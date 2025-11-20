@@ -42,7 +42,8 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
       "command": "uvx",
       "args": [
         "git+https://github.com/tengmmvp/Seedream_MCP",
-        "--api-key", "your_api_key_here"
+        "--api-key",
+        "your_api_key_here"
       ]
     }
   }
@@ -83,10 +84,12 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 ## 🛠️ 可用工具
 
 ### 1. `seedream_text_to_image` - 文生图
+
 根据文本提示词生成图像
 
 **参数：**
-- `prompt` (必需) - 图像生成的文本提示词，建议不超过600个字符
+
+- `prompt` (必需) - 图像生成的文本提示词，建议不超过 600 个字符
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
@@ -95,11 +98,13 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `custom_name` (可选) - 自定义文件名前缀
 
 ### 2. `seedream_image_to_image` - 图生图
+
 根据输入图像和文本提示生成新图像
 
 **参数：**
-- `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过600个字符
-- `image` (必需) - 输入图像的URL或本地文件路径
+
+- `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 600 个字符
+- `image` (必需) - 输入图像的 URL 或本地文件路径
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
@@ -108,11 +113,13 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `custom_name` (可选) - 自定义文件名前缀
 
 ### 3. `seedream_multi_image_fusion` - 多图融合
+
 将多张图像融合生成新图像
 
 **参数：**
-- `prompt` (必需) - 图像融合要求或风格指令，建议不超过600个字符
-- `images` (必需) - 输入图像URL或本地文件路径列表（2-5张图像）
+
+- `prompt` (必需) - 图像融合要求或风格指令，建议不超过 600 个字符
+- `images` (必需) - 输入图像 URL 或本地文件路径列表（2-5 张图像）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
@@ -121,11 +128,13 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `custom_name` (可选) - 自定义文件名前缀
 
 ### 4. `seedream_sequential_generation` - 组图生成
+
 连续生成多张图像，支持文生组图、单图生组图、多图生组图
 
 **参数：**
-- `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过600个字符
-- `max_images` (可选) - 最大生成图像数量，范围1-15，默认4
+
+- `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 600 个字符
+- `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 4
 - `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值
@@ -135,19 +144,22 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `custom_name` (可选) - 自定义文件名前缀
 
 ### 5. `seedream_browse_images` - 图片浏览
+
 浏览工作区中的图片文件，获取文件路径用于图像生成
 
 **参数：**
+
 - `directory` (可选) - 要浏览的目录路径，默认当前目录
 - `recursive` (可选) - 是否递归搜索子目录，默认`true`
-- `max_depth` (可选) - 最大搜索深度，范围1-10，默认3
-- `limit` (可选) - 返回的最大文件数量，范围1-200，默认50
+- `max_depth` (可选) - 最大搜索深度，范围 1-10，默认 3
+- `limit` (可选) - 返回的最大文件数量，范围 1-200，默认 50
 - `format_filter` (可选) - 过滤特定图片格式，如`['.jpg', '.png']`
 - `show_details` (可选) - 是否显示详细文件信息，默认`false`
 
 ## 🆘 常见问题
 
 **Q: uvx 命令不存在？**
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
@@ -157,6 +169,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 **Q: Docker 服务无法启动？**
 确保设置了环境变量：
+
 ```bash
 export ARK_API_KEY=your_key
 docker-compose up -d
@@ -171,13 +184,22 @@ uv sync --dev
 uv run python -m seedream_mcp.server --api-key your_key
 ```
 
+## 👥 贡献者
+
+### 项目创建者
+
+- **[@tengmmvp](https://github.com/tengmmvp)** - 项目创建者
+
+### 重要贡献者
+
+- **[@caoergou](https://github.com/caoergou)** - 通过 [PR #2](https://github.com/tengmmvp/Seedream_MCP/pull/2) 贡献了 uvx 支持、Docker 容器化配置、GitHub Actions 自动化发布流程，极大简化了项目的安装与部署体验
+
+### 参与贡献
+
+欢迎提交 Issue 和 Pull Request！请查看 [GitHub Issues](https://github.com/tengmmvp/Seedream_MCP/issues) 了解当前的讨论和需求。
+
+**🌟 如果您希望参与开发，请先在 Issues 中讨论您的想法！**
+
 ## 📄 许可证
 
-MIT License
-
-## 🙏 致谢
-
-- [火山引擎](https://www.volcengine.com/) - Seedream 4.0 AI 绘图服务
-- [caoergou](https://github.com/caoergou) - uvx 支持、Docker 配置与自动化发布
-
-**🌟 如果这个项目有帮助，请给个 Star！**
+这个项目基于 MIT 许可证开源。更多信息请查看 [LICENSE](LICENSE) 文件。

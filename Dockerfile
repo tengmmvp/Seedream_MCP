@@ -29,7 +29,7 @@ RUN useradd --create-home --shell /bin/bash seedream
 # 安装项目依赖
 RUN uv pip install --system -e .
 
-# 创建默认配置目录（在切换用户前创建，确保有权限）
+# 创建默认配置目录
 RUN mkdir -p /app/seedream_images /app/logs
 
 # 切换到非 root 用户
@@ -42,9 +42,10 @@ ENTRYPOINT ["python", "-m", "seedream_mcp.server"]
 CMD ["--help"]
 
 # 添加标签
-LABEL maintainer="MVP Teng <tengmmvp@qq.com>" \
-      version="1.0.0" \
-      description="Seedream 4.0 MCP Server - AI 图像生成工具" \
-      org.opencontainers.image.source="https://github.com/tengmmvp/Seedream_MCP" \
+LABEL org.opencontainers.image.title="Seedream MCP" \
       org.opencontainers.image.description="基于火山引擎 Seedream 4.0 API 的 MCP 工具，支持 AI 图像生成" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.source="https://github.com/tengmmvp/Seedream_MCP" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="1.0.2" \
+      maintainer="MVP Teng <tengmmvp@qq.com>" \
+      contributors="MVP Teng <tengmmvp@qq.com>, caoergou <itsericsmail@gmail.com>"

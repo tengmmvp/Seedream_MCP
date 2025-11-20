@@ -23,7 +23,7 @@ GitHub Actions 会自动：
 ## 📦 发布产物
 
 - **GitHub Release**: 包含版本信息和更新日志
-- **Docker 镜像**: `ghcr.io/caoergou/seedream-mcp`
+- **Docker 镜像**: `ghcr.io/tengmmvp/seedream-mcp`
 - **源代码**: 始终通过 GitHub 仓库提供
 
 ## 🔄 版本号规范
@@ -37,10 +37,10 @@ GitHub Actions 会自动：
 
 ### uvx 安装
 ```bash
-uvx run git+https://github.com/caoergou/Seedream_MCP --api-key your_key
+uvx run git+https://github.com/tengmmvp/Seedream_MCP --api-key your_key
 ```
 
 ### Docker 运行
 ```bash
-docker run ghcr.io/caoergou/seedream-mcp
+docker run ghcr.io/tengmmvp/seedream-mcp
 ```
