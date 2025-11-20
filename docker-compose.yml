@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  seedream-mcp:
+    image: ghcr.io/caoergou/seedream-mcp:latest
+    container_name: seedream-mcp-server
+    restart: unless-stopped
+    environment:
+      # 必需配置
+      - ARK_API_KEY=${ARK_API_KEY}
+
+      # 可选配置
+      - ARK_BASE_URL=${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
+      - SEEDREAM_MODEL_ID=${SEEDREAM_MODEL_ID:-doubao-seedream-4-0-250828}
+      - SEEDREAM_DEFAULT_SIZE=${SEEDREAM_DEFAULT_SIZE:-2K}
+      - SEEDREAM_DEFAULT_WATERMARK=${SEEDREAM_DEFAULT_WATERMARK:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+      # 自动保存配置
+      - SEEDREAM_AUTO_SAVE_ENABLED=${SEEDREAM_AUTO_SAVE_ENABLED:-true}
+      - SEEDREAM_AUTO_SAVE_BASE_DIR=${SEEDREAM_AUTO_SAVE_BASE_DIR:-/app/seedream_images}
+      - SEEDREAM_AUTO_SAVE_DATE_FOLDER=${SEEDREAM_AUTO_SAVE_DATE_FOLDER:-true}
+      - SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=${SEEDREAM_AUTO_SAVE_CLEANUP_DAYS:-30}
+    volumes:
+      # 保存生成的图片到本地
+      - ./seedream_images:/app/seedream_images
+      # 保存日志文件到本地
+      - ./logs:/app/logs
+      # 可以挂载配置文件
+      - ./.env:/app/.env:ro
+    ports:
+      # 如果需要 HTTP 接口，可以暴露端口
+      # - "8000:8000"
+      - "stdin:stdin"  # MCP 协议需要
+      - "stdout:stdout"  # MCP 协议需要
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import seedream_mcp; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

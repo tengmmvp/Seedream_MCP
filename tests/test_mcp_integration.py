@@ -268,7 +268,7 @@ class TestMCPIntegration:
             assert self.config.base_url == 'https://ark.cn-beijing.volces.com/api/v3', "基础URL不匹配"
             assert self.config.model_id == 'seedream-4.0', "模型ID不匹配"
             assert self.config.default_size == '1K', "默认尺寸不匹配"
-            assert self.config.default_watermark == True, "默认水印设置不匹配"
+            assert self.config.default_watermark == False, "默认水印设置不匹配"
             assert self.config.api_timeout == 60, "API超时设置不匹配"
             assert self.config.max_retries == 3, "最大重试次数不匹配"
             assert self.config.log_level == 'INFO', "日志级别不匹配"

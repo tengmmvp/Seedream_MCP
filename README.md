@@ -1,370 +1,183 @@
 # Seedream 4.0 MCP 工具
 
-![Python](https://img.shields.io/badge/python-3.8+-blue.svg)
+[![uvx](https://img.shields.io/badge/uvx-ready-brightgreen.svg)](https://github.com/astral-sh/uv)
+![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![MCP](https://img.shields.io/badge/MCP-compatible-orange.svg)
-![Status](https://img.shields.io/badge/status-active-brightgreen.svg)
 
-基于火山引擎 Seedream 4.0 API 的 MCP（Model Context Protocol）工具集，提供文生图、图生图、多图融合和组图生成等功能。
+基于火山引擎 Seedream 4.0 API 的 MCP 工具，支持 AI 图像生成。
 
-## 功能特性
+## ⚡ 快速安装
 
-- 🎨 **文生图**：根据文本描述生成高质量图像
-- 🖼️ **图生图**：基于参考图像和文本指令生成新图像
-- 🎭 **多图融合**：融合多张参考图的特征生成新图像
-- 📚 **组图生成**：生成一组内容关联的图像序列
-- 💾 **自动保存**：自动下载并保存生成的图片到本地，解决 URL 过期问题
-- 📝 **Markdown 支持**：自动生成本地图片的 Markdown 引用格式
-- 🔧 **完整的 MCP 协议支持**：符合 MCP 标准，可与支持 MCP 的客户端无缝集成
-
-## 安装要求
-
-- Python 3.8+
-- 火山引擎 Seedream 4.0 API 密钥
-
-## 安装方法
-
-### 1. 克隆项目
+### 方法 1：uvx 一键启动（推荐）
 
 ```bash
-git clone <repository-url>
+# 直接从 GitHub 仓库启动
+uvx git+https://github.com/caoergou/Seedream_MCP --api-key your_api_key_here
+
+# 或者先克隆再启动
+git clone https://github.com/caoergou/Seedream_MCP
 cd Seedream_MCP
+uvx . --api-key your_api_key_here
 ```
 
-### 2. 安装依赖
+### 方法 2：Docker Compose
 
 ```bash
-pip install -e .
+# 下载 docker-compose.yml
+curl -O https://raw.githubusercontent.com/caoergou/Seedream_MCP/main/docker-compose.yml
+
+# 启动服务
+ARK_API_KEY=your_api_key_here docker-compose up -d
 ```
 
-### 3. 配置环境变量
+## 🔧 Claude Desktop 配置
 
-创建 `.env` 文件：
+在 `claude_desktop_config.json` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "seedream": {
+      "command": "uvx",
+      "args": [
+        "git+https://github.com/caoergou/Seedream_MCP",
+        "--api-key", "your_api_key_here"
+      ]
+    }
+  }
+}
+```
+
+重启 Claude Desktop 即可使用。
+
+## ⚙️ 启动参数
 
 ```bash
-# 必需配置
-ARK_API_KEY=your_api_key_here
-
-# 可选配置
-ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-SEEDREAM_MODEL_ID=doubao-seedream-4-0-250828
-SEEDREAM_DEFAULT_SIZE=2K
-SEEDREAM_DEFAULT_WATERMARK=true
-SEEDREAM_TIMEOUT=60
-SEEDREAM_API_TIMEOUT=60
-SEEDREAM_MAX_RETRIES=3
-LOG_LEVEL=INFO
-LOG_FILE=logs/seedream_mcp.log
-
-# 自动保存配置
-SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
-SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30
-SEEDREAM_AUTO_SAVE_MAX_RETRIES=3
-SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800
-SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5
-SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
-SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+--api-key TEXT        # API 密钥（必需）
+--default-size [1K|2K|4K]  # 图像尺寸 (默认: 2K)
+--watermark                 # 启用水印
+--log-level [DEBUG|INFO|WARNING|ERROR]  # 日志级别
 ```
-
-## 使用方法
-
-### 作为 MCP 服务器运行
-
-```bash
-python -m seedream_mcp.server
-```
-
-### 在代码中使用
-
-```python
-import asyncio
-from seedream_mcp import SeedreamClient, SeedreamConfig
-
-async def main():
-    # 加载配置
-    config = SeedreamConfig.from_env()
-
-    # 创建客户端
-    client = SeedreamClient(config)
-
-    try:
-        # 文生图（启用自动保存）
-        result = await client.text_to_image(
-            prompt="一只可爱的小猫咪，卡通风格",
-            size="2K",
-            watermark=True,
-            auto_save=True,
-            custom_name="cute_cat"
-        )
-        print(f"生成的图像URL: {result['image_url']}")
-        print(f"本地保存路径: {result['local_path']}")
-        print(f"Markdown引用: {result['markdown']}")
-
-        # 图生图
-        result = await client.image_to_image(
-            prompt="将这张图片转换为油画风格",
-            image="path/to/image.jpg",
-            size="2K",
-            auto_save=True
-        )
-        print(f"转换后的图像URL: {result['image_url']}")
-        print(f"本地保存路径: {result['local_path']}")
-
-    finally:
-        await client.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-## 工具说明
-
-### 1. seedream_text_to_image
-
-根据文本描述生成图像。
-
-**参数：**
-
-- `prompt` (必需): 文本描述，建议不超过 300 汉字或 600 英文单词
-- `size` (可选): 图像尺寸，可选值：1K、2K、4K，默认 2K
-- `watermark` (可选): 是否添加水印，默认 true
-- `response_format` (可选): 响应格式，可选值：url、b64_json，默认 url
-- `auto_save` (可选): 是否自动保存图片到本地，默认使用全局配置
-- `save_path` (可选): 自定义保存路径，不指定则使用默认路径
-- `custom_name` (可选): 自定义文件名前缀
-
-**示例：**
-
-```json
-{
-  "prompt": "一只可爱的小猫咪，卡通风格",
-  "size": "2K",
-  "watermark": true,
-  "response_format": "url",
-  "auto_save": true,
-  "custom_name": "cute_cat"
-}
-```
-
-### 2. seedream_image_to_image
-
-基于参考图像和文本指令生成新图像。
-
-**参数：**
-
-- `prompt` (必需): 图像编辑指令
-- `image` (必需): 参考图像 URL 或本地文件路径
-- `size` (可选): 输出图像尺寸，默认 2K
-- `watermark` (可选): 是否添加水印，默认 true
-- `auto_save` (可选): 是否自动保存图片到本地，默认使用全局配置
-- `save_path` (可选): 自定义保存路径，不指定则使用默认路径
-- `custom_name` (可选): 自定义文件名前缀
-
-**示例：**
-
-```json
-{
-  "prompt": "将这张图片转换为油画风格",
-  "image": "https://example.com/image.jpg",
-  "size": "2K",
-  "watermark": false,
-  "auto_save": true,
-  "custom_name": "oil_painting"
-}
-```
-
-### 3. seedream_multi_image_fusion
-
-融合多张参考图的特征生成新图像。
-
-**参数：**
-
-- `prompt` (必需): 融合指令描述
-- `images` (必需): 多张参考图像 URL 或文件路径数组（2-5 张）
-- `size` (可选): 输出图像尺寸，默认 2K
-- `auto_save` (可选): 是否自动保存图片到本地，默认使用全局配置
-- `save_path` (可选): 自定义保存路径，不指定则使用默认路径
-- `custom_name` (可选): 自定义文件名前缀
-
-**示例：**
-
-```json
-{
-  "prompt": "将这些图片融合成一个艺术作品",
-  "images": [
-    "https://example.com/image1.jpg",
-    "https://example.com/image2.jpg",
-    "https://example.com/image3.jpg"
-  ],
-  "size": "4K",
-  "auto_save": true,
-  "custom_name": "fusion_art"
-}
-```
-
-### 4. seedream_sequential_generation
-
-生成一组内容关联的图像序列。
-
-**参数：**
-
-- `prompt` (必需): 组图生成描述
-- `max_images` (可选): 最大图像数量（1-10），默认 3
-- `images` (可选): 参考图像数组
-- `size` (可选): 图像尺寸，默认 2K
-- `auto_save` (可选): 是否自动保存图片到本地，默认使用全局配置
-- `save_path` (可选): 自定义保存路径，不指定则使用默认路径
-- `custom_name` (可选): 自定义文件名前缀
-
-**示例：**
-
-```json
-{
-  "prompt": "科幻城市景观，未来主义风格",
-  "max_images": 4,
-  "size": "2K",
-  "auto_save": true,
-  "custom_name": "sci_fi_city"
-}
-```
-
-## 配置选项
-
-| 环境变量                              | 描述                 | 默认值                                     | 必需 |
-| ------------------------------------- | -------------------- | ------------------------------------------ | ---- |
-| `ARK_API_KEY`                         | 火山引擎 API 密钥    | -                                          | ✅   |
-| `ARK_BASE_URL`                        | API 基础 URL         | <https://ark.cn-beijing.volces.com/api/v3> | ❌   |
-| `SEEDREAM_MODEL_ID`                   | 模型 ID              | doubao-seedream-4-0-250828                 | ❌   |
-| `SEEDREAM_DEFAULT_SIZE`               | 默认图像尺寸         | 2K                                         | ❌   |
-| `SEEDREAM_DEFAULT_WATERMARK`          | 默认水印设置         | true                                       | ❌   |
-| `SEEDREAM_TIMEOUT`                    | 请求超时时间（秒）   | 60                                         | ❌   |
-| `SEEDREAM_API_TIMEOUT`                | API 超时时间（秒）   | 60                                         | ❌   |
-| `SEEDREAM_MAX_RETRIES`                | 最大重试次数         | 3                                          | ❌   |
-| `LOG_LEVEL`                           | 日志级别             | INFO                                       | ❌   |
-| `LOG_FILE`                            | 日志文件路径         | logs/seedream_mcp.log                      | ❌   |
-| `SEEDREAM_AUTO_SAVE_ENABLED`          | 是否启用自动保存     | true                                       | ❌   |
-| `SEEDREAM_AUTO_SAVE_BASE_DIR`         | 自动保存基础目录     | ./seedream_images                          | ❌   |
-| `SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT` | 下载超时时间（秒）   | 30                                         | ❌   |
-| `SEEDREAM_AUTO_SAVE_MAX_RETRIES`      | 下载最大重试次数     | 3                                          | ❌   |
-| `SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE`    | 最大文件大小（字节） | 52428800                                   | ❌   |
-| `SEEDREAM_AUTO_SAVE_MAX_CONCURRENT`   | 最大并发下载数       | 5                                          | ❌   |
-| `SEEDREAM_AUTO_SAVE_DATE_FOLDER`      | 是否创建日期文件夹   | true                                       | ❌   |
-| `SEEDREAM_AUTO_SAVE_CLEANUP_DAYS`     | 自动清理天数         | 30                                         | ❌   |
-
-## 自动保存功能
-
-自动保存功能解决了生成图片 URL 在 24 小时后过期的问题，提供永久可用的本地图片存储。
-
-### 核心特性
-
-- **自动下载**：生成图片后自动下载到本地指定目录
-- **智能命名**：使用时间戳 + 内容哈希 + 尺寸信息的命名规则
-- **目录管理**：按工具类型和日期自动分类存储
-- **Markdown 支持**：自动生成本地图片的 Markdown 引用格式
-- **错误恢复**：下载失败时提供原始 URL 作为备选
-- **并发下载**：支持批量图片的并发下载处理
 
 ### 使用示例
 
-```python
-# 启用自动保存的文生图
-result = await client.text_to_image(
-    prompt="美丽的风景画",
-    auto_save=True,
-    custom_name="landscape"
-)
+```bash
+# 基础使用
+uvx git+https://github.com/caoergou/Seedream_MCP \
+  --api-key your_key
 
-# 返回结果包含：
-# - image_url: 原始图片URL
-# - local_path: 本地保存路径
-# - markdown: Markdown引用格式
-# - save_result: 保存操作的详细信息
+# 高质量图像 + 调试模式
+uvx git+https://github.com/caoergou/Seedream_MCP \
+  --api-key your_key --default-size 4K --log-level DEBUG
 ```
 
-### 文件组织结构
+## 🎨 功能特性
 
-```markdown
-images/
-├── 2024-01-15/
-│ ├── text_to_image/
-│ │ ├── landscape_20240115_143022_abc123_2K.png
-│ │ └── portrait_20240115_143045_def456_4K.png
-│ ├── image_to_image/
-│ │ └── style_transfer_20240115_144001_ghi789_2K.png
-│ └── multi_image_fusion/
-│ └── fusion_art_20240115_145030_jkl012_4K.png
-└── 2024-01-16/
-└── ...
+- **文生图**：文本生成图像
+- **图生图**：图像转换风格
+- **多图融合**：融合多张图片
+- **组图生成**：生成图像序列
+- **自动保存**：图片本地存储
+
+## 🛠️ 可用工具
+
+### 1. `seedream_text_to_image` - 文生图
+根据文本提示词生成图像
+
+**参数：**
+- `prompt` (必需) - 图像生成的文本提示词，建议不超过600个字符
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `save_path` (可选) - 自定义保存目录路径
+- `custom_name` (可选) - 自定义文件名前缀
+
+### 2. `seedream_image_to_image` - 图生图
+根据输入图像和文本提示生成新图像
+
+**参数：**
+- `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过600个字符
+- `image` (必需) - 输入图像的URL或本地文件路径
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `save_path` (可选) - 自定义保存目录路径
+- `custom_name` (可选) - 自定义文件名前缀
+
+### 3. `seedream_multi_image_fusion` - 多图融合
+将多张图像融合生成新图像
+
+**参数：**
+- `prompt` (必需) - 图像融合要求或风格指令，建议不超过600个字符
+- `images` (必需) - 输入图像URL或本地文件路径列表（2-5张图像）
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `save_path` (可选) - 自定义保存目录路径
+- `custom_name` (可选) - 自定义文件名前缀
+
+### 4. `seedream_sequential_generation` - 组图生成
+连续生成多张图像，支持文生组图、单图生组图、多图生组图
+
+**参数：**
+- `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过600个字符
+- `max_images` (可选) - 最大生成图像数量，范围1-15，默认4
+- `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `save_path` (可选) - 自定义保存目录路径
+- `custom_name` (可选) - 自定义文件名前缀
+
+### 5. `seedream_browse_images` - 图片浏览
+浏览工作区中的图片文件，获取文件路径用于图像生成
+
+**参数：**
+- `directory` (可选) - 要浏览的目录路径，默认当前目录
+- `recursive` (可选) - 是否递归搜索子目录，默认`true`
+- `max_depth` (可选) - 最大搜索深度，范围1-10，默认3
+- `limit` (可选) - 返回的最大文件数量，范围1-200，默认50
+- `format_filter` (可选) - 过滤特定图片格式，如`['.jpg', '.png']`
+- `show_details` (可选) - 是否显示详细文件信息，默认`false`
+
+## 🆘 常见问题
+
+**Q: uvx 命令不存在？**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 配置说明
+**Q: 如何获取 API 密钥？**
+访问 [火山引擎控制台](https://console.volcengine.com/) 创建密钥
 
-- **SEEDREAM_AUTO_SAVE_ENABLED**: 全局启用/禁用自动保存
-- **SEEDREAM_AUTO_SAVE_BASE_DIR**: 图片保存的根目录
-- **SEEDREAM_AUTO_SAVE_DATE_FOLDER**: 是否按日期创建子文件夹
-- **SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE**: 限制下载的最大文件大小
-- **SEEDREAM_AUTO_SAVE_MAX_CONCURRENT**: 控制并发下载数量
-- **SEEDREAM_AUTO_SAVE_CLEANUP_DAYS**: 自动清理超过指定天数的旧文件
+**Q: Docker 服务无法启动？**
+确保设置了环境变量：
+```bash
+export ARK_API_KEY=your_key
+docker-compose up -d
+```
 
-## 错误处理
-
-工具提供完整的错误处理机制：
-
-- **参数验证错误**：检查必需参数和参数格式
-- **API 调用错误**：处理网络错误、超时等问题
-- **认证错误**：API 密钥无效或过期
-- **配额错误**：API 调用次数超限
-- **服务器错误**：火山引擎服务异常
-
-## 日志记录
-
-工具支持详细的日志记录：
-
-- 函数调用日志
-- API 请求和响应日志
-- 错误和异常日志
-- 性能监控日志
-
-日志级别可通过 `LOG_LEVEL` 环境变量配置。
-
-## 开发和测试
-
-### 运行测试
+## 🧪 本地开发
 
 ```bash
-# 运行集成测试
-python tests/test_mcp_integration.py
-
-# 运行验证脚本
-python verify_installation.py
+git clone https://github.com/caoergou/Seedream_MCP
+cd Seedream_MCP
+uv sync --dev
+uv run python -m seedream_mcp.server --api-key your_key
 ```
 
-### 项目结构
+## 📄 许可证
 
-```text
-Seedream_MCP/
-├── seedream_mcp/           # 主要代码
-│   ├── __init__.py
-│   ├── client.py           # API客户端
-│   ├── config.py           # 配置管理
-│   ├── server.py           # MCP服务器
-│   ├── tools/              # 工具实现
-│   └── utils/              # 工具函数
-├── docs/                   # 文档目录
-├── tests/                  # 测试文件
-├── examples/               # 使用示例
-├── verifys/                # 验证脚本
-├── .env.example           # 环境变量示例
-├── main.py                # 主程序入口
-├── requirements.txt       # 依赖列表
-└── README.md             # 说明文档
-```
+MIT License
 
-## 许可证
+## 🙏 致谢
 
-本项目采用 MIT 许可证。
+- [火山引擎](https://www.volcengine.com/) - Seedream 4.0 AI 绘图服务
+- [原项目仓库](https://github.com/tengmmvp/Seedream_MCP) - 初始代码基础
 
-## 支持
-
-如有问题或建议，请提交 Issue 或 Pull Request。
+**🌟 如果这个项目有帮助，请给个 Star！**

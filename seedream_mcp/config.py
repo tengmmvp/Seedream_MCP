@@ -24,7 +24,7 @@ class SeedreamConfig:
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     model_id: str = "doubao-seedream-4-0-250828"
     default_size: str = "2K"
-    default_watermark: bool = True
+    default_watermark: bool = False
     timeout: int = 60
     api_timeout: int = 60
     max_retries: int = 3
@@ -151,7 +151,7 @@ class SeedreamConfig:
             base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
             model_id=os.getenv("SEEDREAM_MODEL_ID", "doubao-seedream-4-0-250828"),
             default_size=os.getenv("SEEDREAM_DEFAULT_SIZE", "2K"),
-            default_watermark=_parse_bool(os.getenv("SEEDREAM_DEFAULT_WATERMARK", "true")),
+            default_watermark=_parse_bool(os.getenv("SEEDREAM_DEFAULT_WATERMARK", "false")),
             timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
             api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "60")),
             max_retries=_parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),

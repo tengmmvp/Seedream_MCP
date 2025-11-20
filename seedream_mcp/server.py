@@ -6,7 +6,9 @@ Seedream 4.0 MCP工具 - 服务器模块
 """
 
 import asyncio
+import argparse
 import logging
+import os
 from typing import List, Optional
 
 from mcp.server import Server
@@ -217,5 +219,120 @@ async def main():
     await server.run()
 
 
+def cli_main():
+    """命令行入口点
+
+    提供同步的命令行入口点，用于 console_scripts。
+    支持命令行参数传递配置。
+    """
+    parser = argparse.ArgumentParser(
+        description="Seedream 4.0 MCP 服务器 - AI 图像生成工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例用法:
+  # 使用环境变量
+  export ARK_API_KEY=your_key_here
+  seedream-mcp
+
+  # 直接传递 API 密钥
+  seedream-mcp --api-key your_key_here
+
+  # 指定配置文件
+  seedream-mcp --config-file ./config.env
+
+  # 设置图像默认大小
+  seedream-mcp --api-key your_key_here --default-size 4K
+
+  # 完整配置
+  seedream-mcp \\
+    --api-key your_key_here \\
+    --model-id custom-model \\
+    --default-size 2K \\
+    --log-level DEBUG
+        """
+    )
+
+    # API 密钥参数
+    parser.add_argument(
+        "--api-key",
+        help="火山引擎 API 密钥 (也可通过 ARK_API_KEY 环境变量设置)"
+    )
+
+    # 配置文件参数
+    parser.add_argument(
+        "--config-file",
+        help="配置文件路径 (.env 格式)"
+    )
+
+    # 其他配置参数
+    parser.add_argument(
+        "--model-id",
+        default="doubao-seedream-4-0-250828",
+        help="模型 ID (默认: doubao-seedream-4-0-250828)"
+    )
+
+    parser.add_argument(
+        "--default-size",
+        choices=["1K", "2K", "4K"],
+        default="2K",
+        help="默认图像尺寸 (默认: 2K)"
+    )
+
+    parser.add_argument(
+        "--watermark",
+        action="store_true",
+        default=False,
+        help="启用默认水印"
+    )
+
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="日志级别 (默认: INFO)"
+    )
+
+    parser.add_argument(
+        "--base-url",
+        default="https://ark.cn-beijing.volces.com/api/v3",
+        help="API 基础 URL"
+    )
+
+    args = parser.parse_args()
+
+    # 处理配置文件
+    if args.config_file:
+        from dotenv import load_dotenv
+        load_dotenv(args.config_file)
+
+    # 设置环境变量（命令行参数优先级最高）
+    if args.api_key:
+        os.environ["ARK_API_KEY"] = args.api_key
+
+    if args.model_id:
+        os.environ["SEEDREAM_MODEL_ID"] = args.model_id
+
+    if args.default_size:
+        os.environ["SEEDREAM_DEFAULT_SIZE"] = args.default_size
+
+    if args.watermark:
+        os.environ["SEEDREAM_DEFAULT_WATERMARK"] = "true"
+
+    if args.log_level:
+        os.environ["LOG_LEVEL"] = args.log_level
+
+    if args.base_url:
+        os.environ["ARK_BASE_URL"] = args.base_url
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n✅ 服务器已停止")
+        return 0
+    except Exception as e:
+        print(f"❌ 服务器启动失败: {e}")
+        return 1
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    exit(cli_main())
