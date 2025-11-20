@@ -29,11 +29,11 @@ RUN useradd --create-home --shell /bin/bash seedream
 # 安装项目依赖
 RUN uv pip install --system -e .
 
+# 创建默认配置目录（在切换用户前创建，确保有权限）
+RUN mkdir -p /app/seedream_images /app/logs
+
 # 切换到非 root 用户
 USER seedream
-
-# 创建默认配置目录
-RUN mkdir -p /app/seedream_images /app/logs
 
 # 设置入口点
 ENTRYPOINT ["python", "-m", "seedream_mcp.server"]

@@ -6,6 +6,11 @@ on:
       - 'v*'  # 当推送以 v 开头的标签时触发
   workflow_dispatch:  # 允许手动触发
 
+# 设置 GITHUB_TOKEN 的权限
+permissions:
+  contents: write  # 创建 Release 需要
+  packages: write  # 推送 Docker 镜像需要
+
 jobs:
   test:
     name: 🧪 Test
