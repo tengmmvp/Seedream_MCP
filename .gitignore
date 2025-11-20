@@ -206,6 +206,8 @@ seedream_images/
 seedream_mcp.egg-info/
 
 # 代理/说明文件
+.codex/
+.claude/
 AGENTS.md
 CLAUDE.md
 

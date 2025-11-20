@@ -64,18 +64,18 @@ jobs:
           ## 🚀 Seedream MCP ${{ github.ref_name }}
 
           ### ✨ 新特性
-          请查看 [GitHub Commits](https://github.com/caoergou/Seedream_MCP/commits)
+          请查看 [GitHub Commits](https://github.com/tengmmvp/Seedream_MCP/commits)
 
           ### 🛠️ 安装方式
 
           #### 推荐方式（uvx 一键安装）
           ```bash
-          uvx run git+https://github.com/caoergou/Seedream_MCP --api-key your_api_key_here
+          uvx run git+https://github.com/tengmmvp/Seedream_MCP --api-key your_api_key_here
           ```
 
           #### Docker Compose 运行
           ```bash
-          curl -O https://raw.githubusercontent.com/caoergou/Seedream_MCP/main/docker-compose.yml
+          curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
           ARK_API_KEY=your_api_key_here docker-compose up -d
           ```
 

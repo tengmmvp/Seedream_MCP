@@ -51,10 +51,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/caoergou/Seedream_MCP"
-Documentation = "https://github.com/caoergou/Seedream_MCP#readme"
-Repository = "https://github.com/caoergou/Seedream_MCP.git"
-"Bug Tracker" = "https://github.com/caoergou/Seedream_MCP/issues"
+Homepage = "https://github.com/tengmmvp/Seedream_MCP"
+Documentation = "https://github.com/tengmmvp/Seedream_MCP#readme"
+Repository = "https://github.com/tengmmvp/Seedream_MCP.git"
+"Bug Tracker" = "https://github.com/tengmmvp/Seedream_MCP/issues"
 
 [project.scripts]
 seedream-mcp = "seedream_mcp.server:cli_main"

@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   seedream-mcp:
-    image: ghcr.io/caoergou/seedream-mcp:latest
+    image: ghcr.io/tengmmvp/seedream-mcp:latest
     container_name: seedream-mcp-server
     restart: unless-stopped
     environment:

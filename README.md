@@ -13,10 +13,10 @@
 
 ```bash
 # 直接从 GitHub 仓库启动
-uvx git+https://github.com/caoergou/Seedream_MCP --api-key your_api_key_here
+uvx git+https://github.com/tengmmvp/Seedream_MCP --api-key your_api_key_here
 
 # 或者先克隆再启动
-git clone https://github.com/caoergou/Seedream_MCP
+git clone https://github.com/tengmmvp/Seedream_MCP
 cd Seedream_MCP
 uvx . --api-key your_api_key_here
 ```
@@ -25,7 +25,7 @@ uvx . --api-key your_api_key_here
 
 ```bash
 # 下载 docker-compose.yml
-curl -O https://raw.githubusercontent.com/caoergou/Seedream_MCP/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
 # 启动服务
 ARK_API_KEY=your_api_key_here docker-compose up -d
@@ -41,7 +41,7 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
     "seedream": {
       "command": "uvx",
       "args": [
-        "git+https://github.com/caoergou/Seedream_MCP",
+        "git+https://github.com/tengmmvp/Seedream_MCP",
         "--api-key", "your_api_key_here"
       ]
     }
@@ -64,11 +64,11 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 
 ```bash
 # 基础使用
-uvx git+https://github.com/caoergou/Seedream_MCP \
+uvx git+https://github.com/tengmmvp/Seedream_MCP \
   --api-key your_key
 
 # 高质量图像 + 调试模式
-uvx git+https://github.com/caoergou/Seedream_MCP \
+uvx git+https://github.com/tengmmvp/Seedream_MCP \
   --api-key your_key --default-size 4K --log-level DEBUG
 ```
 
@@ -165,7 +165,7 @@ docker-compose up -d
 ## 🧪 本地开发
 
 ```bash
-git clone https://github.com/caoergou/Seedream_MCP
+git clone https://github.com/tengmmvp/Seedream_MCP
 cd Seedream_MCP
 uv sync --dev
 uv run python -m seedream_mcp.server --api-key your_key
@@ -178,6 +178,6 @@ MIT License
 ## 🙏 致谢
 
 - [火山引擎](https://www.volcengine.com/) - Seedream 4.0 AI 绘图服务
-- [原项目仓库](https://github.com/tengmmvp/Seedream_MCP) - 初始代码基础
+- [caoergou](https://github.com/caoergou) - uvx 支持、Docker 配置与自动化发布
 
 **🌟 如果这个项目有帮助，请给个 Star！**
