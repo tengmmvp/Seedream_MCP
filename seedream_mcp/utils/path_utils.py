@@ -1,5 +1,5 @@
 """
-Seedream 4.0 MCP工具 - 路径处理工具
+Seedream MCP工具 - 路径处理工具
 
 提供增强的文件路径处理功能，支持相对路径、绝对路径和路径验证。
 """
@@ -13,8 +13,7 @@ logger = get_logger(__name__)
 
 # 支持的图片格式
 SUPPORTED_IMAGE_EXTENSIONS = {
-    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', 
-    '.webp', '.svg', '.ico', '.psd', '.raw', '.heic', '.heif'
+    '.bmp', '.gif', '.jpeg', '.png', '.tiff', '.webp'
 }
 
 

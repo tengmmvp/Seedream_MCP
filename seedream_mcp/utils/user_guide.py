@@ -1,5 +1,5 @@
 """
-Seedream 4.0 MCP工具 - 用户指导模块
+Seedream MCP工具 - 用户指导模块
 
 提供清晰的文件路径使用指导和错误提示。
 """
@@ -18,14 +18,12 @@ def get_path_usage_guide() -> str:
 📁 Seedream MCP工具 - 文件路径使用指导
 
 支持的图片格式:
-  • JPEG (.jpg, .jpeg)
+  • JPEG (.jpeg)
   • PNG (.png)
   • GIF (.gif)
   • BMP (.bmp)
-  • TIFF (.tiff, .tif)
+  • TIFF (.tiff)
   • WebP (.webp)
-  • SVG (.svg)
-  • ICO (.ico)
 
 支持的路径格式:
 
@@ -77,7 +75,7 @@ def get_error_solutions() -> Dict[str, str]:
         "invalid_format": """
 不支持的文件格式解决方案:
 1. 确保文件是图片格式
-2. 支持的格式: JPG, PNG, GIF, BMP, TIFF, WebP, SVG, ICO
+2. 支持的格式: JPEG, PNG, GIF, BMP, TIFF, WebP
 3. 检查文件扩展名是否正确
 4. 尝试转换为支持的格式
 """,
@@ -149,7 +147,7 @@ def get_quick_tips() -> List[str]:
         "💡 支持网络图片URL，可直接使用在线图片",
         "💡 路径中的正斜杠和反斜杠都可以使用",
         "💡 文件名包含空格时无需添加引号",
-        "💡 支持多种图片格式，包括 JPG、PNG、GIF、WebP 等"
+        "💡 支持多种图片格式，包括 JPEG, PNG, GIF, BMP, TIFF, WebP 等"
     ]
 
 
@@ -192,7 +190,7 @@ def validate_and_suggest_path(path: str) -> Dict[str, Any]:
             result["tips"].extend([
                 "确保文件是图片格式",
                 "检查文件扩展名是否正确",
-                "支持的格式: JPG, PNG, GIF, BMP, TIFF, WebP, SVG, ICO"
+                "支持的格式: JPEG, PNG, GIF, BMP, TIFF, WebP"
             ])
         elif "权限" in error_msg:
             result["tips"].extend([

@@ -230,6 +230,6 @@ class DownloadManager:
             path = urlparse(url).path
             if '.' in path:
                 return Path(path).suffix.lower()
-            return '.jpg'  # 默认扩展名
+            return '.jpeg'  # 默认扩展名
         except Exception:
-            return '.jpg'
+            return '.jpeg'
