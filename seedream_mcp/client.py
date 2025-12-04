@@ -8,6 +8,7 @@ Seedream MCP工具 - 客户端模块
 # 标准库导入
 import asyncio
 import base64
+import json
 from typing import Any, Dict, List, Optional, Union
 
 # 第三方库导入
@@ -32,7 +33,7 @@ from .utils.validation import (
 
 class SeedreamClient:
     """
-    Seedream 4.0 API 客户端类
+    Seedream MCP API 客户端类
     
     提供异步 HTTP 客户端封装，支持多种图像生成功能：
     - 文生图（text_to_image）
@@ -504,7 +505,6 @@ class SeedreamClient:
                             raise SeedreamAPIError(f"HTTP {response.status_code}: {error_text}")
                         # 处理 SSE 流式响应
                         if response.headers.get("content-type", "").startswith("text/event-stream"):
-                            import json
                             items: List[Dict[str, Any]] = []
                             usage: Dict[str, Any] = {}
                             status: Optional[str] = None
@@ -592,7 +592,6 @@ class SeedreamClient:
                         else:
                             # 非 SSE 响应
                             text = await response.aread()
-                            import json
                             parsed = json.loads(text.decode("utf-8"))
                             return {
                                 "success": True,
