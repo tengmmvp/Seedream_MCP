@@ -114,15 +114,15 @@ class AutoSaveManager:
     def _extension_from_mime(self, mime: Optional[str]) -> str:
         mapping = {
             'image/png': '.png',
-            'image/jpeg': '.jpg',
+            'image/jpeg': '.jpeg',
             'image/webp': '.webp',
             'image/gif': '.gif',
             'image/bmp': '.bmp',
-            'image/tiff': '.tif'
+            'image/tiff': '.tiff'
         }
         if not mime:
-            return '.jpg'
-        return mapping.get(mime.lower(), '.jpg')
+            return '.jpeg'
+        return mapping.get(mime.lower(), '.jpeg')
     
     async def save_image(
         self,
@@ -231,7 +231,7 @@ class AutoSaveManager:
                 raise AutoSaveError(f"Base64解码失败: {e}")
 
             # 推断扩展名
-            extension = self._extension_from_mime(mime) if mime else self.file_manager.infer_extension_from_bytes(content_bytes, default=".jpg")
+            extension = self._extension_from_mime(mime) if mime else self.file_manager.infer_extension_from_bytes(content_bytes, default=".jpeg")
 
             # 创建保存路径
             content_hash = self.file_manager.get_content_hash(content_bytes)

@@ -360,10 +360,10 @@ def cli_main():
         from dotenv import load_dotenv
         load_dotenv(args.config_file)
 
-    
-    # API密钥必须通过命令行提供
-    if not args.api_key:
-        raise SystemExit("配置错误: 必须通过命令行提供 --api-key")
+    # 解析 API 密钥（优先 CLI，其次环境变量）
+    cli_api_key = args.api_key or os.getenv("ARK_API_KEY")
+    if not cli_api_key:
+        raise SystemExit("配置错误: 未提供 API 密钥。请使用 --api-key 或设置 ARK_API_KEY 环境变量")
 
     # 构建最终配置对象
     if True:
@@ -377,7 +377,7 @@ def cli_main():
         # 创建完整配置对象
         cfg = SeedreamConfig(
             # 关键配置 (来自CLI参数)
-            api_key=args.api_key,
+            api_key=cli_api_key,
             base_url=args.base_url,
             model_id=model_id,
             default_size=args.default_size,
@@ -408,19 +408,9 @@ def cli_main():
         setup_logging(cfg.log_level, cfg.log_file)
         logger = logging.getLogger(__name__)
 
-        # 配置模式校验：ENV中的关键CLI键将被忽略，避免配置冲突
-        forbidden_env_keys = [
-            "ARK_API_KEY",
-            "SEEDREAM_MODEL_ID",
-            "SEEDREAM_DEFAULT_SIZE",
-            "SEEDREAM_DEFAULT_WATERMARK",
-            "LOG_LEVEL",
-            "ARK_BASE_URL",
-        ]
-        for k in forbidden_env_keys:
-            v = os.getenv(k)
-            if v:
-                logger.warning(f"环境变量 {k}='{v}' 将被忽略，关键配置仅来自命令行")
+        # 当同时设置了 CLI 和环境变量时，提示以 CLI 为准
+        if args.api_key and os.getenv("ARK_API_KEY"):
+            logger.warning("检测到同时设置了 --api-key 与 ARK_API_KEY，已优先使用命令行参数")
 
     # 启动服务器主循环
     try:

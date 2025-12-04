@@ -637,7 +637,7 @@ class SeedreamClient:
                 if attempt == self.config.max_retries - 1:
                     raise SeedreamTimeoutError(f"{endpoint} API 调用超时")
 
-            except httpx.NetworkError as e:
+            except httpx.RequestError as e:
                 self.logger.warning(f"{endpoint} 网络错误 (尝试 {attempt + 1}/{self.config.max_retries}): {str(e)}")
                 if attempt == self.config.max_retries - 1:
                     raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(e)}")

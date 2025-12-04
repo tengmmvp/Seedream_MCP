@@ -252,7 +252,7 @@ def validate_image_list(images: List[str], min_count: int = 1, max_count: int = 
 def validate_max_images(max_images: Any) -> int:
     """验证最大图像数量参数
     
-    确保参数为整数类型且在合理范围内（1-10）。
+    确保参数为整数类型且在合理范围内（1-15）。
     
     Args:
         max_images: 最大图像数量，支持整数或可转换为整数的值
@@ -280,9 +280,9 @@ def validate_max_images(max_images: Any) -> int:
             value=max_images
         )
     
-    if max_images > 10:
+    if max_images > 15:
         raise SeedreamValidationError(
-            "最大图像数量不能超过10",
+            "最大图像数量不能超过15",
             field="max_images",
             value=max_images
         )

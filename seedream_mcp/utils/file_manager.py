@@ -240,7 +240,7 @@ class FileManager:
                 return ".png"
             # JPEG
             if content.startswith(b"\xff\xd8\xff"):
-                return ".jpg"
+                return ".jpeg"
             # GIF
             if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
                 return ".gif"
@@ -252,7 +252,7 @@ class FileManager:
                 return ".webp"
             # TIFF
             if content.startswith(b"II*\x00") or content.startswith(b"MM\x00*"):
-                return ".tif"
+                return ".tiff"
         except Exception:
             pass
         return default
@@ -369,7 +369,7 @@ class FileManager:
         content_bytes: bytes,
         tool_name: str = "seedream",
         custom_name: Optional[str] = None,
-        default_extension: str = ".jpg"
+        default_extension: str = ".jpeg"
     ) -> Path:
         """
         基于字节内容创建保存路径（推断扩展名并使用内容哈希）
