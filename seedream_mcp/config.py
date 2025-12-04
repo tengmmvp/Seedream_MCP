@@ -1,26 +1,55 @@
 """
-Seedream 4.0 MCP工具配置管理模块
+Seedream MCP工具配置管理模块
 
 负责从环境变量读取配置信息，并提供配置验证功能。
 """
 
+# 标准库导入
 import os
-from typing import Optional
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
+
+# 第三方库导入
 from dotenv import load_dotenv
 
+# 本地模块导入
 from .utils.errors import SeedreamConfigError
 
 
 @dataclass
 class SeedreamConfig:
-    """Seedream 4.0 MCP工具配置类"""
+    """
+    Seedream MCP工具配置类
+    
+    封装Seedream服务的所有配置参数，包括API认证、模型设置、日志配置和自动保存功能。
+    支持从环境变量加载配置，并提供完整的参数验证机制。
+    
+    Attributes:
+        api_key: 火山引擎API密钥，必需参数
+        base_url: API服务基础URL，默认为火山引擎北京节点
+        model_id: 使用的模型ID，默认为doubao-seedream-4-5-251128
+        default_size: 默认图像尺寸，默认值为2K
+        default_watermark: 是否默认添加水印，默认值为False
+        timeout: 通用超时时间（秒）
+        api_timeout: API请求超时时间（秒）
+        max_retries: 最大重试次数
+        log_level: 日志级别，可选值：DEBUG、INFO、WARNING、ERROR、CRITICAL
+        log_file: 日志文件路径，为None时输出到控制台
+        auto_save_enabled: 是否启用自动保存功能
+        auto_save_base_dir: 自动保存的基础目录路径
+        auto_save_download_timeout: 下载超时时间（秒）
+        auto_save_max_retries: 下载最大重试次数
+        auto_save_max_file_size: 允许的最大文件大小（字节）
+        auto_save_max_concurrent: 最大并发下载数
+        auto_save_date_folder: 是否按日期创建子文件夹
+        auto_save_cleanup_days: 自动清理天数，0表示不清理
+    """
     
     # 必需配置
     api_key: str
     
-    # 可选配置（带默认值）
+    # 可选配置
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     model_id: str = "doubao-seedream-4-5-251128"
     default_size: str = "2K"
@@ -44,11 +73,22 @@ class SeedreamConfig:
     auto_save_cleanup_days: int = 30
     
     def __post_init__(self):
-        """配置验证"""
+        """
+        初始化后处理
+        
+        在dataclass实例化完成后自动执行配置验证。
+        """
         self.validate()
     
     def validate(self):
-        """验证配置参数"""
+        """
+        验证配置参数
+        
+        对所有配置项进行完整性和有效性检查，确保配置符合业务规则。
+        
+        Raises:
+            SeedreamConfigError: 当任何配置项不符合要求时抛出
+        """
         # 验证API密钥
         if not self.api_key or self.api_key.strip() == "":
             raise SeedreamConfigError("API密钥不能为空")
@@ -116,18 +156,22 @@ class SeedreamConfig:
     
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> "SeedreamConfig":
-        """从环境变量创建配置实例
+        """
+        从环境变量创建配置实例
+        
+        自动加载.env文件并读取环境变量，创建完整的配置实例。
+        支持指定自定义.env文件路径或使用默认路径。
         
         Args:
-            env_file: .env文件路径，如果不指定则使用默认路径
+            env_file: .env文件路径，为None时使用默认路径
             
         Returns:
-            SeedreamConfig实例
+            完整初始化的SeedreamConfig实例
             
         Raises:
-            SeedreamConfigError: 配置错误时抛出
+            SeedreamConfigError: 当必需的环境变量缺失或配置验证失败时抛出
         """
-        # 加载.env文件（最佳努力）
+        # 加载.env文件
         if env_file:
             load_dotenv(env_file)
         else:
@@ -170,7 +214,15 @@ class SeedreamConfig:
         return config
     
     def to_dict(self) -> dict:
-        """转换为字典格式"""
+        """
+        转换为字典格式
+        
+        将配置对象转换为字典形式，便于序列化和日志输出。
+        API密钥等敏感信息将被自动隐藏。
+        
+        Returns:
+            包含所有配置项的字典，敏感字段已脱敏
+        """
         return {
             "api_key": "***" if self.api_key else None,  # 隐藏敏感信息
             "base_url": self.base_url,
@@ -193,30 +245,73 @@ class SeedreamConfig:
         }
     
     def __repr__(self) -> str:
-        """字符串表示（隐藏敏感信息）"""
+        """
+        字符串表示
+        
+        返回配置对象的简洁字符串表示，敏感信息将被自动隐藏。
+        
+        Returns:
+            配置对象的字符串表示形式
+        """
         return f"SeedreamConfig(api_key='***', base_url='{self.base_url}', model_id='{self.model_id}')"
-    
+
+
 def _parse_bool(value: str) -> bool:
-    """解析布尔值字符串"""
+    """
+    解析布尔值字符串
+    
+    将字符串类型的布尔值转换为Python布尔类型。
+    支持多种常见的布尔值表示形式，大小写不敏感。
+    
+    Args:
+        value: 待解析的字符串或布尔值
+        
+    Returns:
+        解析后的布尔值
+    """
     if isinstance(value, bool):
         return value
     return value.lower() in ("true", "1", "yes", "on")
 
 
 def _parse_int(value: str) -> int:
-    """解析整数字符串"""
+    """
+    解析整数字符串
+    
+    将字符串类型的整数值转换为Python整数类型。
+    
+    Args:
+        value: 待解析的字符串
+        
+    Returns:
+        解析后的整数值
+        
+    Raises:
+        SeedreamConfigError: 当字符串无法解析为有效整数时抛出
+    """
     try:
         return int(value)
     except (ValueError, TypeError):
         raise SeedreamConfigError(f"无法解析整数值: {value}")
 
 
-# 全局配置实例（延迟初始化）
+# 全局配置实例
 _global_config: Optional[SeedreamConfig] = None
 
 
 def get_global_config() -> SeedreamConfig:
-    """获取全局配置实例"""
+    """
+    获取全局配置实例
+    
+    获取全局单例配置对象，首次调用时自动从环境变量初始化。
+    使用延迟初始化策略，仅在需要时创建配置实例。
+    
+    Returns:
+        全局SeedreamConfig实例
+        
+    Raises:
+        SeedreamConfigError: 当配置初始化失败时抛出
+    """
     global _global_config
     if _global_config is None:
         _global_config = SeedreamConfig.from_env()
@@ -224,12 +319,30 @@ def get_global_config() -> SeedreamConfig:
 
 
 def set_config(config: SeedreamConfig):
-    """设置全局配置实例"""
+    """
+    设置全局配置实例
+    
+    手动设置全局配置对象，用于测试或特殊场景。
+    
+    Args:
+        config: 要设置的配置实例
+    """
     global _global_config
     _global_config = config
 
 
 def reload_config(env_file: Optional[str] = None):
-    """重新加载配置"""
+    """
+    重新加载配置
+    
+    从环境变量重新加载配置，覆盖当前的全局配置实例。
+    适用于配置动态更新场景。
+    
+    Args:
+        env_file: .env文件路径，为None时使用默认路径
+        
+    Raises:
+        SeedreamConfigError: 当配置加载或验证失败时抛出
+    """
     global _global_config
     _global_config = SeedreamConfig.from_env(env_file)
