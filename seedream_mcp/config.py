@@ -22,7 +22,7 @@ class SeedreamConfig:
     
     # 可选配置（带默认值）
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
-    model_id: str = "doubao-seedream-4-0-250828"
+    model_id: str = "doubao-seedream-4-5-251128"
     default_size: str = "2K"
     default_watermark: bool = False
     timeout: int = 60
@@ -127,11 +127,10 @@ class SeedreamConfig:
         Raises:
             SeedreamConfigError: 配置错误时抛出
         """
-        # 加载.env文件
+        # 加载.env文件（最佳努力）
         if env_file:
             load_dotenv(env_file)
         else:
-            # 尝试加载当前目录和上级目录的.env文件
             load_dotenv()
             load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
         
@@ -149,7 +148,7 @@ class SeedreamConfig:
         config = cls(
             api_key=api_key,
             base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
-            model_id=os.getenv("SEEDREAM_MODEL_ID", "doubao-seedream-4-0-250828"),
+            model_id=os.getenv("SEEDREAM_MODEL_ID", "doubao-seedream-4-5-251128"),
             default_size=os.getenv("SEEDREAM_DEFAULT_SIZE", "2K"),
             default_watermark=_parse_bool(os.getenv("SEEDREAM_DEFAULT_WATERMARK", "false")),
             timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),

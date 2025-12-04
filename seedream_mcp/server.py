@@ -17,7 +17,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .client import SeedreamClient
-from .config import SeedreamConfig
+from .config import SeedreamConfig, set_config, get_global_config, _parse_bool, _parse_int
 from .tools import (
     browse_images_tool,
     image_to_image_tool,
@@ -169,7 +169,7 @@ class SeedreamMCPServer:
             SeedreamMCPError: 客户端初始化失败时抛出
         """
         try:
-            self.config = SeedreamConfig.from_env()
+            self.config = get_global_config()
             self.client = SeedreamClient(self.config)
             self.logger.info("Seedream客户端初始化成功")
         except Exception as e:
@@ -185,7 +185,7 @@ class SeedreamMCPServer:
             Exception: 服务器运行过程中发生的异常
         """
         try:
-            setup_logging()
+            setup_logging(os.getenv("LOG_LEVEL", "INFO"), os.getenv("LOG_FILE"))
             self.logger.info("启动Seedream MCP服务器...")
 
             await self._initialize_client()
@@ -244,10 +244,10 @@ def cli_main():
   seedream-mcp --api-key your_key_here --default-size 4K
 
   # 完整配置
-  seedream-mcp \\
-    --api-key your_key_here \\
-    --model-id custom-model \\
-    --default-size 2K \\
+  seedream-mcp \
+    --api-key your_key_here \
+    --model doubao-seedream-4.5 \
+    --default-size 2K \
     --log-level DEBUG
         """
     )
@@ -264,11 +264,12 @@ def cli_main():
         help="配置文件路径 (.env 格式)"
     )
 
-    # 其他配置参数
+    # 模型选择参数
     parser.add_argument(
-        "--model-id",
-        default="doubao-seedream-4-0-250828",
-        help="模型 ID (默认: doubao-seedream-4-0-250828)"
+        "--model",
+        choices=["doubao-seedream-4.5", "doubao-seedream-4.0"],
+        default="doubao-seedream-4.5",
+        help="选择模型 (默认: doubao-seedream-4.5)"
     )
 
     parser.add_argument(
@@ -298,31 +299,75 @@ def cli_main():
         help="API 基础 URL"
     )
 
+    # 单一模式：CLI关键配置 + ENV扩展配置（不交叉、不覆盖）
+
     args = parser.parse_args()
 
-    # 处理配置文件
+    # 日志：CLI级别 + ENV日志文件
+    setup_logging(args.log_level, os.getenv("LOG_FILE"))
+
+    logger = logging.getLogger(__name__)
+
+    # 加载 .env 扩展配置（仅扩展键）
     if args.config_file:
         from dotenv import load_dotenv
         load_dotenv(args.config_file)
 
-    # 设置环境变量（命令行参数优先级最高）
-    if args.api_key:
-        os.environ["ARK_API_KEY"] = args.api_key
+    # 单一模式校验：ENV中出现关键CLI键将被忽略；CLI必须提供API密钥
+    forbidden_env_keys = [
+        "ARK_API_KEY",
+        "SEEDREAM_MODEL_ID",
+        "SEEDREAM_DEFAULT_SIZE",
+        "SEEDREAM_DEFAULT_WATERMARK",
+        "LOG_LEVEL",
+        "ARK_BASE_URL",
+    ]
+    for k in forbidden_env_keys:
+        v = os.getenv(k)
+        if v:
+            logger.warning(f"环境变量 {k}='{v}' 将被忽略，关键配置仅来自命令行")
+    if not args.api_key:
+        raise SystemExit("配置错误: 必须通过命令行提供 --api-key")
+    # 其他关键参数允许使用默认值
 
-    if args.model_id:
-        os.environ["SEEDREAM_MODEL_ID"] = args.model_id
+    # 构建最终配置（CLI关键 + ENV扩展）
 
-    if args.default_size:
-        os.environ["SEEDREAM_DEFAULT_SIZE"] = args.default_size
+    # 构建最终配置（使用CLI参数与默认值 + ENV扩展）
+    if True:
+        model_map = {
+            "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
+            "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
+        }
+        model_id = model_map.get(args.model, "doubao-seedream-4-5-251128")
+        cfg = SeedreamConfig(
+            api_key=args.api_key,
+            base_url=args.base_url,
+            model_id=model_id,
+            default_size=args.default_size,
+            default_watermark=bool(args.watermark),
+            timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
+            api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "60")),
+            max_retries=_parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
+            log_level=args.log_level,
+            log_file=os.getenv("LOG_FILE"),
+            auto_save_enabled=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_ENABLED", "true")),
+            auto_save_base_dir=os.getenv("SEEDREAM_AUTO_SAVE_BASE_DIR"),
+            auto_save_download_timeout=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")),
+            auto_save_max_retries=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_RETRIES", "3")),
+            auto_save_max_file_size=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE", str(50 * 1024 * 1024))),
+            auto_save_max_concurrent=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")),
+            auto_save_date_folder=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
+            auto_save_cleanup_days=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
+        )
+        set_config(cfg)
 
-    if args.watermark:
-        os.environ["SEEDREAM_DEFAULT_WATERMARK"] = "true"
+    # 其它字段已在上面构造 cfg 并 set_config
 
-    if args.log_level:
-        os.environ["LOG_LEVEL"] = args.log_level
+    # 水印已在 cfg 中设置
 
-    if args.base_url:
-        os.environ["ARK_BASE_URL"] = args.base_url
+    # 日志级别已在 cfg 中设置
+
+    # base_url 已在 cfg 中设置
 
     try:
         asyncio.run(main())

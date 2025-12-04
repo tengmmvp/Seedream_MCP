@@ -51,6 +51,21 @@ multi_image_fusion_tool = Tool(
                 "enum": ["url", "b64_json"],
                 "default": "url"
             },
+            "stream": {
+                "type": "boolean",
+                "description": "是否开启流式输出模式",
+                "default": False
+            },
+            "optimize_prompt_options": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["standard", "fast"],
+                        "default": "standard"
+                    }
+                }
+            },
             "auto_save": {
                 "type": "boolean",
                 "description": "是否自动保存生成的图片到本地。如果未指定，将使用全局配置",
@@ -93,6 +108,8 @@ async def handle_multi_image_fusion(arguments: Dict[str, Any]) -> List[TextConte
         if watermark is None:
             watermark = config.default_watermark
         response_format = arguments.get("response_format", "url")
+        stream = arguments.get("stream", False)
+        optimize_prompt_options = arguments.get("optimize_prompt_options")
         auto_save = arguments.get("auto_save")
         save_path = arguments.get("save_path")
         custom_name = arguments.get("custom_name")
@@ -109,7 +126,9 @@ async def handle_multi_image_fusion(arguments: Dict[str, Any]) -> List[TextConte
                 images=images,
                 size=size,
                 watermark=watermark,
-                response_format=response_format
+                response_format=response_format,
+                stream=stream,
+                optimize_prompt_options=optimize_prompt_options
             )
         
         # 初始化自动保存结果
@@ -239,7 +258,7 @@ async def _handle_auto_save_base64(
 
         image_data = []
         for i, image in enumerate(images):
-            if isinstance(image, dict) and "b64_json" in image:
+            if isinstance(image, dict) and image.get("b64_json"):
                 image_data.append({
                     'b64_json': image['b64_json'],
                     'prompt': prompt,
@@ -359,7 +378,16 @@ def _format_multi_image_fusion_response(
                 
                 # Base64信息（如果存在）
                 if "b64_json" in image:
-                    response_lines.append(f"  {i}. 图像数据: [Base64编码，长度: {len(image['b64_json'])}字符]")
+                    b64_data = image.get("b64_json")
+                    if isinstance(b64_data, str) and b64_data:
+                        response_lines.append(f"  {i}. 图像数据: [Base64编码，长度: {len(b64_data)}字符]")
+                    else:
+                        response_lines.append(f"  {i}. 图像数据: 无")
+                # 尺寸与序号（如存在）
+                if "size" in image:
+                    response_lines.append(f"     尺寸: {image['size']}")
+                if "image_index" in image:
+                    response_lines.append(f"     序号: {image['image_index']}")
                 
                 # 本地路径与Markdown引用（如自动保存）
                 if "local_path" in image:
@@ -379,10 +407,14 @@ def _format_multi_image_fusion_response(
             "",
             "📊 使用统计:"
         ])
-        if "prompt_tokens" in usage:
-            response_lines.append(f"  • 提示词令牌数: {usage['prompt_tokens']}")
+        if "generated_images" in usage:
+            response_lines.append(f"  • 生成图片数: {usage['generated_images']}")
+        if "output_tokens" in usage:
+            response_lines.append(f"  • 输出tokens: {usage['output_tokens']}")
         if "total_tokens" in usage:
-            response_lines.append(f"  • 总令牌数: {usage['total_tokens']}")
+            response_lines.append(f"  • 总tokens: {usage['total_tokens']}")
+        if "prompt_tokens" in usage:
+            response_lines.append(f"  • 提示词tokens: {usage['prompt_tokens']}")
         if "cost" in usage:
             response_lines.append(f"  • 费用: {usage['cost']}")
     

@@ -48,6 +48,21 @@ sequential_generation_tool = Tool(
                 "enum": ["url", "b64_json"],
                 "default": "url"
             },
+            "stream": {
+                "type": "boolean",
+                "description": "是否开启流式输出模式",
+                "default": False
+            },
+            "optimize_prompt_options": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["standard", "fast"],
+                        "default": "standard"
+                    }
+                }
+            },
             "image": {
                 "type": ["string", "array"],
                 "description": "可选的参考图像。支持单张图片URL/路径（字符串）或多张图片URL/路径（字符串数组）。用于单图生组图或多图生组图",
@@ -99,6 +114,8 @@ async def handle_sequential_generation(arguments: Dict[str, Any]) -> List[TextCo
             watermark = config.default_watermark
         response_format = arguments.get("response_format", "url")
         image = arguments.get("image")
+        stream = arguments.get("stream", False)
+        optimize_prompt_options = arguments.get("optimize_prompt_options")
         
         # 提取自动保存参数
         auto_save = arguments.get("auto_save")
@@ -149,7 +166,9 @@ async def handle_sequential_generation(arguments: Dict[str, Any]) -> List[TextCo
                 size=size,
                 watermark=watermark,
                 response_format=response_format,
-                image=image
+                image=image,
+                stream=stream,
+                optimize_prompt_options=optimize_prompt_options
             )
         
         # 初始化自动保存结果
@@ -395,7 +414,16 @@ def _format_sequential_generation_response(
                 
                 # Base64信息（如存在）
                 if "b64_json" in image:
-                    response_lines.append(f"  • 数据: [Base64编码，长度: {len(image['b64_json'])}字符]")
+                    b64_data = image.get("b64_json")
+                    if isinstance(b64_data, str) and b64_data:
+                        response_lines.append(f"  • 数据: [Base64编码，长度: {len(b64_data)}字符]")
+                    else:
+                        response_lines.append("  • 数据: 无")
+                # 尺寸与序号（如存在）
+                if "size" in image:
+                    response_lines.append(f"  • 尺寸: {image['size']}")
+                if "image_index" in image:
+                    response_lines.append(f"  • 序号: {image['image_index']}")
                 
                 # 自动保存后的本地路径与引用（如存在）
                 if "local_path" in image:
@@ -420,10 +448,14 @@ def _format_sequential_generation_response(
         response_lines.extend([
             "📊 使用统计:"
         ])
-        if "prompt_tokens" in usage:
-            response_lines.append(f"  • 提示词令牌数: {usage['prompt_tokens']}")
+        if "generated_images" in usage:
+            response_lines.append(f"  • 生成图片数: {usage['generated_images']}")
+        if "output_tokens" in usage:
+            response_lines.append(f"  • 输出tokens: {usage['output_tokens']}")
         if "total_tokens" in usage:
-            response_lines.append(f"  • 总令牌数: {usage['total_tokens']}")
+            response_lines.append(f"  • 总tokens: {usage['total_tokens']}")
+        if "prompt_tokens" in usage:
+            response_lines.append(f"  • 提示词tokens: {usage['prompt_tokens']}")
         if "cost" in usage:
             response_lines.append(f"  • 费用: {usage['cost']}")
         response_lines.append("")

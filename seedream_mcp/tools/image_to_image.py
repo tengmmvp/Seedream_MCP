@@ -45,6 +45,21 @@ image_to_image_tool = Tool(
                 "enum": ["url", "b64_json"],
                 "default": "url"
             },
+            "stream": {
+                "type": "boolean",
+                "description": "是否开启流式输出模式",
+                "default": False
+            },
+            "optimize_prompt_options": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "enum": ["standard", "fast"],
+                        "default": "standard"
+                    }
+                }
+            },
             "auto_save": {
                 "type": "boolean",
                 "description": "是否自动保存生成的图片到本地。如果未指定，将使用全局配置",
@@ -87,6 +102,8 @@ async def handle_image_to_image(arguments: Dict[str, Any]) -> List[TextContent]:
         if watermark is None:
             watermark = config.default_watermark
         response_format = arguments.get("response_format", "url")
+        stream = arguments.get("stream", False)
+        optimize_prompt_options = arguments.get("optimize_prompt_options")
         auto_save = arguments.get("auto_save")
         save_path = arguments.get("save_path")
         custom_name = arguments.get("custom_name")
@@ -103,7 +120,9 @@ async def handle_image_to_image(arguments: Dict[str, Any]) -> List[TextContent]:
                 image=image,
                 size=size,
                 watermark=watermark,
-                response_format=response_format
+                response_format=response_format,
+                stream=stream,
+                optimize_prompt_options=optimize_prompt_options
             )
         
         # 初始化自动保存结果
@@ -188,7 +207,7 @@ async def _handle_auto_save(
         # 准备保存数据
         image_data = []
         for i, image in enumerate(images):
-            if isinstance(image, dict) and "url" in image:
+            if isinstance(image, dict) and image.get("url"):
                 image_data.append({
                     'url': image['url'],
                     'prompt': prompt,
@@ -248,7 +267,7 @@ async def _handle_auto_save_base64(
 
         image_data = []
         for i, image in enumerate(images):
-            if isinstance(image, dict) and "b64_json" in image:
+            if isinstance(image, dict) and image.get("b64_json"):
                 image_data.append({
                     'b64_json': image['b64_json'],
                     'prompt': prompt,
@@ -366,8 +385,14 @@ def _format_image_to_image_response(
                 response_parts.append(f"图片 {i}:")
                 
                 # URL信息
-                if "url" in image:
+                if image.get("url"):
                     response_parts.append(f"   URL: {image['url']}")
+                # 图片尺寸
+                if "size" in image:
+                    response_parts.append(f"   尺寸: {image['size']}")
+                # 图片序号
+                if "image_index" in image:
+                    response_parts.append(f"   序号: {image['image_index']}")
                 
                 # 本地路径信息（如果有自动保存）
                 if "local_path" in image:
@@ -379,8 +404,11 @@ def _format_image_to_image_response(
                 
                 # Base64信息
                 if "b64_json" in image:
-                    b64_data = image["b64_json"]
-                    response_parts.append(f"   Base64数据: {len(b64_data)} 字符")
+                    b64_data = image.get("b64_json")
+                    if isinstance(b64_data, str) and b64_data:
+                        response_parts.append(f"   Base64数据: {len(b64_data)} 字符")
+                    else:
+                        response_parts.append("   Base64数据: 无")
                 
                 response_parts.append("")
         
@@ -410,12 +438,16 @@ def _format_image_to_image_response(
         # 显示使用统计
         if usage:
             response_parts.append("使用统计:")
-            if "prompt_tokens" in usage:
-                response_parts.append(f"   提示词令牌: {usage['prompt_tokens']}")
-            if "completion_tokens" in usage:
-                response_parts.append(f"   完成令牌: {usage['completion_tokens']}")
+            if "generated_images" in usage:
+                response_parts.append(f"   生成图片数: {usage['generated_images']}")
+            if "output_tokens" in usage:
+                response_parts.append(f"   输出tokens: {usage['output_tokens']}")
             if "total_tokens" in usage:
-                response_parts.append(f"   总令牌: {usage['total_tokens']}")
+                response_parts.append(f"   总tokens: {usage['total_tokens']}")
+            if "prompt_tokens" in usage:
+                response_parts.append(f"   提示词tokens: {usage['prompt_tokens']}")
+            if "completion_tokens" in usage:
+                response_parts.append(f"   完成tokens: {usage['completion_tokens']}")
             if "cost" in usage:
                 response_parts.append(f"   费用: {usage['cost']}")
             response_parts.append("")
