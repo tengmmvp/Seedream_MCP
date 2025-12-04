@@ -9,7 +9,7 @@ Seedream MCP工具 - 客户端模块
 import asyncio
 import base64
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 # 第三方库导入
 import httpx
@@ -87,7 +87,7 @@ class SeedreamClient:
         self,
         prompt: str,
         size: str = "2K",
-        watermark: bool = True,
+        watermark: bool = False,
         response_format: str = "url",
         stream: bool = False,
         optimize_prompt_options: Optional[Dict[str, Any]] = None,
@@ -100,7 +100,7 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要生成的图像内容
             size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
-            watermark: 是否添加水印，默认为 True
+            watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
@@ -151,7 +151,7 @@ class SeedreamClient:
         prompt: str,
         image: str,
         size: str = "2K",
-        watermark: bool = True,
+        watermark: bool = False,
         response_format: str = "url",
         stream: bool = False,
         optimize_prompt_options: Optional[Dict[str, Any]] = None,
@@ -165,7 +165,7 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的修改或转换
             image: 输入图像的 URL 或本地文件路径
             size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
-            watermark: 是否添加水印，默认为 True
+            watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
@@ -221,7 +221,7 @@ class SeedreamClient:
         prompt: str,
         images: List[str],
         size: str = "2K",
-        watermark: bool = True,
+        watermark: bool = False, 
         response_format: str = "url",
         stream: bool = False,
         optimize_prompt_options: Optional[Dict[str, Any]] = None,
@@ -235,7 +235,7 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
             images: 输入图像的 URL 或本地文件路径列表，数量范围为 2-5 张
             size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
-            watermark: 是否添加水印，默认为 True
+            watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
@@ -294,9 +294,9 @@ class SeedreamClient:
         prompt: str,
         max_images: int = 4,
         size: str = "2K",
-        watermark: bool = True,
+        watermark: bool = False,
         response_format: str = "url",
-        image: Optional[Union[str, List[str]]] = None,
+        image: Optional[Union[str, Sequence[str]]] = None,
         stream: bool = False,
         optimize_prompt_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -312,7 +312,7 @@ class SeedreamClient:
             prompt: 文本提示词，描述要生成的图像内容
             max_images: 最大生成图像数量，范围为 1-15，默认为 4
             size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
-            watermark: 是否添加水印，默认为 True
+            watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（最多 10 张）
             stream: 是否使用流式传输，默认为 False
@@ -338,7 +338,7 @@ class SeedreamClient:
             if isinstance(image, str):
                 # 单张图片
                 processed_image = await self._prepare_image_input(image)
-            elif isinstance(image, list):
+            elif isinstance(image, (list, tuple)):
                 # 多张图片
                 if len(image) > 10:
                     raise SeedreamAPIError("最多支持 10 张参考图片")
@@ -481,7 +481,7 @@ class SeedreamClient:
         if self._client is None:
             raise SeedreamAPIError("HTTP 客户端未正确初始化")
 
-        # 构建 URL（Seedream 4.0 API 仅有一个端点）
+        # 构建 URL
         url = f"{self.config.base_url}/images/generations"
 
         for attempt in range(self.config.max_retries):
@@ -701,10 +701,7 @@ class SeedreamClient:
                 '.gif': 'image/gif',
                 '.bmp': 'image/bmp',
                 '.tiff': 'image/tiff',
-                '.tif': 'image/tiff',
                 '.webp': 'image/webp',
-                '.svg': 'image/svg+xml',
-                '.ico': 'image/x-icon'
             }
             mime_type = mime_type_map.get(suffix, 'image/jpeg')
 
