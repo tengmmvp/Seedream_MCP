@@ -1,5 +1,5 @@
 """
-Seedream 4.0 MCP工具 - 图片文件浏览工具
+Seedream MCP工具 - 图片文件浏览工具
 
 帮助用户浏览工作区中的图片文件，获取文件路径用于图像生成。
 """
@@ -14,8 +14,7 @@ logger = get_logger(__name__)
 
 # 支持的图片格式
 SUPPORTED_IMAGE_FORMATS = {
-    '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', 
-    '.webp', '.svg', '.ico', '.psd', '.raw', '.heic', '.heif'
+    '.bmp', '.gif', '.jpeg', '.png', '.tiff', '.webp'
 }
 
 # 工具定义
@@ -51,7 +50,7 @@ browse_images_tool = Tool(
             },
             "format_filter": {
                 "type": "array",
-                "description": "过滤特定格式的图片文件，如 ['.jpg', '.png']",
+                "description": "过滤特定格式的图片文件，如 ['.jpeg', '.png']",
                 "items": {
                     "type": "string"
                 },
