@@ -1,5 +1,5 @@
 """
-Seedream 4.0 MCP工具 - 工具模块
+Seedream MCP工具 - 工具模块
 
 包含所有MCP工具的实现。
 """
