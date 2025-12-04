@@ -1,14 +1,14 @@
-# Seedream 4.0 MCP 工具 API 文档
+# Seedream MCP 工具 API 文档
 
 ## 概述
 
-本文档详细描述了 Seedream 4.0 MCP 工具提供的所有 API 接口和参数规范。
+本文档详细描述了 Seedream MCP 工具提供的所有 API 接口和参数规范。
 
 ## 工具列表
 
 ### 1. seedream_text_to_image
 
-**描述**: 使用 Seedream 4.0 根据文本提示词生成图像
+**描述**: 使用 Seedream 根据文本提示词生成图像
 
 **输入参数**:
 
@@ -88,7 +88,7 @@
 
 ### 2. seedream_image_to_image
 
-**描述**: 使用 Seedream 4.0 根据输入图像和文本提示词生成新图像
+**描述**: 使用 Seedream 根据输入图像和文本提示词生成新图像
 
 **输入参数**:
 
@@ -160,7 +160,7 @@
 
 ### 3. seedream_multi_image_fusion
 
-**描述**: 使用 Seedream 4.0 将多张图像融合生成新图像
+**描述**: 使用 Seedream 将多张图像融合生成新图像
 
 **输入参数**:
 
@@ -248,7 +248,7 @@
 
 ### 4. seedream_sequential_generation
 
-**描述**: 使用 Seedream 4.0 连续生成多张图像（组图生成）
+**描述**: 使用 Seedream 连续生成多张图像（组图生成）
 
 **输入参数**:
 
