@@ -385,10 +385,10 @@ def _validate_url(url: str) -> str:
                 value=url
             )
         
-        # 检查URL路径中的图像扩展名（宽松检查）
+        # 检查URL路径中的图像扩展名
         if parsed.path:
             path_lower = parsed.path.lower()
-            image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif']
+            image_extensions = ['.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff']
             if not any(path_lower.endswith(ext) for ext in image_extensions):
                 # 没有明显的图像扩展名，给出警告但不阻止
                 pass
@@ -442,7 +442,7 @@ def _validate_file_path(file_path: str) -> str:
             )
         
         # 检查文件扩展名
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif']
+        image_extensions = ['.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff']
         if path.suffix.lower() not in image_extensions:
             raise SeedreamValidationError(
                 f"不支持的图像格式: {path.suffix}，支持的格式: {image_extensions}",
