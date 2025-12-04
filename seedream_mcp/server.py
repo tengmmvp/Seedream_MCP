@@ -20,7 +20,6 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 # ==================== 本地模块导入 ====================
-from .client import SeedreamClient
 from .config import (
     SeedreamConfig,
     set_config,
@@ -68,13 +67,12 @@ class NotificationOptions:
 class SeedreamMCPServer:
     """Seedream MCP服务器类
     
-    提供MCP协议服务器实现，负责处理工具调用请求，管理配置和客户端实例。
+    提供MCP协议服务器实现，负责处理工具调用请求与配置管理。
     支持文生图、图生图、多图融合、序列生成等AI图像生成功能。
     
     Attributes:
         server: MCP服务器实例
         config: Seedream配置对象
-        client: Seedream API客户端实例
         logger: 日志记录器
         tools: 可用工具列表
     """
@@ -82,12 +80,11 @@ class SeedreamMCPServer:
     def __init__(self):
         """初始化MCP服务器实例
         
-        创建Server实例，初始化配置、客户端和日志记录器，并注册协议处理器。
-        配置和客户端将在首次工具调用时延迟初始化。
+        创建Server实例，初始化配置与日志记录器，并注册协议处理器。
+        配置将在首次工具调用时延迟初始化。
         """
         self.server = Server("seedream-mcp")
         self.config: Optional[SeedreamConfig] = None
-        self.client: Optional[SeedreamClient] = None
         self.logger = logging.getLogger(__name__)
         self.tools = self._get_tools()
         self._register_handlers()
@@ -131,7 +128,7 @@ class SeedreamMCPServer:
             """处理工具调用请求
             
             根据工具名称路由到对应处理器，执行工具调用并返回结果。
-            支持自动初始化客户端、参数验证和异常处理。
+            支持延迟初始化配置、参数验证和异常处理。
             
             Args:
                 name: 工具名称，用于路由到具体处理器
@@ -144,9 +141,9 @@ class SeedreamMCPServer:
                 SeedreamMCPError: 工具未知或执行失败时抛出
             """
             try:
-                # 延迟初始化客户端和配置
-                if not self.config or not self.client:
-                    await self._initialize_client()
+                # 延迟初始化配置
+                if not self.config:
+                    await self._initialize_config()
 
                 tool_name = name
                 arguments = arguments or {}
@@ -200,39 +197,36 @@ class SeedreamMCPServer:
                 self.logger.error(f"工具调用失败: {e}", exc_info=True)
                 return [TextContent(type="text", text=f"工具调用失败: {str(e)}")]
 
-    async def _initialize_client(self):
-        """初始化配置和客户端
+    async def _initialize_config(self):
+        """初始化配置
         
-        从环境变量和全局配置加载设置，创建Seedream API客户端实例。
-        该方法在首次工具调用时自动触发，实现延迟初始化。
+        从环境变量和全局配置加载设置，采用延迟初始化策略。
         
         Raises:
-            SeedreamMCPError: 客户端初始化失败时抛出，可能由于配置错误或网络问题
+            SeedreamMCPError: 配置初始化失败时抛出
         """
         try:
             self.config = get_global_config()
-            self.client = SeedreamClient(self.config)
-            self.logger.info("Seedream客户端初始化成功")
+            self.logger.info("配置初始化成功")
         except Exception as e:
-            self.logger.error(f"客户端初始化失败: {e}")
-            raise SeedreamMCPError(f"客户端初始化失败: {e}")
+            self.logger.error(f"配置初始化失败: {e}")
+            raise SeedreamMCPError(f"配置初始化失败: {e}")
 
     async def run(self):
         """运行MCP服务器
         
-        启动服务器主循环，初始化日志系统和客户端，通过stdio协议处理请求。
+        启动服务器主循环，初始化日志系统，通过stdio协议处理请求。
         支持优雅关闭和异常捕获。
         
         Raises:
             Exception: 服务器运行过程中发生的未捕获异常
         """
         try:
-            # 初始化日志系统
-            setup_logging(os.getenv("LOG_LEVEL", "INFO"), os.getenv("LOG_FILE"))
+            # 初始化配置并日志系统
+            cfg = get_global_config()
+            setup_logging(cfg.log_level, cfg.log_file)
+            self.config = cfg
             self.logger.info("启动Seedream MCP服务器...")
-
-            # 初始化客户端连接
-            await self._initialize_client()
 
             # 启动stdio服务器并运行主循环
             async with stdio_server() as (read_stream, write_stream):
@@ -241,7 +235,7 @@ class SeedreamMCPServer:
                     write_stream,
                     InitializationOptions(
                         server_name="seedream-mcp",
-                        server_version="1.0.0",
+                        server_version="1.2.0",
                         capabilities=self.server.get_capabilities(
                             notification_options=NotificationOptions(),
                             experimental_capabilities={},
@@ -361,29 +355,11 @@ def cli_main():
     # 解析命令行参数
     args = parser.parse_args()
 
-    # 初始化日志系统，使用CLI日志级别和ENV日志文件
-    setup_logging(args.log_level, os.getenv("LOG_FILE"))
-
-    logger = logging.getLogger(__name__)
-
     # 如果指定了配置文件，加载扩展配置
     if args.config_file:
         from dotenv import load_dotenv
         load_dotenv(args.config_file)
 
-    # 配置模式校验：ENV中的关键CLI键将被忽略，避免配置冲突
-    forbidden_env_keys = [
-        "ARK_API_KEY",
-        "SEEDREAM_MODEL_ID",
-        "SEEDREAM_DEFAULT_SIZE",
-        "SEEDREAM_DEFAULT_WATERMARK",
-        "LOG_LEVEL",
-        "ARK_BASE_URL",
-    ]
-    for k in forbidden_env_keys:
-        v = os.getenv(k)
-        if v:
-            logger.warning(f"环境变量 {k}='{v}' 将被忽略，关键配置仅来自命令行")
     
     # API密钥必须通过命令行提供
     if not args.api_key:
@@ -427,6 +403,24 @@ def cli_main():
         
         # 设置为全局配置
         set_config(cfg)
+
+        # 初始化日志系统使用最终配置
+        setup_logging(cfg.log_level, cfg.log_file)
+        logger = logging.getLogger(__name__)
+
+        # 配置模式校验：ENV中的关键CLI键将被忽略，避免配置冲突
+        forbidden_env_keys = [
+            "ARK_API_KEY",
+            "SEEDREAM_MODEL_ID",
+            "SEEDREAM_DEFAULT_SIZE",
+            "SEEDREAM_DEFAULT_WATERMARK",
+            "LOG_LEVEL",
+            "ARK_BASE_URL",
+        ]
+        for k in forbidden_env_keys:
+            v = os.getenv(k)
+            if v:
+                logger.warning(f"环境变量 {k}='{v}' 将被忽略，关键配置仅来自命令行")
 
     # 启动服务器主循环
     try:
