@@ -1,12 +1,12 @@
 """
-Seedream 4.0 MCP工具 - 组图生成工具
+Seedream MCP工具 - 组图生成工具
 
 实现连续生成多张图像功能，支持自动保存到本地。
 """
 
-from typing import Any, Dict, List, Optional
 from pathlib import Path
 from mcp.types import Tool, TextContent
+from typing import Any, Dict, List, Optional
 
 from ..client import SeedreamClient
 from ..config import SeedreamConfig, get_global_config
@@ -17,7 +17,7 @@ from ..utils.auto_save import AutoSaveManager, AutoSaveResult
 # 工具定义
 sequential_generation_tool = Tool(
     name="seedream_sequential_generation",
-    description="使用Seedream 4.0连续生成多张图像（组图生成），支持3种输入类型：文生组图、单图生组图、多图生组图",
+    description="使用Seedream连续生成多张图像（组图生成），支持3种输入类型：文生组图、单图生组图、多图生组图",
     inputSchema={
         "type": "object",
         "properties": {

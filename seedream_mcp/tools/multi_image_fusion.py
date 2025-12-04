@@ -1,12 +1,12 @@
 """
-Seedream 4.0 MCP工具 - 多图融合工具
+Seedream MCP工具 - 多图融合工具
 
 实现多张图像融合生成功能，支持自动保存生成的图片到本地。
 """
 
-from typing import Any, Dict, List, Optional
 from pathlib import Path
 from mcp.types import Tool, TextContent
+from typing import Any, Dict, List, Optional
 
 from ..client import SeedreamClient
 from ..config import SeedreamConfig, get_global_config
@@ -17,7 +17,7 @@ from ..utils.auto_save import AutoSaveManager, AutoSaveResult
 # 工具定义
 multi_image_fusion_tool = Tool(
     name="seedream_multi_image_fusion",
-    description="使用Seedream 4.0将多张图像融合生成新图像",
+    description="使用Seedream将多张图像融合生成新图像",
     inputSchema={
         "type": "object",
         "properties": {

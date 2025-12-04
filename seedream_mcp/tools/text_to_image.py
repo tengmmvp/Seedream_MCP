@@ -1,12 +1,12 @@
 """
-Seedream 4.0 MCP工具 - 文生图工具
+Seedream MCP工具 - 文生图工具
 
 实现文本到图像生成功能，支持自动保存。
 """
 
-from typing import Any, Dict, List, Optional
 from pathlib import Path
 from mcp.types import Tool, TextContent
+from typing import Any, Dict, List, Optional
 
 from ..client import SeedreamClient
 from ..config import SeedreamConfig, get_global_config
@@ -17,7 +17,7 @@ from ..utils.auto_save import AutoSaveManager
 # 工具定义
 text_to_image_tool = Tool(
     name="seedream_text_to_image",
-    description="使用Seedream 4.0根据文本提示词生成图像",
+    description="使用Seedream根据文本提示词生成图像",
     inputSchema={
         "type": "object",
         "properties": {
