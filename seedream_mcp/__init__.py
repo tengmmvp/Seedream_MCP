@@ -1,7 +1,7 @@
 """
-Seedream 4.0 MCP工具包
+Seedream MCP工具包
 
-基于火山引擎Seedream 4.0 API的模型上下文协议（MCP）工具，
+基于火山引擎Seedream API的模型上下文协议（MCP）工具，
 为开发者提供在IDE中直接调用AI图像生成功能的能力。
 
 支持功能：
@@ -12,9 +12,9 @@ Seedream 4.0 MCP工具包
 
 """
 
-__version__ = "1.0.0"
-__author__ = "Seedream MCP Team"
-__email__ = "tengmmvp@qq.com"
+__version__ = "1.1.0"
+__author__ = "tengmmvp"
+__email__ = "tengmmvp@gmail.com"
 
 from .config import SeedreamConfig
 from .client import SeedreamClient
