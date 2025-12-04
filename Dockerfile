@@ -43,9 +43,9 @@ CMD ["--help"]
 
 # 添加标签
 LABEL org.opencontainers.image.title="Seedream MCP" \
-      org.opencontainers.image.description="基于火山引擎 Seedream 4.0 API 的 MCP 工具，支持 AI 图像生成" \
+      org.opencontainers.image.description="基于火山引擎 Seedream API 的 MCP 工具，支持 AI 图像生成" \
       org.opencontainers.image.source="https://github.com/tengmmvp/Seedream_MCP" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.0.2" \
-      maintainer="MVP Teng <tengmmvp@qq.com>" \
-      contributors="MVP Teng <tengmmvp@qq.com>, caoergou <itsericsmail@gmail.com>"
+      org.opencontainers.image.version="1.2.0" \
+      maintainer="tengmmvp <tengmmvp@gmail.com>" \
+      contributors="tengmmvp <tengmmvp@gmail.com>, caoergou <itsericsmail@gmail.com>"

@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   seedream-mcp:
@@ -11,7 +11,7 @@ services:
 
       # 可选配置
       - ARK_BASE_URL=${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
-      - SEEDREAM_MODEL_ID=${SEEDREAM_MODEL_ID:-doubao-seedream-4-0-250828}
+      - SEEDREAM_MODEL_ID=${SEEDREAM_MODEL_ID:-doubao-seedream-4.5}
       - SEEDREAM_DEFAULT_SIZE=${SEEDREAM_DEFAULT_SIZE:-2K}
       - SEEDREAM_DEFAULT_WATERMARK=${SEEDREAM_DEFAULT_WATERMARK:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -31,8 +31,8 @@ services:
     ports:
       # 如果需要 HTTP 接口，可以暴露端口
       # - "8000:8000"
-      - "stdin:stdin"  # MCP 协议需要
-      - "stdout:stdout"  # MCP 协议需要
+      - "stdin:stdin" # MCP 协议需要
+      - "stdout:stdout" # MCP 协议需要
     stdin_open: true
     tty: true
     healthcheck:

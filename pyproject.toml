@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "seedream-mcp"
-version = "1.0.0"
+version = "1.2.0"
 authors = [
-    {name = "Seedream MCP Team", email = "tengmmvp@qq.com"}
+    {name = "TengMMVP", email = "tengmmvp@gmail.com"}
 ]
-description = "基于火山引擎 Seedream 4.0 API 的 MCP 工具，支持 AI 图像生成功能"
+description = "基于火山引擎 Seedream API 的 MCP 工具，支持 AI 图像生成功能"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"

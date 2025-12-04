@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Seedream 4.0 MCP工具 - 主入口文件
+Seedream MCP工具 - 主入口文件
 
-启动Seedream 4.0 MCP服务器。
+启动Seedream MCP服务器。
 """
 
 import asyncio
