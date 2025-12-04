@@ -3,18 +3,21 @@
 ## 🚀 发布流程
 
 ### 1. 更新版本号
+
 ```bash
 # 编辑 pyproject.toml
-version = "1.1.0"
+version = "1.2.0"
 ```
 
 ### 2. 创建标签
+
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 GitHub Actions 会自动：
+
 - ✅ 测试代码
 - ✅ 创建 GitHub Release
 - ✅ 构建 Docker 镜像
@@ -36,11 +39,13 @@ GitHub Actions 会自动：
 ## 🎯 用户获取方式
 
 ### uvx 安装
+
 ```bash
 uvx run git+https://github.com/tengmmvp/Seedream_MCP --api-key your_key
 ```
 
 ### Docker 运行
+
 ```bash
 docker run ghcr.io/tengmmvp/seedream-mcp
 ```

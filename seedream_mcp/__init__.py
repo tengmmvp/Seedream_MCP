@@ -12,7 +12,7 @@ Seedream MCP工具包
 
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "tengmmvp"
 __email__ = "tengmmvp@gmail.com"
 
