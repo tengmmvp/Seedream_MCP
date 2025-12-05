@@ -7,6 +7,7 @@ Seedream MCP工具 - 参数验证模块
 
 # 标准库导入
 import io
+import re
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
@@ -18,20 +19,10 @@ from PIL import Image
 from .errors import SeedreamValidationError
 
 
-def validate_prompt(prompt: str, max_length: int = 600) -> str:
+def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words: int = 600) -> str:
     """验证文本提示词的有效性和长度限制
     
-    检查提示词是否为空、是否为字符串类型，以及长度是否超出限制。
-    
-    Args:
-        prompt: 待验证的文本提示词
-        max_length: 提示词最大字符数限制，默认为600
-        
-    Returns:
-        str: 去除首尾空格后的提示词
-        
-    Raises:
-        SeedreamValidationError: 当提示词为空、类型错误或超出长度限制时抛出
+    当中文字符超过 `max_chinese_chars` 或英文单词超过 `max_english_words` 时，视为过长。
     """
     if not prompt or not isinstance(prompt, str):
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
@@ -40,12 +31,17 @@ def validate_prompt(prompt: str, max_length: int = 600) -> str:
     if not prompt:
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
     
-    # 检查长度限制
-    if len(prompt) > max_length:
+    chinese_count = len(re.findall(r"[\u4e00-\u9fff]", prompt))
+    english_word_count = len(re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", prompt))
+    
+    if chinese_count > max_chinese_chars or english_word_count > max_english_words:
         raise SeedreamValidationError(
-            f"提示词过长，建议不超过{max_length}个字符（当前{len(prompt)}个字符）",
+            (
+                f"提示词过长，建议不超过{max_chinese_chars}个汉字或{max_english_words}个英文单词"
+                f"（当前中文{chinese_count}个，英文{english_word_count}个）"
+            ),
             field="prompt",
-            value=prompt
+            value=prompt,
         )
     
     return prompt

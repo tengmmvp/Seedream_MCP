@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![MCP](https://img.shields.io/badge/MCP-compatible-orange.svg)
-![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)
 
 基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。
 
@@ -101,7 +101,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 **参数：**
 
-- `prompt` (必需) - 图像生成的文本提示词，建议不超过 600 个字符
+- `prompt` (必需) - 图像生成的文本提示词，建议不超过 300 个汉字或 600 个英文单词
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
@@ -117,7 +117,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 **参数：**
 
-- `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 600 个字符
+- `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词
 - `image` (必需) - 输入图像的 URL 或本地文件路径
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
@@ -134,7 +134,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 **参数：**
 
-- `prompt` (必需) - 图像融合要求或风格指令，建议不超过 600 个字符
+- `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
 - `images` (必需) - 输入图像 URL 或本地文件路径列表（2-5 张图像）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
@@ -151,7 +151,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 **参数：**
 
-- `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 600 个字符
+- `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 4
 - `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组，最多 10 张）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值

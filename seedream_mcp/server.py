@@ -38,7 +38,7 @@ from .utils.logging import get_logger, setup_logging
 SERVER_NAME = "seedream_mcp"
 
 # 服务器版本号
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.2.1"
 
 # 服务器功能说明
 SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图生图、多图融合、组图与图片浏览。"
@@ -85,19 +85,10 @@ logger = get_logger(__name__)
     annotations={"title": "Seedream 文生图", **GENERATION_TOOL_ANNOTATIONS},
 )
 async def seedream_text_to_image(params: TextToImageInput):
-    """文本生成图像工具
+    """
+    文生图：
     
-    根据用户提供的提示词生成图像，支持多种输出格式与自动保存功能。
-    
-    Args:
-        params: 文生图参数，包含提示词、尺寸、输出格式等配置。
-    
-    Returns:
-        生成结果，包含图像 URL 或 base64 数据，以及任务元信息。
-    
-    Raises:
-        SeedreamAPIError: API 调用失败时抛出。
-        SeedreamValidationError: 参数校验失败时抛出。
+    通过给模型提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
     """
     return await run_text_to_image(params)
 
@@ -107,19 +98,10 @@ async def seedream_text_to_image(params: TextToImageInput):
     annotations={"title": "Seedream 图生图", **GENERATION_TOOL_ANNOTATIONS},
 )
 async def seedream_image_to_image(params: ImageToImageInput):
-    """图像生成图像工具
+    """
+    图文生图：
     
-    基于输入图像与文本指令生成新图像，支持水印控制与流式输出。
-    
-    Args:
-        params: 图生图参数，包含输入图像、提示词、强度等配置。
-    
-    Returns:
-        生成结果，包含新图像的 URL 或 base64 数据。
-    
-    Raises:
-        SeedreamAPIError: API 调用失败时抛出。
-        SeedreamValidationError: 参数校验或图像加载失败时抛出。
+    基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
     """
     return await run_image_to_image(params)
 
@@ -129,19 +111,10 @@ async def seedream_image_to_image(params: ImageToImageInput):
     annotations={"title": "Seedream 多图融合", **GENERATION_TOOL_ANNOTATIONS},
 )
 async def seedream_multi_image_fusion(params: MultiImageFusionInput):
-    """多图融合工具
+    """
+    多图融合：
     
-    将多张输入图像融合生成新作品，建议使用 2-5 张图像以获得最佳效果。
-    
-    Args:
-        params: 多图融合参数，包含图像列表、融合提示词等配置。
-    
-    Returns:
-        融合后的图像结果。
-    
-    Raises:
-        SeedreamAPIError: API 调用失败时抛出。
-        SeedreamValidationError: 图像数量或格式校验失败时抛出。
+    根据您输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
     """
     return await run_multi_image_fusion(params)
 
@@ -151,19 +124,10 @@ async def seedream_multi_image_fusion(params: MultiImageFusionInput):
     annotations={"title": "Seedream 组图生成", **GENERATION_TOOL_ANNOTATIONS},
 )
 async def seedream_sequential_generation(params: SequentialGenerationInput):
-    """连续组图生成工具
+    """
+    组图输出：
     
-    批量生成多张图像，适用于剧本分镜、连续场景或组图创作任务。
-    
-    Args:
-        params: 组图生成参数，包含提示词列表、生成数量等配置。
-    
-    Returns:
-        包含所有生成图像的结果集合。
-    
-    Raises:
-        SeedreamAPIError: API 调用失败时抛出。
-        SeedreamValidationError: 参数校验失败时抛出。
+    支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
     """
     return await run_sequential_generation(params)
 
@@ -173,18 +137,10 @@ async def seedream_sequential_generation(params: SequentialGenerationInput):
     annotations={"title": "Seedream 图片浏览", **BROWSE_TOOL_ANNOTATIONS},
 )
 async def seedream_browse_images(params: BrowseImagesInput):
-    """本地图片浏览工具
+    """
+    本地图片浏览：
     
     浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
-    
-    Args:
-        params: 浏览参数，包含目录路径、筛选条件等配置。
-    
-    Returns:
-        图片文件列表及元信息。
-    
-    Raises:
-        SeedreamValidationError: 路径不存在或无访问权限时抛出。
     """
     return await run_browse_images(params)
 
