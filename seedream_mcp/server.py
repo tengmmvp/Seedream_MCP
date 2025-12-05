@@ -38,7 +38,7 @@ from .utils.logging import get_logger, setup_logging
 SERVER_NAME = "seedream_mcp"
 
 # 服务器版本号
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.2.1"
 
 # 服务器功能说明
 SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图生图、多图融合、组图与图片浏览。"
