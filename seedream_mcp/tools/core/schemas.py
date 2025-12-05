@@ -162,16 +162,13 @@ class BaseGenerationInput(BaseModel):
 
 class TextToImageInput(BaseGenerationInput):
     """
-    文生图输入模型。
-    
-    基于文本提示词生成图片，继承通用生成配置。
+    文生图：通过提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
     """
 
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=600,
-        description="用于生成图片的提示词，不超过 600 字符。",
+        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。",
     )
 
     @field_validator("prompt")
@@ -197,20 +194,17 @@ class TextToImageInput(BaseGenerationInput):
 
 class ImageToImageInput(BaseGenerationInput):
     """
-    图生图输入模型。
-    
-    基于参考图片和文本指令进行图片转换或风格迁移。
+    图文生图：基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
     """
 
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=600,
-        description="图片修改或风格转换的指令，建议不超过 600 字符。",
+        description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。",
     )
     image: str = Field(
         ...,
-        description="待转换的图片，支持 URL、本地文件路径或 Data URI。",
+        description="待转换的图片，支持 URL、本地文件路径。",
     )
 
     @field_validator("prompt")
@@ -240,7 +234,7 @@ class ImageToImageInput(BaseGenerationInput):
         校验图片来源。
         
         Args:
-            value: 图片 URL、文件路径或 Data URI
+            value: 图片 URL、文件路径
             
         Returns:
             规范化后的图片标识
@@ -256,22 +250,19 @@ class ImageToImageInput(BaseGenerationInput):
 
 class MultiImageFusionInput(BaseGenerationInput):
     """
-    多图融合输入模型。
-    
-    将多张图片按照提示词进行融合，生成统一风格或混合内容的新图片。
+    多图融合：根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
     """
 
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=600,
-        description="融合目标或风格描述，建议不超过 600 字符。",
+        description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。",
     )
     images: List[str] = Field(
         ...,
         min_items=2,
         max_items=5,
-        description="参与融合的图片列表，支持 URL、本地路径或 Data URI，数量 2-5 张。",
+        description="参与融合的图片列表，支持 URL、本地路径，数量2-5张。",
     )
 
     @field_validator("prompt")
@@ -317,16 +308,13 @@ class MultiImageFusionInput(BaseGenerationInput):
 
 class SequentialGenerationInput(BaseGenerationInput):
     """
-    组图/连续生成输入模型。
-    
-    根据提示词生成多张连贯或系列化的图片，可选参考图片作为辅助。
+    组图输出：支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
     """
 
     prompt: str = Field(
         ...,
         min_length=1,
-        max_length=600,
-        description="连贯的组图提示，需明确数量与内容，不超过 600 字符。",
+        description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。",
     )
     max_images: int = Field(
         default=4,
@@ -410,9 +398,7 @@ class SequentialGenerationInput(BaseGenerationInput):
 
 class BrowseImagesInput(BaseModel):
     """
-    本地图片浏览输入模型。
-    
-    配置本地文件系统中图片文件的查找与过滤规则。
+    本地图片浏览：浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
     """
 
     model_config = ConfigDict(
@@ -443,7 +429,7 @@ class BrowseImagesInput(BaseModel):
     )
     format_filter: Optional[List[str]] = Field(
         default=None,
-        description="需要过滤的图片后缀列表，如 ['.jpg', '.png']。",
+        description="需要过滤的图片后缀列表，如 ['.jpeg', '.png']。",
     )
     show_details: bool = Field(
         default=False,
