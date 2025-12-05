@@ -1,11 +1,12 @@
-﻿# Seedream 4.0 MCP 工具
+﻿# Seedream 4.0 和 Seedream 4.5 MCP 生图工具
 
 [![uvx](https://img.shields.io/badge/uvx-ready-brightgreen.svg)](https://github.com/astral-sh/uv)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![MCP](https://img.shields.io/badge/MCP-compatible-orange.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 
-基于火山引擎 Seedream 4.0 API 的 MCP 工具，支持 AI 图像生成。
+基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。
 
 ## ⚡ 快速安装
 
@@ -55,10 +56,13 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 ## ⚙️ 启动参数
 
 ```bash
---api-key TEXT        # API 密钥（必需）
---default-size [1K|2K|4K]  # 图像尺寸 (默认: 2K)
---watermark                 # 启用水印
---log-level [DEBUG|INFO|WARNING|ERROR]  # 日志级别
+--api-key TEXT                                     # API 密钥（必需）
+--model [doubao-seedream-4.5|doubao-seedream-4.0]  # 模型选择 (默认: doubao-seedream-4.5)
+--default-size [1K|2K|4K]                          # 图像尺寸 (默认: 2K)
+--watermark                                        # 启用水印
+--log-level [DEBUG|INFO|WARNING|ERROR]             # 日志级别
+--transport [stdio|sse|streamable-http]            # MCP 传输方式 (默认: stdio)
+--config-file TEXT                                 # 自定义 .env 配置文件路径
 ```
 
 ### 使用示例
@@ -71,6 +75,14 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 # 高质量图像 + 调试模式
 uvx git+https://github.com/tengmmvp/Seedream_MCP \
   --api-key your_key --default-size 4K --log-level DEBUG
+
+# 使用 Seedream 4.0 模型
+uvx git+https://github.com/tengmmvp/Seedream_MCP \
+  --api-key your_key --model doubao-seedream-4.0
+
+# 使用自定义配置文件
+uvx git+https://github.com/tengmmvp/Seedream_MCP \
+  --config-file ./my-config.env --api-key your_key
 ```
 
 ## 🎨 功能特性
@@ -79,7 +91,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - **图生图**：图像转换风格
 - **多图融合**：融合多张图片
 - **组图生成**：生成图像序列
-- **自动保存**：图片本地存储
+- **图片浏览**：本地图片文件浏览
 
 ## 🛠️ 可用工具
 
@@ -91,9 +103,11 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 - `prompt` (必需) - 图像生成的文本提示词，建议不超过 600 个字符
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
-- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `stream` (可选) - 是否启用流式输出，默认`false`
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
@@ -106,9 +120,11 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 600 个字符
 - `image` (必需) - 输入图像的 URL 或本地文件路径
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
-- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `stream` (可选) - 是否启用流式输出，默认`false`
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
@@ -121,9 +137,11 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 600 个字符
 - `images` (必需) - 输入图像 URL 或本地文件路径列表（2-5 张图像）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
-- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `stream` (可选) - 是否启用流式输出，默认`false`
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
@@ -135,11 +153,13 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 600 个字符
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 4
-- `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）
+- `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组，最多 10 张）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
-- `watermark` (可选) - 是否添加水印，默认使用配置文件值
+- `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置
+- `stream` (可选) - 是否启用流式输出，默认`false`
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
@@ -171,17 +191,54 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 确保设置了环境变量：
 
 ```bash
+# Linux/macOS
 export ARK_API_KEY=your_key
+docker-compose up -d
+
+# Windows
+$env:ARK_API_KEY="your_key"
 docker-compose up -d
 ```
 
 ## 🧪 本地开发
 
 ```bash
+# 克隆仓库
 git clone https://github.com/tengmmvp/Seedream_MCP
 cd Seedream_MCP
+
+# 安装依赖（开发模式）
 uv sync --dev
+
+# 创建 .env 文件
+cp .env.example .env
+# 编辑 .env 文件，添加您的 API 密钥
+
+# 启动服务
+uv run python -m seedream_mcp.server
+
+# 或直接使用 API 密钥启动
 uv run python -m seedream_mcp.server --api-key your_key
+```
+
+## ⚙️ 环境变量配置
+
+主要配置项（详见 `.env.example`）：
+
+```bash
+# 必需配置
+ARK_API_KEY=your_api_key_here
+
+# 模型配置
+SEEDREAM_MODEL_ID=doubao-seedream-4-5-251128
+
+# 默认值
+SEEDREAM_DEFAULT_SIZE=2K
+SEEDREAM_DEFAULT_WATERMARK=false
+
+# 自动保存（默认启用）
+SEEDREAM_AUTO_SAVE_ENABLED=true
+SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 ```
 
 ## 👥 贡献者
