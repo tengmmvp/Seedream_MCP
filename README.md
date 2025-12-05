@@ -1,4 +1,4 @@
-# Seedream 4.0 MCP 工具
+﻿# Seedream 4.0 MCP 工具
 
 [![uvx](https://img.shields.io/badge/uvx-ready-brightgreen.svg)](https://github.com/astral-sh/uv)
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)

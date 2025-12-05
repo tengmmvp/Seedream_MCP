@@ -1,27 +1,36 @@
-"""
-Seedream MCP工具包
+﻿"""
+Seedream MCP 工具包
 
-基于火山引擎Seedream API的模型上下文协议（MCP）工具，
-为开发者提供在IDE中直接调用AI图像生成功能的能力。
-
-支持功能：
-- 文生图：根据文本描述生成图像
-- 图生图：基于参考图像和文本生成新图像  
-- 多图融合：融合多张参考图特征生成图像
-- 组图生成：生成一组关联图像
-
+提供 Seedream 图像生成的 MCP 服务器与客户端封装，支持配置管理、
+客户端调用及 MCP 服务器命令行接口。
 """
 
+from __future__ import annotations
+
+# 包元数据
 __version__ = "1.2.0"
 __author__ = "tengmmvp"
 __email__ = "tengmmvp@gmail.com"
 
-from .config import SeedreamConfig
+# 客户端模块
 from .client import SeedreamClient
-from .server import SeedreamMCPServer
 
+# 配置管理模块
+from .config import SeedreamConfig, get_global_config, reload_config, set_config
+
+# 服务器模块
+from .server import cli_main, mcp
+
+# 公开接口声明
 __all__ = [
+    # 配置类与函数
     "SeedreamConfig",
-    "SeedreamClient", 
-    "SeedreamMCPServer",
+    "get_global_config",
+    "reload_config",
+    "set_config",
+    # 客户端类
+    "SeedreamClient",
+    # 服务器相关
+    "mcp",
+    "cli_main",
 ]
