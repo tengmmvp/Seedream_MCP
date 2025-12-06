@@ -531,7 +531,7 @@ class SeedreamClient:
                                             f"缓冲区大小超限 ({len(buffer)} > {max_buffer_size})，清理旧数据"
                                         )
                                         # 保留最后 1MB 数据
-                                        buffer = buffer[-1024 * 1024:]
+                                        buffer = buffer[-1024 * 1024 :]
 
                                     buffer += chunk
                                     processed_bytes += len(chunk)
@@ -575,12 +575,8 @@ class SeedreamClient:
                                                     "b64_json": evt.get("b64_json"),
                                                     "size": evt.get("size"),
                                                     "image_index": evt.get("image_index"),
-                                                    "model": evt.get(
-                                                        "model", self.config.model_id
-                                                    ),
-                                                    "created": evt.get(
-                                                        "created", int(time.time())
-                                                    ),
+                                                    "model": evt.get("model", self.config.model_id),
+                                                    "created": evt.get("created", int(time.time())),
                                                     "type": evt.get("type", t),
                                                 }
                                             )
@@ -640,12 +636,8 @@ class SeedreamClient:
                                                 "b64_json": evt.get("b64_json"),
                                                 "size": evt.get("size"),
                                                 "image_index": evt.get("image_index"),
-                                                "model": evt.get(
-                                                    "model", self.config.model_id
-                                                ),
-                                                "created": evt.get(
-                                                    "created", int(time.time())
-                                                ),
+                                                "model": evt.get("model", self.config.model_id),
+                                                "created": evt.get("created", int(time.time())),
                                                 "type": evt.get("type", t),
                                             }
                                         )

@@ -203,7 +203,9 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         auto_save_max_concurrent=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")),
         auto_save_date_folder=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
         auto_save_cleanup_days=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
-        stream_buffer_max_size=_parse_int(os.getenv("SEEDREAM_STREAM_BUFFER_MAX_SIZE", str(10 * 1024 * 1024))),
+        stream_buffer_max_size=_parse_int(
+            os.getenv("SEEDREAM_STREAM_BUFFER_MAX_SIZE", str(10 * 1024 * 1024))
+        ),
         stream_chunk_size=_parse_int(os.getenv("SEEDREAM_STREAM_CHUNK_SIZE", str(1024 * 1024))),
     )
 
