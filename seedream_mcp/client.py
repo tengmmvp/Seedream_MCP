@@ -219,7 +219,7 @@ class SeedreamClient:
     async def multi_image_fusion(
         self,
         prompt: str,
-        images: List[str],
+        image: List[str],
         size: str = "2K",
         watermark: bool = False, 
         response_format: str = "url",
@@ -233,7 +233,7 @@ class SeedreamClient:
         
         Args:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
-            images: 输入图像的 URL 或本地文件路径列表，数量范围为 2-5 张
+            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-5 张
             size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
@@ -249,25 +249,25 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
-        images = validate_image_list(images, min_count=2, max_count=5)
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
 
-        self.logger.info(f"开始多图融合任务: prompt='{prompt[:50]}...', images={len(images)}张, size={size}")
+        self.logger.info(f"开始多图融合任务: prompt='{prompt[:50]}...', image={len(image)}张, size={size}")
 
         try:
             # 处理图像输入
             image_data_list = []
-            for image in images:
-                image_data = await self._prepare_image_input(image)
+            for img in image:
+                image_data = await self._prepare_image_input(img)
                 image_data_list.append(image_data)
 
             # 构建请求参数
             request_data = {
                 "model": self.config.model_id,
                 "prompt": prompt,
-                "images": image_data_list,
+                "image": image_data_list,
+                "sequential_image_generation": "disabled",
                 "size": size,
                 "watermark": watermark,
                 "response_format": response_format

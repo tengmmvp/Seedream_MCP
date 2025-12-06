@@ -258,7 +258,7 @@ class MultiImageFusionInput(BaseGenerationInput):
         min_length=1,
         description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。请使用“图X”指定图像（如：将图1的服装换为图2的服装）。",
     )
-    images: List[str] = Field(
+    image: List[str] = Field(
         ...,
         min_items=2,
         max_items=5,
@@ -285,7 +285,7 @@ class MultiImageFusionInput(BaseGenerationInput):
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
 
-    @field_validator("images")
+    @field_validator("image")
     @classmethod
     def validate_images_field(cls, value: List[str]) -> List[str]:
         """
