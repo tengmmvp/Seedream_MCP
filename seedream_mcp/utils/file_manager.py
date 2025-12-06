@@ -6,6 +6,7 @@
 import hashlib
 import logging
 import os
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -198,16 +199,20 @@ class FileManager:
         # 清理基础名称
         clean_base = self.sanitize_filename(base_name)
         
-        # 生成时间戳字符串
-        time_str = timestamp.strftime("%Y%m%d_%H%M%S")
-        
+        # 生成时间戳字符串（包含毫秒）
+        time_str = timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+        # 生成随机数
+        random_suffix = f"{random.randint(1000, 9999)}"
+
         # 构建文件名
         if content_hash:
             # 使用内容哈希的前8位
             hash_part = content_hash[:8]
             filename = f"{clean_base}_{time_str}_{hash_part}{extension}"
         else:
-            filename = f"{clean_base}_{time_str}{extension}"
+            # 添加随机数后缀确保唯一性
+            filename = f"{clean_base}_{time_str}_{random_suffix}{extension}"
         
         return filename
     
