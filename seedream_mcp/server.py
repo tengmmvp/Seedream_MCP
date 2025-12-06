@@ -14,6 +14,7 @@ import os
 # 第三方库导入
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.types import TextContent
 
 # 本地模块导入
 from .config import SeedreamConfig, _parse_bool, _parse_int, set_config
@@ -85,7 +86,7 @@ logger = get_logger(__name__)
     name="seedream_text_to_image",
     annotations={"title": "Seedream 文生图", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_text_to_image(params: TextToImageInput) -> list[dict[str, object]]:
+async def seedream_text_to_image(params: TextToImageInput) -> list[TextContent]:
     """
     文生图：
 
@@ -98,7 +99,7 @@ async def seedream_text_to_image(params: TextToImageInput) -> list[dict[str, obj
     name="seedream_image_to_image",
     annotations={"title": "Seedream 图生图", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_image_to_image(params: ImageToImageInput) -> list[dict[str, object]]:
+async def seedream_image_to_image(params: ImageToImageInput) -> list[TextContent]:
     """
     图文生图：
 
@@ -111,7 +112,7 @@ async def seedream_image_to_image(params: ImageToImageInput) -> list[dict[str, o
     name="seedream_multi_image_fusion",
     annotations={"title": "Seedream 多图融合", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[dict[str, object]]:
+async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[TextContent]:
     """
     多图融合：
 
@@ -126,7 +127,7 @@ async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[dic
 )
 async def seedream_sequential_generation(
     params: SequentialGenerationInput,
-) -> list[dict[str, object]]:
+) -> list[TextContent]:
     """
     组图输出：
 
@@ -139,7 +140,7 @@ async def seedream_sequential_generation(
     name="seedream_browse_images",
     annotations={"title": "Seedream 图片浏览", **BROWSE_TOOL_ANNOTATIONS},
 )
-async def seedream_browse_images(params: BrowseImagesInput) -> list[dict[str, object]]:
+async def seedream_browse_images(params: BrowseImagesInput) -> list[TextContent]:
     """
     本地图片浏览：
 
