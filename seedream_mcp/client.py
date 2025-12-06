@@ -9,6 +9,7 @@ Seedream MCP工具 - 客户端模块
 import asyncio
 import base64
 import json
+import time
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 # 第三方库导入
@@ -20,7 +21,6 @@ from .utils.errors import SeedreamAPIError, SeedreamNetworkError, SeedreamTimeou
 from .utils.logging import get_logger, log_function_call
 from .utils.path_utils import suggest_similar_paths, validate_image_path
 from .utils.validation import (
-    validate_image_list,
     validate_image_url,
     validate_max_images,
     validate_prompt,
@@ -34,13 +34,13 @@ from .utils.validation import (
 class SeedreamClient:
     """
     Seedream MCP API 客户端类
-    
+
     提供异步 HTTP 客户端封装，支持多种图像生成功能：
     - 文生图（text_to_image）
     - 图生图（image_to_image）
     - 多图融合（multi_image_fusion）
     - 组图生成（sequential_generation）
-    
+
     Attributes:
         config: 客户端配置对象
         logger: 日志记录器实例
@@ -49,7 +49,7 @@ class SeedreamClient:
     def __init__(self, config: Optional[SeedreamConfig] = None):
         """
         初始化 Seedream API 客户端
-        
+
         Args:
             config: 配置对象，若为 None 则使用全局默认配置
         """
@@ -60,9 +60,9 @@ class SeedreamClient:
     async def __aenter__(self):
         """
         异步上下文管理器入口
-        
+
         创建并初始化 HTTP 客户端连接。
-        
+
         Returns:
             SeedreamClient: 当前客户端实例
         """
@@ -72,9 +72,9 @@ class SeedreamClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """
         异步上下文管理器出口
-        
+
         清理资源并关闭客户端连接。
-        
+
         Args:
             exc_type: 异常类型
             exc_val: 异常值
@@ -94,9 +94,9 @@ class SeedreamClient:
     ) -> Dict[str, Any]:
         """
         文生图功能
-        
+
         根据文本提示词生成图像。
-        
+
         Args:
             prompt: 文本提示词，描述要生成的图像内容
             size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
@@ -104,10 +104,10 @@ class SeedreamClient:
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
-        
+
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
-        
+
         Raises:
             SeedreamAPIError: API 调用失败
             SeedreamValidationError: 参数验证失败
@@ -127,11 +127,13 @@ class SeedreamClient:
                 "prompt": prompt,
                 "size": size,
                 "watermark": watermark,
-                "response_format": response_format
+                "response_format": response_format,
             }
             if stream:
                 request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(optimize_prompt_options, self.config.model_id)
+            validated_opts = validate_optimize_prompt_options(
+                optimize_prompt_options, self.config.model_id
+            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
 
@@ -158,9 +160,9 @@ class SeedreamClient:
     ) -> Dict[str, Any]:
         """
         图生图功能
-        
+
         基于输入图像和文本提示词生成新图像。
-        
+
         Args:
             prompt: 文本提示词，描述要对输入图像进行的修改或转换
             image: 输入图像的 URL 或本地文件路径
@@ -169,10 +171,10 @@ class SeedreamClient:
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
-        
+
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
-        
+
         Raises:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
@@ -197,11 +199,13 @@ class SeedreamClient:
                 "image": image_data,
                 "size": size,
                 "watermark": watermark,
-                "response_format": response_format
+                "response_format": response_format,
             }
             if stream:
                 request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(optimize_prompt_options, self.config.model_id)
+            validated_opts = validate_optimize_prompt_options(
+                optimize_prompt_options, self.config.model_id
+            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
 
@@ -221,16 +225,16 @@ class SeedreamClient:
         prompt: str,
         image: List[str],
         size: str = "2K",
-        watermark: bool = False, 
+        watermark: bool = False,
         response_format: str = "url",
         stream: bool = False,
         optimize_prompt_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         多图融合功能
-        
+
         将多张图像融合生成新图像。
-        
+
         Args:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
             image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-5 张
@@ -239,10 +243,10 @@ class SeedreamClient:
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
-        
+
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
-        
+
         Raises:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败（如图像数量不符合要求）
@@ -253,7 +257,9 @@ class SeedreamClient:
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
 
-        self.logger.info(f"开始多图融合任务: prompt='{prompt[:50]}...', image={len(image)}张, size={size}")
+        self.logger.info(
+            f"开始多图融合任务: prompt='{prompt[:50]}...', image={len(image)}张, size={size}"
+        )
 
         try:
             # 处理图像输入
@@ -270,11 +276,13 @@ class SeedreamClient:
                 "sequential_image_generation": "disabled",
                 "size": size,
                 "watermark": watermark,
-                "response_format": response_format
+                "response_format": response_format,
             }
             if stream:
                 request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(optimize_prompt_options, self.config.model_id)
+            validated_opts = validate_optimize_prompt_options(
+                optimize_prompt_options, self.config.model_id
+            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
 
@@ -302,12 +310,12 @@ class SeedreamClient:
     ) -> Dict[str, Any]:
         """
         组图生成功能（连续生成多张图像）
-        
+
         支持三种输入模式：
         1. 文生组图：仅使用文本提示词
         2. 单图生组图：使用单张参考图像和文本提示词
         3. 多图生组图：使用多张参考图像和文本提示词
-        
+
         Args:
             prompt: 文本提示词，描述要生成的图像内容
             max_images: 最大生成图像数量，范围为 1-15，默认为 4
@@ -317,10 +325,10 @@ class SeedreamClient:
             image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（最多 10 张）
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
-        
+
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
-        
+
         Raises:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
@@ -349,7 +357,9 @@ class SeedreamClient:
             else:
                 raise SeedreamAPIError("image 参数必须是字符串或字符串列表")
 
-        self.logger.info(f"开始组图生成任务: prompt='{prompt[:50]}...', max_images={max_images}, size={size}")
+        self.logger.info(
+            f"开始组图生成任务: prompt='{prompt[:50]}...', max_images={max_images}, size={size}"
+        )
 
         try:
             # 构建请求参数
@@ -357,16 +367,16 @@ class SeedreamClient:
                 "model": self.config.model_id,
                 "prompt": prompt,
                 "sequential_image_generation": "auto",
-                "sequential_image_generation_options": {
-                    "max_images": max_images
-                },
+                "sequential_image_generation_options": {"max_images": max_images},
                 "size": size,
                 "watermark": watermark,
-                "response_format": response_format
+                "response_format": response_format,
             }
             if stream:
                 request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(optimize_prompt_options, self.config.model_id)
+            validated_opts = validate_optimize_prompt_options(
+                optimize_prompt_options, self.config.model_id
+            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
 
@@ -387,7 +397,7 @@ class SeedreamClient:
     async def close(self):
         """
         关闭 HTTP 客户端连接
-        
+
         释放客户端资源，关闭所有打开的连接。
         """
         if self._client:
@@ -397,10 +407,10 @@ class SeedreamClient:
     async def _ensure_client(self):
         """
         确保 HTTP 客户端已创建
-        
+
         如果客户端未初始化，则创建新的 AsyncClient 实例，
         并配置请求头和超时设置。
-        
+
         Raises:
             SeedreamAPIError: 客户端创建失败或配置无效
         """
@@ -410,10 +420,7 @@ class SeedreamClient:
                 if not headers:
                     raise SeedreamAPIError("无法生成请求头：配置可能无效")
 
-                self._client = httpx.AsyncClient(
-                    timeout=self.config.api_timeout,
-                    headers=headers
-                )
+                self._client = httpx.AsyncClient(timeout=self.config.api_timeout, headers=headers)
 
                 # 验证客户端是否正确创建
                 if self._client is None:
@@ -429,12 +436,12 @@ class SeedreamClient:
     def _get_headers(self) -> Dict[str, str]:
         """
         获取 API 请求头
-        
+
         构建包含认证信息的 HTTP 请求头。
-        
+
         Returns:
             包含 Authorization 和 Content-Type 的请求头字典
-        
+
         Raises:
             SeedreamAPIError: 配置对象为空或 API 密钥为空
         """
@@ -446,30 +453,26 @@ class SeedreamClient:
 
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         self.logger.debug(f"生成请求头: Authorization=Bearer {self.config.api_key[:10]}...")
         return headers
 
-    async def _call_api(
-        self,
-        endpoint: str,
-        request_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def _call_api(self, endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         调用 Seedream API
-        
+
         执行 HTTP POST 请求，支持流式和非流式两种传输模式，
         实现自动重试机制和指数退避策略。
-        
+
         Args:
             endpoint: API 端点标识（用于日志记录）
             request_data: 请求体数据
-        
+
         Returns:
             包含成功标志、数据、使用信息和状态等的响应字典
-        
+
         Raises:
             SeedreamAPIError: API 调用失败或响应解析失败
             SeedreamTimeoutError: 请求超时
@@ -486,17 +489,21 @@ class SeedreamClient:
 
         for attempt in range(self.config.max_retries):
             try:
-                self.logger.debug(f"{endpoint} API 调用尝试 {attempt + 1}/{self.config.max_retries}")
+                self.logger.debug(
+                    f"{endpoint} API 调用尝试 {attempt + 1}/{self.config.max_retries}"
+                )
                 self.logger.debug(f"请求 URL: {url}")
                 self.logger.debug(f"请求数据: {request_data}")
 
                 # 确保客户端的 post 方法存在且可调用
-                if not hasattr(self._client, 'post') or not callable(self._client.post):
+                if not hasattr(self._client, "post") or not callable(self._client.post):
                     raise SeedreamAPIError("HTTP 客户端的 post 方法不可用")
 
                 # 流式传输模式
                 if request_data.get("stream"):
-                    async with self._client.stream("POST", url, json=request_data, timeout=self.config.api_timeout) as response:
+                    async with self._client.stream(
+                        "POST", url, json=request_data, timeout=self.config.api_timeout
+                    ) as response:
                         if response is None:
                             raise SeedreamAPIError("API 响应为空")
                         self.logger.debug(f"收到响应: 状态码={response.status_code}")
@@ -511,10 +518,30 @@ class SeedreamClient:
                             # 使用 aiter_bytes 或 aread 读取流式数据
                             if hasattr(response, "aiter_bytes"):
                                 buffer = b""
+                                max_buffer_size = self.config.stream_buffer_max_size
+                                processed_bytes = 0
+
                                 async for chunk in response.aiter_bytes():
                                     if not chunk:
                                         continue
+
+                                    # 检查缓冲区大小
+                                    if len(buffer) > max_buffer_size:
+                                        self.logger.warning(
+                                            f"缓冲区大小超限 ({len(buffer)} > {max_buffer_size})，清理旧数据"
+                                        )
+                                        # 保留最后 1MB 数据
+                                        buffer = buffer[-1024 * 1024:]
+
                                     buffer += chunk
+                                    processed_bytes += len(chunk)
+
+                                    # 定期记录进度（每处理 1MB）
+                                    if processed_bytes % (1024 * 1024) == 0:
+                                        self.logger.debug(
+                                            f"已处理 {processed_bytes//1024//1024} MB 数据"
+                                        )
+
                                     # 处理完整的事件段
                                     while b"\n\n" in buffer:
                                         seg, buffer = buffer.split(b"\n\n", 1)
@@ -533,26 +560,57 @@ class SeedreamClient:
                                             if not payload or payload == "[DONE]":
                                                 continue
                                             evt = json.loads(payload)
-                                        except Exception:
+                                        except Exception as e:
+                                            self.logger.error(f"SSE事件解析失败: {str(e)}")
+                                            self.logger.debug(
+                                                f"原始数据: {s[:200]}..."
+                                            )  # 只记录前200字符避免日志过大
                                             continue
                                         # 处理事件类型
                                         t = evt.get("type")
                                         if t == "image_generation.partial_succeeded":
-                                            items.append({
-                                                "url": evt.get("url"),
-                                                "b64_json": evt.get("b64_json"),
-                                                "size": evt.get("size"),
-                                                "image_index": evt.get("image_index"),
-                                            })
+                                            items.append(
+                                                {
+                                                    "url": evt.get("url"),
+                                                    "b64_json": evt.get("b64_json"),
+                                                    "size": evt.get("size"),
+                                                    "image_index": evt.get("image_index"),
+                                                    "model": evt.get(
+                                                        "model", self.config.model_id
+                                                    ),
+                                                    "created": evt.get(
+                                                        "created", int(time.time())
+                                                    ),
+                                                    "type": evt.get("type", t),
+                                                }
+                                            )
                                         elif t == "image_generation.partial_failed":
                                             continue
                                         elif t == "image_generation.completed":
                                             usage = evt.get("usage", {}) or {}
                                             status = "completed"
                             else:
-                                # 一次性读取全部数据
-                                body = await response.aread()
-                                segments = body.split(b"\n\n")
+                                # 流式处理大响应，避免内存溢出
+                                max_chunk_size = self.config.stream_chunk_size
+                                segments = []
+                                buffer = b""
+
+                                async for chunk in response.aiter_bytes(max_chunk_size):
+                                    buffer += chunk
+
+                                    # 处理缓冲区中的完整事件
+                                    while b"\n\n" in buffer:
+                                        segment, buffer = buffer.split(b"\n\n", 1)
+                                        if segment.strip():
+                                            segments.append(segment.strip())
+
+                                # 处理剩余数据
+                                if buffer.strip():
+                                    segments.append(buffer.strip())
+
+                                # 记录处理的事件数量
+                                self.logger.info(f"流式处理了 {len(segments)} 个事件段")
+
                                 for seg in segments:
                                     s = seg.strip()
                                     if not s:
@@ -568,16 +626,29 @@ class SeedreamClient:
                                         if not payload or payload == "[DONE]":
                                             continue
                                         evt = json.loads(payload)
-                                    except Exception:
+                                    except Exception as e:
+                                        self.logger.error(f"SSE事件解析失败: {str(e)}")
+                                        self.logger.debug(
+                                            f"原始数据: {s[:200]}..."
+                                        )  # 只记录前200字符避免日志过大
                                         continue
                                     t = evt.get("type")
                                     if t == "image_generation.partial_succeeded":
-                                        items.append({
-                                            "url": evt.get("url"),
-                                            "b64_json": evt.get("b64_json"),
-                                            "size": evt.get("size"),
-                                            "image_index": evt.get("image_index"),
-                                        })
+                                        items.append(
+                                            {
+                                                "url": evt.get("url"),
+                                                "b64_json": evt.get("b64_json"),
+                                                "size": evt.get("size"),
+                                                "image_index": evt.get("image_index"),
+                                                "model": evt.get(
+                                                    "model", self.config.model_id
+                                                ),
+                                                "created": evt.get(
+                                                    "created", int(time.time())
+                                                ),
+                                                "type": evt.get("type", t),
+                                            }
+                                        )
                                     elif t == "image_generation.partial_failed":
                                         continue
                                     elif t == "image_generation.completed":
@@ -602,9 +673,7 @@ class SeedreamClient:
                 else:
                     # 非流式传输模式
                     response = await self._client.post(
-                        url,
-                        json=request_data,
-                        timeout=self.config.api_timeout
+                        url, json=request_data, timeout=self.config.api_timeout
                     )
 
                 # 验证响应对象
@@ -626,45 +695,51 @@ class SeedreamClient:
                         "success": True,
                         "data": result.get("data", []),
                         "usage": result.get("usage", {}),
-                        "status": result.get("status")
+                        "status": result.get("status"),
                     }
                 else:
                     error_msg = f"HTTP {response.status_code}: {response.text}"
                     raise SeedreamAPIError(error_msg)
 
             except httpx.TimeoutException:
-                self.logger.warning(f"{endpoint} API 调用超时 (尝试 {attempt + 1}/{self.config.max_retries})")
+                self.logger.warning(
+                    f"{endpoint} API 调用超时 (尝试 {attempt + 1}/{self.config.max_retries})"
+                )
                 if attempt == self.config.max_retries - 1:
                     raise SeedreamTimeoutError(f"{endpoint} API 调用超时")
 
             except httpx.RequestError as e:
-                self.logger.warning(f"{endpoint} 网络错误 (尝试 {attempt + 1}/{self.config.max_retries}): {str(e)}")
+                self.logger.warning(
+                    f"{endpoint} 网络错误 (尝试 {attempt + 1}/{self.config.max_retries}): {str(e)}"
+                )
                 if attempt == self.config.max_retries - 1:
                     raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(e)}")
 
             except Exception as e:
-                self.logger.warning(f"{endpoint} API 调用失败 (尝试 {attempt + 1}/{self.config.max_retries}): {str(e)}")
+                self.logger.warning(
+                    f"{endpoint} API 调用失败 (尝试 {attempt + 1}/{self.config.max_retries}): {str(e)}"
+                )
                 if attempt == self.config.max_retries - 1:
                     raise
 
             # 指数退避重试
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(2**attempt)
 
         raise SeedreamAPIError(f"{endpoint} API 调用重试次数已用尽")
 
     async def _prepare_image_input(self, image: str) -> str:
         """
         准备图像输入数据
-        
+
         将图像 URL 或本地文件路径转换为 API 所需格式。
         对于 URL 直接返回，对于本地文件读取并转换为 Base64 编码的 Data URI。
-        
+
         Args:
             image: 图像 URL 或本地文件路径
-        
+
         Returns:
             处理后的图像数据（URL 或 Base64 Data URI）
-        
+
         Raises:
             SeedreamAPIError: 图像文件不存在或处理失败
         """
@@ -681,7 +756,9 @@ class SeedreamClient:
                 suggestions = suggest_similar_paths(image)
                 suggestion_text = ""
                 if suggestions:
-                    suggestion_text = f"\n\n建议的相似路径:\n" + "\n".join(f"  • {s}" for s in suggestions[:3])
+                    suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
+                        f"  • {s}" for s in suggestions[:3]
+                    )
 
                 raise SeedreamAPIError(f"{error_msg}{suggestion_text}")
 
@@ -690,20 +767,20 @@ class SeedreamClient:
                 image_bytes = f.read()
 
             # 转换为 Base64
-            image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
             # 获取 MIME 类型
             suffix = normalized_path.suffix.lower()
             mime_type_map = {
-                '.jpg': 'image/jpeg',
-                '.jpeg': 'image/jpeg',
-                '.png': 'image/png',
-                '.gif': 'image/gif',
-                '.bmp': 'image/bmp',
-                '.tiff': 'image/tiff',
-                '.webp': 'image/webp',
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".bmp": "image/bmp",
+                ".tiff": "image/tiff",
+                ".webp": "image/webp",
             }
-            mime_type = mime_type_map.get(suffix, 'image/jpeg')
+            mime_type = mime_type_map.get(suffix, "image/jpeg")
 
             self.logger.info(f"成功处理图片文件: {normalized_path} ({len(image_bytes)} bytes)")
             return f"data:{mime_type};base64,{image_b64}"
@@ -716,13 +793,13 @@ class SeedreamClient:
     def _handle_api_error(self, error: Exception) -> Exception:
         """
         处理 API 错误
-        
+
         将通用异常转换为特定的 Seedream 错误类型，
         根据错误信息自动识别超时、网络等特定错误。
-        
+
         Args:
             error: 原始异常对象
-        
+
         Returns:
             处理后的 Seedream 特定异常对象
         """

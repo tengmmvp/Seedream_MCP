@@ -66,7 +66,9 @@ async def handle_image_to_image(arguments: Dict[str, Any]) -> List[TextContent]:
         # 提取并验证请求参数
         prompt = arguments.get("prompt", "")
         image = arguments.get("image")
-        size = validate_size_for_model(arguments.get("size") or config.default_size, config.model_id)
+        size = validate_size_for_model(
+            arguments.get("size") or config.default_size, config.model_id
+        )
         watermark_value = arguments.get("watermark")
         watermark = (
             validate_watermark(watermark_value)
@@ -137,7 +139,7 @@ async def handle_image_to_image(arguments: Dict[str, Any]) -> List[TextContent]:
     except Exception as exc:
         # 记录异常详情
         logger.error("图生图处理失败", exc_info=True)
-        
+
         # 生成用户友好的错误信息和操作指引
         guidance = "请检查图片路径/URL 与尺寸参数，确认 API Key 和网络可用后重试。"
         return [

@@ -65,7 +65,9 @@ async def handle_multi_image_fusion(arguments: Dict[str, Any]) -> List[TextConte
         prompt = arguments.get("prompt", "")
         image = arguments.get("image")
         # 验证图片尺寸是否符合当前模型要求
-        size = validate_size_for_model(arguments.get("size") or config.default_size, config.model_id)
+        size = validate_size_for_model(
+            arguments.get("size") or config.default_size, config.model_id
+        )
         # 处理水印参数，优先使用请求参数，否则使用配置默认值
         watermark_value = arguments.get("watermark")
         watermark = (

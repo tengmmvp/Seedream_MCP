@@ -9,13 +9,18 @@ from typing import Optional, Dict, Any
 
 class SeedreamMCPError(Exception):
     """Seedream MCP工具基础异常类"""
-    
-    def __init__(self, message: str, error_code: Optional[str] = None, details: Optional[Dict[str, Any]] = None):
+
+    def __init__(
+        self,
+        message: str,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.error_code = error_code
         self.details = details or {}
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
         return {
@@ -28,67 +33,79 @@ class SeedreamMCPError(Exception):
 
 class SeedreamConfigError(SeedreamMCPError):
     """配置相关错误"""
+
     pass
 
 
 class SeedreamAPIError(SeedreamMCPError):
     """API调用相关错误"""
-    
-    def __init__(self, message: str, status_code: Optional[int] = None, response_data: Optional[Dict[str, Any]] = None):
+
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        response_data: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.response_data = response_data or {}
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
         result = super().to_dict()
-        result.update({
-            "status_code": self.status_code,
-            "response_data": self.response_data,
-        })
+        result.update(
+            {
+                "status_code": self.status_code,
+                "response_data": self.response_data,
+            }
+        )
         return result
 
 
 class SeedreamValidationError(SeedreamMCPError):
     """参数验证错误"""
-    
+
     def __init__(self, message: str, field: Optional[str] = None, value: Optional[Any] = None):
         super().__init__(message)
         self.field = field
         self.value = value
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
         result = super().to_dict()
-        result.update({
-            "field": self.field,
-            "value": self.value,
-        })
+        result.update(
+            {
+                "field": self.field,
+                "value": self.value,
+            }
+        )
         return result
 
 
 class SeedreamTimeoutError(SeedreamMCPError):
     """超时错误"""
+
     pass
 
 
 class SeedreamNetworkError(SeedreamMCPError):
     """网络连接错误"""
+
     pass
 
 
 def handle_api_error(response_status: int, response_data: Dict[str, Any]) -> SeedreamAPIError:
     """处理API错误响应
-    
+
     Args:
         response_status: HTTP状态码
         response_data: 响应数据
-        
+
     Returns:
         SeedreamAPIError实例
     """
     error_message = "API调用失败"
-    
+
     # 根据状态码提供更具体的错误信息
     if response_status == 400:
         error_message = "请求参数错误"
@@ -102,7 +119,7 @@ def handle_api_error(response_status: int, response_data: Dict[str, Any]) -> See
         error_message = "请求频率超限，请稍后重试"
     elif response_status >= 500:
         error_message = "服务器内部错误"
-    
+
     # 尝试从响应中提取更详细的错误信息
     if isinstance(response_data, dict):
         if "error" in response_data:
@@ -113,20 +130,18 @@ def handle_api_error(response_status: int, response_data: Dict[str, Any]) -> See
                 error_message = f"{error_message}: {error_detail}"
         elif "message" in response_data:
             error_message = f"{error_message}: {response_data['message']}"
-    
+
     return SeedreamAPIError(
-        message=error_message,
-        status_code=response_status,
-        response_data=response_data
+        message=error_message, status_code=response_status, response_data=response_data
     )
 
 
 def format_error_for_user(error: Exception) -> str:
     """格式化错误信息供用户查看
-    
+
     Args:
         error: 异常实例
-        
+
     Returns:
         格式化的错误信息字符串
     """

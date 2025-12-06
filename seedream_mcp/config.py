@@ -21,10 +21,10 @@ from .utils.errors import SeedreamConfigError
 class SeedreamConfig:
     """
     Seedream MCP工具配置类
-    
+
     封装Seedream服务的所有配置参数，包括API认证、模型设置、日志配置和自动保存功能。
     支持从环境变量加载配置，并提供完整的参数验证机制。
-    
+
     Attributes:
         api_key: 火山引擎API密钥，必需参数
         base_url: API服务基础URL，默认为火山引擎北京节点
@@ -45,10 +45,10 @@ class SeedreamConfig:
         auto_save_date_folder: 是否按日期创建子文件夹
         auto_save_cleanup_days: 自动清理天数，0表示不清理
     """
-    
+
     # 必需配置
     api_key: str
-    
+
     # 可选配置
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     model_id: str = "doubao-seedream-4-5-251128"
@@ -57,11 +57,11 @@ class SeedreamConfig:
     timeout: int = 60
     api_timeout: int = 600
     max_retries: int = 3
-    
+
     # 日志配置
     log_level: str = "INFO"
     log_file: Optional[str] = None
-    
+
     # 自动保存配置
     auto_save_enabled: bool = True
     auto_save_base_dir: Optional[str] = None
@@ -71,103 +71,121 @@ class SeedreamConfig:
     auto_save_max_concurrent: int = 5
     auto_save_date_folder: bool = True
     auto_save_cleanup_days: int = 30
-    
+
+    # 流式处理配置
+    stream_buffer_max_size: int = 10 * 1024 * 1024  # 10MB，流式响应缓冲区最大大小
+    stream_chunk_size: int = 1024 * 1024  # 1MB，每次读取的块大小
+
     def __post_init__(self):
         """
         初始化后处理
-        
+
         在dataclass实例化完成后自动执行配置验证。
         """
         self.validate()
-    
+
     def validate(self):
         """
         验证配置参数
-        
+
         对所有配置项进行完整性和有效性检查，确保配置符合业务规则。
-        
+
         Raises:
             SeedreamConfigError: 当任何配置项不符合要求时抛出
         """
         # 验证API密钥
         if not self.api_key or self.api_key.strip() == "":
             raise SeedreamConfigError("API密钥不能为空")
-        
+
         if self.api_key == "your_api_key_here":
             raise SeedreamConfigError("请设置有效的API密钥，不能使用默认占位符")
-        
+
         # 验证base_url
         if not self.base_url or not self.base_url.startswith(("http://", "https://")):
             raise SeedreamConfigError("base_url必须是有效的HTTP/HTTPS URL")
-        
+
         # 验证model_id
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError("model_id不能为空")
-        
+
         # 验证default_size
         valid_sizes = ["1K", "2K", "4K"]
         if self.default_size not in valid_sizes:
             raise SeedreamConfigError(f"default_size必须是以下值之一: {valid_sizes}")
-        
+
         # 验证timeout
         if self.timeout <= 0:
             raise SeedreamConfigError("timeout必须大于0")
-        
+
         # 验证api_timeout
         if self.api_timeout <= 0:
             raise SeedreamConfigError("api_timeout必须大于0")
-        
+
         # 验证max_retries
         if self.max_retries < 0:
             raise SeedreamConfigError("max_retries不能小于0")
-        
+
         # 验证log_level
         valid_log_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if self.log_level.upper() not in valid_log_levels:
             raise SeedreamConfigError(f"log_level必须是以下值之一: {valid_log_levels}")
-        
+
         # 标准化log_level
         self.log_level = self.log_level.upper()
-        
+
         # 验证自动保存配置
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError("auto_save_download_timeout必须大于0")
-        
+
         if self.auto_save_max_retries < 0:
             raise SeedreamConfigError("auto_save_max_retries不能小于0")
-        
+
         if self.auto_save_max_file_size <= 0:
             raise SeedreamConfigError("auto_save_max_file_size必须大于0")
-        
+
         if self.auto_save_max_concurrent <= 0:
             raise SeedreamConfigError("auto_save_max_concurrent必须大于0")
-        
+
         if self.auto_save_cleanup_days < 0:
             raise SeedreamConfigError("auto_save_cleanup_days不能小于0")
-        
+
+        # 验证流式处理配置
+        if self.stream_buffer_max_size <= 0:
+            raise SeedreamConfigError("stream_buffer_max_size必须大于0")
+
+        if self.stream_chunk_size <= 0:
+            raise SeedreamConfigError("stream_chunk_size必须大于0")
+
+        if self.stream_chunk_size > self.stream_buffer_max_size:
+            raise SeedreamConfigError("stream_chunk_size不能大于stream_buffer_max_size")
+
         # 验证自动保存目录
         if self.auto_save_base_dir:
             try:
                 base_dir = Path(self.auto_save_base_dir)
                 if base_dir.exists() and not base_dir.is_dir():
-                    raise SeedreamConfigError(f"auto_save_base_dir不是有效目录: {self.auto_save_base_dir}")
+                    raise SeedreamConfigError(
+                        f"auto_save_base_dir不是有效目录: {self.auto_save_base_dir}"
+                    )
             except Exception as e:
-                raise SeedreamConfigError(f"auto_save_base_dir路径无效: {self.auto_save_base_dir} -> {e}")
-    
+                raise SeedreamConfigError(
+                    f"auto_save_base_dir路径无效: {self.auto_save_base_dir} -> {e}"
+                )
+
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> "SeedreamConfig":
         """
         从环境变量创建配置实例
-        
+
         自动加载.env文件并读取环境变量，创建完整的配置实例。
         支持指定自定义.env文件路径或使用默认路径。
-        
+
         Args:
             env_file: .env文件路径，为None时使用默认路径
-            
+
         Returns:
             完整初始化的SeedreamConfig实例
-            
+
         Raises:
             SeedreamConfigError: 当必需的环境变量缺失或配置验证失败时抛出
         """
@@ -177,7 +195,7 @@ class SeedreamConfig:
         else:
             load_dotenv()
             load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
-        
+
         # 读取环境变量
         api_key = os.getenv("ARK_API_KEY", "").strip()
         if not api_key:
@@ -187,7 +205,7 @@ class SeedreamConfig:
                 "1. 创建.env文件并添加: ARK_API_KEY=your_actual_api_key\n"
                 "2. 设置系统环境变量: export ARK_API_KEY=your_actual_api_key"
             )
-        
+
         # 创建配置实例
         config = cls(
             api_key=api_key,
@@ -203,23 +221,34 @@ class SeedreamConfig:
             # 自动保存配置
             auto_save_enabled=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_ENABLED", "true")),
             auto_save_base_dir=os.getenv("SEEDREAM_AUTO_SAVE_BASE_DIR"),
-            auto_save_download_timeout=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")),
+            auto_save_download_timeout=_parse_int(
+                os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")
+            ),
             auto_save_max_retries=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_RETRIES", "3")),
-            auto_save_max_file_size=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE", str(50 * 1024 * 1024))),
-            auto_save_max_concurrent=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")),
+            auto_save_max_file_size=_parse_int(
+                os.getenv("SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE", str(50 * 1024 * 1024))
+            ),
+            auto_save_max_concurrent=_parse_int(
+                os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")
+            ),
             auto_save_date_folder=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
             auto_save_cleanup_days=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
+            # 流式处理配置
+            stream_buffer_max_size=_parse_int(
+                os.getenv("SEEDREAM_STREAM_BUFFER_MAX_SIZE", str(10 * 1024 * 1024))
+            ),
+            stream_chunk_size=_parse_int(os.getenv("SEEDREAM_STREAM_CHUNK_SIZE", str(1024 * 1024))),
         )
-        
+
         return config
-    
+
     def to_dict(self) -> dict:
         """
         转换为字典格式
-        
+
         将配置对象转换为字典形式，便于序列化和日志输出。
         API密钥等敏感信息将被自动隐藏。
-        
+
         Returns:
             包含所有配置项的字典，敏感字段已脱敏
         """
@@ -242,30 +271,34 @@ class SeedreamConfig:
             "auto_save_max_concurrent": self.auto_save_max_concurrent,
             "auto_save_date_folder": self.auto_save_date_folder,
             "auto_save_cleanup_days": self.auto_save_cleanup_days,
+            "stream_buffer_max_size": self.stream_buffer_max_size,
+            "stream_chunk_size": self.stream_chunk_size,
         }
-    
+
     def __repr__(self) -> str:
         """
         字符串表示
-        
+
         返回配置对象的简洁字符串表示，敏感信息将被自动隐藏。
-        
+
         Returns:
             配置对象的字符串表示形式
         """
-        return f"SeedreamConfig(api_key='***', base_url='{self.base_url}', model_id='{self.model_id}')"
+        return (
+            f"SeedreamConfig(api_key='***', base_url='{self.base_url}', model_id='{self.model_id}')"
+        )
 
 
 def _parse_bool(value: str) -> bool:
     """
     解析布尔值字符串
-    
+
     将字符串类型的布尔值转换为Python布尔类型。
     支持多种常见的布尔值表示形式，大小写不敏感。
-    
+
     Args:
         value: 待解析的字符串或布尔值
-        
+
     Returns:
         解析后的布尔值
     """
@@ -277,15 +310,15 @@ def _parse_bool(value: str) -> bool:
 def _parse_int(value: str) -> int:
     """
     解析整数字符串
-    
+
     将字符串类型的整数值转换为Python整数类型。
-    
+
     Args:
         value: 待解析的字符串
-        
+
     Returns:
         解析后的整数值
-        
+
     Raises:
         SeedreamConfigError: 当字符串无法解析为有效整数时抛出
     """
@@ -302,13 +335,13 @@ _global_config: Optional[SeedreamConfig] = None
 def get_global_config() -> SeedreamConfig:
     """
     获取全局配置实例
-    
+
     获取全局单例配置对象，首次调用时自动从环境变量初始化。
     使用延迟初始化策略，仅在需要时创建配置实例。
-    
+
     Returns:
         全局SeedreamConfig实例
-        
+
     Raises:
         SeedreamConfigError: 当配置初始化失败时抛出
     """
@@ -321,9 +354,9 @@ def get_global_config() -> SeedreamConfig:
 def set_config(config: SeedreamConfig):
     """
     设置全局配置实例
-    
+
     手动设置全局配置对象，用于测试或特殊场景。
-    
+
     Args:
         config: 要设置的配置实例
     """
@@ -334,13 +367,13 @@ def set_config(config: SeedreamConfig):
 def reload_config(env_file: Optional[str] = None):
     """
     重新加载配置
-    
+
     从环境变量重新加载配置，覆盖当前的全局配置实例。
     适用于配置动态更新场景。
-    
+
     Args:
         env_file: .env文件路径，为None时使用默认路径
-        
+
     Raises:
         SeedreamConfigError: 当配置加载或验证失败时抛出
     """

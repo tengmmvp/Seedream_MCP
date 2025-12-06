@@ -24,7 +24,7 @@ from ...utils.validation import (
 class ResponseFormat(str, Enum):
     """
     图片生成响应格式枚举。
-    
+
     定义生成结果的返回格式，支持 URL 链接和 Base64 编码两种方式。
     """
 
@@ -35,7 +35,7 @@ class ResponseFormat(str, Enum):
 class OptimizePromptOptions(BaseModel):
     """
     提示词优化配置模型。
-    
+
     配置提示词优化策略，平衡生成质量与响应速度。
     """
 
@@ -51,13 +51,13 @@ class OptimizePromptOptions(BaseModel):
     def validate_mode(cls, value: str) -> str:
         """
         校验并规范化优化模式。
-        
+
         Args:
             value: 用户输入的优化模式字符串
-            
+
         Returns:
             规范化后的模式值（小写）
-            
+
         Raises:
             ValueError: 当模式不在允许范围内时
         """
@@ -71,7 +71,7 @@ class OptimizePromptOptions(BaseModel):
 class BaseGenerationInput(BaseModel):
     """
     图片生成工具的通用输入基类。
-    
+
     定义所有图片生成类工具共享的配置参数，包括尺寸、水印、响应格式、
     流式输出、提示词优化及自动保存等功能。
     """
@@ -120,13 +120,13 @@ class BaseGenerationInput(BaseModel):
     def validate_size_field(cls, value: Optional[str]) -> Optional[str]:
         """
         校验图片尺寸参数。
-        
+
         Args:
             value: 用户指定的尺寸值
-            
+
         Returns:
             规范化后的尺寸值，None 时跳过校验
-            
+
         Raises:
             ValueError: 当尺寸格式不符合要求时
         """
@@ -142,13 +142,13 @@ class BaseGenerationInput(BaseModel):
     def validate_non_empty(cls, value: Optional[str]) -> Optional[str]:
         """
         校验字符串字段非空。
-        
+
         Args:
             value: 待校验的字符串值
-            
+
         Returns:
             去除首尾空格后的字符串，None 时跳过校验
-            
+
         Raises:
             ValueError: 当字符串为空或仅含空格时
         """
@@ -176,13 +176,13 @@ class TextToImageInput(BaseGenerationInput):
     def validate_prompt_field(cls, value: str) -> str:
         """
         校验并规范化提示词。
-        
+
         Args:
             value: 用户输入的提示词
-            
+
         Returns:
             规范化后的提示词
-            
+
         Raises:
             ValueError: 当提示词格式或长度不符合要求时
         """
@@ -212,13 +212,13 @@ class ImageToImageInput(BaseGenerationInput):
     def validate_prompt_field(cls, value: str) -> str:
         """
         校验并规范化提示词。
-        
+
         Args:
             value: 用户输入的提示词
-            
+
         Returns:
             规范化后的提示词
-            
+
         Raises:
             ValueError: 当提示词格式或长度不符合要求时
         """
@@ -232,13 +232,13 @@ class ImageToImageInput(BaseGenerationInput):
     def validate_image_field(cls, value: str) -> str:
         """
         校验图片来源。
-        
+
         Args:
             value: 图片 URL、文件路径
-            
+
         Returns:
             规范化后的图片标识
-            
+
         Raises:
             ValueError: 当图片来源格式不合法时
         """
@@ -270,13 +270,13 @@ class MultiImageFusionInput(BaseGenerationInput):
     def validate_prompt_field(cls, value: str) -> str:
         """
         校验并规范化提示词。
-        
+
         Args:
             value: 用户输入的提示词
-            
+
         Returns:
             规范化后的提示词
-            
+
         Raises:
             ValueError: 当提示词格式或长度不符合要求时
         """
@@ -290,13 +290,13 @@ class MultiImageFusionInput(BaseGenerationInput):
     def validate_images_field(cls, value: List[str]) -> List[str]:
         """
         校验图片列表。
-        
+
         Args:
             value: 图片来源列表
-            
+
         Returns:
             规范化后的图片列表
-            
+
         Raises:
             ValueError: 当图片数量或格式不符合要求时
         """
@@ -332,13 +332,13 @@ class SequentialGenerationInput(BaseGenerationInput):
     def validate_prompt_field(cls, value: str) -> str:
         """
         校验并规范化提示词。
-        
+
         Args:
             value: 用户输入的提示词
-            
+
         Returns:
             规范化后的提示词
-            
+
         Raises:
             ValueError: 当提示词格式或长度不符合要求时
         """
@@ -352,13 +352,13 @@ class SequentialGenerationInput(BaseGenerationInput):
     def validate_max_images_field(cls, value: int) -> int:
         """
         校验最大图片数量。
-        
+
         Args:
             value: 用户指定的最大生成数量
-            
+
         Returns:
             校验通过的数量值
-            
+
         Raises:
             ValueError: 当数量超出允许范围时
         """
@@ -374,13 +374,13 @@ class SequentialGenerationInput(BaseGenerationInput):
     ) -> Optional[List[str]]:
         """
         校验参考图片列表。
-        
+
         Args:
             value: 单张图片或图片列表，None 时跳过校验
-            
+
         Returns:
             规范化后的图片列表，None 时返回 None
-            
+
         Raises:
             ValueError: 当图片数量或格式不符合要求时
         """
@@ -441,13 +441,13 @@ class BrowseImagesInput(BaseModel):
     def validate_directory(cls, value: Optional[str]) -> Optional[str]:
         """
         校验目录路径。
-        
+
         Args:
             value: 用户指定的目录路径
-            
+
         Returns:
             规范化后的路径，None 时跳过校验
-            
+
         Raises:
             ValueError: 当路径为空字符串时
         """
@@ -463,10 +463,10 @@ class BrowseImagesInput(BaseModel):
     def normalize_suffixes(cls, value: Optional[List[str]]) -> Optional[List[str]]:
         """
         规范化文件后缀列表。
-        
+
         Args:
             value: 用户提供的后缀列表
-            
+
         Returns:
             规范化后的后缀列表（小写，含点前缀），None 时跳过
         """
@@ -484,10 +484,10 @@ class BrowseImagesInput(BaseModel):
     def validate_limits(self) -> "BrowseImagesInput":
         """
         校验数量限制参数的逻辑一致性。
-        
+
         Returns:
             校验通过的模型实例
-            
+
         Raises:
             ValueError: 当 limit 小于 1 时
         """

@@ -35,7 +35,9 @@ def _format_file_info(path: Path, show_details: bool) -> str:
     if show_details:
         stat = path.stat()
         size_mb = stat.st_size / (1024 * 1024)
-        mtime = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
+        mtime = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(
+            sep=" ", timespec="seconds"
+        )
         parts.append(f"{size_mb:.2f} MB")
         parts.append(f"修改: {mtime}")
     return " | ".join(parts)
@@ -69,7 +71,11 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
     show_details = bool(arguments.get("show_details", False))
 
     logger.info(
-        "浏览图片: dir=%s, recursive=%s, max_depth=%s, limit=%s", directory, recursive, max_depth, limit
+        "浏览图片: dir=%s, recursive=%s, max_depth=%s, limit=%s",
+        directory,
+        recursive,
+        max_depth,
+        limit,
     )
 
     # 搜索图片文件并限制返回数量

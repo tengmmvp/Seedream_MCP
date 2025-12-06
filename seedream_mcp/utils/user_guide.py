@@ -10,7 +10,7 @@ from typing import List, Dict, Any
 def get_path_usage_guide() -> str:
     """
     获取文件路径使用指导
-    
+
     Returns:
         包含详细使用指导的字符串
     """
@@ -30,7 +30,7 @@ def get_path_usage_guide() -> str:
 1. 绝对路径:
    • Windows: C:\\Users\\用户名\\Pictures\\image.jpg
    • Windows: D:\\项目\\images\\photo.png
-   
+
 2. 相对路径:
    • 相对于当前工作目录: images/photo.jpg
    • 相对于当前工作目录: ./assets/image.png
@@ -60,7 +60,7 @@ def get_path_usage_guide() -> str:
 def get_error_solutions() -> Dict[str, str]:
     """
     获取常见错误的解决方案
-    
+
     Returns:
         错误类型到解决方案的映射
     """
@@ -99,45 +99,45 @@ def get_error_solutions() -> Dict[str, str]:
 2. 避免使用非ASCII字符命名文件
 3. 检查文件是否损坏
 4. 尝试重新保存文件
-"""
+""",
     }
 
 
 def format_error_message(error_type: str, original_path: str, suggestions: List[str] = None) -> str:
     """
     格式化错误消息，提供有用的指导
-    
+
     Args:
         error_type: 错误类型
         original_path: 原始路径
         suggestions: 路径建议列表
-    
+
     Returns:
         格式化的错误消息
     """
     solutions = get_error_solutions()
     base_message = f"处理图片路径时出错: {original_path}"
-    
+
     # 添加具体的解决方案
     if error_type in solutions:
         base_message += f"\n\n{solutions[error_type]}"
-    
+
     # 添加路径建议
     if suggestions:
-        base_message += f"\n\n💡 建议的相似路径:\n"
+        base_message += "\n\n💡 建议的相似路径:\n"
         for i, suggestion in enumerate(suggestions[:3], 1):
             base_message += f"  {i}. {suggestion}\n"
-    
+
     # 添加通用指导
-    base_message += f"\n\n📖 获取完整使用指导，请使用: seedream_browse_images 工具"
-    
+    base_message += "\n\n📖 获取完整使用指导，请使用: seedream_browse_images 工具"
+
     return base_message
 
 
 def get_quick_tips() -> List[str]:
     """
     获取快速使用技巧
-    
+
     Returns:
         技巧列表
     """
@@ -147,56 +147,58 @@ def get_quick_tips() -> List[str]:
         "💡 支持网络图片URL，可直接使用在线图片",
         "💡 路径中的正斜杠和反斜杠都可以使用",
         "💡 文件名包含空格时无需添加引号",
-        "💡 支持多种图片格式，包括 JPEG, PNG, GIF, BMP, TIFF, WebP 等"
+        "💡 支持多种图片格式，包括 JPEG, PNG, GIF, BMP, TIFF, WebP 等",
     ]
 
 
 def validate_and_suggest_path(path: str) -> Dict[str, Any]:
     """
     验证路径并提供建议
-    
+
     Args:
         path: 要验证的路径
-    
+
     Returns:
         包含验证结果和建议的字典
     """
     from .path_utils import validate_image_path, suggest_similar_paths
-    
+
     is_valid, error_msg, normalized_path = validate_image_path(path)
-    
+
     result = {
         "is_valid": is_valid,
         "error_message": error_msg,
         "normalized_path": str(normalized_path) if normalized_path else None,
         "suggestions": [],
-        "tips": []
+        "tips": [],
     }
-    
+
     if not is_valid:
         # 获取路径建议
         suggestions = suggest_similar_paths(path)
         result["suggestions"] = suggestions
-        
+
         # 根据错误类型提供特定建议
         if "不存在" in error_msg:
-            result["tips"].extend([
-                "检查文件路径是否正确",
-                "确认文件确实存在",
-                "尝试使用绝对路径",
-                "使用 seedream_browse_images 工具查找图片"
-            ])
+            result["tips"].extend(
+                [
+                    "检查文件路径是否正确",
+                    "确认文件确实存在",
+                    "尝试使用绝对路径",
+                    "使用 seedream_browse_images 工具查找图片",
+                ]
+            )
         elif "格式" in error_msg:
-            result["tips"].extend([
-                "确保文件是图片格式",
-                "检查文件扩展名是否正确",
-                "支持的格式: JPEG, PNG, GIF, BMP, TIFF, WebP"
-            ])
+            result["tips"].extend(
+                [
+                    "确保文件是图片格式",
+                    "检查文件扩展名是否正确",
+                    "支持的格式: JPEG, PNG, GIF, BMP, TIFF, WebP",
+                ]
+            )
         elif "权限" in error_msg:
-            result["tips"].extend([
-                "确保有读取文件的权限",
-                "检查文件是否被占用",
-                "尝试以管理员身份运行"
-            ])
-    
+            result["tips"].extend(
+                ["确保有读取文件的权限", "检查文件是否被占用", "尝试以管理员身份运行"]
+            )
+
     return result
