@@ -46,6 +46,6 @@ LABEL org.opencontainers.image.title="Seedream MCP" \
       org.opencontainers.image.description="基于火山引擎 Seedream API 的 MCP 工具，支持 AI 图像生成" \
       org.opencontainers.image.source="https://github.com/tengmmvp/Seedream_MCP" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.2.1" \
+      org.opencontainers.image.version="1.2.2" \
       maintainer="tengmmvp <tengmmvp@gmail.com>" \
       contributors="tengmmvp <tengmmvp@gmail.com>, caoergou <itsericsmail@gmail.com>"
