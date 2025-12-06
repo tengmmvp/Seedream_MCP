@@ -55,7 +55,7 @@ class SeedreamConfig:
     default_size: str = "2K"
     default_watermark: bool = False
     timeout: int = 60
-    api_timeout: int = 60
+    api_timeout: int = 600
     max_retries: int = 3
     
     # 日志配置
@@ -196,7 +196,7 @@ class SeedreamConfig:
             default_size=os.getenv("SEEDREAM_DEFAULT_SIZE", "2K"),
             default_watermark=_parse_bool(os.getenv("SEEDREAM_DEFAULT_WATERMARK", "false")),
             timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
-            api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "60")),
+            api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "600")),
             max_retries=_parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_file=os.getenv("LOG_FILE"),

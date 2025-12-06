@@ -185,7 +185,7 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         default_size=args.default_size,
         default_watermark=bool(args.watermark),
         timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
-        api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "60")),
+        api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "600")),
         max_retries=_parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
         log_level=args.log_level,
         log_file=os.getenv("LOG_FILE"),
