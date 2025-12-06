@@ -69,7 +69,9 @@ async def handle_text_to_image(arguments: Dict[str, Any]) -> List[TextContent]:
 
         # 提取并验证请求参数
         prompt = arguments.get("prompt", "")
-        size = validate_size_for_model(arguments.get("size") or config.default_size, config.model_id)
+        size = validate_size_for_model(
+            arguments.get("size") or config.default_size, config.model_id
+        )
         watermark_value = arguments.get("watermark")
         watermark = (
             validate_watermark(watermark_value)
@@ -139,7 +141,7 @@ async def handle_text_to_image(arguments: Dict[str, Any]) -> List[TextContent]:
     except Exception as exc:
         # 记录异常详情
         logger.error("文生图处理失败", exc_info=True)
-        
+
         # 提供用户友好的故障排除指导
         guidance = "请检查提示词长度、尺寸与模型兼容性，确认 API Key 和网络可用后重试。"
         return [

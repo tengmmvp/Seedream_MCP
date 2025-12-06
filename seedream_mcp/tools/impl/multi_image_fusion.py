@@ -41,7 +41,7 @@ async def handle_multi_image_fusion(arguments: Dict[str, Any]) -> List[TextConte
     Args:
         arguments: 融合任务参数字典，包含以下字段：
             - prompt (str, optional): 融合描述提示词，默认为空字符串
-            - images (List): 待融合的图片列表
+            - image (List): 待融合的图片列表
             - size (str, optional): 生成图片尺寸，默认使用配置中的默认值
             - watermark (bool, optional): 是否添加水印，默认使用配置中的默认值
             - response_format (str, optional): 响应格式，支持 'url' 或 'b64_json'，默认为 'url'
@@ -63,9 +63,11 @@ async def handle_multi_image_fusion(arguments: Dict[str, Any]) -> List[TextConte
 
         # 提取并验证请求参数
         prompt = arguments.get("prompt", "")
-        images = arguments.get("images")
+        image = arguments.get("image")
         # 验证图片尺寸是否符合当前模型要求
-        size = validate_size_for_model(arguments.get("size") or config.default_size, config.model_id)
+        size = validate_size_for_model(
+            arguments.get("size") or config.default_size, config.model_id
+        )
         # 处理水印参数，优先使用请求参数，否则使用配置默认值
         watermark_value = arguments.get("watermark")
         watermark = (
@@ -100,7 +102,7 @@ async def handle_multi_image_fusion(arguments: Dict[str, Any]) -> List[TextConte
         async with SeedreamClient(config) as client:
             result = await client.multi_image_fusion(
                 prompt=prompt,
-                images=images,
+                image=image,
                 size=size,
                 watermark=watermark,
                 response_format=response_format,

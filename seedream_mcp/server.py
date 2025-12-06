@@ -14,6 +14,7 @@ import os
 # 第三方库导入
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.types import TextContent
 
 # 本地模块导入
 from .config import SeedreamConfig, _parse_bool, _parse_int, set_config
@@ -38,7 +39,7 @@ from .utils.logging import get_logger, setup_logging
 SERVER_NAME = "seedream_mcp"
 
 # 服务器版本号
-SERVER_VERSION = "1.2.1"
+SERVER_VERSION = "1.2.2"
 
 # 服务器功能说明
 SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图生图、多图融合、组图与图片浏览。"
@@ -80,14 +81,15 @@ logger = get_logger(__name__)
 
 # ==================== MCP 工具函数定义 ====================
 
+
 @mcp.tool(
     name="seedream_text_to_image",
     annotations={"title": "Seedream 文生图", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_text_to_image(params: TextToImageInput):
+async def seedream_text_to_image(params: TextToImageInput) -> list[TextContent]:
     """
     文生图：
-    
+
     通过给模型提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
     """
     return await run_text_to_image(params)
@@ -97,10 +99,10 @@ async def seedream_text_to_image(params: TextToImageInput):
     name="seedream_image_to_image",
     annotations={"title": "Seedream 图生图", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_image_to_image(params: ImageToImageInput):
+async def seedream_image_to_image(params: ImageToImageInput) -> list[TextContent]:
     """
     图文生图：
-    
+
     基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
     """
     return await run_image_to_image(params)
@@ -110,10 +112,10 @@ async def seedream_image_to_image(params: ImageToImageInput):
     name="seedream_multi_image_fusion",
     annotations={"title": "Seedream 多图融合", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_multi_image_fusion(params: MultiImageFusionInput):
+async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[TextContent]:
     """
     多图融合：
-    
+
     根据您输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
     """
     return await run_multi_image_fusion(params)
@@ -123,10 +125,12 @@ async def seedream_multi_image_fusion(params: MultiImageFusionInput):
     name="seedream_sequential_generation",
     annotations={"title": "Seedream 组图生成", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_sequential_generation(params: SequentialGenerationInput):
+async def seedream_sequential_generation(
+    params: SequentialGenerationInput,
+) -> list[TextContent]:
     """
     组图输出：
-    
+
     支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
     """
     return await run_sequential_generation(params)
@@ -136,10 +140,10 @@ async def seedream_sequential_generation(params: SequentialGenerationInput):
     name="seedream_browse_images",
     annotations={"title": "Seedream 图片浏览", **BROWSE_TOOL_ANNOTATIONS},
 )
-async def seedream_browse_images(params: BrowseImagesInput):
+async def seedream_browse_images(params: BrowseImagesInput) -> list[TextContent]:
     """
     本地图片浏览：
-    
+
     浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
     """
     return await run_browse_images(params)
@@ -147,17 +151,18 @@ async def seedream_browse_images(params: BrowseImagesInput):
 
 # ==================== 配置构建函数 ====================
 
+
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     """从命令行参数构建服务器配置对象
-    
+
     优先级：命令行参数 > 配置文件环境变量 > 系统环境变量 > 默认值。
-    
+
     Args:
         args: 解析后的命令行参数对象。
-    
+
     Returns:
         构建完成的 SeedreamConfig 配置实例。
-    
+
     Raises:
         SeedreamConfigError: 缺少必需参数（如 API 密钥）时抛出。
     """
@@ -185,13 +190,15 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         default_size=args.default_size,
         default_watermark=bool(args.watermark),
         timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
-        api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "60")),
+        api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "600")),
         max_retries=_parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
         log_level=args.log_level,
         log_file=os.getenv("LOG_FILE"),
         auto_save_enabled=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_ENABLED", "true")),
         auto_save_base_dir=os.getenv("SEEDREAM_AUTO_SAVE_BASE_DIR"),
-        auto_save_download_timeout=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")),
+        auto_save_download_timeout=_parse_int(
+            os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")
+        ),
         auto_save_max_retries=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_RETRIES", "3")),
         auto_save_max_file_size=_parse_int(
             os.getenv("SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE", str(50 * 1024 * 1024))
@@ -199,6 +206,10 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         auto_save_max_concurrent=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")),
         auto_save_date_folder=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
         auto_save_cleanup_days=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
+        stream_buffer_max_size=_parse_int(
+            os.getenv("SEEDREAM_STREAM_BUFFER_MAX_SIZE", str(10 * 1024 * 1024))
+        ),
+        stream_chunk_size=_parse_int(os.getenv("SEEDREAM_STREAM_CHUNK_SIZE", str(1024 * 1024))),
     )
 
     # 设置全局配置实例
@@ -208,9 +219,9 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器
-    
+
     定义所有支持的命令行选项，包括 API 配置、模型选择、日志级别等。
-    
+
     Returns:
         配置完成的 ArgumentParser 实例。
     """
@@ -234,7 +245,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--config-file",
         help="可选的 .env 配置文件路径，用于加载额外环境变量",
     )
-    
+
     # 模型与生成配置
     parser.add_argument(
         "--model",
@@ -254,7 +265,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=False,
         help="启用默认水印",
     )
-    
+
     # 日志配置
     parser.add_argument(
         "--log-level",
@@ -262,14 +273,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="INFO",
         help="日志级别",
     )
-    
+
     # 网络配置
     parser.add_argument(
         "--base-url",
         default="https://ark.cn-beijing.volces.com/api/v3",
         help="API 基础 URL",
     )
-    
+
     # 传输层配置
     parser.add_argument(
         "--transport",
@@ -283,11 +294,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 # ==================== 主入口函数 ====================
 
+
 def cli_main() -> int:
     """命令行主入口函数
-    
+
     负责参数解析、配置构建、日志初始化与服务器启动。
-    
+
     Returns:
         进程退出码：
         - 0: 正常退出

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "seedream-mcp"
-version = "1.2.1"
+version = "1.2.2"
 authors = [
     {name = "TengMMVP", email = "tengmmvp@gmail.com"}
 ]

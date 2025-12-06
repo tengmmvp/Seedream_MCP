@@ -252,7 +252,9 @@ def format_generation_response(
                 parts.append(f"  Markdown 引用: {image['markdown_ref']}")
             if "b64_json" in image:
                 b64_data = image.get("b64_json")
-                parts.append(f"  Base64 数据: {len(b64_data)} 字符" if b64_data else "  Base64 数据: 无")
+                parts.append(
+                    f"  Base64 数据: {len(b64_data)} 字符" if b64_data else "  Base64 数据: 无"
+                )
             parts.append("")
 
     if auto_save_enabled:
@@ -268,7 +270,9 @@ def format_generation_response(
                 if getattr(save_result, "success", False):
                     parts.append(f"  图片 {i}: 已保存到 {save_result.local_path}")
                 else:
-                    parts.append(f"  图片 {i}: 保存失败 - {getattr(save_result, 'error', '未知原因')}")
+                    parts.append(
+                        f"  图片 {i}: 保存失败 - {getattr(save_result, 'error', '未知原因')}"
+                    )
             parts.append("")
         else:
             parts.append("自动保存: 已开启但未生成可保存的图片")

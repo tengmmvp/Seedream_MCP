@@ -33,7 +33,7 @@ def test_validate_prompt_mixed_limits_ok():
 
 
 def test_validate_prompt_mixed_limits_exceed():
-    text_cn = ("你" * 301)
+    text_cn = "你" * 301
     text_en = ("word " * 601).strip()
     with pytest.raises(SeedreamValidationError):
         validate_prompt(text_cn)

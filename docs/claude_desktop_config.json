@@ -19,7 +19,7 @@
       "env": {
         "LOG_FILE": "logs/seedream_mcp.log",
         "SEEDREAM_TIMEOUT": "60",
-        "SEEDREAM_API_TIMEOUT": "60",
+        "SEEDREAM_API_TIMEOUT": "600",
         "SEEDREAM_MAX_RETRIES": "3",
         "SEEDREAM_AUTO_SAVE_ENABLED": "true",
         "SEEDREAM_AUTO_SAVE_BASE_DIR": "./seedream_images",

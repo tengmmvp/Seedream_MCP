@@ -19,23 +19,26 @@ from ...utils.path_utils import find_images_in_directory, get_relative_path
 logger = get_logger(__name__)
 
 
-def _format_file_info(path: Path, show_details: bool) -> str:
+def _format_file_info(display_path: str, stat_path: Path, show_details: bool) -> str:
     """格式化文件信息为字符串。
 
     根据是否显示详细信息，返回文件路径或包含大小、修改时间的完整信息。
 
     Args:
-        path: 文件路径对象。
+        display_path: 展示给用户的文件路径字符串。
+        stat_path: 用于读取文件属性的实际路径对象。
         show_details: 是否显示文件详细信息（大小、修改时间）。
 
     Returns:
         格式化后的文件信息字符串，详细模式下格式为 "路径 | 大小 | 修改时间"。
     """
-    parts = [str(path)]
+    parts = [display_path]
     if show_details:
-        stat = path.stat()
+        stat = stat_path.stat()
         size_mb = stat.st_size / (1024 * 1024)
-        mtime = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds")
+        mtime = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(
+            sep=" ", timespec="seconds"
+        )
         parts.append(f"{size_mb:.2f} MB")
         parts.append(f"修改: {mtime}")
     return " | ".join(parts)
@@ -68,13 +71,19 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
     format_filter = arguments.get("format_filter")
     show_details = bool(arguments.get("show_details", False))
 
+    resolved_dir = Path(directory).expanduser().resolve()
+
     logger.info(
-        "浏览图片: dir=%s, recursive=%s, max_depth=%s, limit=%s", directory, recursive, max_depth, limit
+        "浏览图片: dir={}, recursive={}, max_depth={}, limit={}",
+        resolved_dir,
+        recursive,
+        max_depth,
+        limit,
     )
 
     # 搜索图片文件并限制返回数量
     images = find_images_in_directory(
-        directory=directory,
+        directory=str(resolved_dir),
         recursive=recursive,
         max_depth=max_depth,
         extensions=format_filter,
@@ -86,10 +95,10 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
         return [TextContent(type="text", text="未找到图片文件，请确认目录或过滤条件。")]
 
     # 格式化图片列表输出
-    base_dir = Path(directory).resolve()
+    workspace_root = Path.cwd()
     lines = ["图片列表:"]
     for idx, img in enumerate(images, 1):
-        relative = get_relative_path(img, base_dir)
-        lines.append(f"{idx}. {_format_file_info(Path(relative), show_details)}")
+        display_path = get_relative_path(img, str(workspace_root))
+        lines.append(f"{idx}. {_format_file_info(display_path, img, show_details)}")
 
     return [TextContent(type="text", text="\n".join(lines))]

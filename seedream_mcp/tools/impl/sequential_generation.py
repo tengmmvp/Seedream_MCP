@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 # 标准库导入
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # 第三方库导入
 from mcp.types import TextContent
@@ -73,7 +73,9 @@ async def handle_sequential_generation(arguments: Dict[str, Any]) -> List[TextCo
         prompt = arguments.get("prompt", "")
         max_images = arguments.get("max_images", 4)
         image = arguments.get("image")
-        size = validate_size_for_model(arguments.get("size") or config.default_size, config.model_id)
+        size = validate_size_for_model(
+            arguments.get("size") or config.default_size, config.model_id
+        )
         watermark_value = arguments.get("watermark")
         watermark = (
             validate_watermark(watermark_value)
@@ -146,7 +148,7 @@ async def handle_sequential_generation(arguments: Dict[str, Any]) -> List[TextCo
     except Exception as exc:
         # 记录异常详情
         logger.error("组图生成处理失败", exc_info=True)
-        
+
         # 提供用户友好的故障排除指导
         guidance = "请检查提示词、数量与图片参数，确认 API Key 和网络可用后重试。"
         return [
