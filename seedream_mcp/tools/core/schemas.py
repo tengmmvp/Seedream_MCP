@@ -256,7 +256,7 @@ class MultiImageFusionInput(BaseGenerationInput):
     prompt: str = Field(
         ...,
         min_length=1,
-        description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。",
+        description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。请使用“图X”指定图像（如：将图1的服装换为图2的服装）。",
     )
     images: List[str] = Field(
         ...,
