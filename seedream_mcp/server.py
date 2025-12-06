@@ -85,7 +85,7 @@ logger = get_logger(__name__)
     name="seedream_text_to_image",
     annotations={"title": "Seedream 文生图", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_text_to_image(params: TextToImageInput):
+async def seedream_text_to_image(params: TextToImageInput) -> list[dict[str, object]]:
     """
     文生图：
 
@@ -98,7 +98,7 @@ async def seedream_text_to_image(params: TextToImageInput):
     name="seedream_image_to_image",
     annotations={"title": "Seedream 图生图", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_image_to_image(params: ImageToImageInput):
+async def seedream_image_to_image(params: ImageToImageInput) -> list[dict[str, object]]:
     """
     图文生图：
 
@@ -111,7 +111,7 @@ async def seedream_image_to_image(params: ImageToImageInput):
     name="seedream_multi_image_fusion",
     annotations={"title": "Seedream 多图融合", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_multi_image_fusion(params: MultiImageFusionInput):
+async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[dict[str, object]]:
     """
     多图融合：
 
@@ -124,7 +124,9 @@ async def seedream_multi_image_fusion(params: MultiImageFusionInput):
     name="seedream_sequential_generation",
     annotations={"title": "Seedream 组图生成", **GENERATION_TOOL_ANNOTATIONS},
 )
-async def seedream_sequential_generation(params: SequentialGenerationInput):
+async def seedream_sequential_generation(
+    params: SequentialGenerationInput,
+) -> list[dict[str, object]]:
     """
     组图输出：
 
@@ -137,7 +139,7 @@ async def seedream_sequential_generation(params: SequentialGenerationInput):
     name="seedream_browse_images",
     annotations={"title": "Seedream 图片浏览", **BROWSE_TOOL_ANNOTATIONS},
 )
-async def seedream_browse_images(params: BrowseImagesInput):
+async def seedream_browse_images(params: BrowseImagesInput) -> list[dict[str, object]]:
     """
     本地图片浏览：
 

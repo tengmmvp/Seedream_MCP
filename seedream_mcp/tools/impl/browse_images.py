@@ -95,7 +95,7 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
     base_dir = Path(directory).resolve()
     lines = ["图片列表:"]
     for idx, img in enumerate(images, 1):
-        relative = get_relative_path(img, base_dir)
+        relative = get_relative_path(img, str(base_dir))
         lines.append(f"{idx}. {_format_file_info(Path(relative), show_details)}")
 
     return [TextContent(type="text", text="\n".join(lines))]

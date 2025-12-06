@@ -6,7 +6,7 @@ Seedream MCP工具 - 日志配置模块
 
 import sys
 import logging
-from typing import Optional
+from typing import Any, Callable, Optional
 from pathlib import Path
 
 from loguru import logger
@@ -17,7 +17,7 @@ def setup_logging(
     log_file: Optional[str] = None,
     enable_console: bool = True,
     enable_file: bool = True,
-):
+) -> None:
     """设置日志配置
 
     Args:
@@ -52,13 +52,13 @@ def setup_logging(
             # 使用默认日志文件路径
             log_dir = Path("logs")
             log_dir.mkdir(exist_ok=True)
-            log_file = log_dir / "seedream_mcp.log"
+            log_path = log_dir / "seedream_mcp.log"
         else:
-            log_file = Path(log_file)
-            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
 
         logger.add(
-            str(log_file),
+            str(log_path),
             level=level,
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
             rotation="10 MB",  # 日志文件大小超过10MB时轮转
@@ -71,7 +71,7 @@ def setup_logging(
 
     # 配置标准库logging以重定向到loguru
     class InterceptHandler(logging.Handler):
-        def emit(self, record):
+        def emit(self, record: logging.LogRecord) -> None:
             # 获取对应的loguru级别
             try:
                 level = logger.level(record.levelname).name
@@ -99,7 +99,7 @@ def setup_logging(
         logger.info(f"日志文件: {log_file}")
 
 
-def get_logger(name: str = None):
+def get_logger(name: Optional[str] = None):
     """获取logger实例
 
     Args:
@@ -118,7 +118,7 @@ def get_logger(name: str = None):
     return logger.bind(name=name)
 
 
-def log_function_call(func):
+def log_function_call(func: Callable[..., Any]):
     """函数调用日志装饰器
 
     Args:
@@ -162,8 +162,11 @@ def log_function_call(func):
 
 
 def log_function_call_manual(
-    func_name: str, args: dict = None, result: any = None, error: Exception = None
-):
+    func_name: str,
+    args: Optional[dict[str, Any]] = None,
+    result: Optional[Any] = None,
+    error: Optional[Exception] = None,
+) -> None:
     """手动记录函数调用日志
 
     Args:

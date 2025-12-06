@@ -249,23 +249,27 @@ def validate_max_images(max_images: Any) -> int:
     Raises:
         SeedreamValidationError: 当参数类型错误或超出范围时抛出
     """
-    if not isinstance(max_images, int):
+    if isinstance(max_images, int):
+        validated_value = max_images
+    else:
         try:
-            max_images = int(max_images)
+            validated_value = int(max_images)
         except (ValueError, TypeError):
             raise SeedreamValidationError(
                 "最大图像数量必须是整数", field="max_images", value=max_images
             )
 
-    if max_images < 1:
-        raise SeedreamValidationError("最大图像数量不能小于1", field="max_images", value=max_images)
-
-    if max_images > 15:
+    if validated_value < 1:
         raise SeedreamValidationError(
-            "最大图像数量不能超过15", field="max_images", value=max_images
+            "最大图像数量不能小于1", field="max_images", value=validated_value
         )
 
-    return max_images
+    if validated_value > 15:
+        raise SeedreamValidationError(
+            "最大图像数量不能超过15", field="max_images", value=validated_value
+        )
+
+    return validated_value
 
 
 def validate_watermark(watermark: Any) -> bool:

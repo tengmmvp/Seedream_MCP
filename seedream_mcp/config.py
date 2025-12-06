@@ -76,7 +76,7 @@ class SeedreamConfig:
     stream_buffer_max_size: int = 10 * 1024 * 1024  # 10MB，流式响应缓冲区最大大小
     stream_chunk_size: int = 1024 * 1024  # 1MB，每次读取的块大小
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """
         初始化后处理
 
@@ -84,7 +84,7 @@ class SeedreamConfig:
         """
         self.validate()
 
-    def validate(self):
+    def validate(self) -> None:
         """
         验证配置参数
 
@@ -351,7 +351,7 @@ def get_global_config() -> SeedreamConfig:
     return _global_config
 
 
-def set_config(config: SeedreamConfig):
+def set_config(config: SeedreamConfig) -> None:
     """
     设置全局配置实例
 
@@ -364,7 +364,7 @@ def set_config(config: SeedreamConfig):
     _global_config = config
 
 
-def reload_config(env_file: Optional[str] = None):
+def reload_config(env_file: Optional[str] = None) -> None:
     """
     重新加载配置
 

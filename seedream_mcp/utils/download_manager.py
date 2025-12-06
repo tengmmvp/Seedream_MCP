@@ -172,7 +172,7 @@ class DownloadManager:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # 处理异常结果
-        processed_results = []
+        processed_results: list[Dict[str, Any]] = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 url, path = urls_and_paths[i]

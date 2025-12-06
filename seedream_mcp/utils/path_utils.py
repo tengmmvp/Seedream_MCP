@@ -168,7 +168,7 @@ def find_images_in_directory(
     Returns:
         找到的图片文件路径列表
     """
-    images = []
+    images: list[Path] = []
 
     try:
         dir_path = Path(directory).resolve()
@@ -181,7 +181,7 @@ def find_images_in_directory(
         target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
         target_extensions = {ext.lower() for ext in target_extensions}
 
-        def scan_directory(path: Path, current_depth: int = 0):
+        def scan_directory(path: Path, current_depth: int = 0) -> None:
             if current_depth > max_depth:
                 return
 
@@ -248,7 +248,7 @@ def _format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
 
 
-def suggest_similar_paths(target_path: str, search_dirs: List[str] = None) -> List[str]:
+def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = None) -> List[str]:
     """
     建议相似的文件路径
 

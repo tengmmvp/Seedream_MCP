@@ -8,7 +8,7 @@ import base64
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Dict, List, Optional, Tuple
 
 from .download_manager import DownloadManager, DownloadError
 from .file_manager import FileManager, FileManagerError
@@ -300,7 +300,7 @@ class AutoSaveManager:
         # 限制并发数量
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
-        async def save_with_semaphore(task):
+        async def save_with_semaphore(task: Awaitable[AutoSaveResult]) -> AutoSaveResult:
             async with semaphore:
                 return await task
 
@@ -310,7 +310,7 @@ class AutoSaveManager:
         )
 
         # 处理异常结果
-        processed_results = []
+        processed_results: List[AutoSaveResult] = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 url = image_data[i].get("url", "unknown")
@@ -352,7 +352,7 @@ class AutoSaveManager:
 
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
-        async def save_with_semaphore(task):
+        async def save_with_semaphore(task: Awaitable[AutoSaveResult]) -> AutoSaveResult:
             async with semaphore:
                 return await task
 

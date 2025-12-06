@@ -4,7 +4,7 @@ Seedream MCP工具 - 用户指导模块
 提供清晰的文件路径使用指导和错误提示。
 """
 
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 
 def get_path_usage_guide() -> str:
@@ -103,7 +103,9 @@ def get_error_solutions() -> Dict[str, str]:
     }
 
 
-def format_error_message(error_type: str, original_path: str, suggestions: List[str] = None) -> str:
+def format_error_message(
+    error_type: str, original_path: str, suggestions: Optional[List[str]] = None
+) -> str:
     """
     格式化错误消息，提供有用的指导
 
@@ -165,7 +167,7 @@ def validate_and_suggest_path(path: str) -> Dict[str, Any]:
 
     is_valid, error_msg, normalized_path = validate_image_path(path)
 
-    result = {
+    result: dict[str, Any] = {
         "is_valid": is_valid,
         "error_message": error_msg,
         "normalized_path": str(normalized_path) if normalized_path else None,
