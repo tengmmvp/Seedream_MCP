@@ -70,6 +70,8 @@ class AutoSaveManager:
         max_retries: int = 3,
         max_file_size: int = 50 * 1024 * 1024,  # 50MB
         max_concurrent: int = 5,
+        date_folder: bool = True,
+        cleanup_days: int = 30,
     ):
         """
         初始化自动保存管理器
@@ -80,12 +82,25 @@ class AutoSaveManager:
             max_retries: 最大重试次数
             max_file_size: 最大文件大小
             max_concurrent: 最大并发下载数
+            date_folder: 是否按日期创建文件夹
+            cleanup_days: 自动清理天数，0表示不清理
         """
         self.file_manager = FileManager(base_dir)
         self.download_manager = DownloadManager(
             timeout=download_timeout, max_retries=max_retries, max_file_size=max_file_size
         )
         self.max_concurrent = max_concurrent
+        self.date_folder = date_folder
+        self.cleanup_days = cleanup_days
+
+
+    async def _maybe_cleanup(self) -> None:
+        if self.cleanup_days <= 0:
+            return
+        try:
+            await self.cleanup_old_files(self.cleanup_days)
+        except Exception as e:
+            logger.warning(f"自动清理失败: {e}")
 
     def _parse_data_uri(self, data: str) -> Tuple[Optional[str], str]:
         """
@@ -150,7 +165,11 @@ class AutoSaveManager:
 
             # 创建保存路径
             save_path = self.file_manager.create_save_path(
-                prompt=prompt, url=url, tool_name=tool_name, custom_name=custom_name
+                prompt=prompt,
+                url=url,
+                tool_name=tool_name,
+                custom_name=custom_name,
+                date_folder=self.date_folder,
             )
 
             # 下载图片
@@ -228,6 +247,7 @@ class AutoSaveManager:
                 tool_name=tool_name,
                 custom_name=custom_name,
                 content_hash=content_hash,
+                date_folder=self.date_folder,
             )
 
             # 写入文件
@@ -324,6 +344,7 @@ class AutoSaveManager:
         success_count = sum(1 for r in processed_results if r.success)
         logger.info(f"批量保存完成: {success_count}/{len(image_data)} 成功")
 
+        await self._maybe_cleanup()
         return processed_results
 
     async def save_multiple_base64_images(
@@ -371,6 +392,7 @@ class AutoSaveManager:
 
         success_count = sum(1 for r in processed_results if r.success)
         logger.info(f"批量 Base64 保存完成: {success_count}/{len(image_data)} 成功")
+        await self._maybe_cleanup()
         return processed_results
 
     def format_response_with_auto_save(

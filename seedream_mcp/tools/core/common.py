@@ -90,6 +90,8 @@ async def auto_save_from_urls(
         max_retries=config.auto_save_max_retries,
         max_file_size=config.auto_save_max_file_size,
         max_concurrent=config.auto_save_max_concurrent,
+        date_folder=config.auto_save_date_folder,
+        cleanup_days=config.auto_save_cleanup_days,
     )
 
     images = extract_images(result)
@@ -144,6 +146,8 @@ async def auto_save_from_base64(
         max_retries=config.auto_save_max_retries,
         max_file_size=config.auto_save_max_file_size,
         max_concurrent=config.auto_save_max_concurrent,
+        date_folder=config.auto_save_date_folder,
+        cleanup_days=config.auto_save_cleanup_days,
     )
 
     images = extract_images(result)

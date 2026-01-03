@@ -296,7 +296,12 @@ class FileManager:
         return path / filename
 
     def create_save_path(
-        self, prompt: str, url: str, tool_name: str = "seedream", custom_name: Optional[str] = None
+        self,
+        prompt: str,
+        url: str,
+        tool_name: str = "seedream",
+        custom_name: Optional[str] = None,
+        date_folder: bool = True,
     ) -> Path:
         """
         创建保存路径
@@ -306,6 +311,7 @@ class FileManager:
             url: 图片URL
             tool_name: 工具名称
             custom_name: 自定义名称
+            date_folder: 是否按日期创建文件夹
 
         Returns:
             保存路径
@@ -327,7 +333,7 @@ class FileManager:
         filename = self.generate_unique_filename(base_name, extension)
 
         # 获取组织化路径
-        save_path = self.get_organized_path(filename, tool_name)
+        save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
 
         # 验证路径安全性
         if not self.validate_path(save_path):
@@ -342,6 +348,7 @@ class FileManager:
         tool_name: str = "seedream",
         custom_name: Optional[str] = None,
         content_hash: Optional[str] = None,
+        date_folder: bool = True,
     ) -> Path:
         """
         基于扩展名创建保存路径
@@ -352,13 +359,14 @@ class FileManager:
             tool_name: 工具名称
             custom_name: 自定义名称
             content_hash: 内容哈希（用于去重/标识）
+            date_folder: 是否按日期创建文件夹
 
         Returns:
             保存路径
         """
         base_name = custom_name or self.generate_name_from_prompt(prompt)
         filename = self.generate_unique_filename(base_name, extension, content_hash=content_hash)
-        save_path = self.get_organized_path(filename, tool_name)
+        save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
         if not self.validate_path(save_path):
             raise FileManagerError(f"路径不安全: {save_path}")
         return save_path
@@ -370,6 +378,7 @@ class FileManager:
         tool_name: str = "seedream",
         custom_name: Optional[str] = None,
         default_extension: str = ".jpeg",
+        date_folder: bool = True,
     ) -> Path:
         """
         基于字节内容创建保存路径（推断扩展名并使用内容哈希）
@@ -382,6 +391,7 @@ class FileManager:
             tool_name=tool_name,
             custom_name=custom_name,
             content_hash=content_hash,
+            date_folder=date_folder,
         )
 
     def save_bytes(self, file_path: Path, data: bytes, overwrite: bool = False) -> Dict[str, Any]:

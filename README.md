@@ -135,7 +135,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
-- `images` (必需) - 输入图像 URL 或本地文件路径列表（2-5 张图像）
+- `image` (必需) - 输入图像 URL 或本地文件路径列表（2-5 张图像）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
@@ -153,7 +153,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 4
-- `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组，最多 10 张）
+- `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）；参考图数量与 max_images 之和不超过 15
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
@@ -173,7 +173,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `recursive` (可选) - 是否递归搜索子目录，默认`true`
 - `max_depth` (可选) - 最大搜索深度，范围 1-10，默认 3
 - `limit` (可选) - 返回的最大文件数量，范围 1-200，默认 50
-- `format_filter` (可选) - 过滤特定图片格式，如`['.jpg', '.png']`
+- `format_filter` (可选) - 过滤特定图片格式，如`['.jpeg', '.png']`
 - `show_details` (可选) - 是否显示详细文件信息，默认`false`
 
 ## 🆘 常见问题
@@ -225,6 +225,8 @@ uv run python -m seedream_mcp.server --api-key your_key
 
 主要配置项（详见 `.env.example`）：
 
+配置优先级：MCP 客户端配置（命令行/环境变量） > .env 文件 > 默认值。
+
 ```bash
 # 必需配置
 ARK_API_KEY=your_api_key_here
@@ -239,6 +241,8 @@ SEEDREAM_DEFAULT_WATERMARK=false
 # 自动保存（默认启用）
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
+SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
+SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 ```
 
 ## 👥 贡献者

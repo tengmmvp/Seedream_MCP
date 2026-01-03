@@ -28,16 +28,16 @@ def get_path_usage_guide() -> str:
 支持的路径格式:
 
 1. 绝对路径:
-   • Windows: C:\\Users\\用户名\\Pictures\\image.jpg
+   • Windows: C:\\Users\\用户名\\Pictures\\image.jpeg
    • Windows: D:\\项目\\images\\photo.png
 
 2. 相对路径:
-   • 相对于当前工作目录: images/photo.jpg
+   • 相对于当前工作目录: images/photo.jpeg
    • 相对于当前工作目录: ./assets/image.png
-   • 上级目录: ../images/photo.jpg
+   • 上级目录: ../images/photo.jpeg
 
 3. 网络URL:
-   • https://example.com/image.jpg
+   • https://example.com/image.jpeg
    • http://example.com/photo.png
 
 使用建议:

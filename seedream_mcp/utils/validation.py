@@ -272,6 +272,20 @@ def validate_max_images(max_images: Any) -> int:
     return validated_value
 
 
+def validate_sequential_image_limit(max_images: int, reference_images: List[str] | None) -> None:
+    """验证组图生成的总图片数量限制
+
+    要求：参考图数量 + 生成数量 <= 15。
+    """
+    reference_count = len(reference_images) if reference_images else 0
+    if reference_count + max_images > 15:
+        raise SeedreamValidationError(
+            "参考图数量与生成数量之和不能超过15",
+            field="image",
+            value={"reference_images": reference_count, "max_images": max_images},
+        )
+
+
 def validate_watermark(watermark: Any) -> bool:
     """验证水印参数配置
 
