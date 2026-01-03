@@ -42,9 +42,12 @@ jobs:
         uv run python -c "
         import seedream_mcp
         from seedream_mcp.config import SeedreamConfig
-        from seedream_mcp.server import SeedreamMCPServer
+        from seedream_mcp.server import mcp, SERVER_VERSION, cli_main
+        from seedream_mcp.client import SeedreamClient
+        from seedream_mcp.tools import TextToImageInput, ImageToImageInput
         print('✅ 核心模块导入测试通过')
-        print('📦 Package validation successful')
+        print(f'📦 版本: {SERVER_VERSION}')
+        print('Package validation successful')
         "
 
     - name: 🔍 Check package build
