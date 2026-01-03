@@ -6,14 +6,14 @@
 
 ```bash
 # 编辑 pyproject.toml
-version = "1.2.2"
+version = "1.2.3"
 ```
 
 ### 2. 创建标签
 
 ```bash
-git tag v1.2.2
-git push origin v1.2.2
+git tag v1.2.3
+git push origin v1.2.3
 ```
 
 GitHub Actions 会自动：

@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![MCP](https://img.shields.io/badge/MCP-compatible-orange.svg)
-![Version](https://img.shields.io/badge/version-1.2.2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.3-blue.svg)
 
 基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。
 
