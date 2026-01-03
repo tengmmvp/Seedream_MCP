@@ -17,6 +17,7 @@ from ...utils.validation import (
     validate_image_url,
     validate_max_images,
     validate_prompt,
+    validate_sequential_image_limit,
     validate_size,
 )
 
@@ -391,9 +392,18 @@ class SequentialGenerationInput(BaseGenerationInput):
         else:
             images = value
         try:
-            return validate_image_list(images, min_count=1, max_count=5)
+            return validate_image_list(images, min_count=1, max_count=15)
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
+
+    @model_validator(mode="after")
+    def validate_total_image_limit(self) -> "SequentialGenerationInput":
+        """校验参考图数量与生成数量的总和限制。"""
+        try:
+            validate_sequential_image_limit(self.max_images, self.image)
+        except SeedreamValidationError as exc:
+            raise ValueError(exc.message) from exc
+        return self
 
 
 class BrowseImagesInput(BaseModel):

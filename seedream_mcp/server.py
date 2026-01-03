@@ -10,9 +10,10 @@ from __future__ import annotations
 # 标准库导入
 import argparse
 import os
+from pathlib import Path
 
 # 第三方库导入
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 
@@ -152,10 +153,53 @@ async def seedream_browse_images(params: BrowseImagesInput) -> list[TextContent]
 # ==================== 配置构建函数 ====================
 
 
+def _read_env_files(config_file: str | None) -> dict[str, str]:
+    """读取 .env 文件内容（不覆盖现有环境变量）。
+
+    优先级：显式指定的 config_file > 当前工作目录 .env > 项目根目录 .env。
+    """
+    env_values: dict[str, str] = {}
+    candidates: list[Path] = []
+
+    cwd_env = Path.cwd() / ".env"
+    project_env = Path(__file__).resolve().parent.parent / ".env"
+
+    if cwd_env.is_file():
+        candidates.append(cwd_env)
+    if project_env.is_file() and project_env not in candidates:
+        candidates.append(project_env)
+    if config_file:
+        candidates.append(Path(config_file))
+
+    for env_path in candidates:
+        values = dotenv_values(env_path)
+        env_values.update({k: v for k, v in values.items() if v is not None})
+
+    return env_values
+
+
+def _pick_config_value(
+    cli_value: object | None,
+    env_key: str,
+    env_values: dict[str, str],
+    default_value: object,
+) -> object:
+    """按优先级挑选配置值：CLI > 环境变量 > .env > 默认值。"""
+    if cli_value is not None:
+        return cli_value
+    env_value = os.getenv(env_key)
+    if env_value is not None and str(env_value).strip():
+        return env_value
+    file_value = env_values.get(env_key)
+    if file_value is not None and str(file_value).strip():
+        return file_value
+    return default_value
+
+
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     """从命令行参数构建服务器配置对象
 
-    优先级：命令行参数 > 配置文件环境变量 > 系统环境变量 > 默认值。
+    优先级：命令行参数 > 系统环境变量 > .env 文件 > 默认值。
 
     Args:
         args: 解析后的命令行参数对象。
@@ -166,13 +210,11 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     Raises:
         SeedreamConfigError: 缺少必需参数（如 API 密钥）时抛出。
     """
-    # 加载指定的配置文件（如有）
-    if args.config_file:
-        load_dotenv(args.config_file)
+    env_values = _read_env_files(args.config_file)
 
     # 获取 API 密钥（优先使用命令行参数）
-    cli_api_key = args.api_key or os.getenv("ARK_API_KEY")
-    if not cli_api_key:
+    api_key = _pick_config_value(args.api_key, "ARK_API_KEY", env_values, None)
+    if not api_key:
         raise SeedreamConfigError("未找到 API 密钥,请使用 --api-key 或设置 ARK_API_KEY 环境变量。")
 
     # 模型别名映射，将简短名称映射为完整模型 ID
@@ -180,36 +222,96 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
         "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
     }
-    model_id = model_map.get(args.model, args.model)
+    raw_model = _pick_config_value(
+        args.model, "SEEDREAM_MODEL_ID", env_values, "doubao-seedream-4-5-251128"
+    )
+    model_id = model_map.get(str(raw_model), str(raw_model))
 
     # 构建配置对象
     cfg = SeedreamConfig(
-        api_key=cli_api_key,
-        base_url=args.base_url,
+        api_key=str(api_key),
+        base_url=str(
+            _pick_config_value(
+                args.base_url,
+                "ARK_BASE_URL",
+                env_values,
+                "https://ark.cn-beijing.volces.com/api/v3",
+            )
+        ),
         model_id=model_id,
-        default_size=args.default_size,
-        default_watermark=bool(args.watermark),
-        timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
-        api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "600")),
-        max_retries=_parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
-        log_level=args.log_level,
-        log_file=os.getenv("LOG_FILE"),
-        auto_save_enabled=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_ENABLED", "true")),
-        auto_save_base_dir=os.getenv("SEEDREAM_AUTO_SAVE_BASE_DIR"),
+        default_size=str(
+            _pick_config_value(args.default_size, "SEEDREAM_DEFAULT_SIZE", env_values, "2K")
+        ),
+        default_watermark=_parse_bool(
+            _pick_config_value(args.watermark, "SEEDREAM_DEFAULT_WATERMARK", env_values, "false")
+        ),
+        timeout=_parse_int(
+            str(_pick_config_value(None, "SEEDREAM_TIMEOUT", env_values, "60"))
+        ),
+        api_timeout=_parse_int(
+            str(_pick_config_value(None, "SEEDREAM_API_TIMEOUT", env_values, "600"))
+        ),
+        max_retries=_parse_int(
+            str(_pick_config_value(None, "SEEDREAM_MAX_RETRIES", env_values, "3"))
+        ),
+        log_level=str(_pick_config_value(args.log_level, "LOG_LEVEL", env_values, "INFO")),
+        log_file=(
+            str(_pick_config_value(None, "LOG_FILE", env_values, ""))
+            or None
+        ),
+        auto_save_enabled=_parse_bool(
+            _pick_config_value(None, "SEEDREAM_AUTO_SAVE_ENABLED", env_values, "true")
+        ),
+        auto_save_base_dir=(
+            str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_BASE_DIR", env_values, ""))
+            or None
+        ),
         auto_save_download_timeout=_parse_int(
-            os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")
+            str(
+                _pick_config_value(
+                    None, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", env_values, "30"
+                )
+            )
         ),
-        auto_save_max_retries=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_RETRIES", "3")),
+        auto_save_max_retries=_parse_int(
+            str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_MAX_RETRIES", env_values, "3"))
+        ),
         auto_save_max_file_size=_parse_int(
-            os.getenv("SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE", str(50 * 1024 * 1024))
+            str(
+                _pick_config_value(
+                    None,
+                    "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
+                    env_values,
+                    str(50 * 1024 * 1024),
+                )
+            )
         ),
-        auto_save_max_concurrent=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")),
-        auto_save_date_folder=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
-        auto_save_cleanup_days=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
+        auto_save_max_concurrent=_parse_int(
+            str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", env_values, "5"))
+        ),
+        auto_save_date_folder=_parse_bool(
+            _pick_config_value(None, "SEEDREAM_AUTO_SAVE_DATE_FOLDER", env_values, "true")
+        ),
+        auto_save_cleanup_days=_parse_int(
+            str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", env_values, "30"))
+        ),
         stream_buffer_max_size=_parse_int(
-            os.getenv("SEEDREAM_STREAM_BUFFER_MAX_SIZE", str(10 * 1024 * 1024))
+            str(
+                _pick_config_value(
+                    None,
+                    "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
+                    env_values,
+                    str(10 * 1024 * 1024),
+                )
+            )
         ),
-        stream_chunk_size=_parse_int(os.getenv("SEEDREAM_STREAM_CHUNK_SIZE", str(1024 * 1024))),
+        stream_chunk_size=_parse_int(
+            str(
+                _pick_config_value(
+                    None, "SEEDREAM_STREAM_CHUNK_SIZE", env_values, str(1024 * 1024)
+                )
+            )
+        ),
     )
 
     # 设置全局配置实例
@@ -250,35 +352,35 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         choices=["doubao-seedream-4.5", "doubao-seedream-4.0"],
-        default="doubao-seedream-4.5",
-        help="模型选择（默认 doubao-seedream-4.5）",
+        default=None,
+        help="模型选择（默认按配置或内置默认值）",
     )
     parser.add_argument(
         "--default-size",
         choices=["1K", "2K", "4K"],
-        default="2K",
-        help="默认生成尺寸（默认 2K）",
+        default=None,
+        help="默认生成尺寸（默认按配置或内置默认值）",
     )
     parser.add_argument(
         "--watermark",
         action="store_true",
-        default=False,
-        help="启用默认水印",
+        default=None,
+        help="启用默认水印（未传入时按配置或内置默认值）",
     )
 
     # 日志配置
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="日志级别",
+        default=None,
+        help="日志级别（默认按配置或内置默认值）",
     )
 
     # 网络配置
     parser.add_argument(
         "--base-url",
-        default="https://ark.cn-beijing.volces.com/api/v3",
-        help="API 基础 URL",
+        default=None,
+        help="API 基础 URL（默认按配置或内置默认值）",
     )
 
     # 传输层配置

@@ -17,7 +17,12 @@ import httpx
 
 # 本地模块导入
 from .config import SeedreamConfig, get_global_config
-from .utils.errors import SeedreamAPIError, SeedreamNetworkError, SeedreamTimeoutError
+from .utils.errors import (
+    SeedreamAPIError,
+    SeedreamNetworkError,
+    SeedreamTimeoutError,
+    handle_api_error,
+)
 from .utils.logging import get_logger, log_function_call
 from .utils.path_utils import suggest_similar_paths, validate_image_path
 from .utils.validation import (
@@ -25,6 +30,7 @@ from .utils.validation import (
     validate_max_images,
     validate_prompt,
     validate_response_format,
+    validate_sequential_image_limit,
     validate_size_for_model,
     validate_watermark,
     validate_optimize_prompt_options,
@@ -322,7 +328,7 @@ class SeedreamClient:
             size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（最多 10 张）
+            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（参考图数量与生成数量之和不超过 15）
             stream: 是否使用流式传输，默认为 False
             optimize_prompt_options: 提示词优化选项，可选配置字典
 
@@ -342,20 +348,28 @@ class SeedreamClient:
 
         # 处理图像输入
         processed_image = None
+        reference_images = None
         if image is not None:
             if isinstance(image, str):
                 # 单张图片
-                processed_image = await self._prepare_image_input(image)
+                reference_images = [image]
             elif isinstance(image, (list, tuple)):
                 # 多张图片
-                if len(image) > 10:
-                    raise SeedreamAPIError("最多支持 10 张参考图片")
-                processed_image = []
-                for img in image:
-                    processed_img = await self._prepare_image_input(img)
-                    processed_image.append(processed_img)
+                reference_images = list(image)
             else:
                 raise SeedreamAPIError("image 参数必须是字符串或字符串列表")
+
+        if reference_images is not None:
+            validate_sequential_image_limit(max_images, reference_images)
+
+        if reference_images is not None:
+            if len(reference_images) == 1:
+                processed_image = await self._prepare_image_input(reference_images[0])
+            else:
+                processed_image = []
+                for img in reference_images:
+                    processed_img = await self._prepare_image_input(img)
+                    processed_image.append(processed_img)
 
         self.logger.info(
             f"开始组图生成任务: prompt='{prompt[:50]}...', max_images={max_images}, size={size}"
@@ -509,7 +523,11 @@ class SeedreamClient:
                         self.logger.debug(f"收到响应: 状态码={response.status_code}")
                         if response.status_code != 200:
                             error_text = (await response.aread()).decode("utf-8", errors="ignore")
-                            raise SeedreamAPIError(f"HTTP {response.status_code}: {error_text}")
+                            try:
+                                error_data = json.loads(error_text)
+                            except Exception:
+                                error_data = {"message": error_text}
+                            raise handle_api_error(response.status_code, error_data)
                         # 处理 SSE 流式响应
                         if response.headers.get("content-type", "").startswith("text/event-stream"):
                             items: List[Dict[str, Any]] = []
@@ -690,8 +708,11 @@ class SeedreamClient:
                         "status": result.get("status"),
                     }
                 else:
-                    error_msg = f"HTTP {response.status_code}: {response.text}"
-                    raise SeedreamAPIError(error_msg)
+                    try:
+                        error_data = response.json()
+                    except Exception:
+                        error_data = {"message": response.text}
+                    raise handle_api_error(response.status_code, error_data)
 
             except httpx.TimeoutException:
                 self.logger.warning(
@@ -736,12 +757,18 @@ class SeedreamClient:
             SeedreamAPIError: 图像文件不存在或处理失败
         """
         try:
+            normalized_image = image.strip()
+
             # 如果是 URL，直接返回
-            if image.startswith(("http://", "https://")):
-                return image
+            if normalized_image.startswith(("http://", "https://")):
+                return normalized_image
+
+            # 如果是 Data URI，直接返回
+            if normalized_image.lower().startswith("data:image/"):
+                return normalized_image
 
             # 验证图片路径
-            is_valid, error_msg, normalized_path = validate_image_path(image)
+            is_valid, error_msg, normalized_path = validate_image_path(normalized_image)
 
             if not is_valid:
                 # 提供路径建议
