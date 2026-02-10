@@ -28,11 +28,6 @@ services:
       - ./logs:/app/logs
       # 可以挂载配置文件
       - ./.env:/app/.env:ro
-    ports:
-      # 如果需要 HTTP 接口，可以暴露端口
-      # - "8000:8000"
-      - "stdin:stdin" # MCP 协议需要
-      - "stdout:stdout" # MCP 协议需要
     stdin_open: true
     tty: true
     healthcheck:

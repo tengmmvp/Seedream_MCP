@@ -10,14 +10,7 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...utils.errors import SeedreamValidationError
-from ...utils.validation import (
-    validate_image_list,
-    validate_image_url,
-    validate_max_images,
-    validate_prompt,
-    validate_sequential_image_limit,
-    validate_size,
-)
+from ...utils.validation import validate_sequential_image_limit
 
 
 class ResponseFormat(str, Enum):
@@ -114,28 +107,6 @@ class BaseGenerationInput(BaseModel):
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     )
 
-    @field_validator("size")
-    @classmethod
-    def validate_size_field(cls, value: Optional[str]) -> Optional[str]:
-        """
-        校验图片尺寸参数
-
-        Args:
-            value: 用户指定的尺寸值
-
-        Returns:
-            规范化后的尺寸值，None 时跳过校验
-
-        Raises:
-            ValueError: 当尺寸格式不符合要求时
-        """
-        if value is None:
-            return value
-        try:
-            return validate_size(value)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
-
     @field_validator("save_path", "custom_name")
     @classmethod
     def validate_non_empty(cls, value: Optional[str]) -> Optional[str]:
@@ -170,26 +141,6 @@ class TextToImageInput(BaseGenerationInput):
         description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。",
     )
 
-    @field_validator("prompt")
-    @classmethod
-    def validate_prompt_field(cls, value: str) -> str:
-        """
-        校验并规范化提示词
-
-        Args:
-            value: 用户输入的提示词
-
-        Returns:
-            规范化后的提示词
-
-        Raises:
-            ValueError: 当提示词格式或长度不符合要求时
-        """
-        try:
-            return validate_prompt(value)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
-
 
 class ImageToImageInput(BaseGenerationInput):
     """
@@ -205,46 +156,6 @@ class ImageToImageInput(BaseGenerationInput):
         ...,
         description="待转换的图片，支持 URL、本地文件路径。",
     )
-
-    @field_validator("prompt")
-    @classmethod
-    def validate_prompt_field(cls, value: str) -> str:
-        """
-        校验并规范化提示词
-
-        Args:
-            value: 用户输入的提示词
-
-        Returns:
-            规范化后的提示词
-
-        Raises:
-            ValueError: 当提示词格式或长度不符合要求时
-        """
-        try:
-            return validate_prompt(value)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
-
-    @field_validator("image")
-    @classmethod
-    def validate_image_field(cls, value: str) -> str:
-        """
-        校验图片来源
-
-        Args:
-            value: 图片 URL、文件路径
-
-        Returns:
-            规范化后的图片标识
-
-        Raises:
-            ValueError: 当图片来源格式不合法时
-        """
-        try:
-            return validate_image_url(value)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
 
 
 class MultiImageFusionInput(BaseGenerationInput):
@@ -263,46 +174,6 @@ class MultiImageFusionInput(BaseGenerationInput):
         max_length=5,
         description="参与融合的图片列表，支持 URL、本地路径，数量2-5张。",
     )
-
-    @field_validator("prompt")
-    @classmethod
-    def validate_prompt_field(cls, value: str) -> str:
-        """
-        校验并规范化提示词
-
-        Args:
-            value: 用户输入的提示词
-
-        Returns:
-            规范化后的提示词
-
-        Raises:
-            ValueError: 当提示词格式或长度不符合要求时
-        """
-        try:
-            return validate_prompt(value)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
-
-    @field_validator("image")
-    @classmethod
-    def validate_images_field(cls, value: List[str]) -> List[str]:
-        """
-        校验图片列表
-
-        Args:
-            value: 图片来源列表
-
-        Returns:
-            规范化后的图片列表
-
-        Raises:
-            ValueError: 当图片数量或格式不符合要求时
-        """
-        try:
-            return validate_image_list(value, min_count=2, max_count=5)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
 
 
 class SequentialGenerationInput(BaseGenerationInput):
@@ -325,46 +196,6 @@ class SequentialGenerationInput(BaseGenerationInput):
         default=None,
         description="可选的参考图片，支持单张或多张。",
     )
-
-    @field_validator("prompt")
-    @classmethod
-    def validate_prompt_field(cls, value: str) -> str:
-        """
-        校验并规范化提示词
-
-        Args:
-            value: 用户输入的提示词
-
-        Returns:
-            规范化后的提示词
-
-        Raises:
-            ValueError: 当提示词格式或长度不符合要求时
-        """
-        try:
-            return validate_prompt(value)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
-
-    @field_validator("max_images")
-    @classmethod
-    def validate_max_images_field(cls, value: int) -> int:
-        """
-        校验最大图片数量
-
-        Args:
-            value: 用户指定的最大生成数量
-
-        Returns:
-            校验通过的数量值
-
-        Raises:
-            ValueError: 当数量超出允许范围时
-        """
-        try:
-            return validate_max_images(value)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
 
     @field_validator("image", mode="before")
     @classmethod
@@ -389,14 +220,24 @@ class SequentialGenerationInput(BaseGenerationInput):
             images = [value]
         else:
             images = value
-        try:
-            return validate_image_list(images, min_count=1, max_count=15)
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
+
+        if not isinstance(images, list):
+            raise ValueError("image 必须是字符串或字符串列表")
+        if len(images) < 1 or len(images) > 15:
+            raise ValueError("参考图片数量需在 1-15 之间")
+
+        normalized: List[str] = []
+        for item in images:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("image 列表中的每一项都必须是非空字符串")
+            normalized.append(item.strip())
+        return normalized
 
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
-        """校验参考图数量与生成数量的总和限制。"""
+        """
+        校验参考图数量与生成数量的总和限制。
+        """
         try:
             validate_sequential_image_limit(self.max_images, self.image)
         except SeedreamValidationError as exc:

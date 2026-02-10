@@ -69,10 +69,12 @@ def build_generation_context(
 
     auto_save = arguments.get("auto_save")
     enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
+    raw_size = arguments.get("size") if "size" in arguments else None
+    size_value = config.default_size if raw_size is None else raw_size
 
     return GenerationExecutionContext(
         prompt=arguments.get("prompt", ""),
-        size=validate_size_for_model(arguments.get("size") or config.default_size, config.model_id),
+        size=validate_size_for_model(size_value, config.model_id),
         watermark=watermark,
         response_format=validate_response_format(arguments.get("response_format", "url")),
         stream=bool(arguments.get("stream", False)),
@@ -269,7 +271,7 @@ async def auto_save_from_urls(
                     "url": image["url"],
                     "prompt": prompt,
                     "custom_name": f"{custom_name}_{i + 1}" if custom_name else None,
-                    "alt_text": f"Generated image {i + 1}: {prompt[:50]}...",
+                    "alt_text": f"Generated image {i + 1}",
                 }
             )
 
@@ -329,7 +331,7 @@ async def auto_save_from_base64(
                     "b64_json": image["b64_json"],
                     "prompt": prompt,
                     "custom_name": f"{custom_name}_{i + 1}" if custom_name else None,
-                    "alt_text": f"Generated image {i + 1}: {prompt[:50]}...",
+                    "alt_text": f"Generated image {i + 1}",
                 }
             )
 
@@ -389,7 +391,7 @@ def format_generation_response(
 ) -> str:
     """
     格式化图片生成结果为可读文本
-    
+
     将生成结果、提示词、尺寸、保存信息及使用统计等数据，
     按规范化格式输出为结构清晰的多行文本字符串。
 

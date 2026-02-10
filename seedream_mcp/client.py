@@ -5,9 +5,11 @@ Seedream MCP工具 - 客户端模块
 # 标准库导入
 import asyncio
 import base64
+import hashlib
 import json
 import time
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union, cast
+from urllib.parse import urlparse
 
 # 第三方库导入
 import httpx
@@ -18,14 +20,14 @@ from .utils.errors import (
     SeedreamAPIError,
     SeedreamNetworkError,
     SeedreamTimeoutError,
+    SeedreamValidationError,
     handle_api_error,
 )
 from .utils.logging import get_logger, log_function_call
 from .utils.path_utils import get_workspace_root, suggest_similar_paths, validate_image_path
 from .utils.validation import (
-    validate_image_list,
-    validate_image_url,
     validate_max_images,
+    validate_image_url,
     validate_prompt,
     validate_response_format,
     validate_sequential_image_limit,
@@ -54,6 +56,7 @@ class SeedreamClient:
         self.config = config or get_global_config()
         self.logger = get_logger(__name__)
         self._client: Optional[httpx.AsyncClient] = None
+        self._image_prepare_concurrency = 5
 
     async def __aenter__(self) -> "SeedreamClient":
         """
@@ -116,7 +119,11 @@ class SeedreamClient:
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
 
-        self.logger.info(f"开始文生图任务: prompt='{prompt[:50]}...', size={size}")
+        self.logger.info(
+            "开始文生图任务: prompt_meta={}, size={}",
+            self._summarize_prompt(prompt),
+            size,
+        )
 
         try:
             # 构建请求参数
@@ -179,12 +186,16 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
-        image = validate_image_url(image)
+        image = self._normalize_single_image(image)
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
 
-        self.logger.info(f"开始图文生图任务: prompt='{prompt[:50]}...', size={size}")
+        self.logger.info(
+            "开始图文生图任务: prompt_meta={}, size={}",
+            self._summarize_prompt(prompt),
+            size,
+        )
 
         try:
             # 处理图像输入
@@ -251,21 +262,21 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
-        image = validate_image_list(image, min_count=2, max_count=5)
+        image = self._normalize_image_sequence(image, min_count=2, max_count=5, field_name="image")
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
 
         self.logger.info(
-            f"开始多图融合任务: prompt='{prompt[:50]}...', image={len(image)}张, size={size}"
+            "开始多图融合任务: prompt_meta={}, image_count={}, size={}",
+            self._summarize_prompt(prompt),
+            len(image),
+            size,
         )
 
         try:
             # 处理图像输入
-            image_data_list = []
-            for img in image:
-                image_data = await self._prepare_image_input(img)
-                image_data_list.append(image_data)
+            image_data_list = await self._prepare_images_in_parallel(image)
 
             # 构建请求参数
             request_data = {
@@ -352,23 +363,32 @@ class SeedreamClient:
                 # 多张图片
                 reference_images = list(image)
             else:
-                raise SeedreamAPIError("image 参数必须是字符串或字符串列表")
+                raise SeedreamValidationError(
+                    "image 参数必须是字符串或字符串列表",
+                    field="image",
+                    value=image,
+                )
 
         if reference_images is not None:
-            reference_images = validate_image_list(reference_images, min_count=1, max_count=15)
+            reference_images = self._normalize_image_sequence(
+                reference_images,
+                min_count=1,
+                max_count=15,
+                field_name="image",
+            )
             validate_sequential_image_limit(max_images, reference_images)
 
         if reference_images is not None:
             if len(reference_images) == 1:
                 processed_image = await self._prepare_image_input(reference_images[0])
             else:
-                processed_image = []
-                for img in reference_images:
-                    processed_img = await self._prepare_image_input(img)
-                    processed_image.append(processed_img)
+                processed_image = await self._prepare_images_in_parallel(reference_images)
 
         self.logger.info(
-            f"开始组图输出任务: prompt='{prompt[:50]}...', max_images={max_images}, size={size}"
+            "开始组图输出任务: prompt_meta={}, max_images={}, size={}",
+            self._summarize_prompt(prompt),
+            max_images,
+            size,
         )
 
         try:
@@ -490,9 +510,81 @@ class SeedreamClient:
         return headers
 
     @staticmethod
+    def _summarize_prompt(prompt: str) -> str:
+        """
+        生成提示词日志摘要
+        """
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+        return f"len={len(prompt)}, sha256={digest}"
+
+    @staticmethod
+    def _normalize_single_image(image: str) -> str:
+        """
+        校验并规范化单张图片输入
+        """
+        if not isinstance(image, str):
+            raise SeedreamValidationError("image 参数必须是字符串", field="image", value=image)
+
+        normalized = image.strip()
+        if not normalized:
+            raise SeedreamValidationError("image 参数不能为空字符串", field="image", value=image)
+        return normalized
+
+    @staticmethod
+    def _normalize_image_sequence(
+        images: Sequence[str],
+        *,
+        min_count: int,
+        max_count: int,
+        field_name: str,
+    ) -> List[str]:
+        """
+        校验并规范化图片列表输入
+        """
+        if not isinstance(images, (list, tuple)):
+            raise SeedreamValidationError(
+                f"{field_name} 参数必须是字符串列表",
+                field=field_name,
+                value=images,
+            )
+
+        normalized_images: List[str] = []
+        for index, image in enumerate(images, start=1):
+            if not isinstance(image, str):
+                raise SeedreamValidationError(
+                    f"{field_name}[{index}] 必须是字符串",
+                    field=f"{field_name}[{index}]",
+                    value=image,
+                )
+            normalized_image = image.strip()
+            if not normalized_image:
+                raise SeedreamValidationError(
+                    f"{field_name}[{index}] 不能为空字符串",
+                    field=f"{field_name}[{index}]",
+                    value=image,
+                )
+            normalized_images.append(normalized_image)
+
+        image_count = len(normalized_images)
+        if image_count < min_count:
+            raise SeedreamValidationError(
+                f"{field_name} 数量不能少于 {min_count}",
+                field=field_name,
+                value=normalized_images,
+            )
+        if image_count > max_count:
+            raise SeedreamValidationError(
+                f"{field_name} 数量不能超过 {max_count}",
+                field=field_name,
+                value=normalized_images,
+            )
+
+        return normalized_images
+
+    @staticmethod
     def _summarize_image_field(image_value: Any) -> Any:
         """
-        汇总 image 字段用于安全日志，避免记录原始图像内容或路径细节
+        汇总 image 字段用于安全日志
         """
         if isinstance(image_value, list):
             return {
@@ -516,7 +608,7 @@ class SeedreamClient:
 
     def _sanitize_request_for_logging(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        对请求体做日志脱敏，避免泄露 prompt、图像数据等敏感内容
+        对请求体做日志脱敏
         """
         safe_data: Dict[str, Any] = {}
         for key, value in request_data.items():
@@ -530,272 +622,296 @@ class SeedreamClient:
             safe_data[key] = value
         return safe_data
 
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """
+        获取并校验 HTTP 客户端实例。
+        """
+        if self._client is None:
+            raise SeedreamAPIError("HTTP 客户端未正确初始化")
+        if not callable(getattr(self._client, "post", None)):
+            raise SeedreamAPIError("HTTP 客户端的 post 方法不可用")
+        return self._client
+
+    def _build_generation_url(self) -> str:
+        """
+        构建图片生成接口 URL。
+        """
+        return f"{self.config.base_url}/images/generations"
+
+    def _log_request_attempt(
+        self,
+        *,
+        endpoint: str,
+        attempt: int,
+        total_attempts: int,
+        url: str,
+        safe_request_data: Dict[str, Any],
+    ) -> None:
+        """
+        记录单次请求尝试日志。
+        """
+        self.logger.debug(
+            "{} API 调用尝试 {}/{}",
+            endpoint,
+            attempt + 1,
+            total_attempts,
+        )
+        self.logger.debug("请求 URL: {}", url)
+        self.logger.debug("请求数据(脱敏): {}", safe_request_data)
+
+    def _build_api_result(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        统一归一化 API 返回结果结构。
+        """
+        data = payload.get("data")
+        if isinstance(data, list):
+            data_count = len(data)
+        elif data is None:
+            data_count = 0
+        else:
+            data_count = 1
+
+        self.logger.debug(
+            "解析 JSON 成功: status={}, data_count={}",
+            payload.get("status"),
+            data_count,
+        )
+        return {
+            "success": True,
+            "data": payload.get("data", []),
+            "usage": payload.get("usage", {}),
+            "status": payload.get("status"),
+        }
+
+    def _raise_for_response_status(self, response: httpx.Response) -> None:
+        """
+        将非 200 状态码转换为统一 API 异常。
+        """
+        if response.status_code == 200:
+            return
+
+        try:
+            error_data = response.json()
+        except Exception:
+            error_data = {"message": response.text}
+        raise handle_api_error(response.status_code, error_data)
+
+    async def _raise_for_stream_response_status(self, response: httpx.Response) -> None:
+        """
+        将流式响应中的非 200 状态码转换为统一 API 异常。
+        """
+        if response.status_code == 200:
+            return
+
+        error_text = (await response.aread()).decode("utf-8", errors="ignore")
+        try:
+            error_data = json.loads(error_text)
+        except Exception:
+            error_data = {"message": error_text}
+        raise handle_api_error(response.status_code, error_data)
+
+    @staticmethod
+    def _is_sse_response(response: httpx.Response) -> bool:
+        """
+        判断响应是否为 SSE 事件流。
+        """
+        content_type = str(response.headers.get("content-type", ""))
+        return content_type.startswith("text/event-stream")
+
+    @staticmethod
+    def _format_sse_success_event(event: Dict[str, Any], model_id: str) -> Dict[str, Any]:
+        """
+        将 SSE 成功事件转换为统一图片项结构。
+        """
+        return {
+            "url": event.get("url"),
+            "b64_json": event.get("b64_json"),
+            "size": event.get("size"),
+            "image_index": event.get("image_index"),
+            "model": event.get("model", model_id),
+            "created": event.get("created", int(time.time())),
+            "type": event.get("type", "image_generation.partial_succeeded"),
+        }
+
+    def _parse_sse_segment(self, segment: bytes) -> Optional[Dict[str, Any]]:
+        """
+        解析单个 SSE 事件段，返回事件对象。
+        """
+        raw_segment = segment.strip()
+        if not raw_segment:
+            return None
+
+        try:
+            event_text = raw_segment.decode("utf-8")
+            payload: Optional[str] = None
+            for line in reversed(event_text.split("\n")):
+                if line.startswith("data:"):
+                    payload = line[5:].strip()
+                    break
+            if not payload or payload == "[DONE]":
+                return None
+            parsed_payload = json.loads(payload)
+            if not isinstance(parsed_payload, dict):
+                raise ValueError("SSE 事件数据必须是对象")
+            return cast(Dict[str, Any], parsed_payload)
+        except Exception as exc:
+            self.logger.error("SSE事件解析失败: {}", str(exc))
+            self.logger.debug("SSE事件原始段长度: {} bytes", len(raw_segment))
+            return None
+
+    async def _parse_sse_response(self, response: httpx.Response) -> Dict[str, Any]:
+        """
+        解析 SSE 响应为统一结构。
+        """
+        items: List[Dict[str, Any]] = []
+        usage: Dict[str, Any] = {}
+        status: Optional[str] = None
+
+        buffer = b""
+        max_buffer_size = self.config.stream_buffer_max_size
+        processed_bytes = 0
+
+        async for chunk in response.aiter_bytes(self.config.stream_chunk_size):
+            if not chunk:
+                continue
+
+            buffer += chunk
+            processed_bytes += len(chunk)
+
+            if len(buffer) > max_buffer_size:
+                self.logger.warning(
+                    "缓冲区大小超限 ({} > {})，清理旧数据",
+                    len(buffer),
+                    max_buffer_size,
+                )
+                buffer = buffer[-1024 * 1024 :]
+
+            if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
+                self.logger.debug("已处理 {} MB 数据", processed_bytes // 1024 // 1024)
+
+            while b"\n\n" in buffer:
+                segment, buffer = buffer.split(b"\n\n", 1)
+                event = self._parse_sse_segment(segment)
+                if event is None:
+                    continue
+
+                event_type = event.get("type")
+                if event_type == "image_generation.partial_succeeded":
+                    items.append(self._format_sse_success_event(event, self.config.model_id))
+                elif event_type == "image_generation.completed":
+                    usage = event.get("usage", {}) or {}
+                    status = "completed"
+
+        trailing_event = self._parse_sse_segment(buffer)
+        if trailing_event is not None:
+            event_type = trailing_event.get("type")
+            if event_type == "image_generation.partial_succeeded":
+                items.append(self._format_sse_success_event(trailing_event, self.config.model_id))
+            elif event_type == "image_generation.completed":
+                usage = trailing_event.get("usage", {}) or {}
+                status = "completed"
+
+        return {
+            "success": True,
+            "data": items,
+            "usage": usage,
+            "status": status,
+        }
+
+    async def _send_stream_request(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        url: str,
+        request_data: Dict[str, Any],
+        request_timeout: httpx.Timeout,
+    ) -> Dict[str, Any]:
+        """
+        发送流式请求并解析响应。
+        """
+        async with client.stream(
+            "POST", url, json=request_data, timeout=request_timeout
+        ) as response:
+            self.logger.debug("收到响应: 状态码={}", response.status_code)
+            await self._raise_for_stream_response_status(response)
+
+            if self._is_sse_response(response):
+                return await self._parse_sse_response(response)
+
+            try:
+                payload = json.loads((await response.aread()).decode("utf-8"))
+            except Exception as exc:
+                raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
+            return self._build_api_result(payload)
+
+    async def _send_standard_request(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        url: str,
+        request_data: Dict[str, Any],
+        request_timeout: httpx.Timeout,
+    ) -> Dict[str, Any]:
+        """
+        发送非流式请求并解析响应。
+        """
+        response = await client.post(url, json=request_data, timeout=request_timeout)
+        if response is None:
+            raise SeedreamAPIError("API 响应为空")
+
+        self.logger.debug("收到响应: 状态码={}", response.status_code)
+        self._raise_for_response_status(response)
+
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
+        return self._build_api_result(payload)
+
     async def _call_api(self, endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         调用 Seedream API
-
-        执行 HTTP POST 请求，支持流式和非流式两种传输模式，
-        实现自动重试机制和指数退避策略。
-
-        Args:
-            endpoint: API 端点标识（用于日志记录）
-            request_data: 请求体数据
-
-        Returns:
-            包含成功标志、数据、使用信息和状态等的响应字典
-
-        Raises:
-            SeedreamAPIError: API 调用失败或响应解析失败
-            SeedreamTimeoutError: 请求超时
-            SeedreamNetworkError: 网络连接失败
         """
         await self._ensure_client()
+        client = self._get_http_client()
 
-        # 验证客户端是否正确创建
-        if self._client is None:
-            raise SeedreamAPIError("HTTP 客户端未正确初始化")
-
-        # 构建 URL
-        url = f"{self.config.base_url}/images/generations"
+        url = self._build_generation_url()
         safe_request_data = self._sanitize_request_for_logging(request_data)
         request_timeout = self._build_http_timeout()
-
         total_attempts = max(1, self.config.max_retries)
 
         for attempt in range(total_attempts):
             try:
-                self.logger.debug(
-                    "{} API 调用尝试 {}/{}",
-                    endpoint,
-                    attempt + 1,
-                    total_attempts,
+                self._log_request_attempt(
+                    endpoint=endpoint,
+                    attempt=attempt,
+                    total_attempts=total_attempts,
+                    url=url,
+                    safe_request_data=safe_request_data,
                 )
-                self.logger.debug("请求 URL: {}", url)
-                self.logger.debug("请求数据(脱敏): {}", safe_request_data)
 
-                # 确保客户端的 post 方法存在且可调用
-                if not hasattr(self._client, "post") or not callable(self._client.post):
-                    raise SeedreamAPIError("HTTP 客户端的 post 方法不可用")
-
-                # 流式传输模式
                 if request_data.get("stream"):
-                    async with self._client.stream(
-                        "POST", url, json=request_data, timeout=request_timeout
-                    ) as response:
-                        if response is None:
-                            raise SeedreamAPIError("API 响应为空")
-                        self.logger.debug("收到响应: 状态码={}", response.status_code)
-                        if response.status_code != 200:
-                            error_text = (await response.aread()).decode("utf-8", errors="ignore")
-                            try:
-                                error_data = json.loads(error_text)
-                            except Exception:
-                                error_data = {"message": error_text}
-                            raise handle_api_error(response.status_code, error_data)
-                        # 处理 SSE 流式响应
-                        if response.headers.get("content-type", "").startswith("text/event-stream"):
-                            items: List[Dict[str, Any]] = []
-                            usage: Dict[str, Any] = {}
-                            status: Optional[str] = None
-                            # 使用 aiter_bytes 或 aread 读取流式数据
-                            if hasattr(response, "aiter_bytes"):
-                                buffer = b""
-                                max_buffer_size = self.config.stream_buffer_max_size
-                                processed_bytes = 0
-
-                                async for chunk in response.aiter_bytes():
-                                    if not chunk:
-                                        continue
-
-                                    # 检查缓冲区大小
-                                    if len(buffer) > max_buffer_size:
-                                        self.logger.warning(
-                                            f"缓冲区大小超限 ({len(buffer)} > {max_buffer_size})，清理旧数据"
-                                        )
-                                        # 保留最后 1MB 数据
-                                        buffer = buffer[-1024 * 1024:]
-
-                                    buffer += chunk
-                                    processed_bytes += len(chunk)
-
-                                    # 定期记录进度（每处理 1MB）
-                                    if processed_bytes % (1024 * 1024) == 0:
-                                        self.logger.debug(
-                                            f"已处理 {processed_bytes//1024//1024} MB 数据"
-                                        )
-
-                                    # 处理完整的事件段
-                                    while b"\n\n" in buffer:
-                                        seg, buffer = buffer.split(b"\n\n", 1)
-                                        s = seg.strip()
-                                        if not s:
-                                            continue
-                                        try:
-                                            text = s.decode("utf-8")
-                                            lines = text.split("\n")
-                                            payload = None
-                                            # 提取 data 行
-                                            for ln in reversed(lines):
-                                                if ln.startswith("data:"):
-                                                    payload = ln[5:].strip()
-                                                    break
-                                            if not payload or payload == "[DONE]":
-                                                continue
-                                            evt = json.loads(payload)
-                                        except Exception as e:
-                                            self.logger.error("SSE事件解析失败: {}", str(e))
-                                            self.logger.debug(
-                                                "SSE事件原始段长度: {} bytes",
-                                                len(s),
-                                            )
-                                            continue
-                                        # 处理事件类型
-                                        t = evt.get("type")
-                                        if t == "image_generation.partial_succeeded":
-                                            items.append(
-                                                {
-                                                    "url": evt.get("url"),
-                                                    "b64_json": evt.get("b64_json"),
-                                                    "size": evt.get("size"),
-                                                    "image_index": evt.get("image_index"),
-                                                    "model": evt.get("model", self.config.model_id),
-                                                    "created": evt.get("created", int(time.time())),
-                                                    "type": evt.get("type", t),
-                                                }
-                                            )
-                                        elif t == "image_generation.partial_failed":
-                                            continue
-                                        elif t == "image_generation.completed":
-                                            usage = evt.get("usage", {}) or {}
-                                            status = "completed"
-                            else:
-                                # 流式处理大响应，避免内存溢出
-                                max_chunk_size = self.config.stream_chunk_size
-                                segments = []
-                                buffer = b""
-
-                                async for chunk in response.aiter_bytes(max_chunk_size):
-                                    buffer += chunk
-
-                                    # 处理缓冲区中的完整事件
-                                    while b"\n\n" in buffer:
-                                        segment, buffer = buffer.split(b"\n\n", 1)
-                                        if segment.strip():
-                                            segments.append(segment.strip())
-
-                                # 处理剩余数据
-                                if buffer.strip():
-                                    segments.append(buffer.strip())
-
-                                # 记录处理的事件数量
-                                self.logger.info(f"流式处理了 {len(segments)} 个事件段")
-
-                                for seg in segments:
-                                    s = seg.strip()
-                                    if not s:
-                                        continue
-                                    try:
-                                        event_text = s.decode("utf-8")
-                                        lines = event_text.split("\n")
-                                        payload = None
-                                        for ln in reversed(lines):
-                                            if ln.startswith("data:"):
-                                                payload = ln[5:].strip()
-                                                break
-                                        if not payload or payload == "[DONE]":
-                                            continue
-                                        evt = json.loads(payload)
-                                    except Exception as e:
-                                        self.logger.error("SSE事件解析失败: {}", str(e))
-                                        self.logger.debug("SSE事件原始段长度: {} bytes", len(s))
-                                        continue
-                                    t = evt.get("type")
-                                    if t == "image_generation.partial_succeeded":
-                                        items.append(
-                                            {
-                                                "url": evt.get("url"),
-                                                "b64_json": evt.get("b64_json"),
-                                                "size": evt.get("size"),
-                                                "image_index": evt.get("image_index"),
-                                                "model": evt.get("model", self.config.model_id),
-                                                "created": evt.get("created", int(time.time())),
-                                                "type": evt.get("type", t),
-                                            }
-                                        )
-                                    elif t == "image_generation.partial_failed":
-                                        continue
-                                    elif t == "image_generation.completed":
-                                        usage = evt.get("usage", {}) or {}
-                                        status = "completed"
-                            return {
-                                "success": True,
-                                "data": items,
-                                "usage": usage,
-                                "status": status,
-                            }
-                        else:
-                            # 非 SSE 响应
-                            response_bytes = await response.aread()
-                            parsed = json.loads(response_bytes.decode("utf-8"))
-                            return {
-                                "success": True,
-                                "data": parsed.get("data", []),
-                                "usage": parsed.get("usage", {}),
-                                "status": parsed.get("status"),
-                            }
-                else:
-                    # 非流式传输模式
-                    response = await self._client.post(
-                        url, json=request_data, timeout=request_timeout
+                    return await self._send_stream_request(
+                        client=client,
+                        url=url,
+                        request_data=request_data,
+                        request_timeout=request_timeout,
                     )
 
-                # 验证响应对象
-                if response is None:
-                    raise SeedreamAPIError("API 响应为空")
-
-                self.logger.debug("收到响应: 状态码={}", response.status_code)
-
-                # 检查 HTTP 状态码
-                if response.status_code == 200:
-                    # 解析 JSON 响应
-                    try:
-                        result = response.json()
-                        data = result.get("data")
-                        if isinstance(data, list):
-                            data_count = len(data)
-                        elif data is None:
-                            data_count = 0
-                        else:
-                            data_count = 1
-                        self.logger.debug(
-                            "解析 JSON 成功: status={}, data_count={}",
-                            result.get("status"),
-                            data_count,
-                        )
-                    except Exception as json_error:
-                        raise SeedreamAPIError(f"JSON 解析失败: {str(json_error)}")
-
-                    return {
-                        "success": True,
-                        "data": result.get("data", []),
-                        "usage": result.get("usage", {}),
-                        "status": result.get("status"),
-                    }
-                else:
-                    try:
-                        error_data = response.json()
-                    except Exception:
-                        error_data = {"message": response.text}
-                    raise handle_api_error(response.status_code, error_data)
-
-            except SeedreamAPIError as e:
-                status_code = e.status_code or 0
+                return await self._send_standard_request(
+                    client=client,
+                    url=url,
+                    request_data=request_data,
+                    request_timeout=request_timeout,
+                )
+            except SeedreamAPIError as exc:
+                status_code = exc.status_code or 0
                 if 400 <= status_code < 500:
                     self.logger.warning(
                         "{} API 调用失败（状态码={}），不再重试: {}",
                         endpoint,
                         status_code,
-                        e.message,
+                        exc.message,
                     )
                     raise
 
@@ -804,33 +920,41 @@ class SeedreamClient:
                     endpoint,
                     attempt + 1,
                     total_attempts,
-                    e.message,
+                    exc.message,
+                )
+                if attempt == total_attempts - 1:
+                    raise
+            except httpx.TimeoutException as exc:
+                self.logger.warning(
+                    "{} API 调用超时 (尝试 {}/{}): {}",
+                    endpoint,
+                    attempt + 1,
+                    total_attempts,
+                    str(exc),
+                )
+                if attempt == total_attempts - 1:
+                    raise SeedreamTimeoutError(f"{endpoint} API 调用超时") from exc
+            except httpx.RequestError as exc:
+                self.logger.warning(
+                    "{} 网络错误 (尝试 {}/{}): {}",
+                    endpoint,
+                    attempt + 1,
+                    total_attempts,
+                    str(exc),
+                )
+                if attempt == total_attempts - 1:
+                    raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(exc)}") from exc
+            except Exception as exc:
+                self.logger.warning(
+                    "{} API 调用失败 (尝试 {}/{}): {}",
+                    endpoint,
+                    attempt + 1,
+                    total_attempts,
+                    str(exc),
                 )
                 if attempt == total_attempts - 1:
                     raise
 
-            except httpx.TimeoutException:
-                self.logger.warning(
-                    f"{endpoint} API 调用超时 (尝试 {attempt + 1}/{total_attempts})"
-                )
-                if attempt == total_attempts - 1:
-                    raise SeedreamTimeoutError(f"{endpoint} API 调用超时")
-
-            except httpx.RequestError as e:
-                self.logger.warning(
-                    f"{endpoint} 网络错误 (尝试 {attempt + 1}/{total_attempts}): {str(e)}"
-                )
-                if attempt == total_attempts - 1:
-                    raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(e)}")
-
-            except Exception as e:
-                self.logger.warning(
-                    f"{endpoint} API 调用失败 (尝试 {attempt + 1}/{total_attempts}): {str(e)}"
-                )
-                if attempt == total_attempts - 1:
-                    raise
-
-            # 指数退避重试
             if attempt < total_attempts - 1:
                 await asyncio.sleep(2**attempt)
 
@@ -858,11 +982,14 @@ class SeedreamClient:
 
             # 如果是 URL，直接返回
             if normalized_image.startswith(("http://", "https://")):
+                parsed = urlparse(normalized_image)
+                if not parsed.netloc:
+                    raise SeedreamAPIError(f"无效的图像 URL: {normalized_image}")
                 return normalized_image
 
             # 如果是 Data URI，直接返回
             if normalized_image.lower().startswith("data:image/"):
-                return normalized_image
+                return validate_image_url(normalized_image)
 
             # 验证图片路径
             is_valid, error_msg, normalized_path = validate_image_path(
@@ -905,10 +1032,24 @@ class SeedreamClient:
             self.logger.info(f"成功处理图片文件: {normalized_path} ({len(image_bytes)} bytes)")
             return f"data:{mime_type};base64,{image_b64}"
 
-        except SeedreamAPIError:
+        except (SeedreamAPIError, SeedreamValidationError):
             raise
         except Exception as e:
             raise SeedreamAPIError(f"图像处理失败: {str(e)}")
+
+    async def _prepare_images_in_parallel(self, images: Sequence[str]) -> List[str]:
+        """
+        受限并发预处理多张图片
+        """
+        concurrency = max(1, self._image_prepare_concurrency)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _prepare_with_limit(image: str) -> str:
+            async with semaphore:
+                return await self._prepare_image_input(image)
+
+        tasks = [_prepare_with_limit(image) for image in images]
+        return list(await asyncio.gather(*tasks))
 
     def _handle_api_error(self, error: Exception) -> Exception:
         """
@@ -923,7 +1064,15 @@ class SeedreamClient:
         Returns:
             处理后的 Seedream 特定异常对象
         """
-        if isinstance(error, (SeedreamAPIError, SeedreamTimeoutError, SeedreamNetworkError)):
+        if isinstance(
+            error,
+            (
+                SeedreamAPIError,
+                SeedreamValidationError,
+                SeedreamTimeoutError,
+                SeedreamNetworkError,
+            ),
+        ):
             return error
 
         error_str = str(error)

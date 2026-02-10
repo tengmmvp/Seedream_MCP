@@ -2,17 +2,54 @@
 Seedream MCP工具配置管理模块
 """
 
-# 标准库导入
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
-# 第三方库导入
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
-# 本地模块导入
 from .utils.errors import SeedreamConfigError
+
+# ====================
+# 配置常量
+# ====================
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
+
+MODEL_ALIASES: dict[str, str] = {
+    "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
+    "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
+}
+
+# 记录进程启动后模块加载时的环境键，用于区分“系统环境变量”与“.env 注入变量”
+_BASE_ENV_KEYS: set[str] = set(os.environ.keys())
+_INJECTED_ENV_VALUES: dict[str, str] = {}
+
+ENV_DEFAULTS: dict[str, Any] = {
+    "ARK_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
+    "SEEDREAM_MODEL_ID": "doubao-seedream-4-5-251128",
+    "SEEDREAM_DEFAULT_SIZE": "2K",
+    "SEEDREAM_DEFAULT_WATERMARK": "false",
+    "SEEDREAM_TIMEOUT": "60",
+    "SEEDREAM_API_TIMEOUT": "600",
+    "SEEDREAM_MAX_RETRIES": "3",
+    "LOG_LEVEL": "INFO",
+    "LOG_FILE": "",
+    "SEEDREAM_AUTO_SAVE_ENABLED": "true",
+    "SEEDREAM_AUTO_SAVE_BASE_DIR": "",
+    "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT": "30",
+    "SEEDREAM_AUTO_SAVE_MAX_RETRIES": "3",
+    "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE": str(50 * 1024 * 1024),
+    "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT": "5",
+    "SEEDREAM_AUTO_SAVE_DATE_FOLDER": "true",
+    "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS": "30",
+    "SEEDREAM_STREAM_BUFFER_MAX_SIZE": str(10 * 1024 * 1024),
+    "SEEDREAM_STREAM_CHUNK_SIZE": str(1024 * 1024),
+}
 
 
 @dataclass
@@ -20,28 +57,7 @@ class SeedreamConfig:
     """
     Seedream MCP工具配置类
 
-    封装Seedream服务的所有配置参数，包括API认证、模型设置、日志配置和自动保存功能。
-    支持从环境变量加载配置，并提供完整的参数验证机制。
-
-    Attributes:
-        api_key: 火山引擎API密钥，必需参数
-        base_url: API服务基础URL，默认为火山引擎北京节点
-        model_id: 使用的模型ID，默认为doubao-seedream-4-5-251128
-        default_size: 默认图像尺寸，默认值为2K
-        default_watermark: 是否默认添加水印，默认值为False
-        timeout: 通用超时时间（秒）
-        api_timeout: API请求超时时间（秒）
-        max_retries: 最大重试次数
-        log_level: 日志级别，可选值：DEBUG、INFO、WARNING、ERROR、CRITICAL
-        log_file: 日志文件路径，为None时输出到控制台
-        auto_save_enabled: 是否启用自动保存功能
-        auto_save_base_dir: 自动保存的基础目录路径
-        auto_save_download_timeout: 下载超时时间（秒）
-        auto_save_max_retries: 下载最大重试次数
-        auto_save_max_file_size: 允许的最大文件大小（字节）
-        auto_save_max_concurrent: 最大并发下载数
-        auto_save_date_folder: 是否按日期创建子文件夹
-        auto_save_cleanup_days: 自动清理天数，0表示不清理
+    封装 Seedream 服务的所有配置参数，包括 API 认证、模型设置、日志配置和自动保存功能。
     """
 
     # 必需配置
@@ -75,89 +91,57 @@ class SeedreamConfig:
     stream_chunk_size: int = 1024 * 1024
 
     def __post_init__(self) -> None:
-        """
-        初始化后处理
-
-        在dataclass实例化完成后自动执行配置验证。
-        """
         self.validate()
 
     def validate(self) -> None:
         """
         验证配置参数
-
-        对所有配置项进行完整性和有效性检查，确保配置符合业务规则。
-
-        Raises:
-            SeedreamConfigError: 当任何配置项不符合要求时抛出
         """
-        # 验证API密钥
         if not self.api_key or self.api_key.strip() == "":
             raise SeedreamConfigError("API密钥不能为空")
-
         if self.api_key == "your_api_key_here":
             raise SeedreamConfigError("请设置有效的API密钥，不能使用默认占位符")
 
-        # 验证base_url
         if not self.base_url or not self.base_url.startswith(("http://", "https://")):
             raise SeedreamConfigError("base_url必须是有效的HTTP/HTTPS URL")
 
-        # 验证model_id
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError("model_id不能为空")
 
-        # 验证default_size
         valid_sizes = ["1K", "2K", "4K"]
         if self.default_size not in valid_sizes:
             raise SeedreamConfigError(f"default_size必须是以下值之一: {valid_sizes}")
 
-        # 验证timeout
         if self.timeout <= 0:
             raise SeedreamConfigError("timeout必须大于0")
-
-        # 验证api_timeout
         if self.api_timeout <= 0:
             raise SeedreamConfigError("api_timeout必须大于0")
-
-        # 验证max_retries
         if self.max_retries < 1:
             raise SeedreamConfigError("max_retries不能小于1")
 
-        # 验证log_level
         valid_log_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if self.log_level.upper() not in valid_log_levels:
             raise SeedreamConfigError(f"log_level必须是以下值之一: {valid_log_levels}")
-
-        # 标准化log_level
         self.log_level = self.log_level.upper()
 
-        # 验证自动保存配置
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError("auto_save_download_timeout必须大于0")
-
         if self.auto_save_max_retries < 0:
             raise SeedreamConfigError("auto_save_max_retries不能小于0")
-
         if self.auto_save_max_file_size <= 0:
             raise SeedreamConfigError("auto_save_max_file_size必须大于0")
-
         if self.auto_save_max_concurrent <= 0:
             raise SeedreamConfigError("auto_save_max_concurrent必须大于0")
-
         if self.auto_save_cleanup_days < 0:
             raise SeedreamConfigError("auto_save_cleanup_days不能小于0")
 
-        # 验证流式处理配置
         if self.stream_buffer_max_size <= 0:
             raise SeedreamConfigError("stream_buffer_max_size必须大于0")
-
         if self.stream_chunk_size <= 0:
             raise SeedreamConfigError("stream_chunk_size必须大于0")
-
         if self.stream_chunk_size > self.stream_buffer_max_size:
             raise SeedreamConfigError("stream_chunk_size不能大于stream_buffer_max_size")
 
-        # 验证自动保存目录
         if self.auto_save_base_dir:
             try:
                 base_dir = Path(self.auto_save_base_dir)
@@ -165,93 +149,21 @@ class SeedreamConfig:
                     raise SeedreamConfigError(
                         f"auto_save_base_dir不是有效目录: {self.auto_save_base_dir}"
                     )
-            except Exception as e:
+            except Exception as exc:
                 raise SeedreamConfigError(
-                    f"auto_save_base_dir路径无效: {self.auto_save_base_dir} -> {e}"
+                    f"auto_save_base_dir路径无效: {self.auto_save_base_dir} -> {exc}"
                 )
 
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> "SeedreamConfig":
         """
         从环境变量创建配置实例
-
-        自动加载.env文件并读取环境变量，创建完整的配置实例。
-        支持指定自定义.env文件路径或使用默认路径。
-
-        Args:
-            env_file: .env文件路径，为None时使用默认路径
-
-        Returns:
-            完整初始化的SeedreamConfig实例
-
-        Raises:
-            SeedreamConfigError: 当必需的环境变量缺失或配置验证失败时抛出
         """
-        # 加载.env文件
-        if env_file:
-            load_dotenv(env_file)
-        else:
-            load_dotenv()
-            load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
+        return build_config_from_sources(env_file=env_file)
 
-        # 读取环境变量
-        api_key = os.getenv("ARK_API_KEY", "").strip()
-        if not api_key:
-            raise SeedreamConfigError(
-                "未找到ARK_API_KEY环境变量。请设置您的火山引擎API密钥。\n"
-                "您可以通过以下方式设置：\n"
-                "1. 创建.env文件并添加: ARK_API_KEY=your_actual_api_key\n"
-                "2. 设置系统环境变量: export ARK_API_KEY=your_actual_api_key"
-            )
-
-        # 创建配置实例
-        config = cls(
-            api_key=api_key,
-            base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
-            model_id=os.getenv("SEEDREAM_MODEL_ID", "doubao-seedream-4-5-251128"),
-            default_size=os.getenv("SEEDREAM_DEFAULT_SIZE", "2K"),
-            default_watermark=parse_bool(os.getenv("SEEDREAM_DEFAULT_WATERMARK", "false")),
-            timeout=parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
-            api_timeout=parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "600")),
-            max_retries=parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
-            log_level=os.getenv("LOG_LEVEL", "INFO"),
-            log_file=os.getenv("LOG_FILE"),
-            # 自动保存配置
-            auto_save_enabled=parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_ENABLED", "true")),
-            auto_save_base_dir=os.getenv("SEEDREAM_AUTO_SAVE_BASE_DIR"),
-            auto_save_download_timeout=parse_int(
-                os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")
-            ),
-            auto_save_max_retries=parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_RETRIES", "3")),
-            auto_save_max_file_size=parse_int(
-                os.getenv("SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE", str(50 * 1024 * 1024))
-            ),
-            auto_save_max_concurrent=parse_int(
-                os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")
-            ),
-            auto_save_date_folder=parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
-            auto_save_cleanup_days=parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
-            # 流式处理配置
-            stream_buffer_max_size=parse_int(
-                os.getenv("SEEDREAM_STREAM_BUFFER_MAX_SIZE", str(10 * 1024 * 1024))
-            ),
-            stream_chunk_size=parse_int(os.getenv("SEEDREAM_STREAM_CHUNK_SIZE", str(1024 * 1024))),
-        )
-
-        return config
-
-    def to_dict(self) -> dict:
-        """
-        转换为字典格式
-
-        将配置对象转换为字典形式，便于序列化和日志输出。
-        API密钥等敏感信息将被自动隐藏。
-
-        Returns:
-            包含所有配置项的字典，敏感字段已脱敏
-        """
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "api_key": "***" if self.api_key else None,  # 隐藏敏感信息
+            "api_key": "***" if self.api_key else None,
             "base_url": self.base_url,
             "model_id": self.model_id,
             "default_size": self.default_size,
@@ -274,14 +186,6 @@ class SeedreamConfig:
         }
 
     def __repr__(self) -> str:
-        """
-        字符串表示
-
-        返回配置对象的简洁字符串表示，敏感信息将被自动隐藏。
-
-        Returns:
-            配置对象的字符串表示形式
-        """
         return (
             f"SeedreamConfig(api_key='***', base_url='{self.base_url}', model_id='{self.model_id}')"
         )
@@ -290,15 +194,6 @@ class SeedreamConfig:
 def parse_bool(value: object) -> bool:
     """
     解析布尔值字符串
-
-    将字符串类型的布尔值转换为Python布尔类型。
-    支持多种常见的布尔值表示形式，大小写不敏感。
-
-    Args:
-        value: 待解析的值（字符串或布尔值）
-
-    Returns:
-        解析后的布尔值
     """
     if isinstance(value, bool):
         return value
@@ -310,17 +205,6 @@ def parse_bool(value: object) -> bool:
 def parse_int(value: object) -> int:
     """
     解析整数字符串
-
-    将字符串类型的整数值转换为Python整数类型。
-
-    Args:
-        value: 待解析的值
-
-    Returns:
-        解析后的整数值
-
-    Raises:
-        SeedreamConfigError: 当字符串无法解析为有效整数时抛出
     """
     if isinstance(value, bool):
         return int(value)
@@ -335,8 +219,305 @@ def parse_int(value: object) -> int:
 
     try:
         return int(normalized)
-    except ValueError:
-        raise SeedreamConfigError(f"无法解析整数值: {value}")
+    except ValueError as exc:
+        raise SeedreamConfigError(f"无法解析整数值: {value}") from exc
+
+
+def _read_env_values(env_file: Optional[str]) -> dict[str, str]:
+    """
+    读取 .env 文件键值并注入进程环境变量
+    """
+
+    def _load_single_env_file(path: Path) -> dict[str, str]:
+        values = dotenv_values(path)
+        normalized = {k: str(v) for k, v in values.items() if v is not None}
+        _inject_env_values(normalized)
+        return normalized
+
+    if env_file:
+        env_path = Path(env_file).expanduser().resolve()
+        if not env_path.is_file():
+            raise SeedreamConfigError(f"配置文件不存在: {env_path}")
+        return _load_single_env_file(env_path)
+
+    merged_values: dict[str, str] = {}
+    default_env_path = DEFAULT_ENV_FILE.expanduser().resolve()
+    runtime_env_path = (Path.cwd() / ".env").expanduser().resolve()
+
+    if default_env_path.is_file():
+        merged_values.update(_load_single_env_file(default_env_path))
+
+    if runtime_env_path.is_file():
+        merged_values.update(_load_single_env_file(runtime_env_path))
+
+    return merged_values
+
+
+def _inject_env_values(values: Mapping[str, str]) -> None:
+    """
+    将 .env 键值注入进程环境变量
+
+    规则：
+    - 不覆盖系统环境变量（包括运行时动态设置）；
+    - 允许覆盖此前由 .env 注入的值（支持重复构建切换 env_file）。
+    """
+    for key, value in values.items():
+        current = os.environ.get(key)
+        injected_value = _INJECTED_ENV_VALUES.get(key)
+
+        # 若该键当前已存在且并非 .env 注入值，视为系统环境变量
+        if current is not None and key not in _INJECTED_ENV_VALUES:
+            _BASE_ENV_KEYS.add(key)
+            continue
+
+        # 若该键此前为注入值，但运行时被外部修改，则升级为“系统环境变量”
+        if injected_value is not None and current is not None and current != injected_value:
+            _BASE_ENV_KEYS.add(key)
+            _INJECTED_ENV_VALUES.pop(key, None)
+            continue
+
+        os.environ[key] = value
+        _INJECTED_ENV_VALUES[key] = value
+
+
+def _get_system_env_value(env_key: str) -> Optional[str]:
+    """
+    获取系统环境变量值
+    """
+    env_value = os.getenv(env_key)
+    if env_value is None:
+        return None
+
+    injected_value = _INJECTED_ENV_VALUES.get(env_key)
+    if injected_value is not None and env_value == injected_value and env_key not in _BASE_ENV_KEYS:
+        return None
+
+    return env_value
+
+
+def _pick_config_value(
+    overrides: Mapping[str, object],
+    key: str,
+    env_key: str,
+    env_values: Mapping[str, str],
+    default_value: object,
+) -> object:
+    """
+    按优先级选取配置值：overrides > 系统环境变量 > env 文件 > 默认值。
+    """
+    if key in overrides and overrides[key] is not None:
+        return overrides[key]
+
+    env_value = _get_system_env_value(env_key)
+    if env_value is not None and env_value.strip():
+        return env_value
+
+    file_value = env_values.get(env_key)
+    if file_value is not None and str(file_value).strip():
+        return file_value
+
+    return default_value
+
+
+def build_config_from_sources(
+    overrides: Optional[Mapping[str, object]] = None,
+    env_file: Optional[str] = None,
+) -> SeedreamConfig:
+    """
+    从统一来源构建配置对象
+
+    Args:
+        overrides: 调用方显式覆盖值（例如 CLI 参数）。
+        env_file: 可选 .env 文件路径，未提供时按“项目根 `.env` -> 当前工作目录 `.env`”
+            合并读取（cwd 覆盖）。
+    """
+    override_values = dict(overrides or {})
+    env_values = _read_env_values(env_file)
+
+    api_key = str(
+        _pick_config_value(
+            override_values,
+            "api_key",
+            "ARK_API_KEY",
+            env_values,
+            "",
+        )
+    ).strip()
+    if not api_key:
+        raise SeedreamConfigError("未找到ARK_API_KEY环境变量或配置文件值。")
+
+    raw_model = str(
+        _pick_config_value(
+            override_values,
+            "model",
+            "SEEDREAM_MODEL_ID",
+            env_values,
+            ENV_DEFAULTS["SEEDREAM_MODEL_ID"],
+        )
+    )
+    model_id = MODEL_ALIASES.get(raw_model, raw_model)
+
+    log_file_raw = _pick_config_value(
+        override_values, "log_file", "LOG_FILE", env_values, ENV_DEFAULTS["LOG_FILE"]
+    )
+    auto_save_base_dir_raw = _pick_config_value(
+        override_values,
+        "auto_save_base_dir",
+        "SEEDREAM_AUTO_SAVE_BASE_DIR",
+        env_values,
+        ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_BASE_DIR"],
+    )
+
+    return SeedreamConfig(
+        api_key=api_key,
+        base_url=str(
+            _pick_config_value(
+                override_values,
+                "base_url",
+                "ARK_BASE_URL",
+                env_values,
+                ENV_DEFAULTS["ARK_BASE_URL"],
+            )
+        ),
+        model_id=model_id,
+        default_size=str(
+            _pick_config_value(
+                override_values,
+                "default_size",
+                "SEEDREAM_DEFAULT_SIZE",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_DEFAULT_SIZE"],
+            )
+        ),
+        default_watermark=parse_bool(
+            _pick_config_value(
+                override_values,
+                "watermark",
+                "SEEDREAM_DEFAULT_WATERMARK",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_DEFAULT_WATERMARK"],
+            )
+        ),
+        timeout=parse_int(
+            _pick_config_value(
+                override_values,
+                "timeout",
+                "SEEDREAM_TIMEOUT",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_TIMEOUT"],
+            )
+        ),
+        api_timeout=parse_int(
+            _pick_config_value(
+                override_values,
+                "api_timeout",
+                "SEEDREAM_API_TIMEOUT",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_API_TIMEOUT"],
+            )
+        ),
+        max_retries=parse_int(
+            _pick_config_value(
+                override_values,
+                "max_retries",
+                "SEEDREAM_MAX_RETRIES",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_MAX_RETRIES"],
+            )
+        ),
+        log_level=str(
+            _pick_config_value(
+                override_values,
+                "log_level",
+                "LOG_LEVEL",
+                env_values,
+                ENV_DEFAULTS["LOG_LEVEL"],
+            )
+        ),
+        log_file=(str(log_file_raw) or None),
+        auto_save_enabled=parse_bool(
+            _pick_config_value(
+                override_values,
+                "auto_save_enabled",
+                "SEEDREAM_AUTO_SAVE_ENABLED",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_ENABLED"],
+            )
+        ),
+        auto_save_base_dir=(str(auto_save_base_dir_raw) or None),
+        auto_save_download_timeout=parse_int(
+            _pick_config_value(
+                override_values,
+                "auto_save_download_timeout",
+                "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"],
+            )
+        ),
+        auto_save_max_retries=parse_int(
+            _pick_config_value(
+                override_values,
+                "auto_save_max_retries",
+                "SEEDREAM_AUTO_SAVE_MAX_RETRIES",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_MAX_RETRIES"],
+            )
+        ),
+        auto_save_max_file_size=parse_int(
+            _pick_config_value(
+                override_values,
+                "auto_save_max_file_size",
+                "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE"],
+            )
+        ),
+        auto_save_max_concurrent=parse_int(
+            _pick_config_value(
+                override_values,
+                "auto_save_max_concurrent",
+                "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_MAX_CONCURRENT"],
+            )
+        ),
+        auto_save_date_folder=parse_bool(
+            _pick_config_value(
+                override_values,
+                "auto_save_date_folder",
+                "SEEDREAM_AUTO_SAVE_DATE_FOLDER",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_DATE_FOLDER"],
+            )
+        ),
+        auto_save_cleanup_days=parse_int(
+            _pick_config_value(
+                override_values,
+                "auto_save_cleanup_days",
+                "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_AUTO_SAVE_CLEANUP_DAYS"],
+            )
+        ),
+        stream_buffer_max_size=parse_int(
+            _pick_config_value(
+                override_values,
+                "stream_buffer_max_size",
+                "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_STREAM_BUFFER_MAX_SIZE"],
+            )
+        ),
+        stream_chunk_size=parse_int(
+            _pick_config_value(
+                override_values,
+                "stream_chunk_size",
+                "SEEDREAM_STREAM_CHUNK_SIZE",
+                env_values,
+                ENV_DEFAULTS["SEEDREAM_STREAM_CHUNK_SIZE"],
+            )
+        ),
+    )
 
 
 # 全局配置实例
@@ -345,16 +526,7 @@ _global_config: Optional[SeedreamConfig] = None
 
 def get_global_config() -> SeedreamConfig:
     """
-    获取全局配置实例
-
-    获取全局单例配置对象，首次调用时自动从环境变量初始化。
-    使用延迟初始化策略，仅在需要时创建配置实例。
-
-    Returns:
-        全局SeedreamConfig实例
-
-    Raises:
-        SeedreamConfigError: 当配置初始化失败时抛出
+    获取全局配置实例。
     """
     global _global_config
     if _global_config is None:
@@ -364,12 +536,7 @@ def get_global_config() -> SeedreamConfig:
 
 def set_config(config: SeedreamConfig) -> None:
     """
-    设置全局配置实例
-
-    手动设置全局配置对象，用于测试或特殊场景。
-
-    Args:
-        config: 要设置的配置实例
+    设置全局配置实例。
     """
     global _global_config
     _global_config = config
@@ -377,16 +544,7 @@ def set_config(config: SeedreamConfig) -> None:
 
 def reload_config(env_file: Optional[str] = None) -> None:
     """
-    重新加载配置
-
-    从环境变量重新加载配置，覆盖当前的全局配置实例。
-    适用于配置动态更新场景。
-
-    Args:
-        env_file: .env文件路径，为None时使用默认路径
-
-    Raises:
-        SeedreamConfigError: 当配置加载或验证失败时抛出
+    重新加载全局配置。
     """
     global _global_config
     _global_config = SeedreamConfig.from_env(env_file)

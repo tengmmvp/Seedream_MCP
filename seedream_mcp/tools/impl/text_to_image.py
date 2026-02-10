@@ -54,6 +54,7 @@ async def handle_text_to_image(
     Raises:
         Exception: 当生成过程中发生错误时，捕获异常并返回格式化的错误提示信息。
     """
+
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
     ) -> Dict[str, Any]:
@@ -75,7 +76,7 @@ async def handle_text_to_image(
         completion_title="文生图任务完成",
         failure_prefix="文生图生成",
         guidance="请检查提示词长度、尺寸与模型兼容性，确认 API Key 和网络可用后重试。",
-        start_log_message="文生图开始: prompt='{}...', size={}, stream={}",
-        start_log_values_builder=lambda ctx: ((ctx.prompt or "")[:50], ctx.size, ctx.stream),
+        start_log_message="文生图开始: prompt_len={}, size={}, stream={}",
+        start_log_values_builder=lambda ctx: (len(ctx.prompt or ""), ctx.size, ctx.stream),
         request_executor=_execute,
     )

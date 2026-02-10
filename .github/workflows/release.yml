@@ -32,10 +32,21 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-          cache-dependency-glob: "pyproject.toml"
+          cache-dependency-glob: "uv.lock"
 
       - name: 📥 Install dependencies
-        run: uv sync --dev
+        run: |
+          uv sync
+          uv pip install --python .venv pytest pytest-asyncio mypy flake8 tomli
+
+      - name: 🧪 Run tests
+        run: uv run pytest -q
+
+      - name: 🔍 Run mypy
+        run: uv run mypy seedream_mcp
+
+      - name: 🧹 Run flake8
+        run: uv run flake8 seedream_mcp tests
 
       - name: 🧪 Quick validation
         run: |

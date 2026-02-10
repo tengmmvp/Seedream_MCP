@@ -16,6 +16,7 @@ def setup_logging(
     log_file: Optional[str] = None,
     enable_console: bool = True,
     enable_file: bool = True,
+    force_standard_logging: bool = False,
 ) -> None:
     """
     设置日志配置
@@ -25,6 +26,7 @@ def setup_logging(
         log_file: 日志文件路径，如果为None则使用默认路径
         enable_console: 是否启用控制台输出
         enable_file: 是否启用文件输出
+        force_standard_logging: 是否强制接管标准库 logging 配置
     """
     # 移除默认的loguru处理器
     logger.remove()
@@ -61,15 +63,14 @@ def setup_logging(
             str(log_path),
             level=level,
             format=(
-                "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
-                "{name}:{function}:{line} - {message}"
+                "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | " "{name}:{function}:{line} - {message}"
             ),
             rotation="10 MB",
             retention="30 days",
             compression="zip",
             backtrace=True,
             diagnose=False,
-            enqueue=True, 
+            enqueue=True,
         )
 
     # 配置标准库logging以重定向到loguru
@@ -89,12 +90,14 @@ def setup_logging(
                 frame = frame.f_back
                 depth += 1
 
-            logger.opt(depth=depth, exception=record.exc_info).log(
-                log_level, record.getMessage()
-            )
+            logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
 
     # 设置标准库logging
-    logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+    logging.basicConfig(
+        handlers=[InterceptHandler()],
+        level=0,
+        force=force_standard_logging,
+    )
 
     # 设置第三方库的日志级别
     logging.getLogger("urllib3").setLevel(logging.WARNING)

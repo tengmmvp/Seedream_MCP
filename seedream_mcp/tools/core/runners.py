@@ -23,12 +23,10 @@ from .schemas import (
 )
 
 
-async def run_text_to_image(
-    params: TextToImageInput, config: SeedreamConfig
-) -> List[TextContent]:
+async def run_text_to_image(params: TextToImageInput, config: SeedreamConfig) -> List[TextContent]:
     """
     执行文生图生成工具
-    
+
     Args:
         params: 文生图生成的已验证参数对象。
 
@@ -43,7 +41,7 @@ async def run_image_to_image(
 ) -> List[TextContent]:
     """
     执行图文生图工具
-    
+
     Args:
         params: 图文生图的已验证参数对象。
 
@@ -58,7 +56,7 @@ async def run_multi_image_fusion(
 ) -> List[TextContent]:
     """
     执行多图像融合工具
-    
+
     Args:
         params: 多图像融合的已验证参数对象。
 
@@ -74,7 +72,7 @@ async def run_sequential_generation(
 ) -> List[TextContent]:
     """
     执行组图输出工具
-    
+
     Args:
         params: 组图输出的已验证参数对象。
 
@@ -87,7 +85,7 @@ async def run_sequential_generation(
 async def run_browse_images(params: BrowseImagesInput) -> List[TextContent]:
     """
     执行图像浏览工具
-    
+
     Args:
         params: 图像浏览的已验证参数对象。
 

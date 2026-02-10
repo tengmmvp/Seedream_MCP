@@ -12,7 +12,7 @@ def test_sequential_generation_total_limit_ok():
 
 def test_sequential_generation_total_limit_exceed():
     images = [f"https://example.com/{i}.png" for i in range(6)]
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="不能超过15"):
         SequentialGenerationInput(prompt="test", max_images=10, image=images)
 
 

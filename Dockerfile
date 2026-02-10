@@ -1,5 +1,7 @@
-# 使用官方 Python 镜像作为基础镜像
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1.7
+
+# 使用固定版本的 Python 基础镜像
+FROM python:3.11.11-slim
 
 # 设置工作目录
 WORKDIR /app
@@ -8,29 +10,27 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_NO_PROGRESS=1
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# 固定 uv 版本
+ARG UV_VERSION=0.9.18
+RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
-# 安装 uv
-RUN pip install uv
-
-# 复制项目文件
-COPY pyproject.toml ./
-COPY README.md ./
+# 复制项目清单与源码
+COPY pyproject.toml uv.lock README.md ./
 COPY seedream_mcp/ ./seedream_mcp/
 
-# 创建非 root 用户
-RUN useradd --create-home --shell /bin/bash seedream
+# 基于 lock 文件安装依赖，并以非 editable 方式安装项目
+RUN uv sync --frozen --no-dev --no-editable
 
-# 安装项目依赖
-RUN uv pip install --system -e .
+# 使用项目虚拟环境作为运行时 Python
+ENV PATH="/app/.venv/bin:${PATH}"
 
-# 创建默认配置目录
-RUN mkdir -p /app/seedream_images /app/logs
+# 创建非 root 用户并准备目录
+RUN useradd --create-home --shell /bin/bash seedream \
+    && mkdir -p /app/seedream_images /app/logs \
+    && chown -R seedream:seedream /app
 
 # 切换到非 root 用户
 USER seedream

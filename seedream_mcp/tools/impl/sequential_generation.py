@@ -82,9 +82,9 @@ async def handle_sequential_generation(
         completion_title="组图输出任务完成",
         failure_prefix="组图输出",
         guidance="请检查提示词、数量与图片参数，确认 API Key 和网络可用后重试。",
-        start_log_message="组图输出开始: prompt='{}...', max_images={}, size={}, stream={}",
+        start_log_message="组图输出开始: prompt_len={}, max_images={}, size={}, stream={}",
         start_log_values_builder=lambda ctx: (
-            (ctx.prompt or "")[:50],
+            len(ctx.prompt or ""),
             max_images,
             ctx.size,
             ctx.stream,

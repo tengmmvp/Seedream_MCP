@@ -39,16 +39,12 @@ class FileManager:
         if base_dir is None:
             base_dir = Path.cwd() / "images"
         else:
-            # 验证用户提供的路径
             try:
                 base_dir = Path(base_dir).resolve()
-                # 基本安全检查
                 if self._is_unsafe_path(base_dir):
-                    logger.warning(f"提供的保存路径不安全: {base_dir}，使用默认路径")
-                    base_dir = Path.cwd() / "images"
+                    raise FileManagerError(f"提供的保存路径不安全: {base_dir}")
             except (OSError, ValueError) as e:
-                logger.warning(f"解析保存路径时出错: {e}，使用默认路径")
-                base_dir = Path.cwd() / "images"
+                raise FileManagerError(f"解析保存路径时出错: {e}") from e
 
         self.base_dir = base_dir
         self.ensure_directory(self.base_dir)

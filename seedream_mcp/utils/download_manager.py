@@ -38,6 +38,7 @@ class DownloadManager:
         max_retries: int = 3,
         retry_delay: float = 1.0,
         max_file_size: int = 50 * 1024 * 1024,
+        dns_cache_ttl: int = 60,
     ):
         """
         初始化下载管理器
@@ -47,11 +48,15 @@ class DownloadManager:
             max_retries: 最大重试次数
             retry_delay: 重试延迟时间（秒）
             max_file_size: 最大文件大小（字节）
+            dns_cache_ttl: DNS 解析缓存 TTL（秒）
         """
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.max_file_size = max_file_size
+        self._dns_cache_ttl = max(1, dns_cache_ttl)
+        self._dns_cache: Dict[str, Tuple[float, Tuple[str, ...]]] = {}
+        self._dns_cache_lock = asyncio.Lock()
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self) -> "DownloadManager":
@@ -66,9 +71,7 @@ class DownloadManager:
         获取可用的 aiohttp 会话
         """
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.timeout)
-            )
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout))
         return self._session
 
     async def close(self) -> None:
@@ -123,24 +126,52 @@ class DownloadManager:
         except ValueError:
             return host, True
 
-    async def _validate_public_dns(self, host: str) -> None:
+    async def _resolve_public_ips(self, host: str) -> Tuple[str, ...]:
         """
-        异步解析域名并确保解析结果全部为公网 IP
+        解析域名并校验为公网 IP，命中缓存时直接返回。
         """
+        now = time.time()
+        async with self._dns_cache_lock:
+            cached = self._dns_cache.get(host)
+            if cached is not None:
+                expires_at, cached_ips = cached
+                if expires_at > now:
+                    return cached_ips
+                self._dns_cache.pop(host, None)
+
         loop = asyncio.get_running_loop()
         try:
             infos = await loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
         except OSError as exc:
-            raise DownloadError(f"域名解析失败: {host} ({exc})")
+            raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
 
         if not infos:
             raise DownloadError(f"域名解析结果为空: {host}")
 
+        resolved_ips: set[str] = set()
         for info in infos:
             resolved_ip = info[4][0]
-            ip_obj = ipaddress.ip_address(resolved_ip)
+            try:
+                ip_obj = ipaddress.ip_address(resolved_ip)
+            except ValueError as exc:
+                raise DownloadError(f"域名解析返回非法IP: {host} -> {resolved_ip}") from exc
             if not ip_obj.is_global:
                 raise DownloadError(f"域名解析到非公网地址: {host} -> {resolved_ip}")
+            resolved_ips.add(resolved_ip)
+
+        if not resolved_ips:
+            raise DownloadError(f"域名解析结果为空: {host}")
+
+        ip_tuple = tuple(sorted(resolved_ips))
+        async with self._dns_cache_lock:
+            self._dns_cache[host] = (time.time() + self._dns_cache_ttl, ip_tuple)
+        return ip_tuple
+
+    async def _validate_public_dns(self, host: str) -> None:
+        """
+        异步解析域名并确保解析结果全部为公网 IP
+        """
+        await self._resolve_public_ips(host)
 
     async def _validate_url_for_request(self, url: str) -> None:
         """
@@ -149,6 +180,49 @@ class DownloadManager:
         host, needs_dns_check = self._validate_url_static(url)
         if needs_dns_check:
             await self._validate_public_dns(host)
+
+    @staticmethod
+    def _extract_peer_ip(response: aiohttp.ClientResponse) -> Optional[str]:
+        """
+        从底层连接中提取对端 IP。
+        """
+        connection = response.connection
+        if connection is None or connection.transport is None:
+            return None
+
+        peername = connection.transport.get_extra_info("peername")
+        if not peername:
+            return None
+
+        if isinstance(peername, tuple) and peername:
+            return str(peername[0])
+        return None
+
+    @staticmethod
+    def _ensure_public_peer_ip(peer_ip: str, source_url: str) -> None:
+        """
+        校验连接后的对端 IP 是否为公网地址。
+        """
+        try:
+            ip_obj = ipaddress.ip_address(peer_ip)
+        except ValueError as exc:
+            raise DownloadError(f"连接返回非法IP地址: {peer_ip}") from exc
+
+        if not ip_obj.is_global:
+            raise DownloadError(f"连接命中非公网地址: {peer_ip} ({source_url})")
+
+    def _validate_connected_peer_ip(
+        self, response: aiohttp.ClientResponse, source_url: str
+    ) -> None:
+        """
+        连接建立后再次校验对端 IP，防止 DNS rebinding。
+        """
+        peer_ip = self._extract_peer_ip(response)
+        if not peer_ip:
+            logger.warning(f"无法获取对端IP，跳过连接后校验: {source_url}")
+            return
+
+        self._ensure_public_peer_ip(peer_ip, source_url)
 
     async def download_image(
         self, url: str, save_path: Path, headers: Optional[Dict[str, str]] = None
@@ -192,6 +266,8 @@ class DownloadManager:
                         headers=headers,
                         allow_redirects=False,
                     ) as response:
+                        self._validate_connected_peer_ip(response, current_url)
+
                         if response.status in {301, 302, 303, 307, 308}:
                             location = response.headers.get("location")
                             if not location:

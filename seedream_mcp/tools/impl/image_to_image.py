@@ -75,7 +75,7 @@ async def handle_image_to_image(
         completion_title="图文生图任务完成",
         failure_prefix="图文生图生成",
         guidance="请检查图片路径/URL 与尺寸参数，确认 API Key 和网络可用后重试。",
-        start_log_message="图文生图开始: prompt='{}...', size={}, stream={}",
-        start_log_values_builder=lambda ctx: ((ctx.prompt or "")[:50], ctx.size, ctx.stream),
+        start_log_message="图文生图开始: prompt_len={}, size={}, stream={}",
+        start_log_values_builder=lambda ctx: (len(ctx.prompt or ""), ctx.size, ctx.stream),
         request_executor=_execute,
     )

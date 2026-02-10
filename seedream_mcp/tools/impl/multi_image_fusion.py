@@ -74,7 +74,7 @@ async def handle_multi_image_fusion(
         completion_title="多图融合任务完成",
         failure_prefix="多图融合",
         guidance="请检查图片列表与尺寸参数，确认 API Key 和网络可用后重试。",
-        start_log_message="多图融合开始: prompt='{}...', size={}, stream={}",
-        start_log_values_builder=lambda ctx: ((ctx.prompt or "")[:50], ctx.size, ctx.stream),
+        start_log_message="多图融合开始: prompt_len={}, size={}, stream={}",
+        start_log_values_builder=lambda ctx: (len(ctx.prompt or ""), ctx.size, ctx.stream),
         request_executor=_execute,
     )
