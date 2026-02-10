@@ -41,11 +41,14 @@ ENTRYPOINT ["python", "-m", "seedream_mcp.server"]
 # 默认参数
 CMD ["--help"]
 
+# 镜像版本
+ARG APP_VERSION=dev
+
 # 添加标签
 LABEL org.opencontainers.image.title="Seedream MCP" \
       org.opencontainers.image.description="基于火山引擎 Seedream API 的 MCP 工具，支持 AI 图像生成" \
       org.opencontainers.image.source="https://github.com/tengmmvp/Seedream_MCP" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version="1.2.3" \
+      org.opencontainers.image.version="${APP_VERSION}" \
       maintainer="tengmmvp <tengmmvp@gmail.com>" \
       contributors="tengmmvp <tengmmvp@gmail.com>, caoergou <itsericsmail@gmail.com>"

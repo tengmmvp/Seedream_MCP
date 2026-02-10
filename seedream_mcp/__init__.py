@@ -7,8 +7,10 @@ Seedream MCP 工具包
 
 from __future__ import annotations
 
+# 版本号
+from .version import __version__
+
 # 包元数据
-__version__ = "1.2.3"
 __author__ = "tengmmvp"
 __email__ = "tengmmvp@gmail.com"
 

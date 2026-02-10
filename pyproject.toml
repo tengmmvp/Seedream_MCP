@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "seedream-mcp"
-version = "1.2.3"
+dynamic = ["version"]
 authors = [
     {name = "TengMMVP", email = "tengmmvp@gmail.com"}
 ]
@@ -58,6 +58,9 @@ Repository = "https://github.com/tengmmvp/Seedream_MCP.git"
 
 [project.scripts]
 seedream-mcp = "seedream_mcp.server:cli_main"
+
+[tool.hatch.version]
+path = "seedream_mcp/version.py"
 
 [tool.hatch.build.targets.sdist]
 include = [

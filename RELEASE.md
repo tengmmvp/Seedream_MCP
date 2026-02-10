@@ -5,15 +5,17 @@
 ### 1. 更新版本号
 
 ```bash
-# 编辑 pyproject.toml
-version = "1.2.3"
+# 仅编辑这一处
+# 文件: seedream_mcp/version.py
+__version__ = "1.2.3"
 ```
 
 ### 2. 创建标签
 
 ```bash
-git tag v1.2.3
-git push origin v1.2.3
+VERSION=$(python -c "from seedream_mcp.version import __version__; print(__version__)")
+git tag "v${VERSION}"
+git push origin "v${VERSION}"
 ```
 
 GitHub Actions 会自动：

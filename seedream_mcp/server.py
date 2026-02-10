@@ -30,6 +30,7 @@ from .tools import (
 )
 from .utils.errors import SeedreamConfigError, format_error_for_user
 from .utils.logging import get_logger, setup_logging
+from .version import __version__
 
 # ==================== 服务器元数据常量 ====================
 
@@ -37,10 +38,10 @@ from .utils.logging import get_logger, setup_logging
 SERVER_NAME = "seedream_mcp"
 
 # 服务器版本号
-SERVER_VERSION = "1.2.3"
+SERVER_VERSION = __version__
 
 # 服务器功能说明
-SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图与图片浏览。"
+SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图输出与图片浏览。"
 
 # ==================== 工具注解常量 ====================
 
