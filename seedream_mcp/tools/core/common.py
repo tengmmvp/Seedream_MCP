@@ -1,25 +1,173 @@
 ﻿"""
 通用工具处理辅助函数
-
-本模块提供图片数据提取、自动保存及结果格式化等功能，
-支持基于 URL 和 Base64 的图片保存，并生成规范化的响应信息。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence
+
+from mcp.types import TextContent
 
 from ...config import SeedreamConfig
 from ...utils.auto_save import AutoSaveManager
+from ...utils.errors import SeedreamValidationError, format_error_for_user
 from ...utils.logging import get_logger
+from ...utils.path_utils import get_workspace_root, is_path_within_base, normalize_path
+from ...utils.validation import (
+    validate_optimize_prompt_options,
+    validate_response_format,
+    validate_size_for_model,
+    validate_watermark,
+)
+
+if TYPE_CHECKING:
+    from ...client import SeedreamClient
 
 logger = get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class GenerationExecutionContext:
+    """
+    生成类工具执行上下文
+
+    统一封装四类生成工具共享参数，避免在各 handler 中重复提取与校验。
+    """
+
+    prompt: str
+    size: str
+    watermark: bool
+    response_format: str
+    stream: bool
+    optimize_prompt_options: Optional[Dict[str, Any]]
+    enable_auto_save: bool
+    save_path: Optional[str]
+    custom_name: Optional[str]
+
+
+def build_generation_context(
+    arguments: Dict[str, Any], config: SeedreamConfig
+) -> GenerationExecutionContext:
+    """
+    从工具参数构建统一执行上下文
+
+    Args:
+        arguments: 工具原始参数字典。
+        config: 当前生效配置。
+
+    Returns:
+        统一执行上下文对象。
+    """
+    watermark_value = arguments.get("watermark")
+    watermark = (
+        validate_watermark(watermark_value)
+        if watermark_value is not None
+        else config.default_watermark
+    )
+
+    auto_save = arguments.get("auto_save")
+    enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
+
+    return GenerationExecutionContext(
+        prompt=arguments.get("prompt", ""),
+        size=validate_size_for_model(arguments.get("size") or config.default_size, config.model_id),
+        watermark=watermark,
+        response_format=validate_response_format(arguments.get("response_format", "url")),
+        stream=bool(arguments.get("stream", False)),
+        optimize_prompt_options=validate_optimize_prompt_options(
+            arguments.get("optimize_prompt_options"), config.model_id
+        ),
+        enable_auto_save=enable_auto_save,
+        save_path=arguments.get("save_path"),
+        custom_name=arguments.get("custom_name"),
+    )
+
+
+async def execute_generation_handler(
+    *,
+    arguments: Dict[str, Any],
+    config: SeedreamConfig,
+    module_logger: Any,
+    tool_name: str,
+    completion_title: str,
+    failure_prefix: str,
+    guidance: str,
+    start_log_message: str,
+    start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]],
+    request_executor: Callable[
+        ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
+    ],
+) -> List[TextContent]:
+    """
+    执行生成类工具的通用处理流水线
+
+    包括：参数归一化、调用客户端、自动保存、响应格式化、统一错误处理。
+    """
+    try:
+        from ...client import SeedreamClient
+
+        context = build_generation_context(arguments, config)
+
+        module_logger.info(start_log_message, *start_log_values_builder(context))
+
+        async with SeedreamClient(config) as client:
+            result = await request_executor(client, context)
+
+        auto_save_results: List[Any] = []
+        auto_save_error: Optional[str] = None
+        if context.enable_auto_save and result.get("success"):
+            try:
+                if context.response_format == "url":
+                    auto_save_results = await auto_save_from_urls(
+                        result,
+                        context.prompt,
+                        config,
+                        context.save_path,
+                        context.custom_name,
+                        tool_name,
+                    )
+                else:
+                    auto_save_results = await auto_save_from_base64(
+                        result,
+                        context.prompt,
+                        config,
+                        context.save_path,
+                        context.custom_name,
+                        tool_name,
+                    )
+
+                if auto_save_results:
+                    result = update_result_with_auto_save(result, auto_save_results)
+            except Exception as exc:
+                auto_save_error = format_error_for_user(exc)
+                module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
+
+        response_text = format_generation_response(
+            completion_title,
+            result,
+            context.prompt,
+            context.size,
+            auto_save_results,
+            context.enable_auto_save,
+            auto_save_error=auto_save_error,
+        )
+
+        return [TextContent(type="text", text=response_text)]
+    except Exception as exc:
+        module_logger.error(f"{failure_prefix}处理失败", exc_info=True)
+        return [
+            TextContent(
+                type="text",
+                text=f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}",
+            )
+        ]
+
+
 def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    从生成结果中提取图片数据列表。
+    从生成结果中提取图片数据列表
 
     支持多种数据结构，兼容嵌套字典与数组格式，统一转换为列表输出。
 
@@ -38,9 +186,9 @@ def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [data]
 
 
-def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Optional[Path]:
+def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
     """
-    解析自动保存的基础目录路径。
+    解析自动保存的基础目录路径
 
     优先使用用户指定路径，若未指定则使用配置中的默认路径。
 
@@ -49,13 +197,31 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Optio
         save_path: 用户指定的保存路径，可选。
 
     Returns:
-        解析后的路径对象，若两者均未指定则返回 None。
+        解析后的安全路径对象。
     """
-    if save_path:
-        return Path(save_path)
-    if config.auto_save_base_dir:
-        return Path(config.auto_save_base_dir)
-    return None
+    workspace_root = get_workspace_root()
+    default_base_dir = (
+        Path(config.auto_save_base_dir).expanduser().resolve()
+        if config.auto_save_base_dir
+        else (workspace_root / "images").resolve()
+    )
+
+    if not save_path:
+        return default_base_dir
+
+    try:
+        user_path = normalize_path(save_path, str(default_base_dir))
+    except ValueError as exc:
+        raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
+
+    if not is_path_within_base(user_path, default_base_dir):
+        raise SeedreamValidationError(
+            f"save_path 超出允许范围: {default_base_dir}",
+            field="save_path",
+            value=save_path,
+        )
+
+    return user_path
 
 
 async def auto_save_from_urls(
@@ -67,7 +233,7 @@ async def auto_save_from_urls(
     tool_name: str,
 ) -> List:
     """
-    从 URL 异步下载并保存图片。
+    从 URL 异步下载并保存图片
 
     根据配置项自动解析基础目录，支持批量下载并记录保存结果，
     包含超时控制、重试机制及并发管理。
@@ -109,9 +275,13 @@ async def auto_save_from_urls(
 
     if not image_data:
         logger.warning("未找到可保存的图片 URL")
+        await auto_save_manager.close()
         return []
 
-    return await auto_save_manager.save_multiple_images(image_data, tool_name=tool_name)
+    try:
+        return await auto_save_manager.save_multiple_images(image_data, tool_name=tool_name)
+    finally:
+        await auto_save_manager.close()
 
 
 async def auto_save_from_base64(
@@ -123,7 +293,7 @@ async def auto_save_from_base64(
     tool_name: str,
 ) -> List:
     """
-    从 Base64 数据异步解码并保存图片。
+    从 Base64 数据异步解码并保存图片
 
     根据配置项自动解析基础目录，支持批量解码并保存，
     包含文件大小限制、重试机制及并发管理。
@@ -165,14 +335,18 @@ async def auto_save_from_base64(
 
     if not image_data:
         logger.warning("未找到可保存的 base64 图片数据")
+        await auto_save_manager.close()
         return []
 
-    return await auto_save_manager.save_multiple_base64_images(image_data, tool_name=tool_name)
+    try:
+        return await auto_save_manager.save_multiple_base64_images(image_data, tool_name=tool_name)
+    finally:
+        await auto_save_manager.close()
 
 
 def update_result_with_auto_save(result: Dict[str, Any], auto_save_results: List) -> Dict[str, Any]:
     """
-    将自动保存结果合并到生成结果中。
+    将自动保存结果合并到生成结果中
 
     在原结果基础上添加保存统计信息，并为每张图片补充本地路径和 Markdown 引用，
     不修改原结果对象，返回新的字典副本。
@@ -211,10 +385,11 @@ def format_generation_response(
     size: str,
     auto_save_results: Optional[List] = None,
     auto_save_enabled: bool = False,
+    auto_save_error: Optional[str] = None,
 ) -> str:
     """
-    格式化图片生成结果为可读文本。
-
+    格式化图片生成结果为可读文本
+    
     将生成结果、提示词、尺寸、保存信息及使用统计等数据，
     按规范化格式输出为结构清晰的多行文本字符串。
 
@@ -225,6 +400,7 @@ def format_generation_response(
         size: 生成图片的尺寸规格。
         auto_save_results: 自动保存结果列表,可选。
         auto_save_enabled: 是否启用自动保存功能,默认 False。
+        auto_save_error: 自动保存错误信息，存在时表示已降级跳过自动保存。
 
     Returns:
         格式化后的响应文本,包含完整生成信息及元数据。
@@ -262,7 +438,10 @@ def format_generation_response(
             parts.append("")
 
     if auto_save_enabled:
-        if auto_save_results:
+        if auto_save_error:
+            parts.append(f"自动保存失败: {auto_save_error}")
+            parts.append("")
+        elif auto_save_results:
             parts.append("自动保存信息:")
             successful_saves = sum(1 for r in auto_save_results if getattr(r, "success", False))
             failed_saves = len(auto_save_results) - successful_saves

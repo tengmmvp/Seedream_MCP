@@ -1,18 +1,46 @@
 """
 Seedream MCP工具 - 路径处理工具
-
-提供增强的文件路径处理功能，支持相对路径、绝对路径和路径验证。
 """
 
+import os
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 from .logging import get_logger
+from .validation import SUPPORTED_IMAGE_EXTENSIONS as VALIDATION_SUPPORTED_IMAGE_EXTENSIONS
+from .validation import validate_image_url
+from .errors import SeedreamValidationError
 
 logger = get_logger(__name__)
 
 # 支持的图片格式
-SUPPORTED_IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".png", ".tiff", ".webp"}
+SUPPORTED_IMAGE_EXTENSIONS = set(VALIDATION_SUPPORTED_IMAGE_EXTENSIONS)
+
+
+def get_workspace_root() -> Path:
+    """
+    获取受控的工作区根目录。
+
+    优先使用环境变量 `SEEDREAM_WORKSPACE_ROOT`，未配置时回退为当前工作目录。
+    """
+    configured_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
+    if configured_root and configured_root.strip():
+        try:
+            return Path(configured_root).expanduser().resolve()
+        except Exception as e:
+            logger.warning(f"无效的 SEEDREAM_WORKSPACE_ROOT 配置: {configured_root} ({e})")
+    return Path.cwd().resolve()
+
+
+def is_path_within_base(path: Path, base_dir: Path) -> bool:
+    """
+    判断路径是否位于基础目录内。
+    """
+    try:
+        path.resolve().relative_to(base_dir.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
@@ -66,25 +94,18 @@ def validate_image_path(
         # 标准化路径
         normalized_path = normalize_path(path, base_dir)
 
-        # 检查文件是否存在
-        if not normalized_path.exists():
-            return False, f"文件不存在: {normalized_path}", normalized_path
+        # 校验路径是否在受控目录内
+        if base_dir:
+            base_path = Path(base_dir).resolve()
+            if not is_path_within_base(normalized_path, base_path):
+                return False, f"路径超出允许目录: {base_path}", normalized_path
 
-        # 检查是否为文件
-        if not normalized_path.is_file():
-            return False, f"路径不是文件: {normalized_path}", normalized_path
-
-        # 检查文件扩展名
-        if normalized_path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
-            return False, f"不支持的图片格式: {normalized_path.suffix}", normalized_path
-
-        # 检查文件大小（限制为50MB）
-        file_size = normalized_path.stat().st_size
-        max_size = 50 * 1024 * 1024  # 50MB
-        if file_size > max_size:
-            return False, f"文件过大: {file_size / (1024*1024):.1f}MB (最大50MB)", normalized_path
-
-        return True, "", normalized_path
+        # 委托 validation 模块执行统一规则校验
+        try:
+            validated_path = validate_image_url(str(normalized_path))
+            return True, "", Path(validated_path)
+        except SeedreamValidationError as e:
+            return False, e.message, normalized_path
 
     except Exception as e:
         logger.error(f"路径验证失败 {path}: {e}")
@@ -155,6 +176,7 @@ def find_images_in_directory(
     recursive: bool = True,
     max_depth: int = 3,
     extensions: Optional[List[str]] = None,
+    limit: Optional[int] = None,
 ) -> List[Path]:
     """
     在目录中查找图片文件
@@ -164,6 +186,7 @@ def find_images_in_directory(
         recursive: 是否递归搜索
         max_depth: 最大搜索深度
         extensions: 指定的文件扩展名列表
+        limit: 返回数量上限，达到后提前停止扫描
 
     Returns:
         找到的图片文件路径列表
@@ -187,10 +210,16 @@ def find_images_in_directory(
 
             try:
                 for item in path.iterdir():
+                    if limit is not None and len(images) >= limit:
+                        return
                     if item.is_file() and item.suffix.lower() in target_extensions:
                         images.append(item)
+                        if limit is not None and len(images) >= limit:
+                            return
                     elif item.is_dir() and recursive and current_depth < max_depth:
                         scan_directory(item, current_depth + 1)
+                        if limit is not None and len(images) >= limit:
+                            return
             except (PermissionError, OSError) as e:
                 logger.warning(f"无法访问目录 {path}: {e}")
 

@@ -1,8 +1,5 @@
 ﻿"""
 图片浏览工具模块
-
-提供本地图片文件浏览功能，支持递归搜索、格式过滤、数量限制等特性，
-便于在 MCP 客户端选择参考图。
 """
 
 from __future__ import annotations
@@ -14,13 +11,20 @@ from typing import Any, Dict, List
 from mcp.types import TextContent
 
 from ...utils.logging import get_logger
-from ...utils.path_utils import find_images_in_directory, get_relative_path
+from ...utils.path_utils import (
+    find_images_in_directory,
+    get_relative_path,
+    get_workspace_root,
+    is_path_within_base,
+    normalize_path,
+)
 
 logger = get_logger(__name__)
 
 
 def _format_file_info(display_path: str, stat_path: Path, show_details: bool) -> str:
-    """格式化文件信息为字符串。
+    """
+    格式化文件信息为字符串
 
     根据是否显示详细信息，返回文件路径或包含大小、修改时间的完整信息。
 
@@ -45,7 +49,8 @@ def _format_file_info(display_path: str, stat_path: Path, show_details: bool) ->
 
 
 async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
-    """处理图片浏览请求。
+    """
+    处理图片浏览请求
 
     根据提供的参数搜索指定目录下的图片文件，支持递归搜索、深度限制、
     格式过滤等功能，返回格式化的图片列表。
@@ -71,7 +76,22 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
     format_filter = arguments.get("format_filter")
     show_details = bool(arguments.get("show_details", False))
 
-    resolved_dir = Path(directory).expanduser().resolve()
+    workspace_root = get_workspace_root()
+    try:
+        resolved_dir = normalize_path(directory, str(workspace_root))
+    except ValueError as exc:
+        return [TextContent(type="text", text=f"目录路径无效: {exc}")]
+
+    if not is_path_within_base(resolved_dir, workspace_root):
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    "目录超出允许范围。"
+                    f"仅允许浏览工作区目录: {workspace_root}"
+                ),
+            )
+        ]
 
     logger.info(
         "浏览图片: dir={}, recursive={}, max_depth={}, limit={}",
@@ -87,15 +107,14 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
         recursive=recursive,
         max_depth=max_depth,
         extensions=format_filter,
+        limit=limit,
     )
-    images = images[:limit]
 
     # 处理未找到图片的情况
     if not images:
         return [TextContent(type="text", text="未找到图片文件，请确认目录或过滤条件。")]
 
     # 格式化图片列表输出
-    workspace_root = Path.cwd()
     lines = ["图片列表:"]
     for idx, img in enumerate(images, 1):
         display_path = get_relative_path(img, str(workspace_root))

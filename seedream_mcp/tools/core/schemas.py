@@ -1,7 +1,5 @@
 """
 Seedream MCP 工具输入模型
-
-使用 Pydantic 对 MCP 工具的输入参数进行结构化校验，确保参数约束清晰且具备可读的错误提示。
 """
 
 from __future__ import annotations
@@ -24,7 +22,7 @@ from ...utils.validation import (
 
 class ResponseFormat(str, Enum):
     """
-    图片生成响应格式枚举。
+    图片生成响应格式枚举
 
     定义生成结果的返回格式，支持 URL 链接和 Base64 编码两种方式。
     """
@@ -35,7 +33,7 @@ class ResponseFormat(str, Enum):
 
 class OptimizePromptOptions(BaseModel):
     """
-    提示词优化配置模型。
+    提示词优化配置模型
 
     配置提示词优化策略，平衡生成质量与响应速度。
     """
@@ -51,7 +49,7 @@ class OptimizePromptOptions(BaseModel):
     @classmethod
     def validate_mode(cls, value: str) -> str:
         """
-        校验并规范化优化模式。
+        校验并规范化优化模式
 
         Args:
             value: 用户输入的优化模式字符串
@@ -71,7 +69,7 @@ class OptimizePromptOptions(BaseModel):
 
 class BaseGenerationInput(BaseModel):
     """
-    图片生成工具的通用输入基类。
+    图片生成工具的通用输入基类
 
     定义所有图片生成类工具共享的配置参数，包括尺寸、水印、响应格式、
     流式输出、提示词优化及自动保存等功能。
@@ -120,7 +118,7 @@ class BaseGenerationInput(BaseModel):
     @classmethod
     def validate_size_field(cls, value: Optional[str]) -> Optional[str]:
         """
-        校验图片尺寸参数。
+        校验图片尺寸参数
 
         Args:
             value: 用户指定的尺寸值
@@ -142,7 +140,7 @@ class BaseGenerationInput(BaseModel):
     @classmethod
     def validate_non_empty(cls, value: Optional[str]) -> Optional[str]:
         """
-        校验字符串字段非空。
+        校验字符串字段非空
 
         Args:
             value: 待校验的字符串值
@@ -176,7 +174,7 @@ class TextToImageInput(BaseGenerationInput):
     @classmethod
     def validate_prompt_field(cls, value: str) -> str:
         """
-        校验并规范化提示词。
+        校验并规范化提示词
 
         Args:
             value: 用户输入的提示词
@@ -212,7 +210,7 @@ class ImageToImageInput(BaseGenerationInput):
     @classmethod
     def validate_prompt_field(cls, value: str) -> str:
         """
-        校验并规范化提示词。
+        校验并规范化提示词
 
         Args:
             value: 用户输入的提示词
@@ -232,7 +230,7 @@ class ImageToImageInput(BaseGenerationInput):
     @classmethod
     def validate_image_field(cls, value: str) -> str:
         """
-        校验图片来源。
+        校验图片来源
 
         Args:
             value: 图片 URL、文件路径
@@ -261,8 +259,8 @@ class MultiImageFusionInput(BaseGenerationInput):
     )
     image: List[str] = Field(
         ...,
-        min_items=2,
-        max_items=5,
+        min_length=2,
+        max_length=5,
         description="参与融合的图片列表，支持 URL、本地路径，数量2-5张。",
     )
 
@@ -270,7 +268,7 @@ class MultiImageFusionInput(BaseGenerationInput):
     @classmethod
     def validate_prompt_field(cls, value: str) -> str:
         """
-        校验并规范化提示词。
+        校验并规范化提示词
 
         Args:
             value: 用户输入的提示词
@@ -290,7 +288,7 @@ class MultiImageFusionInput(BaseGenerationInput):
     @classmethod
     def validate_images_field(cls, value: List[str]) -> List[str]:
         """
-        校验图片列表。
+        校验图片列表
 
         Args:
             value: 图片来源列表
@@ -323,7 +321,7 @@ class SequentialGenerationInput(BaseGenerationInput):
         le=15,
         description="本次请求允许生成的最大图片数量，范围 1-15。",
     )
-    image: Optional[Union[str, List[str]]] = Field(
+    image: Optional[List[str]] = Field(
         default=None,
         description="可选的参考图片，支持单张或多张。",
     )
@@ -332,7 +330,7 @@ class SequentialGenerationInput(BaseGenerationInput):
     @classmethod
     def validate_prompt_field(cls, value: str) -> str:
         """
-        校验并规范化提示词。
+        校验并规范化提示词
 
         Args:
             value: 用户输入的提示词
@@ -352,7 +350,7 @@ class SequentialGenerationInput(BaseGenerationInput):
     @classmethod
     def validate_max_images_field(cls, value: int) -> int:
         """
-        校验最大图片数量。
+        校验最大图片数量
 
         Args:
             value: 用户指定的最大生成数量
@@ -368,13 +366,13 @@ class SequentialGenerationInput(BaseGenerationInput):
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
 
-    @field_validator("image")
+    @field_validator("image", mode="before")
     @classmethod
     def validate_reference_images(
         cls, value: Optional[Union[str, List[str]]]
     ) -> Optional[List[str]]:
         """
-        校验参考图片列表。
+        校验参考图片列表
 
         Args:
             value: 单张图片或图片列表，None 时跳过校验
@@ -450,7 +448,7 @@ class BrowseImagesInput(BaseModel):
     @classmethod
     def validate_directory(cls, value: Optional[str]) -> Optional[str]:
         """
-        校验目录路径。
+        校验目录路径
 
         Args:
             value: 用户指定的目录路径
@@ -472,7 +470,7 @@ class BrowseImagesInput(BaseModel):
     @classmethod
     def normalize_suffixes(cls, value: Optional[List[str]]) -> Optional[List[str]]:
         """
-        规范化文件后缀列表。
+        规范化文件后缀列表
 
         Args:
             value: 用户提供的后缀列表
@@ -493,7 +491,7 @@ class BrowseImagesInput(BaseModel):
     @model_validator(mode="after")
     def validate_limits(self) -> "BrowseImagesInput":
         """
-        校验数量限制参数的逻辑一致性。
+        校验数量限制参数的逻辑一致性
 
         Returns:
             校验通过的模型实例

@@ -88,9 +88,9 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 ## 🎨 功能特性
 
 - **文生图**：文本生成图像
-- **图生图**：图像转换风格
+- **图文生图**：图像转换风格
 - **多图融合**：融合多张图片
-- **组图生成**：生成图像序列
+- **组图输出**：生成图像序列
 - **图片浏览**：本地图片文件浏览
 
 ## 🛠️ 可用工具
@@ -111,7 +111,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
-### 2. `seedream_image_to_image` - 图生图
+### 2. `seedream_image_to_image` - 图文生图
 
 根据输入图像和文本提示生成新图像
 
@@ -145,7 +145,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
-### 4. `seedream_sequential_generation` - 组图生成
+### 4. `seedream_sequential_generation` - 组图输出
 
 连续生成多张图像，支持文生组图、单图生组图、多图生组图
 

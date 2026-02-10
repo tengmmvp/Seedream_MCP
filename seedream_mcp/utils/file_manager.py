@@ -1,6 +1,5 @@
 """
 文件管理模块
-实现智能文件命名、目录管理、路径安全检查
 """
 
 import hashlib
@@ -12,17 +11,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from .errors import SeedreamMCPError
+
 logger = logging.getLogger(__name__)
 
 
-class FileManagerError(Exception):
-    """文件管理错误异常"""
+class FileManagerError(SeedreamMCPError):
+    """
+    文件管理错误异常
+    """
 
     pass
 
 
 class FileManager:
-    """文件管理器"""
+    """
+    文件管理器
+    """
 
     def __init__(self, base_dir: Optional[Path] = None):
         """
@@ -103,7 +108,7 @@ class FileManager:
             abs_path = path.resolve()
             base_abs = self.base_dir.resolve()
 
-            # 检查路径是否在基础目录内（沙盒验证）
+            # 检查路径是否在基础目录内
             try:
                 abs_path.relative_to(base_abs)
                 return True

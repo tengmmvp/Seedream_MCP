@@ -1,33 +1,43 @@
 """
 下载管理模块
-实现异步图片下载、超时控制、重试机制
 """
 
 import asyncio
-import aiohttp
+import ipaddress
 import logging
-from typing import Optional, Dict, Any
-from pathlib import Path
+import socket
 import time
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urljoin, urlparse
+
+import aiofiles
+import aiohttp
+
+from .errors import SeedreamMCPError
 
 logger = logging.getLogger(__name__)
 
 
-class DownloadError(Exception):
-    """下载错误异常"""
+class DownloadError(SeedreamMCPError):
+    """
+    下载错误异常
+    """
 
     pass
 
 
 class DownloadManager:
-    """异步下载管理器"""
+    """
+    异步下载管理器
+    """
 
     def __init__(
         self,
         timeout: int = 30,
         max_retries: int = 3,
         retry_delay: float = 1.0,
-        max_file_size: int = 50 * 1024 * 1024,  # 50MB
+        max_file_size: int = 50 * 1024 * 1024,
     ):
         """
         初始化下载管理器
@@ -42,6 +52,103 @@ class DownloadManager:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.max_file_size = max_file_size
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def __aenter__(self) -> "DownloadManager":
+        await self._ensure_session()
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        """
+        获取可用的 aiohttp 会话
+        """
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout)
+            )
+        return self._session
+
+    async def close(self) -> None:
+        """
+        关闭底层会话资源
+        """
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    @staticmethod
+    def _temp_path_for(save_path: Path) -> Path:
+        suffix = save_path.suffix or ".bin"
+        return save_path.with_suffix(f"{suffix}.part")
+
+    @staticmethod
+    def _cleanup_temp_file(temp_path: Path) -> None:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError as exc:
+            logger.warning(f"清理临时文件失败: {temp_path} -> {exc}")
+
+    def _validate_url_static(self, url: str) -> Tuple[str, bool]:
+        """
+        执行不依赖网络的 URL 静态安全校验
+
+        Returns:
+            (host, needs_dns_check)
+        """
+        result = urlparse(url)
+        scheme = (result.scheme or "").lower()
+        if scheme not in {"http", "https"}:
+            raise DownloadError(f"不支持的URL协议: {scheme or '<empty>'}")
+
+        if not result.netloc or not result.hostname:
+            raise DownloadError("URL 缺少主机名")
+
+        if result.username or result.password:
+            raise DownloadError("URL 不允许包含账号或密码")
+
+        host = result.hostname.strip().lower()
+        if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+            raise DownloadError(f"不安全的本地主机地址: {host}")
+
+        # 直接 IP 地址：仅允许公网
+        try:
+            ip = ipaddress.ip_address(host)
+            if not ip.is_global:
+                raise DownloadError(f"不安全的IP地址: {host}")
+            return host, False
+        except ValueError:
+            return host, True
+
+    async def _validate_public_dns(self, host: str) -> None:
+        """
+        异步解析域名并确保解析结果全部为公网 IP
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            infos = await loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except OSError as exc:
+            raise DownloadError(f"域名解析失败: {host} ({exc})")
+
+        if not infos:
+            raise DownloadError(f"域名解析结果为空: {host}")
+
+        for info in infos:
+            resolved_ip = info[4][0]
+            ip_obj = ipaddress.ip_address(resolved_ip)
+            if not ip_obj.is_global:
+                raise DownloadError(f"域名解析到非公网地址: {host} -> {resolved_ip}")
+
+    async def _validate_url_for_request(self, url: str) -> None:
+        """
+        执行请求前 URL 安全校验
+        """
+        host, needs_dns_check = self._validate_url_static(url)
+        if needs_dns_check:
+            await self._validate_public_dns(host)
 
     async def download_image(
         self, url: str, save_path: Path, headers: Optional[Dict[str, str]] = None
@@ -62,18 +169,43 @@ class DownloadManager:
         """
         if headers is None:
             headers = {"User-Agent": "Seedream-MCP/1.0", "Accept": "image/*"}
+        # 静态校验不依赖网络，提前失败避免无效重试
+        self._validate_url_static(url)
 
         start_time = time.time()
         last_error = None
+        temp_path = self._temp_path_for(save_path)
 
         for attempt in range(self.max_retries + 1):
             try:
                 logger.info(f"开始下载图片 (尝试 {attempt + 1}/{self.max_retries + 1}): {url}")
 
-                async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as session:
-                    async with session.get(url, headers=headers) as response:
+                self._cleanup_temp_file(temp_path)
+                session = await self._ensure_session()
+                current_url = url
+                redirect_count = 0
+                while True:
+                    # 依赖网络状态的 DNS 校验放在重试循环内，保障 max_retries 生效
+                    await self._validate_url_for_request(current_url)
+                    async with session.get(
+                        current_url,
+                        headers=headers,
+                        allow_redirects=False,
+                    ) as response:
+                        if response.status in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location")
+                            if not location:
+                                raise DownloadError("重定向响应缺少 Location 头")
+                            if redirect_count >= 3:
+                                raise DownloadError("重定向次数过多")
+
+                            next_url = urljoin(current_url, location)
+                            self._validate_url_static(next_url)
+
+                            redirect_count += 1
+                            current_url = next_url
+                            continue
+
                         # 检查响应状态
                         if response.status != 200:
                             raise DownloadError(f"HTTP错误: {response.status}")
@@ -91,15 +223,16 @@ class DownloadManager:
                         # 确保目录存在
                         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        # 下载并保存文件
+                        # 下载写入临时文件，成功后原子替换
                         total_size = 0
-                        with open(save_path, "wb") as f:
+                        async with aiofiles.open(temp_path, "wb") as f:
                             async for chunk in response.content.iter_chunked(8192):
                                 total_size += len(chunk)
                                 if total_size > self.max_file_size:
                                     raise DownloadError(f"文件过大: {total_size} 字节")
-                                f.write(chunk)
+                                await f.write(chunk)
 
+                        temp_path.replace(save_path)
                         download_time = time.time() - start_time
 
                         result = {
@@ -131,6 +264,8 @@ class DownloadManager:
             except Exception as e:
                 last_error = DownloadError(f"未知错误: {e}")
                 logger.warning(f"下载失败 (尝试 {attempt + 1}): {e}")
+            finally:
+                self._cleanup_temp_file(temp_path)
 
             # 如果不是最后一次尝试，等待后重试
             if attempt < self.max_retries:
@@ -174,7 +309,7 @@ class DownloadManager:
         # 处理异常结果
         processed_results: list[Dict[str, Any]] = []
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 url, path = urls_and_paths[i]
                 processed_results.append(
                     {"success": False, "url": url, "file_path": str(path), "error": str(result)}
@@ -186,20 +321,18 @@ class DownloadManager:
 
     def validate_url(self, url: str) -> bool:
         """
-        验证URL格式
+        验证 URL 静态格式与主机安全性（不含 DNS 解析）
 
         Args:
             url: 要验证的URL
 
         Returns:
-            是否为有效URL
+            是否为静态可接受 URL
         """
         try:
-            from urllib.parse import urlparse
-
-            result = urlparse(url)
-            return all([result.scheme, result.netloc])
-        except Exception:
+            self._validate_url_static(url)
+            return True
+        except DownloadError:
             return False
 
     def get_file_extension_from_url(self, url: str) -> str:

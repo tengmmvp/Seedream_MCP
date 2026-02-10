@@ -1,6 +1,5 @@
 """
 自动保存核心模块
-集成下载和文件管理,实现完整的自动保存逻辑
 """
 
 import asyncio
@@ -11,19 +10,24 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, List, Optional, Tuple
 
 from .download_manager import DownloadManager, DownloadError
+from .errors import SeedreamMCPError
 from .file_manager import FileManager, FileManagerError
 
 logger = logging.getLogger(__name__)
 
 
-class AutoSaveError(Exception):
-    """自动保存错误异常"""
+class AutoSaveError(SeedreamMCPError):
+    """
+    自动保存错误异常
+    """
 
     pass
 
 
 class AutoSaveResult:
-    """自动保存结果"""
+    """
+    自动保存结果
+    """
 
     def __init__(
         self,
@@ -42,7 +46,9 @@ class AutoSaveResult:
         self.metadata = metadata or {}
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典格式"""
+        """
+        转换为字典格式
+        """
         result = {"success": self.success, "original_url": self.original_url}
 
         if self.local_path:
@@ -61,14 +67,16 @@ class AutoSaveResult:
 
 
 class AutoSaveManager:
-    """自动保存管理器"""
+    """
+    自动保存管理器
+    """
 
     def __init__(
         self,
         base_dir: Optional[Path] = None,
         download_timeout: int = 30,
         max_retries: int = 3,
-        max_file_size: int = 50 * 1024 * 1024,  # 50MB
+        max_file_size: int = 50 * 1024 * 1024,
         max_concurrent: int = 5,
         date_folder: bool = True,
         cleanup_days: int = 30,
@@ -93,6 +101,17 @@ class AutoSaveManager:
         self.date_folder = date_folder
         self.cleanup_days = cleanup_days
 
+    async def __aenter__(self) -> "AutoSaveManager":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        """
+        释放底层下载资源
+        """
+        await self.download_manager.close()
 
     async def _maybe_cleanup(self) -> None:
         if self.cleanup_days <= 0:
@@ -224,13 +243,27 @@ class AutoSaveManager:
 
             mime, payload = self._parse_data_uri(b64_data)
             payload = (payload or "").strip()
-            if not payload:
+            normalized_payload = "".join(payload.split())
+            if not normalized_payload:
                 raise AutoSaveError("空的Base64数据")
 
+            estimated_size = (len(normalized_payload) * 3) // 4
+            if estimated_size > self.download_manager.max_file_size:
+                raise AutoSaveError(
+                    f"Base64数据过大: 约 {estimated_size / 1024 / 1024:.1f}MB，"
+                    f"最大支持 {self.download_manager.max_file_size / 1024 / 1024:.1f}MB"
+                )
+
             try:
-                content_bytes = base64.b64decode(payload, validate=False)
+                content_bytes = base64.b64decode(normalized_payload, validate=True)
             except Exception as e:
                 raise AutoSaveError(f"Base64解码失败: {e}")
+
+            if len(content_bytes) > self.download_manager.max_file_size:
+                raise AutoSaveError(
+                    f"解码后数据过大: {len(content_bytes) / 1024 / 1024:.1f}MB，"
+                    f"最大支持 {self.download_manager.max_file_size / 1024 / 1024:.1f}MB"
+                )
 
             # 推断扩展名
             extension = (
@@ -251,7 +284,9 @@ class AutoSaveManager:
             )
 
             # 写入文件
-            write_result = self.file_manager.save_bytes(save_path, content_bytes)
+            write_result = await asyncio.to_thread(
+                self.file_manager.save_bytes, save_path, content_bytes
+            )
 
             # 生成 Markdown 引用
             markdown_alt = alt_text or prompt or "Generated Image"
@@ -268,7 +303,7 @@ class AutoSaveManager:
                 "attempts": 1,
             }
 
-            original_desc = f"base64:{len(payload)}"
+            original_desc = f"base64:{len(normalized_payload)}"
             logger.info(f"Base64 图片保存成功: {write_result['file_path']}")
             return AutoSaveResult(
                 success=True,
@@ -332,7 +367,7 @@ class AutoSaveManager:
         # 处理异常结果
         processed_results: List[AutoSaveResult] = []
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 url = image_data[i].get("url", "unknown")
                 processed_results.append(
                     AutoSaveResult(success=False, original_url=url, error=str(result))
@@ -381,9 +416,9 @@ class AutoSaveManager:
             *[save_with_semaphore(task) for task in tasks], return_exceptions=True
         )
 
-        processed_results = []
+        processed_results: List[AutoSaveResult] = []
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 processed_results.append(
                     AutoSaveResult(success=False, original_url="base64", error=str(result))
                 )
@@ -522,14 +557,14 @@ class AutoSaveManager:
             logger.error(f"获取存储信息失败: {e}")
             return {"base_directory": str(base_dir), "error": str(e)}
 
+    async def get_storage_info_async(self) -> Dict[str, Any]:
+        """
+        异步获取存储信息
+        """
+        return await asyncio.to_thread(self.get_storage_info)
+
     async def cleanup_old_files(self, days: int = 30) -> Dict[str, Any]:
         """
         清理旧文件
-
-        Args:
-            days: 保留天数
-
-        Returns:
-            清理结果
         """
-        return self.file_manager.cleanup_old_files(days)
+        return await asyncio.to_thread(self.file_manager.cleanup_old_files, days)

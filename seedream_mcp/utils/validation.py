@@ -1,12 +1,10 @@
 """
 Seedream MCP工具 - 参数验证模块
-
-提供标准化的参数验证函数，用于验证文本提示词、图像尺寸、图像路径等参数。
-所有验证函数在参数不符合规范时会抛出SeedreamValidationError异常。
 """
 
 # 标准库导入
 import io
+import os
 import re
 from pathlib import Path
 from typing import Any, List
@@ -18,9 +16,45 @@ from PIL import Image
 # 本地模块导入
 from .errors import SeedreamValidationError
 
+# 统一图像校验常量
+SUPPORTED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"]
+MAX_IMAGE_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MIN_IMAGE_EDGE = 15
+MIN_IMAGE_RATIO = 1 / 16
+MAX_IMAGE_RATIO = 16
+MAX_IMAGE_PIXELS = 6000 * 6000
+
+
+def _get_validation_base_dir() -> Path:
+    """
+    获取本地文件校验的基础目录。
+
+    优先使用 `SEEDREAM_WORKSPACE_ROOT`，未设置或无效时回退当前工作目录。
+    """
+    configured_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
+    if configured_root and configured_root.strip():
+        try:
+            return Path(configured_root).expanduser().resolve()
+        except Exception:
+            pass
+    return Path.cwd().resolve()
+
+
+def _resolve_local_image_path(file_path: str) -> Path:
+    """
+    解析本地图片路径。
+
+    相对路径基于校验基础目录解析，绝对路径保持原样。
+    """
+    raw_path = Path(file_path).expanduser()
+    if raw_path.is_absolute():
+        return raw_path.resolve()
+    return (_get_validation_base_dir() / raw_path).resolve()
+
 
 def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words: int = 600) -> str:
-    """验证文本提示词的有效性和长度限制
+    """
+    验证文本提示词的有效性和长度限制
 
     当中文字符超过 `max_chinese_chars` 或英文单词超过 `max_english_words` 时，视为过长。
     """
@@ -48,7 +82,8 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
 
 def validate_size(size: str) -> str:
-    """验证图像尺寸参数是否在允许的范围内
+    """
+    验证图像尺寸参数是否在允许的范围内
 
     Args:
         size: 图像尺寸规格，支持 1K/2K/4K
@@ -74,7 +109,8 @@ def validate_size(size: str) -> str:
 
 
 def validate_size_for_model(size: str, model_id: str) -> str:
-    """验证图像尺寸与模型的兼容性
+    """
+    验证图像尺寸与模型的兼容性
 
     不同模型对图像尺寸有特定要求，此函数确保尺寸参数符合模型限制。
 
@@ -104,7 +140,8 @@ def validate_size_for_model(size: str, model_id: str) -> str:
 
 
 def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None:
-    """验证提示词优化选项的配置
+    """
+    验证提示词优化选项的配置
 
     检查优化模式是否有效，并确保与模型兼容。
 
@@ -157,7 +194,8 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
 
 
 def validate_image_url(image: str) -> str:
-    """验证图像URL、文件路径或Data URI的有效性
+    """
+    验证图像URL、文件路径或Data URI的有效性
 
     支持三种图像输入格式：
     - HTTP/HTTPS URL
@@ -193,7 +231,8 @@ def validate_image_url(image: str) -> str:
 
 
 def validate_image_list(images: List[str], min_count: int = 1, max_count: int = 5) -> List[str]:
-    """验证图像路径列表的有效性和数量限制
+    """
+    验证图像路径列表的有效性和数量限制
 
     对列表中的每个图像路径进行验证，并检查总数是否在允许范围内。
 
@@ -236,7 +275,8 @@ def validate_image_list(images: List[str], min_count: int = 1, max_count: int = 
 
 
 def validate_max_images(max_images: Any) -> int:
-    """验证最大图像数量参数
+    """
+    验证最大图像数量参数
 
     确保参数为整数类型且在合理范围内（1-15）。
 
@@ -273,7 +313,8 @@ def validate_max_images(max_images: Any) -> int:
 
 
 def validate_sequential_image_limit(max_images: int, reference_images: List[str] | None) -> None:
-    """验证组图生成的总图片数量限制
+    """
+    验证组图输出的总图片数量限制
 
     要求：参考图数量 + 生成数量 <= 15。
     """
@@ -287,7 +328,8 @@ def validate_sequential_image_limit(max_images: int, reference_images: List[str]
 
 
 def validate_watermark(watermark: Any) -> bool:
-    """验证水印参数配置
+    """
+    验证水印参数配置
 
     支持布尔值或可转换为布尔值的字符串（true/false、yes/no、on/off、1/0）。
 
@@ -320,7 +362,8 @@ def validate_watermark(watermark: Any) -> bool:
 
 
 def validate_response_format(response_format: str) -> str:
-    """验证响应格式参数
+    """
+    验证响应格式参数
 
     Args:
         response_format: 响应格式类型，支持 url 或 b64_json
@@ -353,7 +396,8 @@ def validate_response_format(response_format: str) -> str:
 
 
 def _validate_url(url: str) -> str:
-    """验证HTTP/HTTPS URL的格式正确性
+    """
+    验证HTTP/HTTPS URL的格式正确性
 
     检查URL的scheme、netloc等部分是否完整，并对图像扩展名进行简单校验。
 
@@ -368,14 +412,14 @@ def _validate_url(url: str) -> str:
     """
     try:
         parsed = urlparse(url)
-        if not parsed.scheme or not parsed.netloc:
+        scheme = (parsed.scheme or "").lower()
+        if scheme not in {"http", "https"} or not parsed.netloc:
             raise SeedreamValidationError("无效的URL格式", field="image", value=url)
 
         # 检查URL路径中的图像扩展名
         if parsed.path:
             path_lower = parsed.path.lower()
-            image_extensions = [".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"]
-            if not any(path_lower.endswith(ext) for ext in image_extensions):
+            if not any(path_lower.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS):
                 # 没有明显的图像扩展名，给出警告但不阻止
                 pass
 
@@ -386,7 +430,8 @@ def _validate_url(url: str) -> str:
 
 
 def _validate_file_path(file_path: str) -> str:
-    """验证本地文件路径的存在性、格式和尺寸限制
+    """
+    验证本地文件路径的存在性、格式和尺寸限制
 
     执行以下检查：
     - 文件是否存在
@@ -405,33 +450,31 @@ def _validate_file_path(file_path: str) -> str:
         SeedreamValidationError: 当文件不存在、格式不支持或尺寸超限时抛出
     """
     try:
-        path = Path(file_path)
+        path = _resolve_local_image_path(file_path)
 
         # 检查文件是否存在
         if not path.exists():
             raise SeedreamValidationError(
-                f"文件不存在: {file_path}", field="image", value=file_path
+                f"文件不存在: {path}", field="image", value=file_path
             )
 
         # 检查是否为文件
         if not path.is_file():
             raise SeedreamValidationError(
-                f"路径不是文件: {file_path}", field="image", value=file_path
+                f"路径不是文件: {path}", field="image", value=file_path
             )
 
         # 检查文件扩展名
-        image_extensions = [".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"]
-        if path.suffix.lower() not in image_extensions:
+        if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
             raise SeedreamValidationError(
-                f"不支持的图像格式: {path.suffix}，支持的格式: {image_extensions}",
+                f"不支持的图像格式: {path.suffix}，支持的格式: {SUPPORTED_IMAGE_EXTENSIONS}",
                 field="image",
                 value=file_path,
             )
 
-        # 检查文件大小（限制为10MB）
+        # 检查文件大小
         file_size = path.stat().st_size
-        max_size = 10 * 1024 * 1024
-        if file_size > max_size:
+        if file_size > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
                 f"文件过大: {file_size / 1024 / 1024:.1f}MB，最大支持10MB",
                 field="image",
@@ -444,7 +487,7 @@ def _validate_file_path(file_path: str) -> str:
                 w, h = img.size
 
                 # 宽高必须大于14像素
-                if w <= 14 or h <= 14:
+                if w < MIN_IMAGE_EDGE or h < MIN_IMAGE_EDGE:
                     raise SeedreamValidationError(
                         "图像宽高长度必须大于14px",
                         field="image",
@@ -453,7 +496,7 @@ def _validate_file_path(file_path: str) -> str:
 
                 # 宽高比限制在 1/16 到 16 之间
                 ratio = w / h if h else 0
-                if ratio < (1 / 16) or ratio > 16:
+                if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
                     raise SeedreamValidationError(
                         "图像宽高比需在[1/16, 16]范围内",
                         field="image",
@@ -461,7 +504,7 @@ def _validate_file_path(file_path: str) -> str:
                     )
 
                 # 总像素不超过 6000×6000
-                if w * h > 6000 * 6000:
+                if w * h > MAX_IMAGE_PIXELS:
                     raise SeedreamValidationError(
                         "图像总像素不能超过 6000×6000",
                         field="image",
@@ -485,7 +528,8 @@ def _validate_file_path(file_path: str) -> str:
 
 
 def _validate_data_uri(data_uri: str) -> str:
-    """验证Data URI格式的图像数据
+    """
+    验证Data URI格式的图像数据
 
     执行以下检查：
     - Data URI格式是否正确（data:image/<格式>;base64,<数据>）
@@ -538,7 +582,7 @@ def _validate_data_uri(data_uri: str) -> str:
 
         # 检查数据大小
         size_bytes = len(raw)
-        if size_bytes > 10 * 1024 * 1024:
+        if size_bytes > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
                 f"数据过大: {size_bytes / 1024 / 1024:.1f}MB，最大支持10MB",
                 field="image",
@@ -551,20 +595,20 @@ def _validate_data_uri(data_uri: str) -> str:
                 w, h = img.size
 
                 # 宽高必须大于14像素
-                if w <= 14 or h <= 14:
+                if w < MIN_IMAGE_EDGE or h < MIN_IMAGE_EDGE:
                     raise SeedreamValidationError(
                         "图像宽高长度必须大于14px", field="image", value=data_uri
                     )
 
                 # 宽高比限制在 1/16 到 16 之间
                 ratio = w / h if h else 0
-                if ratio < (1 / 16) or ratio > 16:
+                if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
                     raise SeedreamValidationError(
                         "图像宽高比需在[1/16, 16]范围内", field="image", value=data_uri
                     )
 
                 # 总像素不超过 6000×6000
-                if w * h > 6000 * 6000:
+                if w * h > MAX_IMAGE_PIXELS:
                     raise SeedreamValidationError(
                         "图像总像素不能超过 6000×6000", field="image", value=data_uri
                     )

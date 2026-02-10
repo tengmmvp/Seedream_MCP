@@ -1,12 +1,11 @@
 """
 Seedream MCP工具 - 日志配置模块
-
-配置日志记录功能，支持控制台和文件输出。
 """
 
 import sys
 import logging
-from typing import Any, Callable, Optional
+from types import FrameType
+from typing import Any, Callable, Optional, Union
 from pathlib import Path
 
 from loguru import logger
@@ -18,7 +17,8 @@ def setup_logging(
     enable_console: bool = True,
     enable_file: bool = True,
 ) -> None:
-    """设置日志配置
+    """
+    设置日志配置
 
     Args:
         log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -43,7 +43,7 @@ def setup_logging(
             "<level>{message}</level>",
             colorize=True,
             backtrace=True,
-            diagnose=True,
+            diagnose=False,
         )
 
     # 文件输出配置
@@ -60,31 +60,38 @@ def setup_logging(
         logger.add(
             str(log_path),
             level=level,
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-            rotation="10 MB",  # 日志文件大小超过10MB时轮转
-            retention="30 days",  # 保留30天的日志文件
-            compression="zip",  # 压缩旧的日志文件
+            format=(
+                "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
+                "{name}:{function}:{line} - {message}"
+            ),
+            rotation="10 MB",
+            retention="30 days",
+            compression="zip",
             backtrace=True,
-            diagnose=True,
-            enqueue=True,  # 异步写入，提高性能
+            diagnose=False,
+            enqueue=True, 
         )
 
     # 配置标准库logging以重定向到loguru
     class InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             # 获取对应的loguru级别
+            log_level: Union[str, int]
             try:
-                level = logger.level(record.levelname).name
+                log_level = logger.level(record.levelname).name
             except ValueError:
-                level = record.levelno
+                log_level = record.levelno
 
             # 查找调用者
-            frame, depth = logging.currentframe(), 2
-            while frame.f_code.co_filename == logging.__file__:
+            frame: Optional[FrameType] = logging.currentframe()
+            depth = 2
+            while frame is not None and frame.f_code.co_filename == logging.__file__:
                 frame = frame.f_back
                 depth += 1
 
-            logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+            logger.opt(depth=depth, exception=record.exc_info).log(
+                log_level, record.getMessage()
+            )
 
     # 设置标准库logging
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
@@ -99,8 +106,9 @@ def setup_logging(
         logger.info(f"日志文件: {log_file}")
 
 
-def get_logger(name: Optional[str] = None):
-    """获取logger实例
+def get_logger(name: Optional[str] = None) -> Any:
+    """
+    获取logger实例
 
     Args:
         name: logger名称，如果为None则使用调用模块名
@@ -112,14 +120,16 @@ def get_logger(name: Optional[str] = None):
         # 自动获取调用模块名
         import inspect
 
-        frame = inspect.currentframe().f_back
-        name = frame.f_globals.get("__name__", "unknown")
+        current = inspect.currentframe()
+        caller = current.f_back if current is not None else None
+        name = caller.f_globals.get("__name__", "unknown") if caller is not None else "unknown"
 
     return logger.bind(name=name)
 
 
-def log_function_call(func: Callable[..., Any]):
-    """函数调用日志装饰器
+def log_function_call(func: Callable[..., Any]) -> Callable[..., Any]:
+    """
+    函数调用日志装饰器
 
     Args:
         func: 要装饰的函数
@@ -128,12 +138,12 @@ def log_function_call(func: Callable[..., Any]):
         装饰后的函数
     """
     import functools
-    import asyncio
+    import inspect
 
     @functools.wraps(func)
-    async def async_wrapper(*args, **kwargs):
+    async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
         func_name = f"{func.__qualname__}"
-        logger.info(f"函数调用: {func_name}({{}})")
+        logger.info("函数调用: {}()", func_name)
 
         try:
             result = await func(*args, **kwargs)
@@ -143,9 +153,9 @@ def log_function_call(func: Callable[..., Any]):
             raise
 
     @functools.wraps(func)
-    def sync_wrapper(*args, **kwargs):
+    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         func_name = f"{func.__qualname__}"
-        logger.info(f"函数调用: {func_name}({{}})")
+        logger.info("函数调用: {}()", func_name)
 
         try:
             result = func(*args, **kwargs)
@@ -155,7 +165,7 @@ def log_function_call(func: Callable[..., Any]):
             raise
 
     # 检查是否是异步函数
-    if asyncio.iscoroutinefunction(func):
+    if inspect.iscoroutinefunction(func):
         return async_wrapper
     else:
         return sync_wrapper
@@ -167,7 +177,8 @@ def log_function_call_manual(
     result: Optional[Any] = None,
     error: Optional[Exception] = None,
 ) -> None:
-    """手动记录函数调用日志
+    """
+    手动记录函数调用日志
 
     Args:
         func_name: 函数名称
@@ -186,8 +197,9 @@ def log_function_call_manual(
             logger.debug(f"函数返回: {_filter_sensitive_data(result)}")
 
 
-def _filter_sensitive_data(data):
-    """过滤敏感数据
+def _filter_sensitive_data(data: Any) -> Any:
+    """
+    过滤敏感数据
 
     Args:
         data: 要过滤的数据

@@ -1,7 +1,5 @@
 """
 Seedream MCP工具配置管理模块
-
-负责从环境变量读取配置信息，并提供配置验证功能。
 """
 
 # 标准库导入
@@ -67,14 +65,14 @@ class SeedreamConfig:
     auto_save_base_dir: Optional[str] = None
     auto_save_download_timeout: int = 30
     auto_save_max_retries: int = 3
-    auto_save_max_file_size: int = 50 * 1024 * 1024  # 50MB
+    auto_save_max_file_size: int = 50 * 1024 * 1024
     auto_save_max_concurrent: int = 5
     auto_save_date_folder: bool = True
     auto_save_cleanup_days: int = 30
 
     # 流式处理配置
-    stream_buffer_max_size: int = 10 * 1024 * 1024  # 10MB，流式响应缓冲区最大大小
-    stream_chunk_size: int = 1024 * 1024  # 1MB，每次读取的块大小
+    stream_buffer_max_size: int = 10 * 1024 * 1024
+    stream_chunk_size: int = 1024 * 1024
 
     def __post_init__(self) -> None:
         """
@@ -122,8 +120,8 @@ class SeedreamConfig:
             raise SeedreamConfigError("api_timeout必须大于0")
 
         # 验证max_retries
-        if self.max_retries < 0:
-            raise SeedreamConfigError("max_retries不能小于0")
+        if self.max_retries < 1:
+            raise SeedreamConfigError("max_retries不能小于1")
 
         # 验证log_level
         valid_log_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -212,32 +210,32 @@ class SeedreamConfig:
             base_url=os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
             model_id=os.getenv("SEEDREAM_MODEL_ID", "doubao-seedream-4-5-251128"),
             default_size=os.getenv("SEEDREAM_DEFAULT_SIZE", "2K"),
-            default_watermark=_parse_bool(os.getenv("SEEDREAM_DEFAULT_WATERMARK", "false")),
-            timeout=_parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
-            api_timeout=_parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "600")),
-            max_retries=_parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
+            default_watermark=parse_bool(os.getenv("SEEDREAM_DEFAULT_WATERMARK", "false")),
+            timeout=parse_int(os.getenv("SEEDREAM_TIMEOUT", "60")),
+            api_timeout=parse_int(os.getenv("SEEDREAM_API_TIMEOUT", "600")),
+            max_retries=parse_int(os.getenv("SEEDREAM_MAX_RETRIES", "3")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_file=os.getenv("LOG_FILE"),
             # 自动保存配置
-            auto_save_enabled=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_ENABLED", "true")),
+            auto_save_enabled=parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_ENABLED", "true")),
             auto_save_base_dir=os.getenv("SEEDREAM_AUTO_SAVE_BASE_DIR"),
-            auto_save_download_timeout=_parse_int(
+            auto_save_download_timeout=parse_int(
                 os.getenv("SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", "30")
             ),
-            auto_save_max_retries=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_RETRIES", "3")),
-            auto_save_max_file_size=_parse_int(
+            auto_save_max_retries=parse_int(os.getenv("SEEDREAM_AUTO_SAVE_MAX_RETRIES", "3")),
+            auto_save_max_file_size=parse_int(
                 os.getenv("SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE", str(50 * 1024 * 1024))
             ),
-            auto_save_max_concurrent=_parse_int(
+            auto_save_max_concurrent=parse_int(
                 os.getenv("SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", "5")
             ),
-            auto_save_date_folder=_parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
-            auto_save_cleanup_days=_parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
+            auto_save_date_folder=parse_bool(os.getenv("SEEDREAM_AUTO_SAVE_DATE_FOLDER", "true")),
+            auto_save_cleanup_days=parse_int(os.getenv("SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", "30")),
             # 流式处理配置
-            stream_buffer_max_size=_parse_int(
+            stream_buffer_max_size=parse_int(
                 os.getenv("SEEDREAM_STREAM_BUFFER_MAX_SIZE", str(10 * 1024 * 1024))
             ),
-            stream_chunk_size=_parse_int(os.getenv("SEEDREAM_STREAM_CHUNK_SIZE", str(1024 * 1024))),
+            stream_chunk_size=parse_int(os.getenv("SEEDREAM_STREAM_CHUNK_SIZE", str(1024 * 1024))),
         )
 
         return config
@@ -289,7 +287,7 @@ class SeedreamConfig:
         )
 
 
-def _parse_bool(value: str) -> bool:
+def parse_bool(value: object) -> bool:
     """
     解析布尔值字符串
 
@@ -297,24 +295,26 @@ def _parse_bool(value: str) -> bool:
     支持多种常见的布尔值表示形式，大小写不敏感。
 
     Args:
-        value: 待解析的字符串或布尔值
+        value: 待解析的值（字符串或布尔值）
 
     Returns:
         解析后的布尔值
     """
     if isinstance(value, bool):
         return value
-    return value.lower() in ("true", "1", "yes", "on")
+    if value is None:
+        return False
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
 
 
-def _parse_int(value: str) -> int:
+def parse_int(value: object) -> int:
     """
     解析整数字符串
 
     将字符串类型的整数值转换为Python整数类型。
 
     Args:
-        value: 待解析的字符串
+        value: 待解析的值
 
     Returns:
         解析后的整数值
@@ -322,9 +322,20 @@ def _parse_int(value: str) -> int:
     Raises:
         SeedreamConfigError: 当字符串无法解析为有效整数时抛出
     """
-    try:
+    if isinstance(value, bool):
         return int(value)
-    except (ValueError, TypeError):
+    if isinstance(value, int):
+        return value
+    if value is None:
+        raise SeedreamConfigError(f"无法解析整数值: {value}")
+
+    normalized = str(value).strip()
+    if not normalized:
+        raise SeedreamConfigError(f"无法解析整数值: {value}")
+
+    try:
+        return int(normalized)
+    except ValueError:
         raise SeedreamConfigError(f"无法解析整数值: {value}")
 
 

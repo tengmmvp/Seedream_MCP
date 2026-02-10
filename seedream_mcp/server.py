@@ -1,8 +1,5 @@
 ﻿"""
 Seedream MCP服务器主模块
-
-基于 FastMCP 框架实现的图像生成服务，提供文生图、图生图、多图融合、
-组图生成与本地图片浏览等工具能力。
 """
 
 from __future__ import annotations
@@ -15,10 +12,10 @@ from pathlib import Path
 # 第三方库导入
 from dotenv import dotenv_values
 from mcp.server.fastmcp import FastMCP
-from mcp.types import TextContent
+from mcp.types import TextContent, ToolAnnotations
 
 # 本地模块导入
-from .config import SeedreamConfig, _parse_bool, _parse_int, set_config
+from .config import SeedreamConfig, get_global_config, parse_bool, parse_int
 from .tools import (
     BrowseImagesInput,
     ImageToImageInput,
@@ -43,7 +40,7 @@ SERVER_NAME = "seedream_mcp"
 SERVER_VERSION = "1.2.3"
 
 # 服务器功能说明
-SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图生图、多图融合、组图与图片浏览。"
+SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图与图片浏览。"
 
 # ==================== 工具注解常量 ====================
 
@@ -52,24 +49,24 @@ SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图生图
 # - destructiveHint: 非破坏性操作
 # - idempotentHint: 非幂等操作（每次生成结果可能不同）
 # - openWorldHint: 开放世界操作（需要网络请求）
-GENERATION_TOOL_ANNOTATIONS = {
-    "readOnlyHint": False,
-    "destructiveHint": False,
-    "idempotentHint": False,
-    "openWorldHint": True,
-}
+GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
 
 # 浏览类工具的能力标注
 # - readOnlyHint: 只读操作（仅读取文件列表）
 # - destructiveHint: 非破坏性操作
 # - idempotentHint: 幂等操作（相同输入得到相同结果）
 # - openWorldHint: 非开放世界操作（本地文件系统）
-BROWSE_TOOL_ANNOTATIONS = {
-    "readOnlyHint": True,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,
-}
+BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
 
 # ==================== MCP 服务器实例 ====================
 
@@ -79,13 +76,38 @@ mcp = FastMCP(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
 # 初始化模块日志记录器
 logger = get_logger(__name__)
 
+# 当前服务器运行时配置
+_active_config: SeedreamConfig | None = None
+
+
+def _build_tool_annotations(title: str, base: ToolAnnotations) -> ToolAnnotations:
+    """
+    基于基础能力标注生成包含 title 的工具注解对象。
+    """
+    return ToolAnnotations(
+        title=title,
+        readOnlyHint=base.readOnlyHint,
+        destructiveHint=base.destructiveHint,
+        idempotentHint=base.idempotentHint,
+        openWorldHint=base.openWorldHint,
+    )
+
+
+def _get_active_config() -> SeedreamConfig:
+    """
+    获取当前活动配置，优先使用 CLI 注入配置。
+    """
+    if _active_config is not None:
+        return _active_config
+    return get_global_config()
+
 
 # ==================== MCP 工具函数定义 ====================
 
 
 @mcp.tool(
     name="seedream_text_to_image",
-    annotations={"title": "Seedream 文生图", **GENERATION_TOOL_ANNOTATIONS},
+    annotations=_build_tool_annotations("Seedream 文生图", GENERATION_TOOL_ANNOTATIONS),
 )
 async def seedream_text_to_image(params: TextToImageInput) -> list[TextContent]:
     """
@@ -93,12 +115,12 @@ async def seedream_text_to_image(params: TextToImageInput) -> list[TextContent]:
 
     通过给模型提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
     """
-    return await run_text_to_image(params)
+    return await run_text_to_image(params, config=_get_active_config())
 
 
 @mcp.tool(
     name="seedream_image_to_image",
-    annotations={"title": "Seedream 图生图", **GENERATION_TOOL_ANNOTATIONS},
+    annotations=_build_tool_annotations("Seedream 图文生图", GENERATION_TOOL_ANNOTATIONS),
 )
 async def seedream_image_to_image(params: ImageToImageInput) -> list[TextContent]:
     """
@@ -106,25 +128,25 @@ async def seedream_image_to_image(params: ImageToImageInput) -> list[TextContent
 
     基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
     """
-    return await run_image_to_image(params)
+    return await run_image_to_image(params, config=_get_active_config())
 
 
 @mcp.tool(
     name="seedream_multi_image_fusion",
-    annotations={"title": "Seedream 多图融合", **GENERATION_TOOL_ANNOTATIONS},
+    annotations=_build_tool_annotations("Seedream 多图融合", GENERATION_TOOL_ANNOTATIONS),
 )
 async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[TextContent]:
     """
     多图融合：
 
-    根据您输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
+    根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
     """
-    return await run_multi_image_fusion(params)
+    return await run_multi_image_fusion(params, config=_get_active_config())
 
 
 @mcp.tool(
     name="seedream_sequential_generation",
-    annotations={"title": "Seedream 组图生成", **GENERATION_TOOL_ANNOTATIONS},
+    annotations=_build_tool_annotations("Seedream 组图输出", GENERATION_TOOL_ANNOTATIONS),
 )
 async def seedream_sequential_generation(
     params: SequentialGenerationInput,
@@ -134,12 +156,12 @@ async def seedream_sequential_generation(
 
     支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
     """
-    return await run_sequential_generation(params)
+    return await run_sequential_generation(params, config=_get_active_config())
 
 
 @mcp.tool(
     name="seedream_browse_images",
-    annotations={"title": "Seedream 图片浏览", **BROWSE_TOOL_ANNOTATIONS},
+    annotations=_build_tool_annotations("Seedream 图片浏览", BROWSE_TOOL_ANNOTATIONS),
 )
 async def seedream_browse_images(params: BrowseImagesInput) -> list[TextContent]:
     """
@@ -154,7 +176,8 @@ async def seedream_browse_images(params: BrowseImagesInput) -> list[TextContent]
 
 
 def _read_env_files(config_file: str | None) -> dict[str, str]:
-    """读取 .env 文件内容（不覆盖现有环境变量）。
+    """
+    读取 .env 文件内容
 
     优先级：显式指定的 config_file > 当前工作目录 .env > 项目根目录 .env。
     """
@@ -164,12 +187,15 @@ def _read_env_files(config_file: str | None) -> dict[str, str]:
     cwd_env = Path.cwd() / ".env"
     project_env = Path(__file__).resolve().parent.parent / ".env"
 
-    if cwd_env.is_file():
-        candidates.append(cwd_env)
-    if project_env.is_file() and project_env not in candidates:
+    # 通过“后写覆盖前写”实现优先级：config_file > cwd > project
+    if project_env.is_file():
         candidates.append(project_env)
+    if cwd_env.is_file() and cwd_env not in candidates:
+        candidates.append(cwd_env)
     if config_file:
-        candidates.append(Path(config_file))
+        config_path = Path(config_file)
+        if config_path.is_file() and config_path not in candidates:
+            candidates.append(config_path)
 
     for env_path in candidates:
         values = dotenv_values(env_path)
@@ -184,7 +210,18 @@ def _pick_config_value(
     env_values: dict[str, str],
     default_value: object,
 ) -> object:
-    """按优先级挑选配置值：CLI > 环境变量 > .env > 默认值。"""
+    """
+    按优先级挑选配置值：CLI > 环境变量 > .env > 默认值。
+
+    Args:
+        cli_value: 命令行参数值，若为 None 则从环境变量或 .env 文件中获取。
+        env_key: 环境变量键名。
+        env_values: 从 .env 文件读取的环境变量值字典。
+        default_value: 默认值，若以上所有来源均为空则返回。
+
+    Returns:
+        按优先级选择后的配置值，若所有来源均为空则返回默认值。
+    """
     if cli_value is not None:
         return cli_value
     env_value = os.getenv(env_key)
@@ -197,7 +234,8 @@ def _pick_config_value(
 
 
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
-    """从命令行参数构建服务器配置对象
+    """
+    从命令行参数构建服务器配置对象
 
     优先级：命令行参数 > 系统环境变量 > .env 文件 > 默认值。
 
@@ -212,7 +250,7 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     """
     env_values = _read_env_files(args.config_file)
 
-    # 获取 API 密钥（优先使用命令行参数）
+    # 获取 API 密钥
     api_key = _pick_config_value(args.api_key, "ARK_API_KEY", env_values, None)
     if not api_key:
         raise SeedreamConfigError("未找到 API 密钥,请使用 --api-key 或设置 ARK_API_KEY 环境变量。")
@@ -242,85 +280,66 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         default_size=str(
             _pick_config_value(args.default_size, "SEEDREAM_DEFAULT_SIZE", env_values, "2K")
         ),
-        default_watermark=_parse_bool(
+        default_watermark=parse_bool(
             _pick_config_value(args.watermark, "SEEDREAM_DEFAULT_WATERMARK", env_values, "false")
         ),
-        timeout=_parse_int(
-            str(_pick_config_value(None, "SEEDREAM_TIMEOUT", env_values, "60"))
-        ),
-        api_timeout=_parse_int(
-            str(_pick_config_value(None, "SEEDREAM_API_TIMEOUT", env_values, "600"))
-        ),
-        max_retries=_parse_int(
-            str(_pick_config_value(None, "SEEDREAM_MAX_RETRIES", env_values, "3"))
-        ),
+        timeout=parse_int(_pick_config_value(None, "SEEDREAM_TIMEOUT", env_values, "60")),
+        api_timeout=parse_int(_pick_config_value(None, "SEEDREAM_API_TIMEOUT", env_values, "600")),
+        max_retries=parse_int(_pick_config_value(None, "SEEDREAM_MAX_RETRIES", env_values, "3")),
         log_level=str(_pick_config_value(args.log_level, "LOG_LEVEL", env_values, "INFO")),
         log_file=(
             str(_pick_config_value(None, "LOG_FILE", env_values, ""))
             or None
         ),
-        auto_save_enabled=_parse_bool(
+        auto_save_enabled=parse_bool(
             _pick_config_value(None, "SEEDREAM_AUTO_SAVE_ENABLED", env_values, "true")
         ),
         auto_save_base_dir=(
             str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_BASE_DIR", env_values, ""))
             or None
         ),
-        auto_save_download_timeout=_parse_int(
-            str(
-                _pick_config_value(
-                    None, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", env_values, "30"
-                )
+        auto_save_download_timeout=parse_int(
+            _pick_config_value(None, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT", env_values, "30")
+        ),
+        auto_save_max_retries=parse_int(
+            _pick_config_value(None, "SEEDREAM_AUTO_SAVE_MAX_RETRIES", env_values, "3")
+        ),
+        auto_save_max_file_size=parse_int(
+            _pick_config_value(
+                None,
+                "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
+                env_values,
+                str(50 * 1024 * 1024),
             )
         ),
-        auto_save_max_retries=_parse_int(
-            str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_MAX_RETRIES", env_values, "3"))
+        auto_save_max_concurrent=parse_int(
+            _pick_config_value(None, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", env_values, "5")
         ),
-        auto_save_max_file_size=_parse_int(
-            str(
-                _pick_config_value(
-                    None,
-                    "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
-                    env_values,
-                    str(50 * 1024 * 1024),
-                )
-            )
-        ),
-        auto_save_max_concurrent=_parse_int(
-            str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT", env_values, "5"))
-        ),
-        auto_save_date_folder=_parse_bool(
+        auto_save_date_folder=parse_bool(
             _pick_config_value(None, "SEEDREAM_AUTO_SAVE_DATE_FOLDER", env_values, "true")
         ),
-        auto_save_cleanup_days=_parse_int(
-            str(_pick_config_value(None, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", env_values, "30"))
+        auto_save_cleanup_days=parse_int(
+            _pick_config_value(None, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", env_values, "30")
         ),
-        stream_buffer_max_size=_parse_int(
-            str(
-                _pick_config_value(
-                    None,
-                    "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
-                    env_values,
-                    str(10 * 1024 * 1024),
-                )
+        stream_buffer_max_size=parse_int(
+            _pick_config_value(
+                None,
+                "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
+                env_values,
+                str(10 * 1024 * 1024),
             )
         ),
-        stream_chunk_size=_parse_int(
-            str(
-                _pick_config_value(
-                    None, "SEEDREAM_STREAM_CHUNK_SIZE", env_values, str(1024 * 1024)
-                )
-            )
+        stream_chunk_size=parse_int(
+            _pick_config_value(None, "SEEDREAM_STREAM_CHUNK_SIZE", env_values, str(1024 * 1024))
         ),
     )
 
-    # 设置全局配置实例
-    set_config(cfg)
     return cfg
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """构建命令行参数解析器
+    """
+    构建命令行参数解析器
 
     定义所有支持的命令行选项，包括 API 配置、模型选择、日志级别等。
 
@@ -361,11 +380,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="默认生成尺寸（默认按配置或内置默认值）",
     )
-    parser.add_argument(
+    watermark_group = parser.add_mutually_exclusive_group()
+    watermark_group.add_argument(
         "--watermark",
+        dest="watermark",
         action="store_true",
         default=None,
         help="启用默认水印（未传入时按配置或内置默认值）",
+    )
+    watermark_group.add_argument(
+        "--no-watermark",
+        dest="watermark",
+        action="store_false",
+        help="关闭默认水印（未传入时按配置或内置默认值）",
     )
 
     # 日志配置
@@ -411,12 +438,16 @@ def cli_main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
+    global _active_config
+
     # 构建配置对象
     try:
         config = _build_config_from_args(args)
     except SeedreamConfigError as exc:
         print(f"配置错误: {exc.message}")
         return 1
+
+    _active_config = config
 
     # 初始化日志系统
     setup_logging(config.log_level, config.log_file)

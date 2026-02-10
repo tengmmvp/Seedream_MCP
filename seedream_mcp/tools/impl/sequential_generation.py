@@ -1,46 +1,37 @@
 ﻿"""
-组图/连续生成工具模块
-
-提供组图批量生成功能的核心处理逻辑，支持连续生成多张图片、自动保存及流式输出。
+组图输出工具模块
 """
 
 from __future__ import annotations
 
 # 标准库导入
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, cast
 
 # 第三方库导入
 from mcp.types import TextContent
 
-# 项目内部导入 - 客户端与配置
-from ...client import SeedreamClient
-from ...config import get_global_config
-
-# 项目内部导入 - 工具模块
-from ...utils.errors import format_error_for_user
+# 项目内部导入 - 配置
+from ...config import SeedreamConfig
 from ...utils.logging import get_logger
-from ...utils.validation import (
-    validate_optimize_prompt_options,
-    validate_response_format,
-    validate_size_for_model,
-    validate_watermark,
-)
 
 # 项目内部导入 - 核心功能
 from ..core.common import (
-    auto_save_from_base64,
-    auto_save_from_urls,
-    format_generation_response,
-    update_result_with_auto_save,
+    execute_generation_handler,
+    GenerationExecutionContext,
 )
+
+if TYPE_CHECKING:
+    from ...client import SeedreamClient
 
 # 模块日志记录器
 logger = get_logger(__name__)
 
 
-async def handle_sequential_generation(arguments: Dict[str, Any]) -> List[TextContent]:
+async def handle_sequential_generation(
+    arguments: Dict[str, Any], config: SeedreamConfig
+) -> List[TextContent]:
     """
-    处理组图/连续生成请求。
+    处理组图输出请求
 
     执行批量图片生成任务，支持提示词优化、多种响应格式、水印配置及自动保存功能。
     根据用户配置参数调用 API 生成多张图片，并可选择性地将结果保存至本地。
@@ -65,95 +56,38 @@ async def handle_sequential_generation(arguments: Dict[str, Any]) -> List[TextCo
     Raises:
         Exception: 当生成过程中发生错误时，捕获异常并返回格式化的错误提示信息。
     """
-    try:
-        # 加载全局配置
-        config = get_global_config()
+    max_images = arguments.get("max_images", 4)
+    image = arguments.get("image")
 
-        # 提取并验证请求参数
-        prompt = arguments.get("prompt", "")
-        max_images = arguments.get("max_images", 4)
-        image = arguments.get("image")
-        size = validate_size_for_model(
-            arguments.get("size") or config.default_size, config.model_id
+    async def _execute(
+        client: "SeedreamClient", context: GenerationExecutionContext
+    ) -> Dict[str, Any]:
+        result = await client.sequential_generation(
+            prompt=context.prompt,
+            max_images=max_images,
+            size=context.size,
+            watermark=context.watermark,
+            response_format=context.response_format,
+            image=image,
+            stream=context.stream,
+            optimize_prompt_options=context.optimize_prompt_options,
         )
-        watermark_value = arguments.get("watermark")
-        watermark = (
-            validate_watermark(watermark_value)
-            if watermark_value is not None
-            else config.default_watermark
-        )
-        response_format = validate_response_format(arguments.get("response_format", "url"))
-        stream = bool(arguments.get("stream", False))
-        optimize_prompt_options = validate_optimize_prompt_options(
-            arguments.get("optimize_prompt_options"), config.model_id
-        )
-        auto_save = arguments.get("auto_save")
-        save_path = arguments.get("save_path")
-        custom_name = arguments.get("custom_name")
+        return cast(Dict[str, Any], result)
 
-        # 确定自动保存配置
-        enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
-
-        # 记录任务开始信息
-        logger.info(
-            "组图生成开始: prompt='{}...', max_images={}, size={}, stream={}",
-            (prompt or "")[:50],
+    return await execute_generation_handler(
+        arguments=arguments,
+        config=config,
+        module_logger=logger,
+        tool_name="sequential_generation",
+        completion_title="组图输出任务完成",
+        failure_prefix="组图输出",
+        guidance="请检查提示词、数量与图片参数，确认 API Key 和网络可用后重试。",
+        start_log_message="组图输出开始: prompt='{}...', max_images={}, size={}, stream={}",
+        start_log_values_builder=lambda ctx: (
+            (ctx.prompt or "")[:50],
             max_images,
-            size,
-            stream,
-        )
-
-        # 执行组图生成请求
-        async with SeedreamClient(config) as client:
-            result = await client.sequential_generation(
-                prompt=prompt,
-                max_images=max_images,
-                size=size,
-                watermark=watermark,
-                response_format=response_format,
-                image=image,
-                stream=stream,
-                optimize_prompt_options=optimize_prompt_options,
-            )
-
-        # 处理自动保存逻辑
-        auto_save_results: List[Any] = []
-        if enable_auto_save and result.get("success"):
-            # 根据响应格式选择对应的保存方法
-            if response_format == "url":
-                auto_save_results = await auto_save_from_urls(
-                    result, prompt, config, save_path, custom_name, "sequential_generation"
-                )
-            else:
-                auto_save_results = await auto_save_from_base64(
-                    result, prompt, config, save_path, custom_name, "sequential_generation"
-                )
-
-            # 将保存结果合并到响应数据中
-            if auto_save_results:
-                result = update_result_with_auto_save(result, auto_save_results)
-
-        # 格式化最终响应文本
-        response_text = format_generation_response(
-            "组图生成任务完成",
-            result,
-            prompt,
-            size,
-            auto_save_results,
-            enable_auto_save,
-        )
-
-        return [TextContent(type="text", text=response_text)]
-
-    except Exception as exc:
-        # 记录异常详情
-        logger.error("组图生成处理失败", exc_info=True)
-
-        # 提供用户友好的故障排除指导
-        guidance = "请检查提示词、数量与图片参数，确认 API Key 和网络可用后重试。"
-        return [
-            TextContent(
-                type="text",
-                text=f"组图生成失败：{format_error_for_user(exc)}\n{guidance}",
-            )
-        ]
+            ctx.size,
+            ctx.stream,
+        ),
+        request_executor=_execute,
+    )
