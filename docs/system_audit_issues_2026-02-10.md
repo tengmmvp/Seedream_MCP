@@ -422,7 +422,7 @@
 
 ---
 
-## 5. 本次变更记录
+## 5. 本次变更记录（首轮）
 
 | 问题ID | 变更文件                                                                                      | 校验结果                                                       | 结论                   |
 | ------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------------------- |
@@ -442,7 +442,28 @@
 | P2-04  | `seedream_mcp/__init__.py`、`tests/test_package_lazy_import.py`                               | 包入口惰性导入测试通过                                         | 已完成                 |
 | P2-05  | `pyproject.toml`、`tests/test_pyproject_dependency_source.py`                                 | 依赖单一来源约束测试通过                                       | 已完成                 |
 
-## 6. 变更记录模板
+## 6. 审查回合补充记录（2026-02-10）
+
+| 回合问题 | 变更文件                                                                                                      | 调整摘要                                                               | 校验结果         |
+| -------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ---------------- |
+| RV-01    | `seedream_mcp/utils/download_manager.py`、`tests/test_download_manager_security.py`                           | 异步下载链路移除阻塞式 DNS 校验，恢复 DNS 相关失败可重试语义           | `pytest -q` 通过 |
+| RV-02    | `seedream_mcp/server.py`、`tests/test_server_config_fallback.py`                                              | `_active_config` 未注入时回退全局配置，恢复非 CLI 启动路径可用性       | `pytest -q` 通过 |
+| RV-03    | `seedream_mcp/client.py`、`tests/test_client_refactor.py`                                                     | 图片相对路径在校验前按 `SEEDREAM_WORKSPACE_ROOT` 统一解析              | `pytest -q` 通过 |
+| RV-04    | `seedream_mcp/tools/core/common.py`                                                                           | 自动保存目录不可用时降级跳过自动保存，不中断主生成流程                 | `pytest -q` 通过 |
+| RV-05    | `seedream_mcp/client.py`、`tests/test_client_refactor.py`                                                     | 恢复 Data URI 本地语义校验，错误或超大输入在请求前拦截                 | `pytest -q` 通过 |
+| RV-06    | `.github/workflows/release.yml`、`tests/test_pyproject_dependency_source.py`                                  | 增加 Python 3.10 `tomli` 回退，并在 CI 中显式安装 `pytest/mypy/flake8` | `pytest -q` 通过 |
+| RV-07    | `seedream_mcp/tools/core/schemas.py`、`tests/test_sequential_generation_limits.py`                            | `model_validator` 中限额校验异常统一封装为 `ValueError`                | `pytest -q` 通过 |
+| RV-08    | `seedream_mcp/config.py`、`tests/test_config_builder.py`                                                      | 恢复 `.env` 注入环境变量，默认读取项目根与 cwd `.env` 并合并           | `pytest -q` 通过 |
+| RV-09    | `seedream_mcp/config.py`、`tests/test_config_builder.py`                                                      | 修复显式 `env_file` 重复构建时被上次注入值污染的问题                   | `pytest -q` 通过 |
+| RV-10    | `seedream_mcp/config.py`、`tests/test_config_builder.py`                                                      | 修复运行时动态设置环境变量被 `.env` 覆盖的优先级回归                   | `pytest -q` 通过 |
+| RV-11    | `seedream_mcp/client.py`、`tests/test_client_refactor.py`                                                     | 图片参数结构校验恢复抛出 `SeedreamValidationError`                     | `pytest -q` 通过 |
+| RV-12    | `seedream_mcp/tools/core/schemas.py`、`seedream_mcp/tools/core/common.py`、`tests/test_generation_context.py` | 显式空 `size` 输入改为报错，禁止静默回退默认值                         | `pytest -q` 通过 |
+
+补充复核结论：
+
+- 当前工作区全量测试：`pytest -q` => `48 passed in 1.53s`。
+
+## 7. 变更记录模板
 
 | 问题ID      | 修复分支/提交 | 变更文件                 | 测试结果         | 结论   |
 | ----------- | ------------- | ------------------------ | ---------------- | ------ |

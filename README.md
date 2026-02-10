@@ -225,7 +225,13 @@ uv run python -m seedream_mcp.server --api-key your_key
 
 主要配置项（详见 `.env.example`）：
 
-配置优先级：MCP 客户端配置（命令行/环境变量） > .env 文件 > 默认值。
+配置优先级：MCP 客户端显式配置（命令行参数） > 运行时系统环境变量 > `.env` 文件 > 默认值。
+
+`.env` 加载规则：
+
+- 使用 `--config-file` 时：仅加载指定文件。
+- 未指定 `--config-file` 时：按“项目根 `.env` -> 当前工作目录 `.env`”顺序合并，后者覆盖前者。
+- `.env` 会注入进程环境变量供运行时读取，但不会覆盖已存在的系统环境变量。
 
 ```bash
 # 必需配置
@@ -238,7 +244,7 @@ SEEDREAM_MODEL_ID=doubao-seedream-4-5-251128
 SEEDREAM_DEFAULT_SIZE=2K
 SEEDREAM_DEFAULT_WATERMARK=false
 
-# 自动保存（默认启用）
+# 自动保存
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
