@@ -237,9 +237,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--default-size",
-        choices=["1K", "2K", "4K"],
+        type=str,
         default=None,
-        help="默认生成尺寸（默认按配置或内置默认值）",
+        help='默认生成尺寸（支持 1K/2K/4K 或 "<宽>x<高>"，默认按配置或内置默认值）',
     )
     watermark_group = parser.add_mutually_exclusive_group()
     watermark_group.add_argument(

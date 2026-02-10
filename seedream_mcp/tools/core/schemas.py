@@ -76,7 +76,7 @@ class BaseGenerationInput(BaseModel):
 
     size: Optional[str] = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/4K；未提供时使用全局默认值。",
+        description="生成图片尺寸，可选 1K/2K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。",
     )
     watermark: Optional[bool] = Field(
         default=None,
@@ -171,8 +171,8 @@ class MultiImageFusionInput(BaseGenerationInput):
     image: List[str] = Field(
         ...,
         min_length=2,
-        max_length=5,
-        description="参与融合的图片列表，支持 URL、本地路径，数量2-5张。",
+        max_length=14,
+        description="参与融合的图片列表，支持 URL、本地路径，数量2-14张。",
     )
 
 
@@ -187,14 +187,14 @@ class SequentialGenerationInput(BaseGenerationInput):
         description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。",
     )
     max_images: int = Field(
-        default=4,
+        default=15,
         ge=1,
         le=15,
         description="本次请求允许生成的最大图片数量，范围 1-15。",
     )
     image: Optional[List[str]] = Field(
         default=None,
-        description="可选的参考图片，支持单张或多张。",
+        description="可选的参考图片，支持单张或多张，最多 14 张。",
     )
 
     @field_validator("image", mode="before")
@@ -223,8 +223,8 @@ class SequentialGenerationInput(BaseGenerationInput):
 
         if not isinstance(images, list):
             raise ValueError("image 必须是字符串或字符串列表")
-        if len(images) < 1 or len(images) > 15:
-            raise ValueError("参考图片数量需在 1-15 之间")
+        if len(images) < 1 or len(images) > 14:
+            raise ValueError("参考图片数量需在 1-14 之间")
 
         normalized: List[str] = []
         for item in images:
@@ -238,6 +238,10 @@ class SequentialGenerationInput(BaseGenerationInput):
         """
         校验参考图数量与生成数量的总和限制。
         """
+        # max_images 未显式传入且存在参考图时，自动扣减为总量上限内的默认值。
+        if self.image and "max_images" not in self.model_fields_set:
+            self.max_images = 15 - len(self.image)
+
         try:
             validate_sequential_image_limit(self.max_images, self.image)
         except SeedreamValidationError as exc:

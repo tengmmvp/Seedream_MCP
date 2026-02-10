@@ -11,7 +11,8 @@ from typing import Any, Mapping, Optional
 
 from dotenv import dotenv_values
 
-from .utils.errors import SeedreamConfigError
+from .utils.errors import SeedreamConfigError, SeedreamValidationError
+from .utils.validation import validate_size_for_model
 
 # ====================
 # 配置常量
@@ -108,9 +109,16 @@ class SeedreamConfig:
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError("model_id不能为空")
 
-        valid_sizes = ["1K", "2K", "4K"]
-        if self.default_size not in valid_sizes:
-            raise SeedreamConfigError(f"default_size必须是以下值之一: {valid_sizes}")
+        if not isinstance(self.default_size, str) or not self.default_size.strip():
+            raise SeedreamConfigError("default_size不能为空")
+
+        normalized_default_size = self.default_size.strip()
+        try:
+            self.default_size = validate_size_for_model(
+                normalized_default_size, self.model_id
+            )
+        except SeedreamValidationError as exc:
+            raise SeedreamConfigError(f"default_size无效: {exc.message}") from exc
 
         if self.timeout <= 0:
             raise SeedreamConfigError("timeout必须大于0")

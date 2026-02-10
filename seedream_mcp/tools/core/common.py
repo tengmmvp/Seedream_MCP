@@ -350,7 +350,7 @@ def update_result_with_auto_save(result: Dict[str, Any], auto_save_results: List
     """
     将自动保存结果合并到生成结果中
 
-    在原结果基础上添加保存统计信息，并为每张图片补充本地路径和 Markdown 引用，
+    在原结果基础上添加保存统计信息，并为可保存图片补充本地路径和 Markdown 引用，
     不修改原结果对象，返回新的字典副本。
 
     Args:
@@ -372,8 +372,19 @@ def update_result_with_auto_save(result: Dict[str, Any], auto_save_results: List
     updated_result["auto_save"] = auto_save_info
 
     images = extract_images(updated_result)
-    for image, save_result in zip(images, auto_save_results):
-        if isinstance(image, dict) and getattr(save_result, "success", False):
+    auto_save_iter = iter(auto_save_results)
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        # 自动保存仅处理包含图片数据的项
+        if not (image.get("url") or image.get("b64_json")):
+            continue
+
+        save_result = next(auto_save_iter, None)
+        if save_result is None:
+            break
+
+        if getattr(save_result, "success", False):
             image["local_path"] = save_result.local_path
             image["markdown_ref"] = save_result.markdown_ref
 
@@ -422,6 +433,13 @@ def format_generation_response(
     for i, image in enumerate(images, 1):
         if isinstance(image, dict):
             parts.append(f"图片 {i}:")
+            error_info = image.get("error")
+            if isinstance(error_info, dict):
+                parts.append("  状态: 失败")
+                if error_info.get("code"):
+                    parts.append(f"  错误码: {error_info['code']}")
+                if error_info.get("message"):
+                    parts.append(f"  错误信息: {error_info['message']}")
             if image.get("url"):
                 parts.append(f"  URL: {image['url']}")
             if "size" in image:

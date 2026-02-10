@@ -100,7 +100,7 @@ class SeedreamClient:
 
         Args:
             prompt: 文本提示词，描述要生成的图像内容
-            size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
+            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
@@ -171,7 +171,7 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要对输入图像进行的修改或转换
             image: 输入图像的 URL 或本地文件路径
-            size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
+            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
@@ -246,8 +246,8 @@ class SeedreamClient:
 
         Args:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
-            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-5 张
-            size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
+            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张
+            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
@@ -262,7 +262,7 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
-        image = self._normalize_image_sequence(image, min_count=2, max_count=5, field_name="image")
+        image = self._normalize_image_sequence(image, min_count=2, max_count=14, field_name="image")
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
@@ -310,7 +310,7 @@ class SeedreamClient:
     async def sequential_generation(
         self,
         prompt: str,
-        max_images: int = 4,
+        max_images: Optional[int] = None,
         size: str = "2K",
         watermark: bool = False,
         response_format: str = "url",
@@ -330,8 +330,8 @@ class SeedreamClient:
 
         Args:
             prompt: 文本提示词，描述要生成的图像内容
-            max_images: 最大生成图像数量，范围为 1-15，默认为 4
-            size: 图像尺寸，可选值为 "1K"、"2K"、"4K"，默认为 "2K"
+            max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
+            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（参考图数量与生成数量之和不超过 15）
@@ -347,7 +347,6 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
-        max_images = validate_max_images(max_images)
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
@@ -373,10 +372,17 @@ class SeedreamClient:
             reference_images = self._normalize_image_sequence(
                 reference_images,
                 min_count=1,
-                max_count=15,
+                max_count=14,
                 field_name="image",
             )
-            validate_sequential_image_limit(max_images, reference_images)
+
+        resolved_max_images = max_images
+        if resolved_max_images is None:
+            resolved_max_images = 15 - len(reference_images) if reference_images is not None else 15
+        resolved_max_images = validate_max_images(resolved_max_images)
+
+        if reference_images is not None:
+            validate_sequential_image_limit(resolved_max_images, reference_images)
 
         if reference_images is not None:
             if len(reference_images) == 1:
@@ -387,7 +393,7 @@ class SeedreamClient:
         self.logger.info(
             "开始组图输出任务: prompt_meta={}, max_images={}, size={}",
             self._summarize_prompt(prompt),
-            max_images,
+            resolved_max_images,
             size,
         )
 
@@ -397,7 +403,7 @@ class SeedreamClient:
                 "model": self.config.model_id,
                 "prompt": prompt,
                 "sequential_image_generation": "auto",
-                "sequential_image_generation_options": {"max_images": max_images},
+                "sequential_image_generation_options": {"max_images": resolved_max_images},
                 "size": size,
                 "watermark": watermark,
                 "response_format": response_format,
@@ -733,6 +739,24 @@ class SeedreamClient:
             "type": event.get("type", "image_generation.partial_succeeded"),
         }
 
+    @staticmethod
+    def _format_sse_failed_event(event: Dict[str, Any], model_id: str) -> Dict[str, Any]:
+        """
+        将 SSE 失败事件转换为统一图片项结构。
+        """
+        raw_error = event.get("error")
+        error = raw_error if isinstance(raw_error, dict) else {}
+        return {
+            "error": {
+                "code": error.get("code"),
+                "message": error.get("message"),
+            },
+            "image_index": event.get("image_index"),
+            "model": event.get("model", model_id),
+            "created": event.get("created", int(time.time())),
+            "type": event.get("type", "image_generation.partial_failed"),
+        }
+
     def _parse_sse_segment(self, segment: bytes) -> Optional[Dict[str, Any]]:
         """
         解析单个 SSE 事件段，返回事件对象。
@@ -798,6 +822,8 @@ class SeedreamClient:
                 event_type = event.get("type")
                 if event_type == "image_generation.partial_succeeded":
                     items.append(self._format_sse_success_event(event, self.config.model_id))
+                elif event_type == "image_generation.partial_failed":
+                    items.append(self._format_sse_failed_event(event, self.config.model_id))
                 elif event_type == "image_generation.completed":
                     usage = event.get("usage", {}) or {}
                     status = "completed"
@@ -807,6 +833,8 @@ class SeedreamClient:
             event_type = trailing_event.get("type")
             if event_type == "image_generation.partial_succeeded":
                 items.append(self._format_sse_success_event(trailing_event, self.config.model_id))
+            elif event_type == "image_generation.partial_failed":
+                items.append(self._format_sse_failed_event(trailing_event, self.config.model_id))
             elif event_type == "image_generation.completed":
                 usage = trailing_event.get("usage", {}) or {}
                 status = "completed"

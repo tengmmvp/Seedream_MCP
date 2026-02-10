@@ -137,6 +137,41 @@ async def test_call_api_parses_sse_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_call_api_parses_sse_partial_failed_event() -> None:
+    sse_payload = (
+        "data: "
+        '{"type":"image_generation.partial_failed","image_index":2,'
+        '"error":{"code":"OutputImageSensitiveContentDetected","message":"blocked"}}\n\n'
+        'data: {"type":"image_generation.completed","usage":{"generated_images":0}}\n\n'
+        "data: [DONE]\n\n"
+    ).encode("utf-8")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=sse_payload,
+        )
+
+    client = SeedreamClient(_build_config())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    try:
+        result = await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
+    finally:
+        await client.close()
+
+    assert result["success"] is True
+    assert result["status"] == "completed"
+    assert len(result["data"]) == 1
+    assert result["data"][0]["type"] == "image_generation.partial_failed"
+    assert result["data"][0]["image_index"] == 2
+    assert result["data"][0]["error"]["code"] == "OutputImageSensitiveContentDetected"
+    assert result["data"][0]["error"]["message"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -175,6 +210,41 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
         "prepared:image-2",
         "prepared:image-3",
     ]
+
+
+@pytest.mark.asyncio
+async def test_multi_image_fusion_accepts_up_to_14_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(_build_config())
+    input_images = [f"https://example.com/{idx}.png" for idx in range(14)]
+    captured_request: Dict[str, Any] = {}
+
+    async def fake_prepare_images_in_parallel(images: List[str]) -> List[str]:
+        return [f"prepared:{item}" for item in images]
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured_request.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
+
+    assert len(captured_request["image"]) == 14
+    assert captured_request["image"][0] == "prepared:https://example.com/0.png"
+    assert captured_request["image"][-1] == "prepared:https://example.com/13.png"
+
+
+@pytest.mark.asyncio
+async def test_multi_image_fusion_rejects_more_than_14_images() -> None:
+    client = SeedreamClient(_build_config())
+    input_images = [f"https://example.com/{idx}.png" for idx in range(15)]
+
+    with pytest.raises(SeedreamValidationError, match="image 数量不能超过 14"):
+        await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
 
 
 @pytest.mark.asyncio
@@ -217,6 +287,34 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
         "prepared:image-2",
         "prepared:image-3",
     ]
+
+
+@pytest.mark.asyncio
+async def test_sequential_generation_without_max_images_uses_reference_aware_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(_build_config())
+    captured_request: Dict[str, Any] = {}
+
+    async def fake_prepare_image_input(image: str) -> str:
+        return f"prepared:{image}"
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured_request.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_prepare_image_input", fake_prepare_image_input)
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.sequential_generation(
+        prompt="test",
+        image="image-1",
+        size="2K",
+    )
+
+    assert captured_request["image"] == "prepared:image-1"
+    assert captured_request["sequential_image_generation_options"]["max_images"] == 14
 
 
 def test_normalize_image_sequence_rejects_non_list_input() -> None:

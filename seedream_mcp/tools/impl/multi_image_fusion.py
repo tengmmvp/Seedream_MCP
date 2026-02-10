@@ -34,7 +34,7 @@ async def handle_multi_image_fusion(
     Args:
         arguments: 融合任务参数字典，包含以下字段：
             - prompt (str, optional): 融合描述提示词，默认为空字符串
-            - image (List): 待融合的图片列表
+            - image (List): 待融合的图片列表（2-14 张）
             - size (str, optional): 生成图片尺寸，默认使用配置中的默认值
             - watermark (bool, optional): 是否添加水印，默认使用配置中的默认值
             - response_format (str, optional): 响应格式，支持 'url' 或 'b64_json'，默认为 'url'

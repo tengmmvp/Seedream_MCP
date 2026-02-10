@@ -39,7 +39,7 @@ async def handle_sequential_generation(
     Args:
         arguments: 请求参数字典，包含以下键值：
             - prompt (str): 生成图片的提示词描述
-            - max_images (int, optional): 最大生成图片数量，默认为 4
+            - max_images (int, optional): 最大生成图片数量；未提供时由客户端按参考图自动推导
             - image (str, optional): 参考图片的 URL 或 Base64 编码
             - size (str, optional): 图片尺寸规格
             - watermark (bool, optional): 是否添加水印
@@ -56,7 +56,7 @@ async def handle_sequential_generation(
     Raises:
         Exception: 当生成过程中发生错误时，捕获异常并返回格式化的错误提示信息。
     """
-    max_images = arguments.get("max_images", 4)
+    max_images = arguments.get("max_images")
     image = arguments.get("image")
 
     async def _execute(

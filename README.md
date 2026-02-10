@@ -1,12 +1,17 @@
 ﻿# Seedream 4.0 和 Seedream 4.5 MCP 生图工具
 
-[![uvx](https://img.shields.io/badge/uvx-ready-brightgreen.svg)](https://github.com/astral-sh/uv)
-![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
+![Version](https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver)
+![Python](https://img.shields.io/badge/python-3.10+-cyan.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![MCP](https://img.shields.io/badge/MCP-compatible-orange.svg)
-![Version](https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver)
+[![uvx](https://img.shields.io/badge/uvx-ready-yellow.svg)](https://github.com/astral-sh/uv)
+![Powered by Codex](https://img.shields.io/badge/Powered_by-Codex-violet.svg)
 
-基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。
+<p align="center">
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-4-5.jpeg" alt="Seedream MCP" width="300"/>
+</p>
+
+<p align="center"><b>基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。</b></p>
 
 ## ⚡ 快速安装
 
@@ -58,7 +63,7 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 ```bash
 --api-key TEXT                                     # API 密钥（必需）
 --model [doubao-seedream-4.5|doubao-seedream-4.0]  # 模型选择 (默认: doubao-seedream-4.5)
---default-size [1K|2K|4K]                          # 图像尺寸 (默认: 2K)
+--default-size [1K|2K|4K|<宽>x<高>]                # 图像尺寸 (默认: 2K)
 --watermark                                        # 启用水印
 --log-level [DEBUG|INFO|WARNING|ERROR]             # 日志级别
 --transport [stdio|sse|streamable-http]            # MCP 传输方式 (默认: stdio)
@@ -102,7 +107,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像生成的文本提示词，建议不超过 300 个汉字或 600 个英文单词
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
@@ -119,7 +124,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 - `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词
 - `image` (必需) - 输入图像的 URL 或本地文件路径
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
@@ -135,8 +140,8 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
-- `image` (必需) - 输入图像 URL 或本地文件路径列表（2-5 张图像）
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `image` (必需) - 输入图像 URL 或本地文件路径列表（2-14 张图像）
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
@@ -152,9 +157,9 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
-- `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 4
-- `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）；参考图数量与 max_images 之和不超过 15
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K`，默认使用配置文件值
+- `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15
+- `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）；参考图最多 14 张，且参考图数量与 max_images 之和不超过 15
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
