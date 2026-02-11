@@ -1,17 +1,19 @@
-﻿# Seedream 4.0 和 Seedream 4.5 MCP 生图工具
+﻿<h1 align="center">Seedream 4.0 和 Seedream 4.5 MCP 生图工具</h1>
 
-![Version](https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver)
-![Python](https://img.shields.io/badge/python-3.10+-cyan.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-![MCP](https://img.shields.io/badge/MCP-compatible-orange.svg)
-[![uvx](https://img.shields.io/badge/uvx-ready-yellow.svg)](https://github.com/astral-sh/uv)
-![Powered by Codex](https://img.shields.io/badge/Powered_by-Codex-violet.svg)
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-4-5.jpeg" alt="Seedream MCP" width="300"/>
-</p>
-
-<p align="center"><b>基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。</b></p>
+<div align="center">
+  <a href="https://zread.ai/tengmmvp/Seedream_MCP">
+    <img src="https://img.shields.io/badge/Ask_Zread-_.svg?style=for-the-badge&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff" alt="Ask Zread"/>
+  </a>
+  <br>
+  <img src="https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver&label=Release" alt="Version"/>
+  <img src="https://img.shields.io/badge/Python-3.10+-cyan.svg" alt="Python"/>
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"/>
+  <img src="https://img.shields.io/badge/Powered_By-Codex%26GLM-violet.svg" alt="Powered by Codex&GLM"/>
+  <br><br>
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-4-5.jpeg" alt="Seedream MCP" width="440"/>
+  <br><br>
+  <b>基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。</b>
+</div>
 
 ## ⚡ 快速安装
 
