@@ -100,11 +100,11 @@ class SeedreamClient:
 
         Args:
             prompt: 文本提示词，描述要生成的图像内容
+            optimize_prompt_options: 提示词优化选项，可选配置字典
             size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
-            optimize_prompt_options: 提示词优化选项，可选配置字典
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -115,6 +115,9 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
+        validated_opts = validate_optimize_prompt_options(
+            optimize_prompt_options, self.config.model_id
+        )
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
@@ -127,20 +130,21 @@ class SeedreamClient:
 
         try:
             # 构建请求参数
-            request_data = {
+            request_data: Dict[str, Any] = {
                 "model": self.config.model_id,
                 "prompt": prompt,
-                "size": size,
-                "watermark": watermark,
-                "response_format": response_format,
             }
-            if stream:
-                request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(
-                optimize_prompt_options, self.config.model_id
-            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
+            request_data.update(
+                {
+                    "size": size,
+                    "watermark": watermark,
+                    "response_format": response_format,
+                }
+            )
+            if stream:
+                request_data["stream"] = True
 
             # 调用 API
             response = await self._call_api("text_to_image", request_data)
@@ -170,12 +174,12 @@ class SeedreamClient:
 
         Args:
             prompt: 文本提示词，描述要对输入图像进行的修改或转换
+            optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 输入图像的 URL 或本地文件路径
             size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
-            optimize_prompt_options: 提示词优化选项，可选配置字典
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -186,6 +190,9 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
+        validated_opts = validate_optimize_prompt_options(
+            optimize_prompt_options, self.config.model_id
+        )
         image = self._normalize_single_image(image)
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
@@ -202,21 +209,22 @@ class SeedreamClient:
             image_data = await self._prepare_image_input(image)
 
             # 构建请求参数
-            request_data = {
+            request_data: Dict[str, Any] = {
                 "model": self.config.model_id,
                 "prompt": prompt,
-                "image": image_data,
-                "size": size,
-                "watermark": watermark,
-                "response_format": response_format,
             }
-            if stream:
-                request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(
-                optimize_prompt_options, self.config.model_id
-            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
+            request_data.update(
+                {
+                    "image": image_data,
+                    "size": size,
+                    "watermark": watermark,
+                    "response_format": response_format,
+                }
+            )
+            if stream:
+                request_data["stream"] = True
 
             # 调用 API
             response = await self._call_api("image_to_image", request_data)
@@ -246,12 +254,12 @@ class SeedreamClient:
 
         Args:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
+            optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张
             size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             stream: 是否使用流式传输，默认为 False
-            optimize_prompt_options: 提示词优化选项，可选配置字典
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -262,6 +270,9 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
+        validated_opts = validate_optimize_prompt_options(
+            optimize_prompt_options, self.config.model_id
+        )
         image = self._normalize_image_sequence(image, min_count=2, max_count=14, field_name="image")
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
@@ -279,22 +290,23 @@ class SeedreamClient:
             image_data_list = await self._prepare_images_in_parallel(image)
 
             # 构建请求参数
-            request_data = {
+            request_data: Dict[str, Any] = {
                 "model": self.config.model_id,
                 "prompt": prompt,
-                "image": image_data_list,
-                "sequential_image_generation": "disabled",
-                "size": size,
-                "watermark": watermark,
-                "response_format": response_format,
             }
-            if stream:
-                request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(
-                optimize_prompt_options, self.config.model_id
-            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
+            request_data.update(
+                {
+                    "image": image_data_list,
+                    "sequential_image_generation": "disabled",
+                    "size": size,
+                    "watermark": watermark,
+                    "response_format": response_format,
+                }
+            )
+            if stream:
+                request_data["stream"] = True
 
             # 调用 API
             response = await self._call_api("multi_image_fusion", request_data)
@@ -330,13 +342,13 @@ class SeedreamClient:
 
         Args:
             prompt: 文本提示词，描述要生成的图像内容
-            max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
+            optimize_prompt_options: 提示词优化选项，可选配置字典
+            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（参考图数量与生成数量之和不超过 15）
             size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
+            max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（参考图数量与生成数量之和不超过 15）
             stream: 是否使用流式传输，默认为 False
-            optimize_prompt_options: 提示词优化选项，可选配置字典
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -347,9 +359,11 @@ class SeedreamClient:
         """
         # 参数验证
         prompt = validate_prompt(prompt)
+        validated_opts = validate_optimize_prompt_options(
+            optimize_prompt_options, self.config.model_id
+        )
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
-        response_format = validate_response_format(response_format)
 
         # 处理图像输入
         processed_image: Optional[Union[str, List[str]]] = None
@@ -384,6 +398,8 @@ class SeedreamClient:
         if reference_images is not None:
             validate_sequential_image_limit(resolved_max_images, reference_images)
 
+        response_format = validate_response_format(response_format)
+
         if reference_images is not None:
             if len(reference_images) == 1:
                 processed_image = await self._prepare_image_input(reference_images[0])
@@ -399,26 +415,25 @@ class SeedreamClient:
 
         try:
             # 构建请求参数
-            request_data = {
+            request_data: Dict[str, Any] = {
                 "model": self.config.model_id,
                 "prompt": prompt,
                 "sequential_image_generation": "auto",
-                "sequential_image_generation_options": {"max_images": resolved_max_images},
-                "size": size,
-                "watermark": watermark,
-                "response_format": response_format,
             }
-            if stream:
-                request_data["stream"] = True
-            validated_opts = validate_optimize_prompt_options(
-                optimize_prompt_options, self.config.model_id
-            )
             if validated_opts:
                 request_data["optimize_prompt_options"] = validated_opts
-
-            # 添加图像参数
             if processed_image is not None:
                 request_data["image"] = processed_image
+            request_data.update(
+                {
+                    "size": size,
+                    "watermark": watermark,
+                    "sequential_image_generation_options": {"max_images": resolved_max_images},
+                    "response_format": response_format,
+                }
+            )
+            if stream:
+                request_data["stream"] = True
 
             # 调用 API
             response = await self._call_api("sequential_generation", request_data)

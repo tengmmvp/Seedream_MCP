@@ -39,13 +39,13 @@ async def handle_text_to_image(
     Args:
         arguments: 请求参数字典,包含以下键值：
             - prompt (str): 生成图片的文本提示词
+            - optimize_prompt_options (dict, optional): 提示词优化选项配置
             - size (str, optional): 图片尺寸规格
             - watermark (bool, optional): 是否添加水印
             - response_format (str, optional): 响应格式，"url" 或 "b64_json"，默认为 "url"
             - stream (bool, optional): 是否启用流式输出，默认为 False
             - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
             - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
-            - optimize_prompt_options (dict, optional): 提示词优化选项配置
             - auto_save (bool, optional): 是否自动保存生成的图片
             - save_path (str, optional): 自定义图片保存路径
             - custom_name (str, optional): 自定义文件名前缀
@@ -62,11 +62,11 @@ async def handle_text_to_image(
     ) -> Dict[str, Any]:
         result = await client.text_to_image(
             prompt=context.prompt,
+            optimize_prompt_options=context.optimize_prompt_options,
             size=context.size,
             watermark=context.watermark,
             response_format=context.response_format,
             stream=context.stream,
-            optimize_prompt_options=context.optimize_prompt_options,
         )
         return cast(Dict[str, Any], result)
 

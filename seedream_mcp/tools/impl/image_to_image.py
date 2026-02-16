@@ -33,6 +33,7 @@ async def handle_image_to_image(
     Args:
         arguments: 请求参数字典，支持以下键值：
             - prompt (str, optional): 生成图像的提示词描述
+            - optimize_prompt_options (dict, optional): 提示词优化选项
             - image (str): 输入图像的路径或URL
             - size (str, optional): 生成图像尺寸，默认使用配置中的默认值
             - watermark (bool, optional): 是否添加水印，默认使用配置中的默认值
@@ -40,7 +41,6 @@ async def handle_image_to_image(
             - stream (bool, optional): 是否启用流式输出，默认为 False
             - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
             - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
-            - optimize_prompt_options (dict, optional): 提示词优化选项
             - auto_save (bool, optional): 是否自动保存生成的图像，默认使用配置中的默认值
             - save_path (str, optional): 自定义保存路径
             - custom_name (str, optional): 自定义文件名
@@ -60,12 +60,12 @@ async def handle_image_to_image(
     ) -> Dict[str, Any]:
         result = await client.image_to_image(
             prompt=context.prompt,
+            optimize_prompt_options=context.optimize_prompt_options,
             image=image,
             size=context.size,
             watermark=context.watermark,
             response_format=context.response_format,
             stream=context.stream,
-            optimize_prompt_options=context.optimize_prompt_options,
         )
         return cast(Dict[str, Any], result)
 

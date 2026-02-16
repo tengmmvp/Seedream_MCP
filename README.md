@@ -109,13 +109,13 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像生成的文本提示词，建议不超过 300 个汉字或 600 个英文单词
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
@@ -127,6 +127,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (必需) - 输入图像的 URL 或本地文件路径
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
@@ -134,7 +135,6 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `stream` (可选) - 是否启用流式输出，默认`false`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
@@ -146,6 +146,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (必需) - 输入图像 URL 或本地文件路径列表（2-14 张图像）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
@@ -153,7 +154,6 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `stream` (可选) - 是否启用流式输出，默认`false`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
@@ -165,15 +165,15 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 **参数：**
 
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
-- `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）；参考图最多 14 张，且参考图数量与 max_images 之和不超过 15
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
+- `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀

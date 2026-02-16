@@ -63,19 +63,61 @@ class OptimizePromptOptions(BaseModel):
         return normalized
 
 
-class BaseGenerationInput(BaseModel):
+class _PromptAndOptimizeInput(BaseModel):
     """
-    图片生成工具的通用输入基类
-
-    定义所有图片生成类工具共享的配置参数，包括尺寸、水印、响应格式、
-    流式输出、提示词优化及自动保存等功能。
+    提示词与提示词优化参数。
     """
 
-    model_config = ConfigDict(
-        extra="forbid",
-        str_strip_whitespace=True,
-        validate_assignment=True,
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。",
     )
+    optimize_prompt_options: Optional[OptimizePromptOptions] = Field(
+        default=None,
+        description="提示词优化配置，仅支持 standard 或 fast。",
+    )
+
+
+class _SingleImageInput(BaseModel):
+    """
+    单图输入参数。
+    """
+
+    image: str = Field(
+        ...,
+        description="参考图片，支持 URL、本地文件路径。",
+    )
+
+
+class _MultiImageInput(BaseModel):
+    """
+    多图输入参数。
+    """
+
+    image: List[str] = Field(
+        ...,
+        min_length=2,
+        max_length=14,
+        description="图片列表，支持 URL、本地路径，数量2-14张。",
+    )
+
+
+class _SequentialImageInput(BaseModel):
+    """
+    组图参考图输入参数。
+    """
+
+    image: Optional[List[str]] = Field(
+        default=None,
+        description="可选的参考图片，支持 URL、本地路径，单张或多张，最多 14 张。",
+    )
+
+
+class _SizeAndWatermarkInput(BaseModel):
+    """
+    尺寸与水印参数。
+    """
 
     size: Optional[str] = Field(
         default=None,
@@ -85,6 +127,26 @@ class BaseGenerationInput(BaseModel):
         default=None,
         description="是否添加水印；未提供时沿用全局默认值。",
     )
+
+
+class _SequentialMaxImagesInput(BaseModel):
+    """
+    组图最大生成数量参数。
+    """
+
+    max_images: int = Field(
+        default=15,
+        ge=1,
+        le=15,
+        description="本次请求允许生成的最大图片数量，范围 1-15。",
+    )
+
+
+class _ResponseAndExecutionInput(BaseModel):
+    """
+    响应格式、执行策略与自动保存参数。
+    """
+
     response_format: ResponseFormat = Field(
         default=ResponseFormat.URL,
         description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
@@ -105,10 +167,6 @@ class BaseGenerationInput(BaseModel):
         le=4,
         description="并行度上限；未提供时自动使用 min(request_count, 4)。",
     )
-    optimize_prompt_options: Optional[OptimizePromptOptions] = Field(
-        default=None,
-        description="提示词优化配置，仅支持 standard 或 fast。",
-    )
     auto_save: Optional[bool] = Field(
         default=None,
         description="是否自动保存到本地；未提供时遵循全局配置。",
@@ -122,7 +180,21 @@ class BaseGenerationInput(BaseModel):
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     )
 
-    @field_validator("save_path", "custom_name")
+
+class BaseGenerationInput(BaseModel):
+    """
+    图片生成工具的通用输入校验基类。
+
+    仅提供共享模型配置与校验逻辑，具体字段顺序由各工具输入模型定义。
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        validate_assignment=True,
+    )
+
+    @field_validator("save_path", "custom_name", check_fields=False)
     @classmethod
     def validate_non_empty(cls, value: Optional[str]) -> Optional[str]:
         """
@@ -149,11 +221,14 @@ class BaseGenerationInput(BaseModel):
         """
         校验并行执行参数组合。
         """
+        request_count = getattr(self, "request_count", 1)
+        parallelism = getattr(self, "parallelism", None)
+        stream = bool(getattr(self, "stream", False))
         try:
             validate_parallel_generation_options(
-                request_count=self.request_count,
-                parallelism=self.parallelism,
-                stream=self.stream,
+                request_count=request_count,
+                parallelism=parallelism,
+                stream=stream,
                 max_request_count=4,
             )
         except SeedreamValidationError as exc:
@@ -161,7 +236,12 @@ class BaseGenerationInput(BaseModel):
         return self
 
 
-class TextToImageInput(BaseGenerationInput):
+class TextToImageInput(
+    BaseGenerationInput,
+    _ResponseAndExecutionInput,
+    _SizeAndWatermarkInput,
+    _PromptAndOptimizeInput,
+):
     """
     文生图：通过提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
     """
@@ -173,7 +253,13 @@ class TextToImageInput(BaseGenerationInput):
     )
 
 
-class ImageToImageInput(BaseGenerationInput):
+class ImageToImageInput(
+    BaseGenerationInput,
+    _ResponseAndExecutionInput,
+    _SizeAndWatermarkInput,
+    _SingleImageInput,
+    _PromptAndOptimizeInput,
+):
     """
     图文生图：基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
     """
@@ -183,13 +269,15 @@ class ImageToImageInput(BaseGenerationInput):
         min_length=1,
         description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。",
     )
-    image: str = Field(
-        ...,
-        description="待转换的图片，支持 URL、本地文件路径。",
-    )
 
 
-class MultiImageFusionInput(BaseGenerationInput):
+class MultiImageFusionInput(
+    BaseGenerationInput,
+    _ResponseAndExecutionInput,
+    _SizeAndWatermarkInput,
+    _MultiImageInput,
+    _PromptAndOptimizeInput,
+):
     """
     多图融合：根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
     """
@@ -199,15 +287,16 @@ class MultiImageFusionInput(BaseGenerationInput):
         min_length=1,
         description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。请使用“图X”指定图像（如：将图1的服装换为图2的服装）。",
     )
-    image: List[str] = Field(
-        ...,
-        min_length=2,
-        max_length=14,
-        description="参与融合的图片列表，支持 URL、本地路径，数量2-14张。",
-    )
 
 
-class SequentialGenerationInput(BaseGenerationInput):
+class SequentialGenerationInput(
+    BaseGenerationInput,
+    _ResponseAndExecutionInput,
+    _SequentialMaxImagesInput,
+    _SizeAndWatermarkInput,
+    _SequentialImageInput,
+    _PromptAndOptimizeInput,
+):
     """
     组图输出：支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
     """
@@ -216,16 +305,6 @@ class SequentialGenerationInput(BaseGenerationInput):
         ...,
         min_length=1,
         description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。",
-    )
-    max_images: int = Field(
-        default=15,
-        ge=1,
-        le=15,
-        description="本次请求允许生成的最大图片数量，范围 1-15。",
-    )
-    image: Optional[List[str]] = Field(
-        default=None,
-        description="可选的参考图片，支持单张或多张，最多 14 张。",
     )
 
     @field_validator("image", mode="before")

@@ -42,11 +42,11 @@ class GenerationExecutionContext:
     """
 
     prompt: str
+    optimize_prompt_options: Optional[Dict[str, Any]]
     size: str
     watermark: bool
     response_format: str
     stream: bool
-    optimize_prompt_options: Optional[Dict[str, Any]]
     request_count: int
     parallelism: int
     enable_auto_save: bool
@@ -59,7 +59,7 @@ class GenerationExecutionContext:
 
 def _add_usage_value(usage: Dict[str, Any], key: str, value: Any) -> None:
     """
-    累加 usage 中的数值字段。
+    累加用量统计。
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return
@@ -195,43 +195,48 @@ def build_generation_context(
         统一执行上下文对象。
     """
     prompt = arguments.get("prompt", "")
+    optimize_prompt_options = arguments.get("optimize_prompt_options")
     raw_size = arguments.get("size") if "size" in arguments else None
+    watermark_value = arguments.get("watermark")
     response_format = arguments.get("response_format", "url")
     stream = bool(arguments.get("stream", False))
-    optimize_prompt_options = arguments.get("optimize_prompt_options")
+    request_count = arguments.get("request_count", 1)
+    parallelism_value = arguments.get("parallelism")
+    auto_save = arguments.get("auto_save")
     save_path = arguments.get("save_path")
     custom_name = arguments.get("custom_name")
-    watermark_value = arguments.get("watermark")
-    auto_save = arguments.get("auto_save")
+
+    validated_optimize_options = validate_optimize_prompt_options(
+        optimize_prompt_options, config.model_id
+    )
 
     size_value = config.default_size if raw_size is None else raw_size
+    validated_size = validate_size_for_model(size_value, config.model_id)
+
     watermark = (
         validate_watermark(watermark_value)
         if watermark_value is not None
         else config.default_watermark
     )
-    enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
+
+    validated_response_format = validate_response_format(response_format)
 
     request_count, parallelism = validate_parallel_generation_options(
-        request_count=arguments.get("request_count", 1),
-        parallelism=arguments.get("parallelism"),
+        request_count=request_count,
+        parallelism=parallelism_value,
         stream=stream,
         max_request_count=4,
     )
 
-    validated_size = validate_size_for_model(size_value, config.model_id)
-    validated_response_format = validate_response_format(response_format)
-    validated_optimize_options = validate_optimize_prompt_options(
-        optimize_prompt_options, config.model_id
-    )
+    enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
 
     return GenerationExecutionContext(
         prompt=prompt,
+        optimize_prompt_options=validated_optimize_options,
         size=validated_size,
         watermark=watermark,
         response_format=validated_response_format,
         stream=stream,
-        optimize_prompt_options=validated_optimize_options,
         request_count=request_count,
         parallelism=parallelism,
         enable_auto_save=enable_auto_save,

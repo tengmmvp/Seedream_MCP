@@ -34,6 +34,7 @@ async def handle_multi_image_fusion(
     Args:
         arguments: 融合任务参数字典，包含以下字段：
             - prompt (str, optional): 融合描述提示词，默认为空字符串
+            - optimize_prompt_options (Dict, optional): 提示词优化选项
             - image (List): 待融合的图片列表（2-14 张）
             - size (str, optional): 生成图片尺寸，默认使用配置中的默认值
             - watermark (bool, optional): 是否添加水印，默认使用配置中的默认值
@@ -41,7 +42,6 @@ async def handle_multi_image_fusion(
             - stream (bool, optional): 是否启用流式响应，默认为 False
             - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
             - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
-            - optimize_prompt_options (Dict, optional): 提示词优化选项
             - auto_save (bool, optional): 是否自动保存结果，默认使用配置中的默认值
             - save_path (str, optional): 保存路径，默认使用配置中的路径
             - custom_name (str, optional): 自定义文件名
@@ -59,12 +59,12 @@ async def handle_multi_image_fusion(
     ) -> Dict[str, Any]:
         result = await client.multi_image_fusion(
             prompt=context.prompt,
+            optimize_prompt_options=context.optimize_prompt_options,
             image=image,
             size=context.size,
             watermark=context.watermark,
             response_format=context.response_format,
             stream=context.stream,
-            optimize_prompt_options=context.optimize_prompt_options,
         )
         return cast(Dict[str, Any], result)
 
