@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, cast
+from typing import TYPE_CHECKING, Any, Dict, cast
 
-from mcp.types import TextContent
+from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
 from ...utils.logging import get_logger
@@ -16,6 +16,8 @@ from ..core.common import (
 )
 
 if TYPE_CHECKING:
+    from mcp.server.fastmcp import Context
+
     from ...client import SeedreamClient
 
 # 模块日志记录器
@@ -23,8 +25,10 @@ logger = get_logger(__name__)
 
 
 async def handle_multi_image_fusion(
-    arguments: Dict[str, Any], config: SeedreamConfig
-) -> List[TextContent]:
+    arguments: Dict[str, Any],
+    config: SeedreamConfig,
+    ctx: "Context[Any, Any, Any] | None" = None,
+) -> CallToolResult:
     """
     处理多图融合请求
 
@@ -47,7 +51,10 @@ async def handle_multi_image_fusion(
             - custom_name (str, optional): 自定义文件名
 
     Returns:
-        List[TextContent]: 包含融合结果的文本内容列表，成功时返回结果详情，失败时返回错误信息
+        CallToolResult: MCP 标准工具结果。
+            - content: 面向模型的文本摘要
+            - structuredContent: 结构化结果数据
+            - isError: 是否为错误结果
 
     Raises:
         Exception: 当融合过程中发生错误时抛出异常，异常信息会被捕获并格式化返回给用户
@@ -87,4 +94,5 @@ async def handle_multi_image_fusion(
             ctx.parallelism,
         ),
         request_executor=_execute,
+        ctx=ctx,
     )

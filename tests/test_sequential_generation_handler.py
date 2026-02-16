@@ -1,4 +1,5 @@
 import pytest
+from mcp.types import CallToolResult
 
 import seedream_mcp.tools.impl.sequential_generation as sequential_generation_module
 from seedream_mcp.config import SeedreamConfig
@@ -20,7 +21,7 @@ async def test_handle_sequential_generation_omits_max_images_when_not_provided(
     async def fake_execute_generation_handler(**kwargs):
         context = build_generation_context(kwargs["arguments"], kwargs["config"])
         await kwargs["request_executor"](FakeClient(), context)
-        return []
+        return CallToolResult(content=[])
 
     monkeypatch.setattr(
         sequential_generation_module,
@@ -53,7 +54,7 @@ async def test_handle_sequential_generation_keeps_explicit_max_images(
     async def fake_execute_generation_handler(**kwargs):
         context = build_generation_context(kwargs["arguments"], kwargs["config"])
         await kwargs["request_executor"](FakeClient(), context)
-        return []
+        return CallToolResult(content=[])
 
     monkeypatch.setattr(
         sequential_generation_module,

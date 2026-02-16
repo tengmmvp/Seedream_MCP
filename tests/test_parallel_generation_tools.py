@@ -1,6 +1,7 @@
 from importlib import import_module
 
 import pytest
+from mcp.types import TextContent
 from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
@@ -9,6 +10,7 @@ from seedream_mcp.tools.impl.image_to_image import handle_image_to_image
 from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
 from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
+from seedream_mcp.utils.errors import SeedreamValidationError
 
 
 def _build_config() -> SeedreamConfig:
@@ -73,10 +75,15 @@ async def test_generation_handlers_support_parallel_requests(
     )
 
     assert call_count == 3
-    response_text = result[0].text
+    assert result.isError is False
+    assert isinstance(result.structuredContent, dict)
+    response_text = next(
+        content.text for content in result.content if isinstance(content, TextContent)
+    )
     assert "并行请求信息:" in response_text
     assert "请求总数: 3" in response_text
     assert "成功请求: 3" in response_text
+    assert result.structuredContent["request_count"] == 3
 
 
 def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:
@@ -92,3 +99,22 @@ def test_parallel_options_reject_parallelism_greater_than_request_count_in_schem
 def test_parallel_options_reject_stream_with_parallel_requests_in_schema() -> None:
     with pytest.raises(ValidationError, match="stream=true 时 request_count 必须为 1"):
         TextToImageInput(prompt="test", request_count=2, stream=True)
+
+
+@pytest.mark.asyncio
+async def test_generation_handler_returns_call_tool_error_result_when_request_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_method(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        raise SeedreamValidationError("提示词不能为空", field="prompt", value="")
+
+    client_module = import_module("seedream_mcp.client")
+    client_cls = getattr(client_module, "SeedreamClient")
+    monkeypatch.setattr(client_cls, "text_to_image", failing_method)
+
+    result = await handle_text_to_image({"prompt": "test"}, _build_config())
+
+    assert result.isError is True
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["status"] == "failed"

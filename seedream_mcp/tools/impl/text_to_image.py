@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 # 标准库导入
-from typing import Any, TYPE_CHECKING, Dict, List, cast
+from typing import Any, TYPE_CHECKING, Dict, cast
 
 # 第三方库导入
-from mcp.types import TextContent
+from mcp.types import CallToolResult
 
 # 项目内部导入 - 配置
 from ...config import SeedreamConfig
@@ -21,6 +21,8 @@ from ..core.common import (
 )
 
 if TYPE_CHECKING:
+    from mcp.server.fastmcp import Context
+
     from ...client import SeedreamClient
 
 # 模块日志记录器
@@ -28,8 +30,10 @@ logger = get_logger(__name__)
 
 
 async def handle_text_to_image(
-    arguments: Dict[str, Any], config: SeedreamConfig
-) -> List[TextContent]:
+    arguments: Dict[str, Any],
+    config: SeedreamConfig,
+    ctx: "Context[Any, Any, Any] | None" = None,
+) -> CallToolResult:
     """
     处理文生图请求
 
@@ -51,10 +55,10 @@ async def handle_text_to_image(
             - custom_name (str, optional): 自定义文件名前缀
 
     Returns:
-        包含文本内容的列表，通常只有一个元素，描述生成任务的执行结果、图片 URL 或 Base64 数据及保存状态。
-
-    Raises:
-        Exception: 当生成过程中发生错误时，捕获异常并返回格式化的错误提示信息。
+        CallToolResult: MCP 标准工具结果。
+            - content: 面向模型的文本摘要
+            - structuredContent: 结构化结果数据
+            - isError: 是否为错误结果
     """
 
     async def _execute(
@@ -89,4 +93,5 @@ async def handle_text_to_image(
             ctx.parallelism,
         ),
         request_executor=_execute,
+        ctx=ctx,
     )

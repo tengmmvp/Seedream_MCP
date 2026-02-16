@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 
 from ...config import SeedreamConfig
 from ...utils.auto_save import AutoSaveManager
@@ -25,6 +25,8 @@ from ...utils.validation import (
 )
 
 if TYPE_CHECKING:
+    from mcp.server.fastmcp import Context
+
     from ...client import SeedreamClient
 
 logger = get_logger(__name__)
@@ -176,6 +178,73 @@ def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
         nested = data.get("data", [])
         return nested if isinstance(nested, list) else [nested]
     return [data]
+
+
+async def _safe_report_progress(
+    ctx: Optional["Context[Any, Any, Any]"],
+    *,
+    progress: float,
+    total: float = 100.0,
+    message: str,
+) -> None:
+    """
+    在支持进度能力的 MCP 会话中上报进度；上报失败不影响主流程。
+    """
+    if ctx is None:
+        return
+
+    try:
+        await ctx.report_progress(progress=progress, total=total, message=message)
+    except Exception as exc:
+        logger.debug("进度上报失败，已忽略: {}", exc)
+
+
+async def _yield_for_cancellation() -> None:
+    """
+    协作式让出执行权，确保取消信号能尽快生效。
+    """
+    await asyncio.sleep(0)
+
+
+def _build_generation_structured_result(
+    *,
+    tool_name: str,
+    result: Dict[str, Any],
+    context: GenerationExecutionContext,
+    auto_save_results: Optional[List[Any]],
+    auto_save_error: Optional[str],
+) -> Dict[str, Any]:
+    """
+    构建 MCP 工具结果的结构化字段。
+    """
+    structured: Dict[str, Any] = {
+        "tool": tool_name,
+        "success": bool(result.get("success")),
+        "status": result.get("status"),
+        "prompt": context.prompt,
+        "size": context.size,
+        "response_format": context.response_format,
+        "stream": context.stream,
+        "request_count": context.request_count,
+        "parallelism": context.parallelism,
+        "data": result.get("data", []),
+        "usage": result.get("usage", {}),
+        "batch": result.get("batch"),
+    }
+
+    if context.enable_auto_save:
+        structured["auto_save"] = {
+            "enabled": True,
+            "error": auto_save_error,
+            "results": [r.to_dict() for r in auto_save_results] if auto_save_results else [],
+        }
+    else:
+        structured["auto_save"] = {"enabled": False}
+
+    if not result.get("success"):
+        structured["error"] = result.get("error", "未知错误")
+
+    return structured
 
 
 # ==================== 上下文构建函数 ====================
@@ -641,6 +710,9 @@ async def execute_parallel_generation_requests(
         ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
     ],
     module_logger: Any,
+    ctx: Optional["Context[Any, Any, Any]"] = None,
+    progress_start: float = 20.0,
+    progress_span: float = 50.0,
 ) -> Dict[str, Any]:
     """
     按并发上限执行多次生成请求并聚合结果。
@@ -648,9 +720,13 @@ async def execute_parallel_generation_requests(
     semaphore = asyncio.Semaphore(context.parallelism)
     request_results: List[Optional[Dict[str, Any]]] = [None] * context.request_count
     request_errors: Dict[int, str] = {}
+    completed_requests = 0
+    progress_lock = asyncio.Lock()
 
     async def _run_single_request(request_index: int) -> None:
+        nonlocal completed_requests
         async with semaphore:
+            await _yield_for_cancellation()
             try:
                 request_results[request_index - 1] = await request_executor(client, context)
             except Exception as exc:
@@ -661,6 +737,17 @@ async def execute_parallel_generation_requests(
                     context.request_count,
                     request_errors[request_index],
                 )
+            finally:
+                async with progress_lock:
+                    completed_requests += 1
+                    progress = progress_start + progress_span * (
+                        completed_requests / context.request_count
+                    )
+                    await _safe_report_progress(
+                        ctx,
+                        progress=progress,
+                        message=f"并行请求进度 {completed_requests}/{context.request_count}",
+                    )
 
     await asyncio.gather(
         *[
@@ -692,7 +779,8 @@ async def execute_generation_handler(
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
     ],
-) -> List[TextContent]:
+    ctx: Optional["Context[Any, Any, Any]"] = None,
+) -> CallToolResult:
     """
     执行生成类工具的通用处理流水线
 
@@ -701,25 +789,40 @@ async def execute_generation_handler(
     try:
         from ...client import SeedreamClient
 
+        await _safe_report_progress(ctx, progress=0.0, message=f"{failure_prefix}请求已接收")
+        await _yield_for_cancellation()
         context = build_generation_context(arguments, config)
+        await _safe_report_progress(ctx, progress=10.0, message="参数校验完成")
 
         module_logger.info(start_log_message, *start_log_values_builder(context))
 
         async with SeedreamClient(config) as client:
             if context.request_count == 1:
+                await _safe_report_progress(ctx, progress=20.0, message="开始调用图像生成接口")
+                await _yield_for_cancellation()
                 result = await request_executor(client, context)
+                await _safe_report_progress(ctx, progress=70.0, message="图像生成完成")
             else:
+                await _safe_report_progress(
+                    ctx,
+                    progress=20.0,
+                    message=f"开始并行请求，共 {context.request_count} 次",
+                )
                 result = await execute_parallel_generation_requests(
                     client=client,
                     context=context,
                     request_executor=request_executor,
                     module_logger=module_logger,
+                    ctx=ctx,
                 )
+                await _safe_report_progress(ctx, progress=70.0, message="并行请求执行完成")
 
         auto_save_results: List[Any] = []
         auto_save_error: Optional[str] = None
         if context.enable_auto_save and result.get("success"):
             try:
+                await _safe_report_progress(ctx, progress=75.0, message="开始自动保存")
+                await _yield_for_cancellation()
                 if context.response_format == "url":
                     auto_save_results = await auto_save_from_urls(
                         result,
@@ -741,6 +844,7 @@ async def execute_generation_handler(
 
                 if auto_save_results:
                     result = update_result_with_auto_save(result, auto_save_results)
+                await _safe_report_progress(ctx, progress=95.0, message="自动保存完成")
             except Exception as exc:
                 auto_save_error = format_error_for_user(exc)
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
@@ -755,12 +859,33 @@ async def execute_generation_handler(
             auto_save_error=auto_save_error,
         )
 
-        return [TextContent(type="text", text=response_text)]
+        structured_result = _build_generation_structured_result(
+            tool_name=tool_name,
+            result=result,
+            context=context,
+            auto_save_results=auto_save_results,
+            auto_save_error=auto_save_error,
+        )
+        await _safe_report_progress(ctx, progress=100.0, message="请求处理完成")
+        return CallToolResult(
+            content=[TextContent(type="text", text=response_text)],
+            structuredContent=structured_result,
+            isError=not bool(result.get("success")),
+        )
     except Exception as exc:
         module_logger.error(f"{failure_prefix}处理失败", exc_info=True)
-        return [
-            TextContent(
-                type="text",
-                text=f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}",
-            )
-        ]
+        await _safe_report_progress(ctx, progress=100.0, message="请求处理失败")
+        error_message = f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}"
+        return CallToolResult(
+            content=[TextContent(type="text", text=error_message)],
+            structuredContent={
+                "tool": tool_name,
+                "success": False,
+                "status": "failed",
+                "error": {
+                    "type": exc.__class__.__name__,
+                    "message": format_error_for_user(exc),
+                },
+            },
+            isError=True,
+        )

@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from mcp.types import TextContent
+from mcp.server.fastmcp import Context
+from mcp.types import CallToolResult, TextContent
 
 from ...utils.logging import get_logger
 from ...utils.path_utils import (
@@ -48,7 +49,10 @@ def _format_file_info(display_path: str, stat_path: Path, show_details: bool) ->
     return " | ".join(parts)
 
 
-async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
+async def handle_browse_images(
+    arguments: Dict[str, Any],
+    ctx: Context[Any, Any, Any] | None = None,
+) -> CallToolResult:
     """
     处理图片浏览请求
 
@@ -65,8 +69,10 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
             - show_details (bool, optional): 是否显示文件详细信息，默认为 False。
 
     Returns:
-        包含图片列表信息的 TextContent 对象列表。若未找到图片，
-        返回提示信息；否则返回编号的图片列表。
+        CallToolResult: MCP 标准工具结果。
+            - content: 面向模型的文本摘要
+            - structuredContent: 结构化结果数据
+            - isError: 是否为错误结果
     """
     # 解析并设置默认参数
     directory = arguments.get("directory") or "."
@@ -80,18 +86,37 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
     try:
         resolved_dir = normalize_path(directory, str(workspace_root))
     except ValueError as exc:
-        return [TextContent(type="text", text=f"目录路径无效: {exc}")]
+        message = f"目录路径无效: {exc}"
+        return CallToolResult(
+            content=[TextContent(type="text", text=message)],
+            structuredContent={
+                "tool": "browse_images",
+                "success": False,
+                "status": "failed",
+                "error": message,
+            },
+            isError=True,
+        )
 
     if not is_path_within_base(resolved_dir, workspace_root):
-        return [
-            TextContent(
-                type="text",
-                text=(
-                    "目录超出允许范围。"
-                    f"仅允许浏览工作区目录: {workspace_root}"
-                ),
-            )
-        ]
+        message = "目录超出允许范围。" f"仅允许浏览工作区目录: {workspace_root}"
+        return CallToolResult(
+            content=[TextContent(type="text", text=message)],
+            structuredContent={
+                "tool": "browse_images",
+                "success": False,
+                "status": "failed",
+                "error": message,
+                "workspace_root": str(workspace_root),
+            },
+            isError=True,
+        )
+
+    if ctx is not None:
+        try:
+            await ctx.report_progress(progress=20.0, total=100.0, message="开始扫描图片目录")
+        except Exception:
+            pass
 
     logger.info(
         "浏览图片: dir={}, recursive={}, max_depth={}, limit={}",
@@ -112,12 +137,61 @@ async def handle_browse_images(arguments: Dict[str, Any]) -> List[TextContent]:
 
     # 处理未找到图片的情况
     if not images:
-        return [TextContent(type="text", text="未找到图片文件，请确认目录或过滤条件。")]
+        message = "未找到图片文件，请确认目录或过滤条件。"
+        if ctx is not None:
+            try:
+                await ctx.report_progress(progress=100.0, total=100.0, message="扫描完成")
+            except Exception:
+                pass
+        return CallToolResult(
+            content=[TextContent(type="text", text=message)],
+            structuredContent={
+                "tool": "browse_images",
+                "success": True,
+                "status": "empty",
+                "directory": str(resolved_dir),
+                "workspace_root": str(workspace_root),
+                "images": [],
+                "count": 0,
+            },
+            isError=False,
+        )
 
     # 格式化图片列表输出
     lines = ["图片列表:"]
+    structured_images: list[dict[str, Any]] = []
     for idx, img in enumerate(images, 1):
         display_path = get_relative_path(img, str(workspace_root))
         lines.append(f"{idx}. {_format_file_info(display_path, img, show_details)}")
+        structured_images.append(
+            {
+                "index": idx,
+                "path": display_path,
+                "absolute_path": str(img),
+            }
+        )
 
-    return [TextContent(type="text", text="\n".join(lines))]
+    if ctx is not None:
+        try:
+            await ctx.report_progress(progress=100.0, total=100.0, message="扫描完成")
+        except Exception:
+            pass
+
+    return CallToolResult(
+        content=[TextContent(type="text", text="\n".join(lines))],
+        structuredContent={
+            "tool": "browse_images",
+            "success": True,
+            "status": "completed",
+            "directory": str(resolved_dir),
+            "workspace_root": str(workspace_root),
+            "count": len(structured_images),
+            "images": structured_images,
+            "recursive": recursive,
+            "max_depth": max_depth,
+            "limit": limit,
+            "show_details": show_details,
+            "format_filter": format_filter,
+        },
+        isError=False,
+    )

@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, cast
+from typing import TYPE_CHECKING, Any, Dict, cast
 
-from mcp.types import TextContent
+from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
 from ...utils.logging import get_logger
@@ -16,14 +16,18 @@ from ..core.common import (
 )
 
 if TYPE_CHECKING:
+    from mcp.server.fastmcp import Context
+
     from ...client import SeedreamClient
 
 logger = get_logger(__name__)
 
 
 async def handle_image_to_image(
-    arguments: Dict[str, Any], config: SeedreamConfig
-) -> List[TextContent]:
+    arguments: Dict[str, Any],
+    config: SeedreamConfig,
+    ctx: "Context[Any, Any, Any] | None" = None,
+) -> CallToolResult:
     """
     处理图文生图请求
 
@@ -46,9 +50,10 @@ async def handle_image_to_image(
             - custom_name (str, optional): 自定义文件名
 
     Returns:
-        List[TextContent]: 包含生成结果或错误信息的文本内容列表，
-                          成功时返回图像URL/Base64数据及元数据，
-                          失败时返回格式化的错误信息和操作指引。
+        CallToolResult: MCP 标准工具结果。
+            - content: 面向模型的文本摘要
+            - structuredContent: 结构化结果数据
+            - isError: 是否为错误结果
 
     Raises:
         Exception: 捕获所有异常并转换为用户友好的错误消息，不向上层抛出。
@@ -88,4 +93,5 @@ async def handle_image_to_image(
             ctx.parallelism,
         ),
         request_executor=_execute,
+        ctx=ctx,
     )

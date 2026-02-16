@@ -6,9 +6,10 @@ from __future__ import annotations
 
 # 标准库导入
 import argparse
+from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-from mcp.types import TextContent, ToolAnnotations
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import CallToolResult, ToolAnnotations
 
 # 本地模块导入
 from .config import SeedreamConfig, build_config_from_sources, get_global_config
@@ -106,39 +107,48 @@ def _get_active_config() -> SeedreamConfig:
     name="seedream_text_to_image",
     annotations=_build_tool_annotations("Seedream 文生图", GENERATION_TOOL_ANNOTATIONS),
 )
-async def seedream_text_to_image(params: TextToImageInput) -> list[TextContent]:
+async def seedream_text_to_image(
+    params: TextToImageInput,
+    ctx: Context[Any, Any, Any],
+) -> CallToolResult:
     """
     文生图：
 
     通过给模型提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
     """
-    return await run_text_to_image(params, config=_get_active_config())
+    return await run_text_to_image(params, config=_get_active_config(), ctx=ctx)
 
 
 @mcp.tool(
     name="seedream_image_to_image",
     annotations=_build_tool_annotations("Seedream 图文生图", GENERATION_TOOL_ANNOTATIONS),
 )
-async def seedream_image_to_image(params: ImageToImageInput) -> list[TextContent]:
+async def seedream_image_to_image(
+    params: ImageToImageInput,
+    ctx: Context[Any, Any, Any],
+) -> CallToolResult:
     """
     图文生图：
 
     基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
     """
-    return await run_image_to_image(params, config=_get_active_config())
+    return await run_image_to_image(params, config=_get_active_config(), ctx=ctx)
 
 
 @mcp.tool(
     name="seedream_multi_image_fusion",
     annotations=_build_tool_annotations("Seedream 多图融合", GENERATION_TOOL_ANNOTATIONS),
 )
-async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[TextContent]:
+async def seedream_multi_image_fusion(
+    params: MultiImageFusionInput,
+    ctx: Context[Any, Any, Any],
+) -> CallToolResult:
     """
     多图融合：
 
     根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
     """
-    return await run_multi_image_fusion(params, config=_get_active_config())
+    return await run_multi_image_fusion(params, config=_get_active_config(), ctx=ctx)
 
 
 @mcp.tool(
@@ -147,26 +157,30 @@ async def seedream_multi_image_fusion(params: MultiImageFusionInput) -> list[Tex
 )
 async def seedream_sequential_generation(
     params: SequentialGenerationInput,
-) -> list[TextContent]:
+    ctx: Context[Any, Any, Any],
+) -> CallToolResult:
     """
     组图输出：
 
     支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
     """
-    return await run_sequential_generation(params, config=_get_active_config())
+    return await run_sequential_generation(params, config=_get_active_config(), ctx=ctx)
 
 
 @mcp.tool(
     name="seedream_browse_images",
     annotations=_build_tool_annotations("Seedream 图片浏览", BROWSE_TOOL_ANNOTATIONS),
 )
-async def seedream_browse_images(params: BrowseImagesInput) -> list[TextContent]:
+async def seedream_browse_images(
+    params: BrowseImagesInput,
+    ctx: Context[Any, Any, Any],
+) -> CallToolResult:
     """
     本地图片浏览：
 
     浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
     """
-    return await run_browse_images(params)
+    return await run_browse_images(params, ctx=ctx)
 
 
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
