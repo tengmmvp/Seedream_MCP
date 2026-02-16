@@ -38,6 +38,8 @@ async def handle_image_to_image(
             - watermark (bool, optional): 是否添加水印，默认使用配置中的默认值
             - response_format (str, optional): 响应格式，支持 "url" 或 "b64_json"，默认为 "url"
             - stream (bool, optional): 是否启用流式输出，默认为 False
+            - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
+            - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
             - optimize_prompt_options (dict, optional): 提示词优化选项
             - auto_save (bool, optional): 是否自动保存生成的图像，默认使用配置中的默认值
             - save_path (str, optional): 自定义保存路径
@@ -75,7 +77,15 @@ async def handle_image_to_image(
         completion_title="图文生图任务完成",
         failure_prefix="图文生图生成",
         guidance="请检查图片路径/URL 与尺寸参数，确认 API Key 和网络可用后重试。",
-        start_log_message="图文生图开始: prompt_len={}, size={}, stream={}",
-        start_log_values_builder=lambda ctx: (len(ctx.prompt or ""), ctx.size, ctx.stream),
+        start_log_message=(
+            "图文生图开始: prompt_len={}, size={}, stream={}, request_count={}, parallelism={}"
+        ),
+        start_log_values_builder=lambda ctx: (
+            len(ctx.prompt or ""),
+            ctx.size,
+            ctx.stream,
+            ctx.request_count,
+            ctx.parallelism,
+        ),
         request_executor=_execute,
     )

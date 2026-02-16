@@ -10,7 +10,10 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...utils.errors import SeedreamValidationError
-from ...utils.validation import validate_sequential_image_limit
+from ...utils.validation import (
+    validate_parallel_generation_options,
+    validate_sequential_image_limit,
+)
 
 
 class ResponseFormat(str, Enum):
@@ -90,6 +93,18 @@ class BaseGenerationInput(BaseModel):
         default=False,
         description="是否启用流式输出；开启后将以事件流返回生成进度。",
     )
+    request_count: int = Field(
+        default=1,
+        ge=1,
+        le=4,
+        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+    )
+    parallelism: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=4,
+        description="并行度上限；未提供时自动使用 min(request_count, 4)。",
+    )
     optimize_prompt_options: Optional[OptimizePromptOptions] = Field(
         default=None,
         description="提示词优化配置，仅支持 standard 或 fast。",
@@ -128,6 +143,22 @@ class BaseGenerationInput(BaseModel):
         if not normalized:
             raise ValueError("该字段不能为空字符串")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_parallel_options(self) -> "BaseGenerationInput":
+        """
+        校验并行执行参数组合。
+        """
+        try:
+            validate_parallel_generation_options(
+                request_count=self.request_count,
+                parallelism=self.parallelism,
+                stream=self.stream,
+                max_request_count=4,
+            )
+        except SeedreamValidationError as exc:
+            raise ValueError(exc.message) from exc
+        return self
 
 
 class TextToImageInput(BaseGenerationInput):

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence
@@ -17,6 +18,7 @@ from ...utils.logging import get_logger
 from ...utils.path_utils import get_workspace_root, is_path_within_base, normalize_path
 from ...utils.validation import (
     validate_optimize_prompt_options,
+    validate_parallel_generation_options,
     validate_response_format,
     validate_size_for_model,
     validate_watermark,
@@ -26,6 +28,9 @@ if TYPE_CHECKING:
     from ...client import SeedreamClient
 
 logger = get_logger(__name__)
+
+
+# ==================== 数据类定义 ====================
 
 
 @dataclass(frozen=True)
@@ -42,150 +47,76 @@ class GenerationExecutionContext:
     response_format: str
     stream: bool
     optimize_prompt_options: Optional[Dict[str, Any]]
+    request_count: int
+    parallelism: int
     enable_auto_save: bool
     save_path: Optional[str]
     custom_name: Optional[str]
 
 
-def build_generation_context(
-    arguments: Dict[str, Any], config: SeedreamConfig
-) -> GenerationExecutionContext:
+# ==================== 底层辅助函数 ====================
+
+
+def _add_usage_value(usage: Dict[str, Any], key: str, value: Any) -> None:
     """
-    从工具参数构建统一执行上下文
-
-    Args:
-        arguments: 工具原始参数字典。
-        config: 当前生效配置。
-
-    Returns:
-        统一执行上下文对象。
+    累加 usage 中的数值字段。
     """
-    watermark_value = arguments.get("watermark")
-    watermark = (
-        validate_watermark(watermark_value)
-        if watermark_value is not None
-        else config.default_watermark
-    )
-
-    auto_save = arguments.get("auto_save")
-    enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
-    raw_size = arguments.get("size") if "size" in arguments else None
-    size_value = config.default_size if raw_size is None else raw_size
-
-    return GenerationExecutionContext(
-        prompt=arguments.get("prompt", ""),
-        size=validate_size_for_model(size_value, config.model_id),
-        watermark=watermark,
-        response_format=validate_response_format(arguments.get("response_format", "url")),
-        stream=bool(arguments.get("stream", False)),
-        optimize_prompt_options=validate_optimize_prompt_options(
-            arguments.get("optimize_prompt_options"), config.model_id
-        ),
-        enable_auto_save=enable_auto_save,
-        save_path=arguments.get("save_path"),
-        custom_name=arguments.get("custom_name"),
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+    current = usage.get(key, 0)
+    if isinstance(current, bool) or not isinstance(current, (int, float)):
+        current = 0
+    usage[key] = current + value
 
 
-async def execute_generation_handler(
-    *,
-    arguments: Dict[str, Any],
-    config: SeedreamConfig,
-    module_logger: Any,
-    tool_name: str,
-    completion_title: str,
-    failure_prefix: str,
-    guidance: str,
-    start_log_message: str,
-    start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]],
-    request_executor: Callable[
-        ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
-    ],
-) -> List[TextContent]:
+def _normalize_error_message(raw_error: Any) -> Optional[str]:
     """
-    执行生成类工具的通用处理流水线
-
-    包括：参数归一化、调用客户端、自动保存、响应格式化、统一错误处理。
+    将不同形态的错误对象提取为可读文本。
     """
-    try:
-        from ...client import SeedreamClient
+    if isinstance(raw_error, str):
+        message = raw_error.strip()
+        return message or None
 
-        context = build_generation_context(arguments, config)
+    if not isinstance(raw_error, dict):
+        return None
 
-        module_logger.info(start_log_message, *start_log_values_builder(context))
+    for key in ("message", "msg", "detail", "error"):
+        value = raw_error.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
 
-        async with SeedreamClient(config) as client:
-            result = await request_executor(client, context)
-
-        auto_save_results: List[Any] = []
-        auto_save_error: Optional[str] = None
-        if context.enable_auto_save and result.get("success"):
-            try:
-                if context.response_format == "url":
-                    auto_save_results = await auto_save_from_urls(
-                        result,
-                        context.prompt,
-                        config,
-                        context.save_path,
-                        context.custom_name,
-                        tool_name,
-                    )
-                else:
-                    auto_save_results = await auto_save_from_base64(
-                        result,
-                        context.prompt,
-                        config,
-                        context.save_path,
-                        context.custom_name,
-                        tool_name,
-                    )
-
-                if auto_save_results:
-                    result = update_result_with_auto_save(result, auto_save_results)
-            except Exception as exc:
-                auto_save_error = format_error_for_user(exc)
-                module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
-
-        response_text = format_generation_response(
-            completion_title,
-            result,
-            context.prompt,
-            context.size,
-            auto_save_results,
-            context.enable_auto_save,
-            auto_save_error=auto_save_error,
-        )
-
-        return [TextContent(type="text", text=response_text)]
-    except Exception as exc:
-        module_logger.error(f"{failure_prefix}处理失败", exc_info=True)
-        return [
-            TextContent(
-                type="text",
-                text=f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}",
-            )
-        ]
+    code = raw_error.get("code")
+    if isinstance(code, str) and code.strip():
+        return code.strip()
+    return None
 
 
-def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _extract_parallel_request_error(
+    result: Optional[Dict[str, Any]], fallback_error: Optional[str]
+) -> str:
     """
-    从生成结果中提取图片数据列表
-
-    支持多种数据结构，兼容嵌套字典与数组格式，统一转换为列表输出。
-
-    Args:
-        result: 图片生成结果字典，包含响应数据及元信息。
-
-    Returns:
-        包含图片数据的字典列表，每个字典代表一张图片的完整信息。
+    提取单个并行请求的失败原因，优先使用结果内错误信息。
     """
-    data = result.get("data", {})
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and "data" in data:
-        nested = data.get("data", [])
-        return nested if isinstance(nested, list) else [nested]
-    return [data]
+    if isinstance(result, dict):
+        direct_error = _normalize_error_message(result.get("error"))
+        if direct_error:
+            return direct_error
+
+        data = result.get("data")
+        if isinstance(data, dict):
+            nested_error = _normalize_error_message(data.get("error"))
+            if nested_error:
+                return nested_error
+        elif isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                item_error = _normalize_error_message(item.get("error"))
+                if item_error:
+                    return item_error
+
+    fallback = _normalize_error_message(fallback_error)
+    return fallback or "请求失败"
 
 
 def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
@@ -224,6 +155,354 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
         )
 
     return user_path
+
+
+def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    从生成结果中提取图片数据列表
+
+    支持多种数据结构，兼容嵌套字典与数组格式，统一转换为列表输出。
+
+    Args:
+        result: 图片生成结果字典，包含响应数据及元信息。
+
+    Returns:
+        包含图片数据的字典列表，每个字典代表一张图片的完整信息。
+    """
+    data = result.get("data", {})
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and "data" in data:
+        nested = data.get("data", [])
+        return nested if isinstance(nested, list) else [nested]
+    return [data]
+
+
+# ==================== 上下文构建函数 ====================
+
+
+def build_generation_context(
+    arguments: Dict[str, Any], config: SeedreamConfig
+) -> GenerationExecutionContext:
+    """
+    从工具参数构建统一执行上下文
+
+    Args:
+        arguments: 工具原始参数字典。
+        config: 当前生效配置。
+
+    Returns:
+        统一执行上下文对象。
+    """
+    prompt = arguments.get("prompt", "")
+    raw_size = arguments.get("size") if "size" in arguments else None
+    response_format = arguments.get("response_format", "url")
+    stream = bool(arguments.get("stream", False))
+    optimize_prompt_options = arguments.get("optimize_prompt_options")
+    save_path = arguments.get("save_path")
+    custom_name = arguments.get("custom_name")
+    watermark_value = arguments.get("watermark")
+    auto_save = arguments.get("auto_save")
+
+    size_value = config.default_size if raw_size is None else raw_size
+    watermark = (
+        validate_watermark(watermark_value)
+        if watermark_value is not None
+        else config.default_watermark
+    )
+    enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
+
+    request_count, parallelism = validate_parallel_generation_options(
+        request_count=arguments.get("request_count", 1),
+        parallelism=arguments.get("parallelism"),
+        stream=stream,
+        max_request_count=4,
+    )
+
+    validated_size = validate_size_for_model(size_value, config.model_id)
+    validated_response_format = validate_response_format(response_format)
+    validated_optimize_options = validate_optimize_prompt_options(
+        optimize_prompt_options, config.model_id
+    )
+
+    return GenerationExecutionContext(
+        prompt=prompt,
+        size=validated_size,
+        watermark=watermark,
+        response_format=validated_response_format,
+        stream=stream,
+        optimize_prompt_options=validated_optimize_options,
+        request_count=request_count,
+        parallelism=parallelism,
+        enable_auto_save=enable_auto_save,
+        save_path=save_path,
+        custom_name=custom_name,
+    )
+
+
+# ==================== 结果处理函数 ====================
+
+
+def aggregate_parallel_generation_results(
+    *,
+    request_results: List[Optional[Dict[str, Any]]],
+    request_errors: Dict[int, str],
+) -> Dict[str, Any]:
+    """
+    聚合并行请求结果为统一响应结构。
+    """
+    merged_data: List[Dict[str, Any]] = []
+    merged_usage: Dict[str, Any] = {}
+    error_items: List[Dict[str, Any]] = []
+    success_requests = 0
+    request_count = len(request_results)
+
+    for request_index, result in enumerate(request_results, start=1):
+        if not result or not result.get("success"):
+            error_message = _extract_parallel_request_error(
+                result, request_errors.get(request_index)
+            )
+            error_items.append({"request_index": request_index, "message": error_message})
+            merged_data.append(
+                {
+                    "type": "image_generation.request_failed",
+                    "request_index": request_index,
+                    "error": {"message": error_message},
+                }
+            )
+            continue
+
+        success_requests += 1
+        usage = result.get("usage", {})
+        if isinstance(usage, dict):
+            for key, value in usage.items():
+                _add_usage_value(merged_usage, key, value)
+
+        images = extract_images(result)
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            normalized_image = image.copy()
+            normalized_image["request_index"] = request_index
+            merged_data.append(normalized_image)
+
+    failed_requests = request_count - success_requests
+    status = (
+        "completed"
+        if failed_requests == 0
+        else ("partial_completed" if success_requests > 0 else "failed")
+    )
+    aggregated_result: Dict[str, Any] = {
+        "success": success_requests > 0,
+        "data": merged_data,
+        "usage": merged_usage,
+        "status": status,
+        "batch": {
+            "request_count": request_count,
+            "success_requests": success_requests,
+            "failed_requests": failed_requests,
+            "errors": error_items,
+        },
+    }
+    if success_requests == 0:
+        if error_items:
+            error_preview = "；".join(
+                f"请求{item['request_index']}: {item['message']}" for item in error_items[:3]
+            )
+            if len(error_items) > 3:
+                error_preview += f"；其余 {len(error_items) - 3} 个请求也失败"
+            aggregated_result["error"] = f"并行请求全部失败。{error_preview}"
+        else:
+            aggregated_result["error"] = "并行请求全部失败"
+    return aggregated_result
+
+
+def update_result_with_auto_save(result: Dict[str, Any], auto_save_results: List) -> Dict[str, Any]:
+    """
+    将自动保存结果合并到生成结果中
+
+    在原结果基础上添加保存统计信息，并为可保存图片补充本地路径和 Markdown 引用，
+    不修改原结果对象，返回新的字典副本。
+
+    Args:
+        result: 图片生成结果字典,包含原始响应数据。
+        auto_save_results: 自动保存结果对象列表。
+
+    Returns:
+        更新后的结果字典,包含自动保存信息及本地路径。
+    """
+    updated_result = result.copy()
+
+    auto_save_info = {
+        "enabled": True,
+        "total_images": len(auto_save_results),
+        "successful_saves": sum(1 for r in auto_save_results if getattr(r, "success", False)),
+        "failed_saves": sum(1 for r in auto_save_results if not getattr(r, "success", False)),
+        "results": [r.to_dict() for r in auto_save_results],
+    }
+    updated_result["auto_save"] = auto_save_info
+
+    images = extract_images(updated_result)
+    auto_save_iter = iter(auto_save_results)
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        # 自动保存仅处理包含图片数据的项
+        if not (image.get("url") or image.get("b64_json")):
+            continue
+
+        save_result = next(auto_save_iter, None)
+        if save_result is None:
+            break
+
+        if getattr(save_result, "success", False):
+            image["local_path"] = save_result.local_path
+            image["markdown_ref"] = save_result.markdown_ref
+
+    return updated_result
+
+
+def format_generation_response(
+    title: str,
+    result: Dict[str, Any],
+    prompt: str,
+    size: str,
+    auto_save_results: Optional[List] = None,
+    auto_save_enabled: bool = False,
+    auto_save_error: Optional[str] = None,
+) -> str:
+    """
+    格式化图片生成结果为可读文本
+
+    将生成结果、提示词、尺寸、保存信息及使用统计等数据，
+    按规范化格式输出为结构清晰的多行文本字符串。
+
+    Args:
+        title: 响应标题,用于标识生成任务类型。
+        result: 图片生成结果字典,包含图片数据及使用统计。
+        prompt: 生成图片所用的提示词。
+        size: 生成图片的尺寸规格。
+        auto_save_results: 自动保存结果列表,可选。
+        auto_save_enabled: 是否启用自动保存功能,默认 False。
+        auto_save_error: 自动保存错误信息，存在时表示已降级跳过自动保存。
+
+    Returns:
+        格式化后的响应文本,包含完整生成信息及元数据。
+    """
+    if not result.get("success"):
+        failure_message = f"图片生成失败: {result.get('error', '未知错误')}"
+        batch_info = result.get("batch")
+        if not isinstance(batch_info, dict):
+            return failure_message
+        error_items = batch_info.get("errors")
+        if not isinstance(error_items, list) or not error_items:
+            return failure_message
+
+        failure_parts = [failure_message, "", "并行失败详情:"]
+        for item in error_items:
+            if not isinstance(item, dict):
+                continue
+            request_index = item.get("request_index")
+            error_message = item.get("message", "请求失败")
+            if request_index is None:
+                failure_parts.append(f"  {error_message}")
+            else:
+                failure_parts.append(f"  请求 {request_index}: {error_message}")
+        return "\n".join(failure_parts)
+
+    images = extract_images(result)
+    usage = result.get("usage", {})
+
+    parts: List[str] = []
+    parts.append(title)
+    parts.append(f"提示词: {prompt}")
+    parts.append(f"尺寸: {size}")
+    parts.append("")
+
+    batch_info = result.get("batch")
+    if isinstance(batch_info, dict):
+        parts.append("并行请求信息:")
+        if "request_count" in batch_info:
+            parts.append(f"  请求总数: {batch_info['request_count']}")
+        if "success_requests" in batch_info:
+            parts.append(f"  成功请求: {batch_info['success_requests']}")
+        if "failed_requests" in batch_info:
+            parts.append(f"  失败请求: {batch_info['failed_requests']}")
+        parts.append("")
+
+    for i, image in enumerate(images, 1):
+        if isinstance(image, dict):
+            parts.append(f"图片 {i}:")
+            if "request_index" in image:
+                parts.append(f"  请求序号: {image['request_index']}")
+            error_info = image.get("error")
+            if isinstance(error_info, dict):
+                parts.append("  状态: 失败")
+                if error_info.get("code"):
+                    parts.append(f"  错误码: {error_info['code']}")
+                if error_info.get("message"):
+                    parts.append(f"  错误信息: {error_info['message']}")
+            if image.get("url"):
+                parts.append(f"  URL: {image['url']}")
+            if "size" in image:
+                parts.append(f"  尺寸: {image['size']}")
+            if "image_index" in image:
+                parts.append(f"  序号: {image['image_index']}")
+            if "local_path" in image:
+                parts.append(f"  本地路径: {image['local_path']}")
+            if "markdown_ref" in image:
+                parts.append(f"  Markdown 引用: {image['markdown_ref']}")
+            if "b64_json" in image:
+                b64_data = image.get("b64_json")
+                parts.append(
+                    f"  Base64 数据: {len(b64_data)} 字符" if b64_data else "  Base64 数据: 无"
+                )
+            parts.append("")
+
+    if auto_save_enabled:
+        if auto_save_error:
+            parts.append(f"自动保存失败: {auto_save_error}")
+            parts.append("")
+        elif auto_save_results:
+            parts.append("自动保存信息:")
+            successful_saves = sum(1 for r in auto_save_results if getattr(r, "success", False))
+            failed_saves = len(auto_save_results) - successful_saves
+            parts.append(f"  总图片数: {len(auto_save_results)}")
+            parts.append(f"  成功保存: {successful_saves}")
+            if failed_saves:
+                parts.append(f"  保存失败: {failed_saves}")
+            for i, save_result in enumerate(auto_save_results, 1):
+                if getattr(save_result, "success", False):
+                    parts.append(f"  图片 {i}: 已保存到 {save_result.local_path}")
+                else:
+                    parts.append(
+                        f"  图片 {i}: 保存失败 - {getattr(save_result, 'error', '未知原因')}"
+                    )
+            parts.append("")
+        else:
+            parts.append("自动保存: 已开启但未生成可保存的图片")
+            parts.append("")
+
+    if usage:
+        parts.append("使用统计:")
+        if "generated_images" in usage:
+            parts.append(f"  生成图片数: {usage['generated_images']}")
+        if "output_tokens" in usage:
+            parts.append(f"  输出 tokens: {usage['output_tokens']}")
+        if "total_tokens" in usage:
+            parts.append(f"  总 tokens: {usage['total_tokens']}")
+        if "prompt_tokens" in usage:
+            parts.append(f"  提示词 tokens: {usage['prompt_tokens']}")
+        if "completion_tokens" in usage:
+            parts.append(f"  完成 tokens: {usage['completion_tokens']}")
+        if "cost" in usage:
+            parts.append(f"  成本: {usage['cost']}")
+        parts.append("")
+
+    return "\n".join(parts)
+
+
+# ==================== 自动保存函数 ====================
 
 
 async def auto_save_from_urls(
@@ -346,155 +625,137 @@ async def auto_save_from_base64(
         await auto_save_manager.close()
 
 
-def update_result_with_auto_save(result: Dict[str, Any], auto_save_results: List) -> Dict[str, Any]:
+# ==================== 并行执行函数 ====================
+
+
+async def execute_parallel_generation_requests(
+    *,
+    client: "SeedreamClient",
+    context: GenerationExecutionContext,
+    request_executor: Callable[
+        ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
+    ],
+    module_logger: Any,
+) -> Dict[str, Any]:
     """
-    将自动保存结果合并到生成结果中
-
-    在原结果基础上添加保存统计信息，并为可保存图片补充本地路径和 Markdown 引用，
-    不修改原结果对象，返回新的字典副本。
-
-    Args:
-        result: 图片生成结果字典,包含原始响应数据。
-        auto_save_results: 自动保存结果对象列表。
-
-    Returns:
-        更新后的结果字典,包含自动保存信息及本地路径。
+    按并发上限执行多次生成请求并聚合结果。
     """
-    updated_result = result.copy()
+    semaphore = asyncio.Semaphore(context.parallelism)
+    request_results: List[Optional[Dict[str, Any]]] = [None] * context.request_count
+    request_errors: Dict[int, str] = {}
 
-    auto_save_info = {
-        "enabled": True,
-        "total_images": len(auto_save_results),
-        "successful_saves": sum(1 for r in auto_save_results if getattr(r, "success", False)),
-        "failed_saves": sum(1 for r in auto_save_results if not getattr(r, "success", False)),
-        "results": [r.to_dict() for r in auto_save_results],
-    }
-    updated_result["auto_save"] = auto_save_info
-
-    images = extract_images(updated_result)
-    auto_save_iter = iter(auto_save_results)
-    for image in images:
-        if not isinstance(image, dict):
-            continue
-        # 自动保存仅处理包含图片数据的项
-        if not (image.get("url") or image.get("b64_json")):
-            continue
-
-        save_result = next(auto_save_iter, None)
-        if save_result is None:
-            break
-
-        if getattr(save_result, "success", False):
-            image["local_path"] = save_result.local_path
-            image["markdown_ref"] = save_result.markdown_ref
-
-    return updated_result
-
-
-def format_generation_response(
-    title: str,
-    result: Dict[str, Any],
-    prompt: str,
-    size: str,
-    auto_save_results: Optional[List] = None,
-    auto_save_enabled: bool = False,
-    auto_save_error: Optional[str] = None,
-) -> str:
-    """
-    格式化图片生成结果为可读文本
-
-    将生成结果、提示词、尺寸、保存信息及使用统计等数据，
-    按规范化格式输出为结构清晰的多行文本字符串。
-
-    Args:
-        title: 响应标题,用于标识生成任务类型。
-        result: 图片生成结果字典,包含图片数据及使用统计。
-        prompt: 生成图片所用的提示词。
-        size: 生成图片的尺寸规格。
-        auto_save_results: 自动保存结果列表,可选。
-        auto_save_enabled: 是否启用自动保存功能,默认 False。
-        auto_save_error: 自动保存错误信息，存在时表示已降级跳过自动保存。
-
-    Returns:
-        格式化后的响应文本,包含完整生成信息及元数据。
-    """
-    if not result.get("success"):
-        return f"图片生成失败: {result.get('error', '未知错误')}"
-
-    images = extract_images(result)
-    usage = result.get("usage", {})
-
-    parts: List[str] = []
-    parts.append(title)
-    parts.append(f"提示词: {prompt}")
-    parts.append(f"尺寸: {size}")
-    parts.append("")
-
-    for i, image in enumerate(images, 1):
-        if isinstance(image, dict):
-            parts.append(f"图片 {i}:")
-            error_info = image.get("error")
-            if isinstance(error_info, dict):
-                parts.append("  状态: 失败")
-                if error_info.get("code"):
-                    parts.append(f"  错误码: {error_info['code']}")
-                if error_info.get("message"):
-                    parts.append(f"  错误信息: {error_info['message']}")
-            if image.get("url"):
-                parts.append(f"  URL: {image['url']}")
-            if "size" in image:
-                parts.append(f"  尺寸: {image['size']}")
-            if "image_index" in image:
-                parts.append(f"  序号: {image['image_index']}")
-            if "local_path" in image:
-                parts.append(f"  本地路径: {image['local_path']}")
-            if "markdown_ref" in image:
-                parts.append(f"  Markdown 引用: {image['markdown_ref']}")
-            if "b64_json" in image:
-                b64_data = image.get("b64_json")
-                parts.append(
-                    f"  Base64 数据: {len(b64_data)} 字符" if b64_data else "  Base64 数据: 无"
+    async def _run_single_request(request_index: int) -> None:
+        async with semaphore:
+            try:
+                request_results[request_index - 1] = await request_executor(client, context)
+            except Exception as exc:
+                request_errors[request_index] = format_error_for_user(exc)
+                module_logger.warning(
+                    "并行请求 {}/{} 失败: {}",
+                    request_index,
+                    context.request_count,
+                    request_errors[request_index],
                 )
-            parts.append("")
 
-    if auto_save_enabled:
-        if auto_save_error:
-            parts.append(f"自动保存失败: {auto_save_error}")
-            parts.append("")
-        elif auto_save_results:
-            parts.append("自动保存信息:")
-            successful_saves = sum(1 for r in auto_save_results if getattr(r, "success", False))
-            failed_saves = len(auto_save_results) - successful_saves
-            parts.append(f"  总图片数: {len(auto_save_results)}")
-            parts.append(f"  成功保存: {successful_saves}")
-            if failed_saves:
-                parts.append(f"  保存失败: {failed_saves}")
-            for i, save_result in enumerate(auto_save_results, 1):
-                if getattr(save_result, "success", False):
-                    parts.append(f"  图片 {i}: 已保存到 {save_result.local_path}")
-                else:
-                    parts.append(
-                        f"  图片 {i}: 保存失败 - {getattr(save_result, 'error', '未知原因')}"
+    await asyncio.gather(
+        *[
+            _run_single_request(request_index)
+            for request_index in range(1, context.request_count + 1)
+        ]
+    )
+
+    return aggregate_parallel_generation_results(
+        request_results=request_results,
+        request_errors=request_errors,
+    )
+
+
+# ==================== 主执行器函数 ====================
+
+
+async def execute_generation_handler(
+    *,
+    arguments: Dict[str, Any],
+    config: SeedreamConfig,
+    module_logger: Any,
+    tool_name: str,
+    completion_title: str,
+    failure_prefix: str,
+    guidance: str,
+    start_log_message: str,
+    start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]],
+    request_executor: Callable[
+        ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
+    ],
+) -> List[TextContent]:
+    """
+    执行生成类工具的通用处理流水线
+
+    包括：参数归一化、调用客户端、自动保存、响应格式化、统一错误处理。
+    """
+    try:
+        from ...client import SeedreamClient
+
+        context = build_generation_context(arguments, config)
+
+        module_logger.info(start_log_message, *start_log_values_builder(context))
+
+        async with SeedreamClient(config) as client:
+            if context.request_count == 1:
+                result = await request_executor(client, context)
+            else:
+                result = await execute_parallel_generation_requests(
+                    client=client,
+                    context=context,
+                    request_executor=request_executor,
+                    module_logger=module_logger,
+                )
+
+        auto_save_results: List[Any] = []
+        auto_save_error: Optional[str] = None
+        if context.enable_auto_save and result.get("success"):
+            try:
+                if context.response_format == "url":
+                    auto_save_results = await auto_save_from_urls(
+                        result,
+                        context.prompt,
+                        config,
+                        context.save_path,
+                        context.custom_name,
+                        tool_name,
                     )
-            parts.append("")
-        else:
-            parts.append("自动保存: 已开启但未生成可保存的图片")
-            parts.append("")
+                else:
+                    auto_save_results = await auto_save_from_base64(
+                        result,
+                        context.prompt,
+                        config,
+                        context.save_path,
+                        context.custom_name,
+                        tool_name,
+                    )
 
-    if usage:
-        parts.append("使用统计:")
-        if "generated_images" in usage:
-            parts.append(f"  生成图片数: {usage['generated_images']}")
-        if "output_tokens" in usage:
-            parts.append(f"  输出 tokens: {usage['output_tokens']}")
-        if "total_tokens" in usage:
-            parts.append(f"  总 tokens: {usage['total_tokens']}")
-        if "prompt_tokens" in usage:
-            parts.append(f"  提示词 tokens: {usage['prompt_tokens']}")
-        if "completion_tokens" in usage:
-            parts.append(f"  完成 tokens: {usage['completion_tokens']}")
-        if "cost" in usage:
-            parts.append(f"  成本: {usage['cost']}")
-        parts.append("")
+                if auto_save_results:
+                    result = update_result_with_auto_save(result, auto_save_results)
+            except Exception as exc:
+                auto_save_error = format_error_for_user(exc)
+                module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
 
-    return "\n".join(parts)
+        response_text = format_generation_response(
+            completion_title,
+            result,
+            context.prompt,
+            context.size,
+            auto_save_results,
+            context.enable_auto_save,
+            auto_save_error=auto_save_error,
+        )
+
+        return [TextContent(type="text", text=response_text)]
+    except Exception as exc:
+        module_logger.error(f"{failure_prefix}处理失败", exc_info=True)
+        return [
+            TextContent(
+                type="text",
+                text=f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}",
+            )
+        ]

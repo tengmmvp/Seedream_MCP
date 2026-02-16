@@ -43,6 +43,8 @@ async def handle_text_to_image(
             - watermark (bool, optional): 是否添加水印
             - response_format (str, optional): 响应格式，"url" 或 "b64_json"，默认为 "url"
             - stream (bool, optional): 是否启用流式输出，默认为 False
+            - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
+            - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
             - optimize_prompt_options (dict, optional): 提示词优化选项配置
             - auto_save (bool, optional): 是否自动保存生成的图片
             - save_path (str, optional): 自定义图片保存路径
@@ -76,7 +78,15 @@ async def handle_text_to_image(
         completion_title="文生图任务完成",
         failure_prefix="文生图生成",
         guidance="请检查提示词长度、尺寸与模型兼容性，确认 API Key 和网络可用后重试。",
-        start_log_message="文生图开始: prompt_len={}, size={}, stream={}",
-        start_log_values_builder=lambda ctx: (len(ctx.prompt or ""), ctx.size, ctx.stream),
+        start_log_message=(
+            "文生图开始: prompt_len={}, size={}, stream={}, request_count={}, parallelism={}"
+        ),
+        start_log_values_builder=lambda ctx: (
+            len(ctx.prompt or ""),
+            ctx.size,
+            ctx.stream,
+            ctx.request_count,
+            ctx.parallelism,
+        ),
         request_executor=_execute,
     )

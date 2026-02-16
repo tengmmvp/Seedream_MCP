@@ -113,6 +113,8 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
@@ -130,6 +132,8 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
@@ -147,6 +151,8 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
@@ -165,6 +171,8 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
