@@ -8,11 +8,7 @@ from mcp.server.fastmcp import Context
 from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
-from ..impl.browse_images import handle_browse_images
-from ..impl.image_to_image import handle_image_to_image
-from ..impl.multi_image_fusion import handle_multi_image_fusion
-from ..impl.sequential_generation import handle_sequential_generation
-from ..impl.text_to_image import handle_text_to_image
+from ...utils.path_utils import workspace_roots_scope
 from .schemas import (
     BrowseImagesInput,
     ImageToImageInput,
@@ -20,6 +16,11 @@ from .schemas import (
     SequentialGenerationInput,
     TextToImageInput,
 )
+from ..impl.browse_images import handle_browse_images
+from ..impl.image_to_image import handle_image_to_image
+from ..impl.multi_image_fusion import handle_multi_image_fusion
+from ..impl.sequential_generation import handle_sequential_generation
+from ..impl.text_to_image import handle_text_to_image
 
 
 async def run_text_to_image(
@@ -34,9 +35,14 @@ async def run_text_to_image(
         params: 文生图生成的已验证参数对象。
 
     Returns:
-        MCP 结构化工具结果（包含 content / structuredContent / isError）。
+        MCP 结构化工具结果。
     """
-    return await handle_text_to_image(params.model_dump(exclude_none=True), config=config, ctx=ctx)
+    async with workspace_roots_scope(ctx):
+        return await handle_text_to_image(
+            params.model_dump(exclude_none=True),
+            config=config,
+            ctx=ctx,
+        )
 
 
 async def run_image_to_image(
@@ -51,9 +57,14 @@ async def run_image_to_image(
         params: 图文生图的已验证参数对象。
 
     Returns:
-        MCP 结构化工具结果（包含 content / structuredContent / isError）。
+        MCP 结构化工具结果。
     """
-    return await handle_image_to_image(params.model_dump(exclude_none=True), config=config, ctx=ctx)
+    async with workspace_roots_scope(ctx):
+        return await handle_image_to_image(
+            params.model_dump(exclude_none=True),
+            config=config,
+            ctx=ctx,
+        )
 
 
 async def run_multi_image_fusion(
@@ -68,13 +79,14 @@ async def run_multi_image_fusion(
         params: 多图像融合的已验证参数对象。
 
     Returns:
-        MCP 结构化工具结果（包含 content / structuredContent / isError）。
+        MCP 结构化工具结果。
     """
-    return await handle_multi_image_fusion(
-        params.model_dump(exclude_none=True),
-        config=config,
-        ctx=ctx,
-    )
+    async with workspace_roots_scope(ctx):
+        return await handle_multi_image_fusion(
+            params.model_dump(exclude_none=True),
+            config=config,
+            ctx=ctx,
+        )
 
 
 async def run_sequential_generation(
@@ -89,13 +101,14 @@ async def run_sequential_generation(
         params: 组图输出的已验证参数对象。
 
     Returns:
-        MCP 结构化工具结果（包含 content / structuredContent / isError）。
+        MCP 结构化工具结果。
     """
-    return await handle_sequential_generation(
-        params.model_dump(exclude_none=True),
-        config=config,
-        ctx=ctx,
-    )
+    async with workspace_roots_scope(ctx):
+        return await handle_sequential_generation(
+            params.model_dump(exclude_none=True),
+            config=config,
+            ctx=ctx,
+        )
 
 
 async def run_browse_images(
@@ -109,6 +122,10 @@ async def run_browse_images(
         params: 图像浏览的已验证参数对象。
 
     Returns:
-        MCP 结构化工具结果（包含 content / structuredContent / isError）。
+        MCP 结构化工具结果。
     """
-    return await handle_browse_images(params.model_dump(exclude_none=True), ctx=ctx)
+    async with workspace_roots_scope(ctx):
+        return await handle_browse_images(
+            params.model_dump(exclude_none=True),
+            ctx=ctx,
+        )

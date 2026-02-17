@@ -15,7 +15,8 @@ from ...utils.logging import get_logger
 from ...utils.path_utils import (
     find_images_in_directory,
     get_relative_path,
-    get_workspace_root,
+    get_workspace_roots,
+    is_path_within_any_base,
     is_path_within_base,
     normalize_path,
 )
@@ -82,11 +83,9 @@ async def handle_browse_images(
     format_filter = arguments.get("format_filter")
     show_details = bool(arguments.get("show_details", False))
 
-    workspace_root = get_workspace_root()
-    try:
-        resolved_dir = normalize_path(directory, str(workspace_root))
-    except ValueError as exc:
-        message = f"目录路径无效: {exc}"
+    workspace_roots = get_workspace_roots()
+    if not workspace_roots:
+        message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
             structuredContent={
@@ -94,12 +93,59 @@ async def handle_browse_images(
                 "success": False,
                 "status": "failed",
                 "error": message,
+                "workspace_roots": [],
             },
             isError=True,
         )
 
-    if not is_path_within_base(resolved_dir, workspace_root):
-        message = "目录超出允许范围。" f"仅允许浏览工作区目录: {workspace_root}"
+    resolved_dirs: list[Path] = []
+    requested_dir = str(directory)
+    raw_dir_path = Path(requested_dir)
+    if raw_dir_path.is_absolute():
+        try:
+            absolute_dir = normalize_path(requested_dir)
+        except ValueError as exc:
+            message = f"目录路径无效: {exc}"
+            return CallToolResult(
+                content=[TextContent(type="text", text=message)],
+                structuredContent={
+                    "tool": "browse_images",
+                    "success": False,
+                    "status": "failed",
+                    "error": message,
+                    "workspace_roots": [str(root) for root in workspace_roots],
+                },
+                isError=True,
+            )
+        if not is_path_within_any_base(absolute_dir, workspace_roots):
+            allowed_roots = ", ".join(str(root) for root in workspace_roots)
+            message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
+            return CallToolResult(
+                content=[TextContent(type="text", text=message)],
+                structuredContent={
+                    "tool": "browse_images",
+                    "success": False,
+                    "status": "failed",
+                    "error": message,
+                    "workspace_roots": [str(root) for root in workspace_roots],
+                },
+                isError=True,
+            )
+        resolved_dirs.append(absolute_dir)
+    else:
+        for root in workspace_roots:
+            try:
+                candidate = normalize_path(requested_dir, str(root))
+            except ValueError:
+                continue
+            if not is_path_within_base(candidate, root):
+                continue
+            if candidate not in resolved_dirs:
+                resolved_dirs.append(candidate)
+
+    if not resolved_dirs:
+        allowed_roots = ", ".join(str(root) for root in workspace_roots)
+        message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
             structuredContent={
@@ -107,7 +153,7 @@ async def handle_browse_images(
                 "success": False,
                 "status": "failed",
                 "error": message,
-                "workspace_root": str(workspace_root),
+                "workspace_roots": [str(root) for root in workspace_roots],
             },
             isError=True,
         )
@@ -119,21 +165,39 @@ async def handle_browse_images(
             pass
 
     logger.info(
-        "浏览图片: dir={}, recursive={}, max_depth={}, limit={}",
-        resolved_dir,
+        "浏览图片: dirs={}, recursive={}, max_depth={}, limit={}",
+        resolved_dirs,
         recursive,
         max_depth,
         limit,
     )
 
     # 搜索图片文件并限制返回数量
-    images = find_images_in_directory(
-        directory=str(resolved_dir),
-        recursive=recursive,
-        max_depth=max_depth,
-        extensions=format_filter,
-        limit=limit,
-    )
+    images: list[Path] = []
+    seen_images: set[Path] = set()
+    for resolved_dir in resolved_dirs:
+        remaining = None if limit is None else max(0, limit - len(images))
+        if remaining == 0:
+            break
+        matched_images = find_images_in_directory(
+            directory=str(resolved_dir),
+            recursive=recursive,
+            max_depth=max_depth,
+            extensions=format_filter,
+            limit=remaining,
+        )
+        for image_path in matched_images:
+            if not is_path_within_any_base(image_path, workspace_roots):
+                logger.warning("检测到越界图片路径，已忽略: {}", image_path)
+                continue
+            if image_path in seen_images:
+                continue
+            seen_images.add(image_path)
+            images.append(image_path)
+            if limit is not None and len(images) >= limit:
+                break
+        if limit is not None and len(images) >= limit:
+            break
 
     # 处理未找到图片的情况
     if not images:
@@ -149,8 +213,9 @@ async def handle_browse_images(
                 "tool": "browse_images",
                 "success": True,
                 "status": "empty",
-                "directory": str(resolved_dir),
-                "workspace_root": str(workspace_root),
+                "directory": requested_dir,
+                "resolved_directories": [str(item) for item in resolved_dirs],
+                "workspace_roots": [str(root) for root in workspace_roots],
                 "images": [],
                 "count": 0,
             },
@@ -161,7 +226,14 @@ async def handle_browse_images(
     lines = ["图片列表:"]
     structured_images: list[dict[str, Any]] = []
     for idx, img in enumerate(images, 1):
-        display_path = get_relative_path(img, str(workspace_root))
+        display_base = next(
+            (root for root in workspace_roots if is_path_within_base(img, root)),
+            None,
+        )
+        if display_base is None:
+            logger.warning("图片路径未命中任何工作区根目录，已忽略: {}", img)
+            continue
+        display_path = get_relative_path(img, str(display_base))
         lines.append(f"{idx}. {_format_file_info(display_path, img, show_details)}")
         structured_images.append(
             {
@@ -183,8 +255,9 @@ async def handle_browse_images(
             "tool": "browse_images",
             "success": True,
             "status": "completed",
-            "directory": str(resolved_dir),
-            "workspace_root": str(workspace_root),
+            "directory": requested_dir,
+            "resolved_directories": [str(item) for item in resolved_dirs],
+            "workspace_roots": [str(root) for root in workspace_roots],
             "count": len(structured_images),
             "images": structured_images,
             "recursive": recursive,

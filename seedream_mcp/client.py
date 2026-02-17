@@ -24,7 +24,7 @@ from .utils.errors import (
     handle_api_error,
 )
 from .utils.logging import get_logger, log_function_call
-from .utils.path_utils import get_workspace_root, suggest_similar_paths, validate_image_path
+from .utils.path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
 from .utils.validation import (
     validate_max_images,
     validate_image_url,
@@ -1021,7 +1021,7 @@ class SeedreamClient:
         """
         try:
             normalized_image = image.strip()
-            workspace_root = get_workspace_root()
+            workspace_roots = get_workspace_roots()
 
             # 如果是 URL，直接返回
             if normalized_image.startswith(("http://", "https://")):
@@ -1034,33 +1034,48 @@ class SeedreamClient:
             if normalized_image.lower().startswith("data:image/"):
                 return validate_image_url(normalized_image)
 
-            # 验证图片路径
-            is_valid, error_msg, normalized_path = validate_image_path(
-                normalized_image, base_dir=str(workspace_root)
-            )
+            if not workspace_roots:
+                raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
 
-            if not is_valid:
+            # 验证图片路径
+            validated_path = None
+            validation_errors: List[str] = []
+            for root in workspace_roots:
+                is_valid, error_msg, normalized_path = validate_image_path(
+                    normalized_image, base_dir=str(root)
+                )
+                if is_valid and normalized_path is not None:
+                    validated_path = normalized_path
+                    break
+                if error_msg:
+                    validation_errors.append(error_msg)
+
+            if validated_path is None:
+                error_text = "图像路径校验失败"
+                if validation_errors:
+                    error_text = "；".join(dict.fromkeys(validation_errors))
+
                 # 提供路径建议
-                suggestions = suggest_similar_paths(image, search_dirs=[str(workspace_root)])
+                suggestions = suggest_similar_paths(
+                    image,
+                    search_dirs=[str(root) for root in workspace_roots],
+                )
                 suggestion_text = ""
                 if suggestions:
                     suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
                         f"  • {s}" for s in suggestions[:3]
                     )
 
-                raise SeedreamAPIError(f"{error_msg}{suggestion_text}")
-
-            if normalized_path is None:
-                raise SeedreamAPIError("图像路径校验失败: 解析后的路径为空")
+                raise SeedreamAPIError(f"{error_text}{suggestion_text}")
 
             # 读取文件并转换为 Base64
-            image_bytes = await asyncio.to_thread(normalized_path.read_bytes)
+            image_bytes = await asyncio.to_thread(validated_path.read_bytes)
 
             # 转换为 Base64
             image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
             # 获取 MIME 类型
-            suffix = normalized_path.suffix.lower()
+            suffix = validated_path.suffix.lower()
             mime_type_map = {
                 ".jpg": "image/jpeg",
                 ".jpeg": "image/jpeg",
@@ -1072,7 +1087,7 @@ class SeedreamClient:
             }
             mime_type = mime_type_map.get(suffix, "image/jpeg")
 
-            self.logger.info(f"成功处理图片文件: {normalized_path} ({len(image_bytes)} bytes)")
+            self.logger.info(f"成功处理图片文件: {validated_path} ({len(image_bytes)} bytes)")
             return f"data:{mime_type};base64,{image_b64}"
 
         except (SeedreamAPIError, SeedreamValidationError):

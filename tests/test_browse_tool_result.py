@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from mcp.types import TextContent
 
+from seedream_mcp.tools.impl import browse_images as browse_images_module
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
 
 
@@ -52,3 +53,34 @@ async def test_browse_images_rejects_out_of_workspace_directory(
     assert result.isError is True
     assert isinstance(result.structuredContent, dict)
     assert result.structuredContent["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_browse_images_ignores_outside_images_without_crashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_img = outside / "outside.png"
+    outside_img.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+
+    def _fake_find_images_in_directory(*args, **kwargs):
+        return [outside_img]
+
+    monkeypatch.setattr(
+        browse_images_module,
+        "find_images_in_directory",
+        _fake_find_images_in_directory,
+    )
+
+    result = await handle_browse_images({"directory": ".", "recursive": True})
+
+    assert result.isError is False
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["status"] == "empty"
+    assert result.structuredContent["count"] == 0
