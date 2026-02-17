@@ -69,6 +69,7 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 --watermark                                        # 启用水印
 --log-level [DEBUG|INFO|WARNING|ERROR]             # 日志级别
 --transport [stdio|sse|streamable-http]            # MCP 传输方式 (默认: stdio)
+--mount-path TEXT                                  # SSE 挂载路径（仅 transport=sse 生效）
 --config-file TEXT                                 # 自定义 .env 配置文件路径
 ```
 
@@ -79,17 +80,25 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 uvx git+https://github.com/tengmmvp/Seedream_MCP \
   --api-key your_key
 
-# 高质量图像 + 调试模式
+# 使用自定义配置文件
 uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --api-key your_key --default-size 4K --log-level DEBUG
+  --config-file ./my-config.env --api-key your_key
 
 # 使用 Seedream 4.0 模型
 uvx git+https://github.com/tengmmvp/Seedream_MCP \
   --api-key your_key --model doubao-seedream-4.0
 
-# 使用自定义配置文件
+# 高质量图像 + 调试模式
 uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --config-file ./my-config.env --api-key your_key
+  --api-key your_key --default-size 4K --log-level DEBUG
+
+# 以 SSE 模式运行并指定挂载路径
+uvx git+https://github.com/tengmmvp/Seedream_MCP \
+  --transport sse --mount-path /mcp --api-key your_key
+
+# 以 Streamable HTTP 模式运行
+uvx git+https://github.com/tengmmvp/Seedream_MCP \
+  --transport streamable-http --api-key your_key
 ```
 
 ## 🎨 功能特性

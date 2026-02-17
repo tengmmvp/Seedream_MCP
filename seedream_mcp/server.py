@@ -6,7 +6,7 @@ from __future__ import annotations
 
 # 标准库导入
 import argparse
-from typing import Any
+from typing import Any, Literal, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, ToolAnnotations
@@ -292,8 +292,26 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="stdio",
         help="MCP 传输方式（默认 stdio）",
     )
+    parser.add_argument(
+        "--mount-path",
+        default=None,
+        help="SSE 传输的挂载路径（如 /mcp），仅在 --transport=sse 时生效",
+    )
 
     return parser
+
+
+def _build_run_options(
+    args: argparse.Namespace,
+) -> tuple[Literal["stdio", "sse", "streamable-http"], str | None]:
+    """
+    构建 MCP 运行参数。
+
+    当前 SDK 的 `mount_path` 仅在 SSE 传输下生效，其他传输模式统一忽略。
+    """
+    transport = cast(Literal["stdio", "sse", "streamable-http"], args.transport)
+    mount_path = args.mount_path if transport == "sse" else None
+    return transport, mount_path
 
 
 # ==================== 主入口函数 ====================
@@ -338,7 +356,8 @@ def cli_main() -> int:
 
     # 启动 MCP 服务器
     try:
-        mcp.run(transport=args.transport)
+        transport, mount_path = _build_run_options(args)
+        mcp.run(transport=transport, mount_path=mount_path)
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在退出。")
         return 0
