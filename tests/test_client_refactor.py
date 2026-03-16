@@ -37,16 +37,60 @@ def _build_config() -> SeedreamConfig:
 def test_public_generation_methods_keep_expected_parameter_order() -> None:
     signature_expectations = {
         "text_to_image": {
-            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "size", "watermark", "response_format", "output_format", "stream", "tools"],
+            "ordered_parameters": [
+                "self",
+                "prompt",
+                "optimize_prompt_options",
+                "size",
+                "watermark",
+                "response_format",
+                "output_format",
+                "stream",
+                "tools",
+            ],
         },
         "image_to_image": {
-            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "image", "size", "watermark", "response_format", "output_format", "stream", "tools"],
+            "ordered_parameters": [
+                "self",
+                "prompt",
+                "optimize_prompt_options",
+                "image",
+                "size",
+                "watermark",
+                "response_format",
+                "output_format",
+                "stream",
+                "tools",
+            ],
         },
         "multi_image_fusion": {
-            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "image", "size", "watermark", "response_format", "output_format", "stream", "tools"],
+            "ordered_parameters": [
+                "self",
+                "prompt",
+                "optimize_prompt_options",
+                "image",
+                "size",
+                "watermark",
+                "response_format",
+                "output_format",
+                "stream",
+                "tools",
+            ],
         },
         "sequential_generation": {
-            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "image", "size", "watermark", "max_images", "response_format", "output_format", "stream", "tools"],
+            "ordered_parameters": [
+                "self",
+                "prompt",
+                "optimize_prompt_options",
+                "image",
+                "size",
+                "watermark",
+                "max_images",
+                "response_format",
+                "output_format",
+                "stream",
+                "tools",
+            ],
         },
     }
 
