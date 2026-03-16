@@ -26,8 +26,12 @@ MIN_IMAGE_EDGE = 15
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 MAX_IMAGE_PIXELS = 6000 * 6000
-VALID_SIZE_PRESETS = {"1K", "2K", "4K"}
+VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
+VALID_OUTPUT_FORMATS = {"jpeg", "png"}
+VALID_GENERATION_TOOL_TYPES = {"web_search"}
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
+SEEDREAM_5X_MIN_SIZE_PIXELS = 2560 * 1440
+SEEDREAM_5X_MAX_SIZE_PIXELS = 10404496
 SEEDREAM_4X_MIN_SIZE_PIXELS = 2560 * 1440
 SEEDREAM_4X_MAX_SIZE_PIXELS = 4096 * 4096
 SEEDREAM_3X_MIN_SIZE_PIXELS = 512 * 512
@@ -92,6 +96,49 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
             value=validated_value,
         )
     return validated_value
+
+
+def _contains_model_token(model_id: str, *tokens: str) -> bool:
+    """
+    判断模型标识中是否包含指定 token。
+    """
+    normalized = (model_id or "").lower()
+    return any(token in normalized for token in tokens)
+
+
+def _is_seedream_50_model(model_id: str) -> bool:
+    """
+    判断是否为 Seedream 5.0 模型。
+    """
+    return _contains_model_token(model_id, "doubao-seedream-5-0", "doubao-seedream-5.0")
+
+
+def _is_seedream_45_model(model_id: str) -> bool:
+    """
+    判断是否为 Seedream 4.5 模型。
+    """
+    return _contains_model_token(model_id, "doubao-seedream-4-5", "doubao-seedream-4.5")
+
+
+def _is_seedream_40_model(model_id: str) -> bool:
+    """
+    判断是否为 Seedream 4.0 模型。
+    """
+    return _contains_model_token(model_id, "doubao-seedream-4-0", "doubao-seedream-4.0")
+
+
+def _is_seedream_30_model(model_id: str) -> bool:
+    """
+    判断是否为 Seedream 3.0 文生图模型。
+    """
+    return _contains_model_token(model_id, "doubao-seedream-3-0", "doubao-seedream-3.0")
+
+
+def _is_seededit_30_model(model_id: str) -> bool:
+    """
+    判断是否为 SeedEdit 3.0 图生图模型。
+    """
+    return _contains_model_token(model_id, "doubao-seededit-3-0", "doubao-seededit-3.0")
 
 
 # ==================== 私有验证函数 ====================
@@ -426,6 +473,113 @@ def validate_response_format(response_format: str) -> str:
     return response_format
 
 
+def validate_output_format(output_format: Any, model_id: str) -> str | None:
+    """
+    验证图像输出文件格式，并检查与模型兼容性。
+    """
+    if output_format is None:
+        return None
+
+    if not isinstance(output_format, str):
+        raise SeedreamValidationError(
+            "output_format 必须是字符串",
+            field="output_format",
+            value=output_format,
+        )
+
+    normalized = output_format.strip().lower()
+    if not normalized:
+        raise SeedreamValidationError(
+            "output_format 不能为空",
+            field="output_format",
+            value=output_format,
+        )
+
+    if normalized not in VALID_OUTPUT_FORMATS:
+        raise SeedreamValidationError(
+            f"output_format 仅支持 {sorted(VALID_OUTPUT_FORMATS)}",
+            field="output_format",
+            value=output_format,
+        )
+
+    if not _is_seedream_50_model(model_id):
+        raise SeedreamValidationError(
+            "仅 doubao-seedream-5.0 模型支持 output_format",
+            field="output_format",
+            value=output_format,
+        )
+
+    return normalized
+
+
+def validate_generation_tools(
+    tools: Any, model_id: str
+) -> List[dict[str, str]] | None:
+    """
+    验证生成工具配置，并检查与模型兼容性。
+    """
+    if tools is None:
+        return None
+
+    if not isinstance(tools, list):
+        raise SeedreamValidationError(
+            "tools 必须是数组",
+            field="tools",
+            value=tools,
+        )
+
+    if not _is_seedream_50_model(model_id):
+        raise SeedreamValidationError(
+            "仅 doubao-seedream-5.0 模型支持 tools",
+            field="tools",
+            value=tools,
+        )
+
+    normalized_tools: List[dict[str, str]] = []
+    for index, tool in enumerate(tools, start=1):
+        if not isinstance(tool, dict):
+            raise SeedreamValidationError(
+                "tools 的每一项都必须是对象",
+                field=f"tools[{index}]",
+                value=tool,
+            )
+
+        extra_keys = set(tool.keys()) - {"type"}
+        if extra_keys:
+            raise SeedreamValidationError(
+                f"tools[{index}] 包含不支持的字段: {sorted(extra_keys)}",
+                field=f"tools[{index}]",
+                value=tool,
+            )
+
+        tool_type = tool.get("type")
+        if not isinstance(tool_type, str):
+            raise SeedreamValidationError(
+                "tools.type 必须是字符串",
+                field=f"tools[{index}].type",
+                value=tool_type,
+            )
+
+        normalized_type = tool_type.strip().lower()
+        if not normalized_type:
+            raise SeedreamValidationError(
+                "tools.type 不能为空",
+                field=f"tools[{index}].type",
+                value=tool_type,
+            )
+
+        if normalized_type not in VALID_GENERATION_TOOL_TYPES:
+            raise SeedreamValidationError(
+                f"tools.type 仅支持 {sorted(VALID_GENERATION_TOOL_TYPES)}",
+                field=f"tools[{index}].type",
+                value=tool_type,
+            )
+
+        normalized_tools.append({"type": normalized_type})
+
+    return normalized_tools
+
+
 def validate_max_images(max_images: Any) -> int:
     """
     验证最大图像数量参数
@@ -472,7 +626,7 @@ def validate_size(size: str) -> str:
     验证图像尺寸参数是否在允许的范围内
 
     Args:
-        size: 图像尺寸规格，支持 1K/2K/4K 或 <宽>x<高>
+        size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>
 
     Returns:
         str: 标准化后的尺寸值（大写格式）
@@ -497,7 +651,7 @@ def validate_size(size: str) -> str:
         return f"{width}x{height}"
 
     raise SeedreamValidationError(
-        "图像尺寸必须为 1K/2K/4K 或 <宽>x<高> 像素值",
+        "图像尺寸必须为 1K/2K/3K/4K 或 <宽>x<高> 像素值",
         field="size",
         value=size,
     )
@@ -524,13 +678,33 @@ def validate_size_for_model(size: str, model_id: str) -> str:
 
     # 分辨率档位校验
     if size in VALID_SIZE_PRESETS:
-        if "doubao-seedream-4-5" in mid or "doubao-seedream-4.5" in mid:
+        if _is_seedream_50_model(mid):
+            if size not in {"2K", "3K"}:
+                raise SeedreamValidationError(
+                    "在 doubao-seedream-5.0 模型下仅支持 2K/3K",
+                    field="size",
+                    value=size,
+                )
+        elif _is_seedream_45_model(mid):
             if size not in {"2K", "4K"}:
                 raise SeedreamValidationError(
                     "在 doubao-seedream-4.5 模型下仅支持 2K/4K",
                     field="size",
                     value=size,
                 )
+        elif _is_seedream_40_model(mid):
+            if size not in {"1K", "2K", "4K"}:
+                raise SeedreamValidationError(
+                    "在 doubao-seedream-4.0 模型下仅支持 1K/2K/4K",
+                    field="size",
+                    value=size,
+                )
+        elif _is_seedream_30_model(mid) or _is_seededit_30_model(mid):
+            raise SeedreamValidationError(
+                "在 doubao-seedream-3.0/doubao-seededit-3.0 模型下仅支持像素尺寸",
+                field="size",
+                value=size,
+            )
         return size
 
     # 像素值校验
@@ -548,9 +722,20 @@ def validate_size_for_model(size: str, model_id: str) -> str:
         )
 
     total_pixels = width * height
-    if any(token in mid for token in ("doubao-seedream-4-5", "doubao-seedream-4.5")) or any(
-        token in mid for token in ("doubao-seedream-4-0", "doubao-seedream-4.0")
-    ):
+    if _is_seedream_50_model(mid):
+        if (
+            total_pixels < SEEDREAM_5X_MIN_SIZE_PIXELS
+            or total_pixels > SEEDREAM_5X_MAX_SIZE_PIXELS
+        ):
+            raise SeedreamValidationError(
+                (
+                    "在 doubao-seedream-5.0 模型下，像素尺寸总像素需在 "
+                    f"[{SEEDREAM_5X_MIN_SIZE_PIXELS}, {SEEDREAM_5X_MAX_SIZE_PIXELS}] 范围内"
+                ),
+                field="size",
+                value=size,
+            )
+    elif _is_seedream_45_model(mid) or _is_seedream_40_model(mid):
         if (
             total_pixels < SEEDREAM_4X_MIN_SIZE_PIXELS
             or total_pixels > SEEDREAM_4X_MAX_SIZE_PIXELS
@@ -563,9 +748,7 @@ def validate_size_for_model(size: str, model_id: str) -> str:
                 field="size",
                 value=size,
             )
-    elif any(token in mid for token in ("doubao-seedream-3-0", "doubao-seedream-3.0")) or any(
-        token in mid for token in ("doubao-seededit-3-0", "doubao-seededit-3.0")
-    ):
+    elif _is_seedream_30_model(mid) or _is_seededit_30_model(mid):
         if (
             total_pixels < SEEDREAM_3X_MIN_SIZE_PIXELS
             or total_pixels > SEEDREAM_3X_MAX_SIZE_PIXELS
@@ -710,12 +893,12 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
             value=mode,
         )
 
-    # doubao-seedream-4.5 模型仅支持 standard 模式
+    # doubao-seedream-5.0/4.5 模型仅支持 standard 模式
     mid = (model_id or "").lower()
-    if "doubao-seedream-4-5" in mid or "doubao-seedream-4.5" in mid:
+    if _is_seedream_50_model(mid) or _is_seedream_45_model(mid):
         if mode != "standard":
             raise SeedreamValidationError(
-                "doubao-seedream-4.5 当前仅支持 optimize_prompt_options.mode=standard",
+                "doubao-seedream-5.0/4.5 当前仅支持 optimize_prompt_options.mode=standard",
                 field="optimize_prompt_options.mode",
                 value=mode,
             )

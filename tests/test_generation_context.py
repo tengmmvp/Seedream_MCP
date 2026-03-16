@@ -1,7 +1,10 @@
+from dataclasses import fields
+
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.common import (
+    GenerationExecutionContext,
     aggregate_parallel_generation_results,
     build_generation_context,
     format_generation_response,
@@ -26,6 +29,24 @@ def test_build_generation_context_uses_default_size_when_omitted() -> None:
     assert context.size == "2K"
     assert context.request_count == 1
     assert context.parallelism == 1
+
+
+def test_generation_execution_context_field_order_matches_mcp_order() -> None:
+    assert [field.name for field in fields(GenerationExecutionContext)] == [
+        "prompt",
+        "optimize_prompt_options",
+        "size",
+        "watermark",
+        "response_format",
+        "output_format",
+        "stream",
+        "tools",
+        "request_count",
+        "parallelism",
+        "enable_auto_save",
+        "save_path",
+        "custom_name",
+    ]
 
 
 def test_build_generation_context_rejects_explicit_empty_size() -> None:
@@ -58,6 +79,51 @@ def test_build_generation_context_rejects_zero_parallelism() -> None:
 
     with pytest.raises(SeedreamValidationError, match="parallelism 必须在 1-4 之间"):
         build_generation_context({"prompt": "test", "request_count": 2, "parallelism": 0}, config)
+
+
+def test_build_generation_context_accepts_seedream_50_output_format_and_tools() -> None:
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-260128",
+        default_size="2K",
+    )
+
+    context = build_generation_context(
+        {
+            "prompt": "test",
+            "output_format": "png",
+            "tools": [{"type": "web_search"}],
+        },
+        config,
+    )
+
+    assert context.output_format == "png"
+    assert context.tools == [{"type": "web_search"}]
+
+
+def test_build_generation_context_rejects_output_format_for_seedream_45() -> None:
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-4-5-251128",
+        default_size="2K",
+    )
+
+    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"):
+        build_generation_context({"prompt": "test", "output_format": "png"}, config)
+
+
+def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -> None:
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-260128",
+        default_size="2K",
+    )
+
+    with pytest.raises(SeedreamValidationError, match="仅支持 optimize_prompt_options.mode=standard"):
+        build_generation_context(
+            {"prompt": "test", "optimize_prompt_options": {"mode": "fast"}},
+            config,
+        )
 
 
 def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None:

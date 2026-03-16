@@ -22,6 +22,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 MODEL_ALIASES: dict[str, str] = {
+    "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
+    "doubao-seedream-5.0-lite": "doubao-seedream-5-0-260128",
     "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
     "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
 }
@@ -32,7 +34,7 @@ _INJECTED_ENV_VALUES: dict[str, str] = {}
 
 ENV_DEFAULTS: dict[str, Any] = {
     "ARK_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
-    "SEEDREAM_MODEL_ID": "doubao-seedream-4-5-251128",
+    "SEEDREAM_MODEL_ID": "doubao-seedream-5-0-260128",
     "SEEDREAM_DEFAULT_SIZE": "2K",
     "SEEDREAM_DEFAULT_WATERMARK": "false",
     "SEEDREAM_TIMEOUT": "60",
@@ -66,7 +68,7 @@ class SeedreamConfig:
 
     # 可选配置
     base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
-    model_id: str = "doubao-seedream-4-5-251128"
+    model_id: str = "doubao-seedream-5-0-260128"
     default_size: str = "2K"
     default_watermark: bool = False
     timeout: int = 60
@@ -108,15 +110,14 @@ class SeedreamConfig:
 
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError("model_id不能为空")
+        self.model_id = normalize_model_selector(self.model_id)
 
         if not isinstance(self.default_size, str) or not self.default_size.strip():
             raise SeedreamConfigError("default_size不能为空")
 
         normalized_default_size = self.default_size.strip()
         try:
-            self.default_size = validate_size_for_model(
-                normalized_default_size, self.model_id
-            )
+            self.default_size = validate_size_for_model(normalized_default_size, self.model_id)
         except SeedreamValidationError as exc:
             raise SeedreamConfigError(f"default_size无效: {exc.message}") from exc
 
@@ -197,6 +198,16 @@ class SeedreamConfig:
         return (
             f"SeedreamConfig(api_key='***', base_url='{self.base_url}', model_id='{self.model_id}')"
         )
+
+
+def normalize_model_selector(value: object) -> str:
+    """
+    规范化模型选择器。
+
+    支持将友好别名映射为真实 Model ID；未命中的值保持原样。
+    """
+    normalized = str(value).strip()
+    return MODEL_ALIASES.get(normalized, normalized)
 
 
 def parse_bool(value: object) -> bool:
@@ -363,7 +374,7 @@ def build_config_from_sources(
             ENV_DEFAULTS["SEEDREAM_MODEL_ID"],
         )
     )
-    model_id = MODEL_ALIASES.get(raw_model, raw_model)
+    model_id = normalize_model_selector(raw_model)
 
     log_file_raw = _pick_config_value(
         override_values, "log_file", "LOG_FILE", env_values, ENV_DEFAULTS["LOG_FILE"]

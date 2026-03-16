@@ -43,7 +43,9 @@ async def handle_multi_image_fusion(
             - size (str, optional): 生成图片尺寸，默认使用配置中的默认值
             - watermark (bool, optional): 是否添加水印，默认使用配置中的默认值
             - response_format (str, optional): 响应格式，支持 'url' 或 'b64_json'，默认为 'url'
+            - output_format (str, optional): 输出图片格式，仅 Seedream 5.0 支持 "jpeg" 或 "png"
             - stream (bool, optional): 是否启用流式响应，默认为 False
+            - tools (list, optional): 模型工具配置，仅 Seedream 5.0 支持，如 [{"type": "web_search"}]
             - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
             - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
             - auto_save (bool, optional): 是否自动保存结果，默认使用配置中的默认值
@@ -71,7 +73,9 @@ async def handle_multi_image_fusion(
             size=context.size,
             watermark=context.watermark,
             response_format=context.response_format,
+            output_format=context.output_format,
             stream=context.stream,
+            tools=context.tools,
         )
         return cast(Dict[str, Any], result)
 

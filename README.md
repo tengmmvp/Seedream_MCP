@@ -1,4 +1,4 @@
-﻿<h1 align="center">Seedream 4.0 和 Seedream 4.5 MCP 生图工具</h1>
+﻿<h1 align="center">Seedream 4.0、4.5 和 5.0 MCP 生图工具</h1>
 
 <div align="center">
   <a href="https://zread.ai/tengmmvp/Seedream_MCP">
@@ -10,9 +10,9 @@
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"/>
   <img src="https://img.shields.io/badge/Powered_By-Codex%26GLM-violet.svg" alt="Powered by Codex&GLM"/>
   <br><br>
-  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-4-5.jpeg" alt="Seedream MCP" width="440"/>
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="440"/>
   <br><br>
-  <b>基于火山引擎 Seedream 4.0 和 Seedream 4.5 API 的 MCP 工具，支持 AI 图像生成。</b>
+  <b>基于火山引擎 Seedream 4.0、4.5 和 5.0 API 的 MCP 工具，支持 AI 图像生成。</b>
 </div>
 
 ## ⚡ 快速安装
@@ -64,8 +64,9 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 
 ```bash
 --api-key TEXT                                     # API 密钥（必需）
---model [doubao-seedream-4.5|doubao-seedream-4.0]  # 模型选择 (默认: doubao-seedream-4.5)
---default-size [1K|2K|4K|<宽>x<高>]                # 图像尺寸 (默认: 2K)
+--model [doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
+                                                 # 模型选择 (默认: doubao-seedream-5.0)
+--default-size [1K|2K|3K|4K|<宽>x<高>]            # 图像尺寸 (默认: 2K，需与模型兼容)
 --watermark                                        # 启用水印
 --log-level [DEBUG|INFO|WARNING|ERROR]             # 日志级别
 --transport [stdio|sse|streamable-http]            # MCP 传输方式 (默认: stdio)
@@ -90,15 +91,7 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 # 高质量图像 + 调试模式
 uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --api-key your_key --default-size 4K --log-level DEBUG
-
-# 以 SSE 模式运行并指定挂载路径
-uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --transport sse --mount-path /mcp --api-key your_key
-
-# 以 Streamable HTTP 模式运行
-uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --transport streamable-http --api-key your_key
+  --api-key your_key --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
 ```
 
 ## 🎨 功能特性
@@ -119,10 +112,12 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 
 - `prompt` (必需) - 图像生成的文本提示词，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -138,10 +133,12 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (必需) - 输入图像的 URL 或本地文件路径
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -157,10 +154,12 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (必需) - 输入图像 URL 或本地文件路径列表（2-14 张图像）
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -176,11 +175,13 @@ uvx git+https://github.com/tengmmvp/Seedream_MCP \
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
 - `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）；参考图最多 14 张，且参考图数量与 max_images 之和不超过 15
-- `size` (可选) - 图像尺寸：`1K`、`2K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值
+- `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
+- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -262,7 +263,7 @@ uv run python -m seedream_mcp.server --api-key your_key
 ARK_API_KEY=your_api_key_here
 
 # 模型配置
-SEEDREAM_MODEL_ID=doubao-seedream-4-5-251128
+SEEDREAM_MODEL_ID=doubao-seedream-5-0-260128
 
 # 默认值
 SEEDREAM_DEFAULT_SIZE=2K

@@ -19,12 +19,27 @@ from ...utils.validation import (
 class ResponseFormat(str, Enum):
     """
     图片生成响应格式枚举
-
-    定义生成结果的返回格式，支持 URL 链接和 Base64 编码两种方式。
     """
 
     URL = "url"
     B64_JSON = "b64_json"
+
+
+class OutputFormat(str, Enum):
+    """
+    图片文件输出格式枚举
+    """
+
+    JPEG = "jpeg"
+    PNG = "png"
+
+
+class GenerationToolType(str, Enum):
+    """
+    模型工具类型枚举
+    """
+
+    WEB_SEARCH = "web_search"
 
 
 class OptimizePromptOptions(BaseModel):
@@ -51,7 +66,7 @@ class OptimizePromptOptions(BaseModel):
             value: 用户输入的优化模式字符串
 
         Returns:
-            规范化后的模式值（小写）
+            规范化后的模式值
 
         Raises:
             ValueError: 当模式不在允许范围内时
@@ -61,6 +76,19 @@ class OptimizePromptOptions(BaseModel):
         if normalized not in allowed:
             raise ValueError(f"mode 仅支持 {sorted(allowed)}")
         return normalized
+
+
+class GenerationTool(BaseModel):
+    """
+    模型工具配置。
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    type: GenerationToolType = Field(
+        ...,
+        description="工具类型，目前仅支持 web_search。",
+    )
 
 
 class _PromptAndOptimizeInput(BaseModel):
@@ -121,7 +149,7 @@ class _SizeAndWatermarkInput(BaseModel):
 
     size: Optional[str] = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。",
+        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。",
     )
     watermark: Optional[bool] = Field(
         default=None,
@@ -151,9 +179,17 @@ class _ResponseAndExecutionInput(BaseModel):
         default=ResponseFormat.URL,
         description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
     )
+    output_format: Optional[OutputFormat] = Field(
+        default=None,
+        description="输出图片格式，仅 doubao-seedream-5.0 支持 jpeg 或 png。",
+    )
     stream: bool = Field(
         default=False,
         description="是否启用流式输出；开启后将以事件流返回生成进度。",
+    )
+    tools: Optional[List[GenerationTool]] = Field(
+        default=None,
+        description="模型工具配置，仅 doubao-seedream-5.0 支持，目前仅支持 web_search。",
     )
     request_count: int = Field(
         default=1,

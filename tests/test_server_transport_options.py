@@ -12,6 +12,13 @@ def test_build_arg_parser_supports_mount_path() -> None:
     assert args.mount_path == "/mcp"
 
 
+def test_build_arg_parser_supports_seedream_50_model_choice() -> None:
+    parser = server._build_arg_parser()
+    args = parser.parse_args(["--model", "doubao-seedream-5.0"])
+
+    assert args.model == "doubao-seedream-5.0"
+
+
 def test_build_run_options_only_applies_mount_path_for_sse() -> None:
     sse_args = Namespace(transport="sse", mount_path="/mcp")
     stdio_args = Namespace(transport="stdio", mount_path="/ignored")

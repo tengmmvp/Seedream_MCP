@@ -17,7 +17,9 @@ from ...utils.errors import SeedreamValidationError, format_error_for_user
 from ...utils.logging import get_logger
 from ...utils.path_utils import get_workspace_root, is_path_within_base, normalize_path
 from ...utils.validation import (
+    validate_generation_tools,
     validate_optimize_prompt_options,
+    validate_output_format,
     validate_parallel_generation_options,
     validate_response_format,
     validate_size_for_model,
@@ -48,7 +50,9 @@ class GenerationExecutionContext:
     size: str
     watermark: bool
     response_format: str
+    output_format: Optional[str]
     stream: bool
+    tools: Optional[List[Dict[str, Any]]]
     request_count: int
     parallelism: int
     enable_auto_save: bool
@@ -224,7 +228,9 @@ def _build_generation_structured_result(
         "prompt": context.prompt,
         "size": context.size,
         "response_format": context.response_format,
+        "output_format": context.output_format,
         "stream": context.stream,
+        "tools": context.tools,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         "data": result.get("data", []),
@@ -268,7 +274,9 @@ def build_generation_context(
     raw_size = arguments.get("size") if "size" in arguments else None
     watermark_value = arguments.get("watermark")
     response_format = arguments.get("response_format", "url")
+    output_format = arguments.get("output_format")
     stream = bool(arguments.get("stream", False))
+    tools = arguments.get("tools")
     request_count = arguments.get("request_count", 1)
     parallelism_value = arguments.get("parallelism")
     auto_save = arguments.get("auto_save")
@@ -289,6 +297,8 @@ def build_generation_context(
     )
 
     validated_response_format = validate_response_format(response_format)
+    validated_output_format = validate_output_format(output_format, config.model_id)
+    validated_tools = validate_generation_tools(tools, config.model_id)
 
     request_count, parallelism = validate_parallel_generation_options(
         request_count=request_count,
@@ -305,7 +315,9 @@ def build_generation_context(
         size=validated_size,
         watermark=watermark,
         response_format=validated_response_format,
+        output_format=validated_output_format,
         stream=stream,
+        tools=validated_tools,
         request_count=request_count,
         parallelism=parallelism,
         enable_auto_save=enable_auto_save,

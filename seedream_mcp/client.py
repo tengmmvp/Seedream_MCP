@@ -26,14 +26,16 @@ from .utils.errors import (
 from .utils.logging import get_logger, log_function_call
 from .utils.path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
 from .utils.validation import (
-    validate_max_images,
+    validate_generation_tools,
     validate_image_url,
+    validate_max_images,
+    validate_optimize_prompt_options,
+    validate_output_format,
     validate_prompt,
     validate_response_format,
     validate_sequential_image_limit,
     validate_size_for_model,
     validate_watermark,
-    validate_optimize_prompt_options,
 )
 
 
@@ -87,11 +89,13 @@ class SeedreamClient:
     async def text_to_image(
         self,
         prompt: str,
+        optimize_prompt_options: Optional[Dict[str, Any]] = None,
         size: str = "2K",
         watermark: bool = False,
         response_format: str = "url",
+        output_format: Optional[str] = None,
         stream: bool = False,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         文生图功能
@@ -101,10 +105,12 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要生成的图像内容
             optimize_prompt_options: 提示词优化选项，可选配置字典
-            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
+            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False
+            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -121,6 +127,8 @@ class SeedreamClient:
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
+        output_format = validate_output_format(output_format, self.config.model_id)
+        tools = validate_generation_tools(tools, self.config.model_id)
 
         self.logger.info(
             "开始文生图任务: prompt_meta={}, size={}",
@@ -143,8 +151,12 @@ class SeedreamClient:
                     "response_format": response_format,
                 }
             )
+            if output_format is not None:
+                request_data["output_format"] = output_format
             if stream:
                 request_data["stream"] = True
+            if tools:
+                request_data["tools"] = tools
 
             # 调用 API
             response = await self._call_api("text_to_image", request_data)
@@ -160,12 +172,14 @@ class SeedreamClient:
     async def image_to_image(
         self,
         prompt: str,
-        image: str,
+        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        image: Optional[str] = None,
         size: str = "2K",
         watermark: bool = False,
         response_format: str = "url",
+        output_format: Optional[str] = None,
         stream: bool = False,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         图文生图功能
@@ -176,10 +190,12 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的修改或转换
             optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 输入图像的 URL 或本地文件路径
-            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
+            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False
+            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -197,6 +213,8 @@ class SeedreamClient:
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
+        output_format = validate_output_format(output_format, self.config.model_id)
+        tools = validate_generation_tools(tools, self.config.model_id)
 
         self.logger.info(
             "开始图文生图任务: prompt_meta={}, size={}",
@@ -223,8 +241,12 @@ class SeedreamClient:
                     "response_format": response_format,
                 }
             )
+            if output_format is not None:
+                request_data["output_format"] = output_format
             if stream:
                 request_data["stream"] = True
+            if tools:
+                request_data["tools"] = tools
 
             # 调用 API
             response = await self._call_api("image_to_image", request_data)
@@ -240,12 +262,14 @@ class SeedreamClient:
     async def multi_image_fusion(
         self,
         prompt: str,
-        image: List[str],
+        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        image: Optional[List[str]] = None,
         size: str = "2K",
         watermark: bool = False,
         response_format: str = "url",
+        output_format: Optional[str] = None,
         stream: bool = False,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         多图融合功能
@@ -256,10 +280,12 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
             optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张
-            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
+            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False
+            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -277,6 +303,8 @@ class SeedreamClient:
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
+        output_format = validate_output_format(output_format, self.config.model_id)
+        tools = validate_generation_tools(tools, self.config.model_id)
 
         self.logger.info(
             "开始多图融合任务: prompt_meta={}, image_count={}, size={}",
@@ -305,8 +333,12 @@ class SeedreamClient:
                     "response_format": response_format,
                 }
             )
+            if output_format is not None:
+                request_data["output_format"] = output_format
             if stream:
                 request_data["stream"] = True
+            if tools:
+                request_data["tools"] = tools
 
             # 调用 API
             response = await self._call_api("multi_image_fusion", request_data)
@@ -322,13 +354,15 @@ class SeedreamClient:
     async def sequential_generation(
         self,
         prompt: str,
-        max_images: Optional[int] = None,
+        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        image: Optional[Union[str, Sequence[str]]] = None,
         size: str = "2K",
         watermark: bool = False,
+        max_images: Optional[int] = None,
         response_format: str = "url",
-        image: Optional[Union[str, Sequence[str]]] = None,
+        output_format: Optional[str] = None,
         stream: bool = False,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         组图输出功能
@@ -344,11 +378,13 @@ class SeedreamClient:
             prompt: 文本提示词，描述要生成的图像内容
             optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（参考图数量与生成数量之和不超过 15）
-            size: 图像尺寸，支持 "1K"、"2K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
+            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False
+            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -364,6 +400,8 @@ class SeedreamClient:
         )
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
+        output_format = validate_output_format(output_format, self.config.model_id)
+        tools = validate_generation_tools(tools, self.config.model_id)
 
         # 处理图像输入
         processed_image: Optional[Union[str, List[str]]] = None
@@ -432,8 +470,12 @@ class SeedreamClient:
                     "response_format": response_format,
                 }
             )
+            if output_format is not None:
+                request_data["output_format"] = output_format
             if stream:
                 request_data["stream"] = True
+            if tools:
+                request_data["tools"] = tools
 
             # 调用 API
             response = await self._call_api("sequential_generation", request_data)

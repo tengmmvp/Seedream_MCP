@@ -1,5 +1,6 @@
 import base64
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -31,6 +32,27 @@ class FakeLogger:
 
 def _build_config() -> SeedreamConfig:
     return SeedreamConfig(api_key="test_key", max_retries=1)
+
+
+def test_public_generation_methods_keep_expected_parameter_order() -> None:
+    signature_expectations = {
+        "text_to_image": {
+            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "size", "watermark", "response_format", "output_format", "stream", "tools"],
+        },
+        "image_to_image": {
+            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "image", "size", "watermark", "response_format", "output_format", "stream", "tools"],
+        },
+        "multi_image_fusion": {
+            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "image", "size", "watermark", "response_format", "output_format", "stream", "tools"],
+        },
+        "sequential_generation": {
+            "ordered_parameters": ["self", "prompt", "optimize_prompt_options", "image", "size", "watermark", "max_images", "response_format", "output_format", "stream", "tools"],
+        },
+    }
+
+    for method_name, expectation in signature_expectations.items():
+        signature = inspect.signature(getattr(SeedreamClient, method_name))
+        assert list(signature.parameters.keys()) == expectation["ordered_parameters"]
 
 
 @pytest.mark.asyncio
@@ -81,6 +103,63 @@ async def test_image_to_image_resolves_relative_path_from_workspace_root(
 
 
 @pytest.mark.asyncio
+async def test_text_to_image_includes_seedream_50_output_format_and_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(
+        SeedreamConfig(
+            api_key="test_key",
+            model_id="doubao-seedream-5-0-260128",
+            max_retries=1,
+        )
+    )
+    captured_request: Dict[str, Any] = {}
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured_request.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.text_to_image(
+        prompt="test",
+        size="2K",
+        output_format="png",
+        tools=[{"type": "web_search"}],
+    )
+
+    assert captured_request["output_format"] == "png"
+    assert captured_request["tools"] == [{"type": "web_search"}]
+
+
+@pytest.mark.asyncio
+async def test_text_to_image_normalizes_seedream_50_alias_before_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(
+        SeedreamConfig(
+            api_key="test_key",
+            model_id="doubao-seedream-5.0",
+            max_retries=1,
+        )
+    )
+    captured_request: Dict[str, Any] = {}
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured_request.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.text_to_image(prompt="test", size="2K")
+
+    assert client.config.model_id == "doubao-seedream-5-0-260128"
+    assert captured_request["model"] == "doubao-seedream-5-0-260128"
+
+
+@pytest.mark.asyncio
 async def test_call_api_parses_non_stream_response() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -104,6 +183,33 @@ async def test_call_api_parses_non_stream_response() -> None:
     assert result["success"] is True
     assert result["status"] == "succeeded"
     assert result["data"][0]["url"] == "https://example.com/1.png"
+
+
+@pytest.mark.asyncio
+async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(
+        SeedreamConfig(
+            api_key="test_key",
+            model_id="doubao-seedream-4-5-251128",
+            max_retries=1,
+        )
+    )
+    api_called = False
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        nonlocal api_called
+        del endpoint, request_data
+        api_called = True
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"):
+        await client.text_to_image(prompt="test", size="2K", output_format="png")
+
+    assert api_called is False
 
 
 @pytest.mark.asyncio

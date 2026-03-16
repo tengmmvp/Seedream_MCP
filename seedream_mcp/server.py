@@ -227,7 +227,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         epilog="""
 示例用法:
   seedream-mcp --api-key your_key_here
-  seedream-mcp --api-key your_key_here --default-size 4K --log-level DEBUG
+  seedream-mcp --api-key your_key_here --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
   seedream-mcp --api-key your_key_here --config-file ./config.env
         """,
     )
@@ -245,7 +245,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # 模型与生成配置
     parser.add_argument(
         "--model",
-        choices=["doubao-seedream-4.5", "doubao-seedream-4.0"],
+        choices=[
+            "doubao-seedream-5.0",
+            "doubao-seedream-5.0-lite",
+            "doubao-seedream-4.5",
+            "doubao-seedream-4.0",
+        ],
         default=None,
         help="模型选择（默认按配置或内置默认值）",
     )
@@ -253,7 +258,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--default-size",
         type=str,
         default=None,
-        help='默认生成尺寸（支持 1K/2K/4K 或 "<宽>x<高>"，默认按配置或内置默认值）',
+        help='默认生成尺寸（支持 1K/2K/3K/4K 或 "<宽>x<高>"，默认按配置或内置默认值）',
     )
     watermark_group = parser.add_mutually_exclusive_group()
     watermark_group.add_argument(

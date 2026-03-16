@@ -48,6 +48,32 @@ def test_build_config_priority_prefers_system_env_over_env_file(
     assert config.api_key == "env_key"
 
 
+def test_build_config_resolves_seedream_50_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-5.0\n")
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.model_id == "doubao-seedream-5-0-260128"
+
+
+def test_build_config_uses_seedream_50_as_default_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.model_id == "doubao-seedream-5-0-260128"
+
+
 def test_build_config_raises_when_explicit_env_file_missing(tmp_path: Path) -> None:
     missing_env = tmp_path / "missing.env"
 
