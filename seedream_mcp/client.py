@@ -581,7 +581,7 @@ class SeedreamClient:
         return f"len={len(prompt)}, sha256={digest}"
 
     @staticmethod
-    def _normalize_single_image(image: str) -> str:
+    def _normalize_single_image(image: object) -> str:
         """
         校验并规范化单张图片输入
         """
@@ -595,7 +595,7 @@ class SeedreamClient:
 
     @staticmethod
     def _normalize_image_sequence(
-        images: Sequence[str],
+        images: object,
         *,
         min_count: int,
         max_count: int,
