@@ -74,6 +74,9 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 }
 ```
 
+<details>
+<summary><b>其他客户端配置</b>（Claude Code · Cursor · Cline）</summary>
+
 ### Claude Code（命令行一键注册）
 
 ```bash
@@ -111,6 +114,8 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
   }
 }
 ```
+
+</details>
 
 > 需要指定模型/尺寸时，追加到 `args`，例如 `["seedream-image-mcp", "--model", "doubao-seedream-5.0"]`。
 
@@ -155,6 +160,9 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - **图片浏览**：本地图片文件浏览
 
 ## 🛠️ 可用工具
+
+<details>
+<summary><b>查看 5 个工具的详细参数</b>（文生图 · 图文生图 · 多图融合 · 组图输出 · 图片浏览）</summary>
 
 ### 1. `seedream_text_to_image` - 文生图
 
@@ -252,6 +260,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `limit` (可选) - 返回的最大文件数量，范围 1-200，默认 50
 - `format_filter` (可选) - 过滤特定图片格式，如`['.jpeg', '.png']`
 - `show_details` (可选) - 是否显示详细文件信息，默认`false`
+
+</details>
 
 ## 🆘 常见问题
 
