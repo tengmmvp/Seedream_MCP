@@ -1,20 +1,33 @@
 ﻿<h1 align="center">Seedream 4.0、4.5 和 5.0 MCP 生图工具</h1>
 
 <div align="center">
+  <img src="https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver&label=Release&style=for-the-badge&color=4C51BF" alt="Version"/>
+  <img src="https://img.shields.io/pypi/v/seedream-image-mcp?label=PyPI&style=for-the-badge&color=F37720" alt="PyPI"/>
+  <img src="https://img.shields.io/badge/Python-3.10+-3776AB.svg?style=for-the-badge" alt="Python"/>
+  <img src="https://img.shields.io/badge/License-MIT-2DA44E.svg?style=for-the-badge" alt="License"/>
   <a href="https://zread.ai/tengmmvp/Seedream_MCP">
     <img src="https://img.shields.io/badge/Ask_Zread-_.svg?style=for-the-badge&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff" alt="Ask Zread"/>
   </a>
-  <br>
-  <img src="https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver&label=Release&style=flat-square" alt="Version"/>
-  <img src="https://img.shields.io/pypi/v/seedream-image-mcp?label=PyPI&style=flat-square" alt="PyPI"/>
-  <img src="https://img.shields.io/badge/Python-3.10+-cyan.svg?style=flat-square" alt="Python"/>
-  <img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat-square" alt="License"/>
-  <img src="https://img.shields.io/badge/Powered_By-Codex%26GLM-violet.svg?style=flat-square" alt="Powered by Codex&GLM"/>
   <br><br>
-  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="450"/>
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="500"/>
   <br><br>
   <b>基于火山引擎 Seedream 4.0、4.5 和 5.0 API 的 MCP 工具，支持 AI 图像生成。</b>
 </div>
+
+---
+
+<details>
+<summary>本项目由 智谱 GLM Coding Plan 提供支持</summary>
+
+<div align="center">
+  <a href="https://www.bigmodel.cn/glm-coding?ic=GDEQEW52AC">
+    <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/zhipu-glm-coding-plan.png" alt="Powered by 智谱 GLM Coding Plan · 智谱编码套餐" />
+  </a>
+</div>
+
+</details>
+
+---
 
 ## ⚡ 快速安装
 
@@ -162,9 +175,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 ## 🛠️ 可用工具
 
 <details>
-<summary><b>查看 5 个工具的详细参数</b>（文生图 · 图文生图 · 多图融合 · 组图输出 · 图片浏览）</summary>
-
-### 1. `seedream_text_to_image` - 文生图
+<summary><b>1. <code>seedream_text_to_image</code></b> — 文生图</summary>
 
 根据文本提示词生成图像
 
@@ -184,7 +195,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
-### 2. `seedream_image_to_image` - 图文生图
+</details>
+
+<details>
+<summary><b>2. <code>seedream_image_to_image</code></b> — 图文生图</summary>
 
 根据输入图像和文本提示生成新图像
 
@@ -205,7 +219,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
-### 3. `seedream_multi_image_fusion` - 多图融合
+</details>
+
+<details>
+<summary><b>3. <code>seedream_multi_image_fusion</code></b> — 多图融合</summary>
 
 将多张图像融合生成新图像
 
@@ -226,7 +243,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
-### 4. `seedream_sequential_generation` - 组图输出
+</details>
+
+<details>
+<summary><b>4. <code>seedream_sequential_generation</code></b> — 组图输出</summary>
 
 连续生成多张图像，支持文生组图、单图生组图、多图生组图
 
@@ -248,7 +268,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
-### 5. `seedream_browse_images` - 图片浏览
+</details>
+
+<details>
+<summary><b>5. <code>seedream_browse_images</code></b> — 图片浏览</summary>
 
 浏览工作区中的图片文件，获取文件路径用于图像生成
 
@@ -263,7 +286,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 
 </details>
 
-## 🆘 常见问题
+## ❓ 常见问题
 
 **Q: uvx 命令不存在？**
 
@@ -340,9 +363,9 @@ SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 
 ## 👥 贡献者
 
-### 项目创建者
+### 项目维护者
 
-- **[@tengmmvp](https://github.com/tengmmvp)** - 项目创建者
+- **[@tengmmvp](https://github.com/tengmmvp)** - 项目维护者
 
 ### 重要贡献者
 
