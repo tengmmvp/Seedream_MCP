@@ -1322,7 +1322,7 @@ wheels = [
 ]
 
 [[package]]
-name = "seedream-mcp"
+name = "seedream-image-mcp"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

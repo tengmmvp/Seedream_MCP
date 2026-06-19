@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "seedream-mcp"
+name = "seedream-image-mcp"
 dynamic = ["version"]
 authors = [
     {name = "TengMMVP", email = "tengmmvp@gmail.com"}
@@ -57,7 +57,7 @@ Repository = "https://github.com/tengmmvp/Seedream_MCP.git"
 "Bug Tracker" = "https://github.com/tengmmvp/Seedream_MCP/issues"
 
 [project.scripts]
-seedream-mcp = "seedream_mcp.server:cli_main"
+seedream-image-mcp = "seedream_mcp.server:cli_main"
 
 [tool.hatch.version]
 path = "seedream_mcp/version.py"

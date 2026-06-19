@@ -11,7 +11,7 @@ services:
 
       # 可选配置
       - ARK_BASE_URL=${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
-      - SEEDREAM_MODEL_ID=${SEEDREAM_MODEL_ID:-doubao-seedream-4.5}
+      - SEEDREAM_MODEL_ID=${SEEDREAM_MODEL_ID:-doubao-seedream-5.0}
       - SEEDREAM_DEFAULT_SIZE=${SEEDREAM_DEFAULT_SIZE:-2K}
       - SEEDREAM_DEFAULT_WATERMARK=${SEEDREAM_DEFAULT_WATERMARK:-false}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}

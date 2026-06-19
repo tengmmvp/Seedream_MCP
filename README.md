@@ -6,30 +6,45 @@
   </a>
   <br>
   <img src="https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver&label=Release" alt="Version"/>
+  <img src="https://img.shields.io/pypi/v/seedream-image-mcp?label=PyPI" alt="PyPI"/>
   <img src="https://img.shields.io/badge/Python-3.10+-cyan.svg" alt="Python"/>
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"/>
   <img src="https://img.shields.io/badge/Powered_By-Codex%26GLM-violet.svg" alt="Powered by Codex&GLM"/>
   <br><br>
-  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="440"/>
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="450"/>
   <br><br>
   <b>基于火山引擎 Seedream 4.0、4.5 和 5.0 API 的 MCP 工具，支持 AI 图像生成。</b>
 </div>
 
 ## ⚡ 快速安装
 
-### 方法 1：uvx 一键启动（推荐）
+### 1. 前置准备
+
+安装 [uv](https://docs.astral.sh/uv/)（包含 `uvx` 命令）：
 
 ```bash
-# 直接从 GitHub 仓库启动
-uvx git+https://github.com/tengmmvp/Seedream_MCP --api-key your_api_key_here
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 或者先克隆再启动
-git clone https://github.com/tengmmvp/Seedream_MCP
-cd Seedream_MCP
-uvx . --api-key your_api_key_here
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-### 方法 2：Docker Compose
+在[火山引擎控制台](https://console.volcengine.com/)获取 API 密钥，通过环境变量 `ARK_API_KEY` 提供。
+
+### 2. 一键启动
+
+```bash
+# 通过环境变量提供密钥（推荐）
+ARK_API_KEY=your_api_key_here uvx seedream-image-mcp
+
+# 也可显式指定模型、尺寸等运行参数
+ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0 --default-size 2K
+```
+
+`uvx` 自动从 [PyPI](https://pypi.org/project/seedream-image-mcp/) 拉取最新版本并在隔离环境运行——无需 clone 仓库、无需手动创建虚拟环境、无需安装依赖。
+
+### 3. 可选：Docker Compose
 
 ```bash
 # 下载 docker-compose.yml
@@ -39,31 +54,72 @@ curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-comp
 ARK_API_KEY=your_api_key_here docker-compose up -d
 ```
 
-## 🔧 Claude Desktop 配置
+## 🔧 客户端配置
 
-在 `claude_desktop_config.json` 中添加：
+> 推荐通过 `env` 注入 `ARK_API_KEY`，避免把密钥写进 `args`（命令行参数会出现在进程列表中，存在泄露风险）。
+
+### Claude Desktop
+
+编辑 `claude_desktop_config.json`：
 
 ```json
 {
   "mcpServers": {
     "seedream": {
       "command": "uvx",
-      "args": [
-        "git+https://github.com/tengmmvp/Seedream_MCP",
-        "--api-key",
-        "your_api_key_here"
-      ]
+      "args": ["seedream-image-mcp"],
+      "env": { "ARK_API_KEY": "your_api_key_here" }
     }
   }
 }
 ```
 
-重启 Claude Desktop 即可使用。
+### Claude Code（命令行一键注册）
+
+```bash
+claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
+```
+
+### Cursor
+
+在项目根目录创建 `.cursor/mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "seedream": {
+      "command": "uvx",
+      "args": ["seedream-image-mcp"],
+      "env": { "ARK_API_KEY": "your_api_key_here" }
+    }
+  }
+}
+```
+
+### Cline / 其他 stdio 客户端
+
+通用配置（`command` + `args` + `env` 字段同上）。Cline 编辑 `cline_mcp_settings.json`：
+
+```json
+{
+  "mcpServers": {
+    "seedream": {
+      "command": "uvx",
+      "args": ["seedream-image-mcp"],
+      "env": { "ARK_API_KEY": "your_api_key_here" }
+    }
+  }
+}
+```
+
+> 需要指定模型/尺寸时，追加到 `args`，例如 `["seedream-image-mcp", "--model", "doubao-seedream-5.0"]`。
+
+配置后重启对应客户端即可使用。
 
 ## ⚙️ 启动参数
 
 ```bash
---api-key TEXT                                     # API 密钥（必需）
+--api-key TEXT                                     # API 密钥（可选，推荐用环境变量 ARK_API_KEY）
 --model [doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
                                                  # 模型选择 (默认: doubao-seedream-5.0)
 --default-size [1K|2K|3K|4K|<宽>x<高>]            # 图像尺寸 (默认: 2K，需与模型兼容)
@@ -78,20 +134,16 @@ ARK_API_KEY=your_api_key_here docker-compose up -d
 
 ```bash
 # 基础使用
-uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --api-key your_key
+ARK_API_KEY=your_key uvx seedream-image-mcp
 
 # 使用自定义配置文件
-uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --config-file ./my-config.env --api-key your_key
+ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
 
 # 使用 Seedream 4.0 模型
-uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --api-key your_key --model doubao-seedream-4.0
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.0
 
 # 高质量图像 + 调试模式
-uvx git+https://github.com/tengmmvp/Seedream_MCP \
-  --api-key your_key --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
 ```
 
 ## 🎨 功能特性

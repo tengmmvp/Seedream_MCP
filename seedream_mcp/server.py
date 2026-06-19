@@ -226,10 +226,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  seedream-mcp --api-key your_key_here
-  seedream-mcp --api-key your_key_here --model doubao-seedream-4.5
+  seedream-image-mcp --api-key your_key_here
+  seedream-image-mcp --api-key your_key_here --model doubao-seedream-4.5
   --default-size 4K --log-level DEBUG
-  seedream-mcp --api-key your_key_here --config-file ./config.env
+  seedream-image-mcp --api-key your_key_here --config-file ./config.env
         """,
     )
 
