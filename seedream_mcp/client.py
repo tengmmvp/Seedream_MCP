@@ -26,6 +26,7 @@ from .utils.errors import (
 from .utils.logging import get_logger, log_function_call
 from .utils.path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
 from .utils.validation import (
+    resolve_sequential_max_images,
     validate_generation_tools,
     validate_image_url,
     validate_max_images,
@@ -428,9 +429,7 @@ class SeedreamClient:
                 field_name="image",
             )
 
-        resolved_max_images = max_images
-        if resolved_max_images is None:
-            resolved_max_images = 15 - len(reference_images) if reference_images is not None else 15
+        resolved_max_images = resolve_sequential_max_images(max_images, reference_images)
         resolved_max_images = validate_max_images(resolved_max_images)
 
         if reference_images is not None:
@@ -734,16 +733,26 @@ class SeedreamClient:
         else:
             data_count = 1
 
+        # 检测部分图片失败 → 标记 partial 状态
+        status = payload.get("status")
+        if (
+            not status
+            and isinstance(data, list)
+            and any(isinstance(item, dict) and "error" in item for item in data)
+        ):
+            status = "partial"
+
         self.logger.debug(
             "解析 JSON 成功: status={}, data_count={}",
-            payload.get("status"),
+            status,
             data_count,
         )
         return {
             "success": True,
             "data": payload.get("data", []),
             "usage": payload.get("usage", {}),
-            "status": payload.get("status"),
+            "status": status,
+            "tools": payload.get("tools"),
         }
 
     def _raise_for_response_status(self, response: httpx.Response) -> None:
@@ -847,6 +856,7 @@ class SeedreamClient:
         items: List[Dict[str, Any]] = []
         usage: Dict[str, Any] = {}
         status: Optional[str] = None
+        tools: Optional[List[Dict[str, Any]]] = None
 
         buffer = b""
         max_buffer_size = self.config.stream_buffer_max_size
@@ -859,17 +869,10 @@ class SeedreamClient:
             buffer += chunk
             processed_bytes += len(chunk)
 
-            if len(buffer) > max_buffer_size:
-                self.logger.warning(
-                    "缓冲区大小超限 ({} > {})，清理旧数据",
-                    len(buffer),
-                    max_buffer_size,
-                )
-                buffer = buffer[-1024 * 1024 :]
-
             if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
                 self.logger.debug("已处理 {} MB 数据", processed_bytes // 1024 // 1024)
 
+            # 先处理所有完整事件，避免缓冲溢出截断时丢失已就绪的事件
             while b"\n\n" in buffer:
                 segment, buffer = buffer.split(b"\n\n", 1)
                 event = self._parse_sse_segment(segment)
@@ -877,6 +880,16 @@ class SeedreamClient:
                     continue
 
                 event_type = event.get("type")
+                # 请求级错误事件：无 type 且顶层含 error 键
+                if event_type is None and isinstance(event.get("error"), dict):
+                    err = event["error"]
+                    raise SeedreamAPIError(
+                        message=err.get("message", "流式请求失败"),
+                        # 请求级错误（如 BadRequest）本质为 4xx，标记 status_code=400
+                        # 使 _call_api 判定为不可重试，避免重复提交无效请求
+                        status_code=400,
+                        error_code=err.get("code"),
+                    )
                 if event_type == "image_generation.partial_succeeded":
                     items.append(self._format_sse_success_event(event, self.config.model_id))
                 elif event_type == "image_generation.partial_failed":
@@ -884,9 +897,26 @@ class SeedreamClient:
                 elif event_type == "image_generation.completed":
                     usage = event.get("usage", {}) or {}
                     status = "completed"
+                    tools = event.get("tools")
+
+            # 完整事件处理完毕后，不完整尾部仍超限时才截断
+            if len(buffer) > max_buffer_size:
+                self.logger.warning(
+                    "缓冲区大小超限 ({} > {})，截断不完整尾部",
+                    len(buffer),
+                    max_buffer_size,
+                )
+                buffer = buffer[-1024 * 1024 :]
 
         trailing_event = self._parse_sse_segment(buffer)
         if trailing_event is not None:
+            if trailing_event.get("type") is None and isinstance(trailing_event.get("error"), dict):
+                err = trailing_event["error"]
+                raise SeedreamAPIError(
+                    message=err.get("message", "流式请求失败"),
+                    status_code=400,
+                    error_code=err.get("code"),
+                )
             event_type = trailing_event.get("type")
             if event_type == "image_generation.partial_succeeded":
                 items.append(self._format_sse_success_event(trailing_event, self.config.model_id))
@@ -895,12 +925,14 @@ class SeedreamClient:
             elif event_type == "image_generation.completed":
                 usage = trailing_event.get("usage", {}) or {}
                 status = "completed"
+                tools = trailing_event.get("tools")
 
         return {
             "success": True,
             "data": items,
             "usage": usage,
             "status": status,
+            "tools": tools,
         }
 
     async def _send_stream_request(
@@ -1124,8 +1156,10 @@ class SeedreamClient:
                 ".png": "image/png",
                 ".gif": "image/gif",
                 ".bmp": "image/bmp",
-                ".tiff": "image/tiff",
                 ".webp": "image/webp",
+                ".tiff": "image/tiff",
+                ".heic": "image/heic",
+                ".heif": "image/heif",
             }
             mime_type = mime_type_map.get(suffix, "image/jpeg")
 

@@ -108,7 +108,9 @@ def test_build_generation_context_rejects_output_format_for_seedream_45() -> Non
         default_size="2K",
     )
 
-    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"):
+    with pytest.raises(
+        SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"
+    ):
         build_generation_context({"prompt": "test", "output_format": "png"}, config)
 
 
@@ -119,7 +121,9 @@ def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -
         default_size="2K",
     )
 
-    with pytest.raises(SeedreamValidationError, match="仅支持 optimize_prompt_options.mode=standard"):
+    with pytest.raises(
+        SeedreamValidationError, match="仅支持 optimize_prompt_options.mode=standard"
+    ):
         build_generation_context(
             {"prompt": "test", "optimize_prompt_options": {"mode": "fast"}},
             config,

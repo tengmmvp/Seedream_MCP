@@ -26,7 +26,14 @@ classifiers = [
     "Topic :: Multimedia :: Graphics",
     "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
 ]
-keywords = ["mcp", "ai", "image-generation", "volcengine", "seedream", "stable-diffusion"]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "seedream",
+    "volcengine",
+    "ai",
+    "image-generation",
+]
 
 dependencies = [
     "mcp>=1.26.0,<2.0.0",
@@ -38,6 +45,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "loguru>=0.7.0",
     "Pillow>=10.0.0",
+    "pillow-heif>=0.16.0",
 ]
 
 [tool.hatch.envs.dev]
@@ -101,8 +109,12 @@ disallow_untyped_defs = true
 module = "aiofiles.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "pillow_heif.*"
+ignore_missing_imports = true
+
 [tool.flake8]
-max-line-length = 100
+max-line-length = 120
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

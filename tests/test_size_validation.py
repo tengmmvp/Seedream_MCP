@@ -18,9 +18,8 @@ def test_validate_size_for_model_normalizes_uppercase_pixel_separator() -> None:
     assert validate_size_for_model("2560X1440", "doubao-seedream-4-5-251128") == "2560x1440"
 
 
-def test_validate_size_for_model_rejects_seedream_50_4k_preset() -> None:
-    with pytest.raises(SeedreamValidationError, match="仅支持 2K/3K"):
-        validate_size_for_model("4K", "doubao-seedream-5-0-260128")
+def test_validate_size_for_model_accepts_seedream_50_4k_preset() -> None:
+    assert validate_size_for_model("4K", "doubao-seedream-5-0-260128") == "4K"
 
 
 def test_validate_size_for_model_rejects_seedream_45_small_pixel_size() -> None:
@@ -28,9 +27,18 @@ def test_validate_size_for_model_rejects_seedream_45_small_pixel_size() -> None:
         validate_size_for_model("1500x1500", "doubao-seedream-4-5-251128")
 
 
+def test_validate_size_for_model_accepts_seedream_40_pixel_size() -> None:
+    assert validate_size_for_model("1280x720", "doubao-seedream-4-0-250828") == "1280x720"
+
+
+def test_validate_size_for_model_rejects_seedream_40_small_pixel_size() -> None:
+    with pytest.raises(SeedreamValidationError, match="总像素需在"):
+        validate_size_for_model("800x800", "doubao-seedream-4-0-250828")
+
+
 def test_validate_size_for_model_rejects_seedream_50_oversized_pixel_size() -> None:
     with pytest.raises(SeedreamValidationError, match="doubao-seedream-5.0 模型下"):
-        validate_size_for_model("5000x2500", "doubao-seedream-5-0-260128")
+        validate_size_for_model("4097x4097", "doubao-seedream-5-0-260128")
 
 
 def test_validate_size_for_model_rejects_invalid_pixel_format() -> None:

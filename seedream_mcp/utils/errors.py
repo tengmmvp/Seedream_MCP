@@ -45,8 +45,9 @@ class SeedreamAPIError(SeedreamMCPError):
         message: str,
         status_code: Optional[int] = None,
         response_data: Optional[Dict[str, Any]] = None,
+        error_code: Optional[str] = None,
     ):
-        super().__init__(message)
+        super().__init__(message, error_code=error_code)
         self.status_code = status_code
         self.response_data = response_data or {}
 
@@ -120,19 +121,25 @@ def handle_api_error(response_status: int, response_data: Dict[str, Any]) -> See
     elif response_status >= 500:
         error_message = "服务器内部错误"
 
-    # 尝试从响应中提取更详细的错误信息
+    # 尝试从响应中提取更详细的错误信息与错误码
+    error_code: Optional[str] = None
     if isinstance(response_data, dict):
         if "error" in response_data:
             error_detail = response_data["error"]
-            if isinstance(error_detail, dict) and "message" in error_detail:
-                error_message = f"{error_message}: {error_detail['message']}"
+            if isinstance(error_detail, dict):
+                error_code = error_detail.get("code")
+                if "message" in error_detail:
+                    error_message = f"{error_message}: {error_detail['message']}"
             elif isinstance(error_detail, str):
                 error_message = f"{error_message}: {error_detail}"
         elif "message" in response_data:
             error_message = f"{error_message}: {response_data['message']}"
 
     return SeedreamAPIError(
-        message=error_message, status_code=response_status, response_data=response_data
+        message=error_message,
+        status_code=response_status,
+        response_data=response_data,
+        error_code=error_code,
     )
 
 
@@ -148,12 +155,13 @@ def format_error_for_user(error: Exception) -> str:
     if isinstance(error, SeedreamConfigError):
         return f"配置错误: {error.message}"
     elif isinstance(error, SeedreamAPIError):
+        code_hint = f" [错误码: {error.error_code}]" if error.error_code else ""
         if error.status_code == 401:
-            return f"认证失败: {error.message}\n请检查您的API密钥是否正确设置。"
+            return f"认证失败: {error.message}{code_hint}\n请检查您的API密钥是否正确设置。"
         elif error.status_code == 429:
-            return f"请求频率超限: {error.message}\n请稍后重试。"
+            return f"请求频率超限: {error.message}{code_hint}\n请稍后重试。"
         else:
-            return f"API调用失败: {error.message}"
+            return f"API调用失败: {error.message}{code_hint}"
     elif isinstance(error, SeedreamValidationError):
         return f"参数验证失败: {error.message}"
     elif isinstance(error, SeedreamTimeoutError):

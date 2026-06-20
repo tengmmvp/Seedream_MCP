@@ -583,6 +583,11 @@ def format_generation_response(
             parts.append(f"  完成 tokens: {usage['completion_tokens']}")
         if "cost" in usage:
             parts.append(f"  成本: {usage['cost']}")
+        tool_usage = usage.get("tool_usage")
+        if isinstance(tool_usage, dict):
+            web_search_count = tool_usage.get("web_search")
+            if isinstance(web_search_count, int) and web_search_count > 0:
+                parts.append(f"  联网搜索: {web_search_count} 次")
         parts.append("")
 
     return "\n".join(parts)

@@ -250,7 +250,9 @@ async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_ca
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
-    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"):
+    with pytest.raises(
+        SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"
+    ):
         await client.text_to_image(prompt="test", size="2K", output_format="png")
 
     assert api_called is False
@@ -526,7 +528,7 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
-    oversized_raw = b"a" * (10 * 1024 * 1024 + 1)
+    oversized_raw = b"a" * (30 * 1024 * 1024 + 1)
     oversized_b64 = base64.b64encode(oversized_raw).decode("ascii")
     oversized_data_uri = f"data:image/png;base64,{oversized_b64}"
 

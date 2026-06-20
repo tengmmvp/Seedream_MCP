@@ -28,6 +28,13 @@ MODEL_ALIASES: dict[str, str] = {
     "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
 }
 
+DEPRECATED_MODEL_TOKENS: set[str] = {
+    "doubao-seedream-3-0",
+    "doubao-seedream-3.0",
+    "doubao-seededit-3-0",
+    "doubao-seededit-3.0",
+}
+
 # 记录进程启动后模块加载时的环境键，用于区分“系统环境变量”与“.env 注入变量”
 _BASE_ENV_KEYS: set[str] = set(os.environ.keys())
 _INJECTED_ENV_VALUES: dict[str, str] = {}
@@ -111,6 +118,11 @@ class SeedreamConfig:
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError("model_id不能为空")
         self.model_id = normalize_model_selector(self.model_id)
+        if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
+            raise SeedreamConfigError(
+                f"已不支持的模型: {self.model_id}（3.0/seededit-3.0 已下线），"
+                "请使用 doubao-seedream-5.0/5.0-lite/4.5/4.0 或对应 Endpoint ID"
+            )
 
         if not isinstance(self.default_size, str) or not self.default_size.strip():
             raise SeedreamConfigError("default_size不能为空")

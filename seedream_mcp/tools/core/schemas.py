@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ...utils.errors import SeedreamValidationError
 from ...utils.validation import (
+    resolve_sequential_max_images,
     validate_parallel_generation_options,
     validate_sequential_image_limit,
 )
@@ -384,9 +385,9 @@ class SequentialGenerationInput(
         """
         校验参考图数量与生成数量的总和限制。
         """
-        # max_images 未显式传入且存在参考图时，自动扣减为总量上限内的默认值。
-        if self.image and "max_images" not in self.model_fields_set:
-            self.max_images = 15 - len(self.image)
+        # max_images 未显式传入时，按参考图数量自动推导（15 - 参考图数）。
+        if "max_images" not in self.model_fields_set:
+            self.max_images = resolve_sequential_max_images(None, self.image)
 
         try:
             validate_sequential_image_limit(self.max_images, self.image)
