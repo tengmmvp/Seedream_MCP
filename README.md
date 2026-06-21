@@ -1,5 +1,11 @@
 ﻿<h1 align="center">Seedream 4.0、4.5 和 5.0 MCP 生图工具</h1>
 
+<p align="center">
+  <a href="./README.md">简体中文</a>
+  ·
+  <a href="./README.en.md">English</a>
+</p>
+
 <div align="center">
   <img src="https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver&label=Release&style=for-the-badge&color=4C51BF" alt="Version"/>
   <img src="https://img.shields.io/pypi/v/seedream-image-mcp?label=PyPI&style=for-the-badge&color=F37720" alt="PyPI"/>
@@ -137,15 +143,23 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 ## ⚙️ 启动参数
 
 ```bash
+# 认证与配置来源
 --api-key TEXT                                     # API 密钥（可选，推荐用环境变量 ARK_API_KEY）
+--config-file TEXT                                 # 自定义 .env 配置文件路径
+
+# 模型与生成
 --model [doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
                                                  # 模型选择 (默认: doubao-seedream-5.0)
 --default-size [1K|2K|3K|4K|<宽>x<高>]            # 图像尺寸 (默认: 2K，需与模型兼容)
 --watermark                                        # 启用水印
+--no-watermark                                     # 关闭水印
+
+# 连接与传输
+--base-url TEXT                                    # API 基础 URL（默认按配置或内置默认值）
+--transport [stdio|streamable-http]                # MCP 传输方式 (默认: stdio)
+
+# 日志
 --log-level [DEBUG|INFO|WARNING|ERROR]             # 日志级别
---transport [stdio|sse|streamable-http]            # MCP 传输方式 (默认: stdio)
---mount-path TEXT                                  # SSE 挂载路径（仅 transport=sse 生效）
---config-file TEXT                                 # 自定义 .env 配置文件路径
 ```
 
 ### 使用示例
@@ -281,6 +295,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `recursive` (可选) - 是否递归搜索子目录，默认`true`
 - `max_depth` (可选) - 最大搜索深度，范围 1-10，默认 3
 - `limit` (可选) - 返回的最大文件数量，范围 1-200，默认 50
+- `offset` (可选) - 分页偏移量（0-100000，从第几张开始返回），配合 `limit` 翻页，默认 0
 - `format_filter` (可选) - 过滤特定图片格式，如`['.jpeg', '.png']`
 - `show_details` (可选) - 是否显示详细文件信息，默认`false`
 
@@ -375,7 +390,7 @@ SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 
 欢迎提交 Issue 和 Pull Request！请查看 [GitHub Issues](https://github.com/tengmmvp/Seedream_MCP/issues) 了解当前的讨论和需求。
 
-**🌟 如果您希望参与开发，请先在 Issues 中讨论您的想法！**
+<div align="center"><b>🌟 如果您希望参与开发，请先在 Issues 中讨论您的想法！</b></div>
 
 ## 📄 许可证
 

@@ -297,12 +297,16 @@ def find_images_in_directory(
         recursive: 是否递归搜索
         max_depth: 最大搜索深度
         extensions: 指定的文件扩展名列表
-        limit: 返回数量上限，达到后提前停止扫描
+        limit: 返回数量上限（<=0 返回空）；扫描按 normcase 稳定顺序，凑够即提前停止
 
     Returns:
         找到的图片文件路径列表
     """
     images: list[Path] = []
+
+    # 非正上限（0 或负数）：返回数量上限为 0，直接返回空列表，不进入扫描。
+    if limit is not None and limit <= 0:
+        return images
 
     try:
         dir_path = Path(directory).resolve()
@@ -315,31 +319,37 @@ def find_images_in_directory(
         target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
         target_extensions = {ext.lower() for ext in target_extensions}
 
-        def scan_directory(path: Path, current_depth: int = 0) -> None:
-            if current_depth > max_depth:
-                return
+        # 目标条数：None（无上限）记为 -1 表示收集全部。
+        target_count = limit if limit is not None else -1
 
+        def scan_directory(path: Path, current_depth: int = 0) -> bool:
+            """按 normcase 稳定顺序深度优先扫描；凑够 target_count 即返回 True 提前终止。"""
+            if current_depth > max_depth:
+                return False
             try:
-                for item in path.iterdir():
-                    if limit is not None and len(images) >= limit:
-                        return
-                    if item.is_file() and item.suffix.lower() in target_extensions:
-                        images.append(item)
-                        if limit is not None and len(images) >= limit:
-                            return
-                    elif item.is_dir() and recursive and current_depth < max_depth:
-                        scan_directory(item, current_depth + 1)
-                        if limit is not None and len(images) >= limit:
-                            return
+                with os.scandir(path) as it:
+                    entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
             except (PermissionError, OSError) as e:
                 logger.warning(f"无法访问目录 {path}: {e}")
+                return False
+
+            for entry in entries:
+                entry_path = Path(entry.path)
+                if entry.is_file() and entry_path.suffix.lower() in target_extensions:
+                    images.append(entry_path)
+                    if target_count >= 0 and len(images) >= target_count:
+                        return True
+                elif entry.is_dir() and recursive and current_depth < max_depth:
+                    if scan_directory(entry_path, current_depth + 1):
+                        return True
+            return False
 
         scan_directory(dir_path)
 
     except Exception as e:
         logger.error(f"搜索图片文件失败 {directory}: {e}")
 
-    return sorted(images)
+    return images
 
 
 def get_file_info(path: Union[str, Path]) -> dict:

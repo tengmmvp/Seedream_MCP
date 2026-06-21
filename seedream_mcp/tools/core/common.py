@@ -165,23 +165,35 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
 
 def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    从生成结果中提取图片数据列表
+    从生成结果中提取图片数据列表。
 
-    支持多种数据结构，兼容嵌套字典与数组格式，统一转换为列表输出。
+    支持多种数据结构（数组 / 单个图片字典 / 嵌套 {"data": ...}），统一转换为仅含字典
+    的列表；None 与非字典元素（含 null）一律归一化剔除，确保结果始终符合
+    GenerationStructuredOutput.data 的 List[Dict] 声明，避免 outputSchema 校验失败。
 
     Args:
         result: 图片生成结果字典，包含响应数据及元信息。
 
     Returns:
-        包含图片数据的字典列表，每个字典代表一张图片的完整信息。
+        包含图片数据的字典列表，每个字典代表一张图片；无图片时返回空列表。
     """
-    data = result.get("data", {})
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and "data" in data:
-        nested = data.get("data", [])
-        return nested if isinstance(nested, list) else [nested]
-    return [data]
+    data = result.get("data")
+
+    def _coerce(value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            # 过滤 null 及非字典元素，保证 List[Dict] 类型一致
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = value.get("data")
+            if nested is not None:
+                return _coerce(nested)
+            return [value]
+        # 其他标量类型（str/int 等）无法表达图片，归一化为空
+        return []
+
+    return _coerce(data)
 
 
 async def _safe_report_progress(
@@ -201,6 +213,36 @@ async def _safe_report_progress(
         await ctx.report_progress(progress=progress, total=total, message=message)
     except Exception as exc:
         logger.debug("进度上报失败，已忽略: {}", exc)
+
+
+_VALID_LOG_LEVELS = ("debug", "info", "warning", "error")
+
+
+async def _safe_ctx_log(
+    ctx: Optional["Context[Any, Any, Any]"],
+    level: str,
+    message: str,
+) -> None:
+    """
+    向 MCP 客户端推送日志通知（debug/info/warning/error）。
+
+    客户端未声明 logging 能力或推送失败时静默跳过，不影响主流程；与 loguru 文件日志
+    互补——此处面向客户端实时可见，文件日志面向离线排查。
+    """
+    if ctx is None or level not in _VALID_LOG_LEVELS:
+        return
+
+    try:
+        if level == "debug":
+            await ctx.debug(message)
+        elif level == "info":
+            await ctx.info(message)
+        elif level == "warning":
+            await ctx.warning(message)
+        else:
+            await ctx.error(message)
+    except Exception as exc:
+        logger.debug("MCP 日志推送失败，已忽略: {}", exc)
 
 
 async def _yield_for_cancellation() -> None:
@@ -233,7 +275,7 @@ def _build_generation_structured_result(
         "tools": context.tools,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
-        "data": result.get("data", []),
+        "data": extract_images(result),
         "usage": result.get("usage", {}),
         "batch": result.get("batch"),
     }
@@ -248,7 +290,12 @@ def _build_generation_structured_result(
         structured["auto_save"] = {"enabled": False}
 
     if not result.get("success"):
-        structured["error"] = result.get("error", "未知错误")
+        raw_error = result.get("error", "未知错误")
+        structured["error"] = (
+            raw_error
+            if isinstance(raw_error, dict)
+            else {"type": "generation_failed", "message": str(raw_error)}
+        )
 
     return structured
 
@@ -577,12 +624,6 @@ def format_generation_response(
             parts.append(f"  输出 tokens: {usage['output_tokens']}")
         if "total_tokens" in usage:
             parts.append(f"  总 tokens: {usage['total_tokens']}")
-        if "prompt_tokens" in usage:
-            parts.append(f"  提示词 tokens: {usage['prompt_tokens']}")
-        if "completion_tokens" in usage:
-            parts.append(f"  完成 tokens: {usage['completion_tokens']}")
-        if "cost" in usage:
-            parts.append(f"  成本: {usage['cost']}")
         tool_usage = usage.get("tool_usage")
         if isinstance(tool_usage, dict):
             web_search_count = tool_usage.get("web_search")
@@ -810,6 +851,12 @@ async def execute_generation_handler(
         await _yield_for_cancellation()
         context = build_generation_context(arguments, config)
         await _safe_report_progress(ctx, progress=10.0, message="参数校验完成")
+        await _safe_ctx_log(
+            ctx,
+            "info",
+            f"{tool_name} 请求开始：尺寸={context.size}, "
+            f"请求数={context.request_count}, 并行度={context.parallelism}",
+        )
 
         module_logger.info(start_log_message, *start_log_values_builder(context))
 
@@ -861,10 +908,17 @@ async def execute_generation_handler(
 
                 if auto_save_results:
                     result = update_result_with_auto_save(result, auto_save_results)
+                    saved_count = sum(1 for r in auto_save_results if getattr(r, "success", False))
+                    await _safe_ctx_log(
+                        ctx,
+                        "info",
+                        f"已自动保存 {saved_count}/{len(auto_save_results)} 张图片到本地",
+                    )
                 await _safe_report_progress(ctx, progress=95.0, message="自动保存完成")
             except Exception as exc:
                 auto_save_error = format_error_for_user(exc)
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
+                await _safe_ctx_log(ctx, "warning", f"自动保存失败，已降级跳过：{auto_save_error}")
 
         response_text = format_generation_response(
             completion_title,
@@ -884,6 +938,13 @@ async def execute_generation_handler(
             auto_save_error=auto_save_error,
         )
         await _safe_report_progress(ctx, progress=100.0, message="请求处理完成")
+        image_count = len(extract_images(result))
+        await _safe_ctx_log(
+            ctx,
+            "info" if result.get("success") else "warning",
+            f"{tool_name} {'完成' if result.get('success') else '未成功'}，"
+            f"共 {image_count} 张图片",
+        )
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)],
             structuredContent=structured_result,
@@ -892,6 +953,7 @@ async def execute_generation_handler(
     except Exception as exc:
         module_logger.error(f"{failure_prefix}处理失败", exc_info=True)
         await _safe_report_progress(ctx, progress=100.0, message="请求处理失败")
+        await _safe_ctx_log(ctx, "error", f"{failure_prefix}失败：{format_error_for_user(exc)}")
         error_message = f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}"
         return CallToolResult(
             content=[TextContent(type="text", text=error_message)],

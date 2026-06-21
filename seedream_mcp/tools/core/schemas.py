@@ -427,6 +427,13 @@ class BrowseImagesInput(BaseModel):
         le=200,
         description="返回的最大文件数量（1-200）。",
     )
+    offset: int = Field(
+        default=0,
+        ge=0,
+        le=100000,
+        description="分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
+        "上限防止无界偏移触发全量扫描。",
+    )
     format_filter: Optional[List[str]] = Field(
         default=None,
         description="需要过滤的图片后缀列表，如 ['.jpeg', '.png']。",

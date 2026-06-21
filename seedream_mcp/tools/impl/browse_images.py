@@ -11,6 +11,7 @@ from typing import Any, Dict
 from mcp.server.fastmcp import Context
 from mcp.types import CallToolResult, TextContent
 
+from ..core.common import _safe_ctx_log, _safe_report_progress
 from ...utils.logging import get_logger
 from ...utils.path_utils import (
     find_images_in_directory,
@@ -80,19 +81,21 @@ async def handle_browse_images(
     recursive = bool(arguments.get("recursive", True))
     max_depth = int(arguments.get("max_depth", 3))
     limit = int(arguments.get("limit", 50))
+    offset = int(arguments.get("offset", 0))
     format_filter = arguments.get("format_filter")
     show_details = bool(arguments.get("show_details", False))
 
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
         message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
+        await _safe_ctx_log(ctx, "warning", message)
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
             structuredContent={
                 "tool": "browse_images",
                 "success": False,
                 "status": "failed",
-                "error": message,
+                "error": {"type": "browse_failed", "message": message},
                 "workspace_roots": [],
             },
             isError=True,
@@ -112,7 +115,7 @@ async def handle_browse_images(
                     "tool": "browse_images",
                     "success": False,
                     "status": "failed",
-                    "error": message,
+                    "error": {"type": "browse_failed", "message": message},
                     "workspace_roots": [str(root) for root in workspace_roots],
                 },
                 isError=True,
@@ -126,7 +129,7 @@ async def handle_browse_images(
                     "tool": "browse_images",
                     "success": False,
                     "status": "failed",
-                    "error": message,
+                    "error": {"type": "browse_failed", "message": message},
                     "workspace_roots": [str(root) for root in workspace_roots],
                 },
                 isError=True,
@@ -152,17 +155,18 @@ async def handle_browse_images(
                 "tool": "browse_images",
                 "success": False,
                 "status": "failed",
-                "error": message,
+                "error": {"type": "browse_failed", "message": message},
                 "workspace_roots": [str(root) for root in workspace_roots],
             },
             isError=True,
         )
 
-    if ctx is not None:
-        try:
-            await ctx.report_progress(progress=20.0, total=100.0, message="开始扫描图片目录")
-        except Exception:
-            pass
+    await _safe_ctx_log(
+        ctx,
+        "info",
+        f"浏览图片：目录={requested_dir}, 递归={recursive}, 最大深度={max_depth}, 限制={limit}",
+    )
+    await _safe_report_progress(ctx, progress=20.0, message="开始扫描图片目录")
 
     logger.info(
         "浏览图片: dirs={}, recursive={}, max_depth={}, limit={}",
@@ -172,19 +176,20 @@ async def handle_browse_images(
         limit,
     )
 
-    # 搜索图片文件并限制返回数量
-    images: list[Path] = []
+    # 搜索图片文件：仅扫描 offset+limit+1 张（多 1 张用于判断 has_more），避免大目录无上限扫描
+    scan_limit = offset + limit + 1
+    all_images: list[Path] = []
     seen_images: set[Path] = set()
-    for resolved_dir in resolved_dirs:
-        remaining = None if limit is None else max(0, limit - len(images))
-        if remaining == 0:
+    total_dirs = len(resolved_dirs)
+    for dir_index, resolved_dir in enumerate(resolved_dirs, start=1):
+        if len(all_images) >= scan_limit:
             break
         matched_images = find_images_in_directory(
             directory=str(resolved_dir),
             recursive=recursive,
             max_depth=max_depth,
             extensions=format_filter,
-            limit=remaining,
+            limit=scan_limit - len(all_images),
         )
         for image_path in matched_images:
             if not is_path_within_any_base(image_path, workspace_roots):
@@ -193,20 +198,39 @@ async def handle_browse_images(
             if image_path in seen_images:
                 continue
             seen_images.add(image_path)
-            images.append(image_path)
-            if limit is not None and len(images) >= limit:
+            all_images.append(image_path)
+            if len(all_images) >= scan_limit:
                 break
-        if limit is not None and len(images) >= limit:
-            break
+        # 多目录扫描时按已扫描目录占比上报中间进度（20% -> 90%），单目录跳过
+        if total_dirs > 1:
+            await _safe_report_progress(
+                ctx,
+                progress=20.0 + 70.0 * dir_index / total_dirs,
+                message=f"已扫描 {dir_index}/{total_dirs} 个目录，找到 {len(all_images)} 张图片",
+            )
 
-    # 处理未找到图片的情况
+    # 分页切片：has_more 时仅扫到 scan_limit、无法精确总数，total_count 置 None
+    page_end = offset + limit
+    images = all_images[offset:page_end]
+    has_more = len(all_images) > page_end
+    next_offset = page_end if has_more else None
+    total_count = None if has_more else len(all_images)
+
+    # 处理当前页为空的情况：
+    # - total_count == 0：确实无匹配图片
+    # - total_count > 0：offset 越界（超出最后一页），仍需返回实际总数供客户端正确翻页
     if not images:
-        message = "未找到图片文件，请确认目录或过滤条件。"
-        if ctx is not None:
-            try:
-                await ctx.report_progress(progress=100.0, total=100.0, message="扫描完成")
-            except Exception:
-                pass
+        if total_count == 0:
+            message = "未找到图片文件，请确认目录或过滤条件。"
+            log_message = "未找到匹配的图片文件"
+        else:
+            message = (
+                f"offset={offset} 超出范围，目录共有 {total_count} 张图片，"
+                f"请使用 0 <= offset < {total_count}。"
+            )
+            log_message = f"offset={offset} 越界（目录共 {total_count} 张）"
+        await _safe_ctx_log(ctx, "info", log_message)
+        await _safe_report_progress(ctx, progress=100.0, message="扫描完成")
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
             structuredContent={
@@ -218,6 +242,10 @@ async def handle_browse_images(
                 "workspace_roots": [str(root) for root in workspace_roots],
                 "images": [],
                 "count": 0,
+                "total_count": total_count,
+                "offset": offset,
+                "has_more": has_more,
+                "next_offset": next_offset,
             },
             isError=False,
         )
@@ -243,11 +271,8 @@ async def handle_browse_images(
             }
         )
 
-    if ctx is not None:
-        try:
-            await ctx.report_progress(progress=100.0, total=100.0, message="扫描完成")
-        except Exception:
-            pass
+    await _safe_ctx_log(ctx, "info", f"浏览完成：共 {len(structured_images)} 张图片")
+    await _safe_report_progress(ctx, progress=100.0, message="扫描完成")
 
     return CallToolResult(
         content=[TextContent(type="text", text="\n".join(lines))],
@@ -259,6 +284,10 @@ async def handle_browse_images(
             "resolved_directories": [str(item) for item in resolved_dirs],
             "workspace_roots": [str(root) for root in workspace_roots],
             "count": len(structured_images),
+            "total_count": total_count,
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
             "images": structured_images,
             "recursive": recursive,
             "max_depth": max_depth,

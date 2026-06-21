@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ from PIL import Image
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.server import mcp, workspace_roots_resource
 from seedream_mcp.utils.errors import SeedreamAPIError
 from seedream_mcp.tools.core.runners import run_browse_images
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
@@ -268,3 +270,45 @@ async def test_client_prepare_image_input_falls_back_to_env_when_list_roots_fail
         prepared = await client._prepare_image_input("local.png")
 
     assert prepared.startswith("data:image/")
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_reports_client_roots_not_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 客户端通过 MCP Roots 授权目录时，seedream://workspace/roots 须报告客户端 roots，
+    # 而非服务器 env/cwd（与浏览工具访问边界一致）。
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    monkeypatch.setattr(mcp, "get_context", lambda: _FakeContext([mcp_root]))
+
+    result = await workspace_roots_resource()
+    data = json.loads(result)
+
+    assert str(mcp_root.resolve()) in data["roots"]
+    assert str(env_root.resolve()) not in data["roots"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 客户端明确不授权任何目录（list_roots 返回空）时，资源须返回空列表，
+    # 不得回退到 env/cwd 暴露服务器本地目录。
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    monkeypatch.setattr(mcp, "get_context", lambda: _FakeContext([]))
+
+    result = await workspace_roots_resource()
+    data = json.loads(result)
+
+    assert data["roots"] == []
+    assert str(env_root.resolve()) not in data["roots"]
