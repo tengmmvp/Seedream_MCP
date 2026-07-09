@@ -26,6 +26,16 @@ def test_config_rejects_deprecated_seededit_3_0() -> None:
 
 
 def test_config_accepts_current_models() -> None:
-    for model in ("doubao-seedream-5.0", "doubao-seedream-4.5", "doubao-seedream-4.0"):
+    for model in (
+        "doubao-seedream-5.0-pro",
+        "doubao-seedream-5.0",
+        "doubao-seedream-4.5",
+        "doubao-seedream-4.0",
+    ):
         config = SeedreamConfig(api_key="k", model_id=model)
         assert config.model_id
+
+
+def test_config_normalizes_seedream_50_pro_alias() -> None:
+    config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0-pro")
+    assert config.model_id == "doubao-seedream-5-0-pro-260628"

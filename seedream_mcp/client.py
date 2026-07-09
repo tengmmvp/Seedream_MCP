@@ -26,6 +26,8 @@ from .utils.errors import (
 from .utils.logging import get_logger, log_function_call
 from .utils.path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
 from .utils.validation import (
+    get_max_reference_images,
+    is_seedream_50_pro_model,
     resolve_sequential_max_images,
     validate_generation_tools,
     validate_image_url,
@@ -36,6 +38,7 @@ from .utils.validation import (
     validate_response_format,
     validate_sequential_image_limit,
     validate_size_for_model,
+    validate_stream,
     validate_watermark,
 )
 
@@ -109,9 +112,9 @@ class SeedreamClient:
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False
-            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
+            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -129,6 +132,7 @@ class SeedreamClient:
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
         output_format = validate_output_format(output_format, self.config.model_id)
+        stream = validate_stream(stream, self.config.model_id)
         tools = validate_generation_tools(tools, self.config.model_id)
 
         self.logger.info(
@@ -194,9 +198,9 @@ class SeedreamClient:
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False
-            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
+            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -215,6 +219,7 @@ class SeedreamClient:
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
         output_format = validate_output_format(output_format, self.config.model_id)
+        stream = validate_stream(stream, self.config.model_id)
         tools = validate_generation_tools(tools, self.config.model_id)
 
         self.logger.info(
@@ -280,13 +285,13 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
             optimize_prompt_options: 提示词优化选项，可选配置字典
-            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张
+            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张（5.0 Pro 最多 10 张）
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False
-            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
+            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -300,11 +305,15 @@ class SeedreamClient:
         validated_opts = validate_optimize_prompt_options(
             optimize_prompt_options, self.config.model_id
         )
-        image = self._normalize_image_sequence(image, min_count=2, max_count=14, field_name="image")
+        max_reference = get_max_reference_images(self.config.model_id)
+        image = self._normalize_image_sequence(
+            image, min_count=2, max_count=max_reference, field_name="image"
+        )
         size = validate_size_for_model(size, self.config.model_id)
         watermark = validate_watermark(watermark)
         response_format = validate_response_format(response_format)
         output_format = validate_output_format(output_format, self.config.model_id)
+        stream = validate_stream(stream, self.config.model_id)
         tools = validate_generation_tools(tools, self.config.model_id)
 
         self.logger.info(
@@ -366,7 +375,7 @@ class SeedreamClient:
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
-        组图输出功能
+        组图输出功能（仅 5.0 Lite/4.5/4.0 支持；5.0 Pro 不支持组图）
 
         支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
 
@@ -383,9 +392,9 @@ class SeedreamClient:
             watermark: 是否添加水印，默认为 False
             max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 doubao-seedream-5.0 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False
-            tools: 模型工具配置，仅 doubao-seedream-5.0 支持，如 [{"type": "web_search"}]
+            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -394,6 +403,15 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
         """
+        # 5.0 Pro 不支持组图生成（sequential_image_generation），直接拒绝
+        if is_seedream_50_pro_model(self.config.model_id):
+            raise SeedreamValidationError(
+                "doubao-seedream-5.0-pro 不支持组图生成，"
+                "请将模型切换为 doubao-seedream-5.0/5.0-lite/4.5/4.0",
+                field="model",
+                value=self.config.model_id,
+            )
+
         # 参数验证
         prompt = validate_prompt(prompt)
         validated_opts = validate_optimize_prompt_options(
@@ -926,6 +944,14 @@ class SeedreamClient:
                 usage = trailing_event.get("usage", {}) or {}
                 status = "completed"
                 tools = trailing_event.get("tools")
+
+        # 与非流式 _build_api_result 保持一致：当存在部分失败（data 含 error 项）时
+        # 标记 status=partial，避免流式/非流式在同等部分失败场景下 status 语义不一致，
+        # 进而误导下游对生成结果完整性的判断。
+        if status in (None, "completed") and any(
+            isinstance(item, dict) and "error" in item for item in items
+        ):
+            status = "partial"
 
         return {
             "success": True,

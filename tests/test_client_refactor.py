@@ -250,9 +250,7 @@ async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_ca
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
-    with pytest.raises(
-        SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"
-    ):
+    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 系列"):
         await client.text_to_image(prompt="test", size="2K", output_format="png")
 
     assert api_called is False
@@ -315,7 +313,7 @@ async def test_call_api_parses_sse_partial_failed_event() -> None:
         await client.close()
 
     assert result["success"] is True
-    assert result["status"] == "completed"
+    assert result["status"] == "partial"
     assert len(result["data"]) == 1
     assert result["data"][0]["type"] == "image_generation.partial_failed"
     assert result["data"][0]["image_index"] == 2
@@ -553,3 +551,107 @@ async def test_sequential_generation_invalid_image_type_raises_validation_error(
             image=123,  # type: ignore[arg-type]
             size="2K",
         )
+
+
+def _build_pro_config() -> SeedreamConfig:
+    return SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-pro-260628",
+        max_retries=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sequential_generation_rejects_seedream_50_pro() -> None:
+    client = SeedreamClient(_build_pro_config())
+
+    with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持组图"):
+        await client.sequential_generation(prompt="test", max_images=3, size="2K")
+
+
+@pytest.mark.asyncio
+async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
+    client = SeedreamClient(_build_pro_config())
+
+    with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
+        await client.text_to_image(prompt="test", size="2K", stream=True)
+
+
+@pytest.mark.asyncio
+async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(_build_pro_config())
+    captured_request: Dict[str, Any] = {}
+
+    async def fake_prepare_images_in_parallel(images: List[str]) -> List[str]:
+        return [f"prepared:{item}" for item in images]
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured_request.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
+
+    # 5.0 Pro 支持 disabled（关闭组图、单图输出），仅不支持 auto（开启组图）
+    assert captured_request["sequential_image_generation"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_multi_image_fusion_keeps_sequential_param_for_lite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(_build_config())
+    captured_request: Dict[str, Any] = {}
+
+    async def fake_prepare_images_in_parallel(images: List[str]) -> List[str]:
+        return [f"prepared:{item}" for item in images]
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured_request.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
+
+    assert captured_request["sequential_image_generation"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_multi_image_fusion_rejects_more_than_10_images_for_pro() -> None:
+    client = SeedreamClient(_build_pro_config())
+    input_images = [f"https://example.com/{idx}.png" for idx in range(11)]
+
+    with pytest.raises(SeedreamValidationError, match="image 数量不能超过 10"):
+        await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
+
+
+@pytest.mark.asyncio
+async def test_multi_image_fusion_accepts_up_to_10_images_for_pro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SeedreamClient(_build_pro_config())
+    input_images = [f"https://example.com/{idx}.png" for idx in range(10)]
+    captured_request: Dict[str, Any] = {}
+
+    async def fake_prepare_images_in_parallel(images: List[str]) -> List[str]:
+        return [f"prepared:{item}" for item in images]
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured_request.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
+
+    assert len(captured_request["image"]) == 10

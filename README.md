@@ -1,7 +1,9 @@
-﻿<h1 align="center">Seedream 4.0、4.5 和 5.0 MCP 生图工具</h1>
+﻿<h1 align="center">Seedream Image MCP</h1>
 
 <p align="center">
   <a href="./README.md">简体中文</a>
+  ·
+  <a href="./README.zh-TW.md">繁體中文</a>
   ·
   <a href="./README.en.md">English</a>
 </p>
@@ -17,7 +19,7 @@
   <br><br>
   <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="500"/>
   <br><br>
-  <b>基于火山引擎 Seedream 4.0、4.5 和 5.0 API 的 MCP 工具，支持 AI 图像生成。</b>
+  <b>基于火山引擎 Seedream 4.0、4.5 和 5.0 系列（含 5.0 Pro）API 的 MCP 工具，支持 AI 图像生成。</b>
 </div>
 
 ---
@@ -148,9 +150,9 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 --config-file TEXT                                 # 自定义 .env 配置文件路径
 
 # 模型与生成
---model [doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
+--model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
                                                  # 模型选择 (默认: doubao-seedream-5.0)
---default-size [1K|2K|3K|4K|<宽>x<高>]            # 图像尺寸 (默认: 2K，需与模型兼容)
+--default-size [1K|2K|3K|4K|<宽>x<高>]            # 图像尺寸 (默认: 2K，需与所选模型兼容)
 --watermark                                        # 启用水印
 --no-watermark                                     # 关闭水印
 
@@ -171,12 +173,29 @@ ARK_API_KEY=your_key uvx seedream-image-mcp
 # 使用自定义配置文件
 ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
 
-# 使用 Seedream 4.0 模型
-ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.0
-
-# 高质量图像 + 调试模式
+# 切换其他模型（如 4.0 / 4.5）并指定尺寸与调试模式
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
+
+# 高精度生图（5.0 Pro；注意：不支持组图 / 联网搜索 / 流式输出，尺寸仅 1K/2K）
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 ```
+
+## 📐 模型能力差异
+
+各模型支持的能力与参数范围不同，选择模型时请留意：
+
+| 能力 / 参数                | 5.0 Pro   | 5.0 Lite     | 4.5       | 4.0          |
+| -------------------------- | --------- | ------------ | --------- | ------------ |
+| 文生图 / 图生图 / 多图生图 | ✅        | ✅           | ✅        | ✅           |
+| 组图生成                   | ❌        | ✅           | ✅        | ✅           |
+| 联网搜索                   | ❌        | ✅           | ❌        | ❌           |
+| 流式输出                   | ❌        | ✅           | ✅        | ✅           |
+| 输出格式（png/jpeg）       | ✅        | ✅           | ❌        | ❌           |
+| 分辨率档位                 | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
+| 默认尺寸                   | 1024x1024 | 2048x2048    | 2048x2048 | 2048x2048    |
+| 参考图上限                 | 10 张     | 14 张        | 14 张     | 14 张        |
+
+> **提示**：默认模型为 **5.0 Lite**，开箱即用全部能力。切换到 `doubao-seedream-5.0-pro` 后，组图、联网搜索、流式输出不可用，尺寸仅支持 `1K/2K`（默认 `1024x1024`），多图生图参考图上限降为 10 张。
 
 ## 🎨 功能特性
 
@@ -200,9 +219,9 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
-- `stream` (可选) - 是否启用流式输出，默认`false`
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
+- `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -224,9 +243,9 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
-- `stream` (可选) - 是否启用流式输出，默认`false`
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
+- `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -244,13 +263,13 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
-- `image` (必需) - 输入图像 URL 或本地文件路径列表（2-14 张图像）
+- `image` (必需) - 输入图像 URL 或本地文件路径列表（2-14 张；5.0 Pro 最多 10 张）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
-- `stream` (可选) - 是否启用流式输出，默认`false`
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
+- `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -262,7 +281,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 <details>
 <summary><b>4. <code>seedream_sequential_generation</code></b> — 组图输出</summary>
 
-连续生成多张图像，支持文生组图、单图生组图、多图生组图
+连续生成多张图像，支持文生组图、单图生组图、多图生组图（仅 5.0 Lite/4.5/4.0 支持；5.0 Pro 不支持组图）
 
 **参数：**
 
@@ -273,9 +292,9 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --defaul
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 `doubao-seedream-5.0` 支持 `jpeg` 或 `png`
-- `stream` (可选) - 是否启用流式输出，默认`false`
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` 支持，例如 `[{"type":"web_search"}]`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
+- `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -363,7 +382,7 @@ uv run python -m seedream_mcp.server --api-key your_key
 ARK_API_KEY=your_api_key_here
 
 # 模型配置
-SEEDREAM_MODEL_ID=doubao-seedream-5-0-260128
+SEEDREAM_MODEL_ID=doubao-seedream-5.0
 
 # 默认值
 SEEDREAM_DEFAULT_SIZE=2K

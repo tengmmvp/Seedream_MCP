@@ -47,6 +47,11 @@ VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
 VALID_OUTPUT_FORMATS = {"jpeg", "png"}
 VALID_GENERATION_TOOL_TYPES = {"web_search"}
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
+SEEDREAM_50PRO_MIN_SIZE_PIXELS = 1280 * 720  # 921600
+SEEDREAM_50PRO_MAX_SIZE_PIXELS = 2048 * 2048  # 4194304
+SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE = 16  # 5.0 Pro 像素宽高须为 16 的倍数
+SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10  # 5.0 Pro 最多 10 张参考图
+SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14  # 5.0 Lite / 4.5 / 4.0 最多 14 张参考图
 SEEDREAM_5X_MIN_SIZE_PIXELS = 2560 * 1440
 SEEDREAM_5X_MAX_SIZE_PIXELS = 4096 * 4096  # 16777216
 SEEDREAM_45_MIN_SIZE_PIXELS = 2560 * 1440
@@ -123,11 +128,30 @@ def _contains_model_token(model_id: str, *tokens: str) -> bool:
     return any(token in normalized for token in tokens)
 
 
+def _is_seedream_50_pro_model(model_id: str) -> bool:
+    """
+    判断是否为 Seedream 5.0 Pro 模型。
+
+    注意：5.0 Pro 的 Model ID（doubao-seedream-5-0-pro-*）包含 "doubao-seedream-5-0"
+    子串，须先于 5.0 Lite 判断，避免被误归入 Lite 分支。
+    """
+    return _contains_model_token(model_id, "doubao-seedream-5-0-pro", "doubao-seedream-5.0-pro")
+
+
 def _is_seedream_50_model(model_id: str) -> bool:
     """
-    判断是否为 Seedream 5.0 模型。
+    判断是否为 Seedream 5.0 Lite 模型。
     """
+    if _is_seedream_50_pro_model(model_id):
+        return False
     return _contains_model_token(model_id, "doubao-seedream-5-0", "doubao-seedream-5.0")
+
+
+def _is_seedream_50_family(model_id: str) -> bool:
+    """
+    判断是否为 Seedream 5.0 系列（5.0 Lite 或 5.0 Pro）。
+    """
+    return _is_seedream_50_model(model_id) or _is_seedream_50_pro_model(model_id)
 
 
 def _is_seedream_45_model(model_id: str) -> bool:
@@ -501,9 +525,10 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
             value=output_format,
         )
 
-    if not _is_seedream_50_model(model_id):
+    # 仅 4.5/4.0 明确不支持 output_format；5.0 系列/Endpoint ID 等无法识别的模型放行
+    if _is_seedream_45_model(model_id) or _is_seedream_40_model(model_id):
         raise SeedreamValidationError(
-            "仅 doubao-seedream-5.0 模型支持 output_format",
+            "仅 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）模型支持 output_format",
             field="output_format",
             value=output_format,
         )
@@ -525,9 +550,14 @@ def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]]
             value=tools,
         )
 
-    if not _is_seedream_50_model(model_id):
+    # 仅 5.0 Pro/4.5/4.0 明确不支持 tools 联网搜索；5.0 Lite/Endpoint ID 等无法识别的模型放行
+    if (
+        _is_seedream_50_pro_model(model_id)
+        or _is_seedream_45_model(model_id)
+        or _is_seedream_40_model(model_id)
+    ):
         raise SeedreamValidationError(
-            "仅 doubao-seedream-5.0 模型支持 tools",
+            "仅 doubao-seedream-5.0 Lite 模型支持 tools（5.0 Pro/4.5/4.0 不支持联网搜索）",
             field="tools",
             value=tools,
         )
@@ -577,6 +607,21 @@ def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]]
     return normalized_tools
 
 
+def validate_stream(stream: bool, model_id: str) -> bool:
+    """
+    验证流式输出参数与模型兼容性。
+
+    Seedream 5.0 Pro 不支持流式输出（stream，传参报错），仅 5.0 Lite/4.5/4.0 支持。
+    """
+    if stream and _is_seedream_50_pro_model(model_id):
+        raise SeedreamValidationError(
+            "doubao-seedream-5.0-pro 不支持流式输出（stream），请使用 5.0 Lite/4.5/4.0",
+            field="stream",
+            value=stream,
+        )
+    return stream
+
+
 def validate_max_images(max_images: Any) -> int:
     """
     验证最大图像数量参数
@@ -613,6 +658,29 @@ def validate_max_images(max_images: Any) -> int:
         )
 
     return validated_value
+
+
+def get_max_reference_images(model_id: str) -> int:
+    """
+    返回模型支持的最大参考图数量。
+
+    - Seedream 5.0 Pro：10 张
+    - Seedream 5.0 Lite / 4.5 / 4.0：14 张
+    """
+    if _is_seedream_50_pro_model(model_id):
+        return SEEDREAM_50PRO_MAX_REFERENCE_IMAGES
+    return SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+
+
+def is_seedream_50_pro_model(model_id: str) -> bool:
+    """
+    判断是否为 Seedream 5.0 Pro 模型（公共接口）。
+
+    5.0 Pro 与 5.0 Lite 存在能力差异：不支持组图（sequential_image_generation）、
+    联网搜索（tools）、流式输出（stream），参考图上限为 10 张，尺寸规则不同。
+    调用方据此做模型相关分支。
+    """
+    return _is_seedream_50_pro_model(model_id)
 
 
 # ==================== 尺寸验证函数 ====================
@@ -675,7 +743,14 @@ def validate_size_for_model(size: str, model_id: str) -> str:
 
     # 分辨率档位校验
     if size in VALID_SIZE_PRESETS:
-        if _is_seedream_50_model(mid):
+        if _is_seedream_50_pro_model(mid):
+            if size not in {"1K", "2K"}:
+                raise SeedreamValidationError(
+                    "在 doubao-seedream-5.0-pro 模型下仅支持 1K/2K",
+                    field="size",
+                    value=size,
+                )
+        elif _is_seedream_50_model(mid):
             if size not in {"2K", "3K", "4K"}:
                 raise SeedreamValidationError(
                     "在 doubao-seedream-5.0 模型下仅支持 2K/3K/4K",
@@ -713,7 +788,31 @@ def validate_size_for_model(size: str, model_id: str) -> str:
         )
 
     total_pixels = width * height
-    if _is_seedream_50_model(mid):
+    if _is_seedream_50_pro_model(mid):
+        if (
+            total_pixels < SEEDREAM_50PRO_MIN_SIZE_PIXELS
+            or total_pixels > SEEDREAM_50PRO_MAX_SIZE_PIXELS
+        ):
+            raise SeedreamValidationError(
+                (
+                    "在 doubao-seedream-5.0-pro 模型下，像素尺寸总像素需在 "
+                    f"[{SEEDREAM_50PRO_MIN_SIZE_PIXELS}, {SEEDREAM_50PRO_MAX_SIZE_PIXELS}] 范围内"
+                ),
+                field="size",
+                value=size,
+            )
+        # 5.0 Pro 方式1（宽x高）要求宽高均为 16 的倍数
+        if (
+            width % SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE != 0
+            or height % SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE != 0
+        ):
+            raise SeedreamValidationError(
+                f"在 doubao-seedream-5.0-pro 模型下，像素宽高须为 "
+                f"{SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE} 的倍数",
+                field="size",
+                value=size,
+            )
+    elif _is_seedream_50_model(mid):
         if total_pixels < SEEDREAM_5X_MIN_SIZE_PIXELS or total_pixels > SEEDREAM_5X_MAX_SIZE_PIXELS:
             raise SeedreamValidationError(
                 (
@@ -875,12 +974,12 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
             value=mode,
         )
 
-    # doubao-seedream-5.0/4.5 模型仅支持 standard 模式
+    # doubao-seedream-5.0 系列/4.5 模型仅支持 standard 模式（fast 仅 4.0 支持）
     mid = (model_id or "").lower()
-    if _is_seedream_50_model(mid) or _is_seedream_45_model(mid):
+    if _is_seedream_50_family(mid) or _is_seedream_45_model(mid):
         if mode != "standard":
             raise SeedreamValidationError(
-                "doubao-seedream-5.0/4.5 当前仅支持 optimize_prompt_options.mode=standard",
+                "doubao-seedream-5.0 系列/4.5 当前仅支持 optimize_prompt_options.mode=standard",
                 field="optimize_prompt_options.mode",
                 value=mode,
             )

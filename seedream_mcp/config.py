@@ -22,6 +22,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 MODEL_ALIASES: dict[str, str] = {
+    "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
     "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
     "doubao-seedream-5.0-lite": "doubao-seedream-5-0-260128",
     "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
@@ -121,7 +122,7 @@ class SeedreamConfig:
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
             raise SeedreamConfigError(
                 f"已不支持的模型: {self.model_id}（3.0/seededit-3.0 已下线），"
-                "请使用 doubao-seedream-5.0/5.0-lite/4.5/4.0 或对应 Endpoint ID"
+                "请使用 doubao-seedream-5.0-pro/5.0/5.0-lite/4.5/4.0 或对应 Endpoint ID"
             )
 
         if not isinstance(self.default_size, str) or not self.default_size.strip():

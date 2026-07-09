@@ -23,6 +23,7 @@ from ...utils.validation import (
     validate_parallel_generation_options,
     validate_response_format,
     validate_size_for_model,
+    validate_stream,
     validate_watermark,
 )
 
@@ -345,12 +346,13 @@ def build_generation_context(
 
     validated_response_format = validate_response_format(response_format)
     validated_output_format = validate_output_format(output_format, config.model_id)
+    validated_stream = validate_stream(stream, config.model_id)
     validated_tools = validate_generation_tools(tools, config.model_id)
 
     request_count, parallelism = validate_parallel_generation_options(
         request_count=request_count,
         parallelism=parallelism_value,
-        stream=stream,
+        stream=validated_stream,
         max_request_count=4,
     )
 
@@ -363,7 +365,7 @@ def build_generation_context(
         watermark=watermark,
         response_format=validated_response_format,
         output_format=validated_output_format,
-        stream=stream,
+        stream=validated_stream,
         tools=validated_tools,
         request_count=request_count,
         parallelism=parallelism,
@@ -579,6 +581,8 @@ def format_generation_response(
                 parts.append(f"  URL: {image['url']}")
             if "size" in image:
                 parts.append(f"  尺寸: {image['size']}")
+            if "output_format" in image:
+                parts.append(f"  输出格式: {image['output_format']}")
             if "image_index" in image:
                 parts.append(f"  序号: {image['image_index']}")
             if "local_path" in image:
@@ -618,6 +622,8 @@ def format_generation_response(
 
     if usage:
         parts.append("使用统计:")
+        if "input_images" in usage:
+            parts.append(f"  输入图片数: {usage['input_images']}")
         if "generated_images" in usage:
             parts.append(f"  生成图片数: {usage['generated_images']}")
         if "output_tokens" in usage:

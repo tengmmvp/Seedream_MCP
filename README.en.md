@@ -1,7 +1,9 @@
-<h1 align="center">Seedream 4.0, 4.5 & 5.0 MCP Image Generation Tool</h1>
+<h1 align="center">Seedream Image MCP</h1>
 
 <p align="center">
   <a href="./README.md">简体中文</a>
+  ·
+  <a href="./README.zh-TW.md">繁體中文</a>
   ·
   <a href="./README.en.md">English</a>
 </p>
@@ -17,7 +19,7 @@
   <br><br>
   <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="500"/>
   <br><br>
-  <b>An MCP tool based on the Volcengine Seedream 4.0, 4.5 and 5.0 APIs, supporting AI image generation.</b>
+  <b>An MCP tool based on the Volcengine Seedream 4.0, 4.5 and 5.0 series (incl. 5.0 Pro) APIs, supporting AI image generation.</b>
 </div>
 
 ---
@@ -148,7 +150,7 @@ Restart the corresponding client after configuration.
 --config-file TEXT                                 # Custom .env config file path
 
 # Model & generation
---model [doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
+--model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
                                                    # Model selection (default: doubao-seedream-5.0)
 --default-size [1K|2K|3K|4K|<width>x<height>]      # Image size (default: 2K; must be compatible with the model)
 --watermark                                        # Enable watermark
@@ -171,12 +173,29 @@ ARK_API_KEY=your_key uvx seedream-image-mcp
 # Use a custom config file
 ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
 
-# Use the Seedream 4.0 model
-ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.0
-
-# High-quality image + debug mode
+# Switch to other models (e.g. 4.0 / 4.5) with a custom size and debug mode
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
+
+# High-precision image generation (5.0 Pro; note: sequential generation / web search / streaming output not supported; sizes 1K/2K only)
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 ```
+
+## 📐 Model Capability Differences
+
+Different models support different capabilities and parameter ranges. Please note this when selecting a model:
+
+| Capability / Parameter                       | 5.0 Pro   | 5.0 Lite     | 4.5       | 4.0          |
+| -------------------------------------------- | --------- | ------------ | --------- | ------------ |
+| Text-to-Image / Image-to-Image / Multi-Image | ✅        | ✅           | ✅        | ✅           |
+| Sequential Generation                        | ❌        | ✅           | ✅        | ✅           |
+| Web Search                                   | ❌        | ✅           | ❌        | ❌           |
+| Streaming Output                             | ❌        | ✅           | ✅        | ✅           |
+| Output Format (png/jpeg)                     | ✅        | ✅           | ❌        | ❌           |
+| Resolution Presets                           | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
+| Default Size                                 | 1024x1024 | 2048x2048    | 2048x2048 | 2048x2048    |
+| Max Reference Images                         | 10        | 14           | 14        | 14           |
+
+> **Tip**: The default model is **5.0 Lite**, with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/2K` sizes are supported (default `1024x1024`), and the multi-image reference cap drops to 10.
 
 ## 🎨 Features
 
@@ -200,9 +219,9 @@ Generate an image from a text prompt
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only `doubao-seedream-5.0` supports `jpeg` or `png`
-- `stream` (optional) - Whether to enable streaming output; default `false`
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0` supports this, e.g. `[{"type":"web_search"}]`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
+- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -224,9 +243,9 @@ Generate a new image from an input image and a text prompt
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only `doubao-seedream-5.0` supports `jpeg` or `png`
-- `stream` (optional) - Whether to enable streaming output; default `false`
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0` supports this, e.g. `[{"type":"web_search"}]`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
+- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -244,13 +263,13 @@ Fuse multiple images into a new image
 
 - `prompt` (required) - Image fusion request or style instruction; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
-- `image` (required) - List of input image URLs or local file paths (2-14 images)
+- `image` (required) - List of input image URLs or local file paths (2-14 images; 5.0 Pro max 10)
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only `doubao-seedream-5.0` supports `jpeg` or `png`
-- `stream` (optional) - Whether to enable streaming output; default `false`
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0` supports this, e.g. `[{"type":"web_search"}]`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
+- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -262,7 +281,7 @@ Fuse multiple images into a new image
 <details>
 <summary><b>4. <code>seedream_sequential_generation</code></b> — Sequential Generation</summary>
 
-Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence
+Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence (only 5.0 Lite/4.5/4.0 supported; 5.0 Pro does not support sequential generation)
 
 **Parameters:**
 
@@ -273,9 +292,9 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only `doubao-seedream-5.0` supports `jpeg` or `png`
-- `stream` (optional) - Whether to enable streaming output; default `false`
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0` supports this, e.g. `[{"type":"web_search"}]`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
+- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -363,7 +382,7 @@ Configuration priority: MCP client explicit config (CLI args) > runtime system e
 ARK_API_KEY=your_api_key_here
 
 # Model config
-SEEDREAM_MODEL_ID=doubao-seedream-5-0-260128
+SEEDREAM_MODEL_ID=doubao-seedream-5.0
 
 # Defaults
 SEEDREAM_DEFAULT_SIZE=2K

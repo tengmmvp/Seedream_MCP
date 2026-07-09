@@ -108,10 +108,19 @@ def test_build_generation_context_rejects_output_format_for_seedream_45() -> Non
         default_size="2K",
     )
 
-    with pytest.raises(
-        SeedreamValidationError, match="仅 doubao-seedream-5.0 模型支持 output_format"
-    ):
+    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 系列"):
         build_generation_context({"prompt": "test", "output_format": "png"}, config)
+
+
+def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
+    config = SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-pro-260628",
+        default_size="2K",
+    )
+
+    with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
+        build_generation_context({"prompt": "test", "stream": True}, config)
 
 
 def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -> None:
@@ -260,3 +269,20 @@ def test_format_generation_response_reports_parallel_failure_details() -> None:
     assert "并行失败详情:" in text
     assert "请求 1: 认证失败" in text
     assert "请求 2: 请求频率超限" in text
+
+
+def test_format_generation_response_shows_input_images_for_pro_usage() -> None:
+    text = format_generation_response(
+        title="图文生图任务完成",
+        result={
+            "success": True,
+            "data": [{"url": "https://example.com/1.png", "size": "1024x1024"}],
+            "usage": {"input_images": 1, "generated_images": 1, "output_tokens": 100},
+        },
+        prompt="test",
+        size="1024x1024",
+    )
+
+    # 5.0 Pro 返回 usage.input_images（输入图数），应在文本统计中展示
+    assert "输入图片数: 1" in text
+    assert "生成图片数: 1" in text

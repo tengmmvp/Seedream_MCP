@@ -54,7 +54,7 @@ class OptimizePromptOptions(BaseModel):
 
     mode: str = Field(
         default="standard",
-        description="提示词优化模式，standard 提供高质量优化，fast 优先速度。",
+        description="提示词优化模式：standard 高质量（全模型），fast 优先速度（仅 4.0 支持）。",
     )
 
     @field_validator("mode")
@@ -128,7 +128,7 @@ class _MultiImageInput(BaseModel):
         ...,
         min_length=2,
         max_length=14,
-        description="图片列表，支持 URL、本地路径，数量2-14张。",
+        description="图片列表，支持 URL、本地路径，数量 2-14 张（5.0 Pro 最多 10 张）。",
     )
 
 
@@ -182,15 +182,15 @@ class _ResponseAndExecutionInput(BaseModel):
     )
     output_format: Optional[OutputFormat] = Field(
         default=None,
-        description="输出图片格式，仅 doubao-seedream-5.0 支持 jpeg 或 png。",
+        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
     )
     stream: bool = Field(
         default=False,
-        description="是否启用流式输出；开启后将以事件流返回生成进度。",
+        description="是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。",
     )
     tools: Optional[List[GenerationTool]] = Field(
         default=None,
-        description="模型工具配置，仅 doubao-seedream-5.0 支持，目前仅支持 web_search。",
+        description="模型工具配置，仅 5.0 Lite 支持联网搜索（web_search）。",
     )
     request_count: int = Field(
         default=1,
