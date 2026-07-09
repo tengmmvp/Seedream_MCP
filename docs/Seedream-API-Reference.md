@@ -1,18 +1,28 @@
 `POST https://ark.cn-beijing.volces.com/api/v3/images/generations` [运行](https://api.volcengine.com/api-explorer/?action=ImageGenerations&groupName=%E5%9B%BE%E7%89%87%E7%94%9F%E6%88%90API&serviceCode=ark&version=2024-01-01&tab=2#N4IgTgpgzgDg9gOyhA+gMzmAtgQwC4gBcIArmADYgA0IUAlgF4REgBMA0tSAO74TY4wAayJoc5ZDSxwAJhErEZcEgCMccALTIIMyDiwaALBoAMG1gFYTADlbWuMMHCwwCxQPhmgUTTA-l6Ao2MAw-4CLeYB4tkHBgDOJgE2KgF+KgABygGHxgNf6gPSmgN2egCwegHEegCFugLCagCfKgOhKgGbx-oBFRoBjkYCTkZGA34qA2Ur+gKyugI76gOSagOJO-oDU5oCnpoBHphWA+Ib+gBVKI4Cf2oAr1oBOQf5wAMaATHaAy+b+gJKKgP1+gL-xgFRxY4CABoCEVoBTPv6A9maAj7b+gKGxgA3OgHnagNxygJJy-peAuyH+gNyugEbpgFgJgHH4wBjfoBvQOygAY5QAz2tkZoBLfUAQjqAQmtAIoagAIEp6AZXlAHBygC51c7+QAUsUNAPjuD38gHSzQKAOYzADMB52y6xagAlTQA55oBSELR0UA2DaAF7V-IAXU0xgB9FQDuioAvIMA9OaAbz1AM8GI0AHJqAAn1soB-PUAS5GAeASKmz-IAAAPW-kAs8qAEB1-IBA80AL4GMlr+QBc+oBUfUagDwVQA2aiAAL5AA)
 
-本文介绍图片生成模型如 Seedream 5.0 lite 的调用 API ，包括输入输出参数，取值范围，注意事项等信息，供您使用接口时查阅字段含义。
+本文介绍 Doubao Seedream 5.0 Pro（以下简称 Seedream 5.0 Pro）、Doubao Seedream 5.0 Lite（以下简称 Seedream 5.0 Lite）、Doubao Seedream 4.5（以下简称 Seedream 4.5）及 Doubao Seedream 4.0（以下简称 Seedream 4.0）图片生成模型的调用 API，包括输入输出参数，取值范围，注意事项等信息，供您使用接口时查阅字段含义。
 
 **不同模型支持的图片生成能力简介**
 
-- **doubao seedream 5.0 lite<mark><sup>new</sup></mark>** **、doubao seedream 4.5/4.0**
-  - 生成组图（组图：基于您输入的内容，生成的一组内容关联的图片；需配置 **sequential_image_generation ** 为`auto` **）**
+- **Seedream 5.0 Pro<mark><sup>new</sup></mark>**
+  - 生成单图（配置 **sequential_image_generation** 不可用）
+    - 多图生图，根据您输入的 **<ins>多张参考图片（2\-10）</ins>** <ins>+文本提示词</ins> 生成单张图片。
+
+    - 单图生图，根据您输入的 <ins>单张参考图片+文本提示词</ins> 生成单张图片。
+
+    - 文生图，根据您输入的 <ins>文本提示词</ins> 生成单张图片。
+
+  - 不支持组图生成、联网搜索、流式输出
+
+- **Seedream 5.0 Lite** 、 **Seedream 4.5/4.0**
+  - 生成组图（组图：基于您输入的内容，生成的一组内容关联的图片；需配置 **sequential_image_generation** 为`auto`）
     - 多图生组图，根据您输入的 **<ins>多张参考图片（2\-14）</ins>** <ins>+文本提示词</ins> 生成一组内容关联的图片（输入的参考图数量+最终生成的图片数量≤15张）。
 
     - 单图生组图，根据您输入的 <ins>单张参考图片+文本提示词</ins> 生成一组内容关联的图片（最多生成14张图片）。
 
     - 文生组图，根据您输入的 <ins>文本提示词</ins> 生成一组内容关联的图片（最多生成15张图片）。
 
-  - 生成单图（配置 **sequential_image_generation ** 为`disabled` **）**
+  - 生成单图（配置 **sequential_image_generation** 为`disabled`）
     - 多图生图，根据您输入的 **<ins>多张参考图片（2\-14）</ins>** <ins>+文本提示词</ins> 生成单张图片。
 
     - 单图生图，根据您输入的 <ins>单张参考图片+文本提示词</ins> 生成单张图片。
@@ -22,18 +32,18 @@
 &nbsp;
 
 <Tabs>
-<Tab zoneid="oOTdY3Sn" title="鉴权说明">
+<Tab zoneid="F3uBBve5JL" title="鉴权说明">
 <TabTitle>鉴权说明</TabTitle>
 
 本接口仅支持 API Key 鉴权，请在 [获取 API Key](https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey) 页面，获取长效 API Key。
 
 </Tab>
-<Tab zoneid="HHCpvO5jKo" title="快速入门">
+<Tab zoneid="PusIHR45N7" title="快速入门">
 <TabTitle>快速入门</TabTitle>
 
-[ ](https://www.volcengine.com/docs/82379/1541523#)[体验中心](https://console.volcengine.com/ark/region:ark+cn-beijing/experience/vision?type=GenImage) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_2abecd05ca2779567c6d32f0ddc7874d.png) </span>[模型列表](https://www.volcengine.com/docs/82379/1330310?lang=zh#9df4d9fd) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_a5fdd3028d35cc512a10bd71b982b6eb.png) </span>[模型计费](https://www.volcengine.com/docs/82379/1544106?lang=zh#457edfd0) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_afbcf38bdec05c05089d5de5c3fd8fc8.png) </span>[API Key](https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?apikey=%7B%7D)
+<span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_b9c82890e851fc10cc31f48f9065abc6.png) </span> [体验中心](https://console.volcengine.com/ark/region:ark+cn-beijing/experience/vision?type=GenImage) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_2abecd05ca2779567c6d32f0ddc7874d.png) </span> [模型列表](https://www.volcengine.com/docs/82379/1330310?lang=zh#9df4d9fd) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_a5fdd3028d35cc512a10bd71b982b6eb.png) </span> [模型计费](https://www.volcengine.com/docs/82379/1544106?lang=zh#457edfd0) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_afbcf38bdec05c05089d5de5c3fd8fc8.png) </span> [API Key](https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey?apikey=%7B%7D)
 
-<span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_57d0bca8e0d122ab1191b40101b5df75.png) </span>[调用教程](https://www.volcengine.com/docs/82379/1548482) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_f45b5cd5863d1eed3bc3c81b9af54407.png) </span>[接口文档](https://www.volcengine.com/docs/82379/1666945) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_1609c71a747f84df24be1e6421ce58f0.png) </span>[常见问题](https://www.volcengine.com/docs/82379/1359411) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_bef4bc3de3535ee19d0c5d6c37b0ffdd.png) </span>[开通模型](https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)
+<span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_57d0bca8e0d122ab1191b40101b5df75.png) </span> [调用教程](https://www.volcengine.com/docs/82379/1548482) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_f45b5cd5863d1eed3bc3c81b9af54407.png) </span> [接口文档](https://www.volcengine.com/docs/82379/1666945) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_1609c71a747f84df24be1e6421ce58f0.png) </span> [常见问题](https://www.volcengine.com/docs/82379/1359411) <span>![图片](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_bef4bc3de3535ee19d0c5d6c37b0ffdd.png) </span> [开通模型](https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)
 
 </Tab>
 </Tabs>
@@ -50,15 +60,15 @@
 
 ---
 
-**model** `string` <span data-api-tag="require|hxjY9W">必选</span>
+**model** `string` `必选`
 
-您需要调用的模型的 ID （Model ID），[开通模型服务](https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)，并[查询 Model ID](https://www.volcengine.com/docs/82379/1330310?lang=zh#9df4d9fd) 。
+您需要调用的模型的 ID （Model ID），[开通模型服务](https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)，并[查询 Model ID](https://www.volcengine.com/docs/82379/1330310#9df4d9fd) 。
 
 您也可通过 Endpoint ID 来调用模型，获得限流、计费类型（前付费/后付费）、运行状态查询、监控、安全等高级能力，可参考[获取 Endpoint ID](https://www.volcengine.com/docs/82379/1099522)。
 
 ---
 
-**prompt ** `string` <span data-api-tag="require|F6ri2w">必选</span>
+**prompt** `string` `必选`
 
 用于生成图像的提示词，支持中英文。（查看提示词指南：[Seedream 4.0-5.0 提示词指南](https://www.volcengine.com/docs/82379/1829186)）
 
@@ -68,280 +78,254 @@
 
 **image** `string/array`
 
-输入的图片信息，支持 URL 或 Base64 编码。其中，doubao\-seedream\-5.0\-lite/4.5/4.0 支持单图或多图输入（[查看多图融合示例](https://www.volcengine.com/docs/82379/1824121?lang=zh#4a35e28f)）。
+输入的图片信息，支持 URL 或 Base64 编码。支持单图或多图输入（[查看多图融合示例](https://www.volcengine.com/docs/82379/1824121#4a35e28f)）。
 
 - 图片URL：请确保图片URL可被访问。
 
 - Base64编码：请遵循此格式`data:image/<图片格式>;base64,<Base64编码>`。注意 `<图片格式>` 需小写，如 `data:image/png;base64,<base64_image>`。
 
-<div data-tips="true" data-tips-type="default">说明</div>
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-- <div data-tips="true" data-tips-type="default">传入单张图片要求：</div>
-  - <div data-tips="true" data-tips-type="default">图片格式：jpeg、png（doubao\-seedream\-5.0\-lite/4.5/4.0 模型新增支持 webp、bmp、tiff、gif、heic、heif 格式<strong><mark><sup>new</sup></mark></strong>）</div>
-  - <div data-tips="true" data-tips-type="default">宽高比（宽/高）范围：</div>
-    - <div data-tips="true" data-tips-type="default">[1/16, 16] (适用模型：doubao\-seedream\-5.0\-lite/4.5/4.0）</div>
-  - <div data-tips="true" data-tips-type="default">宽高长度（px） \> 14</div>
-  - <div data-tips="true" data-tips-type="default">大小：不超过 30MB</div>
+- <div data-tips="true" data-tips-type="tip">传入单张图片要求：</div>
+  - <div data-tips="true" data-tips-type="tip">图片格式：jpeg、png、webp、bmp、tiff、gif、heic、heif</div>
+  - <div data-tips="true" data-tips-type="tip">宽高比（宽/高）范围：[1/16, 16]</div>
+  - <div data-tips="true" data-tips-type="tip">宽高长度（px） \> 14</div>
+  - <div data-tips="true" data-tips-type="tip">大小：不超过 30MB</div>
+  - <div data-tips="true" data-tips-type="tip">总像素：不超过 <code>6000x6000=36000000</code> px （对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制）</div>
 
-  - <div data-tips="true" data-tips-type="default">总像素：不超过 <code>6000x6000=36000000</code> px （对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制）</div>
-
-- <div data-tips="true" data-tips-type="default">doubao\-seedream\-5.0\-lite/4.5/4.0 最多支持传入 14 张参考图。</div>
+- <div data-tips="true" data-tips-type="tip">Seedream 5.0 Pro 最多支持传入 10 张参考图；Seedream 5.0 Lite/4.5/4.0 最多支持传入 14 张参考图。</div>
 
 ---
 
-**size ** `string`
+**size** `string`
 
 <Tabs>
-<Tab zoneid="BMB6AP1M" title="doubao-seedream-5.0-lite">
-<TabTitle>doubao-seedream-5.0-lite</TabTitle>
+<Tab zoneid="VQoHmTcbAn" title="Seedream 5.0 Pro">
+<TabTitle>Seedream 5.0 Pro</TabTitle>
 
 指定生成图像的尺寸信息，支持以下两种方式，不可混用。
 
-- 方式 1 | 指定生成图像的分辨率，并在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。
+- 方式 1 | 指定生成图像的宽高像素值（`宽x高`）：
+  - 默认值：`1024x1024`
+
+  - 总像素取值范围：[`1280x720`（921600）, `2048x2048`（4194304）]
+
+  - 宽高比取值范围：[1/16, 16]
+
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
+
+<div data-tips="true" data-tips-type="tip">采用方式 1 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。宽高像素须为 16 的倍数。</div>
+
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>2048x1024</code></div>
+
+   <div data-tips="true" data-tips-type="tip">总像素值 2048x1024=2097152，符合 [921600, 4194304] 的区间要求；宽高比 2048/1024=2，符合 [1/16, 16] 的区间要求；宽高均为 16 的倍数，故该示例值有效。   </div>
+
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>512x512</code></div>
+
+   <div data-tips="true" data-tips-type="tip">总像素值 512x512=262144，未达到 921600 的最低要求，故该示例值无效。   </div>
+
+- 方式 2 | 指定生成图像的分辨率档位，并在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。
+  - 可选值：`1K`、`2K`
+
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
+
+<div data-tips="true" data-tips-type="tip">采用方式 2 并在 prompt 中描述特定宽高比时，模型实际映射的宽高像素参考值：</div>
+
+<div data-tips="true" data-tips-type="tip">
+|分辨率 |宽高比 |宽高像素值 |
+|---|---|---|
+|1K |1:1 |1024x1024 |
+| |4:3 |1152x864 |
+| |3:4 |864x1152 |
+| |16:9 |1312x736 |
+| |9:16 |736x1312 |
+| |3:2 |1248x832 |
+| |2:3 |832x1248 |
+| |21:9 |1568x672 |
+|2K |1:1 |2048x2048 |
+| |4:3 |2304x1728 |
+| |3:4 |1728x2304 |
+| |16:9 |2848x1600 |
+| |9:16 |1600x2848 |
+| |3:2 |2496x1664 |
+| |2:3 |1664x2496 |
+| |21:9 |3136x1344 |
+</div>
+
+</Tab>
+<Tab zoneid="naPhJOA0Ne" title="Seedream 5.0 Lite">
+<TabTitle>Seedream 5.0 Lite</TabTitle>
+
+指定生成图像的尺寸信息，支持以下两种方式，不可混用。
+
+- 方式 1 | 指定生成图像的宽高像素值：
+  - 默认值：`2048x2048`
+
+  - 总像素取值范围：[`2560x1440`（3686400）, `4096x4096`（16777216）]
+
+  - 宽高比取值范围：[1/16, 16]
+
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
+
+<div data-tips="true" data-tips-type="tip">采用方式 1 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
+
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>3750x1250</code></div>
+
+   <div data-tips="true" data-tips-type="tip">总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。   </div>
+
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>1500x1500</code></div>
+
+   <div data-tips="true" data-tips-type="tip">总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但因其未同时满足两项限制，故该示例值无效。   </div>
+
+- 方式 2 | 指定生成图像的分辨率，并在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。
   - 可选值：`2K`、`3K`、`4K`
 
-- 方式 2 | 指定生成图像的宽高像素值：
-  - 默认值：`2048x2048`
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-  - 总像素取值范围：[`2560x1440=3686400`, `4096x4096=16777216`]
+<div data-tips="true" data-tips-type="tip">采用方式 2 并在 prompt 中描述特定宽高比时，模型实际映射的宽高像素参考值：</div>
 
-  - 宽高比取值范围：[1/16, 16]
-
-<div data-tips="true" data-tips-type="default">说明</div>
-
-<div data-tips="true" data-tips-type="default">采用方式 2 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
-
-- <div data-tips="true" data-tips-type="default"><strong>有效示例</strong>：<code>3750x1250</code></div>
-
-<div data-tips="true" data-tips-type="default">总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
-
-- <div data-tips="true" data-tips-type="default"><strong>无效示例</strong>：<code>1500x1500</code></div>
-
-<div data-tips="true" data-tips-type="default">总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但因其未同时满足两项限制，故该示例值无效。</div>
-
-推荐的宽高像素值：
-
-| 分辨率                                           | 宽高比 | 宽高像素值 |
-| ------------------------------------------------ | ------ | ---------- |
-| <div style="text-align: center"><br>2K</div><br> | 1:1    | 2048x2048  |
-|                                                  | 4:3    | 2304x1728  |
-|                                                  | 3:4    | 1728x2304  |
-|                                                  | 16:9   | 2848x1600  |
-|                                                  | 9:16   | 1600x2848  |
-|                                                  | 3:2    | 2496x1664  |
-|                                                  | 2:3    | 1664x2496  |
-|                                                  | 21:9   | 3136x1344  |
-| <div style="text-align: center"><br>3K</div><br> | 1:1    | 3072x3072  |
-|                                                  | 4:3    | 3456x2592  |
-|                                                  | 3:4    | 2592x3456  |
-|                                                  | 16:9   | 4096x2304  |
-|                                                  | 9:16   | 2304x4096  |
-|                                                  | 2:3    | 2496x3744  |
-|                                                  | 3:2    | 3744x2496  |
-|                                                  | 21:9   | 4704x2016  |
-| <div style="text-align: center"><br>4K</div><br> | 1:1    | 4096x4096  |
-|                                                  | 3:4    | 3520x4704  |
-|                                                  | 4:3    | 4704x3520  |
-|                                                  | 16:9   | 5504x3040  |
-|                                                  | 9:16   | 3040x5504  |
-|                                                  | 2:3    | 3328x4992  |
-|                                                  | 3:2    | 4992x3328  |
-|                                                  | 21:9   | 6240x2656  |
+<div data-tips="true" data-tips-type="tip">
+|分辨率 |宽高比 |宽高像素值 |
+|---|---|---|
+|2K |1:1 |2048x2048 |
+| |4:3 |2304x1728 |
+| |3:4 |1728x2304 |
+| |16:9 |2848x1600 |
+| |9:16 |1600x2848 |
+| |3:2 |2496x1664 |
+| |2:3 |1664x2496 |
+| |21:9 |3136x1344 |
+|3K |1:1 |3072x3072 |
+| |4:3 |3456x2592 |
+| |3:4 |2592x3456 |
+| |16:9 |4096x2304 |
+| |9:16 |2304x4096 |
+| |3:2 |3744x2496 |
+| |2:3 |2496x3744 |
+| |21:9 |4704x2016 |
+|4K |1:1 |4096x4096 |
+| |4:3 |4704x3520 |
+| |3:4 |3520x4704 |
+| |16:9 |5504x3040 |
+| |9:16 |3040x5504 |
+| |3:2 |4992x3328 |
+| |2:3 |3328x4992 |
+| |21:9 |6240x2656 |
+</div>
 
 </Tab>
-<Tab zoneid="kghENadO" title="doubao-seedream-4.5">
-<TabTitle>doubao-seedream-4.5</TabTitle>
+<Tab zoneid="QUBh9gc2xc" title="Seedream 4.5">
+<TabTitle>Seedream 4.5</TabTitle>
 
 指定生成图像的尺寸信息，支持以下两种方式，不可混用。
 
-- 方式 1 | 指定生成图像的分辨率，并在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。
+- 方式 1 | 指定生成图像的宽高像素值：
+  - 默认值：`2048x2048`
+
+  - 总像素取值范围：[`2560x1440`（3686400）, `4096x4096`（16777216）]
+
+  - 宽高比取值范围：[1/16, 16]
+
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
+
+<div data-tips="true" data-tips-type="tip">采用方式 1 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
+
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>3750x1250</code></div>
+
+   <div data-tips="true" data-tips-type="tip">总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。   </div>
+
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>1500x1500</code></div>
+
+   <div data-tips="true" data-tips-type="tip">总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但因其未同时满足两项限制，故该示例值无效。   </div>
+
+- 方式 2 | 指定生成图像的分辨率，并在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。
   - 可选值：`2K`、`4K`
 
-- 方式 2 | 指定生成图像的宽高像素值：
-  - 默认值：`2048x2048`
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-  - 总像素取值范围：[`2560x1440=3686400`, `4096x4096=16777216`]
+<div data-tips="true" data-tips-type="tip">采用方式 2 并在 prompt 中描述特定宽高比时，模型实际映射的宽高像素参考值：</div>
 
-  - 宽高比取值范围：[1/16, 16]
-
-<div data-tips="true" data-tips-type="default">说明</div>
-
-<div data-tips="true" data-tips-type="default">采用方式 2 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
-
-- <div data-tips="true" data-tips-type="default"><strong>有效示例</strong>：<code>3750x1250</code></div>
-
-<div data-tips="true" data-tips-type="default">总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
-
-- <div data-tips="true" data-tips-type="default"><strong>无效示例</strong>：<code>1500x1500</code></div>
-
-<div data-tips="true" data-tips-type="default">总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但因其未同时满足两项限制，故该示例值无效。</div>
-
-推荐的宽高像素值：
-
-| 分辨率                                           | 宽高比 | 宽高像素值 |
-| ------------------------------------------------ | ------ | ---------- |
-| <div style="text-align: center"><br>2K</div><br> | 1:1    | 2048x2048  |
-|                                                  | 4:3    | 2304x1728  |
-|                                                  | 3:4    | 1728x2304  |
-|                                                  | 16:9   | 2848x1600  |
-|                                                  | 9:16   | 1600x2848  |
-|                                                  | 3:2    | 2496x1664  |
-|                                                  | 2:3    | 1664x2496  |
-|                                                  | 21:9   | 3136x1344  |
-| <div style="text-align: center"><br>4K</div><br> | 1:1    | 4096x4096  |
-|                                                  | 3:4    | 3520x4704  |
-|                                                  | 4:3    | 4704x3520  |
-|                                                  | 16:9   | 5504x3040  |
-|                                                  | 9:16   | 3040x5504  |
-|                                                  | 2:3    | 3328x4992  |
-|                                                  | 3:2    | 4992x3328  |
-|                                                  | 21:9   | 6240x2656  |
+<div data-tips="true" data-tips-type="tip">
+|分辨率 |宽高比 |宽高像素值 |
+|---|---|---|
+|2K |1:1 |2048x2048 |
+| |4:3 |2304x1728 |
+| |3:4 |1728x2304 |
+| |16:9 |2848x1600 |
+| |9:16 |1600x2848 |
+| |3:2 |2496x1664 |
+| |2:3 |1664x2496 |
+| |21:9 |3136x1344 |
+|4K |1:1 |4096x4096 |
+| |4:3 |4704x3520 |
+| |3:4 |3520x4704 |
+| |16:9 |5504x3040 |
+| |9:16 |3040x5504 |
+| |3:2 |4992x3328 |
+| |2:3 |3328x4992 |
+| |21:9 |6240x2656 |
+</div>
 
 </Tab>
-<Tab zoneid="MKsftGMr" title="doubao-seedream-4.0">
-<TabTitle>doubao-seedream-4.0</TabTitle>
+<Tab zoneid="hBYi3sINqF" title="Seedream 4.0">
+<TabTitle>Seedream 4.0</TabTitle>
 
 指定生成图像的尺寸信息，支持以下两种方式，不可混用。
 
-- 方式 1 | 指定生成图像的分辨率，并在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。
-  - 可选值：`1K`、`2K`、`4K`
-
-- 方式 2 | 指定生成图像的宽高像素值：
+- 方式 1 | 指定生成图像的宽高像素值：
   - 默认值：`2048x2048`
 
-  - 总像素取值范围：[`1280x720=921600`, `4096x4096=16777216`]
+  - 总像素取值范围：[`1280x720`（921600）, `4096x4096`（16777216）]
 
   - 宽高比取值范围：[1/16, 16]
 
-<div data-tips="true" data-tips-type="default">说明</div>
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="default">采用方式 2 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
+<div data-tips="true" data-tips-type="tip">采用方式 1 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
 
-- <div data-tips="true" data-tips-type="default"><strong>有效示例</strong>：<code>1600x600</code></div>
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>1600x600</code></div>
 
-<div data-tips="true" data-tips-type="default">总像素值 1600x600=960000，符合 [921600, 16777216] 的区间要求；宽高比 1600/600=8/3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
+   <div data-tips="true" data-tips-type="tip">总像素值 1600x600=960000，符合 [921600, 16777216] 的区间要求；宽高比 1600/600=8/3，符合 [1/16, 16] 的区间要求，故该示例值有效。   </div>
 
-- <div data-tips="true" data-tips-type="default"><strong>无效示例</strong>：<code>800x800</code></div>
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>800x800</code></div>
 
-<div data-tips="true" data-tips-type="default">总像素值 800x800=640000，未达到 921600 的最低要求；宽高 800/800=1，虽符合 [1/16, 16] 的区间要求，但因其未同时满足两项限制，故该示例值无效。</div>
+   <div data-tips="true" data-tips-type="tip">总像素值 800x800=640000，未达到 921600 的最低要求；宽高 800/800=1，虽符合 [1/16, 16] 的区间要求，但因其未同时满足两项限制，故该示例值无效。   </div>
 
-推荐的宽高像素值：
+- 方式 2 | 指定生成图像的分辨率，并在prompt中用自然语言描述图片宽高比、图片形状或图片用途，最终由模型判断生成图片的大小。
+  - 可选值：`1K`、`2K`、`4K`
 
-| 分辨率                                           | 宽高比 | 宽高像素值 |
-| ------------------------------------------------ | ------ | ---------- |
-| <div style="text-align: center"><br>1K</div><br> | 1:1    | 1024x1024  |
-|                                                  | 4:3    | 1152x864   |
-|                                                  | 3:4    | 864x1152   |
-|                                                  | 16:9   | 1280x720   |
-|                                                  | 9:16   | 720x1280   |
-|                                                  | 3:2    | 1248x832   |
-|                                                  | 2:3    | 832x1248   |
-|                                                  | 21:9   | 1512x648   |
-| <div style="text-align: center"><br>2K</div><br> | 1:1    | 2048x2048  |
-|                                                  | 4:3    | 2304x1728  |
-|                                                  | 3:4    | 1728x2304  |
-|                                                  | 16:9   | 2848x1600  |
-|                                                  | 9:16   | 1600x2848  |
-|                                                  | 3:2    | 2496x1664  |
-|                                                  | 2:3    | 1664x2496  |
-|                                                  | 21:9   | 3136x1344  |
-| <div style="text-align: center"><br>4K</div><br> | 1:1    | 4096x4096  |
-|                                                  | 3:4    | 3520x4704  |
-|                                                  | 4:3    | 4704x3520  |
-|                                                  | 16:9   | 5504x3040  |
-|                                                  | 9:16   | 3040x5504  |
-|                                                  | 2:3    | 3328x4992  |
-|                                                  | 3:2    | 4992x3328  |
-|                                                  | 21:9   | 6240x2656  |
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-</Tab>
-<Tab zoneid="dUuqsxPhNL" title="doubao-seedream-3.0-t2i">
-<TabTitle>doubao-seedream-3.0-t2i</TabTitle>
+<div data-tips="true" data-tips-type="tip">采用方式 2 并在 prompt 中描述特定宽高比时，模型实际映射的宽高像素参考值：</div>
 
-指定生成图像的宽高像素值。
-
-- 默认值：`1024x1024`
-
-- 单张图片像素取值范围： [`512x512`, `2048x2048`]
-
-推荐的宽高像素值：
-
-| 宽高比 | 宽高像素值 |
-| ------ | ---------- |
-| 1:1    | 1024x1024  |
-| 4:3    | 864x1152   |
-| 3:4    | 1152x864   |
-| 16:9   | 1280x720   |
-| 9:16   | 720x1280   |
-| 3:2    | 832x1248   |
-| 2:3    | 1248x832   |
-| 21:9   | 1512x648   |
-
-</Tab>
-<Tab zoneid="x1x8AMzCkX" title="">
-<TabTitle></TabTitle>
-
-指定生成图像的宽高像素值。**当前仅支持 adaptive。**
-
-- adaptive。将您的输入图片尺寸与下表中的尺寸进行对比，选择最接近的，作为输出图片的尺寸。具体而言，会按顺序从可选比例中，选取与原图宽高比**差值最小**的**第一个**，作为生成图片的比例。
-
-- 预设的高宽像素
-
-| 宽/高 | 宽   | 高   |
-| ----- | ---- | ---- |
-| 0.33  | 512  | 1536 |
-| 0.35  | 544  | 1536 |
-| 0.38  | 576  | 1536 |
-| 0.4   | 608  | 1536 |
-| 0.42  | 640  | 1536 |
-| 0.47  | 640  | 1376 |
-| 0.51  | 672  | 1312 |
-| 0.55  | 704  | 1280 |
-| 0.56  | 736  | 1312 |
-| 0.6   | 768  | 1280 |
-| 0.63  | 768  | 1216 |
-| 0.66  | 800  | 1216 |
-| 0.67  | 832  | 1248 |
-| 0.7   | 832  | 1184 |
-| 0.72  | 832  | 1152 |
-| 0.75  | 864  | 1152 |
-| 0.78  | 896  | 1152 |
-| 0.82  | 896  | 1088 |
-| 0.85  | 928  | 1088 |
-| 0.88  | 960  | 1088 |
-| 0.91  | 992  | 1088 |
-| 0.94  | 1024 | 1088 |
-| 0.97  | 1024 | 1056 |
-| 1     | 1024 | 1024 |
-| 1.06  | 1056 | 992  |
-| 1.1   | 1088 | 992  |
-| 1.17  | 1120 | 960  |
-| 1.24  | 1152 | 928  |
-| 1.29  | 1152 | 896  |
-| 1.33  | 1152 | 864  |
-| 1.42  | 1184 | 832  |
-| 1.46  | 1216 | 832  |
-| 1.5   | 1248 | 832  |
-| 1.56  | 1248 | 800  |
-| 1.62  | 1248 | 768  |
-| 1.67  | 1280 | 768  |
-| 1.74  | 1280 | 736  |
-| 1.82  | 1280 | 704  |
-| 1.78  | 1312 | 736  |
-| 1.86  | 1312 | 704  |
-| 1.95  | 1312 | 672  |
-| 2     | 1344 | 672  |
-| 2.05  | 1376 | 672  |
-| 2.1   | 1408 | 672  |
-| 2.2   | 1408 | 640  |
-| 2.25  | 1440 | 640  |
-| 2.3   | 1472 | 640  |
-| 2.35  | 1504 | 640  |
-| 2.4   | 1536 | 640  |
-| 2.53  | 1536 | 608  |
-| 2.67  | 1536 | 576  |
-| 2.82  | 1536 | 544  |
-| 3     | 1536 | 512  |
+<div data-tips="true" data-tips-type="tip">
+|分辨率 |宽高比 |宽高像素值 |
+|---|---|---|
+|1K |1:1 |1024x1024 |
+| |4:3 |1152x864 |
+| |3:4 |864x1152 |
+| |16:9 |1280x720 |
+| |9:16 |720x1280 |
+| |3:2 |1248x832 |
+| |2:3 |832x1248 |
+| |21:9 |1512x648 |
+|2K |1:1 |2048x2048 |
+| |4:3 |2304x1728 |
+| |3:4 |1728x2304 |
+| |16:9 |2848x1600 |
+| |9:16 |1600x2848 |
+| |3:2 |2496x1664 |
+| |2:3 |1664x2496 |
+| |21:9 |3136x1344 |
+|4K |1:1 |4096x4096 |
+| |4:3 |4704x3520 |
+| |3:4 |3520x4704 |
+| |16:9 |5504x3040 |
+| |9:16 |3040x5504 |
+| |3:2 |4992x3328 |
+| |2:3 |3328x4992 |
+| |21:9 |6240x2656 |
+</div>
 
 </Tab>
 </Tabs>
@@ -350,13 +334,13 @@
 
 **sequential_image_generation** `string` `默认值 disabled`
 
-> 仅 doubao\-seedream\-5.0\-lite/4.5/4.0 支持该参数 | [查看组图输出示例](https://www.volcengine.com/docs/82379/1824121?lang=zh#fc9f85e4)
+> 仅 Seedream 5.0 Lite/4.5/4.0 支持该参数 | Seedream 5.0 Pro 不支持，传参报错 | [查看组图输出示例](https://www.volcengine.com/docs/82379/1824121#fc9f85e4)
 
 控制是否关闭组图功能。
 
-<div data-tips="true" data-tips-type="default" data-tips-is-title="true">说明</div>
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="default">组图：基于您输入的内容，生成的一组内容关联的图片。</div>
+<div data-tips="true" data-tips-type="tip">组图：基于您输入的内容，生成的一组内容关联的图片。</div>
 
 - `auto`：自动判断模式，模型会根据用户提供的提示词自主判断是否返回组图以及组图包含的图片数量。
 
@@ -364,31 +348,31 @@
 
 ---
 
-**sequential_image_generation_options ** `object`
+**sequential_image_generation_options** `object`
 
-> 仅 doubao\-seedream\-5.0\-lite/4.5/4.0 支持该参数
+> 仅 Seedream 5.0 Lite/4.5/4.0 支持该参数 | Seedream 5.0 Pro 不支持，传参报错
 
-组图功能的配置。仅当 **sequential_image_generation ** 为 `auto` 时生效。
+组图功能的配置。仅当 **sequential_image_generation** 为 `auto` 时生效。
 
 属性
 
 ---
 
-sequential_image_generation_options.**max_images ** \*\* \*\* `integer` `默认值 15`
+sequential_image_generation_options. **max_images** `integer` `默认值 15`
 
 指定本次请求，最多可生成的图片数量。
 
 - 取值范围： [1, 15]
 
-<div data-tips="true" data-tips-type="default">说明</div>
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="default">实际可生成的图片数量，除受到 <strong>max_images </strong>影响外<strong>，</strong>还受到输入的参考图数量影响。<strong>输入的参考图数量+最终生成的图片数量≤15张</strong>。</div>
+<div data-tips="true" data-tips-type="tip">实际可生成的图片数量，除受到 <strong>max_images</strong> 影响外，还受到输入的参考图数量影响。 <strong>输入的参考图数量+最终生成的图片数量≤15张</strong> 。</div>
 
 ---
 
-**tools<mark><sup>new</sup></mark>** \*\* \*\* `array of object`
+**tools** `array of object`
 
-> 仅 doubao\-seedream\-5.0\-lite 支持该参数
+> 仅 Seedream 5.0 Lite 支持该参数 | Seedream 5.0 Pro 不支持，传参报错
 
 配置模型要调用的工具。
 
@@ -396,23 +380,23 @@ sequential_image_generation_options.**max_images ** \*\* \*\* `integer` `默认�
 
 ---
 
-tools.**type ** `string`
+tools. **type** `string`
 
 指定使用的工具类型。
 
 - `web_search`：联网搜索功能。
 
-<div data-tips="true" data-tips-type="default" data-tips-is-title="true">说明</div>
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-- <div data-tips="true" data-tips-type="default">开启联网搜索后，模型会根据用户的提示词自主判断是否搜索互联网内容（如商品、天气等），提升生成图片的时效性，但也会增加一定的时延。</div>
+- <div data-tips="true" data-tips-type="tip">开启联网搜索后，模型会根据用户的提示词自主判断是否搜索互联网内容（如商品、天气等），提升生成图片的时效性，但也会增加一定的时延。</div>
 
-- <div data-tips="true" data-tips-type="default">实际搜索次数可通过字段 usage.tool_usage.<strong>web_search</strong> 查询，如果为 0 表示未搜索。</div>
+- <div data-tips="true" data-tips-type="tip">实际搜索次数可通过字段 usage.tool_usage. <strong>web_search</strong> 查询，如果为 0 表示未搜索。</div>
 
 ---
 
 **stream** `Boolean` `默认值 false`
 
-> 仅 doubao\-seedream\-5.0\-lite/4.5/4.0 支持该参数 | [查看流式输出示例](https://www.volcengine.com/docs/82379/1824121?lang=zh#e5bef0d7)
+> 仅 Seedream 5.0 Lite/4.5/4.0 支持该参数 | Seedream 5.0 Pro 不支持，传参报错 | [查看流式输出示例](https://www.volcengine.com/docs/82379/1824121#e5bef0d7)
 
 控制是否开启流式输出模式。
 
@@ -422,19 +406,9 @@ tools.**type ** `string`
 
 ---
 
-**guidance_scale ** `Float`
+**output_format<mark><sup>new</sup></mark>** `string` `默认值 jpeg`
 
-> doubao\-seedream\-5.0\-lite/4.5/4.0 不支持
-
-模型输出结果与prompt的一致程度，生成图像的自由度，又称为文本权重；值越大，模型自由度越小，与用户输入的提示词相关性越强。
-
-取值范围：[`1`, `10`] 。
-
----
-
-**output_format<mark><sup>new</sup></mark>**`string` `默认值 jpeg`
-
-> 仅 doubao\-seedream\-5.0\-lite 支持该参数
+> 仅 Seedream 5.0 Pro/5.0 Lite 支持该参数
 
 指定生成图像的文件格式。可选值：
 
@@ -442,9 +416,9 @@ tools.**type ** `string`
 
 - `jpeg`
 
-<div data-tips="true" data-tips-type="default" data-tips-is-title="true">说明</div>
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="default">doubao\-seedream\-4.5/4.0 模型生成图像的文件格式默认为 jpeg，不支持自定义设置。</div>
+<div data-tips="true" data-tips-type="tip">Seedream 4.5/4.0 模型生成图像的文件格式默认为 jpeg，不支持自定义设置。</div>
 
 ---
 
@@ -452,7 +426,7 @@ tools.**type ** `string`
 
 指定生成图像的返回格式。支持以下两种返回方式：
 
-- `url`：返回图片下载链接；**链接在图片生成后24小时内有效，请及时下载图片。**
+- `url`：返回图片下载链接； **链接在图片生成后24小时内有效，请及时下载图片。**
 
 - `b64_json`：以 Base64 编码字符串的 JSON 格式返回图像数据。
 
@@ -468,25 +442,21 @@ tools.**type ** `string`
 
 ---
 
-**optimize_prompt_options ** `object`
-
-> 仅 doubao\-seedream\-5.0\-lite/4.5/4.0 支持该参数
+**optimize_prompt_options** `object`
 
 提示词优化功能的配置。
 
 属性
 
-optimize_prompt_options.**mode ** `string` `默认值 standard`
+optimize_prompt_options. **mode** `string` `默认值 standard`
 
 设置提示词优化功能使用的模式。
 
 - `standard`：标准模式，生成内容的质量更高，耗时较长。
 
-- `fast`：快速模式，生成内容的耗时更短，质量一般；doubao\-seedream\-5.0\-lite/4.5 当前不支持。
+- `fast`：快速模式，生成内容的耗时更短，质量一般；Seedream 5.0 Pro/5.0 Lite/4.5 当前不支持。
 
 ---
-
-&nbsp;
 
 <span id="7P96iLnc"></span>
 
@@ -496,9 +466,7 @@ optimize_prompt_options.**mode ** `string` `默认值 standard`
 
 ### 流式响应参数
 
-请参见[文档](https://www.volcengine.com/docs/82379/1824137?lang=zh)。
-
-&nbsp;
+请参见[文档](https://www.volcengine.com/docs/82379/1824137)。
 
 <span id="1AxnwQZN"></span>
 
@@ -522,13 +490,13 @@ optimize_prompt_options.**mode ** `string` `默认值 standard`
 
 输出图像的信息。
 
-<div data-tips="true" data-tips-type="default">说明</div>
+<div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="default">doubao\-seedream\-5.0\-lite/4.5/4.0 模型生成组图场景下，组图生成过程中某张图生成失败时：</div>
+<div data-tips="true" data-tips-type="tip">Seedream 5.0 Lite/4.5/4.0 模型生成组图场景下，组图生成过程中某张图生成失败时：</div>
 
-- <div data-tips="true" data-tips-type="default">若失败原因为审核不通过：仍会继续请求下一个图片生成任务，即不影响同请求内其他图片的生成流程。</div>
+- <div data-tips="true" data-tips-type="tip">若失败原因为审核不通过：仍会继续请求下一个图片生成任务，即不影响同请求内其他图片的生成流程。</div>
 
-- <div data-tips="true" data-tips-type="default">若失败原因为内部服务异常（500）：不会继续请求下一个图片生成任务。</div>
+- <div data-tips="true" data-tips-type="tip">若失败原因为内部服务异常（500）：不会继续请求下一个图片生成任务。</div>
 
 可能类型
 
@@ -538,23 +506,31 @@ optimize_prompt_options.**mode ** `string` `默认值 standard`
 
 属性
 
-data.**url ** `string`
+data. **url** `string`
 
-图片的 url 信息，当 **response_format ** 指定为 `url` 时返回。该链接将在生成后 **24 小时内失效**，请务必及时保存图像。
+图片的 url 信息，当 **response_format** 指定为 `url` 时返回。该链接将在生成后 **24 小时内失效** ，请务必及时保存图像。
 
 推荐配置火山引擎 TOS 提供的数据订阅功能，将您的模型推理产物自动转存到自己的 TOS 桶中，便于长期备份或二次加工。详细介绍请参见 [TOS 数据订阅](https://www.volcengine.com/docs/6349/2280949?lang=zh)。
 
 ---
 
-data.**b64_json** `string`
+data. **b64_json** `string`
 
-图片的 base64 信息，当 **response_format ** 指定为 `b64_json` 时返回。
+图片的 base64 信息，当 **response_format** 指定为 `b64_json` 时返回。
 
 ---
 
-data.**size** `string`
+data. **output_format** `string`
 
-> 仅 doubao\-seedream\-5.0\-lite/4.5/4.0 支持该字段。
+> 仅 Seedream 5.0 Pro 支持该字段。
+
+输出图像的格式信息。
+
+---
+
+data. **size** `string`
+
+> 仅 Seedream 5.0 Pro/5.0 Lite/4.5/4.0 支持该字段。
 
 图像的宽高像素值，格式 `<宽像素>x<高像素>`，如`2048×2048`。
 
@@ -566,7 +542,7 @@ data.**size** `string`
 
 属性
 
-data.**error** `object`
+data. **error** `object`
 
 错误信息结构体。
 
@@ -574,13 +550,13 @@ data.**error** `object`
 
 ---
 
-data.error.**code**
+data.error. **code**
 
 某张图片生成错误的错误码，请参见[错误码](https://www.volcengine.com/docs/82379/1299023)。
 
 ---
 
-data.error.**message**
+data.error. **message**
 
 某张图片生成错误的提示信息。
 
@@ -594,7 +570,7 @@ data.error.**message**
 
 ---
 
-tools.**type ** `string`
+tools. **type** `string`
 
 配置的调用工具类型。
 
@@ -610,7 +586,7 @@ tools.**type ** `string`
 
 ---
 
-usage.**generated_images ** `integer`
+usage. **generated_images** `integer`
 
 模型成功生成的图片张数，不包含生成失败的图片。
 
@@ -618,7 +594,15 @@ usage.**generated_images ** `integer`
 
 ---
 
-usage.**output_tokens** `integer`
+usage. **input_images<mark><sup>new</sup></mark>** `integer`
+
+> 仅 Seedream 5.0 Pro 返回该字段
+
+输入模型的图片张数。
+
+---
+
+usage. **output_tokens** `integer`
 
 模型生成的图片花费的 token 数量。
 
@@ -626,7 +610,7 @@ usage.**output_tokens** `integer`
 
 ---
 
-usage.**total_tokens** `integer`
+usage. **total_tokens** `integer`
 
 本次请求消耗的总 token 数量。
 
@@ -634,7 +618,7 @@ usage.**total_tokens** `integer`
 
 ---
 
-usage.**tool_usage ** `object`
+usage. **tool_usage** `object`
 
 使用工具的用量信息。
 
@@ -642,7 +626,7 @@ usage.**tool_usage ** `object`
 
 ---
 
-usage.tool_usage.**web_search ** `integer`
+usage.tool_usage. **web_search** `integer`
 
 调用联网搜索工具次数，仅开启联网搜索时返回。
 
@@ -656,14 +640,12 @@ usage.tool_usage.**web_search ** `integer`
 
 ---
 
-error.**code** `string`
+error. **code** `string`
 
 请参见[错误码](https://www.volcengine.com/docs/82379/1299023)。
 
 ---
 
-error.**message** `string`
+error. **message** `string`
 
 错误提示信息
-
-&nbsp;

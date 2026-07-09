@@ -16,7 +16,7 @@ Doubao\-seedream\-5.0\-lite/4.5/4.0 支持流式输出模式。当您调用图�
 
 **type** `string`
 
-此处应为` image_generation.partial_succeeded`。
+此处应为`image_generation.partial_succeeded`。
 
 ---
 
@@ -36,17 +36,17 @@ Doubao\-seedream\-5.0\-lite/4.5/4.0 支持流式输出模式。当您调用图�
 
 本次生图请求中，本次事件对应图片在请求中的序号。
 
-从 `0`开始累加，不管生图是否成功，即在` image_generation.partial_succeeded`、`image_generation.partial_failed` 事件，均会自动累加 1。
+从 `0`开始累加，不管生图是否成功，即在`image_generation.partial_succeeded`、`image_generation.partial_failed` 事件，均会自动累加 1。
 
 ---
 
-**url ** `string`
+**url** `string`
 
 本次事件对应图片的下载 URL。当请求中配置字段 **response_format** 为 `url` 时返回。
 
 ---
 
-**b64_json ** `string`
+**b64_json** `string`
 
 本次事件对应图片的 Base64 编码。当请求中配置字段 **response_format** 为 `b64_json` 时返回。
 
@@ -127,19 +127,17 @@ Doubao\-seedream\-5.0\-lite/4.5/4.0 支持流式输出模式。当您调用图�
 
 ---
 
-error.**code** `string`
+error. **code** `string`
 
 请参见[错误码](https://www.volcengine.com/docs/82379/1299023)。
 
 ---
 
-error.**message** `string`
+error. **message** `string`
 
 错误提示信息
 
-<span id="UZPzLDle"></span>
-
-###
+&nbsp;
 
 <span id="UZPzLDle"></span>
 
@@ -200,7 +198,7 @@ error.**message** `string`
 
 ---
 
-tools.**type ** `string`
+tools. **type** `string`
 
 配置的调用工具类型。
 
@@ -216,7 +214,7 @@ tools.**type ** `string`
 
 ---
 
-usage.**generated_images ** `integer`
+usage. **generated_images** `integer`
 
 模型成功生成的图片张数，不包含生成失败的图片。
 
@@ -224,7 +222,7 @@ usage.**generated_images ** `integer`
 
 ---
 
-usage.**output_tokens** `integer`
+usage. **output_tokens** `integer`
 
 模型生成的图片花费的 token 数量。
 
@@ -232,7 +230,7 @@ usage.**output_tokens** `integer`
 
 ---
 
-usage.**total_tokens** `integer`
+usage. **total_tokens** `integer`
 
 本次请求消耗的总 token 数量。
 
@@ -240,7 +238,7 @@ usage.**total_tokens** `integer`
 
 ---
 
-usage.**tool_usage ** `object`
+usage. **tool_usage** `object`
 
 使用工具的用量信息。
 
@@ -248,7 +246,7 @@ usage.**tool_usage ** `object`
 
 ---
 
-usage.tool_usage.**web_search ** `integer`
+usage.tool_usage. **web_search** `integer`
 
 调用联网搜索工具次数，仅开启联网搜索时返回。
 
@@ -293,7 +291,7 @@ usage.tool_usage.**web_search ** `integer`
 
 ### 参数说明
 
-**error ** `object`
+**error** `object`
 
 本次请求错误，返回的错误信息。
 
@@ -301,13 +299,13 @@ usage.tool_usage.**web_search ** `integer`
 
 ---
 
-error.**code** `string`
+error. **code** `string`
 
 请参见[错误码](https://www.volcengine.com/docs/82379/1299023)。
 
 ---
 
-error.**message** `string`
+error. **message** `string`
 
 错误提示信息。
 
@@ -323,5 +321,3 @@ error.**message** `string`
   "message":"The request failed because it is missing one or multiple required parameters. Request ID: {id}"
 }
 ```
-
-&nbsp;
