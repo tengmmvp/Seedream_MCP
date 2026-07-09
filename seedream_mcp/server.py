@@ -314,6 +314,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model",
         choices=[
+            "doubao-seedream-5.0-pro",
             "doubao-seedream-5.0",
             "doubao-seedream-5.0-lite",
             "doubao-seedream-4.5",

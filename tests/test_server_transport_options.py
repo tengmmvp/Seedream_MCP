@@ -3,7 +3,7 @@ from argparse import Namespace
 import pytest
 
 import seedream_mcp.server as server
-from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.config import MODEL_ALIASES, SeedreamConfig
 
 
 def test_build_arg_parser_rejects_deprecated_sse_transport() -> None:
@@ -25,6 +25,14 @@ def test_build_arg_parser_supports_seedream_50_model_choice() -> None:
     args = parser.parse_args(["--model", "doubao-seedream-5.0"])
 
     assert args.model == "doubao-seedream-5.0"
+
+
+def test_build_arg_parser_supports_all_model_aliases() -> None:
+    """CLI --model choices 应覆盖全部 MODEL_ALIASES，避免新增模型时遗漏 choices 同步。"""
+    parser = server._build_arg_parser()
+    for alias in MODEL_ALIASES:
+        args = parser.parse_args(["--model", alias])
+        assert args.model == alias
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
