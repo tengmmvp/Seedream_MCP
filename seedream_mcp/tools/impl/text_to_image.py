@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # 标准库导入
-from typing import Any, TYPE_CHECKING, Dict, cast
+from typing import Any, TYPE_CHECKING, Dict
 
 # 第三方库导入
 from mcp.types import CallToolResult
@@ -66,7 +66,8 @@ async def handle_text_to_image(
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
     ) -> Dict[str, Any]:
-        result = await client.text_to_image(
+        # log_function_call 装饰器将返回类型归一化为 Any，显式标注恢复 Dict 契约。
+        result: Dict[str, Any] = await client.text_to_image(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             size=context.size,
@@ -76,7 +77,7 @@ async def handle_text_to_image(
             stream=context.stream,
             tools=context.tools,
         )
-        return cast(Dict[str, Any], result)
+        return result
 
     return await execute_generation_handler(
         arguments=arguments,

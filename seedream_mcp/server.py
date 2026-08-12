@@ -6,15 +6,17 @@ from __future__ import annotations
 
 # 标准库导入
 import argparse
+import asyncio
+import hmac
 import json
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Literal, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, Optional, cast
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 # 本地模块导入
-from .config import SeedreamConfig, build_config_from_sources, get_global_config
+from .config import MODEL_ALIASES, SeedreamConfig, build_config_from_sources, get_global_config
 from .tools import (
     BrowseImagesInput,
     ImageToImageInput,
@@ -35,6 +37,10 @@ from .utils.errors import SeedreamConfigError, format_error_for_user
 from .utils.logging import get_logger, setup_logging
 from .utils.path_utils import get_workspace_roots, workspace_roots_scope
 from .version import __version__
+
+if TYPE_CHECKING:
+    from .client import SeedreamClient
+    from .utils.download_manager import DownloadManager
 
 # ==================== 服务器元数据常量 ====================
 
@@ -78,6 +84,16 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 # 当前服务器运行时配置
 _active_config: SeedreamConfig | None = None
 
+# 模块日志记录器（先于引用它的 lifespan/cleanup 定义）
+logger = get_logger(__name__)
+
+# 共享客户端与下载管理器：模块级单例，跨 lifespan 重入复用。
+# stateless_http 模式下 FastMCP 每请求重入 lifespan，模块级单例确保连接池跨请求复用。
+# 创建受 _shared_init_lock 保护避免并发重复构造；config 身份变化时自动重建。
+_shared_client: Optional[SeedreamClient] = None
+_shared_download_manager: Optional[DownloadManager] = None
+_shared_init_lock = asyncio.Lock()
+
 
 def _get_active_config() -> SeedreamConfig:
     """
@@ -99,17 +115,101 @@ def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     return config if isinstance(config, SeedreamConfig) else _get_active_config()
 
 
+async def _safe_close(obj: Any) -> None:
+    """关闭共享资源，吞掉异常避免清理路径中断。"""
+    if obj is None:
+        return
+    try:
+        await obj.close()
+    except Exception as exc:
+        logger.warning("关闭共享资源失败: {}", exc)
+
+
 @asynccontextmanager
-async def app_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
+async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
-    FastMCP 生命周期管理：将构建好的 SeedreamConfig 注入请求上下文，
-    供工具通过 ctx.request_context.lifespan_context["config"] 共享配置。
+    FastMCP 生命周期管理：注入共享配置、SeedreamClient 与 DownloadManager。
+
+    单例首次创建后跨 lifespan 重入复用。config 身份变化时下次进入自动重建，
+    使 set_config/reload_config 更换实例后对在用客户端生效。stateless_http 模式
+    每请求重入，不在 teardown 清理以保留连接复用；其余模式在 teardown 同事件循环清理。
+    重建会立即关闭旧单例，调用 set_config/reload_config 应避开在途请求，否则在途请求
+    持有的 HTTP 连接会被断开。工具经 ctx.request_context.lifespan_context 取
+    ["config"]/["client"]/["download_manager"]。
+    """
+    global _shared_client, _shared_download_manager
+    config = _get_active_config()
+    if _shared_client is None or _shared_client.config is not config:
+        async with _shared_init_lock:
+            if _shared_client is None or _shared_client.config is not config:
+                old_client = _shared_client
+                old_download_manager = _shared_download_manager
+                from .client import SeedreamClient
+                from .utils.download_manager import DownloadManager
+
+                new_client = SeedreamClient(config)
+                await new_client.__aenter__()
+                new_download_manager = DownloadManager(
+                    timeout=config.auto_save_download_timeout,
+                    max_retries=config.auto_save_max_retries,
+                    max_file_size=config.auto_save_max_file_size,
+                )
+                await new_download_manager.__aenter__()
+                _shared_client = new_client
+                _shared_download_manager = new_download_manager
+                await _safe_close(old_client)
+                await _safe_close(old_download_manager)
+    yield {
+        "config": config,
+        "client": _shared_client,
+        "download_manager": _shared_download_manager,
+    }
+    if not getattr(server.settings, "stateless_http", False):
+        await _cleanup_shared_resources()
+
+
+async def _cleanup_shared_resources() -> None:
+    """关闭并清空 lifespan 单例持有的 HTTP 连接池。"""
+    global _shared_client, _shared_download_manager
+    client = _shared_client
+    download_manager = _shared_download_manager
+    _shared_client = None
+    _shared_download_manager = None
+    await _safe_close(client)
+    await _safe_close(download_manager)
+
+
+def _sync_cleanup() -> None:
+    """同步入口的进程级清理。
+
+    stateless_http 模式 lifespan 不在 teardown 清理，由 cli_main 在服务器退出时补清理。
+
+    asyncio.run 新建事件循环来关闭共享 HTTP 资源，但这些资源（客户端连接池、下载管理器）
+    创建于 lifespan 运行时的旧循环上。跨循环 aclose 对绑定旧循环的底层传输可能被静默
+    忽略，因此此处仅为 best-effort 清理，真正的回收依赖进程退出时由操作系统回收。
+    _safe_close 已吞掉异常，避免清理路径中断。
     """
     try:
-        yield {"config": _get_active_config()}
-    finally:
-        # 当前无服务器级连接池/会话需要清理
+        asyncio.run(_cleanup_shared_resources())
+    except RuntimeError:
         pass
+    except Exception as exc:
+        logger.warning("同步清理共享资源失败: {}", exc)
+
+
+def _reset_lifespan_state() -> None:
+    """重置 lifespan 单例、活动配置与初始化锁，仅供测试隔离调用。
+
+    一并重建 _shared_init_lock 与自动保存清理锁，避免跨事件循环复用绑定了旧循环的 asyncio.Lock。
+    """
+    global _shared_client, _shared_download_manager, _active_config, _shared_init_lock
+    _shared_client = None
+    _shared_download_manager = None
+    _active_config = None
+    _shared_init_lock = asyncio.Lock()
+    from .utils.auto_save import _reset_cleanup_state
+
+    _reset_cleanup_state()
 
 
 # 初始化 FastMCP 服务器实例
@@ -118,9 +218,6 @@ mcp = FastMCP(
     instructions=SERVER_INSTRUCTIONS,
     lifespan=app_lifespan,
 )
-
-# 初始化模块日志记录器
-logger = get_logger(__name__)
 
 
 # ==================== MCP 工具函数定义 ====================
@@ -136,9 +233,11 @@ async def seedream_text_to_image(
     ctx: Context[Any, Any, Any],
 ) -> GenerationStructuredOutput:
     """
-    文生图：
+    文生图：根据文字指令生成单张图片。
 
-    通过给模型提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
+    适用：从零开始按文字描述创建图片。示例：生成“赛博朋克风格的城市夜景”。
+    不适用：需要基于已有图片修改时改用 seedream_image_to_image；需要一次生成多张
+    风格一致的图片时改用 seedream_sequential_generation。
     """
     config = _config_from_context(ctx)
     return await run_text_to_image(params, config=config, ctx=ctx)  # type: ignore[return-value]
@@ -154,9 +253,12 @@ async def seedream_image_to_image(
     ctx: Context[Any, Any, Any],
 ) -> GenerationStructuredOutput:
     """
-    图文生图：
+    图文生图：基于已有图片进行编辑。
 
-    基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
+    适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调
+    迁移、改变背景或视角尺寸等。示例：“把人物背景换成海滩”。
+    不适用：纯文字生图改用 seedream_text_to_image；融合多张图片特征改用
+    seedream_multi_image_fusion。
     """
     config = _config_from_context(ctx)
     return await run_image_to_image(params, config=config, ctx=ctx)  # type: ignore[return-value]
@@ -172,9 +274,12 @@ async def seedream_multi_image_fusion(
     ctx: Context[Any, Any, Any],
 ) -> GenerationStructuredOutput:
     """
-    多图融合：
+    多图融合：融合多张参考图片的特征生成新图片。
 
-    根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
+    适用：把多张图片的风格或元素合并到一张新图。示例：“将图1的服装换到图2的模特
+    身上”，需用“图1/图2”指代输入图片顺序。
+    不适用：仅编辑单张图片改用 seedream_image_to_image；生成一组连贯分镜改用
+    seedream_sequential_generation。
     """
     config = _config_from_context(ctx)
     return await run_multi_image_fusion(  # type: ignore[return-value]
@@ -192,9 +297,12 @@ async def seedream_sequential_generation(
     ctx: Context[Any, Any, Any],
 ) -> GenerationStructuredOutput:
     """
-    组图输出：
+    组图输出：一次生成多张内容关联的图片。
 
-    支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
+    适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：
+    “生成4格漫画，主角依次出现在4个场景”。注意 5.0 Pro 不支持组图，请改用
+    5.0/5.0 Lite/4.5/4.0。
+    不适用：融合多张参考图特征改用 seedream_multi_image_fusion。
     """
     config = _config_from_context(ctx)
     return await run_sequential_generation(  # type: ignore[return-value]
@@ -212,9 +320,10 @@ async def seedream_browse_images(
     ctx: Context[Any, Any, Any],
 ) -> BrowseImagesStructuredOutput:
     """
-    本地图片浏览：
+    本地图片浏览：列出工作区中的图片文件。
 
-    浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
+    适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
+    递归、分页、按格式过滤。仅可浏览工作区目录内文件。
     """
     return await run_browse_images(params, ctx=ctx)  # type: ignore[return-value]
 
@@ -224,7 +333,7 @@ async def seedream_browse_images(
 
 @mcp.resource("seedream://workspace/roots")
 async def workspace_roots_resource() -> str:
-    """工作区根目录（客户端授权的 MCP Roots；未授权时为空，避免暴露服务器本地目录）。"""
+    """工作区根目录。展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。"""
     ctx = mcp.get_context()
     async with workspace_roots_scope(ctx):
         roots = get_workspace_roots()
@@ -245,6 +354,35 @@ async def server_info_resource() -> str:
         ensure_ascii=False,
         indent=2,
     )
+
+
+# ==================== MCP 风格预设 Prompt 定义 ====================
+
+
+@mcp.prompt(name="seedream_style_anime", description="动漫风格生图提示词模板")
+def style_anime_prompt(subject: str = "一个女孩站在樱花树下") -> str:
+    """生成日系动漫风格图片的提示词模板，可作为文生图 prompt 使用。"""
+    return (
+        f"{subject}，日系动漫风格，赛璐珞上色，鲜艳饱和的色彩，精细流畅的线条，" "柔和光影，高细节"
+    )
+
+
+@mcp.prompt(name="seedream_style_realistic", description="写实摄影风格生图提示词模板")
+def style_realistic_prompt(subject: str = "城市夜景") -> str:
+    """生成写实摄影风格图片的提示词模板，可作为文生图 prompt 使用。"""
+    return f"{subject}，写实摄影风格，高清细节，自然光影，景深效果，专业摄影质感"
+
+
+@mcp.prompt(name="seedream_style_watercolor", description="水彩画风格生图提示词模板")
+def style_watercolor_prompt(subject: str = "山间小屋") -> str:
+    """生成水彩画风格图片的提示词模板，可作为文生图 prompt 使用。"""
+    return f"{subject}，水彩画风格，柔和晕染，通透色彩，手绘质感，留白"
+
+
+@mcp.prompt(name="seedream_style_oil_painting", description="油画风格生图提示词模板")
+def style_oil_painting_prompt(subject: str = "海边夕阳") -> str:
+    """生成油画风格图片的提示词模板，可作为文生图 prompt 使用。"""
+    return f"{subject}，油画风格，厚重笔触，丰富层次，经典光影，艺术质感"
 
 
 # ==================== 命令行参数解析 ====================
@@ -303,7 +441,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # API 认证配置
     parser.add_argument(
         "--api-key",
-        help="火山引擎 API 密钥（也可通过 ARK_API_KEY 环境变量配置）",
+        help="火山引擎 API 密钥；建议优先用 ARK_API_KEY 环境变量，命令行传入会出现在进程列表与 shell 历史中",
     )
     parser.add_argument(
         "--config-file",
@@ -313,13 +451,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # 模型与生成配置
     parser.add_argument(
         "--model",
-        choices=[
-            "doubao-seedream-5.0-pro",
-            "doubao-seedream-5.0",
-            "doubao-seedream-5.0-lite",
-            "doubao-seedream-4.5",
-            "doubao-seedream-4.0",
-        ],
+        choices=list(MODEL_ALIASES.keys()),
         default=None,
         help="模型选择（默认按配置或内置默认值）",
     )
@@ -347,7 +479,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # 日志配置
     parser.add_argument(
         "--log-level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default=None,
         help="日志级别（默认按配置或内置默认值）",
     )
@@ -366,6 +498,46 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="stdio",
         help="MCP 传输方式（默认 stdio）",
     )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="streamable-http 监听地址（默认 127.0.0.1，仅 streamable-http 生效；"
+        "绑定非回环地址将触发安全告警）",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="streamable-http 监听端口（默认 8000，仅 streamable-http 生效）",
+    )
+    parser.add_argument(
+        "--stateless",
+        action="store_true",
+        default=False,
+        help="streamable-http 启用无状态模式，更适合远程多客户端与负载均衡（默认关闭）",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="streamable-http 的 Bearer 鉴权令牌（也可通过 SEEDREAM_HTTP_AUTH_TOKEN "
+        "环境变量配置）；绑定非回环地址时必须配置，否则拒绝启动",
+    )
+    parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="streamable-http 的 TLS 证书文件路径，绑定非回环地址时建议配置以防令牌明文传输",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="streamable-http 的 TLS 私钥文件路径，与 --ssl-certfile 配合使用",
+    )
+    parser.add_argument(
+        "--insecure-allow-non-tls",
+        action="store_true",
+        default=False,
+        help="显式允许非回环地址以明文运行 streamable-http，仅用于受信反向代理终结 TLS 的场景",
+    )
 
     return parser
 
@@ -378,6 +550,133 @@ def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable
     本服务仅支持 stdio（本地）与 streamable-http（远程）两种传输。
     """
     return cast(Literal["stdio", "streamable-http"], args.transport)
+
+
+# streamable-http 回环地址集合：绑定这些地址视为仅本机信任
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+class _BearerTokenAuthMiddleware:
+    """
+    streamable-http Bearer 令牌鉴权 ASGI 中间件。
+
+    校验请求 Authorization 头中的 Bearer 令牌，匹配则放行，否则 http 流量返回 401；
+    启用鉴权时非 http 流量（websocket）以 code 1008 关闭。使用 hmac.compare_digest
+    做常数时间比较以避免时序侧信道泄露令牌。
+    """
+
+    def __init__(self, app: Any, expected_token: str) -> None:
+        self.app = app
+        self._expected = expected_token.encode("utf-8")
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        scope_type = scope.get("type")
+        if scope_type == "lifespan":
+            await self.app(scope, receive, send)
+            return
+        if scope_type != "http":
+            # 启用鉴权时拒绝非 http 流量（如 websocket），避免绕过 Bearer 校验
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
+
+        if self._request_authorized(scope):
+            await self.app(scope, receive, send)
+            return
+
+        await self._send_unauthorized(send)
+
+    def _request_authorized(self, scope: Any) -> bool:
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                if value[:7].lower() == b"bearer ":
+                    return hmac.compare_digest(value[7:].strip(), self._expected)
+                return False
+        return False
+
+    async def _send_unauthorized(self, send: Any) -> None:
+        body = json.dumps(
+            {"error": "invalid_token", "error_description": "Authentication required"}
+        ).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"www-authenticate", b'Bearer error="invalid_token"'),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def _resolve_http_auth_token(args: argparse.Namespace) -> str:
+    """解析 streamable-http 鉴权令牌：CLI 参数优先，其次活动配置。"""
+    token = args.auth_token or _get_active_config().http_auth_token
+    return (token or "").strip()
+
+
+def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enabled: bool) -> None:
+    """
+    将 streamable-http 监听配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
+
+    非回环绑定时，调用方需已在 cli_main 中完成 fail-closed 校验（必须配置鉴权令牌），
+    因此此处非回环分支仅用于确认已启用鉴权。stateless 启用无状态模式，更适合远程
+    多客户端与负载均衡场景。
+    """
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.settings.stateless_http = stateless
+    _warn_remote_exposure(host, auth_enabled)
+
+
+def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
+    """根据绑定地址与鉴权状态输出风险告警（同时写入日志与控制台）。"""
+    if host in _LOOPBACK_HOSTS:
+        if auth_enabled:
+            message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"
+        else:
+            message = (
+                "streamable-http 未启用应用层认证，仅限本机信任环境使用；"
+                "如需远程访问，请使用 --auth-token 配置鉴权或经反向代理增加鉴权。"
+            )
+    else:
+        message = (
+            f"streamable-http 绑定到 {host}（非回环地址）并已启用 Bearer 鉴权；"
+            "请确认网络隔离与令牌妥善保管。"
+        )
+    logger.warning(message)
+    print(message)
+
+
+def _run_streamable_http(
+    host: str,
+    port: int,
+    auth_token: str,
+    ssl_certfile: Optional[str] = None,
+    ssl_keyfile: Optional[str] = None,
+) -> None:
+    """
+    启动 streamable-http 传输。
+
+    配置鉴权令牌时，在 FastMCP 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
+    请求返回 401。配置 TLS 证书时透传给 uvicorn 启用 HTTPS。仅使用 FastMCP 公开接口
+    streamable_http_app() 获取 ASGI 应用，避免依赖其私有鉴权装配路径。
+    """
+    import uvicorn
+
+    app = mcp.streamable_http_app()
+    if auth_token:
+        app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
+        logger.info("streamable-http 已启用 Bearer 令牌鉴权")
+    ssl_kwargs: dict[str, Any] = {}
+    if ssl_certfile:
+        ssl_kwargs["ssl_certfile"] = ssl_certfile
+        ssl_kwargs["ssl_keyfile"] = ssl_keyfile
+        logger.info("streamable-http 已启用 TLS")
+    uvicorn.run(app, host=host, port=port, **ssl_kwargs)
 
 
 # ==================== 主入口函数 ====================
@@ -415,7 +714,7 @@ def cli_main() -> int:
         force_standard_logging=True,
     )
     logger.info(
-        "Seedream MCP 启动: %s (version %s)",
+        "Seedream MCP 启动: {} (version {})",
         SERVER_NAME,
         SERVER_VERSION,
     )
@@ -423,7 +722,43 @@ def cli_main() -> int:
     # 启动 MCP 服务器
     try:
         transport = _build_run_options(args)
-        mcp.run(transport=transport)
+        if transport == "streamable-http":
+            auth_token = _resolve_http_auth_token(args)
+            is_loopback = args.host in _LOOPBACK_HOSTS
+            has_tls = bool(args.ssl_certfile)
+            if not is_loopback:
+                if not auth_token:
+                    message = (
+                        f"安全错误：streamable-http 绑定到非回环地址 {args.host} 必须配置鉴权令牌，"
+                        "请通过 --auth-token 或 SEEDREAM_HTTP_AUTH_TOKEN 提供，避免未授权访问。"
+                    )
+                    logger.error(message)
+                    print(message)
+                    return 1
+                if not has_tls and not args.insecure_allow_non_tls:
+                    message = (
+                        f"安全错误：streamable-http 绑定到非回环地址 {args.host} 必须配置 TLS，"
+                        "请通过 --ssl-certfile/--ssl-keyfile 提供，或在受信反向代理终结 TLS 时"
+                        "显式传 --insecure-allow-non-tls，避免 Bearer 令牌明文传输被窃听。"
+                    )
+                    logger.error(message)
+                    print(message)
+                    return 1
+            _apply_http_bind_settings(
+                args.host,
+                args.port,
+                args.stateless,
+                auth_enabled=bool(auth_token),
+            )
+            _run_streamable_http(
+                args.host,
+                args.port,
+                auth_token,
+                ssl_certfile=args.ssl_certfile,
+                ssl_keyfile=args.ssl_keyfile,
+            )
+        else:
+            mcp.run(transport=transport)
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在退出。")
         return 0
@@ -431,6 +766,8 @@ def cli_main() -> int:
         logger.error("服务器运行异常", exc_info=True)
         print(f"服务器运行失败: {format_error_for_user(exc)}")
         return 1
+    finally:
+        _sync_cleanup()
 
     return 0
 

@@ -17,6 +17,9 @@ class FakeLogger:
     def __init__(self) -> None:
         self.info_messages: List[str] = []
 
+    def opt(self, *args: Any, **kwargs: Any) -> "FakeLogger":
+        return self
+
     def info(self, message: str, *args: Any) -> None:
         self.info_messages.append(message.format(*args) if args else message)
 
@@ -28,6 +31,52 @@ class FakeLogger:
 
     def error(self, message: str, *args: Any, **kwargs: Any) -> None:
         del message, args, kwargs
+
+
+def test_build_common_request_assembles_shared_params() -> None:
+    """_build_common_request 组装四方法共享参数；None 字段省略，extra 并入。"""
+    config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5-0-260128")
+    client = SeedreamClient(config)
+    request = client._build_common_request(
+        prompt="p",
+        size="2K",
+        watermark=False,
+        response_format="url",
+        output_format="png",
+        stream=True,
+        tools=[{"type": "web_search"}],
+        validated_opts={"mode": "standard"},
+    )
+    assert request["model"] == "doubao-seedream-5-0-260128"
+    assert request["prompt"] == "p"
+    assert request["size"] == "2K"
+    assert request["watermark"] is False
+    assert request["response_format"] == "url"
+    assert request["output_format"] == "png"
+    assert request["stream"] is True
+    assert request["tools"] == [{"type": "web_search"}]
+    assert request["optimize_prompt_options"] == {"mode": "standard"}
+
+
+def test_build_common_request_merges_extra_and_skips_none() -> None:
+    config = SeedreamConfig(api_key="k")
+    client = SeedreamClient(config)
+    request = client._build_common_request(
+        prompt="p",
+        size="2K",
+        watermark=False,
+        response_format="url",
+        output_format=None,
+        stream=False,
+        tools=None,
+        validated_opts=None,
+        extra={"image": "data"},
+    )
+    assert request["image"] == "data"
+    assert "output_format" not in request
+    assert "stream" not in request
+    assert "tools" not in request
+    assert "optimize_prompt_options" not in request
 
 
 def _build_config() -> SeedreamConfig:
@@ -655,3 +704,43 @@ async def test_multi_image_fusion_accepts_up_to_10_images_for_pro(
     await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
 
     assert len(captured_request["image"]) == 10
+
+
+@pytest.mark.asyncio
+async def test_prepare_image_input_caches_result_and_evicts_fifo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_prepare_image_input 命中缓存不重复调用底层，超限按 FIFO 淘汰最旧条目。"""
+    client = SeedreamClient(_build_config())
+    client._prepare_cache_max = 3
+
+    call_count = 0
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        return f"prepared:{image}"
+
+    monkeypatch.setattr("seedream_mcp.utils.image_input.prepare_image_input", fake_prepare)
+
+    # 同一输入第二次走缓存，底层 prepare_image_input 只调一次
+    first = await client._prepare_image_input("img-1")
+    second = await client._prepare_image_input("img-1")
+    assert first == "prepared:img-1"
+    assert second == "prepared:img-1"
+    assert call_count == 1
+
+    # 填满缓存（img-1 / img-2 / img-3）
+    await client._prepare_image_input("img-2")
+    await client._prepare_image_input("img-3")
+    assert len(client._prepare_cache) == 3
+    assert call_count == 3
+
+    # 再加一条触发 FIFO 淘汰最旧的 img-1，缓存大小不超过 max
+    await client._prepare_image_input("img-4")
+    assert len(client._prepare_cache) == 3
+    assert call_count == 4
+
+    # img-1 已被淘汰，再次请求应重新调用底层
+    await client._prepare_image_input("img-1")
+    assert call_count == 5

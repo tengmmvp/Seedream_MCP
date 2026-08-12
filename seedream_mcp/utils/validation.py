@@ -3,9 +3,10 @@ Seedream MCP工具 - 参数验证模块
 """
 
 # 标准库导入
+import base64
 import io
-import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
@@ -16,29 +17,47 @@ from pillow_heif import register_heif_opener
 
 # 本地模块导入
 from .errors import SeedreamValidationError
+from .formats import SUPPORTED_IMAGE_EXTENSIONS
 from .logging import get_logger
-
-# 注册 HEIC/HEIF 解码器
-register_heif_opener()
+from .os_utils import open_no_follow_read
+from .model_capabilities import get_model_capabilities
+from .model_capabilities import (  # noqa: F401  以下重导出，兼容外部 from .validation import
+    MODEL_CAPABILITIES as MODEL_CAPABILITIES,
+    MODEL_FAMILY_40 as MODEL_FAMILY_40,
+    MODEL_FAMILY_45 as MODEL_FAMILY_45,
+    MODEL_FAMILY_50_LITE as MODEL_FAMILY_50_LITE,
+    MODEL_FAMILY_50_PRO as MODEL_FAMILY_50_PRO,
+    MODEL_FAMILY_UNKNOWN as MODEL_FAMILY_UNKNOWN,
+    SEEDREAM_50PRO_MAX_REFERENCE_IMAGES as SEEDREAM_50PRO_MAX_REFERENCE_IMAGES,
+    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES as SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    ModelCapabilities as ModelCapabilities,
+    _resolve_model_family as _resolve_model_family,
+    get_max_reference_images as get_max_reference_images,
+    is_seedream_50_pro_model as is_seedream_50_pro_model,
+)
 
 logger = get_logger(__name__)
+
+
+# HEIC/HEIF 解码器惰性注册，避免模块导入时的全局副作用，首次校验图片时按需注册
+_heif_opener_registered = False
+
+
+def _ensure_heif_opener_registered() -> None:
+    """注册 HEIC/HEIF 解码器，仅首次调用时执行。"""
+    global _heif_opener_registered
+    if _heif_opener_registered:
+        return
+    register_heif_opener()
+    _heif_opener_registered = True
 
 
 # ==================== 常量定义 ====================
 
 # 统一图像校验常量
-SUPPORTED_IMAGE_EXTENSIONS = [
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".bmp",
-    ".webp",
-    ".tiff",
-    ".heic",
-    ".heif",
-]
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024  # 30MB
+# optimize_prompt_options.mode 合法取值
+VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
 MIN_IMAGE_EDGE = 15
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
@@ -47,17 +66,8 @@ VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
 VALID_OUTPUT_FORMATS = {"jpeg", "png"}
 VALID_GENERATION_TOOL_TYPES = {"web_search"}
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
-SEEDREAM_50PRO_MIN_SIZE_PIXELS = 1280 * 720  # 921600
-SEEDREAM_50PRO_MAX_SIZE_PIXELS = 2048 * 2048  # 4194304
-SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE = 16  # 5.0 Pro 像素宽高须为 16 的倍数
-SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10  # 5.0 Pro 最多 10 张参考图
-SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14  # 5.0 Lite / 4.5 / 4.0 最多 14 张参考图
-SEEDREAM_5X_MIN_SIZE_PIXELS = 2560 * 1440
-SEEDREAM_5X_MAX_SIZE_PIXELS = 4096 * 4096  # 16777216
-SEEDREAM_45_MIN_SIZE_PIXELS = 2560 * 1440
-SEEDREAM_45_MAX_SIZE_PIXELS = 4096 * 4096
-SEEDREAM_40_MIN_SIZE_PIXELS = 1280 * 720  # 921600
-SEEDREAM_40_MAX_SIZE_PIXELS = 4096 * 4096
+MAX_SEQUENTIAL_TOTAL_IMAGES = 15  # 组图：参考图数量与生成数量之和上限
+MAX_PARALLEL_REQUEST_COUNT = 4  # 并行生成请求次数与并行度上限
 
 
 # ==================== 底层私有工具函数 ====================
@@ -67,15 +77,12 @@ def _get_validation_base_dir() -> Path:
     """
     获取本地文件校验的基础目录。
 
-    优先使用 `SEEDREAM_WORKSPACE_ROOT`，未设置或无效时回退当前工作目录。
+    委托 path_utils.resolve_env_workspace_root 保持单一来源；函数内延迟 import
+    避免 path_utils 与 validation 的模块加载循环。
     """
-    configured_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
-    if configured_root and configured_root.strip():
-        try:
-            return Path(configured_root).expanduser().resolve()
-        except Exception:
-            pass
-    return Path.cwd().resolve()
+    from .path_utils import resolve_env_workspace_root
+
+    return resolve_env_workspace_root()
 
 
 def _resolve_local_image_path(file_path: str) -> Path:
@@ -120,52 +127,7 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     return validated_value
 
 
-def _contains_model_token(model_id: str, *tokens: str) -> bool:
-    """
-    判断模型标识中是否包含指定 token。
-    """
-    normalized = (model_id or "").lower()
-    return any(token in normalized for token in tokens)
-
-
-def _is_seedream_50_pro_model(model_id: str) -> bool:
-    """
-    判断是否为 Seedream 5.0 Pro 模型。
-
-    注意：5.0 Pro 的 Model ID（doubao-seedream-5-0-pro-*）包含 "doubao-seedream-5-0"
-    子串，须先于 5.0 Lite 判断，避免被误归入 Lite 分支。
-    """
-    return _contains_model_token(model_id, "doubao-seedream-5-0-pro", "doubao-seedream-5.0-pro")
-
-
-def _is_seedream_50_model(model_id: str) -> bool:
-    """
-    判断是否为 Seedream 5.0 Lite 模型。
-    """
-    if _is_seedream_50_pro_model(model_id):
-        return False
-    return _contains_model_token(model_id, "doubao-seedream-5-0", "doubao-seedream-5.0")
-
-
-def _is_seedream_50_family(model_id: str) -> bool:
-    """
-    判断是否为 Seedream 5.0 系列（5.0 Lite 或 5.0 Pro）。
-    """
-    return _is_seedream_50_model(model_id) or _is_seedream_50_pro_model(model_id)
-
-
-def _is_seedream_45_model(model_id: str) -> bool:
-    """
-    判断是否为 Seedream 4.5 模型。
-    """
-    return _contains_model_token(model_id, "doubao-seedream-4-5", "doubao-seedream-4.5")
-
-
-def _is_seedream_40_model(model_id: str) -> bool:
-    """
-    判断是否为 Seedream 4.0 模型。
-    """
-    return _contains_model_token(model_id, "doubao-seedream-4-0", "doubao-seedream-4.0")
+# 模型家族解析、能力表与判定函数已抽取至 model_capabilities.py，上方通过 re-export 保持兼容
 
 
 # ==================== 私有验证函数 ====================
@@ -175,7 +137,7 @@ def _validate_url(url: str) -> str:
     """
     验证HTTP/HTTPS URL的格式正确性
 
-    检查URL的scheme、netloc等部分是否完整，并对图像扩展名进行简单校验。
+    检查URL的scheme、netloc等部分是否完整。
 
     Args:
         url: 待验证的URL字符串
@@ -192,20 +154,31 @@ def _validate_url(url: str) -> str:
         if scheme not in {"http", "https"} or not parsed.netloc:
             raise SeedreamValidationError("无效的URL格式", field="image", value=url)
 
-        # 检查URL路径中的图像扩展名
-        if parsed.path:
-            path_lower = parsed.path.lower()
-            if not any(path_lower.endswith(ext) for ext in SUPPORTED_IMAGE_EXTENSIONS):
-                # 没有明显的图像扩展名，给出警告但不阻止
-                pass
-
         return url
 
+    except SeedreamValidationError:
+        raise
     except Exception as e:
         raise SeedreamValidationError(f"URL验证失败: {str(e)}", field="image", value=url)
 
 
-def _validate_file_path(file_path: str) -> str:
+def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
+    """校验图像宽高下限、宽高比与总像素约束，不满足时抛出 SeedreamValidationError。
+
+    供本地文件与 Data URI 两条校验路径复用，避免维度规则重复实现导致漂移。
+    """
+    if width < MIN_IMAGE_EDGE or height < MIN_IMAGE_EDGE:
+        raise SeedreamValidationError("图像宽高长度至少15px", field="image", value=value)
+
+    ratio = width / height if height else 0
+    if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
+        raise SeedreamValidationError("图像宽高比需在[1/16, 16]范围内", field="image", value=value)
+
+    if width * height > MAX_IMAGE_PIXELS:
+        raise SeedreamValidationError("图像总像素不能超过 6000×6000", field="image", value=value)
+
+
+def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     """
     验证本地文件路径的存在性、格式和尺寸限制
 
@@ -228,12 +201,16 @@ def _validate_file_path(file_path: str) -> str:
     try:
         path = _resolve_local_image_path(file_path)
 
-        # 检查文件是否存在
-        if not path.exists():
+        # 单次 stat 完成存在性、文件类型与大小检查
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
             raise SeedreamValidationError(f"文件不存在: {path}", field="image", value=file_path)
-
-        # 检查是否为文件
-        if not path.is_file():
+        except OSError as exc:
+            raise SeedreamValidationError(
+                f"无法访问文件: {path} -> {exc}", field="image", value=file_path
+            )
+        if not stat.S_ISREG(stat_result.st_mode):
             raise SeedreamValidationError(f"路径不是文件: {path}", field="image", value=file_path)
 
         # 检查文件扩展名
@@ -245,51 +222,37 @@ def _validate_file_path(file_path: str) -> str:
             )
 
         # 检查文件大小
-        file_size = path.stat().st_size
+        file_size = stat_result.st_size
         if file_size > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"文件过大: {file_size / 1024 / 1024:.1f}MB，最大支持30MB",
+                f"文件过大: {file_size / 1024 / 1024:.1f}MB，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
                 field="image",
                 value=file_path,
             )
 
-        # 验证图像像素维度约束
-        try:
-            with Image.open(path) as img:
-                w, h = img.size
-
-                # 宽高必须大于14像素
-                if w < MIN_IMAGE_EDGE or h < MIN_IMAGE_EDGE:
-                    raise SeedreamValidationError(
-                        "图像宽高长度必须大于14px",
-                        field="image",
-                        value=file_path,
-                    )
-
-                # 宽高比限制在 1/16 到 16 之间
-                ratio = w / h if h else 0
-                if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
-                    raise SeedreamValidationError(
-                        "图像宽高比需在[1/16, 16]范围内",
-                        field="image",
-                        value=file_path,
-                    )
-
-                # 总像素不超过 6000×6000
-                if w * h > MAX_IMAGE_PIXELS:
-                    raise SeedreamValidationError(
-                        "图像总像素不能超过 6000×6000",
-                        field="image",
-                        value=file_path,
-                    )
-        except SeedreamValidationError:
-            raise
-        except Exception as e:
-            raise SeedreamValidationError(
-                f"图像维度解析失败: {str(e)}",
-                field="image",
-                value=file_path,
-            )
+        if not skip_dimensions:
+            # 经 open_no_follow_read 读取字节后再交 PIL 解码，拒绝最终分量符号链接，
+            # 与 image_input._prepare_local_image 保持一致的安全语义
+            try:
+                _ensure_heif_opener_registered()
+                with open_no_follow_read(path) as f:
+                    image_bytes = f.read()
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    _validate_image_dimensions(img.size[0], img.size[1], file_path)
+            except SeedreamValidationError:
+                raise
+            except OSError as exc:
+                raise SeedreamValidationError(
+                    f"无法读取文件: {path} -> {exc}",
+                    field="image",
+                    value=file_path,
+                )
+            except Exception as e:
+                raise SeedreamValidationError(
+                    f"图像维度解析失败: {str(e)}",
+                    field="image",
+                    value=file_path,
+                )
 
         return str(path.absolute())
 
@@ -334,18 +297,25 @@ def _validate_data_uri(data_uri: str) -> str:
                 value=data_uri,
             )
 
-        # 提取并验证图像格式
+        # 提取并验证图像格式。白名单派生自 SUPPORTED_IMAGE_EXTENSIONS 以保持单一来源
         fmt = header_lower.split("data:image/")[-1].split(";")[0]
-        allowed = {"jpeg", "png", "gif", "bmp", "webp", "tiff", "heic", "heif"}
+        allowed = {ext.lstrip(".") for ext in SUPPORTED_IMAGE_EXTENSIONS}
         if fmt not in allowed:
             raise SeedreamValidationError(
                 f"不支持的Data URI图片格式: {fmt}", field="image", value=data_uri
             )
 
+        # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大
+        if len(b64) > MAX_IMAGE_FILE_SIZE * 4 // 3 + 16:
+            raise SeedreamValidationError(
+                f"数据过大: base64 长度 {len(b64)}，最大支持"
+                f"{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
+                field="image",
+                value=data_uri,
+            )
+
         # Base64解码
         try:
-            import base64
-
             raw = base64.b64decode(b64, validate=True)
         except Exception as e:
             raise SeedreamValidationError(
@@ -356,34 +326,16 @@ def _validate_data_uri(data_uri: str) -> str:
         size_bytes = len(raw)
         if size_bytes > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"数据过大: {size_bytes / 1024 / 1024:.1f}MB，最大支持30MB",
+                f"数据过大: {size_bytes / 1024 / 1024:.1f}MB，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
                 field="image",
                 value=data_uri,
             )
 
         # 验证图像像素维度约束
         try:
+            _ensure_heif_opener_registered()
             with Image.open(io.BytesIO(raw)) as img:
-                w, h = img.size
-
-                # 宽高必须大于14像素
-                if w < MIN_IMAGE_EDGE or h < MIN_IMAGE_EDGE:
-                    raise SeedreamValidationError(
-                        "图像宽高长度必须大于14px", field="image", value=data_uri
-                    )
-
-                # 宽高比限制在 1/16 到 16 之间
-                ratio = w / h if h else 0
-                if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
-                    raise SeedreamValidationError(
-                        "图像宽高比需在[1/16, 16]范围内", field="image", value=data_uri
-                    )
-
-                # 总像素不超过 6000×6000
-                if w * h > MAX_IMAGE_PIXELS:
-                    raise SeedreamValidationError(
-                        "图像总像素不能超过 6000×6000", field="image", value=data_uri
-                    )
+                _validate_image_dimensions(img.size[0], img.size[1], data_uri)
         except SeedreamValidationError:
             raise
         except Exception as e:
@@ -525,8 +477,8 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
             value=output_format,
         )
 
-    # 仅 4.5/4.0 明确不支持 output_format；5.0 系列/Endpoint ID 等无法识别的模型放行
-    if _is_seedream_45_model(model_id) or _is_seedream_40_model(model_id):
+    # output_format 仅 5.0 系列支持，4.5/4.0 不支持，未知模型放行，由能力表统一判定
+    if not get_model_capabilities(model_id).supports_output_format:
         raise SeedreamValidationError(
             "仅 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）模型支持 output_format",
             field="output_format",
@@ -550,12 +502,8 @@ def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]]
             value=tools,
         )
 
-    # 仅 5.0 Pro/4.5/4.0 明确不支持 tools 联网搜索；5.0 Lite/Endpoint ID 等无法识别的模型放行
-    if (
-        _is_seedream_50_pro_model(model_id)
-        or _is_seedream_45_model(model_id)
-        or _is_seedream_40_model(model_id)
-    ):
+    # tools 联网搜索仅 5.0 Lite 支持，5.0 Pro/4.5/4.0 不支持，未知模型放行，由能力表统一判定
+    if not get_model_capabilities(model_id).supports_tools:
         raise SeedreamValidationError(
             "仅 doubao-seedream-5.0 Lite 模型支持 tools（5.0 Pro/4.5/4.0 不支持联网搜索）",
             field="tools",
@@ -613,7 +561,7 @@ def validate_stream(stream: bool, model_id: str) -> bool:
 
     Seedream 5.0 Pro 不支持流式输出（stream，传参报错），仅 5.0 Lite/4.5/4.0 支持。
     """
-    if stream and _is_seedream_50_pro_model(model_id):
+    if stream and not get_model_capabilities(model_id).supports_stream:
         raise SeedreamValidationError(
             "doubao-seedream-5.0-pro 不支持流式输出（stream），请使用 5.0 Lite/4.5/4.0",
             field="stream",
@@ -637,6 +585,10 @@ def validate_max_images(max_images: Any) -> int:
     Raises:
         SeedreamValidationError: 当参数类型错误或超出范围时抛出
     """
+    if isinstance(max_images, bool):
+        raise SeedreamValidationError(
+            "最大图像数量必须是整数", field="max_images", value=max_images
+        )
     if isinstance(max_images, int):
         validated_value = max_images
     else:
@@ -652,35 +604,14 @@ def validate_max_images(max_images: Any) -> int:
             "最大图像数量不能小于1", field="max_images", value=validated_value
         )
 
-    if validated_value > 15:
+    if validated_value > MAX_SEQUENTIAL_TOTAL_IMAGES:
         raise SeedreamValidationError(
-            "最大图像数量不能超过15", field="max_images", value=validated_value
+            f"最大图像数量不能超过{MAX_SEQUENTIAL_TOTAL_IMAGES}",
+            field="max_images",
+            value=validated_value,
         )
 
     return validated_value
-
-
-def get_max_reference_images(model_id: str) -> int:
-    """
-    返回模型支持的最大参考图数量。
-
-    - Seedream 5.0 Pro：10 张
-    - Seedream 5.0 Lite / 4.5 / 4.0：14 张
-    """
-    if _is_seedream_50_pro_model(model_id):
-        return SEEDREAM_50PRO_MAX_REFERENCE_IMAGES
-    return SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
-
-
-def is_seedream_50_pro_model(model_id: str) -> bool:
-    """
-    判断是否为 Seedream 5.0 Pro 模型（公共接口）。
-
-    5.0 Pro 与 5.0 Lite 存在能力差异：不支持组图（sequential_image_generation）、
-    联网搜索（tools）、流式输出（stream），参考图上限为 10 张，尺寸规则不同。
-    调用方据此做模型相关分支。
-    """
-    return _is_seedream_50_pro_model(model_id)
 
 
 # ==================== 尺寸验证函数 ====================
@@ -739,38 +670,18 @@ def validate_size_for_model(size: str, model_id: str) -> str:
         SeedreamValidationError: 当尺寸与模型不兼容时抛出
     """
     size = validate_size(size)
-    mid = (model_id or "").lower()
+    caps = get_model_capabilities(model_id)
 
-    # 分辨率档位校验
+    # 分辨率档位校验：各家族支持的档位白名单由能力表声明
     if size in VALID_SIZE_PRESETS:
-        if _is_seedream_50_pro_model(mid):
-            if size not in {"1K", "2K"}:
-                raise SeedreamValidationError(
-                    "在 doubao-seedream-5.0-pro 模型下仅支持 1K/2K",
-                    field="size",
-                    value=size,
-                )
-        elif _is_seedream_50_model(mid):
-            if size not in {"2K", "3K", "4K"}:
-                raise SeedreamValidationError(
-                    "在 doubao-seedream-5.0 模型下仅支持 2K/3K/4K",
-                    field="size",
-                    value=size,
-                )
-        elif _is_seedream_45_model(mid):
-            if size not in {"2K", "4K"}:
-                raise SeedreamValidationError(
-                    "在 doubao-seedream-4.5 模型下仅支持 2K/4K",
-                    field="size",
-                    value=size,
-                )
-        elif _is_seedream_40_model(mid):
-            if size not in {"1K", "2K", "4K"}:
-                raise SeedreamValidationError(
-                    "在 doubao-seedream-4.0 模型下仅支持 1K/2K/4K",
-                    field="size",
-                    value=size,
-                )
+        if size not in caps.allowed_presets:
+            presets_str = "/".join(sorted(caps.allowed_presets))
+            raise SeedreamValidationError(
+                f"在 {caps.display_name} 模型下仅支持 {presets_str}，"
+                "请调整 size 参数或更换为支持该尺寸的模型",
+                field="size",
+                value=size,
+            )
         return size
 
     # 像素值校验
@@ -788,60 +699,22 @@ def validate_size_for_model(size: str, model_id: str) -> str:
         )
 
     total_pixels = width * height
-    if _is_seedream_50_pro_model(mid):
-        if (
-            total_pixels < SEEDREAM_50PRO_MIN_SIZE_PIXELS
-            or total_pixels > SEEDREAM_50PRO_MAX_SIZE_PIXELS
-        ):
+    if caps.min_size_pixels is not None and caps.max_size_pixels is not None:
+        if not (caps.min_size_pixels <= total_pixels <= caps.max_size_pixels):
             raise SeedreamValidationError(
-                (
-                    "在 doubao-seedream-5.0-pro 模型下，像素尺寸总像素需在 "
-                    f"[{SEEDREAM_50PRO_MIN_SIZE_PIXELS}, {SEEDREAM_50PRO_MAX_SIZE_PIXELS}] 范围内"
-                ),
+                f"在 {caps.display_name} 模型下，像素尺寸总像素需在 "
+                f"[{caps.min_size_pixels}, {caps.max_size_pixels}] 范围内",
                 field="size",
                 value=size,
             )
-        # 5.0 Pro 方式1（宽x高）要求宽高均为 16 的倍数
-        if (
-            width % SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE != 0
-            or height % SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE != 0
-        ):
-            raise SeedreamValidationError(
-                f"在 doubao-seedream-5.0-pro 模型下，像素宽高须为 "
-                f"{SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE} 的倍数",
-                field="size",
-                value=size,
-            )
-    elif _is_seedream_50_model(mid):
-        if total_pixels < SEEDREAM_5X_MIN_SIZE_PIXELS or total_pixels > SEEDREAM_5X_MAX_SIZE_PIXELS:
-            raise SeedreamValidationError(
-                (
-                    "在 doubao-seedream-5.0 模型下，像素尺寸总像素需在 "
-                    f"[{SEEDREAM_5X_MIN_SIZE_PIXELS}, {SEEDREAM_5X_MAX_SIZE_PIXELS}] 范围内"
-                ),
-                field="size",
-                value=size,
-            )
-    elif _is_seedream_45_model(mid):
-        if total_pixels < SEEDREAM_45_MIN_SIZE_PIXELS or total_pixels > SEEDREAM_45_MAX_SIZE_PIXELS:
-            raise SeedreamValidationError(
-                (
-                    "在 doubao-seedream-4.5 模型下，像素尺寸总像素需在 "
-                    f"[{SEEDREAM_45_MIN_SIZE_PIXELS}, {SEEDREAM_45_MAX_SIZE_PIXELS}] 范围内"
-                ),
-                field="size",
-                value=size,
-            )
-    elif _is_seedream_40_model(mid):
-        if total_pixels < SEEDREAM_40_MIN_SIZE_PIXELS or total_pixels > SEEDREAM_40_MAX_SIZE_PIXELS:
-            raise SeedreamValidationError(
-                (
-                    "在 doubao-seedream-4.0 模型下，像素尺寸总像素需在 "
-                    f"[{SEEDREAM_40_MIN_SIZE_PIXELS}, {SEEDREAM_40_MAX_SIZE_PIXELS}] 范围内"
-                ),
-                field="size",
-                value=size,
-            )
+    if caps.size_pixel_multiple is not None and (
+        width % caps.size_pixel_multiple != 0 or height % caps.size_pixel_multiple != 0
+    ):
+        raise SeedreamValidationError(
+            f"在 {caps.display_name} 模型下，像素宽高须为 {caps.size_pixel_multiple} 的倍数",
+            field="size",
+            value=size,
+        )
 
     return size
 
@@ -849,7 +722,7 @@ def validate_size_for_model(size: str, model_id: str) -> str:
 # ==================== 图像验证函数 ====================
 
 
-def validate_image_url(image: str) -> str:
+def validate_image_url(image: str, skip_dimensions: bool = False) -> str:
     """
     验证图像URL、文件路径或Data URI的有效性
 
@@ -883,51 +756,7 @@ def validate_image_url(image: str) -> str:
         return _validate_url(image)
 
     # 本地文件路径验证
-    return _validate_file_path(image)
-
-
-def validate_image_list(images: List[str], min_count: int = 1, max_count: int = 14) -> List[str]:
-    """
-    验证图像路径列表的有效性和数量限制
-
-    对列表中的每个图像路径进行验证，并检查总数是否在允许范围内。
-
-    Args:
-        images: 图像URL或文件路径列表
-        min_count: 最小图像数量，默认为1
-        max_count: 最大图像数量，默认为14
-
-    Returns:
-        List[str]: 验证通过的图像路径列表
-
-    Raises:
-        SeedreamValidationError: 当列表为空、数量超限或任一路径无效时抛出
-    """
-    if not images or not isinstance(images, list):
-        raise SeedreamValidationError("图像列表不能为空", field="images", value=images)
-
-    if len(images) < min_count:
-        raise SeedreamValidationError(
-            f"图像数量不能少于{min_count}张", field="images", value=images
-        )
-
-    if len(images) > max_count:
-        raise SeedreamValidationError(
-            f"图像数量不能超过{max_count}张", field="images", value=images
-        )
-
-    # 逐个验证图像路径
-    validated_images = []
-    for i, image in enumerate(images):
-        try:
-            validated_image = validate_image_url(image)
-            validated_images.append(validated_image)
-        except SeedreamValidationError as e:
-            raise SeedreamValidationError(
-                f"第{i+1}张图像验证失败: {e.message}", field=f"images[{i}]", value=image
-            )
-
-    return validated_images
+    return _validate_file_path(image, skip_dimensions=skip_dimensions)
 
 
 # ==================== 高级验证函数 ====================
@@ -966,23 +795,20 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
         )
 
     mode = mode.strip().lower()
-    allowed = {"standard", "fast"}
-    if mode not in allowed:
+    if mode not in VALID_OPTIMIZE_MODES:
         raise SeedreamValidationError(
-            f"optimize_prompt_options.mode 必须为 {sorted(list(allowed))}",
+            f"optimize_prompt_options.mode 必须为 {sorted(VALID_OPTIMIZE_MODES)}",
             field="optimize_prompt_options.mode",
             value=mode,
         )
 
-    # doubao-seedream-5.0 系列/4.5 模型仅支持 standard 模式（fast 仅 4.0 支持）
-    mid = (model_id or "").lower()
-    if _is_seedream_50_family(mid) or _is_seedream_45_model(mid):
-        if mode != "standard":
-            raise SeedreamValidationError(
-                "doubao-seedream-5.0 系列/4.5 当前仅支持 optimize_prompt_options.mode=standard",
-                field="optimize_prompt_options.mode",
-                value=mode,
-            )
+    caps = get_model_capabilities(model_id or "")
+    if not caps.supports_fast_optimize_prompt and mode != "standard":
+        raise SeedreamValidationError(
+            f"{caps.display_name} 当前仅支持 optimize_prompt_options.mode=standard",
+            field="optimize_prompt_options.mode",
+            value=mode,
+        )
 
     return {"mode": mode}
 
@@ -992,7 +818,7 @@ def validate_parallel_generation_options(
     request_count: Any,
     parallelism: Any,
     stream: bool,
-    max_request_count: int = 4,
+    max_request_count: int = MAX_PARALLEL_REQUEST_COUNT,
 ) -> tuple[int, int]:
     """
     校验并行生成参数组合，并返回规范化后的 request_count/parallelism。
@@ -1034,14 +860,14 @@ def validate_sequential_image_limit(max_images: int, reference_images: List[str]
     - 参考图数量 + 生成数量 <= 15
     """
     reference_count = len(reference_images) if reference_images else 0
-    if reference_count > 14:
+    if reference_count > SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES:
         raise SeedreamValidationError(
             "参考图数量不能超过14，且参考图数量与生成数量之和不能超过15",
             field="image",
             value={"reference_images": reference_count, "max_images": max_images},
         )
 
-    if reference_count + max_images > 15:
+    if reference_count + max_images > MAX_SEQUENTIAL_TOTAL_IMAGES:
         raise SeedreamValidationError(
             "参考图数量与生成数量之和不能超过15（参考图最多14）",
             field="image",
@@ -1069,4 +895,4 @@ def resolve_sequential_max_images(
     if max_images is not None:
         return max_images
     reference_count = len(reference_images) if reference_images else 0
-    return 15 - reference_count
+    return MAX_SEQUENTIAL_TOTAL_IMAGES - reference_count

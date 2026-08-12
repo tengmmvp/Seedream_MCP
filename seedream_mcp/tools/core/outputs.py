@@ -10,7 +10,11 @@ from pydantic import BaseModel, ConfigDict
 
 
 class _BaseStructuredOutput(BaseModel):
-    """结构化输出基类：所有工具共有的字段 + 允许额外字段以向前兼容。"""
+    """结构化输出基类。
+
+    声明所有工具共有的字段，并通过 extra='allow' 允许额外字段以向前兼容 API 透传的
+    新字段。客户端解析 structuredContent 时应对未列出的字段容错。
+    """
 
     model_config = ConfigDict(extra="allow")
 

@@ -2,6 +2,8 @@
 Seedream MCP工具 - 路径处理工具
 """
 
+from __future__ import annotations
+
 # 标准库导入
 import os
 from contextlib import asynccontextmanager
@@ -12,7 +14,7 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 # 本地导入
-from .errors import SeedreamValidationError
+from .errors import SeedreamConfigError, SeedreamValidationError
 from .logging import get_logger
 from .validation import (
     SUPPORTED_IMAGE_EXTENSIONS as VALIDATION_SUPPORTED_IMAGE_EXTENSIONS,
@@ -32,17 +34,39 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
 # ==================== 工作区根目录管理 ====================
 
 
-def _resolve_env_workspace_root() -> Path:
+def resolve_env_workspace_root() -> Path:
+    """解析工作区根目录，失败时回退当前工作目录。
+
+    本地开发无 MCP Roots 时作为文件访问边界回退。优先读取活动配置，config 未就绪时
+    回退环境变量。
     """
-    从环境变量解析工作区根目录，失败时回退当前工作目录。
-    """
-    configured_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
-    if configured_root and configured_root.strip():
+    configured_root = _configured_workspace_root()
+    if configured_root:
         try:
             return Path(configured_root).expanduser().resolve()
         except Exception as e:
-            logger.warning(f"无效的 SEEDREAM_WORKSPACE_ROOT 配置: {configured_root} ({e})")
+            logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
     return Path.cwd().resolve()
+
+
+def _configured_workspace_root() -> Optional[str]:
+    """返回已配置的工作区根目录原始值，未配置返回 None。"""
+    config = _safe_global_config()
+    if config is not None:
+        root = config.workspace_root
+        return root.strip() if root else None
+    env_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
+    return env_root.strip() if env_root else None
+
+
+def _safe_global_config() -> Any:
+    """返回全局配置实例；未就绪时返回 None。"""
+    from ..config import get_global_config
+
+    try:
+        return get_global_config()
+    except SeedreamConfigError:
+        return None
 
 
 def get_workspace_roots() -> List[Path]:
@@ -54,7 +78,7 @@ def get_workspace_roots() -> List[Path]:
     roots_from_context = _WORKSPACE_ROOTS_VAR.get()
     if roots_from_context is not None:
         return list(roots_from_context)
-    return [_resolve_env_workspace_root()]
+    return [resolve_env_workspace_root()]
 
 
 def get_workspace_root() -> Path:
@@ -112,11 +136,11 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[List[Path]]:
         try:
             resolved_roots = await _resolve_workspace_roots_from_context(ctx)
         except Exception as exc:
-            logger.debug(f"读取 MCP Roots 失败，回退环境变量边界: {exc}")
+            logger.debug("读取 MCP Roots 失败，回退环境变量边界: {}", exc)
         else:
             token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
             if resolved_roots:
-                logger.debug(f"已应用 MCP Roots 边界: {resolved_roots}")
+                logger.debug("已应用 MCP Roots 边界: {}", resolved_roots)
             else:
                 logger.debug("MCP Roots 为空，当前请求按无本地目录权限处理")
 
@@ -130,22 +154,36 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[List[Path]]:
 # ==================== 路径验证和规范化 ====================
 
 
-def is_path_within_base(path: Path, base_dir: Path) -> bool:
-    """
-    判断路径是否位于基础目录内。
+def _is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
+    """判断已 resolve 的路径是否位于已 resolve 的基础目录内。
+
+    直接做 relative_to 比较，不再重复 resolve。供循环场景复用以避免重复解析。
     """
     try:
-        path.resolve().relative_to(base_dir.resolve())
+        path_resolved.relative_to(base_resolved)
         return True
     except ValueError:
         return False
 
 
+def is_path_within_base(path: Path, base_dir: Path) -> bool:
+    """
+    判断路径是否位于基础目录内。
+    """
+    return _is_within_resolved(path.resolve(), base_dir.resolve())
+
+
 def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
     """
     判断路径是否位于任一基础目录内。
+
+    path 仅 resolve 一次后与各 base 比较，避免对每个 base 重复解析同一 path。
     """
-    return any(is_path_within_base(path, base_dir) for base_dir in base_dirs)
+    resolved_path = path.resolve()
+    for base_dir in base_dirs:
+        if _is_within_resolved(resolved_path, base_dir.resolve()):
+            return True
+    return False
 
 
 def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
@@ -174,7 +212,7 @@ def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
             return path_obj.resolve()
 
     except Exception as e:
-        logger.error(f"路径标准化失败 {path}: {e}")
+        logger.error("路径标准化失败 {}: {}", path, e)
         raise ValueError(f"无效的路径格式: {path}")
 
 
@@ -202,7 +240,7 @@ def get_relative_path(path: Union[str, Path], base_dir: Optional[str] = None) ->
             return str(path_obj.resolve())
 
     except Exception as e:
-        logger.error(f"获取相对路径失败 {path}: {e}")
+        logger.error("获取相对路径失败 {}: {}", path, e)
         return str(path)
 
 
@@ -210,7 +248,7 @@ def get_relative_path(path: Union[str, Path], base_dir: Optional[str] = None) ->
 
 
 def validate_image_path(
-    path: str, base_dir: Optional[str] = None
+    path: str, base_dir: Optional[str] = None, skip_dimensions: bool = False
 ) -> Tuple[bool, str, Optional[Path]]:
     """
     验证图片文件路径
@@ -234,52 +272,20 @@ def validate_image_path(
         if base_dir:
             base_path = Path(base_dir).resolve()
             if not is_path_within_base(normalized_path, base_path):
-                return False, f"路径超出允许目录: {base_path}", normalized_path
+                return False, "路径超出允许的工作区目录范围", normalized_path
 
         # 委托 validation 模块执行统一规则校验
         try:
-            validated_path = validate_image_url(str(normalized_path))
+            validated_path = validate_image_url(
+                str(normalized_path), skip_dimensions=skip_dimensions
+            )
             return True, "", Path(validated_path)
         except SeedreamValidationError as e:
             return False, e.message, normalized_path
 
     except Exception as e:
-        logger.error(f"路径验证失败 {path}: {e}")
+        logger.error("路径验证失败 {}: {}", path, e)
         return False, f"路径验证错误: {str(e)}", None
-
-
-def validate_image_paths(
-    paths: List[str], base_dir: Optional[str] = None
-) -> Tuple[bool, List[str], List[Optional[Path]]]:
-    """
-    批量验证图片文件路径
-
-    Args:
-        paths: 图片文件路径列表
-        base_dir: 基础目录
-
-    Returns:
-        (是否全部有效, 错误信息列表, 标准化路径列表)
-    """
-    errors = []
-    normalized_paths = []
-    all_valid = True
-
-    for i, path in enumerate(paths):
-        is_valid, error_msg, normalized_path = validate_image_path(path, base_dir)
-
-        if not is_valid:
-            all_valid = False
-            errors.append(f"路径 {i+1}: {error_msg}")
-        else:
-            errors.append("")
-
-        normalized_paths.append(normalized_path)
-
-    return all_valid, errors, normalized_paths
-
-
-# ==================== 文件信息和查找 ====================
 
 
 def find_images_in_directory(
@@ -312,7 +318,7 @@ def find_images_in_directory(
         dir_path = Path(directory).resolve()
 
         if not dir_path.exists() or not dir_path.is_dir():
-            logger.warning(f"目录不存在或不是目录: {directory}")
+            logger.warning("目录不存在或不是目录: {}", directory)
             return images
 
         # 使用指定的扩展名或默认支持的扩展名
@@ -330,16 +336,22 @@ def find_images_in_directory(
                 with os.scandir(path) as it:
                     entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
             except (PermissionError, OSError) as e:
-                logger.warning(f"无法访问目录 {path}: {e}")
+                logger.warning("无法访问目录 {}: {}", path, e)
                 return False
 
             for entry in entries:
                 entry_path = Path(entry.path)
-                if entry.is_file() and entry_path.suffix.lower() in target_extensions:
+                # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历
+                if (
+                    entry.is_file(follow_symlinks=False)
+                    and entry_path.suffix.lower() in target_extensions
+                ):
                     images.append(entry_path)
                     if target_count >= 0 and len(images) >= target_count:
                         return True
-                elif entry.is_dir() and recursive and current_depth < max_depth:
+                elif (
+                    entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth
+                ):
                     if scan_directory(entry_path, current_depth + 1):
                         return True
             return False
@@ -347,43 +359,9 @@ def find_images_in_directory(
         scan_directory(dir_path)
 
     except Exception as e:
-        logger.error(f"搜索图片文件失败 {directory}: {e}")
+        logger.error("搜索图片文件失败 {}: {}", directory, e)
 
     return images
-
-
-def get_file_info(path: Union[str, Path]) -> dict:
-    """
-    获取文件信息
-
-    Args:
-        path: 文件路径
-
-    Returns:
-        包含文件信息的字典
-    """
-    try:
-        path_obj = Path(path)
-
-        if not path_obj.exists():
-            return {"error": "文件不存在"}
-
-        stat = path_obj.stat()
-
-        return {
-            "name": path_obj.name,
-            "path": str(path_obj.resolve()),
-            "relative_path": get_relative_path(path_obj),
-            "size": stat.st_size,
-            "size_str": _format_file_size(stat.st_size),
-            "extension": path_obj.suffix.lower(),
-            "modified": stat.st_mtime,
-            "is_image": path_obj.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS,
-        }
-
-    except Exception as e:
-        logger.error(f"获取文件信息失败 {path}: {e}")
-        return {"error": f"获取文件信息失败: {str(e)}"}
 
 
 def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = None) -> List[str]:
@@ -417,7 +395,7 @@ def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = N
                 break
 
     except Exception as e:
-        logger.error(f"生成路径建议失败: {e}")
+        logger.error("生成路径建议失败: {}", e)
 
     return suggestions
 
@@ -440,7 +418,8 @@ def _file_uri_to_path(uri: str) -> Optional[Path]:
     path_part = url2pathname(parsed.path or "")
     netloc = parsed.netloc or ""
     if netloc and netloc.lower() != "localhost":
-        path_part = f"//{netloc}{path_part}"
+        # 拒绝 UNC 路径（file://host/share），避免 Windows 下触发 SMB 连接泄露凭据
+        return None
 
     if not path_part:
         return None
@@ -449,15 +428,3 @@ def _file_uri_to_path(uri: str) -> Optional[Path]:
         return Path(path_part).expanduser().resolve()
     except Exception:
         return None
-
-
-def _format_file_size(size_bytes: int) -> str:
-    """格式化文件大小"""
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KB"
-    elif size_bytes < 1024 * 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
-    else:
-        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"

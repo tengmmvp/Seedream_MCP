@@ -24,3 +24,11 @@ def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """临时工作区根目录，并注入 SEEDREAM_WORKSPACE_ROOT 环境变量。"""
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """每测试重置全局配置单例，防止跨测试缓存污染工作区根目录读取。"""
+    from seedream_mcp import config as config_module
+
+    monkeypatch.setattr(config_module, "_global_config", None)

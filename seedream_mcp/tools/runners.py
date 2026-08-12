@@ -1,5 +1,8 @@
 """
-MCP工具适配器辅助模块
+MCP 工具适配器：组装 core 执行流水线与 impl 处理器，作为 composition root。
+
+位于 tools/ 顶层而非 core/，使依赖方向为 core ← impl ← runners，避免 core 反向依赖 impl
+造成的包级循环。
 """
 
 from __future__ import annotations
@@ -7,20 +10,20 @@ from __future__ import annotations
 from mcp.server.fastmcp import Context
 from mcp.types import CallToolResult
 
-from ...config import SeedreamConfig
-from ...utils.path_utils import workspace_roots_scope
-from .schemas import (
+from ..config import SeedreamConfig
+from ..utils.path_utils import workspace_roots_scope
+from .core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     TextToImageInput,
 )
-from ..impl.browse_images import handle_browse_images
-from ..impl.image_to_image import handle_image_to_image
-from ..impl.multi_image_fusion import handle_multi_image_fusion
-from ..impl.sequential_generation import handle_sequential_generation
-from ..impl.text_to_image import handle_text_to_image
+from .impl.browse_images import handle_browse_images
+from .impl.image_to_image import handle_image_to_image
+from .impl.multi_image_fusion import handle_multi_image_fusion
+from .impl.sequential_generation import handle_sequential_generation
+from .impl.text_to_image import handle_text_to_image
 
 
 async def run_text_to_image(

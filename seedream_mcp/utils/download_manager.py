@@ -4,7 +4,7 @@
 
 import asyncio
 import ipaddress
-import logging
+import random
 import socket
 import time
 from pathlib import Path
@@ -14,9 +14,88 @@ from urllib.parse import urljoin, urlparse
 import aiofiles
 import aiohttp
 
+from ..version import __version__
 from .errors import SeedreamMCPError
+from .formats import is_known_image_bytes
+from .logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+# 下载单文件大小上限默认值
+DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
+
+# 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数
+_DOWNLOAD_CHUNK_SIZE = 256 * 1024
+
+
+def sanitize_url(url: str) -> str:
+    """脱敏 URL 用于日志，保留 scheme/host/path，隐藏查询参数中的潜在敏感信息。"""
+    try:
+        parsed = urlparse(url)
+        if parsed.query:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?<query-redacted>"
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    except Exception:
+        return "<invalid-url>"
+
+
+# 部分服务以通用二进制类型返回图片，故即使非 image/* 也视为合法二进制响应
+_BINARY_CONTENT_TYPES = frozenset(
+    {"application/octet-stream", "application/binary", "binary/octet-stream"}
+)
+
+# RFC 6598 运营商级 NAT 地址段。Python 较新版本 is_global 已排除此段，
+# 此处前置显式判断以给出精确拒绝原因，并对 is_global 实现差异保持纵深防御
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+# 可封装内网 IPv4 的 IPv6 段：NAT64、IPv4-mapped、IPv4-compatible
+_NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
+_IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")
+
+
+def _embedded_ipv4_in_six(ip_obj: Any) -> Optional[ipaddress.IPv4Address]:
+    """提取 NAT64/IPv4-mapped/IPv4-compatible 段内嵌的 IPv4 地址，其他返回 None。"""
+    for network in (_NAT64_NETWORK, _IPV4_MAPPED_NETWORK, _IPV4_COMPAT_NETWORK):
+        if ip_obj in network:
+            return ipaddress.IPv4Address(int(ip_obj) & 0xFFFFFFFF)
+    return None
+
+
+def _public_ip_rejection_reason(ip_obj: Any) -> Optional[str]:
+    """返回 IP 不可作为公网下载目标的拒绝原因，None 表示通过。
+
+    统一静态 URL、DNS 解析、连接对端 IP 三处校验：拒绝非公网地址、RFC 6598 CGNAT 段，
+    以及 6to4/Teredo 等可封装内网地址的 IPv6 段。
+    """
+    if ip_obj.version == 4 and ip_obj in _CGNAT_NETWORK:
+        return "CGNAT地址(100.64.0.0/10)"
+    if not ip_obj.is_global:
+        return "非公网地址"
+    if ip_obj.version == 6:
+        if getattr(ip_obj, "sixtofour", None) or getattr(ip_obj, "teredo", None):
+            return "6to4/Teredo地址"
+        embedded = _embedded_ipv4_in_six(ip_obj)
+        if embedded is not None:
+            reason = _public_ip_rejection_reason(embedded)
+            if reason:
+                return f"IPv6内嵌{reason}"
+    return None
+
+
+def _is_image_compatible_content_type(content_type: str) -> bool:
+    """判断响应内容类型是否兼容图片下载。
+
+    image/* 与通用二进制类型视为兼容；空类型视为兼容，交由字节签名嗅探兜底。
+    明确的非图片类型（text/html、application/json 等）不兼容，调用方应据此拒绝下载。
+    SVG 虽属 image/*，但本质是 XML 文本，可内嵌脚本与外部实体，存在 XSS 与 XXE 风险，
+    不作为图片下载。
+    """
+    normalized = content_type.split(";")[0].strip().lower()
+    if not normalized:
+        return True
+    if normalized in {"image/svg+xml", "image/svg"}:
+        return False
+    return normalized.startswith("image/") or normalized in _BINARY_CONTENT_TYPES
 
 
 class DownloadError(SeedreamMCPError):
@@ -37,7 +116,7 @@ class DownloadManager:
         timeout: int = 30,
         max_retries: int = 3,
         retry_delay: float = 1.0,
-        max_file_size: int = 50 * 1024 * 1024,
+        max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         dns_cache_ttl: int = 60,
     ):
         """
@@ -57,6 +136,7 @@ class DownloadManager:
         self._dns_cache_ttl = max(1, dns_cache_ttl)
         self._dns_cache: Dict[str, Tuple[float, Tuple[str, ...]]] = {}
         self._dns_cache_lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self) -> "DownloadManager":
@@ -69,9 +149,16 @@ class DownloadManager:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """
         获取可用的 aiohttp 会话
+
+        首次创建用双检查锁串行化，避免并发请求各自创建会话导致旧会话泄漏。
         """
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout))
+            async with self._session_lock:
+                if self._session is None or self._session.closed:
+                    self._session = aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                        trust_env=False,
+                    )
         return self._session
 
     async def close(self) -> None:
@@ -88,12 +175,22 @@ class DownloadManager:
         return save_path.with_suffix(f"{suffix}.part")
 
     @staticmethod
-    def _cleanup_temp_file(temp_path: Path) -> None:
+    def _cleanup_temp_file(temp_path: Path, *, created: Optional[bool] = None) -> None:
+        """清理临时文件。
+
+        Args:
+            temp_path: 临时文件路径
+            created: 调用方对 temp 文件创建状态的标记。
+                False 表示本次流程未创建该文件，跳过 exists 检查；
+                None（默认）保持防御性 exists 检查，用于清理潜在残留。
+        """
+        if created is False:
+            return
         try:
             if temp_path.exists():
                 temp_path.unlink()
         except OSError as exc:
-            logger.warning(f"清理临时文件失败: {temp_path} -> {exc}")
+            logger.warning("清理临时文件失败: {} -> {}", temp_path, exc)
 
     def _validate_url_static(self, url: str) -> Tuple[str, bool]:
         """
@@ -117,11 +214,12 @@ class DownloadManager:
         if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
             raise DownloadError(f"不安全的本地主机地址: {host}")
 
-        # 直接 IP 地址：仅允许公网
+        # 直接 IP 地址：仅允许公网，并拒绝 6to4/Teredo 等可封装内网地址的 IPv6 段
         try:
             ip = ipaddress.ip_address(host)
-            if not ip.is_global:
-                raise DownloadError(f"不安全的IP地址: {host}")
+            reason = _public_ip_rejection_reason(ip)
+            if reason:
+                raise DownloadError(f"不安全的IP地址({reason}): {host}")
             return host, False
         except ValueError:
             return host, True
@@ -155,8 +253,9 @@ class DownloadManager:
                 ip_obj = ipaddress.ip_address(resolved_ip)
             except ValueError as exc:
                 raise DownloadError(f"域名解析返回非法IP: {host} -> {resolved_ip}") from exc
-            if not ip_obj.is_global:
-                raise DownloadError(f"域名解析到非公网地址: {host} -> {resolved_ip}")
+            reason = _public_ip_rejection_reason(ip_obj)
+            if reason:
+                raise DownloadError(f"域名解析到不安全地址({reason}): {host} -> {resolved_ip}")
             resolved_ips.add(resolved_ip)
 
         if not resolved_ips:
@@ -208,19 +307,21 @@ class DownloadManager:
         except ValueError as exc:
             raise DownloadError(f"连接返回非法IP地址: {peer_ip}") from exc
 
-        if not ip_obj.is_global:
-            raise DownloadError(f"连接命中非公网地址: {peer_ip} ({source_url})")
+        reason = _public_ip_rejection_reason(ip_obj)
+        if reason:
+            raise DownloadError(f"连接命中不安全地址({reason}): {peer_ip} ({source_url})")
 
     def _validate_connected_peer_ip(
         self, response: aiohttp.ClientResponse, source_url: str
     ) -> None:
         """
         连接建立后再次校验对端 IP，防止 DNS rebinding。
+
+        无法提取对端 IP 时 fail-closed 拒绝下载，避免因校验信息缺失而放行潜在的内网连接。
         """
         peer_ip = self._extract_peer_ip(response)
         if not peer_ip:
-            logger.warning(f"无法获取对端IP，跳过连接后校验: {source_url}")
-            return
+            raise DownloadError(f"无法获取连接对端IP，拒绝下载: {sanitize_url(source_url)}")
 
         self._ensure_public_peer_ip(peer_ip, source_url)
 
@@ -242,17 +343,21 @@ class DownloadManager:
             DownloadError: 下载失败时抛出
         """
         if headers is None:
-            headers = {"User-Agent": "Seedream-MCP/1.0", "Accept": "image/*"}
-        # 静态校验不依赖网络，提前失败避免无效重试
-        self._validate_url_static(url)
+            headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
 
         start_time = time.time()
-        last_error = None
+        last_error: Optional[DownloadError] = None
         temp_path = self._temp_path_for(save_path)
 
         for attempt in range(self.max_retries + 1):
+            temp_created = False
             try:
-                logger.info(f"开始下载图片 (尝试 {attempt + 1}/{self.max_retries + 1}): {url}")
+                logger.info(
+                    "开始下载图片 (尝试 {}/{}): {}",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    sanitize_url(url),
+                )
 
                 self._cleanup_temp_file(temp_path)
                 session = await self._ensure_session()
@@ -286,29 +391,50 @@ class DownloadManager:
                         if response.status != 200:
                             raise DownloadError(f"HTTP错误: {response.status}")
 
-                        # 检查内容类型
+                        # 检查内容类型：明确非图片类型（HTML 错误页、JSON 等）直接拒绝
                         content_type = response.headers.get("content-type", "")
-                        if not content_type.startswith("image/"):
-                            logger.warning(f"内容类型可能不是图片: {content_type}")
+                        if not _is_image_compatible_content_type(content_type):
+                            raise DownloadError(
+                                f"响应内容类型非图片: {content_type.split(';')[0].strip()}"
+                            )
 
                         # 检查文件大小
                         content_length = response.headers.get("content-length")
-                        if content_length and int(content_length) > self.max_file_size:
-                            raise DownloadError(f"文件过大: {content_length} 字节")
+                        if content_length:
+                            try:
+                                cl_value = int(content_length)
+                            except (TypeError, ValueError) as exc:
+                                raise DownloadError(
+                                    f"非法 content-length: {content_length!r}"
+                                ) from exc
+                            if cl_value > self.max_file_size:
+                                raise DownloadError(f"文件过大: {cl_value} 字节")
 
                         # 确保目录存在
                         save_path.parent.mkdir(parents=True, exist_ok=True)
 
                         # 下载写入临时文件，成功后原子替换
                         total_size = 0
+                        head_bytes = b""
                         async with aiofiles.open(temp_path, "wb") as f:
-                            async for chunk in response.content.iter_chunked(8192):
+                            temp_created = True
+                            async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
                                 total_size += len(chunk)
                                 if total_size > self.max_file_size:
                                     raise DownloadError(f"文件过大: {total_size} 字节")
+                                # 在写入循环内累计首 32 字节，省一次 open+read 做签名校验
+                                if len(head_bytes) < 32:
+                                    head_bytes += chunk[: 32 - len(head_bytes)]
                                 await f.write(chunk)
 
+                        # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘
+                        if not is_known_image_bytes(head_bytes):
+                            raise DownloadError(
+                                "下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造"
+                            )
+
                         temp_path.replace(save_path)
+                        temp_created = False
                         download_time = time.time() - start_time
 
                         result = {
@@ -321,79 +447,42 @@ class DownloadManager:
                         }
 
                         logger.info(
-                            f"图片下载成功: {save_path} ({total_size} 字节, {download_time:.2f}秒)"
+                            "图片下载成功: {} ({} 字节, {:.2f}秒)",
+                            save_path,
+                            total_size,
+                            download_time,
                         )
                         return result
 
+            except DownloadError:
+                # 主动抛出的 DownloadError（HTTP 错误/文件过大/字节签名/重定向等）语义明确，原样抛出不重试
+                raise
+
             except asyncio.TimeoutError as e:
                 last_error = DownloadError(f"下载超时: {e}")
-                logger.warning(f"下载超时 (尝试 {attempt + 1}): {url}")
+                logger.warning("下载超时 (尝试 {}): {}", attempt + 1, sanitize_url(url))
 
             except aiohttp.ClientError as e:
                 last_error = DownloadError(f"网络错误: {e}")
-                logger.warning(f"网络错误 (尝试 {attempt + 1}): {e}")
+                logger.warning("网络错误 (尝试 {}): {}", attempt + 1, e, exc_info=True)
 
             except OSError as e:
                 last_error = DownloadError(f"文件系统错误: {e}")
-                logger.warning(f"文件系统错误 (尝试 {attempt + 1}): {e}")
+                logger.warning("文件系统错误 (尝试 {}): {}", attempt + 1, e, exc_info=True)
 
             except Exception as e:
                 last_error = DownloadError(f"未知错误: {e}")
-                logger.warning(f"下载失败 (尝试 {attempt + 1}): {e}")
+                logger.warning("下载失败 (尝试 {}): {}", attempt + 1, e, exc_info=True)
             finally:
-                self._cleanup_temp_file(temp_path)
+                self._cleanup_temp_file(temp_path, created=temp_created)
 
-            # 如果不是最后一次尝试，等待后重试
+            # 如果不是最后一次尝试，等待后重试；叠加抖动避免并发重试同步
             if attempt < self.max_retries:
-                await asyncio.sleep(self.retry_delay * (attempt + 1))
+                await asyncio.sleep(self.retry_delay * (attempt + 1) + random.uniform(0, 1))
 
         # 所有重试都失败了
-        logger.error(f"图片下载失败，已重试 {self.max_retries} 次: {url}")
+        logger.error("图片下载失败，已重试 {} 次: {}", self.max_retries, sanitize_url(url))
         raise last_error or DownloadError("下载失败")
-
-    async def download_multiple_images(
-        self,
-        urls_and_paths: list[tuple[str, Path]],
-        headers: Optional[Dict[str, str]] = None,
-        max_concurrent: int = 5,
-    ) -> list[Dict[str, Any]]:
-        """
-        并发下载多个图片
-
-        Args:
-            urls_and_paths: URL和保存路径的元组列表
-            headers: 请求头
-            max_concurrent: 最大并发数
-
-        Returns:
-            下载结果列表
-        """
-        semaphore = asyncio.Semaphore(max_concurrent)
-
-        async def download_with_semaphore(url: str, path: Path) -> Dict[str, Any]:
-            async with semaphore:
-                try:
-                    return await self.download_image(url, path, headers)
-                except Exception as e:
-                    logger.error(f"下载失败: {url} -> {e}")
-                    return {"success": False, "url": url, "file_path": str(path), "error": str(e)}
-
-        tasks = [download_with_semaphore(url, path) for url, path in urls_and_paths]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # 处理异常结果
-        processed_results: list[Dict[str, Any]] = []
-        for i, result in enumerate(results):
-            if isinstance(result, BaseException):
-                url, path = urls_and_paths[i]
-                processed_results.append(
-                    {"success": False, "url": url, "file_path": str(path), "error": str(result)}
-                )
-            else:
-                processed_results.append(result)
-
-        return processed_results
 
     def validate_url(self, url: str) -> bool:
         """
@@ -410,23 +499,3 @@ class DownloadManager:
             return True
         except DownloadError:
             return False
-
-    def get_file_extension_from_url(self, url: str) -> str:
-        """
-        从URL获取文件扩展名
-
-        Args:
-            url: 图片URL
-
-        Returns:
-            文件扩展名（包含点号）
-        """
-        try:
-            from urllib.parse import urlparse
-
-            path = urlparse(url).path
-            if "." in path:
-                return Path(path).suffix.lower()
-            return ".jpeg"  # 默认扩展名
-        except Exception:
-            return ".jpeg"

@@ -1,0 +1,114 @@
+"""图像输入预处理。
+
+将用户提供的图像（URL / Data URI / 本地文件路径）归一化为 API 可接受的格式：
+URL 与 Data URI 校验后原样返回；本地文件读取并编码为 Base64 Data URI。
+该模块从 SeedreamClient 剥离，使客户端专注于 API 调用，预处理逻辑可独立测试与复用。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+from typing import List
+from urllib.parse import urlparse
+
+from PIL import Image
+
+from .errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
+from .formats import MIME_BY_EXTENSION
+from .logging import get_logger
+from .os_utils import open_no_follow_read
+from .path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
+from .validation import (
+    _ensure_heif_opener_registered,
+    _validate_image_dimensions,
+    validate_image_url,
+)
+
+logger = get_logger(__name__)
+
+
+async def prepare_image_input(image: str) -> str:
+    """将单张图像输入归一化为 API 所需格式。
+
+    - HTTP/HTTPS URL：校验主机后原样返回。
+    - Data URI：经格式与维度校验后原样返回。
+    - 本地文件路径：读取并编码为 Base64 Data URI 返回。
+
+    Data URI 校验与本地文件读取均在工作线程中执行，避免阻塞事件循环。
+    """
+    try:
+        normalized = image.strip()
+
+        if normalized.startswith(("http://", "https://")):
+            parsed = urlparse(normalized)
+            if not parsed.netloc:
+                raise SeedreamAPIError(f"无效的图像 URL: {normalized}")
+            return normalized
+
+        if normalized.lower().startswith("data:image/"):
+            # validate_image_url 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环
+            return await asyncio.to_thread(validate_image_url, normalized)
+
+        # 本地文件：路径校验、读取与编码均为同步 IO，整体放到工作线程
+        return await asyncio.to_thread(_prepare_local_image, normalized, image)
+    except SeedreamMCPError:
+        raise
+    except Exception as e:
+        raise SeedreamAPIError(f"图像处理失败: {e}")
+
+
+def _prepare_local_image(normalized: str, original: str) -> str:
+    """校验本地图片路径并读取编码为 Base64 Data URI。需在工作线程中调用。"""
+    workspace_roots = get_workspace_roots()
+    if not workspace_roots:
+        raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
+
+    validated_path = None
+    validation_errors: List[str] = []
+    for root in workspace_roots:
+        is_valid, error_msg, normalized_path = validate_image_path(
+            normalized, base_dir=str(root), skip_dimensions=True
+        )
+        if is_valid and normalized_path is not None:
+            validated_path = normalized_path
+            break
+        if error_msg:
+            validation_errors.append(error_msg)
+
+    if validated_path is None:
+        error_text = "图像路径校验失败"
+        if validation_errors:
+            error_text = "；".join(dict.fromkeys(validation_errors))
+
+        suggestions = suggest_similar_paths(
+            original,
+            search_dirs=[str(root) for root in workspace_roots],
+        )
+        suggestion_text = ""
+        if suggestions:
+            suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
+                f"  • {s}" for s in suggestions[:3]
+            )
+        raise SeedreamAPIError(f"{error_text}{suggestion_text}")
+
+    # O_NOFOLLOW 防护（最终路径分量拒绝符号链接）由 os_utils 统一实现；
+    # 符号链接或打开失败抛 OSError，由 prepare_image_input 外层转 SeedreamAPIError
+    with open_no_follow_read(validated_path) as f:
+        image_bytes = f.read()
+    # 维度校验复用已读字节，避免再次打开文件
+    try:
+        _ensure_heif_opener_registered()
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            _validate_image_dimensions(img.size[0], img.size[1], str(validated_path))
+    except SeedreamValidationError:
+        raise
+    except Exception as e:
+        raise SeedreamAPIError(f"图像维度解析失败: {e}")
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    suffix = validated_path.suffix.lower()
+    mime_type = MIME_BY_EXTENSION.get(suffix, "image/jpeg")
+
+    logger.info("成功处理图片文件: {} ({} bytes)", validated_path, len(image_bytes))
+    return f"data:{mime_type};base64,{image_b64}"

@@ -1,0 +1,163 @@
+"""生成结果的自动保存：从 URL 下载或从 Base64 解码并落盘。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from ...config import SeedreamConfig
+from ...utils.auto_save import AutoSaveManager, AutoSaveResult
+from ...utils.download_manager import DownloadManager
+from ...utils.logging import get_logger
+from ._helpers import _resolve_base_dir
+from .results import extract_images
+
+logger = get_logger(__name__)
+
+# AutoSaveManager 批量保存方法的可调用类型：接收 manager、image_data、tool_name，返回保存结果列表。
+BatchSaveMethod = Callable[
+    [AutoSaveManager, List[Dict[str, Any]], str], Awaitable[List[AutoSaveResult]]
+]
+
+
+def _build_auto_save_manager(
+    config: SeedreamConfig,
+    base_dir: Path,
+    download_manager: Optional[DownloadManager],
+) -> AutoSaveManager:
+    """按配置构造自动保存管理器。"""
+    return AutoSaveManager(
+        base_dir=base_dir,
+        download_timeout=config.auto_save_download_timeout,
+        max_retries=config.auto_save_max_retries,
+        max_file_size=config.auto_save_max_file_size,
+        max_concurrent=config.auto_save_max_concurrent,
+        date_folder=config.auto_save_date_folder,
+        cleanup_days=config.auto_save_cleanup_days,
+        download_manager=download_manager,
+    )
+
+
+async def _auto_save(
+    result: Dict[str, Any],
+    prompt: str,
+    config: SeedreamConfig,
+    save_path: Optional[str],
+    custom_name: Optional[str],
+    tool_name: str,
+    data_key: str,
+    save_method: BatchSaveMethod,
+    empty_warning: str,
+    download_manager: Optional[DownloadManager] = None,
+) -> List[AutoSaveResult]:
+    """auto_save_from_urls / auto_save_from_base64 的公共骨架。
+
+    data_key 区分结果字典中取值的键（url / b64_json），save_method 为 AutoSaveManager
+    上的批量保存方法（save_multiple_images / save_multiple_base64_images），empty_warning
+    为无可保存数据时的告警文案。
+    """
+    base_dir = _resolve_base_dir(config, save_path)
+    auto_save_manager = _build_auto_save_manager(config, base_dir, download_manager)
+
+    images = extract_images(result)
+    image_data = []
+    for i, image in enumerate(images):
+        if isinstance(image, dict) and image.get(data_key):
+            image_data.append(
+                {
+                    data_key: image[data_key],
+                    "prompt": prompt,
+                    "custom_name": f"{custom_name}_{i + 1}" if custom_name else None,
+                    "alt_text": f"Generated image {i + 1}",
+                }
+            )
+
+    if not image_data:
+        logger.warning(empty_warning)
+        await auto_save_manager.close()
+        return []
+
+    try:
+        return await save_method(auto_save_manager, image_data, tool_name)
+    finally:
+        await auto_save_manager.close()
+
+
+async def auto_save_from_urls(
+    result: Dict[str, Any],
+    prompt: str,
+    config: SeedreamConfig,
+    save_path: Optional[str],
+    custom_name: Optional[str],
+    tool_name: str,
+    download_manager: Optional[DownloadManager] = None,
+) -> List[AutoSaveResult]:
+    """
+    从 URL 异步下载并保存图片
+
+    根据配置项自动解析基础目录，支持批量下载并记录保存结果，
+    包含超时控制、重试机制及并发管理。
+
+    Args:
+        result: 图片生成结果字典，包含 URL 等信息。
+        prompt: 生成图片所用的提示词，用于元数据记录。
+        config: Seedream 配置实例，包含保存参数。
+        save_path: 用户指定的保存路径，可选。
+        custom_name: 自定义文件名前缀，可选。
+        tool_name: 工具名称标识，用于路径组织。
+
+    Returns:
+        保存结果对象列表，每个对象包含成功状态、路径及错误信息。
+    """
+    return await _auto_save(
+        result=result,
+        prompt=prompt,
+        config=config,
+        save_path=save_path,
+        custom_name=custom_name,
+        tool_name=tool_name,
+        data_key="url",
+        save_method=AutoSaveManager.save_multiple_images,
+        empty_warning="未找到可保存的图片 URL",
+        download_manager=download_manager,
+    )
+
+
+async def auto_save_from_base64(
+    result: Dict[str, Any],
+    prompt: str,
+    config: SeedreamConfig,
+    save_path: Optional[str],
+    custom_name: Optional[str],
+    tool_name: str,
+    download_manager: Optional[DownloadManager] = None,
+) -> List[AutoSaveResult]:
+    """
+    从 Base64 数据异步解码并保存图片
+
+    根据配置项自动解析基础目录，支持批量解码并保存，
+    包含文件大小限制、重试机制及并发管理。
+
+    Args:
+        result: 图片生成结果字典,包含 b64_json 等信息。
+        prompt: 生成图片所用的提示词,用于元数据记录。
+        config: Seedream 配置实例,包含保存参数。
+        save_path: 用户指定的保存路径,可选。
+        custom_name: 自定义文件名前缀,可选。
+        tool_name: 工具名称标识,用于路径组织。
+
+    Returns:
+        保存结果对象列表,每个对象包含成功状态,路径及错误信息。
+    """
+    return await _auto_save(
+        result=result,
+        prompt=prompt,
+        config=config,
+        save_path=save_path,
+        custom_name=custom_name,
+        tool_name=tool_name,
+        data_key="b64_json",
+        save_method=AutoSaveManager.save_multiple_base64_images,
+        empty_warning="未找到可保存的 base64 图片数据",
+        download_manager=download_manager,
+    )

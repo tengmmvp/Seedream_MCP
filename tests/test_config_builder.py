@@ -138,9 +138,10 @@ def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
     assert config.model_id == "doubao-seedream-4-0-250828"
 
 
-def test_build_config_injects_non_config_env_from_dotenv(
+def test_build_config_does_not_inject_dotenv_to_os_environ(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # 配置构建不从 .env 向 os.environ 注入任何值，避免全局状态污染
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     workspace_root = runtime_dir / "workspace"
@@ -161,9 +162,12 @@ def test_build_config_injects_non_config_env_from_dotenv(
         ),
     )
 
-    _ = build_config_from_sources()
+    config = build_config_from_sources()
 
-    assert os.getenv("SEEDREAM_WORKSPACE_ROOT") == str(workspace_root)
+    assert config.api_key == "cwd_key"
+    assert config.workspace_root == str(workspace_root)
+    # .env 的值不应泄漏到 os.environ
+    assert os.getenv("SEEDREAM_WORKSPACE_ROOT") is None
 
 
 def test_build_config_explicit_env_file_is_not_polluted_by_previous_env_file(
@@ -185,19 +189,100 @@ def test_build_config_explicit_env_file_is_not_polluted_by_previous_env_file(
     assert config_b.model_id == "doubao-seedream-4-0-250828"
 
 
-def test_build_config_preserves_runtime_env_set_after_import(
+def test_build_config_does_not_write_back_to_os_environ(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 模拟模块导入后再 setenv：_BASE_ENV_KEYS 未包含该键
-    monkeypatch.setattr(config_module, "_BASE_ENV_KEYS", set())
-    monkeypatch.setattr(config_module, "_INJECTED_ENV_VALUES", {})
-
+    # 配置构建读取系统 env 但不回写，.env 值不污染 os.environ
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
     env_file = tmp_path / "config.env"
-    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
     monkeypatch.setenv("ARK_API_KEY", "runtime_key")
 
     config = build_config_from_sources(env_file=str(env_file))
 
     assert config.api_key == "runtime_key"
-    assert os.getenv("ARK_API_KEY") == "runtime_key"
-    assert "ARK_API_KEY" not in config_module._INJECTED_ENV_VALUES
+    # .env 的 MODEL_ID 不应写入 os.environ（系统未设置该键）
+    assert os.getenv("SEEDREAM_MODEL_ID") is None
+    assert config.model_id == "doubao-seedream-4-0-250828"
+
+
+def test_build_config_loads_http_auth_token_from_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_HTTP_AUTH_TOKEN 经 .env 配置链加载（M17）。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+    _write_env_file(tmp_path / ".env", "ARK_API_KEY=k\nSEEDREAM_HTTP_AUTH_TOKEN=token123\n")
+    monkeypatch.chdir(tmp_path)
+    config = build_config_from_sources()
+    assert config.http_auth_token == "token123"
+
+
+def test_to_dict_masks_sensitive_fields() -> None:
+    """to_dict 对 api_key 与 http_auth_token 脱敏（M20）。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", http_auth_token="secret")
+    dumped = config.to_dict()
+    assert dumped["api_key"] == "***"
+    assert dumped["http_auth_token"] == "***"
+
+
+def test_workspace_root_non_directory_rejected(tmp_path: Path) -> None:
+    """workspace_root 指向文件时拒绝（L12）。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    file_path = tmp_path / "notdir"
+    file_path.write_text("x", encoding="utf-8")
+    with pytest.raises(SeedreamConfigError, match="workspace_root"):
+        SeedreamConfig(api_key="k", workspace_root=str(file_path))
+
+
+def test_build_config_none_overrides_fall_through_to_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """overrides 中值为 None 时不视为覆盖，穿透到 env/file/default。"""
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    monkeypatch.delenv("SEEDREAM_DEFAULT_WATERMARK", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(
+        overrides={"watermark": None, "model": None},
+        env_file=str(env_file),
+    )
+
+    assert config.api_key == "file_key"
+    # None override 不阻断了链路：watermark/model 均回落到默认值
+    assert config.default_watermark is False
+    assert config.model_id == "doubao-seedream-5-0-260128"
+
+
+def test_build_config_loads_image_prepare_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_IMAGE_PREPARE_CONCURRENCY 经 .env 加载到 image_prepare_concurrency 字段。"""
+    monkeypatch.delenv("SEEDREAM_IMAGE_PREPARE_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_IMAGE_PREPARE_CONCURRENCY=7\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.image_prepare_concurrency == 7
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1"])
+def test_build_config_rejects_non_positive_image_prepare_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """image_prepare_concurrency 必须 > 0，否则抛 SeedreamConfigError。"""
+    monkeypatch.delenv("SEEDREAM_IMAGE_PREPARE_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_IMAGE_PREPARE_CONCURRENCY={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="image_prepare_concurrency"):
+        build_config_from_sources(env_file=str(env_file))

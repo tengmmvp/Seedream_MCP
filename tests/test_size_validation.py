@@ -110,3 +110,12 @@ def test_validate_size_for_model_rejects_seedream_50_pro_non_multiple_of_16() ->
     # 1300x732：总像素 951600（在 [921600, 4194304] 内）、宽高比合规，仅触发 16 倍数约束
     with pytest.raises(SeedreamValidationError, match="16 的倍数"):
         validate_size_for_model("1300x732", "doubao-seedream-5-0-pro-260628")
+
+
+def test_validate_image_url_rejects_oversized_data_uri_before_decode() -> None:
+    """巨型 base64 在解码前按文本长度估算拒绝，避免先解码触发内存放大。"""
+    from seedream_mcp.utils.validation import MAX_IMAGE_FILE_SIZE, validate_image_url
+
+    huge_b64 = "A" * (MAX_IMAGE_FILE_SIZE * 4 // 3 + 100)
+    with pytest.raises(SeedreamValidationError, match="数据过大"):
+        validate_image_url(f"data:image/png;base64,{huge_b64}")

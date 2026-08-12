@@ -286,3 +286,33 @@ def test_format_generation_response_shows_input_images_for_pro_usage() -> None:
     # 5.0 Pro 返回 usage.input_images（输入图数），应在文本统计中展示
     assert "输入图片数: 1" in text
     assert "生成图片数: 1" in text
+
+
+def test_build_generation_context_auto_save_none_equals_omitted() -> None:
+    """auto_save=None 与不传该参行为一致，均回落到 config.auto_save_enabled。"""
+    config = SeedreamConfig(api_key="test_key", auto_save_enabled=True)
+
+    ctx_explicit_none = build_generation_context({"prompt": "t", "auto_save": None}, config)
+    ctx_omitted = build_generation_context({"prompt": "t"}, config)
+
+    assert ctx_explicit_none.enable_auto_save is True
+    assert ctx_omitted.enable_auto_save is True
+    assert ctx_explicit_none.enable_auto_save == ctx_omitted.enable_auto_save
+
+
+def test_build_generation_context_auto_save_none_passes_through_disabled_config() -> None:
+    """config.auto_save_enabled=False 时，auto_save=None 穿透结果为 False。"""
+    config = SeedreamConfig(api_key="test_key", auto_save_enabled=False)
+
+    ctx = build_generation_context({"prompt": "t", "auto_save": None}, config)
+
+    assert ctx.enable_auto_save is False
+
+
+def test_build_generation_context_explicit_auto_save_overrides_config() -> None:
+    """显式 auto_save 非 None 时覆盖 config.auto_save_enabled，确保穿透仅在 None 时发生。"""
+    config = SeedreamConfig(api_key="test_key", auto_save_enabled=True)
+
+    ctx = build_generation_context({"prompt": "t", "auto_save": False}, config)
+
+    assert ctx.enable_auto_save is False

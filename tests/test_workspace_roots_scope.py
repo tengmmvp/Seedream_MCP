@@ -9,7 +9,7 @@ from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import mcp, workspace_roots_resource
 from seedream_mcp.utils.errors import SeedreamAPIError
-from seedream_mcp.tools.core.runners import run_browse_images
+from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.utils.path_utils import get_workspace_root, workspace_roots_scope
 
@@ -56,6 +56,20 @@ async def test_workspace_roots_scope_prioritizes_mcp_roots_over_env(
         assert get_workspace_root() == mcp_root.resolve()
 
     assert get_workspace_root() == env_root.resolve()
+
+
+def test_resolve_env_workspace_root_reads_global_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活动配置就绪时，resolve_env_workspace_root 读 config.workspace_root。"""
+    from seedream_mcp import config as config_module
+    from seedream_mcp.utils.path_utils import resolve_env_workspace_root
+
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    config = SeedreamConfig(api_key="k", workspace_root=str(tmp_path))
+    monkeypatch.setattr(config_module, "_global_config", config)
+    assert resolve_env_workspace_root() == tmp_path.resolve()
 
 
 @pytest.mark.asyncio

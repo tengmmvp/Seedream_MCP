@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -11,9 +12,11 @@ from typing import Any, Dict
 from mcp.server.fastmcp import Context
 from mcp.types import CallToolResult, TextContent
 
-from ..core.common import _safe_ctx_log, _safe_report_progress
+from ..core._helpers import _safe_ctx_log, _safe_report_progress
 from ...utils.logging import get_logger
 from ...utils.path_utils import (
+    SUPPORTED_IMAGE_EXTENSIONS,
+    _is_within_resolved,
     find_images_in_directory,
     get_relative_path,
     get_workspace_roots,
@@ -41,14 +44,33 @@ def _format_file_info(display_path: str, stat_path: Path, show_details: bool) ->
     """
     parts = [display_path]
     if show_details:
-        stat = stat_path.stat()
-        size_mb = stat.st_size / (1024 * 1024)
-        mtime = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(
+        try:
+            stat_result = stat_path.stat()
+        except OSError:
+            parts.append("文件信息不可用")
+            return " | ".join(parts)
+        size_mb = stat_result.st_size / (1024 * 1024)
+        mtime = datetime.datetime.fromtimestamp(stat_result.st_mtime).isoformat(
             sep=" ", timespec="seconds"
         )
         parts.append(f"{size_mb:.2f} MB")
         parts.append(f"修改: {mtime}")
     return " | ".join(parts)
+
+
+def _browse_error_result(message: str, workspace_roots: list[Path]) -> CallToolResult:
+    """构造浏览工具的失败结果，统一结构化错误字段与 workspace_roots 回显。"""
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structuredContent={
+            "tool": "browse_images",
+            "success": False,
+            "status": "failed",
+            "error": {"type": "browse_failed", "message": message},
+            "workspace_roots": [str(root) for root in workspace_roots],
+        },
+        isError=True,
+    )
 
 
 async def handle_browse_images(
@@ -79,27 +101,28 @@ async def handle_browse_images(
     # 解析并设置默认参数
     directory = arguments.get("directory") or "."
     recursive = bool(arguments.get("recursive", True))
-    max_depth = int(arguments.get("max_depth", 3))
-    limit = int(arguments.get("limit", 50))
-    offset = int(arguments.get("offset", 0))
+    # max_depth/limit/offset 已由 BrowseImagesInput（pydantic）校验为 int，无需再 int() 包装
+    max_depth = arguments.get("max_depth", 3)
+    limit = arguments.get("limit", 50)
+    offset = arguments.get("offset", 0)
     format_filter = arguments.get("format_filter")
+    # 格式过滤仅保留受支持的图片扩展名，避免以非图片后缀探测文件
+    if format_filter:
+        format_filter = [ext for ext in format_filter if ext in SUPPORTED_IMAGE_EXTENSIONS]
+        if not format_filter:
+            format_filter = None
     show_details = bool(arguments.get("show_details", False))
 
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
         message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
         await _safe_ctx_log(ctx, "warning", message)
-        return CallToolResult(
-            content=[TextContent(type="text", text=message)],
-            structuredContent={
-                "tool": "browse_images",
-                "success": False,
-                "status": "failed",
-                "error": {"type": "browse_failed", "message": message},
-                "workspace_roots": [],
-            },
-            isError=True,
-        )
+        return _browse_error_result(message, workspace_roots)
+
+    # 预解析工作区根，避免在 limit 循环内对每张图片 × 每个 root 重复 resolve。
+    # 越界校验仍由 is_path_within_* 内部对 path 再做 resolve，base 与 path 比较语义不变。
+    # 展示层（错误提示、structuredContent 的 workspace_roots）继续用 workspace_roots。
+    resolved_roots: list[Path] = [root.resolve() for root in workspace_roots]
 
     resolved_dirs: list[Path] = []
     requested_dir = str(directory)
@@ -109,34 +132,14 @@ async def handle_browse_images(
             absolute_dir = normalize_path(requested_dir)
         except ValueError as exc:
             message = f"目录路径无效: {exc}"
-            return CallToolResult(
-                content=[TextContent(type="text", text=message)],
-                structuredContent={
-                    "tool": "browse_images",
-                    "success": False,
-                    "status": "failed",
-                    "error": {"type": "browse_failed", "message": message},
-                    "workspace_roots": [str(root) for root in workspace_roots],
-                },
-                isError=True,
-            )
-        if not is_path_within_any_base(absolute_dir, workspace_roots):
+            return _browse_error_result(message, workspace_roots)
+        if not is_path_within_any_base(absolute_dir, resolved_roots):
             allowed_roots = ", ".join(str(root) for root in workspace_roots)
             message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
-            return CallToolResult(
-                content=[TextContent(type="text", text=message)],
-                structuredContent={
-                    "tool": "browse_images",
-                    "success": False,
-                    "status": "failed",
-                    "error": {"type": "browse_failed", "message": message},
-                    "workspace_roots": [str(root) for root in workspace_roots],
-                },
-                isError=True,
-            )
+            return _browse_error_result(message, workspace_roots)
         resolved_dirs.append(absolute_dir)
     else:
-        for root in workspace_roots:
+        for root in resolved_roots:
             try:
                 candidate = normalize_path(requested_dir, str(root))
             except ValueError:
@@ -149,17 +152,7 @@ async def handle_browse_images(
     if not resolved_dirs:
         allowed_roots = ", ".join(str(root) for root in workspace_roots)
         message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
-        return CallToolResult(
-            content=[TextContent(type="text", text=message)],
-            structuredContent={
-                "tool": "browse_images",
-                "success": False,
-                "status": "failed",
-                "error": {"type": "browse_failed", "message": message},
-                "workspace_roots": [str(root) for root in workspace_roots],
-            },
-            isError=True,
-        )
+        return _browse_error_result(message, workspace_roots)
 
     await _safe_ctx_log(
         ctx,
@@ -176,7 +169,7 @@ async def handle_browse_images(
         limit,
     )
 
-    # 搜索图片文件：仅扫描 offset+limit+1 张（多 1 张用于判断 has_more），避免大目录无上限扫描
+    # 搜索图片文件：扫描 offset+limit+1 张，多取的 1 张用于判定 has_more，避免大目录无上限扫描
     scan_limit = offset + limit + 1
     all_images: list[Path] = []
     seen_images: set[Path] = set()
@@ -184,7 +177,8 @@ async def handle_browse_images(
     for dir_index, resolved_dir in enumerate(resolved_dirs, start=1):
         if len(all_images) >= scan_limit:
             break
-        matched_images = find_images_in_directory(
+        matched_images = await asyncio.to_thread(
+            find_images_in_directory,
             directory=str(resolved_dir),
             recursive=recursive,
             max_depth=max_depth,
@@ -192,7 +186,7 @@ async def handle_browse_images(
             limit=scan_limit - len(all_images),
         )
         for image_path in matched_images:
-            if not is_path_within_any_base(image_path, workspace_roots):
+            if not is_path_within_any_base(image_path, resolved_roots):
                 logger.warning("检测到越界图片路径，已忽略: {}", image_path)
                 continue
             if image_path in seen_images:
@@ -254,8 +248,11 @@ async def handle_browse_images(
     lines = ["图片列表:"]
     structured_images: list[dict[str, Any]] = []
     for idx, img in enumerate(images, 1):
+        # 预 resolve img 一次，复用 fast-path 与已 resolve 的 roots 比较，
+        # 避免每张图片对每个 root 重复 resolve。
+        img_resolved = img.resolve()
         display_base = next(
-            (root for root in workspace_roots if is_path_within_base(img, root)),
+            (root for root in resolved_roots if _is_within_resolved(img_resolved, root)),
             None,
         )
         if display_base is None:
@@ -267,7 +264,6 @@ async def handle_browse_images(
             {
                 "index": idx,
                 "path": display_path,
-                "absolute_path": str(img),
             }
         )
 

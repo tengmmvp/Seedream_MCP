@@ -3,17 +3,20 @@
 """
 
 import hashlib
-import logging
 import os
-import random
 import re
+import stat
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from .errors import SeedreamMCPError
+from .formats import SUPPORTED_IMAGE_EXTENSIONS
+from .logging import get_logger
+from .os_utils import open_no_follow_write
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class FileManagerError(SeedreamMCPError):
@@ -40,14 +43,21 @@ class FileManager:
             base_dir = Path.cwd() / "images"
         else:
             try:
-                base_dir = Path(base_dir).resolve()
-                if self._is_unsafe_path(base_dir):
-                    raise FileManagerError(f"提供的保存路径不安全: {base_dir}")
+                resolved = Path(base_dir).resolve()
             except (OSError, ValueError) as e:
                 raise FileManagerError(f"解析保存路径时出错: {e}") from e
+            # 拒绝指向文件的路径。目录越界防护由调用方负责，
+            # 即 common._resolve_base_dir 中的 is_path_within_base 校验。
+            if resolved.exists() and not resolved.is_dir():
+                raise FileManagerError(f"保存路径不是目录: {resolved}")
+            base_dir = resolved
 
         self.base_dir = base_dir
         self.ensure_directory(self.base_dir)
+        # 缓存创建时的工作目录，供 generate_markdown_reference 批量复用
+        self._cwd = Path.cwd()
+        # 缓存 resolved 形式，供 validate_path 等热路径复用；base_dir 已 resolve，无需重复
+        self._base_abs = self.base_dir
 
     def ensure_directory(self, path: Path) -> None:
         """
@@ -61,33 +71,9 @@ class FileManager:
         """
         try:
             path.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"确保目录存在: {path}")
+            logger.debug("确保目录存在: {}", path)
         except OSError as e:
             raise FileManagerError(f"创建目录失败: {path} -> {e}")
-
-    def _is_unsafe_path(self, path: Path) -> bool:
-        """
-        检查路径是否不安全
-
-        Args:
-            path: 要检查的路径
-
-        Returns:
-            路径是否不安全
-        """
-        try:
-            # 检查是否包含危险的路径遍历
-            path_str = str(path)
-            if ".." in path.parts or path_str.startswith("\\\\") or ":" in path.name:
-                return True
-
-            # 检查路径长度
-            if len(str(path)) > 260:  # Windows路径长度限制
-                return True
-
-            return False
-        except Exception:
-            return True
 
     def validate_path(self, path: Path) -> bool:
         """
@@ -102,18 +88,18 @@ class FileManager:
         try:
             # 解析绝对路径
             abs_path = path.resolve()
-            base_abs = self.base_dir.resolve()
+            base_abs = self._base_abs
 
             # 检查路径是否在基础目录内
             try:
                 abs_path.relative_to(base_abs)
                 return True
             except ValueError:
-                logger.warning(f"路径不在基础目录内: {abs_path}")
+                logger.warning("路径不在基础目录内: {}", abs_path)
                 return False
 
         except Exception as e:
-            logger.warning(f"路径验证失败: {path} -> {e}")
+            logger.warning("路径验证失败: {} -> {}", path, e)
             return False
 
     def sanitize_filename(self, filename: str) -> str:
@@ -204,8 +190,8 @@ class FileManager:
         # 生成时间戳字符串（包含毫秒）
         time_str = timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
-        # 生成随机数
-        random_suffix = f"{random.randint(1000, 9999)}"
+        # 生成唯一性后缀
+        unique_suffix = uuid.uuid4().hex[:4]
 
         # 构建文件名
         if content_hash:
@@ -213,8 +199,8 @@ class FileManager:
             hash_part = content_hash[:8]
             filename = f"{clean_base}_{time_str}_{hash_part}{extension}"
         else:
-            # 添加随机数后缀确保唯一性
-            filename = f"{clean_base}_{time_str}_{random_suffix}{extension}"
+            # 添加唯一性后缀确保文件名不冲突
+            filename = f"{clean_base}_{time_str}_{unique_suffix}{extension}"
 
         return filename
 
@@ -230,39 +216,11 @@ class FileManager:
         """
         return hashlib.sha256(content).hexdigest()
 
-    def infer_extension_from_bytes(self, content: bytes, default: str = ".jpg") -> str:
-        """
-        基于文件头推断图片扩展名
+    def infer_extension_from_bytes(self, content: bytes, default: str = ".jpeg") -> str:
+        """基于文件头推断图片扩展名。委托 formats 模块的统一实现。"""
+        from .formats import infer_extension_from_bytes
 
-        Args:
-            content: 图片字节内容
-            default: 默认扩展名
-
-        Returns:
-            扩展名（包含点号）
-        """
-        try:
-            # PNG
-            if content.startswith(b"\x89PNG\r\n\x1a\n"):
-                return ".png"
-            # JPEG
-            if content.startswith(b"\xff\xd8\xff"):
-                return ".jpeg"
-            # GIF
-            if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
-                return ".gif"
-            # BMP
-            if content.startswith(b"BM"):
-                return ".bmp"
-            # WEBP (RIFF....WEBP)
-            if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
-                return ".webp"
-            # TIFF
-            if content.startswith(b"II*\x00") or content.startswith(b"MM\x00*"):
-                return ".tiff"
-        except Exception:
-            pass
-        return default
+        return infer_extension_from_bytes(content, default)
 
     def get_organized_path(
         self, filename: str, subfolder: Optional[str] = None, date_folder: bool = True
@@ -324,11 +282,13 @@ class FileManager:
             # 从提示词生成基础名称
             base_name = self.generate_name_from_prompt(prompt)
 
-        # 获取文件扩展名
-        from .download_manager import DownloadManager
+        # 从 URL 路径推断扩展名；使用独立工具函数，避免实例化 DownloadManager
+        from .url_utils import get_file_extension_from_url
 
-        dm = DownloadManager()
-        extension = dm.get_file_extension_from_url(url)
+        extension = get_file_extension_from_url(url)
+        # 收敛到受支持图片扩展名白名单，防止 URL 派生任意后缀（.html/.aspx 等）落盘
+        if extension not in SUPPORTED_IMAGE_EXTENSIONS:
+            extension = ".jpeg"
 
         # 生成唯一文件名
         filename = self.generate_unique_filename(base_name, extension)
@@ -395,7 +355,9 @@ class FileManager:
             date_folder=date_folder,
         )
 
-    def save_bytes(self, file_path: Path, data: bytes, overwrite: bool = False) -> Dict[str, Any]:
+    def save_bytes(
+        self, file_path: Path, data: bytes, overwrite: bool = False, ensure_parent: bool = True
+    ) -> Dict[str, Any]:
         """
         将字节数据写入文件
 
@@ -403,13 +365,15 @@ class FileManager:
             file_path: 目标路径
             data: 字节数据
             overwrite: 是否覆盖已有文件
+            ensure_parent: 是否确保父目录存在；调用方已确保时传 False 跳过重复 mkdir
 
         Returns:
             保存结果元数据
         """
         try:
-            # 目录保证存在
-            self.ensure_directory(file_path.parent)
+            # 目录保证存在；批量保存入口或上游已建目录时可由调用方关闭
+            if ensure_parent:
+                self.ensure_directory(file_path.parent)
             # 如果文件存在并且不允许覆盖，生成新的唯一文件名
             final_path = file_path
             if final_path.exists() and not overwrite:
@@ -418,8 +382,9 @@ class FileManager:
                 # 添加一个短哈希避免冲突
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
-            # 写入数据
-            with open(final_path, "wb") as f:
+            # O_NOFOLLOW 防护（最终路径分量拒绝符号链接）由 os_utils 统一实现；
+            # 符号链接或打开失败抛 OSError，由下方 except 转 FileManagerError
+            with open_no_follow_write(final_path) as f:
                 f.write(data)
             return {
                 "file_path": str(final_path),
@@ -459,7 +424,7 @@ class FileManager:
         # 获取相对于当前工作目录的路径
         try:
             # 尝试获取相对于当前工作目录的路径
-            cwd = Path.cwd()
+            cwd = self._cwd
             relative_path = str(file_path.relative_to(cwd))
         except ValueError:
             # 如果文件不在当前工作目录下，使用相对于基础目录的路径
@@ -499,33 +464,45 @@ class FileManager:
         errors = []
 
         try:
-            for file_path in self.base_dir.rglob("*"):
-                if file_path.is_file():
-                    try:
-                        # 检查文件修改时间
-                        mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
-                        if mtime < cutoff_time:
-                            file_size = file_path.stat().st_size
-                            file_path.unlink()
-                            deleted_files.append(str(file_path))
-                            deleted_size += file_size
-                            logger.info(f"删除旧文件: {file_path}")
-                    except Exception as e:
-                        errors.append(f"删除文件失败 {file_path}: {e}")
-                        logger.warning(f"删除文件失败: {file_path} -> {e}")
+            directories: List[Path] = []
+            # 单遍 rglob 同时处理文件删除与目录收集，避免二次全量扫描；
+            # 跳过符号链接条目，其目标可能在 base_dir 之外
+            for entry in self.base_dir.rglob("*"):
+                if entry.is_symlink():
+                    continue
+                # 越界复核前置：rglob 默认跟随符号链接目录，经其抵达的条目真实路径可能位于 base_dir 之外，
+                # 在任何 stat 之前拒绝，避免对外部条目读取元信息（Windows 下可能触发 SMB 出站认证）
+                if not self.validate_path(entry):
+                    logger.warning("跳过越界路径: {}", entry)
+                    continue
+                try:
+                    if entry.is_dir():
+                        if entry != self.base_dir:
+                            directories.append(entry)
+                        continue
+                    stat_result = entry.stat()
+                    if not stat.S_ISREG(stat_result.st_mode):
+                        continue
+                    if datetime.fromtimestamp(stat_result.st_mtime) < cutoff_time:
+                        entry.unlink()
+                        deleted_files.append(str(entry))
+                        deleted_size += stat_result.st_size
+                        logger.info("删除旧文件: {}", entry)
+                except Exception as e:
+                    errors.append(f"删除文件失败 {entry}: {e}")
+                    logger.warning("删除文件失败: {} -> {}", entry, e)
 
-            # 删除空目录
-            for dir_path in sorted(self.base_dir.rglob("*"), reverse=True):
-                if dir_path.is_dir() and dir_path != self.base_dir:
-                    try:
-                        if not any(dir_path.iterdir()):
-                            dir_path.rmdir()
-                            logger.info(f"删除空目录: {dir_path}")
-                    except Exception as e:
-                        logger.warning(f"删除目录失败: {dir_path} -> {e}")
+            # 目录逆序排序（先深后浅），删除空目录
+            for dir_path in sorted(directories, reverse=True):
+                try:
+                    if not any(dir_path.iterdir()):
+                        dir_path.rmdir()
+                        logger.info("删除空目录: {}", dir_path)
+                except Exception as e:
+                    logger.warning("删除目录失败: {} -> {}", dir_path, e)
 
         except Exception as e:
             errors.append(f"清理过程出错: {e}")
-            logger.error(f"清理过程出错: {e}")
+            logger.error("清理过程出错: {}", e)
 
         return {"deleted_files": len(deleted_files), "deleted_size": deleted_size, "errors": errors}

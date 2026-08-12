@@ -15,7 +15,7 @@ from .impl.sequential_generation import handle_sequential_generation
 from .impl.text_to_image import handle_text_to_image
 
 # 核心运行器导入
-from .core.runners import (
+from .runners import (
     run_browse_images,
     run_image_to_image,
     run_multi_image_fusion,

@@ -159,9 +159,18 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 # 连接与传输
 --base-url TEXT                                    # API 基础 URL（默认按配置或内置默认值）
 --transport [stdio|streamable-http]                # MCP 传输方式 (默认: stdio)
+--host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址将触发安全告警)
+--port INTEGER                                     # streamable-http 监听端口 (默认: 8000)
+--stateless                                        # streamable-http 无状态模式，适合远程多客户端与负载均衡 (默认关闭)
+
+# 安全
+--auth-token TEXT                                  # Bearer 鉴权令牌（非回环绑定必须配置，也可用 SEEDREAM_HTTP_AUTH_TOKEN）
+--ssl-certfile TEXT                                # TLS 证书文件（非回环绑定建议配置，防令牌明文传输）
+--ssl-keyfile TEXT                                 # TLS 私钥文件，与 --ssl-certfile 配合
+--insecure-allow-non-tls                           # 显式允许非回环明文运行（仅受信反向代理终结 TLS 场景）
 
 # 日志
---log-level [DEBUG|INFO|WARNING|ERROR]             # 日志级别
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别
 ```
 
 ### 使用示例
@@ -184,7 +193,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 各模型支持的能力与参数范围不同，选择模型时请留意：
 
-| 能力 / 参数                | 5.0 Pro   | 5.0 Lite     | 4.5       | 4.0          |
+| 能力 / 参数                | 5.0 Pro   | 5.0 / 5.0 Lite | 4.5       | 4.0          |
 | -------------------------- | --------- | ------------ | --------- | ------------ |
 | 文生图 / 图生图 / 多图生图 | ✅        | ✅           | ✅        | ✅           |
 | 组图生成                   | ❌        | ✅           | ✅        | ✅           |
@@ -192,10 +201,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | 流式输出                   | ❌        | ✅           | ✅        | ✅           |
 | 输出格式（png/jpeg）       | ✅        | ✅           | ❌        | ❌           |
 | 分辨率档位                 | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| 默认尺寸                   | 1024x1024 | 2048x2048    | 2048x2048 | 2048x2048    |
+| 默认尺寸                   | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
 | 参考图上限                 | 10 张     | 14 张        | 14 张     | 14 张        |
 
-> **提示**：默认模型为 **5.0 Lite**，开箱即用全部能力。切换到 `doubao-seedream-5.0-pro` 后，组图、联网搜索、流式输出不可用，尺寸仅支持 `1K/2K`（默认 `1024x1024`），多图生图参考图上限降为 10 张。
+> **提示**：默认模型为 **doubao-seedream-5.0**（与 5.0 Lite 等价），开箱即用全部能力。切换到 `doubao-seedream-5.0-pro` 后，组图、联网搜索、流式输出不可用，尺寸仅支持 `1K/2K`（默认 `2048x2048`），多图生图参考图上限降为 10 张。
 
 ## 🎨 功能特性
 
@@ -352,7 +361,7 @@ git clone https://github.com/tengmmvp/Seedream_MCP
 cd Seedream_MCP
 
 # 安装依赖（开发模式）
-uv sync --dev
+uv sync
 
 # 创建 .env 文件
 cp .env.example .env
@@ -375,7 +384,7 @@ uv run python -m seedream_mcp.server --api-key your_key
 
 - 使用 `--config-file` 时：仅加载指定文件。
 - 未指定 `--config-file` 时：按“项目根 `.env` -> 当前工作目录 `.env`”顺序合并，后者覆盖前者。
-- `.env` 会注入进程环境变量供运行时读取，但不会覆盖已存在的系统环境变量。
+- `.env` 的值**不会注入**进程环境变量，仅按上述优先级解析后写入配置对象，避免污染全局状态；系统环境变量优先于 `.env` 文件。
 
 ```bash
 # 必需配置
@@ -393,6 +402,9 @@ SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+
+# 客户端性能
+SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
 ```
 
 ## 👥 贡献者

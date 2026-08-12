@@ -11,6 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ...utils.errors import SeedreamValidationError
 from ...utils.validation import (
+    MAX_PARALLEL_REQUEST_COUNT,
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
+    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    VALID_OPTIMIZE_MODES,
     resolve_sequential_max_images,
     validate_parallel_generation_options,
     validate_sequential_image_limit,
@@ -73,9 +77,8 @@ class OptimizePromptOptions(BaseModel):
             ValueError: 当模式不在允许范围内时
         """
         normalized = value.strip().lower()
-        allowed = {"standard", "fast"}
-        if normalized not in allowed:
-            raise ValueError(f"mode 仅支持 {sorted(allowed)}")
+        if normalized not in VALID_OPTIMIZE_MODES:
+            raise ValueError(f"mode 仅支持 {sorted(VALID_OPTIMIZE_MODES)}")
         return normalized
 
 
@@ -100,7 +103,7 @@ class _PromptAndOptimizeInput(BaseModel):
     prompt: str = Field(
         ...,
         min_length=1,
-        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。",
+        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
     )
     optimize_prompt_options: Optional[OptimizePromptOptions] = Field(
         default=None,
@@ -115,7 +118,7 @@ class _SingleImageInput(BaseModel):
 
     image: str = Field(
         ...,
-        description="参考图片，支持 URL、本地文件路径。",
+        description="参考图片，支持 URL、本地文件路径。例如：https://example.com/ref.png 或 ./images/portrait.jpg。",
     )
 
 
@@ -127,8 +130,12 @@ class _MultiImageInput(BaseModel):
     image: List[str] = Field(
         ...,
         min_length=2,
-        max_length=14,
-        description="图片列表，支持 URL、本地路径，数量 2-14 张（5.0 Pro 最多 10 张）。",
+        max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+        description=(
+            f"图片列表，支持 URL、本地路径，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
+            "（5.0 Pro 最多 10 张）。"
+            '例如：["https://example.com/a.png", "./images/b.jpg"]。'
+        ),
     )
 
 
@@ -139,7 +146,7 @@ class _SequentialImageInput(BaseModel):
 
     image: Optional[List[str]] = Field(
         default=None,
-        description="可选的参考图片，支持 URL、本地路径，单张或多张，最多 14 张。",
+        description=f"可选的参考图片，支持 URL、本地路径，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张。",
     )
 
 
@@ -150,7 +157,7 @@ class _SizeAndWatermarkInput(BaseModel):
 
     size: Optional[str] = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。",
+        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
     )
     watermark: Optional[bool] = Field(
         default=None,
@@ -164,10 +171,10 @@ class _SequentialMaxImagesInput(BaseModel):
     """
 
     max_images: int = Field(
-        default=15,
+        default=MAX_SEQUENTIAL_TOTAL_IMAGES,
         ge=1,
-        le=15,
-        description="本次请求允许生成的最大图片数量，范围 1-15。",
+        le=MAX_SEQUENTIAL_TOTAL_IMAGES,
+        description=f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}。",
     )
 
 
@@ -195,14 +202,14 @@ class _ResponseAndExecutionInput(BaseModel):
     request_count: int = Field(
         default=1,
         ge=1,
-        le=4,
+        le=MAX_PARALLEL_REQUEST_COUNT,
         description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
     )
     parallelism: Optional[int] = Field(
         default=None,
         ge=1,
-        le=4,
-        description="并行度上限；未提供时自动使用 min(request_count, 4)。",
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
     )
     auto_save: Optional[bool] = Field(
         default=None,
@@ -266,7 +273,7 @@ class BaseGenerationInput(BaseModel):
                 request_count=request_count,
                 parallelism=parallelism,
                 stream=stream,
-                max_request_count=4,
+                max_request_count=MAX_PARALLEL_REQUEST_COUNT,
             )
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
@@ -286,7 +293,7 @@ class TextToImageInput(
     prompt: str = Field(
         ...,
         min_length=1,
-        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。",
+        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
     )
 
 
@@ -304,7 +311,7 @@ class ImageToImageInput(
     prompt: str = Field(
         ...,
         min_length=1,
-        description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。",
+        description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。例如：把背景换成雪山、将照片转为水彩画风格。",
     )
 
 
@@ -341,7 +348,7 @@ class SequentialGenerationInput(
     prompt: str = Field(
         ...,
         min_length=1,
-        description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。",
+        description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。",
     )
 
     @field_validator("image", mode="before")
@@ -370,8 +377,8 @@ class SequentialGenerationInput(
 
         if not isinstance(images, list):
             raise ValueError("image 必须是字符串或字符串列表")
-        if len(images) < 1 or len(images) > 14:
-            raise ValueError("参考图片数量需在 1-14 之间")
+        if len(images) < 1 or len(images) > SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES:
+            raise ValueError(f"参考图片数量需在 1-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 之间")
 
         normalized: List[str] = []
         for item in images:
@@ -486,18 +493,3 @@ class BrowseImagesInput(BaseModel):
                 cleaned = f".{cleaned}"
             normalized.append(cleaned)
         return normalized
-
-    @model_validator(mode="after")
-    def validate_limits(self) -> "BrowseImagesInput":
-        """
-        校验数量限制参数的逻辑一致性
-
-        Returns:
-            校验通过的模型实例
-
-        Raises:
-            ValueError: 当 limit 小于 1 时
-        """
-        if self.limit < 1:
-            raise ValueError("limit 必须大于等于 1")
-        return self

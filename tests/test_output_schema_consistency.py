@@ -82,7 +82,7 @@ def test_browse_success_path_matches_schema() -> None:
         "resolved_directories": ["/ws"],
         "workspace_roots": ["/ws"],
         "count": 1,
-        "images": [{"index": 1, "path": "a.png", "absolute_path": "/ws/a.png"}],
+        "images": [{"index": 1, "path": "a.png"}],
         "recursive": True,
         "max_depth": 3,
         "limit": 50,

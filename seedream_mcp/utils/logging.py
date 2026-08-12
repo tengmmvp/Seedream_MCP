@@ -2,11 +2,13 @@
 Seedream MCP工具 - 日志配置模块
 """
 
-import sys
+import functools
+import inspect
 import logging
+import sys
+from pathlib import Path
 from types import FrameType
 from typing import Any, Callable, Optional, Union
-from pathlib import Path
 
 from loguru import logger
 
@@ -104,9 +106,9 @@ def setup_logging(
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
 
-    logger.info(f"日志系统初始化完成，级别: {level}")
+    logger.info("日志系统初始化完成，级别: {}", level)
     if enable_file and log_file:
-        logger.info(f"日志文件: {log_file}")
+        logger.info("日志文件: {}", log_file)
 
 
 def get_logger(name: Optional[str] = None) -> Any:
@@ -121,8 +123,6 @@ def get_logger(name: Optional[str] = None) -> Any:
     """
     if name is None:
         # 自动获取调用模块名
-        import inspect
-
         current = inspect.currentframe()
         caller = current.f_back if current is not None else None
         name = caller.f_globals.get("__name__", "unknown") if caller is not None else "unknown"
@@ -140,31 +140,29 @@ def log_function_call(func: Callable[..., Any]) -> Callable[..., Any]:
     Returns:
         装饰后的函数
     """
-    import functools
-    import inspect
 
     @functools.wraps(func)
     async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-        func_name = f"{func.__qualname__}"
+        func_name = func.__qualname__
         logger.info("函数调用: {}()", func_name)
 
         try:
             result = await func(*args, **kwargs)
             return result
         except Exception as e:
-            logger.error(f"函数调用失败: {func_name} - {e}")
+            logger.error("函数调用失败: {} - {}", func_name, e)
             raise
 
     @functools.wraps(func)
     def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-        func_name = f"{func.__qualname__}"
+        func_name = func.__qualname__
         logger.info("函数调用: {}()", func_name)
 
         try:
             result = func(*args, **kwargs)
             return result
         except Exception as e:
-            logger.error(f"函数调用失败: {func_name} - {e}")
+            logger.error("函数调用失败: {} - {}", func_name, e)
             raise
 
     # 检查是否是异步函数
@@ -172,58 +170,3 @@ def log_function_call(func: Callable[..., Any]) -> Callable[..., Any]:
         return async_wrapper
     else:
         return sync_wrapper
-
-
-def log_function_call_manual(
-    func_name: str,
-    args: Optional[dict[str, Any]] = None,
-    result: Optional[Any] = None,
-    error: Optional[Exception] = None,
-) -> None:
-    """
-    手动记录函数调用日志
-
-    Args:
-        func_name: 函数名称
-        args: 函数参数（敏感信息会被过滤）
-        result: 函数返回结果
-        error: 异常信息
-    """
-    # 过滤敏感信息
-    safe_args = _filter_sensitive_data(args) if args else {}
-
-    if error:
-        logger.error(f"函数调用失败: {func_name}({safe_args}) - {error}")
-    else:
-        logger.info(f"函数调用: {func_name}({safe_args})")
-        if result is not None:
-            logger.debug(f"函数返回: {_filter_sensitive_data(result)}")
-
-
-def _filter_sensitive_data(data: Any) -> Any:
-    """
-    过滤敏感数据
-
-    Args:
-        data: 要过滤的数据
-
-    Returns:
-        过滤后的数据
-    """
-    if isinstance(data, dict):
-        filtered = {}
-        for key, value in data.items():
-            if any(
-                sensitive in key.lower() for sensitive in ["key", "token", "password", "secret"]
-            ):
-                filtered[key] = "***"
-            else:
-                filtered[key] = _filter_sensitive_data(value)
-        return filtered
-    elif isinstance(data, list):
-        return [_filter_sensitive_data(item) for item in data]
-    elif isinstance(data, str) and len(data) > 100:
-        # 截断过长的字符串
-        return data[:100] + "..."
-    else:
-        return data
