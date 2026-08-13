@@ -166,7 +166,7 @@ def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None
         )
     ]
 
-    updated = update_result_with_auto_save(result, auto_save_results)
+    updated = update_result_with_auto_save(result, auto_save_results, "url")
 
     failed_item = updated["data"][0]
     success_item = updated["data"][1]

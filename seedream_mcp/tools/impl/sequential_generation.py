@@ -80,13 +80,13 @@ async def handle_sequential_generation(
             "组图输出开始: prompt_len={}, max_images={}, size={}, stream={}, "
             "request_count={}, parallelism={}"
         ),
-        start_log_values_builder=lambda ctx: (
-            len(ctx.prompt or ""),
+        start_log_values_builder=lambda gen_ctx: (
+            len(gen_ctx.prompt or ""),
             max_images,
-            ctx.size,
-            ctx.stream,
-            ctx.request_count,
-            ctx.parallelism,
+            gen_ctx.size,
+            gen_ctx.stream,
+            gen_ctx.request_count,
+            gen_ctx.parallelism,
         ),
         request_executor=_execute,
         ctx=ctx,

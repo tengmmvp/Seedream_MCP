@@ -6,6 +6,52 @@ Seedream MCP工具 - 用户指导模块
 
 from typing import Any, Dict, List, Optional
 
+from .formats import SUPPORTED_IMAGE_EXTENSIONS
+
+# 扩展名到展示名的映射；未命中时回退为大写无点扩展名，新增格式无需手动登记。
+# 本映射仅为展示美化，格式增删的权威来源是 formats.SUPPORTED_IMAGE_EXTENSIONS。
+_DISPLAY_NAME_BY_EXT: Dict[str, str] = {
+    ".jpg": "JPEG",
+    ".jpeg": "JPEG",
+    ".png": "PNG",
+    ".gif": "GIF",
+    ".bmp": "BMP",
+    ".webp": "WebP",
+    ".tiff": "TIFF",
+    ".heic": "HEIC",
+    ".heif": "HEIF",
+}
+
+
+def _display_name(ext: str) -> str:
+    """返回扩展名的展示名，未登记时回退为大写无点扩展名。"""
+    return _DISPLAY_NAME_BY_EXT.get(ext, ext.upper().lstrip("."))
+
+
+def supported_formats_summary() -> str:
+    """返回支持的格式逗号分隔摘要，从 formats 单一来源派生，同展示名去重。"""
+    seen: set[str] = set()
+    names: List[str] = []
+    for ext in SUPPORTED_IMAGE_EXTENSIONS:
+        name = _display_name(ext)
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return ", ".join(names)
+
+
+def _supported_format_lines() -> str:
+    """返回多行展示文本，每行一种格式且同展示名去重，用于路径使用指导。"""
+    seen: set[str] = set()
+    lines: List[str] = []
+    for ext in SUPPORTED_IMAGE_EXTENSIONS:
+        name = _display_name(ext)
+        if name in seen:
+            continue
+        seen.add(name)
+        lines.append(f"  • {name} ({ext})")
+    return "\n".join(lines)
+
 
 def get_path_usage_guide() -> str:
     """
@@ -14,18 +60,12 @@ def get_path_usage_guide() -> str:
     Returns:
         包含详细使用指导的字符串
     """
-    guide = """
+    format_lines = _supported_format_lines()
+    guide = f"""
 📁 Seedream MCP工具 - 文件路径使用指导
 
 支持的图片格式:
-  • JPEG (.jpeg)
-  • PNG (.png)
-  • GIF (.gif)
-  • BMP (.bmp)
-  • WebP (.webp)
-  • TIFF (.tiff)
-  • HEIC (.heic)
-  • HEIF (.heif)
+{format_lines}
 
 支持的路径格式:
 
@@ -74,10 +114,10 @@ def get_error_solutions() -> Dict[str, str]:
 3. 尝试使用绝对路径
 4. 使用 seedream_browse_images 工具查找图片文件
 """,
-        "invalid_format": """
+        "invalid_format": f"""
 不支持的文件格式解决方案:
 1. 确保文件是图片格式
-2. 支持的格式: JPEG, PNG, GIF, BMP, WebP, TIFF, HEIC, HEIF
+2. 支持的格式: {supported_formats_summary()}
 3. 检查文件扩展名是否正确
 4. 尝试转换为支持的格式
 """,
@@ -151,7 +191,7 @@ def get_quick_tips() -> List[str]:
         "💡 支持网络图片URL，可直接使用在线图片",
         "💡 路径中的正斜杠和反斜杠都可以使用",
         "💡 文件名包含空格时无需添加引号",
-        "💡 支持多种图片格式，包括 JPEG, PNG, GIF, BMP, WebP, TIFF, HEIC, HEIF 等",
+        "💡 支持多种图片格式，包括 " + supported_formats_summary() + " 等",
     ]
 
 
@@ -197,7 +237,7 @@ def validate_and_suggest_path(path: str) -> Dict[str, Any]:
                 [
                     "确保文件是图片格式",
                     "检查文件扩展名是否正确",
-                    "支持的格式: JPEG, PNG, GIF, BMP, WebP, TIFF, HEIC, HEIF",
+                    "支持的格式: " + supported_formats_summary(),
                 ]
             )
         elif "权限" in error_msg:

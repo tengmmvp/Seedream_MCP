@@ -25,27 +25,21 @@ from ...utils.validation import (
 
 
 class ResponseFormat(str, Enum):
-    """
-    图片生成响应格式枚举
-    """
+    """图片生成响应格式枚举。"""
 
     URL = "url"
     B64_JSON = "b64_json"
 
 
 class OutputFormat(str, Enum):
-    """
-    图片文件输出格式枚举
-    """
+    """图片文件输出格式枚举。"""
 
     JPEG = "jpeg"
     PNG = "png"
 
 
 class GenerationToolType(str, Enum):
-    """
-    模型工具类型枚举
-    """
+    """模型工具类型枚举。"""
 
     WEB_SEARCH = "web_search"
 
@@ -86,9 +80,7 @@ class OptimizePromptOptions(BaseModel):
 
 
 class GenerationTool(BaseModel):
-    """
-    模型工具配置。
-    """
+    """模型工具配置。"""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -99,9 +91,7 @@ class GenerationTool(BaseModel):
 
 
 class _PromptAndOptimizeInput(BaseModel):
-    """
-    提示词与提示词优化参数。
-    """
+    """提示词与提示词优化参数。"""
 
     prompt: str = Field(
         ...,
@@ -115,9 +105,7 @@ class _PromptAndOptimizeInput(BaseModel):
 
 
 class _SingleImageInput(BaseModel):
-    """
-    单图输入参数。
-    """
+    """单图输入参数。"""
 
     image: str = Field(
         ...,
@@ -126,9 +114,7 @@ class _SingleImageInput(BaseModel):
 
 
 class _MultiImageInput(BaseModel):
-    """
-    多图输入参数。
-    """
+    """多图输入参数。"""
 
     image: List[str] = Field(
         ...,
@@ -143,9 +129,7 @@ class _MultiImageInput(BaseModel):
 
 
 class _SequentialImageInput(BaseModel):
-    """
-    组图参考图输入参数。
-    """
+    """组图参考图输入参数。"""
 
     image: Optional[List[str]] = Field(
         default=None,
@@ -154,9 +138,7 @@ class _SequentialImageInput(BaseModel):
 
 
 class _SizeAndWatermarkInput(BaseModel):
-    """
-    尺寸与水印参数。
-    """
+    """尺寸与水印参数。"""
 
     size: Optional[str] = Field(
         default=None,
@@ -169,9 +151,7 @@ class _SizeAndWatermarkInput(BaseModel):
 
 
 class _SequentialMaxImagesInput(BaseModel):
-    """
-    组图最大生成数量参数。
-    """
+    """组图最大生成数量参数。"""
 
     max_images: int = Field(
         default=MAX_SEQUENTIAL_TOTAL_IMAGES,
@@ -182,9 +162,7 @@ class _SequentialMaxImagesInput(BaseModel):
 
 
 class _ResponseAndExecutionInput(BaseModel):
-    """
-    响应格式、执行策略与自动保存参数。
-    """
+    """响应格式、执行策略与自动保存参数。"""
 
     response_format: ResponseFormat = Field(
         default=ResponseFormat.URL,

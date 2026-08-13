@@ -3,6 +3,8 @@
 import pytest
 
 from seedream_mcp.tools.core.schemas import SequentialGenerationInput
+from seedream_mcp.utils.errors import SeedreamValidationError
+from seedream_mcp.utils.validation import validate_sequential_image_limit
 
 
 def test_sequential_generation_total_limit_ok():
@@ -45,3 +47,32 @@ def test_sequential_generation_reference_images_exceed_14():
     images = [f"https://example.com/{i}.png" for i in range(15)]
     with pytest.raises(ValueError, match="1-14"):
         SequentialGenerationInput(prompt="test", max_images=1, image=images)
+
+
+# 以下用例直接验证 validate_sequential_image_limit 的模型能力表驱动上限，
+# 守护"参考图上限随模型变化"的数据驱动语义，防止回归为硬编码 14。
+
+_PRO = "doubao-seedream-5.0-pro"
+_LITE = "doubao-seedream-5.0-lite"
+
+
+def test_validate_sequential_image_limit_pro_caps_at_10():
+    """5.0 Pro 参考图上限由能力表驱动为 10，11 张须拒绝。"""
+    images = [f"https://example.com/{i}.png" for i in range(11)]
+    with pytest.raises(SeedreamValidationError, match="不能超过10"):
+        validate_sequential_image_limit(1, images, _PRO)
+
+
+def test_validate_sequential_image_limit_lite_allows_14():
+    """5.0 Lite 参考图上限为 14，14 张须通过。"""
+    images = [f"https://example.com/{i}.png" for i in range(14)]
+    validate_sequential_image_limit(1, images, _LITE)
+
+
+def test_validate_sequential_image_limit_default_caps_at_14():
+    """model_id 缺省时按通用上限 14 校验，供 schema 层无模型上下文的粗校验。"""
+    ok = [f"https://example.com/{i}.png" for i in range(14)]
+    validate_sequential_image_limit(1, ok)
+    over = [f"https://example.com/{i}.png" for i in range(15)]
+    with pytest.raises(SeedreamValidationError, match="不能超过14"):
+        validate_sequential_image_limit(1, over)

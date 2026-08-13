@@ -22,9 +22,7 @@ logger = get_logger(__name__)
 
 
 def _add_usage_value(usage: Dict[str, Any], key: str, value: Any) -> None:
-    """
-    累加用量统计。
-    """
+    """累加用量统计值，跳过布尔与非数值类型以避免污染汇总结果。"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return
     current = usage.get(key, 0)
@@ -34,9 +32,7 @@ def _add_usage_value(usage: Dict[str, Any], key: str, value: Any) -> None:
 
 
 def _normalize_error_message(raw_error: Any) -> Optional[str]:
-    """
-    将不同形态的错误对象提取为可读文本。
-    """
+    """将不同形态的错误对象提取为可读文本。"""
     if isinstance(raw_error, str):
         message = raw_error.strip()
         return message or None
@@ -58,9 +54,7 @@ def _normalize_error_message(raw_error: Any) -> Optional[str]:
 def _extract_parallel_request_error(
     result: Optional[Dict[str, Any]], fallback_error: Optional[str]
 ) -> str:
-    """
-    提取单个并行请求的失败原因，优先使用结果内错误信息。
-    """
+    """提取单个并行请求的失败原因，优先使用结果内错误信息。"""
     if isinstance(result, dict):
         direct_error = _normalize_error_message(result.get("error"))
         if direct_error:
@@ -84,8 +78,7 @@ def _extract_parallel_request_error(
 
 
 def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
-    """
-    解析自动保存的基础目录路径
+    """解析自动保存的基础目录路径，校验用户路径须落在默认目录之内。
 
     优先使用用户指定路径，若未指定则使用配置中的默认路径。
 
@@ -128,9 +121,7 @@ async def _safe_report_progress(
     total: float = 100.0,
     message: str,
 ) -> None:
-    """
-    在支持进度能力的 MCP 会话中上报进度；上报失败不影响主流程。
-    """
+    """在支持进度能力的 MCP 会话中上报进度；上报失败不影响主流程。"""
     if ctx is None:
         return
 
@@ -170,7 +161,5 @@ async def _safe_ctx_log(
 
 
 async def _yield_for_cancellation() -> None:
-    """
-    协作式让出执行权，确保取消信号能尽快生效。
-    """
+    """协作式让出执行权，确保取消信号能尽快生效。"""
     await asyncio.sleep(0)

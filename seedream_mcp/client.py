@@ -126,7 +126,7 @@ class SeedreamClient:
         """构建各生成方法共享的请求参数基础字典。
 
         size/watermark/response_format/output_format/stream/tools 的组装逻辑在四个生成
-        方法中完全相同，集中于此避免漂移；方法特有的字段（参考图、组图选项等）通过 extra 并入。
+        方法中完全相同，集中于此避免漂移；方法特有的字段如参考图、组图选项等通过 extra 并入。
         """
         request_data: Dict[str, Any] = {
             "model": self.config.model_id,
@@ -173,8 +173,8 @@ class SeedreamClient:
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
             tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
@@ -247,8 +247,8 @@ class SeedreamClient:
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
             tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
@@ -321,12 +321,12 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
             optimize_prompt_options: 提示词优化选项，可选配置字典
-            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张（5.0 Pro 最多 10 张）
+            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张；5.0 Pro 最多 10 张
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
             tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
@@ -397,7 +397,7 @@ class SeedreamClient:
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
-        组图输出功能（仅 5.0 Lite/4.5/4.0 支持；5.0 Pro 不支持组图）
+        组图输出功能，仅 5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持组图
 
         支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
 
@@ -409,13 +409,13 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要生成的图像内容
             optimize_prompt_options: 提示词优化选项，可选配置字典
-            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表（参考图数量与生成数量之和不超过 15）
+            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表；参考图数量与生成数量之和不超过 15
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
             watermark: 是否添加水印，默认为 False
             max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列（Pro/Lite）支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False（5.0 Pro 不支持）
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
             tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
 
         Returns:
@@ -425,7 +425,7 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
         """
-        # 5.0 Pro 不支持组图生成（sequential_image_generation），直接拒绝
+        # 5.0 Pro 不支持 sequential_image_generation 组图生成
         if is_seedream_50_pro_model(self.config.model_id):
             raise SeedreamValidationError(
                 "doubao-seedream-5.0-pro 不支持组图生成，"
@@ -469,7 +469,9 @@ class SeedreamClient:
         resolved_max_images = validate_max_images(resolved_max_images)
 
         if reference_images is not None:
-            validate_sequential_image_limit(resolved_max_images, reference_images)
+            validate_sequential_image_limit(
+                resolved_max_images, reference_images, self.config.model_id
+            )
 
         response_format = validate_response_format(response_format)
         stream = validate_stream(stream, self.config.model_id)
@@ -865,7 +867,7 @@ class SeedreamClient:
         """
         发送非流式请求并解析响应。
         """
-        # 大请求体（多图融合 base64 可达数十 MB）的 JSON 序列化移至工作线程，避免阻塞事件循环
+        # 多图融合的 base64 请求体可达数十 MB，其 JSON 序列化移至工作线程以避免阻塞事件循环
         json_bytes = await asyncio.to_thread(json.dumps, request_data)
         response = await client.post(url, content=json_bytes, timeout=request_timeout)
 
@@ -965,18 +967,16 @@ class SeedreamClient:
                 if attempt == total_attempts - 1:
                     raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(exc)}") from exc
             except Exception as exc:
-                # 编程错误重试无意义，直接抛出避免退避浪费并暴露根因
-                if isinstance(exc, (TypeError, KeyError, AttributeError)):
-                    raise
+                # 编程 bug、序列化失败、值错误等非可重试意外错误直接抛出，不浪费退避等待。
+                # 前三个分支已精确覆盖可重试场景：429/5xx 业务状态码、超时、网络/传输错误。
                 self.logger.warning(
-                    "{} API 调用失败 (尝试 {}/{}): {}",
+                    "{} API 调用出现非预期错误，不再重试 (尝试 {}/{}): {}",
                     endpoint,
                     attempt + 1,
                     total_attempts,
                     str(exc),
                 )
-                if attempt == total_attempts - 1:
-                    raise
+                raise
 
             if attempt < total_attempts - 1:
                 # 优先采用服务器 Retry-After 建议，否则指数退避；均叠加抖动避免并发限流时同步重试

@@ -18,7 +18,9 @@
 
 import asyncio
 import ipaddress
+import os
 import random
+import re
 import socket
 import time
 from pathlib import Path
@@ -32,6 +34,7 @@ from ..version import __version__
 from .errors import SeedreamMCPError
 from .formats import is_known_image_bytes
 from .logging import get_logger
+from .os_utils import open_no_follow_fd
 
 logger = get_logger(__name__)
 
@@ -43,7 +46,10 @@ _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 
 
 def sanitize_url(url: str) -> str:
-    """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据与查询参数中的潜在敏感信息。"""
+    """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
+
+    控制字符 CRLF 等会被剥离，防止攻击者经由 URL 在日志中伪造行，注入误导性记录。
+    """
     try:
         parsed = urlparse(url)
         # 重建不含 userinfo 的 netloc，避免 user:pass@ 凭据进入日志。
@@ -56,10 +62,13 @@ def sanitize_url(url: str) -> str:
         if parsed.port is not None:
             netloc = f"{netloc}:{parsed.port}"
         if parsed.query:
-            return f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
-        return f"{parsed.scheme}://{netloc}{parsed.path}"
+            result = f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
+        else:
+            result = f"{parsed.scheme}://{netloc}{parsed.path}"
     except Exception:
         return "<invalid-url>"
+    # 剥离控制字符，防止 CRLF 经 URL 注入伪造日志行
+    return re.sub(r"[\x00-\x1f\x7f]", "", result)
 
 
 # 部分服务以通用二进制类型返回图片，故即使非 image/* 也视为合法二进制响应
@@ -420,7 +429,7 @@ class DownloadManager:
                                 raise RetryableDownloadError(f"HTTP错误: {response.status}")
                             raise DownloadError(f"HTTP错误: {response.status}")
 
-                        # 检查内容类型：明确非图片类型（HTML 错误页、JSON 等）直接拒绝
+                        # 检查内容类型：HTML 错误页、JSON 等明确非图片类型直接拒绝
                         content_type = response.headers.get("content-type", "")
                         if not _is_image_compatible_content_type(content_type):
                             raise DownloadError(
@@ -440,19 +449,34 @@ class DownloadManager:
 
                         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-                        # 下载写入临时文件，成功后原子替换
+                        # 下载写入临时文件，成功后原子替换。
+                        # 用 O_NOFOLLOW 打开最终分量防符号链接 TOCTOU，与 file_manager.save_bytes
+                        # 防护对齐；再交由 aiofiles 异步写入，closefd=True 使上下文退出时关闭 fd
                         total_size = 0
                         head_bytes = b""
-                        async with aiofiles.open(temp_path, "wb") as f:
+                        fd = open_no_follow_fd(
+                            str(temp_path),
+                            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                        )
+                        fd_handed_off = False
+                        try:
                             temp_created = True
-                            async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
-                                total_size += len(chunk)
-                                if total_size > self.max_file_size:
-                                    raise DownloadError(f"文件过大: {total_size} 字节")
-                                # 在写入循环内累计首 32 字节，省一次 open+read 做签名校验
-                                if len(head_bytes) < 32:
-                                    head_bytes += chunk[: 32 - len(head_bytes)]
-                                await f.write(chunk)
+                            async with aiofiles.open(fd, "wb", closefd=True) as f:
+                                fd_handed_off = True
+                                async for chunk in response.content.iter_chunked(
+                                    _DOWNLOAD_CHUNK_SIZE
+                                ):
+                                    total_size += len(chunk)
+                                    if total_size > self.max_file_size:
+                                        raise DownloadError(f"文件过大: {total_size} 字节")
+                                    # 在写入循环内累计首 32 字节，省一次 open+read 做签名校验
+                                    if len(head_bytes) < 32:
+                                        head_bytes += chunk[: 32 - len(head_bytes)]
+                                    await f.write(chunk)
+                        finally:
+                            # 若 aiofiles 进入上下文前失败而未接管 fd，需手动关闭以避免泄漏
+                            if not fd_handed_off:
+                                os.close(fd)
 
                         # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘
                         if not is_known_image_bytes(head_bytes):

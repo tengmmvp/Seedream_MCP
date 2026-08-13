@@ -160,7 +160,8 @@ async def execute_generation_handler(
                     )
 
                 if auto_save_results:
-                    result = update_result_with_auto_save(result, auto_save_results)
+                    data_key = "url" if context.response_format == "url" else "b64_json"
+                    result = update_result_with_auto_save(result, auto_save_results, data_key)
                     saved_count = sum(1 for r in auto_save_results if getattr(r, "success", False))
                     await _safe_ctx_log(
                         ctx,

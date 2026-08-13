@@ -1,6 +1,7 @@
 """下载安全测试：DNS 解析 TTL 缓存与连接后对端 IP 公网校验。"""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -69,3 +70,146 @@ def test_validate_connected_peer_ip_allows_public_ip() -> None:
     manager._validate_connected_peer_ip(  # type: ignore[arg-type]
         fake_response, "https://example.com"
     )
+
+
+# ---- download_image 端到端：逐跳重定向校验与重试退避 ----
+# mock 网络层，验证把各 SSRF 子组件串联起来的 download_image 主循环：
+# 重定向目标须重新走静态校验、重定向上限、5xx 退避重试后成功落盘。
+
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+class _FakeStreamContent:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def iter_chunked(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        if self._data:
+            yield self._data
+
+
+class _FakeDownloadResponse:
+    def __init__(
+        self,
+        status: int,
+        headers: dict,
+        *,
+        peer_ip: str = "8.8.8.8",
+        content: bytes = b"",
+    ) -> None:
+        self.status = status
+        self.headers = headers
+        self.connection = _FakeConnection(peer_ip)
+        self.content = _FakeStreamContent(content)
+
+    async def __aenter__(self) -> "_FakeDownloadResponse":
+        return self
+
+    async def __aexit__(self, *args: object) -> bool:
+        return False
+
+
+class _FakeSession:
+    """按序返回预设响应序列，超出后重复返回最后一个。"""
+
+    def __init__(self, responses: list) -> None:
+        self._responses = responses
+        self._idx = 0
+
+    def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        del url, kwargs
+        resp = self._responses[min(self._idx, len(self._responses) - 1)]
+        self._idx += 1
+        return resp
+
+
+def _patch_download_network(
+    monkeypatch: pytest.MonkeyPatch, manager: DownloadManager, session: _FakeSession
+) -> None:
+    """跳过依赖真实网络的 DNS 校验并注入 fake session，聚焦主循环串联逻辑。
+
+    _validate_connected_peer_ip 不 mock：fake response 携带公网 peer_ip，真实运行以
+    覆盖"重定向与响应分支前均做对端 IP 复核"的串联路径。
+    """
+
+    async def _pass_url(url: str) -> None:
+        del url
+
+    async def _fake_ensure_session() -> _FakeSession:
+        return session
+
+    monkeypatch.setattr(manager, "_validate_url_for_request", _pass_url)
+    monkeypatch.setattr(manager, "_ensure_session", _fake_ensure_session)
+
+
+@pytest.mark.asyncio
+async def test_download_image_rejects_redirect_to_private_ip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """302 跳转至元数据服务内网地址须被逐跳静态校验拒绝。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [_FakeDownloadResponse(302, {"location": "http://169.254.169.254/latest/meta-data/"})]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    with pytest.raises(DownloadError):
+        await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
+
+
+@pytest.mark.asyncio
+async def test_download_image_rejects_redirect_to_loopback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """302 跳转至回环地址须被逐跳静态校验拒绝。"""
+    manager = DownloadManager()
+    session = _FakeSession([_FakeDownloadResponse(302, {"location": "http://127.0.0.1/"})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    with pytest.raises(DownloadError):
+        await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
+
+
+@pytest.mark.asyncio
+async def test_download_image_rejects_excessive_redirects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """超过 3 跳的重定向链须被拒绝。"""
+    manager = DownloadManager()
+    redirects = [
+        _FakeDownloadResponse(302, {"location": f"https://example.com/r{i}"}) for i in range(5)
+    ]
+    session = _FakeSession(redirects)
+    _patch_download_network(monkeypatch, manager, session)
+
+    with pytest.raises(DownloadError, match="重定向次数过多"):
+        await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
+
+
+@pytest.mark.asyncio
+async def test_download_image_retries_5xx_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """连续 5xx 后成功：验证退避重试串联与最终原子落盘。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _FakeDownloadResponse(500, {}),
+            _FakeDownloadResponse(500, {}),
+            _FakeDownloadResponse(200, {"content-type": "image/png"}, content=_PNG_BYTES),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    async def _no_sleep(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert save_path.exists()
+    assert save_path.read_bytes() == _PNG_BYTES

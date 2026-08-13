@@ -48,12 +48,12 @@ def test_tools_accepted_for_lite() -> None:
 
 
 def test_tools_rejected_for_pro() -> None:
-    with pytest.raises(SeedreamValidationError, match="5.0 Lite"):
+    with pytest.raises(SeedreamValidationError, match="不支持联网搜索"):
         validate_generation_tools([{"type": "web_search"}], PRO)
 
 
 def test_tools_rejected_for_45() -> None:
-    with pytest.raises(SeedreamValidationError, match="5.0 Lite"):
+    with pytest.raises(SeedreamValidationError, match="不支持联网搜索"):
         validate_generation_tools([{"type": "web_search"}], MODEL_45)
 
 

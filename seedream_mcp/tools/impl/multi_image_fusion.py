@@ -76,12 +76,12 @@ async def handle_multi_image_fusion(
         start_log_message=(
             "多图融合开始: prompt_len={}, size={}, stream={}, request_count={}, parallelism={}"
         ),
-        start_log_values_builder=lambda ctx: (
-            len(ctx.prompt or ""),
-            ctx.size,
-            ctx.stream,
-            ctx.request_count,
-            ctx.parallelism,
+        start_log_values_builder=lambda gen_ctx: (
+            len(gen_ctx.prompt or ""),
+            gen_ctx.size,
+            gen_ctx.stream,
+            gen_ctx.request_count,
+            gen_ctx.parallelism,
         ),
         request_executor=_execute,
         ctx=ctx,

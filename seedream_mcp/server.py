@@ -192,16 +192,27 @@ async def _cleanup_shared_resources() -> None:
 def _sync_cleanup() -> None:
     """同步入口的进程级清理。
 
-    stateless_http 模式 lifespan 不在 teardown 清理，由 cli_main 在服务器退出时补清理。
+    stateless_http 模式 lifespan 不在 teardown 清理以保留连接复用，由 cli_main 在
+    服务器退出时补清理。先提取并清空全局引用，确保即便后续清理协程抛错也不会泄漏引用。
 
-    asyncio.run 新建事件循环来关闭共享 HTTP 资源，但客户端连接池与下载管理器创建于
-    lifespan 运行时的旧循环上。跨循环 aclose 对绑定旧循环的底层传输可能被静默忽略，
-    因此此处仅为 best-effort 清理，真正的回收依赖进程退出时由操作系统回收。
-    _safe_close 已吞掉异常，避免清理路径中断。
+    uvicorn 退出时其事件循环已停止，共享 HTTP 资源绑定在已关闭的旧循环上，跨循环
+    aclose 对底层传输可能无效并被 _safe_close 静默忽略，真正的 socket 回收依赖进程
+    退出时由操作系统完成。_safe_close 已吞掉异常，清理路径不中断。
     """
+    global _shared_client, _shared_download_manager
+    client = _shared_client
+    download_manager = _shared_download_manager
+    _shared_client = None
+    _shared_download_manager = None
+
+    async def _close_held() -> None:
+        await _safe_close(client)
+        await _safe_close(download_manager)
+
     try:
-        asyncio.run(_cleanup_shared_resources())
+        asyncio.run(_close_held())
     except RuntimeError:
+        # 无事件循环或已有循环运行，无法安全 asyncio.run；引用已清空，余量交 GC/OS
         pass
     except Exception as exc:
         logger.warning("同步清理共享资源失败: {}", exc)

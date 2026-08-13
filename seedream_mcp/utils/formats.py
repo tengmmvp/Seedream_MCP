@@ -44,7 +44,7 @@ EXTENSION_BY_MIME: dict[str, str] = {
     "image/heif": ".heif",
 }
 
-# HEIC/HEIF 的 ISO BMFF ftyp box brand（offset 8-12），按编码归入 .heic / .heif
+# HEIC/HEIF 的 ISO BMFF ftyp box brand 位于 offset 8-12，按编码归入 .heic / .heif
 _HEIC_BRANDS: tuple[bytes, ...] = (b"heic", b"heix", b"hevc", b"heim", b"heis")
 _HEIF_BRANDS: tuple[bytes, ...] = (b"mif1", b"msf1")
 
@@ -72,16 +72,20 @@ def infer_extension_from_bytes(content: bytes, default: str = ".jpeg") -> str:
         # GIF
         if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
             return ".gif"
-        # BMP
-        if content.startswith(b"BM"):
+        # BMP: "BM" 签名且 offset 6-10 的保留字段须为 0，降低仅凭 2 字节前缀的冲突误判
+        if (
+            content.startswith(b"BM")
+            and len(content) >= 14
+            and content[6:10] == b"\x00\x00\x00\x00"
+        ):
             return ".bmp"
-        # WEBP (RIFF....WEBP)
+        # WEBP：RIFF....WEBP 签名
         if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
             return ".webp"
         # TIFF
         if content.startswith(b"II*\x00") or content.startswith(b"MM\x00*"):
             return ".tiff"
-        # HEIC/HEIF（ISO BMFF：4 字节 size + "ftyp" + 4 字节 brand）
+        # HEIC/HEIF：ISO BMFF 格式，4 字节 size + "ftyp" + 4 字节 brand
         if len(content) >= 12 and content[4:8] == b"ftyp":
             brand = bytes(content[8:12])
             if brand in _HEIC_BRANDS:

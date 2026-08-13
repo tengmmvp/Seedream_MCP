@@ -94,7 +94,6 @@ async def handle_browse_images(
     Returns:
         MCP 标准工具结果，含面向模型的图片列表文本与 structuredContent。
     """
-    # 解析并设置默认参数
     directory = arguments.get("directory") or "."
     recursive = bool(arguments.get("recursive", True))
     # max_depth/limit/offset 已由 BrowseImagesInput 的 pydantic 校验保证为 int，无需再 int() 包装
@@ -245,7 +244,6 @@ async def handle_browse_images(
             isError=False,
         )
 
-    # 格式化图片列表输出
     lines = ["图片列表:"]
     structured_images: list[dict[str, Any]] = []
     for idx, img in enumerate(images, 1):

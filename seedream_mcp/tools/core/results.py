@@ -14,11 +14,10 @@ from .context import GenerationExecutionContext
 
 
 def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    从生成结果中提取图片数据列表。
+    """从生成结果中提取图片数据列表。
 
-    支持多种数据结构（数组 / 单个图片字典 / 嵌套 {"data": ...}），统一转换为仅含字典
-    的列表；None 与非字典元素（含 null）一律归一化剔除，确保结果始终符合
+    支持数组、单个图片字典或嵌套 {"data": ...} 等多种数据结构，统一转换为仅含字典
+    的列表；None 与非字典元素一律归一化剔除，确保结果始终符合
     GenerationStructuredOutput.data 的 List[Dict] 声明，避免 outputSchema 校验失败。
 
     Args:
@@ -40,7 +39,7 @@ def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
             if nested is not None:
                 return _coerce(nested)
             return [value]
-        # 其他标量类型（str/int 等）无法表达图片，归一化为空
+        # str/int 等其他标量类型无法表达图片，归一化为空
         return []
 
     return _coerce(data)
@@ -120,22 +119,33 @@ def aggregate_parallel_generation_results(
     return aggregated_result
 
 
-def update_result_with_auto_save(
-    result: Dict[str, Any], auto_save_results: List[Any]
-) -> Dict[str, Any]:
+def is_saveable_image(image: Any, data_key: str) -> bool:
+    """判断图片项是否含可保存数据，即指定键的值非空。
+
+    收集待保存图片与回填保存结果共用此判定，确保两侧过滤集合严格一致，
+    避免按位置下标回填时因键不同而错位。
     """
-    将自动保存结果合并到生成结果中
+    return isinstance(image, dict) and bool(image.get(data_key))
+
+
+def update_result_with_auto_save(
+    result: Dict[str, Any],
+    auto_save_results: List[Any],
+    data_key: str,
+) -> Dict[str, Any]:
+    """将自动保存结果合并到生成结果中。
 
     为可保存图片补充本地路径和 Markdown 引用，不修改原结果对象，返回新的字典副本。
     保存统计与结果列表由 _build_generation_structured_result 从 auto_save_results 直接构建，
     不在此重复写入。
 
     Args:
-        result: 图片生成结果字典,包含原始响应数据。
+        result: 图片生成结果字典，包含原始响应数据。
         auto_save_results: 自动保存结果对象列表。
+        data_key: 可保存图片的数据键（"url" 或 "b64_json"），须与收集阶段一致。
 
     Returns:
-        更新后的结果字典,图片项含本地路径与 Markdown 引用。
+        更新后的结果字典，图片项含本地路径与 Markdown 引用。
     """
     updated_result = result.copy()
     # 浅拷贝 data 层，使下方为图片项补充 local_path/markdown_ref 不影响传入的原始 result
@@ -147,8 +157,9 @@ def update_result_with_auto_save(
     images = extract_images(updated_result)
     save_index = 0
     for image in images:
-        # 自动保存仅处理包含图片数据的项
-        if not (image.get("url") or image.get("b64_json")):
+        # 仅回填含指定键数据的可保存项；谓词须与收集阶段 is_saveable_image 严格一致，
+        # 否则按位置下标对齐时会因两侧集合不同而错位
+        if not is_saveable_image(image, data_key):
             continue
 
         if save_index >= len(auto_save_results):
@@ -276,8 +287,7 @@ def format_generation_response(
     auto_save_enabled: bool = False,
     auto_save_error: Optional[str] = None,
 ) -> str:
-    """
-    格式化图片生成结果为可读文本
+    """格式化图片生成结果为可读文本。
 
     将生成结果、提示词、尺寸、保存信息及使用统计等数据，
     按规范化格式输出为结构清晰的多行文本字符串。

@@ -33,7 +33,7 @@ def setup_logging(
         enable_file: 是否启用文件输出
         force_standard_logging: 是否强制接管标准库 logging 配置
     """
-    # 移除默认的loguru处理器
+    # 移除默认的 loguru 处理器
     logger.remove()
 
     level = log_level.upper()
@@ -77,7 +77,7 @@ def setup_logging(
             enqueue=True,
         )
 
-    # 配置标准库logging以重定向到loguru
+    # 配置标准库 logging 以重定向到 loguru
     class InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             log_level: Union[str, int]

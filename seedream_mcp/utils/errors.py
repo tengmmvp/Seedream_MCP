@@ -5,6 +5,7 @@
 子类，便于上层按异常类型分支处理与重试决策。
 """
 
+import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Mapping, Optional, Dict, Any
@@ -109,6 +110,8 @@ class SeedreamNetworkError(SeedreamMCPError):
     pass
 
 
+# Retry-After 下限：即便服务器返回 0 或极小值也至少等待此值，避免紧密重试风暴
+_MIN_RETRY_AFTER_SECONDS = 1.0
 # Retry-After 上限：即便服务器返回更大值，单次退避也不超过此值，避免被诱导长时间睡眠
 _MAX_RETRY_AFTER_SECONDS = 300.0
 
@@ -116,8 +119,8 @@ _MAX_RETRY_AFTER_SECONDS = 300.0
 def parse_retry_after(headers: Mapping[str, str]) -> Optional[float]:
     """解析 HTTP Retry-After 头为等待秒数。
 
-    支持 delta-seconds 与 HTTP-date 两种格式；解析失败或非正返回 None。
-    返回值限制在 _MAX_RETRY_AFTER_SECONDS 以内。
+    支持 delta-seconds 与 HTTP-date 两种格式；解析失败或负值返回 None。
+    0 与极小值按最小下限兜底；返回值限制在 [_MIN_RETRY_AFTER_SECONDS, _MAX_RETRY_AFTER_SECONDS] 区间内。
     """
     raw = headers.get("retry-after") or headers.get("Retry-After")
     if not raw:
@@ -126,7 +129,7 @@ def parse_retry_after(headers: Mapping[str, str]) -> Optional[float]:
     try:
         seconds = float(raw)
         if seconds >= 0:
-            return min(seconds, _MAX_RETRY_AFTER_SECONDS)
+            return max(_MIN_RETRY_AFTER_SECONDS, min(seconds, _MAX_RETRY_AFTER_SECONDS))
     except ValueError:
         pass
     try:
@@ -136,7 +139,7 @@ def parse_retry_after(headers: Mapping[str, str]) -> Optional[float]:
                 target = target.replace(tzinfo=timezone.utc)
             delta = (target - datetime.now(timezone.utc)).total_seconds()
             if delta > 0:
-                return min(delta, _MAX_RETRY_AFTER_SECONDS)
+                return max(_MIN_RETRY_AFTER_SECONDS, min(delta, _MAX_RETRY_AFTER_SECONDS))
     except (TypeError, ValueError, OverflowError):
         pass
     return None
@@ -288,22 +291,34 @@ _SENSITIVE_KEY_KEYWORDS = (
 )
 
 
+# Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出
+_BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
+
+
+def _redact_bearer_tokens(value: Any) -> Any:
+    """剥离字符串值中的 Bearer 令牌，保留 Bearer 前缀以保留语义。"""
+    if isinstance(value, str):
+        return _BEARER_TOKEN_PATTERN.sub(r"\1***", value)
+    return value
+
+
 def _filter_sensitive_data(data: Any) -> Any:
     """递归过滤字典/列表中的敏感字段。
 
-    键名命中敏感关键词的值替换为 ***，其余递归处理；非容器类型原样返回。
+    键名命中敏感关键词的值替换为 ***；非敏感键的字符串值额外剥离 Bearer 令牌模式，
+    防止上游错误体回显的鉴权头进入结构化输出。非容器类型原样返回。
     """
     if isinstance(data, dict):
         return {
             key: (
                 "***"
                 if any(keyword in str(key).lower() for keyword in _SENSITIVE_KEY_KEYWORDS)
-                else _filter_sensitive_data(value)
+                else _filter_sensitive_data(_redact_bearer_tokens(value))
             )
             for key, value in data.items()
         }
     if isinstance(data, list):
-        return [_filter_sensitive_data(item) for item in data]
+        return [_filter_sensitive_data(_redact_bearer_tokens(item)) for item in data]
     return data
 
 

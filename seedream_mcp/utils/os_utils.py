@@ -1,8 +1,8 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接。
 
 统一 file_manager.save_bytes 与 image_input._prepare_local_image 的打开逻辑，
-消除两处重复实现。最终路径分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时
-（如 Windows）退化为打开前 is_symlink 拒绝，保留同等安全语义。共享函数抛
+消除两处重复实现。最终路径分量若为符号链接则拒绝；Windows 等平台不支持
+O_NOFOLLOW 时退化为打开前 is_symlink 拒绝，保留同等安全语义。共享函数抛
 OSError，由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的
@@ -42,3 +42,16 @@ def open_no_follow_write(path: PathLike) -> IO[bytes]:
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | no_follow
     fd = os.open(str(path), flags)
     return os.fdopen(fd, "wb")
+
+
+def open_no_follow_fd(path: PathLike, flags: int) -> int:
+    """以调用方 flags 附加 O_NOFOLLOW 打开最终分量，返回文件描述符。
+
+    供需要自定义写入方式的调用方使用，典型场景是经 aiofiles 异步包装 fd。``flags``
+    须包含方向与创建位，如 ``os.O_WRONLY | os.O_CREAT | os.O_TRUNC``。最终路径
+    分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时前置 is_symlink 兜底。
+    """
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if not no_follow and Path(path).is_symlink():
+        raise OSError(f"拒绝写入符号链接: {path}")
+    return os.open(str(path), flags | no_follow)

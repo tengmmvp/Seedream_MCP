@@ -317,3 +317,16 @@ def test_build_config_rejects_prepare_cache_max_below_one(
 
     with pytest.raises(SeedreamConfigError, match="prepare_cache_max"):
         build_config_from_sources(env_file=str(env_file))
+
+
+def test_field_env_map_covers_all_optional_config_fields() -> None:
+    """_FIELD_ENV_MAP 须覆盖除 api_key 外的全部配置字段。
+
+    新增配置字段若遗漏登记，会在首次构建配置取默认值时抛 KeyError。本测试守护该同步点。
+    """
+    from dataclasses import fields as dataclass_fields
+
+    optional_field_names = {
+        f.name for f in dataclass_fields(config_module.SeedreamConfig) if f.name != "api_key"
+    }
+    assert set(config_module._FIELD_ENV_MAP) == optional_field_names

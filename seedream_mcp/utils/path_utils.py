@@ -203,11 +203,9 @@ def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
     try:
         path_obj = Path(path)
 
-        # 绝对路径直接 resolve 返回。
         if path_obj.is_absolute():
             return path_obj.resolve()
 
-        # 相对路径基于 base_dir 或当前工作目录解析。
         if base_dir:
             base_path = Path(base_dir)
             return (base_path / path_obj).resolve()
@@ -253,22 +251,23 @@ def validate_image_path(
 ) -> Tuple[bool, str, Optional[Path]]:
     """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
 
+    HTTP(S) URL 视为有效但标准化路径恒为 None，调用方须同时检查有效位与路径是否
+    为 None，据以分流 URL 与本地文件处理，不可仅凭有效位判定为本地路径。
+
     Args:
-        path: 图片文件路径，HTTP(S) URL 直接判为有效。
+        path: 图片文件路径；HTTP(S) URL 有效但路径返回 None。
         base_dir: 工作区基础目录，用于越界校验。
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
-        三元组 (是否有效, 错误信息, 标准化路径)。
+        三元组 (是否有效, 错误信息, 标准化路径);URL 有效但路径为 None。
     """
     try:
-        # URL 形式的路径直接判为有效。
         if path.startswith(("http://", "https://")):
             return True, "", None
 
         normalized_path = normalize_path(path, base_dir)
 
-        # 校验路径未越出受控工作区目录。
         if base_dir:
             base_path = Path(base_dir).resolve()
             if not is_path_within_base(normalized_path, base_path):
@@ -320,7 +319,6 @@ def find_images_in_directory(
             logger.warning("目录不存在或不是目录: {}", directory)
             return images
 
-        # 选用自定义扩展名集合或默认受支持集合。
         target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
         target_extensions = {ext.lower() for ext in target_extensions}
 
@@ -382,7 +380,7 @@ def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = N
         search_directories = search_dirs or ["."]
 
         for search_dir in search_directories:
-            images = find_images_in_directory(search_dir, recursive=True, max_depth=2)
+            images = find_images_in_directory(search_dir, recursive=True, max_depth=2, limit=500)
 
             for image_path in images:
                 if target_name in image_path.name.lower():

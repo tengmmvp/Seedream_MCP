@@ -224,7 +224,7 @@ class AutoSaveManager:
             logger.info("开始自动保存图片: {}", sanitize_url(url))
 
             if not self.download_manager.validate_url(url):
-                raise AutoSaveError(f"无效的URL: {url}")
+                raise AutoSaveError(f"无效的URL: {sanitize_url(url)}")
 
             # 创建保存路径；该操作内含 mkdir 与 resolve，移出事件循环线程执行
             save_path = await asyncio.to_thread(
@@ -436,7 +436,7 @@ class AutoSaveManager:
         批量保存多个图片
 
         Args:
-            image_data: 图片数据列表,每个元素包含url、prompt等信息
+            image_data: 图片数据列表，每个元素包含 url、prompt 等信息
             tool_name: 工具名称
 
         Returns:

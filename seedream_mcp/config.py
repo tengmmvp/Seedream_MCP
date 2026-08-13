@@ -46,33 +46,6 @@ DEPRECATED_MODEL_TOKENS: set[str] = {
     "doubao-seededit-3.0",
 }
 
-# 配置项的字符串默认值，以环境变量名为键，供 _pick_* 系列辅助回退取值
-ENV_DEFAULTS: dict[str, Any] = {
-    "ARK_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
-    "SEEDREAM_MODEL_ID": "doubao-seedream-5-0-260128",
-    "SEEDREAM_DEFAULT_SIZE": "2K",
-    "SEEDREAM_DEFAULT_WATERMARK": "false",
-    "SEEDREAM_TIMEOUT": "60",
-    "SEEDREAM_API_TIMEOUT": "600",
-    "SEEDREAM_MAX_RETRIES": "3",
-    "LOG_LEVEL": "INFO",
-    "LOG_FILE": "",
-    "SEEDREAM_AUTO_SAVE_ENABLED": "true",
-    "SEEDREAM_AUTO_SAVE_BASE_DIR": "",
-    "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT": "30",
-    "SEEDREAM_AUTO_SAVE_MAX_RETRIES": "3",
-    "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE": str(DEFAULT_MAX_FILE_SIZE),
-    "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT": "5",
-    "SEEDREAM_AUTO_SAVE_DATE_FOLDER": "true",
-    "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS": "30",
-    "SEEDREAM_STREAM_BUFFER_MAX_SIZE": str(10 * 1024 * 1024),
-    "SEEDREAM_STREAM_CHUNK_SIZE": str(1024 * 1024),
-    "SEEDREAM_IMAGE_PREPARE_CONCURRENCY": "5",
-    "SEEDREAM_PREPARE_CACHE_MAX": "32",
-    "SEEDREAM_WORKSPACE_ROOT": "",
-    "SEEDREAM_HTTP_AUTH_TOKEN": "",
-}
-
 # to_dict 输出时按字段名关键词脱敏，新增敏感字段无需手动登记
 _SENSITIVE_CONFIG_KEYWORDS = ("key", "token", "secret", "password", "auth", "credential")
 
@@ -243,6 +216,59 @@ class SeedreamConfig:
         return (
             f"SeedreamConfig(api_key='***', base_url='{self.base_url}', model_id='{self.model_id}')"
         )
+
+
+# dataclass 字段名到环境变量名的映射。ENV_DEFAULTS 据此从 SeedreamConfig 字段默认值
+# 反射派生，使字段默认值成为唯一数据源，消除字符串默认与字段默认的双数据源漂移。
+_FIELD_ENV_MAP: dict[str, str] = {
+    "base_url": "ARK_BASE_URL",
+    "model_id": "SEEDREAM_MODEL_ID",
+    "default_size": "SEEDREAM_DEFAULT_SIZE",
+    "default_watermark": "SEEDREAM_DEFAULT_WATERMARK",
+    "timeout": "SEEDREAM_TIMEOUT",
+    "api_timeout": "SEEDREAM_API_TIMEOUT",
+    "max_retries": "SEEDREAM_MAX_RETRIES",
+    "log_level": "LOG_LEVEL",
+    "log_file": "LOG_FILE",
+    "auto_save_enabled": "SEEDREAM_AUTO_SAVE_ENABLED",
+    "auto_save_base_dir": "SEEDREAM_AUTO_SAVE_BASE_DIR",
+    "auto_save_download_timeout": "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT",
+    "auto_save_max_retries": "SEEDREAM_AUTO_SAVE_MAX_RETRIES",
+    "auto_save_max_file_size": "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
+    "auto_save_max_concurrent": "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT",
+    "auto_save_date_folder": "SEEDREAM_AUTO_SAVE_DATE_FOLDER",
+    "auto_save_cleanup_days": "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS",
+    "stream_buffer_max_size": "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
+    "stream_chunk_size": "SEEDREAM_STREAM_CHUNK_SIZE",
+    "image_prepare_concurrency": "SEEDREAM_IMAGE_PREPARE_CONCURRENCY",
+    "prepare_cache_max": "SEEDREAM_PREPARE_CACHE_MAX",
+    "workspace_root": "SEEDREAM_WORKSPACE_ROOT",
+    "http_auth_token": "SEEDREAM_HTTP_AUTH_TOKEN",
+}
+
+
+def _field_default_str(field_name: str) -> str:
+    """反射 SeedreamConfig 字段默认值并转为环境变量字符串默认值。
+
+    bool 转为 true/false，None 转为空串，其余取 str，与历史手写 ENV_DEFAULTS 语义一致。
+    字段无默认值时返回空串，仅 api_key 属此情形且它不进入 ENV_DEFAULTS。
+    """
+    for f in fields(SeedreamConfig):
+        if f.name == field_name:
+            default = f.default
+            if isinstance(default, bool):
+                return "true" if default else "false"
+            if default is None:
+                return ""
+            return str(default)
+    return ""
+
+
+# 配置项的字符串默认值，以环境变量名为键，从 dataclass 字段默认值派生为单一数据源，
+# 供 _pick_* 系列辅助回退取值
+ENV_DEFAULTS: dict[str, str] = {
+    env_key: _field_default_str(field_name) for field_name, env_key in _FIELD_ENV_MAP.items()
+}
 
 
 def normalize_model_selector(value: object) -> str:
@@ -507,7 +533,6 @@ _config_build_lock = threading.Lock()
 # 锁会造成不可重入死锁
 _global_config_lock = threading.Lock()
 
-# 全局配置实例
 _global_config: Optional[SeedreamConfig] = None
 
 

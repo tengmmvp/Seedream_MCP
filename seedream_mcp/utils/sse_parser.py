@@ -136,6 +136,8 @@ async def parse_sse_response(
     # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)
     offset = 0
     processed_bytes = 0
+    # 是否发生过单事件超限截断；用于在返回结果中标记不完整，通知调用方存在数据丢失
+    truncated = False
 
     async for chunk in response.aiter_bytes(chunk_size):
         if not chunk:
@@ -168,21 +170,18 @@ async def parse_sse_response(
             del buffer[:offset]
             offset = 0
 
-        # 完整事件处理完毕后，不完整尾部仍超限时才截断；回退到最后事件边界避免跨界错位
+        # 不完整尾部超过缓冲区上限：单个事件体积过大，无法完整解析。
+        # while 循环已抽干所有完整事件，故 [offset, end) 必为单个未完成事件；
+        # 丢弃该尾部以免内存无限增长，[0, offset) 内的完整事件均已处理进 items，不会跨界错位。
         live_len = len(buffer) - offset
         if live_len > buffer_max_size:
             log.warning(
-                "缓冲区大小超限 ({} > {})，截断不完整尾部",
+                "单个 SSE 事件超过缓冲区上限 ({} > {})，丢弃该不完整事件",
                 live_len,
                 buffer_max_size,
             )
-            last_sep = buffer.rfind(b"\n\n", offset)
-            if last_sep != -1:
-                offset = last_sep + 2
-            else:
-                offset = len(buffer) - buffer_max_size
-            del buffer[:offset]
-            offset = 0
+            del buffer[offset:]
+            truncated = True
 
     trailing_event = parse_sse_segment(buffer[offset:], log)
     if trailing_event is not None:
@@ -198,6 +197,10 @@ async def parse_sse_response(
     if status in (None, "completed") and any(
         isinstance(item, dict) and "error" in item for item in items
     ):
+        status = "partial"
+
+    # 单个事件超限被丢弃时结果不完整，标记 partial 通知调用方存在数据丢失
+    if truncated and status in (None, "completed"):
         status = "partial"
 
     return {

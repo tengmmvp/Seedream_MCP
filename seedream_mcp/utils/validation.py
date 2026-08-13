@@ -67,7 +67,8 @@ def _ensure_heif_opener_registered() -> None:
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024  # 30MB
 # optimize_prompt_options.mode 的合法取值白名单
 VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
-# 参考图（输入图像）维度约束：最短边、宽高比上下限、总像素上限
+# 参考图（输入图像）维度约束：最短边、宽高比上下限、总像素上限。
+# 宽高比上下限同时用于输出尺寸校验 validate_size_for_model，输入与输出沿用相同规则。
 MIN_IMAGE_EDGE = 15
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
@@ -124,10 +125,16 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     """将任意输入校验并转换为 [min_value, max_value] 内的整数，非法值抛出 SeedreamValidationError。"""
     if isinstance(value, bool):
         raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
-    try:
+    if isinstance(value, float):
+        # 拒绝非整数浮点，避免静默截断造成语义偏差；整数浮点允许转换
+        if not value.is_integer():
+            raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
         validated_value = int(value)
-    except (ValueError, TypeError):
-        raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
+    else:
+        try:
+            validated_value = int(value)
+        except (ValueError, TypeError):
+            raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
 
     if validated_value < min_value or validated_value > max_value:
         raise SeedreamValidationError(
@@ -504,7 +511,6 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
             value=output_format,
         )
 
-    # output_format 仅 5.0 系列支持，4.5/4.0 不支持，未知模型放行，由能力表统一判定
     if not get_model_capabilities(model_id).supports_output_format:
         raise SeedreamValidationError(
             "仅 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）模型支持 output_format",
@@ -541,10 +547,10 @@ def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]]
             value=tools,
         )
 
-    # tools 联网搜索仅 5.0 Lite 支持，5.0 Pro/4.5/4.0 不支持，未知模型放行，由能力表统一判定
     if not get_model_capabilities(model_id).supports_tools:
         raise SeedreamValidationError(
-            "仅 doubao-seedream-5.0 Lite 模型支持 tools（5.0 Pro/4.5/4.0 不支持联网搜索）",
+            "仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持 tools"
+            "（5.0 Pro/4.5/4.0 不支持联网搜索）",
             field="tools",
             value=tools,
         )
@@ -897,25 +903,34 @@ def validate_parallel_generation_options(
     return validated_request_count, validated_parallelism
 
 
-def validate_sequential_image_limit(max_images: int, reference_images: List[str] | None) -> None:
+def validate_sequential_image_limit(
+    max_images: int, reference_images: List[str] | None, model_id: str = ""
+) -> None:
     """
-    验证组图输出的总图片数量限制
+    验证组图输出的总图片数量限制。
+
+    参考图上限由模型能力表统一提供，消除硬编码同步点。model_id 缺省时按通用上限
+    校验，供无模型上下文的 schema 层粗校验使用；精确校验由 client 层传入实际
+    model_id 完成。
 
     要求：
-    - 参考图数量 <= 14
-    - 参考图数量 + 生成数量 <= 15
+    - 参考图数量不超过模型能力上限。5.0 Pro 为 10，其余家族为 14。
+    - 参考图数量与生成数量之和不超过 15。
     """
+    max_reference = get_max_reference_images(model_id)
     reference_count = len(reference_images) if reference_images else 0
-    if reference_count > SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES:
+    if reference_count > max_reference:
         raise SeedreamValidationError(
-            "参考图数量不能超过14，且参考图数量与生成数量之和不能超过15",
+            f"参考图数量不能超过{max_reference}，"
+            f"且参考图数量与生成数量之和不能超过{MAX_SEQUENTIAL_TOTAL_IMAGES}",
             field="image",
             value={"reference_images": reference_count, "max_images": max_images},
         )
 
     if reference_count + max_images > MAX_SEQUENTIAL_TOTAL_IMAGES:
         raise SeedreamValidationError(
-            "参考图数量与生成数量之和不能超过15（参考图最多14）",
+            f"参考图数量与生成数量之和不能超过{MAX_SEQUENTIAL_TOTAL_IMAGES}"
+            f"（参考图最多{max_reference}）",
             field="image",
             value={"reference_images": reference_count, "max_images": max_images},
         )

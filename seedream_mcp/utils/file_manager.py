@@ -108,10 +108,7 @@ class FileManager:
         Returns:
             清理后仅含安全字符的文件名。
         """
-        # 替换文件系统保留字符为下划线。
         filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
-
-        # 剔除控制字符。
         filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
 
         # 限制文件名长度避免超出文件系统上限。
@@ -119,7 +116,6 @@ class FileManager:
             name, ext = os.path.splitext(filename)
             filename = name[: 200 - len(ext)] + ext
 
-        # 净化后为空则回退默认名。
         if not filename.strip():
             filename = "unnamed"
 
@@ -138,20 +134,14 @@ class FileManager:
         if not prompt:
             return "image"
 
-        # 移除特殊字符，仅保留字母、数字、空格与连字符。
         clean_prompt = re.sub(r"[^\w\s-]", "", prompt)
-
-        # 空白字符折叠为下划线。
         clean_prompt = re.sub(r"\s+", "_", clean_prompt)
 
-        # 截断到最大长度。
         if len(clean_prompt) > max_length:
             clean_prompt = clean_prompt[:max_length]
 
-        # 去除首尾下划线。
         clean_prompt = clean_prompt.strip("_")
 
-        # 结果为空则回退默认名。
         if not clean_prompt:
             clean_prompt = "image"
 
@@ -178,13 +168,11 @@ class FileManager:
         if timestamp is None:
             timestamp = datetime.now()
 
-        # 清理基础名称。
         clean_base = self.sanitize_filename(base_name)
 
-        # 生成含毫秒的时间戳字符串。
+        # [:-3] 截掉微秒末三位，得到毫秒精度时间戳
         time_str = timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
-        # 生成 4 位随机唯一性后缀。
         unique_suffix = uuid.uuid4().hex[:4]
 
         # 拼接文件名：优先嵌入内容哈希，否则用随机后缀确保不冲突。
@@ -239,17 +227,14 @@ class FileManager:
         """
         path = self.base_dir
 
-        # 按当前日期创建一级子目录。
         if date_folder:
             today = datetime.now().strftime("%Y-%m-%d")
             path = path / today
 
-        # 追加工具名等子目录。
         if subfolder:
             clean_subfolder = self.sanitize_filename(subfolder)
             path = path / clean_subfolder
 
-        # 确保目录存在。
         self.ensure_directory(path)
 
         return path / filename
@@ -274,13 +259,12 @@ class FileManager:
         Returns:
             保存路径。
         """
-        # 确定文件名基础部分：优先自定义名，否则由提示词派生。
         if custom_name:
             base_name = custom_name
         else:
             base_name = self.generate_name_from_prompt(prompt)
 
-        # 从 URL 路径推断扩展名；调用独立工具函数以避免实例化 DownloadManager。
+        # 调用独立工具函数推断扩展名，避免为复用而实例化 DownloadManager。
         from .url_utils import get_file_extension_from_url
 
         extension = get_file_extension_from_url(url)
@@ -288,13 +272,10 @@ class FileManager:
         if extension not in SUPPORTED_IMAGE_EXTENSIONS:
             extension = ".jpeg"
 
-        # 生成唯一文件名。
         filename = self.generate_unique_filename(base_name, extension)
 
-        # 组织到日期与工具名子目录下。
         save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
 
-        # 校验路径未越出基础目录。
         if not self.validate_path(save_path):
             raise FileManagerError(f"路径不安全: {save_path}")
 
@@ -378,7 +359,6 @@ class FileManager:
         try:
             return str(file_path.relative_to(self.base_dir))
         except ValueError:
-            # 不在基础目录内时回退绝对路径。
             return str(file_path)
 
     def generate_markdown_reference(self, file_path: Path, alt_text: str = "") -> str:
@@ -404,7 +384,6 @@ class FileManager:
         # 统一为正斜杠以兼容 Markdown 引用。
         markdown_path = relative_path.replace("\\", "/")
 
-        # 补齐相对路径前缀。
         if not markdown_path.startswith("./"):
             markdown_path = "./" + markdown_path
 
@@ -440,6 +419,9 @@ class FileManager:
             for root, dirs, files in os.walk(self.base_dir, followlinks=False):
                 root_path = Path(root)
                 if not self.validate_path(root_path):
+                    # 越界：清空 dirs 阻止 os.walk 继续下降到越界子目录，含 NTFS junction
+                    # 目标，避免无谓的越界遍历与潜在 SMB 出站认证暴露
+                    dirs[:] = []
                     continue
                 for name in dirs:
                     dir_path = root_path / name

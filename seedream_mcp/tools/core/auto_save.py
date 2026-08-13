@@ -15,7 +15,7 @@ from ...utils.auto_save import AutoSaveManager, AutoSaveResult
 from ...utils.download_manager import DownloadManager
 from ...utils.logging import get_logger
 from ._helpers import _resolve_base_dir
-from .results import extract_images
+from .results import extract_images, is_saveable_image
 
 logger = get_logger(__name__)
 
@@ -57,25 +57,28 @@ async def _auto_save(
 ) -> List[AutoSaveResult]:
     """auto_save_from_urls / auto_save_from_base64 的公共骨架。
 
-    data_key 区分结果字典中取值的键（url / b64_json），save_method 为 AutoSaveManager
-    上的批量保存方法（save_multiple_images / save_multiple_base64_images），empty_warning
-    为无可保存数据时的告警文案。
+    data_key 区分结果字典中取值的键，取值为 url 或 b64_json；save_method 为
+    AutoSaveManager 的批量保存方法，即 save_multiple_images 或
+    save_multiple_base64_images；empty_warning 为无可保存数据时的告警文案。
     """
     base_dir = _resolve_base_dir(config, save_path)
     auto_save_manager = _build_auto_save_manager(config, base_dir, download_manager)
 
     images = extract_images(result)
-    image_data = []
-    for i, image in enumerate(images):
-        if isinstance(image, dict) and image.get(data_key):
-            image_data.append(
-                {
-                    data_key: image[data_key],
-                    "prompt": prompt,
-                    "custom_name": f"{custom_name}_{i + 1}" if custom_name else None,
-                    "alt_text": f"Generated image {i + 1}",
-                }
-            )
+    image_data: List[Dict[str, Any]] = []
+    for image in images:
+        if not is_saveable_image(image, data_key):
+            continue
+        # 序号基于可保存图计数，避免失败占位项导致文件名跳号
+        save_ordinal = len(image_data) + 1
+        image_data.append(
+            {
+                data_key: image[data_key],
+                "prompt": prompt,
+                "custom_name": f"{custom_name}_{save_ordinal}" if custom_name else None,
+                "alt_text": f"Generated image {save_ordinal}",
+            }
+        )
 
     if not image_data:
         logger.warning(empty_warning)

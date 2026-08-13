@@ -43,6 +43,9 @@ jobs:
       - name: 🧪 Run tests
         run: uv run pytest -q
 
+      - name: 🎨 Check formatting (black)
+        run: uv run black --check seedream_mcp tests
+
       - name: 🔍 Run mypy
         run: uv run mypy seedream_mcp
 

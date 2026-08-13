@@ -28,7 +28,7 @@ class _BaseStructuredOutput(BaseModel):
 
 
 class GenerationStructuredOutput(_BaseStructuredOutput):
-    """生成类工具（文生图/图文生图/多图融合/组图输出）的结构化输出 schema。"""
+    """生成类工具的结构化输出 schema，覆盖文生图、图文生图、多图融合与组图输出。"""
 
     prompt: Optional[str] = None
     size: Optional[str] = None

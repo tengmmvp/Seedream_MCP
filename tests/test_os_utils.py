@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.os_utils import open_no_follow_read, open_no_follow_write
+from seedream_mcp.utils.os_utils import (
+    open_no_follow_fd,
+    open_no_follow_read,
+    open_no_follow_write,
+)
 
 
 def _can_create_symlink(tmp_path: Path) -> bool:
@@ -133,3 +137,35 @@ def test_open_no_follow_fallback_allows_normal_file(
 
     with open_no_follow_read(path) as handle:
         assert handle.read() == b"ok"
+
+
+def test_open_no_follow_fd_writes_normal_file(tmp_path: Path) -> None:
+    """正常文件：open_no_follow_fd 返回 fd，经 os.write 写入后内容持久化。"""
+    path = tmp_path / "fd_out.bin"
+    fd = open_no_follow_fd(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    try:
+        os.write(fd, b"fd-data")
+    finally:
+        os.close(fd)
+    assert path.read_bytes() == b"fd-data"
+
+
+def test_open_no_follow_fd_rejects_symlink_when_supported(tmp_path: Path) -> None:
+    """平台支持 O_NOFOLLOW 时，最终分量为符号链接的 fd 打开被拒绝。"""
+    if not getattr(os, "O_NOFOLLOW", 0):
+        pytest.skip("当前平台不支持 O_NOFOLLOW")
+    link = _make_symlink(tmp_path, "fd_native")
+
+    with pytest.raises(OSError):
+        open_no_follow_fd(link, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+
+
+def test_open_no_follow_fd_fallback_rejects_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模拟平台不支持 O_NOFOLLOW：is_symlink 兜底分支拒绝符号链接的 fd 打开。"""
+    link = _make_symlink(tmp_path, "fd_fallback")
+    monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
+
+    with pytest.raises(OSError, match="拒绝写入符号链接"):
+        open_no_follow_fd(link, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
