@@ -11,13 +11,15 @@
 - 涉及 path_utils 的调用采用函数内延迟 import，规避模块加载循环。
 """
 
+from __future__ import annotations
+
 # 标准库导入
 import base64
 import io
 import re
 import stat
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 from urllib.parse import urlparse
 
 # 第三方库导入
@@ -26,7 +28,7 @@ from pillow_heif import register_heif_opener
 
 # 本地模块导入
 from .errors import SeedreamConfigError, SeedreamValidationError
-from .formats import SUPPORTED_IMAGE_EXTENSIONS, _format_file_size_mb
+from .formats import SUPPORTED_IMAGE_EXTENSIONS, _format_file_size_mb, parse_data_uri
 from .logging import get_logger
 from .os_utils import open_no_follow_read
 from .model_capabilities import get_model_capabilities
@@ -179,9 +181,7 @@ def _validate_url(url: str) -> str:
 
         return url
 
-    except SeedreamValidationError:
-        raise
-    except Exception as e:
+    except ValueError as e:
         raise SeedreamValidationError(f"URL验证失败: {str(e)}", field="image", value=url) from e
 
 
@@ -248,7 +248,8 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         file_size = stat_result.st_size
         if file_size > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"文件过大: {_format_file_size_mb(file_size)}，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
+                f"文件过大: {_format_file_size_mb(file_size)}，"
+                f"最大支持{_format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
                 field="image",
                 value=file_path,
             )
@@ -262,15 +263,13 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
                     image_bytes = f.read()
                 with Image.open(io.BytesIO(image_bytes)) as img:
                     _validate_image_dimensions(img.size[0], img.size[1], file_path)
-            except SeedreamValidationError:
-                raise
             except OSError as exc:
                 raise SeedreamValidationError(
                     f"无法读取文件: {path} -> {exc}",
                     field="image",
                     value=file_path,
                 ) from exc
-            except Exception as e:
+            except (ValueError, Image.DecompressionBombError) as e:
                 raise SeedreamValidationError(
                     f"图像维度解析失败: {str(e)}",
                     field="image",
@@ -279,9 +278,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 
         return str(path.absolute())
 
-    except SeedreamValidationError:
-        raise
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError) as e:
         raise SeedreamValidationError(
             f"文件路径验证失败: {str(e)}", field="image", value=file_path
         ) from e
@@ -308,13 +305,14 @@ def _validate_data_uri(data_uri: str) -> str:
         SeedreamValidationError: 当格式无效、数据损坏或尺寸超限时抛出
     """
     try:
-        # 解析Data URI结构
-        header, _, b64 = data_uri.partition(",")
-        if not header or not b64:
+        # 经 formats.parse_data_uri 统一拆分 media type 与负载，消除与 auto_save 的重复解析
+        media_type, b64 = parse_data_uri(data_uri)
+        if media_type is None or not b64:
             raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)
 
-        # 验证Header格式
-        header_lower = header.lower()
+        # parse_data_uri 仅拆出 media type 与负载；编码标记需在原始 header 中确认，
+        # 确保后续按 base64 解码而非误处理 url-encoded 或纯文本负载
+        header_lower = data_uri.split(",", 1)[0].lower()
         if not header_lower.startswith("data:image/") or ";base64" not in header_lower:
             raise SeedreamValidationError(
                 "Data URI 必须为 data:image/<格式>;base64, 前缀且小写",
@@ -322,8 +320,9 @@ def _validate_data_uri(data_uri: str) -> str:
                 value=data_uri,
             )
 
-        # 提取并验证图像格式。白名单派生自 SUPPORTED_IMAGE_EXTENSIONS 以保持单一来源
-        fmt = header_lower.split("data:image/")[-1].split(";")[0]
+        # 提取并验证图像格式。media_type 形如 image/png，取斜杠后部分为格式标识；
+        # 白名单派生自 SUPPORTED_IMAGE_EXTENSIONS 以保持单一来源
+        fmt = media_type.lower().split("image/")[-1]
         allowed = {ext.lstrip(".") for ext in SUPPORTED_IMAGE_EXTENSIONS}
         if fmt not in allowed:
             raise SeedreamValidationError(
@@ -333,8 +332,8 @@ def _validate_data_uri(data_uri: str) -> str:
         # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大
         if len(b64) > MAX_IMAGE_FILE_SIZE * 4 // 3 + 16:
             raise SeedreamValidationError(
-                f"数据过大: base64 长度 {len(b64)}，最大支持"
-                f"{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
+                f"数据过大: base64 长度 {len(b64)}，"
+                f"最大支持{_format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
                 field="image",
                 value=data_uri,
             )
@@ -342,7 +341,7 @@ def _validate_data_uri(data_uri: str) -> str:
         # Base64解码
         try:
             raw = base64.b64decode(b64, validate=True)
-        except Exception as e:
+        except ValueError as e:
             raise SeedreamValidationError(
                 f"Base64 解码失败: {str(e)}", field="image", value=data_uri
             ) from e
@@ -351,7 +350,8 @@ def _validate_data_uri(data_uri: str) -> str:
         size_bytes = len(raw)
         if size_bytes > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"数据过大: {_format_file_size_mb(size_bytes)}，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
+                f"数据过大: {_format_file_size_mb(size_bytes)}，"
+                f"最大支持{_format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
                 field="image",
                 value=data_uri,
             )
@@ -361,18 +361,14 @@ def _validate_data_uri(data_uri: str) -> str:
             _ensure_heif_opener_registered()
             with Image.open(io.BytesIO(raw)) as img:
                 _validate_image_dimensions(img.size[0], img.size[1], data_uri)
-        except SeedreamValidationError:
-            raise
-        except Exception as e:
+        except (OSError, ValueError, Image.DecompressionBombError) as e:
             raise SeedreamValidationError(
                 f"图像维度解析失败: {str(e)}", field="image", value=data_uri
             ) from e
 
         return data_uri
 
-    except SeedreamValidationError:
-        raise
-    except Exception as e:
+    except (OSError, ValueError) as e:
         raise SeedreamValidationError(
             f"Data URI 验证失败: {str(e)}", field="image", value=data_uri
         ) from e
@@ -527,7 +523,7 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
     return normalized
 
 
-def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]] | None:
+def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]] | None:
     """验证生成工具配置并检查模型兼容性。
 
     联网搜索 web_search 由 doubao-seedream-5.0 / 5.0-lite 系列支持，
@@ -561,7 +557,7 @@ def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]]
             value=tools,
         )
 
-    normalized_tools: List[dict[str, str]] = []
+    normalized_tools: list[dict[str, str]] = []
     for index, tool in enumerate(tools, start=1):
         if not isinstance(tool, dict):
             raise SeedreamValidationError(
@@ -885,7 +881,7 @@ def validate_parallel_generation_options(
 
 
 def validate_sequential_image_limit(
-    max_images: int, reference_images: List[str] | None, model_id: str = ""
+    max_images: int, reference_images: list[str] | None, model_id: str = ""
 ) -> None:
     """
     验证组图输出的总图片数量限制。
@@ -919,7 +915,7 @@ def validate_sequential_image_limit(
 
 def resolve_sequential_max_images(
     max_images: int | None,
-    reference_images: List[str] | None = None,
+    reference_images: list[str] | None = None,
 ) -> int:
     """
     根据参考图数量推导组图最大生成数量

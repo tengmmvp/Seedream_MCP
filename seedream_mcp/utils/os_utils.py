@@ -15,12 +15,14 @@ OSError，由调用方按各自异常类型包装。
 属下层威胁。
 """
 
+from __future__ import annotations
+
 import os
 import stat
 from pathlib import Path
-from typing import IO, Union
+from typing import IO
 
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 
 def open_no_follow_read(path: PathLike) -> IO[bytes]:

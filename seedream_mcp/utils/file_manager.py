@@ -5,6 +5,8 @@
 防符号链接，避免经由符号链接逃逸出基础目录。
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
 import re
@@ -12,7 +14,7 @@ import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any
 
 from .errors import SeedreamMCPError
 from .formats import SUPPORTED_IMAGE_EXTENSIONS
@@ -34,7 +36,7 @@ class FileManagerError(SeedreamMCPError):
 class FileManager:
     """图片保存路径生成、字节写入与旧文件清理的统一入口。"""
 
-    def __init__(self, base_dir: Optional[Path] = None):
+    def __init__(self, base_dir: Path | None = None):
         """初始化文件管理器并确保基础目录存在。
 
         Args:
@@ -166,8 +168,8 @@ class FileManager:
         self,
         base_name: str,
         extension: str,
-        content_hash: Optional[str] = None,
-        timestamp: Optional[datetime] = None,
+        content_hash: str | None = None,
+        timestamp: datetime | None = None,
     ) -> str:
         """生成包含时间戳与唯一性后缀的文件名。
 
@@ -228,7 +230,7 @@ class FileManager:
         return infer_extension_from_bytes(content, default)
 
     def get_organized_path(
-        self, filename: str, subfolder: Optional[str] = None, date_folder: bool = True
+        self, filename: str, subfolder: str | None = None, date_folder: bool = True
     ) -> Path:
         """在基础目录下按日期与子目录组织文件路径。
 
@@ -259,7 +261,7 @@ class FileManager:
         prompt: str,
         url: str,
         tool_name: str = "seedream",
-        custom_name: Optional[str] = None,
+        custom_name: str | None = None,
         date_folder: bool = True,
     ) -> Path:
         """根据提示词与 URL 生成图片保存路径。
@@ -301,8 +303,8 @@ class FileManager:
         prompt: str,
         extension: str,
         tool_name: str = "seedream",
-        custom_name: Optional[str] = None,
-        content_hash: Optional[str] = None,
+        custom_name: str | None = None,
+        content_hash: str | None = None,
         date_folder: bool = True,
     ) -> Path:
         """基于已知扩展名生成保存路径，供字节签名嗅探出真实类型后使用。
@@ -327,7 +329,7 @@ class FileManager:
 
     def save_bytes(
         self, file_path: Path, data: bytes, overwrite: bool = False, ensure_parent: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """将字节数据写入文件，返回保存结果元数据。
 
         Args:
@@ -407,7 +409,7 @@ class FileManager:
         else:
             return f"![]({markdown_path})"
 
-    def cleanup_old_files(self, days: int = 30) -> Dict[str, Any]:
+    def cleanup_old_files(self, days: int = 30) -> dict[str, Any]:
         """清理超过保留天数的旧文件并删除随之变空的子目录。
 
         Args:
@@ -419,81 +421,123 @@ class FileManager:
         # 以 epoch 秒比较 st_mtime，规避 datetime.fromtimestamp 受本地时区与夏令时
         # 跳变影响导致的清理边界漂移。
         cutoff_epoch = datetime.now().timestamp() - days * 86400
-        deleted_files = []
+        errors: list[str] = []
+        deleted_files: list[str] = []
         deleted_size = 0
-        errors = []
-
         try:
-            directories: List[Path] = []
-            # os.walk(followlinks=False) 不下降进入符号链接目录。Windows NTFS junction 属
-            # reparse point 但 is_symlink 返回 False，followlinks 无法拦截，仍会被下降进入
-            # junction 目标，下降后 root 解析到 base_dir 之外。每层先经 validate_path 复核
-            # root 真实位置，越界则跳过该层的目录与文件处理，防止经 junction 误删 base_dir
-            # 之外的条目造成数据破坏。os.walk 下降 junction 时已发生的 OS 级 listdir 无法在此
-            # 拦截，涉及 NTLM/SMB 出站认证风险，部署方应确保 base_dir 不接受不可信写入。
-            for root, dirs, files in os.walk(self.base_dir, followlinks=False):
-                root_path = Path(root)
-                # root 字符串经 os.walk 从已 resolve 的 base_dir 拼接而来，仍可能因 NTFS
-                # junction 被下降到 base_dir 之外；resolve 一次复核真实位置并缓存供本轮复用，
-                # 避免 validate_path 对已 resolve 路径的重复解析与封装开销。
-                try:
-                    root_resolved = root_path.resolve()
-                except Exception as e:
-                    logger.warning("路径验证失败: {} -> {}", root_path, e)
-                    dirs[:] = []
-                    continue
-                if not self._resolved_within_base(root_resolved):
-                    # 越界：清空 dirs 阻止 os.walk 继续下降到越界子目录，含 NTFS junction
-                    # 目标，避免无谓的越界遍历与潜在 SMB 出站认证暴露
-                    logger.warning("路径不在基础目录内: {}", root_resolved)
-                    dirs[:] = []
-                    continue
-                for name in dirs:
-                    dir_path = root_path / name
-                    # 跳过符号链接目录，不纳入空目录清理，避免对其目标操作。
-                    if dir_path.is_symlink():
-                        continue
-                    # junction 目录 resolve 后落在 base_dir 之外，不纳入空目录清理，
-                    # 避免 rmdir 误伤 junction 目标。
-                    try:
-                        dir_resolved = dir_path.resolve()
-                    except Exception as e:
-                        logger.warning("路径验证失败: {} -> {}", dir_path, e)
-                        continue
-                    if not self._resolved_within_base(dir_resolved):
-                        logger.warning("路径不在基础目录内: {}", dir_resolved)
-                        continue
-                    if dir_path != self.base_dir:
-                        directories.append(dir_path)
-                for name in files:
-                    file_path = root_path / name
-                    # 跳过符号链接文件，其目标可能在 base_dir 之外。
-                    if file_path.is_symlink():
-                        continue
-                    try:
-                        stat_result = file_path.stat()
-                        if not stat.S_ISREG(stat_result.st_mode):
-                            continue
-                        if stat_result.st_mtime < cutoff_epoch:
-                            file_path.unlink()
-                            deleted_files.append(str(file_path))
-                            deleted_size += stat_result.st_size
-                            logger.info("删除旧文件: {}", file_path)
-                    except Exception as e:
-                        errors.append(f"删除文件失败 {file_path}: {e}")
-                        logger.warning("删除文件失败: {} -> {}", file_path, e)
-
-            # 按深度逆序排序，先删深层空目录再删浅层。
-            for dir_path in sorted(directories, reverse=True):
-                try:
-                    if not any(dir_path.iterdir()):
-                        dir_path.rmdir()
-                        logger.info("删除空目录: {}", dir_path)
-                except Exception as e:
-                    logger.warning("删除目录失败: {} -> {}", dir_path, e)
-
+            expired_files, directories = self._collect_files_to_delete(cutoff_epoch, errors)
+            deleted_files, deleted_size = self._delete_expired_files(expired_files, errors)
+            self._prune_empty_dirs(directories)
         except Exception as e:
             errors.append(f"清理过程出错: {e}")
             logger.error("清理过程出错: {}", e)
 
         return {"deleted_files": len(deleted_files), "deleted_size": deleted_size, "errors": errors}
+
+    def _collect_files_to_delete(
+        self, cutoff_epoch: float, errors: list[str]
+    ) -> tuple[list[tuple[Path, int]], list[Path]]:
+        """遍历基础目录，收集过期文件与待评估的空目录候选。
+
+        os.walk(followlinks=False) 不下降进入符号链接目录。Windows NTFS junction 属
+        reparse point 但 is_symlink 返回 False，followlinks 无法拦截，仍会被下降进入
+        junction 目标，下降后 root 解析到 base_dir 之外。每层先经 _resolved_within_base
+        复核 root 真实位置，越界则跳过该层的目录与文件处理，防止经 junction 误删 base_dir
+        之外的条目造成数据破坏。os.walk 下降 junction 时已发生的 OS 级 listdir 无法在此
+        拦截，涉及 NTLM/SMB 出站认证风险，部署方应确保 base_dir 不接受不可信写入。
+
+        Args:
+            cutoff_epoch: 过期判定的时间戳下界，st_mtime 小于该值的文件视为过期。
+            errors: 收集 stat 失败的错误描述列表，与删除阶段共享同一列表。
+
+        Returns:
+            (expired_files, directories)：expired_files 为 (path, size) 元组列表，
+            directories 为待评估空目录清理的目录列表，不含 base_dir 自身。
+        """
+        expired_files: list[tuple[Path, int]] = []
+        directories: list[Path] = []
+        for root, dirs, files in os.walk(self.base_dir, followlinks=False):
+            root_path = Path(root)
+            # root 字符串经 os.walk 从已 resolve 的 base_dir 拼接而来，仍可能因 NTFS
+            # junction 被下降到 base_dir 之外；resolve 一次复核真实位置。
+            try:
+                root_resolved = root_path.resolve()
+            except Exception as e:
+                logger.warning("路径验证失败: {} -> {}", root_path, e)
+                dirs[:] = []
+                continue
+            if not self._resolved_within_base(root_resolved):
+                # 越界：清空 dirs 阻止 os.walk 继续下降到越界子目录，含 NTFS junction
+                # 目标，避免无谓的越界遍历与潜在 SMB 出站认证暴露
+                logger.warning("路径不在基础目录内: {}", root_resolved)
+                dirs[:] = []
+                continue
+            for name in dirs:
+                dir_path = root_path / name
+                # 跳过符号链接目录，不纳入空目录清理，避免对其目标操作。
+                if dir_path.is_symlink():
+                    continue
+                # junction 目录 resolve 后落在 base_dir 之外，不纳入空目录清理，
+                # 避免 rmdir 误伤 junction 目标。
+                try:
+                    dir_resolved = dir_path.resolve()
+                except Exception as e:
+                    logger.warning("路径验证失败: {} -> {}", dir_path, e)
+                    continue
+                if not self._resolved_within_base(dir_resolved):
+                    logger.warning("路径不在基础目录内: {}", dir_resolved)
+                    continue
+                if dir_path != self.base_dir:
+                    directories.append(dir_path)
+            for name in files:
+                file_path = root_path / name
+                # 跳过符号链接文件，其目标可能在 base_dir 之外。
+                if file_path.is_symlink():
+                    continue
+                try:
+                    stat_result = file_path.stat()
+                    if not stat.S_ISREG(stat_result.st_mode):
+                        continue
+                    if stat_result.st_mtime < cutoff_epoch:
+                        expired_files.append((file_path, stat_result.st_size))
+                except Exception as e:
+                    errors.append(f"删除文件失败 {file_path}: {e}")
+                    logger.warning("删除文件失败: {} -> {}", file_path, e)
+        return expired_files, directories
+
+    @staticmethod
+    def _delete_expired_files(
+        expired_files: list[tuple[Path, int]], errors: list[str]
+    ) -> tuple[list[str], int]:
+        """删除收集到的过期文件，返回已删路径列表与累计释放字节数。
+
+        stat 与 unlink 拆分到收集与删除两阶段：stat 失败已在收集阶段记录，此处仅
+        处理 unlink 失败，错误累积到共享的 errors 列表以保持错误消息一致。
+        """
+        deleted_files: list[str] = []
+        deleted_size = 0
+        for file_path, size in expired_files:
+            try:
+                file_path.unlink()
+                deleted_files.append(str(file_path))
+                deleted_size += size
+                logger.info("删除旧文件: {}", file_path)
+            except Exception as e:
+                errors.append(f"删除文件失败 {file_path}: {e}")
+                logger.warning("删除文件失败: {} -> {}", file_path, e)
+        return deleted_files, deleted_size
+
+    @staticmethod
+    def _prune_empty_dirs(directories: list[Path]) -> None:
+        """按深度逆序删除已变空的子目录，先删深层再删浅层。
+
+        目录删除失败仅记录警告不计入 errors 列表，与历史行为一致。
+        """
+        # 按深度逆序排序，先删深层空目录再删浅层。
+        for dir_path in sorted(directories, reverse=True):
+            try:
+                if not any(dir_path.iterdir()):
+                    dir_path.rmdir()
+                    logger.info("删除空目录: {}", dir_path)
+            except Exception as e:
+                logger.warning("删除目录失败: {} -> {}", dir_path, e)

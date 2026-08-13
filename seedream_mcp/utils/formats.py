@@ -109,3 +109,26 @@ def is_known_image_bytes(content: bytes) -> bool:
 def _format_file_size_mb(size_bytes: int) -> str:
     """将字节数格式化为 MB 字符串，保留一位小数，供校验与保存模块共享。"""
     return f"{size_bytes / 1024 / 1024:.1f}MB"
+
+
+def parse_data_uri(data: str) -> tuple[str | None, str]:
+    """解析 data URI，返回 (media_type, payload)。
+
+    非以 ``data:`` 开头、缺逗号分隔符或入参非字符串时返回 (None, 原始字符串)。
+    media_type 取自 header 的媒体类型部分，例如 ``data:image/png;base64,....`` 解析为
+    ``image/png``；header 缺少媒体类型时该字段为 None。payload 为首个逗号后的负载，
+    不做 base64 解码，由调用方按编码标记自行处理。供 validation 与 auto_save 共享，
+    消除两处 data URI 拆分逻辑的重复。
+    """
+    if not isinstance(data, str) or not data.startswith("data:"):
+        return None, data
+    header, sep, payload = data.partition(",")
+    if not sep:
+        return None, data
+    # header 形如 "data:image/png;base64"，去掉 "data:" 前缀后取首个 ";" 前的媒体类型
+    body = header[len("data:") :]
+    if ";" in body:
+        media_type = body.split(";", 1)[0] or None
+    else:
+        media_type = body or None
+    return media_type, payload

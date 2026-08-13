@@ -8,7 +8,8 @@
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Mapping, Optional, Dict, Any
+from dataclasses import dataclass
+from typing import Mapping, Optional, Dict, Any, Tuple
 
 
 class SeedreamMCPError(Exception):
@@ -147,6 +148,59 @@ def parse_retry_after(headers: Mapping[str, str]) -> Optional[float]:
     return None
 
 
+# HTTP 错误响应与异常类型的统一归约档案：状态码或异常类到展示标题、用户建议、
+# 结构化错误码的单点映射。handle_api_error、format_error_for_user 与
+# _classify_generation_error_type 三处共用此档案，新增状态码或调整文案仅需改这一处，
+# 避免三套并行分支相互漂移。
+@dataclass(frozen=True)
+class _ErrorProfile:
+    """单条错误归约档案。
+
+    base_message 仅 HTTP 状态档案使用，作为 handle_api_error 拼装 SeedreamAPIError.message
+    的初始文案；异常类型档案不使用该字段。
+    """
+
+    display_title: str
+    user_hint: str
+    error_code: str
+    base_message: str = ""
+
+
+# 精确状态码档案。display_title 与 user_hint 供 format_error_for_user，base_message 供
+# handle_api_error，error_code 供 _classify_generation_error_type。
+_HTTP_STATUS_PROFILES: Dict[int, _ErrorProfile] = {
+    400: _ErrorProfile("API调用失败", "", "api_error", base_message="请求参数错误"),
+    401: _ErrorProfile(
+        "认证失败",
+        "请检查您的API密钥是否正确设置。",
+        "auth_error",
+        base_message="API密钥无效或已过期",
+    ),
+    403: _ErrorProfile("API调用失败", "", "api_error", base_message="访问被拒绝，请检查API权限"),
+    404: _ErrorProfile("API调用失败", "", "api_error", base_message="API端点不存在"),
+    429: _ErrorProfile(
+        "请求频率超限",
+        "请稍后重试。",
+        "rate_limited",
+        base_message="请求频率超限，请稍后重试",
+    ),
+}
+
+# 5xx 与未列举状态码的兜底档案
+_HTTP_5XX_PROFILE = _ErrorProfile("API调用失败", "", "api_error", base_message="服务器内部错误")
+_HTTP_DEFAULT_PROFILE = _ErrorProfile("API调用失败", "", "api_error", base_message="API调用失败")
+
+
+def _lookup_http_error_profile(status_code: int) -> _ErrorProfile:
+    """按 HTTP 状态码查归约档案，5xx 与未列举码回退到对应兜底档案。"""
+    profile = _HTTP_STATUS_PROFILES.get(status_code)
+    if profile is not None:
+        return profile
+    if 500 <= status_code < 600:
+        return _HTTP_5XX_PROFILE
+    return _HTTP_DEFAULT_PROFILE
+
+
 def handle_api_error(
     response_status: int,
     response_data: Dict[str, Any],
@@ -154,9 +208,9 @@ def handle_api_error(
 ) -> SeedreamAPIError:
     """将 HTTP 错误响应归约为 SeedreamAPIError。
 
-    依据状态码选择更具体的错误文案，并尽量从响应体中提取上游 error.code 与 message
-    拼入文案；status_code 与 retry_after 原样保留在返回的异常上，由上层据此判定
-    可重试性与退避时长，而非在此处派生不同异常类型。
+    状态码专属基础文案取自 _HTTP_STATUS_PROFILES，再尝试从响应体提取上游 error.code 与
+    message 拼入文案；status_code 与 retry_after 原样保留在返回的异常上，由上层据此判定
+    可重试性与退避时长。
 
     Args:
         response_status: HTTP 状态码。
@@ -166,21 +220,7 @@ def handle_api_error(
     Returns:
         装配好状态码与错误码的 SeedreamAPIError 实例。
     """
-    error_message = "API调用失败"
-
-    # 按状态码选择更具体的错误文案
-    if response_status == 400:
-        error_message = "请求参数错误"
-    elif response_status == 401:
-        error_message = "API密钥无效或已过期"
-    elif response_status == 403:
-        error_message = "访问被拒绝，请检查API权限"
-    elif response_status == 404:
-        error_message = "API端点不存在"
-    elif response_status == 429:
-        error_message = "请求频率超限，请稍后重试"
-    elif response_status >= 500:
-        error_message = "服务器内部错误"
+    error_message = _lookup_http_error_profile(response_status).base_message
 
     # 尝试从响应体中提取更详细的上游错误信息与错误码
     error_code: Optional[str] = None
@@ -205,11 +245,47 @@ def handle_api_error(
     )
 
 
+# 自定义异常类型到归约档案的映射，按 isinstance 顺序匹配。APIError 按 status 子查表，
+# 不在此列表；SeedreamMCPError 基类与未识别异常各自有兜底档案。
+_EXCEPTION_PROFILES: Tuple[Tuple[type, _ErrorProfile], ...] = (
+    (SeedreamConfigError, _ErrorProfile("配置错误", "", "config_error")),
+    (SeedreamValidationError, _ErrorProfile("参数验证失败", "", "validation_error")),
+    (
+        SeedreamTimeoutError,
+        _ErrorProfile("请求超时", "请检查网络连接或稍后重试。", "timeout_error"),
+    ),
+    (
+        SeedreamNetworkError,
+        _ErrorProfile("网络连接错误", "请检查网络连接。", "network_error"),
+    ),
+)
+
+# SeedreamMCPError 基类兜底与未识别异常兜底
+_GENERIC_MCP_PROFILE = _ErrorProfile("操作失败", "", "generation_failed")
+_UNKNOWN_PROFILE = _ErrorProfile("未知错误", "", "generation_failed")
+
+
+def _resolve_error_profile(error: Exception) -> _ErrorProfile:
+    """将任意异常归约为统一的错误档案，供展示标题、用户建议与结构化错误码共用。
+
+    APIError 优先按 HTTP 状态码查 _HTTP_STATUS_PROFILES；其余按异常类型匹配；
+    SeedreamMCPError 基类与未识别异常回退到各自兜底档案。
+    """
+    if isinstance(error, SeedreamAPIError):
+        return _lookup_http_error_profile(error.status_code or 0)
+    for exc_type, profile in _EXCEPTION_PROFILES:
+        if isinstance(error, exc_type):
+            return profile
+    if isinstance(error, SeedreamMCPError):
+        return _GENERIC_MCP_PROFILE
+    return _UNKNOWN_PROFILE
+
+
 def format_error_for_user(error: Exception) -> str:
     """按异常类型将错误格式化为面向用户的提示文案。
 
-    不同异常类型映射到不同的可操作建议，例如认证失败提示检查 API 密钥、超时提示
-    检查网络；message 统一截断，避免上游回显的长敏感片段进入用户可见输出。
+    展示标题与可操作建议取自 _resolve_error_profile 归约档案；message 统一截断，避免上游
+    回显的长敏感片段进入用户可见输出；仅 APIError 携带上游错误码时附加错误码提示。
 
     Args:
         error: 异常实例。
@@ -217,29 +293,22 @@ def format_error_for_user(error: Exception) -> str:
     Returns:
         格式化的错误信息字符串。
     """
-    if isinstance(error, SeedreamConfigError):
-        return f"配置错误: {error.message}"
-    elif isinstance(error, SeedreamAPIError):
-        code_hint = f" [错误码: {error.error_code}]" if error.error_code else ""
+    profile = _resolve_error_profile(error)
+    if isinstance(error, SeedreamAPIError):
         # message 可能回显上游响应，截断防长敏感片段进入用户可见输出
         message = _truncate_value_for_output(error.message, limit=_MESSAGE_OUTPUT_LIMIT)
-        if error.status_code == 401:
-            return f"认证失败: {message}{code_hint}\n请检查您的API密钥是否正确设置。"
-        elif error.status_code == 429:
-            return f"请求频率超限: {message}{code_hint}\n请稍后重试。"
-        else:
-            return f"API调用失败: {message}{code_hint}"
-    elif isinstance(error, SeedreamValidationError):
-        return f"参数验证失败: {error.message}"
-    elif isinstance(error, SeedreamTimeoutError):
-        return f"请求超时: {error.message}\n请检查网络连接或稍后重试。"
-    elif isinstance(error, SeedreamNetworkError):
-        return f"网络连接错误: {error.message}\n请检查网络连接。"
+        code_hint = f" [错误码: {error.error_code}]" if error.error_code else ""
     elif isinstance(error, SeedreamMCPError):
-        return f"操作失败: {error.message}"
+        message = error.message
+        code_hint = ""
     else:
         message = _truncate_value_for_output(str(error), limit=_MESSAGE_OUTPUT_LIMIT)
-        return f"未知错误: {message}"
+        code_hint = ""
+
+    line = f"{profile.display_title}: {message}{code_hint}"
+    if profile.user_hint:
+        line += f"\n{profile.user_hint}"
+    return line
 
 
 # 异常 value 序列化时的长度上限：避免 data URI 等大对象撑爆日志/结构化响应

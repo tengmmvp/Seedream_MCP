@@ -4,17 +4,19 @@
 下载或写入失败时采用降级策略，保留原始 URL 而不中断整体生成流程。
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Sequence
 
 from .download_manager import DEFAULT_MAX_FILE_SIZE, DownloadManager, DownloadError, sanitize_url
 from .errors import SeedreamMCPError
 from .file_manager import FileManager, FileManagerError
-from .formats import EXTENSION_BY_MIME, _format_file_size_mb, is_known_image_bytes
+from .formats import EXTENSION_BY_MIME, _format_file_size_mb, is_known_image_bytes, parse_data_uri
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -52,10 +54,10 @@ def _build_save_metadata(
     file_size: int,
     content_type: str,
     attempts: int,
-    download_time: Optional[float] = None,
-) -> Dict[str, Any]:
+    download_time: float | None = None,
+) -> dict[str, Any]:
     """构造保存结果元数据，download_time 仅下载路径提供。"""
-    metadata: Dict[str, Any] = {
+    metadata: dict[str, Any] = {
         "prompt": prompt,
         "tool_name": tool_name,
         "save_time": save_time,
@@ -75,10 +77,10 @@ class AutoSaveResult:
         self,
         success: bool,
         original_url: str,
-        local_path: Optional[str] = None,
-        markdown_ref: Optional[str] = None,
-        error: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        local_path: str | None = None,
+        markdown_ref: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         self.success = success
         self.original_url = original_url
@@ -87,7 +89,7 @@ class AutoSaveResult:
         self.error = error
         self.metadata = metadata or {}
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """将保存结果序列化为字典，仅包含已设置的字段。"""
         result = {"success": self.success, "original_url": self.original_url}
 
@@ -111,14 +113,14 @@ class AutoSaveManager:
 
     def __init__(
         self,
-        base_dir: Optional[Path] = None,
+        base_dir: Path | None = None,
         download_timeout: int = 30,
         max_retries: int = 3,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         max_concurrent: int = 5,
         date_folder: bool = True,
         cleanup_days: int = 30,
-        download_manager: Optional[DownloadManager] = None,
+        download_manager: DownloadManager | None = None,
     ):
         """
         初始化自动保存管理器
@@ -146,7 +148,7 @@ class AutoSaveManager:
         self.date_folder = date_folder
         self.cleanup_days = cleanup_days
 
-    async def __aenter__(self) -> "AutoSaveManager":
+    async def __aenter__(self) -> AutoSaveManager:
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -176,24 +178,7 @@ class AutoSaveManager:
         except Exception as e:
             logger.warning("自动清理失败: {}", e, exc_info=True)
 
-    def _parse_data_uri(self, data: str) -> Tuple[Optional[str], str]:
-        """解析 data URI，返回 (mime_type, base64_payload)；非 data URI 返回 (None, 原始字符串)。"""
-        try:
-            if data.startswith("data:"):
-                header, payload = data.split(",", 1)
-                # header 形式如: data:image/png;base64
-                header = header[5:]  # 去掉 'data:'
-                mime = None
-                if ";" in header:
-                    mime = header.split(";")[0] or None
-                else:
-                    mime = header or None
-                return mime, payload
-            return None, data
-        except (ValueError, AttributeError):
-            return None, data
-
-    def _extension_from_mime(self, mime: Optional[str]) -> str:
+    def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退到 .jpeg。"""
         if not mime:
             return ".jpeg"
@@ -204,8 +189,8 @@ class AutoSaveManager:
         url: str,
         prompt: str = "",
         tool_name: str = "seedream",
-        custom_name: Optional[str] = None,
-        alt_text: Optional[str] = None,
+        custom_name: str | None = None,
+        alt_text: str | None = None,
     ) -> AutoSaveResult:
         """
         保存单个图片
@@ -270,8 +255,8 @@ class AutoSaveManager:
             return AutoSaveResult(success=False, original_url=url, error=f"未知错误: {e}")
 
     def _prepare_base64_payload(
-        self, payload: Optional[str], mime: Optional[str]
-    ) -> Tuple[bytes, str, str]:
+        self, payload: str | None, mime: str | None
+    ) -> tuple[bytes, str, str]:
         """同步解码 base64 并推断扩展名与内容哈希。
 
         strip/b64decode/sha256 均为 CPU 密集或全量遍历操作，集中于此供 save_base64_image
@@ -315,8 +300,8 @@ class AutoSaveManager:
         b64_data: str,
         prompt: str = "",
         tool_name: str = "seedream",
-        custom_name: Optional[str] = None,
-        alt_text: Optional[str] = None,
+        custom_name: str | None = None,
+        alt_text: str | None = None,
     ) -> AutoSaveResult:
         """保存单个 Base64 图片，支持 data URI 或纯 base64 字符串。
 
@@ -333,10 +318,10 @@ class AutoSaveManager:
         try:
             logger.info("开始自动保存 Base64 图片")
 
-            # data URI 解析含对大 base64 串的 split 全量拷贝，与解码、路径生成、写入一样属于
-            # 同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞
-            def _prepare_and_save() -> Tuple[bytes, Dict[str, Any], Optional[str]]:
-                mime, payload = self._parse_data_uri(b64_data)
+            # data URI 解析含对大 base64 串的 partition 全量拷贝，与解码、路径生成、写入一样
+            # 属于同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞
+            def _prepare_and_save() -> tuple[bytes, dict[str, Any], str | None]:
+                mime, payload = parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
                 save_path = self.file_manager.create_save_path_from_extension(
                     prompt=prompt,
@@ -388,11 +373,11 @@ class AutoSaveManager:
     async def _run_batch_save(
         self,
         tasks: Sequence[Awaitable[AutoSaveResult]],
-        image_data: List[Dict[str, Any]],
+        image_data: list[dict[str, Any]],
         *,
-        fallback_url_key: Optional[str],
+        fallback_url_key: str | None,
         log_label: str,
-    ) -> List[AutoSaveResult]:
+    ) -> list[AutoSaveResult]:
         """并发执行保存任务并归集结果。
 
         限制并发、将异常归一化为失败结果、统计成功数并触发节流清理。fallback_url_key
@@ -408,7 +393,7 @@ class AutoSaveManager:
             *[save_with_semaphore(task) for task in tasks], return_exceptions=True
         )
 
-        processed_results: List[AutoSaveResult] = []
+        processed_results: list[AutoSaveResult] = []
         for i, result in enumerate(results):
             # 取消信号必须向上传播，避免被下面的异常兜底吞掉
             if isinstance(result, asyncio.CancelledError):
@@ -433,8 +418,8 @@ class AutoSaveManager:
         return processed_results
 
     async def save_multiple_images(
-        self, image_data: List[Dict[str, Any]], tool_name: str = "seedream"
-    ) -> List[AutoSaveResult]:
+        self, image_data: list[dict[str, Any]], tool_name: str = "seedream"
+    ) -> list[AutoSaveResult]:
         """
         批量保存多个图片
 
@@ -461,8 +446,8 @@ class AutoSaveManager:
         )
 
     async def save_multiple_base64_images(
-        self, image_data: List[Dict[str, Any]], tool_name: str = "seedream"
-    ) -> List[AutoSaveResult]:
+        self, image_data: list[dict[str, Any]], tool_name: str = "seedream"
+    ) -> list[AutoSaveResult]:
         """并发保存多个 Base64 图片。
 
         Args:
@@ -487,7 +472,7 @@ class AutoSaveManager:
             tasks, image_data, fallback_url_key=None, log_label="批量 Base64 保存完成"
         )
 
-    async def cleanup_old_files(self, days: int = 30) -> Dict[str, Any]:
+    async def cleanup_old_files(self, days: int = 30) -> dict[str, Any]:
         """清理超过指定天数的旧文件。
 
         Args:

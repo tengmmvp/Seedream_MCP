@@ -16,6 +16,8 @@
 双重校验后方落盘，防 Content-Type 伪造。
 """
 
+from __future__ import annotations
+
 import asyncio
 import ipaddress
 import os
@@ -24,7 +26,7 @@ import re
 import socket
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import aiofiles
@@ -85,7 +87,7 @@ _IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
 _IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")
 
 
-def _embedded_ipv4_in_six(ip_obj: Any) -> Optional[ipaddress.IPv4Address]:
+def _embedded_ipv4_in_six(ip_obj: Any) -> ipaddress.IPv4Address | None:
     """提取 NAT64/IPv4-mapped/IPv4-compatible 段内嵌的 IPv4 地址，其他返回 None。"""
     for network in (_NAT64_NETWORK, _IPV4_MAPPED_NETWORK, _IPV4_COMPAT_NETWORK):
         if ip_obj in network:
@@ -93,7 +95,7 @@ def _embedded_ipv4_in_six(ip_obj: Any) -> Optional[ipaddress.IPv4Address]:
     return None
 
 
-def _public_ip_rejection_reason(ip_obj: Any) -> Optional[str]:
+def _public_ip_rejection_reason(ip_obj: Any) -> str | None:
     """返回 IP 不可作为公网下载目标的拒绝原因，None 表示通过。
 
     统一静态 URL、DNS 解析、连接对端 IP 三处校验：拒绝非公网地址、RFC 6598 CGNAT 段，
@@ -171,12 +173,12 @@ class DownloadManager:
         self.retry_delay = retry_delay
         self.max_file_size = max_file_size
         self._dns_cache_ttl = max(1, dns_cache_ttl)
-        self._dns_cache: Dict[str, Tuple[float, Tuple[str, ...]]] = {}
+        self._dns_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
         self._dns_cache_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: aiohttp.ClientSession | None = None
 
-    async def __aenter__(self) -> "DownloadManager":
+    async def __aenter__(self) -> DownloadManager:
         """进入上下文，确保会话就绪后返回自身。"""
         await self._ensure_session()
         return self
@@ -219,7 +221,7 @@ class DownloadManager:
         return save_path.with_suffix(f"{suffix}.part")
 
     @staticmethod
-    def _cleanup_temp_file(temp_path: Path, *, created: Optional[bool] = None) -> None:
+    def _cleanup_temp_file(temp_path: Path, *, created: bool | None = None) -> None:
         """清理临时文件。
 
         Args:
@@ -236,7 +238,7 @@ class DownloadManager:
         except OSError as exc:
             logger.warning("清理临时文件失败: {} -> {}", temp_path, exc)
 
-    def _validate_url_static(self, url: str) -> Tuple[str, bool]:
+    def _validate_url_static(self, url: str) -> tuple[str, bool]:
         """执行不依赖网络的 URL 静态安全校验，属 SSRF 第一层防护。
 
         解析阶段即拒绝非 http/https 协议、缺失主机名、携带凭据、本地主机名以及
@@ -271,7 +273,7 @@ class DownloadManager:
         except ValueError:
             return host, True
 
-    async def _resolve_public_ips(self, host: str) -> Tuple[str, ...]:
+    async def _resolve_public_ips(self, host: str) -> tuple[str, ...]:
         """解析域名并校验所有解析结果为公网 IP，属 SSRF 第二层防护。
 
         防 DNS rebinding：攻击者可能让静态校验阶段解析到公网 IP，随后在真正
@@ -326,7 +328,7 @@ class DownloadManager:
             await self._validate_public_dns(host)
 
     @staticmethod
-    def _extract_peer_ip(response: aiohttp.ClientResponse) -> Optional[str]:
+    def _extract_peer_ip(response: aiohttp.ClientResponse) -> str | None:
         """从底层传输连接中提取实际对端 IP，供连接后复核使用。"""
         connection = response.connection
         if connection is None or connection.transport is None:
@@ -374,7 +376,7 @@ class DownloadManager:
         response: "aiohttp.ClientResponse",
         current_url: str,
         redirect_count: int,
-    ) -> Optional[str]:
+    ) -> str | None:
         """处理重定向响应，返回下一跳绝对 URL；非重定向返回 None。
 
         重定向目标回到调用方循环顶部由 _validate_url_for_request 执行完整静态与
@@ -398,7 +400,7 @@ class DownloadManager:
         content_type: str,
         attempt: int,
         start_time: float,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """将 200 响应体下载到临时文件，校验大小与字节签名后原子替换，返回结果字典。
 
         content-length 预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出
@@ -464,8 +466,8 @@ class DownloadManager:
         }
 
     async def download_image(
-        self, url: str, save_path: Path, headers: Optional[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
+        self, url: str, save_path: Path, headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         """异步下载图片。
 
         Args:
@@ -483,7 +485,7 @@ class DownloadManager:
             headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
 
         start_time = time.time()
-        last_error: Optional[DownloadError] = None
+        last_error: DownloadError | None = None
         temp_path = self._temp_path_for(save_path)
 
         for attempt in range(self.max_retries + 1):

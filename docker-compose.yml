@@ -49,6 +49,7 @@ services:
       # 客户端性能
       - SEEDREAM_IMAGE_PREPARE_CONCURRENCY=${SEEDREAM_IMAGE_PREPARE_CONCURRENCY:-5}
       - SEEDREAM_PREPARE_CACHE_MAX=${SEEDREAM_PREPARE_CACHE_MAX:-32}
+      - SEEDREAM_PREPARE_CACHE_MAX_BYTES=${SEEDREAM_PREPARE_CACHE_MAX_BYTES:-268435456}
     volumes:
       # 保存生成的图片到本地
       - ./seedream_images:/app/seedream_images

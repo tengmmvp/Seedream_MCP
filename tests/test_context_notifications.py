@@ -101,9 +101,10 @@ async def test_tool_titles_not_duplicated_in_annotations() -> None:
 
 
 async def test_resources_registered() -> None:
-    """注册 MCP resources，包含 workspace roots 与 server info。"""
+    """注册 MCP resources，包含 workspace roots、server info 与 models info。"""
     resources = await mcp.list_resources()
     uris = {str(resource.uri) for resource in resources}
 
     assert "seedream://workspace/roots" in uris
     assert "seedream://server/info" in uris
+    assert "seedream://models/info" in uris

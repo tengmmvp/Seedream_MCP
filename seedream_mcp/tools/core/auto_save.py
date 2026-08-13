@@ -7,6 +7,7 @@ AutoSaveManager 并在 finally 中关闭，使下载连接池的作用域限定�
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -61,7 +62,7 @@ async def _auto_save(
     AutoSaveManager 的批量保存方法，即 save_multiple_images 或
     save_multiple_base64_images；empty_warning 为无可保存数据时的告警文案。
     """
-    base_dir = _resolve_base_dir(config, save_path)
+    base_dir = await asyncio.to_thread(_resolve_base_dir, config, save_path)
     auto_save_manager = _build_auto_save_manager(config, base_dir, download_manager)
 
     images = extract_images(result)

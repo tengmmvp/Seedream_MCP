@@ -102,11 +102,6 @@ _shared_download_manager: Optional[DownloadManager] = None
 _shared_init_lock = asyncio.Lock()
 
 
-def _get_active_config() -> SeedreamConfig:
-    """获取当前活动配置，CLI 注入优先，回退全局默认。"""
-    return get_active_config()
-
-
 def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     """
     从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置。
@@ -115,7 +110,7 @@ def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     """
     state = ctx.request_context.lifespan_context
     config = state.get("config") if isinstance(state, dict) else None
-    return config if isinstance(config, SeedreamConfig) else _get_active_config()
+    return config if isinstance(config, SeedreamConfig) else get_active_config()
 
 
 async def _safe_close(obj: Any) -> None:
@@ -143,7 +138,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     ["config"]/["client"]/["download_manager"]。
     """
     global _shared_client, _shared_download_manager
-    config = _get_active_config()
+    config = get_active_config()
     if _shared_client is None or _shared_client.config is not config:
         async with _shared_init_lock:
             if _shared_client is None or _shared_client.config is not config:
@@ -367,7 +362,7 @@ async def workspace_roots_resource() -> str:
 @mcp.resource("seedream://server/info")
 async def server_info_resource() -> str:
     """服务器版本与当前生效配置摘要。"""
-    config = _get_active_config()
+    config = get_active_config()
     return json.dumps(
         {
             "name": SERVER_NAME,
@@ -381,43 +376,69 @@ async def server_info_resource() -> str:
     )
 
 
+@mcp.resource("seedream://models/info")
+async def models_info_resource() -> str:
+    """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
+    from .utils.model_capabilities import get_model_capabilities
+
+    models = []
+    for alias, model_id in MODEL_ALIASES.items():
+        caps = get_model_capabilities(model_id)
+        models.append(
+            {
+                "alias": alias,
+                "model_id": model_id,
+                "display_name": caps.display_name,
+                "allowed_presets": sorted(caps.allowed_presets),
+                "min_size_pixels": caps.min_size_pixels,
+                "max_size_pixels": caps.max_size_pixels,
+                "size_pixel_multiple": caps.size_pixel_multiple,
+                "max_reference_images": caps.max_reference_images,
+                "supports_output_format": caps.supports_output_format,
+                "supports_tools": caps.supports_tools,
+                "supports_stream": caps.supports_stream,
+                "supports_fast_optimize_prompt": caps.supports_fast_optimize_prompt,
+            }
+        )
+    return json.dumps({"models": models}, ensure_ascii=False, indent=2)
+
+
 # ==================== MCP 风格预设 Prompt 定义 ====================
+
+
+# 风格预设固定前缀，指引模型调用文生图工具并指明 prompt 参数来源
+_STYLE_PROMPT_PREFIX = "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
+
+
+def _build_style_prompt(subject: str, style_suffix: str) -> str:
+    """组装风格预设提示词：固定前缀后接主题与风格描述后缀。"""
+    return f"{_STYLE_PROMPT_PREFIX}{subject}，{style_suffix}"
 
 
 @mcp.prompt(name="seedream_style_anime", description="动漫风格生图提示词模板")
 def style_anime_prompt(subject: str = "一个女孩站在樱花树下") -> str:
     """生成日系动漫风格图片的提示词模板，可作为文生图 prompt 使用。"""
-    return (
-        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
-        f"{subject}，日系动漫风格，赛璐珞上色，鲜艳饱和的色彩，精细流畅的线条，柔和光影，高细节"
+    return _build_style_prompt(
+        subject, "日系动漫风格，赛璐珞上色，鲜艳饱和的色彩，精细流畅的线条，柔和光影，高细节"
     )
 
 
 @mcp.prompt(name="seedream_style_realistic", description="写实摄影风格生图提示词模板")
 def style_realistic_prompt(subject: str = "城市夜景") -> str:
     """生成写实摄影风格图片的提示词模板，可作为文生图 prompt 使用。"""
-    return (
-        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
-        f"{subject}，写实摄影风格，高清细节，自然光影，景深效果，专业摄影质感"
-    )
+    return _build_style_prompt(subject, "写实摄影风格，高清细节，自然光影，景深效果，专业摄影质感")
 
 
 @mcp.prompt(name="seedream_style_watercolor", description="水彩画风格生图提示词模板")
 def style_watercolor_prompt(subject: str = "山间小屋") -> str:
     """生成水彩画风格图片的提示词模板，可作为文生图 prompt 使用。"""
-    return (
-        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
-        f"{subject}，水彩画风格，柔和晕染，通透色彩，手绘质感，留白"
-    )
+    return _build_style_prompt(subject, "水彩画风格，柔和晕染，通透色彩，手绘质感，留白")
 
 
 @mcp.prompt(name="seedream_style_oil_painting", description="油画风格生图提示词模板")
 def style_oil_painting_prompt(subject: str = "海边夕阳") -> str:
     """生成油画风格图片的提示词模板，可作为文生图 prompt 使用。"""
-    return (
-        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
-        f"{subject}，油画风格，厚重笔触，丰富层次，经典光影，艺术质感"
-    )
+    return _build_style_prompt(subject, "油画风格，厚重笔触，丰富层次，经典光影，艺术质感")
 
 
 # ==================== 命令行参数解析 ====================
@@ -728,9 +749,41 @@ class _LimitRequestBodyMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+class _HealthCheckMiddleware:
+    """streamable-http 健康检查中间件，短路 GET /health 返回进程存活状态。
+
+    最后装配使其成为最外层，先于 Bearer 鉴权与请求体限制执行，负载均衡与健康探针
+    无需令牌即可探活。仅做 liveness 判定，不探测上游 API，避免拖慢探针。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") == "http"
+            and scope.get("method") == "GET"
+            and scope.get("path") == "/health"
+        ):
+            body = b'{"status":"ok"}'
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
 def _resolve_http_auth_token(args: argparse.Namespace) -> str:
     """解析 streamable-http 鉴权令牌：CLI 参数优先，其次活动配置。"""
-    token = args.auth_token or _get_active_config().http_auth_token
+    token = args.auth_token or get_active_config().http_auth_token
     return (token or "").strip()
 
 
@@ -796,6 +849,8 @@ def _run_streamable_http(
     if auth_token:
         app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
+    # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于鉴权短路 GET /health 供探针探活
+    app.add_middleware(_HealthCheckMiddleware)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:
         ssl_kwargs["ssl_certfile"] = ssl_certfile

@@ -42,11 +42,11 @@ async def test_call_api_retries_on_429_then_succeeds(monkeypatch: pytest.MonkeyP
             *,
             client: httpx.AsyncClient,
             url: str,
-            request_data: Dict[str, Any],
+            request_body: bytes,
             request_timeout: httpx.Timeout,
         ) -> Dict[str, Any]:
             nonlocal calls
-            del client, url, request_data, request_timeout
+            del client, url, request_body, request_timeout
             calls += 1
             if calls < 2:
                 raise SeedreamAPIError("rate limited", status_code=429)
@@ -71,11 +71,11 @@ async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch) -> None
             *,
             client: httpx.AsyncClient,
             url: str,
-            request_data: Dict[str, Any],
+            request_body: bytes,
             request_timeout: httpx.Timeout,
         ) -> Dict[str, Any]:
             nonlocal calls
-            del client, url, request_data, request_timeout
+            del client, url, request_body, request_timeout
             calls += 1
             raise SeedreamAPIError("bad request", status_code=400)
 
@@ -98,11 +98,11 @@ async def test_call_api_timeout_retried_then_mapped(monkeypatch: pytest.MonkeyPa
             *,
             client: httpx.AsyncClient,
             url: str,
-            request_data: Dict[str, Any],
+            request_body: bytes,
             request_timeout: httpx.Timeout,
         ) -> Dict[str, Any]:
             nonlocal calls
-            del client, url, request_data, request_timeout
+            del client, url, request_body, request_timeout
             calls += 1
             raise httpx.TimeoutException("timed out")
 
@@ -126,11 +126,11 @@ async def test_call_api_unexpected_error_not_retried(monkeypatch: pytest.MonkeyP
             *,
             client: httpx.AsyncClient,
             url: str,
-            request_data: Dict[str, Any],
+            request_body: bytes,
             request_timeout: httpx.Timeout,
         ) -> Dict[str, Any]:
             nonlocal calls
-            del client, url, request_data, request_timeout
+            del client, url, request_body, request_timeout
             calls += 1
             raise ValueError("unexpected bug")
 
@@ -153,11 +153,11 @@ async def test_call_api_retries_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyP
             *,
             client: httpx.AsyncClient,
             url: str,
-            request_data: Dict[str, Any],
+            request_body: bytes,
             request_timeout: httpx.Timeout,
         ) -> Dict[str, Any]:
             nonlocal calls
-            del client, url, request_data, request_timeout
+            del client, url, request_body, request_timeout
             calls += 1
             if calls < 2:
                 raise SeedreamAPIError("server error", status_code=500)
@@ -182,11 +182,11 @@ async def test_call_api_network_error_retries_then_mapped(monkeypatch: pytest.Mo
             *,
             client: httpx.AsyncClient,
             url: str,
-            request_data: Dict[str, Any],
+            request_body: bytes,
             request_timeout: httpx.Timeout,
         ) -> Dict[str, Any]:
             nonlocal calls
-            del client, url, request_data, request_timeout
+            del client, url, request_body, request_timeout
             calls += 1
             raise httpx.ConnectError("connection refused")
 
@@ -211,7 +211,7 @@ async def test_call_api_429_uses_retry_after_for_backoff(monkeypatch: pytest.Mon
 
     # 抖动归零使退避值确定等于 base，便于精确断言 Retry-After 路径
     monkeypatch.setattr(asyncio, "sleep", _capture_sleep)
-    monkeypatch.setattr(random, "uniform", lambda a, b: 0.0)
+    monkeypatch.setattr(random, "uniform", lambda *_: 0.0)
 
     async with SeedreamClient(config) as client:
 
@@ -219,11 +219,11 @@ async def test_call_api_429_uses_retry_after_for_backoff(monkeypatch: pytest.Mon
             *,
             client: httpx.AsyncClient,
             url: str,
-            request_data: Dict[str, Any],
+            request_body: bytes,
             request_timeout: httpx.Timeout,
         ) -> Dict[str, Any]:
             nonlocal calls
-            del client, url, request_data, request_timeout
+            del client, url, request_body, request_timeout
             calls += 1
             if calls < 2:
                 raise SeedreamAPIError("rate limited", status_code=429, retry_after=2.0)
@@ -236,3 +236,42 @@ async def test_call_api_429_uses_retry_after_for_backoff(monkeypatch: pytest.Mon
     assert result["success"] is True
     # retry_after=2.0 路径：单次退避等于 Retry-After 值；指数路径 attempt 0 应为 2**0=1.0
     assert sleep_durations == [2.0]
+
+
+async def test_call_api_429_retry_after_above_backoff_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """retry_after 超过指数退避上限时仍信任服务端值，不被 60 秒上限截断。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    calls = 0
+    sleep_durations: List[float] = []
+
+    async def _capture_sleep(*args: object, **kwargs: object) -> None:
+        del kwargs
+        if args:
+            sleep_durations.append(float(args[0]))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "sleep", _capture_sleep)
+    monkeypatch.setattr(random, "uniform", lambda *_: 0.0)
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> Dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            if calls < 2:
+                raise SeedreamAPIError("rate limited", status_code=429, retry_after=120.0)
+            return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert calls == 2
+    assert result["success"] is True
+    # retry_after=120 超过 _MAX_BACKOFF_SECONDS=60，应信任服务端值 120 而非被截断为 60
+    assert sleep_durations == [120.0]

@@ -16,7 +16,7 @@ import os
 import random
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 # 第三方库导入
 import httpx
@@ -53,8 +53,22 @@ from .utils.sse_parser import is_sse_response, parse_sse_response
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
 _PrepareCacheKey = Tuple[str, Tuple[str, ...], Tuple[float, int]]
 
-# 指数退避单次等待上限，避免 Retry-After 接近 300s 时单次 sleep 过久
+# 指数退避单次等待上限，避免 2**n 增长过快导致单次 sleep 过久；Retry-After 路径已由
+# parse_retry_after 限制在 [1, 300]，不共用此上限
 _MAX_BACKOFF_SECONDS = 60
+
+
+class _ValidatedGenerationParams(NamedTuple):
+    """生成类工具公共参数的校验结果，替代裸 8 元组以提升可读性与类型安全。"""
+
+    prompt: str
+    optimize_prompt_options: Optional[Dict[str, Any]]
+    size: str
+    watermark: bool
+    response_format: str
+    output_format: Optional[str]
+    stream: bool
+    tools: Optional[List[Dict[str, Any]]]
 
 
 class SeedreamClient:
@@ -86,6 +100,8 @@ class SeedreamClient:
         # 命中时移至末尾实现 LRU，超限淘汰最久未用条目
         self._prepare_cache: OrderedDict[_PrepareCacheKey, str] = OrderedDict()
         self._prepare_cache_max = self.config.prepare_cache_max
+        self._prepare_cache_max_bytes = self.config.prepare_cache_max_bytes
+        self._prepare_cache_bytes = 0
         # 并发 miss 去重：同一缓存键的在途预处理复用同一 task，避免重复读+编码
         self._prepare_inflight: dict[_PrepareCacheKey, asyncio.Task[str]] = {}
 
@@ -567,16 +583,7 @@ class SeedreamClient:
         output_format: Optional[str],
         stream: bool,
         tools: Optional[List[Dict[str, Any]]],
-    ) -> Tuple[
-        str,
-        Optional[Dict[str, Any]],
-        str,
-        bool,
-        str,
-        Optional[str],
-        bool,
-        Optional[List[Dict[str, Any]]],
-    ]:
+    ) -> _ValidatedGenerationParams:
         """集中校验生成类工具的公共参数并返回校验后的各值。
 
         文生图、图文生图、多图融合与组图输出共用同一套参数校验，抽取此处避免四处重复。
@@ -592,15 +599,15 @@ class SeedreamClient:
         output_format = validate_output_format(output_format, self.config.model_id)
         stream = validate_stream(stream, self.config.model_id)
         tools = validate_generation_tools(tools, self.config.model_id)
-        return (
-            prompt,
-            validated_opts,
-            size,
-            watermark,
-            response_format,
-            output_format,
-            stream,
-            tools,
+        return _ValidatedGenerationParams(
+            prompt=prompt,
+            optimize_prompt_options=validated_opts,
+            size=size,
+            watermark=watermark,
+            response_format=response_format,
+            output_format=output_format,
+            stream=stream,
+            tools=tools,
         )
 
     async def close(self) -> None:
@@ -701,16 +708,18 @@ class SeedreamClient:
         return f"len={len(prompt)}, sha256={digest}"
 
     @staticmethod
-    def _normalize_single_image(image: Optional[str]) -> str:
-        """
-        校验并规范化单张图片输入
-        """
+    def _normalize_single_image(image: Optional[str], *, field_name: str = "image") -> str:
+        """校验并规范化单张图片输入，field_name 用于定位序列中的具体元素。"""
         if not isinstance(image, str):
-            raise SeedreamValidationError("image 参数必须是字符串", field="image", value=image)
+            raise SeedreamValidationError(
+                f"{field_name} 参数必须是字符串", field=field_name, value=image
+            )
 
         normalized = image.strip()
         if not normalized:
-            raise SeedreamValidationError("image 参数不能为空字符串", field="image", value=image)
+            raise SeedreamValidationError(
+                f"{field_name} 参数不能为空字符串", field=field_name, value=image
+            )
         return normalized
 
     @staticmethod
@@ -733,20 +742,10 @@ class SeedreamClient:
 
         normalized_images: List[str] = []
         for index, image in enumerate(images, start=1):
-            if not isinstance(image, str):
-                raise SeedreamValidationError(
-                    f"{field_name}[{index}] 必须是字符串",
-                    field=f"{field_name}[{index}]",
-                    value=image,
-                )
-            normalized_image = image.strip()
-            if not normalized_image:
-                raise SeedreamValidationError(
-                    f"{field_name}[{index}] 不能为空字符串",
-                    field=f"{field_name}[{index}]",
-                    value=image,
-                )
-            normalized_images.append(normalized_image)
+            element_field = f"{field_name}[{index}]"
+            normalized_images.append(
+                SeedreamClient._normalize_single_image(image, field_name=element_field)
+            )
 
         image_count = len(normalized_images)
         if image_count < min_count:
@@ -802,13 +801,9 @@ class SeedreamClient:
         return safe_data
 
     def _get_http_client(self) -> httpx.AsyncClient:
-        """
-        获取并校验 HTTP 客户端实例。
-        """
+        """获取已初始化的 HTTP 客户端实例，未初始化则抛出。"""
         if self._client is None:
             raise SeedreamAPIError("HTTP 客户端未正确初始化")
-        if not callable(getattr(self._client, "post", None)):
-            raise SeedreamAPIError("HTTP 客户端的 post 方法不可用")
         return self._client
 
     def _build_generation_url(self) -> str:
@@ -889,10 +884,18 @@ class SeedreamClient:
         """将请求体序列化为 UTF-8 bytes，供 httpx 直接发送以跳过事件循环内编码。"""
         return json.dumps(request_data).encode("utf-8")
 
+    def _raise_api_error_for(
+        self,
+        status_code: int,
+        headers: Any,
+        error_data: Dict[str, Any],
+    ) -> None:
+        """按状态码与错误体装配并抛出统一 API 异常，标准与流式路径共用。"""
+        retry_after = self._retry_after_or_none(status_code, headers)
+        raise handle_api_error(status_code, error_data, retry_after=retry_after)
+
     def _raise_for_response_status(self, response: httpx.Response) -> None:
-        """
-        将非 200 状态码转换为统一 API 异常。
-        """
+        """将非 200 状态码转换为统一 API 异常。"""
         if response.status_code == 200:
             return
 
@@ -900,13 +903,10 @@ class SeedreamClient:
             error_data = response.json()
         except Exception:
             error_data = {"message": response.text}
-        retry_after = self._retry_after_or_none(response.status_code, response.headers)
-        raise handle_api_error(response.status_code, error_data, retry_after=retry_after)
+        self._raise_api_error_for(response.status_code, response.headers, error_data)
 
     async def _raise_for_stream_response_status(self, response: httpx.Response) -> None:
-        """
-        将流式响应中的非 200 状态码转换为统一 API 异常。
-        """
+        """将流式响应中的非 200 状态码转换为统一 API 异常。"""
         if response.status_code == 200:
             return
 
@@ -915,25 +915,22 @@ class SeedreamClient:
             error_data = json.loads(error_text)
         except Exception:
             error_data = {"message": error_text}
-        retry_after = self._retry_after_or_none(response.status_code, response.headers)
-        raise handle_api_error(response.status_code, error_data, retry_after=retry_after)
+        self._raise_api_error_for(response.status_code, response.headers, error_data)
 
     async def _send_stream_request(
         self,
         *,
         client: httpx.AsyncClient,
         url: str,
-        request_data: Dict[str, Any],
+        request_body: bytes,
         request_timeout: httpx.Timeout,
     ) -> Dict[str, Any]:
         """
         发送流式请求并解析响应。
         """
-        # 大请求体 JSON 序列化与编码移至工作线程，避免阻塞事件循环；
-        # 直接产出 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
-        json_bytes = await asyncio.to_thread(self._serialize_request, request_data)
+        # request_body 已由调用方在工作线程序列化为 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
         async with client.stream(
-            "POST", url, content=json_bytes, timeout=request_timeout
+            "POST", url, content=request_body, timeout=request_timeout
         ) as response:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
             await self._raise_for_stream_response_status(response)
@@ -961,16 +958,14 @@ class SeedreamClient:
         *,
         client: httpx.AsyncClient,
         url: str,
-        request_data: Dict[str, Any],
+        request_body: bytes,
         request_timeout: httpx.Timeout,
     ) -> Dict[str, Any]:
         """
         发送非流式请求并解析响应。
         """
-        # 多图融合的 base64 请求体可达数十 MB，其 JSON 序列化与编码移至工作线程以避免阻塞事件循环；
-        # 直接产出 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
-        json_bytes = await asyncio.to_thread(self._serialize_request, request_data)
-        response = await client.post(url, content=json_bytes, timeout=request_timeout)
+        # request_body 已由调用方在工作线程序列化为 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
+        response = await client.post(url, content=request_body, timeout=request_timeout)
 
         self.logger.debug("收到响应: 状态码={}", response.status_code)
         self._raise_for_response_status(response)
@@ -996,6 +991,8 @@ class SeedreamClient:
         url = self._build_generation_url()
         safe_request_data = self._sanitize_request_for_logging(request_data)
         request_timeout = self._build_http_timeout()
+        # request_data 在重试期间不变，循环外序列化一次，避免每次重试重复 JSON 编码阻塞
+        request_body = await asyncio.to_thread(self._serialize_request, request_data)
         # max_retries 表示首次失败后的重试次数，故总尝试次数为其加一，与下载重试语义一致
         total_attempts = max(1, self.config.max_retries + 1)
 
@@ -1015,14 +1012,14 @@ class SeedreamClient:
                     return await self._send_stream_request(
                         client=client,
                         url=url,
-                        request_data=request_data,
+                        request_body=request_body,
                         request_timeout=request_timeout,
                     )
 
                 return await self._send_standard_request(
                     client=client,
                     url=url,
-                    request_data=request_data,
+                    request_body=request_body,
                     request_timeout=request_timeout,
                 )
             except SeedreamAPIError as exc:
@@ -1080,11 +1077,15 @@ class SeedreamClient:
                 raise
 
             if attempt < total_attempts - 1:
-                # 优先采用服务器 Retry-After 建议，否则指数退避；均叠加抖动避免并发限流时同步重试。
-                # 注意：超时与网络错误重试可能触发服务端重复处理与计费，因生成 API 非幂等且当前未发送幂等键
-                base = pending_retry_after if pending_retry_after is not None else float(2**attempt)
-                # 单次退避上限 60 秒，避免 Retry-After 接近 300s 时单次 sleep 过久
-                await asyncio.sleep(min(base + random.uniform(0, 1), _MAX_BACKOFF_SECONDS))
+                # 超时与网络错误重试可能触发服务端重复处理与计费，因生成 API 非幂等且当前未发送幂等键。
+                # 服务端 Retry-After 已由 parse_retry_after 限制在 [1, 300] 秒，信任该值叠加抖动后等待；
+                # 指数退避路径单独施加 60 秒上限，避免 2^n 过快增长导致单次 sleep 过久。
+                if pending_retry_after is not None:
+                    await asyncio.sleep(pending_retry_after + random.uniform(0, 1))
+                else:
+                    await asyncio.sleep(
+                        min(float(2**attempt) + random.uniform(0, 1), _MAX_BACKOFF_SECONDS)
+                    )
 
         # 循环不会正常结束：每次迭代成功则 return，末次迭代失败时各 except 分支均 raise；
         # 此 raise 仅满足类型检查器对全路径返回的要求，运行时不可达
@@ -1174,12 +1175,25 @@ class SeedreamClient:
 
         try:
             prepared = await prepare_image_input(image)
-            self._prepare_cache[cache_key] = prepared
-            if len(self._prepare_cache) > self._prepare_cache_max:
-                self._prepare_cache.popitem(last=False)
+            self._cache_prepared_result(cache_key, prepared)
             return prepared
         finally:
             self._prepare_inflight.pop(cache_key, None)
+
+    def _cache_prepared_result(self, cache_key: "_PrepareCacheKey", prepared: str) -> None:
+        """将预处理结果写入 LRU 缓存，按条目数与累计字节双重上限淘汰。
+
+        单条结果加总后超过字节上限时跳过缓存，避免大图累积撑爆内存；条目超限时淘汰最久未用
+        条目并同步扣减字节计数，保持计数与缓存内容一致。
+        """
+        size = len(prepared)
+        if self._prepare_cache_bytes + size > self._prepare_cache_max_bytes:
+            return
+        self._prepare_cache[cache_key] = prepared
+        self._prepare_cache_bytes += size
+        while len(self._prepare_cache) > self._prepare_cache_max:
+            _, evicted = self._prepare_cache.popitem(last=False)
+            self._prepare_cache_bytes -= len(evicted)
 
     async def _prepare_images_in_parallel(self, images: Sequence[str]) -> List[str]:
         """

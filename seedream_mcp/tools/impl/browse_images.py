@@ -34,10 +34,14 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _format_file_info(display_path: str, stat_path: Path, show_details: bool) -> str:
-    """格式化文件信息为字符串。
+def _format_file_info(
+    display_path: str, stat_path: Path, show_details: bool
+) -> tuple[str, Dict[str, Any]]:
+    """格式化文件信息，返回展示文本与结构化详情字段。
 
-    根据是否显示详细信息，返回文件路径或包含大小、修改时间的完整信息。
+    show_details 为真时读取文件大小与修改时间，文本格式为 "路径 | 大小 | 修改时间"，
+    结构化详情含 size_mb 与 modified 两键；stat 失败时文本追加 "文件信息不可用"，两键置 None。
+    show_details 为假时仅返回路径文本与空详情字典。
 
     Args:
         display_path: 展示给用户的文件路径字符串。
@@ -45,25 +49,25 @@ def _format_file_info(display_path: str, stat_path: Path, show_details: bool) ->
         show_details: 是否显示文件详细信息（大小、修改时间）。
 
     Returns:
-        格式化后的文件信息字符串，详细模式下格式为 "路径 | 大小 | 修改时间"。
+        展示文本与结构化详情字段字典组成的二元组。
     """
-    parts = [display_path]
-    if show_details:
-        try:
-            stat_result = stat_path.stat()
-        except OSError:
-            parts.append("文件信息不可用")
-            return " | ".join(parts)
-        size_mb = stat_result.st_size / (1024 * 1024)
-        # astimezone 将 naive 本地时间标注为本地时区，输出携带 UTC 偏移以消除时区歧义。
-        mtime = (
-            datetime.datetime.fromtimestamp(stat_result.st_mtime)
-            .astimezone()
-            .isoformat(sep=" ", timespec="seconds")
-        )
-        parts.append(f"{size_mb:.2f} MB")
-        parts.append(f"修改: {mtime}")
-    return " | ".join(parts)
+    if not show_details:
+        return display_path, {}
+    try:
+        stat_result = stat_path.stat()
+    except OSError:
+        return f"{display_path} | 文件信息不可用", {"size_mb": None, "modified": None}
+    size_mb = stat_result.st_size / (1024 * 1024)
+    # astimezone 将 naive 本地时间标注为本地时区，输出携带 UTC 偏移以消除时区歧义。
+    mtime = (
+        datetime.datetime.fromtimestamp(stat_result.st_mtime)
+        .astimezone()
+        .isoformat(sep=" ", timespec="seconds")
+    )
+    return (
+        f"{display_path} | {size_mb:.2f} MB | 修改: {mtime}",
+        {"size_mb": size_mb, "modified": mtime},
+    )
 
 
 def _build_browse_structured_result(
@@ -224,7 +228,7 @@ def _build_display_entries(
         images: 当前页图片原始路径列表。
         image_resolved_map: 原始路径到 resolved 路径的缓存，由扫描阶段填充。
         resolved_roots: 已 resolve 的工作区根列表，用于定位展示基准根。
-        show_details: 是否在文本中附加文件大小与修改时间。
+        show_details: 是否在文本与结构化条目中附加文件大小与修改时间。
 
     Returns:
         (展示文本行列表, 结构化图片条目列表)，文本行不含 "图片列表:" 标题头。
@@ -241,8 +245,11 @@ def _build_display_entries(
             logger.warning("图片路径未命中任何工作区根目录，已忽略: {}", img)
             continue
         display_path = get_relative_path(img_resolved, str(display_base))
-        lines.append(f"{idx}. {_format_file_info(display_path, img_resolved, show_details)}")
-        structured_images.append({"index": idx, "path": display_path})
+        detail_text, details = _format_file_info(display_path, img_resolved, show_details)
+        lines.append(f"{idx}. {detail_text}")
+        entry: dict[str, Any] = {"index": idx, "path": display_path}
+        entry.update(details)
+        structured_images.append(entry)
     return lines, structured_images
 
 

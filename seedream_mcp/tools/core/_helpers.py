@@ -12,11 +12,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...config import SeedreamConfig
 from ...utils.errors import (
-    SeedreamAPIError,
-    SeedreamConfigError,
-    SeedreamNetworkError,
-    SeedreamTimeoutError,
     SeedreamValidationError,
+    _resolve_error_profile,
     format_error_for_user,
 )
 from ...utils.logging import get_logger
@@ -61,25 +58,10 @@ def _normalize_error_message(raw_error: Any) -> Optional[str]:
 def _classify_generation_error_type(exc: Exception) -> str:
     """将异常映射为稳定的结构化错误码，避免向 structuredContent 暴露内部异常类名。
 
-    按自定义异常类型与 HTTP 状态码分支，输出固定的公开错误码字符串，便于客户端按码处理
-    且不泄露实现细节；未识别异常统一归为 generation_failed。单发与并发路径共用此函数，
-    使两条路径的错误码契约一致。
+    错误码统一来自 errors 模块的归约档案，单发与并发路径共用此函数使两条路径的错误码
+    契约一致，且不泄露实现细节。
     """
-    if isinstance(exc, SeedreamConfigError):
-        return "config_error"
-    if isinstance(exc, SeedreamValidationError):
-        return "validation_error"
-    if isinstance(exc, SeedreamTimeoutError):
-        return "timeout_error"
-    if isinstance(exc, SeedreamNetworkError):
-        return "network_error"
-    if isinstance(exc, SeedreamAPIError):
-        if exc.status_code == 401:
-            return "auth_error"
-        if exc.status_code == 429:
-            return "rate_limited"
-        return "api_error"
-    return "generation_failed"
+    return _resolve_error_profile(exc).error_code
 
 
 def _extract_parallel_request_error(

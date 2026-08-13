@@ -96,6 +96,9 @@ class SeedreamConfig:
     # 参考图预处理结果 LRU 缓存的上限条目数
     prepare_cache_max: int = 32
 
+    # 参考图预处理结果 LRU 缓存的累计字节上限，防止大图缓存累积撑爆内存
+    prepare_cache_max_bytes: int = 256 * 1024 * 1024
+
     # 工作区与传输配置
     workspace_root: Optional[str] = None
     http_auth_token: Optional[str] = None
@@ -170,6 +173,8 @@ class SeedreamConfig:
 
         if self.prepare_cache_max < 1:
             raise SeedreamConfigError("prepare_cache_max不能小于1")
+        if self.prepare_cache_max_bytes < 1:
+            raise SeedreamConfigError("prepare_cache_max_bytes不能小于1")
 
         if self.auto_save_base_dir:
             try:
@@ -244,6 +249,7 @@ _FIELD_ENV_MAP: dict[str, str] = {
     "stream_chunk_size": "SEEDREAM_STREAM_CHUNK_SIZE",
     "image_prepare_concurrency": "SEEDREAM_IMAGE_PREPARE_CONCURRENCY",
     "prepare_cache_max": "SEEDREAM_PREPARE_CACHE_MAX",
+    "prepare_cache_max_bytes": "SEEDREAM_PREPARE_CACHE_MAX_BYTES",
     "workspace_root": "SEEDREAM_WORKSPACE_ROOT",
     "http_auth_token": "SEEDREAM_HTTP_AUTH_TOKEN",
 }
@@ -528,6 +534,12 @@ def _build_config_from_sources_unlocked(
         ),
         prepare_cache_max=_pick_int(
             override_values, "prepare_cache_max", "SEEDREAM_PREPARE_CACHE_MAX", env_values
+        ),
+        prepare_cache_max_bytes=_pick_int(
+            override_values,
+            "prepare_cache_max_bytes",
+            "SEEDREAM_PREPARE_CACHE_MAX_BYTES",
+            env_values,
         ),
         workspace_root=_pick_optional_str(
             override_values, "workspace_root", "SEEDREAM_WORKSPACE_ROOT", env_values

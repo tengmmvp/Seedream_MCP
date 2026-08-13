@@ -104,7 +104,7 @@ def test_config_from_context_falls_back_when_state_not_dict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fallback = SeedreamConfig(api_key="fallback_key")
-    monkeypatch.setattr(server, "_get_active_config", lambda: fallback)
+    monkeypatch.setattr(server, "get_active_config", lambda: fallback)
 
     class _FakeRequestContext:
         lifespan_context = "not a dict"
