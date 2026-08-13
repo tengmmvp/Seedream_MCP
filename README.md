@@ -331,6 +331,27 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 </details>
 
+## 📦 可用资源
+
+除工具外，服务端还暴露以下 MCP 资源供客户端读取运行时信息：
+
+| 资源 URI | 说明 |
+| --- | --- |
+| `seedream://workspace/roots` | 客户端授权的 MCP 工作区 Roots；未授权时为空，避免暴露服务器本地目录 |
+| `seedream://server/info` | 服务器名称、版本与当前生效配置摘要（模型、默认尺寸、自动保存开关等） |
+| `seedream://models/info` | 各模型别名与能力声明：支持的尺寸档位、像素范围、像素倍数、参考图上限、输出格式/工具/流式等能力，供客户端按需选择模型 |
+
+## 🎭 风格预设
+
+服务端内置以下 MCP 提示词模板，一键生成指定风格的文生图 prompt，可通过 `subject` 参数指定画面主题：
+
+| Prompt 名称 | 风格 | 默认主题 |
+| --- | --- | --- |
+| `seedream_style_anime` | 日系动漫风格，赛璐珞上色，鲜艳饱和色彩 | 一个女孩站在樱花树下 |
+| `seedream_style_realistic` | 写实摄影风格，高清细节，自然光影 | 城市夜景 |
+| `seedream_style_watercolor` | 水彩画风格，柔和晕染，通透色彩 | 山间小屋 |
+| `seedream_style_oil_painting` | 油画风格，厚重笔触，丰富层次 | 海边夕阳 |
+
 ## ❓ 常见问题
 
 **Q: uvx 命令不存在？**

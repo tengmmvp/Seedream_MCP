@@ -331,6 +331,27 @@ Browse image files in the workspace and get file paths for image generation
 
 </details>
 
+## 📦 Available Resources
+
+Beyond tools, the server exposes the following MCP resources for clients to read runtime information:
+
+| Resource URI | Description |
+| --- | --- |
+| `seedream://workspace/roots` | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories |
+| `seedream://server/info` | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle, etc.) |
+| `seedream://models/info` | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
+
+## 🎭 Style Presets
+
+The server provides the following MCP prompt templates to generate text-to-image prompts for a given style in one click; use the `subject` parameter to set the scene subject:
+
+| Prompt name | Style | Default subject |
+| --- | --- | --- |
+| `seedream_style_anime` | Japanese anime style, cel shading, vivid saturated colors | A girl standing under cherry blossoms |
+| `seedream_style_realistic` | Realistic photography, high-detail, natural lighting | City night view |
+| `seedream_style_watercolor` | Watercolor style, soft blending, translucent colors | Mountain cabin |
+| `seedream_style_oil_painting` | Oil painting style, thick brushstrokes, rich layers | Seaside sunset |
+
 ## ❓ FAQ
 
 **Q: `uvx` command not found?**

@@ -18,16 +18,13 @@ from urllib.request import url2pathname
 
 # 本地导入
 from .errors import SeedreamConfigError, SeedreamValidationError
+from .formats import SUPPORTED_IMAGE_EXTENSIONS
 from .logging import get_logger
-from .validation import (
-    SUPPORTED_IMAGE_EXTENSIONS as VALIDATION_SUPPORTED_IMAGE_EXTENSIONS,
-    validate_image_url,
-)
+from .validation import validate_image_url
 
 logger = get_logger(__name__)
 
-# 受支持的图片格式集合与工作区 Roots 上下文变量。
-SUPPORTED_IMAGE_EXTENSIONS = set(VALIDATION_SUPPORTED_IMAGE_EXTENSIONS)
+# 图片格式集合直接取 formats 单一来源；下方为工作区 Roots 上下文变量
 _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     "seedream_workspace_roots",
     default=None,

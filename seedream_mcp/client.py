@@ -32,10 +32,10 @@ from .utils.errors import (
     parse_retry_after,
 )
 from .utils.logging import get_logger, log_function_call
+from .utils.model_capabilities import get_model_capabilities
 from .utils.path_utils import is_path_within_any_base
 from .utils.validation import (
     get_max_reference_images,
-    is_seedream_50_pro_model,
     resolve_sequential_max_images,
     validate_generation_tools,
     validate_max_images,
@@ -472,11 +472,11 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
         """
-        # 5.0 Pro 不支持 sequential_image_generation 组图生成
-        if is_seedream_50_pro_model(self.config.model_id):
+        # 组图能力由 ModelCapabilities 数据驱动判定，5.0 Pro 不支持
+        model_caps = get_model_capabilities(self.config.model_id)
+        if not model_caps.supports_sequential_generation:
             raise SeedreamValidationError(
-                "doubao-seedream-5.0-pro 不支持组图生成，"
-                "请将模型切换为 doubao-seedream-5.0/5.0-lite/4.5/4.0",
+                f"{model_caps.display_name} 不支持组图生成，请切换为支持组图的模型",
                 field="model",
                 value=self.config.model_id,
             )
@@ -1139,8 +1139,13 @@ class SeedreamClient:
             from .utils.path_utils import get_workspace_roots
 
             _roots_key = tuple(str(r) for r in get_workspace_roots())
+        # URL/data-URI 无本地文件 I/O，直接用空签名短路，避免缓存命中也分派线程；
         # 本地文件签名含同步 stat/resolve，移至工作线程避免网络挂载工作区下阻塞事件循环
-        signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
+        signature: Tuple[float, int]
+        if image.lower().startswith(("http://", "https://", "data:image/")):
+            signature = (0.0, 0)
+        else:
+            signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
         cache_key: _PrepareCacheKey = (
             image,
             _roots_key,

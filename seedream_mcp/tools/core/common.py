@@ -15,6 +15,11 @@ from mcp.types import CallToolResult, TextContent
 from ...config import SeedreamConfig
 from ...utils.errors import format_error_for_user
 from ._helpers import (
+    PROGRESS_AUTOSAVE_DONE,
+    PROGRESS_AUTOSAVE_START,
+    PROGRESS_COMPLETE,
+    PROGRESS_RECEIVED,
+    PROGRESS_VALIDATED,
     _classify_generation_error_type,
     _safe_ctx_log,
     _safe_report_progress,
@@ -98,10 +103,12 @@ async def execute_generation_handler(
     try:
         from ...client import SeedreamClient
 
-        await _safe_report_progress(ctx, progress=0.0, message=f"{failure_prefix}请求已接收")
+        await _safe_report_progress(
+            ctx, progress=PROGRESS_RECEIVED, message=f"{failure_prefix}请求已接收"
+        )
         await _yield_for_cancellation()
         context = build_generation_context(arguments, config)
-        await _safe_report_progress(ctx, progress=10.0, message="参数校验完成")
+        await _safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
         await _safe_ctx_log(
             ctx,
             "info",
@@ -136,7 +143,9 @@ async def execute_generation_handler(
         auto_save_error: Optional[str] = None
         if context.enable_auto_save and result.get("success"):
             try:
-                await _safe_report_progress(ctx, progress=75.0, message="开始自动保存")
+                await _safe_report_progress(
+                    ctx, progress=PROGRESS_AUTOSAVE_START, message="开始自动保存"
+                )
                 await _yield_for_cancellation()
                 shared_download_manager = _try_get_shared_download_manager(ctx)
                 if context.response_format == "url":
@@ -169,7 +178,9 @@ async def execute_generation_handler(
                         "info",
                         f"已自动保存 {saved_count}/{len(auto_save_results)} 张图片到本地",
                     )
-                await _safe_report_progress(ctx, progress=95.0, message="自动保存完成")
+                await _safe_report_progress(
+                    ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成"
+                )
             except Exception as exc:
                 auto_save_error = format_error_for_user(exc)
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
@@ -197,7 +208,7 @@ async def execute_generation_handler(
             auto_save_error=auto_save_error,
             images=images,
         )
-        await _safe_report_progress(ctx, progress=100.0, message="请求处理完成")
+        await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
         await _safe_ctx_log(
             ctx,
             "info" if result.get("success") else "warning",
@@ -211,7 +222,7 @@ async def execute_generation_handler(
         )
     except Exception as exc:
         module_logger.error("{}处理失败", failure_prefix, exc_info=True)
-        await _safe_report_progress(ctx, progress=100.0, message="请求处理失败")
+        await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         await _safe_ctx_log(ctx, "error", f"{failure_prefix}失败：{format_error_for_user(exc)}")
         error_message = f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}"
         return CallToolResult(

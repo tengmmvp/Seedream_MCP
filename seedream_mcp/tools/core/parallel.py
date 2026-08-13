@@ -11,7 +11,12 @@ import asyncio
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from ...utils.errors import format_error_for_user
-from ._helpers import _safe_report_progress, _yield_for_cancellation
+from ._helpers import (
+    PROGRESS_GENERATION_DONE,
+    PROGRESS_GENERATION_START,
+    _safe_report_progress,
+    _yield_for_cancellation,
+)
 from .context import GenerationExecutionContext
 from .results import aggregate_parallel_generation_results
 
@@ -30,8 +35,8 @@ async def _execute_parallel_generation_requests(
     ],
     module_logger: Any,
     ctx: Optional["Context[Any, Any, Any]"] = None,
-    progress_start: float = 20.0,
-    progress_span: float = 50.0,
+    progress_start: float = PROGRESS_GENERATION_START,
+    progress_span: float = PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START,
 ) -> Dict[str, Any]:
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
 
@@ -138,15 +143,17 @@ async def _run_generation_requests(
     ``_execute_parallel_generation_requests`` 并行执行。进度按阶段上报。
     """
     if context.request_count == 1:
-        await _safe_report_progress(ctx, progress=20.0, message="开始调用图像生成接口")
+        await _safe_report_progress(
+            ctx, progress=PROGRESS_GENERATION_START, message="开始调用图像生成接口"
+        )
         await _yield_for_cancellation()
         result = await request_executor(client, context)
-        await _safe_report_progress(ctx, progress=70.0, message="图像生成完成")
+        await _safe_report_progress(ctx, progress=PROGRESS_GENERATION_DONE, message="图像生成完成")
         return result
 
     await _safe_report_progress(
         ctx,
-        progress=20.0,
+        progress=PROGRESS_GENERATION_START,
         message=f"开始并行请求，共 {context.request_count} 次",
     )
     result = await _execute_parallel_generation_requests(
@@ -156,5 +163,5 @@ async def _run_generation_requests(
         module_logger=module_logger,
         ctx=ctx,
     )
-    await _safe_report_progress(ctx, progress=70.0, message="并行请求执行完成")
+    await _safe_report_progress(ctx, progress=PROGRESS_GENERATION_DONE, message="并行请求执行完成")
     return result

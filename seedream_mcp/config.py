@@ -52,7 +52,7 @@ DEPRECATED_MODEL_TOKENS: set[str] = {
 _SENSITIVE_CONFIG_KEYWORDS = ("key", "token", "secret", "password", "auth", "credential")
 
 
-@dataclass
+@dataclass(frozen=True)
 class SeedreamConfig:
     """
     Seedream MCP 工具配置类
@@ -122,7 +122,7 @@ class SeedreamConfig:
 
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError("model_id不能为空")
-        self.model_id = normalize_model_selector(self.model_id)
+        object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
             raise SeedreamConfigError(
                 f"已不支持的模型: {self.model_id}（3.0/seededit-3.0 已下线），"
@@ -134,7 +134,11 @@ class SeedreamConfig:
 
         normalized_default_size = self.default_size.strip()
         try:
-            self.default_size = validate_size_for_model(normalized_default_size, self.model_id)
+            object.__setattr__(
+                self,
+                "default_size",
+                validate_size_for_model(normalized_default_size, self.model_id),
+            )
         except SeedreamValidationError as exc:
             raise SeedreamConfigError(f"default_size无效: {exc.message}") from exc
 
@@ -148,7 +152,7 @@ class SeedreamConfig:
         valid_log_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if self.log_level.upper() not in valid_log_levels:
             raise SeedreamConfigError(f"log_level必须是以下值之一: {valid_log_levels}")
-        self.log_level = self.log_level.upper()
+        object.__setattr__(self, "log_level", self.log_level.upper())
 
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError("auto_save_download_timeout必须大于0")

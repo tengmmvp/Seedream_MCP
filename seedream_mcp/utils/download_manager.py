@@ -198,6 +198,7 @@ class DownloadManager:
                     self._session = aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(total=self.timeout),
                         trust_env=False,
+                        cookie_jar=aiohttp.DummyCookieJar(),
                     )
         return self._session
 
@@ -233,8 +234,7 @@ class DownloadManager:
         if created is False:
             return
         try:
-            if temp_path.exists():
-                temp_path.unlink()
+            temp_path.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning("清理临时文件失败: {} -> {}", temp_path, exc)
 
@@ -498,7 +498,7 @@ class DownloadManager:
                     sanitize_url(url),
                 )
 
-                self._cleanup_temp_file(temp_path)
+                await asyncio.to_thread(self._cleanup_temp_file, temp_path)
                 session = await self._ensure_session()
                 current_url = url
                 redirect_count = 0
@@ -569,8 +569,14 @@ class DownloadManager:
                 logger.warning("下载超时 (尝试 {}): {}", attempt + 1, sanitize_url(url))
 
             except aiohttp.ClientError as e:
-                last_error = DownloadError(f"网络错误: {e}")
-                logger.warning("网络错误 (尝试 {}): {}", attempt + 1, e, exc_info=True)
+                last_error = DownloadError(f"网络错误: {sanitize_url(url)} [{type(e).__name__}]")
+                logger.warning(
+                    "网络错误 (尝试 {}): {} [{}]",
+                    attempt + 1,
+                    sanitize_url(url),
+                    type(e).__name__,
+                    exc_info=True,
+                )
 
             except OSError as e:
                 last_error = DownloadError(f"文件系统错误: {e}")
@@ -588,7 +594,7 @@ class DownloadManager:
                 )
                 raise
             finally:
-                self._cleanup_temp_file(temp_path, created=temp_created)
+                await asyncio.to_thread(self._cleanup_temp_file, temp_path, created=temp_created)
 
             # 非末次尝试则按线性递增延迟加随机抖动退避后重试，抖动避免并发任务重试同步
             if attempt < self.max_retries:

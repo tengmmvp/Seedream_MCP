@@ -22,10 +22,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-# 第三方库导入
-from PIL import Image
-from pillow_heif import register_heif_opener
-
 # 本地模块导入
 from .errors import SeedreamConfigError, SeedreamValidationError
 from .formats import SUPPORTED_IMAGE_EXTENSIONS, _format_file_size_mb, parse_data_uri
@@ -55,10 +51,17 @@ _heif_opener_registered = False
 
 
 def _ensure_heif_opener_registered() -> None:
-    """注册 HEIC/HEIF 解码器，仅首次调用时执行。"""
+    """注册 HEIC/HEIF 解码器并配置 PIL 解压炸弹防护，仅首次调用时执行。
+
+    PIL 与 pillow_heif 延迟导入，避免模块导入期加载图像库产生全局副作用。
+    """
     global _heif_opener_registered
     if _heif_opener_registered:
         return
+    from PIL import Image
+    from pillow_heif import register_heif_opener
+
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     register_heif_opener()
     _heif_opener_registered = True
 
@@ -75,8 +78,6 @@ MIN_IMAGE_EDGE = 15
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 MAX_IMAGE_PIXELS = 6000 * 6000
-# 与项目输入像素上限对齐，作为 PIL decompression bomb 的纵深防护
-Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 # 尺寸预设档位与输出格式白名单
 VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
 VALID_OUTPUT_FORMATS = {"jpeg", "png"}
@@ -255,6 +256,8 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
             )
 
         if not skip_dimensions:
+            from PIL import Image
+
             # 经 open_no_follow_read 读取字节后再交 PIL 解码，拒绝最终分量符号链接，
             # 与 image_input._prepare_local_image 保持一致的安全语义
             try:
@@ -357,6 +360,8 @@ def _validate_data_uri(data_uri: str) -> str:
             )
 
         # 验证图像像素维度约束
+        from PIL import Image
+
         try:
             _ensure_heif_opener_registered()
             with Image.open(io.BytesIO(raw)) as img:

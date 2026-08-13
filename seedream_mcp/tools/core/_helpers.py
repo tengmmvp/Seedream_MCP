@@ -25,6 +25,17 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# 进度里程碑常量：common.py 与 parallel.py 共用，集中定义避免跨模块隐式契约漂移。
+# 阶梯：接收 0 → 校验完成 10 → 生成开始 20 → 生成完成 70 → 自动保存开始 75 → 保存完成 95 → 结束 100
+PROGRESS_RECEIVED = 0.0
+PROGRESS_VALIDATED = 10.0
+PROGRESS_GENERATION_START = 20.0
+PROGRESS_GENERATION_DONE = 70.0
+PROGRESS_AUTOSAVE_START = 75.0
+PROGRESS_AUTOSAVE_DONE = 95.0
+PROGRESS_COMPLETE = 100.0
+
+
 def _add_usage_value(usage: Dict[str, Any], key: str, value: Any) -> None:
     """累加用量统计值，跳过布尔与非数值类型以避免污染汇总结果。"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):

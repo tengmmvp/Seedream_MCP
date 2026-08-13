@@ -49,6 +49,7 @@ class ModelCapabilities:
     - min_size_pixels/max_size_pixels: 像素总量的上下限，None 表示该家族不约束像素区间。
     - size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束；5.0 Pro 要求宽高为 16 的倍数。
     - supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
+    - supports_sequential_generation: 是否支持组图生成，5.0 Pro 不支持。
     """
 
     family: str
@@ -62,6 +63,7 @@ class ModelCapabilities:
     max_size_pixels: Optional[int]
     size_pixel_multiple: Optional[int]
     supports_fast_optimize_prompt: bool = True
+    supports_sequential_generation: bool = True
 
 
 # 家族解析 token 表：顺序敏感，5.0 Pro 须先于 5.0 Lite。
@@ -97,6 +99,7 @@ MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         max_size_pixels=SEEDREAM_50PRO_MAX_SIZE_PIXELS,
         size_pixel_multiple=SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE,
         supports_fast_optimize_prompt=False,
+        supports_sequential_generation=False,
     ),
     MODEL_FAMILY_50_LITE: ModelCapabilities(
         family=MODEL_FAMILY_50_LITE,

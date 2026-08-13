@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -262,21 +263,26 @@ class AutoSaveManager:
         strip/b64decode/sha256 均为 CPU 密集或全量遍历操作，集中于此供 save_base64_image
         经 asyncio.to_thread 调用，避免阻塞事件循环。
         """
-        normalized_payload = "".join((payload or "").split())
-        if not normalized_payload:
+        raw_payload = payload or ""
+        if not raw_payload or raw_payload.isspace():
             raise AutoSaveError("空的Base64数据")
 
-        estimated_size = (len(normalized_payload) * 3) // 4
+        estimated_size = (len(raw_payload) * 3) // 4
         if estimated_size > self.download_manager.max_file_size:
             raise AutoSaveError(
                 f"Base64数据过大: 约 {_format_file_size_mb(estimated_size)}，"
                 f"最大支持 {_format_file_size_mb(self.download_manager.max_file_size)}"
             )
 
+        # 火山引擎 base64 通常不含空白，直传 validate=True 校验避免对大串做全量复制；
+        # 仅当含空白致校验失败时才清理后重试解码
         try:
-            content_bytes = base64.b64decode(normalized_payload, validate=True)
-        except Exception as e:
-            raise AutoSaveError(f"Base64解码失败: {e}") from e
+            content_bytes = base64.b64decode(raw_payload, validate=True)
+        except Exception:
+            try:
+                content_bytes = base64.b64decode(re.sub(r"\s+", "", raw_payload), validate=True)
+            except Exception as e:
+                raise AutoSaveError(f"Base64解码失败: {e}") from e
 
         if len(content_bytes) > self.download_manager.max_file_size:
             raise AutoSaveError(

@@ -1,22 +1,14 @@
 {
   "mcpServers": {
     "seedream": {
-      "command": "python",
-      "args": [
-        "-m",
-        "seedream_mcp.server",
-        "--api-key",
-        "your_ark_api_key_here",
-        "--model",
-        "doubao-seedream-4.5",
-        "--default-size",
-        "2K",
-        "--base-url",
-        "https://ark.cn-beijing.volces.com/api/v3",
-        "--log-level",
-        "INFO"
-      ],
+      "command": "uvx",
+      "args": ["seedream-image-mcp"],
       "env": {
+        "ARK_API_KEY": "your_ark_api_key_here",
+        "SEEDREAM_MODEL_ID": "doubao-seedream-4.5",
+        "SEEDREAM_DEFAULT_SIZE": "2K",
+        "ARK_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
+        "LOG_LEVEL": "INFO",
         "LOG_FILE": "logs/seedream_mcp.log",
         "SEEDREAM_TIMEOUT": "60",
         "SEEDREAM_API_TIMEOUT": "600",

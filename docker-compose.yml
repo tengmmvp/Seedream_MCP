@@ -34,6 +34,7 @@ services:
       - SEEDREAM_MAX_RETRIES=${SEEDREAM_MAX_RETRIES:-3}
       # 日志
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=${LOG_FILE:-logs/seedream_mcp.log}
       # 自动保存
       - SEEDREAM_AUTO_SAVE_ENABLED=${SEEDREAM_AUTO_SAVE_ENABLED:-true}
       - SEEDREAM_AUTO_SAVE_BASE_DIR=${SEEDREAM_AUTO_SAVE_BASE_DIR:-/app/seedream_images}
