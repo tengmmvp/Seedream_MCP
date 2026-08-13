@@ -1,6 +1,6 @@
 """image_input 预处理测试。
 
-覆盖读取路径符号链接拒绝（O_NOFOLLOW / Windows is_symlink 兜底）与本地图片
+覆盖指向工作区外符号链接的越界拒绝（resolve 跟随后路径越界被拒）与本地图片
 单次读取后的内存维度校验路径。
 """
 
@@ -16,18 +16,30 @@ from seedream_mcp.utils.errors import SeedreamAPIError, SeedreamValidationError
 from seedream_mcp.utils.image_input import prepare_image_input
 
 
-async def test_prepare_image_input_rejects_symlink(workspace_root: Path, tmp_path: Path) -> None:
-    """读取路径符号链接须拒绝，防止 O_NOFOLLOW / TOCTOU 绕过。"""
-    target = tmp_path / "real.png"
+async def test_prepare_image_input_rejects_symlink_escape(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """指向工作区外的符号链接须被越界校验拒绝，防止经符号链接逃逸工作区边界。
+
+    normalize_path 的 resolve 会跟随符号链接，故链接目标须位于工作区之外才能触发越界
+    拒绝；若目标位于工作区内，resolve 后得到常规文件路径，O_NOFOLLOW 打开该常规文件
+    不抛错，测试将沦为空芯。
+    """
+    # 目标文件位于工作区（tmp_path）之外；resolve 跟随符号链接后路径越界被拒
+    target = tmp_path.parent / "symlink_escape_target.png"
     Image.new("RGB", (32, 32), color="white").save(target)
     link = tmp_path / "link.png"
     try:
         os.symlink(target, link)
     except OSError:
+        target.unlink(missing_ok=True)
         pytest.skip("当前环境不支持创建符号链接")
 
-    with pytest.raises(SeedreamAPIError):
-        await prepare_image_input(str(link))
+    try:
+        with pytest.raises(SeedreamAPIError):
+            await prepare_image_input(str(link))
+    finally:
+        target.unlink(missing_ok=True)
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:

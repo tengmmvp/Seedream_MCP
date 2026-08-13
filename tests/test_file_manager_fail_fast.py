@@ -53,3 +53,66 @@ def test_save_bytes_rejects_symlink(tmp_path: Path) -> None:
     manager = FileManager(base_dir=tmp_path)
     with pytest.raises(FileManagerError):
         manager.save_bytes(link, b"data")
+
+
+def test_save_bytes_atomic_writes_and_leaves_no_part(tmp_path: Path) -> None:
+    """save_bytes 经 .part 临时文件原子 replace 落盘，成功后不留 .part 残留。"""
+    manager = FileManager(base_dir=tmp_path)
+    path = tmp_path / "out.png"
+
+    result = manager.save_bytes(path, b"payload")
+
+    assert path.read_bytes() == b"payload"
+    assert not (tmp_path / "out.png.part").exists()
+    assert result["file_size"] == len(b"payload")
+    assert result["file_path"] == str(path)
+
+
+def test_save_bytes_overwrite_replaces_existing_file(tmp_path: Path) -> None:
+    """overwrite=True 时原子 replace 覆盖已有文件。"""
+    manager = FileManager(base_dir=tmp_path)
+    path = tmp_path / "out.png"
+    path.write_bytes(b"old-content")
+
+    manager.save_bytes(path, b"new", overwrite=True)
+
+    assert path.read_bytes() == b"new"
+
+
+def test_save_bytes_no_overwrite_renames_on_conflict(tmp_path: Path) -> None:
+    """overwrite=False 且文件已存在时，追加内容短哈希生成不冲突的新文件名。"""
+    manager = FileManager(base_dir=tmp_path)
+    path = tmp_path / "out.png"
+    path.write_bytes(b"old-content")
+
+    manager.save_bytes(path, b"new-content", overwrite=False)
+
+    # 原文件保留旧内容
+    assert path.read_bytes() == b"old-content"
+    # 新文件以内容哈希后缀生成
+    png_files = [f for f in tmp_path.iterdir() if f.suffix == ".png"]
+    assert len(png_files) == 2
+
+
+def test_save_bytes_cleans_part_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写入失败时 .part 临时文件被 finally 清理，不留残留。"""
+    from seedream_mcp.utils import file_manager as fm_module
+
+    manager = FileManager(base_dir=tmp_path)
+    path = tmp_path / "out.png"
+    # 预创建 .part 文件模拟写入中途产物
+    part_path = tmp_path / "out.png.part"
+    part_path.write_bytes(b"partial")
+
+    def _raise_on_write(_path: Path) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fm_module, "open_no_follow_write", _raise_on_write)
+
+    with pytest.raises(FileManagerError, match="写入文件失败"):
+        manager.save_bytes(path, b"data")
+
+    # .part 文件应被 finally 清理
+    assert not part_path.exists()

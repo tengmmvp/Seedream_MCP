@@ -432,7 +432,7 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
         size="2K",
     )
 
-    assert max_active_count > 1
+    assert 1 < max_active_count <= client._image_prepare_concurrency
     assert captured_request["image"] == [
         "prepared:image-1",
         "prepared:image-2",
@@ -509,7 +509,7 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
         size="2K",
     )
 
-    assert max_active_count > 1
+    assert 1 < max_active_count <= client._image_prepare_concurrency
     assert captured_request["image"] == [
         "prepared:image-1",
         "prepared:image-2",

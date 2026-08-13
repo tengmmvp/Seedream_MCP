@@ -49,6 +49,9 @@ async def _send_asgi_json(
     headers: list[tuple[bytes, bytes]] = [
         (b"content-type", b"application/json"),
         (b"content-length", str(len(body)).encode("ascii")),
+        # 鉴权失败、请求超限与健康探针响应禁止缓存，避免中间代理或浏览器缓存
+        # 敏感状态码响应后误导后续请求。
+        (b"cache-control", b"no-store"),
     ]
     headers.extend(extra_headers)
     await send(

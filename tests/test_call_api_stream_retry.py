@@ -180,3 +180,98 @@ async def test_stream_429_uses_retry_after_for_backoff(
     assert result["success"] is True
     # retry_after 路径：单次退避等于服务端 Retry-After 值；指数路径 attempt 0 应为 2**0=1.0
     assert sleep_durations == [2.0]
+
+
+async def test_stream_4xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
+    """流式分支 4xx 客户端错误（非 429）立即抛出，不重试。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    calls = 0
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> Dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            raise SeedreamAPIError("bad request", status_code=400)
+
+        monkeypatch.setattr(client, "_send_stream_request", fake_send)
+        with pytest.raises(SeedreamAPIError):
+            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+    assert calls == 1
+
+
+async def test_stream_unexpected_error_not_retried(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """流式分支非可重试的意外错误立即抛出，不浪费退避等待。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    calls = 0
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> Dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            raise ValueError("unexpected bug")
+
+        monkeypatch.setattr(client, "_send_stream_request", fake_send)
+        with pytest.raises(ValueError):
+            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+    assert calls == 1
+
+
+async def test_stream_429_retry_after_above_backoff_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """流式分支 retry_after 超过指数退避上限时仍信任服务端值，不被 60 秒上限截断。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    calls = 0
+    sleep_durations: List[float] = []
+
+    async def _capture_sleep(*args: object, **kwargs: object) -> None:
+        del kwargs
+        if args:
+            sleep_durations.append(float(args[0]))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "sleep", _capture_sleep)
+    monkeypatch.setattr(random, "uniform", lambda *_: 0.0)
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> Dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            if calls < 2:
+                raise SeedreamAPIError("rate limited", status_code=429, retry_after=120.0)
+            return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+        monkeypatch.setattr(client, "_send_stream_request", fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+    assert calls == 2
+    assert result["success"] is True
+    # retry_after=120 超过 _MAX_BACKOFF_SECONDS=60，应信任服务端值 120 而非被截断为 60
+    assert sleep_durations == [120.0]

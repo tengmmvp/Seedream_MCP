@@ -241,3 +241,36 @@ async def test_parse_sse_response_propagates_tools_from_completed_event() -> Non
         log=_FakeLog(),
     )
     assert result["tools"] == [{"type": "web_search"}]
+
+
+async def test_parse_sse_response_counts_truncated_events() -> None:
+    """超限丢弃的 SSE 事件以 truncated_events 计数区分图片失败与事件丢弃。
+
+    正常流无丢弃时 truncated_events 为 0；超限丢弃时计数大于 0 且 status 标记 partial。
+    """
+    # 正常流：无事件丢弃
+    normal_chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    normal_result = await parse_sse_response(
+        _FakeSSEResponse(normal_chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        log=_FakeLog(),
+    )
+    assert normal_result["truncated_events"] == 0
+
+    # 超限流：单个不完整事件超过缓冲区上限被丢弃
+    complete = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+    oversized_tail = b"y" * 2000  # 不完整尾部，超过 buffer_max_size
+    truncated_result = await parse_sse_response(
+        _FakeSSEResponse([complete + oversized_tail]),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=512,
+        log=_FakeLog(),
+    )
+    assert truncated_result["truncated_events"] >= 1
+    assert truncated_result["status"] == "partial"

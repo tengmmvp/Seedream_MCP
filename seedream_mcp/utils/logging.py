@@ -77,7 +77,7 @@ def setup_logging(
         if log_file is None:
             # 使用默认日志文件路径
             log_dir = Path("logs")
-            log_dir.mkdir(exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / "seedream_mcp.log"
         else:
             log_path = Path(log_file)

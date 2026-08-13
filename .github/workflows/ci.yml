@@ -13,11 +13,14 @@ permissions:
 
 jobs:
   lint-and-test:
-    name: 🧪 Lint & Test (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: 🧪 Lint & Test (py${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Windows 矩阵覆盖 O_NOFOLLOW 兜底、NTFS junction 等 Windows 专属安全代码路径；
+        # 符号链接相关用例在 Windows 上自动 skip，无碍 CI 通过
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:

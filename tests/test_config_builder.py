@@ -376,3 +376,32 @@ def test_seedream_config_accepts_zero_cleanup_days() -> None:
 
     config = SeedreamConfig(api_key="k", auto_save_cleanup_days=0)
     assert config.auto_save_cleanup_days == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"api_key": "your_api_key_here"}, "占位符"),
+        ({"base_url": "ftp://bad.example.com"}, "base_url"),
+        ({"base_url": ""}, "base_url"),
+        ({"model_id": ""}, "model_id"),
+        ({"model_id": "   "}, "model_id"),
+        ({"timeout": 0}, "timeout"),
+        ({"timeout": -1}, "timeout"),
+        ({"api_timeout": 0}, "api_timeout"),
+        ({"api_timeout": -10}, "api_timeout"),
+        ({"max_retries": 0}, "max_retries"),
+        ({"max_retries": -1}, "max_retries"),
+        ({"log_level": "VERBOSE"}, "log_level"),
+        ({"auto_save_max_retries": -1}, "auto_save_max_retries"),
+    ],
+)
+def test_seedream_config_rejects_invalid_validate_branches(kwargs: dict, match: str) -> None:
+    """validate() 各拒绝分支覆蓋：占位符密钥、非法协议 base_url、空 model_id、
+    非正 timeout/api_timeout、max_retries<1、非法 log_level、负 auto_save_max_retries。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    # api_key 未在 kwargs 中时补充合法值，已在 kwargs 中时（占位符用例）不覆盖
+    full_kwargs = {"api_key": "k", **kwargs} if "api_key" not in kwargs else kwargs
+    with pytest.raises(SeedreamConfigError, match=match):
+        SeedreamConfig(**full_kwargs)

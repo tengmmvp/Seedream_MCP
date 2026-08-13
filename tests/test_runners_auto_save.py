@@ -15,8 +15,18 @@ from typing import Any
 
 import pytest
 
-from seedream_mcp.tools.core.schemas import TextToImageInput
-from seedream_mcp.tools.runners import run_text_to_image
+from seedream_mcp.tools.core.schemas import (
+    ImageToImageInput,
+    MultiImageFusionInput,
+    SequentialGenerationInput,
+    TextToImageInput,
+)
+from seedream_mcp.tools.runners import (
+    run_image_to_image,
+    run_multi_image_fusion,
+    run_sequential_generation,
+    run_text_to_image,
+)
 
 GENERATED_URL = "https://example.com/generated.png"
 
@@ -73,6 +83,17 @@ def _patch_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mgr_cls, "save_multiple_images", failing_save_multiple)
 
 
+def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> None:
+    """monkeypatch SeedreamClient 的指定生成方法返回标准成功结果。"""
+    client_cls = importlib.import_module("seedream_mcp.client").SeedreamClient
+
+    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self, kwargs
+        return _client_result()
+
+    monkeypatch.setattr(client_cls, method_name, fake_method)
+
+
 @pytest.mark.asyncio
 async def test_run_text_to_image_includes_auto_save_field(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
@@ -125,3 +146,69 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
     data = structured["data"]
     assert data[0]["url"] == GENERATED_URL
     assert "local_path" not in data[0]
+
+
+@pytest.mark.asyncio
+async def test_run_image_to_image_dispatches_via_composition_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """run_image_to_image 经 composition root 委托 handle_image_to_image，调用 client.image_to_image。"""
+    _patch_client_method(monkeypatch, "image_to_image")
+    _patch_save_success(monkeypatch)
+
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    params = ImageToImageInput(prompt="edit", image="https://example.com/ref.png")
+
+    result = await run_image_to_image(params, config, ctx=None)
+
+    assert result.isError is False
+    structured = result.structuredContent
+    assert isinstance(structured, dict)
+    assert structured["data"][0]["url"] == GENERATED_URL
+
+
+@pytest.mark.asyncio
+async def test_run_multi_image_fusion_dispatches_via_composition_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """run_multi_image_fusion 经 composition root 委托 handle_multi_image_fusion。"""
+    _patch_client_method(monkeypatch, "multi_image_fusion")
+    _patch_save_success(monkeypatch)
+
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    params = MultiImageFusionInput(
+        prompt="fuse",
+        image=["https://example.com/a.png", "https://example.com/b.png"],
+    )
+
+    result = await run_multi_image_fusion(params, config, ctx=None)
+
+    assert result.isError is False
+    structured = result.structuredContent
+    assert isinstance(structured, dict)
+    assert structured["data"][0]["url"] == GENERATED_URL
+
+
+@pytest.mark.asyncio
+async def test_run_sequential_generation_dispatches_via_composition_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """run_sequential_generation 经 composition root 委托 handle_sequential_generation。"""
+    _patch_client_method(monkeypatch, "sequential_generation")
+    _patch_save_success(monkeypatch)
+
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    params = SequentialGenerationInput(prompt="sequence", max_images=2)
+
+    result = await run_sequential_generation(params, config, ctx=None)
+
+    assert result.isError is False
+    structured = result.structuredContent
+    assert isinstance(structured, dict)
+    assert structured["data"][0]["url"] == GENERATED_URL

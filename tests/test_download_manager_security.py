@@ -64,34 +64,8 @@ def test_validate_connected_peer_ip_allows_public_ip() -> None:
 # ---- download_image 端到端：逐跳重定向校验与重试退避 ----
 # mock 网络层，验证把各 SSRF 子组件串联起来的 download_image 主循环：
 # 重定向目标须重新走静态校验、重定向上限、5xx 退避重试后成功落盘。
-
-
-@pytest.mark.asyncio
-async def test_download_image_rejects_redirect_to_private_ips(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """302 跳转至元数据服务内网地址须被逐跳静态校验拒绝。"""
-    manager = DownloadManager()
-    session = _FakeSession(
-        [_FakeResponse(302, {"location": "http://169.254.169.254/latest/meta-data/"})]
-    )
-    _patch_download_network(monkeypatch, manager, session)
-
-    with pytest.raises(DownloadError):
-        await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
-
-
-@pytest.mark.asyncio
-async def test_download_image_rejects_redirect_to_loopback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """302 跳转至回环地址须被逐跳静态校验拒绝。"""
-    manager = DownloadManager()
-    session = _FakeSession([_FakeResponse(302, {"location": "http://127.0.0.1/"})])
-    _patch_download_network(monkeypatch, manager, session)
-
-    with pytest.raises(DownloadError):
-        await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
+# 重定向到内网/回环的安全拒绝由 *_via_real_static_validation 用例覆盖（保留真实
+# _validate_url_for_request 串联），避免架空校验的空芯用例。
 
 
 @pytest.mark.asyncio

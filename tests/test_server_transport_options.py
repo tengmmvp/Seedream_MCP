@@ -191,6 +191,78 @@ def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(
     assert server.cli_main() == 0
 
 
+@pytest.mark.parametrize(
+    "certfile,keyfile",
+    [("c.pem", None), (None, "k.pem")],
+)
+def test_cli_main_refuses_unpaired_tls_cert_and_key(
+    monkeypatch: pytest.MonkeyPatch, certfile: str | None, keyfile: str | None
+) -> None:
+    """ssl_certfile 与 ssl_keyfile 必须同时提供或同时省略，仅提供其一无法建立 TLS。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
+    args = _make_cli_args("streamable-http")
+    args.host = "0.0.0.0"
+    args.auth_token = "s3cret"
+    args.ssl_certfile = certfile
+    args.ssl_keyfile = keyfile
+    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
+    monkeypatch.setattr(server, "_run_streamable_http", lambda *a, **k: None)
+
+    assert server.cli_main() == 1
+
+
+def test_cli_main_config_error_returns_exit_code_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置构建抛 SeedreamConfigError 时 cli_main 返回退出码 1。"""
+    from seedream_mcp.utils.errors import SeedreamConfigError
+
+    args = _make_cli_args("stdio")
+
+    class _FakeParser:
+        def parse_args(self) -> Namespace:
+            return args
+
+    def _raise_config_error(_args: Namespace) -> SeedreamConfig:
+        raise SeedreamConfigError("bad config")
+
+    monkeypatch.setattr(server, "_build_arg_parser", lambda: _FakeParser())
+    monkeypatch.setattr(server, "_build_config_from_args", _raise_config_error)
+    monkeypatch.setattr(server, "setup_logging", lambda *a, **k: None)
+
+    assert server.cli_main() == 1
+
+
+def test_cli_main_keyboard_interrupt_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """运行期间 KeyboardInterrupt 时 cli_main 捕获并返回退出码 0。"""
+    args = _make_cli_args("stdio")
+    config = SeedreamConfig(api_key="test_key")
+    _stub_cli(monkeypatch, args, config)
+
+    def _raise_interrupt(*, transport: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(server.mcp, "run", _raise_interrupt)
+
+    assert server.cli_main() == 0
+
+
+def test_cli_main_runtime_exception_returns_exit_code_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """运行期间抛一般 Exception 时 cli_main 捕获并返回退出码 1。"""
+    args = _make_cli_args("stdio")
+    config = SeedreamConfig(api_key="test_key")
+    _stub_cli(monkeypatch, args, config)
+
+    def _raise_runtime(*, transport: str) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(server.mcp, "run", _raise_runtime)
+
+    assert server.cli_main() == 1
+
+
 async def test_bearer_auth_middleware_accepts_valid_token() -> None:
     received: dict[str, object] = {}
 

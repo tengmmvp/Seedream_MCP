@@ -169,3 +169,41 @@ def test_open_no_follow_fd_fallback_rejects_symlink(
 
     with pytest.raises(OSError, match="拒绝写入符号链接"):
         open_no_follow_fd(link, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+
+
+def test_open_no_follow_fallback_rejects_fstat_toctou_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fstat 与 lstat 的 st_ino 不一致时，_open_no_follow_fallback 拒绝以闭合 TOCTOU 竞态。
+
+    模拟平台不支持 O_NOFOLLOW，强制走 lstat+fstat 同一性复核分支；monkeypatch os.fstat
+    返回不同 inode，模拟校验与打开之间最终分量被替换为符号链接的场景。
+    """
+    monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
+    path = tmp_path / "plain.bin"
+    path.write_bytes(b"data")
+
+    real_fstat = os.fstat
+
+    def _fake_fstat(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        # 构造不同 inode 的 stat_result，触发同一性复核拒绝
+        return os.stat_result(
+            (
+                st.st_mode,
+                st.st_ino + 1,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                st.st_size,
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(os, "fstat", _fake_fstat)
+
+    with pytest.raises(OSError, match="被替换"):
+        open_no_follow_read(path)

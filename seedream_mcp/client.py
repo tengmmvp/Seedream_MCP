@@ -229,7 +229,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("文生图任务失败: {}", format_error_for_user(e))
+            self.logger.opt(exception=True).error("文生图任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -316,7 +316,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("图文生图任务失败: {}", format_error_for_user(e))
+            self.logger.opt(exception=True).error("图文生图任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -407,7 +407,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("多图融合任务失败: {}", format_error_for_user(e))
+            self.logger.opt(exception=True).error("多图融合任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -550,7 +550,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("组图输出任务失败: {}", format_error_for_user(e))
+            self.logger.opt(exception=True).error("组图输出任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     def _validate_common_generation_params(
@@ -1078,15 +1078,42 @@ class SeedreamClient:
     @staticmethod
     def _local_file_signature(image: str, workspace_roots: tuple[str, ...]) -> tuple[float, int]:
         """本地文件返回 (mtime, size) 参与缓存键，内容替换后失效避免返回陈旧编码；
-        URL 与 data URI 内容由字符串决定、无法定位文件时返回 (0.0, 0)。相对路径按
-        workspace_roots 解析后再 stat，与 utils.image_input._prepare_local_image 的实际读取路径一致。
+        URL 与 data URI 内容由字符串决定、无法定位文件时返回 (0.0, 0)。
+
+        候选文件的选择条件与 utils.image_input._prepare_local_image 的实际读取路径对齐：
+        须为常规文件、扩展名合法、大小在限内且最终分量非符号链接，避免多 Root 工作区下
+        选到无效同名条目，导致签名与读取锁定不同文件而命中陈旧缓存。
 
         base 一次性 resolve 并在循环与复核间复用，避免经 is_path_within_any_base 对每个
         base 重复解析，降低网络挂载工作区下批量参考图预处理的 resolve 开销。
         """
+        import stat as stat_module
+        from .utils.formats import SUPPORTED_IMAGE_EXTENSIONS
+        from .utils.image_validation import MAX_IMAGE_FILE_SIZE
+
         lowered = image.lower()
         if lowered.startswith(("http://", "https://", "data:image/")):
             return (0.0, 0)
+
+        def _candidate_stat(path: Path) -> os.stat_result | None:
+            """返回候选文件的 stat 若其可读取，否则 None。
+
+            校验与 image_validation._validate_file_path 的非维度项对齐：常规文件、合法扩展名、
+            大小在限内。读取路径经 normalize_path resolve 跟随符号链接到目标，故此处用 stat
+            同样跟随以追踪目标文件的 mtime/size，确保签名与读取锁定同一文件不致陈旧缓存。
+            """
+            try:
+                st = path.stat()
+            except OSError:
+                return None
+            if not stat_module.S_ISREG(st.st_mode):
+                return None
+            if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+                return None
+            if st.st_size > MAX_IMAGE_FILE_SIZE:
+                return None
+            return st
+
         # 预 resolve 所有 base 一次，供下方多次越界判定复用，忽略 resolve 失败的根
         resolved_bases: list[Path] = []
         for root in workspace_roots:
@@ -1096,7 +1123,6 @@ class SeedreamClient:
                 continue
 
         def _within(candidate: Path) -> bool:
-            """判定候选路径是否位于任一已 resolve 的 base 内，含 UNC 拒绝。"""
             cand_str = str(candidate).lstrip()
             if cand_str.startswith("\\\\") or cand_str.startswith("//"):
                 return False
@@ -1112,28 +1138,21 @@ class SeedreamClient:
                     continue
             return False
 
-        # 绝对路径直接作为候选；相对路径按工作区根解析，避免 CWD 与工作区不一致时 stat 错误文件。
-        # 候选路径在 exists/stat 前统一做越界守卫，避免对工作区外文件成为存在性 oracle
-        candidate: Path | None = None
+        # 候选选择与读取路径一致；越界守卫前置避免对工作区外文件成为存在性 oracle
         if os.path.isabs(image):
-            candidate = Path(image)
+            chosen = _candidate_stat(Path(image)) if _within(Path(image)) else None
         else:
+            chosen = None
             for base_root in resolved_bases:
                 resolved = base_root / image
                 if not _within(resolved):
                     continue
-                if resolved.exists():
-                    candidate = resolved
+                chosen = _candidate_stat(resolved)
+                if chosen is not None:
                     break
-        if candidate is None:
+        if chosen is None:
             return (0.0, 0)
-        if not _within(candidate):
-            return (0.0, 0)
-        try:
-            stat_result = os.stat(candidate)
-        except OSError:
-            return (0.0, 0)
-        return (stat_result.st_mtime, stat_result.st_size)
+        return (chosen.st_mtime, chosen.st_size)
 
     async def _prepare_image_input(
         self, image: str, _roots_key: tuple[str, ...] | None = None

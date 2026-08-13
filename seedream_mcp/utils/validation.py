@@ -62,6 +62,8 @@ PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 MAX_SEQUENTIAL_TOTAL_IMAGES = 15
 # 并行生成上限：request_count 与 parallelism 共用此上界
 MAX_PARALLEL_REQUEST_COUNT = 4
+# CJK 字符计数范围：基本区 + 扩展 A 区 + 兼容汉字，覆盖生僻字避免计数偏低
+CJK_CHAR_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 # ==================== 底层私有工具函数 ====================
@@ -119,7 +121,7 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
     if not prompt:
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
-    chinese_count = len(re.findall(r"[\u4e00-\u9fff]", prompt))
+    chinese_count = len(CJK_CHAR_PATTERN.findall(prompt))
     english_word_count = len(re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", prompt))
 
     if chinese_count > max_chinese_chars or english_word_count > max_english_words:

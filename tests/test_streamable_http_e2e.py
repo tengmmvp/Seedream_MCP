@@ -131,6 +131,14 @@ async def test_e2e_valid_token_tools_list_returns_200(
             )
 
     assert response.status_code == 200
+    # 响应体须为合法 JSON-RPC 2.0，且 tools/list 结果非空
+    body = response.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 1
+    assert "error" not in body
+    tools = body["result"]["tools"]
+    assert isinstance(tools, list)
+    assert len(tools) > 0
 
 
 async def test_e2e_missing_bearer_token_returns_401(reset_http_app_state: None) -> None:

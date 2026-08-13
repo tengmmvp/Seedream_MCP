@@ -153,8 +153,8 @@ async def parse_sse_response(
     # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)
     offset = 0
     processed_bytes = 0
-    # 是否发生过单事件超限截断；用于在返回结果中标记不完整，通知调用方存在数据丢失
-    truncated = False
+    # 超限丢弃的 SSE 事件计数；用于在返回结果中区分"图片部分失败"与"事件因体积超限被丢弃"
+    truncated_events = 0
     # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀
     search_hint = 0
 
@@ -217,7 +217,7 @@ async def parse_sse_response(
                 buffer_max_size,
             )
             del buffer[offset:]
-            truncated = True
+            truncated_events += 1
             # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫
             search_hint = len(buffer)
 
@@ -238,7 +238,7 @@ async def parse_sse_response(
         status = "partial"
 
     # 单个事件超限被丢弃时结果不完整，标记 partial 通知调用方存在数据丢失
-    if truncated and status in (None, "completed"):
+    if truncated_events > 0 and status in (None, "completed"):
         status = "partial"
 
     return {
@@ -247,4 +247,5 @@ async def parse_sse_response(
         "usage": usage,
         "status": status,
         "tools": tools,
+        "truncated_events": truncated_events,
     }

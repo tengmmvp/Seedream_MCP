@@ -34,6 +34,76 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# ==================== 目录扫描缓存 ====================
+
+# 进程级目录图片列表缓存，消除深翻页 O(offset) 重复文件系统扫描。
+# 键为 (目录路径, recursive, max_depth, 格式过滤元组)，值为 (目录 mtime_ns, 排序后图片路径列表)。
+# 同目录翻页命中缓存时跳过 os.scandir 全量扫描；目录 mtime 变化时惰性失效。
+# 单事件循环内各请求按目录串行 await，跨请求并发经由 GIL 保证 dict 读写原子性，
+# 最坏情况为缓存击穿即多请求各扫一次再覆写，仅影响性能不影响正确性。
+_DIRECTORY_SCAN_CACHE: dict[tuple[str, bool, int, tuple[str, ...]], tuple[int, list[Path]]] = {}
+_DIRECTORY_SCAN_CACHE_MAX_ENTRIES = 64
+
+
+def _get_directory_mtime_ns(path: Path) -> int | None:
+    """返回目录 mtime 纳秒值，stat 失败返回 None。"""
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _cached_find_images_in_directory(
+    *,
+    resolved_dir: Path,
+    recursive: bool,
+    max_depth: int,
+    format_filter: list[str] | None,
+) -> list[Path]:
+    """带进程级缓存的目录图片扫描，目录 mtime 变更时惰性失效。
+
+    缓存未命中时全量扫描目录并缓存完整排序列表；同目录后续翻页直接复用缓存，
+    将深翻页从每次 O(offset) 文件系统扫描降为单次全量扫描加 O(1) 缓存命中。
+    缓存键含 recursive、max_depth 与 format_filter，避免不同扫描配置互相污染。
+    目录 mtime 变化时缓存失效，下次访问重新全量扫描。非递归扫描仅追踪顶层目录
+    mtime，递归扫描的子目录变更不触发失效。
+
+    Args:
+        resolved_dir: 已 resolve 的待扫描目录。
+        recursive: 是否递归扫描子目录。
+        max_depth: 递归最大深度。
+        format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
+
+    Returns:
+        排序后的图片路径列表，扫描失败时返回空列表。
+    """
+    cache_key = (
+        str(resolved_dir),
+        recursive,
+        max_depth,
+        tuple(format_filter) if format_filter else (),
+    )
+    current_mtime = _get_directory_mtime_ns(resolved_dir)
+    cached = _DIRECTORY_SCAN_CACHE.get(cache_key)
+    if cached is not None and current_mtime is not None and cached[0] == current_mtime:
+        return cached[1]
+    images = find_images_in_directory(
+        directory=str(resolved_dir),
+        recursive=recursive,
+        max_depth=max_depth,
+        extensions=format_filter,
+    )
+    if current_mtime is not None:
+        if len(_DIRECTORY_SCAN_CACHE) >= _DIRECTORY_SCAN_CACHE_MAX_ENTRIES:
+            # 驱逐最旧条目；并发 to_thread 下 next(iter())+pop 可能竞态抛 KeyError，捕获容错
+            try:
+                _DIRECTORY_SCAN_CACHE.pop(next(iter(_DIRECTORY_SCAN_CACHE)))
+            except KeyError:
+                pass
+        _DIRECTORY_SCAN_CACHE[cache_key] = (current_mtime, images)
+    return images
+
+
 def _format_file_info(
     display_path: str, stat_path: Path, show_details: bool
 ) -> tuple[str, dict[str, Any]]:
@@ -180,19 +250,18 @@ def _scan_and_filter_directory(
         recursive: 是否递归扫描子目录。
         max_depth: 递归最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
-        remaining: 距 scan_limit 上限的剩余配额，扫描结果与新增条目均不超过此值。
+        remaining: 距 scan_limit 上限的剩余配额，新增条目不超过此值。
         resolved_roots: 已 resolve 的工作区根列表，用于越界判定。
         seen_images: 跨目录共享的已见原始路径集合，函数内就地更新。
 
     Returns:
         新增 (原始路径, resolved 路径) 元组列表，长度不超过 remaining。
     """
-    matched_images = find_images_in_directory(
-        directory=str(resolved_dir),
+    matched_images = _cached_find_images_in_directory(
+        resolved_dir=resolved_dir,
         recursive=recursive,
         max_depth=max_depth,
-        extensions=format_filter,
-        limit=remaining,
+        format_filter=format_filter,
     )
     new_entries: list[tuple[Path, Path]] = []
     for image_path in matched_images:
@@ -259,8 +328,8 @@ async def handle_browse_images(
 ) -> CallToolResult:
     """处理图片浏览请求，扫描工作区内指定目录的图片文件并分页返回。
 
-    仅允许访问 MCP Roots 授权的工作区目录；扫描 offset+limit+1 张以判定 has_more，避免
-    大目录无上限扫描。完整字段规则与默认值见 ``BrowseImagesInput``，本函数读取 arguments。
+    仅允许访问 MCP Roots 授权的工作区目录；扫描结果按目录 mtime 缓存以加速翻页，切片
+    offset+limit+1 张以判定 has_more。完整字段规则与默认值见 ``BrowseImagesInput``，本函数读取 arguments。
     未预期异常被外层捕获并降级为结构化错误，与生成类 ``execute_generation_handler`` 的错误
     结构对齐，不向调用方抛出。
 
@@ -422,7 +491,8 @@ async def _handle_browse_images_impl(
         limit,
     )
 
-    # 搜索图片文件：扫描 offset+limit+1 张，多取的 1 张用于判定 has_more，避免大目录无上限扫描。
+    # 搜索图片文件：_scan_and_filter_directory 经 _cached_find_images_in_directory 全量扫描目录
+    # 并按 mtime 缓存，翻页命中缓存跳过 os.scandir；scan_limit 仅用于切片判定 has_more。
     # format_filter_exhausted 时跳过扫描，all_images 保持为空，由下方空结果分支统一返回。
     # 扫描与扫描后的 resolve、越界判定、去重整体下沉到 _scan_and_filter_directory 在线程内
     # 执行；仅进度上报留在事件循环。深翻页大 offset 或网络挂载目录下 resolve 不再阻塞事件循环。

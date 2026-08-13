@@ -81,7 +81,10 @@ class _FakeSession:
         self._idx = 0
 
     def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]
-        del url, kwargs
+        del url
+        # SSRF 防护：download_image 须显式传 allow_redirects=False 以逐跳手动校验，
+        # 断言该参数防止退化为自动跟随重定向绕过安全校验
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
         resp = self._responses[min(self._idx, len(self._responses) - 1)]
         self._idx += 1
         return resp
@@ -100,7 +103,8 @@ class _RaisingThenSuccessSession:
         self.call_count = 0
 
     def get(self, url: str, **kwargs: object) -> _FakeResponse:  # type: ignore[no-untyped-def]
-        del url, kwargs
+        del url
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
         self.call_count += 1
         if self.call_count == 1:
             raise self._exc
@@ -119,7 +123,8 @@ class _TimeoutThenSuccessSession:
         self.call_count = 0
 
     def get(self, url: str, **kwargs: object) -> _FakeResponse:  # type: ignore[no-untyped-def]
-        del url, kwargs
+        del url
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
         self.call_count += 1
         if self.call_count == 1:
             raise asyncio.TimeoutError()

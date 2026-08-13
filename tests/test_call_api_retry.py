@@ -270,3 +270,34 @@ async def test_call_api_429_retry_after_above_backoff_cap(monkeypatch: pytest.Mo
     assert result["success"] is True
     # retry_after=120 超过 _MAX_BACKOFF_SECONDS=60，应信任服务端值 120 而非被截断为 60
     assert sleep_durations == [120.0]
+
+
+async def test_call_api_no_status_code_not_retried(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """无 HTTP 状态码的错误（如 200 响应体 JSON 解析失败）不可重试，立即抛出。
+
+    生成 API 非幂等，服务端可能已按该请求完成生成与计费，重试会导致重复计费。
+    经 httpx.MockTransport 返回 200 + 非 JSON 体，驱动真实的 _send_standard_request
+    代码路径：_raise_for_response_status 放行 200，response.json() 抛 ValueError 被包装
+    为 status_code=None 的 SeedreamAPIError，_call_api 捕获后不重试直接上抛。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=b"not-json", headers={"content-type": "text/plain"})
+
+    transport = httpx.MockTransport(_handler)
+
+    async with SeedreamClient(config) as client:
+        # 用 MockTransport 替换内部 httpx 客户端，驱动真实 _send_standard_request
+        assert client._client is not None
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=transport)
+
+        with pytest.raises(SeedreamAPIError, match="JSON 解析失败") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        # status_code 为 None 的错误不可重试
+        assert exc_info.value.status_code is None
