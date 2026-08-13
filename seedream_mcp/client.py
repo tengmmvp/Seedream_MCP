@@ -53,6 +53,9 @@ from .utils.sse_parser import is_sse_response, parse_sse_response
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
 _PrepareCacheKey = Tuple[str, Tuple[str, ...], Tuple[float, int]]
 
+# 指数退避单次等待上限，避免 Retry-After 接近 300s 时单次 sleep 过久
+_MAX_BACKOFF_SECONDS = 60
+
 
 class SeedreamClient:
     """
@@ -185,16 +188,25 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败
             SeedreamValidationError: 参数验证失败
         """
-        prompt = validate_prompt(prompt)
-        validated_opts = validate_optimize_prompt_options(
-            optimize_prompt_options, self.config.model_id
+        (
+            prompt,
+            validated_opts,
+            size,
+            watermark,
+            response_format,
+            output_format,
+            stream,
+            tools,
+        ) = self._validate_common_generation_params(
+            prompt=prompt,
+            optimize_prompt_options=optimize_prompt_options,
+            size=size,
+            watermark=watermark,
+            response_format=response_format,
+            output_format=output_format,
+            stream=stream,
+            tools=tools,
         )
-        size = validate_size_for_model(size, self.config.model_id)
-        watermark = validate_watermark(watermark)
-        response_format = validate_response_format(response_format)
-        output_format = validate_output_format(output_format, self.config.model_id)
-        stream = validate_stream(stream, self.config.model_id)
-        tools = validate_generation_tools(tools, self.config.model_id)
 
         self.logger.opt(lazy=True).info(
             "开始文生图任务: prompt_meta={}, size={}",
@@ -259,17 +271,26 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
         """
-        prompt = validate_prompt(prompt)
-        validated_opts = validate_optimize_prompt_options(
-            optimize_prompt_options, self.config.model_id
-        )
         image = self._normalize_single_image(image)
-        size = validate_size_for_model(size, self.config.model_id)
-        watermark = validate_watermark(watermark)
-        response_format = validate_response_format(response_format)
-        output_format = validate_output_format(output_format, self.config.model_id)
-        stream = validate_stream(stream, self.config.model_id)
-        tools = validate_generation_tools(tools, self.config.model_id)
+        (
+            prompt,
+            validated_opts,
+            size,
+            watermark,
+            response_format,
+            output_format,
+            stream,
+            tools,
+        ) = self._validate_common_generation_params(
+            prompt=prompt,
+            optimize_prompt_options=optimize_prompt_options,
+            size=size,
+            watermark=watermark,
+            response_format=response_format,
+            output_format=output_format,
+            stream=stream,
+            tools=tools,
+        )
 
         self.logger.opt(lazy=True).info(
             "开始图文生图任务: prompt_meta={}, size={}",
@@ -337,20 +358,29 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
         """
-        prompt = validate_prompt(prompt)
-        validated_opts = validate_optimize_prompt_options(
-            optimize_prompt_options, self.config.model_id
-        )
         max_reference = get_max_reference_images(self.config.model_id)
         image = self._normalize_image_sequence(
             image, min_count=2, max_count=max_reference, field_name="image"
         )
-        size = validate_size_for_model(size, self.config.model_id)
-        watermark = validate_watermark(watermark)
-        response_format = validate_response_format(response_format)
-        output_format = validate_output_format(output_format, self.config.model_id)
-        stream = validate_stream(stream, self.config.model_id)
-        tools = validate_generation_tools(tools, self.config.model_id)
+        (
+            prompt,
+            validated_opts,
+            size,
+            watermark,
+            response_format,
+            output_format,
+            stream,
+            tools,
+        ) = self._validate_common_generation_params(
+            prompt=prompt,
+            optimize_prompt_options=optimize_prompt_options,
+            size=size,
+            watermark=watermark,
+            response_format=response_format,
+            output_format=output_format,
+            stream=stream,
+            tools=tools,
+        )
 
         self.logger.opt(lazy=True).info(
             "开始多图融合任务: prompt_meta={}, image_count={}, size={}",
@@ -398,7 +428,7 @@ class SeedreamClient:
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
-        组图输出功能，仅 5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持组图
+        组图输出功能，仅 5.0/5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持组图
 
         支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
 
@@ -435,14 +465,25 @@ class SeedreamClient:
                 value=self.config.model_id,
             )
 
-        prompt = validate_prompt(prompt)
-        validated_opts = validate_optimize_prompt_options(
-            optimize_prompt_options, self.config.model_id
+        (
+            prompt,
+            validated_opts,
+            size,
+            watermark,
+            response_format,
+            output_format,
+            stream,
+            tools,
+        ) = self._validate_common_generation_params(
+            prompt=prompt,
+            optimize_prompt_options=optimize_prompt_options,
+            size=size,
+            watermark=watermark,
+            response_format=response_format,
+            output_format=output_format,
+            stream=stream,
+            tools=tools,
         )
-        size = validate_size_for_model(size, self.config.model_id)
-        watermark = validate_watermark(watermark)
-        output_format = validate_output_format(output_format, self.config.model_id)
-        tools = validate_generation_tools(tools, self.config.model_id)
 
         processed_image: Optional[Union[str, List[str]]] = None
         reference_images = None
@@ -473,9 +514,6 @@ class SeedreamClient:
             validate_sequential_image_limit(
                 resolved_max_images, reference_images, self.config.model_id
             )
-
-        response_format = validate_response_format(response_format)
-        stream = validate_stream(stream, self.config.model_id)
 
         try:
             if reference_images is not None:
@@ -517,6 +555,53 @@ class SeedreamClient:
         except Exception as e:
             self.logger.error("组图输出任务失败: {}", e)
             raise self._handle_api_error(e)
+
+    def _validate_common_generation_params(
+        self,
+        *,
+        prompt: str,
+        optimize_prompt_options: Optional[Dict[str, Any]],
+        size: str,
+        watermark: bool,
+        response_format: str,
+        output_format: Optional[str],
+        stream: bool,
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> Tuple[
+        str,
+        Optional[Dict[str, Any]],
+        str,
+        bool,
+        str,
+        Optional[str],
+        bool,
+        Optional[List[Dict[str, Any]]],
+    ]:
+        """集中校验生成类工具的公共参数并返回校验后的各值。
+
+        文生图、图文生图、多图融合与组图输出共用同一套参数校验，抽取此处避免四处重复。
+        各方法特有的图片数量与序列校验仍在各自方法内执行。
+        """
+        prompt = validate_prompt(prompt)
+        validated_opts = validate_optimize_prompt_options(
+            optimize_prompt_options, self.config.model_id
+        )
+        size = validate_size_for_model(size, self.config.model_id)
+        watermark = validate_watermark(watermark)
+        response_format = validate_response_format(response_format)
+        output_format = validate_output_format(output_format, self.config.model_id)
+        stream = validate_stream(stream, self.config.model_id)
+        tools = validate_generation_tools(tools, self.config.model_id)
+        return (
+            prompt,
+            validated_opts,
+            size,
+            watermark,
+            response_format,
+            output_format,
+            stream,
+            tools,
+        )
 
     async def close(self) -> None:
         """关闭 HTTP 客户端连接，释放资源。
@@ -799,6 +884,11 @@ class SeedreamClient:
             return parse_retry_after(headers)
         return None
 
+    @staticmethod
+    def _serialize_request(request_data: Dict[str, Any]) -> bytes:
+        """将请求体序列化为 UTF-8 bytes，供 httpx 直接发送以跳过事件循环内编码。"""
+        return json.dumps(request_data).encode("utf-8")
+
     def _raise_for_response_status(self, response: httpx.Response) -> None:
         """
         将非 200 状态码转换为统一 API 异常。
@@ -841,7 +931,7 @@ class SeedreamClient:
         """
         # 大请求体 JSON 序列化与编码移至工作线程，避免阻塞事件循环；
         # 直接产出 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
-        json_bytes = await asyncio.to_thread(lambda: json.dumps(request_data).encode("utf-8"))
+        json_bytes = await asyncio.to_thread(self._serialize_request, request_data)
         async with client.stream(
             "POST", url, content=json_bytes, timeout=request_timeout
         ) as response:
@@ -879,7 +969,7 @@ class SeedreamClient:
         """
         # 多图融合的 base64 请求体可达数十 MB，其 JSON 序列化与编码移至工作线程以避免阻塞事件循环；
         # 直接产出 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
-        json_bytes = await asyncio.to_thread(lambda: json.dumps(request_data).encode("utf-8"))
+        json_bytes = await asyncio.to_thread(self._serialize_request, request_data)
         response = await client.post(url, content=json_bytes, timeout=request_timeout)
 
         self.logger.debug("收到响应: 状态码={}", response.status_code)
@@ -994,7 +1084,7 @@ class SeedreamClient:
                 # 注意：超时与网络错误重试可能触发服务端重复处理与计费，因生成 API 非幂等且当前未发送幂等键
                 base = pending_retry_after if pending_retry_after is not None else float(2**attempt)
                 # 单次退避上限 60 秒，避免 Retry-After 接近 300s 时单次 sleep 过久
-                await asyncio.sleep(min(base + random.uniform(0, 1), 60))
+                await asyncio.sleep(min(base + random.uniform(0, 1), _MAX_BACKOFF_SECONDS))
 
         # 循环不会正常结束：每次迭代成功则 return，末次迭代失败时各 except 分支均 raise；
         # 此 raise 仅满足类型检查器对全路径返回的要求，运行时不可达
@@ -1048,10 +1138,12 @@ class SeedreamClient:
             from .utils.path_utils import get_workspace_roots
 
             _roots_key = tuple(str(r) for r in get_workspace_roots())
+        # 本地文件签名含同步 stat/resolve，移至工作线程避免网络挂载工作区下阻塞事件循环
+        signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
         cache_key: _PrepareCacheKey = (
             image,
             _roots_key,
-            self._local_file_signature(image, _roots_key),
+            signature,
         )
 
         cached = self._prepare_cache.get(cache_key)

@@ -102,6 +102,17 @@ class FileManager:
             logger.warning("路径验证失败: {} -> {}", path, e)
             return False
 
+    def _resolved_within_base(self, resolved_path: Path) -> bool:
+        """判断已 resolve 的路径是否位于基础目录内，直接 relative_to 比较，不再 resolve。
+
+        供 cleanup_old_files 等热路径复用，避免对已 resolve 路径重复解析。
+        """
+        try:
+            resolved_path.relative_to(self._base_abs)
+            return True
+        except ValueError:
+            return False
+
     def sanitize_filename(self, filename: str) -> str:
         """清理文件名，移除文件系统不安全字符。
 
@@ -422,9 +433,19 @@ class FileManager:
             # 拦截，涉及 NTLM/SMB 出站认证风险，部署方应确保 base_dir 不接受不可信写入。
             for root, dirs, files in os.walk(self.base_dir, followlinks=False):
                 root_path = Path(root)
-                if not self.validate_path(root_path):
+                # root 字符串经 os.walk 从已 resolve 的 base_dir 拼接而来，仍可能因 NTFS
+                # junction 被下降到 base_dir 之外；resolve 一次复核真实位置并缓存供本轮复用，
+                # 避免 validate_path 对已 resolve 路径的重复解析与封装开销。
+                try:
+                    root_resolved = root_path.resolve()
+                except Exception as e:
+                    logger.warning("路径验证失败: {} -> {}", root_path, e)
+                    dirs[:] = []
+                    continue
+                if not self._resolved_within_base(root_resolved):
                     # 越界：清空 dirs 阻止 os.walk 继续下降到越界子目录，含 NTFS junction
                     # 目标，避免无谓的越界遍历与潜在 SMB 出站认证暴露
+                    logger.warning("路径不在基础目录内: {}", root_resolved)
                     dirs[:] = []
                     continue
                 for name in dirs:
@@ -434,7 +455,13 @@ class FileManager:
                         continue
                     # junction 目录 resolve 后落在 base_dir 之外，不纳入空目录清理，
                     # 避免 rmdir 误伤 junction 目标。
-                    if not self.validate_path(dir_path):
+                    try:
+                        dir_resolved = dir_path.resolve()
+                    except Exception as e:
+                        logger.warning("路径验证失败: {} -> {}", dir_path, e)
+                        continue
+                    if not self._resolved_within_base(dir_resolved):
+                        logger.warning("路径不在基础目录内: {}", dir_resolved)
                         continue
                     if dir_path != self.base_dir:
                         directories.append(dir_path)

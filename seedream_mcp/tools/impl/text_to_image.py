@@ -67,7 +67,7 @@ async def handle_text_to_image(
         arguments=arguments,
         config=config,
         module_logger=logger,
-        tool_name="text_to_image",
+        tool_name="seedream_text_to_image",
         completion_title="文生图任务完成",
         failure_prefix="文生图生成",
         guidance="请检查提示词长度、尺寸与模型兼容性，确认 API Key 和网络可用后重试。",

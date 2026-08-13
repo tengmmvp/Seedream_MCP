@@ -68,7 +68,7 @@ async def handle_image_to_image(
         arguments=arguments,
         config=config,
         module_logger=logger,
-        tool_name="image_to_image",
+        tool_name="seedream_image_to_image",
         completion_title="图文生图任务完成",
         failure_prefix="图文生图生成",
         guidance="请检查图片路径/URL 与尺寸参数，确认 API Key 和网络可用后重试。",

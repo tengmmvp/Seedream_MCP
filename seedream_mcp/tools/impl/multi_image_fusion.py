@@ -68,7 +68,7 @@ async def handle_multi_image_fusion(
         arguments=arguments,
         config=config,
         module_logger=logger,
-        tool_name="multi_image_fusion",
+        tool_name="seedream_multi_image_fusion",
         completion_title="多图融合任务完成",
         failure_prefix="多图融合",
         guidance="请检查图片列表与尺寸参数，确认 API Key 和网络可用后重试。",

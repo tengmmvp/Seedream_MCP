@@ -16,7 +16,7 @@ from seedream_mcp.tools.core.outputs import (
 
 def test_generation_success_path_matches_schema() -> None:
     structured = {
-        "tool": "text_to_image",
+        "tool": "seedream_text_to_image",
         "success": True,
         "status": "completed",
         "prompt": "a cat",
@@ -39,7 +39,7 @@ def test_generation_success_path_matches_schema() -> None:
 
 def test_generation_exception_path_error_is_dict() -> None:
     structured = {
-        "tool": "text_to_image",
+        "tool": "seedream_text_to_image",
         "success": False,
         "status": "failed",
         "error": {"type": "SeedreamAPIError", "message": "认证失败"},
@@ -51,7 +51,7 @@ def test_generation_exception_path_error_is_dict() -> None:
 
 def test_generation_failed_result_error_is_str() -> None:
     structured = {
-        "tool": "text_to_image",
+        "tool": "seedream_text_to_image",
         "success": False,
         "status": "failed",
         "prompt": "a cat",
@@ -75,7 +75,7 @@ def test_generation_failed_result_error_is_str() -> None:
 
 def test_browse_success_path_matches_schema() -> None:
     structured = {
-        "tool": "browse_images",
+        "tool": "seedream_browse_images",
         "success": True,
         "status": "completed",
         "directory": ".",
@@ -96,7 +96,7 @@ def test_browse_success_path_matches_schema() -> None:
 
 def test_browse_failure_path_matches_schema() -> None:
     structured = {
-        "tool": "browse_images",
+        "tool": "seedream_browse_images",
         "success": False,
         "status": "failed",
         "error": {"type": "browse_failed", "message": "目录超出允许范围"},
@@ -108,7 +108,7 @@ def test_browse_failure_path_matches_schema() -> None:
 
 def test_browse_empty_path_matches_schema() -> None:
     structured = {
-        "tool": "browse_images",
+        "tool": "seedream_browse_images",
         "success": True,
         "status": "empty",
         "directory": ".",

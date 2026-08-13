@@ -25,8 +25,8 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 
 # 本地模块导入
-from .errors import SeedreamValidationError
-from .formats import SUPPORTED_IMAGE_EXTENSIONS
+from .errors import SeedreamConfigError, SeedreamValidationError
+from .formats import SUPPORTED_IMAGE_EXTENSIONS, _format_file_size_mb
 from .logging import get_logger
 from .os_utils import open_no_follow_read
 from .model_capabilities import get_model_capabilities
@@ -73,10 +73,12 @@ MIN_IMAGE_EDGE = 15
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 MAX_IMAGE_PIXELS = 6000 * 6000
+# 与项目输入像素上限对齐，作为 PIL decompression bomb 的纵深防护
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 # 尺寸预设档位与输出格式白名单
 VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
 VALID_OUTPUT_FORMATS = {"jpeg", "png"}
-# 布尔字符串解析的合法取值，parse_bool 与 validate_watermark 共用以消除值集合漂移
+# 布尔字符串解析的合法取值，config.parse_bool 据此判定真值与假值
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
 # 生成工具类型白名单，目前仅支持联网搜索
@@ -246,7 +248,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         file_size = stat_result.st_size
         if file_size > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"文件过大: {file_size / 1024 / 1024:.1f}MB，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
+                f"文件过大: {_format_file_size_mb(file_size)}，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
                 field="image",
                 value=file_path,
             )
@@ -349,7 +351,7 @@ def _validate_data_uri(data_uri: str) -> str:
         size_bytes = len(raw)
         if size_bytes > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"数据过大: {size_bytes / 1024 / 1024:.1f}MB，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
+                f"数据过大: {_format_file_size_mb(size_bytes)}，最大支持{MAX_IMAGE_FILE_SIZE // 1024 // 1024}MB",
                 field="image",
                 value=data_uri,
             )
@@ -409,10 +411,11 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
 
 def validate_watermark(watermark: Any) -> bool:
-    """
-    验证水印参数配置
+    """验证水印参数配置。
 
     支持布尔值或可转换为布尔值的字符串（true/false、yes/no、on/off、1/0）。
+    布尔字符串解析委托 config.parse_bool，与配置层共享同一解析逻辑；解析失败
+    对外抛出 SeedreamValidationError 以保持校验层异常类型。
 
     Args:
         watermark: 水印开关配置，支持 bool 或 str 类型
@@ -427,12 +430,12 @@ def validate_watermark(watermark: Any) -> bool:
         return watermark
 
     if isinstance(watermark, str):
-        watermark_lower = watermark.lower().strip()
-        if watermark_lower in TRUE_BOOL_STRINGS:
-            return True
-        elif watermark_lower in FALSE_BOOL_STRINGS:
-            return False
-        else:
+        # 延迟导入避免 config 与 validation 的顶层循环依赖
+        from ..config import parse_bool
+
+        try:
+            return parse_bool(watermark)
+        except SeedreamConfigError:
             raise SeedreamValidationError(
                 "水印参数必须是布尔值或有效的字符串（true/false）",
                 field="watermark",
@@ -459,13 +462,13 @@ def validate_response_format(response_format: str) -> str:
 
     if not response_format or not isinstance(response_format, str):
         raise SeedreamValidationError(
-            "响应格式不能为空", field="response_format", value=response_format
+            "response_format 不能为空", field="response_format", value=response_format
         )
 
     response_format = response_format.strip().lower()
     if response_format not in valid_formats:
         raise SeedreamValidationError(
-            f"响应格式必须是以下值之一: {valid_formats}",
+            f"response_format 必须是以下值之一: {valid_formats}",
             field="response_format",
             value=response_format,
         )
@@ -809,13 +812,13 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
 
     if not isinstance(options, dict):
         raise SeedreamValidationError(
-            "optimize_prompt_options必须为对象", field="optimize_prompt_options", value=options
+            "optimize_prompt_options 必须为对象", field="optimize_prompt_options", value=options
         )
 
     mode = options.get("mode", "standard")
     if not isinstance(mode, str):
         raise SeedreamValidationError(
-            "optimize_prompt_options.mode必须为字符串",
+            "optimize_prompt_options.mode 必须为字符串",
             field="optimize_prompt_options.mode",
             value=mode,
         )

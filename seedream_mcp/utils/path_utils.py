@@ -287,7 +287,8 @@ def validate_image_path(
 
         if base_dir:
             base_path = Path(base_dir).resolve()
-            if not is_path_within_base(normalized_path, base_path):
+            # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析
+            if not _is_within_resolved(normalized_path, base_path):
                 return False, "路径超出允许的工作区目录范围", normalized_path
 
         # 委托 validation 模块执行格式与维度等统一规则校验。

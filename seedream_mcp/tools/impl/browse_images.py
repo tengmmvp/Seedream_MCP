@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from mcp.types import CallToolResult, TextContent
 
 from ..core._helpers import _safe_ctx_log, _safe_report_progress
+from ..core.schemas import BrowseImagesInput
 from ...utils.errors import format_error_for_user
 from ...utils.logging import get_logger
 from ...utils.path_utils import (
@@ -90,7 +91,7 @@ def _build_browse_structured_result(
     填充非关键字段，符合 BrowseImagesStructuredOutput 全部字段可选的声明。
     """
     structured: Dict[str, Any] = {
-        "tool": "browse_images",
+        "tool": "seedream_browse_images",
         "success": success,
         "status": status,
         "directory": directory,
@@ -279,13 +280,15 @@ async def handle_browse_images(
             workspace_roots=fallback_roots,
             directory=str(arguments.get("directory") or "."),
             resolved_directories=[],
-            recursive=bool(arguments.get("recursive", True)),
-            max_depth=arguments.get("max_depth", 3),
-            limit=arguments.get("limit", 50),
-            offset=arguments.get("offset", 0),
-            show_details=bool(arguments.get("show_details", False)),
+            recursive=bool(arguments.get("recursive", BrowseImagesInput.DEFAULT_RECURSIVE)),
+            max_depth=arguments.get("max_depth", BrowseImagesInput.DEFAULT_MAX_DEPTH),
+            limit=arguments.get("limit", BrowseImagesInput.DEFAULT_LIMIT),
+            offset=arguments.get("offset", BrowseImagesInput.DEFAULT_OFFSET),
+            show_details=bool(
+                arguments.get("show_details", BrowseImagesInput.DEFAULT_SHOW_DETAILS)
+            ),
             format_filter=None,
-            message=f"浏览图片失败：{user_message}",
+            message=f"浏览图片失败：{user_message}；请确认目录路径有效且位于工作区内。",
         )
 
 
@@ -296,11 +299,12 @@ async def _handle_browse_images_impl(
     """浏览工具主逻辑，由 ``handle_browse_images`` 外层兜底包裹。"""
     directory = arguments.get("directory") or "."
     requested_dir = str(directory)
-    recursive = bool(arguments.get("recursive", True))
-    # max_depth/limit/offset 已由 BrowseImagesInput 的 pydantic 校验保证为 int，无需再 int() 包装
-    max_depth = arguments.get("max_depth", 3)
-    limit = arguments.get("limit", 50)
-    offset = arguments.get("offset", 0)
+    recursive = bool(arguments.get("recursive", BrowseImagesInput.DEFAULT_RECURSIVE))
+    # max_depth/limit/offset 已由 BrowseImagesInput 的 pydantic 校验保证为 int，无需再 int() 包装。
+    # 默认值引用 BrowseImagesInput 的类常量，保持字段默认单一来源。
+    max_depth = arguments.get("max_depth", BrowseImagesInput.DEFAULT_MAX_DEPTH)
+    limit = arguments.get("limit", BrowseImagesInput.DEFAULT_LIMIT)
+    offset = arguments.get("offset", BrowseImagesInput.DEFAULT_OFFSET)
     format_filter = arguments.get("format_filter")
     # 格式过滤仅保留受支持的图片扩展名，避免以非图片后缀探测文件。
     # 过滤后若为空表示用户指定后缀均不受支持，标记后跳过扫描并返回空结果；
@@ -310,7 +314,7 @@ async def _handle_browse_images_impl(
         format_filter = [ext for ext in format_filter if ext in SUPPORTED_IMAGE_EXTENSIONS]
         if not format_filter:
             format_filter_exhausted = True
-    show_details = bool(arguments.get("show_details", False))
+    show_details = bool(arguments.get("show_details", BrowseImagesInput.DEFAULT_SHOW_DETAILS))
 
     workspace_roots = get_workspace_roots()
     resolved_dirs: list[Path] = []

@@ -32,14 +32,11 @@ import aiohttp
 
 from ..version import __version__
 from .errors import SeedreamMCPError
-from .formats import is_known_image_bytes
+from .formats import DEFAULT_MAX_FILE_SIZE, is_known_image_bytes
 from .logging import get_logger
 from .os_utils import open_no_follow_fd
 
 logger = get_logger(__name__)
-
-# 下载单文件大小上限默认值
-DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数
 _DOWNLOAD_CHUNK_SIZE = 256 * 1024
@@ -353,7 +350,9 @@ class DownloadManager:
 
         reason = _public_ip_rejection_reason(ip_obj)
         if reason:
-            raise DownloadError(f"连接命中不安全地址({reason}): {peer_ip} ({source_url})")
+            raise DownloadError(
+                f"连接命中不安全地址({reason}): {peer_ip} ({sanitize_url(source_url)})"
+            )
 
     def _validate_connected_peer_ip(
         self, response: aiohttp.ClientResponse, source_url: str
@@ -369,6 +368,100 @@ class DownloadManager:
             raise DownloadError(f"无法获取连接对端IP，拒绝下载: {sanitize_url(source_url)}")
 
         self._ensure_public_peer_ip(peer_ip, source_url)
+
+    def _handle_redirect_response(
+        self,
+        response: "aiohttp.ClientResponse",
+        current_url: str,
+        redirect_count: int,
+    ) -> Optional[str]:
+        """处理重定向响应，返回下一跳绝对 URL；非重定向返回 None。
+
+        重定向目标回到调用方循环顶部由 _validate_url_for_request 执行完整静态与
+        DNS 校验，本方法仅判定跳数上限与 Location 解析。缺 Location 或超 _MAX_REDIRECTS
+        抛出终态错误。
+        """
+        if response.status not in {301, 302, 303, 307, 308}:
+            return None
+        location = response.headers.get("location")
+        if not location:
+            raise DownloadError("重定向响应缺少 Location 头")
+        if redirect_count >= _MAX_REDIRECTS:
+            raise DownloadError("重定向次数过多")
+        return urljoin(current_url, location)
+
+    async def _download_response_to_temp(
+        self,
+        response: "aiohttp.ClientResponse",
+        save_path: Path,
+        temp_path: Path,
+        content_type: str,
+        attempt: int,
+        start_time: float,
+    ) -> Dict[str, Any]:
+        """将 200 响应体下载到临时文件，校验大小与字节签名后原子替换，返回结果字典。
+
+        content-length 预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出
+        DownloadError，由调用方按终态或可重试分类处理。
+        """
+        content_length = response.headers.get("content-length")
+        if content_length:
+            try:
+                cl_value = int(content_length)
+            except (TypeError, ValueError) as exc:
+                raise DownloadError(f"非法 content-length: {content_length!r}") from exc
+            if cl_value > self.max_file_size:
+                raise DownloadError(f"文件过大: {cl_value} 字节")
+
+        # 目录创建卸载到线程池；exist_ok=True 下重复创建无副作用，保留作防御性兜底
+        await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
+
+        # O_NOFOLLOW 打开最终分量防符号链接 TOCTOU；aiofiles 接管 fd 后异步写入
+        total_size = 0
+        head_bytes = b""
+        fd = await asyncio.to_thread(
+            open_no_follow_fd,
+            str(temp_path),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        )
+        fd_handed_off = False
+        try:
+            async with aiofiles.open(fd, "wb", closefd=True) as f:
+                fd_handed_off = True
+                async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
+                    total_size += len(chunk)
+                    if total_size > self.max_file_size:
+                        raise DownloadError(f"文件过大: {total_size} 字节")
+                    # 累计首 32 字节做签名校验，省一次 open+read
+                    if len(head_bytes) < 32:
+                        head_bytes += chunk[: 32 - len(head_bytes)]
+                    await f.write(chunk)
+        finally:
+            # aiofiles 接管前失败则手动关闭 fd 避免泄漏
+            if not fd_handed_off:
+                os.close(fd)
+
+        # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘
+        if not is_known_image_bytes(head_bytes):
+            raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
+
+        # 同文件系统内原子替换，避免读者看到半写文件
+        await asyncio.to_thread(temp_path.replace, save_path)
+        download_time = time.time() - start_time
+        logger.info(
+            "图片下载成功: {} ({} 字节, {:.2f}秒)",
+            save_path,
+            total_size,
+            download_time,
+        )
+        return {
+            "success": True,
+            "file_path": str(save_path),
+            "file_size": total_size,
+            "download_time": download_time,
+            "content_type": content_type,
+            "attempts": attempt + 1,
+        }
 
     async def download_image(
         self, url: str, save_path: Path, headers: Optional[Dict[str, str]] = None
@@ -427,17 +520,10 @@ class DownloadManager:
                     ) as response:
                         self._validate_connected_peer_ip(response, current_url)
 
-                        if response.status in {301, 302, 303, 307, 308}:
-                            location = response.headers.get("location")
-                            if not location:
-                                raise DownloadError("重定向响应缺少 Location 头")
-                            if redirect_count >= _MAX_REDIRECTS:
-                                raise DownloadError("重定向次数过多")
-
-                            # 重定向目标回到循环顶部由 _validate_url_for_request 执行
-                            # 完整校验，含静态与 DNS 两层，此处不重复静态校验
-                            next_url = urljoin(current_url, location)
-
+                        next_url = self._handle_redirect_response(
+                            response, current_url, redirect_count
+                        )
+                        if next_url is not None:
                             redirect_count += 1
                             current_url = next_url
                             continue
@@ -455,79 +541,17 @@ class DownloadManager:
                                 f"响应内容类型非图片: {content_type.split(';')[0].strip()}"
                             )
 
-                        content_length = response.headers.get("content-length")
-                        if content_length:
-                            try:
-                                cl_value = int(content_length)
-                            except (TypeError, ValueError) as exc:
-                                raise DownloadError(
-                                    f"非法 content-length: {content_length!r}"
-                                ) from exc
-                            if cl_value > self.max_file_size:
-                                raise DownloadError(f"文件过大: {cl_value} 字节")
-
-                        # 目录创建卸载到线程池，避免阻塞事件循环；即便调用方已建目录，
-                        # exist_ok=True 下重复创建无副作用，保留作为防御性兜底
-                        await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
-
-                        # 下载写入临时文件，成功后原子替换。
-                        # 用 O_NOFOLLOW 打开最终分量防符号链接 TOCTOU，与 file_manager.save_bytes
-                        # 防护对齐；再交由 aiofiles 异步写入，closefd=True 使上下文退出时关闭 fd
-                        total_size = 0
-                        head_bytes = b""
-                        # 同步 os.open 卸载到线程池，返回 fd 后 aiofiles 包装仍异步
-                        fd = await asyncio.to_thread(
-                            open_no_follow_fd,
-                            str(temp_path),
-                            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                        )
-                        fd_handed_off = False
-                        try:
-                            temp_created = True
-                            async with aiofiles.open(fd, "wb", closefd=True) as f:
-                                fd_handed_off = True
-                                async for chunk in response.content.iter_chunked(
-                                    _DOWNLOAD_CHUNK_SIZE
-                                ):
-                                    total_size += len(chunk)
-                                    if total_size > self.max_file_size:
-                                        raise DownloadError(f"文件过大: {total_size} 字节")
-                                    # 在写入循环内累计首 32 字节，省一次 open+read 做签名校验
-                                    if len(head_bytes) < 32:
-                                        head_bytes += chunk[: 32 - len(head_bytes)]
-                                    await f.write(chunk)
-                        finally:
-                            # 若 aiofiles 进入上下文前失败而未接管 fd，需手动关闭以避免泄漏
-                            if not fd_handed_off:
-                                os.close(fd)
-
-                        # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘
-                        if not is_known_image_bytes(head_bytes):
-                            raise DownloadError(
-                                "下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造"
-                            )
-
-                        # os.replace 在同文件系统内原子替换，避免读者看到半写文件
-                        await asyncio.to_thread(temp_path.replace, save_path)
-                        temp_created = False
-                        download_time = time.time() - start_time
-
-                        result = {
-                            "success": True,
-                            "file_path": str(save_path),
-                            "file_size": total_size,
-                            "download_time": download_time,
-                            "content_type": content_type,
-                            "attempts": attempt + 1,
-                        }
-
-                        logger.info(
-                            "图片下载成功: {} ({} 字节, {:.2f}秒)",
+                        # 标记 temp 即将由 _download_response_to_temp 创建，供外层 finally
+                        # 在失败时清理残留；成功路径内部 replace 后 temp 已移走，exists 检查无害
+                        temp_created = True
+                        return await self._download_response_to_temp(
+                            response,
                             save_path,
-                            total_size,
-                            download_time,
+                            temp_path,
+                            content_type,
+                            attempt,
+                            start_time,
                         )
-                        return result
 
             except RetryableDownloadError as e:
                 # HTTP 5xx 等 CDN/网关瞬时故障，记录后落入退避重试

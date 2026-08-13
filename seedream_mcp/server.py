@@ -374,6 +374,7 @@ async def server_info_resource() -> str:
             "version": SERVER_VERSION,
             "model_id": config.model_id,
             "default_size": config.default_size,
+            "auto_save_enabled": config.auto_save_enabled,
         },
         ensure_ascii=False,
         indent=2,
@@ -387,26 +388,36 @@ async def server_info_resource() -> str:
 def style_anime_prompt(subject: str = "一个女孩站在樱花树下") -> str:
     """生成日系动漫风格图片的提示词模板，可作为文生图 prompt 使用。"""
     return (
-        f"{subject}，日系动漫风格，赛璐珞上色，鲜艳饱和的色彩，精细流畅的线条，" "柔和光影，高细节"
+        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
+        f"{subject}，日系动漫风格，赛璐珞上色，鲜艳饱和的色彩，精细流畅的线条，柔和光影，高细节"
     )
 
 
 @mcp.prompt(name="seedream_style_realistic", description="写实摄影风格生图提示词模板")
 def style_realistic_prompt(subject: str = "城市夜景") -> str:
     """生成写实摄影风格图片的提示词模板，可作为文生图 prompt 使用。"""
-    return f"{subject}，写实摄影风格，高清细节，自然光影，景深效果，专业摄影质感"
+    return (
+        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
+        f"{subject}，写实摄影风格，高清细节，自然光影，景深效果，专业摄影质感"
+    )
 
 
 @mcp.prompt(name="seedream_style_watercolor", description="水彩画风格生图提示词模板")
 def style_watercolor_prompt(subject: str = "山间小屋") -> str:
     """生成水彩画风格图片的提示词模板，可作为文生图 prompt 使用。"""
-    return f"{subject}，水彩画风格，柔和晕染，通透色彩，手绘质感，留白"
+    return (
+        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
+        f"{subject}，水彩画风格，柔和晕染，通透色彩，手绘质感，留白"
+    )
 
 
 @mcp.prompt(name="seedream_style_oil_painting", description="油画风格生图提示词模板")
 def style_oil_painting_prompt(subject: str = "海边夕阳") -> str:
     """生成油画风格图片的提示词模板，可作为文生图 prompt 使用。"""
-    return f"{subject}，油画风格，厚重笔触，丰富层次，经典光影，艺术质感"
+    return (
+        "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
+        f"{subject}，油画风格，厚重笔触，丰富层次，经典光影，艺术质感"
+    )
 
 
 # ==================== 命令行参数解析 ====================
@@ -550,7 +561,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ssl-certfile",
         default=None,
-        help="streamable-http 的 TLS 证书文件路径，绑定非回环地址时建议配置以防令牌明文传输",
+        help="streamable-http 的 TLS 证书文件路径，绑定非回环地址时必须配置以防令牌明文传输；"
+        "受信反向代理终结 TLS 时可用 --insecure-allow-non-tls 豁免",
     )
     parser.add_argument(
         "--ssl-keyfile",
@@ -645,8 +657,9 @@ _MAX_STREAMABLE_HTTP_BODY = 100 * 1024 * 1024
 class _LimitRequestBodyMiddleware:
     """streamable-http 请求体大小限制 ASGI 中间件。
 
-    按 Content-Length 头早拒超过上限的请求并返回 413，防止超大 JSON-RPC 体在 pydantic
-    物料化前撑爆内存。仅检查声明长度，覆盖正常客户端；恶意谎报长度的 chunked 绕过属极端。
+    先按 Content-Length 头早拒超过上限的请求作为快速路径；再包装 receive 累计 chunked 实际
+    接收字节数，超限即短路返回 413，防止缺失或谎报 Content-Length 的超大请求体在 pydantic
+    物料化前撑爆内存。仅作用于 http 请求，websocket 等非 http 流量原样透传。
     """
 
     def __init__(self, app: Any, max_body_size: int) -> None:
@@ -667,24 +680,52 @@ class _LimitRequestBodyMiddleware:
                     pass
                 break
 
+        # 快速路径：声明长度超限直接 413，避免进入应用读取阶段
         if content_length > self._max_body_size:
-            body = json.dumps(
-                {"error": "request_too_large", "error_description": "Request body exceeds limit"}
-            ).encode("utf-8")
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 413,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(body)).encode("ascii")),
-                    ],
-                }
-            )
-            await send({"type": "http.response.body", "body": body})
+            await self._send_too_large(send)
             return
 
-        await self.app(scope, receive, send)
+        # chunked 防御：累计实际接收字节，缺失或谎报 Content-Length 时超限短路 413
+        total_received = 0
+        too_large = False
+
+        async def receive_wrapper() -> Any:
+            nonlocal total_received, too_large
+            message = await receive()
+            if not too_large and message.get("type") == "http.request":
+                total_received += len(message.get("body", b""))
+                if total_received > self._max_body_size:
+                    too_large = True
+                    # 返回空终帧，停止向下游投递剩余超大请求体
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def send_wrapper(message: Any) -> None:
+            # 一旦判定超限，吞掉下游响应，由本中间件统一回 413 避免双响应
+            if too_large:
+                return
+            await send(message)
+
+        await self.app(scope, receive_wrapper, send_wrapper)
+
+        if too_large:
+            await self._send_too_large(send)
+
+    async def _send_too_large(self, send: Any) -> None:
+        body = json.dumps(
+            {"error": "request_too_large", "error_description": "Request body exceeds limit"}
+        ).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
 
 def _resolve_http_auth_token(args: argparse.Namespace) -> str:
@@ -748,9 +789,9 @@ def _run_streamable_http(
     import uvicorn
 
     app = mcp.streamable_http_app()
-    # body 大小限制中间件：按 Content-Length 早拒超大请求体，防 GB 级 payload 物料化导致 OOM。
-    # 鉴权中间件后添加、因 Starlette insert(0) 成为更外层先执行；二者均在读取请求体前按头拒绝，
-    # 故超大请求体无论鉴权与否都不会被完整读入内存
+    # body 大小限制中间件：按 Content-Length 早拒超大请求体，并对 chunked 流累计字节超限即返回 413，
+    # 防 GB 级 payload 物料化导致 OOM。鉴权中间件后添加、因 Starlette insert(0) 成为更外层先执行；
+    # 二者均在物料化前阻断超大请求体，故无论鉴权与否都不会被完整读入内存
     app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=_MAX_STREAMABLE_HTTP_BODY)
     if auth_token:
         app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)

@@ -165,7 +165,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 
 # 安全
 --auth-token TEXT                                  # Bearer 鉴权令牌（非回环绑定必须配置，也可用 SEEDREAM_HTTP_AUTH_TOKEN）
---ssl-certfile TEXT                                # TLS 证书文件（非回环绑定建议配置，防令牌明文传输）
+--ssl-certfile TEXT                                # TLS 证书文件（非回环绑定必须配置，防令牌明文传输；受信反向代理终结 TLS 时可用 --insecure-allow-non-tls 豁免）
 --ssl-keyfile TEXT                                 # TLS 私钥文件，与 --ssl-certfile 配合
 --insecure-allow-non-tls                           # 显式允许非回环明文运行（仅受信反向代理终结 TLS 场景）
 

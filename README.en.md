@@ -165,7 +165,7 @@ Restart the corresponding client after configuration.
 
 # Security
 --auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; alternatively use SEEDREAM_HTTP_AUTH_TOKEN)
---ssl-certfile TEXT                                # TLS certificate file (recommended for non-loopback binding to prevent plaintext token transmission)
+--ssl-certfile TEXT                                # TLS certificate file (required for non-loopback binding to prevent plaintext token transmission; use --insecure-allow-non-tls when a trusted reverse proxy terminates TLS)
 --ssl-keyfile TEXT                                 # TLS private key file, used together with --ssl-certfile
 --insecure-allow-non-tls                           # Explicitly allow non-loopback plaintext operation (only for trusted reverse proxy TLS-terminating scenarios)
 

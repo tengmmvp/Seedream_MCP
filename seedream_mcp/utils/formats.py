@@ -6,6 +6,9 @@ image_input、file_manager 等模块共享，避免多处重复定义。
 
 from __future__ import annotations
 
+# 自动保存单文件大小上限默认值，config 与 download_manager 共享此单一来源
+DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
+
 # 校验与浏览支持的图片扩展名，小写且含点号
 SUPPORTED_IMAGE_EXTENSIONS: list[str] = [
     ".jpg",
@@ -101,3 +104,8 @@ def infer_extension_from_bytes(content: bytes, default: str = ".jpeg") -> str:
 def is_known_image_bytes(content: bytes) -> bool:
     """判断字节是否以受支持图片的 magic 开头，用于下载内容真实性校验。"""
     return infer_extension_from_bytes(content, default="") != ""
+
+
+def _format_file_size_mb(size_bytes: int) -> str:
+    """将字节数格式化为 MB 字符串，保留一位小数，供校验与保存模块共享。"""
+    return f"{size_bytes / 1024 / 1024:.1f}MB"

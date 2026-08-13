@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Union
+from typing import ClassVar, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -382,7 +382,17 @@ class SequentialGenerationInput(
 
 
 class BrowseImagesInput(BaseModel):
-    """本地图片浏览：浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。"""
+    """本地图片浏览：浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
+
+    字段默认值的单一来源：impl handler 与兜底分支引用此类常量取值，避免魔法值漂移。
+    """
+
+    # ClassVar 声明使 pydantic 将其排除出模型字段，仅作为默认值单一来源供 handler 引用。
+    DEFAULT_RECURSIVE: ClassVar[bool] = True
+    DEFAULT_MAX_DEPTH: ClassVar[int] = 3
+    DEFAULT_LIMIT: ClassVar[int] = 50
+    DEFAULT_OFFSET: ClassVar[int] = 0
+    DEFAULT_SHOW_DETAILS: ClassVar[bool] = False
 
     model_config = ConfigDict(
         extra="forbid",
@@ -395,23 +405,23 @@ class BrowseImagesInput(BaseModel):
         description="要浏览的目录路径，默认使用当前工作目录。",
     )
     recursive: bool = Field(
-        default=True,
+        default=DEFAULT_RECURSIVE,
         description="是否递归查找子目录。",
     )
     max_depth: int = Field(
-        default=3,
+        default=DEFAULT_MAX_DEPTH,
         ge=1,
         le=10,
         description="递归查找的最大深度（1-10）。",
     )
     limit: int = Field(
-        default=50,
+        default=DEFAULT_LIMIT,
         ge=1,
         le=200,
         description="返回的最大文件数量（1-200）。",
     )
     offset: int = Field(
-        default=0,
+        default=DEFAULT_OFFSET,
         ge=0,
         le=100000,
         description="分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
@@ -422,7 +432,7 @@ class BrowseImagesInput(BaseModel):
         description="需要过滤的图片后缀列表，如 ['.jpeg', '.png']。",
     )
     show_details: bool = Field(
-        default=False,
+        default=DEFAULT_SHOW_DETAILS,
         description="是否展示文件大小、修改时间等详细信息。",
     )
 

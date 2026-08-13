@@ -17,6 +17,7 @@ from typing import Any, Mapping, Optional
 from dotenv import dotenv_values
 
 from .utils.errors import SeedreamConfigError, SeedreamValidationError
+from .utils.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.validation import (
     FALSE_BOOL_STRINGS,
     TRUE_BOOL_STRINGS,
@@ -29,9 +30,6 @@ from .utils.validation import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
-
-# 自动保存单文件大小上限默认值
-DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # 模型友好别名到真实 Model ID 的映射，normalize_model_selector 据此展开别名
 MODEL_ALIASES: dict[str, str] = {

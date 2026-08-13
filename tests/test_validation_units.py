@@ -74,7 +74,7 @@ def test_validate_response_format_normalizes_case_and_whitespace() -> None:
 
 
 def test_validate_response_format_invalid_value() -> None:
-    with pytest.raises(SeedreamValidationError, match="响应格式"):
+    with pytest.raises(SeedreamValidationError, match="response_format"):
         validate_response_format("jpeg")
 
 

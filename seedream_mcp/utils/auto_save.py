@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Dict, List, Optional, Sequence, Tuple
 from .download_manager import DEFAULT_MAX_FILE_SIZE, DownloadManager, DownloadError, sanitize_url
 from .errors import SeedreamMCPError
 from .file_manager import FileManager, FileManagerError
-from .formats import EXTENSION_BY_MIME, is_known_image_bytes
+from .formats import EXTENSION_BY_MIME, _format_file_size_mb, is_known_image_bytes
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -284,8 +284,8 @@ class AutoSaveManager:
         estimated_size = (len(normalized_payload) * 3) // 4
         if estimated_size > self.download_manager.max_file_size:
             raise AutoSaveError(
-                f"Base64数据过大: 约 {estimated_size / 1024 / 1024:.1f}MB，"
-                f"最大支持 {self.download_manager.max_file_size / 1024 / 1024:.1f}MB"
+                f"Base64数据过大: 约 {_format_file_size_mb(estimated_size)}，"
+                f"最大支持 {_format_file_size_mb(self.download_manager.max_file_size)}"
             )
 
         try:
@@ -295,8 +295,8 @@ class AutoSaveManager:
 
         if len(content_bytes) > self.download_manager.max_file_size:
             raise AutoSaveError(
-                f"解码后数据过大: {len(content_bytes) / 1024 / 1024:.1f}MB，"
-                f"最大支持 {self.download_manager.max_file_size / 1024 / 1024:.1f}MB"
+                f"解码后数据过大: {_format_file_size_mb(len(content_bytes))}，"
+                f"最大支持 {_format_file_size_mb(self.download_manager.max_file_size)}"
             )
 
         if not is_known_image_bytes(content_bytes):
