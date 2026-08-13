@@ -13,7 +13,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from mcp.types import CallToolResult, TextContent
 
 from ...config import SeedreamConfig
-from ...utils.errors import format_error_for_user
+from ...utils.errors import (
+    SeedreamAPIError,
+    SeedreamConfigError,
+    SeedreamNetworkError,
+    SeedreamTimeoutError,
+    SeedreamValidationError,
+    format_error_for_user,
+)
 from ._helpers import (
     _safe_ctx_log,
     _safe_report_progress,
@@ -53,6 +60,29 @@ __all__ = [
     "format_generation_response",
     "update_result_with_auto_save",
 ]
+
+
+def _classify_generation_error_type(exc: Exception) -> str:
+    """将异常映射为稳定的结构化错误码，避免向 structuredContent 暴露内部异常类名。
+
+    按自定义异常类型与 HTTP 状态码分支，输出固定的公开错误码字符串，便于客户端按码处理
+    且不泄露实现细节；未识别异常统一归为 generation_failed。
+    """
+    if isinstance(exc, SeedreamConfigError):
+        return "config_error"
+    if isinstance(exc, SeedreamValidationError):
+        return "validation_error"
+    if isinstance(exc, SeedreamTimeoutError):
+        return "timeout_error"
+    if isinstance(exc, SeedreamNetworkError):
+        return "network_error"
+    if isinstance(exc, SeedreamAPIError):
+        if exc.status_code == 401:
+            return "auth_error"
+        if exc.status_code == 429:
+            return "rate_limited"
+        return "api_error"
+    return "generation_failed"
 
 
 async def execute_generation_handler(
@@ -174,6 +204,9 @@ async def execute_generation_handler(
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
                 await _safe_ctx_log(ctx, "warning", f"自动保存失败，已降级跳过：{auto_save_error}")
 
+        # 自动保存可能改写 result，须在其之后计算一次图片列表，供后续纯函数复用，
+        # 避免 extract_images 在格式化、结构化与日志阶段重复遍历同一结果。
+        images = extract_images(result)
         response_text = format_generation_response(
             completion_title,
             result,
@@ -182,6 +215,7 @@ async def execute_generation_handler(
             auto_save_results,
             context.enable_auto_save,
             auto_save_error=auto_save_error,
+            images=images,
         )
 
         structured_result = _build_generation_structured_result(
@@ -190,14 +224,14 @@ async def execute_generation_handler(
             context=context,
             auto_save_results=auto_save_results,
             auto_save_error=auto_save_error,
+            images=images,
         )
         await _safe_report_progress(ctx, progress=100.0, message="请求处理完成")
-        image_count = len(extract_images(result))
         await _safe_ctx_log(
             ctx,
             "info" if result.get("success") else "warning",
             f"{tool_name} {'完成' if result.get('success') else '未成功'}，"
-            f"共 {image_count} 张图片",
+            f"共 {len(images)} 张图片",
         )
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)],
@@ -216,7 +250,7 @@ async def execute_generation_handler(
                 "success": False,
                 "status": "failed",
                 "error": {
-                    "type": exc.__class__.__name__,
+                    "type": _classify_generation_error_type(exc),
                     "message": format_error_for_user(exc),
                 },
             },

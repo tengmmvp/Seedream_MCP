@@ -1,27 +1,39 @@
 services:
   seedream-mcp:
-    # 镜像名须与 release.yml 推送的 GHCR 路径一致(GHCR 会将仓库名 Seedream_MCP 小写化为 seedream_mcp)
+    # 镜像名须与 release.yml 推送的 GHCR 路径一致(GHCR 将仓库名 Seedream_MCP 小写化为 seedream_mcp)
     image: ghcr.io/tengmmvp/seedream_mcp:latest
     container_name: seedream-mcp-server
     restart: unless-stopped
+    # docker-compose 部署使用 streamable-http 传输(stdio 需 attach,不适合 up -d)。
+    # 非回环绑定(0.0.0.0)须配置鉴权令牌 SEEDREAM_HTTP_AUTH_TOKEN(见下,必填)。
+    # 默认 --insecure-allow-non-tls 假定部署在 TLS 反向代理之后;直连暴露会致 Bearer 明文传输。
+    # 如需容器内 TLS,改挂证书并用 --ssl-certfile/--ssl-keyfile,同时去掉 --insecure-allow-non-tls。
+    command:
+      - "--transport"
+      - "streamable-http"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--insecure-allow-non-tls"
+    ports:
+      - "${SEEDREAM_HTTP_PORT:-8000}:8000"
     environment:
-      # 必需配置
+      # 必需:火山引擎 API 密钥
       - ARK_API_KEY=${ARK_API_KEY}
-
+      # 必需:streamable-http 鉴权令牌(非回环绑定强制要求,未设置时服务启动即失败)
+      - SEEDREAM_HTTP_AUTH_TOKEN=${SEEDREAM_HTTP_AUTH_TOKEN}
       # API 与模型
       - ARK_BASE_URL=${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
       - SEEDREAM_MODEL_ID=${SEEDREAM_MODEL_ID:-doubao-seedream-5.0}
       - SEEDREAM_DEFAULT_SIZE=${SEEDREAM_DEFAULT_SIZE:-2K}
       - SEEDREAM_DEFAULT_WATERMARK=${SEEDREAM_DEFAULT_WATERMARK:-false}
-
       # 超时与重试
       - SEEDREAM_TIMEOUT=${SEEDREAM_TIMEOUT:-60}
       - SEEDREAM_API_TIMEOUT=${SEEDREAM_API_TIMEOUT:-600}
       - SEEDREAM_MAX_RETRIES=${SEEDREAM_MAX_RETRIES:-3}
-
       # 日志
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-
       # 自动保存
       - SEEDREAM_AUTO_SAVE_ENABLED=${SEEDREAM_AUTO_SAVE_ENABLED:-true}
       - SEEDREAM_AUTO_SAVE_BASE_DIR=${SEEDREAM_AUTO_SAVE_BASE_DIR:-/app/seedream_images}
@@ -31,17 +43,12 @@ services:
       - SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=${SEEDREAM_AUTO_SAVE_MAX_CONCURRENT:-5}
       - SEEDREAM_AUTO_SAVE_DATE_FOLDER=${SEEDREAM_AUTO_SAVE_DATE_FOLDER:-true}
       - SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=${SEEDREAM_AUTO_SAVE_CLEANUP_DAYS:-30}
-
       # 流式处理
       - SEEDREAM_STREAM_BUFFER_MAX_SIZE=${SEEDREAM_STREAM_BUFFER_MAX_SIZE:-10485760}
       - SEEDREAM_STREAM_CHUNK_SIZE=${SEEDREAM_STREAM_CHUNK_SIZE:-1048576}
-
       # 客户端性能
       - SEEDREAM_IMAGE_PREPARE_CONCURRENCY=${SEEDREAM_IMAGE_PREPARE_CONCURRENCY:-5}
       - SEEDREAM_PREPARE_CACHE_MAX=${SEEDREAM_PREPARE_CACHE_MAX:-32}
-
-      # streamable-http 鉴权令牌(暴露到非回环地址时务必配置;stdio 不需要)
-      - SEEDREAM_HTTP_AUTH_TOKEN=${SEEDREAM_HTTP_AUTH_TOKEN:-}
     volumes:
       # 保存生成的图片到本地
       - ./seedream_images:/app/seedream_images
@@ -49,10 +56,9 @@ services:
       - ./logs:/app/logs
       # 可以挂载配置文件(完整配置项见 .env.example)
       - ./.env:/app/.env:ro
-    stdin_open: true
-    tty: true
     healthcheck:
-      test: ["CMD", "python", "-c", "import seedream_mcp; print('OK')"]
+      # 探测 streamable-http 端口监听,验证服务已启动(比仅校验 import 更可靠)
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8000), timeout=5).close()"]
       interval: 30s
       timeout: 10s
       retries: 3

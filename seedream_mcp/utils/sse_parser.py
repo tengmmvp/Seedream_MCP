@@ -143,7 +143,9 @@ async def parse_sse_response(
         if not chunk:
             continue
 
-        buffer += chunk
+        # 规范化行尾为 \n（兼容 CRLF/CR），使事件分隔 \n\n 判定对所有行尾风格一致，
+        # 避免上游或中间代理改用 CRLF 时事件无法切分致整流丢失
+        buffer += chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
         processed_bytes += len(chunk)
 
         if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
@@ -191,7 +193,7 @@ async def parse_sse_response(
             status = "completed"
             tools = evt_tools
 
-    # 与非流式 _build_api_result 保持一致：当存在部分失败（data 含 error 项）时
+    # 与非流式 _build_api_result 保持一致：当 data 项含 error 即存在部分失败时
     # 标记 status=partial，避免流式/非流式在同等部分失败场景下 status 语义不一致，
     # 进而误导下游对生成结果完整性的判断。
     if status in (None, "completed") and any(

@@ -169,12 +169,24 @@ def _is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
         return False
 
 
+def _is_unc_path(path_str: str) -> bool:
+    """判断是否为 Windows UNC 路径(以 \\\\ 或 // 开头)。
+
+    UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
+    避免越界校验尚未拒绝时凭据已向远端泄露。
+    """
+    stripped = path_str.lstrip()
+    return stripped.startswith("\\\\") or stripped.startswith("//")
+
+
 def is_path_within_base(path: Path, base_dir: Path) -> bool:
     """判断路径是否位于基础目录内。
 
     将 path 与 base_dir 均 resolve 后比较，可拦截包含 ``..`` 或经由符号链接
-    指向基础目录之外的路径。
+    指向基础目录之外的路径。UNC 路径直接判为越界，不进入 resolve 以免触发 SMB。
     """
+    if _is_unc_path(str(path)):
+        return False
     return _is_within_resolved(path.resolve(), base_dir.resolve())
 
 
@@ -182,7 +194,10 @@ def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
     """判断路径是否位于任一基础目录内。
 
     path 仅 resolve 一次后与各 base 比较，避免对每个 base 重复解析同一 path。
+    UNC 路径直接判为越界，不进入 resolve 以免触发 SMB。
     """
+    if _is_unc_path(str(path)):
+        return False
     resolved_path = path.resolve()
     for base_dir in base_dirs:
         if _is_within_resolved(resolved_path, base_dir.resolve()):
@@ -203,6 +218,10 @@ def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
     try:
         path_obj = Path(path)
 
+        # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝
+        if _is_unc_path(str(path_obj)):
+            raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
+
         if path_obj.is_absolute():
             return path_obj.resolve()
 
@@ -212,6 +231,9 @@ def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
         else:
             return path_obj.resolve()
 
+    except ValueError:
+        # UNC 拒绝等 ValueError 原样抛出，保留具体原因
+        raise
     except Exception as e:
         logger.error("路径标准化失败 {}: {}", path, e)
         raise ValueError(f"无效的路径格式: {path}")
@@ -260,7 +282,7 @@ def validate_image_path(
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
-        三元组 (是否有效, 错误信息, 标准化路径);URL 有效但路径为 None。
+        三元组 (是否有效, 错误信息, 标准化路径)；URL 有效但路径为 None。
     """
     try:
         if path.startswith(("http://", "https://")):
@@ -418,6 +440,10 @@ def _file_uri_to_path(uri: str) -> Optional[Path]:
         return None
 
     if not path_part:
+        return None
+
+    # file://localhost//server/share 等 netloc 合法但 path 为 UNC 形式，resolve 会触发 SMB
+    if _is_unc_path(path_part):
         return None
 
     try:

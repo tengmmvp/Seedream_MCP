@@ -518,14 +518,16 @@ class SeedreamClient:
             raise self._handle_api_error(e)
 
     async def close(self) -> None:
-        """
-        关闭 HTTP 客户端连接
+        """关闭 HTTP 客户端连接，释放资源。
 
-        释放客户端资源，关闭所有打开的连接。
+        持 _client_lock 与 _ensure_client 串行，避免并发关闭与首次创建交错，
+        导致后续请求拿到 None 或已关闭的客户端。
         """
-        if self._client:
-            await self._client.aclose()
+        async with self._client_lock:
+            client = self._client
             self._client = None
+        if client is not None:
+            await client.aclose()
 
     def _build_http_timeout(self) -> httpx.Timeout:
         """
@@ -751,8 +753,11 @@ class SeedreamClient:
         self.logger.debug("请求数据(脱敏): {}", safe_request_data)
 
     def _build_api_result(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        统一归一化 API 返回结果结构。
+        """统一归一化 API 返回结果结构。
+
+        success 仅代表 HTTP 层成功，即已收到 200 响应；body 级的部分失败或空数据
+        由 status 与 data 共同表达，status 取值为 completed/partial/failed，
+        调用方应同时检查 status 而非仅依赖 success。
         """
         data = payload.get("data")
         if isinstance(data, list):

@@ -11,14 +11,14 @@ from urllib.parse import urlparse
 
 
 def get_file_extension_from_url(url: str, default: str = ".jpeg") -> str:
-    """从 URL 路径推断文件扩展名（含点号）。
+    """从 URL 路径推断文件扩展名，含点号。
 
     Args:
         url: 图片 URL。
-        default: 无法推断时返回的默认扩展名（含点号）。
+        default: 无法推断时返回的默认扩展名，含点号。
 
     Returns:
-        小写的扩展名（含点号），或 ``default``。
+        小写的扩展名，含点号，或 ``default``。
     """
     try:
         # 扩展名仅从 URL 路径部分提取，query 与 fragment 不参与推断

@@ -125,9 +125,9 @@ class AutoSaveManager:
 
         Args:
             base_dir: 基础保存目录
-            download_timeout: 下载超时时间（仅自建下载管理器时生效）
-            max_retries: 最大重试次数（仅自建下载管理器时生效）
-            max_file_size: 最大文件大小（仅自建下载管理器时生效）
+            download_timeout: 下载超时时间，仅自建下载管理器时生效
+            max_retries: 最大重试次数，仅自建下载管理器时生效
+            max_file_size: 最大文件大小，仅自建下载管理器时生效
             max_concurrent: 最大并发下载数
             date_folder: 是否按日期创建文件夹
             cleanup_days: 自动清理天数，0表示不清理
@@ -156,7 +156,7 @@ class AutoSaveManager:
         """
         释放底层下载资源
 
-        仅关闭本实例自建的下载管理器；外部共享的下载管理器由其所有者（如 lifespan）管理。
+        仅关闭本实例自建的下载管理器；外部共享的下载管理器由其所有者管理，如 lifespan。
         """
         if self._owns_download_manager:
             await self.download_manager.close()
@@ -396,7 +396,7 @@ class AutoSaveManager:
         """并发执行保存任务并归集结果。
 
         限制并发、将异常归一化为失败结果、统计成功数并触发节流清理。fallback_url_key
-        指定从 image_data 取原始标识的键（url 分支），None 时用固定 "base64"。
+        指定 url 分支从 image_data 取原始标识的键；为 None 时固定为 "base64"。
         """
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
@@ -410,18 +410,21 @@ class AutoSaveManager:
 
         processed_results: List[AutoSaveResult] = []
         for i, result in enumerate(results):
-            # 取消信号必须向上传播，避免被下面的 BaseException 兜底吞掉
+            # 取消信号必须向上传播，避免被下面的异常兜底吞掉
             if isinstance(result, asyncio.CancelledError):
                 raise result
-            if isinstance(result, BaseException):
+            if isinstance(result, Exception):
                 fallback = (
                     image_data[i].get(fallback_url_key, "unknown") if fallback_url_key else "base64"
                 )
                 processed_results.append(
                     AutoSaveResult(success=False, original_url=fallback, error=str(result))
                 )
-            else:
+            elif isinstance(result, AutoSaveResult):
                 processed_results.append(result)
+            else:
+                # 非 Exception 的 BaseException 视为进程级信号继续向上传播，不降级为失败结果
+                raise result
 
         success_count = sum(1 for r in processed_results if r.success)
         logger.info("{}: {}/{} 成功", log_label, success_count, len(image_data))

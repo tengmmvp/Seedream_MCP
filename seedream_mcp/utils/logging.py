@@ -28,7 +28,7 @@ def setup_logging(
 
     Args:
         log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_file: 日志文件路径，如果为None则使用默认路径
+        log_file: 日志文件路径，如果为 None 则使用默认路径
         enable_console: 是否启用控制台输出
         enable_file: 是否启用文件输出
         force_standard_logging: 是否强制接管标准库 logging 配置
@@ -114,13 +114,13 @@ def setup_logging(
 
 def get_logger(name: Optional[str] = None) -> Any:
     """
-    获取logger实例
+    获取 logger 实例
 
     Args:
-        name: logger名称，如果为None则使用调用模块名
+        name: logger 名称，如果为 None 则使用调用模块名
 
     Returns:
-        logger实例
+        logger 实例
     """
     if name is None:
         # 自动获取调用模块名

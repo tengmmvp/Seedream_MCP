@@ -402,6 +402,14 @@ class DownloadManager:
                 while True:
                     # 依赖网络状态的 DNS 校验放在重试循环内，保障 max_retries 生效
                     await self._validate_url_for_request(current_url)
+                    # 固有 TOCTOU 窗口：此处 DNS 校验通过后，aiohttp 内置解析器会在
+                    # 真正建连前再次独立解析主机名，攻击者可借 DNS rebinding 让实际连接
+                    # 落向内网。当前采用反应式对端 IP 复核（_validate_connected_peer_ip）
+                    # 在连接建立后立即阻断并拒绝下载，故内网连接最多完成 TCP 握手即被放弃，
+                    # 不会读取或落盘响应。彻底闭合该窗口需用自定义 TCPConnector 钉住已校验
+                    # 公网 IP（resolve-once-and-pin），但该改动跨连接与重定向生命周期、风险
+                    # 较高，暂不引入；当前下载 URL 均来自火山引擎 API 返回，属可信来源，
+                    # 残余风险在可控边界内。
                     async with session.get(
                         current_url,
                         headers=headers,
@@ -528,8 +536,16 @@ class DownloadManager:
                 logger.warning("文件系统错误 (尝试 {}): {}", attempt + 1, e, exc_info=True)
 
             except Exception as e:
-                last_error = DownloadError(f"未知错误: {e}")
-                logger.warning("下载失败 (尝试 {}): {}", attempt + 1, e, exc_info=True)
+                # 编程 bug、序列化失败、值错误等非可重试意外错误直接抛出，不浪费退避等待。
+                # 上方分支已精确覆盖可重试场景：HTTP 5xx、超时、网络/传输、文件系统错误。
+                # 调用方 auto_save 仍有兜底 except Exception 负责降级返回原始 URL。
+                logger.warning(
+                    "下载出现非预期错误，不再重试 (尝试 {}): {}",
+                    attempt + 1,
+                    e,
+                    exc_info=True,
+                )
+                raise
             finally:
                 self._cleanup_temp_file(temp_path, created=temp_created)
 

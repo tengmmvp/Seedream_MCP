@@ -648,7 +648,7 @@ async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
 
     await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
 
-    # 5.0 Pro 仅不支持 auto 即开启组图；disabled 即关闭组图、单图输出应被接受
+    # 5.0 Pro 不支持组图，sequential_image_generation 须强制 disabled 以单图输出
     assert captured_request["sequential_image_generation"] == "disabled"
 
 

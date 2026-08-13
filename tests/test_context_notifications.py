@@ -4,7 +4,7 @@ MCP 上下文通知（进度上报 / 日志推送）容错封装与工具元数�
 覆盖：
 - _safe_ctx_log：按级别分发到对应 Context 方法，客户端不支持 logging 能力时静默跳过
 - _safe_report_progress：上报失败不影响主流程
-- 工具顶层 title 注册（对齐 MCP 2025-06-18 规范的 Tool.title 顶层字段）
+- 工具顶层 title 注册，对齐 MCP 2025-06-18 规范的 Tool.title 顶层字段
 """
 
 from __future__ import annotations

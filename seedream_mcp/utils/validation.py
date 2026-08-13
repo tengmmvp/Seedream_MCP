@@ -153,18 +153,18 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
 
 def _validate_url(url: str) -> str:
     """
-    验证HTTP/HTTPS URL的格式正确性
+    验证 HTTP/HTTPS URL 的格式正确性
 
-    检查URL的scheme、netloc等部分是否完整。
+    检查 URL 的 scheme、netloc 等部分是否完整。
 
     Args:
-        url: 待验证的URL字符串
+        url: 待验证的 URL 字符串
 
     Returns:
-        str: 原始URL（验证通过）
+        str: 原始 URL（验证通过）
 
     Raises:
-        SeedreamValidationError: 当URL格式无效时抛出
+        SeedreamValidationError: 当 URL 格式无效时抛出
     """
     try:
         parsed = urlparse(url)
@@ -204,7 +204,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     - 文件是否存在
     - 是否为有效文件（而非目录）
     - 文件扩展名是否支持
-    - 文件大小是否超过30MB
+    - 文件大小是否超过 30MB
     - 图像尺寸是否符合要求（宽高≥15px，宽高比在1/16到16之间，总像素≤6000×6000）
 
     Args:
@@ -284,20 +284,20 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 
 def _validate_data_uri(data_uri: str) -> str:
     """
-    验证Data URI格式的图像数据
+    验证 Data URI 格式的图像数据
 
     执行以下检查：
-    - Data URI格式是否正确（data:image/<格式>;base64,<数据>）
+    - Data URI 格式是否正确（data:image/<格式>;base64,<数据>）
     - 图像格式是否支持
-    - Base64数据是否可解码
-    - 解码后数据大小是否超过30MB
+    - Base64 数据是否可解码
+    - 解码后数据大小是否超过 30MB
     - 图像尺寸是否符合要求（宽高≥15px，宽高比在1/16到16之间，总像素≤6000×6000）
 
     Args:
-        data_uri: Data URI格式的图像字符串
+        data_uri: Data URI 格式的图像字符串
 
     Returns:
-        str: 原始Data URI（验证通过）
+        str: 原始 Data URI（验证通过）
 
     Raises:
         SeedreamValidationError: 当格式无效、数据损坏或尺寸超限时抛出
@@ -412,7 +412,7 @@ def validate_watermark(watermark: Any) -> bool:
     支持布尔值或可转换为布尔值的字符串（true/false、yes/no、on/off、1/0）。
 
     Args:
-        watermark: 水印开关配置，支持bool或str类型
+        watermark: 水印开关配置，支持 bool 或 str 类型
 
     Returns:
         bool: 标准化后的布尔值
@@ -604,11 +604,12 @@ def validate_stream(stream: bool, model_id: str) -> bool:
     """
     验证流式输出参数与模型兼容性。
 
-    Seedream 5.0 Pro 不支持流式输出（stream，传参报错），仅 5.0 Lite/4.5/4.0 支持。
+    Seedream 5.0 Pro 不支持流式输出 stream，传参即报错；仅 5.0 Lite/4.5/4.0 支持。
     """
-    if stream and not get_model_capabilities(model_id).supports_stream:
+    caps = get_model_capabilities(model_id)
+    if stream and not caps.supports_stream:
         raise SeedreamValidationError(
-            "doubao-seedream-5.0-pro 不支持流式输出（stream），请使用 5.0 Lite/4.5/4.0",
+            f"{caps.display_name} 不支持流式输出（stream），请改用支持流式的模型",
             field="stream",
             value=stream,
         )
@@ -634,7 +635,14 @@ def validate_max_images(max_images: Any) -> int:
         raise SeedreamValidationError(
             "最大图像数量必须是整数", field="max_images", value=max_images
         )
-    if isinstance(max_images, int):
+    if isinstance(max_images, float):
+        # 拒绝非整数浮点避免静默截断，与 _coerce_positive_int_in_range 行为一致
+        if not max_images.is_integer():
+            raise SeedreamValidationError(
+                "最大图像数量必须是整数", field="max_images", value=max_images
+            )
+        validated_value = int(max_images)
+    elif isinstance(max_images, int):
         validated_value = max_images
     else:
         try:

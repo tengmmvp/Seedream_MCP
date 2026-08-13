@@ -68,7 +68,7 @@ def test_cleanup_old_files_does_not_descend_into_symlink_dir(tmp_path: Path) -> 
 
     构造 base_dir 内的符号链接目录，指向 base_dir 之外的临时目录；该外部目录含一个
     mtime 已过期的 marker 文件。若 cleanup 错误地跟随符号链接目录下降，会 stat 到该
-    marker 并因过期将其删除（Windows 下还可能触发指向外部资源的 SMB 出站认证）。
+    marker 并因过期将其删除；Windows 下还可能触发指向外部资源的 SMB 出站认证。
     断言 cleanup 后外部 marker 仍存在、内容未被触碰、且未计入删除数量。
     """
     manager = FileManager(base_dir=tmp_path)

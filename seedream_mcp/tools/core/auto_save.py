@@ -100,8 +100,7 @@ async def auto_save_from_urls(
     tool_name: str,
     download_manager: Optional[DownloadManager] = None,
 ) -> List[AutoSaveResult]:
-    """
-    从 URL 异步下载并保存图片
+    """从 URL 异步下载并保存图片。
 
     根据配置项自动解析基础目录，支持批量下载并记录保存结果，
     包含超时控制、重试机制及并发管理。
@@ -113,6 +112,7 @@ async def auto_save_from_urls(
         save_path: 用户指定的保存路径，可选。
         custom_name: 自定义文件名前缀，可选。
         tool_name: 工具名称标识，用于路径组织。
+        download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
 
     Returns:
         保存结果对象列表，每个对象包含成功状态、路径及错误信息。
@@ -140,8 +140,7 @@ async def auto_save_from_base64(
     tool_name: str,
     download_manager: Optional[DownloadManager] = None,
 ) -> List[AutoSaveResult]:
-    """
-    从 Base64 数据异步解码并保存图片
+    """从 Base64 数据异步解码并保存图片。
 
     根据配置项自动解析基础目录，支持批量解码并保存，
     包含文件大小限制、重试机制及并发管理。
@@ -153,6 +152,7 @@ async def auto_save_from_base64(
         save_path: 用户指定的保存路径，可选。
         custom_name: 自定义文件名前缀，可选。
         tool_name: 工具名称标识，用于路径组织。
+        download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
 
     Returns:
         保存结果对象列表，每个对象包含成功状态、路径及错误信息。

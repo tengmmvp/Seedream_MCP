@@ -41,6 +41,12 @@ ENTRYPOINT ["python", "-m", "seedream_mcp.server"]
 # 默认参数
 CMD ["--help"]
 
+# 健康检查采用导入式：验证包与运行时依赖可正常加载，作为最小可移植的存活信号。
+# streamable-http 模式的就绪探针需依赖具体挂载路径（端点未固定），故不在此探活 HTTP；
+# stdio 模式下容器存活由进程本身体现，此检查仅作运行时环境完整性兜底。
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import seedream_mcp" || exit 1
+
 # 镜像版本
 ARG APP_VERSION=dev
 

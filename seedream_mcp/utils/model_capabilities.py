@@ -47,7 +47,7 @@ class ModelCapabilities:
     - max_reference_images: 参考图数量上限，5.0 Pro 为 10，其余家族为 14。
     - allowed_presets: 允许的尺寸预设档位白名单，驱动 validate_size_for_model 档位校验。
     - min_size_pixels/max_size_pixels: 像素总量的上下限，None 表示该家族不约束像素区间。
-    - size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束（5.0 Pro 要求 16 的倍数）。
+    - size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束；5.0 Pro 要求宽高为 16 的倍数。
     - supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
     """
 

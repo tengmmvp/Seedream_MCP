@@ -210,6 +210,31 @@ async def test_bearer_auth_middleware_rejects_invalid_token() -> None:
     assert sent[0]["status"] == 401
 
 
+async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
+    """401 响应须含 www-authenticate 头与 invalid_token 错误体，符合 RFC 6750。"""
+    sent: list[dict] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("鉴权失败不应进入下游应用")
+
+    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    scope = {"type": "http", "headers": [(b"authorization", b"Bearer wrong")]}
+    await middleware(scope, None, send)
+
+    start, body_msg = sent[0], sent[1]
+    assert start["type"] == "http.response.start"
+    assert start["status"] == 401
+    headers = dict(start["headers"])
+    assert headers[b"www-authenticate"] == b'Bearer error="invalid_token"'
+    assert headers[b"content-type"] == b"application/json"
+    assert body_msg["type"] == "http.response.body"
+    body = body_msg["body"].decode("utf-8")
+    assert "invalid_token" in body
+
+
 async def test_bearer_auth_middleware_rejects_missing_header() -> None:
     sent: list[dict] = []
 

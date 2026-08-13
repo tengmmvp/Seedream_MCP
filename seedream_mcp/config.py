@@ -282,12 +282,21 @@ def normalize_model_selector(value: object) -> str:
 
 
 def parse_bool(value: object) -> bool:
-    """将值解析为布尔，接受 true/1/yes/on 为真，其余为假。"""
+    """将值解析为布尔。
+
+    接受 true/yes/on/1 为真、false/no/off/0 为假；其余值抛出 SeedreamConfigError，
+    避免 enabled 这类拼写错误被静默当作 False，导致功能未生效却无报错。
+    """
     if isinstance(value, bool):
         return value
     if value is None:
         return False
-    return str(value).strip().lower() in ("true", "1", "yes", "on")
+    normalized = str(value).strip().lower()
+    if normalized in ("true", "1", "yes", "on"):
+        return True
+    if normalized in ("false", "0", "no", "off"):
+        return False
+    raise SeedreamConfigError(f"无法解析为布尔值(期望 true/false/yes/no/on/off/1/0): {value!r}")
 
 
 def parse_int(value: object) -> int:
@@ -313,8 +322,9 @@ def _read_env_values(env_file: Optional[str]) -> dict[str, str]:
     """
     读取 .env 文件键值为字典，不写入进程环境变量。
 
-    显式 env_file 优先；未提供时按项目根 .env 与当前工作目录 .env 合并读取，
-    cwd 覆盖项目根。配置值经 _pick_config_value 按优先级解析，避免污染 os.environ。
+    显式传入 env_file 时只读取该文件，不再合并项目根或当前工作目录的 .env；
+    未提供时按项目根 .env 与当前工作目录 .env 合并读取，cwd 覆盖项目根。
+    配置值经 _pick_config_value 按优先级解析，避免污染 os.environ。
     """
 
     def _load_single_env_file(path: Path) -> dict[str, str]:

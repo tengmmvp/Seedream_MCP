@@ -45,8 +45,7 @@ class GenerationToolType(str, Enum):
 
 
 class OptimizePromptOptions(BaseModel):
-    """
-    提示词优化配置模型
+    """提示词优化配置模型。
 
     配置提示词优化策略，平衡生成质量与响应速度。
     """
@@ -61,8 +60,7 @@ class OptimizePromptOptions(BaseModel):
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, value: str) -> str:
-        """
-        校验并规范化优化模式
+        """校验并规范化优化模式。
 
         Args:
             value: 用户输入的优化模式字符串
@@ -207,8 +205,7 @@ class _ResponseAndExecutionInput(BaseModel):
 
 
 class BaseGenerationInput(BaseModel):
-    """
-    图片生成工具的通用输入校验基类。
+    """图片生成工具的通用输入校验基类。
 
     仅提供共享模型配置与校验逻辑，具体字段顺序由各工具输入模型定义。
     """
@@ -222,8 +219,7 @@ class BaseGenerationInput(BaseModel):
     @field_validator("save_path", "custom_name", check_fields=False)
     @classmethod
     def validate_non_empty(cls, value: Optional[str]) -> Optional[str]:
-        """
-        校验字符串字段非空
+        """校验字符串字段非空。
 
         Args:
             value: 待校验的字符串值
@@ -243,9 +239,7 @@ class BaseGenerationInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_parallel_options(self) -> "BaseGenerationInput":
-        """
-        校验并行执行参数组合。
-        """
+        """校验并行执行参数组合。"""
         request_count = getattr(self, "request_count", 1)
         parallelism = getattr(self, "parallelism", None)
         stream = bool(getattr(self, "stream", False))
@@ -267,9 +261,7 @@ class TextToImageInput(
     _SizeAndWatermarkInput,
     _PromptAndOptimizeInput,
 ):
-    """
-    文生图：通过提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
-    """
+    """文生图：通过提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。"""
 
     prompt: str = Field(
         ...,
@@ -285,9 +277,7 @@ class ImageToImageInput(
     _SingleImageInput,
     _PromptAndOptimizeInput,
 ):
-    """
-    图文生图：基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。
-    """
+    """图文生图：基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。"""
 
     prompt: str = Field(
         ...,
@@ -303,9 +293,7 @@ class MultiImageFusionInput(
     _MultiImageInput,
     _PromptAndOptimizeInput,
 ):
-    """
-    多图融合：根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
-    """
+    """多图融合：根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。"""
 
     prompt: str = Field(
         ...,
@@ -322,8 +310,10 @@ class SequentialGenerationInput(
     _SequentialImageInput,
     _PromptAndOptimizeInput,
 ):
-    """
-    组图输出：支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
+    """组图输出：支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
+
+    request_count 表示并行生成多组独立的组图结果，而非扩大单组内的图片数量；单组图片数量
+    由 max_images 控制，二者相互独立。
     """
 
     prompt: str = Field(
@@ -337,8 +327,7 @@ class SequentialGenerationInput(
     def validate_reference_images(
         cls, value: Optional[Union[str, List[str]]]
     ) -> Optional[List[str]]:
-        """
-        校验参考图片列表
+        """校验参考图片列表。
 
         Args:
             value: 单张图片或图片列表，None 时跳过校验
@@ -370,9 +359,7 @@ class SequentialGenerationInput(
 
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
-        """
-        校验参考图数量与生成数量的总和限制。
-        """
+        """校验参考图数量与生成数量的总和限制。"""
         # max_images 未显式传入时，按参考图数量自动推导（15 - 参考图数）。
         if "max_images" not in self.model_fields_set:
             self.max_images = resolve_sequential_max_images(None, self.image)
@@ -385,9 +372,7 @@ class SequentialGenerationInput(
 
 
 class BrowseImagesInput(BaseModel):
-    """
-    本地图片浏览：浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
-    """
+    """本地图片浏览：浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。"""
 
     model_config = ConfigDict(
         extra="forbid",
@@ -434,8 +419,7 @@ class BrowseImagesInput(BaseModel):
     @field_validator("directory")
     @classmethod
     def validate_directory(cls, value: Optional[str]) -> Optional[str]:
-        """
-        校验目录路径
+        """校验目录路径。
 
         Args:
             value: 用户指定的目录路径
@@ -456,8 +440,7 @@ class BrowseImagesInput(BaseModel):
     @field_validator("format_filter")
     @classmethod
     def normalize_suffixes(cls, value: Optional[List[str]]) -> Optional[List[str]]:
-        """
-        规范化文件后缀列表
+        """规范化文件后缀列表。
 
         Args:
             value: 用户提供的后缀列表

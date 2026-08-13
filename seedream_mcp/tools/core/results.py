@@ -148,15 +148,15 @@ def update_result_with_auto_save(
         更新后的结果字典，图片项含本地路径与 Markdown 引用。
     """
     updated_result = result.copy()
-    # 浅拷贝 data 层，使下方为图片项补充 local_path/markdown_ref 不影响传入的原始 result
-    if isinstance(updated_result.get("data"), list):
-        updated_result["data"] = [
-            dict(image) if isinstance(image, dict) else image for image in updated_result["data"]
-        ]
-
+    # 经 extract_images 将 data 归一化为扁平字典列表，对每个图片项创建浅拷贝并回写。
+    # 这样无论原始 data 是列表还是嵌套 {"data": ...} 字典，拷贝都覆盖到实际图片项，
+    # 避免下方补充 local_path/markdown_ref 时修改传入的原始 result。
     images = extract_images(updated_result)
+    copied_images: List[Dict[str, Any]] = [dict(image) for image in images]
+    updated_result["data"] = copied_images
+
     save_index = 0
-    for image in images:
+    for image in copied_images:
         # 仅回填含指定键数据的可保存项；谓词须与收集阶段 is_saveable_image 严格一致，
         # 否则按位置下标对齐时会因两侧集合不同而错位
         if not is_saveable_image(image, data_key):
@@ -286,6 +286,7 @@ def format_generation_response(
     auto_save_results: Optional[List[Any]] = None,
     auto_save_enabled: bool = False,
     auto_save_error: Optional[str] = None,
+    images: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """格式化图片生成结果为可读文本。
 
@@ -300,6 +301,8 @@ def format_generation_response(
         auto_save_results: 自动保存结果列表，可选。
         auto_save_enabled: 是否启用自动保存功能，默认 False。
         auto_save_error: 自动保存错误信息，存在时表示已降级跳过自动保存。
+        images: 预提取的图片列表，传入时跳过内部 extract_images 以避免重复计算；
+            None 时按需从 result 提取，便于函数独立调用。
 
     Returns:
         格式化后的响应文本，包含完整生成信息及元数据。
@@ -307,7 +310,8 @@ def format_generation_response(
     if not result.get("success"):
         return _format_failure_section(result)
 
-    images = extract_images(result)
+    if images is None:
+        images = extract_images(result)
     usage = result.get("usage", {})
 
     parts: List[str] = [title, f"提示词: {prompt}", f"尺寸: {size}", ""]
@@ -342,10 +346,20 @@ def _build_generation_structured_result(
     context: GenerationExecutionContext,
     auto_save_results: Optional[List[Any]],
     auto_save_error: Optional[str],
+    images: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """构建 MCP 工具结果的 structuredContent 字段，字段集与 GenerationStructuredOutput 对齐。
 
     成功与失败均返回同一结构，失败时额外写入归一化后的 error 字典，供 outputSchema 校验。
+
+    Args:
+        tool_name: 工具标识。
+        result: 图片生成结果字典。
+        context: 执行上下文，提供面向 schema 的参数字段。
+        auto_save_results: 自动保存结果对象列表。
+        auto_save_error: 自动保存错误信息。
+        images: 预提取的图片列表，传入时直接写入 data，避免重复调用 extract_images；
+            None 时从 result 提取，便于函数独立调用。
     """
     structured: Dict[str, Any] = {
         "tool": tool_name,
@@ -359,7 +373,7 @@ def _build_generation_structured_result(
         "tools": context.tools,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
-        "data": extract_images(result),
+        "data": images if images is not None else extract_images(result),
         "usage": result.get("usage", {}),
         "batch": result.get("batch"),
     }

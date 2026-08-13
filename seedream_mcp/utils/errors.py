@@ -68,7 +68,9 @@ class SeedreamAPIError(SeedreamMCPError):
         """序列化为字典，在基类基础上补充 status_code 与脱敏后的 response_data。"""
         result = super().to_dict()
         # message 可能拼入上游回显片段，超长时截断，避免潜在敏感内容撑爆输出
-        result["message"] = _truncate_value_for_output(result.get("message"), limit=500)
+        result["message"] = _truncate_value_for_output(
+            result.get("message"), limit=_MESSAGE_OUTPUT_LIMIT
+        )
         result.update(
             {
                 "status_code": self.status_code,
@@ -220,7 +222,7 @@ def format_error_for_user(error: Exception) -> str:
     elif isinstance(error, SeedreamAPIError):
         code_hint = f" [错误码: {error.error_code}]" if error.error_code else ""
         # message 可能回显上游响应，截断防长敏感片段进入用户可见输出
-        message = error.message[:500]
+        message = _truncate_value_for_output(error.message, limit=_MESSAGE_OUTPUT_LIMIT)
         if error.status_code == 401:
             return f"认证失败: {message}{code_hint}\n请检查您的API密钥是否正确设置。"
         elif error.status_code == 429:
@@ -236,20 +238,33 @@ def format_error_for_user(error: Exception) -> str:
     elif isinstance(error, SeedreamMCPError):
         return f"操作失败: {error.message}"
     else:
-        message = str(error)[:500]
+        message = _truncate_value_for_output(str(error), limit=_MESSAGE_OUTPUT_LIMIT)
         return f"未知错误: {message}"
 
 
 # 异常 value 序列化时的长度上限：避免 data URI 等大对象撑爆日志/结构化响应
 _VALUE_OUTPUT_LIMIT = 200
+# 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应
+_MESSAGE_OUTPUT_LIMIT = 500
+# dict/list 元素数超过此值即跳过 repr 直接给摘要，避免大集合 repr 造成内存放大
+_CONTAINER_REPR_ELEMENT_LIMIT = 50
+
+
+def _container_summary(value: Any) -> str:
+    """返回 dict/list 的元素数摘要，用于超限或元素过多时替代完整 repr。"""
+    if isinstance(value, dict):
+        return f"<truncated:dict, {len(value)} keys>"
+    return f"<truncated:list, {len(value)} items>"
 
 
 def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> Any:
     """截断过长的异常 value，防止 data URI、大字典等撑爆日志或结构化响应。
 
     - 字符串超限：保留前 ``limit`` 字符并标注原长度。
-    - dict/list 超限：仅保留类型与元素个数摘要。
+    - dict/list 元素过多或 repr 超限：仅保留类型与元素个数摘要。
     - None 或未超限：原样返回。
+
+    dict/list 先按元素数短路，仅对小集合计算 repr 判长，避免大集合 repr 造成内存放大。
     """
     if value is None:
         return None
@@ -258,15 +273,15 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
             return value
         return f"<truncated:{len(value)} chars> {value[:limit]}..."
     if isinstance(value, (dict, list)):
+        if len(value) > _CONTAINER_REPR_ELEMENT_LIMIT:
+            return _container_summary(value)
         try:
             repr_len = len(repr(value))
         except Exception:
             return f"<{type(value).__name__}>"
         if repr_len <= limit:
             return value
-        if isinstance(value, dict):
-            return f"<truncated:dict, {len(value)} keys>"
-        return f"<truncated:list, {len(value)} items>"
+        return _container_summary(value)
     return value
 
 

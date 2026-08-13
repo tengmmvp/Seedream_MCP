@@ -1,8 +1,8 @@
 """守护测试：_prepare_image_input 对同一 cache_key 的并发 miss 复用同一 asyncio.Task。
 
-防止 single-flight 去重退化的回归：当两个并发调用同时 miss 缓存时，必须共享同一在途
-task（_prepare_inflight），底层 prepare_image_input 仅被调用一次。若去重失效，并发
-请求会对同一参考图重复读取与编码，丧失该优化的核心价值。
+防止 single-flight 去重退化的回归：当两个并发调用同时 miss 缓存时，必须共享
+_prepare_inflight 中的同一在途 task，使底层 prepare_image_input 仅被调用一次。
+若去重失效，并发请求会对同一参考图重复读取与编码，丧失该优化的核心价值。
 """
 
 import asyncio
@@ -102,11 +102,11 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     assert creator.cancelled()
     assert waiter in done
 
-    # (a) 第二个等待者仍从共享的 inflight task 拿到正确结果，不应被连带取消
+    # 第二个等待者仍从共享的 inflight task 拿到正确结果，不应被连带取消
     assert not waiter.cancelled(), "等待者不应被创建者取消连带取消"
     assert waiter.result() == "prepared:https://example.com/ref.png"
-    # (b) fake 底层仅调用一次：两个并发调用共享同一 task
+    # fake 底层仅调用一次：两个并发调用共享同一 task
     assert call_count == 1
-    # (c) task 完成后 _prepare_inflight 已清空、缓存写入一条结果
+    # task 完成后 _prepare_inflight 已清空、缓存写入一条结果
     assert len(client._prepare_inflight) == 0
     assert len(client._prepare_cache) == 1

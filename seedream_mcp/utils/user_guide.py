@@ -195,6 +195,12 @@ def get_quick_tips() -> List[str]:
     ]
 
 
+# validate_image_path 错误消息关键词：按消息子串匹配分类提示，不依赖 path_utils 错误码
+_PATH_ERROR_KEYWORD_NOT_FOUND = "不存在"
+_PATH_ERROR_KEYWORD_FORMAT = "格式"
+_PATH_ERROR_KEYWORD_PERMISSION = "权限"
+
+
 def validate_and_suggest_path(path: str) -> Dict[str, Any]:
     """
     验证路径并提供建议
@@ -218,31 +224,31 @@ def validate_and_suggest_path(path: str) -> Dict[str, Any]:
     }
 
     if not is_valid:
-        # 获取路径建议
         suggestions = suggest_similar_paths(path)
         result["suggestions"] = suggestions
 
-        # 根据错误类型提供特定建议
-        if "不存在" in error_msg:
-            result["tips"].extend(
-                [
-                    "检查文件路径是否正确",
-                    "确认文件确实存在",
-                    "尝试使用绝对路径",
-                    "使用 seedream_browse_images 工具查找图片",
-                ]
-            )
-        elif "格式" in error_msg:
-            result["tips"].extend(
-                [
-                    "确保文件是图片格式",
-                    "检查文件扩展名是否正确",
-                    "支持的格式: " + supported_formats_summary(),
-                ]
-            )
-        elif "权限" in error_msg:
-            result["tips"].extend(
-                ["确保有读取文件的权限", "检查文件是否被占用", "尝试以管理员身份运行"]
-            )
+        # 按错误消息关键词匹配提示；首匹配命中即停止，保持原 if/elif 优先级
+        tips_by_keyword = {
+            _PATH_ERROR_KEYWORD_NOT_FOUND: [
+                "检查文件路径是否正确",
+                "确认文件确实存在",
+                "尝试使用绝对路径",
+                "使用 seedream_browse_images 工具查找图片",
+            ],
+            _PATH_ERROR_KEYWORD_FORMAT: [
+                "确保文件是图片格式",
+                "检查文件扩展名是否正确",
+                "支持的格式: " + supported_formats_summary(),
+            ],
+            _PATH_ERROR_KEYWORD_PERMISSION: [
+                "确保有读取文件的权限",
+                "检查文件是否被占用",
+                "尝试以管理员身份运行",
+            ],
+        }
+        for keyword, tips in tips_by_keyword.items():
+            if keyword in error_msg:
+                result["tips"].extend(tips)
+                break
 
     return result

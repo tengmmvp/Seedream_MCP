@@ -21,6 +21,9 @@ from .os_utils import open_no_follow_write
 
 logger = get_logger(__name__)
 
+# 文件名长度上限，避免超出常见文件系统目录项长度限制
+_MAX_FILENAME_LENGTH = 200
+
 
 class FileManagerError(SeedreamMCPError):
     """文件管理相关操作失败时抛出的异常。"""
@@ -112,9 +115,10 @@ class FileManager:
         filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
 
         # 限制文件名长度避免超出文件系统上限。
-        if len(filename) > 200:
+        # max 兜底：扩展名本身超长时差值为负，负索引会从尾部误截，故下限取 0。
+        if len(filename) > _MAX_FILENAME_LENGTH:
             name, ext = os.path.splitext(filename)
-            filename = name[: 200 - len(ext)] + ext
+            filename = name[: max(0, _MAX_FILENAME_LENGTH - len(ext))] + ext
 
         if not filename.strip():
             filename = "unnamed"

@@ -256,7 +256,7 @@ def test_build_config_none_overrides_fall_through_to_defaults(
     )
 
     assert config.api_key == "file_key"
-    # None override 不阻断了链路：watermark/model 均回落到默认值
+    # None override 不阻断后续链路：watermark/model 均回落到默认值
     assert config.default_watermark is False
     assert config.model_id == "doubao-seedream-5-0-260128"
 

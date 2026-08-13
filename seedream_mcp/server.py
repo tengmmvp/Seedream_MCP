@@ -158,13 +158,19 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
                 from .utils.download_manager import DownloadManager
 
                 new_client = SeedreamClient(config)
-                await new_client.__aenter__()
                 new_download_manager = DownloadManager(
                     timeout=config.auto_save_download_timeout,
                     max_retries=config.auto_save_max_retries,
                     max_file_size=config.auto_save_max_file_size,
                 )
-                await new_download_manager.__aenter__()
+                try:
+                    await new_client.__aenter__()
+                    await new_download_manager.__aenter__()
+                except Exception:
+                    # 部分初始化失败时关闭已创建的资源，避免连接池与文件描述符泄漏
+                    await _safe_close(new_client)
+                    await _safe_close(new_download_manager)
+                    raise
                 _shared_client = new_client
                 _shared_download_manager = new_download_manager
                 await _safe_close(old_client)
@@ -569,7 +575,7 @@ def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable
     """
     构建 MCP 运行传输方式。
 
-    SSE 传输已被 MCP 2025-03-26 规范弃用（由 Streamable HTTP 取代），
+    SSE 传输已被 MCP 2025-03-26 规范弃用并由 Streamable HTTP 取代，
     本服务仅支持 stdio（本地）与 streamable-http（远程）两种传输。
     """
     return cast(Literal["stdio", "streamable-http"], args.transport)
