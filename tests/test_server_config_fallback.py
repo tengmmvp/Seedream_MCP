@@ -1,3 +1,5 @@
+"""_get_active_config 优先级测试：CLI 注入配置优先于全局配置。"""
+
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 

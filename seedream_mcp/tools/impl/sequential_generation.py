@@ -1,20 +1,19 @@
-﻿"""
-组图输出工具模块
+﻿"""组图输出工具的 impl 处理器。
+
+作为薄适配器：从入参取出参考图与 max_images 字段，与 prompt 等封装为 ``_execute``
+回调，再委托 ``execute_generation_handler`` 流水线完成校验、调用、保存与结果格式化。
+字段规则与校验由 schemas.SequentialGenerationInput 单一定义。
 """
 
 from __future__ import annotations
 
-# 标准库导入
 from typing import TYPE_CHECKING, Any, Dict
 
-# 第三方库导入
 from mcp.types import CallToolResult
 
-# 项目内部导入 - 配置
 from ...config import SeedreamConfig
 from ...utils.logging import get_logger
 
-# 项目内部导入 - 核心功能
 from ..core.common import (
     execute_generation_handler,
     GenerationExecutionContext,
@@ -25,7 +24,6 @@ if TYPE_CHECKING:
 
     from ...client import SeedreamClient
 
-# 模块日志记录器
 logger = get_logger(__name__)
 
 
@@ -34,35 +32,20 @@ async def handle_sequential_generation(
     config: SeedreamConfig,
     ctx: "Context[Any, Any, Any] | None" = None,
 ) -> CallToolResult:
-    """
-    处理组图输出请求
+    """处理组图输出请求，基于参考图与文本生成一组内容关联的图片。
 
-    执行批量图片生成任务，支持提示词优化、多种响应格式、水印配置及自动保存功能。
-    根据用户配置参数调用 API 生成多张图片，并可选择性地将结果保存至本地。
+    流程由 ``execute_generation_handler`` 统一编排：参数经 schema 校验后构建执行上下文，
+    调用客户端生成，可选自动保存，最终返回结构化工具结果。完整字段规则与默认值见
+    ``SequentialGenerationInput``，本函数仅透传 arguments（含参考图与 max_images）。
 
     Args:
-        arguments: 请求参数字典，包含以下键值：
-            - prompt (str): 生成图片的提示词描述
-            - optimize_prompt_options (dict, optional): 提示词优化选项
-            - image (str, optional): 参考图片的 URL 或 Base64 编码
-            - size (str, optional): 图片尺寸规格
-            - watermark (bool, optional): 是否添加水印
-            - max_images (int, optional): 最大生成图片数量；未提供时由客户端按参考图自动推导
-            - response_format (str, optional): 响应格式，"url" 或 "b64_json"，默认为 "url"
-            - output_format (str, optional): 输出图片格式，仅 Seedream 5.0 支持 "jpeg" 或 "png"
-            - stream (bool, optional): 是否启用流式输出，默认为 False
-            - tools (list, optional): 模型工具配置，仅 Seedream 5.0 支持，如 [{"type": "web_search"}]
-            - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
-            - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
-            - auto_save (bool, optional): 是否自动保存图片
-            - save_path (str, optional): 自定义保存路径
-            - custom_name (str, optional): 自定义文件名前缀
+        arguments: 工具原始参数字典，结构见 ``SequentialGenerationInput``。
+        config: 当前生效的 SeedreamConfig。
+        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
 
     Returns:
-        CallToolResult: MCP 标准工具结果。
-            - content: 面向模型的文本摘要
-            - structuredContent: 结构化结果数据
-            - isError: 是否为错误结果
+        MCP 标准工具结果，含面向模型的文本摘要与 structuredContent，失败时不抛出异常而
+        以 ``isError=True`` 返回。
     """
     image = arguments.get("image")
     max_images = arguments.get("max_images")

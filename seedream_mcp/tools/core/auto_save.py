@@ -1,4 +1,9 @@
-"""生成结果的自动保存：从 URL 下载或从 Base64 解码并落盘。"""
+"""生成结果的自动保存：从 URL 下载或从 Base64 解码并落盘。
+
+``_auto_save`` 作为两个公开入口的公共骨架，按 resolve 得到的基础目录为每次调用独立构造
+AutoSaveManager 并在 finally 中关闭，使下载连接池的作用域限定在单次保存任务内，不跨工具
+调用残留状态。共享 DownloadManager 由调用方通过 lifespan 注入传入。
+"""
 
 from __future__ import annotations
 
@@ -139,15 +144,15 @@ async def auto_save_from_base64(
     包含文件大小限制、重试机制及并发管理。
 
     Args:
-        result: 图片生成结果字典,包含 b64_json 等信息。
-        prompt: 生成图片所用的提示词,用于元数据记录。
-        config: Seedream 配置实例,包含保存参数。
-        save_path: 用户指定的保存路径,可选。
-        custom_name: 自定义文件名前缀,可选。
-        tool_name: 工具名称标识,用于路径组织。
+        result: 图片生成结果字典，包含 b64_json 等信息。
+        prompt: 生成图片所用的提示词，用于元数据记录。
+        config: Seedream 配置实例，包含保存参数。
+        save_path: 用户指定的保存路径，可选。
+        custom_name: 自定义文件名前缀，可选。
+        tool_name: 工具名称标识，用于路径组织。
 
     Returns:
-        保存结果对象列表,每个对象包含成功状态,路径及错误信息。
+        保存结果对象列表，每个对象包含成功状态、路径及错误信息。
     """
     return await _auto_save(
         result=result,

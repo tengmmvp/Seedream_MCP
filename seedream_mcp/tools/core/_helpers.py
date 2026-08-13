@@ -148,11 +148,10 @@ async def _safe_ctx_log(
     level: str,
     message: str,
 ) -> None:
-    """
-    向 MCP 客户端推送日志通知（debug/info/warning/error）。
+    """向 MCP 客户端推送日志通知，级别限 debug/info/warning/error。
 
-    客户端未声明 logging 能力或推送失败时静默跳过，不影响主流程；与 loguru 文件日志
-    互补——此处面向客户端实时可见，文件日志面向离线排查。
+    客户端未声明 logging 能力或推送失败时静默跳过，不影响主流程。本函数面向客户端实时
+    可见的通知，与 loguru 文件日志互补，后者用于离线排查。
     """
     if ctx is None or level not in _VALID_LOG_LEVELS:
         return

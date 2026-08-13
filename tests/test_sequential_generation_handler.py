@@ -1,3 +1,5 @@
+"""handle_sequential_generation 对 max_images 透传与省略语义测试。"""
+
 import pytest
 from mcp.types import CallToolResult
 

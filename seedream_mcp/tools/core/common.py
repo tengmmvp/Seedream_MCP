@@ -1,8 +1,9 @@
 """生成类工具通用处理门面。
 
 内部按职责拆分到 _helpers/context/results/auto_save/parallel 子模块；本模块聚合公共
-符号供 tools/impl 与测试按既有路径 ``from ...core.common import X`` 导入，
-execute_generation_handler 作为四类生成工具的统一处理流水线留在此处。
+符号供 tools/impl 与测试按既有路径 ``from ...core.common import X`` 导入。
+``execute_generation_handler`` 作为四类生成工具的统一处理流水线留在此处，依次执行参数
+归一化与校验、客户端调用、自动保存、响应与结构化结果格式化，并对异常做统一降级处理。
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
     from ...client import SeedreamClient
 
 
-# 门面对外导出的公共符号；私有辅助（_safe_*、_resolve_base_dir 等）供内部与测试显式导入
+# 门面对外导出的公共符号。_safe_* 与 _resolve_base_dir 等私有辅助供内部子模块和测试显式导入。
 __all__ = [
     "GenerationExecutionContext",
     "aggregate_parallel_generation_results",
@@ -70,10 +71,28 @@ async def execute_generation_handler(
     ],
     ctx: Optional["Context[Any, Any, Any]"] = None,
 ) -> CallToolResult:
-    """
-    执行生成类工具的通用处理流水线
+    """执行生成类工具的通用处理流水线，返回 MCP 结构化工具结果。
 
-    包括：参数归一化、调用客户端、自动保存、响应格式化、统一错误处理。
+    流水线依次为：构建并校验执行上下文、按 request_count 单次或并行调用客户端、按
+    response_format 触发 URL 下载或 Base64 解码的自动保存、格式化面向模型的文本与
+    structuredContent。任意阶段抛出的异常都被捕获并降级为 ``isError=True`` 的结果，
+    不向调用方抛出。
+
+    Args:
+        arguments: 工具原始参数字典，由各 impl handler 透传。
+        config: 当前生效的 SeedreamConfig。
+        module_logger: 各 impl 模块的 loguru logger，用于离线日志。
+        tool_name: 工具标识，写入 structuredContent.tool 与日志。
+        completion_title: 成功时响应文本的标题。
+        failure_prefix: 失败时错误消息与日志的前缀。
+        guidance: 失败时追加给用户的排查建议文本。
+        start_log_message: 请求开始时的日志模板。
+        start_log_values_builder: 基于执行上下文构造日志模板参数的回调。
+        request_executor: 执行单次生成请求的回调，由各 impl 提供 client 调用差异。
+        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
+
+    Returns:
+        MCP 结构化工具结果。成功时含文本摘要与 structuredContent，失败时 isError 为 True。
     """
     try:
         from ...client import SeedreamClient

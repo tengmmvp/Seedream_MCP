@@ -1,3 +1,5 @@
+"""生成类工具并行请求支持、schema 约束与失败结果封装测试。"""
+
 from importlib import import_module
 
 import pytest

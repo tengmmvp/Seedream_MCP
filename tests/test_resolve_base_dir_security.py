@@ -1,4 +1,4 @@
-"""_resolve_base_dir 的 save_path 路径穿越守卫测试（A2 安全覆盖）。"""
+"""_resolve_base_dir 的 save_path 路径穿越守卫测试。"""
 
 from pathlib import Path
 

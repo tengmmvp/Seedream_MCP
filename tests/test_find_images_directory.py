@@ -48,7 +48,7 @@ def test_recursive_limit_one_skips_later_subtrees(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # 递归结构：root 下 a/ 与 b/ 各含一张图。limit=1 时字典序遍历进 a/ 取到首张即停，
-    # 不应再扫描 b/。直接证明 limit 真正限制了扫描量（提前停止生效）。
+    # 不应再扫描 b/，直接证明 limit 提前停止真正限制了扫描量。
     sub_a = tmp_path / "a"
     sub_b = tmp_path / "b"
     sub_a.mkdir()
@@ -117,12 +117,12 @@ def test_non_positive_limit_returns_empty_without_scan(
 
 
 def test_recursive_order_matches_global_sorted_path(tmp_path: Path) -> None:
-    # 递归 + 前缀目录名(a/a1/a10)、多层级(a/b)：
-    # 深度优先 + 同级按 normcase 排序须与对全部结果做 sorted(Path) 全局等价
-    # （同父兄弟前缀相同，整串比较退化为子段比较，等价于 Path 的 parts 全局序）；
+    # 递归且包含前缀目录名 a/a1/a10 与多层级 a/b：
+    # 深度优先加同级按 normcase 排序，须与对全部结果做 sorted(Path) 全局等价；
+    # 同父兄弟前缀相同，整串比较退化为子段比较，等价于 Path 的 parts 全局序，
     # 这是分页跨请求顺序连续一致的前提，须作为回归锁定。
-    # 注：Windows 文件系统大小写不敏感，不能同时建 b/ 与 B/ 目录（会冲突），
-    # 故大小写排序由单层 test_sort_matches_path_semantics 覆盖。
+    # 注意 Windows 文件系统大小写不敏感，不能同时建 b/ 与 B/ 目录以免冲突，
+    # 大小写排序改由单层 test_sort_matches_path_semantics 覆盖。
     (tmp_path / "a" / "b").mkdir(parents=True)
     for name in ("a1", "a10", "sub1", "sub10"):
         (tmp_path / name).mkdir()

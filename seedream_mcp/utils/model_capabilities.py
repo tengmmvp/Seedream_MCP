@@ -2,6 +2,10 @@
 
 集中管理各模型家族的识别与能力差异（output_format / tools / stream / 组图 / 参考图上限），
 供 validation、config、client、schemas 共享，避免分散的子串判定与能力表重复。
+
+本模块是数据驱动校验的唯一数据源：MODEL_CAPABILITIES 等数据表驱动各处的模型相关
+判定，新增模型只需扩展数据表而无需修改调用方代码。需注意 5.0 Pro 的 Model ID 含
+"doubao-seedream-5-0" 子串，与 5.0 Lite 规则重叠，家族解析时须先匹配 Pro 以免误判。
 """
 
 from __future__ import annotations
@@ -34,7 +38,18 @@ MODEL_FAMILY_UNKNOWN = "unknown"
 
 @dataclass(frozen=True)
 class ModelCapabilities:
-    """单个模型家族的能力声明，集中描述各模型支持的功能与限制。"""
+    """单个模型家族的能力声明，集中描述各模型支持的功能与限制。
+
+    字段含义：
+    - supports_output_format: 是否支持 output_format 参数，仅 5.0 系列支持。
+    - supports_tools: 是否支持联网搜索等生成工具，仅 5.0 Lite 支持。
+    - supports_stream: 是否支持流式输出，5.0 Pro 不支持。
+    - max_reference_images: 参考图数量上限，5.0 Pro 为 10，其余家族为 14。
+    - allowed_presets: 允许的尺寸预设档位白名单，驱动 validate_size_for_model 档位校验。
+    - min_size_pixels/max_size_pixels: 像素总量的上下限，None 表示该家族不约束像素区间。
+    - size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束（5.0 Pro 要求 16 的倍数）。
+    - supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
+    """
 
     family: str
     display_name: str

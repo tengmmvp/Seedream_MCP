@@ -1,5 +1,8 @@
-"""
-Seedream MCP工具 - 日志配置模块
+"""Seedream MCP 日志配置模块。
+
+基于 loguru 初始化日志系统，配置控制台与文件双通道输出。文件日志按 10 MB 轮换、
+保留 30 天并压缩归档。通过 InterceptHandler 将标准库 logging 调用重定向至 loguru，
+统一第三方库与项目内部的日志通道。
 """
 
 import functools
@@ -33,7 +36,6 @@ def setup_logging(
     # 移除默认的loguru处理器
     logger.remove()
 
-    # 设置日志级别
     level = log_level.upper()
 
     # 控制台输出配置
@@ -78,14 +80,13 @@ def setup_logging(
     # 配置标准库logging以重定向到loguru
     class InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
-            # 获取对应的loguru级别
             log_level: Union[str, int]
             try:
                 log_level = logger.level(record.levelname).name
             except ValueError:
                 log_level = record.levelno
 
-            # 查找调用者
+            # 向上跳过 logging 模块自身的帧，定位真实调用者以计算正确的日志深度
             frame: Optional[FrameType] = logging.currentframe()
             depth = 2
             while frame is not None and frame.f_code.co_filename == logging.__file__:
@@ -94,7 +95,7 @@ def setup_logging(
 
             logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
 
-    # 设置标准库logging
+    # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru
     logging.basicConfig(
         handlers=[InterceptHandler()],
         level=0,
@@ -165,7 +166,6 @@ def log_function_call(func: Callable[..., Any]) -> Callable[..., Any]:
             logger.error("函数调用失败: {} - {}", func_name, e)
             raise
 
-    # 检查是否是异步函数
     if inspect.iscoroutinefunction(func):
         return async_wrapper
     else:

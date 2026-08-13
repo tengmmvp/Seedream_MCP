@@ -58,11 +58,13 @@ def parse_sse_segment(
 
     try:
         event_text = raw_segment.decode("utf-8")
+        # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用
         data_parts: List[str] = []
         for line in event_text.split("\n"):
             if line.startswith("data:"):
                 data_parts.append(line[5:].strip())
         payload = "\n".join(data_parts) if data_parts else None
+        # [DONE] 为流结束哨兵而非图片事件，直接丢弃
         if not payload or payload == "[DONE]":
             return None
         parsed_payload = json.loads(payload)
@@ -112,7 +114,18 @@ async def parse_sse_response(
     buffer_max_size: int,
     log: Any,
 ) -> Dict[str, Any]:
-    """解析 SSE 响应为统一结构。"""
+    """增量解析 SSE 响应为统一的图片项列表与完成元信息。
+
+    Args:
+        response: httpx 流式响应对象，按 ``chunk_size`` 分块读取。
+        model_id: 模型标识，用于填充图片项 model 字段的缺省值。
+        chunk_size: 每次从流中读取的字节数。
+        buffer_max_size: 缓冲区上限，既作为已消费前缀的回收阈值，也作为防异常流无限增长撑爆内存的截断阈值。
+        log: loguru logger 实例，用于记录进度与告警。
+
+    Returns:
+        包含 success/data/usage/status/tools 的统一结果字典。
+    """
     items: List[Dict[str, Any]] = []
     usage: Dict[str, Any] = {}
     status: Optional[str] = None
@@ -134,7 +147,7 @@ async def parse_sse_response(
         if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
             log.debug("已处理 {} MB 数据", processed_bytes // 1024 // 1024)
 
-        # 先处理所有完整事件，避免缓冲溢出截断时丢失已就绪的事件
+        # SSE 事件以空行分隔，即 b"\n\n"；先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件
         while True:
             sep = buffer.find(b"\n\n", offset)
             if sep == -1:

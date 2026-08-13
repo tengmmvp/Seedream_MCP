@@ -1,5 +1,7 @@
-"""
-自动保存核心模块
+"""自动保存协调模块。
+
+协调图片的批量并发下载与本地文件写入，内置按目录节流的旧文件清理。
+下载或写入失败时采用降级策略，保留原始 URL 而不中断整体生成流程。
 """
 
 import asyncio
@@ -38,9 +40,7 @@ def _reset_cleanup_state() -> None:
 
 
 class AutoSaveError(SeedreamMCPError):
-    """
-    自动保存错误异常
-    """
+    """自动保存错误异常。"""
 
     pass
 
@@ -69,9 +69,7 @@ def _build_save_metadata(
 
 
 class AutoSaveResult:
-    """
-    自动保存结果
-    """
+    """自动保存结果，封装保存状态、本地路径、Markdown 引用与元数据。"""
 
     def __init__(
         self,
@@ -90,9 +88,7 @@ class AutoSaveResult:
         self.metadata = metadata or {}
 
     def to_dict(self) -> Dict[str, Any]:
-        """
-        转换为字典格式
-        """
+        """将保存结果序列化为字典，仅包含已设置的字段。"""
         result = {"success": self.success, "original_url": self.original_url}
 
         if self.local_path:
@@ -111,9 +107,7 @@ class AutoSaveResult:
 
 
 class AutoSaveManager:
-    """
-    自动保存管理器
-    """
+    """自动保存管理器，协调并发下载、文件写入与节流清理。"""
 
     def __init__(
         self,
@@ -168,6 +162,7 @@ class AutoSaveManager:
             await self.download_manager.close()
 
     async def _maybe_cleanup(self) -> None:
+        """按目录节流触发旧文件清理，每个 base_dir 在最短间隔内仅执行一次。"""
         if self.cleanup_days <= 0:
             return
         base_key = str(self.file_manager.base_dir)
@@ -182,10 +177,7 @@ class AutoSaveManager:
             logger.warning("自动清理失败: {}", e, exc_info=True)
 
     def _parse_data_uri(self, data: str) -> Tuple[Optional[str], str]:
-        """
-        解析 data URI,返回 (mime_type, base64_payload)
-        如果不是 data URI,则返回 (None, 原始字符串)
-        """
+        """解析 data URI，返回 (mime_type, base64_payload)；非 data URI 返回 (None, 原始字符串)。"""
         try:
             if data.startswith("data:"):
                 header, payload = data.split(",", 1)
@@ -202,6 +194,7 @@ class AutoSaveManager:
             return None, data
 
     def _extension_from_mime(self, mime: Optional[str]) -> str:
+        """根据 MIME 类型推断文件扩展名，未知类型回退到 .jpeg。"""
         if not mime:
             return ".jpeg"
         return EXTENSION_BY_MIME.get(mime.lower(), ".jpeg")
@@ -230,7 +223,6 @@ class AutoSaveManager:
         try:
             logger.info("开始自动保存图片: {}", sanitize_url(url))
 
-            # 验证URL
             if not self.download_manager.validate_url(url):
                 raise AutoSaveError(f"无效的URL: {url}")
 
@@ -244,14 +236,11 @@ class AutoSaveManager:
                 date_folder=self.date_folder,
             )
 
-            # 下载图片
             download_result = await self.download_manager.download_image(url, save_path)
 
-            # 生成Markdown引用
             markdown_alt = alt_text or prompt or "Generated Image"
             markdown_ref = self.file_manager.generate_markdown_reference(save_path, markdown_alt)
 
-            # 构建元数据
             metadata = _build_save_metadata(
                 prompt=prompt,
                 tool_name=tool_name,
@@ -302,7 +291,7 @@ class AutoSaveManager:
         try:
             content_bytes = base64.b64decode(normalized_payload, validate=True)
         except Exception as e:
-            raise AutoSaveError(f"Base64解码失败: {e}")
+            raise AutoSaveError(f"Base64解码失败: {e}") from e
 
         if len(content_bytes) > self.download_manager.max_file_size:
             raise AutoSaveError(
@@ -329,8 +318,17 @@ class AutoSaveManager:
         custom_name: Optional[str] = None,
         alt_text: Optional[str] = None,
     ) -> AutoSaveResult:
-        """
-        保存单个 Base64 图片(支持 data URI 或纯 base64 字符串)
+        """保存单个 Base64 图片，支持 data URI 或纯 base64 字符串。
+
+        Args:
+            b64_data: Base64 编码数据，可为 data URI 或纯 base64 字符串
+            prompt: 生成提示词
+            tool_name: 工具名称
+            custom_name: 自定义文件名
+            alt_text: Markdown 替代文本
+
+        Returns:
+            保存结果
         """
         try:
             logger.info("开始自动保存 Base64 图片")
@@ -356,7 +354,6 @@ class AutoSaveManager:
 
             content_bytes, write_result = await asyncio.to_thread(_prepare_and_save)
 
-            # 生成 Markdown 引用
             markdown_alt = alt_text or prompt or "Generated Image"
             markdown_ref = self.file_manager.generate_markdown_reference(
                 Path(write_result["file_path"]), markdown_alt
@@ -463,8 +460,14 @@ class AutoSaveManager:
     async def save_multiple_base64_images(
         self, image_data: List[Dict[str, Any]], tool_name: str = "seedream"
     ) -> List[AutoSaveResult]:
-        """
-        并发保存多个 Base64 图片
+        """并发保存多个 Base64 图片。
+
+        Args:
+            image_data: 图片数据列表，每个元素包含 b64_json、prompt 等信息
+            tool_name: 工具名称
+
+        Returns:
+            保存结果列表
         """
         logger.info("开始批量保存 {} 个 Base64 图片", len(image_data))
         tasks = [
@@ -482,7 +485,12 @@ class AutoSaveManager:
         )
 
     async def cleanup_old_files(self, days: int = 30) -> Dict[str, Any]:
-        """
-        清理旧文件
+        """清理超过指定天数的旧文件。
+
+        Args:
+            days: 文件保留天数，超过此天数的文件将被删除
+
+        Returns:
+            清理统计信息
         """
         return await asyncio.to_thread(self.file_manager.cleanup_old_files, days)

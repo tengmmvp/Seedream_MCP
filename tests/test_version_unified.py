@@ -1,3 +1,5 @@
+"""版本号单一来源守护：包常量与 server 常量均指向 version.py。"""
+
 from pathlib import Path
 
 from seedream_mcp import __version__ as package_version

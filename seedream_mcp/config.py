@@ -1,5 +1,9 @@
 """
-Seedream MCP工具配置管理模块
+Seedream MCP 工具配置管理模块。
+
+定义 SeedreamConfig 配置数据类与多层配置加载机制，优先级为运行时覆盖 >
+系统环境变量 > .env 文件 > 代码默认值。配置构建不向 os.environ 注入 .env 值，
+仅写入配置对象，避免全局状态污染。
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 # 自动保存单文件大小上限默认值
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
+# 模型友好别名到真实 Model ID 的映射，normalize_model_selector 据此展开别名
 MODEL_ALIASES: dict[str, str] = {
     "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
     "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
@@ -33,6 +38,7 @@ MODEL_ALIASES: dict[str, str] = {
     "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
 }
 
+# 已下线模型的特征 token，model_id 命中任意 token 时 validate 拒绝配置
 DEPRECATED_MODEL_TOKENS: set[str] = {
     "doubao-seedream-3-0",
     "doubao-seedream-3.0",
@@ -40,6 +46,7 @@ DEPRECATED_MODEL_TOKENS: set[str] = {
     "doubao-seededit-3.0",
 }
 
+# 配置项的字符串默认值，以环境变量名为键，供 _pick_* 系列辅助回退取值
 ENV_DEFAULTS: dict[str, Any] = {
     "ARK_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
     "SEEDREAM_MODEL_ID": "doubao-seedream-5-0-260128",
@@ -73,7 +80,7 @@ _SENSITIVE_CONFIG_KEYWORDS = ("key", "token", "secret", "password", "auth", "cre
 @dataclass
 class SeedreamConfig:
     """
-    Seedream MCP工具配置类
+    Seedream MCP 工具配置类
 
     封装 Seedream 服务的所有配置参数，包括 API 认证、模型设置、日志配置和自动保存功能。
     """
@@ -111,7 +118,7 @@ class SeedreamConfig:
     # 客户端图像预处理并发上限
     image_prepare_concurrency: int = 5
 
-    # 参考图预处理结果缓存上限（LRU 条目数）
+    # 参考图预处理结果 LRU 缓存的上限条目数
     prepare_cache_max: int = 32
 
     # 工作区与传输配置
@@ -122,8 +129,10 @@ class SeedreamConfig:
         self.validate()
 
     def validate(self) -> None:
-        """
-        验证配置参数
+        """校验配置参数合法性与业务约束，并在通过时做规范化写回。
+
+        规范化包括展开模型别名为 model_id、按模型能力校验并标准化 default_size、
+        将 log_level 统一为大写。任一校验失败抛出 SeedreamConfigError。
         """
         if not self.api_key or self.api_key.strip() == "":
             raise SeedreamConfigError("API密钥不能为空")
@@ -199,7 +208,7 @@ class SeedreamConfig:
             except Exception as exc:
                 raise SeedreamConfigError(
                     f"auto_save_base_dir路径无效: {self.auto_save_base_dir} -> {exc}"
-                )
+                ) from exc
 
         if self.workspace_root:
             try:
@@ -209,16 +218,17 @@ class SeedreamConfig:
             except SeedreamConfigError:
                 raise
             except Exception as exc:
-                raise SeedreamConfigError(f"workspace_root路径无效: {self.workspace_root} -> {exc}")
+                raise SeedreamConfigError(
+                    f"workspace_root路径无效: {self.workspace_root} -> {exc}"
+                ) from exc
 
     @classmethod
     def from_env(cls, env_file: Optional[str] = None) -> "SeedreamConfig":
-        """
-        从环境变量创建配置实例
-        """
+        """从环境变量与 .env 文件构建配置实例，构建过程线程安全。"""
         return build_config_from_sources(env_file=env_file)
 
     def to_dict(self) -> dict[str, Any]:
+        """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。"""
         result: dict[str, Any] = {}
         for field in fields(self):
             value = getattr(self, field.name)
@@ -246,9 +256,7 @@ def normalize_model_selector(value: object) -> str:
 
 
 def parse_bool(value: object) -> bool:
-    """
-    解析布尔值字符串
-    """
+    """将值解析为布尔，接受 true/1/yes/on 为真，其余为假。"""
     if isinstance(value, bool):
         return value
     if value is None:
@@ -257,9 +265,7 @@ def parse_bool(value: object) -> bool:
 
 
 def parse_int(value: object) -> int:
-    """
-    解析整数字符串
-    """
+    """将值解析为整数，空值或无法解析时抛出 SeedreamConfigError。"""
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -335,6 +341,8 @@ def _pick_config_value(
     return default_value
 
 
+# 类型化配置取值辅助：统一经 _pick_config_value 按优先级取值后再做类型转换，
+# 每个辅助对应一种目标类型，供 _build_config_from_sources_unlocked 调用。
 def _pick_str(
     overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
 ) -> str:
@@ -378,7 +386,7 @@ def build_config_from_sources(
     Args:
         overrides: 调用方显式覆盖值（例如 CLI 参数）。
         env_file: 可选 .env 文件路径，未提供时按“项目根 `.env` -> 当前工作目录 `.env`”
-            合并读取（cwd 覆盖）。
+            合并读取，当前工作目录的值覆盖项目根。
     """
     with _config_build_lock:
         return _build_config_from_sources_unlocked(overrides, env_file)
@@ -404,9 +412,9 @@ def _build_config_from_sources_unlocked(
     if not api_key:
         raise SeedreamConfigError("未找到ARK_API_KEY环境变量或配置文件值。")
 
-    # override 键名 "model" 对应 SeedreamConfig.model_id 字段：CLI 暴露更简短的
-    # "model"，此处取值后再经 normalize_model_selector 写入 model_id，与其余键名
-    # （键名与字段同名）不同，属有意的命名间接映射。
+    # override 键名 "model" 对应 SeedreamConfig.model_id 字段，属有意的命名间接映射：
+    # CLI 暴露更简短的 "model"，取值后再经 normalize_model_selector 写入 model_id。
+    # 多数 override 键名与目标字段同名，仅 "model" 与下方 "watermark" 为 CLI 简称的例外。
     raw_model = str(
         _pick_config_value(
             override_values,
@@ -426,7 +434,7 @@ def _build_config_from_sources_unlocked(
             override_values, "default_size", "SEEDREAM_DEFAULT_SIZE", env_values
         ),
         # override 键名 "watermark" 对应 SeedreamConfig.default_watermark 字段，
-        # 与 model 同属 CLI 友好命名，其余键名均与字段同名。
+        # 与 "model" 同属 CLI 简称，未与字段同名。
         default_watermark=_pick_bool(
             override_values, "watermark", "SEEDREAM_DEFAULT_WATERMARK", env_values
         ),
@@ -494,8 +502,9 @@ def _build_config_from_sources_unlocked(
 
 # 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态
 _config_build_lock = threading.Lock()
-# 全局配置实例的惰性初始化锁；与 _config_build_lock 分离，避免 get_global_config 持锁
-# 调 from_env（内部复用 _config_build_lock）造成不可重入死锁
+# 全局配置实例的惰性初始化锁。与 _config_build_lock 分离，因为 get_global_config
+# 持该锁时会调用 from_env，而 from_env 内部又复用 _config_build_lock，共用同一把
+# 锁会造成不可重入死锁
 _global_config_lock = threading.Lock()
 
 # 全局配置实例
@@ -503,9 +512,7 @@ _global_config: Optional[SeedreamConfig] = None
 
 
 def get_global_config() -> SeedreamConfig:
-    """
-    获取全局配置实例。
-    """
+    """获取全局配置实例，首次调用时惰性构建并经双检锁缓存。"""
     global _global_config
     if _global_config is not None:
         return _global_config
@@ -516,17 +523,18 @@ def get_global_config() -> SeedreamConfig:
 
 
 def set_config(config: SeedreamConfig) -> None:
-    """
-    设置全局配置实例。
-    """
+    """替换全局配置实例，供 CLI 注入活动配置后同步全局单例。"""
     global _global_config
     with _global_config_lock:
         _global_config = config
 
 
 def reload_config(env_file: Optional[str] = None) -> None:
-    """
-    重新加载全局配置。
+    """重新加载全局配置。
+
+    更新全局配置实例。经 CLI 启动后 server 持有独立的活动配置，其优先级高于全局实例，
+    故本函数仅在未注入活动配置的编程式调用场景生效。CLI 运行时热重载需同时重置 server
+    活动配置，否则在用客户端仍读取旧实例。
     """
     global _global_config
     with _global_config_lock:

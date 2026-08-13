@@ -1,7 +1,8 @@
-"""
-Seedream MCP工具 - 错误处理模块
+"""Seedream MCP 错误处理模块。
 
-定义各种异常类型和错误处理函数。
+定义工具集的自定义异常类型层级，以及 HTTP 错误响应的归约与用户可见信息格式化。
+所有自定义异常以 SeedreamMCPError 为根，按场景派生配置、API、校验、超时、网络等
+子类，便于上层按异常类型分支处理与重试决策。
 """
 
 from datetime import datetime, timezone
@@ -10,7 +11,11 @@ from typing import Mapping, Optional, Dict, Any
 
 
 class SeedreamMCPError(Exception):
-    """Seedream MCP工具基础异常类"""
+    """所有 Seedream MCP 自定义异常的基类。
+
+    提供 message、error_code、details 公共字段，并通过 to_dict 序列化为结构化输出；
+    配置、API、校验、超时、网络等场景均派生对应子类，便于按类型捕获与分支处理。
+    """
 
     def __init__(
         self,
@@ -24,7 +29,7 @@ class SeedreamMCPError(Exception):
         self.details = details or {}
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典格式"""
+        """序列化为字典，供结构化错误输出使用。"""
         return {
             "error": self.__class__.__name__,
             "message": self.message,
@@ -34,13 +39,16 @@ class SeedreamMCPError(Exception):
 
 
 class SeedreamConfigError(SeedreamMCPError):
-    """配置相关错误"""
+    """配置加载或校验失败时抛出。"""
 
     pass
 
 
 class SeedreamAPIError(SeedreamMCPError):
-    """API调用相关错误"""
+    """API 调用失败时抛出。
+
+    额外携带 status_code、response_data、retry_after，供上层判定可重试性与退避时长。
+    """
 
     def __init__(
         self,
@@ -56,7 +64,7 @@ class SeedreamAPIError(SeedreamMCPError):
         self.retry_after = retry_after
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典格式"""
+        """序列化为字典，在基类基础上补充 status_code 与脱敏后的 response_data。"""
         result = super().to_dict()
         # message 可能拼入上游回显片段，超长时截断，避免潜在敏感内容撑爆输出
         result["message"] = _truncate_value_for_output(result.get("message"), limit=500)
@@ -70,7 +78,7 @@ class SeedreamAPIError(SeedreamMCPError):
 
 
 class SeedreamValidationError(SeedreamMCPError):
-    """参数验证错误"""
+    """请求参数校验失败时抛出，附带出错的字段名与值。"""
 
     def __init__(self, message: str, field: Optional[str] = None, value: Optional[Any] = None):
         super().__init__(message)
@@ -78,7 +86,7 @@ class SeedreamValidationError(SeedreamMCPError):
         self.value = value
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典格式"""
+        """序列化为字典，在基类基础上补充出错的字段名与值。"""
         result = super().to_dict()
         result.update(
             {
@@ -90,13 +98,13 @@ class SeedreamValidationError(SeedreamMCPError):
 
 
 class SeedreamTimeoutError(SeedreamMCPError):
-    """超时错误"""
+    """请求超时时抛出。"""
 
     pass
 
 
 class SeedreamNetworkError(SeedreamMCPError):
-    """网络连接错误"""
+    """网络连接失败时抛出。"""
 
     pass
 
@@ -139,19 +147,23 @@ def handle_api_error(
     response_data: Dict[str, Any],
     retry_after: Optional[float] = None,
 ) -> SeedreamAPIError:
-    """处理API错误响应
+    """将 HTTP 错误响应归约为 SeedreamAPIError。
+
+    依据状态码选择更具体的错误文案，并尽量从响应体中提取上游 error.code 与 message
+    拼入文案；status_code 与 retry_after 原样保留在返回的异常上，由上层据此判定
+    可重试性与退避时长，而非在此处派生不同异常类型。
 
     Args:
-        response_status: HTTP状态码
-        response_data: 响应数据
-        retry_after: 服务器建议的重试等待秒数，取自 Retry-After 头
+        response_status: HTTP 状态码。
+        response_data: 响应体数据，可能含上游 error/message 字段。
+        retry_after: 服务器建议的重试等待秒数，取自 Retry-After 头。
 
     Returns:
-        SeedreamAPIError实例
+        装配好状态码与错误码的 SeedreamAPIError 实例。
     """
     error_message = "API调用失败"
 
-    # 根据状态码提供更具体的错误信息
+    # 按状态码选择更具体的错误文案
     if response_status == 400:
         error_message = "请求参数错误"
     elif response_status == 401:
@@ -165,7 +177,7 @@ def handle_api_error(
     elif response_status >= 500:
         error_message = "服务器内部错误"
 
-    # 尝试从响应中提取更详细的错误信息与错误码
+    # 尝试从响应体中提取更详细的上游错误信息与错误码
     error_code: Optional[str] = None
     if isinstance(response_data, dict):
         if "error" in response_data:
@@ -189,13 +201,16 @@ def handle_api_error(
 
 
 def format_error_for_user(error: Exception) -> str:
-    """格式化错误信息供用户查看
+    """按异常类型将错误格式化为面向用户的提示文案。
+
+    不同异常类型映射到不同的可操作建议，例如认证失败提示检查 API 密钥、超时提示
+    检查网络；message 统一截断，避免上游回显的长敏感片段进入用户可见输出。
 
     Args:
-        error: 异常实例
+        error: 异常实例。
 
     Returns:
-        格式化的错误信息字符串
+        格式化的错误信息字符串。
     """
     if isinstance(error, SeedreamConfigError):
         return f"配置错误: {error.message}"
@@ -218,7 +233,8 @@ def format_error_for_user(error: Exception) -> str:
     elif isinstance(error, SeedreamMCPError):
         return f"操作失败: {error.message}"
     else:
-        return f"未知错误: {str(error)}"
+        message = str(error)[:500]
+        return f"未知错误: {message}"
 
 
 # 异常 value 序列化时的长度上限：避免 data URI 等大对象撑爆日志/结构化响应

@@ -1,4 +1,9 @@
-"""生成结果处理：图片提取、并行结果聚合、自动保存合并、响应格式化与结构化输出。"""
+"""生成结果处理：图片提取、并行结果聚合、自动保存合并、响应格式化与结构化输出。
+
+各函数为纯数据处理，不触发 I/O：``extract_images`` 将多种响应形态归一化为 List[Dict]；
+``aggregate_parallel_generation_results`` 合并多次请求的 data 与 usage 并按成败推导状态；
+格式化函数将结果装配为面向模型的文本与 structuredContent 字段。
+"""
 
 from __future__ import annotations
 
@@ -46,8 +51,10 @@ def aggregate_parallel_generation_results(
     request_results: List[Optional[Dict[str, Any]]],
     request_errors: Dict[int, str],
 ) -> Dict[str, Any]:
-    """
-    聚合并行请求结果为统一响应结构。
+    """聚合并行请求结果为统一响应结构。
+
+    合并各成功请求的图片与用量统计，失败请求记入 batch.errors；success 由是否有任一成功
+    请求决定，status 按 completed/partial_completed/failed 三态推导。
     """
     merged_data: List[Dict[str, Any]] = []
     merged_usage: Dict[str, Any] = {}
@@ -205,7 +212,10 @@ def _format_image_item(index: int, image: Dict[str, Any]) -> List[str]:
         parts.append(f"  Markdown 引用: {image['markdown_ref']}")
     if "b64_json" in image:
         b64_data = image.get("b64_json")
-        parts.append(f"  Base64 数据: {len(b64_data)} 字符" if b64_data else "  Base64 数据: 无")
+        if b64_data:
+            parts.append(f"  Base64 数据: {len(b64_data)} 字符")
+        else:
+            parts.append("  Base64 数据: 无")
     parts.append("")
     return parts
 
@@ -273,16 +283,16 @@ def format_generation_response(
     按规范化格式输出为结构清晰的多行文本字符串。
 
     Args:
-        title: 响应标题,用于标识生成任务类型。
-        result: 图片生成结果字典,包含图片数据及使用统计。
+        title: 响应标题，用于标识生成任务类型。
+        result: 图片生成结果字典，包含图片数据及使用统计。
         prompt: 生成图片所用的提示词。
         size: 生成图片的尺寸规格。
-        auto_save_results: 自动保存结果列表,可选。
-        auto_save_enabled: 是否启用自动保存功能,默认 False。
+        auto_save_results: 自动保存结果列表，可选。
+        auto_save_enabled: 是否启用自动保存功能，默认 False。
         auto_save_error: 自动保存错误信息，存在时表示已降级跳过自动保存。
 
     Returns:
-        格式化后的响应文本,包含完整生成信息及元数据。
+        格式化后的响应文本，包含完整生成信息及元数据。
     """
     if not result.get("success"):
         return _format_failure_section(result)
@@ -323,8 +333,9 @@ def _build_generation_structured_result(
     auto_save_results: Optional[List[Any]],
     auto_save_error: Optional[str],
 ) -> Dict[str, Any]:
-    """
-    构建 MCP 工具结果的结构化字段。
+    """构建 MCP 工具结果的 structuredContent 字段，字段集与 GenerationStructuredOutput 对齐。
+
+    成功与失败均返回同一结构，失败时额外写入归一化后的 error 字典，供 outputSchema 校验。
     """
     structured: Dict[str, Any] = {
         "tool": tool_name,

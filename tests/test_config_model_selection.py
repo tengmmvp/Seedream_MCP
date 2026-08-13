@@ -1,3 +1,5 @@
+"""模型 ID 配置守护：下线模型黑名单、当前模型接受与别名归一化。"""
+
 import pytest
 
 from seedream_mcp.config import SeedreamConfig

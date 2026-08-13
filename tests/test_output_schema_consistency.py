@@ -1,8 +1,8 @@
 """runtime structuredContent 与声明 outputSchema 的一致性测试。
 
-验证 _build_generation_structured_result / handle_browse_images 产出的 structuredContent
-能够被 GenerationStructuredOutput / BrowseImagesStructuredOutput 实例化（即符合声明的 outputSchema）。
-防止 schema 与实际输出漂移（如 format_filter 类型不一致类 bug）。
+验证 _build_generation_structured_result 与 handle_browse_images 产出的 structuredContent
+能够被 GenerationStructuredOutput 或 BrowseImagesStructuredOutput 实例化，即符合声明的 outputSchema。
+防止 schema 与实际输出漂移，例如 format_filter 类型不一致类 bug。
 """
 
 from __future__ import annotations
@@ -122,8 +122,8 @@ def test_browse_empty_path_matches_schema() -> None:
 
 
 def test_extract_images_normalizes_dict_data_to_list() -> None:
-    # reviewer 场景：上游可能返回 {"data": {"url": ...}} 非列表形态，
-    # extract_images 须统一为 list，使 structuredContent.data 与 outputSchema (List) 一致。
+    # 上游可能返回 {"data": {"url": ...}} 非列表形态，
+    # extract_images 须统一为 list，使 structuredContent.data 与 outputSchema 的 List 声明一致。
     assert extract_images({"data": {"url": "https://example.com/x.png"}}) == [
         {"url": "https://example.com/x.png"}
     ]
@@ -135,7 +135,7 @@ def test_extract_images_normalizes_dict_data_to_list() -> None:
 
 
 def test_extract_images_normalizes_null_and_non_dict_to_empty() -> None:
-    # data: null（_build_api_result 会保留此值）不得产出 [None]，否则违反 List[Dict] 声明、
+    # data: null 会被 _build_api_result 保留，不得产出 [None]，否则违反 List[Dict] 声明、
     # 触发 outputSchema 校验失败把成功响应变成 ToolError；列表中的 null 与其他非字典元素同样剔除。
     assert extract_images({"data": None}) == []
     assert extract_images({"data": [None, {"url": "x"}, None]}) == [{"url": "x"}]

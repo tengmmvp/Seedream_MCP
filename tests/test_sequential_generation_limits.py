@@ -1,3 +1,5 @@
+"""SequentialGenerationInput 的 max_images 与参考图数量联合上限校验。"""
+
 import pytest
 
 from seedream_mcp.tools.core.schemas import SequentialGenerationInput

@@ -2,7 +2,8 @@
 Seedream MCP 工具包
 
 提供 Seedream 图像生成的 MCP 服务器与客户端封装，支持配置管理、
-客户端调用及 MCP 服务器命令行接口。
+客户端调用及 MCP 服务器命令行接口。重量级子模块经 PEP 562 __getattr__ 延迟加载，
+避免包导入触发 server、client 等重模块初始化。
 """
 
 from __future__ import annotations
@@ -10,10 +11,8 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any, TYPE_CHECKING
 
-# 版本号
 from .version import __version__
 
-# 包元数据
 __author__ = "tengmmvp"
 __email__ = "tengmmvp@gmail.com"
 
@@ -22,7 +21,6 @@ if TYPE_CHECKING:
     from .config import SeedreamConfig, get_global_config, reload_config, set_config
     from .server import cli_main, mcp
 
-# 公开接口声明
 __all__ = [
     "__version__",
     # 配置类与函数
@@ -37,6 +35,7 @@ __all__ = [
     "cli_main",
 ]
 
+# PEP 562 延迟加载表：公开属性名 -> (子模块相对路径, 属性名)，首次访问时经 __getattr__ 导入并缓存到 globals()
 _LAZY_EXPORTS = {
     "SeedreamClient": (".client", "SeedreamClient"),
     "SeedreamConfig": (".config", "SeedreamConfig"),

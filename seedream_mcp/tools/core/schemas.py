@@ -1,5 +1,8 @@
-"""
-Seedream MCP 工具输入模型
+"""Seedream MCP 工具输入模型。
+
+作为参数校验与 MCP inputSchema 的单一来源：FastMCP 依据本模块的 pydantic 模型生成
+各工具入参 schema，impl 层 handler 不重复描述字段规则。通用字段抽到 ``_*Input`` 基类
+按需多重继承组合为各工具的最终输入模型。
 """
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+"""工作区 Roots 作用域测试：MCP Roots 优先于 env，list_roots 失败回退 env。"""
+
 import json
 from pathlib import Path
 
@@ -292,7 +294,7 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # 客户端通过 MCP Roots 授权目录时，seedream://workspace/roots 须报告客户端 roots，
-    # 而非服务器 env/cwd（与浏览工具访问边界一致）。
+    # 而非服务器 env/cwd，与浏览工具访问边界一致。
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
@@ -304,8 +306,9 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
     result = await workspace_roots_resource()
     data = json.loads(result)
 
-    assert str(mcp_root.resolve()) in data["roots"]
-    assert str(env_root.resolve()) not in data["roots"]
+    # server 资源输出统一正斜杠，比对时归一化路径分隔符
+    assert str(mcp_root.resolve()).replace("\\", "/") in data["roots"]
+    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
 
 
 @pytest.mark.asyncio
@@ -313,7 +316,7 @@ async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 客户端明确不授权任何目录（list_roots 返回空）时，资源须返回空列表，
+    # 客户端明确不授权任何目录即 list_roots 返回空时，资源须返回空列表，
     # 不得回退到 env/cwd 暴露服务器本地目录。
     env_root = tmp_path / "env"
     env_root.mkdir()

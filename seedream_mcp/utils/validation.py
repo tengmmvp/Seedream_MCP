@@ -1,5 +1,14 @@
-"""
-Seedream MCP工具 - 参数验证模块
+"""Seedream MCP 参数校验模块。
+
+集中处理图像生成各工具的入参校验，覆盖尺寸、水印、像素维度、参考图数量、
+文件大小、宽高比、输出格式、提示词长度、组图总数与并行参数等。
+
+设计要点：
+- 模型能力数据驱动校验：与模型相关的规则（尺寸档位/像素区间/倍数约束、输出格式、
+  联网工具、流式输出、参考图上限等）统一委托 model_capabilities 的能力声明判定，
+  新增模型只需扩展能力表而无需改动校验代码。
+- HEIC/HEIF 解码器惰性注册，避免模块导入时产生全局副作用。
+- 涉及 path_utils 的调用采用函数内延迟 import，规避模块加载循环。
 """
 
 # 标准库导入
@@ -21,7 +30,7 @@ from .formats import SUPPORTED_IMAGE_EXTENSIONS
 from .logging import get_logger
 from .os_utils import open_no_follow_read
 from .model_capabilities import get_model_capabilities
-from .model_capabilities import (  # noqa: F401  以下重导出，兼容外部 from .validation import
+from .model_capabilities import (  # noqa: F401  以下符号重导出，兼容外部 from .validation import
     MODEL_CAPABILITIES as MODEL_CAPABILITIES,
     MODEL_FAMILY_40 as MODEL_FAMILY_40,
     MODEL_FAMILY_45 as MODEL_FAMILY_45,
@@ -54,20 +63,26 @@ def _ensure_heif_opener_registered() -> None:
 
 # ==================== 常量定义 ====================
 
-# 统一图像校验常量
+# 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024  # 30MB
-# optimize_prompt_options.mode 合法取值
+# optimize_prompt_options.mode 的合法取值白名单
 VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
+# 参考图（输入图像）维度约束：最短边、宽高比上下限、总像素上限
 MIN_IMAGE_EDGE = 15
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 MAX_IMAGE_PIXELS = 6000 * 6000
+# 尺寸预设档位与输出格式白名单
 VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
 VALID_OUTPUT_FORMATS = {"jpeg", "png"}
+# 生成工具类型白名单，目前仅支持联网搜索
 VALID_GENERATION_TOOL_TYPES = {"web_search"}
+# 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
-MAX_SEQUENTIAL_TOTAL_IMAGES = 15  # 组图：参考图数量与生成数量之和上限
-MAX_PARALLEL_REQUEST_COUNT = 4  # 并行生成请求次数与并行度上限
+# 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张
+MAX_SEQUENTIAL_TOTAL_IMAGES = 15
+# 并行生成上限：request_count 与 parallelism 共用此上界
+MAX_PARALLEL_REQUEST_COUNT = 4
 
 
 # ==================== 底层私有工具函数 ====================
@@ -98,9 +113,7 @@ def _resolve_local_image_path(file_path: str) -> Path:
 
 
 def _parse_pixel_size(size: str) -> tuple[int, int] | None:
-    """
-    解析像素尺寸字符串。
-    """
+    """解析像素尺寸字符串，命中返回 (宽, 高)，否则返回 None。"""
     matched = PIXEL_SIZE_PATTERN.fullmatch(size.strip())
     if matched is None:
         return None
@@ -108,9 +121,7 @@ def _parse_pixel_size(size: str) -> tuple[int, int] | None:
 
 
 def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:
-    """
-    将任意输入校验并转换为指定范围内的正整数。
-    """
+    """将任意输入校验并转换为 [min_value, max_value] 内的整数，非法值抛出 SeedreamValidationError。"""
     if isinstance(value, bool):
         raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
     try:
@@ -127,7 +138,7 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     return validated_value
 
 
-# 模型家族解析、能力表与判定函数已抽取至 model_capabilities.py，上方通过 re-export 保持兼容
+# 模型家族解析、能力表与判定函数已抽取至 model_capabilities.py，上方通过重导出保持外部导入兼容
 
 
 # ==================== 私有验证函数 ====================
@@ -159,7 +170,7 @@ def _validate_url(url: str) -> str:
     except SeedreamValidationError:
         raise
     except Exception as e:
-        raise SeedreamValidationError(f"URL验证失败: {str(e)}", field="image", value=url)
+        raise SeedreamValidationError(f"URL验证失败: {str(e)}", field="image", value=url) from e
 
 
 def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
@@ -187,7 +198,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     - 是否为有效文件（而非目录）
     - 文件扩展名是否支持
     - 文件大小是否超过30MB
-    - 图像尺寸是否符合要求（宽高>14px，宽高比在1/16到16之间，总像素≤6000×6000）
+    - 图像尺寸是否符合要求（宽高≥15px，宽高比在1/16到16之间，总像素≤6000×6000）
 
     Args:
         file_path: 本地文件的完整路径
@@ -209,7 +220,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         except OSError as exc:
             raise SeedreamValidationError(
                 f"无法访问文件: {path} -> {exc}", field="image", value=file_path
-            )
+            ) from exc
         if not stat.S_ISREG(stat_result.st_mode):
             raise SeedreamValidationError(f"路径不是文件: {path}", field="image", value=file_path)
 
@@ -246,20 +257,22 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
                     f"无法读取文件: {path} -> {exc}",
                     field="image",
                     value=file_path,
-                )
+                ) from exc
             except Exception as e:
                 raise SeedreamValidationError(
                     f"图像维度解析失败: {str(e)}",
                     field="image",
                     value=file_path,
-                )
+                ) from e
 
         return str(path.absolute())
 
     except SeedreamValidationError:
         raise
     except Exception as e:
-        raise SeedreamValidationError(f"文件路径验证失败: {str(e)}", field="image", value=file_path)
+        raise SeedreamValidationError(
+            f"文件路径验证失败: {str(e)}", field="image", value=file_path
+        ) from e
 
 
 def _validate_data_uri(data_uri: str) -> str:
@@ -271,7 +284,7 @@ def _validate_data_uri(data_uri: str) -> str:
     - 图像格式是否支持
     - Base64数据是否可解码
     - 解码后数据大小是否超过30MB
-    - 图像尺寸是否符合要求（宽高>14px，宽高比在1/16到16之间，总像素≤6000×6000）
+    - 图像尺寸是否符合要求（宽高≥15px，宽高比在1/16到16之间，总像素≤6000×6000）
 
     Args:
         data_uri: Data URI格式的图像字符串
@@ -320,7 +333,7 @@ def _validate_data_uri(data_uri: str) -> str:
         except Exception as e:
             raise SeedreamValidationError(
                 f"Base64 解码失败: {str(e)}", field="image", value=data_uri
-            )
+            ) from e
 
         # 检查数据大小
         size_bytes = len(raw)
@@ -341,14 +354,16 @@ def _validate_data_uri(data_uri: str) -> str:
         except Exception as e:
             raise SeedreamValidationError(
                 f"图像维度解析失败: {str(e)}", field="image", value=data_uri
-            )
+            ) from e
 
         return data_uri
 
     except SeedreamValidationError:
         raise
     except Exception as e:
-        raise SeedreamValidationError(f"Data URI 验证失败: {str(e)}", field="image", value=data_uri)
+        raise SeedreamValidationError(
+            f"Data URI 验证失败: {str(e)}", field="image", value=data_uri
+        ) from e
 
 
 # ==================== 基础公共验证函数 ====================
@@ -449,8 +464,20 @@ def validate_response_format(response_format: str) -> str:
 
 
 def validate_output_format(output_format: Any, model_id: str) -> str | None:
-    """
-    验证图像输出文件格式，并检查与模型兼容性。
+    """验证图像输出文件格式并检查模型兼容性。
+
+    output_format 仅 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）支持，
+    4.5/4.0 不支持；未知模型放行，由能力表统一判定。
+
+    Args:
+        output_format: 输出格式字符串，当前支持 jpeg/png；None 表示未指定。
+        model_id: 模型标识符，用于能力兼容性校验。
+
+    Returns:
+        规范化后的格式小写名；输入为 None 时返回 None。
+
+    Raises:
+        SeedreamValidationError: 当格式非法或当前模型不支持 output_format 时抛出。
     """
     if output_format is None:
         return None
@@ -489,8 +516,20 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
 
 
 def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]] | None:
-    """
-    验证生成工具配置，并检查与模型兼容性。
+    """验证生成工具配置并检查模型兼容性。
+
+    联网搜索（web_search）由 doubao-seedream-5.0 / 5.0-lite 系列支持，
+    5.0 Pro/4.5/4.0 不支持；未知模型放行，由能力表统一判定。
+
+    Args:
+        tools: 生成工具数组，每项为含 type 字段的对象；None 表示未指定。
+        model_id: 模型标识符，用于能力兼容性校验。
+
+    Returns:
+        规范化后的工具数组，每项为 {"type": <小写类型>}；输入为 None 时返回 None。
+
+    Raises:
+        SeedreamValidationError: 当结构非法或当前模型不支持 tools 时抛出。
     """
     if tools is None:
         return None
@@ -654,20 +693,22 @@ def validate_size(size: str) -> str:
 
 
 def validate_size_for_model(size: str, model_id: str) -> str:
-    """
-    验证图像尺寸与模型的兼容性
+    """验证图像尺寸与模型的兼容性。
 
-    不同模型对图像尺寸有特定要求，此函数确保尺寸参数符合模型限制。
+    尺寸规则由 model_capabilities 的能力声明驱动：预设档位白名单
+    （allowed_presets）、像素总区间（min/max_size_pixels）、像素倍数约束
+    （size_pixel_multiple，如 5.0 Pro 要求宽高为 16 的倍数）。新增模型只需扩展
+    能力声明即可，无需改动本函数。
 
     Args:
-        size: 图像尺寸规格
-        model_id: 模型标识符
+        size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>。
+        model_id: 模型标识符。
 
     Returns:
-        str: 验证通过的尺寸值
+        验证通过的尺寸值。
 
     Raises:
-        SeedreamValidationError: 当尺寸与模型不兼容时抛出
+        SeedreamValidationError: 当尺寸与模型不兼容时抛出。
     """
     size = validate_size(size)
     caps = get_model_capabilities(model_id)
@@ -820,8 +861,13 @@ def validate_parallel_generation_options(
     stream: bool,
     max_request_count: int = MAX_PARALLEL_REQUEST_COUNT,
 ) -> tuple[int, int]:
-    """
-    校验并行生成参数组合，并返回规范化后的 request_count/parallelism。
+    """校验并行生成参数组合，返回规范化后的 (request_count, parallelism)。
+
+    未指定 parallelism 时取 min(request_count, max_request_count)；
+    parallelism 不得超过 request_count；stream 为真时 request_count 必须为 1。
+
+    Raises:
+        SeedreamValidationError: 当参数越界或组合非法时抛出。
     """
     validated_request_count = _coerce_positive_int_in_range(
         request_count, "request_count", 1, max_request_count

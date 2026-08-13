@@ -1,3 +1,5 @@
+"""browse_images 工具结构化结果、分页元数据与工作区越界拒绝测试。"""
+
 from pathlib import Path
 
 import pytest

@@ -1,3 +1,5 @@
+"""下载安全测试：DNS 解析 TTL 缓存与连接后对端 IP 公网校验。"""
+
 import asyncio
 
 import pytest

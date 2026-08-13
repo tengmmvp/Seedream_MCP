@@ -1,3 +1,5 @@
+"""streamable-http 传输选项与鉴权中间件测试：CLI 启动守卫与 Bearer 校验。"""
+
 from argparse import Namespace
 
 import pytest
@@ -128,7 +130,7 @@ def test_cli_main_refuses_non_loopback_http_without_auth_token(monkeypatch) -> N
 
 
 def test_cli_main_refuses_non_loopback_http_without_tls(monkeypatch) -> None:
-    """非回环 + 令牌 + 无 TLS + 未显式 opt-in → fail-closed 拒绝启动（防令牌明文传输）。"""
+    """非回环 + 令牌 + 无 TLS + 未显式 opt-in → fail-closed 拒绝启动，防止令牌明文传输。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
@@ -167,7 +169,7 @@ def test_cli_main_allows_non_loopback_http_with_tls(monkeypatch) -> None:
 
 
 def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(monkeypatch) -> None:
-    """非回环 + 令牌 + 显式 --insecure-allow-non-tls → 允许（反代终结 TLS 场景）。"""
+    """非回环 + 令牌 + 显式 --insecure-allow-non-tls → 允许，适用于反代终结 TLS 场景。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"

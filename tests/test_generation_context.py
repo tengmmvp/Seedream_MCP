@@ -1,3 +1,5 @@
+"""生成执行上下文构建、并行结果聚合与响应格式化测试。"""
+
 from dataclasses import fields
 
 import pytest
@@ -283,7 +285,7 @@ def test_format_generation_response_shows_input_images_for_pro_usage() -> None:
         size="1024x1024",
     )
 
-    # 5.0 Pro 返回 usage.input_images（输入图数），应在文本统计中展示
+    # 5.0 Pro 返回 usage.input_images 表示输入图数，应在文本统计中展示
     assert "输入图片数: 1" in text
     assert "生成图片数: 1" in text
 

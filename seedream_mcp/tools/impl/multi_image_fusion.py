@@ -1,5 +1,8 @@
-﻿"""
-多图融合工具模块
+﻿"""多图融合工具的 impl 处理器。
+
+作为薄适配器：从入参取出多图列表字段，与 prompt 等封装为 ``_execute`` 回调，再委托
+``execute_generation_handler`` 流水线完成校验、调用、保存与结果格式化。字段规则与校验
+由 schemas.MultiImageFusionInput 单一定义。
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ if TYPE_CHECKING:
 
     from ...client import SeedreamClient
 
-# 模块日志记录器
 logger = get_logger(__name__)
 
 
@@ -29,37 +31,20 @@ async def handle_multi_image_fusion(
     config: SeedreamConfig,
     ctx: "Context[Any, Any, Any] | None" = None,
 ) -> CallToolResult:
-    """
-    处理多图融合请求
+    """处理多图融合请求，依据文本描述融合多张参考图特征生成新图像。
 
-    根据提供的参数执行多图融合任务，包括参数验证、API调用、结果处理及可选的自动保存功能。
-    支持流式响应和提示词优化，可将结果返回为URL或Base64编码格式。
+    流程由 ``execute_generation_handler`` 统一编排：参数经 schema 校验后构建执行上下文，
+    调用客户端生成，可选自动保存，最终返回结构化工具结果。完整字段规则与默认值见
+    ``MultiImageFusionInput``，本函数仅透传 arguments。
 
     Args:
-        arguments: 融合任务参数字典，包含以下字段：
-            - prompt (str, optional): 融合描述提示词，默认为空字符串
-            - optimize_prompt_options (Dict, optional): 提示词优化选项
-            - image (List): 待融合的图片列表（2-14 张）
-            - size (str, optional): 生成图片尺寸，默认使用配置中的默认值
-            - watermark (bool, optional): 是否添加水印，默认使用配置中的默认值
-            - response_format (str, optional): 响应格式，支持 'url' 或 'b64_json'，默认为 'url'
-            - output_format (str, optional): 输出图片格式，仅 Seedream 5.0 支持 "jpeg" 或 "png"
-            - stream (bool, optional): 是否启用流式响应，默认为 False
-            - tools (list, optional): 模型工具配置，仅 Seedream 5.0 支持，如 [{"type": "web_search"}]
-            - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
-            - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
-            - auto_save (bool, optional): 是否自动保存结果，默认使用配置中的默认值
-            - save_path (str, optional): 保存路径，默认使用配置中的路径
-            - custom_name (str, optional): 自定义文件名
+        arguments: 工具原始参数字典，结构见 ``MultiImageFusionInput``。
+        config: 当前生效的 SeedreamConfig。
+        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
 
     Returns:
-        CallToolResult: MCP 标准工具结果。
-            - content: 面向模型的文本摘要
-            - structuredContent: 结构化结果数据
-            - isError: 是否为错误结果
-
-    Raises:
-        Exception: 当融合过程中发生错误时抛出异常，异常信息会被捕获并格式化返回给用户
+        MCP 标准工具结果，含面向模型的文本摘要与 structuredContent，失败时不抛出异常而
+        以 ``isError=True`` 返回。
     """
     image = arguments.get("image")
 

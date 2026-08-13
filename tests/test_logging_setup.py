@@ -1,3 +1,5 @@
+"""setup_logging 的 force_standard_logging 透传测试。"""
+
 import logging
 
 from seedream_mcp.utils.logging import setup_logging

@@ -1,5 +1,7 @@
-﻿"""
-图片浏览工具模块
+﻿"""图片浏览工具的 impl 处理器。
+
+直接实现工作区图片扫描与分页，不经 ``execute_generation_handler`` 生成流水线；字段规则
+由 schemas.BrowseImagesInput 单一定义。
 """
 
 from __future__ import annotations
@@ -50,8 +52,11 @@ def _format_file_info(display_path: str, stat_path: Path, show_details: bool) ->
             parts.append("文件信息不可用")
             return " | ".join(parts)
         size_mb = stat_result.st_size / (1024 * 1024)
-        mtime = datetime.datetime.fromtimestamp(stat_result.st_mtime).isoformat(
-            sep=" ", timespec="seconds"
+        # astimezone 将 naive 本地时间标注为本地时区，输出携带 UTC 偏移以消除时区歧义。
+        mtime = (
+            datetime.datetime.fromtimestamp(stat_result.st_mtime)
+            .astimezone()
+            .isoformat(sep=" ", timespec="seconds")
         )
         parts.append(f"{size_mb:.2f} MB")
         parts.append(f"修改: {mtime}")
@@ -77,31 +82,22 @@ async def handle_browse_images(
     arguments: Dict[str, Any],
     ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
-    """
-    处理图片浏览请求
+    """处理图片浏览请求，扫描工作区内指定目录的图片文件并分页返回。
 
-    根据提供的参数搜索指定目录下的图片文件，支持递归搜索、深度限制、
-    格式过滤等功能，返回格式化的图片列表。
+    仅允许访问 MCP Roots 授权的工作区目录；扫描 offset+limit+1 张以判定 has_more，避免
+    大目录无上限扫描。完整字段规则与默认值见 ``BrowseImagesInput``，本函数读取 arguments。
 
     Args:
-        arguments: 包含搜索参数的字典，支持以下键：
-            - directory (str, optional): 搜索目录路径，默认为当前目录。
-            - recursive (bool, optional): 是否递归搜索子目录，默认为 True。
-            - max_depth (int, optional): 递归搜索的最大深度，默认为 3。
-            - limit (int, optional): 返回结果的最大数量，默认为 50。
-            - format_filter (str, optional): 文件格式过滤条件。
-            - show_details (bool, optional): 是否显示文件详细信息，默认为 False。
+        arguments: 工具原始参数字典，结构见 ``BrowseImagesInput``。
+        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
 
     Returns:
-        CallToolResult: MCP 标准工具结果。
-            - content: 面向模型的文本摘要
-            - structuredContent: 结构化结果数据
-            - isError: 是否为错误结果
+        MCP 标准工具结果，含面向模型的图片列表文本与 structuredContent。
     """
     # 解析并设置默认参数
     directory = arguments.get("directory") or "."
     recursive = bool(arguments.get("recursive", True))
-    # max_depth/limit/offset 已由 BrowseImagesInput（pydantic）校验为 int，无需再 int() 包装
+    # max_depth/limit/offset 已由 BrowseImagesInput 的 pydantic 校验保证为 int，无需再 int() 包装
     max_depth = arguments.get("max_depth", 3)
     limit = arguments.get("limit", 50)
     offset = arguments.get("offset", 0)
@@ -121,7 +117,7 @@ async def handle_browse_images(
 
     # 预解析工作区根，避免在 limit 循环内对每张图片 × 每个 root 重复 resolve。
     # 越界校验仍由 is_path_within_* 内部对 path 再做 resolve，base 与 path 比较语义不变。
-    # 展示层（错误提示、structuredContent 的 workspace_roots）继续用 workspace_roots。
+    # 展示层继续使用 workspace_roots，用于错误提示与 structuredContent 回显。
     resolved_roots: list[Path] = [root.resolve() for root in workspace_roots]
 
     resolved_dirs: list[Path] = []
@@ -195,7 +191,7 @@ async def handle_browse_images(
             all_images.append(image_path)
             if len(all_images) >= scan_limit:
                 break
-        # 多目录扫描时按已扫描目录占比上报中间进度（20% -> 90%），单目录跳过
+        # 多目录扫描时按已扫描目录占比上报中间进度，区间为 20% 至 90%；单目录跳过
         if total_dirs > 1:
             await _safe_report_progress(
                 ctx,

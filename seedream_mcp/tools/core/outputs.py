@@ -1,5 +1,8 @@
-"""
-Seedream MCP 工具结构化输出模型
+"""Seedream MCP 工具结构化输出模型。
+
+作为 outputSchema 的单一来源：FastMCP 依据本模块的 pydantic 模型生成各工具的
+structuredContent schema，handler 仅负责填充字段。基类通过 extra='allow' 容纳 API
+透传的新字段以保持向前兼容。
 """
 
 from __future__ import annotations

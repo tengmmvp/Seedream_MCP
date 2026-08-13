@@ -18,7 +18,7 @@ async def test_seedream_client_httpx_async_client_disables_trust_env() -> None:
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
     try:
-        # 触发 httpx.AsyncClient 创建（_call_api 路径的前置步骤）
+        # 触发 httpx.AsyncClient 创建，这是 _call_api 路径的前置步骤
         await client._ensure_client()
         assert client._client is not None
         # 直接读 httpx.AsyncClient.trust_env 验证守护不变量

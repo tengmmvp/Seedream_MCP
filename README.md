@@ -224,13 +224,13 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **参数：**
 
 - `prompt` (必需) - 图像生成的文本提示词，建议不超过 300 个汉字或 600 个英文单词
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"，fast 仅 4.0 支持
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -247,14 +247,14 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **参数：**
 
 - `prompt` (必需) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"，fast 仅 4.0 支持
 - `image` (必需) - 输入图像的 URL 或本地文件路径
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -271,14 +271,14 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **参数：**
 
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"，fast 仅 4.0 支持
 - `image` (必需) - 输入图像 URL 或本地文件路径列表（2-14 张；5.0 Pro 最多 10 张）
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -295,7 +295,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **参数：**
 
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
-- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"，fast 仅 4.0 支持
 - `image` (可选) - 参考图像，支持单张图片（字符串）或多张图片（数组）；参考图最多 14 张，且参考图数量与 max_images 之和不超过 15
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
@@ -303,7 +303,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
-- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0-lite` 支持联网搜索，例如 `[{"type":"web_search"}]`
+- `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
@@ -405,6 +405,7 @@ SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 
 # 客户端性能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
+SEEDREAM_PREPARE_CACHE_MAX=32
 ```
 
 ## 👥 贡献者

@@ -1,3 +1,5 @@
+"""SeedreamClient 重构守护：请求组装、参数顺序、预处理并发与各模型能力差异。"""
+
 import base64
 import asyncio
 import inspect
@@ -381,7 +383,7 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
     max_active_count = 0
     captured_request: Dict[str, Any] = {}
 
-    async def fake_prepare_image_input(image: str) -> str:
+    async def fake_prepare_image_input(image: str, _roots_key: Any = None) -> str:
         nonlocal active_count, max_active_count
         active_count += 1
         max_active_count = max(max_active_count, active_count)
@@ -457,7 +459,7 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
     max_active_count = 0
     captured_request: Dict[str, Any] = {}
 
-    async def fake_prepare_image_input(image: str) -> str:
+    async def fake_prepare_image_input(image: str, _roots_key: Any = None) -> str:
         nonlocal active_count, max_active_count
         active_count += 1
         max_active_count = max(max_active_count, active_count)
@@ -495,7 +497,7 @@ async def test_sequential_generation_without_max_images_uses_reference_aware_def
     client = SeedreamClient(_build_config())
     captured_request: Dict[str, Any] = {}
 
-    async def fake_prepare_image_input(image: str) -> str:
+    async def fake_prepare_image_input(image: str, _roots_key: Any = None) -> str:
         return f"prepared:{image}"
 
     async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -646,7 +648,7 @@ async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
 
     await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
 
-    # 5.0 Pro 支持 disabled（关闭组图、单图输出），仅不支持 auto（开启组图）
+    # 5.0 Pro 仅不支持 auto 即开启组图；disabled 即关闭组图、单图输出应被接受
     assert captured_request["sequential_image_generation"] == "disabled"
 
 
@@ -707,10 +709,10 @@ async def test_multi_image_fusion_accepts_up_to_10_images_for_pro(
 
 
 @pytest.mark.asyncio
-async def test_prepare_image_input_caches_result_and_evicts_fifo(
+async def test_prepare_image_input_caches_result_and_evicts_lru(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_prepare_image_input 命中缓存不重复调用底层，超限按 FIFO 淘汰最旧条目。"""
+    """_prepare_image_input 命中缓存不重复调用底层；LRU 淘汰最久未用条目，近期命中不被淘汰。"""
     client = SeedreamClient(_build_config())
     client._prepare_cache_max = 3
 
@@ -730,17 +732,23 @@ async def test_prepare_image_input_caches_result_and_evicts_fifo(
     assert second == "prepared:img-1"
     assert call_count == 1
 
-    # 填满缓存（img-1 / img-2 / img-3）
+    # 填满缓存，加入 img-1 / img-2 / img-3
     await client._prepare_image_input("img-2")
     await client._prepare_image_input("img-3")
     assert len(client._prepare_cache) == 3
     assert call_count == 3
 
-    # 再加一条触发 FIFO 淘汰最旧的 img-1，缓存大小不超过 max
+    # 重新访问 img-1 使其成为近期使用，img-2 随即成为最久未用
+    await client._prepare_image_input("img-1")
+    assert call_count == 3
+
+    # 加入 img-4 触发淘汰：LRU 淘汰最久未用的 img-2，保留近期命中的 img-1
     await client._prepare_image_input("img-4")
     assert len(client._prepare_cache) == 3
     assert call_count == 4
 
-    # img-1 已被淘汰，再次请求应重新调用底层
+    # img-2 已被淘汰，重新请求会再次调用底层；img-1 仍在缓存不再调用
+    await client._prepare_image_input("img-2")
+    assert call_count == 5
     await client._prepare_image_input("img-1")
     assert call_count == 5

@@ -29,7 +29,7 @@ async def test_prepare_image_input_rejects_symlink(workspace_root: Path, tmp_pat
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:
-    """本地图片读取并编码为 data URI，维度校验在内存完成（单次读取）。"""
+    """本地图片读取并编码为 data URI，维度校验在内存单次读取完成。"""
     image_path = tmp_path / "local.png"
     Image.new("RGB", (64, 64), color="black").save(image_path)
 

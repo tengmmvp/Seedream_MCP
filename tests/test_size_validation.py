@@ -1,3 +1,5 @@
+"""validate_size_for_model 各模型尺寸规则与 Seedream 5.0 Pro 尺寸回归守护。"""
+
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
@@ -107,7 +109,7 @@ def test_validate_size_for_model_rejects_seedream_50_pro_oversized_pixel() -> No
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_non_multiple_of_16() -> None:
-    # 1300x732：总像素 951600（在 [921600, 4194304] 内）、宽高比合规，仅触发 16 倍数约束
+    # 1300x732 总像素 951600 落在 [921600, 4194304] 内且宽高比合规，仅触发 16 倍数约束
     with pytest.raises(SeedreamValidationError, match="16 的倍数"):
         validate_size_for_model("1300x732", "doubao-seedream-5-0-pro-260628")
 

@@ -1,3 +1,5 @@
+"""包级延迟导入测试：导入 seedream_mcp 不立即加载 client 与 server。"""
+
 import importlib
 import sys
 

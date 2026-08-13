@@ -1,5 +1,19 @@
-"""
-下载管理模块
+"""异步图片下载管理器，提供带 SSRF 多层防护的安全下载能力。
+
+核心安全设计为四层 SSRF 防护，纵深防御逐层收紧：
+
+1. 静态 URL 校验（``_validate_url_static``）：解析阶段即拒绝私网、保留地址及
+   非公网 IP 字面量，把 ``file://``、``http://127.0.0.1`` 等直接伪造挡在网络层外。
+2. DNS 公网解析（``_resolve_public_ips``）：解析主机名后校验所有结果均为公网 IP，
+   防 DNS rebinding 在静态校验通过后才切换到内网地址。
+3. 连接后对端 IP 复核（``_validate_connected_peer_ip``）：实际建立连接后再次校验
+   对端 IP，闭合解析与连接之间的 TOCTOU 窗口。
+4. 逐跳重定向校验（``download_image`` 重定向循环）：禁用自动重定向，每跳目标都
+   重新走完整校验，防止经由重定向绕过跳转到内网。
+
+其余关键设计：失败按递增延迟加随机抖动重试；下载先写 ``.part`` 临时文件再
+``os.replace`` 原子替换，避免半写文件对外可见；响应须经 Content-Type 与字节签名
+双重校验后方落盘，防 Content-Type 伪造。
 """
 
 import asyncio
@@ -29,12 +43,16 @@ _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 
 
 def sanitize_url(url: str) -> str:
-    """脱敏 URL 用于日志，保留 scheme/host/path，隐藏查询参数中的潜在敏感信息。"""
+    """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据与查询参数中的潜在敏感信息。"""
     try:
         parsed = urlparse(url)
+        # 重建不含 userinfo 的 netloc，避免 user:pass@ 凭据进入日志
+        netloc = parsed.hostname or ""
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
         if parsed.query:
-            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?<query-redacted>"
-        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            return f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
+        return f"{parsed.scheme}://{netloc}{parsed.path}"
     except Exception:
         return "<invalid-url>"
 
@@ -99,17 +117,13 @@ def _is_image_compatible_content_type(content_type: str) -> bool:
 
 
 class DownloadError(SeedreamMCPError):
-    """
-    下载错误异常
-    """
+    """下载失败异常。"""
 
     pass
 
 
 class DownloadManager:
-    """
-    异步下载管理器
-    """
+    """异步图片下载管理器，内置 SSRF 四层防护与递增退避重试。"""
 
     def __init__(
         self,
@@ -119,8 +133,7 @@ class DownloadManager:
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         dns_cache_ttl: int = 60,
     ):
-        """
-        初始化下载管理器
+        """初始化下载管理器。
 
         Args:
             timeout: 下载超时时间（秒）
@@ -140,15 +153,16 @@ class DownloadManager:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self) -> "DownloadManager":
+        """进入上下文，确保会话就绪后返回自身。"""
         await self._ensure_session()
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """退出上下文时关闭底层会话。"""
         await self.close()
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
-        """
-        获取可用的 aiohttp 会话
+        """获取可用的 aiohttp 会话。
 
         首次创建用双检查锁串行化，避免并发请求各自创建会话导致旧会话泄漏。
         """
@@ -162,15 +176,14 @@ class DownloadManager:
         return self._session
 
     async def close(self) -> None:
-        """
-        关闭底层会话资源
-        """
+        """关闭底层会话资源。"""
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
 
     @staticmethod
     def _temp_path_for(save_path: Path) -> Path:
+        """返回 save_path 对应的临时文件路径，在原后缀后追加 ``.part``。"""
         suffix = save_path.suffix or ".bin"
         return save_path.with_suffix(f"{suffix}.part")
 
@@ -193,11 +206,14 @@ class DownloadManager:
             logger.warning("清理临时文件失败: {} -> {}", temp_path, exc)
 
     def _validate_url_static(self, url: str) -> Tuple[str, bool]:
-        """
-        执行不依赖网络的 URL 静态安全校验
+        """执行不依赖网络的 URL 静态安全校验，属 SSRF 第一层防护。
+
+        解析阶段即拒绝非 http/https 协议、缺失主机名、携带凭据、本地主机名以及
+        非公网 IP 字面量，把明显伪造的内网目标挡在网络层之外。
 
         Returns:
-            (host, needs_dns_check)
+            (host, needs_dns_check): ``needs_dns_check`` 为 False 表示入参为已通过
+            校验的 IP 字面量，调用方无需再做 DNS 解析校验。
         """
         result = urlparse(url)
         scheme = (result.scheme or "").lower()
@@ -225,8 +241,10 @@ class DownloadManager:
             return host, True
 
     async def _resolve_public_ips(self, host: str) -> Tuple[str, ...]:
-        """
-        解析域名并校验为公网 IP，命中缓存时直接返回。
+        """解析域名并校验所有解析结果为公网 IP，属 SSRF 第二层防护。
+
+        防 DNS rebinding：攻击者可能让静态校验阶段解析到公网 IP，随后在真正
+        发起连接前将 DNS 切换到内网地址。解析结果带 TTL 缓存以减少重复查询。
         """
         now = time.time()
         async with self._dns_cache_lock:
@@ -267,24 +285,18 @@ class DownloadManager:
         return ip_tuple
 
     async def _validate_public_dns(self, host: str) -> None:
-        """
-        异步解析域名并确保解析结果全部为公网 IP
-        """
+        """异步解析域名并确保解析结果全部为公网 IP。"""
         await self._resolve_public_ips(host)
 
     async def _validate_url_for_request(self, url: str) -> None:
-        """
-        执行请求前 URL 安全校验
-        """
+        """执行请求前 URL 安全校验，串联第一层静态校验与第二层 DNS 校验。"""
         host, needs_dns_check = self._validate_url_static(url)
         if needs_dns_check:
             await self._validate_public_dns(host)
 
     @staticmethod
     def _extract_peer_ip(response: aiohttp.ClientResponse) -> Optional[str]:
-        """
-        从底层连接中提取对端 IP。
-        """
+        """从底层传输连接中提取实际对端 IP，供连接后复核使用。"""
         connection = response.connection
         if connection is None or connection.transport is None:
             return None
@@ -299,9 +311,7 @@ class DownloadManager:
 
     @staticmethod
     def _ensure_public_peer_ip(peer_ip: str, source_url: str) -> None:
-        """
-        校验连接后的对端 IP 是否为公网地址。
-        """
+        """校验连接后的对端 IP 是否为公网地址，复用统一的公网判定逻辑。"""
         try:
             ip_obj = ipaddress.ip_address(peer_ip)
         except ValueError as exc:
@@ -314,10 +324,11 @@ class DownloadManager:
     def _validate_connected_peer_ip(
         self, response: aiohttp.ClientResponse, source_url: str
     ) -> None:
-        """
-        连接建立后再次校验对端 IP，防止 DNS rebinding。
+        """连接建立后再次校验对端 IP，属 SSRF 第三层防护。
 
-        无法提取对端 IP 时 fail-closed 拒绝下载，避免因校验信息缺失而放行潜在的内网连接。
+        闭合 DNS rebinding 的 TOCTOU 窗口：即便解析阶段校验通过，连接的对端 IP 仍
+        可能因 DNS 切换而落入内网，故对实际建立连接的 IP 再校验一次。无法提取对端
+        IP 时 fail-closed 拒绝下载，避免因校验信息缺失而放行潜在的内网连接。
         """
         peer_ip = self._extract_peer_ip(response)
         if not peer_ip:
@@ -328,8 +339,7 @@ class DownloadManager:
     async def download_image(
         self, url: str, save_path: Path, headers: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
-        """
-        异步下载图片
+        """异步下载图片。
 
         Args:
             url: 图片URL
@@ -363,6 +373,8 @@ class DownloadManager:
                 session = await self._ensure_session()
                 current_url = url
                 redirect_count = 0
+                # SSRF 第四层防护：禁用自动重定向改为逐跳手动处理，每跳重新走静态、
+                # DNS 与连接对端 IP 完整校验，防止经由重定向绕过跳转到内网地址
                 while True:
                     # 依赖网络状态的 DNS 校验放在重试循环内，保障 max_retries 生效
                     await self._validate_url_for_request(current_url)
@@ -387,7 +399,6 @@ class DownloadManager:
                             current_url = next_url
                             continue
 
-                        # 检查响应状态
                         if response.status != 200:
                             raise DownloadError(f"HTTP错误: {response.status}")
 
@@ -398,7 +409,6 @@ class DownloadManager:
                                 f"响应内容类型非图片: {content_type.split(';')[0].strip()}"
                             )
 
-                        # 检查文件大小
                         content_length = response.headers.get("content-length")
                         if content_length:
                             try:
@@ -410,7 +420,6 @@ class DownloadManager:
                             if cl_value > self.max_file_size:
                                 raise DownloadError(f"文件过大: {cl_value} 字节")
 
-                        # 确保目录存在
                         save_path.parent.mkdir(parents=True, exist_ok=True)
 
                         # 下载写入临时文件，成功后原子替换
@@ -433,6 +442,7 @@ class DownloadManager:
                                 "下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造"
                             )
 
+                        # os.replace 在同文件系统内原子替换，避免读者看到半写文件
                         temp_path.replace(save_path)
                         temp_created = False
                         download_time = time.time() - start_time
@@ -476,17 +486,16 @@ class DownloadManager:
             finally:
                 self._cleanup_temp_file(temp_path, created=temp_created)
 
-            # 如果不是最后一次尝试，等待后重试；叠加抖动避免并发重试同步
+            # 非末次尝试则按线性递增延迟加随机抖动退避后重试，抖动避免并发任务重试同步
             if attempt < self.max_retries:
                 await asyncio.sleep(self.retry_delay * (attempt + 1) + random.uniform(0, 1))
 
-        # 所有重试都失败了
+        # 所有重试均失败，抛出最后一次记录的错误
         logger.error("图片下载失败，已重试 {} 次: {}", self.max_retries, sanitize_url(url))
         raise last_error or DownloadError("下载失败")
 
     def validate_url(self, url: str) -> bool:
-        """
-        验证 URL 静态格式与主机安全性（不含 DNS 解析）
+        """验证 URL 静态格式与主机安全性（不含 DNS 解析）。
 
         Args:
             url: 要验证的URL

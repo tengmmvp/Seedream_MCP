@@ -1,4 +1,4 @@
-"""AutoSaveManager 批量并发的部分失败聚合测试（A6 核心降级路径）。"""
+"""AutoSaveManager 批量并发的部分失败聚合测试，覆盖核心降级路径。"""
 
 from pathlib import Path
 

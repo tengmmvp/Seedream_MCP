@@ -7,7 +7,7 @@ from seedream_mcp.utils.validation import validate_size_for_model
 
 
 def test_validate_size_rejects_extreme_aspect_ratio() -> None:
-    # 宽高比超 16 被拒（像素路径，适用于任意模型）
+    # 宽高比超 16 在像素路径被拒，适用于任意模型
     with pytest.raises(SeedreamValidationError, match="宽高比"):
         validate_size_for_model("200x10", "doubao-seedream-5-0-260128")
 

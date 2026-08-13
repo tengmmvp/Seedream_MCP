@@ -74,7 +74,7 @@ async def test_safe_report_progress_swallows_errors() -> None:
     await _safe_report_progress(ctx, progress=50.0, message="mid")
 
 
-# ==================== 工具顶层 title（对齐 MCP 规范）====================
+# ==================== 工具顶层 title 对齐 MCP 规范 ====================
 
 
 async def test_tools_register_top_level_title() -> None:
@@ -101,7 +101,7 @@ async def test_tool_titles_not_duplicated_in_annotations() -> None:
 
 
 async def test_resources_registered() -> None:
-    """注册 MCP resources（workspace roots + server info）。"""
+    """注册 MCP resources，包含 workspace roots 与 server info。"""
     resources = await mcp.list_resources()
     uris = {str(resource.uri) for resource in resources}
 

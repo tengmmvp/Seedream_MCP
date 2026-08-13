@@ -1,3 +1,5 @@
+"""配置构建器测试：多层优先级、别名解析、env 文件合并与不污染 os.environ。"""
+
 import os
 from pathlib import Path
 
@@ -201,7 +203,7 @@ def test_build_config_does_not_write_back_to_os_environ(
     config = build_config_from_sources(env_file=str(env_file))
 
     assert config.api_key == "runtime_key"
-    # .env 的 MODEL_ID 不应写入 os.environ（系统未设置该键）
+    # 系统未设置 SEEDREAM_MODEL_ID，.env 的该值不应写入 os.environ
     assert os.getenv("SEEDREAM_MODEL_ID") is None
     assert config.model_id == "doubao-seedream-4-0-250828"
 
@@ -209,7 +211,7 @@ def test_build_config_does_not_write_back_to_os_environ(
 def test_build_config_loads_http_auth_token_from_env_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SEEDREAM_HTTP_AUTH_TOKEN 经 .env 配置链加载（M17）。"""
+    """SEEDREAM_HTTP_AUTH_TOKEN 经 .env 配置链加载。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
     _write_env_file(tmp_path / ".env", "ARK_API_KEY=k\nSEEDREAM_HTTP_AUTH_TOKEN=token123\n")
@@ -219,7 +221,7 @@ def test_build_config_loads_http_auth_token_from_env_file(
 
 
 def test_to_dict_masks_sensitive_fields() -> None:
-    """to_dict 对 api_key 与 http_auth_token 脱敏（M20）。"""
+    """to_dict 对 api_key 与 http_auth_token 脱敏。"""
     from seedream_mcp.config import SeedreamConfig
 
     config = SeedreamConfig(api_key="k", http_auth_token="secret")
@@ -229,7 +231,7 @@ def test_to_dict_masks_sensitive_fields() -> None:
 
 
 def test_workspace_root_non_directory_rejected(tmp_path: Path) -> None:
-    """workspace_root 指向文件时拒绝（L12）。"""
+    """workspace_root 指向文件时拒绝。"""
     from seedream_mcp.config import SeedreamConfig
 
     file_path = tmp_path / "notdir"
@@ -285,4 +287,33 @@ def test_build_config_rejects_non_positive_image_prepare_concurrency(
     )
 
     with pytest.raises(SeedreamConfigError, match="image_prepare_concurrency"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+def test_build_config_loads_prepare_cache_max(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_PREPARE_CACHE_MAX 经 .env 加载到 prepare_cache_max 字段。"""
+    monkeypatch.delenv("SEEDREAM_PREPARE_CACHE_MAX", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_PREPARE_CACHE_MAX=16\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.prepare_cache_max == 16
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1"])
+def test_build_config_rejects_prepare_cache_max_below_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """prepare_cache_max 必须 >= 1，否则抛 SeedreamConfigError。"""
+    monkeypatch.delenv("SEEDREAM_PREPARE_CACHE_MAX", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_PREPARE_CACHE_MAX={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="prepare_cache_max"):
         build_config_from_sources(env_file=str(env_file))

@@ -1,13 +1,21 @@
-"""
-Seedream MCP工具 - 客户端模块
+"""Seedream MCP 客户端模块。
+
+定义 :class:`SeedreamClient`，封装火山引擎 Seedream 系列图像生成 API 的调用逻辑。
+该类同时作为公共库 API 与 MCP 工具后端使用，提供文生图、图文生图、多图融合与
+组图生成四种生成入口，并在入口处对参数重新校验，与工具层形成 defense-in-depth。
+
+核心能力包括图像预处理 LRU 缓存与 single-flight 去重、流式与非流式响应统一解析、
+指数退避重试与 Retry-After 处理，以及请求与响应的安全脱敏与异常分类。
 """
 
 # 标准库导入
 import asyncio
 import hashlib
 import json
+import os
 import random
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # 第三方库导入
@@ -41,6 +49,9 @@ from .utils.validation import (
 )
 from .utils.sse_parser import is_sse_response, parse_sse_response
 
+# 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
+_PrepareCacheKey = Tuple[str, Tuple[str, ...], Tuple[float, int]]
+
 
 class SeedreamClient:
     """
@@ -69,8 +80,10 @@ class SeedreamClient:
         self._image_prepare_concurrency = self.config.image_prepare_concurrency
         # 预处理结果按输入原文缓存，避免并行请求对同一参考图重复读取与编码；
         # 命中时移至末尾实现 LRU，超限淘汰最久未用条目
-        self._prepare_cache: OrderedDict[Tuple[Any, ...], str] = OrderedDict()
+        self._prepare_cache: OrderedDict[_PrepareCacheKey, str] = OrderedDict()
         self._prepare_cache_max = self.config.prepare_cache_max
+        # 并发 miss 去重：同一缓存键的在途预处理复用同一 task，避免重复读+编码
+        self._prepare_inflight: dict[_PrepareCacheKey, asyncio.Task[str]] = {}
 
     async def __aenter__(self) -> "SeedreamClient":
         """
@@ -171,7 +184,6 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败
             SeedreamValidationError: 参数验证失败
         """
-        # 参数验证
         prompt = validate_prompt(prompt)
         validated_opts = validate_optimize_prompt_options(
             optimize_prompt_options, self.config.model_id
@@ -190,7 +202,6 @@ class SeedreamClient:
         )
 
         try:
-            # 构建请求参数
             request_data = self._build_common_request(
                 prompt=prompt,
                 size=size,
@@ -202,7 +213,6 @@ class SeedreamClient:
                 validated_opts=validated_opts,
             )
 
-            # 调用 API
             response = await self._call_api("text_to_image", request_data)
 
             self.logger.info("文生图任务完成")
@@ -248,7 +258,6 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
         """
-        # 参数验证
         prompt = validate_prompt(prompt)
         validated_opts = validate_optimize_prompt_options(
             optimize_prompt_options, self.config.model_id
@@ -268,10 +277,8 @@ class SeedreamClient:
         )
 
         try:
-            # 处理图像输入
             image_data = await self._prepare_image_input(image)
 
-            # 构建请求参数
             request_data = self._build_common_request(
                 prompt=prompt,
                 size=size,
@@ -284,7 +291,6 @@ class SeedreamClient:
                 extra={"image": image_data},
             )
 
-            # 调用 API
             response = await self._call_api("image_to_image", request_data)
 
             self.logger.info("图文生图任务完成")
@@ -330,7 +336,6 @@ class SeedreamClient:
             SeedreamAPIError: API 调用失败或图像处理失败
             SeedreamValidationError: 参数验证失败
         """
-        # 参数验证
         prompt = validate_prompt(prompt)
         validated_opts = validate_optimize_prompt_options(
             optimize_prompt_options, self.config.model_id
@@ -354,10 +359,8 @@ class SeedreamClient:
         )
 
         try:
-            # 处理图像输入
             image_data_list = await self._prepare_images_in_parallel(image)
 
-            # 构建请求参数
             request_data = self._build_common_request(
                 prompt=prompt,
                 size=size,
@@ -370,7 +373,6 @@ class SeedreamClient:
                 extra={"image": image_data_list, "sequential_image_generation": "disabled"},
             )
 
-            # 调用 API
             response = await self._call_api("multi_image_fusion", request_data)
 
             self.logger.info("多图融合任务完成")
@@ -432,7 +434,6 @@ class SeedreamClient:
                 value=self.config.model_id,
             )
 
-        # 参数验证
         prompt = validate_prompt(prompt)
         validated_opts = validate_optimize_prompt_options(
             optimize_prompt_options, self.config.model_id
@@ -442,15 +443,12 @@ class SeedreamClient:
         output_format = validate_output_format(output_format, self.config.model_id)
         tools = validate_generation_tools(tools, self.config.model_id)
 
-        # 处理图像输入
         processed_image: Optional[Union[str, List[str]]] = None
         reference_images = None
         if image is not None:
             if isinstance(image, str):
-                # 单张图片
                 reference_images = [image]
             elif isinstance(image, (list, tuple)):
-                # 多张图片
                 reference_images = list(image)
             else:
                 raise SeedreamValidationError(
@@ -490,7 +488,6 @@ class SeedreamClient:
                 lambda: size,
             )
 
-            # 构建请求参数
             extra: Dict[str, Any] = {
                 "sequential_image_generation": "auto",
                 "sequential_image_generation_options": {"max_images": resolved_max_images},
@@ -509,7 +506,6 @@ class SeedreamClient:
                 extra=extra,
             )
 
-            # 调用 API
             response = await self._call_api("sequential_generation", request_data)
 
             self.logger.info("组图输出任务完成")
@@ -531,7 +527,7 @@ class SeedreamClient:
 
     def _build_http_timeout(self) -> httpx.Timeout:
         """
-        构建统一超时策略（首次构建后缓存到实例，避免每次请求重复构造）
+        构建并缓存统一超时策略。首次构建后缓存到实例，避免每次请求重复构造。
 
         - `timeout`：连接建立/连接池获取/请求写入阶段
         - `api_timeout`：响应读取阶段与总超时上限
@@ -833,8 +829,10 @@ class SeedreamClient:
         """
         发送流式请求并解析响应。
         """
+        # 大请求体 JSON 序列化移至工作线程，避免阻塞事件循环
+        json_bytes = await asyncio.to_thread(json.dumps, request_data)
         async with client.stream(
-            "POST", url, json=request_data, timeout=request_timeout
+            "POST", url, content=json_bytes, timeout=request_timeout
         ) as response:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
             await self._raise_for_stream_response_status(response)
@@ -865,7 +863,9 @@ class SeedreamClient:
         """
         发送非流式请求并解析响应。
         """
-        response = await client.post(url, json=request_data, timeout=request_timeout)
+        # 大请求体（多图融合 base64 可达数十 MB）的 JSON 序列化移至工作线程，避免阻塞事件循环
+        json_bytes = await asyncio.to_thread(json.dumps, request_data)
+        response = await client.post(url, content=json_bytes, timeout=request_timeout)
 
         self.logger.debug("收到响应: 状态码={}", response.status_code)
         self._raise_for_response_status(response)
@@ -879,6 +879,10 @@ class SeedreamClient:
     async def _call_api(self, endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         调用 Seedream API
+
+        按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误类型
+        分类处理：4xx 客户端错误（429 除外）立即抛出，429 与 5xx、超时及网络错误按指数
+        退避或服务端 Retry-After 重试，重试次数用尽后抛出对应的 Seedream 异常。
         """
         await self._ensure_client()
         client = self._get_http_client()
@@ -979,42 +983,103 @@ class SeedreamClient:
 
         raise SeedreamAPIError(f"{endpoint} API 调用重试次数已用尽")
 
-    async def _prepare_image_input(self, image: str) -> str:
+    @staticmethod
+    def _local_file_signature(image: str, workspace_roots: Tuple[str, ...]) -> Tuple[float, int]:
+        """本地文件返回 (mtime, size) 参与缓存键，内容替换后失效避免返回陈旧编码；
+        URL 与 data URI 内容由字符串决定、无法定位文件时返回 (0.0, 0)。相对路径按
+        workspace_roots 解析后再 stat，与 _prepare_local_image 的实际读取路径一致。"""
+        lowered = image.lower()
+        if lowered.startswith(("http://", "https://", "data:image/")):
+            return (0.0, 0)
+        # 绝对路径直接 stat；相对路径按工作区根解析，避免 CWD 与工作区不一致时 stat 错误文件
+        candidate: Optional[Path] = None
+        if os.path.isabs(image):
+            candidate = Path(image)
+        else:
+            for root in workspace_roots:
+                resolved = Path(root) / image
+                if resolved.exists():
+                    candidate = resolved
+                    break
+        if candidate is None:
+            return (0.0, 0)
+        try:
+            stat_result = os.stat(candidate)
+        except OSError:
+            return (0.0, 0)
+        return (stat_result.st_mtime, stat_result.st_size)
+
+    async def _prepare_image_input(
+        self, image: str, _roots_key: Optional[Tuple[str, ...]] = None
+    ) -> str:
         """
         准备图像输入数据。
 
-        将图像 URL 或本地文件路径转换为 API 所需格式。结果按 (输入, workspace_roots)
-        缓存，避免并行请求对同一参考图重复读取与编码，并以工作区隔离键避免跨租户命中；
-        缓存超限按 LRU 淘汰。实现委托 :mod:`seedream_mcp.utils.image_input`。
+        将图像 URL 或本地文件路径转换为 API 所需格式。结果按 (输入, workspace_roots,
+        本地文件签名) 缓存，避免并行请求对同一参考图重复读取与编码，并以工作区隔离键
+        避免跨租户命中；本地文件纳入 mtime+size 防内容替换返回陈旧编码。缓存超限按 LRU
+        淘汰；同一键的并发 miss 复用同一在途 task（single-flight）。实现委托
+        :mod:`seedream_mcp.utils.image_input`。
         """
-        from .utils.path_utils import get_workspace_roots
+        if _roots_key is None:
+            from .utils.path_utils import get_workspace_roots
 
-        cache_key = (image, tuple(str(r) for r in get_workspace_roots()))
+            _roots_key = tuple(str(r) for r in get_workspace_roots())
+        cache_key: _PrepareCacheKey = (
+            image,
+            _roots_key,
+            self._local_file_signature(image, _roots_key),
+        )
+
         cached = self._prepare_cache.get(cache_key)
         if cached is not None:
             self._prepare_cache.move_to_end(cache_key)
             return cached
+
+        inflight = self._prepare_inflight.get(cache_key)
+        if inflight is not None:
+            return await inflight
+
+        task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
+        self._prepare_inflight[cache_key] = task
+        # 创建者被取消时仅退出自身，不取消 task：inflight 由 task 完成时清理，
+        # 保护共享同一 task 的其他等待者不被连带取消
+        return await task
+
+    async def _prepare_and_cache(self, image: str, cache_key: _PrepareCacheKey) -> str:
+        """执行图像预处理并写入 LRU 缓存，供 single-flight 去重复用。
+
+        inflight 在本 task 完成时清理；创建者被取消时 task 继续运行直至完成，
+        保护共享同一 task 的其他等待者，避免连带取消。
+        """
         from .utils.image_input import prepare_image_input
 
-        prepared = await prepare_image_input(image)
-        self._prepare_cache[cache_key] = prepared
-        if len(self._prepare_cache) > self._prepare_cache_max:
-            self._prepare_cache.popitem(last=False)
-        return prepared
+        try:
+            prepared = await prepare_image_input(image)
+            self._prepare_cache[cache_key] = prepared
+            if len(self._prepare_cache) > self._prepare_cache_max:
+                self._prepare_cache.popitem(last=False)
+            return prepared
+        finally:
+            self._prepare_inflight.pop(cache_key, None)
 
     async def _prepare_images_in_parallel(self, images: Sequence[str]) -> List[str]:
         """
         受限并发预处理多张图片
         """
+        from .utils.path_utils import get_workspace_roots
+
         concurrency = max(1, self._image_prepare_concurrency)
         semaphore = asyncio.Semaphore(concurrency)
+        # 批内预计算一次工作区键，避免每图重复读取 ContextVar 与构造元组
+        roots_key = tuple(str(r) for r in get_workspace_roots())
 
         async def _prepare_with_limit(image: str) -> str:
             async with semaphore:
-                return await self._prepare_image_input(image)
+                return await self._prepare_image_input(image, roots_key)
 
         tasks = [_prepare_with_limit(image) for image in images]
-        return list(await asyncio.gather(*tasks))
+        return await asyncio.gather(*tasks)
 
     def _handle_api_error(self, error: Exception) -> Exception:
         """

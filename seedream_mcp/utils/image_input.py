@@ -1,7 +1,7 @@
-"""图像输入预处理。
+"""图像输入预处理：将多种来源的图像统一归一化为 API 可接受的格式。
 
-将用户提供的图像（URL / Data URI / 本地文件路径）归一化为 API 可接受的格式：
-URL 与 Data URI 校验后原样返回；本地文件读取并编码为 Base64 Data URI。
+支持 URL、Data URI 与本地文件路径三种来源。URL 与 Data URI 经校验后原样返回；
+本地文件路径在工作区边界校验通过后，经 O_NOFOLLOW 读取并编码为 Base64 Data URI。
 该模块从 SeedreamClient 剥离，使客户端专注于 API 调用，预处理逻辑可独立测试与复用。
 """
 
@@ -48,19 +48,23 @@ async def prepare_image_input(image: str) -> str:
             return normalized
 
         if normalized.lower().startswith("data:image/"):
-            # validate_image_url 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环
+            # validate_image_url 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环。
             return await asyncio.to_thread(validate_image_url, normalized)
 
-        # 本地文件：路径校验、读取与编码均为同步 IO，整体放到工作线程
+        # 本地文件：路径校验、读取与编码均为同步 IO，整体放到工作线程。
         return await asyncio.to_thread(_prepare_local_image, normalized, image)
     except SeedreamMCPError:
         raise
     except Exception as e:
-        raise SeedreamAPIError(f"图像处理失败: {e}")
+        raise SeedreamAPIError(f"图像处理失败: {e}") from e
 
 
 def _prepare_local_image(normalized: str, original: str) -> str:
-    """校验本地图片路径并读取编码为 Base64 Data URI。需在工作线程中调用。"""
+    """校验本地图片路径并读取编码为 Base64 Data URI。
+
+    路径需通过任一工作区 Root 的越界校验方可读取；全部 Root 均校验失败时给出
+    相似路径建议。需在工作线程中调用。
+    """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
         raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
@@ -93,11 +97,11 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             )
         raise SeedreamAPIError(f"{error_text}{suggestion_text}")
 
-    # O_NOFOLLOW 防护（最终路径分量拒绝符号链接）由 os_utils 统一实现；
-    # 符号链接或打开失败抛 OSError，由 prepare_image_input 外层转 SeedreamAPIError
+    # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 os_utils 统一实现；
+    # 符号链接或打开失败抛 OSError，由 prepare_image_input 外层转 SeedreamAPIError。
     with open_no_follow_read(validated_path) as f:
         image_bytes = f.read()
-    # 维度校验复用已读字节，避免再次打开文件
+    # 维度校验复用已读字节，避免再次打开文件。
     try:
         _ensure_heif_opener_registered()
         with Image.open(io.BytesIO(image_bytes)) as img:
@@ -105,7 +109,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     except SeedreamValidationError:
         raise
     except Exception as e:
-        raise SeedreamAPIError(f"图像维度解析失败: {e}")
+        raise SeedreamAPIError(f"图像维度解析失败: {e}") from e
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     suffix = validated_path.suffix.lower()
     mime_type = MIME_BY_EXTENSION.get(suffix, "image/jpeg")

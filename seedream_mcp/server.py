@@ -1,5 +1,9 @@
 ﻿"""
-Seedream MCP服务器主模块
+Seedream MCP 服务器主模块。
+
+注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，以及风格预设
+Prompt 与工作区、服务器信息资源。负责 CLI 参数解析、配置注入、生命周期管理与
+streamable-http 的 Bearer 鉴权装配。
 """
 
 from __future__ import annotations
@@ -16,7 +20,13 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
 # 本地模块导入
-from .config import MODEL_ALIASES, SeedreamConfig, build_config_from_sources, get_global_config
+from .config import (
+    MODEL_ALIASES,
+    SeedreamConfig,
+    build_config_from_sources,
+    get_global_config,
+    set_config,
+)
 from .tools import (
     BrowseImagesInput,
     ImageToImageInput,
@@ -56,10 +66,10 @@ SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生
 # ==================== 工具注解常量 ====================
 
 # 生成类工具的能力标注
-# - readOnlyHint: 非只读操作（生成文件）
-# - destructiveHint: 非破坏性操作
-# - idempotentHint: 非幂等操作（每次生成结果可能不同）
-# - openWorldHint: 开放世界操作（需要网络请求）
+# - readOnlyHint=False：会生成文件，非只读
+# - destructiveHint=False：不破坏既有数据
+# - idempotentHint=False：每次生成结果可能不同，非幂等
+# - openWorldHint=True：需联网调用 API，属开放世界操作
 GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
@@ -68,10 +78,10 @@ GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
 )
 
 # 浏览类工具的能力标注
-# - readOnlyHint: 只读操作（仅读取文件列表）
-# - destructiveHint: 非破坏性操作
-# - idempotentHint: 幂等操作（相同输入得到相同结果）
-# - openWorldHint: 非开放世界操作（本地文件系统）
+# - readOnlyHint=True：仅读取文件列表，只读
+# - destructiveHint=False：不破坏既有数据
+# - idempotentHint=True：相同输入得到相同结果，幂等
+# - openWorldHint=False：仅访问本地文件系统，非开放世界
 BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -84,7 +94,7 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 # 当前服务器运行时配置
 _active_config: SeedreamConfig | None = None
 
-# 模块日志记录器（先于引用它的 lifespan/cleanup 定义）
+# 模块日志记录器。须先于引用它的 lifespan/cleanup 定义，否则函数体内无法解析该名
 logger = get_logger(__name__)
 
 # 共享客户端与下载管理器：模块级单例，跨 lifespan 重入复用。
@@ -184,9 +194,9 @@ def _sync_cleanup() -> None:
 
     stateless_http 模式 lifespan 不在 teardown 清理，由 cli_main 在服务器退出时补清理。
 
-    asyncio.run 新建事件循环来关闭共享 HTTP 资源，但这些资源（客户端连接池、下载管理器）
-    创建于 lifespan 运行时的旧循环上。跨循环 aclose 对绑定旧循环的底层传输可能被静默
-    忽略，因此此处仅为 best-effort 清理，真正的回收依赖进程退出时由操作系统回收。
+    asyncio.run 新建事件循环来关闭共享 HTTP 资源，但客户端连接池与下载管理器创建于
+    lifespan 运行时的旧循环上。跨循环 aclose 对绑定旧循环的底层传输可能被静默忽略，
+    因此此处仅为 best-effort 清理，真正的回收依赖进程退出时由操作系统回收。
     _safe_close 已吞掉异常，避免清理路径中断。
     """
     try:
@@ -337,7 +347,9 @@ async def workspace_roots_resource() -> str:
     ctx = mcp.get_context()
     async with workspace_roots_scope(ctx):
         roots = get_workspace_roots()
-    return json.dumps({"roots": [str(root) for root in roots]}, ensure_ascii=False, indent=2)
+    return json.dumps(
+        {"roots": [str(root).replace("\\", "/") for root in roots]}, ensure_ascii=False, indent=2
+    )
 
 
 @mcp.resource("seedream://server/info")
@@ -560,9 +572,9 @@ class _BearerTokenAuthMiddleware:
     """
     streamable-http Bearer 令牌鉴权 ASGI 中间件。
 
-    校验请求 Authorization 头中的 Bearer 令牌，匹配则放行，否则 http 流量返回 401；
-    启用鉴权时非 http 流量（websocket）以 code 1008 关闭。使用 hmac.compare_digest
-    做常数时间比较以避免时序侧信道泄露令牌。
+    校验请求 Authorization 头中的 Bearer 令牌，匹配则放行，否则 HTTP 流量返回 401。
+    启用鉴权时拒绝 websocket 等非 HTTP 流量并以 code 1008 关闭，避免绕过 Bearer 校验。
+    使用 hmac.compare_digest 做常数时间比较，避免时序侧信道泄露令牌。
     """
 
     def __init__(self, app: Any, expected_token: str) -> None:
@@ -575,7 +587,7 @@ class _BearerTokenAuthMiddleware:
             await self.app(scope, receive, send)
             return
         if scope_type != "http":
-            # 启用鉴权时拒绝非 http 流量（如 websocket），避免绕过 Bearer 校验
+            # 启用鉴权时拒绝 websocket 等非 http 流量，避免绕过 Bearer 校验
             if scope_type == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
             return
@@ -622,7 +634,7 @@ def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enable
     """
     将 streamable-http 监听配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
 
-    非回环绑定时，调用方需已在 cli_main 中完成 fail-closed 校验（必须配置鉴权令牌），
+    非回环绑定时，调用方需已在 cli_main 中完成 fail-closed 校验，即必须配置鉴权令牌，
     因此此处非回环分支仅用于确认已启用鉴权。stateless 启用无状态模式，更适合远程
     多客户端与负载均衡场景。
     """
@@ -633,7 +645,7 @@ def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enable
 
 
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
-    """根据绑定地址与鉴权状态输出风险告警（同时写入日志与控制台）。"""
+    """根据绑定地址与鉴权状态输出风险告警，同时写入日志与控制台。"""
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
             message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"
@@ -692,7 +704,6 @@ def cli_main() -> int:
         - 0: 正常退出
         - 1: 配置错误或运行异常
     """
-    # 解析命令行参数
     parser = _build_arg_parser()
     args = parser.parse_args()
 
@@ -706,8 +717,11 @@ def cli_main() -> int:
         return 1
 
     _active_config = config
+    # 同步写入全局配置单例，使 path_utils 等回退 get_global_config 的路径读到同一实例，
+    # 避免无 MCP Roots 时重建第二个 config 造成双事实来源
+    set_config(config)
 
-    # 初始化日志系统
+    # 初始化日志系统并打印启动信息
     setup_logging(
         config.log_level,
         config.log_file,

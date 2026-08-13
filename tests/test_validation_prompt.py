@@ -1,3 +1,5 @@
+"""validate_prompt 中英文词数建议阈值测试，超限仅警告不阻断。"""
+
 from seedream_mcp.utils.validation import validate_prompt
 from seedream_mcp.tools.core.schemas import TextToImageInput
 

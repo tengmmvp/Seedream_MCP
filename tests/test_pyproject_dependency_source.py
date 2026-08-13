@@ -1,3 +1,5 @@
+"""pyproject 运行时依赖单一来源守护，锁定 PEP 735 dependency-groups 迁移。"""
+
 from pathlib import Path
 
 try:

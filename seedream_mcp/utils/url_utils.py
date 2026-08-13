@@ -21,10 +21,12 @@ def get_file_extension_from_url(url: str, default: str = ".jpeg") -> str:
         小写的扩展名（含点号），或 ``default``。
     """
     try:
+        # 扩展名仅从 URL 路径部分提取，query 与 fragment 不参与推断
         path = urlparse(url).path
         suffix = Path(path).suffix.lower()
         if suffix:
             return suffix
     except Exception:
+        # 解析失败时降级为默认扩展名，保证调用方始终拿到可用的点号后缀
         pass
     return default

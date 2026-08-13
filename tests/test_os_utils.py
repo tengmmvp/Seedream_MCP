@@ -2,7 +2,7 @@
 
 覆盖三种场景：
 (a) 平台支持 O_NOFOLLOW 时，最终分量为符号链接的路径被拒绝；
-(b) 模拟平台不支持 O_NOFOLLOW（monkeypatch O_NOFOLLOW=0），is_symlink 兜底分支拒绝符号链接；
+(b) 模拟平台不支持 O_NOFOLLOW，monkeypatch 置 O_NOFOLLOW=0，is_symlink 兜底分支拒绝符号链接；
 (c) 正常文件读取 / 写入 / 截断成功。
 
 Windows 创建符号链接需特权或开发者模式，相关用例以 try/skip 跳过，避免 WinError 1314。
@@ -17,7 +17,7 @@ from seedream_mcp.utils.os_utils import open_no_follow_read, open_no_follow_writ
 
 
 def _can_create_symlink(tmp_path: Path) -> bool:
-    """探测当前进程是否有权创建符号链接（Windows 需特权或开发者模式）。"""
+    """探测当前进程是否有权创建符号链接，Windows 需特权或开发者模式。"""
     target = tmp_path / "_symlink_probe_target.bin"
     target.write_bytes(b"x")
     link = tmp_path / "_symlink_probe_link.bin"
@@ -121,7 +121,7 @@ def test_open_no_follow_write_fallback_rejects_symlink_without_no_follow(
 def test_open_no_follow_fallback_allows_normal_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """模拟不支持 O_NOFOLLOW 时，正常文件（非符号链接）读取 / 写入仍成功。
+    """模拟不支持 O_NOFOLLOW 时，正常文件即非符号链接的读取与写入仍成功。
 
     确保兜底分支不会误伤普通文件。
     """

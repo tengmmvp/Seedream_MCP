@@ -1,3 +1,5 @@
+"""生成工具 Input schema 字段顺序与 MCP 协议参数顺序对齐守护。"""
+
 from seedream_mcp.tools.core.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,

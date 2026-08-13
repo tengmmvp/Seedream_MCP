@@ -1,4 +1,9 @@
-"""生成请求的并行执行与 lifespan 共享资源获取。"""
+"""生成请求的并行执行与 lifespan 共享资源获取。
+
+单次请求直接调用 request_executor；request_count > 1 时按 parallelism 构造信号量限流
+并发，逐个请求完成后按完成数上报进度。共享的 SeedreamClient 与 DownloadManager 优先从
+lifespan 上下文获取，以复用 HTTP/aiohttp 连接池，无 lifespan 场景由调用方回退新建。
+"""
 
 from __future__ import annotations
 
@@ -28,14 +33,15 @@ async def _execute_parallel_generation_requests(
     progress_start: float = 20.0,
     progress_span: float = 50.0,
 ) -> Dict[str, Any]:
-    """
-    按并发上限执行多次生成请求并聚合结果。
+    """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
+
+    每个请求独立捕获异常并记入 request_errors，不中断其余请求；完成计数与进度读取仅在
+    asyncio 单线程事件循环中进行，且自增与读取之间无 await，因此无需加锁。
     """
     semaphore = asyncio.Semaphore(context.parallelism)
     request_results: List[Optional[Dict[str, Any]]] = [None] * context.request_count
     request_errors: Dict[int, str] = {}
     completed_requests = 0
-    progress_lock = asyncio.Lock()
 
     async def _run_single_request(request_index: int) -> None:
         nonlocal completed_requests
@@ -52,11 +58,11 @@ async def _execute_parallel_generation_requests(
                     request_errors[request_index],
                 )
             finally:
-                async with progress_lock:
-                    completed_requests += 1
-                    progress = progress_start + progress_span * (
-                        completed_requests / context.request_count
-                    )
+                # asyncio 单线程模型下，自增与进度读取之间无 await，不会被其他协程抢占，无需加锁。
+                completed_requests += 1
+                progress = progress_start + progress_span * (
+                    completed_requests / context.request_count
+                )
                 await _safe_report_progress(
                     ctx,
                     progress=progress,
@@ -127,7 +133,11 @@ async def _run_generation_requests(
     ],
     module_logger: Any,
 ) -> Dict[str, Any]:
-    """在给定客户端上执行单次或并行生成请求并返回结果。"""
+    """在给定客户端上执行单次或并行生成请求并返回结果。
+
+    request_count 为 1 时直接调用 request_executor；否则委托
+    ``_execute_parallel_generation_requests`` 并行执行。进度按阶段上报。
+    """
     if context.request_count == 1:
         await _safe_report_progress(ctx, progress=20.0, message="开始调用图像生成接口")
         await _yield_for_cancellation()

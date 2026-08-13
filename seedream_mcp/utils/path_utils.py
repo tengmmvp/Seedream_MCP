@@ -1,5 +1,8 @@
-"""
-Seedream MCP工具 - 路径处理工具
+"""Seedream MCP 路径处理工具：MCP 工作区 Roots 边界与路径越界校验。
+
+以 MCP Roots 作为文件访问边界，对图片路径做规范化与越界校验，拦截包含 ``..``
+或经由符号链接指向工作区之外的路径；无 MCP Roots 时回退 SEEDREAM_WORKSPACE_ROOT
+环境变量。另提供目录图片查找与拼写相近路径建议。
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ from .validation import (
 
 logger = get_logger(__name__)
 
-# 校验允许的图片格式与工作区 Roots 上下文变量
+# 受支持的图片格式集合与工作区 Roots 上下文变量。
 SUPPORTED_IMAGE_EXTENSIONS = set(VALIDATION_SUPPORTED_IMAGE_EXTENSIONS)
 _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     "seedream_workspace_roots",
@@ -70,10 +73,9 @@ def _safe_global_config() -> Any:
 
 
 def get_workspace_roots() -> List[Path]:
-    """
-    获取当前请求生效的工作区根目录列表。
+    """获取当前请求生效的工作区根目录列表。
 
-    优先使用 MCP Roots（请求级上下文变量），无 Roots 时回退环境变量配置。
+    优先使用 MCP Roots 作为文件访问边界，无 Roots 时回退环境变量配置。
     """
     roots_from_context = _WORKSPACE_ROOTS_VAR.get()
     if roots_from_context is not None:
@@ -82,9 +84,7 @@ def get_workspace_roots() -> List[Path]:
 
 
 def get_workspace_root() -> Path:
-    """
-    获取当前请求默认工作区根目录（Roots 首项或环境变量目录）。
-    """
+    """获取当前请求默认工作区根目录，取 Roots 首项或环境变量目录。"""
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
         raise ValueError("当前 MCP 会话未授权任何工作区目录")
@@ -92,8 +92,9 @@ def get_workspace_root() -> Path:
 
 
 async def _resolve_workspace_roots_from_context(ctx: Any) -> List[Path]:
-    """
-    从 MCP 上下文读取客户端 Roots，并转换为本地路径列表。
+    """从 MCP 上下文读取客户端 Roots 并转换为本地路径列表。
+
+    将各 Root 的 file:// URI 转为本地路径，拒绝 UNC 形式以避免触发 SMB 连接。
     """
     if ctx is None:
         return []
@@ -122,8 +123,10 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> List[Path]:
 
 @asynccontextmanager
 async def workspace_roots_scope(ctx: Any) -> AsyncIterator[List[Path]]:
-    """
-    在当前请求作用域内绑定 MCP Roots（若可用），退出时自动恢复。
+    """在当前请求作用域内绑定 MCP Roots，退出时自动恢复。
+
+    将客户端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持
+    Roots 时回退环境变量边界。
     """
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: List[Path] = []
@@ -167,15 +170,16 @@ def _is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
 
 
 def is_path_within_base(path: Path, base_dir: Path) -> bool:
-    """
-    判断路径是否位于基础目录内。
+    """判断路径是否位于基础目录内。
+
+    将 path 与 base_dir 均 resolve 后比较，可拦截包含 ``..`` 或经由符号链接
+    指向基础目录之外的路径。
     """
     return _is_within_resolved(path.resolve(), base_dir.resolve())
 
 
 def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
-    """
-    判断路径是否位于任一基础目录内。
+    """判断路径是否位于任一基础目录内。
 
     path 仅 resolve 一次后与各 base 比较，避免对每个 base 重复解析同一 path。
     """
@@ -187,24 +191,23 @@ def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
 
 
 def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
-    """
-    标准化文件路径
+    """标准化文件路径为绝对 Path 对象。
 
     Args:
-        path: 输入路径（相对或绝对）
-        base_dir: 基础目录，用于解析相对路径
+        path: 输入路径，可为相对或绝对。
+        base_dir: 基础目录，用于解析相对路径。
 
     Returns:
-        标准化的Path对象
+        标准化的 Path 对象。
     """
     try:
         path_obj = Path(path)
 
-        # 如果是绝对路径，直接返回
+        # 绝对路径直接 resolve 返回。
         if path_obj.is_absolute():
             return path_obj.resolve()
 
-        # 如果是相对路径，基于base_dir或当前工作目录解析
+        # 相对路径基于 base_dir 或当前工作目录解析。
         if base_dir:
             base_path = Path(base_dir)
             return (base_path / path_obj).resolve()
@@ -217,26 +220,24 @@ def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
 
 
 def get_relative_path(path: Union[str, Path], base_dir: Optional[str] = None) -> str:
-    """
-    获取相对路径
+    """获取相对路径。
 
     Args:
-        path: 文件路径
-        base_dir: 基础目录，默认为当前工作目录
+        path: 文件路径。
+        base_dir: 基础目录，默认为当前工作目录。
 
     Returns:
-        相对路径字符串
+        相对路径字符串。
     """
     try:
         path_obj = Path(path)
         base_path = Path(base_dir) if base_dir else Path.cwd()
 
-        # 尝试获取相对路径
         try:
             relative_path = path_obj.relative_to(base_path)
             return str(relative_path)
         except ValueError:
-            # 如果无法获取相对路径，返回绝对路径
+            # 无法取相对路径时回退绝对路径。
             return str(path_obj.resolve())
 
     except Exception as e:
@@ -250,31 +251,30 @@ def get_relative_path(path: Union[str, Path], base_dir: Optional[str] = None) ->
 def validate_image_path(
     path: str, base_dir: Optional[str] = None, skip_dimensions: bool = False
 ) -> Tuple[bool, str, Optional[Path]]:
-    """
-    验证图片文件路径
+    """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
 
     Args:
-        path: 图片文件路径
-        base_dir: 基础目录
+        path: 图片文件路径，HTTP(S) URL 直接判为有效。
+        base_dir: 工作区基础目录，用于越界校验。
+        skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
-        (是否有效, 错误信息, 标准化路径)
+        三元组 (是否有效, 错误信息, 标准化路径)。
     """
     try:
-        # 如果是URL，直接返回有效
+        # URL 形式的路径直接判为有效。
         if path.startswith(("http://", "https://")):
             return True, "", None
 
-        # 标准化路径
         normalized_path = normalize_path(path, base_dir)
 
-        # 校验路径是否在受控目录内
+        # 校验路径未越出受控工作区目录。
         if base_dir:
             base_path = Path(base_dir).resolve()
             if not is_path_within_base(normalized_path, base_path):
                 return False, "路径超出允许的工作区目录范围", normalized_path
 
-        # 委托 validation 模块执行统一规则校验
+        # 委托 validation 模块执行格式与维度等统一规则校验。
         try:
             validated_path = validate_image_url(
                 str(normalized_path), skip_dimensions=skip_dimensions
@@ -295,22 +295,21 @@ def find_images_in_directory(
     extensions: Optional[List[str]] = None,
     limit: Optional[int] = None,
 ) -> List[Path]:
-    """
-    在目录中查找图片文件
+    """在目录中查找图片文件。
 
     Args:
-        directory: 搜索目录
-        recursive: 是否递归搜索
-        max_depth: 最大搜索深度
-        extensions: 指定的文件扩展名列表
-        limit: 返回数量上限（<=0 返回空）；扫描按 normcase 稳定顺序，凑够即提前停止
+        directory: 搜索目录。
+        recursive: 是否递归搜索。
+        max_depth: 最大搜索深度。
+        extensions: 指定的文件扩展名列表。
+        limit: 返回数量上限，<=0 时返回空列表；扫描按 normcase 稳定顺序，凑够即提前停止。
 
     Returns:
-        找到的图片文件路径列表
+        找到的图片文件路径列表。
     """
     images: list[Path] = []
 
-    # 非正上限（0 或负数）：返回数量上限为 0，直接返回空列表，不进入扫描。
+    # 上限为 0 或负数时直接返回空列表，不进入扫描。
     if limit is not None and limit <= 0:
         return images
 
@@ -321,11 +320,11 @@ def find_images_in_directory(
             logger.warning("目录不存在或不是目录: {}", directory)
             return images
 
-        # 使用指定的扩展名或默认支持的扩展名
+        # 选用自定义扩展名集合或默认受支持集合。
         target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
         target_extensions = {ext.lower() for ext in target_extensions}
 
-        # 目标条数：None（无上限）记为 -1 表示收集全部。
+        # 无上限时记为 -1 表示收集全部。
         target_count = limit if limit is not None else -1
 
         def scan_directory(path: Path, current_depth: int = 0) -> bool:
@@ -341,7 +340,7 @@ def find_images_in_directory(
 
             for entry in entries:
                 entry_path = Path(entry.path)
-                # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历
+                # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历。
                 if (
                     entry.is_file(follow_symlinks=False)
                     and entry_path.suffix.lower() in target_extensions
@@ -365,15 +364,16 @@ def find_images_in_directory(
 
 
 def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = None) -> List[str]:
-    """
-    建议相似的文件路径
+    """在搜索目录下建议与目标路径拼写相近的图片路径。
+
+    用于路径校验失败时给出纠错建议，缓解用户手误导致的路径错误。
 
     Args:
-        target_path: 目标路径
-        search_dirs: 搜索目录列表
+        target_path: 目标路径。
+        search_dirs: 搜索目录列表，默认当前目录。
 
     Returns:
-        相似路径建议列表
+        相似路径建议列表，最多 5 条。
     """
     suggestions = []
 
@@ -388,7 +388,7 @@ def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = N
                 if target_name in image_path.name.lower():
                     suggestions.append(str(image_path))
 
-                if len(suggestions) >= 5:  # 限制建议数量
+                if len(suggestions) >= 5:
                     break
 
             if len(suggestions) >= 5:
@@ -404,9 +404,7 @@ def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = N
 
 
 def _file_uri_to_path(uri: str) -> Optional[Path]:
-    """
-    将 file:// URI 转换为本地路径。
-    """
+    """将 file:// URI 转换为本地路径，拒绝 UNC 形式以避免触发 SMB 连接。"""
     try:
         parsed = urlparse(uri)
     except Exception:
@@ -418,7 +416,7 @@ def _file_uri_to_path(uri: str) -> Optional[Path]:
     path_part = url2pathname(parsed.path or "")
     netloc = parsed.netloc or ""
     if netloc and netloc.lower() != "localhost":
-        # 拒绝 UNC 路径（file://host/share），避免 Windows 下触发 SMB 连接泄露凭据
+        # 拒绝 UNC 路径如 file://host/share，避免 Windows 下触发 SMB 连接泄露凭据。
         return None
 
     if not path_part:

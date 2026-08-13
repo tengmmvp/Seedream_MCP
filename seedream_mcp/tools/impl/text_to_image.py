@@ -1,20 +1,19 @@
-﻿"""
-文生图工具模块
+﻿"""文生图工具的 impl 处理器。
+
+作为薄适配器：封装 prompt 与优化选项为 ``_execute`` 回调，再委托
+``execute_generation_handler`` 流水线完成校验、调用、保存与结果格式化。字段规则与校验
+由 schemas.TextToImageInput 单一定义。
 """
 
 from __future__ import annotations
 
-# 标准库导入
 from typing import Any, TYPE_CHECKING, Dict
 
-# 第三方库导入
 from mcp.types import CallToolResult
 
-# 项目内部导入 - 配置
 from ...config import SeedreamConfig
 from ...utils.logging import get_logger
 
-# 项目内部导入 - 核心功能
 from ..core.common import (
     execute_generation_handler,
     GenerationExecutionContext,
@@ -25,7 +24,6 @@ if TYPE_CHECKING:
 
     from ...client import SeedreamClient
 
-# 模块日志记录器
 logger = get_logger(__name__)
 
 
@@ -34,33 +32,20 @@ async def handle_text_to_image(
     config: SeedreamConfig,
     ctx: "Context[Any, Any, Any] | None" = None,
 ) -> CallToolResult:
-    """
-    处理文生图请求
+    """处理文生图请求，依据文本提示词生成图片。
 
-    根据用户提供的文本提示词生成图片，支持尺寸配置、水印添加、提示词优化及自动保存等功能。
-    调用 API 生成图片后，可选择性地将结果保存至本地并返回统一格式的响应。
+    流程由 ``execute_generation_handler`` 统一编排：参数经 schema 校验后构建执行上下文，
+    调用客户端生成，可选自动保存，最终返回结构化工具结果。完整字段规则与默认值见
+    ``TextToImageInput``，本函数仅透传 arguments。
 
     Args:
-        arguments: 请求参数字典,包含以下键值：
-            - prompt (str): 生成图片的文本提示词
-            - optimize_prompt_options (dict, optional): 提示词优化选项配置
-            - size (str, optional): 图片尺寸规格
-            - watermark (bool, optional): 是否添加水印
-            - response_format (str, optional): 响应格式，"url" 或 "b64_json"，默认为 "url"
-            - output_format (str, optional): 输出图片格式，仅 Seedream 5.0 支持 "jpeg" 或 "png"
-            - stream (bool, optional): 是否启用流式输出，默认为 False
-            - tools (list, optional): 模型工具配置，仅 Seedream 5.0 支持，如 [{"type": "web_search"}]
-            - request_count (int, optional): 并行请求次数，默认 1，范围 1-4
-            - parallelism (int, optional): 并行度上限，默认 min(request_count, 4)，范围 1-4
-            - auto_save (bool, optional): 是否自动保存生成的图片
-            - save_path (str, optional): 自定义图片保存路径
-            - custom_name (str, optional): 自定义文件名前缀
+        arguments: 工具原始参数字典，结构见 ``TextToImageInput``。
+        config: 当前生效的 SeedreamConfig。
+        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
 
     Returns:
-        CallToolResult: MCP 标准工具结果。
-            - content: 面向模型的文本摘要
-            - structuredContent: 结构化结果数据
-            - isError: 是否为错误结果
+        MCP 标准工具结果，含面向模型的文本摘要与 structuredContent，失败时不抛出异常而
+        以 ``isError=True`` 返回。
     """
 
     async def _execute(

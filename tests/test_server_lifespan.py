@@ -1,6 +1,6 @@
-"""app_lifespan 注入测试（A3）：验证 yield 含 config 与可用 client 的字典。
+"""app_lifespan 注入测试：验证 yield 含 config 与可用 client 的字典。
 
-S1 起将 SeedreamClient 与 DownloadManager 提升为模块级单例，以修复 stateless_http
+SeedreamClient 与 DownloadManager 为模块级单例，以修复 stateless_http
 模式下每请求重入 lifespan 导致连接池退化的问题。此文件同时守护单例的跨重入复用语义。
 """
 
@@ -39,7 +39,7 @@ async def test_app_lifespan_yields_config_and_client(
         assert state["config"] is config
         client = state["client"]
         assert client is not None
-        # client 在 lifespan 期内应可用（持有 httpx 客户端）
+        # client 在 lifespan 期内应可用，须持有 httpx 客户端或具备 close 方法
         assert getattr(client, "_client", None) is not None or hasattr(client, "close")
         # download_manager 同样注入
         assert state["download_manager"] is not None
@@ -72,7 +72,7 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
     monkeypatch: pytest.MonkeyPatch,
     reset_lifespan_singletons,
 ) -> None:
-    """stdio 模式 lifespan 退出时在同事件循环清理单例（H1：进程级优雅关闭）。"""
+    """stdio 模式 lifespan 退出时在同事件循环清理单例，实现进程级优雅关闭。"""
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(server, "_active_config", config)
     monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
@@ -80,7 +80,7 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
     async with server.app_lifespan(server.mcp) as state:
         assert state["client"] is not None
 
-    # teardown 后单例已清理（close + 置 None）
+    # teardown 后单例已清理，执行 close 并置 None
     assert server._shared_client is None
     assert server._shared_download_manager is None
 

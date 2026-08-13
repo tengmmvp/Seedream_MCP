@@ -4,6 +4,12 @@
 消除两处重复实现。最终路径分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时
 （如 Windows）退化为打开前 is_symlink 拒绝，保留同等安全语义。共享函数抛
 OSError，由调用方按各自异常类型包装。
+
+残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的
+符号链接；若校验与打开之间某父目录被替换为指向工作区外的符号链接，读取会
+逃逸出工作区。Windows 无 O_NOFOLLOW 时 is_symlink 与 os.open 之间亦存在最终
+分量替换竞态。两类攻击均需本地写权限与精确时序，属下层威胁；如需收紧可在
+打开后用 fstat 与打开前 stat 比对 device/inode 复核同一性。
 """
 
 import os

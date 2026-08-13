@@ -1,4 +1,9 @@
-"""生成类工具的执行上下文定义与构建。"""
+"""生成类工具的执行上下文定义与构建。
+
+承担 schema 之后的运行时归一化职责：将工具入参中的共享字段集中做尺寸、水印、响应格式、
+并行度等校验，产出不可变的 ``GenerationExecutionContext`` 供流水线各阶段读取，避免在各
+handler 内重复提取与校验。
+"""
 
 from __future__ import annotations
 
@@ -21,10 +26,9 @@ from ...utils.validation import (
 
 @dataclass(frozen=True)
 class GenerationExecutionContext:
-    """
-    生成类工具执行上下文
+    """生成类工具执行上下文，统一封装四类生成工具共享参数。
 
-    统一封装四类生成工具共享参数，避免在各 handler 中重复提取与校验。
+    frozen=True 保证构造后不可变，流水线各阶段读取同一份校验后的快照，避免中途误改。
     """
 
     prompt: str
@@ -45,15 +49,17 @@ class GenerationExecutionContext:
 def build_generation_context(
     arguments: Dict[str, Any], config: SeedreamConfig
 ) -> GenerationExecutionContext:
-    """
-    从工具参数构建统一执行上下文
+    """从工具参数构建统一执行上下文，作为共享字段的集中校验点。
+
+    未显式提供的字段按 config 默认值回退，再交由 utils.validation 的对应校验器做模型
+    能力相关的规则检查，最终装配为不可变的执行上下文。
 
     Args:
         arguments: 工具原始参数字典。
         config: 当前生效配置。
 
     Returns:
-        统一执行上下文对象。
+        校验后的统一执行上下文对象。
     """
     prompt = arguments.get("prompt", "")
     optimize_prompt_options = arguments.get("optimize_prompt_options")

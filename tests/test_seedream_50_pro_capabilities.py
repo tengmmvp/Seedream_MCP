@@ -25,7 +25,7 @@ MODEL_45 = "doubao-seedream-4-5-251128"
 MODEL_40 = "doubao-seedream-4-0-250828"
 
 
-# ==================== 模型识别（根因回归） ====================
+# ==================== 模型识别根因回归 ====================
 
 
 def test_pro_model_detected_as_pro() -> None:
@@ -40,7 +40,7 @@ def test_pro_alias_detected_as_pro() -> None:
     assert is_seedream_50_pro_model("doubao-seedream-5.0-pro") is True
 
 
-# ==================== tools（联网搜索）仅 5.0 Lite 支持 ====================
+# ==================== tools 联网搜索仅 5.0 Lite 支持 ====================
 
 
 def test_tools_accepted_for_lite() -> None:
@@ -134,11 +134,11 @@ def test_stream_enabled_ok_for_lite() -> None:
     assert validate_stream(True, LITE) is True
 
 
-# ==================== Endpoint ID：无法识别模型时放行（由 API 校验） ====================
+# ==================== Endpoint ID 无法识别模型时由 API 校验放行 ====================
 
 
 def test_output_format_accepted_for_endpoint_id() -> None:
-    # Endpoint ID 无法识别模型，放行由 API 校验（与 stream/size/optimize 策略一致）
+    # Endpoint ID 无法识别模型，放行交由 API 校验，与 stream/size/optimize 策略一致
     assert validate_output_format("png", "ep-20241001-abcde") == "png"
 
 

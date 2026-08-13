@@ -1,3 +1,5 @@
+"""FileManager 快速失败与保存路径扩展名收敛测试。"""
+
 import os
 from pathlib import Path
 

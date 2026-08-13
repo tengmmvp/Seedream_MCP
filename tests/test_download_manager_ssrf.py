@@ -1,4 +1,4 @@
-"""SSRF 防护层单元测试（A1 安全覆盖）。
+"""SSRF 防护层单元测试。覆盖静态拒绝与私网解析。
 
 覆盖 _validate_url_static 的各静态拒绝分支与 _resolve_public_ips 的私网解析拒绝，
 这些是 CLAUDE.md 宣称的核心安全特性，此前零回归覆盖。
@@ -130,7 +130,7 @@ def test_public_ip_rejection_accepts_nat64_embedded_public() -> None:
 
 
 def test_public_ip_rejection_rejects_6to4_address() -> None:
-    """6to4 段（2002::/16）地址可封装任意 IPv4 路由，须拒绝。
+    """6to4 段 2002::/16 的地址可封装任意 IPv4 路由，须拒绝。
 
     内嵌的 203.0.113.0 虽为公网文档段，但 6to4 隧道本身允许封装内网路由，
     is_global 对该前缀判定为非公网，先于 sixtofour 属性校验触发拒绝。
@@ -140,6 +140,6 @@ def test_public_ip_rejection_rejects_6to4_address() -> None:
 
 
 def test_public_ip_rejection_rejects_ipv4_mapped_embedded_private() -> None:
-    """IPv4-mapped 段（::ffff:0:0/96）内嵌私网 IPv4 须拒绝。"""
+    """IPv4-mapped 段 ::ffff:0:0/96 内嵌私网 IPv4 须拒绝。"""
     ip = ipaddress.ip_address("::ffff:192.168.0.1")
     assert _public_ip_rejection_reason(ip) is not None
