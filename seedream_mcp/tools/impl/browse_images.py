@@ -236,6 +236,11 @@ async def handle_browse_images(
                 "offset": offset,
                 "has_more": has_more,
                 "next_offset": next_offset,
+                "recursive": recursive,
+                "max_depth": max_depth,
+                "limit": limit,
+                "show_details": show_details,
+                "format_filter": format_filter,
             },
             isError=False,
         )

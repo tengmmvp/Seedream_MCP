@@ -173,6 +173,8 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别
 ```
 
+> **安全提示**：绑定 `localhost` 时服务将其视为回环地址，不强制 Bearer 鉴权与 TLS。部署方应确认 `localhost` 解析到 `127.0.0.1` 或 `::1`，容器与虚拟环境若修改 hosts 需特别注意；非回环绑定必须配置 Bearer 令牌与 TLS。
+
 ### 使用示例
 
 ```bash

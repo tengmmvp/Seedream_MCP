@@ -49,3 +49,64 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     # 在途 task 完成后应被清理；缓存写入一条结果
     assert len(client._prepare_inflight) == 0
     assert len(client._prepare_cache) == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """创建者 await task 被取消时仅退出自身，底层 inflight task 与其他等待者不受影响。
+
+    single-flight 取消隔离契约：创建者被取消时，_prepare_and_cache task 应继续运行直至
+    完成，_prepare_inflight 由 task 完成时的 finally 清理，保护共享同一 task 的其他
+    等待者不被连带取消。两个并发调用经 ensure_future 同时启动；fake 置位事件后，FIFO
+    调度下 creator 先创建 inflight 并 await task，waiter 随后命中 inflight 并 await 同一
+    task。取消 creator 后断言 waiter 仍拿到结果、fake 仅调用一次、缓存正常写入。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    # 显式传入 roots_key，使 cache_key 不依赖工作区根目录上下文
+    roots_key = ("test-roots",)
+
+    call_count = 0
+    inner_started = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        # 通知测试：creator 已创建 inflight task 并 await 它。FIFO 调度下此时 creator、
+        # waiter 均已挂起在共享 task 上。fake 仅执行一次即证明二者复用同一 task。
+        inner_started.set()
+        await asyncio.sleep(0.1)
+        return f"prepared:{image}"
+
+    # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    # URL 输入的 _local_file_signature 恒为 (0.0, 0)，两次 cache_key 完全一致
+    image_url = "https://example.com/ref.png"
+    creator = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+
+    # 等待底层 task 启动：creator 先创建 inflight 并 await task，waiter 随后命中 inflight
+    # 并 await 同一 task，最后底层 task 执行 fake 置位事件。
+    await inner_started.wait()
+    assert len(client._prepare_inflight) == 1
+
+    # 取消创建者：按契约仅退出其 await task，底层 inflight task 不应被连带取消。
+    creator.cancel()
+
+    # asyncio.wait 等待两个 task 终结：creator 因取消终结；waiter 因底层 task 完成终结。
+    done, pending = await asyncio.wait({creator, waiter})
+    assert pending == set()
+    assert creator.cancelled()
+    assert waiter in done
+
+    # (a) 第二个等待者仍从共享的 inflight task 拿到正确结果，不应被连带取消
+    assert not waiter.cancelled(), "等待者不应被创建者取消连带取消"
+    assert waiter.result() == "prepared:https://example.com/ref.png"
+    # (b) fake 底层仅调用一次：两个并发调用共享同一 task
+    assert call_count == 1
+    # (c) task 完成后 _prepare_inflight 已清空、缓存写入一条结果
+    assert len(client._prepare_inflight) == 0
+    assert len(client._prepare_cache) == 1

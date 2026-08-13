@@ -422,27 +422,33 @@ class FileManager:
         Returns:
             清理结果，包含删除文件数、释放字节数与错误列表。
         """
-        from datetime import timedelta
-
-        cutoff_time = datetime.now() - timedelta(days=days)
+        # 以 epoch 秒比较 st_mtime，规避 datetime.fromtimestamp 受本地时区与夏令时
+        # 跳变影响导致的清理边界漂移。
+        cutoff_epoch = datetime.now().timestamp() - days * 86400
         deleted_files = []
         deleted_size = 0
         errors = []
 
         try:
             directories: List[Path] = []
-            # os.walk(followlinks=False) 不下降进入符号链接目录，避免对 base_dir 之外的
-            # 条目执行 listdir/stat，这类条目可能指向 UNC/SMB 远端目标。Windows NTFS
-            # junction 属 reparse point 但 is_symlink 返回 False，followlinks 无法拦截，
-            # 仍会被下降；部署方应确保 base_dir 不接受不可信写入，以规避经由 junction
-            # 的 NTLM/SMB 出站认证风险。非 junction 的 root 由遍历器保证位于 base_dir 内，
-            # 无需逐文件 resolve 复核。
+            # os.walk(followlinks=False) 不下降进入符号链接目录。Windows NTFS junction 属
+            # reparse point 但 is_symlink 返回 False，followlinks 无法拦截，仍会被下降进入
+            # junction 目标，下降后 root 解析到 base_dir 之外。每层先经 validate_path 复核
+            # root 真实位置，越界则跳过该层的目录与文件处理，防止经 junction 误删 base_dir
+            # 之外的条目造成数据破坏。os.walk 下降 junction 时已发生的 OS 级 listdir 无法在此
+            # 拦截，涉及 NTLM/SMB 出站认证风险，部署方应确保 base_dir 不接受不可信写入。
             for root, dirs, files in os.walk(self.base_dir, followlinks=False):
                 root_path = Path(root)
+                if not self.validate_path(root_path):
+                    continue
                 for name in dirs:
                     dir_path = root_path / name
                     # 跳过符号链接目录，不纳入空目录清理，避免对其目标操作。
                     if dir_path.is_symlink():
+                        continue
+                    # junction 目录 resolve 后落在 base_dir 之外，不纳入空目录清理，
+                    # 避免 rmdir 误伤 junction 目标。
+                    if not self.validate_path(dir_path):
                         continue
                     if dir_path != self.base_dir:
                         directories.append(dir_path)
@@ -455,7 +461,7 @@ class FileManager:
                         stat_result = file_path.stat()
                         if not stat.S_ISREG(stat_result.st_mode):
                             continue
-                        if datetime.fromtimestamp(stat_result.st_mtime) < cutoff_time:
+                        if stat_result.st_mtime < cutoff_epoch:
                             file_path.unlink()
                             deleted_files.append(str(file_path))
                             deleted_size += stat_result.st_size

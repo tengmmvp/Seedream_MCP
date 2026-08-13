@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -141,3 +142,40 @@ def test_recursive_order_matches_global_sorted_path(tmp_path: Path) -> None:
     result = find_images_in_directory(str(tmp_path), recursive=True, max_depth=6)
 
     assert result == sorted(result), "递归遍历序须与全局 sorted(Path) 完全一致"
+
+
+def test_find_images_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
+    """符号链接目录指向 base 之外时，递归扫描不得下降进入该目录遍历外部图片。
+
+    防御与 file_manager.cleanup_old_files 同类的符号链接越界风险：find_images_in_directory
+    使用 os.scandir 配合 entry.is_dir(follow_symlinks=False) 拒绝下降符号链接目录。若错误地
+    跟随符号链接目录下降，会把 base 之外的外部图片纳入结果，构成路径边界逃逸，与 browse_images
+    的工作区边界保证冲突。构造 base 内的符号链接目录指向 base 外的目录（含一张图片），并另放
+    一张 base 内真实图片，断言返回结果含真实图片但不含经由符号链接目录下降到的外部图片。
+    """
+    # base 之外的外部目录放置一张图片
+    outside_dir = tmp_path.parent / "outside_find_symlink_target"
+    outside_dir.mkdir(exist_ok=True)
+    (outside_dir / "outside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # base 内放一张真实图片，证明扫描确实执行而非整体被跳过
+    (tmp_path / "inside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # base 内创建指向外部目录的符号链接目录
+    link_dir = tmp_path / "link_dir"
+    try:
+        os.symlink(str(outside_dir), str(link_dir), target_is_directory=True)
+    except (OSError, AttributeError):
+        pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
+
+    result = find_images_in_directory(str(tmp_path), recursive=True)
+
+    result_names = {p.name for p in result}
+    # 真实图片正常返回，证明扫描确实执行
+    assert "inside.png" in result_names
+    # 经由符号链接目录下降到的外部图片不得纳入结果
+    assert "outside.png" not in result_names
+    # 所有结果必须落在 base 目录内，不得经由符号链接逃逸到外部
+    base_resolved = tmp_path.resolve()
+    for image_path in result:
+        assert base_resolved in image_path.resolve().parents

@@ -847,7 +847,9 @@ class SeedreamClient:
                 )
 
             try:
-                payload = json.loads((await response.aread()).decode("utf-8"))
+                raw_body = await response.aread()
+                # JSON 解析为同步 CPU 操作，移至工作线程避免阻塞事件循环
+                payload = await asyncio.to_thread(json.loads, raw_body.decode("utf-8"))
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
             return self._build_api_result(payload)
@@ -871,7 +873,8 @@ class SeedreamClient:
         self._raise_for_response_status(response)
 
         try:
-            payload = response.json()
+            # response.json() 为同步 CPU 解析，大响应体可能阻塞事件循环，移至工作线程
+            payload = await asyncio.to_thread(response.json)
         except Exception as exc:
             raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
         return self._build_api_result(payload)
@@ -1038,13 +1041,16 @@ class SeedreamClient:
 
         inflight = self._prepare_inflight.get(cache_key)
         if inflight is not None:
-            return await inflight
+            # shield 隔离取消传播：等待者被取消时仅取消其自身 await 的 outer，
+            # 底层共享 task 继续运行，保护其他等待者与缓存写入
+            return await asyncio.shield(inflight)
 
         task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
         self._prepare_inflight[cache_key] = task
-        # 创建者被取消时仅退出自身，不取消 task：inflight 由 task 完成时清理，
-        # 保护共享同一 task 的其他等待者不被连带取消
-        return await task
+        # shield 隔离取消传播：创建者被取消时仅取消其自身 await 的 outer，底层共享
+        # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理，
+        # 保护其他等待者不被连带取消，缓存正常写入
+        return await asyncio.shield(task)
 
     async def _prepare_and_cache(self, image: str, cache_key: _PrepareCacheKey) -> str:
         """执行图像预处理并写入 LRU 缓存，供 single-flight 去重复用。

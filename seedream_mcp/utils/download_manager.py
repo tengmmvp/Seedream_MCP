@@ -46,8 +46,13 @@ def sanitize_url(url: str) -> str:
     """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据与查询参数中的潜在敏感信息。"""
     try:
         parsed = urlparse(url)
-        # 重建不含 userinfo 的 netloc，避免 user:pass@ 凭据进入日志
-        netloc = parsed.hostname or ""
+        # 重建不含 userinfo 的 netloc，避免 user:pass@ 凭据进入日志。
+        # hostname 对 IPv6 字面量会剥离方括号，重建时需补回，否则 IPv6 字面量的
+        # host 与端口边界将变得模糊。
+        host = parsed.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        netloc = host
         if parsed.port is not None:
             netloc = f"{netloc}:{parsed.port}"
         if parsed.query:
@@ -118,6 +123,16 @@ def _is_image_compatible_content_type(content_type: str) -> bool:
 
 class DownloadError(SeedreamMCPError):
     """下载失败异常。"""
+
+    pass
+
+
+class RetryableDownloadError(DownloadError):
+    """可重试的下载错误，如 HTTP 5xx 等 CDN/网关瞬时故障。
+
+    继承 DownloadError 以兼容既有 except DownloadError 捕获；在重试循环中需先于
+    DownloadError 单独捕获，将其作为可重试故障而非终态错误处理。
+    """
 
     pass
 
@@ -400,6 +415,9 @@ class DownloadManager:
                             continue
 
                         if response.status != 200:
+                            if 500 <= response.status < 600:
+                                # 5xx 多为 CDN/网关瞬时故障，纳入重试而非终态失败
+                                raise RetryableDownloadError(f"HTTP错误: {response.status}")
                             raise DownloadError(f"HTTP错误: {response.status}")
 
                         # 检查内容类型：明确非图片类型（HTML 错误页、JSON 等）直接拒绝
@@ -464,8 +482,13 @@ class DownloadManager:
                         )
                         return result
 
+            except RetryableDownloadError as e:
+                # HTTP 5xx 等 CDN/网关瞬时故障，记录后落入退避重试
+                last_error = e
+                logger.warning("可重试的 HTTP 错误 (尝试 {}): {}", attempt + 1, e)
+
             except DownloadError:
-                # 主动抛出的 DownloadError（HTTP 错误/文件过大/字节签名/重定向等）语义明确，原样抛出不重试
+                # 4xx、文件过大、字节签名、重定向等语义明确的终态错误，原样抛出不重试
                 raise
 
             except asyncio.TimeoutError as e:

@@ -142,29 +142,17 @@ def log_function_call(func: Callable[..., Any]) -> Callable[..., Any]:
         装饰后的函数
     """
 
+    # 仅记录调用入口日志；异常交由被装饰函数自身的错误处理统一记录，避免在此重复
+    # 输出 ERROR 与函数内部日志叠加，造成同一失败被记录多次。
     @functools.wraps(func)
     async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-        func_name = func.__qualname__
-        logger.info("函数调用: {}()", func_name)
-
-        try:
-            result = await func(*args, **kwargs)
-            return result
-        except Exception as e:
-            logger.error("函数调用失败: {} - {}", func_name, e)
-            raise
+        logger.info("函数调用: {}()", func.__qualname__)
+        return await func(*args, **kwargs)
 
     @functools.wraps(func)
     def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-        func_name = func.__qualname__
-        logger.info("函数调用: {}()", func_name)
-
-        try:
-            result = func(*args, **kwargs)
-            return result
-        except Exception as e:
-            logger.error("函数调用失败: {} - {}", func_name, e)
-            raise
+        logger.info("函数调用: {}()", func.__qualname__)
+        return func(*args, **kwargs)
 
     if inspect.iscoroutinefunction(func):
         return async_wrapper
