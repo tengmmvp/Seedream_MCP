@@ -370,7 +370,7 @@ class SequentialGenerationInput(
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
         """校验参考图数量与生成数量的总和限制。"""
-        # max_images 未显式传入时，按参考图数量自动推导（15 - 参考图数）。
+        # max_images 未显式传入时，按参考图数量自动推导，取生成总上限减去参考图数量。
         if "max_images" not in self.model_fields_set:
             self.max_images = resolve_sequential_max_images(None, self.image)
 
@@ -466,7 +466,7 @@ class BrowseImagesInput(BaseModel):
             value: 用户提供的后缀列表
 
         Returns:
-            规范化后的后缀列表（小写，含点前缀），None 时跳过
+            规范化后的后缀列表，统一小写并补齐点前缀；输入为 None 时返回 None。
         """
         if value is None:
             return None

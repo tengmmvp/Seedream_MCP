@@ -1,6 +1,6 @@
 """Seedream 模型家族解析与能力声明。
 
-集中管理各模型家族的识别与能力差异（output_format / tools / stream / 组图 / 参考图上限），
+集中管理各模型家族的识别与能力差异，含 output_format、tools、stream、组图、参考图上限等维度，
 供 validation、config、client、schemas 共享，避免分散的子串判定与能力表重复。
 
 本模块是数据驱动校验的唯一数据源：MODEL_CAPABILITIES 等数据表驱动各处的模型相关
@@ -159,8 +159,8 @@ def get_model_capabilities(model_id: str) -> ModelCapabilities:
 def is_seedream_50_pro_model(model_id: str) -> bool:
     """判断是否为 Seedream 5.0 Pro 模型，供外部调用方做模型相关分支。
 
-    5.0 Pro 与 5.0 Lite 存在能力差异：不支持组图（sequential_image_generation）、
-    联网搜索（tools）、流式输出（stream），参考图上限为 10 张，尺寸规则不同。
+    5.0 Pro 与 5.0 Lite 存在能力差异：不支持组图 sequential_image_generation、
+    联网搜索 tools、流式输出 stream，参考图上限为 10 张，尺寸规则不同。
     """
     return _resolve_model_family(model_id) == MODEL_FAMILY_50_PRO
 

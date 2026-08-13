@@ -109,7 +109,7 @@ def _get_active_config() -> SeedreamConfig:
 
 def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     """
-    从 MCP 请求上下文获取配置（lifespan 注入），无法获取时回退全局配置。
+    从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置。
 
     工具通过 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局状态。
     """
@@ -436,7 +436,7 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         构建完成的 SeedreamConfig 配置实例。
 
     Raises:
-        SeedreamConfigError: 缺少必需参数（如 API 密钥）时抛出。
+        SeedreamConfigError: 缺少 API 密钥等必需参数时抛出。
     """
     overrides: dict[str, object] = {
         "api_key": args.api_key,
@@ -584,7 +584,7 @@ def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable
     构建 MCP 运行传输方式。
 
     SSE 传输已被 MCP 2025-03-26 规范弃用并由 Streamable HTTP 取代，
-    本服务仅支持 stdio（本地）与 streamable-http（远程）两种传输。
+    本服务仅支持 stdio 本地传输与 streamable-http 远程传输两种方式。
     """
     return cast(Literal["stdio", "streamable-http"], args.transport)
 
@@ -820,14 +820,13 @@ def cli_main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    # 构建配置对象
     try:
         config = _build_config_from_args(args)
     except SeedreamConfigError as exc:
         print(f"配置错误: {exc.message}")
         return 1
 
-    # 注入活动配置，server（client/tools）与 path_utils 经 get_active_config 共用此实例，
+    # 注入活动配置，server 的 client/tools 与 path_utils 经 get_active_config 共用此实例，
     # 避免无 MCP Roots 时 path_utils 重建第二个 config 造成双事实来源
     set_active_config(config)
 
@@ -843,7 +842,6 @@ def cli_main() -> int:
         SERVER_VERSION,
     )
 
-    # 启动 MCP 服务器
     try:
         transport = _build_run_options(args)
         if transport == "streamable-http":

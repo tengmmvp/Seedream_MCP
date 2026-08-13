@@ -422,7 +422,7 @@ def build_config_from_sources(
     单线程完全一致。
 
     Args:
-        overrides: 调用方显式覆盖值（例如 CLI 参数）。
+        overrides: 调用方显式覆盖值，CLI 参数为典型来源。
         env_file: 可选 .env 文件路径，未提供时按“项目根 `.env` -> 当前工作目录 `.env`”
             合并读取，当前工作目录的值覆盖项目根。
     """
@@ -434,7 +434,7 @@ def _build_config_from_sources_unlocked(
     overrides: Optional[Mapping[str, object]] = None,
     env_file: Optional[str] = None,
 ) -> SeedreamConfig:
-    """配置构建内部实现（无锁，由 :func:`build_config_from_sources` 持锁调用）。"""
+    """配置构建内部实现，自身不加锁；由 :func:`build_config_from_sources` 持锁调用。"""
     override_values = dict(overrides or {})
     env_values = _read_env_values(env_file)
 
@@ -598,7 +598,7 @@ def reload_config(env_file: Optional[str] = None) -> None:
     """重新加载全局配置并重置活动配置。
 
     重建全局配置实例并清除活动配置，使后续 get_active_config 回退到新的全局实例，
-    确保 server（client/tools）与 path_utils 读到一致的新配置，消除双单例分叉。
+    确保 server 的 client/tools 与 path_utils 读到一致的新配置，消除双单例分叉。
     """
     global _global_config, _active_config
     with _global_config_lock:

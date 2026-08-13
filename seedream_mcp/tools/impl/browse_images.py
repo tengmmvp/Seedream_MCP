@@ -335,7 +335,7 @@ async def _handle_browse_images_impl(
         )
 
     # 预解析工作区根：去重与展示阶段直接用 _is_within_resolved 与这些已 resolve 的 root
-    # 比较，root 不再重复 resolve，每张图片也只 resolve 一次（见 image_resolved_map）。
+    # 比较，root 不再重复 resolve。每张图片也只 resolve 一次，结果缓存于 image_resolved_map。
     # 展示层与 structuredContent 仍回显原始 workspace_roots。
     resolved_roots: list[Path] = [root.resolve() for root in workspace_roots]
 

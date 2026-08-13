@@ -111,7 +111,7 @@ async def execute_generation_handler(
 
         module_logger.info(start_log_message, *start_log_values_builder(context))
 
-        # 优先复用 lifespan 注入的共享客户端以复用 HTTP 连接池，避免每次请求重建连接；
+        # 优先复用 lifespan 注入的共享客户端，避免每次请求重建 HTTP 连接池；
         # 无 lifespan 上下文时，例如直接调用 handler 的单元测试，回退到按需新建。
         shared_client = _try_get_shared_client(ctx)
         if shared_client is not None:

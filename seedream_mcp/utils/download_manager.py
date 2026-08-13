@@ -2,13 +2,13 @@
 
 核心安全设计为四层 SSRF 防护，纵深防御逐层收紧：
 
-1. 静态 URL 校验（``_validate_url_static``）：解析阶段即拒绝私网、保留地址及
+1. 静态 URL 校验：由 ``_validate_url_static`` 实现，解析阶段即拒绝私网、保留地址及
    非公网 IP 字面量，把 ``file://``、``http://127.0.0.1`` 等直接伪造挡在网络层外。
-2. DNS 公网解析（``_resolve_public_ips``）：解析主机名后校验所有结果均为公网 IP，
+2. DNS 公网解析：由 ``_resolve_public_ips`` 实现，解析主机名后校验所有结果均为公网 IP，
    防 DNS rebinding 在静态校验通过后才切换到内网地址。
-3. 连接后对端 IP 复核（``_validate_connected_peer_ip``）：实际建立连接后再次校验
+3. 连接后对端 IP 复核：由 ``_validate_connected_peer_ip`` 实现，实际建立连接后再次校验
    对端 IP，闭合解析与连接之间的 TOCTOU 窗口。
-4. 逐跳重定向校验（``download_image`` 重定向循环）：禁用自动重定向，每跳目标都
+4. 逐跳重定向校验：由 ``download_image`` 的重定向循环实现，禁用自动重定向，每跳目标都
    重新走完整校验，防止经由重定向绕过跳转到内网。
 
 其余关键设计：失败按递增延迟加随机抖动重试；下载先写 ``.part`` 临时文件再
@@ -188,7 +188,7 @@ class DownloadManager:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """获取可用的 aiohttp 会话。
 
-        首次创建用双检查锁串行化，避免并发请求各自创建会话导致旧会话泄漏。
+        首次创建用双检锁串行化，避免并发请求各自创建会话导致旧会话泄漏。
         """
         if self._session is None or self._session.closed:
             async with self._session_lock:
@@ -507,11 +507,11 @@ class DownloadManager:
                     await self._validate_url_for_request(current_url)
                     # 固有 TOCTOU 窗口：此处 DNS 校验通过后，aiohttp 内置解析器会在
                     # 真正建连前再次独立解析主机名，攻击者可借 DNS rebinding 让实际连接
-                    # 落向内网。当前采用反应式对端 IP 复核（_validate_connected_peer_ip）
+                    # 落向内网。当前采用反应式对端 IP 复核，由 _validate_connected_peer_ip
                     # 在连接建立后立即阻断并拒绝下载，故内网连接最多完成 TCP 握手即被放弃，
                     # 不会读取或落盘响应。彻底闭合该窗口需用自定义 TCPConnector 钉住已校验
-                    # 公网 IP（resolve-once-and-pin），但该改动跨连接与重定向生命周期、风险
-                    # 较高，暂不引入；当前下载 URL 均来自火山引擎 API 返回，属可信来源，
+                    # 公网 IP，即 resolve-once-and-pin 策略，但该改动跨连接与重定向生命周期、
+                    # 风险较高，暂不引入；当前下载 URL 均来自火山引擎 API 返回，属可信来源，
                     # 残余风险在可控边界内。
                     async with session.get(
                         current_url,
@@ -597,7 +597,7 @@ class DownloadManager:
         raise last_error or DownloadError("下载失败")
 
     def validate_url(self, url: str) -> bool:
-        """验证 URL 静态格式与主机安全性（不含 DNS 解析）。
+        """验证 URL 静态格式与主机安全性，不执行 DNS 解析。
 
         Args:
             url: 要验证的URL

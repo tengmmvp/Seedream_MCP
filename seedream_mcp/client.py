@@ -62,7 +62,7 @@ class SeedreamClient:
     Seedream MCP API 客户端类
 
     本类同时作为公共库 API 与 MCP 工具后端使用。各生成方法在入口对参数重新校验，
-    与工具层（tools）的校验形成 defense-in-depth，确保两种调用路径行为一致。
+    与 tools 工具层的校验形成 defense-in-depth，确保两种调用路径行为一致。
 
     Attributes:
         config: 客户端配置对象
@@ -606,7 +606,7 @@ class SeedreamClient:
     async def close(self) -> None:
         """关闭 HTTP 客户端连接，释放资源。
 
-        持 _client_lock 与 _ensure_client 串行，避免并发关闭与首次创建交错，
+        与 _ensure_client 共用 _client_lock 串行，避免并发关闭与首次创建交错，
         导致后续请求拿到 None 或已关闭的客户端。
         """
         async with self._client_lock:
@@ -639,7 +639,7 @@ class SeedreamClient:
         确保 HTTP 客户端已创建
 
         如果客户端未初始化，则创建新的 AsyncClient 实例，
-        并配置请求头和超时设置。首次创建用双检查锁串行化，避免并发请求
+        并配置请求头和超时设置。首次创建用双检锁串行化，避免并发请求
         重复创建 httpx.AsyncClient 导致资源泄漏。
 
         Raises:
@@ -1094,7 +1094,7 @@ class SeedreamClient:
     def _local_file_signature(image: str, workspace_roots: Tuple[str, ...]) -> Tuple[float, int]:
         """本地文件返回 (mtime, size) 参与缓存键，内容替换后失效避免返回陈旧编码；
         URL 与 data URI 内容由字符串决定、无法定位文件时返回 (0.0, 0)。相对路径按
-        workspace_roots 解析后再 stat，与 _prepare_local_image 的实际读取路径一致。"""
+        workspace_roots 解析后再 stat，与 utils.image_input._prepare_local_image 的实际读取路径一致。"""
         lowered = image.lower()
         if lowered.startswith(("http://", "https://", "data:image/")):
             return (0.0, 0)
@@ -1131,7 +1131,7 @@ class SeedreamClient:
         将图像 URL 或本地文件路径转换为 API 所需格式。结果按 (输入, workspace_roots,
         本地文件签名) 缓存，避免并行请求对同一参考图重复读取与编码，并以工作区隔离键
         避免跨租户命中；本地文件纳入 mtime+size 防内容替换返回陈旧编码。缓存超限按 LRU
-        淘汰；同一键的并发 miss 复用同一在途 task（single-flight）。实现委托
+        淘汰；同一键的并发 miss 复用同一在途 task 实现 single-flight 去重。实现委托
         :mod:`seedream_mcp.utils.image_input`。
         """
         if _roots_key is None:

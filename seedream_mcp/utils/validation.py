@@ -4,8 +4,8 @@
 文件大小、宽高比、输出格式、提示词长度、组图总数与并行参数等。
 
 设计要点：
-- 模型能力数据驱动校验：与模型相关的规则（尺寸档位/像素区间/倍数约束、输出格式、
-  联网工具、流式输出、参考图上限等）统一委托 model_capabilities 的能力声明判定，
+- 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、倍数约束、输出格式、
+  联网工具、流式输出、参考图上限等，统一委托 model_capabilities 的能力声明判定，
   新增模型只需扩展能力表而无需改动校验代码。
 - HEIC/HEIF 解码器惰性注册，避免模块导入时产生全局副作用。
 - 涉及 path_utils 的调用采用函数内延迟 import，规避模块加载循环。
@@ -67,7 +67,7 @@ def _ensure_heif_opener_registered() -> None:
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024  # 30MB
 # optimize_prompt_options.mode 的合法取值白名单
 VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
-# 参考图（输入图像）维度约束：最短边、宽高比上下限、总像素上限。
+# 参考图即输入图像，其维度约束含最短边、宽高比上下限、总像素上限。
 # 宽高比上下限同时用于输出尺寸校验 validate_size_for_model，输入与输出沿用相同规则。
 MIN_IMAGE_EDGE = 15
 MIN_IMAGE_RATIO = 1 / 16
@@ -166,7 +166,7 @@ def _validate_url(url: str) -> str:
         url: 待验证的 URL 字符串
 
     Returns:
-        str: 原始 URL（验证通过）
+        str: 验证通过时返回原始 URL
 
     Raises:
         SeedreamValidationError: 当 URL 格式无效时抛出
@@ -207,10 +207,10 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 
     执行以下检查：
     - 文件是否存在
-    - 是否为有效文件（而非目录）
+    - 是否为有效文件而非目录
     - 文件扩展名是否支持
     - 文件大小是否超过 30MB
-    - 图像尺寸是否符合要求（宽高≥15px，宽高比在1/16到16之间，总像素≤6000×6000）
+    - 图像尺寸是否符合要求：宽高≥15px、宽高比在 1/16 至 16 之间、总像素≤6000×6000
 
     Args:
         file_path: 本地文件的完整路径
@@ -292,17 +292,17 @@ def _validate_data_uri(data_uri: str) -> str:
     验证 Data URI 格式的图像数据
 
     执行以下检查：
-    - Data URI 格式是否正确（data:image/<格式>;base64,<数据>）
+    - Data URI 格式是否正确，符合 data:image/<格式>;base64,<数据> 结构
     - 图像格式是否支持
     - Base64 数据是否可解码
     - 解码后数据大小是否超过 30MB
-    - 图像尺寸是否符合要求（宽高≥15px，宽高比在1/16到16之间，总像素≤6000×6000）
+    - 图像尺寸是否符合要求：宽高≥15px、宽高比在 1/16 至 16 之间、总像素≤6000×6000
 
     Args:
         data_uri: Data URI 格式的图像字符串
 
     Returns:
-        str: 原始 Data URI（验证通过）
+        str: 验证通过时返回原始 Data URI
 
     Raises:
         SeedreamValidationError: 当格式无效、数据损坏或尺寸超限时抛出
@@ -453,7 +453,7 @@ def validate_response_format(response_format: str) -> str:
         response_format: 响应格式类型，支持 url 或 b64_json
 
     Returns:
-        str: 标准化后的格式值（小写）
+        str: 小写形式的标准化格式值
 
     Raises:
         SeedreamValidationError: 当格式参数无效时抛出
@@ -530,7 +530,7 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
 def validate_generation_tools(tools: Any, model_id: str) -> List[dict[str, str]] | None:
     """验证生成工具配置并检查模型兼容性。
 
-    联网搜索（web_search）由 doubao-seedream-5.0 / 5.0-lite 系列支持，
+    联网搜索 web_search 由 doubao-seedream-5.0 / 5.0-lite 系列支持，
     5.0 Pro/4.5/4.0 不支持；未知模型放行，由能力表统一判定。
 
     Args:
@@ -652,7 +652,7 @@ def validate_size(size: str) -> str:
         size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>
 
     Returns:
-        str: 标准化后的尺寸值（大写格式）
+        str: 大写格式的标准化尺寸值
 
     Raises:
         SeedreamValidationError: 当尺寸参数无效时抛出
@@ -683,10 +683,9 @@ def validate_size(size: str) -> str:
 def validate_size_for_model(size: str, model_id: str) -> str:
     """验证图像尺寸与模型的兼容性。
 
-    尺寸规则由 model_capabilities 的能力声明驱动：预设档位白名单
-    （allowed_presets）、像素总区间（min/max_size_pixels）、像素倍数约束
-    （size_pixel_multiple，如 5.0 Pro 要求宽高为 16 的倍数）。新增模型只需扩展
-    能力声明即可，无需改动本函数。
+    尺寸规则由 model_capabilities 的能力声明驱动，含预设档位白名单 allowed_presets、
+    像素总区间 min/max_size_pixels、像素倍数约束 size_pixel_multiple，例如 5.0 Pro
+    要求宽高为 16 的倍数。新增模型只需扩展能力声明即可，无需改动本函数。
 
     Args:
         size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>。
@@ -758,7 +757,7 @@ def validate_image_url(image: str, skip_dimensions: bool = False) -> str:
     支持三种图像输入格式：
     - HTTP/HTTPS URL
     - 本地文件路径
-    - Data URI（base64编码）
+    - Data URI，即 base64 编码
 
     Args:
         image: 图像URL、文件路径或Data URI

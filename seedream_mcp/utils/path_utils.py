@@ -165,7 +165,7 @@ def _is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
 
 
 def _is_unc_path(path_str: str) -> bool:
-    """判断是否为 Windows UNC 路径(以 \\\\ 或 // 开头)。
+    """判断是否为 Windows UNC 路径，即以 \\\\ 或 // 开头的路径。
 
     UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
     避免越界校验尚未拒绝时凭据已向远端泄露。

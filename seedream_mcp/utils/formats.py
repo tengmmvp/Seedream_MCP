@@ -55,7 +55,7 @@ _HEIF_BRANDS: tuple[bytes, ...] = (b"mif1", b"msf1")
 def infer_extension_from_bytes(content: bytes, default: str = ".jpeg") -> str:
     """基于文件头魔法字节推断图片扩展名。
 
-    以文件头（magic bytes）为准而非扩展名，避免扩展名缺失或伪造导致类型误判；
+    以文件头 magic bytes 为准而非扩展名，避免扩展名缺失或伪造导致类型误判；
     仅识别受支持的格式，无法识别时返回 ``default``。
 
     Args:

@@ -36,7 +36,7 @@ async def handle_sequential_generation(
 
     流程由 ``execute_generation_handler`` 统一编排：参数经 schema 校验后构建执行上下文，
     调用客户端生成，可选自动保存，最终返回结构化工具结果。完整字段规则与默认值见
-    ``SequentialGenerationInput``，本函数仅透传 arguments（含参考图与 max_images）。
+    ``SequentialGenerationInput``，本函数仅透传 arguments。
 
     Args:
         arguments: 工具原始参数字典，结构见 ``SequentialGenerationInput``。

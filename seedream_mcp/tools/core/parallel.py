@@ -35,8 +35,7 @@ async def _execute_parallel_generation_requests(
 ) -> Dict[str, Any]:
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
 
-    每个请求独立捕获异常并记入 request_errors，不中断其余请求；完成计数与进度读取仅在
-    asyncio 单线程事件循环中进行，且自增与读取之间无 await，因此无需加锁。
+    每个请求独立捕获异常并记入 request_errors，不中断其余请求。
     """
     semaphore = asyncio.Semaphore(context.parallelism)
     request_results: List[Optional[Dict[str, Any]]] = [None] * context.request_count
