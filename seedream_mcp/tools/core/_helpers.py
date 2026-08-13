@@ -11,9 +11,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...config import SeedreamConfig
-from ...utils.errors import SeedreamValidationError
+from ...utils.errors import (
+    SeedreamAPIError,
+    SeedreamConfigError,
+    SeedreamNetworkError,
+    SeedreamTimeoutError,
+    SeedreamValidationError,
+    format_error_for_user,
+)
 from ...utils.logging import get_logger
-from ...utils.path_utils import get_workspace_root, is_path_within_base, normalize_path
+from ...utils.path_utils import _is_within_resolved, get_workspace_root, normalize_path
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -51,10 +58,34 @@ def _normalize_error_message(raw_error: Any) -> Optional[str]:
     return None
 
 
+def _classify_generation_error_type(exc: Exception) -> str:
+    """将异常映射为稳定的结构化错误码，避免向 structuredContent 暴露内部异常类名。
+
+    按自定义异常类型与 HTTP 状态码分支，输出固定的公开错误码字符串，便于客户端按码处理
+    且不泄露实现细节；未识别异常统一归为 generation_failed。单发与并发路径共用此函数，
+    使两条路径的错误码契约一致。
+    """
+    if isinstance(exc, SeedreamConfigError):
+        return "config_error"
+    if isinstance(exc, SeedreamValidationError):
+        return "validation_error"
+    if isinstance(exc, SeedreamTimeoutError):
+        return "timeout_error"
+    if isinstance(exc, SeedreamNetworkError):
+        return "network_error"
+    if isinstance(exc, SeedreamAPIError):
+        if exc.status_code == 401:
+            return "auth_error"
+        if exc.status_code == 429:
+            return "rate_limited"
+        return "api_error"
+    return "generation_failed"
+
+
 def _extract_parallel_request_error(
-    result: Optional[Dict[str, Any]], fallback_error: Optional[str]
+    result: Optional[Dict[str, Any]], fallback_exc: Optional[Exception]
 ) -> str:
-    """提取单个并行请求的失败原因，优先使用结果内错误信息。"""
+    """提取单个并行请求的失败原因，优先使用结果内错误信息，回退到异常格式化文案。"""
     if isinstance(result, dict):
         direct_error = _normalize_error_message(result.get("error"))
         if direct_error:
@@ -73,8 +104,9 @@ def _extract_parallel_request_error(
                 if item_error:
                     return item_error
 
-    fallback = _normalize_error_message(fallback_error)
-    return fallback or "请求失败"
+    if fallback_exc is not None:
+        return format_error_for_user(fallback_exc)
+    return "请求失败"
 
 
 def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
@@ -104,7 +136,9 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
     except ValueError as exc:
         raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
 
-    if not is_path_within_base(user_path, default_base_dir):
+    # user_path 由 normalize_path 解析、default_base_dir 在本函数上方解析，两者均已 resolve，
+    # 直接 relative_to 比较即可，避免 is_path_within_base 对二者再次重复 resolve
+    if not _is_within_resolved(user_path, default_base_dir):
         raise SeedreamValidationError(
             f"save_path 超出允许范围: {default_base_dir}",
             field="save_path",

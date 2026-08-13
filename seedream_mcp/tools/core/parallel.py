@@ -40,7 +40,7 @@ async def _execute_parallel_generation_requests(
     """
     semaphore = asyncio.Semaphore(context.parallelism)
     request_results: List[Optional[Dict[str, Any]]] = [None] * context.request_count
-    request_errors: Dict[int, str] = {}
+    request_errors: Dict[int, Exception] = {}
     completed_requests = 0
 
     async def _run_single_request(request_index: int) -> None:
@@ -50,12 +50,12 @@ async def _execute_parallel_generation_requests(
             try:
                 request_results[request_index - 1] = await request_executor(client, context)
             except Exception as exc:
-                request_errors[request_index] = format_error_for_user(exc)
+                request_errors[request_index] = exc
                 module_logger.warning(
                     "并行请求 {}/{} 失败: {}",
                     request_index,
                     context.request_count,
-                    request_errors[request_index],
+                    format_error_for_user(exc),
                 )
             finally:
                 # asyncio 单线程模型下，自增与进度读取之间无 await，不会被其他协程抢占，无需加锁。

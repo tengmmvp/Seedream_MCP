@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from seedream_mcp import config as config_module
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 
@@ -32,7 +33,7 @@ async def test_app_lifespan_yields_config_and_client(
     reset_lifespan_singletons,
 ) -> None:
     config = SeedreamConfig(api_key="test_key")
-    monkeypatch.setattr(server, "_active_config", config)
+    monkeypatch.setattr(config_module, "_active_config", config)
 
     async with server.app_lifespan(server.mcp) as state:
         assert isinstance(state, dict)
@@ -54,7 +55,7 @@ async def test_app_lifespan_reuses_singleton_across_reentry(
     若 lifespan 内直接创建并退出时关闭，第二次进入将拿到全新实例，丢失连接复用。
     """
     config = SeedreamConfig(api_key="test_key")
-    monkeypatch.setattr(server, "_active_config", config)
+    monkeypatch.setattr(config_module, "_active_config", config)
     # stateless_http 模式 teardown 不清理单例，跨重入复用
     monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
 
@@ -74,7 +75,7 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
 ) -> None:
     """stdio 模式 lifespan 退出时在同事件循环清理单例，实现进程级优雅关闭。"""
     config = SeedreamConfig(api_key="test_key")
-    monkeypatch.setattr(server, "_active_config", config)
+    monkeypatch.setattr(config_module, "_active_config", config)
     monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
 
     async with server.app_lifespan(server.mcp) as state:
@@ -121,7 +122,7 @@ async def test_app_lifespan_concurrent_reentry_creates_one_client(
 ) -> None:
     """并发重入 lifespan 应复用同一单例，验证 _shared_init_lock 防竞态。"""
     config = SeedreamConfig(api_key="test_key")
-    monkeypatch.setattr(server, "_active_config", config)
+    monkeypatch.setattr(config_module, "_active_config", config)
     monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
 
     async def enter() -> Any:
@@ -139,14 +140,198 @@ async def test_app_lifespan_rebuilds_on_config_change(
     """config 身份变化后下次进入 lifespan 重建单例，使热重载生效。"""
     monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
     config_a = SeedreamConfig(api_key="key_a")
-    monkeypatch.setattr(server, "_active_config", config_a)
+    monkeypatch.setattr(config_module, "_active_config", config_a)
     async with server.app_lifespan(server.mcp) as state:
         client_a = state["client"]
 
     config_b = SeedreamConfig(api_key="key_b")
-    monkeypatch.setattr(server, "_active_config", config_b)
+    monkeypatch.setattr(config_module, "_active_config", config_b)
     async with server.app_lifespan(server.mcp) as state:
         client_b = state["client"]
 
     assert client_b is not client_a
     assert client_b.config is config_b
+
+
+# ==================== Lifespan 共享资源复用测试 ====================
+
+
+class _FakeLifespanCtx:
+    """模拟 MCP Context，仅提供 lifespan_context 访问路径与 no-op 进度/日志方法。
+
+    execute_generation_handler 内的 _safe_report_progress / _safe_ctx_log 会调用
+    ctx.report_progress / ctx.info 等方法；此处提供空实现使流水线不报错。
+    """
+
+    def __init__(self, lifespan_context: Any) -> None:
+        class _FakeRequestContext:
+            pass
+
+        self.request_context = _FakeRequestContext()
+        self.request_context.lifespan_context = lifespan_context
+
+    async def report_progress(self, **kwargs: Any) -> None:
+        pass
+
+    async def info(self, message: str) -> None:
+        pass
+
+    async def debug(self, message: str) -> None:
+        pass
+
+    async def warning(self, message: str) -> None:
+        pass
+
+    async def error(self, message: str) -> None:
+        pass
+
+
+async def test_try_get_shared_client_returns_lifespan_instance() -> None:
+    """_try_get_shared_client / _try_get_shared_download_manager 返回注入的实例。"""
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.tools.core.parallel import (
+        _try_get_shared_client,
+        _try_get_shared_download_manager,
+    )
+    from seedream_mcp.utils.download_manager import DownloadManager
+
+    config = SeedreamConfig(api_key="test_key")
+    shared_client = SeedreamClient(config)
+    shared_dm = DownloadManager()
+    try:
+        ctx = _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm})
+        assert _try_get_shared_client(ctx) is shared_client
+        assert _try_get_shared_download_manager(ctx) is shared_dm
+    finally:
+        await shared_client.close()
+        await shared_dm.close()
+
+
+def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
+    """ctx 为 None、lifespan 非 dict、值类型不匹配时均返回 None。"""
+    from seedream_mcp.tools.core.parallel import (
+        _try_get_shared_client,
+        _try_get_shared_download_manager,
+    )
+
+    # ctx=None 恒返回 None，调用方据此回退新建
+    assert _try_get_shared_client(None) is None
+    assert _try_get_shared_download_manager(None) is None
+
+    # lifespan 非 dict
+    assert _try_get_shared_client(_FakeLifespanCtx("not a dict")) is None
+    assert _try_get_shared_download_manager(_FakeLifespanCtx("not a dict")) is None
+
+    # 值类型不匹配（非 SeedreamClient / DownloadManager）
+    bad_ctx = _FakeLifespanCtx({"client": "fake", "download_manager": 123})
+    assert _try_get_shared_client(bad_ctx) is None
+    assert _try_get_shared_download_manager(bad_ctx) is None
+
+    # dict 中缺 key
+    empty_ctx = _FakeLifespanCtx({})
+    assert _try_get_shared_client(empty_ctx) is None
+    assert _try_get_shared_download_manager(empty_ctx) is None
+
+
+async def test_execute_generation_handler_reuses_lifespan_shared_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_generation_handler 优先复用 lifespan 注入的共享 client 而非新建。"""
+    from unittest.mock import MagicMock
+
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.tools.core.common import execute_generation_handler
+
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    shared_client = SeedreamClient(config)
+
+    captured_client: Any = None
+
+    async def fake_executor(client: Any, context: Any) -> dict:
+        nonlocal captured_client
+        captured_client = client
+        return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+    ctx = _FakeLifespanCtx({"client": shared_client})
+    try:
+        result = await execute_generation_handler(
+            arguments={"prompt": "test", "auto_save": False},
+            config=config,
+            module_logger=MagicMock(),
+            tool_name="text_to_image",
+            completion_title="文生图完成",
+            failure_prefix="文生图",
+            guidance="",
+            start_log_message="",
+            start_log_values_builder=lambda c: (),
+            request_executor=fake_executor,
+            ctx=ctx,
+        )
+        # executor 收到的 client 即 lifespan 注入的共享实例
+        assert captured_client is shared_client
+        assert not result.isError
+    finally:
+        await shared_client.close()
+
+
+async def test_execute_generation_handler_passes_shared_download_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """handler 将 lifespan 注入的 download_manager 透传给 auto_save_from_urls。"""
+    from unittest.mock import MagicMock
+
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.tools.core import common as common_module
+    from seedream_mcp.utils.download_manager import DownloadManager
+
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    shared_client = SeedreamClient(config)
+    shared_dm = DownloadManager()
+
+    captured_dm: Any = None
+
+    async def fake_executor(client: Any, context: Any) -> dict:
+        return {
+            "success": True,
+            "data": [{"url": "http://x/1.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        }
+
+    async def fake_auto_save_from_urls(
+        result: Any,
+        prompt: Any,
+        config: Any,
+        save_path: Any,
+        custom_name: Any,
+        tool_name: Any,
+        download_manager: Any = None,
+    ) -> list:
+        nonlocal captured_dm
+        captured_dm = download_manager
+        return []
+
+    monkeypatch.setattr(common_module, "auto_save_from_urls", fake_auto_save_from_urls)
+
+    ctx = _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm})
+    try:
+        await common_module.execute_generation_handler(
+            arguments={"prompt": "test", "auto_save": True, "response_format": "url"},
+            config=config,
+            module_logger=MagicMock(),
+            tool_name="text_to_image",
+            completion_title="文生图完成",
+            failure_prefix="文生图",
+            guidance="",
+            start_log_message="",
+            start_log_values_builder=lambda c: (),
+            request_executor=fake_executor,
+            ctx=ctx,
+        )
+        # auto_save 收到的 download_manager 即 lifespan 注入的共享实例
+        assert captured_dm is shared_dm
+    finally:
+        await shared_client.close()
+        await shared_dm.close()

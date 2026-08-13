@@ -12,7 +12,7 @@ from seedream_mcp.tools.impl.image_to_image import handle_image_to_image
 from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
 from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
-from seedream_mcp.utils.errors import SeedreamValidationError
+from seedream_mcp.utils.errors import SeedreamAPIError, SeedreamValidationError
 
 
 def _build_config() -> SeedreamConfig:
@@ -86,6 +86,56 @@ async def test_generation_handlers_support_parallel_requests(
     assert "请求总数: 3" in response_text
     assert "成功请求: 3" in response_text
     assert result.structuredContent["request_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_parallel_requests_partial_failure_recorded_in_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N 个并行请求中单个失败：其余成功完成，异常进入 batch.errors，status 为 partial_completed。"""
+    call_count = 0
+
+    async def fake_method(self, **kwargs):  # noqa: ANN001
+        nonlocal call_count
+        del self, kwargs
+        call_count += 1
+        # 第 2 次调用模拟单请求失败，其余成功；因并行执行顺序非确定，仅断言失败计数
+        if call_count == 2:
+            raise SeedreamAPIError("模拟单请求失败", status_code=500)
+        return {
+            "success": True,
+            "data": [{"url": f"https://example.com/{call_count}.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        }
+
+    client_module = import_module("seedream_mcp.client")
+    client_cls = getattr(client_module, "SeedreamClient")
+    monkeypatch.setattr(client_cls, "text_to_image", fake_method)
+
+    # 关闭自动保存以避免对占位 URL 发起真实下载，聚焦并行失败聚合断言
+    config = SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
+    result = await handle_text_to_image(
+        {"prompt": "test", "request_count": 3, "parallelism": 2},
+        config,
+    )
+
+    assert call_count == 3
+    # 部分成功：有任一请求成功即 success=True，isError 为 False
+    assert result.isError is False
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["status"] == "partial_completed"
+    batch = result.structuredContent["batch"]
+    assert batch["request_count"] == 3
+    assert batch["success_requests"] == 2
+    assert batch["failed_requests"] == 1
+    assert len(batch["errors"]) == 1
+    assert "模拟单请求失败" in batch["errors"][0]["message"]
+    response_text = next(
+        content.text for content in result.content if isinstance(content, TextContent)
+    )
+    assert "成功请求: 2" in response_text
+    assert "失败请求: 1" in response_text
 
 
 def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:

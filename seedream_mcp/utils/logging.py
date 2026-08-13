@@ -11,7 +11,7 @@ import logging
 import sys
 from pathlib import Path
 from types import FrameType
-from typing import Any, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, Optional, ParamSpec, TypeVar, Union, overload
 
 from loguru import logger
 
@@ -131,9 +131,25 @@ def get_logger(name: Optional[str] = None) -> Any:
     return logger.bind(name=name)
 
 
-def log_function_call(func: Callable[..., Any]) -> Callable[..., Any]:
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+@overload
+def log_function_call(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]: ...
+
+
+@overload
+def log_function_call(func: Callable[P, R]) -> Callable[P, R]: ...
+
+
+def log_function_call(func: Callable[P, Any]) -> Callable[P, Any]:
     """
     函数调用日志装饰器
+
+    使用 ``ParamSpec`` 透传被装饰函数的参数规格，使用 ``TypeVar`` 保留原始返回类型；
+    同步与异步经由两条 overload 声明分别匹配，使装饰后的函数对静态类型检查器仍保持
+    精确签名，避免 ``await`` 链路返回类型退化为 ``Any``。
 
     Args:
         func: 要装饰的函数
@@ -145,16 +161,15 @@ def log_function_call(func: Callable[..., Any]) -> Callable[..., Any]:
     # 仅记录调用入口日志；异常交由被装饰函数自身的错误处理统一记录，避免在此重复
     # 输出 ERROR 与函数内部日志叠加，造成同一失败被记录多次。
     @functools.wraps(func)
-    async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+    async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
         logger.info("函数调用: {}()", func.__qualname__)
         return await func(*args, **kwargs)
 
     @functools.wraps(func)
-    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+    def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
         logger.info("函数调用: {}()", func.__qualname__)
         return func(*args, **kwargs)
 
     if inspect.iscoroutinefunction(func):
         return async_wrapper
-    else:
-        return sync_wrapper
+    return sync_wrapper

@@ -44,6 +44,9 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 # 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数
 _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 
+# 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验
+_MAX_REDIRECTS = 3
+
 
 def sanitize_url(url: str) -> str:
     """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
@@ -200,10 +203,17 @@ class DownloadManager:
         return self._session
 
     async def close(self) -> None:
-        """关闭底层会话资源。"""
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        """关闭底层会话资源。
+
+        与 ``_ensure_session`` 共用 ``_session_lock`` 串行化会话的创建与关闭，
+        避免并发关闭与创建交错导致会话泄漏或误用。实际 ``session.close()`` 置于
+        锁外执行，不在 await I/O 期间持锁。
+        """
+        async with self._session_lock:
+            session = self._session
+            self._session = None
+        if session is not None and not session.closed:
+            await session.close()
 
     @staticmethod
     def _temp_path_for(save_path: Path) -> Path:
@@ -421,11 +431,12 @@ class DownloadManager:
                             location = response.headers.get("location")
                             if not location:
                                 raise DownloadError("重定向响应缺少 Location 头")
-                            if redirect_count >= 3:
+                            if redirect_count >= _MAX_REDIRECTS:
                                 raise DownloadError("重定向次数过多")
 
+                            # 重定向目标回到循环顶部由 _validate_url_for_request 执行
+                            # 完整校验，含静态与 DNS 两层，此处不重复静态校验
                             next_url = urljoin(current_url, location)
-                            self._validate_url_static(next_url)
 
                             redirect_count += 1
                             current_url = next_url
@@ -455,14 +466,18 @@ class DownloadManager:
                             if cl_value > self.max_file_size:
                                 raise DownloadError(f"文件过大: {cl_value} 字节")
 
-                        save_path.parent.mkdir(parents=True, exist_ok=True)
+                        # 目录创建卸载到线程池，避免阻塞事件循环；即便调用方已建目录，
+                        # exist_ok=True 下重复创建无副作用，保留作为防御性兜底
+                        await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
 
                         # 下载写入临时文件，成功后原子替换。
                         # 用 O_NOFOLLOW 打开最终分量防符号链接 TOCTOU，与 file_manager.save_bytes
                         # 防护对齐；再交由 aiofiles 异步写入，closefd=True 使上下文退出时关闭 fd
                         total_size = 0
                         head_bytes = b""
-                        fd = open_no_follow_fd(
+                        # 同步 os.open 卸载到线程池，返回 fd 后 aiofiles 包装仍异步
+                        fd = await asyncio.to_thread(
+                            open_no_follow_fd,
                             str(temp_path),
                             os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
                         )
@@ -493,7 +508,7 @@ class DownloadManager:
                             )
 
                         # os.replace 在同文件系统内原子替换，避免读者看到半写文件
-                        temp_path.replace(save_path)
+                        await asyncio.to_thread(temp_path.replace, save_path)
                         temp_created = False
                         download_time = time.time() - start_time
 

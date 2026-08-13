@@ -7,7 +7,7 @@
 import asyncio
 import base64
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Dict, List, Optional, Sequence, Tuple
 
@@ -190,7 +190,7 @@ class AutoSaveManager:
                     mime = header or None
                 return mime, payload
             return None, data
-        except Exception:
+        except (ValueError, AttributeError):
             return None, data
 
     def _extension_from_mime(self, mime: Optional[str]) -> str:
@@ -244,7 +244,7 @@ class AutoSaveManager:
             metadata = _build_save_metadata(
                 prompt=prompt,
                 tool_name=tool_name,
-                save_time=datetime.now().isoformat(),
+                save_time=datetime.now(timezone.utc).isoformat(),
                 file_size=download_result.get("file_size", 0),
                 content_type=download_result.get("content_type", ""),
                 attempts=download_result.get("attempts", 1),
@@ -333,10 +333,10 @@ class AutoSaveManager:
         try:
             logger.info("开始自动保存 Base64 图片")
 
-            mime, payload = self._parse_data_uri(b64_data)
-
-            # 解码、路径生成与写入均为同步 CPU/IO，合并到单次工作线程执行
-            def _prepare_and_save() -> Tuple[bytes, Dict[str, Any]]:
+            # data URI 解析含对大 base64 串的 split 全量拷贝，与解码、路径生成、写入一样属于
+            # 同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞
+            def _prepare_and_save() -> Tuple[bytes, Dict[str, Any], Optional[str]]:
+                mime, payload = self._parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
                 save_path = self.file_manager.create_save_path_from_extension(
                     prompt=prompt,
@@ -350,9 +350,9 @@ class AutoSaveManager:
                 write_result = self.file_manager.save_bytes(
                     save_path, content_bytes, ensure_parent=False
                 )
-                return content_bytes, write_result
+                return content_bytes, write_result, mime
 
-            content_bytes, write_result = await asyncio.to_thread(_prepare_and_save)
+            content_bytes, write_result, mime = await asyncio.to_thread(_prepare_and_save)
 
             markdown_alt = alt_text or prompt or "Generated Image"
             markdown_ref = self.file_manager.generate_markdown_reference(

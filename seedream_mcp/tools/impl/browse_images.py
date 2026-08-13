@@ -18,6 +18,7 @@ from ...utils.errors import format_error_for_user
 from ...utils.logging import get_logger
 from ...utils.path_utils import (
     SUPPORTED_IMAGE_EXTENSIONS,
+    _is_within_resolved,
     find_images_in_directory,
     get_relative_path,
     get_workspace_roots,
@@ -112,6 +113,138 @@ def _build_browse_structured_result(
     return structured
 
 
+def _build_browse_error(
+    *,
+    workspace_roots: list[Path],
+    directory: str,
+    resolved_directories: list[Path],
+    recursive: bool,
+    max_depth: int,
+    limit: int,
+    offset: int,
+    show_details: bool,
+    format_filter: Optional[List[str]],
+    message: str,
+    status: str = "failed",
+) -> CallToolResult:
+    """集中构造 browse_images 工具的错误 CallToolResult。
+
+    各错误分支共享 9 个状态字段与 isError=True 语义，仅 message 不同；通过此辅助函数
+    统一构造，避免重复展开相同 kwargs。structuredContent.error.type 恒为 browse_failed，
+    message 同时作为可见文本与结构化错误原因，二者保持一致。
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structuredContent=_build_browse_structured_result(
+            status=status,
+            workspace_roots=workspace_roots,
+            directory=directory,
+            resolved_directories=resolved_directories,
+            recursive=recursive,
+            max_depth=max_depth,
+            limit=limit,
+            offset=offset,
+            show_details=show_details,
+            format_filter=format_filter,
+            success=False,
+            error={"type": "browse_failed", "message": message},
+        ),
+        isError=True,
+    )
+
+
+def _scan_and_filter_directory(
+    *,
+    resolved_dir: Path,
+    recursive: bool,
+    max_depth: int,
+    format_filter: Optional[List[str]],
+    remaining: int,
+    resolved_roots: list[Path],
+    seen_images: set[Path],
+) -> list[tuple[Path, Path]]:
+    """扫描单个目录并完成越界判定与去重，返回新增的 (原始路径, resolved 路径) 列表。
+
+    扫描后的 resolve、越界判定与去重等文件系统相关计算集中在本函数同步执行，由调用方通过
+    ``asyncio.to_thread`` 在线程内调用，使深翻页大 offset 或网络挂载目录下的 resolve 不再
+    阻塞事件循环。``seen_images`` 跨目录共享以去重重叠根目录的重复图片；调用方按目录串行
+    await，无并发写竞争。
+
+    Args:
+        resolved_dir: 已 resolve 的待扫描目录。
+        recursive: 是否递归扫描子目录。
+        max_depth: 递归最大深度。
+        format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
+        remaining: 距 scan_limit 上限的剩余配额，扫描结果与新增条目均不超过此值。
+        resolved_roots: 已 resolve 的工作区根列表，用于越界判定。
+        seen_images: 跨目录共享的已见原始路径集合，函数内就地更新。
+
+    Returns:
+        新增 (原始路径, resolved 路径) 元组列表，长度不超过 remaining。
+    """
+    matched_images = find_images_in_directory(
+        directory=str(resolved_dir),
+        recursive=recursive,
+        max_depth=max_depth,
+        extensions=format_filter,
+        limit=remaining,
+    )
+    new_entries: list[tuple[Path, Path]] = []
+    for image_path in matched_images:
+        # 每张图片至多 resolve 一次；root 已 resolve，直接做 relative_to 比较。
+        image_resolved = image_path.resolve()
+        if not any(_is_within_resolved(image_resolved, root) for root in resolved_roots):
+            logger.warning("检测到越界图片路径，已忽略: {}", image_path)
+            continue
+        if image_path in seen_images:
+            continue
+        seen_images.add(image_path)
+        new_entries.append((image_path, image_resolved))
+        if len(new_entries) >= remaining:
+            break
+    return new_entries
+
+
+def _build_display_entries(
+    *,
+    images: list[Path],
+    image_resolved_map: dict[Path, Path],
+    resolved_roots: list[Path],
+    show_details: bool,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """组装面向用户的展示文本与结构化图片条目。
+
+    将 _is_within_resolved 命中查找、get_relative_path 与 _format_file_info 的 stat 等文件
+    系统相关计算集中在本函数同步执行，由调用方通过 ``asyncio.to_thread`` 在线程内调用，使
+    show_details 下网络挂载目录的 stat 不再阻塞事件循环。索引编号沿用 enumerate 语义：被
+    忽略条目仍占位、保留原序号不重排，与历史行为一致。
+
+    Args:
+        images: 当前页图片原始路径列表。
+        image_resolved_map: 原始路径到 resolved 路径的缓存，由扫描阶段填充。
+        resolved_roots: 已 resolve 的工作区根列表，用于定位展示基准根。
+        show_details: 是否在文本中附加文件大小与修改时间。
+
+    Returns:
+        (展示文本行列表, 结构化图片条目列表)，文本行不含 "图片列表:" 标题头。
+    """
+    lines: list[str] = []
+    structured_images: list[dict[str, Any]] = []
+    for idx, img in enumerate(images, 1):
+        img_resolved = image_resolved_map[img]
+        display_base = next(
+            (root for root in resolved_roots if _is_within_resolved(img_resolved, root)),
+            None,
+        )
+        if display_base is None:
+            logger.warning("图片路径未命中任何工作区根目录，已忽略: {}", img)
+            continue
+        display_path = get_relative_path(img_resolved, str(display_base))
+        lines.append(f"{idx}. {_format_file_info(display_path, img_resolved, show_details)}")
+        structured_images.append({"index": idx, "path": display_path})
+    return lines, structured_images
+
+
 async def handle_browse_images(
     arguments: Dict[str, Any],
     ctx: Optional["Context[Any, Any, Any]"] = None,
@@ -142,23 +275,17 @@ async def handle_browse_images(
             fallback_roots = get_workspace_roots()
         except Exception:
             fallback_roots = []
-        return CallToolResult(
-            content=[TextContent(type="text", text=f"浏览图片失败：{user_message}")],
-            structuredContent=_build_browse_structured_result(
-                status="failed",
-                workspace_roots=fallback_roots,
-                directory=str(arguments.get("directory") or "."),
-                resolved_directories=[],
-                recursive=bool(arguments.get("recursive", True)),
-                max_depth=arguments.get("max_depth", 3),
-                limit=arguments.get("limit", 50),
-                offset=arguments.get("offset", 0),
-                show_details=bool(arguments.get("show_details", False)),
-                format_filter=None,
-                success=False,
-                error={"type": "browse_failed", "message": user_message},
-            ),
-            isError=True,
+        return _build_browse_error(
+            workspace_roots=fallback_roots,
+            directory=str(arguments.get("directory") or "."),
+            resolved_directories=[],
+            recursive=bool(arguments.get("recursive", True)),
+            max_depth=arguments.get("max_depth", 3),
+            limit=arguments.get("limit", 50),
+            offset=arguments.get("offset", 0),
+            show_details=bool(arguments.get("show_details", False)),
+            format_filter=None,
+            message=f"浏览图片失败：{user_message}",
         )
 
 
@@ -190,10 +317,31 @@ async def _handle_browse_images_impl(
     if not workspace_roots:
         message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
         await _safe_ctx_log(ctx, "warning", message)
-        return CallToolResult(
-            content=[TextContent(type="text", text=message)],
-            structuredContent=_build_browse_structured_result(
-                status="failed",
+        return _build_browse_error(
+            workspace_roots=workspace_roots,
+            directory=requested_dir,
+            resolved_directories=resolved_dirs,
+            recursive=recursive,
+            max_depth=max_depth,
+            limit=limit,
+            offset=offset,
+            show_details=show_details,
+            format_filter=format_filter,
+            message=message,
+        )
+
+    # 预解析工作区根：去重与展示阶段直接用 _is_within_resolved 与这些已 resolve 的 root
+    # 比较，root 不再重复 resolve，每张图片也只 resolve 一次（见 image_resolved_map）。
+    # 展示层与 structuredContent 仍回显原始 workspace_roots。
+    resolved_roots: list[Path] = [root.resolve() for root in workspace_roots]
+
+    raw_dir_path = Path(requested_dir)
+    if raw_dir_path.is_absolute():
+        try:
+            absolute_dir = normalize_path(requested_dir)
+        except ValueError as exc:
+            message = f"目录路径无效: {exc}"
+            return _build_browse_error(
                 workspace_roots=workspace_roots,
                 directory=requested_dir,
                 resolved_directories=resolved_dirs,
@@ -203,61 +351,22 @@ async def _handle_browse_images_impl(
                 offset=offset,
                 show_details=show_details,
                 format_filter=format_filter,
-                success=False,
-                error={"type": "browse_failed", "message": message},
-            ),
-            isError=True,
-        )
-
-    # 预解析工作区根，避免在 limit 循环内对每张图片 × 每个 root 重复 resolve。
-    # 越界校验仍由 is_path_within_* 内部对 path 再做 resolve，base 与 path 比较语义不变。
-    # 展示层继续使用 workspace_roots，用于错误提示与 structuredContent 回显。
-    resolved_roots: list[Path] = [root.resolve() for root in workspace_roots]
-
-    raw_dir_path = Path(requested_dir)
-    if raw_dir_path.is_absolute():
-        try:
-            absolute_dir = normalize_path(requested_dir)
-        except ValueError as exc:
-            message = f"目录路径无效: {exc}"
-            return CallToolResult(
-                content=[TextContent(type="text", text=message)],
-                structuredContent=_build_browse_structured_result(
-                    status="failed",
-                    workspace_roots=workspace_roots,
-                    directory=requested_dir,
-                    resolved_directories=resolved_dirs,
-                    recursive=recursive,
-                    max_depth=max_depth,
-                    limit=limit,
-                    offset=offset,
-                    show_details=show_details,
-                    format_filter=format_filter,
-                    success=False,
-                    error={"type": "browse_failed", "message": message},
-                ),
-                isError=True,
+                message=message,
             )
         if not is_path_within_any_base(absolute_dir, resolved_roots):
             allowed_roots = ", ".join(str(root) for root in workspace_roots)
             message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
-            return CallToolResult(
-                content=[TextContent(type="text", text=message)],
-                structuredContent=_build_browse_structured_result(
-                    status="failed",
-                    workspace_roots=workspace_roots,
-                    directory=requested_dir,
-                    resolved_directories=resolved_dirs,
-                    recursive=recursive,
-                    max_depth=max_depth,
-                    limit=limit,
-                    offset=offset,
-                    show_details=show_details,
-                    format_filter=format_filter,
-                    success=False,
-                    error={"type": "browse_failed", "message": message},
-                ),
-                isError=True,
+            return _build_browse_error(
+                workspace_roots=workspace_roots,
+                directory=requested_dir,
+                resolved_directories=resolved_dirs,
+                recursive=recursive,
+                max_depth=max_depth,
+                limit=limit,
+                offset=offset,
+                show_details=show_details,
+                format_filter=format_filter,
+                message=message,
             )
         resolved_dirs.append(absolute_dir)
     else:
@@ -274,23 +383,17 @@ async def _handle_browse_images_impl(
     if not resolved_dirs:
         allowed_roots = ", ".join(str(root) for root in workspace_roots)
         message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
-        return CallToolResult(
-            content=[TextContent(type="text", text=message)],
-            structuredContent=_build_browse_structured_result(
-                status="failed",
-                workspace_roots=workspace_roots,
-                directory=requested_dir,
-                resolved_directories=resolved_dirs,
-                recursive=recursive,
-                max_depth=max_depth,
-                limit=limit,
-                offset=offset,
-                show_details=show_details,
-                format_filter=format_filter,
-                success=False,
-                error={"type": "browse_failed", "message": message},
-            ),
-            isError=True,
+        return _build_browse_error(
+            workspace_roots=workspace_roots,
+            directory=requested_dir,
+            resolved_directories=resolved_dirs,
+            recursive=recursive,
+            max_depth=max_depth,
+            limit=limit,
+            offset=offset,
+            show_details=show_details,
+            format_filter=format_filter,
+            message=message,
         )
 
     await _safe_ctx_log(
@@ -310,33 +413,34 @@ async def _handle_browse_images_impl(
 
     # 搜索图片文件：扫描 offset+limit+1 张，多取的 1 张用于判定 has_more，避免大目录无上限扫描。
     # format_filter_exhausted 时跳过扫描，all_images 保持为空，由下方空结果分支统一返回。
+    # 扫描与扫描后的 resolve、越界判定、去重整体下沉到 _scan_and_filter_directory 在线程内
+    # 执行；仅进度上报留在事件循环。深翻页大 offset 或网络挂载目录下 resolve 不再阻塞事件循环。
     scan_limit = offset + limit + 1
     all_images: list[Path] = []
+    # 原始路径到已 resolve 路径的缓存：扫描阶段每张图片仅 resolve 一次，展示阶段复用。
+    image_resolved_map: dict[Path, Path] = {}
     if not format_filter_exhausted:
         seen_images: set[Path] = set()
         total_dirs = len(resolved_dirs)
         for dir_index, resolved_dir in enumerate(resolved_dirs, start=1):
             if len(all_images) >= scan_limit:
                 break
-            matched_images = await asyncio.to_thread(
-                find_images_in_directory,
-                directory=str(resolved_dir),
+            remaining = scan_limit - len(all_images)
+            new_entries = await asyncio.to_thread(
+                _scan_and_filter_directory,
+                resolved_dir=resolved_dir,
                 recursive=recursive,
                 max_depth=max_depth,
-                extensions=format_filter,
-                limit=scan_limit - len(all_images),
+                format_filter=format_filter,
+                remaining=remaining,
+                resolved_roots=resolved_roots,
+                seen_images=seen_images,
             )
-            for image_path in matched_images:
-                if not is_path_within_any_base(image_path, resolved_roots):
-                    logger.warning("检测到越界图片路径，已忽略: {}", image_path)
-                    continue
-                if image_path in seen_images:
-                    continue
-                seen_images.add(image_path)
+            for image_path, image_resolved in new_entries:
                 all_images.append(image_path)
-                if len(all_images) >= scan_limit:
-                    break
-            # 多目录扫描时按已扫描目录占比上报中间进度，区间为 20% 至 90%；单目录跳过
+                image_resolved_map[image_path] = image_resolved
+            # 多目录扫描时按已扫描目录占比上报中间进度，区间为 20% 至 90%；单目录跳过。
+            # 进度上报必须留在事件循环，不能在线程内调用 ctx。
             if total_dirs > 1:
                 await _safe_report_progress(
                     ctx,
@@ -388,26 +492,16 @@ async def _handle_browse_images_impl(
             isError=False,
         )
 
-    lines = ["图片列表:"]
-    structured_images: list[dict[str, Any]] = []
-    for idx, img in enumerate(images, 1):
-        # 查找命中的工作区根用于展示相对路径。使用公开的 is_path_within_base 逐根比较，
-        # 接受其对 img 与 root 的重复 resolve 开销；图片数量受 limit 上限约束，影响可控。
-        display_base = next(
-            (root for root in resolved_roots if is_path_within_base(img, root)),
-            None,
-        )
-        if display_base is None:
-            logger.warning("图片路径未命中任何工作区根目录，已忽略: {}", img)
-            continue
-        display_path = get_relative_path(img, str(display_base))
-        lines.append(f"{idx}. {_format_file_info(display_path, img, show_details)}")
-        structured_images.append(
-            {
-                "index": idx,
-                "path": display_path,
-            }
-        )
+    # 展示组装下沉到 _build_display_entries 在线程内执行：show_details 的 stat 与
+    # _is_within_resolved 命中查找不再在事件循环阻塞网络挂载目录的读取。最终结果构建留在事件循环。
+    display_lines, structured_images = await asyncio.to_thread(
+        _build_display_entries,
+        images=images,
+        image_resolved_map=image_resolved_map,
+        resolved_roots=resolved_roots,
+        show_details=show_details,
+    )
+    lines = ["图片列表:"] + display_lines
 
     await _safe_ctx_log(ctx, "info", f"浏览完成：共 {len(structured_images)} 张图片")
     await _safe_report_progress(ctx, progress=100.0, message="扫描完成")

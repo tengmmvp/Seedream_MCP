@@ -10,7 +10,7 @@ import os
 import re
 import stat
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -346,7 +346,7 @@ class FileManager:
             return {
                 "file_path": str(final_path),
                 "file_size": len(data),
-                "save_time": datetime.now().isoformat(),
+                "save_time": datetime.now(timezone.utc).isoformat(),
             }
         except OSError as e:
             raise FileManagerError(f"写入文件失败: {file_path} -> {e}") from e

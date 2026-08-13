@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ...config import SeedreamConfig
+from ...utils.errors import SeedreamValidationError
 from ...utils.validation import (
     MAX_PARALLEL_REQUEST_COUNT,
     validate_generation_tools,
@@ -100,7 +101,12 @@ def build_generation_context(
         max_request_count=MAX_PARALLEL_REQUEST_COUNT,
     )
 
-    enable_auto_save = auto_save if auto_save is not None else config.auto_save_enabled
+    if auto_save is None:
+        enable_auto_save = config.auto_save_enabled
+    elif isinstance(auto_save, bool):
+        enable_auto_save = auto_save
+    else:
+        raise SeedreamValidationError("auto_save 必须是布尔值", field="auto_save", value=auto_save)
 
     return GenerationExecutionContext(
         prompt=prompt,

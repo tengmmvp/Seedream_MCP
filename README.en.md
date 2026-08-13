@@ -159,10 +159,21 @@ Restart the corresponding client after configuration.
 # Connection & transport
 --base-url TEXT                                    # API base URL (default per config or built-in default)
 --transport [stdio|streamable-http]                # MCP transport (default: stdio)
+--host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address triggers a security warning)
+--port INTEGER                                     # streamable-http listen port (default: 8000)
+--stateless                                        # streamable-http stateless mode, suited for remote multi-client and load balancing (default off)
+
+# Security
+--auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; alternatively use SEEDREAM_HTTP_AUTH_TOKEN)
+--ssl-certfile TEXT                                # TLS certificate file (recommended for non-loopback binding to prevent plaintext token transmission)
+--ssl-keyfile TEXT                                 # TLS private key file, used together with --ssl-certfile
+--insecure-allow-non-tls                           # Explicitly allow non-loopback plaintext operation (only for trusted reverse proxy TLS-terminating scenarios)
 
 # Logging
---log-level [DEBUG|INFO|WARNING|ERROR]             # Log level
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level
 ```
+
+> **Security note**: When bound to `localhost`, the service treats it as a loopback address and does not enforce Bearer auth or TLS. Deployers should ensure `localhost` resolves to `127.0.0.1` or `::1`; containers and virtual environments that modify hosts require special attention. Non-loopback bindings must configure a Bearer token and TLS.
 
 ### Usage Examples
 
@@ -184,7 +195,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 Different models support different capabilities and parameter ranges. Please note this when selecting a model:
 
-| Capability / Parameter                       | 5.0 Pro   | 5.0 Lite     | 4.5       | 4.0          |
+| Capability / Parameter                       | 5.0 Pro   | 5.0 / 5.0 Lite | 4.5       | 4.0          |
 | -------------------------------------------- | --------- | ------------ | --------- | ------------ |
 | Text-to-Image / Image-to-Image / Multi-Image | ✅        | ✅           | ✅        | ✅           |
 | Sequential Generation                        | ❌        | ✅           | ✅        | ✅           |
@@ -192,10 +203,10 @@ Different models support different capabilities and parameter ranges. Please not
 | Streaming Output                             | ❌        | ✅           | ✅        | ✅           |
 | Output Format (png/jpeg)                     | ✅        | ✅           | ❌        | ❌           |
 | Resolution Presets                           | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| Default Size                                 | 1024x1024 | 2048x2048    | 2048x2048 | 2048x2048    |
+| Default Size                                 | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
 | Max Reference Images                         | 10        | 14           | 14        | 14           |
 
-> **Tip**: The default model is **5.0 Lite**, with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/2K` sizes are supported (default `1024x1024`), and the multi-image reference cap drops to 10.
+> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/2K` sizes are supported (default `2048x2048`), and the multi-image reference cap drops to 10.
 
 ## 🎨 Features
 
@@ -215,13 +226,13 @@ Generate an image from a text prompt
 **Parameters:**
 
 - `prompt` (required) - Text prompt for image generation; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
+- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -238,14 +249,14 @@ Generate a new image from an input image and a text prompt
 **Parameters:**
 
 - `prompt` (required) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
 - `image` (required) - URL or local file path of the input image
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
+- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -262,14 +273,14 @@ Fuse multiple images into a new image
 **Parameters:**
 
 - `prompt` (required) - Image fusion request or style instruction; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
 - `image` (required) - List of input image URLs or local file paths (2-14 images; 5.0 Pro max 10)
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
+- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -286,7 +297,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 **Parameters:**
 
 - `prompt` (required) - Text prompt for image generation; should clearly specify the quantity and content; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
 - `image` (optional) - Reference image(s); supports a single image (string) or multiple images (array); up to 14 reference images, and the sum of reference images and max_images must not exceed 15
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
@@ -294,7 +305,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
-- `tools` (optional) - Model tool config; only `doubao-seedream-5.0-lite` supports web search, e.g. `[{"type":"web_search"}]`
+- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -352,7 +363,7 @@ git clone https://github.com/tengmmvp/Seedream_MCP
 cd Seedream_MCP
 
 # Install dependencies (dev mode)
-uv sync --dev
+uv sync
 
 # Create the .env file
 cp .env.example .env
@@ -375,7 +386,7 @@ Configuration priority: MCP client explicit config (CLI args) > runtime system e
 
 - When `--config-file` is used: only the specified file is loaded.
 - When `--config-file` is not specified: files are merged in the order "project-root `.env` -> current-working-directory `.env`", with the latter overriding the former.
-- `.env` injects variables into the process environment for runtime use, but does not override existing system environment variables.
+- `.env` values are **not injected** into the process environment; they are only resolved by the above priority and written to the config object, avoiding global state pollution. System environment variables take precedence over the `.env` file.
 
 ```bash
 # Required
@@ -393,6 +404,10 @@ SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+
+# Client performance
+SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
+SEEDREAM_PREPARE_CACHE_MAX=32
 ```
 
 ## 👥 Contributors

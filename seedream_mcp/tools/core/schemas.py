@@ -94,6 +94,7 @@ class _PromptAndOptimizeInput(BaseModel):
     prompt: str = Field(
         ...,
         min_length=1,
+        max_length=100000,
         description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
     )
     optimize_prompt_options: Optional[OptimizePromptOptions] = Field(
@@ -131,7 +132,10 @@ class _SequentialImageInput(BaseModel):
 
     image: Optional[List[str]] = Field(
         default=None,
-        description=f"可选的参考图片，支持 URL、本地路径，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张。",
+        description=(
+            f"可选的参考图片，支持 URL、本地路径，单张或多张，"
+            f"最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
+        ),
     )
 
 
@@ -196,10 +200,12 @@ class _ResponseAndExecutionInput(BaseModel):
     )
     save_path: Optional[str] = Field(
         default=None,
+        max_length=1024,
         description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
     )
     custom_name: Optional[str] = Field(
         default=None,
+        max_length=255,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     )
 
@@ -266,6 +272,7 @@ class TextToImageInput(
     prompt: str = Field(
         ...,
         min_length=1,
+        max_length=100000,
         description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
     )
 
@@ -282,6 +289,7 @@ class ImageToImageInput(
     prompt: str = Field(
         ...,
         min_length=1,
+        max_length=100000,
         description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。例如：把背景换成雪山、将照片转为水彩画风格。",
     )
 
@@ -298,6 +306,7 @@ class MultiImageFusionInput(
     prompt: str = Field(
         ...,
         min_length=1,
+        max_length=100000,
         description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。请使用“图X”指定图像（如：将图1的服装换为图2的服装）。",
     )
 
@@ -319,6 +328,7 @@ class SequentialGenerationInput(
     prompt: str = Field(
         ...,
         min_length=1,
+        max_length=100000,
         description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。",
     )
 

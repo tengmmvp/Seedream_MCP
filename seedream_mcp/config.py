@@ -17,7 +17,11 @@ from typing import Any, Mapping, Optional
 from dotenv import dotenv_values
 
 from .utils.errors import SeedreamConfigError, SeedreamValidationError
-from .utils.validation import validate_size_for_model
+from .utils.validation import (
+    FALSE_BOOL_STRINGS,
+    TRUE_BOOL_STRINGS,
+    validate_size_for_model,
+)
 
 # ====================
 # 配置常量
@@ -292,9 +296,9 @@ def parse_bool(value: object) -> bool:
     if value is None:
         return False
     normalized = str(value).strip().lower()
-    if normalized in ("true", "1", "yes", "on"):
+    if normalized in TRUE_BOOL_STRINGS:
         return True
-    if normalized in ("false", "0", "no", "off"):
+    if normalized in FALSE_BOOL_STRINGS:
         return False
     raise SeedreamConfigError(f"无法解析为布尔值(期望 true/false/yes/no/on/off/1/0): {value!r}")
 
@@ -544,6 +548,10 @@ _config_build_lock = threading.Lock()
 _global_config_lock = threading.Lock()
 
 _global_config: Optional[SeedreamConfig] = None
+# CLI 注入的活动配置，优先于 _global_config。server 与 path_utils 经 get_active_config
+# 共用此源；reload_config 重置其为 None 以回退重建后的全局配置，消除活动配置与全局
+# 配置的双单例分叉。
+_active_config: Optional[SeedreamConfig] = None
 
 
 def get_global_config() -> SeedreamConfig:
@@ -558,19 +566,43 @@ def get_global_config() -> SeedreamConfig:
 
 
 def set_config(config: SeedreamConfig) -> None:
-    """替换全局配置实例，供 CLI 注入活动配置后同步全局单例。"""
-    global _global_config
+    """替换生效配置：写入全局实例，若已注入活动配置则同步更新，使本调用始终替换生效配置。
+
+    CLI 启动后 get_active_config 优先返回 _active_config，仅写 _global_config 会被遮蔽；
+    故当 _active_config 已设置时一并更新，保证 set_config 在任何阶段都让后续读取拿到新实例。
+    """
+    global _global_config, _active_config
     with _global_config_lock:
         _global_config = config
+        if _active_config is not None:
+            _active_config = config
+
+
+def get_active_config() -> SeedreamConfig:
+    """获取活动配置：CLI 注入的活动配置优先，回退全局默认实例。"""
+    if _active_config is not None:
+        return _active_config
+    return get_global_config()
+
+
+def set_active_config(config: Optional[SeedreamConfig]) -> None:
+    """设置或清除 CLI 注入的活动配置。
+
+    None 表示清除活动配置，后续 get_active_config 回退到全局默认。CLI 启动时注入，
+    使 server 与 path_utils 共用同一活动配置源。
+    """
+    global _active_config
+    with _global_config_lock:
+        _active_config = config
 
 
 def reload_config(env_file: Optional[str] = None) -> None:
-    """重新加载全局配置。
+    """重新加载全局配置并重置活动配置。
 
-    更新全局配置实例。经 CLI 启动后 server 持有独立的活动配置，其优先级高于全局实例，
-    故本函数仅在未注入活动配置的编程式调用场景生效。CLI 运行时热重载需同时重置 server
-    活动配置，否则在用客户端仍读取旧实例。
+    重建全局配置实例并清除活动配置，使后续 get_active_config 回退到新的全局实例，
+    确保 server（client/tools）与 path_utils 读到一致的新配置，消除双单例分叉。
     """
-    global _global_config
+    global _global_config, _active_config
     with _global_config_lock:
         _global_config = SeedreamConfig.from_env(env_file)
+        _active_config = None

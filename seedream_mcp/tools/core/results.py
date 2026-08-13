@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ._helpers import _add_usage_value, _extract_parallel_request_error
+from ._helpers import (
+    _add_usage_value,
+    _classify_generation_error_type,
+    _extract_parallel_request_error,
+)
 from .context import GenerationExecutionContext
 
 
@@ -48,7 +52,7 @@ def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
 def aggregate_parallel_generation_results(
     *,
     request_results: List[Optional[Dict[str, Any]]],
-    request_errors: Dict[int, str],
+    request_errors: Dict[int, Exception],
 ) -> Dict[str, Any]:
     """聚合并行请求结果为统一响应结构。
 
@@ -113,9 +117,21 @@ def aggregate_parallel_generation_results(
             )
             if len(error_items) > 3:
                 error_preview += f"；其余 {len(error_items) - 3} 个请求也失败"
-            aggregated_result["error"] = f"并行请求全部失败。{error_preview}"
+            message = f"并行请求全部失败。{error_preview}"
         else:
-            aggregated_result["error"] = "并行请求全部失败"
+            message = "并行请求全部失败"
+        # 以首个失败异常为代表，复用与单发路径一致的错误码分类，避免并发全失败
+        # 被硬编码为 generation_failed 而与单发路径的错误码契约分叉
+        representative = next(
+            (request_errors[i] for i in range(1, request_count + 1) if i in request_errors),
+            None,
+        )
+        error_type = (
+            _classify_generation_error_type(representative)
+            if representative is not None
+            else "generation_failed"
+        )
+        aggregated_result["error"] = {"type": error_type, "message": message}
     return aggregated_result
 
 
@@ -176,7 +192,12 @@ def update_result_with_auto_save(
 
 def _format_failure_section(result: Dict[str, Any]) -> str:
     """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。"""
-    failure_message = f"图片生成失败: {result.get('error', '未知错误')}"
+    raw_error = result.get("error", "未知错误")
+    # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本
+    error_text = (
+        raw_error.get("message", str(raw_error)) if isinstance(raw_error, dict) else raw_error
+    )
+    failure_message = f"图片生成失败: {error_text}"
     batch_info = result.get("batch")
     if not isinstance(batch_info, dict):
         return failure_message

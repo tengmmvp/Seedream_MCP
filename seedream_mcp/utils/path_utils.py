@@ -54,22 +54,17 @@ def resolve_env_workspace_root() -> Path:
 
 def _configured_workspace_root() -> Optional[str]:
     """返回已配置的工作区根目录原始值，未配置返回 None。"""
-    config = _safe_global_config()
+    try:
+        from ..config import get_active_config
+
+        config = get_active_config()
+    except SeedreamConfigError:
+        config = None
     if config is not None:
         root = config.workspace_root
         return root.strip() if root else None
     env_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
     return env_root.strip() if env_root else None
-
-
-def _safe_global_config() -> Any:
-    """返回全局配置实例；未就绪时返回 None。"""
-    from ..config import get_global_config
-
-    try:
-        return get_global_config()
-    except SeedreamConfigError:
-        return None
 
 
 def get_workspace_roots() -> List[Path]:

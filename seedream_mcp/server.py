@@ -24,8 +24,8 @@ from .config import (
     MODEL_ALIASES,
     SeedreamConfig,
     build_config_from_sources,
-    get_global_config,
-    set_config,
+    get_active_config,
+    set_active_config,
 )
 from .tools import (
     BrowseImagesInput,
@@ -91,9 +91,6 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 
 # ==================== MCP 服务器实例 ====================
 
-# 当前服务器运行时配置
-_active_config: SeedreamConfig | None = None
-
 # 模块日志记录器。须先于引用它的 lifespan/cleanup 定义，否则函数体内无法解析该名
 logger = get_logger(__name__)
 
@@ -106,12 +103,8 @@ _shared_init_lock = asyncio.Lock()
 
 
 def _get_active_config() -> SeedreamConfig:
-    """
-    获取当前活动配置，优先使用 CLI 注入配置。
-    """
-    if _active_config is not None:
-        return _active_config
-    return get_global_config()
+    """获取当前活动配置，CLI 注入优先，回退全局默认。"""
+    return get_active_config()
 
 
 def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
@@ -140,11 +133,13 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     FastMCP 生命周期管理：注入共享配置、SeedreamClient 与 DownloadManager。
 
-    单例首次创建后跨 lifespan 重入复用。config 身份变化时下次进入自动重建，
-    使 set_config/reload_config 更换实例后对在用客户端生效。stateless_http 模式
-    每请求重入，不在 teardown 清理以保留连接复用；其余模式在 teardown 同事件循环清理。
-    重建会立即关闭旧单例，调用 set_config/reload_config 应避开在途请求，否则在途请求
-    持有的 HTTP 连接会被断开。工具经 ctx.request_context.lifespan_context 取
+    单例首次创建后跨 lifespan 重入复用。config 身份变化仅在 lifespan 重入时检测并重建：
+    stateless_http 每请求重入，运行期 set_config/reload_config 可对后续请求生效；stdio
+    与普通 streamable-http 仅单次进入 lifespan，运行期更换配置不会重算已注入的快照与共享
+    客户端，热重载仅在 stateless_http 或进程重启后对在用请求生效。stateless_http 不在
+    teardown 清理以保留连接复用；其余模式在 teardown 同事件循环清理。重建会立即关闭旧
+    单例，调用 set_config/reload_config 应避开在途请求，否则在途请求持有的 HTTP 连接
+    会被断开。工具经 ctx.request_context.lifespan_context 取
     ["config"]/["client"]/["download_manager"]。
     """
     global _shared_client, _shared_download_manager
@@ -229,10 +224,10 @@ def _reset_lifespan_state() -> None:
 
     一并重建 _shared_init_lock 与自动保存清理锁，避免跨事件循环复用绑定了旧循环的 asyncio.Lock。
     """
-    global _shared_client, _shared_download_manager, _active_config, _shared_init_lock
+    global _shared_client, _shared_download_manager, _shared_init_lock
     _shared_client = None
     _shared_download_manager = None
-    _active_config = None
+    set_active_config(None)
     _shared_init_lock = asyncio.Lock()
     from .utils.auto_save import _reset_cleanup_state
 
@@ -548,8 +543,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auth-token",
         default=None,
-        help="streamable-http 的 Bearer 鉴权令牌（也可通过 SEEDREAM_HTTP_AUTH_TOKEN "
-        "环境变量配置）；绑定非回环地址时必须配置，否则拒绝启动",
+        help="streamable-http 的 Bearer 鉴权令牌；建议优先用 SEEDREAM_HTTP_AUTH_TOKEN "
+        "环境变量，命令行传入会出现在进程列表与 shell 历史中；绑定非回环地址时必须配置，"
+        "否则拒绝启动",
     )
     parser.add_argument(
         "--ssl-certfile",
@@ -641,6 +637,56 @@ class _BearerTokenAuthMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+# streamable-http 请求体大小上限：按 Content-Length 早拒超大请求体，防止已认证客户端
+# 提交 GB 级 prompt/data URI 导致 OOM。多图融合等大体量场景若超此值应分批或调高。
+_MAX_STREAMABLE_HTTP_BODY = 100 * 1024 * 1024
+
+
+class _LimitRequestBodyMiddleware:
+    """streamable-http 请求体大小限制 ASGI 中间件。
+
+    按 Content-Length 头早拒超过上限的请求并返回 413，防止超大 JSON-RPC 体在 pydantic
+    物料化前撑爆内存。仅检查声明长度，覆盖正常客户端；恶意谎报长度的 chunked 绕过属极端。
+    """
+
+    def __init__(self, app: Any, max_body_size: int) -> None:
+        self.app = app
+        self._max_body_size = max_body_size
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = 0
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    content_length = int(value)
+                except ValueError:
+                    pass
+                break
+
+        if content_length > self._max_body_size:
+            body = json.dumps(
+                {"error": "request_too_large", "error_description": "Request body exceeds limit"}
+            ).encode("utf-8")
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 413,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        await self.app(scope, receive, send)
+
+
 def _resolve_http_auth_token(args: argparse.Namespace) -> str:
     """解析 streamable-http 鉴权令牌：CLI 参数优先，其次活动配置。"""
     token = args.auth_token or _get_active_config().http_auth_token
@@ -671,10 +717,15 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
                 "streamable-http 未启用应用层认证，仅限本机信任环境使用；"
                 "如需远程访问，请使用 --auth-token 配置鉴权或经反向代理增加鉴权。"
             )
-    else:
+    elif auth_enabled:
         message = (
             f"streamable-http 绑定到 {host}（非回环地址）并已启用 Bearer 鉴权；"
             "请确认网络隔离与令牌妥善保管。"
+        )
+    else:
+        message = (
+            f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险；"
+            "请使用 --auth-token 配置鉴权。"
         )
     logger.warning(message)
     print(message)
@@ -697,6 +748,10 @@ def _run_streamable_http(
     import uvicorn
 
     app = mcp.streamable_http_app()
+    # body 大小限制中间件：按 Content-Length 早拒超大请求体，防 GB 级 payload 物料化导致 OOM。
+    # 鉴权中间件后添加、因 Starlette insert(0) 成为更外层先执行；二者均在读取请求体前按头拒绝，
+    # 故超大请求体无论鉴权与否都不会被完整读入内存
+    app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=_MAX_STREAMABLE_HTTP_BODY)
     if auth_token:
         app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
@@ -724,8 +779,6 @@ def cli_main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    global _active_config
-
     # 构建配置对象
     try:
         config = _build_config_from_args(args)
@@ -733,10 +786,9 @@ def cli_main() -> int:
         print(f"配置错误: {exc.message}")
         return 1
 
-    _active_config = config
-    # 同步写入全局配置单例，使 path_utils 等回退 get_global_config 的路径读到同一实例，
-    # 避免无 MCP Roots 时重建第二个 config 造成双事实来源
-    set_config(config)
+    # 注入活动配置，server（client/tools）与 path_utils 经 get_active_config 共用此实例，
+    # 避免无 MCP Roots 时 path_utils 重建第二个 config 造成双事实来源
+    set_active_config(config)
 
     # 初始化日志系统并打印启动信息
     setup_logging(

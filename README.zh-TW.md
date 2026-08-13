@@ -159,10 +159,21 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 # 連線與傳輸
 --base-url TEXT                                    # API 基礎 URL（預設按設定或內建預設值）
 --transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
+--host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址將觸發安全告警)
+--port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000)
+--stateless                                        # streamable-http 無狀態模式，適合遠端多用戶端與負載平衡 (預設關閉)
+
+# 安全
+--auth-token TEXT                                  # Bearer 鑑權權杖（非回環繫結必須設定，也可用 SEEDREAM_HTTP_AUTH_TOKEN）
+--ssl-certfile TEXT                                # TLS 憑證檔案（非回環繫結建議設定，防權杖明文傳輸）
+--ssl-keyfile TEXT                                 # TLS 私鑰檔案，與 --ssl-certfile 搭配
+--insecure-allow-non-tls                           # 明確允許非回環明文執行（僅受信任反向代理終結 TLS 場景）
 
 # 日誌
---log-level [DEBUG|INFO|WARNING|ERROR]             # 日誌層級
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日誌層級
 ```
+
+> **安全提示**：繫結 `localhost` 時服務將其視為回環位址，不強制 Bearer 鑑權與 TLS。部署方應確認 `localhost` 解析到 `127.0.0.1` 或 `::1`，容器與虛擬環境若修改 hosts 需特別注意；非回環繫結必須設定 Bearer 權杖與 TLS。
 
 ### 使用範例
 
@@ -184,7 +195,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 各模型支援的能力與參數範圍不同，選擇模型時請留意：
 
-| 能力 / 參數                | 5.0 Pro   | 5.0 Lite     | 4.5       | 4.0          |
+| 能力 / 參數                | 5.0 Pro   | 5.0 / 5.0 Lite | 4.5       | 4.0          |
 | -------------------------- | --------- | ------------ | --------- | ------------ |
 | 文生圖 / 圖生圖 / 多圖生圖 | ✅        | ✅           | ✅        | ✅           |
 | 組圖生成                   | ❌        | ✅           | ✅        | ✅           |
@@ -192,10 +203,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | 串流輸出                   | ❌        | ✅           | ✅        | ✅           |
 | 輸出格式（png/jpeg）       | ✅        | ✅           | ❌        | ❌           |
 | 解析度選項                 | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| 預設尺寸                   | 1024x1024 | 2048x2048    | 2048x2048 | 2048x2048    |
+| 預設尺寸                   | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
 | 參考圖上限                 | 10 張     | 14 張        | 14 張     | 14 張        |
 
-> **提示**：預設模型為 **5.0 Lite**，開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/2K`（預設 `1024x1024`），多圖生圖參考圖上限降為 10 張。
+> **提示**：預設模型為 **doubao-seedream-5.0**（與 5.0 Lite 等價），開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/2K`（預設 `2048x2048`），多圖生圖參考圖上限降為 10 張。
 
 ## 🎨 功能特性
 
@@ -215,13 +226,13 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **參數：**
 
 - `prompt` (必要) - 圖像生成的文字提示詞，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
 - `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`
 - `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
-- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0-lite` 支援連網搜尋，例如 `[{"type":"web_search"}]`
+- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
 - `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
@@ -238,14 +249,14 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **參數：**
 
 - `prompt` (必要) - 圖像修改要求或風格轉換指令，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
 - `image` (必要) - 輸入圖像的 URL 或本地檔案路徑
 - `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`
 - `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
-- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0-lite` 支援連網搜尋，例如 `[{"type":"web_search"}]`
+- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
 - `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
@@ -262,14 +273,14 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **參數：**
 
 - `prompt` (必要) - 圖像融合要求或風格指令，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
 - `image` (必要) - 輸入圖像 URL 或本地檔案路徑清單（2-14 張；5.0 Pro 最多 10 張）
 - `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`
 - `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
-- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0-lite` 支援連網搜尋，例如 `[{"type":"web_search"}]`
+- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
 - `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
@@ -286,7 +297,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **參數：**
 
 - `prompt` (必要) - 圖像生成的文字提示詞，應明確指明生成數量與內容，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
 - `image` (選用) - 參考圖像，支援單張圖片（字串）或多張圖片（陣列）；參考圖最多 14 張，且參考圖數量與 max_images 之和不超過 15
 - `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
@@ -294,7 +305,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`
 - `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
-- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0-lite` 支援連網搜尋，例如 `[{"type":"web_search"}]`
+- `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
 - `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
@@ -352,7 +363,7 @@ git clone https://github.com/tengmmvp/Seedream_MCP
 cd Seedream_MCP
 
 # 安裝相依套件（開發模式）
-uv sync --dev
+uv sync
 
 # 建立 .env 檔案
 cp .env.example .env
@@ -375,7 +386,7 @@ uv run python -m seedream_mcp.server --api-key your_key
 
 - 使用 `--config-file` 時：僅載入指定檔案。
 - 未指定 `--config-file` 時：按「專案根 `.env` -> 目前工作目錄 `.env`」順序合併，後者覆寫前者。
-- `.env` 會注入行程環境變數供執行階段讀取，但不會覆寫已存在的系統環境變數。
+- `.env` 的值**不會注入**行程環境變數，僅按上述優先順序解析後寫入設定物件，避免污染全域狀態；系統環境變數優先於 `.env` 檔案。
 
 ```bash
 # 必要設定
@@ -393,6 +404,10 @@ SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+
+# 用戶端效能
+SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
+SEEDREAM_PREPARE_CACHE_MAX=32
 ```
 
 ## 👥 貢獻者

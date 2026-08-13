@@ -193,7 +193,7 @@ def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() 
             "status": "completed",
         },
     ]
-    request_errors = {2: "请求超时"}
+    request_errors = {2: RuntimeError("请求超时")}
 
     result = aggregate_parallel_generation_results(
         request_results=request_results,
@@ -209,23 +209,23 @@ def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() 
     assert result["usage"]["total_tokens"] == 18
     assert result["data"][0]["request_index"] == 1
     assert result["data"][1]["request_index"] == 2
-    assert result["data"][1]["error"]["message"] == "请求超时"
+    assert "请求超时" in result["data"][1]["error"]["message"]
     assert result["data"][2]["request_index"] == 3
 
 
 def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() -> None:
     result = aggregate_parallel_generation_results(
         request_results=[None, None],
-        request_errors={1: "认证失败", 2: "请求频率超限"},
+        request_errors={1: RuntimeError("认证失败"), 2: RuntimeError("请求频率超限")},
     )
 
     assert result["success"] is False
     assert result["status"] == "failed"
-    assert "认证失败" in result["error"]
+    assert "认证失败" in result["error"]["message"]
     assert result["batch"]["errors"][0]["request_index"] == 1
-    assert result["batch"]["errors"][0]["message"] == "认证失败"
+    assert "认证失败" in result["batch"]["errors"][0]["message"]
     assert result["batch"]["errors"][1]["request_index"] == 2
-    assert result["batch"]["errors"][1]["message"] == "请求频率超限"
+    assert "请求频率超限" in result["batch"]["errors"][1]["message"]
 
 
 def test_aggregate_parallel_generation_results_uses_result_error_when_success_false() -> None:
@@ -239,12 +239,12 @@ def test_aggregate_parallel_generation_results_uses_result_error_when_success_fa
 
     assert result["success"] is False
     assert result["status"] == "failed"
-    assert "鉴权失败" in result["error"]
-    assert "请求频率超限" in result["error"]
+    assert "鉴权失败" in result["error"]["message"]
+    assert "请求频率超限" in result["error"]["message"]
     assert result["data"][0]["error"]["message"] == "鉴权失败"
     assert result["data"][1]["error"]["message"] == "请求频率超限"
     assert result["batch"]["errors"][0]["message"] == "鉴权失败"
-    assert result["batch"]["errors"][1]["message"] == "请求频率超限"
+    assert "请求频率超限" in result["batch"]["errors"][1]["message"]
 
 
 def test_format_generation_response_reports_parallel_failure_details() -> None:
@@ -271,6 +271,31 @@ def test_format_generation_response_reports_parallel_failure_details() -> None:
     assert "并行失败详情:" in text
     assert "请求 1: 认证失败" in text
     assert "请求 2: 请求频率超限" in text
+
+
+def test_format_failure_section_extracts_message_from_dict_error() -> None:
+    """result['error'] 为 dict 形态时，用户可见文本应取其 message，不应输出字典 repr。"""
+    text = format_generation_response(
+        title="文生图任务完成",
+        result={
+            "success": False,
+            "status": "failed",
+            "error": {"type": "auth_error", "message": "并行请求全部失败。请求1: 认证失败"},
+            "batch": {
+                "request_count": 1,
+                "success_requests": 0,
+                "failed_requests": 1,
+                "errors": [{"request_index": 1, "message": "认证失败"}],
+            },
+        },
+        prompt="test",
+        size="2K",
+    )
+    failure_line = text.splitlines()[0]
+    assert "并行请求全部失败。请求1: 认证失败" in failure_line
+    # 失败首行不应出现字典 repr 的花括号
+    assert "{" not in failure_line
+    assert "}" not in failure_line
 
 
 def test_format_generation_response_shows_input_images_for_pro_usage() -> None:

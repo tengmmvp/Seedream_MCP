@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import httpx
 
 # 本地模块导入
-from .config import SeedreamConfig, get_global_config
+from .config import SeedreamConfig, get_active_config
 from .utils.errors import (
     SeedreamAPIError,
     SeedreamNetworkError,
@@ -32,6 +32,7 @@ from .utils.errors import (
     parse_retry_after,
 )
 from .utils.logging import get_logger, log_function_call
+from .utils.path_utils import is_path_within_any_base
 from .utils.validation import (
     get_max_reference_images,
     is_seedream_50_pro_model,
@@ -72,7 +73,7 @@ class SeedreamClient:
         Args:
             config: 配置对象，若为 None 则使用全局默认配置
         """
-        self.config = config or get_global_config()
+        self.config = config or get_active_config()
         self.logger = get_logger(__name__)
         self._client: Optional[httpx.AsyncClient] = None
         self._client_lock = asyncio.Lock()
@@ -767,10 +768,12 @@ class SeedreamClient:
         else:
             data_count = 1
 
-        # 检测部分图片失败 → 标记 partial 状态
+        # 检测部分图片失败 → 标记 partial 状态；
+        # 与 sse_parser 保持一致，仅当 status 为 None 或 completed 时改写为 partial，
+        # 避免顶层 status=completed 且 data 含 error 时漏标 partial
         status = payload.get("status")
         if (
-            not status
+            status in (None, "completed")
             and isinstance(data, list)
             and any(isinstance(item, dict) and "error" in item for item in data)
         ):
@@ -836,8 +839,9 @@ class SeedreamClient:
         """
         发送流式请求并解析响应。
         """
-        # 大请求体 JSON 序列化移至工作线程，避免阻塞事件循环
-        json_bytes = await asyncio.to_thread(json.dumps, request_data)
+        # 大请求体 JSON 序列化与编码移至工作线程，避免阻塞事件循环；
+        # 直接产出 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
+        json_bytes = await asyncio.to_thread(lambda: json.dumps(request_data).encode("utf-8"))
         async with client.stream(
             "POST", url, content=json_bytes, timeout=request_timeout
         ) as response:
@@ -855,8 +859,9 @@ class SeedreamClient:
 
             try:
                 raw_body = await response.aread()
-                # JSON 解析为同步 CPU 操作，移至工作线程避免阻塞事件循环
-                payload = await asyncio.to_thread(json.loads, raw_body.decode("utf-8"))
+                # JSON 解析为同步 CPU 操作，移至工作线程避免阻塞事件循环；
+                # 直接传入 bytes，json.loads 自 3.6 起接受 bytes 并在工作线程内完成 decode
+                payload = await asyncio.to_thread(json.loads, raw_body)
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
             return self._build_api_result(payload)
@@ -872,8 +877,9 @@ class SeedreamClient:
         """
         发送非流式请求并解析响应。
         """
-        # 多图融合的 base64 请求体可达数十 MB，其 JSON 序列化移至工作线程以避免阻塞事件循环
-        json_bytes = await asyncio.to_thread(json.dumps, request_data)
+        # 多图融合的 base64 请求体可达数十 MB，其 JSON 序列化与编码移至工作线程以避免阻塞事件循环；
+        # 直接产出 bytes，httpx 收到 bytes 即跳过事件循环内的 encode
+        json_bytes = await asyncio.to_thread(lambda: json.dumps(request_data).encode("utf-8"))
         response = await client.post(url, content=json_bytes, timeout=request_timeout)
 
         self.logger.debug("收到响应: 状态码={}", response.status_code)
@@ -984,12 +990,15 @@ class SeedreamClient:
                 raise
 
             if attempt < total_attempts - 1:
-                # 优先采用服务器 Retry-After 建议，否则指数退避；均叠加抖动避免并发限流时同步重试
+                # 优先采用服务器 Retry-After 建议，否则指数退避；均叠加抖动避免并发限流时同步重试。
+                # 注意：超时与网络错误重试可能触发服务端重复处理与计费，因生成 API 非幂等且当前未发送幂等键
                 base = pending_retry_after if pending_retry_after is not None else float(2**attempt)
                 # 单次退避上限 60 秒，避免 Retry-After 接近 300s 时单次 sleep 过久
                 await asyncio.sleep(min(base + random.uniform(0, 1), 60))
 
-        raise SeedreamAPIError(f"{endpoint} API 调用重试次数已用尽")
+        # 循环不会正常结束：每次迭代成功则 return，末次迭代失败时各 except 分支均 raise；
+        # 此 raise 仅满足类型检查器对全路径返回的要求，运行时不可达
+        raise SeedreamAPIError(f"{endpoint} API 调用意外结束")
 
     @staticmethod
     def _local_file_signature(image: str, workspace_roots: Tuple[str, ...]) -> Tuple[float, int]:
@@ -999,17 +1008,23 @@ class SeedreamClient:
         lowered = image.lower()
         if lowered.startswith(("http://", "https://", "data:image/")):
             return (0.0, 0)
-        # 绝对路径直接 stat；相对路径按工作区根解析，避免 CWD 与工作区不一致时 stat 错误文件
+        # 绝对路径直接作为候选；相对路径按工作区根解析，避免 CWD 与工作区不一致时 stat 错误文件。
+        # 候选路径在 exists/stat 前统一做越界守卫，避免对工作区外文件成为存在性 oracle
+        base_dirs = tuple(Path(r) for r in workspace_roots)
         candidate: Optional[Path] = None
         if os.path.isabs(image):
             candidate = Path(image)
         else:
-            for root in workspace_roots:
-                resolved = Path(root) / image
+            for root in base_dirs:
+                resolved = root / image
+                if not is_path_within_any_base(resolved, base_dirs):
+                    continue
                 if resolved.exists():
                     candidate = resolved
                     break
         if candidate is None:
+            return (0.0, 0)
+        if not is_path_within_any_base(candidate, base_dirs):
             return (0.0, 0)
         try:
             stat_result = os.stat(candidate)

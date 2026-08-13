@@ -213,3 +213,71 @@ async def test_download_image_retries_5xx_then_succeeds(
     assert result["success"] is True
     assert save_path.exists()
     assert save_path.read_bytes() == _PNG_BYTES
+
+
+class _TimeoutThenSuccessSession:
+    """首次 get 抛出 asyncio.TimeoutError，之后返回预设成功响应。
+
+    覆盖 download_image 中 ``except asyncio.TimeoutError`` 重试分支：连接/读取阶段
+    超时经退避后由后续尝试成功落盘。get 直接抛出而非经上下文管理器，等效模拟网络层
+    在建立连接前即超时的场景，异常仍被同一 except 臂捕获。
+    """
+
+    def __init__(self, success_response: "_FakeDownloadResponse") -> None:
+        self._success = success_response
+        self.call_count = 0
+
+    def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        del url, kwargs
+        self.call_count += 1
+        if self.call_count == 1:
+            raise asyncio.TimeoutError()
+        return self._success
+
+
+@pytest.mark.asyncio
+async def test_download_image_exhausts_retries_then_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """所有尝试均返回 5xx → 退避重试用尽后抛出 last_error，文件未落盘。"""
+    manager = DownloadManager()
+    # _FakeSession 超出序列后重复返回最后一个响应，故所有尝试均为 500
+    session = _FakeSession([_FakeDownloadResponse(500, {})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    async def _no_sleep(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert not save_path.exists()
+    # 默认 max_retries=3，共首次 + 3 次重试 = 4 次尝试
+    assert session._idx == manager.max_retries + 1
+
+
+@pytest.mark.asyncio
+async def test_download_image_retries_timeout_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """首次下载超时经退避重试后成功：覆盖 asyncio.TimeoutError except 臂的重试路径。"""
+    manager = DownloadManager()
+    success = _FakeDownloadResponse(200, {"content-type": "image/png"}, content=_PNG_BYTES)
+    session = _TimeoutThenSuccessSession(success)
+    _patch_download_network(monkeypatch, manager, session)
+
+    async def _no_sleep(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert save_path.exists()
+    assert save_path.read_bytes() == _PNG_BYTES
+    assert session.call_count == 2

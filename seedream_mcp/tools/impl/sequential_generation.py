@@ -53,7 +53,6 @@ async def handle_sequential_generation(
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
     ) -> Dict[str, Any]:
-        # log_function_call 装饰器将返回类型归一化为 Any，显式标注恢复 Dict 契约。
         result: Dict[str, Any] = await client.sequential_generation(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,

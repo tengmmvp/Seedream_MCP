@@ -1,13 +1,12 @@
 """Seedream MCP 工具函数包。
 
-聚合异常处理、数据验证、日志、下载、文件管理、自动保存、路径处理与用户指引等子模块的
+聚合异常处理、数据验证、日志、下载、文件管理、自动保存与路径处理等子模块的
 公开接口，提供如下能力：
 - 异常处理：自定义异常类型定义
 - 数据验证：参数校验与格式验证
 - 日志管理：日志系统配置
 - 文件管理：下载、存储、自动保存
 - 路径处理：路径规范化、验证与搜索
-- 用户指引：错误提示、使用指南
 
 采用 PEP 562 的 ``__getattr__`` 延迟加载：包导入时不初始化 PIL、aiohttp、aiofiles
 等重型依赖，仅在首次访问导出名时按需导入对应子模块，兼顾导入性能与循环引用规避。
@@ -47,12 +46,6 @@ __all__ = [
     "get_relative_path",
     "find_images_in_directory",
     "suggest_similar_paths",
-    # 用户指引工具
-    "get_path_usage_guide",
-    "get_error_solutions",
-    "format_error_message",
-    "get_quick_tips",
-    "validate_and_suggest_path",
 ]
 
 # 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)
@@ -82,12 +75,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "get_relative_path": (".path_utils", "get_relative_path"),
     "find_images_in_directory": (".path_utils", "find_images_in_directory"),
     "suggest_similar_paths": (".path_utils", "suggest_similar_paths"),
-    # 用户指引模块
-    "get_path_usage_guide": (".user_guide", "get_path_usage_guide"),
-    "get_error_solutions": (".user_guide", "get_error_solutions"),
-    "format_error_message": (".user_guide", "format_error_message"),
-    "get_quick_tips": (".user_guide", "get_quick_tips"),
-    "validate_and_suggest_path": (".user_guide", "validate_and_suggest_path"),
 }
 
 

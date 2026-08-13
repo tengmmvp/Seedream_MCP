@@ -55,6 +55,8 @@ async def test_parse_sse_response_preserves_complete_events_before_truncation() 
     )
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/1.png"
+    # 截断导致数据丢失时 status 标记为 partial，通知调用方结果不完整
+    assert result["status"] == "partial"
 
 
 async def test_parse_sse_response_raises_on_request_level_error() -> None:
@@ -95,3 +97,80 @@ def test_parse_sse_segment_skips_non_data_lines() -> None:
     result = parse_sse_segment(segment, log=None)
     assert result is not None
     assert result["type"] == "image_generation.completed"
+
+
+async def test_parse_sse_response_classifies_partial_failed_event() -> None:
+    """partial_failed 事件归入 data 项并标记 status=partial。"""
+    chunks = [
+        b'data: {"type":"image_generation.partial_failed",'
+        b'"error":{"code":"content_filter","message":"blocked"}}\n\n',
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        log=_FakeLog(),
+    )
+    assert result["success"] is True
+    # 含 error 项使 status 从 completed 降级为 partial
+    assert result["status"] == "partial"
+    assert len(result["data"]) == 1
+    assert result["data"][0]["type"] == "image_generation.partial_failed"
+    assert result["data"][0]["error"]["code"] == "content_filter"
+    assert result["data"][0]["error"]["message"] == "blocked"
+
+
+async def test_parse_sse_response_normalizes_crlf_line_endings() -> None:
+    """CRLF 行尾被归一化为 \\n，事件分隔 \\n\\n 仍正确切分。"""
+    chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\r\n\r\n',
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\r\n\r\n',
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        log=_FakeLog(),
+    )
+    assert len(result["data"]) == 1
+    assert result["data"][0]["url"] == "http://x/1.png"
+    assert result["status"] == "completed"
+
+
+async def test_parse_sse_response_normalizes_cr_line_endings() -> None:
+    """纯 CR 行尾被归一化为 \\n，事件仍可正确切分。"""
+    chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2.png"}\r\r',
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\r\r',
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        log=_FakeLog(),
+    )
+    assert len(result["data"]) == 1
+    assert result["data"][0]["url"] == "http://x/2.png"
+    assert result["status"] == "completed"
+
+
+async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
+    """单个事件跨多 chunk 到达时，缓冲区累积后仍能完整解析。"""
+    full_event = (
+        b'data: {"type":"image_generation.completed",' b'"usage":{"generated_images":2}}\n\n'
+    )
+    # 拆成 4 字节一块，模拟分片到达
+    chunks = [full_event[i : i + 4] for i in range(0, len(full_event), 4)]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        log=_FakeLog(),
+    )
+    assert result["status"] == "completed"
+    assert result["usage"]["generated_images"] == 2

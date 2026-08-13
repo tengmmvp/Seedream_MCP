@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, Dict, List, Optional, cast
@@ -78,6 +79,24 @@ def parse_sse_segment(
         return None
 
 
+# 大事件卸载阈值：超过此大小的 segment 的 json.loads 改到工作线程执行，
+# 避免 stream + b64_json 多 MB 事件在事件循环中阻塞。小事件保持同步解析以
+# 省去线程调度开销。
+_SSE_OFFLOAD_THRESHOLD = 64 * 1024
+
+
+async def _parse_segment(segment: bytes | bytearray, log: Any) -> Optional[Dict[str, Any]]:
+    """解析单个 SSE 事件段，大段卸载到工作线程避免阻塞事件循环。
+
+    ``parse_sse_segment`` 为同步函数，其 ``json.loads`` 对多 MB 负载耗时可观；
+    超过 ``_SSE_OFFLOAD_THRESHOLD`` 的段通过 ``asyncio.to_thread`` 卸载，小段
+    保持同步以避免线程调度开销。返回值语义与 ``parse_sse_segment`` 一致。
+    """
+    if len(segment) > _SSE_OFFLOAD_THRESHOLD:
+        return await asyncio.to_thread(parse_sse_segment, segment, log)
+    return parse_sse_segment(segment, log)
+
+
 def _classify_sse_event(
     event: Dict[str, Any], model_id: str, items: List[Dict[str, Any]]
 ) -> tuple[bool, Optional[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
@@ -138,27 +157,42 @@ async def parse_sse_response(
     processed_bytes = 0
     # 是否发生过单事件超限截断；用于在返回结果中标记不完整，通知调用方存在数据丢失
     truncated = False
+    # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀
+    search_hint = 0
 
     async for chunk in response.aiter_bytes(chunk_size):
         if not chunk:
             continue
 
-        # 规范化行尾为 \n（兼容 CRLF/CR），使事件分隔 \n\n 判定对所有行尾风格一致，
-        # 避免上游或中间代理改用 CRLF 时事件无法切分致整流丢失
-        buffer += chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-        processed_bytes += len(chunk)
+        # 规范化行尾为 \n 以兼容 CRLF/CR，使事件分隔 \n\n 判定对所有行尾风格一致，
+        # 避免上游或中间代理改用 CRLF 时事件无法切分致整流丢失。
+        # 仅在含 \r 时才分配替换副本；LF-only 为 SSE 流常态，此时退化为一次 memchr
+        # 包含扫描，避免每块无条件分配两个全块临时对象造成的分配与 GC 开销
+        raw_len = len(chunk)
+        if b"\r" in chunk:
+            chunk = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        buffer += chunk
+        processed_bytes += raw_len
 
         if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
             log.debug("已处理 {} MB 数据", processed_bytes // 1024 // 1024)
 
         # SSE 事件以空行分隔，即 b"\n\n"；先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件
         while True:
-            sep = buffer.find(b"\n\n", offset)
+            # 从 max(offset, search_hint - 1) 续扫 b"\n\n"。search_hint 记录上次未命中时的
+            # buffer 长度，回退一字节以覆盖跨块分隔符边界：旧块末尾单个 \n 与新块首个 \n
+            # 拼成的 \n\n。单个未完成事件按大块分多次送达时，避免每块都从 offset 重扫已确认
+            # 无分隔符的尾部，将单事件扫描由平方复杂度降为线性
+            sep = buffer.find(b"\n\n", max(offset, search_hint - 1))
             if sep == -1:
+                search_hint = len(buffer)
                 break
-            segment = bytes(buffer[offset:sep])
+            # bytearray 切片已返回 bytearray 拷贝，parse_sse_segment 接受 bytes|bytearray，无需再 bytes() 转换
+            segment = buffer[offset:sep]
             offset = sep + 2
-            event = parse_sse_segment(segment, log)
+            # offset 已推进至旧 search_hint 之后，重置使下次从新 offset 起扫，避免滞后提示误跳过新区间
+            search_hint = 0
+            event = await _parse_segment(segment, log)
             if event is None:
                 continue
             completed, evt_usage, evt_tools = _classify_sse_event(event, model_id, items)
@@ -171,6 +205,8 @@ async def parse_sse_response(
         if offset > 0 and offset >= buffer_max_size:
             del buffer[:offset]
             offset = 0
+            # 内容前移致旧索引失效；剩余部分已由上方 while 循环确认无分隔符，按当前长度刷新
+            search_hint = len(buffer)
 
         # 不完整尾部超过缓冲区上限：单个事件体积过大，无法完整解析。
         # while 循环已抽干所有完整事件，故 [offset, end) 必为单个未完成事件；
@@ -184,8 +220,10 @@ async def parse_sse_response(
             )
             del buffer[offset:]
             truncated = True
+            # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫
+            search_hint = len(buffer)
 
-    trailing_event = parse_sse_segment(buffer[offset:], log)
+    trailing_event = await _parse_segment(buffer[offset:], log)
     if trailing_event is not None:
         completed, evt_usage, evt_tools = _classify_sse_event(trailing_event, model_id, items)
         if completed:

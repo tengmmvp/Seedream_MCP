@@ -76,6 +76,9 @@ MAX_IMAGE_PIXELS = 6000 * 6000
 # 尺寸预设档位与输出格式白名单
 VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
 VALID_OUTPUT_FORMATS = {"jpeg", "png"}
+# 布尔字符串解析的合法取值，parse_bool 与 validate_watermark 共用以消除值集合漂移
+TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
+FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
 # 生成工具类型白名单，目前仅支持联网搜索
 VALID_GENERATION_TOOL_TYPES = {"web_search"}
 # 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围
@@ -188,7 +191,7 @@ def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
     if width < MIN_IMAGE_EDGE or height < MIN_IMAGE_EDGE:
         raise SeedreamValidationError("图像宽高长度至少15px", field="image", value=value)
 
-    ratio = width / height if height else 0
+    ratio = width / height
     if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
         raise SeedreamValidationError("图像宽高比需在[1/16, 16]范围内", field="image", value=value)
 
@@ -425,9 +428,9 @@ def validate_watermark(watermark: Any) -> bool:
 
     if isinstance(watermark, str):
         watermark_lower = watermark.lower().strip()
-        if watermark_lower in ("true", "1", "yes", "on"):
+        if watermark_lower in TRUE_BOOL_STRINGS:
             return True
-        elif watermark_lower in ("false", "0", "no", "off"):
+        elif watermark_lower in FALSE_BOOL_STRINGS:
             return False
         else:
             raise SeedreamValidationError(
@@ -620,7 +623,8 @@ def validate_max_images(max_images: Any) -> int:
     """
     验证最大图像数量参数
 
-    确保参数为整数类型且在合理范围内（1-15）。
+    确保参数为整数类型且在合理范围内（1-15），委托 _coerce_positive_int_in_range
+    完成校验，与其他整数参数共享统一的错误消息格式。
 
     Args:
         max_images: 最大图像数量，支持整数或可转换为整数的值
@@ -631,40 +635,7 @@ def validate_max_images(max_images: Any) -> int:
     Raises:
         SeedreamValidationError: 当参数类型错误或超出范围时抛出
     """
-    if isinstance(max_images, bool):
-        raise SeedreamValidationError(
-            "最大图像数量必须是整数", field="max_images", value=max_images
-        )
-    if isinstance(max_images, float):
-        # 拒绝非整数浮点避免静默截断，与 _coerce_positive_int_in_range 行为一致
-        if not max_images.is_integer():
-            raise SeedreamValidationError(
-                "最大图像数量必须是整数", field="max_images", value=max_images
-            )
-        validated_value = int(max_images)
-    elif isinstance(max_images, int):
-        validated_value = max_images
-    else:
-        try:
-            validated_value = int(max_images)
-        except (ValueError, TypeError):
-            raise SeedreamValidationError(
-                "最大图像数量必须是整数", field="max_images", value=max_images
-            )
-
-    if validated_value < 1:
-        raise SeedreamValidationError(
-            "最大图像数量不能小于1", field="max_images", value=validated_value
-        )
-
-    if validated_value > MAX_SEQUENTIAL_TOTAL_IMAGES:
-        raise SeedreamValidationError(
-            f"最大图像数量不能超过{MAX_SEQUENTIAL_TOTAL_IMAGES}",
-            field="max_images",
-            value=validated_value,
-        )
-
-    return validated_value
+    return _coerce_positive_int_in_range(max_images, "max_images", 1, MAX_SEQUENTIAL_TOTAL_IMAGES)
 
 
 # ==================== 尺寸验证函数 ====================
@@ -745,7 +716,7 @@ def validate_size_for_model(size: str, model_id: str) -> str:
         raise SeedreamValidationError("图像尺寸格式无效", field="size", value=size)
     width, height = parsed
 
-    ratio = width / height if height else 0
+    ratio = width / height
     if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
         raise SeedreamValidationError(
             "尺寸宽高比需在 [1/16, 16] 范围内",

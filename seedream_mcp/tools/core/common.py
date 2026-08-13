@@ -13,15 +13,9 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from mcp.types import CallToolResult, TextContent
 
 from ...config import SeedreamConfig
-from ...utils.errors import (
-    SeedreamAPIError,
-    SeedreamConfigError,
-    SeedreamNetworkError,
-    SeedreamTimeoutError,
-    SeedreamValidationError,
-    format_error_for_user,
-)
+from ...utils.errors import format_error_for_user
 from ._helpers import (
+    _classify_generation_error_type,
     _safe_ctx_log,
     _safe_report_progress,
     _yield_for_cancellation,
@@ -60,29 +54,6 @@ __all__ = [
     "format_generation_response",
     "update_result_with_auto_save",
 ]
-
-
-def _classify_generation_error_type(exc: Exception) -> str:
-    """将异常映射为稳定的结构化错误码，避免向 structuredContent 暴露内部异常类名。
-
-    按自定义异常类型与 HTTP 状态码分支，输出固定的公开错误码字符串，便于客户端按码处理
-    且不泄露实现细节；未识别异常统一归为 generation_failed。
-    """
-    if isinstance(exc, SeedreamConfigError):
-        return "config_error"
-    if isinstance(exc, SeedreamValidationError):
-        return "validation_error"
-    if isinstance(exc, SeedreamTimeoutError):
-        return "timeout_error"
-    if isinstance(exc, SeedreamNetworkError):
-        return "network_error"
-    if isinstance(exc, SeedreamAPIError):
-        if exc.status_code == 401:
-            return "auth_error"
-        if exc.status_code == 429:
-            return "rate_limited"
-        return "api_error"
-    return "generation_failed"
 
 
 async def execute_generation_handler(

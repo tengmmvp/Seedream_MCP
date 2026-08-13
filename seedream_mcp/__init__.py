@@ -18,15 +18,24 @@ __email__ = "tengmmvp@gmail.com"
 
 if TYPE_CHECKING:
     from .client import SeedreamClient
-    from .config import SeedreamConfig, get_global_config, reload_config, set_config
+    from .config import (
+        SeedreamConfig,
+        get_active_config,
+        get_global_config,
+        reload_config,
+        set_active_config,
+        set_config,
+    )
     from .server import cli_main, mcp
 
 __all__ = [
     "__version__",
     # 配置类与函数
     "SeedreamConfig",
+    "get_active_config",
     "get_global_config",
     "reload_config",
+    "set_active_config",
     "set_config",
     # 客户端类
     "SeedreamClient",
@@ -39,8 +48,10 @@ __all__ = [
 _LAZY_EXPORTS = {
     "SeedreamClient": (".client", "SeedreamClient"),
     "SeedreamConfig": (".config", "SeedreamConfig"),
+    "get_active_config": (".config", "get_active_config"),
     "get_global_config": (".config", "get_global_config"),
     "reload_config": (".config", "reload_config"),
+    "set_active_config": (".config", "set_active_config"),
     "set_config": (".config", "set_config"),
     "mcp": (".server", "mcp"),
     "cli_main": (".server", "cli_main"),

@@ -21,7 +21,7 @@ async def test_prepare_image_input_invalidates_cache_when_local_file_size_change
     """本地文件 size 变化后 (mtime, size) 签名失效，第二次调用重新走底层 prepare。"""
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
-    roots_key = ("test-roots",)
+    roots_key = (str(tmp_path),)
 
     image_file = tmp_path / "ref.png"
     image_file.write_bytes(b"original-content")

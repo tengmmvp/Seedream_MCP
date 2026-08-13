@@ -27,8 +27,16 @@ def workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _reset_global_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """每测试重置全局配置单例，防止跨测试缓存污染工作区根目录读取。"""
+def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
     from seedream_mcp import config as config_module
+    from seedream_mcp.server import mcp
+    from seedream_mcp.utils import validation as validation_module
 
+    # 配置单例：全局默认与 CLI 注入的活动配置
     monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setattr(config_module, "_active_config", None)
+    # cli_main 直接写 mcp.settings.stateless_http，还原默认避免影响后续 lifespan teardown
+    monkeypatch.setattr(mcp.settings, "stateless_http", False)
+    # HEIC 解码器注册标志为模块全局，重置以隔离注册时序相关用例
+    monkeypatch.setattr(validation_module, "_heif_opener_registered", False)
