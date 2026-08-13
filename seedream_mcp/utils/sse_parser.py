@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, cast
 
 from .errors import SeedreamAPIError
 
@@ -20,7 +20,7 @@ def is_sse_response(response: Any) -> bool:
     return content_type.startswith("text/event-stream")
 
 
-def format_sse_success_event(event: Dict[str, Any], model_id: str) -> Dict[str, Any]:
+def format_sse_success_event(event: dict[str, Any], model_id: str) -> dict[str, Any]:
     """将 SSE 成功事件转换为统一图片项结构。"""
     return {
         "url": event.get("url"),
@@ -33,7 +33,7 @@ def format_sse_success_event(event: Dict[str, Any], model_id: str) -> Dict[str, 
     }
 
 
-def format_sse_failed_event(event: Dict[str, Any], model_id: str) -> Dict[str, Any]:
+def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, Any]:
     """将 SSE 失败事件转换为统一图片项结构。"""
     raw_error = event.get("error")
     error = raw_error if isinstance(raw_error, dict) else {}
@@ -49,9 +49,7 @@ def format_sse_failed_event(event: Dict[str, Any], model_id: str) -> Dict[str, A
     }
 
 
-def parse_sse_segment(
-    segment: bytes | bytearray, log: Optional[Any] = None
-) -> Optional[Dict[str, Any]]:
+def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dict[str, Any] | None:
     """解析单个 SSE 事件段，返回事件对象。解析失败时记录日志并返回 None。"""
     raw_segment = segment.strip()
     if not raw_segment:
@@ -60,7 +58,7 @@ def parse_sse_segment(
     try:
         event_text = raw_segment.decode("utf-8")
         # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用
-        data_parts: List[str] = []
+        data_parts: list[str] = []
         for line in event_text.split("\n"):
             if line.startswith("data:"):
                 data_parts.append(line[5:].strip())
@@ -71,7 +69,7 @@ def parse_sse_segment(
         parsed_payload = json.loads(payload)
         if not isinstance(parsed_payload, dict):
             raise ValueError("SSE 事件数据必须是对象")
-        return cast(Dict[str, Any], parsed_payload)
+        return cast(dict[str, Any], parsed_payload)
     except Exception as exc:
         if log is not None:
             log.error("SSE事件解析失败: {}", str(exc))
@@ -85,7 +83,7 @@ def parse_sse_segment(
 _SSE_OFFLOAD_THRESHOLD = 64 * 1024
 
 
-async def _parse_segment(segment: bytes | bytearray, log: Any) -> Optional[Dict[str, Any]]:
+async def _parse_segment(segment: bytes | bytearray, log: Any) -> dict[str, Any] | None:
     """解析单个 SSE 事件段，大段卸载到工作线程避免阻塞事件循环。
 
     ``parse_sse_segment`` 为同步函数，其 ``json.loads`` 对多 MB 负载耗时可观；
@@ -98,8 +96,8 @@ async def _parse_segment(segment: bytes | bytearray, log: Any) -> Optional[Dict[
 
 
 def _classify_sse_event(
-    event: Dict[str, Any], model_id: str, items: List[Dict[str, Any]]
-) -> tuple[bool, Optional[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
+    event: dict[str, Any], model_id: str, items: list[dict[str, Any]]
+) -> tuple[bool, dict[str, Any] | None, list[dict[str, Any]] | None]:
     """分类单个 SSE 事件：追加图片项或返回完成元信息；请求级错误抛 SeedreamAPIError。
 
     主循环与流末尾残留处理共用此函数，避免事件分支逻辑重复。
@@ -132,7 +130,7 @@ async def parse_sse_response(
     chunk_size: int,
     buffer_max_size: int,
     log: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """增量解析 SSE 响应为统一的图片项列表与完成元信息。
 
     Args:
@@ -145,10 +143,10 @@ async def parse_sse_response(
     Returns:
         包含 success/data/usage/status/tools 的统一结果字典。
     """
-    items: List[Dict[str, Any]] = []
-    usage: Dict[str, Any] = {}
-    status: Optional[str] = None
-    tools: Optional[List[Dict[str, Any]]] = None
+    items: list[dict[str, Any]] = []
+    usage: dict[str, Any] = {}
+    status: str | None = None
+    tools: list[dict[str, Any]] | None = None
 
     # 使用 bytearray 累积流式数据：bytes 拼接为 O(n²) 拷贝，bytearray.extend 均摊 O(1)
     buffer = bytearray()

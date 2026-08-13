@@ -203,8 +203,11 @@ Different models support different capabilities and parameter ranges. Please not
 | Streaming Output                             | ❌        | ✅           | ✅        | ✅           |
 | Output Format (png/jpeg)                     | ✅        | ✅           | ❌        | ❌           |
 | Resolution Presets                           | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| Default Size                                 | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
+| Custom Size Multiple                         | Multiple of 16 | No limit     | No limit  | No limit     |
+| Default Size (MCP)                           | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
 | Max Reference Images                         | 10        | 14           | 14        | 14           |
+
+> **Default Size (MCP)**: The "Default Size (MCP)" row reflects the runtime resolved value of MCP's unified `default_size=2K` setting (corresponding to `2048x2048`), independent of each model's native default (e.g. 5.0 Pro's native default is `1024x1024`).
 
 > **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/2K` sizes are supported (default `2048x2048`), and the multi-image reference cap drops to 10.
 
@@ -230,7 +233,7 @@ Generate an image from a text prompt
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
@@ -254,7 +257,7 @@ Generate a new image from an input image and a text prompt
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
@@ -278,7 +281,7 @@ Fuse multiple images into a new image
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
@@ -303,8 +306,8 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`
-- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
+- `stream` (optional) - Whether to enable streaming output; default `false`
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
@@ -420,11 +423,20 @@ SEEDREAM_MODEL_ID=doubao-seedream-5.0
 SEEDREAM_DEFAULT_SIZE=2K
 SEEDREAM_DEFAULT_WATERMARK=false
 
+# Timeouts
+SEEDREAM_TIMEOUT=60                         # Connection/write/pool-acquire timeout (seconds)
+SEEDREAM_API_TIMEOUT=600                    # API call read & total timeout (seconds)
+
 # Auto-save
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
+SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds)
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+
+# Workspace & transport
+SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)
+SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (recommended for non-loopback binding)
 
 # Client performance
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

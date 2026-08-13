@@ -8,7 +8,7 @@ lifespan 上下文获取，以复用 HTTP/aiohttp 连接池，无 lifespan 场�
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ...utils.errors import format_error_for_user
 from ._helpers import (
@@ -31,20 +31,20 @@ async def _execute_parallel_generation_requests(
     client: "SeedreamClient",
     context: GenerationExecutionContext,
     request_executor: Callable[
-        ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
+        ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
     module_logger: Any,
-    ctx: Optional["Context[Any, Any, Any]"] = None,
+    ctx: Context[Any, Any, Any] | None = None,
     progress_start: float = PROGRESS_GENERATION_START,
     progress_span: float = PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
 
     每个请求独立捕获异常并记入 request_errors，不中断其余请求。
     """
     semaphore = asyncio.Semaphore(context.parallelism)
-    request_results: List[Optional[Dict[str, Any]]] = [None] * context.request_count
-    request_errors: Dict[int, Exception] = {}
+    request_results: list[dict[str, Any] | None] = [None] * context.request_count
+    request_errors: dict[int, Exception] = {}
     completed_requests = 0
 
     async def _run_single_request(request_index: int) -> None:
@@ -87,8 +87,8 @@ async def _execute_parallel_generation_requests(
 
 
 def _try_get_shared_client(
-    ctx: Optional["Context[Any, Any, Any]"],
-) -> "Optional[SeedreamClient]":
+    ctx: Context[Any, Any, Any] | None,
+) -> SeedreamClient | None:
     """从 lifespan 上下文获取共享 SeedreamClient，无则返回 None。
 
     复用共享客户端可共享 HTTP 连接池。无 lifespan 的场景，例如单元测试直接调用
@@ -108,8 +108,8 @@ def _try_get_shared_client(
 
 
 def _try_get_shared_download_manager(
-    ctx: Optional["Context[Any, Any, Any]"],
-) -> Optional[Any]:
+    ctx: Context[Any, Any, Any] | None,
+) -> Any | None:
     """从 lifespan 上下文获取共享 DownloadManager，无则返回 None。
 
     复用共享下载管理器可跨请求复用 aiohttp 连接池，避免每次生成重复 TLS 握手。
@@ -131,12 +131,12 @@ async def _run_generation_requests(
     *,
     client: "SeedreamClient",
     context: GenerationExecutionContext,
-    ctx: Optional["Context[Any, Any, Any]"],
+    ctx: Context[Any, Any, Any] | None,
     request_executor: Callable[
-        ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
+        ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
     module_logger: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """在给定客户端上执行单次或并行生成请求并返回结果。
 
     request_count 为 1 时直接调用 request_executor；否则委托

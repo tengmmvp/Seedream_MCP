@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult
 
@@ -18,6 +18,7 @@ from ..core.common import (
     execute_generation_handler,
     GenerationExecutionContext,
 )
+from ._common import SEQUENTIAL_GENERATION, _sequential_start_log_values_factory
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -28,9 +29,9 @@ logger = get_logger(__name__)
 
 
 async def handle_sequential_generation(
-    arguments: Dict[str, Any],
+    arguments: dict[str, Any],
     config: SeedreamConfig,
-    ctx: "Context[Any, Any, Any] | None" = None,
+    ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """处理组图输出请求，基于参考图与文本生成一组内容关联的图片。
 
@@ -52,8 +53,8 @@ async def handle_sequential_generation(
 
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
-    ) -> Dict[str, Any]:
-        result: Dict[str, Any] = await client.sequential_generation(
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = await client.sequential_generation(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             image=image,
@@ -71,22 +72,8 @@ async def handle_sequential_generation(
         arguments=arguments,
         config=config,
         module_logger=logger,
-        tool_name="seedream_sequential_generation",
-        completion_title="组图输出任务完成",
-        failure_prefix="组图输出",
-        guidance="请检查提示词、数量与图片参数，确认 API Key 和网络可用后重试。",
-        start_log_message=(
-            "组图输出开始: prompt_len={}, max_images={}, size={}, stream={}, "
-            "request_count={}, parallelism={}"
-        ),
-        start_log_values_builder=lambda gen_ctx: (
-            len(gen_ctx.prompt or ""),
-            max_images,
-            gen_ctx.size,
-            gen_ctx.stream,
-            gen_ctx.request_count,
-            gen_ctx.parallelism,
-        ),
+        **SEQUENTIAL_GENERATION.as_handler_kwargs(),
+        start_log_values_builder=_sequential_start_log_values_factory(max_images),
         request_executor=_execute,
         ctx=ctx,
     )

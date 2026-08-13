@@ -2,10 +2,14 @@
 
 import logging
 
+import pytest
+
 from seedream_mcp.utils.logging import setup_logging
 
 
-def test_setup_logging_respects_force_standard_logging_false(monkeypatch) -> None:
+def test_setup_logging_respects_force_standard_logging_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_kwargs = {}
 
     def fake_basic_config(*args, **kwargs) -> None:
@@ -24,7 +28,9 @@ def test_setup_logging_respects_force_standard_logging_false(monkeypatch) -> Non
     assert captured_kwargs["force"] is False
 
 
-def test_setup_logging_respects_force_standard_logging_true(monkeypatch) -> None:
+def test_setup_logging_respects_force_standard_logging_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_kwargs = {}
 
     def fake_basic_config(*args, **kwargs) -> None:

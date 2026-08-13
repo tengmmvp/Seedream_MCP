@@ -1,13 +1,13 @@
 """生成结果处理：图片提取、并行结果聚合、自动保存合并、响应格式化与结构化输出。
 
-各函数为纯数据处理，不触发 I/O：``extract_images`` 将多种响应形态归一化为 List[Dict]；
+各函数为纯数据处理，不触发 I/O：``extract_images`` 将多种响应形态归一化为 list[Dict]；
 ``aggregate_parallel_generation_results`` 合并多次请求的 data 与 usage 并按成败推导状态；
 格式化函数将结果装配为面向模型的文本与 structuredContent 字段。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ._helpers import (
     _add_usage_value,
@@ -17,12 +17,12 @@ from ._helpers import (
 from .context import GenerationExecutionContext
 
 
-def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
     """从生成结果中提取图片数据列表。
 
     支持数组、单个图片字典或嵌套 {"data": ...} 等多种数据结构，统一转换为仅含字典
     的列表；None 与非字典元素一律归一化剔除，确保结果始终符合
-    GenerationStructuredOutput.data 的 List[Dict] 声明，避免 outputSchema 校验失败。
+    GenerationStructuredOutput.data 的 list[Dict] 声明，避免 outputSchema 校验失败。
 
     Args:
         result: 图片生成结果字典，包含响应数据及元信息。
@@ -32,11 +32,11 @@ def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     data = result.get("data")
 
-    def _coerce(value: Any) -> List[Dict[str, Any]]:
+    def _coerce(value: Any) -> list[dict[str, Any]]:
         if value is None:
             return []
         if isinstance(value, list):
-            # 过滤 null 及非字典元素，保证 List[Dict] 类型一致
+            # 过滤 null 及非字典元素，保证 list[Dict] 类型一致
             return [item for item in value if isinstance(item, dict)]
         if isinstance(value, dict):
             nested = value.get("data")
@@ -51,17 +51,17 @@ def extract_images(result: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def aggregate_parallel_generation_results(
     *,
-    request_results: List[Optional[Dict[str, Any]]],
-    request_errors: Dict[int, Exception],
-) -> Dict[str, Any]:
+    request_results: list[dict[str, Any] | None],
+    request_errors: dict[int, Exception],
+) -> dict[str, Any]:
     """聚合并行请求结果为统一响应结构。
 
     合并各成功请求的图片与用量统计，失败请求记入 batch.errors；success 由是否有任一成功
-    请求决定，status 按 completed/partial_completed/failed 三态推导。
+    请求决定，status 按 completed/partial/failed 三态推导。
     """
-    merged_data: List[Dict[str, Any]] = []
-    merged_usage: Dict[str, Any] = {}
-    error_items: List[Dict[str, Any]] = []
+    merged_data: list[dict[str, Any]] = []
+    merged_usage: dict[str, Any] = {}
+    error_items: list[dict[str, Any]] = []
     success_requests = 0
     request_count = len(request_results)
 
@@ -94,11 +94,9 @@ def aggregate_parallel_generation_results(
 
     failed_requests = request_count - success_requests
     status = (
-        "completed"
-        if failed_requests == 0
-        else ("partial_completed" if success_requests > 0 else "failed")
+        "completed" if failed_requests == 0 else ("partial" if success_requests > 0 else "failed")
     )
-    aggregated_result: Dict[str, Any] = {
+    aggregated_result: dict[str, Any] = {
         "success": success_requests > 0,
         "data": merged_data,
         "usage": merged_usage,
@@ -145,20 +143,21 @@ def is_saveable_image(image: Any, data_key: str) -> bool:
 
 
 def update_result_with_auto_save(
-    result: Dict[str, Any],
-    auto_save_results: List[Any],
-    data_key: str,
-) -> Dict[str, Any]:
-    """将自动保存结果合并到生成结果中。
+    result: dict[str, Any],
+    auto_save_results: list[Any],
+    saveable_indices: list[int],
+) -> dict[str, Any]:
+    """按收集阶段记录的原始索引将自动保存结果合并到生成结果。
 
-    为可保存图片补充本地路径和 Markdown 引用，不修改原结果对象，返回新的字典副本。
+    回填严格按 saveable_indices 指定的原始图片位置写入，不重复执行可保存性过滤，
+    消除收集与回填两次独立过滤可能错位的风险。不修改原结果对象，返回新的字典副本。
     保存统计与结果列表由 _build_generation_structured_result 从 auto_save_results 直接构建，
     不在此重复写入。
 
     Args:
         result: 图片生成结果字典，包含原始响应数据。
         auto_save_results: 自动保存结果对象列表。
-        data_key: 可保存图片的数据键（"url" 或 "b64_json"），须与收集阶段一致。
+        saveable_indices: 可保存图片在归一化列表中的原始索引，由收集阶段产出。
 
     Returns:
         更新后的结果字典，图片项含本地路径与 Markdown 引用。
@@ -168,29 +167,23 @@ def update_result_with_auto_save(
     # 这样无论原始 data 是列表还是嵌套 {"data": ...} 字典，拷贝都覆盖到实际图片项，
     # 避免下方补充 local_path/markdown_ref 时修改传入的原始 result。
     images = extract_images(updated_result)
-    copied_images: List[Dict[str, Any]] = [dict(image) for image in images]
+    copied_images: list[dict[str, Any]] = [dict(image) for image in images]
     updated_result["data"] = copied_images
 
-    save_index = 0
-    for image in copied_images:
-        # 仅回填含指定键数据的可保存项；谓词须与收集阶段 is_saveable_image 严格一致，
-        # 否则按位置下标对齐时会因两侧集合不同而错位
-        if not is_saveable_image(image, data_key):
-            continue
-
-        if save_index >= len(auto_save_results):
+    for i, save_result in enumerate(auto_save_results):
+        if i >= len(saveable_indices):
             break
-        save_result = auto_save_results[save_index]
-        save_index += 1
-
+        idx = saveable_indices[i]
+        if idx >= len(copied_images):
+            break
         if getattr(save_result, "success", False):
-            image["local_path"] = save_result.local_path
-            image["markdown_ref"] = save_result.markdown_ref
+            copied_images[idx]["local_path"] = save_result.local_path
+            copied_images[idx]["markdown_ref"] = save_result.markdown_ref
 
     return updated_result
 
 
-def _format_failure_section(result: Dict[str, Any]) -> str:
+def _format_failure_section(result: dict[str, Any]) -> str:
     """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。"""
     raw_error = result.get("error", "未知错误")
     # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本
@@ -218,7 +211,7 @@ def _format_failure_section(result: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _format_image_item(index: int, image: Dict[str, Any]) -> List[str]:
+def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
     """格式化单张图片的可读详情行。"""
     parts = [f"图片 {index}:"]
     if "request_index" in image:
@@ -253,8 +246,8 @@ def _format_image_item(index: int, image: Dict[str, Any]) -> List[str]:
 
 
 def _format_auto_save_section(
-    auto_save_results: Optional[List[Any]], auto_save_error: Optional[str]
-) -> List[str]:
+    auto_save_results: list[Any] | None, auto_save_error: str | None
+) -> list[str]:
     """格式化自动保存统计与逐项结果。"""
     if auto_save_error:
         return [f"自动保存失败: {auto_save_error}", ""]
@@ -279,7 +272,7 @@ def _format_auto_save_section(
     return parts
 
 
-def _format_usage_section(usage: Dict[str, Any]) -> List[str]:
+def _format_usage_section(usage: dict[str, Any]) -> list[str]:
     """格式化使用统计。"""
     parts = ["使用统计:"]
     if "input_images" in usage:
@@ -301,13 +294,13 @@ def _format_usage_section(usage: Dict[str, Any]) -> List[str]:
 
 def format_generation_response(
     title: str,
-    result: Dict[str, Any],
+    result: dict[str, Any],
     prompt: str,
     size: str,
-    auto_save_results: Optional[List[Any]] = None,
+    auto_save_results: list[Any] | None = None,
     auto_save_enabled: bool = False,
-    auto_save_error: Optional[str] = None,
-    images: Optional[List[Dict[str, Any]]] = None,
+    auto_save_error: str | None = None,
+    images: list[dict[str, Any]] | None = None,
 ) -> str:
     """格式化图片生成结果为可读文本。
 
@@ -335,7 +328,7 @@ def format_generation_response(
         images = extract_images(result)
     usage = result.get("usage", {})
 
-    parts: List[str] = [title, f"提示词: {prompt}", f"尺寸: {size}", ""]
+    parts: list[str] = [title, f"提示词: {prompt}", f"尺寸: {size}", ""]
 
     batch_info = result.get("batch")
     if isinstance(batch_info, dict):
@@ -363,12 +356,12 @@ def format_generation_response(
 def _build_generation_structured_result(
     *,
     tool_name: str,
-    result: Dict[str, Any],
+    result: dict[str, Any],
     context: GenerationExecutionContext,
-    auto_save_results: Optional[List[Any]],
-    auto_save_error: Optional[str],
-    images: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+    auto_save_results: list[Any] | None,
+    auto_save_error: str | None,
+    images: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """构建 MCP 工具结果的 structuredContent 字段，字段集与 GenerationStructuredOutput 对齐。
 
     成功与失败均返回同一结构，失败时额外写入归一化后的 error 字典，供 outputSchema 校验。
@@ -382,7 +375,7 @@ def _build_generation_structured_result(
         images: 预提取的图片列表，传入时直接写入 data，避免重复调用 extract_images；
             None 时从 result 提取，便于函数独立调用。
     """
-    structured: Dict[str, Any] = {
+    structured: dict[str, Any] = {
         "tool": tool_name,
         "success": bool(result.get("success")),
         "status": result.get("status"),

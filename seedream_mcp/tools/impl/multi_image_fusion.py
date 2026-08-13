@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult
 
@@ -17,6 +17,7 @@ from ..core.common import (
     execute_generation_handler,
     GenerationExecutionContext,
 )
+from ._common import MULTI_IMAGE_FUSION, _default_start_log_values
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -27,9 +28,9 @@ logger = get_logger(__name__)
 
 
 async def handle_multi_image_fusion(
-    arguments: Dict[str, Any],
+    arguments: dict[str, Any],
     config: SeedreamConfig,
-    ctx: "Context[Any, Any, Any] | None" = None,
+    ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """处理多图融合请求，依据文本描述融合多张参考图特征生成新图像。
 
@@ -50,8 +51,8 @@ async def handle_multi_image_fusion(
 
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
-    ) -> Dict[str, Any]:
-        result: Dict[str, Any] = await client.multi_image_fusion(
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = await client.multi_image_fusion(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             image=image,
@@ -68,20 +69,8 @@ async def handle_multi_image_fusion(
         arguments=arguments,
         config=config,
         module_logger=logger,
-        tool_name="seedream_multi_image_fusion",
-        completion_title="多图融合任务完成",
-        failure_prefix="多图融合",
-        guidance="请检查图片列表与尺寸参数，确认 API Key 和网络可用后重试。",
-        start_log_message=(
-            "多图融合开始: prompt_len={}, size={}, stream={}, request_count={}, parallelism={}"
-        ),
-        start_log_values_builder=lambda gen_ctx: (
-            len(gen_ctx.prompt or ""),
-            gen_ctx.size,
-            gen_ctx.stream,
-            gen_ctx.request_count,
-            gen_ctx.parallelism,
-        ),
+        **MULTI_IMAGE_FUSION.as_handler_kwargs(),
+        start_log_values_builder=_default_start_log_values,
         request_executor=_execute,
         ctx=ctx,
     )

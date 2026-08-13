@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import stat
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,23 @@ logger = get_logger(__name__)
 
 # 文件名长度上限，避免超出常见文件系统目录项长度限制
 _MAX_FILENAME_LENGTH = 200
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """判断路径是否为 NTFS junction 等非符号链接型 reparse point。
+
+    os.walk(followlinks=False) 不拦截 junction：junction 属 reparse point，
+    is_symlink 对其返回 False，会被下降进入目标执行 OS 级 listdir。本函数用
+    reparse point 属性位检测，供清理遍历下降前剔除。仅 Windows 存在 junction，
+    其他平台直接返回 False。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    return bool(st.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 class FileManagerError(SeedreamMCPError):
@@ -472,13 +490,18 @@ class FileManager:
                 logger.warning("路径不在基础目录内: {}", root_resolved)
                 dirs[:] = []
                 continue
+            # 下降前剔除符号链接、NTFS junction 与越界目录。os.walk(followlinks=False)
+            # 不拦截 junction，因其属 reparse point 而 is_symlink 返回 False；若不在此
+            # 剔除会下降进入 junction 或越界目录目标执行 OS 级 listdir，涉及潜在 SMB
+            # 出站认证暴露。dirs[:] 原地赋值阻止 os.walk 继续下降到被剔除的目录。
+            pruned_dirs: list[str] = []
             for name in dirs:
                 dir_path = root_path / name
-                # 跳过符号链接目录，不纳入空目录清理，避免对其目标操作。
                 if dir_path.is_symlink():
                     continue
-                # junction 目录 resolve 后落在 base_dir 之外，不纳入空目录清理，
-                # 避免 rmdir 误伤 junction 目标。
+                if _is_reparse_point(dir_path):
+                    logger.warning("跳过 reparse point 目录: {}", dir_path)
+                    continue
                 try:
                     dir_resolved = dir_path.resolve()
                 except Exception as e:
@@ -489,6 +512,8 @@ class FileManager:
                     continue
                 if dir_path != self.base_dir:
                     directories.append(dir_path)
+                pruned_dirs.append(name)
+            dirs[:] = pruned_dirs
             for name in files:
                 file_path = root_path / name
                 # 跳过符号链接文件，其目标可能在 base_dir 之外。
@@ -501,8 +526,8 @@ class FileManager:
                     if stat_result.st_mtime < cutoff_epoch:
                         expired_files.append((file_path, stat_result.st_size))
                 except Exception as e:
-                    errors.append(f"删除文件失败 {file_path}: {e}")
-                    logger.warning("删除文件失败: {} -> {}", file_path, e)
+                    errors.append(f"获取文件信息失败 {file_path}: {e}")
+                    logger.warning("获取文件信息失败: {} -> {}", file_path, e)
         return expired_files, directories
 
     @staticmethod

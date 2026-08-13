@@ -81,7 +81,7 @@ def _make_cli_args(transport: str) -> Namespace:
     )
 
 
-def _stub_cli(monkeypatch, args: Namespace, config: SeedreamConfig) -> None:
+def _stub_cli(monkeypatch: pytest.MonkeyPatch, args: Namespace, config: SeedreamConfig) -> None:
     class _FakeParser:
         def parse_args(self) -> Namespace:
             return args
@@ -89,11 +89,13 @@ def _stub_cli(monkeypatch, args: Namespace, config: SeedreamConfig) -> None:
     monkeypatch.setattr(server, "_build_arg_parser", lambda: _FakeParser())
     monkeypatch.setattr(server, "_build_config_from_args", lambda _args: config)
     monkeypatch.setattr(server, "setup_logging", lambda *a, **k: None)
-    monkeypatch.setattr(server, "_warn_remote_exposure", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_apply_http_bind_settings", lambda *a, **k: None)
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
-def test_cli_main_dispatches_to_correct_runner(monkeypatch, transport: str) -> None:
+def test_cli_main_dispatches_to_correct_runner(
+    monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
     args = _make_cli_args(transport)
     config = SeedreamConfig(api_key="test_key")
     _stub_cli(monkeypatch, args, config)
@@ -117,7 +119,9 @@ def test_cli_main_dispatches_to_correct_runner(monkeypatch, transport: str) -> N
         assert captured == {"http": {"host": "127.0.0.1", "port": 8000, "auth_token": ""}}
 
 
-def test_cli_main_refuses_non_loopback_http_without_auth_token(monkeypatch) -> None:
+def test_cli_main_refuses_non_loopback_http_without_auth_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """非回环 + 无鉴权令牌 → fail-closed 拒绝启动。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
@@ -129,7 +133,9 @@ def test_cli_main_refuses_non_loopback_http_without_auth_token(monkeypatch) -> N
     assert server.cli_main() == 1
 
 
-def test_cli_main_refuses_non_loopback_http_without_tls(monkeypatch) -> None:
+def test_cli_main_refuses_non_loopback_http_without_tls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """非回环 + 令牌 + 无 TLS + 未显式 opt-in → fail-closed 拒绝启动，防止令牌明文传输。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
@@ -143,7 +149,9 @@ def test_cli_main_refuses_non_loopback_http_without_tls(monkeypatch) -> None:
     assert server.cli_main() == 1
 
 
-def test_cli_main_allows_non_loopback_http_with_tls(monkeypatch) -> None:
+def test_cli_main_allows_non_loopback_http_with_tls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """非回环 + 令牌 + TLS 证书 → 正常分发并透传 SSL。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
@@ -168,7 +176,9 @@ def test_cli_main_allows_non_loopback_http_with_tls(monkeypatch) -> None:
     assert captured["http"]["ssl_certfile"] == "/fake/cert.pem"
 
 
-def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(monkeypatch) -> None:
+def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """非回环 + 令牌 + 显式 --insecure-allow-non-tls → 允许，适用于反代终结 TLS 场景。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")

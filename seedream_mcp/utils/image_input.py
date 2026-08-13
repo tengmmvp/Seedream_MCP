@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-from typing import List
 from urllib.parse import urlparse
 
 from PIL import Image
@@ -20,10 +19,10 @@ from .formats import MIME_BY_EXTENSION
 from .logging import get_logger
 from .os_utils import open_no_follow_read
 from .path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
-from .validation import (
+from .image_validation import (
     _ensure_heif_opener_registered,
     _validate_image_dimensions,
-    validate_image_url,
+    validate_image_input,
 )
 
 logger = get_logger(__name__)
@@ -48,8 +47,8 @@ async def prepare_image_input(image: str) -> str:
             return normalized
 
         if normalized.lower().startswith("data:image/"):
-            # validate_image_url 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环。
-            return await asyncio.to_thread(validate_image_url, normalized)
+            # validate_image_input 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环。
+            return await asyncio.to_thread(validate_image_input, normalized)
 
         # 本地文件：路径校验、读取与编码均为同步 IO，整体放到工作线程。
         return await asyncio.to_thread(_prepare_local_image, normalized, image)
@@ -70,7 +69,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
         raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
 
     validated_path = None
-    validation_errors: List[str] = []
+    validation_errors: list[str] = []
     for root in workspace_roots:
         is_valid, error_msg, normalized_path = validate_image_path(
             normalized, base_dir=str(root), skip_dimensions=True

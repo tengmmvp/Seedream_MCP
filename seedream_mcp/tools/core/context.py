@@ -8,20 +8,14 @@ handler 内重复提取与校验。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ...config import SeedreamConfig
 from ...utils.errors import SeedreamValidationError
 from ...utils.validation import (
     MAX_PARALLEL_REQUEST_COUNT,
-    validate_generation_tools,
-    validate_optimize_prompt_options,
-    validate_output_format,
+    validate_common_generation_params,
     validate_parallel_generation_options,
-    validate_response_format,
-    validate_size_for_model,
-    validate_stream,
-    validate_watermark,
 )
 
 
@@ -33,22 +27,22 @@ class GenerationExecutionContext:
     """
 
     prompt: str
-    optimize_prompt_options: Optional[Dict[str, Any]]
+    optimize_prompt_options: dict[str, Any] | None
     size: str
     watermark: bool
     response_format: str
-    output_format: Optional[str]
+    output_format: str | None
     stream: bool
-    tools: Optional[List[Dict[str, Any]]]
+    tools: list[dict[str, Any]] | None
     request_count: int
     parallelism: int
     enable_auto_save: bool
-    save_path: Optional[str]
-    custom_name: Optional[str]
+    save_path: str | None
+    custom_name: str | None
 
 
 def build_generation_context(
-    arguments: Dict[str, Any], config: SeedreamConfig
+    arguments: dict[str, Any], config: SeedreamConfig
 ) -> GenerationExecutionContext:
     """从工具参数构建统一执行上下文，作为共享字段的集中校验点。
 
@@ -76,28 +70,27 @@ def build_generation_context(
     save_path = arguments.get("save_path")
     custom_name = arguments.get("custom_name")
 
-    validated_optimize_options = validate_optimize_prompt_options(
-        optimize_prompt_options, config.model_id
-    )
-
     size_value = config.default_size if raw_size is None else raw_size
-    validated_size = validate_size_for_model(size_value, config.model_id)
-
-    watermark = (
-        validate_watermark(watermark_value)
-        if watermark_value is not None
-        else config.default_watermark
+    watermark_for_validate = (
+        config.default_watermark if watermark_value is None else watermark_value
     )
 
-    validated_response_format = validate_response_format(response_format)
-    validated_output_format = validate_output_format(output_format, config.model_id)
-    validated_stream = validate_stream(stream, config.model_id)
-    validated_tools = validate_generation_tools(tools, config.model_id)
+    validated = validate_common_generation_params(
+        prompt=prompt,
+        optimize_prompt_options=optimize_prompt_options,
+        size=size_value,
+        watermark=watermark_for_validate,
+        response_format=response_format,
+        output_format=output_format,
+        stream=stream,
+        tools=tools,
+        model_id=config.model_id,
+    )
 
     request_count, parallelism = validate_parallel_generation_options(
         request_count=request_count,
         parallelism=parallelism_value,
-        stream=validated_stream,
+        stream=validated.stream,
         max_request_count=MAX_PARALLEL_REQUEST_COUNT,
     )
 
@@ -109,14 +102,14 @@ def build_generation_context(
         raise SeedreamValidationError("auto_save 必须是布尔值", field="auto_save", value=auto_save)
 
     return GenerationExecutionContext(
-        prompt=prompt,
-        optimize_prompt_options=validated_optimize_options,
-        size=validated_size,
-        watermark=watermark,
-        response_format=validated_response_format,
-        output_format=validated_output_format,
-        stream=validated_stream,
-        tools=validated_tools,
+        prompt=validated.prompt,
+        optimize_prompt_options=validated.optimize_prompt_options,
+        size=validated.size,
+        watermark=validated.watermark,
+        response_format=validated.response_format,
+        output_format=validated.output_format,
+        stream=validated.stream,
+        tools=validated.tools,
         request_count=request_count,
         parallelism=parallelism,
         enable_auto_save=enable_auto_save,

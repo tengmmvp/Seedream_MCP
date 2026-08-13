@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult, TextContent
 
@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 
 def _format_file_info(
     display_path: str, stat_path: Path, show_details: bool
-) -> tuple[str, Dict[str, Any]]:
+) -> tuple[str, dict[str, Any]]:
     """格式化文件信息，返回展示文本与结构化详情字段。
 
     show_details 为真时读取文件大小与修改时间，文本格式为 "路径 | 大小 | 修改时间"，
@@ -81,20 +81,20 @@ def _build_browse_structured_result(
     limit: int,
     offset: int,
     show_details: bool,
-    format_filter: Optional[List[str]],
+    format_filter: list[str] | None,
     success: bool = True,
-    images: Optional[List[Dict[str, Any]]] = None,
-    total_count: Optional[int] = None,
-    has_more: Optional[bool] = None,
-    next_offset: Optional[int] = None,
-    error: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    images: list[dict[str, Any]] | None = None,
+    total_count: int | None = None,
+    has_more: bool | None = None,
+    next_offset: int | None = None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """集中构建 browse_images 工具的 structuredContent，字段集与 BrowseImagesStructuredOutput 对齐。
 
     成功、空结果与失败三分支共用此构建，避免手工内联字典造成的字段漂移。失败分支以默认值
     填充非关键字段，符合 BrowseImagesStructuredOutput 全部字段可选的声明。
     """
-    structured: Dict[str, Any] = {
+    structured: dict[str, Any] = {
         "tool": "seedream_browse_images",
         "success": success,
         "status": status,
@@ -128,7 +128,7 @@ def _build_browse_error(
     limit: int,
     offset: int,
     show_details: bool,
-    format_filter: Optional[List[str]],
+    format_filter: list[str] | None,
     message: str,
     status: str = "failed",
 ) -> CallToolResult:
@@ -163,7 +163,7 @@ def _scan_and_filter_directory(
     resolved_dir: Path,
     recursive: bool,
     max_depth: int,
-    format_filter: Optional[List[str]],
+    format_filter: list[str] | None,
     remaining: int,
     resolved_roots: list[Path],
     seen_images: set[Path],
@@ -254,8 +254,8 @@ def _build_display_entries(
 
 
 async def handle_browse_images(
-    arguments: Dict[str, Any],
-    ctx: Optional["Context[Any, Any, Any]"] = None,
+    arguments: dict[str, Any],
+    ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """处理图片浏览请求，扫描工作区内指定目录的图片文件并分页返回。
 
@@ -300,8 +300,8 @@ async def handle_browse_images(
 
 
 async def _handle_browse_images_impl(
-    arguments: Dict[str, Any],
-    ctx: Optional["Context[Any, Any, Any]"] = None,
+    arguments: dict[str, Any],
+    ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """浏览工具主逻辑，由 ``handle_browse_images`` 外层兜底包裹。"""
     directory = arguments.get("directory") or "."

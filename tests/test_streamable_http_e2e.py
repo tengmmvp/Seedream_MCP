@@ -65,14 +65,15 @@ class _LifespanManager:
 def _build_app(auth_token: str, *, body_limit: int = _MAX_BODY) -> Any:
     """复刻 _run_streamable_http 的中间件装配顺序。
 
-    Starlette add_middleware 经 insert(0) 使后添加者为更外层：健康检查最外，其后 Bearer
-    鉴权，请求体上限居中，应用在内。鉴权与请求体中间件均在物料化前阻断，故无论鉴权
-    与否都不会被完整读入内存。
+    Starlette add_middleware 经 insert(0) 使后添加者为更外层：健康检查最外，其后请求体
+    上限，再后 Bearer 鉴权，应用在内。请求体上限位于鉴权之外，故声明超长 Content-Length
+    的请求在鉴权前即被 413 早拒；已认证 chunked 请求由 receive 字节累计保护，未授权
+    chunked 请求不读 body 直接 401，其体积限制依赖 uvicorn 或反向代理层。
     """
     app = server.mcp.streamable_http_app()
-    app.add_middleware(server._LimitRequestBodyMiddleware, max_body_size=body_limit)
     if auth_token:
         app.add_middleware(server._BearerTokenAuthMiddleware, expected_token=auth_token)
+    app.add_middleware(server._LimitRequestBodyMiddleware, max_body_size=body_limit)
     app.add_middleware(server._HealthCheckMiddleware)
     return app
 
@@ -165,7 +166,7 @@ async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) ->
 
 
 async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> None:
-    """合法令牌放行后，请求体超 Content-Length 上限由请求体中间件返回 413。
+    """请求体超 Content-Length 上限由请求体中间件在鉴权前返回 413。
 
     生产阈值为 100MB（_MAX_STREAMABLE_HTTP_BODY），单值由 test_request_body_limit 覆盖；
     此处装配小阈值以真实发送超限字节体验证全栈集成，确认中间件在 ASGI 栈内短路。

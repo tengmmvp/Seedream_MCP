@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import ClassVar, List, Optional, Union
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -97,7 +97,7 @@ class _PromptAndOptimizeInput(BaseModel):
         max_length=100000,
         description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
     )
-    optimize_prompt_options: Optional[OptimizePromptOptions] = Field(
+    optimize_prompt_options: OptimizePromptOptions | None = Field(
         default=None,
         description="提示词优化配置，仅支持 standard 或 fast。",
     )
@@ -115,7 +115,7 @@ class _SingleImageInput(BaseModel):
 class _MultiImageInput(BaseModel):
     """多图输入参数。"""
 
-    image: List[str] = Field(
+    image: list[str] = Field(
         ...,
         min_length=2,
         max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
@@ -130,7 +130,7 @@ class _MultiImageInput(BaseModel):
 class _SequentialImageInput(BaseModel):
     """组图参考图输入参数。"""
 
-    image: Optional[List[str]] = Field(
+    image: list[str] | None = Field(
         default=None,
         description=(
             f"可选的参考图片，支持 URL、本地路径，单张或多张，"
@@ -142,11 +142,11 @@ class _SequentialImageInput(BaseModel):
 class _SizeAndWatermarkInput(BaseModel):
     """尺寸与水印参数。"""
 
-    size: Optional[str] = Field(
+    size: str | None = Field(
         default=None,
         description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
     )
-    watermark: Optional[bool] = Field(
+    watermark: bool | None = Field(
         default=None,
         description="是否添加水印；未提供时沿用全局默认值。",
     )
@@ -170,7 +170,7 @@ class _ResponseAndExecutionInput(BaseModel):
         default=ResponseFormat.URL,
         description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
     )
-    output_format: Optional[OutputFormat] = Field(
+    output_format: OutputFormat | None = Field(
         default=None,
         description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
     )
@@ -178,7 +178,7 @@ class _ResponseAndExecutionInput(BaseModel):
         default=False,
         description="是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。",
     )
-    tools: Optional[List[GenerationTool]] = Field(
+    tools: list[GenerationTool] | None = Field(
         default=None,
         description="模型工具配置，仅 5.0 Lite 支持联网搜索（web_search）。",
     )
@@ -188,22 +188,22 @@ class _ResponseAndExecutionInput(BaseModel):
         le=MAX_PARALLEL_REQUEST_COUNT,
         description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
     )
-    parallelism: Optional[int] = Field(
+    parallelism: int | None = Field(
         default=None,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
         description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
     )
-    auto_save: Optional[bool] = Field(
+    auto_save: bool | None = Field(
         default=None,
         description="是否自动保存到本地；未提供时遵循全局配置。",
     )
-    save_path: Optional[str] = Field(
+    save_path: str | None = Field(
         default=None,
         max_length=1024,
         description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
     )
-    custom_name: Optional[str] = Field(
+    custom_name: str | None = Field(
         default=None,
         max_length=255,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
@@ -224,7 +224,7 @@ class BaseGenerationInput(BaseModel):
 
     @field_validator("save_path", "custom_name", check_fields=False)
     @classmethod
-    def validate_non_empty(cls, value: Optional[str]) -> Optional[str]:
+    def validate_non_empty(cls, value: str | None) -> str | None:
         """校验字符串字段非空。
 
         Args:
@@ -334,9 +334,7 @@ class SequentialGenerationInput(
 
     @field_validator("image", mode="before")
     @classmethod
-    def validate_reference_images(
-        cls, value: Optional[Union[str, List[str]]]
-    ) -> Optional[List[str]]:
+    def validate_reference_images(cls, value: str | list[str] | None) -> list[str] | None:
         """校验参考图片列表。
 
         Args:
@@ -360,7 +358,7 @@ class SequentialGenerationInput(
         if len(images) < 1 or len(images) > SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES:
             raise ValueError(f"参考图片数量需在 1-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 之间")
 
-        normalized: List[str] = []
+        normalized: list[str] = []
         for item in images:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError("image 列表中的每一项都必须是非空字符串")
@@ -400,7 +398,7 @@ class BrowseImagesInput(BaseModel):
         validate_assignment=True,
     )
 
-    directory: Optional[str] = Field(
+    directory: str | None = Field(
         default=None,
         description="要浏览的目录路径，默认使用当前工作目录。",
     )
@@ -427,7 +425,7 @@ class BrowseImagesInput(BaseModel):
         description="分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
         "上限防止无界偏移触发全量扫描。",
     )
-    format_filter: Optional[List[str]] = Field(
+    format_filter: list[str] | None = Field(
         default=None,
         description="需要过滤的图片后缀列表，如 ['.jpeg', '.png']。",
     )
@@ -438,7 +436,7 @@ class BrowseImagesInput(BaseModel):
 
     @field_validator("directory")
     @classmethod
-    def validate_directory(cls, value: Optional[str]) -> Optional[str]:
+    def validate_directory(cls, value: str | None) -> str | None:
         """校验目录路径。
 
         Args:
@@ -459,7 +457,7 @@ class BrowseImagesInput(BaseModel):
 
     @field_validator("format_filter")
     @classmethod
-    def normalize_suffixes(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+    def normalize_suffixes(cls, value: list[str] | None) -> list[str] | None:
         """规范化文件后缀列表。
 
         Args:

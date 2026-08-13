@@ -21,18 +21,10 @@ from seedream_mcp.utils.errors import (
 )
 
 
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """屏蔽退避 sleep，避免测试因指数退避真实等待。"""
-
-    async def _sleep(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(asyncio, "sleep", _sleep)
-
-
-async def test_stream_retries_on_429_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_retries_on_429_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """429 限流经流式分支退避重试，首次失败后第二次成功。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -59,9 +51,10 @@ async def test_stream_retries_on_429_then_succeeds(monkeypatch: pytest.MonkeyPat
     assert result["success"] is True
 
 
-async def test_stream_retries_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_retries_on_5xx_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """5xx 服务端错误经流式分支退避重试，首次失败后第二次成功。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -90,9 +83,9 @@ async def test_stream_retries_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyPat
 
 async def test_stream_timeout_retried_then_mapped_to_timeout_error(
     monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
 ) -> None:
     """流式分支 httpx 超时按 max_retries 重试用尽后映射为 SeedreamTimeoutError。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=1)
     calls = 0
 
@@ -120,9 +113,9 @@ async def test_stream_timeout_retried_then_mapped_to_timeout_error(
 
 async def test_stream_network_error_retried_then_mapped_to_network_error(
     monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
 ) -> None:
     """流式分支 httpx.RequestError 重试用尽后映射为 SeedreamNetworkError。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=1)
     calls = 0
 

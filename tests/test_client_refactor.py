@@ -151,7 +151,9 @@ def test_public_generation_methods_keep_expected_parameter_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_text_to_image_log_does_not_include_prompt_plaintext(monkeypatch) -> None:
+async def test_text_to_image_log_does_not_include_prompt_plaintext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = SeedreamClient(_build_config())
     fake_logger = FakeLogger()
     monkeypatch.setattr(client, "logger", fake_logger)

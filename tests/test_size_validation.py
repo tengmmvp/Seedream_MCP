@@ -114,10 +114,10 @@ def test_validate_size_for_model_rejects_seedream_50_pro_non_multiple_of_16() ->
         validate_size_for_model("1300x732", "doubao-seedream-5-0-pro-260628")
 
 
-def test_validate_image_url_rejects_oversized_data_uri_before_decode() -> None:
+def test_validate_image_input_rejects_oversized_data_uri_before_decode() -> None:
     """巨型 base64 在解码前按文本长度估算拒绝，避免先解码触发内存放大。"""
-    from seedream_mcp.utils.validation import MAX_IMAGE_FILE_SIZE, validate_image_url
+    from seedream_mcp.utils.image_validation import MAX_IMAGE_FILE_SIZE, validate_image_input
 
     huge_b64 = "A" * (MAX_IMAGE_FILE_SIZE * 4 // 3 + 100)
     with pytest.raises(SeedreamValidationError, match="数据过大"):
-        validate_image_url(f"data:image/png;base64,{huge_b64}")
+        validate_image_input(f"data:image/png;base64,{huge_b64}")

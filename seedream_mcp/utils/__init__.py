@@ -26,7 +26,7 @@ __all__ = [
     "SeedreamAPIError",
     # 数据验证函数
     "validate_prompt",
-    "validate_image_url",
+    "validate_image_input",
     "validate_size",
     # 日志配置
     "setup_logging",
@@ -57,7 +57,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "SeedreamAPIError": (".errors", "SeedreamAPIError"),
     # 数据验证模块
     "validate_prompt": (".validation", "validate_prompt"),
-    "validate_image_url": (".validation", "validate_image_url"),
+    "validate_image_input": (".image_validation", "validate_image_input"),
     "validate_size": (".validation", "validate_size"),
     # 日志管理模块
     "setup_logging": (".logging", "setup_logging"),

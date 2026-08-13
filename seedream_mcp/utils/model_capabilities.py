@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 # 参考图上限常量
 SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10  # 5.0 Pro 最多 10 张参考图
@@ -59,9 +58,9 @@ class ModelCapabilities:
     supports_stream: bool
     max_reference_images: int
     allowed_presets: frozenset[str]
-    min_size_pixels: Optional[int]
-    max_size_pixels: Optional[int]
-    size_pixel_multiple: Optional[int]
+    min_size_pixels: int | None
+    max_size_pixels: int | None
+    size_pixel_multiple: int | None
     supports_fast_optimize_prompt: bool = True
     supports_sequential_generation: bool = True
 

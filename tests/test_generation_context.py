@@ -166,7 +166,7 @@ def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None
         )
     ]
 
-    updated = update_result_with_auto_save(result, auto_save_results, "url")
+    updated = update_result_with_auto_save(result, auto_save_results, [1])
 
     failed_item = updated["data"][0]
     success_item = updated["data"][1]
@@ -201,7 +201,7 @@ def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() 
     )
 
     assert result["success"] is True
-    assert result["status"] == "partial_completed"
+    assert result["status"] == "partial"
     assert result["batch"]["request_count"] == 3
     assert result["batch"]["success_requests"] == 2
     assert result["batch"]["failed_requests"] == 1

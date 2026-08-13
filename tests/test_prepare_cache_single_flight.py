@@ -110,3 +110,102 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     # task 完成后 _prepare_inflight 已清空、缓存写入一条结果
     assert len(client._prepare_inflight) == 0
     assert len(client._prepare_cache) == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """等待者被取消时仅退出自身；共享的 inflight task 继续运行至完成并写入缓存。
+
+    single-flight 取消隔离契约的另一侧：等待者 await asyncio.shield(inflight) 被取消时，
+    shield 仅取消其自身的外层 await，底层共享 task 不受连带取消，继续运行直至完成，
+    _prepare_inflight 由 task 完成时的 finally 清理，缓存正常写入。两个并发调用经
+    ensure_future 同时启动；fake 置位事件后，FIFO 调度下 creator 先创建 inflight 并
+    await task，waiter 随后命中 inflight 并 await 同一 task。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    roots_key = ("test-roots",)
+
+    call_count = 0
+    inner_started = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        inner_started.set()
+        await asyncio.sleep(0.1)
+        return f"prepared:{image}"
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    image_url = "https://example.com/ref.png"
+    creator = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+
+    # 等待底层 task 启动：creator 先创建 inflight 并 await task，waiter 随后命中 inflight
+    # 并 await 同一 task，最后底层 task 执行 fake 置位事件。
+    await inner_started.wait()
+    assert len(client._prepare_inflight) == 1
+
+    # 取消等待者：shield 隔离使底层 inflight task 不受连带取消
+    waiter.cancel()
+
+    done, pending = await asyncio.wait({creator, waiter})
+    assert pending == set()
+    assert waiter.cancelled()
+
+    # 创建者共享同一 inflight task，仍拿到正确结果；底层仅调用一次
+    assert creator.result() == "prepared:https://example.com/ref.png"
+    assert call_count == 1
+    # inflight 完成后已清空，结果写入缓存
+    assert len(client._prepare_inflight) == 0
+    assert len(client._prepare_cache) == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_image_input_error_propagates_to_all_sharers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_prepare_and_cache 抛错时所有共享同一 inflight 的等待者收到该异常，且不写入缓存。
+
+    single-flight 错误传播契约：底层 prepare_image_input 抛错时，共享同一 inflight task
+    的创建者与等待者均经 asyncio.shield 收到该异常；_prepare_inflight 由 task 完成时的
+    finally 清空；因异常在缓存写入前抛出，_prepare_cache 不写入任何条目。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    roots_key = ("test-roots",)
+
+    call_count = 0
+    inner_started = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal call_count
+        del image
+        call_count += 1
+        inner_started.set()
+        await asyncio.sleep(0.05)
+        raise ValueError("prepare failed")
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    image_url = "https://example.com/ref.png"
+    creator = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+
+    await inner_started.wait()
+    # 两者 await 同一 inflight task，task 抛错时均收到该异常
+    done, pending = await asyncio.wait({creator, waiter})
+    assert pending == set()
+
+    for task in (creator, waiter):
+        exc = task.exception()
+        assert isinstance(exc, ValueError)
+        assert "prepare failed" in str(exc)
+
+    # 底层仅调用一次；task 完成后 inflight 已清空；出错不写入缓存
+    assert call_count == 1
+    assert len(client._prepare_inflight) == 0
+    assert len(client._prepare_cache) == 0

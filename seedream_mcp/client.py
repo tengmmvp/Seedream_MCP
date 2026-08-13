@@ -16,7 +16,7 @@ import os
 import random
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Sequence
 
 # 第三方库导入
 import httpx
@@ -33,42 +33,22 @@ from .utils.errors import (
 )
 from .utils.logging import get_logger, log_function_call
 from .utils.model_capabilities import get_model_capabilities
-from .utils.path_utils import is_path_within_any_base
 from .utils.validation import (
+    ValidatedCommonParams,
     get_max_reference_images,
     resolve_sequential_max_images,
-    validate_generation_tools,
+    validate_common_generation_params,
     validate_max_images,
-    validate_optimize_prompt_options,
-    validate_output_format,
-    validate_prompt,
-    validate_response_format,
     validate_sequential_image_limit,
-    validate_size_for_model,
-    validate_stream,
-    validate_watermark,
 )
 from .utils.sse_parser import is_sse_response, parse_sse_response
 
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
-_PrepareCacheKey = Tuple[str, Tuple[str, ...], Tuple[float, int]]
+_PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 
 # 指数退避单次等待上限，避免 2**n 增长过快导致单次 sleep 过久；Retry-After 路径已由
 # parse_retry_after 限制在 [1, 300]，不共用此上限
 _MAX_BACKOFF_SECONDS = 60
-
-
-class _ValidatedGenerationParams(NamedTuple):
-    """生成类工具公共参数的校验结果，替代裸 8 元组以提升可读性与类型安全。"""
-
-    prompt: str
-    optimize_prompt_options: Optional[Dict[str, Any]]
-    size: str
-    watermark: bool
-    response_format: str
-    output_format: Optional[str]
-    stream: bool
-    tools: Optional[List[Dict[str, Any]]]
 
 
 class SeedreamClient:
@@ -83,7 +63,7 @@ class SeedreamClient:
         logger: 日志记录器实例
     """
 
-    def __init__(self, config: Optional[SeedreamConfig] = None):
+    def __init__(self, config: SeedreamConfig | None = None):
         """
         初始化 Seedream API 客户端
 
@@ -92,9 +72,9 @@ class SeedreamClient:
         """
         self.config = config or get_active_config()
         self.logger = get_logger(__name__)
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
-        self._timeout: Optional[httpx.Timeout] = None
+        self._timeout: httpx.Timeout | None = None
         self._image_prepare_concurrency = self.config.image_prepare_concurrency
         # 预处理结果按输入原文缓存，避免并行请求对同一参考图重复读取与编码；
         # 命中时移至末尾实现 LRU，超限淘汰最久未用条目
@@ -137,24 +117,24 @@ class SeedreamClient:
         size: str,
         watermark: bool,
         response_format: str,
-        output_format: Optional[str],
+        output_format: str | None,
         stream: bool,
-        tools: Optional[List[Any]],
-        validated_opts: Optional[Dict[str, Any]],
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        tools: list[Any] | None,
+        validated_opts: dict[str, Any] | None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """构建各生成方法共享的请求参数基础字典。
 
         size/watermark/response_format/output_format/stream/tools 的组装逻辑在四个生成
         方法中完全相同，集中于此避免漂移；方法特有的字段如参考图、组图选项等通过 extra 并入。
         """
-        request_data: Dict[str, Any] = {
+        request_data: dict[str, Any] = {
             "model": self.config.model_id,
             "prompt": prompt,
         }
         if validated_opts:
             request_data["optimize_prompt_options"] = validated_opts
-        update_payload: Dict[str, Any] = {
+        update_payload: dict[str, Any] = {
             "size": size,
             "watermark": watermark,
             "response_format": response_format,
@@ -174,14 +154,14 @@ class SeedreamClient:
     async def text_to_image(
         self,
         prompt: str,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
+        optimize_prompt_options: dict[str, Any] | None = None,
         size: str = "2K",
         watermark: bool = False,
         response_format: str = "url",
-        output_format: Optional[str] = None,
+        output_format: str | None = None,
         stream: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """
         文生图功能
 
@@ -255,15 +235,15 @@ class SeedreamClient:
     async def image_to_image(
         self,
         prompt: str,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
-        image: Optional[str] = None,
+        optimize_prompt_options: dict[str, Any] | None = None,
+        image: str | None = None,
         size: str = "2K",
         watermark: bool = False,
         response_format: str = "url",
-        output_format: Optional[str] = None,
+        output_format: str | None = None,
         stream: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """
         图文生图功能
 
@@ -342,15 +322,15 @@ class SeedreamClient:
     async def multi_image_fusion(
         self,
         prompt: str,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
-        image: Optional[List[str]] = None,
+        optimize_prompt_options: dict[str, Any] | None = None,
+        image: list[str] | None = None,
         size: str = "2K",
         watermark: bool = False,
         response_format: str = "url",
-        output_format: Optional[str] = None,
+        output_format: str | None = None,
         stream: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """
         多图融合功能
 
@@ -433,16 +413,16 @@ class SeedreamClient:
     async def sequential_generation(
         self,
         prompt: str,
-        optimize_prompt_options: Optional[Dict[str, Any]] = None,
-        image: Optional[Union[str, Sequence[str]]] = None,
+        optimize_prompt_options: dict[str, Any] | None = None,
+        image: str | Sequence[str] | None = None,
         size: str = "2K",
         watermark: bool = False,
-        max_images: Optional[int] = None,
+        max_images: int | None = None,
         response_format: str = "url",
-        output_format: Optional[str] = None,
+        output_format: str | None = None,
         stream: bool = False,
-        tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """
         组图输出功能，仅 5.0/5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持组图
 
@@ -501,7 +481,7 @@ class SeedreamClient:
             tools=tools,
         )
 
-        processed_image: Optional[Union[str, List[str]]] = None
+        processed_image: str | list[str] | None = None
         reference_images = None
         if image is not None:
             if isinstance(image, str):
@@ -545,7 +525,7 @@ class SeedreamClient:
                 lambda: size,
             )
 
-            extra: Dict[str, Any] = {
+            extra: dict[str, Any] = {
                 "sequential_image_generation": "auto",
                 "sequential_image_generation_options": {"max_images": resolved_max_images},
             }
@@ -576,38 +556,30 @@ class SeedreamClient:
         self,
         *,
         prompt: str,
-        optimize_prompt_options: Optional[Dict[str, Any]],
+        optimize_prompt_options: dict[str, Any] | None,
         size: str,
         watermark: bool,
         response_format: str,
-        output_format: Optional[str],
+        output_format: str | None,
         stream: bool,
-        tools: Optional[List[Dict[str, Any]]],
-    ) -> _ValidatedGenerationParams:
+        tools: list[dict[str, Any]] | None,
+    ) -> ValidatedCommonParams:
         """集中校验生成类工具的公共参数并返回校验后的各值。
 
-        文生图、图文生图、多图融合与组图输出共用同一套参数校验，抽取此处避免四处重复。
+        委托 utils.validation.validate_common_generation_params 单一入口完成公共参数校验，
+        与 context.build_generation_context 共享同一校验逻辑，消除两处分散调用的漂移风险。
         各方法特有的图片数量与序列校验仍在各自方法内执行。
         """
-        prompt = validate_prompt(prompt)
-        validated_opts = validate_optimize_prompt_options(
-            optimize_prompt_options, self.config.model_id
-        )
-        size = validate_size_for_model(size, self.config.model_id)
-        watermark = validate_watermark(watermark)
-        response_format = validate_response_format(response_format)
-        output_format = validate_output_format(output_format, self.config.model_id)
-        stream = validate_stream(stream, self.config.model_id)
-        tools = validate_generation_tools(tools, self.config.model_id)
-        return _ValidatedGenerationParams(
+        return validate_common_generation_params(
             prompt=prompt,
-            optimize_prompt_options=validated_opts,
+            optimize_prompt_options=optimize_prompt_options,
             size=size,
             watermark=watermark,
             response_format=response_format,
             output_format=output_format,
             stream=stream,
             tools=tools,
+            model_id=self.config.model_id,
         )
 
     async def close(self) -> None:
@@ -673,7 +645,7 @@ class SeedreamClient:
                         self._client = None
                         raise SeedreamAPIError(f"HTTP 客户端初始化失败: {str(e)}") from e
 
-    def _get_headers(self) -> Dict[str, str]:
+    def _get_headers(self) -> dict[str, str]:
         """
         获取 API 请求头
 
@@ -708,7 +680,7 @@ class SeedreamClient:
         return f"len={len(prompt)}, sha256={digest}"
 
     @staticmethod
-    def _normalize_single_image(image: Optional[str], *, field_name: str = "image") -> str:
+    def _normalize_single_image(image: str | None, *, field_name: str = "image") -> str:
         """校验并规范化单张图片输入，field_name 用于定位序列中的具体元素。"""
         if not isinstance(image, str):
             raise SeedreamValidationError(
@@ -724,12 +696,12 @@ class SeedreamClient:
 
     @staticmethod
     def _normalize_image_sequence(
-        images: Optional[Sequence[str]],
+        images: Sequence[str] | None,
         *,
         min_count: int,
         max_count: int,
         field_name: str,
-    ) -> List[str]:
+    ) -> list[str]:
         """
         校验并规范化图片列表输入
         """
@@ -740,7 +712,7 @@ class SeedreamClient:
                 value=images,
             )
 
-        normalized_images: List[str] = []
+        normalized_images: list[str] = []
         for index, image in enumerate(images, start=1):
             element_field = f"{field_name}[{index}]"
             normalized_images.append(
@@ -781,14 +753,16 @@ class SeedreamClient:
         if not isinstance(image_value, str):
             return f"<{type(image_value).__name__}>"
 
-        value = image_value.strip()
-        if value.startswith(("http://", "https://")):
+        # 仅取前缀判定类型，避免对大 base64 data URI 做全量 strip/lower 拷贝；
+        # image 经上游 _normalize_single_image 已去除首尾空白，前缀判断即可
+        prefix = image_value[:16].lower()
+        if prefix.startswith(("http://", "https://")):
             return "<image_url>"
-        if value.lower().startswith("data:image/"):
-            return f"<data_uri:{len(value)} chars>"
+        if prefix.startswith("data:image/"):
+            return f"<data_uri:{len(image_value)} chars>"
         return "<local_image_path>"
 
-    def _sanitize_request_for_logging(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _sanitize_request_for_logging(self, request_data: dict[str, Any]) -> dict[str, Any]:
         """对请求体做日志脱敏：浅拷贝后替换 prompt 与 image 字段，其余原样引用。"""
         safe_data = dict(request_data)
         prompt = safe_data.get("prompt")
@@ -819,7 +793,7 @@ class SeedreamClient:
         attempt: int,
         total_attempts: int,
         url: str,
-        safe_request_data: Dict[str, Any],
+        safe_request_data: dict[str, Any],
     ) -> None:
         """
         记录单次请求尝试日志。
@@ -833,7 +807,7 @@ class SeedreamClient:
         self.logger.debug("请求 URL: {}", url)
         self.logger.debug("请求数据(脱敏): {}", safe_request_data)
 
-    def _build_api_result(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_api_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         """统一归一化 API 返回结果结构。
 
         success 仅代表 HTTP 层成功，即已收到 200 响应；body 级的部分失败或空数据
@@ -873,14 +847,14 @@ class SeedreamClient:
         }
 
     @staticmethod
-    def _retry_after_or_none(status_code: int, headers: Any) -> Optional[float]:
+    def _retry_after_or_none(status_code: int, headers: Any) -> float | None:
         """对可重试状态码（429/5xx）解析 Retry-After，其余返回 None。"""
         if status_code == 429 or status_code >= 500:
             return parse_retry_after(headers)
         return None
 
     @staticmethod
-    def _serialize_request(request_data: Dict[str, Any]) -> bytes:
+    def _serialize_request(request_data: dict[str, Any]) -> bytes:
         """将请求体序列化为 UTF-8 bytes，供 httpx 直接发送以跳过事件循环内编码。"""
         return json.dumps(request_data).encode("utf-8")
 
@@ -888,7 +862,7 @@ class SeedreamClient:
         self,
         status_code: int,
         headers: Any,
-        error_data: Dict[str, Any],
+        error_data: dict[str, Any],
     ) -> None:
         """按状态码与错误体装配并抛出统一 API 异常，标准与流式路径共用。"""
         retry_after = self._retry_after_or_none(status_code, headers)
@@ -924,7 +898,7 @@ class SeedreamClient:
         url: str,
         request_body: bytes,
         request_timeout: httpx.Timeout,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         发送流式请求并解析响应。
         """
@@ -960,7 +934,7 @@ class SeedreamClient:
         url: str,
         request_body: bytes,
         request_timeout: httpx.Timeout,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         发送非流式请求并解析响应。
         """
@@ -977,7 +951,7 @@ class SeedreamClient:
             raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
         return self._build_api_result(payload)
 
-    async def _call_api(self, endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         """
         调用 Seedream API
 
@@ -998,7 +972,7 @@ class SeedreamClient:
 
         is_stream = bool(request_data.get("stream"))
         for attempt in range(total_attempts):
-            pending_retry_after: Optional[float] = None
+            pending_retry_after: float | None = None
             try:
                 self._log_request_attempt(
                     endpoint=endpoint,
@@ -1092,30 +1066,58 @@ class SeedreamClient:
         raise SeedreamAPIError(f"{endpoint} API 调用意外结束")
 
     @staticmethod
-    def _local_file_signature(image: str, workspace_roots: Tuple[str, ...]) -> Tuple[float, int]:
+    def _local_file_signature(image: str, workspace_roots: tuple[str, ...]) -> tuple[float, int]:
         """本地文件返回 (mtime, size) 参与缓存键，内容替换后失效避免返回陈旧编码；
         URL 与 data URI 内容由字符串决定、无法定位文件时返回 (0.0, 0)。相对路径按
-        workspace_roots 解析后再 stat，与 utils.image_input._prepare_local_image 的实际读取路径一致。"""
+        workspace_roots 解析后再 stat，与 utils.image_input._prepare_local_image 的实际读取路径一致。
+
+        base 一次性 resolve 并在循环与复核间复用，避免经 is_path_within_any_base 对每个
+        base 重复解析，降低网络挂载工作区下批量参考图预处理的 resolve 开销。
+        """
         lowered = image.lower()
         if lowered.startswith(("http://", "https://", "data:image/")):
             return (0.0, 0)
+        # 预 resolve 所有 base 一次，供下方多次越界判定复用，忽略 resolve 失败的根
+        resolved_bases: list[Path] = []
+        for root in workspace_roots:
+            try:
+                resolved_bases.append(Path(root).resolve())
+            except (OSError, ValueError):
+                continue
+
+        def _within(candidate: Path) -> bool:
+            """判定候选路径是否位于任一已 resolve 的 base 内，含 UNC 拒绝。"""
+            cand_str = str(candidate).lstrip()
+            if cand_str.startswith("\\\\") or cand_str.startswith("//"):
+                return False
+            try:
+                cand_resolved = candidate.resolve()
+            except (OSError, ValueError):
+                return False
+            for base in resolved_bases:
+                try:
+                    cand_resolved.relative_to(base)
+                    return True
+                except ValueError:
+                    continue
+            return False
+
         # 绝对路径直接作为候选；相对路径按工作区根解析，避免 CWD 与工作区不一致时 stat 错误文件。
         # 候选路径在 exists/stat 前统一做越界守卫，避免对工作区外文件成为存在性 oracle
-        base_dirs = tuple(Path(r) for r in workspace_roots)
-        candidate: Optional[Path] = None
+        candidate: Path | None = None
         if os.path.isabs(image):
             candidate = Path(image)
         else:
-            for root in base_dirs:
-                resolved = root / image
-                if not is_path_within_any_base(resolved, base_dirs):
+            for base_root in resolved_bases:
+                resolved = base_root / image
+                if not _within(resolved):
                     continue
                 if resolved.exists():
                     candidate = resolved
                     break
         if candidate is None:
             return (0.0, 0)
-        if not is_path_within_any_base(candidate, base_dirs):
+        if not _within(candidate):
             return (0.0, 0)
         try:
             stat_result = os.stat(candidate)
@@ -1124,7 +1126,7 @@ class SeedreamClient:
         return (stat_result.st_mtime, stat_result.st_size)
 
     async def _prepare_image_input(
-        self, image: str, _roots_key: Optional[Tuple[str, ...]] = None
+        self, image: str, _roots_key: tuple[str, ...] | None = None
     ) -> str:
         """
         准备图像输入数据。
@@ -1141,7 +1143,7 @@ class SeedreamClient:
             _roots_key = tuple(str(r) for r in get_workspace_roots())
         # URL/data-URI 无本地文件 I/O，直接用空签名短路，避免缓存命中也分派线程；
         # 本地文件签名含同步 stat/resolve，移至工作线程避免网络挂载工作区下阻塞事件循环
-        signature: Tuple[float, int]
+        signature: tuple[float, int]
         if image.lower().startswith(("http://", "https://", "data:image/")):
             signature = (0.0, 0)
         else:
@@ -1192,6 +1194,16 @@ class SeedreamClient:
         条目并同步扣减字节计数，保持计数与缓存内容一致。
         """
         size = len(prepared)
+        # 单条结果自身超出字节上限时永不可缓存，直接跳过避免无意义清空整个缓存
+        if size > self._prepare_cache_max_bytes:
+            return
+        # 字节超限时先按 LRU 淘汰至可容纳，而非直接拒绝，避免大图场景缓存被早期
+        # 条目占满后新条目无法入场，提升高频复用少量大参考图的命中率
+        while (
+            self._prepare_cache_bytes + size > self._prepare_cache_max_bytes and self._prepare_cache
+        ):
+            _, evicted = self._prepare_cache.popitem(last=False)
+            self._prepare_cache_bytes -= len(evicted)
         if self._prepare_cache_bytes + size > self._prepare_cache_max_bytes:
             return
         self._prepare_cache[cache_key] = prepared
@@ -1200,7 +1212,7 @@ class SeedreamClient:
             _, evicted = self._prepare_cache.popitem(last=False)
             self._prepare_cache_bytes -= len(evicted)
 
-    async def _prepare_images_in_parallel(self, images: Sequence[str]) -> List[str]:
+    async def _prepare_images_in_parallel(self, images: Sequence[str]) -> list[str]:
         """
         受限并发预处理多张图片
         """

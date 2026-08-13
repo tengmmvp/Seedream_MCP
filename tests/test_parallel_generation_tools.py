@@ -92,7 +92,7 @@ async def test_generation_handlers_support_parallel_requests(
 async def test_parallel_requests_partial_failure_recorded_in_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N 个并行请求中单个失败：其余成功完成，异常进入 batch.errors，status 为 partial_completed。"""
+    """N 个并行请求中单个失败：其余成功完成，异常进入 batch.errors，status 为 partial。"""
     call_count = 0
 
     async def fake_method(self, **kwargs):  # noqa: ANN001
@@ -124,7 +124,7 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
     # 部分成功：有任一请求成功即 success=True，isError 为 False
     assert result.isError is False
     assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "partial_completed"
+    assert result.structuredContent["status"] == "partial"
     batch = result.structuredContent["batch"]
     assert batch["request_count"] == 3
     assert batch["success_requests"] == 2

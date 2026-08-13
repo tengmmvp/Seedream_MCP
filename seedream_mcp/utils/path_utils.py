@@ -12,7 +12,7 @@ import os
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Any, AsyncIterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, AsyncIterator, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -20,7 +20,7 @@ from urllib.request import url2pathname
 from .errors import SeedreamConfigError, SeedreamValidationError
 from .formats import SUPPORTED_IMAGE_EXTENSIONS
 from .logging import get_logger
-from .validation import validate_image_url
+from .image_validation import validate_image_input
 
 logger = get_logger(__name__)
 
@@ -49,7 +49,7 @@ def resolve_env_workspace_root() -> Path:
     return Path.cwd().resolve()
 
 
-def _configured_workspace_root() -> Optional[str]:
+def _configured_workspace_root() -> str | None:
     """返回已配置的工作区根目录原始值，未配置返回 None。"""
     try:
         from ..config import get_active_config
@@ -64,7 +64,7 @@ def _configured_workspace_root() -> Optional[str]:
     return env_root.strip() if env_root else None
 
 
-def get_workspace_roots() -> List[Path]:
+def get_workspace_roots() -> list[Path]:
     """获取当前请求生效的工作区根目录列表。
 
     优先使用 MCP Roots 作为文件访问边界，无 Roots 时回退环境变量配置。
@@ -83,7 +83,7 @@ def get_workspace_root() -> Path:
     return workspace_roots[0]
 
 
-async def _resolve_workspace_roots_from_context(ctx: Any) -> List[Path]:
+async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
     """从 MCP 上下文读取客户端 Roots 并转换为本地路径列表。
 
     将各 Root 的 file:// URI 转为本地路径，拒绝 UNC 形式以避免触发 SMB 连接。
@@ -98,7 +98,7 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> List[Path]:
 
     roots_result = await list_roots()
 
-    resolved_roots: List[Path] = []
+    resolved_roots: list[Path] = []
     for root in getattr(roots_result, "roots", []):
         uri_value = getattr(root, "uri", None)
         if uri_value is None:
@@ -114,14 +114,14 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> List[Path]:
 
 
 @asynccontextmanager
-async def workspace_roots_scope(ctx: Any) -> AsyncIterator[List[Path]]:
+async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     """在当前请求作用域内绑定 MCP Roots，退出时自动恢复。
 
     将客户端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持
     Roots 时回退环境变量边界。
     """
     token: Token[tuple[Path, ...] | None] | None = None
-    resolved_roots: List[Path] = []
+    resolved_roots: list[Path] = []
 
     session = getattr(ctx, "session", None)
     list_roots = getattr(session, "list_roots", None)
@@ -197,7 +197,7 @@ def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
     return False
 
 
-def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
+def normalize_path(path: str, base_dir: str | None = None) -> Path:
     """标准化文件路径为绝对 Path 对象。
 
     Args:
@@ -231,7 +231,7 @@ def normalize_path(path: str, base_dir: Optional[str] = None) -> Path:
         raise ValueError(f"无效的路径格式: {path}")
 
 
-def get_relative_path(path: Union[str, Path], base_dir: Optional[str] = None) -> str:
+def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
     """获取相对路径。
 
     Args:
@@ -261,8 +261,8 @@ def get_relative_path(path: Union[str, Path], base_dir: Optional[str] = None) ->
 
 
 def validate_image_path(
-    path: str, base_dir: Optional[str] = None, skip_dimensions: bool = False
-) -> Tuple[bool, str, Optional[Path]]:
+    path: str, base_dir: str | None = None, skip_dimensions: bool = False
+) -> tuple[bool, str, Path | None]:
     """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
 
     HTTP(S) URL 视为有效但标准化路径恒为 None，调用方须同时检查有效位与路径是否
@@ -290,7 +290,7 @@ def validate_image_path(
 
         # 委托 validation 模块执行格式与维度等统一规则校验。
         try:
-            validated_path = validate_image_url(
+            validated_path = validate_image_input(
                 str(normalized_path), skip_dimensions=skip_dimensions
             )
             return True, "", Path(validated_path)
@@ -306,9 +306,9 @@ def find_images_in_directory(
     directory: str,
     recursive: bool = True,
     max_depth: int = 3,
-    extensions: Optional[List[str]] = None,
-    limit: Optional[int] = None,
-) -> List[Path]:
+    extensions: list[str] | None = None,
+    limit: int | None = None,
+) -> list[Path]:
     """在目录中查找图片文件。
 
     Args:
@@ -376,7 +376,7 @@ def find_images_in_directory(
     return images
 
 
-def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = None) -> List[str]:
+def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None) -> list[str]:
     """在搜索目录下建议与目标路径拼写相近的图片路径。
 
     用于路径校验失败时给出纠错建议，缓解用户手误导致的路径错误。
@@ -416,7 +416,7 @@ def suggest_similar_paths(target_path: str, search_dirs: Optional[List[str]] = N
 # ==================== 辅助函数 ====================
 
 
-def _file_uri_to_path(uri: str) -> Optional[Path]:
+def _file_uri_to_path(uri: str) -> Path | None:
     """将 file:// URI 转换为本地路径，拒绝 UNC 形式以避免触发 SMB 连接。"""
     try:
         parsed = urlparse(uri)

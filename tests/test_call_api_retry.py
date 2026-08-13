@@ -21,18 +21,10 @@ from seedream_mcp.utils.errors import (
 )
 
 
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """屏蔽退避 sleep，避免测试因指数退避真实等待。"""
-
-    async def _sleep(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(asyncio, "sleep", _sleep)
-
-
-async def test_call_api_retries_on_429_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_api_retries_on_429_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """429 限流按退避重试，首次失败后第二次成功。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -59,9 +51,8 @@ async def test_call_api_retries_on_429_then_succeeds(monkeypatch: pytest.MonkeyP
     assert result["success"] is True
 
 
-async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
     """4xx 客户端错误（非 429）立即抛出，不重试。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -86,9 +77,10 @@ async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch) -> None
     assert calls == 1
 
 
-async def test_call_api_timeout_retried_then_mapped(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_api_timeout_retried_then_mapped(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """httpx 超时按 max_retries 重试用尽后映射为 SeedreamTimeoutError。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=1)
     calls = 0
 
@@ -114,9 +106,10 @@ async def test_call_api_timeout_retried_then_mapped(monkeypatch: pytest.MonkeyPa
     assert calls == 2
 
 
-async def test_call_api_unexpected_error_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_api_unexpected_error_not_retried(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """非可重试的意外错误立即抛出，不浪费退避等待。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -141,9 +134,10 @@ async def test_call_api_unexpected_error_not_retried(monkeypatch: pytest.MonkeyP
     assert calls == 1
 
 
-async def test_call_api_retries_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_api_retries_on_5xx_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """5xx 服务端错误按退避重试，首次失败后第二次成功。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -170,9 +164,10 @@ async def test_call_api_retries_on_5xx_then_succeeds(monkeypatch: pytest.MonkeyP
     assert result["success"] is True
 
 
-async def test_call_api_network_error_retries_then_mapped(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_call_api_network_error_retries_then_mapped(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
     """httpx.RequestError（ConnectError）重试用尽后映射为 SeedreamNetworkError。"""
-    _no_sleep(monkeypatch)
     config = SeedreamConfig(api_key="k", max_retries=1)
     calls = 0
 

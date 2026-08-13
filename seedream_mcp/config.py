@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import os
 import threading
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from dotenv import dotenv_values
 
@@ -48,8 +48,23 @@ DEPRECATED_MODEL_TOKENS: set[str] = {
     "doubao-seededit-3.0",
 }
 
+# 合法日志级别，供 config 校验与 CLI choices 共用此单一来源
+LEGAL_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
 # to_dict 输出时按字段名关键词脱敏，新增敏感字段无需手动登记
 _SENSITIVE_CONFIG_KEYWORDS = ("key", "token", "secret", "password", "auth", "credential")
+
+# dataclass 字段 metadata 中登记环境变量名的键，字段定义据此声明对应环境变量名
+_ENV_METADATA_KEY = "env"
+
+
+def _env_field(default: Any, env_name: str) -> Any:
+    """为 dataclass 字段绑定默认值与环境变量名元数据。
+
+    env_name 经字段 metadata 声明，使字段定义成为字段默认值与环境变量名映射的单一数据源，
+    _FIELD_ENV_MAP 与 ENV_DEFAULTS 据此反射派生。
+    """
+    return field(default=default, metadata={_ENV_METADATA_KEY: env_name})
 
 
 @dataclass(frozen=True)
@@ -64,44 +79,46 @@ class SeedreamConfig:
     api_key: str
 
     # 可选配置
-    base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
-    model_id: str = "doubao-seedream-5-0-260128"
-    default_size: str = "2K"
-    default_watermark: bool = False
-    timeout: int = 60
-    api_timeout: int = 600
-    max_retries: int = 3
+    base_url: str = _env_field("https://ark.cn-beijing.volces.com/api/v3", "ARK_BASE_URL")
+    model_id: str = _env_field("doubao-seedream-5-0-260128", "SEEDREAM_MODEL_ID")
+    default_size: str = _env_field("2K", "SEEDREAM_DEFAULT_SIZE")
+    default_watermark: bool = _env_field(False, "SEEDREAM_DEFAULT_WATERMARK")
+    timeout: int = _env_field(60, "SEEDREAM_TIMEOUT")
+    api_timeout: int = _env_field(600, "SEEDREAM_API_TIMEOUT")
+    max_retries: int = _env_field(3, "SEEDREAM_MAX_RETRIES")
 
     # 日志配置
-    log_level: str = "INFO"
-    log_file: Optional[str] = None
+    log_level: str = _env_field("INFO", "LOG_LEVEL")
+    log_file: str | None = _env_field(None, "LOG_FILE")
 
     # 自动保存配置
-    auto_save_enabled: bool = True
-    auto_save_base_dir: Optional[str] = None
-    auto_save_download_timeout: int = 30
-    auto_save_max_retries: int = 3
-    auto_save_max_file_size: int = DEFAULT_MAX_FILE_SIZE
-    auto_save_max_concurrent: int = 5
-    auto_save_date_folder: bool = True
-    auto_save_cleanup_days: int = 30
+    auto_save_enabled: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_ENABLED")
+    auto_save_base_dir: str | None = _env_field(None, "SEEDREAM_AUTO_SAVE_BASE_DIR")
+    auto_save_download_timeout: int = _env_field(30, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT")
+    auto_save_max_retries: int = _env_field(3, "SEEDREAM_AUTO_SAVE_MAX_RETRIES")
+    auto_save_max_file_size: int = _env_field(
+        DEFAULT_MAX_FILE_SIZE, "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE"
+    )
+    auto_save_max_concurrent: int = _env_field(5, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT")
+    auto_save_date_folder: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_DATE_FOLDER")
+    auto_save_cleanup_days: int = _env_field(30, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS")
 
     # 流式处理配置
-    stream_buffer_max_size: int = 10 * 1024 * 1024
-    stream_chunk_size: int = 1024 * 1024
+    stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
+    stream_chunk_size: int = _env_field(1024 * 1024, "SEEDREAM_STREAM_CHUNK_SIZE")
 
     # 客户端图像预处理并发上限
-    image_prepare_concurrency: int = 5
+    image_prepare_concurrency: int = _env_field(5, "SEEDREAM_IMAGE_PREPARE_CONCURRENCY")
 
     # 参考图预处理结果 LRU 缓存的上限条目数
-    prepare_cache_max: int = 32
+    prepare_cache_max: int = _env_field(32, "SEEDREAM_PREPARE_CACHE_MAX")
 
     # 参考图预处理结果 LRU 缓存的累计字节上限，防止大图缓存累积撑爆内存
-    prepare_cache_max_bytes: int = 256 * 1024 * 1024
+    prepare_cache_max_bytes: int = _env_field(256 * 1024 * 1024, "SEEDREAM_PREPARE_CACHE_MAX_BYTES")
 
     # 工作区与传输配置
-    workspace_root: Optional[str] = None
-    http_auth_token: Optional[str] = None
+    workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
+    http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
 
     def __post_init__(self) -> None:
         self.validate()
@@ -149,9 +166,8 @@ class SeedreamConfig:
         if self.max_retries < 1:
             raise SeedreamConfigError("max_retries不能小于1")
 
-        valid_log_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-        if self.log_level.upper() not in valid_log_levels:
-            raise SeedreamConfigError(f"log_level必须是以下值之一: {valid_log_levels}")
+        if self.log_level.upper() not in LEGAL_LOG_LEVELS:
+            raise SeedreamConfigError(f"log_level必须是以下值之一: {list(LEGAL_LOG_LEVELS)}")
         object.__setattr__(self, "log_level", self.log_level.upper())
 
         if self.auto_save_download_timeout <= 0:
@@ -181,46 +197,42 @@ class SeedreamConfig:
             raise SeedreamConfigError("prepare_cache_max_bytes不能小于1")
 
         if self.auto_save_base_dir:
-            try:
-                base_dir = Path(self.auto_save_base_dir).expanduser()
-                if base_dir.exists() and not base_dir.is_dir():
-                    raise SeedreamConfigError(
-                        f"auto_save_base_dir不是有效目录: {self.auto_save_base_dir}"
-                    )
-            except SeedreamConfigError:
-                raise
-            except Exception as exc:
-                raise SeedreamConfigError(
-                    f"auto_save_base_dir路径无效: {self.auto_save_base_dir} -> {exc}"
-                ) from exc
+            self._validate_dir_field(self.auto_save_base_dir, "auto_save_base_dir")
 
         if self.workspace_root:
-            try:
-                root_path = Path(self.workspace_root).expanduser()
-                if root_path.exists() and not root_path.is_dir():
-                    raise SeedreamConfigError(f"workspace_root不是有效目录: {self.workspace_root}")
-            except SeedreamConfigError:
-                raise
-            except Exception as exc:
-                raise SeedreamConfigError(
-                    f"workspace_root路径无效: {self.workspace_root} -> {exc}"
-                ) from exc
+            self._validate_dir_field(self.workspace_root, "workspace_root")
+
+    def _validate_dir_field(self, value: str, field_name: str) -> Path:
+        """校验给定路径指向有效目录，存在但非目录时抛 SeedreamConfigError。
+
+        返回展开 ~ 后的 Path。仅校验已存在路径的目录性，不要求目录预先存在，
+        使未创建的目录也能通过校验以便后续按需创建。
+        """
+        try:
+            dir_path = Path(value).expanduser()
+            if dir_path.exists() and not dir_path.is_dir():
+                raise SeedreamConfigError(f"{field_name}不是有效目录: {value}")
+            return dir_path
+        except SeedreamConfigError:
+            raise
+        except Exception as exc:
+            raise SeedreamConfigError(f"{field_name}路径无效: {value} -> {exc}") from exc
 
     @classmethod
-    def from_env(cls, env_file: Optional[str] = None) -> "SeedreamConfig":
+    def from_env(cls, env_file: str | None = None) -> "SeedreamConfig":
         """从环境变量与 .env 文件构建配置实例，构建过程线程安全。"""
         return build_config_from_sources(env_file=env_file)
 
     def to_dict(self) -> dict[str, Any]:
         """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。"""
         result: dict[str, Any] = {}
-        for field in fields(self):
-            value = getattr(self, field.name)
-            name_lower = field.name.lower()
+        for config_field in fields(self):
+            value = getattr(self, config_field.name)
+            name_lower = config_field.name.lower()
             if any(keyword in name_lower for keyword in _SENSITIVE_CONFIG_KEYWORDS):
-                result[field.name] = "***" if value else None
+                result[config_field.name] = "***" if value else None
             else:
-                result[field.name] = value
+                result[config_field.name] = value
         return result
 
     def __repr__(self) -> str:
@@ -229,33 +241,12 @@ class SeedreamConfig:
         )
 
 
-# dataclass 字段名到环境变量名的映射。ENV_DEFAULTS 据此从 SeedreamConfig 字段默认值
-# 反射派生，使字段默认值成为唯一数据源，消除字符串默认与字段默认的双数据源漂移。
+# dataclass 字段名到环境变量名的映射，从 SeedreamConfig 各字段的 env 元数据反射派生，
+# 使字段定义成为单一数据源。新增字段仅需在其 _env_field 声明中登记环境变量名。
 _FIELD_ENV_MAP: dict[str, str] = {
-    "base_url": "ARK_BASE_URL",
-    "model_id": "SEEDREAM_MODEL_ID",
-    "default_size": "SEEDREAM_DEFAULT_SIZE",
-    "default_watermark": "SEEDREAM_DEFAULT_WATERMARK",
-    "timeout": "SEEDREAM_TIMEOUT",
-    "api_timeout": "SEEDREAM_API_TIMEOUT",
-    "max_retries": "SEEDREAM_MAX_RETRIES",
-    "log_level": "LOG_LEVEL",
-    "log_file": "LOG_FILE",
-    "auto_save_enabled": "SEEDREAM_AUTO_SAVE_ENABLED",
-    "auto_save_base_dir": "SEEDREAM_AUTO_SAVE_BASE_DIR",
-    "auto_save_download_timeout": "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT",
-    "auto_save_max_retries": "SEEDREAM_AUTO_SAVE_MAX_RETRIES",
-    "auto_save_max_file_size": "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
-    "auto_save_max_concurrent": "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT",
-    "auto_save_date_folder": "SEEDREAM_AUTO_SAVE_DATE_FOLDER",
-    "auto_save_cleanup_days": "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS",
-    "stream_buffer_max_size": "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
-    "stream_chunk_size": "SEEDREAM_STREAM_CHUNK_SIZE",
-    "image_prepare_concurrency": "SEEDREAM_IMAGE_PREPARE_CONCURRENCY",
-    "prepare_cache_max": "SEEDREAM_PREPARE_CACHE_MAX",
-    "prepare_cache_max_bytes": "SEEDREAM_PREPARE_CACHE_MAX_BYTES",
-    "workspace_root": "SEEDREAM_WORKSPACE_ROOT",
-    "http_auth_token": "SEEDREAM_HTTP_AUTH_TOKEN",
+    f.name: f.metadata[_ENV_METADATA_KEY]
+    for f in fields(SeedreamConfig)
+    if _ENV_METADATA_KEY in f.metadata
 }
 
 
@@ -330,7 +321,7 @@ def parse_int(value: object) -> int:
         raise SeedreamConfigError(f"无法解析整数值: {value}") from exc
 
 
-def _read_env_values(env_file: Optional[str]) -> dict[str, str]:
+def _read_env_values(env_file: str | None) -> dict[str, str]:
     """
     读取 .env 文件键值为字典，不写入进程环境变量。
 
@@ -399,7 +390,7 @@ def _pick_str(
 
 def _pick_optional_str(
     overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
-) -> Optional[str]:
+) -> str | None:
     raw = _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
     return str(raw) or None
 
@@ -421,8 +412,8 @@ def _pick_bool(
 
 
 def build_config_from_sources(
-    overrides: Optional[Mapping[str, object]] = None,
-    env_file: Optional[str] = None,
+    overrides: Mapping[str, object] | None = None,
+    env_file: str | None = None,
 ) -> SeedreamConfig:
     """
     从统一来源构建配置对象，线程安全。
@@ -441,8 +432,8 @@ def build_config_from_sources(
 
 
 def _build_config_from_sources_unlocked(
-    overrides: Optional[Mapping[str, object]] = None,
-    env_file: Optional[str] = None,
+    overrides: Mapping[str, object] | None = None,
+    env_file: str | None = None,
 ) -> SeedreamConfig:
     """配置构建内部实现，自身不加锁；由 :func:`build_config_from_sources` 持锁调用。"""
     override_values = dict(overrides or {})
@@ -561,11 +552,11 @@ _config_build_lock = threading.Lock()
 # 锁会造成不可重入死锁
 _global_config_lock = threading.Lock()
 
-_global_config: Optional[SeedreamConfig] = None
+_global_config: SeedreamConfig | None = None
 # CLI 注入的活动配置，优先于 _global_config。server 与 path_utils 经 get_active_config
 # 共用此源；reload_config 重置其为 None 以回退重建后的全局配置，消除活动配置与全局
 # 配置的双单例分叉。
-_active_config: Optional[SeedreamConfig] = None
+_active_config: SeedreamConfig | None = None
 
 
 def get_global_config() -> SeedreamConfig:
@@ -599,7 +590,7 @@ def get_active_config() -> SeedreamConfig:
     return get_global_config()
 
 
-def set_active_config(config: Optional[SeedreamConfig]) -> None:
+def set_active_config(config: SeedreamConfig | None) -> None:
     """设置或清除 CLI 注入的活动配置。
 
     None 表示清除活动配置，后续 get_active_config 回退到全局默认。CLI 启动时注入，
@@ -610,7 +601,7 @@ def set_active_config(config: Optional[SeedreamConfig]) -> None:
         _active_config = config
 
 
-def reload_config(env_file: Optional[str] = None) -> None:
+def reload_config(env_file: str | None = None) -> None:
     """重新加载全局配置并重置活动配置。
 
     重建全局配置实例并清除活动配置，使后续 get_active_config 回退到新的全局实例，

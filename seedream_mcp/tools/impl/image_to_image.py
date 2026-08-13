@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult
 
@@ -17,6 +17,7 @@ from ..core.common import (
     execute_generation_handler,
     GenerationExecutionContext,
 )
+from ._common import IMAGE_TO_IMAGE, _default_start_log_values
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -27,9 +28,9 @@ logger = get_logger(__name__)
 
 
 async def handle_image_to_image(
-    arguments: Dict[str, Any],
+    arguments: dict[str, Any],
     config: SeedreamConfig,
-    ctx: "Context[Any, Any, Any] | None" = None,
+    ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """处理图文生图请求，基于参考图与文本指令生成新图像。
 
@@ -50,8 +51,8 @@ async def handle_image_to_image(
 
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
-    ) -> Dict[str, Any]:
-        result: Dict[str, Any] = await client.image_to_image(
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = await client.image_to_image(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             image=image,
@@ -68,20 +69,8 @@ async def handle_image_to_image(
         arguments=arguments,
         config=config,
         module_logger=logger,
-        tool_name="seedream_image_to_image",
-        completion_title="图文生图任务完成",
-        failure_prefix="图文生图生成",
-        guidance="请检查图片路径/URL 与尺寸参数，确认 API Key 和网络可用后重试。",
-        start_log_message=(
-            "图文生图开始: prompt_len={}, size={}, stream={}, request_count={}, parallelism={}"
-        ),
-        start_log_values_builder=lambda gen_ctx: (
-            len(gen_ctx.prompt or ""),
-            gen_ctx.size,
-            gen_ctx.stream,
-            gen_ctx.request_count,
-            gen_ctx.parallelism,
-        ),
+        **IMAGE_TO_IMAGE.as_handler_kwargs(),
+        start_log_values_builder=_default_start_log_values,
         request_executor=_execute,
         ctx=ctx,
     )

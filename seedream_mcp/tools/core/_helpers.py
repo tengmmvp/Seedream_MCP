@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 from ...config import SeedreamConfig
 from ...utils.errors import (
@@ -36,7 +36,7 @@ PROGRESS_AUTOSAVE_DONE = 95.0
 PROGRESS_COMPLETE = 100.0
 
 
-def _add_usage_value(usage: Dict[str, Any], key: str, value: Any) -> None:
+def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
     """累加用量统计值，跳过布尔与非数值类型以避免污染汇总结果。"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return
@@ -46,7 +46,7 @@ def _add_usage_value(usage: Dict[str, Any], key: str, value: Any) -> None:
     usage[key] = current + value
 
 
-def _normalize_error_message(raw_error: Any) -> Optional[str]:
+def _normalize_error_message(raw_error: Any) -> str | None:
     """将不同形态的错误对象提取为可读文本。"""
     if isinstance(raw_error, str):
         message = raw_error.strip()
@@ -76,7 +76,7 @@ def _classify_generation_error_type(exc: Exception) -> str:
 
 
 def _extract_parallel_request_error(
-    result: Optional[Dict[str, Any]], fallback_exc: Optional[Exception]
+    result: dict[str, Any] | None, fallback_exc: Exception | None
 ) -> str:
     """提取单个并行请求的失败原因，优先使用结果内错误信息，回退到异常格式化文案。"""
     if isinstance(result, dict):
@@ -102,7 +102,7 @@ def _extract_parallel_request_error(
     return "请求失败"
 
 
-def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
+def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
     """解析自动保存的基础目录路径，校验用户路径须落在默认目录之内。
 
     优先使用用户指定路径，若未指定则使用配置中的默认路径。
@@ -142,7 +142,7 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: Optional[str]) -> Path:
 
 
 async def _safe_report_progress(
-    ctx: Optional["Context[Any, Any, Any]"],
+    ctx: Context[Any, Any, Any] | None,
     *,
     progress: float,
     total: float = 100.0,
@@ -162,7 +162,7 @@ _VALID_LOG_LEVELS = ("debug", "info", "warning", "error")
 
 
 async def _safe_ctx_log(
-    ctx: Optional["Context[Any, Any, Any]"],
+    ctx: Context[Any, Any, Any] | None,
     level: str,
     message: str,
 ) -> None:

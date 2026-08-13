@@ -11,14 +11,14 @@ import logging
 import sys
 from pathlib import Path
 from types import FrameType
-from typing import Any, Awaitable, Callable, Optional, ParamSpec, TypeVar, Union, overload
+from typing import Any, Awaitable, Callable, ParamSpec, TypeVar, overload
 
 from loguru import logger
 
 
 def setup_logging(
     log_level: str = "INFO",
-    log_file: Optional[str] = None,
+    log_file: str | None = None,
     enable_console: bool = True,
     enable_file: bool = True,
     force_standard_logging: bool = False,
@@ -80,14 +80,14 @@ def setup_logging(
     # 配置标准库 logging 以重定向到 loguru
     class InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
-            log_level: Union[str, int]
+            log_level: str | int
             try:
                 log_level = logger.level(record.levelname).name
             except ValueError:
                 log_level = record.levelno
 
             # 向上跳过 logging 模块自身的帧，定位真实调用者以计算正确的日志深度
-            frame: Optional[FrameType] = logging.currentframe()
+            frame: FrameType | None = logging.currentframe()
             depth = 2
             while frame is not None and frame.f_code.co_filename == logging.__file__:
                 frame = frame.f_back
@@ -112,7 +112,7 @@ def setup_logging(
         logger.info("日志文件: {}", log_file)
 
 
-def get_logger(name: Optional[str] = None) -> Any:
+def get_logger(name: str | None = None) -> Any:
     """
     获取 logger 实例
 

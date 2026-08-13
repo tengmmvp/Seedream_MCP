@@ -7,7 +7,7 @@ structuredContent schema，handler 仅负责填充字段。基类通过 extra='a
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -23,41 +23,41 @@ class _BaseStructuredOutput(BaseModel):
 
     tool: str
     success: bool
-    status: Optional[str] = None
-    error: Optional[Dict[str, Any]] = None
+    status: str | None = None
+    error: dict[str, Any] | None = None
 
 
 class GenerationStructuredOutput(_BaseStructuredOutput):
     """生成类工具的结构化输出 schema，覆盖文生图、图文生图、多图融合与组图输出。"""
 
-    prompt: Optional[str] = None
-    size: Optional[str] = None
-    response_format: Optional[str] = None
-    output_format: Optional[str] = None
-    stream: Optional[bool] = None
-    tools: Optional[List[Dict[str, Any]]] = None
-    request_count: Optional[int] = None
-    parallelism: Optional[int] = None
-    data: Optional[List[Dict[str, Any]]] = None
-    usage: Optional[Dict[str, Any]] = None
-    batch: Optional[Dict[str, Any]] = None
-    auto_save: Optional[Dict[str, Any]] = None
+    prompt: str | None = None
+    size: str | None = None
+    response_format: str | None = None
+    output_format: str | None = None
+    stream: bool | None = None
+    tools: list[dict[str, Any]] | None = None
+    request_count: int | None = None
+    parallelism: int | None = None
+    data: list[dict[str, Any]] | None = None
+    usage: dict[str, Any] | None = None
+    batch: dict[str, Any] | None = None
+    auto_save: dict[str, Any] | None = None
 
 
 class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     """图片浏览工具的结构化输出 schema。"""
 
-    directory: Optional[str] = None
-    resolved_directories: Optional[List[str]] = None
-    workspace_roots: Optional[List[str]] = None
-    count: Optional[int] = None
-    total_count: Optional[int] = None
-    offset: Optional[int] = None
-    has_more: Optional[bool] = None
-    next_offset: Optional[int] = None
-    images: Optional[List[Dict[str, Any]]] = None
-    recursive: Optional[bool] = None
-    max_depth: Optional[int] = None
-    limit: Optional[int] = None
-    show_details: Optional[bool] = None
-    format_filter: Optional[List[str]] = None
+    directory: str | None = None
+    resolved_directories: list[str] | None = None
+    workspace_roots: list[str] | None = None
+    count: int | None = None
+    total_count: int | None = None
+    offset: int | None = None
+    has_more: bool | None = None
+    next_offset: int | None = None
+    images: list[dict[str, Any]] | None = None
+    recursive: bool | None = None
+    max_depth: int | None = None
+    limit: int | None = None
+    show_details: bool | None = None
+    format_filter: list[str] | None = None

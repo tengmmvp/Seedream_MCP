@@ -308,10 +308,10 @@ async def test_execute_generation_handler_passes_shared_download_manager(
         custom_name: Any,
         tool_name: Any,
         download_manager: Any = None,
-    ) -> list:
+    ) -> tuple:
         nonlocal captured_dm
         captured_dm = download_manager
-        return []
+        return [], []
 
     monkeypatch.setattr(common_module, "auto_save_from_urls", fake_auto_save_from_urls)
 

@@ -203,8 +203,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | 流式输出                   | ❌        | ✅           | ✅        | ✅           |
 | 输出格式（png/jpeg）       | ✅        | ✅           | ❌        | ❌           |
 | 分辨率档位                 | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| 默认尺寸                   | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
+| 自定义尺寸倍数                | 16 的倍数    | 不限制          | 不限制       | 不限制          |
+| MCP 默认尺寸               | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
 | 参考图上限                 | 10 张     | 14 张        | 14 张     | 14 张        |
+
+> **MCP 默认尺寸**：表中“MCP 默认尺寸”行为 MCP 统一配置 `default_size=2K`（对应 `2048x2048`）的运行时解析值，与各模型原生默认无关（例如 5.0 Pro 原生默认为 `1024x1024`）。
 
 > **提示**：默认模型为 **doubao-seedream-5.0**（与 5.0 Lite 等价），开箱即用全部能力。切换到 `doubao-seedream-5.0-pro` 后，组图、联网搜索、流式输出不可用，尺寸仅支持 `1K/2K`（默认 `2048x2048`），多图生图参考图上限降为 10 张。
 
@@ -230,7 +233,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
@@ -254,7 +257,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
@@ -278,7 +281,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
@@ -303,8 +306,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`
-- `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
+- `stream` (可选) - 是否启用流式输出，默认`false`
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
 - `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
@@ -420,11 +423,20 @@ SEEDREAM_MODEL_ID=doubao-seedream-5.0
 SEEDREAM_DEFAULT_SIZE=2K
 SEEDREAM_DEFAULT_WATERMARK=false
 
+# 超时
+SEEDREAM_TIMEOUT=60                         # 连接建立/写入/连接池获取超时（秒）
+SEEDREAM_API_TIMEOUT=600                    # API 调用读取与总超时（秒）
+
 # 自动保存
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
+SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 单张图片下载超时（秒）
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+
+# 工作区与传输
+SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界回退目录（MCP Roots 优先）
+SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定建议配置）
 
 # 客户端性能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

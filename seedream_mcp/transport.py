@@ -1,0 +1,286 @@
+"""streamable-http 传输层：ASGI 中间件与传输配置。
+
+包含请求体大小限制、Bearer 鉴权、健康检查三个 ASGI 中间件，以及 streamable-http
+监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 FastMCP 的 streamable_http_app
+外层，按装配逆序执行。FastMCP 实例 mcp 在调用时延迟导入，避免与 server 模块形成顶层
+循环导入。
+"""
+
+from __future__ import annotations
+
+# 标准库导入
+import argparse
+import hmac
+import json
+from typing import Any
+
+from .config import get_active_config
+from .utils.logging import get_logger
+
+# 模块日志记录器
+logger = get_logger(__name__)
+
+# ==================== 传输层常量 ====================
+
+# streamable-http 回环地址集合：绑定这些地址视为仅本机信任
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+# streamable-http 请求体大小上限：按 Content-Length 早拒超大请求体，防止已认证客户端
+# 提交 GB 级 prompt/data URI 导致 OOM。多图融合等大体量场景若超此值应分批或调高。
+_MAX_STREAMABLE_HTTP_BODY = 100 * 1024 * 1024
+
+
+# ==================== ASGI 响应辅助 ====================
+
+
+async def _send_asgi_json(
+    send: Any,
+    status: int,
+    body: bytes,
+    extra_headers: tuple[tuple[bytes, bytes], ...] = (),
+) -> None:
+    """
+    发送统一格式的 JSON ASGI 响应。
+
+    构造 http.response.start 与 http.response.body 两条消息，content-type 固定为
+    application/json，content-length 按实得 body 字节计算；extra_headers 附加在标准头
+    之后，供 www-authenticate 等响应头复用，消除三处中间件的手写重复。
+    """
+    headers: list[tuple[bytes, bytes]] = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    headers.extend(extra_headers)
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": headers,
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+# ==================== ASGI 中间件 ====================
+
+
+class _BearerTokenAuthMiddleware:
+    """
+    streamable-http Bearer 令牌鉴权 ASGI 中间件。
+
+    校验请求 Authorization 头中的 Bearer 令牌，匹配则放行，否则 HTTP 流量返回 401。
+    启用鉴权时拒绝 websocket 等非 HTTP 流量并以 code 1008 关闭，避免绕过 Bearer 校验。
+    使用 hmac.compare_digest 做常数时间比较，避免时序侧信道泄露令牌。
+    """
+
+    def __init__(self, app: Any, expected_token: str) -> None:
+        self.app = app
+        self._expected = expected_token.encode("utf-8")
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        scope_type = scope.get("type")
+        if scope_type == "lifespan":
+            await self.app(scope, receive, send)
+            return
+        if scope_type != "http":
+            # 启用鉴权时拒绝 websocket 等非 http 流量，避免绕过 Bearer 校验
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
+            return
+
+        if self._request_authorized(scope):
+            await self.app(scope, receive, send)
+            return
+
+        await self._send_unauthorized(send)
+
+    def _request_authorized(self, scope: Any) -> bool:
+        for name, value in scope.get("headers", []):
+            if name == b"authorization":
+                if value[:7].lower() == b"bearer ":
+                    return hmac.compare_digest(value[7:].strip(), self._expected)
+                return False
+        return False
+
+    async def _send_unauthorized(self, send: Any) -> None:
+        body = json.dumps(
+            {"error": "invalid_token", "error_description": "Authentication required"}
+        ).encode("utf-8")
+        await _send_asgi_json(
+            send,
+            401,
+            body,
+            extra_headers=((b"www-authenticate", b'Bearer error="invalid_token"'),),
+        )
+
+
+class _LimitRequestBodyMiddleware:
+    """streamable-http 请求体大小限制 ASGI 中间件。
+
+    先按 Content-Length 头早拒超过上限的请求作为快速路径；再包装 receive 累计 chunked 实际
+    接收字节数，超限即短路返回 413，防止缺失或谎报 Content-Length 的超大请求体在 pydantic
+    物料化前撑爆内存。仅作用于 http 请求，websocket 等非 http 流量原样透传。
+    """
+
+    def __init__(self, app: Any, max_body_size: int) -> None:
+        self.app = app
+        self._max_body_size = max_body_size
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = 0
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    content_length = int(value)
+                except ValueError:
+                    pass
+                break
+
+        # 快速路径：声明长度超限直接 413，避免进入应用读取阶段
+        if content_length > self._max_body_size:
+            await self._send_too_large(send)
+            return
+
+        # chunked 防御：累计实际接收字节，缺失或谎报 Content-Length 时超限短路 413
+        total_received = 0
+        too_large = False
+
+        async def receive_wrapper() -> Any:
+            nonlocal total_received, too_large
+            message = await receive()
+            if not too_large and message.get("type") == "http.request":
+                total_received += len(message.get("body", b""))
+                if total_received > self._max_body_size:
+                    too_large = True
+                    # 返回空终帧，停止向下游投递剩余超大请求体
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def send_wrapper(message: Any) -> None:
+            # 一旦判定超限，吞掉下游响应，由本中间件统一回 413 避免双响应
+            if too_large:
+                return
+            await send(message)
+
+        await self.app(scope, receive_wrapper, send_wrapper)
+
+        if too_large:
+            await self._send_too_large(send)
+
+    async def _send_too_large(self, send: Any) -> None:
+        body = json.dumps(
+            {"error": "request_too_large", "error_description": "Request body exceeds limit"}
+        ).encode("utf-8")
+        await _send_asgi_json(send, 413, body)
+
+
+class _HealthCheckMiddleware:
+    """streamable-http 健康检查中间件，短路 GET /health 返回进程存活状态。
+
+    最后装配使其成为最外层，先于请求体限制与 Bearer 鉴权执行，负载均衡与健康探针
+    无需令牌即可探活。仅做 liveness 判定，不探测上游 API，避免拖慢探针。
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") == "http"
+            and scope.get("method") == "GET"
+            and scope.get("path") == "/health"
+        ):
+            await _send_asgi_json(send, 200, b'{"status":"ok"}')
+            return
+        await self.app(scope, receive, send)
+
+
+# ==================== streamable-http 传输配置 ====================
+
+
+def _resolve_http_auth_token(args: argparse.Namespace) -> str:
+    """解析 streamable-http 鉴权令牌：CLI 参数优先，其次活动配置。"""
+    token = args.auth_token or get_active_config().http_auth_token
+    return (token or "").strip()
+
+
+def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enabled: bool) -> None:
+    """
+    将 streamable-http 监听配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
+
+    非回环绑定时，调用方需已在 cli_main 中完成 fail-closed 校验，即必须配置鉴权令牌，
+    因此此处非回环分支仅用于确认已启用鉴权。stateless 启用无状态模式，更适合远程
+    多客户端与负载均衡场景。
+    """
+    from .server import mcp
+
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.settings.stateless_http = stateless
+    _warn_remote_exposure(host, auth_enabled)
+
+
+def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
+    """根据绑定地址与鉴权状态输出风险告警，同时写入日志与控制台。"""
+    if host in _LOOPBACK_HOSTS:
+        if auth_enabled:
+            message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"
+        else:
+            message = (
+                "streamable-http 未启用应用层认证，仅限本机信任环境使用；"
+                "如需远程访问，请使用 --auth-token 配置鉴权或经反向代理增加鉴权。"
+            )
+    elif auth_enabled:
+        message = (
+            f"streamable-http 绑定到 {host}（非回环地址）并已启用 Bearer 鉴权；"
+            "请确认网络隔离与令牌妥善保管。"
+        )
+    else:
+        message = (
+            f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险；"
+            "请使用 --auth-token 配置鉴权。"
+        )
+    logger.warning(message)
+    print(message)
+
+
+def _run_streamable_http(
+    host: str,
+    port: int,
+    auth_token: str,
+    ssl_certfile: str | None = None,
+    ssl_keyfile: str | None = None,
+) -> None:
+    """
+    启动 streamable-http 传输。
+
+    配置鉴权令牌时，在 FastMCP 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
+    请求返回 401。配置 TLS 证书时透传给 uvicorn 启用 HTTPS。仅使用 FastMCP 公开接口
+    streamable_http_app() 获取 ASGI 应用，避免依赖其私有鉴权装配路径。
+    """
+    import uvicorn
+
+    from .server import mcp
+
+    app = mcp.streamable_http_app()
+    # Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
+    # HealthCheck -> LimitRequestBody -> Bearer -> app：Bearer 最先添加居最内，其后添加
+    # 请求体限制使其位于鉴权之外，从而声明超长 Content-Length 的请求在鉴权前即被 413 早拒。
+    # 已认证的 chunked 请求由 receive 字节累计保护；未授权 chunked 请求不读 body 直接 401，
+    # 其体积限制依赖 uvicorn 或反向代理层。
+    if auth_token:
+        app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
+        logger.info("streamable-http 已启用 Bearer 令牌鉴权")
+    app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=_MAX_STREAMABLE_HTTP_BODY)
+    # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health
+    app.add_middleware(_HealthCheckMiddleware)
+    ssl_kwargs: dict[str, Any] = {}
+    if ssl_certfile:
+        ssl_kwargs["ssl_certfile"] = ssl_certfile
+        ssl_kwargs["ssl_keyfile"] = ssl_keyfile
+        logger.info("streamable-http 已启用 TLS")
+    uvicorn.run(app, host=host, port=port, **ssl_kwargs)

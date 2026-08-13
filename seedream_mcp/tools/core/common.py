@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 
 from mcp.types import CallToolResult, TextContent
 
@@ -63,7 +63,7 @@ __all__ = [
 
 async def execute_generation_handler(
     *,
-    arguments: Dict[str, Any],
+    arguments: dict[str, Any],
     config: SeedreamConfig,
     module_logger: Any,
     tool_name: str,
@@ -73,9 +73,9 @@ async def execute_generation_handler(
     start_log_message: str,
     start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]],
     request_executor: Callable[
-        ["SeedreamClient", GenerationExecutionContext], Awaitable[Dict[str, Any]]
+        ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
-    ctx: Optional["Context[Any, Any, Any]"] = None,
+    ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """执行生成类工具的通用处理流水线，返回 MCP 结构化工具结果。
 
@@ -139,8 +139,8 @@ async def execute_generation_handler(
                     module_logger=module_logger,
                 )
 
-        auto_save_results: List[Any] = []
-        auto_save_error: Optional[str] = None
+        auto_save_results: list[Any] = []
+        auto_save_error: str | None = None
         if context.enable_auto_save and result.get("success"):
             try:
                 await _safe_report_progress(
@@ -149,7 +149,7 @@ async def execute_generation_handler(
                 await _yield_for_cancellation()
                 shared_download_manager = _try_get_shared_download_manager(ctx)
                 if context.response_format == "url":
-                    auto_save_results = await auto_save_from_urls(
+                    auto_save_results, saveable_indices = await auto_save_from_urls(
                         result,
                         context.prompt,
                         config,
@@ -159,7 +159,7 @@ async def execute_generation_handler(
                         download_manager=shared_download_manager,
                     )
                 else:
-                    auto_save_results = await auto_save_from_base64(
+                    auto_save_results, saveable_indices = await auto_save_from_base64(
                         result,
                         context.prompt,
                         config,
@@ -170,8 +170,9 @@ async def execute_generation_handler(
                     )
 
                 if auto_save_results:
-                    data_key = "url" if context.response_format == "url" else "b64_json"
-                    result = update_result_with_auto_save(result, auto_save_results, data_key)
+                    result = update_result_with_auto_save(
+                        result, auto_save_results, saveable_indices
+                    )
                     saved_count = sum(1 for r in auto_save_results if getattr(r, "success", False))
                     await _safe_ctx_log(
                         ctx,
