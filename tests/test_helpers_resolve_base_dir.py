@@ -30,7 +30,7 @@ def test_resolve_base_dir_accepts_nested_save_path_within_base(
 
     resolved = _resolve_base_dir(config, "sub/dir")
 
-    assert str(resolved).startswith(str(base))
+    assert resolved == (base / "sub" / "dir").resolve()
 
 
 def test_resolve_base_dir_accepts_absolute_save_path_within_base(
@@ -82,3 +82,17 @@ def test_resolve_base_dir_returns_default_when_save_path_missing(
     resolved = _resolve_base_dir(config, None)
 
     assert resolved == base.resolve()
+
+
+def test_resolve_base_dir_falls_back_to_workspace_images_when_base_dir_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """auto_save_base_dir 为 None 时回退到 get_workspace_root()/images。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+    config = SeedreamConfig(api_key="test_key")  # auto_save_base_dir 默认 None
+
+    resolved = _resolve_base_dir(config, None)
+
+    assert resolved == (workspace / "images").resolve()

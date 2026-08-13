@@ -207,3 +207,29 @@ async def test_run_batch_save_passes_through_success_results(
     assert len(results) == 1
     assert results[0].success is True
     assert results[0].local_path == "/tmp/1"
+
+
+# ==================== save_multiple_base64_images 端到端 ====================
+
+
+async def test_save_multiple_base64_images_end_to_end(
+    manager: AutoSaveManager, tmp_path: Path
+) -> None:
+    """合法与非法 payload 混合时，合法项落盘成功、非法项降级为失败结果。"""
+    png_bytes = _minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+    image_data = [
+        {"b64_json": payload, "prompt": "cat"},
+        {"b64_json": "", "prompt": "bad"},  # 空 payload → 保存失败
+    ]
+
+    results = await manager.save_multiple_base64_images(image_data, tool_name="t2i")
+
+    assert len(results) == 2
+    assert results[0].success is True
+    local_path = results[0].local_path
+    assert local_path is not None
+    assert Path(local_path).exists()
+    assert Path(local_path).read_bytes() == png_bytes
+    assert results[1].success is False
+    assert results[1].original_url == "base64"

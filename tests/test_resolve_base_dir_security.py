@@ -43,7 +43,7 @@ def test_resolve_base_dir_accepts_save_path_within_base(
     config = SeedreamConfig(api_key="k", auto_save_base_dir=str(workspace))
 
     resolved = _resolve_base_dir(config, "sub/dir")
-    assert str(resolved).startswith(str(workspace))
+    assert resolved == (workspace / "sub" / "dir").resolve()
 
 
 def test_resolve_base_dir_returns_default_when_no_save_path(

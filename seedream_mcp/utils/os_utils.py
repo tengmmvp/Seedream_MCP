@@ -101,4 +101,6 @@ def open_no_follow_fd(path: PathLike, flags: int) -> int:
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     if no_follow:
         return os.open(str(path), flags | no_follow)
-    return _open_no_follow_fallback(str(path), flags, creating=True, action="写入")
+    return _open_no_follow_fallback(
+        str(path), flags, creating=bool(flags & os.O_CREAT), action="写入"
+    )

@@ -9,8 +9,8 @@ from __future__ import annotations
 # 自动保存单文件大小上限默认值，config 与 download_manager 共享此单一来源
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
-# 校验与浏览支持的图片扩展名，小写且含点号
-SUPPORTED_IMAGE_EXTENSIONS: list[str] = [
+# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in 成员判断
+SUPPORTED_IMAGE_EXTENSIONS_ORDERED: list[str] = [
     ".jpg",
     ".jpeg",
     ".png",
@@ -21,6 +21,7 @@ SUPPORTED_IMAGE_EXTENSIONS: list[str] = [
     ".heic",
     ".heif",
 ]
+SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)
 
 # 扩展名到 MIME 类型映射，用于本地文件转 Data URI
 MIME_BY_EXTENSION: dict[str, str] = {

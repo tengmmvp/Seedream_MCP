@@ -72,7 +72,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
 # Start the service
-ARK_API_KEY=your_api_key_here docker-compose up -d
+ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-compose up -d
 ```
 
 ## 🔧 Client Configuration
@@ -372,10 +372,12 @@ Make sure the environment variable is set:
 ```bash
 # Linux/macOS
 export ARK_API_KEY=your_key
+export SEEDREAM_HTTP_AUTH_TOKEN=your_token
 docker-compose up -d
 
 # Windows
 $env:ARK_API_KEY="your_key"
+$env:SEEDREAM_HTTP_AUTH_TOKEN="your_token"
 docker-compose up -d
 ```
 

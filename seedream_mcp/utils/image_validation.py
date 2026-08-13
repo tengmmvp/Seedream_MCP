@@ -16,10 +16,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .errors import SeedreamValidationError
-from .formats import SUPPORTED_IMAGE_EXTENSIONS, _format_file_size_mb, parse_data_uri
+from .formats import (
+    SUPPORTED_IMAGE_EXTENSIONS,
+    SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
+    _format_file_size_mb,
+    parse_data_uri,
+)
 from .os_utils import open_no_follow_read
 
-# HEIC/HEIF 解码器惰性注册，避免模块导入时的全局副作用，首次校验图片时按需注册
+# HEIC/HEIF 解码器惰性注册，避免模块导入时的全局副作用，首次校验图片时按需注册。
+# check-then-set 非线程安全，并发首调用可能重复注册；register_heif_opener 与
+# MAX_IMAGE_PIXELS 赋值均幂等，重复执行无功能影响。
 _heif_opener_registered = False
 
 
@@ -37,6 +44,20 @@ def _ensure_heif_opener_registered() -> None:
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     register_heif_opener()
     _heif_opener_registered = True
+
+
+def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None:
+    """解码图像字节并校验像素维度，供本地文件与预处理两条路径复用。
+
+    image_bytes 为已读取的完整图像字节，value_label 用于错误信息。维度超限由
+    _validate_image_dimensions 抛 SeedreamValidationError；解码异常抛 PIL 原生类型，
+    由调用方按所属模块的异常基类包装。
+    """
+    from PIL import Image
+
+    _ensure_heif_opener_registered()
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        _validate_image_dimensions(img.size[0], img.size[1], value_label)
 
 
 # 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用
@@ -143,7 +164,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         # 检查文件扩展名
         if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
             raise SeedreamValidationError(
-                f"不支持的图像格式: {path.suffix}，支持的格式: {SUPPORTED_IMAGE_EXTENSIONS}",
+                f"不支持的图像格式: {path.suffix}，支持的格式: {SUPPORTED_IMAGE_EXTENSIONS_ORDERED}",
                 field="image",
                 value=file_path,
             )
@@ -161,14 +182,12 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         if not skip_dimensions:
             from PIL import Image
 
-            # 经 open_no_follow_read 读取字节后再交 PIL 解码，拒绝最终分量符号链接，
+            # 经 open_no_follow_read 读取字节后交共享解码校验，拒绝最终分量符号链接，
             # 与 image_input._prepare_local_image 保持一致的安全语义
             try:
-                _ensure_heif_opener_registered()
                 with open_no_follow_read(path) as f:
                     image_bytes = f.read()
-                with Image.open(io.BytesIO(image_bytes)) as img:
-                    _validate_image_dimensions(img.size[0], img.size[1], file_path)
+                decode_and_validate_dimensions(image_bytes, file_path)
             except OSError as exc:
                 raise SeedreamValidationError(
                     f"无法读取文件: {path} -> {exc}",
@@ -258,9 +277,7 @@ def _validate_data_uri(data_uri: str) -> str:
         from PIL import Image
 
         try:
-            _ensure_heif_opener_registered()
-            with Image.open(io.BytesIO(raw)) as img:
-                _validate_image_dimensions(img.size[0], img.size[1], data_uri)
+            decode_and_validate_dimensions(raw, data_uri)
         except (OSError, ValueError, Image.DecompressionBombError) as e:
             raise SeedreamValidationError(
                 f"图像维度解析失败: {str(e)}", field="image", value=data_uri

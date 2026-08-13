@@ -137,7 +137,7 @@ jobs:
             #### Docker Compose 运行
             ```bash
             curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
-            ARK_API_KEY=your_api_key_here docker-compose up -d
+            ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-compose up -d
             ```
 
             ### 🔧 配置说明

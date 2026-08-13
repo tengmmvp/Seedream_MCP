@@ -15,12 +15,37 @@ from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.errors import SeedreamValidationError
 
 
+class _LazyOptWrapper:
+    """opt(lazy=True) 返回的包装：求值 lazy callable 实参后委托回 FakeLogger。
+
+    loguru 的 lazy=True 把 lambda 作为实参传入，须在记录时求值后再格式化；若 opt 直接
+    返回自身，lambda 对象本身进入格式化字符串，掩盖 _summarize_prompt 等求值路径未运行。
+    """
+
+    def __init__(self, owner: "FakeLogger") -> None:
+        self._owner = owner
+
+    def info(self, message: str, *args: Any) -> None:
+        evaluated = tuple(arg() if callable(arg) else arg for arg in args)
+        self._owner.info(message, *evaluated)
+
+    def debug(self, message: str, *args: Any) -> None:
+        del message, args
+
+    def warning(self, message: str, *args: Any) -> None:
+        del message, args
+
+    def error(self, message: str, *args: Any, **kwargs: Any) -> None:
+        del message, args, kwargs
+
+
 class FakeLogger:
     def __init__(self) -> None:
         self.info_messages: List[str] = []
 
-    def opt(self, *args: Any, **kwargs: Any) -> "FakeLogger":
-        return self
+    def opt(self, *args: Any, **kwargs: Any) -> _LazyOptWrapper:
+        del args, kwargs
+        return _LazyOptWrapper(self)
 
     def info(self, message: str, *args: Any) -> None:
         self.info_messages.append(message.format(*args) if args else message)
@@ -537,6 +562,37 @@ def test_summarize_prompt_does_not_expose_prompt_plaintext() -> None:
     assert "len=" in meta
     assert "sha256=" in meta
     assert prompt not in meta
+
+
+def test_build_api_result_marks_partial_when_completed_data_has_error() -> None:
+    """非 SSE JSON 路径：status=completed 但 data 含 error 项须降级为 partial。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {
+            "status": "completed",
+            "data": [
+                {"url": "http://x/1.png"},
+                {"error": {"code": "blocked", "message": "blocked"}},
+            ],
+            "usage": {"generated_images": 1},
+        }
+    )
+    assert result["success"] is True
+    assert result["status"] == "partial"
+
+
+def test_build_api_result_marks_partial_when_status_missing_data_has_error() -> None:
+    """status 缺省且 data 含 error 项同样须标记 partial。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result({"data": [{"error": "boom"}]})
+    assert result["status"] == "partial"
+
+
+def test_build_api_result_keeps_completed_when_no_error_in_data() -> None:
+    """无 error 项时不误降级，status 保持 completed。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result({"status": "completed", "data": [{"url": "http://x/1.png"}]})
+    assert result["status"] == "completed"
 
 
 @pytest.mark.asyncio

@@ -10,43 +10,13 @@
 
 采用 PEP 562 的 ``__getattr__`` 延迟加载：包导入时不初始化 PIL、aiohttp、aiofiles
 等重型依赖，仅在首次访问导出名时按需导入对应子模块，兼顾导入性能与循环引用规避。
-``__all__`` 与 ``_LAZY_EXPORTS`` 的键须保持一致，前者声明公开接口，后者提供加载映射。
+``__all__`` 程序化派生自 ``_LAZY_EXPORTS`` 的键，二者天然一致，无需手动维护。
 """
 
 from __future__ import annotations
 
 from importlib import import_module
 from typing import Any
-
-# 公开接口声明
-__all__ = [
-    # 异常类型
-    "SeedreamMCPError",
-    "SeedreamConfigError",
-    "SeedreamAPIError",
-    # 数据验证函数
-    "validate_prompt",
-    "validate_image_input",
-    "validate_size",
-    # 日志配置
-    "setup_logging",
-    # 下载管理
-    "DownloadManager",
-    "DownloadError",
-    # 文件管理
-    "FileManager",
-    "FileManagerError",
-    # 自动保存
-    "AutoSaveManager",
-    "AutoSaveResult",
-    "AutoSaveError",
-    # 路径处理工具
-    "normalize_path",
-    "validate_image_path",
-    "get_relative_path",
-    "find_images_in_directory",
-    "suggest_similar_paths",
-]
 
 # 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)
 # 包导入不再触发 PIL/aiohttp/aiofiles 等重型依赖初始化，仅在首次访问时按需加载
@@ -76,6 +46,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "find_images_in_directory": (".path_utils", "find_images_in_directory"),
     "suggest_similar_paths": (".path_utils", "suggest_similar_paths"),
 }
+
+# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步
+__all__ = list(_LAZY_EXPORTS)
 
 
 def __getattr__(name: str) -> Any:

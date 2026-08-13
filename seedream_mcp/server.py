@@ -12,6 +12,7 @@ from __future__ import annotations
 # 标准库导入
 import asyncio
 import json
+import sys
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
@@ -117,13 +118,17 @@ _shared_init_lock = asyncio.Lock()
 
 def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     """
-    从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置。
+    从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。
 
-    工具通过 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局状态。
+    工具与资源经 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局
+    状态，消除热重载窗口内活动配置与请求实际使用的配置不一致。
     """
     state = ctx.request_context.lifespan_context
     config = state.get("config") if isinstance(state, dict) else None
-    return config if isinstance(config, SeedreamConfig) else get_active_config()
+    if isinstance(config, SeedreamConfig):
+        return config
+    logger.warning("lifespan 上下文未注入配置，回退全局活动配置")
+    return get_active_config()
 
 
 async def _safe_close(obj: Any) -> None:
@@ -375,7 +380,8 @@ async def workspace_roots_resource() -> str:
 @mcp.resource("seedream://server/info")
 async def server_info_resource() -> str:
     """服务器版本与当前生效配置摘要。"""
-    config = get_active_config()
+    ctx = mcp.get_context()
+    config = _config_from_context(ctx)
     return json.dumps(
         {
             "name": SERVER_NAME,
@@ -473,7 +479,7 @@ def cli_main() -> int:
     try:
         config = _build_config_from_args(args)
     except SeedreamConfigError as exc:
-        print(f"配置错误: {exc.message}")
+        print(f"配置错误: {exc.message}", file=sys.stderr)
         return 1
 
     # 注入活动配置，server 的 client/tools 与 path_utils 经 get_active_config 共用此实例，
@@ -495,6 +501,14 @@ def cli_main() -> int:
     try:
         transport = _build_run_options(args)
         if transport == "streamable-http":
+            if (args.ssl_certfile is None) != (args.ssl_keyfile is None):
+                message = (
+                    "配置错误：--ssl-certfile 与 --ssl-keyfile 必须同时提供或同时省略，"
+                    "仅提供其一无法建立 TLS。"
+                )
+                logger.error(message)
+                print(message, file=sys.stderr)
+                return 1
             auth_token = _resolve_http_auth_token(args)
             is_loopback = args.host in _LOOPBACK_HOSTS
             has_tls = bool(args.ssl_certfile)
@@ -505,7 +519,7 @@ def cli_main() -> int:
                         "请通过 --auth-token 或 SEEDREAM_HTTP_AUTH_TOKEN 提供，避免未授权访问。"
                     )
                     logger.error(message)
-                    print(message)
+                    print(message, file=sys.stderr)
                     return 1
                 if not has_tls and not args.insecure_allow_non_tls:
                     message = (
@@ -514,7 +528,7 @@ def cli_main() -> int:
                         "显式传 --insecure-allow-non-tls，避免 Bearer 令牌明文传输被窃听。"
                     )
                     logger.error(message)
-                    print(message)
+                    print(message, file=sys.stderr)
                     return 1
             _apply_http_bind_settings(
                 args.host,
@@ -536,7 +550,7 @@ def cli_main() -> int:
         return 0
     except Exception as exc:
         logger.error("服务器运行异常", exc_info=True)
-        print(f"服务器运行失败: {format_error_for_user(exc)}")
+        print(f"服务器运行失败: {format_error_for_user(exc)}", file=sys.stderr)
         return 1
     finally:
         _sync_cleanup()

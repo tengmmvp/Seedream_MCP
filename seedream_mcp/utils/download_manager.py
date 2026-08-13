@@ -46,6 +46,10 @@ _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 # 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验
 _MAX_REDIRECTS = 3
 
+# DNS 缓存条目上限：长生命周期下持续解析不同 host 会导致缓存无界增长，
+# 超过此阈值时清理已过期条目，仍存活的条目保留以维持命中率
+_DNS_CACHE_MAX_SIZE = 256
+
 
 def sanitize_url(url: str) -> str:
     """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
@@ -315,7 +319,19 @@ class DownloadManager:
         ip_tuple = tuple(sorted(resolved_ips))
         async with self._dns_cache_lock:
             self._dns_cache[host] = (time.time() + self._dns_cache_ttl, ip_tuple)
+            if len(self._dns_cache) > _DNS_CACHE_MAX_SIZE:
+                self._evict_expired_dns_entries()
         return ip_tuple
+
+    def _evict_expired_dns_entries(self) -> None:
+        """清理已过期的 DNS 缓存条目，防止长生命周期下多 host 缓存无界增长。
+
+        仅移除已过期条目，存活条目保留以维持缓存命中率；调用方须已持有
+        ``_dns_cache_lock``。
+        """
+        now = time.time()
+        for expired_host in [h for h, (exp, _) in self._dns_cache.items() if exp <= now]:
+            self._dns_cache.pop(expired_host, None)
 
     async def _validate_public_dns(self, host: str) -> None:
         """异步解析域名并确保解析结果全部为公网 IP。"""

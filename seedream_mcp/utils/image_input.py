@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 from urllib.parse import urlparse
 
 from PIL import Image
@@ -20,8 +19,7 @@ from .logging import get_logger
 from .os_utils import open_no_follow_read
 from .path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
 from .image_validation import (
-    _ensure_heif_opener_registered,
-    _validate_image_dimensions,
+    decode_and_validate_dimensions,
     validate_image_input,
 )
 
@@ -100,13 +98,17 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     # 符号链接或打开失败抛 OSError，由 prepare_image_input 外层转 SeedreamAPIError。
     with open_no_follow_read(validated_path) as f:
         image_bytes = f.read()
-    # 维度校验复用已读字节，避免再次打开文件。
+    # 维度校验复用已读字节，维度相关异常与 image_validation 路径对齐为 SeedreamValidationError
     try:
-        _ensure_heif_opener_registered()
-        with Image.open(io.BytesIO(image_bytes)) as img:
-            _validate_image_dimensions(img.size[0], img.size[1], str(validated_path))
+        decode_and_validate_dimensions(image_bytes, str(validated_path))
     except SeedreamValidationError:
         raise
+    except (ValueError, Image.DecompressionBombError) as e:
+        raise SeedreamValidationError(
+            f"图像维度解析失败: {str(e)}",
+            field="image",
+            value=str(validated_path),
+        ) from e
     except Exception as e:
         raise SeedreamAPIError(f"图像维度解析失败: {e}") from e
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")

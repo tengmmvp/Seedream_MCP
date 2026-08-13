@@ -179,3 +179,34 @@ def test_find_images_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
     base_resolved = tmp_path.resolve()
     for image_path in result:
         assert base_resolved in image_path.resolve().parents
+
+
+def test_extensions_parameter_filters_to_given_set(tmp_path: Path) -> None:
+    """显式 extensions 仅返回匹配扩展名的文件，其余图片扩展名被排除。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "b.jpg").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "c.txt").write_bytes(b"x")
+
+    result = find_images_in_directory(str(tmp_path), recursive=False, extensions=[".jpg"])
+
+    assert [p.name for p in result] == ["b.jpg"]
+
+
+def test_find_images_returns_empty_when_directory_missing(tmp_path: Path) -> None:
+    """目录不存在时返回空列表而非抛出异常。"""
+    missing = tmp_path / "does_not_exist"
+    assert find_images_in_directory(str(missing), recursive=False) == []
+
+
+def test_find_images_swallows_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """os.scandir 抛 PermissionError 时扫描该目录返回 False，整体不抛异常、返回空。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _raise_permission(path: Any) -> Any:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(path_utils_module.os, "scandir", _raise_permission)
+
+    assert find_images_in_directory(str(tmp_path), recursive=False) == []

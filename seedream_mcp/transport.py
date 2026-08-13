@@ -110,7 +110,10 @@ class _BearerTokenAuthMiddleware:
             send,
             401,
             body,
-            extra_headers=((b"www-authenticate", b'Bearer error="invalid_token"'),),
+            extra_headers=(
+                (b"www-authenticate", b'Bearer error="invalid_token"'),
+                (b"connection", b"close"),
+            ),
         )
 
 
@@ -166,7 +169,14 @@ class _LimitRequestBodyMiddleware:
                 return
             await send(message)
 
-        await self.app(scope, receive_wrapper, send_wrapper)
+        try:
+            await self.app(scope, receive_wrapper, send_wrapper)
+        except Exception:
+            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，避免冒泡为 500
+            if too_large:
+                await self._send_too_large(send)
+                return
+            raise
 
         if too_large:
             await self._send_too_large(send)
@@ -175,7 +185,7 @@ class _LimitRequestBodyMiddleware:
         body = json.dumps(
             {"error": "request_too_large", "error_description": "Request body exceeds limit"}
         ).encode("utf-8")
-        await _send_asgi_json(send, 413, body)
+        await _send_asgi_json(send, 413, body, extra_headers=((b"connection", b"close"),))
 
 
 class _HealthCheckMiddleware:
@@ -240,6 +250,8 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
             "请确认网络隔离与令牌妥善保管。"
         )
     else:
+        # 防御性死代码：cli_main 对非回环地址未启用鉴权已 fail-closed 拒绝启动，正常路径
+        # 不可达此分支；保留以备绕过 cli_main 直接调用 _apply_http_bind_settings 时的告警。
         message = (
             f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险；"
             "请使用 --auth-token 配置鉴权。"
@@ -267,6 +279,9 @@ def _run_streamable_http(
     from .server import mcp
 
     app = mcp.streamable_http_app()
+    # streamable_http_app 首次调用后缓存 _session_manager 并固定中间件栈，重复调用会在同一
+    # 缓存实例上叠加 add_middleware。生产路径 cli_main 单次调用无叠加风险；测试需重建栈时
+    # 以 monkeypatch 重置 mcp._session_manager 为 None 强制重建，见 test_streamable_http_e2e。
     # Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
     # HealthCheck -> LimitRequestBody -> Bearer -> app：Bearer 最先添加居最内，其后添加
     # 请求体限制使其位于鉴权之外，从而声明超长 Content-Length 的请求在鉴权前即被 413 早拒。

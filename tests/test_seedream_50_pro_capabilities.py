@@ -146,3 +146,24 @@ def test_tools_accepted_for_endpoint_id() -> None:
     assert validate_generation_tools([{"type": "web_search"}], "ep-20241001-abcde") == [
         {"type": "web_search"}
     ]
+
+
+# ==================== 组图生成：5.0 Pro 不支持 ====================
+
+
+def test_supports_sequential_generation_false_for_pro() -> None:
+    """Pro 的能力声明须关闭组图支持，驱动 client 层拒绝组图调用。"""
+    from seedream_mcp.utils.model_capabilities import get_model_capabilities
+
+    assert get_model_capabilities(PRO).supports_sequential_generation is False
+    assert get_model_capabilities(LITE).supports_sequential_generation is True
+
+
+async def test_pro_model_rejects_sequential_generation_call() -> None:
+    """Pro 模型调用组图生成须在能力判定处被拒绝，不进入参数校验与 API 调用。"""
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.config import SeedreamConfig
+
+    client = SeedreamClient(SeedreamConfig(api_key="k", model_id=PRO, max_retries=1))
+    with pytest.raises(SeedreamValidationError, match="不支持组图"):
+        await client.sequential_generation(prompt="t", max_images=3, size="2K")

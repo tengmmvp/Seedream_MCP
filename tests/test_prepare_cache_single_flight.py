@@ -46,9 +46,9 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     # 两个并发 miss 共享同一 task，底层仅调用一次
     assert call_count == 1
     assert first == second == "prepared:https://example.com/ref.png"
-    # 在途 task 完成后应被清理；缓存写入一条结果
+    # 在途 task 完成后应被清理；HTTP URL 跳过缓存，缓存为空
     assert len(client._prepare_inflight) == 0
-    assert len(client._prepare_cache) == 1
+    assert len(client._prepare_cache) == 0
 
 
 @pytest.mark.asyncio
@@ -61,7 +61,7 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     完成，_prepare_inflight 由 task 完成时的 finally 清理，保护共享同一 task 的其他
     等待者不被连带取消。两个并发调用经 ensure_future 同时启动；fake 置位事件后，FIFO
     调度下 creator 先创建 inflight 并 await task，waiter 随后命中 inflight 并 await 同一
-    task。取消 creator 后断言 waiter 仍拿到结果、fake 仅调用一次、缓存正常写入。
+    task。取消 creator 后断言 waiter 仍拿到结果、fake 仅调用一次；HTTP URL 跳过缓存。
     """
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
@@ -107,20 +107,20 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     assert waiter.result() == "prepared:https://example.com/ref.png"
     # fake 底层仅调用一次：两个并发调用共享同一 task
     assert call_count == 1
-    # task 完成后 _prepare_inflight 已清空、缓存写入一条结果
+    # task 完成后 _prepare_inflight 已清空；HTTP URL 跳过缓存，缓存为空
     assert len(client._prepare_inflight) == 0
-    assert len(client._prepare_cache) == 1
+    assert len(client._prepare_cache) == 0
 
 
 @pytest.mark.asyncio
 async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """等待者被取消时仅退出自身；共享的 inflight task 继续运行至完成并写入缓存。
+    """等待者被取消时仅退出自身；共享的 inflight task 继续运行至完成。
 
     single-flight 取消隔离契约的另一侧：等待者 await asyncio.shield(inflight) 被取消时，
     shield 仅取消其自身的外层 await，底层共享 task 不受连带取消，继续运行直至完成，
-    _prepare_inflight 由 task 完成时的 finally 清理，缓存正常写入。两个并发调用经
+    _prepare_inflight 由 task 完成时的 finally 清理；HTTP URL 跳过缓存。两个并发调用经
     ensure_future 同时启动；fake 置位事件后，FIFO 调度下 creator 先创建 inflight 并
     await task，waiter 随后命中 inflight 并 await 同一 task。
     """
@@ -159,9 +159,9 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     # 创建者共享同一 inflight task，仍拿到正确结果；底层仅调用一次
     assert creator.result() == "prepared:https://example.com/ref.png"
     assert call_count == 1
-    # inflight 完成后已清空，结果写入缓存
+    # inflight 完成后已清空；HTTP URL 跳过缓存，缓存为空
     assert len(client._prepare_inflight) == 0
-    assert len(client._prepare_cache) == 1
+    assert len(client._prepare_cache) == 0
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,34 @@ logger = get_logger(__name__)
 # 文件名长度上限，避免超出常见文件系统目录项长度限制
 _MAX_FILENAME_LENGTH = 200
 
+# Windows 保留设备名，命中时在词干后追加下划线避免被解释为设备而非文件
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+)
+
 
 def _is_reparse_point(path: Path) -> bool:
     """判断路径是否为 NTFS junction 等非符号链接型 reparse point。
@@ -134,7 +162,7 @@ class FileManager:
             return False
 
     def sanitize_filename(self, filename: str) -> str:
-        """清理文件名，移除文件系统不安全字符。
+        """清理文件名，移除文件系统不安全字符并规避 Windows 保留设备名。
 
         Args:
             filename: 原始文件名。
@@ -150,6 +178,15 @@ class FileManager:
         if len(filename) > _MAX_FILENAME_LENGTH:
             name, ext = os.path.splitext(filename)
             filename = name[: max(0, _MAX_FILENAME_LENGTH - len(ext))] + ext
+
+        # Windows 保留设备名处理：CON.txt、NUL 等在 Windows 上会被解释为设备而非文件，
+        # 命中时在首个点前追加下划线使词干不再匹配保留名
+        parts = filename.split(".", 1)
+        # Windows 解析设备名前会剥离前导点与首尾空格，按同样规则归一化词干再判断
+        stem = parts[0].strip(". ")
+        if stem.upper() in _WINDOWS_RESERVED_NAMES:
+            parts[0] += "_"
+            filename = ".".join(parts)
 
         if not filename.strip():
             filename = "unnamed"
@@ -370,10 +407,21 @@ class FileManager:
                 ext = final_path.suffix
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
-            # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 os_utils 统一实现；
-            # 符号链接或打开失败抛 OSError，由下方 except 转 FileManagerError。
-            with open_no_follow_write(final_path) as f:
-                f.write(data)
+            # 原子落盘：先写 .part 临时文件再 replace 替换，崩溃时仅残留 .part 而非损坏
+            # 目标文件，与 download_manager 下载路径的落盘语义一致。O_NOFOLLOW 防护由
+            # os_utils 统一实现，符号链接或打开失败抛 OSError 由下方 except 转 FileManagerError。
+            tmp_path = final_path.with_name(f"{final_path.name}.part")
+            replaced = False
+            try:
+                with open_no_follow_write(tmp_path) as f:
+                    f.write(data)
+                tmp_path.replace(final_path)
+                replaced = True
+            finally:
+                # replace 成功后 tmp_path 已重命名不存在；异常路径含 KeyboardInterrupt 等
+                # 非 OSError 也须清理残留，与 download_manager 落盘鲁棒性对齐
+                if not replaced:
+                    tmp_path.unlink(missing_ok=True)
             return {
                 "file_path": str(final_path),
                 "file_size": len(data),

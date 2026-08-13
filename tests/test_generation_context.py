@@ -343,3 +343,11 @@ def test_build_generation_context_explicit_auto_save_overrides_config() -> None:
     ctx = build_generation_context({"prompt": "t", "auto_save": False}, config)
 
     assert ctx.enable_auto_save is False
+
+
+def test_build_generation_context_rejects_non_bool_auto_save() -> None:
+    """auto_save 为非 bool 值（如字符串）须在上下文构建处被拒绝。"""
+    config = _build_config()
+
+    with pytest.raises(SeedreamValidationError, match="auto_save 必须是布尔值"):
+        build_generation_context({"prompt": "t", "auto_save": "yes"}, config)

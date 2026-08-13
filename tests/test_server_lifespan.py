@@ -40,8 +40,8 @@ async def test_app_lifespan_yields_config_and_client(
         assert state["config"] is config
         client = state["client"]
         assert client is not None
-        # client 在 lifespan 期内应可用，须持有 httpx 客户端或具备 close 方法
-        assert getattr(client, "_client", None) is not None or hasattr(client, "close")
+        # client 在 lifespan 期内应已持有可用的 httpx 客户端
+        assert client._client is not None
         # download_manager 同样注入
         assert state["download_manager"] is not None
 

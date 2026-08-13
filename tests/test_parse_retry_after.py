@@ -34,3 +34,20 @@ def test_parse_retry_after_http_date_future() -> None:
 def test_parse_retry_after_http_date_past_returns_none() -> None:
     past = datetime.now(timezone.utc) - timedelta(seconds=60)
     assert parse_retry_after({"retry-after": format_datetime(past, usegmt=True)}) is None
+
+
+def test_parse_retry_after_zero_clamped_to_min() -> None:
+    """值为 0 时按下限兜底为最小等待秒数，避免紧密重试风暴。"""
+    assert parse_retry_after({"retry-after": "0"}) == 1.0
+
+
+def test_parse_retry_after_uppercase_header_key() -> None:
+    """大写驼峰键名 Retry-After 须同样可解析。"""
+    assert parse_retry_after({"Retry-After": "120"}) == 120.0
+
+
+def test_parse_retry_after_http_date_far_future_clamped_to_max() -> None:
+    """HTTP-date 指向远期时被上限钳制为最大等待秒数，避免被诱导长时间睡眠。"""
+    far_future = datetime.now(timezone.utc) + timedelta(seconds=99999)
+    result = parse_retry_after({"retry-after": format_datetime(far_future, usegmt=True)})
+    assert result == 300.0

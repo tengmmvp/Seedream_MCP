@@ -7,11 +7,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.common import extract_images
+from seedream_mcp.tools.core.context import build_generation_context
 from seedream_mcp.tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
 )
+from seedream_mcp.tools.core.results import _build_generation_structured_result
+from seedream_mcp.tools.impl.browse_images import _build_browse_structured_result
 
 
 def test_generation_success_path_matches_schema() -> None:
@@ -141,3 +147,71 @@ def test_extract_images_normalizes_null_and_non_dict_to_empty() -> None:
     assert extract_images({"data": [None, {"url": "x"}, None]}) == [{"url": "x"}]
     assert extract_images({}) == []  # 缺少 data 键
     assert extract_images({"data": "https://example.com/str"}) == []  # 标量无法表达图片
+
+
+def test_real_generation_builder_success_output_instantiates_schema() -> None:
+    """调用真实 _build_generation_structured_result 后须能实例化 GenerationStructuredOutput。
+
+    上述用例以手工 dict 实例化 schema，无法发现 builder 漏写字段或类型漂移。本用例经
+    build_generation_context 产出真实上下文，再交由真实 builder 构造 structuredContent，
+    最后实例化 pydantic 模型，端到端验证 builder 输出与声明的 outputSchema 一致。
+    """
+    config = SeedreamConfig(api_key="k")
+    context = build_generation_context({"prompt": "a cat", "size": "2K"}, config)
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"url": "https://example.com/1.png"}],
+        "usage": {"generated_images": 1},
+    }
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=context,
+        auto_save_results=None,
+        auto_save_error=None,
+    )
+    obj = GenerationStructuredOutput(**structured)
+    assert obj.success is True
+    assert obj.tool == "seedream_text_to_image"
+    assert obj.prompt == "a cat"
+    assert obj.data == [{"url": "https://example.com/1.png"}]
+
+
+def test_real_generation_builder_failure_output_instantiates_schema() -> None:
+    """失败路径的 builder 输出同样须能实例化 schema，覆盖 error 归一化分支。"""
+    config = SeedreamConfig(api_key="k")
+    context = build_generation_context({"prompt": "a cat", "size": "2K"}, config)
+    result = {"success": False, "status": "failed", "error": "生成超时"}
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=context,
+        auto_save_results=None,
+        auto_save_error=None,
+    )
+    obj = GenerationStructuredOutput(**structured)
+    assert obj.success is False
+    assert obj.error == {"type": "generation_failed", "message": "生成超时"}
+
+
+def test_real_browse_builder_output_instantiates_schema(tmp_path: Path) -> None:
+    """调用真实 _build_browse_structured_result 后须能实例化 BrowseImagesStructuredOutput。"""
+    workspace = tmp_path / "ws"
+    structured = _build_browse_structured_result(
+        status="completed",
+        workspace_roots=[workspace],
+        directory=".",
+        resolved_directories=[workspace],
+        recursive=True,
+        max_depth=3,
+        limit=50,
+        offset=0,
+        show_details=False,
+        format_filter=[".png", ".jpg"],
+        images=[{"index": 1, "path": "a.png"}],
+    )
+    obj = BrowseImagesStructuredOutput(**structured)
+    assert obj.success is True
+    assert obj.count == 1
+    assert obj.format_filter == [".png", ".jpg"]

@@ -16,6 +16,26 @@ from typing import Any, Awaitable, Callable, ParamSpec, TypeVar, overload
 from loguru import logger
 
 
+class InterceptHandler(logging.Handler):
+    """将标准库 logging 的调用重定向至 loguru 的桥接处理器。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        log_level: str | int
+        try:
+            log_level = logger.level(record.levelname).name
+        except ValueError:
+            log_level = record.levelno
+
+        # 向上跳过 logging 模块自身的帧，定位真实调用者以计算正确的日志深度
+        frame: FrameType | None = logging.currentframe()
+        depth = 2
+        while frame is not None and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
+
+
 def setup_logging(
     log_level: str = "INFO",
     log_file: str | None = None,
@@ -76,24 +96,6 @@ def setup_logging(
             diagnose=False,
             enqueue=True,
         )
-
-    # 配置标准库 logging 以重定向到 loguru
-    class InterceptHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            log_level: str | int
-            try:
-                log_level = logger.level(record.levelname).name
-            except ValueError:
-                log_level = record.levelno
-
-            # 向上跳过 logging 模块自身的帧，定位真实调用者以计算正确的日志深度
-            frame: FrameType | None = logging.currentframe()
-            depth = 2
-            while frame is not None and frame.f_code.co_filename == logging.__file__:
-                frame = frame.f_back
-                depth += 1
-
-            logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
 
     # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru
     logging.basicConfig(

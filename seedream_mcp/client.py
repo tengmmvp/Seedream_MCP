@@ -28,6 +28,7 @@ from .utils.errors import (
     SeedreamNetworkError,
     SeedreamTimeoutError,
     SeedreamValidationError,
+    format_error_for_user,
     handle_api_error,
     parse_retry_after,
 )
@@ -228,7 +229,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("文生图任务失败: {}", e)
+            self.logger.error("文生图任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -315,7 +316,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("图文生图任务失败: {}", e)
+            self.logger.error("图文生图任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -406,7 +407,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("多图融合任务失败: {}", e)
+            self.logger.error("多图融合任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -549,7 +550,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.error("组图输出任务失败: {}", e)
+            self.logger.error("组图输出任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     def _validate_common_generation_params(
@@ -840,7 +841,7 @@ class SeedreamClient:
         )
         return {
             "success": True,
-            "data": payload.get("data", []),
+            "data": data or [],
             "usage": payload.get("usage", {}),
             "status": status,
             "tools": payload.get("tools"),
@@ -997,7 +998,16 @@ class SeedreamClient:
                     request_timeout=request_timeout,
                 )
             except SeedreamAPIError as exc:
-                status_code = exc.status_code or 0
+                # 无 HTTP 状态码的错误不可重试。此类错误源于响应体 JSON 解析失败等服务
+                # 端之外的异常，但服务端对非幂等生成 API 可能已完成处理，重试会导致重复生成与计费
+                if exc.status_code is None:
+                    self.logger.warning(
+                        "{} API 调用失败（无 HTTP 状态码，不再重试）: {}",
+                        endpoint,
+                        exc.message,
+                    )
+                    raise
+                status_code = exc.status_code
                 # 429 表示限流，退避后重试；其余 4xx 客户端错误不可重试直接抛出
                 if 400 <= status_code < 500 and status_code != 429:
                     self.logger.warning(
@@ -1182,7 +1192,10 @@ class SeedreamClient:
 
         try:
             prepared = await prepare_image_input(image)
-            self._cache_prepared_result(cache_key, prepared)
+            # HTTP/HTTPS URL 经 prepare_image_input 仅 urlparse 校验后原样返回，缓存无收益
+            # 反而占用 LRU 条目；data URI 与本地文件经解码或编码产生新值，仍照常缓存。
+            if not image.lower().startswith(("http://", "https://")):
+                self._cache_prepared_result(cache_key, prepared)
             return prepared
         finally:
             self._prepare_inflight.pop(cache_key, None)

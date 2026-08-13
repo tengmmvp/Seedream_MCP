@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from ...config import SeedreamConfig
 from ...utils.errors import (
     SeedreamValidationError,
-    _resolve_error_profile,
+    resolve_error_profile,
     format_error_for_user,
 )
 from ...utils.logging import get_logger
@@ -72,7 +72,7 @@ def _classify_generation_error_type(exc: Exception) -> str:
     错误码统一来自 errors 模块的归约档案，单发与并发路径共用此函数使两条路径的错误码
     契约一致，且不泄露实现细节。
     """
-    return _resolve_error_profile(exc).error_code
+    return resolve_error_profile(exc).error_code
 
 
 def _extract_parallel_request_error(

@@ -375,6 +375,8 @@ def _build_generation_structured_result(
         images: 预提取的图片列表，传入时直接写入 data，避免重复调用 extract_images；
             None 时从 result 提取，便于函数独立调用。
     """
+    # b64_json 模式下 data 内的完整 base64 为有意保留：用户显式请求 b64 即期望取回图像
+    # 数据，故此处不做截断；并行与组图场景的大载荷由调用方或客户端按需处理。
     structured: dict[str, Any] = {
         "tool": tool_name,
         "success": bool(result.get("success")),

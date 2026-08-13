@@ -330,3 +330,49 @@ def test_field_env_map_covers_all_optional_config_fields() -> None:
         f.name for f in dataclass_fields(config_module.SeedreamConfig) if f.name != "api_key"
     }
     assert set(config_module._FIELD_ENV_MAP) == optional_field_names
+
+
+# ==================== __post_init__ 字段边界校验 ====================
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"prepare_cache_max_bytes": 0}, "prepare_cache_max_bytes"),
+        ({"auto_save_max_file_size": 0}, "auto_save_max_file_size"),
+        ({"auto_save_max_file_size": -1}, "auto_save_max_file_size"),
+        ({"auto_save_download_timeout": 0}, "auto_save_download_timeout"),
+        ({"auto_save_download_timeout": -5}, "auto_save_download_timeout"),
+        ({"auto_save_max_concurrent": 0}, "auto_save_max_concurrent"),
+        ({"auto_save_cleanup_days": -1}, "auto_save_cleanup_days"),
+        ({"stream_buffer_max_size": 0}, "stream_buffer_max_size"),
+        ({"stream_chunk_size": 0}, "stream_chunk_size"),
+        ({"stream_chunk_size": -1}, "stream_chunk_size"),
+    ],
+)
+def test_seedream_config_rejects_invalid_positive_or_non_negative_field(
+    kwargs: dict, match: str
+) -> None:
+    """各数值字段越界时 __post_init__ 经 validate 抛 SeedreamConfigError。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match=match):
+        SeedreamConfig(api_key="k", **kwargs)
+
+
+def test_seedream_config_rejects_chunk_size_greater_than_buffer() -> None:
+    """stream_chunk_size 大于 stream_buffer_max_size 须被拒绝。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(
+        SeedreamConfigError, match="stream_chunk_size不能大于stream_buffer_max_size"
+    ):
+        SeedreamConfig(api_key="k", stream_chunk_size=2048, stream_buffer_max_size=1024)
+
+
+def test_seedream_config_accepts_zero_cleanup_days() -> None:
+    """cleanup_days 下界为 0（含），表示不清理；不得被当成负数拒绝。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", auto_save_cleanup_days=0)
+    assert config.auto_save_cleanup_days == 0

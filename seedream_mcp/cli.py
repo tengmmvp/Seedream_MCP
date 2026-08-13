@@ -11,6 +11,7 @@ import argparse
 from typing import Literal, cast
 
 from .config import LEGAL_LOG_LEVELS, MODEL_ALIASES, SeedreamConfig, build_config_from_sources
+from .version import __version__
 
 
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
@@ -42,6 +43,17 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     )
 
 
+def _port_type(value: str) -> int:
+    """argparse type 校验端口为 1-65535 范围内的整数。"""
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"端口必须为整数，收到 {value!r}")
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"端口必须在 1-65535 范围内，收到 {port}")
+    return port
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """
     构建命令行参数解析器
@@ -61,6 +73,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
   --default-size 4K --log-level DEBUG
   seedream-image-mcp --api-key your_key_here --config-file ./config.env
         """,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
 
     # API 认证配置
@@ -131,9 +148,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--port",
-        type=int,
+        type=_port_type,
         default=8000,
-        help="streamable-http 监听端口（默认 8000，仅 streamable-http 生效）",
+        help="streamable-http 监听端口（默认 8000，仅 streamable-http 生效，范围 1-65535）",
     )
     parser.add_argument(
         "--stateless",

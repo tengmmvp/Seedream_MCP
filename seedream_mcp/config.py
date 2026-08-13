@@ -202,17 +202,16 @@ class SeedreamConfig:
         if self.workspace_root:
             self._validate_dir_field(self.workspace_root, "workspace_root")
 
-    def _validate_dir_field(self, value: str, field_name: str) -> Path:
+    def _validate_dir_field(self, value: str, field_name: str) -> None:
         """校验给定路径指向有效目录，存在但非目录时抛 SeedreamConfigError。
 
-        返回展开 ~ 后的 Path。仅校验已存在路径的目录性，不要求目录预先存在，
+        仅校验已存在路径的目录性，不要求目录预先存在，
         使未创建的目录也能通过校验以便后续按需创建。
         """
         try:
             dir_path = Path(value).expanduser()
             if dir_path.exists() and not dir_path.is_dir():
                 raise SeedreamConfigError(f"{field_name}不是有效目录: {value}")
-            return dir_path
         except SeedreamConfigError:
             raise
         except Exception as exc:
@@ -465,84 +464,108 @@ def _build_config_from_sources_unlocked(
     )
     model_id = normalize_model_selector(raw_model)
 
-    return SeedreamConfig(
-        api_key=api_key,
-        base_url=_pick_str(override_values, "base_url", "ARK_BASE_URL", env_values),
-        model_id=model_id,
-        default_size=_pick_str(
+    config_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        "base_url": _pick_str(override_values, "base_url", "ARK_BASE_URL", env_values),
+        "model_id": model_id,
+        "default_size": _pick_str(
             override_values, "default_size", "SEEDREAM_DEFAULT_SIZE", env_values
         ),
         # override 键名 "watermark" 对应 SeedreamConfig.default_watermark 字段，
         # 与 "model" 同属 CLI 简称，未与字段同名。
-        default_watermark=_pick_bool(
+        "default_watermark": _pick_bool(
             override_values, "watermark", "SEEDREAM_DEFAULT_WATERMARK", env_values
         ),
-        timeout=_pick_int(override_values, "timeout", "SEEDREAM_TIMEOUT", env_values),
-        api_timeout=_pick_int(override_values, "api_timeout", "SEEDREAM_API_TIMEOUT", env_values),
-        max_retries=_pick_int(override_values, "max_retries", "SEEDREAM_MAX_RETRIES", env_values),
-        log_level=_pick_str(override_values, "log_level", "LOG_LEVEL", env_values),
-        log_file=_pick_optional_str(override_values, "log_file", "LOG_FILE", env_values),
-        auto_save_enabled=_pick_bool(
+        "timeout": _pick_int(override_values, "timeout", "SEEDREAM_TIMEOUT", env_values),
+        "api_timeout": _pick_int(
+            override_values, "api_timeout", "SEEDREAM_API_TIMEOUT", env_values
+        ),
+        "max_retries": _pick_int(
+            override_values, "max_retries", "SEEDREAM_MAX_RETRIES", env_values
+        ),
+        "log_level": _pick_str(override_values, "log_level", "LOG_LEVEL", env_values),
+        "log_file": _pick_optional_str(override_values, "log_file", "LOG_FILE", env_values),
+        "auto_save_enabled": _pick_bool(
             override_values, "auto_save_enabled", "SEEDREAM_AUTO_SAVE_ENABLED", env_values
         ),
-        auto_save_base_dir=_pick_optional_str(
+        "auto_save_base_dir": _pick_optional_str(
             override_values, "auto_save_base_dir", "SEEDREAM_AUTO_SAVE_BASE_DIR", env_values
         ),
-        auto_save_download_timeout=_pick_int(
+        "auto_save_download_timeout": _pick_int(
             override_values,
             "auto_save_download_timeout",
             "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT",
             env_values,
         ),
-        auto_save_max_retries=_pick_int(
-            override_values, "auto_save_max_retries", "SEEDREAM_AUTO_SAVE_MAX_RETRIES", env_values
+        "auto_save_max_retries": _pick_int(
+            override_values,
+            "auto_save_max_retries",
+            "SEEDREAM_AUTO_SAVE_MAX_RETRIES",
+            env_values,
         ),
-        auto_save_max_file_size=_pick_int(
+        "auto_save_max_file_size": _pick_int(
             override_values,
             "auto_save_max_file_size",
             "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
             env_values,
         ),
-        auto_save_max_concurrent=_pick_int(
+        "auto_save_max_concurrent": _pick_int(
             override_values,
             "auto_save_max_concurrent",
             "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT",
             env_values,
         ),
-        auto_save_date_folder=_pick_bool(
-            override_values, "auto_save_date_folder", "SEEDREAM_AUTO_SAVE_DATE_FOLDER", env_values
+        "auto_save_date_folder": _pick_bool(
+            override_values,
+            "auto_save_date_folder",
+            "SEEDREAM_AUTO_SAVE_DATE_FOLDER",
+            env_values,
         ),
-        auto_save_cleanup_days=_pick_int(
-            override_values, "auto_save_cleanup_days", "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS", env_values
+        "auto_save_cleanup_days": _pick_int(
+            override_values,
+            "auto_save_cleanup_days",
+            "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS",
+            env_values,
         ),
-        stream_buffer_max_size=_pick_int(
-            override_values, "stream_buffer_max_size", "SEEDREAM_STREAM_BUFFER_MAX_SIZE", env_values
+        "stream_buffer_max_size": _pick_int(
+            override_values,
+            "stream_buffer_max_size",
+            "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
+            env_values,
         ),
-        stream_chunk_size=_pick_int(
+        "stream_chunk_size": _pick_int(
             override_values, "stream_chunk_size", "SEEDREAM_STREAM_CHUNK_SIZE", env_values
         ),
-        image_prepare_concurrency=_pick_int(
+        "image_prepare_concurrency": _pick_int(
             override_values,
             "image_prepare_concurrency",
             "SEEDREAM_IMAGE_PREPARE_CONCURRENCY",
             env_values,
         ),
-        prepare_cache_max=_pick_int(
+        "prepare_cache_max": _pick_int(
             override_values, "prepare_cache_max", "SEEDREAM_PREPARE_CACHE_MAX", env_values
         ),
-        prepare_cache_max_bytes=_pick_int(
+        "prepare_cache_max_bytes": _pick_int(
             override_values,
             "prepare_cache_max_bytes",
             "SEEDREAM_PREPARE_CACHE_MAX_BYTES",
             env_values,
         ),
-        workspace_root=_pick_optional_str(
+        "workspace_root": _pick_optional_str(
             override_values, "workspace_root", "SEEDREAM_WORKSPACE_ROOT", env_values
         ),
-        http_auth_token=_pick_optional_str(
+        "http_auth_token": _pick_optional_str(
             override_values, "http_auth_token", "SEEDREAM_HTTP_AUTH_TOKEN", env_values
         ),
-    )
+    }
+    # 断言所有带 env metadata 的字段都在构造调用中显式传值，防止新增 _env_field 字段
+    # 被静默忽略而仅回落到默认值。开发期同步遗漏会立即暴露。
+    missing_env_fields = set(_FIELD_ENV_MAP.keys()) - set(config_kwargs.keys())
+    if missing_env_fields:
+        raise AssertionError(
+            f"以下字段已声明 env metadata 但未在配置构建中传值: {sorted(missing_env_fields)}"
+        )
+    return SeedreamConfig(**config_kwargs)
 
 
 # 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态

@@ -1,7 +1,10 @@
 """SSE 流式解析的缓冲区上限保护与事件聚合测试。"""
 
+import json
+
 import pytest
 
+import seedream_mcp.utils.sse_parser as sse_parser_module
 from seedream_mcp.utils.errors import SeedreamAPIError
 from seedream_mcp.utils.sse_parser import parse_sse_response, parse_sse_segment
 
@@ -174,3 +177,67 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
     )
     assert result["status"] == "completed"
     assert result["usage"]["generated_images"] == 2
+
+
+async def test_parse_sse_response_offloads_large_segment_to_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单事件体积超过 64KB 阈值时 json.loads 须卸载到工作线程，小事件保持同步解析。"""
+    offload_sizes: list[int] = []
+    real_to_thread = sse_parser_module.asyncio.to_thread
+
+    async def spy(func: object, *args: object, **kwargs: object) -> object:
+        if args and isinstance(args[0], (bytes, bytearray)):
+            offload_sizes.append(len(args[0]))
+        return await real_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sse_parser_module.asyncio, "to_thread", spy)
+
+    big_event = json.dumps({"type": "image_generation.partial_succeeded", "b64_json": "A" * 70000})
+    chunks = [
+        ("data: " + big_event + "\n\n").encode(),
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=256 * 1024,
+        log=_FakeLog(),
+    )
+    assert len(result["data"]) == 1
+    # 仅超 64KB 的大事件经 to_thread 卸载，completed 小事件保持同步解析
+    assert len(offload_sizes) == 1
+    assert offload_sizes[0] > 64 * 1024
+
+
+async def test_parse_sse_response_empty_stream_returns_none_status() -> None:
+    """空流无任何事件：返回 success=True、空 data、status=None、tools=None。"""
+    result = await parse_sse_response(
+        _FakeSSEResponse([]),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        log=_FakeLog(),
+    )
+    assert result["success"] is True
+    assert result["data"] == []
+    assert result["status"] is None
+    assert result["tools"] is None
+
+
+async def test_parse_sse_response_propagates_tools_from_completed_event() -> None:
+    """completed 事件携带的 tools 字段须透传到结果，供联网搜索等用途下游消费。"""
+    chunks = [
+        b'data: {"type":"image_generation.completed",'
+        b'"usage":{"generated_images":1},'
+        b'"tools":[{"type":"web_search"}]}\n\n',
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        log=_FakeLog(),
+    )
+    assert result["tools"] == [{"type": "web_search"}]

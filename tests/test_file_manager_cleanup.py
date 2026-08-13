@@ -39,6 +39,46 @@ def test_cleanup_old_files_removes_expired_and_keeps_recent(tmp_path: Path) -> N
     assert result["deleted_files"] >= 1
 
 
+def test_cleanup_old_files_accumulates_deleted_size_and_prunes_empty_dirs(
+    tmp_path: Path,
+) -> None:
+    """deleted_size 按字节累计；过期文件清空后变空的子目录须被修剪。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    sub = tmp_path / "2024-01-01" / "tool"
+    sub.mkdir(parents=True)
+    old_file = sub / "old.png"
+    old_file.write_bytes(b"x" * 100)
+    old_time = (datetime.now() - timedelta(days=40)).timestamp()
+    os.utime(old_file, (old_time, old_time))
+
+    result = manager.cleanup_old_files(days=30)
+
+    assert result["deleted_files"] == 1
+    assert result["deleted_size"] == 100
+    assert result["errors"] == []
+    # 文件删除后子目录变空，按深度逆序修剪：tool 与 2024-01-01 均被清空删除
+    assert not sub.exists()
+    assert not sub.parent.exists()
+    # base_dir 自身不修剪
+    assert tmp_path.exists()
+
+
+def test_cleanup_old_files_keeps_non_empty_subdir(tmp_path: Path) -> None:
+    """子目录仍含未过期文件时不得被修剪。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    sub = tmp_path / "keep_dir"
+    sub.mkdir()
+    new_file = sub / "new.png"
+    new_file.write_bytes(b"new")  # 未过期
+
+    manager.cleanup_old_files(days=30)
+
+    assert new_file.exists()
+    assert sub.exists()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows 创建符号链接需管理员权限")
 def test_cleanup_old_files_skips_symlink_pointing_outside(tmp_path: Path) -> None:
     """符号链接指向 base_dir 之外时，cleanup 不得删除其目标，防止越权删除。"""

@@ -265,7 +265,7 @@ _GENERIC_MCP_PROFILE = _ErrorProfile("操作失败", "", "generation_failed")
 _UNKNOWN_PROFILE = _ErrorProfile("未知错误", "", "generation_failed")
 
 
-def _resolve_error_profile(error: Exception) -> _ErrorProfile:
+def resolve_error_profile(error: Exception) -> _ErrorProfile:
     """将任意异常归约为统一的错误档案，供展示标题、用户建议与结构化错误码共用。
 
     APIError 优先按 HTTP 状态码查 _HTTP_STATUS_PROFILES；其余按异常类型匹配；
@@ -284,7 +284,7 @@ def _resolve_error_profile(error: Exception) -> _ErrorProfile:
 def format_error_for_user(error: Exception) -> str:
     """按异常类型将错误格式化为面向用户的提示文案。
 
-    展示标题与可操作建议取自 _resolve_error_profile 归约档案；message 统一截断，避免上游
+    展示标题与可操作建议取自 resolve_error_profile 归约档案；message 统一截断，避免上游
     回显的长敏感片段进入用户可见输出；仅 APIError 携带上游错误码时附加错误码提示。
 
     Args:
@@ -293,7 +293,7 @@ def format_error_for_user(error: Exception) -> str:
     Returns:
         格式化的错误信息字符串。
     """
-    profile = _resolve_error_profile(error)
+    profile = resolve_error_profile(error)
     if isinstance(error, SeedreamAPIError):
         # message 可能回显上游响应，截断防长敏感片段进入用户可见输出
         message = _truncate_value_for_output(error.message, limit=_MESSAGE_OUTPUT_LIMIT)
@@ -354,7 +354,9 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
     return value
 
 
-# 敏感字段关键词：键名包含任一关键词即视为敏感，输出时以 *** 脱敏
+# 敏感字段关键词：键名经边界匹配命中任一关键词即视为敏感，输出时以 *** 脱敏。
+# 边界匹配要求键名等于关键词或以下划线分隔包含关键词，避免短词如 key 误命中
+# monkey、keyboard 等无关键名。
 _SENSITIVE_KEY_KEYWORDS = (
     "key",
     "token",
@@ -362,9 +364,7 @@ _SENSITIVE_KEY_KEYWORDS = (
     "passwd",
     "secret",
     "credential",
-    "authorization",
     "auth",
-    "apikey",
     "cookie",
     "session",
     "jwt",
@@ -373,6 +373,10 @@ _SENSITIVE_KEY_KEYWORDS = (
     "nonce",
     "saml",
 )
+
+# 高确信度敏感词：自身足够特异性，直接子串匹配以覆盖 x-authorization、my-apikey
+# 等连字符或无分隔变体，无需边界限定
+_SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey")
 
 
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出
@@ -386,6 +390,26 @@ def _redact_bearer_tokens(value: Any) -> Any:
     return value
 
 
+def _is_sensitive_key(key: Any) -> bool:
+    """判断键名是否命中敏感关键词。
+
+    高确信度词采用子串匹配以覆盖连字符与无分隔变体；其余关键词采用边界匹配，
+    键名等于关键词或以下划线分隔包含关键词方视为命中，避免短词如 key 误匹配。
+    """
+    key_lower = str(key).lower()
+    for substring in _SENSITIVE_KEY_SUBSTRINGS:
+        if substring in key_lower:
+            return True
+    for keyword in _SENSITIVE_KEY_KEYWORDS:
+        if (
+            key_lower == keyword
+            or key_lower.endswith("_" + keyword)
+            or key_lower.startswith(keyword + "_")
+        ):
+            return True
+    return False
+
+
 def _filter_sensitive_data(data: Any) -> Any:
     """递归过滤字典/列表中的敏感字段。
 
@@ -396,7 +420,7 @@ def _filter_sensitive_data(data: Any) -> Any:
         return {
             key: (
                 "***"
-                if any(keyword in str(key).lower() for keyword in _SENSITIVE_KEY_KEYWORDS)
+                if _is_sensitive_key(key)
                 else _filter_sensitive_data(_redact_bearer_tokens(value))
             )
             for key, value in data.items()

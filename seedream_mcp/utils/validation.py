@@ -278,6 +278,10 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
             value=tools,
         )
 
+    # 空列表等同不使用工具，跳过模型能力校验并归一化为 None，避免向 API 传空数组
+    if not tools:
+        return None
+
     if not get_model_capabilities(model_id).supports_tools:
         raise SeedreamValidationError(
             "仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持 tools"

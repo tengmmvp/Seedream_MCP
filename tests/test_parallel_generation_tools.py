@@ -16,7 +16,8 @@ from seedream_mcp.utils.errors import SeedreamAPIError, SeedreamValidationError
 
 
 def _build_config() -> SeedreamConfig:
-    return SeedreamConfig(api_key="test_key", max_retries=1)
+    # 关闭自动保存：测试 mock 返回占位 URL，避免对 example.com 发起真实下载拖慢 CI
+    return SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
 
 
 @pytest.mark.asyncio
