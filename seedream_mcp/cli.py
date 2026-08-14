@@ -148,7 +148,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--host",
         default=DEFAULT_HTTP_HOST,
         help="streamable-http 监听地址（默认 127.0.0.1，仅 streamable-http 生效；"
-        "绑定非回环地址将触发安全告警）",
+        "绑定非回环地址必须配置 --auth-token 与 TLS，否则拒绝启动）",
     )
     parser.add_argument(
         "--port",

@@ -198,6 +198,46 @@ async def test_text_to_image_log_does_not_include_prompt_plaintext(
 
 
 @pytest.mark.asyncio
+async def test_generation_methods_synthesize_defaults_from_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """直连调用未传 size/watermark 时按 config 默认值合成，消除签名与配置双源。
+
+    硬性守护：watermark 未显式传入时必须保持 False（default_watermark 默认 False，
+    与官方默认 true 相悖但为项目有意决策）。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1, default_size="4K")
+    client = SeedreamClient(config)
+    captured: Dict[str, Any] = {}
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        captured.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    # 设置 default_size="4K" 后不传 size 应得 4K，watermark 不传时恒为 False
+    await client.text_to_image(prompt="test")
+    assert captured["size"] == "4K"
+    assert captured["watermark"] is False
+
+    # 未改配置的默认实例回落 default_size=2K
+    default_client = SeedreamClient(_build_config())
+    default_captured: Dict[str, Any] = {}
+
+    async def fake_call_api_default(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint
+        default_captured.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(default_client, "_call_api", fake_call_api_default)
+    await default_client.text_to_image(prompt="test")
+    assert default_captured["size"] == "2K"
+    assert default_captured["watermark"] is False
+
+
+@pytest.mark.asyncio
 async def test_image_to_image_resolves_relative_path_from_workspace_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

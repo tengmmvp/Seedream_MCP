@@ -46,6 +46,7 @@ async def test_parse_sse_response_collects_events_and_completed() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert result["success"] is True
@@ -65,6 +66,7 @@ async def test_parse_sse_response_preserves_complete_events_before_truncation() 
         chunk_size=64,
         buffer_max_size=512,
         event_truncate_threshold=512,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert len(result["data"]) == 1
@@ -82,6 +84,7 @@ async def test_parse_sse_response_raises_on_request_level_error() -> None:
             chunk_size=64,
             buffer_max_size=4096,
             event_truncate_threshold=4096,
+            total_bytes_limit=64 * 1024,
             log=_FakeLog(),
         )
 
@@ -127,6 +130,7 @@ async def test_parse_sse_response_classifies_partial_failed_event() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert result["success"] is True
@@ -150,6 +154,7 @@ async def test_parse_sse_response_normalizes_crlf_line_endings() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert len(result["data"]) == 1
@@ -169,6 +174,7 @@ async def test_parse_sse_response_normalizes_cr_line_endings() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert len(result["data"]) == 1
@@ -189,6 +195,7 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert result["status"] == "completed"
@@ -198,13 +205,17 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
 async def test_parse_sse_response_offloads_large_segment_to_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """单事件体积超过 64KB 阈值时 json.loads 须卸载到工作线程，小事件保持同步解析。"""
+    """单事件体积超过 64KB 阈值时切片与 json.loads 须一并卸载到工作线程，小事件保持同步。
+
+    大段卸载任务为 _slice_parse_segment(buffer, start, end, log)，段体积即 end - start；
+    completed 小事件不得触发 to_thread。
+    """
     offload_sizes: list[int] = []
     real_to_thread = sse_parser_module.asyncio.to_thread
 
     async def spy(func: object, *args: object, **kwargs: object) -> object:
-        if args and isinstance(args[0], (bytes, bytearray)):
-            offload_sizes.append(len(args[0]))
+        if func is sse_parser_module._slice_parse_segment and len(args) == 4:
+            offload_sizes.append(int(args[2]) - int(args[1]))  # type: ignore[arg-type]
         return await real_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(sse_parser_module.asyncio, "to_thread", spy)
@@ -220,6 +231,7 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
         chunk_size=64,
         buffer_max_size=256 * 1024,
         event_truncate_threshold=256 * 1024,
+        total_bytes_limit=256 * 1024,
         log=_FakeLog(),
     )
     assert len(result["data"]) == 1
@@ -236,6 +248,7 @@ async def test_parse_sse_response_empty_stream_returns_none_status() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert result["success"] is True
@@ -257,6 +270,7 @@ async def test_parse_sse_response_propagates_tools_from_completed_event() -> Non
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert result["tools"] == [{"type": "web_search"}]
@@ -279,6 +293,7 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert normal_result["truncated_events"] == 0
@@ -292,6 +307,7 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
         chunk_size=64,
         buffer_max_size=512,
         event_truncate_threshold=512,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert truncated_result["truncated_events"] >= 1
@@ -323,11 +339,49 @@ async def test_parse_sse_response_large_event_not_truncated_below_file_size_thre
         chunk_size=64,
         buffer_max_size=2048,
         event_truncate_threshold=32 * 1024,
+        total_bytes_limit=64 * 1024,
         log=_FakeLog(),
     )
     assert result["truncated_events"] == 0
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/big.png"
+
+
+async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
+    """多事件滴流累计超过总量上限时终止解析、停止读取并抛出明确异常。
+
+    单事件阈值拦不住每个事件都合法但数量无限的滴流流，累计接收字节超限即关闭
+    响应并抛 SeedreamAPIError，错误消息注明响应流总量超限。
+    """
+    event = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+    # 每块 4 个完整事件（体积均低于单事件阈值），共 8 块持续滴流
+    chunk = event * 4
+    total_chunks = 8
+    consumed = 0
+
+    class _CountingResponse(_FakeSSEResponse):
+        async def aiter_bytes(self, chunk_size: int):
+            nonlocal consumed
+            del chunk_size
+            for c in self._chunks:
+                consumed += 1
+                yield c
+
+    response = _CountingResponse([chunk] * total_chunks)
+    with pytest.raises(SeedreamAPIError, match="SSE 响应流总量超限"):
+        await parse_sse_response(
+            response,
+            model_id="m",
+            chunk_size=64,
+            buffer_max_size=4096,
+            event_truncate_threshold=4096,
+            # 上限设为两块体积，第三块接收后累计即超限
+            total_bytes_limit=len(chunk) * 2,
+            log=_FakeLog(),
+        )
+
+    # 超限后停止读取：实际消费的块数远小于上游供给的块数
+    assert consumed < total_chunks
 
 
 def _resp_with_content_type(content_type: str) -> SimpleNamespace:

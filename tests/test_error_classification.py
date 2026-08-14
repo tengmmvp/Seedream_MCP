@@ -101,6 +101,20 @@ def test_handle_api_error_extracts_upstream_error_dict() -> None:
     assert exc.error_code == "BAD_REQUEST"
 
 
+def test_handle_api_error_drops_non_string_error_code() -> None:
+    """上游 error.code 为数字或空串时 error_code 置 None，不臆测转字符串。
+
+    数字码转字符串属臆测语义，与 str | None 注解不符；丢弃时 message 拼装不受影响。
+    """
+    numeric = handle_api_error(400, {"error": {"code": 40012, "message": "invalid image"}})
+    assert numeric.error_code is None
+    assert "invalid image" in numeric.message
+
+    empty = handle_api_error(400, {"error": {"code": "", "message": "bad payload"}})
+    assert empty.error_code is None
+    assert "bad payload" in empty.message
+
+
 def test_handle_api_error_extracts_upstream_error_string() -> None:
     """响应体 error 为纯字符串时拼入文案。"""
     exc = handle_api_error(400, {"error": "plain error string"})

@@ -1,6 +1,7 @@
 """browse_images 工具结构化结果、分页元数据与工作区越界拒绝测试。"""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from mcp.types import TextContent
@@ -204,3 +205,31 @@ async def test_browse_images_format_filter_all_unsupported_echoes_original(
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "均不在支持列表" in text
     assert "支持" in text
+
+
+def test_format_file_info_degrades_on_malformed_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """畸形时间戳使 fromtimestamp 抛 ValueError 时降级为“文件信息不可用”，不向调用方抛异常。
+
+    stat 本身成功，降级分支须同时置空 size_mb 与 modified 两键，避免半份详情误导
+    调用方。以替身模块替换 browse_images 命名空间内的 datetime 名字，使
+    datetime.datetime.fromtimestamp 抛 ValueError；内建 datetime 类为不可变类型，
+    无法直接对其打属性补丁。
+    """
+    image = tmp_path / "a.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    class _ExplodingDatetime:
+        @staticmethod
+        def fromtimestamp(timestamp: float) -> object:
+            raise ValueError("year is out of range")
+
+    fake_datetime_module = SimpleNamespace(datetime=_ExplodingDatetime)
+    monkeypatch.setattr(browse_images_module, "datetime", fake_datetime_module)
+
+    text, details = browse_images_module._format_file_info("a.png", image, True)
+
+    assert text == "a.png | 文件信息不可用"
+    assert details == {"size_mb": None, "modified": None}

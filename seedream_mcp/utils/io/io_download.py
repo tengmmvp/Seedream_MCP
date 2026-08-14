@@ -56,6 +56,23 @@ _MAX_REDIRECTS = 3
 # 防止长生命周期下持续解析不同 host 导致缓存无界增长。
 _DNS_CACHE_MAX_SIZE = 256
 
+# getaddrinfo 的 gaierror 中属永久失败的错误码集合：域名不存在或查询参数不受支持，
+# 重试无法恢复。其余错误码一律按可重试分类，包括 EAI_AGAIN 与 EAI_FAIL 等瞬时解析
+# 故障，以及 Windows 上未映射进本集合的原始 WSA 错误码；瞬时抖动远多于永久错误，
+# 且重试次数上限兜底。平台缺少对应常量时经 getattr 取 None 后从集合中剔除。
+_TERMINAL_GAI_ERRNOS = frozenset(
+    code
+    for code in (
+        getattr(socket, "EAI_NONAME", None),
+        getattr(socket, "EAI_NODATA", None),
+        getattr(socket, "EAI_SERVICE", None),
+        getattr(socket, "EAI_FAMILY", None),
+        getattr(socket, "EAI_SOCKTYPE", None),
+        getattr(socket, "EAI_BADFLAGS", None),
+    )
+    if code is not None
+)
+
 
 def sanitize_url(url: str) -> str:
     """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
@@ -155,7 +172,7 @@ class DownloadError(SeedreamMCPError):
 
 
 class RetryableDownloadError(DownloadError):
-    """可重试的下载错误，如 HTTP 5xx 等 CDN/网关瞬时故障。
+    """可重试的下载错误，如 HTTP 5xx、DNS 瞬时解析失败等瞬时故障。
 
     继承 DownloadError，可被按 DownloadError 捕获的调用方统一处理；重试循环中
     须先于 DownloadError 单独捕获，将其作为可重试故障而非终态错误处理。
@@ -383,7 +400,8 @@ class DownloadManager:
         登记的解析；超时重试期间被放弃的旧线程可能与新线程短暂并存，但在途数受 max_retries
         与 max_concurrent 下载并发上限约束，故不额外施加并发信号量。Python 3.11+ 起
         asyncio.TimeoutError 是内建 TimeoutError（OSError 子类）的别名，须在调用方先于
-        except OSError 捕获以保持可重试语义。
+        except OSError 捕获以保持可重试语义。gaierror 按错误码分类：域名不存在类错误为
+        终态 DownloadError，EAI_AGAIN 等瞬时解析故障为可重试错误，同样交由重试。
         """
         loop = asyncio.get_running_loop()
         try:
@@ -393,6 +411,12 @@ class DownloadManager:
             )
         except asyncio.TimeoutError:
             raise
+        except socket.gaierror as exc:
+            # gaierror 是 OSError 子类，须先于 OSError 捕获；errno 命中永久失败集合才
+            # 保持终态，瞬时故障与不可靠 errno 一律按可重试上抛。
+            if exc.errno is not None and exc.errno in _TERMINAL_GAI_ERRNOS:
+                raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
+            raise RetryableDownloadError(f"域名解析失败: {host} ({exc})") from exc
         except OSError as exc:
             raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
 
@@ -696,9 +720,9 @@ class DownloadManager:
                 )
 
             except RetryableDownloadError as e:
-                # HTTP 5xx 等 CDN/网关瞬时故障，记录后落入退避重试。
+                # HTTP 5xx、DNS 瞬时解析失败等瞬时故障，记录后落入退避重试。
                 last_error = e
-                logger.warning("可重试的 HTTP 错误 (尝试 {}): {}", attempt + 1, e)
+                logger.warning("可重试的下载错误 (尝试 {}): {}", attempt + 1, e)
 
             except DownloadError:
                 # 4xx、文件过大、字节签名、重定向等语义明确的终态错误，原样抛出不重试。

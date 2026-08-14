@@ -14,10 +14,16 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult, TextContent
 
-from ..core._helpers import _safe_ctx_log, _safe_report_progress
+from ..core._helpers import (
+    PROGRESS_COMPLETE,
+    PROGRESS_SCAN_SPAN,
+    PROGRESS_SCAN_START,
+    _safe_ctx_log,
+    _safe_report_progress,
+)
 from ..core.outputs import BrowseImagesStructuredOutput, build_error_dict
 from ..core.schemas import BrowseImagesInput
-from ...utils.io.io_scan import _cached_find_images_in_directory
+from ...utils.io.io_scan import cached_find_images_in_directory
 from ...utils.core.errors import format_error_for_user
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import (
@@ -34,20 +40,23 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# 进度上报百分比常量，命名沿用生成管道 core._helpers 进度常量的 PROGRESS_ 前缀体系。
-# 阶梯：扫描开始 20，多目录扫描按已扫描目录占比上报中间进度并渐增至 90，结束 100。
-PROGRESS_SCAN_START = 20.0
-PROGRESS_SCAN_SPAN = 70.0
-PROGRESS_COMPLETE = 100.0
-
 
 @dataclass(frozen=True)
 class _BrowseRequestState:
     """单次浏览请求的状态快照，错误分支与兜底分支共享取值。
 
     Attributes:
+        workspace_roots: 客户端授权的工作区根目录列表，保留原始形态供错误消息与
+            structuredContent 回显。
+        directory: 用户请求的目录字符串，未提供时归一为当前目录 "."。
         resolved_directories: 随解析流程逐步填充的活动列表，构建快照时绑定其引用；所有
             错误分支发生在该列表尚未填充的阶段，成功分支在填充完成后读取同一引用。
+        recursive: 是否递归扫描子目录。
+        max_depth: 递归扫描的最大深度。
+        limit: 单页返回的图片条数上限。
+        offset: 分页起始偏移，与 limit 共同决定当前页切片。
+        show_details: 是否在文本与结构化条目中附带文件大小与修改时间。
+        format_filter: 经支持列表过滤后的扩展名白名单，None 表示不限制格式。
     """
 
     workspace_roots: list[Path]
@@ -237,7 +246,7 @@ def _scan_and_filter_directory(
         新增 (原始路径，resolved 路径) 元组列表，长度不超过 remaining。
     """
     # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
-    matched_images = _cached_find_images_in_directory(
+    matched_images = cached_find_images_in_directory(
         resolved_dir=resolved_dir,
         recursive=recursive,
         max_depth=max_depth,
@@ -448,7 +457,7 @@ async def _handle_browse_images_impl(
         state.limit,
     )
 
-    # 搜索图片文件：_scan_and_filter_directory 经 _cached_find_images_in_directory 扫描目录，
+    # 搜索图片文件：_scan_and_filter_directory 经 cached_find_images_in_directory 扫描目录，
     # 翻页共享有序列表缓存，非递归按目录 mtime 失效、递归按 TTL 失效；scan_limit 用于早停
     # 与切片判定 has_more。语义边界：越界项即 resolve 后落在工作区外的符号链接，与跨目录
     # 重复项在扫描之后才被剔除，其占用早停配额时可见数偏少，has_more 可能提前为 False、

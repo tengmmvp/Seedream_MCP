@@ -59,3 +59,27 @@ def test_unknown_attribute_raises_attribute_error() -> None:
 
     with pytest.raises(AttributeError):
         getattr(seedream_mcp, "definitely_not_an_export")
+
+
+def test_import_server_does_not_eager_load_pil() -> None:
+    """导入 seedream_mcp.server 不得触发 PIL 加载。
+
+    PIL 首次导入含解码器注册，成本达数十毫秒；图像相关模块一律函数内惰性导入，
+    使该成本落点在工作线程而非事件循环线程。子进程运行守护，避免本进程已加载
+    的模块污染断言。
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, seedream_mcp.server; "
+        "loaded = [m for m in sys.modules if m == 'PIL' or m.startswith('PIL.')]; "
+        "assert not loaded, f'PIL eagerly imported: {loaded}'"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr

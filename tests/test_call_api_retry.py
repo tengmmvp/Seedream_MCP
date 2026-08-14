@@ -279,8 +279,8 @@ async def test_call_api_no_status_code_not_retried(
 
     生成 API 非幂等，服务端可能已按该请求完成生成与计费，重试会导致重复计费。
     经 httpx.MockTransport 返回 200 + 非 JSON 体，驱动真实的 _send_standard_request
-    代码路径：_raise_for_response_status 放行 200，response.json() 抛 ValueError 被包装
-    为 status_code=None 的 SeedreamAPIError，_call_api 捕获后不重试直接上抛。
+    代码路径：状态码 200 放行，json.loads 抛 ValueError 被包装为 status_code=None 的
+    SeedreamAPIError，_call_api 捕获后不重试直接上抛。
     """
     config = SeedreamConfig(api_key="k", max_retries=3)
 
@@ -300,4 +300,68 @@ async def test_call_api_no_status_code_not_retried(
             await client._call_api("text_to_image", {"prompt": "p"})
 
         # status_code 为 None 的错误不可重试
+        assert exc_info.value.status_code is None
+
+
+async def test_standard_request_rejects_oversized_content_length(
+    no_sleep: None,
+) -> None:
+    """非流式路径：Content-Length 声明超过总量上限的响应在读取前即拒绝。
+
+    上限为 auto_save_max_file_size × 20（默认 1GB），此处压缩配置为 1024×20 字节
+    以便测试；伪造远超实际 body 的 Content-Length 模拟被污染上游的巨型响应声明。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            headers={"content-length": str(1024 * 1024)},
+            content=b"{}",
+        )
+
+    async with SeedreamClient(config) as client:
+        assert client._client is not None
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+
+        with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        # 无状态码的超限错误不可重试，避免对非幂等生成 API 重复请求
+        assert exc_info.value.status_code is None
+        assert "Content-Length" in exc_info.value.message
+
+
+async def test_standard_request_rejects_chunked_body_over_limit(
+    no_sleep: None,
+) -> None:
+    """非流式路径：chunked 无 Content-Length 的响应在流式累计读取中超限即拒绝。
+
+    content 传异步生成器时 httpx 不携带 Content-Length 头，模拟分块滴流的巨型响应；
+    限额读取必须不依赖 Content-Length 声明，在 aiter_bytes 累计中强制执行。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+
+        async def _stream():
+            # 上限 1024×20=20480 字节，共送出 40KB 确保跨过上限
+            for _ in range(40):
+                yield b"x" * 1024
+
+        return httpx.Response(200, content=_stream())
+
+    async with SeedreamClient(config) as client:
+        assert client._client is not None
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+
+        with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        # 错误消息携带实际读取字节数，且无状态码不可重试
+        assert "已读取" in exc_info.value.message
         assert exc_info.value.status_code is None

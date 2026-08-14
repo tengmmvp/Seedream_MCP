@@ -1,13 +1,15 @@
 """download_image 重试分类与 _download_response_to_temp 内部分支测试。
 
 覆盖 download_image 的可重试/终态错误分类，aiohttp.ClientError/OSError 重试，
-泛 Exception 不重试，以及 _download_response_to_temp 的 content-length 解析失败、
-流式累计超限、字节签名不匹配、fd 泄漏兜底四条分支。用 fake session/response 模拟，
-不依赖真实网络。
+泛 Exception 不重试，DNS 解析错误的瞬时可重试与私网终态分类，以及
+_download_response_to_temp 的 content-length 解析失败、流式累计超限、字节签名
+不匹配、fd 泄漏兜底四条分支。用 fake session/response 模拟，不依赖真实网络。
 """
 
+import asyncio
 import errno
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any, List
@@ -164,6 +166,73 @@ async def test_download_image_does_not_retry_on_invalid_url_client_error(
 
     # URL 语法错误重试无意义，单次尝试即终态抛出
     assert session.call_count == 1
+    assert not save_path.exists()
+
+
+# ==================== DNS 解析错误分类 ====================
+
+
+def _patch_loop_getaddrinfo(monkeypatch: pytest.MonkeyPatch, fake_getaddrinfo: Any) -> None:
+    """替换当前事件循环的 getaddrinfo，聚焦 _resolve_public_ips_uncached 的分类。"""
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+
+
+async def test_download_retries_on_transient_dns_resolution_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """EAI_AGAIN 瞬时解析失败按可重试处理，退避后重新解析并成功落盘。
+
+    gaierror 虽是 OSError 子类，但瞬时解析抖动与解析超时同属可恢复故障；若按终态
+    DownloadError 上抛会绕过退避重试，单次 DNS 抖动即导致保存失败。
+    """
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    resolve_calls: List[int] = []
+
+    async def _gaierror_then_success(host: str, port: int, **kwargs: object) -> Any:
+        del host, port, kwargs
+        resolve_calls.append(1)
+        if len(resolve_calls) == 1:
+            raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 0))]
+
+    _patch_loop_getaddrinfo(monkeypatch, _gaierror_then_success)
+
+    async def _fake_ensure_session() -> Any:
+        return session
+
+    monkeypatch.setattr(manager, "_ensure_session", _fake_ensure_session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert save_path.read_bytes() == _PNG_BYTES
+    # 首次解析瞬时失败后未缓存失败结果，第二次重试解析成功并完成下载
+    assert len(resolve_calls) == 2
+
+
+async def test_download_dns_resolving_private_ip_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """解析到私网 IP 属 SSRF 第二层防护的终态拒绝，不进入退避重试。"""
+    manager = DownloadManager()
+    resolve_calls: List[int] = []
+
+    async def _private_ip_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
+        del host, port, kwargs
+        resolve_calls.append(1)
+        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("192.168.1.1", 0))]
+
+    _patch_loop_getaddrinfo(monkeypatch, _private_ip_getaddrinfo)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="不安全地址"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 终态错误单次尝试即上抛，未触发退避重试
+    assert len(resolve_calls) == 1
     assert not save_path.exists()
 
 

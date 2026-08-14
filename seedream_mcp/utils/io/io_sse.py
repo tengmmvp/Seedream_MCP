@@ -95,22 +95,51 @@ def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dic
         return None
 
 
-# 大事件卸载阈值：超过此大小的 segment 的 json.loads 改到工作线程执行，
-# 避免 stream + b64_json 多 MB 事件在事件循环中阻塞。小事件保持同步解析以
-# 省去线程调度开销。
+# 大事件卸载阈值：超过此大小的 segment 的「切片 + json.loads」整体改到工作线程执行，
+# 避免 stream + b64_json 多 MB 事件在事件循环中产生 memcpy 与解析阻塞。小事件保持
+# 同步处理以省去线程调度开销。
 _SSE_OFFLOAD_THRESHOLD = 64 * 1024
 
 
-async def _parse_segment(segment: bytes | bytearray, log: Any) -> dict[str, Any] | None:
-    """解析单个 SSE 事件段，大段卸载到工作线程避免阻塞事件循环。
+def _slice_parse_segment(
+    buffer: bytearray, start: int, end: int, log: Any
+) -> dict[str, Any] | None:
+    """在工作线程内切出 buffer[start:end] 事件段并解析。
 
-    ``parse_sse_segment`` 为同步函数，其 ``json.loads`` 对多 MB 负载耗时可观；
-    超过 ``_SSE_OFFLOAD_THRESHOLD`` 的段通过 ``asyncio.to_thread`` 卸载，小段
-    保持同步以避免线程调度开销。返回值语义与 ``parse_sse_segment`` 一致。
+    bytearray 切片是一次 memcpy，单事件上限约 event_truncate_threshold 量级，
+    与 json.loads 一并下沉线程，避免两者在事件循环上叠加阻塞。
     """
-    if len(segment) > _SSE_OFFLOAD_THRESHOLD:
-        return await asyncio.to_thread(parse_sse_segment, segment, log)
-    return parse_sse_segment(segment, log)
+    return parse_sse_segment(buffer[start:end], log)
+
+
+async def _parse_segment_range(
+    buffer: bytearray, start: int, end: int, log: Any
+) -> dict[str, Any] | None:
+    """切出 buffer[start:end] 事件段并解析，大段把切片与解析一并卸载到工作线程。
+
+    主循环在 await 期间挂起，buffer 的全部变更点（追加、前缀回收、超限截断）均位于
+    本协程内，协程挂起即冻结追加，线程内读到的 buffer 内容稳定，无需快照副本。
+    小段在事件循环内同步切片解析，避免线程调度开销。返回值语义与 ``parse_sse_segment``
+    一致。
+    """
+    if end - start > _SSE_OFFLOAD_THRESHOLD:
+        return await asyncio.to_thread(_slice_parse_segment, buffer, start, end, log)
+    return parse_sse_segment(buffer[start:end], log)
+
+
+async def _close_stream_response(response: Any) -> None:
+    """尽力关闭流式响应，停止继续从上游读取。
+
+    仅持有 aclose 的 httpx 响应需要显式关闭；伪响应对象（测试替身）无此方法则跳过。
+    关闭失败不掩盖待抛出的超限错误。
+    """
+    aclose = getattr(response, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        pass
 
 
 def _classify_sse_event(
@@ -148,6 +177,7 @@ async def parse_sse_response(
     chunk_size: int,
     buffer_max_size: int,
     event_truncate_threshold: int,
+    total_bytes_limit: int,
     log: Any,
 ) -> dict[str, Any]:
     """增量解析 SSE 响应为统一的图片项列表与完成元信息。
@@ -162,10 +192,17 @@ async def parse_sse_response(
             撑爆内存的安全阀；须大于单张合法图片 base64 负载上限，避免 stream + b64_json
             的大图事件被误截断而永久丢失。与 buffer_max_size 解耦，前者管前缀回收频率，
             后者管单事件体积上限。
+        total_bytes_limit: 响应流累计接收字节总量上限，含全部事件段与不完整尾部。
+            单事件阈值拦不住以大量小事件滴流的超限流，累计总量在读取过程中强制此上限，
+            超限时终止解析并关闭响应。与非流式/流式 JSON 路径共用同一限额。
         log: loguru logger 实例，用于记录进度与告警。
 
     Returns:
         包含 success/data/usage/status/tools 的统一结果字典。
+
+    Raises:
+        SeedreamAPIError: 响应流累计接收字节超过 total_bytes_limit，或上游返回请求级
+            错误事件。
     """
     items: list[dict[str, Any]] = []
     usage: dict[str, Any] = {}
@@ -208,6 +245,20 @@ async def parse_sse_response(
         buffer += chunk
         processed_bytes += raw_len
 
+        # 响应流总量上限：单事件截断阈值拦不住以大量小事件滴流的超限流，累计接收
+        # 字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
+        if processed_bytes > total_bytes_limit:
+            log.warning(
+                "SSE 响应流总量超限: 已接收 {} 字节，上限 {} 字节",
+                processed_bytes,
+                total_bytes_limit,
+            )
+            await _close_stream_response(response)
+            raise SeedreamAPIError(
+                f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
+                f"超过上限 {total_bytes_limit} 字节"
+            )
+
         if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
             log.debug("已处理 {} MB 数据", processed_bytes // 1024 // 1024)
 
@@ -221,12 +272,11 @@ async def parse_sse_response(
             if sep == -1:
                 search_hint = len(buffer)
                 break
-            # bytearray 切片已返回 bytearray 拷贝，parse_sse_segment 接受 bytes|bytearray，无需再 bytes() 转换。
-            segment = buffer[offset:sep]
+            seg_start = offset
             offset = sep + 2
             # offset 已推进至旧 search_hint 之后，重置使下次从新 offset 起扫，避免滞后提示误跳过新区间。
             search_hint = 0
-            event = await _parse_segment(segment, log)
+            event = await _parse_segment_range(buffer, seg_start, sep, log)
             if event is None:
                 continue
             apply_completed(*_classify_sse_event(event, model_id, items))
@@ -253,7 +303,7 @@ async def parse_sse_response(
             # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫。
             search_hint = len(buffer)
 
-    trailing_event = await _parse_segment(buffer[offset:], log)
+    trailing_event = await _parse_segment_range(buffer, offset, len(buffer), log)
     if trailing_event is not None:
         apply_completed(*_classify_sse_event(trailing_event, model_id, items))
 

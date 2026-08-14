@@ -72,17 +72,13 @@ def test_suggest_similar_paths_finds_close_names(tmp_path: Path) -> None:
     assert suggest_similar_paths("portrait") == []
 
 
-def test_log_function_call_wraps_sync_and_async() -> None:
-    """日志装饰器对同步与异步函数均透传参数与返回值并记录调用入口。"""
+def test_log_function_call_wraps_sync() -> None:
+    """日志装饰器对同步函数透传参数与返回值；异步覆盖见下方专门用例。"""
     from seedream_mcp.utils.core.logs import log_function_call
 
     @log_function_call
     def sync_fn(value: int) -> int:
         return value * 2
-
-    @log_function_call
-    async def async_fn(value: int) -> int:
-        return value + 1
 
     assert sync_fn(21) == 42
 

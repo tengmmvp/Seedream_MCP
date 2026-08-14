@@ -1,8 +1,8 @@
 """文件管理模块：生成图片保存路径、写入字节内容并清理旧文件。
 
-负责按日期与工具名组织保存路径、净化文件名、用内容哈希做去重、基于字节签名
-嗅探真实扩展名，以及按保留天数清理旧文件。落盘写入与旧文件遍历均通过 io_file
-防符号链接，避免经由符号链接逃逸出基础目录。
+负责按日期与工具名组织保存路径、净化文件名、用内容哈希做去重，以及按保留天数
+清理旧文件。落盘写入与旧文件遍历均通过 io_file 防符号链接，避免经由符号链接逃逸
+出基础目录。字节签名嗅探扩展名由 core.formats 统一提供，调用方直接使用模块函数。
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from ..core.errors import SeedreamMCPError
 from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
-    infer_extension_from_bytes,
 )
 from ..core.logs import get_logger
 from .io_file import (
@@ -251,23 +250,6 @@ class FileManager:
             SHA256 十六进制哈希值。
         """
         return hashlib.sha256(content).hexdigest()
-
-    def infer_extension_from_bytes(
-        self, content: bytes, default: str = DEFAULT_IMAGE_EXTENSION
-    ) -> str:
-        """基于文件头魔法字节嗅探真实图片类型并返回扩展名。
-
-        读取字节头部 magic bytes 判断真实格式，不信任 URL 或路径声明的扩展名，
-        避免伪造后缀的文件落盘。委托 formats 模块的统一实现。
-
-        Args:
-            content: 图片字节内容。
-            default: 无法识别时返回的默认扩展名，含点号。
-
-        Returns:
-            推断出的扩展名，含点号。
-        """
-        return infer_extension_from_bytes(content, default)
 
     def get_organized_path(
         self, filename: str, subfolder: str | None = None, date_folder: bool = True

@@ -25,10 +25,19 @@ PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 # 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环。
 _LARGE_IMAGE_THRESHOLD = 1024 * 1024
 
-# 工作区 roots 元组 → 已 resolve 的 base 列表，跨图复用避免每图重复 resolve 同一根目录。
-# 上限 _RESOLVED_BASES_CACHE_MAX_ENTRIES，超限淘汰最旧条目。dict 自 Python 3.7 起保持插入序。
-_RESOLVED_BASES_CACHE_MAX_ENTRIES = 32
-_resolved_bases_cache: dict[tuple[str, ...], list[Path]] = {}
+# 工作区 roots 元组 → 已 resolve 的根列表，跨图复用避免每图重复 resolve 同一根目录。
+# 上限 _RESOLVED_ROOTS_CACHE_MAX_ENTRIES，超限淘汰最旧条目。dict 自 Python 3.7 起保持插入序。
+_RESOLVED_ROOTS_CACHE_MAX_ENTRIES = 32
+_resolved_roots_cache: dict[tuple[str, ...], list[Path]] = {}
+
+
+def reset_resolved_bases_cache() -> None:
+    """清空工作区 roots 的 resolve 结果缓存。
+
+    供 lifespan 等资源管理方在会话切换或测试隔离时调用，使后续签名计算按当前
+    roots 重新 resolve，避免沿用旧会话的根解析结果。
+    """
+    _resolved_roots_cache.clear()
 
 
 class ImagePreparer:
@@ -36,7 +45,7 @@ class ImagePreparer:
 
     预处理结果按 (输入, workspace_roots, 本地文件签名) 缓存，避免并行请求对同一参考图
     重复读取与编码；同一键的并发 miss 复用同一在途 task。本地文件纳入 mtime+size 防内容
-    替换返回陈旧编码。
+    替换返回陈旧编码。预处理并发上限为实例级全局约束，跨批量调用共享。
     """
 
     def __init__(
@@ -51,6 +60,23 @@ class ImagePreparer:
         self._prepare_cache_bytes = 0
         self._prepare_inflight: dict[PrepareCacheKey, asyncio.Task[str]] = {}
         self._prepare_concurrency = prepare_concurrency
+        # 信号量为实例级并跨 prepare_images_in_parallel 调用共享，使配置的并发上限在
+        # 并行生成与并发工具调用叠加时仍是全局上限。asyncio.Semaphore 在首次使用时
+        # 绑定事件循环，跨循环复用会报错，故持循环身份守卫按需重建。
+        self._prepare_semaphore: asyncio.Semaphore | None = None
+        self._prepare_semaphore_loop: asyncio.AbstractEventLoop | None = None
+
+    def _get_prepare_semaphore(self) -> asyncio.Semaphore:
+        """返回绑定当前事件循环的实例级预处理信号量，循环变化时重建。
+
+        检查与重建之间无 await 点，同一事件循环内不存在竞态；preparer 跨事件循环
+        依次复用（如测试进程内多次 asyncio.run）时按新循环重建，语义等价于新实例。
+        """
+        loop = asyncio.get_running_loop()
+        if self._prepare_semaphore is None or self._prepare_semaphore_loop is not loop:
+            self._prepare_semaphore = asyncio.Semaphore(max(1, self._prepare_concurrency))
+            self._prepare_semaphore_loop = loop
+        return self._prepare_semaphore
 
     @staticmethod
     def _local_file_signature(image: str, workspace_roots: tuple[str, ...]) -> tuple[float, int]:
@@ -63,28 +89,32 @@ class ImagePreparer:
         utils.image_input._prepare_local_image 的实际读取路径共用同一规则，签名与
         读取锁定同一文件，不会因两侧规则漂移命中陈旧缓存。
 
-        已 resolve 的 base 列表按 workspace_roots 缓存并在跨图间复用，避免批量多图时每图
+        残余风险：签名基于 mtime+size 而非内容哈希，同信任域内具备本地写权限者可在
+        替换文件内容后用 os.utime 还原签名命中陈旧缓存；信任边界依赖 workspace Roots
+        声明，Roots 授权目录内的主体视为同域，该投毒不构成跨域越权。
+
+        已 resolve 的根列表按 workspace_roots 缓存并在跨图间复用，避免批量多图时每图
         重复 resolve 同一根目录，降低网络挂载工作区下的 resolve 开销。
         """
         if classify_image_reference(image) != "local":
             return (0.0, 0)
 
-        resolved_bases = _resolved_bases_cache.get(workspace_roots)
-        if resolved_bases is None:
-            resolved_bases = []
+        resolved_roots = _resolved_roots_cache.get(workspace_roots)
+        if resolved_roots is None:
+            resolved_roots = []
             for root in workspace_roots:
                 try:
-                    resolved_bases.append(Path(root).resolve())
+                    resolved_roots.append(Path(root).resolve())
                 except (OSError, ValueError):
                     continue
-            _resolved_bases_cache[workspace_roots] = resolved_bases
-            if len(_resolved_bases_cache) > _RESOLVED_BASES_CACHE_MAX_ENTRIES:
+            _resolved_roots_cache[workspace_roots] = resolved_roots
+            if len(_resolved_roots_cache) > _RESOLVED_ROOTS_CACHE_MAX_ENTRIES:
                 try:
-                    _resolved_bases_cache.pop(next(iter(_resolved_bases_cache)))
+                    _resolved_roots_cache.pop(next(iter(_resolved_roots_cache)))
                 except KeyError:
                     pass
 
-        found = resolve_local_image_candidate(image, resolved_bases)
+        found = resolve_local_image_candidate(image, resolved_roots)
         if found is None:
             return (0.0, 0)
         _, st = found
@@ -192,11 +222,15 @@ class ImagePreparer:
             self._prepare_cache_bytes -= len(evicted)
 
     async def prepare_images_in_parallel(self, images: Sequence[str]) -> list[str]:
-        """受限并发预处理多张图片。"""
+        """受限并发预处理多张图片。
+
+        并发上限由实例级信号量约束：同一 preparer 上并发的多个批量调用共享同一
+        全局上限，并行生成与 streamable-http 并发工具调用不会叠加突破配置的
+        prepare_concurrency 上限。
+        """
         from ..io.io_path import get_workspace_roots
 
-        concurrency = max(1, self._prepare_concurrency)
-        semaphore = asyncio.Semaphore(concurrency)
+        semaphore = self._get_prepare_semaphore()
         # 批内预计算一次工作区键，避免每图重复读取 ContextVar 与构造元组。
         roots_key = tuple(str(r) for r in get_workspace_roots())
 

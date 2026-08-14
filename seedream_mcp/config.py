@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
@@ -149,13 +150,19 @@ class SeedreamConfig:
         将 log_level 统一为大写。任一校验失败抛出 SeedreamConfigError。
         """
         if not self.api_key or self.api_key.strip() == "":
-            raise SeedreamConfigError("API密钥不能为空")
+            raise SeedreamConfigError(f"API密钥不能为空{_env_var_suffix('api_key')}")
         if self.api_key == "your_api_key_here":
-            raise SeedreamConfigError("请设置有效的API密钥，不能使用默认占位符")
+            raise SeedreamConfigError(
+                f"请设置有效的API密钥，不能使用默认占位符{_env_var_suffix('api_key')}"
+            )
 
-        if not self.base_url or not self.base_url.startswith(("http://", "https://")):
-            raise SeedreamConfigError("base_url必须是有效的HTTP/HTTPS URL")
-        if self.base_url.startswith("http://"):
+        # RFC 3986 规定 scheme 大小写不敏感，HTTPS:// 等大写形态经 urlparse 取小写后判定。
+        base_url_scheme = urlparse(self.base_url).scheme.lower() if self.base_url else ""
+        if not self.base_url or base_url_scheme not in ("http", "https"):
+            raise SeedreamConfigError(
+                f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
+            )
+        if base_url_scheme == "http":
             if not self.allow_http_base_url:
                 raise SeedreamConfigError(
                     "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝；"
@@ -169,7 +176,7 @@ class SeedreamConfig:
             )
 
         if not self.model_id or self.model_id.strip() == "":
-            raise SeedreamConfigError("model_id不能为空")
+            raise SeedreamConfigError(f"model_id不能为空{_env_var_suffix('model_id')}")
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
             # 可用别名清单运行时从 MODEL_ALIASES 派生，新增模型时提示自动同步，
@@ -177,11 +184,11 @@ class SeedreamConfig:
             aliases = "/".join(MODEL_ALIASES)
             raise SeedreamConfigError(
                 f"已不支持的模型: {self.model_id}（3.0/seededit-3.0 已下线），"
-                f"请使用 {aliases} 或对应 Endpoint ID"
+                f"请使用 {aliases} 或对应 Endpoint ID{_env_var_suffix('model_id')}"
             )
 
         if not isinstance(self.default_size, str) or not self.default_size.strip():
-            raise SeedreamConfigError("default_size不能为空")
+            raise SeedreamConfigError(f"default_size不能为空{_env_var_suffix('default_size')}")
 
         normalized_default_size = self.default_size.strip()
         try:
@@ -191,46 +198,80 @@ class SeedreamConfig:
                 validate_size_for_model(normalized_default_size, self.model_id),
             )
         except SeedreamValidationError as exc:
-            raise SeedreamConfigError(f"default_size无效: {exc.message}") from exc
+            raise SeedreamConfigError(
+                f"default_size无效: {exc.message}{_env_var_suffix('default_size')}"
+            ) from exc
 
         if self.timeout <= 0:
-            raise SeedreamConfigError("timeout必须大于0")
+            raise SeedreamConfigError(f"timeout必须大于0{_env_var_suffix('timeout')}")
         if self.api_timeout <= 0:
-            raise SeedreamConfigError("api_timeout必须大于0")
+            raise SeedreamConfigError(f"api_timeout必须大于0{_env_var_suffix('api_timeout')}")
         if self.max_retries < 1:
-            raise SeedreamConfigError("max_retries不能小于1")
+            raise SeedreamConfigError(f"max_retries不能小于1{_env_var_suffix('max_retries')}")
 
         if self.log_level.upper() not in LEGAL_LOG_LEVELS:
-            raise SeedreamConfigError(f"log_level必须是以下值之一: {list(LEGAL_LOG_LEVELS)}")
+            raise SeedreamConfigError(
+                f"log_level必须是以下值之一: {list(LEGAL_LOG_LEVELS)}"
+                f"{_env_var_suffix('log_level')}"
+            )
         object.__setattr__(self, "log_level", self.log_level.upper())
 
         if self.auto_save_download_timeout <= 0:
-            raise SeedreamConfigError("auto_save_download_timeout必须大于0")
+            raise SeedreamConfigError(
+                f"auto_save_download_timeout必须大于0"
+                f"{_env_var_suffix('auto_save_download_timeout')}"
+            )
         if self.auto_save_max_retries < 0:
-            raise SeedreamConfigError("auto_save_max_retries不能小于0")
+            raise SeedreamConfigError(
+                f"auto_save_max_retries不能小于0{_env_var_suffix('auto_save_max_retries')}"
+            )
         if self.auto_save_max_file_size <= 0:
-            raise SeedreamConfigError("auto_save_max_file_size必须大于0")
+            raise SeedreamConfigError(
+                f"auto_save_max_file_size必须大于0" f"{_env_var_suffix('auto_save_max_file_size')}"
+            )
         if self.auto_save_max_concurrent <= 0:
-            raise SeedreamConfigError("auto_save_max_concurrent必须大于0")
+            raise SeedreamConfigError(
+                f"auto_save_max_concurrent必须大于0"
+                f"{_env_var_suffix('auto_save_max_concurrent')}"
+            )
         if self.auto_save_cleanup_days < 0:
-            raise SeedreamConfigError("auto_save_cleanup_days不能小于0")
+            raise SeedreamConfigError(
+                f"auto_save_cleanup_days不能小于0{_env_var_suffix('auto_save_cleanup_days')}"
+            )
         if self.auto_save_max_total_bytes is not None and self.auto_save_max_total_bytes <= 0:
-            raise SeedreamConfigError("auto_save_max_total_bytes必须大于0")
+            raise SeedreamConfigError(
+                f"auto_save_max_total_bytes必须大于0"
+                f"{_env_var_suffix('auto_save_max_total_bytes')}"
+            )
 
         if self.stream_buffer_max_size <= 0:
-            raise SeedreamConfigError("stream_buffer_max_size必须大于0")
+            raise SeedreamConfigError(
+                f"stream_buffer_max_size必须大于0{_env_var_suffix('stream_buffer_max_size')}"
+            )
         if self.stream_chunk_size <= 0:
-            raise SeedreamConfigError("stream_chunk_size必须大于0")
+            raise SeedreamConfigError(
+                f"stream_chunk_size必须大于0{_env_var_suffix('stream_chunk_size')}"
+            )
         if self.stream_chunk_size > self.stream_buffer_max_size:
-            raise SeedreamConfigError("stream_chunk_size不能大于stream_buffer_max_size")
+            raise SeedreamConfigError(
+                f"stream_chunk_size不能大于stream_buffer_max_size"
+                f"{_env_var_suffix('stream_chunk_size', 'stream_buffer_max_size')}"
+            )
 
         if self.image_prepare_concurrency <= 0:
-            raise SeedreamConfigError("image_prepare_concurrency必须大于0")
+            raise SeedreamConfigError(
+                f"image_prepare_concurrency必须大于0"
+                f"{_env_var_suffix('image_prepare_concurrency')}"
+            )
 
         if self.prepare_cache_max < 1:
-            raise SeedreamConfigError("prepare_cache_max不能小于1")
+            raise SeedreamConfigError(
+                f"prepare_cache_max不能小于1{_env_var_suffix('prepare_cache_max')}"
+            )
         if self.prepare_cache_max_bytes < 1:
-            raise SeedreamConfigError("prepare_cache_max_bytes不能小于1")
+            raise SeedreamConfigError(
+                f"prepare_cache_max_bytes不能小于1{_env_var_suffix('prepare_cache_max_bytes')}"
+            )
 
         if self.auto_save_base_dir:
             self._validate_dir_field(self.auto_save_base_dir, "auto_save_base_dir")
@@ -239,7 +280,10 @@ class SeedreamConfig:
             self._validate_dir_field(self.workspace_root, "workspace_root")
 
         if self.http_max_body_size < 1024 * 1024:
-            raise SeedreamConfigError("http_max_body_size 不能低于 1MB（1048576 字节）")
+            raise SeedreamConfigError(
+                f"http_max_body_size 不能低于 1MB（1048576 字节）"
+                f"{_env_var_suffix('http_max_body_size')}"
+            )
 
     def _validate_dir_field(self, value: str, field_name: str) -> None:
         """校验给定路径指向有效目录，存在但非目录时抛 SeedreamConfigError。
@@ -250,11 +294,15 @@ class SeedreamConfig:
         try:
             dir_path = Path(value).expanduser()
             if dir_path.exists() and not dir_path.is_dir():
-                raise SeedreamConfigError(f"{field_name}不是有效目录: {value}")
+                raise SeedreamConfigError(
+                    f"{field_name}不是有效目录: {value}{_env_var_suffix(field_name)}"
+                )
         except SeedreamConfigError:
             raise
         except Exception as exc:
-            raise SeedreamConfigError(f"{field_name}路径无效: {value} -> {exc}") from exc
+            raise SeedreamConfigError(
+                f"{field_name}路径无效: {value} -> {exc}{_env_var_suffix(field_name)}"
+            ) from exc
 
     @classmethod
     def from_env(cls, env_file: str | None = None) -> "SeedreamConfig":
@@ -289,6 +337,28 @@ _FIELD_ENV_MAP: dict[str, str] = {
     for f in fields(SeedreamConfig)
     if _ENV_METADATA_KEY in f.metadata
 }
+
+# api_key 为必填字段、无默认值，不适用 _env_field 登记，其环境变量名在此显式列出，
+# 与配置构建显式读取 ARK_API_KEY 的路径保持一致。
+_NON_METADATA_FIELD_ENV: dict[str, str] = {"api_key": "ARK_API_KEY"}
+
+
+def _env_var_suffix(*field_names: str) -> str:
+    """反查字段对应的环境变量名，生成校验错误消息的变量名提示后缀。
+
+    以 _FIELD_ENV_MAP 为单一数据源，api_key 经 _NON_METADATA_FIELD_ENV 补齐。跨字段
+    约束可传入多个字段名，斜杠连接各自的变量名。无法反查的字段名跳过，全部不可反查
+    时返回空串，消息保持原样。validate 在实例构造期执行，晚于本模块加载完成，直接
+    读取模块级映射无可见性问题。
+    """
+    env_names: list[str] = []
+    for name in field_names:
+        env_name = _FIELD_ENV_MAP.get(name) or _NON_METADATA_FIELD_ENV.get(name)
+        if env_name:
+            env_names.append(env_name)
+    if not env_names:
+        return ""
+    return f"（环境变量 {'/'.join(env_names)}）"
 
 
 def _field_default_str(field_name: str) -> str:

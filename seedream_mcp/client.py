@@ -128,8 +128,8 @@ class SeedreamClient:
         self,
         prompt: str,
         optimize_prompt_options: dict[str, Any] | None = None,
-        size: str = "2K",
-        watermark: bool = False,
+        size: str | None = None,
+        watermark: bool | None = None,
         response_format: str = "url",
         output_format: str | None = None,
         stream: bool = False,
@@ -143,8 +143,8 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要生成的图像内容
             optimize_prompt_options: 提示词优化选项，可选配置字典
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
-            watermark: 是否添加水印，默认为 False
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
@@ -209,8 +209,8 @@ class SeedreamClient:
         prompt: str,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: str | None = None,
-        size: str = "2K",
-        watermark: bool = False,
+        size: str | None = None,
+        watermark: bool | None = None,
         response_format: str = "url",
         output_format: str | None = None,
         stream: bool = False,
@@ -225,8 +225,8 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的修改或转换
             optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 输入图像的 URL 或本地文件路径
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
-            watermark: 是否添加水印，默认为 False
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
@@ -295,8 +295,8 @@ class SeedreamClient:
         prompt: str,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: list[str] | None = None,
-        size: str = "2K",
-        watermark: bool = False,
+        size: str | None = None,
+        watermark: bool | None = None,
         response_format: str = "url",
         output_format: str | None = None,
         stream: bool = False,
@@ -311,8 +311,8 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的融合操作
             optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张；5.0 Pro 最多 10 张
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
-            watermark: 是否添加水印，默认为 False
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
@@ -385,8 +385,8 @@ class SeedreamClient:
         prompt: str,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: str | Sequence[str] | None = None,
-        size: str = "2K",
-        watermark: bool = False,
+        size: str | None = None,
+        watermark: bool | None = None,
         max_images: int | None = None,
         response_format: str = "url",
         output_format: str | None = None,
@@ -407,8 +407,8 @@ class SeedreamClient:
             prompt: 文本提示词，描述要生成的图像内容
             optimize_prompt_options: 提示词优化选项，可选配置字典
             image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表；参考图数量与生成数量之和不超过 15
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，默认为 "2K"
-            watermark: 是否添加水印，默认为 False
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark
             max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
@@ -525,8 +525,8 @@ class SeedreamClient:
         *,
         prompt: str,
         optimize_prompt_options: dict[str, Any] | None,
-        size: str,
-        watermark: bool,
+        size: str | None,
+        watermark: bool | None,
         response_format: str,
         output_format: str | None,
         stream: bool,
@@ -536,14 +536,16 @@ class SeedreamClient:
 
         委托 utils.core.validators.validate_common_generation_params 单一入口完成公共参数
         全量校验，作为公共库 API 的自校验层：工具链路经 schema 与 context 分层校验后仍会
-        到达此处，直接调用 client 的库使用方则仅依赖本校验。各方法特有的图片数量与序列
-        校验仍在各自方法内执行。
+        到达此处，直接调用 client 的库使用方则仅依赖本校验。size 与 watermark 未显式
+        传入时按 config.default_size / default_watermark 兜底合成，与 tools 层
+        build_generation_context 的合成语义一致，消除直连调用与配置的双源分叉。
+        各方法特有的图片数量与序列校验仍在各自方法内执行。
         """
         return validate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
-            size=size,
-            watermark=watermark,
+            size=size if size is not None else self.config.default_size,
+            watermark=self.config.default_watermark if watermark is None else watermark,
             response_format=response_format,
             output_format=output_format,
             stream=stream,
@@ -822,28 +824,72 @@ class SeedreamClient:
         retry_after = self._retry_after_or_none(status_code, headers)
         raise handle_api_error(status_code, error_data, retry_after=retry_after)
 
-    def _raise_for_response_status(self, response: httpx.Response) -> None:
-        """将非 200 状态码转换为统一 API 异常。"""
-        if response.status_code == 200:
-            return
+    def _response_body_byte_limit(self) -> int:
+        """上游响应体读取总量上限，非流式 JSON、流式 JSON 与 SSE 三条路径共用。
 
+        推导：组图单次请求最多返回 15 张图，b64_json 模式下单张图片的 base64 负载
+        上限为 auto_save_max_file_size 的 4/3（base64 将 3 字节编码为 4 字符），
+        15 × 4/3 = 20，故 20 × auto_save_max_file_size 恰好覆盖合法最坏响应体，
+        超过该值的响应只能来自异常或被污染的上游。该上限同时是非流式与流式 JSON
+        路径的响应体读入上限。
+        """
+        return self.config.auto_save_max_file_size * 20
+
+    async def _read_response_body_capped(self, response: httpx.Response) -> bytes:
+        """流式读取响应体并施加总量上限，超限抛出 SeedreamAPIError。
+
+        Content-Length 头先做快速预检，超限时无需读取直接拒绝；chunked 或缺失
+        Content-Length 的响应在 aiter_bytes 累计读取中强制上限，超限时中断读取并
+        抛出携带实际读取字节数的错误。响应的关闭由调用方负责（stream 上下文退出
+        或显式 aclose）。
+        """
+        max_bytes = self._response_body_byte_limit()
+        content_length = response.headers.get("content-length")
+        if content_length:
+            try:
+                declared_bytes = int(content_length)
+            except ValueError:
+                declared_bytes = -1
+            if declared_bytes > max_bytes:
+                raise SeedreamAPIError(
+                    f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
+                    f"超过上限 {max_bytes} 字节"
+                )
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in response.aiter_bytes():
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > max_bytes:
+                raise SeedreamAPIError(
+                    f"响应体过大: 已读取 {received} 字节，超过上限 {max_bytes} 字节"
+                )
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _error_data_from_body(raw_body: bytes) -> dict[str, Any]:
+        """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。"""
         try:
-            error_data = response.json()
+            parsed: Any = json.loads(raw_body)
         except Exception:
-            error_data = {"message": response.text}
-        self._raise_api_error_for(response.status_code, response.headers, error_data)
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+        return {"message": raw_body.decode("utf-8", errors="ignore")}
 
     async def _raise_for_stream_response_status(self, response: httpx.Response) -> None:
         """将流式响应中的非 200 状态码转换为统一 API 异常。"""
         if response.status_code == 200:
             return
 
-        error_text = (await response.aread()).decode("utf-8", errors="ignore")
-        try:
-            error_data = json.loads(error_text)
-        except Exception:
-            error_data = {"message": error_text}
-        self._raise_api_error_for(response.status_code, response.headers, error_data)
+        raw_body = await self._read_response_body_capped(response)
+        self._raise_api_error_for(
+            response.status_code,
+            response.headers,
+            self._error_data_from_body(raw_body),
+        )
 
     async def _send_stream_request(
         self,
@@ -874,14 +920,20 @@ class SeedreamClient:
                         self.config.stream_buffer_max_size,
                         (self.config.auto_save_max_file_size * 4 + 2) // 3,
                     ),
+                    # 响应流总量上限与非流式/流式 JSON 路径共用同一限额，拦截以大量
+                    # 小事件滴流的超限流，见 _response_body_byte_limit。
+                    total_bytes_limit=self._response_body_byte_limit(),
                     log=self.logger,
                 )
 
             try:
-                raw_body = await response.aread()
+                raw_body = await self._read_response_body_capped(response)
                 # JSON 解析为同步 CPU 操作，移至工作线程避免阻塞事件循环；
                 # 直接传入 bytes，json.loads 自 3.6 起接受 bytes 并在工作线程内完成 decode。
                 payload = await asyncio.to_thread(json.loads, raw_body)
+            except SeedreamAPIError:
+                # 超限错误保持原文上抛，避免被误包装为 JSON 解析失败。
+                raise
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
             return self._build_api_result(payload)
@@ -894,30 +946,35 @@ class SeedreamClient:
         request_body: bytes,
         request_timeout: httpx.Timeout,
     ) -> dict[str, Any]:
-        """发送非流式请求，将 JSON 响应解析为统一结果结构。"""
+        """发送非流式请求，将 JSON 响应解析为统一结果结构。
+
+        以 build_request + send(stream=True) 发送：client.post 会使 httpx 先全量缓冲
+        响应体，Content-Length 预检在缓冲完成后才生效，chunked 或缺失 Content-Length
+        的巨型响应在缓冲阶段无任何拦截；流式发送使总量限额在接收过程中即强制执行。
+        """
         # request_body 已由调用方在工作线程序列化为 bytes，httpx 收到 bytes 即跳过事件循环内的 encode。
-        response = await client.post(url, content=request_body, timeout=request_timeout)
-
-        self.logger.debug("收到响应: 状态码={}", response.status_code)
-        # 响应体大小上限：与 SSE 单事件安全阀对齐，拒绝异常巨型响应体进入 JSON 解析，
-        # 防止上游或中间层以超大响应触发内存放大。b64_json 模式下单张合法图片的
-        # base64 负载上限即 auto_save_max_file_size 的 4/3，同量级封顶不影响合法响应。
-        content_length = response.headers.get("content-length")
-        if content_length:
-            try:
-                cl_value = int(content_length)
-            except ValueError:
-                cl_value = -1
-            if cl_value > self.config.auto_save_max_file_size * 20:
-                raise SeedreamAPIError(f"响应体过大: {cl_value} 字节")
-        self._raise_for_response_status(response)
-
+        request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
+        response = await client.send(request, stream=True)
         try:
-            # response.json() 为同步 CPU 解析，大响应体可能阻塞事件循环，移至工作线程。
-            payload = await asyncio.to_thread(response.json)
-        except Exception as exc:
-            raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
-        return self._build_api_result(payload)
+            self.logger.debug("收到响应: 状态码={}", response.status_code)
+            raw_body = await self._read_response_body_capped(response)
+
+            if response.status_code != 200:
+                self._raise_api_error_for(
+                    response.status_code,
+                    response.headers,
+                    self._error_data_from_body(raw_body),
+                )
+
+            try:
+                # JSON 解析为同步 CPU 操作，大响应体可能阻塞事件循环，移至工作线程；
+                # 直接传入 bytes，json.loads 自 3.6 起接受 bytes 并在工作线程内完成 decode。
+                payload = await asyncio.to_thread(json.loads, raw_body)
+            except Exception as exc:
+                raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
+            return self._build_api_result(payload)
+        finally:
+            await response.aclose()
 
     async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         """

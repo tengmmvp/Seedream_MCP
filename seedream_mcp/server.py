@@ -46,7 +46,7 @@ from .tools import (
     run_sequential_generation,
     run_text_to_image,
 )
-from .tools.core.parallel import get_lifespan_resource
+from .tools.core.common import get_lifespan_resource
 from .tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,

@@ -118,7 +118,7 @@ def test_get_lifespan_resource_swallows_value_error_from_request_context() -> No
             raise ValueError("Context is not available outside of a request")
 
     from seedream_mcp.config import LIFESPAN_KEY_CLIENT
-    from seedream_mcp.tools.core.parallel import get_lifespan_resource
+    from seedream_mcp.tools.core.common import get_lifespan_resource
 
     assert get_lifespan_resource(_ValueErrorCtx(), LIFESPAN_KEY_CLIENT, object) is None
 
@@ -214,6 +214,26 @@ async def test_app_lifespan_rebuilds_on_config_change(
     assert client_b.config is config_b
 
 
+async def test_app_lifespan_applies_download_concurrency_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons,
+) -> None:
+    """共享 DownloadManager 的会话连接器按配置施加进程级下载并发上限。
+
+    AutoSaveManager 每次批量保存局部构造的信号量只约束单次调用，跨请求叠加的下载
+    并发须由共享会话的连接器统一限制，否则全进程连接数可达调用次数乘以配置上限。
+    """
+    config = SeedreamConfig(api_key="test_key", auto_save_max_concurrent=3)
+    monkeypatch.setattr(config_module, "_active_config", config)
+    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
+
+    async with server.app_lifespan(server.mcp) as state:
+        download_manager = state["download_manager"]
+        session = download_manager._session
+        assert session is not None
+        assert session.connector.limit == 3
+
+
 # ==================== Lifespan 共享资源复用测试 ====================
 
 
@@ -250,7 +270,7 @@ class _FakeLifespanCtx:
 async def test_try_get_shared_client_returns_lifespan_instance() -> None:
     """_try_get_shared_client / _try_get_shared_download_manager 返回注入的实例。"""
     from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.tools.core.parallel import (
+    from seedream_mcp.tools.core.common import (
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )
@@ -270,7 +290,7 @@ async def test_try_get_shared_client_returns_lifespan_instance() -> None:
 
 def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
     """ctx 为 None、lifespan 非 dict、值类型不匹配时均返回 None。"""
-    from seedream_mcp.tools.core.parallel import (
+    from seedream_mcp.tools.core.common import (
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )

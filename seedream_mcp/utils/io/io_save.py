@@ -23,6 +23,7 @@ from ..core.formats import (
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
     _format_file_size_mb,
+    infer_extension_from_bytes,
     is_known_image_bytes,
     parse_data_uri,
 )
@@ -42,8 +43,8 @@ _cleanup_lock = asyncio.Lock()
 _cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
-def _reset_cleanup_state() -> None:
-    """重置清理节流的模块级状态，仅供测试与 server._reset_lifespan_state 隔离调用。
+def reset_cleanup_state() -> None:
+    """重置清理节流的模块级状态，供 resources 复位协议与测试隔离调用。
 
     asyncio.Lock 首次 acquire 后绑定当时的事件循环；pytest-asyncio 每个测试用例
     使用全新事件循环，跨循环复用旧锁会在 acquire 时报错。本函数重建 _cleanup_lock
@@ -301,8 +302,12 @@ class AutoSaveManager:
 
             download_result = await self.download_manager.download_image(url, save_path)
 
+            # 字节签名嗅探可能修正扩展名，实际落盘路径以下载结果的 file_path 为准；
+            # URL 派生的 save_path 此时可能指向不存在的文件，不得用于对外报告。
+            final_path = Path(download_result["file_path"])
+
             markdown_alt = alt_text or prompt or "Generated Image"
-            markdown_ref = self.file_manager.generate_markdown_reference(save_path, markdown_alt)
+            markdown_ref = self.file_manager.generate_markdown_reference(final_path, markdown_alt)
 
             metadata = _build_save_metadata(
                 prompt=prompt,
@@ -318,12 +323,12 @@ class AutoSaveManager:
             result = AutoSaveResult(
                 success=True,
                 original_url=url,
-                local_path=str(save_path),
+                local_path=str(final_path),
                 markdown_ref=markdown_ref,
                 metadata=metadata,
             )
 
-            logger.info("图片保存成功: {}", save_path)
+            logger.info("图片保存成功: {}", final_path)
             return result
 
         except (DownloadError, FileManagerError, AutoSaveError) as e:
@@ -378,9 +383,7 @@ class AutoSaveManager:
         extension = (
             self._extension_from_mime(mime)
             if mime
-            else self.file_manager.infer_extension_from_bytes(
-                content_bytes, default=DEFAULT_IMAGE_EXTENSION
-            )
+            else infer_extension_from_bytes(content_bytes, default=DEFAULT_IMAGE_EXTENSION)
         )
         content_hash = self.file_manager.get_content_hash(content_bytes)
         return content_bytes, extension, content_hash
@@ -477,6 +480,8 @@ class AutoSaveManager:
         限制并发、将异常归一化为失败结果、统计成功数并触发节流清理。fallback_url_key
         指定 url 分支从 image_data 取原始标识的键；为 None 时固定为 "base64"。
         """
+        # semaphore 保持局部构造：AutoSaveManager 按调用新建且每个实例至多执行一次
+        # 批量保存，提升为实例属性不会带来复用收益。
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
         async def save_with_semaphore(task: Awaitable[AutoSaveResult]) -> AutoSaveResult:

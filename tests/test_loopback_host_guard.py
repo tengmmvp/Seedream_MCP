@@ -1,7 +1,8 @@
 """_LoopbackHostGuardMiddleware 的 Host 头校验测试。
 
 覆盖回环 Host 放行（含端口剥离与 IPv6 方括号形态）、外部域名拒绝、Host 缺失
-fail-closed 与非 http scope 透传，守护回环绑定下的 DNS rebinding 防线。
+fail-closed、websocket 同样校验（恶意 Host 以 1008 关闭）与 lifespan 透传，
+守护回环绑定下的 DNS rebinding 防线。
 """
 
 from __future__ import annotations
@@ -32,6 +33,12 @@ class _MessageSink:
                 return int(message["status"])
         return None
 
+    def websocket_close_code(self) -> int | None:
+        for message in self.messages:
+            if message.get("type") == "websocket.close":
+                return int(message["code"])
+        return None
+
 
 class _InnerApp:
     """记录是否被放行调用的内层应用替身。"""
@@ -45,6 +52,10 @@ class _InnerApp:
 
 def _http_scope(headers: list[tuple[bytes, bytes]]) -> dict[str, Any]:
     return {"type": "http", "method": "POST", "path": "/mcp", "headers": headers}
+
+
+def _websocket_scope(headers: list[tuple[bytes, bytes]]) -> dict[str, Any]:
+    return {"type": "websocket", "path": "/mcp", "headers": headers}
 
 
 @pytest.mark.parametrize(
@@ -104,13 +115,55 @@ async def test_guard_rejects_missing_host_header() -> None:
     assert sink.status() == 403
 
 
-@pytest.mark.parametrize("scope_type", ["websocket", "lifespan"])
-async def test_guard_passes_through_non_http_scopes(scope_type: str) -> None:
-    """websocket 与 lifespan scope 原样透传，Host 校验仅作用于 http 流量。"""
+@pytest.mark.parametrize("host", [b"evil.example.com", b"evil.example.com:8000", b"192.168.1.5"])
+async def test_guard_closes_websocket_with_non_loopback_host(host: bytes) -> None:
+    """websocket scope 携带外部 Host 时以 1008 关闭，不进入内层应用。
+
+    websocket 无 HTTP 状态码可回，参照 Bearer 鉴权中间件的拒绝模式关闭握手；
+    不校验 websocket 会让 rebinding 借 websocket 通道绕过 Host 防线。
+    """
     inner = _InnerApp()
     sink = _MessageSink()
     guard = _LoopbackHostGuardMiddleware(inner)
-    scope = {"type": scope_type, "headers": [(b"host", b"evil.example.com")]}
+
+    await guard(_websocket_scope([(b"host", host)]), _noop_receive, sink)
+
+    assert inner.called_scopes == []
+    assert sink.websocket_close_code() == 1008
+    assert sink.status() is None
+
+
+async def test_guard_closes_websocket_with_missing_host_header() -> None:
+    """websocket 缺失 Host 头同样 fail-closed 关闭，与 http 路径取向一致。"""
+    inner = _InnerApp()
+    sink = _MessageSink()
+    guard = _LoopbackHostGuardMiddleware(inner)
+
+    await guard(_websocket_scope([]), _noop_receive, sink)
+
+    assert inner.called_scopes == []
+    assert sink.websocket_close_code() == 1008
+
+
+@pytest.mark.parametrize("host", [b"127.0.0.1:8000", b"localhost", b"[::1]"])
+async def test_guard_allows_websocket_with_loopback_host(host: bytes) -> None:
+    """websocket 携带回环 Host 正常放行，本机客户端不受影响。"""
+    inner = _InnerApp()
+    sink = _MessageSink()
+    guard = _LoopbackHostGuardMiddleware(inner)
+
+    await guard(_websocket_scope([(b"host", host)]), _noop_receive, sink)
+
+    assert len(inner.called_scopes) == 1
+    assert sink.websocket_close_code() is None
+
+
+async def test_guard_passes_through_lifespan_scope() -> None:
+    """lifespan scope 原样透传，Host 校验仅作用于 http 与 websocket 流量。"""
+    inner = _InnerApp()
+    sink = _MessageSink()
+    guard = _LoopbackHostGuardMiddleware(inner)
+    scope = {"type": "lifespan", "headers": [(b"host", b"evil.example.com")]}
 
     await guard(scope, _noop_receive, sink)
 

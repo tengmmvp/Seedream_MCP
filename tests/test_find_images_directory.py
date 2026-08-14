@@ -14,7 +14,7 @@ import pytest
 
 import seedream_mcp.utils.io.io_scan as scan_module
 import seedream_mcp.utils.io.io_path as path_utils_module
-from seedream_mcp.utils.io.io_scan import _cached_find_images_in_directory
+from seedream_mcp.utils.io.io_scan import cached_find_images_in_directory
 from seedream_mcp.utils.io.io_path import find_images_in_directory
 
 
@@ -225,10 +225,10 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    scan_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module.reset_directory_scan_cache()
 
     # scan_limit 大于目录图数，确保扫到末尾从而缓存全量
-    first = _cached_find_images_in_directory(
+    first = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
     )
     assert [p.name for p in first] == ["a.png"]
@@ -238,7 +238,7 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     (sub / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     # TTL 内再次调用命中缓存，返回陈旧的 1 张
-    within_ttl = _cached_find_images_in_directory(
+    within_ttl = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
     )
     assert [p.name for p in within_ttl] == ["a.png"]
@@ -249,7 +249,7 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     base = real_monotonic()
     monkeypatch.setattr(scan_module.time, "monotonic", lambda: base + ttl + 1)
 
-    expired = _cached_find_images_in_directory(
+    expired = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
     )
     assert sorted(p.name for p in expired) == ["a.png", "b.png"]
@@ -259,24 +259,24 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
     """缓存命中返回全量列表浅拷贝，不同 scan_limit 的翻页共享同一缓存条目。"""
     for name in ("a.png", "b.png", "c.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
-    scan_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module.reset_directory_scan_cache()
 
     # scan_limit 大于图数，扫到末尾缓存全量 3 张
-    first = _cached_find_images_in_directory(
+    first = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
     )
     assert len(first) == 3
     assert len(scan_module._DIRECTORY_SCAN_CACHE) == 1
 
     # 不同 scan_limit（模拟翻页）命中同一缓存，返回全量 3 而非 scan_limit=2 的前缀
-    paged = _cached_find_images_in_directory(
+    paged = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=2
     )
     assert len(paged) == 3
 
     # 返回浅拷贝：调用方修改不影响内部缓存
     paged.append(Path("/fake.png"))
-    again = _cached_find_images_in_directory(
+    again = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
     )
     assert len(again) == 3
@@ -290,13 +290,13 @@ def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> Non
     """
     for i in range(5):
         (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    scan_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module.reset_directory_scan_cache()
 
     def _entry() -> Any:
         return next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
 
     # 首页 scan_limit=2：目录有 5 图，返回 2 条，结果数等于 limit 故 complete=False，缓存前缀 2
-    _cached_find_images_in_directory(
+    cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=2
     )
     entry = _entry()
@@ -304,7 +304,7 @@ def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> Non
     assert len(entry.images) == 2
 
     # 深页 scan_limit=4：缓存前缀 2 小于 4，重扫并扩展前缀至 4
-    _cached_find_images_in_directory(
+    cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=4
     )
     entry = _entry()
@@ -312,7 +312,7 @@ def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> Non
     assert len(entry.images) == 4
 
     # 回看 scan_limit=2：缓存前缀 4 不小于 2，命中返回前缀，不重扫（images 仍为 4）
-    back = _cached_find_images_in_directory(
+    back = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=2
     )
     assert len(back) == 4
@@ -323,13 +323,13 @@ def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
     """扫到目录末尾(complete=True)后，任意 scan_limit 均命中全量，不再扫描。"""
     for name in ("a.png", "b.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
-    scan_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module.reset_directory_scan_cache()
 
     def _entry() -> Any:
         return next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
 
     # scan_limit=10 远大于目录 2 图，返回 2 条且 complete=True（扫到末尾）
-    _cached_find_images_in_directory(
+    cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
     )
     entry = _entry()
@@ -337,7 +337,7 @@ def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
     assert len(entry.images) == 2
 
     # 更小 scan_limit 命中 complete 缓存，返回全量 2 而非前缀
-    hit = _cached_find_images_in_directory(
+    hit = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=1
     )
     assert len(hit) == 2

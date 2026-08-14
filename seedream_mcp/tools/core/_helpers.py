@@ -27,8 +27,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-# 进度里程碑常量：common.py 与 parallel.py 共用，集中定义避免跨模块隐式契约漂移。
-# 阶梯：接收 0 → 校验完成 10 → 生成开始 20 → 生成完成 70 → 自动保存开始 75 → 保存完成 95 → 结束 100。
+# 进度里程碑常量：common.py、parallel.py 与 impl/browse_images.py 共用，集中定义避免
+# 跨模块隐式契约漂移与两套同名常量各自演化。
+# 生成管道阶梯：接收 0 → 校验完成 10 → 生成开始 20 → 生成完成 70 → 自动保存开始 75 → 保存完成 95 → 结束 100。
 PROGRESS_RECEIVED = 0.0
 PROGRESS_VALIDATED = 10.0
 PROGRESS_GENERATION_START = 20.0
@@ -36,6 +37,10 @@ PROGRESS_GENERATION_DONE = 70.0
 PROGRESS_AUTOSAVE_START = 75.0
 PROGRESS_AUTOSAVE_DONE = 95.0
 PROGRESS_COMPLETE = 100.0
+# 浏览工具阶梯：扫描开始 20，多目录扫描按已扫描目录占比在 70 的跨度内渐增至 90，
+# 结束复用 PROGRESS_COMPLETE。数值与生成管道部分里程碑相同但语义独立，故单独命名。
+PROGRESS_SCAN_START = 20.0
+PROGRESS_SCAN_SPAN = 70.0
 
 
 def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:

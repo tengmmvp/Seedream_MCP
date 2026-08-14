@@ -159,7 +159,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 # 连接与传输
 --base-url TEXT                                    # API 基础 URL（默认按配置或内置默认值；须 https，http 需设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
 --transport [stdio|streamable-http]                # MCP 传输方式 (默认: stdio)
---host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址将触发安全告警)
+--host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址必须配置 --auth-token 与 TLS，否则拒绝启动)
 --port INTEGER                                     # streamable-http 监听端口 (默认: 8000)
 --stateless                                        # streamable-http 无状态模式，适合远程多客户端与负载均衡 (默认关闭)
 
@@ -324,7 +324,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **参数：**
 
-- `directory` (可选) - 要浏览的目录路径，默认当前目录
+- `directory` (可选) - 要浏览的目录路径，默认浏览工作区根目录（MCP Roots 授权的首个根；无 Roots 时回退 `SEEDREAM_WORKSPACE_ROOT` 配置的本地工作区根，均未设置时为进程当前工作目录）
 - `recursive` (可选) - 是否递归搜索子目录，默认`true`
 - `max_depth` (可选) - 最大搜索深度，范围 1-10，默认 3
 - `limit` (可选) - 返回的最大文件数量，范围 1-200，默认 50

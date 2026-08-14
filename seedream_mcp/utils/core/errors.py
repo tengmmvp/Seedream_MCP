@@ -257,7 +257,10 @@ def handle_api_error(
         if "error" in response_data:
             error_detail = response_data["error"]
             if isinstance(error_detail, dict):
-                error_code = error_detail.get("code")
+                raw_code = error_detail.get("code")
+                # 仅接受非空字符串错误码：上游数字码转字符串属臆测语义，其余类型置 None
+                # 丢弃，message 拼装不受影响。
+                error_code = raw_code if isinstance(raw_code, str) and raw_code else None
                 if "message" in error_detail:
                     error_message = f"{error_message}: {error_detail['message']}"
             elif isinstance(error_detail, str):

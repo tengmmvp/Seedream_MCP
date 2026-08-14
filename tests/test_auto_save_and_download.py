@@ -15,6 +15,13 @@ from seedream_mcp.utils.io.io_download import (
     _is_image_compatible_content_type,
 )
 
+from _download_fakes import (
+    _PNG_BYTES,
+    _FakeSession,
+    _patch_download_network,
+    _png_success_response,
+)
+
 # 1x1 透明 PNG 的 base64 编码
 _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 
@@ -84,6 +91,33 @@ async def test_save_image_returns_failure_on_download_error(
         assert result.original_url == "https://example.com/image.png"
     finally:
         await manager.close()
+
+
+async def test_save_image_reports_sniffed_final_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """URL 无后缀派生 .jpeg 而响应体为 PNG 时，local_path 与 markdown_ref 报告实际落盘文件。
+
+    字节签名嗅探会把落盘路径修正为 .png 后缀；save_image 必须基于下载结果的
+    file_path 构造对外路径，报告 URL 派生的原始路径会指向不存在的文件。
+    """
+    download_manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(base_dir=tmp_path, download_manager=download_manager)
+
+    async with manager:
+        result = await manager.save_image("https://cdn.example.com/signed", prompt="测试图片")
+
+    assert result.success is True
+    assert result.local_path is not None
+    final_path = Path(result.local_path)
+    assert final_path.suffix.lower() == ".png"
+    assert final_path.exists()
+    assert final_path.read_bytes() == _PNG_BYTES
+    assert result.markdown_ref is not None
+    assert final_path.name in result.markdown_ref
+    assert result.markdown_ref.endswith(".png)")
 
 
 async def test_maybe_cleanup_throttle_shared_per_base_dir(
@@ -165,7 +199,7 @@ async def test_close_does_not_wait_for_background_cleanup(
     """
     from seedream_mcp.utils.io import io_save as auto_save_module
 
-    auto_save_module._reset_cleanup_state()
+    auto_save_module.reset_cleanup_state()
     release = asyncio.Event()
     started = asyncio.Event()
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)

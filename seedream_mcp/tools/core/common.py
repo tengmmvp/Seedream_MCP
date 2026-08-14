@@ -35,6 +35,7 @@ from .parallel import (
     _run_generation_requests,
     _try_get_shared_client,
     _try_get_shared_download_manager,
+    get_lifespan_resource,
 )
 from .results import (  # noqa: F401
     _build_generation_structured_result,
@@ -51,7 +52,8 @@ if TYPE_CHECKING:
     from ...client import SeedreamClient
 
 
-# 门面对外导出的公共符号。_safe_* 与 _resolve_base_dir 等私有辅助供内部子模块和测试显式导入。
+# 门面对外导出的公共符号。_safe_*、_resolve_base_dir 与 _try_get_shared_* 等私有辅助
+# 供内部子模块和测试显式导入。
 __all__ = [
     "GenerationExecutionContext",
     "aggregate_parallel_generation_results",
@@ -61,6 +63,7 @@ __all__ = [
     "execute_generation_handler",
     "extract_images",
     "format_generation_response",
+    "get_lifespan_resource",
     "update_result_with_auto_save",
 ]
 
@@ -144,6 +147,7 @@ async def execute_generation_handler(
                 )
 
         auto_save_results: list[AutoSaveResult] = []
+        saveable_indices: list[int] = []
         auto_save_error: str | None = None
         is_generation_failed = _is_generation_failed(result)
         if context.enable_auto_save and not is_generation_failed:
@@ -204,6 +208,7 @@ async def execute_generation_handler(
             context.enable_auto_save,
             auto_save_error=auto_save_error,
             images=images,
+            saveable_indices=saveable_indices,
         )
 
         structured_result = _build_generation_structured_result(

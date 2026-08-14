@@ -150,6 +150,7 @@ class _LimitRequestBodyMiddleware:
 
         total_received = 0
         too_large = False
+        response_started = False
 
         async def receive_wrapper() -> Any:
             nonlocal total_received, too_large
@@ -166,22 +167,35 @@ class _LimitRequestBodyMiddleware:
             return message
 
         async def send_wrapper(message: Any) -> None:
+            nonlocal response_started
+            # 下游发出首个响应头即视为响应已开始，此后补发 413 会构成双响应。
+            if message.get("type") == "http.response.start":
+                response_started = True
             # 一旦判定超限，吞掉下游响应，由本中间件统一回 413 避免双响应。
             if too_large:
                 return
             await send(message)
+
+        async def _finalize_too_large() -> None:
+            # 防御性不可达路径：现行 receive_wrapper 截断后，下游在读到空终帧时应在发出
+            # 响应头之前失败或正常返回。若下游已开始响应再补发 http.response.start 会违反
+            # ASGI 单响应约定，此处仅记日志，连接异常交由服务器协议层处理。
+            if response_started:
+                logger.warning("请求体超限但下游已开始响应，跳过补发 413 以避免双响应")
+                return
+            await self._send_too_large(send)
 
         try:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
             # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，避免冒泡为 500。
             if too_large:
-                await self._send_too_large(send)
+                await _finalize_too_large()
                 return
             raise
 
         if too_large:
-            await self._send_too_large(send)
+            await _finalize_too_large()
 
     async def _send_too_large(self, send: Any) -> None:
         body = json.dumps(
@@ -216,8 +230,9 @@ class _LoopbackHostGuardMiddleware:
 
     回环绑定且未配置鉴权时，浏览器经 DNS rebinding 可对 127.0.0.1 发起同源请求，
     绕过 CORS 直达工具面枚举文件或盗用 API key。校验 Host 头为回环地址可阻断外部
-    域名请求；本地以 127.0.0.1/localhost/[::1] 访问不受影响。Host 头缺失（HTTP/1.0
-    等路径）按 403 拒绝，与整层 fail-closed 取向一致。
+    域名请求；本地以 127.0.0.1/localhost/[::1] 访问不受影响。http 与 websocket 流量
+    均校验：websocket 无 HTTP 状态码可回，参照鉴权中间件模式以 1008 关闭；Host 头
+    缺失（HTTP/1.0 等路径）按 403 拒绝，与整层 fail-closed 取向一致。
     """
 
     # 允许的 Host 头值（剥离端口后），均解析到回环或即回环字面量。此处保留 “localhost”
@@ -233,10 +248,16 @@ class _LoopbackHostGuardMiddleware:
         self.app = app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        if scope.get("type") == "http":
+        scope_type = scope.get("type")
+        if scope_type in ("http", "websocket"):
             host = self._host_header(scope)
             if host is None or self._strip_port(host) not in self._ALLOWED_HOSTS:
-                await self._send_forbidden(send)
+                if scope_type == "websocket":
+                    # websocket 握手无 HTTP 状态码可回，按本文件鉴权中间件模式以
+                    # 1008 Policy Violation 关闭，阻断 rebinding 借 websocket 绕过校验。
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await self._send_forbidden(send)
                 return
         await self.app(scope, receive, send)
 
@@ -261,6 +282,56 @@ class _LoopbackHostGuardMiddleware:
             {"error": "invalid_host", "error_description": "Host not allowed"}
         ).encode("utf-8")
         await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
+
+
+# ==================== streamable-http 中间件装配 ====================
+
+# 本模块装配到 streamable-http app 的全部中间件类，供重复装配检测使用。
+_STREAMABLE_HTTP_MIDDLEWARE_CLASSES = (
+    _BearerTokenAuthMiddleware,
+    _LimitRequestBodyMiddleware,
+    _LoopbackHostGuardMiddleware,
+    _HealthCheckMiddleware,
+)
+
+
+def _middleware_attached(app: Any) -> bool:
+    """检测 app 的用户中间件栈中是否已含本模块装配的任一中间件。"""
+    for middleware in getattr(app, "user_middleware", ()):
+        if getattr(middleware, "cls", None) in _STREAMABLE_HTTP_MIDDLEWARE_CLASSES:
+            return True
+    return False
+
+
+def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> None:
+    """向 streamable-http app 装配中间件栈，重复装配时跳过。
+
+    streamable_http_app 每次调用新建 Starlette app 但复用缓存的 _session_manager，
+    同一 app 实例重复进入装配会在其用户中间件栈上叠加重复层。装配前检测本模块任一
+    中间件已存在即整体跳过，使装配幂等；全新 app 正常装配。测试需重建会话管理器时
+    以 monkeypatch 重置 mcp._session_manager 为 None 强制重建，见 test_streamable_http_e2e。
+
+    Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
+    HealthCheck -> LimitRequestBody -> Bearer -> app：Bearer 最先添加居最内，其后添加
+    请求体限制使其位于鉴权之外，从而声明超长 Content-Length 的请求在鉴权前即被 413 早拒。
+    已认证的 chunked 请求由 receive 字节累计保护；未授权 chunked 请求不读 body 直接 401，
+    其体积限制依赖 uvicorn 或反向代理层。
+    """
+    if _middleware_attached(app):
+        logger.warning("streamable-http 中间件已装配，跳过重复装配以避免中间件栈叠加")
+        return
+    if auth_token:
+        app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
+        logger.info("streamable-http 已启用 Bearer 令牌鉴权")
+    app.add_middleware(
+        _LimitRequestBodyMiddleware, max_body_size=get_active_config().http_max_body_size
+    )
+    # 回环绑定时启用 Host 头校验，阻断 DNS rebinding 使外部域名请求直达本机服务。
+    # 位于健康检查之内、请求体限制与鉴权之外，本地 127.0.0.1/localhost 访问不受影响。
+    if host in _LOOPBACK_HOSTS:
+        app.add_middleware(_LoopbackHostGuardMiddleware)
+    # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health。
+    app.add_middleware(_HealthCheckMiddleware)
 
 
 # ==================== streamable-http 传输配置 ====================
@@ -368,26 +439,7 @@ def _run_streamable_http(
     from .resources import _cleanup_shared_resources, mcp
 
     app = mcp.streamable_http_app()
-    # streamable_http_app 首次调用后缓存 _session_manager 并固定中间件栈，重复调用会在同一
-    # 缓存实例上叠加 add_middleware。生产路径 cli_main 单次调用无叠加风险；测试需重建栈时
-    # 以 monkeypatch 重置 mcp._session_manager 为 None 强制重建，见 test_streamable_http_e2e。
-    # Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    # HealthCheck -> LimitRequestBody -> Bearer -> app：Bearer 最先添加居最内，其后添加
-    # 请求体限制使其位于鉴权之外，从而声明超长 Content-Length 的请求在鉴权前即被 413 早拒。
-    # 已认证的 chunked 请求由 receive 字节累计保护；未授权 chunked 请求不读 body 直接 401，
-    # 其体积限制依赖 uvicorn 或反向代理层。
-    if auth_token:
-        app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
-        logger.info("streamable-http 已启用 Bearer 令牌鉴权")
-    app.add_middleware(
-        _LimitRequestBodyMiddleware, max_body_size=get_active_config().http_max_body_size
-    )
-    # 回环绑定时启用 Host 头校验，阻断 DNS rebinding 使外部域名请求直达本机服务。
-    # 位于健康检查之内、请求体限制与鉴权之外，本地 127.0.0.1/localhost 访问不受影响。
-    if host in _LOOPBACK_HOSTS:
-        app.add_middleware(_LoopbackHostGuardMiddleware)
-    # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health。
-    app.add_middleware(_HealthCheckMiddleware)
+    _attach_streamable_http_middleware(app, host, auth_token)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:
         ssl_kwargs["ssl_certfile"] = ssl_certfile

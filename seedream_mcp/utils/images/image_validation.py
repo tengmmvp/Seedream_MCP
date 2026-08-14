@@ -139,7 +139,7 @@ def image_candidate_stat(path: Path) -> os.stat_result | None:
 
 
 def resolve_local_image_candidate(
-    image: str, resolved_bases: list[Path]
+    image: str, resolved_roots: list[Path]
 ) -> tuple[Path, os.stat_result] | None:
     """按输入路径与已 resolve 的工作区根列表定位可读取的候选图片文件。
 
@@ -154,7 +154,7 @@ def resolve_local_image_candidate(
     决定回退或报错。
     """
     candidates = (
-        [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_bases]
+        [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_roots]
     )
     for candidate in candidates:
         # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
@@ -165,7 +165,7 @@ def resolve_local_image_candidate(
             resolved_candidate = candidate.resolve()
         except (OSError, ValueError):
             continue
-        if not any(is_within_resolved(resolved_candidate, base) for base in resolved_bases):
+        if not any(is_within_resolved(resolved_candidate, base) for base in resolved_roots):
             continue
         st = image_candidate_stat(resolved_candidate)
         if st is not None:

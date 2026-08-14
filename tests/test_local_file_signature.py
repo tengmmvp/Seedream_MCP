@@ -82,9 +82,9 @@ def test_signature_delegates_to_shared_candidate_resolution(tmp_path: Path) -> N
     (root1 / "photo.png").mkdir()
     valid = root2 / "photo.png"
     valid.write_bytes(_PNG_BYTES)
-    resolved_bases = [root1.resolve(), root2.resolve()]
+    resolved_roots = [root1.resolve(), root2.resolve()]
 
-    found = resolve_local_image_candidate("photo.png", resolved_bases)
+    found = resolve_local_image_candidate("photo.png", resolved_roots)
     assert found is not None
     path, st = found
 

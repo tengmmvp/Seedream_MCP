@@ -450,3 +450,75 @@ def test_build_config_loads_allow_http_base_url_from_env_file(
 
     assert config.allow_http_base_url is True
     assert config.base_url == "http://internal.example.com/api/v3"
+
+
+# ==================== base_url scheme 大小写不敏感 ====================
+
+
+def test_seedream_config_accepts_uppercase_https_scheme() -> None:
+    """RFC 3986 scheme 大小写不敏感：HTTPS:// 大写形态应被接受。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", base_url="HTTPS://ark.example.com/api/v3")
+
+    assert config.base_url == "HTTPS://ark.example.com/api/v3"
+
+
+def test_seedream_config_uppercase_http_scheme_requires_exemption() -> None:
+    """HTTP:// 大写形态按明文端点处理：未豁免时拒绝，豁免后接受。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_ALLOW_HTTP_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="HTTP://internal.example.com/api/v3")
+
+    config = SeedreamConfig(
+        api_key="k",
+        base_url="HTTP://internal.example.com/api/v3",
+        allow_http_base_url=True,
+    )
+    assert config.base_url == "HTTP://internal.example.com/api/v3"
+
+
+# ==================== 校验错误消息附带环境变量名 ====================
+
+
+@pytest.mark.parametrize(
+    "kwargs,env_name",
+    [
+        ({"timeout": 0}, "SEEDREAM_TIMEOUT"),
+        ({"api_timeout": -1}, "SEEDREAM_API_TIMEOUT"),
+        ({"max_retries": 0}, "SEEDREAM_MAX_RETRIES"),
+        ({"log_level": "VERBOSE"}, "LOG_LEVEL"),
+        ({"auto_save_download_timeout": 0}, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"),
+        ({"stream_chunk_size": 0}, "SEEDREAM_STREAM_CHUNK_SIZE"),
+        ({"prepare_cache_max": 0}, "SEEDREAM_PREPARE_CACHE_MAX"),
+        ({"http_max_body_size": 1024}, "SEEDREAM_HTTP_MAX_BODY_SIZE"),
+        ({"base_url": "ftp://bad.example.com"}, "ARK_BASE_URL"),
+        ({"model_id": "doubao-seededit-3-0-250828"}, "SEEDREAM_MODEL_ID"),
+    ],
+)
+def test_seedream_config_validation_errors_mention_env_var(kwargs: dict, env_name: str) -> None:
+    """校验失败消息附带对应环境变量名，用户可直接定位配置来源。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match=f"环境变量 {env_name}"):
+        SeedreamConfig(api_key="k", **kwargs)
+
+
+def test_seedream_config_empty_api_key_error_mentions_env_var() -> None:
+    """api_key 为空的校验消息附带 ARK_API_KEY，虽该字段无 env metadata。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_API_KEY"):
+        SeedreamConfig(api_key=" ")
+
+
+def test_seedream_config_chunk_size_error_mentions_both_env_vars() -> None:
+    """跨字段约束的校验消息同时附带两个字段的环境变量名。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(
+        SeedreamConfigError,
+        match="环境变量 SEEDREAM_STREAM_CHUNK_SIZE/SEEDREAM_STREAM_BUFFER_MAX_SIZE",
+    ):
+        SeedreamConfig(api_key="k", stream_chunk_size=2048, stream_buffer_max_size=1024)

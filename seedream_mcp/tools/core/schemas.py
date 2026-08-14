@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import ClassVar, Protocol
+from typing import ClassVar, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -96,7 +96,8 @@ class _PromptAndOptimizeInput(BaseModel):
     """提示词与提示词优化参数。"""
 
     # prompt 在基类声明以确立字段顺序：MCP inputSchema 按字段顺序展示参数，prompt 须居首。
-    # 长度约束经常量声明，子类覆盖 prompt 时复用同一常量避免散落多处。
+    # 基类定义仅锚定字段顺序，长度约束与描述以各子类的覆盖为准；子类覆盖 prompt 时复用
+    # 同一长度常量，避免约束散落多处。
     prompt: str = Field(
         ...,
         min_length=PROMPT_MIN_LENGTH,
@@ -148,10 +149,11 @@ class _MultiImageInput(BaseModel):
 class _SequentialImageInput(BaseModel):
     """组图参考图输入参数。"""
 
-    image: list[str] | None = Field(
+    # 运行时接受单字符串并经 before-validator 归一为单元素列表，声明与该行为一致。
+    image: str | list[str] | None = Field(
         default=None,
         description=(
-            f"可选的参考图片，支持 URL、本地路径，单张或多张，"
+            f"可选的参考图片，支持 URL、本地路径，单张或多张，单字符串视为单元素列表，"
             f"最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
         ),
     )
@@ -386,17 +388,20 @@ class SequentialGenerationInput(
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
         """校验参考图数量与生成数量的总和限制。"""
+        # 字段声明含 str 形态以对齐 inputSchema，但 before-validator 已把单字符串归一为
+        # 列表，after 阶段的运行时值恒为 list[str] | None，此处收窄供下游计数消费。
+        images = cast("list[str] | None", self.image)
         # max_images 未显式传入时，按参考图数量自动推导，取生成总上限减去参考图数量。
         # 派生写入用 object.__setattr__ 绕过 validate_assignment 并从 model_fields_set
         # 剔除：普通赋值会把派生值登记进 fields_set 且再触发一轮本 after-validator，
         # 使派生与显式传入不可区分，误导依据 fields_set 判断显式传入的逻辑（如
         # exclude_unset 序列化与审计）。
         if "max_images" not in self.model_fields_set:
-            object.__setattr__(self, "max_images", resolve_sequential_max_images(None, self.image))
+            object.__setattr__(self, "max_images", resolve_sequential_max_images(None, images))
             self.__pydantic_fields_set__.discard("max_images")
 
         try:
-            validate_sequential_image_limit(self.max_images, self.image)
+            validate_sequential_image_limit(self.max_images, images)
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
         return self
@@ -424,7 +429,11 @@ class BrowseImagesInput(BaseModel):
 
     directory: str | None = Field(
         default=None,
-        description="要浏览的目录路径，默认使用当前工作目录。",
+        description=(
+            "要浏览的目录路径，默认浏览工作区根目录，即 MCP Roots 授权的首个根；"
+            "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
+            "均未设置时回退进程当前工作目录。"
+        ),
     )
     recursive: bool = Field(
         default=DEFAULT_RECURSIVE,

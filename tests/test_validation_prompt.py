@@ -98,3 +98,40 @@ def test_pydantic_input_accepts_english_601_words_for_structure_validation_only(
     prompt = ("word " * 601).strip()
     obj = TextToImageInput(prompt=prompt)
     assert obj.prompt == prompt
+
+
+def _reference_cjk_count(text: str) -> int:
+    """独立基准计数：按字符直接遍历判定 CJK 区间，不依赖被测的正则实现。"""
+    return sum(1 for c in text if "㐀" <= c <= "䶿" or "一" <= c <= "鿿" or "豈" <= c <= "﫿")
+
+
+def test_validate_prompt_long_prompt_counts_match_reference(
+    warning_logger: _WarningCaptureLogger,
+) -> None:
+    """100KB 级长提示词的中英文计数与独立基准一致，警告文案携带真实计数。
+
+    长提示词计数路径是性能敏感点，任何后续重排或下沉不得改变计数结果。
+    """
+    long_cjk = "春" * 100_000
+    long_en = ("word " * 20_001).strip()
+    # validate_prompt 返回 strip 后文本，构造时先去除首尾空白保持断言可比
+    mixed = (("春天来了 " + "word " * 10) * 2_000).strip()
+
+    for text in (long_cjk, long_en, mixed):
+        assert validate_prompt(text) == text
+
+    # 三条超限提示各触发一次警告，文案中的计数与独立基准一致
+    assert len(warning_logger.warnings) == 3
+    assert f"中文{_reference_cjk_count(long_cjk)}" in warning_logger.warnings[0]
+    assert f"英文{20_001}" in warning_logger.warnings[1]
+    assert f"中文{_reference_cjk_count(mixed)}" in warning_logger.warnings[2]
+    assert f"英文{20_000}" in warning_logger.warnings[2]
+
+
+def test_validate_prompt_long_prompt_without_cjk_or_words_emits_no_warning(
+    warning_logger: _WarningCaptureLogger,
+) -> None:
+    """超长但不含 CJK 与英文单词的提示词计数均为零，不触发警告。"""
+    text = "！" * 100_000
+    assert validate_prompt(text) == text
+    assert warning_logger.warnings == []

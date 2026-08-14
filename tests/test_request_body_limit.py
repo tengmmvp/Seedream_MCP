@@ -194,6 +194,49 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
     assert received == {"called": True}
 
 
+async def test_request_body_limit_skips_413_when_downstream_already_responded() -> None:
+    """下游先发 response.start 再触发超限时不得补发第二个 response.start。
+
+    防御性路径：现行实现截断 body 后下游应在发出响应头前失败或返回，此处模拟
+    下游已开始响应才读到超限 body 的形态，断言真实 send 只收到一个
+    http.response.start，连接异常交由服务器协议层处理。
+    """
+    small_limit = 1024
+    sent: list[dict] = []
+    messages = [
+        {"type": "http.request", "body": b"x" * 600, "more_body": True},
+        {"type": "http.request", "body": b"x" * 600, "more_body": False},
+    ]
+    counter = {"i": 0}
+
+    async def receive() -> dict:
+        if counter["i"] < len(messages):
+            msg = messages[counter["i"]]
+            counter["i"] += 1
+            return msg
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        # 先正常开始响应，再读取 body 触发超限判定。
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        while True:
+            msg = await receive()
+            if msg["type"] == "http.request" and not msg.get("more_body", False):
+                break
+        await send({"type": "http.response.body", "body": b"partial"})
+
+    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    scope = {"type": "http", "headers": []}
+    await middleware(scope, receive, send)
+
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 200
+
+
 # ==================== SEEDREAM_HTTP_MAX_BODY_SIZE 配置解析 ====================
 
 

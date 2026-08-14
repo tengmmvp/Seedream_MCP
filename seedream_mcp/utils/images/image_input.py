@@ -11,8 +11,6 @@ import asyncio
 import base64
 from pathlib import Path
 
-from PIL import Image
-
 from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
 from ..core.formats import MIME_BY_EXTENSION, _format_file_size_mb
 from ..core.logs import get_logger
@@ -72,14 +70,14 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     if not workspace_roots:
         raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
 
-    resolved_bases: list[Path] = []
+    resolved_roots: list[Path] = []
     for root in workspace_roots:
         try:
-            resolved_bases.append(root.resolve())
+            resolved_roots.append(root.resolve())
         except (OSError, ValueError):
             continue
 
-    found = resolve_local_image_candidate(normalized, resolved_bases)
+    found = resolve_local_image_candidate(normalized, resolved_roots)
     if found is None:
         # 诊断性校验仅用于错误文案：定位已由共享规则唯一决定，此处取各根的具体
         # 失败原因（文件不存在、格式不支持等）拼入错误消息，不影响候选一致性。
@@ -124,6 +122,10 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             value=str(validated_path),
         )
     # 维度校验复用已读字节，维度相关异常与 image_validation 路径对齐为 SeedreamValidationError。
+    # PIL 函数内惰性导入与 image_validation 模式一致：本函数运行于工作线程，首次导入的
+    # 解码器加载成本不落在事件循环线程，首个带参考图的请求不阻塞其他在途请求。
+    from PIL import Image
+
     try:
         decode_and_validate_dimensions(image_bytes, str(validated_path))
     except SeedreamValidationError:

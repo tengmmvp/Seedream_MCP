@@ -53,6 +53,16 @@ class _DirectoryScanCacheEntry:
     complete: bool
 
 
+def reset_directory_scan_cache() -> None:
+    """清空目录扫描的进程级缓存，供测试隔离与进程复位使用。
+
+    清除 _DIRECTORY_SCAN_CACHE 内全部条目；模块内其余名称均为不可变常量或纯函数，
+    无其他需要复位的模块级可变状态。resources._reset_lifespan_state 的复位协议经
+    本函数登记此缓存。
+    """
+    _DIRECTORY_SCAN_CACHE.clear()
+
+
 def _get_directory_mtime_ns(path: Path) -> int | None:
     """返回目录 mtime 纳秒值，stat 失败返回 None。"""
     try:
@@ -95,7 +105,7 @@ def _store_scan_entry(
     )
 
 
-def _cached_find_images_in_directory(
+def cached_find_images_in_directory(
     *,
     resolved_dir: Path,
     recursive: bool,
