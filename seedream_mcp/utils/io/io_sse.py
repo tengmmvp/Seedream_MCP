@@ -1,7 +1,7 @@
 """SSE 流式响应解析。
 
-将 Seedream API 的 Server-Sent Events 流式响应解析为统一结构。从 SeedreamClient
-剥离，便于独立测试与维护。
+将 Seedream API 的 Server-Sent Events 流式响应增量解析为统一的图片项列表与完成
+元信息，供 client 的流式请求路径调用。
 """
 
 from __future__ import annotations
@@ -59,10 +59,10 @@ def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, A
 
 
 def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dict[str, Any] | None:
-    """解析单个 SSE 事件段，返回事件对象。解析失败时记录日志并返回 None。
+    """解析单个 SSE 事件段，返回事件对象。
 
-    全程按 bytes 处理负载并直接交给 json.loads，省去整段事件的 str decode 分配；
-    大事件场景下事件体可达数十 MB，该分配是解析路径的主要瞬时内存峰值。
+    解析失败时记录日志并返回 None。负载全程按 bytes 处理并直接交给 json.loads，
+    避免大事件场景下整段事件的 str decode 分配造成瞬时内存峰值。
     """
     start = 0
     end = len(segment)
@@ -75,13 +75,13 @@ def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dic
         return None
 
     try:
-        # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用
+        # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用。
         data_parts: list[bytes | bytearray] = []
         for line in raw_segment.split(b"\n"):
             if line.startswith(b"data:"):
                 data_parts.append(line[5:].strip())
         payload = b"\n".join(data_parts) if data_parts else None
-        # [DONE] 为流结束哨兵而非图片事件，直接丢弃
+        # [DONE] 为流结束哨兵而非图片事件，直接丢弃。
         if not payload or payload == b"[DONE]":
             return None
         parsed_payload = json.loads(payload)
@@ -124,7 +124,7 @@ def _classify_sse_event(
         (completed, usage, tools) — completed 为 True 时 usage/tools 有效。
     """
     event_type = event.get("type")
-    # 请求级错误事件：无 type 且顶层含 error 键。本质为 4xx，标记 status_code=400 使上层判定不可重试
+    # 请求级错误事件：无 type 且顶层含 error 键。本质为 4xx，标记 status_code=400 使上层判定不可重试。
     if event_type is None and isinstance(event.get("error"), dict):
         err = event["error"]
         raise SeedreamAPIError(
@@ -184,14 +184,14 @@ async def parse_sse_response(
             status = "completed"
             tools = evt_tools
 
-    # 使用 bytearray 累积流式数据：bytes 拼接为 O(n²) 拷贝，bytearray.extend 均摊 O(1)
+    # 使用 bytearray 累积流式数据：bytes 拼接为 O(n²) 拷贝，bytearray.extend 均摊 O(1)。
     buffer = bytearray()
-    # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)
+    # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)。
     offset = 0
     processed_bytes = 0
-    # 超限丢弃的 SSE 事件计数；用于在返回结果中区分"图片部分失败"与"事件因体积超限被丢弃"
+    # 超限丢弃的 SSE 事件计数；用于在返回结果中区分“图片部分失败”与“事件因体积超限被丢弃”。
     truncated_events = 0
-    # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀
+    # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀。
     search_hint = 0
 
     async for chunk in response.aiter_bytes(chunk_size):
@@ -201,7 +201,7 @@ async def parse_sse_response(
         # 规范化行尾为 \n 以兼容 CRLF/CR，使事件分隔 \n\n 判定对所有行尾风格一致，
         # 避免上游或中间代理改用 CRLF 时事件无法切分致整流丢失。
         # 仅在含 \r 时才分配替换副本；LF-only 为 SSE 流常态，此时退化为一次 memchr
-        # 包含扫描，避免每块无条件分配两个全块临时对象造成的分配与 GC 开销
+        # 包含扫描，避免每块无条件分配两个全块临时对象造成的分配与 GC 开销。
         raw_len = len(chunk)
         if b"\r" in chunk:
             chunk = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
@@ -211,31 +211,31 @@ async def parse_sse_response(
         if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
             log.debug("已处理 {} MB 数据", processed_bytes // 1024 // 1024)
 
-        # SSE 事件以空行分隔，即 b"\n\n"；先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件
+        # SSE 事件以空行分隔，即 b"\n\n"；先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件。
         while True:
             # 从 max(offset, search_hint - 1) 续扫 b"\n\n"。search_hint 记录上次未命中时的
             # buffer 长度，回退一字节以覆盖跨块分隔符边界：旧块末尾单个 \n 与新块首个 \n
             # 拼成的 \n\n。单个未完成事件按大块分多次送达时，避免每块都从 offset 重扫已确认
-            # 无分隔符的尾部，将单事件扫描由平方复杂度降为线性
+            # 无分隔符的尾部，将单事件扫描由平方复杂度降为线性。
             sep = buffer.find(b"\n\n", max(offset, search_hint - 1))
             if sep == -1:
                 search_hint = len(buffer)
                 break
-            # bytearray 切片已返回 bytearray 拷贝，parse_sse_segment 接受 bytes|bytearray，无需再 bytes() 转换
+            # bytearray 切片已返回 bytearray 拷贝，parse_sse_segment 接受 bytes|bytearray，无需再 bytes() 转换。
             segment = buffer[offset:sep]
             offset = sep + 2
-            # offset 已推进至旧 search_hint 之后，重置使下次从新 offset 起扫，避免滞后提示误跳过新区间
+            # offset 已推进至旧 search_hint 之后，重置使下次从新 offset 起扫，避免滞后提示误跳过新区间。
             search_hint = 0
             event = await _parse_segment(segment, log)
             if event is None:
                 continue
             apply_completed(*_classify_sse_event(event, model_id, items))
 
-        # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少 buffer_max_size 字节
+        # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少 buffer_max_size 字节。
         if offset > 0 and offset >= buffer_max_size:
             del buffer[:offset]
             offset = 0
-            # 内容前移致旧索引失效；剩余部分已由上方 while 循环确认无分隔符，按当前长度刷新
+            # 内容前移致旧索引失效；剩余部分已由上方 while 循环确认无分隔符，按当前长度刷新。
             search_hint = len(buffer)
 
         # 不完整尾部超过缓冲区上限：单个事件体积过大，无法完整解析。
@@ -250,7 +250,7 @@ async def parse_sse_response(
             )
             del buffer[offset:]
             truncated_events += 1
-            # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫
+            # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫。
             search_hint = len(buffer)
 
     trailing_event = await _parse_segment(buffer[offset:], log)
@@ -265,7 +265,7 @@ async def parse_sse_response(
     ):
         status = "partial"
 
-    # 单个事件超限被丢弃时结果不完整，标记 partial 通知调用方存在数据丢失
+    # 单个事件超限被丢弃时结果不完整，标记 partial 通知调用方存在数据丢失。
     if truncated_events > 0 and status in (None, "completed"):
         status = "partial"
 

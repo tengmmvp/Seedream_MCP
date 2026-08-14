@@ -6,13 +6,13 @@ image_input、io_storage 等模块共享，避免多处重复定义。
 
 from __future__ import annotations
 
-# 自动保存单文件大小上限默认值，config 与 io_download 共享此单一来源
+# 自动保存单文件大小上限默认值，config 与 io_download 共享此单一来源。
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
-# 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源
+# 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。
 DEFAULT_IMAGE_EXTENSION = ".jpeg"
 
-# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in 成员判断
+# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in 成员判断。
 SUPPORTED_IMAGE_EXTENSIONS_ORDERED: list[str] = [
     ".jpg",
     ".jpeg",
@@ -26,7 +26,7 @@ SUPPORTED_IMAGE_EXTENSIONS_ORDERED: list[str] = [
 ]
 SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)
 
-# 扩展名到 MIME 类型映射，用于本地文件转 Data URI
+# 扩展名到 MIME 类型映射，用于本地文件转 Data URI。
 MIME_BY_EXTENSION: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -39,7 +39,7 @@ MIME_BY_EXTENSION: dict[str, str] = {
     ".heif": "image/heif",
 }
 
-# MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名
+# MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名。
 EXTENSION_BY_MIME: dict[str, str] = {
     "image/png": ".png",
     "image/jpeg": ".jpeg",
@@ -51,7 +51,7 @@ EXTENSION_BY_MIME: dict[str, str] = {
     "image/heif": ".heif",
 }
 
-# HEIC/HEIF 的 ISO BMFF ftyp box brand 位于 offset 8-12，按编码归入 .heic / .heif
+# HEIC/HEIF 的 ISO BMFF ftyp box brand 位于 offset 8-12，按编码归入 .heic / .heif。
 _HEIC_BRANDS: tuple[bytes, ...] = (b"heic", b"heix", b"hevc", b"heim", b"heis")
 _HEIF_BRANDS: tuple[bytes, ...] = (b"mif1", b"msf1")
 
@@ -70,26 +70,21 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
         推断出的扩展名，含点号。
     """
     try:
-        # PNG
         if content.startswith(b"\x89PNG\r\n\x1a\n"):
             return ".png"
-        # JPEG
         if content.startswith(b"\xff\xd8\xff"):
             return ".jpeg"
-        # GIF
         if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
             return ".gif"
-        # BMP: "BM" 签名且 offset 6-10 的保留字段须为 0，降低仅凭 2 字节前缀的冲突误判
+        # BMP: "BM" 签名且 offset 6-10 的保留字段须为 0，降低仅凭 2 字节前缀的冲突误判。
         if (
             content.startswith(b"BM")
             and len(content) >= 14
             and content[6:10] == b"\x00\x00\x00\x00"
         ):
             return ".bmp"
-        # WEBP：RIFF....WEBP 签名
         if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
             return ".webp"
-        # TIFF
         if content.startswith(b"II*\x00") or content.startswith(b"MM\x00*"):
             return ".tiff"
         # HEIC/HEIF：ISO BMFF 格式，4 字节 size + "ftyp" + 4 字节 brand
@@ -100,7 +95,7 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
             if brand in _HEIF_BRANDS:
                 return ".heif"
     except Exception:
-        # 字节过短或切片异常时降级为默认扩展名，保证稳定返回
+        # 字节过短或切片异常时降级为默认扩展名，保证稳定返回。
         pass
     return default
 
@@ -131,7 +126,7 @@ def parse_data_uri(data: str) -> tuple[str | None, str]:
     header, sep, payload = data.partition(",")
     if not sep or not header.lower().startswith("data:"):
         return None, data
-    # header 形如 "data:image/png;base64"，去掉 scheme 前缀后取首个 ";" 前的媒体类型
+    # header 形如 "data:image/png;base64"，去掉 scheme 前缀后取首个 ";" 前的媒体类型。
     body = header.split(":", 1)[1]
     if ";" in body:
         media_type = body.split(";", 1)[0] or None

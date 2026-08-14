@@ -30,6 +30,21 @@ class GenerationExecutionContext:
     """生成类工具执行上下文，统一封装四类生成工具共享参数。
 
     frozen=True 保证构造后不可变，流水线各阶段读取同一份校验后的快照，避免中途误改。
+
+    Attributes:
+        prompt: 生成提示词。
+        optimize_prompt_options: 经校验的提示词优化选项字典，未启用时为 None。
+        size: 经模型能力校验的尺寸规格。
+        watermark: 是否添加水印，未显式提供时取 config 默认值。
+        response_format: 响应格式，url 或 b64_json。
+        output_format: 输出图片格式，未指定时为 None。
+        stream: 是否启用流式输出。
+        tools: 经校验的模型工具配置列表，未启用时为 None。
+        request_count: 请求次数，1 表示单次请求。
+        parallelism: 并行度上限，未显式提供时取 request_count 与全局上限的较小值。
+        enable_auto_save: 是否启用自动保存，未显式提供时取 config 默认值。
+        save_path: 用户指定的保存目录，未指定时为 None。
+        custom_name: 自定义文件名前缀，未指定时为 None。
     """
 
     prompt: str
@@ -65,9 +80,9 @@ def build_generation_context(
     Returns:
         校验后的统一执行上下文对象。
     """
-    # 参考图数量上限依赖 model_id（5.0 Pro 为 10，其余 14），schema 只能表达全家族
+    # 参考图数量上限依赖 model_id：5.0 Pro 为 10、其余为 14。schema 只能表达全家族
     # 默认上限，须在此按模型即时校验，与尺寸/流式等能力校验同层，避免进度已上报
-    # "参数校验完成"后才在请求执行器内报错。单图输入为 str、组图未传参考图为 None，
+    # “参数校验完成”后才在请求执行器内报错。单图输入为 str、组图未传参考图为 None，
     # 均不触发。
     images = getattr(params, "image", None)
     if isinstance(images, list):

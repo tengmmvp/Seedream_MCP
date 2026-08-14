@@ -23,18 +23,12 @@ from .version import __version__
 
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     """
-    从命令行参数构建服务器配置对象
+    从命令行参数构建服务器配置对象。
 
     优先级：命令行参数 > 系统环境变量 > .env 文件 > 默认值。
 
-    Args:
-        args: 解析后的命令行参数对象。
-
-    Returns:
-        构建完成的 SeedreamConfig 配置实例。
-
     Raises:
-        SeedreamConfigError: 缺少 API 密钥等必需参数时抛出。
+        SeedreamConfigError: 缺少 API 密钥等必需参数。
     """
     overrides: dict[str, object] = {
         "api_key": args.api_key,
@@ -51,12 +45,12 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
 
 
 def _log_level_type(value: str) -> str:
-    """argparse type 将日志级别转大写，使 CLI 与 env/.env 的大小写不敏感行为一致。"""
+    """将日志级别转为大写，作为 argparse type 使 CLI 与 env/.env 的大小写不敏感行为一致。"""
     return value.upper()
 
 
 def _port_type(value: str) -> int:
-    """argparse type 校验端口为 1-65535 范围内的整数。"""
+    """校验端口为 1-65535 范围内的整数，作为 argparse type 使用。"""
     try:
         port = int(value)
     except ValueError:
@@ -68,12 +62,9 @@ def _port_type(value: str) -> int:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     """
-    构建命令行参数解析器
+    构建命令行参数解析器。
 
     定义所有支持的命令行选项，包括 API 配置、模型选择、日志级别等。
-
-    Returns:
-        配置完成的 ArgumentParser 实例。
     """
     parser = argparse.ArgumentParser(
         description="Seedream MCP 服务器 - AI 图像生成工具",

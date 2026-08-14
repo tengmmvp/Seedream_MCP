@@ -82,8 +82,8 @@ def build_error_structured(
 ) -> dict[str, Any]:
     """构建失败路径的 structuredContent，经 GenerationStructuredOutput 与声明 schema 绑定。
 
-    dump 策略与 results.format_generation_response 的失败分支一致：全字段输出、
-    未赋值字段以 None 填充，使异常兜底与流水线失败两类错误分支的字段集相同，
+    dump 策略与 results._build_generation_structured_result 的失败分支一致：全字段
+    输出、未赋值字段以 None 填充，使异常兜底与流水线失败两类错误分支的字段集相同，
     消费方无需按错误来源区分字段断言。
     """
     return GenerationStructuredOutput(

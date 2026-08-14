@@ -40,14 +40,14 @@ def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
         if value is None:
             return []
         if isinstance(value, list):
-            # 过滤 null 及非字典元素，保证 list[Dict] 类型一致
+            # 过滤 null 及非字典元素，保证 list[Dict] 类型一致。
             return [item for item in value if isinstance(item, dict)]
         if isinstance(value, dict):
             nested = value.get("data")
             if nested is not None:
                 return _coerce(nested)
             return [value]
-        # str/int 等其他标量类型无法表达图片，归一化为空
+        # str/int 等其他标量类型无法表达图片，归一化为空。
         return []
 
     return _coerce(data)
@@ -123,7 +123,7 @@ def aggregate_parallel_generation_results(
         else:
             message = "并行请求全部失败"
         # 以首个失败异常为代表，复用与单发路径一致的错误码分类，避免并发全失败
-        # 被硬编码为 generation_failed 而与单发路径的错误码契约分叉
+        # 被硬编码为 generation_failed 而与单发路径的错误码契约分叉。
         representative = next(
             (request_errors[i] for i in range(1, request_count + 1) if i in request_errors),
             None,
@@ -140,8 +140,8 @@ def aggregate_parallel_generation_results(
 def is_saveable_image(image: Any, data_key: str) -> bool:
     """判断图片项是否含可保存数据，即指定键的值非空。
 
-    收集待保存图片与回填保存结果共用此判定，确保两侧过滤集合严格一致，
-    避免按位置下标回填时因键不同而错位。
+    供自动保存收集阶段筛选待保存图片；回填阶段依据收集时记录的索引列表定位，
+    不重复执行此判定。
     """
     return isinstance(image, dict) and bool(image.get(data_key))
 
@@ -212,7 +212,7 @@ def _format_failure_section(result: dict[str, Any]) -> str:
     error 文本为上游自由内容，出口处过 sanitize_error_text 与异常路径防护一致。
     """
     raw_error = result.get("error", "未知错误")
-    # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本
+    # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本。
     error_text = sanitize_error_text(
         raw_error.get("message", str(raw_error)) if isinstance(raw_error, dict) else raw_error
     )
@@ -418,7 +418,7 @@ def _build_generation_structured_result(
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         # data 项可能携带上游 per-image error 自由文本，统一净化后进入结构化输出，
-        # 与异常路径防护一致；仅对含 error 的项浅拷贝，避免改动原结果对象
+        # 与异常路径防护一致；仅对含 error 的项浅拷贝，避免改动原结果对象。
         "data": _sanitize_image_errors(images if images is not None else extract_images(result)),
         "usage": result.get("usage", {}),
         "batch": result.get("batch"),

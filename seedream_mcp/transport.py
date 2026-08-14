@@ -19,13 +19,12 @@ from typing import Any, Callable
 from .config import get_active_config
 from .utils.core.logs import get_logger
 
-# 模块日志记录器
 logger = get_logger(__name__)
 
 # ==================== 传输层常量 ====================
 
 # streamable-http 可信回环地址集合：仅字面量回环地址免鉴权。
-# 不含 "localhost"，其解析依赖 hosts/DNS，污染时可指向非回环地址，
+# 不含 “localhost”，其解析依赖 hosts/DNS，污染时可指向非回环地址，
 # 仅凭字符串判定会使公网暴露仍免鉴权。
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
@@ -86,7 +85,6 @@ class _BearerTokenAuthMiddleware:
             await self.app(scope, receive, send)
             return
         if scope_type != "http":
-            # 启用鉴权时拒绝 websocket 等非 http 流量，避免绕过 Bearer 校验
             if scope_type == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
             return
@@ -146,12 +144,10 @@ class _LimitRequestBodyMiddleware:
                     pass
                 break
 
-        # 快速路径：声明长度超限直接 413，避免进入应用读取阶段
         if content_length > self._max_body_size:
             await self._send_too_large(send)
             return
 
-        # chunked 防御：累计实际接收字节，缺失或谎报 Content-Length 时超限短路 413
         total_received = 0
         too_large = False
 
@@ -166,12 +162,11 @@ class _LimitRequestBodyMiddleware:
                 total_received += len(message.get("body", b""))
                 if total_received > self._max_body_size:
                     too_large = True
-                    # 返回空终帧，停止向下游投递剩余超大请求体
                     return {"type": "http.request", "body": b"", "more_body": False}
             return message
 
         async def send_wrapper(message: Any) -> None:
-            # 一旦判定超限，吞掉下游响应，由本中间件统一回 413 避免双响应
+            # 一旦判定超限，吞掉下游响应，由本中间件统一回 413 避免双响应。
             if too_large:
                 return
             await send(message)
@@ -179,7 +174,7 @@ class _LimitRequestBodyMiddleware:
         try:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
-            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，避免冒泡为 500
+            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，避免冒泡为 500。
             if too_large:
                 await self._send_too_large(send)
                 return
@@ -225,13 +220,13 @@ class _LoopbackHostGuardMiddleware:
     等路径）按 403 拒绝，与整层 fail-closed 取向一致。
     """
 
-    # 允许的 Host 头值（剥离端口后），均解析到回环或即回环字面量。此处保留 "localhost"
+    # 允许的 Host 头值（剥离端口后），均解析到回环或即回环字面量。此处保留 “localhost”
     # 与 _LOOPBACK_HOSTS 排除它并不矛盾：绑定判定决定服务实际监听位置，hosts 污染会使
     # 绑定 localhost 实际暴露公网，故必须 fail-closed；而远程攻击者无法借污染令请求
     # 携带 Host: localhost 抵达本机（rebinding 场景 Host 恒为攻击者域名，伪造该 Host
     # 需本机裸 socket，等价于本地访问），容忍本地方便默认以 localhost 访问的客户端。
-    # 不含未加方括号的裸 "::1"：IPv6 字面量在 Host 头中必须带方括号，裸形态属畸形，
-    # 剥端口逻辑会将其截断为非回环值，按 fail-closed 拒绝
+    # 不含未加方括号的裸 “::1”：IPv6 字面量在 Host 头中必须带方括号，裸形态属畸形，
+    # 剥端口逻辑会将其截断为非回环值，按 fail-closed 拒绝。
     _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]"})
 
     def __init__(self, app: Any) -> None:
@@ -254,7 +249,7 @@ class _LoopbackHostGuardMiddleware:
 
     @staticmethod
     def _strip_port(host: bytes) -> bytes:
-        # IPv6 字面量形如 [::1]:8000，保留含方括号的主机部分
+        # IPv6 字面量形如 [::1]:8000，保留含方括号的主机部分。
         if host.startswith(b"["):
             end = host.find(b"]")
             return host[: end + 1] if end != -1 else host
@@ -391,13 +386,12 @@ def _run_streamable_http(
     # 位于健康检查之内、请求体限制与鉴权之外，本地 127.0.0.1/localhost 访问不受影响。
     if host in _LOOPBACK_HOSTS:
         app.add_middleware(_LoopbackHostGuardMiddleware)
-    # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health
+    # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health。
     app.add_middleware(_HealthCheckMiddleware)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:
         ssl_kwargs["ssl_certfile"] = ssl_certfile
         ssl_kwargs["ssl_keyfile"] = ssl_keyfile
-        # uvicorn 默认 TLS 上下文不固定最低协议版本，经工厂统一抬高到 TLS 1.2
         ssl_kwargs["ssl_context_factory"] = _tls12_ssl_context_factory
         logger.info("streamable-http 已启用 TLS，最低协议版本 TLS 1.2")
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, **ssl_kwargs))

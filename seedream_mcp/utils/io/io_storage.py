@@ -33,10 +33,10 @@ from .io_url import get_file_extension_from_url
 
 logger = get_logger(__name__)
 
-# 文件名长度上限，避免超出常见文件系统目录项长度限制
+# 文件名长度上限，避免超出常见文件系统目录项长度限制。
 _MAX_FILENAME_LENGTH = 200
 
-# Windows 保留设备名，命中时在词干后追加下划线避免被解释为设备而非文件
+# Windows 保留设备名，命中时在词干后追加下划线避免被解释为设备而非文件。
 _WINDOWS_RESERVED_NAMES = frozenset(
     {
         "CON",
@@ -66,13 +66,17 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 
 
 class FileManagerError(SeedreamMCPError):
-    """文件管理相关操作失败时抛出的异常。"""
+    """文件管理相关操作失败。"""
 
     pass
 
 
 class FileManager:
-    """图片保存路径生成、字节写入与旧文件清理的统一入口。"""
+    """图片保存路径生成、字节写入与旧文件清理的统一入口。
+
+    Attributes:
+        base_dir: 图片保存基础目录，已 resolve 的绝对路径。
+    """
 
     def __init__(self, base_dir: Path | None = None):
         """初始化文件管理器并确保基础目录存在。
@@ -86,7 +90,7 @@ class FileManager:
         except (OSError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
         # 仅拒绝指向已存在文件的路径。目录越界防护不在本类职责内，
-        # 由调用方 tools/core/common._resolve_base_dir 经 is_path_within_base 校验。
+        # 由调用方 tools/core/_helpers._resolve_base_dir 做已 resolve 路径的包含校验。
         if resolved.exists() and not resolved.is_dir():
             raise FileManagerError(f"保存路径不是目录: {resolved}")
         base_dir = resolved
@@ -160,7 +164,7 @@ class FileManager:
             filename = name[: max(0, _MAX_FILENAME_LENGTH - len(ext))] + ext
 
         # Windows 保留设备名处理：CON.txt、NUL 等在 Windows 上会被解释为设备而非文件，
-        # 命中时在首个点前追加下划线使词干不再匹配保留名
+        # 命中时在首个点前追加下划线使词干不再匹配保留名。
         # Windows 解析设备名前会剥离前导点与首尾空格，按同样规则归一化词干再判断。
         # 直接 split(".",1) 对前导点输入（如 .CON）会使首段为空而漏检，故先 lstrip 再取词干。
         normalized_stem = filename.lstrip(". ").split(".", 1)[0].strip(". ")
@@ -223,7 +227,7 @@ class FileManager:
 
         clean_base = self.sanitize_filename(base_name)
 
-        # [:-3] 截掉微秒末三位，得到毫秒精度时间戳
+        # [:-3] 截掉微秒末三位，得到毫秒精度时间戳。
         time_str = timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
         unique_suffix = uuid.uuid4().hex[:8]
@@ -509,10 +513,9 @@ class FileManager:
 
         heapq.nsmallest 仅取可能被删的最旧候选：非零字节文件每删一个至少减少 1 字节，
         覆盖超额量至多需 excess 个；0 字节文件不减少总量但占据最旧位置也可能被删，计入
-        候选上界，最终封顶为文件总数，避免对全量文件排序。nsmallest 与 sorted 同为稳定
-        排序，逐候选删除至总量达标的语义在删除全成功时与原 sorted 实现等价；个别 unlink
-        失败时固定候选窗口可能提前耗尽而总量仍超限，失败记入 errors 由下次节流清理重试，
-        驱逐力在极端错误路径下弱于原全量遍历。
+        候选上界，最终封顶为文件总数，避免对全量文件排序。逐候选删除至总量达标；个别
+        unlink 失败时固定候选窗口可能提前耗尽而总量仍超限，失败记入 errors 由下次节流
+        清理重试。
         """
         total = sum(size for _path, size, _mtime in files)
         if total <= max_total_bytes:
@@ -574,7 +577,7 @@ class FileManager:
                 continue
             if not self._resolved_within_base(root_resolved):
                 # 越界：清空 dirs 阻止 os.walk 继续下降到越界子目录，含 NTFS junction
-                # 目标，避免无谓的越界遍历与潜在 SMB 出站认证暴露
+                # 目标，避免无谓的越界遍历与潜在 SMB 出站认证暴露。
                 logger.warning("路径不在基础目录内: {}", root_resolved)
                 dirs[:] = []
                 continue
@@ -603,7 +606,7 @@ class FileManager:
             dirs[:] = pruned_dirs
             for name in files:
                 file_path = root_path / name
-                # 仅收集本服务支持的图片文件，跳过 base_dir 内其他类型文件，避免误删用户数据
+                # 仅收集本服务支持的图片文件，跳过 base_dir 内其他类型文件，避免误删用户数据。
                 if file_path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
                     continue
                 # 跳过符号链接文件，其目标可能在 base_dir 之外。
@@ -647,13 +650,11 @@ class FileManager:
 
     @staticmethod
     def _prune_empty_dirs(directories: list[Path]) -> None:
-        """按深度逆序删除已变空的子目录，先删深层再删浅层。
+        """按深度逆序删除已变空的子目录，使父目录在子目录删除后变空而级联得到清理。
 
         清理不区分目录来源：base_dir 内用户自建的空目录同样会被移除，行为边界已在
-        run_cleanup_policies 对外披露。目录删除失败仅记录警告不计入 errors 列表，
-        与历史行为一致。
+        run_cleanup_policies 对外披露。目录删除失败仅记录警告，不计入 errors 列表。
         """
-        # 按目录深度逆序排序，先删深层空目录再删浅层，使父目录在子目录删除后变空而被清理。
         for dir_path in sorted(directories, key=lambda p: len(p.parts), reverse=True):
             try:
                 if not any(dir_path.iterdir()):

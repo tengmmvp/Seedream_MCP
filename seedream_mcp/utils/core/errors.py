@@ -47,13 +47,13 @@ class SeedreamMCPError(Exception):
 
 
 class SeedreamConfigError(SeedreamMCPError):
-    """配置加载或校验失败时抛出。"""
+    """配置加载或校验失败。"""
 
     pass
 
 
 class SeedreamAPIError(SeedreamMCPError):
-    """API 调用失败时抛出。
+    """API 调用失败。
 
     额外携带 status_code、response_data、retry_after，供上层判定可重试性与退避时长。
     """
@@ -84,7 +84,7 @@ class SeedreamAPIError(SeedreamMCPError):
 
 
 class SeedreamValidationError(SeedreamMCPError):
-    """请求参数校验失败时抛出，附带出错的字段名与值。"""
+    """请求参数校验失败，附带出错的字段名与值。"""
 
     def __init__(self, message: str, field: str | None = None, value: Any | None = None):
         super().__init__(message)
@@ -108,20 +108,20 @@ class SeedreamValidationError(SeedreamMCPError):
 
 
 class SeedreamTimeoutError(SeedreamMCPError):
-    """请求超时时抛出。"""
+    """请求超时。"""
 
     pass
 
 
 class SeedreamNetworkError(SeedreamMCPError):
-    """网络连接失败时抛出。"""
+    """网络连接失败。"""
 
     pass
 
 
-# Retry-After 下限：即便服务器返回 0 或极小值也至少等待此值，避免紧密重试风暴
+# Retry-After 下限：即便服务器返回 0 或极小值也至少等待此值，避免紧密重试风暴。
 _MIN_RETRY_AFTER_SECONDS = 1.0
-# Retry-After 上限：即便服务器返回更大值，单次退避也不超过此值，避免被诱导长时间睡眠
+# Retry-After 上限：即便服务器返回更大值，单次退避也不超过此值，避免被诱导长时间睡眠。
 _MAX_RETRY_AFTER_SECONDS = 300.0
 
 
@@ -251,7 +251,7 @@ def handle_api_error(
     """
     error_message = _lookup_http_error_profile(response_status).base_message
 
-    # 尝试从响应体中提取更详细的上游错误信息与错误码
+    # 尝试从响应体中提取更详细的上游错误信息与错误码。
     error_code: str | None = None
     if isinstance(response_data, dict):
         if "error" in response_data:
@@ -332,7 +332,7 @@ def format_error_for_user(error: Exception) -> str:
     else:
         raw_message = str(error)
         code_hint = ""
-    # 三类异常统一先剥离敏感键值与 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出
+    # 三类异常统一先剥离敏感键值与 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出。
     message = _truncate_value_for_output(
         _redact_sensitive_message(raw_message), limit=_MESSAGE_OUTPUT_LIMIT
     )
@@ -343,11 +343,11 @@ def format_error_for_user(error: Exception) -> str:
     return line
 
 
-# 异常 value 序列化时的长度上限：避免 data URI 等大对象撑爆日志/结构化响应
+# 异常 value 序列化时的长度上限：避免 data URI 等大对象撑爆日志/结构化响应。
 _VALUE_OUTPUT_LIMIT = 200
-# 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应
+# 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应。
 _MESSAGE_OUTPUT_LIMIT = 500
-# dict/list 元素数超过此值即跳过 repr 直接给摘要，避免大集合 repr 造成内存放大
+# dict/list 元素数超过此值即跳过 repr 直接给摘要，避免大集合 repr 造成内存放大。
 _CONTAINER_REPR_ELEMENT_LIMIT = 50
 
 
@@ -407,11 +407,11 @@ _SENSITIVE_KEY_KEYWORDS = (
 )
 
 # 高确信度敏感词：自身足够特异性，直接子串匹配以覆盖 x-authorization、my-apikey
-# 等连字符或无分隔变体，无需边界限定
+# 等连字符或无分隔变体，无需边界限定。
 _SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey")
 
 
-# Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出
+# Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出。
 _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 
 # 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用，新增键名两处同步生效。
@@ -421,7 +421,7 @@ _SENSITIVE_KEYVALUE_KEYS = (
 )
 
 # 键值分隔符：含全角变体（U+FF1A 全角冒号、U+FE55 小型冒号、U+FF1D 全角等号），
-# 上游错误体以全角分隔符回显凭据时同样命中，封堵非 ASCII 分隔符的绕过形态
+# 上游错误体以全角分隔符回显凭据时同样命中，封堵非 ASCII 分隔符的绕过形态。
 _SENSITIVE_KEYVALUE_SEPARATOR = r"[ \t]*[:：﹕=＝][ \t]*"
 
 # 敏感键值裸值模式：authorization/apikey/token/secret/password/cookie 类键名后跟分隔符
@@ -469,7 +469,7 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
 
     message 与 details/value/response_data 等结构化字段共用此净化，使各字段对敏感
     片段与日志注入的防护完全一致；非字符串原样返回。控制字符归一化必须先于键值
-    匹配执行："api_key:\\nvalue" 形态在压平后才能被键值模式命中，否则凭据可借换行
+    匹配执行：“api_key:\\nvalue” 形态在压平后才能被键值模式命中，否则凭据可借换行
     分隔绕过脱敏；随后剥 authorization/apikey 等键名后的裸值与残留 Bearer 令牌，
     末尾剥 URL userinfo 凭据。
     """

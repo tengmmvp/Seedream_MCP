@@ -1,7 +1,7 @@
 """生成类工具通用处理门面。
 
 内部按职责拆分到 _helpers/context/results/auto_save/parallel 子模块；本模块聚合公共
-符号供 tools/impl 与测试按既有路径 ``from ...core.common import X`` 导入。
+符号，供 tools/impl 与测试经 ``from ...core.common import X`` 导入。
 ``execute_generation_handler`` 作为四类生成工具的统一处理流水线留在此处，依次执行参数
 归一化与校验、客户端调用、自动保存、响应与结构化结果格式化，并对异常做统一降级处理。
 """

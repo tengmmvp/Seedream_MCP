@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 
 
 # 进度里程碑常量：common.py 与 parallel.py 共用，集中定义避免跨模块隐式契约漂移。
-# 阶梯：接收 0 → 校验完成 10 → 生成开始 20 → 生成完成 70 → 自动保存开始 75 → 保存完成 95 → 结束 100
+# 阶梯：接收 0 → 校验完成 10 → 生成开始 20 → 生成完成 70 → 自动保存开始 75 → 保存完成 95 → 结束 100。
 PROGRESS_RECEIVED = 0.0
 PROGRESS_VALIDATED = 10.0
 PROGRESS_GENERATION_START = 20.0
@@ -153,7 +153,7 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
         raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
 
     # user_path 由 normalize_path 解析、default_base_dir 在本函数上方解析，两者均已 resolve，
-    # 直接 relative_to 比较即可，避免 is_path_within_base 对二者再次重复 resolve
+    # 直接 relative_to 比较即可，避免 is_path_within_base 对二者再次重复 resolve。
     if not is_within_resolved(user_path, default_base_dir):
         raise SeedreamValidationError(
             f"save_path 超出允许范围: {default_base_dir}",

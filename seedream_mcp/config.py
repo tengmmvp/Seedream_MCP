@@ -21,21 +21,17 @@ from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
 from .utils.core.validators import parse_bool, validate_size_for_model
 
-# ====================
-# 配置常量
-# ====================
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 # MODEL_ALIASES 与 DEPRECATED_MODEL_TOKENS 属模型知识，统一定义于 model_capabilities，
 # 此处经 import 暴露供 normalize_model_selector 与 validate 使用，外部仍可从 config 导入。
 
-# 合法日志级别，供 config 校验与 CLI choices 共用此单一来源
+# 合法日志级别，供 config 校验与 CLI choices 共用此单一来源。
 LEGAL_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 # lifespan 上下文字典键，app_lifespan 产出方与 parallel/server 消费方的契约。
-# config 为双方共同底层依赖，键集中定义于此，core 层复用键时无需依赖顶层装配模块
+# config 为双方共同底层依赖，键集中定义于此，core 层复用键时无需依赖顶层装配模块。
 LIFESPAN_KEY_CONFIG = "config"
 LIFESPAN_KEY_CLIENT = "client"
 LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"
@@ -43,11 +39,11 @@ LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"
 # streamable-http 默认监听配置：argparse 默认值、传输装配与 resources 的 lifespan
 # 复位共用此单一来源。与 lifespan 键同理由集中于 config——transport 与 resources 互为
 # 延迟导入的近邻层，常量若落在任一侧都会形成对另一侧的顶层依赖回环，config 是双方
-# 共同底层
+# 共同底层。
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
 
-# dataclass 字段 metadata 中登记环境变量名的键，字段定义据此声明对应环境变量名
+# dataclass 字段 metadata 中登记环境变量名的键，字段定义据此声明对应环境变量名。
 _ENV_METADATA_KEY = "env"
 
 
@@ -63,17 +59,48 @@ def _env_field(default: Any, env_name: str) -> Any:
 @dataclass(frozen=True)
 class SeedreamConfig:
     """
-    Seedream MCP 工具配置类
+    Seedream MCP 工具配置。
 
     封装 Seedream 服务的所有配置参数，包括 API 认证、模型设置、日志配置和自动保存功能。
+    各字段默认值与环境变量名经 _env_field 绑定于字段定义。
+
+    Attributes:
+        api_key: 火山引擎 API 密钥。
+        base_url: API 端点 URL。
+        allow_http_base_url: http:// 明文 base_url 的显式豁免开关；http 明文会使 API
+            密钥在网络上裸传，默认拒绝。
+        model_id: 模型标识，构造校验时展开别名为完整 Model ID。
+        default_size: 默认图像尺寸，构造校验时按模型能力标准化。
+        default_watermark: 默认是否在生成图片上添加水印。
+        timeout: 通用超时秒数。
+        api_timeout: API 调用超时秒数。
+        max_retries: API 调用最大重试次数。
+        log_level: 日志级别。
+        log_file: 日志文件路径，未设置时使用日志系统默认路径。
+        auto_save_enabled: 是否启用自动保存。
+        auto_save_base_dir: 自动保存根目录，未设置时回退工作区 images 目录。
+        auto_save_download_timeout: 自动保存下载超时秒数。
+        auto_save_max_retries: 自动保存下载最大重试次数。
+        auto_save_max_file_size: 自动保存单文件大小上限字节数。
+        auto_save_max_concurrent: 自动保存并发下载数上限。
+        auto_save_date_folder: 是否按日期子目录保存图片。
+        auto_save_cleanup_days: 旧文件自动清理天数。
+        auto_save_max_total_bytes: 保存目录总字节上限，超限按最旧文件优先驱逐。
+        stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
+        stream_chunk_size: SSE 流式响应读取块大小字节数。
+        image_prepare_concurrency: 参考图预处理并发上限。
+        prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
+        prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限，防止大图缓存
+            累积撑爆内存。
+        workspace_root: 无 MCP Roots 时本地文件访问边界的回退目录。
+        http_auth_token: streamable-http 传输的 Bearer 鉴权令牌。
+        http_max_body_size: streamable-http 请求体大小上限字节数；默认 64MB，MCP 正常
+            载荷远小于 100MB，单图 data URI 上限约 40MB，兼顾多图融合。
     """
 
-    # 必需配置
     api_key: str
 
-    # 可选配置
     base_url: str = _env_field("https://ark.cn-beijing.volces.com/api/v3", "ARK_BASE_URL")
-    # http:// 的 base_url 显式豁免开关；http 明文会使 API 密钥在网络上裸传，默认拒绝
     allow_http_base_url: bool = _env_field(False, "SEEDREAM_ALLOW_HTTP_BASE_URL")
     model_id: str = _env_field("doubao-seedream-5-0-260128", "SEEDREAM_MODEL_ID")
     default_size: str = _env_field("2K", "SEEDREAM_DEFAULT_SIZE")
@@ -82,11 +109,9 @@ class SeedreamConfig:
     api_timeout: int = _env_field(600, "SEEDREAM_API_TIMEOUT")
     max_retries: int = _env_field(3, "SEEDREAM_MAX_RETRIES")
 
-    # 日志配置
     log_level: str = _env_field("INFO", "LOG_LEVEL")
     log_file: str | None = _env_field(None, "LOG_FILE")
 
-    # 自动保存配置
     auto_save_enabled: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_ENABLED")
     auto_save_base_dir: str | None = _env_field(None, "SEEDREAM_AUTO_SAVE_BASE_DIR")
     auto_save_download_timeout: int = _env_field(30, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT")
@@ -101,23 +126,17 @@ class SeedreamConfig:
         10 * 1024 * 1024 * 1024, "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES"
     )
 
-    # 流式处理配置
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
     stream_chunk_size: int = _env_field(1024 * 1024, "SEEDREAM_STREAM_CHUNK_SIZE")
 
-    # 客户端图像预处理并发上限
     image_prepare_concurrency: int = _env_field(5, "SEEDREAM_IMAGE_PREPARE_CONCURRENCY")
 
-    # 参考图预处理结果 LRU 缓存的上限条目数
     prepare_cache_max: int = _env_field(32, "SEEDREAM_PREPARE_CACHE_MAX")
 
-    # 参考图预处理结果 LRU 缓存的累计字节上限，防止大图缓存累积撑爆内存
     prepare_cache_max_bytes: int = _env_field(256 * 1024 * 1024, "SEEDREAM_PREPARE_CACHE_MAX_BYTES")
 
-    # 工作区与传输配置
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
-    # 默认 64MB：MCP 正常载荷远小于 100MB，单图 data URI 上限约 40MB，64MB 兼顾多图融合
     http_max_body_size: int = _env_field(64 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
 
     def __post_init__(self) -> None:
@@ -138,7 +157,6 @@ class SeedreamConfig:
             raise SeedreamConfigError("base_url必须是有效的HTTP/HTTPS URL")
         if self.base_url.startswith("http://"):
             if not self.allow_http_base_url:
-                # http 明文会使 API 密钥在网络上裸传，默认拒绝构建，仅显式豁免时放行
                 raise SeedreamConfigError(
                     "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝；"
                     "仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
@@ -155,7 +173,7 @@ class SeedreamConfig:
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
             # 可用别名清单运行时从 MODEL_ALIASES 派生，新增模型时提示自动同步，
-            # 消除与 CLI choices 派生机制并存的最后一个硬编码模型清单同步点
+            # 消除与 CLI choices 派生机制并存的最后一个硬编码模型清单同步点。
             aliases = "/".join(MODEL_ALIASES)
             raise SeedreamConfigError(
                 f"已不支持的模型: {self.model_id}（3.0/seededit-3.0 已下线），"
@@ -276,7 +294,7 @@ _FIELD_ENV_MAP: dict[str, str] = {
 def _field_default_str(field_name: str) -> str:
     """反射 SeedreamConfig 字段默认值并转为环境变量字符串默认值。
 
-    bool 转为 true/false，None 转为空串，其余取 str，与历史手写 ENV_DEFAULTS 语义一致。
+    bool 转为 true/false，None 转为空串，其余取 str。
     字段无默认值时返回空串，仅 api_key 属此情形且它不进入 ENV_DEFAULTS。
     """
     for f in fields(SeedreamConfig):
@@ -291,7 +309,7 @@ def _field_default_str(field_name: str) -> str:
 
 
 # 配置项的字符串默认值，以环境变量名为键，从 dataclass 字段默认值派生为单一数据源，
-# 供 _pick_* 系列辅助回退取值
+# 供 _pick_* 系列辅助回退取值。
 ENV_DEFAULTS: dict[str, str] = {
     env_key: _field_default_str(field_name) for field_name, env_key in _FIELD_ENV_MAP.items()
 }
@@ -331,8 +349,7 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     读取 .env 文件键值为字典，不写入进程环境变量。
 
     显式传入 env_file 时只读取该文件，不再合并项目根或当前工作目录的 .env；
-    未提供时按项目根 .env 与当前工作目录 .env 合并读取，cwd 覆盖项目根。
-    配置值经 _pick_config_value 按优先级解析，避免污染 os.environ。
+    未提供时按项目根 .env 与当前工作目录 .env 合并读取，当前工作目录覆盖项目根。
     """
 
     def _load_single_env_file(path: Path) -> dict[str, str]:
@@ -355,7 +372,6 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     if runtime_env_path.is_file():
         merged_values.update(_load_single_env_file(runtime_env_path))
         if default_env_path.is_file() and runtime_env_path != default_env_path:
-            # 工作目录不受控时其中的 .env 可能注入非预期配置，覆盖发生时告警提示核对来源
             from .utils.core.logs import get_logger
 
             get_logger(__name__).warning(
@@ -457,9 +473,8 @@ def build_config_from_sources(
     """
     从统一来源构建配置对象，线程安全。
 
-    通过 ``_config_build_lock`` 串行化构建，避免并发调用时 .env 注入与 os.environ
-    读写之间产生竞态，该问题在 streamable-http 多请求场景下尤为关键。构建语义与
-    单线程完全一致。
+    通过 ``_config_build_lock`` 串行化构建；streamable-http 多请求场景下可能并发
+    触发配置构建，串行化保证构建语义与单线程完全一致。
 
     Args:
         overrides: 调用方显式覆盖值，CLI 参数为典型来源。
@@ -474,7 +489,7 @@ def _build_config_from_sources_unlocked(
     overrides: Mapping[str, object] | None = None,
     env_file: str | None = None,
 ) -> SeedreamConfig:
-    """配置构建内部实现，自身不加锁；由 :func:`build_config_from_sources` 持锁调用。"""
+    """构建配置对象但自身不加锁，由 :func:`build_config_from_sources` 持锁调用。"""
     override_values = dict(overrides or {})
     env_values = _read_env_values(env_file)
 
@@ -620,11 +635,11 @@ def _build_config_from_sources_unlocked(
     return SeedreamConfig(**config_kwargs)
 
 
-# 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态
+# 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态。
 _config_build_lock = threading.Lock()
 # 全局配置实例的惰性初始化锁。与 _config_build_lock 分离，因为 get_global_config
 # 持该锁时会调用 from_env，而 from_env 内部又复用 _config_build_lock，共用同一把
-# 锁会造成不可重入死锁
+# 锁会造成不可重入死锁。
 _global_config_lock = threading.Lock()
 
 _global_config: SeedreamConfig | None = None

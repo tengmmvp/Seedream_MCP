@@ -45,8 +45,9 @@ PROGRESS_COMPLETE = 100.0
 class _BrowseRequestState:
     """单次浏览请求的状态快照，错误分支与兜底分支共享取值。
 
-    resolved_directories 为随解析流程逐步填充的活动列表；构建快照时绑定其引用，所有错误
-    分支发生在该列表尚未填充的阶段，成功分支在填充完成后读取同一引用。
+    Attributes:
+        resolved_directories: 随解析流程逐步填充的活动列表，构建快照时绑定其引用；所有
+            错误分支发生在该列表尚未填充的阶段，成功分支在填充完成后读取同一引用。
     """
 
     workspace_roots: list[Path]
@@ -87,8 +88,8 @@ def _format_file_info(
 ) -> tuple[str, dict[str, Any]]:
     """格式化文件信息，返回展示文本与结构化详情字段。
 
-    show_details 为真时读取文件大小与修改时间，文本格式为 "路径 | 大小 | 修改时间"，
-    结构化详情含 size_mb 与 modified 两键；stat 失败时文本追加 "文件信息不可用"，两键置 None。
+    show_details 为真时读取文件大小与修改时间，文本格式为 “路径 | 大小 | 修改时间”，
+    结构化详情含 size_mb 与 modified 两键；stat 失败时文本追加 “文件信息不可用”，两键置 None。
     show_details 为假时仅返回路径文本与空详情字典。
 
     Args:
@@ -108,7 +109,7 @@ def _format_file_info(
     size_mb = stat_result.st_size / (1024 * 1024)
     # astimezone 将 naive 本地时间标注为本地时区，输出携带 UTC 偏移以消除时区歧义。
     # 畸形时间戳（负值或超范围）会使 fromtimestamp 抛 ValueError/OSError，与 stat 失败
-    # 同样降级为"文件信息不可用"，不使整次浏览落到兜底错误分支
+    # 同样降级为“文件信息不可用”，不使整次浏览落到兜底错误分支。
     try:
         mtime = (
             datetime.datetime.fromtimestamp(stat_result.st_mtime)
@@ -216,12 +217,12 @@ def _scan_and_filter_directory(
     resolved_roots: list[Path],
     seen_images: set[Path],
 ) -> list[tuple[Path, Path]]:
-    """扫描单个目录并完成越界判定与去重，返回新增的 (原始路径, resolved 路径) 列表。
+    """扫描单个目录并完成越界判定与去重，返回新增的 (原始路径，resolved 路径) 列表。
 
     扫描后的 resolve、越界判定与去重等文件系统相关计算集中在本函数同步执行，由调用方通过
-    ``asyncio.to_thread`` 在线程内调用，使深翻页大 offset 或网络挂载目录下的 resolve 不再
-    阻塞事件循环。``seen_images`` 跨目录共享以去重重叠根目录的重复图片；调用方按目录串行
-    await，无并发写竞争。
+    ``asyncio.to_thread`` 在线程内调用，使深翻页大 offset 或网络挂载目录下的 resolve
+    不阻塞事件循环。``seen_images`` 跨目录共享以去重重叠根目录的重复图片；调用方按目录
+    串行 await，无并发写竞争。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -233,9 +234,9 @@ def _scan_and_filter_directory(
         seen_images: 跨目录共享的已见原始路径集合，函数内就地更新。
 
     Returns:
-        新增 (原始路径, resolved 路径) 元组列表，长度不超过 remaining。
+        新增 (原始路径，resolved 路径) 元组列表，长度不超过 remaining。
     """
-    # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效
+    # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
     matched_images = _cached_find_images_in_directory(
         resolved_dir=resolved_dir,
         recursive=recursive,
@@ -270,9 +271,9 @@ def _build_display_entries(
     """组装面向用户的展示文本与结构化图片条目。
 
     将 is_within_resolved 命中查找、get_relative_path 与 _format_file_info 的 stat 等文件
-    系统相关计算集中在本函数同步执行，由调用方通过 ``asyncio.to_thread`` 在线程内调用，使
-    show_details 下网络挂载目录的 stat 不再阻塞事件循环。索引编号沿用 enumerate 语义：被
-    忽略条目仍占位、保留原序号不重排，与历史行为一致。
+    系统相关计算集中在本函数同步执行，由调用方通过 ``asyncio.to_thread`` 在线程内调用，避免
+    show_details 下网络挂载目录的 stat 阻塞事件循环。索引编号沿用 enumerate 语义：被
+    忽略条目仍占位、保留原序号不重排。
 
     Args:
         images: 当前页图片原始路径列表。
@@ -281,7 +282,7 @@ def _build_display_entries(
         show_details: 是否在文本与结构化条目中附加文件大小与修改时间。
 
     Returns:
-        (展示文本行列表, 结构化图片条目列表)，文本行不含 "图片列表:" 标题头。
+        (展示文本行列表，结构化图片条目列表)。文本行不含 “图片列表:” 标题头。
     """
     lines: list[str] = []
     structured_images: list[dict[str, Any]] = []
@@ -307,7 +308,7 @@ def _normalize_format_filter(raw: list[str] | None) -> tuple[list[str] | None, b
     """过滤出受支持的图片扩展名，返回 (过滤值, 是否无有效后缀)。
 
     仅保留受支持的扩展名，避免以非图片后缀探测文件。空列表与全部不受支持的输入
-    语义一致：均为"无有效后缀"，标记 exhausted 并保留原始输入供 structuredContent
+    语义一致：均为“无有效后缀”，标记 exhausted 并保留原始输入供 structuredContent
     回显；不能把空列表传给 find_images_in_directory，其把空列表视为未限制而扫描
     全部。未提供（None）不限制、不标记。
     """
@@ -342,7 +343,6 @@ async def handle_browse_images(
     try:
         return await _handle_browse_images_impl(params, ctx)
     except Exception as exc:
-        # 兜底：未预期异常降级为结构化错误，避免向调用方抛出原始异常。
         logger.error("浏览图片处理失败", exc_info=True)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         user_message = format_error_for_user(exc)
@@ -352,7 +352,7 @@ async def handle_browse_images(
         except Exception:
             fallback_roots = []
         # 过滤值回显与内层错误分支保持一致：经同一过滤规则而非置 None，避免丢失
-        # 用户原始过滤输入
+        # 用户原始过滤输入。
         fallback_filter, _ = _normalize_format_filter(params.format_filter)
         return _build_browse_error(
             state=_BrowseRequestState.from_params(
@@ -369,14 +369,10 @@ async def _handle_browse_images_impl(
     params: BrowseImagesInput,
     ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
-    """浏览工具主逻辑，由 ``handle_browse_images`` 外层兜底包裹。"""
-    # 格式过滤经 _normalize_format_filter 统一处理：仅保留受支持的图片扩展名，
-    # 空列表与全部不受支持一致视为无有效后缀，跳过扫描并保留原始输入回显。
+    """执行图片浏览主逻辑，未预期异常由外层 ``handle_browse_images`` 兜底降级。"""
     raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
 
     workspace_roots = get_workspace_roots()
-    # resolved_dirs 随解析流程逐步填充；state 绑定其引用，错误分支在填充前读取、成功分支在
-    # 填充后读取同一引用，确保请求状态在各分支间一致。
     resolved_dirs: list[Path] = []
     state = _BrowseRequestState.from_params(
         params,
@@ -392,7 +388,7 @@ async def _handle_browse_images_impl(
 
     # 预解析工作区根与请求目录：resolve/normalize 均为可能阻塞网络挂载目录的同步
     # 文件系统调用，整体下沉线程执行；去重与展示阶段直接用 is_within_resolved 与这些
-    # 已 resolve 的 root 比较，root 不再重复 resolve。每张图片也只 resolve 一次，结果
+    # 已 resolve 的 root 比较，root 无需重复 resolve。每张图片也只 resolve 一次，结果
     # 缓存于 image_resolved_map。展示层与 structuredContent 仍回显原始 workspace_roots。
     def _resolve_roots_and_dirs() -> tuple[list[Path], list[Path], str | None]:
         resolved_root_list = []
@@ -436,11 +432,6 @@ async def _handle_browse_images_impl(
         message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
         return _build_browse_error(state=state, message=message)
 
-    if not resolved_dirs:
-        allowed_roots = ", ".join(str(root) for root in workspace_roots)
-        message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
-        return _build_browse_error(state=state, message=message)
-
     await _safe_ctx_log(
         ctx,
         "info",
@@ -458,16 +449,13 @@ async def _handle_browse_images_impl(
     )
 
     # 搜索图片文件：_scan_and_filter_directory 经 _cached_find_images_in_directory 扫描目录，
-    # 翻页共享有序列表缓存（非递归按 mtime 失效、递归按 TTL 失效），scan_limit 用于早停与切片
-    # 判定 has_more。语义边界：越界项（resolve 后在工作区外的符号链接）与跨目录重复项在扫描
-    # 之后才被剔除，其占用早停配额时可见数偏少，has_more 可能提前为 False、total_count 偏小；
-    # 该情形需越界条目恰好占满配额，属罕见边界。format_filter_exhausted 时跳过扫描，
-    # all_images 保持为空，由下方空结果分支统一返回。扫描与扫描后的 resolve、越界判定、去重
-    # 整体下沉到 _scan_and_filter_directory 在线程内执行；仅进度上报留在事件循环。深翻页
-    # 大 offset 或网络挂载目录下 resolve 不再阻塞事件循环。
+    # 翻页共享有序列表缓存，非递归按目录 mtime 失效、递归按 TTL 失效；scan_limit 用于早停
+    # 与切片判定 has_more。语义边界：越界项即 resolve 后落在工作区外的符号链接，与跨目录
+    # 重复项在扫描之后才被剔除，其占用早停配额时可见数偏少，has_more 可能提前为 False、
+    # total_count 偏小；该情形需越界条目恰好占满配额，属罕见边界。format_filter_exhausted
+    # 时跳过扫描，all_images 保持为空，由下方空结果分支统一返回。
     scan_limit = state.offset + state.limit + 1
     all_images: list[Path] = []
-    # 原始路径到已 resolve 路径的缓存：扫描阶段每张图片仅 resolve 一次，展示阶段复用。
     image_resolved_map: dict[Path, Path] = {}
     if not format_filter_exhausted:
         seen_images: set[Path] = set()
@@ -498,7 +486,7 @@ async def _handle_browse_images_impl(
                     message=f"已扫描 {dir_index}/{total_dirs} 个目录，找到 {len(all_images)} 张图片",
                 )
 
-    # 分页切片：has_more 时仅扫到 scan_limit、无法精确总数，total_count 置 None
+    # 分页切片：has_more 时仅扫到 scan_limit、无法精确总数，total_count 置 None。
     page_end = state.offset + state.limit
     images = all_images[state.offset : page_end]
     has_more = len(all_images) > page_end
@@ -550,8 +538,6 @@ async def _handle_browse_images_impl(
             isError=False,
         )
 
-    # 展示组装下沉到 _build_display_entries 在线程内执行：show_details 的 stat 与
-    # is_within_resolved 命中查找不再在事件循环阻塞网络挂载目录的读取。最终结果构建留在事件循环。
     display_lines, structured_images = await asyncio.to_thread(
         _build_display_entries,
         images=images,

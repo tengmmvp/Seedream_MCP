@@ -19,7 +19,7 @@ from importlib import import_module
 from typing import Any
 
 # 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)
-# 包导入不再触发 PIL/aiohttp/aiofiles 等重型依赖初始化，仅在首次访问时按需加载
+# 包导入不再触发 PIL/aiohttp/aiofiles 等重型依赖初始化，仅在首次访问时按需加载。
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # 异常处理（core）
     "SeedreamMCPError": (".core.errors", "SeedreamMCPError"),
@@ -47,7 +47,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "suggest_similar_paths": (".io.io_path", "suggest_similar_paths"),
 }
 
-# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步
+# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步。
 __all__ = list(_LAZY_EXPORTS)
 
 

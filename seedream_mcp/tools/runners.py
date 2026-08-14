@@ -31,7 +31,7 @@ from .impl.sequential_generation import handle_sequential_generation
 from .impl.text_to_image import handle_text_to_image
 
 # 泛型参数绑定输入协议：handler 接受各自的具体输入模型，与传入 params 的具体类型一致，
-# 避免 Callable 逆变要求 handler 接受任意协议实现
+# 避免 Callable 逆变要求 handler 接受任意协议实现。
 _GenerationInputT = TypeVar("_GenerationInputT", bound=GenerationInputParams)
 
 _GenerationHandler = Callable[
@@ -56,7 +56,7 @@ async def run_text_to_image(
     config: SeedreamConfig,
     ctx: Context | None = None,
 ) -> CallToolResult:
-    """文生图工具的 composition root 入口，委托 ``handle_text_to_image``。"""
+    """注入工作区边界后委托 ``handle_text_to_image`` 处理文生图请求。"""
     return await _run_generation_tool(params, config, ctx, handle_text_to_image)
 
 
@@ -65,7 +65,7 @@ async def run_image_to_image(
     config: SeedreamConfig,
     ctx: Context | None = None,
 ) -> CallToolResult:
-    """图文生图工具的 composition root 入口，委托 ``handle_image_to_image``。"""
+    """注入工作区边界后委托 ``handle_image_to_image`` 处理图文生图请求。"""
     return await _run_generation_tool(params, config, ctx, handle_image_to_image)
 
 
@@ -74,7 +74,7 @@ async def run_multi_image_fusion(
     config: SeedreamConfig,
     ctx: Context | None = None,
 ) -> CallToolResult:
-    """多图融合工具的 composition root 入口，委托 ``handle_multi_image_fusion``。"""
+    """注入工作区边界后委托 ``handle_multi_image_fusion`` 处理多图融合请求。"""
     return await _run_generation_tool(params, config, ctx, handle_multi_image_fusion)
 
 
@@ -83,7 +83,7 @@ async def run_sequential_generation(
     config: SeedreamConfig,
     ctx: Context | None = None,
 ) -> CallToolResult:
-    """组图输出工具的 composition root 入口，委托 ``handle_sequential_generation``。"""
+    """注入工作区边界后委托 ``handle_sequential_generation`` 处理组图输出请求。"""
     return await _run_generation_tool(params, config, ctx, handle_sequential_generation)
 
 
@@ -91,6 +91,6 @@ async def run_browse_images(
     params: BrowseImagesInput,
     ctx: Context | None = None,
 ) -> CallToolResult:
-    """图片浏览工具的 composition root 入口，委托 ``handle_browse_images``。"""
+    """注入工作区边界后委托 ``handle_browse_images`` 处理图片浏览请求。"""
     async with workspace_roots_scope(ctx):
         return await handle_browse_images(params, ctx=ctx)

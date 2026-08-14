@@ -8,7 +8,6 @@ validate_image_path 位于 images 子包的 image_validation，本模块保持�
 
 from __future__ import annotations
 
-# 标准库导入
 import asyncio
 import os
 from contextlib import asynccontextmanager
@@ -18,7 +17,6 @@ from typing import Any, AsyncIterator, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-# 本地导入
 from ..core.errors import SeedreamConfigError
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
@@ -26,17 +24,16 @@ from .io_file import _is_reparse_point
 
 logger = get_logger(__name__)
 
-# 图片格式集合直接取 formats 单一来源；下方为工作区 Roots 上下文变量
 _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     "seedream_workspace_roots",
     default=None,
 )
 
-# roots/list 请求的显式短超时：每次工具调用前都有一次线上往返，慢客户端或半开连接
-# 不应长时间挂起工具执行；超时按读取失败回退环境变量边界
+# roots/list 请求的显式短超时：每次工具调用前都有一次线上往返，不设超时将退化为依赖
+# 会话层读超时，慢客户端或半开连接会把工具调用拖到分钟级；超时按读取失败回退环境变量边界。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
 
-# 回退 CWD 告警只记录一次；无 Roots 时本解析随每次文件访问触发，逐次告警会淹没日志
+# 回退 CWD 告警只记录一次；无 Roots 时本解析随每次文件访问触发，逐次告警会淹没日志。
 _cwd_fallback_warned = False
 
 
@@ -113,7 +110,6 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
     if session is None or not callable(list_roots):
         return []
 
-    # 显式短超时：无超时时依赖会话层读超时，慢客户端会把每次工具调用拖到分钟级
     roots_result = await asyncio.wait_for(list_roots(), timeout=_ROOTS_LIST_TIMEOUT_SECONDS)
 
     resolved_roots: list[Path] = []
@@ -226,11 +222,14 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
 
     Returns:
         标准化的 Path 对象。
+
+    Raises:
+        ValueError: 路径为 UNC 形式或路径无效时抛出。
     """
     try:
         path_obj = Path(path)
 
-        # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝
+        # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝。
         if _is_unc_path(str(path_obj)):
             raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
 
@@ -244,7 +243,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             return path_obj.resolve()
 
     except ValueError:
-        # UNC 拒绝等 ValueError 原样抛出，保留具体原因
+        # UNC 拒绝等 ValueError 原样抛出，保留具体原因。
         raise
     except Exception as e:
         logger.error("路径标准化失败 {}: {}", path, e)
@@ -259,7 +258,7 @@ def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
         base_dir: 基础目录，默认为当前工作目录。
 
     Returns:
-        相对路径字符串。
+        相对路径字符串；无法相对化时回退绝对路径字符串。
     """
     try:
         path_obj = Path(path)
@@ -269,7 +268,6 @@ def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
             relative_path = path_obj.relative_to(base_path)
             return str(relative_path)
         except ValueError:
-            # 无法取相对路径时回退绝对路径。
             return str(path_obj.resolve())
 
     except Exception as e:
@@ -302,7 +300,6 @@ def find_images_in_directory(
     """
     images: list[Path] = []
 
-    # 上限为 0 或负数时直接返回空列表，不进入扫描。
     if limit is not None and limit <= 0:
         return images
 
@@ -397,7 +394,7 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
     return suggestions
 
 
-# ==================== 辅助函数 ====================
+# ==================== file URI 转换 ====================
 
 
 def _file_uri_to_path(uri: str) -> Path | None:
@@ -419,7 +416,7 @@ def _file_uri_to_path(uri: str) -> Path | None:
     if not path_part:
         return None
 
-    # file://localhost//server/share 等 netloc 合法但 path 为 UNC 形式，resolve 会触发 SMB
+    # file://localhost//server/share 等 netloc 合法但 path 为 UNC 形式，resolve 会触发 SMB。
     if _is_unc_path(path_part):
         return None
 

@@ -25,13 +25,13 @@ logger = get_logger(__name__)
 # 并发经由 GIL 保证 dict 读写原子性，最坏情况为缓存击穿即多请求各扫一次再覆写，仅影响性能。
 _DIRECTORY_SCAN_CACHE: dict[tuple[str, bool, int, tuple[str, ...]], _DirectoryScanCacheEntry] = {}
 _DIRECTORY_SCAN_CACHE_MAX_ENTRIES = 64
-# 单条目图片列表长度上限：超过的大目录不缓存全量列表，回退每页扫描，避免无界内存占用
+# 单条目图片列表长度上限：超过的大目录不缓存全量列表，回退每页扫描，避免无界内存占用。
 _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN = 10000
 # 递归扫描缓存 TTL：子目录新增图片不改变顶层目录 mtime，以 TTL 兜底保证最终一致。
 # 取 30 秒平衡翻页缓存命中与新增图片的可见延迟，过短会使间隔翻页必然全量重扫。
 _DIRECTORY_SCAN_CACHE_TTL_SECONDS = 30.0
 # 前缀扩展的几何倍率：命中但前缀不足时按 max(scan_limit, 倍率×已缓存条数) 重扫，
-# 使第 K 页的前缀扩展按指数预取，累计扫描代价从 O(K²) 降为 O(K)，摊销单次扫描开销
+# 使第 K 页的前缀扩展按指数预取，累计扫描代价从 O(K²) 降为 O(K)，摊销单次扫描开销。
 _SCAN_PREFIX_GROWTH_FACTOR = 2
 
 
@@ -39,9 +39,12 @@ _SCAN_PREFIX_GROWTH_FACTOR = 2
 class _DirectoryScanCacheEntry:
     """单条目录扫描缓存。
 
-    mtime_ns 为非递归扫描捕获的目录 mtime 指纹，递归扫描留 None 改用 TTL 失效。images 为
-    有序扫描结果，complete 标记其是否已扫到目录末尾；False 时 images 为稳定前缀，随更大
-    scan_limit 重扫扩展，回看与同范围重复请求直接命中。
+    Attributes:
+        mtime_ns: 非递归扫描捕获的目录 mtime 指纹，递归扫描为 None 改用 TTL 失效。
+        captured_at: 缓存写入时的单调时钟时间戳，供 TTL 失效判定。
+        images: 有序扫描结果，可能为目录末尾前的稳定前缀。
+        complete: images 是否已扫到目录末尾；False 时为稳定前缀，随更大 scan_limit
+            重扫扩展，回看与同范围重复请求直接命中。
     """
 
     mtime_ns: int | None
@@ -76,10 +79,10 @@ def _store_scan_entry(
 ) -> None:
     """写入扫描缓存，条目数超限时驱逐最旧条目。"""
     if len(images) > _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
-        # 超过单条目列表上限的大目录不缓存，回退每页扫描，避免无界内存占用
+        # 超过单条目列表上限的大目录不缓存，回退每页扫描，避免无界内存占用。
         return
     if len(_DIRECTORY_SCAN_CACHE) >= _DIRECTORY_SCAN_CACHE_MAX_ENTRIES:
-        # 驱逐最旧条目；并发 to_thread 下 next(iter()) 与 pop 可能竞态抛 KeyError，捕获容错
+        # 驱逐最旧条目；并发 to_thread 下 next(iter()) 与 pop 可能竞态抛 KeyError，捕获容错。
         try:
             _DIRECTORY_SCAN_CACHE.pop(next(iter(_DIRECTORY_SCAN_CACHE)))
         except KeyError:
@@ -101,7 +104,7 @@ def _cached_find_images_in_directory(
     scan_limit: int,
     scanner: Callable[..., list[Path]] | None = None,
 ) -> list[Path]:
-    """带进程级缓存的目录图片扫描，翻页共享有序结果并支持前缀增量扩展。
+    """扫描目录图片并经进程级缓存翻页共享有序结果，支持前缀增量扩展。
 
     缓存键不含 scan_limit，同目录同扫描配置的不同翻页共享一份有序列表。命中且条目完整或
     前缀不少于 scan_limit 时返回浅拷贝，将深翻页从每页文件系统扫描降为首次扫描加 O(1) 命中。
@@ -137,7 +140,7 @@ def _cached_find_images_in_directory(
         if cached.complete or len(cached.images) >= scan_limit:
             return cached.images[:]
         # 上限取单条目列表上限：超过该上限的扫描结果不会被缓存，扩展到该值之上只会
-        # 每页全量重扫，不再命中
+        # 每页全量重扫，不再命中。
         scan_limit = min(
             _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN,
             max(scan_limit, len(cached.images) * _SCAN_PREFIX_GROWTH_FACTOR),
@@ -154,7 +157,7 @@ def _cached_find_images_in_directory(
         limit=scan_limit,
     )
     complete = len(images) < scan_limit
-    # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空；非递归仅在 stat 成功时缓存
+    # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空；非递归仅在 stat 成功时缓存。
     if recursive or base_mtime is not None:
         _store_scan_entry(
             cache_key,
@@ -162,5 +165,5 @@ def _cached_find_images_in_directory(
             images=images,
             complete=complete,
         )
-    # 新扫描结果已存入缓存本体，切片返回独立副本，调用方原地修改不会篡改缓存
+    # 新扫描结果已存入缓存本体，切片返回独立副本，调用方原地修改不会篡改缓存。
     return images[:]

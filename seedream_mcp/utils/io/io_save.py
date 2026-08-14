@@ -30,15 +30,15 @@ from ..core.logs import get_logger
 
 logger = get_logger(__name__)
 
-# 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描
+# 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
 # 按 base_dir 记录最近清理时间，跨请求共享节流；不同 base_dir 独立，互不抑制。
-# 用 OrderedDict 并设上限，避免异常多变的 base_dir 使键无界增长耗尽内存
+# 用 OrderedDict 并设上限，避免异常多变的 base_dir 使键无界增长耗尽内存。
 _CLEANUP_LAST_RUN_MAX_ENTRIES = 16
 _cleanup_last_run: OrderedDict[str, float] = OrderedDict()
-# 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理
+# 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理。
 _cleanup_lock = asyncio.Lock()
-# 在途的后台清理任务，供进程级退出清理 drain_background_cleanup_tasks 等待完成
+# 在途的后台清理任务，供进程级退出清理 drain_background_cleanup_tasks 等待完成。
 _cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
@@ -58,7 +58,7 @@ def _reset_cleanup_state() -> None:
 async def drain_background_cleanup_tasks() -> None:
     """等待在途的后台清理任务全部完成，供进程级退出清理调用。
 
-    请求路径的 AutoSaveManager.close 不等待清理（避免阻塞返回路径与跨请求耦合）；
+    请求路径的 AutoSaveManager.close 不等待清理，以免阻塞返回路径并引入跨请求耦合；
     stdio 经 lifespan teardown、streamable-http 经服务循环的退出清理间接调用本函数，
     保证进程退出时清理已完成、节流状态定局。任务自身失败已在
     _run_cleanup_in_background 内回滚节流时间戳并记录日志，此处仅等待不重试；
@@ -98,7 +98,16 @@ def _build_save_metadata(
 
 
 class AutoSaveResult:
-    """自动保存结果，封装保存状态、本地路径、Markdown 引用与元数据。"""
+    """自动保存结果，封装保存状态、本地路径、Markdown 引用与元数据。
+
+    Attributes:
+        success: 是否保存成功
+        original_url: 原始图片 URL，Base64 保存路径为 base64 标识串
+        local_path: 保存成功时的本地文件路径，未保存时为 None
+        markdown_ref: Markdown 图片引用，未生成时为 None
+        error: 失败时的错误描述，成功时为 None
+        metadata: 保存结果元数据，缺省为空字典
+    """
 
     def __init__(
         self,
@@ -140,7 +149,17 @@ class AutoSaveResult:
 
 
 class AutoSaveManager:
-    """自动保存管理器，协调并发下载、文件写入与节流清理。"""
+    """自动保存管理器，协调并发下载、文件写入与节流清理。
+
+    Attributes:
+        file_manager: 文件管理器，负责保存路径生成与字节写入
+        download_manager: 下载管理器，自建或由外部共享
+        max_file_size: 最大文件大小（字节）
+        max_concurrent: 最大并发下载数
+        date_folder: 是否按日期创建文件夹
+        cleanup_days: 自动清理天数，0 表示不清理
+        max_total_bytes: 保存目录总字节上限，None 表示不限制
+    """
 
     def __init__(
         self,
@@ -154,8 +173,7 @@ class AutoSaveManager:
         max_total_bytes: int | None = None,
         download_manager: DownloadManager | None = None,
     ):
-        """
-        初始化自动保存管理器
+        """初始化自动保存管理器。
 
         Args:
             base_dir: 基础保存目录
@@ -190,8 +208,7 @@ class AutoSaveManager:
         await self.close()
 
     async def close(self) -> None:
-        """
-        释放底层下载资源
+        """释放底层下载资源。
 
         仅关闭本实例自建的下载管理器；外部共享的下载管理器由其所有者管理，如 lifespan。
         不等待在途后台清理任务：清理仅访问文件系统、不依赖下载会话，失败已在任务内
@@ -220,7 +237,7 @@ class AutoSaveManager:
             _cleanup_last_run[base_key] = now
             while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
                 _cleanup_last_run.popitem(last=False)
-        # 后台执行清理，不阻塞当前请求返回；失败回滚节流时间戳供下次重试
+        # 后台执行清理，不阻塞当前请求返回；失败回滚节流时间戳供下次重试。
         task = asyncio.create_task(self._run_cleanup_in_background(base_key, previous))
         _cleanup_tasks.add(task)
         task.add_done_callback(_cleanup_tasks.discard)
@@ -228,7 +245,7 @@ class AutoSaveManager:
     async def _run_cleanup_in_background(self, base_key: str, previous: float) -> None:
         """在后台线程执行清理，失败时回滚节流时间戳。"""
         try:
-            # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历
+            # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历。
             await asyncio.to_thread(
                 self.file_manager.run_cleanup_policies,
                 self.cleanup_days,
@@ -254,8 +271,7 @@ class AutoSaveManager:
         custom_name: str | None = None,
         alt_text: str | None = None,
     ) -> AutoSaveResult:
-        """
-        保存单个图片
+        """保存单个图片。
 
         Args:
             url: 图片URL
@@ -273,7 +289,7 @@ class AutoSaveManager:
             if not self.download_manager.validate_url(url):
                 raise AutoSaveError(f"无效的URL: {sanitize_url(url)}")
 
-            # 创建保存路径；该操作内含 mkdir 与 resolve，移出事件循环线程执行
+            # 创建保存路径；该操作内含 mkdir 与 resolve，移出事件循环线程执行。
             save_path = await asyncio.to_thread(
                 self.file_manager.create_save_path,
                 prompt=prompt,
@@ -295,7 +311,7 @@ class AutoSaveManager:
                 file_size=download_result.get("file_size", 0),
                 content_type=download_result.get("content_type", ""),
                 attempts=download_result.get("attempts", 1),
-                # 缺失时传 None 省略该键，与 base64 保存路径的 metadata 形状一致
+                # 缺失时传 None 省略该键，与 base64 保存路径的 metadata 形状一致。
                 download_time=download_result.get("download_time"),
             )
 
@@ -314,7 +330,7 @@ class AutoSaveManager:
             logger.error("图片保存失败: {} -> {}", sanitize_url(url), e)
             return AutoSaveResult(success=False, original_url=url, error=str(e))
         except OSError as e:
-            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底
+            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底。
             logger.error("图片保存文件系统错误: {} -> {}", sanitize_url(url), e)
             return AutoSaveResult(success=False, original_url=url, error=f"文件系统错误: {e}")
         except Exception as e:
@@ -341,7 +357,7 @@ class AutoSaveManager:
             )
 
         # 火山引擎 base64 通常不含空白，直传 validate=True 校验避免对大串做全量复制；
-        # 仅当含空白致校验失败时才清理后重试解码
+        # 仅当含空白致校验失败时才清理后重试解码。
         try:
             content_bytes = base64.b64decode(raw_payload, validate=True)
         except Exception:
@@ -393,7 +409,7 @@ class AutoSaveManager:
             logger.info("开始自动保存 Base64 图片")
 
             # data URI 解析含对大 base64 串的 partition 全量拷贝，与解码、路径生成、写入一样
-            # 属于同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞
+            # 属于同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞。
             def _prepare_and_save() -> tuple[bytes, dict[str, Any], str | None]:
                 mime, payload = parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
@@ -405,7 +421,7 @@ class AutoSaveManager:
                     content_hash=content_hash,
                     date_folder=self.date_folder,
                 )
-                # save_path 由 create_save_path_from_extension 返回，父目录已确保存在，跳过重复 mkdir
+                # save_path 由 create_save_path_from_extension 返回，父目录已确保存在，跳过重复 mkdir。
                 write_result = self.file_manager.save_bytes(
                     save_path, content_bytes, ensure_parent=False
                 )
@@ -441,7 +457,7 @@ class AutoSaveManager:
             logger.error("Base64 图片保存失败: {}", e)
             return AutoSaveResult(success=False, original_url="base64", error=str(e))
         except OSError as e:
-            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底
+            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底。
             logger.error("Base64 图片保存文件系统错误: {}", e)
             return AutoSaveResult(success=False, original_url="base64", error=f"文件系统错误: {e}")
         except Exception as e:
@@ -473,7 +489,7 @@ class AutoSaveManager:
 
         processed_results: list[AutoSaveResult] = []
         for i, result in enumerate(results):
-            # 取消信号必须向上传播，避免被下面的异常兜底吞掉
+            # 取消信号必须向上传播，避免被下面的异常兜底吞掉。
             if isinstance(result, asyncio.CancelledError):
                 raise result
             if isinstance(result, Exception):
@@ -486,7 +502,7 @@ class AutoSaveManager:
             elif isinstance(result, AutoSaveResult):
                 processed_results.append(result)
             else:
-                # 非 Exception 的 BaseException 视为进程级信号继续向上传播，不降级为失败结果
+                # 非 Exception 的 BaseException 视为进程级信号继续向上传播，不降级为失败结果。
                 raise result
 
         success_count = sum(1 for r in processed_results if r.success)
@@ -498,8 +514,7 @@ class AutoSaveManager:
     async def save_multiple_images(
         self, image_data: list[dict[str, Any]], tool_name: str = "seedream"
     ) -> list[AutoSaveResult]:
-        """
-        批量保存多个图片
+        """批量保存多个图片。
 
         Args:
             image_data: 图片数据列表，每个元素包含 url、prompt 等信息

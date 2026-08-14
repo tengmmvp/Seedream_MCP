@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 
 # lifespan 共享资源取值的泛型辅助，client/download_manager/config 三处探测共用。
-# lifespan 上下文字典键定义在 config 模块，经顶部 import 复用，core 层不依赖顶层装配模块
+# lifespan 上下文字典键定义在 config 模块，经顶部 import 复用，core 层不依赖顶层装配模块。
 _T = TypeVar("_T")
 
 
@@ -73,7 +73,7 @@ async def _execute_parallel_generation_requests(
                 # asyncio 单线程模型下，自增之间无 await，不会被其他协程抢占，无需加锁。
                 completed_requests += 1
                 report_progress = True
-        # 进度上报移出信号量槽，避免慢客户端背压拖延槽位释放、阻塞后续请求启动
+        # 进度上报移出信号量槽，避免慢客户端背压拖延槽位释放、阻塞后续请求启动。
         if report_progress:
             progress = progress_start + progress_span * (completed_requests / context.request_count)
             await _safe_report_progress(
@@ -102,12 +102,12 @@ def get_lifespan_resource(
 ) -> _T | None:
     """从 lifespan 上下文按键取类型匹配的共享资源，无则返回 None。
 
-    无 ctx 或无 lifespan 上下文时返回 None，由调用方回退新建，保持向后兼容
-    （如单元测试直接调用 handler 的场景）。client、download_manager 与 config
-    三处共享资源探测共用此实现，server 的配置探测亦复用。取值路径上各属性缺失
-    的异常形态均视为"不可得"：mcp 的 Context.request_context 在无请求上下文时
-    抛 ValueError，request_context 为 None 时 .lifespan_context 抛 AttributeError，
-    旧版本构造路径可能抛 LookupError，捕获三者确保守卫本身不逃逸异常。
+    无 ctx 或无 lifespan 上下文时返回 None，由调用方回退新建，单元测试直接调用
+    handler 时即走此路径。client、download_manager 与 config 三处共享资源探测共用
+    此实现。取值路径上各属性缺失的异常形态均视为“不可得”：mcp 的
+    Context.request_context 在无请求上下文时抛 ValueError，request_context 为
+    None 时 .lifespan_context 抛 AttributeError，旧版本构造路径可能抛 LookupError，
+    捕获三者确保守卫本身不逃逸异常。
     """
     if ctx is None:
         return None

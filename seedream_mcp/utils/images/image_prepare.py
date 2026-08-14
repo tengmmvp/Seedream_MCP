@@ -1,8 +1,8 @@
 """参考图预处理缓存子系统：LRU + single-flight 去重。
 
-从 SeedreamClient 剥离，集中管理图像输入预处理结果的缓存与并发去重。本地文件签名
-复用 io_path 的越界判定与 image_validation 的文件资格常量，避免在客户端复刻边界
-规则导致签名与读取锁定不同文件而命中陈旧缓存。
+集中管理图像输入预处理结果的缓存与并发去重。本地文件签名复用 io_path 的越界判定
+与 image_validation 的文件资格常量，确保签名与读取锁定同一文件，不因两侧规则漂移
+命中陈旧缓存。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 
-# 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环
+# 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环。
 _LARGE_IMAGE_THRESHOLD = 1024 * 1024
 
 # 工作区 roots 元组 → 已 resolve 的 base 列表，跨图复用避免每图重复 resolve 同一根目录。
@@ -54,7 +54,9 @@ class ImagePreparer:
 
     @staticmethod
     def _local_file_signature(image: str, workspace_roots: tuple[str, ...]) -> tuple[float, int]:
-        """本地文件返回 (mtime, size) 参与缓存键，内容替换后失效避免返回陈旧编码；
+        """计算图像输入的缓存签名。
+
+        本地文件返回 (mtime, size) 参与缓存键，内容替换后失效避免返回陈旧编码；
         URL 与 data URI 内容由字符串决定、无法定位文件时返回 (0.0, 0)。
 
         候选定位委托 image_validation.resolve_local_image_candidate，与
@@ -113,13 +115,13 @@ class ImagePreparer:
 
             _roots_key = tuple(str(r) for r in get_workspace_roots())
         # URL/data-URI 无本地文件 I/O，直接用空签名短路；本地文件签名含同步 stat/resolve，
-        # 移至工作线程避免网络挂载工作区下阻塞事件循环
+        # 移至工作线程避免网络挂载工作区下阻塞事件循环。
         ref_kind = classify_image_reference(image)
         if ref_kind == "local":
             signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
             key_image = image
         elif len(image) > _LARGE_IMAGE_THRESHOLD:
-            # 超大 data URI 用摘要键，避免全串 O(n) 哈希与比较阻塞事件循环
+            # 超大 data URI 用摘要键，避免全串 O(n) 哈希与比较阻塞事件循环。
             signature = (0.0, 0)
             key_image = await asyncio.to_thread(self._data_uri_digest, image)
         else:
@@ -135,17 +137,17 @@ class ImagePreparer:
         inflight = self._prepare_inflight.get(cache_key)
         if inflight is not None:
             # shield 隔离取消传播：等待者被取消时仅取消其自身 await 的 outer，
-            # 底层共享 task 继续运行，保护其他等待者与缓存写入
+            # 底层共享 task 继续运行，保护其他等待者与缓存写入。
             return await asyncio.shield(inflight)
 
         task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
         self._prepare_inflight[cache_key] = task
         # 检索共享 task 的异常结果：创建者被取消后 shield 的 outer 不再消费 task 结果，
         # 若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
-        # retrieved"；回调内显式检索并记录，消除噪音日志
+        # retrieved"；回调内显式检索并记录，消除噪音日志。
         task.add_done_callback(log_unretrieved_task_exception)
         # shield 隔离取消传播：创建者被取消时仅取消其自身 await 的 outer，底层共享
-        # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理
+        # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理。
         return await asyncio.shield(task)
 
     async def _prepare_and_cache(self, image: str, cache_key: PrepareCacheKey) -> str:
@@ -173,11 +175,11 @@ class ImagePreparer:
         条目并同步扣减字节计数，保持计数与缓存内容一致。
         """
         size = len(prepared)
-        # 单条结果自身超出字节上限时永不可缓存，直接跳过避免无意义清空整个缓存
+        # 单条结果自身超出字节上限时永不可缓存，直接跳过避免无意义清空整个缓存。
         if size > self._prepare_cache_max_bytes:
             return
         # 字节超限时先按 LRU 淘汰至可容纳，而非直接拒绝，避免大图场景缓存被早期
-        # 条目占满后新条目无法入场，提升高频复用少量大参考图的命中率
+        # 条目占满后新条目无法入场，提升高频复用少量大参考图的命中率。
         while (
             self._prepare_cache_bytes + size > self._prepare_cache_max_bytes and self._prepare_cache
         ):
@@ -195,7 +197,7 @@ class ImagePreparer:
 
         concurrency = max(1, self._prepare_concurrency)
         semaphore = asyncio.Semaphore(concurrency)
-        # 批内预计算一次工作区键，避免每图重复读取 ContextVar 与构造元组
+        # 批内预计算一次工作区键，避免每图重复读取 ContextVar 与构造元组。
         roots_key = tuple(str(r) for r in get_workspace_roots())
 
         async def _prepare_with_limit(image: str) -> str:

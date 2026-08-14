@@ -28,12 +28,12 @@ from typing import (
 from loguru import logger
 
 if TYPE_CHECKING:
-    # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入
+    # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入。
     from loguru import Logger
 
 
 def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
-    """done callback：检索并记录共享后台 task 的异常，消除事件循环告警噪音。
+    """检索并记录共享后台 task 的异常，消除事件循环告警噪音。
 
     经 asyncio.shield 共享的 task 在创建者被取消后，其 outer 不再消费 task 结果；
     若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
@@ -57,7 +57,7 @@ class InterceptHandler(logging.Handler):
         except ValueError:
             log_level = record.levelno
 
-        # 向上跳过 logging 模块自身的帧，定位真实调用者以计算正确的日志深度
+        # 向上跳过 logging 模块自身的帧，定位真实调用者以计算正确的日志深度。
         frame: FrameType | None = logging.currentframe()
         depth = 2
         while frame is not None and frame.f_code.co_filename == logging.__file__:
@@ -67,12 +67,12 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
 
 
-# 日志消息中的控制字符，剥离以防文件名、上游错误体等经由日志注入伪造日志行
+# 日志消息中的控制字符，剥离以防文件名、上游错误体等经由日志注入伪造日志行。
 _LOG_MESSAGE_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _strip_message_control_chars(record: Any) -> None:
-    """patcher：剥离日志消息与异常消息的控制字符，防日志注入。
+    """剥离日志消息与异常消息的控制字符，防日志注入。
 
     路径名、上游错误体等可能含 CR/LF 等控制字符，原样记录会在日志文件中伪造额外行，
     干扰审计取证。作为全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点，无需
@@ -115,8 +115,7 @@ def setup_logging(
     enable_file: bool = True,
     force_standard_logging: bool = False,
 ) -> None:
-    """
-    设置日志配置
+    """设置日志配置。
 
     未显式传入 log_file 时，默认日志路径为 ``logs/seedream_mcp.log``，该相对路径
     相对于进程工作目录（CWD）解析；不同启动方式的 CWD 可能不同，如需固定位置请传入
@@ -129,14 +128,12 @@ def setup_logging(
         enable_file: 是否启用文件输出
         force_standard_logging: 是否强制接管标准库 logging 配置
     """
-    # 移除默认的 loguru 处理器
     logger.remove()
-    # 全局剥离日志消息控制字符，防路径名与上游错误体经日志注入伪造行
+    # 全局剥离日志消息控制字符，防路径名与上游错误体经日志注入伪造行。
     logger.configure(patcher=_strip_message_control_chars)
 
     level = log_level.upper()
 
-    # 控制台输出配置
     if enable_console:
         logger.add(
             sys.stderr,
@@ -151,10 +148,8 @@ def setup_logging(
             enqueue=True,
         )
 
-    # 文件输出配置
     if enable_file:
         if log_file is None:
-            # 使用默认日志文件路径
             log_dir = Path("logs")
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / "seedream_mcp.log"
@@ -176,14 +171,14 @@ def setup_logging(
             enqueue=True,
         )
 
-    # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru
+    # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru。
     logging.basicConfig(
         handlers=[InterceptHandler()],
         level=0,
         force=force_standard_logging,
     )
 
-    # 设置第三方库的日志级别
+    # 压制第三方库的 DEBUG/INFO 噪音：桥接后其全量日志会淹没项目自身的业务日志。
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -194,8 +189,7 @@ def setup_logging(
 
 
 def get_logger(name: str | None = None) -> Logger:
-    """
-    获取 logger 实例
+    """获取 logger 实例。
 
     Args:
         name: logger 名称，如果为 None 则使用调用模块名
@@ -229,8 +223,7 @@ def log_function_call(func: Callable[P, R]) -> Callable[P, R]: ...
 
 
 def log_function_call(func: Callable[P, Any]) -> Callable[P, Any]:
-    """
-    函数调用日志装饰器
+    """装饰函数并在调用入口记录日志。
 
     使用 ``ParamSpec`` 透传被装饰函数的参数规格，使用 ``TypeVar`` 保留原始返回类型；
     同步与异步经由两条 overload 声明分别匹配，使装饰后的函数对静态类型检查器仍保持

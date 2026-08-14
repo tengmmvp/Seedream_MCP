@@ -14,11 +14,9 @@
 
 from __future__ import annotations
 
-# 标准库导入
 import re
 from typing import Any, NamedTuple
 
-# 本地模块导入
 from .errors import SeedreamConfigError, SeedreamValidationError
 from .logs import get_logger
 from ..model.model_capabilities import get_max_reference_images, get_model_capabilities
@@ -33,26 +31,26 @@ VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
 # 尺寸预设档位与输出格式白名单
 VALID_SIZE_PRESETS = frozenset({"1K", "2K", "3K", "4K"})
 VALID_OUTPUT_FORMATS = frozenset({"jpeg", "png"})
-# 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值
+# 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
 # 图像宽高比上下限，输入参考图与输出尺寸校验共用同一规则。image_validation 从本模块
-# 导入使用，维持单一来源
+# 导入使用，维持单一来源。
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 # 生成工具类型白名单，目前仅支持联网搜索；schemas.GenerationToolType 枚举的取值
-# 集合以本常量为源，test_schema_length_limits 守护两侧一致
+# 集合以本常量为源，test_consistency_guards 守护两侧一致。
 VALID_GENERATION_TOOL_TYPES = frozenset({"web_search"})
 # 响应格式白名单，schemas.ResponseFormat 枚举的取值集合以本常量为源，同一守护测试
-# 断言两侧一致
+# 断言两侧一致。
 VALID_RESPONSE_FORMATS = frozenset({"url", "b64_json"})
-# 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围
+# 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围。
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
-# 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张
+# 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张。
 MAX_SEQUENTIAL_TOTAL_IMAGES = 15
-# 并行生成上限：request_count 与 parallelism 共用此上界
+# 并行生成上限：request_count 与 parallelism 共用此上界。
 MAX_PARALLEL_REQUEST_COUNT = 4
-# CJK 字符计数范围：基本区 + 扩展 A 区 + 兼容汉字，覆盖生僻字避免计数偏低
+# CJK 字符计数范围：基本区 + 扩展 A 区 + 兼容汉字，覆盖生僻字避免计数偏低。
 CJK_CHAR_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
@@ -72,7 +70,7 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     if isinstance(value, bool):
         raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
     if isinstance(value, float):
-        # 拒绝非整数浮点，避免静默截断造成语义偏差；整数浮点允许转换
+        # 拒绝非整数浮点，避免静默截断造成语义偏差；整数浮点允许转换。
         if not value.is_integer():
             raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
         validated_value = int(value)
@@ -114,10 +112,10 @@ def parse_bool(value: object) -> bool:
 
 
 def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words: int = 600) -> str:
-    """
-    验证文本提示词的有效性和长度限制
+    """验证文本提示词的有效性和长度限制。
 
-    当中文字符超过 `max_chinese_chars` 或英文单词超过 `max_english_words` 时，视为过长。
+    中文字符超过 `max_chinese_chars` 或英文单词超过 `max_english_words` 时仅记录
+    警告，不阻断调用。
     """
     if not prompt or not isinstance(prompt, str):
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
@@ -127,7 +125,7 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
     # MCP JSON 可合法传入未配对 UTF-16 代理字符的转义序列，此类文本无法 UTF-8 编码，
-    # 若放行会在请求体序列化处才失败并呈现编码细节错误；在此提前以参数级提示拒绝
+    # 若放行会在请求体序列化处才失败并呈现编码细节错误；在此提前以参数级提示拒绝。
     try:
         prompt.encode("utf-8")
     except UnicodeEncodeError:
@@ -137,16 +135,16 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
     # 短文本粗筛：长度不超过中文阈值时两项计数必然在限内（单字符至多计 1 个中文、
     # 单词至少 1 个字符），跳过正则扫描，避免长提示词的 findall 在调用路径上物化
-    # 十万级单字符列表
+    # 十万级单字符列表。
     chinese_count = 0
     english_word_count = 0
     if len(prompt) > max_chinese_chars:
-        # subn 以替换计数取代 findall 物化匹配列表，超长中文提示词下仅一次分配
+        # subn 以替换计数取代 findall 物化匹配列表，超长中文提示词下仅一次分配。
         chinese_count = CJK_CHAR_PATTERN.subn("", prompt)[1]
         english_word_count = re.subn(r"[A-Za-z]+(?:'[A-Za-z]+)?", "", prompt)[1]
 
     if chinese_count > max_chinese_chars or english_word_count > max_english_words:
-        # 文档为"建议"而非硬限制：超限时仅记录警告，不阻断调用
+        # 文档为"建议"而非硬限制：超限时仅记录警告，不阻断调用。
         logger.warning(
             "提示词较长（中文{}个/英文{}个），建议不超过{}个汉字或{}个英文单词，可能影响生成效果",
             chinese_count,
@@ -166,13 +164,13 @@ def validate_watermark(watermark: Any) -> bool:
     以保持校验层异常类型。
 
     Args:
-        watermark: 水印开关配置，支持 bool 或 str 类型
+        watermark: 水印开关配置，支持 bool 或 str 类型。
 
     Returns:
-        bool: 标准化后的布尔值
+        标准化后的布尔值。
 
     Raises:
-        SeedreamValidationError: 当参数类型或格式无效时抛出
+        SeedreamValidationError: 当参数类型或格式无效时抛出。
     """
     if isinstance(watermark, bool):
         return watermark
@@ -191,17 +189,16 @@ def validate_watermark(watermark: Any) -> bool:
 
 
 def validate_response_format(response_format: str) -> str:
-    """
-    验证响应格式参数
+    """验证响应格式参数。
 
     Args:
-        response_format: 响应格式类型，支持 url 或 b64_json
+        response_format: 响应格式类型，支持 url 或 b64_json。
 
     Returns:
-        str: 小写形式的标准化格式值
+        小写形式的标准化格式值。
 
     Raises:
-        SeedreamValidationError: 当格式参数无效时抛出
+        SeedreamValidationError: 当格式参数无效时抛出。
     """
     if not response_format or not isinstance(response_format, str):
         raise SeedreamValidationError(
@@ -296,7 +293,7 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
             value=tools,
         )
 
-    # 空列表等同不使用工具，跳过模型能力校验并归一化为 None，避免向 API 传空数组
+    # 空列表等同不使用工具，跳过模型能力校验并归一化为 None，避免向 API 传空数组。
     if not tools:
         return None
 
@@ -354,8 +351,7 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
 
 
 def validate_stream(stream: bool, model_id: str) -> bool:
-    """
-    验证流式输出参数与模型兼容性。
+    """验证流式输出参数与模型兼容性。
 
     Seedream 5.0 Pro 不支持流式输出 stream，传参即报错；仅 doubao-seedream-5.0 系列
     （5.0/5.0-lite 同一模型）/4.5/4.0 支持。
@@ -371,20 +367,19 @@ def validate_stream(stream: bool, model_id: str) -> bool:
 
 
 def validate_max_images(max_images: Any) -> int:
-    """
-    验证最大图像数量参数
+    """验证最大图像数量参数。
 
     确保参数为整数类型且在合理范围内（1-15），委托 _coerce_positive_int_in_range
     完成校验，与其他整数参数共享统一的错误消息格式。
 
     Args:
-        max_images: 最大图像数量，支持整数或可转换为整数的值
+        max_images: 最大图像数量，支持整数或可转换为整数的值。
 
     Returns:
-        int: 验证后的整数值
+        验证后的整数值。
 
     Raises:
-        SeedreamValidationError: 当参数类型错误或超出范围时抛出
+        SeedreamValidationError: 当参数类型错误或超出范围时抛出。
     """
     return _coerce_positive_int_in_range(max_images, "max_images", 1, MAX_SEQUENTIAL_TOTAL_IMAGES)
 
@@ -393,17 +388,16 @@ def validate_max_images(max_images: Any) -> int:
 
 
 def validate_size(size: str) -> str:
-    """
-    验证图像尺寸参数是否在允许的范围内
+    """验证图像尺寸参数是否在允许的范围内。
 
     Args:
-        size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>
+        size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>。
 
     Returns:
-        str: 大写格式的标准化尺寸值
+        大写格式的标准化尺寸值。
 
     Raises:
-        SeedreamValidationError: 当尺寸参数无效时抛出
+        SeedreamValidationError: 当尺寸参数无效时抛出。
     """
     if not size or not isinstance(size, str):
         raise SeedreamValidationError("图像尺寸不能为空", field="size", value=size)
@@ -448,7 +442,7 @@ def validate_size_for_model(size: str, model_id: str) -> str:
     size = validate_size(size)
     caps = get_model_capabilities(model_id)
 
-    # 分辨率档位校验：各家族支持的档位白名单由能力表声明
+    # 分辨率档位校验：各家族支持的档位白名单由能力表声明。
     if size in VALID_SIZE_PRESETS:
         if size not in caps.allowed_presets:
             presets_str = "/".join(sorted(caps.allowed_presets))
@@ -499,20 +493,19 @@ def validate_size_for_model(size: str, model_id: str) -> str:
 
 
 def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None:
-    """
-    验证提示词优化选项的配置
+    """验证提示词优化选项的配置。
 
     检查优化模式是否有效，并确保与模型兼容。
 
     Args:
-        options: 优化选项字典，包含mode等配置
-        model_id: 模型标识符
+        options: 优化选项字典，包含 mode 等配置。
+        model_id: 模型标识符。
 
     Returns:
-        dict | None: 验证后的优化选项字典，若输入为None则返回None
+        验证后的优化选项字典；输入为 None 时返回 None。
 
     Raises:
-        SeedreamValidationError: 当选项配置无效或与模型不兼容时抛出
+        SeedreamValidationError: 当选项配置无效或与模型不兼容时抛出。
     """
     if options is None:
         return None
@@ -595,8 +588,7 @@ def validate_parallel_generation_options(
 def validate_sequential_image_limit(
     max_images: int, reference_images: list[str] | None, model_id: str = ""
 ) -> None:
-    """
-    验证组图输出的总图片数量限制。
+    """验证组图输出的总图片数量限制。
 
     参考图上限由模型能力表统一提供，消除硬编码同步点。model_id 缺省时按通用上限
     校验，供无模型上下文的 schema 层粗校验使用；精确校验由 client 层传入实际
@@ -629,18 +621,17 @@ def resolve_sequential_max_images(
     max_images: int | None,
     reference_images: list[str] | None = None,
 ) -> int:
-    """
-    根据参考图数量推导组图最大生成数量
+    """根据参考图数量推导组图最大生成数量。
 
     当未显式指定 max_images 时，默认为 15 - len(reference_images)，
     以保证"参考图数量 + 生成数量 <= 15"。
 
     Args:
-        max_images: 用户指定的最大生成数量，None 表示未指定
-        reference_images: 参考图片列表，可为空
+        max_images: 用户指定的最大生成数量，None 表示未指定。
+        reference_images: 参考图片列表，可为空。
 
     Returns:
-        推导后的最大生成数量
+        推导后的最大生成数量。
     """
     if max_images is not None:
         return max_images

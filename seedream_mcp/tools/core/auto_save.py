@@ -1,7 +1,7 @@
 """生成结果的自动保存：从 URL 下载或从 Base64 解码并落盘。
 
 ``_auto_save`` 作为两个公开入口的公共骨架，按 resolve 得到的基础目录为每次调用独立构造
-AutoSaveManager 并在 finally 中关闭，使下载连接池的作用域限定在单次保存任务内，不跨工具
+AutoSaveManager 并在保存结束后关闭，使下载连接池的作用域限定在单次保存任务内，不跨工具
 调用残留状态。共享 DownloadManager 由调用方通过 lifespan 注入传入。
 """
 
@@ -60,31 +60,29 @@ async def _auto_save(
     empty_warning: str,
     download_manager: DownloadManager | None = None,
 ) -> AutoSaveOutcome:
-    """auto_save_from_urls / auto_save_from_base64 的公共骨架。
+    """执行 URL 与 Base64 两个自动保存入口共用的保存流程。
 
     data_key 区分结果字典中取值的键，取值为 url 或 b64_json；save_method 为
     AutoSaveManager 的批量保存方法，即 save_multiple_images 或
     save_multiple_base64_images；empty_warning 为无可保存数据时的告警文案。
 
     Returns:
-        (保存结果列表, 可保存图片在归一化列表中的原始索引列表)。索引列表供回填
+        (保存结果列表，可保存图片在归一化列表中的原始索引列表)。索引列表供回填
         阶段按位置写入，消除收集与回填两次独立过滤可能错位的风险。
     """
 
     def _resolve_and_build() -> AutoSaveManager:
-        # base_dir 解析与 manager 构造均含同步文件系统调用，并入工作线程执行避免阻塞事件循环
         resolved_base_dir = _resolve_base_dir(config, save_path)
         return _build_auto_save_manager(config, resolved_base_dir, download_manager)
 
     images = extract_images(result)
     image_data: list[dict[str, Any]] = []
-    # 记录每个待保存图片在归一化列表中的原始索引，供回填阶段按索引写入。
     saveable_indices: list[int] = []
     for idx, image in enumerate(images):
         if not is_saveable_image(image, data_key):
             continue
         saveable_indices.append(idx)
-        # 序号基于可保存图计数，避免失败占位项导致文件名跳号
+        # 序号基于可保存图计数，避免失败占位项导致文件名跳号。
         save_ordinal = len(image_data) + 1
         image_data.append(
             {
@@ -100,9 +98,9 @@ async def _auto_save(
         return [], []
 
     # manager 构造含 FileManager.__init__ 的 resolve/exists/mkdir 等同步文件系统调用，
-    # 经 to_thread 在工作线程内完成避免在事件循环线程内同步阻塞
+    # 经 to_thread 在工作线程内完成避免在事件循环线程内同步阻塞。
     auto_save_manager = await asyncio.to_thread(_resolve_and_build)
-    # async with 确保 save 阶段任意异常均释放 manager 自建的下载连接池，不依赖手动 close
+    # async with 确保 save 阶段任意异常均释放 manager 自建的下载连接池，不依赖手动 close。
     async with auto_save_manager:
         results = await save_method(auto_save_manager, image_data, tool_name)
         return results, saveable_indices
@@ -132,7 +130,7 @@ async def auto_save_from_urls(
         download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
 
     Returns:
-        (保存结果对象列表, 可保存图片原始索引列表) 二元组。索引列表供回填阶段
+        (保存结果对象列表，可保存图片原始索引列表) 二元组。索引列表供回填阶段
         按位置写入本地路径。
     """
     return await _auto_save(
@@ -173,7 +171,7 @@ async def auto_save_from_base64(
         download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
 
     Returns:
-        (保存结果对象列表, 可保存图片原始索引列表) 二元组。索引列表供回填阶段
+        (保存结果对象列表，可保存图片原始索引列表) 二元组。索引列表供回填阶段
         按位置写入本地路径。
     """
     return await _auto_save(

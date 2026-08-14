@@ -13,18 +13,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # 参考图上限常量
-SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10  # 5.0 Pro 最多 10 张参考图
+SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10
 SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14  # 5.0 Lite / 4.5 / 4.0 最多 14 张参考图
 
-# 各家族像素尺寸范围与倍数约束，供 validate_size_for_model 数据驱动校验
-SEEDREAM_50PRO_MIN_SIZE_PIXELS = 1280 * 720  # 921600
-SEEDREAM_50PRO_MAX_SIZE_PIXELS = 2048 * 2048  # 4194304
-SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE = 16  # 5.0 Pro 像素宽高须为 16 的倍数
+# 各家族像素尺寸范围与倍数约束，供 validate_size_for_model 数据驱动校验。
+SEEDREAM_50PRO_MIN_SIZE_PIXELS = 1280 * 720
+SEEDREAM_50PRO_MAX_SIZE_PIXELS = 2048 * 2048
+SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE = 16
 SEEDREAM_5X_MIN_SIZE_PIXELS = 2560 * 1440
-SEEDREAM_5X_MAX_SIZE_PIXELS = 4096 * 4096  # 16777216
+SEEDREAM_5X_MAX_SIZE_PIXELS = 4096 * 4096
 SEEDREAM_45_MIN_SIZE_PIXELS = 2560 * 1440
 SEEDREAM_45_MAX_SIZE_PIXELS = 4096 * 4096
-SEEDREAM_40_MIN_SIZE_PIXELS = 1280 * 720  # 921600
+SEEDREAM_40_MIN_SIZE_PIXELS = 1280 * 720
 SEEDREAM_40_MAX_SIZE_PIXELS = 4096 * 4096
 
 # 模型家族规范名
@@ -39,16 +39,19 @@ MODEL_FAMILY_UNKNOWN = "unknown"
 class ModelCapabilities:
     """单个模型家族的能力声明，集中描述各模型支持的功能与限制。
 
-    字段含义：
-    - supports_output_format: 是否支持 output_format 参数，仅 5.0 系列支持。
-    - supports_tools: 是否支持联网搜索等生成工具，仅 doubao-seedream-5.0 系列（5.0/5.0-lite 同一模型）支持。
-    - supports_stream: 是否支持流式输出，5.0 Pro 不支持。
-    - max_reference_images: 参考图数量上限，5.0 Pro 为 10，其余家族为 14。
-    - allowed_presets: 允许的尺寸预设档位白名单，驱动 validate_size_for_model 档位校验。
-    - min_size_pixels/max_size_pixels: 像素总量的上下限，None 表示该家族不约束像素区间。
-    - size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束；5.0 Pro 要求宽高为 16 的倍数。
-    - supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
-    - supports_sequential_generation: 是否支持组图生成，5.0 Pro 不支持。
+    Attributes:
+        family: 模型家族规范名。
+        display_name: 面向用户输出的模型展示名，供错误消息引用。
+        supports_output_format: 是否支持 output_format 参数，仅 5.0 系列支持。
+        supports_tools: 是否支持联网搜索等生成工具，仅 doubao-seedream-5.0 系列（5.0/5.0-lite 同一模型）支持。
+        supports_stream: 是否支持流式输出，5.0 Pro 不支持。
+        max_reference_images: 参考图数量上限，5.0 Pro 为 10，其余家族为 14。
+        allowed_presets: 允许的尺寸预设档位白名单，驱动 validate_size_for_model 档位校验。
+        min_size_pixels: 像素总量的下限，None 表示该家族不约束像素区间。
+        max_size_pixels: 像素总量的上限，None 表示该家族不约束像素区间。
+        size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束；5.0 Pro 要求宽高为 16 的倍数。
+        supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
+        supports_sequential_generation: 是否支持组图生成，5.0 Pro 不支持。
     """
 
     family: str
@@ -75,7 +78,7 @@ _MODEL_FAMILY_TOKENS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-# 模型友好别名到真实 Model ID 的映射，config.normalize_model_selector 据此展开别名
+# 模型友好别名到真实 Model ID 的映射，config.normalize_model_selector 据此展开别名。
 MODEL_ALIASES: dict[str, str] = {
     "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
     "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
@@ -84,7 +87,7 @@ MODEL_ALIASES: dict[str, str] = {
     "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
 }
 
-# 已下线模型的特征 token，model_id 命中任意 token 时 config 校验拒绝
+# 已下线模型的特征 token，model_id 命中任意 token 时 config 校验拒绝。
 DEPRECATED_MODEL_TOKENS: set[str] = {
     "doubao-seedream-3-0",
     "doubao-seedream-3.0",
@@ -102,7 +105,7 @@ def _resolve_model_family(model_id: str) -> str:
     return MODEL_FAMILY_UNKNOWN
 
 
-# 各家族能力表；unknown 默认放行全部能力，兼容 Endpoint ID 等无法识别的模型
+# 各家族能力表；unknown 默认放行全部能力，兼容 Endpoint ID 等无法识别的模型。
 MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
     MODEL_FAMILY_50_PRO: ModelCapabilities(
         family=MODEL_FAMILY_50_PRO,

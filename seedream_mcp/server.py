@@ -62,7 +62,7 @@ from .utils.core.logs import get_logger, setup_logging
 from .utils.io.io_path import get_workspace_roots, workspace_roots_scope
 
 # resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 为本模块直接
-# 使用，其余供 tests 与既有 import 路径经 server 模块访问
+# 使用，其余供 tests 与既有 import 路径经 server 模块访问。
 from .resources import (  # noqa: F401
     SERVER_NAME,
     SERVER_VERSION,
@@ -73,7 +73,7 @@ from .resources import (  # noqa: F401
     mcp,
 )
 
-# ASGI 中间件与请求体上限常量重导出，供 tests 经 server 模块访问
+# ASGI 中间件与请求体上限常量重导出，供 tests 经 server 模块访问。
 from .transport import (  # noqa: F401
     _BearerTokenAuthMiddleware,
     _HealthCheckMiddleware,
@@ -82,11 +82,8 @@ from .transport import (  # noqa: F401
 
 # ==================== 工具注解常量 ====================
 
-# 生成类工具的能力标注
-# - readOnlyHint=False：会生成文件，非只读
-# - destructiveHint=False：不破坏既有数据
-# - idempotentHint=False：每次生成结果可能不同，非幂等
-# - openWorldHint=True：需联网调用 API，属开放世界操作
+# 生成类工具的能力标注：会生成文件，非只读；不破坏既有数据；每次生成结果可能不同，
+# 非幂等；需联网调用 API，属开放世界操作。
 GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
@@ -94,11 +91,8 @@ GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     openWorldHint=True,
 )
 
-# 浏览类工具的能力标注
-# - readOnlyHint=True：仅读取文件列表，只读
-# - destructiveHint=False：不破坏既有数据
-# - idempotentHint=True：相同输入得到相同结果，幂等
-# - openWorldHint=False：仅访问本地文件系统，非开放世界
+# 浏览类工具的能力标注：仅读取文件列表，只读且幂等；不破坏既有数据；仅访问本地
+# 文件系统，非开放世界操作。
 BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -106,7 +100,6 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     openWorldHint=False,
 )
 
-# 模块日志记录器
 logger = get_logger(__name__)
 
 
@@ -272,7 +265,7 @@ async def models_info_resource() -> str:
 
     from .utils.model.model_capabilities import get_model_capabilities
 
-    # asdict 派生能力字段，ModelCapabilities 新增字段自动出现在本资源，无需手工同步
+    # asdict 派生能力字段，ModelCapabilities 新增字段自动出现在本资源，无需手工同步。
     models = []
     for alias, model_id in MODEL_ALIASES.items():
         caps_dict = asdict(get_model_capabilities(model_id))
@@ -287,7 +280,7 @@ async def models_info_resource() -> str:
 # ==================== MCP 风格预设 Prompt 定义 ====================
 
 
-# 风格预设固定前缀，指引模型调用文生图工具并指明 prompt 参数来源
+# 风格预设固定前缀，指引模型调用文生图工具并指明 prompt 参数来源。
 _STYLE_PROMPT_PREFIX = "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
 
 
@@ -326,9 +319,7 @@ def style_oil_painting_prompt(subject: str = "海边夕阳") -> str:
 
 
 def cli_main() -> int:
-    """命令行主入口函数
-
-    负责参数解析、配置构建、日志初始化与服务器启动。
+    """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
 
     Returns:
         进程退出码：
@@ -345,7 +336,7 @@ def cli_main() -> int:
         return 1
 
     # 注入活动配置，共享 client/tools 与 io_path 经 get_active_config 共用此实例，
-    # 避免无 MCP Roots 时 io_path 重建第二个 config 造成双事实来源
+    # 避免无 MCP Roots 时 io_path 重建第二个 config 造成双事实来源。
     set_active_config(config)
 
     # 初始化日志系统并打印启动信息。setup_logging 含目录创建等 I/O，只读容器或受限

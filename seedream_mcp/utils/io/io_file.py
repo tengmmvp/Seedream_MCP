@@ -5,7 +5,7 @@ atomic_replace_from_fd_sync（同步变体）四个能力，另有 _is_reparse_p
 NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的
 清理遍历共用。open_no_follow_read 读取时拒绝最终路径分量为符号链接；open_temp_fd
 以不可预测随机名创建临时文件供调用方写入后原子替换；atomic_replace_from_fd 封装
-"随机临时文件→写入→os.replace 原子替换→失败清理"协议供 io_storage 与 io_download
+“随机临时文件→写入→os.replace 原子替换→失败清理”协议供 io_storage 与 io_download
 复用，writer 可返回 Path 覆盖最终路径以支持按字节签名修正扩展名等写入后才知的
 目标。支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝符号链接。Windows 等平台
 不支持 O_NOFOLLOW 时，退化为打开前 lstat 与打开后 fstat 比对 st_ino/st_dev
@@ -35,8 +35,7 @@ def _cleanup_temp_file(temp_path: Path) -> None:
     """清理临时文件，忽略不存在，清理失败记录警告以暴露残留临时文件。
 
     临时文件清理失败多为 Windows 杀毒/索引器短暂持锁等瞬时原因，记录 warning 便于运维
-    发现残留而非静默吞掉。logger 延迟导入规避 io_file 作为底层被 logging→config→
-    image_validation 回引的模块加载循环。
+    发现残留而非静默吞掉。
     """
     try:
         temp_path.unlink(missing_ok=True)
@@ -47,7 +46,7 @@ def _cleanup_temp_file(temp_path: Path) -> None:
 
 
 def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
-    """无 O_NOFOLLOW 平台的兜底打开，返回文件描述符。
+    """在无 O_NOFOLLOW 的平台兜底打开文件，返回文件描述符。
 
     lstat 先取最终分量指纹，符号链接直接拒绝；open 后用 fstat 复核打开的 fd 仍是
     同一对象，校验与打开之间最终分量被替换为符号链接则 st_ino/st_dev 不一致，据此
@@ -144,8 +143,6 @@ async def atomic_replace_from_fd(
         try:
             override_path = await writer(fd)
         finally:
-            # writer 以 closefd=False 包装 fd，本函数为 fd 的唯一关闭点，避免双重关闭与
-            # fd 复用场景下误关他者持有的描述符
             os.close(fd)
         target = final_path if override_path is None else override_path
         await asyncio.to_thread(temp_path.replace, target)
@@ -168,8 +165,7 @@ def _is_reparse_point(path: Path) -> bool:
     listdir。本函数用 reparse point 属性位检测，供目录遍历下降前剔除。仅 Windows 存在
     junction，其他平台直接返回 False。
 
-    file_manager 清理遍历与 io_path 浏览扫描共用此判定，消除两处分别实现同一 reparse
-    point 检测的漂移风险。
+    供 io_storage 的清理遍历与 io_path 的浏览扫描共用，保持 reparse point 检测单一实现。
     """
     if sys.platform != "win32":
         return False

@@ -2,7 +2,7 @@
 
 支持 URL、Data URI 与本地文件路径三种来源。URL 与 Data URI 经校验后原样返回；
 本地文件路径在工作区边界校验通过后，经 O_NOFOLLOW 读取并编码为 Base64 Data URI。
-该模块从 SeedreamClient 剥离，使客户端专注于 API 调用，预处理逻辑可独立测试与复用。
+预处理逻辑独立于 SeedreamClient：客户端专注于 API 调用，本模块可独立测试与复用。
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     # 预处理并发 5 × 30MB 上限下瞬态约 800MB，不受 LRU 缓存字节上限约束，部署
     # 受限时须按此规划内存。
     with open_no_follow_read(validated_path) as f:
-        # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存
+        # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存。
         image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
     if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
         raise SeedreamValidationError(
@@ -123,7 +123,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             field="image",
             value=str(validated_path),
         )
-    # 维度校验复用已读字节，维度相关异常与 image_validation 路径对齐为 SeedreamValidationError
+    # 维度校验复用已读字节，维度相关异常与 image_validation 路径对齐为 SeedreamValidationError。
     try:
         decode_and_validate_dimensions(image_bytes, str(validated_path))
     except SeedreamValidationError:

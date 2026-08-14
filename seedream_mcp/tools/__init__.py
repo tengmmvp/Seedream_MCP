@@ -5,8 +5,8 @@
 handler；第三层为 core.schemas 下的输入模型，作为参数校验与 MCP inputSchema 的单一
 来源。依赖方向为 core <- impl <- runners，本包仅做聚合再导出。
 
-采用 PEP 562 的 ``__getattr__`` 延迟加载：导入任一工具子模块不再连带加载全部 impl、
-runners 与 schemas，仅在首次访问导出名时按需导入对应子模块。``__all__`` 程序化派生
+采用 PEP 562 的 ``__getattr__`` 延迟加载：首次访问导出名时才导入对应子模块，不连带
+加载其余 impl、runners 与 schemas 子模块。``__all__`` 程序化派生
 自 ``_LAZY_EXPORTS`` 的键，二者天然一致，无需手动维护。
 """
 
@@ -38,9 +38,9 @@ if TYPE_CHECKING:
         run_text_to_image,
     )
 
-# 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)
+# 延迟加载映射：导出名 -> (子模块相对名，子模块内属性名)
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    # 业务处理器（impl）
+    # impl 业务处理器
     "handle_browse_images": (".impl.browse_images", "handle_browse_images"),
     "handle_image_to_image": (".impl.image_to_image", "handle_image_to_image"),
     "handle_multi_image_fusion": (".impl.multi_image_fusion", "handle_multi_image_fusion"),
@@ -49,13 +49,13 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
         "handle_sequential_generation",
     ),
     "handle_text_to_image": (".impl.text_to_image", "handle_text_to_image"),
-    # 核心运行器（runners）
+    # runners 适配器
     "run_browse_images": (".runners", "run_browse_images"),
     "run_image_to_image": (".runners", "run_image_to_image"),
     "run_multi_image_fusion": (".runners", "run_multi_image_fusion"),
     "run_sequential_generation": (".runners", "run_sequential_generation"),
     "run_text_to_image": (".runners", "run_text_to_image"),
-    # 数据模型（core.schemas）
+    # core.schemas 输入模型
     "BrowseImagesInput": (".core.schemas", "BrowseImagesInput"),
     "ImageToImageInput": (".core.schemas", "ImageToImageInput"),
     "MultiImageFusionInput": (".core.schemas", "MultiImageFusionInput"),
@@ -63,7 +63,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "TextToImageInput": (".core.schemas", "TextToImageInput"),
 }
 
-# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步
+# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步。
 __all__ = list(_LAZY_EXPORTS)
 
 

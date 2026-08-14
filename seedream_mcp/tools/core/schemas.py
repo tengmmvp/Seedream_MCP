@@ -23,7 +23,7 @@ from ...utils.core.validators import (
     validate_sequential_image_limit,
 )
 
-# prompt 字段长度约束，四个生成工具共享，集中声明避免散落多处
+# prompt 字段长度约束，四个生成工具共享，集中声明避免散落多处。
 PROMPT_MIN_LENGTH = 1
 PROMPT_MAX_LENGTH = 100000
 
@@ -67,13 +67,13 @@ class OptimizePromptOptions(BaseModel):
         """校验并规范化优化模式。
 
         Args:
-            value: 用户输入的优化模式字符串
+            value: 用户输入的优化模式字符串。
 
         Returns:
-            规范化后的模式值
+            规范化后的模式值。
 
         Raises:
-            ValueError: 当模式不在允许范围内时
+            ValueError: 模式不在允许范围内。
         """
         normalized = value.strip().lower()
         if normalized not in VALID_OPTIMIZE_MODES:
@@ -95,8 +95,8 @@ class GenerationTool(BaseModel):
 class _PromptAndOptimizeInput(BaseModel):
     """提示词与提示词优化参数。"""
 
-    # prompt 在基类声明以确立字段顺序（MCP inputSchema 据字段顺序展示参数，prompt 须居首）；
-    # 约束经常量声明，子类覆盖 prompt 时复用同一常量避免散落多处。
+    # prompt 在基类声明以确立字段顺序：MCP inputSchema 按字段顺序展示参数，prompt 须居首。
+    # 长度约束经常量声明，子类覆盖 prompt 时复用同一常量避免散落多处。
     prompt: str = Field(
         ...,
         min_length=PROMPT_MIN_LENGTH,
@@ -246,13 +246,13 @@ class BaseGenerationInput(BaseModel):
         """校验字符串字段非空。
 
         Args:
-            value: 待校验的字符串值
+            value: 待校验的字符串值。
 
         Returns:
-            去除首尾空格后的字符串，None 时跳过校验
+            去除首尾空格后的字符串，None 时跳过校验。
 
         Raises:
-            ValueError: 当字符串为空或仅含空格时
+            ValueError: 字符串为空或仅含空格。
         """
         if value is None:
             return None
@@ -356,13 +356,13 @@ class SequentialGenerationInput(
         """校验参考图片列表。
 
         Args:
-            value: 单张图片或图片列表，None 时跳过校验
+            value: 单张图片或图片列表，None 时跳过校验。
 
         Returns:
-            规范化后的图片列表，None 时返回 None
+            规范化后的图片列表，None 时返回 None。
 
         Raises:
-            ValueError: 当图片数量或格式不符合要求时
+            ValueError: 图片数量或格式不符合要求。
         """
         if value is None:
             return None
@@ -389,7 +389,7 @@ class SequentialGenerationInput(
         # max_images 未显式传入时，按参考图数量自动推导，取生成总上限减去参考图数量。
         # 派生写入用 object.__setattr__ 绕过 validate_assignment 并从 model_fields_set
         # 剔除：普通赋值会把派生值登记进 fields_set 且再触发一轮本 after-validator，
-        # 使派生与显式传入不可区分，误导体贴 fields_set 判断显式传入的逻辑（如
+        # 使派生与显式传入不可区分，误导依据 fields_set 判断显式传入的逻辑（如
         # exclude_unset 序列化与审计）。
         if "max_images" not in self.model_fields_set:
             object.__setattr__(self, "max_images", resolve_sequential_max_images(None, self.image))
@@ -467,13 +467,13 @@ class BrowseImagesInput(BaseModel):
         """校验目录路径。
 
         Args:
-            value: 用户指定的目录路径
+            value: 用户指定的目录路径。
 
         Returns:
-            规范化后的路径，None 时跳过校验
+            规范化后的路径，None 时跳过校验。
 
         Raises:
-            ValueError: 当路径为空字符串时
+            ValueError: 路径为空字符串。
         """
         if value is None:
             return None
@@ -488,7 +488,7 @@ class BrowseImagesInput(BaseModel):
         """规范化文件后缀列表。
 
         Args:
-            value: 用户提供的后缀列表
+            value: 用户提供的后缀列表。
 
         Returns:
             规范化后的后缀列表，统一小写并补齐点前缀；输入为 None 时返回 None。

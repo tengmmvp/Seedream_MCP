@@ -9,7 +9,7 @@
    aiohttp 不在连接前二次独立解析，从根本上闭合 DNS rebinding 窗口。
 3. 连接后对端 IP 复核：由 ``_validate_connected_peer_ip`` 实现，实际建立连接后再次校验
    对端 IP，作为第二层钉死之上的纵深防御，应对解析器与连接之间的残余窗口。
-4. 逐跳重定向校验：由 ``download_image`` 的重定向循环实现，禁用自动重定向，每跳目标都
+4. 逐跳重定向校验：由 ``_attempt_download`` 的重定向循环实现，禁用自动重定向，每跳目标都
    重新走完整校验，防止经由重定向绕过跳转到内网。
 
 其余关键设计：失败按递增延迟加随机抖动重试；下载先写 ``tempfile.mkstemp`` 生成的
@@ -43,17 +43,17 @@ from .io_file import atomic_replace_from_fd
 
 logger = get_logger(__name__)
 
-# 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数
+# 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数。
 _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 
-# 落盘批量写阈值：累积至该字节数才提交一次 aiofiles 写任务，减少执行器跳转次数
+# 落盘批量写阈值：累积至该字节数才提交一次 aiofiles 写任务，减少执行器跳转次数。
 _WRITE_BATCH_BYTES = 4 * 1024 * 1024
 
-# 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验
+# 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验。
 _MAX_REDIRECTS = 3
 
 # DNS 缓存条目硬上限：超限时先清理过期条目，仍超限则按最旧 expires_at 强制驱逐，
-# 防止长生命周期下持续解析不同 host 导致缓存无界增长
+# 防止长生命周期下持续解析不同 host 导致缓存无界增长。
 _DNS_CACHE_MAX_SIZE = 256
 
 
@@ -79,19 +79,19 @@ def sanitize_url(url: str) -> str:
             result = f"{parsed.scheme}://{netloc}{parsed.path}"
     except Exception:
         return "<invalid-url>"
-    # 剥离控制字符，防止 CRLF 经 URL 注入伪造日志行
+    # 剥离控制字符，防止 CRLF 经 URL 注入伪造日志行。
     return re.sub(r"[\x00-\x1f\x7f]", "", result)
 
 
-# 部分服务以通用二进制类型返回图片，故即使非 image/* 也视为合法二进制响应
+# 部分服务以通用二进制类型返回图片，故即使非 image/* 也视为合法二进制响应。
 _BINARY_CONTENT_TYPES = frozenset(
     {"application/octet-stream", "application/binary", "binary/octet-stream"}
 )
 
 # RFC 6598 运营商级 NAT 地址段。Python 较新版本 is_global 已排除此段，
-# 此处前置显式判断以给出精确拒绝原因，并对 is_global 实现差异保持纵深防御
+# 此处前置显式判断以给出精确拒绝原因，并对 is_global 实现差异保持纵深防御。
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
-# 可封装内网 IPv4 的 IPv6 段：NAT64、IPv4-mapped、IPv4-compatible
+# 可封装内网 IPv4 的 IPv6 段：NAT64、IPv4-mapped、IPv4-compatible。
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 _IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
 _IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")
@@ -120,7 +120,7 @@ def _public_ip_rejection_reason(
         return "CGNAT地址(100.64.0.0/10)"
     if not ip_obj.is_global:
         return "非公网地址"
-    # isinstance 收窄到 IPv6Address，使内嵌段提取与 sixtofour/teredo 属性访问均受类型校验
+    # isinstance 收窄到 IPv6Address，使内嵌段提取与 sixtofour/teredo 属性访问均受类型校验。
     if isinstance(ip_obj, ipaddress.IPv6Address):
         if ip_obj.sixtofour is not None or ip_obj.teredo is not None:
             return "6to4/Teredo地址"
@@ -157,8 +157,8 @@ class DownloadError(SeedreamMCPError):
 class RetryableDownloadError(DownloadError):
     """可重试的下载错误，如 HTTP 5xx 等 CDN/网关瞬时故障。
 
-    继承 DownloadError 以兼容既有 except DownloadError 捕获；在重试循环中需先于
-    DownloadError 单独捕获，将其作为可重试故障而非终态错误处理。
+    继承 DownloadError，可被按 DownloadError 捕获的调用方统一处理；重试循环中
+    须先于 DownloadError 单独捕获，将其作为可重试故障而非终态错误处理。
     """
 
     pass
@@ -203,7 +203,14 @@ class _PublicIpPinningResolver(AbstractResolver):
 
 
 class DownloadManager:
-    """异步图片下载管理器，内置 SSRF 四层防护与递增退避重试。"""
+    """异步图片下载管理器，内置 SSRF 四层防护与递增退避重试。
+
+    Attributes:
+        timeout: 下载超时时间（秒）
+        max_retries: 最大重试次数
+        retry_delay: 重试延迟时间（秒）
+        max_file_size: 最大文件大小（字节）
+    """
 
     def __init__(
         self,
@@ -309,7 +316,7 @@ class DownloadManager:
         if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
             raise DownloadError(f"不安全的本地主机地址: {host}")
 
-        # 直接 IP 地址：仅允许公网，并拒绝 6to4/Teredo 等可封装内网地址的 IPv6 段
+        # 直接 IP 地址：仅允许公网，并拒绝 6to4/Teredo 等可封装内网地址的 IPv6 段。
         try:
             ip = ipaddress.ip_address(host)
             reason = _public_ip_rejection_reason(ip)
@@ -341,13 +348,13 @@ class DownloadManager:
             inflight = self._dns_inflight.get(host)
             if inflight is None:
                 # 缓存与在途登记在同一锁区间内完成，中间无 await，单线程事件循环下
-                # 并发协程不会交错创建重复 task
+                # 并发协程不会交错创建重复 task。
                 inflight = asyncio.ensure_future(self._resolve_and_cache(host))
                 self._dns_inflight[host] = inflight
                 # 检索共享 task 的异常结果：创建者被取消后 shield 的 outer 不再消费
-                # task 结果，无其他等待者时避免 "Task exception was never retrieved" 噪音
+                # task 结果，无其他等待者时避免 "Task exception was never retrieved" 噪音。
                 inflight.add_done_callback(log_unretrieved_task_exception)
-        # 锁外 await 共享在途 task；shield 使创建者被取消时不连带取消底层 task
+        # 锁外 await 共享在途 task；shield 使创建者被取消时不连带取消底层 task。
         return await asyncio.shield(inflight)
 
     async def _resolve_and_cache(self, host: str) -> tuple[str, ...]:
@@ -497,7 +504,7 @@ class DownloadManager:
             raise DownloadError("重定向次数过多")
         next_url = urljoin(current_url, location)
         # 拒绝协议降级：https 起始的下载不允许经重定向落到 http，消除降级到明文链路
-        # 的攻击面，与逐跳完整校验共同收紧重定向信任边界
+        # 的攻击面，与逐跳完整校验共同收紧重定向信任边界。
         if urlparse(current_url).scheme == "https" and urlparse(next_url).scheme != "https":
             raise DownloadError("重定向目标协议不允许降级到 https 之外")
         return next_url
@@ -535,7 +542,7 @@ class DownloadManager:
             if cl_value > self.max_file_size:
                 raise DownloadError(f"文件过大: {cl_value} 字节")
 
-        # 目录创建卸载到线程池；exist_ok=True 下重复创建无副作用，保留作防御性兜底
+        # 目录创建卸载到线程池；exist_ok=True 下重复创建无副作用，保留作防御性兜底。
         await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
 
         total_size = 0
@@ -544,16 +551,16 @@ class DownloadManager:
 
         async def _writer(fd: int) -> Path | None:
             nonlocal total_size, head_bytes, final_save_path
-            # closefd=False：aiofiles 退出时仅 flush 不关闭 fd，由骨架统一关闭，避免双重关闭
+            # closefd=False：aiofiles 退出时仅 flush 不关闭 fd，由骨架统一关闭，避免双重关闭。
             async with aiofiles.open(fd, "wb", closefd=False) as f:
                 # 批量累积写入：aiofiles 每次 write 提交一次执行器任务，逐 256KB chunk
-                # 跳转在批量下载时占用默认执行器线程槽，累积至 _WRITE_BATCH_BYTES 再落盘
+                # 跳转在批量下载时占用默认执行器线程槽，累积至 _WRITE_BATCH_BYTES 再落盘。
                 write_buffer = bytearray()
                 async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
                     total_size += len(chunk)
                     if total_size > self.max_file_size:
                         raise DownloadError(f"文件过大: {total_size} 字节")
-                    # 累计首 32 字节做签名校验，省一次 open+read
+                    # 累计首 32 字节做签名校验，省一次 open+read。
                     if len(head_bytes) < 32:
                         head_bytes += chunk[: 32 - len(head_bytes)]
                     write_buffer += chunk
@@ -562,17 +569,17 @@ class DownloadManager:
                         write_buffer.clear()
                 if write_buffer:
                     await f.write(write_buffer)
-            # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘
+            # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘。
             if not is_known_image_bytes(head_bytes):
                 raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
-            # 签名已确认受支持，推断必然命中具体格式；与 URL 派生扩展名不一致时修正最终路径
+            # 签名已确认受支持，推断必然命中具体格式；与 URL 派生扩展名不一致时修正最终路径。
             sniffed = infer_extension_from_bytes(head_bytes)
             if sniffed != save_path.suffix.lower():
                 final_save_path = save_path.with_suffix(sniffed)
                 return final_save_path
             return None
 
-        # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成
+        # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成。
         await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix)
 
         download_time = time.time() - start_time
@@ -632,11 +639,11 @@ class DownloadManager:
 
                 if response.status != 200:
                     if 500 <= response.status < 600:
-                        # 5xx 多为 CDN/网关瞬时故障，纳入重试而非终态失败
+                        # 5xx 多为 CDN/网关瞬时故障，纳入重试而非终态失败。
                         raise RetryableDownloadError(f"HTTP错误: {response.status}")
                     raise DownloadError(f"HTTP错误: {response.status}")
 
-                # 检查内容类型：HTML 错误页、JSON 等明确非图片类型直接拒绝
+                # 检查内容类型：HTML 错误页、JSON 等明确非图片类型直接拒绝。
                 content_type = response.headers.get("content-type", "")
                 if not _is_image_compatible_content_type(content_type):
                     raise DownloadError(f"响应内容类型非图片: {content_type.split(';')[0].strip()}")
@@ -671,7 +678,7 @@ class DownloadManager:
 
         start_time = time.time()
         last_error: DownloadError | None = None
-        # 临时文件的可读性后缀：原扩展名后追加 .part，实际路径由原子落盘骨架内 mkstemp 随机生成
+        # 临时文件的可读性后缀：原扩展名后追加 .part，实际路径由原子落盘骨架内 mkstemp 随机生成。
         temp_suffix = (save_path.suffix or ".bin") + ".part"
 
         for attempt in range(self.max_retries + 1):
@@ -689,12 +696,12 @@ class DownloadManager:
                 )
 
             except RetryableDownloadError as e:
-                # HTTP 5xx 等 CDN/网关瞬时故障，记录后落入退避重试
+                # HTTP 5xx 等 CDN/网关瞬时故障，记录后落入退避重试。
                 last_error = e
                 logger.warning("可重试的 HTTP 错误 (尝试 {}): {}", attempt + 1, e)
 
             except DownloadError:
-                # 4xx、文件过大、字节签名、重定向等语义明确的终态错误，原样抛出不重试
+                # 4xx、文件过大、字节签名、重定向等语义明确的终态错误，原样抛出不重试。
                 raise
 
             except asyncio.TimeoutError as e:
@@ -703,7 +710,7 @@ class DownloadManager:
 
             except aiohttp.ClientError as e:
                 # InvalidUrlClientError 是 URL 语法层面的永久错误，重试无意义，直接终态抛出；
-                # 其余 ClientError 多为连接类瞬时故障，纳入退避重试
+                # 其余 ClientError 多为连接类瞬时故障，纳入退避重试。
                 if isinstance(e, aiohttp.InvalidUrlClientError):
                     raise DownloadError(
                         f"无效的URL: {sanitize_url(url)} [{type(e).__name__}]"
@@ -718,11 +725,11 @@ class DownloadManager:
                 )
 
             except PermissionError as e:
-                # 权限拒绝属永久性错误，重试仅徒增延迟，直接终态抛出
+                # 权限拒绝属永久性错误，重试仅徒增延迟，直接终态抛出。
                 raise DownloadError(f"权限拒绝，不可重试: {e}") from e
 
             except OSError as e:
-                # 只读文件系统、磁盘满与配额超限等永久性错误不重试；其余瞬时 OSError 保持重试
+                # 只读文件系统、磁盘满与配额超限等永久性错误不重试；其余瞬时 OSError 保持重试。
                 if e.errno in {errno.EROFS, errno.ENOSPC, errno.EDQUOT}:
                     raise DownloadError(f"文件系统永久错误，不可重试: {e}") from e
                 last_error = DownloadError(f"文件系统错误: {e}")
@@ -740,11 +747,10 @@ class DownloadManager:
                 )
                 raise
 
-            # 非末次尝试则按线性递增延迟加随机抖动退避后重试，抖动避免并发任务重试同步
+            # 非末次尝试则按线性递增延迟加随机抖动退避后重试，抖动避免并发任务重试同步。
             if attempt < self.max_retries:
                 await asyncio.sleep(self.retry_delay * (attempt + 1) + random.uniform(0, 1))
 
-        # 所有重试均失败，抛出最后一次记录的错误
         logger.error("图片下载失败，已重试 {} 次: {}", self.max_retries, sanitize_url(url))
         raise last_error or DownloadError("下载失败")
 

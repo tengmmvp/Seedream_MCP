@@ -35,26 +35,17 @@ if TYPE_CHECKING:
 
 # ==================== 服务器元数据常量 ====================
 
-# 服务器标识名称
 SERVER_NAME = "seedream_mcp"
 
-# 服务器版本号
 SERVER_VERSION = __version__
 
-# 服务器功能说明
 SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图输出与图片浏览。"
 
 # ==================== MCP 服务器实例与共享资源状态 ====================
 
-# 模块日志记录器。须先于引用它的 lifespan/cleanup 定义，否则函数体内无法解析该名
 logger = get_logger(__name__)
 
 
-# 共享 client/download_manager 对及在途引用计数，跨 lifespan 重入复用。
-# stateless_http 模式下 FastMCP 每请求重入 lifespan，模块级单例确保连接池跨请求复用。
-# 创建受 _shared_init_lock 保护避免并发重复构造；config 身份变化触发重建时，旧资源可能
-# 仍被在途请求持有，引用计数确保仅当所有在途请求释放后才关闭旧实例，避免断开在途请求
-# 已持有的 HTTP 连接池。
 class _SharedResource:
     """共享 client/download_manager 对及在途引用计数。"""
 
@@ -70,13 +61,12 @@ class _SharedResource:
         self.refcount = 0
 
 
-# 当前活动资源句柄
 _active_resource: _SharedResource | None = None
-# 被重建取代但仍有在途引用的资源，引用归零时由 _release_resource 关闭并移出
+# 被重建取代但仍有在途引用的资源，引用归零时由 _release_resource 关闭并移出。
 _retired_resources: list[_SharedResource] = []
 # asyncio.Lock 首次 acquire 后绑定当时的事件循环：同进程二次进入不同循环（重复
 # asyncio.run、先程序化使用再起 server）会 RuntimeError，生产单循环路径安全；
-# 跨循环复用由 _reset_lifespan_state 重建规避（测试隔离使用）
+# 跨循环复用由 _reset_lifespan_state 重建规避。
 _shared_init_lock = asyncio.Lock()
 
 
@@ -118,7 +108,7 @@ async def _close_resource(resource: _SharedResource) -> None:
 
 
 async def _retire_resource(resource: _SharedResource | None) -> None:
-    """资源被新资源取代。仍有在途引用时纳入退役追踪，否则立即关闭。"""
+    """退役被取代的共享资源。仍有在途引用时纳入退役追踪，否则立即关闭。"""
     if resource is None:
         return
     if resource.refcount > 0:
@@ -140,7 +130,7 @@ async def _release_resource(resource: _SharedResource) -> None:
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
-    FastMCP 生命周期管理：注入共享配置、SeedreamClient 与 DownloadManager。
+    管理 FastMCP 生命周期，注入共享配置、SeedreamClient 与 DownloadManager。
 
     资源以引用计数的模块级单例持有，跨 lifespan 重入复用。stateless_http 模式下 FastMCP
     每请求重入 lifespan，活动资源仅登记在途引用而不关闭，使连接池跨请求复用。config
@@ -153,6 +143,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     global _active_resource
     config = get_active_config()
     if _active_resource is None or _active_resource.config is not config:
+        # 锁内二次判定，避免并发进入 lifespan 时重复构造共享资源。
         async with _shared_init_lock:
             if _active_resource is None or _active_resource.config is not config:
                 old = _active_resource
@@ -182,7 +173,7 @@ async def _cleanup_shared_resources() -> None:
     """关闭并清空活动与退役资源持有的 HTTP 连接池，并等待后台清理任务完成。
 
     先经 drain_background_cleanup_tasks 等待自动保存的节流清理任务收尾，使退出时
-    节流状态定局，替代此前每请求 close 上的等待；随后关闭资源。streamable-http 的
+    节流状态定局；随后关闭资源。streamable-http 的
     退出路径另经 _drain_pending_tasks 取消回收残余任务兜底。
     """
     global _active_resource
@@ -200,7 +191,7 @@ async def _cleanup_shared_resources() -> None:
 
 
 def _sync_cleanup() -> None:
-    """同步入口的进程级兜底清理。
+    """执行同步入口的进程级兜底清理。
 
     streamable-http 的优雅关闭在 _run_streamable_http 内于服务事件循环上执行，stdio 在
     lifespan teardown 同循环清理；两者完成后活动资源已为 None，本函数为防御性兜底，覆盖
@@ -225,7 +216,7 @@ def _sync_cleanup() -> None:
     try:
         asyncio.run(_close_held())
     except RuntimeError:
-        # 无事件循环或已有循环运行，无法安全 asyncio.run；引用已清空，余量交 GC/OS
+        # 无事件循环或已有循环运行，无法安全 asyncio.run；引用已清空，余量交 GC/OS。
         pass
     except Exception as exc:
         logger.warning("同步清理共享资源失败: {}", exc)
@@ -250,7 +241,7 @@ def _reset_lifespan_state() -> None:
     _reset_cleanup_state()
 
 
-# 初始化 FastMCP 服务器实例
+# 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。
 mcp = FastMCP(
     SERVER_NAME,
     instructions=SERVER_INSTRUCTIONS,
