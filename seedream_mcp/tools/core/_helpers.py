@@ -12,13 +12,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ...config import SeedreamConfig
-from ...utils.errors import (
+from ...utils.core.errors import (
     SeedreamValidationError,
     resolve_error_profile,
     format_error_for_user,
 )
-from ...utils.logging import get_logger
-from ...utils.path_utils import _is_within_resolved, get_workspace_root, normalize_path
+from ...utils.core.logs import get_logger
+from ...utils.io.io_path import _is_within_resolved, get_workspace_root, normalize_path
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context

@@ -7,27 +7,25 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import heapq
 import os
 import re
 import stat
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .errors import SeedreamMCPError
-from .formats import SUPPORTED_IMAGE_EXTENSIONS
-from .logging import get_logger
-from .os_utils import atomic_replace_from_fd
+from ..core.errors import SeedreamMCPError
+from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
+from ..core.logs import get_logger
+from .io_file import (
+    _is_reparse_point,
+    atomic_replace_from_fd_sync,
+)
 
 logger = get_logger(__name__)
-
-# stat.FILE_ATTRIBUTE_REPARSE_POINT 自 Python 3.12 起提供；3.10/3.11 缺失时回退到固定数值 0x400。
-_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 # 文件名长度上限，避免超出常见文件系统目录项长度限制
 _MAX_FILENAME_LENGTH = 200
@@ -59,23 +57,6 @@ _WINDOWS_RESERVED_NAMES = frozenset(
         "LPT9",
     }
 )
-
-
-def _is_reparse_point(path: Path) -> bool:
-    """判断路径是否为 NTFS junction 等非符号链接型 reparse point。
-
-    os.walk(followlinks=False) 不拦截 junction：junction 属 reparse point，
-    is_symlink 对其返回 False，会被下降进入目标执行 OS 级 listdir。本函数用
-    reparse point 属性位检测，供清理遍历下降前剔除。仅 Windows 存在 junction，
-    其他平台直接返回 False。
-    """
-    if sys.platform != "win32":
-        return False
-    try:
-        st = path.lstat()
-    except OSError:
-        return False
-    return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 class FileManagerError(SeedreamMCPError):
@@ -140,7 +121,7 @@ class FileManager:
         Returns:
             路径在基础目录范围内返回 True，否则返回 False。
         """
-        from .path_utils import _is_within_resolved
+        from .io_path import _is_within_resolved
 
         try:
             abs_path = path.resolve()
@@ -158,7 +139,7 @@ class FileManager:
         复用 path_utils._is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
         供 cleanup_old_files 等热路径复用，避免对已 resolve 路径重复解析。
         """
-        from .path_utils import _is_within_resolved
+        from .io_path import _is_within_resolved
 
         return _is_within_resolved(resolved_path, self._base_abs)
 
@@ -282,7 +263,7 @@ class FileManager:
         Returns:
             推断出的扩展名，含点号。
         """
-        from .formats import infer_extension_from_bytes
+        from ..core.formats import infer_extension_from_bytes
 
         return infer_extension_from_bytes(content, default)
 
@@ -339,7 +320,7 @@ class FileManager:
             base_name = self.generate_name_from_prompt(prompt)
 
         # 调用独立工具函数推断扩展名，避免为复用而实例化 DownloadManager。
-        from .url_utils import get_file_extension_from_url
+        from .io_url import get_file_extension_from_url
 
         extension = get_file_extension_from_url(url)
         # 收敛到受支持图片扩展名白名单，防止 URL 派生的 .html/.aspx 等任意后缀落盘。
@@ -410,16 +391,16 @@ class FileManager:
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
 
-            # 原子落盘协议由 os_utils.atomic_replace_from_fd 统一提供，与 download_manager
-            # 下载路径复用同一骨架：随机名临时文件规避符号链接 TOCTOU，写入后 os.replace
-            # 原子替换，失败清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。
-            # save_bytes 为同步公共接口且数据已在内存，经 asyncio.run 驱动异步骨架；其实际
-            # 调用方均位于工作线程或测试同步上下文，无运行中事件循环，asyncio.run 始终可用。
-            async def _writer(fd: int) -> None:
+            # 原子落盘协议由 os_utils.atomic_replace_from_fd_sync 同步提供，与 download_manager
+            # 下载路径的异步骨架对应同一协议：随机名临时文件规避符号链接 TOCTOU，写入后
+            # os.replace 原子替换，失败清理临时文件。writer 以 closefd=False 包装 fd，骨架
+            # 独占 fd 关闭。save_bytes 为同步公共接口且数据已在内存，走同步落盘路径避免在
+            # 事件循环内 asyncio.run 驱动异步骨架的分层倒置与 RuntimeError 风险。
+            def _writer(fd: int) -> None:
                 with os.fdopen(fd, "wb", closefd=False) as f:
                     f.write(data)
 
-            asyncio.run(atomic_replace_from_fd(final_path, _writer, suffix=".part"))
+            atomic_replace_from_fd_sync(final_path, _writer, suffix=".part")
             return {
                 "file_path": str(final_path),
                 "file_size": len(data),
@@ -486,22 +467,19 @@ class FileManager:
         if days < 1:
             logger.info("保留天数 {} 小于 1，跳过旧文件清理。", days)
             return {"deleted_files": 0, "deleted_size": 0, "errors": []}
-        # 以 epoch 秒比较 st_mtime，规避 datetime.fromtimestamp 受本地时区与夏令时
-        # 跳变影响导致的清理边界漂移。
-        cutoff_epoch = datetime.now().timestamp() - days * 86400
         errors: list[str] = []
-        deleted_files: list[str] = []
+        deleted_files = 0
         deleted_size = 0
         try:
             all_files, directories = self._collect_all_files(errors)
-            expired_files = [(p, s, m) for (p, s, m) in all_files if m < cutoff_epoch]
-            deleted_files, deleted_size = self._delete_expired_files(expired_files, errors)
+            deleted_names, deleted_size = self._apply_age_policy(all_files, days, errors)
+            deleted_files = len(deleted_names)
             self._prune_empty_dirs(directories)
         except Exception as e:
             errors.append(f"清理过程出错: {e}")
             logger.error("清理过程出错: {}", e)
 
-        return {"deleted_files": len(deleted_files), "deleted_size": deleted_size, "errors": errors}
+        return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
 
     def enforce_total_size_limit(self, max_total_bytes: int) -> dict[str, Any]:
         """按总字节上限驱逐最旧文件，使保存目录占用不超过 max_total_bytes。
@@ -526,9 +504,10 @@ class FileManager:
     def run_cleanup_policies(self, days: int, max_total_bytes: int | None) -> dict[str, Any]:
         """单次目录扫描依次执行按天清理与总量配额驱逐，供节流清理入口复用。
 
-        cleanup_old_files 与 enforce_total_size_limit 各自独立扫描；本方法共享一次遍历
-        结果执行两策略，避免重复全目录 os.walk。按天策略先执行，配额驱逐基于剩余文件
-        与剩余总量计算。days 小于 1 跳过按天清理，max_total_bytes 为 None 跳过配额驱逐。
+        共享一次遍历结果执行两策略，避免重复全目录 os.walk。按天策略经 _apply_age_policy
+        与 cleanup_old_files 复用同一实现，先执行并删除空目录；配额驱逐基于按天清理后的
+        剩余文件计算，剔除已删条目避免对已删路径重复 unlink。days 小于 1 跳过按天清理，
+        max_total_bytes 为 None 跳过配额驱逐。
 
         Returns:
             合并的清理结果，包含两策略累计的删除文件数、释放字节数与错误列表。
@@ -540,15 +519,11 @@ class FileManager:
             all_files, directories = self._collect_all_files(errors)
             remaining_files = all_files
             if days >= 1:
-                # 以 epoch 秒比较 st_mtime，规避本地时区与夏令时跳变导致的清理边界漂移。
-                cutoff_epoch = datetime.now().timestamp() - days * 86400
-                expired_files = [(p, s, m) for (p, s, m) in all_files if m < cutoff_epoch]
-                deleted_names, age_deleted_size = self._delete_expired_files(expired_files, errors)
+                deleted_names, age_deleted_size = self._apply_age_policy(all_files, days, errors)
                 self._prune_empty_dirs(directories)
                 deleted_files += len(deleted_names)
                 deleted_size += age_deleted_size
                 if deleted_names:
-                    # 配额驱逐基于按天清理后的剩余文件，剔除已删条目避免对已删路径重复 unlink
                     deleted_set = set(deleted_names)
                     remaining_files = [
                         item for item in all_files if str(item[0]) not in deleted_set
@@ -563,6 +538,22 @@ class FileManager:
             errors.append(f"清理过程出错: {e}")
             logger.error("清理过程出错: {}", e)
         return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
+
+    def _apply_age_policy(
+        self,
+        all_files: list[tuple[Path, int, float]],
+        days: int,
+        errors: list[str],
+    ) -> tuple[list[str], int]:
+        """对已扫描文件按保留天数删除过期项，返回已删路径名列表与释放字节数。
+
+        cutoff 以 epoch 秒比较 st_mtime，规避本地时区与夏令时跳变导致的清理边界漂移。
+        供 cleanup_old_files 与 run_cleanup_policies 共用，消除两处 cutoff 计算与过期
+        过滤的重复实现；调用方负责 days 小于 1 的跳过判定。
+        """
+        cutoff_epoch = datetime.now().timestamp() - days * 86400
+        expired_files = [(p, s, m) for (p, s, m) in all_files if m < cutoff_epoch]
+        return self._delete_expired_files(expired_files, errors)
 
     def _enforce_quota_from_scan(
         self,
@@ -663,8 +654,7 @@ class FileManager:
                 if not self._resolved_within_base(dir_resolved):
                     logger.warning("路径不在基础目录内: {}", dir_resolved)
                     continue
-                if dir_path != self.base_dir:
-                    directories.append(dir_path)
+                directories.append(dir_path)
                 pruned_dirs.append(name)
             dirs[:] = pruned_dirs
             for name in files:

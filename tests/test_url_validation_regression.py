@@ -6,8 +6,8 @@
 
 import pytest
 
-from seedream_mcp.utils.errors import SeedreamValidationError
-from seedream_mcp.utils.image_validation import validate_image_input
+from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.images.image_validation import validate_image_input
 
 
 def test_validate_image_input_rejects_missing_host_without_message_rewrap() -> None:

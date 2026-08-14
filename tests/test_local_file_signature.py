@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.client import SeedreamClient
+from seedream_mcp.utils.images.image_prepare import ImagePreparer
 
 # 合法 PNG 文件头，供构造可读取的候选常规文件
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
@@ -20,12 +20,12 @@ _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 
 def test_url_and_data_uri_return_zero_signature() -> None:
     """URL 与 data URI 内容由字符串决定，签名返回 (0.0, 0)。"""
-    assert SeedreamClient._local_file_signature("https://x/a.png", ("/root",)) == (0.0, 0)
-    assert SeedreamClient._local_file_signature("data:image/png;base64,", ("/root",)) == (0.0, 0)
+    assert ImagePreparer._local_file_signature("https://x/a.png", ("/root",)) == (0.0, 0)
+    assert ImagePreparer._local_file_signature("data:image/png;base64,", ("/root",)) == (0.0, 0)
 
 
 def test_nonexistent_relative_path_returns_zero(tmp_path: Path) -> None:
-    assert SeedreamClient._local_file_signature("nope.png", (str(tmp_path),)) == (0.0, 0)
+    assert ImagePreparer._local_file_signature("nope.png", (str(tmp_path),)) == (0.0, 0)
 
 
 def test_absolute_path_outside_roots_returns_zero(tmp_path: Path) -> None:
@@ -33,7 +33,7 @@ def test_absolute_path_outside_roots_returns_zero(tmp_path: Path) -> None:
     outside = tmp_path / "outside.png"
     outside.write_bytes(_PNG_BYTES)
     roots = (str(tmp_path / "workspace"),)
-    assert SeedreamClient._local_file_signature(str(outside), roots) == (0.0, 0)
+    assert ImagePreparer._local_file_signature(str(outside), roots) == (0.0, 0)
 
 
 def test_multi_root_skips_invalid_picks_valid(tmp_path: Path) -> None:
@@ -48,7 +48,7 @@ def test_multi_root_skips_invalid_picks_valid(tmp_path: Path) -> None:
     valid = root2 / "photo.png"
     valid.write_bytes(_PNG_BYTES)
 
-    sig = SeedreamClient._local_file_signature("photo.png", (str(root1), str(root2)))
+    sig = ImagePreparer._local_file_signature("photo.png", (str(root1), str(root2)))
     st = valid.stat()
     assert sig == (st.st_mtime, st.st_size)
 
@@ -63,7 +63,7 @@ def test_multi_root_skips_oversized_picks_valid(tmp_path: Path) -> None:
     valid = root2 / "photo.png"
     valid.write_bytes(_PNG_BYTES)
 
-    sig = SeedreamClient._local_file_signature("photo.png", (str(root1), str(root2)))
+    sig = ImagePreparer._local_file_signature("photo.png", (str(root1), str(root2)))
     st = valid.stat()
     assert sig == (st.st_mtime, st.st_size)
 
@@ -79,4 +79,4 @@ def test_final_component_symlink_rejected(tmp_path: Path) -> None:
     link = tmp_path / "link.png"
     os.symlink(target, link)
 
-    assert SeedreamClient._local_file_signature("link.png", (str(tmp_path),)) == (0.0, 0)
+    assert ImagePreparer._local_file_signature("link.png", (str(tmp_path),)) == (0.0, 0)

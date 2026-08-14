@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-import seedream_mcp.utils.validation as validation_module
-from seedream_mcp.utils.validation import validate_prompt
+import seedream_mcp.utils.core.validators as validation_module
+from seedream_mcp.utils.core.validators import validate_prompt
 from seedream_mcp.tools.core.schemas import TextToImageInput
 
 

@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from seedream_mcp.utils.errors import SeedreamAPIError, SeedreamValidationError
-from seedream_mcp.utils.image_input import prepare_image_input
+from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
+from seedream_mcp.utils.images.image_input import prepare_image_input
 
 
 async def test_prepare_image_input_rejects_symlink_escape(

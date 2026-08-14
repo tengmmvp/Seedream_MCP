@@ -14,7 +14,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.errors import (
+from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamNetworkError,
     SeedreamTimeoutError,

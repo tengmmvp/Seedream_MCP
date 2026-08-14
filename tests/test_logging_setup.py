@@ -4,7 +4,7 @@ import logging
 
 import pytest
 
-from seedream_mcp.utils.logging import setup_logging
+from seedream_mcp.utils.core.logs import setup_logging
 
 
 class _FakeLogger:
@@ -29,7 +29,7 @@ class _FakeLogger:
 @pytest.fixture
 def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> None:
     """以替身替换 setup_logging 模块内的 loguru 全局，防止 remove/add 改写真实全局 handler。"""
-    monkeypatch.setattr("seedream_mcp.utils.logging.logger", _FakeLogger())
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", _FakeLogger())
 
 
 def test_setup_logging_respects_force_standard_logging_false(

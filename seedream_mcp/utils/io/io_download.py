@@ -35,11 +35,11 @@ import aiofiles
 import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
 
-from ..version import __version__
-from .errors import SeedreamMCPError
-from .formats import DEFAULT_MAX_FILE_SIZE, is_known_image_bytes
-from .logging import get_logger
-from .os_utils import atomic_replace_from_fd
+from ...version import __version__
+from ..core.errors import SeedreamMCPError
+from ..core.formats import DEFAULT_MAX_FILE_SIZE, is_known_image_bytes
+from ..core.logs import get_logger
+from .io_file import atomic_replace_from_fd
 
 logger = get_logger(__name__)
 
@@ -94,7 +94,9 @@ _IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
 _IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")
 
 
-def _embedded_ipv4_in_six(ip_obj: Any) -> ipaddress.IPv4Address | None:
+def _embedded_ipv4_in_six(
+    ip_obj: ipaddress.IPv6Address,
+) -> ipaddress.IPv4Address | None:
     """提取 NAT64/IPv4-mapped/IPv4-compatible 段内嵌的 IPv4 地址，其他返回 None。"""
     for network in (_NAT64_NETWORK, _IPV4_MAPPED_NETWORK, _IPV4_COMPAT_NETWORK):
         if ip_obj in network:
@@ -102,18 +104,22 @@ def _embedded_ipv4_in_six(ip_obj: Any) -> ipaddress.IPv4Address | None:
     return None
 
 
-def _public_ip_rejection_reason(ip_obj: Any) -> str | None:
+def _public_ip_rejection_reason(
+    ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> str | None:
     """返回 IP 不可作为公网下载目标的拒绝原因，None 表示通过。
 
     统一静态 URL、DNS 解析、连接对端 IP 三处校验：拒绝非公网地址、RFC 6598 CGNAT 段，
-    以及 6to4/Teredo 等可封装内网地址的 IPv6 段。
+    以及 6to4/Teredo 等可封装内网地址的 IPv6 段。入参覆盖 ip_address 解析可能返回的
+    IPv4 与 IPv6 两类地址，递归校验 IPv6 内嵌 IPv4 时传入提取出的 IPv4Address。
     """
     if ip_obj.version == 4 and ip_obj in _CGNAT_NETWORK:
         return "CGNAT地址(100.64.0.0/10)"
     if not ip_obj.is_global:
         return "非公网地址"
-    if ip_obj.version == 6:
-        if getattr(ip_obj, "sixtofour", None) or getattr(ip_obj, "teredo", None):
+    # isinstance 收窄到 IPv6Address，使内嵌段提取与 sixtofour/teredo 属性访问均受类型校验
+    if isinstance(ip_obj, ipaddress.IPv6Address):
+        if ip_obj.sixtofour is not None or ip_obj.teredo is not None:
             return "6to4/Teredo地址"
         embedded = _embedded_ipv4_in_six(ip_obj)
         if embedded is not None:

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from seedream_mcp.utils.errors import SeedreamValidationError
-from seedream_mcp.utils.model_capabilities import (
+from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.model.model_capabilities import (
     get_max_reference_images,
     is_seedream_50_pro_model,
 )
-from seedream_mcp.utils.validation import (
+from seedream_mcp.utils.core.validators import (
     validate_generation_tools,
     validate_optimize_prompt_options,
     validate_output_format,
@@ -155,7 +155,7 @@ def test_tools_accepted_for_endpoint_id() -> None:
 
 def test_supports_sequential_generation_false_for_pro() -> None:
     """Pro 的能力声明须关闭组图支持，驱动 client 层拒绝组图调用。"""
-    from seedream_mcp.utils.model_capabilities import get_model_capabilities
+    from seedream_mcp.utils.model.model_capabilities import get_model_capabilities
 
     assert get_model_capabilities(PRO).supports_sequential_generation is False
     assert get_model_capabilities(LITE).supports_sequential_generation is True

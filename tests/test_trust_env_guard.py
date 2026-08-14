@@ -9,7 +9,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.download_manager import DownloadManager
+from seedream_mcp.utils.io.io_download import DownloadManager
 
 
 @pytest.mark.asyncio

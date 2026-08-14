@@ -2,8 +2,8 @@
 
 包含请求体大小限制、Bearer 鉴权、健康检查三个 ASGI 中间件，以及 streamable-http
 监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 FastMCP 的 streamable_http_app
-外层，按装配逆序执行。FastMCP 实例 mcp 在调用时延迟导入，避免与 server 模块形成顶层
-循环导入。
+外层，按装配逆序执行。FastMCP 实例 mcp 与共享资源清理函数在调用时从 resources 模块
+延迟导入，传输层不依赖 server 模块。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import json
 from typing import Any
 
 from .config import get_active_config
-from .utils.logging import get_logger
+from .utils.core.logs import get_logger
 
 # 模块日志记录器
 logger = get_logger(__name__)
@@ -232,7 +232,7 @@ def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enable
     因此此处非回环分支仅用于确认已启用鉴权。stateless 启用无状态模式，更适合远程
     多客户端与负载均衡场景。
     """
-    from .server import mcp
+    from .resources import mcp
 
     mcp.settings.host = host
     mcp.settings.port = port
@@ -302,7 +302,7 @@ def _run_streamable_http(
     """
     import uvicorn
 
-    from .server import _cleanup_shared_resources, mcp
+    from .resources import _cleanup_shared_resources, mcp
 
     app = mcp.streamable_http_app()
     # streamable_http_app 首次调用后缓存 _session_manager 并固定中间件栈，重复调用会在同一

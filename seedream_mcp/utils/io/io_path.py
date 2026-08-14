@@ -17,11 +17,12 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 # 本地导入
-from .errors import SeedreamConfigError, SeedreamValidationError
-from .formats import SUPPORTED_IMAGE_EXTENSIONS
-from .logging import get_logger
-from .image_validation import validate_image_input
-from .image_ref import classify_image_reference
+from ..core.errors import SeedreamConfigError, SeedreamValidationError
+from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
+from ..core.logs import get_logger
+from ..images.image_validation import validate_image_input
+from ..images.image_ref import classify_image_reference
+from .io_file import _is_reparse_point
 
 logger = get_logger(__name__)
 
@@ -53,7 +54,7 @@ def resolve_env_workspace_root() -> Path:
 def _configured_workspace_root() -> str | None:
     """返回已配置的工作区根目录原始值，未配置返回 None。"""
     try:
-        from ..config import get_active_config
+        from ...config import get_active_config
 
         config = get_active_config()
     except SeedreamConfigError:
@@ -369,6 +370,9 @@ def find_images_in_directory(
                 elif (
                     entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth
                 ):
+                    if _is_reparse_point(entry_path):
+                        logger.warning("跳过 reparse point 目录: {}", entry_path)
+                        continue
                     if scan_directory(entry_path, current_depth + 1):
                         return True
             return False

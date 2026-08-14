@@ -11,7 +11,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils import image_input
+from seedream_mcp.utils.images import image_input
 
 
 @pytest.mark.asyncio
@@ -47,8 +47,8 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     assert call_count == 1
     assert first == second == "prepared:https://example.com/ref.png"
     # 在途 task 完成后应被清理；HTTP URL 跳过缓存，缓存为空
-    assert len(client._prepare_inflight) == 0
-    assert len(client._prepare_cache) == 0
+    assert len(client._image_preparer._prepare_inflight) == 0
+    assert len(client._image_preparer._prepare_cache) == 0
 
 
 @pytest.mark.asyncio
@@ -91,7 +91,7 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     # 等待底层 task 启动：creator 先创建 inflight 并 await task，waiter 随后命中 inflight
     # 并 await 同一 task，最后底层 task 执行 fake 置位事件。
     await inner_started.wait()
-    assert len(client._prepare_inflight) == 1
+    assert len(client._image_preparer._prepare_inflight) == 1
 
     # 取消创建者：按契约仅退出其 await task，底层 inflight task 不应被连带取消。
     creator.cancel()
@@ -108,8 +108,8 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     # fake 底层仅调用一次：两个并发调用共享同一 task
     assert call_count == 1
     # task 完成后 _prepare_inflight 已清空；HTTP URL 跳过缓存，缓存为空
-    assert len(client._prepare_inflight) == 0
-    assert len(client._prepare_cache) == 0
+    assert len(client._image_preparer._prepare_inflight) == 0
+    assert len(client._image_preparer._prepare_cache) == 0
 
 
 @pytest.mark.asyncio
@@ -147,7 +147,7 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     # 等待底层 task 启动：creator 先创建 inflight 并 await task，waiter 随后命中 inflight
     # 并 await 同一 task，最后底层 task 执行 fake 置位事件。
     await inner_started.wait()
-    assert len(client._prepare_inflight) == 1
+    assert len(client._image_preparer._prepare_inflight) == 1
 
     # 取消等待者：shield 隔离使底层 inflight task 不受连带取消
     waiter.cancel()
@@ -160,8 +160,8 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     assert creator.result() == "prepared:https://example.com/ref.png"
     assert call_count == 1
     # inflight 完成后已清空；HTTP URL 跳过缓存，缓存为空
-    assert len(client._prepare_inflight) == 0
-    assert len(client._prepare_cache) == 0
+    assert len(client._image_preparer._prepare_inflight) == 0
+    assert len(client._image_preparer._prepare_cache) == 0
 
 
 @pytest.mark.asyncio
@@ -207,5 +207,5 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
 
     # 底层仅调用一次；task 完成后 inflight 已清空；出错不写入缓存
     assert call_count == 1
-    assert len(client._prepare_inflight) == 0
-    assert len(client._prepare_cache) == 0
+    assert len(client._image_preparer._prepare_inflight) == 0
+    assert len(client._image_preparer._prepare_cache) == 0

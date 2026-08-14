@@ -6,8 +6,8 @@
 
 import pytest
 
-from seedream_mcp.utils.errors import SeedreamValidationError
-from seedream_mcp.utils.validation import (
+from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.validators import (
     MAX_SEQUENTIAL_TOTAL_IMAGES,
     _coerce_positive_int_in_range,
     validate_max_images,

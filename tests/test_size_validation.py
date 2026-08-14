@@ -3,9 +3,9 @@
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.errors import SeedreamConfigError
-from seedream_mcp.utils.errors import SeedreamValidationError
-from seedream_mcp.utils.validation import validate_size_for_model
+from seedream_mcp.utils.core.errors import SeedreamConfigError
+from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.validators import validate_size_for_model
 
 
 def test_validate_size_for_model_accepts_seedream_45_pixel_size() -> None:
@@ -116,7 +116,7 @@ def test_validate_size_for_model_rejects_seedream_50_pro_non_multiple_of_16() ->
 
 def test_validate_image_input_rejects_oversized_data_uri_before_decode() -> None:
     """巨型 base64 在解码前按文本长度估算拒绝，避免先解码触发内存放大。"""
-    from seedream_mcp.utils.image_validation import MAX_IMAGE_FILE_SIZE, validate_image_input
+    from seedream_mcp.utils.images.image_validation import MAX_IMAGE_FILE_SIZE, validate_image_input
 
     huge_b64 = "A" * (MAX_IMAGE_FILE_SIZE * 4 // 3 + 100)
     with pytest.raises(SeedreamValidationError, match="数据过大"):

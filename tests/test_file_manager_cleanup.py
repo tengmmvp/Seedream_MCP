@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.file_manager import FileManager
+from seedream_mcp.utils.io.io_storage import FileManager
 
 
 def test_validate_path_accepts_inside_base(tmp_path: Path) -> None:

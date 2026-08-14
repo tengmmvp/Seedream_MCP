@@ -7,7 +7,7 @@ scheme 的 URL 误入本地文件分支；本测试锁定统一分类的正确�
 
 import pytest
 
-from seedream_mcp.utils.image_ref import classify_image_reference
+from seedream_mcp.utils.images.image_ref import classify_image_reference
 
 
 @pytest.mark.parametrize(

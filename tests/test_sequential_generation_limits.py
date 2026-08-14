@@ -3,8 +3,8 @@
 import pytest
 
 from seedream_mcp.tools.core.schemas import SequentialGenerationInput
-from seedream_mcp.utils.errors import SeedreamValidationError
-from seedream_mcp.utils.validation import validate_sequential_image_limit
+from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.validators import validate_sequential_image_limit
 
 
 def test_sequential_generation_total_limit_ok() -> None:

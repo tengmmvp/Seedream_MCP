@@ -13,8 +13,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .logging import get_logger
-from .path_utils import find_images_in_directory
+from ..core.logs import get_logger
+from .io_path import find_images_in_directory
 
 logger = get_logger(__name__)
 
@@ -104,7 +104,8 @@ def _cached_find_images_in_directory(
     命中但前缀不足 scan_limit 时按更大 scan_limit 重扫并扩展缓存，大目录深翻页每页至多一次
     扫描，回看与同范围重复请求直接命中；扫描到目录末尾即标记 complete，后续任意 scan_limit
     均不再扫描。scanner 可注入，默认使用 path_utils.find_images_in_directory，便于调用方在
-    自身模块作用域内替换底层扫描。
+    自身模块作用域内替换底层扫描。命中与未命中两个出口均返回独立 list 副本，调用方对返回值
+    原地修改不会篡改缓存内列表。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -126,9 +127,10 @@ def _cached_find_images_in_directory(
     scan = scanner if scanner is not None else find_images_in_directory
     cached = _DIRECTORY_SCAN_CACHE.get(cache_key)
     if cached is not None and _is_scan_entry_fresh(cached, resolved_dir, recursive):
-        # 完整列表或前缀已覆盖本次 scan_limit 时直接复用，前缀不足则按更大 scan_limit 重扫扩展
+        # 完整列表或前缀已覆盖本次 scan_limit 时直接复用，前缀不足则按更大 scan_limit 重扫扩展。
+        # 切片返回独立副本，调用方原地修改不会篡改缓存内列表。
         if cached.complete or len(cached.images) >= scan_limit:
-            return list(cached.images)
+            return cached.images[:]
     # 扫描前捕获目录 mtime，使缓存写入的指纹与 images 自洽：扫描与 stat 之间若有并发写入，
     # 扫描后捕获的 mtime 会反映新增而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖
     # mtime 失效，跳过捕获。
@@ -149,4 +151,5 @@ def _cached_find_images_in_directory(
             images=images,
             complete=complete,
         )
-    return images
+    # 新扫描结果已存入缓存本体，切片返回独立副本，调用方原地修改不会篡改缓存
+    return images[:]

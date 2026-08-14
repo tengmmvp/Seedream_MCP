@@ -7,7 +7,7 @@ import pytest
 
 import seedream_mcp.config as config_module
 from seedream_mcp.config import build_config_from_sources
-from seedream_mcp.utils.errors import SeedreamConfigError
+from seedream_mcp.utils.core.errors import SeedreamConfigError
 
 
 def _write_env_file(path: Path, content: str) -> None:

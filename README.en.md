@@ -173,7 +173,7 @@ Restart the corresponding client after configuration.
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level
 ```
 
-> **Security note**: When bound to `localhost`, the service treats it as a loopback address and does not enforce Bearer auth or TLS. Deployers should ensure `localhost` resolves to `127.0.0.1` or `::1`; containers and virtual environments that modify hosts require special attention. Non-loopback bindings must configure a Bearer token and TLS. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which are exposed in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address.
+> **Security note**: `localhost` is not treated as a loopback address (its resolution depends on hosts/DNS and may be poisoned to a non-loopback address). Binding to it likewise requires a Bearer auth token and TLS, and the service refuses to start without them; for loopback semantics without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback bindings must likewise configure a Bearer token and TLS. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which are exposed in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address.
 
 ### Usage Examples
 
@@ -445,6 +445,11 @@ SEEDREAM_HTTP_MAX_BODY_SIZE=104857600       # streamable-http request body size 
 # Client performance
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
 SEEDREAM_PREPARE_CACHE_MAX=32
+SEEDREAM_PREPARE_CACHE_MAX_BYTES=268435456    # Reference image prepare cache total byte cap (default 256MB)
+
+# Streaming
+SEEDREAM_STREAM_BUFFER_MAX_SIZE=10485760      # SSE stream buffer prefix reclaim threshold (default 10MB)
+SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (default 1MB)
 ```
 
 ## 👥 Contributors

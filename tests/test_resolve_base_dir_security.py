@@ -6,7 +6,7 @@ import pytest
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.common import _resolve_base_dir
-from seedream_mcp.utils.errors import SeedreamValidationError
+from seedream_mcp.utils.core.errors import SeedreamValidationError
 
 
 def test_resolve_base_dir_rejects_traversal_save_path(
@@ -66,10 +66,10 @@ def test_validate_image_path_none_base_dir_falls_back_and_enforces_bounds(
     越界路径（含 .. 穿越）即使不传 base_dir 也须被判无效，不再静默放行；边界内真实小图
     返回有效。monkeypatch get_workspace_root 返回独立 workspace，隔离环境变量与配置。
     """
-    import seedream_mcp.utils.path_utils as path_utils_module
+    import seedream_mcp.utils.io.io_path as path_utils_module
     from PIL import Image
 
-    from seedream_mcp.utils.path_utils import validate_image_path
+    from seedream_mcp.utils.io.io_path import validate_image_path
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()

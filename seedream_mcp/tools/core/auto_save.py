@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ...config import SeedreamConfig
-from ...utils.auto_save import AutoSaveManager, AutoSaveResult
-from ...utils.download_manager import DownloadManager
-from ...utils.logging import get_logger
+from ...utils.io.io_save import AutoSaveManager, AutoSaveResult
+from ...utils.io.io_download import DownloadManager
+from ...utils.core.logs import get_logger
 from ._helpers import _resolve_base_dir
 from .results import extract_images, is_saveable_image
 

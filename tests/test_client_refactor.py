@@ -12,7 +12,7 @@ from PIL import Image
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.errors import SeedreamValidationError
+from seedream_mcp.utils.core.errors import SeedreamValidationError
 
 
 class _LazyOptWrapper:
@@ -404,7 +404,7 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = SeedreamClient(_build_config())
-    client._image_prepare_concurrency = 2
+    client._image_preparer._prepare_concurrency = 2
 
     active_count = 0
     max_active_count = 0
@@ -423,7 +423,7 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
         captured_request.update(request_data)
         return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
-    monkeypatch.setattr(client, "_prepare_image_input", fake_prepare_image_input)
+    monkeypatch.setattr(client._image_preparer, "prepare_image_input", fake_prepare_image_input)
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
     await client.multi_image_fusion(
@@ -432,7 +432,7 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
         size="2K",
     )
 
-    assert 1 < max_active_count <= client._image_prepare_concurrency
+    assert 1 < max_active_count <= client._image_preparer._prepare_concurrency
     assert captured_request["image"] == [
         "prepared:image-1",
         "prepared:image-2",
@@ -480,7 +480,7 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = SeedreamClient(_build_config())
-    client._image_prepare_concurrency = 2
+    client._image_preparer._prepare_concurrency = 2
 
     active_count = 0
     max_active_count = 0
@@ -499,7 +499,7 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
         captured_request.update(request_data)
         return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
-    monkeypatch.setattr(client, "_prepare_image_input", fake_prepare_image_input)
+    monkeypatch.setattr(client._image_preparer, "prepare_image_input", fake_prepare_image_input)
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
     await client.sequential_generation(
@@ -509,7 +509,7 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
         size="2K",
     )
 
-    assert 1 < max_active_count <= client._image_prepare_concurrency
+    assert 1 < max_active_count <= client._image_preparer._prepare_concurrency
     assert captured_request["image"] == [
         "prepared:image-1",
         "prepared:image-2",
@@ -773,10 +773,10 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
     """_prepare_image_input 命中缓存不重复调用底层；LRU 淘汰最久未用条目，近期命中不被淘汰。"""
     # 用对象式 monkeypatch 而非字符串式：字符串式经 getattr(seedream_mcp, "utils") 解析，
     # 在 test_package_lazy_import 重载顶层包后 utils 子模块不再绑定到新包对象而失败。
-    from seedream_mcp.utils import image_input
+    from seedream_mcp.utils.images import image_input
 
     client = SeedreamClient(_build_config())
-    client._prepare_cache_max = 3
+    client._image_preparer._prepare_cache_max = 3
 
     call_count = 0
 
@@ -797,7 +797,7 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
     # 填满缓存，加入 img-1 / img-2 / img-3
     await client._prepare_image_input("img-2")
     await client._prepare_image_input("img-3")
-    assert len(client._prepare_cache) == 3
+    assert len(client._image_preparer._prepare_cache) == 3
     assert call_count == 3
 
     # 重新访问 img-1 使其成为近期使用，img-2 随即成为最久未用
@@ -806,7 +806,7 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
 
     # 加入 img-4 触发淘汰：LRU 淘汰最久未用的 img-2，保留近期命中的 img-1
     await client._prepare_image_input("img-4")
-    assert len(client._prepare_cache) == 3
+    assert len(client._image_preparer._prepare_cache) == 3
     assert call_count == 4
 
     # img-2 已被淘汰，重新请求会再次调用底层；img-1 仍在缓存不再调用

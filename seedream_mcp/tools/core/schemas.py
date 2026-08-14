@@ -12,9 +12,9 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ...utils.errors import SeedreamValidationError
-from ...utils.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
-from ...utils.validation import (
+from ...utils.core.errors import SeedreamValidationError
+from ...utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
     VALID_OPTIMIZE_MODES,

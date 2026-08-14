@@ -173,7 +173,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别
 ```
 
-> **安全提示**：绑定 `localhost` 时服务将其视为回环地址，不强制 Bearer 鉴权与 TLS。部署方应确认 `localhost` 解析到 `127.0.0.1` 或 `::1`，容器与虚拟环境若修改 hosts 需特别注意；非回环绑定必须配置 Bearer 令牌与 TLS。
+> **安全提示**：`localhost` 不被视为回环地址（其解析依赖 hosts/DNS，可能被污染指向非回环），绑定它同样要求配置 Bearer 鉴权令牌与 TLS，未配置则服务拒绝启动；如需回环免鉴权语义，请改绑 `127.0.0.1` 或 `::1`。非回环绑定同样必须配置 Bearer 令牌与 TLS。
 
 ### 使用示例
 
@@ -445,6 +445,11 @@ SEEDREAM_HTTP_MAX_BODY_SIZE=104857600       # streamable-http 请求体上限（
 # 客户端性能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
 SEEDREAM_PREPARE_CACHE_MAX=32
+SEEDREAM_PREPARE_CACHE_MAX_BYTES=268435456    # 参考图预处理缓存累计字节上限（默认 256MB）
+
+# 流式处理
+SEEDREAM_STREAM_BUFFER_MAX_SIZE=10485760      # SSE 流式响应缓冲区前缀回收阈值（默认 10MB）
+SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 流式响应每次读取块大小（默认 1MB）
 ```
 
 ## 👥 贡献者

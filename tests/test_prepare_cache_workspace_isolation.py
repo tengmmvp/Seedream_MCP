@@ -11,7 +11,8 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils import image_input, path_utils
+from seedream_mcp.utils.images import image_input
+from seedream_mcp.utils.io import io_path as path_utils
 
 
 @pytest.mark.asyncio

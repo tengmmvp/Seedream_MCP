@@ -224,7 +224,7 @@ def test_cli_main_config_error_returns_exit_code_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """配置构建抛 SeedreamConfigError 时 cli_main 返回退出码 1。"""
-    from seedream_mcp.utils.errors import SeedreamConfigError
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
 
     args = _make_cli_args("stdio")
 

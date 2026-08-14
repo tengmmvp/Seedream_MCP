@@ -16,7 +16,7 @@ import aiofiles
 import aiohttp
 import pytest
 
-from seedream_mcp.utils.download_manager import DownloadError, DownloadManager
+from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager
 
 from _download_fakes import (
     _FakeResponse,

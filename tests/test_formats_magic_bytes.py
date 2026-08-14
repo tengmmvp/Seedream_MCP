@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from seedream_mcp.utils.formats import infer_extension_from_bytes, is_known_image_bytes
+from seedream_mcp.utils.core.formats import infer_extension_from_bytes, is_known_image_bytes
 
 # ==================== BMP ====================
 

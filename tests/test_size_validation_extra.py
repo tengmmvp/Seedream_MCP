@@ -2,8 +2,8 @@
 
 import pytest
 
-from seedream_mcp.utils.errors import SeedreamValidationError
-from seedream_mcp.utils.validation import validate_size_for_model
+from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.validators import validate_size_for_model
 
 
 def test_validate_size_rejects_extreme_aspect_ratio() -> None:

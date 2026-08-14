@@ -16,7 +16,7 @@ from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.context import GenerationExecutionContext
 from seedream_mcp.tools.core.parallel import _run_generation_requests
-from seedream_mcp.utils.logging import get_logger
+from seedream_mcp.utils.core.logs import get_logger
 
 
 def _make_context(request_count: int, parallelism: int) -> GenerationExecutionContext:

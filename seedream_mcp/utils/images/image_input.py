@@ -13,11 +13,11 @@ from urllib.parse import urlparse
 
 from PIL import Image
 
-from .errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
-from .formats import MIME_BY_EXTENSION
-from .logging import get_logger
-from .os_utils import open_no_follow_read
-from .path_utils import get_workspace_roots, suggest_similar_paths, validate_image_path
+from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
+from ..core.formats import MIME_BY_EXTENSION
+from ..core.logs import get_logger
+from ..io.io_file import open_no_follow_read
+from ..io.io_path import get_workspace_roots, suggest_similar_paths, validate_image_path
 from .image_validation import (
     decode_and_validate_dimensions,
     validate_image_input,

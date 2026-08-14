@@ -16,10 +16,10 @@ from typing import Any, Mapping
 
 from dotenv import dotenv_values
 
-from .utils.errors import SeedreamConfigError, SeedreamValidationError
-from .utils.formats import DEFAULT_MAX_FILE_SIZE
-from .utils.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
-from .utils.validation import (
+from .utils.core.errors import SeedreamConfigError, SeedreamValidationError
+from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
+from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
+from .utils.core.validators import (
     FALSE_BOOL_STRINGS,
     TRUE_BOOL_STRINGS,
     validate_size_for_model,
@@ -127,6 +127,13 @@ class SeedreamConfig:
 
         if not self.base_url or not self.base_url.startswith(("http://", "https://")):
             raise SeedreamConfigError("base_url必须是有效的HTTP/HTTPS URL")
+        if self.base_url.startswith("http://"):
+            # http 明文会使 API 密钥在网络上裸传，记录告警提示仅限自建可信内网端点使用
+            from .utils.core.logs import get_logger
+
+            get_logger(__name__).warning(
+                "ARK_BASE_URL 使用 http://，API 密钥将在网络上明文传输，" "仅自建可信内网端点时使用"
+            )
 
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError("model_id不能为空")
@@ -391,42 +398,42 @@ def _pick_config_value(
 # 类型化配置取值辅助：统一经 _pick_config_value 按优先级取值后再做类型转换，
 # 每个辅助对应一种目标类型，供 _build_config_from_sources_unlocked 调用。
 def _pick_str(
-    overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> str:
     return str(
-        _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
+        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     ).strip()
 
 
 def _pick_optional_str(
-    overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> str | None:
-    raw = _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
+    raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     return str(raw).strip() or None
 
 
 def _pick_int(
-    overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> int:
     return parse_int(
-        _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
+        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     )
 
 
 def _pick_optional_int(
-    overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> int | None:
-    raw = _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
+    raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None or not str(raw).strip():
         return None
     return parse_int(raw)
 
 
 def _pick_bool(
-    overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> bool:
     return parse_bool(
-        _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
+        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     )
 
 

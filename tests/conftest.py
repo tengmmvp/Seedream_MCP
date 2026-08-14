@@ -45,7 +45,9 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
     from seedream_mcp import config as config_module
     from seedream_mcp.server import _reset_lifespan_state, mcp
-    from seedream_mcp.utils import image_validation as image_validation_module
+    from seedream_mcp.tools.impl import browse_images as browse_module
+    from seedream_mcp.utils.images import image_prepare as image_prepare_module
+    from seedream_mcp.utils.images import image_validation as image_validation_module
 
     # 全局配置懒加载缓存重置为 None，使各测试独立重建
     monkeypatch.setattr(config_module, "_global_config", None)
@@ -53,6 +55,10 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mcp.settings, "stateless_http", False)
     # HEIC 解码器注册标志为模块全局，重置以隔离注册时序相关用例
     monkeypatch.setattr(image_validation_module, "_heif_opener_registered", False)
+    # 浏览扫描与参考图预处理的模块级缓存跨测试隔离，避免上一用例的目录扫描结果或
+    # workspace_roots 解析缓存影响下一用例
+    browse_module._DIRECTORY_SCAN_CACHE.clear()
+    image_prepare_module._resolved_bases_cache.clear()
     # lifespan 共享单例、活动配置、asyncio.Lock 与自动保存清理锁若跨事件循环复用会报错，
     # 每测试统一重建到干净态
     _reset_lifespan_state()

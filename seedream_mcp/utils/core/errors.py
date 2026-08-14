@@ -97,7 +97,7 @@ class SeedreamValidationError(SeedreamMCPError):
         result.update(
             {
                 "field": self.field,
-                "value": _truncate_value_for_output(self.value),
+                "value": _truncate_value_for_output(_sanitize_output_string(self.value)),
             }
         )
         return result
@@ -429,17 +429,27 @@ def _redact_bearer_tokens(value: Any) -> Any:
     return value
 
 
-def _redact_sensitive_message(value: str) -> str:
-    """剥离消息中的敏感键值裸值、Bearer 令牌与 CRLF 控制字符。
+def _sanitize_output_string(value: Any) -> Any:
+    """对字符串值剥离敏感键值裸值、Bearer 令牌与 CRLF 控制字符。
 
-    先以 _SENSITIVE_KEYVALUE_PATTERN 剥离 authorization/apikey 键名后的裸值，再以
-    _BEARER_TOKEN_PATTERN 剥离残留的 Bearer 令牌，两者叠加覆盖上游错误体常见的回显形态。
-    末尾剥离 CR/LF 控制字符，与 download_manager.sanitize_url 对齐，防止攻击者经由
-    上游错误体在日志或结构化输出中伪造行实施日志注入。
+    message 与 details/value/response_data 等结构化字段共用此净化，使各字段对敏感
+    片段与日志注入的防护完全一致；非字符串原样返回。先剥 authorization/apikey 键名
+    后的裸值，再剥残留 Bearer 令牌，末尾剥 CR/LF 防日志注入。
     """
+    if not isinstance(value, str):
+        return value
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", value)
-    redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
+    redacted = _redact_bearer_tokens(redacted)
     return _CONTROL_CHARS_PATTERN.sub(" ", redacted)
+
+
+def _redact_sensitive_message(value: str) -> str:
+    """剥离 message 中的敏感键值裸值、Bearer 令牌与 CRLF。
+
+    委托 _sanitize_output_string，与 details/value/response_data 等结构化字段共用同一
+    净化实现，避免两处脱敏逻辑漂移。
+    """
+    return _sanitize_output_string(value)  # type: ignore[no-any-return]
 
 
 def _is_sensitive_key(key: Any) -> bool:
@@ -477,12 +487,12 @@ def _filter_sensitive_data(data: Any) -> Any:
             key: (
                 "***"
                 if _is_sensitive_key(key)
-                else _filter_sensitive_data(_redact_bearer_tokens(value))
+                else _filter_sensitive_data(_sanitize_output_string(value))
             )
             for key, value in data.items()
         }
     if isinstance(data, list):
-        return [_filter_sensitive_data(_redact_bearer_tokens(item)) for item in data]
+        return [_filter_sensitive_data(_sanitize_output_string(item)) for item in data]
     return data
 
 

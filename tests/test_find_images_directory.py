@@ -13,9 +13,9 @@ from typing import Any
 import pytest
 
 import seedream_mcp.tools.impl.browse_images as browse_module
-import seedream_mcp.utils.path_utils as path_utils_module
+import seedream_mcp.utils.io.io_path as path_utils_module
 from seedream_mcp.tools.impl.browse_images import _cached_find_images_in_directory
-from seedream_mcp.utils.path_utils import find_images_in_directory
+from seedream_mcp.utils.io.io_path import find_images_in_directory
 
 
 def test_limit_returns_sorted_prefix_not_creation_order(tmp_path: Path) -> None:
@@ -341,3 +341,32 @@ def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=1
     )
     assert len(hit) == 2
+
+
+def test_find_images_does_not_descend_into_reparse_point(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NTFS junction 等 reparse point 目录不下降，与 file_manager 清理路径防护对齐。
+
+    junction 的 is_symlink 返回 False，entry.is_dir(follow_symlinks=False) 对其返回 True
+    仍会下降，从而进入 junction 目标执行 OS 级 listdir，涉及 SMB 出站认证暴露。find_images
+    下降前须经 os_utils._is_reparse_point 剔除。用 monkeypatch 让该函数对指定子目录返回
+    True，断言该子树不被扫描而真实图片仍正常返回，回归保护此防护不退化。
+    """
+    junction_dir = tmp_path / "junction_dir"
+    junction_dir.mkdir()
+    (junction_dir / "inside_junction.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "real.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    real_is_reparse = path_utils_module._is_reparse_point
+    monkeypatch.setattr(
+        path_utils_module,
+        "_is_reparse_point",
+        lambda p: real_is_reparse(p) or p.resolve() == junction_dir.resolve(),
+    )
+
+    result = find_images_in_directory(str(tmp_path), recursive=True)
+
+    result_names = {p.name for p in result}
+    assert "real.png" in result_names
+    assert "inside_junction.png" not in result_names

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.path_utils import (
+from seedream_mcp.utils.io.io_path import (
     _file_uri_to_path,
     _is_unc_path,
     is_path_within_any_base,

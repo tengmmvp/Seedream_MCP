@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
-from seedream_mcp.utils.errors import parse_retry_after
+from seedream_mcp.utils.core.errors import parse_retry_after
 
 
 def test_parse_retry_after_delta_seconds() -> None:

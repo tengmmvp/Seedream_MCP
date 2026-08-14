@@ -7,9 +7,10 @@
 
 from __future__ import annotations
 
-from seedream_mcp.utils.errors import (
+from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamMCPError,
+    SeedreamValidationError,
     _filter_sensitive_data,
     _redact_bearer_tokens,
     _redact_sensitive_message,
@@ -29,11 +30,16 @@ def test_filter_sensitive_data_redacts_sensitive_keys() -> None:
     assert filtered == {"authorization": "***", "api_key": "***", "normal": "v"}
 
 
-def test_filter_sensitive_data_strips_bearer_in_non_sensitive_value() -> None:
-    """非敏感键的字符串值中的 Bearer 令牌被剥离，保留 Bearer 前缀。"""
+def test_filter_sensitive_data_strips_credentials_in_non_sensitive_value() -> None:
+    """非敏感键的字符串值中内嵌的鉴权信息被剥离，令牌不残留于结构化输出。
+
+    authorization: 键名形态触发键值裸值剥离，吸收 scheme 词并替换值为 ***，与 message 层
+    对 Authorization 的脱敏一致；纯 Bearer 令牌由 Bearer 模式保留前缀，见 list 测试。
+    """
     filtered = _filter_sensitive_data({"header": "Authorization: Bearer abc123"})
 
-    assert filtered == {"header": "Authorization: Bearer ***"}
+    assert filtered == {"header": "Authorization: ***"}
+    assert "abc123" not in str(filtered)
 
 
 def test_filter_sensitive_data_redacts_list_items() -> None:
@@ -226,3 +232,30 @@ def test_api_error_to_dict_strips_crlf_in_message() -> None:
     rendered_message = err.to_dict()["message"]
     assert "\r" not in rendered_message
     assert "\n" not in rendered_message
+
+
+def test_base_error_to_dict_strips_crlf_in_details() -> None:
+    """details 内字符串值的 CRLF 被剥离，与 message 层防护对齐，防结构化输出日志注入。"""
+    err = SeedreamMCPError(message="ok", details={"trace": "a\r\nFAKE\napikey=leaked"})
+    dumped = err.to_dict()
+    assert "\r" not in str(dumped["details"])
+    assert "\n" not in str(dumped["details"])
+    assert "leaked" not in str(dumped["details"])
+
+
+def test_api_error_to_dict_strips_crlf_in_response_data() -> None:
+    """response_data 内字符串值（含嵌套）的 CRLF 被剥离，与 message 层对齐。"""
+    err = SeedreamAPIError(
+        message="ok", response_data={"trace": "a\r\nFAKE", "nested": {"deep": "x\ny"}}
+    )
+    response_data = err.to_dict()["response_data"]
+    assert "\r" not in str(response_data)
+    assert "\n" not in str(response_data)
+
+
+def test_validation_error_to_dict_strips_crlf_in_value() -> None:
+    """SeedreamValidationError.to_dict 的 value 经 CRLF 剥离，换行不进入结构化输出。"""
+    err = SeedreamValidationError(message="bad size", field="size", value="2048\r\nFAKE")
+    dumped = err.to_dict()
+    assert "\r" not in str(dumped["value"])
+    assert "\n" not in str(dumped["value"])

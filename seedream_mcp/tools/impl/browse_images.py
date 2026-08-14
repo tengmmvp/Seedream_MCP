@@ -17,14 +17,14 @@ from mcp.types import CallToolResult, TextContent
 
 from ..core._helpers import _safe_ctx_log, _safe_report_progress
 from ..core.schemas import BrowseImagesInput
-from ...utils.directory_scan_cache import (  # noqa: F401  # 扫描缓存符号经本模块重导出，外部经本模块访问缓存状态
+from ...utils.io.io_scan import (  # noqa: F401  # 扫描缓存符号经本模块重导出，外部经本模块访问缓存状态
     _DIRECTORY_SCAN_CACHE,
     _DIRECTORY_SCAN_CACHE_TTL_SECONDS,
     _cached_find_images_in_directory,
 )
-from ...utils.errors import format_error_for_user
-from ...utils.logging import get_logger
-from ...utils.path_utils import (
+from ...utils.core.errors import format_error_for_user
+from ...utils.core.logs import get_logger
+from ...utils.io.io_path import (
     SUPPORTED_IMAGE_EXTENSIONS,
     _is_within_resolved,
     find_images_in_directory,
@@ -39,6 +39,12 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
 
 logger = get_logger(__name__)
+
+# 进度上报百分比常量，命名沿用生成管道 core._helpers 进度常量的 PROGRESS_ 前缀体系。
+# 阶梯：扫描开始 20，多目录扫描按已扫描目录占比上报中间进度并渐增至 90，结束 100。
+PROGRESS_SCAN_START = 20.0
+PROGRESS_SCAN_SPAN = 70.0
+PROGRESS_COMPLETE = 100.0
 
 
 @dataclass(frozen=True)
@@ -320,7 +326,7 @@ async def handle_browse_images(
     except Exception as exc:
         # 兜底：未预期异常降级为结构化错误，避免向调用方抛出原始异常。
         logger.error("浏览图片处理失败", exc_info=True)
-        await _safe_report_progress(ctx, progress=100.0, message="浏览图片处理失败")
+        await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         user_message = format_error_for_user(exc)
         await _safe_ctx_log(ctx, "error", f"浏览图片失败：{user_message}")
         try:
@@ -410,7 +416,7 @@ async def _handle_browse_images_impl(
         f"浏览图片：目录={state.directory}, 递归={state.recursive}, "
         f"最大深度={state.max_depth}, 限制={state.limit}",
     )
-    await _safe_report_progress(ctx, progress=20.0, message="开始扫描图片目录")
+    await _safe_report_progress(ctx, progress=PROGRESS_SCAN_START, message="开始扫描图片目录")
 
     logger.info(
         "浏览图片: dirs={}, recursive={}, max_depth={}, limit={}",
@@ -454,7 +460,7 @@ async def _handle_browse_images_impl(
             if total_dirs > 1:
                 await _safe_report_progress(
                     ctx,
-                    progress=20.0 + 70.0 * dir_index / total_dirs,
+                    progress=PROGRESS_SCAN_START + PROGRESS_SCAN_SPAN * dir_index / total_dirs,
                     message=f"已扫描 {dir_index}/{total_dirs} 个目录，找到 {len(all_images)} 张图片",
                 )
 
@@ -487,7 +493,7 @@ async def _handle_browse_images_impl(
             )
             log_message = f"offset={state.offset} 越界（目录共 {total_count} 张）"
         await _safe_ctx_log(ctx, "info", log_message)
-        await _safe_report_progress(ctx, progress=100.0, message="扫描完成")
+        await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
             structuredContent=_build_browse_structured_result(
@@ -522,7 +528,7 @@ async def _handle_browse_images_impl(
     lines = ["图片列表:"] + display_lines
 
     await _safe_ctx_log(ctx, "info", f"浏览完成：共 {len(structured_images)} 张图片")
-    await _safe_report_progress(ctx, progress=100.0, message="扫描完成")
+    await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
 
     return CallToolResult(
         content=[TextContent(type="text", text="\n".join(lines))],

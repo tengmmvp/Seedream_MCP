@@ -5,15 +5,29 @@
 统一第三方库与项目内部的日志通道。
 """
 
+from __future__ import annotations
+
 import functools
 import inspect
 import logging
 import sys
 from pathlib import Path
 from types import FrameType
-from typing import Any, Awaitable, Callable, ParamSpec, TypeVar, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    ParamSpec,
+    TypeVar,
+    overload,
+)
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入
+    from loguru import Logger
 
 
 class InterceptHandler(logging.Handler):
@@ -118,7 +132,7 @@ def setup_logging(
         logger.info("日志文件: {}", log_file)
 
 
-def get_logger(name: str | None = None) -> Any:
+def get_logger(name: str | None = None) -> Logger:
     """
     获取 logger 实例
 

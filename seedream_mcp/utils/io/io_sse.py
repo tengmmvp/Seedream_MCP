@@ -11,7 +11,7 @@ import json
 import time
 from typing import Any, cast
 
-from .errors import SeedreamAPIError
+from ..core.errors import SeedreamAPIError
 
 
 def is_sse_response(response: Any) -> bool:
@@ -134,6 +134,7 @@ async def parse_sse_response(
     model_id: str,
     chunk_size: int,
     buffer_max_size: int,
+    event_truncate_threshold: int,
     log: Any,
 ) -> dict[str, Any]:
     """增量解析 SSE 响应为统一的图片项列表与完成元信息。
@@ -142,7 +143,12 @@ async def parse_sse_response(
         response: httpx 流式响应对象，按 ``chunk_size`` 分块读取。
         model_id: 模型标识，用于填充图片项 model 字段的缺省值。
         chunk_size: 每次从流中读取的字节数。
-        buffer_max_size: 缓冲区上限，既作为已消费前缀的回收阈值，也作为防异常流无限增长撑爆内存的截断阈值。
+        buffer_max_size: 已消费前缀的回收阈值，buffer 偏移达到此值时批量回收前缀以控制
+            常驻内存。不用于单事件截断，避免合法大图被误丢。
+        event_truncate_threshold: 单个未完成 SSE 事件的截断阈值，仅作防异常流无限增长
+            撑爆内存的安全阀；须大于单张合法图片 base64 负载上限，避免 stream + b64_json
+            的大图事件被误截断而永久丢失。与 buffer_max_size 解耦，前者管前缀回收频率，
+            后者管单事件体积上限。
         log: loguru logger 实例，用于记录进度与告警。
 
     Returns:
@@ -215,11 +221,11 @@ async def parse_sse_response(
         # while 循环已抽干所有完整事件，故 [offset, end) 必为单个未完成事件；
         # 丢弃该尾部以免内存无限增长，[0, offset) 内的完整事件均已处理进 items，不会跨界错位。
         live_len = len(buffer) - offset
-        if live_len > buffer_max_size:
+        if live_len > event_truncate_threshold:
             log.warning(
-                "单个 SSE 事件超过缓冲区上限 ({} > {})，丢弃该不完整事件",
+                "单个 SSE 事件超过截断阈值 ({} > {})，丢弃该不完整事件",
                 live_len,
-                buffer_max_size,
+                event_truncate_threshold,
             )
             del buffer[offset:]
             truncated_events += 1

@@ -16,7 +16,7 @@ from mcp.types import CallToolResult
 from pydantic import BaseModel
 
 from ..config import SeedreamConfig
-from ..utils.path_utils import workspace_roots_scope
+from ..utils.io.io_path import workspace_roots_scope
 from .core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,

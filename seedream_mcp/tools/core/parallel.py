@@ -10,7 +10,11 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
-from ...utils.errors import format_error_for_user
+from ...resources import (
+    LIFESPAN_KEY_CLIENT,
+    LIFESPAN_KEY_DOWNLOAD_MANAGER,
+)
+from ...utils.core.errors import format_error_for_user
 from ._helpers import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
@@ -24,10 +28,11 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
 
     from ...client import SeedreamClient
-    from ...utils.download_manager import DownloadManager
+    from ...utils.io.io_download import DownloadManager
 
 
-# lifespan 共享资源取值的泛型辅助，client/download_manager/config 三处探测共用
+# lifespan 共享资源取值的泛型辅助，client/download_manager/config 三处探测共用。
+# lifespan 上下文字典键定义在 resources 模块（lifespan 契约所有者），经顶部 import 复用
 _T = TypeVar("_T")
 
 
@@ -124,7 +129,7 @@ def _try_get_shared_client(
     """
     from ...client import SeedreamClient
 
-    return _get_lifespan_resource(ctx, "client", SeedreamClient)
+    return _get_lifespan_resource(ctx, LIFESPAN_KEY_CLIENT, SeedreamClient)
 
 
 def _try_get_shared_download_manager(
@@ -134,9 +139,9 @@ def _try_get_shared_download_manager(
 
     复用共享下载管理器可跨请求复用 aiohttp 连接池，避免每次生成重复 TLS 握手。
     """
-    from ...utils.download_manager import DownloadManager
+    from ...utils.io.io_download import DownloadManager
 
-    return _get_lifespan_resource(ctx, "download_manager", DownloadManager)
+    return _get_lifespan_resource(ctx, LIFESPAN_KEY_DOWNLOAD_MANAGER, DownloadManager)
 
 
 async def _run_generation_requests(

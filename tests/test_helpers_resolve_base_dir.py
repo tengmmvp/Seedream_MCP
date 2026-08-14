@@ -13,7 +13,7 @@ import pytest
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import _resolve_base_dir
-from seedream_mcp.utils.errors import SeedreamValidationError
+from seedream_mcp.utils.core.errors import SeedreamValidationError
 
 
 def _make_config(base_dir: Path) -> SeedreamConfig:

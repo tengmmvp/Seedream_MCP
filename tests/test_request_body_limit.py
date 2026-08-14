@@ -12,7 +12,7 @@ import pytest
 
 import seedream_mcp.server as server
 from seedream_mcp.config import build_config_from_sources
-from seedream_mcp.utils.errors import SeedreamConfigError
+from seedream_mcp.utils.core.errors import SeedreamConfigError
 
 _LIMIT = 100 * 1024 * 1024
 

@@ -21,30 +21,30 @@ from typing import Any
 # 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)
 # 包导入不再触发 PIL/aiohttp/aiofiles 等重型依赖初始化，仅在首次访问时按需加载
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    # 异常处理模块
-    "SeedreamMCPError": (".errors", "SeedreamMCPError"),
-    "SeedreamConfigError": (".errors", "SeedreamConfigError"),
-    "SeedreamAPIError": (".errors", "SeedreamAPIError"),
-    # 数据验证模块
-    "validate_prompt": (".validation", "validate_prompt"),
-    "validate_image_input": (".image_validation", "validate_image_input"),
-    "validate_size": (".validation", "validate_size"),
-    # 日志管理模块
-    "setup_logging": (".logging", "setup_logging"),
-    # 文件管理模块
-    "DownloadManager": (".download_manager", "DownloadManager"),
-    "DownloadError": (".download_manager", "DownloadError"),
-    "FileManager": (".file_manager", "FileManager"),
-    "FileManagerError": (".file_manager", "FileManagerError"),
-    "AutoSaveManager": (".auto_save", "AutoSaveManager"),
-    "AutoSaveResult": (".auto_save", "AutoSaveResult"),
-    "AutoSaveError": (".auto_save", "AutoSaveError"),
-    # 路径处理模块
-    "normalize_path": (".path_utils", "normalize_path"),
-    "validate_image_path": (".path_utils", "validate_image_path"),
-    "get_relative_path": (".path_utils", "get_relative_path"),
-    "find_images_in_directory": (".path_utils", "find_images_in_directory"),
-    "suggest_similar_paths": (".path_utils", "suggest_similar_paths"),
+    # 异常处理（core）
+    "SeedreamMCPError": (".core.errors", "SeedreamMCPError"),
+    "SeedreamConfigError": (".core.errors", "SeedreamConfigError"),
+    "SeedreamAPIError": (".core.errors", "SeedreamAPIError"),
+    # 参数校验（core）与图像校验（images）
+    "validate_prompt": (".core.validators", "validate_prompt"),
+    "validate_image_input": (".images.image_validation", "validate_image_input"),
+    "validate_size": (".core.validators", "validate_size"),
+    # 日志管理（core）
+    "setup_logging": (".core.logs", "setup_logging"),
+    # 文件与下载（io）
+    "DownloadManager": (".io.io_download", "DownloadManager"),
+    "DownloadError": (".io.io_download", "DownloadError"),
+    "FileManager": (".io.io_storage", "FileManager"),
+    "FileManagerError": (".io.io_storage", "FileManagerError"),
+    "AutoSaveManager": (".io.io_save", "AutoSaveManager"),
+    "AutoSaveResult": (".io.io_save", "AutoSaveResult"),
+    "AutoSaveError": (".io.io_save", "AutoSaveError"),
+    # 路径处理（io）
+    "normalize_path": (".io.io_path", "normalize_path"),
+    "validate_image_path": (".io.io_path", "validate_image_path"),
+    "get_relative_path": (".io.io_path", "get_relative_path"),
+    "find_images_in_directory": (".io.io_path", "find_images_in_directory"),
+    "suggest_similar_paths": (".io.io_path", "suggest_similar_paths"),
 }
 
 # 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步

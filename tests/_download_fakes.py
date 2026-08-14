@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from seedream_mcp.utils.download_manager import DownloadManager
+from seedream_mcp.utils.io.io_download import DownloadManager
 
 # 合法 PNG 魔法字节，供成功路径与签名校验对照
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24

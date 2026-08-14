@@ -193,7 +193,7 @@ async def test_try_get_shared_client_returns_lifespan_instance() -> None:
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )
-    from seedream_mcp.utils.download_manager import DownloadManager
+    from seedream_mcp.utils.io.io_download import DownloadManager
 
     config = SeedreamConfig(api_key="test_key")
     shared_client = SeedreamClient(config)
@@ -283,7 +283,7 @@ async def test_execute_generation_handler_passes_shared_download_manager(
 
     from seedream_mcp.client import SeedreamClient
     from seedream_mcp.tools.core import common as common_module
-    from seedream_mcp.utils.download_manager import DownloadManager
+    from seedream_mcp.utils.io.io_download import DownloadManager
 
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)

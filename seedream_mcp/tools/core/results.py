@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...utils.io.io_save import AutoSaveResult
 from ._helpers import (
     _add_usage_value,
     _classify_generation_error_type,
@@ -145,7 +146,7 @@ def is_saveable_image(image: Any, data_key: str) -> bool:
 
 def update_result_with_auto_save(
     result: dict[str, Any],
-    auto_save_results: list[Any],
+    auto_save_results: list[AutoSaveResult],
     saveable_indices: list[int],
 ) -> dict[str, Any]:
     """按收集阶段记录的原始索引将自动保存结果合并到生成结果。
@@ -177,7 +178,7 @@ def update_result_with_auto_save(
         idx = saveable_indices[i]
         if idx >= len(copied_images):
             break
-        if getattr(save_result, "success", False):
+        if save_result.success:
             copied_images[idx]["local_path"] = save_result.local_path
             copied_images[idx]["markdown_ref"] = save_result.markdown_ref
 
@@ -247,7 +248,7 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
 
 
 def _format_auto_save_section(
-    auto_save_results: list[Any] | None, auto_save_error: str | None
+    auto_save_results: list[AutoSaveResult] | None, auto_save_error: str | None
 ) -> list[str]:
     """格式化自动保存统计与逐项结果。"""
     if auto_save_error:
@@ -255,7 +256,7 @@ def _format_auto_save_section(
     if not auto_save_results:
         return ["自动保存: 已开启但未生成可保存的图片", ""]
 
-    successful_saves = sum(1 for r in auto_save_results if getattr(r, "success", False))
+    successful_saves = sum(1 for r in auto_save_results if r.success)
     failed_saves = len(auto_save_results) - successful_saves
     parts = [
         "自动保存信息:",
@@ -265,10 +266,10 @@ def _format_auto_save_section(
     if failed_saves:
         parts.append(f"  保存失败: {failed_saves}")
     for i, save_result in enumerate(auto_save_results, 1):
-        if getattr(save_result, "success", False):
+        if save_result.success:
             parts.append(f"  图片 {i}: 已保存到 {save_result.local_path}")
         else:
-            parts.append(f"  图片 {i}: 保存失败 - {getattr(save_result, 'error', '未知原因')}")
+            parts.append(f"  图片 {i}: 保存失败 - {save_result.error or '未知原因'}")
     parts.append("")
     return parts
 
@@ -298,7 +299,7 @@ def format_generation_response(
     result: dict[str, Any],
     prompt: str,
     size: str,
-    auto_save_results: list[Any] | None = None,
+    auto_save_results: list[AutoSaveResult] | None = None,
     auto_save_enabled: bool = False,
     auto_save_error: str | None = None,
     images: list[dict[str, Any]] | None = None,
@@ -359,7 +360,7 @@ def _build_generation_structured_result(
     tool_name: str,
     result: dict[str, Any],
     context: GenerationExecutionContext,
-    auto_save_results: list[Any] | None,
+    auto_save_results: list[AutoSaveResult] | None,
     auto_save_error: str | None,
     images: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:

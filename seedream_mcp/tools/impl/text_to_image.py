@@ -12,7 +12,7 @@ from typing import Any, TYPE_CHECKING
 from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
-from ...utils.logging import get_logger
+from ...utils.core.logs import get_logger
 
 from ..core.common import (
     execute_generation_handler,

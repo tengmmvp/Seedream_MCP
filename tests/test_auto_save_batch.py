@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.auto_save import AutoSaveManager, AutoSaveResult
+from seedream_mcp.utils.io.io_save import AutoSaveManager, AutoSaveResult
 
 
 async def test_save_multiple_images_aggregates_partial_failure(

@@ -4,7 +4,7 @@
 覆盖 _HEIC_BRANDS 与 _HEIF_BRANDS，防止扩展名推断回归。
 """
 
-from seedream_mcp.utils.formats import (
+from seedream_mcp.utils.core.formats import (
     infer_extension_from_bytes,
     is_known_image_bytes,
 )

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.auto_save import AutoSaveError, AutoSaveManager, AutoSaveResult
+from seedream_mcp.utils.io.io_save import AutoSaveError, AutoSaveManager, AutoSaveResult
 
 
 @pytest.fixture
@@ -85,7 +85,7 @@ async def test_prepare_base64_payload_decoded_exceeds_limit(
     标准 base64 下 estimated_size >= decoded_size，估算守卫通常先行触发；
     此处 monkeypatch b64decode 返回超限字节，覆盖解码后大小检查的独立分支。
     """
-    import seedream_mcp.utils.auto_save as auto_save_module
+    import seedream_mcp.utils.io.io_save as auto_save_module
 
     mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=1000, cleanup_days=0)
     try:

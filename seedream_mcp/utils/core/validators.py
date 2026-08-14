@@ -19,9 +19,9 @@ from typing import Any, NamedTuple
 
 # 本地模块导入
 from .errors import SeedreamConfigError, SeedreamValidationError
-from .image_validation import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
-from .logging import get_logger
-from .model_capabilities import get_max_reference_images, get_model_capabilities
+from ..images.image_validation import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
+from .logs import get_logger
+from ..model.model_capabilities import get_max_reference_images, get_model_capabilities
 
 logger = get_logger(__name__)
 
@@ -31,13 +31,13 @@ logger = get_logger(__name__)
 # optimize_prompt_options.mode 的合法取值白名单
 VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
 # 尺寸预设档位与输出格式白名单
-VALID_SIZE_PRESETS = {"1K", "2K", "3K", "4K"}
-VALID_OUTPUT_FORMATS = {"jpeg", "png"}
+VALID_SIZE_PRESETS = frozenset({"1K", "2K", "3K", "4K"})
+VALID_OUTPUT_FORMATS = frozenset({"jpeg", "png"})
 # 布尔字符串解析的合法取值，config.parse_bool 据此判定真值与假值
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
 # 生成工具类型白名单，目前仅支持联网搜索
-VALID_GENERATION_TOOL_TYPES = {"web_search"}
+VALID_GENERATION_TOOL_TYPES = frozenset({"web_search"})
 # 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 # 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张
@@ -140,7 +140,7 @@ def validate_watermark(watermark: Any) -> bool:
 
     if isinstance(watermark, str):
         # 延迟导入避免 config 与 validation 的顶层循环依赖
-        from ..config import parse_bool
+        from ...config import parse_bool
 
         try:
             return parse_bool(watermark)

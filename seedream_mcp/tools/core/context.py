@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import SeedreamConfig
-from ...utils.errors import SeedreamValidationError
-from ...utils.validation import (
+from ...utils.core.errors import SeedreamValidationError
+from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     validate_common_generation_params,
     validate_parallel_generation_options,
@@ -46,7 +46,7 @@ def build_generation_context(
 ) -> GenerationExecutionContext:
     """从工具参数构建统一执行上下文，作为共享字段的集中校验点。
 
-    未显式提供的字段按 config 默认值回退，再交由 utils.validation 的对应校验器做模型
+    未显式提供的字段按 config 默认值回退，再交由 utils.core.validators 的对应校验器做模型
     能力相关的规则检查，最终装配为不可变的执行上下文。
 
     Args:

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.auto_save import AutoSaveManager
-from seedream_mcp.utils.download_manager import (
+from seedream_mcp.utils.io.io_save import AutoSaveManager
+from seedream_mcp.utils.io.io_download import (
     DownloadError,
     DownloadManager,
     _is_image_compatible_content_type,
@@ -89,7 +89,7 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """节流按 base_dir 跨请求共享：同目录仅触发一次，不同目录各自触发。"""
-    from seedream_mcp.utils import auto_save as auto_save_module
+    from seedream_mcp.utils.io import io_save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
     cleanup_calls: list[int] = []
@@ -121,7 +121,7 @@ async def test_maybe_cleanup_retries_after_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """清理失败时节流时间戳回滚，下次批量保存可立即重试而非等待完整间隔。"""
-    from seedream_mcp.utils import auto_save as auto_save_module
+    from seedream_mcp.utils.io import io_save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
     calls: list[int] = []
@@ -151,7 +151,7 @@ async def test_maybe_cleanup_retries_after_failure(
 
 def test_is_known_image_bytes_detects_image_magic() -> None:
     """下载字节签名校验：识别真实图片 magic，拒绝 HTML/可执行等伪造内容。"""
-    from seedream_mcp.utils.formats import is_known_image_bytes
+    from seedream_mcp.utils.core.formats import is_known_image_bytes
 
     assert is_known_image_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
     assert is_known_image_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 16)

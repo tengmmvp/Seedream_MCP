@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from seedream_mcp.utils.download_manager import (
+from seedream_mcp.utils.io.io_download import (
     DownloadError,
     DownloadManager,
     _PublicIpPinningResolver,

@@ -10,28 +10,31 @@ import asyncio
 import base64
 import re
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Sequence
 
-from .download_manager import DownloadManager, DownloadError, sanitize_url
-from .errors import SeedreamMCPError
-from .file_manager import FileManager, FileManagerError
-from .formats import (
+from .io_download import DownloadManager, DownloadError, sanitize_url
+from ..core.errors import SeedreamMCPError
+from .io_storage import FileManager, FileManagerError
+from ..core.formats import (
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
     _format_file_size_mb,
     is_known_image_bytes,
     parse_data_uri,
 )
-from .logging import get_logger
+from ..core.logs import get_logger
 
 logger = get_logger(__name__)
 
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
-# 按 base_dir 记录最近清理时间，跨请求共享节流；不同 base_dir 独立，互不抑制
-_cleanup_last_run: dict[str, float] = {}
+# 按 base_dir 记录最近清理时间，跨请求共享节流；不同 base_dir 独立，互不抑制。
+# 用 OrderedDict 并设上限，避免异常多变的 base_dir 使键无界增长耗尽内存
+_CLEANUP_LAST_RUN_MAX_ENTRIES = 16
+_cleanup_last_run: OrderedDict[str, float] = OrderedDict()
 # 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理
 _cleanup_lock = asyncio.Lock()
 
@@ -45,7 +48,7 @@ def _reset_cleanup_state() -> None:
     """
     global _cleanup_lock, _cleanup_last_run
     _cleanup_lock = asyncio.Lock()
-    _cleanup_last_run = {}
+    _cleanup_last_run = OrderedDict()
 
 
 class AutoSaveError(SeedreamMCPError):
@@ -189,6 +192,8 @@ class AutoSaveManager:
             if now - previous < _CLEANUP_MIN_INTERVAL_SECONDS:
                 return
             _cleanup_last_run[base_key] = now
+            while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
+                _cleanup_last_run.popitem(last=False)
         try:
             # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历
             await asyncio.to_thread(

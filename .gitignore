@@ -200,7 +200,7 @@ temp/
 .tmp/
 
 # 生成的图片和输出
-images/
+/images/
 seedream_images/
 
 # 项目构建产物

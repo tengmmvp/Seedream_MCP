@@ -15,7 +15,7 @@ from seedream_mcp.tools.impl.image_to_image import handle_image_to_image
 from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
 from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
-from seedream_mcp.utils.errors import SeedreamAPIError, SeedreamValidationError
+from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 
 
 def _build_config() -> SeedreamConfig:

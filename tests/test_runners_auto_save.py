@@ -51,7 +51,7 @@ def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    auto_save_module = importlib.import_module("seedream_mcp.utils.auto_save")
+    auto_save_module = importlib.import_module("seedream_mcp.utils.io.io_save")
     mgr_cls = auto_save_module.AutoSaveManager
     result_cls = auto_save_module.AutoSaveResult
 
@@ -72,7 +72,7 @@ def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    mgr_cls = importlib.import_module("seedream_mcp.utils.auto_save").AutoSaveManager
+    mgr_cls = importlib.import_module("seedream_mcp.utils.io.io_save").AutoSaveManager
 
     async def failing_save_multiple(
         self: Any, images: list[dict[str, Any]], tool_name: str

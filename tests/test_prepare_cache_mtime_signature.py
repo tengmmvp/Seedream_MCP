@@ -11,7 +11,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils import image_input
+from seedream_mcp.utils.images import image_input
 
 
 @pytest.mark.asyncio
@@ -38,7 +38,7 @@ async def test_prepare_image_input_invalidates_cache_when_local_file_size_change
     # 第一次调用：cache miss，底层被调用，结果写入缓存
     first = await client._prepare_image_input(str(image_file), roots_key)
     assert call_count == 1
-    assert len(client._prepare_cache) == 1
+    assert len(client._image_preparer._prepare_cache) == 1
 
     # 覆写文件：使用不同长度的字节确保 size 维度变化使签名失效；
     # size 为精确值，借此规避 Windows mtime 精度问题
@@ -49,4 +49,4 @@ async def test_prepare_image_input_invalidates_cache_when_local_file_size_change
     assert call_count == 2
     assert first != second
     # size 维度变化使两次 cache_key 不同，缓存各保留一条
-    assert len(client._prepare_cache) == 2
+    assert len(client._image_preparer._prepare_cache) == 2

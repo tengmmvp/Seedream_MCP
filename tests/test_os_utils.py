@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.os_utils import atomic_replace_from_fd, open_no_follow_read
+from seedream_mcp.utils.io.io_file import atomic_replace_from_fd, open_no_follow_read
 
 
 def _can_create_symlink(tmp_path: Path) -> bool:

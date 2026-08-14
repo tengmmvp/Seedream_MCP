@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.file_manager import FileManager, FileManagerError
+from seedream_mcp.utils.io.io_storage import FileManager, FileManagerError
 
 
 def test_file_manager_rejects_non_directory_base_dir(tmp_path: Path) -> None:
@@ -99,7 +99,7 @@ def test_save_bytes_cleans_random_temp_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """replace 失败时随机名临时文件被 finally 清理，目录内不留残留。"""
-    from seedream_mcp.utils import file_manager as fm_module
+    from seedream_mcp.utils.io import io_storage as fm_module
 
     manager = FileManager(base_dir=tmp_path)
     path = tmp_path / "out.png"

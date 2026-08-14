@@ -3,7 +3,7 @@
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.errors import SeedreamConfigError
+from seedream_mcp.utils.core.errors import SeedreamConfigError
 
 
 def test_config_accepts_endpoint_id() -> None:

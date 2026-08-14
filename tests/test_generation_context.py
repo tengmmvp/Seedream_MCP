@@ -12,8 +12,8 @@ from seedream_mcp.tools.core.common import (
     format_generation_response,
     update_result_with_auto_save,
 )
-from seedream_mcp.utils.auto_save import AutoSaveResult
-from seedream_mcp.utils.errors import SeedreamValidationError
+from seedream_mcp.utils.io.io_save import AutoSaveResult
+from seedream_mcp.utils.core.errors import SeedreamValidationError
 
 
 def _build_config() -> SeedreamConfig:

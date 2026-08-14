@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 from mcp.types import CallToolResult, TextContent
 
 from ...config import SeedreamConfig
-from ...utils.errors import format_error_for_user
+from ...utils.io.io_save import AutoSaveResult
+from ...utils.core.errors import format_error_for_user
 from ._helpers import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
@@ -140,7 +141,7 @@ async def execute_generation_handler(
                     module_logger=module_logger,
                 )
 
-        auto_save_results: list[Any] = []
+        auto_save_results: list[AutoSaveResult] = []
         auto_save_error: str | None = None
         is_generation_failed = _is_generation_failed(result)
         if context.enable_auto_save and not is_generation_failed:
@@ -175,7 +176,7 @@ async def execute_generation_handler(
                     result = update_result_with_auto_save(
                         result, auto_save_results, saveable_indices
                     )
-                    saved_count = sum(1 for r in auto_save_results if getattr(r, "success", False))
+                    saved_count = sum(1 for r in auto_save_results if r.success)
                     await _safe_ctx_log(
                         ctx,
                         "info",

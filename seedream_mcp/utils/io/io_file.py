@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from typing import IO, Awaitable, Callable
@@ -37,7 +38,7 @@ def _cleanup_temp_file(temp_path: Path) -> None:
     try:
         temp_path.unlink(missing_ok=True)
     except OSError as exc:
-        from .logging import get_logger
+        from ..core.logs import get_logger
 
         get_logger(__name__).warning("清理临时文件失败: {} -> {}", temp_path, exc)
 
@@ -140,6 +141,69 @@ async def atomic_replace_from_fd(
             # fd 复用场景下误关他者持有的描述符
             os.close(fd)
         await asyncio.to_thread(temp_path.replace, final_path)
+        replaced = True
+    finally:
+        if not replaced:
+            _cleanup_temp_file(temp_path)
+    return temp_path
+
+
+# stat.FILE_ATTRIBUTE_REPARSE_POINT 自 Python 3.12 起提供；3.10/3.11 缺失时回退固定值 0x400。
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """判断路径是否为 NTFS junction 等非符号链接型 reparse point。
+
+    os.scandir(follow_symlinks=False) 与 os.walk(followlinks=False) 均不拦截 junction：
+    junction 属 reparse point，is_symlink 对其返回 False，会被下降进入目标执行 OS 级
+    listdir。本函数用 reparse point 属性位检测，供目录遍历下降前剔除。仅 Windows 存在
+    junction，其他平台直接返回 False。
+
+    file_manager 清理遍历与 path_utils 浏览扫描共用此判定，消除两处分别实现同一 reparse
+    point 检测的漂移风险。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def atomic_replace_from_fd_sync(
+    final_path: Path,
+    writer: Callable[[int], None],
+    suffix: str = ".part",
+) -> Path:
+    """经随机名临时文件同步原子落盘，返回实际创建的随机临时路径。
+
+    与 atomic_replace_from_fd 对应的同步版本，供 save_bytes 等同步公共接口直接复用，
+    避免在事件循环内 asyncio.run 驱动异步骨架的分层倒置与 RuntimeError 风险。writer
+    同步写入 fd 后由本函数 os.replace 原子替换，失败路径清理随机临时文件。mkstemp 与
+    replace 为同步系统调用，调用方须处于可阻塞的工作线程或同步上下文。
+
+    writer 抛出的异常原样上掷，由调用方按各自异常类型分类处理；fd 在 writer 正常返回
+    或抛出后由本函数统一关闭，writer 须以 closefd=False 包装 fd 使本函数独占 fd 关闭权，
+    避免双重关闭与 fd 复用误关他者。
+
+    Args:
+        final_path: 最终目标路径，临时文件在其所在目录创建以保证同文件系统原子替换。
+        writer: 接收 fd 的同步写入回调，须以 closefd=False 包装 fd。
+        suffix: 临时文件名后缀，用于可读性与调试定位。
+
+    Returns:
+        实际创建的随机名临时路径（替换成功后已重命名为 final_path）。
+    """
+    fd, temp_path = open_temp_fd(final_path.parent, suffix=suffix)
+    replaced = False
+    try:
+        try:
+            writer(fd)
+        finally:
+            os.close(fd)
+        temp_path.replace(final_path)
         replaced = True
     finally:
         if not replaced:

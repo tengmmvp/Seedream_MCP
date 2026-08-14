@@ -7,7 +7,7 @@
 import pytest
 
 from seedream_mcp.tools.core.common import _classify_generation_error_type
-from seedream_mcp.utils.errors import (
+from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
     SeedreamMCPError,

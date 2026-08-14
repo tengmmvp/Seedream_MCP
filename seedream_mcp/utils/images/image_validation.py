@@ -15,14 +15,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .errors import SeedreamValidationError
-from .formats import (
+from ..core.errors import SeedreamValidationError
+from ..core.formats import (
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
     _format_file_size_mb,
     parse_data_uri,
 )
-from .os_utils import open_no_follow_read
+from ..io.io_file import open_no_follow_read
 from .image_ref import classify_image_reference
 
 # HEIC/HEIF 解码器惰性注册，避免模块导入时的全局副作用，首次校验图片时按需注册。
@@ -77,7 +77,7 @@ def _get_validation_base_dir() -> Path:
     委托 path_utils.resolve_env_workspace_root 保持单一来源；函数内延迟 import
     避免 path_utils 与本模块的加载循环。
     """
-    from .path_utils import resolve_env_workspace_root
+    from ..io.io_path import resolve_env_workspace_root
 
     return resolve_env_workspace_root()
 
