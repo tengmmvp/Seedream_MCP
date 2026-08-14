@@ -1,18 +1,16 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接。
 
-统一 file_manager.save_bytes 与 image_input._prepare_local_image 的打开逻辑，
-消除两处重复实现。最终路径分量若为符号链接则拒绝；支持 O_NOFOLLOW 的平台由
-内核在 open 时原子拒绝符号链接。Windows 等平台不支持 O_NOFOLLOW 时，退化为
-打开前 lstat 与打开后 fstat 比对 st_ino/st_dev 同一性：lstat 先取最终分量指纹，
-open 后用 fstat 复核打开的 fd 仍是同一对象，若校验与打开之间最终分量被替换为
-符号链接则 st_ino/st_dev 不一致，据此拒绝，闭合该 TOCTOU 竞态。共享函数抛
-OSError，由调用方按各自异常类型包装。
+提供 open_no_follow_read 与 open_temp_fd 两个函数。open_no_follow_read 读取时拒绝
+最终路径分量为符号链接，open_temp_fd 以不可预测随机名创建临时文件供调用方写入后
+原子替换。支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝符号链接。Windows 等平台
+不支持 O_NOFOLLOW 时，退化为打开前 lstat 与打开后 fstat 比对 st_ino/st_dev 同一性：
+lstat 先取最终分量指纹，open 后用 fstat 复核打开的 fd 仍是同一对象，若校验与打开
+之间最终分量被替换为符号链接则 st_ino/st_dev 不一致，据此拒绝，闭合该 TOCTOU 竞态。
+共享函数抛 OSError，由调用方按各自异常类型包装。
 
-残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的
-符号链接；若校验与打开之间某父目录被替换为指向工作区外的符号链接，读取会
-逃逸出工作区。Windows 无 O_NOFOLLOW 时，O_CREAT 新建尚不存在的路径无既有
-分量指纹可比对，其符号链接替换竞态仍存在；上述攻击均需本地写权限与精确时序，
-属下层威胁。
+残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
+若校验与打开之间某父目录被替换为指向工作区外的符号链接，读取会逃逸出工作区。上述
+攻击需本地写权限与精确时序，属下层威胁。
 """
 
 from __future__ import annotations
@@ -75,20 +73,6 @@ def open_no_follow_read(path: PathLike) -> IO[bytes]:
         return os.fdopen(os.open(str(path), os.O_RDONLY | no_follow), "rb")
     fd = _open_no_follow_fallback(str(path), os.O_RDONLY, creating=False, action="读取")
     return os.fdopen(fd, "rb")
-
-
-def open_no_follow_write(path: PathLike) -> IO[bytes]:
-    """以 O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW 打开文件，返回二进制只写文件对象。
-
-    最终路径分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时退化为 lstat 取指纹、
-    open 后 fstat 比对 st_ino/st_dev 同一性，闭合最终分量替换竞态。
-    """
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | no_follow
-    if no_follow:
-        return os.fdopen(os.open(str(path), flags), "wb")
-    fd = _open_no_follow_fallback(str(path), flags, creating=True, action="写入")
-    return os.fdopen(fd, "wb")
 
 
 def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Path]:

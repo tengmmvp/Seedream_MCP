@@ -127,6 +127,7 @@ class AutoSaveManager:
         max_concurrent: int = 5,
         date_folder: bool = True,
         cleanup_days: int = 30,
+        max_total_bytes: int | None = None,
         download_manager: DownloadManager | None = None,
     ):
         """
@@ -140,6 +141,7 @@ class AutoSaveManager:
             max_concurrent: 最大并发下载数
             date_folder: 是否按日期创建文件夹
             cleanup_days: 自动清理天数，0表示不清理
+            max_total_bytes: 保存目录总字节上限，超出按最旧文件驱逐；None 表示不限制
             download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭
         """
         self.file_manager = FileManager(base_dir)
@@ -154,6 +156,7 @@ class AutoSaveManager:
         self.max_concurrent = max_concurrent
         self.date_folder = date_folder
         self.cleanup_days = cleanup_days
+        self.max_total_bytes = max_total_bytes
 
     async def __aenter__(self) -> AutoSaveManager:
         return self
@@ -177,7 +180,7 @@ class AutoSaveManager:
         避免瞬时清理失败被节流一整小时。重试频率受限于批量保存调用频率，不会形成即时重试
         风暴；锁内完成检查与占位保证并发请求不会同时进入清理。
         """
-        if self.cleanup_days <= 0:
+        if self.cleanup_days <= 0 and self.max_total_bytes is None:
             return
         base_key = str(self.file_manager.base_dir)
         now = time.time()
@@ -187,7 +190,12 @@ class AutoSaveManager:
                 return
             _cleanup_last_run[base_key] = now
         try:
-            await self.cleanup_old_files(self.cleanup_days)
+            if self.cleanup_days > 0:
+                await self.cleanup_old_files(self.cleanup_days)
+            if self.max_total_bytes is not None:
+                await asyncio.to_thread(
+                    self.file_manager.enforce_total_size_limit, self.max_total_bytes
+                )
         except Exception as e:
             # 回滚到清理前的时间戳，使下次批量保存能立即重试而非等待完整节流间隔。
             async with _cleanup_lock:

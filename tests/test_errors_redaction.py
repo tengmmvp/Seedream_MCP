@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from seedream_mcp.utils.errors import (
     SeedreamAPIError,
+    SeedreamMCPError,
     _filter_sensitive_data,
     _redact_bearer_tokens,
+    _redact_sensitive_message,
     _truncate_value_for_output,
     format_error_for_user,
 )
@@ -155,3 +157,41 @@ def test_format_error_for_user_redacts_bearer_in_api_error_message() -> None:
 
     assert "sk-secret-token-123" not in rendered
     assert "Bearer ***" in rendered
+
+
+# ==================== details 字段脱敏（to_dict 一致性） ====================
+
+
+def test_base_error_to_dict_filters_sensitive_details() -> None:
+    """SeedreamMCPError.to_dict 的 details 经敏感字段过滤，与 response_data 一致。"""
+    err = SeedreamMCPError(
+        "msg", details={"api_key": "secret", "authorization": "Bearer x", "normal": "v"}
+    )
+    dumped = err.to_dict()
+
+    assert dumped["details"] == {"api_key": "***", "authorization": "***", "normal": "v"}
+
+
+# ==================== _redact_sensitive_message：敏感键值裸值剥离 ====================
+
+
+def test_redact_sensitive_message_strips_apikey_keyvalue() -> None:
+    """apikey=xxx 形态的裸值被剥离，保留键名与分隔符。"""
+    assert _redact_sensitive_message("failed at apikey=sk-123") == "failed at apikey=***"
+
+
+def test_redact_sensitive_message_strips_hyphenated_api_key() -> None:
+    """api-key=xxx 连字符键名变体同样剥离。"""
+    assert _redact_sensitive_message("api-key=secret") == "api-key=***"
+
+
+def test_redact_sensitive_message_strips_authorization_basic_scheme() -> None:
+    """Authorization: Basic xxx 形态剥离 scheme 与凭据，不泄露凭据。"""
+    assert _redact_sensitive_message("echo Authorization: Basic abc123") == (
+        "echo Authorization: ***"
+    )
+
+
+def test_redact_sensitive_message_preserves_plain_bearer() -> None:
+    """无键名前缀的 Bearer 令牌仍由 Bearer 模式剥离，叠加覆盖。"""
+    assert _redact_sensitive_message("Invalid Bearer sk-secret-token-123") == ("Invalid Bearer ***")

@@ -102,6 +102,7 @@ class SeedreamConfig:
     auto_save_max_concurrent: int = _env_field(5, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT")
     auto_save_date_folder: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_DATE_FOLDER")
     auto_save_cleanup_days: int = _env_field(30, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS")
+    auto_save_max_total_bytes: int | None = _env_field(None, "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES")
 
     # 流式处理配置
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
@@ -119,6 +120,7 @@ class SeedreamConfig:
     # 工作区与传输配置
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
+    http_max_body_size: int = _env_field(100 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
 
     def __post_init__(self) -> None:
         self.validate()
@@ -180,6 +182,8 @@ class SeedreamConfig:
             raise SeedreamConfigError("auto_save_max_concurrent必须大于0")
         if self.auto_save_cleanup_days < 0:
             raise SeedreamConfigError("auto_save_cleanup_days不能小于0")
+        if self.auto_save_max_total_bytes is not None and self.auto_save_max_total_bytes <= 0:
+            raise SeedreamConfigError("auto_save_max_total_bytes必须大于0")
 
         if self.stream_buffer_max_size <= 0:
             raise SeedreamConfigError("stream_buffer_max_size必须大于0")
@@ -201,6 +205,9 @@ class SeedreamConfig:
 
         if self.workspace_root:
             self._validate_dir_field(self.workspace_root, "workspace_root")
+
+        if self.http_max_body_size < 1024 * 1024:
+            raise SeedreamConfigError("http_max_body_size 不能低于 1MB（1048576 字节）")
 
     def _validate_dir_field(self, value: str, field_name: str) -> None:
         """校验给定路径指向有效目录，存在但非目录时抛 SeedreamConfigError。
@@ -229,7 +236,7 @@ class SeedreamConfig:
             value = getattr(self, config_field.name)
             name_lower = config_field.name.lower()
             if any(keyword in name_lower for keyword in _SENSITIVE_CONFIG_KEYWORDS):
-                result[config_field.name] = "***" if value else None
+                result[config_field.name] = "***" if value is not None else None
             else:
                 result[config_field.name] = value
         return result
@@ -397,14 +404,16 @@ def _pick_config_value(
 def _pick_str(
     overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
 ) -> str:
-    return str(_pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key]))
+    return str(
+        _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
+    ).strip()
 
 
 def _pick_optional_str(
     overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
 ) -> str | None:
     raw = _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
-    return str(raw) or None
+    return str(raw).strip() or None
 
 
 def _pick_int(
@@ -413,6 +422,15 @@ def _pick_int(
     return parse_int(
         _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
     )
+
+
+def _pick_optional_int(
+    overrides: Mapping[str, object], field: str, env_key: str, env_values: Mapping[str, str]
+) -> int | None:
+    raw = _pick_config_value(overrides, field, env_key, env_values, ENV_DEFAULTS[env_key])
+    if raw is None or not str(raw).strip():
+        return None
+    return parse_int(raw)
 
 
 def _pick_bool(
@@ -540,6 +558,12 @@ def _build_config_from_sources_unlocked(
             "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS",
             env_values,
         ),
+        "auto_save_max_total_bytes": _pick_optional_int(
+            override_values,
+            "auto_save_max_total_bytes",
+            "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES",
+            env_values,
+        ),
         "stream_buffer_max_size": _pick_int(
             override_values,
             "stream_buffer_max_size",
@@ -569,6 +593,9 @@ def _build_config_from_sources_unlocked(
         ),
         "http_auth_token": _pick_optional_str(
             override_values, "http_auth_token", "SEEDREAM_HTTP_AUTH_TOKEN", env_values
+        ),
+        "http_max_body_size": _pick_int(
+            override_values, "http_max_body_size", "SEEDREAM_HTTP_MAX_BODY_SIZE", env_values
         ),
     }
     # 断言所有带 env metadata 的字段都在构造调用中显式传值，防止新增 _env_field 字段

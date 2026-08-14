@@ -180,10 +180,11 @@ class FileManager:
 
         # Windows 保留设备名处理：CON.txt、NUL 等在 Windows 上会被解释为设备而非文件，
         # 命中时在首个点前追加下划线使词干不再匹配保留名
-        parts = filename.split(".", 1)
-        # Windows 解析设备名前会剥离前导点与首尾空格，按同样规则归一化词干再判断
-        stem = parts[0].strip(". ")
-        if stem.upper() in _WINDOWS_RESERVED_NAMES:
+        # Windows 解析设备名前会剥离前导点与首尾空格，按同样规则归一化词干再判断。
+        # 直接 split(".",1) 对前导点输入（如 .CON）会使首段为空而漏检，故先 lstrip 再取词干。
+        normalized_stem = filename.lstrip(". ").split(".", 1)[0].strip(". ")
+        if normalized_stem.upper() in _WINDOWS_RESERVED_NAMES:
+            parts = filename.split(".", 1)
             parts[0] += "_"
             filename = ".".join(parts)
 
@@ -244,7 +245,7 @@ class FileManager:
         # [:-3] 截掉微秒末三位，得到毫秒精度时间戳
         time_str = timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
-        unique_suffix = uuid.uuid4().hex[:4]
+        unique_suffix = uuid.uuid4().hex[:8]
 
         # 拼接文件名：优先嵌入内容哈希，否则用随机后缀确保不冲突。
         if content_hash:
@@ -516,9 +517,44 @@ class FileManager:
 
         return {"deleted_files": len(deleted_files), "deleted_size": deleted_size, "errors": errors}
 
+    def enforce_total_size_limit(self, max_total_bytes: int) -> dict[str, Any]:
+        """按总字节上限驱逐最旧文件，使保存目录占用不超过 max_total_bytes。
+
+        与 cleanup_old_files 的按天清理互补：按天清理控制文件年龄，本方法控制总占用，
+        防止保留窗口内持续写入耗尽磁盘。复用 _collect_files_to_delete 的扫描与越界防护，
+        按 mtime 升序删除最旧文件直至总量达标。
+        """
+        errors: list[str] = []
+        deleted_files = 0
+        deleted_size = 0
+        try:
+            # cutoff 取当前时刻以收集全部已存在文件。当前时刻晚于任意已存在文件的 mtime，故全部命中过期条件。
+            all_files, _directories = self._collect_files_to_delete(
+                datetime.now().timestamp(), errors
+            )
+            total = sum(size for _path, size, _mtime in all_files)
+            if total <= max_total_bytes:
+                return {"deleted_files": 0, "deleted_size": 0, "errors": errors}
+            for file_path, size, _mtime in sorted(all_files, key=lambda item: item[2]):
+                if total <= max_total_bytes:
+                    break
+                try:
+                    file_path.unlink()
+                    total -= size
+                    deleted_files += 1
+                    deleted_size += size
+                    logger.info("总量配额驱逐旧文件: {}", file_path)
+                except Exception as e:
+                    errors.append(f"删除文件失败 {file_path}: {e}")
+                    logger.warning("删除文件失败: {} -> {}", file_path, e)
+        except Exception as e:
+            errors.append(f"总量清理过程出错: {e}")
+            logger.error("总量清理过程出错: {}", e)
+        return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
+
     def _collect_files_to_delete(
         self, cutoff_epoch: float, errors: list[str]
-    ) -> tuple[list[tuple[Path, int]], list[Path]]:
+    ) -> tuple[list[tuple[Path, int, float]], list[Path]]:
         """遍历基础目录，收集过期文件与待评估的空目录候选。
 
         os.walk(followlinks=False) 不下降进入符号链接目录。Windows NTFS junction 属
@@ -533,10 +569,10 @@ class FileManager:
             errors: 收集 stat 失败的错误描述列表，与删除阶段共享同一列表。
 
         Returns:
-            (expired_files, directories)：expired_files 为 (path, size) 元组列表，
+            (expired_files, directories)：expired_files 为 (path, size, mtime) 元组列表，
             directories 为待评估空目录清理的目录列表，不含 base_dir 自身。
         """
-        expired_files: list[tuple[Path, int]] = []
+        expired_files: list[tuple[Path, int, float]] = []
         directories: list[Path] = []
         for root, dirs, files in os.walk(self.base_dir, followlinks=False):
             root_path = Path(root)
@@ -592,7 +628,7 @@ class FileManager:
                     if not stat.S_ISREG(stat_result.st_mode):
                         continue
                     if stat_result.st_mtime < cutoff_epoch:
-                        expired_files.append((file_path, stat_result.st_size))
+                        expired_files.append((file_path, stat_result.st_size, stat_result.st_mtime))
                 except Exception as e:
                     errors.append(f"获取文件信息失败 {file_path}: {e}")
                     logger.warning("获取文件信息失败: {} -> {}", file_path, e)
@@ -600,7 +636,7 @@ class FileManager:
 
     @staticmethod
     def _delete_expired_files(
-        expired_files: list[tuple[Path, int]], errors: list[str]
+        expired_files: list[tuple[Path, int, float]], errors: list[str]
     ) -> tuple[list[str], int]:
         """删除收集到的过期文件，返回已删路径列表与累计释放字节数。
 
@@ -609,7 +645,7 @@ class FileManager:
         """
         deleted_files: list[str] = []
         deleted_size = 0
-        for file_path, size in expired_files:
+        for file_path, size, _mtime in expired_files:
             try:
                 file_path.unlink()
                 deleted_files.append(str(file_path))

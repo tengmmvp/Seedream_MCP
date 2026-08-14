@@ -46,6 +46,10 @@ def setup_logging(
     """
     设置日志配置
 
+    未显式传入 log_file 时，默认日志路径为 ``logs/seedream_mcp.log``，该相对路径
+    相对于进程工作目录（CWD）解析；不同启动方式的 CWD 可能不同，如需固定位置请传入
+    绝对路径或经 LOG_FILE 环境变量配置。
+
     Args:
         log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         log_file: 日志文件路径，如果为 None 则使用默认路径
@@ -125,10 +129,14 @@ def get_logger(name: str | None = None) -> Any:
         logger 实例
     """
     if name is None:
-        # 自动获取调用模块名
+        # 自动获取调用模块名。inspect.currentframe() 返回的帧对象会形成引用环，
+        # CPython 建议使用后立即显式 del 以便循环引用垃圾回收及时回收该帧。
         current = inspect.currentframe()
-        caller = current.f_back if current is not None else None
-        name = caller.f_globals.get("__name__", "unknown") if caller is not None else "unknown"
+        try:
+            caller = current.f_back if current is not None else None
+            name = caller.f_globals.get("__name__", "unknown") if caller is not None else "unknown"
+        finally:
+            del current
 
     return logger.bind(name=name)
 

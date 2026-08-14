@@ -75,7 +75,7 @@ def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dic
         if not isinstance(parsed_payload, dict):
             raise ValueError("SSE 事件数据必须是对象")
         return cast(dict[str, Any], parsed_payload)
-    except Exception as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, IndexError) as exc:
         if log is not None:
             log.error("SSE事件解析失败: {}", str(exc))
             log.debug("SSE事件原始段长度: {} bytes", len(raw_segment))

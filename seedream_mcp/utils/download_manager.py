@@ -331,7 +331,16 @@ class DownloadManager:
 
         loop = asyncio.get_running_loop()
         try:
-            infos = await loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            # getaddrinfo 无内置超时，DNS 无响应时会挂起至系统超时；以 wait_for 施加上限，
+            # 超时抛 asyncio.TimeoutError，交由 download_image 的 except asyncio.TimeoutError 重试。
+            infos = await asyncio.wait_for(
+                loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP),
+                timeout=self.timeout,
+            )
+        except asyncio.TimeoutError:
+            # Python 3.11+ 起 asyncio.TimeoutError 是内建 TimeoutError（OSError 子类）的别名，
+            # 须先于 except OSError 捕获并原样上抛，保持可重试语义而非终态化。
+            raise
         except OSError as exc:
             raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
 
@@ -470,6 +479,8 @@ class DownloadManager:
                 cl_value = int(content_length)
             except (TypeError, ValueError) as exc:
                 raise DownloadError(f"非法 content-length: {content_length!r}") from exc
+            if cl_value < 0:
+                raise DownloadError(f"非法 content-length: {cl_value}")
             if cl_value > self.max_file_size:
                 raise DownloadError(f"文件过大: {cl_value} 字节")
 

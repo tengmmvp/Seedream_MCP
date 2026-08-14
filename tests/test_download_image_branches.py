@@ -145,6 +145,28 @@ async def test_download_response_rejects_oversized_content_length(tmp_path: Path
         )
 
 
+async def test_download_response_rejects_negative_content_length(tmp_path: Path) -> None:
+    """content-length 为负值 → DownloadError，不进入文件写入阶段。
+
+    int('-1') 合法但负值无意义，原本 -1 > max_file_size 为 False 会绕过预检查。
+    """
+    manager = DownloadManager()
+    response = _FakeResponse(headers={"content-type": "image/png", "content-length": "-1"})
+    temp_path = manager._temp_path_for(tmp_path / "out.png")
+
+    with pytest.raises(DownloadError, match="非法 content-length"):
+        await manager._download_response_to_temp(
+            response,  # type: ignore[arg-type]
+            tmp_path / "out.png",
+            temp_path,
+            "image/png",
+            0,
+            time.monotonic(),
+        )
+
+    assert not temp_path.exists()
+
+
 async def test_download_response_rejects_streaming_cumulative_oversize(
     tmp_path: Path,
 ) -> None:

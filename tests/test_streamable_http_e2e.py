@@ -20,8 +20,8 @@ from seedream_mcp.config import SeedreamConfig
 
 # FastMCP streamable-http 默认 MCP 端点路径
 _MCP_PATH = "/mcp"
-# 生产请求体上限，见 server._MAX_STREAMABLE_HTTP_BODY
-_MAX_BODY = server._MAX_STREAMABLE_HTTP_BODY
+# 生产请求体上限默认值，与 SeedreamConfig.http_max_body_size 默认一致
+_MAX_BODY = 100 * 1024 * 1024
 
 
 class _LifespanManager:
@@ -176,7 +176,7 @@ async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) ->
 async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> None:
     """请求体超 Content-Length 上限由请求体中间件在鉴权前返回 413。
 
-    生产阈值为 100MB（_MAX_STREAMABLE_HTTP_BODY），单值由 test_request_body_limit 覆盖；
+    生产阈值默认 100MB（config.http_max_body_size），单值由 test_request_body_limit 覆盖；
     此处装配小阈值以真实发送超限字节体验证全栈集成，确认中间件在 ASGI 栈内短路。
     """
     app = _build_app("s3cret", body_limit=64)

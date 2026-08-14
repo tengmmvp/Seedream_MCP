@@ -43,6 +43,11 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     )
 
 
+def _log_level_type(value: str) -> str:
+    """argparse type 将日志级别转大写，使 CLI 与 env/.env 的大小写不敏感行为一致。"""
+    return value.upper()
+
+
 def _port_type(value: str) -> int:
     """argparse type 校验端口为 1-65535 范围内的整数。"""
     try:
@@ -87,7 +92,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--config-file",
-        help="可选的 .env 配置文件路径，用于加载额外环境变量",
+        help="可选的 .env 配置文件路径，替换默认 .env 加载（指定后不再读取项目根/当前目录的 .env）",
     )
 
     # 模型与生成配置
@@ -121,6 +126,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     # 日志配置
     parser.add_argument(
         "--log-level",
+        type=_log_level_type,
         choices=list(LEGAL_LOG_LEVELS),
         default=None,
         help="日志级别（默认按配置或内置默认值）",

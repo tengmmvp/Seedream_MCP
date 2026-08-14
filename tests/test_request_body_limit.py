@@ -6,8 +6,13 @@
 """
 
 import json
+from pathlib import Path
+
+import pytest
 
 import seedream_mcp.server as server
+from seedream_mcp.config import build_config_from_sources
+from seedream_mcp.utils.errors import SeedreamConfigError
 
 _LIMIT = 100 * 1024 * 1024
 
@@ -187,3 +192,55 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
     await middleware(scope, receive, None)
 
     assert received == {"called": True}
+
+
+# ==================== SEEDREAM_HTTP_MAX_BODY_SIZE 配置解析 ====================
+
+
+def test_http_max_body_size_defaults_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置环境变量时回退默认 100MB。"""
+    env_file = tmp_path / "config.env"
+    env_file.write_text("ARK_API_KEY=test_key\n", encoding="utf-8")
+    monkeypatch.delenv("SEEDREAM_HTTP_MAX_BODY_SIZE", raising=False)
+    config = build_config_from_sources(env_file=str(env_file))
+    assert config.http_max_body_size == 100 * 1024 * 1024
+
+
+def test_http_max_body_size_uses_env_file_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合法整数值经 .env 覆盖默认上限。"""
+    env_file = tmp_path / "config.env"
+    env_file.write_text(
+        "ARK_API_KEY=test_key\nSEEDREAM_HTTP_MAX_BODY_SIZE=2097152\n", encoding="utf-8"
+    )
+    monkeypatch.delenv("SEEDREAM_HTTP_MAX_BODY_SIZE", raising=False)
+    config = build_config_from_sources(env_file=str(env_file))
+    assert config.http_max_body_size == 2 * 1024 * 1024
+
+
+def test_http_max_body_size_rejects_below_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """低于下限 1MB 的值视为配置错误，构建失败。"""
+    env_file = tmp_path / "config.env"
+    env_file.write_text("ARK_API_KEY=test_key\nSEEDREAM_HTTP_MAX_BODY_SIZE=100\n", encoding="utf-8")
+    monkeypatch.delenv("SEEDREAM_HTTP_MAX_BODY_SIZE", raising=False)
+    with pytest.raises(SeedreamConfigError):
+        build_config_from_sources(env_file=str(env_file))
+
+
+def test_http_max_body_size_rejects_non_integer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非整数环境变量视为配置错误，构建失败。"""
+    env_file = tmp_path / "config.env"
+    env_file.write_text(
+        "ARK_API_KEY=test_key\nSEEDREAM_HTTP_MAX_BODY_SIZE=not-a-number\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SEEDREAM_HTTP_MAX_BODY_SIZE", raising=False)
+    with pytest.raises(SeedreamConfigError):
+        build_config_from_sources(env_file=str(env_file))

@@ -311,6 +311,10 @@ def find_images_in_directory(
 ) -> list[Path]:
     """在目录中查找图片文件。
 
+    安全前置条件：本函数自身不做工作区越界校验，调用方必须先完成工作区越界校验
+    （is_path_within_any_base），确认 directory 位于允许的工作区根之内，再调用本函数。
+    本函数经 utils/__init__ 重导出为公共工具，任何外部调用方均须遵守此前置条件。
+
     Args:
         directory: 搜索目录。
         recursive: 是否递归搜索。

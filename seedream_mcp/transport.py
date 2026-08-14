@@ -28,10 +28,6 @@ logger = get_logger(__name__)
 # 仅凭字符串判定会使公网暴露仍免鉴权。
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
-# streamable-http 请求体大小上限：按 Content-Length 早拒超大请求体，防止已认证客户端
-# 提交 GB 级 prompt/data URI 导致 OOM。多图融合等大体量场景若超此值应分批或调高。
-_MAX_STREAMABLE_HTTP_BODY = 100 * 1024 * 1024
-
 
 # ==================== ASGI 响应辅助 ====================
 
@@ -160,8 +156,12 @@ class _LimitRequestBodyMiddleware:
 
         async def receive_wrapper() -> Any:
             nonlocal total_received, too_large
+            # 一旦已判定超限，后续调用直接返回空终帧，不再向底层 receive 读取真实消息，
+            # 彻底切断超大 body 的剩余投递。
+            if too_large:
+                return {"type": "http.request", "body": b"", "more_body": False}
             message = await receive()
-            if not too_large and message.get("type") == "http.request":
+            if message.get("type") == "http.request":
                 total_received += len(message.get("body", b""))
                 if total_received > self._max_body_size:
                     too_large = True
@@ -316,7 +316,9 @@ def _run_streamable_http(
     if auth_token:
         app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
-    app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=_MAX_STREAMABLE_HTTP_BODY)
+    app.add_middleware(
+        _LimitRequestBodyMiddleware, max_body_size=get_active_config().http_max_body_size
+    )
     # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health
     app.add_middleware(_HealthCheckMiddleware)
     ssl_kwargs: dict[str, Any] = {}

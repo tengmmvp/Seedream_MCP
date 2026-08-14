@@ -59,7 +59,6 @@ from .transport import (  # noqa: F401
     _BearerTokenAuthMiddleware,
     _HealthCheckMiddleware,
     _LimitRequestBodyMiddleware,
-    _MAX_STREAMABLE_HTTP_BODY,
 )
 
 if TYPE_CHECKING:

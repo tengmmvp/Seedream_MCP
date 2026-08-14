@@ -136,6 +136,11 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     误拒 Roots 授权但环境根之外的合法路径。调用方 path_utils.validate_image_path 与
     client 的本地文件签名校验已在前置环节用正确的 Roots 集合完成越界拦截。
 
+    图像维度读取经 open_no_follow_read 打开最终分量。path 已由
+    _resolve_local_image_path 调用 resolve() 跟随符号链接，故 O_NOFOLLOW 对初始输入
+    即符号链接的防护效果减弱，其贡献仅限 resolve 与 open 之间的 TOCTOU 窗口防护；
+    主要的符号链接越界防御由调用方的边界 resolve 与比较提供。
+
     Args:
         file_path: 本地文件的完整路径。
         skip_dimensions: 是否跳过图像像素维度校验。

@@ -48,7 +48,7 @@ _DIRECTORY_SCAN_CACHE: dict[
     tuple[str, bool, int, tuple[str, ...]], tuple[int | None, float, list[Path]]
 ] = {}
 _DIRECTORY_SCAN_CACHE_MAX_ENTRIES = 64
-_DIRECTORY_SCAN_CACHE_MAX_LIST_LEN = 2000
+_DIRECTORY_SCAN_CACHE_MAX_LIST_LEN = 5000
 # 递归扫描缓存 TTL：子目录新增图片不改变顶层目录 mtime，以 TTL 兜底保证最终一致。
 _DIRECTORY_SCAN_CACHE_TTL_SECONDS = 5.0
 

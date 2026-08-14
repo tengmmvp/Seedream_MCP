@@ -43,6 +43,7 @@ def _build_auto_save_manager(
         max_concurrent=config.auto_save_max_concurrent,
         date_folder=config.auto_save_date_folder,
         cleanup_days=config.auto_save_cleanup_days,
+        max_total_bytes=config.auto_save_max_total_bytes,
         download_manager=download_manager,
     )
 

@@ -45,6 +45,15 @@ def test_build_arg_parser_supports_auth_token() -> None:
     assert args.auth_token == "s3cret"
 
 
+@pytest.mark.parametrize("level", ["debug", "Debug", "DEBUG"])
+def test_build_arg_parser_log_level_case_insensitive(level: str) -> None:
+    """--log-level 经 type 预处理转大写，小写/混合大小写均接受，与 env/.env 行为一致。"""
+    parser = server._build_arg_parser()
+    args = parser.parse_args(["--log-level", level])
+
+    assert args.log_level == "DEBUG"
+
+
 def test_build_arg_parser_supports_tls_options() -> None:
     parser = server._build_arg_parser()
     args = parser.parse_args(["--ssl-certfile", "c.pem", "--ssl-keyfile", "k.pem"])

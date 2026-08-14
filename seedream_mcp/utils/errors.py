@@ -33,16 +33,16 @@ class SeedreamMCPError(Exception):
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典，供结构化错误输出使用。
 
-        message 统一剥离 Bearer 令牌并截断，避免上游回显的敏感片段进入结构化输出；
-        子类无需各自处理 message。
+        message 统一剥离敏感键值与 Bearer 令牌并截断，details 经敏感字段过滤，
+        避免上游回显的敏感片段进入结构化输出；子类无需各自处理 message 与 details。
         """
         return {
             "error": self.__class__.__name__,
             "message": _truncate_value_for_output(
-                _redact_bearer_tokens(self.message), limit=_MESSAGE_OUTPUT_LIMIT
+                _redact_sensitive_message(self.message), limit=_MESSAGE_OUTPUT_LIMIT
             ),
             "error_code": self.error_code,
-            "details": self.details,
+            "details": _filter_sensitive_data(self.details),
         }
 
 
@@ -197,6 +197,12 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
         "payload_too_large",
         base_message="请求体过大",
     ),
+    422: _ErrorProfile(
+        "请求参数语义错误",
+        "请检查请求参数语义。",
+        "validation_error",
+        base_message="请求参数语义错误",
+    ),
     429: _ErrorProfile(
         "请求频率超限",
         "请稍后重试。",
@@ -322,9 +328,9 @@ def format_error_for_user(error: Exception) -> str:
     else:
         raw_message = str(error)
         code_hint = ""
-    # 三类异常统一先剥离 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出
+    # 三类异常统一先剥离敏感键值与 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出
     message = _truncate_value_for_output(
-        _redact_bearer_tokens(raw_message), limit=_MESSAGE_OUTPUT_LIMIT
+        _redact_sensitive_message(raw_message), limit=_MESSAGE_OUTPUT_LIMIT
     )
 
     line = f"{profile.display_title}: {message}{code_hint}"
@@ -404,12 +410,29 @@ _SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey")
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出
 _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 
+# 敏感键值裸值模式：authorization/apikey 键名后跟分隔符（: 或 =）与值时，剥离值部分，
+# 覆盖 api-key=xxx、apikey: xxx、Authorization: Basic xxx 等上游错误体回显形态。可选的
+# 第二个空白分隔词用于吸收 Authorization 的 scheme（如 Basic），避免仅剥离 scheme 而泄露凭据。
+_SENSITIVE_KEYVALUE_PATTERN = re.compile(
+    r"(?i)(api[-_]?key|authorization)([ \t]*[:=][ \t]*)\S+(?:[ \t]+\S+)?"
+)
+
 
 def _redact_bearer_tokens(value: Any) -> Any:
     """剥离字符串值中的 Bearer 令牌，保留 Bearer 前缀以保留语义。"""
     if isinstance(value, str):
         return _BEARER_TOKEN_PATTERN.sub(r"\1***", value)
     return value
+
+
+def _redact_sensitive_message(value: str) -> str:
+    """剥离消息中的敏感键值裸值与 Bearer 令牌。
+
+    先以 _SENSITIVE_KEYVALUE_PATTERN 剥离 authorization/apikey 键名后的裸值，再以
+    _BEARER_TOKEN_PATTERN 剥离残留的 Bearer 令牌，两者叠加覆盖上游错误体常见的回显形态。
+    """
+    redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", value)
+    return _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
 
 
 def _is_sensitive_key(key: Any) -> bool:

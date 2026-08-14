@@ -52,7 +52,8 @@ _PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 _MAX_BACKOFF_SECONDS = 60
 
 # 工作区 roots 元组 → 已 resolve 的 base 列表，跨图复用避免每图重复 resolve 同一根目录。
-# 工作区 Roots 集合有限且稳定，缓存无淘汰；若部署场景会出现大量不同 Roots 需改为 LRU。
+# 上限 _RESOLVED_BASES_CACHE_MAX_ENTRIES，超限淘汰最旧条目。dict 自 Python 3.7 起保持插入序，最旧即最久未访问。
+_RESOLVED_BASES_CACHE_MAX_ENTRIES = 32
 _resolved_bases_cache: dict[tuple[str, ...], list[Path]] = {}
 
 
@@ -233,7 +234,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.opt(exception=True).error("文生图任务失败: {}", format_error_for_user(e))
+            self.logger.error("文生图任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -320,7 +321,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.opt(exception=True).error("图文生图任务失败: {}", format_error_for_user(e))
+            self.logger.error("图文生图任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -411,7 +412,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.opt(exception=True).error("多图融合任务失败: {}", format_error_for_user(e))
+            self.logger.error("多图融合任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     @log_function_call
@@ -554,7 +555,7 @@ class SeedreamClient:
             return response
 
         except Exception as e:
-            self.logger.opt(exception=True).error("组图输出任务失败: {}", format_error_for_user(e))
+            self.logger.error("组图输出任务失败: {}", format_error_for_user(e))
             raise self._handle_api_error(e)
 
     def _validate_common_generation_params(
@@ -1131,6 +1132,11 @@ class SeedreamClient:
                 except (OSError, ValueError):
                     continue
             _resolved_bases_cache[workspace_roots] = resolved_bases
+            if len(_resolved_bases_cache) > _RESOLVED_BASES_CACHE_MAX_ENTRIES:
+                try:
+                    _resolved_bases_cache.pop(next(iter(_resolved_bases_cache)))
+                except KeyError:
+                    pass
 
         def _within(candidate: Path) -> bool:
             cand_str = str(candidate).lstrip()
@@ -1183,7 +1189,7 @@ class SeedreamClient:
         # URL/data-URI 无本地文件 I/O，直接用空签名短路，避免缓存命中也分派线程；
         # 本地文件签名含同步 stat/resolve，移至工作线程避免网络挂载工作区下阻塞事件循环
         signature: tuple[float, int]
-        if image.lower().startswith(("http://", "https://", "data:image/")):
+        if image[:16].lower().startswith(("http://", "https://", "data:image/")):
             signature = (0.0, 0)
         else:
             signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
@@ -1223,7 +1229,7 @@ class SeedreamClient:
             prepared = await prepare_image_input(image)
             # HTTP/HTTPS URL 经 prepare_image_input 仅 urlparse 校验后原样返回，缓存无收益
             # 反而占用 LRU 条目；data URI 与本地文件经解码或编码产生新值，仍照常缓存。
-            if not image.lower().startswith(("http://", "https://")):
+            if not image[:16].lower().startswith(("http://", "https://")):
                 self._cache_prepared_result(cache_key, prepared)
             return prepared
         finally:

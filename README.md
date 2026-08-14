@@ -435,10 +435,12 @@ SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 单张图片下载超时（秒）
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=         # 保存目录总字节上限（留空不限制；超限按最旧文件驱逐）
 
 # 工作区与传输
 SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界回退目录（MCP Roots 优先）
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定建议配置）
+SEEDREAM_HTTP_MAX_BODY_SIZE=104857600       # streamable-http 请求体上限（字节，≥1MB，默认 100MB）
 
 # 客户端性能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
