@@ -16,7 +16,6 @@ import aiofiles
 import aiohttp
 import pytest
 
-from seedream_mcp.utils import download_manager as dm_module
 from seedream_mcp.utils.download_manager import DownloadError, DownloadManager
 
 from _download_fakes import (
@@ -99,6 +98,29 @@ async def test_download_image_does_not_retry_on_disk_quota_exceeded(
         await manager.download_image("https://example.com/img.png", save_path)
 
     # 配额超限需管理员介入，重试仅徒增延迟，故单次尝试即终态抛出
+    assert session.call_count == 1
+    assert not save_path.exists()
+
+
+async def test_download_image_does_not_retry_on_invalid_url_client_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """aiohttp.InvalidUrlClientError 属 URL 语法永久错误，立即抛出 DownloadError 不重试。
+
+    InvalidUrlClientError 继承 ClientError，但重试无法修复 URL 语法问题，须在 ClientError
+    臂内单独识别为终态错误，区别于连接类瞬时 ClientError 的退避重试。
+    """
+    manager = DownloadManager()
+    session = _RaisingThenSuccessSession(
+        aiohttp.InvalidUrlClientError("http://bad url"), _png_success_response()
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="无效的URL"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # URL 语法错误重试无意义，单次尝试即终态抛出
     assert session.call_count == 1
     assert not save_path.exists()
 
@@ -218,10 +240,11 @@ async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path)
 async def test_download_response_closes_fd_when_aiofiles_open_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """aiofiles.open 接管 fd 前抛错时，finally 兜底 os.close 关闭 fd 避免泄漏。
+    """aiofiles.open 包装 fd 失败时，落盘骨架兜底 os.close 关闭 fd 避免泄漏。
 
-    open_temp_fd 已成功返回 fd，但 aiofiles.open 包装该 fd 时失败：fd_handed_off
-    仍为 False，finally 分支手动 os.close(fd)。此处追踪 os.close 调用以确认兜底生效。
+    atomic_replace_from_fd 已成功返回 fd，但 writer 内 aiofiles.open 包装该 fd 时失败
+    抛出异常：骨架为 fd 唯一关闭点，在 finally 中 os.close(fd) 恰好一次。此处追踪
+    os.close 调用以确认兜底生效且无双重关闭。
     """
     manager = DownloadManager()
     response = _FakeResponse(
@@ -247,7 +270,7 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
     def _raising_aiofiles_open(*args: object, **kwargs: object) -> Any:
         return _RaisingAiofilesCtx()
 
-    monkeypatch.setattr(dm_module.os, "close", _tracking_close)
+    monkeypatch.setattr(os, "close", _tracking_close)
     monkeypatch.setattr(aiofiles, "open", _raising_aiofiles_open)
 
     with pytest.raises(OSError, match="aiofiles open boom"):

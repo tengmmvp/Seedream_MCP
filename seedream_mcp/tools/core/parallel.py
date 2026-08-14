@@ -8,7 +8,7 @@ lifespan 上下文获取，以复用 HTTP/aiohttp 连接池，无 lifespan 场�
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
 from ...utils.errors import format_error_for_user
 from ._helpers import (
@@ -24,6 +24,11 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
 
     from ...client import SeedreamClient
+    from ...utils.download_manager import DownloadManager
+
+
+# lifespan 共享资源取值的泛型辅助，client/download_manager/config 三处探测共用
+_T = TypeVar("_T")
 
 
 async def _execute_parallel_generation_requests(
@@ -86,51 +91,52 @@ async def _execute_parallel_generation_requests(
     )
 
 
+def _get_lifespan_resource(
+    ctx: Context[Any, Any, Any] | None,
+    key: str,
+    resource_type: type[_T],
+) -> _T | None:
+    """从 lifespan 上下文按键取类型匹配的共享资源，无则返回 None。
+
+    无 ctx 或无 lifespan 上下文时返回 None，由调用方回退新建，保持向后兼容
+    （如单元测试直接调用 handler 的场景）。client、download_manager 与 config
+    三处共享资源探测共用此实现。
+    """
+    if ctx is None:
+        return None
+    try:
+        state = ctx.request_context.lifespan_context
+    except AttributeError:
+        return None
+    if isinstance(state, dict):
+        resource = state.get(key)
+        if isinstance(resource, resource_type):
+            return resource
+    return None
+
+
 def _try_get_shared_client(
     ctx: Context[Any, Any, Any] | None,
 ) -> SeedreamClient | None:
     """从 lifespan 上下文获取共享 SeedreamClient，无则返回 None。
 
-    复用共享客户端可共享 HTTP 连接池。无 lifespan 的场景，例如单元测试直接调用
-    handler 时，返回 None，由调用方回退新建，保持向后兼容。
+    复用共享客户端可共享 HTTP 连接池。无 lifespan 的场景返回 None，由调用方回退新建。
     """
-    if ctx is None:
-        return None
-
     from ...client import SeedreamClient
 
-    try:
-        state = ctx.request_context.lifespan_context
-    except AttributeError:
-        return None
-    if isinstance(state, dict):
-        shared = state.get("client")
-        if isinstance(shared, SeedreamClient):
-            return shared
-    return None
+    return _get_lifespan_resource(ctx, "client", SeedreamClient)
 
 
 def _try_get_shared_download_manager(
     ctx: Context[Any, Any, Any] | None,
-) -> Any | None:
+) -> DownloadManager | None:
     """从 lifespan 上下文获取共享 DownloadManager，无则返回 None。
 
     复用共享下载管理器可跨请求复用 aiohttp 连接池，避免每次生成重复 TLS 握手。
     """
-    if ctx is None:
-        return None
-
     from ...utils.download_manager import DownloadManager
 
-    try:
-        state = ctx.request_context.lifespan_context
-    except AttributeError:
-        return None
-    if isinstance(state, dict):
-        shared = state.get("download_manager")
-        if isinstance(shared, DownloadManager):
-            return shared
-    return None
+    return _get_lifespan_resource(ctx, "download_manager", DownloadManager)
 
 
 async def _run_generation_requests(

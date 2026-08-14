@@ -280,3 +280,64 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
     )
     assert len(again) == 3
+
+
+def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> None:
+    """大目录深翻页：小 scan_limit 缓存不完整前缀，更大 scan_limit 重扫扩展前缀，回看命中不重扫。
+
+    覆盖 complete=False 前缀增量扩展这一新逻辑：旧实现从不缓存不完整列表，深翻页每页重扫；
+    新实现缓存前缀并随 scan_limit 增长扩展，回看与同范围重复请求直接命中。
+    """
+    for i in range(5):
+        (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    browse_module._DIRECTORY_SCAN_CACHE.clear()
+
+    def _entry() -> Any:
+        return next(iter(browse_module._DIRECTORY_SCAN_CACHE.values()))
+
+    # 首页 scan_limit=2：目录有 5 图，返回 2 条，结果数等于 limit 故 complete=False，缓存前缀 2
+    _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=2
+    )
+    entry = _entry()
+    assert not entry.complete
+    assert len(entry.images) == 2
+
+    # 深页 scan_limit=4：缓存前缀 2 小于 4，重扫并扩展前缀至 4
+    _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=4
+    )
+    entry = _entry()
+    assert not entry.complete
+    assert len(entry.images) == 4
+
+    # 回看 scan_limit=2：缓存前缀 4 不小于 2，命中返回前缀，不重扫（images 仍为 4）
+    back = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=2
+    )
+    assert len(back) == 4
+    assert len(_entry().images) == 4
+
+
+def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
+    """扫到目录末尾(complete=True)后，任意 scan_limit 均命中全量，不再扫描。"""
+    for name in ("a.png", "b.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    browse_module._DIRECTORY_SCAN_CACHE.clear()
+
+    def _entry() -> Any:
+        return next(iter(browse_module._DIRECTORY_SCAN_CACHE.values()))
+
+    # scan_limit=10 远大于目录 2 图，返回 2 条且 complete=True（扫到末尾）
+    _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
+    )
+    entry = _entry()
+    assert entry.complete
+    assert len(entry.images) == 2
+
+    # 更小 scan_limit 命中 complete 缓存，返回全量 2 而非前缀
+    hit = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=1
+    )
+    assert len(hit) == 2

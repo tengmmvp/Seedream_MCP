@@ -22,6 +22,7 @@ from .image_validation import (
     decode_and_validate_dimensions,
     validate_image_input,
 )
+from .image_ref import classify_image_reference
 
 logger = get_logger(__name__)
 
@@ -38,13 +39,14 @@ async def prepare_image_input(image: str) -> str:
     try:
         normalized = image.strip()
 
-        if normalized.startswith(("http://", "https://")):
+        kind = classify_image_reference(normalized)
+        if kind == "url":
             parsed = urlparse(normalized)
             if not parsed.netloc:
                 raise SeedreamAPIError(f"无效的图像 URL: {normalized}")
             return normalized
 
-        if normalized.lower().startswith("data:image/"):
+        if kind == "data_uri":
             # validate_image_input 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环。
             return await asyncio.to_thread(validate_image_input, normalized)
 

@@ -23,6 +23,7 @@ from .formats import (
     parse_data_uri,
 )
 from .os_utils import open_no_follow_read
+from .image_ref import classify_image_reference
 
 # HEIC/HEIF 解码器惰性注册，避免模块导入时的全局副作用，首次校验图片时按需注册。
 # check-then-set 非线程安全，并发首调用可能重复注册；register_heif_opener 与
@@ -320,13 +321,10 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     if not image:
         raise SeedreamValidationError("图像路径不能为空", field="image", value=image)
 
-    # Data URI 格式验证
-    if image.lower().startswith("data:image/"):
+    # 三类来源统一经 classify_image_reference 判定，scheme 大小写不敏感
+    kind = classify_image_reference(image)
+    if kind == "data_uri":
         return _validate_data_uri(image)
-
-    # HTTP/HTTPS URL 验证
-    if image.startswith(("http://", "https://")):
+    if kind == "url":
         return _validate_url(image)
-
-    # 本地文件路径验证
     return _validate_file_path(image, skip_dimensions=skip_dimensions)

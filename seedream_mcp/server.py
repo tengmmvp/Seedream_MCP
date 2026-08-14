@@ -5,6 +5,12 @@ Seedream MCP 服务器主模块。
 Prompt 与工作区、服务器信息资源。负责配置注入、生命周期管理、main/cli_main 入口
 与传输分派。CLI 参数解析由 cli 模块承担，streamable-http 中间件与传输配置由 transport
 模块承担，二者经本模块重导出以保持 server 模块既有导入 surface 与 tests 访问路径不变。
+
+outputSchema 声明契约：五个 @mcp.tool 工具函数的返回类型注解为 pydantic model
+（GenerationStructuredOutput / BrowseImagesStructuredOutput），仅用于让 FastMCP 据此
+生成 outputSchema；运行时实际返回 CallToolResult（含面向模型的文本与 structuredContent）。
+故函数体中相应的 ``# type: ignore[return-value]`` 是该方案的必要组成，不可为统一返回
+类型而移除，否则 outputSchema 声明会失效。详见 AGENTS.md 的 outputSchema 声明契约一节。
 """
 
 from __future__ import annotations
@@ -147,11 +153,13 @@ def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。
 
     工具与资源经 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局
-    状态，消除热重载窗口内活动配置与请求实际使用的配置不一致。
+    状态，消除热重载窗口内活动配置与请求实际使用的配置不一致。复用 parallel 的
+    _get_lifespan_resource 统一资源探测实现。
     """
-    state = ctx.request_context.lifespan_context
-    config = state.get("config") if isinstance(state, dict) else None
-    if isinstance(config, SeedreamConfig):
+    from .tools.core.parallel import _get_lifespan_resource
+
+    config = _get_lifespan_resource(ctx, "config", SeedreamConfig)
+    if config is not None:
         return config
     logger.warning("lifespan 上下文未注入配置，回退全局活动配置")
     return get_active_config()

@@ -33,16 +33,16 @@ from .utils.errors import (
     parse_retry_after,
 )
 from .utils.logging import get_logger, log_function_call
-from .utils.model_capabilities import get_model_capabilities
+from .utils.model_capabilities import get_max_reference_images, get_model_capabilities
 from .utils.validation import (
     ValidatedCommonParams,
-    get_max_reference_images,
     resolve_sequential_max_images,
     validate_common_generation_params,
     validate_max_images,
     validate_sequential_image_limit,
 )
 from .utils.sse_parser import is_sse_response, parse_sse_response
+from .utils.image_ref import classify_image_reference
 
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
 _PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
@@ -235,7 +235,7 @@ class SeedreamClient:
 
         except Exception as e:
             self.logger.error("文生图任务失败: {}", format_error_for_user(e))
-            raise self._handle_api_error(e)
+            raise self._normalize_api_error(e)
 
     @log_function_call
     async def image_to_image(
@@ -322,7 +322,7 @@ class SeedreamClient:
 
         except Exception as e:
             self.logger.error("图文生图任务失败: {}", format_error_for_user(e))
-            raise self._handle_api_error(e)
+            raise self._normalize_api_error(e)
 
     @log_function_call
     async def multi_image_fusion(
@@ -413,7 +413,7 @@ class SeedreamClient:
 
         except Exception as e:
             self.logger.error("多图融合任务失败: {}", format_error_for_user(e))
-            raise self._handle_api_error(e)
+            raise self._normalize_api_error(e)
 
     @log_function_call
     async def sequential_generation(
@@ -556,7 +556,7 @@ class SeedreamClient:
 
         except Exception as e:
             self.logger.error("组图输出任务失败: {}", format_error_for_user(e))
-            raise self._handle_api_error(e)
+            raise self._normalize_api_error(e)
 
     def _validate_common_generation_params(
         self,
@@ -759,12 +759,12 @@ class SeedreamClient:
         if not isinstance(image_value, str):
             return f"<{type(image_value).__name__}>"
 
-        # 仅取前缀判定类型，避免对大 base64 data URI 做全量 strip/lower 拷贝；
-        # image 经上游 _normalize_single_image 已去除首尾空白，前缀判断即可
-        prefix = image_value[:16].lower()
-        if prefix.startswith(("http://", "https://")):
+        # 三类来源统一判定，scheme 大小写不敏感；image 经上游 _normalize_single_image
+        # 已去除首尾空白，前缀判断即可
+        kind = classify_image_reference(image_value)
+        if kind == "url":
             return "<image_url>"
-        if prefix.startswith("data:image/"):
+        if kind == "data_uri":
             return f"<data_uri:{len(image_value)} chars>"
         return "<local_image_path>"
 
@@ -1099,8 +1099,7 @@ class SeedreamClient:
         from .utils.formats import SUPPORTED_IMAGE_EXTENSIONS
         from .utils.image_validation import MAX_IMAGE_FILE_SIZE
 
-        lowered = image.lower()
-        if lowered.startswith(("http://", "https://", "data:image/")):
+        if classify_image_reference(image) != "local":
             return (0.0, 0)
 
         def _candidate_stat(path: Path) -> os.stat_result | None:
@@ -1189,10 +1188,10 @@ class SeedreamClient:
         # URL/data-URI 无本地文件 I/O，直接用空签名短路，避免缓存命中也分派线程；
         # 本地文件签名含同步 stat/resolve，移至工作线程避免网络挂载工作区下阻塞事件循环
         signature: tuple[float, int]
-        if image[:16].lower().startswith(("http://", "https://", "data:image/")):
-            signature = (0.0, 0)
-        else:
+        if classify_image_reference(image) == "local":
             signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
+        else:
+            signature = (0.0, 0)
         cache_key: _PrepareCacheKey = (
             image,
             _roots_key,
@@ -1229,7 +1228,7 @@ class SeedreamClient:
             prepared = await prepare_image_input(image)
             # HTTP/HTTPS URL 经 prepare_image_input 仅 urlparse 校验后原样返回，缓存无收益
             # 反而占用 LRU 条目；data URI 与本地文件经解码或编码产生新值，仍照常缓存。
-            if not image[:16].lower().startswith(("http://", "https://")):
+            if classify_image_reference(image) != "url":
                 self._cache_prepared_result(cache_key, prepared)
             return prepared
         finally:
@@ -1278,12 +1277,13 @@ class SeedreamClient:
         tasks = [_prepare_with_limit(image) for image in images]
         return await asyncio.gather(*tasks)
 
-    def _handle_api_error(self, error: Exception) -> Exception:
+    def _normalize_api_error(self, error: Exception) -> Exception:
         """
-        处理 API 错误
+        归一化 API 错误为 Seedream 错误类型。
 
-        将通用异常转换为特定的 Seedream 错误类型，
-        根据错误信息自动识别超时、网络等特定错误。
+        已是 Seedream 错误的异常原样返回；其余异常包装为 SeedreamAPIError。
+        与 utils.errors.handle_api_error（按 HTTP 状态码装配异常）职责不同：
+        后者在 _call_api 内按响应分类，本方法仅兜底包装 _call_api 之外的异常。
 
         Args:
             error: 原始异常对象

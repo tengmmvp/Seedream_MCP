@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.os_utils import open_no_follow_read
+from seedream_mcp.utils.os_utils import atomic_replace_from_fd, open_no_follow_read
 
 
 def _can_create_symlink(tmp_path: Path) -> bool:
@@ -128,3 +128,49 @@ def test_open_no_follow_fallback_rejects_fstat_toctou_mismatch(
 
     with pytest.raises(OSError, match="被替换"):
         open_no_follow_read(path)
+
+
+# ==================== atomic_replace_from_fd 原子落盘骨架 ====================
+
+
+async def test_atomic_replace_from_fd_success_replaces_and_leaves_no_temp(
+    tmp_path: Path,
+) -> None:
+    """成功路径：writer 写入后 os.replace 原子替换，目录内仅最终文件无随机临时残留。"""
+    final = tmp_path / "out.bin"
+
+    async def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    await atomic_replace_from_fd(final, writer, suffix=".part")
+
+    assert final.read_bytes() == b"payload"
+    assert list(tmp_path.iterdir()) == [final]
+
+
+async def test_atomic_replace_from_fd_writer_failure_cleans_temp_and_closes_fd_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """writer 抛出：随机临时文件被清理、fd 由骨架唯一关闭一次、原始异常上抛。"""
+    final = tmp_path / "out.bin"
+    closed: list[int] = []
+    real_close = os.close
+
+    def _tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", _tracking_close)
+
+    async def bad_writer(fd: int) -> None:
+        raise OSError("write boom")
+
+    with pytest.raises(OSError, match="write boom"):
+        await atomic_replace_from_fd(final, bad_writer, suffix=".part")
+
+    assert not final.exists()
+    # 失败路径清理随机临时文件，目录内无残留
+    assert list(tmp_path.iterdir()) == []
+    # 骨架为 fd 唯一关闭点，writer 未接管时关闭一次避免泄漏
+    assert len(closed) == 1

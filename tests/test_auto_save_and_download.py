@@ -94,15 +94,15 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     auto_save_module._cleanup_last_run.clear()
     cleanup_calls: list[int] = []
 
-    async def fake_cleanup(days: int) -> dict:
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict:
         cleanup_calls.append(days)
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 
     # 同一 base_dir 的两个实例共享节流
     manager_a = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
     manager_b = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
-    monkeypatch.setattr(manager_a, "cleanup_old_files", fake_cleanup)
-    monkeypatch.setattr(manager_b, "cleanup_old_files", fake_cleanup)
+    monkeypatch.setattr(manager_a.file_manager, "run_cleanup_policies", fake_run_cleanup)
+    monkeypatch.setattr(manager_b.file_manager, "run_cleanup_policies", fake_run_cleanup)
 
     await manager_a._maybe_cleanup()
     await manager_b._maybe_cleanup()  # 同 base_dir，被节流
@@ -112,7 +112,7 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     other_dir = tmp_path / "other"
     other_dir.mkdir()
     manager_c = AutoSaveManager(base_dir=other_dir, cleanup_days=30)
-    monkeypatch.setattr(manager_c, "cleanup_old_files", fake_cleanup)
+    monkeypatch.setattr(manager_c.file_manager, "run_cleanup_policies", fake_run_cleanup)
     await manager_c._maybe_cleanup()
     assert cleanup_calls == [30, 30]
 
@@ -126,7 +126,7 @@ async def test_maybe_cleanup_retries_after_failure(
     auto_save_module._cleanup_last_run.clear()
     calls: list[int] = []
 
-    async def failing_then_succeeding_cleanup(days: int) -> dict:
+    def failing_then_succeeding_cleanup(days: int, max_total_bytes: int | None) -> dict:
         calls.append(days)
         if len(calls) == 1:
             raise RuntimeError("transient cleanup failure")
@@ -134,7 +134,9 @@ async def test_maybe_cleanup_retries_after_failure(
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
     try:
-        monkeypatch.setattr(manager, "cleanup_old_files", failing_then_succeeding_cleanup)
+        monkeypatch.setattr(
+            manager.file_manager, "run_cleanup_policies", failing_then_succeeding_cleanup
+        )
 
         # 首次清理失败：异常被吞，时间戳回滚使下次可重试
         await manager._maybe_cleanup()

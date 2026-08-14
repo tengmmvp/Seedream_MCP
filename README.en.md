@@ -173,7 +173,7 @@ Restart the corresponding client after configuration.
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level
 ```
 
-> **Security note**: When bound to `localhost`, the service treats it as a loopback address and does not enforce Bearer auth or TLS. Deployers should ensure `localhost` resolves to `127.0.0.1` or `::1`; containers and virtual environments that modify hosts require special attention. Non-loopback bindings must configure a Bearer token and TLS.
+> **Security note**: When bound to `localhost`, the service treats it as a loopback address and does not enforce Bearer auth or TLS. Deployers should ensure `localhost` resolves to `127.0.0.1` or `::1`; containers and virtual environments that modify hosts require special attention. Non-loopback bindings must configure a Bearer token and TLS. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which are exposed in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address.
 
 ### Usage Examples
 
@@ -435,10 +435,12 @@ SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds)
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save directory (default 10GB; oldest evicted first when exceeded)
 
 # Workspace & transport
 SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (recommended for non-loopback binding)
+SEEDREAM_HTTP_MAX_BODY_SIZE=104857600       # streamable-http request body size limit (bytes, ≥1MB, default 100MB)
 
 # Client performance
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

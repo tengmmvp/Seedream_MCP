@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import errno
 import ipaddress
-import os
 import random
 import re
 import socket
@@ -40,7 +39,7 @@ from ..version import __version__
 from .errors import SeedreamMCPError
 from .formats import DEFAULT_MAX_FILE_SIZE, is_known_image_bytes
 from .logging import get_logger
-from .os_utils import open_temp_fd
+from .os_utils import atomic_replace_from_fd
 
 logger = get_logger(__name__)
 
@@ -220,6 +219,7 @@ class DownloadManager:
         self.max_file_size = max_file_size
         self._dns_cache_ttl = max(1, dns_cache_ttl)
         self._dns_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
+        self._dns_inflight: dict[str, asyncio.Task[tuple[str, ...]]] = {}
         self._dns_cache_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
@@ -271,14 +271,6 @@ class DownloadManager:
         suffix = save_path.suffix or ".bin"
         return save_path.with_suffix(f"{suffix}.part")
 
-    @staticmethod
-    def _cleanup_temp_file(temp_path: Path) -> None:
-        """清理临时文件，忽略不存在与清理失败以容忍失败路径与并发。"""
-        try:
-            temp_path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning("清理临时文件失败: {} -> {}", temp_path, exc)
-
     def _validate_url_static(self, url: str) -> tuple[str, bool]:
         """执行不依赖网络的 URL 静态安全校验，属 SSRF 第一层防护。
 
@@ -319,6 +311,11 @@ class DownloadManager:
 
         防 DNS rebinding：攻击者可能让静态校验阶段解析到公网 IP，随后在真正
         发起连接前将 DNS 切换到内网地址。解析结果带 TTL 缓存以减少重复查询。
+
+        同 host 并发下载在缓存冷启动时经在途 task 去重共享一次 getaddrinfo：缓存 miss
+        且无在途 task 时创建并登记，并发调用 await 同一 task，避免 N 个并发下载各自触发
+        系统解析。在途 task 经 asyncio.shield 隔离取消传播，创建者被取消时底层 task 继续
+        运行至完成并写入缓存，保护共享同一 task 的其他等待者。
         """
         now = time.time()
         async with self._dns_cache_lock:
@@ -328,18 +325,50 @@ class DownloadManager:
                 if expires_at > now:
                     return cached_ips
                 self._dns_cache.pop(host, None)
+            inflight = self._dns_inflight.get(host)
+            if inflight is None:
+                # 缓存与在途登记在同一锁区间内完成，中间无 await，单线程事件循环下
+                # 并发协程不会交错创建重复 task
+                inflight = asyncio.ensure_future(self._resolve_and_cache(host))
+                self._dns_inflight[host] = inflight
+        # 锁外 await 共享在途 task；shield 使创建者被取消时不连带取消底层 task
+        return await asyncio.shield(inflight)
 
+    async def _resolve_and_cache(self, host: str) -> tuple[str, ...]:
+        """执行单次解析与公网校验并写入缓存，供 _resolve_public_ips 在途去重。
+
+        finally 清理在途 task，使后续缓存过期或失败后的请求可重新发起解析。
+        """
+        try:
+            ip_tuple = await self._resolve_public_ips_uncached(host)
+            async with self._dns_cache_lock:
+                self._dns_cache[host] = (time.time() + self._dns_cache_ttl, ip_tuple)
+                if len(self._dns_cache) > _DNS_CACHE_MAX_SIZE:
+                    self._enforce_dns_cache_limit()
+            return ip_tuple
+        finally:
+            async with self._dns_cache_lock:
+                self._dns_inflight.pop(host, None)
+
+    async def _resolve_public_ips_uncached(self, host: str) -> tuple[str, ...]:
+        """执行单次 getaddrinfo 与公网校验，不做缓存与在途去重。
+
+        getaddrinfo 由事件循环卸载到线程执行器，无内置超时；以 wait_for 施加上限，超时
+        抛 asyncio.TimeoutError 交由 download_image 重试。wait_for 超时仅取消等待协程，
+        底层 getaddrinfo 工作线程无法被中断，会继续运行至系统解析完成后丢弃结果；该线程
+        一次性且其结果已被丢弃。经 _resolve_public_ips 的在途去重，同一 host 至多一个在途
+        登记的解析；超时重试期间被放弃的旧线程可能与新线程短暂并存，但在途数受 max_retries
+        与 max_concurrent 下载并发上限约束，故不额外施加并发信号量。Python 3.11+ 起
+        asyncio.TimeoutError 是内建 TimeoutError（OSError 子类）的别名，须在调用方先于
+        except OSError 捕获以保持可重试语义。
+        """
         loop = asyncio.get_running_loop()
         try:
-            # getaddrinfo 无内置超时，DNS 无响应时会挂起至系统超时；以 wait_for 施加上限，
-            # 超时抛 asyncio.TimeoutError，交由 download_image 的 except asyncio.TimeoutError 重试。
             infos = await asyncio.wait_for(
                 loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP),
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
-            # Python 3.11+ 起 asyncio.TimeoutError 是内建 TimeoutError（OSError 子类）的别名，
-            # 须先于 except OSError 捕获并原样上抛，保持可重试语义而非终态化。
             raise
         except OSError as exc:
             raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
@@ -362,12 +391,7 @@ class DownloadManager:
         if not resolved_ips:
             raise DownloadError(f"域名解析结果为空: {host}")
 
-        ip_tuple = tuple(sorted(resolved_ips))
-        async with self._dns_cache_lock:
-            self._dns_cache[host] = (time.time() + self._dns_cache_ttl, ip_tuple)
-            if len(self._dns_cache) > _DNS_CACHE_MAX_SIZE:
-                self._enforce_dns_cache_limit()
-        return ip_tuple
+        return tuple(sorted(resolved_ips))
 
     def _enforce_dns_cache_limit(self) -> None:
         """强制 DNS 缓存条目数不超过上限，防止长生命周期下多 host 缓存无界增长。
@@ -468,10 +492,11 @@ class DownloadManager:
     ) -> dict[str, Any]:
         """将 200 响应体下载到临时文件，校验大小与字节签名后原子替换，返回结果字典。
 
-        临时文件名由 ``tempfile.mkstemp`` 随机生成以规避符号链接 TOCTOU；``temp_path``
-        仅用于派生临时文件所在目录与后缀，实际写入的是不可预测随机名文件。content-length
-        预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出 DownloadError，
-        失败时清理随机临时文件，由调用方按终态或可重试分类处理。
+        落盘协议由 os_utils.atomic_replace_from_fd 统一提供，与 file_manager.save_bytes
+        复用同一骨架：随机名临时文件规避符号链接 TOCTOU，写入后 os.replace 原子替换，失败
+        清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。content-length
+        预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出 DownloadError，由
+        调用方按终态或可重试分类处理。
         """
         content_length = response.headers.get("content-length")
         if content_length:
@@ -487,46 +512,27 @@ class DownloadManager:
         # 目录创建卸载到线程池；exist_ok=True 下重复创建无副作用，保留作防御性兜底
         await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
 
-        # mkstemp 随机名临时文件规避可预测路径被预置符号链接覆盖；aiofiles 接管 fd 异步写入
-        fd, actual_temp_path = await asyncio.to_thread(
-            open_temp_fd, temp_path.parent, suffix=temp_path.suffix
-        )
         total_size = 0
         head_bytes = b""
-        fd_handed_off = False
-        replaced = False
-        try:
-            try:
-                async with aiofiles.open(fd, "wb", closefd=True) as f:
-                    fd_handed_off = True
-                    async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
-                        total_size += len(chunk)
-                        if total_size > self.max_file_size:
-                            raise DownloadError(f"文件过大: {total_size} 字节")
-                        # 累计首 32 字节做签名校验，省一次 open+read
-                        if len(head_bytes) < 32:
-                            head_bytes += chunk[: 32 - len(head_bytes)]
-                        await f.write(chunk)
-            finally:
-                # aiofiles 接管前失败则手动关闭 fd 避免泄漏；aiofiles 已内部关闭时
-                # 二次关闭会抛 OSError，吞掉以不掩盖原始异常
-                if not fd_handed_off:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
 
+        async def _writer(fd: int) -> None:
+            nonlocal total_size, head_bytes
+            # closefd=False：aiofiles 退出时仅 flush 不关闭 fd，由骨架统一关闭，避免双重关闭
+            async with aiofiles.open(fd, "wb", closefd=False) as f:
+                async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
+                    total_size += len(chunk)
+                    if total_size > self.max_file_size:
+                        raise DownloadError(f"文件过大: {total_size} 字节")
+                    # 累计首 32 字节做签名校验，省一次 open+read
+                    if len(head_bytes) < 32:
+                        head_bytes += chunk[: 32 - len(head_bytes)]
+                    await f.write(chunk)
             # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘
             if not is_known_image_bytes(head_bytes):
                 raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
 
-            # 同文件系统内原子替换，避免读者看到半写文件
-            await asyncio.to_thread(actual_temp_path.replace, save_path)
-            replaced = True
-        finally:
-            # 失败路径清理随机临时文件；成功路径已 replace 移走，missing_ok 无害
-            if not replaced:
-                self._cleanup_temp_file(actual_temp_path)
+        # suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成
+        await atomic_replace_from_fd(save_path, _writer, suffix=temp_path.suffix)
 
         download_time = time.time() - start_time
         logger.info(
@@ -543,6 +549,65 @@ class DownloadManager:
             "content_type": content_type,
             "attempts": attempt + 1,
         }
+
+    async def _attempt_download(
+        self,
+        session: "aiohttp.ClientSession",
+        url: str,
+        headers: dict[str, str],
+        save_path: Path,
+        temp_path: Path,
+        attempt: int,
+        start_time: float,
+    ) -> dict[str, Any]:
+        """执行单次下载尝试，含逐跳重定向循环，返回成功落盘结果字典。
+
+        SSRF 第四层防护：禁用自动重定向改为逐跳手动处理，每跳重新走静态、DNS 与连接
+        对端 IP 完整校验，防止经由重定向绕过跳转到内网地址。依赖网络状态的 DNS 校验
+        在本方法内执行，保障外层 download_image 的 max_retries 对网络故障生效。
+        resolve-and-pin：会话连接器绑定 _PublicIpPinningResolver，校验通过的公网 IP 被
+        钉死为连接目标，aiohttp 不再独立二次解析，DNS rebinding 无从把实际连接切向内网；
+        _validate_connected_peer_ip 作为纵深防御保留。
+
+        HTTP 5xx 抛 RetryableDownloadError 由外层纳入退避重试；4xx、文件过大、字节签名、
+        重定向等语义明确的终态错误抛 DownloadError 由外层原样上抛不重试。
+        """
+        current_url = url
+        redirect_count = 0
+        while True:
+            await self._validate_url_for_request(current_url)
+            async with session.get(
+                current_url,
+                headers=headers,
+                allow_redirects=False,
+            ) as response:
+                self._validate_connected_peer_ip(response, current_url)
+
+                next_url = self._handle_redirect_response(response, current_url, redirect_count)
+                if next_url is not None:
+                    redirect_count += 1
+                    current_url = next_url
+                    continue
+
+                if response.status != 200:
+                    if 500 <= response.status < 600:
+                        # 5xx 多为 CDN/网关瞬时故障，纳入重试而非终态失败
+                        raise RetryableDownloadError(f"HTTP错误: {response.status}")
+                    raise DownloadError(f"HTTP错误: {response.status}")
+
+                # 检查内容类型：HTML 错误页、JSON 等明确非图片类型直接拒绝
+                content_type = response.headers.get("content-type", "")
+                if not _is_image_compatible_content_type(content_type):
+                    raise DownloadError(f"响应内容类型非图片: {content_type.split(';')[0].strip()}")
+
+                return await self._download_response_to_temp(
+                    response,
+                    save_path,
+                    temp_path,
+                    content_type,
+                    attempt,
+                    start_time,
+                )
 
     async def download_image(
         self, url: str, save_path: Path, headers: dict[str, str] | None = None
@@ -577,52 +642,9 @@ class DownloadManager:
                 )
 
                 session = await self._ensure_session()
-                current_url = url
-                redirect_count = 0
-                # SSRF 第四层防护：禁用自动重定向改为逐跳手动处理，每跳重新走静态、
-                # DNS 与连接对端 IP 完整校验，防止经由重定向绕过跳转到内网地址
-                while True:
-                    # 依赖网络状态的 DNS 校验放在重试循环内，保障 max_retries 生效。
-                    # resolve-and-pin：会话连接器绑定 _PublicIpPinningResolver，校验通过
-                    # 的公网 IP 被钉死为连接目标，aiohttp 不再独立二次解析，DNS rebinding
-                    # 无从把实际连接切向内网；_validate_connected_peer_ip 作为纵深防御保留。
-                    await self._validate_url_for_request(current_url)
-                    async with session.get(
-                        current_url,
-                        headers=headers,
-                        allow_redirects=False,
-                    ) as response:
-                        self._validate_connected_peer_ip(response, current_url)
-
-                        next_url = self._handle_redirect_response(
-                            response, current_url, redirect_count
-                        )
-                        if next_url is not None:
-                            redirect_count += 1
-                            current_url = next_url
-                            continue
-
-                        if response.status != 200:
-                            if 500 <= response.status < 600:
-                                # 5xx 多为 CDN/网关瞬时故障，纳入重试而非终态失败
-                                raise RetryableDownloadError(f"HTTP错误: {response.status}")
-                            raise DownloadError(f"HTTP错误: {response.status}")
-
-                        # 检查内容类型：HTML 错误页、JSON 等明确非图片类型直接拒绝
-                        content_type = response.headers.get("content-type", "")
-                        if not _is_image_compatible_content_type(content_type):
-                            raise DownloadError(
-                                f"响应内容类型非图片: {content_type.split(';')[0].strip()}"
-                            )
-
-                        return await self._download_response_to_temp(
-                            response,
-                            save_path,
-                            temp_path,
-                            content_type,
-                            attempt,
-                            start_time,
-                        )
+                return await self._attempt_download(
+                    session, url, headers, save_path, temp_path, attempt, start_time
+                )
 
             except RetryableDownloadError as e:
                 # HTTP 5xx 等 CDN/网关瞬时故障，记录后落入退避重试
@@ -638,6 +660,12 @@ class DownloadManager:
                 logger.warning("下载超时 (尝试 {}): {}", attempt + 1, sanitize_url(url))
 
             except aiohttp.ClientError as e:
+                # InvalidUrlClientError 是 URL 语法层面的永久错误，重试无意义，直接终态抛出；
+                # 其余 ClientError 多为连接类瞬时故障，纳入退避重试
+                if isinstance(e, aiohttp.InvalidUrlClientError):
+                    raise DownloadError(
+                        f"无效的URL: {sanitize_url(url)} [{type(e).__name__}]"
+                    ) from e
                 last_error = DownloadError(f"网络错误: {sanitize_url(url)} [{type(e).__name__}]")
                 logger.warning(
                     "网络错误 (尝试 {}): {} [{}]",

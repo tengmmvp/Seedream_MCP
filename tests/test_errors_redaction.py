@@ -195,3 +195,34 @@ def test_redact_sensitive_message_strips_authorization_basic_scheme() -> None:
 def test_redact_sensitive_message_preserves_plain_bearer() -> None:
     """无键名前缀的 Bearer 令牌仍由 Bearer 模式剥离，叠加覆盖。"""
     assert _redact_sensitive_message("Invalid Bearer sk-secret-token-123") == ("Invalid Bearer ***")
+
+
+# ==================== CRLF 日志注入剥离 ====================
+
+
+def test_redact_sensitive_message_strips_crlf_injection() -> None:
+    """CR/LF 控制字符被替换为空格，防止上游错误体在日志中伪造行注入误导记录。
+
+    与 download_manager.sanitize_url 的控制字符剥离对齐。
+    """
+    injected = "正常错误\r\nERROR fake-line\napikey=leaked"
+    redacted = _redact_sensitive_message(injected)
+    assert "\r" not in redacted
+    assert "\n" not in redacted
+    # 伪造的 ERROR 行不再独占一行，被压平为同一行内的空格分隔片段
+    assert "fake-line" in redacted
+    # 叠加键值裸值剥离：apikey=leaked 被脱敏
+    assert "leaked" not in redacted
+
+
+def test_redact_sensitive_message_strips_lone_cr_and_lf() -> None:
+    """单独的 CR 或 LF 同样被剥离。"""
+    assert _redact_sensitive_message("a\rb\nc") == "a b c"
+
+
+def test_api_error_to_dict_strips_crlf_in_message() -> None:
+    """SeedreamAPIError.to_dict 的 message 经 CRLF 剥离，换行不进入结构化输出。"""
+    err = SeedreamAPIError(message="first\r\nsecond")
+    rendered_message = err.to_dict()["message"]
+    assert "\r" not in rendered_message
+    assert "\n" not in rendered_message

@@ -13,15 +13,19 @@ from typing import ClassVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...utils.errors import SeedreamValidationError
+from ...utils.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 from ...utils.validation import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
-    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     VALID_OPTIMIZE_MODES,
     resolve_sequential_max_images,
     validate_parallel_generation_options,
     validate_sequential_image_limit,
 )
+
+# prompt 字段长度约束，四个生成工具共享，集中声明避免散落多处
+PROMPT_MIN_LENGTH = 1
+PROMPT_MAX_LENGTH = 100000
 
 
 class ResponseFormat(str, Enum):
@@ -91,10 +95,12 @@ class GenerationTool(BaseModel):
 class _PromptAndOptimizeInput(BaseModel):
     """提示词与提示词优化参数。"""
 
+    # prompt 在基类声明以确立字段顺序（MCP inputSchema 据字段顺序展示参数，prompt 须居首）；
+    # 约束经常量声明，子类覆盖 prompt 时复用同一常量避免散落多处。
     prompt: str = Field(
         ...,
-        min_length=1,
-        max_length=100000,
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
         description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
     )
     optimize_prompt_options: OptimizePromptOptions | None = Field(
@@ -271,8 +277,8 @@ class TextToImageInput(
 
     prompt: str = Field(
         ...,
-        min_length=1,
-        max_length=100000,
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
         description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
     )
 
@@ -288,8 +294,8 @@ class ImageToImageInput(
 
     prompt: str = Field(
         ...,
-        min_length=1,
-        max_length=100000,
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
         description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。例如：把背景换成雪山、将照片转为水彩画风格。",
     )
 
@@ -305,8 +311,8 @@ class MultiImageFusionInput(
 
     prompt: str = Field(
         ...,
-        min_length=1,
-        max_length=100000,
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
         description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。请使用“图X”指定图像（如：将图1的服装换为图2的服装）。",
     )
 
@@ -327,8 +333,8 @@ class SequentialGenerationInput(
 
     prompt: str = Field(
         ...,
-        min_length=1,
-        max_length=100000,
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
         description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。",
     )
 

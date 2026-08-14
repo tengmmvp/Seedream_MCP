@@ -70,7 +70,11 @@ async def _auto_save(
         (保存结果列表, 可保存图片在归一化列表中的原始索引列表)。索引列表供回填
         阶段按位置写入，消除收集与回填两次独立过滤可能错位的风险。
     """
-    base_dir = await asyncio.to_thread(_resolve_base_dir, config, save_path)
+
+    def _resolve_and_build() -> AutoSaveManager:
+        # base_dir 解析与 manager 构造均含同步文件系统调用，并入工作线程执行避免阻塞事件循环
+        resolved_base_dir = _resolve_base_dir(config, save_path)
+        return _build_auto_save_manager(config, resolved_base_dir, download_manager)
 
     images = extract_images(result)
     image_data: list[dict[str, Any]] = []
@@ -95,8 +99,11 @@ async def _auto_save(
         logger.warning(empty_warning)
         return [], []
 
+    # manager 构造含 FileManager.__init__ 的 resolve/exists/mkdir 等同步文件系统调用，
+    # 经 to_thread 在工作线程内完成避免在事件循环线程内同步阻塞
+    auto_save_manager = await asyncio.to_thread(_resolve_and_build)
     # async with 确保 save 阶段任意异常均释放 manager 自建的下载连接池，不依赖手动 close
-    async with _build_auto_save_manager(config, base_dir, download_manager) as auto_save_manager:
+    async with auto_save_manager:
         results = await save_method(auto_save_manager, image_data, tool_name)
         return results, saveable_indices
 

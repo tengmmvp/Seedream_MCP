@@ -137,33 +137,130 @@ def test_cleanup_old_files_does_not_descend_into_symlink_dir(tmp_path: Path) -> 
     assert result["deleted_files"] == 0
 
 
-def test_cleanup_old_files_days_below_one_skips_deletion(tmp_path: Path) -> None:
-    """days<1 视为禁用清理：即使存在过期文件也不删除，返回零计数且文件保留。
+def test_enforce_total_size_limit_evicts_oldest_until_under_limit(tmp_path: Path) -> None:
+    """总量超限时按 mtime 升序驱逐最旧文件直至总量达标，保留较新文件。"""
+    manager = FileManager(base_dir=tmp_path)
 
-    与 auto_save 的"0=不清理"语义统一，避免误传 0/负值删除全部文件。
+    now = datetime.now()
+    # 三个文件各 100 字节，总量 300；上限 150 须驱逐最旧两个共 200 字节方达标
+    files: list[Path] = []
+    for i, age_days in enumerate([10, 5, 1]):
+        f = tmp_path / f"img_{i}.png"
+        f.write_bytes(b"x" * 100)
+        t = (now - timedelta(days=age_days)).timestamp()
+        os.utime(f, (t, t))
+        files.append(f)
+
+    result = manager.enforce_total_size_limit(150)
+
+    # 最旧两个被驱逐，最新一个保留
+    assert result["deleted_files"] == 2
+    assert result["deleted_size"] == 200
+    assert not files[0].exists()
+    assert not files[1].exists()
+    assert files[2].exists()
+
+
+def test_enforce_total_size_limit_noop_when_under_limit(tmp_path: Path) -> None:
+    """总量未超上限时不删除任何文件。"""
+    manager = FileManager(base_dir=tmp_path)
+    f = tmp_path / "img.png"
+    f.write_bytes(b"x" * 100)
+
+    result = manager.enforce_total_size_limit(200)
+
+    assert result["deleted_files"] == 0
+    assert result["deleted_size"] == 0
+    assert f.exists()
+
+
+def test_run_cleanup_policies_runs_age_then_quota_in_single_scan(
+    tmp_path: Path,
+) -> None:
+    """单次扫描依次执行按天清理与总量配额：过期文件先删，剩余超配额再驱逐最旧。
+
+    验证两策略共用一次扫描结果且配额驱逐基于按天清理后的剩余文件：过期文件既被按天
+    删除，不再被配额驱逐重复处理。
     """
     manager = FileManager(base_dir=tmp_path)
 
+    now = datetime.now()
+    # 过期文件：40 天前，100 字节；按天清理会删除
+    expired = tmp_path / "expired.png"
+    expired.write_bytes(b"x" * 100)
+    expired_t = (now - timedelta(days=40)).timestamp()
+    os.utime(expired, (expired_t, expired_t))
+    # 较新文件：1 天前，各 100 字节；按天保留，但总量超配额时最旧的会被驱逐
+    recent_old = tmp_path / "recent_old.png"
+    recent_old.write_bytes(b"x" * 100)
+    recent_old_t = (now - timedelta(days=1, seconds=2)).timestamp()
+    os.utime(recent_old, (recent_old_t, recent_old_t))
+    recent_new = tmp_path / "recent_new.png"
+    recent_new.write_bytes(b"x" * 100)
+    recent_new_t = (now - timedelta(days=1, seconds=1)).timestamp()
+    os.utime(recent_new, (recent_new_t, recent_new_t))
+
+    # 按天 30 天删除 expired（100B）；剩余 200B，配额 150 须再驱逐 recent_old（最旧）
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=150)
+
+    assert result["deleted_files"] == 2
+    assert result["deleted_size"] == 200
+    assert result["errors"] == []
+    assert not expired.exists()
+    assert not recent_old.exists()
+    assert recent_new.exists()
+
+
+def test_run_cleanup_policies_quota_excludes_age_deleted_files(tmp_path: Path) -> None:
+    """配额驱逐对按天清理已删除的文件不重复 unlink，errors 不含已删路径的删除失败。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    now = datetime.now()
+    expired = tmp_path / "expired.png"
+    expired.write_bytes(b"x" * 100)
+    os.utime(expired, ((now - timedelta(days=40)).timestamp(),) * 2)
+    keep = tmp_path / "keep.png"
+    keep.write_bytes(b"x" * 100)
+    os.utime(keep, ((now - timedelta(days=1)).timestamp(),) * 2)
+
+    # 按天删除 expired；剩余 keep 100B，配额 200 不超，不再驱逐
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=200)
+
+    assert result["deleted_files"] == 1
+    assert result["deleted_size"] == 100
+    assert result["errors"] == []
+    assert not expired.exists()
+    assert keep.exists()
+
+
+def test_run_cleanup_policies_skips_age_when_days_below_one(tmp_path: Path) -> None:
+    """days<1 时跳过按天清理，仅执行配额驱逐。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    now = datetime.now()
     old_file = tmp_path / "old.png"
-    old_file.write_bytes(b"old")
-    old_time = (datetime.now() - timedelta(days=40)).timestamp()
-    os.utime(old_file, (old_time, old_time))
+    old_file.write_bytes(b"x" * 100)
+    os.utime(old_file, ((now - timedelta(days=40)).timestamp(),) * 2)
 
-    # days=0 跳过清理：返回零计数且过期文件仍存在
-    result_zero = manager.cleanup_old_files(days=0)
-    assert result_zero["deleted_files"] == 0
-    assert result_zero["deleted_size"] == 0
-    assert result_zero["errors"] == []
-    assert old_file.exists()
+    # days=0 跳过按天清理：old_file 虽过期仍保留；配额 50 须驱逐它
+    result = manager.run_cleanup_policies(days=0, max_total_bytes=50)
 
-    # days=-1 同样跳过
-    result_negative = manager.cleanup_old_files(days=-1)
-    assert result_negative["deleted_files"] == 0
-    assert result_negative["deleted_size"] == 0
-    assert result_negative["errors"] == []
-    assert old_file.exists()
-
-    # 对照：days=30 正常清理，删除该过期文件
-    result_thirty = manager.cleanup_old_files(days=30)
-    assert result_thirty["deleted_files"] == 1
+    assert result["deleted_files"] == 1
+    assert result["deleted_size"] == 100
     assert not old_file.exists()
+
+
+def test_run_cleanup_policies_skips_quota_when_none(tmp_path: Path) -> None:
+    """max_total_bytes=None 时跳过配额驱逐，仅执行按天清理。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    now = datetime.now()
+    expired = tmp_path / "expired.png"
+    expired.write_bytes(b"x" * 100)
+    os.utime(expired, ((now - timedelta(days=40)).timestamp(),) * 2)
+
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
+
+    assert result["deleted_files"] == 1
+    assert result["deleted_size"] == 100
+    assert not expired.exists()

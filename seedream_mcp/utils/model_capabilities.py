@@ -75,6 +75,24 @@ _MODEL_FAMILY_TOKENS: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+# 模型友好别名到真实 Model ID 的映射，config.normalize_model_selector 据此展开别名
+MODEL_ALIASES: dict[str, str] = {
+    "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
+    "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
+    "doubao-seedream-5.0-lite": "doubao-seedream-5-0-260128",
+    "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
+    "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
+}
+
+# 已下线模型的特征 token，model_id 命中任意 token 时 config 校验拒绝
+DEPRECATED_MODEL_TOKENS: set[str] = {
+    "doubao-seedream-3-0",
+    "doubao-seedream-3.0",
+    "doubao-seededit-3-0",
+    "doubao-seededit-3.0",
+}
+
+
 def _resolve_model_family(model_id: str) -> str:
     """将模型标识解析为规范家族名，未命中已知家族时返回 unknown。"""
     normalized = (model_id or "").lower()

@@ -190,12 +190,12 @@ class AutoSaveManager:
                 return
             _cleanup_last_run[base_key] = now
         try:
-            if self.cleanup_days > 0:
-                await self.cleanup_old_files(self.cleanup_days)
-            if self.max_total_bytes is not None:
-                await asyncio.to_thread(
-                    self.file_manager.enforce_total_size_limit, self.max_total_bytes
-                )
+            # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历
+            await asyncio.to_thread(
+                self.file_manager.run_cleanup_policies,
+                self.cleanup_days,
+                self.max_total_bytes,
+            )
         except Exception as e:
             # 回滚到清理前的时间戳，使下次批量保存能立即重试而非等待完整节流间隔。
             async with _cleanup_lock:
@@ -500,14 +500,3 @@ class AutoSaveManager:
         return await self._run_batch_save(
             tasks, image_data, fallback_url_key=None, log_label="批量 Base64 保存完成"
         )
-
-    async def cleanup_old_files(self, days: int = 30) -> dict[str, Any]:
-        """清理超过指定天数的旧文件。
-
-        Args:
-            days: 文件保留天数，超过此天数的文件将被删除
-
-        Returns:
-            清理统计信息
-        """
-        return await asyncio.to_thread(self.file_manager.cleanup_old_files, days)

@@ -10,9 +10,11 @@ from __future__ import annotations
 import pytest
 
 from seedream_mcp.utils.errors import SeedreamValidationError
-from seedream_mcp.utils.validation import (
+from seedream_mcp.utils.model_capabilities import (
     get_max_reference_images,
     is_seedream_50_pro_model,
+)
+from seedream_mcp.utils.validation import (
     validate_generation_tools,
     validate_optimize_prompt_options,
     validate_output_format,

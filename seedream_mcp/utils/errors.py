@@ -417,6 +417,10 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     r"(?i)(api[-_]?key|authorization)([ \t]*[:=][ \t]*)\S+(?:[ \t]+\S+)?"
 )
 
+# CR/LF 控制字符模式：上游错误体可能携带换行，剥离以防止日志注入伪造行，与
+# download_manager.sanitize_url 的控制字符剥离对齐。替换为空格保留词边界可读性。
+_CONTROL_CHARS_PATTERN = re.compile(r"[\r\n]")
+
 
 def _redact_bearer_tokens(value: Any) -> Any:
     """剥离字符串值中的 Bearer 令牌，保留 Bearer 前缀以保留语义。"""
@@ -426,13 +430,16 @@ def _redact_bearer_tokens(value: Any) -> Any:
 
 
 def _redact_sensitive_message(value: str) -> str:
-    """剥离消息中的敏感键值裸值与 Bearer 令牌。
+    """剥离消息中的敏感键值裸值、Bearer 令牌与 CRLF 控制字符。
 
     先以 _SENSITIVE_KEYVALUE_PATTERN 剥离 authorization/apikey 键名后的裸值，再以
     _BEARER_TOKEN_PATTERN 剥离残留的 Bearer 令牌，两者叠加覆盖上游错误体常见的回显形态。
+    末尾剥离 CR/LF 控制字符，与 download_manager.sanitize_url 对齐，防止攻击者经由
+    上游错误体在日志或结构化输出中伪造行实施日志注入。
     """
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", value)
-    return _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
+    redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
+    return _CONTROL_CHARS_PATTERN.sub(" ", redacted)
 
 
 def _is_sensitive_key(key: Any) -> bool:

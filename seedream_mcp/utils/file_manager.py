@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import heapq
 import os
 import re
 import stat
@@ -20,7 +22,7 @@ from typing import Any
 from .errors import SeedreamMCPError
 from .formats import SUPPORTED_IMAGE_EXTENSIONS
 from .logging import get_logger
-from .os_utils import open_temp_fd
+from .os_utils import atomic_replace_from_fd
 
 logger = get_logger(__name__)
 
@@ -407,34 +409,17 @@ class FileManager:
                 ext = final_path.suffix
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
-            # 原子落盘：open_temp_fd 经 tempfile.mkstemp 在 final_path 同目录创建不可预测
-            # 随机名临时文件并返回独占 fd，规避可预测临时路径被预置符号链接覆盖任意文件的
-            # TOCTOU；经 fd 写入后 os.replace 原子替换到 final_path，崩溃时仅残留随机临时
-            # 文件而非损坏目标。与 download_manager 下载路径的落盘语义一致，打开或写入失败
-            # 抛 OSError 由下方 except 转 FileManagerError。
-            fd, tmp_path = open_temp_fd(final_path.parent, suffix=".part")
-            replaced = False
-            fd_handed_off = False
-            try:
-                try:
-                    with os.fdopen(fd, "wb") as f:
-                        fd_handed_off = True
-                        f.write(data)
-                finally:
-                    # os.fdopen 接管前抛错时手动关闭 fd 避免泄漏；已由 with 关闭时二次关闭
-                    # 抛 OSError，吞掉以不掩盖原始异常
-                    if not fd_handed_off:
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
-                os.replace(tmp_path, final_path)
-                replaced = True
-            finally:
-                # replace 成功后 tmp_path 已重命名不存在；异常路径含 KeyboardInterrupt 等
-                # 非 OSError 也须清理残留随机临时文件，与 download_manager 落盘鲁棒性对齐
-                if not replaced:
-                    tmp_path.unlink(missing_ok=True)
+
+            # 原子落盘协议由 os_utils.atomic_replace_from_fd 统一提供，与 download_manager
+            # 下载路径复用同一骨架：随机名临时文件规避符号链接 TOCTOU，写入后 os.replace
+            # 原子替换，失败清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。
+            # save_bytes 为同步公共接口且数据已在内存，经 asyncio.run 驱动异步骨架；其实际
+            # 调用方均位于工作线程或测试同步上下文，无运行中事件循环，asyncio.run 始终可用。
+            async def _writer(fd: int) -> None:
+                with os.fdopen(fd, "wb", closefd=False) as f:
+                    f.write(data)
+
+            asyncio.run(atomic_replace_from_fd(final_path, _writer, suffix=".part"))
             return {
                 "file_path": str(final_path),
                 "file_size": len(data),
@@ -508,7 +493,8 @@ class FileManager:
         deleted_files: list[str] = []
         deleted_size = 0
         try:
-            expired_files, directories = self._collect_files_to_delete(cutoff_epoch, errors)
+            all_files, directories = self._collect_all_files(errors)
+            expired_files = [(p, s, m) for (p, s, m) in all_files if m < cutoff_epoch]
             deleted_files, deleted_size = self._delete_expired_files(expired_files, errors)
             self._prune_empty_dirs(directories)
         except Exception as e:
@@ -521,41 +507,106 @@ class FileManager:
         """按总字节上限驱逐最旧文件，使保存目录占用不超过 max_total_bytes。
 
         与 cleanup_old_files 的按天清理互补：按天清理控制文件年龄，本方法控制总占用，
-        防止保留窗口内持续写入耗尽磁盘。复用 _collect_files_to_delete 的扫描与越界防护，
-        按 mtime 升序删除最旧文件直至总量达标。
+        防止保留窗口内持续写入耗尽磁盘。复用 _collect_all_files 的扫描与越界防护，
+        经 heapq.nsmallest 取最旧若干候选按 mtime 升序删除直至总量达标。
         """
         errors: list[str] = []
         deleted_files = 0
         deleted_size = 0
         try:
-            # cutoff 取当前时刻以收集全部已存在文件。当前时刻晚于任意已存在文件的 mtime，故全部命中过期条件。
-            all_files, _directories = self._collect_files_to_delete(
-                datetime.now().timestamp(), errors
+            all_files, _directories = self._collect_all_files(errors)
+            deleted_files, deleted_size = self._enforce_quota_from_scan(
+                all_files, max_total_bytes, errors
             )
-            total = sum(size for _path, size, _mtime in all_files)
-            if total <= max_total_bytes:
-                return {"deleted_files": 0, "deleted_size": 0, "errors": errors}
-            for file_path, size, _mtime in sorted(all_files, key=lambda item: item[2]):
-                if total <= max_total_bytes:
-                    break
-                try:
-                    file_path.unlink()
-                    total -= size
-                    deleted_files += 1
-                    deleted_size += size
-                    logger.info("总量配额驱逐旧文件: {}", file_path)
-                except Exception as e:
-                    errors.append(f"删除文件失败 {file_path}: {e}")
-                    logger.warning("删除文件失败: {} -> {}", file_path, e)
         except Exception as e:
             errors.append(f"总量清理过程出错: {e}")
             logger.error("总量清理过程出错: {}", e)
         return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
 
-    def _collect_files_to_delete(
-        self, cutoff_epoch: float, errors: list[str]
+    def run_cleanup_policies(self, days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        """单次目录扫描依次执行按天清理与总量配额驱逐，供节流清理入口复用。
+
+        cleanup_old_files 与 enforce_total_size_limit 各自独立扫描；本方法共享一次遍历
+        结果执行两策略，避免重复全目录 os.walk。按天策略先执行，配额驱逐基于剩余文件
+        与剩余总量计算。days 小于 1 跳过按天清理，max_total_bytes 为 None 跳过配额驱逐。
+
+        Returns:
+            合并的清理结果，包含两策略累计的删除文件数、释放字节数与错误列表。
+        """
+        errors: list[str] = []
+        deleted_files = 0
+        deleted_size = 0
+        try:
+            all_files, directories = self._collect_all_files(errors)
+            remaining_files = all_files
+            if days >= 1:
+                # 以 epoch 秒比较 st_mtime，规避本地时区与夏令时跳变导致的清理边界漂移。
+                cutoff_epoch = datetime.now().timestamp() - days * 86400
+                expired_files = [(p, s, m) for (p, s, m) in all_files if m < cutoff_epoch]
+                deleted_names, age_deleted_size = self._delete_expired_files(expired_files, errors)
+                self._prune_empty_dirs(directories)
+                deleted_files += len(deleted_names)
+                deleted_size += age_deleted_size
+                if deleted_names:
+                    # 配额驱逐基于按天清理后的剩余文件，剔除已删条目避免对已删路径重复 unlink
+                    deleted_set = set(deleted_names)
+                    remaining_files = [
+                        item for item in all_files if str(item[0]) not in deleted_set
+                    ]
+            if max_total_bytes is not None:
+                quota_deleted, quota_deleted_size = self._enforce_quota_from_scan(
+                    remaining_files, max_total_bytes, errors
+                )
+                deleted_files += quota_deleted
+                deleted_size += quota_deleted_size
+        except Exception as e:
+            errors.append(f"清理过程出错: {e}")
+            logger.error("清理过程出错: {}", e)
+        return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
+
+    def _enforce_quota_from_scan(
+        self,
+        files: list[tuple[Path, int, float]],
+        max_total_bytes: int,
+        errors: list[str],
+    ) -> tuple[int, int]:
+        """按总量配额从已扫描文件中驱逐最旧文件，返回删除文件数与累计释放字节数。
+
+        heapq.nsmallest 仅取可能被删的最旧候选：非零字节文件每删一个至少减少 1 字节，
+        覆盖超额量至多需 excess 个；0 字节文件不减少总量但占据最旧位置也可能被删，计入
+        候选上界，最终封顶为文件总数，避免对全量文件排序。nsmallest 与 sorted 同为稳定
+        排序，逐候选删除至总量达标的语义在删除全成功时与原 sorted 实现等价；个别 unlink
+        失败时固定候选窗口可能提前耗尽而总量仍超限，失败记入 errors 由下次节流清理重试，
+        驱逐力在极端错误路径下弱于原全量遍历。
+        """
+        total = sum(size for _path, size, _mtime in files)
+        if total <= max_total_bytes:
+            return 0, 0
+        excess = total - max_total_bytes
+        zero_byte_files = sum(1 for _p, size, _m in files if size == 0)
+        candidate_limit = min(len(files), excess + zero_byte_files)
+        deleted_files = 0
+        deleted_size = 0
+        for file_path, size, _mtime in heapq.nsmallest(
+            candidate_limit, files, key=lambda item: item[2]
+        ):
+            if total <= max_total_bytes:
+                break
+            try:
+                file_path.unlink()
+                total -= size
+                deleted_files += 1
+                deleted_size += size
+                logger.info("总量配额驱逐旧文件: {}", file_path)
+            except Exception as e:
+                errors.append(f"删除文件失败 {file_path}: {e}")
+                logger.warning("删除文件失败: {} -> {}", file_path, e)
+        return deleted_files, deleted_size
+
+    def _collect_all_files(
+        self, errors: list[str]
     ) -> tuple[list[tuple[Path, int, float]], list[Path]]:
-        """遍历基础目录，收集过期文件与待评估的空目录候选。
+        """遍历基础目录，收集全部普通文件与待评估的空目录候选。
 
         os.walk(followlinks=False) 不下降进入符号链接目录。Windows NTFS junction 属
         reparse point 但 is_symlink 返回 False，followlinks 无法拦截，仍会被下降进入
@@ -564,15 +615,17 @@ class FileManager:
         之外的条目造成数据破坏。os.walk 下降 junction 时已发生的 OS 级 listdir 无法在此
         拦截，涉及 NTLM/SMB 出站认证风险，部署方应确保 base_dir 不接受不可信写入。
 
+        一次扫描产出全部 (path, size, mtime) 供按天清理与总量配额两策略共用，按天策略
+        在调用方按 cutoff 过滤，避免两策略各自全目录遍历。
+
         Args:
-            cutoff_epoch: 过期判定的时间戳下界，st_mtime 小于该值的文件视为过期。
             errors: 收集 stat 失败的错误描述列表，与删除阶段共享同一列表。
 
         Returns:
-            (expired_files, directories)：expired_files 为 (path, size, mtime) 元组列表，
+            (all_files, directories)：all_files 为 (path, size, mtime) 元组列表，
             directories 为待评估空目录清理的目录列表，不含 base_dir 自身。
         """
-        expired_files: list[tuple[Path, int, float]] = []
+        all_files: list[tuple[Path, int, float]] = []
         directories: list[Path] = []
         for root, dirs, files in os.walk(self.base_dir, followlinks=False):
             root_path = Path(root)
@@ -627,12 +680,11 @@ class FileManager:
                     stat_result = file_path.stat()
                     if not stat.S_ISREG(stat_result.st_mode):
                         continue
-                    if stat_result.st_mtime < cutoff_epoch:
-                        expired_files.append((file_path, stat_result.st_size, stat_result.st_mtime))
+                    all_files.append((file_path, stat_result.st_size, stat_result.st_mtime))
                 except Exception as e:
                     errors.append(f"获取文件信息失败 {file_path}: {e}")
                     logger.warning("获取文件信息失败: {} -> {}", file_path, e)
-        return expired_files, directories
+        return all_files, directories
 
     @staticmethod
     def _delete_expired_files(

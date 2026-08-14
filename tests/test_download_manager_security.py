@@ -30,6 +30,20 @@ class _FakeLoop:
         ]
 
 
+class _BlockingFakeLoop:
+    """getaddrinfo 阻塞在 gate 上，使并发解析重叠以验证在途 task 去重。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.gate = asyncio.Event()
+
+    async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+        del host, port, proto
+        self.calls += 1
+        await self.gate.wait()
+        return [(None, None, None, None, ("8.8.8.8", 0))]
+
+
 @pytest.mark.asyncio
 async def test_validate_public_dns_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_loop = _FakeLoop()
@@ -40,6 +54,39 @@ async def test_validate_public_dns_uses_ttl_cache(monkeypatch: pytest.MonkeyPatc
     await manager._validate_public_dns("example.com")
 
     assert fake_loop.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_public_ips_dedups_inflight_resolutions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同 host 并发解析在缓存冷启动时共享同一在途 task，仅触发一次 getaddrinfo。
+
+    getaddrinfo 阻塞在 gate 上使两并发调用重叠：首个调用 miss 缓存创建并登记在途 task，
+    次个调用发现登记项后 await 同一 task，避免各自独立解析。
+    """
+    fake_loop = _BlockingFakeLoop()
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+
+    manager = DownloadManager(dns_cache_ttl=60)
+    t1 = asyncio.create_task(manager._resolve_public_ips("example.com"))
+    t2 = asyncio.create_task(manager._resolve_public_ips("example.com"))
+    # 让出控制权使两任务均调度到在途等待点；getaddrinfo 已被调用一次并阻塞在 gate
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if fake_loop.calls == 1:
+            break
+
+    assert fake_loop.calls == 1
+    # 在途 task 已登记且尚未完成，证明两任务共享同一在途解析
+    assert "example.com" in manager._dns_inflight
+    fake_loop.gate.set()
+    r1, r2 = await asyncio.gather(t1, t2)
+
+    assert r1 == r2 == ("8.8.8.8",)
+    # task 完成后在途登记已清空，缓存已写入
+    assert manager._dns_inflight == {}
+    assert "example.com" in manager._dns_cache
 
 
 def test_validate_connected_peer_ip_blocks_non_public_ip() -> None:

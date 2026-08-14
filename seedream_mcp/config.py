@@ -18,6 +18,7 @@ from dotenv import dotenv_values
 
 from .utils.errors import SeedreamConfigError, SeedreamValidationError
 from .utils.formats import DEFAULT_MAX_FILE_SIZE
+from .utils.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
 from .utils.validation import (
     FALSE_BOOL_STRINGS,
     TRUE_BOOL_STRINGS,
@@ -31,22 +32,8 @@ from .utils.validation import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
-# 模型友好别名到真实 Model ID 的映射，normalize_model_selector 据此展开别名
-MODEL_ALIASES: dict[str, str] = {
-    "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
-    "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
-    "doubao-seedream-5.0-lite": "doubao-seedream-5-0-260128",
-    "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
-    "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
-}
-
-# 已下线模型的特征 token，model_id 命中任意 token 时 validate 拒绝配置
-DEPRECATED_MODEL_TOKENS: set[str] = {
-    "doubao-seedream-3-0",
-    "doubao-seedream-3.0",
-    "doubao-seededit-3-0",
-    "doubao-seededit-3.0",
-}
+# MODEL_ALIASES 与 DEPRECATED_MODEL_TOKENS 属模型知识，统一定义于 model_capabilities，
+# 此处经 import 暴露供 normalize_model_selector 与 validate 使用，外部仍可从 config 导入。
 
 # 合法日志级别，供 config 校验与 CLI choices 共用此单一来源
 LEGAL_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -102,7 +89,9 @@ class SeedreamConfig:
     auto_save_max_concurrent: int = _env_field(5, "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT")
     auto_save_date_folder: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_DATE_FOLDER")
     auto_save_cleanup_days: int = _env_field(30, "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS")
-    auto_save_max_total_bytes: int | None = _env_field(None, "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES")
+    auto_save_max_total_bytes: int | None = _env_field(
+        10 * 1024 * 1024 * 1024, "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES"
+    )
 
     # 流式处理配置
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")

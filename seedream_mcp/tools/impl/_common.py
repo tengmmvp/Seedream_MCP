@@ -30,7 +30,7 @@ def _default_start_log_values(
 
 
 def _sequential_start_log_values_factory(
-    max_images: Any,
+    max_images: int | None,
 ) -> Callable[["GenerationExecutionContext"], tuple[Any, ...]]:
     """构造组图输出开始日志参数的 builder，闭包捕获运行时 max_images。"""
 

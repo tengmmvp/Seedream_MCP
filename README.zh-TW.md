@@ -173,7 +173,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日誌層級
 ```
 
-> **安全提示**：繫結 `localhost` 時服務將其視為回環位址，不強制 Bearer 鑑權與 TLS。部署方應確認 `localhost` 解析到 `127.0.0.1` 或 `::1`，容器與虛擬環境若修改 hosts 需特別注意；非回環繫結必須設定 Bearer 權杖與 TLS。
+> **安全提示**：繫結 `localhost` 時服務將其視為回環位址，不強制 Bearer 鑑權與 TLS。部署方應確認 `localhost` 解析到 `127.0.0.1` 或 `::1`，容器與虛擬環境若修改 hosts 需特別注意；非回環繫結必須設定 Bearer 權杖與 TLS。生產與容器部署應透過環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞密鑰，而非 CLI `--api-key` / `--auth-token`（命令列參數會暴露在行程清單與 shell 歷史記錄中）；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。
 
 ### 使用範例
 
@@ -435,10 +435,12 @@ SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒）
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 儲存目錄總位元組上限（預設 10GB；超限按最舊檔案優先逐出）
 
 # 工作區與傳輸
 SEEDREAM_WORKSPACE_ROOT=                    # 本地開發時檔案讀寫邊界回退目錄（MCP Roots 優先）
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鑑權權杖（非回環繫結建議設定）
+SEEDREAM_HTTP_MAX_BODY_SIZE=104857600       # streamable-http 請求內文上限（位元組，≥1MB，預設 100MB）
 
 # 用戶端效能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

@@ -21,6 +21,7 @@ from .errors import SeedreamConfigError, SeedreamValidationError
 from .formats import SUPPORTED_IMAGE_EXTENSIONS
 from .logging import get_logger
 from .image_validation import validate_image_input
+from .image_ref import classify_image_reference
 
 logger = get_logger(__name__)
 
@@ -277,7 +278,7 @@ def validate_image_path(
         三元组 (是否有效, 错误信息, 标准化路径)；URL 有效但路径为 None。
     """
     try:
-        if path.startswith(("http://", "https://")):
+        if classify_image_reference(path) == "url":
             return True, "", None
 
         if base_dir is None:

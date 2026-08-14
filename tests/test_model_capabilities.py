@@ -4,7 +4,7 @@
 """
 
 from seedream_mcp.config import MODEL_ALIASES
-from seedream_mcp.utils.validation import (
+from seedream_mcp.utils.model_capabilities import (
     MODEL_FAMILY_40,
     MODEL_FAMILY_45,
     MODEL_FAMILY_50_LITE,
