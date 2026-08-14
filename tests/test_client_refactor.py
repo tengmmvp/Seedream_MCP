@@ -788,31 +788,31 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
     monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
 
     # 同一输入第二次走缓存，底层 prepare_image_input 只调一次
-    first = await client._prepare_image_input("img-1")
-    second = await client._prepare_image_input("img-1")
+    first = await client._image_preparer.prepare_image_input("img-1")
+    second = await client._image_preparer.prepare_image_input("img-1")
     assert first == "prepared:img-1"
     assert second == "prepared:img-1"
     assert call_count == 1
 
     # 填满缓存，加入 img-1 / img-2 / img-3
-    await client._prepare_image_input("img-2")
-    await client._prepare_image_input("img-3")
+    await client._image_preparer.prepare_image_input("img-2")
+    await client._image_preparer.prepare_image_input("img-3")
     assert len(client._image_preparer._prepare_cache) == 3
     assert call_count == 3
 
     # 重新访问 img-1 使其成为近期使用，img-2 随即成为最久未用
-    await client._prepare_image_input("img-1")
+    await client._image_preparer.prepare_image_input("img-1")
     assert call_count == 3
 
     # 加入 img-4 触发淘汰：LRU 淘汰最久未用的 img-2，保留近期命中的 img-1
-    await client._prepare_image_input("img-4")
+    await client._image_preparer.prepare_image_input("img-4")
     assert len(client._image_preparer._prepare_cache) == 3
     assert call_count == 4
 
     # img-2 已被淘汰，重新请求会再次调用底层；img-1 仍在缓存不再调用
-    await client._prepare_image_input("img-2")
+    await client._image_preparer.prepare_image_input("img-2")
     assert call_count == 5
-    await client._prepare_image_input("img-1")
+    await client._image_preparer.prepare_image_input("img-1")
     assert call_count == 5
 
 

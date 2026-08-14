@@ -28,7 +28,7 @@ from .io_file import (
     _is_reparse_point,
     atomic_replace_from_fd_sync,
 )
-from .io_path import _is_within_resolved
+from .io_path import is_within_resolved
 from .io_url import get_file_extension_from_url
 
 logger = get_logger(__name__)
@@ -114,7 +114,7 @@ class FileManager:
     def validate_path(self, path: Path) -> bool:
         """验证路径是否在基础目录范围内。
 
-        复用 io_path._is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
+        复用 io_path.is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
         或经由符号链接指向基础目录之外的路径。
 
         Args:
@@ -125,7 +125,7 @@ class FileManager:
         """
         try:
             abs_path = path.resolve()
-            if _is_within_resolved(abs_path, self._base_abs):
+            if is_within_resolved(abs_path, self._base_abs):
                 return True
             logger.warning("路径不在基础目录内: {}", abs_path)
             return False
@@ -136,10 +136,10 @@ class FileManager:
     def _resolved_within_base(self, resolved_path: Path) -> bool:
         """判断已 resolve 的路径是否位于基础目录内，直接比较，不再 resolve。
 
-        复用 io_path._is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
-        供 cleanup_old_files 等热路径复用，避免对已 resolve 路径重复解析。
+        复用 io_path.is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
+        供 run_cleanup_policies 等热路径复用，避免对已 resolve 路径重复解析。
         """
-        return _is_within_resolved(resolved_path, self._base_abs)
+        return is_within_resolved(resolved_path, self._base_abs)
 
     def sanitize_filename(self, filename: str) -> str:
         """清理文件名，移除文件系统不安全字符并规避 Windows 保留设备名。
@@ -449,6 +449,10 @@ class FileManager:
         剩余文件计算，剔除已删条目避免对已删路径重复 unlink。days 小于 1 跳过按天清理，
         max_total_bytes 为 None 跳过配额驱逐。
 
+        注意：空目录清理针对 base_dir 内全部空目录，不区分目录是否由本服务创建；
+        用户在保存目录内自行维护的空目录（如占位目录）也会被移除，需保留目录结构
+        请在目录内放置占位文件。
+
         Returns:
             合并的清理结果，包含两策略累计的删除文件数、释放字节数与错误列表。
         """
@@ -488,8 +492,8 @@ class FileManager:
         """对已扫描文件按保留天数删除过期项，返回已删路径名列表与释放字节数。
 
         cutoff 以 epoch 秒比较 st_mtime，规避本地时区与夏令时跳变导致的清理边界漂移。
-        供 cleanup_old_files 与 run_cleanup_policies 共用，消除两处 cutoff 计算与过期
-        过滤的重复实现；调用方负责 days 小于 1 的跳过判定。
+        供 run_cleanup_policies 使用，cutoff 计算与过期过滤集中于此避免重复实现；
+        调用方负责 days 小于 1 的跳过判定。
         """
         cutoff_epoch = datetime.now().timestamp() - days * 86400
         expired_files = [(p, s, m) for (p, s, m) in all_files if m < cutoff_epoch]
@@ -645,7 +649,9 @@ class FileManager:
     def _prune_empty_dirs(directories: list[Path]) -> None:
         """按深度逆序删除已变空的子目录，先删深层再删浅层。
 
-        目录删除失败仅记录警告不计入 errors 列表，与历史行为一致。
+        清理不区分目录来源：base_dir 内用户自建的空目录同样会被移除，行为边界已在
+        run_cleanup_policies 对外披露。目录删除失败仅记录警告不计入 errors 列表，
+        与历史行为一致。
         """
         # 按目录深度逆序排序，先删深层空目录再删浅层，使父目录在子目录删除后变空而被清理。
         for dir_path in sorted(directories, key=lambda p: len(p.parts), reverse=True):

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import time  # noqa: F401  # time 为进程共享模块，扫描缓存经其驱动 TTL，外部经本模块替换 monotonic 即可模拟过期
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,21 +17,15 @@ from mcp.types import CallToolResult, TextContent
 from ..core._helpers import _safe_ctx_log, _safe_report_progress
 from ..core.outputs import BrowseImagesStructuredOutput, build_error_dict
 from ..core.schemas import BrowseImagesInput
-from ...utils.io.io_scan import (  # noqa: F401  # 扫描缓存符号经本模块重导出，外部经本模块访问缓存状态
-    _DIRECTORY_SCAN_CACHE,
-    _DIRECTORY_SCAN_CACHE_TTL_SECONDS,
-    _cached_find_images_in_directory,
-)
+from ...utils.io.io_scan import _cached_find_images_in_directory
 from ...utils.core.errors import format_error_for_user
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import (
     SUPPORTED_IMAGE_EXTENSIONS,
-    _is_within_resolved,
     find_images_in_directory,
     get_relative_path,
     get_workspace_roots,
-    is_path_within_any_base,
-    is_path_within_base,
+    is_within_resolved,
     normalize_path,
 )
 
@@ -114,11 +107,16 @@ def _format_file_info(
         return f"{display_path} | 文件信息不可用", {"size_mb": None, "modified": None}
     size_mb = stat_result.st_size / (1024 * 1024)
     # astimezone 将 naive 本地时间标注为本地时区，输出携带 UTC 偏移以消除时区歧义。
-    mtime = (
-        datetime.datetime.fromtimestamp(stat_result.st_mtime)
-        .astimezone()
-        .isoformat(sep=" ", timespec="seconds")
-    )
+    # 畸形时间戳（负值或超范围）会使 fromtimestamp 抛 ValueError/OSError，与 stat 失败
+    # 同样降级为"文件信息不可用"，不使整次浏览落到兜底错误分支
+    try:
+        mtime = (
+            datetime.datetime.fromtimestamp(stat_result.st_mtime)
+            .astimezone()
+            .isoformat(sep=" ", timespec="seconds")
+        )
+    except (ValueError, OSError, OverflowError):
+        return f"{display_path} | 文件信息不可用", {"size_mb": None, "modified": None}
     return (
         f"{display_path} | {size_mb:.2f} MB | 修改: {mtime}",
         {"size_mb": size_mb, "modified": mtime},
@@ -250,7 +248,7 @@ def _scan_and_filter_directory(
     for image_path in matched_images:
         # 每张图片至多 resolve 一次；root 已 resolve，直接做 relative_to 比较。
         image_resolved = image_path.resolve()
-        if not any(_is_within_resolved(image_resolved, root) for root in resolved_roots):
+        if not any(is_within_resolved(image_resolved, root) for root in resolved_roots):
             logger.warning("检测到越界图片路径，已忽略: {}", image_path)
             continue
         if image_path in seen_images:
@@ -271,7 +269,7 @@ def _build_display_entries(
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """组装面向用户的展示文本与结构化图片条目。
 
-    将 _is_within_resolved 命中查找、get_relative_path 与 _format_file_info 的 stat 等文件
+    将 is_within_resolved 命中查找、get_relative_path 与 _format_file_info 的 stat 等文件
     系统相关计算集中在本函数同步执行，由调用方通过 ``asyncio.to_thread`` 在线程内调用，使
     show_details 下网络挂载目录的 stat 不再阻塞事件循环。索引编号沿用 enumerate 语义：被
     忽略条目仍占位、保留原序号不重排，与历史行为一致。
@@ -290,7 +288,7 @@ def _build_display_entries(
     for idx, img in enumerate(images, 1):
         img_resolved = image_resolved_map[img]
         display_base = next(
-            (root for root in resolved_roots if _is_within_resolved(img_resolved, root)),
+            (root for root in resolved_roots if is_within_resolved(img_resolved, root)),
             None,
         )
         if display_base is None:
@@ -303,6 +301,24 @@ def _build_display_entries(
         entry.update(details)
         structured_images.append(entry)
     return lines, structured_images
+
+
+def _normalize_format_filter(raw: list[str] | None) -> tuple[list[str] | None, bool]:
+    """过滤出受支持的图片扩展名，返回 (过滤值, 是否无有效后缀)。
+
+    仅保留受支持的扩展名，避免以非图片后缀探测文件。空列表与全部不受支持的输入
+    语义一致：均为"无有效后缀"，标记 exhausted 并保留原始输入供 structuredContent
+    回显；不能把空列表传给 find_images_in_directory，其把空列表视为未限制而扫描
+    全部。未提供（None）不限制、不标记。
+    """
+    if raw is None:
+        return None, False
+    if not raw:
+        return raw, True
+    supported_only = [ext for ext in raw if ext in SUPPORTED_IMAGE_EXTENSIONS]
+    if supported_only:
+        return supported_only, False
+    return raw, True
 
 
 async def handle_browse_images(
@@ -335,12 +351,15 @@ async def handle_browse_images(
             fallback_roots = get_workspace_roots()
         except Exception:
             fallback_roots = []
+        # 过滤值回显与内层错误分支保持一致：经同一过滤规则而非置 None，避免丢失
+        # 用户原始过滤输入
+        fallback_filter, _ = _normalize_format_filter(params.format_filter)
         return _build_browse_error(
             state=_BrowseRequestState.from_params(
                 params,
                 workspace_roots=fallback_roots,
                 resolved_directories=[],
-                format_filter=None,
+                format_filter=fallback_filter,
             ),
             message=f"浏览图片失败：{user_message}；请确认目录路径有效且位于工作区内。",
         )
@@ -351,17 +370,9 @@ async def _handle_browse_images_impl(
     ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """浏览工具主逻辑，由 ``handle_browse_images`` 外层兜底包裹。"""
-    # 格式过滤仅保留受支持的图片扩展名，避免以非图片后缀探测文件。全部后缀均不受支持时标记
-    # format_filter_exhausted 并跳过扫描；此时保留用户原始输入供 structuredContent 回显，不缩减
-    # 为空列表。不能将空列表传给 find_images_in_directory，因其把空列表视为未限制而扫描全部。
-    raw_format_filter = params.format_filter
-    format_filter_exhausted = False
-    if raw_format_filter:
-        supported_only = [ext for ext in raw_format_filter if ext in SUPPORTED_IMAGE_EXTENSIONS]
-        if supported_only:
-            raw_format_filter = supported_only
-        else:
-            format_filter_exhausted = True
+    # 格式过滤经 _normalize_format_filter 统一处理：仅保留受支持的图片扩展名，
+    # 空列表与全部不受支持一致视为无有效后缀，跳过扫描并保留原始输入回显。
+    raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
 
     workspace_roots = get_workspace_roots()
     # resolved_dirs 随解析流程逐步填充；state 绑定其引用，错误分支在填充前读取、成功分支在
@@ -379,33 +390,51 @@ async def _handle_browse_images_impl(
         await _safe_ctx_log(ctx, "warning", message)
         return _build_browse_error(state=state, message=message)
 
-    # 预解析工作区根：去重与展示阶段直接用 _is_within_resolved 与这些已 resolve 的 root
-    # 比较，root 不再重复 resolve。每张图片也只 resolve 一次，结果缓存于 image_resolved_map。
-    # 展示层与 structuredContent 仍回显原始 workspace_roots。
-    resolved_roots: list[Path] = [root.resolve() for root in workspace_roots]
-
-    raw_dir_path = Path(state.directory)
-    if raw_dir_path.is_absolute():
-        try:
-            absolute_dir = normalize_path(state.directory)
-        except ValueError as exc:
-            message = f"目录路径无效: {exc}"
-            return _build_browse_error(state=state, message=message)
-        if not is_path_within_any_base(absolute_dir, resolved_roots):
-            allowed_roots = ", ".join(str(root) for root in workspace_roots)
-            message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
-            return _build_browse_error(state=state, message=message)
-        resolved_dirs.append(absolute_dir)
-    else:
-        for root in resolved_roots:
+    # 预解析工作区根与请求目录：resolve/normalize 均为可能阻塞网络挂载目录的同步
+    # 文件系统调用，整体下沉线程执行；去重与展示阶段直接用 is_within_resolved 与这些
+    # 已 resolve 的 root 比较，root 不再重复 resolve。每张图片也只 resolve 一次，结果
+    # 缓存于 image_resolved_map。展示层与 structuredContent 仍回显原始 workspace_roots。
+    def _resolve_roots_and_dirs() -> tuple[list[Path], list[Path], str | None]:
+        resolved_root_list = []
+        for root in workspace_roots:
             try:
-                candidate = normalize_path(state.directory, str(root))
-            except ValueError:
+                resolved_root_list.append(root.resolve())
+            except (OSError, ValueError):
                 continue
-            if not is_path_within_base(candidate, root):
-                continue
-            if candidate not in resolved_dirs:
-                resolved_dirs.append(candidate)
+        resolved_dir_list: list[Path] = []
+        error_message: str | None = None
+        if Path(state.directory).is_absolute():
+            try:
+                absolute_dir = normalize_path(state.directory)
+            except ValueError as exc:
+                return resolved_root_list, [], f"目录路径无效: {exc}"
+            if not any(is_within_resolved(absolute_dir, base) for base in resolved_root_list):
+                return resolved_root_list, [], None
+            resolved_dir_list.append(absolute_dir)
+        else:
+            for root in resolved_root_list:
+                try:
+                    candidate = normalize_path(state.directory, str(root))
+                except ValueError:
+                    continue
+                if not is_within_resolved(candidate, root):
+                    continue
+                if candidate not in resolved_dir_list:
+                    resolved_dir_list.append(candidate)
+        return resolved_root_list, resolved_dir_list, error_message
+
+    resolved_roots, resolved_dirs_from_thread, dir_error = await asyncio.to_thread(
+        _resolve_roots_and_dirs
+    )
+
+    if dir_error is not None:
+        return _build_browse_error(state=state, message=dir_error)
+    resolved_dirs.extend(resolved_dirs_from_thread)
+
+    if not resolved_dirs:
+        allowed_roots = ", ".join(str(root) for root in workspace_roots)
+        message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
+        return _build_browse_error(state=state, message=message)
 
     if not resolved_dirs:
         allowed_roots = ", ".join(str(root) for root in workspace_roots)
@@ -430,9 +459,12 @@ async def _handle_browse_images_impl(
 
     # 搜索图片文件：_scan_and_filter_directory 经 _cached_find_images_in_directory 扫描目录，
     # 翻页共享有序列表缓存（非递归按 mtime 失效、递归按 TTL 失效），scan_limit 用于早停与切片
-    # 判定 has_more。format_filter_exhausted 时跳过扫描，all_images 保持为空，由下方空结果分支
-    # 统一返回。扫描与扫描后的 resolve、越界判定、去重整体下沉到 _scan_and_filter_directory 在
-    # 线程内执行；仅进度上报留在事件循环。深翻页大 offset 或网络挂载目录下 resolve 不再阻塞事件循环。
+    # 判定 has_more。语义边界：越界项（resolve 后在工作区外的符号链接）与跨目录重复项在扫描
+    # 之后才被剔除，其占用早停配额时可见数偏少，has_more 可能提前为 False、total_count 偏小；
+    # 该情形需越界条目恰好占满配额，属罕见边界。format_filter_exhausted 时跳过扫描，
+    # all_images 保持为空，由下方空结果分支统一返回。扫描与扫描后的 resolve、越界判定、去重
+    # 整体下沉到 _scan_and_filter_directory 在线程内执行；仅进度上报留在事件循环。深翻页
+    # 大 offset 或网络挂载目录下 resolve 不再阻塞事件循环。
     scan_limit = state.offset + state.limit + 1
     all_images: list[Path] = []
     # 原始路径到已 resolve 路径的缓存：扫描阶段每张图片仅 resolve 一次，展示阶段复用。
@@ -519,7 +551,7 @@ async def _handle_browse_images_impl(
         )
 
     # 展示组装下沉到 _build_display_entries 在线程内执行：show_details 的 stat 与
-    # _is_within_resolved 命中查找不再在事件循环阻塞网络挂载目录的读取。最终结果构建留在事件循环。
+    # is_within_resolved 命中查找不再在事件循环阻塞网络挂载目录的读取。最终结果构建留在事件循环。
     display_lines, structured_images = await asyncio.to_thread(
         _build_display_entries,
         images=images,

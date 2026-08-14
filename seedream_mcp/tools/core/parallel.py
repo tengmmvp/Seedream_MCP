@@ -95,7 +95,7 @@ async def _execute_parallel_generation_requests(
     )
 
 
-def _get_lifespan_resource(
+def get_lifespan_resource(
     ctx: Context[Any, Any, Any] | None,
     key: str,
     resource_type: type[_T],
@@ -104,13 +104,16 @@ def _get_lifespan_resource(
 
     无 ctx 或无 lifespan 上下文时返回 None，由调用方回退新建，保持向后兼容
     （如单元测试直接调用 handler 的场景）。client、download_manager 与 config
-    三处共享资源探测共用此实现。
+    三处共享资源探测共用此实现，server 的配置探测亦复用。取值路径上各属性缺失
+    的异常形态均视为"不可得"：mcp 的 Context.request_context 在无请求上下文时
+    抛 ValueError，request_context 为 None 时 .lifespan_context 抛 AttributeError，
+    旧版本构造路径可能抛 LookupError，捕获三者确保守卫本身不逃逸异常。
     """
     if ctx is None:
         return None
     try:
         state = ctx.request_context.lifespan_context
-    except AttributeError:
+    except (AttributeError, ValueError, LookupError):
         return None
     if isinstance(state, dict):
         resource = state.get(key)
@@ -128,7 +131,7 @@ def _try_get_shared_client(
     """
     from ...client import SeedreamClient
 
-    return _get_lifespan_resource(ctx, LIFESPAN_KEY_CLIENT, SeedreamClient)
+    return get_lifespan_resource(ctx, LIFESPAN_KEY_CLIENT, SeedreamClient)
 
 
 def _try_get_shared_download_manager(
@@ -140,7 +143,7 @@ def _try_get_shared_download_manager(
     """
     from ...utils.io.io_download import DownloadManager
 
-    return _get_lifespan_resource(ctx, LIFESPAN_KEY_DOWNLOAD_MANAGER, DownloadManager)
+    return get_lifespan_resource(ctx, LIFESPAN_KEY_DOWNLOAD_MANAGER, DownloadManager)
 
 
 async def _run_generation_requests(

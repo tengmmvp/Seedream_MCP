@@ -414,19 +414,44 @@ _SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey")
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出
 _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 
-# 敏感键值裸值模式：authorization/apikey/token/secret 类键名后跟分隔符（: 或 =）与值时，
-# 剥离值部分，覆盖 api-key=xxx、apikey: xxx、Authorization: Basic xxx、token=xxx、
-# client_secret=yyy 等上游错误体回显形态。可选的第二个空白分隔词用于吸收
-# Authorization 的 scheme（如 Basic），避免仅剥离 scheme 而泄露凭据。token/secret 变体
-# 同样要求分隔符存在，普通文本中的词形不受影响。
+# 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用，新增键名两处同步生效。
+_SENSITIVE_KEYVALUE_KEYS = (
+    r"api[-_]?key|authorization|(?:access|auth|refresh|session|api)[-_]?token"
+    r"|(?:client|api|signing|app)[-_]?secret|password|passwd|cookie|token|secret"
+)
+
+# 键值分隔符：含全角变体（U+FF1A 全角冒号、U+FE55 小型冒号、U+FF1D 全角等号），
+# 上游错误体以全角分隔符回显凭据时同样命中，封堵非 ASCII 分隔符的绕过形态
+_SENSITIVE_KEYVALUE_SEPARATOR = r"[ \t]*[:：﹕=＝][ \t]*"
+
+# 敏感键值裸值模式：authorization/apikey/token/secret/password/cookie 类键名后跟分隔符
+# （ASCII 或全角的 :/=）与值时，剥离值部分，覆盖 api-key=xxx、apikey: xxx、
+# Authorization: Basic xxx、token=xxx、client_secret=yyy、password=zzz、
+# Cookie: SESSIONID=vvv 等上游错误体回显形态。
+# 值吸收为贪婪多词并在下一个"键名+分隔符"形态前停止：既覆盖多词凭据（secretA secretB），
+# 又保住同文本中后续键值对不被整体吞掉；具体复合键名（如 api_key）置于泛化词（token）前，
+# 保证交替组按序优先命中长变体。所有键名同样要求分隔符存在，普通文本中的词形不受影响。
 _SENSITIVE_KEYVALUE_PATTERN = re.compile(
-    r"(?i)(api[-_]?key|authorization|(?:access|auth|refresh|session|api)[-_]?token"
-    r"|(?:client|api|signing|app)[-_]?secret|token|secret)([ \t]*[:=][ \t]*)\S+(?:[ \t]+\S+)?"
+    r"(?i)("
+    + _SENSITIVE_KEYVALUE_KEYS
+    + r")("
+    + _SENSITIVE_KEYVALUE_SEPARATOR
+    + r")\S+"
+    + r"(?:[ \t]+(?!"
+    + _SENSITIVE_KEYVALUE_KEYS
+    + _SENSITIVE_KEYVALUE_SEPARATOR
+    + r")\S+)*"
 )
 
 # CR/LF 控制字符模式：上游错误体可能携带换行，剥离以防止日志注入伪造行，与
 # io_download.sanitize_url 的控制字符剥离对齐。替换为空格保留词边界可读性。
 _CONTROL_CHARS_PATTERN = re.compile(r"[\r\n]")
+
+# URL userinfo 剥离模式：错误消息或字段值中的 http(s) URL 携带 user:pass@ 凭据时剥去
+# userinfo 部分，防止参考图 URL 被拒后的原值回显把凭据送进结构化输出与用户可见文本。
+# username 为非空白、非 /:@ 字符，密码部分可缺省；协议前缀限定 http(s) 且要求词边界，
+# 避免误伤普通文本中的 mailto:user@host 形态。
+_URL_USERINFO_PATTERN = re.compile(r"(?i)\b((?:https?)://)[^\s/:@]+(?::[^\s/@]*)?@")
 
 
 def _redact_bearer_tokens(value: Any) -> Any:
@@ -440,17 +465,20 @@ _SanitizedValue = TypeVar("_SanitizedValue")
 
 
 def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
-    """对字符串值剥离敏感键值裸值、Bearer 令牌与 CRLF 控制字符。
+    """对字符串值剥离 CRLF 控制字符、敏感键值裸值、Bearer 令牌与 URL userinfo。
 
     message 与 details/value/response_data 等结构化字段共用此净化，使各字段对敏感
-    片段与日志注入的防护完全一致；非字符串原样返回。先剥 authorization/apikey 键名
-    后的裸值，再剥残留 Bearer 令牌，末尾剥 CR/LF 防日志注入。
+    片段与日志注入的防护完全一致；非字符串原样返回。控制字符归一化必须先于键值
+    匹配执行："api_key:\\nvalue" 形态在压平后才能被键值模式命中，否则凭据可借换行
+    分隔绕过脱敏；随后剥 authorization/apikey 等键名后的裸值与残留 Bearer 令牌，
+    末尾剥 URL userinfo 凭据。
     """
     if not isinstance(value, str):
         return value
-    redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", value)
+    redacted = _CONTROL_CHARS_PATTERN.sub(" ", value)
+    redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
     redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
-    return cast("_SanitizedValue", _CONTROL_CHARS_PATTERN.sub(" ", redacted))
+    return cast("_SanitizedValue", _URL_USERINFO_PATTERN.sub(r"\1", redacted))
 
 
 def _redact_sensitive_message(value: str) -> str:
@@ -460,6 +488,24 @@ def _redact_sensitive_message(value: str) -> str:
     净化实现，避免两处脱敏逻辑漂移。
     """
     return _sanitize_output_string(value)
+
+
+def sanitize_error_text(
+    message: _SanitizedValue, limit: int = _MESSAGE_OUTPUT_LIMIT
+) -> _SanitizedValue:
+    """对上游错误文本剥离敏感片段与控制字符并截断，供全部用户可见输出路径共用。
+
+    异常路径经 to_dict/format_error_for_user 已净化；结果数据路径——SSE 失败事件、
+    响应 data 项的 error 字段、并行聚合消息、自动保存 error——同样可能携带上游回显
+    的鉴权片段，各出口统一经本函数收敛为与异常路径相同的防护，消除两条输出通道的
+    不对称。非字符串原样返回。
+    """
+    if not isinstance(message, str):
+        return message
+    return cast(
+        "_SanitizedValue",
+        _truncate_value_for_output(_sanitize_output_string(message), limit=limit),
+    )
 
 
 def _is_sensitive_key(key: Any) -> bool:

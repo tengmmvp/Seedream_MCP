@@ -76,11 +76,38 @@ async def test_prepare_image_input_validates_and_returns_data_uri() -> None:
 
 async def test_prepare_image_input_rejects_url_without_netloc() -> None:
     """以 http:// 开头但缺少主机名的 URL 须在入参校验即拒绝。"""
-    with pytest.raises(SeedreamAPIError, match="无效的图像 URL"):
+    with pytest.raises(SeedreamValidationError, match="无效的URL格式"):
         await prepare_image_input("http://")
+
+
+async def test_prepare_image_input_rejects_url_userinfo_credentials() -> None:
+    """携带 userinfo 凭据的参考图 URL 须在主管道即拒绝，凭据不得随请求体送往上游 API。
+
+    守护 URL 分支接入统一校验，防止 userinfo 拒绝沦为仅 data_uri/本地分支可达的死代码。
+    """
+    with pytest.raises(SeedreamValidationError, match="用户名密码"):
+        await prepare_image_input("https://AKID:SECRET@mirror.example.com/ref.png")
+
+
+async def test_prepare_image_input_rejects_url_userinfo_username_only() -> None:
+    """仅用户名、无密码的 userinfo 形态同样拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="用户名密码"):
+        await prepare_image_input("https://user@mirror.example.com/ref.png")
 
 
 async def test_prepare_image_input_rejects_invalid_data_uri() -> None:
     """非法 base64 负载的 Data URI 须被校验透传拒绝，校验错误原样上抛不被吞掉。"""
     with pytest.raises(SeedreamValidationError, match="Base64 解码失败|Data URI"):
         await prepare_image_input("data:image/png;base64,@@not_base64@@")
+
+
+async def test_prepare_image_input_accepts_uppercase_data_scheme() -> None:
+    """scheme 大小写不敏感：大写 DATA: 前缀的合法 Data URI 正常校验通过。
+
+    RFC 3986 scheme 大小写不敏感；此前大写前缀在 parse_data_uri 处拆分失败，
+    报笼统的"格式无效"而非走精确校验分支。
+    """
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
+    data_uri = "DATA:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    assert await prepare_image_input(data_uri) == data_uri

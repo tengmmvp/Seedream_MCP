@@ -168,7 +168,7 @@ class SeedreamClient:
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -250,7 +250,7 @@ class SeedreamClient:
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -336,7 +336,7 @@ class SeedreamClient:
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -433,7 +433,7 @@ class SeedreamClient:
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
             stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 5.0 Lite 支持，如 [{"type": "web_search"}]
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等
@@ -842,11 +842,19 @@ class SeedreamClient:
 
     @staticmethod
     def _serialize_request(request_data: dict[str, Any]) -> bytes:
-        """将请求体序列化为 UTF-8 bytes，供 httpx 直接发送以跳过事件循环内编码。
+        """将请求体流式序列化为 UTF-8 bytes，供 httpx 直接发送以跳过事件循环内编码。
 
-        关闭 ensure_ascii 以 UTF-8 原样输出非 ASCII 字符，避免 ASCII 转义序列使中文提示词膨胀。
+        iterencode 分片产出并逐片编码累积到 bytearray，避免 json.dumps 先物化完整
+        str 再整体 encode 产生的双份等大临时拷贝——参考图达 14×30MB 上限时序列化
+        峰值随载荷线性放大，省去 str 中间态可直接削减约 1/3 瞬时内存。关闭
+        ensure_ascii 以 UTF-8 原样输出非 ASCII 字符，避免 ASCII 转义序列使中文
+        提示词膨胀。注意并行请求各自持有等大 body 属固有成本，见 _call_api 注释。
         """
-        return json.dumps(request_data, ensure_ascii=False).encode("utf-8")
+        encoder = json.JSONEncoder(ensure_ascii=False)
+        buffer = bytearray()
+        for chunk in encoder.iterencode(request_data):
+            buffer += chunk.encode("utf-8")
+        return bytes(buffer)
 
     def _raise_api_error_for(
         self,
@@ -939,6 +947,17 @@ class SeedreamClient:
         response = await client.post(url, content=request_body, timeout=request_timeout)
 
         self.logger.debug("收到响应: 状态码={}", response.status_code)
+        # 响应体大小上限：与 SSE 单事件安全阀对齐，拒绝异常巨型响应体进入 JSON 解析，
+        # 防止上游或中间层以超大响应触发内存放大。b64_json 模式下单张合法图片的
+        # base64 负载上限即 auto_save_max_file_size 的 4/3，同量级封顶不影响合法响应
+        content_length = response.headers.get("content-length")
+        if content_length:
+            try:
+                cl_value = int(content_length)
+            except ValueError:
+                cl_value = -1
+            if cl_value > self.config.auto_save_max_file_size * 20:
+                raise SeedreamAPIError(f"响应体过大: {cl_value} 字节")
         self._raise_for_response_status(response)
 
         try:
@@ -962,7 +981,10 @@ class SeedreamClient:
         url = self._build_generation_url()
         safe_request_data = self._sanitize_request_for_logging(request_data)
         request_timeout = self._build_http_timeout()
-        # request_data 在重试期间不变，循环外序列化一次，避免每次重试重复 JSON 编码阻塞
+        # request_data 在重试期间不变，循环外序列化一次，避免每次重试重复 JSON 编码阻塞。
+        # 内存特征：序列化经 iterencode 削减 str 中间态，但每个并行请求各自持有等大
+        # body 直至响应返回（request_count 上限 4），14×30MB 参考图最坏包络下 body
+        # 存活约 4×560MB，部署受限时须按此规划内存。
         request_body = await asyncio.to_thread(self._serialize_request, request_data)
         # max_retries 表示首次失败后的重试次数，故总尝试次数为其加一，与下载重试语义一致
         total_attempts = max(1, self.config.max_retries + 1)
@@ -1071,11 +1093,9 @@ class SeedreamClient:
         # 此 raise 仅满足类型检查器对全路径返回的要求，运行时不可达
         raise SeedreamAPIError(f"{endpoint} API 调用意外结束")
 
-    async def _prepare_image_input(
-        self, image: str, _roots_key: tuple[str, ...] | None = None
-    ) -> str:
+    async def _prepare_image_input(self, image: str) -> str:
         """准备图像输入数据，委托 ImagePreparer 预处理缓存子系统。"""
-        return await self._image_preparer.prepare_image_input(image, _roots_key)
+        return await self._image_preparer.prepare_image_input(image)
 
     async def _prepare_images_in_parallel(self, images: Sequence[str]) -> list[str]:
         """受限并发预处理多张图片，委托 ImagePreparer。"""

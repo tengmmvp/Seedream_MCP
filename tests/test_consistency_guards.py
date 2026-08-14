@@ -1,0 +1,108 @@
+"""跨层一致性守护测试。
+
+锁定三组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
+MCP 注册工具名与 impl ToolMetadata 工具名、路径相似建议与 CLI 端口解析的边界行为。
+新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pytest
+
+from seedream_mcp.tools.core.schemas import GenerationToolType, ResponseFormat
+from seedream_mcp.utils.core.validators import (
+    VALID_GENERATION_TOOL_TYPES,
+    VALID_RESPONSE_FORMATS,
+)
+
+
+def test_response_format_enum_matches_validator_whitelist() -> None:
+    """ResponseFormat 枚举取值与 validators 白名单一致，新增格式须两侧同步。"""
+    assert {item.value for item in ResponseFormat} == set(VALID_RESPONSE_FORMATS)
+
+
+def test_generation_tool_type_enum_matches_validator_whitelist() -> None:
+    """GenerationToolType 枚举取值与 VALID_GENERATION_TOOL_TYPES 一致。"""
+    assert {item.value for item in GenerationToolType} == set(VALID_GENERATION_TOOL_TYPES)
+
+
+async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
+    """server 注册的 MCP 工具名与 impl ToolMetadata 声明一致。
+
+    任一侧改名会使 structuredContent.tool 与注册名静默错位，两侧字面量分布在不同
+    模块，靠本断言锁定一致。
+    """
+    from seedream_mcp.resources import mcp
+    from seedream_mcp.tools.impl._common import (
+        IMAGE_TO_IMAGE,
+        MULTI_IMAGE_FUSION,
+        SEQUENTIAL_GENERATION,
+        TEXT_TO_IMAGE,
+    )
+
+    tools = await mcp.list_tools()
+    registered = {tool.name for tool in tools}
+    declared = {
+        metadata.tool_name
+        for metadata in (TEXT_TO_IMAGE, IMAGE_TO_IMAGE, MULTI_IMAGE_FUSION, SEQUENTIAL_GENERATION)
+    }
+    declared.add("seedream_browse_images")
+
+    assert declared == registered
+
+
+# ==================== 零覆盖小面 ====================
+
+
+def test_suggest_similar_paths_finds_close_names(tmp_path: Path) -> None:
+    """相似路径建议按目标文件名子串匹配，无参调用返回空列表不扫描 CWD。"""
+    from seedream_mcp.utils.io.io_path import suggest_similar_paths
+
+    (tmp_path / "portrait.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "other.jpg").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # 匹配方向为目标名是候选文件名的子串，覆盖"缺扩展名/少打字母"的手误形态
+    suggestions = suggest_similar_paths("portrait", search_dirs=[str(tmp_path)])
+
+    assert suggestions == [str(tmp_path / "portrait.png")]
+    # 未提供搜索目录时不扫描任何目录，强制调用方显式给出边界
+    assert suggest_similar_paths("portrait") == []
+
+
+def test_log_function_call_wraps_sync_and_async() -> None:
+    """日志装饰器对同步与异步函数均透传参数与返回值并记录调用入口。"""
+    from seedream_mcp.utils.core.logs import log_function_call
+
+    @log_function_call
+    def sync_fn(value: int) -> int:
+        return value * 2
+
+    @log_function_call
+    async def async_fn(value: int) -> int:
+        return value + 1
+
+    assert sync_fn(21) == 42
+
+
+async def test_log_function_call_wraps_async() -> None:
+    from seedream_mcp.utils.core.logs import log_function_call
+
+    @log_function_call
+    async def async_fn(value: int) -> int:
+        return value + 1
+
+    assert await async_fn(1) == 2
+
+
+def test_cli_port_type_rejects_invalid_port() -> None:
+    """CLI 端口解析拒绝非数字与超范围端口，接受合法端口。"""
+    from seedream_mcp.cli import _port_type
+
+    assert _port_type("8000") == 8000
+    with pytest.raises(argparse.ArgumentTypeError):
+        _port_type("not-a-port")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _port_type("70000")

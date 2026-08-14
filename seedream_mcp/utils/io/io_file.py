@@ -1,14 +1,17 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接与原子落盘骨架。
 
-提供 open_no_follow_read、open_temp_fd 与 atomic_replace_from_fd 三个能力。
-open_no_follow_read 读取时拒绝最终路径分量为符号链接；open_temp_fd 以不可预测随机名
-创建临时文件供调用方写入后原子替换；atomic_replace_from_fd 封装"随机临时文件→写入→
-os.replace 原子替换→失败清理"协议供 io_storage 与 io_download 复用。支持
-O_NOFOLLOW 的平台由内核在 open 时原子拒绝符号链接。Windows 等平台不支持 O_NOFOLLOW
-时，退化为打开前 lstat 与打开后 fstat 比对 st_ino/st_dev 同一性：lstat 先取最终分量
-指纹，open 后用 fstat 复核打开的 fd 仍是同一对象，若校验与打开之间最终分量被替换为
-符号链接则 st_ino/st_dev 不一致，据此拒绝，闭合该 TOCTOU 竞态。共享函数抛 OSError，
-由调用方按各自异常类型包装。
+提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd（异步）与
+atomic_replace_from_fd_sync（同步变体）四个能力，另有 _is_reparse_point 判定
+NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的
+清理遍历共用。open_no_follow_read 读取时拒绝最终路径分量为符号链接；open_temp_fd
+以不可预测随机名创建临时文件供调用方写入后原子替换；atomic_replace_from_fd 封装
+"随机临时文件→写入→os.replace 原子替换→失败清理"协议供 io_storage 与 io_download
+复用，writer 可返回 Path 覆盖最终路径以支持按字节签名修正扩展名等写入后才知的
+目标。支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝符号链接。Windows 等平台
+不支持 O_NOFOLLOW 时，退化为打开前 lstat 与打开后 fstat 比对 st_ino/st_dev
+同一性：lstat 先取最终分量指纹，open 后用 fstat 复核打开的 fd 仍是同一对象，
+若校验与打开之间最终分量被替换为符号链接则 st_ino/st_dev 不一致，据此拒绝，
+闭合该 TOCTOU 竞态。共享函数抛 OSError，由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
 若校验与打开之间某父目录被替换为指向工作区外的符号链接，读取会逃逸出工作区。上述
@@ -108,7 +111,7 @@ def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Pat
 
 async def atomic_replace_from_fd(
     final_path: Path,
-    writer: Callable[[int], Awaitable[None]],
+    writer: Callable[[int], Awaitable[Path | None]],
     suffix: str = ".part",
 ) -> Path:
     """经随机名临时文件原子落盘，返回实际创建的随机临时路径。
@@ -120,27 +123,32 @@ async def atomic_replace_from_fd(
     原子替换，失败路径清理随机临时文件。mkstemp 与 replace 经 ``asyncio.to_thread``
     卸载，避免在事件循环线程内执行可能阻塞网络文件系统的同步系统调用。
 
-    writer 抛出的异常原样上抛，由调用方按各自异常类型分类处理；fd 在 writer 正常返回
-    或抛出后由本函数统一关闭，writer 无需也无法安全关闭 fd。
+    writer 返回 None 时替换到 ``final_path``；返回 Path 时以该路径为最终目标，供
+    写入完成后才能确定最终路径的场景（如按字节签名修正扩展名）使用，返回路径须与
+    ``final_path`` 同目录以保证原子性。writer 抛出的异常原样上抛，由调用方按各自
+    异常类型分类处理；fd 在 writer 正常返回或抛出后由本函数统一关闭，writer 无需
+    也无法安全关闭 fd。
 
     Args:
         final_path: 最终目标路径，临时文件在其所在目录创建以保证同文件系统原子替换。
-        writer: 接收 fd 的异步写入回调，须以 closefd=False 包装 fd。
+        writer: 接收 fd 的异步写入回调，须以 closefd=False 包装 fd，可返回覆盖用的
+            最终路径或 None。
         suffix: 临时文件名后缀，用于可读性与调试定位。
 
     Returns:
-        实际创建的随机名临时路径（替换成功后已重命名为 final_path）。
+        实际创建的随机名临时路径（替换成功后已重命名为最终路径）。
     """
     fd, temp_path = await asyncio.to_thread(open_temp_fd, final_path.parent, suffix=suffix)
     replaced = False
     try:
         try:
-            await writer(fd)
+            override_path = await writer(fd)
         finally:
             # writer 以 closefd=False 包装 fd，本函数为 fd 的唯一关闭点，避免双重关闭与
             # fd 复用场景下误关他者持有的描述符
             os.close(fd)
-        await asyncio.to_thread(temp_path.replace, final_path)
+        target = final_path if override_path is None else override_path
+        await asyncio.to_thread(temp_path.replace, target)
         replaced = True
     finally:
         if not replaced:

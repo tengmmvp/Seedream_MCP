@@ -132,6 +132,18 @@ class _MultiImageInput(BaseModel):
         ),
     )
 
+    @field_validator("image")
+    @classmethod
+    def reject_blank_items(cls, value: list[str]) -> list[str]:
+        """逐项拒绝空白字符串，与组图输入的校验深度一致。
+
+        空白项若放行到 client 归一化层才报错，错误会从 schema 级参数错误退化为
+        isError 工具结果，报错层次与文案与其他参数不一致。
+        """
+        if any(not item.strip() for item in value):
+            raise ValueError("image 列表中的每一项都必须是非空字符串")
+        return value
+
 
 class _SequentialImageInput(BaseModel):
     """组图参考图输入参数。"""
@@ -186,7 +198,7 @@ class _ResponseAndExecutionInput(BaseModel):
     )
     tools: list[GenerationTool] | None = Field(
         default=None,
-        description="模型工具配置，仅 5.0 Lite 支持联网搜索（web_search）。",
+        description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
     )
     request_count: int = Field(
         default=1,
@@ -375,8 +387,13 @@ class SequentialGenerationInput(
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
         """校验参考图数量与生成数量的总和限制。"""
         # max_images 未显式传入时，按参考图数量自动推导，取生成总上限减去参考图数量。
+        # 派生写入用 object.__setattr__ 绕过 validate_assignment 并从 model_fields_set
+        # 剔除：普通赋值会把派生值登记进 fields_set 且再触发一轮本 after-validator，
+        # 使派生与显式传入不可区分，误导体贴 fields_set 判断显式传入的逻辑（如
+        # exclude_unset 序列化与审计）。
         if "max_images" not in self.model_fields_set:
-            self.max_images = resolve_sequential_max_images(None, self.image)
+            object.__setattr__(self, "max_images", resolve_sequential_max_images(None, self.image))
+            self.__pydantic_fields_set__.discard("max_images")
 
         try:
             validate_sequential_image_limit(self.max_images, self.image)
@@ -434,7 +451,10 @@ class BrowseImagesInput(BaseModel):
     )
     format_filter: list[str] | None = Field(
         default=None,
-        description="需要过滤的图片后缀列表，如 ['.jpeg', '.png']。",
+        description=(
+            "需要过滤的图片后缀列表，如 ['.jpeg', '.png']；仅保留受支持的后缀。"
+            "空列表或全部后缀不受支持时视为无有效后缀：跳过扫描返回空结果并回显原始输入。"
+        ),
     )
     show_details: bool = Field(
         default=DEFAULT_SHOW_DETAILS,

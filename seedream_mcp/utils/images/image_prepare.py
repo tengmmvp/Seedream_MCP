@@ -9,17 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import os
-import stat as stat_module
 from collections import OrderedDict
 from pathlib import Path
 from typing import Sequence
 
-from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from .image_ref import classify_image_reference
-from .image_validation import MAX_IMAGE_FILE_SIZE
-from ..core.logs import get_logger
-from ..io.io_path import is_path_within_any_base
+from .image_validation import resolve_local_image_candidate
+from ..core.logs import get_logger, log_unretrieved_task_exception
 
 logger = get_logger(__name__)
 
@@ -61,30 +57,15 @@ class ImagePreparer:
         """本地文件返回 (mtime, size) 参与缓存键，内容替换后失效避免返回陈旧编码；
         URL 与 data URI 内容由字符串决定、无法定位文件时返回 (0.0, 0)。
 
-        候选文件的选择与 utils.image_input._prepare_local_image 的实际读取路径对齐：
-        须为常规文件、扩展名合法、大小在限内且位于工作区内，避免多 Root 工作区下选到
-        无效同名条目导致签名与读取锁定不同文件而命中陈旧缓存。越界判定复用
-        io_path.is_path_within_any_base，不在此复刻边界规则。
+        候选定位委托 image_validation.resolve_local_image_candidate，与
+        utils.image_input._prepare_local_image 的实际读取路径共用同一规则，签名与
+        读取锁定同一文件，不会因两侧规则漂移命中陈旧缓存。
 
         已 resolve 的 base 列表按 workspace_roots 缓存并在跨图间复用，避免批量多图时每图
         重复 resolve 同一根目录，降低网络挂载工作区下的 resolve 开销。
         """
         if classify_image_reference(image) != "local":
             return (0.0, 0)
-
-        def _candidate_stat(path: Path) -> os.stat_result | None:
-            """返回候选文件的 stat 若其可读取，否则 None。"""
-            try:
-                st = path.stat()
-            except OSError:
-                return None
-            if not stat_module.S_ISREG(st.st_mode):
-                return None
-            if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
-                return None
-            if st.st_size > MAX_IMAGE_FILE_SIZE:
-                return None
-            return st
 
         resolved_bases = _resolved_bases_cache.get(workspace_roots)
         if resolved_bases is None:
@@ -101,32 +82,21 @@ class ImagePreparer:
                 except KeyError:
                     pass
 
-        # 候选选择与读取路径一致；越界守卫复用 io_path.is_path_within_any_base，
-        # 前置避免对工作区外文件成为存在性 oracle
-        if os.path.isabs(image):
-            candidate = Path(image)
-            chosen = (
-                _candidate_stat(candidate)
-                if is_path_within_any_base(candidate, resolved_bases)
-                else None
-            )
-        else:
-            chosen = None
-            for base_root in resolved_bases:
-                resolved = base_root / image
-                if not is_path_within_any_base(resolved, resolved_bases):
-                    continue
-                chosen = _candidate_stat(resolved)
-                if chosen is not None:
-                    break
-        if chosen is None:
+        found = resolve_local_image_candidate(image, resolved_bases)
+        if found is None:
             return (0.0, 0)
-        return (chosen.st_mtime, chosen.st_size)
+        _, st = found
+        return (st.st_mtime, st.st_size)
 
     @staticmethod
     def _data_uri_digest(image: str) -> str:
-        """计算非本地图像输入的摘要键，供超大输入替代全串作缓存键。"""
-        return "sha256:" + hashlib.sha256(image.encode("utf-8")).hexdigest()[:16]
+        """计算非本地图像输入的摘要键，供超大输入替代全串作缓存键。
+
+        摘要取 128-bit（32 hex）：64-bit 截断的生日碰撞界约 2^32 次哈希即进入可行域，
+        蓄意构造碰撞可令缓存命中返回他人输入；128-bit 将构造成本推出可行域，长度
+        增量可忽略。
+        """
+        return "sha256:" + hashlib.sha256(image.encode("utf-8")).hexdigest()[:32]
 
     async def prepare_image_input(
         self, image: str, _roots_key: tuple[str, ...] | None = None
@@ -170,6 +140,10 @@ class ImagePreparer:
 
         task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
         self._prepare_inflight[cache_key] = task
+        # 检索共享 task 的异常结果：创建者被取消后 shield 的 outer 不再消费 task 结果，
+        # 若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
+        # retrieved"；回调内显式检索并记录，消除噪音日志
+        task.add_done_callback(log_unretrieved_task_exception)
         # shield 隔离取消传播：创建者被取消时仅取消其自身 await 的 outer，底层共享
         # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理
         return await asyncio.shield(task)
@@ -184,7 +158,7 @@ class ImagePreparer:
 
         try:
             prepared = await prepare_image_input(image)
-            # HTTP/HTTPS URL 经 prepare_image_input 仅 urlparse 校验后原样返回，缓存无收益
+            # HTTP/HTTPS URL 经 prepare_image_input 统一校验后原样返回，缓存无收益
             # 反而占用 LRU 条目；data URI 与本地文件经解码或编码产生新值，仍照常缓存。
             if classify_image_reference(image) != "url":
                 self._cache_prepared_result(cache_key, prepared)

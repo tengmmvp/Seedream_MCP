@@ -41,7 +41,7 @@ class ModelCapabilities:
 
     字段含义：
     - supports_output_format: 是否支持 output_format 参数，仅 5.0 系列支持。
-    - supports_tools: 是否支持联网搜索等生成工具，仅 5.0 Lite 支持。
+    - supports_tools: 是否支持联网搜索等生成工具，仅 doubao-seedream-5.0 系列（5.0/5.0-lite 同一模型）支持。
     - supports_stream: 是否支持流式输出，5.0 Pro 不支持。
     - max_reference_images: 参考图数量上限，5.0 Pro 为 10，其余家族为 14。
     - allowed_presets: 允许的尺寸预设档位白名单，驱动 validate_size_for_model 档位校验。

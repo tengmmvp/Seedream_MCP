@@ -221,11 +221,18 @@ class _LoopbackHostGuardMiddleware:
 
     回环绑定且未配置鉴权时，浏览器经 DNS rebinding 可对 127.0.0.1 发起同源请求，
     绕过 CORS 直达工具面枚举文件或盗用 API key。校验 Host 头为回环地址可阻断外部
-    域名请求；本地以 127.0.0.1/localhost/[::1] 访问不受影响。
+    域名请求；本地以 127.0.0.1/localhost/[::1] 访问不受影响。Host 头缺失（HTTP/1.0
+    等路径）按 403 拒绝，与整层 fail-closed 取向一致。
     """
 
-    # 允许的 Host 头值（剥离端口后），均解析到回环或即回环字面量
-    _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]", b"::1"})
+    # 允许的 Host 头值（剥离端口后），均解析到回环或即回环字面量。此处保留 "localhost"
+    # 与 _LOOPBACK_HOSTS 排除它并不矛盾：绑定判定决定服务实际监听位置，hosts 污染会使
+    # 绑定 localhost 实际暴露公网，故必须 fail-closed；而远程攻击者无法借污染令请求
+    # 携带 Host: localhost 抵达本机（rebinding 场景 Host 恒为攻击者域名，伪造该 Host
+    # 需本机裸 socket，等价于本地访问），容忍本地方便默认以 localhost 访问的客户端。
+    # 不含未加方括号的裸 "::1"：IPv6 字面量在 Host 头中必须带方括号，裸形态属畸形，
+    # 剥端口逻辑会将其截断为非回环值，按 fail-closed 拒绝
+    _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]"})
 
     def __init__(self, app: Any) -> None:
         self.app = app
@@ -233,7 +240,7 @@ class _LoopbackHostGuardMiddleware:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope.get("type") == "http":
             host = self._host_header(scope)
-            if host is not None and self._strip_port(host) not in self._ALLOWED_HOSTS:
+            if host is None or self._strip_port(host) not in self._ALLOWED_HOSTS:
                 await self._send_forbidden(send)
                 return
         await self.app(scope, receive, send)

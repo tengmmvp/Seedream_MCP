@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import SeedreamConfig
+from ...utils.core.errors import SeedreamValidationError
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     validate_generation_tools,
@@ -20,6 +21,7 @@ from ...utils.core.validators import (
     validate_size_for_model,
     validate_stream,
 )
+from ...utils.model.model_capabilities import get_max_reference_images
 from .schemas import GenerationInputParams
 
 
@@ -51,9 +53,10 @@ def build_generation_context(
     """从类型化输入模型构建统一执行上下文。
 
     输入模型已保证 prompt 非空、布尔与枚举字段合法、request_count 与 parallelism 的
-    范围及组合约束。本函数仅做 schema 表达不了的校验与合成：尺寸、输出格式、流式与
-    联网工具依赖 config.model_id 的能力校验；size、watermark、auto_save、parallelism
-    未显式提供时按 config 默认值合成。全量重校验由 client 各生成方法入口承担。
+    范围及组合约束。本函数仅做 schema 表达不了的校验与合成：尺寸、输出格式、流式、
+    联网工具与参考图数量依赖 config.model_id 的能力校验；size、watermark、auto_save、
+    parallelism 未显式提供时按 config 默认值合成。全量重校验由 client 各生成方法入口
+    承担。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
@@ -62,6 +65,19 @@ def build_generation_context(
     Returns:
         校验后的统一执行上下文对象。
     """
+    # 参考图数量上限依赖 model_id（5.0 Pro 为 10，其余 14），schema 只能表达全家族
+    # 默认上限，须在此按模型即时校验，与尺寸/流式等能力校验同层，避免进度已上报
+    # "参数校验完成"后才在请求执行器内报错。单图输入为 str、组图未传参考图为 None，
+    # 均不触发。
+    images = getattr(params, "image", None)
+    if isinstance(images, list):
+        max_reference = get_max_reference_images(config.model_id)
+        if len(images) > max_reference:
+            raise SeedreamValidationError(
+                f"image 数量不能超过 {max_reference}",
+                field="image",
+                value=images,
+            )
     optimize_prompt_options = (
         validate_optimize_prompt_options(
             params.optimize_prompt_options.model_dump(), config.model_id

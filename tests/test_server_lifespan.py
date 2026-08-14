@@ -85,6 +85,68 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
     assert resources._active_resource is None
 
 
+async def test_app_lifespan_cleans_up_on_exception_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons,
+) -> None:
+    """yield 体抛异常的 teardown 同样执行共享资源清理，防止异常退出泄漏连接池。
+
+    清理语句位于 finally 内：asynccontextmanager 的异常经 athrow 注入并在 finally
+    后继续向外传播，写在 finally 之后的语句会被跳过。
+    """
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with server.app_lifespan(server.mcp):
+            raise RuntimeError("boom")
+
+    assert resources._active_resource is None
+
+
+def test_get_lifespan_resource_swallows_value_error_from_request_context() -> None:
+    """ctx.request_context 抛 ValueError 时守卫返回 None 而非异常逃逸。
+
+    mcp 的 Context.request_context 在无请求上下文时抛 ValueError 而非 AttributeError，
+    仅捕 AttributeError 会令异常从本应回退 None 的守卫路径逃逸。
+    """
+
+    class _ValueErrorCtx:
+        @property
+        def request_context(self) -> object:
+            raise ValueError("Context is not available outside of a request")
+
+    from seedream_mcp.config import LIFESPAN_KEY_CLIENT
+    from seedream_mcp.tools.core.parallel import get_lifespan_resource
+
+    assert get_lifespan_resource(_ValueErrorCtx(), LIFESPAN_KEY_CLIENT, object) is None
+
+
+async def test_cleanup_shared_resources_drains_background_cleanup_first(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons,
+) -> None:
+    """进程级清理先等待在途后台清理任务收尾，再关闭共享资源。"""
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    drain_calls: list[bool] = []
+
+    async def fake_drain() -> None:
+        drain_calls.append(True)
+
+    monkeypatch.setattr(auto_save_module, "drain_background_cleanup_tasks", fake_drain)
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
+
+    async with server.app_lifespan(server.mcp):
+        pass
+
+    assert drain_calls == [True]
+    assert resources._active_resource is None
+
+
 def test_config_from_context_prefers_lifespan_config() -> None:
     """_config_from_context 优先取 lifespan 注入的 config，回退活动配置。"""
     config = SeedreamConfig(api_key="lifespan_key")

@@ -37,14 +37,17 @@ from aiohttp.abc import AbstractResolver, ResolveResult
 
 from ...version import __version__
 from ..core.errors import SeedreamMCPError
-from ..core.formats import DEFAULT_MAX_FILE_SIZE, is_known_image_bytes
-from ..core.logs import get_logger
+from ..core.formats import DEFAULT_MAX_FILE_SIZE, infer_extension_from_bytes, is_known_image_bytes
+from ..core.logs import get_logger, log_unretrieved_task_exception
 from .io_file import atomic_replace_from_fd
 
 logger = get_logger(__name__)
 
 # 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数
 _DOWNLOAD_CHUNK_SIZE = 256 * 1024
+
+# 落盘批量写阈值：累积至该字节数才提交一次 aiofiles 写任务，减少执行器跳转次数
+_WRITE_BATCH_BYTES = 4 * 1024 * 1024
 
 # 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验
 _MAX_REDIRECTS = 3
@@ -245,6 +248,12 @@ class DownloadManager:
         首次创建用双检锁串行化，避免并发请求各自创建会话导致旧会话泄漏。会话绑定
         ``_PublicIpPinningResolver`` 的连接器，使 aiohttp 连接目标经 SSRF 公网校验后
         钉死，不在连接前二次独立解析，闭合 DNS rebinding 窗口。
+
+        超时策略：sock_connect 与 sock_read 仅约束连接建立与单次读取停滞，服务端按
+        停滞阈值间歇发送字节的慢滴流响应可无限拖住任务，故另设宽松的总时长上限
+        封顶整个下载。上限按停滞超时的 120 倍推导且不低于 1 小时，默认配置下为
+        1 小时（50MB 上限对应约 14KB/s 平均速率），只封堵恶意慢速滴流，不影响正常
+        慢网络下大图片的完整下载；失败仍走既有重试与降级路径。
         """
         if self._session is None or self._session.closed:
             async with self._session_lock:
@@ -252,7 +261,7 @@ class DownloadManager:
                     connector = aiohttp.TCPConnector(resolver=_PublicIpPinningResolver(self))
                     self._session = aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(
-                            total=None,
+                            total=max(float(self.timeout) * 120, 3600.0),
                             sock_connect=self.timeout,
                             sock_read=self.timeout,
                         ),
@@ -335,6 +344,9 @@ class DownloadManager:
                 # 并发协程不会交错创建重复 task
                 inflight = asyncio.ensure_future(self._resolve_and_cache(host))
                 self._dns_inflight[host] = inflight
+                # 检索共享 task 的异常结果：创建者被取消后 shield 的 outer 不再消费
+                # task 结果，无其他等待者时避免 "Task exception was never retrieved" 噪音
+                inflight.add_done_callback(log_unretrieved_task_exception)
         # 锁外 await 共享在途 task；shield 使创建者被取消时不连带取消底层 task
         return await asyncio.shield(inflight)
 
@@ -483,7 +495,12 @@ class DownloadManager:
             raise DownloadError("重定向响应缺少 Location 头")
         if redirect_count >= _MAX_REDIRECTS:
             raise DownloadError("重定向次数过多")
-        return urljoin(current_url, location)
+        next_url = urljoin(current_url, location)
+        # 拒绝协议降级：https 起始的下载不允许经重定向落到 http，消除降级到明文链路
+        # 的攻击面，与逐跳完整校验共同收紧重定向信任边界
+        if urlparse(current_url).scheme == "https" and urlparse(next_url).scheme != "https":
+            raise DownloadError("重定向目标协议不允许降级到 https 之外")
+        return next_url
 
     async def _download_response_to_temp(
         self,
@@ -501,6 +518,11 @@ class DownloadManager:
         清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。content-length
         预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出 DownloadError，由
         调用方按终态或可重试分类处理。
+
+        扩展名以实际字节签名为准：签名校验通过后用 head_bytes 推断真实格式，与
+        save_path 的 URL 派生扩展名不一致时经 writer 返回值把最终路径修正为嗅探结果，
+        与 base64 保存路径的 infer_extension_from_bytes 行为对齐，避免无后缀的签名
+        URL 恒落 .jpeg 或扩展名与内容不符。
         """
         content_length = response.headers.get("content-length")
         if content_length:
@@ -518,11 +540,15 @@ class DownloadManager:
 
         total_size = 0
         head_bytes = b""
+        final_save_path = save_path
 
-        async def _writer(fd: int) -> None:
-            nonlocal total_size, head_bytes
+        async def _writer(fd: int) -> Path | None:
+            nonlocal total_size, head_bytes, final_save_path
             # closefd=False：aiofiles 退出时仅 flush 不关闭 fd，由骨架统一关闭，避免双重关闭
             async with aiofiles.open(fd, "wb", closefd=False) as f:
+                # 批量累积写入：aiofiles 每次 write 提交一次执行器任务，逐 256KB chunk
+                # 跳转在批量下载时占用默认执行器线程槽，累积至 _WRITE_BATCH_BYTES 再落盘
+                write_buffer = bytearray()
                 async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
                     total_size += len(chunk)
                     if total_size > self.max_file_size:
@@ -530,10 +556,21 @@ class DownloadManager:
                     # 累计首 32 字节做签名校验，省一次 open+read
                     if len(head_bytes) < 32:
                         head_bytes += chunk[: 32 - len(head_bytes)]
-                    await f.write(chunk)
+                    write_buffer += chunk
+                    if len(write_buffer) >= _WRITE_BATCH_BYTES:
+                        await f.write(write_buffer)
+                        write_buffer.clear()
+                if write_buffer:
+                    await f.write(write_buffer)
             # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘
             if not is_known_image_bytes(head_bytes):
                 raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
+            # 签名已确认受支持，推断必然命中具体格式；与 URL 派生扩展名不一致时修正最终路径
+            sniffed = infer_extension_from_bytes(head_bytes)
+            if sniffed != save_path.suffix.lower():
+                final_save_path = save_path.with_suffix(sniffed)
+                return final_save_path
+            return None
 
         # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成
         await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix)
@@ -541,13 +578,13 @@ class DownloadManager:
         download_time = time.time() - start_time
         logger.info(
             "图片下载成功: {} ({} 字节, {:.2f}秒)",
-            save_path,
+            final_save_path,
             total_size,
             download_time,
         )
         return {
             "success": True,
-            "file_path": str(save_path),
+            "file_path": str(final_save_path),
             "file_size": total_size,
             "download_time": download_time,
             "content_type": content_type,

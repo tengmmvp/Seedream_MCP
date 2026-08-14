@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-import seedream_mcp.tools.impl.browse_images as browse_module
+import seedream_mcp.utils.io.io_scan as scan_module
 import seedream_mcp.utils.io.io_path as path_utils_module
-from seedream_mcp.tools.impl.browse_images import _cached_find_images_in_directory
+from seedream_mcp.utils.io.io_scan import _cached_find_images_in_directory
 from seedream_mcp.utils.io.io_path import find_images_in_directory
 
 
@@ -149,7 +149,7 @@ def test_recursive_order_matches_global_sorted_path(tmp_path: Path) -> None:
 def test_find_images_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
     """符号链接目录指向 base 之外时，递归扫描不得下降进入该目录遍历外部图片。
 
-    防御与 io_storage.FileManager.cleanup_old_files 同类的符号链接越界风险：find_images_in_directory
+    防御与 io_storage.FileManager.run_cleanup_policies 同类的符号链接越界风险：find_images_in_directory
     使用 os.scandir 配合 entry.is_dir(follow_symlinks=False) 拒绝下降符号链接目录。若错误地
     跟随符号链接目录下降，会把 base 之外的外部图片纳入结果，构成路径边界逃逸，与 browse_images
     的工作区边界保证冲突。构造 base 内的符号链接目录指向 base 外的目录（含一张图片），并另放
@@ -225,14 +225,14 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    browse_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module._DIRECTORY_SCAN_CACHE.clear()
 
     # scan_limit 大于目录图数，确保扫到末尾从而缓存全量
     first = _cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
     )
     assert [p.name for p in first] == ["a.png"]
-    assert len(browse_module._DIRECTORY_SCAN_CACHE) == 1
+    assert len(scan_module._DIRECTORY_SCAN_CACHE) == 1
 
     # 向已存在子目录新增第 2 张图；顶层目录 mtime 不变
     (sub / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -244,10 +244,10 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     assert [p.name for p in within_ttl] == ["a.png"]
 
     # 模拟 TTL 过期：推进 browse_images.time.monotonic 返回值越过 TTL
-    ttl = browse_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
-    real_monotonic = browse_module.time.monotonic
+    ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
+    real_monotonic = scan_module.time.monotonic
     base = real_monotonic()
-    monkeypatch.setattr(browse_module.time, "monotonic", lambda: base + ttl + 1)
+    monkeypatch.setattr(scan_module.time, "monotonic", lambda: base + ttl + 1)
 
     expired = _cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
@@ -259,14 +259,14 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
     """缓存命中返回全量列表浅拷贝，不同 scan_limit 的翻页共享同一缓存条目。"""
     for name in ("a.png", "b.png", "c.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
-    browse_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module._DIRECTORY_SCAN_CACHE.clear()
 
     # scan_limit 大于图数，扫到末尾缓存全量 3 张
     first = _cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
     )
     assert len(first) == 3
-    assert len(browse_module._DIRECTORY_SCAN_CACHE) == 1
+    assert len(scan_module._DIRECTORY_SCAN_CACHE) == 1
 
     # 不同 scan_limit（模拟翻页）命中同一缓存，返回全量 3 而非 scan_limit=2 的前缀
     paged = _cached_find_images_in_directory(
@@ -290,10 +290,10 @@ def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> Non
     """
     for i in range(5):
         (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    browse_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module._DIRECTORY_SCAN_CACHE.clear()
 
     def _entry() -> Any:
-        return next(iter(browse_module._DIRECTORY_SCAN_CACHE.values()))
+        return next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
 
     # 首页 scan_limit=2：目录有 5 图，返回 2 条，结果数等于 limit 故 complete=False，缓存前缀 2
     _cached_find_images_in_directory(
@@ -323,10 +323,10 @@ def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
     """扫到目录末尾(complete=True)后，任意 scan_limit 均命中全量，不再扫描。"""
     for name in ("a.png", "b.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
-    browse_module._DIRECTORY_SCAN_CACHE.clear()
+    scan_module._DIRECTORY_SCAN_CACHE.clear()
 
     def _entry() -> Any:
-        return next(iter(browse_module._DIRECTORY_SCAN_CACHE.values()))
+        return next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
 
     # scan_limit=10 远大于目录 2 图，返回 2 条且 complete=True（扫到末尾）
     _cached_find_images_in_directory(

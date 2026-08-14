@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import logging
@@ -29,6 +30,21 @@ from loguru import logger
 if TYPE_CHECKING:
     # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入
     from loguru import Logger
+
+
+def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
+    """done callback：检索并记录共享后台 task 的异常，消除事件循环告警噪音。
+
+    经 asyncio.shield 共享的 task 在创建者被取消后，其 outer 不再消费 task 结果；
+    若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
+    retrieved"。挂载本回调显式检索异常即清除该标记，有等待者正常消费时重复检索
+    无副作用。供 images 与 io 子包的 single-flight 在途 task 共用。
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("后台共享任务失败: {}", exc)
 
 
 class InterceptHandler(logging.Handler):
@@ -56,15 +72,40 @@ _LOG_MESSAGE_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _strip_message_control_chars(record: Any) -> None:
-    """patcher：剥离日志消息的控制字符，防日志注入。
+    """patcher：剥离日志消息与异常消息的控制字符，防日志注入。
 
     路径名、上游错误体等可能含 CR/LF 等控制字符，原样记录会在日志文件中伪造额外行，
     干扰审计取证。作为全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点，无需
-    逐处 sanitize 路径或错误文本。traceback 堆栈经 exception 字段独立呈现，不受影响。
+    逐处 sanitize 路径或错误文本。exc_info 渲染的 traceback 不经过 record["message"]，
+    其异常消息文本经 _strip_exception_control_chars 同步清洗；traceback 帧的源代码行
+    来自本地文件，不含不可信输入。
     """
     message = record["message"]
     if _LOG_MESSAGE_CONTROL_CHARS.search(message):
         record["message"] = _LOG_MESSAGE_CONTROL_CHARS.sub(" ", message)
+    _strip_exception_control_chars(record)
+
+
+def _strip_exception_control_chars(record: Any) -> None:
+    """清洗 exc_info 记录携带的异常消息文本中的控制字符。
+
+    loguru 对 exception 字段的 traceback 渲染独立于 message，异常 str 输出由 args
+    派生，原地清洗 args 即同时修正本条与后续对该异常实例的字符串化显示，使携带
+    换行的上游错误消息无法在日志文件中伪造行。仅处理含字符串 args 的异常，无 args
+    或重写 __str__ 的异常保持原样，帧源代码行不受影响。
+    """
+    exc = record.get("exception")
+    if exc is None:
+        return
+    value = exc.value
+    args = getattr(value, "args", None)
+    if not args:
+        return
+    cleaned = tuple(
+        _LOG_MESSAGE_CONTROL_CHARS.sub(" ", arg) if isinstance(arg, str) else arg for arg in args
+    )
+    if cleaned != args:
+        value.args = cleaned
 
 
 def setup_logging(

@@ -40,8 +40,12 @@ FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
 # 导入使用，维持单一来源
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
-# 生成工具类型白名单，目前仅支持联网搜索
+# 生成工具类型白名单，目前仅支持联网搜索；schemas.GenerationToolType 枚举的取值
+# 集合以本常量为源，test_schema_length_limits 守护两侧一致
 VALID_GENERATION_TOOL_TYPES = frozenset({"web_search"})
+# 响应格式白名单，schemas.ResponseFormat 枚举的取值集合以本常量为源，同一守护测试
+# 断言两侧一致
+VALID_RESPONSE_FORMATS = frozenset({"url", "b64_json"})
 # 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 # 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张
@@ -87,10 +91,6 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     return validated_value
 
 
-# 模型家族解析、能力表与判定函数已抽取至 model_capabilities.py
-# 图像输入校验（URL/本地文件/Data URI 的格式与 PIL 维度校验）已拆分至 image_validation.py
-
-
 # ==================== 基础公共验证函数 ====================
 
 
@@ -126,8 +126,24 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
     if not prompt:
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
-    chinese_count = len(CJK_CHAR_PATTERN.findall(prompt))
-    english_word_count = len(re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", prompt))
+    # MCP JSON 可合法传入未配对 UTF-16 代理字符的转义序列，此类文本无法 UTF-8 编码，
+    # 若放行会在请求体序列化处才失败并呈现编码细节错误；在此提前以参数级提示拒绝
+    try:
+        prompt.encode("utf-8")
+    except UnicodeEncodeError:
+        raise SeedreamValidationError(
+            "提示词包含无法编码的字符（如未配对的代理字符）", field="prompt", value=None
+        )
+
+    # 短文本粗筛：长度不超过中文阈值时两项计数必然在限内（单字符至多计 1 个中文、
+    # 单词至少 1 个字符），跳过正则扫描，避免长提示词的 findall 在调用路径上物化
+    # 十万级单字符列表
+    chinese_count = 0
+    english_word_count = 0
+    if len(prompt) > max_chinese_chars:
+        # subn 以替换计数取代 findall 物化匹配列表，超长中文提示词下仅一次分配
+        chinese_count = CJK_CHAR_PATTERN.subn("", prompt)[1]
+        english_word_count = re.subn(r"[A-Za-z]+(?:'[A-Za-z]+)?", "", prompt)[1]
 
     if chinese_count > max_chinese_chars or english_word_count > max_english_words:
         # 文档为"建议"而非硬限制：超限时仅记录警告，不阻断调用
@@ -187,17 +203,15 @@ def validate_response_format(response_format: str) -> str:
     Raises:
         SeedreamValidationError: 当格式参数无效时抛出
     """
-    valid_formats = ["url", "b64_json"]
-
     if not response_format or not isinstance(response_format, str):
         raise SeedreamValidationError(
             "response_format 不能为空", field="response_format", value=response_format
         )
 
     response_format = response_format.strip().lower()
-    if response_format not in valid_formats:
+    if response_format not in VALID_RESPONSE_FORMATS:
         raise SeedreamValidationError(
-            f"response_format 必须是以下值之一: {valid_formats}",
+            f"response_format 必须是以下值之一: {sorted(VALID_RESPONSE_FORMATS)}",
             field="response_format",
             value=response_format,
         )
@@ -343,7 +357,8 @@ def validate_stream(stream: bool, model_id: str) -> bool:
     """
     验证流式输出参数与模型兼容性。
 
-    Seedream 5.0 Pro 不支持流式输出 stream，传参即报错；仅 5.0 Lite/4.5/4.0 支持。
+    Seedream 5.0 Pro 不支持流式输出 stream，传参即报错；仅 doubao-seedream-5.0 系列
+    （5.0/5.0-lite 同一模型）/4.5/4.0 支持。
     """
     caps = get_model_capabilities(model_id)
     if stream and not caps.supports_stream:

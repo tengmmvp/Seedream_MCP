@@ -118,19 +118,21 @@ def _format_file_size_mb(size_bytes: int) -> str:
 def parse_data_uri(data: str) -> tuple[str | None, str]:
     """解析 data URI，返回 (media_type, payload)。
 
-    非以 ``data:`` 开头、缺逗号分隔符或入参非字符串时返回 (None, 原始字符串)。
+    scheme 前缀按 RFC 3986 大小写不敏感判定，与 image_ref 的分类口径一致，使
+    ``DATA:image/png;base64,....`` 也能进入校验流水线获得精确报错而非笼统的
+    "格式无效"。非 data URI、缺逗号分隔符或入参非字符串时返回 (None, 原始字符串)。
     media_type 取自 header 的媒体类型部分，例如 ``data:image/png;base64,....`` 解析为
     ``image/png``；header 缺少媒体类型时该字段为 None。payload 为首个逗号后的负载，
     不做 base64 解码，由调用方按编码标记自行处理。供 validation 与 auto_save 共享，
     消除两处 data URI 拆分逻辑的重复。
     """
-    if not isinstance(data, str) or not data.startswith("data:"):
+    if not isinstance(data, str):
         return None, data
     header, sep, payload = data.partition(",")
-    if not sep:
+    if not sep or not header.lower().startswith("data:"):
         return None, data
-    # header 形如 "data:image/png;base64"，去掉 "data:" 前缀后取首个 ";" 前的媒体类型
-    body = header[len("data:") :]
+    # header 形如 "data:image/png;base64"，去掉 scheme 前缀后取首个 ";" 前的媒体类型
+    body = header.split(":", 1)[1]
     if ";" in body:
         media_type = body.split(";", 1)[0] or None
     else:

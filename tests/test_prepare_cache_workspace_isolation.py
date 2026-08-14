@@ -48,8 +48,8 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
 
     monkeypatch.setattr(path_utils, "get_workspace_roots", fake_get_workspace_roots)
 
-    first = await client._prepare_image_input("same-image.png")
-    second = await client._prepare_image_input("same-image.png")
+    first = await client._image_preparer.prepare_image_input("same-image.png")
+    second = await client._image_preparer.prepare_image_input("same-image.png")
 
     assert first == "prepared:same-image.png"
     assert second == "prepared:same-image.png"
@@ -75,7 +75,7 @@ async def test_prepare_image_input_cache_hit_when_workspace_roots_stable(
     monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare_image_input)
     monkeypatch.setattr(path_utils, "get_workspace_roots", lambda: [Path("/workspace/same")])
 
-    await client._prepare_image_input("img.png")
-    await client._prepare_image_input("img.png")
+    await client._image_preparer.prepare_image_input("img.png")
+    await client._image_preparer.prepare_image_input("img.png")
 
     assert call_count == 1

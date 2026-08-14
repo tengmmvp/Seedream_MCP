@@ -141,14 +141,18 @@ async def test_download_image_rejects_redirect_to_private_ip_via_real_static_val
     monkeypatch.setattr(manager, "_ensure_session", _fake_ensure_session)
 
     with pytest.raises(DownloadError, match="不安全|非公网"):
-        await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
+        # 起始 URL 用 http 使降级检查不先触发，保证静态校验路径真实可达
+        await manager.download_image("http://example.com/img.png", tmp_path / "out.png")
 
 
 @pytest.mark.asyncio
 async def test_download_image_rejects_redirect_to_loopback_via_real_static_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """端到端串联：302 跳转至回环地址须被真实 _validate_url_static 拒绝。"""
+    """端到端串联：302 跳转至回环地址须被真实 _validate_url_static 拒绝。
+
+    起始 URL 用 http 使降级检查不先触发，保证静态校验路径真实可达。
+    """
     manager = DownloadManager()
     session = _FakeSession([_FakeResponse(302, {"location": "http://127.0.0.1/"})])
 
@@ -162,6 +166,19 @@ async def test_download_image_rejects_redirect_to_loopback_via_real_static_valid
     monkeypatch.setattr(manager, "_ensure_session", _fake_ensure_session)
 
     with pytest.raises(DownloadError, match="不安全|非公网"):
+        await manager.download_image("http://example.com/img.png", tmp_path / "out.png")
+
+
+@pytest.mark.asyncio
+async def test_download_image_rejects_https_to_http_downgrade_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """https 起始的下载不允许经重定向降级到 http，消除明文链路攻击面。"""
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(302, {"location": "http://mirror.example.com/x.png"})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    with pytest.raises(DownloadError, match="降级"):
         await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
 
 

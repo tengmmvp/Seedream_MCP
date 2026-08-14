@@ -295,7 +295,7 @@ Fuse multiple images into a new image
 <details>
 <summary><b>4. <code>seedream_sequential_generation</code></b> — Sequential Generation</summary>
 
-Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence (only 5.0 Lite/4.5/4.0 supported; 5.0 Pro does not support sequential generation)
+Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence (only the doubao-seedream-5.0 series (5.0/5.0-lite)/4.5/4.0 supported; 5.0 Pro does not support sequential generation)
 
 **Parameters:**
 
@@ -304,7 +304,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `image` (optional) - Reference image(s); supports a single image (string) or multiple images (array); up to 14 reference images, and the sum of reference images and max_images must not exceed 15
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
-- `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15
+- `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
 - `stream` (optional) - Whether to enable streaming output; default `false`
@@ -458,6 +458,12 @@ SEEDREAM_PREPARE_CACHE_MAX_BYTES=268435456    # Reference image prepare cache to
 SEEDREAM_STREAM_BUFFER_MAX_SIZE=10485760      # SSE stream buffer prefix reclaim threshold (default 10MB)
 SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (default 1MB)
 ```
+
+### Deployment Notes
+
+- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction delete **all** expired files with supported image extensions (and empty directories) inside the save directory, regardless of whether they were created by this server. Do not point `SEEDREAM_AUTO_SAVE_BASE_DIR` at directories holding important personal images.
+- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: if reading MCP Roots fails, the file access boundary falls back to this variable (or the process working directory when unset).
+- **Body size of unauthenticated requests**: unauthenticated chunked requests are rejected with 401 before their body is read; their size limiting relies on uvicorn or a fronting reverse proxy. Configure a request body limit at the proxy layer for public deployments.
 
 ## 👥 Contributors
 

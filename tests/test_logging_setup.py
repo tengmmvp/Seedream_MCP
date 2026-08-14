@@ -1,10 +1,14 @@
-"""setup_logging 的 force_standard_logging 透传测试。"""
+"""setup_logging 的 force_standard_logging 透传测试与日志控制字符 patcher 测试。"""
 
 import logging
+from collections import namedtuple
 
 import pytest
 
-from seedream_mcp.utils.core.logs import setup_logging
+from seedream_mcp.utils.core.logs import _strip_message_control_chars, setup_logging
+
+# 模拟 loguru record["exception"] 的 RecordException 结构（type, value, traceback）
+_RecordException = namedtuple("_RecordException", "type value traceback")
 
 
 class _FakeLogger:
@@ -75,3 +79,54 @@ def test_setup_logging_respects_force_standard_logging_true(
     )
 
     assert captured_kwargs["force"] is True
+
+
+# ==================== 控制字符 patcher ====================
+
+
+def test_patcher_strips_message_control_chars() -> None:
+    """日志消息中的 CR/LF 被逐字符替换为空格，防日志注入伪造行。"""
+    record: dict = {"message": "a\r\nb"}
+
+    _strip_message_control_chars(record)
+
+    assert record["message"] == "a  b"
+
+
+def test_patcher_strips_exception_message_control_chars() -> None:
+    """exc_info 渲染的异常消息文本同样清洗，换行不落入日志伪造额外行。"""
+    exc = ValueError("line1\nFAKE-INFO token=leaked\r\nline3")
+    record: dict = {
+        "message": "boom",
+        "exception": _RecordException(ValueError, exc, None),
+    }
+
+    _strip_message_control_chars(record)
+
+    rendered = str(exc)
+    assert "\n" not in rendered
+    assert "\r" not in rendered
+    assert "FAKE-INFO" in rendered
+
+
+def test_patcher_leaves_clean_exception_untouched() -> None:
+    """无控制字符的异常消息保持原样，不做多余改写。"""
+    exc = ValueError("clean message")
+    args_before = exc.args
+    record: dict = {
+        "message": "boom",
+        "exception": _RecordException(ValueError, exc, None),
+    }
+
+    _strip_message_control_chars(record)
+
+    assert exc.args == args_before
+
+
+def test_patcher_handles_record_without_exception() -> None:
+    """exception 为 None 的常规记录正常处理，不抛错。"""
+    record: dict = {"message": "plain", "exception": None}
+
+    _strip_message_control_chars(record)
+
+    assert record["message"] == "plain"

@@ -9,6 +9,7 @@ validate_image_path 位于 images 子包的 image_validation，本模块保持�
 from __future__ import annotations
 
 # 标准库导入
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
@@ -30,6 +31,10 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     "seedream_workspace_roots",
     default=None,
 )
+
+# roots/list 请求的显式短超时：每次工具调用前都有一次线上往返，慢客户端或半开连接
+# 不应长时间挂起工具执行；超时按读取失败回退环境变量边界
+_ROOTS_LIST_TIMEOUT_SECONDS = 5.0
 
 # 回退 CWD 告警只记录一次；无 Roots 时本解析随每次文件访问触发，逐次告警会淹没日志
 _cwd_fallback_warned = False
@@ -108,7 +113,8 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
     if session is None or not callable(list_roots):
         return []
 
-    roots_result = await list_roots()
+    # 显式短超时：无超时时依赖会话层读超时，慢客户端会把每次工具调用拖到分钟级
+    roots_result = await asyncio.wait_for(list_roots(), timeout=_ROOTS_LIST_TIMEOUT_SECONDS)
 
     resolved_roots: list[Path] = []
     for root in getattr(roots_result, "roots", []):
@@ -143,7 +149,9 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
         try:
             resolved_roots = await _resolve_workspace_roots_from_context(ctx)
         except Exception as exc:
-            logger.debug("读取 MCP Roots 失败，回退环境变量边界: {}", exc)
+            # 回退会放宽文件访问边界到环境变量根（未配置时为进程 CWD），多租户
+            # streamable-http 部署须感知该回退，提级为 warning 而非 debug
+            logger.warning("读取 MCP Roots 失败，回退环境变量边界: {}", exc)
         else:
             token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
             if resolved_roots:
@@ -161,7 +169,7 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
 # ==================== 路径验证和规范化 ====================
 
 
-def _is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
+def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
     """判断已 resolve 的路径是否位于已 resolve 的基础目录内。
 
     直接做 relative_to 比较，不再重复 resolve。供循环场景复用以避免重复解析。
@@ -191,7 +199,7 @@ def is_path_within_base(path: Path, base_dir: Path) -> bool:
     """
     if _is_unc_path(str(path)):
         return False
-    return _is_within_resolved(path.resolve(), base_dir.resolve())
+    return is_within_resolved(path.resolve(), base_dir.resolve())
 
 
 def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
@@ -204,7 +212,7 @@ def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
         return False
     resolved_path = path.resolve()
     for base_dir in base_dirs:
-        if _is_within_resolved(resolved_path, base_dir.resolve()):
+        if is_within_resolved(resolved_path, base_dir.resolve()):
             return True
     return False
 
@@ -357,7 +365,9 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
 
     Args:
         target_path: 目标路径。
-        search_dirs: 搜索目录列表，默认当前目录。
+        search_dirs: 搜索目录列表；未提供时不扫描任何目录并返回空列表，强制调用方
+            显式指定边界。不默认扫描进程 CWD，避免本函数经公开导出被直接调用时以
+            CWD 为界泄露本地图片文件名。
 
     Returns:
         相似路径建议列表，最多 5 条。
@@ -366,7 +376,7 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
 
     try:
         target_name = Path(target_path).name.lower()
-        search_directories = search_dirs or ["."]
+        search_directories = search_dirs or []
 
         for search_dir in search_directories:
             images = find_images_in_directory(search_dir, recursive=True, max_depth=2, limit=500)

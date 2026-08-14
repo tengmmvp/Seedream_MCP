@@ -295,7 +295,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 <details>
 <summary><b>4. <code>seedream_sequential_generation</code></b> — 組圖輸出</summary>
 
-連續生成多張圖像，支援文生組圖、單圖生組圖、多圖生組圖（僅 5.0 Lite/4.5/4.0 支援；5.0 Pro 不支援組圖）
+連續生成多張圖像，支援文生組圖、單圖生組圖、多圖生組圖（僅 doubao-seedream-5.0 系列（5.0/5.0-lite）/4.5/4.0 支援；5.0 Pro 不支援組圖）
 
 **參數：**
 
@@ -304,7 +304,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `image` (選用) - 參考圖像，支援單張圖片（字串）或多張圖片（陣列）；參考圖最多 14 張，且參考圖數量與 max_images 之和不超過 15
 - `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
-- `max_images` (選用) - 最大生成圖像數量，範圍 1-15，預設 15
+- `max_images` (選用) - 最大生成圖像數量，範圍 1-15，預設 15；提供參考圖時預設自動扣減為 15 減參考圖數量
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設 `jpeg`
 - `stream` (選用) - 是否啟用串流輸出，預設`false`
@@ -458,6 +458,12 @@ SEEDREAM_PREPARE_CACHE_MAX_BYTES=268435456    # 參考圖前置處理快取累�
 SEEDREAM_STREAM_BUFFER_MAX_SIZE=10485760      # SSE 串流回應緩衝區前綴回收閾值（預設 10MB）
 SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 串流回應每次讀取區塊大小（預設 1MB）
 ```
+
+### 部署注意事項
+
+- **儲存目錄由服務管理**：自動儲存的按天清理與總量配額會刪除儲存目錄內**所有**符合圖片副檔名的過期檔案與空目錄，不區分是否由本服務生成。請勿將 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向個人相簿等含重要圖片的目錄。
+- **多租戶 streamable-http 部署建議顯式設定 `SEEDREAM_WORKSPACE_ROOT`**：MCP Roots 讀取失敗時檔案存取邊界會回退到該環境變數（未設定時為行程工作目錄）。
+- **未認證請求的體積限制**：未攜帶有效權杖的 chunked 請求不讀 body 即回傳 401，其體積限制依賴 uvicorn 層或前置反向代理；公網暴露部署請在代理層設定請求體上限。
 
 ## 👥 貢獻者
 

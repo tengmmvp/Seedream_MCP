@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING, Any
 from ...config import SeedreamConfig
 from ...utils.core.errors import (
     SeedreamValidationError,
-    resolve_error_profile,
     format_error_for_user,
+    resolve_error_profile,
+    sanitize_error_text,
 )
 from ...utils.core.logs import get_logger
-from ...utils.io.io_path import _is_within_resolved, get_workspace_root, normalize_path
+from ...utils.io.io_path import is_within_resolved, get_workspace_root, normalize_path
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -65,10 +66,14 @@ def _is_generation_failed(result: dict[str, Any]) -> bool:
 
 
 def _normalize_error_message(raw_error: Any) -> str | None:
-    """将不同形态的错误对象提取为可读文本。"""
+    """将不同形态的错误对象提取为可读文本，经统一脱敏后返回。
+
+    上游错误文本可能回显鉴权片段，出口处过 sanitize_error_text 使并行聚合消息与
+    异常路径的防护一致。
+    """
     if isinstance(raw_error, str):
         message = raw_error.strip()
-        return message or None
+        return sanitize_error_text(message) if message else None
 
     if not isinstance(raw_error, dict):
         return None
@@ -76,7 +81,7 @@ def _normalize_error_message(raw_error: Any) -> str | None:
     for key in ("message", "msg", "detail", "error"):
         value = raw_error.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return sanitize_error_text(value.strip())
 
     code = raw_error.get("code")
     if isinstance(code, str) and code.strip():
@@ -149,7 +154,7 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
 
     # user_path 由 normalize_path 解析、default_base_dir 在本函数上方解析，两者均已 resolve，
     # 直接 relative_to 比较即可，避免 is_path_within_base 对二者再次重复 resolve
-    if not _is_within_resolved(user_path, default_base_dir):
+    if not is_within_resolved(user_path, default_base_dir):
         raise SeedreamValidationError(
             f"save_path 超出允许范围: {default_base_dir}",
             field="save_path",

@@ -40,6 +40,13 @@ LIFESPAN_KEY_CONFIG = "config"
 LIFESPAN_KEY_CLIENT = "client"
 LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"
 
+# streamable-http 默认监听配置：argparse 默认值、传输装配与 resources 的 lifespan
+# 复位共用此单一来源。与 lifespan 键同理由集中于 config——transport 与 resources 互为
+# 延迟导入的近邻层，常量若落在任一侧都会形成对另一侧的顶层依赖回环，config 是双方
+# 共同底层
+DEFAULT_HTTP_HOST = "127.0.0.1"
+DEFAULT_HTTP_PORT = 8000
+
 # dataclass 字段 metadata 中登记环境变量名的键，字段定义据此声明对应环境变量名
 _ENV_METADATA_KEY = "env"
 
@@ -147,9 +154,12 @@ class SeedreamConfig:
             raise SeedreamConfigError("model_id不能为空")
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
+            # 可用别名清单运行时从 MODEL_ALIASES 派生，新增模型时提示自动同步，
+            # 消除与 CLI choices 派生机制并存的最后一个硬编码模型清单同步点
+            aliases = "/".join(MODEL_ALIASES)
             raise SeedreamConfigError(
                 f"已不支持的模型: {self.model_id}（3.0/seededit-3.0 已下线），"
-                "请使用 doubao-seedream-5.0-pro/5.0/5.0-lite/4.5/4.0 或对应 Endpoint ID"
+                f"请使用 {aliases} 或对应 Endpoint ID"
             )
 
         if not isinstance(self.default_size, str) or not self.default_size.strip():

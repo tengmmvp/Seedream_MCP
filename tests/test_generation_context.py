@@ -60,6 +60,39 @@ def test_build_generation_context_rejects_explicit_empty_size() -> None:
         build_generation_context(TextToImageInput(prompt="test", size=""), config)
 
 
+def test_build_generation_context_rejects_reference_images_over_pro_limit() -> None:
+    """5.0 Pro 的参考图上限 10 在 context 层即时拒绝，与尺寸等能力校验同层。
+
+    schema 上限只能表达全家族默认 14；若留给 client 层，进度已上报"参数校验完成"
+    后才报错，错误呈现层次不一致。
+    """
+    from seedream_mcp.tools.core.schemas import MultiImageFusionInput
+
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-pro")
+    params = MultiImageFusionInput(
+        prompt="融合测试",
+        image=[f"https://example.com/ref-{i}.png" for i in range(11)],
+    )
+
+    with pytest.raises(SeedreamValidationError, match="数量不能超过 10"):
+        build_generation_context(params, config)
+
+
+def test_build_generation_context_allows_default_model_reference_limit() -> None:
+    """非 Pro 家族的默认上限 14 在 context 层放行，不误伤合法输入。"""
+    from seedream_mcp.tools.core.schemas import MultiImageFusionInput
+
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0")
+    params = MultiImageFusionInput(
+        prompt="融合测试",
+        image=[f"https://example.com/ref-{i}.png" for i in range(14)],
+    )
+
+    context = build_generation_context(params, config)
+
+    assert context.request_count == 1
+
+
 def test_build_generation_context_sets_default_parallelism_by_request_count() -> None:
     config = _build_config()
     context = build_generation_context(TextToImageInput(prompt="test", request_count=3), config)

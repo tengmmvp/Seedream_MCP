@@ -20,6 +20,7 @@ from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager
 
 from _download_fakes import (
     _FakeResponse,
+    _FakeSession,
     _PNG_BYTES,
     _RaisingThenSuccessSession,
     _patch_download_network,
@@ -46,6 +47,47 @@ async def test_download_image_retries_on_aiohttp_client_error(
     assert save_path.exists()
     assert save_path.read_bytes() == _PNG_BYTES
     assert session.call_count == 2
+
+
+async def test_download_sniffs_extension_from_bytes_when_suffix_mismatched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """URL 派生扩展名与实际字节不符时按字节签名修正，落盘与结果路径一致。
+
+    签名 CDN 链接常无路径后缀（恒得默认 .jpeg）或声明与内容不符；嗅探后内容与
+    扩展名保持一致，与 base64 保存路径行为对齐。
+    """
+    from _download_fakes import _FakeSession
+
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.jpeg"
+    result = await manager.download_image("https://cdn.example.com/signed.jpeg", save_path)
+
+    corrected = tmp_path / "out.png"
+    assert result["success"] is True
+    assert result["file_path"] == str(corrected)
+    assert corrected.exists()
+    assert corrected.read_bytes() == _PNG_BYTES
+    assert not save_path.exists()
+
+
+async def test_download_keeps_suffix_when_matches_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """URL 扩展名与字节签名一致时路径不变，不产生多余修正。"""
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["file_path"] == str(save_path)
+    assert save_path.read_bytes() == _PNG_BYTES
 
 
 async def test_download_image_retries_on_oserror(

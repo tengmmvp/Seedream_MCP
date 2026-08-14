@@ -11,7 +11,7 @@ import json
 import time
 from typing import Any, cast
 
-from ..core.errors import SeedreamAPIError
+from ..core.errors import SeedreamAPIError, sanitize_error_text
 
 
 def is_sse_response(response: Any) -> bool:
@@ -39,13 +39,17 @@ def format_sse_success_event(event: dict[str, Any], model_id: str) -> dict[str, 
 
 
 def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, Any]:
-    """将 SSE 失败事件转换为统一图片项结构。"""
+    """将 SSE 失败事件转换为统一图片项结构。
+
+    error.message 为上游自由文本，经 sanitize_error_text 剥离敏感片段与控制字符并
+    截断后再进入图片项，防止被劫持的中间层借 per-image 错误回显凭据直达用户可见输出。
+    """
     raw_error = event.get("error")
     error = raw_error if isinstance(raw_error, dict) else {}
     return {
         "error": {
             "code": error.get("code"),
-            "message": error.get("message"),
+            "message": sanitize_error_text(error.get("message")),
         },
         "image_index": event.get("image_index"),
         "model": event.get("model", model_id),

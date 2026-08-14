@@ -80,6 +80,55 @@ async def test_browse_images_ignores_outside_images_without_crashing(
 
 
 @pytest.mark.asyncio
+async def test_browse_images_empty_format_filter_skips_scan(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """空列表 format_filter 与"全部后缀不受支持"语义一致：跳过扫描返回空结果。
+
+    此前空列表因 falsy 判断直接退化为不过滤的全量扫描，与全不支持分支行为不一致。
+    """
+    (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _fail_find(*args, **kwargs):
+        raise AssertionError("无有效后缀时不应触发目录扫描")
+
+    monkeypatch.setattr(browse_images_module, "find_images_in_directory", _fail_find)
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, format_filter=[])
+    )
+
+    assert result.isError is False
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["status"] == "empty"
+    assert result.structuredContent["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_browse_images_fallback_error_preserves_format_filter(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外层兜底错误分支回显经同一规则过滤的 format_filter，不丢失用户原始输入。"""
+    from mcp.types import CallToolResult
+
+    async def _exploding_impl(params, ctx):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(browse_images_module, "_handle_browse_images_impl", _exploding_impl)
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, format_filter=[".png", ".exe"])
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["format_filter"] == [".png"]
+
+
+@pytest.mark.asyncio
 async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
     for name in ("a.png", "b.png", "c.png"):
         (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")

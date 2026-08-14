@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import stat
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,9 @@ from ..core.validators import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
-    _is_within_resolved,
+    _is_unc_path,
     get_workspace_root,
+    is_within_resolved,
     normalize_path,
     resolve_env_workspace_root,
 )
@@ -117,6 +119,60 @@ def _validate_url(url: str) -> str:
         raise SeedreamValidationError(f"URL验证失败: {str(e)}", field="image", value=url) from e
 
 
+def image_candidate_stat(path: Path) -> os.stat_result | None:
+    """返回通过图片文件资格检查的 stat，供候选定位与读取路径共用同一规则。
+
+    资格规则：常规文件、扩展名在支持白名单、大小不超过 MAX_IMAGE_FILE_SIZE；
+    任一不满足或 stat 失败返回 None。
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+        return None
+    if st.st_size > MAX_IMAGE_FILE_SIZE:
+        return None
+    return st
+
+
+def resolve_local_image_candidate(
+    image: str, resolved_bases: list[Path]
+) -> tuple[Path, os.stat_result] | None:
+    """按输入路径与已 resolve 的工作区根列表定位可读取的候选图片文件。
+
+    绝对路径直接作为候选；相对路径按根序逐一拼接。候选 resolve 一次后经
+    is_within_resolved 与各已 resolve 根直接比较（拦截 ``..`` 与符号链接越界），
+    通过后经 image_candidate_stat 做文件资格检查，返回首个命中的
+    (resolve 后物理路径, stat)。不再经 is_path_within_any_base 二次 resolve——该
+    函数每张本地图在缓存签名与读取两条路径各调用一次，Windows/网络挂载下重复
+    resolve 是缓存命中路径的主要剩余开销。ImagePreparer 的缓存签名与
+    image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件，杜绝两侧
+    规则漂移导致签名命中与读取内容不一致的陈旧缓存。未命中返回 None，由调用方
+    决定回退或报错。
+    """
+    candidates = (
+        [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_bases]
+    )
+    for candidate in candidates:
+        # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
+        # 避免凭据在越界拒绝尚未发生时已向远端泄露；直接比较优化不得丢失该前置守卫
+        if _is_unc_path(str(candidate)):
+            continue
+        try:
+            resolved_candidate = candidate.resolve()
+        except (OSError, ValueError):
+            continue
+        if not any(is_within_resolved(resolved_candidate, base) for base in resolved_bases):
+            continue
+        st = image_candidate_stat(resolved_candidate)
+        if st is not None:
+            return resolved_candidate, st
+    return None
+
+
 def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
     """校验图像宽高下限、宽高比与总像素约束，不满足时抛出 SeedreamValidationError。
 
@@ -147,8 +203,8 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     执行存在性、文件类型、扩展名、文件大小检查；skip_dimensions 为 False 时还校验
     图像维度。路径的工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基础目录
     取自环境配置，与 MCP 运行时的 Roots 集合来源不同，故不在函数内做边界断言，以免
-    误拒 Roots 授权但环境根之外的合法路径。调用方 io_path.validate_image_path 与
-    client 的本地文件签名校验已在前置环节用正确的 Roots 集合完成越界拦截。
+    误拒 Roots 授权但环境根之外的合法路径。调用方 validate_image_path 与
+    resolve_local_image_candidate 已在前置环节用正确的 Roots 集合完成越界拦截。
 
     图像维度读取经 open_no_follow_read 打开最终分量。path 已由
     _resolve_local_image_path 调用 resolve() 跟随符号链接，故 O_NOFOLLOW 对初始输入
@@ -259,7 +315,7 @@ def _validate_data_uri(data_uri: str) -> str:
         header_lower = data_uri.split(",", 1)[0].lower()
         if not header_lower.startswith("data:image/") or ";base64" not in header_lower:
             raise SeedreamValidationError(
-                "Data URI 必须为 data:image/<格式>;base64, 前缀且小写",
+                "Data URI 必须为 data:image/<格式>;base64, 前缀（scheme 大小写不敏感）",
                 field="image",
                 value=data_uri,
             )
@@ -376,7 +432,7 @@ def validate_image_path(
         normalized_path = normalize_path(path, base_dir)
         base_path = Path(base_dir).resolve()
         # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析
-        if not _is_within_resolved(normalized_path, base_path):
+        if not is_within_resolved(normalized_path, base_path):
             return False, "路径超出允许的工作区目录范围", normalized_path
 
         # 委托本模块 validate_image_input 执行格式与维度等统一规则校验。

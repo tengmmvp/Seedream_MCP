@@ -173,3 +173,22 @@ def test_file_uri_to_path_accepts_local_file(tmp_path: Path) -> None:
 
 def test_file_uri_to_path_rejects_malformed_uri() -> None:
     assert _file_uri_to_path("file://") is None
+
+
+def test_resolve_local_image_candidate_skips_unc_without_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UNC 输入在候选定位中于 resolve 前被拦截，不触发 SMB 连接。
+
+    直接比较优化不得丢失 UNC 前置守卫；断言 Path.resolve 未被调用而非仅返回 None，
+    防止未来回归为"先 resolve 后拒绝"。
+    """
+    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+
+    def _explode(self):  # type: ignore[no-untyped-def]
+        raise AssertionError("UNC 候选不得进入 resolve（会触发 SMB 认证）")
+
+    monkeypatch.setattr(Path, "resolve", _explode)
+
+    assert resolve_local_image_candidate("\\\\attacker\\share\\x.png", [tmp_path]) is None
+    assert resolve_local_image_candidate("//attacker/share/x.png", [tmp_path]) is None

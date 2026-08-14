@@ -28,7 +28,11 @@ _DIRECTORY_SCAN_CACHE_MAX_ENTRIES = 64
 # 单条目图片列表长度上限：超过的大目录不缓存全量列表，回退每页扫描，避免无界内存占用
 _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN = 10000
 # 递归扫描缓存 TTL：子目录新增图片不改变顶层目录 mtime，以 TTL 兜底保证最终一致。
-_DIRECTORY_SCAN_CACHE_TTL_SECONDS = 5.0
+# 取 30 秒平衡翻页缓存命中与新增图片的可见延迟，过短会使间隔翻页必然全量重扫。
+_DIRECTORY_SCAN_CACHE_TTL_SECONDS = 30.0
+# 前缀扩展的几何倍率：命中但前缀不足时按 max(scan_limit, 倍率×已缓存条数) 重扫，
+# 使第 K 页的前缀扩展按指数预取，累计扫描代价从 O(K²) 降为 O(K)，摊销单次扫描开销
+_SCAN_PREFIX_GROWTH_FACTOR = 2
 
 
 @dataclass
@@ -127,10 +131,17 @@ def _cached_find_images_in_directory(
     scan = scanner if scanner is not None else find_images_in_directory
     cached = _DIRECTORY_SCAN_CACHE.get(cache_key)
     if cached is not None and _is_scan_entry_fresh(cached, resolved_dir, recursive):
-        # 完整列表或前缀已覆盖本次 scan_limit 时直接复用，前缀不足则按更大 scan_limit 重扫扩展。
-        # 切片返回独立副本，调用方原地修改不会篡改缓存内列表。
+        # 完整列表或前缀已覆盖本次 scan_limit 时直接复用，前缀不足则按几何倍率扩展的
+        # scan_limit 重扫，摊销深翻页的累计扫描代价。切片返回独立副本，调用方原地
+        # 修改不会篡改缓存内列表。
         if cached.complete or len(cached.images) >= scan_limit:
             return cached.images[:]
+        # 上限取单条目列表上限：超过该上限的扫描结果不会被缓存，扩展到该值之上只会
+        # 每页全量重扫，不再命中
+        scan_limit = min(
+            _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN,
+            max(scan_limit, len(cached.images) * _SCAN_PREFIX_GROWTH_FACTOR),
+        )
     # 扫描前捕获目录 mtime，使缓存写入的指纹与 images 自洽：扫描与 stat 之间若有并发写入，
     # 扫描后捕获的 mtime 会反映新增而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖
     # mtime 失效，跳过捕获。

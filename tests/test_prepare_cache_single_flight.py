@@ -39,8 +39,8 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     # URL 输入的 _local_file_signature 恒为 (0.0, 0)，两次 cache_key 完全一致
     image_url = "https://example.com/ref.png"
     first, second = await asyncio.gather(
-        client._prepare_image_input(image_url, roots_key),
-        client._prepare_image_input(image_url, roots_key),
+        client._image_preparer.prepare_image_input(image_url, roots_key),
+        client._image_preparer.prepare_image_input(image_url, roots_key),
     )
 
     # 两个并发 miss 共享同一 task，底层仅调用一次
@@ -85,8 +85,10 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
 
     # URL 输入的 _local_file_signature 恒为 (0.0, 0)，两次 cache_key 完全一致
     image_url = "https://example.com/ref.png"
-    creator = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
-    waiter = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+    creator = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, roots_key)
+    )
+    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
 
     # 等待底层 task 启动：creator 先创建 inflight 并 await task，waiter 随后命中 inflight
     # 并 await 同一 task，最后底层 task 执行 fake 置位事件。
@@ -141,8 +143,10 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
-    creator = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
-    waiter = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+    creator = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, roots_key)
+    )
+    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
 
     # 等待底层 task 启动：creator 先创建 inflight 并 await task，waiter 随后命中 inflight
     # 并 await 同一 task，最后底层 task 执行 fake 置位事件。
@@ -192,8 +196,10 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
     monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
-    creator = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
-    waiter = asyncio.ensure_future(client._prepare_image_input(image_url, roots_key))
+    creator = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, roots_key)
+    )
+    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
 
     await inner_started.wait()
     # 两者 await 同一 inflight task，task 抛错时均收到该异常

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...utils.core.errors import sanitize_error_text
 from ...utils.io.io_save import AutoSaveResult
 from ._helpers import (
     _add_usage_value,
@@ -186,11 +187,33 @@ def update_result_with_auto_save(
     return updated_result
 
 
+def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """净化图片项内的上游 error.message，返回净化后的列表。
+
+    仅对含 error.message 字符串的项做浅拷贝替换，其余项原样引用，避免改动调用方
+    传入的原结果对象。SSE 失败事件在 io_sse 源头已净化，此处覆盖非 SSE 路径的
+    per-image error，使两条来源的结构化输出防护一致。
+    """
+    sanitized: list[dict[str, Any]] = []
+    for image in images:
+        error = image.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            item = dict(image)
+            item["error"] = {**error, "message": sanitize_error_text(error["message"])}
+            sanitized.append(item)
+        else:
+            sanitized.append(image)
+    return sanitized
+
+
 def _format_failure_section(result: dict[str, Any]) -> str:
-    """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。"""
+    """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。
+
+    error 文本为上游自由内容，出口处过 sanitize_error_text 与异常路径防护一致。
+    """
     raw_error = result.get("error", "未知错误")
     # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本
-    error_text = (
+    error_text = sanitize_error_text(
         raw_error.get("message", str(raw_error)) if isinstance(raw_error, dict) else raw_error
     )
     failure_message = f"图片生成失败: {error_text}"
@@ -206,7 +229,7 @@ def _format_failure_section(result: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         request_index = item.get("request_index")
-        error_message = item.get("message", "请求失败")
+        error_message = sanitize_error_text(item.get("message", "请求失败"))
         if request_index is None:
             parts.append(f"  {error_message}")
         else:
@@ -225,7 +248,7 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
         if error_info.get("code"):
             parts.append(f"  错误码: {error_info['code']}")
         if error_info.get("message"):
-            parts.append(f"  错误信息: {error_info['message']}")
+            parts.append(f"  错误信息: {sanitize_error_text(error_info['message'])}")
     if image.get("url"):
         parts.append(f"  URL: {image['url']}")
     if "size" in image:
@@ -394,7 +417,9 @@ def _build_generation_structured_result(
         "tools": context.tools,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
-        "data": images if images is not None else extract_images(result),
+        # data 项可能携带上游 per-image error 自由文本，统一净化后进入结构化输出，
+        # 与异常路径防护一致；仅对含 error 的项浅拷贝，避免改动原结果对象
+        "data": _sanitize_image_errors(images if images is not None else extract_images(result)),
         "usage": result.get("usage", {}),
         "batch": result.get("batch"),
     }
@@ -402,7 +427,7 @@ def _build_generation_structured_result(
     if context.enable_auto_save:
         payload["auto_save"] = {
             "enabled": True,
-            "error": auto_save_error,
+            "error": sanitize_error_text(auto_save_error),
             "results": [r.to_dict() for r in auto_save_results] if auto_save_results else [],
         }
     else:
@@ -411,11 +436,13 @@ def _build_generation_structured_result(
     failed = _is_generation_failed(result)
     if failed:
         raw_error = result.get("error", "未知错误")
-        payload["error"] = (
-            raw_error
-            if isinstance(raw_error, dict)
-            else build_error_dict("generation_failed", str(raw_error))
-        )
+        if isinstance(raw_error, dict):
+            sanitized_error = dict(raw_error)
+            if isinstance(sanitized_error.get("message"), str):
+                sanitized_error["message"] = sanitize_error_text(sanitized_error["message"])
+            payload["error"] = sanitized_error
+        else:
+            payload["error"] = build_error_dict("generation_failed", str(raw_error))
 
     output = GenerationStructuredOutput(**payload)
     if failed:

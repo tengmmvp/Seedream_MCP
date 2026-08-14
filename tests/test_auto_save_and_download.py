@@ -108,7 +108,7 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     await manager_a._maybe_cleanup()
     await manager_b._maybe_cleanup()  # 同 base_dir，被节流
     # 后台清理异步执行，等待完成后再断言调用次数
-    await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
+    await auto_save_module.drain_background_cleanup_tasks()
     assert cleanup_calls == [30]
 
     # 不同 base_dir 独立节流
@@ -117,7 +117,7 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     manager_c = AutoSaveManager(base_dir=other_dir, cleanup_days=30)
     monkeypatch.setattr(manager_c.file_manager, "run_cleanup_policies", fake_run_cleanup)
     await manager_c._maybe_cleanup()
-    await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
+    await auto_save_module.drain_background_cleanup_tasks()
     assert cleanup_calls == [30, 30]
 
 
@@ -144,15 +144,50 @@ async def test_maybe_cleanup_retries_after_failure(
 
         # 首次清理失败：异常被吞，时间戳回滚使下次可重试
         await manager._maybe_cleanup()
-        await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
+        await auto_save_module.drain_background_cleanup_tasks()
         assert calls == [30]
 
         # 紧接着的第二次因上次失败未占用节流窗口，可立即重试
         await manager._maybe_cleanup()
-        await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
+        await auto_save_module.drain_background_cleanup_tasks()
         assert calls == [30, 30]
     finally:
         await manager.close()
+
+
+async def test_close_does_not_wait_for_background_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """close 不等待在途后台清理，请求返回路径不被全量目录遍历阻塞。
+
+    清理收尾由 drain_background_cleanup_tasks 在进程级退出清理时等待；此前 close 上的
+    gather 使节流触发的请求同步挂起整个清理时长，且模块级任务集合造成跨请求延迟耦合。
+    """
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    auto_save_module._reset_cleanup_state()
+    release = asyncio.Event()
+    started = asyncio.Event()
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
+
+    async def held_cleanup(base_key: str, previous: float) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(manager, "_run_cleanup_in_background", held_cleanup)
+
+    async with manager:
+        await manager._maybe_cleanup()
+        # 让出控制权使后台任务开始执行，确认清理确已启动且被 release 挂起
+        await asyncio.sleep(0)
+        assert started.is_set()
+
+    # async with 退出即 close 完成，而清理任务仍在途，证明 close 未等待清理
+    assert not release.is_set()
+
+    release.set()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert not auto_save_module._cleanup_tasks
 
 
 def test_is_known_image_bytes_detects_image_magic() -> None:

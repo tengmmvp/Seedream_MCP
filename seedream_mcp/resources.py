@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from mcp.server.fastmcp import FastMCP
 
 from .config import (
+    DEFAULT_HTTP_HOST,
+    DEFAULT_HTTP_PORT,
     LIFESPAN_KEY_CLIENT,
     LIFESPAN_KEY_CONFIG,
     LIFESPAN_KEY_DOWNLOAD_MANAGER,
@@ -25,7 +27,6 @@ from .config import (
     set_active_config,
 )
 from .utils.core.logs import get_logger
-from .cli import _DEFAULT_HTTP_HOST, _DEFAULT_HTTP_PORT
 from .version import __version__
 
 if TYPE_CHECKING:
@@ -73,6 +74,9 @@ class _SharedResource:
 _active_resource: _SharedResource | None = None
 # 被重建取代但仍有在途引用的资源，引用归零时由 _release_resource 关闭并移出
 _retired_resources: list[_SharedResource] = []
+# asyncio.Lock 首次 acquire 后绑定当时的事件循环：同进程二次进入不同循环（重复
+# asyncio.run、先程序化使用再起 server）会 RuntimeError，生产单循环路径安全；
+# 跨循环复用由 _reset_lifespan_state 重建规避（测试隔离使用）
 _shared_init_lock = asyncio.Lock()
 
 
@@ -167,13 +171,24 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         }
     finally:
         await _release_resource(resource)
-    if not getattr(server.settings, "stateless_http", False):
-        await _cleanup_shared_resources()
+        # 清理须在 finally 内执行：asynccontextmanager 的 yield 体抛异常时，异常经
+        # athrow 注入并在 finally 后继续向外传播，写在 finally 之后的语句会被跳过，
+        # 导致异常 teardown 下共享资源不被同循环清理。
+        if not getattr(server.settings, "stateless_http", False):
+            await _cleanup_shared_resources()
 
 
 async def _cleanup_shared_resources() -> None:
-    """关闭并清空活动与退役资源持有的 HTTP 连接池。"""
+    """关闭并清空活动与退役资源持有的 HTTP 连接池，并等待后台清理任务完成。
+
+    先经 drain_background_cleanup_tasks 等待自动保存的节流清理任务收尾，使退出时
+    节流状态定局，替代此前每请求 close 上的等待；随后关闭资源。streamable-http 的
+    退出路径另经 _drain_pending_tasks 取消回收残余任务兜底。
+    """
     global _active_resource
+    from .utils.io.io_save import drain_background_cleanup_tasks
+
+    await drain_background_cleanup_tasks()
     retired = list(_retired_resources)
     _retired_resources.clear()
     active = _active_resource
@@ -189,7 +204,10 @@ def _sync_cleanup() -> None:
 
     streamable-http 的优雅关闭在 _run_streamable_http 内于服务事件循环上执行，stdio 在
     lifespan teardown 同循环清理；两者完成后活动资源已为 None，本函数为防御性兜底，覆盖
-    异常退出未触发上述清理的情形。先提取并清空全局引用，确保即便后续清理协程抛错也不泄漏。
+    异常退出未触发上述清理的情形。先提取并清空全局引用，确保引用不因后续清理抛错而滞留。
+    关闭在 asyncio.run 的新事件循环上执行：httpx/aiohttp 传输绑定于原循环，跨循环 aclose
+    对底层 socket 常无效，此处为尽力而为的显式关闭，残余连接交由进程退出回收，"不泄漏"
+    的强保证仅在同循环清理路径（app_lifespan teardown 与 _run_streamable_http finally）成立。
     """
     global _active_resource
     retired = list(_retired_resources)
@@ -225,8 +243,8 @@ def _reset_lifespan_state() -> None:
     set_active_config(None)
     _shared_init_lock = asyncio.Lock()
     mcp.settings.stateless_http = False
-    mcp.settings.host = _DEFAULT_HTTP_HOST
-    mcp.settings.port = _DEFAULT_HTTP_PORT
+    mcp.settings.host = DEFAULT_HTTP_HOST
+    mcp.settings.port = DEFAULT_HTTP_PORT
     from .utils.io.io_save import _reset_cleanup_state
 
     _reset_cleanup_state()

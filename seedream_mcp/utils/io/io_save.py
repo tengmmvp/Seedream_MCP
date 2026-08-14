@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Sequence
 
 from .io_download import DownloadManager, DownloadError, sanitize_url
-from ..core.errors import SeedreamMCPError
+from ..core.errors import SeedreamMCPError, sanitize_error_text
 from .io_storage import FileManager, FileManagerError
 from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
@@ -38,7 +38,7 @@ _CLEANUP_LAST_RUN_MAX_ENTRIES = 16
 _cleanup_last_run: OrderedDict[str, float] = OrderedDict()
 # 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理
 _cleanup_lock = asyncio.Lock()
-# 在途的后台清理任务，close 时等待完成以保持节流状态一致
+# 在途的后台清理任务，供进程级退出清理 drain_background_cleanup_tasks 等待完成
 _cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
@@ -53,6 +53,19 @@ def _reset_cleanup_state() -> None:
     _cleanup_lock = asyncio.Lock()
     _cleanup_last_run = OrderedDict()
     _cleanup_tasks = set()
+
+
+async def drain_background_cleanup_tasks() -> None:
+    """等待在途的后台清理任务全部完成，供进程级退出清理调用。
+
+    请求路径的 AutoSaveManager.close 不等待清理（避免阻塞返回路径与跨请求耦合）；
+    stdio 经 lifespan teardown、streamable-http 经服务循环的退出清理间接调用本函数，
+    保证进程退出时清理已完成、节流状态定局。任务自身失败已在
+    _run_cleanup_in_background 内回滚节流时间戳并记录日志，此处仅等待不重试；
+    等待期间新 spawn 的任务不在本轮快照内，交由下次调用或进程退出兜底。
+    """
+    if _cleanup_tasks:
+        await asyncio.gather(*list(_cleanup_tasks), return_exceptions=True)
 
 
 class AutoSaveError(SeedreamMCPError):
@@ -104,7 +117,11 @@ class AutoSaveResult:
         self.metadata = metadata or {}
 
     def to_dict(self) -> dict[str, Any]:
-        """将保存结果序列化为字典，仅包含已设置的字段。"""
+        """将保存结果序列化为字典，仅包含已设置的字段。
+
+        error 为异常文本，出口处过 sanitize_error_text 剥离敏感片段与控制字符，
+        防止本地异常消息（如携带凭据的 URL）进入结构化输出。
+        """
         result = {"success": self.success, "original_url": self.original_url}
 
         if self.local_path:
@@ -114,7 +131,7 @@ class AutoSaveResult:
             result["markdown_ref"] = self.markdown_ref
 
         if self.error:
-            result["error"] = self.error
+            result["error"] = sanitize_error_text(self.error)
 
         if self.metadata:
             result["metadata"] = self.metadata
@@ -177,11 +194,13 @@ class AutoSaveManager:
         释放底层下载资源
 
         仅关闭本实例自建的下载管理器；外部共享的下载管理器由其所有者管理，如 lifespan。
-        等待在途后台清理完成，避免进程退出时节流状态不一致。
+        不等待在途后台清理任务：清理仅访问文件系统、不依赖下载会话，失败已在任务内
+        回滚节流时间戳并记录日志，无需 close 同步；模块级任务集合上的等待反而使请求
+        返回路径被全量目录遍历阻塞，并造成跨请求延迟耦合。退出前的等待收敛在
+        drain_background_cleanup_tasks，由进程级清理入口调用。
         """
         if self._owns_download_manager:
             await self.download_manager.close()
-        await asyncio.gather(*_cleanup_tasks, return_exceptions=True)
 
     async def _maybe_cleanup(self) -> None:
         """按目录节流触发旧文件清理，每个 base_dir 在最短间隔内仅执行一次。

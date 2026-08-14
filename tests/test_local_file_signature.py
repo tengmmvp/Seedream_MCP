@@ -68,6 +68,32 @@ def test_multi_root_skips_oversized_picks_valid(tmp_path: Path) -> None:
     assert sig == (st.st_mtime, st.st_size)
 
 
+def test_signature_delegates_to_shared_candidate_resolution(tmp_path: Path) -> None:
+    """签名委托 image_validation.resolve_local_image_candidate 共享定位，与读取路径同源。
+
+    候选选择规则抽取为单一实现后，签名与读取不可能因两侧规则漂移锁定不同文件。
+    """
+    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+
+    root1 = tmp_path / "r1"
+    root2 = tmp_path / "r2"
+    root1.mkdir()
+    root2.mkdir()
+    (root1 / "photo.png").mkdir()
+    valid = root2 / "photo.png"
+    valid.write_bytes(_PNG_BYTES)
+    resolved_bases = [root1.resolve(), root2.resolve()]
+
+    found = resolve_local_image_candidate("photo.png", resolved_bases)
+    assert found is not None
+    path, st = found
+
+    assert path == valid.resolve()
+    assert (st.st_mtime, st.st_size) == ImagePreparer._local_file_signature(
+        "photo.png", (str(root1), str(root2))
+    )
+
+
 @pytest.mark.skipif(
     sys.platform == "win32" or not hasattr(os, "symlink"),
     reason="符号链接需 POSIX 与创建权限",

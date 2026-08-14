@@ -43,6 +43,23 @@ def test_sequential_generation_reference_images_max_14_ok() -> None:
     assert len(obj.image or []) == 14
 
 
+def test_sequential_generation_derived_max_images_not_in_fields_set() -> None:
+    """派生的 max_images 不进入 model_fields_set，与显式传入保持可区分。
+
+    普通赋值会把派生值登记进 fields_set，误导以 fields_set 判断"是否显式传入"的
+    下游逻辑（exclude_unset 序列化、审计），并多触发一轮 after-validator。
+    """
+    images = [f"https://example.com/{i}.png" for i in range(3)]
+    obj = SequentialGenerationInput(prompt="test", image=images)
+
+    assert obj.max_images == 12
+    assert "max_images" not in obj.model_fields_set
+
+    explicit = SequentialGenerationInput(prompt="test", image=images, max_images=10)
+    assert explicit.max_images == 10
+    assert "max_images" in explicit.model_fields_set
+
+
 def test_sequential_generation_reference_images_exceed_14() -> None:
     images = [f"https://example.com/{i}.png" for i in range(15)]
     with pytest.raises(ValueError, match="1-14"):

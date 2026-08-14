@@ -2,7 +2,7 @@
 Seedream MCP 服务器主模块。
 
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，以及风格预设
-Prompt 与工作区、服务器信息资源。负责配置注入、main/cli_main 入口与传输分派。
+Prompt 与工作区、服务器信息资源。负责配置注入、cli_main 入口与传输分派。
 FastMCP 实例与共享资源生命周期管理由 resources 模块承担，本模块导入 mcp 完成注册
 并重导出 resources 符号，保持 server 既有导入 surface 与 tests 访问路径不变。CLI
 参数解析由 cli 模块承担，streamable-http 中间件与传输配置由 transport 模块承担，
@@ -26,9 +26,9 @@ from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 
 # 本地模块导入
-from . import resources
 from .cli import _build_arg_parser, _build_config_from_args, _build_run_options
 from .config import (
+    LIFESPAN_KEY_CONFIG,
     MODEL_ALIASES,
     SeedreamConfig,
     get_active_config,
@@ -46,6 +46,7 @@ from .tools import (
     run_sequential_generation,
     run_text_to_image,
 )
+from .tools.core.parallel import get_lifespan_resource
 from .tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
@@ -63,12 +64,10 @@ from .utils.io.io_path import get_workspace_roots, workspace_roots_scope
 # resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 为本模块直接
 # 使用，其余供 tests 与既有 import 路径经 server 模块访问
 from .resources import (  # noqa: F401
-    SERVER_INSTRUCTIONS,
     SERVER_NAME,
     SERVER_VERSION,
     _cleanup_shared_resources,
     _reset_lifespan_state,
-    _retired_resources,
     _sync_cleanup,
     app_lifespan,
     mcp,
@@ -117,11 +116,9 @@ def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
 
     工具与资源经 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局
     状态，消除热重载窗口内活动配置与请求实际使用的配置不一致。复用 parallel 的
-    _get_lifespan_resource 统一资源探测实现。
+    get_lifespan_resource 统一资源探测实现，lifespan 键与 parallel 一致取自 config。
     """
-    from .tools.core.parallel import _get_lifespan_resource
-
-    config = _get_lifespan_resource(ctx, resources.LIFESPAN_KEY_CONFIG, SeedreamConfig)
+    config = get_lifespan_resource(ctx, LIFESPAN_KEY_CONFIG, SeedreamConfig)
     if config is not None:
         return config
     logger.warning("lifespan 上下文未注入配置，回退全局活动配置")

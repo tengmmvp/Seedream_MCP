@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from urllib.parse import urlparse
+from pathlib import Path
 
 from PIL import Image
 
@@ -21,6 +21,7 @@ from ..io.io_path import get_workspace_roots, suggest_similar_paths
 from .image_validation import (
     MAX_IMAGE_FILE_SIZE,
     decode_and_validate_dimensions,
+    resolve_local_image_candidate,
     validate_image_input,
     validate_image_path,
 )
@@ -32,7 +33,7 @@ logger = get_logger(__name__)
 async def prepare_image_input(image: str) -> str:
     """将单张图像输入归一化为 API 所需格式。
 
-    - HTTP/HTTPS URL：校验主机后原样返回。
+    - HTTP/HTTPS URL：经统一校验拒绝 userinfo 凭据等不安全形态后原样返回。
     - Data URI：经格式与维度校验后原样返回。
     - 本地文件路径：读取并编码为 Base64 Data URI 返回。
 
@@ -43,10 +44,9 @@ async def prepare_image_input(image: str) -> str:
 
         kind = classify_image_reference(normalized)
         if kind == "url":
-            parsed = urlparse(normalized)
-            if not parsed.netloc:
-                raise SeedreamAPIError(f"无效的图像 URL: {normalized}")
-            return normalized
+            # URL 分支同样经统一校验：拒绝携带 userinfo 凭据的参考图 URL，防止凭据
+            # 随请求体送往上游 API。校验为纯 CPU 轻量操作，无需工作线程。
+            return validate_image_input(normalized)
 
         if kind == "data_uri":
             # validate_image_input 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环。
@@ -63,26 +63,34 @@ async def prepare_image_input(image: str) -> str:
 def _prepare_local_image(normalized: str, original: str) -> str:
     """校验本地图片路径并读取编码为 Base64 Data URI。
 
-    路径需通过任一工作区 Root 的越界校验方可读取；全部 Root 均校验失败时给出
-    相似路径建议。需在工作线程中调用。
+    候选定位委托 image_validation.resolve_local_image_candidate，与
+    ImagePreparer._local_file_signature 共用同一选择规则，缓存签名与实际读取
+    锁定同一文件。定位失败时经 validate_image_path 做诊断性校验取具体失败原因，
+    并给出相似路径建议。需在工作线程中调用。
     """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
         raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
 
-    validated_path = None
-    validation_errors: list[str] = []
+    resolved_bases: list[Path] = []
     for root in workspace_roots:
-        is_valid, error_msg, normalized_path = validate_image_path(
-            normalized, base_dir=str(root), skip_dimensions=True
-        )
-        if is_valid and normalized_path is not None:
-            validated_path = normalized_path
-            break
-        if error_msg:
-            validation_errors.append(error_msg)
+        try:
+            resolved_bases.append(root.resolve())
+        except (OSError, ValueError):
+            continue
 
-    if validated_path is None:
+    found = resolve_local_image_candidate(normalized, resolved_bases)
+    if found is None:
+        # 诊断性校验仅用于错误文案：定位已由共享规则唯一决定，此处取各根的具体
+        # 失败原因（文件不存在、格式不支持等）拼入错误消息，不影响候选一致性。
+        validation_errors: list[str] = []
+        for root in workspace_roots:
+            _, error_msg, _ = validate_image_path(
+                normalized, base_dir=str(root), skip_dimensions=True
+            )
+            if error_msg:
+                validation_errors.append(error_msg)
+
         error_text = "图像路径校验失败"
         if validation_errors:
             error_text = "；".join(dict.fromkeys(validation_errors))
@@ -98,8 +106,13 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             )
         raise SeedreamAPIError(f"{error_text}{suggestion_text}")
 
+    validated_path, _ = found
+
     # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 io_file 统一实现；
     # 符号链接或打开失败抛 OSError，由 prepare_image_input 外层转 SeedreamAPIError。
+    # 内存特征：读取字节、b64 编码与最终 data URI 拼接的瞬时峰值约为单图的 5.5×，
+    # 预处理并发 5 × 30MB 上限下瞬态约 800MB，不受 LRU 缓存字节上限约束，部署
+    # 受限时须按此规划内存。
     with open_no_follow_read(validated_path) as f:
         # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存
         image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
