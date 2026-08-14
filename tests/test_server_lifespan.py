@@ -10,8 +10,10 @@ from typing import Any
 import pytest
 
 from seedream_mcp import config as config_module
+import seedream_mcp.resources as resources
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.core.schemas import TextToImageInput
 
 
 @pytest.fixture
@@ -19,12 +21,10 @@ async def reset_lifespan_singletons():
     """重置模块级单例与传输模式，测试后关闭本测试创建的实例，避免跨测试污染与资源泄漏。"""
     server._reset_lifespan_state()
     yield
-    client = server._shared_client
-    download_manager = server._shared_download_manager
-    if client is not None:
-        await client.close()
-    if download_manager is not None:
-        await download_manager.close()
+    active = resources._active_resource
+    if active is not None:
+        await active.client.close()
+        await active.download_manager.close()
     server._reset_lifespan_state()
 
 
@@ -81,9 +81,8 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
     async with server.app_lifespan(server.mcp) as state:
         assert state["client"] is not None
 
-    # teardown 后单例已清理，执行 close 并置 None
-    assert server._shared_client is None
-    assert server._shared_download_manager is None
+    # teardown 后活动资源已清理，执行 close 并置 None
+    assert resources._active_resource is None
 
 
 def test_config_from_context_prefers_lifespan_config() -> None:
@@ -256,7 +255,7 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
     ctx = _FakeLifespanCtx({"client": shared_client})
     try:
         result = await execute_generation_handler(
-            arguments={"prompt": "test", "auto_save": False},
+            params=TextToImageInput(prompt="test", auto_save=False),
             config=config,
             module_logger=MagicMock(),
             tool_name="text_to_image",
@@ -318,7 +317,7 @@ async def test_execute_generation_handler_passes_shared_download_manager(
     ctx = _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm})
     try:
         await common_module.execute_generation_handler(
-            arguments={"prompt": "test", "auto_save": True, "response_format": "url"},
+            params=TextToImageInput(prompt="test", auto_save=True, response_format="url"),
             config=config,
             module_logger=MagicMock(),
             tool_name="text_to_image",

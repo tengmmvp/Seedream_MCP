@@ -15,7 +15,7 @@ from seedream_mcp.tools.impl.browse_images import handle_browse_images
 async def test_browse_images_returns_structured_success(workspace_root: Path) -> None:
     (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    result = await handle_browse_images({"directory": ".", "recursive": False})
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
     assert result.isError is False
     assert isinstance(result.structuredContent, dict)
@@ -26,7 +26,7 @@ async def test_browse_images_returns_structured_success(workspace_root: Path) ->
 
 @pytest.mark.asyncio
 async def test_browse_images_returns_empty_when_no_files(workspace_root: Path) -> None:
-    result = await handle_browse_images({"directory": ".", "recursive": False})
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
     assert result.isError is False
     assert isinstance(result.structuredContent, dict)
@@ -41,7 +41,7 @@ async def test_browse_images_rejects_out_of_workspace_directory(
     outside_dir = workspace_root.parent / "outside_dir_for_test"
     outside_dir.mkdir(exist_ok=True)
 
-    result = await handle_browse_images({"directory": str(outside_dir)})
+    result = await handle_browse_images(BrowseImagesInput(directory=str(outside_dir)))
 
     assert result.isError is True
     assert isinstance(result.structuredContent, dict)
@@ -71,7 +71,7 @@ async def test_browse_images_ignores_outside_images_without_crashing(
         _fake_find_images_in_directory,
     )
 
-    result = await handle_browse_images({"directory": ".", "recursive": True})
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=True))
 
     assert result.isError is False
     assert isinstance(result.structuredContent, dict)
@@ -85,7 +85,7 @@ async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
         (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     page1 = await handle_browse_images(
-        {"directory": ".", "recursive": False, "limit": 2, "offset": 0}
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
     )
     sc1 = page1.structuredContent
     assert isinstance(sc1, dict)
@@ -95,7 +95,7 @@ async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
     assert sc1["next_offset"] == 2
 
     page2 = await handle_browse_images(
-        {"directory": ".", "recursive": False, "limit": 2, "offset": 2}
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=2)
     )
     sc2 = page2.structuredContent
     assert isinstance(sc2, dict)
@@ -114,7 +114,7 @@ async def test_browse_images_offset_beyond_end_keeps_total_count(
         (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(
-        {"directory": ".", "recursive": False, "limit": 2, "offset": 4}
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=4)
     )
     sc = result.structuredContent
     assert isinstance(sc, dict)
@@ -146,7 +146,7 @@ async def test_browse_images_format_filter_all_unsupported_echoes_original(
     "均不在支持列表"与"支持"，status 为 empty 且 isError 为 False；format_filter 保留
     用户原始非空列表 [".svg"] 供回显，不缩减为空列表。
     """
-    result = await handle_browse_images({"directory": ".", "format_filter": [".svg"]})
+    result = await handle_browse_images(BrowseImagesInput(directory=".", format_filter=[".svg"]))
 
     assert result.isError is False
     assert isinstance(result.structuredContent, dict)

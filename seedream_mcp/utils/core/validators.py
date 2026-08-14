@@ -8,7 +8,8 @@
   联网工具、流式输出、参考图上限等，统一委托 model_capabilities 的能力声明判定，
   新增模型只需扩展能力表而无需改动校验代码。
 - HEIC/HEIF 解码器惰性注册，避免模块导入时产生全局副作用。
-- 涉及 path_utils 的调用采用函数内延迟 import，规避模块加载循环。
+- 布尔字符串解析 parse_bool 与宽高比上下限常量由本模块单一持有，config 的
+  _pick_bool 与 image_validation 的维度校验均为消费方。
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from typing import Any, NamedTuple
 
 # 本地模块导入
 from .errors import SeedreamConfigError, SeedreamValidationError
-from ..images.image_validation import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
 from .logs import get_logger
 from ..model.model_capabilities import get_max_reference_images, get_model_capabilities
 
@@ -33,9 +33,13 @@ VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
 # 尺寸预设档位与输出格式白名单
 VALID_SIZE_PRESETS = frozenset({"1K", "2K", "3K", "4K"})
 VALID_OUTPUT_FORMATS = frozenset({"jpeg", "png"})
-# 布尔字符串解析的合法取值，config.parse_bool 据此判定真值与假值
+# 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
+# 图像宽高比上下限，输入参考图与输出尺寸校验共用同一规则。image_validation 从本模块
+# 导入使用，维持单一来源
+MIN_IMAGE_RATIO = 1 / 16
+MAX_IMAGE_RATIO = 16
 # 生成工具类型白名单，目前仅支持联网搜索
 VALID_GENERATION_TOOL_TYPES = frozenset({"web_search"})
 # 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围
@@ -83,11 +87,30 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     return validated_value
 
 
-# 模型家族解析、能力表与判定函数已抽取至 model_capabilities.py，上方通过重导出保持外部导入兼容
+# 模型家族解析、能力表与判定函数已抽取至 model_capabilities.py
 # 图像输入校验（URL/本地文件/Data URI 的格式与 PIL 维度校验）已拆分至 image_validation.py
 
 
 # ==================== 基础公共验证函数 ====================
+
+
+def parse_bool(value: object) -> bool:
+    """将值解析为布尔。
+
+    接受 true/yes/on/1 为真、false/no/off/0 为假；其余值抛出 SeedreamConfigError，
+    避免 enabled 这类拼写错误被静默当作 False，导致功能未生效却无报错。
+    布尔解析知识归本模块单一所有，config 与本模块的校验函数均为消费方。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    if normalized in TRUE_BOOL_STRINGS:
+        return True
+    if normalized in FALSE_BOOL_STRINGS:
+        return False
+    raise SeedreamConfigError(f"无法解析为布尔值(期望 true/false/yes/no/on/off/1/0): {value!r}")
 
 
 def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words: int = 600) -> str:
@@ -123,8 +146,8 @@ def validate_watermark(watermark: Any) -> bool:
     """验证水印参数配置。
 
     支持布尔值或可转换为布尔值的字符串（true/false、yes/no、on/off、1/0）。
-    布尔字符串解析委托 config.parse_bool，与配置层共享同一解析逻辑；解析失败
-    对外抛出 SeedreamValidationError 以保持校验层异常类型。
+    布尔字符串经本模块 parse_bool 解析，解析失败对外抛出 SeedreamValidationError
+    以保持校验层异常类型。
 
     Args:
         watermark: 水印开关配置，支持 bool 或 str 类型
@@ -139,9 +162,6 @@ def validate_watermark(watermark: Any) -> bool:
         return watermark
 
     if isinstance(watermark, str):
-        # 延迟导入避免 config 与 validation 的顶层循环依赖
-        from ...config import parse_bool
-
         try:
             return parse_bool(watermark)
         except SeedreamConfigError:
@@ -434,7 +454,7 @@ def validate_size_for_model(size: str, model_id: str) -> str:
     ratio = width / height
     if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
         raise SeedreamValidationError(
-            "尺寸宽高比需在 [1/16, 16] 范围内",
+            f"尺寸宽高比需在 [{MIN_IMAGE_RATIO}, {MAX_IMAGE_RATIO}] 范围内",
             field="size",
             value=size,
         )
@@ -640,9 +660,9 @@ def validate_common_generation_params(
 ) -> ValidatedCommonParams:
     """集中校验生成类工具的公共参数并返回校验后的各值。
 
-    作为 context 与 client 共享的单一校验入口：新增公共参数校验规则只需在此扩展，
-    两处调用方自动受益，消除分散调用同一组校验器导致的同步漂移风险。运行时仍保持
-    context 与 client 各自校验一次的纵深防御，本函数仅消除代码重复与同步点。
+    供 client 生成方法入口做公共库 API 自校验：新增公共参数校验规则只需在此扩展，
+    调用方自动受益。工具层的值域校验由 schemas.py 的 Field 约束承担，与本函数构成
+    defense-in-depth。
     """
     return ValidatedCommonParams(
         prompt=validate_prompt(prompt),

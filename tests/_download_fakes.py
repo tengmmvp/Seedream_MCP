@@ -1,4 +1,4 @@
-"""download_manager 测试共享的伪网络对象与辅助函数。
+"""io_download 下载测试共享的伪网络对象与辅助函数。
 
 供 test_download_manager_security 与 test_download_image_branches 复用，避免两处
 重复定义与语义漂移。流式内容采用多分块语义，支持单块与多块场景；对端 IP、连接、

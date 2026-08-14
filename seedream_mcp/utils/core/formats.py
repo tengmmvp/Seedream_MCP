@@ -1,13 +1,16 @@
 """图像格式定义与推断。
 
 集中管理支持的图像扩展名、MIME 类型映射与基于文件头的格式推断，供 validation、
-image_input、file_manager 等模块共享，避免多处重复定义。
+image_input、io_storage 等模块共享，避免多处重复定义。
 """
 
 from __future__ import annotations
 
-# 自动保存单文件大小上限默认值，config 与 download_manager 共享此单一来源
+# 自动保存单文件大小上限默认值，config 与 io_download 共享此单一来源
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
+
+# 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源
+DEFAULT_IMAGE_EXTENSION = ".jpeg"
 
 # 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in 成员判断
 SUPPORTED_IMAGE_EXTENSIONS_ORDERED: list[str] = [
@@ -53,7 +56,7 @@ _HEIC_BRANDS: tuple[bytes, ...] = (b"heic", b"heix", b"hevc", b"heim", b"heis")
 _HEIF_BRANDS: tuple[bytes, ...] = (b"mif1", b"msf1")
 
 
-def infer_extension_from_bytes(content: bytes, default: str = ".jpeg") -> str:
+def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTENSION) -> str:
     """基于文件头魔法字节推断图片扩展名。
 
     以文件头 magic bytes 为准而非扩展名，避免扩展名缺失或伪造导致类型误判；

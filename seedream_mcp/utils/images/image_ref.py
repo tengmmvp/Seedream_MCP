@@ -1,7 +1,7 @@
 """图像输入来源分类的单一判定实现。
 
 URL、Data URI 与本地文件路径三类的判定原先散布于 client、image_input、
-image_validation、path_utils 多处，且大小写策略不一致：data URI 判定取小写，
+image_validation、io_path 多处，且大小写策略不一致：data URI 判定取小写，
 而 http/https scheme 判定大小写敏感，导致大写 scheme 的 URL 误入本地文件分支。
 本模块提供统一判定，scheme 大小写不敏感符合 RFC 3986。
 """

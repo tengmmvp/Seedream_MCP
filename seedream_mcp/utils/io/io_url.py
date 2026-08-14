@@ -9,8 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ..core.formats import DEFAULT_IMAGE_EXTENSION
 
-def get_file_extension_from_url(url: str, default: str = ".jpeg") -> str:
+
+def get_file_extension_from_url(url: str, default: str = DEFAULT_IMAGE_EXTENSION) -> str:
     """从 URL 路径推断文件扩展名，含点号。
 
     Args:

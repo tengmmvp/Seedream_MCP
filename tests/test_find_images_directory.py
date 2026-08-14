@@ -149,7 +149,7 @@ def test_recursive_order_matches_global_sorted_path(tmp_path: Path) -> None:
 def test_find_images_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
     """符号链接目录指向 base 之外时，递归扫描不得下降进入该目录遍历外部图片。
 
-    防御与 file_manager.cleanup_old_files 同类的符号链接越界风险：find_images_in_directory
+    防御与 io_storage.FileManager.cleanup_old_files 同类的符号链接越界风险：find_images_in_directory
     使用 os.scandir 配合 entry.is_dir(follow_symlinks=False) 拒绝下降符号链接目录。若错误地
     跟随符号链接目录下降，会把 base 之外的外部图片纳入结果，构成路径边界逃逸，与 browse_images
     的工作区边界保证冲突。构造 base 内的符号链接目录指向 base 外的目录（含一张图片），并另放
@@ -346,11 +346,11 @@ def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
 def test_find_images_does_not_descend_into_reparse_point(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """NTFS junction 等 reparse point 目录不下降，与 file_manager 清理路径防护对齐。
+    """NTFS junction 等 reparse point 目录不下降，与 io_storage 清理路径防护对齐。
 
     junction 的 is_symlink 返回 False，entry.is_dir(follow_symlinks=False) 对其返回 True
     仍会下降，从而进入 junction 目标执行 OS 级 listdir，涉及 SMB 出站认证暴露。find_images
-    下降前须经 os_utils._is_reparse_point 剔除。用 monkeypatch 让该函数对指定子目录返回
+    下降前须经 io_file._is_reparse_point 剔除。用 monkeypatch 让该函数对指定子目录返回
     True，断言该子树不被扫描而真实图片仍正常返回，回归保护此防护不退化。
     """
     junction_dir = tmp_path / "junction_dir"

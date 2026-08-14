@@ -157,7 +157,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 --no-watermark                                     # 關閉浮水印
 
 # 連線與傳輸
---base-url TEXT                                    # API 基礎 URL（預設按設定或內建預設值）
+--base-url TEXT                                    # API 基礎 URL（預設按設定或內建預設值；須 https，http 需設 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
 --transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
 --host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址將觸發安全告警)
 --port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000)
@@ -165,7 +165,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 
 # 安全
 --auth-token TEXT                                  # Bearer 鑑權權杖（非回環繫結必須設定，也可用 SEEDREAM_HTTP_AUTH_TOKEN）
---ssl-certfile TEXT                                # TLS 憑證檔案（非回環繫結必須設定，防權杖明文傳輸；受信任反向代理終結 TLS 時可用 --insecure-allow-non-tls 豁免）
+--ssl-certfile TEXT                                # TLS 憑證檔案（非回環繫結必須設定，防權杖明文傳輸，啟用後最低協定版本 TLS 1.2；受信任反向代理終結 TLS 時可用 --insecure-allow-non-tls 豁免）
 --ssl-keyfile TEXT                                 # TLS 私鑰檔案，與 --ssl-certfile 搭配
 --insecure-allow-non-tls                           # 明確允許非回環明文執行（僅受信任反向代理終結 TLS 場景）
 
@@ -418,6 +418,9 @@ uv run python -m seedream_mcp.server --api-key your_key
 # 必要設定
 ARK_API_KEY=your_api_key_here
 
+# API 端點安全
+SEEDREAM_ALLOW_HTTP_BASE_URL=false            # 豁免 http:// 的 ARK_BASE_URL（預設拒絕明文傳輸；僅自建可信內網端點設 true）
+
 # 模型設定
 SEEDREAM_MODEL_ID=doubao-seedream-5.0
 
@@ -428,11 +431,15 @@ SEEDREAM_DEFAULT_WATERMARK=false
 # 逾時
 SEEDREAM_TIMEOUT=60                         # 連線建立/寫入/連線池取得逾時（秒）
 SEEDREAM_API_TIMEOUT=600                    # API 呼叫讀取與總逾時（秒）
+SEEDREAM_MAX_RETRIES=3                      # API 呼叫最大重試次數（429/5xx、逾時與網路錯誤重試，4xx 不重試）
 
 # 自動儲存
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒）
+SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下載失敗最大重試次數（0 表示不重試）
+SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 單張圖片大小上限（位元組，預設 50MB）
+SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # 最大並行下載數
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 儲存目錄總位元組上限（預設 10GB；超限按最舊檔案優先逐出）
@@ -440,7 +447,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 儲存目錄總位元組上限�
 # 工作區與傳輸
 SEEDREAM_WORKSPACE_ROOT=                    # 本地開發時檔案讀寫邊界回退目錄（MCP Roots 優先）
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鑑權權杖（非回環繫結建議設定）
-SEEDREAM_HTTP_MAX_BODY_SIZE=104857600       # streamable-http 請求內文上限（位元組，≥1MB，預設 100MB）
+SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 請求內文上限（位元組，≥1MB，預設 64MB；單圖 data URI 約 40MB，兼顧多圖融合）
 
 # 用戶端效能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

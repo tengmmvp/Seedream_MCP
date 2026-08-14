@@ -22,6 +22,9 @@ class _FakeLogger:
         del args, kwargs
         return 0
 
+    def configure(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
     def info(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
 

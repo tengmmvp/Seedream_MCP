@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from mcp.types import CallToolResult, TextContent
 
 from ..core._helpers import _safe_ctx_log, _safe_report_progress
+from ..core.outputs import BrowseImagesStructuredOutput, build_error_dict
 from ..core.schemas import BrowseImagesInput
 from ...utils.io.io_scan import (  # noqa: F401  # 扫描缓存符号经本模块重导出，外部经本模块访问缓存状态
     _DIRECTORY_SCAN_CACHE,
@@ -66,26 +67,24 @@ class _BrowseRequestState:
     format_filter: list[str] | None
 
     @classmethod
-    def from_arguments(
+    def from_params(
         cls,
-        arguments: dict[str, Any],
+        params: BrowseImagesInput,
         *,
         workspace_roots: list[Path],
         resolved_directories: list[Path],
         format_filter: list[str] | None = None,
     ) -> _BrowseRequestState:
-        """从工具原始参数与既有状态构建请求快照，impl 与兜底分支共享同一取值逻辑。"""
+        """从类型化输入模型与既有状态构建请求快照，impl 与兜底分支共享同一取值逻辑。"""
         return cls(
             workspace_roots=workspace_roots,
-            directory=str(arguments.get("directory") or "."),
+            directory=params.directory if params.directory is not None else ".",
             resolved_directories=resolved_directories,
-            recursive=bool(arguments.get("recursive", BrowseImagesInput.DEFAULT_RECURSIVE)),
-            max_depth=arguments.get("max_depth", BrowseImagesInput.DEFAULT_MAX_DEPTH),
-            limit=arguments.get("limit", BrowseImagesInput.DEFAULT_LIMIT),
-            offset=arguments.get("offset", BrowseImagesInput.DEFAULT_OFFSET),
-            show_details=bool(
-                arguments.get("show_details", BrowseImagesInput.DEFAULT_SHOW_DETAILS)
-            ),
+            recursive=params.recursive,
+            max_depth=params.max_depth,
+            limit=params.limit,
+            offset=params.offset,
+            show_details=params.show_details,
             format_filter=format_filter,
         )
 
@@ -145,12 +144,14 @@ def _build_browse_structured_result(
     next_offset: int | None = None,
     error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """集中构建 browse_images 工具的 structuredContent，字段集与 BrowseImagesStructuredOutput 对齐。
+    """集中构建 browse_images 工具的 structuredContent。
 
-    成功、空结果与失败三分支共用此构建，避免手工内联字典造成的字段漂移。失败分支以默认值
-    填充非关键字段，符合 BrowseImagesStructuredOutput 全部字段可选的声明。
+    经 BrowseImagesStructuredOutput 构造后 model_dump，使 runtime 输出与声明的
+    outputSchema 绑定，字段漂移在构造时即暴露。成功、空结果与失败三分支共用此构建；
+    失败分支以默认值填充非关键字段，符合 BrowseImagesStructuredOutput 全部字段可选的
+    声明。成功与空结果路径不输出 error 键，与既有契约一致。
     """
-    structured: dict[str, Any] = {
+    payload: dict[str, Any] = {
         "tool": "seedream_browse_images",
         "success": success,
         "status": status,
@@ -169,9 +170,10 @@ def _build_browse_structured_result(
         "show_details": show_details,
         "format_filter": format_filter,
     }
-    if error is not None:
-        structured["error"] = error
-    return structured
+    output = BrowseImagesStructuredOutput(**payload, error=error)
+    if error is None:
+        return output.model_dump(exclude={"error"})
+    return output.model_dump()
 
 
 def _build_browse_error(
@@ -200,7 +202,7 @@ def _build_browse_error(
             show_details=state.show_details,
             format_filter=state.format_filter,
             success=False,
-            error={"type": "browse_failed", "message": message},
+            error=build_error_dict("browse_failed", message),
         ),
         isError=True,
     )
@@ -304,25 +306,25 @@ def _build_display_entries(
 
 
 async def handle_browse_images(
-    arguments: dict[str, Any],
+    params: BrowseImagesInput,
     ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """处理图片浏览请求，扫描工作区内指定目录的图片文件并分页返回。
 
     仅允许访问 MCP Roots 授权的工作区目录；扫描结果按目录 mtime 缓存以加速翻页，切片
-    offset+limit+1 张以判定 has_more。完整字段规则与默认值见 ``BrowseImagesInput``，本函数读取 arguments。
-    未预期异常被外层捕获并降级为结构化错误，与生成类 ``execute_generation_handler`` 的错误
-    结构对齐，不向调用方抛出。
+    offset+limit+1 张以判定 has_more。完整字段规则与默认值见 ``BrowseImagesInput``，
+    本函数读取类型化入参模型。未预期异常被外层捕获并降级为结构化错误，与生成类
+    ``execute_generation_handler`` 的错误结构对齐，不向调用方抛出。
 
     Args:
-        arguments: 工具原始参数字典，结构见 ``BrowseImagesInput``。
+        params: 经 pydantic 校验的图片浏览入参模型。
         ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
 
     Returns:
         MCP 标准工具结果，含面向模型的图片列表文本与 structuredContent。
     """
     try:
-        return await _handle_browse_images_impl(arguments, ctx)
+        return await _handle_browse_images_impl(params, ctx)
     except Exception as exc:
         # 兜底：未预期异常降级为结构化错误，避免向调用方抛出原始异常。
         logger.error("浏览图片处理失败", exc_info=True)
@@ -334,8 +336,8 @@ async def handle_browse_images(
         except Exception:
             fallback_roots = []
         return _build_browse_error(
-            state=_BrowseRequestState.from_arguments(
-                arguments,
+            state=_BrowseRequestState.from_params(
+                params,
                 workspace_roots=fallback_roots,
                 resolved_directories=[],
                 format_filter=None,
@@ -345,14 +347,14 @@ async def handle_browse_images(
 
 
 async def _handle_browse_images_impl(
-    arguments: dict[str, Any],
+    params: BrowseImagesInput,
     ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
     """浏览工具主逻辑，由 ``handle_browse_images`` 外层兜底包裹。"""
     # 格式过滤仅保留受支持的图片扩展名，避免以非图片后缀探测文件。全部后缀均不受支持时标记
     # format_filter_exhausted 并跳过扫描；此时保留用户原始输入供 structuredContent 回显，不缩减
     # 为空列表。不能将空列表传给 find_images_in_directory，因其把空列表视为未限制而扫描全部。
-    raw_format_filter = arguments.get("format_filter")
+    raw_format_filter = params.format_filter
     format_filter_exhausted = False
     if raw_format_filter:
         supported_only = [ext for ext in raw_format_filter if ext in SUPPORTED_IMAGE_EXTENSIONS]
@@ -365,8 +367,8 @@ async def _handle_browse_images_impl(
     # resolved_dirs 随解析流程逐步填充；state 绑定其引用，错误分支在填充前读取、成功分支在
     # 填充后读取同一引用，确保请求状态在各分支间一致。
     resolved_dirs: list[Path] = []
-    state = _BrowseRequestState.from_arguments(
-        arguments,
+    state = _BrowseRequestState.from_params(
+        params,
         workspace_roots=workspace_roots,
         resolved_directories=resolved_dirs,
         format_filter=raw_format_filter,

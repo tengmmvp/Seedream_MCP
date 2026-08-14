@@ -1,4 +1,4 @@
-"""os_utils.open_no_follow_read 守护测试。
+"""io_file.open_no_follow_read 守护测试。
 
 覆盖三种场景：
 (a) 平台支持 O_NOFOLLOW 时，最终分量为符号链接的路径被拒绝；

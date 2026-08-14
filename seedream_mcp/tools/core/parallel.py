@@ -10,10 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, TypeVar
 
-from ...resources import (
-    LIFESPAN_KEY_CLIENT,
-    LIFESPAN_KEY_DOWNLOAD_MANAGER,
-)
+from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
 from ...utils.core.errors import format_error_for_user
 from ._helpers import (
     PROGRESS_GENERATION_DONE,
@@ -32,7 +29,7 @@ if TYPE_CHECKING:
 
 
 # lifespan 共享资源取值的泛型辅助，client/download_manager/config 三处探测共用。
-# lifespan 上下文字典键定义在 resources 模块（lifespan 契约所有者），经顶部 import 复用
+# lifespan 上下文字典键定义在 config 模块，经顶部 import 复用，core 层不依赖顶层装配模块
 _T = TypeVar("_T")
 
 
@@ -59,6 +56,7 @@ async def _execute_parallel_generation_requests(
 
     async def _run_single_request(request_index: int) -> None:
         nonlocal completed_requests
+        report_progress = False
         async with semaphore:
             await _yield_for_cancellation()
             try:
@@ -72,16 +70,17 @@ async def _execute_parallel_generation_requests(
                     format_error_for_user(exc),
                 )
             finally:
-                # asyncio 单线程模型下，自增与进度读取之间无 await，不会被其他协程抢占，无需加锁。
+                # asyncio 单线程模型下，自增之间无 await，不会被其他协程抢占，无需加锁。
                 completed_requests += 1
-                progress = progress_start + progress_span * (
-                    completed_requests / context.request_count
-                )
-                await _safe_report_progress(
-                    ctx,
-                    progress=progress,
-                    message=f"并行请求进度 {completed_requests}/{context.request_count}",
-                )
+                report_progress = True
+        # 进度上报移出信号量槽，避免慢客户端背压拖延槽位释放、阻塞后续请求启动
+        if report_progress:
+            progress = progress_start + progress_span * (completed_requests / context.request_count)
+            await _safe_report_progress(
+                ctx,
+                progress=progress,
+                message=f"并行请求进度 {completed_requests}/{context.request_count}",
+            )
 
     await asyncio.gather(
         *[

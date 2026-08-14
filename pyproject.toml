@@ -115,9 +115,6 @@ ignore_missing_imports = true
 module = "pillow_heif.*"
 ignore_missing_imports = true
 
-[tool.flake8]
-max-line-length = 120
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

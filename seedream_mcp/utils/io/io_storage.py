@@ -1,7 +1,7 @@
 """文件管理模块：生成图片保存路径、写入字节内容并清理旧文件。
 
 负责按日期与工具名组织保存路径、净化文件名、用内容哈希做去重、基于字节签名
-嗅探真实扩展名，以及按保留天数清理旧文件。落盘写入与旧文件遍历均通过 os_utils
+嗅探真实扩展名，以及按保留天数清理旧文件。落盘写入与旧文件遍历均通过 io_file
 防符号链接，避免经由符号链接逃逸出基础目录。
 """
 
@@ -18,12 +18,18 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import SeedreamMCPError
-from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
+from ..core.formats import (
+    DEFAULT_IMAGE_EXTENSION,
+    SUPPORTED_IMAGE_EXTENSIONS,
+    infer_extension_from_bytes,
+)
 from ..core.logs import get_logger
 from .io_file import (
     _is_reparse_point,
     atomic_replace_from_fd_sync,
 )
+from .io_path import _is_within_resolved
+from .io_url import get_file_extension_from_url
 
 logger = get_logger(__name__)
 
@@ -74,23 +80,19 @@ class FileManager:
         Args:
             base_dir: 图片保存基础目录。默认为当前工作目录下的 images 文件夹。
         """
-        if base_dir is None:
-            base_dir = Path.cwd() / "images"
-        else:
-            try:
-                resolved = Path(base_dir).resolve()
-            except (OSError, ValueError) as e:
-                raise FileManagerError(f"解析保存路径时出错: {e}") from e
-            # 仅拒绝指向已存在文件的路径。目录越界防护不在本类职责内，
-            # 由调用方 tools/core/common._resolve_base_dir 经 is_path_within_base 校验。
-            if resolved.exists() and not resolved.is_dir():
-                raise FileManagerError(f"保存路径不是目录: {resolved}")
-            base_dir = resolved
+        raw_base = Path.cwd() / "images" if base_dir is None else Path(base_dir)
+        try:
+            resolved = raw_base.resolve()
+        except (OSError, ValueError) as e:
+            raise FileManagerError(f"解析保存路径时出错: {e}") from e
+        # 仅拒绝指向已存在文件的路径。目录越界防护不在本类职责内，
+        # 由调用方 tools/core/common._resolve_base_dir 经 is_path_within_base 校验。
+        if resolved.exists() and not resolved.is_dir():
+            raise FileManagerError(f"保存路径不是目录: {resolved}")
+        base_dir = resolved
 
         self.base_dir = base_dir
         self.ensure_directory(self.base_dir)
-        # 缓存创建时的工作目录，供 generate_markdown_reference 批量复用。
-        self._cwd = Path.cwd()
         # 缓存 resolved 形式供 validate_path 等热路径复用；base_dir 已 resolve，无需重复解析。
         self._base_abs = self.base_dir
 
@@ -112,7 +114,7 @@ class FileManager:
     def validate_path(self, path: Path) -> bool:
         """验证路径是否在基础目录范围内。
 
-        复用 path_utils._is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
+        复用 io_path._is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
         或经由符号链接指向基础目录之外的路径。
 
         Args:
@@ -121,8 +123,6 @@ class FileManager:
         Returns:
             路径在基础目录范围内返回 True，否则返回 False。
         """
-        from .io_path import _is_within_resolved
-
         try:
             abs_path = path.resolve()
             if _is_within_resolved(abs_path, self._base_abs):
@@ -136,11 +136,9 @@ class FileManager:
     def _resolved_within_base(self, resolved_path: Path) -> bool:
         """判断已 resolve 的路径是否位于基础目录内，直接比较，不再 resolve。
 
-        复用 path_utils._is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
+        复用 io_path._is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
         供 cleanup_old_files 等热路径复用，避免对已 resolve 路径重复解析。
         """
-        from .io_path import _is_within_resolved
-
         return _is_within_resolved(resolved_path, self._base_abs)
 
     def sanitize_filename(self, filename: str) -> str:
@@ -250,7 +248,9 @@ class FileManager:
         """
         return hashlib.sha256(content).hexdigest()
 
-    def infer_extension_from_bytes(self, content: bytes, default: str = ".jpeg") -> str:
+    def infer_extension_from_bytes(
+        self, content: bytes, default: str = DEFAULT_IMAGE_EXTENSION
+    ) -> str:
         """基于文件头魔法字节嗅探真实图片类型并返回扩展名。
 
         读取字节头部 magic bytes 判断真实格式，不信任 URL 或路径声明的扩展名，
@@ -263,8 +263,6 @@ class FileManager:
         Returns:
             推断出的扩展名，含点号。
         """
-        from ..core.formats import infer_extension_from_bytes
-
         return infer_extension_from_bytes(content, default)
 
     def get_organized_path(
@@ -319,13 +317,10 @@ class FileManager:
         else:
             base_name = self.generate_name_from_prompt(prompt)
 
-        # 调用独立工具函数推断扩展名，避免为复用而实例化 DownloadManager。
-        from .io_url import get_file_extension_from_url
-
         extension = get_file_extension_from_url(url)
         # 收敛到受支持图片扩展名白名单，防止 URL 派生的 .html/.aspx 等任意后缀落盘。
         if extension not in SUPPORTED_IMAGE_EXTENSIONS:
-            extension = ".jpeg"
+            extension = DEFAULT_IMAGE_EXTENSION
 
         filename = self.generate_unique_filename(base_name, extension)
 
@@ -391,7 +386,7 @@ class FileManager:
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
 
-            # 原子落盘协议由 os_utils.atomic_replace_from_fd_sync 同步提供，与 download_manager
+            # 原子落盘协议由 io_file.atomic_replace_from_fd_sync 同步提供，与 io_download
             # 下载路径的异步骨架对应同一协议：随机名临时文件规避符号链接 TOCTOU，写入后
             # os.replace 原子替换，失败清理临时文件。writer 以 closefd=False 包装 fd，骨架
             # 独占 fd 关闭。save_bytes 为同步公共接口且数据已在内存，走同步落盘路径避免在
@@ -409,7 +404,7 @@ class FileManager:
         except OSError as e:
             raise FileManagerError(f"写入文件失败: {file_path} -> {e}") from e
 
-    def get_relative_path(self, file_path: Path) -> str:
+    def relative_to_base(self, file_path: Path) -> str:
         """获取文件相对于基础目录的路径。
 
         Args:
@@ -433,17 +428,9 @@ class FileManager:
         Returns:
             Markdown 引用字符串。
         """
-        # 优先取相对当前工作目录的路径，便于在日志或文档中直接引用。
-        try:
-            cwd = self._cwd
-            relative_path = str(file_path.relative_to(cwd))
-        except ValueError:
-            # 文件不在当前工作目录下时，回退到相对基础目录的路径并前缀基础目录名。
-            relative_path = self.get_relative_path(file_path)
-            base_dir_name = self.base_dir.name
-            relative_path = f"{base_dir_name}/{relative_path}"
-
-        # 统一为正斜杠以兼容 Markdown 引用。
+        # 以基础目录为基准生成相对路径：保存文件恒位于 base_dir 之下，相对化必然成功，
+        # 且不受进程 CWD 变化影响。统一为正斜杠以兼容 Markdown 引用。
+        relative_path = self.relative_to_base(file_path)
         markdown_path = relative_path.replace("\\", "/")
 
         if not markdown_path.startswith("./"):
@@ -454,58 +441,11 @@ class FileManager:
         else:
             return f"![]({markdown_path})"
 
-    def cleanup_old_files(self, days: int = 30) -> dict[str, Any]:
-        """清理超过保留天数的旧文件并删除随之变空的子目录。
-
-        Args:
-            days: 文件保留天数，默认 30。
-
-        Returns:
-            清理结果，包含删除文件数、释放字节数与错误列表。
-        """
-        # days 小于 1 视为禁用清理，与 auto_save 的"0=不清理"语义统一，避免误删全部文件。
-        if days < 1:
-            logger.info("保留天数 {} 小于 1，跳过旧文件清理。", days)
-            return {"deleted_files": 0, "deleted_size": 0, "errors": []}
-        errors: list[str] = []
-        deleted_files = 0
-        deleted_size = 0
-        try:
-            all_files, directories = self._collect_all_files(errors)
-            deleted_names, deleted_size = self._apply_age_policy(all_files, days, errors)
-            deleted_files = len(deleted_names)
-            self._prune_empty_dirs(directories)
-        except Exception as e:
-            errors.append(f"清理过程出错: {e}")
-            logger.error("清理过程出错: {}", e)
-
-        return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
-
-    def enforce_total_size_limit(self, max_total_bytes: int) -> dict[str, Any]:
-        """按总字节上限驱逐最旧文件，使保存目录占用不超过 max_total_bytes。
-
-        与 cleanup_old_files 的按天清理互补：按天清理控制文件年龄，本方法控制总占用，
-        防止保留窗口内持续写入耗尽磁盘。复用 _collect_all_files 的扫描与越界防护，
-        经 heapq.nsmallest 取最旧若干候选按 mtime 升序删除直至总量达标。
-        """
-        errors: list[str] = []
-        deleted_files = 0
-        deleted_size = 0
-        try:
-            all_files, _directories = self._collect_all_files(errors)
-            deleted_files, deleted_size = self._enforce_quota_from_scan(
-                all_files, max_total_bytes, errors
-            )
-        except Exception as e:
-            errors.append(f"总量清理过程出错: {e}")
-            logger.error("总量清理过程出错: {}", e)
-        return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
-
     def run_cleanup_policies(self, days: int, max_total_bytes: int | None) -> dict[str, Any]:
         """单次目录扫描依次执行按天清理与总量配额驱逐，供节流清理入口复用。
 
         共享一次遍历结果执行两策略，避免重复全目录 os.walk。按天策略经 _apply_age_policy
-        与 cleanup_old_files 复用同一实现，先执行并删除空目录；配额驱逐基于按天清理后的
+        实现并删除空目录；配额驱逐基于按天清理后的
         剩余文件计算，剔除已删条目避免对已删路径重复 unlink。days 小于 1 跳过按天清理，
         max_total_bytes 为 None 跳过配额驱逐。
 
@@ -659,6 +599,9 @@ class FileManager:
             dirs[:] = pruned_dirs
             for name in files:
                 file_path = root_path / name
+                # 仅收集本服务支持的图片文件，跳过 base_dir 内其他类型文件，避免误删用户数据
+                if file_path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+                    continue
                 # 跳过符号链接文件，其目标可能在 base_dir 之外。
                 if file_path.is_symlink():
                     continue

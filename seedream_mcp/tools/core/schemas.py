@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -388,10 +388,11 @@ class SequentialGenerationInput(
 class BrowseImagesInput(BaseModel):
     """本地图片浏览：浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
 
-    字段默认值的单一来源：impl handler 与兜底分支引用此类常量取值，避免魔法值漂移。
+    字段默认值的单一来源：各字段 Field 默认值引用类上声明的 ClassVar 常量，避免魔法值
+    漂移；impl handler 以类型化属性读取，缺省字段直接携带默认值。
     """
 
-    # ClassVar 声明使 pydantic 将其排除出模型字段，仅作为默认值单一来源供 handler 引用。
+    # ClassVar 声明使 pydantic 将其排除出模型字段，仅作为默认值单一来源供 Field 引用。
     DEFAULT_RECURSIVE: ClassVar[bool] = True
     DEFAULT_MAX_DEPTH: ClassVar[int] = 3
     DEFAULT_LIMIT: ClassVar[int] = 50
@@ -481,3 +482,25 @@ class BrowseImagesInput(BaseModel):
                 cleaned = f".{cleaned}"
             normalized.append(cleaned)
         return normalized
+
+
+class GenerationInputParams(Protocol):
+    """四个生成工具输入模型共享字段的协议类型。
+
+    供 core 流水线以类型化属性访问读取共享字段，替代弱类型 dict.get；各生成工具的
+    具体输入模型经结构化子类型自动满足本协议，无需显式继承。
+    """
+
+    prompt: str
+    optimize_prompt_options: OptimizePromptOptions | None
+    size: str | None
+    watermark: bool | None
+    response_format: ResponseFormat
+    output_format: OutputFormat | None
+    stream: bool
+    tools: list[GenerationTool] | None
+    request_count: int
+    parallelism: int | None
+    auto_save: bool | None
+    save_path: str | None
+    custom_name: str | None

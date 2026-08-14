@@ -1,8 +1,9 @@
 """Seedream MCP 路径处理工具：MCP 工作区 Roots 边界与路径越界校验。
 
-以 MCP Roots 作为文件访问边界，对图片路径做规范化与越界校验，拦截包含 ``..``
+以 MCP Roots 作为文件访问边界，提供路径规范化与越界判定原语，拦截包含 ``..``
 或经由符号链接指向工作区之外的路径；无 MCP Roots 时回退 SEEDREAM_WORKSPACE_ROOT
-环境变量。另提供目录图片查找与拼写相近路径建议。
+环境变量。另提供目录图片查找与拼写相近路径建议。组合工作区边界与图像规则的
+validate_image_path 位于 images 子包的 image_validation，本模块保持纯路径职责。
 """
 
 from __future__ import annotations
@@ -17,11 +18,9 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 # 本地导入
-from ..core.errors import SeedreamConfigError, SeedreamValidationError
+from ..core.errors import SeedreamConfigError
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
-from ..images.image_validation import validate_image_input
-from ..images.image_ref import classify_image_reference
 from .io_file import _is_reparse_point
 
 logger = get_logger(__name__)
@@ -32,6 +31,9 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     default=None,
 )
 
+# 回退 CWD 告警只记录一次；无 Roots 时本解析随每次文件访问触发，逐次告警会淹没日志
+_cwd_fallback_warned = False
+
 
 # ==================== 工作区根目录管理 ====================
 
@@ -40,14 +42,22 @@ def resolve_env_workspace_root() -> Path:
     """解析工作区根目录，失败时回退当前工作目录。
 
     本地开发无 MCP Roots 时作为文件访问边界回退。优先读取活动配置，config 未就绪时
-    回退环境变量。
+    回退环境变量。无任何配置回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个
+    工作目录。
     """
+    global _cwd_fallback_warned
     configured_root = _configured_workspace_root()
     if configured_root:
         try:
             return Path(configured_root).expanduser().resolve()
         except Exception as e:
             logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
+    if not _cwd_fallback_warned:
+        _cwd_fallback_warned = True
+        logger.warning(
+            "未配置 MCP Roots 与 SEEDREAM_WORKSPACE_ROOT，文件访问边界回退为进程当前工作目录 {}",
+            Path.cwd().resolve(),
+        )
     return Path.cwd().resolve()
 
 
@@ -257,51 +267,6 @@ def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
     except Exception as e:
         logger.error("获取相对路径失败 {}: {}", path, e)
         return str(path)
-
-
-# ==================== 图片路径验证 ====================
-
-
-def validate_image_path(
-    path: str, base_dir: str | None = None, skip_dimensions: bool = False
-) -> tuple[bool, str, Path | None]:
-    """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
-
-    HTTP(S) URL 视为有效但标准化路径恒为 None，调用方须同时检查有效位与路径是否
-    为 None，据以分流 URL 与本地文件处理，不可仅凭有效位判定为本地路径。
-
-    Args:
-        path: 图片文件路径；HTTP(S) URL 有效但路径返回 None。
-        base_dir: 工作区基础目录，用于越界校验；None 时回退首个工作区根，多根工作区仅校验首个根，完整多根校验须由调用方遍历各根分别调用。
-        skip_dimensions: 是否跳过图片像素维度校验。
-
-    Returns:
-        三元组 (是否有效, 错误信息, 标准化路径)；URL 有效但路径为 None。
-    """
-    try:
-        if classify_image_reference(path) == "url":
-            return True, "", None
-
-        if base_dir is None:
-            base_dir = str(get_workspace_root())
-        normalized_path = normalize_path(path, base_dir)
-        base_path = Path(base_dir).resolve()
-        # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析
-        if not _is_within_resolved(normalized_path, base_path):
-            return False, "路径超出允许的工作区目录范围", normalized_path
-
-        # 委托 validation 模块执行格式与维度等统一规则校验。
-        try:
-            validated_path = validate_image_input(
-                str(normalized_path), skip_dimensions=skip_dimensions
-            )
-            return True, "", Path(validated_path)
-        except SeedreamValidationError as e:
-            return False, e.message, normalized_path
-
-    except Exception as e:
-        logger.error("路径验证失败 {}: {}", path, e)
-        return False, f"路径验证错误: {str(e)}", None
 
 
 def find_images_in_directory(

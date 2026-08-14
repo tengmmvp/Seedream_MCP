@@ -19,6 +19,7 @@ from .io_download import DownloadManager, DownloadError, sanitize_url
 from ..core.errors import SeedreamMCPError
 from .io_storage import FileManager, FileManagerError
 from ..core.formats import (
+    DEFAULT_IMAGE_EXTENSION,
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
     _format_file_size_mb,
@@ -37,6 +38,8 @@ _CLEANUP_LAST_RUN_MAX_ENTRIES = 16
 _cleanup_last_run: OrderedDict[str, float] = OrderedDict()
 # 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理
 _cleanup_lock = asyncio.Lock()
+# 在途的后台清理任务，close 时等待完成以保持节流状态一致
+_cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
 def _reset_cleanup_state() -> None:
@@ -46,9 +49,10 @@ def _reset_cleanup_state() -> None:
     使用全新事件循环，跨循环复用旧锁会在 acquire 时报错。本函数重建 _cleanup_lock
     并清空 _cleanup_last_run，使后续调用从干净状态启动。
     """
-    global _cleanup_lock, _cleanup_last_run
+    global _cleanup_lock, _cleanup_last_run, _cleanup_tasks
     _cleanup_lock = asyncio.Lock()
     _cleanup_last_run = OrderedDict()
+    _cleanup_tasks = set()
 
 
 class AutoSaveError(SeedreamMCPError):
@@ -140,7 +144,7 @@ class AutoSaveManager:
             base_dir: 基础保存目录
             download_timeout: 下载超时时间，仅自建下载管理器时生效
             max_retries: 最大重试次数，仅自建下载管理器时生效
-            max_file_size: 最大文件大小，仅自建下载管理器时生效
+            max_file_size: 最大文件大小，本实例自持；自建下载管理器时同时作为其上限
             max_concurrent: 最大并发下载数
             date_folder: 是否按日期创建文件夹
             cleanup_days: 自动清理天数，0表示不清理
@@ -148,6 +152,7 @@ class AutoSaveManager:
             download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭
         """
         self.file_manager = FileManager(base_dir)
+        self.max_file_size = max_file_size
         if download_manager is not None:
             self.download_manager = download_manager
             self._owns_download_manager = False
@@ -172,9 +177,11 @@ class AutoSaveManager:
         释放底层下载资源
 
         仅关闭本实例自建的下载管理器；外部共享的下载管理器由其所有者管理，如 lifespan。
+        等待在途后台清理完成，避免进程退出时节流状态不一致。
         """
         if self._owns_download_manager:
             await self.download_manager.close()
+        await asyncio.gather(*_cleanup_tasks, return_exceptions=True)
 
     async def _maybe_cleanup(self) -> None:
         """按目录节流触发旧文件清理，每个 base_dir 在最短间隔内仅执行一次。
@@ -194,6 +201,13 @@ class AutoSaveManager:
             _cleanup_last_run[base_key] = now
             while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
                 _cleanup_last_run.popitem(last=False)
+        # 后台执行清理，不阻塞当前请求返回；失败回滚节流时间戳供下次重试
+        task = asyncio.create_task(self._run_cleanup_in_background(base_key, previous))
+        _cleanup_tasks.add(task)
+        task.add_done_callback(_cleanup_tasks.discard)
+
+    async def _run_cleanup_in_background(self, base_key: str, previous: float) -> None:
+        """在后台线程执行清理，失败时回滚节流时间戳。"""
         try:
             # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历
             await asyncio.to_thread(
@@ -208,10 +222,10 @@ class AutoSaveManager:
             logger.warning("自动清理失败: {}", e, exc_info=True)
 
     def _extension_from_mime(self, mime: str | None) -> str:
-        """根据 MIME 类型推断文件扩展名，未知类型回退到 .jpeg。"""
+        """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""
         if not mime:
-            return ".jpeg"
-        return EXTENSION_BY_MIME.get(mime.lower(), ".jpeg")
+            return DEFAULT_IMAGE_EXTENSION
+        return EXTENSION_BY_MIME.get(mime.lower(), DEFAULT_IMAGE_EXTENSION)
 
     async def save_image(
         self,
@@ -262,7 +276,8 @@ class AutoSaveManager:
                 file_size=download_result.get("file_size", 0),
                 content_type=download_result.get("content_type", ""),
                 attempts=download_result.get("attempts", 1),
-                download_time=download_result.get("download_time", 0),
+                # 缺失时传 None 省略该键，与 base64 保存路径的 metadata 形状一致
+                download_time=download_result.get("download_time"),
             )
 
             result = AutoSaveResult(
@@ -279,6 +294,10 @@ class AutoSaveManager:
         except (DownloadError, FileManagerError, AutoSaveError) as e:
             logger.error("图片保存失败: {} -> {}", sanitize_url(url), e)
             return AutoSaveResult(success=False, original_url=url, error=str(e))
+        except OSError as e:
+            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底
+            logger.error("图片保存文件系统错误: {} -> {}", sanitize_url(url), e)
+            return AutoSaveResult(success=False, original_url=url, error=f"文件系统错误: {e}")
         except Exception as e:
             logger.error("图片保存出现未知错误: {} -> {}", sanitize_url(url), e)
             return AutoSaveResult(success=False, original_url=url, error=f"未知错误: {e}")
@@ -296,10 +315,10 @@ class AutoSaveManager:
             raise AutoSaveError("空的Base64数据")
 
         estimated_size = (len(raw_payload) * 3) // 4
-        if estimated_size > self.download_manager.max_file_size:
+        if estimated_size > self.max_file_size:
             raise AutoSaveError(
                 f"Base64数据过大: 约 {_format_file_size_mb(estimated_size)}，"
-                f"最大支持 {_format_file_size_mb(self.download_manager.max_file_size)}"
+                f"最大支持 {_format_file_size_mb(self.max_file_size)}"
             )
 
         # 火山引擎 base64 通常不含空白，直传 validate=True 校验避免对大串做全量复制；
@@ -312,10 +331,10 @@ class AutoSaveManager:
             except Exception as e:
                 raise AutoSaveError(f"Base64解码失败: {e}") from e
 
-        if len(content_bytes) > self.download_manager.max_file_size:
+        if len(content_bytes) > self.max_file_size:
             raise AutoSaveError(
                 f"解码后数据过大: {_format_file_size_mb(len(content_bytes))}，"
-                f"最大支持 {_format_file_size_mb(self.download_manager.max_file_size)}"
+                f"最大支持 {_format_file_size_mb(self.max_file_size)}"
             )
 
         if not is_known_image_bytes(content_bytes):
@@ -324,7 +343,9 @@ class AutoSaveManager:
         extension = (
             self._extension_from_mime(mime)
             if mime
-            else self.file_manager.infer_extension_from_bytes(content_bytes, default=".jpeg")
+            else self.file_manager.infer_extension_from_bytes(
+                content_bytes, default=DEFAULT_IMAGE_EXTENSION
+            )
         )
         content_hash = self.file_manager.get_content_hash(content_bytes)
         return content_bytes, extension, content_hash
@@ -400,6 +421,10 @@ class AutoSaveManager:
         except (FileManagerError, AutoSaveError) as e:
             logger.error("Base64 图片保存失败: {}", e)
             return AutoSaveResult(success=False, original_url="base64", error=str(e))
+        except OSError as e:
+            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底
+            logger.error("Base64 图片保存文件系统错误: {}", e)
+            return AutoSaveResult(success=False, original_url="base64", error=f"文件系统错误: {e}")
         except Exception as e:
             logger.error("Base64 图片保存出现未知错误: {}", e)
             return AutoSaveResult(success=False, original_url="base64", error=f"未知错误: {e}")

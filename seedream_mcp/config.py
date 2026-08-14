@@ -16,14 +16,10 @@ from typing import Any, Mapping
 
 from dotenv import dotenv_values
 
-from .utils.core.errors import SeedreamConfigError, SeedreamValidationError
+from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, _is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
-from .utils.core.validators import (
-    FALSE_BOOL_STRINGS,
-    TRUE_BOOL_STRINGS,
-    validate_size_for_model,
-)
+from .utils.core.validators import parse_bool, validate_size_for_model
 
 # ====================
 # 配置常量
@@ -38,8 +34,11 @@ DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 # 合法日志级别，供 config 校验与 CLI choices 共用此单一来源
 LEGAL_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
-# to_dict 输出时按字段名关键词脱敏，新增敏感字段无需手动登记
-_SENSITIVE_CONFIG_KEYWORDS = ("key", "token", "secret", "password", "auth", "credential")
+# lifespan 上下文字典键，app_lifespan 产出方与 parallel/server 消费方的契约。
+# config 为双方共同底层依赖，键集中定义于此，core 层复用键时无需依赖顶层装配模块
+LIFESPAN_KEY_CONFIG = "config"
+LIFESPAN_KEY_CLIENT = "client"
+LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"
 
 # dataclass 字段 metadata 中登记环境变量名的键，字段定义据此声明对应环境变量名
 _ENV_METADATA_KEY = "env"
@@ -67,6 +66,8 @@ class SeedreamConfig:
 
     # 可选配置
     base_url: str = _env_field("https://ark.cn-beijing.volces.com/api/v3", "ARK_BASE_URL")
+    # http:// 的 base_url 显式豁免开关；http 明文会使 API 密钥在网络上裸传，默认拒绝
+    allow_http_base_url: bool = _env_field(False, "SEEDREAM_ALLOW_HTTP_BASE_URL")
     model_id: str = _env_field("doubao-seedream-5-0-260128", "SEEDREAM_MODEL_ID")
     default_size: str = _env_field("2K", "SEEDREAM_DEFAULT_SIZE")
     default_watermark: bool = _env_field(False, "SEEDREAM_DEFAULT_WATERMARK")
@@ -109,7 +110,8 @@ class SeedreamConfig:
     # 工作区与传输配置
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
-    http_max_body_size: int = _env_field(100 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
+    # 默认 64MB：MCP 正常载荷远小于 100MB，单图 data URI 上限约 40MB，64MB 兼顾多图融合
+    http_max_body_size: int = _env_field(64 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
 
     def __post_init__(self) -> None:
         self.validate()
@@ -128,11 +130,17 @@ class SeedreamConfig:
         if not self.base_url or not self.base_url.startswith(("http://", "https://")):
             raise SeedreamConfigError("base_url必须是有效的HTTP/HTTPS URL")
         if self.base_url.startswith("http://"):
-            # http 明文会使 API 密钥在网络上裸传，记录告警提示仅限自建可信内网端点使用
+            if not self.allow_http_base_url:
+                # http 明文会使 API 密钥在网络上裸传，默认拒绝构建，仅显式豁免时放行
+                raise SeedreamConfigError(
+                    "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝；"
+                    "仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
+                )
             from .utils.core.logs import get_logger
 
             get_logger(__name__).warning(
-                "ARK_BASE_URL 使用 http://，API 密钥将在网络上明文传输，" "仅自建可信内网端点时使用"
+                "ARK_BASE_URL 使用 http:// 且已豁免，API 密钥将在网络上明文传输，"
+                "仅限自建可信内网端点使用"
             )
 
         if not self.model_id or self.model_id.strip() == "":
@@ -226,12 +234,15 @@ class SeedreamConfig:
         return build_config_from_sources(env_file=env_file)
 
     def to_dict(self) -> dict[str, Any]:
-        """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。"""
+        """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。
+
+        敏感判定复用 errors 的 _is_sensitive_key 边界匹配，与结构化错误输出的脱敏
+        标准保持同一来源。
+        """
         result: dict[str, Any] = {}
         for config_field in fields(self):
             value = getattr(self, config_field.name)
-            name_lower = config_field.name.lower()
-            if any(keyword in name_lower for keyword in _SENSITIVE_CONFIG_KEYWORDS):
+            if _is_sensitive_key(config_field.name):
                 result[config_field.name] = "***" if value is not None else None
             else:
                 result[config_field.name] = value
@@ -286,24 +297,6 @@ def normalize_model_selector(value: object) -> str:
     return MODEL_ALIASES.get(normalized, normalized)
 
 
-def parse_bool(value: object) -> bool:
-    """将值解析为布尔。
-
-    接受 true/yes/on/1 为真、false/no/off/0 为假；其余值抛出 SeedreamConfigError，
-    避免 enabled 这类拼写错误被静默当作 False，导致功能未生效却无报错。
-    """
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    normalized = str(value).strip().lower()
-    if normalized in TRUE_BOOL_STRINGS:
-        return True
-    if normalized in FALSE_BOOL_STRINGS:
-        return False
-    raise SeedreamConfigError(f"无法解析为布尔值(期望 true/false/yes/no/on/off/1/0): {value!r}")
-
-
 def parse_int(value: object) -> int:
     """将值解析为整数，空值或无法解析时抛出 SeedreamConfigError。"""
     if isinstance(value, bool):
@@ -351,6 +344,16 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
 
     if runtime_env_path.is_file():
         merged_values.update(_load_single_env_file(runtime_env_path))
+        if default_env_path.is_file() and runtime_env_path != default_env_path:
+            # 工作目录不受控时其中的 .env 可能注入非预期配置，覆盖发生时告警提示核对来源
+            from .utils.core.logs import get_logger
+
+            get_logger(__name__).warning(
+                "当前工作目录 .env（{}）覆盖了项目根 .env（{}）的配置值；"
+                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+                runtime_env_path,
+                default_env_path,
+            )
 
     return merged_values
 
@@ -494,6 +497,9 @@ def _build_config_from_sources_unlocked(
     config_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "base_url": _pick_str(override_values, "base_url", "ARK_BASE_URL", env_values),
+        "allow_http_base_url": _pick_bool(
+            override_values, "allow_http_base_url", "SEEDREAM_ALLOW_HTTP_BASE_URL", env_values
+        ),
         "model_id": model_id,
         "default_size": _pick_str(
             override_values, "default_size", "SEEDREAM_DEFAULT_SIZE", env_values
@@ -612,7 +618,7 @@ _config_build_lock = threading.Lock()
 _global_config_lock = threading.Lock()
 
 _global_config: SeedreamConfig | None = None
-# CLI 注入的活动配置，优先于 _global_config。server 与 path_utils 经 get_active_config
+# CLI 注入的活动配置，优先于 _global_config。server 与 io_path 经 get_active_config
 # 共用此源；reload_config 重置其为 None 以回退重建后的全局配置，消除活动配置与全局
 # 配置的双单例分叉。
 _active_config: SeedreamConfig | None = None
@@ -653,7 +659,7 @@ def set_active_config(config: SeedreamConfig | None) -> None:
     """设置或清除 CLI 注入的活动配置。
 
     None 表示清除活动配置，后续 get_active_config 回退到全局默认。CLI 启动时注入，
-    使 server 与 path_utils 共用同一活动配置源。
+    使 server 与 io_path 共用同一活动配置源。
     """
     global _active_config
     with _global_config_lock:
@@ -664,7 +670,7 @@ def reload_config(env_file: str | None = None) -> None:
     """重新加载全局配置并重置活动配置。
 
     重建全局配置实例并清除活动配置，使后续 get_active_config 回退到新的全局实例，
-    确保 server 的 client/tools 与 path_utils 读到一致的新配置，消除双单例分叉。
+    确保 server 的 client/tools 与 io_path 读到一致的新配置，消除双单例分叉。
     """
     global _global_config, _active_config
     with _global_config_lock:

@@ -17,6 +17,7 @@ from ._helpers import (
     _is_generation_failed,
 )
 from .context import GenerationExecutionContext
+from .outputs import GenerationStructuredOutput, build_error_dict
 
 
 def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -131,7 +132,7 @@ def aggregate_parallel_generation_results(
             if representative is not None
             else "generation_failed"
         )
-        aggregated_result["error"] = {"type": error_type, "message": message}
+        aggregated_result["error"] = build_error_dict(error_type, message)
     return aggregated_result
 
 
@@ -364,9 +365,11 @@ def _build_generation_structured_result(
     auto_save_error: str | None,
     images: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """构建 MCP 工具结果的 structuredContent 字段，字段集与 GenerationStructuredOutput 对齐。
+    """构建 MCP 工具结果的 structuredContent 字段。
 
-    成功与失败均返回同一结构，失败时额外写入归一化后的 error 字典，供 outputSchema 校验。
+    经 GenerationStructuredOutput 构造后 model_dump，使 runtime 输出与声明的
+    outputSchema 绑定，字段漂移在构造时即暴露。成功与失败均返回同一结构，失败时额外
+    写入归一化后的 error 字典；成功路径不输出 error 键，与既有契约一致。
 
     Args:
         tool_name: 工具标识。
@@ -379,7 +382,7 @@ def _build_generation_structured_result(
     """
     # b64_json 模式下 data 内的完整 base64 为有意保留：用户显式请求 b64 即期望取回图像
     # 数据，故此处不做截断；并行与组图场景的大载荷由调用方或客户端按需处理。
-    structured: dict[str, Any] = {
+    payload: dict[str, Any] = {
         "tool": tool_name,
         "success": not _is_generation_failed(result),
         "status": result.get("status"),
@@ -397,20 +400,24 @@ def _build_generation_structured_result(
     }
 
     if context.enable_auto_save:
-        structured["auto_save"] = {
+        payload["auto_save"] = {
             "enabled": True,
             "error": auto_save_error,
             "results": [r.to_dict() for r in auto_save_results] if auto_save_results else [],
         }
     else:
-        structured["auto_save"] = {"enabled": False}
+        payload["auto_save"] = {"enabled": False}
 
-    if _is_generation_failed(result):
+    failed = _is_generation_failed(result)
+    if failed:
         raw_error = result.get("error", "未知错误")
-        structured["error"] = (
+        payload["error"] = (
             raw_error
             if isinstance(raw_error, dict)
-            else {"type": "generation_failed", "message": str(raw_error)}
+            else build_error_dict("generation_failed", str(raw_error))
         )
 
-    return structured
+    output = GenerationStructuredOutput(**payload)
+    if failed:
+        return output.model_dump()
+    return output.model_dump(exclude={"error"})

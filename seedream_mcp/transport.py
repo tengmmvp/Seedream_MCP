@@ -13,7 +13,8 @@ import argparse
 import asyncio
 import hmac
 import json
-from typing import Any
+import ssl
+from typing import Any, Callable
 
 from .config import get_active_config
 from .utils.core.logs import get_logger
@@ -215,7 +216,66 @@ class _HealthCheckMiddleware:
         await self.app(scope, receive, send)
 
 
+class _LoopbackHostGuardMiddleware:
+    """回环绑定时校验 Host 头，防 DNS rebinding 使外部域名请求直达本机服务。
+
+    回环绑定且未配置鉴权时，浏览器经 DNS rebinding 可对 127.0.0.1 发起同源请求，
+    绕过 CORS 直达工具面枚举文件或盗用 API key。校验 Host 头为回环地址可阻断外部
+    域名请求；本地以 127.0.0.1/localhost/[::1] 访问不受影响。
+    """
+
+    # 允许的 Host 头值（剥离端口后），均解析到回环或即回环字面量
+    _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]", b"::1"})
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            host = self._host_header(scope)
+            if host is not None and self._strip_port(host) not in self._ALLOWED_HOSTS:
+                await self._send_forbidden(send)
+                return
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _host_header(scope: Any) -> bytes | None:
+        for name, value in scope.get("headers", []):
+            if name == b"host":
+                return value  # type: ignore[no-any-return]
+        return None
+
+    @staticmethod
+    def _strip_port(host: bytes) -> bytes:
+        # IPv6 字面量形如 [::1]:8000，保留含方括号的主机部分
+        if host.startswith(b"["):
+            end = host.find(b"]")
+            return host[: end + 1] if end != -1 else host
+        idx = host.rfind(b":")
+        return host if idx == -1 else host[:idx]
+
+    async def _send_forbidden(self, send: Any) -> None:
+        body = json.dumps(
+            {"error": "invalid_host", "error_description": "Host not allowed"}
+        ).encode("utf-8")
+        await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
+
+
 # ==================== streamable-http 传输配置 ====================
+
+
+def _tls12_ssl_context_factory(
+    config: Any, default_factory: Callable[[], ssl.SSLContext]
+) -> ssl.SSLContext:
+    """在 uvicorn 默认构造的 TLS 上下文之上强制最低协议版本 TLS 1.2。
+
+    uvicorn 按 certfile/keyfile 自建的上下文未固定最低版本，旧客户端可能协商到
+    已知弱点的 TLS 1.0/1.1。经 default_factory 取 uvicorn 默认上下文后抬高下限，
+    证书加载等其余行为与 uvicorn 原生路径保持一致。
+    """
+    context = default_factory()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
 
 
 def _resolve_http_auth_token(args: argparse.Namespace) -> str:
@@ -291,7 +351,8 @@ def _run_streamable_http(
     启动 streamable-http 传输。
 
     配置鉴权令牌时，在 FastMCP 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
-    请求返回 401。配置 TLS 证书时透传给 uvicorn 启用 HTTPS。仅使用 FastMCP 公开接口
+    请求返回 401。配置 TLS 证书时经 ssl_context_factory 构造最低 TLS 1.2 的服务端
+    上下文交给 uvicorn 启用 HTTPS。仅使用 FastMCP 公开接口
     streamable_http_app() 获取 ASGI 应用，避免依赖其私有鉴权装配路径。
 
     显式管理事件循环：uvicorn Server.serve 返回后循环仍存活，于其上运行共享资源的异步
@@ -319,13 +380,19 @@ def _run_streamable_http(
     app.add_middleware(
         _LimitRequestBodyMiddleware, max_body_size=get_active_config().http_max_body_size
     )
+    # 回环绑定时启用 Host 头校验，阻断 DNS rebinding 使外部域名请求直达本机服务。
+    # 位于健康检查之内、请求体限制与鉴权之外，本地 127.0.0.1/localhost 访问不受影响。
+    if host in _LOOPBACK_HOSTS:
+        app.add_middleware(_LoopbackHostGuardMiddleware)
     # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health
     app.add_middleware(_HealthCheckMiddleware)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:
         ssl_kwargs["ssl_certfile"] = ssl_certfile
         ssl_kwargs["ssl_keyfile"] = ssl_keyfile
-        logger.info("streamable-http 已启用 TLS")
+        # uvicorn 默认 TLS 上下文不固定最低协议版本，经工厂统一抬高到 TLS 1.2
+        ssl_kwargs["ssl_context_factory"] = _tls12_ssl_context_factory
+        logger.info("streamable-http 已启用 TLS，最低协议版本 TLS 1.2")
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, **ssl_kwargs))
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

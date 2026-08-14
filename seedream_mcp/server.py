@@ -20,7 +20,6 @@ from __future__ import annotations
 # 标准库导入
 import json
 import sys
-import types
 from typing import Any
 
 from mcp.server.fastmcp import Context
@@ -81,35 +80,6 @@ from .transport import (  # noqa: F401
     _HealthCheckMiddleware,
     _LimitRequestBodyMiddleware,
 )
-
-# ==================== 生命周期状态属性转发 ====================
-
-# _active_resource、_shared_client、_shared_download_manager 由 resources 模块在
-# lifespan 运行期重新赋值，from-import 重导出只会固定导入时的旧值。本模块替换模块类，
-# 经属性协议把这三个名字的读写转发到 resources 模块，使 server._shared_client 等
-# 既有访问路径始终反映最新状态；monkeypatch 对 server 模块写入这些名字时同样落在
-# resources 模块，供 _sync_cleanup 等函数读到。
-_FORWARDED_STATE_ATTRS = frozenset(
-    {"_active_resource", "_shared_client", "_shared_download_manager"}
-)
-
-
-class _ServerModule(types.ModuleType):
-    """生命周期状态属性转发到 resources 模块的服务器模块类型。"""
-
-    def __getattr__(self, name: str) -> Any:
-        if name in _FORWARDED_STATE_ATTRS:
-            return getattr(resources, name)
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name in _FORWARDED_STATE_ATTRS:
-            setattr(resources, name, value)
-            return
-        super().__setattr__(name, value)
-
-
-sys.modules[__name__].__class__ = _ServerModule
 
 # ==================== 工具注解常量 ====================
 
@@ -301,27 +271,19 @@ async def server_info_resource() -> str:
 @mcp.resource("seedream://models/info")
 async def models_info_resource() -> str:
     """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
+    from dataclasses import asdict
+
     from .utils.model.model_capabilities import get_model_capabilities
 
+    # asdict 派生能力字段，ModelCapabilities 新增字段自动出现在本资源，无需手工同步
     models = []
     for alias, model_id in MODEL_ALIASES.items():
-        caps = get_model_capabilities(model_id)
-        models.append(
-            {
-                "alias": alias,
-                "model_id": model_id,
-                "display_name": caps.display_name,
-                "allowed_presets": sorted(caps.allowed_presets),
-                "min_size_pixels": caps.min_size_pixels,
-                "max_size_pixels": caps.max_size_pixels,
-                "size_pixel_multiple": caps.size_pixel_multiple,
-                "max_reference_images": caps.max_reference_images,
-                "supports_output_format": caps.supports_output_format,
-                "supports_tools": caps.supports_tools,
-                "supports_stream": caps.supports_stream,
-                "supports_fast_optimize_prompt": caps.supports_fast_optimize_prompt,
-            }
-        )
+        caps_dict = asdict(get_model_capabilities(model_id))
+        if "allowed_presets" in caps_dict and isinstance(
+            caps_dict["allowed_presets"], (set, frozenset, list)
+        ):
+            caps_dict["allowed_presets"] = sorted(caps_dict["allowed_presets"])
+        models.append({"alias": alias, "model_id": model_id, **caps_dict})
     return json.dumps({"models": models}, ensure_ascii=False, indent=2)
 
 
@@ -385,8 +347,8 @@ def cli_main() -> int:
         print(f"配置错误: {exc.message}", file=sys.stderr)
         return 1
 
-    # 注入活动配置，共享 client/tools 与 path_utils 经 get_active_config 共用此实例，
-    # 避免无 MCP Roots 时 path_utils 重建第二个 config 造成双事实来源
+    # 注入活动配置，共享 client/tools 与 io_path 经 get_active_config 共用此实例，
+    # 避免无 MCP Roots 时 io_path 重建第二个 config 造成双事实来源
     set_active_config(config)
 
     # 初始化日志系统并打印启动信息。setup_logging 含目录创建等 I/O，只读容器或受限

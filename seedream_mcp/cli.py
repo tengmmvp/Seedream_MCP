@@ -13,6 +13,10 @@ from typing import Literal, cast
 from .config import LEGAL_LOG_LEVELS, MODEL_ALIASES, SeedreamConfig, build_config_from_sources
 from .version import __version__
 
+# streamable-http 默认监听配置，argparse 默认值与 resources 的 lifespan 复位共用此单一来源
+_DEFAULT_HTTP_HOST = "127.0.0.1"
+_DEFAULT_HTTP_PORT = 8000
+
 
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     """
@@ -148,14 +152,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
+        default=_DEFAULT_HTTP_HOST,
         help="streamable-http 监听地址（默认 127.0.0.1，仅 streamable-http 生效；"
         "绑定非回环地址将触发安全告警）",
     )
     parser.add_argument(
         "--port",
         type=_port_type,
-        default=8000,
+        default=_DEFAULT_HTTP_PORT,
         help="streamable-http 监听端口（默认 8000，仅 streamable-http 生效，范围 1-65535）",
     )
     parser.add_argument(

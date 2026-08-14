@@ -14,13 +14,15 @@ from urllib.parse import urlparse
 from PIL import Image
 
 from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
-from ..core.formats import MIME_BY_EXTENSION
+from ..core.formats import MIME_BY_EXTENSION, _format_file_size_mb
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
-from ..io.io_path import get_workspace_roots, suggest_similar_paths, validate_image_path
+from ..io.io_path import get_workspace_roots, suggest_similar_paths
 from .image_validation import (
+    MAX_IMAGE_FILE_SIZE,
     decode_and_validate_dimensions,
     validate_image_input,
+    validate_image_path,
 )
 from .image_ref import classify_image_reference
 
@@ -96,10 +98,18 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             )
         raise SeedreamAPIError(f"{error_text}{suggestion_text}")
 
-    # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 os_utils 统一实现；
+    # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 io_file 统一实现；
     # 符号链接或打开失败抛 OSError，由 prepare_image_input 外层转 SeedreamAPIError。
     with open_no_follow_read(validated_path) as f:
-        image_bytes = f.read()
+        # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存
+        image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
+    if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
+        raise SeedreamValidationError(
+            f"文件过大: {_format_file_size_mb(len(image_bytes))}，"
+            f"最大支持{_format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+            field="image",
+            value=str(validated_path),
+        )
     # 维度校验复用已读字节，维度相关异常与 image_validation 路径对齐为 SeedreamValidationError
     try:
         decode_and_validate_dimensions(image_bytes, str(validated_path))

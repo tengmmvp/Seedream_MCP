@@ -12,7 +12,7 @@ import pytest
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.model.model_capabilities import (
     get_max_reference_images,
-    is_seedream_50_pro_model,
+    get_model_capabilities,
 )
 from seedream_mcp.utils.core.validators import (
     validate_generation_tools,
@@ -31,15 +31,15 @@ MODEL_40 = "doubao-seedream-4-0-250828"
 
 
 def test_pro_model_detected_as_pro() -> None:
-    assert is_seedream_50_pro_model(PRO) is True
+    assert get_model_capabilities(PRO).max_reference_images == 10
 
 
 def test_lite_model_not_detected_as_pro() -> None:
-    assert is_seedream_50_pro_model(LITE) is False
+    assert get_model_capabilities(LITE).max_reference_images == 14
 
 
 def test_pro_alias_detected_as_pro() -> None:
-    assert is_seedream_50_pro_model("doubao-seedream-5.0-pro") is True
+    assert get_model_capabilities("doubao-seedream-5.0-pro").max_reference_images == 10
 
 
 # ==================== tools 联网搜索仅 5.0 Lite 支持 ====================

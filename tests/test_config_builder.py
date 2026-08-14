@@ -405,3 +405,48 @@ def test_seedream_config_rejects_invalid_validate_branches(kwargs: dict, match: 
     full_kwargs = {"api_key": "k", **kwargs} if "api_key" not in kwargs else kwargs
     with pytest.raises(SeedreamConfigError, match=match):
         SeedreamConfig(**full_kwargs)
+
+
+# ==================== http:// base_url 默认拒绝与显式豁免 ====================
+
+
+def test_seedream_config_rejects_http_base_url_by_default() -> None:
+    """http:// 的 base_url 未豁免时默认拒绝构建，防止 API 密钥明文传输。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_ALLOW_HTTP_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="http://internal.example.com/api/v3")
+
+
+def test_seedream_config_allows_http_base_url_with_explicit_exemption() -> None:
+    """显式设置 allow_http_base_url 后接受 http:// base_url。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(
+        api_key="k",
+        base_url="http://internal.example.com/api/v3",
+        allow_http_base_url=True,
+    )
+
+    assert config.base_url == "http://internal.example.com/api/v3"
+    assert config.allow_http_base_url is True
+
+
+def test_build_config_loads_allow_http_base_url_from_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_ALLOW_HTTP_BASE_URL 经 .env 豁免 http:// 的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    monkeypatch.delenv("SEEDREAM_ALLOW_HTTP_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "ARK_BASE_URL=http://internal.example.com/api/v3\n"
+        "SEEDREAM_ALLOW_HTTP_BASE_URL=true\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.allow_http_base_url is True
+    assert config.base_url == "http://internal.example.com/api/v3"

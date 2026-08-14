@@ -3,7 +3,7 @@
 提供 open_no_follow_read、open_temp_fd 与 atomic_replace_from_fd 三个能力。
 open_no_follow_read 读取时拒绝最终路径分量为符号链接；open_temp_fd 以不可预测随机名
 创建临时文件供调用方写入后原子替换；atomic_replace_from_fd 封装"随机临时文件→写入→
-os.replace 原子替换→失败清理"协议供 file_manager 与 download_manager 复用。支持
+os.replace 原子替换→失败清理"协议供 io_storage 与 io_download 复用。支持
 O_NOFOLLOW 的平台由内核在 open 时原子拒绝符号链接。Windows 等平台不支持 O_NOFOLLOW
 时，退化为打开前 lstat 与打开后 fstat 比对 st_ino/st_dev 同一性：lstat 先取最终分量
 指纹，open 后用 fstat 复核打开的 fd 仍是同一对象，若校验与打开之间最终分量被替换为
@@ -32,7 +32,7 @@ def _cleanup_temp_file(temp_path: Path) -> None:
     """清理临时文件，忽略不存在，清理失败记录警告以暴露残留临时文件。
 
     临时文件清理失败多为 Windows 杀毒/索引器短暂持锁等瞬时原因，记录 warning 便于运维
-    发现残留而非静默吞掉。logger 延迟导入规避 os_utils 作为底层被 logging→config→
+    发现残留而非静默吞掉。logger 延迟导入规避 io_file 作为底层被 logging→config→
     image_validation 回引的模块加载循环。
     """
     try:
@@ -113,7 +113,7 @@ async def atomic_replace_from_fd(
 ) -> Path:
     """经随机名临时文件原子落盘，返回实际创建的随机临时路径。
 
-    统一 file_manager.save_bytes 与 download_manager._download_response_to_temp 的落盘
+    统一 io_storage.save_bytes 与 io_download._download_response_to_temp 的落盘
     协议：``open_temp_fd`` 在 ``final_path`` 同目录创建不可预测随机名临时文件规避符号
     链接 TOCTOU；``writer`` 接收 fd 异步写入，须以 ``closefd=False`` 包装 fd 使本函数
     独占 fd 关闭权，避免双重关闭与 fd 复用误关他者；写入完成后经线程池执行 ``os.replace``
@@ -160,7 +160,7 @@ def _is_reparse_point(path: Path) -> bool:
     listdir。本函数用 reparse point 属性位检测，供目录遍历下降前剔除。仅 Windows 存在
     junction，其他平台直接返回 False。
 
-    file_manager 清理遍历与 path_utils 浏览扫描共用此判定，消除两处分别实现同一 reparse
+    file_manager 清理遍历与 io_path 浏览扫描共用此判定，消除两处分别实现同一 reparse
     point 检测的漂移风险。
     """
     if sys.platform != "win32":

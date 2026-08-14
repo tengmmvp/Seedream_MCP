@@ -157,7 +157,7 @@ Restart the corresponding client after configuration.
 --no-watermark                                     # Disable watermark
 
 # Connection & transport
---base-url TEXT                                    # API base URL (default per config or built-in default)
+--base-url TEXT                                    # API base URL (default per config or built-in default; must be https, http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
 --transport [stdio|streamable-http]                # MCP transport (default: stdio)
 --host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address triggers a security warning)
 --port INTEGER                                     # streamable-http listen port (default: 8000)
@@ -165,7 +165,7 @@ Restart the corresponding client after configuration.
 
 # Security
 --auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; alternatively use SEEDREAM_HTTP_AUTH_TOKEN)
---ssl-certfile TEXT                                # TLS certificate file (required for non-loopback binding to prevent plaintext token transmission; use --insecure-allow-non-tls when a trusted reverse proxy terminates TLS)
+--ssl-certfile TEXT                                # TLS certificate file (required for non-loopback binding to prevent plaintext token transmission, minimum protocol version TLS 1.2 once enabled; use --insecure-allow-non-tls when a trusted reverse proxy terminates TLS)
 --ssl-keyfile TEXT                                 # TLS private key file, used together with --ssl-certfile
 --insecure-allow-non-tls                           # Explicitly allow non-loopback plaintext operation (only for trusted reverse proxy TLS-terminating scenarios)
 
@@ -418,6 +418,9 @@ Configuration priority: MCP client explicit config (CLI args) > runtime system e
 # Required
 ARK_API_KEY=your_api_key_here
 
+# API endpoint security
+SEEDREAM_ALLOW_HTTP_BASE_URL=false            # Exempt an http:// ARK_BASE_URL (plaintext rejected by default; set true only for trusted self-hosted intranet endpoints)
+
 # Model config
 SEEDREAM_MODEL_ID=doubao-seedream-5.0
 
@@ -428,11 +431,15 @@ SEEDREAM_DEFAULT_WATERMARK=false
 # Timeouts
 SEEDREAM_TIMEOUT=60                         # Connection/write/pool-acquire timeout (seconds)
 SEEDREAM_API_TIMEOUT=600                    # API call read & total timeout (seconds)
+SEEDREAM_MAX_RETRIES=3                      # Max retries for API calls (retries 429/5xx, timeouts, network errors; no retry on 4xx)
 
 # Auto-save
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds)
+SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # Max retries for failed downloads (0 disables retry)
+SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB)
+SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # Max concurrent downloads
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save directory (default 10GB; oldest evicted first when exceeded)
@@ -440,7 +447,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save dir
 # Workspace & transport
 SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (recommended for non-loopback binding)
-SEEDREAM_HTTP_MAX_BODY_SIZE=104857600       # streamable-http request body size limit (bytes, ≥1MB, default 100MB)
+SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
 
 # Client performance
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

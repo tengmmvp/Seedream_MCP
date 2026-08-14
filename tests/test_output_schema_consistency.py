@@ -17,6 +17,7 @@ from seedream_mcp.tools.core.outputs import (
     GenerationStructuredOutput,
 )
 from seedream_mcp.tools.core.results import _build_generation_structured_result
+from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.browse_images import _build_browse_structured_result
 
 
@@ -157,7 +158,7 @@ def test_real_generation_builder_success_output_instantiates_schema() -> None:
     最后实例化 pydantic 模型，端到端验证 builder 输出与声明的 outputSchema 一致。
     """
     config = SeedreamConfig(api_key="k")
-    context = build_generation_context({"prompt": "a cat", "size": "2K"}, config)
+    context = build_generation_context(TextToImageInput(prompt="a cat", size="2K"), config)
     result = {
         "success": True,
         "status": "completed",
@@ -181,7 +182,7 @@ def test_real_generation_builder_success_output_instantiates_schema() -> None:
 def test_real_generation_builder_failure_output_instantiates_schema() -> None:
     """失败路径的 builder 输出同样须能实例化 schema，覆盖 error 归一化分支。"""
     config = SeedreamConfig(api_key="k")
-    context = build_generation_context({"prompt": "a cat", "size": "2K"}, config)
+    context = build_generation_context(TextToImageInput(prompt="a cat", size="2K"), config)
     result = {"success": False, "status": "failed", "error": "生成超时"}
     structured = _build_generation_structured_result(
         tool_name="seedream_text_to_image",

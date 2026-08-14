@@ -134,33 +134,33 @@ async def test_download_response_rejects_invalid_content_length(tmp_path: Path) 
     response = _FakeResponse(
         headers={"content-type": "image/png", "content-length": "not-a-number"}
     )
-    temp_path = manager._temp_path_for(tmp_path / "out.png")
+    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="非法 content-length"):
         await manager._download_response_to_temp(
             response,  # type: ignore[arg-type]
             tmp_path / "out.png",
-            temp_path,
+            temp_suffix,
             "image/png",
             0,
             time.monotonic(),
         )
 
     # 校验失败发生在 mkdir 与文件创建之前，临时文件不应存在
-    assert not temp_path.exists()
+    assert not list(tmp_path.glob("*.part"))
 
 
 async def test_download_response_rejects_oversized_content_length(tmp_path: Path) -> None:
     """content-length 超 max_file_size → DownloadError 早拒。"""
     manager = DownloadManager(max_file_size=100)
     response = _FakeResponse(headers={"content-type": "image/png", "content-length": "101"})
-    temp_path = manager._temp_path_for(tmp_path / "out.png")
+    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="文件过大"):
         await manager._download_response_to_temp(
             response,  # type: ignore[arg-type]
             tmp_path / "out.png",
-            temp_path,
+            temp_suffix,
             "image/png",
             0,
             time.monotonic(),
@@ -174,19 +174,19 @@ async def test_download_response_rejects_negative_content_length(tmp_path: Path)
     """
     manager = DownloadManager()
     response = _FakeResponse(headers={"content-type": "image/png", "content-length": "-1"})
-    temp_path = manager._temp_path_for(tmp_path / "out.png")
+    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="非法 content-length"):
         await manager._download_response_to_temp(
             response,  # type: ignore[arg-type]
             tmp_path / "out.png",
-            temp_path,
+            temp_suffix,
             "image/png",
             0,
             time.monotonic(),
         )
 
-    assert not temp_path.exists()
+    assert not list(tmp_path.glob("*.part"))
 
 
 async def test_download_response_rejects_streaming_cumulative_oversize(
@@ -198,13 +198,13 @@ async def test_download_response_rejects_streaming_cumulative_oversize(
     response = _FakeResponse(
         headers={"content-type": "image/png"}, content_chunks=[b"x" * 60, b"x" * 60]
     )
-    temp_path = manager._temp_path_for(tmp_path / "out.png")
+    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="文件过大"):
         await manager._download_response_to_temp(
             response,  # type: ignore[arg-type]
             tmp_path / "out.png",
-            temp_path,
+            temp_suffix,
             "image/png",
             0,
             time.monotonic(),
@@ -221,13 +221,13 @@ async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path)
         headers={"content-type": "image/png", "content-length": "13"},
         content_chunks=[b"NOT_AN_IMAGE!"],
     )
-    temp_path = manager._temp_path_for(tmp_path / "out.png")
+    temp_suffix = ".png.part"
 
     with pytest.raises(DownloadError, match="字节签名"):
         await manager._download_response_to_temp(
             response,  # type: ignore[arg-type]
             tmp_path / "out.png",
-            temp_path,
+            temp_suffix,
             "image/png",
             0,
             time.monotonic(),
@@ -251,7 +251,7 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
         headers={"content-type": "image/png", "content-length": str(len(_PNG_BYTES))},
         content_chunks=[_PNG_BYTES],
     )
-    temp_path = manager._temp_path_for(tmp_path / "out.png")
+    temp_suffix = ".png.part"
 
     closed_fds: List[int] = []
     real_os_close = os.close
@@ -277,7 +277,7 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
         await manager._download_response_to_temp(
             response,  # type: ignore[arg-type]
             tmp_path / "out.png",
-            temp_path,
+            temp_suffix,
             "image/png",
             0,
             time.monotonic(),

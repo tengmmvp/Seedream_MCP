@@ -203,13 +203,37 @@ def test_redact_sensitive_message_preserves_plain_bearer() -> None:
     assert _redact_sensitive_message("Invalid Bearer sk-secret-token-123") == ("Invalid Bearer ***")
 
 
+def test_redact_sensitive_message_strips_token_keyvalue() -> None:
+    """token=xxx 形态的裸值被剥离，保留键名与分隔符。"""
+    assert _redact_sensitive_message("failed at token=abc123") == "failed at token=***"
+
+
+def test_redact_sensitive_message_strips_secret_keyvalue() -> None:
+    """secret=xxx 形态的裸值被剥离，保留键名与分隔符。"""
+    assert _redact_sensitive_message("secret=s3cr3t-value") == "secret=***"
+
+
+def test_redact_sensitive_message_strips_compound_token_and_secret_variants() -> None:
+    """access_token / client_secret / auth-token 等复合键名变体同样剥离。"""
+    assert _redact_sensitive_message("access_token=eyJhbGciOi") == "access_token=***"
+    assert _redact_sensitive_message("client_secret: hunter2") == "client_secret: ***"
+    assert _redact_sensitive_message("auth-token: t0k") == "auth-token: ***"
+
+
+def test_redact_sensitive_message_preserves_plain_words_without_separator() -> None:
+    """无 : 或 = 分隔符的普通文本 token/secret 词形不受影响，避免误伤非敏感内容。"""
+    assert _redact_sensitive_message("token count exceeded") == "token count exceeded"
+    assert _redact_sensitive_message("the secret sauce") == "the secret sauce"
+    assert _redact_sensitive_message("max_tokens: 4096 exceeded") == "max_tokens: 4096 exceeded"
+
+
 # ==================== CRLF 日志注入剥离 ====================
 
 
 def test_redact_sensitive_message_strips_crlf_injection() -> None:
     """CR/LF 控制字符被替换为空格，防止上游错误体在日志中伪造行注入误导记录。
 
-    与 download_manager.sanitize_url 的控制字符剥离对齐。
+    与 io_download.sanitize_url 的控制字符剥离对齐。
     """
     injected = "正常错误\r\nERROR fake-line\napikey=leaked"
     redacted = _redact_sensitive_message(injected)

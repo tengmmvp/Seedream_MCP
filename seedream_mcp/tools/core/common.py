@@ -30,6 +30,7 @@ from ._helpers import (
 from ._helpers import _resolve_base_dir as _resolve_base_dir  # noqa: F401
 from .auto_save import auto_save_from_base64, auto_save_from_urls
 from .context import GenerationExecutionContext, build_generation_context
+from .outputs import build_error_structured
 from .parallel import (
     _run_generation_requests,
     _try_get_shared_client,
@@ -42,6 +43,7 @@ from .results import (  # noqa: F401
     format_generation_response,
     update_result_with_auto_save,
 )
+from .schemas import GenerationInputParams
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
@@ -65,7 +67,7 @@ __all__ = [
 
 async def execute_generation_handler(
     *,
-    arguments: dict[str, Any],
+    params: GenerationInputParams,
     config: SeedreamConfig,
     module_logger: Any,
     tool_name: str,
@@ -87,7 +89,7 @@ async def execute_generation_handler(
     不向调用方抛出。
 
     Args:
-        arguments: 工具原始参数字典，由各 impl handler 透传。
+        params: 经 pydantic 校验的工具输入模型，由各 impl handler 透传。
         config: 当前生效的 SeedreamConfig。
         module_logger: 各 impl 模块的 loguru logger，用于离线日志。
         tool_name: 工具标识，写入 structuredContent.tool 与日志。
@@ -109,7 +111,7 @@ async def execute_generation_handler(
             ctx, progress=PROGRESS_RECEIVED, message=f"{failure_prefix}请求已接收"
         )
         await _yield_for_cancellation()
-        context = build_generation_context(arguments, config)
+        context = build_generation_context(params, config)
         await _safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
         await _safe_ctx_log(
             ctx,
@@ -231,14 +233,10 @@ async def execute_generation_handler(
         error_message = f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}"
         return CallToolResult(
             content=[TextContent(type="text", text=error_message)],
-            structuredContent={
-                "tool": tool_name,
-                "success": False,
-                "status": "failed",
-                "error": {
-                    "type": _classify_generation_error_type(exc),
-                    "message": format_error_for_user(exc),
-                },
-            },
+            structuredContent=build_error_structured(
+                tool_name,
+                _classify_generation_error_type(exc),
+                format_error_for_user(exc),
+            ),
             isError=True,
         )

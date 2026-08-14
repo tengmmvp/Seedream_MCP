@@ -63,6 +63,26 @@ def test_build_arg_parser_supports_tls_options() -> None:
     assert args.insecure_allow_non_tls is False
 
 
+def test_tls12_ssl_context_factory_enforces_minimum_version() -> None:
+    """TLS 上下文工厂复用 uvicorn 默认构造并强制最低 TLS 1.2，拒绝旧版本协商。"""
+    import ssl
+
+    from seedream_mcp.transport import _tls12_ssl_context_factory
+
+    base = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    captured: dict[str, object] = {}
+
+    def default_factory() -> ssl.SSLContext:
+        captured["called"] = True
+        return base
+
+    result = _tls12_ssl_context_factory(None, default_factory)
+
+    assert captured == {"called": True}
+    assert result is base
+    assert result.minimum_version == ssl.TLSVersion.TLSv1_2
+
+
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
 def test_build_run_options_returns_transport(transport: str) -> None:
     args = Namespace(transport=transport)

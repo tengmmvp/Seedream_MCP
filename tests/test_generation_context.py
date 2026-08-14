@@ -3,6 +3,7 @@
 from dataclasses import fields
 
 import pytest
+from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.common import (
@@ -12,6 +13,7 @@ from seedream_mcp.tools.core.common import (
     format_generation_response,
     update_result_with_auto_save,
 )
+from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.utils.io.io_save import AutoSaveResult
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
@@ -26,7 +28,7 @@ def _build_config() -> SeedreamConfig:
 
 def test_build_generation_context_uses_default_size_when_omitted() -> None:
     config = _build_config()
-    context = build_generation_context({"prompt": "test"}, config)
+    context = build_generation_context(TextToImageInput(prompt="test"), config)
 
     assert context.size == "2K"
     assert context.request_count == 1
@@ -55,12 +57,12 @@ def test_build_generation_context_rejects_explicit_empty_size() -> None:
     config = _build_config()
 
     with pytest.raises(SeedreamValidationError, match="图像尺寸不能为空"):
-        build_generation_context({"prompt": "test", "size": ""}, config)
+        build_generation_context(TextToImageInput(prompt="test", size=""), config)
 
 
 def test_build_generation_context_sets_default_parallelism_by_request_count() -> None:
     config = _build_config()
-    context = build_generation_context({"prompt": "test", "request_count": 3}, config)
+    context = build_generation_context(TextToImageInput(prompt="test", request_count=3), config)
 
     assert context.request_count == 3
     assert context.parallelism == 3
@@ -69,18 +71,17 @@ def test_build_generation_context_sets_default_parallelism_by_request_count() ->
 def test_build_generation_context_uses_explicit_parallelism() -> None:
     config = _build_config()
     context = build_generation_context(
-        {"prompt": "test", "request_count": 4, "parallelism": 2},
+        TextToImageInput(prompt="test", request_count=4, parallelism=2),
         config,
     )
     assert context.request_count == 4
     assert context.parallelism == 2
 
 
-def test_build_generation_context_rejects_zero_parallelism() -> None:
-    config = _build_config()
-
-    with pytest.raises(SeedreamValidationError, match="parallelism 必须在 1-4 之间"):
-        build_generation_context({"prompt": "test", "request_count": 2, "parallelism": 0}, config)
+def test_input_schema_rejects_zero_parallelism() -> None:
+    """parallelism 越界属 schema Field 约束，构造输入模型时即被拒绝。"""
+    with pytest.raises(ValidationError, match="parallelism"):
+        TextToImageInput(prompt="test", request_count=2, parallelism=0)
 
 
 def test_build_generation_context_accepts_seedream_50_output_format_and_tools() -> None:
@@ -91,11 +92,11 @@ def test_build_generation_context_accepts_seedream_50_output_format_and_tools() 
     )
 
     context = build_generation_context(
-        {
-            "prompt": "test",
-            "output_format": "png",
-            "tools": [{"type": "web_search"}],
-        },
+        TextToImageInput(
+            prompt="test",
+            output_format="png",
+            tools=[{"type": "web_search"}],
+        ),
         config,
     )
 
@@ -111,7 +112,7 @@ def test_build_generation_context_rejects_output_format_for_seedream_45() -> Non
     )
 
     with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 系列"):
-        build_generation_context({"prompt": "test", "output_format": "png"}, config)
+        build_generation_context(TextToImageInput(prompt="test", output_format="png"), config)
 
 
 def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
@@ -122,7 +123,7 @@ def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
     )
 
     with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
-        build_generation_context({"prompt": "test", "stream": True}, config)
+        build_generation_context(TextToImageInput(prompt="test", stream=True), config)
 
 
 def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -> None:
@@ -136,7 +137,7 @@ def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -
         SeedreamValidationError, match="仅支持 optimize_prompt_options.mode=standard"
     ):
         build_generation_context(
-            {"prompt": "test", "optimize_prompt_options": {"mode": "fast"}},
+            TextToImageInput(prompt="test", optimize_prompt_options={"mode": "fast"}),
             config,
         )
 
@@ -319,8 +320,10 @@ def test_build_generation_context_auto_save_none_equals_omitted() -> None:
     """auto_save=None 与不传该参行为一致，均回落到 config.auto_save_enabled。"""
     config = SeedreamConfig(api_key="test_key", auto_save_enabled=True)
 
-    ctx_explicit_none = build_generation_context({"prompt": "t", "auto_save": None}, config)
-    ctx_omitted = build_generation_context({"prompt": "t"}, config)
+    ctx_explicit_none = build_generation_context(
+        TextToImageInput(prompt="t", auto_save=None), config
+    )
+    ctx_omitted = build_generation_context(TextToImageInput(prompt="t"), config)
 
     assert ctx_explicit_none.enable_auto_save is True
     assert ctx_omitted.enable_auto_save is True
@@ -331,7 +334,7 @@ def test_build_generation_context_auto_save_none_passes_through_disabled_config(
     """config.auto_save_enabled=False 时，auto_save=None 穿透结果为 False。"""
     config = SeedreamConfig(api_key="test_key", auto_save_enabled=False)
 
-    ctx = build_generation_context({"prompt": "t", "auto_save": None}, config)
+    ctx = build_generation_context(TextToImageInput(prompt="t", auto_save=None), config)
 
     assert ctx.enable_auto_save is False
 
@@ -340,14 +343,16 @@ def test_build_generation_context_explicit_auto_save_overrides_config() -> None:
     """显式 auto_save 非 None 时覆盖 config.auto_save_enabled，确保穿透仅在 None 时发生。"""
     config = SeedreamConfig(api_key="test_key", auto_save_enabled=True)
 
-    ctx = build_generation_context({"prompt": "t", "auto_save": False}, config)
+    ctx = build_generation_context(TextToImageInput(prompt="t", auto_save=False), config)
 
     assert ctx.enable_auto_save is False
 
 
-def test_build_generation_context_rejects_non_bool_auto_save() -> None:
-    """auto_save 为非 bool 值（如字符串）须在上下文构建处被拒绝。"""
-    config = _build_config()
+def test_input_schema_rejects_non_bool_auto_save() -> None:
+    """auto_save 类型约束属 schema 字段声明，不可解析的值在构造输入模型时即被拒绝。
 
-    with pytest.raises(SeedreamValidationError, match="auto_save 必须是布尔值"):
-        build_generation_context({"prompt": "t", "auto_save": "yes"}, config)
+    可解析的布尔字符串如 yes/true 经 pydantic 宽松模式归一化为 bool，与 MCP 客户端
+    传 JSON 布尔的路径行为一致。
+    """
+    with pytest.raises(ValidationError):
+        TextToImageInput(prompt="t", auto_save="maybe")

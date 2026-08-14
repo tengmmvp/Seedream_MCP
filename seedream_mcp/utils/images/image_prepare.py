@@ -1,13 +1,14 @@
 """参考图预处理缓存子系统：LRU + single-flight 去重。
 
 从 SeedreamClient 剥离，集中管理图像输入预处理结果的缓存与并发去重。本地文件签名
-复用 path_utils 的越界判定与 image_validation 的文件资格常量，避免在客户端复刻边界
+复用 io_path 的越界判定与 image_validation 的文件资格常量，避免在客户端复刻边界
 规则导致签名与读取锁定不同文件而命中陈旧缓存。
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import stat as stat_module
 from collections import OrderedDict
@@ -24,6 +25,9 @@ logger = get_logger(__name__)
 
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
+
+# 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环
+_LARGE_IMAGE_THRESHOLD = 1024 * 1024
 
 # 工作区 roots 元组 → 已 resolve 的 base 列表，跨图复用避免每图重复 resolve 同一根目录。
 # 上限 _RESOLVED_BASES_CACHE_MAX_ENTRIES，超限淘汰最旧条目。dict 自 Python 3.7 起保持插入序。
@@ -60,7 +64,7 @@ class ImagePreparer:
         候选文件的选择与 utils.image_input._prepare_local_image 的实际读取路径对齐：
         须为常规文件、扩展名合法、大小在限内且位于工作区内，避免多 Root 工作区下选到
         无效同名条目导致签名与读取锁定不同文件而命中陈旧缓存。越界判定复用
-        path_utils.is_path_within_any_base，不在此复刻边界规则。
+        io_path.is_path_within_any_base，不在此复刻边界规则。
 
         已 resolve 的 base 列表按 workspace_roots 缓存并在跨图间复用，避免批量多图时每图
         重复 resolve 同一根目录，降低网络挂载工作区下的 resolve 开销。
@@ -97,7 +101,7 @@ class ImagePreparer:
                 except KeyError:
                     pass
 
-        # 候选选择与读取路径一致；越界守卫复用 path_utils.is_path_within_any_base，
+        # 候选选择与读取路径一致；越界守卫复用 io_path.is_path_within_any_base，
         # 前置避免对工作区外文件成为存在性 oracle
         if os.path.isabs(image):
             candidate = Path(image)
@@ -119,6 +123,11 @@ class ImagePreparer:
             return (0.0, 0)
         return (chosen.st_mtime, chosen.st_size)
 
+    @staticmethod
+    def _data_uri_digest(image: str) -> str:
+        """计算非本地图像输入的摘要键，供超大输入替代全串作缓存键。"""
+        return "sha256:" + hashlib.sha256(image.encode("utf-8")).hexdigest()[:16]
+
     async def prepare_image_input(
         self, image: str, _roots_key: tuple[str, ...] | None = None
     ) -> str:
@@ -135,11 +144,18 @@ class ImagePreparer:
             _roots_key = tuple(str(r) for r in get_workspace_roots())
         # URL/data-URI 无本地文件 I/O，直接用空签名短路；本地文件签名含同步 stat/resolve，
         # 移至工作线程避免网络挂载工作区下阻塞事件循环
-        if classify_image_reference(image) == "local":
+        ref_kind = classify_image_reference(image)
+        if ref_kind == "local":
             signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
+            key_image = image
+        elif len(image) > _LARGE_IMAGE_THRESHOLD:
+            # 超大 data URI 用摘要键，避免全串 O(n) 哈希与比较阻塞事件循环
+            signature = (0.0, 0)
+            key_image = await asyncio.to_thread(self._data_uri_digest, image)
         else:
             signature = (0.0, 0)
-        cache_key: PrepareCacheKey = (image, _roots_key, signature)
+            key_image = image
+        cache_key: PrepareCacheKey = (key_image, _roots_key, signature)
 
         cached = self._prepare_cache.get(cache_key)
         if cached is not None:
@@ -193,8 +209,6 @@ class ImagePreparer:
         ):
             _, evicted = self._prepare_cache.popitem(last=False)
             self._prepare_cache_bytes -= len(evicted)
-        if self._prepare_cache_bytes + size > self._prepare_cache_max_bytes:
-            return
         self._prepare_cache[cache_key] = prepared
         self._prepare_cache_bytes += size
         while len(self._prepare_cache) > self._prepare_cache_max:

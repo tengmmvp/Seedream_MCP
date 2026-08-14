@@ -103,7 +103,7 @@ def _cached_find_images_in_directory(
     前缀不少于 scan_limit 时返回浅拷贝，将深翻页从每页文件系统扫描降为首次扫描加 O(1) 命中。
     命中但前缀不足 scan_limit 时按更大 scan_limit 重扫并扩展缓存，大目录深翻页每页至多一次
     扫描，回看与同范围重复请求直接命中；扫描到目录末尾即标记 complete，后续任意 scan_limit
-    均不再扫描。scanner 可注入，默认使用 path_utils.find_images_in_directory，便于调用方在
+    均不再扫描。scanner 可注入，默认使用 io_path.find_images_in_directory，便于调用方在
     自身模块作用域内替换底层扫描。命中与未命中两个出口均返回独立 list 副本，调用方对返回值
     原地修改不会篡改缓存内列表。
 
@@ -113,7 +113,7 @@ def _cached_find_images_in_directory(
         max_depth: 递归最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         scan_limit: 扫描数量上限，用于未命中或前缀扩展时的早停与是否扫到目录末尾的判定。
-        scanner: 底层扫描函数，签名同 path_utils.find_images_in_directory；None 时使用默认实现。
+        scanner: 底层扫描函数，签名同 io_path.find_images_in_directory；None 时使用默认实现。
 
     Returns:
         排序后的图片路径列表，缓存命中时为已缓存的有序前缀或全量，未命中时至多 scan_limit 条。

@@ -14,11 +14,11 @@ import seedream_mcp.server as server
 from seedream_mcp.config import build_config_from_sources
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 
-_LIMIT = 100 * 1024 * 1024
+_LIMIT = 64 * 1024 * 1024
 
 
 async def test_request_body_limit_rejects_oversized_content_length() -> None:
-    """Content-Length 超 100MB 上限 → 413 + body 含 request_too_large。"""
+    """Content-Length 超上限 → 413 + body 含 request_too_large。"""
     sent: list[dict] = []
 
     async def send(message: dict) -> None:
@@ -200,12 +200,12 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
 def test_http_max_body_size_defaults_when_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未设置环境变量时回退默认 100MB。"""
+    """未设置环境变量时回退默认 64MB。"""
     env_file = tmp_path / "config.env"
     env_file.write_text("ARK_API_KEY=test_key\n", encoding="utf-8")
     monkeypatch.delenv("SEEDREAM_HTTP_MAX_BODY_SIZE", raising=False)
     config = build_config_from_sources(env_file=str(env_file))
-    assert config.http_max_body_size == 100 * 1024 * 1024
+    assert config.http_max_body_size == 64 * 1024 * 1024
 
 
 def test_http_max_body_size_uses_env_file_override(

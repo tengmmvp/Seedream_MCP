@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
-from typing import Mapping, Any
+from typing import Mapping, Any, TypeVar, cast
 
 
 class SeedreamMCPError(Exception):
@@ -97,7 +97,11 @@ class SeedreamValidationError(SeedreamMCPError):
         result.update(
             {
                 "field": self.field,
-                "value": _truncate_value_for_output(_sanitize_output_string(self.value)),
+                "value": _truncate_value_for_output(
+                    _filter_sensitive_data(self.value)
+                    if isinstance(self.value, (dict, list))
+                    else _sanitize_output_string(self.value)
+                ),
             }
         )
         return result
@@ -410,15 +414,18 @@ _SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey")
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出
 _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 
-# 敏感键值裸值模式：authorization/apikey 键名后跟分隔符（: 或 =）与值时，剥离值部分，
-# 覆盖 api-key=xxx、apikey: xxx、Authorization: Basic xxx 等上游错误体回显形态。可选的
-# 第二个空白分隔词用于吸收 Authorization 的 scheme（如 Basic），避免仅剥离 scheme 而泄露凭据。
+# 敏感键值裸值模式：authorization/apikey/token/secret 类键名后跟分隔符（: 或 =）与值时，
+# 剥离值部分，覆盖 api-key=xxx、apikey: xxx、Authorization: Basic xxx、token=xxx、
+# client_secret=yyy 等上游错误体回显形态。可选的第二个空白分隔词用于吸收
+# Authorization 的 scheme（如 Basic），避免仅剥离 scheme 而泄露凭据。token/secret 变体
+# 同样要求分隔符存在，普通文本中的词形不受影响。
 _SENSITIVE_KEYVALUE_PATTERN = re.compile(
-    r"(?i)(api[-_]?key|authorization)([ \t]*[:=][ \t]*)\S+(?:[ \t]+\S+)?"
+    r"(?i)(api[-_]?key|authorization|(?:access|auth|refresh|session|api)[-_]?token"
+    r"|(?:client|api|signing|app)[-_]?secret|token|secret)([ \t]*[:=][ \t]*)\S+(?:[ \t]+\S+)?"
 )
 
 # CR/LF 控制字符模式：上游错误体可能携带换行，剥离以防止日志注入伪造行，与
-# download_manager.sanitize_url 的控制字符剥离对齐。替换为空格保留词边界可读性。
+# io_download.sanitize_url 的控制字符剥离对齐。替换为空格保留词边界可读性。
 _CONTROL_CHARS_PATTERN = re.compile(r"[\r\n]")
 
 
@@ -429,7 +436,10 @@ def _redact_bearer_tokens(value: Any) -> Any:
     return value
 
 
-def _sanitize_output_string(value: Any) -> Any:
+_SanitizedValue = TypeVar("_SanitizedValue")
+
+
+def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     """对字符串值剥离敏感键值裸值、Bearer 令牌与 CRLF 控制字符。
 
     message 与 details/value/response_data 等结构化字段共用此净化，使各字段对敏感
@@ -439,8 +449,8 @@ def _sanitize_output_string(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", value)
-    redacted = _redact_bearer_tokens(redacted)
-    return _CONTROL_CHARS_PATTERN.sub(" ", redacted)
+    redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
+    return cast("_SanitizedValue", _CONTROL_CHARS_PATTERN.sub(" ", redacted))
 
 
 def _redact_sensitive_message(value: str) -> str:
@@ -449,7 +459,7 @@ def _redact_sensitive_message(value: str) -> str:
     委托 _sanitize_output_string，与 details/value/response_data 等结构化字段共用同一
     净化实现，避免两处脱敏逻辑漂移。
     """
-    return _sanitize_output_string(value)  # type: ignore[no-any-return]
+    return _sanitize_output_string(value)
 
 
 def _is_sensitive_key(key: Any) -> bool:

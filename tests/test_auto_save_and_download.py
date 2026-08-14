@@ -3,6 +3,7 @@
 覆盖自动保存成功/降级、清理节流的实例独立性、下载内容类型校验与对端 IP fail-closed。
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,8 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
 
     await manager_a._maybe_cleanup()
     await manager_b._maybe_cleanup()  # 同 base_dir，被节流
+    # 后台清理异步执行，等待完成后再断言调用次数
+    await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
     assert cleanup_calls == [30]
 
     # 不同 base_dir 独立节流
@@ -114,6 +117,7 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     manager_c = AutoSaveManager(base_dir=other_dir, cleanup_days=30)
     monkeypatch.setattr(manager_c.file_manager, "run_cleanup_policies", fake_run_cleanup)
     await manager_c._maybe_cleanup()
+    await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
     assert cleanup_calls == [30, 30]
 
 
@@ -140,10 +144,12 @@ async def test_maybe_cleanup_retries_after_failure(
 
         # 首次清理失败：异常被吞，时间戳回滚使下次可重试
         await manager._maybe_cleanup()
+        await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
         assert calls == [30]
 
         # 紧接着的第二次因上次失败未占用节流窗口，可立即重试
         await manager._maybe_cleanup()
+        await asyncio.gather(*auto_save_module._cleanup_tasks, return_exceptions=True)
         assert calls == [30, 30]
     finally:
         await manager.close()

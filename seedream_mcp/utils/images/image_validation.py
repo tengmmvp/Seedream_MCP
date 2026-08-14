@@ -1,9 +1,9 @@
 """图像输入校验：URL、本地文件路径与 Data URI 的格式与维度校验。
 
-从 validation 模块拆分出涉及 I/O 的图像校验：本地文件经 O_NOFOLLOW 读取字节后交
+从 validators 拆分出涉及 I/O 的图像校验：本地文件经 O_NOFOLLOW 读取字节后交
 PIL 解码校验维度，Data URI 经 base64 解码后同样校验。纯参数校验（尺寸、水印、
-prompt 等）仍留在 validation 模块，本模块的维度常量经 validation 重导出供输出尺寸
-校验复用。涉及 path_utils 的调用采用函数内延迟 import，规避模块加载循环。
+prompt 等）与宽高比常量仍留在 validators，本模块从其导入共用。validate_image_path
+组合工作区边界判定与统一规则校验，供 image_input 等调用方使用。
 """
 
 from __future__ import annotations
@@ -22,8 +22,18 @@ from ..core.formats import (
     _format_file_size_mb,
     parse_data_uri,
 )
+from ..core.validators import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
+from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
+from ..io.io_path import (
+    _is_within_resolved,
+    get_workspace_root,
+    normalize_path,
+    resolve_env_workspace_root,
+)
 from .image_ref import classify_image_reference
+
+logger = get_logger(__name__)
 
 # HEIC/HEIF 解码器惰性注册，避免模块导入时的全局副作用，首次校验图片时按需注册。
 # check-then-set 非线程安全，并发首调用可能重复注册；register_heif_opener 与
@@ -64,21 +74,13 @@ def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None
 # 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024  # 30MB
 # 参考图即输入图像，其维度约束含最短边、宽高比上下限、总像素上限。
-# 宽高比上下限同时用于输出尺寸校验，输入与输出沿用相同规则。
+# 宽高比上下限由 validators 持有，输出尺寸校验与本模块共用同一规则。
 MIN_IMAGE_EDGE = 15
-MIN_IMAGE_RATIO = 1 / 16
-MAX_IMAGE_RATIO = 16
 MAX_IMAGE_PIXELS = 6000 * 6000
 
 
 def _get_validation_base_dir() -> Path:
-    """获取本地文件校验的基础目录。
-
-    委托 path_utils.resolve_env_workspace_root 保持单一来源；函数内延迟 import
-    避免 path_utils 与本模块的加载循环。
-    """
-    from ..io.io_path import resolve_env_workspace_root
-
+    """获取本地文件校验的基础目录，委托 io_path.resolve_env_workspace_root 保持单一来源。"""
     return resolve_env_workspace_root()
 
 
@@ -107,6 +109,9 @@ def _validate_url(url: str) -> str:
         scheme = (parsed.scheme or "").lower()
         if scheme not in {"http", "https"} or not parsed.netloc:
             raise SeedreamValidationError("无效的URL格式", field="image", value=url)
+        # 拒绝 userinfo，参考图 URL 不应携带凭据，且含凭据 URL 会被送往上游 API 致泄露
+        if parsed.username or parsed.password:
+            raise SeedreamValidationError("URL 不允许携带用户名密码", field="image", value=url)
         return url
     except ValueError as e:
         raise SeedreamValidationError(f"URL验证失败: {str(e)}", field="image", value=url) from e
@@ -118,14 +123,22 @@ def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
     供本地文件与 Data URI 两条校验路径复用，避免维度规则重复实现导致漂移。
     """
     if width < MIN_IMAGE_EDGE or height < MIN_IMAGE_EDGE:
-        raise SeedreamValidationError("图像宽高长度至少15px", field="image", value=value)
+        raise SeedreamValidationError(
+            f"图像宽高长度至少{MIN_IMAGE_EDGE}px", field="image", value=value
+        )
 
     ratio = width / height
     if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
-        raise SeedreamValidationError("图像宽高比需在[1/16, 16]范围内", field="image", value=value)
+        raise SeedreamValidationError(
+            f"图像宽高比需在[{MIN_IMAGE_RATIO}, {MAX_IMAGE_RATIO}]范围内",
+            field="image",
+            value=value,
+        )
 
     if width * height > MAX_IMAGE_PIXELS:
-        raise SeedreamValidationError("图像总像素不能超过 6000×6000", field="image", value=value)
+        raise SeedreamValidationError(
+            f"图像总像素不能超过 {MAX_IMAGE_PIXELS}", field="image", value=value
+        )
 
 
 def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
@@ -134,7 +147,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     执行存在性、文件类型、扩展名、文件大小检查；skip_dimensions 为 False 时还校验
     图像维度。路径的工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基础目录
     取自环境配置，与 MCP 运行时的 Roots 集合来源不同，故不在函数内做边界断言，以免
-    误拒 Roots 授权但环境根之外的合法路径。调用方 path_utils.validate_image_path 与
+    误拒 Roots 授权但环境根之外的合法路径。调用方 io_path.validate_image_path 与
     client 的本地文件签名校验已在前置环节用正确的 Roots 集合完成越界拦截。
 
     图像维度读取经 open_no_follow_read 打开最终分量。path 已由
@@ -192,7 +205,15 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
             # 与 image_input._prepare_local_image 保持一致的安全语义
             try:
                 with open_no_follow_read(path) as f:
-                    image_bytes = f.read()
+                    # 限制读取量并复核，防 stat 与 read 间文件被替换为超大文件撑爆内存
+                    image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
+                if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
+                    raise SeedreamValidationError(
+                        f"文件过大: {_format_file_size_mb(len(image_bytes))}，"
+                        f"最大支持{_format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+                        field="image",
+                        value=file_path,
+                    )
                 decode_and_validate_dimensions(image_bytes, file_path)
             except OSError as exc:
                 raise SeedreamValidationError(
@@ -301,7 +322,7 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     """验证图像输入的有效性，支持 HTTP/HTTPS URL、本地文件路径与 Data URI 三种格式。
 
     本函数对本地文件路径仅校验存在性、格式与维度，不强制工作区越界校验。调用方须先经
-    path_utils.validate_image_path 完成基于 MCP Roots 的越界判定后再调用本函数，避免直接
+    io_path.validate_image_path 完成基于 MCP Roots 的越界判定后再调用本函数，避免直接
     传入本地路径绕过工作区边界。
 
     Args:
@@ -328,3 +349,45 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     if kind == "url":
         return _validate_url(image)
     return _validate_file_path(image, skip_dimensions=skip_dimensions)
+
+
+def validate_image_path(
+    path: str, base_dir: str | None = None, skip_dimensions: bool = False
+) -> tuple[bool, str, Path | None]:
+    """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
+
+    HTTP(S) URL 视为有效但标准化路径恒为 None，调用方须同时检查有效位与路径是否
+    为 None，据以分流 URL 与本地文件处理，不可仅凭有效位判定为本地路径。
+
+    Args:
+        path: 图片文件路径；HTTP(S) URL 有效但路径返回 None。
+        base_dir: 工作区基础目录，用于越界校验；None 时回退首个工作区根，多根工作区仅校验首个根，完整多根校验须由调用方遍历各根分别调用。
+        skip_dimensions: 是否跳过图片像素维度校验。
+
+    Returns:
+        三元组 (是否有效, 错误信息, 标准化路径)；URL 有效但路径为 None。
+    """
+    try:
+        if classify_image_reference(path) == "url":
+            return True, "", None
+
+        if base_dir is None:
+            base_dir = str(get_workspace_root())
+        normalized_path = normalize_path(path, base_dir)
+        base_path = Path(base_dir).resolve()
+        # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析
+        if not _is_within_resolved(normalized_path, base_path):
+            return False, "路径超出允许的工作区目录范围", normalized_path
+
+        # 委托本模块 validate_image_input 执行格式与维度等统一规则校验。
+        try:
+            validated_path = validate_image_input(
+                str(normalized_path), skip_dimensions=skip_dimensions
+            )
+            return True, "", Path(validated_path)
+        except SeedreamValidationError as e:
+            return False, e.message, normalized_path
+
+    except Exception as e:
+        logger.error("路径验证失败 {}: {}", path, e)
+        return False, f"路径验证错误: {str(e)}", None

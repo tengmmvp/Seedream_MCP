@@ -251,7 +251,11 @@ class DownloadManager:
                 if self._session is None or self._session.closed:
                     connector = aiohttp.TCPConnector(resolver=_PublicIpPinningResolver(self))
                     self._session = aiohttp.ClientSession(
-                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                        timeout=aiohttp.ClientTimeout(
+                            total=None,
+                            sock_connect=self.timeout,
+                            sock_read=self.timeout,
+                        ),
                         trust_env=False,
                         cookie_jar=aiohttp.DummyCookieJar(),
                         connector=connector,
@@ -270,12 +274,6 @@ class DownloadManager:
             self._session = None
         if session is not None and not session.closed:
             await session.close()
-
-    @staticmethod
-    def _temp_path_for(save_path: Path) -> Path:
-        """返回 save_path 对应的临时文件路径，在原后缀后追加 ``.part``。"""
-        suffix = save_path.suffix or ".bin"
-        return save_path.with_suffix(f"{suffix}.part")
 
     def _validate_url_static(self, url: str) -> tuple[str, bool]:
         """执行不依赖网络的 URL 静态安全校验，属 SSRF 第一层防护。
@@ -491,14 +489,14 @@ class DownloadManager:
         self,
         response: "aiohttp.ClientResponse",
         save_path: Path,
-        temp_path: Path,
+        temp_suffix: str,
         content_type: str,
         attempt: int,
         start_time: float,
     ) -> dict[str, Any]:
         """将 200 响应体下载到临时文件，校验大小与字节签名后原子替换，返回结果字典。
 
-        落盘协议由 os_utils.atomic_replace_from_fd 统一提供，与 file_manager.save_bytes
+        落盘协议由 io_file.atomic_replace_from_fd 统一提供，与 io_storage.save_bytes
         复用同一骨架：随机名临时文件规避符号链接 TOCTOU，写入后 os.replace 原子替换，失败
         清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。content-length
         预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出 DownloadError，由
@@ -537,8 +535,8 @@ class DownloadManager:
             if not is_known_image_bytes(head_bytes):
                 raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
 
-        # suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成
-        await atomic_replace_from_fd(save_path, _writer, suffix=temp_path.suffix)
+        # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成
+        await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix)
 
         download_time = time.time() - start_time
         logger.info(
@@ -562,7 +560,7 @@ class DownloadManager:
         url: str,
         headers: dict[str, str],
         save_path: Path,
-        temp_path: Path,
+        temp_suffix: str,
         attempt: int,
         start_time: float,
     ) -> dict[str, Any]:
@@ -609,7 +607,7 @@ class DownloadManager:
                 return await self._download_response_to_temp(
                     response,
                     save_path,
-                    temp_path,
+                    temp_suffix,
                     content_type,
                     attempt,
                     start_time,
@@ -636,7 +634,8 @@ class DownloadManager:
 
         start_time = time.time()
         last_error: DownloadError | None = None
-        temp_path = self._temp_path_for(save_path)
+        # 临时文件的可读性后缀：原扩展名后追加 .part，实际路径由原子落盘骨架内 mkstemp 随机生成
+        temp_suffix = (save_path.suffix or ".bin") + ".part"
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -649,7 +648,7 @@ class DownloadManager:
 
                 session = await self._ensure_session()
                 return await self._attempt_download(
-                    session, url, headers, save_path, temp_path, attempt, start_time
+                    session, url, headers, save_path, temp_suffix, attempt, start_time
                 )
 
             except RetryableDownloadError as e:

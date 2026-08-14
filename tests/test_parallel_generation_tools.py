@@ -10,7 +10,12 @@ from pydantic import ValidationError
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import _add_usage_value
 from seedream_mcp.tools.core.results import aggregate_parallel_generation_results
-from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.tools.core.schemas import (
+    ImageToImageInput,
+    MultiImageFusionInput,
+    SequentialGenerationInput,
+    TextToImageInput,
+)
 from seedream_mcp.tools.impl.image_to_image import handle_image_to_image
 from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
 from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
@@ -25,26 +30,42 @@ def _build_config() -> SeedreamConfig:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("handler", "method_name", "arguments"),
+    ("handler", "method_name", "params"),
     [
-        (handle_text_to_image, "text_to_image", {"prompt": "test"}),
+        (
+            handle_text_to_image,
+            "text_to_image",
+            TextToImageInput(prompt="test", request_count=3, parallelism=2),
+        ),
         (
             handle_image_to_image,
             "image_to_image",
-            {"prompt": "test", "image": "https://example.com/ref.png"},
+            ImageToImageInput(
+                prompt="test",
+                image="https://example.com/ref.png",
+                request_count=3,
+                parallelism=2,
+            ),
         ),
         (
             handle_multi_image_fusion,
             "multi_image_fusion",
-            {
-                "prompt": "test",
-                "image": ["https://example.com/1.png", "https://example.com/2.png"],
-            },
+            MultiImageFusionInput(
+                prompt="test",
+                image=["https://example.com/1.png", "https://example.com/2.png"],
+                request_count=3,
+                parallelism=2,
+            ),
         ),
         (
             handle_sequential_generation,
             "sequential_generation",
-            {"prompt": "test", "image": "https://example.com/ref.png"},
+            SequentialGenerationInput(
+                prompt="test",
+                image="https://example.com/ref.png",
+                request_count=3,
+                parallelism=2,
+            ),
         ),
     ],
 )
@@ -52,7 +73,7 @@ async def test_generation_handlers_support_parallel_requests(
     monkeypatch: pytest.MonkeyPatch,
     handler,
     method_name: str,
-    arguments: dict,
+    params,
 ) -> None:
     call_count = 0
 
@@ -71,14 +92,7 @@ async def test_generation_handlers_support_parallel_requests(
     client_cls = getattr(client_module, "SeedreamClient")
     monkeypatch.setattr(client_cls, method_name, fake_method)
 
-    result = await handler(
-        {
-            **arguments,
-            "request_count": 3,
-            "parallelism": 2,
-        },
-        _build_config(),
-    )
+    result = await handler(params, _build_config())
 
     assert call_count == 3
     assert result.isError is False
@@ -120,7 +134,7 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
     # 关闭自动保存以避免对占位 URL 发起真实下载，聚焦并行失败聚合断言
     config = SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
     result = await handle_text_to_image(
-        {"prompt": "test", "request_count": 3, "parallelism": 2},
+        TextToImageInput(prompt="test", request_count=3, parallelism=2),
         config,
     )
 
@@ -169,7 +183,7 @@ async def test_generation_handler_returns_call_tool_error_result_when_request_fa
     client_cls = getattr(client_module, "SeedreamClient")
     monkeypatch.setattr(client_cls, "text_to_image", failing_method)
 
-    result = await handle_text_to_image({"prompt": "test"}, _build_config())
+    result = await handle_text_to_image(TextToImageInput(prompt="test"), _build_config())
 
     assert result.isError is True
     assert isinstance(result.structuredContent, dict)

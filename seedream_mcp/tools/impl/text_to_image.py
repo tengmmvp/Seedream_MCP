@@ -18,6 +18,7 @@ from ..core.common import (
     execute_generation_handler,
     GenerationExecutionContext,
 )
+from ..core.schemas import TextToImageInput
 from ._common import TEXT_TO_IMAGE, _default_start_log_values
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ logger = get_logger(__name__)
 
 
 async def handle_text_to_image(
-    arguments: dict[str, Any],
+    params: TextToImageInput,
     config: SeedreamConfig,
     ctx: Context[Any, Any, Any] | None = None,
 ) -> CallToolResult:
@@ -37,10 +38,10 @@ async def handle_text_to_image(
 
     流程由 ``execute_generation_handler`` 统一编排：参数经 schema 校验后构建执行上下文，
     调用客户端生成，可选自动保存，最终返回结构化工具结果。完整字段规则与默认值见
-    ``TextToImageInput``，本函数仅透传 arguments。
+    ``TextToImageInput``，本函数仅透传入参模型。
 
     Args:
-        arguments: 工具原始参数字典，结构见 ``TextToImageInput``。
+        params: 经 pydantic 校验的文生图入参模型。
         config: 当前生效的 SeedreamConfig。
         ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
 
@@ -65,7 +66,7 @@ async def handle_text_to_image(
         return result
 
     return await execute_generation_handler(
-        arguments=arguments,
+        params=params,
         config=config,
         module_logger=logger,
         **TEXT_TO_IMAGE.as_handler_kwargs(),

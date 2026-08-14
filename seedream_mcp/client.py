@@ -555,9 +555,10 @@ class SeedreamClient:
     ) -> ValidatedCommonParams:
         """集中校验生成类工具的公共参数并返回校验后的各值。
 
-        委托 utils.core.validators.validate_common_generation_params 单一入口完成公共参数校验，
-        与 context.build_generation_context 共享同一校验逻辑，消除两处分散调用的漂移风险。
-        各方法特有的图片数量与序列校验仍在各自方法内执行。
+        委托 utils.core.validators.validate_common_generation_params 单一入口完成公共参数
+        全量校验，作为公共库 API 的自校验层：工具链路经 schema 与 context 分层校验后仍会
+        到达此处，直接调用 client 的库使用方则仅依赖本校验。各方法特有的图片数量与序列
+        校验仍在各自方法内执行。
         """
         return validate_common_generation_params(
             prompt=prompt,
@@ -644,11 +645,8 @@ class SeedreamClient:
             包含 Authorization 和 Content-Type 的请求头字典
 
         Raises:
-            SeedreamAPIError: 配置对象为空或 API 密钥为空
+            SeedreamAPIError: API 密钥为空
         """
-        if not self.config:
-            raise SeedreamAPIError("配置对象为空")
-
         if not self.config.api_key:
             raise SeedreamAPIError("API 密钥为空，请检查环境变量 ARK_API_KEY")
 
@@ -812,7 +810,7 @@ class SeedreamClient:
             data_count = 1
 
         # 检测部分图片失败 → 标记 partial 状态；
-        # 与 sse_parser 保持一致，仅当 status 为 None 或 completed 时改写为 partial，
+        # 与 io_sse 保持一致，仅当 status 为 None 或 completed 时改写为 partial，
         # 避免顶层 status=completed 且 data 含 error 时漏标 partial
         status = payload.get("status")
         if (

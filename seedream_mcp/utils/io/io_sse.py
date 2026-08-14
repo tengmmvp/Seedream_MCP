@@ -55,21 +55,30 @@ def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, A
 
 
 def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dict[str, Any] | None:
-    """解析单个 SSE 事件段，返回事件对象。解析失败时记录日志并返回 None。"""
-    raw_segment = segment.strip()
+    """解析单个 SSE 事件段，返回事件对象。解析失败时记录日志并返回 None。
+
+    全程按 bytes 处理负载并直接交给 json.loads，省去整段事件的 str decode 分配；
+    大事件场景下事件体可达数十 MB，该分配是解析路径的主要瞬时内存峰值。
+    """
+    start = 0
+    end = len(segment)
+    while start < end and segment[start] in b" \t\r\n":
+        start += 1
+    while end > start and segment[end - 1] in b" \t\r\n":
+        end -= 1
+    raw_segment = segment[start:end] if start > 0 or end < len(segment) else segment
     if not raw_segment:
         return None
 
     try:
-        event_text = raw_segment.decode("utf-8")
         # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用
-        data_parts: list[str] = []
-        for line in event_text.split("\n"):
-            if line.startswith("data:"):
+        data_parts: list[bytes | bytearray] = []
+        for line in raw_segment.split(b"\n"):
+            if line.startswith(b"data:"):
                 data_parts.append(line[5:].strip())
-        payload = "\n".join(data_parts) if data_parts else None
+        payload = b"\n".join(data_parts) if data_parts else None
         # [DONE] 为流结束哨兵而非图片事件，直接丢弃
-        if not payload or payload == "[DONE]":
+        if not payload or payload == b"[DONE]":
             return None
         parsed_payload = json.loads(payload)
         if not isinstance(parsed_payload, dict):
@@ -159,6 +168,18 @@ async def parse_sse_response(
     status: str | None = None
     tools: list[dict[str, Any]] | None = None
 
+    def apply_completed(
+        completed: bool,
+        evt_usage: dict[str, Any] | None,
+        evt_tools: list[dict[str, Any]] | None,
+    ) -> None:
+        """记录完成事件的元信息，主循环与流末尾残留处理共用。"""
+        nonlocal usage, status, tools
+        if completed:
+            usage = evt_usage or {}
+            status = "completed"
+            tools = evt_tools
+
     # 使用 bytearray 累积流式数据：bytes 拼接为 O(n²) 拷贝，bytearray.extend 均摊 O(1)
     buffer = bytearray()
     # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)
@@ -204,11 +225,7 @@ async def parse_sse_response(
             event = await _parse_segment(segment, log)
             if event is None:
                 continue
-            completed, evt_usage, evt_tools = _classify_sse_event(event, model_id, items)
-            if completed:
-                usage = evt_usage or {}
-                status = "completed"
-                tools = evt_tools
+            apply_completed(*_classify_sse_event(event, model_id, items))
 
         # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少 buffer_max_size 字节
         if offset > 0 and offset >= buffer_max_size:
@@ -234,11 +251,7 @@ async def parse_sse_response(
 
     trailing_event = await _parse_segment(buffer[offset:], log)
     if trailing_event is not None:
-        completed, evt_usage, evt_tools = _classify_sse_event(trailing_event, model_id, items)
-        if completed:
-            usage = evt_usage or {}
-            status = "completed"
-            tools = evt_tools
+        apply_completed(*_classify_sse_event(trailing_event, model_id, items))
 
     # 与非流式 _build_api_result 保持一致：当 data 项含 error 即存在部分失败时
     # 标记 status=partial，避免流式/非流式在同等部分失败场景下 status 语义不一致，

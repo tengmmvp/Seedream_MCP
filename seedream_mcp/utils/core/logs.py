@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import inspect
 import logging
+import re
 import sys
 from pathlib import Path
 from types import FrameType
@@ -50,6 +51,22 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
 
 
+# 日志消息中的控制字符，剥离以防文件名、上游错误体等经由日志注入伪造日志行
+_LOG_MESSAGE_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _strip_message_control_chars(record: Any) -> None:
+    """patcher：剥离日志消息的控制字符，防日志注入。
+
+    路径名、上游错误体等可能含 CR/LF 等控制字符，原样记录会在日志文件中伪造额外行，
+    干扰审计取证。作为全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点，无需
+    逐处 sanitize 路径或错误文本。traceback 堆栈经 exception 字段独立呈现，不受影响。
+    """
+    message = record["message"]
+    if _LOG_MESSAGE_CONTROL_CHARS.search(message):
+        record["message"] = _LOG_MESSAGE_CONTROL_CHARS.sub(" ", message)
+
+
 def setup_logging(
     log_level: str = "INFO",
     log_file: str | None = None,
@@ -73,6 +90,8 @@ def setup_logging(
     """
     # 移除默认的 loguru 处理器
     logger.remove()
+    # 全局剥离日志消息控制字符，防路径名与上游错误体经日志注入伪造行
+    logger.configure(patcher=_strip_message_control_chars)
 
     level = log_level.upper()
 
@@ -88,6 +107,7 @@ def setup_logging(
             colorize=True,
             backtrace=True,
             diagnose=False,
+            enqueue=True,
         )
 
     # 文件输出配置

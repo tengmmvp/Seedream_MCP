@@ -1,8 +1,9 @@
 """生成类工具的执行上下文定义与构建。
 
-承担 schema 之后的运行时归一化职责：将工具入参中的共享字段集中做尺寸、水印、响应格式、
-并行度等校验，产出不可变的 ``GenerationExecutionContext`` 供流水线各阶段读取，避免在各
-handler 内重复提取与校验。
+承担 schema 之后的运行时归一化职责。值域与组合约束已由 schemas.py 的输入模型保证，
+本模块仅执行 schema 表达不了的两类工作：与 config 默认值的合成，以及依赖运行时
+config.model_id 的模型能力校验，产出不可变的 ``GenerationExecutionContext`` 供流水线
+各阶段读取，避免各 handler 内重复提取与校验。
 """
 
 from __future__ import annotations
@@ -11,12 +12,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import SeedreamConfig
-from ...utils.core.errors import SeedreamValidationError
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
-    validate_common_generation_params,
-    validate_parallel_generation_options,
+    validate_generation_tools,
+    validate_optimize_prompt_options,
+    validate_output_format,
+    validate_size_for_model,
+    validate_stream,
 )
+from .schemas import GenerationInputParams
 
 
 @dataclass(frozen=True)
@@ -42,77 +46,64 @@ class GenerationExecutionContext:
 
 
 def build_generation_context(
-    arguments: dict[str, Any], config: SeedreamConfig
+    params: GenerationInputParams, config: SeedreamConfig
 ) -> GenerationExecutionContext:
-    """从工具参数构建统一执行上下文，作为共享字段的集中校验点。
+    """从类型化输入模型构建统一执行上下文。
 
-    未显式提供的字段按 config 默认值回退，再交由 utils.core.validators 的对应校验器做模型
-    能力相关的规则检查，最终装配为不可变的执行上下文。
+    输入模型已保证 prompt 非空、布尔与枚举字段合法、request_count 与 parallelism 的
+    范围及组合约束。本函数仅做 schema 表达不了的校验与合成：尺寸、输出格式、流式与
+    联网工具依赖 config.model_id 的能力校验；size、watermark、auto_save、parallelism
+    未显式提供时按 config 默认值合成。全量重校验由 client 各生成方法入口承担。
 
     Args:
-        arguments: 工具原始参数字典。
+        params: 经 pydantic 校验的工具输入模型。
         config: 当前生效配置。
 
     Returns:
         校验后的统一执行上下文对象。
     """
-    prompt = arguments.get("prompt", "")
-    optimize_prompt_options = arguments.get("optimize_prompt_options")
-    raw_size = arguments.get("size") if "size" in arguments else None
-    watermark_value = arguments.get("watermark")
-    response_format = arguments.get("response_format", "url")
-    output_format = arguments.get("output_format")
-    stream = bool(arguments.get("stream", False))
-    tools = arguments.get("tools")
-    request_count = arguments.get("request_count", 1)
-    parallelism_value = arguments.get("parallelism")
-    auto_save = arguments.get("auto_save")
-    save_path = arguments.get("save_path")
-    custom_name = arguments.get("custom_name")
-
-    size_value = config.default_size if raw_size is None else raw_size
-    watermark_for_validate = (
-        config.default_watermark if watermark_value is None else watermark_value
+    optimize_prompt_options = (
+        validate_optimize_prompt_options(
+            params.optimize_prompt_options.model_dump(), config.model_id
+        )
+        if params.optimize_prompt_options is not None
+        else None
     )
+    tools = (
+        validate_generation_tools([tool.model_dump() for tool in params.tools], config.model_id)
+        if params.tools
+        else None
+    )
+    size = validate_size_for_model(
+        params.size if params.size is not None else config.default_size,
+        config.model_id,
+    )
+    watermark = config.default_watermark if params.watermark is None else params.watermark
+    output_format = (
+        validate_output_format(params.output_format.value, config.model_id)
+        if params.output_format is not None
+        else None
+    )
+    stream = validate_stream(params.stream, config.model_id)
 
-    validated = validate_common_generation_params(
-        prompt=prompt,
+    return GenerationExecutionContext(
+        prompt=params.prompt,
         optimize_prompt_options=optimize_prompt_options,
-        size=size_value,
-        watermark=watermark_for_validate,
-        response_format=response_format,
+        size=size,
+        watermark=watermark,
+        response_format=params.response_format.value,
         output_format=output_format,
         stream=stream,
         tools=tools,
-        model_id=config.model_id,
-    )
-
-    request_count, parallelism = validate_parallel_generation_options(
-        request_count=request_count,
-        parallelism=parallelism_value,
-        stream=validated.stream,
-        max_request_count=MAX_PARALLEL_REQUEST_COUNT,
-    )
-
-    if auto_save is None:
-        enable_auto_save = config.auto_save_enabled
-    elif isinstance(auto_save, bool):
-        enable_auto_save = auto_save
-    else:
-        raise SeedreamValidationError("auto_save 必须是布尔值", field="auto_save", value=auto_save)
-
-    return GenerationExecutionContext(
-        prompt=validated.prompt,
-        optimize_prompt_options=validated.optimize_prompt_options,
-        size=validated.size,
-        watermark=validated.watermark,
-        response_format=validated.response_format,
-        output_format=validated.output_format,
-        stream=validated.stream,
-        tools=validated.tools,
-        request_count=request_count,
-        parallelism=parallelism,
-        enable_auto_save=enable_auto_save,
-        save_path=save_path,
-        custom_name=custom_name,
+        request_count=params.request_count,
+        parallelism=(
+            params.parallelism
+            if params.parallelism is not None
+            else min(params.request_count, MAX_PARALLEL_REQUEST_COUNT)
+        ),
+        enable_auto_save=(
+            config.auto_save_enabled if params.auto_save is None else params.auto_save
+        ),
+        save_path=params.save_path,
+        custom_name=params.custom_name,
     )

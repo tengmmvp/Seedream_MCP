@@ -1,6 +1,6 @@
 """_file_uri_to_path 的 file:// URI 解析与主机拒绝测试。
 
-函数位于 ``utils/path_utils``，将 MCP Roots 声明的 file:// URI 转为本地路径。
+函数位于 ``utils/io/io_path``，将 MCP Roots 声明的 file:// URI 转为本地路径。
 安全契约：拒绝非 localhost 主机的 file://host/share，避免 Windows 下触发 SMB
 连接泄露凭据；放行标准本地绝对路径 file:///abs/path。
 

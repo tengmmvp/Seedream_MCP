@@ -1,7 +1,7 @@
 """classify_image_reference 单元测试。
 
 守护图像输入来源分类的单一判定，重点覆盖 scheme 大小写不敏感特性——历史上
-image_input/image_validation/path_utils 三处的 http/https 判定大小写敏感，导致大写
+image_input/image_validation/io_path 三处的 http/https 判定大小写敏感，导致大写
 scheme 的 URL 误入本地文件分支；本测试锁定统一分类的正确性，防止回归。
 """
 

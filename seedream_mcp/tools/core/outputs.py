@@ -1,8 +1,10 @@
 """Seedream MCP 工具结构化输出模型。
 
 作为 outputSchema 的单一来源：FastMCP 依据本模块的 pydantic 模型生成各工具的
-structuredContent schema，handler 仅负责填充字段。基类通过 extra='allow' 容纳 API
-透传的新字段以保持向前兼容。
+structuredContent schema；runtime 的 structuredContent 也须经本模块模型构造后
+model_dump，使声明 schema 与实际输出绑定、不漂移。基类通过 extra='allow' 容纳
+API 透传的新字段以保持向前兼容；build_error_dict 与 build_error_structured 收敛
+各错误分支的错误结构。
 """
 
 from __future__ import annotations
@@ -61,3 +63,31 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     limit: int | None = None
     show_details: bool | None = None
     format_filter: list[str] | None = None
+
+
+def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
+    """构建结构化错误载荷，各工具错误分支共用同一字段集。
+
+    error_type 传入 errors 模块 resolve_error_profile 归约出的 error_code，使
+    structuredContent.error.type 与单发、并发、浏览各路径的错误码契约一致。
+    """
+    return {"type": error_type, "message": message}
+
+
+def build_error_structured(
+    tool_name: str,
+    error_type: str,
+    message: str,
+    status: str = "failed",
+) -> dict[str, Any]:
+    """构建失败路径的 structuredContent，经 GenerationStructuredOutput 与声明 schema 绑定。
+
+    仅输出已赋值字段，字段集与既有错误兜底分支一致，均为必填的 tool、success、
+    status 与 error。
+    """
+    return GenerationStructuredOutput(
+        tool=tool_name,
+        success=False,
+        status=status,
+        error=build_error_dict(error_type, message),
+    ).model_dump(exclude_none=True)

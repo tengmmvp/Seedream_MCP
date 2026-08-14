@@ -6,12 +6,14 @@ from mcp.types import CallToolResult
 import seedream_mcp.tools.impl.sequential_generation as sequential_generation_module
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.common import build_generation_context
+from seedream_mcp.tools.core.schemas import SequentialGenerationInput
 
 
 @pytest.mark.asyncio
-async def test_handle_sequential_generation_omits_max_images_when_not_provided(
+async def test_handle_sequential_generation_passes_derived_max_images_when_omitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """max_images 未显式提供时由 schema 按参考图数量推导，handler 透传推导值。"""
     config = SeedreamConfig(api_key="test_key")
     captured_kwargs: dict = {}
 
@@ -21,7 +23,7 @@ async def test_handle_sequential_generation_omits_max_images_when_not_provided(
             return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
     async def fake_execute_generation_handler(**kwargs):
-        context = build_generation_context(kwargs["arguments"], kwargs["config"])
+        context = build_generation_context(kwargs["params"], kwargs["config"])
         await kwargs["request_executor"](FakeClient(), context)
         return CallToolResult(content=[])
 
@@ -32,13 +34,13 @@ async def test_handle_sequential_generation_omits_max_images_when_not_provided(
     )
 
     await sequential_generation_module.handle_sequential_generation(
-        {"prompt": "test", "image": "image-1"},
+        SequentialGenerationInput(prompt="test", image="image-1"),
         config,
     )
 
-    assert "max_images" in captured_kwargs
-    assert captured_kwargs["max_images"] is None
-    assert captured_kwargs["image"] == "image-1"
+    # schema 推导：总上限 15 减去 1 张参考图
+    assert captured_kwargs["max_images"] == 14
+    assert captured_kwargs["image"] == ["image-1"]
 
 
 @pytest.mark.asyncio
@@ -54,7 +56,7 @@ async def test_handle_sequential_generation_keeps_explicit_max_images(
             return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
     async def fake_execute_generation_handler(**kwargs):
-        context = build_generation_context(kwargs["arguments"], kwargs["config"])
+        context = build_generation_context(kwargs["params"], kwargs["config"])
         await kwargs["request_executor"](FakeClient(), context)
         return CallToolResult(content=[])
 
@@ -65,7 +67,7 @@ async def test_handle_sequential_generation_keeps_explicit_max_images(
     )
 
     await sequential_generation_module.handle_sequential_generation(
-        {"prompt": "test", "image": "image-1", "max_images": 3},
+        SequentialGenerationInput(prompt="test", image="image-1", max_images=3),
         config,
     )
 

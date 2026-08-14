@@ -41,7 +41,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "AutoSaveError": (".io.io_save", "AutoSaveError"),
     # 路径处理（io）
     "normalize_path": (".io.io_path", "normalize_path"),
-    "validate_image_path": (".io.io_path", "validate_image_path"),
+    "validate_image_path": (".images.image_validation", "validate_image_path"),
     "get_relative_path": (".io.io_path", "get_relative_path"),
     "find_images_in_directory": (".io.io_path", "find_images_in_directory"),
     "suggest_similar_paths": (".io.io_path", "suggest_similar_paths"),

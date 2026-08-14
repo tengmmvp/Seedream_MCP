@@ -1,4 +1,4 @@
-"""FileManager 的 validate_path 越界守卫与 cleanup_old_files 测试。"""
+"""FileManager 的 validate_path 越界守卫与 run_cleanup_policies 清理测试。"""
 
 import os
 import sys
@@ -21,7 +21,7 @@ def test_validate_path_rejects_outside_base(tmp_path: Path) -> None:
     assert manager.validate_path(outside) is False
 
 
-def test_cleanup_old_files_removes_expired_and_keeps_recent(tmp_path: Path) -> None:
+def test_run_cleanup_age_removes_expired_and_keeps_recent(tmp_path: Path) -> None:
     manager = FileManager(base_dir=tmp_path)
 
     old_file = tmp_path / "old.png"
@@ -32,14 +32,14 @@ def test_cleanup_old_files_removes_expired_and_keeps_recent(tmp_path: Path) -> N
     new_file = tmp_path / "new.png"
     new_file.write_bytes(b"new")
 
-    result = manager.cleanup_old_files(days=30)
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
 
     assert not old_file.exists()
     assert new_file.exists()
     assert result["deleted_files"] >= 1
 
 
-def test_cleanup_old_files_accumulates_deleted_size_and_prunes_empty_dirs(
+def test_run_cleanup_age_accumulates_deleted_size_and_prunes_empty_dirs(
     tmp_path: Path,
 ) -> None:
     """deleted_size 按字节累计；过期文件清空后变空的子目录须被修剪。"""
@@ -52,7 +52,7 @@ def test_cleanup_old_files_accumulates_deleted_size_and_prunes_empty_dirs(
     old_time = (datetime.now() - timedelta(days=40)).timestamp()
     os.utime(old_file, (old_time, old_time))
 
-    result = manager.cleanup_old_files(days=30)
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
 
     assert result["deleted_files"] == 1
     assert result["deleted_size"] == 100
@@ -64,7 +64,7 @@ def test_cleanup_old_files_accumulates_deleted_size_and_prunes_empty_dirs(
     assert tmp_path.exists()
 
 
-def test_cleanup_old_files_keeps_non_empty_subdir(tmp_path: Path) -> None:
+def test_run_cleanup_age_keeps_non_empty_subdir(tmp_path: Path) -> None:
     """子目录仍含未过期文件时不得被修剪。"""
     manager = FileManager(base_dir=tmp_path)
 
@@ -73,15 +73,15 @@ def test_cleanup_old_files_keeps_non_empty_subdir(tmp_path: Path) -> None:
     new_file = sub / "new.png"
     new_file.write_bytes(b"new")  # 未过期
 
-    manager.cleanup_old_files(days=30)
+    manager.run_cleanup_policies(days=30, max_total_bytes=None)
 
     assert new_file.exists()
     assert sub.exists()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows 创建符号链接需管理员权限")
-def test_cleanup_old_files_skips_symlink_pointing_outside(tmp_path: Path) -> None:
-    """符号链接指向 base_dir 之外时，cleanup 不得删除其目标，防止越权删除。"""
+def test_run_cleanup_age_skips_symlink_pointing_outside(tmp_path: Path) -> None:
+    """符号链接指向 base_dir 之外时，清理不得删除其目标，防止越权删除。"""
     manager = FileManager(base_dir=tmp_path)
 
     outside_dir = tmp_path.parent / "outside_target"
@@ -97,19 +97,19 @@ def test_cleanup_old_files_skips_symlink_pointing_outside(tmp_path: Path) -> Non
     except OSError:
         pytest.skip("当前环境不支持创建符号链接")
 
-    manager.cleanup_old_files(days=30)
+    manager.run_cleanup_policies(days=30, max_total_bytes=None)
 
     # 符号链接自身可能被跳过；但其指向的外部目标必须不被删除
     assert target.exists()
 
 
-def test_cleanup_old_files_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
-    """符号链接目录指向 base_dir 之外时，cleanup 不得下降进入该目录遍历外部条目。
+def test_run_cleanup_age_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
+    """符号链接目录指向 base_dir 之外时，清理不得下降进入该目录遍历外部条目。
 
     构造 base_dir 内的符号链接目录，指向 base_dir 之外的临时目录；该外部目录含一个
-    mtime 已过期的 marker 文件。若 cleanup 错误地跟随符号链接目录下降，会 stat 到该
+    mtime 已过期的 marker 文件。若清理错误地跟随符号链接目录下降，会 stat 到该
     marker 并因过期将其删除；Windows 下还可能触发指向外部资源的 SMB 出站认证。
-    断言 cleanup 后外部 marker 仍存在、内容未被触碰、且未计入删除数量。
+    断言清理后外部 marker 仍存在、内容未被触碰、且未计入删除数量。
     """
     manager = FileManager(base_dir=tmp_path)
 
@@ -128,16 +128,16 @@ def test_cleanup_old_files_does_not_descend_into_symlink_dir(tmp_path: Path) -> 
     except (OSError, AttributeError):
         pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
 
-    result = manager.cleanup_old_files(days=30)
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
 
-    # marker 已过期，若 cleanup 下降进入符号链接目录则会被删除；
-    # 其仍存在即证明 cleanup 未对外部条目下降遍历
+    # marker 已过期，若清理下降进入符号链接目录则会被删除；
+    # 其仍存在即证明清理未对外部条目下降遍历
     assert marker.exists()
     assert marker.read_bytes() == b"marker-content"
     assert result["deleted_files"] == 0
 
 
-def test_enforce_total_size_limit_evicts_oldest_until_under_limit(tmp_path: Path) -> None:
+def test_run_cleanup_quota_evicts_oldest_until_under_limit(tmp_path: Path) -> None:
     """总量超限时按 mtime 升序驱逐最旧文件直至总量达标，保留较新文件。"""
     manager = FileManager(base_dir=tmp_path)
 
@@ -151,7 +151,8 @@ def test_enforce_total_size_limit_evicts_oldest_until_under_limit(tmp_path: Path
         os.utime(f, (t, t))
         files.append(f)
 
-    result = manager.enforce_total_size_limit(150)
+    # days=0 跳过按天清理，仅执行配额驱逐
+    result = manager.run_cleanup_policies(days=0, max_total_bytes=150)
 
     # 最旧两个被驱逐，最新一个保留
     assert result["deleted_files"] == 2
@@ -161,13 +162,13 @@ def test_enforce_total_size_limit_evicts_oldest_until_under_limit(tmp_path: Path
     assert files[2].exists()
 
 
-def test_enforce_total_size_limit_noop_when_under_limit(tmp_path: Path) -> None:
+def test_run_cleanup_quota_noop_when_under_limit(tmp_path: Path) -> None:
     """总量未超上限时不删除任何文件。"""
     manager = FileManager(base_dir=tmp_path)
     f = tmp_path / "img.png"
     f.write_bytes(b"x" * 100)
 
-    result = manager.enforce_total_size_limit(200)
+    result = manager.run_cleanup_policies(days=0, max_total_bytes=200)
 
     assert result["deleted_files"] == 0
     assert result["deleted_size"] == 0
@@ -264,3 +265,25 @@ def test_run_cleanup_policies_skips_quota_when_none(tmp_path: Path) -> None:
     assert result["deleted_files"] == 1
     assert result["deleted_size"] == 100
     assert not expired.exists()
+
+
+def test_run_cleanup_only_deletes_image_files(tmp_path: Path) -> None:
+    """清理仅删除图片扩展名文件，base_dir 内其他类型文件保留，防误删用户数据。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    old_time = (datetime.now() - timedelta(days=40)).timestamp()
+    old_image = tmp_path / "old.png"
+    old_image.write_bytes(b"img")
+    os.utime(old_image, (old_time, old_time))
+    old_doc = tmp_path / "notes.txt"
+    old_doc.write_bytes(b"notes")
+    os.utime(old_doc, (old_time, old_time))
+    old_data = tmp_path / "data.json"
+    old_data.write_bytes(b"{}")
+    os.utime(old_data, (old_time, old_time))
+
+    manager.run_cleanup_policies(days=30, max_total_bytes=None)
+
+    assert not old_image.exists()
+    assert old_doc.exists()
+    assert old_data.exists()
