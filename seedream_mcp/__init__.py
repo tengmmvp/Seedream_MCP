@@ -11,14 +11,14 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any, TYPE_CHECKING
 
-from .version import __version__
+from .version import __version__  # noqa: F401
 
 __author__ = "tengmmvp"
 __email__ = "tengmmvp@gmail.com"
 
 if TYPE_CHECKING:
-    from .client import SeedreamClient
-    from .config import (
+    from .client import SeedreamClient  # noqa: F401
+    from .config import (  # noqa: F401
         SeedreamConfig,
         get_active_config,
         get_global_config,
@@ -26,23 +26,7 @@ if TYPE_CHECKING:
         set_active_config,
         set_config,
     )
-    from .server import cli_main, mcp
-
-__all__ = [
-    "__version__",
-    # 配置类与函数
-    "SeedreamConfig",
-    "get_active_config",
-    "get_global_config",
-    "reload_config",
-    "set_active_config",
-    "set_config",
-    # 客户端类
-    "SeedreamClient",
-    # 服务器相关
-    "mcp",
-    "cli_main",
-]
+    from .server import cli_main, mcp  # noqa: F401
 
 # PEP 562 延迟加载表：公开属性名 -> (子模块相对路径, 属性名)，首次访问时经 __getattr__ 导入并缓存到 globals()
 _LAZY_EXPORTS = {
@@ -56,6 +40,9 @@ _LAZY_EXPORTS = {
     "mcp": (".server", "mcp"),
     "cli_main": (".server", "cli_main"),
 }
+
+# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键并补充 __version__，消除手动同步
+__all__ = ["__version__"] + list(_LAZY_EXPORTS)
 
 
 def __getattr__(name: str) -> Any:

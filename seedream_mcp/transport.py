@@ -10,6 +10,7 @@ from __future__ import annotations
 
 # 标准库导入
 import argparse
+import asyncio
 import hmac
 import json
 from typing import Any
@@ -22,8 +23,10 @@ logger = get_logger(__name__)
 
 # ==================== 传输层常量 ====================
 
-# streamable-http 回环地址集合：绑定这些地址视为仅本机信任
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+# streamable-http 可信回环地址集合：仅字面量回环地址免鉴权。
+# 不含 "localhost"，其解析依赖 hosts/DNS，污染时可指向非回环地址，
+# 仅凭字符串判定会使公网暴露仍免鉴权。
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
 # streamable-http 请求体大小上限：按 Content-Length 早拒超大请求体，防止已认证客户端
 # 提交 GB 级 prompt/data URI 导致 OOM。多图融合等大体量场景若超此值应分批或调高。
@@ -263,6 +266,20 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
     print(message)
 
 
+async def _drain_pending_tasks() -> None:
+    """取消并回收当前事件循环上的残余任务，避免 loop.close 触发 pending 警告。
+
+    server.serve 返回后连接处理等任务可能仍待处理，直接关闭循环会跳过其连接清理
+    finally 并产生 "Task was destroyed but it is pending!" 警告。排除当前自身任务后
+    取消其余任务，并以 return_exceptions 等待其退出。
+    """
+    current = asyncio.current_task()
+    pending = [task for task in asyncio.all_tasks() if task is not current]
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 def _run_streamable_http(
     host: str,
     port: int,
@@ -276,10 +293,16 @@ def _run_streamable_http(
     配置鉴权令牌时，在 FastMCP 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
     请求返回 401。配置 TLS 证书时透传给 uvicorn 启用 HTTPS。仅使用 FastMCP 公开接口
     streamable_http_app() 获取 ASGI 应用，避免依赖其私有鉴权装配路径。
+
+    显式管理事件循环：uvicorn Server.serve 返回后循环仍存活，于其上运行共享资源的异步
+    清理，使连接池在绑定的原循环上优雅释放。共享 HTTP 资源经 app_lifespan 创建并使用于
+    该循环，跨循环 aclose 对底层传输无效，故关闭须在同一循环。stateless_http 模式下
+    lifespan 不在 teardown 清理以保留连接复用，退出清理依赖此处完成。关闭循环前取消并
+    回收残余任务，避免连接处理任务的清理 finally 被跳过。
     """
     import uvicorn
 
-    from .server import mcp
+    from .server import _cleanup_shared_resources, mcp
 
     app = mcp.streamable_http_app()
     # streamable_http_app 首次调用后缓存 _session_manager 并固定中间件栈，重复调用会在同一
@@ -301,4 +324,18 @@ def _run_streamable_http(
         ssl_kwargs["ssl_certfile"] = ssl_certfile
         ssl_kwargs["ssl_keyfile"] = ssl_keyfile
         logger.info("streamable-http 已启用 TLS")
-    uvicorn.run(app, host=host, port=port, **ssl_kwargs)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, **ssl_kwargs))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(server.serve())
+    finally:
+        try:
+            loop.run_until_complete(_drain_pending_tasks())
+        except Exception as exc:
+            logger.warning("streamable-http 残余任务回收失败: {}", exc)
+        try:
+            loop.run_until_complete(_cleanup_shared_resources())
+        except Exception as exc:
+            logger.warning("streamable-http 退出清理失败: {}", exc)
+        loop.close()

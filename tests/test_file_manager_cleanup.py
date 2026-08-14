@@ -135,3 +135,35 @@ def test_cleanup_old_files_does_not_descend_into_symlink_dir(tmp_path: Path) -> 
     assert marker.exists()
     assert marker.read_bytes() == b"marker-content"
     assert result["deleted_files"] == 0
+
+
+def test_cleanup_old_files_days_below_one_skips_deletion(tmp_path: Path) -> None:
+    """days<1 视为禁用清理：即使存在过期文件也不删除，返回零计数且文件保留。
+
+    与 auto_save 的"0=不清理"语义统一，避免误传 0/负值删除全部文件。
+    """
+    manager = FileManager(base_dir=tmp_path)
+
+    old_file = tmp_path / "old.png"
+    old_file.write_bytes(b"old")
+    old_time = (datetime.now() - timedelta(days=40)).timestamp()
+    os.utime(old_file, (old_time, old_time))
+
+    # days=0 跳过清理：返回零计数且过期文件仍存在
+    result_zero = manager.cleanup_old_files(days=0)
+    assert result_zero["deleted_files"] == 0
+    assert result_zero["deleted_size"] == 0
+    assert result_zero["errors"] == []
+    assert old_file.exists()
+
+    # days=-1 同样跳过
+    result_negative = manager.cleanup_old_files(days=-1)
+    assert result_negative["deleted_files"] == 0
+    assert result_negative["deleted_size"] == 0
+    assert result_negative["errors"] == []
+    assert old_file.exists()
+
+    # 对照：days=30 正常清理，删除该过期文件
+    result_thirty = manager.cleanup_old_files(days=30)
+    assert result_thirty["deleted_files"] == 1
+    assert not old_file.exists()

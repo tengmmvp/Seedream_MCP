@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,13 +38,30 @@ PROGRESS_COMPLETE = 100.0
 
 
 def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
-    """累加用量统计值，跳过布尔与非数值类型以避免污染汇总结果。"""
+    """累加用量统计值。
+
+    标量数值字段直接累加；嵌套 dict 字段对其标量子键递归累加合并，使并发聚合与单请求
+    原样保留的用量结构一致。布尔与非数值标量跳过以避免污染汇总结果。
+    """
+    if isinstance(value, dict):
+        current = usage.get(key)
+        if isinstance(current, dict):
+            for sub_key, sub_value in value.items():
+                _add_usage_value(current, sub_key, sub_value)
+        else:
+            usage[key] = copy.deepcopy(value)
+        return
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return
     current = usage.get(key, 0)
     if isinstance(current, bool) or not isinstance(current, (int, float)):
         current = 0
     usage[key] = current + value
+
+
+def _is_generation_failed(result: dict[str, Any]) -> bool:
+    """判定生成结果是否视为失败，纳入 HTTP 层 success 与显式 status==failed。"""
+    return not bool(result.get("success")) or result.get("status") == "failed"
 
 
 def _normalize_error_message(raw_error: Any) -> str | None:

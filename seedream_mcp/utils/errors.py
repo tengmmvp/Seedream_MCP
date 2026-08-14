@@ -31,10 +31,16 @@ class SeedreamMCPError(Exception):
         self.details = details or {}
 
     def to_dict(self) -> dict[str, Any]:
-        """序列化为字典，供结构化错误输出使用。"""
+        """序列化为字典，供结构化错误输出使用。
+
+        message 统一剥离 Bearer 令牌并截断，避免上游回显的敏感片段进入结构化输出；
+        子类无需各自处理 message。
+        """
         return {
             "error": self.__class__.__name__,
-            "message": self.message,
+            "message": _truncate_value_for_output(
+                _redact_bearer_tokens(self.message), limit=_MESSAGE_OUTPUT_LIMIT
+            ),
             "error_code": self.error_code,
             "details": self.details,
         }
@@ -68,10 +74,6 @@ class SeedreamAPIError(SeedreamMCPError):
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典，在基类基础上补充 status_code 与脱敏后的 response_data。"""
         result = super().to_dict()
-        # message 可能拼入上游回显片段，超长时截断，避免潜在敏感内容撑爆输出
-        result["message"] = _truncate_value_for_output(
-            result.get("message"), limit=_MESSAGE_OUTPUT_LIMIT
-        )
         result.update(
             {
                 "status_code": self.status_code,
@@ -176,8 +178,25 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
         "auth_error",
         base_message="API密钥无效或已过期",
     ),
-    403: _ErrorProfile("API调用失败", "", "api_error", base_message="访问被拒绝，请检查API权限"),
+    402: _ErrorProfile(
+        "余额不足",
+        "请检查账户余额与配额。",
+        "payment_required",
+        base_message="余额不足",
+    ),
+    403: _ErrorProfile(
+        "API调用失败",
+        "请确认 API Key 已开通目标模型的调用权限。",
+        "api_error",
+        base_message="访问被拒绝，请检查API权限",
+    ),
     404: _ErrorProfile("API调用失败", "", "api_error", base_message="API端点不存在"),
+    413: _ErrorProfile(
+        "请求体过大",
+        "请减小参考图尺寸或改用 URL 传入。",
+        "payload_too_large",
+        base_message="请求体过大",
+    ),
     429: _ErrorProfile(
         "请求频率超限",
         "请稍后重试。",
@@ -295,15 +314,18 @@ def format_error_for_user(error: Exception) -> str:
     """
     profile = resolve_error_profile(error)
     if isinstance(error, SeedreamAPIError):
-        # message 可能回显上游响应，截断防长敏感片段进入用户可见输出
-        message = _truncate_value_for_output(error.message, limit=_MESSAGE_OUTPUT_LIMIT)
+        raw_message = error.message
         code_hint = f" [错误码: {error.error_code}]" if error.error_code else ""
     elif isinstance(error, SeedreamMCPError):
-        message = error.message
+        raw_message = error.message
         code_hint = ""
     else:
-        message = _truncate_value_for_output(str(error), limit=_MESSAGE_OUTPUT_LIMIT)
+        raw_message = str(error)
         code_hint = ""
+    # 三类异常统一先剥离 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出
+    message = _truncate_value_for_output(
+        _redact_bearer_tokens(raw_message), limit=_MESSAGE_OUTPUT_LIMIT
+    )
 
     line = f"{profile.display_title}: {message}{code_hint}"
     if profile.user_hint:
@@ -355,7 +377,7 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
 
 
 # 敏感字段关键词：键名经边界匹配命中任一关键词即视为敏感，输出时以 *** 脱敏。
-# 边界匹配要求键名等于关键词或以下划线分隔包含关键词，避免短词如 key 误命中
+# 边界匹配要求键名等于关键词或以下划线、连字符分隔包含关键词，避免短词如 key 误命中
 # monkey、keyboard 等无关键名。
 _SENSITIVE_KEY_KEYWORDS = (
     "key",
@@ -394,7 +416,7 @@ def _is_sensitive_key(key: Any) -> bool:
     """判断键名是否命中敏感关键词。
 
     高确信度词采用子串匹配以覆盖连字符与无分隔变体；其余关键词采用边界匹配，
-    键名等于关键词或以下划线分隔包含关键词方视为命中，避免短词如 key 误匹配。
+    键名等于关键词或以下划线、连字符分隔包含关键词方视为命中，避免短词如 key 误匹配。
     """
     key_lower = str(key).lower()
     for substring in _SENSITIVE_KEY_SUBSTRINGS:
@@ -404,7 +426,11 @@ def _is_sensitive_key(key: Any) -> bool:
         if (
             key_lower == keyword
             or key_lower.endswith("_" + keyword)
+            or key_lower.endswith("-" + keyword)
+            or key_lower.endswith("." + keyword)
             or key_lower.startswith(keyword + "_")
+            or key_lower.startswith(keyword + "-")
+            or key_lower.startswith(keyword + ".")
         ):
             return True
     return False

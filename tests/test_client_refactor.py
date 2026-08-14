@@ -771,6 +771,10 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_prepare_image_input 命中缓存不重复调用底层；LRU 淘汰最久未用条目，近期命中不被淘汰。"""
+    # 用对象式 monkeypatch 而非字符串式：字符串式经 getattr(seedream_mcp, "utils") 解析，
+    # 在 test_package_lazy_import 重载顶层包后 utils 子模块不再绑定到新包对象而失败。
+    from seedream_mcp.utils import image_input
+
     client = SeedreamClient(_build_config())
     client._prepare_cache_max = 3
 
@@ -781,7 +785,7 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
         call_count += 1
         return f"prepared:{image}"
 
-    monkeypatch.setattr("seedream_mcp.utils.image_input.prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
 
     # 同一输入第二次走缓存，底层 prepare_image_input 只调一次
     first = await client._prepare_image_input("img-1")
@@ -810,3 +814,17 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
     assert call_count == 5
     await client._prepare_image_input("img-1")
     assert call_count == 5
+
+
+def test_serialize_request_outputs_utf8_without_ascii_escape() -> None:
+    """_serialize_request 以 ensure_ascii=False 输出 UTF-8 bytes，中文原样出现而非 \\uXXXX 转义。
+
+    静态方法可直接通过类调用，无需实例化。验证返回 bytes，"中文" 的 UTF-8 字节序列原样
+    出现，且不包含 ASCII 转义形式（字面 \\u4e2d），确保中文提示词不被转义膨胀。
+    """
+    result = SeedreamClient._serialize_request({"prompt": "中文测试"})
+
+    assert isinstance(result, bytes)
+    assert "中文".encode("utf-8") in result
+    # ASCII 转义形式（字面反斜杠 u 4 e 2 d）不得出现
+    assert b"\\u4e2d" not in result

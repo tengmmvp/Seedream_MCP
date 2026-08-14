@@ -270,7 +270,7 @@ def validate_image_path(
 
     Args:
         path: 图片文件路径；HTTP(S) URL 有效但路径返回 None。
-        base_dir: 工作区基础目录，用于越界校验。
+        base_dir: 工作区基础目录，用于越界校验；None 时回退首个工作区根，多根工作区仅校验首个根，完整多根校验须由调用方遍历各根分别调用。
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
@@ -280,13 +280,13 @@ def validate_image_path(
         if path.startswith(("http://", "https://")):
             return True, "", None
 
+        if base_dir is None:
+            base_dir = str(get_workspace_root())
         normalized_path = normalize_path(path, base_dir)
-
-        if base_dir:
-            base_path = Path(base_dir).resolve()
-            # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析
-            if not _is_within_resolved(normalized_path, base_path):
-                return False, "路径超出允许的工作区目录范围", normalized_path
+        base_path = Path(base_dir).resolve()
+        # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析
+        if not _is_within_resolved(normalized_path, base_path):
+            return False, "路径超出允许的工作区目录范围", normalized_path
 
         # 委托 validation 模块执行格式与维度等统一规则校验。
         try:

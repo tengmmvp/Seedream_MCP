@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tempfile
 from pathlib import Path
 from typing import IO
 
@@ -90,17 +91,21 @@ def open_no_follow_write(path: PathLike) -> IO[bytes]:
     return os.fdopen(fd, "wb")
 
 
-def open_no_follow_fd(path: PathLike, flags: int) -> int:
-    """以调用方 flags 附加 O_NOFOLLOW 打开最终分量，返回文件描述符。
+def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Path]:
+    """在指定目录内创建不可预测随机名的临时文件，返回文件描述符与实际路径。
 
-    供需要自定义写入方式的调用方使用，典型场景是经 aiofiles 异步包装 fd。``flags``
-    须包含方向与创建位，如 ``os.O_WRONLY | os.O_CREAT | os.O_TRUNC``。最终路径
-    分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时退化为 lstat 取指纹、open 后
-    fstat 比对 st_ino/st_dev 同一性，闭合最终分量替换竞态。
+    基于 ``tempfile.mkstemp`` 生成不可预测文件名并以独占创建方式打开，规避可预测
+    临时路径被预置符号链接覆盖任意文件的风险。调用方写入完成后用 ``os.replace``
+    原子替换到目标路径，失败时负责清理该临时文件。``dir_path`` 必须已存在且与目标
+    路径位于同一文件系统，以保证 ``os.replace`` 的原子性。
+
+    Args:
+        dir_path: 临时文件所在目录，必须已存在。
+        suffix: 临时文件名后缀，用于可读性与调试定位。
+
+    Returns:
+        ``(fd, temp_path)``：``fd`` 已以只写独占方式打开，``temp_path`` 为实际创建的
+        随机名路径。
     """
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    if no_follow:
-        return os.open(str(path), flags | no_follow)
-    return _open_no_follow_fallback(
-        str(path), flags, creating=bool(flags & os.O_CREAT), action="写入"
-    )
+    fd, name = tempfile.mkstemp(dir=str(dir_path), suffix=suffix)
+    return fd, Path(name)

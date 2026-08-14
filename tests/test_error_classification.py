@@ -211,3 +211,34 @@ def test_format_unknown_error_truncates_long_message() -> None:
     result = format_error_for_user(ValueError(long_msg))
     assert len(result) < len(long_msg)
     assert "truncated" in result
+
+
+# ==================== handle_api_error：402/413 状态码档案 ====================
+
+
+def test_handle_api_error_402_payment_required_profile() -> None:
+    """402 映射到余额不足档案：message 含余额，结构化错误码为 payment_required。"""
+    exc = handle_api_error(402, {})
+    assert exc.status_code == 402
+    assert "余额" in exc.message
+    assert _classify_generation_error_type(exc) == "payment_required"
+
+
+def test_handle_api_error_402_user_hint_mentions_balance() -> None:
+    """402 错误的用户提示含余额相关可操作建议。"""
+    exc = handle_api_error(402, {})
+    assert "余额" in format_error_for_user(exc)
+
+
+def test_handle_api_error_413_payload_too_large_profile() -> None:
+    """413 映射到请求体过大档案：message 含请求体过大，结构化错误码为 payload_too_large。"""
+    exc = handle_api_error(413, {})
+    assert exc.status_code == 413
+    assert _classify_generation_error_type(exc) == "payload_too_large"
+
+
+def test_handle_api_error_413_user_hint_mentions_reduce_or_url() -> None:
+    """413 错误的用户提示含减小尺寸或改用 URL 的可操作建议。"""
+    exc = handle_api_error(413, {})
+    result = format_error_for_user(exc)
+    assert "减小" in result or "URL" in result

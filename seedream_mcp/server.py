@@ -77,6 +77,10 @@ SERVER_VERSION = __version__
 # 服务器功能说明
 SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图输出与图片浏览。"
 
+# streamable-http 默认监听配置，与 FastMCP Settings 默认值一致；_reset_lifespan_state 据此复位
+_DEFAULT_HTTP_HOST = "127.0.0.1"
+_DEFAULT_HTTP_PORT = 8000
+
 # ==================== 工具注解常量 ====================
 
 # 生成类工具的能力标注
@@ -108,9 +112,32 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 # 模块日志记录器。须先于引用它的 lifespan/cleanup 定义，否则函数体内无法解析该名
 logger = get_logger(__name__)
 
-# 共享客户端与下载管理器：模块级单例，跨 lifespan 重入复用。
+
+# 共享 client/download_manager 对及在途引用计数，跨 lifespan 重入复用。
 # stateless_http 模式下 FastMCP 每请求重入 lifespan，模块级单例确保连接池跨请求复用。
-# 创建受 _shared_init_lock 保护避免并发重复构造；config 身份变化时自动重建。
+# 创建受 _shared_init_lock 保护避免并发重复构造；config 身份变化触发重建时，旧资源可能
+# 仍被在途请求持有，引用计数确保仅当所有在途请求释放后才关闭旧实例，避免断开在途请求
+# 已持有的 HTTP 连接池。
+class _SharedResource:
+    """共享 client/download_manager 对及在途引用计数。"""
+
+    def __init__(
+        self,
+        client: "SeedreamClient",
+        download_manager: "DownloadManager",
+        config: SeedreamConfig,
+    ) -> None:
+        self.client = client
+        self.download_manager = download_manager
+        self.config = config
+        self.refcount = 0
+
+
+# 当前活动资源句柄
+_active_resource: _SharedResource | None = None
+# 被重建取代但仍有在途引用的资源，引用归零时由 _release_resource 关闭并移出
+_retired_resources: list[_SharedResource] = []
+# 活动资源的 client/dm 别名，保留供测试直接读取活动实例与 _sync_cleanup 兜底关闭
 _shared_client: SeedreamClient | None = None
 _shared_download_manager: DownloadManager | None = None
 _shared_init_lock = asyncio.Lock()
@@ -141,87 +168,141 @@ async def _safe_close(obj: Any) -> None:
         logger.warning("关闭共享资源失败: {}", exc)
 
 
+def _sync_active_aliases(resource: _SharedResource | None) -> None:
+    """同步活动资源到 _shared_client/_shared_download_manager 别名。
+
+    别名始终指向活动资源的 client/dm，保留测试直接读取活动实例的既有路径，并供
+    _sync_cleanup 兜底关闭。
+    """
+    global _shared_client, _shared_download_manager
+    if resource is None:
+        _shared_client = None
+        _shared_download_manager = None
+    else:
+        _shared_client = resource.client
+        _shared_download_manager = resource.download_manager
+
+
+async def _build_active_resource(config: SeedreamConfig) -> _SharedResource:
+    """创建并初始化新的共享资源句柄，部分初始化失败时关闭已创建部分避免泄漏。"""
+    from .client import SeedreamClient
+    from .utils.download_manager import DownloadManager
+
+    new_client = SeedreamClient(config)
+    new_download_manager = DownloadManager(
+        timeout=config.auto_save_download_timeout,
+        max_retries=config.auto_save_max_retries,
+        max_file_size=config.auto_save_max_file_size,
+    )
+    try:
+        await new_client.__aenter__()
+        await new_download_manager.__aenter__()
+    except Exception:
+        await _safe_close(new_client)
+        await _safe_close(new_download_manager)
+        raise
+    return _SharedResource(new_client, new_download_manager, config)
+
+
+async def _close_resource(resource: _SharedResource) -> None:
+    """关闭资源持有的 client 与 download_manager。"""
+    await _safe_close(resource.client)
+    await _safe_close(resource.download_manager)
+
+
+async def _retire_resource(resource: _SharedResource | None) -> None:
+    """资源被新资源取代。仍有在途引用时纳入退役追踪，否则立即关闭。"""
+    if resource is None:
+        return
+    if resource.refcount > 0:
+        _retired_resources.append(resource)
+    else:
+        await _close_resource(resource)
+
+
+async def _release_resource(resource: _SharedResource) -> None:
+    """递减在途引用；退役资源引用归零时关闭并移出追踪列表。"""
+    resource.refcount -= 1
+    if resource.refcount > 0 or resource is _active_resource:
+        return
+    if resource in _retired_resources:
+        _retired_resources.remove(resource)
+    await _close_resource(resource)
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     FastMCP 生命周期管理：注入共享配置、SeedreamClient 与 DownloadManager。
 
-    单例首次创建后跨 lifespan 重入复用。config 身份变化仅在 lifespan 重入时检测并重建：
-    stateless_http 每请求重入，运行期 set_config/reload_config 可对后续请求生效；stdio
-    与普通 streamable-http 仅单次进入 lifespan，运行期更换配置不会重算已注入的快照与共享
-    客户端，热重载仅在 stateless_http 或进程重启后对在用请求生效。stateless_http 不在
-    teardown 清理以保留连接复用；其余模式在 teardown 同事件循环清理。重建会立即关闭旧
-    单例，调用 set_config/reload_config 应避开在途请求，否则在途请求持有的 HTTP 连接
-    会被断开。工具经 ctx.request_context.lifespan_context 取
+    资源以引用计数的模块级单例持有，跨 lifespan 重入复用。stateless_http 模式下 FastMCP
+    每请求重入 lifespan，活动资源仅登记在途引用而不关闭，使连接池跨请求复用。config
+    身份变化触发重建：新资源立即取代活动槽位，旧资源若仍有在途引用则纳入退役追踪，待
+    最后一个在途请求释放后再关闭，避免运行期 set_config/reload_config 断开在途请求已
+    持有的 HTTP 连接池。stdio 与普通 streamable-http 仅单次进入 lifespan，teardown 时
+    在同事件循环清理。工具经 ctx.request_context.lifespan_context 取
     ["config"]/["client"]/["download_manager"]。
     """
-    global _shared_client, _shared_download_manager
+    global _active_resource
     config = get_active_config()
-    if _shared_client is None or _shared_client.config is not config:
+    if _active_resource is None or _active_resource.config is not config:
         async with _shared_init_lock:
-            if _shared_client is None or _shared_client.config is not config:
-                old_client = _shared_client
-                old_download_manager = _shared_download_manager
-                from .client import SeedreamClient
-                from .utils.download_manager import DownloadManager
-
-                new_client = SeedreamClient(config)
-                new_download_manager = DownloadManager(
-                    timeout=config.auto_save_download_timeout,
-                    max_retries=config.auto_save_max_retries,
-                    max_file_size=config.auto_save_max_file_size,
-                )
-                try:
-                    await new_client.__aenter__()
-                    await new_download_manager.__aenter__()
-                except Exception:
-                    # 部分初始化失败时关闭已创建的资源，避免连接池与文件描述符泄漏
-                    await _safe_close(new_client)
-                    await _safe_close(new_download_manager)
-                    raise
-                _shared_client = new_client
-                _shared_download_manager = new_download_manager
-                await _safe_close(old_client)
-                await _safe_close(old_download_manager)
-    yield {
-        "config": config,
-        "client": _shared_client,
-        "download_manager": _shared_download_manager,
-    }
+            if _active_resource is None or _active_resource.config is not config:
+                old = _active_resource
+                _active_resource = await _build_active_resource(config)
+                _sync_active_aliases(_active_resource)
+                await _retire_resource(old)
+            resource = _active_resource
+            resource.refcount += 1
+    else:
+        resource = _active_resource
+        resource.refcount += 1
+    try:
+        yield {
+            "config": resource.config,
+            "client": resource.client,
+            "download_manager": resource.download_manager,
+        }
+    finally:
+        await _release_resource(resource)
     if not getattr(server.settings, "stateless_http", False):
         await _cleanup_shared_resources()
 
 
 async def _cleanup_shared_resources() -> None:
-    """关闭并清空 lifespan 单例持有的 HTTP 连接池。"""
-    global _shared_client, _shared_download_manager
-    client = _shared_client
-    download_manager = _shared_download_manager
-    _shared_client = None
-    _shared_download_manager = None
-    await _safe_close(client)
-    await _safe_close(download_manager)
+    """关闭并清空活动与退役资源持有的 HTTP 连接池。"""
+    global _active_resource
+    retired = list(_retired_resources)
+    _retired_resources.clear()
+    active = _active_resource
+    _active_resource = None
+    _sync_active_aliases(None)
+    for resource in retired:
+        await _close_resource(resource)
+    if active is not None:
+        await _close_resource(active)
 
 
 def _sync_cleanup() -> None:
-    """同步入口的进程级清理。
+    """同步入口的进程级兜底清理。
 
-    stateless_http 模式 lifespan 不在 teardown 清理以保留连接复用，由 cli_main 在
-    服务器退出时补清理。先提取并清空全局引用，确保即便后续清理协程抛错也不会泄漏引用。
-
-    uvicorn 退出时其事件循环已停止，共享 HTTP 资源绑定在已关闭的旧循环上，跨循环
-    aclose 对底层传输可能无效并被 _safe_close 静默忽略，真正的 socket 回收依赖进程
-    退出时由操作系统完成。_safe_close 已吞掉异常，清理路径不中断。
+    streamable-http 的优雅关闭在 _run_streamable_http 内于服务事件循环上执行，stdio 在
+    lifespan teardown 同循环清理；两者完成后活动资源已为 None，本函数为防御性兜底，覆盖
+    异常退出未触发上述清理的情形。先提取并清空全局引用，确保即便后续清理协程抛错也不泄漏。
     """
-    global _shared_client, _shared_download_manager
+    global _active_resource
+    retired = list(_retired_resources)
+    _retired_resources.clear()
+    _active_resource = None
     client = _shared_client
     download_manager = _shared_download_manager
-    _shared_client = None
-    _shared_download_manager = None
+    _sync_active_aliases(None)
 
     async def _close_held() -> None:
         await _safe_close(client)
         await _safe_close(download_manager)
+        for resource in retired:
+            await _close_resource(resource)
 
     try:
         asyncio.run(_close_held())
@@ -236,12 +317,18 @@ def _reset_lifespan_state() -> None:
     """重置 lifespan 单例、活动配置与初始化锁，仅供测试隔离调用。
 
     一并重建 _shared_init_lock 与自动保存清理锁，避免跨事件循环复用绑定了旧循环的 asyncio.Lock。
+    复位 mcp.settings 的 streamable-http 配置，避免上一个用例的 host/port/stateless 泄漏。
     """
-    global _shared_client, _shared_download_manager, _shared_init_lock
+    global _shared_client, _shared_download_manager, _shared_init_lock, _active_resource
     _shared_client = None
     _shared_download_manager = None
+    _active_resource = None
+    _retired_resources.clear()
     set_active_config(None)
     _shared_init_lock = asyncio.Lock()
+    mcp.settings.stateless_http = False
+    mcp.settings.host = _DEFAULT_HTTP_HOST
+    mcp.settings.port = _DEFAULT_HTTP_PORT
     from .utils.auto_save import _reset_cleanup_state
 
     _reset_cleanup_state()
@@ -486,12 +573,19 @@ def cli_main() -> int:
     # 避免无 MCP Roots 时 path_utils 重建第二个 config 造成双事实来源
     set_active_config(config)
 
-    # 初始化日志系统并打印启动信息
-    setup_logging(
-        config.log_level,
-        config.log_file,
-        force_standard_logging=True,
-    )
+    # 初始化日志系统并打印启动信息。setup_logging 含目录创建等 I/O，只读容器或受限
+    # 账号下可能抛 OSError，此处捕获并降级为 stderr 输出与退出码 1，与配置错误的优雅
+    # 契约一致，避免直接 traceback 崩溃。OSError 不经 format_error_for_user：其未知错误
+    # 档案标签会误导排查方向，且回显的绝对路径会泄露用户目录结构。
+    try:
+        setup_logging(
+            config.log_level,
+            config.log_file,
+            force_standard_logging=True,
+        )
+    except OSError:
+        print("日志系统初始化失败（请检查日志目录权限或磁盘空间）", file=sys.stderr)
+        return 1
     logger.info(
         "Seedream MCP 启动: {} (version {})",
         SERVER_NAME,

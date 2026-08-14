@@ -1,12 +1,15 @@
 """生成类工具并行请求支持、schema 约束与失败结果封装测试。"""
 
 from importlib import import_module
+from typing import Any
 
 import pytest
 from mcp.types import TextContent
 from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.core._helpers import _add_usage_value
+from seedream_mcp.tools.core.results import aggregate_parallel_generation_results
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.image_to_image import handle_image_to_image
 from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
@@ -171,3 +174,78 @@ async def test_generation_handler_returns_call_tool_error_result_when_request_fa
     assert result.isError is True
     assert isinstance(result.structuredContent, dict)
     assert result.structuredContent["status"] == "failed"
+
+
+def test_add_usage_value_recursively_accumulates_nested_dict_subkeys() -> None:
+    """_add_usage_value 对嵌套 dict 值递归累加子键：多次传入同一嵌套键时数值子键累加。"""
+    usage: dict[str, Any] = {}
+    _add_usage_value(usage, "tool_usage", {"web_search": 5})
+    _add_usage_value(usage, "tool_usage", {"web_search": 5})
+
+    assert usage["tool_usage"]["web_search"] == 10
+
+
+def test_add_usage_value_scalar_numeric_accumulates_and_bool_str_skipped() -> None:
+    """标量数值累加；bool 与 str 跳过不写入，避免污染汇总。"""
+    usage: dict[str, Any] = {}
+    _add_usage_value(usage, "generated_images", 2)
+    _add_usage_value(usage, "generated_images", 3)
+    _add_usage_value(usage, "cached", True)
+    _add_usage_value(usage, "model", "doubao-seedream-5.0")
+
+    assert usage["generated_images"] == 5
+    assert "cached" not in usage
+    assert "model" not in usage
+
+
+def test_add_usage_value_deepcopies_dict_when_existing_is_non_dict() -> None:
+    """value 为 dict 但现有值为非 dict 时，deepcopy 覆盖写入并断开引用。"""
+    usage: dict[str, Any] = {"count": 5}
+    incoming = {"tool_usage": {"web_search": 1}}
+    _add_usage_value(usage, "count", incoming)
+
+    assert usage["count"] == {"tool_usage": {"web_search": 1}}
+    # deepcopy 后修改源 dict 不影响已写入的聚合结果
+    incoming["tool_usage"]["web_search"] = 999
+    assert usage["count"]["tool_usage"]["web_search"] == 1
+
+
+def test_aggregate_parallel_generation_results_deep_merges_usage() -> None:
+    """聚合多请求 usage：嵌套 dict 子键递归累加，标量数值累加，bool/str 跳过。"""
+    request_results = [
+        {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {
+                "tool_usage": {"web_search": 3},
+                "generated_images": 2,
+                "cached": True,
+                "model": "doubao-seedream-5.0",
+            },
+            "status": "completed",
+        },
+        {
+            "success": True,
+            "data": [{"url": "https://example.com/2.png"}],
+            "usage": {
+                "tool_usage": {"web_search": 4},
+                "generated_images": 3,
+                "cached": True,
+                "model": "doubao-seedream-5.0",
+            },
+            "status": "completed",
+        },
+    ]
+
+    aggregated = aggregate_parallel_generation_results(
+        request_results=request_results,
+        request_errors={},
+    )
+    usage = aggregated["usage"]
+
+    # 嵌套 dict 子键与标量数值均为各请求之和
+    assert usage["tool_usage"]["web_search"] == 7
+    assert usage["generated_images"] == 5
+    # bool 与 str 标量被跳过，不出现在聚合 usage 中
+    assert "cached" not in usage
+    assert "model" not in usage

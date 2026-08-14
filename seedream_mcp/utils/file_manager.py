@@ -20,9 +20,12 @@ from typing import Any
 from .errors import SeedreamMCPError
 from .formats import SUPPORTED_IMAGE_EXTENSIONS
 from .logging import get_logger
-from .os_utils import open_no_follow_write
+from .os_utils import open_temp_fd
 
 logger = get_logger(__name__)
+
+# stat.FILE_ATTRIBUTE_REPARSE_POINT 自 Python 3.12 起提供；3.10/3.11 缺失时回退到固定数值 0x400。
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 # 文件名长度上限，避免超出常见文件系统目录项长度限制
 _MAX_FILENAME_LENGTH = 200
@@ -70,7 +73,7 @@ def _is_reparse_point(path: Path) -> bool:
         st = path.lstat()
     except OSError:
         return False
-    return bool(st.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 class FileManagerError(SeedreamMCPError):
@@ -126,8 +129,8 @@ class FileManager:
     def validate_path(self, path: Path) -> bool:
         """验证路径是否在基础目录范围内。
 
-        通过 resolve 后做 relative_to 比较判定，可拦截包含 ``..`` 或经由符号链接
-        指向基础目录之外的路径。
+        复用 path_utils._is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
+        或经由符号链接指向基础目录之外的路径。
 
         Args:
             path: 要验证的路径。
@@ -135,31 +138,27 @@ class FileManager:
         Returns:
             路径在基础目录范围内返回 True，否则返回 False。
         """
+        from .path_utils import _is_within_resolved
+
         try:
             abs_path = path.resolve()
-            base_abs = self._base_abs
-
-            try:
-                abs_path.relative_to(base_abs)
+            if _is_within_resolved(abs_path, self._base_abs):
                 return True
-            except ValueError:
-                logger.warning("路径不在基础目录内: {}", abs_path)
-                return False
-
+            logger.warning("路径不在基础目录内: {}", abs_path)
+            return False
         except Exception as e:
             logger.warning("路径验证失败: {} -> {}", path, e)
             return False
 
     def _resolved_within_base(self, resolved_path: Path) -> bool:
-        """判断已 resolve 的路径是否位于基础目录内，直接 relative_to 比较，不再 resolve。
+        """判断已 resolve 的路径是否位于基础目录内，直接比较，不再 resolve。
 
+        复用 path_utils._is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
         供 cleanup_old_files 等热路径复用，避免对已 resolve 路径重复解析。
         """
-        try:
-            resolved_path.relative_to(self._base_abs)
-            return True
-        except ValueError:
-            return False
+        from .path_utils import _is_within_resolved
+
+        return _is_within_resolved(resolved_path, self._base_abs)
 
     def sanitize_filename(self, filename: str) -> str:
         """清理文件名，移除文件系统不安全字符并规避 Windows 保留设备名。
@@ -407,19 +406,32 @@ class FileManager:
                 ext = final_path.suffix
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
-            # 原子落盘：先写 .part 临时文件再 replace 替换，崩溃时仅残留 .part 而非损坏
-            # 目标文件，与 download_manager 下载路径的落盘语义一致。O_NOFOLLOW 防护由
-            # os_utils 统一实现，符号链接或打开失败抛 OSError 由下方 except 转 FileManagerError。
-            tmp_path = final_path.with_name(f"{final_path.name}.part")
+            # 原子落盘：open_temp_fd 经 tempfile.mkstemp 在 final_path 同目录创建不可预测
+            # 随机名临时文件并返回独占 fd，规避可预测临时路径被预置符号链接覆盖任意文件的
+            # TOCTOU；经 fd 写入后 os.replace 原子替换到 final_path，崩溃时仅残留随机临时
+            # 文件而非损坏目标。与 download_manager 下载路径的落盘语义一致，打开或写入失败
+            # 抛 OSError 由下方 except 转 FileManagerError。
+            fd, tmp_path = open_temp_fd(final_path.parent, suffix=".part")
             replaced = False
+            fd_handed_off = False
             try:
-                with open_no_follow_write(tmp_path) as f:
-                    f.write(data)
-                tmp_path.replace(final_path)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        fd_handed_off = True
+                        f.write(data)
+                finally:
+                    # os.fdopen 接管前抛错时手动关闭 fd 避免泄漏；已由 with 关闭时二次关闭
+                    # 抛 OSError，吞掉以不掩盖原始异常
+                    if not fd_handed_off:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                os.replace(tmp_path, final_path)
                 replaced = True
             finally:
                 # replace 成功后 tmp_path 已重命名不存在；异常路径含 KeyboardInterrupt 等
-                # 非 OSError 也须清理残留，与 download_manager 落盘鲁棒性对齐
+                # 非 OSError 也须清理残留随机临时文件，与 download_manager 落盘鲁棒性对齐
                 if not replaced:
                     tmp_path.unlink(missing_ok=True)
             return {
@@ -484,6 +496,10 @@ class FileManager:
         Returns:
             清理结果，包含删除文件数、释放字节数与错误列表。
         """
+        # days 小于 1 视为禁用清理，与 auto_save 的"0=不清理"语义统一，避免误删全部文件。
+        if days < 1:
+            logger.info("保留天数 {} 小于 1，跳过旧文件清理。", days)
+            return {"deleted_files": 0, "deleted_size": 0, "errors": []}
         # 以 epoch 秒比较 st_mtime，规避 datetime.fromtimestamp 受本地时区与夏令时
         # 跳变影响导致的清理边界漂移。
         cutoff_epoch = datetime.now().timestamp() - days * 86400
@@ -567,6 +583,10 @@ class FileManager:
                 # 跳过符号链接文件，其目标可能在 base_dir 之外。
                 if file_path.is_symlink():
                     continue
+                # 与目录分支对称：reparse point 文件会被 stat 跟随，命中则跳过。
+                if _is_reparse_point(file_path):
+                    logger.warning("跳过 reparse point 文件: {}", file_path)
+                    continue
                 try:
                     stat_result = file_path.stat()
                     if not stat.S_ISREG(stat_result.st_mode):
@@ -606,8 +626,8 @@ class FileManager:
 
         目录删除失败仅记录警告不计入 errors 列表，与历史行为一致。
         """
-        # 按深度逆序排序，先删深层空目录再删浅层。
-        for dir_path in sorted(directories, reverse=True):
+        # 按目录深度逆序排序，先删深层空目录再删浅层，使父目录在子目录删除后变空而被清理。
+        for dir_path in sorted(directories, key=lambda p: len(p.parts), reverse=True):
             try:
                 if not any(dir_path.iterdir()):
                     dir_path.rmdir()

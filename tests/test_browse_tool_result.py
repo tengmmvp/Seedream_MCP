@@ -132,3 +132,26 @@ def test_browse_images_input_rejects_oversized_offset() -> None:
     # 边界值合法
     assert BrowseImagesInput(offset=100000).offset == 100000
     assert BrowseImagesInput(offset=0).offset == 0
+
+
+@pytest.mark.asyncio
+async def test_browse_images_format_filter_all_unsupported_echoes_original(
+    workspace_root: Path,
+) -> None:
+    """format_filter 全部为不支持后缀时返回区分消息，structuredContent 回显用户原始输入。
+
+    用 .svg 而非任务示例的 .gif：formats.py 的 SUPPORTED_IMAGE_EXTENSIONS 含 .gif，
+    若用 .gif 会落入 supported_only 非空分支而不触发 format_filter_exhausted，无法覆盖
+    区分消息。.svg 不在支持集合内，可真正命中 exhausted 分支。断言区分消息含
+    "均不在支持列表"与"支持"，status 为 empty 且 isError 为 False；format_filter 保留
+    用户原始非空列表 [".svg"] 供回显，不缩减为空列表。
+    """
+    result = await handle_browse_images({"directory": ".", "format_filter": [".svg"]})
+
+    assert result.isError is False
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["status"] == "empty"
+    assert result.structuredContent["format_filter"] == [".svg"]
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "均不在支持列表" in text
+    assert "支持" in text

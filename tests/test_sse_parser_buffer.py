@@ -1,12 +1,17 @@
 """SSE 流式解析的缓冲区上限保护与事件聚合测试。"""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 import seedream_mcp.utils.sse_parser as sse_parser_module
 from seedream_mcp.utils.errors import SeedreamAPIError
-from seedream_mcp.utils.sse_parser import parse_sse_response, parse_sse_segment
+from seedream_mcp.utils.sse_parser import (
+    is_sse_response,
+    parse_sse_response,
+    parse_sse_segment,
+)
 
 
 class _FakeLog:
@@ -274,3 +279,32 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
     )
     assert truncated_result["truncated_events"] >= 1
     assert truncated_result["status"] == "partial"
+
+
+def _resp_with_content_type(content_type: str) -> SimpleNamespace:
+    """构造仅含 content-type 头的伪响应对象。"""
+    return SimpleNamespace(headers={"content-type": content_type})
+
+
+def test_is_sse_response_matches_plain_media_type() -> None:
+    """纯净 text/event-stream 判定为 SSE。"""
+    assert is_sse_response(_resp_with_content_type("text/event-stream")) is True
+
+
+def test_is_sse_response_strips_charset_parameter() -> None:
+    """带 charset 参数的 Content-Type 经分号剥离后仍判定为 SSE。"""
+    assert is_sse_response(_resp_with_content_type("text/event-stream; charset=utf-8")) is True
+
+
+def test_is_sse_response_strips_leading_whitespace() -> None:
+    """含前导空白的非法 Content-Type 经 strip 后仍判定为 SSE，避免误判降级。"""
+    assert is_sse_response(_resp_with_content_type(" text/event-stream")) is True
+
+
+def test_is_sse_response_rejects_non_sse_media_type() -> None:
+    assert is_sse_response(_resp_with_content_type("application/json")) is False
+
+
+def test_is_sse_response_rejects_missing_content_type() -> None:
+    """缺省 content-type 头时返回 False，交由调用方走非流式解析。"""
+    assert is_sse_response(SimpleNamespace(headers={})) is False

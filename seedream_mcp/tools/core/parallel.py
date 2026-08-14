@@ -99,7 +99,10 @@ def _try_get_shared_client(
 
     from ...client import SeedreamClient
 
-    state = ctx.request_context.lifespan_context
+    try:
+        state = ctx.request_context.lifespan_context
+    except AttributeError:
+        return None
     if isinstance(state, dict):
         shared = state.get("client")
         if isinstance(shared, SeedreamClient):
@@ -119,7 +122,10 @@ def _try_get_shared_download_manager(
 
     from ...utils.download_manager import DownloadManager
 
-    state = ctx.request_context.lifespan_context
+    try:
+        state = ctx.request_context.lifespan_context
+    except AttributeError:
+        return None
     if isinstance(state, dict):
         shared = state.get("download_manager")
         if isinstance(shared, DownloadManager):

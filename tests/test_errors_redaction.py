@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 from seedream_mcp.utils.errors import (
+    SeedreamAPIError,
     _filter_sensitive_data,
     _redact_bearer_tokens,
     _truncate_value_for_output,
+    format_error_for_user,
 )
 
 # ==================== _filter_sensitive_data ====================
@@ -116,3 +118,40 @@ def test_truncate_value_returns_small_container_unchanged() -> None:
     small = {"a": 1}
 
     assert _truncate_value_for_output(small) == small
+
+
+# ==================== 连字符敏感键名（边界匹配） ====================
+
+
+def test_filter_sensitive_data_redacts_hyphenated_sensitive_keys() -> None:
+    """连字符键名 api-key、x-api-key 命中边界匹配，值被脱敏为 ***，不泄露原始凭据。"""
+    data = {"api-key": "secret123", "x-api-key": "secret456"}
+
+    filtered = _filter_sensitive_data(data)
+
+    assert filtered == {"api-key": "***", "x-api-key": "***"}
+    assert "secret123" not in str(filtered)
+    assert "secret456" not in str(filtered)
+
+
+# ==================== SeedreamAPIError message 的 Bearer 脱敏（集成） ====================
+
+
+def test_api_error_to_dict_redacts_bearer_in_message() -> None:
+    """SeedreamAPIError.to_dict 的 message 经 Bearer 脱敏，原始令牌不进入结构化输出。"""
+    err = SeedreamAPIError(message="Invalid Bearer sk-secret-token-123")
+
+    rendered_message = err.to_dict()["message"]
+
+    assert "sk-secret-token-123" not in rendered_message
+    assert "Bearer ***" in rendered_message
+
+
+def test_format_error_for_user_redacts_bearer_in_api_error_message() -> None:
+    """format_error_for_user 对 APIError 的 message 做 Bearer 脱敏，令牌不进入用户可见输出。"""
+    err = SeedreamAPIError(message="Invalid Bearer sk-secret-token-123")
+
+    rendered = format_error_for_user(err)
+
+    assert "sk-secret-token-123" not in rendered
+    assert "Bearer ***" in rendered

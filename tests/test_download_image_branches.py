@@ -6,6 +6,7 @@
 不依赖真实网络。
 """
 
+import errno
 import os
 import time
 from pathlib import Path
@@ -79,6 +80,25 @@ async def test_download_image_does_not_retry_generic_exception(
         await manager.download_image("https://example.com/img.png", save_path)
 
     # 仅尝试一次，原样抛出不重试
+    assert session.call_count == 1
+    assert not save_path.exists()
+
+
+async def test_download_image_does_not_retry_on_disk_quota_exceeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """EDQUOT 磁盘配额超限属永久性错误，立即抛出 DownloadError 不重试。"""
+    manager = DownloadManager()
+    session = _RaisingThenSuccessSession(
+        OSError(errno.EDQUOT, "disk quota exceeded"), _png_success_response()
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="文件系统永久错误"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 配额超限需管理员介入，重试仅徒增延迟，故单次尝试即终态抛出
     assert session.call_count == 1
     assert not save_path.exists()
 
@@ -178,7 +198,7 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
 ) -> None:
     """aiofiles.open 接管 fd 前抛错时，finally 兜底 os.close 关闭 fd 避免泄漏。
 
-    open_no_follow_fd 已成功返回 fd，但 aiofiles.open 包装该 fd 时失败：fd_handed_off
+    open_temp_fd 已成功返回 fd，但 aiofiles.open 包装该 fd 时失败：fd_handed_off
     仍为 False，finally 分支手动 os.close(fd)。此处追踪 os.close 调用以确认兜底生效。
     """
     manager = DownloadManager()
@@ -218,5 +238,5 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
             time.monotonic(),
         )
 
-    # finally 兜底已关闭 open_no_follow_fd 产出的 fd，避免泄漏
+    # finally 兜底已关闭 open_temp_fd 产出的 fd，避免泄漏
     assert len(closed_fds) == 1

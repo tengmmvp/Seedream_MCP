@@ -6,12 +6,14 @@
 
 import asyncio
 import ipaddress
+from unittest.mock import AsyncMock
 
 import pytest
 
 from seedream_mcp.utils.download_manager import (
     DownloadError,
     DownloadManager,
+    _PublicIpPinningResolver,
     _public_ip_rejection_reason,
 )
 
@@ -143,3 +145,69 @@ def test_public_ip_rejection_rejects_ipv4_mapped_embedded_private() -> None:
     """IPv4-mapped 段 ::ffff:0:0/96 内嵌私网 IPv4 须拒绝。"""
     ip = ipaddress.ip_address("::ffff:192.168.0.1")
     assert _public_ip_rejection_reason(ip) is not None
+
+
+# ==================== _PublicIpPinningResolver：resolve-and-pin ====================
+
+
+async def test_public_ip_pinning_resolver_returns_only_public_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """resolve 只返回 _resolve_public_ips 校验通过的公网 IP，hostname 保留原 host 维护 SNI。"""
+    manager = DownloadManager()
+    monkeypatch.setattr(manager, "_resolve_public_ips", AsyncMock(return_value=("203.0.113.5",)))
+
+    resolver = _PublicIpPinningResolver(manager)
+    results = await resolver.resolve(host="example.com", port=443)
+
+    assert len(results) == 1
+    assert results[0]["host"] == "203.0.113.5"
+    assert results[0]["hostname"] == "example.com"
+
+
+async def test_public_ip_pinning_resolver_preserves_hostname_for_multiple_ips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多个公网 IP 均返回，每条 hostname 保留为原 host，供 TLS SNI 与证书校验使用。"""
+    manager = DownloadManager()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_public_ips",
+        AsyncMock(return_value=("203.0.113.5", "198.51.100.7")),
+    )
+
+    resolver = _PublicIpPinningResolver(manager)
+    results = await resolver.resolve(host="example.com", port=443)
+
+    assert len(results) == 2
+    assert {r["host"] for r in results} == {"203.0.113.5", "198.51.100.7"}
+    assert all(r["hostname"] == "example.com" for r in results)
+
+
+async def test_public_ip_pinning_resolver_no_entries_when_no_public_ips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_public_ips 返回空时 resolve 不返回可用条目，私网/非法 IP 无从进入连接目标。"""
+    manager = DownloadManager()
+    monkeypatch.setattr(manager, "_resolve_public_ips", AsyncMock(return_value=()))
+
+    resolver = _PublicIpPinningResolver(manager)
+    results = await resolver.resolve(host="example.com", port=443)
+
+    assert results == []
+
+
+async def test_public_ip_pinning_resolver_propagates_private_ip_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_resolve_public_ips 拒绝私网解析时 resolve 不返回可用条目，错误向上传播。"""
+    manager = DownloadManager()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_public_ips",
+        AsyncMock(side_effect=DownloadError("域名解析到不安全地址(非公网地址)")),
+    )
+
+    resolver = _PublicIpPinningResolver(manager)
+    with pytest.raises(DownloadError, match="非公网"):
+        await resolver.resolve(host="example.com", port=443)

@@ -13,6 +13,7 @@ from ._helpers import (
     _add_usage_value,
     _classify_generation_error_type,
     _extract_parallel_request_error,
+    _is_generation_failed,
 )
 from .context import GenerationExecutionContext
 
@@ -66,7 +67,7 @@ def aggregate_parallel_generation_results(
     request_count = len(request_results)
 
     for request_index, result in enumerate(request_results, start=1):
-        if not result or not result.get("success"):
+        if not result or _is_generation_failed(result):
             error_message = _extract_parallel_request_error(
                 result, request_errors.get(request_index)
             )
@@ -321,7 +322,7 @@ def format_generation_response(
     Returns:
         格式化后的响应文本，包含完整生成信息及元数据。
     """
-    if not result.get("success"):
+    if _is_generation_failed(result):
         return _format_failure_section(result)
 
     if images is None:
@@ -379,7 +380,7 @@ def _build_generation_structured_result(
     # 数据，故此处不做截断；并行与组图场景的大载荷由调用方或客户端按需处理。
     structured: dict[str, Any] = {
         "tool": tool_name,
-        "success": bool(result.get("success")),
+        "success": not _is_generation_failed(result),
         "status": result.get("status"),
         "prompt": context.prompt,
         "size": context.size,
@@ -403,7 +404,7 @@ def _build_generation_structured_result(
     else:
         structured["auto_save"] = {"enabled": False}
 
-    if not result.get("success"):
+    if _is_generation_failed(result):
         raw_error = result.get("error", "未知错误")
         structured["error"] = (
             raw_error

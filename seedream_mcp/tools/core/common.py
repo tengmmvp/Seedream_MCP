@@ -21,6 +21,7 @@ from ._helpers import (
     PROGRESS_RECEIVED,
     PROGRESS_VALIDATED,
     _classify_generation_error_type,
+    _is_generation_failed,
     _safe_ctx_log,
     _safe_report_progress,
     _yield_for_cancellation,
@@ -141,7 +142,8 @@ async def execute_generation_handler(
 
         auto_save_results: list[Any] = []
         auto_save_error: str | None = None
-        if context.enable_auto_save and result.get("success"):
+        is_generation_failed = _is_generation_failed(result)
+        if context.enable_auto_save and not is_generation_failed:
             try:
                 await _safe_report_progress(
                     ctx, progress=PROGRESS_AUTOSAVE_START, message="开始自动保存"
@@ -212,14 +214,14 @@ async def execute_generation_handler(
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
         await _safe_ctx_log(
             ctx,
-            "info" if result.get("success") else "warning",
-            f"{tool_name} {'完成' if result.get('success') else '未成功'}，"
+            "warning" if is_generation_failed else "info",
+            f"{tool_name} {'未成功' if is_generation_failed else '完成'}，"
             f"共 {len(images)} 张图片",
         )
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)],
             structuredContent=structured_result,
-            isError=not bool(result.get("success")),
+            isError=is_generation_failed,
         )
     except Exception as exc:
         module_logger.error("{}处理失败", failure_prefix, exc_info=True)

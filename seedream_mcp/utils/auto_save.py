@@ -171,18 +171,27 @@ class AutoSaveManager:
             await self.download_manager.close()
 
     async def _maybe_cleanup(self) -> None:
-        """按目录节流触发旧文件清理，每个 base_dir 在最短间隔内仅执行一次。"""
+        """按目录节流触发旧文件清理，每个 base_dir 在最短间隔内仅执行一次。
+
+        节流时间戳仅在清理成功后保留，失败时回滚到清理前的值，使下次批量保存可尽快重试，
+        避免瞬时清理失败被节流一整小时。重试频率受限于批量保存调用频率，不会形成即时重试
+        风暴；锁内完成检查与占位保证并发请求不会同时进入清理。
+        """
         if self.cleanup_days <= 0:
             return
         base_key = str(self.file_manager.base_dir)
         now = time.time()
         async with _cleanup_lock:
-            if now - _cleanup_last_run.get(base_key, 0.0) < _CLEANUP_MIN_INTERVAL_SECONDS:
+            previous = _cleanup_last_run.get(base_key, 0.0)
+            if now - previous < _CLEANUP_MIN_INTERVAL_SECONDS:
                 return
             _cleanup_last_run[base_key] = now
         try:
             await self.cleanup_old_files(self.cleanup_days)
         except Exception as e:
+            # 回滚到清理前的时间戳，使下次批量保存能立即重试而非等待完整节流间隔。
+            async with _cleanup_lock:
+                _cleanup_last_run[base_key] = previous
             logger.warning("自动清理失败: {}", e, exc_info=True)
 
     def _extension_from_mime(self, mime: str | None) -> str:

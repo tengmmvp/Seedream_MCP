@@ -352,6 +352,17 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     return merged_values
 
 
+def _value_is_set(value: object) -> bool:
+    """判定一个取值是否应视为已设置。
+
+    字符串需 strip 后非空，与系统环境变量、.env 文件值的空值判定保持一致；
+    其余类型仅排除 None，使布尔、整数等显式覆盖仍被采纳。
+    """
+    if isinstance(value, str):
+        return bool(value.strip())
+    return value is not None
+
+
 def _pick_config_value(
     overrides: Mapping[str, object],
     key: str,
@@ -362,18 +373,20 @@ def _pick_config_value(
     """
     按优先级选取配置值：overrides > 系统环境变量 > env 文件 > 默认值。
 
-    系统环境变量直接读取 os.environ，因配置构建不再向其注入 .env 值，
-    故 os.environ 仅含真实的系统环境变量。
+    三层来源统一采用 _value_is_set 做空值判定，空白字符串在任一层都视为未设置而穿透到
+    下一层，避免空白 override 被原样采用而空白 env/file 被当作未设置的语义分裂。系统
+    环境变量直接读取 os.environ，因配置构建不再向其注入 .env 值，故 os.environ 仅含
+    真实的系统环境变量。
     """
-    if key in overrides and overrides[key] is not None:
+    if key in overrides and _value_is_set(overrides[key]):
         return overrides[key]
 
     env_value = os.getenv(env_key)
-    if env_value is not None and env_value.strip():
+    if _value_is_set(env_value):
         return env_value
 
     file_value = env_values.get(env_key)
-    if file_value is not None and str(file_value).strip():
+    if _value_is_set(file_value):
         return file_value
 
     return default_value

@@ -117,6 +117,36 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     assert cleanup_calls == [30, 30]
 
 
+async def test_maybe_cleanup_retries_after_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理失败时节流时间戳回滚，下次批量保存可立即重试而非等待完整间隔。"""
+    from seedream_mcp.utils import auto_save as auto_save_module
+
+    auto_save_module._cleanup_last_run.clear()
+    calls: list[int] = []
+
+    async def failing_then_succeeding_cleanup(days: int) -> dict:
+        calls.append(days)
+        if len(calls) == 1:
+            raise RuntimeError("transient cleanup failure")
+        return {"deleted_files": 0, "deleted_size": 0, "errors": []}
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
+    try:
+        monkeypatch.setattr(manager, "cleanup_old_files", failing_then_succeeding_cleanup)
+
+        # 首次清理失败：异常被吞，时间戳回滚使下次可重试
+        await manager._maybe_cleanup()
+        assert calls == [30]
+
+        # 紧接着的第二次因上次失败未占用节流窗口，可立即重试
+        await manager._maybe_cleanup()
+        assert calls == [30, 30]
+    finally:
+        await manager.close()
+
+
 def test_is_known_image_bytes_detects_image_magic() -> None:
     """下载字节签名校验：识别真实图片 magic，拒绝 HTML/可执行等伪造内容。"""
     from seedream_mcp.utils.formats import is_known_image_bytes

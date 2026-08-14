@@ -55,15 +55,16 @@ def test_save_bytes_rejects_symlink(tmp_path: Path) -> None:
         manager.save_bytes(link, b"data")
 
 
-def test_save_bytes_atomic_writes_and_leaves_no_part(tmp_path: Path) -> None:
-    """save_bytes 经 .part 临时文件原子 replace 落盘，成功后不留 .part 残留。"""
+def test_save_bytes_atomic_write_leaves_no_temp(tmp_path: Path) -> None:
+    """save_bytes 经随机名临时文件原子 replace 落盘，成功后不留临时文件残留。"""
     manager = FileManager(base_dir=tmp_path)
     path = tmp_path / "out.png"
 
     result = manager.save_bytes(path, b"payload")
 
     assert path.read_bytes() == b"payload"
-    assert not (tmp_path / "out.png.part").exists()
+    # 成功落盘后目录内仅最终文件，无随机名临时文件残留
+    assert list(tmp_path.iterdir()) == [path]
     assert result["file_size"] == len(b"payload")
     assert result["file_path"] == str(path)
 
@@ -94,25 +95,22 @@ def test_save_bytes_no_overwrite_renames_on_conflict(tmp_path: Path) -> None:
     assert len(png_files) == 2
 
 
-def test_save_bytes_cleans_part_on_write_failure(
+def test_save_bytes_cleans_random_temp_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """写入失败时 .part 临时文件被 finally 清理，不留残留。"""
+    """replace 失败时随机名临时文件被 finally 清理，目录内不留残留。"""
     from seedream_mcp.utils import file_manager as fm_module
 
     manager = FileManager(base_dir=tmp_path)
     path = tmp_path / "out.png"
-    # 预创建 .part 文件模拟写入中途产物
-    part_path = tmp_path / "out.png.part"
-    part_path.write_bytes(b"partial")
 
-    def _raise_on_write(_path: Path) -> None:
-        raise OSError("disk full")
+    def _raise_on_replace(_src: object, _dst: object) -> None:
+        raise OSError("replace failed")
 
-    monkeypatch.setattr(fm_module, "open_no_follow_write", _raise_on_write)
+    monkeypatch.setattr(fm_module.os, "replace", _raise_on_replace)
 
     with pytest.raises(FileManagerError, match="写入文件失败"):
         manager.save_bytes(path, b"data")
 
-    # .part 文件应被 finally 清理
-    assert not part_path.exists()
+    # 失败路径清理随机名临时文件，目录内无残留
+    assert list(tmp_path.iterdir()) == []

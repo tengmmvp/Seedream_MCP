@@ -12,7 +12,9 @@ from typing import Any
 
 import pytest
 
+import seedream_mcp.tools.impl.browse_images as browse_module
 import seedream_mcp.utils.path_utils as path_utils_module
+from seedream_mcp.tools.impl.browse_images import _cached_find_images_in_directory
 from seedream_mcp.utils.path_utils import find_images_in_directory
 
 
@@ -210,3 +212,71 @@ def test_find_images_swallows_permission_error(
     monkeypatch.setattr(path_utils_module.os, "scandir", _raise_permission)
 
     assert find_images_in_directory(str(tmp_path), recursive=False) == []
+
+
+def test_cached_find_images_recursive_uses_ttl_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """递归扫描用 TTL 缓存：TTL 内命中缓存返回陈旧结果，TTL 过期后重扫看到子目录新增图。
+
+    子目录新增文件不改变顶层目录 mtime，递归无法用 mtime 失效，改用 TTL：TTL 内复用缓存
+    换取翻页性能（接受短时陈旧），过期后重新扫描反映新增。
+    """
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    browse_module._DIRECTORY_SCAN_CACHE.clear()
+
+    # scan_limit 大于目录图数，确保扫到末尾从而缓存全量
+    first = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
+    )
+    assert [p.name for p in first] == ["a.png"]
+    assert len(browse_module._DIRECTORY_SCAN_CACHE) == 1
+
+    # 向已存在子目录新增第 2 张图；顶层目录 mtime 不变
+    (sub / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # TTL 内再次调用命中缓存，返回陈旧的 1 张
+    within_ttl = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
+    )
+    assert [p.name for p in within_ttl] == ["a.png"]
+
+    # 模拟 TTL 过期：推进 browse_images.time.monotonic 返回值越过 TTL
+    ttl = browse_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
+    real_monotonic = browse_module.time.monotonic
+    base = real_monotonic()
+    monkeypatch.setattr(browse_module.time, "monotonic", lambda: base + ttl + 1)
+
+    expired = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
+    )
+    assert sorted(p.name for p in expired) == ["a.png", "b.png"]
+
+
+def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
+    """缓存命中返回全量列表浅拷贝，不同 scan_limit 的翻页共享同一缓存条目。"""
+    for name in ("a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    browse_module._DIRECTORY_SCAN_CACHE.clear()
+
+    # scan_limit 大于图数，扫到末尾缓存全量 3 张
+    first = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
+    )
+    assert len(first) == 3
+    assert len(browse_module._DIRECTORY_SCAN_CACHE) == 1
+
+    # 不同 scan_limit（模拟翻页）命中同一缓存，返回全量 3 而非 scan_limit=2 的前缀
+    paged = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=2
+    )
+    assert len(paged) == 3
+
+    # 返回浅拷贝：调用方修改不影响内部缓存
+    paged.append(Path("/fake.png"))
+    again = _cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
+    )
+    assert len(again) == 3

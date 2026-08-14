@@ -15,9 +15,14 @@ from .errors import SeedreamAPIError
 
 
 def is_sse_response(response: Any) -> bool:
-    """判断响应是否为 SSE 事件流。"""
+    """判断响应是否为 SSE 事件流。
+
+    先剥离 ``;`` 参数与首尾空白再判定 media type，兼容含前导空白的
+    `` text/event-stream`` 与带 charset 参数的 ``text/event-stream; charset=utf-8``。
+    """
     content_type = str(response.headers.get("content-type", ""))
-    return content_type.startswith("text/event-stream")
+    media_type = content_type.split(";")[0].strip().lower()
+    return media_type.startswith("text/event-stream")
 
 
 def format_sse_success_event(event: dict[str, Any], model_id: str) -> dict[str, Any]:

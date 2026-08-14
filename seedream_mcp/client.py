@@ -51,6 +51,10 @@ _PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 # parse_retry_after 限制在 [1, 300]，不共用此上限
 _MAX_BACKOFF_SECONDS = 60
 
+# 工作区 roots 元组 → 已 resolve 的 base 列表，跨图复用避免每图重复 resolve 同一根目录。
+# 工作区 Roots 集合有限且稳定，缓存无淘汰；若部署场景会出现大量不同 Roots 需改为 LRU。
+_resolved_bases_cache: dict[tuple[str, ...], list[Path]] = {}
+
 
 class SeedreamClient:
     """
@@ -856,8 +860,11 @@ class SeedreamClient:
 
     @staticmethod
     def _serialize_request(request_data: dict[str, Any]) -> bytes:
-        """将请求体序列化为 UTF-8 bytes，供 httpx 直接发送以跳过事件循环内编码。"""
-        return json.dumps(request_data).encode("utf-8")
+        """将请求体序列化为 UTF-8 bytes，供 httpx 直接发送以跳过事件循环内编码。
+
+        关闭 ensure_ascii 以 UTF-8 原样输出非 ASCII 字符，避免 ASCII 转义序列使中文提示词膨胀。
+        """
+        return json.dumps(request_data, ensure_ascii=False).encode("utf-8")
 
     def _raise_api_error_for(
         self,
@@ -1084,8 +1091,8 @@ class SeedreamClient:
         须为常规文件、扩展名合法、大小在限内且最终分量非符号链接，避免多 Root 工作区下
         选到无效同名条目，导致签名与读取锁定不同文件而命中陈旧缓存。
 
-        base 一次性 resolve 并在循环与复核间复用，避免经 is_path_within_any_base 对每个
-        base 重复解析，降低网络挂载工作区下批量参考图预处理的 resolve 开销。
+        已 resolve 的 base 列表按 workspace_roots 缓存并在跨图间复用，避免批量多图时每图
+        重复 resolve 同一根目录，降低网络挂载工作区下的 resolve 开销。
         """
         import stat as stat_module
         from .utils.formats import SUPPORTED_IMAGE_EXTENSIONS
@@ -1114,13 +1121,16 @@ class SeedreamClient:
                 return None
             return st
 
-        # 预 resolve 所有 base 一次，供下方多次越界判定复用，忽略 resolve 失败的根
-        resolved_bases: list[Path] = []
-        for root in workspace_roots:
-            try:
-                resolved_bases.append(Path(root).resolve())
-            except (OSError, ValueError):
-                continue
+        # 已 resolve 的 base 按 workspace_roots 缓存，跨图复用避免每图重复 resolve
+        resolved_bases = _resolved_bases_cache.get(workspace_roots)
+        if resolved_bases is None:
+            resolved_bases = []
+            for root in workspace_roots:
+                try:
+                    resolved_bases.append(Path(root).resolve())
+                except (OSError, ValueError):
+                    continue
+            _resolved_bases_cache[workspace_roots] = resolved_bases
 
         def _within(candidate: Path) -> bool:
             cand_str = str(candidate).lstrip()

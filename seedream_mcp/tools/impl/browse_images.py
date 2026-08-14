@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,13 +37,20 @@ logger = get_logger(__name__)
 
 # ==================== 目录扫描缓存 ====================
 
-# 进程级目录图片列表缓存，消除深翻页 O(offset) 重复文件系统扫描。
-# 键为 (目录路径, recursive, max_depth, 格式过滤元组)，值为 (目录 mtime_ns, 排序后图片路径列表)。
-# 同目录翻页命中缓存时跳过 os.scandir 全量扫描；目录 mtime 变化时惰性失效。
-# 单事件循环内各请求按目录串行 await，跨请求并发经由 GIL 保证 dict 读写原子性，
-# 最坏情况为缓存击穿即多请求各扫一次再覆写，仅影响性能不影响正确性。
-_DIRECTORY_SCAN_CACHE: dict[tuple[str, bool, int, tuple[str, ...]], tuple[int, list[Path]]] = {}
+# 进程级目录图片列表缓存，消除翻页重复文件系统扫描。
+# 键为 (目录路径, recursive, max_depth, 格式过滤元组)，不含 limit：同目录同配置的不同翻页
+# 共享一份全量有序列表，命中时返回浅拷贝供调用方切片，将深翻页从每页扫描降为首次扫描加
+# O(1) 命中。值为 (目录 mtime_ns, 捕获时的 monotonic 秒, 全量有序图片列表)。非递归以目录
+# mtime 失效，新增图片立即反映；递归因子目录变更不改顶层 mtime，用 TTL 失效，接受短时
+# 陈旧换取翻页性能。单事件循环内各请求按目录串行 await，跨请求并发经由 GIL 保证 dict
+# 读写原子性，最坏情况为缓存击穿即多请求各扫一次再覆写，仅影响性能。
+_DIRECTORY_SCAN_CACHE: dict[
+    tuple[str, bool, int, tuple[str, ...]], tuple[int | None, float, list[Path]]
+] = {}
 _DIRECTORY_SCAN_CACHE_MAX_ENTRIES = 64
+_DIRECTORY_SCAN_CACHE_MAX_LIST_LEN = 2000
+# 递归扫描缓存 TTL：子目录新增图片不改变顶层目录 mtime，以 TTL 兜底保证最终一致。
+_DIRECTORY_SCAN_CACHE_TTL_SECONDS = 5.0
 
 
 def _get_directory_mtime_ns(path: Path) -> int | None:
@@ -59,23 +67,25 @@ def _cached_find_images_in_directory(
     recursive: bool,
     max_depth: int,
     format_filter: list[str] | None,
+    scan_limit: int,
 ) -> list[Path]:
-    """带进程级缓存的目录图片扫描，目录 mtime 变更时惰性失效。
+    """带进程级缓存的目录图片扫描，翻页共享全量列表缓存。
 
-    缓存未命中时全量扫描目录并缓存完整排序列表；同目录后续翻页直接复用缓存，
-    将深翻页从每次 O(offset) 文件系统扫描降为单次全量扫描加 O(1) 缓存命中。
-    缓存键含 recursive、max_depth 与 format_filter，避免不同扫描配置互相污染。
-    目录 mtime 变化时缓存失效，下次访问重新全量扫描。非递归扫描仅追踪顶层目录
-    mtime，递归扫描的子目录变更不触发失效。
+    缓存键不含 scan_limit，同目录同扫描配置的不同翻页共享一份全量有序列表，命中时返回
+    浅拷贝供调用方切片，将深翻页从每页文件系统扫描降为首次扫描加 O(1) 命中。非递归扫描以
+    目录 mtime 失效，新增图片立即反映；递归扫描因子目录变更不改变顶层 mtime，改用 TTL
+    失效，接受短时陈旧换取翻页性能。未命中时以 scan_limit 早停扫描，仅在扫到目录末尾、
+    结果数小于 scan_limit 时方缓存全量列表；超过上限的大目录不缓存，每次按 scan_limit 早停。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
         recursive: 是否递归扫描子目录。
         max_depth: 递归最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
+        scan_limit: 扫描数量上限，用于未命中时的早停与是否扫到目录末尾的判定。
 
     Returns:
-        排序后的图片路径列表，扫描失败时返回空列表。
+        排序后的图片路径列表，缓存命中时为全量，未命中时至多 scan_limit 条。
     """
     cache_key = (
         str(resolved_dir),
@@ -83,24 +93,39 @@ def _cached_find_images_in_directory(
         max_depth,
         tuple(format_filter) if format_filter else (),
     )
-    current_mtime = _get_directory_mtime_ns(resolved_dir)
     cached = _DIRECTORY_SCAN_CACHE.get(cache_key)
-    if cached is not None and current_mtime is not None and cached[0] == current_mtime:
-        return cached[1]
+    if cached is not None:
+        captured_mtime, captured_at, images = cached
+        fresh = (
+            time.monotonic() - captured_at < _DIRECTORY_SCAN_CACHE_TTL_SECONDS
+            if recursive
+            else _get_directory_mtime_ns(resolved_dir) == captured_mtime
+        )
+        if fresh:
+            return list(images)
+    # 扫描前捕获目录 mtime，使缓存写入的指纹与 images 自洽：扫描与 stat 之间若有并发
+    # 写入，扫描后捕获的 mtime 会反映新增而 images 未含，命中时持续返回陈旧列表。递归
+    # 扫描不依赖 mtime 失效，跳过捕获。
+    base_mtime = _get_directory_mtime_ns(resolved_dir) if not recursive else None
     images = find_images_in_directory(
         directory=str(resolved_dir),
         recursive=recursive,
         max_depth=max_depth,
         extensions=format_filter,
+        limit=scan_limit,
     )
-    if current_mtime is not None:
+    # 仅当扫到目录末尾、结果数小于 scan_limit 时 images 才是完整列表，方可缓存全量；
+    # 等于 scan_limit 说明目录更大、仅取得前缀，不缓存以免翻页取到错误前缀。
+    if len(images) < scan_limit and len(images) <= _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
         if len(_DIRECTORY_SCAN_CACHE) >= _DIRECTORY_SCAN_CACHE_MAX_ENTRIES:
             # 驱逐最旧条目；并发 to_thread 下 next(iter())+pop 可能竞态抛 KeyError，捕获容错
             try:
                 _DIRECTORY_SCAN_CACHE.pop(next(iter(_DIRECTORY_SCAN_CACHE)))
             except KeyError:
                 pass
-        _DIRECTORY_SCAN_CACHE[cache_key] = (current_mtime, images)
+        # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空；非递归仅在 stat 成功时缓存
+        if recursive or base_mtime is not None:
+            _DIRECTORY_SCAN_CACHE[cache_key] = (base_mtime, time.monotonic(), images)
     return images
 
 
@@ -262,6 +287,7 @@ def _scan_and_filter_directory(
         recursive=recursive,
         max_depth=max_depth,
         format_filter=format_filter,
+        scan_limit=remaining,
     )
     new_entries: list[tuple[Path, Path]] = []
     for image_path in matched_images:
@@ -383,12 +409,15 @@ async def _handle_browse_images_impl(
     offset = arguments.get("offset", BrowseImagesInput.DEFAULT_OFFSET)
     format_filter = arguments.get("format_filter")
     # 格式过滤仅保留受支持的图片扩展名，避免以非图片后缀探测文件。
-    # 过滤后若为空表示用户指定后缀均不受支持，标记后跳过扫描并返回空结果；
+    # 全部后缀均不受支持时标记 format_filter_exhausted 并跳过扫描；此时 format_filter
+    # 保留用户原始输入供 structuredContent 回显，不缩减为空列表。
     # 不能将空列表传给 find_images_in_directory，因其把空列表视为未限制而扫描全部。
     format_filter_exhausted = False
     if format_filter:
-        format_filter = [ext for ext in format_filter if ext in SUPPORTED_IMAGE_EXTENSIONS]
-        if not format_filter:
+        supported_only = [ext for ext in format_filter if ext in SUPPORTED_IMAGE_EXTENSIONS]
+        if supported_only:
+            format_filter = supported_only
+        else:
             format_filter_exhausted = True
     show_details = bool(arguments.get("show_details", BrowseImagesInput.DEFAULT_SHOW_DETAILS))
 
@@ -491,8 +520,8 @@ async def _handle_browse_images_impl(
         limit,
     )
 
-    # 搜索图片文件：_scan_and_filter_directory 经 _cached_find_images_in_directory 全量扫描目录
-    # 并按 mtime 缓存，翻页命中缓存跳过 os.scandir；scan_limit 仅用于切片判定 has_more。
+    # 搜索图片文件：_scan_and_filter_directory 经 _cached_find_images_in_directory 扫描目录，
+    # 翻页共享全量列表缓存（非递归按 mtime 失效、递归按 TTL 失效），scan_limit 用于早停与切片判定 has_more。
     # format_filter_exhausted 时跳过扫描，all_images 保持为空，由下方空结果分支统一返回。
     # 扫描与扫描后的 resolve、越界判定、去重整体下沉到 _scan_and_filter_directory 在线程内
     # 执行；仅进度上报留在事件循环。深翻页大 offset 或网络挂载目录下 resolve 不再阻塞事件循环。
@@ -537,10 +566,18 @@ async def _handle_browse_images_impl(
     total_count = None if has_more else len(all_images)
 
     # 处理当前页为空的情况：
-    # - total_count == 0：确实无匹配图片，含 format_filter_exhausted 场景
+    # - format_filter_exhausted：用户指定后缀全部不受支持，返回独立区分消息
+    # - total_count == 0：确实无匹配图片
     # - total_count > 0：offset 超出最后一页越界，仍需返回实际总数供客户端正确翻页
     if not images:
-        if total_count == 0:
+        if format_filter_exhausted:
+            supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
+            user_formats = ", ".join(format_filter) if format_filter else ""
+            message = (
+                f"指定的图片格式 {user_formats} 均不在支持列表内，" f"支持: {supported_list}。"
+            )
+            log_message = "图片格式过滤条件全部不受支持"
+        elif total_count == 0:
             message = "未找到图片文件，请确认目录或过滤条件。"
             log_message = "未找到匹配的图片文件"
         else:

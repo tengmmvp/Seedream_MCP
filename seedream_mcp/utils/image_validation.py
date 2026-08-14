@@ -294,6 +294,10 @@ def _validate_data_uri(data_uri: str) -> str:
 def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     """验证图像输入的有效性，支持 HTTP/HTTPS URL、本地文件路径与 Data URI 三种格式。
 
+    本函数对本地文件路径仅校验存在性、格式与维度，不强制工作区越界校验。调用方须先经
+    path_utils.validate_image_path 完成基于 MCP Roots 的越界判定后再调用本函数，避免直接
+    传入本地路径绕过工作区边界。
+
     Args:
         image: 图像 URL、文件路径或 Data URI。
         skip_dimensions: 是否跳过本地文件的像素维度校验。
