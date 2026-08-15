@@ -364,6 +364,40 @@ def test_redact_sensitive_message_long_space_run_stays_fast() -> None:
     assert pipeline_elapsed < 0.1
 
 
+def test_redact_sensitive_message_unicode_whitespace_run_stays_fast() -> None:
+    """性能守护：Unicode 空白长串与引号空白组合的脱敏保持线性，防止扩展字符类后的回溯回归。"""
+    nbsp_run = "token" + chr(0xA0) * 20_000 + "value"
+    start = time.perf_counter()
+    redacted = _redact_sensitive_message(nbsp_run)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.1
+    # 无分隔符不命中键值模式，原文保留
+    assert redacted == nbsp_run
+
+    quoted_nbsp = "token '" + chr(0xA0) * 20_000 + "' value"
+    start = time.perf_counter()
+    _redact_sensitive_message(quoted_nbsp)
+    assert time.perf_counter() - start < 0.1
+
+
+def test_redact_sensitive_message_underscore_chain_stays_fast() -> None:
+    """性能守护：键名续段星号的失败回溯保持线性，连字符长链不得触发指数回溯。
+
+    续段字符类若允许跨分隔符字符，嵌套量词的切分歧义会使 session_a_a 一类输入的
+    失败回溯指数级膨胀，200 段即超分钟级；边界唯一化后 2 万段仍为毫秒级。
+    """
+    hostile = "session" + "_a" * 20_000
+
+    start = time.perf_counter()
+    redacted = _redact_sensitive_message(hostile)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.5
+    # 无分隔符不命中键值模式，原文保留
+    assert redacted == hostile
+
+
 def test_redact_sensitive_message_strips_password_and_cookie_keyvalues() -> None:
     """password/cookie 键值形态的裸值同样剥离，凭据不残留在用户可见输出。"""
     assert _redact_sensitive_message("password=hunter2topsecret") == "password=***"
@@ -627,3 +661,129 @@ def test_redact_sensitive_message_quote_variant_no_overmatch() -> None:
     )
     assert _redact_sensitive_message('the "secret" ingredient') == 'the "secret" ingredient'
     assert _redact_sensitive_message("the token count is fine") == "the token count is fine"
+
+
+# ==================== Unicode 空白与控制字符分隔绕过（回归） ====================
+
+
+def test_redact_sensitive_message_blocks_control_char_separator_bypass() -> None:
+    """垂直制表符、换页符与 NEL 分隔的键值在控制字符压平后被键值模式命中。"""
+    assert _redact_sensitive_message("api_key:\x0bSECRET123") == "api_key: ***"
+    assert _redact_sensitive_message("api_key:\x0cSECRET123") == "api_key: ***"
+    assert _redact_sensitive_message("api_key:\x85SECRET123") == "api_key: ***"
+    assert "SECRET123" not in _redact_sensitive_message("token\x0b=SECRET123")
+
+
+def test_redact_sensitive_message_blocks_unicode_whitespace_separator_bypass() -> None:
+    """NBSP、全角空格与 em 空白分隔的键值形态同样剥离，凭据不借 Unicode 空白逃逸。"""
+    nbsp = chr(0xA0)
+    ideographic = chr(0x3000)
+    em_space = chr(0x2003)
+    assert _redact_sensitive_message("password" + nbsp + "=" + nbsp + "SECRET") == (
+        "password" + nbsp + "=" + nbsp + "***"
+    )
+    assert _redact_sensitive_message("token" + ideographic + ":" + ideographic + "SECRET") == (
+        "token" + ideographic + ":" + ideographic + "***"
+    )
+    assert _redact_sensitive_message("api_key" + em_space + "=" + em_space + "SECRET") == (
+        "api_key" + em_space + "=" + em_space + "***"
+    )
+
+
+def test_redact_sensitive_message_blocks_quote_space_quote_separator() -> None:
+    """「引号-空白-引号」形态的分隔符组合同样命中，secret 不残留。"""
+    redacted = _redact_sensitive_message("api_key '' : secret123")
+    assert "secret123" not in redacted
+    assert redacted == "api_key '' : ***"
+
+
+def test_control_chars_pattern_flattens_c0_del_and_nel() -> None:
+    """控制字符类统一覆盖 C0、DEL 与 NEL，errors 与 logs 两模块共用同一常量。"""
+    from seedream_mcp.utils.core import errors as errors_module
+    from seedream_mcp.utils.core import logs as logs_module
+
+    assert errors_module.CONTROL_CHARS_PATTERN is logs_module._LOG_MESSAGE_CONTROL_CHARS
+    for ch in ("\x00", "\x08", "\x0b", "\x0c", "\r", "\n", "\x1f", "\x7f", "\x85"):
+        assert errors_module.CONTROL_CHARS_PATTERN.sub(" ", f"a{ch}b") == "a b"
+    # 可打印字符不受影响
+    assert errors_module.CONTROL_CHARS_PATTERN.sub(" ", "a b中") == "a b中"
+
+
+# ==================== 自由文本键名与 dict 键策略单一来源 ====================
+
+
+def test_redact_sensitive_message_strips_session_jwt_privatekey_keyvalues() -> None:
+    """session/jwt/privatekey 等自由文本键名与 dict 键策略同覆盖，裸值剥离。"""
+    assert _redact_sensitive_message("session_id=abc123") == "session_id=***"
+    assert _redact_sensitive_message("session-id=abc123") == "session-id=***"
+    assert _redact_sensitive_message("jwt=eyJhbGciOiJIUzI1NiJ9") == "jwt=***"
+    assert _redact_sensitive_message("privatekey=SECRET") == "privatekey=***"
+    assert _redact_sensitive_message("sshkey=SECRET") == "sshkey=***"
+    assert _redact_sensitive_message("signature=hmac-value") == "signature=***"
+    assert _redact_sensitive_message("nonce=42") == "nonce=***"
+    assert _redact_sensitive_message("saml_assertion=payload") == "saml_assertion=***"
+
+
+def test_is_sensitive_key_matches_privatekey_and_sshkey() -> None:
+    """无分隔复合词 privatekey/sshkey 纳入高确信子串清单，与 apikey 策略统一。"""
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    assert _is_sensitive_key("privatekey") is True
+    assert _is_sensitive_key("sshkey") is True
+    assert _is_sensitive_key("my-privatekey") is True
+    assert _is_sensitive_key("x_sshkey") is True
+    # 边界匹配的防误伤语义保留：monkey、keyboard 不因含 key 字面命中
+    assert _is_sensitive_key("monkey") is False
+    assert _is_sensitive_key("keyboard") is False
+
+
+def test_filter_sensitive_data_redacts_privatekey_dict_key() -> None:
+    """dict 键路径对 privatekey/sshkey 同样脱敏，两条通道策略一致。"""
+    filtered = _filter_sensitive_data({"privatekey": "SECRET", "sshkey": "SECRET", "normal": "v"})
+    assert filtered == {"privatekey": "***", "sshkey": "***", "normal": "v"}
+
+
+def test_keyvalue_key_branches_derive_from_keyword_lists() -> None:
+    """自由文本键名交替组由两清单派生，新增敏感词不会遗漏同步到自由文本通道。"""
+    from seedream_mcp.utils.core.errors import (
+        _SENSITIVE_KEY_KEYWORDS,
+        _SENSITIVE_KEY_SUBSTRINGS,
+        _SENSITIVE_KEYVALUE_KEYS,
+    )
+
+    ambiguous = {"key", "auth"}
+    for word in (*_SENSITIVE_KEY_SUBSTRINGS, *_SENSITIVE_KEY_KEYWORDS):
+        if word in ambiguous:
+            continue
+        assert word in _SENSITIVE_KEYVALUE_KEYS
+
+
+def test_redact_sensitive_message_preserves_suffix_word_forms() -> None:
+    """后缀形态的普通词不受派生分支影响：续段要求以分隔符开头，max_tokens 保留。"""
+    assert _redact_sensitive_message("max_tokens: 4096 exceeded") == "max_tokens: 4096 exceeded"
+    assert _redact_sensitive_message("token count exceeded") == "token count exceeded"
+
+
+# ==================== _sanitize_response_data 次序与契约 ====================
+
+
+def test_sanitize_response_data_summarizes_oversized_container() -> None:
+    """超大容器先截断收敛为元素数摘要，脱敏正则不遍历其值，凭据不进入输出。"""
+    from seedream_mcp.utils.core.errors import _sanitize_response_data
+
+    big = {f"field{i}": "api_key=SECRET" for i in range(60)}
+    result = _sanitize_response_data(big)
+
+    assert result == "<truncated:dict, 60 keys>"
+    assert "SECRET" not in str(result)
+
+
+def test_sanitize_response_data_redacts_values_of_small_container() -> None:
+    """小容器保留结构，字符串值中的敏感键值裸值仍被剥离。"""
+    from seedream_mcp.utils.core.errors import _sanitize_response_data
+
+    redacted = _sanitize_response_data({"note": "api_key=SECRET", "count": 3})
+
+    assert "SECRET" not in str(redacted)
+    assert redacted["note"].startswith("api_key=***")
+    assert redacted["count"] == 3

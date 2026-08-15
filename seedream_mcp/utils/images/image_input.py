@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
-from ..core.formats import MIME_BY_EXTENSION, _format_file_size_mb
+from ..core.formats import MIME_BY_EXTENSION, _format_file_size_mb, infer_extension_from_bytes
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
@@ -181,16 +181,19 @@ def _prepare_local_image(normalized: str, original: str) -> str:
         decode_and_validate_dimensions(image_bytes, str(validated_path))
     except SeedreamValidationError:
         raise
-    except (ValueError, Image.DecompressionBombError) as e:
+    except (ValueError, OSError, Image.DecompressionBombError) as e:
+        # OSError 覆盖 PIL.UnidentifiedImageError：扩展名合法但内容损坏同样属参数
+        # 校验语义，与 _validate_file_path 的维度解析分支对齐为 SeedreamValidationError。
         raise SeedreamValidationError(
             f"图像维度解析失败: {str(e)}",
             field="image",
             value=str(validated_path),
         ) from e
-    except Exception as e:
-        raise SeedreamAPIError(f"图像维度解析失败: {e}") from e
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    suffix = validated_path.suffix.lower()
+    # MIME 以字节签名复核为准，签名不可识别时回退扩展名映射；扩展名可伪造，
+    # 与 auto_save 保存路径的 infer_extension_from_bytes 保持同一口径。
+    inferred_extension = infer_extension_from_bytes(image_bytes, default="")
+    suffix = inferred_extension or validated_path.suffix.lower()
     mime_type = MIME_BY_EXTENSION.get(suffix, "image/jpeg")
 
     logger.info("成功处理图片文件: {} ({} bytes)", validated_path, len(image_bytes))

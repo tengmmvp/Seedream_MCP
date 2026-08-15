@@ -87,8 +87,13 @@ def _get_validation_base_dir() -> Path:
 
 
 def _resolve_local_image_path(file_path: str) -> Path:
-    """解析本地图片路径，相对路径基于校验基础目录解析，绝对路径保持原样。"""
-    raw_path = Path(file_path).expanduser()
+    """解析本地图片路径，相对路径基于校验基础目录解析，绝对路径保持原样。
+
+    不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的现行定位
+    口径一致：调用方按字面值完成工作区边界判定后再进入本函数，展开会使实际读取
+    目标脱离已判定的边界。
+    """
+    raw_path = Path(file_path)
     if raw_path.is_absolute():
         return raw_path.resolve()
     return (_get_validation_base_dir() / raw_path).resolve()
@@ -238,7 +243,8 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 
         if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
             raise SeedreamValidationError(
-                f"不支持的图像格式: {path.suffix}，支持的格式: {SUPPORTED_IMAGE_EXTENSIONS_ORDERED}",
+                f"不支持的图像格式: {path.suffix}，"
+                f"支持的格式: {'/'.join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)}",
                 field="image",
                 value=file_path,
             )

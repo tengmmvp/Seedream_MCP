@@ -61,12 +61,14 @@ def aggregate_parallel_generation_results(
     """聚合并行请求结果为统一响应结构。
 
     合并各成功请求的图片与用量统计，失败请求记入 batch.errors；success 由是否有任一成功
-    请求决定，status 按 completed/partial/failed 三态推导。
+    请求决定，status 按 completed/partial/failed 三态推导，任一成功请求自身为 partial
+    时批次 status 至多为 partial。
     """
     merged_data: list[dict[str, Any]] = []
     merged_usage: dict[str, Any] = {}
     error_items: list[dict[str, Any]] = []
     success_requests = 0
+    partial_requests = 0
     request_count = len(request_results)
 
     for request_index, result in enumerate(request_results, start=1):
@@ -85,6 +87,8 @@ def aggregate_parallel_generation_results(
             continue
 
         success_requests += 1
+        if result.get("status") == "partial":
+            partial_requests += 1
         usage = result.get("usage", {})
         if isinstance(usage, dict):
             for key, value in usage.items():
@@ -97,9 +101,14 @@ def aggregate_parallel_generation_results(
             merged_data.append(normalized_image)
 
     failed_requests = request_count - success_requests
-    status = (
-        "completed" if failed_requests == 0 else ("partial" if success_requests > 0 else "failed")
-    )
+    # 批次状态推导：全部成功且无任何请求自身为 partial 时才报 completed；任一成功
+    # 请求内部存在部分失败时批次完整性同样受损，status 至多为 partial。
+    if failed_requests == 0 and partial_requests == 0:
+        status = "completed"
+    elif success_requests > 0:
+        status = "partial"
+    else:
+        status = "failed"
     aggregated_result: dict[str, Any] = {
         "success": success_requests > 0,
         "data": merged_data,
@@ -213,32 +222,47 @@ def _sanitize_usage(usage: Any) -> Any:
     usage 为 client 侧原样透传的上游 dict，被劫持中间层回显自由文本时可能携带
     CRLF 或凭据片段；数值键为聚合语义保持原值，字符串值与嵌套容器逐层净化。
     遍历采用显式栈迭代而非递归：数百层嵌套（json.loads 同样不限深度）不会触发
-    解释器递归上限，使成功结果退化为异常；visited 集合防御循环引用，上游透传
-    数据理论无环，命中时以 <truncated:cyclic> 摘要占位终止展开。
+    解释器递归上限，使成功结果退化为异常。祖先集合仅记录当前展开栈上的容器，
+    子树处理完毕即移出：合法的共享引用不在同一条展开路径上重复出现，按全量
+    id 判重会将其误吞为循环；真正的循环引用表现为祖先再现，命中时以
+    <truncated:cyclic> 摘要占位终止展开。
     """
     if isinstance(usage, str):
         return sanitize_error_text(usage)
     if not isinstance(usage, (dict, list)):
         return usage
 
-    sanitized_root: dict[str, Any] | list[Any] = {} if isinstance(usage, dict) else []
-    visited: set[int] = set()
+    # list 根同样预置等长空槽，与嵌套 list 的按下标写入口径一致。
+    sanitized_root: dict[str, Any] | list[Any] = (
+        {} if isinstance(usage, dict) else [None] * len(usage)
+    )
+    ancestors: set[int] = set()
+    # 子树完成哨兵：与写入任务同为三元组形态，目标位置为该哨兵对象，写入位置
+    # 携带待移出的容器 id，值为 None。
+    subtree_done = object()
     # 待写入任务栈：目标容器 + 写入位置（dict 键或 list 下标）+ 待净化值；按下标
     # 寻址写入，出栈顺序不影响容器内元素顺序。
-    pending: list[tuple[dict[str, Any] | list[Any], Any, Any]] = (
+    pending: list[tuple[Any, Any, Any]] = (
         [(sanitized_root, key, value) for key, value in usage.items()]
         if isinstance(usage, dict)
         else [(sanitized_root, index, item) for index, item in enumerate(usage)]
     )
     while pending:
         target, key, value = pending.pop()
+        if target is subtree_done:
+            ancestors.discard(key)
+            continue
         sanitized: Any
         if isinstance(value, (dict, list)):
-            if id(value) in visited:
+            if id(value) in ancestors:
                 sanitized = "<truncated:cyclic>"
             else:
-                visited.add(id(value))
-                sanitized = {} if isinstance(value, dict) else []
+                ancestors.add(id(value))
+                # list 预置等长空槽，子任务按下标写入时不越界；dict 以键写入无需预置。
+                sanitized = {} if isinstance(value, dict) else [None] * len(value)
+                # 哨兵先于子任务入栈，LIFO 使子任务先于哨兵弹出，容器恰在其
+                # 子树处理期间位于祖先集合中。
+                pending.append((subtree_done, id(value), None))
                 if isinstance(value, dict):
                     pending.extend((sanitized, k, item) for k, item in value.items())
                 else:
@@ -271,6 +295,22 @@ _KNOWN_IMAGE_KEYS = frozenset(
 )
 
 
+def _sanitize_unknown_value(value: Any) -> Any:
+    """递归净化未知键的取值：字符串走数据字段净化，容器逐层重建，标量原样返回。
+
+    与 errors 模块 _filter_sensitive_data 同为递归实现：输入来自 json.loads 的
+    响应体，无循环引用与超深嵌套。字符串沿用 sanitize_data_text 的数据字段语义，
+    保留 URL 与长文本的可用性。
+    """
+    if isinstance(value, str):
+        return sanitize_data_text(value)
+    if isinstance(value, dict):
+        return {key: _sanitize_unknown_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_unknown_value(item) for item in value]
+    return value
+
+
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """净化图片项内的上游自由字段，就地写回传入列表并返回同一列表。
 
@@ -281,7 +321,8 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
     即不可寻址；其余短标识与自由文本走 sanitize_error_text，截断语义正确。
     local_path/markdown_ref 合法写入点仅为自动保存回填，但上游伪造的原始条目
     同样携带这两个键，统一净化闭合两条通道的注入面；未知键由结构化输出
-    extra='allow' 直通，字符串值保守净化后保留而非剔除。净化结果写回列表条目后，
+    extra='allow' 直通，字符串值保守净化后保留而非剔除，容器值递归净化后重建，
+    嵌套深处的凭据片段与 CRLF 同样不进入 structuredContent。净化结果写回列表条目后，
     文本与结构化两条输出通道复用同一份净化值；已净化列表再次进入时经模块级
     哨兵跳过，超长片段的截断标记不再叠加。仅对净化后内容发生变化的项做浅拷贝
     替换列表位置，其余项原样引用，调用方持有的原图片字典对象不被修改。
@@ -328,9 +369,9 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
                     updates[field] = sanitized_value
 
         for key, value in image.items():
-            if key in _KNOWN_IMAGE_KEYS or not isinstance(value, str):
+            if key in _KNOWN_IMAGE_KEYS:
                 continue
-            sanitized_value = sanitize_data_text(value)
+            sanitized_value = _sanitize_unknown_value(value)
             if sanitized_value != value:
                 updates[key] = sanitized_value
 
@@ -642,7 +683,9 @@ def _build_generation_structured_result(
                 sanitized_error["message"] = sanitize_error_text(sanitized_error["message"])
             payload["error"] = sanitized_error
         else:
-            payload["error"] = build_error_dict("generation_failed", str(raw_error))
+            payload["error"] = build_error_dict(
+                "generation_failed", sanitize_error_text(str(raw_error))
+            )
 
     output = GenerationStructuredOutput(**payload)
     if failed:

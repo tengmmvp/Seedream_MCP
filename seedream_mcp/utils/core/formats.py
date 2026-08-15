@@ -12,8 +12,9 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 # 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。
 DEFAULT_IMAGE_EXTENSION = ".jpeg"
 
-# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in 成员判断。
-SUPPORTED_IMAGE_EXTENSIONS_ORDERED: list[str] = [
+# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in 成员判断；
+# 有序版本为不可变元组，防止公共容器被原地变异污染共享行为。
+SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (
     ".jpg",
     ".jpeg",
     ".png",
@@ -23,7 +24,7 @@ SUPPORTED_IMAGE_EXTENSIONS_ORDERED: list[str] = [
     ".tiff",
     ".heic",
     ".heif",
-]
+)
 SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)
 
 # 扩展名到 MIME 类型映射，用于本地文件转 Data URI。
@@ -76,12 +77,9 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
             return ".jpeg"
         if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
             return ".gif"
-        # BMP: "BM" 签名且 offset 6-10 的保留字段须为 0，降低仅凭 2 字节前缀的冲突误判。
-        if (
-            content.startswith(b"BM")
-            and len(content) >= 14
-            and content[6:10] == b"\x00\x00\x00\x00"
-        ):
+        # BMP: "BM" 魔数且文件头完整（14 字节 BITMAPFILEHEADER）。个别合法 BMP 变体的
+        # offset 6-10 保留字段非零，不据此拒判；完整文件头长度足以约束误判面。
+        if content.startswith(b"BM") and len(content) >= 14:
             return ".bmp"
         if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
             return ".webp"

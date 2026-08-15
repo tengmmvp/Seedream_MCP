@@ -6,22 +6,38 @@
 
 from __future__ import annotations
 
-from seedream_mcp.utils.core.formats import infer_extension_from_bytes, is_known_image_bytes
+import pytest
+
+from seedream_mcp.utils.core.formats import (
+    SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
+    infer_extension_from_bytes,
+    is_known_image_bytes,
+)
+
+# ==================== 公共容器不可变 ====================
+
+
+def test_supported_extensions_ordered_is_immutable_tuple() -> None:
+    """有序扩展名容器为不可变元组，公共白名单不可被原地变异。"""
+    assert isinstance(SUPPORTED_IMAGE_EXTENSIONS_ORDERED, tuple)
+    with pytest.raises((AttributeError, TypeError)):
+        SUPPORTED_IMAGE_EXTENSIONS_ORDERED.append(".exe")  # type: ignore[attr-defined]
+
 
 # ==================== BMP ====================
 
 
 def test_infer_extension_returns_bmp_for_valid_signature() -> None:
-    """BM 签名且 offset 6-10 保留字段为 0 时识别为 .bmp。"""
-    content = b"BM" + b"\x00" * 12  # len >= 14，保留字段 offset 6:10 全零
+    """BM 签名且文件头完整（14 字节）时识别为 .bmp。"""
+    content = b"BM" + b"\x00" * 12  # len >= 14
     assert infer_extension_from_bytes(content) == ".bmp"
     assert is_known_image_bytes(content) is True
 
 
-def test_infer_extension_bmp_requires_reserved_zeros() -> None:
-    """BM 前缀但保留字段非零时不识别为 BMP，降低 2 字节前缀冲突误判。"""
+def test_infer_extension_bmp_accepts_nonzero_reserved_fields() -> None:
+    """BM 前缀且保留字段非零的合法 BMP 变体同样识别，不据保留字段拒判。"""
     content = b"BM" + b"\x00" * 4 + b"\x01\x00\x00\x00" + b"\x00" * 4
-    assert infer_extension_from_bytes(content, default=".jpeg") == ".jpeg"
+    assert infer_extension_from_bytes(content) == ".bmp"
 
 
 def test_infer_extension_bmp_requires_min_length() -> None:

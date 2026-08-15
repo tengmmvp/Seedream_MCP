@@ -130,17 +130,29 @@ async def _release_resource(resource: _SharedResource) -> None:
     await _close_resource(resource)
 
 
+def _has_inflight_references() -> bool:
+    """判定共享资源是否仍有在途 lifespan 引用。
+
+    _release_resource 在退役资源引用归零时立即关闭并移出追踪列表，故退役列表非空
+    即存在在途引用；活动资源按引用计数直接判定。
+    """
+    active = _active_resource
+    return (active is not None and active.refcount > 0) or bool(_retired_resources)
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     """
     管理 FastMCP 生命周期，注入共享配置、SeedreamClient 与 DownloadManager。
 
     资源以引用计数的模块级单例持有，跨 lifespan 重入复用。stateless_http 模式下 FastMCP
-    每请求重入 lifespan，活动资源仅登记在途引用而不关闭，使连接池跨请求复用。config
-    身份变化触发重建：新资源立即取代活动槽位，旧资源若仍有在途引用则纳入退役追踪，待
-    最后一个在途请求释放后再关闭，避免运行期 set_config/reload_config 断开在途请求已
-    持有的 HTTP 连接池。stdio 与普通 streamable-http 仅单次进入 lifespan，teardown 时
-    在同事件循环清理。工具经 ctx.request_context.lifespan_context 取
+    每请求重入 lifespan，活动资源仅登记在途引用而不关闭，使连接池跨请求复用。stateful
+    streamable-http 下 lifespan 按会话进入退出：会话管理器为每个会话独立运行低层
+    Server.run，各自进入一次 lifespan；teardown 仅递减在途引用，归零前不清理，任一
+    会话退出不影响其余会话持有的连接池。config 身份变化触发重建：新资源立即取代活动
+    槽位，旧资源若仍有在途引用则纳入退役追踪，待最后一个在途请求释放后再关闭，避免
+    运行期 set_config/reload_config 断开在途请求已持有的 HTTP 连接池。stdio 单次进入
+    lifespan，退出即在同事件循环清理。工具经 ctx.request_context.lifespan_context 取
     ["config"]/["client"]/["download_manager"]。
     """
     global _active_resource
@@ -168,7 +180,11 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         # 清理须在 finally 内执行：asynccontextmanager 的 yield 体抛异常时，异常经
         # athrow 注入并在 finally 后继续向外传播，写在 finally 之后的语句会被跳过，
         # 导致异常 teardown 下共享资源不被同循环清理。
-        if not getattr(server.settings, "stateless_http", False):
+        # 清理以引用计数门控：stateful streamable-http 下 lifespan 按会话进入退出，
+        # 并发会话各自持有在途引用，任一会话退出不得关闭其余会话仍在使用的资源，
+        # 全部在途引用归零后才清理。
+        stateless = getattr(server.settings, "stateless_http", False)
+        if not stateless and not _has_inflight_references():
             await _cleanup_shared_resources()
 
 

@@ -1,0 +1,125 @@
+"""io_path 行为修复回归测试。
+
+覆盖四项修复：相似路径建议对空目标名不误报、get_relative_path 对绝对路径回退分支
+不再重复 resolve、resolve_env_workspace_root 按配置值缓存 resolve 结果、
+resolve_workspace_roots 不再对已 resolve 的根重复 resolve。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+import seedream_mcp.utils.io.io_path as io_path_module
+
+
+@pytest.fixture(autouse=True)
+def _clear_env_root_cache() -> Iterator[None]:
+    """每个用例前后清空回退根缓存，隔离模块级可变状态。"""
+    io_path_module._RESOLVED_ENV_ROOT_CACHE.clear()
+    yield
+    io_path_module._RESOLVED_ENV_ROOT_CACHE.clear()
+
+
+def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
+    tmp_path: Path,
+) -> None:
+    """目标名为空串时不产生建议，避免空串子串匹配把任意图片误当相近项。
+
+    ``/``、``.``、``..`` 等输入的 Path.name 为空串，旧实现的 ``"" in name`` 恒真，
+    会把搜索目录前 5 张任意图片当相近建议返回。
+    """
+    for name in ("a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    for bare_target in ("", ".", "..", "/"):
+        assert io_path_module.suggest_similar_paths(bare_target, search_dirs=[str(tmp_path)]) == []
+
+    # 对照：非空目标名仍按子串匹配给出建议
+    assert io_path_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)]) == [
+        str(tmp_path / "a.png")
+    ]
+
+
+def test_get_relative_path_absolute_fallback_skips_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """无法相对化且入参已是绝对路径时直接返回字符串，不再重复 resolve。
+
+    浏览链路传入的路径均已 resolve，回退分支的重复 resolve 属纯冗余 stat。
+    """
+
+    def _explode_resolve(self: Path, strict: bool = False) -> Path:
+        raise AssertionError("绝对路径回退分支不应再次 resolve")
+
+    monkeypatch.setattr(Path, "resolve", _explode_resolve)
+    base = tmp_path / "base"
+    target = tmp_path / "x.png"
+
+    assert io_path_module.get_relative_path(target, str(base)) == str(target)
+
+
+def test_get_relative_path_relative_success_keeps_plain_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """可相对化的入参返回纯相对路径，全程不触发 resolve。"""
+
+    def _explode_resolve(self: Path, strict: bool = False) -> Path:
+        raise AssertionError("相对化成功分支不应调用 resolve")
+
+    monkeypatch.setattr(Path, "resolve", _explode_resolve)
+
+    assert io_path_module.get_relative_path("x.png", str(tmp_path)) == "x.png"
+
+
+def test_resolve_env_workspace_root_caches_resolved_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一配置根重复解析命中缓存，不再触达文件系统；配置值变更产生新键重新解析。"""
+    first_root = tmp_path / "first"
+    first_root.mkdir()
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    configured = {"value": str(first_root)}
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_configured_workspace_root", lambda: configured["value"])
+
+    resolve_calls: list[str] = []
+    original_resolve = Path.resolve
+
+    def _counting_resolve(self: Path, strict: bool = False) -> Path:
+        resolve_calls.append(str(self))
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _counting_resolve)
+    tracked = {str(first_root), str(second_root)}
+
+    first = io_path_module.resolve_env_workspace_root()
+    cached_again = io_path_module.resolve_env_workspace_root()
+    assert first == cached_again == first_root
+    # 同配置两次解析只触发一次该路径的 resolve；期间 cwd 兜底分支未走，无其他 resolve
+    assert [p for p in resolve_calls if p in tracked] == [str(first_root)]
+
+    configured["value"] = str(second_root)
+    changed = io_path_module.resolve_env_workspace_root()
+    assert changed == second_root
+    assert [p for p in resolve_calls if p in tracked] == [str(first_root), str(second_root)]
+
+
+def test_resolve_workspace_roots_skips_redundant_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """会话 Roots 与环境变量回退根均已 resolve，归一化不得再次 resolve。"""
+
+    def _explode_resolve(self: Path, strict: bool = False) -> Path:
+        raise AssertionError("已 resolve 的工作区根不应再次 resolve")
+
+    monkeypatch.setattr(Path, "resolve", _explode_resolve)
+    sub_root = tmp_path / "sub"
+
+    assert io_path_module.resolve_workspace_roots([tmp_path, str(sub_root)]) == [
+        tmp_path,
+        sub_root,
+    ]

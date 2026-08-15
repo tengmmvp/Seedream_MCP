@@ -23,6 +23,9 @@ from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKE
 from .utils.core.validators import parse_bool, validate_size_for_model
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# 项目根 .env 语义仅在源码 checkout 下成立：wheel 安装态 PROJECT_ROOT 指向
+# site-packages 的上级目录，该处不会有项目 .env，安装部署依赖当前工作目录 .env
+# 或显式 env_file 提供配置。
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 # MODEL_ALIASES 与 DEPRECATED_MODEL_TOKENS 属模型知识，统一定义于 model_capabilities，
@@ -429,6 +432,8 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
 
     显式传入 env_file 时只读取该文件，不再合并项目根或当前工作目录的 .env；
     未提供时按项目根 .env 与当前工作目录 .env 合并读取，当前工作目录覆盖项目根。
+    项目根 .env 仅源码 checkout 下存在，wheel 安装态实际只有当前工作目录 .env
+    参与合并。
     """
 
     def _load_single_env_file(path: Path) -> dict[str, str]:

@@ -25,6 +25,16 @@ class _FakeLog:
         pass
 
 
+class _CapturingLog(_FakeLog):
+    """捕获 debug 调用参数的日志替身，供进度与未知事件日志断言使用。"""
+
+    def __init__(self) -> None:
+        self.debug_calls: list[tuple[object, ...]] = []
+
+    def debug(self, *a, **k) -> None:
+        self.debug_calls.append(a)
+
+
 class _FakeSSEResponse:
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
@@ -111,6 +121,76 @@ async def test_parse_sse_request_level_error_code_narrowed_to_string() -> None:
                 log=_FakeLog(),
             )
         assert exc_info.value.error_code == expected
+
+
+async def test_parse_sse_request_level_error_message_truncated_to_8kb() -> None:
+    """请求级错误事件的超长 message 拼入异常前经 8KB 截断，与 handle_api_error 同口径。
+
+    使用同一截断辅助函数而非独立实现：截断保留前缀并标注原长度，超大错误体不随
+    异常 message 进入日志。
+    """
+    long_message = "x" * 20000
+    chunks = [b'data: {"error":{"message":"' + long_message.encode() + b'","code":"e"}}\n\n']
+    with pytest.raises(SeedreamAPIError) as exc_info:
+        await parse_sse_response(
+            _FakeSSEResponse(chunks),
+            model_id="m",
+            chunk_size=64,
+            buffer_max_size=64 * 1024,
+            event_truncate_threshold=64 * 1024,
+            total_bytes_limit=256 * 1024,
+            log=_FakeLog(),
+        )
+    message = exc_info.value.message
+    assert message.startswith("<truncated:20000 chars>")
+    # 截断后总长为标注前缀 + 8KB 片段 + 省略号，远小于原始 20000 字符
+    assert len(message) < 8 * 1024 + 100
+
+
+async def test_parse_sse_response_logs_unknown_event_type_with_segment_size() -> None:
+    """未识别 type 的事件被丢弃并记录 debug 日志，携带事件 type 与段字节规模。"""
+    log = _CapturingLog()
+    unknown = b'data: {"type":"image_generation.unknown_future","payload":"x"}\n\n'
+    chunks = [unknown, b'data: {"type":"image_generation.completed","usage":{}}\n\n']
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=log,
+    )
+    assert result["data"] == []
+    assert result["status"] == "completed"
+    unknown_logs = [
+        call for call in log.debug_calls if "image_generation.unknown_future" in str(call)
+    ]
+    assert unknown_logs, "未知 type 事件须记录 debug 日志"
+    # 日志参数含事件段字节规模；段长不含事件分隔符 \n\n
+    assert str(len(unknown) - 2) in str(unknown_logs[0])
+
+
+async def test_parse_sse_response_progress_log_by_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进度日志按字节增量阈值记录，不依赖 processed_bytes 恰好命中整 MB 取模。"""
+    monkeypatch.setattr(sse_parser_module, "_SSE_PROGRESS_LOG_INTERVAL_BYTES", 100)
+    log = _CapturingLog()
+    # 无事件分隔符的不完整流仅累计字节，驱动进度分支
+    chunk = b"z" * 60
+    await parse_sse_response(
+        _FakeSSEResponse([chunk, chunk, chunk, chunk]),
+        model_id="m",
+        chunk_size=16,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=log,
+    )
+    progress_logs = [call for call in log.debug_calls if "已处理" in str(call)]
+    # 240 字节按 100 字节间隔至少记录两次；取模判定下 240 % 1MB 永不为 0
+    assert len(progress_logs) >= 2
 
 
 def test_parse_sse_segment_joins_multiline_data_into_single_json() -> None:

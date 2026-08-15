@@ -544,7 +544,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | [Seedream-API-Reference.md](docs/Seedream-API-Reference.md) | 火山引擎官方文稿：图像生成 API 参考 |
 | [Seedream-Official-Tutorial.md](docs/Seedream-Official-Tutorial.md) | 火山引擎官方文稿：官方教程 |
 | [Seedream-Streaming-Response.md](docs/Seedream-Streaming-Response.md) | 火山引擎官方文稿：流式响应（SSE 事件）说明 |
-| [claude_desktop_config.json](docs/claude_desktop_config.json) | 本项目示例：Claude Desktop 完整环境变量配置样例 |
+| [claude_desktop_config.json](docs/claude_desktop_config.json) | 本项目示例：Claude Desktop 常用环境变量配置样本 |
 | [pyguide.md](docs/pyguide.md) | 开发规范收录：Google Python Style Guide |
 
 ## ❓ 常见问题
@@ -631,11 +631,11 @@ SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 单张图片下载超时（秒）
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下载失败最大重试次数（0 表示不重试）
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 单张图片大小上限（字节，默认 50MB）；另兼作流式单事件截断阈值与响应体读取上限的推导基准
+SEEDREAM_RESPONSE_BODY_LIMIT=               # 上游响应体读取总量上限（字节；不设则按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导，非流式/流式 JSON 与 SSE 共用）
 SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # 最大并发下载数
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 保存目录总字节上限（默认 10GB；超限按最旧文件驱逐）
-SEEDREAM_RESPONSE_BODY_LIMIT=                # 上游响应体读取总量上限（字节；不设则按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导，非流式/流式 JSON 与 SSE 共用）
 
 # 工作区与传输
 SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界回退目录（MCP Roots 优先）

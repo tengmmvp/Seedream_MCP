@@ -23,11 +23,11 @@ from ..core._helpers import (
 )
 from ..core.outputs import BrowseImagesStructuredOutput, build_error_dict
 from ..core.schemas import BrowseImagesInput
-from ...utils.io.io_scan import cached_find_images_in_directory
 from ...utils.core.errors import format_error_for_user
+from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
+from ...utils.io.io_scan import cached_find_images_in_directory
 from ...utils.io.io_path import (
-    SUPPORTED_IMAGE_EXTENSIONS,
     _WORKSPACE_ROOTS_VAR,
     find_images_in_directory,
     get_relative_path,
@@ -480,7 +480,7 @@ async def _handle_browse_images_impl(
         # 回退边界下回显绝对路径会暴露服务器环境结构，改述为服务器配置边界。
         if _boundary_from_session_roots():
             allowed_roots = ", ".join(str(root) for root in workspace_roots)
-            message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
+            message = f"目录超出允许范围。仅允许浏览工作区目录: {allowed_roots}"
         else:
             message = "目录超出允许范围。仅允许浏览服务器配置的工作区目录。"
         return _build_browse_error(state=state, message=message)
@@ -550,37 +550,34 @@ async def _handle_browse_images_impl(
 
     # 处理当前页为空的情况：
     # - format_filter_exhausted：用户指定后缀全部不受支持，返回独立区分消息
+    # - total_count 为真：offset 超出最后一页越界，返回实际总数与成立的有效翻页引导
     # - total_count == 0：无匹配图片；扫描中存在不可读目录时文案区分「目录不可读」，
     #   避免权限问题被静默归并为「无图片」
-    # - total_count > 0：offset 超出最后一页越界，仍需返回实际总数供客户端正确翻页
     if not images:
         if format_filter_exhausted:
             supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
             user_formats = ", ".join(state.format_filter) if state.format_filter else ""
-            message = (
-                f"指定的图片格式 {user_formats} 均不在支持列表内，" f"支持: {supported_list}。"
-            )
+            message = f"指定的图片格式 {user_formats} 均不在支持列表内，支持: {supported_list}。"
             log_message = "图片格式过滤条件全部不受支持"
-        elif total_count == 0:
-            if unreadable_dirs:
-                unique_unreadable = list(dict.fromkeys(unreadable_dirs))
-                if _boundary_from_session_roots():
-                    dirs_text = ", ".join(str(item) for item in unique_unreadable)
-                else:
-                    # 回退边界场景回显已 resolve 的目录绝对路径会泄露服务器环境结构，
-                    # 仅按数量提示，明细进日志。
-                    dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"
-                message = f"目录不可读或无图片文件：{dirs_text}"
-                log_message = f"未找到匹配图片且 {len(unique_unreadable)} 个目录不可读"
-            else:
-                message = "未找到图片文件，请确认目录或过滤条件。"
-                log_message = "未找到匹配的图片文件"
-        else:
+        elif total_count:
             message = (
                 f"offset={state.offset} 超出范围，目录共有 {total_count} 张图片，"
                 f"请使用 0 <= offset < {total_count}。"
             )
             log_message = f"offset={state.offset} 越界（目录共 {total_count} 张）"
+        elif unreadable_dirs:
+            unique_unreadable = list(dict.fromkeys(unreadable_dirs))
+            if _boundary_from_session_roots():
+                dirs_text = ", ".join(str(item) for item in unique_unreadable)
+            else:
+                # 回退边界场景回显已 resolve 的目录绝对路径会泄露服务器环境结构，
+                # 仅按数量提示，明细进日志。
+                dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"
+            message = f"目录不可读或无图片文件：{dirs_text}"
+            log_message = f"未找到匹配图片且 {len(unique_unreadable)} 个目录不可读"
+        else:
+            message = "未找到图片文件，请确认目录或过滤条件。"
+            log_message = "未找到匹配的图片文件"
         await _safe_ctx_log(ctx, "info", log_message)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
         return CallToolResult(

@@ -544,7 +544,7 @@ The repository's `docs/` directory contains the following reference material:
 | [Seedream-API-Reference.md](docs/Seedream-API-Reference.md) | Volcengine official document: image generation API reference |
 | [Seedream-Official-Tutorial.md](docs/Seedream-Official-Tutorial.md) | Volcengine official document: official tutorial |
 | [Seedream-Streaming-Response.md](docs/Seedream-Streaming-Response.md) | Volcengine official document: streaming response (SSE events) |
-| [claude_desktop_config.json](docs/claude_desktop_config.json) | Project sample: full Claude Desktop environment-variable configuration |
+| [claude_desktop_config.json](docs/claude_desktop_config.json) | Project sample: common Claude Desktop environment variables |
 | [pyguide.md](docs/pyguide.md) | Development reference: Google Python Style Guide |
 
 ## ❓ FAQ

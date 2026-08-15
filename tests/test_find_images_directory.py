@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import Any
@@ -427,3 +428,116 @@ def test_find_images_does_not_descend_into_reparse_point(
     result_names = {p.name for p in result}
     assert "real.png" in result_names
     assert "inside_junction.png" not in result_names
+
+
+def test_cached_find_images_prefix_extension_not_clamped_by_cache_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缓存前缀扩展不得把缓存条目上限施加到实际扫描量。
+
+    回归保护：扩展 scan_limit 曾被 min(单条目列表上限) 截断，超过上限的大目录深翻页
+    只扫到上限条数即返回短页，调用方把短页误判为扫完全量并谎报 total_count。缓存
+    上限只应决定结果是否写缓存，不应截断扫描本身。以 monkeypatch 缩小条目上限常数
+    模拟万张目录，避免真实建万级文件。
+    """
+    for i in range(7):
+        (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(scan_module, "_DIRECTORY_SCAN_CACHE_MAX_LIST_LEN", 5)
+    scan_module.reset_directory_scan_cache()
+
+    def _entry() -> Any:
+        return next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
+
+    # 首页 scan_limit=3：目录有 7 图，缓存不完整前缀 3
+    cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=3
+    )
+    assert not _entry().complete
+    assert len(_entry().images) == 3
+
+    # 深页 scan_limit=7 超过条目上限 5：扩展扫描不得被截断到 5，必须返回全部 7 张
+    deep = cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=7
+    )
+    assert len(deep) == 7
+
+    # 扫描结果超过条目上限 5，不写缓存；缓存内仍为旧前缀条目且不标记 complete
+    entry = _entry()
+    assert len(entry.images) == 3
+    assert not entry.complete
+
+    # 同一深页请求再次到达：缓存前缀不足，按原始 scan_limit 重扫并返回全量
+    deep_again = cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=7
+    )
+    assert len(deep_again) == 7
+
+
+class _ExplodingEntry:
+    """is_file 抛 OSError 的目录条目，驱动扫描循环体内的中途异常路径。"""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def is_file(self, follow_symlinks: bool = True) -> bool:
+        raise OSError("transient io error")
+
+    def is_dir(self, follow_symlinks: bool = True) -> bool:
+        return False
+
+
+def _patch_scandir_with_exploding_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 os.scandir 替换为返回单个 is_file 抛 OSError 条目的扫描器。"""
+
+    def _fake_scandir(path: Any) -> Any:
+        del path
+        return contextlib.nullcontext(iter([_ExplodingEntry(str(tmp_path / "boom.png"))]))
+
+    monkeypatch.setattr(path_utils_module.os, "scandir", _fake_scandir)
+
+
+def test_find_images_propagates_mid_scan_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫描循环体内的 OSError 向上传播，不再吞掉后返回部分结果。
+
+    旧实现的外层 catch 收窄前，中途 IO 错误被记日志后返回已收集的部分列表，调用方
+    无法区分「扫完」与「中途出错」。
+    """
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    _patch_scandir_with_exploding_entry(tmp_path, monkeypatch)
+
+    with pytest.raises(OSError, match="transient io error"):
+        find_images_in_directory(str(tmp_path), recursive=False)
+
+
+def test_cached_find_images_mid_scan_error_not_cached_as_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """扫描中途异常向上传播且不写缓存条目，部分列表不得被冻结为 complete。
+
+    调用链：cached_find_images_in_directory 的 complete 按「返回量小于 scan_limit」
+    判定，若扫描器吞掉中途异常返回部分列表，缓存层会把短列表整条缓存为 complete，
+    目录后半部分在缓存有效期内不可见。异常传播使缓存写入不可达，杜绝该冻结。
+    """
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    _patch_scandir_with_exploding_entry(tmp_path, monkeypatch)
+    scan_module.reset_directory_scan_cache()
+
+    with pytest.raises(OSError, match="transient io error"):
+        cached_find_images_in_directory(
+            resolved_dir=tmp_path,
+            recursive=False,
+            max_depth=1,
+            format_filter=None,
+            scan_limit=10,
+        )
+
+    assert scan_module._DIRECTORY_SCAN_CACHE == {}
+
+    monkeypatch.undo()
+    # 瞬时错误恢复后重扫可得完整结果，证明错误未被固化为缓存
+    recovered = cached_find_images_in_directory(
+        resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
+    )
+    assert [raw.name for raw, _resolved in recovered] == ["a.png"]

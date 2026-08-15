@@ -119,6 +119,15 @@ def test_patcher_strips_message_control_chars() -> None:
     assert record["message"] == "a  b"
 
 
+def test_patcher_strips_nel_and_vertical_tab() -> None:
+    """控制字符类与 errors 模块共用单一来源：NEL 与垂直制表符同样压平为空格。"""
+    record: dict = {"message": "a\x85b\x0bc\x00d\x7f"}
+
+    _strip_message_control_chars(record)
+
+    assert record["message"] == "a b c d "
+
+
 def test_patcher_strips_exception_message_control_chars() -> None:
     """exc_info 渲染的异常消息文本同样清洗，换行不落入日志伪造额外行。"""
     exc = ValueError("line1\nFAKE-INFO token=leaked\r\nline3")

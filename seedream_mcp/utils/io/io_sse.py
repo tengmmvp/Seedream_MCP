@@ -11,7 +11,11 @@ import json
 import time
 from typing import Any, cast
 
-from ..core.errors import SeedreamAPIError, sanitize_error_text
+from ..core.errors import (
+    SeedreamAPIError,
+    _truncate_upstream_message_fragment,
+    sanitize_error_text,
+)
 
 
 def is_sse_response(response: Any) -> bool:
@@ -100,6 +104,10 @@ def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dic
 # 同步处理以省去线程调度开销。
 _SSE_OFFLOAD_THRESHOLD = 64 * 1024
 
+# 处理进度 debug 日志的最小字节间隔：按增量阈值记录，替代对整 MB 取模的判定，模判定
+# 在任意 chunk_size 下几乎不会恰好命中。
+_SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
+
 
 def _slice_parse_segment(
     buffer: bytearray, start: int, end: int, log: Any
@@ -143,11 +151,16 @@ async def _close_stream_response(response: Any) -> None:
 
 
 def _classify_sse_event(
-    event: dict[str, Any], model_id: str, items: list[dict[str, Any]]
+    event: dict[str, Any],
+    model_id: str,
+    items: list[dict[str, Any]],
+    log: Any,
+    segment_len: int,
 ) -> tuple[bool, dict[str, Any] | None, list[dict[str, Any]] | None]:
     """分类单个 SSE 事件：追加图片项或返回完成元信息；请求级错误抛 SeedreamAPIError。
 
-    主循环与流末尾残留处理共用此函数，避免事件分支逻辑重复。
+    主循环与流末尾残留处理共用此函数，避免事件分支逻辑重复。未识别 type 的事件丢弃
+    并记录 debug 日志，携带事件 type 与事件段字节规模，便于排查上游新增事件形态。
 
     Returns:
         (completed, usage, tools) — completed 为 True 时 usage/tools 有效。
@@ -158,7 +171,9 @@ def _classify_sse_event(
         err = event["error"]
         raw_code = err.get("code")
         raise SeedreamAPIError(
-            message=err.get("message", "流式请求失败"),
+            # message 经与 handle_api_error 相同的 8KB 截断辅助处理，超大错误体不随
+            # 异常进入日志；非字符串形态由该辅助归一化为文本。
+            message=_truncate_upstream_message_fragment(err.get("message", "流式请求失败")),
             status_code=400,
             # 仅接受非空字符串错误码，与 errors.handle_api_error 同口径：上游数字码
             # 转字符串属臆测语义，其余类型置 None 丢弃。
@@ -170,6 +185,12 @@ def _classify_sse_event(
         items.append(format_sse_failed_event(event, model_id))
     elif event_type == "image_generation.completed":
         return True, event.get("usage", {}) or {}, event.get("tools")
+    else:
+        log.debug(
+            "忽略未知类型的 SSE 事件: type={!r}, 段长 {} 字节",
+            event_type,
+            segment_len,
+        )
     return False, None, None
 
 
@@ -240,6 +261,8 @@ async def parse_sse_response(
     # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)。
     offset = 0
     processed_bytes = 0
+    # 上次进度日志记录时的累计字节数，与 _SSE_PROGRESS_LOG_INTERVAL_BYTES 共同决定记录时机。
+    last_progress_log_bytes = 0
     # 超限丢弃的 SSE 事件计数；用于在返回结果中区分“图片部分失败”与“事件因体积超限被丢弃”。
     truncated_events = 0
     # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀。
@@ -273,8 +296,9 @@ async def parse_sse_response(
                 f"超过上限 {total_bytes_limit} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
             )
 
-        if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:
-            log.debug("已处理 {} MB 数据", processed_bytes // 1024 // 1024)
+        if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:
+            last_progress_log_bytes = processed_bytes
+            log.debug("已处理 {} 字节数据", processed_bytes)
 
         # SSE 事件以空行分隔，即 b"\n\n"；先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件。
         while True:
@@ -293,7 +317,7 @@ async def parse_sse_response(
             event = await _parse_segment_range(buffer, seg_start, sep, log)
             if event is None:
                 continue
-            apply_completed(*_classify_sse_event(event, model_id, items))
+            apply_completed(*_classify_sse_event(event, model_id, items, log, sep - seg_start))
 
         # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少 buffer_max_size 字节。
         if offset > 0 and offset >= buffer_max_size:
@@ -319,7 +343,9 @@ async def parse_sse_response(
 
     trailing_event = await _parse_segment_range(buffer, offset, len(buffer), log)
     if trailing_event is not None:
-        apply_completed(*_classify_sse_event(trailing_event, model_id, items))
+        apply_completed(
+            *_classify_sse_event(trailing_event, model_id, items, log, len(buffer) - offset)
+        )
 
     # 与非流式 _build_api_result 保持一致：当 data 项含 error 即存在部分失败时
     # 标记 status=partial，避免流式/非流式在同等部分失败场景下 status 语义不一致，

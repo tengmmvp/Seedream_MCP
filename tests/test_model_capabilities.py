@@ -3,8 +3,11 @@
 重点守护 5.0 Pro 须先于 5.0 Lite 解析的顺序，避免 Pro ID 含 "5-0" 子串被误判。
 """
 
+import pytest
+
 from seedream_mcp.config import MODEL_ALIASES
 from seedream_mcp.utils.model.model_capabilities import (
+    MODEL_CAPABILITIES,
     MODEL_FAMILY_40,
     MODEL_FAMILY_45,
     MODEL_FAMILY_50_LITE,
@@ -66,3 +69,9 @@ def test_get_model_capabilities_legacy_and_unknown_default_to_permissive() -> No
     assert unknown.supports_tools is True
     assert unknown.supports_stream is True
     assert unknown.max_reference_images == 14
+
+
+def test_model_capabilities_table_is_read_only() -> None:
+    """能力表为只读映射视图，调用方原地改写被拒绝，公共数据表不被污染。"""
+    with pytest.raises(TypeError):
+        MODEL_CAPABILITIES["new-family"] = MODEL_CAPABILITIES[MODEL_FAMILY_50_PRO]  # type: ignore[index]

@@ -135,3 +135,16 @@ def test_validate_prompt_long_prompt_without_cjk_or_words_emits_no_warning(
     text = "！" * 100_000
     assert validate_prompt(text) == text
     assert warning_logger.warnings == []
+
+
+def test_cjk_pattern_counts_extension_planes_and_kana() -> None:
+    """扩展 B 及以后平面与假名纳入中文计数，覆盖生僻字与日文避免计数偏低。
+
+    仅影响超限告警计数：拉丁字母、全角标点与谚文不在计数范围。
+    """
+    from seedream_mcp.utils.core.validators import CJK_CHAR_PATTERN
+
+    text = "春𠀀𪚥あアｱ一㐀"
+    assert CJK_CHAR_PATTERN.subn("", text)[1] == 8
+
+    assert CJK_CHAR_PATTERN.subn("", "a！한")[1] == 0

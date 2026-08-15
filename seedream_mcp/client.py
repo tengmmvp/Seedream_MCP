@@ -689,8 +689,9 @@ class SeedreamClient:
 
         首次构建后缓存到实例，避免每次请求重复构造。
 
-        - `timeout`：连接建立/连接池获取/请求写入阶段
-        - `api_timeout`：响应读取阶段与总超时上限
+        - `timeout`：连接建立、连接池获取与请求写入阶段的上限
+        - `api_timeout`：响应读取阶段的单次读取间隔上限。httpx 的 read 超时按单次
+          读操作计时而非整个响应的累计时长，流式响应持续慢滴流时不构成总时长约束
         """
         if self._timeout is None:
             base_timeout = float(self.config.timeout)
@@ -888,9 +889,18 @@ class SeedreamClient:
         else:
             data_count = 1
 
+        # status 字段异形（如数字或布尔）时收敛为 None：GenerationStructuredOutput.status
+        # 声明 str|None，pydantic v2 拒绝非 str 输入，透传会使已计费的成功生成在
+        # 结构化构造时整体翻错；收敛为 None 后仍落入下方缺省口径参与 partial 改写。
+        status = payload.get("status")
+        if status is not None and not isinstance(status, str):
+            self.logger.debug(
+                "API 响应 status 字段非 str（{}），已收敛为 None",
+                type(status).__name__,
+            )
+            status = None
         # 与 io_sse 保持一致，仅当 status 为 None 或 completed 时改写为 partial，
         # 避免顶层 status=completed 且 data 含 error 时漏标 partial。
-        status = payload.get("status")
         if (
             status in (None, "completed")
             and isinstance(data, list)

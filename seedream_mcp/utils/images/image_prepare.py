@@ -27,9 +27,12 @@ PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 _LARGE_IMAGE_THRESHOLD = 1024 * 1024
 
 # 工作区 roots 元组 → 已 resolve 的根列表，跨图复用避免每图重复 resolve 同一根目录。
-# 上限 _RESOLVED_ROOTS_CACHE_MAX_ENTRIES，超限淘汰最旧条目。dict 自 Python 3.7 起保持插入序。
+# 上限 _RESOLVED_ROOTS_CACHE_MAX_ENTRIES，超限按 FIFO 淘汰最旧条目。缓存本体为
+# OrderedDict，淘汰走单方法调用 popitem(last=False)，原子完成「取最旧并删除」；
+# 若沿用「next(iter(dict)) 再 pop」的两步组合，工作线程并发写入改变字典尺寸时
+# next 会抛 RuntimeError，逃出外层仅捕 KeyError 的防护。
 _RESOLVED_ROOTS_CACHE_MAX_ENTRIES = 32
-_resolved_roots_cache: dict[tuple[str, ...], list[Path]] = {}
+_resolved_roots_cache: OrderedDict[tuple[str, ...], list[Path]] = OrderedDict()
 
 
 class _PrepareSemaphoreSlot:
@@ -142,7 +145,7 @@ class ImagePreparer:
             _resolved_roots_cache[workspace_roots] = resolved_roots
             if len(_resolved_roots_cache) > _RESOLVED_ROOTS_CACHE_MAX_ENTRIES:
                 try:
-                    _resolved_roots_cache.pop(next(iter(_resolved_roots_cache)))
+                    _resolved_roots_cache.popitem(last=False)
                 except KeyError:
                     pass
 

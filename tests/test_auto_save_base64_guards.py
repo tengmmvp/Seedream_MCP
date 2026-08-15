@@ -231,5 +231,8 @@ async def test_save_multiple_base64_images_end_to_end(
     assert local_path is not None
     assert Path(local_path).exists()
     assert Path(local_path).read_bytes() == png_bytes
+    # 成功与失败路径的 original_url 统一为同一 base64 标识串；字节数经 metadata.file_size 提供
+    assert results[0].original_url == "base64"
+    assert results[0].metadata["file_size"] == len(png_bytes)
     assert results[1].success is False
     assert results[1].original_url == "base64"

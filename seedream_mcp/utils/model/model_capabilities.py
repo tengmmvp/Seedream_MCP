@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Mapping
 
 # 参考图上限常量
 SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10
@@ -106,72 +108,75 @@ def _resolve_model_family(model_id: str) -> str:
 
 
 # 各家族能力表；unknown 默认放行全部能力，兼容 Endpoint ID 等无法识别的模型。
-MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
-    MODEL_FAMILY_50_PRO: ModelCapabilities(
-        family=MODEL_FAMILY_50_PRO,
-        display_name="doubao-seedream-5.0-pro",
-        supports_output_format=True,
-        supports_tools=False,
-        supports_stream=False,
-        max_reference_images=SEEDREAM_50PRO_MAX_REFERENCE_IMAGES,
-        allowed_presets=frozenset({"1K", "2K"}),
-        min_size_pixels=SEEDREAM_50PRO_MIN_SIZE_PIXELS,
-        max_size_pixels=SEEDREAM_50PRO_MAX_SIZE_PIXELS,
-        size_pixel_multiple=SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE,
-        supports_fast_optimize_prompt=False,
-        supports_sequential_generation=False,
-    ),
-    MODEL_FAMILY_50_LITE: ModelCapabilities(
-        family=MODEL_FAMILY_50_LITE,
-        display_name="doubao-seedream-5.0",
-        supports_output_format=True,
-        supports_tools=True,
-        supports_stream=True,
-        max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-        allowed_presets=frozenset({"2K", "3K", "4K"}),
-        min_size_pixels=SEEDREAM_5X_MIN_SIZE_PIXELS,
-        max_size_pixels=SEEDREAM_5X_MAX_SIZE_PIXELS,
-        size_pixel_multiple=None,
-        supports_fast_optimize_prompt=False,
-    ),
-    MODEL_FAMILY_45: ModelCapabilities(
-        family=MODEL_FAMILY_45,
-        display_name="doubao-seedream-4.5",
-        supports_output_format=False,
-        supports_tools=False,
-        supports_stream=True,
-        max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-        allowed_presets=frozenset({"2K", "4K"}),
-        min_size_pixels=SEEDREAM_45_MIN_SIZE_PIXELS,
-        max_size_pixels=SEEDREAM_45_MAX_SIZE_PIXELS,
-        size_pixel_multiple=None,
-        supports_fast_optimize_prompt=False,
-    ),
-    MODEL_FAMILY_40: ModelCapabilities(
-        family=MODEL_FAMILY_40,
-        display_name="doubao-seedream-4.0",
-        supports_output_format=False,
-        supports_tools=False,
-        supports_stream=True,
-        max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-        allowed_presets=frozenset({"1K", "2K", "4K"}),
-        min_size_pixels=SEEDREAM_40_MIN_SIZE_PIXELS,
-        max_size_pixels=SEEDREAM_40_MAX_SIZE_PIXELS,
-        size_pixel_multiple=None,
-    ),
-    MODEL_FAMILY_UNKNOWN: ModelCapabilities(
-        family=MODEL_FAMILY_UNKNOWN,
-        display_name="当前",
-        supports_output_format=True,
-        supports_tools=True,
-        supports_stream=True,
-        max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-        allowed_presets=frozenset({"1K", "2K", "3K", "4K"}),
-        min_size_pixels=None,
-        max_size_pixels=None,
-        size_pixel_multiple=None,
-    ),
-}
+# 以 MappingProxyType 包装为只读视图，防止公共数据表被调用方原地改写污染全局判定。
+MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
+    {
+        MODEL_FAMILY_50_PRO: ModelCapabilities(
+            family=MODEL_FAMILY_50_PRO,
+            display_name="doubao-seedream-5.0-pro",
+            supports_output_format=True,
+            supports_tools=False,
+            supports_stream=False,
+            max_reference_images=SEEDREAM_50PRO_MAX_REFERENCE_IMAGES,
+            allowed_presets=frozenset({"1K", "2K"}),
+            min_size_pixels=SEEDREAM_50PRO_MIN_SIZE_PIXELS,
+            max_size_pixels=SEEDREAM_50PRO_MAX_SIZE_PIXELS,
+            size_pixel_multiple=SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE,
+            supports_fast_optimize_prompt=False,
+            supports_sequential_generation=False,
+        ),
+        MODEL_FAMILY_50_LITE: ModelCapabilities(
+            family=MODEL_FAMILY_50_LITE,
+            display_name="doubao-seedream-5.0",
+            supports_output_format=True,
+            supports_tools=True,
+            supports_stream=True,
+            max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            allowed_presets=frozenset({"2K", "3K", "4K"}),
+            min_size_pixels=SEEDREAM_5X_MIN_SIZE_PIXELS,
+            max_size_pixels=SEEDREAM_5X_MAX_SIZE_PIXELS,
+            size_pixel_multiple=None,
+            supports_fast_optimize_prompt=False,
+        ),
+        MODEL_FAMILY_45: ModelCapabilities(
+            family=MODEL_FAMILY_45,
+            display_name="doubao-seedream-4.5",
+            supports_output_format=False,
+            supports_tools=False,
+            supports_stream=True,
+            max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            allowed_presets=frozenset({"2K", "4K"}),
+            min_size_pixels=SEEDREAM_45_MIN_SIZE_PIXELS,
+            max_size_pixels=SEEDREAM_45_MAX_SIZE_PIXELS,
+            size_pixel_multiple=None,
+            supports_fast_optimize_prompt=False,
+        ),
+        MODEL_FAMILY_40: ModelCapabilities(
+            family=MODEL_FAMILY_40,
+            display_name="doubao-seedream-4.0",
+            supports_output_format=False,
+            supports_tools=False,
+            supports_stream=True,
+            max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            allowed_presets=frozenset({"1K", "2K", "4K"}),
+            min_size_pixels=SEEDREAM_40_MIN_SIZE_PIXELS,
+            max_size_pixels=SEEDREAM_40_MAX_SIZE_PIXELS,
+            size_pixel_multiple=None,
+        ),
+        MODEL_FAMILY_UNKNOWN: ModelCapabilities(
+            family=MODEL_FAMILY_UNKNOWN,
+            display_name="当前",
+            supports_output_format=True,
+            supports_tools=True,
+            supports_stream=True,
+            max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            allowed_presets=frozenset({"1K", "2K", "3K", "4K"}),
+            min_size_pixels=None,
+            max_size_pixels=None,
+            size_pixel_multiple=None,
+        ),
+    }
+)
 
 
 def get_model_capabilities(model_id: str) -> ModelCapabilities:

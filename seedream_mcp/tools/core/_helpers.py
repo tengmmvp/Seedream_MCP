@@ -201,7 +201,17 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
     if config.auto_save_base_dir:
         default_base_dir = Path(config.auto_save_base_dir).expanduser().resolve()
     else:
-        workspace_root = get_workspace_root()
+        # MCP Roots 为空列表时 get_workspace_root 抛 ValueError，原样上抛会落入未识别
+        # 异常档案呈「未知错误」；转校验异常归入 validation_error 档，用户可见文案
+        # 指向工作区授权问题而非未知失败。
+        try:
+            workspace_root = get_workspace_root()
+        except ValueError as exc:
+            raise SeedreamValidationError(
+                f"无法确定自动保存基础目录: {exc}",
+                field="auto_save_base_dir",
+                value=config.auto_save_base_dir,
+            ) from exc
         default_base_dir = (workspace_root / "images").resolve()
 
     if not save_path:

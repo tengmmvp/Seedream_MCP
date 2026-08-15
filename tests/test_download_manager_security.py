@@ -255,3 +255,100 @@ async def test_download_image_retries_timeout_then_succeeds(
     assert save_path.exists()
     assert save_path.read_bytes() == _PNG_BYTES
     assert session.call_count == 2
+
+
+class _HeaderCaptureSession:
+    """按序返回预设响应并捕获每次 get 的请求头，供重定向头剥离断言使用。"""
+
+    def __init__(self, responses: list) -> None:
+        self._responses = list(responses)
+        self._idx = 0
+        self.captured_headers: list[dict[str, str]] = []
+
+    def get(self, url: str, **kwargs: object) -> object:
+        del url
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
+        headers = kwargs.get("headers") or {}
+        self.captured_headers.append(dict(headers))  # type: ignore[arg-type]
+        resp = self._responses[min(self._idx, len(self._responses) - 1)]
+        self._idx += 1
+        return resp
+
+
+_CUSTOM_HEADERS = {
+    "User-Agent": "Seedream-MCP/test",
+    "Accept": "image/*",
+    "Authorization": "Bearer secret-token",
+    "X-Trace-Id": "trace-1",
+}
+
+
+@pytest.mark.asyncio
+async def test_download_image_strips_custom_headers_on_cross_origin_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重定向跳向不同源时剥离定制请求头，仅保留 User-Agent 与 Accept 等通用头。
+
+    调用方为原始主机定制的 Authorization、跟踪头原样发给重定向目标会向第三方源
+    泄露凭据与内部信息。
+    """
+    manager = DownloadManager()
+    session = _HeaderCaptureSession(
+        [
+            _FakeResponse(302, {"location": "https://cdn.example.net/img.png"}),
+            _FakeResponse(200, {"content-type": "image/png"}, content_chunks=[_PNG_BYTES]),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image(
+        "https://example.com/img.png", save_path, headers=dict(_CUSTOM_HEADERS)
+    )
+
+    assert result["success"] is True
+    assert len(session.captured_headers) == 2
+    # 起始请求发往原始主机，定制头原样保留
+    assert session.captured_headers[0] == _CUSTOM_HEADERS
+    # 跨源跳转剥离定制头，仅保留通用头
+    second_keys = {key.lower() for key in session.captured_headers[1]}
+    assert "authorization" not in second_keys
+    assert "x-trace-id" not in second_keys
+    assert "user-agent" in second_keys
+    assert "accept" in second_keys
+
+
+@pytest.mark.asyncio
+async def test_download_image_keeps_headers_on_same_origin_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同源重定向不剥离请求头，调用方定制头在原主机内保持原样。"""
+    manager = DownloadManager()
+    session = _HeaderCaptureSession(
+        [
+            _FakeResponse(302, {"location": "https://example.com/img_final.png"}),
+            _FakeResponse(200, {"content-type": "image/png"}, content_chunks=[_PNG_BYTES]),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image(
+        "https://example.com/img.png", save_path, headers=dict(_CUSTOM_HEADERS)
+    )
+
+    assert result["success"] is True
+    assert len(session.captured_headers) == 2
+    assert session.captured_headers[0] == _CUSTOM_HEADERS
+    assert session.captured_headers[1] == _CUSTOM_HEADERS
+
+
+def test_url_origin_treats_default_port_as_same_origin() -> None:
+    """显式默认端口与省略端口判定同源；scheme 与 host 差异判定跨源。"""
+    from seedream_mcp.utils.io.io_download import _url_origin
+
+    assert _url_origin("https://a.example/x") == _url_origin("https://a.example:443/y")
+    assert _url_origin("http://a.example/x") == _url_origin("http://a.example:80/y")
+    assert _url_origin("https://a.example/x") != _url_origin("https://b.example/x")
+    assert _url_origin("https://a.example/x") != _url_origin("http://a.example/x")
+    assert _url_origin("https://a.example/x") != _url_origin("https://a.example:8443/x")

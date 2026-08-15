@@ -10,7 +10,8 @@
 3. 连接后对端 IP 复核：由 ``_validate_connected_peer_ip`` 实现，实际建立连接后再次校验
    对端 IP，作为第二层钉死之上的纵深防御，应对解析器与连接之间的残余窗口。
 4. 逐跳重定向校验：由 ``_attempt_download`` 的重定向循环实现，禁用自动重定向，每跳目标都
-   重新走完整校验，防止经由重定向绕过跳转到内网。
+   重新走完整校验，防止经由重定向绕过跳转到内网；跳向不同源时剥离调用方定制请求头，
+   仅保留通用头，防止定制头原样发给重定向目标。
 
 其余关键设计：失败按递增延迟加随机抖动重试；下载先写 ``tempfile.mkstemp`` 生成的
 不可预测随机名临时文件再 ``os.replace`` 原子替换，避免半写文件对外可见并规避可预测
@@ -51,6 +52,10 @@ _WRITE_BATCH_BYTES = 4 * 1024 * 1024
 
 # 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验。
 _MAX_REDIRECTS = 3
+
+# 跨源重定向时保留的通用请求头：与目标主机无关、不含调用方定制信息。其余请求头
+# （如为原主机定制的鉴权或跟踪头）在跳向不同源时剥离，不原样发给重定向目标。
+_CROSS_ORIGIN_SAFE_REQUEST_HEADERS = frozenset({"user-agent", "accept"})
 
 # DNS 缓存条目硬上限：超限时先清理过期条目，仍超限则按最旧 expires_at 强制驱逐，
 # 防止长生命周期下持续解析不同 host 导致缓存无界增长。
@@ -114,6 +119,34 @@ def sanitize_url(url: str) -> str:
         return "<invalid-url>"
     # 剥离控制字符，防止 CRLF 经 URL 注入伪造日志行。
     return re.sub(r"[\x00-\x1f\x7f]", "", result)
+
+
+def _url_origin(url: str) -> tuple[str, str, int]:
+    """返回 URL 的请求源三元组 (scheme, host, effective_port)，供跨源判定。
+
+    未显式给出端口时按 scheme 取默认端口，使 ``https://a.example`` 与
+    ``https://a.example:443`` 判定为同源。端口字段非法时按默认端口处理，该 URL
+    的请求本身会因语法问题被下游拒绝，此处不提前报错。
+    """
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
+
+
+def _strip_custom_headers_for_cross_origin(headers: dict[str, str]) -> dict[str, str]:
+    """剥离跨源跳转不应转发的定制请求头，仅保留通用安全头。"""
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() in _CROSS_ORIGIN_SAFE_REQUEST_HEADERS
+    }
 
 
 # 部分服务以通用二进制类型返回图片，故即使非 image/* 也视为合法二进制响应。
@@ -666,22 +699,30 @@ class DownloadManager:
         钉死为连接目标，aiohttp 不再独立二次解析，DNS rebinding 无从把实际连接切向内网；
         _validate_connected_peer_ip 作为纵深防御保留。
 
+        请求头跨源防护：调用方为原始主机定制的请求头在重定向跳向不同源时剥离，仅保留
+        User-Agent 与 Accept 等通用头，防止定制头原样发给重定向目标泄露内部信息。
+
         HTTP 5xx 抛 RetryableDownloadError 由外层纳入退避重试；4xx、文件过大、字节签名、
         重定向等语义明确的终态错误抛 DownloadError 由外层原样上抛不重试。
         """
         current_url = url
+        current_headers = headers
         redirect_count = 0
         while True:
             await self._validate_url_for_request(current_url)
             async with session.get(
                 current_url,
-                headers=headers,
+                headers=current_headers,
                 allow_redirects=False,
             ) as response:
                 self._validate_connected_peer_ip(response, current_url)
 
                 next_url = self._handle_redirect_response(response, current_url, redirect_count)
                 if next_url is not None:
+                    # 跳向不同源时从调用方原始头重建安全头集合；同源跳转保持当前头不变，
+                    # 一旦剥离后续跳回原源也不恢复定制头。
+                    if _url_origin(next_url) != _url_origin(current_url):
+                        current_headers = _strip_custom_headers_for_cross_origin(headers)
                     redirect_count += 1
                     current_url = next_url
                     continue

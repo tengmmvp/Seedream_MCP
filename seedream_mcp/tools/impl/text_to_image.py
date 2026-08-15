@@ -53,6 +53,8 @@ async def handle_text_to_image(
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
     ) -> dict[str, Any]:
+        # 中间变量显式标注返回类型：@log_function_call 的重载签名在 mypy 下退化为
+        # (*Any, **Any) -> Any，直接 return 会触发 warn_return_any。
         result: dict[str, Any] = await client.text_to_image(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,

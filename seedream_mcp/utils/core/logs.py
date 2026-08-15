@@ -11,7 +11,6 @@ import asyncio
 import functools
 import inspect
 import logging
-import re
 import sys
 from pathlib import Path
 from types import FrameType
@@ -26,6 +25,8 @@ from typing import (
 )
 
 from loguru import logger
+
+from .errors import CONTROL_CHARS_PATTERN
 
 if TYPE_CHECKING:
     # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入。
@@ -68,7 +69,8 @@ class InterceptHandler(logging.Handler):
 
 
 # 日志消息中的控制字符，剥离以防文件名、上游错误体等经由日志注入伪造日志行。
-_LOG_MESSAGE_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+# 字符类取 errors.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
+_LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 
 
 def _strip_message_control_chars(record: Any) -> None:

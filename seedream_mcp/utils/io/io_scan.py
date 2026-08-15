@@ -180,12 +180,10 @@ def cached_find_images_in_directory(
             if unreadable_dirs is not None:
                 unreadable_dirs.extend(cached.unreadable_dirs)
             return cached.images[:]
-        # 上限取单条目列表上限：超过该上限的扫描结果不会被缓存，扩展到该值之上只会
-        # 每页全量重扫，不再命中。
-        scan_limit = min(
-            _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN,
-            max(scan_limit, len(cached.images) * _SCAN_PREFIX_GROWTH_FACTOR),
-        )
+        # 前缀不足时按几何倍率扩展 scan_limit 重扫，摊销深翻页的累计扫描代价。扩展量
+        # 不受单条目列表上限约束：该上限只决定扫描结果是否写入缓存（见 _store_scan_entry），
+        # 若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为扫完全量。
+        scan_limit = max(scan_limit, len(cached.images) * _SCAN_PREFIX_GROWTH_FACTOR)
     # 扫描前捕获目录 mtime，使缓存写入的指纹与 images 自洽：扫描与 stat 之间若有并发写入，
     # 扫描后捕获的 mtime 会反映新增而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖
     # mtime 失效，跳过捕获。

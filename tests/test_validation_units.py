@@ -6,15 +6,31 @@
 
 import pytest
 
-from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from seedream_mcp.utils.core.validators import (
     MAX_SEQUENTIAL_TOTAL_IMAGES,
     _coerce_positive_int_in_range,
+    parse_bool,
     validate_max_images,
+    validate_optimize_prompt_options,
     validate_parallel_generation_options,
     validate_response_format,
     validate_watermark,
 )
+from seedream_mcp.utils.model.model_capabilities import ModelCapabilities
+
+# ==================== parse_bool ====================
+
+
+def test_parse_bool_error_message_is_plain_text() -> None:
+    """解析失败消息为纯文本：分隔符用正斜杠，不因反斜杠转义出控制字符。"""
+    with pytest.raises(SeedreamConfigError) as exc_info:
+        parse_bool("maybe")
+
+    message = exc_info.value.message
+    assert "true/false/yes/no/on/off/1/0" in message
+    assert all(ord(ch) >= 0x20 for ch in message)
+
 
 # ==================== validate_watermark ====================
 
@@ -251,3 +267,79 @@ def test_parallel_options_parallelism_equal_request_count_ok() -> None:
     rc, par = validate_parallel_generation_options(request_count=3, parallelism=3, stream=False)
     assert rc == 3
     assert par == 3
+
+
+# ==================== validate_optimize_prompt_options ====================
+
+
+def test_optimize_options_accept_mode_only() -> None:
+    """仅含 mode 的合法取值通过；缺省 mode 归一化为 standard。"""
+    model_id = "doubao-seedream-4-0-250828"
+    assert validate_optimize_prompt_options({"mode": "fast"}, model_id) == {"mode": "fast"}
+    assert validate_optimize_prompt_options({}, model_id) == {"mode": "standard"}
+    assert validate_optimize_prompt_options(None, model_id) is None
+
+
+def test_optimize_options_reject_unknown_keys() -> None:
+    """未知字段显式拒绝而非静默丢弃，与 validate_generation_tools 的口径一致。"""
+    with pytest.raises(SeedreamValidationError, match="包含不支持的字段"):
+        validate_optimize_prompt_options(
+            {"mode": "standard", "level": 3}, "doubao-seedream-4-0-250828"
+        )
+
+
+# ==================== 单边像素区间约束 ====================
+
+
+def _make_caps(min_pixels: int | None, max_pixels: int | None) -> ModelCapabilities:
+    return ModelCapabilities(
+        family="test-family",
+        display_name="测试模型",
+        supports_output_format=True,
+        supports_tools=True,
+        supports_stream=True,
+        max_reference_images=14,
+        allowed_presets=frozenset({"1K"}),
+        min_size_pixels=min_pixels,
+        max_size_pixels=max_pixels,
+        size_pixel_multiple=None,
+    )
+
+
+def test_size_single_sided_min_bound_applies_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """仅声明 min 时下限独立生效，不因 max 未声明而整体跳过像素区间校验。"""
+    import seedream_mcp.utils.core.validators as validators_module
+
+    monkeypatch.setattr(
+        validators_module, "get_model_capabilities", lambda _mid: _make_caps(1_000, None)
+    )
+    with pytest.raises(SeedreamValidationError, match="总像素需不低于 1000"):
+        validators_module.validate_size_for_model("10x10", "any-model")
+    assert validators_module.validate_size_for_model("40x40", "any-model") == "40x40"
+
+
+def test_size_single_sided_max_bound_applies_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """仅声明 max 时上限独立生效。"""
+    import seedream_mcp.utils.core.validators as validators_module
+
+    monkeypatch.setattr(
+        validators_module, "get_model_capabilities", lambda _mid: _make_caps(None, 1_000)
+    )
+    with pytest.raises(SeedreamValidationError, match="总像素需不超过 1000"):
+        validators_module.validate_size_for_model("50x50", "any-model")
+    assert validators_module.validate_size_for_model("20x20", "any-model") == "20x20"
+
+
+def test_size_both_bounds_message_keeps_range_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    """双边声明时错误消息保持区间形式，既有调用方依赖的文案不变。"""
+    import seedream_mcp.utils.core.validators as validators_module
+
+    monkeypatch.setattr(
+        validators_module, "get_model_capabilities", lambda _mid: _make_caps(1_000, 2_000)
+    )
+    with pytest.raises(SeedreamValidationError, match=r"总像素需在 \[1000, 2000\] 范围内"):
+        validators_module.validate_size_for_model("80x80", "any-model")

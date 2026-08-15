@@ -13,7 +13,7 @@ from typing import Any, TYPE_CHECKING
 
 from .version import __version__  # noqa: F401
 
-__author__ = "tengmmvp"
+__author__ = "TengMMVP"
 __email__ = "tengmmvp@gmail.com"
 
 if TYPE_CHECKING:
@@ -56,3 +56,8 @@ def __getattr__(name: str) -> Any:
     value = getattr(module, attr_name)
     globals()[name] = value
     return value
+
+
+def __dir__() -> list[str]:
+    """补全 dir() 结果，纳入尚未触发导入的延迟导出公开名。"""
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))

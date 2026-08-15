@@ -177,3 +177,46 @@ async def test_prepare_image_input_accepts_uppercase_data_scheme() -> None:
     Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
     data_uri = "DATA:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
     assert await prepare_image_input(data_uri) == data_uri
+
+
+async def test_prepare_image_input_corrupt_content_raises_validation_error(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """扩展名合法但内容损坏属参数校验语义，抛 SeedreamValidationError 而非 API 错误。
+
+    与 _validate_file_path 的维度解析分支同口径：损坏内容是调用方输入问题，
+    错误码归约为 validation_error，不误导调用方重试或排查上游 API。
+    """
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"definitely-not-an-image-0123456789")
+
+    with pytest.raises(SeedreamValidationError, match="图像维度解析失败"):
+        await prepare_image_input(str(corrupt))
+
+
+async def test_prepare_image_input_mime_follows_byte_signature(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """data URI 的 MIME 以字节签名为准：PNG 内容存为 .jpg 时标注 image/png。
+
+    扩展名可伪造，与 auto_save 保存路径的 infer_extension_from_bytes 口径一致；
+    签名不可识别时才回退扩展名映射。
+    """
+    mismatched = tmp_path / "actually-png.jpg"
+    Image.new("RGB", (32, 32), color="white").save(mismatched, format="PNG")
+
+    result = await prepare_image_input(str(mismatched))
+
+    assert result.startswith("data:image/png;base64,")
+
+
+def test_validate_image_input_keeps_home_prefix_literal(workspace_root: Path) -> None:
+    """~ 前缀不做用户目录展开，按字面相对路径参与解析，与候选定位口径一致。
+
+    展开会使实际读取目标脱离调用方已按字面值完成的工作区边界判定。
+    """
+    from seedream_mcp.utils.images.image_validation import _resolve_local_image_path
+
+    resolved = _resolve_local_image_path("~/x.png")
+
+    assert "~" in str(resolved)

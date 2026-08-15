@@ -50,8 +50,10 @@ PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 MAX_SEQUENTIAL_TOTAL_IMAGES = 15
 # 并行生成上限：request_count 与 parallelism 共用此上界。
 MAX_PARALLEL_REQUEST_COUNT = 4
-# CJK 字符计数范围：基本区 + 扩展 A 区 + 兼容汉字，覆盖生僻字避免计数偏低。
-CJK_CHAR_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+# CJK 字符计数范围：基本区 + 扩展 A 区 + 兼容汉字 + 扩展 B 及以后（平面 2 与 3 的
+# CJK 表意扩展区）与假名（平假名、片假名、半角片假名），覆盖生僻字与日文避免计数
+# 偏低；仅影响超限告警计数，不参与任何放行判定。
+CJK_CHAR_PATTERN = re.compile("[㐀-䶿一-鿿豈-﫿" "\U00020000-\U0003ffffぁ-ヿｦ-ﾟ]")
 
 
 # 英文单词计数模式：字母串允许一个撇号连接（如 don't 计为一个单词），模块级预编译
@@ -480,14 +482,23 @@ def validate_size_for_model(size: str, model_id: str) -> str:
         )
 
     total_pixels = width * height
-    if caps.min_size_pixels is not None and caps.max_size_pixels is not None:
-        if not (caps.min_size_pixels <= total_pixels <= caps.max_size_pixels):
-            raise SeedreamValidationError(
-                f"在 {caps.display_name} 模型下，像素尺寸总像素需在 "
-                f"[{caps.min_size_pixels}, {caps.max_size_pixels}] 范围内",
-                field="size",
-                value=size,
-            )
+    # 像素区间按单边独立判定：能力表仅声明 min 或仅声明 max 时，对应单边约束独立生效。
+    min_pixels = caps.min_size_pixels
+    max_pixels = caps.max_size_pixels
+    below_min = min_pixels is not None and total_pixels < min_pixels
+    above_max = max_pixels is not None and total_pixels > max_pixels
+    if below_min or above_max:
+        if min_pixels is not None and max_pixels is not None:
+            bound_text = f"在 [{min_pixels}, {max_pixels}] 范围内"
+        elif min_pixels is not None:
+            bound_text = f"不低于 {min_pixels}"
+        else:
+            bound_text = f"不超过 {max_pixels}"
+        raise SeedreamValidationError(
+            f"在 {caps.display_name} 模型下，像素尺寸总像素需{bound_text}",
+            field="size",
+            value=size,
+        )
     if caps.size_pixel_multiple is not None and (
         width % caps.size_pixel_multiple != 0 or height % caps.size_pixel_multiple != 0
     ):
@@ -524,6 +535,17 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
     if not isinstance(options, dict):
         raise SeedreamValidationError(
             "optimize_prompt_options 必须为对象", field="optimize_prompt_options", value=options
+        )
+
+    # 未知字段显式拒绝而非静默丢弃，与 validate_generation_tools 的处理方式一致；
+    # schemas.py 的 OptimizePromptOptions extra="forbid" 已覆盖工具层，此处补齐
+    # 公共 client 直调路径。
+    extra_keys = set(options.keys()) - {"mode"}
+    if extra_keys:
+        raise SeedreamValidationError(
+            f"optimize_prompt_options 包含不支持的字段: {sorted(extra_keys)}",
+            field="optimize_prompt_options",
+            value=options,
         )
 
     mode = options.get("mode", "standard")

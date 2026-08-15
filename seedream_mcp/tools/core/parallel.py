@@ -46,8 +46,6 @@ async def _execute_parallel_generation_requests(
     ],
     module_logger: Any,
     ctx: Context[Any, Any, Any] | None = None,
-    progress_start: float = PROGRESS_GENERATION_START,
-    progress_span: float = PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START,
 ) -> dict[str, Any]:
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
 
@@ -79,7 +77,9 @@ async def _execute_parallel_generation_requests(
                 report_progress = True
         # 进度上报移出信号量槽，避免慢客户端背压拖延槽位释放、阻塞后续请求启动。
         if report_progress:
-            progress = progress_start + progress_span * (completed_requests / context.request_count)
+            progress = PROGRESS_GENERATION_START + (
+                PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START
+            ) * (completed_requests / context.request_count)
             await _safe_report_progress(
                 ctx,
                 progress=progress,

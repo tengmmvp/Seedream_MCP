@@ -649,6 +649,30 @@ def test_build_api_result_keeps_completed_when_no_error_in_data() -> None:
     assert result["status"] == "completed"
 
 
+@pytest.mark.parametrize("status_value", [0, True, None])
+def test_build_api_result_non_str_status_converged_to_none(status_value: Any) -> None:
+    """上游 status 异形时收敛为 None，已成功的生成不因类型异形在结构化构造时翻错。
+
+    GenerationStructuredOutput.status 声明 str|None，pydantic v2 拒绝 int/bool；
+    未收敛时 200 响应携带 {"status": 0} 会使外层 except 把成功结果整体打翻为错误。
+    """
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result({"status": status_value, "data": [{"url": "http://x/1.png"}]})
+
+    assert result["success"] is True
+    assert result["status"] is None
+
+
+def test_build_api_result_non_str_status_with_error_data_marks_partial() -> None:
+    """异形 status 收敛为 None 后仍按缺省口径参与 partial 改写，与 SSE 路径一致。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"status": 0, "data": [{"error": {"code": "blocked", "message": "blocked"}}]}
+    )
+
+    assert result["status"] == "partial"
+
+
 @pytest.mark.asyncio
 async def test_image_to_image_invalid_data_uri_fails_before_api_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -765,7 +789,7 @@ async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
 
 
 @pytest.mark.asyncio
-async def test_multi_image_fusion_keeps_sequential_param_for_lite(
+async def test_multi_image_fusion_disables_sequential_for_sequential_capable_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = SeedreamClient(_build_config())
@@ -784,6 +808,8 @@ async def test_multi_image_fusion_keeps_sequential_param_for_lite(
 
     await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
 
+    # 默认模型本身支持组图，但多图融合对全部模型恒传 disabled 保持单图输出；
+    # 与 Pro 用例分别守护「不支持组图的模型」与「支持组图的模型」两条分支
     assert captured_request["sequential_image_generation"] == "disabled"
 
 

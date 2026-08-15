@@ -36,6 +36,11 @@ _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
 # 回退 CWD 告警只记录一次；无 Roots 时本解析随每次文件访问触发，逐次告警会淹没日志。
 _cwd_fallback_warned = False
 
+# 已 resolve 回退根的进程级缓存，键为配置原始字符串。回退边界模式下每次文件访问都会
+# 经过本解析，expanduser 与 resolve 属文件系统调用，缓存消除事件循环上的重复阻塞。
+# 键含配置原始值，配置变更自然产生新键；解析失败不缓存，下次访问重试。
+_RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
+
 
 # ==================== 工作区根目录管理 ====================
 
@@ -45,15 +50,22 @@ def resolve_env_workspace_root() -> Path:
 
     本地开发无 MCP Roots 时作为文件访问边界回退。优先读取活动配置，config 未就绪时
     回退环境变量。无任何配置回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个
-    工作目录。
+    工作目录。配置根的 resolve 结果按配置原始字符串缓存，同配置重复访问不再触达文件
+    系统。
     """
     global _cwd_fallback_warned
     configured_root = _configured_workspace_root()
     if configured_root:
+        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root)
+        if cached_root is not None:
+            return cached_root
         try:
-            return Path(configured_root).expanduser().resolve()
+            resolved_root = Path(configured_root).expanduser().resolve()
         except Exception as e:
             logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
+        else:
+            _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
+            return resolved_root
     if not _cwd_fallback_warned:
         _cwd_fallback_warned = True
         logger.warning(
@@ -98,24 +110,20 @@ def get_workspace_root() -> Path:
 
 
 def resolve_workspace_roots(roots: Sequence[Path | str]) -> list[Path]:
-    """逐个 resolve 工作区根目录，无法 resolve 的条目跳过。
+    """将工作区根目录列表归一为 Path 列表，保持入参顺序。
 
-    供候选文件定位的调用方在比较前统一解析根目录，保持各消费方对失效根目录的
-    容错行为一致：单个根 resolve 失败不阻断其余根的处理。
+    两类生产方在产出时已完成 resolve：会话 Roots 经 ``_file_uri_to_path`` 转换即
+    resolve，环境变量回退经 ``resolve_env_workspace_root`` 返回已 resolve 路径。本
+    函数不再重复 resolve，消除每请求对同一批根的重复文件系统调用；仅做 Path 归一，
+    兼容字符串入参形态。
 
     Args:
-        roots: 待 resolve 的工作区根目录列表，元素可为 Path 或路径字符串。
+        roots: 已 resolve 的工作区根目录列表，元素可为 Path 或路径字符串。
 
     Returns:
-        成功 resolve 的根目录列表，保持入参顺序。
+        归一后的根目录列表，保持入参顺序。
     """
-    resolved_roots: list[Path] = []
-    for root in roots:
-        try:
-            resolved_roots.append(Path(root).resolve())
-        except (OSError, ValueError):
-            continue
-    return resolved_roots
+    return [Path(root) for root in roots]
 
 
 async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
@@ -286,6 +294,10 @@ def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
             relative_path = path_obj.relative_to(base_path)
             return str(relative_path)
         except ValueError:
+            # 已是绝对路径时直接返回字符串，不再重复 resolve；is_absolute 为纯词法
+            # 判定，浏览链路传入的已 resolve 路径由此免除一次逐级 stat。
+            if path_obj.is_absolute():
+                return str(path_obj)
             return str(path_obj.resolve())
 
     except Exception as e:
@@ -317,7 +329,12 @@ def find_images_in_directory(
             供调用方区分「目录不可读」与「目录内无图片」；未提供时不可读目录仅记日志跳过。
 
     Returns:
-        找到的图片文件路径列表。
+        找到的图片文件路径列表。目录不存在或预检失败时返回空列表。
+
+    Raises:
+        OSError: 扫描中途的文件系统错误（如条目 stat 失败）向上传播，由调用方区分
+            「扫完」与「中途出错」；单个目录不可读属预期信号，经 unreadable_dirs
+            收集后跳过该目录，不视为扫描失败。
     """
     images: list[Path] = []
 
@@ -330,50 +347,48 @@ def find_images_in_directory(
         if not dir_path.exists() or not dir_path.is_dir():
             logger.warning("目录不存在或不是目录: {}", directory)
             return images
-
-        target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
-        target_extensions = {ext.lower() for ext in target_extensions}
-
-        # 无上限时记为 -1 表示收集全部。
-        target_count = limit if limit is not None else -1
-
-        def scan_directory(path: Path, current_depth: int = 0) -> bool:
-            """按 normcase 稳定顺序深度优先扫描；凑够 target_count 即返回 True 提前终止。"""
-            if current_depth > max_depth:
-                return False
-            try:
-                with os.scandir(path) as it:
-                    entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
-            except (PermissionError, OSError) as e:
-                logger.warning("无法访问目录 {}: {}", path, e)
-                if unreadable_dirs is not None:
-                    unreadable_dirs.append(path)
-                return False
-
-            for entry in entries:
-                entry_path = Path(entry.path)
-                # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历。
-                if (
-                    entry.is_file(follow_symlinks=False)
-                    and entry_path.suffix.lower() in target_extensions
-                ):
-                    images.append(entry_path)
-                    if target_count >= 0 and len(images) >= target_count:
-                        return True
-                elif (
-                    entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth
-                ):
-                    if _is_reparse_point(entry_path):
-                        logger.warning("跳过 reparse point 目录: {}", entry_path)
-                        continue
-                    if scan_directory(entry_path, current_depth + 1):
-                        return True
-            return False
-
-        scan_directory(dir_path)
-
     except Exception as e:
         logger.error("搜索图片文件失败 {}: {}", directory, e)
+        return images
+
+    target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
+    target_extensions = {ext.lower() for ext in target_extensions}
+
+    # 无上限时记为 -1 表示收集全部。
+    target_count = limit if limit is not None else -1
+
+    def scan_directory(path: Path, current_depth: int = 0) -> bool:
+        """按 normcase 稳定顺序深度优先扫描；凑够 target_count 即返回 True 提前终止。"""
+        if current_depth > max_depth:
+            return False
+        try:
+            with os.scandir(path) as it:
+                entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
+        except OSError as e:
+            logger.warning("无法访问目录 {}: {}", path, e)
+            if unreadable_dirs is not None:
+                unreadable_dirs.append(path)
+            return False
+
+        for entry in entries:
+            entry_path = Path(entry.path)
+            # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历。
+            if (
+                entry.is_file(follow_symlinks=False)
+                and entry_path.suffix.lower() in target_extensions
+            ):
+                images.append(entry_path)
+                if target_count >= 0 and len(images) >= target_count:
+                    return True
+            elif entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth:
+                if _is_reparse_point(entry_path):
+                    logger.warning("跳过 reparse point 目录: {}", entry_path)
+                    continue
+                if scan_directory(entry_path, current_depth + 1):
+                    return True
+        return False
+
+    scan_directory(dir_path)
 
     return images
 
@@ -390,12 +405,15 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
             CWD 为界泄露本地图片文件名。
 
     Returns:
-        相似路径建议列表，最多 5 条。
+        相似路径建议列表，最多 5 条。目标以 ``/``、``.`` 等结尾使文件名归一为空串时
+        不产生建议，避免空串子串匹配把任意前几张图片误当相近项。
     """
-    suggestions = []
+    suggestions: list[str] = []
 
     try:
         target_name = Path(target_path).name.lower()
+        if not target_name:
+            return suggestions
         search_directories = search_dirs or []
 
         for search_dir in search_directories:

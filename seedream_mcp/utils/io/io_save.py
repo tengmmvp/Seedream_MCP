@@ -15,9 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Sequence
 
-from .io_download import DownloadManager, DownloadError, sanitize_url
 from ..core.errors import SeedreamMCPError, sanitize_data_text, sanitize_error_text
-from .io_storage import FileManager, FileManagerError
 from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
     DEFAULT_MAX_FILE_SIZE,
@@ -28,6 +26,8 @@ from ..core.formats import (
     parse_data_uri,
 )
 from ..core.logs import get_logger
+from .io_download import DownloadManager, DownloadError, sanitize_url
+from .io_storage import FileManager, FileManagerError
 
 logger = get_logger(__name__)
 
@@ -416,7 +416,7 @@ class AutoSaveManager:
 
             # data URI 解析含对大 base64 串的 partition 全量拷贝，与解码、路径生成、写入一样
             # 属于同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞。
-            def _prepare_and_save() -> tuple[bytes, dict[str, Any], str | None]:
+            def _prepare_and_save() -> tuple[dict[str, Any], str | None]:
                 mime, payload = parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
                 save_path = self.file_manager.create_save_path_from_extension(
@@ -431,9 +431,9 @@ class AutoSaveManager:
                 write_result = self.file_manager.save_bytes(
                     save_path, content_bytes, ensure_parent=False
                 )
-                return content_bytes, write_result, mime
+                return write_result, mime
 
-            content_bytes, write_result, mime = await asyncio.to_thread(_prepare_and_save)
+            write_result, mime = await asyncio.to_thread(_prepare_and_save)
 
             markdown_alt = alt_text or prompt or "Generated Image"
             markdown_ref = self.file_manager.generate_markdown_reference(
@@ -448,11 +448,10 @@ class AutoSaveManager:
                 attempts=1,
             )
 
-            original_desc = f"base64:{len(content_bytes)}"
             logger.info("Base64 图片保存成功: {}", write_result["file_path"])
             return AutoSaveResult(
                 success=True,
-                original_url=original_desc,
+                original_url="base64",
                 local_path=write_result["file_path"],
                 markdown_ref=markdown_ref,
                 metadata=metadata,

@@ -544,7 +544,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | [Seedream-API-Reference.md](docs/Seedream-API-Reference.md) | 火山引擎官方文稿：圖像生成 API 參考 |
 | [Seedream-Official-Tutorial.md](docs/Seedream-Official-Tutorial.md) | 火山引擎官方文稿：官方教程 |
 | [Seedream-Streaming-Response.md](docs/Seedream-Streaming-Response.md) | 火山引擎官方文稿：串流回應（SSE 事件）說明 |
-| [claude_desktop_config.json](docs/claude_desktop_config.json) | 本專案範例：Claude Desktop 完整環境變數設定樣本 |
+| [claude_desktop_config.json](docs/claude_desktop_config.json) | 本專案範例：Claude Desktop 常用環境變數設定樣本 |
 | [pyguide.md](docs/pyguide.md) | 開發規範收錄：Google Python Style Guide |
 
 ## ❓ 常見問題

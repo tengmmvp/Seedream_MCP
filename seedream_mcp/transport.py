@@ -369,8 +369,8 @@ def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enable
     """
     将 streamable-http 监听配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
 
-    非回环绑定时，调用方需已在 cli_main 中完成 fail-closed 校验，即必须配置鉴权令牌，
-    因此此处非回环分支仅用于确认已启用鉴权。stateless 启用无状态模式，更适合远程
+    非回环绑定的鉴权与 TLS 前置校验由 cli_main fail-closed 完成，本函数仅在通过
+    校验后调用，非回环绑定必已启用鉴权。stateless 启用无状态模式，更适合远程
     多客户端与负载均衡场景。
     """
     from .resources import mcp
@@ -382,7 +382,11 @@ def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enable
 
 
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
-    """根据绑定地址与鉴权状态输出风险告警，同时写入日志与控制台。"""
+    """根据绑定地址与鉴权状态输出风险告警，同时写入日志与控制台。
+
+    调用前提：非回环绑定的鉴权前置校验已在 cli_main fail-closed 完成，非回环分支
+    输出的鉴权提醒据此成立；本函数不做校验，仅陈述生效配置的风险面。
+    """
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
             message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"
@@ -391,17 +395,10 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
                 "streamable-http 未启用应用层认证，仅限本机信任环境使用；"
                 "如需远程访问，请使用 --auth-token 配置鉴权或经反向代理增加鉴权。"
             )
-    elif auth_enabled:
+    else:
         message = (
             f"streamable-http 绑定到 {host}（非回环地址）并已启用 Bearer 鉴权；"
             "请确认网络隔离与令牌妥善保管。"
-        )
-    else:
-        # 防御性死代码：cli_main 对非回环地址未启用鉴权已 fail-closed 拒绝启动，正常路径
-        # 不可达此分支；保留以备绕过 cli_main 直接调用 _apply_http_bind_settings 时的告警。
-        message = (
-            f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险；"
-            "请使用 --auth-token 配置鉴权。"
         )
     logger.warning(message)
     # 控制台输出走 stderr，与 server.py 的运行告警一致，避免污染 stdio 传输的 stdout。
@@ -440,8 +437,9 @@ def _run_streamable_http(
     显式管理事件循环：uvicorn Server.serve 返回后循环仍存活，于其上运行共享资源的异步
     清理，使连接池在绑定的原循环上优雅释放。共享 HTTP 资源经 app_lifespan 创建并使用于
     该循环，跨循环 aclose 对底层传输无效，故关闭须在同一循环。stateless_http 模式下
-    lifespan 不在 teardown 清理以保留连接复用，退出清理依赖此处完成。关闭循环前取消并
-    回收残余任务，避免连接处理任务的清理 finally 被跳过。
+    lifespan 不在 teardown 清理以保留连接复用，退出清理依赖此处完成；stateful 模式正常
+    在最后一个会话的 lifespan teardown 清理，此处兜底覆盖关闭时仍有在途会话的情形。
+    关闭循环前取消并回收残余任务，避免连接处理任务的清理 finally 被跳过。
     """
     import uvicorn
 
@@ -470,3 +468,5 @@ def _run_streamable_http(
         except Exception as exc:
             logger.warning("streamable-http 退出清理失败: {}", exc)
         loop.close()
+        # 复位线程事件循环引用：残留已关闭的循环会使后续 get_event_loop 取到不可用对象。
+        asyncio.set_event_loop(None)

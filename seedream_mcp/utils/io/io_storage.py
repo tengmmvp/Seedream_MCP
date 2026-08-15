@@ -96,8 +96,6 @@ class FileManager:
 
         self.base_dir = base_dir
         self.ensure_directory(self.base_dir)
-        # 缓存 resolved 形式供 validate_path 等热路径复用；base_dir 已 resolve，无需重复解析。
-        self._base_abs = self.base_dir
 
     def ensure_directory(self, path: Path) -> None:
         """确保目录存在，不存在则递归创建。
@@ -128,7 +126,7 @@ class FileManager:
         """
         try:
             abs_path = path.resolve()
-            if is_within_resolved(abs_path, self._base_abs):
+            if is_within_resolved(abs_path, self.base_dir):
                 return True
             logger.warning("路径不在基础目录内: {}", abs_path)
             return False
@@ -142,7 +140,7 @@ class FileManager:
         复用 io_path.is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
         供 run_cleanup_policies 等热路径复用，避免对已 resolve 路径重复解析。
         """
-        return is_within_resolved(resolved_path, self._base_abs)
+        return is_within_resolved(resolved_path, self.base_dir)
 
     def sanitize_filename(self, filename: str) -> str:
         """清理文件名，移除文件系统不安全字符并规避 Windows 保留设备名。
@@ -350,6 +348,10 @@ class FileManager:
         self, file_path: Path, data: bytes, overwrite: bool = False, ensure_parent: bool = True
     ) -> dict[str, Any]:
         """将字节数据写入文件，返回保存结果元数据。
+
+        overwrite=False 时的已存在检查与改名属 best-effort：检查与原子替换之间存在
+        竞态窗口，极小概率下并发写入方会落到同一目标文件。文件名含时间戳与随机或
+        内容哈希后缀，碰撞概率可忽略，不为该窗口加锁兜底。
 
         Args:
             file_path: 目标路径。

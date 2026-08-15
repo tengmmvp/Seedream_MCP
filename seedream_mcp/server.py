@@ -2,7 +2,8 @@
 Seedream MCP 服务器主模块。
 
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，以及风格预设
-Prompt 与工作区、服务器信息资源。负责配置注入、cli_main 入口与传输分派。
+Prompt 与工作区、服务器信息、模型信息三个资源。负责配置注入、cli_main 入口与
+传输分派。
 FastMCP 实例与共享资源生命周期管理由 resources 模块承担，本模块导入 mcp 完成注册
 并重导出 resources 符号，保持 server 既有导入 surface 与 tests 访问路径不变。CLI
 参数解析由 cli 模块承担，streamable-http 中间件与传输配置由 transport 模块承担，

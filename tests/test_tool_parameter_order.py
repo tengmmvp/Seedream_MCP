@@ -184,19 +184,37 @@ async def test_flat_input_schema_forbids_additional_properties() -> None:
 
 
 @pytest.mark.parametrize(
-    "typo_args",
+    ("tool_name", "typo_args"),
     [
-        {"prompt": "a cat", "watermarkss": True},
-        {"prompt": "a cat", "sze": "2K"},
+        ("seedream_text_to_image", {"prompt": "a cat", "watermarkss": True}),
+        ("seedream_text_to_image", {"prompt": "a cat", "sze": "2K"}),
+        (
+            "seedream_image_to_image",
+            {"prompt": "a cat", "image": "https://example.com/cat.png", "sze": "2K"},
+        ),
+        (
+            "seedream_multi_image_fusion",
+            {
+                "prompt": "a cat",
+                "image": ["https://example.com/cat.png"],
+                "responce_format": "url",
+            },
+        ),
+        ("seedream_sequential_generation", {"prompt": "a cat", "max_imagess": 4}),
+        ("seedream_browse_images", {"directory": ".", "recursve": True}),
     ],
 )
-async def test_flat_tool_rejects_unknown_parameter_names(typo_args: dict) -> None:
-    """拼错参数名的调用被 ToolError 拒绝，不被静默丢弃。
+async def test_flat_tool_rejects_unknown_parameter_names(tool_name: str, typo_args: dict) -> None:
+    """五工具的平铺签名在运行时拒绝拼错参数名，不被静默丢弃。
 
     输入模型以 extra=forbid 拒绝未知键，嵌套 params 形态下拼错参数在模型校验即
     失败；平铺签名经 FastMCP 参数模型默认忽略未知键，server 注册期把参数模型替换
     为 extra=forbid 子类补偿。客户端可据 inputSchema 在本地拒绝，服务端运行时
-    同样拒绝，模型收到明确报错后可自行纠正参数名。
+    同样拒绝，模型收到明确报错后可自行纠正参数名。其余参数均取合法值，确保
+    报错仅源于未知键。
     """
-    with pytest.raises(ToolError, match="watermarkss|sze"):
-        await mcp.call_tool("seedream_text_to_image", typo_args)
+    typo_key = next(
+        key for key in typo_args if key not in _TOOL_INPUT_MODELS[tool_name].model_fields
+    )
+    with pytest.raises(ToolError, match=typo_key):
+        await mcp.call_tool(tool_name, typo_args)

@@ -458,7 +458,8 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
 
 # 敏感字段关键词：键名经边界匹配命中任一关键词即视为敏感，输出时以 *** 脱敏。
 # 边界匹配要求键名等于关键词或以下划线、连字符分隔包含关键词，避免短词如 key 误命中
-# monkey、keyboard 等无关键名。
+# monkey、keyboard 等无关键名。本清单与 _SENSITIVE_KEY_SUBSTRINGS 同时是自由文本
+# 键值脱敏键名交替组的派生源，构成 dict 键与自由文本两条脱敏路径的单一来源。
 _SENSITIVE_KEY_KEYWORDS = (
     "key",
     "token",
@@ -476,28 +477,65 @@ _SENSITIVE_KEY_KEYWORDS = (
     "saml",
 )
 
-# 高确信度敏感词：自身足够特异性，直接子串匹配以覆盖 x-authorization、my-apikey
-# 等连字符或无分隔变体，无需边界限定。
-_SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey")
+# 高确信度敏感词：自身足够特异性，直接子串匹配以覆盖 x-authorization、my-apikey、
+# privatekey、sshkey 等连字符或无分隔变体，无需边界限定。
+_SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey", "privatekey", "sshkey")
 
 
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出。
 _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 
-# 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用，新增键名两处同步生效。
+# 不参与自由文本键名交替组直接派生的短词：key 与 auth 单独出现特异性不足，
+# keyboard、author 一类普通词会被误吞，仅保留受限复合分支覆盖其敏感形态。
+_SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS = frozenset({"key", "auth"})
+
+# 键名续段：以 - 或 _ 起头、后接不含分隔符的词字符段。续段字符类排除 _ 与 - 自身，
+# 各续段边界唯一确定，星号失败回溯随总长线性；若续段允许跨 _，嵌套量词的切分歧义
+# 会把 session_a_a_a 一类输入的回溯推到指数级。
+_SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[-_][^\W_-]+)*"
+
+# 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。分支由
+# _SENSITIVE_KEY_SUBSTRINGS 与 _SENSITIVE_KEY_KEYWORDS 派生，特异性足够的词生成
+# 「关键词 + 续段」分支，覆盖 session、session_id、session-id、jwt、privatekey
+# 等形态；短词 key 与 auth 走受限复合分支（api-key、auth-token、client-secret）。
+# 后缀形态如 max_tokens 中 token 前还有普通字母，派生分支要求续段以分隔符开头，
+# 该词形不受影响。新增敏感词只需扩展上方两清单，本组自动跟进。
 _SENSITIVE_KEYVALUE_KEYS = (
-    r"api[-_]?key|authorization|(?:access|auth|refresh|session|api)[-_]?token"
-    r"|(?:client|api|signing|app)[-_]?secret|password|passwd|cookie|token|secret"
+    "|".join(
+        keyword + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+        for keyword in (*_SENSITIVE_KEY_SUBSTRINGS, *_SENSITIVE_KEY_KEYWORDS)
+        if keyword not in _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS
+    )
+    + r"|api[-_]?key"
+    + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+    + r"|(?:access|auth|refresh|session|api)[-_]?token"
+    + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+    + r"|(?:client|api|signing|app)[-_]?secret"
+    + _SENSITIVE_KEYVALUE_KEY_SUFFIX
 )
 
-# 键值分隔符：允许键名后紧跟一个可选的单引号或双引号，覆盖 JSON/Python repr 回显
-# 形态，如 {"api_key": "xxx"} 与 {'api_key': 'xxx'}；并含全角变体（U+FF1A 全角冒号、
-# U+FE55 小型冒号、U+FF1D 全角等号），上游错误体以全角分隔符回显凭据时同样命中，
-# 封堵非 ASCII 分隔符的绕过形态。引号仅在键名与分隔符之间匹配，普通文本中的词形
-# 不受影响。引号与其后的空格组成非捕获组，键名后的同一段空格无法被两个量词分别
-# 吸收，长空格串只存在单一切分路径，分隔符匹配失败时的回溯保持线性，不随空格数
-# 二次方增长。
-_SENSITIVE_KEYVALUE_SEPARATOR = r"[\t ]*(?:['\"][\t ]*)?[:：﹕=＝][ \t]*"
+# 键值分隔符与值吸收共用的空白字符类：ASCII 空白加 Unicode 空白（NBSP、Ogham 空格、
+# U+2000 至 U+200A 空格区段、行/段分隔符、窄/中数学空格、全角空格），封堵
+# password\xa0=\xa0SECRET、token　:　SECRET 一类借 Unicode 空白分隔的绕过形态。
+# \x0b、\x0c、\x85 一类控制型空白由 CONTROL_CHARS_PATTERN 在键值匹配前压平为普通空格，
+# 仍在此列出以保证类自身完备。
+_KEYVALUE_WHITESPACE_CLASS = r"[\t \x0b\x0c\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
+
+# 键值分隔符：允许键名后紧跟至多两段「引号 + 空白」组合，覆盖 JSON/Python repr
+# 回显形态（{"api_key": "xxx"}、{'api_key': 'xxx'}）与「引号-空白-引号」形态
+# （api_key '' : secret）；并含全角变体（U+FF1A 全角冒号、U+FE55 小型冒号、
+# U+FF1D 全角等号），上游错误体以全角分隔符回显凭据时同样命中。空白段取
+# _KEYVALUE_WHITESPACE_CLASS，Unicode 空白分隔同样命中。引号与空白组成单一非捕获组
+# 且计数受限，同一段空白不存在两个量词分别吸收的切分路径，分隔符匹配失败时的回溯
+# 保持线性，不随空格数二次方增长。
+_SENSITIVE_KEYVALUE_SEPARATOR = (
+    _KEYVALUE_WHITESPACE_CLASS
+    + r"*(?:['\"]"
+    + _KEYVALUE_WHITESPACE_CLASS
+    + r"*){0,2}[:：﹕=＝]"
+    + _KEYVALUE_WHITESPACE_CLASS
+    + r"*"
+)
 
 # 值吸收的停止前瞻形态：可选前导引号 + 任意键名 + 分隔符，不限于敏感词。前导引号
 # 覆盖 JSON 回显中键名自身带引号的形态；下一个词呈现键名加分隔符结构时值吸收停止，
@@ -521,14 +559,18 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     + r")("
     + _SENSITIVE_KEYVALUE_SEPARATOR
     + r")\S+"
-    + r"(?:[ \t]+(?!"
+    + r"(?:"
+    + _KEYVALUE_WHITESPACE_CLASS
+    + r"+(?!"
     + _SENSITIVE_KEYVALUE_ANY_KEY
     + r")\S+)*"
 )
 
-# CR/LF 控制字符模式：上游错误体可能携带换行，剥离以防止日志注入伪造行，与
-# io_download.sanitize_url 的控制字符剥离对齐。替换为空格保留词边界可读性。
-_CONTROL_CHARS_PATTERN = re.compile(r"[\r\n]")
+# 控制字符模式：C0 控制字符、DEL 与 NEL（U+0085）逐字符压平为空格，防止上游错误体
+# 或文件名经日志与结构化输出注入伪造行；替换为空格保留词边界可读性。\t 属 C0 区，
+# 按日志通道既有口径一并压平，制表符对齐在结构化输出中无语义。logs 的日志消息
+# patcher 共用本常量，两模块的控制字符口径单一来源。
+CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85]")
 
 # URL userinfo 剥离模式：错误消息或字段值中的 http(s) URL 携带 user:pass@ 凭据时剥去
 # userinfo 部分，防止参考图 URL 被拒后的原值回显把凭据送进结构化输出与用户可见文本。
@@ -548,7 +590,7 @@ _SanitizedValue = TypeVar("_SanitizedValue")
 
 
 def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
-    """对字符串值剥离 CRLF 控制字符、敏感键值裸值、Bearer 令牌与 URL userinfo。
+    """对字符串值剥离控制字符、敏感键值裸值、Bearer 令牌与 URL userinfo。
 
     message 与 details/value/response_data 等结构化字段共用此净化，使各字段对敏感
     片段与日志注入的防护完全一致；非字符串原样返回。控制字符归一化必须先于键值
@@ -558,14 +600,14 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     """
     if not isinstance(value, str):
         return value
-    redacted = _CONTROL_CHARS_PATTERN.sub(" ", value)
+    redacted = CONTROL_CHARS_PATTERN.sub(" ", value)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
     redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
     return cast("_SanitizedValue", _URL_USERINFO_PATTERN.sub(r"\1", redacted))
 
 
 def _redact_sensitive_message(value: Any) -> str:
-    """剥离 message 中的敏感键值裸值、Bearer 令牌、CRLF 与 URL userinfo。
+    """剥离 message 中的敏感键值裸值、Bearer 令牌、控制字符与 URL userinfo。
 
     非字符串 message 先归一化为文本，dict/list 走 JSON 序列化，再进入脱敏管线，
     封堵 dict 形态 message 借 str/repr 的引号形态穿透脱敏的路径。委托
@@ -616,7 +658,7 @@ def _sanitize_url_data_text(value: str, limit: int) -> str:
     Bearer 形态的凭据不受豁免影响，仍在此路径剥离，控制字符压平防御日志注入。
     """
     truncated = cast("str", _truncate_value_for_output(value, limit=limit))
-    redacted = _CONTROL_CHARS_PATTERN.sub(" ", truncated)
+    redacted = CONTROL_CHARS_PATTERN.sub(" ", truncated)
     redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
     return _URL_USERINFO_PATTERN.sub(r"\1", redacted)
 
@@ -688,5 +730,10 @@ def _filter_sensitive_data(data: Any) -> Any:
 
 
 def _sanitize_response_data(data: Any) -> Any:
-    """对 API 响应数据先脱敏再截断，避免敏感信息或大对象进入结构化错误输出。"""
-    return _truncate_value_for_output(_filter_sensitive_data(data))
+    """对 API 响应数据先截断后脱敏，避免敏感信息或大对象进入结构化错误输出。
+
+    与 sanitize_error_text 的纵深次序一致：截断先行约束脱敏正则的工作长度，超大
+    容器先收敛为元素数摘要，正则不再遍历其全部字符串值；截断保留段中的敏感片段
+    随后仍被脱敏剥离，两个方向都不残留。
+    """
+    return _filter_sensitive_data(_truncate_value_for_output(data))
