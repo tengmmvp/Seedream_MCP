@@ -346,8 +346,8 @@ def test_prompt_not_echoed_in_text_channel() -> None:
     assert "a very long prompt" not in text
 
 
-def test_url_line_omitted_when_local_path_present() -> None:
-    """保存成功条目省略 URL 行，取回结果以本地路径为准；Markdown 引用行不再输出。"""
+def test_url_line_kept_alongside_local_path() -> None:
+    """保存成功条目 URL 行与本地路径行并存：URL 是模型展示图片的直接载体。"""
     result = {
         "success": True,
         "status": "completed",
@@ -362,7 +362,7 @@ def test_url_line_omitted_when_local_path_present() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
 
-    assert "URL:" not in text
+    assert "  URL: https://example.com/a.png" in text
     assert "Markdown 引用" not in text
     assert "  本地路径: images/a.png" in text
 
@@ -429,6 +429,7 @@ def test_single_image_text_form_is_compact() -> None:
     )
 
     assert "自动保存: 1/1 成功" in text
+    assert "  URL: https://example.com/1.png" in text
     assert "总图片数" not in text
     assert "成功保存" not in text
     assert "生成图片数" not in text
@@ -469,7 +470,8 @@ def test_fifteen_image_batch_text_form_has_no_duplicate_path_lines() -> None:
     assert "自动保存: 15/15 成功" in text
     assert "生成图片数" not in text
     for i in range(1, 16):
-        # URL 行与 Markdown 引用行均已收敛，路径仅在「本地路径」行出现一次。
+        # URL 行输出完整地址、本地路径行输出持久化位置；markdown_ref 行不输出，
+        # 路径文本仅在「本地路径」行出现一次。
         assert text.count(f"images/{i}.png") == 1
 
 

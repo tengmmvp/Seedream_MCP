@@ -424,10 +424,10 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
     """格式化单张图片的可读详情行。
 
     入参条目已由 format_generation_response 经 _sanitize_image_errors 统一净化并
-    写回，此处直接消费已净化值，不再对同一字段重复过净化管线。保存成功的条目
-    已有本地路径，取回结果以路径为准，URL 行省略；未保存或保存失败时 URL 是取回
-    结果的唯一途径，保留输出。markdown_ref 可由本地路径平凡推导，文本通道不再
-    单独成行，结构化通道仍完整携带。
+    写回，此处直接消费已净化值，不再对同一字段重复过净化管线。URL 是模型向用户
+    展示图片的直接载体，始终输出；local_path 为自动保存回填的持久化信息，存在时
+    附加输出。markdown_ref 可由本地路径平凡推导，文本通道不单独成行，结构化通道
+    仍完整携带。
     """
     parts = [f"图片 {index}:"]
     if "request_index" in image:
@@ -439,7 +439,7 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
             parts.append(f"  错误码: {error_info['code']}")
         if error_info.get("message"):
             parts.append(f"  错误信息: {error_info['message']}")
-    if image.get("url") and "local_path" not in image:
+    if image.get("url"):
         parts.append(f"  URL: {image['url']}")
     if "size" in image:
         parts.append(f"  尺寸: {image['size']}")
