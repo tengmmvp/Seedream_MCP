@@ -3,7 +3,8 @@
 提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd（异步）与
 atomic_replace_from_fd_sync（同步变体）四个能力，另有 _is_reparse_point 判定
 NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的
-清理遍历共用。open_no_follow_read 读取时拒绝最终路径分量为符号链接；open_temp_fd
+清理遍历共用；已持有 lstat 结果的调用方经 _has_reparse_attribute 判定同一属性位。
+open_no_follow_read 读取时拒绝最终路径分量为符号链接；open_temp_fd
 以不可预测随机名创建临时文件供调用方写入后原子替换；atomic_replace_from_fd 封装
 “随机临时文件→写入→os.replace 原子替换→失败清理”协议供 io_storage 与 io_download
 复用，writer 可返回 Path 覆盖最终路径以支持按字节签名修正扩展名等写入后才知的
@@ -157,6 +158,17 @@ async def atomic_replace_from_fd(
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
+def _has_reparse_attribute(st: os.stat_result) -> bool:
+    """判断 lstat 结果是否携带 NTFS reparse point 属性位，非 Windows 恒为 False。
+
+    调用方已持有 lstat 结果时经本函数判定，避免 _is_reparse_point 再次 lstat；
+    st_file_attributes 仅 Windows 的 stat 结果存在，平台判定先行。
+    """
+    if sys.platform != "win32":
+        return False
+    return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def _is_reparse_point(path: Path) -> bool:
     """判断路径是否为 NTFS junction 等非符号链接型 reparse point。
 
@@ -167,13 +179,11 @@ def _is_reparse_point(path: Path) -> bool:
 
     供 io_storage 的清理遍历与 io_path 的浏览扫描共用，保持 reparse point 检测单一实现。
     """
-    if sys.platform != "win32":
-        return False
     try:
         st = path.lstat()
     except OSError:
         return False
-    return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
+    return _has_reparse_attribute(st)
 
 
 def atomic_replace_from_fd_sync(

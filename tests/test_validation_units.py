@@ -32,6 +32,21 @@ def test_parse_bool_error_message_is_plain_text() -> None:
     assert all(ord(ch) >= 0x20 for ch in message)
 
 
+def test_parse_bool_none_returns_false() -> None:
+    """None 视为未配置返回 False，与 docstring 声明一致，不进入解析失败分支。"""
+    assert parse_bool(None) is False
+
+
+def test_deprecated_model_tokens_is_immutable_frozenset() -> None:
+    """已下线模型 token 清单为 frozenset，公共清单不可被原地变异。"""
+    from seedream_mcp.utils.model.model_capabilities import DEPRECATED_MODEL_TOKENS
+
+    assert isinstance(DEPRECATED_MODEL_TOKENS, frozenset)
+    assert "doubao-seedream-3-0" in DEPRECATED_MODEL_TOKENS
+    with pytest.raises(AttributeError):
+        DEPRECATED_MODEL_TOKENS.add("doubao-seedream-x")  # type: ignore[attr-defined]
+
+
 # ==================== validate_watermark ====================
 
 

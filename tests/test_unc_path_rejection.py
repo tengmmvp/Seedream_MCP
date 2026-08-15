@@ -109,6 +109,26 @@ def test_normalize_path_resolves_relative(tmp_path: Path) -> None:
     assert result == (tmp_path / "sub" / "file.png").resolve()
 
 
+def test_normalize_path_oserror_preserves_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OSError 归一为 ValueError 时保留 errno 原因，不丢失为笼统的路径格式错误。
+
+    ENAMETOOLONG 等文件系统错误进错误文案，调用方可据此区分路径拼写问题与系统级
+    长度限制。
+    """
+    import errno
+
+    def _raise_enametoolong(self: Path, strict: bool = False) -> Path:
+        del strict
+        raise OSError(errno.ENAMETOOLONG, "File name too long")
+
+    monkeypatch.setattr(Path, "resolve", _raise_enametoolong)
+
+    with pytest.raises(ValueError, match="File name too long"):
+        normalize_path(str(tmp_path / "x.png"))
+
+
 # ==================== _file_uri_to_path ====================
 
 

@@ -167,11 +167,26 @@ async def _run_generation_requests(
 
     批次执行期间绑定共享请求计划，client 侧据此对同批请求只构建一次 request_data、
     只序列化一次 body；作用域退出时经 finally 复位绑定并释放计划，异常与取消路径
-    均不泄漏。
+    均不泄漏。公共参数校验同样提升为批次级：分发前经
+    prevalidate_common_generation_params 校验一次并写入计划缓存，批内各生成方法
+    按输入快照命中缓存，100k 级提示词的 CJK 计数不再逐请求重复。
     """
     from ...client import shared_request_plan_scope
 
     with shared_request_plan_scope():
+        # 批次级公共参数校验：批内各请求公共参数相同，分发前校验一次经共享计划
+        # 缓存复用。校验失败在分发前上抛，异常与消息和单请求路径的首请求校验失败
+        # 一致，由外层流水线统一降级，不进入逐请求错误聚合。
+        client.prevalidate_common_generation_params(
+            prompt=context.prompt,
+            optimize_prompt_options=context.optimize_prompt_options,
+            size=context.size,
+            watermark=context.watermark,
+            response_format=context.response_format,
+            output_format=context.output_format,
+            stream=context.stream,
+            tools=context.tools,
+        )
         if context.request_count == 1:
             await _safe_report_progress(
                 ctx, progress=PROGRESS_GENERATION_START, message="开始调用图像生成接口"

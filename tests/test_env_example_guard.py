@@ -4,6 +4,9 @@ example 中出现的全部 SEEDREAM_/ARK_/LOG_ 键（注释与赋值行都算）
 读取的键集合一致：example 多出的键属文档残留应删除，config 读取而 example 未登记
 的键属文档遗漏。集合来源以 config 实际读取的全部 env 为准，即 _FIELD_ENV_MAP 的
 值集合与显式读取的 ARK_API_KEY。
+
+另一守护维度为 README 与 example 的键集关系：README.md 环境变量配置块的键集须覆盖
+example 全部实际赋值的功能键，example 登记功能键而 README 未同步时失败。
 """
 
 from __future__ import annotations
@@ -12,17 +15,38 @@ import re
 from pathlib import Path
 
 import seedream_mcp.config as config_module
+from test_docs_consistency import _env_block
 
 # 环境变量键形态：前缀限定 SEEDREAM_/ARK_/LOG_，键名由大写字母、数字、下划线组成。
 # 前缀目录行（如 “- SEEDREAM_ 服务行为”）后接空白不构成完整键，不会被命中。
 _ENV_KEY_PATTERN = re.compile(r"\b(?:SEEDREAM|ARK|LOG)_[A-Z0-9_]+")
 
+# .env.example 实际赋值行形态，行首即为键名与等号，注释行以 # 开头不会命中。
+_EXAMPLE_ASSIGNMENT_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=")
+
+# README 键集守护的基准文件，键集须与 example 功能键全等或为其超集。
+_BASE_README = "README.md"
+
+
+def _example_path() -> Path:
+    """返回仓库根目录下的 .env.example 路径。"""
+    return Path(config_module.__file__).resolve().parent.parent / ".env.example"
+
 
 def _example_env_keys() -> set[str]:
     """提取 .env.example 全文（注释与赋值行）出现的全部环境变量键。"""
-    example_path = Path(config_module.__file__).resolve().parent.parent / ".env.example"
-    content = example_path.read_text(encoding="utf-8")
+    content = _example_path().read_text(encoding="utf-8")
     return set(_ENV_KEY_PATTERN.findall(content))
+
+
+def _example_assigned_keys() -> set[str]:
+    """提取 .env.example 实际赋值行的功能键集合，注释行中的键不计入。"""
+    keys: set[str] = set()
+    for raw in _example_path().read_text(encoding="utf-8").splitlines():
+        match = _EXAMPLE_ASSIGNMENT_PATTERN.match(raw.strip())
+        if match is not None:
+            keys.add(match.group(1))
+    return keys
 
 
 def _config_read_env_keys() -> set[str]:
@@ -46,3 +70,15 @@ def test_config_env_keys_are_all_documented_in_example() -> None:
     missing = _config_read_env_keys() - _example_env_keys()
 
     assert not missing, f".env.example 漏登记 config 读取的键: {sorted(missing)}"
+
+
+def test_readme_env_block_covers_example_assigned_keys() -> None:
+    """README.md 环境变量配置块的键集须覆盖 .env.example 全部功能键。
+
+    基准为简体 README.md，键集与 example 功能键全等或为其超集皆可；配置块定位
+    复用 test_docs_consistency 的 _env_block 锚点逻辑，避免两处提取实现漂移。
+    """
+    readme_keys = set(_ENV_KEY_PATTERN.findall("\n".join(_env_block(_BASE_README).lines)))
+    missing = _example_assigned_keys() - readme_keys
+
+    assert not missing, f"README.md 环境变量配置块缺少 .env.example 登记的功能键: {sorted(missing)}"

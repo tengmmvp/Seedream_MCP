@@ -401,6 +401,58 @@ def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
     assert len(hit) == 2
 
 
+def test_cached_find_images_hot_directory_survives_cache_pressure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缓存命中刷新条目热度，轮询目录数超过上限时热目录不被逐出。
+
+    旧实现为 FIFO 驱逐：热目录先插入即位于链首，轮询超过上限数量的其他目录后热
+    目录被逐出，下一次访问退化为全量重扫。LRU 下命中刷新 move_to_end，被逐出的
+    是最久未命中的目录。以注入的扫描计数器断言热目录全程只扫一次。
+    """
+    monkeypatch.setattr(scan_module, "_DIRECTORY_SCAN_CACHE_MAX_ENTRIES", 2)
+    scan_module.reset_directory_scan_cache()
+
+    hot = tmp_path / "hot"
+    hot.mkdir()
+    (hot / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    other_dirs: list[Path] = []
+    for i in range(3):
+        other = tmp_path / f"d{i}"
+        other.mkdir()
+        (other / f"{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        other_dirs.append(other)
+
+    scanned_dirs: list[str] = []
+    original_scan = scan_module.find_images_in_directory
+
+    def counting_scan(**kwargs: Any) -> list[Path]:
+        scanned_dirs.append(kwargs["directory"])
+        return original_scan(**kwargs)
+
+    def scan(dir_key: Path) -> None:
+        cached_find_images_in_directory(
+            resolved_dir=dir_key,
+            recursive=False,
+            max_depth=1,
+            format_filter=None,
+            scan_limit=10,
+            scanner=counting_scan,
+        )
+
+    scan(hot)
+    scan(other_dirs[0])
+    # 缓存已满 2 条：热目录再次命中须刷新热度，不触发重扫
+    scan(hot)
+    # 插入第三目录触发驱逐，被逐出的应是最久未命中的 d0 而非热目录
+    scan(other_dirs[1])
+    # 热目录仍命中缓存，不重扫
+    scan(hot)
+
+    assert scanned_dirs.count(str(hot)) == 1, "热目录命中缓存刷新热度后不得被 LRU 逐出"
+    assert scanned_dirs == [str(hot), str(other_dirs[0]), str(other_dirs[1])]
+
+
 def test_find_images_does_not_descend_into_reparse_point(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,6 +480,33 @@ def test_find_images_does_not_descend_into_reparse_point(
     result_names = {p.name for p in result}
     assert "real.png" in result_names
     assert "inside_junction.png" not in result_names
+
+
+def test_find_images_excludes_reparse_point_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reparse point 文件不列入结果，与目录分支及 io_storage 清理遍历防护口径对称。
+
+    OneDrive 占位 .png、投影 FS 条目等 reparse 文件不是 symlink，entry.is_file(
+    follow_symlinks=False) 对其返回 True，仅靠后缀过滤会把它列为参考图，后续读取路径的
+    open_no_follow_read 兜底只拦 S_ISLNK 而跟随 reparse 目标。用 monkeypatch 让
+    _is_reparse_point 对指定文件返回 True，断言该文件被剔除而真实图片正常返回。
+    """
+    placeholder = tmp_path / "onedrive_placeholder.png"
+    placeholder.write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "real.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    placeholder_resolved = placeholder.resolve()
+    real_is_reparse = path_utils_module._is_reparse_point
+    monkeypatch.setattr(
+        path_utils_module,
+        "_is_reparse_point",
+        lambda p: real_is_reparse(p) or p.resolve() == placeholder_resolved,
+    )
+
+    result_names = {p.name for p in find_images_in_directory(str(tmp_path), recursive=False)}
+
+    assert result_names == {"real.png"}
 
 
 def test_cached_find_images_prefix_extension_not_clamped_by_cache_cap(

@@ -75,6 +75,27 @@ class AutoSaveError(SeedreamMCPError):
     pass
 
 
+# Markdown 替代文本的长度上限：alt 只承担图片引用内的可访问性描述，超长文本放大
+# 输出体积且破坏可读性；完整提示词已在 structuredContent 顶层 prompt 字段存在。
+_MARKDOWN_ALT_MAX_LENGTH = 200
+
+
+def _build_markdown_alt(alt_text: str | None) -> str:
+    """净化 Markdown 替代文本，返回可直接嵌入 ``![...](...)`` 的文本。
+
+    alt 为调用方可控自由文本：控制字符压平防注入，``\\``、``[``、``]`` 反斜杠转义
+    保持图片引用的结构完整，超长截断到上限。空文本回退固定文案；不使用 prompt 兜底，
+    提示词在结构化输出顶层已有专门字段，拼入 alt 只会放大输出且引入注入面。
+    """
+    if not alt_text:
+        return "Generated Image"
+    flattened = re.sub(r"[\x00-\x1f\x7f]", " ", alt_text)
+    escaped = flattened.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    if len(escaped) > _MARKDOWN_ALT_MAX_LENGTH:
+        escaped = escaped[:_MARKDOWN_ALT_MAX_LENGTH]
+    return escaped or "Generated Image"
+
+
 def _build_save_metadata(
     tool_name: str,
     save_time: str,
@@ -131,18 +152,18 @@ class AutoSaveResult:
     def to_dict(self) -> dict[str, Any]:
         """将保存结果序列化为字典，仅包含已设置的字段。
 
-        original_url 为数据字段，过 sanitize_data_text 剥离 userinfo 凭据与控制
-        字符但不做常规截断，签名 URL 保持完整可用；error 为自由文本，过
-        sanitize_error_text 截断。两字段的净化与 results.py 中 data 项的对应
-        字段对齐，防止同一 URL 在两条输出通道防护不对称。
+        original_url、local_path 与 markdown_ref 为数据字段，过 sanitize_data_text
+        剥离 userinfo 凭据与控制字符但不做常规截断，签名 URL 与本地路径保持完整可用；
+        error 为自由文本，过 sanitize_error_text 截断。各字段的净化与 results.py 中
+        data 项的对应字段对齐，防止同名字段在两条输出通道防护不对称。
         """
         result = {"success": self.success, "original_url": sanitize_data_text(self.original_url)}
 
         if self.local_path:
-            result["local_path"] = self.local_path
+            result["local_path"] = sanitize_data_text(self.local_path)
 
         if self.markdown_ref:
-            result["markdown_ref"] = self.markdown_ref
+            result["markdown_ref"] = sanitize_data_text(self.markdown_ref)
 
         if self.error:
             result["error"] = sanitize_error_text(self.error)
@@ -310,7 +331,7 @@ class AutoSaveManager:
             # URL 派生的 save_path 此时可能指向不存在的文件，不得用于对外报告。
             final_path = Path(download_result["file_path"])
 
-            markdown_alt = alt_text or prompt or "Generated Image"
+            markdown_alt = _build_markdown_alt(alt_text)
             markdown_ref = self.file_manager.generate_markdown_reference(final_path, markdown_alt)
 
             metadata = _build_save_metadata(
@@ -435,7 +456,7 @@ class AutoSaveManager:
 
             write_result, mime = await asyncio.to_thread(_prepare_and_save)
 
-            markdown_alt = alt_text or prompt or "Generated Image"
+            markdown_alt = _build_markdown_alt(alt_text)
             markdown_ref = self.file_manager.generate_markdown_reference(
                 Path(write_result["file_path"]), markdown_alt
             )

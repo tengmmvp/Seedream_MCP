@@ -191,11 +191,12 @@ class SeedreamConfig:
             raise SeedreamConfigError(f"model_id不能为空{_env_var_suffix('model_id')}")
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
-            # 可用别名清单运行时从 MODEL_ALIASES 派生，新增模型时提示自动同步，
-            # 消除与 CLI choices 派生机制并存的最后一个硬编码模型清单同步点。
+            # 可用别名与下线清单均运行时派生（MODEL_ALIASES / DEPRECATED_MODEL_TOKENS），
+            # 新增或下线模型时提示自动同步，消除硬编码模型清单同步点。
             aliases = "/".join(MODEL_ALIASES)
+            deprecated = "/".join(sorted(DEPRECATED_MODEL_TOKENS))
             raise SeedreamConfigError(
-                f"已不支持的模型: {self.model_id}（3.0/seededit-3.0 已下线），"
+                f"已不支持的模型: {self.model_id}（{deprecated} 已下线），"
                 f"请使用 {aliases} 或对应 Endpoint ID{_env_var_suffix('model_id')}"
             )
 
@@ -441,7 +442,13 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     """
 
     def _load_single_env_file(path: Path) -> dict[str, str]:
-        values = dotenv_values(path)
+        try:
+            values = dotenv_values(path)
+        except OSError as exc:
+            # .env 存在但 open 失败（权限拒绝、磁盘不可用等）与文件不存在同属配置来源
+            # 不可得，统一包装为含路径与原因的配置错误，经 cli_main 的优雅错误路径输出，
+            # 不向调用方裸抛 OSError。
+            raise SeedreamConfigError(f"配置文件不可读: {path} -> {exc}") from exc
         return {k: str(v) for k, v in values.items() if v is not None}
 
     if env_file:
@@ -808,11 +815,13 @@ def _registered_workspace_root_provider() -> str | None:
 
     活动配置就绪时返回其 workspace_root，配置值在构建时已按优先级合并环境变量与
     .env；配置构建失败即活动配置不可得时回退读取 SEEDREAM_WORKSPACE_ROOT 环境变量，
-    与 io_path 未注册提供者时的回退一致。
+    与 io_path 未注册提供者时的回退一致。OSError 与配置错误同口径处理：配置构建中
+    残余的文件系统错误沿提供者上抛会把 io_path 的每次边界解析变为崩溃，一律回退
+    环境变量。
     """
     try:
         config = get_active_config()
-    except SeedreamConfigError:
+    except (SeedreamConfigError, OSError):
         config = None
     if config is not None:
         root = config.workspace_root

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from ...utils.core.errors import sanitize_data_text, sanitize_error_text
 from ...utils.io.io_save import AutoSaveResult
@@ -199,9 +199,10 @@ def update_result_with_auto_save(
 # 单槽哨兵：最近一次经 _sanitize_image_errors 净化写回的图片列表。文本与结构化
 # 两条出口在 common.py 中以同一列表先后调用本函数，两次调用之间无 await，事件
 # 循环内不会交错，第二次进入据此识别并跳过重复净化。Python 内建 list 不支持实例
-# 属性也不可弱引用，无法在列表对象上打标记，故以模块级单槽承载；命中后即清空，
-# 未复用时持有至下一次生成调用覆盖，复位协议可经 reset_last_sanitized_images
-# 显式清空；槽位被其他调用覆盖时退化为重复净化，方向安全。
+# 属性也不可弱引用，无法在列表对象上打标记，故以模块级单槽承载；命中后即清空。
+# 两条出口外不依赖槽位常驻：结构化出口作为末位消费者在用后显式复位，失败批次
+# 的图片列表不滞留槽位至下一次生成调用；槽位被其他调用覆盖时退化为重复净化，
+# 方向安全；资源生命周期边界可经 reset_last_sanitized_images 显式清空。
 _last_sanitized_images: list[dict[str, Any]] | None = None
 
 
@@ -216,25 +217,24 @@ def reset_last_sanitized_images() -> None:
     _last_sanitized_images = None
 
 
-def _sanitize_usage(usage: Any) -> Any:
-    """净化 usage 统计：数值标量原样保留，字符串值过净化管线。
+def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> Any:
+    """以显式栈迭代净化任意嵌套的 dict/list 树，字符串值经 sanitize_string 处理。
 
-    usage 为 client 侧原样透传的上游 dict，被劫持中间层回显自由文本时可能携带
-    CRLF 或凭据片段；数值键为聚合语义保持原值，字符串值与嵌套容器逐层净化。
     遍历采用显式栈迭代而非递归：数百层嵌套（json.loads 同样不限深度）不会触发
     解释器递归上限，使成功结果退化为异常。祖先集合仅记录当前展开栈上的容器，
     子树处理完毕即移出：合法的共享引用不在同一条展开路径上重复出现，按全量
     id 判重会将其误吞为循环；真正的循环引用表现为祖先再现，命中时以
-    <truncated:cyclic> 摘要占位终止展开。
+    <truncated:cyclic> 摘要占位终止展开。usage 净化与未知键净化共用本核心，
+    仅字符串净化函数不同，口径由单一实现保证一致。
     """
-    if isinstance(usage, str):
-        return sanitize_error_text(usage)
-    if not isinstance(usage, (dict, list)):
-        return usage
+    if isinstance(value, str):
+        return sanitize_string(value)
+    if not isinstance(value, (dict, list)):
+        return value
 
     # list 根同样预置等长空槽，与嵌套 list 的按下标写入口径一致。
     sanitized_root: dict[str, Any] | list[Any] = (
-        {} if isinstance(usage, dict) else [None] * len(usage)
+        {} if isinstance(value, dict) else [None] * len(value)
     )
     ancestors: set[int] = set()
     # 子树完成哨兵：与写入任务同为三元组形态，目标位置为该哨兵对象，写入位置
@@ -243,36 +243,46 @@ def _sanitize_usage(usage: Any) -> Any:
     # 待写入任务栈：目标容器 + 写入位置（dict 键或 list 下标）+ 待净化值；按下标
     # 寻址写入，出栈顺序不影响容器内元素顺序。
     pending: list[tuple[Any, Any, Any]] = (
-        [(sanitized_root, key, value) for key, value in usage.items()]
-        if isinstance(usage, dict)
-        else [(sanitized_root, index, item) for index, item in enumerate(usage)]
+        [(sanitized_root, key, item) for key, item in value.items()]
+        if isinstance(value, dict)
+        else [(sanitized_root, index, item) for index, item in enumerate(value)]
     )
     while pending:
-        target, key, value = pending.pop()
+        target, key, item = pending.pop()
         if target is subtree_done:
             ancestors.discard(key)
             continue
         sanitized: Any
-        if isinstance(value, (dict, list)):
-            if id(value) in ancestors:
+        if isinstance(item, (dict, list)):
+            if id(item) in ancestors:
                 sanitized = "<truncated:cyclic>"
             else:
-                ancestors.add(id(value))
+                ancestors.add(id(item))
                 # list 预置等长空槽，子任务按下标写入时不越界；dict 以键写入无需预置。
-                sanitized = {} if isinstance(value, dict) else [None] * len(value)
+                sanitized = {} if isinstance(item, dict) else [None] * len(item)
                 # 哨兵先于子任务入栈，LIFO 使子任务先于哨兵弹出，容器恰在其
                 # 子树处理期间位于祖先集合中。
-                pending.append((subtree_done, id(value), None))
-                if isinstance(value, dict):
-                    pending.extend((sanitized, k, item) for k, item in value.items())
+                pending.append((subtree_done, id(item), None))
+                if isinstance(item, dict):
+                    pending.extend((sanitized, k, sub) for k, sub in item.items())
                 else:
-                    pending.extend((sanitized, i, item) for i, item in enumerate(value))
-        elif isinstance(value, str):
-            sanitized = sanitize_error_text(value)
+                    pending.extend((sanitized, i, sub) for i, sub in enumerate(item))
+        elif isinstance(item, str):
+            sanitized = sanitize_string(item)
         else:
-            sanitized = value
+            sanitized = item
         target[key] = sanitized
     return sanitized_root
+
+
+def _sanitize_usage(usage: Any) -> Any:
+    """净化 usage 统计：数值标量原样保留，字符串值过净化管线。
+
+    usage 为 client 侧原样透传的上游 dict，被劫持中间层回显自由文本时可能携带
+    CRLF 或凭据片段；数值键为聚合语义保持原值，字符串值与嵌套容器逐层净化。
+    遍历经 _sanitize_value_tree 迭代展开，深嵌套不触发解释器递归上限。
+    """
+    return _sanitize_value_tree(usage, sanitize_error_text)
 
 
 # 图片条目的已知键：error 与 size/output_format/model/type、url 各自单独净化，
@@ -296,19 +306,14 @@ _KNOWN_IMAGE_KEYS = frozenset(
 
 
 def _sanitize_unknown_value(value: Any) -> Any:
-    """递归净化未知键的取值：字符串走数据字段净化，容器逐层重建，标量原样返回。
+    """净化未知键的取值：字符串走数据字段净化，容器逐层重建，标量原样返回。
 
-    与 errors 模块 _filter_sensitive_data 同为递归实现：输入来自 json.loads 的
-    响应体，无循环引用与超深嵌套。字符串沿用 sanitize_data_text 的数据字段语义，
-    保留 URL 与长文本的可用性。
+    字符串沿用 sanitize_data_text 的数据字段语义，保留 URL 与长文本的可用性。
+    遍历经 _sanitize_value_tree 迭代展开，与 _sanitize_usage 同一实现口径：
+    被污染上游构造的数百层嵌套容器不会触发解释器递归上限，已计费的成功生成
+    不因净化阶段翻错为异常；循环引用以 <truncated:cyclic> 占位终止。
     """
-    if isinstance(value, str):
-        return sanitize_data_text(value)
-    if isinstance(value, dict):
-        return {key: _sanitize_unknown_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_sanitize_unknown_value(item) for item in value]
-    return value
+    return _sanitize_value_tree(value, sanitize_data_text)
 
 
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -639,6 +644,14 @@ def _build_generation_structured_result(
     """
     # b64_json 模式下 data 内的完整 base64 为有意保留：用户显式请求 b64 即期望取回图像
     # 数据，故此处不做截断；并行与组图场景的大载荷由调用方或客户端按需处理。
+    sanitized_images = _sanitize_image_errors(
+        images if images is not None else extract_images(result)
+    )
+    # 结构化出口是净化哨兵的末位消费者，用后显式复位：成功路径的文本出口已先净化
+    # 同一列表，上方调用命中哨兵即清空，此处复位为幂等；失败路径的文本出口经
+    # _format_failure_section 提前返回、不经净化，上方调用为首次净化并写入哨兵，
+    # 复位使失败批次的图片列表不滞留哨兵槽位至下一次生成调用。
+    reset_last_sanitized_images()
     payload: dict[str, Any] = {
         "tool": tool_name,
         "success": not _is_generation_failed(result),
@@ -653,8 +666,8 @@ def _build_generation_structured_result(
         "parallelism": context.parallelism,
         # data 项可能携带上游 per-image error 与 url/model/type 等自由字段，统一净化
         # 后进入结构化输出，与异常路径防护一致。format_generation_response 已就同一
-        # 列表净化写回，此处经模块级哨兵跳过重复净化；独立调用场景自行净化兜底。
-        "data": _sanitize_image_errors(images if images is not None else extract_images(result)),
+        # 列表净化写回，上方经模块级哨兵跳过重复净化；独立调用场景自行净化兜底。
+        "data": sanitized_images,
         # usage 为 client 侧原样透传的上游 dict，字符串值过净化管线防 CRLF 与凭据注入，
         # 数值键保持原值供聚合与计费核对。
         "usage": _sanitize_usage(result.get("usage", {})),
@@ -681,6 +694,10 @@ def _build_generation_structured_result(
             sanitized_error = dict(raw_error)
             if isinstance(sanitized_error.get("message"), str):
                 sanitized_error["message"] = sanitize_error_text(sanitized_error["message"])
+            # code 同为上游自由文本，200 加顶层 error 的请求级失败经 client 透传
+            # 到此，CRLF 与凭据片段不借错误码进入 structuredContent。
+            if isinstance(sanitized_error.get("code"), str):
+                sanitized_error["code"] = sanitize_error_text(sanitized_error["code"])
             payload["error"] = sanitized_error
         else:
             payload["error"] = build_error_dict(

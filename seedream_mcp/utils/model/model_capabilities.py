@@ -90,12 +90,16 @@ MODEL_ALIASES: dict[str, str] = {
 }
 
 # 已下线模型的特征 token，model_id 命中任意 token 时 config 校验拒绝。
-DEPRECATED_MODEL_TOKENS: set[str] = {
-    "doubao-seedream-3-0",
-    "doubao-seedream-3.0",
-    "doubao-seededit-3-0",
-    "doubao-seededit-3.0",
-}
+# frozenset 不可变，与 MODEL_CAPABILITIES 的只读视图口径一致，防止公共清单被
+# 原地改写污染全局判定。
+DEPRECATED_MODEL_TOKENS: frozenset[str] = frozenset(
+    {
+        "doubao-seedream-3-0",
+        "doubao-seedream-3.0",
+        "doubao-seededit-3-0",
+        "doubao-seededit-3.0",
+    }
+)
 
 
 def _resolve_model_family(model_id: str) -> str:

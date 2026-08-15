@@ -37,9 +37,10 @@ _cwd_fallback_warned = False
 
 # 已 resolve 回退根的进程级缓存，键为配置原始字符串。回退边界模式下每次文件访问都会
 # 经过本解析，expanduser 与 resolve 属文件系统调用，缓存消除事件循环上的重复阻塞。
-# 仅缓存绝对路径形态的配置值：相对路径的 resolve 结果随进程 CWD 变化，以原始字符串
-# 为键会把首个 CWD 下的解析固化给后续访问，相对形态每次现算。键含配置原始值，配置
-# 变更自然产生新键；解析失败不缓存，下次访问重试。活动配置变更时经
+# 仅缓存 expanduser 后为绝对路径的配置值：相对路径的 resolve 结果随进程 CWD 变化，
+# 以原始字符串为键会把首个 CWD 下的解析固化给后续访问，相对形态每次现算；~ 形态的
+# 展开结果只依赖用户主目录环境，与进程 CWD 无关，展开后为绝对路径即可缓存。键含配置
+# 原始值，配置变更自然产生新键；解析失败不缓存，下次访问重试。活动配置变更时经
 # clear_resolved_env_root_cache 显式失效。
 _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 
@@ -78,18 +79,21 @@ def resolve_env_workspace_root() -> Path:
 
     本地开发无 MCP Roots 时作为文件访问边界回退。优先读取活动配置，config 未就绪时
     回退环境变量。无任何配置回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个
-    工作目录。绝对路径形态的配置根按原始字符串缓存 resolve 结果，同配置重复访问不再
-    触达文件系统；相对与 ~ 形态不缓存，每次现算。
+    工作目录。expanduser 后为绝对路径的配置根按原始字符串缓存 resolve 结果，同配置
+    重复访问不再触达文件系统；相对形态不缓存，每次现算。
     """
     global _cwd_fallback_warned
     configured_root = _configured_workspace_root()
     if configured_root:
-        cacheable = Path(configured_root).is_absolute()
-        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root) if cacheable else None
-        if cached_root is not None:
-            return cached_root
         try:
-            resolved_root = Path(configured_root).expanduser().resolve()
+            # expanduser 先行：~ 形态的展开结果只依赖用户主目录，与进程 CWD 无关，
+            # 以展开后的绝对性判定可缓存性，缓存键仍为配置原始字符串。
+            expanded_root = Path(configured_root).expanduser()
+            cacheable = expanded_root.is_absolute()
+            cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root) if cacheable else None
+            if cached_root is not None:
+                return cached_root
+            resolved_root = expanded_root.resolve()
         except Exception as e:
             logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
         else:
@@ -309,9 +313,14 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
     except ValueError:
         # UNC 拒绝等 ValueError 原样抛出，保留具体原因。
         raise
+    except OSError as e:
+        # ENAMETOOLONG 等文件系统错误单独分支，errno 原因进入错误文案，供调用方
+        # 区分路径拼写问题与系统级长度限制，不归并为笼统的格式错误。
+        logger.error("路径标准化失败 {}: {}", path, e)
+        raise ValueError(f"无效的路径格式: {path} ({e})") from e
     except Exception as e:
         logger.error("路径标准化失败 {}: {}", path, e)
-        raise ValueError(f"无效的路径格式: {path}")
+        raise ValueError(f"无效的路径格式: {path}") from e
 
 
 def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
@@ -415,6 +424,12 @@ def find_images_in_directory(
                 entry.is_file(follow_symlinks=False)
                 and entry_path.suffix.lower() in target_extensions
             ):
+                # OneDrive 占位文件等 reparse 文件不是 symlink，is_file 不拒绝；与目录
+                # 分支同规则剔除，避免列为参考图后读取跟随 reparse 目标。后缀命中后才
+                # 判定，非图片条目不付 lstat 开销。
+                if _is_reparse_point(entry_path):
+                    logger.warning("跳过 reparse point 文件: {}", entry_path)
+                    continue
                 images.append(entry_path)
                 if target_count >= 0 and len(images) >= target_count:
                     return True

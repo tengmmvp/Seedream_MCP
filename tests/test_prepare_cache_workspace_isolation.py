@@ -1,17 +1,23 @@
-"""守护测试：_prepare_image_input 的缓存键以 workspace_roots 隔离。
+"""守护测试：预处理缓存键的 workspace 隔离、签名 strip 一致性与摘要键容错。
 
-防止不同工作区（MCP Roots）的请求因缓存键缺失 workspace 维度而跨租户命中，
-导致本地图片被错误地按另一工作区的缓存结果返回。
+workspace_roots 缺失缓存键维度会使不同工作区的请求跨租户命中，本地图片被错误地
+按另一工作区的缓存结果返回；签名路径与读取路径的 strip 不一致会架空 mtime+size
+失效保护；摘要键对未配对代理字符不容错会使批量预处理整批中断。
 """
 
+import io
+import os
 from pathlib import Path
 from typing import Dict, List
 
 import pytest
+from PIL import Image
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.images import image_input
+from seedream_mcp.utils.images.image_prepare import ImagePreparer
 from seedream_mcp.utils.io import io_path as path_utils
 
 
@@ -105,3 +111,67 @@ def test_resolved_roots_cache_evicts_oldest_fifo(monkeypatch: pytest.MonkeyPatch
     assert ("/ws/1",) in _resolved_roots_cache
     assert (f"/ws/{_RESOLVED_ROOTS_CACHE_MAX_ENTRIES}",) in _resolved_roots_cache
     _resolved_roots_cache.clear()
+
+
+# ==================== 签名路径与读取路径的 strip 一致性 ====================
+
+
+@pytest.mark.asyncio
+async def test_prepare_signature_strips_whitespace_like_read_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """带首尾空白路径的签名与读取定位同一物理文件，文件替换后缓存按 mtime+size 失效。
+
+    签名路径不 strip 时对带空白输入恒得 (0.0, 0) 签名，mtime+size 失效保护被架空，
+    编辑替换图片后持续返回旧编码；strip 后两条路径对同一物理文件求签名。
+    """
+    image_path = tmp_path / "ref.png"
+    Image.new("RGB", (32, 32), color="white").save(image_path, format="PNG")
+
+    monkeypatch.setattr(path_utils, "get_workspace_roots", lambda: [tmp_path])
+    preparer = ImagePreparer(
+        prepare_cache_max=8, prepare_cache_max_bytes=64 * 1024 * 1024, prepare_concurrency=2
+    )
+
+    padded = f"  {image_path} "
+    first_result = await preparer.prepare_image_input(padded)
+    assert first_result.startswith("data:image/png;base64,")
+
+    # 替换为不同内容并显式推进 mtime，规避文件系统时间精度差异
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), color="black").save(buffer, format="PNG")
+    image_path.write_bytes(buffer.getvalue())
+    stat = image_path.stat()
+    os.utime(image_path, (stat.st_atime + 10, stat.st_mtime + 10))
+
+    second_result = await preparer.prepare_image_input(padded)
+
+    assert second_result != first_result
+    assert second_result.startswith("data:image/png;base64,")
+
+
+# ==================== 超大输入摘要键的代理字符容错 ====================
+
+
+def test_data_uri_digest_tolerates_unpaired_surrogate() -> None:
+    """未配对代理字符经 replace 编码进摘要，不在此抛 UnicodeEncodeError。"""
+    digest = ImagePreparer._data_uri_digest("data:image/png;base64,\ud800abc")
+
+    assert digest.startswith("sha256:")
+    assert len(digest) == len("sha256:") + 32
+
+
+@pytest.mark.asyncio
+async def test_prepare_large_data_uri_with_surrogate_raises_validation_error() -> None:
+    """超大含代理字符 data URI 报参数级校验错误，不抛 UnicodeEncodeError 中断整批。
+
+    摘要键容错后，非法输入在 validate_image_input 的 base64 解码处失败，与
+    image_validation 的 Base64 解码失败文案口径一致。
+    """
+    hostile = "data:image/png;base64," + "\ud800" + "a" * (1024 * 1024 + 32)
+    preparer = ImagePreparer(
+        prepare_cache_max=2, prepare_cache_max_bytes=1024 * 1024, prepare_concurrency=1
+    )
+
+    with pytest.raises(SeedreamValidationError, match="Base64 解码失败"):
+        await preparer.prepare_image_input(hostile)

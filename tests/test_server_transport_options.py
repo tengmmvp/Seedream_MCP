@@ -1,10 +1,12 @@
-"""streamable-http 传输选项与鉴权中间件测试：CLI 启动守卫与 Bearer 校验。"""
+"""streamable-http 传输选项与鉴权中间件测试：CLI 启动守卫、Bearer/Host 校验与传输关闭行为。"""
 
+import asyncio
 from argparse import Namespace
 
 import pytest
 
 import seedream_mcp.server as server
+import seedream_mcp.transport as transport_module
 from seedream_mcp.config import MODEL_ALIASES, SeedreamConfig
 
 
@@ -391,3 +393,166 @@ async def test_bearer_auth_middleware_rejects_websocket_scope() -> None:
     await middleware(scope, None, send)
 
     assert sent == [{"type": "websocket.close", "code": 1008}]
+
+
+# ==================== 令牌经配置注入的鉴权路径 ====================
+
+
+def test_cli_main_non_loopback_auth_token_from_active_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无 --auth-token、令牌经活动配置注入时非回环启动通过并透传该令牌。
+
+    生产容器部署依赖 SEEDREAM_HTTP_AUTH_TOKEN 环境变量在配置构建期汇入
+    http_auth_token 字段；cli_main 把配置注入活动配置后 _resolve_http_auth_token
+    回退读取该字段，鉴权不得只认 CLI 参数。
+    """
+    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
+    args = _make_cli_args("streamable-http")
+    args.host = "0.0.0.0"
+    args.auth_token = None
+    args.insecure_allow_non_tls = True
+    config = SeedreamConfig(api_key="test_key", http_auth_token="env-token")
+    _stub_cli(monkeypatch, args, config)
+    captured: dict[str, object] = {}
+
+    def _fake_http_run(host, port, auth_token, ssl_certfile=None, ssl_keyfile=None):  # type: ignore[no-untyped-def]
+        captured["auth_token"] = auth_token
+
+    monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
+
+    assert server.cli_main() == 0
+    assert captured["auth_token"] == "env-token"
+
+
+def test_cli_main_cli_auth_token_overrides_config_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI 与配置同时提供令牌时 CLI 优先，与配置构建的覆盖优先级一致。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
+    args = _make_cli_args("streamable-http")
+    args.host = "0.0.0.0"
+    args.auth_token = "cli-token"
+    args.insecure_allow_non_tls = True
+    config = SeedreamConfig(api_key="test_key", http_auth_token="env-token")
+    _stub_cli(monkeypatch, args, config)
+    captured: dict[str, object] = {}
+
+    def _fake_http_run(host, port, auth_token, ssl_certfile=None, ssl_keyfile=None):  # type: ignore[no-untyped-def]
+        captured["auth_token"] = auth_token
+
+    monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
+
+    assert server.cli_main() == 0
+    assert captured["auth_token"] == "cli-token"
+
+
+# ==================== 绑定地址同步 SDK 内层防护 ====================
+
+
+def test_apply_http_bind_settings_security_follows_bind_host() -> None:
+    """transport_security 按绑定地址派生：非回环关闭 SDK Host 白名单，回环保留白名单。
+
+    FastMCP 构造期以默认 host 定型回环白名单；若绑定设置不随实际地址重写，非回环
+    部署的全部 /mcp 请求会被 SDK 内层以 421 拒绝。stateless 一并写入，供会话
+    管理器首次 streamable_http_app 调用时快照。
+    """
+    server._apply_http_bind_settings("0.0.0.0", stateless=True, auth_enabled=True)
+    non_loopback = server.mcp.settings.transport_security
+    assert non_loopback is not None
+    assert non_loopback.enable_dns_rebinding_protection is False
+    assert server.mcp.settings.stateless_http is True
+
+    server._apply_http_bind_settings("127.0.0.1", stateless=False, auth_enabled=True)
+    loopback = server.mcp.settings.transport_security
+    assert loopback is not None
+    assert loopback.enable_dns_rebinding_protection is True
+    assert loopback.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    assert server.mcp.settings.stateless_http is False
+
+
+# ==================== 回环 Host 校验大小写 ====================
+
+
+@pytest.mark.parametrize(
+    "host",
+    [b"LOCALHOST", b"LocalHost:8000", b"LOCALHOST:8000"],
+)
+async def test_loopback_host_guard_matching_is_case_insensitive(host: bytes) -> None:
+    """Host 头主机名大小写不敏感，大写回环 Host 放行而非 403。"""
+    inner_called: list[bool] = []
+
+    async def inner(scope, receive, send):  # type: ignore[no-untyped-def]
+        inner_called.append(True)
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        raise AssertionError("放行路径不应产生短路响应")
+
+    guard = transport_module._LoopbackHostGuardMiddleware(inner)
+    await guard({"type": "http", "headers": [(b"host", host)]}, None, send)
+
+    assert inner_called == [True]
+
+
+@pytest.mark.parametrize("host", [b"EVIL.EXAMPLE.COM", b"Evil.Example.Com:8000"])
+async def test_loopback_host_guard_rejects_uppercase_external_host(host: bytes) -> None:
+    """大写外部域名 Host 仍被 403 拒绝，大小写归一不放宽 fail-closed 取向。"""
+    sent: list[dict] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    async def inner(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("外部域名 Host 不应进入下游")
+
+    guard = transport_module._LoopbackHostGuardMiddleware(inner)
+    await guard({"type": "http", "headers": [(b"host", host)]}, None, send)
+
+    assert sent[0]["status"] == 403
+
+
+# ==================== 残余任务回收 ====================
+
+
+async def test_drain_pending_tasks_cancels_and_collects_pending() -> None:
+    """常规路径：待处理任务被取消并在回收内退出。"""
+
+    async def _sleeper() -> None:
+        await asyncio.sleep(30)
+
+    task = asyncio.ensure_future(_sleeper())
+    await asyncio.sleep(0)
+
+    await transport_module._drain_pending_tasks()
+
+    assert task.cancelled()
+
+
+async def test_drain_pending_tasks_gives_up_when_task_swallows_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """吞掉 CancelledError 的任务在超时后被放弃等待，回收不无限挂起退出流程。"""
+    monkeypatch.setattr(transport_module, "_DRAIN_PENDING_TIMEOUT_SECONDS", 0.1)
+    state = {"cancels": 0}
+
+    async def _stubborn() -> None:
+        while True:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                state["cancels"] += 1
+                if state["cancels"] >= 2:
+                    return
+
+    task = asyncio.ensure_future(_stubborn())
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(transport_module._drain_pending_tasks(), timeout=5.0)
+
+    assert not task.done()
+    assert state["cancels"] == 1
+
+    # 收尾：第二次取消触发吞满阈值后任务退出，避免遗留 pending 任务。
+    task.cancel()
+    await asyncio.wait_for(task, timeout=5.0)
+    assert task.done() and not task.cancelled()

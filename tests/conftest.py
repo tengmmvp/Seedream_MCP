@@ -1,7 +1,7 @@
 """共享测试 fixture。
 
 提供基础配置与工作区根目录 fixture，供需要 SeedreamConfig 或工作区隔离的测试复用，
-避免各测试重复构造；需要差异化字段时用 model_copy(update={...}) 覆盖。
+避免各测试重复构造；需要差异化字段时直接以构造 kwargs 覆盖或用 dataclasses.replace。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from seedream_mcp.config import SeedreamConfig
 
 @pytest.fixture
 def seedream_config() -> SeedreamConfig:
-    """基础测试配置，api_key 固定为 test_key；差异化字段用 model_copy 覆盖。"""
+    """基础测试配置，api_key 固定为 test_key；差异化字段以构造 kwargs 或 dataclasses.replace 覆盖。"""
     return SeedreamConfig(api_key="test_key")
 
 

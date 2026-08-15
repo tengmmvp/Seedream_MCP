@@ -18,7 +18,6 @@ from mcp.server.fastmcp import FastMCP
 
 from .config import (
     DEFAULT_HTTP_HOST,
-    DEFAULT_HTTP_PORT,
     LIFESPAN_KEY_CLIENT,
     LIFESPAN_KEY_CONFIG,
     LIFESPAN_KEY_DOWNLOAD_MANAGER,
@@ -255,8 +254,9 @@ def _reset_lifespan_state() -> None:
     """重置 lifespan 单例、活动与全局配置及初始化锁，仅供测试隔离调用。
 
     重建 _shared_init_lock 避免跨事件循环复用绑定了旧循环的 asyncio.Lock，复位
-    mcp.settings 的 streamable-http 配置避免上一个用例的 host/port/stateless 泄漏。
-    模块级可变状态的复位清单集中在本函数，新增状态须登记于此：自动保存清理节流状态、
+    mcp.settings 的 streamable-http 配置避免上一个用例的 stateless 与
+    transport_security 泄漏；监听 host/port 不经 settings 写入，无需复位。模块级
+    可变状态的复位清单集中在本函数，新增状态须登记于此：自动保存清理节流状态、
     目录扫描缓存、参考图 roots 解析缓存与生成结果净化哨兵分别经对应模块的复位函数清除。
     """
     global _shared_init_lock, _active_resource
@@ -275,8 +275,12 @@ def _reset_lifespan_state() -> None:
     config_module._global_config = None
     _shared_init_lock = asyncio.Lock()
     mcp.settings.stateless_http = False
-    mcp.settings.host = DEFAULT_HTTP_HOST
-    mcp.settings.port = DEFAULT_HTTP_PORT
+    # transport_security 与 stateless 同为会话管理器首次 streamable_http_app 调用时
+    # 快照定型的配置，复位到回环默认防护，避免上个用例的非回环绑定关闭 SDK 内层
+    # Host 白名单后泄漏到后续用例。延迟导入遵循近邻层不在顶层互相依赖的约定。
+    from .transport import _transport_security_for_host
+
+    mcp.settings.transport_security = _transport_security_for_host(DEFAULT_HTTP_HOST)
     # 复位清单：io_save 的清理节流锁与任务集合绑定事件循环，io_scan 的目录扫描缓存与
     # image_prepare 的 roots 解析缓存跨用例残留目录解析结果，tools.core.results 的净化
     # 哨兵单槽持有最近一次生成的图片列表引用；四者与 lifespan 单例同步复位。延迟导入

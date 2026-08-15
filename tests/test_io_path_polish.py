@@ -1,9 +1,9 @@
 """io_path 行为修复回归测试。
 
 覆盖：相似路径建议对空目标名不误报、get_relative_path 对绝对路径回退分支不再重复
-resolve、resolve_env_workspace_root 仅对绝对路径形态的配置值缓存 resolve 结果、
-resolve_workspace_roots 不再对已 resolve 的根重复 resolve、工作区根提供者的注册
-协议与未注册回退。
+resolve、resolve_env_workspace_root 对 expanduser 后为绝对路径的配置值（含 ~ 形态）
+缓存 resolve 结果而相对形态每次现算、resolve_workspace_roots 不再对已 resolve 的根
+重复 resolve、工作区根提供者的注册协议与未注册回退。
 """
 
 from __future__ import annotations
@@ -148,6 +148,38 @@ def test_resolve_env_workspace_root_relative_config_recomputes_after_cwd_change(
     monkeypatch.chdir(second_cwd)
     assert io_path_module.resolve_env_workspace_root() == (second_cwd / "images").resolve()
     assert "images" not in io_path_module._RESOLVED_ENV_ROOT_CACHE
+
+
+def test_resolve_env_workspace_root_tilde_form_uses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """~ 形态的配置根进入 resolve 缓存，重复访问不再触达文件系统。
+
+    ~ 展开结果只依赖用户主目录环境，与进程 CWD 无关，按展开后的绝对性判定可缓存；
+    旧实现以展开前的 is_absolute 排除 ~ 形态，stdio 客户端未声明 roots 时每次文件
+    访问都在事件循环同步 expanduser+resolve。同配置两次解析只应触发一次 resolve。
+    """
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_configured_workspace_root", lambda: "~")
+
+    # 期望值在 resolve 被 monkeypatch 计数前捕获，避免断言自身的 resolve 混入计数
+    expected = Path("~").expanduser().resolve()
+    expanded_home = str(Path("~").expanduser())
+    resolve_calls: list[str] = []
+    original_resolve = Path.resolve
+
+    def _counting_resolve(self: Path, strict: bool = False) -> Path:
+        resolve_calls.append(str(self))
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _counting_resolve)
+
+    first = io_path_module.resolve_env_workspace_root()
+    cached_again = io_path_module.resolve_env_workspace_root()
+
+    assert first == cached_again == expected
+    assert resolve_calls.count(expanded_home) == 1, "~ 形态配置根的 resolve 应只执行一次"
+    assert "~" in io_path_module._RESOLVED_ENV_ROOT_CACHE
 
 
 def test_workspace_root_provider_registration_drives_configured_root(

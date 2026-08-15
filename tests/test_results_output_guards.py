@@ -15,6 +15,7 @@ from seedream_mcp.tools.core.context import GenerationExecutionContext
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
     _sanitize_image_errors,
+    extract_images,
     format_generation_response,
     reset_last_sanitized_images,
     update_result_with_auto_save,
@@ -719,3 +720,126 @@ def test_reset_last_sanitized_images_clears_sentinel_slot() -> None:
     reset_last_sanitized_images()
 
     assert results_module._last_sanitized_images is None
+
+
+def test_failure_path_structured_result_resets_sanitized_sentinel() -> None:
+    """失败路径结构化出口用后复位哨兵：失败批次的图片列表不滞留槽位至下一次调用。
+
+    失败路径的文本出口经 _format_failure_section 提前返回、不经净化，结构化出口是
+    首个也是末个消费者；不复位时哨兵会持有失败批次图片直至下一次生成调用覆盖。
+    """
+    # 先净化一份无关列表，模拟上一次调用在哨兵槽位的滞留。
+    _sanitize_image_errors([{"url": "https://example.com/prev.png"}])
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"message": "boom"},
+        "data": [{"url": "https://example.com/a.png"}],
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert structured["success"] is False
+    assert results_module._last_sanitized_images is None
+
+
+def test_success_path_pipeline_sanitization_ends_with_cleared_sentinel() -> None:
+    """成功路径文本与结构化先后净化同一列表，流水线结束后哨兵为空、无引用滞留。"""
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"url": "https://example.com/a.png"}],
+    }
+    images = extract_images(result)
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K", images=images)
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+        images=images,
+    )
+
+    assert "URL: https://example.com/a.png" in text
+    assert structured["data"][0]["url"] == "https://example.com/a.png"
+    assert results_module._last_sanitized_images is None
+
+
+# ==================== 请求级失败错误渲染 ====================
+
+
+def test_failure_text_renders_top_level_error_message_not_unknown() -> None:
+    """请求级软失败经结果结构透传 error 时，失败文案渲染真实原因而非未知错误。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "data": [],
+        "error": {"code": "StreamRejected", "message": "流式请求被拒绝\r\nFAKE api_key=leaked"},
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "图片生成失败: 流式请求被拒绝" in text
+    assert "未知错误" not in text
+    assert "leaked" not in text
+    assert "\r" not in text
+
+
+def test_structured_failure_error_code_sanitized() -> None:
+    """失败分支 error.code 为上游自由文本：净化后进入 structuredContent，无换行注入。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"code": "E\r\nFAKE api_key=leaked", "message": "boom"},
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert structured["error"]["code"] == "E  FAKE api_key=***"
+    assert "leaked" not in str(structured["error"])
+
+
+# ==================== 未知键净化遍历健壮性 ====================
+
+
+def test_unknown_value_deeply_nested_sanitized_without_recursion_error() -> None:
+    """950 层嵌套 list 的未知键值净化正常完成：迭代展开不触发解释器递归上限。
+
+    深处的字符串仍被净化，凭据片段与 CRLF 不进入 structuredContent。
+    """
+    deep: Any = "echo\r\nFAKE api_key=leaked"
+    for _ in range(950):
+        deep = [deep]
+    images = [{"url": "https://example.com/a.png", "custom_meta": deep}]
+
+    sanitized = _sanitize_image_errors(images)
+
+    current: Any = sanitized[0]["custom_meta"]
+    for _ in range(950):
+        current = current[0]
+    assert current == "echo  FAKE api_key=***"
+
+
+def test_unknown_value_cyclic_reference_terminated_with_placeholder() -> None:
+    """未知键值含循环引用时以 <truncated:cyclic> 占位终止展开，不无限循环。"""
+    cyclic: list[Any] = []
+    cyclic.append(cyclic)
+    images = [{"url": "https://example.com/a.png", "custom_meta": cyclic}]
+
+    sanitized = _sanitize_image_errors(images)
+
+    assert sanitized[0]["custom_meta"][0][0] == "<truncated:cyclic>"

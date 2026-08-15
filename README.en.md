@@ -213,17 +213,17 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 Different models support different capabilities and parameter ranges. Please note this when selecting a model:
 
-| Capability / Parameter                       | 5.0 Pro   | 5.0 / 5.0 Lite | 4.5       | 4.0          |
-| -------------------------------------------- | --------- | ------------ | --------- | ------------ |
-| Text-to-Image / Image-to-Image / Multi-Image | ✅        | ✅           | ✅        | ✅           |
-| Sequential Generation                        | ❌        | ✅           | ✅        | ✅           |
-| Web Search                                   | ❌        | ✅           | ❌        | ❌           |
-| Streaming Output                             | ❌        | ✅           | ✅        | ✅           |
-| Output Format (png/jpeg)                     | ✅        | ✅           | ❌        | ❌           |
-| Resolution Presets                           | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
+| Capability / Parameter                       | 5.0 Pro        | 5.0 / 5.0 Lite | 4.5       | 4.0          |
+| -------------------------------------------- | -------------- | ------------ | --------- | ------------ |
+| Text-to-Image / Image-to-Image / Multi-Image | ✅             | ✅           | ✅        | ✅           |
+| Sequential Generation                        | ❌             | ✅           | ✅        | ✅           |
+| Web Search                                   | ❌             | ✅           | ❌        | ❌           |
+| Streaming Output                             | ❌             | ✅           | ✅        | ✅           |
+| Output Format (png/jpeg)                     | ✅             | ✅           | ❌        | ❌           |
+| Resolution Presets                           | 1K / 2K        | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
 | Custom Size Multiple                         | Multiple of 16 | No limit     | No limit  | No limit     |
-| Default Size (MCP)                           | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
-| Max Reference Images                         | 10        | 14           | 14        | 14           |
+| Default Size (MCP)                           | 2048x2048      | 2048x2048    | 2048x2048 | 2048x2048    |
+| Max Reference Images                         | 10             | 14           | 14        | 14           |
 
 > **Default Size (MCP)**: The "Default Size (MCP)" row reflects the runtime resolved value of MCP's unified `default_size=2K` setting (corresponding to `2048x2048`), independent of each model's native default (e.g. 5.0 Pro's native default is `1024x1024`).
 
@@ -521,7 +521,7 @@ Beyond tools, the server exposes the following MCP resources for clients to read
 | Resource URI | Description |
 | --- | --- |
 | `seedream://workspace/roots` | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories |
-| `seedream://server/info` | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle, etc.) |
+| `seedream://server/info` | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total) |
 | `seedream://models/info` | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
 
 ## 🎭 Style Presets
@@ -611,7 +611,8 @@ Configuration priority: MCP client explicit config (CLI args) > runtime system e
 ARK_API_KEY=your_api_key_here
 
 # API endpoint security
-SEEDREAM_ALLOW_HTTP_BASE_URL=false            # Exempt an http:// ARK_BASE_URL (plaintext rejected by default; set true only for trusted self-hosted intranet endpoints)
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # API base URL, defaults to the Volcengine Beijing endpoint; must be https, http sends the API key in plaintext and is rejected by default, only trusted self-hosted intranet endpoints can be exempted via SEEDREAM_ALLOW_HTTP_BASE_URL
+SEEDREAM_ALLOW_HTTP_BASE_URL=false                      # Exempt an http:// ARK_BASE_URL (plaintext rejected by default; set true only for trusted self-hosted intranet endpoints)
 
 # Model config
 SEEDREAM_MODEL_ID=doubao-seedream-5.0
@@ -624,6 +625,10 @@ SEEDREAM_DEFAULT_WATERMARK=false
 SEEDREAM_TIMEOUT=60                         # Connection/write/pool-acquire timeout (seconds)
 SEEDREAM_API_TIMEOUT=600                    # API call read & total timeout (seconds)
 SEEDREAM_MAX_RETRIES=3                      # Max retries for API calls (retries 429/5xx, timeouts, network errors; no retry on 4xx)
+
+# Logging
+LOG_LEVEL=INFO                              # Log level (DEBUG / INFO / WARNING / ERROR / CRITICAL)
+LOG_FILE=logs/seedream_mcp.log              # Log file path
 
 # Auto-save
 SEEDREAM_AUTO_SAVE_ENABLED=true

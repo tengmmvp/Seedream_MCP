@@ -38,7 +38,12 @@ from aiohttp.abc import AbstractResolver, ResolveResult
 
 from ...version import __version__
 from ..core.errors import SeedreamMCPError
-from ..core.formats import DEFAULT_MAX_FILE_SIZE, infer_extension_from_bytes, is_known_image_bytes
+from ..core.formats import (
+    DEFAULT_MAX_FILE_SIZE,
+    SNIFF_HEAD_BYTES_FLOOR,
+    infer_extension_from_bytes,
+    is_known_image_bytes,
+)
 from ..core.logs import get_logger, log_unretrieved_task_exception
 from .io_file import atomic_replace_from_fd
 
@@ -320,6 +325,17 @@ class DownloadManager:
         """退出上下文时关闭底层会话。"""
         await self.close()
 
+    def _download_total_budget(self) -> float:
+        """返回单次下载会话与跨尝试累计共用的总时长上限，单位秒。
+
+        上限按停滞超时的 120 倍推导且不低于 1 小时，默认配置下为 1 小时（50MB 上限
+        对应约 14KB/s 平均速率），只封堵恶意慢速滴流，不影响正常慢网络下大图片的完整
+        下载。会话 timeout 与 download_image 的跨尝试累计预算取同一值：无累计预算时
+        慢滴流响应每次尝试都可耗满单次封顶，重试使单个保存任务的最长占用放大为单次
+        封顶乘尝试数，两处取同一值使总占用与单次封顶同量级。
+        """
+        return max(float(self.timeout) * 120, 3600.0)
+
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """获取可用的 aiohttp 会话。
 
@@ -330,9 +346,7 @@ class DownloadManager:
 
         超时策略：sock_connect 与 sock_read 仅约束连接建立与单次读取停滞，服务端按
         停滞阈值间歇发送字节的慢滴流响应可无限拖住任务，故另设宽松的总时长上限
-        封顶整个下载。上限按停滞超时的 120 倍推导且不低于 1 小时，默认配置下为
-        1 小时（50MB 上限对应约 14KB/s 平均速率），只封堵恶意慢速滴流，不影响正常
-        慢网络下大图片的完整下载；失败仍走既有重试与降级路径。
+        封顶整个下载，上限值经 _download_total_budget 推导。
         """
         if self._session is None or self._session.closed:
             async with self._session_lock:
@@ -343,7 +357,7 @@ class DownloadManager:
                     connector = aiohttp.TCPConnector(**connector_kwargs)
                     self._session = aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(
-                            total=max(float(self.timeout) * 120, 3600.0),
+                            total=self._download_total_budget(),
                             sock_connect=self.timeout,
                             sock_read=self.timeout,
                         ),
@@ -642,9 +656,10 @@ class DownloadManager:
                     total_size += len(chunk)
                     if total_size > self.max_file_size:
                         raise DownloadError(f"文件过大: {total_size} 字节")
-                    # 累计首 32 字节做签名校验，省一次 open+read。
-                    if len(head_bytes) < 32:
-                        head_bytes += chunk[: 32 - len(head_bytes)]
+                    # 累计首部字节做签名校验，省一次 open+read；窗口取各格式最小
+                    # 长度下界的最大值，保证 is_known_image_bytes 对全部格式可判定。
+                    if len(head_bytes) < SNIFF_HEAD_BYTES_FLOOR:
+                        head_bytes += chunk[: SNIFF_HEAD_BYTES_FLOOR - len(head_bytes)]
                     write_buffer += chunk
                     if len(write_buffer) >= _WRITE_BATCH_BYTES:
                         await f.write(write_buffer)
@@ -839,6 +854,18 @@ class DownloadManager:
 
             # 非末次尝试则按线性递增延迟加随机抖动退避后重试，抖动避免并发任务重试同步。
             if attempt < self.max_retries:
+                # 跨尝试累计时长预算从 start_time 起算，耗尽即停止重试：慢滴流响应
+                # 单次尝试可耗满会话总时长上限，无累计预算时重试按尝试数成倍放大
+                # 单个保存任务的占用；预算与单次封顶取同一值，见 _download_total_budget。
+                elapsed = time.time() - start_time
+                if elapsed >= self._download_total_budget():
+                    logger.warning(
+                        "下载累计耗时 {:.0f} 秒已超总预算 {:.0f} 秒，停止重试: {}",
+                        elapsed,
+                        self._download_total_budget(),
+                        sanitize_url(url),
+                    )
+                    break
                 await asyncio.sleep(self.retry_delay * (attempt + 1) + random.uniform(0, 1))
 
         logger.error("图片下载失败，已重试 {} 次: {}", self.max_retries, sanitize_url(url))

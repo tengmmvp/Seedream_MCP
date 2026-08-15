@@ -221,7 +221,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | 流式输出                   | ❌        | ✅           | ✅        | ✅           |
 | 输出格式（png/jpeg）       | ✅        | ✅           | ❌        | ❌           |
 | 分辨率档位                 | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| 自定义尺寸倍数                | 16 的倍数    | 不限制          | 不限制       | 不限制          |
+| 自定义尺寸倍数             | 16 的倍数 | 不限制       | 不限制    | 不限制       |
 | MCP 默认尺寸               | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
 | 参考图上限                 | 10 张     | 14 张        | 14 张     | 14 张        |
 
@@ -521,7 +521,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | 资源 URI | 说明 |
 | --- | --- |
 | `seedream://workspace/roots` | 客户端授权的 MCP 工作区 Roots；未授权时为空，避免暴露服务器本地目录 |
-| `seedream://server/info` | 服务器名称、版本与当前生效配置摘要（模型、默认尺寸、自动保存开关等） |
+| `seedream://server/info` | 服务器名称、版本与当前生效配置摘要（模型、默认尺寸、自动保存开关，共五项字段） |
 | `seedream://models/info` | 各模型别名与能力声明：支持的尺寸档位、像素范围、像素倍数、参考图上限、输出格式/工具/流式等能力，供客户端按需选择模型 |
 
 ## 🎭 风格预设
@@ -611,7 +611,8 @@ uv run python -m seedream_mcp.server --api-key your_key
 ARK_API_KEY=your_api_key_here
 
 # API 端点安全
-SEEDREAM_ALLOW_HTTP_BASE_URL=false            # 豁免 http:// 的 ARK_BASE_URL（默认拒绝明文传输；仅自建可信内网端点设 true）
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # API 基础 URL，默认火山引擎北京端点；须 https，http 会使 API Key 明文传输而被默认拒绝，仅自建可信内网端点可经 SEEDREAM_ALLOW_HTTP_BASE_URL 豁免
+SEEDREAM_ALLOW_HTTP_BASE_URL=false                      # 豁免 http:// 的 ARK_BASE_URL（默认拒绝明文传输；仅自建可信内网端点设 true）
 
 # 模型配置
 SEEDREAM_MODEL_ID=doubao-seedream-5.0
@@ -624,6 +625,10 @@ SEEDREAM_DEFAULT_WATERMARK=false
 SEEDREAM_TIMEOUT=60                         # 连接建立/写入/连接池获取超时（秒）
 SEEDREAM_API_TIMEOUT=600                    # API 调用读取与总超时（秒）
 SEEDREAM_MAX_RETRIES=3                      # API 调用最大重试次数（429/5xx、超时与网络错误重试，4xx 不重试）
+
+# 日志
+LOG_LEVEL=INFO                              # 日志级别（DEBUG / INFO / WARNING / ERROR / CRITICAL）
+LOG_FILE=logs/seedream_mcp.log              # 日志文件路径
 
 # 自动保存
 SEEDREAM_AUTO_SAVE_ENABLED=true

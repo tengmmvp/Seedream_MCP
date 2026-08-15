@@ -81,7 +81,11 @@ from .utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
-from .utils.io.io_path import get_workspace_roots, workspace_roots_scope
+from .utils.io.io_path import (
+    get_workspace_roots,
+    is_boundary_from_session_roots,
+    workspace_roots_scope,
+)
 from .utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 
 # resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 为本模块直接
@@ -737,7 +741,12 @@ async def workspace_roots_resource() -> str:
     """工作区根目录。展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。"""
     ctx = mcp.get_context()
     async with workspace_roots_scope(ctx):
-        roots = get_workspace_roots()
+        # 边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端
+        # 授权声明，其绝对路径不进入面向调用方的输出，按未授权输出空列表。
+        if is_boundary_from_session_roots():
+            roots = get_workspace_roots()
+        else:
+            roots = []
     return json.dumps(
         {"roots": [str(root).replace("\\", "/") for root in roots]}, ensure_ascii=False, indent=2
     )
@@ -895,7 +904,6 @@ def cli_main() -> int:
                     return 1
             _apply_http_bind_settings(
                 args.host,
-                args.port,
                 args.stateless,
                 auth_enabled=bool(auth_token),
             )

@@ -6,9 +6,10 @@ README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版�
 
 配对策略：围栏代码块按出现顺序配对，先断言数量相等，再逐块比较第 N 块；基准
 版本为 README.md，其余两份与基准对齐。断言只比较语言无关要素，如 JSON 块全文、
-bash 块内的 KEY=value 赋值、环境变量键序、标题层级、链接 URL 与表格列数，不比
-较自然语言正文。定位环境变量配置块时以含 SEEDREAM_MODEL_ID 赋值行的 bash 块为
-锚点，不依赖各语言的章节标题文字。
+bash 块内的 KEY=value 赋值、环境变量键序、标题层级、链接 URL、表格列数与能力差
+异表的数字 token 序列，不比较自然语言正文。定位环境变量配置块时以含
+SEEDREAM_MODEL_ID 赋值行的 bash 块为锚点，定位能力差异表时以含 "1K / 2K" 单元格
+的表格为锚点，均不依赖各语言的章节标题文字。
 """
 
 from __future__ import annotations
@@ -169,6 +170,61 @@ def _table_columns(name: str) -> list[tuple[int, int]]:
         if raw.lstrip().startswith("|"):
             columns.append((lineno, raw.count("|") - 1))
     return columns
+
+
+# 能力差异表定位锚点，分辨率档位行的 "1K / 2K" 单元格为语言无关内容，全文唯一。
+_CAPABILITY_TABLE_CELL_ANCHOR = "1K / 2K"
+
+# 单元格内数字 token 提取，尺寸档位、倍数、像素值与参考图上限等取值均为数字。
+_NUMBER_TOKEN_PATTERN = re.compile(r"\d+")
+
+
+def _row_cells(raw: str) -> list[str]:
+    """拆分表格行为单元格序列，剥除首尾竖线与单元格两侧空白。"""
+    stripped = raw.strip()
+    inner = stripped[1:-1] if stripped.startswith("|") else stripped
+    return [cell.strip() for cell in inner.split("|")]
+
+
+def _tables(name: str) -> list[list[tuple[int, str]]]:
+    """把正文表格行按连续行分组为表，每表为带 1 基行号的行序列。"""
+    tables: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    for entry in _prose_lines(name):
+        if entry[1].lstrip().startswith("|"):
+            current.append(entry)
+        elif current:
+            tables.append(current)
+            current = []
+    if current:
+        tables.append(current)
+    return tables
+
+
+def _capability_table(name: str) -> list[tuple[int, str]]:
+    """定位能力差异表，锚点为含 "1K / 2K" 单元格的唯一表格。"""
+    candidates = [
+        rows
+        for rows in _tables(name)
+        if any(_CAPABILITY_TABLE_CELL_ANCHOR in _row_cells(raw) for _, raw in rows)
+    ]
+    assert len(candidates) == 1, (
+        f"{name} 能力差异表定位失败，含 {_CAPABILITY_TABLE_CELL_ANCHOR} 单元格的表格"
+        f"应唯一命中，实际命中 {len(candidates)} 个"
+    )
+    return candidates[0]
+
+
+def _row_number_tokens(raw: str) -> list[str]:
+    """按单元格顺序提取行内全部数字 token，构成语言无关的取值指纹。
+
+    "1K / 2K" 展开为 ["1", "2"]，"10 张" 展开为 ["10"]，"2048x2048" 展开为
+    ["2048", "2048"]；纯文字单元格贡献空序列，不影响行对齐。
+    """
+    tokens: list[str] = []
+    for cell in _row_cells(raw):
+        tokens.extend(_NUMBER_TOKEN_PATTERN.findall(cell))
+    return tokens
 
 
 def _first_mismatch_index(base: Sequence[_T], other: Sequence[_T]) -> int:
@@ -349,3 +405,31 @@ def test_table_column_sequence_matches() -> None:
             f"{BASE_README} 第 {base_entry[0]} 行 {base_entry[1]} 列，"
             f"{name} 第 {other_entry[0]} 行 {other_entry[1]} 列"
         )
+
+
+def test_capability_table_number_tokens_match() -> None:
+    """能力差异表逐行数字 token 序列三语一致，单元格取值漂移即失败。
+
+    列数守护只锁定表格结构，单元格取值不在其比对范围，任一语言单独修改数值
+    不会变红。数字 token 为语言无关要素，按行成序列比较即可覆盖尺寸档位、
+    倍数、默认像素与参考图上限等取值；失败消息定位两份文件的差异行号。
+    """
+    base_rows = _capability_table(BASE_README)
+    base_tokens = [_row_number_tokens(raw) for _, raw in base_rows]
+    assert any(base_tokens), "能力差异表未提取到任何数字 token，定位或解析失效"
+
+    for name in OTHER_READMES:
+        other_rows = _capability_table(name)
+        assert len(other_rows) == len(base_rows), (
+            f"{name} 能力差异表为 {len(other_rows)} 行，{BASE_README} 为 "
+            f"{len(base_rows)} 行，存在单语增删的表格行"
+        )
+        for (base_lineno, base_raw), (other_lineno, other_raw) in zip(base_rows, other_rows):
+            base_row_tokens = _row_number_tokens(base_raw)
+            other_row_tokens = _row_number_tokens(other_raw)
+            assert other_row_tokens == base_row_tokens, (
+                f"{name} 第 {other_lineno} 行「{other_raw.strip()}」的数字 token 序列与 "
+                f"{BASE_README} 第 {base_lineno} 行「{base_raw.strip()}」漂移:\n"
+                f"  {BASE_README}: {base_row_tokens}\n"
+                f"  {name}: {other_row_tokens}"
+            )

@@ -17,6 +17,8 @@ import ssl
 import sys
 from typing import Any, Callable
 
+from mcp.server.transport_security import TransportSecuritySettings
+
 from .config import get_active_config
 from .utils.core.logs import get_logger
 
@@ -28,6 +30,19 @@ logger = get_logger(__name__)
 # 不含 “localhost”，其解析依赖 hosts/DNS，污染时可指向非回环地址，
 # 仅凭字符串判定会使公网暴露仍免鉴权。
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
+
+# 回环绑定下 SDK 内层 DNS rebinding 防护的 Host/Origin 白名单，端口通配，与
+# FastMCP 构造期对回环 host 的默认白名单一致，亦与 _LoopbackHostGuardMiddleware
+# 容忍的回环 Host 集合语义对齐。
+_LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+_LOOPBACK_ALLOWED_ORIGINS = (
+    "http://127.0.0.1:*",
+    "http://localhost:*",
+    "http://[::1]:*",
+)
+
+# 残余任务回收的最长等待秒数，超时即放弃等待交由循环关闭收尾。
+_DRAIN_PENDING_TIMEOUT_SECONDS = 5.0
 
 
 # ==================== ASGI 响应辅助 ====================
@@ -254,7 +269,8 @@ class _LoopbackHostGuardMiddleware:
         scope_type = scope.get("type")
         if scope_type in ("http", "websocket"):
             host = self._host_header(scope)
-            if host is None or self._strip_port(host) not in self._ALLOWED_HOSTS:
+            # Host 头的主机名大小写不敏感，比较前统一小写，避免大写回环 Host 被误拒。
+            if host is None or self._strip_port(host).lower() not in self._ALLOWED_HOSTS:
                 if scope_type == "websocket":
                     # websocket 握手无 HTTP 状态码可回，按本文件鉴权中间件模式以
                     # 1008 Policy Violation 关闭，阻断 rebinding 借 websocket 绕过校验。
@@ -365,19 +381,49 @@ def _resolve_http_auth_token(args: argparse.Namespace) -> str:
     return (token or "").strip()
 
 
-def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enabled: bool) -> None:
+def _transport_security_for_host(host: str) -> TransportSecuritySettings:
+    """按实际绑定地址派生 SDK 内层 DNS rebinding 防护配置。
+
+    FastMCP 构造期仅在未显式传入 transport_security 且 host 为回环时启用回环 Host
+    白名单；本项目以默认 host 构造实例，白名单随构造期定型。回环绑定维持该白名单，
+    与 _LoopbackHostGuardMiddleware 的回环 Host 容忍集合语义对齐；非回环绑定关闭
+    白名单，此时鉴权与 TLS 已由本项目 Bearer 中间件与 cli_main 的 fail-closed 前置
+    校验承担，SDK 内层白名单反而会把携带真实域名 Host 的全部 /mcp 请求以 421 拒绝。
     """
-    将 streamable-http 监听配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
+    if host in _LOOPBACK_HOSTS:
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(_LOOPBACK_ALLOWED_HOSTS),
+            allowed_origins=list(_LOOPBACK_ALLOWED_ORIGINS),
+        )
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+
+def _apply_http_bind_settings(host: str, stateless: bool, auth_enabled: bool) -> None:
+    """
+    将 streamable-http 传输配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
+
+    实际监听地址与端口由 _run_streamable_http 显式传给 uvicorn，settings 的
+    host/port 无消费方，本函数不写入。写入 stateless_http 与 transport_security
+    两项：二者在首次 streamable_http_app 调用时被 StreamableHTTPSessionManager 快照
+    定型，此后再改 settings 不生效，本函数必须在任何 streamable_http_app 调用之前
+    执行。transport_security 经 _transport_security_for_host 按实际绑定地址同步
+    SDK 内层 DNS rebinding 防护，消除构造期默认回环白名单与非回环部署的错配。
+    stateless 启用无状态模式，更适合远程多客户端与负载均衡场景。
 
     生产链路由 cli_main 完成非回环绑定的鉴权与 TLS 前置校验后调用，非回环绑定必
     已启用鉴权；绕过 cli_main 直调本函数时无此保证，告警文案按传入的 auth_enabled
-    据实输出。stateless 启用无状态模式，更适合远程多客户端与负载均衡场景。
+    据实输出。
     """
     from .resources import mcp
 
-    mcp.settings.host = host
-    mcp.settings.port = port
     mcp.settings.stateless_http = stateless
+    mcp.settings.transport_security = _transport_security_for_host(host)
+    if host not in _LOOPBACK_HOSTS:
+        logger.info(
+            "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
+            host,
+        )
     _warn_remote_exposure(host, auth_enabled)
 
 
@@ -416,13 +462,22 @@ async def _drain_pending_tasks() -> None:
 
     server.serve 返回后连接处理等任务可能仍待处理，直接关闭循环会跳过其连接清理
     finally 并产生 "Task was destroyed but it is pending!" 警告。排除当前自身任务后
-    取消其余任务，并以 return_exceptions 等待其退出。
+    取消其余任务，并以带超时的等待回收其退出。个别任务吞掉 CancelledError 时无限
+    等待会挂起整个退出流程，超时后放弃等待交由循环关闭收尾，代价至多是遗留 pending
+    警告，不再阻塞进程退出。
     """
     current = asyncio.current_task()
     pending = [task for task in asyncio.all_tasks() if task is not current]
     for task in pending:
         task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+    if not pending:
+        return
+    _, unfinished = await asyncio.wait(pending, timeout=_DRAIN_PENDING_TIMEOUT_SECONDS)
+    if unfinished:
+        logger.warning(
+            "回收残余任务超时，放弃等待 {} 个未退出任务",
+            len(unfinished),
+        )
 
 
 def _run_streamable_http(

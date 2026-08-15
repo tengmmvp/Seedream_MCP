@@ -239,6 +239,41 @@ async def test_download_image_exhausts_retries_then_raises(
 
 
 @pytest.mark.asyncio
+async def test_download_image_stops_retry_when_total_budget_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """跨尝试累计时长预算耗尽即停止重试，单个保存任务占用不随尝试数成倍放大。
+
+    恶意慢滴流响应每次尝试都可耗满单次会话总时长上限，无累计预算时 max_retries
+    次重试使最长占用放大为单次封顶乘尝试数。以每次读时钟即前进超过预算的伪时钟
+    驱动：首次尝试失败后累计耗时已超预算，直接停止重试，尝试次数为 1 而非
+    max_retries + 1。
+    """
+    import seedream_mcp.utils.io.io_download as download_module
+
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(500, {})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    clock_now = [1000.0]
+
+    def _advancing_time() -> float:
+        value = clock_now[0]
+        # 每次读时钟前进 7200 秒，超过默认预算下限 3600 秒
+        clock_now[0] += 7200.0
+        return value
+
+    monkeypatch.setattr(download_module.time, "time", _advancing_time)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert not save_path.exists()
+    assert session._idx == 1, "预算耗尽后应停止重试，仅执行首次尝试"
+
+
+@pytest.mark.asyncio
 async def test_download_image_retries_timeout_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:

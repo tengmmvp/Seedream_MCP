@@ -6,6 +6,9 @@ image_input、io_storage 等模块共享，避免多处重复定义。
 
 from __future__ import annotations
 
+from types import MappingProxyType
+from typing import Mapping
+
 # 自动保存单文件大小上限默认值，config 与 io_download 共享此单一来源。
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
@@ -27,30 +30,36 @@ SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (
 )
 SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)
 
-# 扩展名到 MIME 类型映射，用于本地文件转 Data URI。
-MIME_BY_EXTENSION: dict[str, str] = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".bmp": "image/bmp",
-    ".webp": "image/webp",
-    ".tiff": "image/tiff",
-    ".heic": "image/heic",
-    ".heif": "image/heif",
-}
+# 扩展名到 MIME 类型映射，用于本地文件转 Data URI。以 MappingProxyType 包装为
+# 只读视图，与 SUPPORTED_IMAGE_EXTENSIONS 的 frozenset 口径一致，防止公共映射被
+# 原地改写污染共享行为。
+MIME_BY_EXTENSION: Mapping[str, str] = MappingProxyType(
+    {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp",
+        ".tiff": "image/tiff",
+        ".heic": "image/heic",
+        ".heif": "image/heif",
+    }
+)
 
-# MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名。
-EXTENSION_BY_MIME: dict[str, str] = {
-    "image/png": ".png",
-    "image/jpeg": ".jpeg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-    "image/bmp": ".bmp",
-    "image/tiff": ".tiff",
-    "image/heic": ".heic",
-    "image/heif": ".heif",
-}
+# MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名，同样取只读视图。
+EXTENSION_BY_MIME: Mapping[str, str] = MappingProxyType(
+    {
+        "image/png": ".png",
+        "image/jpeg": ".jpeg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+        "image/bmp": ".bmp",
+        "image/tiff": ".tiff",
+        "image/heic": ".heic",
+        "image/heif": ".heif",
+    }
+)
 
 # HEIC/HEIF 的 ISO BMFF ftyp box brand 位于 offset 8-12，按编码归入 .heic / .heif。
 _HEIC_BRANDS: tuple[bytes, ...] = (b"heic", b"heix", b"hevc", b"heim", b"heis")
@@ -98,9 +107,28 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
     return default
 
 
+# 下载内容真实性判定按格式分级的最小合法长度下界：BMP 的 14 字节文件头约束过宽，
+# 以 BM 开头的任意短文本都会被判为图片；真实 BMP 至少由 14 字节文件头、40 字节
+# DIB 头与像素行构成，64 字节下界拦截短文本误判而不拒绝合法 BMP。其余格式签名
+# 特异性足够，不设下界。下载侧以流式首部做本校验时，累计字节数须覆盖目标格式的
+# 下界，否则合法内容会被误拒。
+_MIN_KNOWN_BYTES_BY_EXTENSION: Mapping[str, int] = MappingProxyType({".bmp": 64})
+
+# 流式首部校验的最小累计窗口：各格式下界的最大值，下载侧的首部缓冲须至少覆盖
+# 该字节数，使 is_known_image_bytes 对全部受支持格式可判定。
+SNIFF_HEAD_BYTES_FLOOR = max(_MIN_KNOWN_BYTES_BY_EXTENSION.values())
+
+
 def is_known_image_bytes(content: bytes) -> bool:
-    """判断字节是否以受支持图片的 magic 开头，用于下载内容真实性校验。"""
-    return infer_extension_from_bytes(content, default="") != ""
+    """判断字节是否以受支持图片的 magic 开头且达到该格式的最小长度。
+
+    用于下载与 Base64 解码路径的内容真实性校验；扩展名推断仍由
+    infer_extension_from_bytes 独立承担，不受最小长度下界影响。
+    """
+    extension = infer_extension_from_bytes(content, default="")
+    if not extension:
+        return False
+    return len(content) >= _MIN_KNOWN_BYTES_BY_EXTENSION.get(extension, 0)
 
 
 def format_file_size_mb(size_bytes: int) -> str:

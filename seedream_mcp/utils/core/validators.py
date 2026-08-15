@@ -44,7 +44,10 @@ VALID_GENERATION_TOOL_TYPES = frozenset({"web_search"})
 # 响应格式白名单，schemas.ResponseFormat 枚举的取值集合以本常量为源，同一守护测试
 # 断言两侧一致。
 VALID_RESPONSE_FORMATS = frozenset({"url", "b64_json"})
-# 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围。
+# 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围。\d 在 Python re
+# 匹配任意 Unicode 十进制数字，阿拉伯-印度数字一类的非 ASCII 数字串同样命中，
+# int() 对其可正常转换，解析结果与 ASCII 数字一致，行为良性并按此声明。
+# IGNORECASE 对本模式无实际作用，模式不含字母字符，保留标志以维持既有声明。
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 # 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张。
 MAX_SEQUENTIAL_TOTAL_IMAGES = 15
@@ -101,9 +104,10 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
 def parse_bool(value: object) -> bool:
     """将值解析为布尔。
 
-    接受 true/yes/on/1 为真、false/no/off/0 为假；其余值抛出 SeedreamConfigError，
-    避免 enabled 这类拼写错误被静默当作 False，导致功能未生效却无报错。
-    布尔解析知识归本模块单一所有，config 与本模块的校验函数均为消费方。
+    接受 true/yes/on/1 为真、false/no/off/0 为假；None 视为未配置，返回 False；
+    其余值抛出 SeedreamConfigError，避免 enabled 这类拼写错误被静默当作 False，
+    导致功能未生效却无报错。布尔解析知识归本模块单一所有，config 与本模块的
+    校验函数均为消费方。
     """
     if isinstance(value, bool):
         return value

@@ -24,6 +24,7 @@ from ..core.formats import (
 )
 from ..core.logs import get_logger
 from .io_file import (
+    _has_reparse_attribute,
     _is_reparse_point,
     atomic_replace_from_fd_sync,
 )
@@ -593,11 +594,19 @@ class FileManager:
                 # 仅收集本服务支持的图片文件，跳过 base_dir 内其他类型文件，避免误删用户数据。
                 if file_path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
                     continue
-                # 跳过符号链接文件，其目标可能在 base_dir 之外。
-                if file_path.is_symlink():
+                # 单次 lstat 同时判定符号链接与 reparse point 属性：is_symlink 与
+                # _is_reparse_point 各自 lstat 一次，全目录清理时每文件三次 stat。
+                try:
+                    lstat_result = file_path.lstat()
+                except OSError as e:
+                    errors.append(f"获取文件信息失败 {file_path}: {e}")
+                    logger.warning("获取文件信息失败: {} -> {}", file_path, e)
                     continue
-                # 与目录分支对称：reparse point 文件会被 stat 跟随，命中则跳过。
-                if _is_reparse_point(file_path):
+                # 符号链接文件的目标可能在 base_dir 之外；reparse point 文件会被后续
+                # stat 跟随，与目录分支对称，命中则跳过。
+                if stat.S_ISLNK(lstat_result.st_mode):
+                    continue
+                if _has_reparse_attribute(lstat_result):
                     logger.warning("跳过 reparse point 文件: {}", file_path)
                     continue
                 try:
@@ -605,7 +614,7 @@ class FileManager:
                     if not stat.S_ISREG(stat_result.st_mode):
                         continue
                     all_files.append((file_path, stat_result.st_size, stat_result.st_mtime))
-                except Exception as e:
+                except OSError as e:
                     errors.append(f"获取文件信息失败 {file_path}: {e}")
                     logger.warning("获取文件信息失败: {} -> {}", file_path, e)
         return all_files, directories

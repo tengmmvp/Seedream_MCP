@@ -396,3 +396,44 @@ async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
 
     assert data["roots"] == []
     assert str(env_root.resolve()) not in data["roots"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_capability_missing_returns_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """客户端未声明 roots capability 时资源输出空列表，不回退暴露 env 根。
+
+    未声明 capability 时 scope 跳过 roots/list，边界回退环境变量根；回退根属
+    服务器环境而非客户端授权声明，其绝对路径不得进入面向调用方的输出。
+    """
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    session = _CapabilityDeclaringSession([], declared=False)
+    monkeypatch.setattr(mcp, "get_context", lambda: _SpyContext(session))
+
+    result = await workspace_roots_resource()
+    data = json.loads(result)
+
+    assert data["roots"] == []
+    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_list_roots_failure_returns_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """roots/list 失败回退 env 边界时资源输出空列表，不暴露服务器 env 根。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    monkeypatch.setattr(mcp, "get_context", lambda: _FailingContext())
+
+    result = await workspace_roots_resource()
+    data = json.loads(result)
+
+    assert data["roots"] == []
+    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]

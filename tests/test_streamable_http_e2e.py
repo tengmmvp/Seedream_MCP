@@ -4,7 +4,8 @@
 Bearer 鉴权放行/拒绝、请求体上限超限早拒、合法请求经全栈返回 200。另含
 tools/call 协议集成：平铺参数经真实 JSON-RPC 调用路径反序列化，成功与失败
 结果均以 HTTP 200 的 CallToolResult 返回，isError 透传，structuredContent
-经 FastMCP 内部以 outputSchema 校验。
+经 FastMCP 内部以 outputSchema 校验。以及 SDK 内层 DNS rebinding 防护按绑定
+地址重配的集成：非回环绑定下非白名单 Host 的 /mcp 请求放行，回环绑定维持 421。
 
 httpx.ASGITransport 仅发送 http scope 不驱动 ASGI lifespan，故对触达 MCP 应用的
 200 用例以自建 _LifespanManager 显式运行 session_manager 生命周期（建立任务组）；
@@ -343,3 +344,61 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
     assert structured["success"] is False
     assert structured["status"] == "failed"
     assert "提示词不能为空" in structured["error"]["message"]
+
+
+async def _post_mcp_with_host(app: Any, host_header: str) -> httpx.Response:
+    """以指定 Host 头经完整 ASGI 栈发起 tools/list 请求，返回响应。"""
+    async with _LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:8000"
+        ) as client:
+            return await client.post(
+                _MCP_PATH,
+                content=_mcp_request("tools/list"),
+                headers={
+                    "host": host_header,
+                    "authorization": "Bearer s3cret",
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+            )
+
+
+async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
+    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
+) -> None:
+    """非回环绑定按实际地址重配 SDK 内层 Host 校验，非白名单 Host 的 /mcp 不再 421。
+
+    FastMCP 构造期以默认 host 127.0.0.1 启用回环 Host 白名单，会话管理器在首次
+    streamable_http_app 调用时快照 transport_security 定型；未按实际绑定地址重配时，
+    非回环部署的全部 /mcp 请求都会被 SDK 内层以 421 拒绝。本用例经生产的
+    _apply_http_bind_settings 路径完成重配，以部署域名 Host 请求断言放行。
+    """
+    server._apply_http_bind_settings("0.0.0.0", stateless=True, auth_enabled=True)
+    monkeypatch.setattr(server.mcp.settings, "json_response", True)
+    app = _build_app("s3cret")
+
+    response = await _post_mcp_with_host(app, "mcp.example.com")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jsonrpc"] == "2.0"
+    assert "error" not in body
+
+
+async def test_e2e_loopback_bind_keeps_sdk_host_allowlist(
+    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
+) -> None:
+    """回环绑定维持 SDK 内层回环 Host 白名单，外部域名 Host 仍被 421 拒绝。
+
+    防护按绑定地址重配不得把回环防护一并关闭：回环绑定下 rebinding 域名请求仍须
+    被 SDK 内层拒绝，与 _LoopbackHostGuardMiddleware 的回环防线语义对齐。
+    """
+    server._apply_http_bind_settings("127.0.0.1", stateless=True, auth_enabled=True)
+    monkeypatch.setattr(server.mcp.settings, "json_response", True)
+    app = _build_app("s3cret")
+
+    response = await _post_mcp_with_host(app, "mcp.example.com")
+
+    assert response.status_code == 421

@@ -34,17 +34,16 @@ class SeedreamMCPError(Exception):
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典，供结构化错误输出使用。
 
-        message 统一剥离敏感键值与 Bearer 令牌并截断，非字符串形态先归一化为文本
-        再进入脱敏管线；details 经敏感字段过滤，避免上游回显的敏感片段进入结构化
-        输出；子类无需各自处理 message 与 details。
+        message 先截断再剥离敏感键值与 Bearer 令牌，与 sanitize_error_text 声明的
+        truncate-first 次序一致，非字符串形态先归一化为文本再进入该管线；details
+        与 response_data 同口径先截断后过滤，超大容器收敛为元素数摘要，上游回显的
+        敏感片段不进入结构化输出；子类无需各自处理 message 与 details。
         """
         return {
             "error": self.__class__.__name__,
-            "message": _truncate_value_for_output(
-                _redact_sensitive_message(self.message), limit=_MESSAGE_OUTPUT_LIMIT
-            ),
+            "message": _sanitize_message_for_output(self.message),
             "error_code": self.error_code,
-            "details": _filter_sensitive_data(self.details),
+            "details": _sanitize_response_data(self.details),
         }
 
 
@@ -382,8 +381,9 @@ def resolve_error_profile(error: Exception) -> _ErrorProfile:
 def format_error_for_user(error: Exception) -> str:
     """按异常类型将错误格式化为面向用户的提示文案。
 
-    展示标题与可操作建议取自 resolve_error_profile 归约档案；message 统一截断，避免上游
-    回显的长敏感片段进入用户可见输出；仅 APIError 携带上游错误码时附加错误码提示。
+    展示标题与可操作建议取自 resolve_error_profile 归约档案；message 统一先截断再
+    剥离敏感片段，截断上限约束脱敏正则的工作长度，上游回显的长敏感片段不进入用户
+    可见输出；仅 APIError 携带上游错误码时附加错误码提示。
 
     Args:
         error: 异常实例。
@@ -401,11 +401,9 @@ def format_error_for_user(error: Exception) -> str:
     else:
         raw_message = str(error)
         code_hint = ""
-    # 三类异常统一先剥离敏感键值与 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出；
-    # dict/list 形态的 message 在 _redact_sensitive_message 内归一化为文本，同样被覆盖。
-    message = _truncate_value_for_output(
-        _redact_sensitive_message(raw_message), limit=_MESSAGE_OUTPUT_LIMIT
-    )
+    # 三类异常统一先截断再剥离敏感键值与 Bearer 令牌，避免任何分支的敏感片段进入用户可见输出；
+    # dict/list 形态的 message 在 _sanitize_message_for_output 内归一化为文本，同样被覆盖。
+    message = _sanitize_message_for_output(raw_message)
 
     line = f"{profile.display_title}: {message}{code_hint}"
     if profile.user_hint:
@@ -478,8 +476,19 @@ _SENSITIVE_KEY_KEYWORDS = (
 )
 
 # 高确信度敏感词：自身足够特异性，直接子串匹配以覆盖 x-authorization、my-apikey、
-# privatekey、sshkey 等连字符或无分隔变体，无需边界限定。
-_SENSITIVE_KEY_SUBSTRINGS = ("authorization", "apikey", "privatekey", "sshkey")
+# privatekey、sshkey 等连字符或无分隔变体，无需边界限定。camelCase 复合词 secretKey、
+# accessKey、sessionKey、authKey 归一化小写后同样在此命中，dict 键与自由文本两条
+# 脱敏路径的键名分支均由本清单派生。
+_SENSITIVE_KEY_SUBSTRINGS = (
+    "authorization",
+    "apikey",
+    "privatekey",
+    "sshkey",
+    "secretkey",
+    "accesskey",
+    "sessionkey",
+    "authkey",
+)
 
 
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出。
@@ -497,16 +506,18 @@ _SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[-_][^\W_-]+)*"
 # 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。分支由
 # _SENSITIVE_KEY_SUBSTRINGS 与 _SENSITIVE_KEY_KEYWORDS 派生，特异性足够的词生成
 # 「关键词 + 续段」分支，覆盖 session、session_id、session-id、jwt、privatekey
-# 等形态；短词 key 与 auth 走受限复合分支（api-key、auth-token、client-secret）。
-# 后缀形态如 max_tokens 中 token 前还有普通字母，派生分支要求续段以分隔符开头，
-# 该词形不受影响。新增敏感词只需扩展上方两清单，本组自动跟进。
+# 等形态；短词 key 与 auth 走受限复合分支（api-key、auth-token、client-secret），
+# api key 复合分支允许空格分隔，覆盖 "API Key: <凭据>" 形态，键命中仍要求紧跟
+# 分隔符与值，普通句中无分隔符的 api key 词组不受影响。后缀形态如 max_tokens 中
+# token 前还有普通字母，派生分支要求续段以分隔符开头，该词形不受影响。新增敏感词
+# 只需扩展上方两清单，本组自动跟进。
 _SENSITIVE_KEYVALUE_KEYS = (
     "|".join(
         keyword + _SENSITIVE_KEYVALUE_KEY_SUFFIX
         for keyword in (*_SENSITIVE_KEY_SUBSTRINGS, *_SENSITIVE_KEY_KEYWORDS)
         if keyword not in _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS
     )
-    + r"|api[-_]?key"
+    + r"|api[-_ ]?key"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
     + r"|(?:access|auth|refresh|session|api)[-_]?token"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
@@ -579,13 +590,6 @@ CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85]")
 _URL_USERINFO_PATTERN = re.compile(r"(?i)\b((?:https?)://)[^\s/:@]+(?::[^\s/@]*)?@")
 
 
-def _redact_bearer_tokens(value: Any) -> Any:
-    """剥离字符串值中的 Bearer 令牌，保留 Bearer 前缀以保留语义。"""
-    if isinstance(value, str):
-        return _BEARER_TOKEN_PATTERN.sub(r"\1***", value)
-    return value
-
-
 _SanitizedValue = TypeVar("_SanitizedValue")
 
 
@@ -617,6 +621,19 @@ def _redact_sensitive_message(value: Any) -> str:
     if not isinstance(value, str):
         value = _normalize_non_str_message(value)
     return cast("str", _sanitize_output_string(value))
+
+
+def _sanitize_message_for_output(value: Any, limit: int = _MESSAGE_OUTPUT_LIMIT) -> str:
+    """对异常 message 先截断再剥离敏感片段，供 to_dict 与 format_error_for_user 共用。
+
+    与 sanitize_error_text 声明的 truncate-first 次序一致：截断上限约束脱敏正则的
+    工作长度，作为对抗超长构造输入的纵深兜底；截断丢弃段中的凭据随截断消失，
+    保留段中的凭据再被脱敏剥离，截断点落在键名中间时该键值对不再被命中，其值
+    同样已被截断丢弃，不构成泄露。非字符串 message 先归一化为文本，dict/list 走
+    JSON 序列化，防止 dict 形态借 str/repr 的引号形态穿透脱敏。
+    """
+    text = value if isinstance(value, str) else _normalize_non_str_message(value)
+    return _redact_sensitive_message(_truncate_value_for_output(text, limit=limit))
 
 
 def sanitize_error_text(
@@ -675,58 +692,77 @@ def sanitize_data_text(value: _SanitizedValue, limit: int = _DATA_OUTPUT_LIMIT) 
     URL 数据字段不应用键值脱敏：查询参数是 URL 的组成而非凭据回显，命中
     token=/Secret= 等参数名会使签名 URL 不可用；以 http(s):// 开头且不含空白
     的纯 URL 走仅 userinfo 与控制字符的轻量路径，凭据仍在 userinfo 与 Bearer
-    处理中覆盖。URL 前缀但含空白或控制字符的混合文本不属于纯 URL，仍走全套
-    脱敏，凭据不借 URL 形态逃逸。非字符串原样返回。
+    处理中覆盖。纯 URL 判定先 strip 首尾空白，带前导空白的 URL 同样按纯 URL
+    走轻量路径，签名查询串不被键值脱敏替换为 ***。URL 前缀但含空白或控制字符的
+    混合文本不属于纯 URL，仍走全套脱敏，凭据不借 URL 形态逃逸。非字符串原样
+    返回。
     """
     if not isinstance(value, str):
         return value
-    if _URL_DATA_PREFIX_PATTERN.match(value) and _WHITESPACE_PATTERN.search(value) is None:
-        return cast("_SanitizedValue", _sanitize_url_data_text(value, limit=limit))
+    stripped = value.strip()
+    if _URL_DATA_PREFIX_PATTERN.match(stripped) and _WHITESPACE_PATTERN.search(stripped) is None:
+        return cast("_SanitizedValue", _sanitize_url_data_text(stripped, limit=limit))
     return sanitize_error_text(value, limit=limit)
 
 
 def _is_sensitive_key(key: Any) -> bool:
     """判断键名是否命中敏感关键词。
 
-    高确信度词采用子串匹配以覆盖连字符与无分隔变体；其余关键词采用边界匹配，
-    键名等于关键词或以下划线、连字符分隔包含关键词方视为命中，避免短词如 key 误匹配。
+    高确信度词采用子串匹配以覆盖连字符、无分隔与 camelCase 变体；其余关键词采用
+    边界匹配，键名等于关键词或以下划线、连字符、点号、空格分隔包含关键词方视为
+    命中，避免短词如 key 误匹配 monkey、keyboard。空格与自由文本复合分支
+    api key 的分隔规则一致，dict 键 "api key" 同样命中。
     """
     key_lower = str(key).lower()
     for substring in _SENSITIVE_KEY_SUBSTRINGS:
         if substring in key_lower:
             return True
     for keyword in _SENSITIVE_KEY_KEYWORDS:
-        if (
-            key_lower == keyword
-            or key_lower.endswith("_" + keyword)
-            or key_lower.endswith("-" + keyword)
-            or key_lower.endswith("." + keyword)
-            or key_lower.startswith(keyword + "_")
-            or key_lower.startswith(keyword + "-")
-            or key_lower.startswith(keyword + ".")
-        ):
+        if key_lower == keyword:
             return True
+        for separator in ("_", "-", ".", " "):
+            if key_lower.endswith(separator + keyword) or key_lower.startswith(keyword + separator):
+                return True
     return False
 
 
 def _filter_sensitive_data(data: Any) -> Any:
-    """递归过滤字典/列表中的敏感字段。
+    """过滤字典/列表中的敏感字段，深层嵌套经显式栈迭代处理。
 
-    键名命中敏感关键词的值替换为 ***；非敏感键的字符串值额外剥离 Bearer 令牌模式，
-    防止上游错误体回显的鉴权头进入结构化输出。非容器类型原样返回。
+    键名命中敏感关键词的值替换为 ***；非敏感键与列表项的字符串值额外剥离
+    Bearer 令牌与敏感键值片段，防止上游错误体回显的鉴权头进入结构化输出，
+    容器项继续下钻。以显式栈替代递归，超深嵌套不触发解释器递归上限，
+    RecursionError 不外逃，与 _normalize_non_str_message 对超深 message 的
+    兜底口径对齐。非容器类型原样返回。
     """
-    if isinstance(data, dict):
-        return {
-            key: (
-                "***"
-                if _is_sensitive_key(key)
-                else _filter_sensitive_data(_sanitize_output_string(value))
-            )
-            for key, value in data.items()
-        }
-    if isinstance(data, list):
-        return [_filter_sensitive_data(_sanitize_output_string(item)) for item in data]
-    return data
+    if not isinstance(data, (dict, list)):
+        return data
+    result: Any = {} if isinstance(data, dict) else []
+    pending: list[tuple[Any, Any]] = [(data, result)]
+    while pending:
+        source, target = pending.pop()
+        if isinstance(source, dict):
+            for key, value in source.items():
+                if _is_sensitive_key(key):
+                    target[key] = "***"
+                    continue
+                value = _sanitize_output_string(value)
+                if isinstance(value, (dict, list)):
+                    child: Any = {} if isinstance(value, dict) else []
+                    target[key] = child
+                    pending.append((value, child))
+                else:
+                    target[key] = value
+        else:
+            for item in source:
+                item = _sanitize_output_string(item)
+                if isinstance(item, (dict, list)):
+                    nested: Any = {} if isinstance(item, dict) else []
+                    target.append(nested)
+                    pending.append((item, nested))
+                else:
+                    target.append(item)
+    return result
 
 
 def _sanitize_response_data(data: Any) -> Any:

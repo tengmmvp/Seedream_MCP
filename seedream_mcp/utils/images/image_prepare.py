@@ -135,7 +135,12 @@ class ImagePreparer:
 
         已 resolve 的根列表按 workspace_roots 缓存并在跨图间复用，避免批量多图时每图
         重复 resolve 同一根目录，降低网络挂载工作区下的 resolve 开销。
+
+        首尾空白与读取路径统一先 strip：_prepare_local_image 以 strip 后路径定位文件，
+        签名路径同样 strip 后定位，两条路径对同一物理文件求签名，带空白前缀的输入
+        不会因签名恒为 (0.0, 0) 架空 mtime+size 失效保护。
         """
+        image = image.strip()
         if classify_image_reference(image) != "local":
             return (0.0, 0)
 
@@ -161,9 +166,13 @@ class ImagePreparer:
 
         摘要取 128-bit（32 hex）：64-bit 截断的生日碰撞界约 2^32 次哈希即进入可行域，
         蓄意构造碰撞可令缓存命中返回他人输入；128-bit 将构造成本推出可行域，长度
-        增量可忽略。
+        增量可忽略。encode 以 replace 容错，未配对代理字符不在此抛
+        UnicodeEncodeError；此类非法输入随后在 validate_image_input 的 base64
+        解码处按参数级校验报错，与 image_validation 的 Base64 解码失败口径一致，
+        批量路径不因编码异常整批中断。
         """
-        return "sha256:" + hashlib.sha256(image.encode("utf-8")).hexdigest()[:32]
+        digest = hashlib.sha256(image.encode("utf-8", errors="replace")).hexdigest()
+        return "sha256:" + digest[:32]
 
     async def prepare_image_input(
         self, image: str, _roots_key: tuple[str, ...] | None = None
@@ -257,7 +266,8 @@ class ImagePreparer:
             prepared = await prepare_image_input(image)
             # HTTP/HTTPS URL 经 prepare_image_input 统一校验后原样返回，缓存无收益
             # 反而占用 LRU 条目；data URI 与本地文件经解码或编码产生新值，仍照常缓存。
-            if classify_image_reference(image) != "url":
+            # 判定与读取路径同样以 strip 后输入分类，带空白前缀的 URL 不误入缓存。
+            if classify_image_reference(image.strip()) != "url":
                 self._cache_prepared_result(cache_key, prepared)
             return prepared
         finally:

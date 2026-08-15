@@ -3,6 +3,7 @@
 import base64
 import asyncio
 import inspect
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -12,7 +13,11 @@ from PIL import Image
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.errors import (
+    SeedreamConfigError,
+    SeedreamValidationError,
+    resolve_error_profile,
+)
 
 
 class _LazyOptWrapper:
@@ -908,3 +913,195 @@ def test_serialize_request_outputs_utf8_without_ascii_escape() -> None:
     assert "中文".encode("utf-8") in result
     # ASCII 转义形式（字面反斜杠 u 4 e 2 d）不得出现
     assert b"\\u4e2d" not in result
+
+
+# ==================== 生成端点 URL 尾斜杠归一化 ====================
+
+
+def test_build_generation_url_strips_trailing_slashes() -> None:
+    """base_url 尾斜杠归一化：带尾斜杠不拼出双斜杠路径，无尾斜杠结果一致。"""
+    trailing = SeedreamClient(
+        SeedreamConfig(api_key="k", base_url="https://ark.example.com/api/v3/")
+    )
+    plain = SeedreamClient(SeedreamConfig(api_key="k", base_url="https://ark.example.com/api/v3"))
+
+    assert trailing._build_generation_url() == "https://ark.example.com/api/v3/images/generations"
+    assert plain._build_generation_url() == "https://ark.example.com/api/v3/images/generations"
+
+
+# ==================== 200 响应顶层 error 守卫 ====================
+
+
+def test_build_api_result_top_level_error_without_data_marks_request_failure() -> None:
+    """200 顶层 error 为非空 dict 且无 data：置 success=False 并透传 error，不再吞为成功零图。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"error": {"code": "ContentTooLarge", "message": "生成内容超限"}, "usage": {}}
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "ContentTooLarge"
+    assert result["error"]["message"] == "生成内容超限"
+    assert result["data"] == []
+    assert result["usage"] == {}
+
+
+def test_build_api_result_top_level_error_with_only_error_items_marks_failure() -> None:
+    """data 全为 error 占位项时同样无有效图片，顶层 error 判定请求级失败。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"error": {"code": "E", "message": "boom"}, "data": [{"error": {"code": "E"}}]}
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+
+
+def test_build_api_result_top_level_error_with_valid_images_keeps_success() -> None:
+    """顶层 error 但 data 含有效图片：已产出且已计费的结果维持成功口径，不透传 error。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {
+            "error": {"code": "PartialServiceDegraded", "message": "降级"},
+            "data": [{"url": "https://example.com/1.png"}],
+        }
+    )
+
+    assert result["success"] is True
+    assert "error" not in result
+    assert result["data"][0]["url"] == "https://example.com/1.png"
+
+
+@pytest.mark.parametrize("error_value", [None, {}, "boom", 42])
+def test_build_api_result_non_dict_top_level_error_keeps_success(error_value: Any) -> None:
+    """非 dict 或空 dict 形态的顶层 error 不触发请求级失败，维持既有成功口径。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result({"error": error_value})
+
+    assert result["success"] is True
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
+    """stream=true 时上游以 200 加非 SSE JSON 错误体响应：结果为失败并透传错误码。
+
+    上游仅收到一次请求；错误经结果结构表达而非异常，调用方可取回真实错误码。
+    """
+    upstream_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(
+            200,
+            json={"error": {"code": "StreamRejected", "message": "流式请求被拒绝"}},
+        )
+
+    client = SeedreamClient(_build_config())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+    finally:
+        await client.close()
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "StreamRejected"
+    assert upstream_calls == 1
+
+
+# ==================== 空 API Key 归约档 ====================
+
+
+@pytest.mark.asyncio
+async def test_empty_api_key_maps_to_config_error_profile() -> None:
+    """运行时空 API Key 经生成方法调用归约 config_error 档，不再包装为 api_error。
+
+    SeedreamConfig 构造期已拒绝空密钥，此处经 object.__setattr__ 模拟配置在构造后
+    被置空的运行时状态，锁定 _get_headers 抛出的异常类型与归约档。
+    """
+    config = _build_config()
+    object.__setattr__(config, "api_key", "")
+    client = SeedreamClient(config)
+
+    with pytest.raises(SeedreamConfigError) as excinfo:
+        await client.text_to_image(prompt="p", size="2K")
+
+    assert resolve_error_profile(excinfo.value).error_code == "config_error"
+    assert "API 密钥为空" in excinfo.value.message
+
+
+# ==================== 批次级公共参数校验提升 ====================
+
+
+def _client_cls() -> Any:
+    """取当前 sys.modules 中的 SeedreamClient 类，规避 client 模块被重载后的过期引用。"""
+    return getattr(import_module("seedream_mcp.client"), "SeedreamClient")
+
+
+def _install_validate_common_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
+    """在 client 模块命名空间替换 validate_common_generation_params 为计数替身。"""
+    client_module = import_module("seedream_mcp.client")
+    calls = {"validate": 0}
+    original = client_module.validate_common_generation_params
+
+    def _spy(**kwargs: Any) -> Any:
+        calls["validate"] += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(client_module, "validate_common_generation_params", _spy)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_parallel_batch_validates_common_params_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """4 请求批次公共参数全量校验只发生一次，批内各请求经共享计划命中缓存。"""
+    from seedream_mcp.tools.core.schemas import TextToImageInput
+    from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
+
+    calls = _install_validate_common_spy(monkeypatch)
+
+    async def fake_send(
+        self: Any,
+        *,
+        client: Any,
+        url: str,
+        request_body: bytes,
+        request_timeout: Any,
+    ) -> Dict[str, Any]:
+        del self, client, url, request_body, request_timeout
+        return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+    monkeypatch.setattr(_client_cls(), "_send_standard_request", fake_send)
+
+    result = await handle_text_to_image(
+        TextToImageInput(prompt="parallel", request_count=4, parallelism=4),
+        SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False),
+    )
+
+    assert result.isError is False
+    assert calls["validate"] == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_client_calls_validate_common_params_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未绑定共享计划的直连调用保持逐次校验，公共 API 行为不变。"""
+    calls = _install_validate_common_spy(monkeypatch)
+    client = SeedreamClient(_build_config())
+
+    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        del endpoint, request_data
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+
+    await client.text_to_image(prompt="first")
+    await client.text_to_image(prompt="second")
+
+    assert calls["validate"] == 2

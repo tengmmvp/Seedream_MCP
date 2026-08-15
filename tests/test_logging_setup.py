@@ -107,6 +107,16 @@ def test_console_sink_colorize_follows_tty_autodetection(
     assert fake.add_kwargs[0]["colorize"] is None
 
 
+def test_setup_logging_suppresses_third_party_info_noise(
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
+) -> None:
+    """第三方噪音压制清单覆盖 httpx：每次 API 调用一条的 INFO "HTTP Request" 不再淹没业务日志。"""
+    setup_logging(log_level="INFO", enable_console=False, enable_file=False)
+
+    for name in ("urllib3", "aiohttp", "asyncio", "httpx"):
+        assert logging.getLogger(name).level == logging.WARNING
+
+
 # ==================== 控制字符 patcher ====================
 
 

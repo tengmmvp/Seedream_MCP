@@ -62,6 +62,35 @@ def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, A
     }
 
 
+def _extract_data_field_values(raw_segment: bytes | bytearray) -> list[bytes | bytearray]:
+    """按 SSE 规范提取段内全部 data: 字段值，多行值由调用方以换行拼接。
+
+    每行仅剥离字段名后的首个前导空格，其余空白属于负载本身；json.loads 对 JSON
+    负载的前后空白天然容忍，单空格剥离已使 ``data: x`` 与 ``data:x`` 语义一致。
+    """
+    values: list[bytes | bytearray] = []
+    for line in raw_segment.split(b"\n"):
+        if line.startswith(b"data:"):
+            value = line[5:]
+            if value.startswith(b" "):
+                value = value[1:]
+            values.append(value)
+    return values
+
+
+def _has_lost_data_payload(tail: bytes | bytearray) -> bool:
+    """判断流末尾残留段是否携带实际丢失的 data 负载。
+
+    空白行、注释行与 ``[DONE]`` 哨兵经 parse_sse_segment 同样返回 None，但均不构成
+    数据丢失；仅当残留段含非空且非哨兵的 data 负载时，解析失败才计为丢失事件。
+    """
+    for value in _extract_data_field_values(tail):
+        stripped = value.strip()
+        if stripped and stripped != b"[DONE]":
+            return True
+    return False
+
+
 def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dict[str, Any] | None:
     """解析单个 SSE 事件段，返回事件对象。
 
@@ -80,10 +109,7 @@ def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dic
 
     try:
         # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用。
-        data_parts: list[bytes | bytearray] = []
-        for line in raw_segment.split(b"\n"):
-            if line.startswith(b"data:"):
-                data_parts.append(line[5:].strip())
+        data_parts = _extract_data_field_values(raw_segment)
         payload = b"\n".join(data_parts) if data_parts else None
         # [DONE] 为流结束哨兵而非图片事件，直接丢弃。
         if not payload or payload == b"[DONE]":
@@ -341,11 +367,15 @@ async def parse_sse_response(
             # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫。
             search_hint = len(buffer)
 
+    trailing_len = len(buffer) - offset
     trailing_event = await _parse_segment_range(buffer, offset, len(buffer), log)
     if trailing_event is not None:
-        apply_completed(
-            *_classify_sse_event(trailing_event, model_id, items, log, len(buffer) - offset)
-        )
+        apply_completed(*_classify_sse_event(trailing_event, model_id, items, log, trailing_len))
+    elif trailing_len > 0 and _has_lost_data_payload(buffer[offset:]):
+        # 流末尾残留段含 data 负载但解析失败：与超阈值丢事件同口径计数并记录，
+        # truncated_events 使 status 标记 partial，通知调用方结果不完整。
+        truncated_events += 1
+        log.debug("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
 
     # 与非流式 _build_api_result 保持一致：当 data 项含 error 即存在部分失败时
     # 标记 status=partial，避免流式/非流式在同等部分失败场景下 status 语义不一致，

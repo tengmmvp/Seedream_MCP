@@ -196,7 +196,7 @@ async def test_parse_sse_response_progress_log_by_threshold(
 def test_parse_sse_segment_joins_multiline_data_into_single_json() -> None:
     """SSE 单事件跨多行 data: 时，parse_sse_segment 用 \\n 拼接为完整 JSON。
 
-    验证 split('\\n') + [5:].strip() + '\\n'.join 的多行 data 合并行为，
+    验证逐行提取 data 值并以 \\n 拼接的多行 data 合并行为，
     确保客户端将合法 JSON 拆成两行发送时仍能正确还原对象。
     """
     segment = (
@@ -206,6 +206,30 @@ def test_parse_sse_segment_joins_multiline_data_into_single_json() -> None:
     assert result is not None
     assert result["type"] == "image_generation.completed"
     assert result["usage"]["generated_images"] == 2
+
+
+def test_parse_sse_segment_strips_single_leading_space_only() -> None:
+    """data: 字段仅剥离首个前导空格：data:x 与 data: x 语义一致，多余空白属负载。
+
+    SSE 规范规定字段值仅移除单个前导 U+0020；JSON 负载对剩余前后空白天然容忍，
+    三种形态均解析为同一事件对象。
+    """
+    completed = b'{"type":"image_generation.completed","usage":{}}'
+    for segment in (
+        b"data:" + completed,
+        b"data: " + completed,
+        b"data:  " + completed,
+        b"data: " + completed + b"  ",
+    ):
+        result = parse_sse_segment(segment, log=None)
+        assert result is not None, f"形态 {segment!r} 应解析成功"
+        assert result["type"] == "image_generation.completed"
+
+
+def test_parse_sse_segment_done_marker_without_space_still_recognized() -> None:
+    """data:[DONE] 无空格形态同样识别为流结束哨兵，不进入 json 解析。"""
+    assert parse_sse_segment(b"data: [DONE]", log=None) is None
+    assert parse_sse_segment(b"data:[DONE]", log=None) is None
 
 
 def test_parse_sse_segment_returns_none_for_done_marker() -> None:
@@ -362,7 +386,10 @@ async def test_parse_sse_response_empty_stream_returns_none_status() -> None:
 
 
 async def test_parse_sse_response_propagates_tools_from_completed_event() -> None:
-    """completed 事件携带的 tools 字段须透传到结果，供联网搜索等用途下游消费。"""
+    """completed 事件携带的 tools 字段须透传到结果，与官方响应字段对齐。
+
+    响应侧 tools 当前无下游消费者，保留透传仅为字段完整性；联网搜索用量经
+    usage.tool_usage 表达。"""
     chunks = [
         b'data: {"type":"image_generation.completed",'
         b'"usage":{"generated_images":1},'
@@ -416,6 +443,73 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
     )
     assert truncated_result["truncated_events"] >= 1
     assert truncated_result["status"] == "partial"
+
+
+async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
+    """流末尾不完整事件解析失败时计入 truncated_events，不再静默丢失。
+
+    与超阈值丢事件同口径：计数使 status 标记 partial 通知调用方结果不完整，并记录
+    debug 日志携带丢弃字节数；残留段之前的完整事件不受影响。
+    """
+    log = _CapturingLog()
+    chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
+        # 不完整 JSON 且无结尾空行：残留段含 data 负载但解析失败
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2',
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=log,
+    )
+    assert len(result["data"]) == 1
+    assert result["truncated_events"] == 1
+    assert result["status"] == "partial"
+    drop_logs = [call for call in log.debug_calls if "流末尾" in str(call)]
+    assert drop_logs, "流末尾丢弃事件须记录 debug 日志"
+
+
+async def test_parse_sse_response_done_sentinel_tail_not_counted_truncated() -> None:
+    """[DONE] 哨兵残留（无结尾空行）与纯空白尾部不计为丢失事件。
+
+    哨兵与空白行经解析同样返回 None，但不构成数据丢失；误计会使 completed 状态
+    被降级为 partial，谎报结果不完整。
+    """
+    sentinel_chunks = [
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+        b"data: [DONE]",
+    ]
+    sentinel_result = await parse_sse_response(
+        _FakeSSEResponse(sentinel_chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_FakeLog(),
+    )
+    assert sentinel_result["truncated_events"] == 0
+    assert sentinel_result["status"] == "completed"
+
+    whitespace_chunks = [
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+        b"\n  \n",
+    ]
+    whitespace_result = await parse_sse_response(
+        _FakeSSEResponse(whitespace_chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_FakeLog(),
+    )
+    assert whitespace_result["truncated_events"] == 0
+    assert whitespace_result["status"] == "completed"
 
 
 async def test_parse_sse_response_large_event_not_truncated_below_file_size_threshold() -> None:

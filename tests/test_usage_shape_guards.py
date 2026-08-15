@@ -124,3 +124,29 @@ async def test_sse_completed_usage_dict_preserved() -> None:
 
     assert result["status"] == "completed"
     assert result["usage"] == {"generated_images": 1}
+
+
+@pytest.mark.asyncio
+async def test_stream_top_level_error_failure_keeps_usage_dict(no_sleep: None) -> None:
+    """stream 请求级失败路径同样保证 usage 恒为 dict：异形 usage 收敛为空 dict。
+
+    顶层 error 守卫的失败返回位于 usage 守卫之后，失败结果不因错误路径绕过
+    usage 归一化。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=1)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={"error": {"code": "StreamRejected", "message": "流式请求被拒绝"}, "usage": "bad"},
+        )
+
+    async with SeedreamClient(config) as client:
+        assert client._client is not None
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        result = await client.text_to_image(prompt="p", stream=True)
+
+    assert result["success"] is False
+    assert result["usage"] == {}

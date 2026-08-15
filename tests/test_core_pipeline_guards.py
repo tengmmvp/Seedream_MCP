@@ -104,6 +104,34 @@ def test_aggregate_all_completed_requests_report_completed() -> None:
     assert aggregated["status"] == "completed"
 
 
+def test_aggregate_failed_request_with_top_level_error_extracts_message() -> None:
+    """请求级软失败结果进入并行聚合时，错误消息取自透传的顶层 error 而非兜底文案。"""
+    request_results = [
+        {
+            "success": False,
+            "status": "failed",
+            "data": [],
+            "error": {"code": "StreamRejected", "message": "流式请求被拒绝"},
+        },
+        {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        },
+    ]
+
+    aggregated = aggregate_parallel_generation_results(
+        request_results=request_results,
+        request_errors={},
+    )
+
+    assert aggregated["success"] is True
+    assert aggregated["status"] == "partial"
+    assert aggregated["batch"]["failed_requests"] == 1
+    assert "流式请求被拒绝" in aggregated["batch"]["errors"][0]["message"]
+
+
 # ==================== 失败分支与嵌套净化 ====================
 
 

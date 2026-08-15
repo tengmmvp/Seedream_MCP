@@ -23,6 +23,7 @@ import httpx
 from .config import SeedreamConfig, get_active_config
 from .utils.core.errors import (
     SeedreamAPIError,
+    SeedreamConfigError,
     SeedreamNetworkError,
     SeedreamTimeoutError,
     SeedreamValidationError,
@@ -70,6 +71,13 @@ class SharedRequestPlan:
     自动保存等后续阶段，对象随批次回收、不跨调用常驻。
 
     request_data 在共享期间不可变：构建完成后各生成方法与 ``_call_api`` 仅读取、不改写。
+
+    单方法批次约束：get_or_build 与 get_or_serialize 的无锁快路径按计划内已有即复用
+    判定，不校验产物归属于哪个生成方法。同一作用域内先后调用两个不同的生成方法时，
+    后到方法会复用先到方法的 request_data 与 body，产出错误方法的请求。当前唯一调用方
+    tools 并行层在单次工具调用内只分发一个 request_executor，批次内生成方法恒定，
+    本约束由调用方保证；新增调用方须维持单方法批次语义，或先在键控机制中纳入方法
+    标识再复用本计划。
     """
 
     def __init__(self) -> None:
@@ -78,6 +86,10 @@ class SharedRequestPlan:
         self._lock = asyncio.Lock()
         self.request_data: dict[str, Any] | None = None
         self.body: bytes | None = None
+        # 批次级公共参数校验缓存，元素为输入快照与校验结果的对偶。tools 并行层在
+        # 批次分发前预校验写入一次，批内各生成方法按输入快照相等命中复用；未经预校验
+        # 的并发直连场景各请求独立校验后末次写入生效，结果一致、方向安全。
+        self.validated_common_params: tuple[tuple[Any, ...], ValidatedCommonParams] | None = None
 
     async def get_or_build(
         self, builder: Callable[[], Awaitable[dict[str, Any]]]
@@ -115,6 +127,7 @@ class SharedRequestPlan:
         """批次执行结束后清除共享引用，避免大 body 滞留至自动保存等后续阶段。"""
         self.request_data = None
         self.body = None
+        self.validated_common_params = None
 
 
 # 当前批次的共享计划绑定：tools 并行层在批次执行期间设置、结束后复位。contextvars
@@ -150,6 +163,20 @@ async def _build_request_data(
     if plan is None:
         return await builder()
     return await plan.get_or_build(builder)
+
+
+def _has_valid_image_items(data: Any) -> bool:
+    """判定 200 响应的 data 字段是否含至少一个非错误的图片条目。
+
+    list 形态须存在不含 error 键的 dict 条目；dict 形态本身计为一个条目，含 error
+    键时视为失败占位；None 与标量形态无图片。供 _build_api_result 的顶层 error
+    守卫判定请求级软失败。
+    """
+    if isinstance(data, list):
+        return any(isinstance(item, dict) and "error" not in item for item in data)
+    if isinstance(data, dict):
+        return "error" not in data
+    return False
 
 
 class SeedreamClient:
@@ -658,17 +685,74 @@ class SeedreamClient:
         传入时按 config.default_size / default_watermark 兜底合成，与 tools 层
         build_generation_context 的合成语义一致，消除直连调用与配置的双源分叉。
         各方法特有的图片数量与序列校验仍在各自方法内执行。
+
+        当前上下文绑定共享请求计划时按输入快照复用批内首次校验结果：批内各请求的
+        公共参数相同，重复校验对结果无增量，仅重复 100k 级提示词的 CJK 计数扫描；
+        缓存通常由 tools 并行层经 prevalidate_common_generation_params 在批次分发前
+        写入，未经预校验的并发批次各请求独立校验，结果一致。直连调用未绑定计划，
+        每次调用均独立校验，公共 API 行为不变。
         """
-        return validate_common_generation_params(
+        resolved_size = size if size is not None else self.config.default_size
+        resolved_watermark = self.config.default_watermark if watermark is None else watermark
+        inputs = (
+            prompt,
+            optimize_prompt_options,
+            resolved_size,
+            resolved_watermark,
+            response_format,
+            output_format,
+            stream,
+            tools,
+        )
+        plan = _ACTIVE_REQUEST_PLAN.get()
+        if plan is not None:
+            cached = plan.validated_common_params
+            if cached is not None and cached[0] == inputs:
+                return cached[1]
+        validated = validate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
-            size=size if size is not None else self.config.default_size,
-            watermark=self.config.default_watermark if watermark is None else watermark,
+            size=resolved_size,
+            watermark=resolved_watermark,
             response_format=response_format,
             output_format=output_format,
             stream=stream,
             tools=tools,
             model_id=self.config.model_id,
+        )
+        if plan is not None:
+            plan.validated_common_params = (inputs, validated)
+        return validated
+
+    def prevalidate_common_generation_params(
+        self,
+        *,
+        prompt: str,
+        optimize_prompt_options: dict[str, Any] | None,
+        size: str | None,
+        watermark: bool | None,
+        response_format: str,
+        output_format: str | None,
+        stream: bool,
+        tools: list[dict[str, Any]] | None,
+    ) -> None:
+        """批次分发前校验公共参数一次，结果经共享计划供同批各请求复用。
+
+        供 tools 并行层在批次请求分发前调用：批内公共参数全批相同，100k 级提示词的
+        CJK 计数等重校验每批只发生一次，批内各生成方法在
+        _validate_common_generation_params 内按输入快照命中缓存。校验失败立即上抛，
+        异常类型与消息和单请求路径的首请求校验失败一致。未绑定共享计划时仅执行
+        校验，无缓存效果。
+        """
+        self._validate_common_generation_params(
+            prompt=prompt,
+            optimize_prompt_options=optimize_prompt_options,
+            size=size,
+            watermark=watermark,
+            response_format=response_format,
+            output_format=output_format,
+            stream=stream,
+            tools=tools,
         )
 
     async def close(self) -> None:
@@ -711,6 +795,8 @@ class SeedreamClient:
         首次创建经双检锁串行化，避免并发请求重复创建 httpx.AsyncClient 导致资源泄漏。
 
         Raises:
+            SeedreamConfigError: API 密钥为空。配置类失败原样透传，保持 config_error
+                归约档与配置排查指引，不落入下方 api_error 档的包装文案。
             SeedreamAPIError: 客户端创建失败或配置无效
         """
         if self._client is None:
@@ -729,6 +815,9 @@ class SeedreamClient:
                         )
                         self.logger.debug("HTTP 客户端创建成功")
 
+                    except SeedreamConfigError:
+                        self.logger.error("HTTP 客户端创建失败: API 密钥为空")
+                        raise
                     except Exception as e:
                         self.logger.error("HTTP 客户端创建失败: {}", e)
                         self._client = None
@@ -738,10 +827,11 @@ class SeedreamClient:
         """构建带 Bearer 认证与 JSON Content-Type 的请求头。
 
         Raises:
-            SeedreamAPIError: API 密钥为空
+            SeedreamConfigError: API 密钥为空。密钥缺失属部署配置问题而非 API 调用
+                失败，config_error 归约档使调用方得到配置排查指引。
         """
         if not self.config.api_key:
-            raise SeedreamAPIError("API 密钥为空，请检查环境变量 ARK_API_KEY")
+            raise SeedreamConfigError("API 密钥为空，请检查环境变量 ARK_API_KEY")
 
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -854,7 +944,12 @@ class SeedreamClient:
         return self._client
 
     def _build_generation_url(self) -> str:
-        return f"{self.config.base_url}/images/generations"
+        """拼接图像生成端点 URL，归一化 base_url 尾部斜杠避免拼出双斜杠路径。
+
+        ARK_BASE_URL 以 / 结尾时直接拼接会得到 //images/generations，部分网关按
+        双斜杠路径拒绝路由；rstrip 在 client 侧单点归一化，config 层不重复处理。
+        """
+        return f"{self.config.base_url.rstrip('/')}/images/generations"
 
     def _log_request_attempt(
         self,
@@ -879,7 +974,9 @@ class SeedreamClient:
 
         success 仅代表 HTTP 层成功，即已收到 200 响应；body 级的部分失败或空数据
         由 status 与 data 共同表达，status 取值为 completed/partial/failed，
-        调用方应同时检查 status 而非仅依赖 success。
+        调用方应同时检查 status 而非仅依赖 success。顶层 error 为非空 dict 且 data
+        无有效图片时属请求级软失败：success 置 False 并透传 error 键，调用方据此
+        取回上游错误码与原因，不再被吞为成功零图。
         """
         data = payload.get("data")
         if isinstance(data, list):
@@ -922,11 +1019,34 @@ class SeedreamClient:
                 type(usage).__name__,
             )
             usage = {}
+
+        # 顶层 error 守卫：官方响应 schema 在顶层定义 error 对象，stream=true 时上游
+        # 可能以 200 加非 SSE JSON 错误体响应。error 为非空 dict 且 data 无任何有效
+        # 图片时判定为请求级失败，success=False 并透传 error 键供失败文案与并行聚合
+        # 提取真实原因；data 仍含有效图片时视为已产出结果的响应，维持成功口径不变，
+        # 避免已计费的图片被误标失败。非 dict 形态的 error 缺乏结构化错误语义，同样
+        # 维持既有成功口径。
+        top_error = payload.get("error")
+        if isinstance(top_error, dict) and top_error and not _has_valid_image_items(data):
+            self.logger.warning(
+                "200 响应携带顶层 error 且无有效图片，标记为请求级失败: code={}",
+                top_error.get("code"),
+            )
+            return {
+                "success": False,
+                "data": data or [],
+                "usage": usage,
+                "status": "failed",
+                "error": top_error,
+                "tools": payload.get("tools"),
+            }
         return {
             "success": True,
             "data": data or [],
             "usage": usage,
             "status": status,
+            # 响应侧 tools 当前无下游消费者，采集仅为保持结果结构与官方响应字段
+            # 对齐，联网搜索用量经 usage.tool_usage 表达。
             "tools": payload.get("tools"),
         }
 
@@ -1309,6 +1429,7 @@ class SeedreamClient:
             error,
             (
                 SeedreamAPIError,
+                SeedreamConfigError,
                 SeedreamValidationError,
                 SeedreamTimeoutError,
                 SeedreamNetworkError,

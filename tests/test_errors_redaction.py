@@ -15,8 +15,8 @@ from seedream_mcp.utils.core.errors import (
     SeedreamMCPError,
     SeedreamValidationError,
     _filter_sensitive_data,
-    _redact_bearer_tokens,
     _redact_sensitive_message,
+    _sanitize_output_string,
     _truncate_value_for_output,
     format_error_for_user,
     handle_api_error,
@@ -73,24 +73,25 @@ def test_filter_sensitive_data_passes_through_scalars() -> None:
     assert _filter_sensitive_data(42) == 42
 
 
-# ==================== _redact_bearer_tokens ====================
+# ==================== Bearer 令牌剥离管线（_sanitize_output_string） ====================
 
 
-def test_redact_bearer_tokens_replaces_token() -> None:
-    assert _redact_bearer_tokens("Bearer abc") == "Bearer ***"
+def test_bearer_pipeline_replaces_token() -> None:
+    """实际脱敏管线上 Bearer 令牌被替换为 ***，前缀保留以维持语义。"""
+    assert _sanitize_output_string("Bearer abc") == "Bearer ***"
 
 
-def test_redact_bearer_tokens_is_case_insensitive() -> None:
-    assert _redact_bearer_tokens("bearer ABC") == "bearer ***"
+def test_bearer_pipeline_is_case_insensitive() -> None:
+    assert _sanitize_output_string("bearer ABC") == "bearer ***"
 
 
-def test_redact_bearer_tokens_preserves_surrounding_text() -> None:
-    assert _redact_bearer_tokens("auth: Bearer s3cret done") == "auth: Bearer *** done"
+def test_bearer_pipeline_preserves_surrounding_text() -> None:
+    assert _sanitize_output_string("auth: Bearer s3cret done") == "auth: Bearer *** done"
 
 
-def test_redact_bearer_tokens_passes_through_non_strings() -> None:
-    assert _redact_bearer_tokens(123) == 123
-    assert _redact_bearer_tokens(None) is None
+def test_bearer_pipeline_passes_through_non_strings() -> None:
+    assert _sanitize_output_string(123) == 123
+    assert _sanitize_output_string(None) is None
 
 
 # ==================== _truncate_value_for_output ====================
@@ -554,6 +555,15 @@ def test_sanitize_data_text_url_light_path_still_strips_userinfo() -> None:
     assert "SECRET" not in redacted
 
 
+def test_sanitize_data_text_strips_padding_before_url_judgment() -> None:
+    """纯 URL 判定先 strip 首尾空白：带空白前缀的签名 URL 走轻量路径，查询串不被键值脱敏破坏。"""
+    url = "https://example.com/a.png?token=abc&Signature=xyz"
+
+    assert sanitize_data_text("  " + url) == url
+    assert sanitize_data_text(url + "  ") == url
+    assert sanitize_data_text(f"\t{url}\n") == url
+
+
 def test_sanitize_data_text_url_prefixed_mixed_text_keeps_keyvalue_redaction() -> None:
     """URL 前缀但含空白或控制字符的混合文本仍走全套脱敏，凭据不借 URL 形态逃逸。"""
     with_crlf = sanitize_data_text("https://example.com/a.png\r\napi_key=leaked")
@@ -644,6 +654,69 @@ def test_api_error_deeply_nested_message_does_not_raise_recursion_error() -> Non
     assert isinstance(rendered, str)
     assert rendered != ""
     assert format_error_for_user(err)
+
+
+# ==================== message 与 details 的 truncate-first 次序 ====================
+
+
+def test_to_dict_message_truncates_before_redaction() -> None:
+    """to_dict 的 message 先截断后脱敏：截断丢弃段凭据随截断消失，保留段凭据被剥离，输出长度受上限约束。"""
+    boundary_split = SeedreamAPIError(message="a" * 495 + "api_key=" + "SECRET" * 200)
+    rendered = str(boundary_split.to_dict()["message"])
+    assert "SECRET" not in rendered
+    assert len(rendered) < 700
+
+    kept_prefix = SeedreamAPIError(message="api_key=leaked " + "x" * 600)
+    rendered_kept = str(kept_prefix.to_dict()["message"])
+    assert "leaked" not in rendered_kept
+    assert "api_key=***" in rendered_kept
+
+
+def test_format_error_for_user_truncates_before_redaction() -> None:
+    """format_error_for_user 与 to_dict 同次序：先截断约束正则工作长度，再剥离保留段凭据。"""
+    err = SeedreamAPIError(message="a" * 495 + "api_key=" + "SECRET" * 200)
+    rendered = format_error_for_user(err)
+    assert "SECRET" not in rendered
+
+
+# ==================== details 深嵌套迭代防护与截断对齐 ====================
+
+
+def test_to_dict_deeply_nested_details_do_not_raise_recursion_error() -> None:
+    """十万层嵌套 dict/list 形态 details 不外逃 RecursionError。
+
+    _filter_sensitive_data 以显式栈替代递归，深嵌套结构的敏感字段过滤不触发
+    解释器递归上限，与 _normalize_non_str_message 对超深 message 的兜底口径对齐；
+    to_dict 的 truncate-first 管线中 repr 触发的递归失败由 _truncate_value_for_output
+    兜底为类型占位符，details 收敛为有界文本。
+    """
+    deep_dict: Any = {}
+    for _ in range(100_000):
+        deep_dict = {"a": deep_dict}
+
+    filtered = _filter_sensitive_data(deep_dict)
+    assert isinstance(filtered, dict)
+
+    err_dict = SeedreamMCPError("msg", details=deep_dict)
+    dumped = err_dict.to_dict()
+    assert dumped["details"] == "<dict>"
+
+    deep_list: Any = []
+    for _ in range(100_000):
+        deep_list = [deep_list]
+    assert isinstance(_filter_sensitive_data(deep_list), list)
+    err_list = SeedreamMCPError("msg", details=deep_list)
+    assert err_list.to_dict()["details"] == "<list>"
+
+
+def test_to_dict_details_truncated_like_response_data() -> None:
+    """details 与 response_data 截断口径对齐：超大容器收敛为元素数摘要，不撑爆结构化输出。"""
+    oversized = {f"field{i}": "x" * 50 for i in range(60)}
+    err = SeedreamMCPError("msg", details=oversized)
+
+    dumped = err.to_dict()
+
+    assert dumped["details"] == "<truncated:dict, 60 keys>"
 
 
 def test_redact_sensitive_message_blocks_quoted_keyvalue_forms() -> None:
@@ -741,6 +814,92 @@ def test_filter_sensitive_data_redacts_privatekey_dict_key() -> None:
     """dict 键路径对 privatekey/sshkey 同样脱敏，两条通道策略一致。"""
     filtered = _filter_sensitive_data({"privatekey": "SECRET", "sshkey": "SECRET", "normal": "v"})
     assert filtered == {"privatekey": "***", "sshkey": "***", "normal": "v"}
+
+
+# ==================== camelCase 敏感键双路径覆盖 ====================
+
+
+def test_redact_sensitive_message_strips_camelcase_sensitive_keyvalues() -> None:
+    """camelCase 敏感键 secretKey/accessKey/sessionKey/authKey 的裸值剥离，凭据不借驼峰命名逃逸。"""
+    assert _redact_sensitive_message("secretKey=AKIAIOSFODNN7EXAMPLE") == "secretKey=***"
+    assert _redact_sensitive_message("accessKey: AKIAIOSFODNN7EXAMPLE") == "accessKey: ***"
+    assert _redact_sensitive_message("sessionKey=abc123def456") == "sessionKey=***"
+    assert _redact_sensitive_message("authKey=xyz789") == "authKey=***"
+
+
+def test_is_sensitive_key_matches_camelcase_sensitive_compounds() -> None:
+    """camelCase 复合键归一化小写后命中高确信子串清单，dict 键路径与自由文本同覆盖。"""
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    assert _is_sensitive_key("secretKey") is True
+    assert _is_sensitive_key("accessKey") is True
+    assert _is_sensitive_key("sessionKey") is True
+    assert _is_sensitive_key("authKey") is True
+    assert _is_sensitive_key("my-accessKey") is True
+    # 对照组：普通词键不因含 key/auth 字面命中
+    assert _is_sensitive_key("monkey") is False
+    assert _is_sensitive_key("keyboard") is False
+    assert _is_sensitive_key("author") is False
+
+
+def test_filter_sensitive_data_redacts_camelcase_sensitive_dict_keys() -> None:
+    """dict 键路径对 camelCase 敏感键同样脱敏为 ***，两条通道策略一致。"""
+    filtered = _filter_sensitive_data(
+        {
+            "secretKey": "AKIA1",
+            "accessKey": "AKIA2",
+            "sessionKey": "s1",
+            "authKey": "a1",
+            "note": "v",
+        }
+    )
+    assert filtered == {
+        "secretKey": "***",
+        "accessKey": "***",
+        "sessionKey": "***",
+        "authKey": "***",
+        "note": "v",
+    }
+
+
+# ==================== 空格复合词 API Key ====================
+
+
+def test_redact_sensitive_message_strips_space_separated_api_key() -> None:
+    """空格复合词 "API Key: <凭据>" 同样命中键值脱敏，分隔符前不允许空格的绕过封堵。"""
+    assert _redact_sensitive_message("API Key: AKIAIOSFODNN7EXAMPLE") == "API Key: ***"
+    assert _redact_sensitive_message("api key = secret123") == "api key = ***"
+    # 对照组：连字符与下划线变体仍命中
+    assert _redact_sensitive_message("X-Api-Key: k1") == "X-Api-Key: ***"
+    assert _redact_sensitive_message("api_key=k2") == "api_key=***"
+
+
+def test_redact_sensitive_message_api_key_space_form_no_overmatch() -> None:
+    """普通含 api/key 词句不误吞：无分隔符与值的词组保持原文。"""
+    assert _redact_sensitive_message("api key is missing") == "api key is missing"
+    assert _redact_sensitive_message("please rotate the api key regularly") == (
+        "please rotate the api key regularly"
+    )
+    # key 后紧跟普通字母的复合词不命中，仅 "key" 前缀不足以触发
+    assert _redact_sensitive_message("my api keyboard mapping") == "my api keyboard mapping"
+
+
+def test_is_sensitive_key_matches_space_separated_compound() -> None:
+    """空格作为键名边界分隔符与自由文本复合分支同规则："api key" 键名命中。"""
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    assert _is_sensitive_key("api key") is True
+    assert _is_sensitive_key("my api key") is True
+    # 对照组：X-Api-Key 仍命中，普通复合词不误吞
+    assert _is_sensitive_key("X-Api-Key") is True
+    assert _is_sensitive_key("rapid api keyboard") is False
+    assert _is_sensitive_key("monkey") is False
+
+
+def test_filter_sensitive_data_redacts_space_separated_api_key_dict_key() -> None:
+    """dict 键 "api key" 的值被脱敏，与自由文本空格复合分支策略一致。"""
+    filtered = _filter_sensitive_data({"api key": "AKIA1", "note": "v"})
+    assert filtered == {"api key": "***", "note": "v"}
 
 
 def test_keyvalue_key_branches_derive_from_keyword_lists() -> None:

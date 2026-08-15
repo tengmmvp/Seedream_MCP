@@ -462,3 +462,47 @@ def test_reset_lifespan_state_clears_sanitized_images_sentinel() -> None:
     results_module._last_sanitized_images = [{"url": "https://example.com/x.png"}]
     server._reset_lifespan_state()
     assert results_module._last_sanitized_images is None
+
+
+def test_reset_lifespan_state_restores_loopback_transport_security() -> None:
+    """复位协议把 SDK 内层 Host 白名单恢复回环默认，非回环绑定关闭不跨用例泄漏。
+
+    transport_security 与 stateless 同为会话管理器首次 streamable_http_app 调用时
+    快照定型的配置；上个用例按非回环绑定关闭防护后若不复位，后续用例新建的会话
+    管理器会继承关闭态，回环防护用例被静默削弱。
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from seedream_mcp.transport import _transport_security_for_host
+
+    server.mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+
+    server._reset_lifespan_state()
+
+    restored = server.mcp.settings.transport_security
+    assert restored is not None
+    assert restored.enable_dns_rebinding_protection is True
+    assert restored == _transport_security_for_host("127.0.0.1")
+
+
+# ==================== 平铺 inputSchema 收紧版本守护 ====================
+
+
+def test_tighten_flat_tool_schemas_private_surface_guard() -> None:
+    """五工具经 SDK 私有面全部命中并完成收紧，SDK 升级改动私有 API 时本测试转红。
+
+    _tighten_flat_tool_schemas 依赖 mcp._tool_manager.get_tool 与 Tool.fn_metadata.
+    arg_model 两个私有入口，get_tool 返回 None 时仅告警跳过，fail-open 会让封闭性
+    静默缺失。逐工具断言命中与两处收紧到位，私有面漂移即失败，提示维护者适配
+    SDK 变化而非静默失去 inputSchema 封闭性。
+    """
+    assert len(server._FLAT_SCHEMA_TOOL_NAMES) == 5
+
+    for name in server._FLAT_SCHEMA_TOOL_NAMES:
+        tool = server.mcp._tool_manager.get_tool(name)
+        assert tool is not None, f"SDK 私有面未命中工具: {name}"
+        assert tool.parameters.get("additionalProperties") is False, name
+        arg_model = tool.fn_metadata.arg_model
+        assert arg_model.model_config.get("extra") == "forbid", name

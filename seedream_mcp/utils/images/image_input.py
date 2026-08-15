@@ -43,7 +43,7 @@ async def prepare_image_input(image: str) -> str:
     - Data URI：经格式与维度校验后原样返回。
     - 本地文件路径：读取并编码为 Base64 Data URI 返回。
 
-    Data URI 校验与本地文件读取均在工作线程中执行，避免阻塞事件循环。
+    URL 校验、Data URI 校验与本地文件读取均在工作线程中执行，避免阻塞事件循环。
     """
     try:
         normalized = image.strip()
@@ -51,8 +51,9 @@ async def prepare_image_input(image: str) -> str:
         kind = classify_image_reference(normalized)
         if kind == "url":
             # URL 分支同样经统一校验：拒绝携带 userinfo 凭据的参考图 URL，防止凭据
-            # 随请求体送往上游 API。校验为纯 CPU 轻量操作，无需工作线程。
-            return validate_image_input(normalized)
+            # 随请求体送往上游 API。urlparse 对请求体上限内的巨型 URL 的全量解析
+            # 可造成事件循环停顿，与 data_uri 分支一致下沉工作线程执行。
+            return await asyncio.to_thread(validate_image_input, normalized)
 
         if kind == "data_uri":
             # validate_image_input 内含 PIL 解码等同步操作，放到工作线程避免阻塞事件循环。

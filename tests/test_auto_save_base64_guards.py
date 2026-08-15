@@ -1,7 +1,8 @@
 """AutoSaveManager Base64 解码守卫与批量保存异常处理的单元测试。
 
-覆盖 _prepare_base64_payload 的空数据/估算超限/解码失败/非图片格式/解码后超限守卫，
-以及 _run_batch_save 的 CancelledError 重抛与 Exception→fallback 降级分支。
+覆盖 _prepare_base64_payload 的空数据/估算超限/解码失败/非图片格式/解码后超限守卫、
+_run_batch_save 的 CancelledError 重抛与 Exception→fallback 降级分支，以及
+AutoSaveResult.to_dict 的数据字段净化与 markdown alt 兜底。
 """
 
 import asyncio
@@ -236,3 +237,97 @@ async def test_save_multiple_base64_images_end_to_end(
     assert results[0].metadata["file_size"] == len(png_bytes)
     assert results[1].success is False
     assert results[1].original_url == "base64"
+
+
+# ==================== to_dict 净化与 markdown alt 兜底 ====================
+
+
+def test_auto_save_result_to_dict_sanitizes_local_path_and_markdown_ref() -> None:
+    """to_dict 对 local_path/markdown_ref 施加 sanitize_data_text，与 data 通道同字段防护对称。
+
+    同名字段在 results.py 的 data 项通道过 sanitize_data_text，auto_save.results 通道
+    不得少做：CRLF 压平防注入，userinfo 凭据剥离。
+    """
+    result = AutoSaveResult(
+        success=True,
+        original_url="https://user:pass@example.com/img.png?token=abc",
+        local_path="C:\\save\\img.png\r\nFAKE: injected",
+        markdown_ref="![alt](./img.png)\r\nFAKE-REF: injected",
+        error=None,
+    )
+
+    dumped = result.to_dict()
+
+    # 控制字符压平，换行注入不可行；内容主体保留（数据字段不做常规截断破坏可用性）
+    assert dumped["local_path"] == "C:\\save\\img.png  FAKE: injected"
+    assert dumped["markdown_ref"] == "![alt](./img.png)  FAKE-REF: injected"
+    # 纯 URL 数据字段仅剥 userinfo 凭据，签名查询参数保持完整
+    assert dumped["original_url"] == "https://example.com/img.png?token=abc"
+
+
+def test_auto_save_result_to_dict_sanitizes_error_text() -> None:
+    """error 通道过 sanitize_error_text 截断，凭据样式片段被剥离。"""
+    result = AutoSaveResult(
+        success=False,
+        original_url="base64",
+        error="api_key: sk-secret123\r\n下载失败",
+    )
+
+    dumped = result.to_dict()
+
+    assert "sk-secret123" not in dumped["error"]
+    assert "\r" not in dumped["error"]
+    assert "\n" not in dumped["error"]
+
+
+async def test_save_base64_image_prompt_not_embedded_in_markdown_ref(
+    manager: AutoSaveManager,
+) -> None:
+    """prompt 不再拼入 markdown alt：CRLF、凭据样式与超长内容不经 markdown_ref 泄露。
+
+    提示词已在 structuredContent 顶层 prompt 字段存在，alt 兜底使用固定文案，输出
+    有界且不引入注入面。custom_name 固定文件名派生，隔离断言到 alt 通道。
+    """
+    png_bytes = _minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+    malicious_prompt = "api_key: sk-secret\r\nFAKE: injected " + "x" * 5000
+
+    result = await manager.save_base64_image(
+        payload, prompt=malicious_prompt, custom_name="cat", tool_name="t2i"
+    )
+
+    assert result.success is True
+    ref = result.markdown_ref
+    assert ref is not None
+    assert ref.startswith("![Generated Image](")
+    assert "sk-secret" not in ref
+    assert "FAKE" not in ref
+    assert "\r" not in ref
+    assert "\n" not in ref
+    # 固定文案兜底使 alt 有界，超长 prompt 不放大 markdown_ref
+    assert len(ref) < 300
+
+
+async def test_save_base64_image_escapes_markdown_breaking_alt(
+    manager: AutoSaveManager,
+) -> None:
+    """调用方提供的 alt 含控制字符与 markdown 定界符时压平并转义，引用结构完整。
+
+    右方括号与反斜杠经转义防 alt 内容截断 ``![...](...)`` 结构；空 alt 回退固定文案。
+    """
+    png_bytes = _minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+
+    result = await manager.save_base64_image(payload, alt_text="a]b\\c\r\nd", tool_name="t2i")
+
+    assert result.success is True
+    ref = result.markdown_ref
+    assert ref is not None
+    assert "\\]" in ref
+    assert "\\\\" in ref
+    assert "\r" not in ref
+    assert "\n" not in ref
+
+    empty_alt = await manager.save_base64_image(payload, alt_text="", tool_name="t2i")
+    assert empty_alt.markdown_ref is not None
+    assert empty_alt.markdown_ref.startswith("![Generated Image](")
