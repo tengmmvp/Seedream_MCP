@@ -144,8 +144,9 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
     # 计数扫描为全量 O(n) 且无法在本函数内下沉工作线程：调用链上
     # SeedreamClient._validate_common_generation_params 与公共导出 validate_prompt
     # 均为同步契约，改为协函数需连带 client 调用点与公共 API 语义一并调整，超出
-    # 本模块边界。实测 120K 纯中文提示词双 subn 计数约 10ms，其中 encode 代理检查
-    # 仅约 0.2ms；长提示词的重排与下沉需由调用侧在异步上下文统一规划。
+    # 本模块边界。实测最坏（schema 上限 100K 中文字符）双 subn 计数约 25ms 事件
+    # 循环占用，其中 encode 代理检查仅约 0.2ms；长提示词的重排与下沉需由调用侧
+    # 在异步上下文统一规划。
     chinese_count = 0
     english_word_count = 0
     if len(prompt) > max_chinese_chars:

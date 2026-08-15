@@ -159,7 +159,7 @@ Restart the corresponding client after configuration.
 # Connection & transport
 --base-url TEXT                                    # API base URL (default per config or built-in default; must be https, http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
 --transport [stdio|streamable-http]                # MCP transport (default: stdio)
---host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address triggers a security warning)
+--host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address requires --auth-token along with TLS (or the --insecure-allow-non-tls exemption), and the service refuses to start without them)
 --port INTEGER                                     # streamable-http listen port (default: 8000)
 --stateless                                        # streamable-http stateless mode, suited for remote multi-client and load balancing (default off)
 
@@ -324,7 +324,7 @@ Browse image files in the workspace and get file paths for image generation
 
 **Parameters:**
 
-- `directory` (optional) - Directory to browse; defaults to the current directory
+- `directory` (optional) - Directory path to browse; defaults to the workspace root (the first root authorized by MCP Roots; falls back to the local workspace root configured via `SEEDREAM_WORKSPACE_ROOT` when no Roots are set, and to the process current working directory when neither is set)
 - `recursive` (optional) - Whether to search subdirectories recursively; default `true`
 - `max_depth` (optional) - Maximum search depth; range 1-10; default 3
 - `limit` (optional) - Maximum number of files to return; range 1-200; default 50
@@ -438,7 +438,8 @@ SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds)
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # Max retries for failed downloads (0 disables retry)
-SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB)
+SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB); also the derivation base for the stream single-event truncate threshold and the response-body read limit
+SEEDREAM_RESPONSE_BODY_LIMIT=               # Total upstream response-body read limit (bytes; derived as SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 when unset, shared by non-stream/stream JSON and SSE)
 SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # Max concurrent downloads
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
@@ -446,7 +447,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save dir
 
 # Workspace & transport
 SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)
-SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (recommended for non-loopback binding)
+SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (required for non-loopback binding, or the service refuses to start; TLS or the --insecure-allow-non-tls exemption is also required)
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
 
 # Client performance

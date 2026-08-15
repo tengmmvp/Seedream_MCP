@@ -56,19 +56,35 @@ _MAX_REDIRECTS = 3
 # 防止长生命周期下持续解析不同 host 导致缓存无界增长。
 _DNS_CACHE_MAX_SIZE = 256
 
-# getaddrinfo 的 gaierror 中属永久失败的错误码集合：域名不存在或查询参数不受支持，
-# 重试无法恢复。其余错误码一律按可重试分类，包括 EAI_AGAIN 与 EAI_FAIL 等瞬时解析
-# 故障，以及 Windows 上未映射进本集合的原始 WSA 错误码；瞬时抖动远多于永久错误，
+# Windows getaddrinfo 失败抛 gaierror 时 errno 携带 winsock2.h 的 WSA 错误码，而非
+# POSIX EAI_* 常量（Windows 的 Python 通常不暴露 EAI_* 别名），须以字面值并入终态
+# 集合才能在 Windows 生效：
+#   11001 WSAHOST_NOT_FOUND：主机不存在，对应 POSIX EAI_NONAME 终态。
+#   11004 WSANO_DATA：无该类型 DNS 记录，对应 POSIX EAI_NODATA 终态。
+#   11003 WSANO_RECOVERY：不可恢复的解析器故障，对应 POSIX EAI_FAIL 类终态。
+# 11002 WSATRY_AGAIN 对应 EAI_AGAIN 瞬时故障，保持可重试不入终态集合。POSIX 平台的
+# EAI_* 码为负值或个位小值，与上述正数值不相交，双平台码表经数值并集统一且无歧义。
+_WSA_HOST_NOT_FOUND = 11001
+_WSA_NO_DATA = 11004
+_WSA_NO_RECOVERY = 11003
+
+# getaddrinfo 的 gaierror 中属永久失败的错误码集合：域名不存在、查询参数不受支持或
+# 不可恢复的解析器故障（EAI_FAIL 为 non-recoverable failure），重试无法恢复。其余
+# 错误码一律按可重试分类，包括 EAI_AGAIN 等瞬时解析故障；瞬时抖动远多于永久错误，
 # 且重试次数上限兜底。平台缺少对应常量时经 getattr 取 None 后从集合中剔除。
 _TERMINAL_GAI_ERRNOS = frozenset(
     code
     for code in (
         getattr(socket, "EAI_NONAME", None),
         getattr(socket, "EAI_NODATA", None),
+        getattr(socket, "EAI_FAIL", None),
         getattr(socket, "EAI_SERVICE", None),
         getattr(socket, "EAI_FAMILY", None),
         getattr(socket, "EAI_SOCKTYPE", None),
         getattr(socket, "EAI_BADFLAGS", None),
+        _WSA_HOST_NOT_FOUND,
+        _WSA_NO_DATA,
+        _WSA_NO_RECOVERY,
     )
     if code is not None
 )
@@ -236,6 +252,7 @@ class DownloadManager:
         retry_delay: float = 1.0,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         dns_cache_ttl: int = 60,
+        connection_limit: int | None = None,
     ):
         """初始化下载管理器。
 
@@ -245,11 +262,15 @@ class DownloadManager:
             retry_delay: 重试延迟时间（秒）
             max_file_size: 最大文件大小（字节）
             dns_cache_ttl: DNS 解析缓存 TTL（秒）
+            connection_limit: 底层连接器的并发连接上限，None 时沿用 aiohttp 默认。供
+                资源层施加进程级下载并发上限；经构造参数传入使会话因 close 重建时
+                连接器自动保持同一上限，不依赖调用方在会话建立后二次注入。
         """
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.max_file_size = max_file_size
+        self._connection_limit = connection_limit
         self._dns_cache_ttl = max(1, dns_cache_ttl)
         self._dns_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
         self._dns_inflight: dict[str, asyncio.Task[tuple[str, ...]]] = {}
@@ -271,7 +292,8 @@ class DownloadManager:
 
         首次创建用双检锁串行化，避免并发请求各自创建会话导致旧会话泄漏。会话绑定
         ``_PublicIpPinningResolver`` 的连接器，使 aiohttp 连接目标经 SSRF 公网校验后
-        钉死，不在连接前二次独立解析，闭合 DNS rebinding 窗口。
+        钉死，不在连接前二次独立解析，闭合 DNS rebinding 窗口。构造期注入的
+        connection_limit 在每次构造连接器时传入，会话重建分支自动保持同一上限。
 
         超时策略：sock_connect 与 sock_read 仅约束连接建立与单次读取停滞，服务端按
         停滞阈值间歇发送字节的慢滴流响应可无限拖住任务，故另设宽松的总时长上限
@@ -282,7 +304,10 @@ class DownloadManager:
         if self._session is None or self._session.closed:
             async with self._session_lock:
                 if self._session is None or self._session.closed:
-                    connector = aiohttp.TCPConnector(resolver=_PublicIpPinningResolver(self))
+                    connector_kwargs: dict[str, Any] = {"resolver": _PublicIpPinningResolver(self)}
+                    if self._connection_limit is not None:
+                        connector_kwargs["limit"] = self._connection_limit
+                    connector = aiohttp.TCPConnector(**connector_kwargs)
                     self._session = aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(
                             total=max(float(self.timeout) * 120, 3600.0),

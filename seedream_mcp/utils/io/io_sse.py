@@ -156,10 +156,13 @@ def _classify_sse_event(
     # 请求级错误事件：无 type 且顶层含 error 键。本质为 4xx，标记 status_code=400 使上层判定不可重试。
     if event_type is None and isinstance(event.get("error"), dict):
         err = event["error"]
+        raw_code = err.get("code")
         raise SeedreamAPIError(
             message=err.get("message", "流式请求失败"),
             status_code=400,
-            error_code=err.get("code"),
+            # 仅接受非空字符串错误码，与 errors.handle_api_error 同口径：上游数字码
+            # 转字符串属臆测语义，其余类型置 None 丢弃。
+            error_code=raw_code if isinstance(raw_code, str) and raw_code else None,
         )
     if event_type == "image_generation.partial_succeeded":
         items.append(format_sse_success_event(event, model_id))
@@ -256,7 +259,7 @@ async def parse_sse_response(
             await _close_stream_response(response)
             raise SeedreamAPIError(
                 f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
-                f"超过上限 {total_bytes_limit} 字节"
+                f"超过上限 {total_bytes_limit} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
             )
 
         if processed_bytes > 0 and processed_bytes % (1024 * 1024) == 0:

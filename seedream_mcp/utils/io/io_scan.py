@@ -1,9 +1,10 @@
 """目录图片扫描的进程级缓存。
 
 以 (目录路径, recursive, max_depth, 格式过滤元组) 为键缓存有序扫描结果，供 browse_images
-翻页共享，消除深翻页的重复文件系统扫描。扫描底层函数由调用方注入，本模块只负责缓存策略
-与失效判定。非递归扫描以目录 mtime 失效，新增图片立即反映；递归扫描因子目录变更不改变
-顶层 mtime，改用 TTL 失效，接受短时陈旧换取翻页性能。
+翻页共享，消除深翻页的重复文件系统扫描。缓存条目存储 (原始路径, resolved 路径) 对，扫描
+完成时对每个原始路径 resolve 一次，深翻页命中缓存免于逐文件重复 resolve。扫描底层函数由
+调用方注入，本模块只负责缓存策略与失效判定。非递归扫描以目录 mtime 失效，新增图片立即
+反映；递归扫描因子目录变更不改变顶层 mtime，改用 TTL 失效，接受短时陈旧换取翻页性能。
 """
 
 from __future__ import annotations
@@ -42,14 +43,15 @@ class _DirectoryScanCacheEntry:
     Attributes:
         mtime_ns: 非递归扫描捕获的目录 mtime 指纹，递归扫描为 None 改用 TTL 失效。
         captured_at: 缓存写入时的单调时钟时间戳，供 TTL 失效判定。
-        images: 有序扫描结果，可能为目录末尾前的稳定前缀。
+        images: 有序 (原始路径, resolved 路径) 对列表，resolve 在扫描完成时执行一次并
+            随条目缓存，可能为目录末尾前的稳定前缀。
         complete: images 是否已扫到目录末尾；False 时为稳定前缀，随更大 scan_limit
             重扫扩展，回看与同范围重复请求直接命中。
     """
 
     mtime_ns: int | None
     captured_at: float
-    images: list[Path]
+    images: list[tuple[Path, Path]]
     complete: bool
 
 
@@ -80,11 +82,27 @@ def _is_scan_entry_fresh(
     return _get_directory_mtime_ns(resolved_dir) == entry.mtime_ns
 
 
+def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
+    """将扫描结果的每个原始路径 resolve 一次，返回 (原始路径, resolved 路径) 对列表。
+
+    resolve 是扫描链路中开销最大的逐文件文件系统调用，故只在扫描完成时执行一次并随
+    缓存条目共享，深翻页命中缓存时调用方直接取已 resolve 对。resolve 失败的条目
+    （OSError/ValueError，如网络挂载目录临时不可达）跳过不缓存，待下次扫描重试。
+    """
+    pairs: list[tuple[Path, Path]] = []
+    for image_path in images:
+        try:
+            pairs.append((image_path, image_path.resolve()))
+        except (OSError, ValueError):
+            continue
+    return pairs
+
+
 def _store_scan_entry(
     cache_key: tuple[str, bool, int, tuple[str, ...]],
     *,
     mtime_ns: int | None,
-    images: list[Path],
+    images: list[tuple[Path, Path]],
     complete: bool,
 ) -> None:
     """写入扫描缓存，条目数超限时驱逐最旧条目。"""
@@ -113,7 +131,7 @@ def cached_find_images_in_directory(
     format_filter: list[str] | None,
     scan_limit: int,
     scanner: Callable[..., list[Path]] | None = None,
-) -> list[Path]:
+) -> list[tuple[Path, Path]]:
     """扫描目录图片并经进程级缓存翻页共享有序结果，支持前缀增量扩展。
 
     缓存键不含 scan_limit，同目录同扫描配置的不同翻页共享一份有序列表。命中且条目完整或
@@ -133,7 +151,9 @@ def cached_find_images_in_directory(
         scanner: 底层扫描函数，签名同 io_path.find_images_in_directory；None 时使用默认实现。
 
     Returns:
-        排序后的图片路径列表，缓存命中时为已缓存的有序前缀或全量，未命中时至多 scan_limit 条。
+        排序后的 (原始路径, resolved 路径) 元组列表，resolve 在扫描完成时执行一次并随缓存
+        共享，深翻页命中缓存不再逐文件 resolve；缓存命中时为已缓存的有序前缀或全量，
+        未命中时至多 scan_limit 条。
     """
     cache_key = (
         str(resolved_dir),
@@ -159,14 +179,17 @@ def cached_find_images_in_directory(
     # 扫描后捕获的 mtime 会反映新增而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖
     # mtime 失效，跳过捕获。
     base_mtime = None if recursive else _get_directory_mtime_ns(resolved_dir)
-    images = scan(
+    scanned_images = scan(
         directory=str(resolved_dir),
         recursive=recursive,
         max_depth=max_depth,
         extensions=format_filter,
         limit=scan_limit,
     )
-    complete = len(images) < scan_limit
+    # 扫描完成时对全部原始路径 resolve 一次并缓存 (原始, resolved) 对，翻页命中直接复用。
+    # complete 按扫描器的原始返回量判定：resolve 失败被剔除不影响目录已枚举完毕的事实。
+    images = _resolve_scan_pairs(scanned_images)
+    complete = len(scanned_images) < scan_limit
     # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空；非递归仅在 stat 成功时缓存。
     if recursive or base_mtime is not None:
         _store_scan_entry(

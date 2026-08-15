@@ -522,3 +522,48 @@ def test_seedream_config_chunk_size_error_mentions_both_env_vars() -> None:
         match="环境变量 SEEDREAM_STREAM_CHUNK_SIZE/SEEDREAM_STREAM_BUFFER_MAX_SIZE",
     ):
         SeedreamConfig(api_key="k", stream_chunk_size=2048, stream_buffer_max_size=1024)
+
+
+# ==================== response_body_limit 响应体读取上限 ====================
+
+
+def test_build_config_loads_response_body_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_RESPONSE_BODY_LIMIT 显式设置时作为字节值直接生效。"""
+    monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_RESPONSE_BODY_LIMIT=1048576\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.response_body_limit == 1048576
+
+
+def test_build_config_response_body_limit_defaults_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 response_body_limit 为 None，由 client 按 auto_save_max_file_size × 20 推导。"""
+    monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.response_body_limit is None
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1"])
+def test_build_config_rejects_non_positive_response_body_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """response_body_limit 必须 > 0，否则抛 SeedreamConfigError。"""
+    monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_RESPONSE_BODY_LIMIT={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="response_body_limit"):
+        build_config_from_sources(env_file=str(env_file))

@@ -1,8 +1,9 @@
-"""守护测试：prepare_images_in_parallel 的并发上限为 ImagePreparer 实例级约束。
+"""守护测试：ImagePreparer 预处理并发上限为实例级约束，单图与批量入口共用。
 
-防止信号量退化为每次调用各建一份的回归：并行生成与 streamable-http 并发工具调用
-共享同一 preparer 时，若每个批量调用各持独立信号量，全局并发随调用数线性放大，
-突破 SEEDREAM_IMAGE_PREPARE_CONCURRENCY 声明的全局上限。
+防止信号量退化为每次调用各建一份或仅覆盖批量入口的回归：并行生成与
+streamable-http 并发工具调用共享同一 preparer 时，若每个批量调用各持独立信号量，
+或单图直连调用不经信号量，全局并发随调用数线性放大，突破
+SEEDREAM_IMAGE_PREPARE_CONCURRENCY 声明的全局上限。
 """
 
 import asyncio
@@ -53,6 +54,38 @@ async def test_concurrent_parallel_calls_share_instance_semaphore(
     assert call_count == 2 * (limit + 1)
     assert results_a == [f"prepared:{image}" for image in batch_a]
     assert results_b == [f"prepared:{image}" for image in batch_b]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_single_image_calls_share_instance_semaphore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并发单图入口（client 直连路径）同样受实例级信号量约束，峰值并发不超过上限。"""
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    preparer = client._image_preparer
+    limit = config.image_prepare_concurrency
+
+    current = 0
+    peak = 0
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal current, peak
+        current += 1
+        peak = max(peak, current)
+        await asyncio.sleep(0.02)
+        current -= 1
+        return f"prepared:{image}"
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    # 并发单图调用数数倍于上限：若信号量仅在批量入口生效，峰值会随调用数放大
+    images = [f"https://example.com/s{i}.png" for i in range(limit * 3)]
+
+    results = await asyncio.gather(*(preparer.prepare_image_input(image) for image in images))
+
+    assert peak <= limit, "并发单图调用不得突破配置的全局并发上限"
+    assert results == [f"prepared:{image}" for image in images]
 
 
 def test_instance_semaphore_rebuilds_across_event_loops() -> None:

@@ -218,7 +218,7 @@ async def test_app_lifespan_applies_download_concurrency_limit(
     monkeypatch: pytest.MonkeyPatch,
     reset_lifespan_singletons,
 ) -> None:
-    """共享 DownloadManager 的会话连接器按配置施加进程级下载并发上限。
+    """共享 DownloadManager 经构造参数施加进程级下载并发上限到会话连接器。
 
     AutoSaveManager 每次批量保存局部构造的信号量只约束单次调用，跨请求叠加的下载
     并发须由共享会话的连接器统一限制，否则全进程连接数可达调用次数乘以配置上限。
@@ -232,6 +232,39 @@ async def test_app_lifespan_applies_download_concurrency_limit(
         session = download_manager._session
         assert session is not None
         assert session.connector.limit == 3
+
+
+async def test_download_manager_connection_limit_survives_session_rebuild() -> None:
+    """close 后重建的会话连接器保持构造期注入的并发上限。
+
+    并发上限经 DownloadManager 构造参数传入，_ensure_session 每次构造连接器均施加
+    该值；若依赖会话建立后二次注入，会话重建分支会静默失去上限。
+    """
+    from seedream_mcp.utils.io.io_download import DownloadManager
+
+    manager = DownloadManager(connection_limit=2)
+    session = await manager._ensure_session()
+    assert session.connector.limit == 2
+    await manager.close()
+    rebuilt = await manager._ensure_session()
+    assert rebuilt is not session
+    assert rebuilt.connector.limit == 2
+    await manager.close()
+
+
+def test_reset_lifespan_state_clears_global_config() -> None:
+    """复位协议覆盖 config._global_config，用例触发的懒加载配置不跨用例残留。
+
+    set_active_config(None) 只清除 CLI 注入的活动配置；全局配置懒加载缓存若不在
+    复位清单内，上个用例按其环境构建的配置会被后续用例经 get_active_config 读到。
+    复位与断言均经函数内 import 取 sys.modules 的当前 config 模块对象，与延迟
+    消费方（io_path 等）的调用时解析保持同一目标。
+    """
+    from seedream_mcp import config as current_config_module
+
+    current_config_module._global_config = SeedreamConfig(api_key="stale_key")
+    server._reset_lifespan_state()
+    assert current_config_module._global_config is None
 
 
 # ==================== Lifespan 共享资源复用测试 ====================
@@ -389,6 +422,7 @@ async def test_execute_generation_handler_passes_shared_download_manager(
         custom_name: Any,
         tool_name: Any,
         download_manager: Any = None,
+        images: Any = None,
     ) -> tuple:
         nonlocal captured_dm
         captured_dm = download_manager

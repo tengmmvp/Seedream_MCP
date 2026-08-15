@@ -159,7 +159,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 # 連線與傳輸
 --base-url TEXT                                    # API 基礎 URL（預設按設定或內建預設值；須 https，http 需設 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
 --transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
---host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址將觸發安全告警)
+--host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址必須設定 --auth-token 與 TLS（或 --insecure-allow-non-tls 豁免），否則拒絕啟動)
 --port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000)
 --stateless                                        # streamable-http 無狀態模式，適合遠端多用戶端與負載平衡 (預設關閉)
 
@@ -324,7 +324,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **參數：**
 
-- `directory` (選用) - 要瀏覽的目錄路徑，預設目前目錄
+- `directory` (選用) - 要瀏覽的目錄路徑，預設瀏覽工作區根目錄（MCP Roots 授權的首個根；無 Roots 時回退 `SEEDREAM_WORKSPACE_ROOT` 設定的本地工作區根，均未設定時為行程目前工作目錄）
 - `recursive` (選用) - 是否遞迴搜尋子目錄，預設`true`
 - `max_depth` (選用) - 最大搜尋深度，範圍 1-10，預設 3
 - `limit` (選用) - 回傳的最大檔案數量，範圍 1-200，預設 50
@@ -438,7 +438,8 @@ SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒）
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下載失敗最大重試次數（0 表示不重試）
-SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 單張圖片大小上限（位元組，預設 50MB）
+SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 單張圖片大小上限（位元組，預設 50MB）；另兼作流式單事件截斷閾值與回應體讀取上限的推導基準
+SEEDREAM_RESPONSE_BODY_LIMIT=               # 上游回應體讀取總量上限（位元組；不設則按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推導，非流式/流式 JSON 與 SSE 共用）
 SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # 最大並行下載數
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
@@ -446,7 +447,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 儲存目錄總位元組上限�
 
 # 工作區與傳輸
 SEEDREAM_WORKSPACE_ROOT=                    # 本地開發時檔案讀寫邊界回退目錄（MCP Roots 優先）
-SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鑑權權杖（非回環繫結建議設定）
+SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鑑權權杖（非回環繫結必須設定，否則拒絕啟動；另需 TLS 或 --insecure-allow-non-tls 豁免）
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 請求內文上限（位元組，≥1MB，預設 64MB；單圖 data URI 約 40MB，兼顧多圖融合）
 
 # 用戶端效能

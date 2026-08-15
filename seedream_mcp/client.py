@@ -43,6 +43,14 @@ from .utils.images.image_prepare import ImagePreparer
 # parse_retry_after 限制在 [1, 300]，不共用此上限。
 _MAX_BACKOFF_SECONDS = 60
 
+# 错误响应体独立读取上限：错误体仅需承载错误描述文本，不携带图片数据，无需图片级
+# 配额；独立小上限使被污染上游无法借非 200 响应倾倒巨型错误体拖慢读取与日志。
+_ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
+
+# SSE 事件信封余量：event_truncate_threshold 在 base64 负载上界之外，为 data: 前缀、
+# JSON 包络（字段名、引号、分隔符）与行结尾预留的字节数。
+_SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
+
 
 class SeedreamClient:
     """Seedream API 客户端。
@@ -827,23 +835,33 @@ class SeedreamClient:
     def _response_body_byte_limit(self) -> int:
         """上游响应体读取总量上限，非流式 JSON、流式 JSON 与 SSE 三条路径共用。
 
-        推导：组图单次请求最多返回 15 张图，b64_json 模式下单张图片的 base64 负载
-        上限为 auto_save_max_file_size 的 4/3（base64 将 3 字节编码为 4 字符），
+        显式配置 response_body_limit 时直接生效。未配置时推导：组图单次请求最多
+        返回 15 张图，b64_json 模式下单张图片的 base64 负载上限为
+        auto_save_max_file_size 的 4/3（base64 将 3 字节编码为 4 字符），
         15 × 4/3 = 20，故 20 × auto_save_max_file_size 恰好覆盖合法最坏响应体，
-        超过该值的响应只能来自异常或被污染的上游。该上限同时是非流式与流式 JSON
-        路径的响应体读入上限。
+        超过该值的响应只能来自异常或被污染的上游。
         """
+        if self.config.response_body_limit is not None:
+            return self.config.response_body_limit
         return self.config.auto_save_max_file_size * 20
 
-    async def _read_response_body_capped(self, response: httpx.Response) -> bytes:
+    def _error_body_byte_limit(self) -> int:
+        """错误路径读体上限：取响应体总量上限与 4MB 独立上限的较小值。"""
+        return min(self._response_body_byte_limit(), _ERROR_BODY_BYTE_LIMIT)
+
+    async def _read_response_body_capped(
+        self, response: httpx.Response, *, max_bytes: int | None = None
+    ) -> bytes:
         """流式读取响应体并施加总量上限，超限抛出 SeedreamAPIError。
 
-        Content-Length 头先做快速预检，超限时无需读取直接拒绝；chunked 或缺失
-        Content-Length 的响应在 aiter_bytes 累计读取中强制上限，超限时中断读取并
-        抛出携带实际读取字节数的错误。响应的关闭由调用方负责（stream 上下文退出
-        或显式 aclose）。
+        max_bytes 缺省时取 _response_body_byte_limit；错误路径传入
+        _error_body_byte_limit 的独立小上限。Content-Length 头先做快速预检，
+        超限时无需读取直接拒绝；chunked 或缺失 Content-Length 的响应在
+        aiter_bytes 累计读取中强制上限，超限时中断读取并抛出携带实际读取字节数的
+        错误。响应的关闭由调用方负责（stream 上下文退出或显式 aclose）。
         """
-        max_bytes = self._response_body_byte_limit()
+        if max_bytes is None:
+            max_bytes = self._response_body_byte_limit()
         content_length = response.headers.get("content-length")
         if content_length:
             try:
@@ -853,7 +871,7 @@ class SeedreamClient:
             if declared_bytes > max_bytes:
                 raise SeedreamAPIError(
                     f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
-                    f"超过上限 {max_bytes} 字节"
+                    f"超过上限 {max_bytes} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
                 )
         chunks: list[bytes] = []
         received = 0
@@ -863,16 +881,21 @@ class SeedreamClient:
             received += len(chunk)
             if received > max_bytes:
                 raise SeedreamAPIError(
-                    f"响应体过大: 已读取 {received} 字节，超过上限 {max_bytes} 字节"
+                    f"响应体过大: 已读取 {received} 字节，超过上限 {max_bytes} 字节，"
+                    f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
                 )
             chunks.append(chunk)
         return b"".join(chunks)
 
     @staticmethod
-    def _error_data_from_body(raw_body: bytes) -> dict[str, Any]:
-        """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。"""
+    async def _error_data_from_body(raw_body: bytes) -> dict[str, Any]:
+        """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。
+
+        json.loads 为同步 CPU 操作，移至工作线程执行，避免大错误体在事件循环内
+        解析阻塞其他任务；解码文本经 handle_api_error 截断后才进入异常 message。
+        """
         try:
-            parsed: Any = json.loads(raw_body)
+            parsed: Any = await asyncio.to_thread(json.loads, raw_body)
         except Exception:
             parsed = None
         if isinstance(parsed, dict):
@@ -884,12 +907,11 @@ class SeedreamClient:
         if response.status_code == 200:
             return
 
-        raw_body = await self._read_response_body_capped(response)
-        self._raise_api_error_for(
-            response.status_code,
-            response.headers,
-            self._error_data_from_body(raw_body),
+        raw_body = await self._read_response_body_capped(
+            response, max_bytes=self._error_body_byte_limit()
         )
+        error_data = await self._error_data_from_body(raw_body)
+        self._raise_api_error_for(response.status_code, response.headers, error_data)
 
     async def _send_stream_request(
         self,
@@ -913,12 +935,16 @@ class SeedreamClient:
                     model_id=self.config.model_id,
                     chunk_size=self.config.stream_chunk_size,
                     buffer_max_size=self.config.stream_buffer_max_size,
-                    # 截断阈值须容纳单张合法图片的 base64 负载（原图 ×4/3），与下载路径的
+                    # 截断阈值须容纳单张合法图片的 base64 负载，与下载路径的
                     # auto_save_max_file_size 对齐，避免 stream + b64_json 大图被误丢；
-                    # 与前缀回收阈值解耦，后者仅控常驻内存。
+                    # 与前缀回收阈值解耦，后者仅控常驻内存。n 字节原图的 base64 严格
+                    # 上界为 4*⌈n/3⌉：n mod 3 余 1/2 时近似式 ⌈4n/3⌉ 比真实值小
+                    # 1-2 字节而可能误截断边界事件，故取精确上界并加 SSE 事件信封余量
+                    # 覆盖 data: 前缀与 JSON 包络。
                     event_truncate_threshold=max(
                         self.config.stream_buffer_max_size,
-                        (self.config.auto_save_max_file_size * 4 + 2) // 3,
+                        4 * ((self.config.auto_save_max_file_size + 2) // 3)
+                        + _SSE_EVENT_ENVELOPE_MARGIN,
                     ),
                     # 响应流总量上限与非流式/流式 JSON 路径共用同一限额，拦截以大量
                     # 小事件滴流的超限流，见 _response_body_byte_limit。
@@ -957,15 +983,14 @@ class SeedreamClient:
         response = await client.send(request, stream=True)
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
-            raw_body = await self._read_response_body_capped(response)
-
             if response.status_code != 200:
-                self._raise_api_error_for(
-                    response.status_code,
-                    response.headers,
-                    self._error_data_from_body(raw_body),
+                raw_body = await self._read_response_body_capped(
+                    response, max_bytes=self._error_body_byte_limit()
                 )
+                error_data = await self._error_data_from_body(raw_body)
+                self._raise_api_error_for(response.status_code, response.headers, error_data)
 
+            raw_body = await self._read_response_body_capped(response)
             try:
                 # JSON 解析为同步 CPU 操作，大响应体可能阻塞事件循环，移至工作线程；
                 # 直接传入 bytes，json.loads 自 3.6 起接受 bytes 并在工作线程内完成 decode。
@@ -981,8 +1006,9 @@ class SeedreamClient:
         调用 Seedream API。
 
         按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误类型
-        分类处理：4xx 客户端错误（429 除外）立即抛出，429 与 5xx、超时及网络错误按指数
-        退避或服务端 Retry-After 重试，重试次数用尽后抛出对应的 Seedream 异常。
+        分类处理：非 2xx 中仅 429 与 5xx 可重试，其余状态码（含 3xx 与 401-499）立即
+        抛出；超时及网络错误按指数退避或服务端 Retry-After 重试，重试次数用尽后抛出
+        对应的 Seedream 异常。
         """
         await self._ensure_client()
         client = self._get_http_client()
@@ -1035,7 +1061,9 @@ class SeedreamClient:
                     )
                     raise
                 status_code = exc.status_code
-                if 400 <= status_code < 500 and status_code != 429:
+                if status_code != 429 and status_code < 500:
+                    # 仅 429 与 5xx 可重试；其余非 2xx（含 3xx 与 401-499）为立即
+                    # 终态，重试只会对非幂等的生成 API 重复请求与计费。
                     self.logger.warning(
                         "{} API 调用失败（状态码={}），不再重试: {}",
                         endpoint,

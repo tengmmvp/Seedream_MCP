@@ -59,6 +59,7 @@ async def _auto_save(
     save_method: BatchSaveMethod,
     empty_warning: str,
     download_manager: DownloadManager | None = None,
+    images: list[dict[str, Any]] | None = None,
 ) -> AutoSaveOutcome:
     """执行 URL 与 Base64 两个自动保存入口共用的保存流程。
 
@@ -75,7 +76,8 @@ async def _auto_save(
         resolved_base_dir = _resolve_base_dir(config, save_path)
         return _build_auto_save_manager(config, resolved_base_dir, download_manager)
 
-    images = extract_images(result)
+    if images is None:
+        images = extract_images(result)
     image_data: list[dict[str, Any]] = []
     saveable_indices: list[int] = []
     for idx, image in enumerate(images):
@@ -114,6 +116,7 @@ async def auto_save_from_urls(
     custom_name: str | None,
     tool_name: str,
     download_manager: DownloadManager | None = None,
+    images: list[dict[str, Any]] | None = None,
 ) -> AutoSaveOutcome:
     """从 URL 异步下载并保存图片。
 
@@ -128,6 +131,8 @@ async def auto_save_from_urls(
         custom_name: 自定义文件名前缀，可选。
         tool_name: 工具名称标识，用于路径组织。
         download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
+        images: 调用方对 result 预提取的图片列表，传入时跳过内部 extract_images 以
+            避免重复计算；None 时按需从 result 提取，便于函数独立调用。
 
     Returns:
         (保存结果对象列表，可保存图片原始索引列表) 二元组。索引列表供回填阶段
@@ -144,6 +149,7 @@ async def auto_save_from_urls(
         save_method=AutoSaveManager.save_multiple_images,
         empty_warning="未找到可保存的图片 URL",
         download_manager=download_manager,
+        images=images,
     )
 
 
@@ -155,6 +161,7 @@ async def auto_save_from_base64(
     custom_name: str | None,
     tool_name: str,
     download_manager: DownloadManager | None = None,
+    images: list[dict[str, Any]] | None = None,
 ) -> AutoSaveOutcome:
     """从 Base64 数据异步解码并保存图片。
 
@@ -169,6 +176,8 @@ async def auto_save_from_base64(
         custom_name: 自定义文件名前缀，可选。
         tool_name: 工具名称标识，用于路径组织。
         download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
+        images: 调用方对 result 预提取的图片列表，传入时跳过内部 extract_images 以
+            避免重复计算；None 时按需从 result 提取，便于函数独立调用。
 
     Returns:
         (保存结果对象列表，可保存图片原始索引列表) 二元组。索引列表供回填阶段
@@ -185,4 +194,5 @@ async def auto_save_from_base64(
         save_method=AutoSaveManager.save_multiple_base64_images,
         empty_warning="未找到可保存的 base64 图片数据",
         download_manager=download_manager,
+        images=images,
     )

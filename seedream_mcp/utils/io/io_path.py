@@ -97,6 +97,27 @@ def get_workspace_root() -> Path:
     return workspace_roots[0]
 
 
+def resolve_workspace_roots(roots: Sequence[Path | str]) -> list[Path]:
+    """逐个 resolve 工作区根目录，无法 resolve 的条目跳过。
+
+    供候选文件定位的调用方在比较前统一解析根目录，保持各消费方对失效根目录的
+    容错行为一致：单个根 resolve 失败不阻断其余根的处理。
+
+    Args:
+        roots: 待 resolve 的工作区根目录列表，元素可为 Path 或路径字符串。
+
+    Returns:
+        成功 resolve 的根目录列表，保持入参顺序。
+    """
+    resolved_roots: list[Path] = []
+    for root in roots:
+        try:
+            resolved_roots.append(Path(root).resolve())
+        except (OSError, ValueError):
+            continue
+    return resolved_roots
+
+
 async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
     """从 MCP 上下文读取客户端 Roots 并转换为本地路径列表。
 

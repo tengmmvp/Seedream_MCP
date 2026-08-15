@@ -175,6 +175,45 @@ async def test_browse_images_offset_beyond_end_keeps_total_count(
     assert sc["next_offset"] is None
 
 
+@pytest.mark.asyncio
+async def test_browse_images_deep_page_reuses_resolved_paths(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """深翻页命中扫描缓存时不重复 resolve 图片文件。
+
+    图片路径的 resolve 由扫描缓存层在首次扫描完成时执行并随 (原始, resolved) 对缓存；
+    第二次浏览的深页命中完整缓存时免于 O(offset) 次逐文件 resolve，仅剩目录级 resolve
+    （工作区根与请求目录）。统计第二次浏览期间后缀为 .png 的 Path.resolve 调用数，
+    断言为零。
+    """
+    for i in range(5):
+        (workspace_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # 首页 scan_limit = 0+5+1 = 6 > 5，扫到目录末尾缓存完整的 (原始, resolved) 对列表
+    page1 = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=5, offset=0)
+    )
+    assert page1.structuredContent["count"] == 5
+
+    resolved_paths: list[Path] = []
+    original_resolve = Path.resolve
+
+    def _counting_resolve(self: Path, strict: bool = False) -> Path:
+        resolved_paths.append(self)
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _counting_resolve)
+
+    # 深页 offset=4：scan_limit=4+1+1=6，命中完整缓存，不重扫也不逐文件 resolve
+    page2 = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=1, offset=4)
+    )
+    assert page2.structuredContent["count"] == 1
+    image_resolves = [p for p in resolved_paths if p.suffix == ".png"]
+    assert image_resolves == [], "缓存命中的深页不应再对图片文件逐个 resolve"
+
+
 def test_browse_images_input_rejects_oversized_offset() -> None:
     """offset 超上限应被 pydantic 拒绝，防止无界偏移触发全量扫描。"""
     with pytest.raises(ValidationError):

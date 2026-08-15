@@ -230,6 +230,22 @@ def _lookup_http_error_profile(status_code: int) -> _ErrorProfile:
     return _HTTP_DEFAULT_PROFILE
 
 
+# 上游错误 message 片段拼入异常文案前的截断上限：错误体可能为任意长度的自由文本，
+# 截断避免超大文本随异常 message 进入日志形成巨型日志行。
+_UPSTREAM_MESSAGE_FRAGMENT_LIMIT = 8 * 1024
+
+
+def _truncate_upstream_message_fragment(value: Any) -> Any:
+    """截断上游错误 message 片段至 8KB，超长时保留前缀并标注原长度。
+
+    handle_api_error 将上游 error/message 字段拼入异常 message，拼接前统一经本函数
+    截断；非字符串值原样返回，交由后续字符串插值处理。
+    """
+    if isinstance(value, str) and len(value) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
+        return f"<truncated:{len(value)} chars> " f"{value[:_UPSTREAM_MESSAGE_FRAGMENT_LIMIT]}..."
+    return value
+
+
 def handle_api_error(
     response_status: int,
     response_data: dict[str, Any],
@@ -238,8 +254,8 @@ def handle_api_error(
     """将 HTTP 错误响应归约为 SeedreamAPIError。
 
     状态码专属基础文案取自 _HTTP_STATUS_PROFILES，再尝试从响应体提取上游 error.code 与
-    message 拼入文案；status_code 与 retry_after 原样保留在返回的异常上，由上层据此判定
-    可重试性与退避时长。
+    message 拼入文案，message 片段经 8KB 截断防止超大错误体随异常进入日志；
+    status_code 与 retry_after 原样保留在返回的异常上，由上层据此判定可重试性与退避时长。
 
     Args:
         response_status: HTTP 状态码。
@@ -262,11 +278,19 @@ def handle_api_error(
                 # 丢弃，message 拼装不受影响。
                 error_code = raw_code if isinstance(raw_code, str) and raw_code else None
                 if "message" in error_detail:
-                    error_message = f"{error_message}: {error_detail['message']}"
+                    error_message = (
+                        f"{error_message}: "
+                        f"{_truncate_upstream_message_fragment(error_detail['message'])}"
+                    )
             elif isinstance(error_detail, str):
-                error_message = f"{error_message}: {error_detail}"
+                error_message = (
+                    f"{error_message}: {_truncate_upstream_message_fragment(error_detail)}"
+                )
         elif "message" in response_data:
-            error_message = f"{error_message}: {response_data['message']}"
+            error_message = (
+                f"{error_message}: "
+                f"{_truncate_upstream_message_fragment(response_data['message'])}"
+            )
 
     return SeedreamAPIError(
         message=error_message,

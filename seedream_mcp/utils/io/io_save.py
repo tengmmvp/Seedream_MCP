@@ -129,10 +129,11 @@ class AutoSaveResult:
     def to_dict(self) -> dict[str, Any]:
         """将保存结果序列化为字典，仅包含已设置的字段。
 
-        error 为异常文本，出口处过 sanitize_error_text 剥离敏感片段与控制字符，
-        防止本地异常消息（如携带凭据的 URL）进入结构化输出。
+        original_url 与 error 均为可能携带敏感片段的自由文本，出口处统一过
+        sanitize_error_text 剥离 userinfo 凭据与控制字符，与 results.py 中
+        data 项 url 字段的净化对齐，防止同一 URL 在两条输出通道防护不对称。
         """
-        result = {"success": self.success, "original_url": self.original_url}
+        result = {"success": self.success, "original_url": sanitize_error_text(self.original_url)}
 
         if self.local_path:
             result["local_path"] = self.local_path

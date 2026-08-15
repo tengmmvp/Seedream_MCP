@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from pathlib import Path
 
 from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
 from ..core.formats import MIME_BY_EXTENSION, _format_file_size_mb
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
-from ..io.io_path import get_workspace_roots, suggest_similar_paths
+from ..io.io_path import (
+    get_workspace_roots,
+    resolve_workspace_roots,
+    suggest_similar_paths,
+)
 from .image_validation import (
     MAX_IMAGE_FILE_SIZE,
     decode_and_validate_dimensions,
@@ -70,12 +73,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     if not workspace_roots:
         raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
 
-    resolved_roots: list[Path] = []
-    for root in workspace_roots:
-        try:
-            resolved_roots.append(root.resolve())
-        except (OSError, ValueError):
-            continue
+    resolved_roots = resolve_workspace_roots(workspace_roots)
 
     found = resolve_local_image_candidate(normalized, resolved_roots)
     if found is None:

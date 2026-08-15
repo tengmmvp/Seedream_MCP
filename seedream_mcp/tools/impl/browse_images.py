@@ -33,6 +33,7 @@ from ...utils.io.io_path import (
     get_workspace_roots,
     is_within_resolved,
     normalize_path,
+    resolve_workspace_roots,
 )
 
 if TYPE_CHECKING:
@@ -228,10 +229,11 @@ def _scan_and_filter_directory(
 ) -> list[tuple[Path, Path]]:
     """扫描单个目录并完成越界判定与去重，返回新增的 (原始路径，resolved 路径) 列表。
 
-    扫描后的 resolve、越界判定与去重等文件系统相关计算集中在本函数同步执行，由调用方通过
-    ``asyncio.to_thread`` 在线程内调用，使深翻页大 offset 或网络挂载目录下的 resolve
-    不阻塞事件循环。``seen_images`` 跨目录共享以去重重叠根目录的重复图片；调用方按目录
-    串行 await，无并发写竞争。
+    越界判定与去重集中在本函数同步执行，由调用方通过 ``asyncio.to_thread`` 在线程内调用；
+    每张图片的 resolve 由扫描缓存层在扫描完成时执行一次并随缓存条目共享，深翻页命中缓存时
+    本函数直接取已 resolve 对，不再逐文件重复 resolve。越界复核与去重不随缓存固化，每次
+    请求按当前工作区根重新执行，保留安全语义。``seen_images`` 跨目录共享以去重重叠根目录的
+    重复图片；调用方按目录串行 await，无并发写竞争。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -246,7 +248,7 @@ def _scan_and_filter_directory(
         新增 (原始路径，resolved 路径) 元组列表，长度不超过 remaining。
     """
     # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
-    matched_images = cached_find_images_in_directory(
+    matched_image_pairs = cached_find_images_in_directory(
         resolved_dir=resolved_dir,
         recursive=recursive,
         max_depth=max_depth,
@@ -255,9 +257,8 @@ def _scan_and_filter_directory(
         scanner=find_images_in_directory,
     )
     new_entries: list[tuple[Path, Path]] = []
-    for image_path in matched_images:
-        # 每张图片至多 resolve 一次；root 已 resolve，直接做 relative_to 比较。
-        image_resolved = image_path.resolve()
+    for image_path, image_resolved in matched_image_pairs:
+        # resolve 结果来自扫描缓存层；root 已 resolve，直接做 relative_to 比较。
         if not any(is_within_resolved(image_resolved, root) for root in resolved_roots):
             logger.warning("检测到越界图片路径，已忽略: {}", image_path)
             continue
@@ -397,15 +398,11 @@ async def _handle_browse_images_impl(
 
     # 预解析工作区根与请求目录：resolve/normalize 均为可能阻塞网络挂载目录的同步
     # 文件系统调用，整体下沉线程执行；去重与展示阶段直接用 is_within_resolved 与这些
-    # 已 resolve 的 root 比较，root 无需重复 resolve。每张图片也只 resolve 一次，结果
-    # 缓存于 image_resolved_map。展示层与 structuredContent 仍回显原始 workspace_roots。
+    # 已 resolve 的 root 比较，root 无需重复 resolve。图片路径由扫描缓存层 resolve，
+    # 结果经 image_resolved_map 供展示阶段复用。展示层与 structuredContent 仍回显原始
+    # workspace_roots。
     def _resolve_roots_and_dirs() -> tuple[list[Path], list[Path], str | None]:
-        resolved_root_list = []
-        for root in workspace_roots:
-            try:
-                resolved_root_list.append(root.resolve())
-            except (OSError, ValueError):
-                continue
+        resolved_root_list = resolve_workspace_roots(workspace_roots)
         resolved_dir_list: list[Path] = []
         error_message: str | None = None
         if Path(state.directory).is_absolute():

@@ -77,6 +77,32 @@ async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
     assert calls == 1
 
 
+async def test_call_api_3xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
+    """3xx（如 302）不可重试，立即终态抛出，不进入退避循环。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    calls = 0
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> Dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            raise SeedreamAPIError("found", status_code=302)
+
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        with pytest.raises(SeedreamAPIError):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert calls == 1
+
+
 async def test_call_api_timeout_retried_then_mapped(
     monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:

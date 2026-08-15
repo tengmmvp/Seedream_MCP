@@ -231,7 +231,7 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     first = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
     )
-    assert [p.name for p in first] == ["a.png"]
+    assert [raw.name for raw, _resolved in first] == ["a.png"]
     assert len(scan_module._DIRECTORY_SCAN_CACHE) == 1
 
     # 向已存在子目录新增第 2 张图；顶层目录 mtime 不变
@@ -241,7 +241,7 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     within_ttl = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
     )
-    assert [p.name for p in within_ttl] == ["a.png"]
+    assert [raw.name for raw, _resolved in within_ttl] == ["a.png"]
 
     # 模拟 TTL 过期：推进 browse_images.time.monotonic 返回值越过 TTL
     ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
@@ -252,7 +252,7 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     expired = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=True, max_depth=3, format_filter=None, scan_limit=100
     )
-    assert sorted(p.name for p in expired) == ["a.png", "b.png"]
+    assert sorted(raw.name for raw, _resolved in expired) == ["a.png", "b.png"]
 
 
 def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
@@ -266,6 +266,7 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
     )
     assert len(first) == 3
+    assert all(raw.resolve() == resolved for raw, resolved in first)
     assert len(scan_module._DIRECTORY_SCAN_CACHE) == 1
 
     # 不同 scan_limit（模拟翻页）命中同一缓存，返回全量 3 而非 scan_limit=2 的前缀
@@ -275,7 +276,7 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
     assert len(paged) == 3
 
     # 返回浅拷贝：调用方修改不影响内部缓存
-    paged.append(Path("/fake.png"))
+    paged.append((Path("/fake.png"), Path("/fake.png")))
     again = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10
     )

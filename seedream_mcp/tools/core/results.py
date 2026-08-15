@@ -188,28 +188,50 @@ def update_result_with_auto_save(
 
 
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """净化图片项内的上游 error.message 与 url 字段，返回净化后的列表。
+    """净化图片项内的上游自由字段，就地写回传入列表并返回同一列表。
 
-    仅对净化后内容发生变化的项做浅拷贝替换，其余项原样引用，避免改动调用方传入的
-    原结果对象。SSE 失败事件在 io_sse 源头已净化，此处覆盖非 SSE 路径的 per-image
-    error 与上游 url，url 可能携带 userinfo 凭据或 CRLF，与 error 通道防护对称。
+    覆盖 error.message、error.code、url、size 与 output_format：均为上游可回显
+    自由内容的字段，可能携带 userinfo 凭据或 CRLF。净化结果写回列表条目后，
+    文本与结构化两条输出通道复用同一份净化值，同一字段不再重复过净化管线。
+    仅对净化后内容发生变化的项做浅拷贝替换列表位置，其余项原样引用，调用方
+    持有的原图片字典对象不被修改。SSE 失败事件在 io_sse 源头已净化，此处
+    覆盖非 SSE 路径；对已脱敏内容幂等，但超长片段（截断后仍超 500 字符）会
+    在重复调用时叠加一层截断标记。
     """
-    sanitized: list[dict[str, Any]] = []
-    for image in images:
-        item: dict[str, Any] | None = None
+    for index, image in enumerate(images):
+        updates: dict[str, Any] = {}
+
         error = image.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            item = dict(image)
-            item["error"] = {**error, "message": sanitize_error_text(error["message"])}
-        url = image.get("url")
-        if isinstance(url, str):
-            sanitized_url = sanitize_error_text(url)
-            if sanitized_url != url:
-                if item is None:
-                    item = dict(image)
-                item["url"] = sanitized_url
-        sanitized.append(item if item is not None else image)
-    return sanitized
+        if isinstance(error, dict):
+            sanitized_error: dict[str, Any] | None = None
+            message = error.get("message")
+            if isinstance(message, str):
+                sanitized_message = sanitize_error_text(message)
+                if sanitized_message != message:
+                    sanitized_error = {**error, "message": sanitized_message}
+            code = error.get("code")
+            if isinstance(code, str):
+                sanitized_code = sanitize_error_text(code)
+                if sanitized_code != code:
+                    if sanitized_error is None:
+                        sanitized_error = dict(error)
+                    sanitized_error["code"] = sanitized_code
+            if sanitized_error is not None:
+                updates["error"] = sanitized_error
+
+        for field in ("url", "size", "output_format"):
+            value = image.get(field)
+            if isinstance(value, str):
+                sanitized_value = sanitize_error_text(value)
+                if sanitized_value != value:
+                    updates[field] = sanitized_value
+
+        if updates:
+            sanitized_item = dict(image)
+            sanitized_item.update(updates)
+            images[index] = sanitized_item
+
+    return images
 
 
 def _format_failure_section(result: dict[str, Any]) -> str:
@@ -244,7 +266,11 @@ def _format_failure_section(result: dict[str, Any]) -> str:
 
 
 def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
-    """格式化单张图片的可读详情行。"""
+    """格式化单张图片的可读详情行。
+
+    入参条目已由 format_generation_response 经 _sanitize_image_errors 统一净化并
+    写回，此处直接消费已净化值，不再对同一字段重复过净化管线。
+    """
     parts = [f"图片 {index}:"]
     if "request_index" in image:
         parts.append(f"  请求序号: {image['request_index']}")
@@ -254,11 +280,9 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
         if error_info.get("code"):
             parts.append(f"  错误码: {error_info['code']}")
         if error_info.get("message"):
-            parts.append(f"  错误信息: {sanitize_error_text(error_info['message'])}")
+            parts.append(f"  错误信息: {error_info['message']}")
     if image.get("url"):
-        # 上游 url 为自由内容，可能携带 userinfo 凭据或 CRLF，输出前统一净化，
-        # 与 error 通道的结构化输出防护对称。
-        parts.append(f"  URL: {sanitize_error_text(image['url'])}")
+        parts.append(f"  URL: {image['url']}")
     if "size" in image:
         parts.append(f"  尺寸: {image['size']}")
     if "output_format" in image:
@@ -313,7 +337,9 @@ def _format_auto_save_section(
         if save_result.success:
             parts.append(f"  图片 {display_index}: 已保存到 {save_result.local_path}")
         else:
-            parts.append(f"  图片 {display_index}: 保存失败 - {save_result.error or '未知原因'}")
+            # error 为异常文本，与结构化通道 to_dict 的净化对齐，防止换行注入用户可见文本。
+            error_text = sanitize_error_text(save_result.error or "未知原因")
+            parts.append(f"  图片 {display_index}: 保存失败 - {error_text}")
     parts.append("")
     return parts
 
@@ -376,6 +402,9 @@ def format_generation_response(
 
     if images is None:
         images = extract_images(result)
+    # 统一净化一次并写回列表：_format_image_item 直接消费已净化值，后续结构化
+    # 构建复用同一列表，同一字段不再重复过净化管线；io_sse 源头净化保持独立防线。
+    images = _sanitize_image_errors(images)
     usage = result.get("usage", {})
 
     parts: list[str] = [title, f"提示词: {prompt}", f"尺寸: {size}", ""]
@@ -443,8 +472,9 @@ def _build_generation_structured_result(
         "tools": context.tools,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
-        # data 项可能携带上游 per-image error 自由文本，统一净化后进入结构化输出，
-        # 与异常路径防护一致；仅对含 error 的项浅拷贝，避免改动原结果对象。
+        # data 项可能携带上游 per-image error 与 url/size/output_format 等自由字段，
+        # 统一净化后进入结构化输出，与异常路径防护一致。format_generation_response
+        # 已就同一列表净化写回，此处调用兜底独立调用场景；超长片段会再截断一次。
         "data": _sanitize_image_errors(images if images is not None else extract_images(result)),
         "usage": result.get("usage", {}),
         "batch": result.get("batch"),

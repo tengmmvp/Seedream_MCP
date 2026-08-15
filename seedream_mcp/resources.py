@@ -86,38 +86,22 @@ async def _build_active_resource(config: SeedreamConfig) -> _SharedResource:
     from .utils.io.io_download import DownloadManager
 
     new_client = SeedreamClient(config)
+    # 进程级下载并发上限经构造参数下沉为 DownloadManager 的公开契约：连接器在
+    # _ensure_session 内构造时统一施加该值，会话因 close 重建的分支自动保持上限。
     new_download_manager = DownloadManager(
         timeout=config.auto_save_download_timeout,
         max_retries=config.auto_save_max_retries,
         max_file_size=config.auto_save_max_file_size,
+        connection_limit=config.auto_save_max_concurrent,
     )
     try:
         await new_client.__aenter__()
         await new_download_manager.__aenter__()
-        _apply_download_concurrency_limit(new_download_manager, config)
     except Exception:
         await _safe_close(new_client)
         await _safe_close(new_download_manager)
         raise
     return _SharedResource(new_client, new_download_manager, config)
-
-
-def _apply_download_concurrency_limit(
-    download_manager: "DownloadManager", config: SeedreamConfig
-) -> None:
-    """为共享下载管理器的会话连接器施加进程级下载并发上限。
-
-    共享 DownloadManager 跨请求复用同一 aiohttp 会话，AutoSaveManager 每次批量保存
-    局部构造的信号量只约束单次调用，多个并发生成请求的下载并发会叠加超出配置上限。
-    在会话连接器上统一施加 config.auto_save_max_concurrent，使全进程同时建立的下载
-    连接数受同一上限约束。aiohttp 连接器的 limit 为只读属性且 DownloadManager 无
-    连接器注入入参，经底层 _limit 槽位赋值实现；在会话首次建立连接前施加，效果与
-    构造期传入 limit 一致。
-    """
-    session = download_manager._session
-    connector = session.connector if session is not None else None
-    if connector is not None:
-        connector._limit = config.auto_save_max_concurrent
 
 
 async def _close_resource(resource: _SharedResource) -> None:
@@ -242,7 +226,7 @@ def _sync_cleanup() -> None:
 
 
 def _reset_lifespan_state() -> None:
-    """重置 lifespan 单例、活动配置与初始化锁，仅供测试隔离调用。
+    """重置 lifespan 单例、活动与全局配置及初始化锁，仅供测试隔离调用。
 
     重建 _shared_init_lock 避免跨事件循环复用绑定了旧循环的 asyncio.Lock，复位
     mcp.settings 的 streamable-http 配置避免上一个用例的 host/port/stateless 泄漏。
@@ -253,6 +237,16 @@ def _reset_lifespan_state() -> None:
     _active_resource = None
     _retired_resources.clear()
     set_active_config(None)
+    # 全局配置懒加载缓存一并复位：set_active_config 只清除 CLI 注入的活动配置，
+    # _global_config 不清除会跨用例残留按上个用例环境构建的配置。赋值目标须经
+    # 函数内延迟 import 取 sys.modules 的当前 config 模块对象：io_path 等延迟消费方
+    # 在调用时解析 config 模块，测试重载 config 后新旧模块对象分裂，绑死导入期对象
+    # 会清错目标使延迟消费方读到残留配置。config 模块其余模块级状态无需纳入复位：
+    # _config_build_lock 与 _global_config_lock 为不绑定事件循环的 threading.Lock，
+    # 可跨用例安全复用。
+    from . import config as config_module
+
+    config_module._global_config = None
     _shared_init_lock = asyncio.Lock()
     mcp.settings.stateless_http = False
     mcp.settings.host = DEFAULT_HTTP_HOST
@@ -260,13 +254,13 @@ def _reset_lifespan_state() -> None:
     # 复位清单：io_save 的清理节流锁与任务集合绑定事件循环，io_scan 的目录扫描缓存与
     # image_prepare 的 roots 解析缓存跨用例残留目录解析结果；三者与 lifespan 单例同步
     # 复位。延迟导入遵循 utils 子模块不在顶层 import 顶层模块的项目约定。
-    from .utils.images.image_prepare import reset_resolved_bases_cache
+    from .utils.images.image_prepare import reset_resolved_roots_cache
     from .utils.io.io_save import reset_cleanup_state
     from .utils.io.io_scan import reset_directory_scan_cache
 
     reset_cleanup_state()
     reset_directory_scan_cache()
-    reset_resolved_bases_cache()
+    reset_resolved_roots_cache()
 
 
 # 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。

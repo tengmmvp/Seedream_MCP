@@ -16,6 +16,7 @@ from typing import Sequence
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate
 from ..core.logs import get_logger, log_unretrieved_task_exception
+from ..io.io_path import resolve_workspace_roots
 
 logger = get_logger(__name__)
 
@@ -31,7 +32,7 @@ _RESOLVED_ROOTS_CACHE_MAX_ENTRIES = 32
 _resolved_roots_cache: dict[tuple[str, ...], list[Path]] = {}
 
 
-def reset_resolved_bases_cache() -> None:
+def reset_resolved_roots_cache() -> None:
     """清空工作区 roots 的 resolve 结果缓存。
 
     供 lifespan 等资源管理方在会话切换或测试隔离时调用，使后续签名计算按当前
@@ -60,9 +61,9 @@ class ImagePreparer:
         self._prepare_cache_bytes = 0
         self._prepare_inflight: dict[PrepareCacheKey, asyncio.Task[str]] = {}
         self._prepare_concurrency = prepare_concurrency
-        # 信号量为实例级并跨 prepare_images_in_parallel 调用共享，使配置的并发上限在
-        # 并行生成与并发工具调用叠加时仍是全局上限。asyncio.Semaphore 在首次使用时
-        # 绑定事件循环，跨循环复用会报错，故持循环身份守卫按需重建。
+        # 信号量为实例级并在全部预处理入口（单图与批量）间共享，使配置的并发上限在
+        # 并行生成、并发工具调用与单图直连叠加时仍是全局上限。asyncio.Semaphore 在
+        # 首次使用时绑定事件循环，跨循环复用会报错，故持循环身份守卫按需重建。
         self._prepare_semaphore: asyncio.Semaphore | None = None
         self._prepare_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
@@ -101,12 +102,7 @@ class ImagePreparer:
 
         resolved_roots = _resolved_roots_cache.get(workspace_roots)
         if resolved_roots is None:
-            resolved_roots = []
-            for root in workspace_roots:
-                try:
-                    resolved_roots.append(Path(root).resolve())
-                except (OSError, ValueError):
-                    continue
+            resolved_roots = resolve_workspace_roots(workspace_roots)
             _resolved_roots_cache[workspace_roots] = resolved_roots
             if len(_resolved_roots_cache) > _RESOLVED_ROOTS_CACHE_MAX_ENTRIES:
                 try:
@@ -139,6 +135,21 @@ class ImagePreparer:
         本地文件签名) 缓存，避免并行请求对同一参考图重复读取与编码，并以工作区隔离键
         避免跨租户命中；本地文件纳入 mtime+size 防内容替换返回陈旧编码。缓存超限按 LRU
         淘汰；同一键的并发 miss 复用同一在途 task 实现 single-flight 去重。
+
+        并发上限由实例级信号量约束：单图入口（client 直连）与批量入口共用同一
+        全局上限，并行生成与并发工具调用叠加时总并发不超过配置的
+        prepare_concurrency。
+        """
+        async with self._get_prepare_semaphore():
+            return await self._prepare_image_input_locked(image, _roots_key)
+
+    async def _prepare_image_input_locked(
+        self, image: str, _roots_key: tuple[str, ...] | None
+    ) -> str:
+        """执行图像预处理的缓存检索与执行，调用方已持有实例级信号量。
+
+        签名计算、缓存命中与 single-flight 逻辑均在本实现体内，prepare_image_input
+        仅负责信号量守卫；批量路径经公共入口逐图进入，与单图直连共享同一守卫。
         """
         if _roots_key is None:
             from ..io.io_path import get_workspace_roots
@@ -224,19 +235,14 @@ class ImagePreparer:
     async def prepare_images_in_parallel(self, images: Sequence[str]) -> list[str]:
         """受限并发预处理多张图片。
 
-        并发上限由实例级信号量约束：同一 preparer 上并发的多个批量调用共享同一
-        全局上限，并行生成与 streamable-http 并发工具调用不会叠加突破配置的
-        prepare_concurrency 上限。
+        每图经公共 prepare_image_input 入口进入，批内并发上限即实例级信号量约束的
+        配置值；同一 preparer 上并发的多个批量调用与单图直连调用共享同一全局上限，
+        并行生成与 streamable-http 并发工具调用不会叠加突破 prepare_concurrency 上限。
         """
         from ..io.io_path import get_workspace_roots
 
-        semaphore = self._get_prepare_semaphore()
         # 批内预计算一次工作区键，避免每图重复读取 ContextVar 与构造元组。
         roots_key = tuple(str(r) for r in get_workspace_roots())
 
-        async def _prepare_with_limit(image: str) -> str:
-            async with semaphore:
-                return await self.prepare_image_input(image, roots_key)
-
-        tasks = [_prepare_with_limit(image) for image in images]
+        tasks = [self.prepare_image_input(image, roots_key) for image in images]
         return await asyncio.gather(*tasks)

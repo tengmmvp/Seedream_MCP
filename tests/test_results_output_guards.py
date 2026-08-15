@@ -178,3 +178,88 @@ def test_structured_data_clean_url_passed_through_without_copy() -> None:
     sanitized = _sanitize_image_errors(images)
 
     assert sanitized[0] is images[0]
+
+
+# ==================== 上游自由字段脱敏 ====================
+
+
+def _dirty_free_field_result() -> dict[str, Any]:
+    """size/output_format/error.code 均携带 CRLF 的图片结果，验证换行注入防护。"""
+    return {
+        "success": True,
+        "status": "partial",
+        "data": [
+            {
+                "size": "2K\r\nFAKE-SIZE: injected",
+                "output_format": "png\r\nFAKE-FORMAT: injected",
+                "error": {"code": "E-1\r\nFAKE-CODE: injected", "message": "boom"},
+            }
+        ],
+    }
+
+
+def test_image_item_free_fields_sanitized_in_text_output() -> None:
+    """文本通道 size/output_format/错误码行净化：CRLF 压平，无换行注入。"""
+    text = format_generation_response("文生图任务完成", _dirty_free_field_result(), "test", "2K")
+
+    size_line = next(line for line in text.splitlines() if line.startswith("  尺寸: "))
+    format_line = next(line for line in text.splitlines() if line.startswith("  输出格式: "))
+    code_line = next(line for line in text.splitlines() if line.startswith("  错误码: "))
+    assert size_line == "  尺寸: 2K  FAKE-SIZE: injected"
+    assert format_line == "  输出格式: png  FAKE-FORMAT: injected"
+    assert code_line == "  错误码: E-1  FAKE-CODE: injected"
+
+
+def test_structured_data_free_fields_sanitized() -> None:
+    """structuredContent.data 项的 size/output_format/error.code 净化，与文本通道对称。"""
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=_dirty_free_field_result(),
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    item = structured["data"][0]
+    assert item["size"] == "2K  FAKE-SIZE: injected"
+    assert item["output_format"] == "png  FAKE-FORMAT: injected"
+    assert item["error"]["code"] == "E-1  FAKE-CODE: injected"
+
+
+def test_auto_save_section_failure_error_sanitized_in_text_output() -> None:
+    """保存失败行净化：error 携带 CRLF 与敏感键值时不注入换行、不泄露凭据。"""
+    save_result = AutoSaveResult(
+        success=False,
+        original_url="https://example.com/x.png",
+        error="下载失败\r\nFAKE api_key=sk-leaked",
+    )
+
+    text = format_generation_response(
+        "文生图任务完成",
+        _mixed_result(),
+        "test",
+        "2K",
+        [save_result],
+        auto_save_enabled=True,
+        saveable_indices=[1],
+    )
+
+    # 统计行「保存失败: 1」不含破折号，用条目行特有的「保存失败 -」前缀定位。
+    failure_line = next(line for line in text.splitlines() if "保存失败 -" in line)
+    assert failure_line == "  图片 2: 保存失败 - 下载失败  FAKE api_key=***"
+    assert "sk-leaked" not in text
+
+
+def test_auto_save_result_to_dict_sanitizes_original_url() -> None:
+    """to_dict 的 original_url 过净化管线：userinfo 剥离、CRLF 压平。"""
+    save_result = AutoSaveResult(success=False, original_url=_DIRTY_URL, error="下载失败")
+
+    payload = save_result.to_dict()
+
+    url = payload["original_url"]
+    assert isinstance(url, str)
+    assert "AKID:SECRET@" not in url
+    assert "SECRET" not in url
+    assert "\r" not in url
+    assert "\n" not in url
+    assert "mirror.example.com/a.png" in url

@@ -89,6 +89,9 @@ class SeedreamConfig:
         auto_save_max_total_bytes: 保存目录总字节上限，超限按最旧文件优先驱逐。
         stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
         stream_chunk_size: SSE 流式响应读取块大小字节数。
+        response_body_limit: 上游响应体读取总量上限字节数，None 时按
+            auto_save_max_file_size × 20 推导；非流式 JSON、流式 JSON 与 SSE
+            三条读取路径共用。
         image_prepare_concurrency: 参考图预处理并发上限。
         prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
         prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限，防止大图缓存
@@ -129,6 +132,8 @@ class SeedreamConfig:
 
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
     stream_chunk_size: int = _env_field(1024 * 1024, "SEEDREAM_STREAM_CHUNK_SIZE")
+
+    response_body_limit: int | None = _env_field(None, "SEEDREAM_RESPONSE_BODY_LIMIT")
 
     image_prepare_concurrency: int = _env_field(5, "SEEDREAM_IMAGE_PREPARE_CONCURRENCY")
 
@@ -256,6 +261,10 @@ class SeedreamConfig:
             raise SeedreamConfigError(
                 f"stream_chunk_size不能大于stream_buffer_max_size"
                 f"{_env_var_suffix('stream_chunk_size', 'stream_buffer_max_size')}"
+            )
+        if self.response_body_limit is not None and self.response_body_limit <= 0:
+            raise SeedreamConfigError(
+                f"response_body_limit必须大于0{_env_var_suffix('response_body_limit')}"
             )
 
         if self.image_prepare_concurrency <= 0:
@@ -669,6 +678,12 @@ def _build_config_from_sources_unlocked(
         ),
         "stream_chunk_size": _pick_int(
             override_values, "stream_chunk_size", "SEEDREAM_STREAM_CHUNK_SIZE", env_values
+        ),
+        "response_body_limit": _pick_optional_int(
+            override_values,
+            "response_body_limit",
+            "SEEDREAM_RESPONSE_BODY_LIMIT",
+            env_values,
         ),
         "image_prepare_concurrency": _pick_int(
             override_values,

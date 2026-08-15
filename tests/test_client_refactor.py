@@ -463,7 +463,12 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
         captured_request.update(request_data)
         return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
-    monkeypatch.setattr(client._image_preparer, "prepare_image_input", fake_prepare_image_input)
+    # 对实现体打桩而非替换公共 prepare_image_input 方法：并发信号量位于公共入口内部，
+    # 替换方法会使批量路径绕过信号量，断言的上限不再是真实约束；经实现体打桩信号量
+    # 守卫仍在路径内，真实入口的 to_thread 签名跳转也不进入计时路径。
+    monkeypatch.setattr(
+        client._image_preparer, "_prepare_image_input_locked", fake_prepare_image_input
+    )
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
     await client.multi_image_fusion(
@@ -539,7 +544,12 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
         captured_request.update(request_data)
         return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
-    monkeypatch.setattr(client._image_preparer, "prepare_image_input", fake_prepare_image_input)
+    # 对实现体打桩而非替换公共 prepare_image_input 方法：并发信号量位于公共入口内部，
+    # 替换方法会使批量路径绕过信号量，断言的上限不再是真实约束；经实现体打桩信号量
+    # 守卫仍在路径内，真实入口的 to_thread 签名跳转也不进入计时路径。
+    monkeypatch.setattr(
+        client._image_preparer, "_prepare_image_input_locked", fake_prepare_image_input
+    )
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
     await client.sequential_generation(

@@ -89,6 +89,30 @@ async def test_parse_sse_response_raises_on_request_level_error() -> None:
         )
 
 
+async def test_parse_sse_request_level_error_code_narrowed_to_string() -> None:
+    """请求级错误事件的 code 仅非空字符串被保留，数字与空串均置 None。
+
+    与 errors.handle_api_error 的错误码收窄口径一致，数字码转字符串属臆测语义。
+    """
+    for code_json, expected in [
+        (b'"code":40012', None),
+        (b'"code":""', None),
+        (b'"code":"InvalidParameter"', "InvalidParameter"),
+    ]:
+        chunks = [b'data: {"error":{"message":"bad request",' + code_json + b"}}\n\n"]
+        with pytest.raises(SeedreamAPIError, match="bad request") as exc_info:
+            await parse_sse_response(
+                _FakeSSEResponse(chunks),
+                model_id="m",
+                chunk_size=64,
+                buffer_max_size=4096,
+                event_truncate_threshold=4096,
+                total_bytes_limit=64 * 1024,
+                log=_FakeLog(),
+            )
+        assert exc_info.value.error_code == expected
+
+
 def test_parse_sse_segment_joins_multiline_data_into_single_json() -> None:
     """SSE 单事件跨多行 data: 时，parse_sse_segment 用 \\n 拼接为完整 JSON。
 

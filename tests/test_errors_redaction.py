@@ -391,17 +391,20 @@ def test_format_sse_failed_event_sanitizes_error_message() -> None:
 
 
 def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
-    """非 SSE 路径的 per-image error.message 净化后进结构化输出，原结果对象不被修改。"""
+    """非 SSE 路径的 per-image error.message 净化并写回列表条目，原字典对象不被修改。"""
     from seedream_mcp.tools.core.results import _sanitize_image_errors
 
     images = [
         {"url": "https://a/1.png"},
         {"error": {"code": "X", "message": "api_key: sk-leaked"}},
     ]
+    # 净化以浅拷贝写回列表位置，须持原字典对象的直接引用才能断言其未被就地修改。
+    original_dirty_item = images[1]
 
     sanitized = _sanitize_image_errors(images)
 
     assert "sk-leaked" not in str(sanitized[1])
     assert "***" in sanitized[1]["error"]["message"]
+    assert sanitized is images
     assert sanitized[0] is images[0]
-    assert images[1]["error"]["message"] == "api_key: sk-leaked"
+    assert original_dirty_item["error"]["message"] == "api_key: sk-leaked"

@@ -150,6 +150,9 @@ async def execute_generation_handler(
         saveable_indices: list[int] = []
         auto_save_error: str | None = None
         is_generation_failed = _is_generation_failed(result)
+        # 图片列表在自动保存前提取一次并传入 auto_save_from_*，供收集阶段直接复用，
+        # 消除收集阶段对同一结果的重复提取。
+        images = extract_images(result)
         if context.enable_auto_save and not is_generation_failed:
             try:
                 await _safe_report_progress(
@@ -166,6 +169,7 @@ async def execute_generation_handler(
                         context.custom_name,
                         tool_name,
                         download_manager=shared_download_manager,
+                        images=images,
                     )
                 else:
                     auto_save_results, saveable_indices = await auto_save_from_base64(
@@ -176,12 +180,16 @@ async def execute_generation_handler(
                         context.custom_name,
                         tool_name,
                         download_manager=shared_download_manager,
+                        images=images,
                     )
 
                 if auto_save_results:
                     result = update_result_with_auto_save(
                         result, auto_save_results, saveable_indices
                     )
+                    # 回填合并改写了 data（补充 local_path/markdown_ref），展示与结构化
+                    # 输出按合并后的结果重新提取；未触发合并时沿用上方已提取的列表。
+                    images = extract_images(result)
                     saved_count = sum(1 for r in auto_save_results if r.success)
                     await _safe_ctx_log(
                         ctx,
@@ -196,9 +204,8 @@ async def execute_generation_handler(
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
                 await _safe_ctx_log(ctx, "warning", f"自动保存失败，已降级跳过：{auto_save_error}")
 
-        # 自动保存可能改写 result，须在其之后计算一次图片列表，供后续纯函数复用，
-        # 避免 extract_images 在格式化、结构化与日志阶段重复遍历同一结果。
-        images = extract_images(result)
+        # images 供后续纯函数复用，避免 extract_images 在格式化、结构化与日志阶段
+        # 重复遍历同一结果。
         response_text = format_generation_response(
             completion_title,
             result,

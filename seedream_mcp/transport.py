@@ -1,9 +1,9 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
-包含请求体大小限制、Bearer 鉴权、健康检查三个 ASGI 中间件，以及 streamable-http
-监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 FastMCP 的 streamable_http_app
-外层，按装配逆序执行。FastMCP 实例 mcp 与共享资源清理函数在调用时从 resources 模块
-延迟导入，传输层不依赖 server 模块。
+包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护四个 ASGI 中间件，以及
+streamable-http 监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 FastMCP 的
+streamable_http_app 外层，按装配逆序执行。FastMCP 实例 mcp 与共享资源清理函数在调用时
+从 resources 模块延迟导入，传输层不依赖 server 模块。
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ async def _send_asgi_json(
 
     构造 http.response.start 与 http.response.body 两条消息，content-type 固定为
     application/json，content-length 按实得 body 字节计算；extra_headers 附加在标准头
-    之后，供 www-authenticate 等响应头复用，消除三处中间件的手写重复。
+    之后，供 www-authenticate 等响应头复用，消除四个中间件的手写重复。
     """
     headers: list[tuple[bytes, bytes]] = [
         (b"content-type", b"application/json"),

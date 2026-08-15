@@ -115,8 +115,21 @@ class _SingleImageInput(BaseModel):
 
     image: str = Field(
         ...,
-        description="参考图片，支持 URL、本地文件路径。例如：https://example.com/ref.png 或 ./images/portrait.jpg。",
+        description="参考图片，支持 URL、data URI（data:image/*;base64,...）、本地文件路径。"
+        "例如：https://example.com/ref.png 或 ./images/portrait.jpg。",
     )
+
+    @field_validator("image")
+    @classmethod
+    def reject_blank_image(cls, value: str) -> str:
+        """拒绝空白字符串，与多图输入的校验深度一致。
+
+        空白值若放行到 client 归一化层才报错，错误会从 schema 级参数错误退化为
+        isError 工具结果，报错层次与其他参数不一致。
+        """
+        if not value.strip():
+            raise ValueError("image 不能为空字符串")
+        return value
 
 
 class _MultiImageInput(BaseModel):
@@ -127,8 +140,8 @@ class _MultiImageInput(BaseModel):
         min_length=2,
         max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
         description=(
-            f"图片列表，支持 URL、本地路径，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
-            "（5.0 Pro 最多 10 张）。"
+            f"图片列表，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
+            f"数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
             '例如：["https://example.com/a.png", "./images/b.jpg"]。'
         ),
     )
@@ -153,8 +166,8 @@ class _SequentialImageInput(BaseModel):
     image: str | list[str] | None = Field(
         default=None,
         description=(
-            f"可选的参考图片，支持 URL、本地路径，单张或多张，单字符串视为单元素列表，"
-            f"最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
+            f"可选的参考图片，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
+            f"单张或多张，单字符串视为单元素列表，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张。"
         ),
     )
 

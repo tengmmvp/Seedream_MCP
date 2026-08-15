@@ -18,7 +18,11 @@ import aiofiles
 import aiohttp
 import pytest
 
-from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager
+from seedream_mcp.utils.io.io_download import (
+    DownloadError,
+    DownloadManager,
+    RetryableDownloadError,
+)
 
 from _download_fakes import (
     _FakeResponse,
@@ -233,6 +237,57 @@ async def test_download_dns_resolving_private_ip_is_terminal(
 
     # 终态错误单次尝试即上抛，未触发退避重试
     assert len(resolve_calls) == 1
+    assert not save_path.exists()
+
+
+async def test_download_wsa_host_not_found_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """Windows WSAHOST_NOT_FOUND(11001) 域名不存在属终态：单次解析即上抛不退避。
+
+    Windows 的 getaddrinfo 失败 errno 为 WSA 错误码而非 POSIX EAI_* 常量，终态集合
+    未并入 WSA 码表时该平台全部按可重试退避，永久性域名错误也会耗尽重试次数。
+    """
+    manager = DownloadManager()
+    resolve_calls: List[int] = []
+
+    async def _wsa_11001_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
+        del host, port, kwargs
+        resolve_calls.append(1)
+        raise socket.gaierror(11001, "Host not found")
+
+    _patch_loop_getaddrinfo(monkeypatch, _wsa_11001_getaddrinfo)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="域名解析失败") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 终态错误且非可重试子类，单次尝试即上抛，未触发退避重试
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert len(resolve_calls) == 1
+    assert not save_path.exists()
+
+
+async def test_download_wsa_try_again_is_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """Windows WSATRY_AGAIN(11002) 对应 EAI_AGAIN 瞬时故障：按可重试退避。"""
+    manager = DownloadManager()
+    resolve_calls: List[int] = []
+
+    async def _wsa_11002_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
+        del host, port, kwargs
+        resolve_calls.append(1)
+        raise socket.gaierror(11002, "Non-authoritative host not found")
+
+    _patch_loop_getaddrinfo(monkeypatch, _wsa_11002_getaddrinfo)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(RetryableDownloadError, match="域名解析失败"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 可重试错误按 max_retries 上限反复解析，而非单次终态上抛
+    assert len(resolve_calls) == manager.max_retries + 1
     assert not save_path.exists()
 
 

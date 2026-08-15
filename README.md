@@ -438,15 +438,16 @@ SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 单张图片下载超时（秒）
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下载失败最大重试次数（0 表示不重试）
-SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 单张图片大小上限（字节，默认 50MB）
+SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 单张图片大小上限（字节，默认 50MB）；另兼作流式单事件截断阈值与响应体读取上限的推导基准
 SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # 最大并发下载数
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 保存目录总字节上限（默认 10GB；超限按最旧文件驱逐）
+SEEDREAM_RESPONSE_BODY_LIMIT=                # 上游响应体读取总量上限（字节；不设则按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导，非流式/流式 JSON 与 SSE 共用）
 
 # 工作区与传输
 SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界回退目录（MCP Roots 优先）
-SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定建议配置）
+SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定必须配置，否则拒绝启动；另需 TLS 或 --insecure-allow-non-tls 豁免）
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 请求体上限（字节，≥1MB，默认 64MB；单图 data URI 约 40MB，兼顾多图融合）
 
 # 客户端性能
