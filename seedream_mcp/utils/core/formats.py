@@ -103,7 +103,7 @@ def is_known_image_bytes(content: bytes) -> bool:
     return infer_extension_from_bytes(content, default="") != ""
 
 
-def _format_file_size_mb(size_bytes: int) -> str:
+def format_file_size_mb(size_bytes: int) -> str:
     """将字节数格式化为 MB 字符串，保留一位小数，供校验与保存模块共享。"""
     return f"{size_bytes / 1024 / 1024:.1f}MB"
 

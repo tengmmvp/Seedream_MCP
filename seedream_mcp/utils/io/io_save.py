@@ -20,7 +20,7 @@ from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
-    _format_file_size_mb,
+    format_file_size_mb,
     infer_extension_from_bytes,
     is_known_image_bytes,
     parse_data_uri,
@@ -360,8 +360,8 @@ class AutoSaveManager:
         estimated_size = (len(raw_payload) * 3) // 4
         if estimated_size > self.max_file_size:
             raise AutoSaveError(
-                f"Base64数据过大: 约 {_format_file_size_mb(estimated_size)}，"
-                f"最大支持 {_format_file_size_mb(self.max_file_size)}"
+                f"Base64数据过大: 约 {format_file_size_mb(estimated_size)}，"
+                f"最大支持 {format_file_size_mb(self.max_file_size)}"
             )
 
         # 火山引擎 base64 通常不含空白，直传 validate=True 校验避免对大串做全量复制；
@@ -376,8 +376,8 @@ class AutoSaveManager:
 
         if len(content_bytes) > self.max_file_size:
             raise AutoSaveError(
-                f"解码后数据过大: {_format_file_size_mb(len(content_bytes))}，"
-                f"最大支持 {_format_file_size_mb(self.max_file_size)}"
+                f"解码后数据过大: {format_file_size_mb(len(content_bytes))}，"
+                f"最大支持 {format_file_size_mb(self.max_file_size)}"
             )
 
         if not is_known_image_bytes(content_bytes):

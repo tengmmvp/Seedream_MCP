@@ -21,7 +21,7 @@ from typing import (
     Callable,
     ParamSpec,
     TypeVar,
-    overload,
+    cast,
 )
 
 from loguru import logger
@@ -217,20 +217,15 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-@overload
-def log_function_call(func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]: ...
-
-
-@overload
-def log_function_call(func: Callable[P, R]) -> Callable[P, R]: ...
-
-
-def log_function_call(func: Callable[P, Any]) -> Callable[P, Any]:
+def log_function_call(func: Callable[P, R]) -> Callable[P, R]:
     """装饰函数并在调用入口记录日志。
 
-    使用 ``ParamSpec`` 透传被装饰函数的参数规格，使用 ``TypeVar`` 保留原始返回类型；
-    同步与异步经由两条 overload 声明分别匹配，使装饰后的函数对静态类型检查器仍保持
-    精确签名，避免 ``await`` 链路返回类型退化为 ``Any``。
+    使用 ``ParamSpec`` 透传被装饰函数的参数规格，``TypeVar`` 绑定原始返回类型；
+    同步与异步在实现内分流，装饰后的静态签名与原函数完全一致，``await`` 链路保持
+    精确返回类型。异步函数的 ``R`` 求解为其原生 coroutine 类型，与未装饰时一致。
+    声明采用单一 ``Callable[P, R]`` 而非 overload 区分同步与异步分支：mypy 对
+    签名含 ``Any`` 的异步函数做 overload 约束求解时会把 ParamSpec 整体擦除为
+    ``(*Any, **Any) -> Any``，单一签名不经接口约束求解，类型可精确穿透。
 
     Args:
         func: 要装饰的函数
@@ -241,16 +236,21 @@ def log_function_call(func: Callable[P, Any]) -> Callable[P, Any]:
 
     # 仅记录调用入口日志；异常交由被装饰函数自身的错误处理统一记录，避免在此重复
     # 输出 ERROR 与函数内部日志叠加，造成同一失败被记录多次。
-    @functools.wraps(func)
-    async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
-        logger.info("函数调用: {}()", func.__qualname__)
-        return await func(*args, **kwargs)
+    if inspect.iscoroutinefunction(func):
+        # 异步函数的返回类型即 coroutine，Awaitable[R] 视图使 await 表达式还原出 R，
+        # 内层包装按 R 声明返回类型，外层 cast 收敛包装产生的第二层 coroutine 容器。
+        async_func = cast("Callable[P, Awaitable[R]]", func)
+
+        @functools.wraps(func)
+        async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            logger.info("函数调用: {}()", func.__qualname__)
+            return await async_func(*args, **kwargs)
+
+        return cast("Callable[P, R]", async_wrapper)
 
     @functools.wraps(func)
-    def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
+    def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         logger.info("函数调用: {}()", func.__qualname__)
         return func(*args, **kwargs)
 
-    if inspect.iscoroutinefunction(func):
-        return async_wrapper
     return sync_wrapper

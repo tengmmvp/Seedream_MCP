@@ -1,8 +1,9 @@
 """io_path 行为修复回归测试。
 
-覆盖四项修复：相似路径建议对空目标名不误报、get_relative_path 对绝对路径回退分支
-不再重复 resolve、resolve_env_workspace_root 按配置值缓存 resolve 结果、
-resolve_workspace_roots 不再对已 resolve 的根重复 resolve。
+覆盖：相似路径建议对空目标名不误报、get_relative_path 对绝对路径回退分支不再重复
+resolve、resolve_env_workspace_root 仅对绝对路径形态的配置值缓存 resolve 结果、
+resolve_workspace_roots 不再对已 resolve 的根重复 resolve、工作区根提供者的注册
+协议与未注册回退。
 """
 
 from __future__ import annotations
@@ -18,9 +19,9 @@ import seedream_mcp.utils.io.io_path as io_path_module
 @pytest.fixture(autouse=True)
 def _clear_env_root_cache() -> Iterator[None]:
     """每个用例前后清空回退根缓存，隔离模块级可变状态。"""
-    io_path_module._RESOLVED_ENV_ROOT_CACHE.clear()
+    io_path_module.clear_resolved_env_root_cache()
     yield
-    io_path_module._RESOLVED_ENV_ROOT_CACHE.clear()
+    io_path_module.clear_resolved_env_root_cache()
 
 
 def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
@@ -123,3 +124,57 @@ def test_resolve_workspace_roots_skips_redundant_resolve(
         tmp_path,
         sub_root,
     ]
+
+
+def test_resolve_env_workspace_root_relative_config_recomputes_after_cwd_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """相对路径形态的配置根不进缓存，进程 CWD 变更后按新 CWD 重新解析。
+
+    缓存以配置原始字符串为键，相对路径的 resolve 结果随 CWD 变化；若照常缓存，
+    CWD 变更后的访问会命中首个 CWD 下的陈旧 resolve。绝对路径形态仍走缓存，由
+    test_resolve_env_workspace_root_caches_resolved_result 锁定。
+    """
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_configured_workspace_root", lambda: "images")
+
+    monkeypatch.chdir(first_cwd)
+    assert io_path_module.resolve_env_workspace_root() == (first_cwd / "images").resolve()
+
+    monkeypatch.chdir(second_cwd)
+    assert io_path_module.resolve_env_workspace_root() == (second_cwd / "images").resolve()
+    assert "images" not in io_path_module._RESOLVED_ENV_ROOT_CACHE
+
+
+def test_workspace_root_provider_registration_drives_configured_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """注册的提供者是配置根的读取入口；提供者未注册时回退环境变量。"""
+    target = tmp_path / "provided"
+    target.mkdir()
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_workspace_root_provider", lambda: str(target))
+
+    assert io_path_module._configured_workspace_root() == str(target)
+    assert io_path_module.resolve_env_workspace_root() == target.resolve()
+
+    monkeypatch.setattr(io_path_module, "_env_workspace_root_provider", None)
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
+    assert io_path_module._configured_workspace_root() == str(tmp_path)
+
+
+def test_register_env_workspace_root_provider_replaces_previous() -> None:
+    """register_env_workspace_root_provider 为覆盖式替换，后注册者生效。"""
+    original = io_path_module._env_workspace_root_provider
+    try:
+        io_path_module.register_env_workspace_root_provider(lambda: "/registered/root")
+        assert io_path_module._configured_workspace_root() == "/registered/root"
+
+        io_path_module.register_env_workspace_root_provider(lambda: "/other/root")
+        assert io_path_module._configured_workspace_root() == "/other/root"
+    finally:
+        io_path_module.register_env_workspace_root_provider(original)

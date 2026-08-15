@@ -1,0 +1,351 @@
+"""三语 README 一致性守护测试。
+
+README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版本。项目不为
+三语文档建单源渲染系统，改由本文件把跨语言漂移从人工同步变成测试强制：任一语
+言单独修改而未同步其余两份，对应断言立即变红。
+
+配对策略：围栏代码块按出现顺序配对，先断言数量相等，再逐块比较第 N 块；基准
+版本为 README.md，其余两份与基准对齐。断言只比较语言无关要素，如 JSON 块全文、
+bash 块内的 KEY=value 赋值、环境变量键序、标题层级、链接 URL 与表格列数，不比
+较自然语言正文。定位环境变量配置块时以含 SEEDREAM_MODEL_ID 赋值行的 bash 块为
+锚点，不依赖各语言的章节标题文字。
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TypeVar
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+BASE_README = "README.md"
+OTHER_READMES = ("README.en.md", "README.zh-TW.md")
+
+# 环境变量配置块的定位锚点，全文仅该 bash 块存在 SEEDREAM_MODEL_ID 赋值行。
+_ENV_BLOCK_ANCHOR = re.compile(r"^\s*SEEDREAM_MODEL_ID=")
+
+# bash 块内 KEY=value 形态的赋值提取。值取等号后到首个空白前的片段并剥除尾部
+# 标点，可为空串，避免句子收尾的右括号等标点在不同语言注释中的附着差异造成误
+# 报；注释行中的赋值同样提取，用于捕捉译文注释里漂移的键名与取值。
+_ASSIGNMENT_PATTERN = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=(\S*)")
+_VALUE_TRAILING_PUNCTUATION = ")]}.,;:!?"
+
+# 环境变量键名形态，与 .env.example 守护测试的口径一致。
+_ENV_KEY_PATTERN = re.compile(r"\b(?:SEEDREAM|ARK)_[A-Z0-9_]+")
+_ENV_KEY_FULL_PATTERN = re.compile(r"(?:SEEDREAM|ARK)_[A-Z0-9_]+\Z")
+
+# 正文中的 markdown 链接与 HTML 链接属性两类 URL 提取。
+_MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_HTML_LINK_PATTERN = re.compile(r'(?:href|src)="([^"]+)"')
+
+# ATX 标题行，井号序列后须跟空白。
+_HEADING_PATTERN = re.compile(r"^(#{1,6})(?=\s)")
+
+_T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class CodeBlock:
+    """一个围栏代码块。line 为起始围栏所在行号，lines 为围栏内的正文行。"""
+
+    lang: str
+    line: int
+    lines: tuple[str, ...]
+
+
+def _read_readme(name: str) -> str:
+    """读取仓库根目录下指定文件名的 README 全文。"""
+    return (PROJECT_ROOT / name).read_text(encoding="utf-8")
+
+
+def _fenced_blocks(text: str) -> list[CodeBlock]:
+    """按行扫描全文，返回全部围栏代码块，按出现顺序排列。
+
+    以行首三反引号围栏开合切换状态，开栏行围栏标记后的文字即为语言标识。
+    """
+    blocks: list[CodeBlock] = []
+    lang: str | None = None
+    start_line = 0
+    body: list[str] = []
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        if not raw.lstrip().startswith("```"):
+            if lang is not None:
+                body.append(raw)
+            continue
+        if lang is None:
+            lang = raw.lstrip()[3:].strip().lower()
+            start_line = lineno
+            body = []
+        else:
+            blocks.append(CodeBlock(lang, start_line, tuple(body)))
+            lang = None
+            body = []
+    return blocks
+
+
+def _lang_blocks(name: str, lang: str) -> list[CodeBlock]:
+    """读取指定 README 并返回给定语言的全部围栏块。"""
+    return [block for block in _fenced_blocks(_read_readme(name)) if block.lang == lang]
+
+
+def _prose_lines(name: str) -> list[tuple[int, str]]:
+    """返回不在任何围栏代码块内的正文行，带 1 基行号。"""
+    result: list[tuple[int, str]] = []
+    in_code = False
+    for lineno, raw in enumerate(_read_readme(name).splitlines(), start=1):
+        if raw.lstrip().startswith("```"):
+            in_code = not in_code
+            continue
+        if not in_code:
+            result.append((lineno, raw))
+    return result
+
+
+def _block_assignments(block: CodeBlock) -> list[tuple[str, str]]:
+    """提取块内全部 KEY=value 赋值，按行序与行内出现顺序展开为扁平序列。"""
+    pairs: list[tuple[str, str]] = []
+    for line in block.lines:
+        for key, value in _ASSIGNMENT_PATTERN.findall(line):
+            pairs.append((key, value.rstrip(_VALUE_TRAILING_PUNCTUATION)))
+    return pairs
+
+
+def _env_block(name: str) -> CodeBlock:
+    """定位环境变量配置 bash 块，锚点为 SEEDREAM_MODEL_ID 赋值行。"""
+    candidates = [
+        block
+        for block in _lang_blocks(name, "bash")
+        if any(_ENV_BLOCK_ANCHOR.match(line) for line in block.lines)
+    ]
+    assert len(candidates) == 1, (
+        f"{name} 环境变量配置块定位失败，含 SEEDREAM_MODEL_ID 赋值行的 bash 块"
+        f"应唯一命中，实际命中 {len(candidates)} 个"
+    )
+    return candidates[0]
+
+
+def _env_block_keys(name: str) -> list[str]:
+    """环境变量配置块内出现的全部 SEEDREAM_/ARK_ 键名，含注释行，按出现顺序。"""
+    keys: list[str] = []
+    for line in _env_block(name).lines:
+        keys.extend(_ENV_KEY_PATTERN.findall(line))
+    return keys
+
+
+def _env_block_pairs(name: str) -> list[tuple[str, str]]:
+    """环境变量配置块内环境变量键的赋值对，默认数值经键值对成对锁定。"""
+    return [
+        (key, value)
+        for key, value in _block_assignments(_env_block(name))
+        if _ENV_KEY_FULL_PATTERN.match(key)
+    ]
+
+
+def _heading_depths(name: str) -> list[tuple[int, int]]:
+    """正文标题行的行号与层级序列。"""
+    depths: list[tuple[int, int]] = []
+    for lineno, raw in _prose_lines(name):
+        match = _HEADING_PATTERN.match(raw)
+        if match is not None:
+            depths.append((lineno, len(match.group(1))))
+    return depths
+
+
+def _link_urls(name: str) -> set[str]:
+    """正文链接 URL 集合，markdown 链接与 HTML href/src 都计入。"""
+    urls: set[str] = set()
+    for _, raw in _prose_lines(name):
+        urls.update(_MARKDOWN_LINK_PATTERN.findall(raw))
+        urls.update(_HTML_LINK_PATTERN.findall(raw))
+    return urls
+
+
+def _table_columns(name: str) -> list[tuple[int, int]]:
+    """正文表格行的行号与列数序列，列数按行内竖线数减一计算。"""
+    columns: list[tuple[int, int]] = []
+    for lineno, raw in _prose_lines(name):
+        if raw.lstrip().startswith("|"):
+            columns.append((lineno, raw.count("|") - 1))
+    return columns
+
+
+def _first_mismatch_index(base: Sequence[_T], other: Sequence[_T]) -> int:
+    """返回两序列首个差异位置，互为前缀时返回较短者长度。"""
+    for index in range(min(len(base), len(other))):
+        if base[index] != other[index]:
+            return index
+    return min(len(base), len(other))
+
+
+def _block_drift_message(ordinal: int, base: CodeBlock, other_name: str, other: CodeBlock) -> str:
+    """构造代码块漂移的失败消息，定位到文件、块序与首个差异行。"""
+    base_detail = "缺失"
+    other_detail = "缺失"
+    for offset in range(max(len(base.lines), len(other.lines))):
+        base_line = base.lines[offset] if offset < len(base.lines) else "缺失"
+        other_line = other.lines[offset] if offset < len(other.lines) else "缺失"
+        if base_line != other_line:
+            base_detail = f"第 {base.line + 1 + offset} 行「{base_line.strip()}」"
+            other_detail = f"第 {other.line + 1 + offset} 行「{other_line.strip()}」"
+            break
+    return (
+        f"{other_name} 第 {other.line} 行起的第 {ordinal} 个 {base.lang} 代码块与 "
+        f"{BASE_README} 第 {base.line} 行起的同序块漂移:\n"
+        f"  {BASE_README} {base_detail}\n"
+        f"  {other_name} {other_detail}"
+    )
+
+
+def test_json_blocks_are_identical_across_languages() -> None:
+    """三语全部 json 代码块逐字一致，含工具调用示例与客户端配置。
+
+    JSON 示例语言无关，块内字符串值三语共用同一份内容；某语言单独修改示例而
+    未同步其余两份时，首个差异行消息直接指明漂移的文件与块。
+    """
+    base_blocks = _lang_blocks(BASE_README, "json")
+    assert base_blocks, "README.md 应存在 json 代码块，围栏解析失效或文档被清空"
+
+    for name in OTHER_READMES:
+        other_blocks = _lang_blocks(name, "json")
+        assert len(other_blocks) == len(base_blocks), (
+            f"{name} 的 json 代码块数量为 {len(other_blocks)}，{BASE_README} 为 "
+            f"{len(base_blocks)}，存在单语增删的示例块"
+        )
+        for ordinal, (base, other) in enumerate(zip(base_blocks, other_blocks), start=1):
+            assert other.lines == base.lines, _block_drift_message(ordinal, base, name, other)
+
+
+def test_bash_blocks_share_assignments_across_languages() -> None:
+    """三语全部 bash 代码块内 KEY=value 赋值序列一致。
+
+    提取按行内 KEY= 形态进行，注释行同样参与，允许注释正文的语言差异；赋值序
+    列覆盖环境变量清单、示例命令与译文注释中出现的键名与取值。
+    """
+    base_blocks = _lang_blocks(BASE_README, "bash")
+    assert base_blocks, "README.md 应存在 bash 代码块，围栏解析失效或文档被清空"
+
+    for name in OTHER_READMES:
+        other_blocks = _lang_blocks(name, "bash")
+        assert len(other_blocks) == len(base_blocks), (
+            f"{name} 的 bash 代码块数量为 {len(other_blocks)}，{BASE_README} 为 "
+            f"{len(base_blocks)}，存在单语增删的命令块"
+        )
+        for ordinal, (base, other) in enumerate(zip(base_blocks, other_blocks), start=1):
+            base_pairs = _block_assignments(base)
+            other_pairs = _block_assignments(other)
+            assert other_pairs == base_pairs, (
+                f"{name} 第 {other.line} 行起的第 {ordinal} 个 bash 块赋值序列与 "
+                f"{BASE_README} 第 {base.line} 行起的同序块漂移:\n"
+                f"  {BASE_README}: {base_pairs}\n"
+                f"  {name}: {other_pairs}"
+            )
+
+
+def test_env_block_key_sequence_matches() -> None:
+    """环境变量配置块的键名序列三语一致，含注释行中出现的键。
+
+    键按首次出现顺序展开为扁平序列比较，同时锁定集合与顺序；新增、删除或移动
+    环境变量而未三语同步时失败。
+    """
+    base_keys = _env_block_keys(BASE_README)
+    assert base_keys, "环境变量配置块未提取到任何键，锚点定位或解析失效"
+
+    for name in OTHER_READMES:
+        other_keys = _env_block_keys(name)
+        assert other_keys == base_keys, (
+            f"{name} 环境变量配置块的键序列与 {BASE_README} 漂移:\n"
+            f"  {BASE_README}: {base_keys}\n"
+            f"  {name}: {other_keys}"
+        )
+
+
+def test_env_block_default_values_match() -> None:
+    """环境变量配置块的赋值键值对三语一致，默认值数值成对相等。
+
+    端口、字节上限、天数等默认值经键值对逐对比较，67108864、268435456、
+    10737418240、30 等任一语言漂移即失败。
+    """
+    base_pairs = _env_block_pairs(BASE_README)
+    assert base_pairs, "环境变量配置块未提取到任何赋值对，解析失效"
+
+    for name in OTHER_READMES:
+        other_pairs = _env_block_pairs(name)
+        assert other_pairs == base_pairs, (
+            f"{name} 环境变量配置块的赋值键值对与 {BASE_README} 漂移:\n"
+            f"  {BASE_README}: {base_pairs}\n"
+            f"  {name}: {other_pairs}"
+        )
+
+
+def test_heading_depth_sequence_matches() -> None:
+    """标题层级序列三语一致，忽略标题文本只比较深度。
+
+    某一语言新增章节或调整层级而未同步时，深度序列先行失配，失败消息给出首个
+    差异标题在两份文件中的行号。
+    """
+    base_headings = _heading_depths(BASE_README)
+    assert base_headings, "未提取到任何标题行，解析失效"
+    base_depths = [depth for _, depth in base_headings]
+
+    for name in OTHER_READMES:
+        other_headings = _heading_depths(name)
+        other_depths = [depth for _, depth in other_headings]
+        if other_depths == base_depths:
+            continue
+        mismatch = _first_mismatch_index(base_depths, other_depths)
+        base_entry = base_headings[mismatch] if mismatch < len(base_headings) else base_headings[-1]
+        other_entry = (
+            other_headings[mismatch] if mismatch < len(other_headings) else other_headings[-1]
+        )
+        assert other_depths == base_depths, (
+            f"{name} 的标题层级序列与 {BASE_README} 漂移，数量 {len(other_depths)} 对 "
+            f"{len(base_depths)}，首个差异在第 {mismatch + 1} 个标题: "
+            f"{BASE_README} 第 {base_entry[0]} 行层级 {base_entry[1]}，"
+            f"{name} 第 {other_entry[0]} 行层级 {other_entry[1]}"
+        )
+
+
+def test_link_url_sets_match() -> None:
+    """正文链接 URL 集合三语一致，markdown 链接与 HTML href/src 都计入。
+
+    代码块内的 URL 不参与比较；导航链接、徽章图与参考文档相对链接三语共享同
+    一份集合，单语增删链接即失败。
+    """
+    base_urls = _link_urls(BASE_README)
+    assert base_urls, "未提取到任何链接，解析失效"
+
+    for name in OTHER_READMES:
+        other_urls = _link_urls(name)
+        assert other_urls == base_urls, (
+            f"{name} 的链接 URL 集合与 {BASE_README} 漂移:\n"
+            f"  仅 {BASE_README} 有: {sorted(base_urls - other_urls)}\n"
+            f"  仅 {name} 有: {sorted(other_urls - base_urls)}"
+        )
+
+
+def test_table_column_sequence_matches() -> None:
+    """表格列数序列三语一致，覆盖模型能力差异等数据表。
+
+    某一语言增删数据列或整表而未同步时，列数序列先行失配，失败消息给出首个差
+    异表格行在两份文件中的行号。
+    """
+    base_columns = _table_columns(BASE_README)
+    assert base_columns, "未提取到任何表格行，解析失效"
+
+    for name in OTHER_READMES:
+        other_columns = _table_columns(name)
+        if other_columns == base_columns:
+            continue
+        mismatch = _first_mismatch_index(base_columns, other_columns)
+        base_entry = base_columns[mismatch] if mismatch < len(base_columns) else base_columns[-1]
+        other_entry = (
+            other_columns[mismatch] if mismatch < len(other_columns) else other_columns[-1]
+        )
+        assert other_columns == base_columns, (
+            f"{name} 的表格列数序列与 {BASE_README} 漂移，行数 {len(other_columns)} 对 "
+            f"{len(base_columns)}，首个差异在第 {mismatch + 1} 个表格行: "
+            f"{BASE_README} 第 {base_entry[0]} 行 {base_entry[1]} 列，"
+            f"{name} 第 {other_entry[0]} 行 {other_entry[1]} 列"
+        )

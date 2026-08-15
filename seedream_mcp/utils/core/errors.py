@@ -271,13 +271,13 @@ def _normalize_non_str_message(value: Any) -> str:
     return str(value)
 
 
-def _truncate_upstream_message_fragment(value: Any) -> str:
+def truncate_upstream_message_fragment(value: Any) -> str:
     """归一化并截断上游错误 message 片段至 8KB，超长时保留前缀并标注原长度。
 
     handle_api_error 将上游 error/message 字段拼入异常 message，拼接前统一经本函数
     处理：非字符串分量先归一化为文本，dict/list 走 JSON 序列化，防止 dict 形态
     message 经 f-string 插值为 Python repr 后绕过下游键值脱敏；随后截断防止超大
-    错误体随异常进入日志。
+    错误体随异常进入日志。io_sse 对请求级错误事件的 message 拼装共用本函数。
     """
     text = value if isinstance(value, str) else _normalize_non_str_message(value)
     if len(text) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
@@ -319,16 +319,16 @@ def handle_api_error(
                 if "message" in error_detail:
                     error_message = (
                         f"{error_message}: "
-                        f"{_truncate_upstream_message_fragment(error_detail['message'])}"
+                        f"{truncate_upstream_message_fragment(error_detail['message'])}"
                     )
             elif isinstance(error_detail, str):
                 error_message = (
-                    f"{error_message}: {_truncate_upstream_message_fragment(error_detail)}"
+                    f"{error_message}: {truncate_upstream_message_fragment(error_detail)}"
                 )
         elif "message" in response_data:
             error_message = (
                 f"{error_message}: "
-                f"{_truncate_upstream_message_fragment(response_data['message'])}"
+                f"{truncate_upstream_message_fragment(response_data['message'])}"
             )
 
     return SeedreamAPIError(

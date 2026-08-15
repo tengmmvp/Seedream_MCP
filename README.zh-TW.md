@@ -278,7 +278,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_text_to_image",
   "arguments": {
-    "prompt": "水彩風格的江南水鄉，清晨薄霧"
+    "prompt": "水彩风格的江南水乡，清晨薄雾"
   }
 }
 ```
@@ -289,7 +289,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_text_to_image",
   "arguments": {
-    "prompt": "水彩風格的江南水鄉，清晨薄霧",
+    "prompt": "水彩风格的江南水乡，清晨薄雾",
     "size": "2K",
     "watermark": false,
     "response_format": "url",
@@ -332,7 +332,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_image_to_image",
   "arguments": {
-    "prompt": "把這張人像照片轉換為吉卜力動畫風格",
+    "prompt": "把这张人像照片转换为吉卜力动画风格",
     "image": "images/2026/08/15/portrait.jpeg"
   }
 }
@@ -344,7 +344,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_image_to_image",
   "arguments": {
-    "prompt": "把這張人像照片轉換為吉卜力動畫風格",
+    "prompt": "把这张人像照片转换为吉卜力动画风格",
     "image": "https://example.com/portrait.jpeg",
     "size": "2048x2048",
     "watermark": false,
@@ -386,7 +386,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_multi_image_fusion",
   "arguments": {
-    "prompt": "把兩張人像融合為一張雙人合影，攝影棚燈光",
+    "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
       "images/2026/08/15/person_a.jpeg",
       "images/2026/08/15/person_b.jpeg"
@@ -401,7 +401,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_multi_image_fusion",
   "arguments": {
-    "prompt": "把產品圖與品牌 Logo 融合為一張海報主視覺",
+    "prompt": "把产品图与品牌 Logo 融合为一张海报主视觉",
     "image": [
       "images/product_front.png",
       "images/product_side.png",
@@ -447,7 +447,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_sequential_generation",
   "arguments": {
-    "prompt": "四格漫畫：一隻柴犬的一天，起床、吃飯、散步、睡覺"
+    "prompt": "四格漫画：一只柴犬的一天，起床、吃饭、散步、睡觉"
   }
 }
 ```
@@ -458,7 +458,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_sequential_generation",
   "arguments": {
-    "prompt": "以參考圖中的角色為主角，繪製三格探險漫畫",
+    "prompt": "以参考图中的角色为主角，绘制三格探险漫画",
     "image": [
       "images/2026/08/15/hero_front.jpeg",
       "images/2026/08/15/hero_side.jpeg"

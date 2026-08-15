@@ -13,11 +13,10 @@ import os
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Callable, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from ..core.errors import SeedreamConfigError
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
 from .io_file import _is_reparse_point
@@ -38,11 +37,40 @@ _cwd_fallback_warned = False
 
 # 已 resolve 回退根的进程级缓存，键为配置原始字符串。回退边界模式下每次文件访问都会
 # 经过本解析，expanduser 与 resolve 属文件系统调用，缓存消除事件循环上的重复阻塞。
-# 键含配置原始值，配置变更自然产生新键；解析失败不缓存，下次访问重试。
+# 仅缓存绝对路径形态的配置值：相对路径的 resolve 结果随进程 CWD 变化，以原始字符串
+# 为键会把首个 CWD 下的解析固化给后续访问，相对形态每次现算。键含配置原始值，配置
+# 变更自然产生新键；解析失败不缓存，下次访问重试。活动配置变更时经
+# clear_resolved_env_root_cache 显式失效。
 _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
+
+# 工作区根目录提供者：由 config 模块加载时经 register_env_workspace_root_provider
+# 注入，返回活动配置的 workspace_root 原始字符串，未配置返回 None。本模块不向上
+# import 顶层 config，配置值的读取方向由 config 向下注入。
+EnvWorkspaceRootProvider = Callable[[], str | None]
+_env_workspace_root_provider: EnvWorkspaceRootProvider | None = None
 
 
 # ==================== 工作区根目录管理 ====================
+
+
+def register_env_workspace_root_provider(provider: EnvWorkspaceRootProvider) -> None:
+    """注册工作区根目录提供者，config 侧在模块加载时注入取值入口。
+
+    依赖方向为 config 向下注入：提供者返回活动配置的 workspace_root 原始字符串，
+    未配置返回 None；活动配置未就绪时的环境变量回退语义由提供者自身封装，与本模块
+    未注册提供者时的回退一致。
+    """
+    global _env_workspace_root_provider
+    _env_workspace_root_provider = provider
+
+
+def clear_resolved_env_root_cache() -> None:
+    """清空已 resolve 回退根的进程级缓存。
+
+    活动配置变更时由 config 侧的配置写入路径调用，使后续访问按新配置重新解析；
+    测试复位协议经 set_active_config(None) 间接触发，跨用例不残留上个配置的解析结果。
+    """
+    _RESOLVED_ENV_ROOT_CACHE.clear()
 
 
 def resolve_env_workspace_root() -> Path:
@@ -50,13 +78,14 @@ def resolve_env_workspace_root() -> Path:
 
     本地开发无 MCP Roots 时作为文件访问边界回退。优先读取活动配置，config 未就绪时
     回退环境变量。无任何配置回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个
-    工作目录。配置根的 resolve 结果按配置原始字符串缓存，同配置重复访问不再触达文件
-    系统。
+    工作目录。绝对路径形态的配置根按原始字符串缓存 resolve 结果，同配置重复访问不再
+    触达文件系统；相对与 ~ 形态不缓存，每次现算。
     """
     global _cwd_fallback_warned
     configured_root = _configured_workspace_root()
     if configured_root:
-        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root)
+        cacheable = Path(configured_root).is_absolute()
+        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root) if cacheable else None
         if cached_root is not None:
             return cached_root
         try:
@@ -64,7 +93,8 @@ def resolve_env_workspace_root() -> Path:
         except Exception as e:
             logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
         else:
-            _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
+            if cacheable:
+                _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
             return resolved_root
     if not _cwd_fallback_warned:
         _cwd_fallback_warned = True
@@ -76,16 +106,14 @@ def resolve_env_workspace_root() -> Path:
 
 
 def _configured_workspace_root() -> str | None:
-    """返回已配置的工作区根目录原始值，未配置返回 None。"""
-    try:
-        from ...config import get_active_config
+    """返回已配置的工作区根目录原始值，未配置返回 None。
 
-        config = get_active_config()
-    except SeedreamConfigError:
-        config = None
-    if config is not None:
-        root = config.workspace_root
-        return root.strip() if root else None
+    优先调用 config 侧注册的提供者读取活动配置的 workspace_root；提供者未注册即
+    config 模块未加载时，回退读取 SEEDREAM_WORKSPACE_ROOT 环境变量。
+    """
+    provider = _env_workspace_root_provider
+    if provider is not None:
+        return provider()
     env_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
     return env_root.strip() if env_root else None
 
@@ -107,6 +135,16 @@ def get_workspace_root() -> Path:
     if not workspace_roots:
         raise ValueError("当前 MCP 会话未授权任何工作区目录")
     return workspace_roots[0]
+
+
+def is_boundary_from_session_roots() -> bool:
+    """判断当前请求的工作区边界是否来自客户端会话 Roots 声明。
+
+    workspace_roots_scope 仅在客户端声明 roots capability 且 roots/list 成功时写入
+    工作区根上下文变量；变量为 None 说明边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD
+    回退取得，属服务器环境而非客户端授权声明，其绝对路径不进入面向调用方的输出。
+    """
+    return _WORKSPACE_ROOTS_VAR.get() is not None
 
 
 def resolve_workspace_roots(roots: Sequence[Path | str]) -> list[Path]:

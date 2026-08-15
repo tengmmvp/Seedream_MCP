@@ -53,7 +53,7 @@ async def handle_multi_image_fusion(
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
     ) -> dict[str, Any]:
-        result: dict[str, Any] = await client.multi_image_fusion(
+        return await client.multi_image_fusion(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             image=image,
@@ -64,7 +64,6 @@ async def handle_multi_image_fusion(
             stream=context.stream,
             tools=context.tools,
         )
-        return result
 
     return await execute_generation_handler(
         params=params,

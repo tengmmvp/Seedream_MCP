@@ -13,8 +13,8 @@ from typing import Any, cast
 
 from ..core.errors import (
     SeedreamAPIError,
-    _truncate_upstream_message_fragment,
     sanitize_error_text,
+    truncate_upstream_message_fragment,
 )
 
 
@@ -173,7 +173,7 @@ def _classify_sse_event(
         raise SeedreamAPIError(
             # message 经与 handle_api_error 相同的 8KB 截断辅助处理，超大错误体不随
             # 异常进入日志；非字符串形态由该辅助归一化为文本。
-            message=_truncate_upstream_message_fragment(err.get("message", "流式请求失败")),
+            message=truncate_upstream_message_fragment(err.get("message", "流式请求失败")),
             status_code=400,
             # 仅接受非空字符串错误码，与 errors.handle_api_error 同口径：上游数字码
             # 转字符串属臆测语义，其余类型置 None 丢弃。

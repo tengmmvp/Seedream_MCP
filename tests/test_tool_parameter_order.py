@@ -5,13 +5,17 @@
 平铺字段的名称、类型、默认值、约束与描述镜像自输入模型，任何一侧改动未同步时
 本文件失败即暴露漂移。另锁定平铺 schema 的封闭性：顶层 additionalProperties 为
 false 且拼错参数在运行时被 ToolError 拒绝，恢复输入模型 extra=forbid 的
-「被拒自纠」语义。
+「被拒自纠」语义。等价性延伸到描述维度：逐字段 description 非空且镜像模型字段
+描述，嵌套 $defs 定义全等，描述文案陈述的数值区间与默认值同字段实际约束一致。
 """
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
+from pydantic.fields import FieldInfo
 
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools.core.schemas import (
@@ -164,6 +168,94 @@ async def test_flat_input_schema_field_definitions_match_model() -> None:
                 assert tool_prop["description"] == model_prop["description"], name
             else:
                 assert tool_prop == model_prop, (name, field)
+
+
+# ==================== 参数 description 镜像与文案约束一致性 ====================
+
+# 描述文案中的数字区间形态，如「1-15」，用于比对字段实际约束的闭区间边界。
+_DESCRIPTION_RANGE_PATTERN = re.compile(r"(\d+)\s*-\s*(\d+)")
+# 描述文案中的默认值数字形态，如「默认 0」，用于比对字段声明的默认值。
+_DESCRIPTION_DEFAULT_PATTERN = re.compile(r"默认\s*(\d+)")
+
+
+def _field_bounds(info: FieldInfo) -> tuple[int | None, int | None]:
+    """提取字段约束的闭区间边界，数值边界与长度边界同权，缺该向约束时为 None。"""
+    lower: int | None = None
+    upper: int | None = None
+    for constraint in info.metadata:
+        ge = getattr(constraint, "ge", None)
+        min_length = getattr(constraint, "min_length", None)
+        le = getattr(constraint, "le", None)
+        max_length = getattr(constraint, "max_length", None)
+        if isinstance(ge, int):
+            lower = ge
+        elif isinstance(min_length, int):
+            lower = min_length
+        if isinstance(le, int):
+            upper = le
+        elif isinstance(max_length, int):
+            upper = max_length
+    return lower, upper
+
+
+async def test_flat_input_schema_field_descriptions_mirror_model() -> None:
+    """每个平铺参数的 inputSchema description 非空且与模型字段描述全等。
+
+    FastMCP 1.28 不解析工具 docstring 的参数说明，inputSchema 的参数 description
+    唯一来源是平铺签名的 Field 默认值，工具 docstring 仅承担工具级描述。逐字段
+    定义等价断言在两侧同时缺失 description 时会空过，本断言补上非空要求与显式
+    相等，任一侧清空或单独改写描述即失败。
+    """
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+
+    for name, model in _TOOL_INPUT_MODELS.items():
+        schema = by_name[name].inputSchema
+        for field, info in model.model_fields.items():
+            description = schema["properties"][field].get("description")
+            assert isinstance(description, str) and description.strip(), (name, field)
+            assert description == info.description, (name, field)
+
+
+async def test_flat_input_schema_nested_definitions_match_model() -> None:
+    """inputSchema 的嵌套定义与模型 schema 全等，锁定嵌套模型描述与枚举成员。
+
+    逐字段定义断言只比对顶层属性，optimize_prompt_options、tools 与枚举字段的
+    实际结构位于 $defs，嵌套字段描述或枚举取值漂移不会被顶层比对发现。
+    """
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+
+    for name, model in _TOOL_INPUT_MODELS.items():
+        schema = by_name[name].inputSchema
+        assert schema.get("$defs", {}) == model.model_json_schema().get("$defs", {}), name
+
+
+async def test_flat_schema_description_tokens_match_model_constraints() -> None:
+    """inputSchema 描述文案中的数值区间与默认值必须与模型字段实际约束一致。
+
+    描述镜像只保证两侧文案相同，不保证文案与规则相符；约束调整后残留硬编码区间
+    或默认值的文案不会被镜像断言发现。本断言提取 inputSchema 描述中的数字区间
+    与默认值数字，与模型字段声明的 ge/le、min_length/max_length 及默认值比对，
+    文案陈述的规则必须真实存在且数值相等。
+    """
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+
+    for name, model in _TOOL_INPUT_MODELS.items():
+        schema = by_name[name].inputSchema
+        for field, info in model.model_fields.items():
+            description = schema["properties"][field].get("description")
+            assert isinstance(description, str), (name, field)
+            lower, upper = _field_bounds(info)
+            for match in _DESCRIPTION_RANGE_PATTERN.finditer(description):
+                assert (int(match.group(1)), int(match.group(2))) == (lower, upper), (
+                    name,
+                    field,
+                    match.group(0),
+                )
+            for match in _DESCRIPTION_DEFAULT_PATTERN.finditer(description):
+                assert int(match.group(1)) == info.default, (name, field, match.group(0))
 
 
 # ==================== 平铺 inputSchema 封闭性 ====================

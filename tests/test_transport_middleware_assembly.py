@@ -20,6 +20,7 @@ from seedream_mcp.transport import (
     _LimitRequestBodyMiddleware,
     _LoopbackHostGuardMiddleware,
     _attach_streamable_http_middleware,
+    _warn_remote_exposure,
 )
 
 
@@ -93,3 +94,35 @@ def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None
     _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
 
     assert app.attached_classes() == first_pass
+
+
+# ==================== 暴露风险告警文案测试 ====================
+
+
+@pytest.mark.parametrize(
+    ("host", "auth_enabled", "expected_fragment", "absent_fragment"),
+    [
+        ("127.0.0.1", True, "已启用 Bearer 鉴权", "未启用"),
+        ("127.0.0.1", False, "未启用应用层认证", "已启用 Bearer 鉴权"),
+        ("0.0.0.0", True, "已启用 Bearer 鉴权", "未启用"),
+        ("0.0.0.0", False, "未启用鉴权", "已启用 Bearer 鉴权"),
+    ],
+)
+def test_warn_remote_exposure_reports_truthful_auth_state(
+    host: str,
+    auth_enabled: bool,
+    expected_fragment: str,
+    absent_fragment: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """告警文案与传入的鉴权状态一致，任何调用路径不得输出相反状态。
+
+    生产链路经 cli_main fail-closed 校验后非回环绑定必已启用鉴权，但直调
+    _warn_remote_exposure 可达未启用分支；非回环且未启用时若沿用已启用文案，
+    运维会据虚假信息误判暴露面已受保护。
+    """
+    _warn_remote_exposure(host, auth_enabled)
+
+    output = capsys.readouterr().err
+    assert expected_fragment in output
+    assert absent_fragment not in output

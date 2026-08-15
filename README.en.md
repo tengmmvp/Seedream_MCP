@@ -278,7 +278,7 @@ Basic call:
 {
   "name": "seedream_text_to_image",
   "arguments": {
-    "prompt": "A watercolor Jiangnan water town in early-morning mist"
+    "prompt": "水彩风格的江南水乡，清晨薄雾"
   }
 }
 ```
@@ -289,7 +289,7 @@ Optional parameter combination (size + watermark + response/output format + auto
 {
   "name": "seedream_text_to_image",
   "arguments": {
-    "prompt": "A watercolor Jiangnan water town in early-morning mist",
+    "prompt": "水彩风格的江南水乡，清晨薄雾",
     "size": "2K",
     "watermark": false,
     "response_format": "url",
@@ -332,7 +332,7 @@ Basic call:
 {
   "name": "seedream_image_to_image",
   "arguments": {
-    "prompt": "Convert this portrait photo into a Studio Ghibli anime style",
+    "prompt": "把这张人像照片转换为吉卜力动画风格",
     "image": "images/2026/08/15/portrait.jpeg"
   }
 }
@@ -344,7 +344,7 @@ Optional parameter combination (URL reference image + size + watermark + respons
 {
   "name": "seedream_image_to_image",
   "arguments": {
-    "prompt": "Convert this portrait photo into a Studio Ghibli anime style",
+    "prompt": "把这张人像照片转换为吉卜力动画风格",
     "image": "https://example.com/portrait.jpeg",
     "size": "2048x2048",
     "watermark": false,
@@ -386,7 +386,7 @@ Basic call:
 {
   "name": "seedream_multi_image_fusion",
   "arguments": {
-    "prompt": "Fuse the two portraits into one two-person group shot with studio lighting",
+    "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
       "images/2026/08/15/person_a.jpeg",
       "images/2026/08/15/person_b.jpeg"
@@ -401,7 +401,7 @@ Optional parameter combination (`image` list mixing local paths and URLs + size 
 {
   "name": "seedream_multi_image_fusion",
   "arguments": {
-    "prompt": "Fuse the product photos and brand logo into one poster key visual",
+    "prompt": "把产品图与品牌 Logo 融合为一张海报主视觉",
     "image": [
       "images/product_front.png",
       "images/product_side.png",
@@ -447,7 +447,7 @@ Basic call (text-to-sequence; `max_images` defaults to 15):
 {
   "name": "seedream_sequential_generation",
   "arguments": {
-    "prompt": "A four-panel comic: a day of a Shiba Inu — waking up, eating, walking, sleeping"
+    "prompt": "四格漫画：一只柴犬的一天，起床、吃饭、散步、睡觉"
   }
 }
 ```
@@ -458,7 +458,7 @@ Optional parameter combination (reference image list + `max_images` + size + wat
 {
   "name": "seedream_sequential_generation",
   "arguments": {
-    "prompt": "Draw a three-panel adventure comic starring the character in the reference images",
+    "prompt": "以参考图中的角色为主角，绘制三格探险漫画",
     "image": [
       "images/2026/08/15/hero_front.jpeg",
       "images/2026/08/15/hero_side.jpeg"

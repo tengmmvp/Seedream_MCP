@@ -989,7 +989,9 @@ class SeedreamClient:
         _error_body_byte_limit 的独立小上限。Content-Length 头先做快速预检，
         超限时无需读取直接拒绝；chunked 或缺失 Content-Length 的响应在
         aiter_bytes 累计读取中强制上限，超限时中断读取并抛出携带实际读取字节数的
-        错误。响应的关闭由调用方负责（stream 上下文退出或显式 aclose）。
+        错误。chunks 列表与 join 产物在返回前短暂并存，进程内存峰值约为已读字节
+        的 2 倍，默认上限下可达约 2GB，部署方需按此峰值规划进程内存。
+        响应的关闭由调用方负责（stream 上下文退出或显式 aclose）。
         """
         if max_bytes is None:
             max_bytes = self._response_body_byte_limit()

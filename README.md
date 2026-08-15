@@ -1,4 +1,4 @@
-﻿<h1 align="center">Seedream Image MCP</h1>
+<h1 align="center">Seedream Image MCP</h1>
 
 <p align="center">
   <a href="./README.md">简体中文</a>
@@ -177,7 +177,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 # 连接与传输
 --base-url TEXT                                    # API 基础 URL（默认按配置或内置默认值；须 https，http 需设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
 --transport [stdio|streamable-http]                # MCP 传输方式 (默认: stdio)
---host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址必须配置 --auth-token 与 TLS，否则拒绝启动)
+--host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址必须配置 --auth-token 与 TLS（或 --insecure-allow-non-tls 豁免），否则拒绝启动)
 --port INTEGER                                     # streamable-http 监听端口 (默认: 8000)
 --stateless                                        # streamable-http 无状态模式，适合远程多客户端与负载均衡 (默认关闭)
 

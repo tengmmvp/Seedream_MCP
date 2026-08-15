@@ -6,6 +6,8 @@ app_lifespan 复现双会话并发与先后退出场景，锁定 teardown 清理
 任一会话退出不得关闭其余会话仍在使用的共享资源，全部在途引用归零后才清理。
 """
 
+import asyncio
+
 import pytest
 
 from seedream_mcp import config as config_module
@@ -111,3 +113,56 @@ async def test_new_session_rebuilds_after_all_sessions_exit(
     async with server.app_lifespan(server.mcp) as second_state:
         assert second_state["client"] is not first_client
         assert second_state["client"]._client is not None
+
+
+async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons,
+) -> None:
+    """teardown 清理在 drain 让出期间有新会话进入时放弃关闭，复用的资源保持可用。
+
+    复现归零判定与实际关闭之间的交错：会话 1 的 teardown 进入清理并在
+    drain_background_cleanup_tasks 处挂起，期间会话 2 经引用计数复用仍挂活动槽位
+    的资源。清理恢复后必须复检在途引用并放弃关闭，否则会话 2 持有的连接池被关掉。
+    """
+    from seedream_mcp.utils.io import io_save
+
+    drain_entered = asyncio.Event()
+    drain_release = asyncio.Event()
+
+    async def hanging_drain() -> None:
+        drain_entered.set()
+        await drain_release.wait()
+
+    monkeypatch.setattr(io_save, "drain_background_cleanup_tasks", hanging_drain)
+    _activate_config(monkeypatch, SeedreamConfig(api_key="test_key"))
+
+    first_lifespan = server.app_lifespan(server.mcp)
+    first_state = await first_lifespan.__aenter__()
+    shared_client = first_state["client"]
+    shared_download_manager = first_state["download_manager"]
+
+    teardown = asyncio.ensure_future(first_lifespan.__aexit__(None, None, None))
+    await drain_entered.wait()
+
+    second_lifespan = server.app_lifespan(server.mcp)
+    second_state = await second_lifespan.__aenter__()
+    assert second_state["client"] is shared_client
+    assert second_state["download_manager"] is shared_download_manager
+
+    drain_release.set()
+    await teardown
+
+    # 清理放弃后资源仍挂活动槽位且未被关闭，会话 2 继续持有可用连接池
+    active = resources._active_resource
+    assert active is not None
+    assert active.client is shared_client
+    assert active.refcount == 1
+    assert shared_client._client is not None
+    assert shared_download_manager._session is not None
+
+    # 会话 2 退出时引用归零，清理正常完成
+    await second_lifespan.__aexit__(None, None, None)
+    assert resources._active_resource is None
+    assert shared_client._client is None
+    assert shared_download_manager._session is None

@@ -13,13 +13,13 @@ import os
 from pathlib import Path
 
 from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
-from ..core.formats import MIME_BY_EXTENSION, _format_file_size_mb, infer_extension_from_bytes
+from ..core.formats import MIME_BY_EXTENSION, format_file_size_mb, infer_extension_from_bytes
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
-    _WORKSPACE_ROOTS_VAR,
     _is_unc_path,
     get_workspace_roots,
+    is_boundary_from_session_roots,
     is_within_resolved,
     resolve_workspace_roots,
     suggest_similar_paths,
@@ -118,7 +118,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             # 回退边界下来自服务器环境的根路径不进入面向调用方的错误消息，
             # 与 browse_images 的回退边界遮蔽标准一致；仅会话 Roots 声明的
             # 边界回显具体路径供调用方自纠。
-            if _WORKSPACE_ROOTS_VAR.get() is None:
+            if not is_boundary_from_session_roots():
                 raise SeedreamValidationError(
                     "路径超出允许的工作区目录范围，仅允许服务器配置的工作区目录",
                     field="image",
@@ -167,8 +167,8 @@ def _prepare_local_image(normalized: str, original: str) -> str:
         image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
     if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
         raise SeedreamValidationError(
-            f"文件过大: {_format_file_size_mb(len(image_bytes))}，"
-            f"最大支持{_format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+            f"文件过大: {format_file_size_mb(len(image_bytes))}，"
+            f"最大支持{format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
             field="image",
             value=str(validated_path),
         )

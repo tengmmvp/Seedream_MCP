@@ -19,6 +19,10 @@ from dotenv import dotenv_values
 
 from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, _is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
+from .utils.io.io_path import (
+    clear_resolved_env_root_cache,
+    register_env_workspace_root_provider,
+)
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
 from .utils.core.validators import parse_bool, validate_size_for_model
 
@@ -733,9 +737,9 @@ _config_build_lock = threading.Lock()
 _global_config_lock = threading.Lock()
 
 _global_config: SeedreamConfig | None = None
-# CLI 注入的活动配置，优先于 _global_config。server 与 io_path 经 get_active_config
-# 共用此源；reload_config 重置其为 None 以回退重建后的全局配置，消除活动配置与全局
-# 配置的双单例分叉。
+# CLI 注入的活动配置，优先于 _global_config。server 经 get_active_config 共用此源，
+# io_path 经模块加载期注册的工作区根提供者间接读取同一活动配置；reload_config 重置
+# 其为 None 以回退重建后的全局配置，消除活动配置与全局配置的双单例分叉。
 _active_config: SeedreamConfig | None = None
 
 
@@ -755,12 +759,14 @@ def set_config(config: SeedreamConfig) -> None:
 
     CLI 启动后 get_active_config 优先返回 _active_config，仅写 _global_config 会被遮蔽；
     故当 _active_config 已设置时一并更新，保证 set_config 在任何阶段都让后续读取拿到新实例。
+    生效配置变更同时使 io_path 的回退根 resolve 缓存失效。
     """
     global _global_config, _active_config
     with _global_config_lock:
         _global_config = config
         if _active_config is not None:
             _active_config = config
+    clear_resolved_env_root_cache()
 
 
 def get_active_config() -> SeedreamConfig:
@@ -774,20 +780,47 @@ def set_active_config(config: SeedreamConfig | None) -> None:
     """设置或清除 CLI 注入的活动配置。
 
     None 表示清除活动配置，后续 get_active_config 回退到全局默认。CLI 启动时注入，
-    使 server 与 io_path 共用同一活动配置源。
+    使 server 与 io_path 经注册的提供者共用同一活动配置源；测试复位协议经
+    set_active_config(None) 同步使 io_path 的回退根缓存失效。
     """
     global _active_config
     with _global_config_lock:
         _active_config = config
+    clear_resolved_env_root_cache()
 
 
 def reload_config(env_file: str | None = None) -> None:
     """重新加载全局配置并重置活动配置。
 
     重建全局配置实例并清除活动配置，使后续 get_active_config 回退到新的全局实例，
-    确保 server 的 client/tools 与 io_path 读到一致的新配置，消除双单例分叉。
+    确保 server 的 client/tools 与 io_path 读到一致的新配置，消除双单例分叉；
+    io_path 的回退根 resolve 缓存随之失效。
     """
     global _global_config, _active_config
     with _global_config_lock:
         _global_config = SeedreamConfig.from_env(env_file)
         _active_config = None
+    clear_resolved_env_root_cache()
+
+
+def _registered_workspace_root_provider() -> str | None:
+    """向 io_path 提供当前生效的工作区根目录原始值。
+
+    活动配置就绪时返回其 workspace_root，配置值在构建时已按优先级合并环境变量与
+    .env；配置构建失败即活动配置不可得时回退读取 SEEDREAM_WORKSPACE_ROOT 环境变量，
+    与 io_path 未注册提供者时的回退一致。
+    """
+    try:
+        config = get_active_config()
+    except SeedreamConfigError:
+        config = None
+    if config is not None:
+        root = config.workspace_root
+        return root.strip() if root else None
+    env_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
+    return env_root.strip() if env_root else None
+
+
+# 模块加载即完成注入：任何加载了 config 的进程，io_path 的回退读取都经本提供者取得
+# 活动配置值，消除 io_path 对顶层 config 的延迟 import 向上依赖。
+register_env_workspace_root_provider(_registered_workspace_root_provider)

@@ -182,23 +182,33 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         # 导致异常 teardown 下共享资源不被同循环清理。
         # 清理以引用计数门控：stateful streamable-http 下 lifespan 按会话进入退出，
         # 并发会话各自持有在途引用，任一会话退出不得关闭其余会话仍在使用的资源，
-        # 全部在途引用归零后才清理。
+        # 全部在途引用归零后才清理。归零判定与实际关闭之间隔 drain 的让出点，
+        # idle_only 使清理在等待后复检引用，覆盖期间新会话复用资源的交错。
         stateless = getattr(server.settings, "stateless_http", False)
         if not stateless and not _has_inflight_references():
-            await _cleanup_shared_resources()
+            await _cleanup_shared_resources(idle_only=True)
 
 
-async def _cleanup_shared_resources() -> None:
+async def _cleanup_shared_resources(*, idle_only: bool = False) -> None:
     """关闭并清空活动与退役资源持有的 HTTP 连接池，并等待后台清理任务完成。
 
     先经 drain_background_cleanup_tasks 等待自动保存的节流清理任务收尾，使退出时
-    节流状态定局；随后关闭资源。streamable-http 的
-    退出路径另经 _drain_pending_tasks 取消回收残余任务兜底。
+    节流状态定局；随后关闭资源。idle_only 为 True 时以在途引用门控关闭：drain 的
+    await 让出控制点期间，新会话可能经引用计数复用仍挂活动槽位的资源，恢复后复检
+    _has_inflight_references，出现新引用即放弃本次清理，资源交由最后一个在途引用
+    的 teardown 重新触发清理；复检与快照、槽位置空之间不含 await，同一事件循环内
+    原子完成，drain 期间叠加触发的多轮清理至多一轮取得资源快照，其余空跑退出。
+    idle_only 为 False 时无条件关闭，供进程退出兜底，覆盖关闭时仍有在途会话的
+    异常退出场景。streamable-http 的退出路径另经 _drain_pending_tasks 取消回收
+    残余任务兜底。
     """
     global _active_resource
     from .utils.io.io_save import drain_background_cleanup_tasks
 
     await drain_background_cleanup_tasks()
+    if idle_only and _has_inflight_references():
+        logger.debug("清理等待期间出现新的在途 lifespan 引用，放弃本次共享资源清理")
+        return
     retired = list(_retired_resources)
     _retired_resources.clear()
     active = _active_resource

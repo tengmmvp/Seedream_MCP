@@ -8,6 +8,8 @@ MCP 注册工具名与 impl ToolMetadata 工具名、路径相似建议与 CLI �
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -91,6 +93,49 @@ async def test_log_function_call_wraps_async() -> None:
         return value + 1
 
     assert await async_fn(1) == 2
+
+
+def test_log_function_call_signature_survives_mypy(tmp_path: Path) -> None:
+    """mypy 对装饰后方法的签名精确穿透，参数含 Any 的异步方法不退化为 Any。
+
+    装饰器曾以 overload 加 Awaitable 分支声明，mypy 对签名含 Any 的异步函数做
+    约束求解时将 ParamSpec 擦除为 (*Any, **Any) -> Any，使直接 return 装饰方法
+    结果的代码触发 no-any-return。本用例在严格模式下编译最小片段并断言零告警，
+    防止装饰器声明回退到会触发擦除的形态。
+    """
+    pytest.importorskip("mypy")
+
+    snippet = tmp_path / "typing_guard.py"
+    snippet.write_text(
+        "from typing import Any\n"
+        "\n"
+        "from seedream_mcp.utils.core.logs import log_function_call\n"
+        "\n"
+        "\n"
+        "class Guard:\n"
+        "    @log_function_call\n"
+        "    async def fetch(\n"
+        "        self, key: str, meta: dict[str, Any] | None = None\n"
+        "    ) -> dict[str, Any]:\n"
+        "        return {}\n"
+        "\n"
+        "\n"
+        "async def call(guard: Guard) -> dict[str, Any]:\n"
+        '    return await guard.fetch(key="k")\n',
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "mypy", "--strict", str(snippet)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_cli_port_type_rejects_invalid_port() -> None:

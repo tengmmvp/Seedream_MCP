@@ -369,9 +369,9 @@ def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enable
     """
     将 streamable-http 监听配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
 
-    非回环绑定的鉴权与 TLS 前置校验由 cli_main fail-closed 完成，本函数仅在通过
-    校验后调用，非回环绑定必已启用鉴权。stateless 启用无状态模式，更适合远程
-    多客户端与负载均衡场景。
+    生产链路由 cli_main 完成非回环绑定的鉴权与 TLS 前置校验后调用，非回环绑定必
+    已启用鉴权；绕过 cli_main 直调本函数时无此保证，告警文案按传入的 auth_enabled
+    据实输出。stateless 启用无状态模式，更适合远程多客户端与负载均衡场景。
     """
     from .resources import mcp
 
@@ -384,8 +384,9 @@ def _apply_http_bind_settings(host: str, port: int, stateless: bool, auth_enable
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
     """根据绑定地址与鉴权状态输出风险告警，同时写入日志与控制台。
 
-    调用前提：非回环绑定的鉴权前置校验已在 cli_main fail-closed 完成，非回环分支
-    输出的鉴权提醒据此成立；本函数不做校验，仅陈述生效配置的风险面。
+    生产链路经 cli_main 调用时，非回环绑定的鉴权前置校验已 fail-closed 完成，
+    非回环分支必走已启用鉴权文案；绕过 cli_main 直调本函数时鉴权可能未启用，
+    未启用分支据实输出告警。任何调用路径都不得输出与生效配置相反的状态。
     """
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
@@ -395,10 +396,15 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
                 "streamable-http 未启用应用层认证，仅限本机信任环境使用；"
                 "如需远程访问，请使用 --auth-token 配置鉴权或经反向代理增加鉴权。"
             )
-    else:
+    elif auth_enabled:
         message = (
             f"streamable-http 绑定到 {host}（非回环地址）并已启用 Bearer 鉴权；"
             "请确认网络隔离与令牌妥善保管。"
+        )
+    else:
+        message = (
+            f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险；"
+            "请使用 --auth-token 配置鉴权。"
         )
     logger.warning(message)
     # 控制台输出走 stderr，与 server.py 的运行告警一致，避免污染 stdio 传输的 stdout。

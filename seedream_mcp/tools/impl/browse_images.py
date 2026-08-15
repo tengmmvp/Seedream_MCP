@@ -28,10 +28,10 @@ from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
 from ...utils.io.io_scan import cached_find_images_in_directory
 from ...utils.io.io_path import (
-    _WORKSPACE_ROOTS_VAR,
     find_images_in_directory,
     get_relative_path,
     get_workspace_roots,
+    is_boundary_from_session_roots,
     is_within_resolved,
     normalize_path,
     resolve_workspace_roots,
@@ -46,16 +46,6 @@ logger = get_logger(__name__)
 # 会话 Roots 声明时，回显绝对路径会向调用方暴露服务器环境结构，字段与消息统一以
 # 本占位符替代真实路径。
 _FALLBACK_BOUNDARY_PLACEHOLDER = "<工作区根（服务器配置）>"
-
-
-def _boundary_from_session_roots() -> bool:
-    """判断当前请求的工作区边界是否来自客户端会话 Roots 声明。
-
-    workspace_roots_scope 仅在客户端声明 roots capability 且 roots/list 成功时写入
-    工作区根上下文变量；变量为 None 说明边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD
-    回退取得，属服务器环境而非客户端授权声明，其绝对路径不进入面向调用方的输出。
-    """
-    return _WORKSPACE_ROOTS_VAR.get() is not None
 
 
 @dataclass(frozen=True)
@@ -181,7 +171,7 @@ def _build_browse_structured_result(
     resolved_directories 的路径值以占位符替代，不向调用方回显服务器本地目录结构；
     会话 Roots 场景保持回显客户端自己声明的路径。
     """
-    if _boundary_from_session_roots():
+    if is_boundary_from_session_roots():
         workspace_root_values = [str(root) for root in workspace_roots]
         resolved_directory_values = [str(item) for item in resolved_directories]
     else:
@@ -478,7 +468,7 @@ async def _handle_browse_images_impl(
     if not resolved_dirs:
         # 越界拒绝消息回显允许根清单仅在边界来自会话 Roots 声明时进行；env/CWD
         # 回退边界下回显绝对路径会暴露服务器环境结构，改述为服务器配置边界。
-        if _boundary_from_session_roots():
+        if is_boundary_from_session_roots():
             allowed_roots = ", ".join(str(root) for root in workspace_roots)
             message = f"目录超出允许范围。仅允许浏览工作区目录: {allowed_roots}"
         else:
@@ -567,7 +557,7 @@ async def _handle_browse_images_impl(
             log_message = f"offset={state.offset} 越界（目录共 {total_count} 张）"
         elif unreadable_dirs:
             unique_unreadable = list(dict.fromkeys(unreadable_dirs))
-            if _boundary_from_session_roots():
+            if is_boundary_from_session_roots():
                 dirs_text = ", ".join(str(item) for item in unique_unreadable)
             else:
                 # 回退边界场景回显已 resolve 的目录绝对路径会泄露服务器环境结构，
