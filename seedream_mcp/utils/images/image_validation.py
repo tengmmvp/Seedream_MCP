@@ -146,9 +146,9 @@ def resolve_local_image_candidate(
     绝对路径直接作为候选；相对路径按根序逐一拼接。候选 resolve 一次后经
     is_within_resolved 与各已 resolve 根直接比较（拦截 ``..`` 与符号链接越界），
     通过后经 image_candidate_stat 做文件资格检查，返回首个命中的
-    (resolve 后物理路径, stat)。越界判定不经 is_path_within_any_base 二次
-    resolve：该函数对每张本地图在缓存签名与读取两条路径各调用一次，Windows/网络
-    挂载下重复 resolve 是缓存命中路径的主要剩余开销。ImagePreparer 的缓存签名与
+    (resolve 后物理路径, stat)。越界判定沿用已 resolve 结果不再重复解析，
+    Windows/网络挂载下的重复 resolve 是缓存命中路径的主要剩余开销。
+    ImagePreparer 的缓存签名与
     image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件，杜绝两侧
     规则漂移导致签名命中与读取内容不一致的陈旧缓存。未命中返回 None，由调用方
     决定回退或报错。

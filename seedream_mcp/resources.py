@@ -231,7 +231,7 @@ def _reset_lifespan_state() -> None:
     重建 _shared_init_lock 避免跨事件循环复用绑定了旧循环的 asyncio.Lock，复位
     mcp.settings 的 streamable-http 配置避免上一个用例的 host/port/stateless 泄漏。
     模块级可变状态的复位清单集中在本函数，新增状态须登记于此：自动保存清理节流状态、
-    目录扫描缓存、参考图 roots 解析缓存分别经对应模块的复位函数清除。
+    目录扫描缓存、参考图 roots 解析缓存与生成结果净化哨兵分别经对应模块的复位函数清除。
     """
     global _shared_init_lock, _active_resource
     _active_resource = None
@@ -252,8 +252,10 @@ def _reset_lifespan_state() -> None:
     mcp.settings.host = DEFAULT_HTTP_HOST
     mcp.settings.port = DEFAULT_HTTP_PORT
     # 复位清单：io_save 的清理节流锁与任务集合绑定事件循环，io_scan 的目录扫描缓存与
-    # image_prepare 的 roots 解析缓存跨用例残留目录解析结果；三者与 lifespan 单例同步
-    # 复位。延迟导入遵循 utils 子模块不在顶层 import 顶层模块的项目约定。
+    # image_prepare 的 roots 解析缓存跨用例残留目录解析结果，tools.core.results 的净化
+    # 哨兵单槽持有最近一次生成的图片列表引用；四者与 lifespan 单例同步复位。延迟导入
+    # 遵循子模块不在顶层 import 跨层模块的项目约定。
+    from .tools.core.results import reset_last_sanitized_images
     from .utils.images.image_prepare import reset_resolved_roots_cache
     from .utils.io.io_save import reset_cleanup_state
     from .utils.io.io_scan import reset_directory_scan_cache
@@ -261,6 +263,7 @@ def _reset_lifespan_state() -> None:
     reset_cleanup_state()
     reset_directory_scan_cache()
     reset_resolved_roots_cache()
+    reset_last_sanitized_images()
 
 
 # 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。

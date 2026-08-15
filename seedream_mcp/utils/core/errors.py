@@ -5,6 +5,7 @@
 子类，便于上层按异常类型分支处理与重试决策。
 """
 
+import json
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -33,8 +34,9 @@ class SeedreamMCPError(Exception):
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典，供结构化错误输出使用。
 
-        message 统一剥离敏感键值与 Bearer 令牌并截断，details 经敏感字段过滤，
-        避免上游回显的敏感片段进入结构化输出；子类无需各自处理 message 与 details。
+        message 统一剥离敏感键值与 Bearer 令牌并截断，非字符串形态先归一化为文本
+        再进入脱敏管线；details 经敏感字段过滤，避免上游回显的敏感片段进入结构化
+        输出；子类无需各自处理 message 与 details。
         """
         return {
             "error": self.__class__.__name__,
@@ -175,7 +177,12 @@ class _ErrorProfile:
 # 精确状态码档案。display_title 与 user_hint 供 format_error_for_user，base_message 供
 # handle_api_error，error_code 供 _classify_generation_error_type。
 _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
-    400: _ErrorProfile("API调用失败", "", "api_error", base_message="请求参数错误"),
+    400: _ErrorProfile(
+        "API调用失败",
+        "请核对请求参数。",
+        "api_error",
+        base_message="请求参数错误",
+    ),
     401: _ErrorProfile(
         "认证失败",
         "请检查您的API密钥是否正确设置。",
@@ -194,7 +201,12 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
         "api_error",
         base_message="访问被拒绝，请检查API权限",
     ),
-    404: _ErrorProfile("API调用失败", "", "api_error", base_message="API端点不存在"),
+    404: _ErrorProfile(
+        "API调用失败",
+        "请确认 API 端点配置。",
+        "api_error",
+        base_message="API端点不存在",
+    ),
     413: _ErrorProfile(
         "请求体过大",
         "请减小参考图尺寸或改用 URL 传入。",
@@ -216,7 +228,12 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
 }
 
 # 5xx 与未列举状态码的兜底档案
-_HTTP_5XX_PROFILE = _ErrorProfile("API调用失败", "", "api_error", base_message="服务器内部错误")
+_HTTP_5XX_PROFILE = _ErrorProfile(
+    "API调用失败",
+    "服务端暂时不可用，请稍后重试。",
+    "api_error",
+    base_message="服务器内部错误",
+)
 _HTTP_DEFAULT_PROFILE = _ErrorProfile("API调用失败", "", "api_error", base_message="API调用失败")
 
 
@@ -235,15 +252,37 @@ def _lookup_http_error_profile(status_code: int) -> _ErrorProfile:
 _UPSTREAM_MESSAGE_FRAGMENT_LIMIT = 8 * 1024
 
 
-def _truncate_upstream_message_fragment(value: Any) -> Any:
-    """截断上游错误 message 片段至 8KB，超长时保留前缀并标注原长度。
+def _normalize_non_str_message(value: Any) -> str:
+    """将非字符串 message 归一化为文本：dict/list 以 JSON 序列化，其余取 str。
+
+    JSON 序列化产出带双引号的键值形态，键名后的引号由 _SENSITIVE_KEYVALUE_SEPARATOR
+    的引号变体覆盖，凭据仍被键值脱敏命中；序列化与 str() 对超深嵌套结构都会触发
+    解释器递归上限，逐级回退后以类型占位符兜底，保证任何形态的 message 分量都能
+    进入字符串脱敏管线，不再借 dict/list 形态穿透，RecursionError 也不外逃。
+    """
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError, RecursionError):
+            try:
+                return str(value)
+            except RecursionError:
+                return f"<unprintable:{type(value).__name__}>"
+    return str(value)
+
+
+def _truncate_upstream_message_fragment(value: Any) -> str:
+    """归一化并截断上游错误 message 片段至 8KB，超长时保留前缀并标注原长度。
 
     handle_api_error 将上游 error/message 字段拼入异常 message，拼接前统一经本函数
-    截断；非字符串值原样返回，交由后续字符串插值处理。
+    处理：非字符串分量先归一化为文本，dict/list 走 JSON 序列化，防止 dict 形态
+    message 经 f-string 插值为 Python repr 后绕过下游键值脱敏；随后截断防止超大
+    错误体随异常进入日志。
     """
-    if isinstance(value, str) and len(value) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
-        return f"<truncated:{len(value)} chars> " f"{value[:_UPSTREAM_MESSAGE_FRAGMENT_LIMIT]}..."
-    return value
+    text = value if isinstance(value, str) else _normalize_non_str_message(value)
+    if len(text) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
+        return f"<truncated:{len(text)} chars> {text[:_UPSTREAM_MESSAGE_FRAGMENT_LIMIT]}..."
+    return text
 
 
 def handle_api_error(
@@ -305,7 +344,10 @@ def handle_api_error(
 # 不在此列表；SeedreamMCPError 基类与未识别异常各自有兜底档案。
 _EXCEPTION_PROFILES: tuple[tuple[type, _ErrorProfile], ...] = (
     (SeedreamConfigError, _ErrorProfile("配置错误", "", "config_error")),
-    (SeedreamValidationError, _ErrorProfile("参数验证失败", "", "validation_error")),
+    (
+        SeedreamValidationError,
+        _ErrorProfile("参数验证失败", "请检查对应参数的取值范围。", "validation_error"),
+    ),
     (
         SeedreamTimeoutError,
         _ErrorProfile("请求超时", "请检查网络连接或稍后重试。", "timeout_error"),
@@ -359,7 +401,8 @@ def format_error_for_user(error: Exception) -> str:
     else:
         raw_message = str(error)
         code_hint = ""
-    # 三类异常统一先剥离敏感键值与 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出。
+    # 三类异常统一先剥离敏感键值与 Bearer 令牌再截断，避免任何分支的敏感片段进入用户可见输出；
+    # dict/list 形态的 message 在 _redact_sensitive_message 内归一化为文本，同样被覆盖。
     message = _truncate_value_for_output(
         _redact_sensitive_message(raw_message), limit=_MESSAGE_OUTPUT_LIMIT
     )
@@ -447,17 +490,31 @@ _SENSITIVE_KEYVALUE_KEYS = (
     r"|(?:client|api|signing|app)[-_]?secret|password|passwd|cookie|token|secret"
 )
 
-# 键值分隔符：含全角变体（U+FF1A 全角冒号、U+FE55 小型冒号、U+FF1D 全角等号），
-# 上游错误体以全角分隔符回显凭据时同样命中，封堵非 ASCII 分隔符的绕过形态。
-_SENSITIVE_KEYVALUE_SEPARATOR = r"[ \t]*[:：﹕=＝][ \t]*"
+# 键值分隔符：允许键名后紧跟一个可选的单引号或双引号，覆盖 JSON/Python repr 回显
+# 形态，如 {"api_key": "xxx"} 与 {'api_key': 'xxx'}；并含全角变体（U+FF1A 全角冒号、
+# U+FE55 小型冒号、U+FF1D 全角等号），上游错误体以全角分隔符回显凭据时同样命中，
+# 封堵非 ASCII 分隔符的绕过形态。引号仅在键名与分隔符之间匹配，普通文本中的词形
+# 不受影响。引号与其后的空格组成非捕获组，键名后的同一段空格无法被两个量词分别
+# 吸收，长空格串只存在单一切分路径，分隔符匹配失败时的回溯保持线性，不随空格数
+# 二次方增长。
+_SENSITIVE_KEYVALUE_SEPARATOR = r"[\t ]*(?:['\"][\t ]*)?[:：﹕=＝][ \t]*"
+
+# 值吸收的停止前瞻形态：可选前导引号 + 任意键名 + 分隔符，不限于敏感词。前导引号
+# 覆盖 JSON 回显中键名自身带引号的形态；下一个词呈现键名加分隔符结构时值吸收停止，
+# 该词作为新键值对独立参与后续匹配，非敏感键值对保留原文而非被整体吞掉。
+_SENSITIVE_KEYVALUE_ANY_KEY = r"['\"]?[\w-]+" + _SENSITIVE_KEYVALUE_SEPARATOR
 
 # 敏感键值裸值模式：authorization/apikey/token/secret/password/cookie 类键名后跟分隔符
 # （ASCII 或全角的 :/=）与值时，剥离值部分，覆盖 api-key=xxx、apikey: xxx、
 # Authorization: Basic xxx、token=xxx、client_secret=yyy、password=zzz、
 # Cookie: SESSIONID=vvv 等上游错误体回显形态。
-# 值吸收为贪婪多词并在下一个"键名+分隔符"形态前停止：既覆盖多词凭据（secretA secretB），
-# 又保住同文本中后续键值对不被整体吞掉；具体复合键名（如 api_key）置于泛化词（token）前，
-# 保证交替组按序优先命中长变体。所有键名同样要求分隔符存在，普通文本中的词形不受影响。
+# 值吸收为贪婪多词，在下一个任意键名加分隔符形态前停止：多词凭据 secretA secretB
+# 整体剥离，同文本中后续键值对无论键名敏感与否都保持独立形态，多键 JSON 回显只
+# 脱敏敏感键，相邻非敏感键值对与括号配平得以保留；具体复合键名置于泛化词前，
+# 保证交替组按序优先命中长变体。所有键名同样要求分隔符存在，普通文本中的词形不受
+# 影响。已知误吞面：Cookie: 巧克力蛋糕食谱推荐 一类无空格整段文本被整体脱敏为
+# Cookie: ***，next token: <eos> 一类普通键值的值同样被吞；敏感键后的多词值无法与
+# 非敏感尾词可靠区分，按 fail-closed 方向并入脱敏，宁可多脱不漏凭据。
 _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     r"(?i)("
     + _SENSITIVE_KEYVALUE_KEYS
@@ -465,8 +522,7 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     + _SENSITIVE_KEYVALUE_SEPARATOR
     + r")\S+"
     + r"(?:[ \t]+(?!"
-    + _SENSITIVE_KEYVALUE_KEYS
-    + _SENSITIVE_KEYVALUE_SEPARATOR
+    + _SENSITIVE_KEYVALUE_ANY_KEY
     + r")\S+)*"
 )
 
@@ -508,19 +564,27 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     return cast("_SanitizedValue", _URL_USERINFO_PATTERN.sub(r"\1", redacted))
 
 
-def _redact_sensitive_message(value: str) -> str:
-    """剥离 message 中的敏感键值裸值、Bearer 令牌与 CRLF。
+def _redact_sensitive_message(value: Any) -> str:
+    """剥离 message 中的敏感键值裸值、Bearer 令牌、CRLF 与 URL userinfo。
 
-    委托 _sanitize_output_string，与 details/value/response_data 等结构化字段共用同一
+    非字符串 message 先归一化为文本，dict/list 走 JSON 序列化，再进入脱敏管线，
+    封堵 dict 形态 message 借 str/repr 的引号形态穿透脱敏的路径。委托
+    _sanitize_output_string，与 details/value/response_data 等结构化字段共用同一
     净化实现，避免两处脱敏逻辑漂移。
     """
-    return _sanitize_output_string(value)
+    if not isinstance(value, str):
+        value = _normalize_non_str_message(value)
+    return cast("str", _sanitize_output_string(value))
 
 
 def sanitize_error_text(
     message: _SanitizedValue, limit: int = _MESSAGE_OUTPUT_LIMIT
 ) -> _SanitizedValue:
-    """对上游错误文本剥离敏感片段与控制字符并截断，供全部用户可见输出路径共用。
+    """对上游错误文本先截断再剥离敏感片段与控制字符，供全部用户可见输出路径共用。
+
+    先截断后脱敏使正则的工作长度受 limit 约束，作为对抗超长构造输入的纵深兜底；
+    截断丢弃段中的凭据随截断消失，保留段中的凭据再被脱敏剥离，两个方向都不残留。
+    截断点落在键名中间时该键值对不再被命中，其值同样已被截断丢弃，不构成泄露。
 
     异常路径经 to_dict/format_error_for_user 已净化；结果数据路径——SSE 失败事件、
     响应 data 项的 error 字段、并行聚合消息、自动保存 error——同样可能携带上游回显
@@ -531,8 +595,52 @@ def sanitize_error_text(
         return message
     return cast(
         "_SanitizedValue",
-        _truncate_value_for_output(_sanitize_output_string(message), limit=limit),
+        _sanitize_output_string(_truncate_value_for_output(message, limit=limit)),
     )
+
+
+# 数据字段序列化时的防御性长度上限：URL 等数据字段的取值是返回结果可用性的一
+# 部分，不施加错误文本的 500 字符截断；16KB 级上限仅防异常超长数据撑爆输出。
+_DATA_OUTPUT_LIMIT = 16 * 1024
+
+# 纯 URL 数据字段判定：以 http(s):// 开头且不含任何空白字符的值视为 URL 本体。
+_URL_DATA_PREFIX_PATTERN = re.compile(r"https?://", re.IGNORECASE)
+_WHITESPACE_PATTERN = re.compile(r"\s")
+
+
+def _sanitize_url_data_text(value: str, limit: int) -> str:
+    """纯 URL 数据字段的轻量净化：截断后仅剥离控制字符、Bearer 令牌与 userinfo。
+
+    URL 的查询参数是 URL 的组成部分而非凭据回显，token=/Secret= 等参数名触发键值
+    裸值脱敏会把签名 URL 的查询串整体替换为 ***，数据字段随之不可用；userinfo 与
+    Bearer 形态的凭据不受豁免影响，仍在此路径剥离，控制字符压平防御日志注入。
+    """
+    truncated = cast("str", _truncate_value_for_output(value, limit=limit))
+    redacted = _CONTROL_CHARS_PATTERN.sub(" ", truncated)
+    redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
+    return _URL_USERINFO_PATTERN.sub(r"\1", redacted)
+
+
+def sanitize_data_text(value: _SanitizedValue, limit: int = _DATA_OUTPUT_LIMIT) -> _SanitizedValue:
+    """对数据字段文本剥离敏感片段与控制字符，仅保留防御性大上限截断。
+
+    与 sanitize_error_text 的分工：数据字段净化 vs 错误文本净化。url/original_url
+    等数据字段的取值本身是返回结果的一部分，截断即破坏可用性——签名 URL 常见
+    400-700 字符，500 字符截断会使其不可用；故此处保留 CRLF、敏感键值裸值、
+    Bearer 令牌与 URL userinfo 的全套脱敏，仅以 16KB 防御上限兜底，非 URL 文本
+    委托 sanitize_error_text 完成净化与截断。
+
+    URL 数据字段不应用键值脱敏：查询参数是 URL 的组成而非凭据回显，命中
+    token=/Secret= 等参数名会使签名 URL 不可用；以 http(s):// 开头且不含空白
+    的纯 URL 走仅 userinfo 与控制字符的轻量路径，凭据仍在 userinfo 与 Bearer
+    处理中覆盖。URL 前缀但含空白或控制字符的混合文本不属于纯 URL，仍走全套
+    脱敏，凭据不借 URL 形态逃逸。非字符串原样返回。
+    """
+    if not isinstance(value, str):
+        return value
+    if _URL_DATA_PREFIX_PATTERN.match(value) and _WHITESPACE_PATTERN.search(value) is None:
+        return cast("_SanitizedValue", _sanitize_url_data_text(value, limit=limit))
+    return sanitize_error_text(value, limit=limit)
 
 
 def _is_sensitive_key(key: Any) -> bool:

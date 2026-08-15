@@ -1,8 +1,8 @@
 """UNC 路径拒绝测试。
 
 Windows UNC 路径（\\\\host\\share 或 //host/share）的 resolve 会触发 SMB 认证，
-须在 resolve 前由 _is_unc_path 拦截。覆盖 _is_unc_path、is_path_within_base、
-is_path_within_any_base、normalize_path、_file_uri_to_path 对 UNC 的拒绝行为。
+须在 resolve 前由 _is_unc_path 拦截。覆盖 _is_unc_path、is_within_resolved、
+normalize_path、_file_uri_to_path 对 UNC 的拒绝行为与越界判定语义。
 """
 
 from pathlib import Path
@@ -12,8 +12,7 @@ import pytest
 from seedream_mcp.utils.io.io_path import (
     _file_uri_to_path,
     _is_unc_path,
-    is_path_within_any_base,
-    is_path_within_base,
+    is_within_resolved,
     normalize_path,
 )
 
@@ -58,57 +57,31 @@ def test_is_unc_path_rejects_single_leading_slash() -> None:
     assert _is_unc_path("/home/user") is False
 
 
-# ==================== is_path_within_base ====================
+# ==================== is_within_resolved ====================
 
 
-def test_is_path_within_base_rejects_unc() -> None:
-    """UNC 路径直接判为越界，不进入 resolve 以免触发 SMB。"""
-    assert is_path_within_base(Path("\\\\host\\share\\file.png"), Path("C:/base")) is False
+def test_is_within_resolved_accepts_inside(tmp_path: Path) -> None:
+    """已 resolve 的路径与根直接比较，界内路径判 True。"""
+    f = (tmp_path / "file.png").resolve()
+    assert is_within_resolved(f, tmp_path.resolve()) is True
 
 
-def test_is_path_within_base_rejects_unc_forward_slash() -> None:
-    assert is_path_within_base(Path("//host/share/file.png"), Path("/base")) is False
-
-
-def test_is_path_within_base_accepts_inside(tmp_path: Path) -> None:
-    f = tmp_path / "file.png"
-    f.touch()
-    assert is_path_within_base(f, tmp_path) is True
-
-
-def test_is_path_within_base_rejects_outside(tmp_path: Path) -> None:
-    inside = tmp_path / "sub" / "file.png"
-    outside = tmp_path.parent / "sibling"
+def test_is_within_resolved_rejects_outside(tmp_path: Path) -> None:
+    inside = (tmp_path / "sub" / "file.png").resolve()
+    outside = (tmp_path.parent / "sibling").resolve()
     outside.mkdir(exist_ok=True)
-    assert is_path_within_base(inside, outside) is False
+    assert is_within_resolved(inside, outside) is False
 
 
-# ==================== is_path_within_any_base ====================
-
-
-def test_is_path_within_any_base_rejects_unc(tmp_path: Path) -> None:
-    """UNC 路径在多根场景下同样直接判为越界。"""
-    bases = [tmp_path, Path("C:/other")]
-    assert is_path_within_any_base(Path("\\\\host\\share\\file.png"), bases) is False
-
-
-def test_is_path_within_any_base_accepts_inside_one(tmp_path: Path) -> None:
+def test_is_within_resolved_accepts_one_of_multiple_bases(tmp_path: Path) -> None:
+    """多根场景下按根逐一比较：命中任一根即界内，全部未命中判越界。"""
     base_a = tmp_path / "a"
     base_b = tmp_path / "b"
     base_a.mkdir()
     base_b.mkdir()
-    f = base_b / "file.png"
-    f.touch()
-    assert is_path_within_any_base(f, [base_a, base_b]) is True
-
-
-def test_is_path_within_any_base_rejects_all_outside(tmp_path: Path) -> None:
-    base_a = tmp_path / "a"
-    base_b = tmp_path / "b"
-    base_a.mkdir()
-    base_b.mkdir()
-    outside = tmp_path / "c" / "file.png"
-    assert is_path_within_any_base(outside, [base_a, base_b]) is False
+    f = (base_b / "file.png").resolve()
+    assert is_within_resolved(f, base_a.resolve()) is False
+    assert is_within_resolved(f, base_b.resolve()) is True
 
 
 # ==================== normalize_path ====================
@@ -192,3 +165,23 @@ def test_resolve_local_image_candidate_skips_unc_without_resolve(
 
     assert resolve_local_image_candidate("\\\\attacker\\share\\x.png", [tmp_path]) is None
     assert resolve_local_image_candidate("//attacker/share/x.png", [tmp_path]) is None
+
+
+def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNC 根下相对路径拼接出的候选在 resolve 前被逐候选守卫拦截。
+
+    输入级 UNC 检查只覆盖 UNC 形态的直接输入；根本身为 UNC 时，相对路径经
+    base / normalized 拼出的候选同样以 UNC 前缀开头，resolve 会触发 SMB 认证。
+    断言 Path.resolve 未被调用，防止回归为"先 resolve 后跳过"。
+    """
+    from seedream_mcp.utils.images.image_input import _resolves_outside_workspace
+
+    def _explode(self):  # type: ignore[no-untyped-def]
+        raise AssertionError("UNC 候选不得进入 resolve（会触发 SMB 认证）")
+
+    monkeypatch.setattr(Path, "resolve", _explode)
+
+    unc_root = Path("\\\\attacker\\share")
+    assert _resolves_outside_workspace("relative/x.png", [unc_root]) is True

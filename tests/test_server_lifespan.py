@@ -376,7 +376,6 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
             tool_name="text_to_image",
             completion_title="文生图完成",
             failure_prefix="文生图",
-            guidance="",
             start_log_message="",
             start_log_values_builder=lambda c: (),
             request_executor=fake_executor,
@@ -439,7 +438,6 @@ async def test_execute_generation_handler_passes_shared_download_manager(
             tool_name="text_to_image",
             completion_title="文生图完成",
             failure_prefix="文生图",
-            guidance="",
             start_log_message="",
             start_log_values_builder=lambda c: (),
             request_executor=fake_executor,
@@ -450,3 +448,17 @@ async def test_execute_generation_handler_passes_shared_download_manager(
     finally:
         await shared_client.close()
         await shared_dm.close()
+
+
+def test_reset_lifespan_state_clears_sanitized_images_sentinel() -> None:
+    """复位协议清空 results 的净化哨兵单槽。
+
+    哨兵默认持有最近一次生成的图片列表引用至下次覆盖；_reset_lifespan_state
+    登记调用 reset_last_sanitized_images 使引用不跨资源生命周期边界存活，
+    本断言锁定登记不被移除。
+    """
+    from seedream_mcp.tools.core import results as results_module
+
+    results_module._last_sanitized_images = [{"url": "https://example.com/x.png"}]
+    server._reset_lifespan_state()
+    assert results_module._last_sanitized_images is None

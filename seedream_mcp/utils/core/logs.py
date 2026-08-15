@@ -142,7 +142,8 @@ def setup_logging(
             "<level>{level: <8}</level> | "
             "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
             "<level>{message}</level>",
-            colorize=True,
+            # colorize=None 交由 loguru 按流是否 TTY 自动决定，非终端 sink 不输出 ANSI 转义。
+            colorize=None,
             backtrace=True,
             diagnose=False,
             enqueue=True,

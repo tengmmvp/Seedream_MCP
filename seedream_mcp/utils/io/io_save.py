@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Sequence
 
 from .io_download import DownloadManager, DownloadError, sanitize_url
-from ..core.errors import SeedreamMCPError, sanitize_error_text
+from ..core.errors import SeedreamMCPError, sanitize_data_text, sanitize_error_text
 from .io_storage import FileManager, FileManagerError
 from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
@@ -76,7 +76,6 @@ class AutoSaveError(SeedreamMCPError):
 
 
 def _build_save_metadata(
-    prompt: str,
     tool_name: str,
     save_time: str,
     file_size: int,
@@ -84,9 +83,12 @@ def _build_save_metadata(
     attempts: int,
     download_time: float | None = None,
 ) -> dict[str, Any]:
-    """构造保存结果元数据，download_time 仅下载路径提供。"""
+    """构造保存结果元数据，download_time 仅下载路径提供。
+
+    不记录 prompt：structuredContent 顶层已携带完整提示词，metadata 内重复一份
+    只会放大输出体积。attempts 与 download_time 为下载诊断信息，保留供排查。
+    """
     metadata: dict[str, Any] = {
-        "prompt": prompt,
         "tool_name": tool_name,
         "save_time": save_time,
         "file_size": file_size,
@@ -129,11 +131,12 @@ class AutoSaveResult:
     def to_dict(self) -> dict[str, Any]:
         """将保存结果序列化为字典，仅包含已设置的字段。
 
-        original_url 与 error 均为可能携带敏感片段的自由文本，出口处统一过
-        sanitize_error_text 剥离 userinfo 凭据与控制字符，与 results.py 中
-        data 项 url 字段的净化对齐，防止同一 URL 在两条输出通道防护不对称。
+        original_url 为数据字段，过 sanitize_data_text 剥离 userinfo 凭据与控制
+        字符但不做常规截断，签名 URL 保持完整可用；error 为自由文本，过
+        sanitize_error_text 截断。两字段的净化与 results.py 中 data 项的对应
+        字段对齐，防止同一 URL 在两条输出通道防护不对称。
         """
-        result = {"success": self.success, "original_url": sanitize_error_text(self.original_url)}
+        result = {"success": self.success, "original_url": sanitize_data_text(self.original_url)}
 
         if self.local_path:
             result["local_path"] = self.local_path
@@ -311,7 +314,6 @@ class AutoSaveManager:
             markdown_ref = self.file_manager.generate_markdown_reference(final_path, markdown_alt)
 
             metadata = _build_save_metadata(
-                prompt=prompt,
                 tool_name=tool_name,
                 save_time=datetime.now(timezone.utc).isoformat(),
                 file_size=download_result.get("file_size", 0),
@@ -439,7 +441,6 @@ class AutoSaveManager:
             )
 
             metadata = _build_save_metadata(
-                prompt=prompt,
                 tool_name=tool_name,
                 save_time=write_result.get("save_time") or "",
                 file_size=write_result.get("file_size", 0),

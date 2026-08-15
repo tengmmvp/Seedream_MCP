@@ -344,9 +344,11 @@ def test_format_generation_response_shows_input_images_for_pro_usage() -> None:
         size="1024x1024",
     )
 
-    # 5.0 Pro 返回 usage.input_images 表示输入图数，应在文本统计中展示
+    # 5.0 Pro 返回 usage.input_images 表示输入图数，应在文本统计中展示。
+    # 生成图片数与自动保存摘要重复，文本通道收敛后由图片列表与结构化通道表达。
     assert "输入图片数: 1" in text
-    assert "生成图片数: 1" in text
+    assert "输出 tokens: 100" in text
+    assert "生成图片数" not in text
 
 
 def test_build_generation_context_auto_save_none_equals_omitted() -> None:

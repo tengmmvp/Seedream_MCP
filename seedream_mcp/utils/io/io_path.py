@@ -148,12 +148,32 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
     return resolved_roots
 
 
+def _session_declares_roots_capability(session: Any) -> bool:
+    """判断会话对端客户端是否在 initialize 阶段声明了 roots capability。
+
+    未声明 roots 的客户端对 roots/list 请求必然返回方法不支持错误，先经会话内存中的
+    capability 声明探测可跳过这次每请求一次的线上往返。check_client_capability
+    不可达或探测异常时保守视为已声明，保持旧版 SDK 与测试替身下的原有行为。
+    """
+    check_capability = getattr(session, "check_client_capability", None)
+    if not callable(check_capability):
+        return True
+    try:
+        from mcp.types import ClientCapabilities, RootsCapability
+
+        declared = check_capability(ClientCapabilities(roots=RootsCapability()))
+    except Exception:
+        return True
+    return bool(declared)
+
+
 @asynccontextmanager
 async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     """在当前请求作用域内绑定 MCP Roots，退出时自动恢复。
 
     将客户端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持
-    Roots 时回退环境变量边界。
+    Roots 时回退环境变量边界。客户端未声明 roots capability 时直接跳过
+    roots/list 往返，同样回退环境变量边界。
     """
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: list[Path] = []
@@ -161,6 +181,9 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     session = getattr(ctx, "session", None)
     list_roots = getattr(session, "list_roots", None)
     roots_supported = session is not None and callable(list_roots)
+    if roots_supported and not _session_declares_roots_capability(session):
+        logger.debug("客户端未声明 roots capability，跳过 roots/list，回退环境变量边界")
+        roots_supported = False
 
     if roots_supported:
         try:
@@ -206,32 +229,6 @@ def _is_unc_path(path_str: str) -> bool:
     """
     stripped = path_str.lstrip()
     return stripped.startswith("\\\\") or stripped.startswith("//")
-
-
-def is_path_within_base(path: Path, base_dir: Path) -> bool:
-    """判断路径是否位于基础目录内。
-
-    将 path 与 base_dir 均 resolve 后比较，可拦截包含 ``..`` 或经由符号链接
-    指向基础目录之外的路径。UNC 路径直接判为越界，不进入 resolve 以免触发 SMB。
-    """
-    if _is_unc_path(str(path)):
-        return False
-    return is_within_resolved(path.resolve(), base_dir.resolve())
-
-
-def is_path_within_any_base(path: Path, base_dirs: Sequence[Path]) -> bool:
-    """判断路径是否位于任一基础目录内。
-
-    path 仅 resolve 一次后与各 base 比较，避免对每个 base 重复解析同一 path。
-    UNC 路径直接判为越界，不进入 resolve 以免触发 SMB。
-    """
-    if _is_unc_path(str(path)):
-        return False
-    resolved_path = path.resolve()
-    for base_dir in base_dirs:
-        if is_within_resolved(resolved_path, base_dir.resolve()):
-            return True
-    return False
 
 
 def normalize_path(path: str, base_dir: str | None = None) -> Path:
@@ -302,12 +299,13 @@ def find_images_in_directory(
     max_depth: int = 3,
     extensions: list[str] | None = None,
     limit: int | None = None,
+    unreadable_dirs: list[Path] | None = None,
 ) -> list[Path]:
     """在目录中查找图片文件。
 
-    安全前置条件：本函数自身不做工作区越界校验，调用方必须先完成工作区越界校验
-    （is_path_within_any_base），确认 directory 位于允许的工作区根之内，再调用本函数。
-    本函数经 utils/__init__ 重导出为公共工具，任何外部调用方均须遵守此前置条件。
+    安全前置条件：本函数自身不做工作区越界校验，调用方必须先完成工作区越界校验，
+    确认 directory 位于允许的工作区根之内，再调用本函数。本函数经 utils/__init__
+    重导出为公共工具，任何外部调用方均须遵守此前置条件。
 
     Args:
         directory: 搜索目录。
@@ -315,6 +313,8 @@ def find_images_in_directory(
         max_depth: 最大搜索深度。
         extensions: 指定的文件扩展名列表。
         limit: 返回数量上限，<=0 时返回空列表；扫描按 normcase 稳定顺序，凑够即提前停止。
+        unreadable_dirs: 可选收集列表，扫描中因权限或系统错误无法读取的目录会追加至此，
+            供调用方区分「目录不可读」与「目录内无图片」；未提供时不可读目录仅记日志跳过。
 
     Returns:
         找到的图片文件路径列表。
@@ -346,6 +346,8 @@ def find_images_in_directory(
                     entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
             except (PermissionError, OSError) as e:
                 logger.warning("无法访问目录 {}: {}", path, e)
+                if unreadable_dirs is not None:
+                    unreadable_dirs.append(path)
                 return False
 
             for entry in entries:

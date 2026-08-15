@@ -5,7 +5,7 @@
       "args": ["seedream-image-mcp"],
       "env": {
         "ARK_API_KEY": "your_ark_api_key_here",
-        "SEEDREAM_MODEL_ID": "doubao-seedream-4.5",
+        "SEEDREAM_MODEL_ID": "doubao-seedream-5.0",
         "SEEDREAM_DEFAULT_SIZE": "2K",
         "ARK_BASE_URL": "https://ark.cn-beijing.volces.com/api/v3",
         "LOG_LEVEL": "INFO",

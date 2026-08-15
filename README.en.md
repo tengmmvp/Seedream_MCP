@@ -75,6 +75,24 @@ curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-comp
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-compose up -d
 ```
 
+The service listens on container port `8000` via the streamable-http transport; the host port is controlled by `SEEDREAM_HTTP_PORT` (default 8000), and the MCP endpoint path is `/mcp`. Client configuration (Claude Desktop shown; other streamable-http clients are analogous):
+
+```json
+{
+  "mcpServers": {
+    "seedream": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}
+```
+
+`<token>` is a placeholder and must match the server-side `SEEDREAM_HTTP_AUTH_TOKEN` environment variable; when the service is exposed through a TLS reverse proxy or in-container TLS, use the `https://` form for `url` (e.g. `https://mcp.example.com/mcp`).
+
 ## 🔧 Client Configuration
 
 > It is recommended to inject `ARK_API_KEY` via `env` rather than writing it into `args` (command-line arguments appear in the process list and pose a leakage risk).
@@ -221,10 +239,20 @@ Different models support different capabilities and parameter ranges. Please not
 
 ## 🛠️ Available Tools
 
+### Response Contract: Text and structuredContent Dual Channels
+
+Every tool's `tools/call` result carries two channels at once:
+
+- **`content`**: a `TextContent` summary intended to be model-readable; it contains image URLs/local paths and auto-save results, which the model can relay to the user directly.
+- **`structuredContent`**: structured data for programmatic consumption; the field set is governed by each tool's declared `outputSchema` (introspect via `tools/list`; fields evolve with versions per the declaration).
+- **`isError` semantics**: on runtime failure `isError` is `true` and `content` holds the user-facing error text; on success it is `false`. Parameter schema validation failures (type errors, over-length, etc.) are rejected at the protocol layer and return only `isError=true` with the validation error text, without `structuredContent`.
+
+> URL-form image addresses expire after about 24 hours; with auto-save enabled, the `local_path` field in the result provides a persistent local path.
+
 <details>
 <summary><b>1. <code>seedream_text_to_image</code></b> — Text-to-Image</summary>
 
-Generate an image from a text prompt
+Generate an image from a text prompt. This tool calls an external billed API and produces files locally; it is not read-only.
 
 **Parameters:**
 
@@ -233,7 +261,7 @@ Generate an image from a text prompt
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
@@ -242,12 +270,42 @@ Generate an image from a text prompt
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
 
+**Call examples:**
+
+Basic call:
+
+```json
+{
+  "name": "seedream_text_to_image",
+  "arguments": {
+    "prompt": "A watercolor Jiangnan water town in early-morning mist"
+  }
+}
+```
+
+Optional parameter combination (size + watermark + response/output format + auto-save):
+
+```json
+{
+  "name": "seedream_text_to_image",
+  "arguments": {
+    "prompt": "A watercolor Jiangnan water town in early-morning mist",
+    "size": "2K",
+    "watermark": false,
+    "response_format": "url",
+    "output_format": "jpeg",
+    "auto_save": true,
+    "custom_name": "jiangnan"
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>2. <code>seedream_image_to_image</code></b> — Image-to-Image</summary>
 
-Generate a new image from an input image and a text prompt
+Generate a new image from an input image and a text prompt. This tool calls an external billed API and produces files locally; it is not read-only.
 
 **Parameters:**
 
@@ -257,7 +315,7 @@ Generate a new image from an input image and a text prompt
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
@@ -266,12 +324,42 @@ Generate a new image from an input image and a text prompt
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
 
+**Call examples:**
+
+Basic call:
+
+```json
+{
+  "name": "seedream_image_to_image",
+  "arguments": {
+    "prompt": "Convert this portrait photo into a Studio Ghibli anime style",
+    "image": "images/2026/08/15/portrait.jpeg"
+  }
+}
+```
+
+Optional parameter combination (URL reference image + size + watermark + response/output format):
+
+```json
+{
+  "name": "seedream_image_to_image",
+  "arguments": {
+    "prompt": "Convert this portrait photo into a Studio Ghibli anime style",
+    "image": "https://example.com/portrait.jpeg",
+    "size": "2048x2048",
+    "watermark": false,
+    "response_format": "url",
+    "output_format": "png"
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>3. <code>seedream_multi_image_fusion</code></b> — Multi-Image Fusion</summary>
 
-Fuse multiple images into a new image
+Fuse multiple images into a new image. This tool calls an external billed API and produces files locally; it is not read-only.
 
 **Parameters:**
 
@@ -281,7 +369,7 @@ Fuse multiple images into a new image
 - `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
@@ -290,12 +378,48 @@ Fuse multiple images into a new image
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
 
+**Call examples:**
+
+Basic call:
+
+```json
+{
+  "name": "seedream_multi_image_fusion",
+  "arguments": {
+    "prompt": "Fuse the two portraits into one two-person group shot with studio lighting",
+    "image": [
+      "images/2026/08/15/person_a.jpeg",
+      "images/2026/08/15/person_b.jpeg"
+    ]
+  }
+}
+```
+
+Optional parameter combination (`image` list mixing local paths and URLs + size + watermark + response format):
+
+```json
+{
+  "name": "seedream_multi_image_fusion",
+  "arguments": {
+    "prompt": "Fuse the product photos and brand logo into one poster key visual",
+    "image": [
+      "images/product_front.png",
+      "images/product_side.png",
+      "https://example.com/logo.png"
+    ],
+    "size": "2K",
+    "watermark": true,
+    "response_format": "url"
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>4. <code>seedream_sequential_generation</code></b> — Sequential Generation</summary>
 
-Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence (only the doubao-seedream-5.0 series (5.0/5.0-lite)/4.5/4.0 supported; 5.0 Pro does not support sequential generation)
+Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence (only the doubao-seedream-5.0 series (5.0/5.0-lite)/4.5/4.0 supported; 5.0 Pro does not support sequential generation). This tool calls an external billed API and produces files locally; it is not read-only.
 
 **Parameters:**
 
@@ -306,7 +430,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; default `jpeg`
+- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false`
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of parallel requests; range 1-4; default 1
@@ -315,12 +439,43 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
 
+**Call examples:**
+
+Basic call (text-to-sequence; `max_images` defaults to 15):
+
+```json
+{
+  "name": "seedream_sequential_generation",
+  "arguments": {
+    "prompt": "A four-panel comic: a day of a Shiba Inu — waking up, eating, walking, sleeping"
+  }
+}
+```
+
+Optional parameter combination (reference image list + `max_images` + size + watermark):
+
+```json
+{
+  "name": "seedream_sequential_generation",
+  "arguments": {
+    "prompt": "Draw a three-panel adventure comic starring the character in the reference images",
+    "image": [
+      "images/2026/08/15/hero_front.jpeg",
+      "images/2026/08/15/hero_side.jpeg"
+    ],
+    "max_images": 3,
+    "size": "2K",
+    "watermark": false
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>5. <code>seedream_browse_images</code></b> — Browse Images</summary>
 
-Browse image files in the workspace and get file paths for image generation
+Browse image files in the workspace and get file paths for image generation. This tool is read-only, idempotent, and does not access the network.
 
 **Parameters:**
 
@@ -331,6 +486,31 @@ Browse image files in the workspace and get file paths for image generation
 - `offset` (optional) - Pagination offset (0-100000; index of the first item to return); used with `limit` for pagination; default 0
 - `format_filter` (optional) - Filter by specific image formats, e.g. `['.jpeg', '.png']`
 - `show_details` (optional) - Whether to show detailed file info; default `false`
+
+**Call examples:**
+
+Basic call (no arguments; browses the workspace root):
+
+```json
+{
+  "name": "seedream_browse_images",
+  "arguments": {}
+}
+```
+
+Optional parameter combination (directory + recursion + result cap + format filter):
+
+```json
+{
+  "name": "seedream_browse_images",
+  "arguments": {
+    "directory": "images",
+    "recursive": true,
+    "limit": 20,
+    "format_filter": [".jpeg", ".png"]
+  }
+}
+```
 
 </details>
 
@@ -354,6 +534,18 @@ The server provides the following MCP prompt templates to generate text-to-image
 | `seedream_style_realistic` | Realistic photography, high-detail, natural lighting | City night view |
 | `seedream_style_watercolor` | Watercolor style, soft blending, translucent colors | Mountain cabin |
 | `seedream_style_oil_painting` | Oil painting style, thick brushstrokes, rich layers | Seaside sunset |
+
+## 📚 Reference Documentation
+
+The repository's `docs/` directory contains the following reference material:
+
+| Document | Description |
+| --- | --- |
+| [Seedream-API-Reference.md](docs/Seedream-API-Reference.md) | Volcengine official document: image generation API reference |
+| [Seedream-Official-Tutorial.md](docs/Seedream-Official-Tutorial.md) | Volcengine official document: official tutorial |
+| [Seedream-Streaming-Response.md](docs/Seedream-Streaming-Response.md) | Volcengine official document: streaming response (SSE events) |
+| [claude_desktop_config.json](docs/claude_desktop_config.json) | Project sample: full Claude Desktop environment-variable configuration |
+| [pyguide.md](docs/pyguide.md) | Development reference: Google Python Style Guide |
 
 ## ❓ FAQ
 

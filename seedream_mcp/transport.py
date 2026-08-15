@@ -14,6 +14,7 @@ import asyncio
 import hmac
 import json
 import ssl
+import sys
 from typing import Any, Callable
 
 from .config import get_active_config
@@ -207,8 +208,10 @@ class _LimitRequestBodyMiddleware:
 class _HealthCheckMiddleware:
     """streamable-http 健康检查中间件，短路 GET /health 返回进程存活状态。
 
-    最后装配使其成为最外层，先于请求体限制与 Bearer 鉴权执行，负载均衡与健康探针
-    无需令牌即可探活。仅做 liveness 判定，不探测上游 API，避免拖慢探针。
+    位于请求体限制与 Bearer 鉴权之外执行，负载均衡与健康探针无需令牌即可探活；
+    回环绑定时位于 Host 校验之内，rebinding 域名请求连探活也被拒，本机探针的 Host
+    恒为回环字面量或 localhost，不受影响。仅做 liveness 判定，不探测上游 API，
+    避免拖慢探针。
     """
 
     def __init__(self, app: Any) -> None:
@@ -312,8 +315,10 @@ def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> 
     以 monkeypatch 重置 mcp._session_manager 为 None 强制重建，见 test_streamable_http_e2e。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    HealthCheck -> LimitRequestBody -> Bearer -> app：Bearer 最先添加居最内，其后添加
-    请求体限制使其位于鉴权之外，从而声明超长 Content-Length 的请求在鉴权前即被 413 早拒。
+    LoopbackHostGuard（仅回环绑定）-> HealthCheck -> LimitRequestBody -> Bearer -> app：
+    Bearer 最先添加居最内，其后添加请求体限制使其位于鉴权之外，从而声明超长
+    Content-Length 的请求在鉴权前即被 413 早拒；健康检查再外一层，探针免令牌探活；
+    回环绑定时 Host 校验最后添加居最外层，rebinding 请求先于健康检查被拒。
     已认证的 chunked 请求由 receive 字节累计保护；未授权 chunked 请求不读 body 直接 401，
     其体积限制依赖 uvicorn 或反向代理层。
     """
@@ -326,12 +331,15 @@ def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> 
     app.add_middleware(
         _LimitRequestBodyMiddleware, max_body_size=get_active_config().http_max_body_size
     )
+    # 健康检查位于请求体限制与鉴权之外短路 GET /health，探针无需令牌；回环绑定时位于
+    # Host 校验之内，rebinding 域名请求连探活也被拒，负载均衡探针以真实回环 Host 访问
+    # 不受影响。
+    app.add_middleware(_HealthCheckMiddleware)
     # 回环绑定时启用 Host 头校验，阻断 DNS rebinding 使外部域名请求直达本机服务。
-    # 位于健康检查之内、请求体限制与鉴权之外，本地 127.0.0.1/localhost 访问不受影响。
+    # 最后添加使其成为最外层，先于健康检查拒掉外部域名请求，本地 127.0.0.1/localhost
+    # 访问不受影响。
     if host in _LOOPBACK_HOSTS:
         app.add_middleware(_LoopbackHostGuardMiddleware)
-    # 健康检查最后添加，因 Starlette insert(0) 成为最外层，先于请求体限制与鉴权短路 GET /health。
-    app.add_middleware(_HealthCheckMiddleware)
 
 
 # ==================== streamable-http 传输配置 ====================
@@ -396,7 +404,8 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
             "请使用 --auth-token 配置鉴权。"
         )
     logger.warning(message)
-    print(message)
+    # 控制台输出走 stderr，与 server.py 的运行告警一致，避免污染 stdio 传输的 stdout。
+    print(message, file=sys.stderr)
 
 
 async def _drain_pending_tasks() -> None:

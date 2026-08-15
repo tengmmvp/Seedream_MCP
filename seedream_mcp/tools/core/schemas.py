@@ -95,7 +95,8 @@ class GenerationTool(BaseModel):
 class _PromptAndOptimizeInput(BaseModel):
     """提示词与提示词优化参数。"""
 
-    # prompt 在基类声明以确立字段顺序：MCP inputSchema 按字段顺序展示参数，prompt 须居首。
+    # prompt 在基类声明以确立字段顺序：模型字段顺序是 server.py 平铺签名的镜像来源，
+    # prompt 须居首，平铺契约的等价性由 test_tool_call_assembly 锁定。
     # 基类定义仅锚定字段顺序，长度约束与描述以各子类的覆盖为准；子类覆盖 prompt 时复用
     # 同一长度常量，避免约束散落多处。
     prompt: str = Field(

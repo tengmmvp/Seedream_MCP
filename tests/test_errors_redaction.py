@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamMCPError,
@@ -16,6 +19,8 @@ from seedream_mcp.utils.core.errors import (
     _redact_sensitive_message,
     _truncate_value_for_output,
     format_error_for_user,
+    handle_api_error,
+    sanitize_data_text,
     sanitize_error_text,
 )
 
@@ -312,6 +317,53 @@ def test_redact_sensitive_message_absorption_stops_at_next_keyvalue() -> None:
     assert _redact_sensitive_message("token=abc api_key=xyz tail") == "token=*** api_key=***"
 
 
+def test_redact_sensitive_message_preserves_adjacent_non_sensitive_keyvalue() -> None:
+    """值吸收在任意键名形态前停止：多键 JSON 只脱敏敏感键，相邻非敏感键值对保留。
+
+    停止前瞻识别可选引号加任意键名加分隔符的结构，不限于敏感词；非敏感键不再被
+    前一个敏感值的贪婪吸收整体吞掉，JSON 回显的括号得以配平。
+    """
+    redacted = _redact_sensitive_message('{"api_key": "SK-1", "note": "keep me"}')
+    assert "SK-1" not in redacted
+    assert '"note": "keep me"' in redacted
+    assert redacted.endswith("}")
+
+    single_quoted = _redact_sensitive_message("{'api_key': 'a1', 'note': 'n1'}")
+    assert "a1" not in single_quoted
+    assert "'note': 'n1'" in single_quoted
+    assert single_quoted.endswith("}")
+
+    # 裸键值形态同样在非敏感键名前停止吸收，trace_id 保留原文
+    assert _redact_sensitive_message("token=abc trace_id=xyz") == "token=*** trace_id=xyz"
+
+
+# ==================== 分隔符正则性能守护 ====================
+
+
+def test_redact_sensitive_message_long_space_run_stays_fast() -> None:
+    """性能守护：长空格串输入的脱敏在时限内完成，防止分隔符二次方回溯回归。
+
+    分隔符中允许同一段空格被两个量词分别吸收时，键名后长空格串的失败匹配呈
+    二次方回溯，20010 字符输入实测秒级；切分路径唯一化后同输入毫秒级完成。
+    """
+    hostile = "token" + " " * 20_000 + "value"
+
+    start = time.perf_counter()
+    redacted = _redact_sensitive_message(hostile)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.1
+    # 无分隔符不命中键值模式，原文保留
+    assert redacted == hostile
+
+    # 带分隔符变体经 sanitize_error_text 入口：先截断约束正则工作长度，同为毫秒级
+    start = time.perf_counter()
+    sanitize_error_text("token=" + " " * 20_000 + "value")
+    pipeline_elapsed = time.perf_counter() - start
+
+    assert pipeline_elapsed < 0.1
+
+
 def test_redact_sensitive_message_strips_password_and_cookie_keyvalues() -> None:
     """password/cookie 键值形态的裸值同样剥离，凭据不残留在用户可见输出。"""
     assert _redact_sensitive_message("password=hunter2topsecret") == "password=***"
@@ -369,10 +421,16 @@ def test_sanitize_error_text_passes_through_non_strings() -> None:
 
 
 def test_sanitize_error_text_redacts_and_truncates() -> None:
-    """sanitize_error_text 先脱敏后截断，长文本中的凭据不因截断位置而残留。"""
-    redacted = sanitize_error_text("x" * 600 + "\napi_key: leaked")
-    assert "leaked" not in redacted
-    assert len(redacted) < 700
+    """sanitize_error_text 先截断后脱敏：丢弃段凭据随截断消失，保留段凭据被剥离。"""
+    # 凭据位于截断点之后：随丢弃段一起消失
+    tail_beyond_limit = sanitize_error_text("x" * 600 + "\napi_key: leaked")
+    assert "leaked" not in tail_beyond_limit
+    assert len(tail_beyond_limit) < 700
+
+    # 凭据位于保留段内：截断后仍被脱敏剥离
+    kept_prefix = sanitize_error_text("api_key: leaked " + "x" * 600)
+    assert "leaked" not in kept_prefix
+    assert "api_key: ***" in kept_prefix
 
 
 def test_format_sse_failed_event_sanitizes_error_message() -> None:
@@ -408,3 +466,164 @@ def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
     assert sanitized is images
     assert sanitized[0] is images[0]
     assert original_dirty_item["error"]["message"] == "api_key: sk-leaked"
+
+
+# ==================== 数据字段净化：不截断（sanitize_data_text） ====================
+
+
+def test_sanitize_data_text_preserves_long_url_without_truncation() -> None:
+    """约 674 字符的签名 URL 原样保留：数据字段不做错误文本的 500 字符截断。"""
+    signed_url = "https://tos.example.com/obj/a.png?X-Tos-Signature=" + "s" * 620
+    assert len(signed_url) > 500
+
+    assert sanitize_data_text(signed_url) == signed_url
+
+
+def test_sanitize_data_text_strips_credentials_without_truncation() -> None:
+    """超长 URL 的 userinfo 凭据剥离仍生效，剥离后的 URL 完整保留。"""
+    long_url = "https://AKID:" + "p" * 600 + "@mirror.example.com/a.png?sig=abc"
+
+    redacted = sanitize_data_text(long_url)
+
+    assert redacted == "https://mirror.example.com/a.png?sig=abc"
+    assert "truncated" not in redacted
+
+
+def test_sanitize_data_text_keeps_full_sanitization_modes() -> None:
+    """数据字段净化保留全套脱敏：CRLF 压平、敏感键值剥离。"""
+    redacted = sanitize_data_text("https://example.com/a.png\r\napi_key=leaked")
+
+    assert "\r" not in redacted
+    assert "\n" not in redacted
+    assert "leaked" not in redacted
+
+
+def test_sanitize_data_text_preserves_url_query_params() -> None:
+    """纯 URL 数据字段不应用键值脱敏：查询参数是 URL 组成而非凭据回显。
+
+    token=/Secret= 等查询参数名触发键值剥离会把签名 URL 的查询串整体替换为 ***，
+    数据字段随之不可用；大小写 scheme 前缀同样按纯 URL 处理。
+    """
+    url = "https://example.com/a.png?token=abc&x-expires=99&Secret=zzz&api_key=k1"
+
+    assert sanitize_data_text(url) == url
+    upper = "HTTP://example.com/a.png?token=abc"
+    assert sanitize_data_text(upper) == upper
+
+
+def test_sanitize_data_text_url_light_path_still_strips_userinfo() -> None:
+    """纯 URL 轻量路径仍剥离 userinfo 凭据，查询参数豁免不削弱凭据防护。"""
+    redacted = sanitize_data_text("https://AKID:SECRET@mirror.example.com/a.png?token=abc")
+
+    assert redacted == "https://mirror.example.com/a.png?token=abc"
+    assert "AKID" not in redacted
+    assert "SECRET" not in redacted
+
+
+def test_sanitize_data_text_url_prefixed_mixed_text_keeps_keyvalue_redaction() -> None:
+    """URL 前缀但含空白或控制字符的混合文本仍走全套脱敏，凭据不借 URL 形态逃逸。"""
+    with_crlf = sanitize_data_text("https://example.com/a.png\r\napi_key=leaked")
+    assert "leaked" not in with_crlf
+
+    with_space = sanitize_data_text("https://example.com/a.png api_key=leaked tail")
+    assert "leaked" not in with_space
+
+
+def test_sanitize_data_text_non_url_text_keeps_keyvalue_redaction() -> None:
+    """非 URL 文本的键值脱敏不受 URL 豁免影响，非敏感键值对同样保留。"""
+    redacted = sanitize_data_text("api_key=leaked note=keep")
+
+    assert redacted == "api_key=*** note=keep"
+
+
+def test_sanitize_data_text_enforces_defensive_limit() -> None:
+    """16KB 防御上限仍生效：异常超长数据不撑爆输出。"""
+    huge = "x" * (16 * 1024 + 100)
+
+    redacted = sanitize_data_text(huge)
+
+    assert "truncated" in redacted
+    assert len(redacted) < len(huge)
+
+
+def test_sanitize_data_text_passes_through_non_strings() -> None:
+    """与 sanitize_error_text 一致，非字符串原样返回。"""
+    assert sanitize_data_text(42) == 42
+    assert sanitize_data_text(None) is None
+
+
+# ==================== 非字符串 message 归一化 ====================
+
+
+def test_api_error_dict_message_sanitized_in_to_dict() -> None:
+    """dict 形态 message 归一化为 JSON 后脱敏，api_key 键值凭据不残留。"""
+    err = SeedreamAPIError(message={"api_key": "SK-SECRET", "note": "x"})  # type: ignore[arg-type]
+
+    rendered = str(err.to_dict()["message"])
+
+    assert "SK-SECRET" not in rendered
+    assert "***" in rendered
+
+
+def test_api_error_dict_message_sanitized_for_user() -> None:
+    """format_error_for_user 同样覆盖 dict 形态 message。"""
+    err = SeedreamAPIError(message={"api_key": "SK-SECRET"})  # type: ignore[arg-type]
+
+    rendered = format_error_for_user(err)
+
+    assert "SK-SECRET" not in rendered
+    assert "***" in rendered
+
+
+def test_handle_api_error_normalizes_dict_upstream_message() -> None:
+    """上游响应体的 dict 形态 message 拼接前归一化，输出通道凭据不残留。"""
+    exc = handle_api_error(400, {"error": {"message": {"api_key": "SK-SECRET"}}})
+
+    rendered = str(exc.to_dict()["message"])
+    assert "SK-SECRET" not in rendered
+    assert "***" in rendered
+    user_rendered = format_error_for_user(exc)
+    assert "SK-SECRET" not in user_rendered
+
+
+def test_handle_api_error_normalizes_list_upstream_message() -> None:
+    """list 形态 message 同样归一化，str() 兜底后进入脱敏管线。"""
+    exc = handle_api_error(400, {"message": ["api_key=SK-SECRET"]})
+
+    rendered = str(exc.to_dict()["message"])
+    assert "SK-SECRET" not in rendered
+
+
+def test_api_error_deeply_nested_message_does_not_raise_recursion_error() -> None:
+    """十万层嵌套 list 形态 message 归一化不外逃 RecursionError，降级为占位文本。
+
+    json.dumps 与 str() 对超深嵌套结构先后触发解释器递归上限，归一化逐级回退到
+    类型占位符，to_dict 与用户可见输出通道均不受影响。
+    """
+    deep: Any = []
+    for _ in range(100_000):
+        deep = [deep]
+
+    err = SeedreamAPIError(message=deep)  # type: ignore[arg-type]
+
+    rendered = str(err.to_dict()["message"])
+    assert isinstance(rendered, str)
+    assert rendered != ""
+    assert format_error_for_user(err)
+
+
+def test_redact_sensitive_message_blocks_quoted_keyvalue_forms() -> None:
+    """JSON/Python repr 的引号键值形态（键名后紧跟引号再接冒号）同样命中剥离。"""
+    assert "xxx" not in _redact_sensitive_message("{'api_key': 'xxx'}")
+    assert "xxx" not in _redact_sensitive_message('{"api_key": "xxx"}')
+    # 值吸收为贪婪多词，收尾引号与花括号并入脱敏值一并消隐，方向 fail-safe。
+    assert _redact_sensitive_message('{"api_key": "xxx"}') == '{"api_key": ***'
+
+
+def test_redact_sensitive_message_quote_variant_no_overmatch() -> None:
+    """引号变体不误伤普通文本：无分隔符的引号词形与既有保留样例不受影响。"""
+    assert _redact_sensitive_message('he mentioned "token" in prose') == (
+        'he mentioned "token" in prose'
+    )
+    assert _redact_sensitive_message('the "secret" ingredient') == 'the "secret" ingredient'
+    assert _redact_sensitive_message("the token count is fine") == "the token count is fine"

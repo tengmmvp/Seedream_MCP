@@ -1,12 +1,29 @@
-"""错误分类、HTTP 错误归约与用户可见格式化的单元测试。
+"""错误分类、HTTP 错误归约、用户可见格式化与失败排查建议选择的测试。
 
 覆盖 _classify_generation_error_type 的 8 个分支、handle_api_error 的状态码阶梯文案
-与上游错误体提取、format_error_for_user 的 isinstance 分支与 message 截断。
+与上游错误体提取、format_error_for_user 的 isinstance 分支与 message 截断、
+_resolve_failure_guidance 的状态码/错误码查表与流水线降级文案拼接。guidance 拼接
+语义：归约档案携带 user_hint 时该建议即最终建议，不再叠加查表值；档案无建议时
+才以查表值补充。
 """
+
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
-from seedream_mcp.tools.core.common import _classify_generation_error_type
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.core._helpers import (
+    _FAILURE_GUIDANCE_BY_ERROR_CODE,
+    _FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES,
+    _resolve_failure_guidance,
+)
+from seedream_mcp.tools.core.common import (
+    _classify_generation_error_type,
+    execute_generation_handler,
+)
+from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.utils.core import errors as errors_module
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
@@ -256,3 +273,173 @@ def test_handle_api_error_413_user_hint_mentions_reduce_or_url() -> None:
     exc = handle_api_error(413, {})
     result = format_error_for_user(exc)
     assert "减小" in result or "URL" in result
+
+
+# ==================== user_hint 覆盖补齐 ====================
+
+
+def test_format_validation_error_includes_range_hint() -> None:
+    """参数验证失败追加检查参数取值范围的可操作建议。"""
+    result = format_error_for_user(SeedreamValidationError("bad param"))
+    assert "参数验证失败" in result
+    assert "取值范围" in result
+
+
+def test_handle_api_error_400_user_hint_mentions_check_params() -> None:
+    """400 错误的用户提示含核对请求参数的建议。"""
+    exc = handle_api_error(400, {})
+    result = format_error_for_user(exc)
+    assert "请核对请求参数" in result
+
+
+def test_handle_api_error_404_user_hint_mentions_endpoint_config() -> None:
+    """404 错误的用户提示含确认 API 端点配置的建议。"""
+    exc = handle_api_error(404, {})
+    result = format_error_for_user(exc)
+    assert "请确认 API 端点配置" in result
+
+
+def test_handle_api_error_5xx_user_hint_mentions_retry_later() -> None:
+    """5xx 兜底档案追加服务端暂时不可用、稍后重试的建议。"""
+    for status in (500, 503):
+        exc = SeedreamAPIError("boom", status_code=status)
+        result = format_error_for_user(exc)
+        assert "服务端暂时不可用" in result
+        assert "稍后重试" in result
+
+
+# ==================== 失败排查建议按错误类型选择 ====================
+
+
+def test_resolve_failure_guidance_validation_error_avoids_api_key() -> None:
+    """参数类错误的排查建议引导调整参数，不出现 API Key 与网络指引。"""
+    guidance = _resolve_failure_guidance(SeedreamValidationError("bad size"))
+    assert guidance == "请根据错误信息调整对应参数取值。"
+    assert "API Key" not in guidance
+
+
+def test_resolve_failure_guidance_network_error_keeps_credential_hint() -> None:
+    """网络类错误的排查建议保留凭据与网络指引。"""
+    guidance = _resolve_failure_guidance(SeedreamNetworkError("conn refused"))
+    assert "API Key" in guidance
+    assert "网络" in guidance
+
+
+def test_resolve_failure_guidance_timeout_and_auth_keep_credential_hint() -> None:
+    """超时与认证类错误同样保留凭据与网络指引。"""
+    assert "API Key" in _resolve_failure_guidance(SeedreamTimeoutError("t"))
+    assert "API Key" in _resolve_failure_guidance(SeedreamAPIError("unauthorized", status_code=401))
+
+
+def test_resolve_failure_guidance_unknown_code_falls_back_to_generic() -> None:
+    """未列举错误码回退到通用排查建议。"""
+    assert _resolve_failure_guidance(ValueError("x")) == "请根据错误信息排查后重试。"
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        (400, "请核对请求参数。"),
+        (401, "请确认 API Key 和网络可用后重试。"),
+        (402, "请检查账户余额与配额。"),
+        (404, "请确认 API 端点配置。"),
+        (429, "请稍后重试。"),
+    ],
+)
+def test_resolve_failure_guidance_prefers_status_over_error_code(
+    status: int, expected: str
+) -> None:
+    """携带状态码的 API 错误按状态级建议表取值，400/404 不再落到凭据与网络指引。"""
+    guidance = _resolve_failure_guidance(SeedreamAPIError("boom", status_code=status))
+    assert guidance == expected
+    if status in (400, 404):
+        assert "API Key" not in guidance
+
+
+def test_resolve_failure_guidance_api_error_without_status_falls_back_to_error_code() -> None:
+    """无状态码的 API 错误按错误码兜底，api_error 走凭据与网络指引。"""
+    guidance = _resolve_failure_guidance(SeedreamAPIError("unspecified failure"))
+    assert guidance == "请确认 API Key 和网络可用后重试。"
+
+
+def test_failure_guidance_table_covers_all_profile_error_codes() -> None:
+    """errors.py 归约档案的全部错误码均可经查表解析，走默认的码显式登记。
+
+    收集 HTTP 状态档案、异常类型档案与四个兜底档案的错误码全集，与
+    _FAILURE_GUIDANCE_BY_ERROR_CODE 的键做双向锁定：未列表且未登记的码在此失败，
+    提示新增档案时同步维护查表；查表中残留已废弃的码同样失败。
+    """
+    profile_codes = {profile.error_code for profile in errors_module._HTTP_STATUS_PROFILES.values()}
+    profile_codes |= {profile.error_code for _, profile in errors_module._EXCEPTION_PROFILES}
+    profile_codes |= {
+        errors_module._HTTP_5XX_PROFILE.error_code,
+        errors_module._HTTP_DEFAULT_PROFILE.error_code,
+        errors_module._GENERIC_MCP_PROFILE.error_code,
+        errors_module._UNKNOWN_PROFILE.error_code,
+    }
+    assert profile_codes == (
+        set(_FAILURE_GUIDANCE_BY_ERROR_CODE) | set(_FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES)
+    )
+
+
+async def _run_failing_handler(exc: Exception):
+    """以给定异常驱动 execute_generation_handler 的降级分支，返回结果文本。"""
+    config = SeedreamConfig(api_key="test_key")
+
+    async def failing_executor(client: Any, context: Any) -> dict[str, Any]:
+        del client, context
+        raise exc
+
+    result = await execute_generation_handler(
+        params=TextToImageInput(prompt="test prompt", auto_save=False),
+        config=config,
+        module_logger=MagicMock(),
+        tool_name="seedream_text_to_image",
+        completion_title="文生图任务完成",
+        failure_prefix="文生图生成",
+        start_log_message="",
+        start_log_values_builder=lambda c: (),
+        request_executor=failing_executor,
+    )
+    assert result.isError is True
+    return result.content[0].text
+
+
+async def test_handler_failure_text_validation_error_uses_profile_hint_only() -> None:
+    """档案携带 user_hint 的参数类错误：建议只来自档案，不叠加查表排查行。"""
+    text = await _run_failing_handler(SeedreamValidationError("尺寸超出允许范围"))
+
+    assert "API Key" not in text
+    assert "请检查对应参数的取值范围。" in text
+    # user_hint 即最终建议，查表值不再拼接，避免双源叠加。
+    assert "请根据错误信息调整对应参数取值。" not in text
+
+
+async def test_handler_failure_text_network_error_uses_profile_hint_only() -> None:
+    """档案携带 user_hint 的网络类错误：建议只来自档案，不叠加查表排查行。"""
+    text = await _run_failing_handler(SeedreamNetworkError("connection refused"))
+
+    assert "请检查网络连接。" in text
+    assert "请确认 API Key 和网络可用后重试。" not in text
+
+
+async def test_handler_failure_text_without_hint_appends_table_guidance() -> None:
+    """档案无 user_hint 的错误（如未知异常）才追加查表排查建议行。"""
+    text = await _run_failing_handler(ValueError("unexpected"))
+
+    assert text.endswith("请根据错误信息排查后重试。")
+
+
+async def test_handler_failure_text_429_retry_hint_appears_exactly_once() -> None:
+    """429 降级文案中「请稍后重试」全文恰好出现一次，锁定 user_hint 与查表不叠加。"""
+    text = await _run_failing_handler(SeedreamAPIError("rate limited", status_code=429))
+
+    assert text.count("请稍后重试") == 1
+
+
+async def test_handler_failure_text_400_mentions_params_without_api_key() -> None:
+    """400 降级文案引导核对请求参数，不出现与参数错误矛盾的 API Key 指引。"""
+    text = await _run_failing_handler(SeedreamAPIError("invalid size", status_code=400))
+
+    assert "请核对请求参数。" in text
+    assert "API Key" not in text

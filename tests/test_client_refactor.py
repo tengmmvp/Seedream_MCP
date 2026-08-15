@@ -450,7 +450,9 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
     max_active_count = 0
     captured_request: Dict[str, Any] = {}
 
-    async def fake_prepare_image_input(image: str, _roots_key: Any = None) -> str:
+    async def fake_prepare_image_input(
+        image: str, _roots_key: Any = None, _slot: Any = None
+    ) -> str:
         nonlocal active_count, max_active_count
         active_count += 1
         max_active_count = max(max_active_count, active_count)
@@ -531,7 +533,9 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
     max_active_count = 0
     captured_request: Dict[str, Any] = {}
 
-    async def fake_prepare_image_input(image: str, _roots_key: Any = None) -> str:
+    async def fake_prepare_image_input(
+        image: str, _roots_key: Any = None, _slot: Any = None
+    ) -> str:
         nonlocal active_count, max_active_count
         active_count += 1
         max_active_count = max(max_active_count, active_count)

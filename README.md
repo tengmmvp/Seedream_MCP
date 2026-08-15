@@ -75,6 +75,24 @@ curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-comp
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-compose up -d
 ```
 
+服务以 streamable-http 传输监听容器内 `8000` 端口，宿主机端口由 `SEEDREAM_HTTP_PORT` 控制（默认 8000），MCP 端点路径为 `/mcp`。客户端接入配置（以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理）：
+
+```json
+{
+  "mcpServers": {
+    "seedream": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}
+```
+
+`<token>` 为占位符，须与服务端环境变量 `SEEDREAM_HTTP_AUTH_TOKEN` 一致；若经 TLS 反向代理或容器内 TLS 暴露，`url` 改用 `https://` 形态（如 `https://mcp.example.com/mcp`）。
+
 ## 🔧 客户端配置
 
 > 推荐通过 `env` 注入 `ARK_API_KEY`，避免把密钥写进 `args`（命令行参数会出现在进程列表中，存在泄露风险）。
@@ -173,7 +191,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别
 ```
 
-> **安全提示**：`localhost` 不被视为回环地址（其解析依赖 hosts/DNS，可能被污染指向非回环），绑定它同样要求配置 Bearer 鉴权令牌与 TLS，未配置则服务拒绝启动；如需回环免鉴权语义，请改绑 `127.0.0.1` 或 `::1`。非回环绑定同样必须配置 Bearer 令牌与 TLS。
+> **安全提示**：`localhost` 不被视为回环地址（其解析依赖 hosts/DNS，可能被污染指向非回环），绑定它同样要求配置 Bearer 鉴权令牌与 TLS，未配置则服务拒绝启动；如需回环免鉴权语义，请改绑 `127.0.0.1` 或 `::1`。非回环绑定同样必须配置 Bearer 令牌与 TLS。生产与容器部署应通过环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递密钥，而非 CLI `--api-key` / `--auth-token`（命令行参数会暴露在进程列表与 shell 历史记录中）；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。
 
 ### 使用示例
 
@@ -221,10 +239,20 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 ## 🛠️ 可用工具
 
+### 响应契约：文本与 structuredContent 双通道
+
+所有工具的 `tools/call` 结果同时携带两条通道：
+
+- **`content`**：`TextContent` 文本摘要，面向模型可读，包含图片 URL/本地路径与自动保存结果等信息，模型可直接转述给用户。
+- **`structuredContent`**：结构化数据，面向程序处理；字段集以各工具声明的 `outputSchema` 为准（客户端经 `tools/list` 自省，字段随版本演进以声明为准）。
+- **`isError` 语义**：运行时失败时 `isError` 为 `true`，`content` 为面向用户的错误文案；成功时为 `false`。参数 schema 校验失败（类型错误、超长等）在协议层即被拒绝，仅返回 `isError=true` 与校验错误文本，不含 `structuredContent`。
+
+> URL 形式的图片地址约 24 小时后过期；开启自动保存后，结果中的 `local_path` 字段提供本地持久化路径。
+
 <details>
 <summary><b>1. <code>seedream_text_to_image</code></b> — 文生图</summary>
 
-根据文本提示词生成图像
+根据文本提示词生成图像。该工具调用外部计费 API、在本地产出文件，非只读。
 
 **参数：**
 
@@ -233,7 +261,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
@@ -242,12 +270,42 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
+**调用示例：**
+
+基础调用：
+
+```json
+{
+  "name": "seedream_text_to_image",
+  "arguments": {
+    "prompt": "水彩风格的江南水乡，清晨薄雾"
+  }
+}
+```
+
+可选参数组合（尺寸 + 水印 + 响应与输出格式 + 自动保存）：
+
+```json
+{
+  "name": "seedream_text_to_image",
+  "arguments": {
+    "prompt": "水彩风格的江南水乡，清晨薄雾",
+    "size": "2K",
+    "watermark": false,
+    "response_format": "url",
+    "output_format": "jpeg",
+    "auto_save": true,
+    "custom_name": "jiangnan"
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>2. <code>seedream_image_to_image</code></b> — 图文生图</summary>
 
-根据输入图像和文本提示生成新图像
+根据输入图像和文本提示生成新图像。该工具调用外部计费 API、在本地产出文件，非只读。
 
 **参数：**
 
@@ -257,7 +315,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
@@ -266,12 +324,42 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
+**调用示例：**
+
+基础调用：
+
+```json
+{
+  "name": "seedream_image_to_image",
+  "arguments": {
+    "prompt": "把这张人像照片转换为吉卜力动画风格",
+    "image": "images/2026/08/15/portrait.jpeg"
+  }
+}
+```
+
+可选参数组合（URL 参考图 + 尺寸 + 水印 + 响应与输出格式）：
+
+```json
+{
+  "name": "seedream_image_to_image",
+  "arguments": {
+    "prompt": "把这张人像照片转换为吉卜力动画风格",
+    "image": "https://example.com/portrait.jpeg",
+    "size": "2048x2048",
+    "watermark": false,
+    "response_format": "url",
+    "output_format": "png"
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>3. <code>seedream_multi_image_fusion</code></b> — 多图融合</summary>
 
-将多张图像融合生成新图像
+将多张图像融合生成新图像。该工具调用外部计费 API、在本地产出文件，非只读。
 
 **参数：**
 
@@ -281,7 +369,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
@@ -290,12 +378,48 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
+**调用示例：**
+
+基础调用：
+
+```json
+{
+  "name": "seedream_multi_image_fusion",
+  "arguments": {
+    "prompt": "把两张人像融合为一张双人合影，影棚灯光",
+    "image": [
+      "images/2026/08/15/person_a.jpeg",
+      "images/2026/08/15/person_b.jpeg"
+    ]
+  }
+}
+```
+
+可选参数组合（`image` 列表混用本地路径与 URL + 尺寸 + 水印 + 响应格式）：
+
+```json
+{
+  "name": "seedream_multi_image_fusion",
+  "arguments": {
+    "prompt": "把产品图与品牌 Logo 融合为一张海报主视觉",
+    "image": [
+      "images/product_front.png",
+      "images/product_side.png",
+      "https://example.com/logo.png"
+    ],
+    "size": "2K",
+    "watermark": true,
+    "response_format": "url"
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>4. <code>seedream_sequential_generation</code></b> — 组图输出</summary>
 
-连续生成多张图像，支持文生组图、单图生组图、多图生组图（仅 doubao-seedream-5.0 系列（5.0/5.0-lite）/4.5/4.0 支持；5.0 Pro 不支持组图）
+连续生成多张图像，支持文生组图、单图生组图、多图生组图（仅 doubao-seedream-5.0 系列（5.0/5.0-lite）/4.5/4.0 支持；5.0 Pro 不支持组图）。该工具调用外部计费 API、在本地产出文件，非只读。
 
 **参数：**
 
@@ -306,7 +430,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15；提供参考图时默认自动扣减为 15 减参考图数量
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认 `jpeg`
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
 - `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
@@ -315,12 +439,43 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
 
+**调用示例：**
+
+基础调用（文生组图，`max_images` 缺省为 15）：
+
+```json
+{
+  "name": "seedream_sequential_generation",
+  "arguments": {
+    "prompt": "四格漫画：一只柴犬的一天，起床、吃饭、散步、睡觉"
+  }
+}
+```
+
+可选参数组合（参考图列表 + `max_images` + 尺寸 + 水印）：
+
+```json
+{
+  "name": "seedream_sequential_generation",
+  "arguments": {
+    "prompt": "以参考图中的角色为主角，绘制三格探险漫画",
+    "image": [
+      "images/2026/08/15/hero_front.jpeg",
+      "images/2026/08/15/hero_side.jpeg"
+    ],
+    "max_images": 3,
+    "size": "2K",
+    "watermark": false
+  }
+}
+```
+
 </details>
 
 <details>
 <summary><b>5. <code>seedream_browse_images</code></b> — 图片浏览</summary>
 
-浏览工作区中的图片文件，获取文件路径用于图像生成
+浏览工作区中的图片文件，获取文件路径用于图像生成。该工具只读、幂等、不访问网络。
 
 **参数：**
 
@@ -331,6 +486,31 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `offset` (可选) - 分页偏移量（0-100000，从第几张开始返回），配合 `limit` 翻页，默认 0
 - `format_filter` (可选) - 过滤特定图片格式，如`['.jpeg', '.png']`
 - `show_details` (可选) - 是否显示详细文件信息，默认`false`
+
+**调用示例：**
+
+基础调用（无参数浏览工作区根目录）：
+
+```json
+{
+  "name": "seedream_browse_images",
+  "arguments": {}
+}
+```
+
+可选参数组合（目录 + 递归 + 数量上限 + 格式过滤）：
+
+```json
+{
+  "name": "seedream_browse_images",
+  "arguments": {
+    "directory": "images",
+    "recursive": true,
+    "limit": 20,
+    "format_filter": [".jpeg", ".png"]
+  }
+}
+```
 
 </details>
 
@@ -354,6 +534,18 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | `seedream_style_realistic` | 写实摄影风格，高清细节，自然光影 | 城市夜景 |
 | `seedream_style_watercolor` | 水彩画风格，柔和晕染，通透色彩 | 山间小屋 |
 | `seedream_style_oil_painting` | 油画风格，厚重笔触，丰富层次 | 海边夕阳 |
+
+## 📚 参考文档
+
+仓库 `docs/` 目录收录以下参考资料：
+
+| 文档 | 说明 |
+| --- | --- |
+| [Seedream-API-Reference.md](docs/Seedream-API-Reference.md) | 火山引擎官方文稿：图像生成 API 参考 |
+| [Seedream-Official-Tutorial.md](docs/Seedream-Official-Tutorial.md) | 火山引擎官方文稿：官方教程 |
+| [Seedream-Streaming-Response.md](docs/Seedream-Streaming-Response.md) | 火山引擎官方文稿：流式响应（SSE 事件）说明 |
+| [claude_desktop_config.json](docs/claude_desktop_config.json) | 本项目示例：Claude Desktop 完整环境变量配置样例 |
+| [pyguide.md](docs/pyguide.md) | 开发规范收录：Google Python Style Guide |
 
 ## ❓ 常见问题
 

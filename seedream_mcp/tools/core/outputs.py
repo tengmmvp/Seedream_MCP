@@ -44,6 +44,9 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     usage: dict[str, Any] | None = None
     batch: dict[str, Any] | None = None
     auto_save: dict[str, Any] | None = None
+    # SSE 解析因单事件体积超限丢弃的事件数；未发生丢弃时为 None。
+    # 字段随本模型自动进入声明的 outputSchema，FastMCP 声明端无需额外动作。
+    truncated_events: int | None = None
 
 
 class BrowseImagesStructuredOutput(_BaseStructuredOutput):

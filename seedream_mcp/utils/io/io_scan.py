@@ -47,12 +47,15 @@ class _DirectoryScanCacheEntry:
             随条目缓存，可能为目录末尾前的稳定前缀。
         complete: images 是否已扫到目录末尾；False 时为稳定前缀，随更大 scan_limit
             重扫扩展，回看与同范围重复请求直接命中。
+        unreadable_dirs: 本次扫描中因权限或系统错误无法读取的目录列表，随条目缓存，
+            缓存命中时同样透传给调用方。
     """
 
     mtime_ns: int | None
     captured_at: float
     images: list[tuple[Path, Path]]
     complete: bool
+    unreadable_dirs: list[Path]
 
 
 def reset_directory_scan_cache() -> None:
@@ -104,6 +107,7 @@ def _store_scan_entry(
     mtime_ns: int | None,
     images: list[tuple[Path, Path]],
     complete: bool,
+    unreadable_dirs: list[Path],
 ) -> None:
     """写入扫描缓存，条目数超限时驱逐最旧条目。"""
     if len(images) > _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
@@ -120,6 +124,7 @@ def _store_scan_entry(
         captured_at=time.monotonic(),
         images=images,
         complete=complete,
+        unreadable_dirs=unreadable_dirs,
     )
 
 
@@ -131,6 +136,7 @@ def cached_find_images_in_directory(
     format_filter: list[str] | None,
     scan_limit: int,
     scanner: Callable[..., list[Path]] | None = None,
+    unreadable_dirs: list[Path] | None = None,
 ) -> list[tuple[Path, Path]]:
     """扫描目录图片并经进程级缓存翻页共享有序结果，支持前缀增量扩展。
 
@@ -140,7 +146,8 @@ def cached_find_images_in_directory(
     扫描，回看与同范围重复请求直接命中；扫描到目录末尾即标记 complete，后续任意 scan_limit
     均不再扫描。scanner 可注入，默认使用 io_path.find_images_in_directory，便于调用方在
     自身模块作用域内替换底层扫描。命中与未命中两个出口均返回独立 list 副本，调用方对返回值
-    原地修改不会篡改缓存内列表。
+    原地修改不会篡改缓存内列表。不可读目录信号随条目缓存并经 unreadable_dirs 收集器透传，
+    缓存命中时同样可得。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -149,6 +156,8 @@ def cached_find_images_in_directory(
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         scan_limit: 扫描数量上限，用于未命中或前缀扩展时的早停与是否扫到目录末尾的判定。
         scanner: 底层扫描函数，签名同 io_path.find_images_in_directory；None 时使用默认实现。
+        unreadable_dirs: 可选收集列表，扫描中无法读取的目录追加至此；缓存命中时回放条目内
+            记录的不可读目录，深翻页与首页获取一致的不可读信号。
 
     Returns:
         排序后的 (原始路径, resolved 路径) 元组列表，resolve 在扫描完成时执行一次并随缓存
@@ -168,6 +177,8 @@ def cached_find_images_in_directory(
         # scan_limit 重扫，摊销深翻页的累计扫描代价。切片返回独立副本，调用方原地
         # 修改不会篡改缓存内列表。
         if cached.complete or len(cached.images) >= scan_limit:
+            if unreadable_dirs is not None:
+                unreadable_dirs.extend(cached.unreadable_dirs)
             return cached.images[:]
         # 上限取单条目列表上限：超过该上限的扫描结果不会被缓存，扩展到该值之上只会
         # 每页全量重扫，不再命中。
@@ -179,12 +190,14 @@ def cached_find_images_in_directory(
     # 扫描后捕获的 mtime 会反映新增而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖
     # mtime 失效，跳过捕获。
     base_mtime = None if recursive else _get_directory_mtime_ns(resolved_dir)
+    scan_unreadable: list[Path] = []
     scanned_images = scan(
         directory=str(resolved_dir),
         recursive=recursive,
         max_depth=max_depth,
         extensions=format_filter,
         limit=scan_limit,
+        unreadable_dirs=scan_unreadable,
     )
     # 扫描完成时对全部原始路径 resolve 一次并缓存 (原始, resolved) 对，翻页命中直接复用。
     # complete 按扫描器的原始返回量判定：resolve 失败被剔除不影响目录已枚举完毕的事实。
@@ -197,6 +210,9 @@ def cached_find_images_in_directory(
             mtime_ns=base_mtime,
             images=images,
             complete=complete,
+            unreadable_dirs=list(scan_unreadable),
         )
+    if unreadable_dirs is not None:
+        unreadable_dirs.extend(scan_unreadable)
     # 新扫描结果已存入缓存本体，切片返回独立副本，调用方原地修改不会篡改缓存。
     return images[:]

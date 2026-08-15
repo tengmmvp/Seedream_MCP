@@ -214,6 +214,62 @@ def test_find_images_swallows_permission_error(
     assert find_images_in_directory(str(tmp_path), recursive=False) == []
 
 
+def test_find_images_collects_unreadable_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """传入收集列表时，无法读取的目录追加至列表，供调用方区分目录不可读与无图片。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _raise_permission(path: Any) -> Any:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(path_utils_module.os, "scandir", _raise_permission)
+
+    collected: list[Path] = []
+    result = find_images_in_directory(str(tmp_path), recursive=False, unreadable_dirs=collected)
+
+    assert result == []
+    assert collected == [tmp_path.resolve()]
+
+
+def test_cached_find_images_replays_unreadable_dirs_on_cache_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不可读目录信号随扫描缓存条目存储，缓存命中时回放给收集列表。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _raise_permission(path: Any) -> Any:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(path_utils_module.os, "scandir", _raise_permission)
+    scan_module.reset_directory_scan_cache()
+
+    first_collected: list[Path] = []
+    first = cached_find_images_in_directory(
+        resolved_dir=tmp_path,
+        recursive=False,
+        max_depth=1,
+        format_filter=None,
+        scan_limit=10,
+        unreadable_dirs=first_collected,
+    )
+    assert first == []
+    assert first_collected == [tmp_path.resolve()]
+
+    # 非递归按 mtime 失效，目录未变更即命中缓存：不可读目录从缓存条目回放
+    hit_collected: list[Path] = []
+    hit = cached_find_images_in_directory(
+        resolved_dir=tmp_path,
+        recursive=False,
+        max_depth=1,
+        format_filter=None,
+        scan_limit=10,
+        unreadable_dirs=hit_collected,
+    )
+    assert hit == []
+    assert hit_collected == [tmp_path.resolve()]
+
+
 def test_cached_find_images_recursive_uses_ttl_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

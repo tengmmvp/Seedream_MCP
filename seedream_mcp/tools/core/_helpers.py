@@ -103,6 +103,61 @@ def _classify_generation_error_type(exc: Exception) -> str:
     return resolve_error_profile(exc).error_code
 
 
+# 凭据与连接类错误的共用排查建议。
+_NETWORK_CREDENTIAL_GUIDANCE = "请确认 API Key 和网络可用后重试。"
+
+# 有意走默认排查建议的错误码：generation_failed 是基类与未识别异常的兜底档案码，
+# 无比通用建议更具体的指引，不进入错误码查表；错误码全集守护测试据此放行。
+_FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES = frozenset({"generation_failed"})
+
+# 失败排查建议按错误码查表：参数与请求形态类错误引导调整参数取值，凭据、服务与连接
+# 类错误引导检查 API Key 与网络，避免校验失败时误导调用方排查无关项。错误码取值与
+# errors 模块的归约档案一致，新增错误码时同步维护本表；未列举错误码回退通用建议。
+# guidance 拼接仅在归约档案未携带 user_hint 时发生（见 common.py 失败分支），本表
+# 是该场景下的兜底建议来源，档案有 user_hint 的错误码以档案建议为准。
+_FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
+    "validation_error": "请根据错误信息调整对应参数取值。",
+    "payload_too_large": "请根据错误信息调整对应参数取值。",
+    "rate_limited": "请稍后重试。",
+    "payment_required": "请检查账户余额与配额。",
+    "config_error": "请检查服务端配置后重试。",
+    "auth_error": _NETWORK_CREDENTIAL_GUIDANCE,
+    "api_error": _NETWORK_CREDENTIAL_GUIDANCE,
+    "network_error": _NETWORK_CREDENTIAL_GUIDANCE,
+    "timeout_error": _NETWORK_CREDENTIAL_GUIDANCE,
+}
+_DEFAULT_FAILURE_GUIDANCE = "请根据错误信息排查后重试。"
+
+# HTTP 状态码级排查建议：SeedreamAPIError 的多个业务失败状态（400/404 等）归约到
+# 同一个 api_error 错误码，仅按错误码查表会把参数错误与端点错误统一导向凭据与网络
+# 排查，与档案 user_hint 矛盾。guidance 拼接仅在归约档案未携带 user_hint 时发生，
+# 而 _HTTP_STATUS_PROFILES 对以下各状态均已配置 user_hint，故本表当前不会触达，
+# 仅作为档案移除或新增状态缺 hint 时的兜底；建议文案与各状态档案 user_hint 语义
+# 一致，未列举状态回退错误码查表。
+_FAILURE_GUIDANCE_BY_STATUS: dict[int, str] = {
+    400: "请核对请求参数。",
+    401: _NETWORK_CREDENTIAL_GUIDANCE,
+    402: "请检查账户余额与配额。",
+    404: "请确认 API 端点配置。",
+    429: "请稍后重试。",
+}
+
+
+def _resolve_failure_guidance(exc: Exception) -> str:
+    """按 HTTP 状态码或错误归约档案的错误码选择失败排查建议，供异常降级文案拼接。
+
+    SeedreamAPIError 优先按 status_code 查状态级建议表，无状态码或状态未列举时按
+    归约档案错误码兜底查表，两表均未命中回退通用建议。
+    """
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        status_guidance = _FAILURE_GUIDANCE_BY_STATUS.get(status_code)
+        if status_guidance is not None:
+            return status_guidance
+    error_code = resolve_error_profile(exc).error_code
+    return _FAILURE_GUIDANCE_BY_ERROR_CODE.get(error_code, _DEFAULT_FAILURE_GUIDANCE)
+
+
 def _extract_parallel_request_error(
     result: dict[str, Any] | None, fallback_exc: Exception | None
 ) -> str:
@@ -158,7 +213,7 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
         raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
 
     # user_path 由 normalize_path 解析、default_base_dir 在本函数上方解析，两者均已 resolve，
-    # 直接 relative_to 比较即可，避免 is_path_within_base 对二者再次重复 resolve。
+    # 直接 relative_to 比较即可，避免对已 resolve 的二者再次重复 resolve。
     if not is_within_resolved(user_path, default_base_dir):
         raise SeedreamValidationError(
             f"save_path 超出允许范围: {default_base_dir}",

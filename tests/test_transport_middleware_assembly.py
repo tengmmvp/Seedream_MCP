@@ -52,15 +52,16 @@ def active_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_attach_assembles_full_stack_for_loopback_with_token(active_config: None) -> None:
-    """回环绑定且配置令牌时装配四层：Bearer、请求体上限、Host 校验、健康检查。"""
+    """回环绑定且配置令牌时装配四层：Bearer、请求体上限、健康检查、Host 校验。"""
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
 
-    # add_middleware 经 insert(0) 使后添加者居前：健康检查最外、Bearer 最内。
+    # add_middleware 经 insert(0) 使后添加者居前：Host 校验最外，先于健康检查拒掉
+    # rebinding 域名请求；健康检查居鉴权之外探针免令牌；Bearer 最内。
     assert app.attached_classes() == [
-        _HealthCheckMiddleware,
         _LoopbackHostGuardMiddleware,
+        _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
         _BearerTokenAuthMiddleware,
     ]

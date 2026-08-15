@@ -26,6 +26,26 @@ class _FakeSession:
         )
 
 
+class _CapabilityDeclaringSession(_FakeSession):
+    """带 capability 探测的会话替身：check_client_capability 返回固定声明结果。"""
+
+    def __init__(self, roots: list[Path], declared: bool) -> None:
+        super().__init__(roots)
+        self.declared = declared
+        self.capability_probes = 0
+
+    def check_client_capability(self, capability: object) -> bool:
+        self.capability_probes += 1
+        return self.declared
+
+
+class _SpyContext:
+    """仅暴露 session 的最小上下文替身。"""
+
+    def __init__(self, session: object) -> None:
+        self.session = session
+
+
 class _FakeContext:
     def __init__(self, roots: list[Path]) -> None:
         self.session = _FakeSession(roots)
@@ -247,6 +267,53 @@ async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
 
     async with workspace_roots_scope(_FailingContext()):
         assert get_workspace_root() == env_root.resolve()
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_skips_list_roots_without_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """客户端未声明 roots capability 时跳过 roots/list 往返，直接回退环境变量边界。
+
+    未声明 roots 的客户端对 roots/list 必然报方法不支持，逐请求发起往返只会引入
+    失败等待与告警噪音；以会话内存中的 capability 声明即可短路。
+    """
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+
+    session = _CapabilityDeclaringSession([], declared=False)
+
+    async def _explode_list_roots() -> ListRootsResult:
+        raise AssertionError("未声明 roots capability 时不得发起 roots/list")
+
+    session.list_roots = _explode_list_roots  # type: ignore[method-assign]
+
+    async with workspace_roots_scope(_SpyContext(session)):
+        assert get_workspace_root() == env_root.resolve()
+
+    assert session.capability_probes == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_calls_list_roots_when_capability_declared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """客户端已声明 roots capability 时照常发起 roots/list 并应用客户端边界。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+
+    session = _CapabilityDeclaringSession([mcp_root], declared=True)
+
+    async with workspace_roots_scope(_SpyContext(session)):
+        assert get_workspace_root() == mcp_root.resolve()
+
+    assert session.capability_probes == 1
 
 
 @pytest.mark.asyncio

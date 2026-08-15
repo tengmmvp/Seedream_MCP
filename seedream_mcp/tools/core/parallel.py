@@ -3,6 +3,10 @@
 单次请求直接调用 request_executor；request_count > 1 时按 parallelism 构造信号量限流
 并发，逐个请求完成后按完成数上报进度。共享的 SeedreamClient 与 DownloadManager 优先从
 lifespan 上下文获取，以复用 HTTP/aiohttp 连接池，无 lifespan 场景由调用方回退新建。
+
+批次执行期间经 client.shared_request_plan_scope 绑定共享请求计划：同批请求在 client
+侧只构建一次 request_data、只序列化一次 body，N 个并行请求峰值内存 1×body；作用域
+退出时统一复位绑定并释放计划引用。
 """
 
 from __future__ import annotations
@@ -160,27 +164,38 @@ async def _run_generation_requests(
 
     request_count 为 1 时直接调用 request_executor；否则委托
     ``_execute_parallel_generation_requests`` 并行执行。进度按阶段上报。
-    """
-    if context.request_count == 1:
-        await _safe_report_progress(
-            ctx, progress=PROGRESS_GENERATION_START, message="开始调用图像生成接口"
-        )
-        await _yield_for_cancellation()
-        result = await request_executor(client, context)
-        await _safe_report_progress(ctx, progress=PROGRESS_GENERATION_DONE, message="图像生成完成")
-        return result
 
-    await _safe_report_progress(
-        ctx,
-        progress=PROGRESS_GENERATION_START,
-        message=f"开始并行请求，共 {context.request_count} 次",
-    )
-    result = await _execute_parallel_generation_requests(
-        client=client,
-        context=context,
-        request_executor=request_executor,
-        module_logger=module_logger,
-        ctx=ctx,
-    )
-    await _safe_report_progress(ctx, progress=PROGRESS_GENERATION_DONE, message="并行请求执行完成")
-    return result
+    批次执行期间绑定共享请求计划，client 侧据此对同批请求只构建一次 request_data、
+    只序列化一次 body；作用域退出时经 finally 复位绑定并释放计划，异常与取消路径
+    均不泄漏。
+    """
+    from ...client import shared_request_plan_scope
+
+    with shared_request_plan_scope():
+        if context.request_count == 1:
+            await _safe_report_progress(
+                ctx, progress=PROGRESS_GENERATION_START, message="开始调用图像生成接口"
+            )
+            await _yield_for_cancellation()
+            result = await request_executor(client, context)
+            await _safe_report_progress(
+                ctx, progress=PROGRESS_GENERATION_DONE, message="图像生成完成"
+            )
+            return result
+
+        await _safe_report_progress(
+            ctx,
+            progress=PROGRESS_GENERATION_START,
+            message=f"开始并行请求，共 {context.request_count} 次",
+        )
+        result = await _execute_parallel_generation_requests(
+            client=client,
+            context=context,
+            request_executor=request_executor,
+            module_logger=module_logger,
+            ctx=ctx,
+        )
+        await _safe_report_progress(
+            ctx, progress=PROGRESS_GENERATION_DONE, message="并行请求执行完成"
+        )
+        return result

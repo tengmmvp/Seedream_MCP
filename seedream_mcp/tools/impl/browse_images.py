@@ -28,6 +28,7 @@ from ...utils.core.errors import format_error_for_user
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import (
     SUPPORTED_IMAGE_EXTENSIONS,
+    _WORKSPACE_ROOTS_VAR,
     find_images_in_directory,
     get_relative_path,
     get_workspace_roots,
@@ -41,6 +42,21 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# 回退边界占位回显：工作区根来自 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退而非客户端
+# 会话 Roots 声明时，回显绝对路径会向调用方暴露服务器环境结构，字段与消息统一以
+# 本占位符替代真实路径。
+_FALLBACK_BOUNDARY_PLACEHOLDER = "<工作区根（服务器配置）>"
+
+
+def _boundary_from_session_roots() -> bool:
+    """判断当前请求的工作区边界是否来自客户端会话 Roots 声明。
+
+    workspace_roots_scope 仅在客户端声明 roots capability 且 roots/list 成功时写入
+    工作区根上下文变量；变量为 None 说明边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD
+    回退取得，属服务器环境而非客户端授权声明，其绝对路径不进入面向调用方的输出。
+    """
+    return _WORKSPACE_ROOTS_VAR.get() is not None
+
 
 @dataclass(frozen=True)
 class _BrowseRequestState:
@@ -50,8 +66,9 @@ class _BrowseRequestState:
         workspace_roots: 客户端授权的工作区根目录列表，保留原始形态供错误消息与
             structuredContent 回显。
         directory: 用户请求的目录字符串，未提供时归一为当前目录 "."。
-        resolved_directories: 随解析流程逐步填充的活动列表，构建快照时绑定其引用；所有
-            错误分支发生在该列表尚未填充的阶段，成功分支在填充完成后读取同一引用。
+        resolved_directories: 由 handle_browse_images 创建并传入 impl 的共享活动列表，
+            解析流程逐步填充；成功分支在填充完成后读取同一引用，外层兜底分支在 impl
+            抛出未预期异常时仍能取到已解析的目录。
         recursive: 是否递归扫描子目录。
         max_depth: 递归扫描的最大深度。
         limit: 单页返回的图片条数上限。
@@ -159,14 +176,24 @@ def _build_browse_structured_result(
     outputSchema 绑定，字段漂移在构造时即暴露。成功、空结果与失败三分支共用此构建；
     失败分支以默认值填充非关键字段，符合 BrowseImagesStructuredOutput 全部字段可选的
     声明。成功与空结果路径不输出 error 键，与既有契约一致。
+
+    边界来自 env/CWD 回退而非会话 Roots 声明时，workspace_roots 与
+    resolved_directories 的路径值以占位符替代，不向调用方回显服务器本地目录结构；
+    会话 Roots 场景保持回显客户端自己声明的路径。
     """
+    if _boundary_from_session_roots():
+        workspace_root_values = [str(root) for root in workspace_roots]
+        resolved_directory_values = [str(item) for item in resolved_directories]
+    else:
+        workspace_root_values = [_FALLBACK_BOUNDARY_PLACEHOLDER] if workspace_roots else []
+        resolved_directory_values = [_FALLBACK_BOUNDARY_PLACEHOLDER] if resolved_directories else []
     payload: dict[str, Any] = {
         "tool": "seedream_browse_images",
         "success": success,
         "status": status,
         "directory": directory,
-        "resolved_directories": [str(item) for item in resolved_directories],
-        "workspace_roots": [str(root) for root in workspace_roots],
+        "resolved_directories": resolved_directory_values,
+        "workspace_roots": workspace_root_values,
         "images": images if images is not None else [],
         "count": len(images) if images is not None else 0,
         "total_count": total_count,
@@ -226,6 +253,7 @@ def _scan_and_filter_directory(
     remaining: int,
     resolved_roots: list[Path],
     seen_images: set[Path],
+    unreadable_dirs: list[Path],
 ) -> list[tuple[Path, Path]]:
     """扫描单个目录并完成越界判定与去重，返回新增的 (原始路径，resolved 路径) 列表。
 
@@ -243,6 +271,8 @@ def _scan_and_filter_directory(
         remaining: 距 scan_limit 上限的剩余配额，新增条目不超过此值。
         resolved_roots: 已 resolve 的工作区根列表，用于越界判定。
         seen_images: 跨目录共享的已见原始路径集合，函数内就地更新。
+        unreadable_dirs: 跨目录共享的不可读目录收集列表，函数内就地更新，供空结果
+            分支区分目录不可读与目录内无图片。
 
     Returns:
         新增 (原始路径，resolved 路径) 元组列表，长度不超过 remaining。
@@ -255,6 +285,7 @@ def _scan_and_filter_directory(
         format_filter=format_filter,
         scan_limit=remaining,
         scanner=find_images_in_directory,
+        unreadable_dirs=unreadable_dirs,
     )
     new_entries: list[tuple[Path, Path]] = []
     for image_path, image_resolved in matched_image_pairs:
@@ -350,8 +381,13 @@ async def handle_browse_images(
     Returns:
         MCP 标准工具结果，含面向模型的图片列表文本与 structuredContent。
     """
+    # 已解析目录列表在进入 impl 前创建并由两函数共享引用：impl 内部逐步填充，抛出
+    # 未预期异常时兜底分支经同一引用回显已解析目录，不再恒为空列表。
+    resolved_directories: list[Path] = []
     try:
-        return await _handle_browse_images_impl(params, ctx)
+        return await _handle_browse_images_impl(
+            params, ctx, resolved_directories=resolved_directories
+        )
     except Exception as exc:
         logger.error("浏览图片处理失败", exc_info=True)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
@@ -368,7 +404,7 @@ async def handle_browse_images(
             state=_BrowseRequestState.from_params(
                 params,
                 workspace_roots=fallback_roots,
-                resolved_directories=[],
+                resolved_directories=resolved_directories,
                 format_filter=fallback_filter,
             ),
             message=f"浏览图片失败：{user_message}；请确认目录路径有效且位于工作区内。",
@@ -378,12 +414,18 @@ async def handle_browse_images(
 async def _handle_browse_images_impl(
     params: BrowseImagesInput,
     ctx: Context[Any, Any, Any] | None = None,
+    *,
+    resolved_directories: list[Path],
 ) -> CallToolResult:
-    """执行图片浏览主逻辑，未预期异常由外层 ``handle_browse_images`` 兜底降级。"""
+    """执行图片浏览主逻辑，未预期异常由外层 ``handle_browse_images`` 兜底降级。
+
+    resolved_directories 为外层创建的共享列表，目录解析结果在填充该列表后供成功
+    分支与外层兜底分支共同读取。
+    """
     raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
 
     workspace_roots = get_workspace_roots()
-    resolved_dirs: list[Path] = []
+    resolved_dirs = resolved_directories
     state = _BrowseRequestState.from_params(
         params,
         workspace_roots=workspace_roots,
@@ -434,8 +476,13 @@ async def _handle_browse_images_impl(
     resolved_dirs.extend(resolved_dirs_from_thread)
 
     if not resolved_dirs:
-        allowed_roots = ", ".join(str(root) for root in workspace_roots)
-        message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
+        # 越界拒绝消息回显允许根清单仅在边界来自会话 Roots 声明时进行；env/CWD
+        # 回退边界下回显绝对路径会暴露服务器环境结构，改述为服务器配置边界。
+        if _boundary_from_session_roots():
+            allowed_roots = ", ".join(str(root) for root in workspace_roots)
+            message = "目录超出允许范围。" f"仅允许浏览工作区目录: {allowed_roots}"
+        else:
+            message = "目录超出允许范围。仅允许浏览服务器配置的工作区目录。"
         return _build_browse_error(state=state, message=message)
 
     await _safe_ctx_log(
@@ -463,6 +510,7 @@ async def _handle_browse_images_impl(
     scan_limit = state.offset + state.limit + 1
     all_images: list[Path] = []
     image_resolved_map: dict[Path, Path] = {}
+    unreadable_dirs: list[Path] = []
     if not format_filter_exhausted:
         seen_images: set[Path] = set()
         total_dirs = len(resolved_dirs)
@@ -479,6 +527,7 @@ async def _handle_browse_images_impl(
                 remaining=remaining,
                 resolved_roots=resolved_roots,
                 seen_images=seen_images,
+                unreadable_dirs=unreadable_dirs,
             )
             for image_path, image_resolved in new_entries:
                 all_images.append(image_path)
@@ -501,7 +550,8 @@ async def _handle_browse_images_impl(
 
     # 处理当前页为空的情况：
     # - format_filter_exhausted：用户指定后缀全部不受支持，返回独立区分消息
-    # - total_count == 0：确实无匹配图片
+    # - total_count == 0：无匹配图片；扫描中存在不可读目录时文案区分「目录不可读」，
+    #   避免权限问题被静默归并为「无图片」
     # - total_count > 0：offset 超出最后一页越界，仍需返回实际总数供客户端正确翻页
     if not images:
         if format_filter_exhausted:
@@ -512,8 +562,19 @@ async def _handle_browse_images_impl(
             )
             log_message = "图片格式过滤条件全部不受支持"
         elif total_count == 0:
-            message = "未找到图片文件，请确认目录或过滤条件。"
-            log_message = "未找到匹配的图片文件"
+            if unreadable_dirs:
+                unique_unreadable = list(dict.fromkeys(unreadable_dirs))
+                if _boundary_from_session_roots():
+                    dirs_text = ", ".join(str(item) for item in unique_unreadable)
+                else:
+                    # 回退边界场景回显已 resolve 的目录绝对路径会泄露服务器环境结构，
+                    # 仅按数量提示，明细进日志。
+                    dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"
+                message = f"目录不可读或无图片文件：{dirs_text}"
+                log_message = f"未找到匹配图片且 {len(unique_unreadable)} 个目录不可读"
+            else:
+                message = "未找到图片文件，请确认目录或过滤条件。"
+                log_message = "未找到匹配的图片文件"
         else:
             message = (
                 f"offset={state.offset} 超出范围，目录共有 {total_count} 张图片，"
@@ -552,6 +613,12 @@ async def _handle_browse_images_impl(
         show_details=state.show_details,
     )
     lines = ["图片列表:"] + display_lines
+    if has_more:
+        # 满页且仍有更多时在文本尾部追加翻页引导；has_more 意味着未扫完全量，
+        # total_count 此时恒为 None，省略总数表述仅给出当前页区间。
+        page_last = state.offset + len(images)
+        range_text = f"第 {state.offset + 1}-{page_last} 张"
+        lines.append(f"{range_text}，仍有更多，继续翻页请传 offset={next_offset}")
 
     await _safe_ctx_log(ctx, "info", f"浏览完成：共 {len(structured_images)} 张图片")
     await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")

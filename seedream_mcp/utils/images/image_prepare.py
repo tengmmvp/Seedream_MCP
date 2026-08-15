@@ -32,6 +32,42 @@ _RESOLVED_ROOTS_CACHE_MAX_ENTRIES = 32
 _resolved_roots_cache: dict[tuple[str, ...], list[Path]] = {}
 
 
+class _PrepareSemaphoreSlot:
+    """预处理并发槽位的独占释放句柄，保证槽位恰好释放一次。
+
+    正常与异常路径由持有者在 finally 中释放；创建者被取消而共享 task 仍在运行时，
+    释放责任经 transfer_to_task 转移给该 task 的完成回调。转移后脱缰 task 在结束前
+    持续占用并发额度，取消次数不再无界叠加突破 prepare_concurrency 上限。
+    """
+
+    __slots__ = ("_semaphore", "_released")
+
+    def __init__(self, semaphore: asyncio.Semaphore) -> None:
+        self._semaphore = semaphore
+        self._released = False
+
+    def release(self) -> None:
+        """释放槽位，重复调用仅首次生效。"""
+        if self._released:
+            return
+        self._released = True
+        self._semaphore.release()
+
+    def transfer_to_task(self, task: "asyncio.Task[str]") -> None:
+        """把槽位释放责任转移给 task，由 task 完成回调释放。
+
+        task 已完成时完成回调经事件循环尽快调度，仍保证恰好一次释放。
+        """
+        if self._released:
+            return
+        self._released = True
+        task.add_done_callback(self._release_when_task_done)
+
+    def _release_when_task_done(self, task: "asyncio.Task[str]") -> None:
+        del task
+        self._semaphore.release()
+
+
 def reset_resolved_roots_cache() -> None:
     """清空工作区 roots 的 resolve 结果缓存。
 
@@ -138,18 +174,26 @@ class ImagePreparer:
 
         并发上限由实例级信号量约束：单图入口（client 直连）与批量入口共用同一
         全局上限，并行生成与并发工具调用叠加时总并发不超过配置的
-        prepare_concurrency。
+        prepare_concurrency。槽位经 _PrepareSemaphoreSlot 管理：创建者被取消且共享
+        task 仍在运行时，释放责任转移给 task 完成回调，脱缰 task 结束前持续占用
+        并发额度，取消风暴不会突破上限。
         """
-        async with self._get_prepare_semaphore():
-            return await self._prepare_image_input_locked(image, _roots_key)
+        semaphore = self._get_prepare_semaphore()
+        await semaphore.acquire()
+        slot = _PrepareSemaphoreSlot(semaphore)
+        try:
+            return await self._prepare_image_input_locked(image, _roots_key, slot)
+        finally:
+            slot.release()
 
     async def _prepare_image_input_locked(
-        self, image: str, _roots_key: tuple[str, ...] | None
+        self, image: str, _roots_key: tuple[str, ...] | None, slot: _PrepareSemaphoreSlot
     ) -> str:
-        """执行图像预处理的缓存检索与执行，调用方已持有实例级信号量。
+        """执行图像预处理的缓存检索与执行，调用方已持有实例级信号量槽位。
 
         签名计算、缓存命中与 single-flight 逻辑均在本实现体内，prepare_image_input
-        仅负责信号量守卫；批量路径经公共入口逐图进入，与单图直连共享同一守卫。
+        仅负责信号量守卫；批量路径经公共入口逐图进入，与单图直连共享同一守卫。创建者
+        在 shield 等待共享 task 时被取消的，槽位经 slot 转移给 task 本体释放。
         """
         if _roots_key is None:
             from ..io.io_path import get_workspace_roots
@@ -187,9 +231,16 @@ class ImagePreparer:
         # 若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
         # retrieved"；回调内显式检索并记录，消除噪音日志。
         task.add_done_callback(log_unretrieved_task_exception)
-        # shield 隔离取消传播：创建者被取消时仅取消其自身 await 的 outer，底层共享
-        # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理。
-        return await asyncio.shield(task)
+        try:
+            # shield 隔离取消传播：创建者被取消时仅取消其自身 await 的 outer，底层共享
+            # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理。
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # 创建者被取消而共享 task 脱缰继续运行：若随创建者 finally 释放本槽位，
+            # 取消次数会无界叠加突破并发上限。把释放责任转移给 task 本体，task 结束前
+            # 槽位保持占用，新请求与等待者继续受限。
+            slot.transfer_to_task(task)
+            raise
 
     async def _prepare_and_cache(self, image: str, cache_key: PrepareCacheKey) -> str:
         """执行图像预处理并写入 LRU 缓存，供 single-flight 去重复用。

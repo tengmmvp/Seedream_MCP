@@ -14,6 +14,7 @@ from PIL import Image
 
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 from seedream_mcp.utils.images.image_input import prepare_image_input
+from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
 async def test_prepare_image_input_rejects_symlink_escape(
@@ -23,7 +24,8 @@ async def test_prepare_image_input_rejects_symlink_escape(
 
     normalize_path 的 resolve 会跟随符号链接，故链接目标须位于工作区之外才能触发越界
     拒绝；若目标位于工作区内，resolve 后得到常规文件路径，O_NOFOLLOW 打开该常规文件
-    不抛错，测试将沦为空芯。
+    不抛错，测试将沦为空芯。越界属参数校验语义，抛 SeedreamValidationError；以会话
+    Roots 声明边界，消息附调用方授权的根列表供自纠。
     """
     # 目标文件位于工作区（tmp_path）之外；resolve 跟随符号链接后路径越界被拒
     target = tmp_path.parent / "symlink_escape_target.png"
@@ -35,11 +37,75 @@ async def test_prepare_image_input_rejects_symlink_escape(
         target.unlink(missing_ok=True)
         pytest.skip("当前环境不支持创建符号链接")
 
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
-        with pytest.raises(SeedreamAPIError):
+        with pytest.raises(
+            SeedreamValidationError, match="路径超出允许的工作区目录范围"
+        ) as exc_info:
             await prepare_image_input(str(link))
+        assert "允许的根:" in exc_info.value.message
+        assert str(tmp_path.resolve()) in exc_info.value.message
     finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
         target.unlink(missing_ok=True)
+
+
+async def test_prepare_image_input_out_of_bounds_error_carries_roots(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """绝对路径落在工作区根之外时抛校验错误，消息携带允许的根列表供纠错。
+
+    越界属参数问题而非 API 调用失败，异常类型须为 SeedreamValidationError，
+    错误码归约为 validation_error 而非 api_error。以会话 Roots 声明边界，
+    根列表为调用方自授权信息，回显不受回退边界遮蔽约束。
+    """
+    outside = tmp_path.parent / "outside_workspace_image.png"
+    Image.new("RGB", (32, 32), color="white").save(outside)
+
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
+    try:
+        with pytest.raises(
+            SeedreamValidationError, match="路径超出允许的工作区目录范围"
+        ) as exc_info:
+            await prepare_image_input(str(outside))
+        assert str(tmp_path.resolve()) in exc_info.value.message
+        assert exc_info.value.field == "image"
+    finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
+        outside.unlink(missing_ok=True)
+
+
+async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """回退边界（无会话 Roots）下的越界消息不回显服务器环境根路径。
+
+    边界经 SEEDREAM_WORKSPACE_ROOT 回退取得时根路径属于服务器本地目录结构，
+    消息改述为仅允许服务器配置的工作区目录，与 browse_images 的回退遮蔽
+    标准一致。
+    """
+    outside = tmp_path.parent / "outside_workspace_masked.png"
+    Image.new("RGB", (32, 32), color="white").save(outside)
+
+    try:
+        with pytest.raises(
+            SeedreamValidationError, match="仅允许服务器配置的工作区目录"
+        ) as exc_info:
+            await prepare_image_input(str(outside))
+        assert "允许的根:" not in exc_info.value.message
+        assert str(tmp_path.resolve()) not in exc_info.value.message
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """界内不存在的路径仍走诊断分支：报文件不存在而非越界，不附允许根列表。"""
+    with pytest.raises(SeedreamAPIError) as exc_info:
+        await prepare_image_input(str(tmp_path / "missing.png"))
+    assert "路径超出允许的工作区目录范围" not in exc_info.value.message
+    assert "文件不存在" in exc_info.value.message
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:

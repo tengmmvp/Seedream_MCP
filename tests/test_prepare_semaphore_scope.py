@@ -88,6 +88,84 @@ async def test_concurrent_single_image_calls_share_instance_semaphore(
     assert results == [f"prepared:{image}" for image in images]
 
 
+@pytest.mark.asyncio
+async def test_cancelled_creators_do_not_break_concurrency_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """串行取消创建者留下的脱缰 task 持续占用并发槽位，峰值并发不超过上限。
+
+    创建者被取消时 shield 使共享 task 继续运行；若其槽位随创建者一并释放，脱缰
+    task 与后续请求叠加会使峰值并发随取消次数无界放大，突破
+    SEEDREAM_IMAGE_PREPARE_CONCURRENCY 声明的全局上限。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    preparer = client._image_preparer
+    limit = config.image_prepare_concurrency
+
+    current = 0
+    peak = 0
+    entered = 0
+    release = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal current, peak, entered
+        del image
+        entered += 1
+        current += 1
+        peak = max(peak, current)
+        await release.wait()
+        current -= 1
+        return "prepared"
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    # 串行发起 3 个请求并各自取消创建者：取消不传播到共享 task，3 个脱缰 task 继续在途。
+    # 以 _prepare_inflight 条目数判定创建者已挂起在 shield 等待点，避免依赖时序。
+    for index in range(3):
+        creator = asyncio.ensure_future(
+            preparer.prepare_image_input(f"https://example.com/cancelled-{index}.png")
+        )
+        while len(preparer._prepare_inflight) < index + 1:
+            await asyncio.sleep(0)
+        creator.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await creator
+
+    # 等待脱缰 task 全部进入 fake_prepare，确保它们计入并发观测。
+    while entered < 3:
+        await asyncio.sleep(0)
+
+    # 发起满额新请求并推进事件循环至无可继续：修复前脱缰 task 不占槽位，3+limit 个
+    # 任务同时进入 fake_prepare；修复后仅 limit-3 个新请求进入，其余阻塞在信号量。
+    followers = [
+        asyncio.ensure_future(
+            preparer.prepare_image_input(f"https://example.com/follower-{index}.png")
+        )
+        for index in range(limit)
+    ]
+    settled = 0
+    while settled < 4:
+        before = entered
+        await asyncio.sleep(0)
+        settled = settled + 1 if entered == before else 0
+
+    assert current <= limit, "取消产生的脱缰 task 不得突破配置的全局并发上限"
+    assert peak <= limit
+
+    release.set()
+    results = await asyncio.gather(*followers)
+    assert results == ["prepared"] * limit
+    # 推进事件循环至全部脱缰 task 终结且其完成回调执行完毕，再校验信号量计数复原，
+    # 确认槽位既未泄漏也未重复释放。
+    settled = 0
+    while settled < 4:
+        before = preparer._get_prepare_semaphore()._value
+        await asyncio.sleep(0)
+        settled = settled + 1 if preparer._get_prepare_semaphore()._value == before else 0
+    assert preparer._get_prepare_semaphore()._value == limit
+
+
 def test_instance_semaphore_rebuilds_across_event_loops() -> None:
     """同一 preparer 跨事件循环依次使用时不因信号量绑定旧循环而报错。
 

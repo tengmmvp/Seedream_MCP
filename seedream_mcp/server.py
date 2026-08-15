@@ -13,6 +13,14 @@ outputSchema 声明契约：五个 @mcp.tool 工具函数的返回类型注解�
 生成 outputSchema；运行时实际返回 CallToolResult（含面向模型的文本与 structuredContent）。
 故函数体中相应的 ``# type: ignore[return-value]`` 是该方案的必要组成，不可为统一返回
 类型而移除，否则 outputSchema 声明会失效。详见 AGENTS.md 的 outputSchema 声明契约一节。
+
+inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明（prompt 居首），而非单一
+params 嵌套模型。FastMCP 1.28 的 FuncMetadata 不支持单参数 BaseModel 自动展开，
+嵌套声明会把 inputSchema 收敛为一个 params 对象字段，客户端以平铺键名调用会被拒绝。
+平铺字段的名称、类型、默认值、约束与描述镜像自 tools.core.schemas 的对应输入模型，
+字段规则的单一来源仍是该模块；函数体内过滤值为 None 的可选字段后组装输入模型并
+委托既有 run_* 处理器，跨字段校验在组装时照常触发。test_tool_parameter_order 以
+inputSchema 与模型 schema 的等价性断言锁定两侧不漂移。
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 # 本地模块导入
 from .cli import _build_arg_parser, _build_config_from_args, _build_run_options
@@ -47,6 +56,14 @@ from .tools import (
     run_text_to_image,
 )
 from .tools.core.common import get_lifespan_resource
+from .tools.core.schemas import (
+    GenerationTool,
+    OptimizePromptOptions,
+    OutputFormat,
+    PROMPT_MAX_LENGTH,
+    PROMPT_MIN_LENGTH,
+    ResponseFormat,
+)
 from .tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
@@ -59,7 +76,12 @@ from .transport import (
 )
 from .utils.core.errors import SeedreamConfigError, format_error_for_user
 from .utils.core.logs import get_logger, setup_logging
+from .utils.core.validators import (
+    MAX_PARALLEL_REQUEST_COUNT,
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
+)
 from .utils.io.io_path import get_workspace_roots, workspace_roots_scope
+from .utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 
 # resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 为本模块直接
 # 使用，其余供 tests 与既有 import 路径经 server 模块访问。
@@ -118,6 +140,27 @@ def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     return get_active_config()
 
 
+def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """过滤值为 None 的函数签名默认值，仅保留显式提供的字段。
+
+    None 过滤作用于平铺函数签名的默认值：签名字段以 None 统一表示未提供，剔除后
+    组装输入模型使 model_fields_set 仅含显式提供的字段。模型中带非 None 默认值的
+    字段不受同等过滤——生成工具的 response_format/stream/request_count 与浏览工具
+    的 recursive/max_depth/limit/offset/show_details 经签名非 None 默认值取值，恒进入
+    model_fields_set；组图 max_images 虽在模型中以总上限为默认值，但其签名为 None
+    默认，未提供时被过滤、不进入 fields_set，随后按参考图数量自动推导。当前唯一
+    依赖 fields_set 区分的就是 max_images 推导，不受恒进入字段影响；未来若有新逻辑
+    依赖 model_fields_set 判定显式传入，须知上述字段不参与该区分。
+
+    Args:
+        kwargs: 平铺参数名到函数入参值的映射，必填字段由调用方保证非 None。
+
+    Returns:
+        剔除 None 值后的参数字典，用作输入模型构造的关键字参数。
+    """
+    return {key: value for key, value in kwargs.items() if value is not None}
+
+
 # ==================== MCP 工具函数定义 ====================
 
 
@@ -127,8 +170,69 @@ def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
 async def seedream_text_to_image(
-    params: TextToImageInput,
-    ctx: Context[Any, Any, Any],
+    prompt: str = Field(
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
+        description=(
+            "用于生成图片的提示词，建议不超过300个汉字或600个英文单词。"
+            "例如：一只戴墨镜的猫坐在月球上，写实风格。"
+        ),
+    ),
+    optimize_prompt_options: OptimizePromptOptions | None = Field(
+        default=None,
+        description="提示词优化配置，仅支持 standard 或 fast。",
+    ),
+    size: str | None = Field(
+        default=None,
+        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+    ),
+    watermark: bool | None = Field(
+        default=None,
+        description="是否添加水印；未提供时沿用全局默认值。",
+    ),
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.URL,
+        description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
+    ),
+    output_format: OutputFormat | None = Field(
+        default=None,
+        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+    ),
+    stream: bool = Field(
+        default=False,
+        description="是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。",
+    ),
+    tools: list[GenerationTool] | None = Field(
+        default=None,
+        description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
+    ),
+    request_count: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+    ),
+    parallelism: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+    ),
+    auto_save: bool | None = Field(
+        default=None,
+        description="是否自动保存到本地；未提供时遵循全局配置。",
+    ),
+    save_path: str | None = Field(
+        default=None,
+        max_length=1024,
+        description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
+    ),
+    custom_name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="自定义文件名前缀，未提供时根据提示词自动生成。",
+    ),
+    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """
     文生图：根据文字指令生成单张图片。
@@ -138,7 +242,29 @@ async def seedream_text_to_image(
     风格一致的图片时改用 seedream_sequential_generation。
     """
     config = _config_from_context(ctx)
-    return await run_text_to_image(params, config=config, ctx=ctx)  # type: ignore[return-value]
+    return await run_text_to_image(
+        TextToImageInput(
+            **_filter_unset_params(
+                {
+                    "prompt": prompt,
+                    "optimize_prompt_options": optimize_prompt_options,
+                    "size": size,
+                    "watermark": watermark,
+                    "response_format": response_format,
+                    "output_format": output_format,
+                    "stream": stream,
+                    "tools": tools,
+                    "request_count": request_count,
+                    "parallelism": parallelism,
+                    "auto_save": auto_save,
+                    "save_path": save_path,
+                    "custom_name": custom_name,
+                }
+            )
+        ),
+        config=config,
+        ctx=ctx,
+    )  # type: ignore[return-value]
 
 
 @mcp.tool(
@@ -147,8 +273,75 @@ async def seedream_text_to_image(
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
 async def seedream_image_to_image(
-    params: ImageToImageInput,
-    ctx: Context[Any, Any, Any],
+    prompt: str = Field(
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
+        description=(
+            "图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。"
+            "例如：把背景换成雪山、将照片转为水彩画风格。"
+        ),
+    ),
+    optimize_prompt_options: OptimizePromptOptions | None = Field(
+        default=None,
+        description="提示词优化配置，仅支持 standard 或 fast。",
+    ),
+    image: str = Field(
+        description=(
+            "参考图片，支持 URL、data URI（data:image/*;base64,...）、本地文件路径。"
+            "例如：https://example.com/ref.png 或 ./images/portrait.jpg。"
+        ),
+    ),
+    size: str | None = Field(
+        default=None,
+        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+    ),
+    watermark: bool | None = Field(
+        default=None,
+        description="是否添加水印；未提供时沿用全局默认值。",
+    ),
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.URL,
+        description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
+    ),
+    output_format: OutputFormat | None = Field(
+        default=None,
+        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+    ),
+    stream: bool = Field(
+        default=False,
+        description="是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。",
+    ),
+    tools: list[GenerationTool] | None = Field(
+        default=None,
+        description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
+    ),
+    request_count: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+    ),
+    parallelism: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+    ),
+    auto_save: bool | None = Field(
+        default=None,
+        description="是否自动保存到本地；未提供时遵循全局配置。",
+    ),
+    save_path: str | None = Field(
+        default=None,
+        max_length=1024,
+        description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
+    ),
+    custom_name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="自定义文件名前缀，未提供时根据提示词自动生成。",
+    ),
+    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """
     图文生图：基于已有图片进行编辑。
@@ -159,7 +352,30 @@ async def seedream_image_to_image(
     seedream_multi_image_fusion。
     """
     config = _config_from_context(ctx)
-    return await run_image_to_image(params, config=config, ctx=ctx)  # type: ignore[return-value]
+    return await run_image_to_image(
+        ImageToImageInput(
+            **_filter_unset_params(
+                {
+                    "prompt": prompt,
+                    "optimize_prompt_options": optimize_prompt_options,
+                    "image": image,
+                    "size": size,
+                    "watermark": watermark,
+                    "response_format": response_format,
+                    "output_format": output_format,
+                    "stream": stream,
+                    "tools": tools,
+                    "request_count": request_count,
+                    "parallelism": parallelism,
+                    "auto_save": auto_save,
+                    "save_path": save_path,
+                    "custom_name": custom_name,
+                }
+            )
+        ),
+        config=config,
+        ctx=ctx,
+    )  # type: ignore[return-value]
 
 
 @mcp.tool(
@@ -168,8 +384,78 @@ async def seedream_image_to_image(
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
 async def seedream_multi_image_fusion(
-    params: MultiImageFusionInput,
-    ctx: Context[Any, Any, Any],
+    prompt: str = Field(
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
+        description=(
+            "融合目标或风格描述，建议不超过300个汉字或600个英文单词。"
+            "请使用“图X”指定图像（如：将图1的服装换为图2的服装）。"
+        ),
+    ),
+    optimize_prompt_options: OptimizePromptOptions | None = Field(
+        default=None,
+        description="提示词优化配置，仅支持 standard 或 fast。",
+    ),
+    image: list[str] = Field(
+        min_length=2,
+        max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+        description=(
+            f"图片列表，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
+            f"数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
+            '例如：["https://example.com/a.png", "./images/b.jpg"]。'
+        ),
+    ),
+    size: str | None = Field(
+        default=None,
+        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+    ),
+    watermark: bool | None = Field(
+        default=None,
+        description="是否添加水印；未提供时沿用全局默认值。",
+    ),
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.URL,
+        description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
+    ),
+    output_format: OutputFormat | None = Field(
+        default=None,
+        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+    ),
+    stream: bool = Field(
+        default=False,
+        description="是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。",
+    ),
+    tools: list[GenerationTool] | None = Field(
+        default=None,
+        description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
+    ),
+    request_count: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+    ),
+    parallelism: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+    ),
+    auto_save: bool | None = Field(
+        default=None,
+        description="是否自动保存到本地；未提供时遵循全局配置。",
+    ),
+    save_path: str | None = Field(
+        default=None,
+        max_length=1024,
+        description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
+    ),
+    custom_name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="自定义文件名前缀，未提供时根据提示词自动生成。",
+    ),
+    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """
     多图融合：融合多张参考图片的特征生成新图片。
@@ -180,9 +466,30 @@ async def seedream_multi_image_fusion(
     seedream_sequential_generation。
     """
     config = _config_from_context(ctx)
-    return await run_multi_image_fusion(  # type: ignore[return-value]
-        params, config=config, ctx=ctx
-    )
+    return await run_multi_image_fusion(
+        MultiImageFusionInput(
+            **_filter_unset_params(
+                {
+                    "prompt": prompt,
+                    "optimize_prompt_options": optimize_prompt_options,
+                    "image": image,
+                    "size": size,
+                    "watermark": watermark,
+                    "response_format": response_format,
+                    "output_format": output_format,
+                    "stream": stream,
+                    "tools": tools,
+                    "request_count": request_count,
+                    "parallelism": parallelism,
+                    "auto_save": auto_save,
+                    "save_path": save_path,
+                    "custom_name": custom_name,
+                }
+            )
+        ),
+        config=config,
+        ctx=ctx,
+    )  # type: ignore[return-value]
 
 
 @mcp.tool(
@@ -191,8 +498,82 @@ async def seedream_multi_image_fusion(
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
 async def seedream_sequential_generation(
-    params: SequentialGenerationInput,
-    ctx: Context[Any, Any, Any],
+    prompt: str = Field(
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
+        description=(
+            "连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。"
+            "例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。"
+        ),
+    ),
+    optimize_prompt_options: OptimizePromptOptions | None = Field(
+        default=None,
+        description="提示词优化配置，仅支持 standard 或 fast。",
+    ),
+    image: str | list[str] | None = Field(
+        default=None,
+        description=(
+            f"可选的参考图片，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
+            f"单张或多张，单字符串视为单元素列表，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张。"
+        ),
+    ),
+    size: str | None = Field(
+        default=None,
+        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+    ),
+    watermark: bool | None = Field(
+        default=None,
+        description="是否添加水印；未提供时沿用全局默认值。",
+    ),
+    max_images: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_SEQUENTIAL_TOTAL_IMAGES,
+        description=f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}。",
+    ),
+    response_format: ResponseFormat = Field(
+        default=ResponseFormat.URL,
+        description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
+    ),
+    output_format: OutputFormat | None = Field(
+        default=None,
+        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+    ),
+    stream: bool = Field(
+        default=False,
+        description="是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。",
+    ),
+    tools: list[GenerationTool] | None = Field(
+        default=None,
+        description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
+    ),
+    request_count: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+    ),
+    parallelism: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+    ),
+    auto_save: bool | None = Field(
+        default=None,
+        description="是否自动保存到本地；未提供时遵循全局配置。",
+    ),
+    save_path: str | None = Field(
+        default=None,
+        max_length=1024,
+        description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
+    ),
+    custom_name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="自定义文件名前缀，未提供时根据提示词自动生成。",
+    ),
+    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """
     组图输出：一次生成多张内容关联的图片。
@@ -203,9 +584,31 @@ async def seedream_sequential_generation(
     不适用：融合多张参考图特征改用 seedream_multi_image_fusion。
     """
     config = _config_from_context(ctx)
-    return await run_sequential_generation(  # type: ignore[return-value]
-        params, config=config, ctx=ctx
-    )
+    return await run_sequential_generation(
+        SequentialGenerationInput(
+            **_filter_unset_params(
+                {
+                    "prompt": prompt,
+                    "optimize_prompt_options": optimize_prompt_options,
+                    "image": image,
+                    "size": size,
+                    "watermark": watermark,
+                    "max_images": max_images,
+                    "response_format": response_format,
+                    "output_format": output_format,
+                    "stream": stream,
+                    "tools": tools,
+                    "request_count": request_count,
+                    "parallelism": parallelism,
+                    "auto_save": auto_save,
+                    "save_path": save_path,
+                    "custom_name": custom_name,
+                }
+            )
+        ),
+        config=config,
+        ctx=ctx,
+    )  # type: ignore[return-value]
 
 
 @mcp.tool(
@@ -214,8 +617,51 @@ async def seedream_sequential_generation(
     annotations=BROWSE_TOOL_ANNOTATIONS,
 )
 async def seedream_browse_images(
-    params: BrowseImagesInput,
-    ctx: Context[Any, Any, Any],
+    directory: str | None = Field(
+        default=None,
+        description=(
+            "要浏览的目录路径，默认浏览工作区根目录，即 MCP Roots 授权的首个根；"
+            "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
+            "均未设置时回退进程当前工作目录。"
+        ),
+    ),
+    recursive: bool = Field(
+        default=BrowseImagesInput.DEFAULT_RECURSIVE,
+        description="是否递归查找子目录。",
+    ),
+    max_depth: int = Field(
+        default=BrowseImagesInput.DEFAULT_MAX_DEPTH,
+        ge=1,
+        le=10,
+        description="递归查找的最大深度（1-10）。",
+    ),
+    limit: int = Field(
+        default=BrowseImagesInput.DEFAULT_LIMIT,
+        ge=1,
+        le=200,
+        description="返回的最大文件数量（1-200）。",
+    ),
+    offset: int = Field(
+        default=BrowseImagesInput.DEFAULT_OFFSET,
+        ge=0,
+        le=100000,
+        description=(
+            "分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
+            "上限防止无界偏移触发全量扫描。"
+        ),
+    ),
+    format_filter: list[str] | None = Field(
+        default=None,
+        description=(
+            "需要过滤的图片后缀列表，如 ['.jpeg', '.png']；仅保留受支持的后缀。"
+            "空列表或全部后缀不受支持时视为无有效后缀：跳过扫描返回空结果并回显原始输入。"
+        ),
+    ),
+    show_details: bool = Field(
+        default=BrowseImagesInput.DEFAULT_SHOW_DETAILS,
+        description="是否展示文件大小、修改时间等详细信息。",
+    ),
+    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> BrowseImagesStructuredOutput:
     """
     本地图片浏览：列出工作区中的图片文件。
@@ -223,13 +669,69 @@ async def seedream_browse_images(
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
     递归、分页、按格式过滤。仅可浏览工作区目录内文件。
     """
-    return await run_browse_images(params, ctx=ctx)  # type: ignore[return-value]
+    return await run_browse_images(
+        BrowseImagesInput(
+            **_filter_unset_params(
+                {
+                    "directory": directory,
+                    "recursive": recursive,
+                    "max_depth": max_depth,
+                    "limit": limit,
+                    "offset": offset,
+                    "format_filter": format_filter,
+                    "show_details": show_details,
+                }
+            )
+        ),
+        ctx=ctx,
+    )  # type: ignore[return-value]
+
+
+# ==================== 平铺 inputSchema 收紧 ====================
+
+# 需要收紧 inputSchema 的五个平铺签名工具。
+_FLAT_SCHEMA_TOOL_NAMES = (
+    "seedream_text_to_image",
+    "seedream_image_to_image",
+    "seedream_multi_image_fusion",
+    "seedream_sequential_generation",
+    "seedream_browse_images",
+)
+
+
+def _tighten_flat_tool_schemas() -> None:
+    """对五个平铺签名工具的 inputSchema 顶层补 additionalProperties: false。
+
+    平铺签名丢失模型 extra=forbid 的补偿：输入模型本身以 extra=forbid 拒绝未知键，
+    而 FastMCP 1.28 依据函数签名生成的参数模型默认忽略未知键，inputSchema 也不含
+    additionalProperties 声明，拼错的参数名会被静默丢弃而非拒绝。本函数在注册后
+    集中修补两处：inputSchema 顶层声明 additionalProperties: false，客户端本地校验
+    即可拒绝拼错参数；参数模型替换为 extra=forbid 的子类，服务端运行时同样拒绝。
+    子类化保留全部字段、校验器与序列化行为，仅收紧额外键策略。于 import 期执行，
+    先于任何 tools/list 与 tools/call 生效；FastMCP 无公开的工具访问 API，经
+    tool manager 取 Tool 对象修补其 parameters dict 与参数模型。
+    """
+    for name in _FLAT_SCHEMA_TOOL_NAMES:
+        tool = mcp._tool_manager.get_tool(name)
+        if tool is None:
+            logger.warning("未找到待收紧 inputSchema 的工具: {}", name)
+            continue
+        tool.parameters["additionalProperties"] = False
+        arg_model = tool.fn_metadata.arg_model
+        tool.fn_metadata.arg_model = type(
+            arg_model.__name__,
+            (arg_model,),
+            {"model_config": {**arg_model.model_config, "extra": "forbid"}},
+        )
+
+
+_tighten_flat_tool_schemas()
 
 
 # ==================== MCP 资源定义 ====================
 
 
-@mcp.resource("seedream://workspace/roots")
+@mcp.resource("seedream://workspace/roots", mime_type="application/json")
 async def workspace_roots_resource() -> str:
     """工作区根目录。展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。"""
     ctx = mcp.get_context()
@@ -240,7 +742,7 @@ async def workspace_roots_resource() -> str:
     )
 
 
-@mcp.resource("seedream://server/info")
+@mcp.resource("seedream://server/info", mime_type="application/json")
 async def server_info_resource() -> str:
     """服务器版本与当前生效配置摘要。"""
     ctx = mcp.get_context()
@@ -258,7 +760,7 @@ async def server_info_resource() -> str:
     )
 
 
-@mcp.resource("seedream://models/info")
+@mcp.resource("seedream://models/info", mime_type="application/json")
 async def models_info_resource() -> str:
     """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
     from dataclasses import asdict

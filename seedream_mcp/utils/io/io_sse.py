@@ -214,13 +214,24 @@ async def parse_sse_response(
 
     def apply_completed(
         completed: bool,
-        evt_usage: dict[str, Any] | None,
+        evt_usage: Any,
         evt_tools: list[dict[str, Any]] | None,
     ) -> None:
-        """记录完成事件的元信息，主循环与流末尾残留处理共用。"""
+        """记录完成事件的元信息，主循环与流末尾残留处理共用。
+
+        上游 completed 事件的 usage 字段异形（如字符串或数字）时收敛为空 dict，
+        与非流式 client._build_api_result 的守卫同口径，保证结果结构 usage 恒为 dict。
+        """
         nonlocal usage, status, tools
         if completed:
-            usage = evt_usage or {}
+            if isinstance(evt_usage, dict):
+                usage = evt_usage
+            else:
+                log.debug(
+                    "SSE completed 事件 usage 非 dict（{}），已收敛为空 dict",
+                    type(evt_usage).__name__,
+                )
+                usage = {}
             status = "completed"
             tools = evt_tools
 

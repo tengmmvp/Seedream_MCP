@@ -249,9 +249,47 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
 
         result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
 
-    assert result["truncated_events"] == 0
+    # 无截断时不写 truncated_events 键：跨组契约约定 0 或缺省不携带该键，
+    # results/outputs 侧按键存在性渲染截断提示
+    assert "truncated_events" not in result
     assert len(result["data"]) == 1
     assert len(result["data"][0]["b64_json"]) == b64_len
+
+
+async def test_stream_truncated_events_passed_through_in_payload(no_sleep: None) -> None:
+    """SSE 事件因超限被丢弃时，truncated_events 计数透传进 api result payload。
+
+    单个未完成事件超过 event_truncate_threshold 即被丢弃并计数；阈值推导为
+    max(stream_buffer_max_size, base64 严格上界 + 信封余量)，压缩配置后约为 5464
+    字节，首个分块送出 6KB 无分隔符前缀触发截断，随后送达的 completed 事件正常解析。
+    """
+    config = SeedreamConfig(
+        api_key="k",
+        max_retries=3,
+        auto_save_max_file_size=1024,
+        stream_buffer_max_size=1024,
+        stream_chunk_size=64,
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+
+        async def _stream():
+            # 不完整事件：无空行分隔，超过阈值后被丢弃并计数
+            yield b"data: " + b"A" * 6000
+            yield b'data: {"type":"image_generation.completed","usage":{}}\n\n'
+
+        return httpx.Response(200, content=_stream(), headers={"content-type": "text/event-stream"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+    assert result["truncated_events"] == 1
+    assert isinstance(result["truncated_events"], int)
+    # 事件被丢弃使结果不完整，status 须标记 partial
+    assert result["status"] == "partial"
 
 
 async def test_stream_json_over_limit_error_not_wrapped_as_parse_failure(no_sleep: None) -> None:

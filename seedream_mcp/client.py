@@ -6,13 +6,17 @@
 
 核心能力包括图像预处理 LRU 缓存与 single-flight 去重、流式与非流式响应统一解析、
 指数退避重试与 Retry-After 处理，以及请求与响应的安全脱敏与异常分类。
+并行批次经 :class:`SharedRequestPlan` 共享单份 request_data 与序列化 body，
+构建与序列化各恰好发生一次。
 """
 
 import asyncio
 import hashlib
 import json
 import random
-from typing import Any, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Awaitable, Callable, Iterator, Sequence, cast
 
 import httpx
 
@@ -50,6 +54,102 @@ _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 # SSE 事件信封余量：event_truncate_threshold 在 base64 负载上界之外，为 data: 前缀、
 # JSON 包络（字段名、引号、分隔符）与行结尾预留的字节数。
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
+
+# 响应体 join 卸载阈值：累计读取超过该字节数时 b"".join 的整块拷贝下沉工作线程执行，
+# 避免 60MB 级响应在事件循环内长时间占用；小体量保持同步以省去线程调度开销。
+_JOIN_OFFLOAD_THRESHOLD = 8 * 1024 * 1024
+
+
+class SharedRequestPlan:
+    """单次工具调用内并行请求的共享计划。
+
+    同一批次的多并行请求经本对象共享同一份 request_data 与序列化 body：构建与序列化
+    各恰好发生一次，N 个请求的峰值内存为 1×body。计划由 tools 并行层在批次执行期间经
+    ``shared_request_plan_scope`` 绑定到当前上下文，client 各生成方法与 ``_call_api``
+    读取绑定值；批次结束后由作用域退出统一复位并调用 release 释放引用，body 不滞留至
+    自动保存等后续阶段，对象随批次回收、不跨调用常驻。
+
+    request_data 在共享期间不可变：构建完成后各生成方法与 ``_call_api`` 仅读取、不改写。
+    """
+
+    def __init__(self) -> None:
+        # 单飞锁同时守护构建与序列化：同批并发调用在锁上排队，后到者复用先到者产出；
+        # body 产出后所有调用方（含重试）走无锁快路径。
+        self._lock = asyncio.Lock()
+        self.request_data: dict[str, Any] | None = None
+        self.body: bytes | None = None
+
+    async def get_or_build(
+        self, builder: Callable[[], Awaitable[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        """返回共享 request_data：首个到者执行 builder 构建，其余复用同一 dict。
+
+        builder 在锁内执行，同批请求的图像预处理与请求字典组装只发生一次；构建抛出时
+        不写入计划，各调用方独立失败，后到者在锁内自行重试构建。
+        """
+        if self.request_data is not None:
+            return self.request_data
+        async with self._lock:
+            if self.request_data is None:
+                self.request_data = await builder()
+            return cast(dict[str, Any], self.request_data)
+
+    async def get_or_serialize(
+        self,
+        request_data: dict[str, Any],
+        serializer: Callable[[dict[str, Any]], bytes],
+    ) -> bytes:
+        """返回共享 body：首个到者序列化一次，其余复用同一 bytes 对象。
+
+        锁覆盖序列化全程，同批并发调用排队等待首份 body 产出，而非各自持有一份等大
+        拷贝；request_data 须为 ``get_or_build`` 返回的同一共享 dict。
+        """
+        if self.body is not None:
+            return self.body
+        async with self._lock:
+            if self.body is None:
+                self.body = await asyncio.to_thread(serializer, request_data)
+            return cast(bytes, self.body)
+
+    def release(self) -> None:
+        """批次执行结束后清除共享引用，避免大 body 滞留至自动保存等后续阶段。"""
+        self.request_data = None
+        self.body = None
+
+
+# 当前批次的共享计划绑定：tools 并行层在批次执行期间设置、结束后复位。contextvars
+# 按 asyncio 任务上下文隔离，并发批次互不可见；未绑定的直连调用读取到 None，走独立
+# 构建与序列化路径，公共 API 行为不受影响。
+_ACTIVE_REQUEST_PLAN: ContextVar[SharedRequestPlan | None] = ContextVar(
+    "seedream_active_request_plan", default=None
+)
+
+
+@contextmanager
+def shared_request_plan_scope() -> Iterator[SharedRequestPlan]:
+    """绑定新的共享请求计划至当前上下文，退出时复位绑定并释放计划引用。
+
+    供 tools 并行层包裹批次请求分发：作用域内的 client 生成调用读取绑定计划，同批
+    请求只构建一次 request_data、只序列化一次 body。以 with 使用，异常与取消路径
+    均经 finally 复位。
+    """
+    plan = SharedRequestPlan()
+    token = _ACTIVE_REQUEST_PLAN.set(plan)
+    try:
+        yield plan
+    finally:
+        _ACTIVE_REQUEST_PLAN.reset(token)
+        plan.release()
+
+
+async def _build_request_data(
+    plan: SharedRequestPlan | None,
+    builder: Callable[[], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """按共享计划构建 request_data：无计划直接构建，有计划经单飞复用同批结果。"""
+    if plan is None:
+        return await builder()
+    return await plan.get_or_build(builder)
 
 
 class SeedreamClient:
@@ -191,8 +291,8 @@ class SeedreamClient:
             lambda: size,
         )
 
-        try:
-            request_data = self._build_common_request(
+        async def _build_request() -> dict[str, Any]:
+            return self._build_common_request(
                 prompt=prompt,
                 size=size,
                 watermark=watermark,
@@ -202,6 +302,9 @@ class SeedreamClient:
                 tools=tools,
                 validated_opts=validated_opts,
             )
+
+        try:
+            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
 
             response = await self._call_api("text_to_image", request_data)
 
@@ -274,10 +377,9 @@ class SeedreamClient:
             lambda: size,
         )
 
-        try:
+        async def _build_request() -> dict[str, Any]:
             image_data = await self._prepare_image_input(image)
-
-            request_data = self._build_common_request(
+            return self._build_common_request(
                 prompt=prompt,
                 size=size,
                 watermark=watermark,
@@ -288,6 +390,9 @@ class SeedreamClient:
                 validated_opts=validated_opts,
                 extra={"image": image_data},
             )
+
+        try:
+            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
 
             response = await self._call_api("image_to_image", request_data)
 
@@ -364,10 +469,9 @@ class SeedreamClient:
             lambda: size,
         )
 
-        try:
+        async def _build_request() -> dict[str, Any]:
             image_data_list = await self._prepare_images_in_parallel(image)
-
-            request_data = self._build_common_request(
+            return self._build_common_request(
                 prompt=prompt,
                 size=size,
                 watermark=watermark,
@@ -378,6 +482,9 @@ class SeedreamClient:
                 validated_opts=validated_opts,
                 extra={"image": image_data_list, "sequential_image_generation": "disabled"},
             )
+
+        try:
+            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
 
             response = await self._call_api("multi_image_fusion", request_data)
 
@@ -458,7 +565,6 @@ class SeedreamClient:
             tools=tools,
         )
 
-        processed_image: str | list[str] | None = None
         reference_images = None
         if image is not None:
             if isinstance(image, str):
@@ -488,19 +594,20 @@ class SeedreamClient:
                 resolved_max_images, reference_images, self.config.model_id
             )
 
-        try:
+        self.logger.opt(lazy=True).info(
+            "开始组图输出任务: prompt_meta={}, max_images={}, size={}",
+            lambda: self._summarize_prompt(prompt),
+            lambda: resolved_max_images,
+            lambda: size,
+        )
+
+        async def _build_request() -> dict[str, Any]:
+            processed_image: str | list[str] | None = None
             if reference_images is not None:
                 if len(reference_images) == 1:
                     processed_image = await self._prepare_image_input(reference_images[0])
                 else:
                     processed_image = await self._prepare_images_in_parallel(reference_images)
-
-            self.logger.opt(lazy=True).info(
-                "开始组图输出任务: prompt_meta={}, max_images={}, size={}",
-                lambda: self._summarize_prompt(prompt),
-                lambda: resolved_max_images,
-                lambda: size,
-            )
 
             extra: dict[str, Any] = {
                 "sequential_image_generation": "auto",
@@ -508,7 +615,7 @@ class SeedreamClient:
             }
             if processed_image is not None:
                 extra["image"] = processed_image
-            request_data = self._build_common_request(
+            return self._build_common_request(
                 prompt=prompt,
                 size=size,
                 watermark=watermark,
@@ -519,6 +626,9 @@ class SeedreamClient:
                 validated_opts=validated_opts,
                 extra=extra,
             )
+
+        try:
+            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
 
             response = await self._call_api("sequential_generation", request_data)
 
@@ -793,10 +903,19 @@ class SeedreamClient:
             status,
             data_count,
         )
+        # usage 字段异形（如字符串或数字）时收敛为空 dict，保证结果结构 usage 恒为
+        # dict，不因上游异形透传破坏下游聚合；与 io_sse 的 completed 事件守卫同口径。
+        usage = payload.get("usage", {})
+        if not isinstance(usage, dict):
+            self.logger.debug(
+                "API 响应 usage 字段非 dict（{}），已收敛为空 dict",
+                type(usage).__name__,
+            )
+            usage = {}
         return {
             "success": True,
             "data": data or [],
-            "usage": payload.get("usage", {}),
+            "usage": usage,
             "status": status,
             "tools": payload.get("tools"),
         }
@@ -814,7 +933,9 @@ class SeedreamClient:
 
         经 iterencode 分片逐片编码，避免先物化完整 str 再整体 encode 的双份临时
         拷贝；关闭 ensure_ascii 使中文等非 ASCII 字符以 UTF-8 原样输出，不被 ASCII
-        转义序列膨胀。并行请求各自持有等大 body 的内存包络见 _call_api 注释。
+        转义序列膨胀。末尾保留一次 bytes(buffer) 拷贝：httpx 对 content 仅特判
+        bytes 与 str，bytearray 会落入 Iterable 分支逐元素产出 int 而损坏请求体，
+        故无法以零拷贝方式直接交出 buffer。并行请求的内存包络见 _call_api 注释。
         """
         encoder = json.JSONEncoder(ensure_ascii=False)
         buffer = bytearray()
@@ -885,14 +1006,19 @@ class SeedreamClient:
                     f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
                 )
             chunks.append(chunk)
+        if received > _JOIN_OFFLOAD_THRESHOLD:
+            # 大响应体的 join 为单次整块 memcpy，下沉工作线程执行，避免在事件循环内
+            # 长时间占用阻塞其他任务。
+            return await asyncio.to_thread(b"".join, chunks)
         return b"".join(chunks)
 
     @staticmethod
     async def _error_data_from_body(raw_body: bytes) -> dict[str, Any]:
         """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。
 
-        json.loads 为同步 CPU 操作，移至工作线程执行，避免大错误体在事件循环内
-        解析阻塞其他任务；解码文本经 handle_api_error 截断后才进入异常 message。
+        json.loads 与降级分支的 bytes decode 均为同步 CPU 操作，移至工作线程执行，
+        避免大错误体在事件循环内解析或解码阻塞其他任务；解码文本经 handle_api_error
+        截断后才进入异常 message。
         """
         try:
             parsed: Any = await asyncio.to_thread(json.loads, raw_body)
@@ -900,7 +1026,11 @@ class SeedreamClient:
             parsed = None
         if isinstance(parsed, dict):
             return parsed
-        return {"message": raw_body.decode("utf-8", errors="ignore")}
+
+        def _decode_as_message() -> dict[str, Any]:
+            return {"message": raw_body.decode("utf-8", errors="ignore")}
+
+        return await asyncio.to_thread(_decode_as_message)
 
     async def _raise_for_stream_response_status(self, response: httpx.Response) -> None:
         """将流式响应中的非 200 状态码转换为统一 API 异常。"""
@@ -930,7 +1060,7 @@ class SeedreamClient:
             await self._raise_for_stream_response_status(response)
 
             if is_sse_response(response):
-                return await parse_sse_response(
+                sse_result = await parse_sse_response(
                     response,
                     model_id=self.config.model_id,
                     chunk_size=self.config.stream_chunk_size,
@@ -951,6 +1081,13 @@ class SeedreamClient:
                     total_bytes_limit=self._response_body_byte_limit(),
                     log=self.logger,
                 )
+                # 跨组契约：仅在发生超限丢弃时把 truncated_events 计数写入 api result
+                # payload，计数为 0 或缺省时不写键，results/outputs 侧按键存在性渲染
+                # 截断提示。
+                truncated_events = sse_result.pop("truncated_events", 0)
+                if isinstance(truncated_events, int) and truncated_events > 0:
+                    sse_result["truncated_events"] = truncated_events
+                return sse_result
 
             try:
                 raw_body = await self._read_response_body_capped(response)
@@ -1017,10 +1154,15 @@ class SeedreamClient:
         safe_request_data = self._sanitize_request_for_logging(request_data)
         request_timeout = self._build_http_timeout()
         # request_data 在重试期间不变，循环外序列化一次，避免每次重试重复 JSON 编码阻塞。
-        # 内存特征：序列化经 iterencode 削减 str 中间态，但每个并行请求各自持有等大
-        # body 直至响应返回（request_count 上限 4），14×30MB 参考图最坏包络下 body
-        # 存活约 4×560MB，部署受限时须按此规划内存。
-        request_body = await asyncio.to_thread(self._serialize_request, request_data)
+        # 批次绑定共享计划时（见 _ACTIVE_REQUEST_PLAN）经计划单飞：N 个并行请求共享同一
+        # 份 request_data 与 body，构建与序列化各恰好一次，峰值 1×body；未绑定的直连调用
+        # 各自序列化一份。内存特征：序列化经 iterencode 削减 str 中间态，body 存活至响应
+        # 返回，由调用方引用保持。
+        plan = _ACTIVE_REQUEST_PLAN.get()
+        if plan is None:
+            request_body = await asyncio.to_thread(self._serialize_request, request_data)
+        else:
+            request_body = await plan.get_or_serialize(request_data, self._serialize_request)
         # max_retries 表示首次失败后的重试次数，故总尝试次数为其加一，与下载重试语义一致。
         total_attempts = max(1, self.config.max_retries + 1)
 

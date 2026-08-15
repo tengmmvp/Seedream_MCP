@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
+from pathlib import Path
 
 from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
 from ..core.formats import MIME_BY_EXTENSION, _format_file_size_mb
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
+    _WORKSPACE_ROOTS_VAR,
+    _is_unc_path,
     get_workspace_roots,
+    is_within_resolved,
     resolve_workspace_roots,
     suggest_similar_paths,
 )
@@ -61,13 +66,45 @@ async def prepare_image_input(image: str) -> str:
         raise SeedreamAPIError(f"图像处理失败: {e}") from e
 
 
+def _resolves_outside_workspace(normalized: str, resolved_roots: list[Path]) -> bool:
+    """判断输入路径解析后的物理位置是否落在全部工作区根之外。
+
+    与 resolve_local_image_candidate 的候选构造一致：绝对路径原样作为候选，相对
+    路径按根序拼接；任一候选 resolve 后命中任一根即视为界内。用于把「路径越界」
+    从「文件缺失或无效」类失败中拆出，走带允许根列表的校验错误分支。UNC 路径不
+    进入 resolve 以免触发 SMB 连接：UNC 形态的输入直接返回 False 交由诊断分支
+    处理，UNC 根拼接出的相对路径候选经逐候选守卫跳过。
+    """
+    if _is_unc_path(normalized):
+        return False
+    if os.path.isabs(normalized):
+        candidates = [Path(normalized)]
+    else:
+        candidates = [base / normalized for base in resolved_roots]
+    for candidate in candidates:
+        # 逐候选 UNC 守卫：根本身为 UNC 形态时相对路径候选拼接后仍以 UNC 前缀开头，
+        # resolve 同样会触发 SMB 连接。守卫规则与 resolve_local_image_candidate 的
+        # 逐候选前置拦截同源，均为 io_path._is_unc_path 的单一规则。
+        if _is_unc_path(str(candidate)):
+            continue
+        try:
+            resolved_candidate = candidate.resolve()
+        except (OSError, ValueError):
+            continue
+        if any(is_within_resolved(resolved_candidate, base) for base in resolved_roots):
+            return False
+    return True
+
+
 def _prepare_local_image(normalized: str, original: str) -> str:
     """校验本地图片路径并读取编码为 Base64 Data URI。
 
     候选定位委托 image_validation.resolve_local_image_candidate，与
     ImagePreparer._local_file_signature 共用同一选择规则，缓存签名与实际读取
-    锁定同一文件。定位失败时经 validate_image_path 做诊断性校验取具体失败原因，
-    并给出相似路径建议。需在工作线程中调用。
+    锁定同一文件。定位失败且路径解析后落在全部工作区根之外时，抛出携带允许根
+    列表的 SeedreamValidationError，属参数校验语义而非 API 调用失败；界内定位
+    失败则经 validate_image_path 做诊断性校验取具体失败原因，并给出相似路径建议。
+    需在工作线程中调用。
     """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
@@ -77,6 +114,22 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     found = resolve_local_image_candidate(normalized, resolved_roots)
     if found is None:
+        if _resolves_outside_workspace(normalized, resolved_roots):
+            # 回退边界下来自服务器环境的根路径不进入面向调用方的错误消息，
+            # 与 browse_images 的回退边界遮蔽标准一致；仅会话 Roots 声明的
+            # 边界回显具体路径供调用方自纠。
+            if _WORKSPACE_ROOTS_VAR.get() is None:
+                raise SeedreamValidationError(
+                    "路径超出允许的工作区目录范围，仅允许服务器配置的工作区目录",
+                    field="image",
+                    value=normalized,
+                )
+            allowed_roots = ", ".join(str(root) for root in workspace_roots)
+            raise SeedreamValidationError(
+                f"路径超出允许的工作区目录范围，允许的根: {allowed_roots}",
+                field="image",
+                value=normalized,
+            )
         # 诊断性校验仅用于错误文案：定位已由共享规则唯一决定，此处取各根的具体
         # 失败原因（文件不存在、格式不支持等）拼入错误消息，不影响候选一致性。
         validation_errors: list[str] = []

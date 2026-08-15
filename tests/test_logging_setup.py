@@ -18,18 +18,22 @@ _RecordException = namedtuple("_RecordException", "type value traceback")
 
 
 class _FakeLogger:
-    """替身 loguru logger，吸收 remove/add/info 调用。
+    """替身 loguru logger，吸收 remove/add/info 调用并记录 add 的关键字参数。
 
     真实 setup_logging 会调用 logger.remove() 清空全局 loguru handler 并 logger.add()
     注册新 handler，污染跨测试的全局日志状态。测试期间以替身替换模块级 logger，使其
     不动真实全局，杜绝 handler 泄漏。
     """
 
+    def __init__(self) -> None:
+        self.add_kwargs: list[dict] = []
+
     def remove(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
 
     def add(self, *args: object, **kwargs: object) -> int:
-        del args, kwargs
+        del args
+        self.add_kwargs.append(dict(kwargs))
         return 0
 
     def configure(self, *args: object, **kwargs: object) -> None:
@@ -85,6 +89,22 @@ def test_setup_logging_respects_force_standard_logging_true(
     )
 
     assert captured_kwargs["force"] is True
+
+
+def test_console_sink_colorize_follows_tty_autodetection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """控制台 sink 的 colorize 保持 None，由 loguru 按流是否 TTY 自动决定。
+
+    强制 True 会使重定向到文件或管道的非终端 sink 输出 ANSI 转义序列，污染采集日志。
+    """
+    fake = _FakeLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+
+    setup_logging(log_level="INFO", enable_console=True, enable_file=False)
+
+    assert len(fake.add_kwargs) == 1
+    assert fake.add_kwargs[0]["colorize"] is None
 
 
 # ==================== 控制字符 patcher ====================

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...utils.core.errors import sanitize_error_text
+from ...utils.core.errors import sanitize_data_text, sanitize_error_text
 from ...utils.io.io_save import AutoSaveResult
 from ._helpers import (
     _add_usage_value,
@@ -187,17 +187,111 @@ def update_result_with_auto_save(
     return updated_result
 
 
+# 单槽哨兵：最近一次经 _sanitize_image_errors 净化写回的图片列表。文本与结构化
+# 两条出口在 common.py 中以同一列表先后调用本函数，两次调用之间无 await，事件
+# 循环内不会交错，第二次进入据此识别并跳过重复净化。Python 内建 list 不支持实例
+# 属性也不可弱引用，无法在列表对象上打标记，故以模块级单槽承载；命中后即清空，
+# 未复用时持有至下一次生成调用覆盖，复位协议可经 reset_last_sanitized_images
+# 显式清空；槽位被其他调用覆盖时退化为重复净化，方向安全。
+_last_sanitized_images: list[dict[str, Any]] | None = None
+
+
+def reset_last_sanitized_images() -> None:
+    """清空净化哨兵槽位，供复位协议在资源生命周期边界显式调用。
+
+    哨兵默认持有至下一次生成调用覆盖；复位协议调用本函数立即释放槽位持有的
+    图片列表引用，避免其生命周期越过资源边界。清空后同一列表再次进入净化
+    仅退化为重复净化，对已净化内容幂等，方向安全。
+    """
+    global _last_sanitized_images
+    _last_sanitized_images = None
+
+
+def _sanitize_usage(usage: Any) -> Any:
+    """净化 usage 统计：数值标量原样保留，字符串值过净化管线。
+
+    usage 为 client 侧原样透传的上游 dict，被劫持中间层回显自由文本时可能携带
+    CRLF 或凭据片段；数值键为聚合语义保持原值，字符串值与嵌套容器逐层净化。
+    遍历采用显式栈迭代而非递归：数百层嵌套（json.loads 同样不限深度）不会触发
+    解释器递归上限，使成功结果退化为异常；visited 集合防御循环引用，上游透传
+    数据理论无环，命中时以 <truncated:cyclic> 摘要占位终止展开。
+    """
+    if isinstance(usage, str):
+        return sanitize_error_text(usage)
+    if not isinstance(usage, (dict, list)):
+        return usage
+
+    sanitized_root: dict[str, Any] | list[Any] = {} if isinstance(usage, dict) else []
+    visited: set[int] = set()
+    # 待写入任务栈：目标容器 + 写入位置（dict 键或 list 下标）+ 待净化值；按下标
+    # 寻址写入，出栈顺序不影响容器内元素顺序。
+    pending: list[tuple[dict[str, Any] | list[Any], Any, Any]] = (
+        [(sanitized_root, key, value) for key, value in usage.items()]
+        if isinstance(usage, dict)
+        else [(sanitized_root, index, item) for index, item in enumerate(usage)]
+    )
+    while pending:
+        target, key, value = pending.pop()
+        sanitized: Any
+        if isinstance(value, (dict, list)):
+            if id(value) in visited:
+                sanitized = "<truncated:cyclic>"
+            else:
+                visited.add(id(value))
+                sanitized = {} if isinstance(value, dict) else []
+                if isinstance(value, dict):
+                    pending.extend((sanitized, k, item) for k, item in value.items())
+                else:
+                    pending.extend((sanitized, i, item) for i, item in enumerate(value))
+        elif isinstance(value, str):
+            sanitized = sanitize_error_text(value)
+        else:
+            sanitized = value
+        target[key] = sanitized
+    return sanitized_root
+
+
+# 图片条目的已知键：error 与 size/output_format/model/type、url 各自单独净化，
+# local_path/markdown_ref 归入数据字段净化，b64_json 为有意保留的图像载荷原样透传，
+# request_index/image_index 为本侧聚合写入的整数序号。不在此列的键按未知键处理。
+_KNOWN_IMAGE_KEYS = frozenset(
+    {
+        "type",
+        "size",
+        "output_format",
+        "model",
+        "url",
+        "error",
+        "local_path",
+        "markdown_ref",
+        "b64_json",
+        "request_index",
+        "image_index",
+    }
+)
+
+
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """净化图片项内的上游自由字段，就地写回传入列表并返回同一列表。
 
-    覆盖 error.message、error.code、url、size 与 output_format：均为上游可回显
-    自由内容的字段，可能携带 userinfo 凭据或 CRLF。净化结果写回列表条目后，
-    文本与结构化两条输出通道复用同一份净化值，同一字段不再重复过净化管线。
-    仅对净化后内容发生变化的项做浅拷贝替换列表位置，其余项原样引用，调用方
-    持有的原图片字典对象不被修改。SSE 失败事件在 io_sse 源头已净化，此处
-    覆盖非 SSE 路径；对已脱敏内容幂等，但超长片段（截断后仍超 500 字符）会
-    在重复调用时叠加一层截断标记。
+    覆盖 error.message、error.code、url、size、output_format、model、type、
+    local_path、markdown_ref 与未知键：均为上游可回显自由内容的字段，可能携带
+    userinfo 凭据或 CRLF。url/local_path/markdown_ref 与未知键为数据字段，走
+    sanitize_data_text 保留完整可用性——签名 URL 常见 400-700 字符、本地路径截断
+    即不可寻址；其余短标识与自由文本走 sanitize_error_text，截断语义正确。
+    local_path/markdown_ref 合法写入点仅为自动保存回填，但上游伪造的原始条目
+    同样携带这两个键，统一净化闭合两条通道的注入面；未知键由结构化输出
+    extra='allow' 直通，字符串值保守净化后保留而非剔除。净化结果写回列表条目后，
+    文本与结构化两条输出通道复用同一份净化值；已净化列表再次进入时经模块级
+    哨兵跳过，超长片段的截断标记不再叠加。仅对净化后内容发生变化的项做浅拷贝
+    替换列表位置，其余项原样引用，调用方持有的原图片字典对象不被修改。
+    SSE 失败事件在 io_sse 源头已净化，此处覆盖非 SSE 路径；对已脱敏内容幂等。
     """
+    global _last_sanitized_images
+    if _last_sanitized_images is images:
+        _last_sanitized_images = None
+        return images
+
     for index, image in enumerate(images):
         updates: dict[str, Any] = {}
 
@@ -219,18 +313,33 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
             if sanitized_error is not None:
                 updates["error"] = sanitized_error
 
-        for field in ("url", "size", "output_format"):
+        for field in ("size", "output_format", "model", "type"):
             value = image.get(field)
             if isinstance(value, str):
                 sanitized_value = sanitize_error_text(value)
                 if sanitized_value != value:
                     updates[field] = sanitized_value
 
+        for field in ("url", "local_path", "markdown_ref"):
+            value = image.get(field)
+            if isinstance(value, str):
+                sanitized_value = sanitize_data_text(value)
+                if sanitized_value != value:
+                    updates[field] = sanitized_value
+
+        for key, value in image.items():
+            if key in _KNOWN_IMAGE_KEYS or not isinstance(value, str):
+                continue
+            sanitized_value = sanitize_data_text(value)
+            if sanitized_value != value:
+                updates[key] = sanitized_value
+
         if updates:
             sanitized_item = dict(image)
             sanitized_item.update(updates)
             images[index] = sanitized_item
 
+    _last_sanitized_images = images
     return images
 
 
@@ -269,7 +378,10 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
     """格式化单张图片的可读详情行。
 
     入参条目已由 format_generation_response 经 _sanitize_image_errors 统一净化并
-    写回，此处直接消费已净化值，不再对同一字段重复过净化管线。
+    写回，此处直接消费已净化值，不再对同一字段重复过净化管线。保存成功的条目
+    已有本地路径，取回结果以路径为准，URL 行省略；未保存或保存失败时 URL 是取回
+    结果的唯一途径，保留输出。markdown_ref 可由本地路径平凡推导，文本通道不再
+    单独成行，结构化通道仍完整携带。
     """
     parts = [f"图片 {index}:"]
     if "request_index" in image:
@@ -281,7 +393,7 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
             parts.append(f"  错误码: {error_info['code']}")
         if error_info.get("message"):
             parts.append(f"  错误信息: {error_info['message']}")
-    if image.get("url"):
+    if image.get("url") and "local_path" not in image:
         parts.append(f"  URL: {image['url']}")
     if "size" in image:
         parts.append(f"  尺寸: {image['size']}")
@@ -291,8 +403,6 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
         parts.append(f"  序号: {image['image_index']}")
     if "local_path" in image:
         parts.append(f"  本地路径: {image['local_path']}")
-    if "markdown_ref" in image:
-        parts.append(f"  Markdown 引用: {image['markdown_ref']}")
     if "b64_json" in image:
         b64_data = image.get("b64_json")
         if b64_data:
@@ -308,12 +418,13 @@ def _format_auto_save_section(
     auto_save_error: str | None,
     saveable_indices: list[int] | None = None,
 ) -> list[str]:
-    """格式化自动保存统计与逐项结果。
+    """格式化自动保存摘要与失败明细。
 
-    图片编号基准与图片列表段落一致，取可保存图片在 extract_images 归一化列表中的
-    原始索引：失败占位项占号不重排，混合成败时两条「图片 N」指向同一条目。
-    saveable_indices 与 auto_save_results 按位置对位；缺失或长度不足时回退保存序号，
-    避免编号悬空。
+    成功项的本地路径已在图片列表段落以「本地路径」行展示，此处折叠为一行
+    N/M 成功摘要；仅失败项保留明细行。图片编号基准与图片列表段落一致，取可保存
+    图片在 extract_images 归一化列表中的原始索引：失败占位项占号不重排，混合成败
+    时两条「图片 N」指向同一条目。saveable_indices 与 auto_save_results 按位置
+    对位；缺失或长度不足时回退保存序号，避免编号悬空。
     """
     if auto_save_error:
         return [f"自动保存失败: {auto_save_error}", ""]
@@ -321,47 +432,65 @@ def _format_auto_save_section(
         return ["自动保存: 已开启但未生成可保存的图片", ""]
 
     successful_saves = sum(1 for r in auto_save_results if r.success)
-    failed_saves = len(auto_save_results) - successful_saves
-    parts = [
-        "自动保存信息:",
-        f"  总图片数: {len(auto_save_results)}",
-        f"  成功保存: {successful_saves}",
-    ]
-    if failed_saves:
-        parts.append(f"  保存失败: {failed_saves}")
+    parts = [f"自动保存: {successful_saves}/{len(auto_save_results)} 成功"]
     for i, save_result in enumerate(auto_save_results):
+        if save_result.success:
+            continue
         if saveable_indices is not None and i < len(saveable_indices):
             display_index = saveable_indices[i] + 1
         else:
             display_index = i + 1
-        if save_result.success:
-            parts.append(f"  图片 {display_index}: 已保存到 {save_result.local_path}")
-        else:
-            # error 为异常文本，与结构化通道 to_dict 的净化对齐，防止换行注入用户可见文本。
-            error_text = sanitize_error_text(save_result.error or "未知原因")
-            parts.append(f"  图片 {display_index}: 保存失败 - {error_text}")
+        # error 为异常文本，与结构化通道 to_dict 的净化对齐，防止换行注入用户可见文本。
+        error_text = sanitize_error_text(save_result.error or "未知原因")
+        parts.append(f"  图片 {display_index}: 保存失败 - {error_text}")
     parts.append("")
     return parts
 
 
 def _format_usage_section(usage: dict[str, Any]) -> list[str]:
-    """格式化使用统计。"""
-    parts = ["使用统计:"]
+    """格式化使用统计。
+
+    生成图片数已由自动保存摘要或图片列表段落表达——摘要分母即待保存图片总数，
+    此处不再重复计数；无可渲染条目时整段省略。标量字段仅渲染数值取值：usage 为
+    上游透传 dict，字符串值经插值会把换行与敏感片段带入文本通道。
+    """
+    items: list[str] = []
+
+    def _render_number(label: str, value: Any) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return
+        items.append(f"  {label}: {value}")
+
     if "input_images" in usage:
-        parts.append(f"  输入图片数: {usage['input_images']}")
-    if "generated_images" in usage:
-        parts.append(f"  生成图片数: {usage['generated_images']}")
+        _render_number("输入图片数", usage["input_images"])
     if "output_tokens" in usage:
-        parts.append(f"  输出 tokens: {usage['output_tokens']}")
+        _render_number("输出 tokens", usage["output_tokens"])
     if "total_tokens" in usage:
-        parts.append(f"  总 tokens: {usage['total_tokens']}")
+        _render_number("总 tokens", usage["total_tokens"])
     tool_usage = usage.get("tool_usage")
     if isinstance(tool_usage, dict):
         web_search_count = tool_usage.get("web_search")
-        if isinstance(web_search_count, int) and web_search_count > 0:
-            parts.append(f"  联网搜索: {web_search_count} 次")
-    parts.append("")
-    return parts
+        if (
+            isinstance(web_search_count, int)
+            and not isinstance(web_search_count, bool)
+            and web_search_count > 0
+        ):
+            items.append(f"  联网搜索: {web_search_count} 次")
+    if not items:
+        return []
+    return ["使用统计:", *items, ""]
+
+
+def _extract_truncated_events(result: dict[str, Any]) -> int | None:
+    """提取 SSE 解析记录的超限丢弃事件数，仅接受正整数。
+
+    client 侧在发生超限丢弃时向 result 写入 truncated_events 键，未发生时缺省
+    无键；bool 与非正整数等异常形态一律视为无该信息。
+    """
+    value = result.get("truncated_events")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def format_generation_response(
@@ -377,13 +506,15 @@ def format_generation_response(
 ) -> str:
     """格式化图片生成结果为可读文本。
 
-    将生成结果、提示词、尺寸、保存信息及使用统计等数据，
-    按规范化格式输出为结构清晰的多行文本字符串。
+    将生成结果、尺寸、保存信息及使用统计等数据，按规范化格式输出为结构清晰的
+    多行文本字符串。提示词不在文本通道回显：structuredContent.prompt 已携带完整
+    值，且调用方模型刚发送过该提示词。
 
     Args:
         title: 响应标题，用于标识生成任务类型。
         result: 图片生成结果字典，包含图片数据及使用统计。
-        prompt: 生成图片所用的提示词。
+        prompt: 生成图片所用的提示词；为保持既有调用签名保留，文本通道不再回显，
+            完整值由结构化通道的 prompt 字段携带。
         size: 生成图片的尺寸规格。
         auto_save_results: 自动保存结果列表，可选。
         auto_save_enabled: 是否启用自动保存功能，默认 False。
@@ -403,11 +534,11 @@ def format_generation_response(
     if images is None:
         images = extract_images(result)
     # 统一净化一次并写回列表：_format_image_item 直接消费已净化值，后续结构化
-    # 构建复用同一列表，同一字段不再重复过净化管线；io_sse 源头净化保持独立防线。
+    # 构建复用同一列表并经哨兵跳过重复净化；io_sse 源头净化保持独立防线。
     images = _sanitize_image_errors(images)
     usage = result.get("usage", {})
 
-    parts: list[str] = [title, f"提示词: {prompt}", f"尺寸: {size}", ""]
+    parts: list[str] = [title, f"尺寸: {size}", ""]
 
     batch_info = result.get("batch")
     if isinstance(batch_info, dict):
@@ -430,6 +561,13 @@ def format_generation_response(
 
     if usage:
         parts.extend(_format_usage_section(usage))
+
+    truncated_events = _extract_truncated_events(result)
+    if truncated_events:
+        # usage 与自动保存段落自带收尾空行，追加提示行前去除一个，避免连续空行。
+        if parts and parts[-1] == "":
+            parts.pop()
+        parts.append(f"因单事件体积超限丢弃 {truncated_events} 个事件")
 
     return "\n".join(parts)
 
@@ -472,13 +610,19 @@ def _build_generation_structured_result(
         "tools": context.tools,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
-        # data 项可能携带上游 per-image error 与 url/size/output_format 等自由字段，
-        # 统一净化后进入结构化输出，与异常路径防护一致。format_generation_response
-        # 已就同一列表净化写回，此处调用兜底独立调用场景；超长片段会再截断一次。
+        # data 项可能携带上游 per-image error 与 url/model/type 等自由字段，统一净化
+        # 后进入结构化输出，与异常路径防护一致。format_generation_response 已就同一
+        # 列表净化写回，此处经模块级哨兵跳过重复净化；独立调用场景自行净化兜底。
         "data": _sanitize_image_errors(images if images is not None else extract_images(result)),
-        "usage": result.get("usage", {}),
+        # usage 为 client 侧原样透传的上游 dict，字符串值过净化管线防 CRLF 与凭据注入，
+        # 数值键保持原值供聚合与计费核对。
+        "usage": _sanitize_usage(result.get("usage", {})),
         "batch": result.get("batch"),
     }
+
+    truncated_events = _extract_truncated_events(result)
+    if truncated_events is not None:
+        payload["truncated_events"] = truncated_events
 
     if context.enable_auto_save:
         payload["auto_save"] = {

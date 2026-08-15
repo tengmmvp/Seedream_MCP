@@ -14,7 +14,7 @@ from mcp.types import CallToolResult, TextContent
 
 from ...config import SeedreamConfig
 from ...utils.io.io_save import AutoSaveResult
-from ...utils.core.errors import format_error_for_user
+from ...utils.core.errors import format_error_for_user, resolve_error_profile
 from ._helpers import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
@@ -23,6 +23,7 @@ from ._helpers import (
     PROGRESS_VALIDATED,
     _classify_generation_error_type,
     _is_generation_failed,
+    _resolve_failure_guidance,
     _safe_ctx_log,
     _safe_report_progress,
     _yield_for_cancellation,
@@ -76,7 +77,6 @@ async def execute_generation_handler(
     tool_name: str,
     completion_title: str,
     failure_prefix: str,
-    guidance: str,
     start_log_message: str,
     start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]],
     request_executor: Callable[
@@ -98,7 +98,6 @@ async def execute_generation_handler(
         tool_name: 工具标识，写入 structuredContent.tool 与日志。
         completion_title: 成功时响应文本的标题。
         failure_prefix: 失败时错误消息与日志的前缀。
-        guidance: 失败时追加给用户的排查建议文本。
         start_log_message: 请求开始时的日志模板。
         start_log_values_builder: 基于执行上下文构造日志模板参数的回调。
         request_executor: 执行单次生成请求的回调，由各 impl 提供 client 调用差异。
@@ -241,14 +240,23 @@ async def execute_generation_handler(
     except Exception as exc:
         module_logger.error("{}处理失败", failure_prefix, exc_info=True)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
-        await _safe_ctx_log(ctx, "error", f"{failure_prefix}失败：{format_error_for_user(exc)}")
-        error_message = f"{failure_prefix}失败：{format_error_for_user(exc)}\n{guidance}"
+        user_facing_error = format_error_for_user(exc)
+        await _safe_ctx_log(ctx, "error", f"{failure_prefix}失败：{user_facing_error}")
+        # format_error_for_user 已在档案携带 user_hint 时把建议拼入文案，此时不再
+        # 叠加查表排查建议，避免 429/402 等场景同一句建议逐字出现两遍；档案无
+        # user_hint 时才以查表建议补充，参数类错误不附带凭据与网络指引。
+        if resolve_error_profile(exc).user_hint:
+            error_message = f"{failure_prefix}失败：{user_facing_error}"
+        else:
+            error_message = (
+                f"{failure_prefix}失败：{user_facing_error}\n{_resolve_failure_guidance(exc)}"
+            )
         return CallToolResult(
             content=[TextContent(type="text", text=error_message)],
             structuredContent=build_error_structured(
                 tool_name,
                 _classify_generation_error_type(exc),
-                format_error_for_user(exc),
+                user_facing_error,
             ),
             isError=True,
         )
