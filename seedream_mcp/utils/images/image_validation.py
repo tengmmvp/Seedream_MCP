@@ -65,6 +65,13 @@ def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None
     image_bytes 为已读取的完整图像字节，value_label 用于错误信息。维度超限由
     _validate_image_dimensions 抛 SeedreamValidationError；解码异常抛 PIL 原生类型，
     由调用方按所属模块的异常基类包装。
+
+    Args:
+        image_bytes: 已读取的完整图像字节。
+        value_label: 出现在错误信息中的输入标识。
+
+    Raises:
+        SeedreamValidationError: 宽高下限、宽高比或总像素任一约束不满足。
     """
     from PIL import Image
 
@@ -82,7 +89,7 @@ MAX_IMAGE_PIXELS = 6000 * 6000
 
 
 def _get_validation_base_dir() -> Path:
-    """获取本地文件校验的基础目录，委托 io_path.resolve_env_workspace_root 保持单一来源。"""
+    """本地文件校验的基础目录，委托 io_path.resolve_env_workspace_root 保持单一来源。"""
     return resolve_env_workspace_root()
 
 
@@ -129,6 +136,12 @@ def image_candidate_stat(path: Path) -> os.stat_result | None:
 
     资格规则：常规文件、扩展名在支持白名单、大小不超过 MAX_IMAGE_FILE_SIZE；
     任一不满足或 stat 失败返回 None。
+
+    Args:
+        path: 待检查的候选文件路径。
+
+    Returns:
+        通过资格检查的 stat 结果；任一条件不满足或 stat 失败返回 None。
     """
     try:
         st = path.stat()
@@ -157,6 +170,13 @@ def resolve_local_image_candidate(
     image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件，杜绝两侧
     规则漂移导致签名命中与读取内容不一致的陈旧缓存。未命中返回 None，由调用方
     决定回退或报错。
+
+    Args:
+        image: 输入路径字符串，可为绝对或相对路径。
+        resolved_roots: 已 resolve 的工作区根列表，相对路径按根序拼接候选。
+
+    Returns:
+        首个命中的 (resolve 后物理路径, stat) 二元组；未命中返回 None。
     """
     candidates = (
         [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_roots]
@@ -418,7 +438,8 @@ def validate_image_path(
 
     Args:
         path: 图片文件路径；HTTP(S) URL 有效但路径返回 None。
-        base_dir: 工作区基础目录，用于越界校验；None 时回退首个工作区根，多根工作区仅校验首个根，完整多根校验须由调用方遍历各根分别调用。
+        base_dir: 工作区基础目录，用于越界校验；None 时回退首个工作区根，多根工作区
+            仅校验首个根，完整多根校验须由调用方遍历各根分别调用。
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:

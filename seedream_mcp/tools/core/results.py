@@ -37,6 +37,7 @@ def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
     data = result.get("data")
 
     def _coerce(value: Any) -> list[dict[str, Any]]:
+        """将任意取值归一化为仅含图片字典的列表。"""
         if value is None:
             return []
         if isinstance(value, list):
@@ -63,6 +64,14 @@ def aggregate_parallel_generation_results(
     合并各成功请求的图片与用量统计，失败请求记入 batch.errors；success 由是否有任一成功
     请求决定，status 按 completed/partial/failed 三态推导，任一成功请求自身为 partial
     时批次 status 至多为 partial。
+
+    Args:
+        request_results: 各请求结果列表，成功为结果字典，失败或异常时对应位置为 None。
+        request_errors: 请求序号到异常的映射，序号从 1 起，与结果列表按位置对应。
+
+    Returns:
+        聚合后的统一响应字典，含 success、data、usage、status 与 batch 键，全部
+        请求失败时额外写入 error 键。
     """
     merged_data: list[dict[str, Any]] = []
     merged_usage: dict[str, Any] = {}
@@ -641,6 +650,9 @@ def _build_generation_structured_result(
         auto_save_error: 自动保存错误信息。
         images: 预提取的图片列表，传入时直接写入 data，避免重复调用 extract_images；
             None 时从 result 提取，便于函数独立调用。
+
+    Returns:
+        构造并经 model_dump 输出的 structuredContent 字典，成功路径排除 error 键。
     """
     # b64_json 模式下 data 内的完整 base64 为有意保留：用户显式请求 b64 即期望取回图像
     # 数据，故此处不做截断；并行与组图场景的大载荷由调用方或客户端按需处理。

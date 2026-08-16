@@ -60,6 +60,9 @@ def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
 
     Returns:
         打开的文件描述符。
+
+    Raises:
+        OSError: 最终分量为符号链接，或校验与打开之间最终分量被替换为符号链接。
     """
     pre_st = os.lstat(path_str)
     if stat.S_ISLNK(pre_st.st_mode):
@@ -81,6 +84,15 @@ def open_no_follow_read(path: PathLike) -> IO[bytes]:
 
     最终路径分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时退化为 lstat 取指纹、
     open 后 fstat 比对 st_ino/st_dev 同一性，闭合最终分量替换竞态。
+
+    Args:
+        path: 目标文件路径。
+
+    Returns:
+        以只读方式打开的二进制文件对象。
+
+    Raises:
+        OSError: 最终路径分量为符号链接、打开期间最终分量被替换，或其他打开失败。
     """
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     if no_follow:
@@ -104,6 +116,9 @@ def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Pat
     Returns:
         ``(fd, temp_path)``：``fd`` 已以只写独占方式打开，``temp_path`` 为实际创建的
         随机名路径。
+
+    Raises:
+        OSError: 目录不存在或临时文件创建失败。
     """
     fd, name = tempfile.mkstemp(dir=str(dir_path), suffix=suffix)
     return fd, Path(name)
@@ -137,6 +152,9 @@ async def atomic_replace_from_fd(
 
     Returns:
         实际创建的随机名临时路径（替换成功后已重命名为最终路径）。
+
+    Raises:
+        OSError: 临时文件创建或原子替换失败；writer 抛出的异常经本函数原样上抛。
     """
     fd, temp_path = await asyncio.to_thread(open_temp_fd, final_path.parent, suffix=suffix)
     replaced = False
@@ -154,8 +172,7 @@ async def atomic_replace_from_fd(
     return temp_path
 
 
-# stat.FILE_ATTRIBUTE_REPARSE_POINT 自 Python 3.12 起提供；3.10/3.11 缺失时回退固定值 0x400。
-_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_FILE_ATTRIBUTE_REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
 
 
 def _has_reparse_attribute(st: os.stat_result) -> bool:
@@ -198,7 +215,7 @@ def atomic_replace_from_fd_sync(
     同步写入 fd 后由本函数 os.replace 原子替换，失败路径清理随机临时文件。mkstemp 与
     replace 为同步系统调用，调用方须处于可阻塞的工作线程或同步上下文。
 
-    writer 抛出的异常原样上掷，由调用方按各自异常类型分类处理；fd 在 writer 正常返回
+    writer 抛出的异常原样上抛，由调用方按各自异常类型分类处理；fd 在 writer 正常返回
     或抛出后由本函数统一关闭，writer 须以 closefd=False 包装 fd 使本函数独占 fd 关闭权，
     避免双重关闭与 fd 复用误关他者。
 
@@ -209,6 +226,9 @@ def atomic_replace_from_fd_sync(
 
     Returns:
         实际创建的随机名临时路径（替换成功后已重命名为 final_path）。
+
+    Raises:
+        OSError: 临时文件创建或原子替换失败；writer 抛出的异常经本函数原样上抛。
     """
     fd, temp_path = open_temp_fd(final_path.parent, suffix=suffix)
     replaced = False

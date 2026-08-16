@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    import tomli as tomllib
+import tomllib
 
 
 def test_runtime_dependencies_have_single_source() -> None:

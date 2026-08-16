@@ -67,6 +67,7 @@ class _PrepareSemaphoreSlot:
         task.add_done_callback(self._release_when_task_done)
 
     def _release_when_task_done(self, task: "asyncio.Task[str]") -> None:
+        """task 完成回调，释放经转移的槽位，恰好执行一次由转移语义保证。"""
         del task
         self._semaphore.release()
 
@@ -94,6 +95,13 @@ class ImagePreparer:
         prepare_cache_max_bytes: int,
         prepare_concurrency: int,
     ) -> None:
+        """初始化预处理缓存与并发约束。
+
+        Args:
+            prepare_cache_max: LRU 缓存条目数上限。
+            prepare_cache_max_bytes: 缓存累计字节上限。
+            prepare_concurrency: 预处理并发上限，为实例级全局约束。
+        """
         self._prepare_cache: OrderedDict[PrepareCacheKey, str] = OrderedDict()
         self._prepare_cache_max = prepare_cache_max
         self._prepare_cache_max_bytes = prepare_cache_max_bytes
@@ -189,6 +197,17 @@ class ImagePreparer:
         prepare_concurrency。槽位经 _PrepareSemaphoreSlot 管理：创建者被取消且共享
         task 仍在运行时，释放责任转移给 task 完成回调，脱缰 task 结束前持续占用
         并发额度，取消风暴不会突破上限。
+
+        Args:
+            image: 图像输入字符串，三类来源的归一化语义与模块级函数一致。
+            _roots_key: 工作区隔离键；批量路径预计算共享，None 时按当前请求 Roots 现取。
+
+        Returns:
+            归一化后的图像输入，本地文件为 Base64 Data URI。
+
+        Raises:
+            SeedreamValidationError: 输入格式无效、路径越界或维度超限等参数校验失败。
+            SeedreamAPIError: 会话未授权工作区目录或图像处理其他失败。
         """
         semaphore = self._get_prepare_semaphore()
         await semaphore.acquire()
@@ -302,6 +321,15 @@ class ImagePreparer:
         每图经公共 prepare_image_input 入口进入，批内并发上限即实例级信号量约束的
         配置值；同一 preparer 上并发的多个批量调用与单图直连调用共享同一全局上限，
         并行生成与 streamable-http 并发工具调用不会叠加突破 prepare_concurrency 上限。
+
+        Args:
+            images: 图像输入字符串序列。
+
+        Returns:
+            与入参顺序一致的归一化结果列表。
+
+        Raises:
+            SeedreamMCPError: 任一图像预处理失败时抛出，与单图入口的异常语义一致。
         """
         from ..io.io_path import get_workspace_roots
 

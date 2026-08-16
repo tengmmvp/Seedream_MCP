@@ -23,6 +23,12 @@ def is_sse_response(response: Any) -> bool:
 
     先剥离 ``;`` 参数与首尾空白再判定 media type，兼容含前导空白的
     `` text/event-stream`` 与带 charset 参数的 ``text/event-stream; charset=utf-8``。
+
+    Args:
+        response: HTTP 响应对象。
+
+    Returns:
+        Content-Type 为 text/event-stream 返回 True，否则返回 False。
     """
     content_type = str(response.headers.get("content-type", ""))
     media_type = content_type.split(";")[0].strip().lower()
@@ -30,7 +36,15 @@ def is_sse_response(response: Any) -> bool:
 
 
 def format_sse_success_event(event: dict[str, Any], model_id: str) -> dict[str, Any]:
-    """将 SSE 成功事件转换为统一图片项结构。"""
+    """将 SSE 成功事件转换为统一图片项结构。
+
+    Args:
+        event: SSE 成功事件的 JSON 对象。
+        model_id: 模型标识，事件缺失 model 字段时填充缺省值。
+
+    Returns:
+        统一图片项结构的字典。
+    """
     return {
         "url": event.get("url"),
         "b64_json": event.get("b64_json"),
@@ -47,6 +61,13 @@ def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, A
 
     error.message 为上游自由文本，经 sanitize_error_text 剥离敏感片段与控制字符并
     截断后再进入图片项，防止被劫持的中间层借 per-image 错误回显凭据直达用户可见输出。
+
+    Args:
+        event: SSE 失败事件的 JSON 对象。
+        model_id: 模型标识，事件缺失 model 字段时填充缺省值。
+
+    Returns:
+        统一图片项结构的字典，含净化后的 error 字段。
     """
     raw_error = event.get("error")
     error = raw_error if isinstance(raw_error, dict) else {}
@@ -188,8 +209,18 @@ def _classify_sse_event(
     主循环与流末尾残留处理共用此函数，避免事件分支逻辑重复。未识别 type 的事件丢弃
     并记录 debug 日志，携带事件 type 与事件段字节规模，便于排查上游新增事件形态。
 
+    Args:
+        event: 已解析的 SSE 事件对象。
+        model_id: 模型标识，用于图片项缺省值。
+        items: 图片项累计列表，成功与失败事件直接追加至此。
+        log: loguru logger 实例。
+        segment_len: 事件段字节规模，用于未知类型事件的排查日志。
+
     Returns:
         (completed, usage, tools) — completed 为 True 时 usage/tools 有效。
+
+    Raises:
+        SeedreamAPIError: 事件为请求级错误时抛出，status_code 固定为 400。
     """
     event_type = event.get("type")
     # 请求级错误事件：无 type 且顶层含 error 键。本质为 4xx，标记 status_code=400 使上层判定不可重试。

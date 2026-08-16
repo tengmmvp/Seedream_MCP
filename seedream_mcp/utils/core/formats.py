@@ -94,7 +94,7 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
             return ".webp"
         if content.startswith(b"II*\x00") or content.startswith(b"MM\x00*"):
             return ".tiff"
-        # HEIC/HEIF：ISO BMFF 格式，4 字节 size + "ftyp" + 4 字节 brand
+        # HEIC/HEIF：ISO BMFF 格式，4 字节 size + "ftyp" + 4 字节 brand。
         if len(content) >= 12 and content[4:8] == b"ftyp":
             brand = bytes(content[8:12])
             if brand in _HEIC_BRANDS:
@@ -146,6 +146,13 @@ def parse_data_uri(data: str) -> tuple[str | None, str]:
     ``image/png``；header 缺少媒体类型时该字段为 None。payload 为首个逗号后的负载，
     不做 base64 解码，由调用方按编码标记自行处理。供 validation 与 auto_save 共享，
     消除两处 data URI 拆分逻辑的重复。
+
+    Args:
+        data: 待解析的 data URI 字符串。
+
+    Returns:
+        (media_type, payload) 形式的元组；非 data URI、缺逗号分隔符或
+        入参非字符串时为 (None, 原始字符串)。
     """
     if not isinstance(data, str):
         return None, data

@@ -258,7 +258,7 @@ def test_auto_save_result_to_dict_sanitizes_local_path_and_markdown_ref() -> Non
 
     dumped = result.to_dict()
 
-    # 控制字符压平，换行注入不可行；内容主体保留（数据字段不做常规截断破坏可用性）
+    # 控制字符压平，换行注入不可行；内容主体保留，数据字段不做常规截断以保持可用性
     assert dumped["local_path"] == "C:\\save\\img.png  FAKE: injected"
     assert dumped["markdown_ref"] == "![alt](./img.png)  FAKE-REF: injected"
     # 纯 URL 数据字段仅剥 userinfo 凭据，签名查询参数保持完整

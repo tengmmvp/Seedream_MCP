@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-# 使用固定版本的 Python 基础镜像
-FROM python:3.11.11-slim
+# Python 3.12 slim 基础镜像，次版本内自动跟踪补丁更新
+FROM python:3.12-slim
 
 # 设置工作目录
 WORKDIR /app

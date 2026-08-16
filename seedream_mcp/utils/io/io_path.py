@@ -60,6 +60,10 @@ def register_env_workspace_root_provider(provider: EnvWorkspaceRootProvider) -> 
     依赖方向为 config 向下注入：提供者返回活动配置的 workspace_root 原始字符串，
     未配置返回 None；活动配置未就绪时的环境变量回退语义由提供者自身封装，与本模块
     未注册提供者时的回退一致。
+
+    Args:
+        provider: 工作区根目录提供者，返回活动配置的 workspace_root 原始字符串，
+            未配置返回 None。
     """
     global _env_workspace_root_provider
     _env_workspace_root_provider = provider
@@ -81,6 +85,9 @@ def resolve_env_workspace_root() -> Path:
     回退环境变量。无任何配置回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个
     工作目录。expanduser 后为绝对路径的配置根按原始字符串缓存 resolve 结果，同配置
     重复访问不再触达文件系统；相对形态不缓存，每次现算。
+
+    Returns:
+        已 resolve 的工作区根目录；无任何配置时为进程当前工作目录。
     """
     global _cwd_fallback_warned
     configured_root = _configured_workspace_root()
@@ -126,6 +133,9 @@ def get_workspace_roots() -> list[Path]:
     """获取当前请求生效的工作区根目录列表。
 
     优先使用 MCP Roots 作为文件访问边界，无 Roots 时回退环境变量配置。
+
+    Returns:
+        当前请求生效的工作区根目录列表。
     """
     roots_from_context = _WORKSPACE_ROOTS_VAR.get()
     if roots_from_context is not None:
@@ -134,7 +144,11 @@ def get_workspace_roots() -> list[Path]:
 
 
 def get_workspace_root() -> Path:
-    """获取当前请求默认工作区根目录，取 Roots 首项或环境变量目录。"""
+    """获取当前请求默认工作区根目录，取 Roots 首项或环境变量目录。
+
+    Raises:
+        ValueError: 当前请求未授权任何工作区目录。
+    """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
         raise ValueError("当前 MCP 会话未授权任何工作区目录")
@@ -147,6 +161,9 @@ def is_boundary_from_session_roots() -> bool:
     workspace_roots_scope 仅在客户端声明 roots capability 且 roots/list 成功时写入
     工作区根上下文变量；变量为 None 说明边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD
     回退取得，属服务器环境而非客户端授权声明，其绝对路径不进入面向调用方的输出。
+
+    Returns:
+        边界来自会话 Roots 声明返回 True，经环境变量或进程 CWD 回退返回 False。
     """
     return _WORKSPACE_ROOTS_VAR.get() is not None
 
@@ -224,6 +241,12 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     将客户端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持
     Roots 时回退环境变量边界。客户端未声明 roots capability 时直接跳过
     roots/list 往返，同样回退环境变量边界。
+
+    Args:
+        ctx: MCP 请求上下文，经其 session 读取客户端 Roots。
+
+    Yields:
+        当前请求解析出的工作区根目录列表；客户端不支持 Roots 时为空列表。
     """
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: list[Path] = []
@@ -263,6 +286,13 @@ def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
     """判断已 resolve 的路径是否位于已 resolve 的基础目录内。
 
     直接做 relative_to 比较，不再重复 resolve。供循环场景复用以避免重复解析。
+
+    Args:
+        path_resolved: 已 resolve 的待判定路径。
+        base_resolved: 已 resolve 的基础目录。
+
+    Returns:
+        路径等于基础目录或位于其内返回 True，否则返回 False。
     """
     try:
         path_resolved.relative_to(base_resolved)

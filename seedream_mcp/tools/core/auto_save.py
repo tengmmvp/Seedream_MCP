@@ -68,7 +68,7 @@ async def _auto_save(
     save_multiple_base64_images；empty_warning 为无可保存数据时的告警文案。
 
     Returns:
-        (保存结果列表，可保存图片在归一化列表中的原始索引列表)。索引列表供回填
+        (保存结果列表, 可保存图片在归一化列表中的原始索引列表)。索引列表供回填
         阶段按位置写入，消除收集与回填两次独立过滤可能错位的风险。
     """
 
@@ -135,8 +135,11 @@ async def auto_save_from_urls(
             避免重复计算；None 时按需从 result 提取，便于函数独立调用。
 
     Returns:
-        (保存结果对象列表，可保存图片原始索引列表) 二元组。索引列表供回填阶段
+        (保存结果对象列表, 可保存图片原始索引列表) 二元组。索引列表供回填阶段
         按位置写入本地路径。
+
+    Raises:
+        SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
     """
     return await _auto_save(
         result=result,
@@ -180,8 +183,11 @@ async def auto_save_from_base64(
             避免重复计算；None 时按需从 result 提取，便于函数独立调用。
 
     Returns:
-        (保存结果对象列表，可保存图片原始索引列表) 二元组。索引列表供回填阶段
+        (保存结果对象列表, 可保存图片原始索引列表) 二元组。索引列表供回填阶段
         按位置写入本地路径。
+
+    Raises:
+        SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
     """
     return await _auto_save(
         result=result,

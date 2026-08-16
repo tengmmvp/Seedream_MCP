@@ -245,7 +245,7 @@ def _scan_and_filter_directory(
     seen_images: set[Path],
     unreadable_dirs: list[Path],
 ) -> list[tuple[Path, Path]]:
-    """扫描单个目录并完成越界判定与去重，返回新增的 (原始路径，resolved 路径) 列表。
+    """扫描单个目录并完成越界判定与去重，返回新增的 (原始路径, resolved 路径) 列表。
 
     越界判定与去重集中在本函数同步执行，由调用方通过 ``asyncio.to_thread`` 在线程内调用；
     每张图片的 resolve 由扫描缓存层在扫描完成时执行一次并随缓存条目共享，深翻页命中缓存时
@@ -265,7 +265,7 @@ def _scan_and_filter_directory(
             分支区分目录不可读与目录内无图片。
 
     Returns:
-        新增 (原始路径，resolved 路径) 元组列表，长度不超过 remaining。
+        新增 (原始路径, resolved 路径) 元组列表，长度不超过 remaining。
     """
     # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
     matched_image_pairs = cached_find_images_in_directory(
@@ -434,6 +434,7 @@ async def _handle_browse_images_impl(
     # 结果经 image_resolved_map 供展示阶段复用。展示层与 structuredContent 仍回显原始
     # workspace_roots。
     def _resolve_roots_and_dirs() -> tuple[list[Path], list[Path], str | None]:
+        """解析工作区根与请求目录，返回根列表、目录列表与错误消息三元组。"""
         resolved_root_list = resolve_workspace_roots(workspace_roots)
         resolved_dir_list: list[Path] = []
         error_message: str | None = None

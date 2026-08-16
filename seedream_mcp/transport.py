@@ -96,6 +96,7 @@ class _BearerTokenAuthMiddleware:
         self._expected = expected_token.encode("utf-8")
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        """ASGI 调用入口：非 http 流量按类型处置，http 流量校验令牌后放行或回 401。"""
         scope_type = scope.get("type")
         if scope_type == "lifespan":
             await self.app(scope, receive, send)
@@ -112,6 +113,7 @@ class _BearerTokenAuthMiddleware:
         await self._send_unauthorized(send)
 
     def _request_authorized(self, scope: Any) -> bool:
+        """判定请求是否携带匹配的 Bearer 令牌，非 Bearer 授权方案同样拒绝。"""
         for name, value in scope.get("headers", []):
             if name == b"authorization":
                 if value[:7].lower() == b"bearer ":
@@ -147,6 +149,7 @@ class _LimitRequestBodyMiddleware:
         self._max_body_size = max_body_size
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        """ASGI 调用入口：包装 receive 与 send 实施字节上限，超限短路返回 413。"""
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
@@ -289,7 +292,7 @@ class _LoopbackHostGuardMiddleware:
 
     @staticmethod
     def _strip_port(host: bytes) -> bytes:
-        # IPv6 字面量形如 [::1]:8000，保留含方括号的主机部分。
+        """剥离 Host 头值的端口部分，IPv6 字面量如 [::1]:8000 保留方括号主机部分。"""
         if host.startswith(b"["):
             end = host.find(b"]")
             return host[: end + 1] if end != -1 else host

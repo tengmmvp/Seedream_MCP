@@ -159,7 +159,10 @@ class SeedreamConfig:
         """校验配置参数合法性与业务约束，并在通过时做规范化写回。
 
         规范化包括展开模型别名为 model_id、按模型能力校验并标准化 default_size、
-        将 log_level 统一为大写。任一校验失败抛出 SeedreamConfigError。
+        将 log_level 统一为大写。
+
+        Raises:
+            SeedreamConfigError: 任一配置项校验失败。
         """
         if not self.api_key or self.api_key.strip() == "":
             raise SeedreamConfigError(f"API密钥不能为空{_env_var_suffix('api_key')}")
@@ -323,7 +326,11 @@ class SeedreamConfig:
 
     @classmethod
     def from_env(cls, env_file: str | None = None) -> "SeedreamConfig":
-        """从环境变量与 .env 文件构建配置实例，构建过程线程安全。"""
+        """从环境变量与 .env 文件构建配置实例，构建过程线程安全。
+
+        Raises:
+            SeedreamConfigError: 配置文件不可读或配置项校验失败。
+        """
         return build_config_from_sources(env_file=env_file)
 
     def to_dict(self) -> dict[str, Any]:
@@ -413,7 +420,11 @@ def normalize_model_selector(value: object) -> str:
 
 
 def parse_int(value: object) -> int:
-    """将值解析为整数，空值或无法解析时抛出 SeedreamConfigError。"""
+    """将值解析为整数。
+
+    Raises:
+        SeedreamConfigError: 值为空或无法解析为整数。
+    """
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -575,6 +586,9 @@ def build_config_from_sources(
         overrides: 调用方显式覆盖值，CLI 参数为典型来源。
         env_file: 可选 .env 文件路径，未提供时按“项目根 `.env` -> 当前工作目录 `.env`”
             合并读取，当前工作目录的值覆盖项目根。
+
+    Raises:
+        SeedreamConfigError: 配置文件不可读、缺少 API 密钥或配置项校验失败。
     """
     with _config_build_lock:
         return _build_config_from_sources_unlocked(overrides, env_file)
@@ -762,7 +776,7 @@ def get_global_config() -> SeedreamConfig:
 
 
 def set_config(config: SeedreamConfig) -> None:
-    """替换生效配置：写入全局实例，若已注入活动配置则同步更新，使本调用始终替换生效配置。
+    """替换当前生效的配置实例。
 
     CLI 启动后 get_active_config 优先返回 _active_config，仅写 _global_config 会被遮蔽；
     故当 _active_config 已设置时一并更新，保证 set_config 在任何阶段都让后续读取拿到新实例。

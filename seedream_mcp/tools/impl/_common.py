@@ -54,6 +54,12 @@ class ToolMetadata:
 
     仅收纳各工具逐字不同且为常量的字符串字段；开始日志参数构造回调因组图输出依赖
     运行时入参，由各 handler 显式传入，数据表与运行时逻辑各司其职。
+
+    Attributes:
+        tool_name: 工具标识，写入 structuredContent.tool 与日志。
+        completion_title: 成功时响应文本的标题。
+        failure_prefix: 失败时错误消息与日志的前缀。
+        start_log_message: 请求开始时的日志模板。
     """
 
     tool_name: str

@@ -79,6 +79,10 @@ def build_generation_context(
 
     Returns:
         校验后的统一执行上下文对象。
+
+    Raises:
+        SeedreamValidationError: 尺寸、输出格式、流式、联网工具、提示词优化或参考图
+            数量校验未通过。
     """
     # 参考图数量上限依赖 model_id：5.0 Pro 为 10、其余为 14。schema 只能表达全家族
     # 默认上限，须在此按模型即时校验，与尺寸/流式等能力校验同层，避免进度已上报

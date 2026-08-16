@@ -53,7 +53,7 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
    ```
 
 3. **CI 自动执行**（`.github/workflows/release.yml`，tag `v*` 触发）：
-   - `test`：3.10 / 3.11 / 3.12 矩阵跑 pytest + mypy + flake8 + 构建验证
+   - `test`：3.12 矩阵跑 pytest + mypy + flake8 + 构建验证
    - `pypi-release`：`uv build` 产出 sdist/wheel，通过 trusted publishing 发布到 PyPI
    - `build-and-release`：依赖 PyPI 成功后创建 GitHub Release（安装说明引用 PyPI，故须等其完成）
    - `docker-release`：构建多架构镜像推送 ghcr.io（与 PyPI 并行，从源码构建，不依赖 PyPI）

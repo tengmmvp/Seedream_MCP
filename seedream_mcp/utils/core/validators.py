@@ -26,9 +26,9 @@ logger = get_logger(__name__)
 
 # ==================== 常量定义 ====================
 
-# optimize_prompt_options.mode 的合法取值白名单
+# optimize_prompt_options.mode 的合法取值白名单。
 VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
-# 尺寸预设档位与输出格式白名单
+# 尺寸预设档位与输出格式白名单。
 VALID_SIZE_PRESETS = frozenset({"1K", "2K", "3K", "4K"})
 VALID_OUTPUT_FORMATS = frozenset({"jpeg", "png"})
 # 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
@@ -104,10 +104,19 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
 def parse_bool(value: object) -> bool:
     """将值解析为布尔。
 
-    接受 true/yes/on/1 为真、false/no/off/0 为假；None 视为未配置，返回 False；
-    其余值抛出 SeedreamConfigError，避免 enabled 这类拼写错误被静默当作 False，
-    导致功能未生效却无报错。布尔解析知识归本模块单一所有，config 与本模块的
+    无法识别的取值显式报错而非静默当作 False，避免 enabled 这类拼写错误导致
+    功能未生效却无报错。布尔解析知识归本模块单一所有，config 与本模块的
     校验函数均为消费方。
+
+    Args:
+        value: 待解析的取值。
+
+    Returns:
+        value 为 bool 时原样返回；true/yes/on/1 解析为 True，
+        false/no/off/0 解析为 False，None 视为未配置并返回 False。
+
+    Raises:
+        SeedreamConfigError: 取值无法解析为布尔时抛出。
     """
     if isinstance(value, bool):
         return value
@@ -126,7 +135,19 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
     中文字符超过 `max_chinese_chars` 或英文单词超过 `max_english_words` 时仅记录
     警告，不阻断调用。
+
+    Args:
+        prompt: 待校验的提示词文本。
+        max_chinese_chars: 中文字符数告警阈值。
+        max_english_words: 英文单词数告警阈值。
+
+    Returns:
+        去除首尾空白后的提示词文本。
+
+    Raises:
+        SeedreamValidationError: 提示词为空、非字符串或包含无法编码字符时抛出。
     """
+
     if not prompt or not isinstance(prompt, str):
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
@@ -372,7 +393,18 @@ def validate_stream(stream: bool, model_id: str) -> bool:
 
     Seedream 5.0 Pro 不支持流式输出 stream，传参即报错；仅 doubao-seedream-5.0 系列
     （5.0/5.0-lite 同一模型）/4.5/4.0 支持。
+
+    Args:
+        stream: 流式输出开关。
+        model_id: 模型标识符。
+
+    Returns:
+        原样返回 stream。
+
+    Raises:
+        SeedreamValidationError: stream 为真且模型不支持流式输出时抛出。
     """
+
     caps = get_model_capabilities(model_id)
     if stream and not caps.supports_stream:
         raise SeedreamValidationError(
@@ -471,7 +503,7 @@ def validate_size_for_model(size: str, model_id: str) -> str:
             )
         return size
 
-    # 像素值校验
+    # 像素值校验：解析宽高后依次校验宽高比、像素总量与倍数约束。
     parsed = _parse_pixel_size(size)
     if parsed is None:
         raise SeedreamValidationError("图像尺寸格式无效", field="size", value=size)
@@ -591,6 +623,12 @@ def validate_parallel_generation_options(
     未指定 parallelism 时取 min(request_count, max_request_count)；
     parallelism 不得超过 request_count；stream 为真时 request_count 必须为 1。
 
+    Args:
+        request_count: 请求总数。
+        parallelism: 并行度，None 表示未指定。
+        stream: 是否流式输出。
+        max_request_count: request_count 与 parallelism 的公共上界。
+
     Raises:
         SeedreamValidationError: 当参数越界或组合非法时抛出。
     """
@@ -634,6 +672,14 @@ def validate_sequential_image_limit(
     要求：
     - 参考图数量不超过模型能力上限。5.0 Pro 为 10，其余家族为 14。
     - 参考图数量与生成数量之和不超过 15。
+
+    Args:
+        max_images: 组图生成数量上限。
+        reference_images: 参考图列表，可为 None。
+        model_id: 模型标识符，缺省时按通用参考图上限校验。
+
+    Raises:
+        SeedreamValidationError: 参考图数量超限或与生成数量之和超限时抛出。
     """
     max_reference = get_max_reference_images(model_id)
     reference_count = len(reference_images) if reference_images else 0
@@ -677,7 +723,18 @@ def resolve_sequential_max_images(
 
 
 class ValidatedCommonParams(NamedTuple):
-    """生成类工具公共参数的校验结果，供 context 与 client 共享单一校验入口。"""
+    """生成类工具公共参数的校验结果，供 context 与 client 共享单一校验入口。
+
+    Attributes:
+        prompt: 校验后的提示词文本。
+        optimize_prompt_options: 校验后的提示词优化选项，未指定时为 None。
+        size: 校验后的尺寸规格。
+        watermark: 标准化后的水印开关。
+        response_format: 小写标准化后的响应格式。
+        output_format: 小写标准化后的输出格式，未指定时为 None。
+        stream: 校验通过后的流式输出开关。
+        tools: 校验后的生成工具数组，未指定时为 None。
+    """
 
     prompt: str
     optimize_prompt_options: dict[str, Any] | None
@@ -706,6 +763,20 @@ def validate_common_generation_params(
     供 client 生成方法入口做公共库 API 自校验：新增公共参数校验规则只需在此扩展，
     调用方自动受益。工具层的值域校验由 schemas.py 的 Field 约束承担，与本函数构成
     defense-in-depth。
+
+    Args:
+        prompt: 提示词文本。
+        optimize_prompt_options: 提示词优化选项，可为 None。
+        size: 尺寸规格。
+        watermark: 水印开关。
+        response_format: 响应格式。
+        output_format: 输出格式，可为 None。
+        stream: 流式输出开关。
+        tools: 生成工具数组，可为 None。
+        model_id: 模型标识符。
+
+    Returns:
+        校验后的公共参数集合，字段语义见 ValidatedCommonParams。
     """
     return ValidatedCommonParams(
         prompt=validate_prompt(prompt),

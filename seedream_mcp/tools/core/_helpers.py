@@ -196,6 +196,9 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
 
     Returns:
         解析后的安全路径对象。
+
+    Raises:
+        SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
     """
     # 多根场景下取首个授权根作为自动保存默认落点。browse 与图像输入采用遍历全根的不同策略。
     if config.auto_save_base_dir:

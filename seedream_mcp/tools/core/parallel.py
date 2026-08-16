@@ -57,6 +57,7 @@ async def _execute_parallel_generation_requests(
     completed_requests = 0
 
     async def _run_single_request(request_index: int) -> None:
+        """在信号量槽内执行单次请求并记录结果或异常，槽外上报进度。"""
         nonlocal completed_requests
         report_progress = False
         async with semaphore:

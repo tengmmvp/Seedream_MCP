@@ -186,8 +186,8 @@ class SeedreamClient:
     确保公共库 API 与 MCP 工具后端两种调用路径行为一致。
 
     Attributes:
-        config: 客户端配置对象
-        logger: 日志记录器实例
+        config: 客户端配置对象。
+        logger: 日志记录器实例。
     """
 
     def __init__(self, config: SeedreamConfig | None = None):
@@ -195,7 +195,7 @@ class SeedreamClient:
         初始化 Seedream API 客户端。
 
         Args:
-            config: 配置对象，若为 None 则使用全局默认配置
+            config: 配置对象，若为 None 则使用全局默认配置。
         """
         self.config = config or get_active_config()
         self.logger = get_logger(__name__)
@@ -276,21 +276,21 @@ class SeedreamClient:
         通过给模型提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
 
         Args:
-            prompt: 文本提示词，描述要生成的图像内容
-            optimize_prompt_options: 提示词优化选项，可选配置字典
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
-            watermark: 是否添加水印，未传入时默认取配置 default_watermark
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
+            prompt: 文本提示词，描述要生成的图像内容。
+            optimize_prompt_options: 提示词优化选项，可选配置字典。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
 
         Returns:
-            包含生成结果的字典，包括图像数据、使用信息和状态等
+            包含生成结果的字典，包括图像数据、使用信息和状态等。
 
         Raises:
-            SeedreamAPIError: API 调用失败
-            SeedreamValidationError: 参数验证失败
+            SeedreamAPIError: API 调用失败。
+            SeedreamValidationError: 参数验证失败。
         """
         (
             prompt,
@@ -360,22 +360,22 @@ class SeedreamClient:
         基于已有图片，结合文字指令进行图像编辑。
 
         Args:
-            prompt: 文本提示词，描述要对输入图像进行的修改或转换
-            optimize_prompt_options: 提示词优化选项，可选配置字典
-            image: 输入图像的 URL 或本地文件路径
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
-            watermark: 是否添加水印，未传入时默认取配置 default_watermark
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
+            prompt: 文本提示词，描述要对输入图像进行的修改或转换。
+            optimize_prompt_options: 提示词优化选项，可选配置字典。
+            image: 输入图像的 URL 或本地文件路径。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
 
         Returns:
-            包含生成结果的字典，包括图像数据、使用信息和状态等
+            包含生成结果的字典，包括图像数据、使用信息和状态等。
 
         Raises:
-            SeedreamAPIError: API 调用失败或图像处理失败
-            SeedreamValidationError: 参数验证失败
+            SeedreamAPIError: API 调用失败或图像处理失败。
+            SeedreamValidationError: 参数验证失败。
         """
         image = self._normalize_single_image(image)
         (
@@ -448,22 +448,22 @@ class SeedreamClient:
         根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。
 
         Args:
-            prompt: 文本提示词，描述要对输入图像进行的融合操作
-            optimize_prompt_options: 提示词优化选项，可选配置字典
-            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张；5.0 Pro 最多 10 张
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
-            watermark: 是否添加水印，未传入时默认取配置 default_watermark
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
+            prompt: 文本提示词，描述要对输入图像进行的融合操作。
+            optimize_prompt_options: 提示词优化选项，可选配置字典。
+            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张；5.0 Pro 最多 10 张。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
 
         Returns:
-            包含生成结果的字典，包括图像数据、使用信息和状态等
+            包含生成结果的字典，包括图像数据、使用信息和状态等。
 
         Raises:
-            SeedreamAPIError: API 调用失败或图像处理失败
-            SeedreamValidationError: 参数验证失败
+            SeedreamAPIError: API 调用失败或图像处理失败。
+            SeedreamValidationError: 参数验证失败。
         """
         max_reference = get_max_reference_images(self.config.model_id)
         image = self._normalize_image_sequence(
@@ -546,23 +546,23 @@ class SeedreamClient:
         3. 多图生组图：使用多张参考图像和文本提示词
 
         Args:
-            prompt: 文本提示词，描述要生成的图像内容
-            optimize_prompt_options: 提示词优化选项，可选配置字典
-            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表；参考图数量与生成数量之和不超过 15
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size
-            watermark: 是否添加水印，未传入时默认取配置 default_watermark
-            max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限
-            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]
+            prompt: 文本提示词，描述要生成的图像内容。
+            optimize_prompt_options: 提示词优化选项，可选配置字典。
+            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表；参考图数量与生成数量之和不超过 15。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            watermark: 是否添加水印，未传入时默认取配置 default_watermark。
+            max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限。
+            response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
+            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
+            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
 
         Returns:
-            包含生成结果的字典，包括图像数据、使用信息和状态等
+            包含生成结果的字典，包括图像数据、使用信息和状态等。
 
         Raises:
-            SeedreamAPIError: API 调用失败或图像处理失败
-            SeedreamValidationError: 参数验证失败
+            SeedreamAPIError: API 调用失败或图像处理失败。
+            SeedreamValidationError: 参数验证失败。
         """
         model_caps = get_model_capabilities(self.config.model_id)
         if not model_caps.supports_sequential_generation:
@@ -807,7 +807,7 @@ class SeedreamClient:
                         if not headers:
                             raise SeedreamAPIError("无法生成请求头：配置可能无效")
 
-                        # trust_env=False 防止 HTTP_PROXY 等环境变量绕过 SSRF 防护或截获 API Key
+                        # trust_env=False 防止 HTTP_PROXY 等环境变量绕过 SSRF 防护或截获 API Key。
                         self._client = httpx.AsyncClient(
                             timeout=self._build_http_timeout(),
                             headers=headers,
@@ -870,7 +870,10 @@ class SeedreamClient:
         max_count: int,
         field_name: str,
     ) -> list[str]:
-        """校验并规范化图片列表输入。"""
+        """校验并规范化图片列表输入。
+
+        逐项规范化并按 min_count 与 max_count 校验数量。
+        """
         if not isinstance(images, (list, tuple)):
             raise SeedreamValidationError(
                 f"{field_name} 参数必须是字符串列表",
@@ -938,7 +941,11 @@ class SeedreamClient:
         return safe_data
 
     def _get_http_client(self) -> httpx.AsyncClient:
-        """获取已初始化的 HTTP 客户端实例，未初始化则抛出。"""
+        """获取已初始化的 HTTP 客户端实例。
+
+        Raises:
+            SeedreamAPIError: HTTP 客户端尚未初始化。
+        """
         if self._client is None:
             raise SeedreamAPIError("HTTP 客户端未正确初始化")
         return self._client
@@ -960,6 +967,7 @@ class SeedreamClient:
         url: str,
         safe_request_data: dict[str, Any],
     ) -> None:
+        """输出单次 API 调用尝试的调试日志，请求体须传入已脱敏副本。"""
         self.logger.debug(
             "{} API 调用尝试 {}/{}",
             endpoint,
@@ -1420,10 +1428,10 @@ class SeedreamClient:
         异常，在 _call_api 内按响应分类，本方法仅兜底包装 _call_api 之外的异常。
 
         Args:
-            error: 原始异常对象
+            error: 原始异常对象。
 
         Returns:
-            处理后的 Seedream 特定异常对象
+            处理后的 Seedream 特定异常对象。
         """
         if isinstance(
             error,

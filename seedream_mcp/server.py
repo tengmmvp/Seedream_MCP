@@ -738,7 +738,10 @@ _tighten_flat_tool_schemas()
 
 @mcp.resource("seedream://workspace/roots", mime_type="application/json")
 async def workspace_roots_resource() -> str:
-    """工作区根目录。展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。"""
+    """工作区根目录。
+
+    展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。
+    """
     ctx = mcp.get_context()
     async with workspace_roots_scope(ctx):
         # 边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端

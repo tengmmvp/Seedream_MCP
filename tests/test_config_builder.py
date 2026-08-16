@@ -397,7 +397,7 @@ def test_seedream_config_accepts_zero_cleanup_days() -> None:
     ],
 )
 def test_seedream_config_rejects_invalid_validate_branches(kwargs: dict, match: str) -> None:
-    """validate() 各拒绝分支覆蓋：占位符密钥、非法协议 base_url、空 model_id、
+    """validate() 各拒绝分支覆盖：占位符密钥、非法协议 base_url、空 model_id、
     非正 timeout/api_timeout、max_retries<1、非法 log_level、负 auto_save_max_retries。"""
     from seedream_mcp.config import SeedreamConfig
 

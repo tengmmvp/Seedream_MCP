@@ -83,7 +83,7 @@ def test_validate_image_path_none_base_dir_falls_back_and_enforces_bounds(
     assert err == ""
     assert normalized is not None
 
-    # 越界穿越路径：不传 base_dir 时仍须判无效（回归：此前 base_dir=None 会静默放行）
+    # 越界穿越路径：不传 base_dir 时仍须判无效；回归背景为此前 base_dir=None 会静默放行
     escape = str(workspace / ".." / "escape.png")
     is_valid_escape, err_escape, _ = validate_image_path(escape, base_dir=None)
     assert is_valid_escape is False

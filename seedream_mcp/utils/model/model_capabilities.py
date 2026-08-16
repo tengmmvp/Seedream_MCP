@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
-# 参考图上限常量
+# 参考图上限常量，由能力表按家族引用。
 SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10
-SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14  # 5.0 Lite / 4.5 / 4.0 最多 14 张参考图
+SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14  # 5.0 Lite / 4.5 / 4.0 最多 14 张参考图。
 
 # 各家族像素尺寸范围与倍数约束，供 validate_size_for_model 数据驱动校验。
 SEEDREAM_50PRO_MIN_SIZE_PIXELS = 1280 * 720
@@ -29,9 +29,9 @@ SEEDREAM_45_MAX_SIZE_PIXELS = 4096 * 4096
 SEEDREAM_40_MIN_SIZE_PIXELS = 1280 * 720
 SEEDREAM_40_MAX_SIZE_PIXELS = 4096 * 4096
 
-# 模型家族规范名
+# 模型家族规范名，作为家族解析的返回值与能力表的键。
 MODEL_FAMILY_50_PRO = "5.0-pro"
-MODEL_FAMILY_50_LITE = "5.0-lite"  # 5.0 与 5.0-lite 共用 Model ID，此家族代表两者
+MODEL_FAMILY_50_LITE = "5.0-lite"  # 5.0 与 5.0-lite 共用 Model ID，此家族代表两者。
 MODEL_FAMILY_45 = "4.5"
 MODEL_FAMILY_40 = "4.0"
 MODEL_FAMILY_UNKNOWN = "unknown"

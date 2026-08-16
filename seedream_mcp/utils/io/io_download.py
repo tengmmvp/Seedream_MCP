@@ -104,6 +104,12 @@ def sanitize_url(url: str) -> str:
     """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
 
     控制字符 CRLF 等会被剥离，防止攻击者经由 URL 在日志中伪造行，注入误导性记录。
+
+    Args:
+        url: 原始 URL 字符串。
+
+    Returns:
+        脱敏后的 URL；解析失败返回 ``<invalid-url>``。
     """
     try:
         parsed = urlparse(url)
@@ -251,6 +257,23 @@ class _PublicIpPinningResolver(AbstractResolver):
     async def resolve(
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
     ) -> list[ResolveResult]:
+        """解析主机名为经公网校验的 IP 列表，连接目标随之钉死为校验结果。
+
+        返回的 ResolveResult 保留 URL 原始主机名作为 hostname，供 aiohttp 设置 TLS
+        的 SNI 与证书校验目标。解析失败的异常语义由 ``_resolve_public_ips`` 定义。
+
+        Args:
+            host: 待解析的主机名。
+            port: 目标端口，原样写入解析结果。
+            family: 调用方请求的地址族，本实现忽略。
+
+        Returns:
+            全部校验通过 IP 及其真实地址族构成的解析结果列表。
+
+        Raises:
+            DownloadError: 解析结果为空、含非法 IP 或命中非公网地址等终态失败。
+            RetryableDownloadError: DNS 瞬时解析故障等可重试失败。
+        """
         # 忽略调用方请求的 family，返回全部校验通过 IP 及其真实 family，由 aiohttp 选择。
         ips = await self._manager._resolve_public_ips(host)
         results: list[ResolveResult] = []
@@ -277,10 +300,10 @@ class DownloadManager:
     """异步图片下载管理器，内置 SSRF 四层防护与递增退避重试。
 
     Attributes:
-        timeout: 下载超时时间（秒）
-        max_retries: 最大重试次数
-        retry_delay: 重试延迟时间（秒）
-        max_file_size: 最大文件大小（字节）
+        timeout: 下载超时时间（秒）。
+        max_retries: 最大重试次数。
+        retry_delay: 重试延迟时间（秒）。
+        max_file_size: 最大文件大小（字节）。
     """
 
     def __init__(
@@ -295,11 +318,11 @@ class DownloadManager:
         """初始化下载管理器。
 
         Args:
-            timeout: 下载超时时间（秒）
-            max_retries: 最大重试次数
-            retry_delay: 重试延迟时间（秒）
-            max_file_size: 最大文件大小（字节）
-            dns_cache_ttl: DNS 解析缓存 TTL（秒）
+            timeout: 下载超时时间（秒）。
+            max_retries: 最大重试次数。
+            retry_delay: 重试延迟时间（秒）。
+            max_file_size: 最大文件大小（字节）。
+            dns_cache_ttl: DNS 解析缓存 TTL（秒）。
             connection_limit: 底层连接器的并发连接上限，None 时沿用 aiohttp 默认。供
                 资源层施加进程级下载并发上限；经构造参数传入使会话因 close 重建时
                 连接器自动保持同一上限，不依赖调用方在会话建立后二次注入。
@@ -386,9 +409,16 @@ class DownloadManager:
         解析阶段即拒绝非 http/https 协议、缺失主机名、携带凭据、本地主机名以及
         非公网 IP 字面量，把明显伪造的内网目标挡在网络层之外。
 
+        Args:
+            url: 待校验的下载 URL。
+
         Returns:
             (host, needs_dns_check): ``needs_dns_check`` 为 False 表示入参为已通过
             校验的 IP 字面量，调用方无需再做 DNS 解析校验。
+
+        Raises:
+            DownloadError: 协议不受支持、主机名缺失、携带凭据、本地主机名或非公网
+                IP 字面量。
         """
         result = urlparse(url)
         scheme = (result.scheme or "").lower()
@@ -425,6 +455,16 @@ class DownloadManager:
         且无在途 task 时创建并登记，并发调用 await 同一 task，避免 N 个并发下载各自触发
         系统解析。在途 task 经 asyncio.shield 隔离取消传播，创建者被取消时底层 task 继续
         运行至完成并写入缓存，保护共享同一 task 的其他等待者。
+
+        Args:
+            host: 待解析并校验的主机名。
+
+        Returns:
+            该主机名全部校验通过的公网 IP 元组。
+
+        Raises:
+            DownloadError: 解析结果为空、含非法 IP 或命中非公网地址等终态失败。
+            RetryableDownloadError: DNS 瞬时解析故障等可重试失败。
         """
         now = time.time()
         async with self._dns_cache_lock:
@@ -470,8 +510,8 @@ class DownloadManager:
         底层 getaddrinfo 工作线程无法被中断，会继续运行至系统解析完成后丢弃结果；该线程
         一次性且其结果已被丢弃。经 _resolve_public_ips 的在途去重，同一 host 至多一个在途
         登记的解析；超时重试期间被放弃的旧线程可能与新线程短暂并存，但在途数受 max_retries
-        与 max_concurrent 下载并发上限约束，故不额外施加并发信号量。Python 3.11+ 起
-        asyncio.TimeoutError 是内建 TimeoutError（OSError 子类）的别名，须在调用方先于
+        与 max_concurrent 下载并发上限约束，故不额外施加并发信号量。asyncio.TimeoutError
+        是内建 TimeoutError（OSError 子类）的别名，须在调用方先于
         except OSError 捕获以保持可重试语义。gaierror 按错误码分类：域名不存在类错误为
         终态 DownloadError，EAI_AGAIN 等瞬时解析故障为可重试错误，同样交由重试。
         """
@@ -552,7 +592,16 @@ class DownloadManager:
 
     @staticmethod
     def _ensure_public_peer_ip(peer_ip: str, source_url: str) -> None:
-        """校验连接后的对端 IP 是否为公网地址，复用统一的公网判定逻辑。"""
+        """校验连接后的对端 IP 是否为公网地址，复用统一的公网判定逻辑。
+
+        Args:
+            peer_ip: 连接建立后的对端 IP 字符串。
+            source_url: 来源 URL，仅经脱敏后进入错误信息。
+
+        Raises:
+            DownloadError: 对端 IP 无法解析为合法地址，或命中不可作为公网下载目标
+                的地址。
+        """
         try:
             ip_obj = ipaddress.ip_address(peer_ip)
         except ValueError as exc:
@@ -572,6 +621,13 @@ class DownloadManager:
         第二层 resolve-and-pin 已把连接目标钉死为校验通过的公网 IP，本层作为纵深
         防御：即便存在解析器与连接之间的残余窗口使对端 IP 落入内网，仍据此拒绝。
         无法提取对端 IP 时 fail-closed 拒绝下载，避免因校验信息缺失而放行潜在的内网连接。
+
+        Args:
+            response: 已建立连接的响应对象。
+            source_url: 来源 URL，仅经脱敏后进入错误信息。
+
+        Raises:
+            DownloadError: 无法提取对端 IP，或对端 IP 命中不可作为公网下载目标的地址。
         """
         peer_ip = self._extract_peer_ip(response)
         if not peer_ip:
@@ -590,6 +646,18 @@ class DownloadManager:
         重定向目标回到调用方循环顶部由 _validate_url_for_request 执行完整静态与
         DNS 校验，本方法仅判定跳数上限与 Location 解析。缺 Location 或超 _MAX_REDIRECTS
         抛出终态错误。
+
+        Args:
+            response: 当前跳的响应对象。
+            current_url: 发起当前请求的绝对 URL，用于解析相对 Location。
+            redirect_count: 已完成的重定向跳数。
+
+        Returns:
+            下一跳绝对 URL；当前响应非重定向时返回 None。
+
+        Raises:
+            DownloadError: 重定向响应缺少 Location 头、超过跳数上限或目标协议不允许
+                降级。
         """
         if response.status not in {301, 302, 303, 307, 308}:
             return None
@@ -768,15 +836,19 @@ class DownloadManager:
         """异步下载图片。
 
         Args:
-            url: 图片URL
-            save_path: 保存路径
-            headers: 请求头
+            url: 图片 URL。
+            save_path: 保存路径，最终扩展名以字节签名嗅探结果为准。
+            headers: 请求头；None 时使用内置默认头。
 
         Returns:
-            下载结果信息
+            下载结果字典，含 file_path、file_size、download_time、content_type 与
+            attempts。
 
         Raises:
-            DownloadError: 下载失败时抛出
+            DownloadError: URL 校验、内容校验等终态失败，或重试耗尽仍失败；
+                文件系统永久错误与无效 URL 同样以终态方式抛出。非下载语义的
+                意外异常按原类型上抛。
+                上抛，不包装为 DownloadError。
         """
         if headers is None:
             headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
@@ -875,10 +947,10 @@ class DownloadManager:
         """验证 URL 静态格式与主机安全性，不执行 DNS 解析。
 
         Args:
-            url: 要验证的URL
+            url: 要验证的 URL。
 
         Returns:
-            是否为静态可接受 URL
+            静态校验通过返回 True，否则返回 False。
         """
         try:
             self._validate_url_static(url)

@@ -13,7 +13,7 @@ from seedream_mcp.utils.images.image_ref import classify_image_reference
 @pytest.mark.parametrize(
     "image,expected",
     [
-        # URL：scheme 大小写不敏感（RFC 3986），是本次修复的核心
+        # URL：scheme 大小写不敏感（RFC 3986），历史回归点
         ("http://example.com/x.png", "url"),
         ("https://example.com/x.png", "url"),
         ("HTTP://example.com/x.png", "url"),
@@ -43,6 +43,5 @@ def test_classify_empty_and_whitespace_treated_as_local() -> None:
 
 def test_classify_only_checks_prefix_window() -> None:
     """仅取前 16 字符判定，超长 base64 data URI 不做全量拷贝。"""
-    # data:image/ 前缀后接超长 base64，仍正确分类为 data_uri
     long_data_uri = "data:image/png;base64," + "A" * 100000
     assert classify_image_reference(long_data_uri) == "data_uri"

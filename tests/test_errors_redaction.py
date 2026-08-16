@@ -736,7 +736,7 @@ def test_redact_sensitive_message_quote_variant_no_overmatch() -> None:
     assert _redact_sensitive_message("the token count is fine") == "the token count is fine"
 
 
-# ==================== Unicode 空白与控制字符分隔绕过（回归） ====================
+# ==================== Unicode 空白与控制字符分隔绕过回归 ====================
 
 
 def test_redact_sensitive_message_blocks_control_char_separator_bypass() -> None:

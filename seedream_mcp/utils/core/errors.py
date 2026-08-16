@@ -16,8 +16,12 @@ from typing import Mapping, Any, TypeVar, cast
 class SeedreamMCPError(Exception):
     """所有 Seedream MCP 自定义异常的基类。
 
-    提供 message、error_code、details 公共字段，并通过 to_dict 序列化为结构化输出；
     配置、API、校验、超时、网络等场景均派生对应子类，便于按类型捕获与分支处理。
+
+    Attributes:
+        message: 人类可读的错误描述文本。
+        error_code: 结构化错误码，未提供时为 None。
+        details: 附加上下文键值对，未提供时为空字典。
     """
 
     def __init__(
@@ -56,7 +60,12 @@ class SeedreamConfigError(SeedreamMCPError):
 class SeedreamAPIError(SeedreamMCPError):
     """API 调用失败。
 
-    额外携带 status_code、response_data、retry_after，供上层判定可重试性与退避时长。
+    上层依据状态码与退避秒数判定可重试性与退避时长。
+
+    Attributes:
+        status_code: HTTP 状态码，未提供时为 None。
+        response_data: 上游响应体数据，未提供时为空字典。
+        retry_after: 服务器建议的重试等待秒数，未提供时为 None。
     """
 
     def __init__(
@@ -85,7 +94,12 @@ class SeedreamAPIError(SeedreamMCPError):
 
 
 class SeedreamValidationError(SeedreamMCPError):
-    """请求参数校验失败，附带出错的字段名与值。"""
+    """请求参数校验失败。
+
+    Attributes:
+        field: 出错的参数字段名，未提供时为 None。
+        value: 出错的参数值，未提供时为 None。
+    """
 
     def __init__(self, message: str, field: str | None = None, value: Any | None = None):
         super().__init__(message)
@@ -131,6 +145,13 @@ def parse_retry_after(headers: Mapping[str, str]) -> float | None:
 
     支持 delta-seconds 与 HTTP-date 两种格式；解析失败或负值返回 None。
     0 与极小值按最小下限兜底；返回值限制在 [_MIN_RETRY_AFTER_SECONDS, _MAX_RETRY_AFTER_SECONDS] 区间内。
+
+    Args:
+        headers: HTTP 响应头映射，同时读取 retry-after 与 Retry-After 两种键名。
+
+    Returns:
+        建议等待的秒数，已收敛到上下限区间内；头部缺失、无法解析或
+        目标时间不晚于当前时刻时为 None。
     """
     raw = headers.get("retry-after") or headers.get("Retry-After")
     if not raw:
@@ -163,8 +184,12 @@ def parse_retry_after(headers: Mapping[str, str]) -> float | None:
 class _ErrorProfile:
     """单条错误归约档案。
 
-    base_message 仅 HTTP 状态档案使用，作为 handle_api_error 拼装 SeedreamAPIError.message
-    的初始文案；异常类型档案不使用该字段。
+    Attributes:
+        display_title: 面向用户的展示标题，供 format_error_for_user 使用。
+        user_hint: 面向用户的可操作建议，可为空字符串。
+        error_code: 结构化错误码，供错误分类使用。
+        base_message: 仅 HTTP 状态档案使用，作为 handle_api_error 拼装
+            SeedreamAPIError.message 的初始文案；异常类型档案留空。
     """
 
     display_title: str
@@ -226,7 +251,7 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
     ),
 }
 
-# 5xx 与未列举状态码的兜底档案
+# 5xx 与未列举状态码的兜底档案。
 _HTTP_5XX_PROFILE = _ErrorProfile(
     "API调用失败",
     "服务端暂时不可用，请稍后重试。",
@@ -277,6 +302,12 @@ def truncate_upstream_message_fragment(value: Any) -> str:
     处理：非字符串分量先归一化为文本，dict/list 走 JSON 序列化，防止 dict 形态
     message 经 f-string 插值为 Python repr 后绕过下游键值脱敏；随后截断防止超大
     错误体随异常进入日志。io_sse 对请求级错误事件的 message 拼装共用本函数。
+
+    Args:
+        value: 上游错误 message 分量，任意类型。
+
+    Returns:
+        归一化并截断至 8KB 的文本，超长时前缀标注原始长度。
     """
     text = value if isinstance(value, str) else _normalize_non_str_message(value)
     if len(text) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
@@ -357,7 +388,7 @@ _EXCEPTION_PROFILES: tuple[tuple[type, _ErrorProfile], ...] = (
     ),
 )
 
-# SeedreamMCPError 基类兜底与未识别异常兜底
+# SeedreamMCPError 基类兜底与未识别异常兜底。
 _GENERIC_MCP_PROFILE = _ErrorProfile("操作失败", "", "generation_failed")
 _UNKNOWN_PROFILE = _ErrorProfile("未知错误", "", "generation_failed")
 
@@ -367,6 +398,12 @@ def resolve_error_profile(error: Exception) -> _ErrorProfile:
 
     APIError 优先按 HTTP 状态码查 _HTTP_STATUS_PROFILES；其余按异常类型匹配；
     SeedreamMCPError 基类与未识别异常回退到各自兜底档案。
+
+    Args:
+        error: 待归约的任意异常实例。
+
+    Returns:
+        该异常对应的归约档案；未识别异常返回兜底档案。
     """
     if isinstance(error, SeedreamAPIError):
         return _lookup_http_error_profile(error.status_code or 0)
@@ -649,6 +686,13 @@ def sanitize_error_text(
     响应 data 项的 error 字段、并行聚合消息、自动保存 error——同样可能携带上游回显
     的鉴权片段，各出口统一经本函数收敛为与异常路径相同的防护，消除两条输出通道的
     不对称。非字符串原样返回。
+
+    Args:
+        message: 待净化的错误文本，非字符串输入原样返回。
+        limit: 截断长度上限。
+
+    Returns:
+        先截断再剥离敏感片段与控制字符后的文本。
     """
     if not isinstance(message, str):
         return message
@@ -696,6 +740,14 @@ def sanitize_data_text(value: _SanitizedValue, limit: int = _DATA_OUTPUT_LIMIT) 
     走轻量路径，签名查询串不被键值脱敏替换为 ***。URL 前缀但含空白或控制字符的
     混合文本不属于纯 URL，仍走全套脱敏，凭据不借 URL 形态逃逸。非字符串原样
     返回。
+
+    Args:
+        value: 待净化的数据字段文本，非字符串输入原样返回。
+        limit: 防御性截断上限。
+
+    Returns:
+        净化后的数据字段文本；纯 URL 走轻量净化路径，其余文本走
+        sanitize_error_text 的全套净化路径。
     """
     if not isinstance(value, str):
         return value

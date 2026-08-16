@@ -208,8 +208,8 @@ async def test_generation_methods_synthesize_defaults_from_config(
 ) -> None:
     """直连调用未传 size/watermark 时按 config 默认值合成，消除签名与配置双源。
 
-    硬性守护：watermark 未显式传入时必须保持 False（default_watermark 默认 False，
-    与官方默认 true 相悖但为项目有意决策）。
+    硬性守护：watermark 未显式传入时必须保持 False；default_watermark 默认 False
+    与官方默认 true 相悖，为项目有意决策。
     """
     config = SeedreamConfig(api_key="test_key", max_retries=1, default_size="4K")
     client = SeedreamClient(config)

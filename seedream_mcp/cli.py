@@ -45,7 +45,11 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
 
 
 def _log_level_type(value: str) -> str:
-    """将日志级别转为大写，作为 argparse type 使 CLI 与 env/.env 的大小写不敏感行为一致。"""
+    """将日志级别转为大写后返回。
+
+    作为 argparse 的 type 回调使用，使 CLI 与系统环境变量、.env 文件在
+    日志级别上的大小写不敏感行为保持一致。
+    """
     return value.upper()
 
 

@@ -40,6 +40,9 @@ def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
     若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
     retrieved"。挂载本回调显式检索异常即清除该标记，有等待者正常消费时重复检索
     无副作用。供 images 与 io 子包的 single-flight 在途 task 共用。
+
+    Args:
+        task: 可能不再有等待者消费结果的在途后台任务。
     """
     if task.cancelled():
         return
@@ -52,6 +55,11 @@ class InterceptHandler(logging.Handler):
     """将标准库 logging 的调用重定向至 loguru 的桥接处理器。"""
 
     def emit(self, record: logging.LogRecord) -> None:
+        """将标准库日志记录转写为 loguru 日志调用。
+
+        级别名经 loguru 级别表映射，未注册的级别名回退为数值级别；日志深度
+        回溯至 logging 模块之外的原始调用帧，使记录的调用位置为真实调用者。
+        """
         log_level: str | int
         try:
             log_level = logger.level(record.levelname).name
@@ -124,11 +132,11 @@ def setup_logging(
     绝对路径或经 LOG_FILE 环境变量配置。
 
     Args:
-        log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_file: 日志文件路径，如果为 None 则使用默认路径
-        enable_console: 是否启用控制台输出
-        enable_file: 是否启用文件输出
-        force_standard_logging: 是否强制接管标准库 logging 配置
+        log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
+        log_file: 日志文件路径，为 None 时使用默认路径 logs/seedream_mcp.log。
+        enable_console: 是否启用控制台输出。
+        enable_file: 是否启用文件输出。
+        force_standard_logging: 是否强制接管标准库 logging 配置。
     """
     logger.remove()
     # 全局剥离日志消息控制字符，防路径名与上游错误体经日志注入伪造行。
@@ -197,10 +205,10 @@ def get_logger(name: str | None = None) -> Logger:
     """获取 logger 实例。
 
     Args:
-        name: logger 名称，如果为 None 则使用调用模块名
+        name: logger 名称，为 None 时自动取调用模块名。
 
     Returns:
-        logger 实例
+        绑定了指定名称的 loguru logger 实例。
     """
     if name is None:
         # 自动获取调用模块名。inspect.currentframe() 返回的帧对象会形成引用环，
@@ -230,10 +238,10 @@ def log_function_call(func: Callable[P, R]) -> Callable[P, R]:
     ``(*Any, **Any) -> Any``，单一签名不经接口约束求解，类型可精确穿透。
 
     Args:
-        func: 要装饰的函数
+        func: 要装饰的函数。
 
     Returns:
-        装饰后的函数
+        装饰后的函数。
     """
 
     # 仅记录调用入口日志；异常交由被装饰函数自身的错误处理统一记录，避免在此重复

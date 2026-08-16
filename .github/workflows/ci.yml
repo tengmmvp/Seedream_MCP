@@ -1,12 +1,12 @@
-# 持续集成:PR 与分支推送时运行单测、类型检查、Lint 与格式校验,作为合入门禁
-# 发布流水线见 release.yml(仅 v* 标签触发)
+# 持续集成：PR 与分支推送时运行格式校验、Lint、类型检查与单测，作为合入门禁。
+# 发布流水线见 release.yml，由 v* 标签触发。
 name: 🔍 CI
 
 on:
   pull_request:
-    branches: [main, feature]
+    branches: [main]
   push:
-    branches: [main, feature]
+    branches: [main]
 
 permissions:
   contents: read
@@ -18,10 +18,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows 矩阵覆盖 O_NOFOLLOW 兜底、NTFS junction 等 Windows 专属安全代码路径；
-        # 符号链接相关用例在 Windows 上自动 skip，无碍 CI 通过
+        # Windows 矩阵验证 O_NOFOLLOW 兜底与 reparse point 剔除等平台专属安全路径。
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
       - name: 📥 Checkout code
@@ -32,7 +31,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: 📦 Install uv
+      - name: ⚡ Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
@@ -47,8 +46,8 @@ jobs:
       - name: 🧹 Run flake8
         run: uv run flake8 seedream_mcp tests
 
-      - name: 🔍 Run mypy
+      - name: 🔎 Run mypy
         run: uv run mypy seedream_mcp
 
-      - name: 🧪 Run tests
+      - name: ✅ Run tests
         run: uv run pytest -q

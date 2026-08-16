@@ -516,7 +516,7 @@ async def test_parse_sse_response_large_event_not_truncated_below_file_size_thre
     """截断阈值对齐 auto_save 文件上限后，单张合法大图事件不被误丢。
 
     模拟 stream + b64_json 场景：单事件体积介于前缀回收阈值与对齐后的截断阈值之间时，
-    须完整解析而非截断丢弃，回归保护 #2 的阈值解耦修复。
+    须完整解析而非截断丢弃，守护前缀回收阈值与截断阈值解耦不被回归。
     """
     # 事件体积 8KB，大于 buffer_max_size(2KB) 但小于 event_truncate_threshold(32KB)
     big_payload = "B" * 8000

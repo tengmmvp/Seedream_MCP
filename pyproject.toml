@@ -11,15 +11,13 @@ authors = [
 description = "基于火山引擎 Seedream API 的 MCP 工具，支持 AI 图像生成功能"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -59,8 +57,6 @@ dev = [
     "flake8>=6.0.0",
     "mypy>=1.0.0",
     "hatchling",
-    # Python 3.11+ 内置 tomllib；3.10 需 tomli 解析 pyproject.toml（测试用）
-    "tomli; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -88,7 +84,7 @@ packages = ["seedream_mcp"]
 
 [tool.black]
 line-length = 100
-target-version = ['py310']
+target-version = ['py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -105,7 +101,7 @@ extend-exclude = '''
 '''
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

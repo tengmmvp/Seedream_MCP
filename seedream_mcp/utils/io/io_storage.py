@@ -83,6 +83,9 @@ class FileManager:
 
         Args:
             base_dir: 图片保存基础目录。默认为当前工作目录下的 images 文件夹。
+
+        Raises:
+            FileManagerError: 基础目录解析失败或指向已存在文件。
         """
         raw_base = Path.cwd() / "images" if base_dir is None else Path(base_dir)
         try:
@@ -296,6 +299,9 @@ class FileManager:
 
         Returns:
             保存路径。
+
+        Raises:
+            FileManagerError: 生成的保存路径越出基础目录。
         """
         if custom_name:
             base_name = custom_name
@@ -337,6 +343,9 @@ class FileManager:
 
         Returns:
             保存路径。
+
+        Raises:
+            FileManagerError: 生成的保存路径越出基础目录。
         """
         base_name = custom_name or self.generate_name_from_prompt(prompt)
         filename = self.generate_unique_filename(base_name, extension, content_hash=content_hash)
@@ -362,6 +371,9 @@ class FileManager:
 
         Returns:
             保存结果元数据，包含最终路径、大小与保存时间。
+
+        Raises:
+            FileManagerError: 目录创建或文件写入失败。
         """
         try:
             # 默认确保父目录存在；批量保存入口或上游已建目录时可由调用方关闭。
@@ -441,6 +453,10 @@ class FileManager:
         注意：空目录清理针对 base_dir 内全部空目录，不区分目录是否由本服务创建；
         用户在保存目录内自行维护的空目录（如占位目录）也会被移除，需保留目录结构
         请在目录内放置占位文件。
+
+        Args:
+            days: 按天清理的保留天数，小于 1 跳过按天清理。
+            max_total_bytes: 保存目录总字节上限；None 跳过配额驱逐。
 
         Returns:
             合并的清理结果，包含两策略累计的删除文件数、释放字节数与错误列表。

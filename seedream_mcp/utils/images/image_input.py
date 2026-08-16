@@ -44,6 +44,16 @@ async def prepare_image_input(image: str) -> str:
     - 本地文件路径：读取并编码为 Base64 Data URI 返回。
 
     URL 校验、Data URI 校验与本地文件读取均在工作线程中执行，避免阻塞事件循环。
+
+    Args:
+        image: 图像输入字符串，可为 HTTP/HTTPS URL、Data URI 或本地文件路径。
+
+    Returns:
+        归一化后的图像输入：URL 与 Data URI 原样返回，本地文件为 Base64 Data URI。
+
+    Raises:
+        SeedreamValidationError: 输入格式无效、路径越界或维度超限等参数校验失败。
+        SeedreamAPIError: 当前会话未授权任何工作区目录，或图像处理发生其他失败。
     """
     try:
         normalized = image.strip()

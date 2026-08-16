@@ -70,7 +70,7 @@ async def drain_background_cleanup_tasks() -> None:
 
 
 class AutoSaveError(SeedreamMCPError):
-    """自动保存错误异常。"""
+    """自动保存操作失败。"""
 
     pass
 
@@ -142,6 +142,16 @@ class AutoSaveResult:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
     ):
+        """初始化自动保存结果。
+
+        Args:
+            success: 是否保存成功。
+            original_url: 原始图片 URL，Base64 保存路径为 base64 标识串。
+            local_path: 保存成功时的本地文件路径，未保存时为 None。
+            markdown_ref: Markdown 图片引用，未生成时为 None。
+            error: 失败时的错误描述，成功时为 None。
+            metadata: 保存结果元数据；None 时置为空字典。
+        """
         self.success = success
         self.original_url = original_url
         self.local_path = local_path
@@ -178,13 +188,13 @@ class AutoSaveManager:
     """自动保存管理器，协调并发下载、文件写入与节流清理。
 
     Attributes:
-        file_manager: 文件管理器，负责保存路径生成与字节写入
-        download_manager: 下载管理器，自建或由外部共享
-        max_file_size: 最大文件大小（字节）
-        max_concurrent: 最大并发下载数
-        date_folder: 是否按日期创建文件夹
-        cleanup_days: 自动清理天数，0 表示不清理
-        max_total_bytes: 保存目录总字节上限，None 表示不限制
+        file_manager: 文件管理器，负责保存路径生成与字节写入。
+        download_manager: 下载管理器，自建或由外部共享。
+        max_file_size: 最大文件大小（字节）。
+        max_concurrent: 最大并发下载数。
+        date_folder: 是否按日期创建文件夹。
+        cleanup_days: 自动清理天数，0 表示不清理。
+        max_total_bytes: 保存目录总字节上限，None 表示不限制。
     """
 
     def __init__(
@@ -202,15 +212,15 @@ class AutoSaveManager:
         """初始化自动保存管理器。
 
         Args:
-            base_dir: 基础保存目录
-            download_timeout: 下载超时时间，仅自建下载管理器时生效
-            max_retries: 最大重试次数，仅自建下载管理器时生效
-            max_file_size: 最大文件大小，本实例自持；自建下载管理器时同时作为其上限
-            max_concurrent: 最大并发下载数
-            date_folder: 是否按日期创建文件夹
-            cleanup_days: 自动清理天数，0表示不清理
-            max_total_bytes: 保存目录总字节上限，超出按最旧文件驱逐；None 表示不限制
-            download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭
+            base_dir: 基础保存目录。
+            download_timeout: 下载超时时间，仅自建下载管理器时生效。
+            max_retries: 最大重试次数，仅自建下载管理器时生效。
+            max_file_size: 最大文件大小，本实例自持；自建下载管理器时同时作为其上限。
+            max_concurrent: 最大并发下载数。
+            date_folder: 是否按日期创建文件夹。
+            cleanup_days: 自动清理天数，0 表示不清理。
+            max_total_bytes: 保存目录总字节上限，超出按最旧文件驱逐；None 表示不限制。
+            download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭。
         """
         self.file_manager = FileManager(base_dir)
         self.max_file_size = max_file_size
@@ -228,9 +238,11 @@ class AutoSaveManager:
         self.max_total_bytes = max_total_bytes
 
     async def __aenter__(self) -> AutoSaveManager:
+        """进入上下文，直接返回自身，不预热下载会话。"""
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """退出上下文时释放本实例自有的下载资源。"""
         await self.close()
 
     async def close(self) -> None:
@@ -300,14 +312,15 @@ class AutoSaveManager:
         """保存单个图片。
 
         Args:
-            url: 图片URL
-            prompt: 生成提示词
-            tool_name: 工具名称
-            custom_name: 自定义文件名
-            alt_text: Markdown替代文本
+            url: 图片 URL。
+            prompt: 生成提示词。
+            tool_name: 工具名称。
+            custom_name: 自定义文件名。
+            alt_text: Markdown 替代文本。
 
         Returns:
-            保存结果
+            保存结果；下载或写入失败时 success 为 False 并携带错误描述，不向调用方
+            抛出下载与文件系统异常。
         """
         try:
             logger.info("开始自动保存图片: {}", sanitize_url(url))
@@ -423,14 +436,15 @@ class AutoSaveManager:
         """保存单个 Base64 图片，支持 data URI 或纯 base64 字符串。
 
         Args:
-            b64_data: Base64 编码数据，可为 data URI 或纯 base64 字符串
-            prompt: 生成提示词
-            tool_name: 工具名称
-            custom_name: 自定义文件名
-            alt_text: Markdown 替代文本
+            b64_data: Base64 编码数据，可为 data URI 或纯 base64 字符串。
+            prompt: 生成提示词。
+            tool_name: 工具名称。
+            custom_name: 自定义文件名。
+            alt_text: Markdown 替代文本。
 
         Returns:
-            保存结果
+            保存结果；解码或写入失败时 success 为 False 并携带错误描述，不向调用方
+            抛出解码与文件系统异常。
         """
         try:
             logger.info("开始自动保存 Base64 图片")
@@ -544,11 +558,11 @@ class AutoSaveManager:
         """批量保存多个图片。
 
         Args:
-            image_data: 图片数据列表，每个元素包含 url、prompt 等信息
-            tool_name: 工具名称
+            image_data: 图片数据列表，每个元素包含 url、prompt 等信息。
+            tool_name: 工具名称。
 
         Returns:
-            保存结果列表
+            与入参顺序一致的保存结果列表；单项失败降级为失败结果，不中断批次。
         """
         logger.info("开始批量保存 {} 个图片", len(image_data))
         tasks = [
@@ -571,11 +585,11 @@ class AutoSaveManager:
         """并发保存多个 Base64 图片。
 
         Args:
-            image_data: 图片数据列表，每个元素包含 b64_json、prompt 等信息
-            tool_name: 工具名称
+            image_data: 图片数据列表，每个元素包含 b64_json、prompt 等信息。
+            tool_name: 工具名称。
 
         Returns:
-            保存结果列表
+            与入参顺序一致的保存结果列表；单项失败降级为失败结果，不中断批次。
         """
         logger.info("开始批量保存 {} 个 Base64 图片", len(image_data))
         tasks = [
