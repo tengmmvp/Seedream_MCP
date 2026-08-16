@@ -185,6 +185,12 @@ def resolve_local_image_candidate(
     Returns:
         首个命中的 (resolve 后物理路径, stat) 二元组；未命中返回 None。
     """
+    # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，输入级前置拦截与
+    # normalize_path、_resolve_local_image_path 同口径；反斜杠形态的 UNC 在
+    # POSIX 上非绝对路径，先拼后查会使 UNC 前缀丢失于根路径之下，故必须在
+    # 候选构造前判定。
+    if is_unc_path(image):
+        return None
     candidates = (
         [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_roots]
     )

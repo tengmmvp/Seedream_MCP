@@ -99,11 +99,36 @@ def test_signature_delegates_to_shared_candidate_resolution(tmp_path: Path) -> N
     sys.platform == "win32" or not hasattr(os, "symlink"),
     reason="符号链接需 POSIX 与创建权限",
 )
-def test_final_component_symlink_rejected(tmp_path: Path) -> None:
-    """最终分量为符号链接时签名返回零，与 open_no_follow_read 的拒绝语义一致。"""
+def test_final_component_symlink_follows_target_within_root(tmp_path: Path) -> None:
+    """界内符号链接按 resolve 跟随语义取目标文件的签名，与读取路径锁定同一文件。
+
+    候选定位统一 resolve 后做越界判定，符号链接越界防御由该比较承担，而非拒绝
+    链接本身；界内链接等价于直接引用目标，签名与读取都落在目标物理文件上，
+    mtime+size 失效保护对链接替换同样生效。
+    """
     target = tmp_path / "real.png"
     target.write_bytes(_PNG_BYTES)
     link = tmp_path / "link.png"
     os.symlink(target, link)
 
-    assert ImagePreparer._local_file_signature("link.png", (str(tmp_path),)) == (0.0, 0)
+    st = target.stat()
+    assert ImagePreparer._local_file_signature("link.png", (str(tmp_path),)) == (
+        st.st_mtime,
+        st.st_size,
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "symlink"),
+    reason="符号链接需 POSIX 与创建权限",
+)
+def test_final_component_symlink_escaping_root_returns_zero(tmp_path: Path) -> None:
+    """指向根外的符号链接经 resolve 后越界，签名返回零不泄露目标文件信息。"""
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(_PNG_BYTES)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    link = root / "link.png"
+    os.symlink(outside, link)
+
+    assert ImagePreparer._local_file_signature("link.png", (str(root),)) == (0.0, 0)

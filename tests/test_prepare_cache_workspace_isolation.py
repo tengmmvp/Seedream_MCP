@@ -102,7 +102,11 @@ async def test_prepare_signature_strips_whitespace_like_read_path(
     image_path = tmp_path / "ref.png"
     Image.new("RGB", (32, 32), color="white").save(image_path, format="PNG")
 
+    # 读取路径经 image_input 顶层 from-import 绑定 get_workspace_roots，签名与缓存键
+    # 路径在函数内延迟导入后解析 io_path 模块属性，两个名字必须同时替换，否则读取
+    # 路径落到真实回退根，测试结果取决于 basetemp 是否恰在回退根之内。
     monkeypatch.setattr(path_utils, "get_workspace_roots", lambda: [tmp_path])
+    monkeypatch.setattr(image_input, "get_workspace_roots", lambda: [tmp_path])
     preparer = ImagePreparer(
         prepare_cache_max=8, prepare_cache_max_bytes=64 * 1024 * 1024, prepare_concurrency=2
     )

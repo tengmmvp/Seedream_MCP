@@ -76,7 +76,7 @@ def test_open_no_follow_read_fallback_rejects_symlink_without_no_follow(
 
     # 强制 no_follow 取值为 0，触发 is_symlink 兜底分支
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
-    with pytest.raises(OSError, match="拒绝跟随符号链接"):
+    with pytest.raises(OSError, match="拒绝读取符号链接"):
         open_no_follow_read(link)
 
 

@@ -45,14 +45,26 @@ def test_create_save_path_keeps_whitelisted_extension(tmp_path: Path) -> None:
     assert path.suffix.lower() == ".png"
 
 
-@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="需支持 O_NOFOLLOW 的平台")
-def test_save_bytes_rejects_symlink(tmp_path: Path) -> None:
-    """save_bytes 拒绝写向符号链接，O_NOFOLLOW 根除写路径 TOCTOU。"""
+def test_save_bytes_replaces_symlink_itself_without_write_through(tmp_path: Path) -> None:
+    """save_bytes 落向符号链接路径时替换链接本身为常规文件，不写穿到其指向。
+
+    原子落盘经随机名临时文件 + os.replace：POSIX rename 对符号链接目标的语义是
+    替换该链接而非跟随，写穿攻击者预置链接到任意文件的路径不存在；断言数据落在
+    链接路径本身且原指向目标始终未被创建，守护该替换语义不被回归为跟随写入。
+    """
+    victim_target = tmp_path / "nonexistent_target"
     link = tmp_path / "link"
-    os.symlink(tmp_path / "nonexistent_target", link)
+    try:
+        os.symlink(victim_target, link)
+    except OSError:
+        pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
     manager = FileManager(base_dir=tmp_path)
-    with pytest.raises(FileManagerError):
-        manager.save_bytes(link, b"data")
+
+    manager.save_bytes(link, b"data")
+
+    assert link.is_symlink() is False
+    assert link.read_bytes() == b"data"
+    assert victim_target.exists() is False
 
 
 def test_save_bytes_atomic_write_leaves_no_temp(tmp_path: Path) -> None:
