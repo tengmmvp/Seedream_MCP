@@ -1,5 +1,4 @@
-"""
-Seedream MCP 工具配置管理模块。
+"""Seedream MCP 工具配置管理模块。
 
 定义 SeedreamConfig 配置数据类与多层配置加载机制，优先级为运行时覆盖 >
 系统环境变量 > .env 文件 > 代码默认值。配置构建不向 os.environ 注入 .env 值，
@@ -48,8 +47,7 @@ def _env_field(default: Any, env_name: str) -> Any:
 
 @dataclass(frozen=True)
 class SeedreamConfig:
-    """
-    Seedream MCP 工具配置。
+    """Seedream MCP 工具配置。
 
     封装 Seedream 服务的所有配置参数，包括 API 认证、模型设置、日志配置和自动保存功能。
     各字段默认值与环境变量名经 _env_field 绑定于字段定义。
@@ -390,8 +388,7 @@ ENV_DEFAULTS: dict[str, str] = {
 
 
 def normalize_model_selector(value: object) -> str:
-    """
-    规范化模型选择器。
+    """规范化模型选择器。
 
     支持将友好别名映射为真实 Model ID；未命中的值保持原样。
     """
@@ -423,8 +420,7 @@ def parse_int(value: object) -> int:
 
 
 def _read_env_values(env_file: str | None) -> dict[str, str]:
-    """
-    读取 .env 文件键值为字典，不写入进程环境变量。
+    """读取 .env 文件键值为字典，不写入进程环境变量。
 
     显式传入 env_file 时只读取该文件，不再合并项目根或当前工作目录的 .env；
     未提供时按项目根 .env 与当前工作目录 .env 合并读取，当前工作目录覆盖项目根。
@@ -492,8 +488,7 @@ def _pick_config_value(
     env_values: Mapping[str, str],
     default_value: object,
 ) -> object:
-    """
-    按优先级选取配置值：overrides > 系统环境变量 > env 文件 > 默认值。
+    """按优先级选取配置值：overrides > 系统环境变量 > env 文件 > 默认值。
 
     三层来源统一采用 _value_is_set 做空值判定，空白字符串在任一层都视为未设置而穿透到
     下一层，避免空白 override 被原样采用而空白 env/file 被当作未设置的语义分裂。系统
@@ -560,8 +555,7 @@ def build_config_from_sources(
     overrides: Mapping[str, object] | None = None,
     env_file: str | None = None,
 ) -> SeedreamConfig:
-    """
-    从统一来源构建配置对象，线程安全。
+    """从统一来源构建配置对象，线程安全。
 
     通过 ``_config_build_lock`` 串行化构建；streamable-http 多请求场景下可能并发
     触发配置构建，串行化保证构建语义与单线程完全一致。

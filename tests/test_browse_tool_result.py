@@ -227,11 +227,12 @@ def test_browse_images_input_rejects_oversized_offset() -> None:
 async def test_browse_images_format_filter_all_unsupported_echoes_original(
     workspace_root: Path,
 ) -> None:
-    """format_filter 全部为不支持后缀时返回区分消息，structuredContent 回显用户原始输入。
+    """format_filter 全部为不支持后缀时返回区分消息并回显原始输入。
 
-    用 .svg 而非任务示例的 .gif：formats.py 的 SUPPORTED_IMAGE_EXTENSIONS 含 .gif，
-    若用 .gif 会落入 supported_only 非空分支而不触发 format_filter_exhausted，无法覆盖
-    区分消息。.svg 不在支持集合内，可真正命中 exhausted 分支。断言区分消息含
+    structuredContent 回显用户原始 format_filter。用 .svg 而非任务示例的 .gif：
+    formats.py 的 SUPPORTED_IMAGE_EXTENSIONS 含 .gif，若用 .gif 会落入
+    supported_only 非空分支而不触发 format_filter_exhausted，无法覆盖区分消息。
+    .svg 不在支持集合内，可真正命中 exhausted 分支。断言区分消息含
     "均不在支持列表"与"支持"，status 为 empty 且 isError 为 False；format_filter 保留
     用户原始非空列表 [".svg"] 供回显，不缩减为空列表。
     """
@@ -392,12 +393,12 @@ def test_format_file_info_degrades_on_malformed_timestamp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """畸形时间戳使 fromtimestamp 抛 ValueError 时降级为“文件信息不可用”，不向调用方抛异常。
+    """畸形时间戳使 fromtimestamp 抛 ValueError 时降级为“文件信息不可用”。
 
-    stat 本身成功，降级分支须同时置空 size_mb 与 modified 两键，避免半份详情误导
-    调用方。以替身模块替换 browse_images 命名空间内的 datetime 名字，使
-    datetime.datetime.fromtimestamp 抛 ValueError；内建 datetime 类为不可变类型，
-    无法直接对其打属性补丁。
+    不向调用方抛异常；stat 本身成功，降级分支须同时置空 size_mb 与 modified
+    两键，避免半份详情误导调用方。以替身模块替换 browse_images 命名空间内的
+    datetime 名字，使 datetime.datetime.fromtimestamp 抛 ValueError；内建
+    datetime 类为不可变类型，无法直接对其打属性补丁。
     """
     image = tmp_path / "a.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")

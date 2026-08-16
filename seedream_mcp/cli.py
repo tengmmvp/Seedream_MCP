@@ -21,8 +21,7 @@ from .version import __version__
 
 
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
-    """
-    从命令行参数构建服务器配置对象。
+    """从命令行参数构建服务器配置对象。
 
     优先级：命令行参数 > 系统环境变量 > .env 文件 > 默认值。
 
@@ -64,8 +63,7 @@ def _port_type(value: str) -> int:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """
-    构建命令行参数解析器。
+    """构建命令行参数解析器。
 
     定义所有支持的命令行选项，包括 API 配置、模型选择、日志级别等。
     """
@@ -195,8 +193,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable-http"]:
-    """
-    构建 MCP 运行传输方式。
+    """构建 MCP 运行传输方式。
 
     SSE 传输已被 MCP 2025-03-26 规范弃用并由 Streamable HTTP 取代，
     本服务仅支持 stdio 本地传输与 streamable-http 远程传输两种方式。

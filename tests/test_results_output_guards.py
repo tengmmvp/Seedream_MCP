@@ -822,7 +822,10 @@ def test_structured_failure_error_code_sanitized() -> None:
 
 
 def test_failure_text_dict_message_normalized_and_sanitized() -> None:
-    """请求级 error.message 为 dict 形态：归一化为文本后脱敏，Bearer 凭据不进入文本通道。"""
+    """请求级 error.message 为 dict 形态时归一化为文本后脱敏。
+
+    Bearer 凭据不进入文本通道。
+    """
     result = {
         "success": False,
         "status": "failed",
@@ -865,7 +868,10 @@ def test_failure_text_non_dict_error_normalized_and_sanitized() -> None:
 
 
 def test_structured_failure_dict_message_normalized_and_sanitized() -> None:
-    """结构化出口的非 str error.message 归一化为文本后脱敏，凭据不进入 structuredContent。"""
+    """结构化出口的非 str error.message 归一化为文本后脱敏。
+
+    凭据不进入 structuredContent。
+    """
     result = {
         "success": False,
         "status": "failed",

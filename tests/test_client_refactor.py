@@ -876,7 +876,10 @@ async def test_multi_image_fusion_accepts_up_to_10_images_for_pro(
 async def test_prepare_image_input_caches_result_and_evicts_lru(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_prepare_image_input 命中缓存不重复调用底层；LRU 淘汰最久未用条目，近期命中不被淘汰。"""
+    """_prepare_image_input 命中缓存不重复调用底层，LRU 淘汰最久未用条目。
+
+    近期命中不被淘汰。
+    """
     # 用对象式 monkeypatch 而非字符串式：字符串式经 getattr(seedream_mcp, "utils") 解析，
     # 在 test_package_lazy_import 重载顶层包后 utils 子模块不再绑定到新包对象而失败。
     from seedream_mcp.utils.images import image_input
@@ -923,10 +926,11 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
 
 
 def test_serialize_request_outputs_utf8_without_ascii_escape() -> None:
-    """_serialize_request 以 ensure_ascii=False 输出 UTF-8 bytes，中文原样出现而非 \\uXXXX 转义。
+    """_serialize_request 以 ensure_ascii=False 输出 UTF-8 bytes。
 
-    静态方法可直接通过类调用，无需实例化。验证返回 bytes，"中文" 的 UTF-8 字节序列原样
-    出现，且不包含 ASCII 转义形式（字面 \\u4e2d），确保中文提示词不被转义膨胀。
+    中文原样出现而非 \\uXXXX 转义：静态方法可直接通过类调用，无需实例化。验证
+    返回 bytes，"中文" 的 UTF-8 字节序列原样出现，且不包含 ASCII 转义形式（字面
+    \\u4e2d），确保中文提示词不被转义膨胀。
     """
     result = SeedreamClient._serialize_request({"prompt": "中文测试"})
 
@@ -954,7 +958,10 @@ def test_build_generation_url_strips_trailing_slashes() -> None:
 
 
 def test_build_api_result_top_level_error_without_data_marks_request_failure() -> None:
-    """200 顶层 error 为非空 dict 且无 data：置 success=False 并透传 error，不再吞为成功零图。"""
+    """200 顶层 error 为非空 dict 且无 data 时置 success=False 并透传 error。
+
+    不再吞为成功零图。
+    """
     client = SeedreamClient(_build_config())
     result = client._build_api_result(
         {"error": {"code": "ContentTooLarge", "message": "生成内容超限"}, "usage": {}}
@@ -1048,7 +1055,10 @@ async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
 async def test_call_api_non_dict_json_payload_raises_format_error(
     raw_payload: Any, expected_type: str
 ) -> None:
-    """标准路径 200 响应体为非 dict JSON 时抛出明确的响应格式错误，而非 AttributeError。"""
+    """标准路径 200 响应体为非 dict JSON 时抛出明确的响应格式错误。
+
+    抛出明确的错误而非 AttributeError。
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         del request

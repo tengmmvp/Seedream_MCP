@@ -152,7 +152,10 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
 async def test_run_image_to_image_dispatches_via_composition_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """run_image_to_image 经 composition root 委托 handle_image_to_image，调用 client.image_to_image。"""
+    """run_image_to_image 经 composition root 委托 handle_image_to_image。
+
+    最终调用 client.image_to_image。
+    """
     _patch_client_method(monkeypatch, "image_to_image")
     _patch_save_success(monkeypatch)
 
@@ -197,7 +200,10 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
 async def test_run_sequential_generation_dispatches_via_composition_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """run_sequential_generation 经 composition root 委托 handle_sequential_generation。"""
+    """run_sequential_generation 经 composition root 委托实现处理器。
+
+    委托目标为 handle_sequential_generation，最终调用 client.sequential_generation。
+    """
     _patch_client_method(monkeypatch, "sequential_generation")
     _patch_save_success(monkeypatch)
 

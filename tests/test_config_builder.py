@@ -264,7 +264,10 @@ def test_build_config_none_overrides_fall_through_to_defaults(
 def test_build_config_loads_image_prepare_concurrency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SEEDREAM_IMAGE_PREPARE_CONCURRENCY 经 .env 加载到 image_prepare_concurrency 字段。"""
+    """SEEDREAM_IMAGE_PREPARE_CONCURRENCY 经 .env 加载生效。
+
+    加载到 image_prepare_concurrency 字段。
+    """
     monkeypatch.delenv("SEEDREAM_IMAGE_PREPARE_CONCURRENCY", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_IMAGE_PREPARE_CONCURRENCY=7\n")
@@ -397,8 +400,11 @@ def test_seedream_config_accepts_zero_cleanup_days() -> None:
     ],
 )
 def test_seedream_config_rejects_invalid_validate_branches(kwargs: dict, match: str) -> None:
-    """validate() 各拒绝分支覆盖：占位符密钥、非法协议 base_url、空 model_id、
-    非正 timeout/api_timeout、max_retries<1、非法 log_level、负 auto_save_max_retries。"""
+    """validate() 各拒绝分支经构造期校验拒绝非法配置。
+
+    覆盖占位符密钥、非法协议 base_url、空 model_id、非正 timeout/api_timeout、
+    max_retries<1、非法 log_level、负 auto_save_max_retries。
+    """
     from seedream_mcp.config import SeedreamConfig
 
     # api_key 未在 kwargs 中时补充合法值，已在 kwargs 中时（占位符用例）不覆盖
@@ -543,7 +549,10 @@ def test_build_config_loads_response_body_limit(
 def test_build_config_response_body_limit_defaults_to_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未设置时 response_body_limit 为 None，由 client 按 auto_save_max_file_size × 20 推导。"""
+    """未设置时 response_body_limit 为 None。
+
+    由 client 按 auto_save_max_file_size × 20 推导。
+    """
     monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")

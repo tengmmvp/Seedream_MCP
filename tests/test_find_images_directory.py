@@ -274,10 +274,11 @@ def test_cached_find_images_replays_unreadable_dirs_on_cache_hit(
 def test_cached_find_images_recursive_uses_ttl_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """递归扫描用 TTL 缓存：TTL 内命中缓存返回陈旧结果，TTL 过期后重扫看到子目录新增图。
+    """递归扫描用 TTL 缓存：TTL 内命中缓存返回陈旧结果，过期后重扫。
 
-    子目录新增文件不改变顶层目录 mtime，递归无法用 mtime 失效，改用 TTL：TTL 内复用缓存
-    换取翻页性能（接受短时陈旧），过期后重新扫描反映新增。
+    重扫看到子目录新增图。子目录新增文件不改变顶层目录 mtime，递归无法用 mtime
+    失效，改用 TTL：TTL 内复用缓存换取翻页性能（接受短时陈旧），过期后重新
+    扫描反映新增。
     """
     sub = tmp_path / "sub"
     sub.mkdir()
@@ -341,10 +342,11 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
 
 
 def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> None:
-    """大目录深翻页：小 scan_limit 缓存不完整前缀，更大 scan_limit 重扫扩展前缀，回看命中不重扫。
+    """大目录深翻页：小 scan_limit 缓存不完整前缀，更大 scan_limit 重扫扩展前缀。
 
-    覆盖 complete=False 前缀增量扩展这一新逻辑：旧实现从不缓存不完整列表，深翻页每页重扫；
-    新实现缓存前缀并随 scan_limit 增长扩展，回看与同范围重复请求直接命中。
+    回看命中不重扫。覆盖 complete=False 前缀增量扩展这一新逻辑：旧实现从不缓存
+    不完整列表，深翻页每页重扫；新实现缓存前缀并随 scan_limit 增长扩展，回看与
+    同范围重复请求直接命中。
     """
     for i in range(5):
         (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")

@@ -349,7 +349,10 @@ class ImageToImageInput(
     _SingleImageInput,
     _PromptAndOptimizeInput,
 ):
-    """图文生图：基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。"""
+    """图文生图：基于已有图片，结合文字指令进行图像编辑。
+
+    支持图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等操作。
+    """
 
     # 图层拆分场景 prompt 可缺省：模型将自动识别图片中的主要元素并拆分为独立图层；
     # 其余场景必填，组合约束由下方 model_validator 保证。基类锚定为必填 str 以固定
@@ -387,7 +390,10 @@ class MultiImageFusionInput(
     _MultiImageInput,
     _PromptAndOptimizeInput,
 ):
-    """多图融合：根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。"""
+    """多图融合：根据文本描述与多张参考图片，融合风格与元素生成新图像。
+
+    如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
+    """
 
     prompt: str = Field(
         ...,
@@ -405,10 +411,10 @@ class SequentialGenerationInput(
     _SequentialImageInput,
     _PromptAndOptimizeInput,
 ):
-    """组图输出：支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
+    """组图输出：以一张或多张参考图与文字信息，生成一组内容关联的图片。
 
-    request_count 表示并行生成多组独立的组图结果，而非扩大单组内的图片数量；单组图片数量
-    由 max_images 控制，二者相互独立。
+    支持漫画分镜、品牌视觉等场景；request_count 表示并行生成多组独立的组图结果，
+    而非扩大单组内的图片数量；单组图片数量由 max_images 控制，二者相互独立。
     """
 
     prompt: str = Field(

@@ -153,7 +153,7 @@ def test_public_ip_rejection_rejects_ipv4_mapped_embedded_private() -> None:
 async def test_public_ip_pinning_resolver_returns_only_public_ip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """resolve 只返回 _resolve_public_ips 校验通过的公网 IP，hostname 保留原 host 维护 SNI。"""
+    """resolve 只返回校验通过的公网 IP，hostname 保留原 host 维护 SNI。"""
     manager = DownloadManager()
     monkeypatch.setattr(manager, "_resolve_public_ips", AsyncMock(return_value=("203.0.113.5",)))
 
@@ -187,7 +187,10 @@ async def test_public_ip_pinning_resolver_preserves_hostname_for_multiple_ips(
 async def test_public_ip_pinning_resolver_no_entries_when_no_public_ips(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_resolve_public_ips 返回空时 resolve 不返回可用条目，私网/非法 IP 无从进入连接目标。"""
+    """_resolve_public_ips 返回空时 resolve 不返回可用条目。
+
+    私网与非法 IP 无从进入连接目标。
+    """
     manager = DownloadManager()
     monkeypatch.setattr(manager, "_resolve_public_ips", AsyncMock(return_value=()))
 

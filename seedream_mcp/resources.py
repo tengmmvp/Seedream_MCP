@@ -1,5 +1,4 @@
-"""
-Seedream MCP 共享资源模块。
+"""Seedream MCP 共享资源模块。
 
 持有 FastMCP 实例 mcp 与其生命周期所需的共享资源管理：服务器元数据常量、
 app_lifespan 引用计数单例、活动与退役资源状态、同步与异步清理入口。server 模块
@@ -141,8 +140,7 @@ def _has_inflight_references() -> bool:
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """
-    管理 FastMCP 生命周期，注入共享配置、SeedreamClient 与 DownloadManager。
+    """管理 FastMCP 生命周期，注入共享配置、SeedreamClient 与 DownloadManager。
 
     资源以引用计数的模块级单例持有，跨 lifespan 重入复用。stateless_http 模式下 FastMCP
     每请求重入 lifespan，活动资源仅登记在途引用而不关闭，使连接池跨请求复用。stateful

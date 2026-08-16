@@ -95,10 +95,11 @@ def test_open_no_follow_fallback_allows_normal_file(
 def test_open_no_follow_fallback_rejects_fstat_toctou_mismatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """fstat 与 lstat 的 st_ino 不一致时，_open_no_follow_fallback 拒绝以闭合 TOCTOU 竞态。
+    """fstat 与 lstat 的 st_ino 不一致时拒绝打开，闭合 TOCTOU 竞态。
 
-    模拟平台不支持 O_NOFOLLOW，强制走 lstat+fstat 同一性复核分支；monkeypatch os.fstat
-    返回不同 inode，模拟校验与打开之间最终分量被替换为符号链接的场景。
+    经 _open_no_follow_fallback 的同一性复核拒绝。模拟平台不支持 O_NOFOLLOW，强制走
+    lstat+fstat 同一性复核分支；monkeypatch os.fstat 返回不同 inode，模拟校验与打开
+    之间最终分量被替换为符号链接的场景。
     """
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
     path = tmp_path / "plain.bin"

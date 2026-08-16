@@ -96,10 +96,11 @@ async def test_save_image_returns_failure_on_download_error(
 async def test_save_image_reports_sniffed_final_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
 ) -> None:
-    """URL 无后缀派生 .jpeg 而响应体为 PNG 时，local_path 与 markdown_ref 报告实际落盘文件。
+    """URL 派生后缀与响应体实际格式不符时，local_path 报告实际落盘文件。
 
-    字节签名嗅探会把落盘路径修正为 .png 后缀；save_image 必须基于下载结果的
-    file_path 构造对外路径，报告 URL 派生的原始路径会指向不存在的文件。
+    URL 无后缀派生 .jpeg 而响应体为 PNG：字节签名嗅探会把落盘路径修正为 .png 后缀；
+    save_image 必须基于下载结果的 file_path 构造对外路径，报告 URL 派生的原始路径
+    会指向不存在的文件，markdown_ref 同理。
     """
     download_manager = DownloadManager()
     session = _FakeSession([_png_success_response()])

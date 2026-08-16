@@ -1,4 +1,4 @@
-﻿"""组图输出工具的 impl 处理器。
+"""组图输出工具的 impl 处理器。
 
 作为薄适配器：从入参取出参考图与 max_images 字段，与 prompt 等封装为 ``_execute``
 回调，再委托 ``execute_generation_handler`` 流水线完成校验、调用、保存与结果格式化。

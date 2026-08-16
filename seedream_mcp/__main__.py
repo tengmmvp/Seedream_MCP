@@ -1,5 +1,4 @@
-"""
-Seedream MCP 包主入口。
+"""Seedream MCP 包主入口。
 
 允许通过 python -m seedream_mcp 运行服务器。
 """

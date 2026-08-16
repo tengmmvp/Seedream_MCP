@@ -119,12 +119,13 @@ def test_validate_connected_peer_ip_allows_public_ip() -> None:
 async def test_download_image_rejects_redirect_to_private_ip_via_real_static_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """端到端串联：保留真实 _validate_url_for_request，逐跳重定向到内网 IP 须被静态校验拒绝。
+    """端到端串联：保留真实 _validate_url_for_request 的重定向内网拒绝。
 
-    上述两条重定向用例经 _patch_download_network 把 _validate_url_for_request 架空为直通，
-    实测的是重定向上限而非安全拒绝。本用例仅 stub 依赖网络的 DNS 解析与 session 注入，
-    保留真实的 _validate_url_for_request 串联，使 302 目标 169.254.169.254 经
-    _validate_url_static 命中非公网判定被拒绝，覆盖 SSRF 第四层防护的端到端安全语义。
+    逐跳重定向到内网 IP 须被静态校验拒绝。上述两条重定向用例经 _patch_download_network
+    把 _validate_url_for_request 架空为直通，实测的是重定向上限而非安全拒绝。本用例仅
+    stub 依赖网络的 DNS 解析与 session 注入，保留真实的 _validate_url_for_request 串联，
+    使 302 目标 169.254.169.254 经 _validate_url_static 命中非公网判定被拒绝，覆盖
+    SSRF 第四层防护的端到端安全语义。
     """
     manager = DownloadManager()
     session = _FakeSession(

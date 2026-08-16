@@ -1,4 +1,4 @@
-﻿"""文生图工具的 impl 处理器。
+"""文生图工具的 impl 处理器。
 
 作为薄适配器：封装 prompt 与优化选项为 ``_execute`` 回调，再委托
 ``execute_generation_handler`` 流水线完成校验、调用、保存与结果格式化。字段规则与校验

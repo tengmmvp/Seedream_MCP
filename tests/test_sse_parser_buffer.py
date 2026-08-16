@@ -333,10 +333,10 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
 async def test_parse_sse_response_offloads_large_segment_to_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """单事件体积超过 64KB 阈值时切片与 json.loads 须一并卸载到工作线程，小事件保持同步。
+    """单事件体积超过 64KB 阈值时切片与 json.loads 一并卸载到工作线程。
 
-    大段卸载任务为 _slice_parse_segment(buffer, start, end, log)，段体积即 end - start；
-    completed 小事件不得触发 to_thread。
+    小事件保持同步。大段卸载任务为 _slice_parse_segment(buffer, start, end, log)，
+    段体积即 end - start；completed 小事件不得触发 to_thread。
     """
     offload_sizes: list[int] = []
     real_to_thread = sse_parser_module.asyncio.to_thread

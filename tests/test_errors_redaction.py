@@ -201,7 +201,10 @@ def test_api_error_to_dict_redacts_bearer_in_message() -> None:
 
 
 def test_format_error_for_user_redacts_bearer_in_api_error_message() -> None:
-    """format_error_for_user 对 APIError 的 message 做 Bearer 脱敏，令牌不进入用户可见输出。"""
+    """format_error_for_user 对 APIError 的 message 做 Bearer 脱敏。
+
+    令牌不进入用户可见输出。
+    """
     err = SeedreamAPIError(message="Invalid Bearer sk-secret-token-123")
 
     rendered = format_error_for_user(err)
@@ -429,7 +432,10 @@ def test_redact_sensitive_message_long_space_run_stays_fast() -> None:
 
 
 def test_redact_sensitive_message_unicode_whitespace_run_stays_fast() -> None:
-    """性能守护：Unicode 空白长串与引号空白组合的脱敏保持线性，防止扩展字符类后的回溯回归。"""
+    """性能守护：Unicode 空白长串与引号空白组合的脱敏保持线性。
+
+    防止扩展字符类后的回溯回归。
+    """
     nbsp_run = "token" + chr(0xA0) * 20_000 + "value"
     start = time.perf_counter()
     redacted = _redact_sensitive_message(nbsp_run)
@@ -646,7 +652,10 @@ def test_sanitize_data_text_url_light_path_still_strips_userinfo() -> None:
 
 
 def test_sanitize_data_text_strips_padding_before_url_judgment() -> None:
-    """纯 URL 判定先 strip 首尾空白：带空白前缀的签名 URL 走轻量路径，查询串不被键值脱敏破坏。"""
+    """纯 URL 判定先 strip 首尾空白，带空白前缀的签名 URL 走轻量路径。
+
+    查询串不被键值脱敏破坏。
+    """
     url = "https://example.com/a.png?token=abc&Signature=xyz"
 
     assert sanitize_data_text("  " + url) == url
@@ -750,7 +759,10 @@ def test_api_error_deeply_nested_message_does_not_raise_recursion_error() -> Non
 
 
 def test_to_dict_message_truncates_before_redaction() -> None:
-    """to_dict 的 message 先截断后脱敏：截断丢弃段凭据随截断消失，保留段凭据被剥离，输出长度受上限约束。"""
+    """to_dict 的 message 先截断后脱敏。
+
+    截断丢弃段凭据随截断消失，保留段凭据被剥离，输出长度受上限约束。
+    """
     boundary_split = SeedreamAPIError(message="a" * 495 + "api_key=" + "SECRET" * 200)
     rendered = str(boundary_split.to_dict()["message"])
     assert "SECRET" not in rendered
@@ -763,7 +775,10 @@ def test_to_dict_message_truncates_before_redaction() -> None:
 
 
 def test_format_error_for_user_truncates_before_redaction() -> None:
-    """format_error_for_user 与 to_dict 同次序：先截断约束正则工作长度，再剥离保留段凭据。"""
+    """format_error_for_user 与 to_dict 同次序：先截断再脱敏。
+
+    截断约束正则工作长度，再剥离保留段凭据。
+    """
     err = SeedreamAPIError(message="a" * 495 + "api_key=" + "SECRET" * 200)
     rendered = format_error_for_user(err)
     assert "SECRET" not in rendered
@@ -800,7 +815,10 @@ def test_to_dict_deeply_nested_details_do_not_raise_recursion_error() -> None:
 
 
 def test_to_dict_details_truncated_like_response_data() -> None:
-    """details 与 response_data 截断口径对齐：超大容器收敛为元素数摘要，不撑爆结构化输出。"""
+    """details 与 response_data 截断口径对齐，超大容器收敛为元素数摘要。
+
+    不撑爆结构化输出。
+    """
     oversized = {f"field{i}": "x" * 50 for i in range(60)}
     err = SeedreamMCPError("msg", details=oversized)
 
@@ -936,7 +954,10 @@ def test_redact_sensitive_message_strips_session_jwt_privatekey_keyvalues() -> N
 
 
 def test_is_sensitive_key_matches_privatekey_and_sshkey() -> None:
-    """无分隔复合词 privatekey/sshkey 纳入高确信子串清单，与 apikey 策略统一。"""
+    """无分隔复合词 privatekey/sshkey 纳入高确信子串清单。
+
+    与 apikey 策略统一。
+    """
     from seedream_mcp.utils.core.errors import _is_sensitive_key
 
     assert _is_sensitive_key("privatekey") is True
@@ -958,7 +979,10 @@ def test_filter_sensitive_data_redacts_privatekey_dict_key() -> None:
 
 
 def test_redact_sensitive_message_strips_camelcase_sensitive_keyvalues() -> None:
-    """camelCase 敏感键 secretKey/accessKey/sessionKey/authKey 的裸值剥离，凭据不借驼峰命名逃逸。"""
+    """camelCase 敏感键的裸值剥离，凭据不借驼峰命名逃逸。
+
+    覆盖 secretKey/accessKey/sessionKey/authKey 四键。
+    """
     assert _redact_sensitive_message("secretKey=AKIAIOSFODNN7EXAMPLE") == "secretKey=***"
     assert _redact_sensitive_message("accessKey: AKIAIOSFODNN7EXAMPLE") == "accessKey: ***"
     assert _redact_sensitive_message("sessionKey=abc123def456") == "sessionKey=***"

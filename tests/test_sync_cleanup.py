@@ -31,7 +31,10 @@ class _FakeResource:
 
 
 def test_sync_cleanup_closes_shared_resources(monkeypatch: pytest.MonkeyPatch) -> None:
-    """正常路径：asyncio.run 在无运行循环下执行 _close_held，关闭 client 与 download_manager。"""
+    """正常路径下 asyncio.run 执行 _close_held 关闭全部共享资源。
+
+    无运行循环时经 asyncio.run 执行，关闭 client 与 download_manager。
+    """
     client = _Closeable()
     download_manager = _Closeable()
     monkeypatch.setattr(resources, "_active_resource", _FakeResource(client, download_manager))

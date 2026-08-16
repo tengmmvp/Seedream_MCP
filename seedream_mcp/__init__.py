@@ -1,5 +1,4 @@
-﻿"""
-Seedream MCP 工具包。
+"""Seedream MCP 工具包。
 
 提供 Seedream 图像生成的 MCP 服务器与客户端封装。
 """

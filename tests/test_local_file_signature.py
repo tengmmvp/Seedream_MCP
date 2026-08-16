@@ -69,9 +69,10 @@ def test_multi_root_skips_oversized_picks_valid(tmp_path: Path) -> None:
 
 
 def test_signature_delegates_to_shared_candidate_resolution(tmp_path: Path) -> None:
-    """签名委托 image_validation.resolve_local_image_candidate 共享定位，与读取路径同源。
+    """签名委托共享定位 resolve_local_image_candidate，与读取路径同源。
 
-    候选选择规则抽取为单一实现后，签名与读取不可能因两侧规则漂移锁定不同文件。
+    候选选择规则抽取为 image_validation 的单一实现后，签名与读取不可能因两侧
+    规则漂移锁定不同文件。
     """
     from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
 

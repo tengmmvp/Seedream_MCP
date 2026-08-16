@@ -215,19 +215,19 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 各模型支持的能力与参数范围不同，选择模型时请留意：
 
-| 能力 / 参数                | 5.0 Pro   | 5.0 / 5.0 Lite | 4.5       | 4.0          |
-| -------------------------- | --------- | ------------ | --------- | ------------ |
-| 文生图 / 图生图 / 多图生图 | ✅        | ✅           | ✅        | ✅           |
-| 组图生成                   | ❌        | ✅           | ✅        | ✅           |
-| 联网搜索                   | ❌        | ✅           | ❌        | ❌           |
-| 流式输出                   | ❌        | ✅           | ✅        | ✅           |
-| 输出格式（png/jpeg）       | ✅        | ✅           | ❌        | ❌           |
-| 图层拆分                   | ✅        | ❌           | ❌        | ❌           |
-| 透明背景                   | ✅        | ❌           | ❌        | ❌           |
-| 分辨率档位                 | 1K / 1.5K / 2K | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| 自定义尺寸倍数             | 16 的倍数 | 不限制       | 不限制    | 不限制       |
-| MCP 默认尺寸               | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
-| 参考图上限                 | 10 张     | 14 张        | 14 张     | 14 张        |
+| 能力 / 参数                | 5.0 Pro        | 5.0 / 5.0 Lite | 4.5       | 4.0          |
+| -------------------------- | -------------- | -------------- | --------- | ------------ |
+| 文生图 / 图生图 / 多图生图 | ✅             | ✅             | ✅        | ✅           |
+| 组图生成                   | ❌             | ✅             | ✅        | ✅           |
+| 联网搜索                   | ❌             | ✅             | ❌        | ❌           |
+| 流式输出                   | ❌             | ✅             | ✅        | ✅           |
+| 输出格式（png/jpeg）       | ✅             | ✅             | ❌        | ❌           |
+| 图层拆分                   | ✅             | ❌             | ❌        | ❌           |
+| 透明背景                   | ✅             | ❌             | ❌        | ❌           |
+| 分辨率档位                 | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K   | 1K / 2K / 4K |
+| 自定义尺寸倍数             | 16 的倍数      | 不限制         | 不限制    | 不限制       |
+| MCP 默认尺寸               | 2048x2048      | 2048x2048      | 2048x2048 | 2048x2048    |
+| 参考图上限                 | 10 张          | 14 张          | 14 张     | 14 张        |
 
 > **MCP 默认尺寸**：表中“MCP 默认尺寸”行为 MCP 统一配置 `default_size=2K`（对应 `2048x2048`）的运行时解析值，与各模型原生默认无关。
 
@@ -524,34 +524,34 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 除工具外，服务端还暴露以下 MCP 资源供客户端读取运行时信息：
 
-| 资源 URI | 说明 |
-| --- | --- |
-| `seedream://workspace/roots` | 客户端授权的 MCP 工作区 Roots；未授权时为空，避免暴露服务器本地目录 |
-| `seedream://server/info` | 服务器名称、版本与当前生效配置摘要（模型、默认尺寸、自动保存开关，共五项字段） |
-| `seedream://models/info` | 各模型别名与能力声明：支持的尺寸档位、像素范围、像素倍数、参考图上限、输出格式/工具/流式等能力，供客户端按需选择模型 |
+| 资源 URI                     | 说明                                                                                                                 |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `seedream://workspace/roots` | 客户端授权的 MCP 工作区 Roots；未授权时为空，避免暴露服务器本地目录                                                  |
+| `seedream://server/info`     | 服务器名称、版本与当前生效配置摘要（模型、默认尺寸、自动保存开关，共五项字段）                                       |
+| `seedream://models/info`     | 各模型别名与能力声明：支持的尺寸档位、像素范围、像素倍数、参考图上限、输出格式/工具/流式等能力，供客户端按需选择模型 |
 
 ## 🎭 风格预设
 
 服务端内置以下 MCP 提示词模板，一键生成指定风格的文生图 prompt，可通过 `subject` 参数指定画面主题：
 
-| Prompt 名称 | 风格 | 默认主题 |
-| --- | --- | --- |
-| `seedream_style_anime` | 日系动漫风格，赛璐珞上色，鲜艳饱和色彩 | 一个女孩站在樱花树下 |
-| `seedream_style_realistic` | 写实摄影风格，高清细节，自然光影 | 城市夜景 |
-| `seedream_style_watercolor` | 水彩画风格，柔和晕染，通透色彩 | 山间小屋 |
-| `seedream_style_oil_painting` | 油画风格，厚重笔触，丰富层次 | 海边夕阳 |
+| Prompt 名称                   | 风格                                   | 默认主题             |
+| ----------------------------- | -------------------------------------- | -------------------- |
+| `seedream_style_anime`        | 日系动漫风格，赛璐珞上色，鲜艳饱和色彩 | 一个女孩站在樱花树下 |
+| `seedream_style_realistic`    | 写实摄影风格，高清细节，自然光影       | 城市夜景             |
+| `seedream_style_watercolor`   | 水彩画风格，柔和晕染，通透色彩         | 山间小屋             |
+| `seedream_style_oil_painting` | 油画风格，厚重笔触，丰富层次           | 海边夕阳             |
 
 ## 📚 参考文档
 
 仓库 `docs/` 目录收录以下参考资料：
 
-| 文档 | 说明 |
-| --- | --- |
-| [Seedream-API-Reference.md](docs/volcengine/Seedream-API-Reference.md) | 火山引擎官方文稿：图像生成 API 参考 |
-| [Seedream-Official-Tutorial.md](docs/volcengine/Seedream-Official-Tutorial.md) | 火山引擎官方文稿：官方教程 |
-| [Seedream-Streaming-Response.md](docs/volcengine/Seedream-Streaming-Response.md) | 火山引擎官方文稿：流式响应（SSE 事件）说明 |
-| [claude_desktop_config.json](docs/samples/claude_desktop_config.json) | 本项目示例：Claude Desktop 常用环境变量配置样本 |
-| [pyguide.md](docs/development/pyguide.md) | 开发规范收录：Google Python Style Guide |
+| 文档                                                                             | 说明                                            |
+| -------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [Seedream-API-Reference.md](docs/volcengine/Seedream-API-Reference.md)           | 火山引擎官方文稿：图像生成 API 参考             |
+| [Seedream-Official-Tutorial.md](docs/volcengine/Seedream-Official-Tutorial.md)   | 火山引擎官方文稿：官方教程                      |
+| [Seedream-Streaming-Response.md](docs/volcengine/Seedream-Streaming-Response.md) | 火山引擎官方文稿：流式响应（SSE 事件）说明      |
+| [claude_desktop_config.json](docs/samples/claude_desktop_config.json)            | 本项目示例：Claude Desktop 常用环境变量配置样本 |
+| [pyguide.md](docs/development/pyguide.md)                                        | 开发规范收录：Google Python Style Guide         |
 
 ## ❓ 常见问题
 
@@ -668,7 +668,6 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 流式响应每次读取块�
 - **保存目录归服务管理**：自动保存的按天清理与总量配额会删除保存目录内**所有**符合图片扩展名的过期文件与空目录，不区分是否由本服务生成。请勿将 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向个人相册等含重要图片的目录。
 - **多租户 streamable-http 部署建议显式设置 `SEEDREAM_WORKSPACE_ROOT`**：MCP Roots 读取失败时文件访问边界会回退到该环境变量（未设置时为进程工作目录）。
 - **未认证请求的体积限制**：未携带有效令牌的 chunked 请求不读 body 即返回 401，其体积限制依赖 uvicorn 层或前置反向代理；公网暴露部署请在代理层配置请求体上限。
-
 
 ## 👥 贡献者
 

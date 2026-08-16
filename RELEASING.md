@@ -20,13 +20,13 @@
 
 在 PyPI 后台（`Account settings → Publishing → Add a new publisher → GitHub`）填写：
 
-| 字段 | 值 |
-|---|---|
+| 字段              | 值                   |
+| ----------------- | -------------------- |
 | PyPI Project name | `seedream-image-mcp` |
-| Owner | `tengmmvp` |
-| Repository name | `Seedream_MCP` |
-| Workflow filename | `release.yml` |
-| Environment name | *(留空)* |
+| Owner             | `tengmmvp`           |
+| Repository name   | `Seedream_MCP`       |
+| Workflow filename | `release.yml`        |
+| Environment name  | _(留空)_             |
 
 > 由于项目首次发布时尚不存在，使用 **"pending publisher"**（针对尚不存在的项目）。PyPI 会在首次成功发布时自动创建项目，之后该 publisher 自动转正。
 >
@@ -39,11 +39,13 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
 ## 发版流程
 
 1. **更新版本号**：仅修改 [seedream_mcp/version.py](seedream_mcp/version.py) 中的 `__version__`。
+
    ```python
    __version__ = "1.2.7"
    ```
 
 2. **提交并打 tag**（在 main 分支上进行）：
+
    ```bash
    git add seedream_mcp/version.py
    git commit -m "chore(release): bump version to v1.2.7"
@@ -71,12 +73,12 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
 
 ## 故障排查
 
-| 现象 | 原因与处理 |
-|---|---|
-| `pypi-release` 报 OIDC / `403` | trusted publisher 配置与 workflow 不一致（repo / owner / workflow filename / environment）。核对 PyPI 后台与 `release.yml` |
-| `pypi-release` 报 `400 File already exists` | 该版本已在 PyPI 存在。bump 版本号重发，勿覆盖 |
-| 发布成功但 `uvx` 仍拉到旧版 | PyPI CDN 缓存，等待几分钟 |
-| tag 误推、CI 未成功 | 删除 tag 后修正重打：`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`（已发到 PyPI 的无法撤销） |
+| 现象                                        | 原因与处理                                                                                                                 |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `pypi-release` 报 OIDC / `403`              | trusted publisher 配置与 workflow 不一致（repo / owner / workflow filename / environment）。核对 PyPI 后台与 `release.yml` |
+| `pypi-release` 报 `400 File already exists` | 该版本已在 PyPI 存在。bump 版本号重发，勿覆盖                                                                              |
+| 发布成功但 `uvx` 仍拉到旧版                 | PyPI CDN 缓存，等待几分钟                                                                                                  |
+| tag 误推、CI 未成功                         | 删除 tag 后修正重打：`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`（已发到 PyPI 的无法撤销）                    |
 
 ## 回退
 

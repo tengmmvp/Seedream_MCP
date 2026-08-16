@@ -183,8 +183,7 @@ class SeedreamClient:
     """
 
     def __init__(self, config: SeedreamConfig | None = None):
-        """
-        初始化 Seedream API 客户端。
+        """初始化 Seedream API 客户端。
 
         Args:
             config: 配置对象，若为 None 则使用全局默认配置。
@@ -265,8 +264,7 @@ class SeedreamClient:
         stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """
-        生成符合文本描述的单张图片。
+        """生成符合文本描述的单张图片。
 
         通过给模型提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。
 
@@ -351,8 +349,7 @@ class SeedreamClient:
         stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """
-        编辑已有图片，结合文字指令生成新图片。
+        """编辑已有图片，结合文字指令生成新图片。
 
         基于已有图片，结合文字指令进行图像编辑。
 
@@ -459,8 +456,7 @@ class SeedreamClient:
         stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """
-        融合多张参考图片的风格与元素生成新图像。
+        """融合多张参考图片的风格与元素生成新图像。
 
         根据输入的文本描述和多张参考图片，融合它们的风格、元素等特征来生成新图像。
 
@@ -553,8 +549,7 @@ class SeedreamClient:
         stream: bool = False,
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """
-        生成一组内容关联的图片，仅 5.0/5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持组图。
+        """生成一组内容关联的图片，仅 5.0/5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持组图。
 
         支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
 
@@ -797,8 +792,7 @@ class SeedreamClient:
             await client.aclose()
 
     def _build_http_timeout(self) -> httpx.Timeout:
-        """
-        构建并缓存统一超时策略。
+        """构建并缓存统一超时策略。
 
         首次构建后缓存到实例，避免每次请求重复构造。
 
@@ -1287,8 +1281,7 @@ class SeedreamClient:
             await response.aclose()
 
     async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        """
-        调用 Seedream API。
+        """调用 Seedream API。
 
         按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误类型
         分类处理：非 2xx 中仅 429 与 5xx 可重试，其余状态码（含 3xx 与 401-499）立即
@@ -1411,8 +1404,7 @@ class SeedreamClient:
         return await self._image_preparer.prepare_images_in_parallel(images)
 
     def _normalize_api_error(self, error: Exception) -> Exception:
-        """
-        归一化 API 错误为 Seedream 错误类型。
+        """归一化 API 错误为 Seedream 错误类型。
 
         已是 Seedream 错误的异常原样返回；其余异常包装为 SeedreamAPIError。
         与 utils.core.errors.handle_api_error 的职责不同：后者按 HTTP 状态码装配

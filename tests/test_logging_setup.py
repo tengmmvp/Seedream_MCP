@@ -48,7 +48,10 @@ class _FakeLogger:
 
 @pytest.fixture
 def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> None:
-    """以替身替换 setup_logging 模块内的 loguru 全局，防止 remove/add 改写真实全局 handler。"""
+    """以替身替换 setup_logging 模块内的 loguru 全局。
+
+    防止 remove/add 改写真实全局 handler。
+    """
     monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", _FakeLogger())
 
 
@@ -113,7 +116,10 @@ def test_console_sink_colorize_follows_tty_autodetection(
 def test_setup_logging_suppresses_third_party_info_noise(
     monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
 ) -> None:
-    """第三方噪音压制清单覆盖 httpx：每次 API 调用一条的 INFO "HTTP Request" 不再淹没业务日志。"""
+    """第三方噪音压制清单覆盖 httpx 的 INFO 噪音。
+
+    每次 API 调用一条的 INFO "HTTP Request" 不再淹没业务日志。
+    """
     setup_logging(log_level="INFO", enable_console=False, enable_file=False)
 
     for name in ("urllib3", "aiohttp", "asyncio", "httpx"):

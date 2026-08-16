@@ -153,10 +153,11 @@ async def test_download_image_does_not_retry_on_disk_quota_exceeded(
 async def test_download_image_does_not_retry_on_invalid_url_client_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """aiohttp.InvalidUrlClientError 属 URL 语法永久错误，立即抛出 DownloadError 不重试。
+    """aiohttp.InvalidUrlClientError 属 URL 语法永久错误，立即抛出不重试。
 
-    InvalidUrlClientError 继承 ClientError，但重试无法修复 URL 语法问题，须在 ClientError
-    臂内单独识别为终态错误，区别于连接类瞬时 ClientError 的退避重试。
+    InvalidUrlClientError 继承 ClientError，但重试无法修复 URL 语法问题，须在
+    ClientError 臂内单独识别为终态错误，抛出 DownloadError，区别于连接类瞬时
+    ClientError 的退避重试。
     """
     manager = DownloadManager()
     session = _RaisingThenSuccessSession(

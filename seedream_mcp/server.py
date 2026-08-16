@@ -1,5 +1,4 @@
-"""
-Seedream MCP 服务器主模块。
+"""Seedream MCP 服务器主模块。
 
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，以及风格预设
 Prompt 与工作区、服务器信息、模型信息三个资源。负责配置注入、cli_main 入口与
@@ -132,8 +131,7 @@ logger = get_logger(__name__)
 
 
 def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
-    """
-    从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。
+    """从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。
 
     工具与资源经 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局
     状态，消除热重载窗口内活动配置与请求实际使用的配置不一致。复用 parallel 的
@@ -240,8 +238,7 @@ async def seedream_text_to_image(
     ),
     ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
-    """
-    文生图：根据文字指令生成单张图片。
+    """文生图：根据文字指令生成单张图片。
 
     适用：从零开始按文字描述创建图片。示例：生成“赛博朋克风格的城市夜景”。
     不适用：需要基于已有图片修改时改用 seedream_image_to_image；需要一次生成多张
@@ -369,8 +366,7 @@ async def seedream_image_to_image(
     ),
     ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
-    """
-    图文生图：基于已有图片进行编辑。
+    """图文生图：基于已有图片进行编辑。
 
     适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调
     迁移、改变背景或视角尺寸等。示例：“把人物背景换成海滩”。
@@ -485,8 +481,7 @@ async def seedream_multi_image_fusion(
     ),
     ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
-    """
-    多图融合：融合多张参考图片的特征生成新图片。
+    """多图融合：融合多张参考图片的特征生成新图片。
 
     适用：把多张图片的风格或元素合并到一张新图。示例：“将图1的服装换到图2的模特
     身上”，需用“图1/图2”指代输入图片顺序。
@@ -603,8 +598,7 @@ async def seedream_sequential_generation(
     ),
     ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
-    """
-    组图输出：一次生成多张内容关联的图片。
+    """组图输出：一次生成多张内容关联的图片。
 
     适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：
     “生成4格漫画，主角依次出现在4个场景”。注意 5.0 Pro 不支持组图，请改用
@@ -692,8 +686,7 @@ async def seedream_browse_images(
     ),
     ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
 ) -> BrowseImagesStructuredOutput:
-    """
-    本地图片浏览：列出工作区中的图片文件。
+    """本地图片浏览：列出工作区中的图片文件。
 
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
     递归、分页、按格式过滤。仅可浏览工作区目录内文件。

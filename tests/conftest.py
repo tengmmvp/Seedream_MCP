@@ -16,7 +16,10 @@ from seedream_mcp.config import SeedreamConfig
 
 @pytest.fixture
 def seedream_config() -> SeedreamConfig:
-    """基础测试配置，api_key 固定为 test_key；差异化字段以构造 kwargs 或 dataclasses.replace 覆盖。"""
+    """基础测试配置，api_key 固定为 test_key。
+
+    差异化字段以构造 kwargs 或 dataclasses.replace 覆盖。
+    """
     return SeedreamConfig(api_key="test_key")
 
 

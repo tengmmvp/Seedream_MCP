@@ -262,7 +262,10 @@ def test_handle_api_error_402_user_hint_mentions_balance() -> None:
 
 
 def test_handle_api_error_413_payload_too_large_profile() -> None:
-    """413 映射到请求体过大档案：message 含请求体过大，结构化错误码为 payload_too_large。"""
+    """413 映射到请求体过大档案，结构化错误码为 payload_too_large。
+
+    message 含请求体过大。
+    """
     exc = handle_api_error(413, {})
     assert exc.status_code == 413
     assert _classify_generation_error_type(exc) == "payload_too_large"

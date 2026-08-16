@@ -472,7 +472,10 @@ def test_build_generation_context_auto_save_none_passes_through_disabled_config(
 
 
 def test_build_generation_context_explicit_auto_save_overrides_config() -> None:
-    """显式 auto_save 非 None 时覆盖 config.auto_save_enabled，确保穿透仅在 None 时发生。"""
+    """显式 auto_save 非 None 时覆盖 config.auto_save_enabled。
+
+    确保穿透仅在 None 时发生。
+    """
     config = SeedreamConfig(api_key="test_key", auto_save_enabled=True)
 
     ctx = build_generation_context(TextToImageInput(prompt="t", auto_save=False), config)

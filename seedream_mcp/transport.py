@@ -54,8 +54,7 @@ async def _send_asgi_json(
     body: bytes,
     extra_headers: tuple[tuple[bytes, bytes], ...] = (),
 ) -> None:
-    """
-    发送统一格式的 JSON ASGI 响应。
+    """发送统一格式的 JSON ASGI 响应。
 
     构造 http.response.start 与 http.response.body 两条消息，content-type 固定为
     application/json，content-length 按实得 body 字节计算；extra_headers 附加在标准头
@@ -83,8 +82,7 @@ async def _send_asgi_json(
 
 
 class _BearerTokenAuthMiddleware:
-    """
-    streamable-http Bearer 令牌鉴权 ASGI 中间件。
+    """streamable-http Bearer 令牌鉴权 ASGI 中间件。
 
     校验请求 Authorization 头中的 Bearer 令牌，匹配则放行，否则 HTTP 流量返回 401。
     启用鉴权时拒绝 websocket 等非 HTTP 流量并以 code 1008 关闭，避免绕过 Bearer 校验。
@@ -403,8 +401,7 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
 
 
 def _apply_http_bind_settings(host: str, stateless: bool, auth_enabled: bool) -> None:
-    """
-    将 streamable-http 传输配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
+    """将 streamable-http 传输配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
 
     实际监听地址与端口由 _run_streamable_http 显式传给 uvicorn，settings 的
     host/port 无消费方，本函数不写入。写入 stateless_http 与 transport_security
@@ -490,8 +487,7 @@ def _run_streamable_http(
     ssl_certfile: str | None = None,
     ssl_keyfile: str | None = None,
 ) -> None:
-    """
-    启动 streamable-http 传输。
+    """启动 streamable-http 传输。
 
     配置鉴权令牌时，在 FastMCP 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
     请求返回 401。配置 TLS 证书时经 ssl_context_factory 构造最低 TLS 1.2 的服务端

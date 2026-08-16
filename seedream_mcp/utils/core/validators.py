@@ -89,7 +89,10 @@ def _preset_numeric_sort_key(preset: str) -> tuple[float, str]:
 
 
 def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:
-    """将任意输入校验并转换为 [min_value, max_value] 内的整数，非法值抛出 SeedreamValidationError。"""
+    """将任意输入校验并转换为 [min_value, max_value] 内的整数。
+
+    非法值抛出 SeedreamValidationError。
+    """
     if isinstance(value, bool):
         raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
     if isinstance(value, float):

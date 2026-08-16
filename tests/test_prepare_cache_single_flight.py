@@ -1,7 +1,7 @@
-"""守护测试：_prepare_image_input 对同一 cache_key 的并发 miss 复用同一 asyncio.Task。
+"""守护测试：_prepare_image_input 对同一 cache_key 的并发 miss 复用在途任务。
 
 防止 single-flight 去重退化的回归：当两个并发调用同时 miss 缓存时，必须共享
-_prepare_inflight 中的同一在途 task，使底层 prepare_image_input 仅被调用一次。
+_prepare_inflight 中的同一 asyncio.Task，使底层 prepare_image_input 仅被调用一次。
 若去重失效，并发请求会对同一参考图重复读取与编码，丧失该优化的核心价值。
 """
 
@@ -18,7 +18,10 @@ from seedream_mcp.utils.images import image_input
 async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """同一 cache_key 的并发 miss 复用同一在途 task，底层 prepare_image_input 仅调用一次。"""
+    """同一 cache_key 的并发 miss 复用同一在途 task。
+
+    底层 prepare_image_input 仅调用一次。
+    """
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
     # 显式传入 roots_key，使 cache_key 不依赖工作区根目录上下文
@@ -172,11 +175,12 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
 async def test_prepare_image_input_error_propagates_to_all_sharers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_prepare_and_cache 抛错时所有共享同一 inflight 的等待者收到该异常，且不写入缓存。
+    """_prepare_and_cache 抛错时所有共享同一 inflight 的等待者收到该异常。
 
-    single-flight 错误传播契约：底层 prepare_image_input 抛错时，共享同一 inflight task
-    的创建者与等待者均经 asyncio.shield 收到该异常；_prepare_inflight 由 task 完成时的
-    finally 清空；因异常在缓存写入前抛出，_prepare_cache 不写入任何条目。
+    且不写入缓存。single-flight 错误传播契约：底层 prepare_image_input 抛错时，
+    共享同一 inflight task 的创建者与等待者均经 asyncio.shield 收到该异常；
+    _prepare_inflight 由 task 完成时的 finally 清空；因异常在缓存写入前抛出，
+    _prepare_cache 不写入任何条目。
     """
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)

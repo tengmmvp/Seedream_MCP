@@ -283,10 +283,10 @@ async def test_save_multiple_base64_images_end_to_end(
 
 
 def test_auto_save_result_to_dict_sanitizes_local_path_and_markdown_ref() -> None:
-    """to_dict 对 local_path/markdown_ref 施加 sanitize_data_text，与 data 通道同字段防护对称。
+    """to_dict 对 local_path/markdown_ref 施加 sanitize_data_text。
 
-    同名字段在 results.py 的 data 项通道过 sanitize_data_text，auto_save.results 通道
-    不得少做：CRLF 压平防注入，userinfo 凭据剥离。
+    与 results.py 的 data 通道同字段防护对称：同名字段在 data 项通道已净化，
+    auto_save.results 通道不得少做——CRLF 压平防注入，userinfo 凭据剥离。
     """
     result = AutoSaveResult(
         success=True,
