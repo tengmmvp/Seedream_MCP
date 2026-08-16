@@ -290,6 +290,59 @@ async def test_download_image_stops_retry_when_total_budget_exhausted(
     assert session._idx == 1, "预算耗尽后应停止重试，仅执行首次尝试"
 
 
+class _SlowHopClockSession:
+    """每跳推进伪时钟一个完整预算窗口的重定向链会话，模拟慢滴流链。
+
+    伪时钟读数恒定，仅 get 调用推进时间，建模会话 total 超时按单次请求计窗、
+    每跳各享全额窗口的最坏情形。
+    """
+
+    def __init__(self, responses: list, clock_now: list[float], hop_seconds: float) -> None:
+        self._responses = list(responses)
+        self._idx = 0
+        self._clock_now = clock_now
+        self._hop_seconds = hop_seconds
+
+    def get(self, url: str, **kwargs: object) -> object:  # type: ignore[no-untyped-def]
+        del url
+        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
+        self._clock_now[0] += self._hop_seconds
+        resp = self._responses[min(self._idx, len(self._responses) - 1)]
+        self._idx += 1
+        return resp
+
+
+@pytest.mark.asyncio
+async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """重定向链按起始时间累计校验总预算，单次尝试不随跳数放大到多倍封顶。
+
+    每跳耗满一个预算窗口的慢链与读数恒定的伪时钟驱动：首跳后累计已满预算，
+    跟随下一跳前即按超时分类截停，经退避外层的跨尝试预算检查停止重试。总占用
+    为一个预算窗口，而非 1+3 跳各享全额窗口的约 4 倍。
+    """
+    import seedream_mcp.utils.io.io_download as download_module
+
+    manager = DownloadManager()
+    redirects = [_FakeResponse(302, {"location": f"https://example.com/r{i}"}) for i in range(4)]
+    budget = 10.0
+    clock_now = [1000.0]
+    session = _SlowHopClockSession(redirects, clock_now, hop_seconds=budget)
+    _patch_download_network(monkeypatch, manager, session)
+    monkeypatch.setattr(manager, "_download_total_budget", lambda: budget)
+    monkeypatch.setattr(download_module.time, "time", lambda: clock_now[0])
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="下载超时.*重定向链累计耗时"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 首跳后累计耗满预算即截停，仅发出一次请求；总占用恰为一个预算窗口
+    assert session._idx == 1, "累计预算已耗尽时不得跟随下一跳"
+    assert clock_now[0] - 1000.0 == budget
+    assert not save_path.exists()
+
+
 @pytest.mark.asyncio
 async def test_download_image_retries_timeout_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None

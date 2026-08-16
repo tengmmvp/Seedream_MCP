@@ -1014,3 +1014,152 @@ def test_structured_status_sanitized_and_max_images_surfaced() -> None:
     assert "\r" not in structured["status"]
     assert "\n" not in structured["status"]
     assert structured["max_images"] == 4
+
+
+# ==================== 伪造序号字段净化 ====================
+
+
+def test_forged_string_request_and_image_index_sanitized_in_both_channels() -> None:
+    """单请求路径伪造 request_index/image_index 为 CRLF 自由文本：两通道均净化。
+
+    跳过净化的前提是本侧聚合写入的整数序号，单请求路径的 data 项为上游原样
+    透传；非 int 形态按错误文本净化，int 实例保持原值直接渲染。
+    """
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [
+            {
+                "url": "https://example.com/a.png",
+                "request_index": "1\r\nFAKE-REQ api_key=sk-idx-leaked",
+                "image_index": "2\r\nFAKE-IDX api_key=sk-idx2-leaked",
+            },
+            {
+                "url": "https://example.com/b.png",
+                "request_index": 2,
+                "image_index": 3,
+            },
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert "\r" not in text
+    assert "sk-idx-leaked" not in text
+    assert "sk-idx2-leaked" not in text
+    request_line = next(line for line in text.splitlines() if line.startswith("  请求序号: "))
+    index_line = next(line for line in text.splitlines() if line.startswith("  序号: "))
+    assert request_line == "  请求序号: 1  FAKE-REQ api_key=***"
+    assert index_line == "  序号: 2  FAKE-IDX api_key=***"
+    assert structured["data"][0]["request_index"] == "1  FAKE-REQ api_key=***"
+    assert structured["data"][0]["image_index"] == "2  FAKE-IDX api_key=***"
+    # int 实例为本侧聚合写入的整数序号，保持原值直接渲染。
+    assert "  请求序号: 2" in text
+    assert "  序号: 3" in text
+    assert structured["data"][1]["request_index"] == 2
+    assert structured["data"][1]["image_index"] == 3
+
+
+# ==================== per-image error 非字符串分量归一净化 ====================
+
+
+def test_per_image_dict_error_message_normalized_and_sanitized() -> None:
+    """per-image error.message 为 dict 形态：归一化为文本后脱敏，两通道不泄露凭据。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [
+            {
+                "type": "image_generation.partial_failed",
+                "error": {"message": {"authorization": "Bearer sk-perimage-leaked"}},
+            }
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    message = structured["data"][0]["error"]["message"]
+    assert isinstance(message, str)
+    assert "sk-perimage-leaked" not in message
+    assert "***" in message
+    assert "sk-perimage-leaked" not in text
+    message_line = next(line for line in text.splitlines() if line.startswith("  错误信息: "))
+    assert "***" in message_line
+
+
+def test_per_image_list_error_code_normalized_and_sanitized() -> None:
+    """per-image error.code 为 list 形态：归一化净化后凭据片段不进入两通道。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [
+            {
+                "type": "image_generation.partial_failed",
+                "error": {"code": ["E\r\nFAKE api_key=leaked"]},
+            }
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    code = structured["data"][0]["error"]["code"]
+    assert isinstance(code, str)
+    assert "leaked" not in code
+    assert "api_key=***" in code
+    assert "leaked" not in text
+
+
+# ==================== b64_json 异形防翻错 ====================
+
+
+def test_b64_json_non_sized_form_renders_absent_without_error() -> None:
+    """伪造 b64_json 为不可计长度形态时不抛 TypeError，已计费结果保留成功输出。"""
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [
+            {"url": "https://example.com/a.png", "b64_json": 12345},
+            {"b64_json": "abcd"},
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "  URL: https://example.com/a.png" in text
+    assert "  Base64 数据: 无" in text
+    # 可计长度形态保持字符数输出。
+    assert "  Base64 数据: 4 字符" in text
+
+
+# ==================== error 键空值回落 ====================
+
+
+def test_failure_text_none_error_value_falls_back_to_unknown() -> None:
+    """error 键存在但值为 None 时回落未知错误，不渲染字面量 None。"""
+    result = {"success": False, "status": "failed", "data": [], "error": None}
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "图片生成失败: 未知错误" in text
+    assert "None" not in text

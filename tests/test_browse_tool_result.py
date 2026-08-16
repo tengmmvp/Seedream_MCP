@@ -483,3 +483,26 @@ async def test_browse_images_unsupported_format_message_sanitized(
     assert "均不在支持列表" in text
     assert "secret" not in text
     assert "***" in text
+
+
+@pytest.mark.asyncio
+async def test_browse_images_empty_format_filter_message_has_no_blank_slot(
+    workspace_root: Path,
+) -> None:
+    """空列表 format_filter 的耗尽消息不含量词空位：无双空格、无残缺语义。
+
+    空列表是文档明示的合法输入，与「全部后缀不受支持」共用 exhausted 标记；
+    无用户格式可回显时改用不含空位的文案。
+    """
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, format_filter=[])
+    )
+
+    assert result.isError is False
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["status"] == "empty"
+    assert result.structuredContent["format_filter"] == []
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "未指定任何受支持的图片格式" in text
+    assert "均不在支持列表" not in text
+    assert "  " not in text

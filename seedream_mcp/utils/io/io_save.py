@@ -436,10 +436,10 @@ class AutoSaveManager:
         if not is_known_image_bytes(content_bytes):
             raise AutoSaveError("Base64 数据不是受支持的图片格式")
 
-        extension = (
-            self._extension_from_mime(mime)
-            if mime
-            else infer_extension_from_bytes(content_bytes, default=DEFAULT_IMAGE_EXTENSION)
+        # 扩展名以字节签名嗅探为准，与下载路径嗅探修正最终路径的口径对称；mime 仅作
+        # 嗅探失败时的回退，data URI 声明与字节不符时落盘扩展名仍与实际内容一致。
+        extension = infer_extension_from_bytes(
+            content_bytes, default=self._extension_from_mime(mime)
         )
         content_hash = self.file_manager.get_content_hash(content_bytes)
         return content_bytes, extension, content_hash

@@ -551,13 +551,18 @@ async def _handle_browse_images_impl(
     if not images:
         if format_filter_exhausted:
             supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
-            # 用户提交的 filter 字符串经错误文本净化出口收敛后拼入消息，凭据样式
-            # 片段被脱敏、超长输入被截断；支持列表为静态服务端数据，不参与净化，
-            # 保留完整可读。
-            user_formats = (
-                sanitize_error_text(", ".join(state.format_filter)) if state.format_filter else ""
-            )
-            message = f"指定的图片格式 {user_formats} 均不在支持列表内，支持: {supported_list}。"
+            if state.format_filter:
+                # 用户提交的 filter 字符串经错误文本净化出口收敛后拼入消息，凭据样式
+                # 片段被脱敏、超长输入被截断；支持列表为静态服务端数据，不参与净化，
+                # 保留完整可读。
+                user_formats = sanitize_error_text(", ".join(state.format_filter))
+                message = (
+                    f"指定的图片格式 {user_formats} 均不在支持列表内，支持: {supported_list}。"
+                )
+            else:
+                # 空列表为文档明示的合法输入，无用户格式可回显时改用不含量词空位的
+                # 文案，避免双空格与残缺语义。
+                message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
             log_message = "图片格式过滤条件全部不受支持"
         elif total_count:
             message = (

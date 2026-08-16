@@ -434,11 +434,19 @@ class FileManager:
             Markdown 引用字符串。
         """
         # 以基础目录为基准生成相对路径：保存文件恒位于 base_dir 之下，相对化必然成功，
-        # 且不受进程 CWD 变化影响。统一为正斜杠以兼容 Markdown 引用；空格与圆括号
-        # 经百分号编码，custom_name 含此类字符时引用目标仍符合 CommonMark 语法。
+        # 且不受进程 CWD 变化影响。统一为正斜杠以兼容 Markdown 引用；空格、圆括号、
+        # # 与 % 经百分号编码：# 会被 Markdown 视为 fragment 起点截断引用目标，% 会被
+        # 误解码，custom_name 经 sanitize_filename 后两者均得以保留。百分号必须最先
+        # 编码，后编码会使其余编码产物中的百分号被二次编码。
         relative_path = self.relative_to_base(file_path)
         markdown_path = relative_path.replace("\\", "/")
-        markdown_path = markdown_path.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+        markdown_path = (
+            markdown_path.replace("%", "%25")
+            .replace("#", "%23")
+            .replace(" ", "%20")
+            .replace("(", "%28")
+            .replace(")", "%29")
+        )
 
         if not markdown_path.startswith("./"):
             markdown_path = "./" + markdown_path

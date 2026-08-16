@@ -349,13 +349,14 @@ class DownloadManager:
         await self.close()
 
     def _download_total_budget(self) -> float:
-        """返回单次下载会话与跨尝试累计共用的总时长上限，单位秒。
+        """返回单次下载会话、跨尝试累计与重定向链逐跳累计共用的总时长上限，单位秒。
 
         上限按停滞超时的 120 倍推导且不低于 1 小时，默认配置下为 1 小时（50MB 上限
         对应约 14KB/s 平均速率），只封堵恶意慢速滴流，不影响正常慢网络下大图片的完整
-        下载。会话 timeout 与 download_image 的跨尝试累计预算取同一值：无累计预算时
-        慢滴流响应每次尝试都可耗满单次封顶，重试使单个保存任务的最长占用放大为单次
-        封顶乘尝试数，两处取同一值使总占用与单次封顶同量级。
+        下载。会话 timeout、download_image 的跨尝试累计预算与 _attempt_download 的
+        重定向链逐跳累计校验取同一值：无累计校验时慢滴流响应每次尝试都可耗满单次
+        封顶，重定向链每跳又各享全额单次窗口，重试与跳数把单个保存任务的最长占用
+        放大为单次封顶乘尝试数；三处取同一值后总占用被约束在单次封顶的小常数倍内。
         """
         return max(float(self.timeout) * 120, 3600.0)
 
@@ -785,6 +786,10 @@ class DownloadManager:
         钉死为连接目标，aiohttp 不再独立二次解析，DNS rebinding 无从把实际连接切向内网；
         _validate_connected_peer_ip 作为纵深防御保留。
 
+        重定向链逐跳累计校验总预算：会话 total 超时按单次请求计窗，每跳各享全额窗口，
+        跟随下一跳前按起始时间累计校验，超限抛 asyncio.TimeoutError 交由外层按超时
+        分类重试，恶意慢滴流重定向链不得把单次尝试拖至跳数倍封顶。
+
         请求头跨源防护：调用方为原始主机定制的请求头在重定向跳向不同源时剥离，仅保留
         User-Agent 与 Accept 等通用头，防止定制头原样发给重定向目标泄露内部信息。
 
@@ -805,6 +810,14 @@ class DownloadManager:
 
                 next_url = self._handle_redirect_response(response, current_url, redirect_count)
                 if next_url is not None:
+                    # 跟随下一跳前按起始时间累计校验总预算：每跳的会话 total 超时独立
+                    # 计窗，无累计校验时慢滴流重定向链可把单次尝试拖至跳数倍封顶。
+                    elapsed = time.time() - start_time
+                    if elapsed >= self._download_total_budget():
+                        raise asyncio.TimeoutError(
+                            f"重定向链累计耗时 {elapsed:.0f} 秒已超总预算 "
+                            f"{self._download_total_budget():.0f} 秒: {sanitize_url(url)}"
+                        )
                     # 跳向不同源时从调用方原始头重建安全头集合；同源跳转保持当前头不变，
                     # 一旦剥离后续跳回原源也不恢复定制头。
                     if _url_origin(next_url) != _url_origin(current_url):

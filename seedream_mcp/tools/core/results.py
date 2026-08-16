@@ -318,7 +318,8 @@ def _sanitize_usage(usage: Any) -> Any:
 
 # 图片条目的已知键：error 与 size/output_format/model/type、url 各自单独净化，
 # local_path/markdown_ref 归入数据字段净化，b64_json 为有意保留的图像载荷原样透传，
-# request_index/image_index 为本侧聚合写入的整数序号。不在此列的键按未知键处理。
+# request_index/image_index 的 int 实例为本侧聚合写入的整数序号，非 int 形态按
+# 错误文本单独净化。不在此列的键按未知键处理。
 _KNOWN_IMAGE_KEYS = frozenset(
     {
         "type",
@@ -351,10 +352,15 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
     """净化图片项内的上游自由字段，就地写回传入列表并返回同一列表。
 
     覆盖 error.message、error.code、url、size、output_format、model、type、
-    local_path、markdown_ref 与未知键：均为上游可回显自由内容的字段，可能携带
-    userinfo 凭据或 CRLF。url/local_path/markdown_ref 与未知键为数据字段，走
-    sanitize_data_text 保留完整可用性——签名 URL 常见 400-700 字符、本地路径截断
-    即不可寻址；其余短标识与自由文本走 sanitize_error_text，截断语义正确。
+    local_path、markdown_ref、request_index/image_index 的非 int 形态与未知键：
+    均为上游可回显自由内容的字段，可能携带 userinfo 凭据或 CRLF。
+    url/local_path/markdown_ref 与未知键为数据字段，走 sanitize_data_text 保留
+    完整可用性——签名 URL 常见 400-700 字符、本地路径截断即不可寻址；其余短标识
+    与自由文本走 sanitize_error_text，截断语义正确。error.message 与 error.code
+    的非字符串形态先经 normalize_message_text 归一化为文本再净化，与顶层
+    error.message 的双出口口径一致，dict/list 形态的凭据不借原值穿透。
+    request_index/image_index 的合法写入点为本侧聚合写入的整数序号，单请求路径
+    的 data 项为上游原样透传，非 int 形态按错误文本净化，int 实例保持原值。
     local_path/markdown_ref 合法写入点仅为自动保存回填，但上游伪造的原始条目
     同样携带这两个键，统一净化闭合两条通道的注入面；未知键由结构化输出
     extra='allow' 直通，字符串值保守净化后保留而非剔除，容器值递归净化后重建，
@@ -376,13 +382,16 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
         if isinstance(error, dict):
             sanitized_error: dict[str, Any] | None = None
             message = error.get("message")
-            if isinstance(message, str):
-                sanitized_message = sanitize_error_text(message)
+            if message is not None:
+                # message 为上游自由内容且可为任意 JSON 形态：非字符串先归一化为
+                # 文本再净化，与顶层 error.message 的双出口口径一致。
+                sanitized_message = sanitize_error_text(normalize_message_text(message))
                 if sanitized_message != message:
                     sanitized_error = {**error, "message": sanitized_message}
             code = error.get("code")
-            if isinstance(code, str):
-                sanitized_code = sanitize_error_text(code)
+            if code is not None:
+                # code 同为上游自由内容，非字符串形态同口径归一化后净化。
+                sanitized_code = sanitize_error_text(normalize_message_text(code))
                 if sanitized_code != code:
                     if sanitized_error is None:
                         sanitized_error = dict(error)
@@ -396,6 +405,17 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
                 sanitized_value = sanitize_error_text(value)
                 if sanitized_value != value:
                     updates[field] = sanitized_value
+
+        for field in ("request_index", "image_index"):
+            value = image.get(field)
+            # int 实例为本侧聚合写入的整数序号，直接保留；单请求路径的 data 项为
+            # 上游原样透传，其余形态按错误文本净化，字符串经 sanitize_error_text
+            # 收敛，容器经同一迭代核心逐层处理。
+            if isinstance(value, int):
+                continue
+            sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
+            if sanitized_value != value:
+                updates[field] = sanitized_value
 
         for field in ("url", "local_path", "markdown_ref"):
             value = image.get(field)
@@ -427,7 +447,9 @@ def _format_failure_section(result: dict[str, Any]) -> str:
     message 的非字符串形态先经 normalize_message_text 归一化为文本再净化，凭据
     不借 dict/list 形态在净化之后经插值穿透文本通道。
     """
-    raw_error = result.get("error", "未知错误")
+    # error 键存在但值为 None 时归入未知错误，不把字面量 None 渲染为用户可见文本，
+    # 与结构化出口对空值的收敛处理对称。
+    raw_error = result.get("error") or "未知错误"
     # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本。
     error_text = sanitize_error_text(
         normalize_message_text(
@@ -486,7 +508,9 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
         parts.append(f"  本地路径: {image['local_path']}")
     if "b64_json" in image:
         b64_data = image.get("b64_json")
-        if b64_data:
+        # 伪造的 int 等不可计长度形态会使 len 抛 TypeError，已计费结果被外层翻错
+        # 为失败；仅对可计长度的形态输出字符数，其余归入无数据分支。
+        if b64_data and isinstance(b64_data, (str, bytes, list, dict, tuple)):
             parts.append(f"  Base64 数据: {len(b64_data)} 字符")
         else:
             parts.append("  Base64 数据: 无")

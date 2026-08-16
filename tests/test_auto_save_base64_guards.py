@@ -134,7 +134,7 @@ def test_prepare_base64_payload_valid_png(manager: AutoSaveManager) -> None:
 
 
 def test_prepare_base64_payload_with_mime(manager: AutoSaveManager) -> None:
-    """提供 mime 时扩展名由 mime 映射决定。"""
+    """提供与字节签名一致的 mime 时扩展名为该格式的映射值。"""
     png_bytes = _minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
     _, extension, _ = manager._prepare_base64_payload(payload, "image/png")
@@ -148,6 +148,26 @@ def test_prepare_base64_payload_strips_whitespace(manager: AutoSaveManager) -> N
     dirty_payload = clean_payload[:5] + " \n\t " + clean_payload[5:]
     content_bytes, _, _ = manager._prepare_base64_payload(dirty_payload, None)
     assert content_bytes == png_bytes
+
+
+async def test_save_base64_image_sniffed_extension_overrides_conflicting_mime(
+    manager: AutoSaveManager,
+) -> None:
+    """data URI mime 与字节签名冲突时落盘扩展名取嗅探结果。
+
+    data:image/png 前缀承载 JPEG 签名字节，扩展名取嗅探的 .jpeg 而非 mime 推断
+    的 .png，与下载路径嗅探修正最终路径的口径对称，扩展名与实际内容不符时不得
+    以声明为准落盘。
+    """
+    jpeg_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 20
+    data_uri = "data:image/png;base64," + base64.b64encode(jpeg_bytes).decode()
+
+    result = await manager.save_base64_image(data_uri, custom_name="conflict", tool_name="t2i")
+
+    assert result.success is True
+    assert result.local_path is not None
+    assert Path(result.local_path).suffix == ".jpeg"
+    assert Path(result.local_path).read_bytes() == jpeg_bytes
 
 
 # ==================== _run_batch_save 异常处理 ====================

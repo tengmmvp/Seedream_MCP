@@ -281,8 +281,9 @@ _UPSTREAM_MESSAGE_FRAGMENT_LIMIT = 8 * 1024
 def _normalize_non_str_message(value: Any) -> str:
     """将非字符串 message 归一化为文本：dict/list 以 JSON 序列化，其余取 str。
 
-    JSON 序列化产出带双引号的键值形态，键名后的引号由 _SENSITIVE_KEYVALUE_SEPARATOR
-    的引号变体覆盖，凭据仍被键值脱敏命中；序列化与 str() 对超深嵌套结构都会触发
+    JSON 序列化产出带双引号的键值形态，嵌套字符串内的引号与换行被转义为反斜杠
+    形态，键名后的引号与转义序列由 _SENSITIVE_KEYVALUE_SEPARATOR 的引号变体与
+    转义容忍覆盖，凭据仍被键值脱敏命中；序列化与 str() 对超深嵌套结构都会触发
     解释器递归上限，逐级回退后以类型占位符兜底，保证任何形态的 message 分量都能
     进入字符串脱敏管线，不再借 dict/list 形态穿透，RecursionError 也不外逃。
     """
@@ -469,8 +470,16 @@ def format_error_for_user(error: Exception) -> str:
 _VALUE_OUTPUT_LIMIT = 200
 # 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应。
 _MESSAGE_OUTPUT_LIMIT = 500
-# dict/list 元素数超过此值即跳过 repr 直接给摘要，避免大集合 repr 造成内存放大。
+# dict/list 元素数超过此值即跳过长度估计直接给摘要，超大容器不进入逐元素遍历。
 _CONTAINER_REPR_ELEMENT_LIMIT = 50
+# 容器嵌套深度上限：与解释器 repr 递归上限同量级，超过后视为 repr 形态不可用，
+# 长度估计返回 None，截断走类型占位符，与既有 RecursionError 兜底口径一致。
+_CONTAINER_REPR_DEPTH_LIMIT = 1000
+# 非 str/bytes 叶子元素的长度估计常数：任意对象的 repr 长度形态不定，按小常数
+# 计入，不为判长物化其 repr。
+_CONTAINER_LEAF_LENGTH_ESTIMATE = 16
+# 容器单元素的标点开销估计：repr 形态中的引号、冒号、逗号等标点按固定值计入。
+_CONTAINER_ELEMENT_OVERHEAD = 6
 
 
 def _container_summary(value: Any) -> str:
@@ -480,14 +489,59 @@ def _container_summary(value: Any) -> str:
     return f"<truncated:list, {len(value)} items>"
 
 
+def _estimate_container_output_length(value: Any) -> int | None:
+    """迭代估计 dict/list 的输出长度，供截断判长使用，不物化完整 repr。
+
+    str/bytes 键与元素直接取 len，嵌套容器递归求和，其余元素按固定小常数计入，
+    小元素数容器内的大字符串不再为判长分配整份 repr。显式栈遍历配 id 判重，
+    循环引用以常数终止展开；嵌套深度超过 _CONTAINER_REPR_DEPTH_LIMIT 返回
+    None，调用方以类型占位符兜底。
+    """
+    total = 0
+    seen: set[int] = {id(value)}
+    pending: list[tuple[Any, int]] = [(value, 1)]
+
+    def leaf_length(item: Any) -> int:
+        if isinstance(item, (str, bytes)):
+            return len(item) + _CONTAINER_ELEMENT_OVERHEAD
+        return _CONTAINER_LEAF_LENGTH_ESTIMATE
+
+    def account_item(item: Any, depth: int) -> None:
+        nonlocal total
+        if isinstance(item, (dict, list)):
+            if id(item) in seen:
+                total += _CONTAINER_LEAF_LENGTH_ESTIMATE
+                return
+            seen.add(id(item))
+            pending.append((item, depth + 1))
+            return
+        total += leaf_length(item)
+
+    while pending:
+        node, depth = pending.pop()
+        if depth > _CONTAINER_REPR_DEPTH_LIMIT:
+            return None
+        if isinstance(node, dict):
+            for key, item in node.items():
+                total += leaf_length(key)
+                account_item(item, depth)
+        else:
+            for item in node:
+                account_item(item, depth)
+    return total
+
+
 def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> Any:
     """截断过长的异常 value，防止 data URI、大字典等撑爆日志或结构化响应。
 
     - 字符串超限：保留前 ``limit`` 字符并标注原长度。
-    - dict/list 元素过多或 repr 超限：仅保留类型与元素个数摘要。
+    - dict/list 元素过多或估计长度超限：仅保留类型与元素个数摘要。
+    - dict/list 嵌套超深：保留类型占位符。
     - None 或未超限：原样返回。
 
-    dict/list 先按元素数短路，仅对小集合计算 repr 判长，避免大集合 repr 造成内存放大。
+    dict/list 先按元素数短路，再以元素长度累计估计判长，str/bytes 直接取 len、
+    嵌套容器求和、其余按固定小常数，不为判长物化完整 repr，小元素数容器内的
+    大字符串不再造成整份 repr 的内存放大。
     """
     if value is None:
         return None
@@ -498,11 +552,10 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
     if isinstance(value, (dict, list)):
         if len(value) > _CONTAINER_REPR_ELEMENT_LIMIT:
             return _container_summary(value)
-        try:
-            repr_len = len(repr(value))
-        except Exception:
+        estimated = _estimate_container_output_length(value)
+        if estimated is None:
             return f"<{type(value).__name__}>"
-        if repr_len <= limit:
+        if estimated <= limit:
             return value
         return _container_summary(value)
     return value
@@ -593,18 +646,22 @@ _SENSITIVE_KEYVALUE_KEYS = (
 # 仍在此列出以保证类自身完备。
 _KEYVALUE_WHITESPACE_CLASS = r"[\t \x0b\x0c\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
 
-# 键值分隔符：允许键名后紧跟至多两段「引号 + 空白」组合，覆盖 JSON/Python repr
-# 回显形态（{"api_key": "xxx"}、{'api_key': 'xxx'}）与「引号-空白-引号」形态
-# （api_key '' : secret）；并含全角变体（U+FF1A 全角冒号、U+FE55 小型冒号、
-# U+FF1D 全角等号），上游错误体以全角分隔符回显凭据时同样命中。空白段取
-# _KEYVALUE_WHITESPACE_CLASS，Unicode 空白分隔同样命中。引号与空白组成单一非捕获组
-# 且计数受限，同一段空白不存在两个量词分别吸收的切分路径，分隔符匹配失败时的回溯
-# 保持线性，不随空格数二次方增长。
+# 键值分隔符：允许键名后紧跟至多两段「引号 + 空白」组合，引号前容忍可选反斜杠，
+# 覆盖 JSON/Python repr 回显形态（{"api_key": "xxx"}、{'api_key': 'xxx'}）、
+# json.dumps 对嵌套字符串的转义产物形态（{\"api_key\": \"xxx\"}）与
+# 「引号-空白-引号」形态（api_key '' : secret）；分隔符字符为 ASCII 或全角变体
+# （U+FF1A 全角冒号、U+FE55 小型冒号、U+FF1D 全角等号），字符前同样容忍可选
+# 反斜杠，并增补字面反斜杠加 n 的转义换行形态，json.dumps 与 repr 把实际换行
+# 转义为两字符 \n 后，键名后的凭据仍被命中，转义产物与原文形态获得同等覆盖，
+# 不再借归一化产物绕过脱敏。空白段取 _KEYVALUE_WHITESPACE_CLASS，Unicode 空白
+# 分隔同样命中。引号与空白组成单一非捕获组且计数受限，反斜杠为可选前缀、
+# 分隔符分支为有限交替，同一段空白不存在两个量词分别吸收的切分路径，分隔符
+# 匹配失败时的回溯保持线性，不随空格数二次方增长。
 _SENSITIVE_KEYVALUE_SEPARATOR = (
     _KEYVALUE_WHITESPACE_CLASS
-    + r"*(?:['\"]"
+    + r"*(?:\\?['\"]"
     + _KEYVALUE_WHITESPACE_CLASS
-    + r"*){0,2}[:：﹕=＝]"
+    + r"*){0,2}(?:\\n|\\?[:：﹕=＝])"
     + _KEYVALUE_WHITESPACE_CLASS
     + r"*"
 )

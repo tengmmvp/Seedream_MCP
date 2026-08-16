@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import time
+import tracemalloc
 from typing import Any
 
 from seedream_mcp.utils.core.errors import (
@@ -149,6 +150,27 @@ def test_truncate_value_returns_small_container_unchanged() -> None:
     small = {"a": 1}
 
     assert _truncate_value_for_output(small) == small
+
+
+def test_truncate_value_estimates_large_string_container_without_repr() -> None:
+    """大字符串元素的小容器判长不物化整份 repr，tracemalloc 峰值远低于物化形态。
+
+    3 元素 dict 各 4MB 字符串的完整 repr 约 12MB，仅判长即丢弃属纯浪费分配；
+    估计路径对元素直接取 len，峰值内存以 2MB 为上界锁定，回归到 repr 物化时
+    峰值至少 12MB 即失败。
+    """
+    big = {f"field{i}": "x" * (4 * 1024 * 1024) for i in range(3)}
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        truncated = _truncate_value_for_output(big)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert truncated == "<truncated:dict, 3 keys>"
+    assert peak < 2 * 1024 * 1024
 
 
 # ==================== 连字符敏感键名（边界匹配） ====================
@@ -438,6 +460,33 @@ def test_redact_sensitive_message_underscore_chain_stays_fast() -> None:
     assert elapsed < 0.5
     # 无分隔符不命中键值模式，原文保留
     assert redacted == hostile
+
+
+def test_redact_sensitive_message_escaped_quote_run_stays_fast() -> None:
+    """性能守护：数千转义引号的对抗输入保持线性耗时，反斜杠容忍不引入回溯退化。
+
+    引号组计数受限且反斜杠为可选前缀，相邻空白段之间必有引号字符定界，空白
+    吸收的切分路径唯一；分隔符分支为有限交替，转义引号长串的失败匹配在每个
+    扫描位置只付出常数代价。
+    """
+    hostile = "noise " + '\\"' * 4000 + " api_key: sk-1"
+    start = time.perf_counter()
+    redacted = _redact_sensitive_message(hostile)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.1
+    assert "sk-1" not in redacted
+
+    spaced = "token " + '\\"' + " " * 2000 + '\\"' + " " * 2000 + " : sk-1"
+    start = time.perf_counter()
+    redacted_spaced = _redact_sensitive_message(spaced)
+    assert time.perf_counter() - start < 0.1
+    assert "sk-1" not in redacted_spaced
+
+    newline_flood = "token" + "\\n" * 4000
+    start = time.perf_counter()
+    _redact_sensitive_message(newline_flood)
+    assert time.perf_counter() - start < 0.1
 
 
 def test_redact_sensitive_message_strips_password_and_cookie_keyvalues() -> None:
@@ -809,6 +858,54 @@ def test_redact_sensitive_message_blocks_quote_space_quote_separator() -> None:
     redacted = _redact_sensitive_message("api_key '' : secret123")
     assert "secret123" not in redacted
     assert redacted == "api_key '' : ***"
+
+
+# ==================== 转义引号与字面 \n 分隔绕过 ====================
+
+
+def test_redact_sensitive_message_strips_escaped_quote_keyvalue_forms() -> None:
+    """json.dumps/repr 转义引号形态的键值分隔同样命中，凭据不借归一化产物逃逸。
+
+    键名后的引号与值侧引号均带前导反斜杠，分隔符的引号组与分隔符字符容忍可选
+    反斜杠后获得与未转义形态同等的命中。
+    """
+    redacted = _redact_sensitive_message('auth failed for \\"api_key\\": \\"sk-xxx\\"')
+    assert "sk-xxx" not in redacted
+    assert redacted == 'auth failed for \\"api_key\\": ***'
+
+
+def test_redact_sensitive_message_strips_literal_backslash_n_separator() -> None:
+    """字面反斜杠加 n 的转义换行分隔形态同样剥离，凭据不借转义换行逃逸。"""
+    assert _redact_sensitive_message("api_key\\nsk-1") == "api_key\\n***"
+
+
+def test_handle_api_error_strips_credentials_in_escaped_quote_json_message() -> None:
+    """嵌套字符串内的引号经 json.dumps 转义后，键值凭据在两条输出通道均被剥离。"""
+    resp = {
+        "error": {
+            "code": "InvalidParameter",
+            "message": {"detail": 'auth failed for "api_key": "sk-live-9f8e7d6c"'},
+        }
+    }
+    err = handle_api_error(400, resp)
+
+    rendered = str(err.to_dict()["message"])
+    user_text = format_error_for_user(err)
+
+    assert "sk-live-9f8e7d6c" not in rendered
+    assert "sk-live-9f8e7d6c" not in user_text
+    assert "***" in rendered
+
+
+def test_handle_api_error_strips_newline_separator_after_json_normalization() -> None:
+    """实际换行分隔的键值经 json.dumps 归一化为字面 \\n 后仍被剥离。"""
+    err = handle_api_error(400, {"error": {"message": {"detail": "api_key\nsk-1"}}})
+
+    rendered = str(err.to_dict()["message"])
+    user_text = format_error_for_user(err)
+
+    assert "sk-1" not in rendered
+    assert "sk-1" not in user_text
 
 
 def test_control_chars_pattern_flattens_c0_del_and_nel() -> None:

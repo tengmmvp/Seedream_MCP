@@ -4,6 +4,9 @@
 不触发网络或文件 I/O，直接验证各分支的返回值与抛错语义。
 """
 
+from decimal import Decimal
+from fractions import Fraction
+
 import pytest
 
 from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
@@ -179,6 +182,18 @@ def test_coerce_integer_float() -> None:
 def test_coerce_non_integer_float_rejected() -> None:
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
         _coerce_positive_int_in_range(5.5, "f", 1, 10)
+
+
+@pytest.mark.parametrize("value", [Decimal("2.9"), Fraction(5, 2)])
+def test_coerce_non_integer_rational_rejected(value: Decimal | Fraction) -> None:
+    """Decimal 与 Fraction 的非整数值拒绝，与 float 分支同规则，不静默截断。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_positive_int_in_range(value, "f", 1, 10)
+
+
+def test_coerce_integer_decimal_accepted() -> None:
+    """整数值的 Decimal 允许转换为 int。"""
+    assert _coerce_positive_int_in_range(Decimal("2"), "f", 1, 10) == 2
 
 
 def test_coerce_bool_rejected() -> None:

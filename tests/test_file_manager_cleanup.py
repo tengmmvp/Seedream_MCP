@@ -333,3 +333,26 @@ def test_generate_markdown_reference_encodes_spaces_and_parens(tmp_path: Path) -
 
     assert "my%20pic%20%281%29_a1b2c3d4.png" in markdown_ref
     assert " " not in markdown_ref.split("(", 1)[1]
+
+
+def test_generate_markdown_reference_encodes_hash_and_percent(tmp_path: Path) -> None:
+    """文件名含 # 与 % 时同样百分号编码，引用目标不被截断或误解码。
+
+    custom_name 经 sanitize_filename 后 # 与 % 得以保留：# 会被 Markdown 视为
+    fragment 起点截断引用目标，% 会被按百分号编码误解码。百分号先于其余字符
+    编码，编码产物中的百分号不被二次编码为 %2520。
+    """
+    manager = FileManager(base_dir=tmp_path)
+
+    target = tmp_path / "2026-08-16" / "seedream"
+    target.mkdir(parents=True)
+    image = target / "pic #1 50%_a1b2c3d4.png"
+    image.write_bytes(b"img")
+
+    markdown_ref = manager.generate_markdown_reference(image, alt_text="pic")
+
+    assert "pic%20%231%2050%25_a1b2c3d4.png" in markdown_ref
+    assert "%2520" not in markdown_ref
+    target_part = markdown_ref.split("(", 1)[1]
+    assert "#" not in target_part
+    assert target_part.count("%") == target_part.count("%2")
