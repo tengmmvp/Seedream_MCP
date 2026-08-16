@@ -55,6 +55,49 @@ async def test_download_image_retries_on_aiohttp_client_error(
     assert session.call_count == 2
 
 
+@pytest.mark.parametrize("status", [408, 429])
+async def test_download_retries_on_rate_limit_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None, status: int
+) -> None:
+    """408 请求超时与 429 限流属可重试：退避后第二次成功落盘。
+
+    并发批量下载触发 CDN 限流是常见形态，若按终态失败自动保存会静默丢弃本地
+    副本，只剩 24 小时过期的源 URL。
+    """
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _FakeResponse(status=status, headers={"content-type": "text/plain"}),
+            _png_success_response(),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert save_path.read_bytes() == _PNG_BYTES
+    assert session._idx == 2
+
+
+async def test_download_429_exhausts_retries_as_retryable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """429 持续出现时按可重试耗尽上抛，而非单次终态失败。"""
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(status=429, headers={"content-type": "text/plain"})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(RetryableDownloadError, match="HTTP错误"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 可重试路径按 max_retries 上限反复尝试
+    assert session._idx == manager.max_retries + 1
+    assert not save_path.exists()
+
+
 async def test_download_sniffs_extension_from_bytes_when_suffix_mismatched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:

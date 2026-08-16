@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.io.io_file import atomic_replace_from_fd, open_no_follow_read
+from seedream_mcp.utils.io.io_file import (
+    atomic_replace_from_fd,
+    atomic_replace_from_fd_sync,
+    open_no_follow_read,
+)
 
 
 def _can_create_symlink(tmp_path: Path) -> bool:
@@ -175,3 +179,68 @@ async def test_atomic_replace_from_fd_writer_failure_cleans_temp_and_closes_fd_o
     assert list(tmp_path.iterdir()) == []
     # 骨架为 fd 唯一关闭点，writer 未接管时关闭一次避免泄漏
     assert len(closed) == 1
+
+
+# ==================== atomic_replace_from_fd_sync 同步原子落盘 ====================
+
+
+def test_atomic_replace_from_fd_sync_success_replaces_and_leaves_no_temp(
+    tmp_path: Path,
+) -> None:
+    """成功路径：同步 writer 写入后 os.replace 原子替换，目录内仅最终文件无残留。"""
+    final = tmp_path / "out.bin"
+
+    def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    atomic_replace_from_fd_sync(final, writer, suffix=".part")
+
+    assert final.read_bytes() == b"payload"
+    assert list(tmp_path.iterdir()) == [final]
+
+
+def test_atomic_replace_from_fd_sync_writer_failure_cleans_temp_and_closes_fd_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同步 writer 抛出：随机临时文件被清理、fd 由骨架唯一关闭一次、原始异常上抛。"""
+    final = tmp_path / "out.bin"
+    closed: list[int] = []
+    real_close = os.close
+
+    def _tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(os, "close", _tracking_close)
+
+    def bad_writer(fd: int) -> None:
+        raise OSError("write boom")
+
+    with pytest.raises(OSError, match="write boom"):
+        atomic_replace_from_fd_sync(final, bad_writer, suffix=".part")
+
+    assert not final.exists()
+    # 失败路径清理随机临时文件，目录内无残留
+    assert list(tmp_path.iterdir()) == []
+    # 骨架为 fd 唯一关闭点，writer 未接管时关闭一次避免泄漏
+    assert len(closed) == 1
+
+
+def test_atomic_replace_from_fd_sync_replace_failure_cleans_temp(
+    tmp_path: Path,
+) -> None:
+    """替换失败：目标被同名目录占用时 os.replace 抛错，随机临时文件被清理。"""
+    final = tmp_path / "out.bin"
+    final.mkdir()
+
+    def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    with pytest.raises(OSError):
+        atomic_replace_from_fd_sync(final, writer, suffix=".part")
+
+    # 目录占用保留，临时文件经失败路径清理无残留
+    assert final.is_dir()
+    assert list(tmp_path.iterdir()) == [final]

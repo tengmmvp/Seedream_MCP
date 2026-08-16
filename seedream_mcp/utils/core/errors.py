@@ -473,6 +473,11 @@ def format_error_for_user(error: Exception) -> str:
 _VALUE_OUTPUT_LIMIT = 200
 # 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应。
 _MESSAGE_OUTPUT_LIMIT = 500
+# 结构化数据通道（response_data/details/value 的容器形态）的输出预算：常规上游
+# 错误体为单键 error 内含 code/message/request_id，合计两百余字符；沿用标量 200
+# 预算判长会把这类小错误体整体收敛为元素数摘要，error.code 与 request_id 等排障
+# 字段全部丢失。容器放宽至 2KB 仍可挡住 data URI 与超大错误体，脱敏管线不受影响。
+_STRUCTURED_DATA_OUTPUT_LIMIT = 2048
 # dict/list 元素数超过此值即跳过长度估计直接给摘要，超大容器不进入逐元素遍历。
 _CONTAINER_REPR_ELEMENT_LIMIT = 50
 # 容器嵌套深度上限：与解释器 repr 递归上限同量级，超过后视为 repr 形态不可用，
@@ -593,8 +598,10 @@ _SENSITIVE_KEY_KEYWORDS = (
 
 # 高确信度敏感词：自身足够特异性，直接子串匹配以覆盖 x-authorization、my-apikey、
 # privatekey、sshkey 等连字符或无分隔变体，无需边界限定。camelCase 复合词 secretKey、
-# accessKey、sessionKey、authKey 归一化小写后同样在此命中，dict 键与自由文本两条
-# 脱敏路径的键名分支均由本清单派生。
+# accessKey、sessionKey、authKey、refreshToken、clientSecret 归一化小写后同样在此
+# 命中，与自由文本路径复合分支（access/auth/refresh/session/api-token、
+# client/api/signing/app-secret）覆盖的无分隔形态对齐，dict 键与自由文本两条脱敏
+# 路径的键名分支均由本清单派生。
 _SENSITIVE_KEY_SUBSTRINGS = (
     "authorization",
     "apikey",
@@ -604,6 +611,15 @@ _SENSITIVE_KEY_SUBSTRINGS = (
     "accesskey",
     "sessionkey",
     "authkey",
+    "accesstoken",
+    "authtoken",
+    "refreshtoken",
+    "sessiontoken",
+    "apitoken",
+    "clientsecret",
+    "apisecret",
+    "signingsecret",
+    "appsecret",
 )
 
 # 敏感关键词的段集合与键名切分模式：_is_sensitive_key 按切分段的成员判断使用，
@@ -955,6 +971,9 @@ def _sanitize_response_data(data: Any) -> Any:
 
     与 sanitize_error_text 的纵深次序一致：截断先行约束脱敏正则的工作长度，超大
     容器先收敛为元素数摘要，正则不再遍历其全部字符串值；截断保留段中的敏感片段
-    随后仍被脱敏剥离，两个方向都不残留。
+    随后仍被脱敏剥离，两个方向都不残留。判长预算取结构化数据通道的放宽上限，
+    常规单键错误体的 code/request_id 等排障字段不因标量预算被整体摘要吞掉。
     """
-    return _filter_sensitive_data(_truncate_value_for_output(data))
+    return _filter_sensitive_data(
+        _truncate_value_for_output(data, limit=_STRUCTURED_DATA_OUTPUT_LIMIT)
+    )

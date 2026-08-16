@@ -513,7 +513,19 @@ def _run_streamable_http(
         ssl_kwargs["ssl_keyfile"] = ssl_keyfile
         ssl_kwargs["ssl_context_factory"] = _tls12_ssl_context_factory
         logger.info("streamable-http 已启用 TLS，最低协议版本 TLS 1.2")
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, **ssl_kwargs))
+    # timeout_graceful_shutdown 缺省为 None 时 uvicorn 无限等待连接排空，MCP 客户端
+    # 常态持有的长开 SSE 流会使 serve() 在 SIGTERM 后永不返回，下方 finally 清理链被
+    # 整体跳过。取与残余任务回收一致的有界超时，超时后 uvicorn 取消在途连接，进程
+    # 进入本函数的退出清理。
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            timeout_graceful_shutdown=int(_DRAIN_PENDING_TIMEOUT_SECONDS),
+            **ssl_kwargs,
+        )
+    )
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:

@@ -1005,6 +1005,40 @@ def test_is_sensitive_key_matches_camelcase_sensitive_compounds() -> None:
     assert _is_sensitive_key("author") is False
 
 
+def test_is_sensitive_key_matches_camelcase_token_secret_compounds() -> None:
+    """camelCase token/secret 复合键命中子串清单，与自由文本复合分支同口径。
+
+    refreshToken、clientSecret 一类无分隔复合词此前仅自由文本路径的复合分支
+    覆盖，dict 键路径不命中；子串清单补齐后两条路径一致。
+    """
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    for key in (
+        "refreshToken",
+        "accessToken",
+        "authToken",
+        "sessionToken",
+        "apiToken",
+        "clientSecret",
+        "apiSecret",
+        "signingSecret",
+        "appSecret",
+    ):
+        assert _is_sensitive_key(key) is True
+    # 对照组：普通词键不因含 token/secret 字面命中
+    assert _is_sensitive_key("tokenCount") is False
+    assert _is_sensitive_key("secretive") is False
+
+
+def test_api_error_to_dict_redacts_camelcase_token_in_response_data() -> None:
+    """上游错误体经 camelCase 键回显令牌时，response_data 输出脱敏。"""
+    err = SeedreamAPIError(
+        "upstream failed", response_data={"error": {"refreshToken": "eyJabc.def"}}
+    )
+
+    assert "eyJabc" not in str(err.to_dict())
+
+
 def test_filter_sensitive_data_redacts_camelcase_sensitive_dict_keys() -> None:
     """dict 键路径对 camelCase 敏感键同样脱敏为 ***，两条通道策略一致。"""
     filtered = _filter_sensitive_data(
@@ -1136,6 +1170,28 @@ def test_sanitize_response_data_redacts_values_of_small_container() -> None:
     assert "SECRET" not in str(redacted)
     assert redacted["note"].startswith("api_key=***")
     assert redacted["count"] == 3
+
+
+def test_sanitize_response_data_preserves_typical_error_body_fields() -> None:
+    """常规体量的上游错误体保留结构，error.code 与 request_id 排障字段不丢失。
+
+    判长预算取结构化数据通道的放宽上限，单键 error 容器不再被整体收敛为元素数
+    摘要；超大容器仍按元素数与预算双上限收敛。
+    """
+    from seedream_mcp.utils.core.errors import _sanitize_response_data
+
+    body = {
+        "error": {
+            "code": "InvalidParameter.ImageSize",
+            "message": "x" * 95,
+            "request_id": "req-20260816-abcdef123456",
+        }
+    }
+    result = _sanitize_response_data(body)
+
+    assert isinstance(result, dict)
+    assert result["error"]["code"] == "InvalidParameter.ImageSize"
+    assert result["error"]["request_id"] == "req-20260816-abcdef123456"
 
 
 # ==================== 字面转义分隔族与真实控制空白独占分隔 ====================

@@ -827,8 +827,9 @@ class DownloadManager:
                     continue
 
                 if response.status != 200:
-                    if 500 <= response.status < 600:
-                        # 5xx 多为 CDN/网关瞬时故障，纳入重试而非终态失败。
+                    # 5xx 与 408/429 多为 CDN/网关瞬时故障或限流，纳入重试而非终态失败，
+                    # 避免并发批量下载触发限流后自动保存静默丢弃本地副本。
+                    if response.status in (408, 429) or 500 <= response.status < 600:
                         raise RetryableDownloadError(f"HTTP错误: {response.status}")
                     raise DownloadError(f"HTTP错误: {response.status}")
 

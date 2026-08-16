@@ -370,6 +370,84 @@ async def test_bearer_auth_middleware_rejects_missing_header() -> None:
     assert sent[0]["status"] == 401
 
 
+async def test_bearer_auth_middleware_accepts_case_insensitive_scheme() -> None:
+    """scheme 前缀大小写不敏感：小写 bearer 形态同样放行。"""
+    received: dict[str, object] = {}
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        received["called"] = True
+
+    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    scope = {"type": "http", "headers": [(b"authorization", b"bearer s3cret")]}
+    await middleware(scope, None, None)
+
+    assert received == {"called": True}
+
+
+async def test_bearer_auth_middleware_rejects_non_bearer_scheme() -> None:
+    """非 Bearer 授权方案直接拒绝，不回退比较令牌值。"""
+    sent: list[dict] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("非 Bearer 方案不应进入下游应用")
+
+    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    scope = {"type": "http", "headers": [(b"authorization", b"Basic czNjcmV0")]}
+    await middleware(scope, None, send)
+
+    assert sent[0]["status"] == 401
+
+
+async def test_bearer_auth_middleware_strips_token_whitespace() -> None:
+    """令牌前后空白经 strip 后比较，携带等价令牌的请求放行。"""
+    received: dict[str, object] = {}
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        received["called"] = True
+
+    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    scope = {"type": "http", "headers": [(b"authorization", b"Bearer  s3cret ")]}
+    await middleware(scope, None, None)
+
+    assert received == {"called": True}
+
+
+async def test_bearer_auth_middleware_decides_on_first_authorization_header() -> None:
+    """多个 authorization 头取首个即判定：首个非 Bearer 或首个令牌不符均拒绝。"""
+    sent: list[dict] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("重复头场景不应进入下游应用")
+
+    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    scope = {
+        "type": "http",
+        "headers": [
+            (b"authorization", b"Basic aaa"),
+            (b"authorization", b"Bearer s3cret"),
+        ],
+    }
+    await middleware(scope, None, send)
+    assert sent[0]["status"] == 401
+
+    sent.clear()
+    scope_second = {
+        "type": "http",
+        "headers": [
+            (b"authorization", b"Bearer wrong"),
+            (b"authorization", b"Bearer s3cret"),
+        ],
+    }
+    await middleware(scope_second, None, send)
+    assert sent[0]["status"] == 401
+
+
 async def test_bearer_auth_middleware_passes_lifespan_scope() -> None:
     """lifespan 类型 ASGI 消息应直接透传，不校验鉴权。"""
     received: dict[str, object] = {}
