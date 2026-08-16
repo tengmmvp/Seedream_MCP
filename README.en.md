@@ -80,7 +80,7 @@ The service listens on container port `8000` via the streamable-http transport; 
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "type": "http",
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
@@ -104,7 +104,7 @@ Edit `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "command": "uvx",
       "args": ["seedream-image-mcp"],
       "env": { "ARK_API_KEY": "your_api_key_here" }
@@ -129,7 +129,7 @@ Create `.cursor/mcp.json` in the project root:
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "command": "uvx",
       "args": ["seedream-image-mcp"],
       "env": { "ARK_API_KEY": "your_api_key_here" }
@@ -145,7 +145,7 @@ Generic configuration (the `command` + `args` + `env` fields are the same as abo
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "command": "uvx",
       "args": ["seedream-image-mcp"],
       "env": { "ARK_API_KEY": "your_api_key_here" }
@@ -541,11 +541,11 @@ The repository's `docs/` directory contains the following reference material:
 
 | Document | Description |
 | --- | --- |
-| [Seedream-API-Reference.md](docs/Seedream-API-Reference.md) | Volcengine official document: image generation API reference |
-| [Seedream-Official-Tutorial.md](docs/Seedream-Official-Tutorial.md) | Volcengine official document: official tutorial |
-| [Seedream-Streaming-Response.md](docs/Seedream-Streaming-Response.md) | Volcengine official document: streaming response (SSE events) |
-| [claude_desktop_config.json](docs/claude_desktop_config.json) | Project sample: common Claude Desktop environment variables |
-| [pyguide.md](docs/pyguide.md) | Development reference: Google Python Style Guide |
+| [Seedream-API-Reference.md](docs/volcengine/Seedream-API-Reference.md) | Volcengine official document: image generation API reference |
+| [Seedream-Official-Tutorial.md](docs/volcengine/Seedream-Official-Tutorial.md) | Volcengine official document: official tutorial |
+| [Seedream-Streaming-Response.md](docs/volcengine/Seedream-Streaming-Response.md) | Volcengine official document: streaming response (SSE events) |
+| [claude_desktop_config.json](docs/samples/claude_desktop_config.json) | Project sample: common Claude Desktop environment variables |
+| [pyguide.md](docs/development/pyguide.md) | Development reference: Google Python Style Guide |
 
 ## ❓ FAQ
 

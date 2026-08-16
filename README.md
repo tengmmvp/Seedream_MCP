@@ -80,7 +80,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-co
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "type": "http",
       "url": "http://127.0.0.1:8000/mcp",
       "headers": {
@@ -104,7 +104,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-co
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "command": "uvx",
       "args": ["seedream-image-mcp"],
       "env": { "ARK_API_KEY": "your_api_key_here" }
@@ -129,7 +129,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "command": "uvx",
       "args": ["seedream-image-mcp"],
       "env": { "ARK_API_KEY": "your_api_key_here" }
@@ -145,7 +145,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 ```json
 {
   "mcpServers": {
-    "seedream": {
+    "seedream-image-mcp": {
       "command": "uvx",
       "args": ["seedream-image-mcp"],
       "env": { "ARK_API_KEY": "your_api_key_here" }
@@ -541,11 +541,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 | 文档 | 说明 |
 | --- | --- |
-| [Seedream-API-Reference.md](docs/Seedream-API-Reference.md) | 火山引擎官方文稿：图像生成 API 参考 |
-| [Seedream-Official-Tutorial.md](docs/Seedream-Official-Tutorial.md) | 火山引擎官方文稿：官方教程 |
-| [Seedream-Streaming-Response.md](docs/Seedream-Streaming-Response.md) | 火山引擎官方文稿：流式响应（SSE 事件）说明 |
-| [claude_desktop_config.json](docs/claude_desktop_config.json) | 本项目示例：Claude Desktop 常用环境变量配置样本 |
-| [pyguide.md](docs/pyguide.md) | 开发规范收录：Google Python Style Guide |
+| [Seedream-API-Reference.md](docs/volcengine/Seedream-API-Reference.md) | 火山引擎官方文稿：图像生成 API 参考 |
+| [Seedream-Official-Tutorial.md](docs/volcengine/Seedream-Official-Tutorial.md) | 火山引擎官方文稿：官方教程 |
+| [Seedream-Streaming-Response.md](docs/volcengine/Seedream-Streaming-Response.md) | 火山引擎官方文稿：流式响应（SSE 事件）说明 |
+| [claude_desktop_config.json](docs/samples/claude_desktop_config.json) | 本项目示例：Claude Desktop 常用环境变量配置样本 |
+| [pyguide.md](docs/development/pyguide.md) | 开发规范收录：Google Python Style Guide |
 
 ## ❓ 常见问题
 

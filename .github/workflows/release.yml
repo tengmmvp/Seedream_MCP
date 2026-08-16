@@ -125,7 +125,7 @@ jobs:
             ```json
             {
               "mcpServers": {
-                "seedream": {
+                "seedream-image-mcp": {
                   "command": "uvx",
                   "args": ["seedream-image-mcp"],
                   "env": { "ARK_API_KEY": "your_api_key_here" }
