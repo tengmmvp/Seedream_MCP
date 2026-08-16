@@ -1,5 +1,5 @@
-# 发布流水线:测试 → 发布 PyPI → 创建 GitHub Release;Docker 镜像并行推送至 GHCR
-# 触发:推送 v* 标签
+# 发布流水线：测试 → 发布 PyPI → 创建 GitHub Release；Docker 镜像并行推送至 GHCR。
+# 由 v* 标签触发；另支持手动触发，手动时仅运行测试作业。
 name: 🚀 Release
 
 on:
@@ -8,13 +8,13 @@ on:
       - "v*"
   workflow_dispatch:
 
-# GITHUB_TOKEN 默认权限
+# GITHUB_TOKEN 默认权限。
 permissions:
-  contents: write # 创建 GitHub Release
-  packages: write # 推送镜像到 ghcr.io
+  contents: write # 创建 GitHub Release。
+  packages: write # 推送镜像到 ghcr.io。
 
 jobs:
-  # 测试矩阵:多 Python 版本跑单测、静态检查与构建验证,作为后续发布的门禁
+  # 测试作业：在发布基线 Python 版本上跑单测、静态检查与构建验证，作为后续发布的门禁。
   test:
     name: 🧪 Test
     runs-on: ubuntu-latest
@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: 📦 Install uv
+      - name: ⚡ Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
@@ -40,19 +40,19 @@ jobs:
       - name: 📦 Install dependencies
         run: uv sync
 
-      - name: 🧪 Run tests
+      - name: ✅ Run tests
         run: uv run pytest -q
 
       - name: 🎨 Check formatting (black)
         run: uv run black --check seedream_mcp tests
 
-      - name: 🔍 Run mypy
+      - name: 🔎 Run mypy
         run: uv run mypy seedream_mcp
 
       - name: 🧹 Run flake8
         run: uv run flake8 seedream_mcp tests
 
-      - name: 🧪 Quick validation
+      - name: 🧫 Quick validation
         run: |
           uv run python -c "
           from seedream_mcp import __version__
@@ -65,35 +65,35 @@ jobs:
           print('Package validation successful')
           "
 
-      - name: 🔍 Check package build
+      - name: 🧱 Check package build
         run: uv build --wheel
 
-  # 发布到 PyPI:基于 OIDC Trusted Publishing,用短期令牌替代长期 API token
+  # 发布到 PyPI：基于 OIDC Trusted Publishing，用短期令牌替代长期 API token。
   pypi-release:
-    name: 📦 Publish to PyPI
+    name: 📤 Publish to PyPI
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     permissions:
-      id-token: write # Trusted Publishing 必需:颁发 OIDC 令牌
+      id-token: write # Trusted Publishing 必需：颁发 OIDC 令牌。
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: 📦 Install uv
+      - name: ⚡ Install uv
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
 
-      - name: 🏗️ Build distributions
+      - name: 🎁 Build distributions
         run: uv build
 
-      - name: 📦 Publish to PyPI
+      - name: 📤 Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
-  # 创建 GitHub Release:依赖 PyPI 成功,确保 Release 中的安装说明已可用
+  # 创建 GitHub Release：依赖 PyPI 成功，确保 Release 中的安装说明已可用。
   build-and-release:
-    name: 🏗️ Build and Release
+    name: 🔖 Build and Release
     runs-on: ubuntu-latest
     needs: [test, pypi-release]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -115,7 +115,7 @@ jobs:
 
             ### 🛠️ 安装方式
 
-            #### 推荐方式（PyPI + uvx 一键安装）
+            #### 推荐方式
             ```bash
             # 通过环境变量提供密钥（推荐）
             ARK_API_KEY=your_api_key_here uvx seedream-image-mcp
@@ -146,12 +146,12 @@ jobs:
             3. 在 Claude Desktop / Cursor / VS Code 等 MCP 客户端中配置
 
           draft: false
-          # tag 含 alpha/beta/rc 时自动标记为预发布版本
+          # tag 含 alpha/beta/rc 时自动标记为预发布版本。
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 构建多架构镜像推送 GHCR:从源码构建,与 PyPI 发布相互独立、并行执行
+  # 构建多架构镜像推送 GHCR：从源码构建，与 PyPI 发布相互独立、并行执行。
   docker-release:
     name: 🐳 Docker Release
     runs-on: ubuntu-latest
@@ -162,7 +162,7 @@ jobs:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: 🏗️ Set up Docker Buildx
+      - name: 🛠️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: 🔑 Log in to GitHub Container Registry
@@ -172,7 +172,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🏷️ Extract metadata
+      - name: 🧾 Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -183,7 +183,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: 🐳 Build and push Docker image
+      - name: 🚢 Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
