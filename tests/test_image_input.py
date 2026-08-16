@@ -101,11 +101,41 @@ async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
 async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """界内不存在的路径仍走诊断分支：报文件不存在而非越界，不附允许根列表。"""
-    with pytest.raises(SeedreamAPIError) as exc_info:
-        await prepare_image_input(str(tmp_path / "missing.png"))
-    assert "路径超出允许的工作区目录范围" not in exc_info.value.message
-    assert "文件不存在" in exc_info.value.message
+    """会话 Roots 边界下界内不存在的路径仍走诊断分支：报文件不存在而非越界。
+
+    具体失败原因与相似路径建议均回显调用方授权声明的根下信息，不受回退遮蔽约束。
+    """
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
+    try:
+        with pytest.raises(SeedreamAPIError) as exc_info:
+            await prepare_image_input("missing.png")
+        assert "路径超出允许的工作区目录范围" not in exc_info.value.message
+        assert "文件不存在" in exc_info.value.message
+    finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
+
+
+async def test_prepare_image_input_in_bounds_diagnostics_masks_fallback_boundary(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """回退边界下界内定位失败的诊断分支不泄露服务器根绝对路径与相似路径建议。
+
+    具体失败原因文案与相似路径建议都由服务器环境根下的绝对路径拼出，遮蔽为仅
+    回显调用方输入的泛化消息。根下放置名称相近的真实图片，确保遮蔽前建议分支
+    确实可命中，测试不沦为空芯。
+    """
+    sibling = tmp_path / "missing_sibling.png"
+    Image.new("RGB", (32, 32), color="white").save(sibling)
+
+    try:
+        with pytest.raises(SeedreamAPIError) as exc_info:
+            await prepare_image_input("missing_sib.png")
+        assert "路径超出允许的工作区目录范围" not in exc_info.value.message
+        assert "建议的相似路径" not in exc_info.value.message
+        assert str(tmp_path.resolve()) not in exc_info.value.message
+        assert "missing_sib.png" in exc_info.value.message
+    finally:
+        sibling.unlink(missing_ok=True)
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:

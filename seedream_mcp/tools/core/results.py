@@ -20,6 +20,7 @@ from ._helpers import (
     _classify_generation_error_type,
     _extract_parallel_request_error,
     _is_generation_failed,
+    _normalize_error_message,
 )
 from .context import GenerationExecutionContext
 from .outputs import GenerationStructuredOutput, build_error_dict
@@ -356,11 +357,13 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
     均为上游可回显自由内容的字段，可能携带 userinfo 凭据或 CRLF。
     url/local_path/markdown_ref 与未知键为数据字段，走 sanitize_data_text 保留
     完整可用性——签名 URL 常见 400-700 字符、本地路径截断即不可寻址；其余短标识
-    与自由文本走 sanitize_error_text，截断语义正确。error.message 与 error.code
-    的非字符串形态先经 normalize_message_text 归一化为文本再净化，与顶层
-    error.message 的双出口口径一致，dict/list 形态的凭据不借原值穿透。
-    request_index/image_index 的合法写入点为本侧聚合写入的整数序号，单请求路径
-    的 data 项为上游原样透传，非 int 形态按错误文本净化，int 实例保持原值。
+    与自由文本走 sanitize_error_text，截断语义正确。七个已知字段的非 str 形态与
+    序号字段的非 int 形态均经 _sanitize_value_tree 处理：字符串按各自语义净化，
+    容器逐层净化后保留，标量原样返回，凭据与 CRLF 不借 dict/list 形态整体绕过。
+    error.message 与 error.code 的非字符串形态先经 normalize_message_text 归一化
+    为文本再净化，与顶层 error.message 的双出口口径一致，dict/list 形态的凭据
+    不借原值穿透。request_index/image_index 的合法写入点为本侧聚合写入的整数
+    序号，int 实例保持原值；bool 虽为 int 子类但不是序号，同样进入净化路径。
     local_path/markdown_ref 合法写入点仅为自动保存回填，但上游伪造的原始条目
     同样携带这两个键，统一净化闭合两条通道的注入面；未知键由结构化输出
     extra='allow' 直通，字符串值保守净化后保留而非剔除，容器值递归净化后重建，
@@ -401,17 +404,18 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
 
         for field in ("size", "output_format", "model", "type"):
             value = image.get(field)
-            if isinstance(value, str):
-                sanitized_value = sanitize_error_text(value)
-                if sanitized_value != value:
-                    updates[field] = sanitized_value
+            # 非 str 形态经 _sanitize_value_tree 处理：字符串按错误文本语义净化，
+            # 容器逐层净化后保留，标量原样返回，凭据与 CRLF 不借 dict/list 形态
+            # 整体绕过净化。
+            sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
+            if sanitized_value != value:
+                updates[field] = sanitized_value
 
         for field in ("request_index", "image_index"):
             value = image.get(field)
-            # int 实例为本侧聚合写入的整数序号，直接保留；单请求路径的 data 项为
-            # 上游原样透传，其余形态按错误文本净化，字符串经 sanitize_error_text
-            # 收敛，容器经同一迭代核心逐层处理。
-            if isinstance(value, int):
+            # int 实例为本侧聚合写入的整数序号，直接保留；bool 虽为 int 子类但不是
+            # 序号，与单请求路径透传的其他非 int 形态一并按错误文本净化。
+            if not isinstance(value, bool) and isinstance(value, int):
                 continue
             sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
             if sanitized_value != value:
@@ -419,10 +423,11 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
 
         for field in ("url", "local_path", "markdown_ref"):
             value = image.get(field)
-            if isinstance(value, str):
-                sanitized_value = sanitize_data_text(value)
-                if sanitized_value != value:
-                    updates[field] = sanitized_value
+            # 数据字段与上一循环同构，仅净化语义换为 sanitize_data_text 保留
+            # URL 与长文本的可用性。
+            sanitized_value = _sanitize_value_tree(value, sanitize_data_text)
+            if sanitized_value != value:
+                updates[field] = sanitized_value
 
         for key, value in image.items():
             if key in _KNOWN_IMAGE_KEYS:
@@ -445,17 +450,28 @@ def _format_failure_section(result: dict[str, Any]) -> str:
 
     error 文本为上游自由内容，出口处过 sanitize_error_text 与异常路径防护一致；
     message 的非字符串形态先经 normalize_message_text 归一化为文本再净化，凭据
-    不借 dict/list 形态在净化之后经插值穿透文本通道。
+    不借 dict/list 形态在净化之后经插值穿透文本通道。error 形态为 dict 时优先经
+    _normalize_error_message 的五级阶梯提取 message/msg/detail/error/code，阶梯
+    未命中且 message 为非 None 形态时归一化该分量；缺键、None 等空值回落未知
+    错误，字面量 None 与字典 repr 不进入用户可见文本。
     """
-    # error 键存在但值为 None 时归入未知错误，不把字面量 None 渲染为用户可见文本，
-    # 与结构化出口对空值的收敛处理对称。
+    # error 键缺失或值为 None 等空值时归入未知错误；结构化出口对空值施以同一
+    # or 回落，两条通道口径一致。
     raw_error = result.get("error") or "未知错误"
-    # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本。
-    error_text = sanitize_error_text(
-        normalize_message_text(
-            raw_error.get("message", str(raw_error)) if isinstance(raw_error, dict) else raw_error
-        )
-    )
+    if isinstance(raw_error, dict):
+        # dict 形态优先复用五级提取阶梯，与并行聚合的错误提取同口径；阶梯只命中
+        # 字符串分量，非 str 的 message 仍归一化为文本再净化，凭据不借形态穿透；
+        # message 缺键或为 None 时回落未知错误，dict repr 与字面 None 不进入文本。
+        error_text = _normalize_error_message(raw_error)
+        if error_text is None:
+            message = raw_error.get("message")
+            error_text = (
+                sanitize_error_text(normalize_message_text(message))
+                if message is not None
+                else "未知错误"
+            )
+    else:
+        error_text = sanitize_error_text(normalize_message_text(raw_error))
     failure_message = f"图片生成失败: {error_text}"
     batch_info = result.get("batch")
     if not isinstance(batch_info, dict):
@@ -477,35 +493,46 @@ def _format_failure_section(result: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _render_sanitized_value(value: Any) -> str:
+    """将已净化的取值渲染为文本行内容：字符串原样，其余形态归一化为文本。
+
+    容器等非字符串形态经 f-string 插值会以 Python repr 输出，净化后的嵌套字符串
+    仍会被引号与转义包裹成可疑文本；此处统一经 normalize_message_text 归一化为
+    文本，repr 形态不出现在用户可见行中。
+    """
+    return value if isinstance(value, str) else normalize_message_text(value)
+
+
 def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
     """格式化单张图片的可读详情行。
 
     入参条目已由 format_generation_response 经 _sanitize_image_errors 统一净化并
-    写回，此处直接消费已净化值，不再对同一字段重复过净化管线。URL 是模型向用户
+    写回，此处直接消费已净化值，不再对同一字段重复过净化管线；非字符串取值经
+    _render_sanitized_value 渲染归一化文本，不以 repr 插值。URL 是模型向用户
     展示图片的直接载体，始终输出；local_path 为自动保存回填的持久化信息，存在时
     附加输出。markdown_ref 可由本地路径平凡推导，文本通道不单独成行，结构化通道
     仍完整携带。
     """
     parts = [f"图片 {index}:"]
     if "request_index" in image:
-        parts.append(f"  请求序号: {image['request_index']}")
+        parts.append(f"  请求序号: {_render_sanitized_value(image['request_index'])}")
     error_info = image.get("error")
     if isinstance(error_info, dict):
         parts.append("  状态: 失败")
         if error_info.get("code"):
-            parts.append(f"  错误码: {error_info['code']}")
+            parts.append(f"  错误码: {_render_sanitized_value(error_info['code'])}")
         if error_info.get("message"):
-            parts.append(f"  错误信息: {error_info['message']}")
+            parts.append(f"  错误信息: {_render_sanitized_value(error_info['message'])}")
     if image.get("url"):
-        parts.append(f"  URL: {image['url']}")
+        parts.append(f"  URL: {_render_sanitized_value(image['url'])}")
     if "size" in image:
-        parts.append(f"  尺寸: {image['size']}")
+        parts.append(f"  尺寸: {_render_sanitized_value(image['size'])}")
     if "output_format" in image:
-        parts.append(f"  输出格式: {image['output_format']}")
+        parts.append(f"  输出格式: {_render_sanitized_value(image['output_format'])}")
     if "image_index" in image:
-        parts.append(f"  序号: {image['image_index']}")
+        parts.append(f"  序号: {_render_sanitized_value(image['image_index'])}")
     if "local_path" in image:
-        parts.append(f"  本地路径: {image['local_path']}")
+        parts.append(f"  本地路径: {_render_sanitized_value(image['local_path'])}")
     if "b64_json" in image:
         b64_data = image.get("b64_json")
         # 伪造的 int 等不可计长度形态会使 len 抛 TypeError，已计费结果被外层翻错
@@ -757,7 +784,9 @@ def _build_generation_structured_result(
 
     failed = _is_generation_failed(result)
     if failed:
-        raw_error = result.get("error", "未知错误")
+        # error 键缺失或值为 None 等空值时回落未知错误，与文本通道的 or 口径一致，
+        # 字面量 None 不进入 structuredContent.error。
+        raw_error = result.get("error") or "未知错误"
         if isinstance(raw_error, dict):
             sanitized_error = dict(raw_error)
             # message 为上游自由内容且可为任意 JSON 形态：非字符串先归一化为文本再

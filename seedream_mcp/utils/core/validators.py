@@ -103,10 +103,11 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     else:
         try:
             validated_value = int(value)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
         # Decimal 与 Fraction 一类数值经 int() 会静默截断小数部分，与 float 分支同规则
-        # 拒绝非整数值。字符串经 int() 解析已保证无损转换，不参与等值比较。
+        # 拒绝非整数值；Decimal 无穷经 int() 抛 OverflowError，与解析失败同规则转译为
+        # 校验错误。字符串经 int() 解析已保证无损转换，不参与等值比较。
         if not isinstance(value, str) and value != validated_value:
             raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
 

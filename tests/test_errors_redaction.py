@@ -792,8 +792,9 @@ def test_to_dict_deeply_nested_details_do_not_raise_recursion_error() -> None:
 
     _filter_sensitive_data 以显式栈替代递归，深嵌套结构的敏感字段过滤不触发
     解释器递归上限，与 _normalize_non_str_message 对超深 message 的兜底口径对齐；
-    to_dict 的 truncate-first 管线中 repr 触发的递归失败由 _truncate_value_for_output
-    兜底为类型占位符，details 收敛为有界文本。
+    to_dict 的 truncate-first 管线中判长估计在累计长度超限处提前终止，dict 链
+    每层累计键长、首层即收敛为元素数摘要；list 链无键长累计，走到深度上限兜底
+    为类型占位符，两条路径 details 均为有界文本。
     """
     deep_dict: Any = {}
     for _ in range(100_000):
@@ -804,7 +805,7 @@ def test_to_dict_deeply_nested_details_do_not_raise_recursion_error() -> None:
 
     err_dict = SeedreamMCPError("msg", details=deep_dict)
     dumped = err_dict.to_dict()
-    assert dumped["details"] == "<dict>"
+    assert dumped["details"] == "<truncated:dict, 1 keys>"
 
     deep_list: Any = []
     for _ in range(100_000):
@@ -1135,3 +1136,178 @@ def test_sanitize_response_data_redacts_values_of_small_container() -> None:
     assert "SECRET" not in str(redacted)
     assert redacted["note"].startswith("api_key=***")
     assert redacted["count"] == 3
+
+
+# ==================== 字面转义分隔族与真实控制空白独占分隔 ====================
+
+
+def test_redact_sensitive_message_strips_literal_escape_separator_family() -> None:
+    """字面转义序列 \t \r \f 与十六进制转义 \u000b \x0b 分隔的键值同样剥离。
+
+    json.dumps 与 repr 只把 \n 归约为既有覆盖，制表符、回车、换页与十六进制
+    变体的转义产物获得同等覆盖，凭据不借转义形态逃逸。
+    """
+    assert _redact_sensitive_message("api_key\\tsk-1") == "api_key\\t***"
+    assert _redact_sensitive_message("api_key\\rsk-1") == "api_key\\r***"
+    assert _redact_sensitive_message("api_key\\fsk-1") == "api_key\\f***"
+    assert _redact_sensitive_message("api_key\\u000bsk-1") == "api_key\\u000b***"
+    assert _redact_sensitive_message("api_key\\x0bsk-1") == "api_key\\x0b***"
+    # 大写十六进制变体同样命中
+    assert "sk-1" not in _redact_sensitive_message("api_key\\u000Bsk-1")
+    assert "sk-1" not in _redact_sensitive_message("api_key\\x0Bsk-1")
+
+
+def test_handle_api_error_strips_real_tab_cr_in_nested_message() -> None:
+    """嵌套 dict message 含真实 TAB/CR，JSON 转义为字面 \t \r 后两条输出通道均被剥离。"""
+    resp = {"error": {"code": "E", "message": {"detail": "api_key\tsk-live-1\rjwt=sk-live-2"}}}
+    err = handle_api_error(400, resp)
+
+    rendered = str(err.to_dict()["message"])
+    user_text = format_error_for_user(err)
+
+    assert "sk-live-1" not in rendered
+    assert "sk-live-2" not in rendered
+    assert "sk-live-1" not in user_text
+    assert "sk-live-2" not in user_text
+
+
+def test_redact_sensitive_message_blocks_real_control_char_standalone_separator() -> None:
+    """真实换行或制表符独占分隔的键值在压平前的首轮匹配命中，不借控制字符绕过。"""
+    for sep in ("\n", "\r", "\t"):
+        redacted = _redact_sensitive_message(f"api_key{sep}SK-abcdef1234567890")
+        assert "SK-abcdef1234567890" not in redacted
+        assert sep not in redacted
+        assert redacted.startswith("api_key")
+
+    assert _redact_sensitive_message("api_key\r\nSK-1") == "api_key  ***"
+    assert _redact_sensitive_message("api_key:\nSK-1") == "api_key: ***"
+    assert _redact_sensitive_message("api_key:\tSK-1") == "api_key: ***"
+
+
+def test_real_control_separator_credentials_blocked_in_both_outputs() -> None:
+    """真实换行分隔的凭据在 to_dict 与 format_error_for_user 双出口均不残留。"""
+    err = SeedreamAPIError(message="上游回显 api_key\nSK-live-abcdef 其余说明")
+
+    dumped = str(err.to_dict()["message"])
+    user_text = format_error_for_user(err)
+
+    assert "SK-live-abcdef" not in dumped
+    assert "SK-live-abcdef" not in user_text
+    assert "\n" not in dumped
+
+
+def test_redact_sensitive_message_control_char_run_stays_fast() -> None:
+    """性能守护：控制空白长串在无值形态下失败回溯保持线性。
+
+    控制空白分支与前后空白量词若可分别吸收同一段空白，长串失败匹配呈二次方；
+    分支尾部前瞻限定其只在控制空白串尾命中，切分路径唯一，两万字符毫秒级完成。
+    """
+    hostile = "token" + "\t" * 20_000
+
+    start = time.perf_counter()
+    redacted = _redact_sensitive_message(hostile)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.1
+    assert "\t" not in redacted
+
+
+# ==================== userinfo 密码含 @ 与查询串 @ 保留 ====================
+
+
+def test_redact_sensitive_message_strips_userinfo_password_containing_at() -> None:
+    """密码含 @ 时贪婪剥到主机前最后一个 @，不再残留 ss@ 片段。"""
+    redacted = _redact_sensitive_message("https://user:p@ss@example.com/a.png")
+
+    assert redacted == "https://example.com/a.png"
+    assert "p@ss" not in redacted
+
+
+def test_redact_sensitive_message_keeps_query_at_without_userinfo() -> None:
+    """无 userinfo 的 URL 查询串中的 @ 不触发剥离，链接保留原样。"""
+    url = "https://example.com/a.png?email=a@b"
+
+    assert _redact_sensitive_message(url) == url
+
+
+# ==================== 点号键名两通道一致性 ====================
+
+
+def test_redact_sensitive_message_strips_dotted_sensitive_keyvalues() -> None:
+    """点号续段的键名 session.id、api.key、access.token 裸值剥离。"""
+    assert _redact_sensitive_message("session.id=abc123") == "session.id=***"
+    assert _redact_sensitive_message("api.key: SECRET") == "api.key: ***"
+    assert _redact_sensitive_message("access.token=SECRET") == "access.token=***"
+    # 对照组：无分隔符与值的点号词组保持原文
+    assert _redact_sensitive_message("session.idea was good") == "session.idea was good"
+
+
+def test_dotted_sensitive_key_redacts_consistently_across_channels() -> None:
+    """session.id 在 dict 键与自由文本两条通道同判敏感，口径一致。"""
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    assert _is_sensitive_key("session.id") is True
+    filtered = _filter_sensitive_data({"session.id": "abc", "note": "v"})
+    assert filtered == {"session.id": "***", "note": "v"}
+    assert _redact_sensitive_message("session.id=abc") == "session.id=***"
+
+
+# ==================== to_dict error_code 同口径净化 ====================
+
+
+def test_api_error_to_dict_sanitizes_overlong_error_code() -> None:
+    """to_dict 的 error_code 过与 message 同口径的截断，超长错误码受上限约束。"""
+    err = SeedreamAPIError(message="boom", error_code="C" * 900)
+
+    rendered = str(err.to_dict()["error_code"])
+
+    assert "<truncated:900 chars>" in rendered
+    assert rendered.count("C") == 500
+
+
+def test_api_error_to_dict_sanitizes_error_code_credentials() -> None:
+    """error_code 携带的控制字符与键值凭据在结构化输出中被剥离，None 保持为 None。"""
+    dirty = SeedreamAPIError(message="boom", error_code="x\r\nFAKE api_key: SECRET")
+
+    rendered = str(dirty.to_dict()["error_code"])
+
+    assert "SECRET" not in rendered
+    assert "\n" not in rendered
+    assert "api_key: ***" in rendered
+    assert SeedreamAPIError(message="boom").to_dict()["error_code"] is None
+
+
+# ==================== 超大嵌套容器判长提前终止 ====================
+
+
+def test_truncate_value_summarizes_huge_nested_container_quickly() -> None:
+    """小外层容器内嵌超大子容器的判长在超限处提前终止，快速返回元素数摘要。"""
+    big = {"a": ["x"] * 3_000_000}
+
+    start = time.perf_counter()
+    truncated = _truncate_value_for_output(big)
+    elapsed = time.perf_counter() - start
+
+    assert truncated == "<truncated:dict, 1 keys>"
+    assert elapsed < 0.5
+
+
+# ==================== 零宽不可见字符与全角引号变体 ====================
+
+
+def test_redact_sensitive_message_blocks_zero_width_key_variants() -> None:
+    """零宽字符插入键名内部或键与分隔符之间时先移除再匹配，真实键名照常命中。"""
+    zwsp = chr(0x200B)
+    zwnj = chr(0x200C)
+    soft_hyphen = chr(0x00AD)
+    bom = chr(0xFEFF)
+    assert _redact_sensitive_message(f"api{zwsp}key=SECRET") == "apikey=***"
+    assert _redact_sensitive_message(f"session{zwnj}.id=abc") == "session.id=***"
+    assert _redact_sensitive_message(f"token{soft_hyphen}=SECRET") == "token=***"
+    assert _redact_sensitive_message(f"{bom}token=SECRET") == "token=***"
+
+
+def test_redact_sensitive_message_blocks_fullwidth_quote_separator() -> None:
+    """全角引号 ＂ ＇ 作为分隔符引号组的变体命中，凭据不借全角引号逃逸。"""
+    assert _redact_sensitive_message("api_key＂: sk-1") == "api_key＂: ***"
+    assert _redact_sensitive_message("api_key＇: sk-1") == "api_key＇: ***"

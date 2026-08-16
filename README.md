@@ -72,12 +72,13 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
 # 可选：创建 .env（参考 .env.example）供 compose 只读挂载，替代下行环境变量前置
+# 不创建 .env 时 Docker 会自动创建同名目录导致挂载异常，需先 touch .env 或删除 compose 中的该挂载
 
 # 启动服务
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
-服务以 streamable-http 传输监听容器内 `8000` 端口，宿主机端口由 `SEEDREAM_HTTP_PORT` 控制（默认 8000），MCP 端点路径为 `/mcp`。客户端接入配置（以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理）：
+服务以 streamable-http 传输监听容器内 `8000` 端口，宿主机端口由 `SEEDREAM_HTTP_PORT` 控制（默认 8000），MCP 端点路径为 `/mcp`。端口映射默认仅绑定回环地址 `127.0.0.1`，需从其他设备直连时把 docker-compose.yml 中的端口映射改为 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主机网卡地址。客户端接入配置（以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理）：
 
 ```json
 {
@@ -300,7 +301,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "name": "seedream_image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": ".seedream/images/2026/08/15/portrait.jpeg"
+    "image": ".seedream/images/2026-08-15/seedream_image_to_image/portrait.jpeg"
   }
 }
 ```
@@ -337,8 +338,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      ".seedream/images/2026/08/15/person_a.jpeg",
-      ".seedream/images/2026/08/15/person_b.jpeg"
+      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_a.jpeg",
+      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_b.jpeg"
     ]
   }
 }
@@ -544,6 +545,7 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 流式响应每次读取块�
 - **保存目录归服务管理**：自动保存的按天清理与总量配额会删除保存目录内**所有**符合图片扩展名的过期文件与空目录，不区分是否由本服务生成。请勿将 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向个人相册等含重要图片的目录。
 - **多租户 streamable-http 部署建议显式设置 `SEEDREAM_WORKSPACE_ROOT`**：MCP Roots 读取失败时文件访问边界会回退到该环境变量（未设置时为进程工作目录）。
 - **未认证请求的体积限制**：未携带有效令牌的 chunked 请求不读 body 即返回 401，其体积限制依赖 uvicorn 层或前置反向代理；公网暴露部署请在代理层配置请求体上限。
+- **Linux 宿主挂载目录属主**：容器以 uid 1000 的非 root 用户运行，Linux 宿主上 compose 挂载的 `./.seedream` 目录需对该用户可写（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影响。
 
 ## 👥 贡献者
 

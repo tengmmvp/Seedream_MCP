@@ -324,6 +324,10 @@ async def parse_sse_response(
     truncated_events = 0
     # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀。
     search_hint = 0
+    # 上一块末尾孤立 \r 的悬置标志。块尾 \r 无法独立判定是 CRLF 前半还是单独 CR 行尾，
+    # 先不归一化，留待与次块首字节拼接后判定，防止其被提前转为 \n 与次块首 \n 拼成
+    # \n\n 假事件分隔符导致多行 data 事件被静默拆丢。
+    pending_cr = False
 
     async for chunk in response.aiter_bytes(chunk_size):
         if not chunk:
@@ -331,11 +335,19 @@ async def parse_sse_response(
 
         # 规范化行尾为 \n 以兼容 CRLF/CR，使事件分隔 \n\n 判定对所有行尾风格一致，
         # 避免上游或中间代理改用 CRLF 时事件无法切分致整流丢失。
+        # 悬置 \r 前置拼回本块头部一并归一化，块尾新出现的孤立 \r 撤出本块继续悬置。
         # 仅在含 \r 时才分配替换副本；LF-only 为 SSE 流常态，此时退化为一次 memchr
         # 包含扫描，避免每块无条件分配两个全块临时对象造成的分配与 GC 开销。
         raw_len = len(chunk)
+        if pending_cr:
+            chunk = b"\r" + chunk
+            pending_cr = False
         if b"\r" in chunk:
-            chunk = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            normalized = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            if chunk.endswith(b"\r"):
+                normalized = normalized[:-1]
+                pending_cr = True
+            chunk = normalized
         buffer += chunk
         processed_bytes += raw_len
 
@@ -398,6 +410,9 @@ async def parse_sse_response(
             # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫。
             search_hint = len(buffer)
 
+    # 流在悬置 \r 处结束：单独 CR 亦为完整行尾，补作 \n 保持归一语义后进入残留解析。
+    if pending_cr:
+        buffer += b"\n"
     trailing_len = len(buffer) - offset
     trailing_event = await _parse_segment_range(buffer, offset, len(buffer), log)
     if trailing_event is not None:

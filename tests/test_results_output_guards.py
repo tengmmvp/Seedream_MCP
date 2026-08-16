@@ -1169,3 +1169,135 @@ def test_failure_text_none_error_value_falls_back_to_unknown() -> None:
 
     assert "图片生成失败: 未知错误" in text
     assert "None" not in text
+
+
+def test_structured_failure_none_error_value_falls_back_to_unknown() -> None:
+    """结构化出口对 error=None 与文本通道同口径回落未知错误，message 不为字面 None。"""
+    result = {"success": False, "status": "failed", "data": [], "error": None}
+
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert structured["error"]["message"] == "未知错误"
+    assert "None" not in str(structured["error"])
+    assert "图片生成失败: 未知错误" in text
+    assert "None" not in text
+
+
+# ==================== dict error 缺键与空 message 的阶梯提取 ====================
+
+
+def test_failure_text_dict_error_without_message_extracts_code_via_ladder() -> None:
+    """dict error 缺 message 键时经五级阶梯落到 code，dict repr 不进入文本。"""
+    result = {"success": False, "status": "failed", "data": [], "error": {"code": "E"}}
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "图片生成失败: E" in text
+    assert "{'code'" not in text
+
+
+def test_failure_text_dict_error_none_message_falls_back_to_unknown() -> None:
+    """dict error 的 message 为 None 时回落未知错误，字面 None 不进入文本。"""
+    result = {"success": False, "status": "failed", "data": [], "error": {"message": None}}
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "图片生成失败: 未知错误" in text
+    assert "None" not in text
+
+
+# ==================== 非 str 数据字段净化 ====================
+
+
+def test_non_str_url_size_local_path_sanitized_in_both_channels() -> None:
+    """非 str 形态的 url/size/local_path 经容器逐层净化，凭据与 CRLF 不进入两通道。
+
+    文本通道渲染归一化文本而非 Python repr；正常 str 形态与 int 标量保持原值。
+    """
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [
+            {
+                "url": {"Authorization": "Bearer sk-nonstr-leaked"},
+                "size": ["2K\r\nFAKE api_key=leaked"],
+                "local_path": {"p": "images/a.png\r\nFAKE-PATH: injected"},
+            },
+            {
+                "url": "https://example.com/ok.png",
+                "size": "2K",
+                "local_path": 7,
+            },
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    # 凭据与 CRLF 不进入文本通道，非 str 形态以归一化文本渲染。
+    assert "sk-nonstr-leaked" not in text
+    assert "api_key=leaked" not in text
+    assert "\r" not in text
+    url_line = next(line for line in text.splitlines() if line.startswith("  URL: "))
+    size_line = next(line for line in text.splitlines() if line.startswith("  尺寸: "))
+    path_line = next(line for line in text.splitlines() if line.startswith("  本地路径: "))
+    assert url_line == '  URL: {"Authorization": "Bearer ***"}'
+    assert size_line == '  尺寸: ["2K  FAKE api_key=***"]'
+    assert path_line == '  本地路径: {"p": "images/a.png  FAKE-PATH: injected"}'
+    # 结构化通道保留容器形态，嵌套字符串逐层净化。
+    assert structured["data"][0]["url"] == {"Authorization": "Bearer ***"}
+    assert structured["data"][0]["size"] == ["2K  FAKE api_key=***"]
+    assert structured["data"][0]["local_path"] == {"p": "images/a.png  FAKE-PATH: injected"}
+    # 正常 str 形态与 int 标量保持原值。
+    assert "  URL: https://example.com/ok.png" in text
+    assert "  尺寸: 2K" in text
+    assert "  本地路径: 7" in text
+    assert structured["data"][1]["url"] == "https://example.com/ok.png"
+    assert structured["data"][1]["size"] == "2K"
+    assert structured["data"][1]["local_path"] == 7
+
+
+# ==================== bool 序号形态 ====================
+
+
+def test_forged_bool_index_form_routed_through_sanitization_path() -> None:
+    """bool 序号不占 int 快速通道：bool 子类排除口径与序号提取守卫一致。
+
+    bool 保持布尔取值进入结构化通道，文本通道渲染归一化文本；int 实例仍直接保留。
+    """
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [
+            {"url": "https://example.com/a.png", "request_index": True},
+            {"url": "https://example.com/b.png", "request_index": 2},
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert "  请求序号: True" in text
+    assert structured["data"][0]["request_index"] is True
+    # int 实例为本侧聚合写入的整数序号，保持原值直接渲染。
+    assert "  请求序号: 2" in text
+    assert structured["data"][1]["request_index"] == 2

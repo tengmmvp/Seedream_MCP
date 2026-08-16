@@ -25,7 +25,6 @@ from ..core.formats import (
 from ..core.logs import get_logger
 from .io_file import (
     _has_reparse_attribute,
-    _is_reparse_point,
     atomic_replace_from_fd_sync,
 )
 from .io_path import is_within_resolved
@@ -647,9 +646,17 @@ class FileManager:
             pruned_dirs: list[str] = []
             for name in dirs:
                 dir_path = root_path / name
-                if dir_path.is_symlink():
+                # 单次 lstat 同时判定符号链接与 reparse point 属性，与文件分支同口径，
+                # 免掉 is_symlink 与逐路径 reparse 判定的重复 lstat；listdir 与 lstat
+                # 之间条目消失属正常轮替，跳过不下降。
+                try:
+                    dir_lstat = dir_path.lstat()
+                except OSError as e:
+                    logger.warning("获取目录信息失败: {} -> {}", dir_path, e)
                     continue
-                if _is_reparse_point(dir_path):
+                if stat.S_ISLNK(dir_lstat.st_mode):
+                    continue
+                if _has_reparse_attribute(dir_lstat):
                     logger.warning("跳过 reparse point 目录: {}", dir_path)
                     continue
                 try:
@@ -671,7 +678,7 @@ class FileManager:
                 if not is_image and not name.endswith(".part"):
                     continue
                 # 单次 lstat 同时判定符号链接与 reparse point 属性：is_symlink 与
-                # _is_reparse_point 各自 lstat 一次，全目录清理时每文件三次 stat。
+                # 逐路径 reparse 判定各自再 lstat 一次，全目录清理时每文件三次 stat。
                 try:
                     lstat_result = file_path.lstat()
                 except OSError as e:

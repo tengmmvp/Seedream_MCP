@@ -2,8 +2,8 @@
 
 提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd（异步）与
 atomic_replace_from_fd_sync（同步变体）四个能力，另有 _is_reparse_point 判定
-NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的
-清理遍历共用；已持有 lstat 结果的调用方经 _has_reparse_attribute 判定同一属性位。
+NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描使用；已持有
+lstat 结果的调用方经 _has_reparse_attribute 判定同一属性位。
 open_no_follow_read 读取时拒绝最终路径分量为符号链接；open_temp_fd
 以不可预测随机名创建临时文件供调用方写入后原子替换；atomic_replace_from_fd 封装
 “随机临时文件→写入→os.replace 原子替换→失败清理”协议供 io_storage 与 io_download

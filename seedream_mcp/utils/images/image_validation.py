@@ -99,8 +99,14 @@ def _resolve_local_image_path(file_path: str) -> Path:
 
     不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的现行定位
     口径一致：调用方按字面值完成工作区边界判定后再进入本函数，展开会使实际读取
-    目标脱离已判定的边界。
+    目标脱离已判定的边界。UNC 路径在 resolve 前抛 ValueError 拒绝，与
+    normalize_path 同口径，避免 Windows 下 resolve 触发 SMB 认证。
+
+    Raises:
+        ValueError: 路径为 UNC 形式。
     """
+    if is_unc_path(file_path):
+        raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {file_path}")
     raw_path = Path(file_path)
     if raw_path.is_absolute():
         return raw_path.resolve()

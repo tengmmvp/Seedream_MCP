@@ -116,7 +116,8 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     锁定同一文件。定位失败且路径解析后落在全部工作区根之外时，抛出携带允许根
     列表的 SeedreamValidationError，属参数校验语义而非 API 调用失败；界内定位
     失败则经 validate_image_path 做诊断性校验取具体失败原因，并给出相似路径建议。
-    需在工作线程中调用。
+    越界与界内两条失败路径的文案均按边界来源遮蔽：回退边界来自服务器环境，根
+    绝对路径不进入面向调用方的错误消息。需在工作线程中调用。
     """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
@@ -144,6 +145,10 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             )
         # 诊断性校验仅用于错误文案：定位已由共享规则唯一决定，此处取各根的具体
         # 失败原因（文件不存在、格式不支持等）拼入错误消息，不影响候选一致性。
+        # 诊断文案与相似路径建议均由服务器根下的绝对路径拼出，回退边界时与越界
+        # 分支同口径遮蔽，改报仅回显调用方输入的泛化消息。
+        if not is_boundary_from_session_roots():
+            raise SeedreamAPIError(f"图像路径校验失败: {normalized}")
         validation_errors: list[str] = []
         for root in workspace_roots:
             _, error_msg, _ = validate_image_path(

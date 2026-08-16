@@ -13,11 +13,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# GITHUB_TOKEN 默认权限。
-permissions:
-  contents: write # 创建 GitHub Release。
-  packages: write # 推送镜像到 ghcr.io。
-
 jobs:
   # 测试作业：在发布基线 Python 版本上跑单测、静态检查与构建验证，作为后续发布的门禁。
   test:
@@ -27,6 +22,8 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.12"]
+    permissions:
+      contents: read
 
     steps:
       - name: 📥 Checkout code
@@ -44,7 +41,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: 📦 Install dependencies
-        run: uv sync
+        run: uv sync --frozen
 
       - name: ✅ Run tests
         run: uv run pytest -q
@@ -105,6 +102,8 @@ jobs:
     timeout-minutes: 10
     needs: [test, pypi-release]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
 
     steps:
       - name: 📥 Checkout code
@@ -166,6 +165,9 @@ jobs:
     timeout-minutes: 30
     needs: test
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read # 检出源码构建镜像。
+      packages: write # 推送镜像到 ghcr.io。
 
     steps:
       - name: 📥 Checkout code

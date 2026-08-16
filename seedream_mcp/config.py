@@ -157,6 +157,11 @@ class SeedreamConfig:
             raise SeedreamConfigError(
                 f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
             )
+        # netloc 缺失的畸形 URL 在构造期拒绝：https:// 与 https:foo 等形态若放行到运行时，
+        # 会在 httpx 拼请求时抛 UnsupportedProtocol 落入网络错误重试，错误归约档变为
+        # network_error 而非此处的 config_error。
+        if not urlparse(self.base_url).netloc.strip():
+            raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
         if base_url_scheme == "http":
             if not self.allow_http_base_url:
                 raise SeedreamConfigError(

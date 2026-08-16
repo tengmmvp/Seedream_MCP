@@ -196,6 +196,19 @@ def test_coerce_integer_decimal_accepted() -> None:
     assert _coerce_positive_int_in_range(Decimal("2"), "f", 1, 10) == 2
 
 
+@pytest.mark.parametrize("value", [Decimal("Infinity"), Decimal("-Infinity")])
+def test_coerce_infinite_decimal_rejected(value: Decimal) -> None:
+    """Decimal 无穷经 int() 抛 OverflowError，转译为参数校验错误不外逃。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_positive_int_in_range(value, "f", 1, 10)
+
+
+def test_coerce_fraction_infinity_boundary_unconstructible() -> None:
+    """Fraction 无法表示无穷，构造即抛 OverflowError，该形态到不了校验层。"""
+    with pytest.raises(OverflowError):
+        Fraction(Decimal("Infinity"))
+
+
 def test_coerce_bool_rejected() -> None:
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
         _coerce_positive_int_in_range(True, "f", 1, 10)

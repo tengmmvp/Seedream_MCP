@@ -72,12 +72,13 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
 # 選用：建立 .env（參考 .env.example）供 compose 唯讀掛載，替代下行環境變數前置
+# 未建立 .env 時 Docker 會自動建立同名目錄導致掛載異常，需先 touch .env 或刪除 compose 中的該掛載
 
 # 啟動服務
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
-服務以 streamable-http 傳輸監聽容器內 `8000` 連接埠，宿主機連接埠由 `SEEDREAM_HTTP_PORT` 控制（預設 8000），MCP 端點路徑為 `/mcp`。用戶端接入設定（以 Claude Desktop 為例，其他支援 streamable-http 的用戶端同理）：
+服務以 streamable-http 傳輸監聽容器內 `8000` 連接埠，宿主機連接埠由 `SEEDREAM_HTTP_PORT` 控制（預設 8000），MCP 端點路徑為 `/mcp`。連接埠映射預設僅綁定回環位址 `127.0.0.1`，需從其他裝置直連時把 docker-compose.yml 中的連接埠映射改為 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主機網卡位址。用戶端接入設定（以 Claude Desktop 為例，其他支援 streamable-http 的用戶端同理）：
 
 ```json
 {
@@ -300,7 +301,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "name": "seedream_image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": ".seedream/images/2026/08/15/portrait.jpeg"
+    "image": ".seedream/images/2026-08-15/seedream_image_to_image/portrait.jpeg"
   }
 }
 ```
@@ -337,8 +338,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      ".seedream/images/2026/08/15/person_a.jpeg",
-      ".seedream/images/2026/08/15/person_b.jpeg"
+      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_a.jpeg",
+      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_b.jpeg"
     ]
   }
 }
@@ -544,6 +545,7 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 串流回應每次讀取區�
 - **儲存目錄由服務管理**：自動儲存的按天清理與總量配額會刪除儲存目錄內**所有**符合圖片副檔名的過期檔案與空目錄，不區分是否由本服務生成。請勿將 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向個人相簿等含重要圖片的目錄。
 - **多租戶 streamable-http 部署建議顯式設定 `SEEDREAM_WORKSPACE_ROOT`**：MCP Roots 讀取失敗時檔案存取邊界會回退到該環境變數（未設定時為行程工作目錄）。
 - **未認證請求的體積限制**：未攜帶有效權杖的 chunked 請求不讀 body 即回傳 401，其體積限制依賴 uvicorn 層或前置反向代理；公網暴露部署請在代理層設定請求體上限。
+- **Linux 宿主掛載目錄屬主**：容器以 uid 1000 的非 root 使用者執行，Linux 宿主上 compose 掛載的 `./.seedream` 目錄需對該使用者可寫（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影響。
 
 ## 👥 貢獻者
 

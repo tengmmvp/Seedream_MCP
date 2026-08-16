@@ -87,32 +87,6 @@ async def test_prepare_image_input_cache_hit_when_workspace_roots_stable(
     assert call_count == 1
 
 
-def test_resolved_roots_cache_evicts_oldest_fifo(monkeypatch: pytest.MonkeyPatch) -> None:
-    """roots 解析缓存超限时按 FIFO 淘汰最旧条目，上限恒定且最旧键先失效。
-
-    淘汰经 OrderedDict.popitem(last=False) 单方法调用完成，规避「迭代取首键再
-    pop」两步组合在并发写入下的 RuntimeError 逃逸。
-    """
-    from seedream_mcp.utils.images import image_prepare
-    from seedream_mcp.utils.images.image_prepare import (
-        _RESOLVED_ROOTS_CACHE_MAX_ENTRIES,
-        _resolved_roots_cache,
-    )
-    from seedream_mcp.utils.images.image_prepare import ImagePreparer
-
-    _resolved_roots_cache.clear()
-    monkeypatch.setattr(image_prepare, "resolve_workspace_roots", lambda roots: [Path("/ws")])
-
-    for i in range(_RESOLVED_ROOTS_CACHE_MAX_ENTRIES + 1):
-        ImagePreparer._local_file_signature("local.png", (f"/ws/{i}",))
-
-    assert len(_resolved_roots_cache) == _RESOLVED_ROOTS_CACHE_MAX_ENTRIES
-    assert ("/ws/0",) not in _resolved_roots_cache
-    assert ("/ws/1",) in _resolved_roots_cache
-    assert (f"/ws/{_RESOLVED_ROOTS_CACHE_MAX_ENTRIES}",) in _resolved_roots_cache
-    _resolved_roots_cache.clear()
-
-
 # ==================== 签名路径与读取路径的 strip 一致性 ====================
 
 

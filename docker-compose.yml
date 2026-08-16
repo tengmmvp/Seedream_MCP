@@ -11,7 +11,8 @@ services:
       - "8000"
       - "--insecure-allow-non-tls"
     ports:
-      - "${SEEDREAM_HTTP_PORT:-8000}:8000"
+      # 默认仅绑定回环地址；需从其他设备直连时改为 "0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000" 或指定宿主机网卡地址。
+      - "127.0.0.1:${SEEDREAM_HTTP_PORT:-8000}:8000"
     environment:
       # 必需：火山引擎 API 密钥
       - ARK_API_KEY=${ARK_API_KEY}
@@ -57,6 +58,7 @@ services:
       - SEEDREAM_STREAM_CHUNK_SIZE=${SEEDREAM_STREAM_CHUNK_SIZE:-1048576}
     volumes:
       - ./.seedream:/app/.seedream
+      # 宿主未创建 .env 时 Docker 会自动创建同名目录导致挂载异常，需先 touch .env 或删除本行。
       - ./.env:/app/.env:ro
     restart: unless-stopped
     healthcheck:

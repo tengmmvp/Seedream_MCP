@@ -224,6 +224,35 @@ def test_add_usage_value_deepcopies_dict_when_existing_is_non_dict() -> None:
     assert usage["count"]["tool_usage"]["web_search"] == 1
 
 
+def test_aggregate_all_failed_requests_reuse_exception_error_code() -> None:
+    """并行全失败时 error.type 取代表异常的归约错误码，与单发路径契约一致。
+
+    首个失败异常为 401 时批次 error.type 为 auth_error，不回落硬编码的
+    generation_failed。
+    """
+    aggregated = aggregate_parallel_generation_results(
+        request_results=[None],
+        request_errors={1: SeedreamAPIError("x", status_code=401)},
+    )
+
+    assert aggregated["success"] is False
+    assert aggregated["status"] == "failed"
+    assert aggregated["error"]["type"] == "auth_error"
+
+
+def test_aggregate_all_failed_without_exceptions_falls_back_to_generation_failed() -> None:
+    """无异常映射的全失败批次回落 generation_failed 兜底码。"""
+    aggregated = aggregate_parallel_generation_results(
+        request_results=[
+            {"success": False, "status": "failed", "data": [], "error": {"code": "E"}}
+        ],
+        request_errors={},
+    )
+
+    assert aggregated["success"] is False
+    assert aggregated["error"]["type"] == "generation_failed"
+
+
 def test_aggregate_parallel_generation_results_deep_merges_usage() -> None:
     """聚合多请求 usage：嵌套 dict 子键递归累加，标量数值累加，bool/str 跳过。"""
     request_results = [

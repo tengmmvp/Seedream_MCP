@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import OrderedDict
-from pathlib import Path
 from typing import Sequence
 
 from .image_ref import classify_image_reference
@@ -25,14 +24,6 @@ PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 
 # 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环。
 _LARGE_IMAGE_THRESHOLD = 1024 * 1024
-
-# 工作区 roots 元组 → 已 resolve 的根列表，跨图复用避免每图重复 resolve 同一根目录。
-# 上限 _RESOLVED_ROOTS_CACHE_MAX_ENTRIES，超限按 FIFO 淘汰最旧条目。缓存本体为
-# OrderedDict，淘汰走单方法调用 popitem(last=False)，原子完成「取最旧并删除」；
-# 若沿用「next(iter(dict)) 再 pop」的两步组合，工作线程并发写入改变字典尺寸时
-# next 会抛 RuntimeError，逃出外层仅捕 KeyError 的防护。
-_RESOLVED_ROOTS_CACHE_MAX_ENTRIES = 32
-_resolved_roots_cache: OrderedDict[tuple[str, ...], list[Path]] = OrderedDict()
 
 
 class _PrepareSemaphoreSlot:
@@ -70,15 +61,6 @@ class _PrepareSemaphoreSlot:
         """task 完成回调，释放经转移的槽位，恰好执行一次由转移语义保证。"""
         del task
         self._semaphore.release()
-
-
-def reset_resolved_roots_cache() -> None:
-    """清空工作区 roots 的 resolve 结果缓存。
-
-    供 lifespan 等资源管理方在会话切换或测试隔离时调用，使后续签名计算按当前
-    roots 重新 resolve，避免沿用旧会话的根解析结果。
-    """
-    _resolved_roots_cache.clear()
 
 
 class ImagePreparer:
@@ -141,9 +123,6 @@ class ImagePreparer:
         替换文件内容后用 os.utime 还原签名命中陈旧缓存；信任边界依赖 workspace Roots
         声明，Roots 授权目录内的主体视为同域，该投毒不构成跨域越权。
 
-        已 resolve 的根列表按 workspace_roots 缓存并在跨图间复用，避免批量多图时每图
-        重复 resolve 同一根目录，降低网络挂载工作区下的 resolve 开销。
-
         首尾空白与读取路径统一先 strip：_prepare_local_image 以 strip 后路径定位文件，
         签名路径同样 strip 后定位，两条路径对同一物理文件求签名，带空白前缀的输入
         不会因签名恒为 (0.0, 0) 架空 mtime+size 失效保护。
@@ -152,17 +131,7 @@ class ImagePreparer:
         if classify_image_reference(image) != "local":
             return (0.0, 0)
 
-        resolved_roots = _resolved_roots_cache.get(workspace_roots)
-        if resolved_roots is None:
-            resolved_roots = resolve_workspace_roots(workspace_roots)
-            _resolved_roots_cache[workspace_roots] = resolved_roots
-            if len(_resolved_roots_cache) > _RESOLVED_ROOTS_CACHE_MAX_ENTRIES:
-                try:
-                    _resolved_roots_cache.popitem(last=False)
-                except KeyError:
-                    pass
-
-        found = resolve_local_image_candidate(image, resolved_roots)
+        found = resolve_local_image_candidate(image, resolve_workspace_roots(workspace_roots))
         if found is None:
             return (0.0, 0)
         _, st = found

@@ -19,6 +19,11 @@ import pytest
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
+from seedream_mcp.utils.core.errors import (
+    SeedreamValidationError,
+    format_error_for_user,
+    resolve_error_profile,
+)
 
 
 def _client_cls() -> Any:
@@ -189,3 +194,95 @@ async def test_direct_client_call_without_plan_serializes_independently(
     assert serialize_calls["serialize"] == 1
     assert build_calls["build"] == 1
     assert len(sent_bodies) == 1
+
+
+# ==================== 共享计划失败路径 ====================
+
+
+@pytest.mark.asyncio
+async def test_shared_plan_builder_failure_propagates_independently() -> None:
+    """builder 抛错时各请求独立收到原异常，计划不写入，后续请求可重试构建。
+
+    锁定 get_or_build 契约：构建失败不污染计划，锁释放后每个调用方在锁内自行
+    重试构建，异常原样传播，不被吞掉或合并为共享的一份失败。
+    """
+    plan_cls = getattr(import_module("seedream_mcp.client"), "SharedRequestPlan")
+    plan = plan_cls()
+    builder_failure = RuntimeError("prepare failed")
+    attempts = {"count": 0}
+
+    async def failing_builder() -> dict[str, Any]:
+        attempts["count"] += 1
+        await asyncio.sleep(0)
+        raise builder_failure
+
+    outcomes = await asyncio.gather(
+        *(plan.get_or_build(failing_builder) for _ in range(3)),
+        return_exceptions=True,
+    )
+
+    # 各请求独立收到同一原异常对象，不被包装为其他类型
+    assert all(outcome is builder_failure for outcome in outcomes)
+    # 每个调用方都在锁内自行重试构建，无一被短路跳过
+    assert attempts["count"] == 3
+    # 计划未写入失败产物
+    assert plan.request_data is None
+
+    # 后续请求可重试构建并成功写入计划
+    async def working_builder() -> dict[str, Any]:
+        return {"model": "m"}
+
+    built = await plan.get_or_build(working_builder)
+
+    assert built == {"model": "m"}
+    assert plan.request_data == {"model": "m"}
+
+
+@pytest.mark.asyncio
+async def test_prevalidate_failure_matches_single_request_first_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """批次级预校验失败经 handle_text_to_image 降级的类型与消息与单请求路径一致。
+
+    预校验在批次分发前上抛，整批以 isError 结果统一降级，不进入逐请求错误聚合；
+    错误类型与消息与单请求路径首请求校验失败完全一致。
+    """
+    client_module = import_module("seedream_mcp.client")
+    validation_failure = SeedreamValidationError("预校验拒绝", field="size", value="bad")
+
+    def failing_validate(**kwargs: Any) -> Any:
+        del kwargs
+        raise validation_failure
+
+    monkeypatch.setattr(client_module, "validate_common_generation_params", failing_validate)
+
+    config = _build_config()
+
+    # 单请求路径首请求失败：直连调用在生成方法入口校验公共参数并原样上抛
+    single_exc: BaseException | None = None
+    try:
+        async with _client_cls()(config) as client:
+            await client.text_to_image(prompt="p")
+    except Exception as exc:
+        single_exc = exc
+
+    assert isinstance(single_exc, SeedreamValidationError)
+    assert single_exc is validation_failure
+
+    # 批次路径：预校验失败在分发前上抛，经 handler 统一降级为整批错误结果
+    batch_result = await handle_text_to_image(
+        TextToImageInput(prompt="p", request_count=3, parallelism=3),
+        config,
+    )
+
+    assert batch_result.isError is True
+    assert isinstance(batch_result.structuredContent, dict)
+    batch_error = batch_result.structuredContent["error"]
+    assert batch_error["message"] == format_error_for_user(single_exc)
+    assert batch_error["type"] == resolve_error_profile(single_exc).error_code
+
+    # 单请求经同一 handler 的降级结果与批次完全一致，消费方无需按批次数区分错误形态
+    single_result = await handle_text_to_image(TextToImageInput(prompt="p"), config)
+
+    assert single_result.isError is True
+    assert single_result.structuredContent == batch_result.structuredContent

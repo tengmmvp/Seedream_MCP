@@ -39,14 +39,17 @@ class SeedreamMCPError(Exception):
         """序列化为字典，供结构化错误输出使用。
 
         message 先截断再剥离敏感键值与 Bearer 令牌，与 sanitize_error_text 声明的
-        truncate-first 次序一致，非字符串形态先归一化为文本再进入该管线；details
-        与 response_data 同口径先截断后过滤，超大容器收敛为元素数摘要，上游回显的
-        敏感片段不进入结构化输出；子类无需各自处理 message 与 details。
+        truncate-first 次序一致，非字符串形态先归一化为文本再进入该管线；error_code
+        为上游可回显的自由文本，过与 message 同口径的截断与净化，None 保持为 None；
+        details 与 response_data 同口径先截断后过滤，超大容器收敛为元素数摘要，上游
+        回显的敏感片段不进入结构化输出；子类无需各自处理 message 与 details。
         """
         return {
             "error": self.__class__.__name__,
             "message": _sanitize_message_for_output(self.message),
-            "error_code": self.error_code,
+            "error_code": (
+                None if self.error_code is None else _sanitize_message_for_output(self.error_code)
+            ),
             "details": _sanitize_response_data(self.details),
         }
 
@@ -489,13 +492,15 @@ def _container_summary(value: Any) -> str:
     return f"<truncated:list, {len(value)} items>"
 
 
-def _estimate_container_output_length(value: Any) -> int | None:
+def _estimate_container_output_length(value: Any, limit: int) -> int | None:
     """迭代估计 dict/list 的输出长度，供截断判长使用，不物化完整 repr。
 
     str/bytes 键与元素直接取 len，嵌套容器递归求和，其余元素按固定小常数计入，
-    小元素数容器内的大字符串不再为判长分配整份 repr。显式栈遍历配 id 判重，
-    循环引用以常数终止展开；嵌套深度超过 _CONTAINER_REPR_DEPTH_LIMIT 返回
-    None，调用方以类型占位符兜底。
+    小元素数容器内的大字符串不再为判长分配整份 repr。total 累计超过 limit 即提前
+    返回当前值，小外层容器内嵌超大子容器时判长只走到超限为止，不遍历其全部元素；
+    返回值仅供调用方与 limit 比较，超限后的精确值没有意义。显式栈遍历配 id 判重，
+    循环引用以常数终止展开；嵌套深度超过 _CONTAINER_REPR_DEPTH_LIMIT 返回 None，
+    调用方以类型占位符兜底。
     """
     total = 0
     seen: set[int] = {id(value)}
@@ -525,9 +530,13 @@ def _estimate_container_output_length(value: Any) -> int | None:
             for key, item in node.items():
                 total += leaf_length(key)
                 account_item(item, depth)
+                if total > limit:
+                    return total
         else:
             for item in node:
                 account_item(item, depth)
+                if total > limit:
+                    return total
     return total
 
 
@@ -552,7 +561,7 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
     if isinstance(value, (dict, list)):
         if len(value) > _CONTAINER_REPR_ELEMENT_LIMIT:
             return _container_summary(value)
-        estimated = _estimate_container_output_length(value)
+        estimated = _estimate_container_output_length(value, limit=limit)
         if estimated is None:
             return f"<{type(value).__name__}>"
         if estimated <= limit:
@@ -612,56 +621,82 @@ _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 # keyboard、author 一类普通词会被误吞，仅保留受限复合分支覆盖其敏感形态。
 _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS = frozenset({"key", "auth"})
 
-# 键名续段：以 - 或 _ 起头、后接不含分隔符的词字符段。续段字符类排除 _ 与 - 自身，
-# 各续段边界唯一确定，星号失败回溯随总长线性；若续段允许跨 _，嵌套量词的切分歧义
-# 会把 session_a_a_a 一类输入的回溯推到指数级。
-_SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[-_][^\W_-]+)*"
+# 键名续段：以 . 、- 或 _ 起头、后接不含分隔符的词字符段。点号纳入续段分隔符后，
+# session.id 一类点号键名与 dict 键的点号切分口径一致，自由文本通道同样命中。续段
+# 字符类排除 _ 、- 与 . 自身，各续段边界唯一确定，星号失败回溯随总长线性；若续段
+# 允许跨分隔字符，嵌套量词的切分歧义会把 session_a_a_a 一类输入的回溯推到指数级。
+_SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[._-][^\W_.-]+)*"
 
 # 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。分支由
 # _SENSITIVE_KEY_SUBSTRINGS 与 _SENSITIVE_KEY_KEYWORDS 派生，特异性足够的词生成
-# 「关键词 + 续段」分支，覆盖 session、session_id、session-id、jwt、privatekey
-# 等形态；短词 key 与 auth 走受限复合分支（api-key、auth-token、client-secret），
-# api key 复合分支允许空格分隔，覆盖 "API Key: <凭据>" 形态，键命中仍要求紧跟
-# 分隔符与值，普通句中无分隔符的 api key 词组不受影响。后缀形态如 max_tokens 中
-# token 前还有普通字母，派生分支要求续段以分隔符开头，该词形不受影响。新增敏感词
-# 只需扩展上方两清单，本组自动跟进。
+# 「关键词 + 续段」分支，覆盖 session、session_id、session-id、session.id、jwt、
+# privatekey 等形态；短词 key 与 auth 走受限复合分支（api-key、auth-token、
+# client-secret），复合分支的可选分隔字符与续段同步纳入点号，api.key、access.token
+# 与 dict 键的点号切分同口径命中，api key 复合分支允许空格分隔，覆盖 "API Key:
+# <凭据>" 形态，键命中仍要求紧跟分隔符与值，普通句中无分隔符的 api key 词组不受
+# 影响。后缀形态如 max_tokens 中 token 前还有普通字母，派生分支要求续段以分隔符
+# 开头，该词形不受影响。新增敏感词只需扩展上方两清单，本组自动跟进。
 _SENSITIVE_KEYVALUE_KEYS = (
     "|".join(
         keyword + _SENSITIVE_KEYVALUE_KEY_SUFFIX
         for keyword in (*_SENSITIVE_KEY_SUBSTRINGS, *_SENSITIVE_KEY_KEYWORDS)
         if keyword not in _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS
     )
-    + r"|api[-_ ]?key"
+    + r"|api[-_. ]?key"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
-    + r"|(?:access|auth|refresh|session|api)[-_]?token"
+    + r"|(?:access|auth|refresh|session|api)[-_.]?token"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
-    + r"|(?:client|api|signing|app)[-_]?secret"
+    + r"|(?:client|api|signing|app)[-_.]?secret"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
 )
 
 # 键值分隔符与值吸收共用的空白字符类：ASCII 空白加 Unicode 空白（NBSP、Ogham 空格、
 # U+2000 至 U+200A 空格区段、行/段分隔符、窄/中数学空格、全角空格），封堵
 # password\xa0=\xa0SECRET、token　:　SECRET 一类借 Unicode 空白分隔的绕过形态。
-# \x0b、\x0c、\x85 一类控制型空白由 CONTROL_CHARS_PATTERN 在键值匹配前压平为普通空格，
-# 仍在此列出以保证类自身完备。
-_KEYVALUE_WHITESPACE_CLASS = r"[\t \x0b\x0c\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
+# \n、\r、\x85 与既有的 \t、\x0b、\x0c 一并列入，控制字符压平前的首轮键值匹配中
+# 「冒号加换行」一类形态由本类承接空白段；压平后控制字符不复存在，第二轮中这些
+# 成员空转，保持类自身完备。
+_KEYVALUE_WHITESPACE_CLASS = (
+    r"[\t\n\r \x0b\x0c\x85\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
+)
+
+# 控制空白字符类：真实制表符、换行符、回车符、垂直制表符、换页符与 NEL。作为
+# 分隔符交替组的独占分支，覆盖无冒号等号的「键后直接跟控制空白再跟值」形态，
+# 该形态只在压平前的首轮键值匹配中存在。
+_KEYVALUE_CONTROL_WHITESPACE_CLASS = r"[\t\n\r\x0b\x0c\x85]"
+
+# 键值分隔符交替组：有限分支族。字面转义族覆盖反斜杠加 n、r、t、f 的两字符转义
+# 与反斜杠 u 加四位十六进制、反斜杠 x 加两位十六进制的转义形态，json.dumps 与
+# repr 把实际控制字符转义为字面序列后键名后的凭据仍被命中；冒号等号族容忍可选
+# 反斜杠前缀；控制空白分支的尾部前瞻要求其后不再紧跟控制空白，控制空白串中该
+# 分支只在串尾唯一位置可命中，与前后空白量词不构成同一串的双重吸收切分路径，
+# 失败回溯保持线性。各分支首字符互斥，同一位置至多一个分支命中，交替自身不
+# 放大回溯。
+_SENSITIVE_KEYVALUE_ALT = (
+    r"(?:\\[nrtf]"
+    r"|\\u[0-9a-fA-F]{4}"
+    r"|\\x[0-9a-fA-F]{2}"
+    r"|\\?[:：﹕=＝]"
+    r"|" + _KEYVALUE_CONTROL_WHITESPACE_CLASS + r"(?!" + _KEYVALUE_CONTROL_WHITESPACE_CLASS + r"))"
+)
 
 # 键值分隔符：允许键名后紧跟至多两段「引号 + 空白」组合，引号前容忍可选反斜杠，
-# 覆盖 JSON/Python repr 回显形态（{"api_key": "xxx"}、{'api_key': 'xxx'}）、
-# json.dumps 对嵌套字符串的转义产物形态（{\"api_key\": \"xxx\"}）与
-# 「引号-空白-引号」形态（api_key '' : secret）；分隔符字符为 ASCII 或全角变体
-# （U+FF1A 全角冒号、U+FE55 小型冒号、U+FF1D 全角等号），字符前同样容忍可选
-# 反斜杠，并增补字面反斜杠加 n 的转义换行形态，json.dumps 与 repr 把实际换行
-# 转义为两字符 \n 后，键名后的凭据仍被命中，转义产物与原文形态获得同等覆盖，
-# 不再借归一化产物绕过脱敏。空白段取 _KEYVALUE_WHITESPACE_CLASS，Unicode 空白
-# 分隔同样命中。引号与空白组成单一非捕获组且计数受限，反斜杠为可选前缀、
-# 分隔符分支为有限交替，同一段空白不存在两个量词分别吸收的切分路径，分隔符
-# 匹配失败时的回溯保持线性，不随空格数二次方增长。
+# 引号字符含全角变体（U+FF02 ＂ 与 U+FF07 ＇），覆盖 JSON/Python repr 回显形态
+# （{"api_key": "xxx"}、{'api_key': 'xxx'}）、json.dumps 对嵌套字符串的转义产物
+# 形态（{\"api_key\": \"xxx\"}）与「引号-空白-引号」形态（api_key '' : secret）；
+# 分隔符字符为 ASCII 或全角变体（U+FF1A 全角冒号、U+FE55 小型冒号、U+FF1D 全角
+# 等号），转义族与控制空白独占分支见 _SENSITIVE_KEYVALUE_ALT，实际控制字符与
+# 其转义产物获得同等覆盖，不再借归一化产物绕过脱敏。空白段取
+# _KEYVALUE_WHITESPACE_CLASS，Unicode 空白分隔同样命中。引号与空白组成单一
+# 非捕获组且计数受限，反斜杠为可选前缀、分隔符分支为有限交替，控制空白分支经
+# 前瞻约束后同一段空白不存在两个量词分别吸收的切分路径，分隔符匹配失败时的
+# 回溯保持线性，不随空格数二次方增长。
 _SENSITIVE_KEYVALUE_SEPARATOR = (
     _KEYVALUE_WHITESPACE_CLASS
-    + r"*(?:\\?['\"]"
+    + r"*(?:\\?['\"＂＇]"
     + _KEYVALUE_WHITESPACE_CLASS
-    + r"*){0,2}(?:\\n|\\?[:：﹕=＝])"
+    + r"*){0,2}"
+    + _SENSITIVE_KEYVALUE_ALT
     + _KEYVALUE_WHITESPACE_CLASS
     + r"*"
 )
@@ -701,28 +736,37 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
 # patcher 共用本常量，两模块的控制字符口径单一来源。
 CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85]")
 
+# 零宽不可见字符：ZWSP、ZWNJ、BOM 与软连字符。插入键名内部或键与分隔符之间时
+# 视觉不可见，键值匹配前整体移除以拼接出真实键名，还原后的 apikey、session.id
+# 一类键名照常命中脱敏；替换为空串而非空格，避免把键名切成两段导致脱敏失效。
+_INVISIBLE_CHARS_PATTERN = re.compile(r"[\u200b\u200c\ufeff\u00ad]")
+
 # URL userinfo 剥离模式：错误消息或字段值中的 http(s) URL 携带 user:pass@ 凭据时剥去
 # userinfo 部分，防止参考图 URL 被拒后的原值回显把凭据送进结构化输出与用户可见文本。
-# username 为非空白、非 /:@ 字符，密码部分可缺省；协议前缀限定 http(s) 且要求词边界，
-# 避免误伤普通文本中的 mailto:user@host 形态。
-_URL_USERINFO_PATTERN = re.compile(r"(?i)\b((?:https?)://)[^\s/:@]+(?::[^\s/@]*)?@")
+# userinfo 区间为协议前缀后到首个空白、斜杠、问号或井号之前的连续段，密码含 @ 时
+# 贪婪取区间内最后一个 @ 作为 userinfo 与主机的边界，user:p@ss@example.com 形态剥净
+# 不再残留 ss@ 片段；查询串中的 @ 位于区间之外，无 userinfo 的 URL 不受影响。协议
+# 前缀限定 http(s) 且要求词边界，避免误伤普通文本中的 mailto:user@host 形态。
+_URL_USERINFO_PATTERN = re.compile(r"(?i)\b((?:https?)://)[^\s/?#]+@")
 
 
 _SanitizedValue = TypeVar("_SanitizedValue")
 
 
 def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
-    """对字符串值剥离控制字符、敏感键值裸值、Bearer 令牌与 URL userinfo。
+    """对字符串值剥离零宽字符、敏感键值裸值、Bearer 令牌与 URL userinfo。
 
     message 与 details/value/response_data 等结构化字段共用此净化，使各字段对敏感
-    片段与日志注入的防护完全一致；非字符串原样返回。控制字符归一化必须先于键值
-    匹配执行：“api_key:\\nvalue” 形态在压平后才能被键值模式命中，否则凭据可借换行
-    分隔绕过脱敏；随后剥 authorization/apikey 等键名后的裸值与残留 Bearer 令牌，
-    末尾剥 URL userinfo 凭据。
+    片段与日志注入的防护完全一致；非字符串原样返回。零宽不可见字符先于键值匹配
+    移除，拼接出真实键名；随后在控制字符压平前的原文上执行第一次键值匹配，真实
+    换行或制表符独占分隔的形态在此命中；压平后再执行第二次键值匹配，覆盖冒号
+    等号族、转义产物与引号变体等其余形态；末尾剥 Bearer 令牌与 URL userinfo 凭据。
     """
     if not isinstance(value, str):
         return value
-    redacted = CONTROL_CHARS_PATTERN.sub(" ", value)
+    redacted = _INVISIBLE_CHARS_PATTERN.sub("", value)
+    redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
+    redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
     redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
     return cast("_SanitizedValue", _URL_USERINFO_PATTERN.sub(r"\1", redacted))

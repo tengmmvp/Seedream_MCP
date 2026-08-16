@@ -90,6 +90,10 @@ def _strip_message_control_chars(record: Any) -> None:
     逐处 sanitize 路径或错误文本。exc_info 渲染的 traceback 不经过 record["message"]，
     其异常消息文本经 _strip_exception_control_chars 同步清洗；traceback 帧的源代码行
     来自本地文件，不含不可信输入。
+
+    本层只压平控制字符，不剥离键值形态的凭据：日志通道有意保留异常原文的可见内容
+    便于排障，键值凭据脱敏由调用点承担，client 的 _sanitize_request_for_logging 在
+    请求记录前先行过滤，异常文本不在此层剥离。
     """
     message = record["message"]
     if _LOG_MESSAGE_CONTROL_CHARS.search(message):

@@ -485,6 +485,60 @@ def test_seedream_config_uppercase_http_scheme_requires_exemption() -> None:
     assert config.base_url == "HTTP://internal.example.com/api/v3"
 
 
+# ==================== base_url netloc 主机名校验 ====================
+
+
+@pytest.mark.parametrize("invalid_base_url", ["https://", "https:foo", "https:///path", "http://"])
+def test_seedream_config_rejects_base_url_without_netloc(invalid_base_url: str) -> None:
+    """scheme 合法但 netloc 缺失的 base_url 在构造期拒绝。
+
+    此类畸形 URL 若放行到运行时，会在 httpx 拼请求时抛 UnsupportedProtocol 落入
+    网络错误重试，错误归约档错误地变为 network_error 而非 config_error。
+    """
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="主机名"):
+        SeedreamConfig(api_key="k", base_url=invalid_base_url, allow_http_base_url=True)
+
+
+def test_seedream_config_rejects_whitespace_only_netloc() -> None:
+    """netloc 仅含空白的 base_url 同样视为缺主机名，strip 后判定。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="https:// ")
+
+
+@pytest.mark.parametrize(
+    "valid_base_url",
+    [
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "https://ark.example.com:8443/api/v3",
+        "HTTPS://ark.example.com/api/v3",
+        "http://internal.example.com",
+    ],
+)
+def test_seedream_config_accepts_base_url_with_netloc(valid_base_url: str) -> None:
+    """带主机名的合法 URL 不被 netloc 校验误伤，含带端口、路径与大写 scheme 形态。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", base_url=valid_base_url, allow_http_base_url=True)
+
+    assert config.base_url == valid_base_url
+
+
+def test_build_config_rejects_base_url_without_netloc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_config_from_sources 构建路径同样经 validate 拒绝缺主机名的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nARK_BASE_URL=https://\n")
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        build_config_from_sources(env_file=str(env_file))
+
+
 # ==================== 校验错误消息附带环境变量名 ====================
 
 
@@ -500,6 +554,9 @@ def test_seedream_config_uppercase_http_scheme_requires_exemption() -> None:
         ({"prepare_cache_max": 0}, "SEEDREAM_PREPARE_CACHE_MAX"),
         ({"http_max_body_size": 1024}, "SEEDREAM_HTTP_MAX_BODY_SIZE"),
         ({"base_url": "ftp://bad.example.com"}, "ARK_BASE_URL"),
+        ({"base_url": "https://"}, "ARK_BASE_URL"),
+        ({"base_url": "https:foo"}, "ARK_BASE_URL"),
+        ({"base_url": "https:///path"}, "ARK_BASE_URL"),
         ({"model_id": "doubao-seededit-3-0-250828"}, "SEEDREAM_MODEL_ID"),
     ],
 )

@@ -16,11 +16,12 @@ ENV PYTHONUNBUFFERED=1 \
 ARG UV_VERSION=0.9.18
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
-# 复制项目清单与源码
+# 先复制项目清单并只安装依赖，源码未变更时命中缓存层；README 为 hatchling 构建元数据所需
 COPY pyproject.toml uv.lock README.md ./
-COPY seedream_mcp/ ./seedream_mcp/
+RUN uv sync --frozen --no-dev --no-install-project
 
-# 基于 lock 文件安装依赖，并以非 editable 方式安装项目
+# 复制源码后以非 editable 方式安装项目本体
+COPY seedream_mcp/ ./seedream_mcp/
 RUN uv sync --frozen --no-dev --no-editable
 
 # 使用项目虚拟环境作为运行时 Python

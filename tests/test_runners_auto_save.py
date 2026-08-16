@@ -14,6 +14,7 @@ import importlib
 from typing import Any
 
 import pytest
+from mcp.types import TextContent
 
 from seedream_mcp.tools.core.schemas import (
     ImageToImageInput,
@@ -119,6 +120,99 @@ async def test_run_text_to_image_includes_auto_save_field(
     data = structured["data"]
     assert data[0]["url"] == GENERATED_URL
     assert data[0]["local_path"] == "/saved/generated.png"
+
+
+@pytest.mark.asyncio
+async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfills(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """response_format=b64_json 时自动保存走 Base64 分支：按 b64_json 收集并按原始索引回填。
+
+    失败占位项不进入保存队列；saveable_indices 对位使保存结果回填到 data 中的
+    原始位置而非首位。
+    """
+    client_cls = importlib.import_module("seedream_mcp.client").SeedreamClient
+    auto_save_module = importlib.import_module("seedream_mcp.utils.io.io_save")
+
+    async def fake_text_to_image_b64(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self, kwargs
+        return {
+            "success": True,
+            "data": [
+                {
+                    "type": "image_generation.partial_failed",
+                    "image_index": 1,
+                    "error": {"code": "blocked", "message": "blocked"},
+                },
+                {
+                    "type": "image_generation.completed",
+                    "image_index": 2,
+                    "b64_json": "QUJD",
+                },
+            ],
+            "usage": {"generated_images": 1},
+            "status": "partial",
+        }
+
+    captured: dict[str, Any] = {}
+
+    async def fake_save_multiple_base64(
+        self: Any, images: list[dict[str, Any]], tool_name: str
+    ) -> list[Any]:
+        captured["images"] = images
+        captured["tool_name"] = tool_name
+        return [
+            auto_save_module.AutoSaveResult(
+                success=True,
+                original_url="base64",
+                local_path="/saved/decoded.png",
+                markdown_ref="![Generated Image](decoded.png)",
+            )
+        ]
+
+    monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image_b64)
+    monkeypatch.setattr(
+        auto_save_module.AutoSaveManager,
+        "save_multiple_base64_images",
+        fake_save_multiple_base64,
+    )
+
+    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.tools.core.schemas import ResponseFormat
+
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    params = TextToImageInput(prompt="a cat", response_format=ResponseFormat.B64_JSON)
+
+    result = await run_text_to_image(params, config, ctx=None)
+
+    assert result.isError is False
+    structured = result.structuredContent
+    assert isinstance(structured, dict)
+    assert structured["response_format"] == "b64_json"
+    # 收集阶段只纳入携带 b64_json 的条目，失败占位项不进入保存队列。
+    assert captured["images"] == [
+        {
+            "b64_json": "QUJD",
+            "prompt": "a cat",
+            "custom_name": None,
+            "alt_text": "Generated image 1",
+        }
+    ]
+    assert captured["tool_name"] == "seedream_text_to_image"
+    # auto_save.results 回填保存结果。
+    save_results = structured["auto_save"]["results"]
+    assert len(save_results) == 1
+    assert save_results[0]["local_path"] == "/saved/decoded.png"
+    # data 按收集阶段记录的原始索引对位写回，失败占位项不获得本地路径。
+    data = structured["data"]
+    assert "local_path" not in data[0]
+    assert data[1]["local_path"] == "/saved/decoded.png"
+    assert data[1]["markdown_ref"] == "![Generated Image](decoded.png)"
+    response_text = next(
+        content.text for content in result.content if isinstance(content, TextContent)
+    )
+    assert "自动保存: 1/1 成功" in response_text
+    assert "  Base64 数据: 4 字符" in response_text
 
 
 @pytest.mark.asyncio

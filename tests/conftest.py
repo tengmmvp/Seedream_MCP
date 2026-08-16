@@ -54,6 +54,6 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> None:
     # HEIC 解码器注册标志为模块全局，重置以隔离注册时序相关用例
     monkeypatch.setattr(image_validation_module, "_heif_opener_registered", False)
     # lifespan 共享单例、活动配置、全局配置懒加载缓存、asyncio.Lock、自动保存清理状态
-    # 与目录扫描/参考图 roots 解析缓存等模块级可变状态统一经复位协议重建到干净态，
-    # 避免跨事件循环复用与跨用例缓存污染；复位清单见 _reset_lifespan_state
+    # 与目录扫描缓存等模块级可变状态统一经复位协议重建到干净态，避免跨事件循环复用
+    # 与跨用例缓存污染；复位清单见 _reset_lifespan_state
     _reset_lifespan_state()

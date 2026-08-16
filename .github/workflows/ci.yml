@@ -1,4 +1,4 @@
-# 持续集成：PR 与分支推送时运行格式校验、Lint、类型检查与单测，作为合入门禁。
+# 持续集成：PR 与分支推送时运行格式校验、Lint、类型检查、单测与 Docker 构建验证，作为合入门禁。
 # 发布流水线见 release.yml，由 v* 标签触发。
 # 第三方 action 一律以 commit SHA 固定引用，行尾注释标注对应的版本号。
 name: 🔍 CI
@@ -80,3 +80,15 @@ jobs:
 
       - name: ✅ Run tests
         run: uv run pytest -q
+
+  docker:
+    name: 🐳 Docker Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: 🧱 Build Docker image
+        run: docker build .

@@ -72,12 +72,13 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
 # Optional: create .env (see .env.example) for the read-only compose mount, instead of prefixing env vars below
+# Without .env, Docker auto-creates a same-named directory and breaks the mount; run "touch .env" first or remove that mount from the compose file
 
 # Start the service
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
-The service listens on container port `8000` via the streamable-http transport; the host port is controlled by `SEEDREAM_HTTP_PORT` (default 8000), and the MCP endpoint path is `/mcp`. Client configuration (Claude Desktop shown; other streamable-http clients are analogous):
+The service listens on container port `8000` via the streamable-http transport; the host port is controlled by `SEEDREAM_HTTP_PORT` (default 8000), and the MCP endpoint path is `/mcp`. The port mapping binds to the loopback address `127.0.0.1` by default; to allow direct connections from other machines, change the port mapping in docker-compose.yml to `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` or a specific host interface address. Client configuration (Claude Desktop shown; other streamable-http clients are analogous):
 
 ```json
 {
@@ -300,7 +301,7 @@ Generate a new image from an input image and a text prompt. This tool calls an e
   "name": "seedream_image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": ".seedream/images/2026/08/15/portrait.jpeg"
+    "image": ".seedream/images/2026-08-15/seedream_image_to_image/portrait.jpeg"
   }
 }
 ```
@@ -337,8 +338,8 @@ Fuse multiple images into a new image. This tool calls an external billed API an
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      ".seedream/images/2026/08/15/person_a.jpeg",
-      ".seedream/images/2026/08/15/person_b.jpeg"
+      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_a.jpeg",
+      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_b.jpeg"
     ]
   }
 }
@@ -544,6 +545,7 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (
 - **The save directory is managed by the server**: age-based cleanup and total-size quota eviction delete **all** expired files with supported image extensions (and empty directories) inside the save directory, regardless of whether they were created by this server. Do not point `SEEDREAM_AUTO_SAVE_BASE_DIR` at directories holding important personal images.
 - **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: if reading MCP Roots fails, the file access boundary falls back to this variable (or the process working directory when unset).
 - **Body size of unauthenticated requests**: unauthenticated chunked requests are rejected with 401 before their body is read; their size limiting relies on uvicorn or a fronting reverse proxy. Configure a request body limit at the proxy layer for public deployments.
+- **Ownership of the mounted directory on Linux hosts**: the container runs as a non-root user with uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user (`mkdir -p .seedream && chown 1000:1000 .seedream`); Docker Desktop is unaffected.
 
 ## 👥 Contributors
 

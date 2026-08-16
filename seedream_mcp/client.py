@@ -820,15 +820,13 @@ class SeedreamClient:
         Raises:
             SeedreamConfigError: API 密钥为空。配置类失败原样透传，保持 config_error
                 归约档与配置排查指引，不落入下方 api_error 档的包装文案。
-            SeedreamAPIError: 客户端创建失败或配置无效
+            SeedreamAPIError: 客户端创建失败。
         """
         if self._client is None:
             async with self._client_lock:
                 if self._client is None:
                     try:
                         headers = self._get_headers()
-                        if not headers:
-                            raise SeedreamAPIError("无法生成请求头：配置可能无效")
 
                         self._client = httpx.AsyncClient(
                             timeout=self._build_http_timeout(),

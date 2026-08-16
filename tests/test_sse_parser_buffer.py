@@ -310,6 +310,33 @@ async def test_parse_sse_response_normalizes_cr_line_endings() -> None:
     assert result["status"] == "completed"
 
 
+async def test_parse_sse_response_crlf_multiline_event_survives_arbitrary_split() -> None:
+    """CRLF 多行 data 事件在任意分块点下完整解析，不产生假事件分隔符。
+
+    逐字节分块穷尽全部切分点，含 \r 与 \n 的边界；块尾孤立 \r 被归一为 \n 后与
+    次块首 \n 拼接曾把多行 data 事件静默拆丢。4 字节分块另覆盖常规分片形态。
+    """
+    line1 = b'data: {"type": "image_generation.partial_succeeded",'
+    line2 = b'data:  "url":"http://x/1.png"}'
+    completed = b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}'
+    stream = line1 + b"\r\n" + line2 + b"\r\n\r\n" + completed + b"\r\n\r\n"
+    for size in (1, 4):
+        chunks = [stream[i : i + size] for i in range(0, len(stream), size)]
+        result = await parse_sse_response(
+            _FakeSSEResponse(chunks),
+            model_id="m",
+            chunk_size=64,
+            buffer_max_size=4096,
+            event_truncate_threshold=4096,
+            total_bytes_limit=64 * 1024,
+            log=_FakeLog(),
+        )
+        assert len(result["data"]) == 1, f"分块大小 {size} 下事件不得丢失"
+        assert result["data"][0]["url"] == "http://x/1.png"
+        assert result["status"] == "completed"
+        assert result["truncated_events"] == 0
+
+
 async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
     """单个事件跨多 chunk 到达时，缓冲区累积后仍能完整解析。"""
     full_event = (
