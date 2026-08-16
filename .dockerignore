@@ -19,9 +19,7 @@ nosetests.xml
 coverage.xml
 *.cover
 *.log
-.git
 .mypy_cache
-.pytest_cache
 .hypothesis
 
 # Virtual environments
@@ -70,10 +68,8 @@ docs/
 !README.md
 
 # Development files
-.gitignore
 .dockerignore
 .github/
-.DS_Store
 
 # Cache directories
 .uv/

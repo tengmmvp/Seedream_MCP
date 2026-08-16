@@ -36,6 +36,10 @@ logger = get_logger(__name__)
 # 文件名长度上限，避免超出常见文件系统目录项长度限制。
 _MAX_FILENAME_LENGTH = 200
 
+# 遗留临时文件清扫的 mtime 宽限秒数：仅删除早于该时限的 .part 条目，在途下载与
+# 写入的临时文件（合法下载总预算为小时级）恒新于宽限值，不被并发清理击杀。
+_PART_SWEEP_GRACE_SECONDS = 24 * 3600
+
 # Windows 保留设备名，命中时在词干后追加下划线避免被解释为设备而非文件。
 _WINDOWS_RESERVED_NAMES = frozenset(
     {
@@ -430,9 +434,11 @@ class FileManager:
             Markdown 引用字符串。
         """
         # 以基础目录为基准生成相对路径：保存文件恒位于 base_dir 之下，相对化必然成功，
-        # 且不受进程 CWD 变化影响。统一为正斜杠以兼容 Markdown 引用。
+        # 且不受进程 CWD 变化影响。统一为正斜杠以兼容 Markdown 引用；空格与圆括号
+        # 经百分号编码，custom_name 含此类字符时引用目标仍符合 CommonMark 语法。
         relative_path = self.relative_to_base(file_path)
         markdown_path = relative_path.replace("\\", "/")
+        markdown_path = markdown_path.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
 
         if not markdown_path.startswith("./"):
             markdown_path = "./" + markdown_path
@@ -450,16 +456,18 @@ class FileManager:
         剩余文件计算，剔除已删条目避免对已删路径重复 unlink。days 小于 1 跳过按天清理，
         max_total_bytes 为 None 跳过配额驱逐。
 
-        注意：空目录清理针对 base_dir 内全部空目录，不区分目录是否由本服务创建；
-        用户在保存目录内自行维护的空目录（如占位目录）也会被移除，需保留目录结构
-        请在目录内放置占位文件。
+        注意：空目录清理针对 base_dir 内全部空目录且独立于按天门控执行，不区分目录
+        是否由本服务创建；用户在保存目录内自行维护的空目录（如占位目录）也会被移除，
+        需保留目录结构请在目录内放置占位文件。清理末尾还会清扫超龄的 .part 遗留临时
+        文件（详见 _sweep_orphan_part_files），共享目录部署下其他工具的半成品下载在
+        宽限期内不受影响。
 
         Args:
             days: 按天清理的保留天数，小于 1 跳过按天清理。
             max_total_bytes: 保存目录总字节上限；None 跳过配额驱逐。
 
         Returns:
-            合并的清理结果，包含两策略累计的删除文件数、释放字节数与错误列表。
+            合并的清理结果，包含各策略累计的删除文件数、释放字节数与错误列表。
         """
         errors: list[str] = []
         deleted_files = 0
@@ -469,7 +477,6 @@ class FileManager:
             remaining_files = all_files
             if days >= 1:
                 deleted_names, age_deleted_size = self._apply_age_policy(all_files, days, errors)
-                self._prune_empty_dirs(directories)
                 deleted_files += len(deleted_names)
                 deleted_size += age_deleted_size
                 if deleted_names:
@@ -483,10 +490,72 @@ class FileManager:
                 )
                 deleted_files += quota_deleted
                 deleted_size += quota_deleted_size
+            # 临时文件清扫先于空目录回收：仅含遗留 .part 的目录在清扫后变空，本轮
+            # prune 即可回收，不留待下一次节流间隔。
+            swept_files, swept_size = self._sweep_orphan_part_files(errors)
+            deleted_files += swept_files
+            deleted_size += swept_size
+            # 空目录清理独立于按天门控执行：CLEANUP_DAYS=0 且仅配置总量配额的部署下，
+            # 日期子目录清空后同样回收，不随 days 门控慢性累积目录项。
+            self._prune_empty_dirs(directories)
         except Exception as e:
             errors.append(f"清理过程出错: {e}")
             logger.error("清理过程出错: {}", e)
         return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
+
+    def _sweep_orphan_part_files(self, errors: list[str]) -> tuple[int, int]:
+        """删除保存目录内超龄遗留的 .part 临时文件，返回删除数量与释放字节数。
+
+        常规清理扫描仅收集受支持图片扩展名，.part 临时文件在进程崩溃或临时清理
+        失败时遗留且不在其列，不经清扫将永久累积。仅删除 mtime 早于宽限值的条目：
+        在途下载与写入的临时文件恒新于宽限值，与后台清理并发时不被击杀；.part 亦
+        为常见下载工具的半成品命名，共享目录部署下其他工具的在途文件同样受宽限
+        保护。遍历防护与 _collect_all_files 同口径：下降前剪除符号链接与 reparse
+        point 目录，防删除动作经 junction 物理越出 base_dir；文件经 lstat 链复核
+        为常规文件后才进入删除。
+        """
+        now = datetime.now().timestamp()
+        deleted = 0
+        deleted_size = 0
+        for dirpath, dirnames, filenames in os.walk(self.base_dir, followlinks=False):
+            # 下降前原地剪除符号链接与 reparse point 子目录：os.walk 不拦截 junction，
+            # 下降后的路径检查无法阻止对目标内容的遍历与删除。
+            dirnames[:] = [
+                name for name in dirnames if not self._is_unsafe_directory(Path(dirpath, name))
+            ]
+            for name in filenames:
+                if not name.endswith(".part"):
+                    continue
+                target = Path(dirpath) / name
+                try:
+                    st = target.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISLNK(st.st_mode) or _has_reparse_attribute(st):
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if now - st.st_mtime < _PART_SWEEP_GRACE_SECONDS:
+                    continue
+                try:
+                    target.unlink()
+                    deleted += 1
+                    deleted_size += st.st_size
+                except OSError as e:
+                    errors.append(f"临时文件清理失败: {target} -> {e}")
+        if deleted:
+            logger.info("清扫超龄遗留临时文件 {} 个", deleted)
+        return deleted, deleted_size
+
+    @staticmethod
+    def _is_unsafe_directory(path: Path) -> bool:
+        """判断目录条目是否为符号链接或 reparse point，供遍历下降前剪除。"""
+        try:
+            if path.is_symlink():
+                return True
+        except OSError:
+            return True
+        return _is_reparse_point(path)
 
     def _apply_age_policy(
         self,

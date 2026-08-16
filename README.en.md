@@ -71,8 +71,10 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 # Download docker-compose.yml
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
+# Optional: create .env (see .env.example) for the read-only compose mount, instead of prefixing env vars below
+
 # Start the service
-ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-compose up -d
+ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
 The service listens on container port `8000` via the streamable-http transport; the host port is controlled by `SEEDREAM_HTTP_PORT` (default 8000), and the MCP endpoint path is `/mcp`. Client configuration (Claude Desktop shown; other streamable-http clients are analogous):
@@ -569,12 +571,12 @@ Make sure the environment variable is set:
 # Linux/macOS
 export ARK_API_KEY=your_key
 export SEEDREAM_HTTP_AUTH_TOKEN=your_token
-docker-compose up -d
+docker compose up -d
 
 # Windows
 $env:ARK_API_KEY="your_key"
 $env:SEEDREAM_HTTP_AUTH_TOKEN="your_token"
-docker-compose up -d
+docker compose up -d
 ```
 
 ## 🧪 Local Development

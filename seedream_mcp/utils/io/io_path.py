@@ -301,11 +301,12 @@ def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
         return False
 
 
-def _is_unc_path(path_str: str) -> bool:
+def is_unc_path(path_str: str) -> bool:
     """判断是否为 Windows UNC 路径，即以 \\\\ 或 // 开头的路径。
 
     UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
-    避免越界校验尚未拒绝时凭据已向远端泄露。
+    避免越界校验尚未拒绝时凭据已向远端泄露。io_path 内部与 images 组的
+    候选守卫共用本公共判定，保持单一规则。
     """
     stripped = path_str.lstrip()
     return stripped.startswith("\\\\") or stripped.startswith("//")
@@ -328,7 +329,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         path_obj = Path(path)
 
         # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝。
-        if _is_unc_path(str(path_obj)):
+        if is_unc_path(str(path_obj)):
             raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
 
         if path_obj.is_absolute():
@@ -541,7 +542,7 @@ def _file_uri_to_path(uri: str) -> Path | None:
         return None
 
     # file://localhost//server/share 等 netloc 合法但 path 为 UNC 形式，resolve 会触发 SMB。
-    if _is_unc_path(path_part):
+    if is_unc_path(path_part):
         return None
 
     try:

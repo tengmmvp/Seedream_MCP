@@ -90,7 +90,9 @@ def _normalize_error_message(raw_error: Any) -> str | None:
 
     code = raw_error.get("code")
     if isinstance(code, str) and code.strip():
-        return code.strip()
+        # code 与 message 同为上游自由文本，回退分支同样过脱敏，防止被劫持上游
+        # 经 code 键向 batch.errors[].message 注入 CRLF 与凭据片段。
+        return sanitize_error_text(code.strip())
     return None
 
 

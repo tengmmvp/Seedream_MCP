@@ -146,7 +146,7 @@ async def test_run_batch_save_converts_exception_to_failed_result(
 
     image_data = [{"url": "http://x/fail.png"}, {"url": "http://x/ok.png"}]
     results = await manager._run_batch_save(
-        [failing_task(), ok_task()],
+        [failing_task, ok_task],
         image_data,
         fallback_url_key="url",
         log_label="test",
@@ -166,7 +166,7 @@ async def test_run_batch_save_reraises_cancelled_error(manager: AutoSaveManager)
 
     with pytest.raises(asyncio.CancelledError):
         await manager._run_batch_save(
-            [cancelled_task()],
+            [cancelled_task],
             [{"url": "http://x/cancel.png"}],
             fallback_url_key="url",
             log_label="test",
@@ -180,7 +180,7 @@ async def test_run_batch_save_base64_fallback_key(manager: AutoSaveManager) -> N
         raise RuntimeError("decode fail")
 
     results = await manager._run_batch_save(
-        [failing_task()],
+        [failing_task],
         [{"b64_json": "abc"}],
         fallback_url_key=None,
         log_label="b64 test",
@@ -200,7 +200,7 @@ async def test_run_batch_save_passes_through_success_results(
         return AutoSaveResult(success=True, original_url="http://x/1.png", local_path="/tmp/1")
 
     results = await manager._run_batch_save(
-        [ok_task()],
+        [ok_task],
         [{"url": "http://x/1.png"}],
         fallback_url_key="url",
         log_label="test",
@@ -331,3 +331,16 @@ async def test_save_base64_image_escapes_markdown_breaking_alt(
     empty_alt = await manager.save_base64_image(payload, alt_text="", tool_name="t2i")
     assert empty_alt.markdown_ref is not None
     assert empty_alt.markdown_ref.startswith("![Generated Image](")
+
+
+def test_build_save_metadata_sanitizes_content_type() -> None:
+    """content_type 为下载响应头原文，净化后控制字符与凭据片段不随 metadata 外泄。"""
+    from seedream_mcp.utils.io.io_save import _build_save_metadata
+
+    metadata = _build_save_metadata(
+        "t2i", "2026-08-16T00:00:00", 1024, "image/png\r\nX-Injected: Bearer leak", 1
+    )
+
+    content_type = metadata["content_type"]
+    assert "\r" not in content_type and "\n" not in content_type
+    assert "leak" not in content_type

@@ -12,6 +12,19 @@ def test_config_accepts_endpoint_id() -> None:
     assert config.model_id == "ep-20241001-abcde"
 
 
+def test_default_model_id_matches_alias_table() -> None:
+    """config 默认模型与别名表同值，模型快照升级时两侧不静默分叉。
+
+    默认值与 MODEL_ALIASES 同字面量双源维护，漏改一侧会使默认模型与别名展开
+    结果指向不同版本。
+    """
+    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
+
+    config = SeedreamConfig(api_key="k")
+    assert config.model_id == MODEL_ALIASES["doubao-seedream-5.0"]
+
+
 def test_config_rejects_deprecated_seedream_3_0() -> None:
     with pytest.raises(SeedreamConfigError, match="已下线"):
         SeedreamConfig(api_key="k", model_id="doubao-seedream-3-0-t2i-250515")

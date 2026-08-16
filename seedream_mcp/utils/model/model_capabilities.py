@@ -86,13 +86,17 @@ _MODEL_FAMILY_TOKENS: list[tuple[str, tuple[str, ...]]] = [
 
 
 # 模型友好别名到真实 Model ID 的映射，config.normalize_model_selector 据此展开别名。
-MODEL_ALIASES: dict[str, str] = {
-    "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
-    "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
-    "doubao-seedream-5.0-lite": "doubao-seedream-5-0-260128",
-    "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
-    "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
-}
+# 与 MODEL_CAPABILITIES、DEPRECATED_MODEL_TOKENS 同一只读口径包装，防止公共清单被
+# 调用方原地改写污染全局判定。
+MODEL_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
+        "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
+        "doubao-seedream-5.0-lite": "doubao-seedream-5-0-260128",
+        "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
+        "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
+    }
+)
 
 # 已下线模型的特征 token，model_id 命中任意 token 时 config 校验拒绝。
 # frozenset 不可变，与 MODEL_CAPABILITIES 的只读视图口径一致，防止公共清单被
@@ -173,6 +177,7 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
             min_size_pixels=SEEDREAM_40_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_40_MAX_SIZE_PIXELS,
             size_pixel_multiple=None,
+            supports_fast_optimize_prompt=True,
         ),
         MODEL_FAMILY_UNKNOWN: ModelCapabilities(
             family=MODEL_FAMILY_UNKNOWN,

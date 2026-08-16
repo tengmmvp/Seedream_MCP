@@ -28,7 +28,7 @@ from ..core.validators import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
-    _is_unc_path,
+    is_unc_path,
     get_workspace_root,
     is_within_resolved,
     normalize_path,
@@ -185,7 +185,7 @@ def resolve_local_image_candidate(
     for candidate in candidates:
         # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
         # 避免凭据在越界拒绝尚未发生时已向远端泄露；直接比较优化不得丢失该前置守卫。
-        if _is_unc_path(str(candidate)):
+        if is_unc_path(str(candidate)):
             continue
         try:
             resolved_candidate = candidate.resolve()

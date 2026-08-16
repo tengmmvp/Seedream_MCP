@@ -107,18 +107,20 @@ class SeedreamValidationError(SeedreamMCPError):
         self.value = value
 
     def to_dict(self) -> dict[str, Any]:
-        """序列化为字典，在基类基础上补充出错的字段名与值。"""
+        """序列化为字典，在基类基础上补充出错的字段名与值。
+
+        value 的净化次序与 details/response_data 同口径先截断后脱敏：容器走
+        _sanitize_response_data，字符串与 bytes 走 _sanitize_message_for_output，
+        其中 bytes 先归一化为文本再截断脱敏、不绕过任一防线，数值与布尔原样保留。
+        """
+        if isinstance(self.value, (dict, list)):
+            sanitized_value: Any = _sanitize_response_data(self.value)
+        elif isinstance(self.value, (str, bytes)):
+            sanitized_value = _sanitize_message_for_output(self.value, limit=_VALUE_OUTPUT_LIMIT)
+        else:
+            sanitized_value = _sanitize_output_string(self.value)
         result = super().to_dict()
-        result.update(
-            {
-                "field": self.field,
-                "value": _truncate_value_for_output(
-                    _filter_sensitive_data(self.value)
-                    if isinstance(self.value, (dict, list))
-                    else _sanitize_output_string(self.value)
-                ),
-            }
-        )
+        result.update({"field": self.field, "value": sanitized_value})
         return result
 
 
@@ -785,11 +787,15 @@ def _filter_sensitive_data(data: Any) -> Any:
     Bearer 令牌与敏感键值片段，防止上游错误体回显的鉴权头进入结构化输出，
     容器项继续下钻。以显式栈替代递归，超深嵌套不触发解释器递归上限，
     RecursionError 不外逃，与 _normalize_non_str_message 对超深 message 的
-    兜底口径对齐。非容器类型原样返回。
+    兜底口径对齐。已访问容器经 id 记录，循环引用容器以 <truncated:cyclic>
+    占位终止展开，不产生无限循环；判重为全量集合而非祖先集合，同一容器被
+    多处共享引用时同样折叠为占位符，本函数的错误数据源为 json.loads 产物
+    不产生共享引用，折叠方向 fail-closed 不放大输出。非容器类型原样返回。
     """
     if not isinstance(data, (dict, list)):
         return data
     result: Any = {} if isinstance(data, dict) else []
+    seen: set[int] = {id(data)}
     pending: list[tuple[Any, Any]] = [(data, result)]
     while pending:
         source, target = pending.pop()
@@ -800,8 +806,12 @@ def _filter_sensitive_data(data: Any) -> Any:
                     continue
                 value = _sanitize_output_string(value)
                 if isinstance(value, (dict, list)):
+                    if id(value) in seen:
+                        target[key] = "<truncated:cyclic>"
+                        continue
                     child: Any = {} if isinstance(value, dict) else []
                     target[key] = child
+                    seen.add(id(value))
                     pending.append((value, child))
                 else:
                     target[key] = value
@@ -809,8 +819,12 @@ def _filter_sensitive_data(data: Any) -> Any:
             for item in source:
                 item = _sanitize_output_string(item)
                 if isinstance(item, (dict, list)):
+                    if id(item) in seen:
+                        target.append("<truncated:cyclic>")
+                        continue
                     nested: Any = {} if isinstance(item, dict) else []
                     target.append(nested)
+                    seen.add(id(item))
                     pending.append((item, nested))
                 else:
                     target.append(item)

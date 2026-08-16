@@ -8,6 +8,11 @@ on:
       - "v*"
   workflow_dispatch:
 
+# 同一标签的并发触发排队执行而不互相取消，避免发布产物交错；卡死的作业按超时上限终止。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 # GITHUB_TOKEN 默认权限。
 permissions:
   contents: write # 创建 GitHub Release。
@@ -18,6 +23,7 @@ jobs:
   test:
     name: 🧪 Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -49,7 +55,7 @@ jobs:
       - name: 🔎 Run mypy
         run: uv run mypy seedream_mcp
 
-      - name: 🧹 Run flake8
+      - name: 🔬 Run flake8
         run: uv run flake8 seedream_mcp tests
 
       - name: 🧫 Quick validation
@@ -72,6 +78,7 @@ jobs:
   pypi-release:
     name: 📤 Publish to PyPI
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: test
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -95,6 +102,7 @@ jobs:
   build-and-release:
     name: 🔖 Build and Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [test, pypi-release]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
 
@@ -137,7 +145,7 @@ jobs:
             #### Docker Compose 运行
             ```bash
             curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
-            ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-compose up -d
+            ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
             ```
 
             ### 🔧 配置说明
@@ -155,6 +163,7 @@ jobs:
   docker-release:
     name: 🐳 Docker Release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: test
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
 

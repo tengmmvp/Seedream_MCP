@@ -414,3 +414,25 @@ def test_format_file_info_degrades_on_malformed_timestamp(
 
     assert text == "a.png | 文件信息不可用"
     assert details == {"size_mb": None, "modified": None}
+
+
+def test_build_display_entries_sanitizes_file_name_credentials(
+    workspace_root: Path,
+) -> None:
+    """含凭据样式片段的文件名经净化进入文本与结构化两条通道，不外泄片段。"""
+    from seedream_mcp.utils.io.io_path import resolve_workspace_roots
+
+    image = workspace_root / "img api_key=secret.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    resolved_roots = resolve_workspace_roots([workspace_root])
+
+    lines, entries = browse_images_module._build_display_entries(
+        images=[image],
+        image_resolved_map={image: image.resolve()},
+        resolved_roots=resolved_roots,
+        show_details=False,
+    )
+
+    assert "secret" not in lines[0]
+    assert "secret" not in entries[0]["path"]
+    assert "***" in entries[0]["path"]

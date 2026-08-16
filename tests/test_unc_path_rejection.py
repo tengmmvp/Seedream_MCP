@@ -1,7 +1,7 @@
 """UNC 路径拒绝测试。
 
 Windows UNC 路径（\\\\host\\share 或 //host/share）的 resolve 会触发 SMB 认证，
-须在 resolve 前由 _is_unc_path 拦截。覆盖 _is_unc_path、is_within_resolved、
+须在 resolve 前由 is_unc_path 拦截。覆盖 is_unc_path、is_within_resolved、
 normalize_path、_file_uri_to_path 对 UNC 的拒绝行为与越界判定语义。
 """
 
@@ -11,12 +11,12 @@ import pytest
 
 from seedream_mcp.utils.io.io_path import (
     _file_uri_to_path,
-    _is_unc_path,
+    is_unc_path,
     is_within_resolved,
     normalize_path,
 )
 
-# ==================== _is_unc_path ====================
+# ==================== is_unc_path ====================
 
 
 @pytest.mark.parametrize(
@@ -30,13 +30,13 @@ from seedream_mcp.utils.io.io_path import (
     ],
 )
 def test_is_unc_path_detects_unc(path: str) -> None:
-    assert _is_unc_path(path) is True
+    assert is_unc_path(path) is True
 
 
 def test_is_unc_path_strips_leading_whitespace() -> None:
     """带前导空格的 UNC 路径仍被识别。"""
-    assert _is_unc_path("  \\\\host\\share") is True
-    assert _is_unc_path("  //host/share") is True
+    assert is_unc_path("  \\\\host\\share") is True
+    assert is_unc_path("  //host/share") is True
 
 
 @pytest.mark.parametrize(
@@ -49,12 +49,12 @@ def test_is_unc_path_strips_leading_whitespace() -> None:
     ],
 )
 def test_is_unc_path_rejects_non_unc(path: str) -> None:
-    assert _is_unc_path(path) is False
+    assert is_unc_path(path) is False
 
 
 def test_is_unc_path_rejects_single_leading_slash() -> None:
     """单个前导斜杠不是 UNC。"""
-    assert _is_unc_path("/home/user") is False
+    assert is_unc_path("/home/user") is False
 
 
 # ==================== is_within_resolved ====================

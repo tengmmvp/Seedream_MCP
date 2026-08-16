@@ -71,8 +71,10 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 # 下载 docker-compose.yml
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
+# 可选：创建 .env（参考 .env.example）供 compose 只读挂载，替代下行环境变量前置
+
 # 启动服务
-ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker-compose up -d
+ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
 服务以 streamable-http 传输监听容器内 `8000` 端口，宿主机端口由 `SEEDREAM_HTTP_PORT` 控制（默认 8000），MCP 端点路径为 `/mcp`。客户端接入配置（以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理）：
@@ -569,12 +571,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Linux/macOS
 export ARK_API_KEY=your_key
 export SEEDREAM_HTTP_AUTH_TOKEN=your_token
-docker-compose up -d
+docker compose up -d
 
 # Windows
 $env:ARK_API_KEY="your_key"
 $env:SEEDREAM_HTTP_AUTH_TOKEN="your_token"
-docker-compose up -d
+docker compose up -d
 ```
 
 ## 🧪 本地开发

@@ -76,8 +76,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         epilog="""
 示例用法:
   seedream-image-mcp --api-key your_key_here
-  seedream-image-mcp --api-key your_key_here --model doubao-seedream-4.5
-  --default-size 4K --log-level DEBUG
+  seedream-image-mcp --api-key your_key_here --model doubao-seedream-4.5 \\
+      --default-size 4K --log-level DEBUG
   seedream-image-mcp --api-key your_key_here --config-file ./config.env
         """,
     )

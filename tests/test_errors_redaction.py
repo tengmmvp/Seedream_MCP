@@ -55,6 +55,22 @@ def test_filter_sensitive_data_redacts_list_items() -> None:
     assert filtered == ["Bearer ***", "plain"]
 
 
+def test_filter_sensitive_data_terminates_cyclic_containers() -> None:
+    """循环引用容器以占位符终止展开，不产生无限循环挂死进程。"""
+    cyclic: dict[str, Any] = {"normal": "v"}
+    cyclic["self"] = cyclic
+    cyclic_list: list[Any] = ["plain"]
+    cyclic_list.append(cyclic_list)
+
+    filtered = _filter_sensitive_data(cyclic)
+    assert filtered["normal"] == "v"
+    assert filtered["self"] == "<truncated:cyclic>"
+
+    filtered_list = _filter_sensitive_data(cyclic_list)
+    assert filtered_list[0] == "plain"
+    assert filtered_list[1] == "<truncated:cyclic>"
+
+
 def test_filter_sensitive_data_recurses_nested_structures() -> None:
     """嵌套 dict 内的敏感字段与 Bearer 令牌均被处理。"""
     filtered = _filter_sensitive_data(

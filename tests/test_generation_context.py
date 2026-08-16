@@ -141,6 +141,7 @@ def test_generation_execution_context_field_order_matches_mcp_order() -> None:
         "tools",
         "layer_decomposition",
         "background",
+        "max_images",
         "request_count",
         "parallelism",
         "enable_auto_save",

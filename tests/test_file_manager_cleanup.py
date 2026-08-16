@@ -287,3 +287,49 @@ def test_run_cleanup_only_deletes_image_files(tmp_path: Path) -> None:
     assert not old_image.exists()
     assert old_doc.exists()
     assert old_data.exists()
+
+
+def test_run_cleanup_sweeps_stale_part_files_only(tmp_path: Path) -> None:
+    """超龄 .part 遗留临时文件被清扫并计入统计；宽限期内的在途临时文件保留。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    stale_time = (datetime.now() - timedelta(days=2)).timestamp()
+    stale_part = tmp_path / "tmpabc123.png.part"
+    stale_part.write_bytes(b"x" * 100)
+    os.utime(stale_part, (stale_time, stale_time))
+    fresh_part = tmp_path / "tmpdef456.png.part"
+    fresh_part.write_bytes(b"y" * 50)
+
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
+
+    assert not stale_part.exists()
+    assert fresh_part.exists()
+    assert result["deleted_files"] == 1
+    assert result["deleted_size"] == 100
+
+
+def test_run_cleanup_quota_only_config_prunes_empty_dirs(tmp_path: Path) -> None:
+    """CLEANUP_DAYS=0 且仅配置总量配额时空目录同样回收，不随 days 门控累积。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    empty_date_dir = tmp_path / "2026-08-16"
+    empty_date_dir.mkdir()
+
+    manager.run_cleanup_policies(days=0, max_total_bytes=1024)
+
+    assert not empty_date_dir.exists()
+
+
+def test_generate_markdown_reference_encodes_spaces_and_parens(tmp_path: Path) -> None:
+    """文件名含空格与圆括号时 Markdown 引用目标百分号编码，符合 CommonMark 语法。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    target = tmp_path / "2026-08-16" / "seedream"
+    target.mkdir(parents=True)
+    image = target / "my pic (1)_a1b2c3d4.png"
+    image.write_bytes(b"img")
+
+    markdown_ref = manager.generate_markdown_reference(image, alt_text="pic")
+
+    assert "my%20pic%20%281%29_a1b2c3d4.png" in markdown_ref
+    assert " " not in markdown_ref.split("(", 1)[1]

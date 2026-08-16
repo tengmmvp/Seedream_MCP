@@ -44,6 +44,8 @@ class GenerationExecutionContext:
         tools: 经校验的模型工具配置列表，未启用时为 None。
         layer_decomposition: 是否开启图层拆分，仅 5.0 Pro 图生图可用，未启用时为 False。
         background: 透明通道取值，transparent 或 opaque，未指定时为 None。
+        max_images: 组图单次请求的生成数量上限；非组图工具为 None，未显式传入时
+            为按参考图数量推导的生效值，回显供调用方获知实际约束。
         request_count: 请求次数，1 表示单次请求。
         parallelism: 并行度上限，未显式提供时取 request_count 与全局上限的较小值。
         enable_auto_save: 是否启用自动保存，未显式提供时取 config 默认值。
@@ -61,6 +63,7 @@ class GenerationExecutionContext:
     tools: list[dict[str, Any]] | None
     layer_decomposition: bool
     background: str | None
+    max_images: int | None
     request_count: int
     parallelism: int
     enable_auto_save: bool
@@ -151,6 +154,9 @@ def build_generation_context(
         tools=tools,
         layer_decomposition=layer_decomposition,
         background=background,
+        # 组图工具的 max_images 经 schema 模型推导为生效值，未显式传入时按参考图
+        # 数量推导；回显使调用方获知实际生效的生成数量上限，其余工具无此字段为 None。
+        max_images=getattr(params, "max_images", None),
         request_count=params.request_count,
         parallelism=(
             params.parallelism

@@ -23,7 +23,7 @@ from ..core._helpers import (
 )
 from ..core.outputs import BrowseImagesStructuredOutput, build_error_dict
 from ..core.schemas import BrowseImagesInput
-from ...utils.core.errors import format_error_for_user
+from ...utils.core.errors import format_error_for_user, sanitize_data_text
 from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
 from ...utils.io.io_scan import cached_find_images_in_directory
@@ -326,7 +326,9 @@ def _build_display_entries(
         if display_base is None:
             logger.warning("图片路径未命中任何工作区根目录，已忽略: {}", img)
             continue
-        display_path = get_relative_path(img_resolved, str(display_base))
+        # 文件名来自服务器文件系统，含控制字符的文件名经净化后才进入文本与结构化
+        # 两条通道，与生成通道对 local_path/markdown_ref 的净化口径一致。
+        display_path = sanitize_data_text(get_relative_path(img_resolved, str(display_base)))
         detail_text, details = _format_file_info(display_path, img_resolved, show_details)
         lines.append(f"{idx}. {detail_text}")
         entry: dict[str, Any] = {"index": idx, "path": display_path}

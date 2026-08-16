@@ -150,7 +150,9 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
         SeedreamValidationError: 提示词为空、非字符串或包含无法编码字符时抛出。
     """
 
-    if not prompt or not isinstance(prompt, str):
+    if not isinstance(prompt, str):
+        raise SeedreamValidationError("提示词必须是字符串", field="prompt", value=prompt)
+    if not prompt:
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
     prompt = prompt.strip()
@@ -240,7 +242,11 @@ def validate_response_format(response_format: str) -> str:
     Raises:
         SeedreamValidationError: 当格式参数无效时抛出。
     """
-    if not response_format or not isinstance(response_format, str):
+    if not isinstance(response_format, str):
+        raise SeedreamValidationError(
+            "response_format 必须为字符串", field="response_format", value=response_format
+        )
+    if not response_format:
         raise SeedreamValidationError(
             "response_format 不能为空", field="response_format", value=response_format
         )
@@ -357,7 +363,7 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
         extra_keys = set(tool.keys()) - {"type"}
         if extra_keys:
             raise SeedreamValidationError(
-                f"tools[{index}] 包含不支持的字段: {sorted(extra_keys)}",
+                f"tools[{index}] 包含不支持的字段: {sorted(extra_keys, key=repr)}",
                 field=f"tools[{index}]",
                 value=tool,
             )
@@ -452,7 +458,9 @@ def validate_size(size: str, *, layer_decomposition: bool = False) -> str:
     Raises:
         SeedreamValidationError: 当尺寸参数无效时抛出。
     """
-    if not size or not isinstance(size, str):
+    if not isinstance(size, str):
+        raise SeedreamValidationError("图像尺寸必须为字符串", field="size", value=size)
+    if not size:
         raise SeedreamValidationError("图像尺寸不能为空", field="size", value=size)
 
     normalized = size.strip()
@@ -696,7 +704,7 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
     extra_keys = set(options.keys()) - {"mode"}
     if extra_keys:
         raise SeedreamValidationError(
-            f"optimize_prompt_options 包含不支持的字段: {sorted(extra_keys)}",
+            f"optimize_prompt_options 包含不支持的字段: {sorted(extra_keys, key=repr)}",
             field="optimize_prompt_options",
             value=options,
         )

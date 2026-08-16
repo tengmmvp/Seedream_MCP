@@ -20,6 +20,10 @@ from ._helpers import (
 from .context import GenerationExecutionContext
 from .outputs import GenerationStructuredOutput, build_error_dict
 
+# extract_images 嵌套 data 下钻的深度上限：远高于合法响应的嵌套层级，仅兜底受损
+# 上游注入的环状或超深结构，超限归一为空而非挂死或翻错。
+_MAX_NESTED_DATA_DEPTH = 10_000
+
 
 def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
     """从生成结果中提取图片数据列表。
@@ -37,19 +41,33 @@ def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
     data = result.get("data")
 
     def _coerce(value: Any) -> list[dict[str, Any]]:
-        """将任意取值归一化为仅含图片字典的列表。"""
-        if value is None:
+        """将任意取值归一化为仅含图片字典的列表。
+
+        嵌套 ``{"data": ...}`` 形态经 while 迭代下钻而非递归：json.loads 的 C 层
+        栈开销低于 Python 帧，深嵌套响应可成功解析却在递归实现上抛 RecursionError，
+        使已计费的成功生成翻错为错误结果；迭代下钻与 _sanitize_value_tree 的
+        遍历口径一致。下钻设深度上限兜底：json.loads 产物不含循环引用，上限仅在
+        受损上游经其他途径注入环状结构时触发，超限视为无效图片数据归一为空，
+        不使迭代退化为挂死。
+        """
+        depth = 0
+        while True:
+            if value is None:
+                return []
+            if isinstance(value, list):
+                # 过滤 null 及非字典元素，保证 list[Dict] 类型一致。
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                nested = value.get("data")
+                if nested is not None:
+                    depth += 1
+                    if depth > _MAX_NESTED_DATA_DEPTH:
+                        return []
+                    value = nested
+                    continue
+                return [value]
+            # str/int 等其他标量类型无法表达图片，归一化为空。
             return []
-        if isinstance(value, list):
-            # 过滤 null 及非字典元素，保证 list[Dict] 类型一致。
-            return [item for item in value if isinstance(item, dict)]
-        if isinstance(value, dict):
-            nested = value.get("data")
-            if nested is not None:
-                return _coerce(nested)
-            return [value]
-        # str/int 等其他标量类型无法表达图片，归一化为空。
-        return []
 
     return _coerce(data)
 
@@ -664,10 +682,13 @@ def _build_generation_structured_result(
     # _format_failure_section 提前返回、不经净化，上方调用为首次净化并写入哨兵，
     # 复位使失败批次的图片列表不滞留哨兵槽位至下一次生成调用。
     reset_last_sanitized_images()
+    # status 的非 SSE 路径取自响应体原文，属上游自由文本；与 data/usage 同口径净化，
+    # 控制字符与凭据片段不借 status 键进入 structuredContent。
+    raw_status = result.get("status")
     payload: dict[str, Any] = {
         "tool": tool_name,
         "success": not _is_generation_failed(result),
-        "status": result.get("status"),
+        "status": sanitize_error_text(raw_status) if isinstance(raw_status, str) else raw_status,
         "prompt": context.prompt,
         "size": context.size,
         "response_format": context.response_format,
@@ -676,6 +697,7 @@ def _build_generation_structured_result(
         "tools": context.tools,
         "layer_decomposition": context.layer_decomposition,
         "background": context.background,
+        "max_images": context.max_images,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         # data 项可能携带上游 per-image error 与 url/model/type 等自由字段，统一净化

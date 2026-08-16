@@ -17,7 +17,7 @@ from ..core.formats import MIME_BY_EXTENSION, format_file_size_mb, infer_extensi
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
-    _is_unc_path,
+    is_unc_path,
     get_workspace_roots,
     is_boundary_from_session_roots,
     is_within_resolved,
@@ -87,7 +87,7 @@ def _resolves_outside_workspace(normalized: str, resolved_roots: list[Path]) -> 
     进入 resolve 以免触发 SMB 连接：UNC 形态的输入直接返回 False 交由诊断分支
     处理，UNC 根拼接出的相对路径候选经逐候选守卫跳过。
     """
-    if _is_unc_path(normalized):
+    if is_unc_path(normalized):
         return False
     if os.path.isabs(normalized):
         candidates = [Path(normalized)]
@@ -96,8 +96,8 @@ def _resolves_outside_workspace(normalized: str, resolved_roots: list[Path]) -> 
     for candidate in candidates:
         # 逐候选 UNC 守卫：根本身为 UNC 形态时相对路径候选拼接后仍以 UNC 前缀开头，
         # resolve 同样会触发 SMB 连接。守卫规则与 resolve_local_image_candidate 的
-        # 逐候选前置拦截同源，均为 io_path._is_unc_path 的单一规则。
-        if _is_unc_path(str(candidate)):
+        # 逐候选前置拦截同源，均为 io_path.is_unc_path 的单一规则。
+        if is_unc_path(str(candidate)):
             continue
         try:
             resolved_candidate = candidate.resolve()

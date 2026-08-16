@@ -41,6 +41,7 @@ def _context() -> GenerationExecutionContext:
         tools=None,
         layer_decomposition=False,
         background=None,
+        max_images=None,
         request_count=1,
         parallelism=1,
         enable_auto_save=False,

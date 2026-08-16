@@ -44,6 +44,21 @@ def test_read_env_values_wraps_os_error_as_config_error(
     assert str(env_file) in excinfo.value.message
 
 
+def test_read_env_values_wraps_non_utf8_as_config_error(tmp_path: Path) -> None:
+    """.env 含非 UTF-8 字节时包装为含编码提示的 SeedreamConfigError，不裸抛。
+
+    中文 Windows 记事本默认 ANSI/GBK 保存含中文注释的 .env 是现实触发场景；
+    UnicodeDecodeError 不在 cli_main 捕获范围内，未包装时以裸 traceback 崩溃。
+    """
+    env_file = tmp_path / "gbk.env"
+    env_file.write_bytes(b"ARK_API_KEY=test_key\n# \xd6\xd0\xce\xc4 note\n")
+
+    with pytest.raises(SeedreamConfigError, match="UTF-8") as excinfo:
+        _read_env_values(str(env_file))
+
+    assert str(env_file) in excinfo.value.message
+
+
 def test_deprecated_model_error_message_derives_from_token_set() -> None:
     """弃用模型错误提示的下线清单从 DEPRECATED_MODEL_TOKENS 派生。
 

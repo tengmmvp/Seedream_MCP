@@ -205,7 +205,6 @@ seedream_images/
 
 # 项目构建产物
 seedream_mcp.egg-info/
-dist/
 
 # 代理/说明文件
 .codex/

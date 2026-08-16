@@ -41,6 +41,7 @@ def _context(enable_auto_save: bool = True) -> GenerationExecutionContext:
         tools=None,
         layer_decomposition=False,
         background=None,
+        max_images=None,
         request_count=1,
         parallelism=1,
         enable_auto_save=enable_auto_save,
@@ -847,3 +848,58 @@ def test_unknown_value_cyclic_reference_terminated_with_placeholder() -> None:
     sanitized = _sanitize_image_errors(images)
 
     assert sanitized[0]["custom_meta"][0][0] == "<truncated:cyclic>"
+
+
+def test_parallel_error_code_fallback_branch_is_sanitized() -> None:
+    """code 回退分支与 message 同口径脱敏，被劫持上游无法经 code 注入换行与凭据。
+
+    上游 200 响应顶层 error 仅含 code 键时，其自由文本经 _extract_parallel_request_error
+    进入 batch.errors[].message 直达 structuredContent；该分支漏脱敏时 CRLF 与 Bearer
+    片段原样透传，违背 usage/data 同场景已建立的净化标准。
+    """
+    from seedream_mcp.tools.core._helpers import _extract_parallel_request_error
+
+    message = _extract_parallel_request_error(
+        {"error": {"code": "InjectedHeader\r\nAuthorization: Bearer leak"}}, None
+    )
+
+    assert "\r" not in message and "\n" not in message
+    assert "leak" not in message
+
+
+def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> None:
+    """深嵌套 {"data": ...} 链经迭代下钻提取，不因 RecursionError 使成功生成翻错。
+
+    json.loads 的 C 层栈开销低于 Python 帧，深度千级嵌套可成功解析；递归实现的
+    _coerce 在同等深度抛 RecursionError，被外层降级为错误结果。
+    """
+    from seedream_mcp.tools.core.results import extract_images
+
+    inner: dict[str, Any] = {"url": "https://example.com/deep.png"}
+    result: dict[str, Any] = inner
+    for _ in range(1500):
+        result = {"data": result}
+
+    images = extract_images(result)
+
+    assert images == [inner]
+
+
+def test_structured_status_sanitized_and_max_images_surfaced() -> None:
+    """status 上游原文经净化进入 structuredContent，max_images 生效值原样回显。"""
+    import dataclasses
+
+    from seedream_mcp.tools.core.results import _build_generation_structured_result
+
+    context = dataclasses.replace(_context(), max_images=4)
+    structured = _build_generation_structured_result(
+        tool_name="seedream_sequential_generation",
+        result={"success": True, "status": "ok\r\ninjected", "data": [], "usage": {}},
+        context=context,
+        auto_save_results=None,
+        auto_save_error=None,
+    )
+
+    assert "\r" not in structured["status"]
+    assert "\n" not in structured["status"]
+    assert structured["max_images"] == 4

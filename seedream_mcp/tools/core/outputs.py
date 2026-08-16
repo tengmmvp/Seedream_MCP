@@ -48,6 +48,8 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
         layer_decomposition: 是否开启图层拆分，非 False 取值仅出现在图文生图，
             其余工具恒为 False。
         background: 透明通道取值，非 None 取值仅出现在图文生图显式指定时。
+        max_images: 组图单次请求的生成数量上限，未显式传入时为按参考图数量推导的
+            生效值；非组图工具为 None。
         request_count: 本批次请求数量。
         parallelism: 本批次并行度上限。
         data: 图片条目列表，条目含 url 或 b64_json 及自动保存回填的本地路径信息；
@@ -67,6 +69,7 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     tools: list[dict[str, Any]] | None = None
     layer_decomposition: bool | None = None
     background: str | None = None
+    max_images: int | None = None
     request_count: int | None = None
     parallelism: int | None = None
     data: list[dict[str, Any]] | None = None

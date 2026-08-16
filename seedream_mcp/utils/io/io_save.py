@@ -13,7 +13,7 @@ import time
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from ..core.errors import SeedreamMCPError, sanitize_data_text, sanitize_error_text
 from ..core.formats import (
@@ -113,7 +113,9 @@ def _build_save_metadata(
         "tool_name": tool_name,
         "save_time": save_time,
         "file_size": file_size,
-        "content_type": content_type,
+        # content_type 为下载响应头原文，属上游自由文本；与 AutoSaveResult.to_dict
+        # 对 original_url/error 的净化同口径，控制字符与凭据片段不随 metadata 外泄。
+        "content_type": sanitize_data_text(content_type),
         "attempts": attempts,
     }
     if download_time is not None:
@@ -281,19 +283,32 @@ class AutoSaveManager:
         task.add_done_callback(_cleanup_tasks.discard)
 
     async def _run_cleanup_in_background(self, base_key: str, previous: float) -> None:
-        """在后台线程执行清理，失败时回滚节流时间戳。"""
+        """在后台线程执行清理，失败时回滚节流时间戳。
+
+        run_cleanup_policies 对扫描级与逐项错误宽捕获并收入返回值 errors 列表而非
+        上抛，逐项失败同样回滚节流时间戳：部分失败意味着目录可能仍超限，下次批量
+        保存应尽快重试而非等待完整节流间隔。
+        """
         try:
             # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历。
-            await asyncio.to_thread(
+            outcome = await asyncio.to_thread(
                 self.file_manager.run_cleanup_policies,
                 self.cleanup_days,
                 self.max_total_bytes,
             )
         except Exception as e:
-            # 回滚到清理前的时间戳，使下次批量保存能立即重试而非等待完整节流间隔。
-            async with _cleanup_lock:
-                _cleanup_last_run[base_key] = previous
+            await self._rollback_cleanup_throttle(base_key, previous)
             logger.warning("自动清理失败: {}", e, exc_info=True)
+            return
+        errors = outcome.get("errors") if isinstance(outcome, dict) else None
+        if errors:
+            await self._rollback_cleanup_throttle(base_key, previous)
+            logger.warning("自动清理部分失败: {}", errors)
+
+    async def _rollback_cleanup_throttle(self, base_key: str, previous: float) -> None:
+        """回滚到清理前的时间戳，使下次批量保存能立即重试而非等待完整节流间隔。"""
+        async with _cleanup_lock:
+            _cleanup_last_run[base_key] = previous
 
     def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""
@@ -505,7 +520,7 @@ class AutoSaveManager:
 
     async def _run_batch_save(
         self,
-        tasks: Sequence[Awaitable[AutoSaveResult]],
+        factories: Sequence[Callable[[], Awaitable[AutoSaveResult]]],
         image_data: list[dict[str, Any]],
         *,
         fallback_url_key: str | None,
@@ -515,17 +530,21 @@ class AutoSaveManager:
 
         限制并发、将异常归一化为失败结果、统计成功数并触发节流清理。fallback_url_key
         指定 url 分支从 image_data 取原始标识的键；为 None 时固定为 "base64"。
+        入参为协程工厂而非协程对象：协程在获得信号量后才创建，批量被整体取消时仍在
+        排队的任务不遗留未 await 的协程对象，避免 GC 阶段的 RuntimeWarning 噪音。
         """
         # semaphore 保持局部构造：AutoSaveManager 按调用新建且每个实例至多执行一次
         # 批量保存，提升为实例属性不会带来复用收益。
         semaphore = asyncio.Semaphore(self.max_concurrent)
 
-        async def save_with_semaphore(task: Awaitable[AutoSaveResult]) -> AutoSaveResult:
+        async def save_with_semaphore(
+            factory: Callable[[], Awaitable[AutoSaveResult]],
+        ) -> AutoSaveResult:
             async with semaphore:
-                return await task
+                return await factory()
 
         results = await asyncio.gather(
-            *[save_with_semaphore(task) for task in tasks], return_exceptions=True
+            *[save_with_semaphore(factory) for factory in factories], return_exceptions=True
         )
 
         processed_results: list[AutoSaveResult] = []
@@ -565,8 +584,9 @@ class AutoSaveManager:
             与入参顺序一致的保存结果列表；单项失败降级为失败结果，不中断批次。
         """
         logger.info("开始批量保存 {} 个图片", len(image_data))
-        tasks = [
-            self.save_image(
+        # 默认参数绑定当前项：闭包晚绑定会使全部工厂引用同一循环变量。
+        factories = [
+            lambda data=data: self.save_image(
                 url=data.get("url", ""),
                 prompt=data.get("prompt", ""),
                 tool_name=tool_name,
@@ -576,7 +596,7 @@ class AutoSaveManager:
             for data in image_data
         ]
         return await self._run_batch_save(
-            tasks, image_data, fallback_url_key="url", log_label="批量保存完成"
+            factories, image_data, fallback_url_key="url", log_label="批量保存完成"
         )
 
     async def save_multiple_base64_images(
@@ -592,8 +612,8 @@ class AutoSaveManager:
             与入参顺序一致的保存结果列表；单项失败降级为失败结果，不中断批次。
         """
         logger.info("开始批量保存 {} 个 Base64 图片", len(image_data))
-        tasks = [
-            self.save_base64_image(
+        factories = [
+            lambda data=data: self.save_base64_image(
                 b64_data=data.get("b64_json", ""),
                 prompt=data.get("prompt", ""),
                 tool_name=tool_name,
@@ -603,5 +623,5 @@ class AutoSaveManager:
             for data in image_data
         ]
         return await self._run_batch_save(
-            tasks, image_data, fallback_url_key=None, log_label="批量 Base64 保存完成"
+            factories, image_data, fallback_url_key=None, log_label="批量 Base64 保存完成"
         )

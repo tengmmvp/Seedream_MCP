@@ -8,8 +8,8 @@ README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版�
 版本为 README.md，其余两份与基准对齐。断言只比较语言无关要素，如 JSON 块全文、
 bash 块内的 KEY=value 赋值、环境变量键序、标题层级、链接 URL、表格列数与能力差
 异表的数字 token 序列，不比较自然语言正文。定位环境变量配置块时以含
-SEEDREAM_MODEL_ID 赋值行的 bash 块为锚点，定位能力差异表时以含 "1K / 2K" 单元格
-的表格为锚点，均不依赖各语言的章节标题文字。
+SEEDREAM_MODEL_ID 赋值行的 bash 块为锚点，定位能力差异表时以含 "1K / 1.5K / 2K"
+单元格的表格为锚点，均不依赖各语言的章节标题文字。
 """
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ def _table_columns(name: str) -> list[tuple[int, int]]:
     return columns
 
 
-# 能力差异表定位锚点，分辨率档位行的 "1K / 2K" 单元格为语言无关内容，全文唯一。
+# 能力差异表定位锚点，分辨率档位行的 "1K / 1.5K / 2K" 单元格为语言无关内容，全文唯一。
 _CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
 
 # 单元格内数字 token 提取，尺寸档位、倍数、像素值与参考图上限等取值均为数字。
@@ -202,7 +202,7 @@ def _tables(name: str) -> list[list[tuple[int, str]]]:
 
 
 def _capability_table(name: str) -> list[tuple[int, str]]:
-    """定位能力差异表，锚点为含 "1K / 2K" 单元格的唯一表格。"""
+    """定位能力差异表，锚点为含 "1K / 1.5K / 2K" 单元格的唯一表格。"""
     candidates = [
         rows
         for rows in _tables(name)

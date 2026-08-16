@@ -231,7 +231,10 @@ class ImagePreparer:
 
             _roots_key = tuple(str(r) for r in get_workspace_roots())
         # URL/data-URI 无本地文件 I/O，直接用空签名短路；本地文件签名含同步 stat/resolve，
-        # 移至工作线程避免网络挂载工作区下阻塞事件循环。
+        # 移至工作线程避免网络挂载工作区下阻塞事件循环。分类前先 strip，与
+        # prepare_image_input 入口及 _local_file_signature 的口径一致，防止前导空白
+        # 使 URL/data URI 误判为本地路径。
+        image = image.strip()
         ref_kind = classify_image_reference(image)
         if ref_kind == "local":
             signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)

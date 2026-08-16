@@ -1,4 +1,5 @@
 # 持续集成：PR 与分支推送时运行格式校验、Lint、类型检查与单测，作为合入门禁。
+# 静态检查与 OS、Python 版本无关，独立为单次执行的 lint 作业；单测按 OS × Python 矩阵运行。
 # 发布流水线见 release.yml，由 v* 标签触发。
 name: 🔍 CI
 
@@ -8,13 +9,51 @@ on:
   push:
     branches: [main]
 
+# 同一引用的连续更新取消在跑的旧轮次，避免旧提交的完整矩阵排队堆积。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  lint-and-test:
-    name: 🧪 Lint & Test (py${{ matrix.python-version }}, ${{ matrix.os }})
+  lint:
+    name: 🧹 Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: ⚡ Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: 📦 Install dependencies
+        run: uv sync
+
+      - name: 🎨 Check formatting (black)
+        run: uv run black --check seedream_mcp tests
+
+      - name: 🔬 Run flake8
+        run: uv run flake8 seedream_mcp tests
+
+      - name: 🔎 Run mypy
+        run: uv run mypy seedream_mcp
+
+  test:
+    name: 🧪 Test (py${{ matrix.python-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -39,15 +78,6 @@ jobs:
 
       - name: 📦 Install dependencies
         run: uv sync
-
-      - name: 🎨 Check formatting (black)
-        run: uv run black --check seedream_mcp tests
-
-      - name: 🧹 Run flake8
-        run: uv run flake8 seedream_mcp tests
-
-      - name: 🔎 Run mypy
-        run: uv run mypy seedream_mcp
 
       - name: ✅ Run tests
         run: uv run pytest -q

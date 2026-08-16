@@ -31,6 +31,7 @@ def _make_context(request_count: int, parallelism: int) -> GenerationExecutionCo
         tools=None,
         layer_decomposition=False,
         background=None,
+        max_images=None,
         request_count=request_count,
         parallelism=parallelism,
         enable_auto_save=False,

@@ -847,8 +847,7 @@ class DownloadManager:
         Raises:
             DownloadError: URL 校验、内容校验等终态失败，或重试耗尽仍失败；
                 文件系统永久错误与无效 URL 同样以终态方式抛出。非下载语义的
-                意外异常按原类型上抛。
-                上抛，不包装为 DownloadError。
+                意外异常按原类型上抛，不包装为 DownloadError。
         """
         if headers is None:
             headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}

@@ -460,6 +460,10 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
             # 不可得，统一包装为含路径与原因的配置错误，经 cli_main 的优雅错误路径输出，
             # 不向调用方裸抛 OSError。
             raise SeedreamConfigError(f"配置文件不可读: {path} -> {exc}") from exc
+        except UnicodeDecodeError as exc:
+            # dotenv 以 UTF-8 解码；中文 Windows 记事本默认 ANSI/GBK 保存含中文注释的
+            # .env 时进入此分支，同样包装为优雅配置错误并提示编码要求，不裸抛。
+            raise SeedreamConfigError(f"配置文件编码错误: {path} 需为 UTF-8 编码 -> {exc}") from exc
         return {k: str(v) for k, v in values.items() if v is not None}
 
     if env_file:
