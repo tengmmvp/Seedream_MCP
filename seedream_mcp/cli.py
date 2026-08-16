@@ -1,12 +1,11 @@
 """Seedream MCP 命令行接口：argparse 参数解析与配置构建。
 
 定义全部命令行选项，并按 CLI 参数 > 系统环境变量 > .env 文件 > 默认值的优先级构建
-SeedreamConfig。传输方式判定也在此完成。cli_main 据此装配配置并分派至 server 或 transport。
+SeedreamConfig。
 """
 
 from __future__ import annotations
 
-# 标准库导入
 import argparse
 from typing import Literal, cast
 

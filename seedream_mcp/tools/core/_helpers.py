@@ -27,9 +27,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-# 进度里程碑常量：common.py、parallel.py 与 impl/browse_images.py 共用，集中定义避免
-# 跨模块隐式契约漂移与两套同名常量各自演化。
-# 生成管道阶梯：接收 0 → 校验完成 10 → 生成开始 20 → 生成完成 70 → 自动保存开始 75 → 保存完成 95 → 结束 100。
+# 进度里程碑常量
 PROGRESS_RECEIVED = 0.0
 PROGRESS_VALIDATED = 10.0
 PROGRESS_GENERATION_START = 20.0
@@ -37,8 +35,7 @@ PROGRESS_GENERATION_DONE = 70.0
 PROGRESS_AUTOSAVE_START = 75.0
 PROGRESS_AUTOSAVE_DONE = 95.0
 PROGRESS_COMPLETE = 100.0
-# 浏览工具阶梯：扫描开始 20，多目录扫描按已扫描目录占比在 70 的跨度内渐增至 90，
-# 结束复用 PROGRESS_COMPLETE。数值与生成管道部分里程碑相同但语义独立，故单独命名。
+# 浏览工具阶梯
 PROGRESS_SCAN_START = 20.0
 PROGRESS_SCAN_SPAN = 70.0
 
@@ -90,8 +87,6 @@ def _normalize_error_message(raw_error: Any) -> str | None:
 
     code = raw_error.get("code")
     if isinstance(code, str) and code.strip():
-        # code 与 message 同为上游自由文本，回退分支同样过脱敏，防止被劫持上游
-        # 经 code 键向 batch.errors[].message 注入 CRLF 与凭据片段。
         return sanitize_error_text(code.strip())
     return None
 
@@ -112,11 +107,7 @@ _NETWORK_CREDENTIAL_GUIDANCE = "请确认 API Key 和网络可用后重试。"
 # 无比通用建议更具体的指引，不进入错误码查表；错误码全集守护测试据此放行。
 _FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES = frozenset({"generation_failed"})
 
-# 失败排查建议按错误码查表：参数与请求形态类错误引导调整参数取值，凭据、服务与连接
-# 类错误引导检查 API Key 与网络，避免校验失败时误导调用方排查无关项。错误码取值与
-# errors 模块的归约档案一致，新增错误码时同步维护本表；未列举错误码回退通用建议。
-# guidance 拼接仅在归约档案未携带 user_hint 时发生（见 common.py 失败分支），本表
-# 是该场景下的兜底建议来源，档案有 user_hint 的错误码以档案建议为准。
+# 失败排查建议按错误码查表
 _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
     "validation_error": "请根据错误信息调整对应参数取值。",
     "payload_too_large": "请根据错误信息调整对应参数取值。",

@@ -1,13 +1,12 @@
 """Seedream MCP 客户端模块。
 
-定义 :class:`SeedreamClient`，封装火山引擎 Seedream 系列图像生成 API 的调用逻辑。
-该类同时作为公共库 API 与 MCP 工具后端使用，提供文生图、图文生图、多图融合与
-组图生成四种生成入口，并在入口处对参数重新校验，与工具层形成 defense-in-depth。
+定义 :class:`SeedreamClient`，封装火山引擎 Seedream 系列图像生成 API 的调用。
+该类同时作为公共库 API 与 MCP 工具后端，提供文生图、图文生图、多图融合、
+组图生成四种入口，入口处重新校验参数，与工具层形成 defense-in-depth。
 
-核心能力包括图像预处理 LRU 缓存与 single-flight 去重、流式与非流式响应统一解析、
-指数退避重试与 Retry-After 处理，以及请求与响应的安全脱敏与异常分类。
-并行批次经 :class:`SharedRequestPlan` 共享单份 request_data 与序列化 body，
-构建与序列化各恰好发生一次。
+内置图像预处理 LRU 缓存与 single-flight 去重、流式与非流式统一解析、
+指数退避重试、请求与响应脱敏与异常分类；并行批次经 :class:`SharedRequestPlan`
+共享单份 request_data 与序列化 body，构建与序列化各恰好发生一次。
 """
 
 import asyncio
@@ -46,20 +45,16 @@ from .utils.io.io_sse import is_sse_response, parse_sse_response
 from .utils.images.image_ref import classify_image_reference
 from .utils.images.image_prepare import ImagePreparer
 
-# 指数退避单次等待上限，避免 2**n 增长过快导致单次 sleep 过久；Retry-After 路径已由
-# parse_retry_after 限制在 [1, 300]，不共用此上限。
+# 指数退避单次等待上限
 _MAX_BACKOFF_SECONDS = 60
 
-# 错误响应体独立读取上限：错误体仅需承载错误描述文本，不携带图片数据，无需图片级
-# 配额；独立小上限使被污染上游无法借非 200 响应倾倒巨型错误体拖慢读取与日志。
+# 错误响应体独立读取上限
 _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 
-# SSE 事件信封余量：event_truncate_threshold 在 base64 负载上界之外，为 data: 前缀、
-# JSON 包络（字段名、引号、分隔符）与行结尾预留的字节数。
+# SSE 事件信封余量
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
 
-# 响应体 join 卸载阈值：累计读取超过该字节数时 b"".join 的整块拷贝下沉工作线程执行，
-# 避免 60MB 级响应在事件循环内长时间占用；小体量保持同步以省去线程调度开销。
+# 响应体 join 卸载阈值
 _JOIN_OFFLOAD_THRESHOLD = 8 * 1024 * 1024
 
 
@@ -83,14 +78,9 @@ class SharedRequestPlan:
     """
 
     def __init__(self) -> None:
-        # 单飞锁同时守护构建与序列化：同批并发调用在锁上排队，后到者复用先到者产出；
-        # body 产出后所有调用方（含重试）走无锁快路径。
         self._lock = asyncio.Lock()
         self.request_data: dict[str, Any] | None = None
         self.body: bytes | None = None
-        # 批次级公共参数校验缓存，元素为输入快照与校验结果的对偶。tools 并行层在
-        # 批次分发前预校验写入一次，批内各生成方法按输入快照相等命中复用；未经预校验
-        # 的并发直连场景各请求独立校验后末次写入生效，结果一致、方向安全。
         self.validated_common_params: tuple[tuple[Any, ...], ValidatedCommonParams] | None = None
 
     async def get_or_build(
@@ -846,7 +836,6 @@ class SeedreamClient:
                         if not headers:
                             raise SeedreamAPIError("无法生成请求头：配置可能无效")
 
-                        # trust_env=False 防止 HTTP_PROXY 等环境变量绕过 SSRF 防护或截获 API Key。
                         self._client = httpx.AsyncClient(
                             timeout=self._build_http_timeout(),
                             headers=headers,
@@ -961,7 +950,6 @@ class SeedreamClient:
         if not isinstance(image_value, str):
             return f"<{type(image_value).__name__}>"
 
-        # 值已由上游 _normalize_single_image 去除首尾空白，无需再清理。
         kind = classify_image_reference(image_value)
         if kind == "url":
             return "<image_url>"
@@ -1049,9 +1037,6 @@ class SeedreamClient:
         else:
             data_count = 1
 
-        # status 字段异形（如数字或布尔）时收敛为 None：GenerationStructuredOutput.status
-        # 声明 str|None，pydantic v2 拒绝非 str 输入，透传会使已计费的成功生成在
-        # 结构化构造时整体翻错；收敛为 None 后仍落入下方缺省口径参与 partial 改写。
         status = payload.get("status")
         if status is not None and not isinstance(status, str):
             self.logger.debug(
@@ -1059,8 +1044,6 @@ class SeedreamClient:
                 type(status).__name__,
             )
             status = None
-        # 与 io_sse 保持一致，仅当 status 为 None 或 completed 时改写为 partial，
-        # 避免顶层 status=completed 且 data 含 error 时漏标 partial。
         if (
             status in (None, "completed")
             and isinstance(data, list)
@@ -1073,8 +1056,6 @@ class SeedreamClient:
             status,
             data_count,
         )
-        # usage 字段异形（如字符串或数字）时收敛为空 dict，保证结果结构 usage 恒为
-        # dict，不因上游异形透传破坏下游聚合；与 io_sse 的 completed 事件守卫同口径。
         usage = payload.get("usage", {})
         if not isinstance(usage, dict):
             self.logger.debug(
@@ -1083,12 +1064,6 @@ class SeedreamClient:
             )
             usage = {}
 
-        # 顶层 error 守卫：官方响应 schema 在顶层定义 error 对象，stream=true 时上游
-        # 可能以 200 加非 SSE JSON 错误体响应。error 为非空 dict 且 data 无任何有效
-        # 图片时判定为请求级失败，success=False 并透传 error 键供失败文案与并行聚合
-        # 提取真实原因；data 仍含有效图片时视为已产出结果的响应，维持成功口径不变，
-        # 避免已计费的图片被误标失败。非 dict 形态的 error 缺乏结构化错误语义，同样
-        # 维持既有成功口径。
         top_error = payload.get("error")
         if isinstance(top_error, dict) and top_error and not _has_valid_image_items(data):
             self.logger.warning(
@@ -1108,8 +1083,6 @@ class SeedreamClient:
             "data": data or [],
             "usage": usage,
             "status": status,
-            # 响应侧 tools 当前无下游消费者，采集仅为保持结果结构与官方响应字段
-            # 对齐，联网搜索用量经 usage.tool_usage 表达。
             "tools": payload.get("tools"),
         }
 
@@ -1202,8 +1175,6 @@ class SeedreamClient:
                 )
             chunks.append(chunk)
         if received > _JOIN_OFFLOAD_THRESHOLD:
-            # 大响应体的 join 为单次整块 memcpy，下沉工作线程执行，避免在事件循环内
-            # 长时间占用阻塞其他任务。
             return await asyncio.to_thread(b"".join, chunks)
         return b"".join(chunks)
 
@@ -1247,7 +1218,6 @@ class SeedreamClient:
         request_timeout: httpx.Timeout,
     ) -> dict[str, Any]:
         """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。"""
-        # request_body 已由调用方在工作线程序列化为 bytes，httpx 收到 bytes 即跳过事件循环内的 encode。
         async with client.stream(
             "POST", url, content=request_body, timeout=request_timeout
         ) as response:
@@ -1260,25 +1230,14 @@ class SeedreamClient:
                     model_id=self.config.model_id,
                     chunk_size=self.config.stream_chunk_size,
                     buffer_max_size=self.config.stream_buffer_max_size,
-                    # 截断阈值须容纳单张合法图片的 base64 负载，与下载路径的
-                    # auto_save_max_file_size 对齐，避免 stream + b64_json 大图被误丢；
-                    # 与前缀回收阈值解耦，后者仅控常驻内存。n 字节原图的 base64 严格
-                    # 上界为 4*⌈n/3⌉：n mod 3 余 1/2 时近似式 ⌈4n/3⌉ 比真实值小
-                    # 1-2 字节而可能误截断边界事件，故取精确上界并加 SSE 事件信封余量
-                    # 覆盖 data: 前缀与 JSON 包络。
                     event_truncate_threshold=max(
                         self.config.stream_buffer_max_size,
                         4 * ((self.config.auto_save_max_file_size + 2) // 3)
                         + _SSE_EVENT_ENVELOPE_MARGIN,
                     ),
-                    # 响应流总量上限与非流式/流式 JSON 路径共用同一限额，拦截以大量
-                    # 小事件滴流的超限流，见 _response_body_byte_limit。
                     total_bytes_limit=self._response_body_byte_limit(),
                     log=self.logger,
                 )
-                # 跨组契约：仅在发生超限丢弃时把 truncated_events 计数写入 api result
-                # payload，计数为 0 或缺省时不写键，results/outputs 侧按键存在性渲染
-                # 截断提示。
                 truncated_events = sse_result.pop("truncated_events", 0)
                 if isinstance(truncated_events, int) and truncated_events > 0:
                     sse_result["truncated_events"] = truncated_events
@@ -1286,11 +1245,8 @@ class SeedreamClient:
 
             try:
                 raw_body = await self._read_response_body_capped(response)
-                # JSON 解析为同步 CPU 操作，移至工作线程避免阻塞事件循环；
-                # 直接传入 bytes，json.loads 自 3.6 起接受 bytes 并在工作线程内完成 decode。
                 payload = await asyncio.to_thread(json.loads, raw_body)
             except SeedreamAPIError:
-                # 超限错误保持原文上抛，避免被误包装为 JSON 解析失败。
                 raise
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
@@ -1310,7 +1266,6 @@ class SeedreamClient:
         响应体，Content-Length 预检在缓冲完成后才生效，chunked 或缺失 Content-Length
         的巨型响应在缓冲阶段无任何拦截；流式发送使总量限额在接收过程中即强制执行。
         """
-        # request_body 已由调用方在工作线程序列化为 bytes，httpx 收到 bytes 即跳过事件循环内的 encode。
         request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
         response = await client.send(request, stream=True)
         try:
@@ -1324,8 +1279,6 @@ class SeedreamClient:
 
             raw_body = await self._read_response_body_capped(response)
             try:
-                # JSON 解析为同步 CPU 操作，大响应体可能阻塞事件循环，移至工作线程；
-                # 直接传入 bytes，json.loads 自 3.6 起接受 bytes 并在工作线程内完成 decode。
                 payload = await asyncio.to_thread(json.loads, raw_body)
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
@@ -1348,17 +1301,11 @@ class SeedreamClient:
         url = self._build_generation_url()
         safe_request_data = self._sanitize_request_for_logging(request_data)
         request_timeout = self._build_http_timeout()
-        # request_data 在重试期间不变，循环外序列化一次，避免每次重试重复 JSON 编码阻塞。
-        # 批次绑定共享计划时（见 _ACTIVE_REQUEST_PLAN）经计划单飞：N 个并行请求共享同一
-        # 份 request_data 与 body，构建与序列化各恰好一次，峰值 1×body；未绑定的直连调用
-        # 各自序列化一份。内存特征：序列化经 iterencode 削减 str 中间态，body 存活至响应
-        # 返回，由调用方引用保持。
         plan = _ACTIVE_REQUEST_PLAN.get()
         if plan is None:
             request_body = await asyncio.to_thread(self._serialize_request, request_data)
         else:
             request_body = await plan.get_or_serialize(request_data, self._serialize_request)
-        # max_retries 表示首次失败后的重试次数，故总尝试次数为其加一，与下载重试语义一致。
         total_attempts = max(1, self.config.max_retries + 1)
 
         is_stream = bool(request_data.get("stream"))
@@ -1388,8 +1335,6 @@ class SeedreamClient:
                     request_timeout=request_timeout,
                 )
             except SeedreamAPIError as exc:
-                # 无 HTTP 状态码的错误不可重试。此类错误源于响应体 JSON 解析失败等服务
-                # 端之外的异常，但服务端对非幂等生成 API 可能已完成处理，重试会导致重复生成与计费。
                 if exc.status_code is None:
                     self.logger.warning(
                         "{} API 调用失败（无 HTTP 状态码，不再重试）: {}",
@@ -1399,8 +1344,6 @@ class SeedreamClient:
                     raise
                 status_code = exc.status_code
                 if status_code != 429 and status_code < 500:
-                    # 仅 429 与 5xx 可重试；其余非 2xx（含 3xx 与 401-499）为立即
-                    # 终态，重试只会对非幂等的生成 API 重复请求与计费。
                     self.logger.warning(
                         "{} API 调用失败（状态码={}），不再重试: {}",
                         endpoint,
@@ -1440,8 +1383,6 @@ class SeedreamClient:
                 if attempt == total_attempts - 1:
                     raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(exc)}") from exc
             except Exception as exc:
-                # 编程 bug、序列化失败、值错误等非可重试意外错误直接抛出，不浪费退避等待。
-                # 前三个分支已精确覆盖可重试场景：429/5xx 业务状态码、超时、网络/传输错误。
                 self.logger.warning(
                     "{} API 调用出现非预期错误，不再重试 (尝试 {}/{}): {}",
                     endpoint,
@@ -1452,9 +1393,6 @@ class SeedreamClient:
                 raise
 
             if attempt < total_attempts - 1:
-                # 超时与网络错误重试可能触发服务端重复处理与计费，因生成 API 非幂等且当前未发送幂等键。
-                # 服务端 Retry-After 已由 parse_retry_after 限制在 [1, 300] 秒，信任该值叠加抖动后等待；
-                # 指数退避路径单独施加 60 秒上限，避免 2^n 过快增长导致单次 sleep 过久。
                 if pending_retry_after is not None:
                     await asyncio.sleep(pending_retry_after + random.uniform(0, 1))
                 else:
@@ -1462,8 +1400,6 @@ class SeedreamClient:
                         min(float(2**attempt) + random.uniform(0, 1), _MAX_BACKOFF_SECONDS)
                     )
 
-        # 循环不会正常结束：每次迭代成功则 return，末次迭代失败时各 except 分支均 raise；
-        # 此 raise 仅满足类型检查器对全路径返回的要求，运行时不可达。
         raise SeedreamAPIError(f"{endpoint} API 调用意外结束")
 
     async def _prepare_image_input(self, image: str) -> str:
@@ -1500,8 +1436,6 @@ class SeedreamClient:
         ):
             return error
 
-        # _call_api 内部已将 httpx 异常归类为 Seedream 超时/网络错误，此处兜底包装其余异常；
-        # 附 __cause__ 保持异常链。
         wrapped = SeedreamAPIError(f"API 调用失败: {error}")
         wrapped.__cause__ = error
         return wrapped

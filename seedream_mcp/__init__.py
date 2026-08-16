@@ -1,9 +1,7 @@
 ﻿"""
 Seedream MCP 工具包。
 
-提供 Seedream 图像生成的 MCP 服务器与客户端封装，支持配置管理、
-客户端调用及 MCP 服务器命令行接口。重量级子模块经 PEP 562 __getattr__ 延迟加载，
-避免包导入触发 server、client 等重模块初始化。
+提供 Seedream 图像生成的 MCP 服务器与客户端封装。
 """
 
 from __future__ import annotations

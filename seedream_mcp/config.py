@@ -27,31 +27,13 @@ from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKE
 from .utils.core.validators import parse_bool, validate_size_for_model
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# 项目根 .env 语义仅在源码 checkout 下成立：wheel 安装态 PROJECT_ROOT 指向
-# site-packages 的上级目录，该处不会有项目 .env，安装部署依赖当前工作目录 .env
-# 或显式 env_file 提供配置。
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
-
-# MODEL_ALIASES 与 DEPRECATED_MODEL_TOKENS 属模型知识，统一定义于 model_capabilities，
-# 此处经 import 暴露供 normalize_model_selector 与 validate 使用，外部仍可从 config 导入。
-
-# 合法日志级别，供 config 校验与 CLI choices 共用此单一来源。
 LEGAL_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-
-# lifespan 上下文字典键，app_lifespan 产出方与 parallel/server 消费方的契约。
-# config 为双方共同底层依赖，键集中定义于此，core 层复用键时无需依赖顶层装配模块。
 LIFESPAN_KEY_CONFIG = "config"
 LIFESPAN_KEY_CLIENT = "client"
 LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"
-
-# streamable-http 默认监听配置：argparse 默认值、传输装配与 resources 的 lifespan
-# 复位共用此单一来源。与 lifespan 键同理由集中于 config——transport 与 resources 互为
-# 延迟导入的近邻层，常量若落在任一侧都会形成对另一侧的顶层依赖回环，config 是双方
-# 共同底层。
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
-
-# dataclass 字段 metadata 中登记环境变量名的键，字段定义据此声明对应环境变量名。
 _ENV_METADATA_KEY = "env"
 
 
@@ -194,8 +176,6 @@ class SeedreamConfig:
             raise SeedreamConfigError(f"model_id不能为空{_env_var_suffix('model_id')}")
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
-            # 可用别名与下线清单均运行时派生（MODEL_ALIASES / DEPRECATED_MODEL_TOKENS），
-            # 新增或下线模型时提示自动同步，消除硬编码模型清单同步点。
             aliases = "/".join(MODEL_ALIASES)
             deprecated = "/".join(sorted(DEPRECATED_MODEL_TOKENS))
             raise SeedreamConfigError(
