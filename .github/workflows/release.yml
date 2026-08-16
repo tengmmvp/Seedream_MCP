@@ -8,7 +8,6 @@ on:
       - "v*"
   workflow_dispatch:
 
-# 同一标签的并发触发排队执行而不互相取消，避免发布产物交错；卡死的作业按超时上限终止。
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -49,7 +48,7 @@ jobs:
       - name: ✅ Run tests
         run: uv run pytest -q
 
-      - name: 🎨 Check formatting (black)
+      - name: 🎨 Check formatting
         run: uv run black --check seedream_mcp tests
 
       - name: 🔎 Run mypy

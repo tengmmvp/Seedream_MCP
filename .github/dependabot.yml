@@ -1,4 +1,3 @@
-# 依赖更新提醒：pip 依赖（uv.lock 与 pyproject）、GitHub Actions 与 Docker 三类
 # 依赖的版本升级 PR 自动提案，运行时依赖与构建链依赖的老化有持续提醒。
 version: 2
 updates:
