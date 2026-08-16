@@ -84,15 +84,18 @@ def _build_markdown_alt(alt_text: str | None) -> str:
     """净化 Markdown 替代文本，返回可直接嵌入 ``![...](...)`` 的文本。
 
     alt 为调用方可控自由文本：控制字符压平防注入，``\\``、``[``、``]`` 反斜杠转义
-    保持图片引用的结构完整，超长截断到上限。空文本回退固定文案；不使用 prompt 兜底，
-    提示词在结构化输出顶层已有专门字段，拼入 alt 只会放大输出且引入注入面。
+    保持图片引用的结构完整，超长在转义前截断到上限的一半。单字符转义后至多放大为
+    两个字符，按上限的一半截断使转义结果必然不超上限，截断点也不会把反斜杠转义对
+    劈成尾随孤立反斜杠。空文本回退固定文案；不使用 prompt 兜底，提示词在结构化输出
+    顶层已有专门字段，拼入 alt 只会放大输出且引入注入面。
     """
     if not alt_text:
         return "Generated Image"
     flattened = re.sub(r"[\x00-\x1f\x7f]", " ", alt_text)
+    max_flat_length = _MARKDOWN_ALT_MAX_LENGTH // 2
+    if len(flattened) > max_flat_length:
+        flattened = flattened[:max_flat_length]
     escaped = flattened.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-    if len(escaped) > _MARKDOWN_ALT_MAX_LENGTH:
-        escaped = escaped[:_MARKDOWN_ALT_MAX_LENGTH]
     return escaped or "Generated Image"
 
 
@@ -195,7 +198,7 @@ class AutoSaveManager:
         max_file_size: 最大文件大小（字节）。
         max_concurrent: 最大并发下载数。
         date_folder: 是否按日期创建文件夹。
-        cleanup_days: 自动清理天数，0 表示不清理。
+        cleanup_days: 自动清理天数，0 表示不按天清理。
         max_total_bytes: 保存目录总字节上限，None 表示不限制。
     """
 
@@ -220,7 +223,7 @@ class AutoSaveManager:
             max_file_size: 最大文件大小，本实例自持；自建下载管理器时同时作为其上限。
             max_concurrent: 最大并发下载数。
             date_folder: 是否按日期创建文件夹。
-            cleanup_days: 自动清理天数，0 表示不清理。
+            cleanup_days: 自动清理天数，0 表示不按天清理。
             max_total_bytes: 保存目录总字节上限，超出按最旧文件驱逐；None 表示不限制。
             download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭。
         """
@@ -260,14 +263,15 @@ class AutoSaveManager:
             await self.download_manager.close()
 
     async def _maybe_cleanup(self) -> None:
-        """按目录节流触发旧文件清理，每个 base_dir 在最短间隔内仅执行一次。
+        """按目录节流触发清理，每个 base_dir 在最短间隔内仅执行一次。
 
+        清理入口不设开关短路：遗留 .part 孤儿清扫须在 auto-save 启用时无条件可达，
+        两项清理策略均显式关闭的部署下进程崩溃遗留的临时文件同样被回收，不无界
+        累积。按天清理与配额驱逐仍由 run_cleanup_policies 按各自开关分别门控。
         节流时间戳仅在清理成功后保留，失败时回滚到清理前的值，使下次批量保存可尽快重试，
         避免瞬时清理失败被节流一整小时。重试频率受限于批量保存调用频率，不会形成即时重试
         风暴；锁内完成检查与占位保证并发请求不会同时进入清理。
         """
-        if self.cleanup_days <= 0 and self.max_total_bytes is None:
-            return
         base_key = str(self.file_manager.base_dir)
         now = time.time()
         async with _cleanup_lock:

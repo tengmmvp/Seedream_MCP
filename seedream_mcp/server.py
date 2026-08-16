@@ -29,7 +29,7 @@ from __future__ import annotations
 # 标准库导入
 import json
 import sys
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
@@ -296,7 +296,7 @@ async def seedream_image_to_image(
     image: str = Field(
         description=(
             "参考图片，支持 URL、data URI（data:image/*;base64,...）、本地文件路径。"
-            "例如：https://example.com/ref.png 或 ./images/portrait.jpg。"
+            "例如：https://example.com/ref.png 或 ./.seedream/images/portrait.jpg。"
         ),
     ),
     layer_decomposition: bool | None = Field(
@@ -430,7 +430,7 @@ async def seedream_multi_image_fusion(
         description=(
             f"图片列表，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
             f"数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
-            '例如：["https://example.com/a.png", "./images/b.jpg"]。'
+            '例如：["https://example.com/a.png", "./.seedream/images/b.jpg"]。'
         ),
     ),
     size: str | None = Field(
@@ -647,6 +647,7 @@ async def seedream_sequential_generation(
 async def seedream_browse_images(
     directory: str | None = Field(
         default=None,
+        max_length=1024,
         description=(
             "要浏览的目录路径，默认浏览工作区根目录，即 MCP Roots 授权的首个根；"
             "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
@@ -678,7 +679,7 @@ async def seedream_browse_images(
             "上限防止无界偏移触发全量扫描。"
         ),
     ),
-    format_filter: list[str] | None = Field(
+    format_filter: list[Annotated[str, Field(max_length=16)]] | None = Field(
         default=None,
         description=(
             "需要过滤的图片后缀列表，如 ['.jpeg', '.png']；仅保留受支持的后缀。"

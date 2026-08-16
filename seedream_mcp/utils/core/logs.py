@@ -66,12 +66,13 @@ class InterceptHandler(logging.Handler):
         except ValueError:
             log_level = record.levelno
 
-        # 向上跳过 logging 模块自身的帧，定位真实调用者以计算正确的日志深度。
+        # 向上跳过 emit 自身帧与 logging 模块内部的帧，定位真实调用者以计算正确的
+        # 日志深度。首帧无条件跳过，其后仅当帧位于 logging 模块内时继续跳过。
         frame: FrameType | None = logging.currentframe()
-        depth = 2
-        while frame is not None and frame.f_code.co_filename == logging.__file__:
-            frame = frame.f_back
+        depth = 0
+        while frame is not None and (depth == 0 or frame.f_code.co_filename == logging.__file__):
             depth += 1
+            frame = frame.f_back
 
         logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
 
@@ -127,13 +128,13 @@ def setup_logging(
 ) -> None:
     """设置日志配置。
 
-    未显式传入 log_file 时，默认日志路径为 ``logs/seedream_mcp.log``，该相对路径
-    相对于进程工作目录（CWD）解析；不同启动方式的 CWD 可能不同，如需固定位置请传入
-    绝对路径或经 LOG_FILE 环境变量配置。
+    未显式传入 log_file 时，默认日志路径为 ``.seedream/logs/seedream_mcp.log``，
+    该相对路径相对于进程工作目录（CWD）解析；不同启动方式的 CWD 可能不同，如需固定
+    位置请传入绝对路径或经 LOG_FILE 环境变量配置。
 
     Args:
         log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
-        log_file: 日志文件路径，为 None 时使用默认路径 logs/seedream_mcp.log。
+        log_file: 日志文件路径，为 None 时使用默认路径 .seedream/logs/seedream_mcp.log。
         enable_console: 是否启用控制台输出。
         enable_file: 是否启用文件输出。
         force_standard_logging: 是否强制接管标准库 logging 配置。
@@ -161,7 +162,7 @@ def setup_logging(
 
     if enable_file:
         if log_file is None:
-            log_dir = Path("logs")
+            log_dir = Path(".seedream") / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / "seedream_mcp.log"
         else:
@@ -204,8 +205,11 @@ def setup_logging(
 def get_logger(name: str | None = None) -> Logger:
     """获取 logger 实例。
 
+    name 仅绑定到日志记录的 extra 字段，输出中渲染的模块名始终取真实调用帧；
+    当前调用方统一传 ``__name__``，二者恰好一致，传自定义名称不会改变渲染输出。
+
     Args:
-        name: logger 名称，为 None 时自动取调用模块名。
+        name: 绑定到 extra 的名称，为 None 时自动取调用模块名。
 
     Returns:
         绑定了指定名称的 loguru logger 实例。

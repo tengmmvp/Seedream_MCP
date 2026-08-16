@@ -50,8 +50,7 @@ Thumbs.db
 .env.local
 .env.development
 .env.test
-seedream_images/
-logs/
+.seedream/
 dist/
 build/
 *.egg-info/

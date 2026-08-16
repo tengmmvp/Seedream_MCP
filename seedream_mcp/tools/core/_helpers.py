@@ -217,7 +217,7 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
                 field="auto_save_base_dir",
                 value=config.auto_save_base_dir,
             ) from exc
-        default_base_dir = (workspace_root / "images").resolve()
+        default_base_dir = (workspace_root / ".seedream" / "images").resolve()
 
     if not save_path:
         return default_base_dir

@@ -818,6 +818,117 @@ def test_structured_failure_error_code_sanitized() -> None:
     assert "leaked" not in str(structured["error"])
 
 
+# ==================== 非 str error.message 归一化 ====================
+
+
+def test_failure_text_dict_message_normalized_and_sanitized() -> None:
+    """请求级 error.message 为 dict 形态：归一化为文本后脱敏，Bearer 凭据不进入文本通道。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"message": {"authorization": "Bearer sk-text-leaked"}},
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "图片生成失败:" in text
+    assert "sk-text-leaked" not in text
+    assert "***" in text
+
+
+def test_failure_text_list_message_normalized_and_sanitized() -> None:
+    """error.message 为 list 形态同样归一化，键值凭据不借 repr 插值穿透文本通道。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"message": ["api_key=SK-LIST-LEAK"]},
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "SK-LIST-LEAK" not in text
+    assert "api_key=***" in text
+
+
+def test_failure_text_non_dict_error_normalized_and_sanitized() -> None:
+    """顶层 error 为非 dict 形态时整体归一化，凭据不借 list 形态穿透文本通道。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": ["Authorization: Bearer sk-top-leaked"],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+
+    assert "sk-top-leaked" not in text
+    assert "***" in text
+
+
+def test_structured_failure_dict_message_normalized_and_sanitized() -> None:
+    """结构化出口的非 str error.message 归一化为文本后脱敏，凭据不进入 structuredContent。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"code": "E", "message": {"authorization": "Bearer sk-struct-leaked"}},
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    message = structured["error"]["message"]
+    assert isinstance(message, str)
+    assert "sk-struct-leaked" not in message
+    assert "***" in message
+
+
+def test_structured_failure_list_message_normalized_and_sanitized() -> None:
+    """结构化出口对 list 形态 message 同样归一化，凭据样式片段被剥离。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"message": ["token=SK-LIST-STRUCT"]},
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    message = structured["error"]["message"]
+    assert isinstance(message, str)
+    assert "SK-LIST-STRUCT" not in message
+    assert "token=***" in message
+
+
+def test_structured_failure_non_dict_error_normalized_and_sanitized() -> None:
+    """顶层 error 为 list 形态走归一化兜底分支，凭据不进入 structuredContent.error。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": ["api_key=SK-NONDICT-STRUCT"],
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    rendered = str(structured["error"])
+    assert "SK-NONDICT-STRUCT" not in rendered
+    assert "***" in rendered
+
+
 # ==================== 未知键净化遍历健壮性 ====================
 
 

@@ -76,6 +76,18 @@ def _parse_pixel_size(size: str) -> tuple[int, int] | None:
     return int(matched.group(1)), int(matched.group(2))
 
 
+def _preset_numeric_sort_key(preset: str) -> tuple[float, str]:
+    """尺寸档位的排序键：按数值前缀升序，其次按字典序保证稳定。
+
+    字典序会把 1.5K 排在 1K 之前，与档位的数值视觉顺序相反；数值前缀无法解析的
+    档位排在末尾，不阻断排序。
+    """
+    try:
+        return (float(preset.removesuffix("K")), preset)
+    except ValueError:
+        return (float("inf"), preset)
+
+
 def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:
     """将任意输入校验并转换为 [min_value, max_value] 内的整数，非法值抛出 SeedreamValidationError。"""
     if isinstance(value, bool):
@@ -410,8 +422,11 @@ def validate_stream(stream: bool, model_id: str) -> bool:
         原样返回 stream。
 
     Raises:
-        SeedreamValidationError: stream 为真且模型不支持流式输出时抛出。
+        SeedreamValidationError: stream 非布尔值，或 stream 为真且模型不支持
+            流式输出时抛出。
     """
+    if not isinstance(stream, bool):
+        raise SeedreamValidationError("stream 必须为布尔值", field="stream", value=stream)
 
     caps = get_model_capabilities(model_id)
     if stream and not caps.supports_stream:
@@ -444,13 +459,15 @@ def validate_max_images(max_images: Any) -> int:
 # ==================== 尺寸验证函数 ====================
 
 
-def validate_size(size: str, *, layer_decomposition: bool = False) -> str:
+def validate_size(size: str, *, layer_decomposition: bool = False, model_id: str = "") -> str:
     """验证图像尺寸参数是否在允许的范围内。
 
     Args:
         size: 图像尺寸规格，支持 1K/1.5K/2K/3K/4K 或 <宽>x<高>。
         layer_decomposition: 是否处于图层拆分场景，true 时额外接受按输入图
             尺寸自适应的 "auto"。
+        model_id: 模型标识符，图层拆分场景拒绝像素值时按该模型能力声明的档位
+            白名单生成错误文案；缺省时按未知家族的全集档位表述。
 
     Returns:
         大写格式的标准化尺寸值；图层拆分场景的 auto 归一为小写返回。
@@ -475,10 +492,17 @@ def validate_size(size: str, *, layer_decomposition: bool = False) -> str:
     if layer_decomposition and normalized.lower() == "auto":
         return "auto"
 
-    # 图层拆分场景仅支持分辨率档位与 auto，不支持宽高像素值方式。
+    # 图层拆分场景仅支持分辨率档位与 auto，不支持宽高像素值方式；档位清单从模型
+    # 能力声明动态派生，与档位放行判定保持同一数据来源。
     if layer_decomposition:
+        presets_text = "/".join(
+            sorted(
+                get_model_capabilities(model_id).allowed_presets,
+                key=_preset_numeric_sort_key,
+            )
+        )
         raise SeedreamValidationError(
-            "图层拆分场景的 size 仅支持分辨率档位（1K/1.5K/2K）或 auto",
+            f"图层拆分场景的 size 仅支持分辨率档位（{presets_text}）或 auto",
             field="size",
             value=size,
         )
@@ -515,7 +539,7 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     Raises:
         SeedreamValidationError: 当尺寸与模型不兼容时抛出。
     """
-    size = validate_size(size, layer_decomposition=layer_decomposition)
+    size = validate_size(size, layer_decomposition=layer_decomposition, model_id=model_id)
     caps = get_model_capabilities(model_id)
 
     if size == "auto":
@@ -530,7 +554,7 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     # 分辨率档位校验：各家族支持的档位白名单由能力表声明。
     if size in VALID_SIZE_PRESETS:
         if size not in caps.allowed_presets:
-            presets_str = "/".join(sorted(caps.allowed_presets))
+            presets_str = "/".join(sorted(caps.allowed_presets, key=_preset_numeric_sort_key))
             raise SeedreamValidationError(
                 f"在 {caps.display_name} 模型下仅支持 {presets_str}，"
                 "请调整 size 参数或更换为支持该尺寸的模型",

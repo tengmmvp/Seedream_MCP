@@ -155,6 +155,38 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     assert cleanup_calls == [30, 30]
 
 
+async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
+    tmp_path: Path,
+) -> None:
+    """cleanup_days=0 且 max_total_bytes=None 时遗留 .part 孤儿仍被清扫。
+
+    遗留临时文件清扫不受清理开关门控：auto-save 启用但两项清理均显式关闭的部署下，
+    进程崩溃遗留的 .part 不无界累积。宽限期内的 .part 不受清扫影响。
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    auto_save_module._cleanup_last_run.clear()
+    stale_part = tmp_path / "tmpabc123.png.part"
+    stale_part.write_bytes(b"x" * 30)
+    stale_time = (datetime.now() - timedelta(days=2)).timestamp()
+    os.utime(stale_part, (stale_time, stale_time))
+    fresh_part = tmp_path / "tmpdef456.png.part"
+    fresh_part.write_bytes(b"y" * 10)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0, max_total_bytes=None)
+    try:
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+
+        assert not stale_part.exists()
+        assert fresh_part.exists()
+    finally:
+        await manager.close()
+
+
 async def test_maybe_cleanup_retries_after_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -436,3 +436,50 @@ def test_build_display_entries_sanitizes_file_name_credentials(
     assert "secret" not in lines[0]
     assert "secret" not in entries[0]["path"]
     assert "***" in entries[0]["path"]
+
+
+@pytest.mark.asyncio
+async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
+    workspace_root: Path,
+) -> None:
+    """无效目录错误消息经净化截断，不整体回显超长输入与凭据样式片段。
+
+    以 // 前缀构造跨平台命中的 UNC 路径，normalize_path 在 resolve 前拒绝并携带
+    完整原始路径抛 ValueError；错误消息须收敛到错误文本输出上限内，且输入中的
+    api_key 裸值被脱敏。
+    """
+    directory = "//server/share/api_key=secret" + "a" * 900
+    assert len(directory) <= 1024  # schema 侧 max_length 内，进入 handler 触发拒绝
+
+    result = await handle_browse_images(BrowseImagesInput(directory=directory))
+
+    assert result.isError is True
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "目录路径无效" in text
+    assert "secret" not in text
+    # 截断保留前 500 字符并附带截断标注，上限按标注开销放宽。
+    assert len(text) <= 540
+    assert isinstance(result.structuredContent, dict)
+    structured_message = result.structuredContent["error"]["message"]
+    assert "secret" not in structured_message
+
+
+@pytest.mark.asyncio
+async def test_browse_images_unsupported_format_message_sanitized(
+    workspace_root: Path,
+) -> None:
+    """全不支持后缀的区分消息中，用户 filter 的凭据样式片段被脱敏。
+
+    仅净化用户提交的 filter 串，静态支持列表保持完整可读，消息仍含区分表述。
+    """
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", format_filter=["api_key=secret"])
+    )
+
+    assert result.isError is False
+    assert isinstance(result.structuredContent, dict)
+    assert result.structuredContent["status"] == "empty"
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "均不在支持列表" in text
+    assert "secret" not in text
+    assert "***" in text

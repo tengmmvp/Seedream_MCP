@@ -339,7 +339,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "name": "seedream_image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": "images/2026/08/15/portrait.jpeg"
+    "image": ".seedream/images/2026/08/15/portrait.jpeg"
   }
 }
 ```
@@ -394,8 +394,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      "images/2026/08/15/person_a.jpeg",
-      "images/2026/08/15/person_b.jpeg"
+      ".seedream/images/2026/08/15/person_a.jpeg",
+      ".seedream/images/2026/08/15/person_b.jpeg"
     ]
   }
 }
@@ -409,8 +409,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "arguments": {
     "prompt": "把产品图与品牌 Logo 融合为一张海报主视觉",
     "image": [
-      "images/product_front.png",
-      "images/product_side.png",
+      ".seedream/images/product_front.png",
+      ".seedream/images/product_side.png",
       "https://example.com/logo.png"
     ],
     "size": "2K",
@@ -466,8 +466,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "arguments": {
     "prompt": "以参考图中的角色为主角，绘制三格探险漫画",
     "image": [
-      "images/2026/08/15/hero_front.jpeg",
-      "images/2026/08/15/hero_side.jpeg"
+      ".seedream/images/2026/08/15/hero_front.jpeg",
+      ".seedream/images/2026/08/15/hero_side.jpeg"
     ],
     "max_images": 3,
     "size": "2K",
@@ -510,7 +510,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 {
   "name": "seedream_browse_images",
   "arguments": {
-    "directory": "images",
+    "directory": ".seedream/images",
     "recursive": true,
     "limit": 20,
     "format_filter": [".jpeg", ".png"]
@@ -634,11 +634,11 @@ SEEDREAM_MAX_RETRIES=3                      # API 呼叫最大重試次數（429
 
 # 日誌
 LOG_LEVEL=INFO                              # 日誌級別（DEBUG / INFO / WARNING / ERROR / CRITICAL）
-LOG_FILE=logs/seedream_mcp.log              # 日誌檔案路徑
+LOG_FILE=                                   # 日誌檔案路徑（預設 .seedream/logs/seedream_mcp.log，相對行程工作目錄解析）
 
 # 自動儲存
 SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
+SEEDREAM_AUTO_SAVE_BASE_DIR=                # 圖片儲存根目錄（預設 <工作區根>/.seedream/images，工作區根取 MCP Roots 首項或 SEEDREAM_WORKSPACE_ROOT）
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒）
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下載失敗最大重試次數（0 表示不重試）
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 單張圖片大小上限（位元組，預設 50MB）；另兼作流式單事件截斷閾值與回應體讀取上限的推導基準

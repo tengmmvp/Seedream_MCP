@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import ClassVar, Protocol, cast
+from typing import Annotated, ClassVar, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -124,7 +124,7 @@ class _SingleImageInput(BaseModel):
     image: str = Field(
         ...,
         description="参考图片，支持 URL、data URI（data:image/*;base64,...）、本地文件路径。"
-        "例如：https://example.com/ref.png 或 ./images/portrait.jpg。",
+        "例如：https://example.com/ref.png 或 ./.seedream/images/portrait.jpg。",
     )
 
     @field_validator("image")
@@ -150,7 +150,7 @@ class _MultiImageInput(BaseModel):
         description=(
             f"图片列表，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
             f"数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
-            '例如：["https://example.com/a.png", "./images/b.jpg"]。'
+            '例如：["https://example.com/a.png", "./.seedream/images/b.jpg"]。'
         ),
     )
 
@@ -495,6 +495,7 @@ class BrowseImagesInput(BaseModel):
 
     directory: str | None = Field(
         default=None,
+        max_length=1024,
         description=(
             "要浏览的目录路径，默认浏览工作区根目录，即 MCP Roots 授权的首个根；"
             "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
@@ -524,7 +525,9 @@ class BrowseImagesInput(BaseModel):
         description="分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
         "上限防止无界偏移触发全量扫描。",
     )
-    format_filter: list[str] | None = Field(
+    # 后缀为 jpeg/png 一类短词，单项上限 16 仅拒绝异常超长输入，防止错误消息
+    # 对超大字符串整体回显。
+    format_filter: list[Annotated[str, Field(max_length=16)]] | None = Field(
         default=None,
         description=(
             "需要过滤的图片后缀列表，如 ['.jpeg', '.png']；仅保留受支持的后缀。"

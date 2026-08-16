@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from ...utils.core.errors import sanitize_data_text, sanitize_error_text
+from ...utils.core.errors import (
+    normalize_message_text,
+    sanitize_data_text,
+    sanitize_error_text,
+)
 from ...utils.io.io_save import AutoSaveResult
 from ._helpers import (
     _add_usage_value,
@@ -419,12 +423,16 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _format_failure_section(result: dict[str, Any]) -> str:
     """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。
 
-    error 文本为上游自由内容，出口处过 sanitize_error_text 与异常路径防护一致。
+    error 文本为上游自由内容，出口处过 sanitize_error_text 与异常路径防护一致；
+    message 的非字符串形态先经 normalize_message_text 归一化为文本再净化，凭据
+    不借 dict/list 形态在净化之后经插值穿透文本通道。
     """
     raw_error = result.get("error", "未知错误")
     # error 形态为 dict 时取其 message，形态为 str 时直接使用，避免字典 repr 进入用户可见文本。
     error_text = sanitize_error_text(
-        raw_error.get("message", str(raw_error)) if isinstance(raw_error, dict) else raw_error
+        normalize_message_text(
+            raw_error.get("message", str(raw_error)) if isinstance(raw_error, dict) else raw_error
+        )
     )
     failure_message = f"图片生成失败: {error_text}"
     batch_info = result.get("batch")
@@ -439,7 +447,7 @@ def _format_failure_section(result: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         request_index = item.get("request_index")
-        error_message = sanitize_error_text(item.get("message", "请求失败"))
+        error_message = sanitize_error_text(normalize_message_text(item.get("message", "请求失败")))
         if request_index is None:
             parts.append(f"  {error_message}")
         else:
@@ -728,8 +736,12 @@ def _build_generation_structured_result(
         raw_error = result.get("error", "未知错误")
         if isinstance(raw_error, dict):
             sanitized_error = dict(raw_error)
-            if isinstance(sanitized_error.get("message"), str):
-                sanitized_error["message"] = sanitize_error_text(sanitized_error["message"])
+            # message 为上游自由内容且可为任意 JSON 形态：非字符串先归一化为文本再
+            # 净化，dict/list 的凭据不借原值直通 structuredContent.error.message。
+            if "message" in sanitized_error:
+                sanitized_error["message"] = sanitize_error_text(
+                    normalize_message_text(sanitized_error["message"])
+                )
             # code 同为上游自由文本，200 加顶层 error 的请求级失败经 client 透传
             # 到此，CRLF 与凭据片段不借错误码进入 structuredContent。
             if isinstance(sanitized_error.get("code"), str):
@@ -737,7 +749,8 @@ def _build_generation_structured_result(
             payload["error"] = sanitized_error
         else:
             payload["error"] = build_error_dict(
-                "generation_failed", sanitize_error_text(str(raw_error))
+                "generation_failed",
+                sanitize_error_text(normalize_message_text(raw_error)),
             )
 
     output = GenerationStructuredOutput(**payload)

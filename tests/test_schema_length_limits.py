@@ -1,15 +1,15 @@
 """工具输入 schema 字符串边界测试。
 
 pydantic 在 core schema 层强制 max_length 约束，超长值在字段校验器运行前即被拒绝。
-覆盖 prompt（100000）/save_path（1024）/custom_name（255）的接受与超长拒绝边界，
-以及单图 image 的空白拒绝边界，锁定 inputSchema 约束不被回归。统一使用 model_validate
-构造输入。
+覆盖 prompt（100000）/save_path（1024）/custom_name（255）/browse directory（1024）/
+browse format_filter 单项（16）的接受与超长拒绝边界，以及单图 image 的空白拒绝边界，
+锁定 inputSchema 约束不被回归。统一使用 model_validate 构造输入。
 """
 
 import pytest
 from pydantic import ValidationError
 
-from seedream_mcp.tools.core.schemas import ImageToImageInput, TextToImageInput
+from seedream_mcp.tools.core.schemas import BrowseImagesInput, ImageToImageInput, TextToImageInput
 
 
 def test_prompt_accepts_max_length_boundary() -> None:
@@ -49,6 +49,32 @@ def test_custom_name_rejects_exceeding_max_length() -> None:
     """custom_name 长度 256 应被 pydantic 拒绝。"""
     with pytest.raises(ValidationError):
         TextToImageInput.model_validate({"prompt": "x", "custom_name": "a" * 256})
+
+
+def test_browse_directory_accepts_max_length_boundary() -> None:
+    """browse directory 长度恰为 1024 应被接受。"""
+    model = BrowseImagesInput.model_validate({"directory": "a" * 1024})
+
+    assert len(model.directory) == 1024
+
+
+def test_browse_directory_rejects_exceeding_max_length() -> None:
+    """browse directory 长度 1025 应被 pydantic 拒绝，错误消息不再整体回显超长输入。"""
+    with pytest.raises(ValidationError):
+        BrowseImagesInput.model_validate({"directory": "a" * 1025})
+
+
+def test_browse_format_filter_accepts_item_max_length_boundary() -> None:
+    """format_filter 单项长度恰为 16 应被接受。"""
+    model = BrowseImagesInput.model_validate({"format_filter": ["a" * 16]})
+
+    assert model.format_filter == ["." + "a" * 16]
+
+
+def test_browse_format_filter_rejects_exceeding_item_max_length() -> None:
+    """format_filter 单项长度 17 应被 pydantic 拒绝。"""
+    with pytest.raises(ValidationError):
+        BrowseImagesInput.model_validate({"format_filter": ["a" * 17]})
 
 
 def test_single_image_rejects_blank_string() -> None:

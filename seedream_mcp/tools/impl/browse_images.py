@@ -23,7 +23,7 @@ from ..core._helpers import (
 )
 from ..core.outputs import BrowseImagesStructuredOutput, build_error_dict
 from ..core.schemas import BrowseImagesInput
-from ...utils.core.errors import format_error_for_user, sanitize_data_text
+from ...utils.core.errors import format_error_for_user, sanitize_data_text, sanitize_error_text
 from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
 from ...utils.io.io_scan import cached_find_images_in_directory
@@ -444,7 +444,9 @@ async def _handle_browse_images_impl(
             try:
                 absolute_dir = normalize_path(state.directory)
             except ValueError as exc:
-                return resolved_root_list, [], f"目录路径无效: {exc}"
+                # 异常消息内含完整用户输入路径，经净化截断后才进入文本与结构化
+                # 错误两条通道，与生成侧 format_error_for_user 的出口防护对齐。
+                return resolved_root_list, [], sanitize_error_text(f"目录路径无效: {exc}")
             if not any(is_within_resolved(absolute_dir, base) for base in resolved_root_list):
                 return resolved_root_list, [], None
             resolved_dir_list.append(absolute_dir)
@@ -549,7 +551,12 @@ async def _handle_browse_images_impl(
     if not images:
         if format_filter_exhausted:
             supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
-            user_formats = ", ".join(state.format_filter) if state.format_filter else ""
+            # 用户提交的 filter 字符串经错误文本净化出口收敛后拼入消息，凭据样式
+            # 片段被脱敏、超长输入被截断；支持列表为静态服务端数据，不参与净化，
+            # 保留完整可读。
+            user_formats = (
+                sanitize_error_text(", ".join(state.format_filter)) if state.format_filter else ""
+            )
             message = f"指定的图片格式 {user_formats} 均不在支持列表内，支持: {supported_list}。"
             log_message = "图片格式过滤条件全部不受支持"
         elif total_count:

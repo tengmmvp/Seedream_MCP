@@ -102,7 +102,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--model",
         choices=list(MODEL_ALIASES.keys()),
         default=None,
-        help="模型选择（默认按配置或内置默认值）",
+        help="模型别名（默认按配置或内置默认值）；完整 Model ID 或 Endpoint ID 需经"
+        "环境变量 SEEDREAM_MODEL_ID 传入",
     )
     parser.add_argument(
         "--default-size",

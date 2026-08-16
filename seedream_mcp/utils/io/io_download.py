@@ -668,8 +668,11 @@ class DownloadManager:
             raise DownloadError("重定向次数过多")
         next_url = urljoin(current_url, location)
         # 拒绝协议降级：https 起始的下载不允许经重定向落到 http，消除降级到明文链路
-        # 的攻击面，与逐跳完整校验共同收紧重定向信任边界。
-        if urlparse(current_url).scheme == "https" and urlparse(next_url).scheme != "https":
+        # 的攻击面，与逐跳完整校验共同收紧重定向信任边界。scheme 先归一化小写再
+        # 比较，与 _url_origin 和 _validate_url_static 的既有口径一致。
+        current_scheme = (urlparse(current_url).scheme or "").lower()
+        next_scheme = (urlparse(next_url).scheme or "").lower()
+        if current_scheme == "https" and next_scheme != "https":
             raise DownloadError("重定向目标协议不允许降级到 https 之外")
         return next_url
 

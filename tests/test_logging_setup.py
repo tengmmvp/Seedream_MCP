@@ -3,9 +3,12 @@
 import asyncio
 import logging
 from collections import namedtuple
+from collections.abc import Generator
+from pathlib import Path
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from seedream_mcp.utils.core.logs import (
     _strip_message_control_chars,
@@ -115,6 +118,60 @@ def test_setup_logging_suppresses_third_party_info_noise(
 
     for name in ("urllib3", "aiohttp", "asyncio", "httpx"):
         assert logging.getLogger(name).level == logging.WARNING
+
+
+# ==================== 文件日志默认路径与桥接帧定位 ====================
+
+
+@pytest.fixture
+def _real_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path]:
+    """在 tmp 工作目录以真实 loguru 初始化文件日志，返回默认日志文件路径。
+
+    结束时移除全局 sink、重置全局 patcher 并恢复标准库 root handlers，
+    不向后续用例泄漏全局日志状态。
+    """
+    monkeypatch.chdir(tmp_path)
+    root_handlers = list(logging.getLogger().handlers)
+    try:
+        # force 强制重装 root handlers 使 InterceptHandler 生效，与生产调用参数一致；
+        # 缺省 force=False 在 root 已有 handler 时不会安装桥接器
+        setup_logging(
+            log_level="INFO",
+            enable_console=False,
+            enable_file=True,
+            force_standard_logging=True,
+        )
+        yield tmp_path / ".seedream" / "logs" / "seedream_mcp.log"
+    finally:
+        logger.remove()
+        logger.configure(patcher=None)
+        logging.getLogger().handlers = root_handlers
+
+
+def test_setup_logging_default_file_lands_under_seedream_logs(
+    _real_file_logging: Path,
+) -> None:
+    """未显式传入 log_file 时，日志文件落在进程工作目录的 .seedream/logs 下。"""
+    logger.info("probe default path")
+
+    logger.complete()
+
+    assert _real_file_logging.is_file()
+    assert "probe default path" in _real_file_logging.read_text(encoding="utf-8")
+
+
+def test_intercept_handler_locates_real_caller_frame(
+    _real_file_logging: Path,
+) -> None:
+    """标准库桥接日志的调用位置是真实调用方模块，而非 logging 内部帧。"""
+    logging.getLogger("bridge.probe").warning("via stdlib bridge")
+
+    logger.complete()
+
+    content = _real_file_logging.read_text(encoding="utf-8")
+    assert "via stdlib bridge" in content
+    assert "logging:callHandlers" not in content
+    assert "test_logging_setup:" in content
 
 
 # ==================== 控制字符 patcher ====================

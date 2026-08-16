@@ -1,0 +1,18 @@
+# 行尾策略：文本文件入库与检出统一 LF，跨平台行为一致；
+# 声明覆盖各贡献者的 core.autocrlf 本地配置，仓库自带约定。
+* text=auto eol=lf
+
+# Windows 脚本须保持 CRLF 才能在 cmd 下正确执行
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件禁用行尾与编码转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.gz binary

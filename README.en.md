@@ -339,7 +339,7 @@ Basic call:
   "name": "seedream_image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": "images/2026/08/15/portrait.jpeg"
+    "image": ".seedream/images/2026/08/15/portrait.jpeg"
   }
 }
 ```
@@ -394,8 +394,8 @@ Basic call:
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      "images/2026/08/15/person_a.jpeg",
-      "images/2026/08/15/person_b.jpeg"
+      ".seedream/images/2026/08/15/person_a.jpeg",
+      ".seedream/images/2026/08/15/person_b.jpeg"
     ]
   }
 }
@@ -409,8 +409,8 @@ Optional parameter combination (`image` list mixing local paths and URLs + size 
   "arguments": {
     "prompt": "把产品图与品牌 Logo 融合为一张海报主视觉",
     "image": [
-      "images/product_front.png",
-      "images/product_side.png",
+      ".seedream/images/product_front.png",
+      ".seedream/images/product_side.png",
       "https://example.com/logo.png"
     ],
     "size": "2K",
@@ -466,8 +466,8 @@ Optional parameter combination (reference image list + `max_images` + size + wat
   "arguments": {
     "prompt": "以参考图中的角色为主角，绘制三格探险漫画",
     "image": [
-      "images/2026/08/15/hero_front.jpeg",
-      "images/2026/08/15/hero_side.jpeg"
+      ".seedream/images/2026/08/15/hero_front.jpeg",
+      ".seedream/images/2026/08/15/hero_side.jpeg"
     ],
     "max_images": 3,
     "size": "2K",
@@ -510,7 +510,7 @@ Optional parameter combination (directory + recursion + result cap + format filt
 {
   "name": "seedream_browse_images",
   "arguments": {
-    "directory": "images",
+    "directory": ".seedream/images",
     "recursive": true,
     "limit": 20,
     "format_filter": [".jpeg", ".png"]
@@ -634,11 +634,11 @@ SEEDREAM_MAX_RETRIES=3                      # Max retries for API calls (retries
 
 # Logging
 LOG_LEVEL=INFO                              # Log level (DEBUG / INFO / WARNING / ERROR / CRITICAL)
-LOG_FILE=logs/seedream_mcp.log              # Log file path
+LOG_FILE=                                   # Log file path (default .seedream/logs/seedream_mcp.log, resolved relative to the process working directory)
 
 # Auto-save
 SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=./seedream_images
+SEEDREAM_AUTO_SAVE_BASE_DIR=                # Image save root directory (default <workspace root>/.seedream/images; workspace root is the first MCP Root or SEEDREAM_WORKSPACE_ROOT)
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds)
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # Max retries for failed downloads (0 disables retry)
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB); also the derivation base for the stream single-event truncate threshold and the response-body read limit

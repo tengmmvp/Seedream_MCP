@@ -36,10 +36,10 @@ services:
       - SEEDREAM_MAX_RETRIES=${SEEDREAM_MAX_RETRIES:-3}
       # 日志
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LOG_FILE=${LOG_FILE:-logs/seedream_mcp.log}
+      - LOG_FILE=${LOG_FILE:-.seedream/logs/seedream_mcp.log}
       # 自动保存
       - SEEDREAM_AUTO_SAVE_ENABLED=${SEEDREAM_AUTO_SAVE_ENABLED:-true}
-      - SEEDREAM_AUTO_SAVE_BASE_DIR=${SEEDREAM_AUTO_SAVE_BASE_DIR:-/app/seedream_images}
+      - SEEDREAM_AUTO_SAVE_BASE_DIR=${SEEDREAM_AUTO_SAVE_BASE_DIR:-/app/.seedream/images}
       - SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=${SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT:-30}
       - SEEDREAM_AUTO_SAVE_MAX_RETRIES=${SEEDREAM_AUTO_SAVE_MAX_RETRIES:-3}
       - SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=${SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE:-52428800}
@@ -63,11 +63,11 @@ services:
       # streamable-http 请求体大小上限(字节,≥1MB)
       - SEEDREAM_HTTP_MAX_BODY_SIZE=${SEEDREAM_HTTP_MAX_BODY_SIZE:-67108864}
     volumes:
-      # 保存生成的图片到本地
-      - ./seedream_images:/app/seedream_images
-      # 保存日志文件到本地
-      - ./logs:/app/logs
-      # 可以挂载配置文件(完整配置项见 .env.example)
+      # 持久化运行时产物(生成的图片与日志)到本地 .seedream 目录;
+      # Linux 宿主上 Docker 自动创建的挂载目录归 root,需先 chown 为容器内非 root 用户可写
+      - ./.seedream:/app/.seedream
+      # 挂载配置文件(完整配置项见 .env.example);宿主未创建 .env 时 Docker 会
+      # 自动创建同名目录,需先删除该目录再创建 .env 文件
       - ./.env:/app/.env:ro
     healthcheck:
       # 探测 streamable-http 端口监听,验证服务已启动(比仅校验 import 更可靠)

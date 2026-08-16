@@ -90,8 +90,8 @@ def test_validate_size_for_model_accepts_seedream_50_pro_2k_preset() -> None:
 
 def test_validate_size_for_model_rejects_seedream_50_pro_3k_preset() -> None:
     # 关键回归：5.0 Pro 的 id 含 "doubao-seedream-5-0" 子串，若误判为 5.0 Lite 则 3K 会通过
-    # 档位串接经 sorted 字典序排列，1.5K 排在 1K 之前。
-    with pytest.raises(SeedreamValidationError, match="仅支持 1.5K/1K/2K"):
+    # 档位串接按数值序排列，1K 排在 1.5K 之前。
+    with pytest.raises(SeedreamValidationError, match=r"仅支持 1K/1\.5K/2K"):
         validate_size_for_model("3K", "doubao-seedream-5-0-pro-260628")
 
 

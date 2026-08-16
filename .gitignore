@@ -191,7 +191,6 @@ Thumbs.db
 # ================================
 
 # 日志文件
-logs/
 *.log
 
 # 临时文件
@@ -199,9 +198,8 @@ tmp/
 temp/
 .tmp/
 
-# 生成的图片和输出
-/images/
-seedream_images/
+# 运行时产物目录（生成的图片与日志）
+.seedream/
 
 # 项目构建产物
 seedream_mcp.egg-info/

@@ -86,12 +86,12 @@ class FileManager:
         """初始化文件管理器并确保基础目录存在。
 
         Args:
-            base_dir: 图片保存基础目录。默认为当前工作目录下的 images 文件夹。
+            base_dir: 图片保存基础目录。默认为当前工作目录下的 .seedream/images 文件夹。
 
         Raises:
             FileManagerError: 基础目录解析失败或指向已存在文件。
         """
-        raw_base = Path.cwd() / "images" if base_dir is None else Path(base_dir)
+        raw_base = Path.cwd() / ".seedream" / "images" if base_dir is None else Path(base_dir)
         try:
             resolved = raw_base.resolve()
         except (OSError, ValueError) as e:
@@ -449,17 +449,17 @@ class FileManager:
             return f"![]({markdown_path})"
 
     def run_cleanup_policies(self, days: int, max_total_bytes: int | None) -> dict[str, Any]:
-        """单次目录扫描依次执行按天清理与总量配额驱逐，供节流清理入口复用。
+        """单次目录扫描依次执行按天清理、总量配额驱逐与遗留临时文件清扫。
 
-        共享一次遍历结果执行两策略，避免重复全目录 os.walk。按天策略经 _apply_age_policy
-        实现并删除空目录；配额驱逐基于按天清理后的
-        剩余文件计算，剔除已删条目避免对已删路径重复 unlink。days 小于 1 跳过按天清理，
-        max_total_bytes 为 None 跳过配额驱逐。
+        共享一次遍历结果执行三项处理，避免重复全目录 os.walk。按天策略经 _apply_age_policy
+        删除过期文件；配额驱逐基于按天清理后的剩余文件计算，剔除已删条目避免对已删路径
+        重复 unlink。days 小于 1 跳过按天清理，max_total_bytes 为 None 跳过配额驱逐，
+        .part 清扫与空目录回收不受两项清理开关门控。
 
         注意：空目录清理针对 base_dir 内全部空目录且独立于按天门控执行，不区分目录
         是否由本服务创建；用户在保存目录内自行维护的空目录（如占位目录）也会被移除，
         需保留目录结构请在目录内放置占位文件。清理末尾还会清扫超龄的 .part 遗留临时
-        文件（详见 _sweep_orphan_part_files），共享目录部署下其他工具的半成品下载在
+        文件，行为详见 _sweep_orphan_part_files，共享目录部署下其他工具的半成品下载在
         宽限期内不受影响。
 
         Args:
@@ -473,7 +473,7 @@ class FileManager:
         deleted_files = 0
         deleted_size = 0
         try:
-            all_files, directories = self._collect_all_files(errors)
+            all_files, part_files, directories = self._collect_all_files(errors)
             remaining_files = all_files
             if days >= 1:
                 deleted_names, age_deleted_size = self._apply_age_policy(all_files, days, errors)
@@ -492,7 +492,7 @@ class FileManager:
                 deleted_size += quota_deleted_size
             # 临时文件清扫先于空目录回收：仅含遗留 .part 的目录在清扫后变空，本轮
             # prune 即可回收，不留待下一次节流间隔。
-            swept_files, swept_size = self._sweep_orphan_part_files(errors)
+            swept_files, swept_size = self._sweep_orphan_part_files(part_files, errors)
             deleted_files += swept_files
             deleted_size += swept_size
             # 空目录清理独立于按天门控执行：CLEANUP_DAYS=0 且仅配置总量配额的部署下，
@@ -503,59 +503,37 @@ class FileManager:
             logger.error("清理过程出错: {}", e)
         return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
 
-    def _sweep_orphan_part_files(self, errors: list[str]) -> tuple[int, int]:
-        """删除保存目录内超龄遗留的 .part 临时文件，返回删除数量与释放字节数。
+    @staticmethod
+    def _sweep_orphan_part_files(
+        part_files: list[tuple[Path, int, float]], errors: list[str]
+    ) -> tuple[int, int]:
+        """删除超龄遗留的 .part 临时文件，返回删除数量与释放字节数。
 
         常规清理扫描仅收集受支持图片扩展名，.part 临时文件在进程崩溃或临时清理
         失败时遗留且不在其列，不经清扫将永久累积。仅删除 mtime 早于宽限值的条目：
         在途下载与写入的临时文件恒新于宽限值，与后台清理并发时不被击杀；.part 亦
         为常见下载工具的半成品命名，共享目录部署下其他工具的在途文件同样受宽限
-        保护。遍历防护与 _collect_all_files 同口径：下降前剪除符号链接与 reparse
-        point 目录，防删除动作经 junction 物理越出 base_dir；文件经 lstat 链复核
-        为常规文件后才进入删除。
+        保护。候选由 _collect_all_files 在同一目录遍历中顺带收集，遍历防护口径为
+        下降前剪除符号链接与 reparse point 目录、root 与子目录 within-base 复核、
+        文件级 lstat 链与 S_ISREG 判定，防删除动作经 junction 物理越出 base_dir。
+        本方法基于收集时的 mtime 与字节数执行宽限过滤与删除，两阶段结构与按天
+        清理一致。
         """
         now = datetime.now().timestamp()
         deleted = 0
         deleted_size = 0
-        for dirpath, dirnames, filenames in os.walk(self.base_dir, followlinks=False):
-            # 下降前原地剪除符号链接与 reparse point 子目录：os.walk 不拦截 junction，
-            # 下降后的路径检查无法阻止对目标内容的遍历与删除。
-            dirnames[:] = [
-                name for name in dirnames if not self._is_unsafe_directory(Path(dirpath, name))
-            ]
-            for name in filenames:
-                if not name.endswith(".part"):
-                    continue
-                target = Path(dirpath) / name
-                try:
-                    st = target.lstat()
-                except OSError:
-                    continue
-                if stat.S_ISLNK(st.st_mode) or _has_reparse_attribute(st):
-                    continue
-                if not stat.S_ISREG(st.st_mode):
-                    continue
-                if now - st.st_mtime < _PART_SWEEP_GRACE_SECONDS:
-                    continue
-                try:
-                    target.unlink()
-                    deleted += 1
-                    deleted_size += st.st_size
-                except OSError as e:
-                    errors.append(f"临时文件清理失败: {target} -> {e}")
+        for file_path, size, mtime in part_files:
+            if now - mtime < _PART_SWEEP_GRACE_SECONDS:
+                continue
+            try:
+                file_path.unlink()
+                deleted += 1
+                deleted_size += size
+            except OSError as e:
+                errors.append(f"临时文件清理失败: {file_path} -> {e}")
         if deleted:
             logger.info("清扫超龄遗留临时文件 {} 个", deleted)
         return deleted, deleted_size
-
-    @staticmethod
-    def _is_unsafe_directory(path: Path) -> bool:
-        """判断目录条目是否为符号链接或 reparse point，供遍历下降前剪除。"""
-        try:
-            if path.is_symlink():
-                return True
-        except OSError:
-            return True
-        return _is_reparse_point(path)
 
     def _apply_age_policy(
         self,
@@ -613,8 +591,8 @@ class FileManager:
 
     def _collect_all_files(
         self, errors: list[str]
-    ) -> tuple[list[tuple[Path, int, float]], list[Path]]:
-        """遍历基础目录，收集全部普通文件与待评估的空目录候选。
+    ) -> tuple[list[tuple[Path, int, float]], list[tuple[Path, int, float]], list[Path]]:
+        """遍历基础目录，收集图片文件、.part 遗留候选与待评估的空目录候选。
 
         os.walk(followlinks=False) 不下降进入符号链接目录。Windows NTFS junction 属
         reparse point 但 is_symlink 返回 False，followlinks 无法拦截，仍会被下降进入
@@ -623,17 +601,20 @@ class FileManager:
         之外的条目造成数据破坏。os.walk 下降 junction 时已发生的 OS 级 listdir 无法在此
         拦截，涉及 NTLM/SMB 出站认证风险，部署方应确保 base_dir 不接受不可信写入。
 
-        一次扫描产出全部 (path, size, mtime) 供按天清理与总量配额两策略共用，按天策略
-        在调用方按 cutoff 过滤，避免两策略各自全目录遍历。
+        一次扫描产出全部 (path, size, mtime) 供按天清理、总量配额与遗留 .part 清扫
+        三者共用，按天策略在调用方按 cutoff 过滤，避免各自重复全目录遍历。.part 候选
+        不依赖图片扩展名过滤，条目名以 .part 结尾即收集。
 
         Args:
             errors: 收集 stat 失败的错误描述列表，与删除阶段共享同一列表。
 
         Returns:
-            (all_files, directories)：all_files 为 (path, size, mtime) 元组列表，
+            (all_files, part_files, directories)：all_files 为受支持图片扩展名文件的
+            (path, size, mtime) 元组列表，part_files 为 .part 结尾条目的同形元组列表，
             directories 为待评估空目录清理的目录列表，不含 base_dir 自身。
         """
         all_files: list[tuple[Path, int, float]] = []
+        part_files: list[tuple[Path, int, float]] = []
         directories: list[Path] = []
         for root, dirs, files in os.walk(self.base_dir, followlinks=False):
             root_path = Path(root)
@@ -676,14 +657,20 @@ class FileManager:
             dirs[:] = pruned_dirs
             for name in files:
                 file_path = root_path / name
-                # 仅收集本服务支持的图片文件，跳过 base_dir 内其他类型文件，避免误删用户数据。
-                if file_path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+                # 仅收集本服务支持的图片文件与 .part 遗留临时文件，跳过 base_dir 内
+                # 其他类型文件，避免误删用户数据。
+                is_image = file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+                if not is_image and not name.endswith(".part"):
                     continue
                 # 单次 lstat 同时判定符号链接与 reparse point 属性：is_symlink 与
                 # _is_reparse_point 各自 lstat 一次，全目录清理时每文件三次 stat。
                 try:
                     lstat_result = file_path.lstat()
                 except OSError as e:
+                    if not is_image:
+                        # 在途下载完成时 .part 条目被原子重命名消失，stat 竞态属正常
+                        # 轮替，不计错误以免误判清理失败回滚节流。
+                        continue
                     errors.append(f"获取文件信息失败 {file_path}: {e}")
                     logger.warning("获取文件信息失败: {} -> {}", file_path, e)
                     continue
@@ -698,11 +685,19 @@ class FileManager:
                     stat_result = file_path.stat()
                     if not stat.S_ISREG(stat_result.st_mode):
                         continue
-                    all_files.append((file_path, stat_result.st_size, stat_result.st_mtime))
+                    entry = (file_path, stat_result.st_size, stat_result.st_mtime)
+                    if is_image:
+                        all_files.append(entry)
+                    else:
+                        part_files.append(entry)
                 except OSError as e:
+                    if not is_image:
+                        # 与 lstat 分支同因：在途下载的 .part 条目完成时被原子重命名
+                        # 消失，stat 竞态属正常轮替，不计错误以免误判清理失败回滚节流。
+                        continue
                     errors.append(f"获取文件信息失败 {file_path}: {e}")
                     logger.warning("获取文件信息失败: {} -> {}", file_path, e)
-        return all_files, directories
+        return all_files, part_files, directories
 
     @staticmethod
     def _delete_expired_files(

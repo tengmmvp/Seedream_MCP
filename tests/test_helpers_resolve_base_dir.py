@@ -88,7 +88,7 @@ def test_resolve_base_dir_returns_default_when_save_path_missing(
 def test_resolve_base_dir_falls_back_to_workspace_images_when_base_dir_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """auto_save_base_dir 为 None 时回退到 get_workspace_root()/images。"""
+    """auto_save_base_dir 为 None 时回退到 get_workspace_root()/.seedream/images。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
@@ -96,7 +96,7 @@ def test_resolve_base_dir_falls_back_to_workspace_images_when_base_dir_none(
 
     resolved = _resolve_base_dir(config, None)
 
-    assert resolved == (workspace / "images").resolve()
+    assert resolved == (workspace / ".seedream" / "images").resolve()
 
 
 def test_validate_image_path_none_base_dir_falls_back_and_enforces_bounds(

@@ -188,6 +188,31 @@ def test_format_error_for_user_redacts_bearer_in_api_error_message() -> None:
     assert "Bearer ***" in rendered
 
 
+# ==================== format_error_for_user 错误码提示净化 ====================
+
+
+def test_format_error_for_user_sanitizes_error_code_hint() -> None:
+    """code_hint 过净化管线：控制字符压平、凭据片段剥离，伪造行不进入用户可见输出。"""
+    err = SeedreamAPIError(message="boom", error_code="x\r\nFAKE api_key: SECRET")
+
+    rendered = format_error_for_user(err)
+
+    assert "\r" not in rendered
+    assert "\n" not in rendered
+    assert "SECRET" not in rendered
+    assert "api_key: ***" in rendered
+
+
+def test_format_error_for_user_truncates_overlong_error_code() -> None:
+    """超长错误码在 code_hint 拼接前被截断，用户可见输出长度受上限约束。"""
+    err = SeedreamAPIError(message="boom", error_code="C" * 900)
+
+    rendered = format_error_for_user(err)
+
+    assert "<truncated:900 chars>" in rendered
+    assert rendered.count("C") == 500
+
+
 # ==================== details 字段脱敏（to_dict 一致性） ====================
 
 
@@ -916,6 +941,33 @@ def test_filter_sensitive_data_redacts_space_separated_api_key_dict_key() -> Non
     """dict 键 "api key" 的值被脱敏，与自由文本空格复合分支策略一致。"""
     filtered = _filter_sensitive_data({"api key": "AKIA1", "note": "v"})
     assert filtered == {"api key": "***", "note": "v"}
+
+
+# ==================== 复合键中段关键词命中 ====================
+
+
+def test_is_sensitive_key_matches_mid_segment_keyword_forms() -> None:
+    """复合键中段的敏感关键词段同样命中，与 docstring 声明及自由文本未锚定口径一致。"""
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    assert _is_sensitive_key("user.session_id") is True
+    assert _is_sensitive_key("a.session_id.b") is True
+    assert _is_sensitive_key("request_session_id") is True
+    assert _is_sensitive_key("request-session-id") is True
+    assert _is_sensitive_key("user auth scope") is True
+    # 对照组：无敏感段的普通复合键不命中，关键词不吞并整词段的相邻字符
+    assert _is_sensitive_key("user.profile.id") is False
+    assert _is_sensitive_key("request-id") is False
+    assert _is_sensitive_key("sessions") is False
+
+
+def test_filter_sensitive_data_redacts_mid_segment_sensitive_keys() -> None:
+    """dict 键路径对关键词位于中段的复合键同样脱敏，与自由文本通道口径一致。"""
+    filtered = _filter_sensitive_data(
+        {"user.session_id": "abc", "request-session-id": "xyz", "keep": "v"}
+    )
+
+    assert filtered == {"user.session_id": "***", "request-session-id": "***", "keep": "v"}
 
 
 def test_keyvalue_key_branches_derive_from_keyword_lists() -> None:

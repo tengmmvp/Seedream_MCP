@@ -29,7 +29,7 @@ ENV PATH="/app/.venv/bin:${PATH}"
 
 # 创建非 root 用户并准备目录
 RUN useradd --create-home --shell /bin/bash seedream \
-    && mkdir -p /app/seedream_images /app/logs \
+    && mkdir -p /app/.seedream/images /app/.seedream/logs \
     && chown -R seedream:seedream /app
 
 # 切换到非 root 用户

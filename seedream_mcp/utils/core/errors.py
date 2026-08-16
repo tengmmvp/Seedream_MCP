@@ -297,6 +297,16 @@ def _normalize_non_str_message(value: Any) -> str:
     return str(value)
 
 
+def normalize_message_text(value: Any) -> str:
+    """将任意形态的错误 message 分量归一化为文本，字符串原样返回。
+
+    dict/list 走 JSON 序列化，其余非字符串取 str，超深嵌套逐级回退到类型占位符。
+    结果净化出口对非字符串 message 先经本函数归一化再过 sanitize_error_text，
+    凭据不借 dict/list 形态在净化之后经插值穿透文本与结构化输出通道。
+    """
+    return value if isinstance(value, str) else _normalize_non_str_message(value)
+
+
 def truncate_upstream_message_fragment(value: Any) -> str:
     """归一化并截断上游错误 message 片段至 8KB，超长时保留前缀并标注原长度。
 
@@ -311,7 +321,7 @@ def truncate_upstream_message_fragment(value: Any) -> str:
     Returns:
         归一化并截断至 8KB 的文本，超长时前缀标注原始长度。
     """
-    text = value if isinstance(value, str) else _normalize_non_str_message(value)
+    text = normalize_message_text(value)
     if len(text) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
         return f"<truncated:{len(text)} chars> {text[:_UPSTREAM_MESSAGE_FRAGMENT_LIMIT]}..."
     return text
@@ -422,7 +432,8 @@ def format_error_for_user(error: Exception) -> str:
 
     展示标题与可操作建议取自 resolve_error_profile 归约档案；message 统一先截断再
     剥离敏感片段，截断上限约束脱敏正则的工作长度，上游回显的长敏感片段不进入用户
-    可见输出；仅 APIError 携带上游错误码时附加错误码提示。
+    可见输出；仅 APIError 携带上游错误码时附加错误码提示，错误码同为上游自由文本，
+    拼入前同样过净化管线。
 
     Args:
         error: 异常实例。
@@ -433,7 +444,11 @@ def format_error_for_user(error: Exception) -> str:
     profile = resolve_error_profile(error)
     if isinstance(error, SeedreamAPIError):
         raw_message = error.message
-        code_hint = f" [错误码: {error.error_code}]" if error.error_code else ""
+        # 错误码是上游可回显的自由文本，拼入前过净化管线：控制字符压平、敏感片段
+        # 剥离、超长截断，与 message 同口径，伪造行与凭据不借错误码进入用户可见输出。
+        code_hint = (
+            f" [错误码: {sanitize_error_text(error.error_code)}]" if error.error_code else ""
+        )
     elif isinstance(error, SeedreamMCPError):
         raw_message = error.message
         code_hint = ""
@@ -528,6 +543,13 @@ _SENSITIVE_KEY_SUBSTRINGS = (
     "sessionkey",
     "authkey",
 )
+
+# 敏感关键词的段集合与键名切分模式：_is_sensitive_key 按切分段的成员判断使用，
+# 集合由关键词清单派生保持单一来源；下划线、连字符、点号、空格四种分隔符经
+# 预编译字符类一次切分完成，热路径上避免逐分隔符多次 split 与逐关键词的
+# 前缀后缀扫描。
+_SENSITIVE_KEY_KEYWORD_SET = frozenset(_SENSITIVE_KEY_KEYWORDS)
+_KEY_SEGMENT_SPLIT_PATTERN = re.compile(r"[_\- .]")
 
 
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出。
@@ -657,9 +679,7 @@ def _redact_sensitive_message(value: Any) -> str:
     _sanitize_output_string，与 details/value/response_data 等结构化字段共用同一
     净化实现，避免两处脱敏逻辑漂移。
     """
-    if not isinstance(value, str):
-        value = _normalize_non_str_message(value)
-    return cast("str", _sanitize_output_string(value))
+    return cast("str", _sanitize_output_string(normalize_message_text(value)))
 
 
 def _sanitize_message_for_output(value: Any, limit: int = _MESSAGE_OUTPUT_LIMIT) -> str:
@@ -671,7 +691,7 @@ def _sanitize_message_for_output(value: Any, limit: int = _MESSAGE_OUTPUT_LIMIT)
     同样已被截断丢弃，不构成泄露。非字符串 message 先归一化为文本，dict/list 走
     JSON 序列化，防止 dict 形态借 str/repr 的引号形态穿透脱敏。
     """
-    text = value if isinstance(value, str) else _normalize_non_str_message(value)
+    text = normalize_message_text(value)
     return _redact_sensitive_message(_truncate_value_for_output(text, limit=limit))
 
 
@@ -763,21 +783,19 @@ def _is_sensitive_key(key: Any) -> bool:
     """判断键名是否命中敏感关键词。
 
     高确信度词采用子串匹配以覆盖连字符、无分隔与 camelCase 变体；其余关键词采用
-    边界匹配，键名等于关键词或以下划线、连字符、点号、空格分隔包含关键词方视为
-    命中，避免短词如 key 误匹配 monkey、keyboard。空格与自由文本复合分支
-    api key 的分隔规则一致，dict 键 "api key" 同样命中。
+    段匹配，键名按下划线、连字符、点号、空格切分后任一段等于关键词方视为命中，
+    位于复合键中段的关键词同样覆盖，user.session_id 与 request-session-id 命中。
+    与自由文本路径的一致范围是分隔符定界的复合词；无分隔前缀复合词如
+    usersession_id 仅自由文本路径的未锚定匹配命中，键名段匹配不命中。短词 key
+    不误匹配 monkey、keyboard，空格分隔规则与自由文本复合分支 api key 一致，
+    dict 键 "api key" 同样命中。
     """
     key_lower = str(key).lower()
     for substring in _SENSITIVE_KEY_SUBSTRINGS:
         if substring in key_lower:
             return True
-    for keyword in _SENSITIVE_KEY_KEYWORDS:
-        if key_lower == keyword:
-            return True
-        for separator in ("_", "-", ".", " "):
-            if key_lower.endswith(separator + keyword) or key_lower.startswith(keyword + separator):
-                return True
-    return False
+    segments = frozenset(_KEY_SEGMENT_SPLIT_PATTERN.split(key_lower))
+    return not segments.isdisjoint(_SENSITIVE_KEY_KEYWORD_SET)
 
 
 def _filter_sensitive_data(data: Any) -> Any:

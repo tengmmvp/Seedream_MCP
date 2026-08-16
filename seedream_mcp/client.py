@@ -370,7 +370,7 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的修改或转换；图层拆分场景可
                 缺省，由模型自动识别图片主要元素并拆分。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
-            image: 输入图像的 URL 或本地文件路径。
+            image: 输入图像的 URL、data URI（data:image/*;base64,...）或本地文件路径。
             layer_decomposition: 是否开启图层拆分，仅 5.0 Pro 支持；开启后单张输入图
                 拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层。
             background: 图片透明通道，"transparent" 或 "opaque"，仅 5.0 Pro 支持；
@@ -477,7 +477,8 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要对输入图像进行的融合操作。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
-            image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张；5.0 Pro 最多 10 张。
+            image: 输入图像的 URL、data URI（data:image/*;base64,...）或本地文件路径
+                列表，数量范围为 2-14 张；5.0 Pro 最多 10 张。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
@@ -575,7 +576,9 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要生成的图像内容。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
-            image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表；参考图数量与生成数量之和不超过 15。
+            image: 可选的参考图像，支持单张图像或多张图像列表，元素为 URL、
+                data URI（data:image/*;base64,...）或本地文件路径；参考图数量与
+                生成数量之和不超过 15。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限。
@@ -1015,6 +1018,20 @@ class SeedreamClient:
         self.logger.debug("请求 URL: {}", url)
         self.logger.debug("请求数据(脱敏): {}", safe_request_data)
 
+    @staticmethod
+    def _require_dict_payload(payload: Any) -> dict[str, Any]:
+        """校验 200 响应的 JSON 体为对象形态，非 dict 时抛出明确的格式错误。
+
+        _build_api_result 以 dict 形态读取字段，list/str/null 等形态会触发
+        AttributeError 形式的误导性报错；错误路径 _error_data_from_body 已对
+        非 dict 体降级处理，成功路径在此对称拦截，进入结果构建前显式拒绝。
+        """
+        if not isinstance(payload, dict):
+            # null 体映射为 JSON 术语，其余形态用类型名表述
+            received = "null" if payload is None else type(payload).__name__
+            raise SeedreamAPIError(f"响应格式错误: 期望 JSON 对象，实际收到 {received}")
+        return payload
+
     def _build_api_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         """统一归一化 API 返回结果结构。
 
@@ -1277,7 +1294,7 @@ class SeedreamClient:
                 raise
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
-            return self._build_api_result(payload)
+            return self._build_api_result(self._require_dict_payload(payload))
 
     async def _send_standard_request(
         self,
@@ -1312,7 +1329,7 @@ class SeedreamClient:
                 payload = await asyncio.to_thread(json.loads, raw_body)
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
-            return self._build_api_result(payload)
+            return self._build_api_result(self._require_dict_payload(payload))
         finally:
             await response.aclose()
 

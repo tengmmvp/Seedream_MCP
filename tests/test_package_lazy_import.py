@@ -77,18 +77,8 @@ def test_import_server_does_not_eager_load_pil() -> None:
     使该成本落点在工作线程而非事件循环线程。子进程运行守护，避免本进程已加载
     的模块污染断言。
     """
-    import subprocess
-    import sys
-
-    code = (
+    _run_in_subprocess(
         "import sys, seedream_mcp.server; "
         "loaded = [m for m in sys.modules if m == 'PIL' or m.startswith('PIL.')]; "
         "assert not loaded, f'PIL eagerly imported: {loaded}'"
     )
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert completed.returncode == 0, completed.stderr

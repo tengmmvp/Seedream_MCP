@@ -21,10 +21,13 @@ from typing import Any
 # 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)
 # 包导入不再触发 PIL/aiohttp/aiofiles 等重型依赖初始化，仅在首次访问时按需加载。
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    # 异常处理（core）
+    # 异常处理（core），errors.py 定义的异常类型全集
     "SeedreamMCPError": (".core.errors", "SeedreamMCPError"),
     "SeedreamConfigError": (".core.errors", "SeedreamConfigError"),
     "SeedreamAPIError": (".core.errors", "SeedreamAPIError"),
+    "SeedreamValidationError": (".core.errors", "SeedreamValidationError"),
+    "SeedreamTimeoutError": (".core.errors", "SeedreamTimeoutError"),
+    "SeedreamNetworkError": (".core.errors", "SeedreamNetworkError"),
     # 参数校验（core）与图像校验（images）
     "validate_prompt": (".core.validators", "validate_prompt"),
     "validate_image_input": (".images.image_validation", "validate_image_input"),
@@ -61,3 +64,8 @@ def __getattr__(name: str) -> Any:
     value = getattr(module, attr_name)
     globals()[name] = value
     return value
+
+
+def __dir__() -> list[str]:
+    """补全 dir() 结果，纳入尚未触发导入的延迟导出公开名。"""
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))

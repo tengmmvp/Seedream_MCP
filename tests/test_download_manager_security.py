@@ -183,6 +183,23 @@ async def test_download_image_rejects_https_to_http_downgrade_redirect(
 
 
 @pytest.mark.asyncio
+async def test_download_image_rejects_uppercase_scheme_downgrade_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """初始 URL scheme 为大写 HTTPS 时，重定向降级到 http 同样被拒绝。
+
+    降级判定的 scheme 比较经小写归一化，与 _url_origin 和 _validate_url_static 的
+    口径一致，大写起始 URL 不构成绕过降级检查的输入面。
+    """
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(302, {"location": "http://mirror.example.com/x.png"})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    with pytest.raises(DownloadError, match="降级"):
+        await manager.download_image("HTTPS://example.com/img.png", tmp_path / "out.png")
+
+
+@pytest.mark.asyncio
 async def test_download_image_rejects_excessive_redirects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

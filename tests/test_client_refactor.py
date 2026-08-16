@@ -14,6 +14,7 @@ from PIL import Image
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import (
+    SeedreamAPIError,
     SeedreamConfigError,
     SeedreamValidationError,
     resolve_error_profile,
@@ -1030,6 +1031,79 @@ async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
     assert result["status"] == "failed"
     assert result["error"]["code"] == "StreamRejected"
     assert upstream_calls == 1
+
+
+# ==================== 200 响应非 dict JSON 体守卫 ====================
+
+
+@pytest.mark.parametrize(
+    "raw_payload,expected_type",
+    [
+        ([1, 2], "list"),
+        ("text", "str"),
+        (None, "null"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_call_api_non_dict_json_payload_raises_format_error(
+    raw_payload: Any, expected_type: str
+) -> None:
+    """标准路径 200 响应体为非 dict JSON 时抛出明确的响应格式错误，而非 AttributeError。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        # httpx 的 json=None 表示不写 JSON 体，null 场景显式发送字面量文本
+        if raw_payload is None:
+            return httpx.Response(200, content="null", headers={"content-type": "application/json"})
+        return httpx.Response(200, json=raw_payload)
+
+    client = SeedreamClient(_build_config())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    try:
+        with pytest.raises(SeedreamAPIError) as excinfo:
+            await client._call_api("text_to_image", {"prompt": "hello"})
+    finally:
+        await client.close()
+
+    assert "响应格式错误" in excinfo.value.message
+    assert expected_type in excinfo.value.message
+    assert "AttributeError" not in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    "raw_payload,expected_type",
+    [
+        ([1, 2], "list"),
+        ("text", "str"),
+        (None, "null"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_request_non_dict_json_payload_raises_format_error(
+    raw_payload: Any, expected_type: str
+) -> None:
+    """流式路径 200 响应体为非 dict JSON 时同样抛出明确的响应格式错误。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        # httpx 的 json=None 表示不写 JSON 体，null 场景显式发送字面量文本
+        if raw_payload is None:
+            return httpx.Response(200, content="null", headers={"content-type": "application/json"})
+        return httpx.Response(200, json=raw_payload)
+
+    client = SeedreamClient(_build_config())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    try:
+        with pytest.raises(SeedreamAPIError) as excinfo:
+            await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
+    finally:
+        await client.close()
+
+    assert "响应格式错误" in excinfo.value.message
+    assert expected_type in excinfo.value.message
+    assert "AttributeError" not in excinfo.value.message
 
 
 # ==================== 空 API Key 归约档 ====================

@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.io.io_save import AutoSaveManager, AutoSaveResult
+from seedream_mcp.utils.io.io_save import (
+    AutoSaveManager,
+    AutoSaveResult,
+    drain_background_cleanup_tasks,
+)
 
 
 async def test_save_multiple_images_aggregates_partial_failure(
@@ -38,4 +42,7 @@ async def test_save_multiple_images_aggregates_partial_failure(
     assert results[0].success is False
     assert "下载失败" in (results[0].error or "")
     assert results[1].success is True
+    # 清理入口不因清理开关短路，批量保存会派生后台清扫任务；drain 后再关闭，
+    # 任务完成状态确定，不悬垂到用例事件循环之外
+    await drain_background_cleanup_tasks()
     await manager.close()

@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -565,14 +565,23 @@ class _ExplodingEntry:
         return False
 
 
-def _patch_scandir_with_exploding_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """把 os.scandir 替换为返回单个 is_file 抛 OSError 条目的扫描器。"""
+def _patch_scandir_with_exploding_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Callable[..., Any]:
+    """把 os.scandir 替换为返回单个 is_file 抛 OSError 条目的扫描器。
+
+    返回被替换前的原 scandir，调用方需要中途恢复时用它做 setattr 定点还原，
+    不得调用 monkeypatch.undo，否则会连 autouse fixture 的补丁一并回退。
+    """
+
+    original_scandir: Callable[..., Any] = path_utils_module.os.scandir
 
     def _fake_scandir(path: Any) -> Any:
         del path
         return contextlib.nullcontext(iter([_ExplodingEntry(str(tmp_path / "boom.png"))]))
 
     monkeypatch.setattr(path_utils_module.os, "scandir", _fake_scandir)
+    return original_scandir
 
 
 def test_find_images_propagates_mid_scan_oserror(
@@ -600,7 +609,7 @@ def test_cached_find_images_mid_scan_error_not_cached_as_complete(
     目录后半部分在缓存有效期内不可见。异常传播使缓存写入不可达，杜绝该冻结。
     """
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    _patch_scandir_with_exploding_entry(tmp_path, monkeypatch)
+    original_scandir = _patch_scandir_with_exploding_entry(tmp_path, monkeypatch)
     scan_module.reset_directory_scan_cache()
 
     with pytest.raises(OSError, match="transient io error"):
@@ -614,7 +623,7 @@ def test_cached_find_images_mid_scan_error_not_cached_as_complete(
 
     assert scan_module._DIRECTORY_SCAN_CACHE == {}
 
-    monkeypatch.undo()
+    monkeypatch.setattr(path_utils_module.os, "scandir", original_scandir)
     # 瞬时错误恢复后重扫可得完整结果，证明错误未被固化为缓存
     recovered = cached_find_images_in_directory(
         resolved_dir=tmp_path, recursive=False, max_depth=1, format_filter=None, scan_limit=10

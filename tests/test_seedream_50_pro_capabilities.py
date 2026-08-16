@@ -138,6 +138,12 @@ def test_stream_enabled_ok_for_lite() -> None:
     assert validate_stream(True, LITE) is True
 
 
+def test_stream_non_bool_rejected_for_supporting_model() -> None:
+    """非布尔的 stream 在支持流式的模型下同样于参数级拒绝，不透传上游。"""
+    with pytest.raises(SeedreamValidationError, match="stream 必须为布尔值"):
+        validate_stream("true", LITE)
+
+
 # ==================== Endpoint ID 无法识别模型时由 API 校验放行 ====================
 
 
@@ -203,6 +209,21 @@ def test_size_pixel_value_rejected_in_layer_decomposition_scenario() -> None:
     # 官方图层拆分场景仅支持分辨率档位方式，宽高像素值直接拒绝
     with pytest.raises(SeedreamValidationError, match="仅支持分辨率档位"):
         validate_size_for_model("2048x2048", PRO, layer_decomposition=True)
+
+
+def test_layer_preset_message_derives_from_model_capabilities() -> None:
+    """图层拒绝文案的档位清单从能力声明派生，1K 按数值序排在 1.5K 之前。
+
+    Pro 拒绝消息仅含其能力档位 1K/1.5K/2K；未知家族 supports_layer_decomposition
+    为真且档位为全集，同一场景拒绝消息须含 3K/4K，与数据驱动的放行判定一致。
+    """
+    with pytest.raises(SeedreamValidationError, match=r"仅支持分辨率档位（1K/1\.5K/2K）或 auto"):
+        validate_size_for_model("2048x2048", PRO, layer_decomposition=True)
+
+    with pytest.raises(
+        SeedreamValidationError, match=r"仅支持分辨率档位（1K/1\.5K/2K/3K/4K）或 auto"
+    ):
+        validate_size_for_model("2048x2048", "ep-20241001-abcde", layer_decomposition=True)
 
 
 def test_common_params_prompt_none_accepted_with_layer_decomposition() -> None:

@@ -39,3 +39,10 @@ def test_unknown_attribute_raises_attribute_error() -> None:
     """访问未声明的属性应抛出 AttributeError，而非静默返回 None。"""
     with pytest.raises(AttributeError):
         getattr(utils_pkg, "definitely_not_an_export")
+
+
+def test_dir_includes_lazy_exports() -> None:
+    """``dir()`` 须包含尚未触发导入的延迟导出公开名，保证补全与可发现性。"""
+    listed = dir(utils_pkg)
+    for name in utils_pkg.__all__:
+        assert name in listed, f"dir() 缺少延迟导出名 {name!r}"

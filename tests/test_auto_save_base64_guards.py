@@ -7,21 +7,41 @@ AutoSaveResult.to_dict 的数据字段净化与 markdown alt 兜底。
 
 import asyncio
 import base64
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.io.io_save import AutoSaveError, AutoSaveManager, AutoSaveResult
+from seedream_mcp.utils.io.io_save import (
+    AutoSaveError,
+    AutoSaveManager,
+    AutoSaveResult,
+    _build_markdown_alt,
+    drain_background_cleanup_tasks,
+)
 
 
 @pytest.fixture
 def manager(tmp_path: Path) -> AutoSaveManager:
-    """构造 cleanup_days=0 的 AutoSaveManager，避免触发目录扫描副作用。
+    """构造 cleanup_days=0 的 AutoSaveManager，本文件用例不依赖按天清理。
 
+    清理入口已不因清理开关短路，批量保存路径会触发后台 .part 清扫；本文件用例
+    直连 _prepare_base64_payload 与保存入口，清理相关断言由清理专项文件覆盖。
     DownloadManager 的 aiohttp 会话惰性创建，_prepare_base64_payload 不触发会话分配，
     因此 sync fixture 无需 close 即可安全释放。
     """
     return AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
+
+
+@pytest.fixture(autouse=True)
+async def _drain_cleanup_tasks() -> AsyncIterator[None]:
+    """每个用例结束前等待在途后台清理任务完成，避免任务悬垂到用例事件循环之外。
+
+    清理入口不设开关短路后，经 _run_batch_save 的用例会派生真实的后台清扫任务；
+    drain 后断言与用例循环生命周期对齐，任务完成状态确定。
+    """
+    yield
+    await drain_background_cleanup_tasks()
 
 
 def _minimal_png_bytes() -> bytes:
@@ -331,6 +351,28 @@ async def test_save_base64_image_escapes_markdown_breaking_alt(
     empty_alt = await manager.save_base64_image(payload, alt_text="", tool_name="t2i")
     assert empty_alt.markdown_ref is not None
     assert empty_alt.markdown_ref.startswith("![Generated Image](")
+
+
+def test_build_markdown_alt_truncation_keeps_escape_pairs_intact() -> None:
+    """超长 alt 截断后不产生尾随孤立反斜杠，转义对不被截断点劈开。
+
+    截断发生在转义前的压平文本上并按最坏两倍放大预留上限。本用例的输入在转义后
+    长度为 201，若在转义后截断到 200，会留下未配对的单个尾随反斜杠转义掉闭合
+    方括号，使 Markdown 图片引用不再解析。
+    """
+    # 1 个普通字符加 100 个反斜杠：压平长度 101 触发截断，转义后 1 + 200 = 201；
+    # 若在转义后截断到 200，末位恰为转义对的前半，留下孤立尾随反斜杠
+    alt = "a" + "\\" * 100
+    result = _build_markdown_alt(alt)
+
+    assert len(result) <= 200
+    # 尾随反斜杠连续段长度必须为偶数，反斜杠转义对完整
+    trailing = len(result) - len(result.rstrip("\\"))
+    assert trailing % 2 == 0
+    # 未触发截断的边界输入：100 个反斜杠转义后恰为 200，成对完整不截断
+    exact = _build_markdown_alt("\\" * 100)
+    assert exact == "\\\\" * 100
+    assert len(exact) == 200
 
 
 def test_build_save_metadata_sanitizes_content_type() -> None:
