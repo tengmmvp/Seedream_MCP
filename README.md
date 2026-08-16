@@ -17,9 +17,9 @@
     <img src="https://img.shields.io/badge/Ask_Zread-_.svg?style=for-the-badge&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff" alt="Ask Zread"/>
   </a>
   <br><br>
-  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="500"/>
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0-pro.jpeg" alt="Seedream MCP" width="670"/>
   <br><br>
-  <b>基于火山引擎 Seedream 4.0、4.5 和 5.0 系列（含 5.0 Pro）API 的 MCP 工具，支持 AI 图像生成。</b>
+  <b>基于火山引擎 Seedream API 的 AI 图像生成 MCP 工具。</b>
 </div>
 
 ---
@@ -121,7 +121,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 ### Claude Code（命令行一键注册）
 
 ```bash
-claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
+claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
 ```
 
 ### Cursor
@@ -233,25 +233,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 > **提示**：默认模型为 **doubao-seedream-5.0**（与 5.0 Lite 等价），开箱即用全部能力。切换到 `doubao-seedream-5.0-pro` 后，组图、联网搜索、流式输出不可用，尺寸仅支持 `1K/1.5K/2K`（默认 `2048x2048`），多图生图参考图上限降为 10 张，另独享图层拆分与透明背景能力。
 
-## 🎨 功能特性
-
-- **文生图**：文本生成图像
-- **图文生图**：图像转换风格
-- **多图融合**：融合多张图片
-- **组图输出**：生成图像序列
-- **图片浏览**：本地图片文件浏览
-
 ## 🛠️ 可用工具
-
-### 响应契约：文本与 structuredContent 双通道
-
-所有工具的 `tools/call` 结果同时携带两条通道：
-
-- **`content`**：`TextContent` 文本摘要，面向模型可读，包含图片 URL/本地路径与自动保存结果等信息，模型可直接转述给用户。
-- **`structuredContent`**：结构化数据，面向程序处理；字段集以各工具声明的 `outputSchema` 为准（客户端经 `tools/list` 自省，字段随版本演进以声明为准）。
-- **`isError` 语义**：运行时失败时 `isError` 为 `true`，`content` 为面向用户的错误文案；成功时为 `false`。参数 schema 校验失败（类型错误、超长等）在协议层即被拒绝，仅返回 `isError=true` 与校验错误文本，不含 `structuredContent`。
-
-> URL 形式的图片地址约 24 小时后过期；开启自动保存后，结果中的 `local_path` 字段提供本地持久化路径。
 
 <details>
 <summary><b>1. <code>seedream_text_to_image</code></b> — 文生图</summary>
@@ -276,30 +258,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **调用示例：**
 
-基础调用：
-
 ```json
 {
   "name": "seedream_text_to_image",
   "arguments": {
     "prompt": "水彩风格的江南水乡，清晨薄雾"
-  }
-}
-```
-
-可选参数组合（尺寸 + 水印 + 响应与输出格式 + 自动保存）：
-
-```json
-{
-  "name": "seedream_text_to_image",
-  "arguments": {
-    "prompt": "水彩风格的江南水乡，清晨薄雾",
-    "size": "2K",
-    "watermark": false,
-    "response_format": "url",
-    "output_format": "jpeg",
-    "auto_save": true,
-    "custom_name": "jiangnan"
   }
 }
 ```
@@ -332,30 +295,12 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **调用示例：**
 
-基础调用：
-
 ```json
 {
   "name": "seedream_image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
     "image": ".seedream/images/2026/08/15/portrait.jpeg"
-  }
-}
-```
-
-可选参数组合（URL 参考图 + 尺寸 + 水印 + 响应与输出格式）：
-
-```json
-{
-  "name": "seedream_image_to_image",
-  "arguments": {
-    "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": "https://example.com/portrait.jpeg",
-    "size": "2048x2048",
-    "watermark": false,
-    "response_format": "url",
-    "output_format": "png"
   }
 }
 ```
@@ -386,8 +331,6 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **调用示例：**
 
-基础调用：
-
 ```json
 {
   "name": "seedream_multi_image_fusion",
@@ -397,25 +340,6 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
       ".seedream/images/2026/08/15/person_a.jpeg",
       ".seedream/images/2026/08/15/person_b.jpeg"
     ]
-  }
-}
-```
-
-可选参数组合（`image` 列表混用本地路径与 URL + 尺寸 + 水印 + 响应格式）：
-
-```json
-{
-  "name": "seedream_multi_image_fusion",
-  "arguments": {
-    "prompt": "把产品图与品牌 Logo 融合为一张海报主视觉",
-    "image": [
-      ".seedream/images/product_front.png",
-      ".seedream/images/product_side.png",
-      "https://example.com/logo.png"
-    ],
-    "size": "2K",
-    "watermark": true,
-    "response_format": "url"
   }
 }
 ```
@@ -447,31 +371,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **调用示例：**
 
-基础调用（文生组图，`max_images` 缺省为 15）：
-
 ```json
 {
   "name": "seedream_sequential_generation",
   "arguments": {
     "prompt": "四格漫画：一只柴犬的一天，起床、吃饭、散步、睡觉"
-  }
-}
-```
-
-可选参数组合（参考图列表 + `max_images` + 尺寸 + 水印）：
-
-```json
-{
-  "name": "seedream_sequential_generation",
-  "arguments": {
-    "prompt": "以参考图中的角色为主角，绘制三格探险漫画",
-    "image": [
-      ".seedream/images/2026/08/15/hero_front.jpeg",
-      ".seedream/images/2026/08/15/hero_side.jpeg"
-    ],
-    "max_images": 3,
-    "size": "2K",
-    "watermark": false
   }
 }
 ```
@@ -495,26 +399,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **调用示例：**
 
-基础调用（无参数浏览工作区根目录）：
-
 ```json
 {
   "name": "seedream_browse_images",
   "arguments": {}
-}
-```
-
-可选参数组合（目录 + 递归 + 数量上限 + 格式过滤）：
-
-```json
-{
-  "name": "seedream_browse_images",
-  "arguments": {
-    "directory": ".seedream/images",
-    "recursive": true,
-    "limit": 20,
-    "format_filter": [".jpeg", ".png"]
-  }
 }
 ```
 
@@ -540,18 +428,6 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | `seedream_style_realistic`    | 写实摄影风格，高清细节，自然光影       | 城市夜景             |
 | `seedream_style_watercolor`   | 水彩画风格，柔和晕染，通透色彩         | 山间小屋             |
 | `seedream_style_oil_painting` | 油画风格，厚重笔触，丰富层次           | 海边夕阳             |
-
-## 📚 参考文档
-
-仓库 `docs/` 目录收录以下参考资料：
-
-| 文档                                                                             | 说明                                            |
-| -------------------------------------------------------------------------------- | ----------------------------------------------- |
-| [Seedream-API-Reference.md](docs/volcengine/Seedream-API-Reference.md)           | 火山引擎官方文稿：图像生成 API 参考             |
-| [Seedream-Official-Tutorial.md](docs/volcengine/Seedream-Official-Tutorial.md)   | 火山引擎官方文稿：官方教程                      |
-| [Seedream-Streaming-Response.md](docs/volcengine/Seedream-Streaming-Response.md) | 火山引擎官方文稿：流式响应（SSE 事件）说明      |
-| [claude_desktop_config.json](docs/samples/claude_desktop_config.json)            | 本项目示例：Claude Desktop 常用环境变量配置样本 |
-| [pyguide.md](docs/development/pyguide.md)                                        | 开发规范收录：Google Python Style Guide         |
 
 ## ❓ 常见问题
 
@@ -678,12 +554,6 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 流式响应每次读取块�
 ### 重要贡献者
 
 - **[@caoergou](https://github.com/caoergou)** - 通过 [PR #2](https://github.com/tengmmvp/Seedream_MCP/pull/2) 贡献了 uvx 支持、Docker 容器化配置、GitHub Actions 自动化发布流程，极大简化了项目的安装与部署体验
-
-### 参与贡献
-
-欢迎提交 Issue 和 Pull Request！请查看 [GitHub Issues](https://github.com/tengmmvp/Seedream_MCP/issues) 了解当前的讨论和需求。
-
-<div align="center"><b>🌟 如果您希望参与开发，请先在 Issues 中讨论您的想法！</b></div>
 
 ## 📄 许可证
 

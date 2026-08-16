@@ -17,9 +17,9 @@
     <img src="https://img.shields.io/badge/Ask_Zread-_.svg?style=for-the-badge&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff" alt="Ask Zread"/>
   </a>
   <br><br>
-  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0.jpeg" alt="Seedream MCP" width="500"/>
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0-pro.jpeg" alt="Seedream MCP" width="670"/>
   <br><br>
-  <b>An MCP tool based on the Volcengine Seedream 4.0, 4.5 and 5.0 series (incl. 5.0 Pro) APIs, supporting AI image generation.</b>
+  <b>An MCP tool based on the Volcengine Seedream APIs for AI image generation.</b>
 </div>
 
 ---
@@ -121,7 +121,7 @@ Edit `claude_desktop_config.json`:
 ### Claude Code (one-line registration)
 
 ```bash
-claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
+claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
 ```
 
 ### Cursor
@@ -216,42 +216,24 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 Different models support different capabilities and parameter ranges. Please note this when selecting a model:
 
 | Capability / Parameter                       | 5.0 Pro        | 5.0 / 5.0 Lite | 4.5       | 4.0          |
-| -------------------------------------------- | -------------- | ------------ | --------- | ------------ |
-| Text-to-Image / Image-to-Image / Multi-Image | ✅             | ✅           | ✅        | ✅           |
-| Sequential Generation                        | ❌             | ✅           | ✅        | ✅           |
-| Web Search                                   | ❌             | ✅           | ❌        | ❌           |
-| Streaming Output                             | ❌             | ✅           | ✅        | ✅           |
-| Output Format (png/jpeg)                     | ✅             | ✅           | ❌        | ❌           |
-| Layer Decomposition                          | ✅             | ❌           | ❌        | ❌           |
-| Transparent Background                       | ✅             | ❌           | ❌        | ❌           |
-| Resolution Presets                           | 1K / 1.5K / 2K | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
-| Custom Size Multiple                         | Multiple of 16 | No limit     | No limit  | No limit     |
-| Default Size (MCP)                           | 2048x2048      | 2048x2048    | 2048x2048 | 2048x2048    |
-| Max Reference Images                         | 10             | 14           | 14        | 14           |
+| -------------------------------------------- | -------------- | -------------- | --------- | ------------ |
+| Text-to-Image / Image-to-Image / Multi-Image | ✅             | ✅             | ✅        | ✅           |
+| Sequential Generation                        | ❌             | ✅             | ✅        | ✅           |
+| Web Search                                   | ❌             | ✅             | ❌        | ❌           |
+| Streaming Output                             | ❌             | ✅             | ✅        | ✅           |
+| Output Format (png/jpeg)                     | ✅             | ✅             | ❌        | ❌           |
+| Layer Decomposition                          | ✅             | ❌             | ❌        | ❌           |
+| Transparent Background                       | ✅             | ❌             | ❌        | ❌           |
+| Resolution Presets                           | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K   | 1K / 2K / 4K |
+| Custom Size Multiple                         | Multiple of 16 | No limit       | No limit  | No limit     |
+| Default Size (MCP)                           | 2048x2048      | 2048x2048      | 2048x2048 | 2048x2048    |
+| Max Reference Images                         | 10             | 14             | 14        | 14           |
 
 > **Default Size (MCP)**: The "Default Size (MCP)" row reflects the runtime resolved value of MCP's unified `default_size=2K` setting (corresponding to `2048x2048`), independent of each model's native default.
 
 > **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported (default `2048x2048`), the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
 
-## 🎨 Features
-
-- **Text-to-Image**: generate images from text
-- **Image-to-Image**: transform image styles
-- **Multi-Image Fusion**: blend multiple images
-- **Sequential Generation**: generate image sequences
-- **Browse Images**: browse local image files
-
 ## 🛠️ Available Tools
-
-### Response Contract: Text and structuredContent Dual Channels
-
-Every tool's `tools/call` result carries two channels at once:
-
-- **`content`**: a `TextContent` summary intended to be model-readable; it contains image URLs/local paths and auto-save results, which the model can relay to the user directly.
-- **`structuredContent`**: structured data for programmatic consumption; the field set is governed by each tool's declared `outputSchema` (introspect via `tools/list`; fields evolve with versions per the declaration).
-- **`isError` semantics**: on runtime failure `isError` is `true` and `content` holds the user-facing error text; on success it is `false`. Parameter schema validation failures (type errors, over-length, etc.) are rejected at the protocol layer and return only `isError=true` with the validation error text, without `structuredContent`.
-
-> URL-form image addresses expire after about 24 hours; with auto-save enabled, the `local_path` field in the result provides a persistent local path.
 
 <details>
 <summary><b>1. <code>seedream_text_to_image</code></b> — Text-to-Image</summary>
@@ -276,30 +258,11 @@ Generate an image from a text prompt. This tool calls an external billed API and
 
 **Call examples:**
 
-Basic call:
-
 ```json
 {
   "name": "seedream_text_to_image",
   "arguments": {
     "prompt": "水彩风格的江南水乡，清晨薄雾"
-  }
-}
-```
-
-Optional parameter combination (size + watermark + response/output format + auto-save):
-
-```json
-{
-  "name": "seedream_text_to_image",
-  "arguments": {
-    "prompt": "水彩风格的江南水乡，清晨薄雾",
-    "size": "2K",
-    "watermark": false,
-    "response_format": "url",
-    "output_format": "jpeg",
-    "auto_save": true,
-    "custom_name": "jiangnan"
   }
 }
 ```
@@ -332,30 +295,12 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 
 **Call examples:**
 
-Basic call:
-
 ```json
 {
   "name": "seedream_image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
     "image": ".seedream/images/2026/08/15/portrait.jpeg"
-  }
-}
-```
-
-Optional parameter combination (URL reference image + size + watermark + response/output format):
-
-```json
-{
-  "name": "seedream_image_to_image",
-  "arguments": {
-    "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": "https://example.com/portrait.jpeg",
-    "size": "2048x2048",
-    "watermark": false,
-    "response_format": "url",
-    "output_format": "png"
   }
 }
 ```
@@ -386,8 +331,6 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 
 **Call examples:**
 
-Basic call:
-
 ```json
 {
   "name": "seedream_multi_image_fusion",
@@ -397,25 +340,6 @@ Basic call:
       ".seedream/images/2026/08/15/person_a.jpeg",
       ".seedream/images/2026/08/15/person_b.jpeg"
     ]
-  }
-}
-```
-
-Optional parameter combination (`image` list mixing local paths and URLs + size + watermark + response format):
-
-```json
-{
-  "name": "seedream_multi_image_fusion",
-  "arguments": {
-    "prompt": "把产品图与品牌 Logo 融合为一张海报主视觉",
-    "image": [
-      ".seedream/images/product_front.png",
-      ".seedream/images/product_side.png",
-      "https://example.com/logo.png"
-    ],
-    "size": "2K",
-    "watermark": true,
-    "response_format": "url"
   }
 }
 ```
@@ -447,31 +371,11 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 
 **Call examples:**
 
-Basic call (text-to-sequence; `max_images` defaults to 15):
-
 ```json
 {
   "name": "seedream_sequential_generation",
   "arguments": {
     "prompt": "四格漫画：一只柴犬的一天，起床、吃饭、散步、睡觉"
-  }
-}
-```
-
-Optional parameter combination (reference image list + `max_images` + size + watermark):
-
-```json
-{
-  "name": "seedream_sequential_generation",
-  "arguments": {
-    "prompt": "以参考图中的角色为主角，绘制三格探险漫画",
-    "image": [
-      ".seedream/images/2026/08/15/hero_front.jpeg",
-      ".seedream/images/2026/08/15/hero_side.jpeg"
-    ],
-    "max_images": 3,
-    "size": "2K",
-    "watermark": false
   }
 }
 ```
@@ -495,26 +399,10 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 **Call examples:**
 
-Basic call (no arguments; browses the workspace root):
-
 ```json
 {
   "name": "seedream_browse_images",
   "arguments": {}
-}
-```
-
-Optional parameter combination (directory + recursion + result cap + format filter):
-
-```json
-{
-  "name": "seedream_browse_images",
-  "arguments": {
-    "directory": ".seedream/images",
-    "recursive": true,
-    "limit": 20,
-    "format_filter": [".jpeg", ".png"]
-  }
 }
 ```
 
@@ -524,34 +412,22 @@ Optional parameter combination (directory + recursion + result cap + format filt
 
 Beyond tools, the server exposes the following MCP resources for clients to read runtime information:
 
-| Resource URI | Description |
-| --- | --- |
-| `seedream://workspace/roots` | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories |
-| `seedream://server/info` | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total) |
-| `seedream://models/info` | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
+| Resource URI                 | Description                                                                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seedream://workspace/roots` | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories                                                                           |
+| `seedream://server/info`     | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                                     |
+| `seedream://models/info`     | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
 
 ## 🎭 Style Presets
 
 The server provides the following MCP prompt templates to generate text-to-image prompts for a given style in one click; use the `subject` parameter to set the scene subject:
 
-| Prompt name | Style | Default subject |
-| --- | --- | --- |
-| `seedream_style_anime` | Japanese anime style, cel shading, vivid saturated colors | A girl standing under cherry blossoms |
-| `seedream_style_realistic` | Realistic photography, high-detail, natural lighting | City night view |
-| `seedream_style_watercolor` | Watercolor style, soft blending, translucent colors | Mountain cabin |
-| `seedream_style_oil_painting` | Oil painting style, thick brushstrokes, rich layers | Seaside sunset |
-
-## 📚 Reference Documentation
-
-The repository's `docs/` directory contains the following reference material:
-
-| Document | Description |
-| --- | --- |
-| [Seedream-API-Reference.md](docs/volcengine/Seedream-API-Reference.md) | Volcengine official document: image generation API reference |
-| [Seedream-Official-Tutorial.md](docs/volcengine/Seedream-Official-Tutorial.md) | Volcengine official document: official tutorial |
-| [Seedream-Streaming-Response.md](docs/volcengine/Seedream-Streaming-Response.md) | Volcengine official document: streaming response (SSE events) |
-| [claude_desktop_config.json](docs/samples/claude_desktop_config.json) | Project sample: common Claude Desktop environment variables |
-| [pyguide.md](docs/development/pyguide.md) | Development reference: Google Python Style Guide |
+| Prompt name                   | Style                                                     | Default subject                       |
+| ----------------------------- | --------------------------------------------------------- | ------------------------------------- |
+| `seedream_style_anime`        | Japanese anime style, cel shading, vivid saturated colors | A girl standing under cherry blossoms |
+| `seedream_style_realistic`    | Realistic photography, high-detail, natural lighting      | City night view                       |
+| `seedream_style_watercolor`   | Watercolor style, soft blending, translucent colors       | Mountain cabin                        |
+| `seedream_style_oil_painting` | Oil painting style, thick brushstrokes, rich layers       | Seaside sunset                        |
 
 ## ❓ FAQ
 
@@ -678,12 +554,6 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (
 ### Key Contributors
 
 - **[@caoergou](https://github.com/caoergou)** - Contributed uvx support, Docker containerization, and the GitHub Actions automated release workflow via [PR #2](https://github.com/tengmmvp/Seedream_MCP/pull/2), greatly simplifying installation and deployment.
-
-### Contributing
-
-Issues and Pull Requests are welcome! Check [GitHub Issues](https://github.com/tengmmvp/Seedream_MCP/issues) to see current discussions and needs.
-
-<div align="center"><b>🌟 If you'd like to contribute, please discuss your ideas in Issues first!</b></div>
 
 ## 📄 License
 
