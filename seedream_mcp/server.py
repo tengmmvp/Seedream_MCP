@@ -192,7 +192,7 @@ async def seedream_text_to_image(
     ),
     watermark: bool | None = Field(
         default=None,
-        description="是否添加水印；未提供时沿用全局默认值。",
+        description="是否添加水印；未提供时沿用全局默认值（默认不添加）。",
     ),
     response_format: ResponseFormat = Field(
         default=ResponseFormat.URL,
@@ -200,7 +200,7 @@ async def seedream_text_to_image(
     ),
     output_format: OutputFormat | None = Field(
         default=None,
-        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+        description="输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。",
     ),
     stream: bool = Field(
         default=False,
@@ -214,17 +214,17 @@ async def seedream_text_to_image(
         default=1,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+        description="同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。",
     ),
     parallelism: int | None = Field(
         default=None,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+        description="并行度上限（1-10）；未提供时自动取 min(request_count, 10)，一般无需手动指定。",
     ),
     auto_save: bool | None = Field(
         default=None,
-        description="是否自动保存到本地；未提供时遵循全局配置。",
+        description="是否自动保存到本地；未提供时遵循全局配置（默认开启）。",
     ),
     save_path: str | None = Field(
         default=None,
@@ -320,7 +320,7 @@ async def seedream_image_to_image(
     ),
     watermark: bool | None = Field(
         default=None,
-        description="是否添加水印；未提供时沿用全局默认值。",
+        description="是否添加水印；未提供时沿用全局默认值（默认不添加）。",
     ),
     response_format: ResponseFormat = Field(
         default=ResponseFormat.URL,
@@ -328,7 +328,7 @@ async def seedream_image_to_image(
     ),
     output_format: OutputFormat | None = Field(
         default=None,
-        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+        description="输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。",
     ),
     stream: bool = Field(
         default=False,
@@ -342,17 +342,17 @@ async def seedream_image_to_image(
         default=1,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+        description="同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。",
     ),
     parallelism: int | None = Field(
         default=None,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+        description="并行度上限（1-10）；未提供时自动取 min(request_count, 10)，一般无需手动指定。",
     ),
     auto_save: bool | None = Field(
         default=None,
-        description="是否自动保存到本地；未提供时遵循全局配置。",
+        description="是否自动保存到本地；未提供时遵循全局配置（默认开启）。",
     ),
     save_path: str | None = Field(
         default=None,
@@ -435,7 +435,7 @@ async def seedream_multi_image_fusion(
     ),
     watermark: bool | None = Field(
         default=None,
-        description="是否添加水印；未提供时沿用全局默认值。",
+        description="是否添加水印；未提供时沿用全局默认值（默认不添加）。",
     ),
     response_format: ResponseFormat = Field(
         default=ResponseFormat.URL,
@@ -443,7 +443,7 @@ async def seedream_multi_image_fusion(
     ),
     output_format: OutputFormat | None = Field(
         default=None,
-        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+        description="输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。",
     ),
     stream: bool = Field(
         default=False,
@@ -457,17 +457,17 @@ async def seedream_multi_image_fusion(
         default=1,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+        description="同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。",
     ),
     parallelism: int | None = Field(
         default=None,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+        description="并行度上限（1-10）；未提供时自动取 min(request_count, 10)，一般无需手动指定。",
     ),
     auto_save: bool | None = Field(
         default=None,
-        description="是否自动保存到本地；未提供时遵循全局配置。",
+        description="是否自动保存到本地；未提供时遵循全局配置（默认开启）。",
     ),
     save_path: str | None = Field(
         default=None,
@@ -546,7 +546,7 @@ async def seedream_sequential_generation(
     ),
     watermark: bool | None = Field(
         default=None,
-        description="是否添加水印；未提供时沿用全局默认值。",
+        description="是否添加水印；未提供时沿用全局默认值（默认不添加）。",
     ),
     max_images: int | None = Field(
         default=None,
@@ -560,7 +560,7 @@ async def seedream_sequential_generation(
     ),
     output_format: OutputFormat | None = Field(
         default=None,
-        description="输出图片格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 jpeg 或 png。",
+        description="输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。",
     ),
     stream: bool = Field(
         default=False,
@@ -574,17 +574,17 @@ async def seedream_sequential_generation(
         default=1,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行请求次数，1 表示单次请求；可用于一次发起多次生成以减少等待。",
+        description="同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。",
     ),
     parallelism: int | None = Field(
         default=None,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行度上限；未提供时自动使用 min(request_count, 并行上限)。",
+        description="并行度上限（1-10）；未提供时自动取 min(request_count, 10)，一般无需手动指定。",
     ),
     auto_save: bool | None = Field(
         default=None,
-        description="是否自动保存到本地；未提供时遵循全局配置。",
+        description="是否自动保存到本地；未提供时遵循全局配置（默认开启）。",
     ),
     save_path: str | None = Field(
         default=None,
@@ -668,10 +668,7 @@ async def seedream_browse_images(
         default=BrowseImagesInput.DEFAULT_OFFSET,
         ge=0,
         le=100000,
-        description=(
-            "分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
-            "上限防止无界偏移触发全量扫描。"
-        ),
+        description="分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。",
     ),
     format_filter: list[Annotated[str, Field(max_length=16)]] | None = Field(
         default=None,

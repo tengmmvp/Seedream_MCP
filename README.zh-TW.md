@@ -247,11 +247,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
-- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
+- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
 - `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
-- `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
+- `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一張圖，範圍 1-10，預設 1
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞
@@ -284,11 +284,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容；圖層拆分場景僅支援檔位與 `auto`（按輸入圖自適應，未指定尺寸時的預設值）
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
-- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
+- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
 - `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
-- `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
+- `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一張圖，範圍 1-10，預設 1
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞
@@ -320,11 +320,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
-- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
+- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
 - `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
-- `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
+- `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一張圖，範圍 1-10，預設 1
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞
@@ -360,11 +360,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `max_images` (選用) - 最大生成圖像數量，範圍 1-15，預設 15；提供參考圖時預設自動扣減為 15 減參考圖數量
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
-- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
+- `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
 - `stream` (選用) - 是否啟用串流輸出，預設`false`
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
-- `request_count` (選用) - 並行請求次數，範圍 1-4，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-4，預設 `min(request_count, 4)`
+- `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一張圖，範圍 1-10，預設 1
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞

@@ -54,7 +54,7 @@ PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 # 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张。
 MAX_SEQUENTIAL_TOTAL_IMAGES = 15
 # 并行生成上限：request_count 与 parallelism 共用此上界。
-MAX_PARALLEL_REQUEST_COUNT = 4
+MAX_PARALLEL_REQUEST_COUNT = 10
 # CJK 字符计数范围：基本区 + 扩展 A 区 + 兼容汉字 + 扩展 B 及以后（平面 2 与 3 的
 # CJK 表意扩展区）与假名（平假名、片假名、半角片假名），覆盖生僻字与日文避免计数
 # 偏低；仅影响超限告警计数，不参与任何放行判定。

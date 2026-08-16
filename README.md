@@ -247,11 +247,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（Pro/标准/Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
-- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
-- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
+- `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一张图，范围 1-10，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
@@ -284,11 +284,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容；图层拆分场景仅支持档位与 `auto`（按输入图自适应，未指定尺寸时的默认值）
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（Pro/标准/Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
-- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
-- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
+- `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一张图，范围 1-10，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
@@ -320,11 +320,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（Pro/标准/Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`（5.0 Pro 不支持）
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
-- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
-- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
+- `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一张图，范围 1-10，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀
@@ -360,11 +360,11 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15；提供参考图时默认自动扣减为 15 减参考图数量
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
-- `output_format` (可选) - 输出文件格式，仅 5.0 系列（5.0 Pro/5.0 Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
+- `output_format` (可选) - 输出文件格式，仅 5.0 系列（Pro/标准/Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理
 - `stream` (可选) - 是否启用流式输出，默认`false`
 - `tools` (可选) - 模型工具配置，仅 `doubao-seedream-5.0` / `5.0-lite` 系列支持联网搜索，例如 `[{"type":"web_search"}]`
-- `request_count` (可选) - 并行请求次数，范围 1-4，默认 1
-- `parallelism` (可选) - 并行度上限，范围 1-4，默认 `min(request_count, 4)`
+- `request_count` (可选) - 同一提示并行发起的独立生成次数，每次各产出一张图，范围 1-10，默认 1
+- `parallelism` (可选) - 并行度上限，范围 1-10，默认 `min(request_count, 10)`，一般无需手动指定
 - `auto_save` (可选) - 是否自动保存到本地，默认使用全局配置（默认 true）
 - `save_path` (可选) - 自定义保存目录路径
 - `custom_name` (可选) - 自定义文件名前缀

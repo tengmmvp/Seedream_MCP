@@ -158,7 +158,7 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
 
 def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:
     with pytest.raises(ValidationError, match="request_count"):
-        TextToImageInput(prompt="test", request_count=5)
+        TextToImageInput(prompt="test", request_count=11)
 
 
 def test_parallel_options_reject_parallelism_greater_than_request_count_in_schema() -> None:

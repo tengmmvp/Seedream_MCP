@@ -247,11 +247,11 @@ Generate an image from a text prompt. This tool calls an external billed API and
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
-- `request_count` (optional) - Number of parallel requests; range 1-4; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
+- `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
@@ -284,11 +284,11 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model; the layer decomposition scenario only supports presets and `auto` (adapts to the input image, and is the default when no size is specified)
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
-- `request_count` (optional) - Number of parallel requests; range 1-4; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
+- `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
@@ -320,11 +320,11 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
-- `request_count` (optional) - Number of parallel requests; range 1-4; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
+- `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
@@ -360,11 +360,11 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false`
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
-- `request_count` (optional) - Number of parallel requests; range 1-4; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-4; default `min(request_count, 4)`
+- `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix

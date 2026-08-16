@@ -284,12 +284,12 @@ def test_parallel_options_stream_rejects_multi_request() -> None:
 
 def test_parallel_options_request_count_above_max() -> None:
     with pytest.raises(SeedreamValidationError):
-        validate_parallel_generation_options(request_count=5, parallelism=None, stream=False)
+        validate_parallel_generation_options(request_count=11, parallelism=None, stream=False)
 
 
 def test_parallel_options_parallelism_above_max() -> None:
     with pytest.raises(SeedreamValidationError):
-        validate_parallel_generation_options(request_count=4, parallelism=5, stream=False)
+        validate_parallel_generation_options(request_count=10, parallelism=11, stream=False)
 
 
 def test_parallel_options_parallelism_equal_request_count_ok() -> None:
