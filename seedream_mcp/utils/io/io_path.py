@@ -532,7 +532,12 @@ def _file_uri_to_path(uri: str) -> Path | None:
     if (parsed.scheme or "").lower() != "file":
         return None
 
-    path_part = url2pathname(parsed.path or "")
+    try:
+        path_part = url2pathname(parsed.path or "")
+    except Exception:
+        # Python 3.14 起 url2pathname 对非 localhost authority 的 file URI 直接抛
+        # URLError（含 POSIX 上的 //server/share 形态），语义同为拒绝，归一为 None。
+        return None
     netloc = parsed.netloc or ""
     if netloc and netloc.lower() != "localhost":
         # 拒绝 UNC 路径如 file://host/share，避免 Windows 下触发 SMB 连接泄露凭据。

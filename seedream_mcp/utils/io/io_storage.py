@@ -116,7 +116,9 @@ class FileManager:
         try:
             path.mkdir(parents=True, exist_ok=True)
             logger.debug("确保目录存在: {}", path)
-        except OSError as e:
+        except (OSError, ValueError) as e:
+            # Python 3.13 起 pathlib 对嵌入 null 字符等非法路径参数抛 ValueError
+            # 而非 OSError，与解析失败一并归一为 FileManagerError。
             raise FileManagerError(f"创建目录失败: {path} -> {e}") from e
 
     def validate_path(self, path: Path) -> bool:

@@ -18,7 +18,13 @@ def test_file_manager_rejects_non_directory_base_dir(tmp_path: Path) -> None:
 
 
 def test_file_manager_rejects_unresolvable_base_dir() -> None:
-    with pytest.raises(FileManagerError, match="解析保存路径时出错"):
+    """含嵌入 null 字符的 base_dir 被拒绝为 FileManagerError，不向调用方穿透。
+
+    Python 3.12 在 resolve 阶段即抛 OSError；3.13 起 pathlib 重构后 resolve 容忍
+    非法字符、迟至 mkdir 才抛 ValueError，两个版本统一归一为 FileManagerError，
+    不限定具体文案以保持跨版本稳定。
+    """
+    with pytest.raises(FileManagerError):
         FileManager(base_dir=Path("\0invalid"))
 
 
