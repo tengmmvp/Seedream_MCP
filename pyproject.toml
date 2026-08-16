@@ -36,7 +36,7 @@ keywords = [
 ]
 
 dependencies = [
-    "mcp>=1.28.0,<2.0.0",
+    "mcp>=1.28.0,<3.0.0",
     "pydantic>=2.11.0,<3",
     "typing-extensions>=4.12.0",
     "httpx>=0.28.0,<1",
