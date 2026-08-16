@@ -39,6 +39,8 @@ def _context() -> GenerationExecutionContext:
         output_format=None,
         stream=False,
         tools=None,
+        layer_decomposition=False,
+        background=None,
         request_count=1,
         parallelism=1,
         enable_auto_save=False,

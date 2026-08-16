@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.tools.core.schemas import GenerationToolType, ResponseFormat
+from seedream_mcp.tools.core.schemas import BackgroundMode, GenerationToolType, ResponseFormat
 from seedream_mcp.utils.core.validators import (
+    VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
     VALID_RESPONSE_FORMATS,
 )
@@ -29,6 +30,11 @@ def test_response_format_enum_matches_validator_whitelist() -> None:
 def test_generation_tool_type_enum_matches_validator_whitelist() -> None:
     """GenerationToolType 枚举取值与 VALID_GENERATION_TOOL_TYPES 一致。"""
     assert {item.value for item in GenerationToolType} == set(VALID_GENERATION_TOOL_TYPES)
+
+
+def test_background_mode_enum_matches_validator_whitelist() -> None:
+    """BackgroundMode 枚举取值与 VALID_BACKGROUND_MODES 一致，新增取值须两侧同步。"""
+    assert {item.value for item in BackgroundMode} == set(VALID_BACKGROUND_MODES)
 
 
 async def test_mcp_registered_tool_names_match_impl_metadata() -> None:

@@ -170,7 +170,7 @@ claude mcp add seedream --env ARK_API_KEY=your_api_key_here -- uvx seedream-imag
 # 模型與生成
 --model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
                                                  # 模型選擇 (預設: doubao-seedream-5.0)
---default-size [1K|2K|3K|4K|<寬>x<高>]            # 圖像尺寸 (預設: 2K，需與所選模型相容)
+--default-size [1K|1.5K|2K|3K|4K|<寬>x<高>]        # 圖像尺寸 (預設: 2K，需與所選模型相容)
 --watermark                                        # 啟用浮水印
 --no-watermark                                     # 關閉浮水印
 
@@ -205,7 +205,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
 # 切換其他模型（如 4.0 / 4.5）並指定尺寸與除錯模式
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
 
-# 高精度生圖（5.0 Pro；注意：不支援組圖 / 連網搜尋 / 串流輸出，尺寸僅 1K/2K）
+# 高精度生圖（5.0 Pro；注意：不支援組圖 / 連網搜尋 / 串流輸出，尺寸僅 1K/1.5K/2K）
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 ```
 
@@ -220,14 +220,16 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | 連網搜尋                   | ❌        | ✅           | ❌        | ❌           |
 | 串流輸出                   | ❌        | ✅           | ✅        | ✅           |
 | 輸出格式（png/jpeg）       | ✅        | ✅           | ❌        | ❌           |
-| 解析度選項                 | 1K / 2K   | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
+| 圖層拆分                   | ✅        | ❌           | ❌        | ❌           |
+| 透明背景                   | ✅        | ❌           | ❌        | ❌           |
+| 解析度選項                 | 1K / 1.5K / 2K | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
 | 自訂尺寸倍數               | 16 的倍數 | 不限制       | 不限制    | 不限制       |
 | MCP 預設尺寸               | 2048x2048 | 2048x2048    | 2048x2048 | 2048x2048    |
 | 參考圖上限                 | 10 張     | 14 張        | 14 張     | 14 張        |
 
-> **MCP 預設尺寸**：表中「MCP 預設尺寸」列為 MCP 統一設定 `default_size=2K`（對應 `2048x2048`）的執行階段解析值，與各模型原生預設無關（例如 5.0 Pro 原生預設為 `1024x1024`）。
+> **MCP 預設尺寸**：表中「MCP 預設尺寸」列為 MCP 統一設定 `default_size=2K`（對應 `2048x2048`）的執行階段解析值，與各模型原生預設無關。
 
-> **提示**：預設模型為 **doubao-seedream-5.0**（與 5.0 Lite 等價），開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/2K`（預設 `2048x2048`），多圖生圖參考圖上限降為 10 張。
+> **提示**：預設模型為 **doubao-seedream-5.0**（與 5.0 Lite 等價），開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/1.5K/2K`（預設 `2048x2048`），多圖生圖參考圖上限降為 10 張，另獨享圖層拆分與透明背景能力。
 
 ## 🎨 功能特性
 
@@ -257,8 +259,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **參數：**
 
 - `prompt` (必要) - 圖像生成的文字提示詞，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
-- `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 5.0 Pro / 4.0 支援
+- `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
@@ -309,10 +311,12 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **參數：**
 
-- `prompt` (必要) - 圖像修改要求或風格轉換指令，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
+- `prompt` (選用) - 圖像修改要求或風格轉換指令，建議不超過 300 個漢字或 600 個英文單字；僅圖層拆分場景可缺省，由模型自動識別拆分意圖
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 5.0 Pro / 4.0 支援
 - `image` (必要) - 輸入圖像的 URL 或本地檔案路徑
-- `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
+- `layer_decomposition` (選用) - 是否開啟圖層拆分，僅 5.0 Pro 支援；開啟後將單張輸入圖拆解為 1 張底圖與最多 16 個帶透明通道的 PNG 圖層，圖層條目額外回傳 `z_index`、`name`、`description`、`bounding_box` 欄位；`output_format` 僅控制底圖格式，圖層恆為 PNG
+- `background` (選用) - 透明通道，`transparent` 生成透明背景圖（需輸入單張帶透明通道的圖片，與 `output_format=jpeg` 互斥）或 `opaque` 生成常規圖，僅 5.0 Pro 支援
+- `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容；圖層拆分場景僅支援檔位與 `auto`（按輸入圖自適應，未指定尺寸時的預設值）
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
@@ -364,9 +368,9 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **參數：**
 
 - `prompt` (必要) - 圖像融合要求或風格指令，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 5.0 Pro / 4.0 支援
 - `image` (必要) - 輸入圖像 URL 或本地檔案路徑清單（2-14 張；5.0 Pro 最多 10 張）
-- `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
+- `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（5.0 Pro/5.0 Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
@@ -424,9 +428,9 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 **參數：**
 
 - `prompt` (必要) - 圖像生成的文字提示詞，應明確指明生成數量與內容，建議不超過 300 個漢字或 600 個英文單字
-- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 4.0 支援
+- `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 5.0 Pro / 4.0 支援
 - `image` (選用) - 參考圖像，支援單張圖片（字串）或多張圖片（陣列）；參考圖最多 14 張，且參考圖數量與 max_images 之和不超過 15
-- `size` (選用) - 圖像尺寸：`1K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
+- `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `max_images` (選用) - 最大生成圖像數量，範圍 1-15，預設 15；提供參考圖時預設自動扣減為 15 減參考圖數量
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`

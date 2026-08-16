@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from ..core.errors import SeedreamValidationError
 from ..core.formats import (
+    MIME_BY_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
     format_file_size_mb,
@@ -319,11 +320,15 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 def _validate_data_uri(data_uri: str) -> str:
     """验证 Data URI 格式图像数据的格式、可解码性、大小与像素维度。
 
+    官方要求 ``<图片格式>`` 为小写；本函数校验通过后把 media type 归一化为
+    小写标准 MIME（``image/jpg`` 一并归一为 ``image/jpeg``）重建 Data URI 返回，
+    使送往上游的载荷恒为官方要求的标准形态，用户侧大小写误写不再依赖上游报错。
+
     Args:
         data_uri: Data URI 格式的图像字符串。
 
     Returns:
-        验证通过时返回原始 Data URI。
+        验证通过且 media type 归一化后的 Data URI。
 
     Raises:
         SeedreamValidationError: 当格式无效、数据损坏或尺寸超限时抛出。
@@ -352,6 +357,8 @@ def _validate_data_uri(data_uri: str) -> str:
             raise SeedreamValidationError(
                 f"不支持的Data URI图片格式: {fmt}", field="image", value=data_uri
             )
+        # 官方要求格式小写；标准 MIME 子类型经 formats 的单一映射派生（jpg 随之归一为 jpeg）。
+        canonical_fmt = MIME_BY_EXTENSION[f".{fmt}"].split("/", 1)[1]
 
         # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大。
         if len(b64) > MAX_IMAGE_FILE_SIZE * 4 // 3 + 16:
@@ -387,7 +394,7 @@ def _validate_data_uri(data_uri: str) -> str:
                 f"图像维度解析失败: {str(e)}", field="image", value=data_uri
             ) from e
 
-        return data_uri
+        return f"data:image/{canonical_fmt};base64,{b64}"
 
     except (OSError, ValueError) as e:
         raise SeedreamValidationError(

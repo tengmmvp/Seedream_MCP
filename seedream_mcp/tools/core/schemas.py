@@ -48,6 +48,13 @@ class GenerationToolType(str, Enum):
     WEB_SEARCH = "web_search"
 
 
+class BackgroundMode(str, Enum):
+    """图片透明通道模式枚举。"""
+
+    TRANSPARENT = "transparent"
+    OPAQUE = "opaque"
+
+
 class OptimizePromptOptions(BaseModel):
     """提示词优化配置模型。
 
@@ -58,7 +65,7 @@ class OptimizePromptOptions(BaseModel):
 
     mode: str = Field(
         default="standard",
-        description="提示词优化模式：standard 高质量（全模型），fast 优先速度（仅 4.0 支持）。",
+        description="提示词优化模式：standard 高质量（全模型），fast 优先速度（仅 5.0 Pro / 4.0 支持）。",
     )
 
     @field_validator("mode")
@@ -97,8 +104,8 @@ class _PromptAndOptimizeInput(BaseModel):
 
     # prompt 在基类声明以确立字段顺序：模型字段顺序是 server.py 平铺签名的镜像来源，
     # prompt 须居首，平铺契约的等价性由 test_tool_call_assembly 锁定。
-    # 基类定义仅锚定字段顺序，长度约束与描述以各子类的覆盖为准；子类覆盖 prompt 时复用
-    # 同一长度常量，避免约束散落多处。
+    # 基类定义仅锚定字段顺序，长度约束与描述以各子类的覆盖为准；图文生图覆盖为
+    # str | None 以支持图层拆分场景缺省，其余子类保持必填并复用同一长度常量。
     prompt: str = Field(
         ...,
         min_length=PROMPT_MIN_LENGTH,
@@ -173,12 +180,35 @@ class _SequentialImageInput(BaseModel):
     )
 
 
+class _LayerDecompositionInput(BaseModel):
+    """图层拆分与透明通道参数，仅图文生图工具暴露。
+
+    两参数均仅 5.0 Pro 支持，模型能力门控在 context 构建与 client 全量重校验两处
+    执行；字段排布在 image 与 size 之间，决定平铺签名的字段顺序。
+    """
+
+    layer_decomposition: bool | None = Field(
+        default=None,
+        description=(
+            "是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图"
+            "与最多 16 个带透明通道的 PNG 图层，可配合 prompt 指定拆分意图。"
+        ),
+    )
+    background: BackgroundMode | None = Field(
+        default=None,
+        description=(
+            "图片透明通道，仅 5.0 Pro 图生图支持；transparent 生成透明背景图"
+            "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
+        ),
+    )
+
+
 class _SizeAndWatermarkInput(BaseModel):
     """尺寸与水印参数。"""
 
     size: str | None = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+        description="生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
     )
     watermark: bool | None = Field(
         default=None,
@@ -315,16 +345,38 @@ class ImageToImageInput(
     BaseGenerationInput,
     _ResponseAndExecutionInput,
     _SizeAndWatermarkInput,
+    _LayerDecompositionInput,
     _SingleImageInput,
     _PromptAndOptimizeInput,
 ):
     """图文生图：基于已有图片，结合文字指令进行图像编辑，包括图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等。"""
 
-    prompt: str = Field(
-        ...,
+    # 图层拆分场景 prompt 可缺省：模型将自动识别图片中的主要元素并拆分为独立图层；
+    # 其余场景必填，组合约束由下方 model_validator 保证。基类锚定为必填 str 以固定
+    # 字段顺序，本类宽化覆盖为可选，组合约束在运行时兜底。
+    prompt: str | None = Field(  # type: ignore[assignment]
+        default=None,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
-        description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。例如：把背景换成雪山、将照片转为水彩画风格。",
+        description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；图层拆分场景可缺省，由模型自动识别拆分意图。例如：把背景换成雪山、将照片转为水彩画风格。",
+    )
+
+    @model_validator(mode="after")
+    def validate_prompt_required_without_layer_decomposition(self) -> "ImageToImageInput":
+        """非图层拆分场景 prompt 必填，缺省时在构造输入模型阶段即拒绝。"""
+        if self.prompt is None and not self.layer_decomposition:
+            raise ValueError("prompt 不能为空，仅图层拆分场景允许缺省")
+        return self
+
+    # 覆盖共享基类的 size 描述以表达图层拆分特例：仅档位与 auto、缺省合成 auto；
+    # 覆盖声明不改变字段顺序，平铺签名镜像由守护测试继续锁定。
+    size: str | None = Field(
+        default=None,
+        description=(
+            "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；"
+            "图层拆分场景仅支持档位与 auto，未提供时默认 auto；"
+            "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
+        ),
     )
 
 
@@ -534,7 +586,11 @@ class GenerationInputParams(Protocol):
     具体输入模型经结构化子类型自动满足本协议，无需显式继承。
     """
 
-    prompt: str
+    # prompt 经只读 property 声明：各工具实现为 str（必填工具）或 str | None（图文
+    # 生图的图层拆分场景可缺省），只读协变使两类实现均满足本协议。
+    @property
+    def prompt(self) -> str | None: ...
+
     optimize_prompt_options: OptimizePromptOptions | None
     size: str | None
     watermark: bool | None

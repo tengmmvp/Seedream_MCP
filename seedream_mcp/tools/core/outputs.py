@@ -45,10 +45,14 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
         output_format: 输出图片格式，未指定时为 None。
         stream: 是否启用流式输出。
         tools: 模型工具配置列表，未启用时为 None。
+        layer_decomposition: 是否开启图层拆分，非 False 取值仅出现在图文生图，
+            其余工具恒为 False。
+        background: 透明通道取值，非 None 取值仅出现在图文生图显式指定时。
         request_count: 本批次请求数量。
         parallelism: 本批次并行度上限。
-        data: 图片条目列表，条目含 url 或 b64_json 及自动保存回填的本地路径信息。
-        usage: 用量统计字典，键由上游透传。
+        data: 图片条目列表，条目含 url 或 b64_json 及自动保存回填的本地路径信息；
+            图层拆分场景条目另含 z_index、name、description、bounding_box 字段。
+        usage: 用量统计字典，键由上游透传；5.0 Pro 另含 input_images 输入图片数。
         batch: 并行批次统计，单次请求时为 None。
         auto_save: 自动保存摘要，未启用时仅含 enabled 键。
         truncated_events: SSE 解析因单事件体积超限丢弃的事件数，未发生丢弃时为
@@ -61,6 +65,8 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     output_format: str | None = None
     stream: bool | None = None
     tools: list[dict[str, Any]] | None = None
+    layer_decomposition: bool | None = None
+    background: str | None = None
     request_count: int | None = None
     parallelism: int | None = None
     data: list[dict[str, Any]] | None = None

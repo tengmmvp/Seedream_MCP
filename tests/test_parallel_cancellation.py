@@ -29,6 +29,8 @@ def _make_context(request_count: int, parallelism: int) -> GenerationExecutionCo
         output_format=None,
         stream=False,
         tools=None,
+        layer_decomposition=False,
+        background=None,
         request_count=request_count,
         parallelism=parallelism,
         enable_auto_save=False,

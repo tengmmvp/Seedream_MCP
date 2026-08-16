@@ -90,8 +90,30 @@ def test_validate_size_for_model_accepts_seedream_50_pro_2k_preset() -> None:
 
 def test_validate_size_for_model_rejects_seedream_50_pro_3k_preset() -> None:
     # 关键回归：5.0 Pro 的 id 含 "doubao-seedream-5-0" 子串，若误判为 5.0 Lite 则 3K 会通过
-    with pytest.raises(SeedreamValidationError, match="5.0-pro 模型下仅支持 1K/2K"):
+    # 档位串接经 sorted 字典序排列，1.5K 排在 1K 之前。
+    with pytest.raises(SeedreamValidationError, match="仅支持 1.5K/1K/2K"):
         validate_size_for_model("3K", "doubao-seedream-5-0-pro-260628")
+
+
+def test_validate_size_for_model_accepts_seedream_50_pro_1_5k_preset() -> None:
+    assert validate_size_for_model("1.5K", "doubao-seedream-5-0-pro-260628") == "1.5K"
+
+
+def test_validate_size_for_model_rejects_seedream_50_pro_1_5k_for_lite() -> None:
+    with pytest.raises(SeedreamValidationError, match="仅支持 2K/3K/4K"):
+        validate_size_for_model("1.5K", "doubao-seedream-5-0-260128")
+
+
+def test_validate_size_for_model_accepts_seedream_50_pro_upper_pixel_bound() -> None:
+    # 官方像素上限 2048x2048x1.1025=4624220；邻界值 2048x2256=4620288 不超限且
+    # 宽高均为 16 的倍数，通过。
+    assert validate_size_for_model("2048x2256", "doubao-seedream-5-0-pro-260628") == ("2048x2256")
+
+
+def test_validate_size_for_model_rejects_seedream_50_pro_above_pixel_bound() -> None:
+    # 2080x2224=4625920 超出官方上限 4624220，拒绝。
+    with pytest.raises(SeedreamValidationError, match="5.0-pro 模型下"):
+        validate_size_for_model("2080x2224", "doubao-seedream-5-0-pro-260628")
 
 
 def test_validate_size_for_model_accepts_seedream_50_pro_pixel_size() -> None:

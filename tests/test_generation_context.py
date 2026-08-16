@@ -13,7 +13,7 @@ from seedream_mcp.tools.core.common import (
     format_generation_response,
     update_result_with_auto_save,
 )
-from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.tools.core.schemas import ImageToImageInput, TextToImageInput
 from seedream_mcp.utils.io.io_save import AutoSaveResult
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
@@ -35,6 +35,100 @@ def test_build_generation_context_uses_default_size_when_omitted() -> None:
     assert context.parallelism == 1
 
 
+def _build_pro_config() -> SeedreamConfig:
+    return SeedreamConfig(
+        api_key="test_key",
+        model_id="doubao-seedream-5-0-pro-260628",
+        default_size="2K",
+    )
+
+
+def test_build_generation_context_layer_decomposition_defaults_size_auto() -> None:
+    """图层拆分开启且未显式提供 size 时按官方默认取 auto，不取 config.default_size。"""
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(
+            prompt="拆分图层", image="https://example.com/a.png", layer_decomposition=True
+        ),
+        config,
+    )
+
+    assert context.layer_decomposition is True
+    assert context.size == "auto"
+
+
+def test_build_generation_context_layer_decomposition_keeps_explicit_size() -> None:
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(
+            prompt="拆分图层",
+            image="https://example.com/a.png",
+            layer_decomposition=True,
+            size="1K",
+        ),
+        config,
+    )
+
+    assert context.size == "1K"
+
+
+def test_build_generation_context_layer_decomposition_rejected_for_lite() -> None:
+    config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-260128")
+
+    with pytest.raises(SeedreamValidationError, match="不支持 layer_decomposition"):
+        build_generation_context(
+            ImageToImageInput(
+                prompt="拆分图层", image="https://example.com/a.png", layer_decomposition=True
+            ),
+            config,
+        )
+
+
+def test_build_generation_context_background_carried_to_context() -> None:
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(
+            prompt="透明背景", image="https://example.com/a.png", background="transparent"
+        ),
+        config,
+    )
+
+    assert context.background == "transparent"
+    assert context.layer_decomposition is False
+
+
+def test_build_generation_context_layer_scenario_allows_missing_prompt() -> None:
+    """图层拆分场景 prompt 可缺省，context 携带 None 且 size 默认 auto。"""
+    config = _build_pro_config()
+    context = build_generation_context(
+        ImageToImageInput(image="https://example.com/a.png", layer_decomposition=True),
+        config,
+    )
+
+    assert context.prompt is None
+    assert context.size == "auto"
+
+
+def test_image_to_image_input_rejects_missing_prompt_without_layer() -> None:
+    with pytest.raises(ValidationError, match="prompt 不能为空"):
+        ImageToImageInput(image="https://example.com/a.png")
+
+
+def test_build_generation_context_rejects_transparent_with_jpeg() -> None:
+    config = _build_pro_config()
+
+    with pytest.raises(SeedreamValidationError, match="互斥"):
+        build_generation_context(
+            ImageToImageInput(
+                prompt="透明背景",
+                image="https://example.com/a.png",
+                background="transparent",
+                output_format="jpeg",
+            ),
+            config,
+        )
+
+
 def test_generation_execution_context_field_order_matches_mcp_order() -> None:
     assert [field.name for field in fields(GenerationExecutionContext)] == [
         "prompt",
@@ -45,6 +139,8 @@ def test_generation_execution_context_field_order_matches_mcp_order() -> None:
         "output_format",
         "stream",
         "tools",
+        "layer_decomposition",
+        "background",
         "request_count",
         "parallelism",
         "enable_auto_save",

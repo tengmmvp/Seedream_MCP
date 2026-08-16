@@ -15,9 +15,12 @@ from seedream_mcp.utils.model.model_capabilities import (
     get_model_capabilities,
 )
 from seedream_mcp.utils.core.validators import (
+    validate_background,
     validate_generation_tools,
+    validate_layer_decomposition,
     validate_optimize_prompt_options,
     validate_output_format,
+    validate_size_for_model,
     validate_stream,
 )
 
@@ -99,12 +102,11 @@ def test_max_reference_images_40_is_14() -> None:
     assert get_max_reference_images(MODEL_40) == 14
 
 
-# ==================== 提示词优化模式：Pro/Lite/4.5 仅 standard ====================
+# ==================== 提示词优化模式：Lite/4.5 仅 standard，Pro/4.0 支持 fast ====================
 
 
-def test_optimize_fast_rejected_for_pro() -> None:
-    with pytest.raises(SeedreamValidationError, match="standard"):
-        validate_optimize_prompt_options({"mode": "fast"}, PRO)
+def test_optimize_fast_accepted_for_pro() -> None:
+    assert validate_optimize_prompt_options({"mode": "fast"}, PRO) == {"mode": "fast"}
 
 
 def test_optimize_fast_rejected_for_lite() -> None:
@@ -159,6 +161,123 @@ def test_supports_sequential_generation_false_for_pro() -> None:
 
     assert get_model_capabilities(PRO).supports_sequential_generation is False
     assert get_model_capabilities(LITE).supports_sequential_generation is True
+
+
+# ==================== 图层拆分：仅 5.0 Pro 支持 ====================
+
+
+def test_layer_decomposition_accepted_for_pro() -> None:
+    assert validate_layer_decomposition(True, PRO) is True
+
+
+def test_layer_decomposition_rejected_for_lite() -> None:
+    with pytest.raises(SeedreamValidationError, match="不支持 layer_decomposition"):
+        validate_layer_decomposition(True, LITE)
+
+
+def test_layer_decomposition_none_defaults_false() -> None:
+    assert validate_layer_decomposition(None, LITE) is False
+
+
+def test_layer_decomposition_rejects_non_bool() -> None:
+    with pytest.raises(SeedreamValidationError, match="布尔值"):
+        validate_layer_decomposition("true", PRO)
+
+
+def test_size_auto_accepted_for_pro_with_layer_decomposition() -> None:
+    assert validate_size_for_model("auto", PRO, layer_decomposition=True) == "auto"
+
+
+def test_size_auto_rejected_without_layer_decomposition() -> None:
+    with pytest.raises(SeedreamValidationError):
+        validate_size_for_model("auto", PRO)
+
+
+def test_size_auto_rejected_for_lite_even_with_layer_decomposition() -> None:
+    # Lite 不支持图层拆分，auto 在门控层即被拒绝
+    with pytest.raises(SeedreamValidationError, match="不支持图层拆分"):
+        validate_size_for_model("auto", LITE, layer_decomposition=True)
+
+
+def test_size_pixel_value_rejected_in_layer_decomposition_scenario() -> None:
+    # 官方图层拆分场景仅支持分辨率档位方式，宽高像素值直接拒绝
+    with pytest.raises(SeedreamValidationError, match="仅支持分辨率档位"):
+        validate_size_for_model("2048x2048", PRO, layer_decomposition=True)
+
+
+def test_common_params_prompt_none_accepted_with_layer_decomposition() -> None:
+    from seedream_mcp.utils.core.validators import validate_common_generation_params
+
+    validated = validate_common_generation_params(
+        prompt=None,
+        optimize_prompt_options=None,
+        size="auto",
+        watermark=False,
+        response_format="url",
+        output_format=None,
+        stream=False,
+        tools=None,
+        model_id=PRO,
+        layer_decomposition=True,
+    )
+
+    assert validated.prompt is None
+
+
+def test_common_params_prompt_none_rejected_without_layer_decomposition() -> None:
+    from seedream_mcp.utils.core.validators import validate_common_generation_params
+
+    with pytest.raises(SeedreamValidationError, match="prompt 不能为空"):
+        validate_common_generation_params(
+            prompt=None,
+            optimize_prompt_options=None,
+            size="2K",
+            watermark=False,
+            response_format="url",
+            output_format=None,
+            stream=False,
+            tools=None,
+            model_id=PRO,
+        )
+
+
+# ==================== 透明通道 background：仅 5.0 Pro 支持 ====================
+
+
+def test_background_transparent_accepted_for_pro() -> None:
+    assert validate_background("transparent", PRO) == "transparent"
+
+
+def test_background_opaque_accepted_for_pro() -> None:
+    assert validate_background("opaque", PRO) == "opaque"
+
+
+def test_background_rejected_for_lite() -> None:
+    with pytest.raises(SeedreamValidationError, match="不支持 background"):
+        validate_background("transparent", LITE)
+
+
+def test_background_rejects_invalid_value() -> None:
+    with pytest.raises(SeedreamValidationError, match="background 必须为"):
+        validate_background("alpha", PRO)
+
+
+def test_background_none_returns_none() -> None:
+    assert validate_background(None, LITE) is None
+
+
+def test_background_transparent_rejects_jpeg_output_format() -> None:
+    # 官方语义：透明背景输出为 png，与 output_format=jpeg 互斥
+    with pytest.raises(SeedreamValidationError, match="互斥"):
+        validate_background("transparent", PRO, output_format="jpeg")
+
+
+def test_background_transparent_allows_png_output_format() -> None:
+    assert validate_background("transparent", PRO, output_format="png") == "transparent"
+
+
+def test_background_transparent_allows_unspecified_output_format() -> None:
+    assert validate_background("transparent", PRO, output_format=None) == "transparent"
 
 
 async def test_pro_model_rejects_sequential_generation_call() -> None:

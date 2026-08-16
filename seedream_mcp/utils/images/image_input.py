@@ -40,7 +40,7 @@ async def prepare_image_input(image: str) -> str:
     """将单张图像输入归一化为 API 所需格式。
 
     - HTTP/HTTPS URL：经统一校验拒绝 userinfo 凭据等不安全形态后原样返回。
-    - Data URI：经格式与维度校验后原样返回。
+    - Data URI：经格式与维度校验后将 media type 归一化为小写标准 MIME 返回。
     - 本地文件路径：读取并编码为 Base64 Data URI 返回。
 
     URL 校验、Data URI 校验与本地文件读取均在工作线程中执行，避免阻塞事件循环。
@@ -49,7 +49,8 @@ async def prepare_image_input(image: str) -> str:
         image: 图像输入字符串，可为 HTTP/HTTPS URL、Data URI 或本地文件路径。
 
     Returns:
-        归一化后的图像输入：URL 与 Data URI 原样返回，本地文件为 Base64 Data URI。
+        归一化后的图像输入：URL 原样返回，Data URI 为 media type 归一化后的形态，
+        本地文件为 Base64 Data URI。
 
     Raises:
         SeedreamValidationError: 输入格式无效、路径越界或维度超限等参数校验失败。

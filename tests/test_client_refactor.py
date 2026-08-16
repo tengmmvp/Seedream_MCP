@@ -115,6 +115,24 @@ def _build_config() -> SeedreamConfig:
     return SeedreamConfig(api_key="test_key", max_retries=1)
 
 
+def test_build_common_request_omits_prompt_key_when_none() -> None:
+    """图层拆分场景缺省提示词时请求体不含 prompt 键，由模型自动识别拆分意图。"""
+    client = SeedreamClient(_build_config())
+    data = client._build_common_request(
+        prompt=None,
+        size="auto",
+        watermark=False,
+        response_format="url",
+        output_format=None,
+        stream=False,
+        tools=None,
+        validated_opts=None,
+    )
+
+    assert "prompt" not in data
+    assert data["model"] == client.config.model_id
+
+
 def test_public_generation_methods_keep_expected_parameter_order() -> None:
     signature_expectations = {
         "text_to_image": {
@@ -136,6 +154,8 @@ def test_public_generation_methods_keep_expected_parameter_order() -> None:
                 "prompt",
                 "optimize_prompt_options",
                 "image",
+                "layer_decomposition",
+                "background",
                 "size",
                 "watermark",
                 "response_format",

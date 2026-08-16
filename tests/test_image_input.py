@@ -171,12 +171,14 @@ async def test_prepare_image_input_accepts_uppercase_data_scheme() -> None:
     """scheme 大小写不敏感：大写 DATA: 前缀的合法 Data URI 正常校验通过。
 
     RFC 3986 scheme 大小写不敏感；此前大写前缀在 parse_data_uri 处拆分失败，
-    报笼统的"格式无效"而非走精确校验分支。
+    报笼统的"格式无效"而非走精确校验分支。官方要求图片格式为小写，返回值经
+    归一化为小写标准形态。
     """
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
     data_uri = "DATA:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-    assert await prepare_image_input(data_uri) == data_uri
+    normalized = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    assert await prepare_image_input(data_uri) == normalized
 
 
 async def test_prepare_image_input_corrupt_content_raises_validation_error(

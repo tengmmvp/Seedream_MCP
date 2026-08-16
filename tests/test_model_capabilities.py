@@ -68,6 +68,8 @@ def test_get_model_capabilities_legacy_and_unknown_default_to_permissive() -> No
     assert unknown.supports_output_format is True
     assert unknown.supports_tools is True
     assert unknown.supports_stream is True
+    assert unknown.supports_layer_decomposition is True
+    assert unknown.supports_background is True
     assert unknown.max_reference_images == 14
 
 

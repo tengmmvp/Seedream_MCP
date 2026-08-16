@@ -36,7 +36,9 @@ from .utils.model.model_capabilities import get_max_reference_images, get_model_
 from .utils.core.validators import (
     ValidatedCommonParams,
     resolve_sequential_max_images,
+    validate_background,
     validate_common_generation_params,
+    validate_layer_decomposition,
     validate_max_images,
     validate_sequential_image_limit,
 )
@@ -221,7 +223,7 @@ class SeedreamClient:
     def _build_common_request(
         self,
         *,
-        prompt: str,
+        prompt: str | None,
         size: str,
         watermark: bool,
         response_format: str,
@@ -235,11 +237,14 @@ class SeedreamClient:
 
         size/watermark/response_format/output_format/stream/tools 的组装逻辑在四个生成
         方法中完全相同，集中于此避免漂移；方法特有的字段如参考图、组图选项等通过 extra 并入。
+        prompt 为 None 时不写入该键，对应图层拆分场景的缺省提示词，由模型自动识别
+        拆分意图。
         """
         request_data: dict[str, Any] = {
             "model": self.config.model_id,
-            "prompt": prompt,
         }
+        if prompt is not None:
+            request_data["prompt"] = prompt
         if validated_opts:
             request_data["optimize_prompt_options"] = validated_opts
         update_payload: dict[str, Any] = {
@@ -261,7 +266,7 @@ class SeedreamClient:
     @log_function_call
     async def text_to_image(
         self,
-        prompt: str,
+        prompt: str | None = None,
         optimize_prompt_options: dict[str, Any] | None = None,
         size: str | None = None,
         watermark: bool | None = None,
@@ -278,7 +283,7 @@ class SeedreamClient:
         Args:
             prompt: 文本提示词，描述要生成的图像内容。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
@@ -293,7 +298,7 @@ class SeedreamClient:
             SeedreamValidationError: 参数验证失败。
         """
         (
-            prompt,
+            validated_prompt,
             validated_opts,
             size,
             watermark,
@@ -314,13 +319,13 @@ class SeedreamClient:
 
         self.logger.opt(lazy=True).info(
             "开始文生图任务: prompt_meta={}, size={}",
-            lambda: self._summarize_prompt(prompt),
+            lambda: self._summarize_prompt(validated_prompt),
             lambda: size,
         )
 
         async def _build_request() -> dict[str, Any]:
             return self._build_common_request(
-                prompt=prompt,
+                prompt=validated_prompt,
                 size=size,
                 watermark=watermark,
                 response_format=response_format,
@@ -344,9 +349,11 @@ class SeedreamClient:
     @log_function_call
     async def image_to_image(
         self,
-        prompt: str,
+        prompt: str | None = None,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: str | None = None,
+        layer_decomposition: bool | None = None,
+        background: str | None = None,
         size: str | None = None,
         watermark: bool | None = None,
         response_format: str = "url",
@@ -360,10 +367,18 @@ class SeedreamClient:
         基于已有图片，结合文字指令进行图像编辑。
 
         Args:
-            prompt: 文本提示词，描述要对输入图像进行的修改或转换。
+            prompt: 文本提示词，描述要对输入图像进行的修改或转换；图层拆分场景可
+                缺省，由模型自动识别图片主要元素并拆分。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
             image: 输入图像的 URL 或本地文件路径。
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            layer_decomposition: 是否开启图层拆分，仅 5.0 Pro 支持；开启后单张输入图
+                拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层。
+            background: 图片透明通道，"transparent" 或 "opaque"，仅 5.0 Pro 支持；
+                transparent 需输入单张带透明通道的图片，且与 output_format="jpeg"
+                互斥。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或
+                "<宽>x<高>" 像素值；图层拆分场景仅支持档位与 "auto"，且未传入时默认
+                取 "auto"，其余场景未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
@@ -378,8 +393,11 @@ class SeedreamClient:
             SeedreamValidationError: 参数验证失败。
         """
         image = self._normalize_single_image(image)
+        resolved_layer_decomposition = validate_layer_decomposition(
+            layer_decomposition, self.config.model_id
+        )
         (
-            prompt,
+            validated_prompt,
             validated_opts,
             size,
             watermark,
@@ -396,18 +414,27 @@ class SeedreamClient:
             output_format=output_format,
             stream=stream,
             tools=tools,
+            layer_decomposition=resolved_layer_decomposition,
+        )
+        resolved_background = validate_background(
+            background, self.config.model_id, output_format=output_format
         )
 
         self.logger.opt(lazy=True).info(
             "开始图文生图任务: prompt_meta={}, size={}",
-            lambda: self._summarize_prompt(prompt),
+            lambda: self._summarize_prompt(validated_prompt),
             lambda: size,
         )
 
         async def _build_request() -> dict[str, Any]:
             image_data = await self._prepare_image_input(image)
+            extra: dict[str, Any] = {"image": image_data}
+            if resolved_layer_decomposition:
+                extra["layer_decomposition"] = True
+            if resolved_background is not None:
+                extra["background"] = resolved_background
             return self._build_common_request(
-                prompt=prompt,
+                prompt=validated_prompt,
                 size=size,
                 watermark=watermark,
                 response_format=response_format,
@@ -415,7 +442,7 @@ class SeedreamClient:
                 stream=stream,
                 tools=tools,
                 validated_opts=validated_opts,
-                extra={"image": image_data},
+                extra=extra,
             )
 
         try:
@@ -432,7 +459,7 @@ class SeedreamClient:
     @log_function_call
     async def multi_image_fusion(
         self,
-        prompt: str,
+        prompt: str | None = None,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: list[str] | None = None,
         size: str | None = None,
@@ -451,7 +478,7 @@ class SeedreamClient:
             prompt: 文本提示词，描述要对输入图像进行的融合操作。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
             image: 输入图像的 URL 或本地文件路径列表，数量范围为 2-14 张；5.0 Pro 最多 10 张。
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
             output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
@@ -470,7 +497,7 @@ class SeedreamClient:
             image, min_count=2, max_count=max_reference, field_name="image"
         )
         (
-            prompt,
+            validated_prompt,
             validated_opts,
             size,
             watermark,
@@ -491,7 +518,7 @@ class SeedreamClient:
 
         self.logger.opt(lazy=True).info(
             "开始多图融合任务: prompt_meta={}, image_count={}, size={}",
-            lambda: self._summarize_prompt(prompt),
+            lambda: self._summarize_prompt(validated_prompt),
             lambda: len(image),
             lambda: size,
         )
@@ -499,7 +526,7 @@ class SeedreamClient:
         async def _build_request() -> dict[str, Any]:
             image_data_list = await self._prepare_images_in_parallel(image)
             return self._build_common_request(
-                prompt=prompt,
+                prompt=validated_prompt,
                 size=size,
                 watermark=watermark,
                 response_format=response_format,
@@ -524,7 +551,7 @@ class SeedreamClient:
     @log_function_call
     async def sequential_generation(
         self,
-        prompt: str,
+        prompt: str | None = None,
         optimize_prompt_options: dict[str, Any] | None = None,
         image: str | Sequence[str] | None = None,
         size: str | None = None,
@@ -549,7 +576,7 @@ class SeedreamClient:
             prompt: 文本提示词，描述要生成的图像内容。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
             image: 可选的参考图像，支持单张图像 URL/路径或多张图像 URL/路径列表；参考图数量与生成数量之和不超过 15。
-            size: 图像尺寸，支持与当前模型兼容的 "1K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
+            size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
@@ -573,7 +600,7 @@ class SeedreamClient:
             )
 
         (
-            prompt,
+            validated_prompt,
             validated_opts,
             size,
             watermark,
@@ -623,7 +650,7 @@ class SeedreamClient:
 
         self.logger.opt(lazy=True).info(
             "开始组图输出任务: prompt_meta={}, max_images={}, size={}",
-            lambda: self._summarize_prompt(prompt),
+            lambda: self._summarize_prompt(validated_prompt),
             lambda: resolved_max_images,
             lambda: size,
         )
@@ -643,7 +670,7 @@ class SeedreamClient:
             if processed_image is not None:
                 extra["image"] = processed_image
             return self._build_common_request(
-                prompt=prompt,
+                prompt=validated_prompt,
                 size=size,
                 watermark=watermark,
                 response_format=response_format,
@@ -668,7 +695,7 @@ class SeedreamClient:
     def _validate_common_generation_params(
         self,
         *,
-        prompt: str,
+        prompt: str | None,
         optimize_prompt_options: dict[str, Any] | None,
         size: str | None,
         watermark: bool | None,
@@ -676,6 +703,7 @@ class SeedreamClient:
         output_format: str | None,
         stream: bool,
         tools: list[dict[str, Any]] | None,
+        layer_decomposition: bool = False,
     ) -> ValidatedCommonParams:
         """集中校验生成类工具的公共参数并返回校验后的各值。
 
@@ -683,8 +711,9 @@ class SeedreamClient:
         全量校验，作为公共库 API 的自校验层：工具链路经 schema 与 context 分层校验后仍会
         到达此处，直接调用 client 的库使用方则仅依赖本校验。size 与 watermark 未显式
         传入时按 config.default_size / default_watermark 兜底合成，与 tools 层
-        build_generation_context 的合成语义一致，消除直连调用与配置的双源分叉。
-        各方法特有的图片数量与序列校验仍在各自方法内执行。
+        build_generation_context 的合成语义一致，消除直连调用与配置的双源分叉；
+        图层拆分场景 size 未显式传入时按官方默认取 auto。各方法特有的图片数量与
+        序列校验仍在各自方法内执行。
 
         当前上下文绑定共享请求计划时按输入快照复用批内首次校验结果：批内各请求的
         公共参数相同，重复校验对结果无增量，仅重复 100k 级提示词的 CJK 计数扫描；
@@ -692,7 +721,10 @@ class SeedreamClient:
         写入，未经预校验的并发批次各请求独立校验，结果一致。直连调用未绑定计划，
         每次调用均独立校验，公共 API 行为不变。
         """
-        resolved_size = size if size is not None else self.config.default_size
+        if layer_decomposition and size is None:
+            resolved_size = "auto"
+        else:
+            resolved_size = size if size is not None else self.config.default_size
         resolved_watermark = self.config.default_watermark if watermark is None else watermark
         inputs = (
             prompt,
@@ -703,6 +735,7 @@ class SeedreamClient:
             output_format,
             stream,
             tools,
+            layer_decomposition,
         )
         plan = _ACTIVE_REQUEST_PLAN.get()
         if plan is not None:
@@ -719,6 +752,7 @@ class SeedreamClient:
             stream=stream,
             tools=tools,
             model_id=self.config.model_id,
+            layer_decomposition=layer_decomposition,
         )
         if plan is not None:
             plan.validated_common_params = (inputs, validated)
@@ -727,7 +761,7 @@ class SeedreamClient:
     def prevalidate_common_generation_params(
         self,
         *,
-        prompt: str,
+        prompt: str | None,
         optimize_prompt_options: dict[str, Any] | None,
         size: str | None,
         watermark: bool | None,
@@ -735,6 +769,7 @@ class SeedreamClient:
         output_format: str | None,
         stream: bool,
         tools: list[dict[str, Any]] | None,
+        layer_decomposition: bool = False,
     ) -> None:
         """批次分发前校验公共参数一次，结果经共享计划供同批各请求复用。
 
@@ -753,6 +788,7 @@ class SeedreamClient:
             output_format=output_format,
             stream=stream,
             tools=tools,
+            layer_decomposition=layer_decomposition,
         )
 
     async def close(self) -> None:
@@ -842,8 +878,10 @@ class SeedreamClient:
         return headers
 
     @staticmethod
-    def _summarize_prompt(prompt: str) -> str:
+    def _summarize_prompt(prompt: str | None) -> str:
         """生成提示词的日志摘要，仅含长度与 SHA-256 摘要前 12 位，避免提示词明文进入日志。"""
+        if prompt is None:
+            return "not-provided"
         digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         return f"len={len(prompt)}, sha256={digest}"
 

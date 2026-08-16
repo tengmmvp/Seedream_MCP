@@ -187,6 +187,7 @@ async def _run_generation_requests(
             output_format=context.output_format,
             stream=context.stream,
             tools=context.tools,
+            layer_decomposition=context.layer_decomposition,
         )
         if context.request_count == 1:
             await _safe_report_progress(

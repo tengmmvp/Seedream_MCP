@@ -29,8 +29,10 @@ logger = get_logger(__name__)
 # optimize_prompt_options.mode 的合法取值白名单。
 VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
 # 尺寸预设档位与输出格式白名单。
-VALID_SIZE_PRESETS = frozenset({"1K", "2K", "3K", "4K"})
+VALID_SIZE_PRESETS = frozenset({"1K", "1.5K", "2K", "3K", "4K"})
 VALID_OUTPUT_FORMATS = frozenset({"jpeg", "png"})
+# 图片透明通道参数 background 的合法取值白名单，仅 5.0 Pro 图生图支持。
+VALID_BACKGROUND_MODES = frozenset({"transparent", "opaque"})
 # 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
@@ -436,14 +438,16 @@ def validate_max_images(max_images: Any) -> int:
 # ==================== 尺寸验证函数 ====================
 
 
-def validate_size(size: str) -> str:
+def validate_size(size: str, *, layer_decomposition: bool = False) -> str:
     """验证图像尺寸参数是否在允许的范围内。
 
     Args:
-        size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>。
+        size: 图像尺寸规格，支持 1K/1.5K/2K/3K/4K 或 <宽>x<高>。
+        layer_decomposition: 是否处于图层拆分场景，true 时额外接受按输入图
+            尺寸自适应的 "auto"。
 
     Returns:
-        大写格式的标准化尺寸值。
+        大写格式的标准化尺寸值；图层拆分场景的 auto 归一为小写返回。
 
     Raises:
         SeedreamValidationError: 当尺寸参数无效时抛出。
@@ -459,28 +463,43 @@ def validate_size(size: str) -> str:
     if preset in VALID_SIZE_PRESETS:
         return preset
 
+    # 图层拆分场景的 auto 档：由模型按输入图尺寸与宽高比自适应输出，无像素校验。
+    if layer_decomposition and normalized.lower() == "auto":
+        return "auto"
+
+    # 图层拆分场景仅支持分辨率档位与 auto，不支持宽高像素值方式。
+    if layer_decomposition:
+        raise SeedreamValidationError(
+            "图层拆分场景的 size 仅支持分辨率档位（1K/1.5K/2K）或 auto",
+            field="size",
+            value=size,
+        )
+
     pixel_size = _parse_pixel_size(normalized)
     if pixel_size is not None:
         width, height = pixel_size
         return f"{width}x{height}"
 
     raise SeedreamValidationError(
-        "图像尺寸必须为 1K/2K/3K/4K 或 <宽>x<高> 像素值",
+        "图像尺寸必须为 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值",
         field="size",
         value=size,
     )
 
 
-def validate_size_for_model(size: str, model_id: str) -> str:
+def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bool = False) -> str:
     """验证图像尺寸与模型的兼容性。
 
     尺寸规则由 model_capabilities 的能力声明驱动，含预设档位白名单 allowed_presets、
     像素总区间 min/max_size_pixels、像素倍数约束 size_pixel_multiple，例如 5.0 Pro
-    要求宽高为 16 的倍数。新增模型只需扩展能力声明即可，无需改动本函数。
+    要求宽高为 16 的倍数。新增模型只需扩展能力声明即可，无需改动本函数。图层拆分
+    场景下 "auto" 由模型自适应输出，仅校验模型支持图层拆分，不走档位与像素校验。
 
     Args:
-        size: 图像尺寸规格，支持 1K/2K/3K/4K 或 <宽>x<高>。
+        size: 图像尺寸规格，支持 1K/1.5K/2K/3K/4K 或 <宽>x<高>；图层拆分场景
+            另支持 auto。
         model_id: 模型标识符。
+        layer_decomposition: 是否处于图层拆分场景。
 
     Returns:
         验证通过的尺寸值。
@@ -488,8 +507,17 @@ def validate_size_for_model(size: str, model_id: str) -> str:
     Raises:
         SeedreamValidationError: 当尺寸与模型不兼容时抛出。
     """
-    size = validate_size(size)
+    size = validate_size(size, layer_decomposition=layer_decomposition)
     caps = get_model_capabilities(model_id)
+
+    if size == "auto":
+        if not caps.supports_layer_decomposition:
+            raise SeedreamValidationError(
+                f"{caps.display_name} 模型不支持图层拆分，size 不接受 auto",
+                field="size",
+                value=size,
+            )
+        return size
 
     # 分辨率档位校验：各家族支持的档位白名单由能力表声明。
     if size in VALID_SIZE_PRESETS:
@@ -548,6 +576,95 @@ def validate_size_for_model(size: str, model_id: str) -> str:
 
 
 # ==================== 高级验证函数 ====================
+
+
+def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> bool:
+    """验证图层拆分开关与模型的兼容性。
+
+    图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，仅
+    5.0 Pro 支持，且要求单张参考图输入（image_to_image 工具的输入形态已保证）。
+
+    Args:
+        layer_decomposition: 图层拆分开关，None 视为未启用。
+        model_id: 模型标识符。
+
+    Returns:
+        归一后的开关布尔值，未启用时为 False。
+
+    Raises:
+        SeedreamValidationError: 开关值非法，或当前模型不支持图层拆分。
+    """
+    if layer_decomposition is None:
+        return False
+    if not isinstance(layer_decomposition, bool):
+        raise SeedreamValidationError(
+            "layer_decomposition 必须为布尔值",
+            field="layer_decomposition",
+            value=layer_decomposition,
+        )
+    caps = get_model_capabilities(model_id or "")
+    if layer_decomposition and not caps.supports_layer_decomposition:
+        raise SeedreamValidationError(
+            f"{caps.display_name} 模型不支持 layer_decomposition 图层拆分",
+            field="layer_decomposition",
+            value=layer_decomposition,
+        )
+    return layer_decomposition
+
+
+def validate_background(
+    background: Any, model_id: str, output_format: str | None = None
+) -> str | None:
+    """验证图片透明通道参数与模型的兼容性。
+
+    background 控制是否生成带透明通道的图片，仅 5.0 Pro 的图生图场景支持，且要求
+    输入单张带透明通道的图片；输入图格式约束由上游校验，此处做值域、模型门控与
+    output_format 互斥校验。透明背景输出为带 alpha 通道的 png，与 jpeg 输出格式
+    互斥，同时指定按官方语义报错。
+
+    Args:
+        background: 透明通道取值，transparent 或 opaque，None 表示未指定。
+        model_id: 模型标识符。
+        output_format: 同请求指定的输出格式，None 表示未指定。
+
+    Returns:
+        规范化后的取值，未指定时为 None。
+
+    Raises:
+        SeedreamValidationError: 取值非法、当前模型不支持该参数，或透明背景与
+            jpeg 输出格式互斥。
+    """
+    if background is None:
+        return None
+    if not isinstance(background, str):
+        raise SeedreamValidationError(
+            "background 必须为字符串", field="background", value=background
+        )
+    normalized = background.strip().lower()
+    if normalized not in VALID_BACKGROUND_MODES:
+        raise SeedreamValidationError(
+            f"background 必须为 {sorted(VALID_BACKGROUND_MODES)}",
+            field="background",
+            value=background,
+        )
+    caps = get_model_capabilities(model_id or "")
+    if not caps.supports_background:
+        raise SeedreamValidationError(
+            f"{caps.display_name} 模型不支持 background 透明通道参数",
+            field="background",
+            value=normalized,
+        )
+    if (
+        normalized == "transparent"
+        and output_format is not None
+        and output_format.strip().lower() == "jpeg"
+    ):
+        raise SeedreamValidationError(
+            "透明背景输出为 png，background=transparent 与 output_format=jpeg 互斥",
+            field="background",
+            value=normalized,
+        )
+    return normalized
 
 
 def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None:
@@ -726,7 +843,7 @@ class ValidatedCommonParams(NamedTuple):
     """生成类工具公共参数的校验结果，供 context 与 client 共享单一校验入口。
 
     Attributes:
-        prompt: 校验后的提示词文本。
+        prompt: 校验后的提示词文本；图层拆分场景未提供提示词时为 None。
         optimize_prompt_options: 校验后的提示词优化选项，未指定时为 None。
         size: 校验后的尺寸规格。
         watermark: 标准化后的水印开关。
@@ -736,7 +853,7 @@ class ValidatedCommonParams(NamedTuple):
         tools: 校验后的生成工具数组，未指定时为 None。
     """
 
-    prompt: str
+    prompt: str | None
     optimize_prompt_options: dict[str, Any] | None
     size: str
     watermark: bool
@@ -748,7 +865,7 @@ class ValidatedCommonParams(NamedTuple):
 
 def validate_common_generation_params(
     *,
-    prompt: str,
+    prompt: str | None,
     optimize_prompt_options: dict[str, Any] | None,
     size: str,
     watermark: bool,
@@ -757,6 +874,7 @@ def validate_common_generation_params(
     stream: bool,
     tools: list[dict[str, Any]] | None,
     model_id: str,
+    layer_decomposition: bool = False,
 ) -> ValidatedCommonParams:
     """集中校验生成类工具的公共参数并返回校验后的各值。
 
@@ -765,7 +883,7 @@ def validate_common_generation_params(
     defense-in-depth。
 
     Args:
-        prompt: 提示词文本。
+        prompt: 提示词文本；图层拆分场景可为 None，由模型自动识别拆分意图。
         optimize_prompt_options: 提示词优化选项，可为 None。
         size: 尺寸规格。
         watermark: 水印开关。
@@ -774,14 +892,21 @@ def validate_common_generation_params(
         stream: 流式输出开关。
         tools: 生成工具数组，可为 None。
         model_id: 模型标识符。
+        layer_decomposition: 是否处于图层拆分场景，true 时 size 额外接受 auto、
+            prompt 允许缺省。
 
     Returns:
         校验后的公共参数集合，字段语义见 ValidatedCommonParams。
+
+    Raises:
+        SeedreamValidationError: 任一参数校验未通过，含非图层场景缺省 prompt。
     """
+    if prompt is None and not layer_decomposition:
+        raise SeedreamValidationError("prompt 不能为空", field="prompt", value=None)
     return ValidatedCommonParams(
-        prompt=validate_prompt(prompt),
+        prompt=validate_prompt(prompt) if prompt is not None else None,
         optimize_prompt_options=validate_optimize_prompt_options(optimize_prompt_options, model_id),
-        size=validate_size_for_model(size, model_id),
+        size=validate_size_for_model(size, model_id, layer_decomposition=layer_decomposition),
         watermark=validate_watermark(watermark),
         response_format=validate_response_format(response_format),
         output_format=validate_output_format(output_format, model_id),

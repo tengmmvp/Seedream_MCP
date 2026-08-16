@@ -173,7 +173,7 @@ def _table_columns(name: str) -> list[tuple[int, int]]:
 
 
 # 能力差异表定位锚点，分辨率档位行的 "1K / 2K" 单元格为语言无关内容，全文唯一。
-_CAPABILITY_TABLE_CELL_ANCHOR = "1K / 2K"
+_CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
 
 # 单元格内数字 token 提取，尺寸档位、倍数、像素值与参考图上限等取值均为数字。
 _NUMBER_TOKEN_PATTERN = re.compile(r"\d+")

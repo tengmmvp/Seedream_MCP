@@ -58,6 +58,7 @@ from .tools import (
 )
 from .tools.core.common import get_lifespan_resource
 from .tools.core.schemas import (
+    BackgroundMode,
     GenerationTool,
     OptimizePromptOptions,
     OutputFormat,
@@ -189,7 +190,7 @@ async def seedream_text_to_image(
     ),
     size: str | None = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+        description="生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
     ),
     watermark: bool | None = Field(
         default=None,
@@ -278,11 +279,13 @@ async def seedream_text_to_image(
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
 async def seedream_image_to_image(
-    prompt: str = Field(
+    prompt: str | None = Field(
+        default=None,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
         description=(
-            "图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词。"
+            "图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；"
+            "图层拆分场景可缺省，由模型自动识别拆分意图。"
             "例如：把背景换成雪山、将照片转为水彩画风格。"
         ),
     ),
@@ -296,9 +299,27 @@ async def seedream_image_to_image(
             "例如：https://example.com/ref.png 或 ./images/portrait.jpg。"
         ),
     ),
+    layer_decomposition: bool | None = Field(
+        default=None,
+        description=(
+            "是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图"
+            "与最多 16 个带透明通道的 PNG 图层，可配合 prompt 指定拆分意图。"
+        ),
+    ),
+    background: BackgroundMode | None = Field(
+        default=None,
+        description=(
+            "图片透明通道，仅 5.0 Pro 图生图支持；transparent 生成透明背景图"
+            "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
+        ),
+    ),
     size: str | None = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+        description=(
+            "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；"
+            "图层拆分场景仅支持档位与 auto，未提供时默认 auto；"
+            "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
+        ),
     ),
     watermark: bool | None = Field(
         default=None,
@@ -364,6 +385,8 @@ async def seedream_image_to_image(
                     "prompt": prompt,
                     "optimize_prompt_options": optimize_prompt_options,
                     "image": image,
+                    "layer_decomposition": layer_decomposition,
+                    "background": background,
                     "size": size,
                     "watermark": watermark,
                     "response_format": response_format,
@@ -412,7 +435,7 @@ async def seedream_multi_image_fusion(
     ),
     size: str | None = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+        description="生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
     ),
     watermark: bool | None = Field(
         default=None,
@@ -524,7 +547,7 @@ async def seedream_sequential_generation(
     ),
     size: str | None = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+        description="生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
     ),
     watermark: bool | None = Field(
         default=None,

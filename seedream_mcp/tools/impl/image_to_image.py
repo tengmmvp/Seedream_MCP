@@ -57,6 +57,8 @@ async def handle_image_to_image(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             image=image,
+            layer_decomposition=context.layer_decomposition or None,
+            background=context.background,
             size=context.size,
             watermark=context.watermark,
             response_format=context.response_format,

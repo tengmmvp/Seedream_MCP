@@ -59,6 +59,8 @@ def test_image_to_image_parameter_order() -> None:
         "prompt",
         "optimize_prompt_options",
         "image",
+        "layer_decomposition",
+        "background",
         "size",
         "watermark",
         "response_format",

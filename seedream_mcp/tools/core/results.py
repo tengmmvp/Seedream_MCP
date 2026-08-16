@@ -551,7 +551,7 @@ def _extract_truncated_events(result: dict[str, Any]) -> int | None:
 def format_generation_response(
     title: str,
     result: dict[str, Any],
-    prompt: str,
+    prompt: str | None,
     size: str,
     auto_save_results: list[AutoSaveResult] | None = None,
     auto_save_enabled: bool = False,
@@ -568,8 +568,8 @@ def format_generation_response(
     Args:
         title: 响应标题，用于标识生成任务类型。
         result: 图片生成结果字典，包含图片数据及使用统计。
-        prompt: 生成图片所用的提示词；为保持既有调用签名保留，文本通道不再回显，
-            完整值由结构化通道的 prompt 字段携带。
+        prompt: 生成图片所用的提示词，图层拆分场景可为 None；为保持既有调用签名
+            保留，文本通道不再回显，完整值由结构化通道的 prompt 字段携带。
         size: 生成图片的尺寸规格。
         auto_save_results: 自动保存结果列表，可选。
         auto_save_enabled: 是否启用自动保存功能，默认 False。
@@ -674,6 +674,8 @@ def _build_generation_structured_result(
         "output_format": context.output_format,
         "stream": context.stream,
         "tools": context.tools,
+        "layer_decomposition": context.layer_decomposition,
+        "background": context.background,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         # data 项可能携带上游 per-image error 与 url/model/type 等自由字段，统一净化

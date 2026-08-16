@@ -50,7 +50,7 @@ def _build_auto_save_manager(
 
 async def _auto_save(
     result: dict[str, Any],
-    prompt: str,
+    prompt: str | None,
     config: SeedreamConfig,
     save_path: str | None,
     custom_name: str | None,
@@ -89,7 +89,7 @@ async def _auto_save(
         image_data.append(
             {
                 data_key: image[data_key],
-                "prompt": prompt,
+                "prompt": prompt or "",
                 "custom_name": f"{custom_name}_{save_ordinal}" if custom_name else None,
                 "alt_text": f"Generated image {save_ordinal}",
             }
@@ -110,7 +110,7 @@ async def _auto_save(
 
 async def auto_save_from_urls(
     result: dict[str, Any],
-    prompt: str,
+    prompt: str | None,
     config: SeedreamConfig,
     save_path: str | None,
     custom_name: str | None,
@@ -125,7 +125,7 @@ async def auto_save_from_urls(
 
     Args:
         result: 图片生成结果字典，包含 URL 等信息。
-        prompt: 生成图片所用的提示词，用于元数据记录。
+        prompt: 生成提示词，用于派生保存文件名；图层拆分场景可为 None。
         config: Seedream 配置实例，包含保存参数。
         save_path: 用户指定的保存路径，可选。
         custom_name: 自定义文件名前缀，可选。
@@ -158,7 +158,7 @@ async def auto_save_from_urls(
 
 async def auto_save_from_base64(
     result: dict[str, Any],
-    prompt: str,
+    prompt: str | None,
     config: SeedreamConfig,
     save_path: str | None,
     custom_name: str | None,
@@ -173,7 +173,7 @@ async def auto_save_from_base64(
 
     Args:
         result: 图片生成结果字典，包含 b64_json 等信息。
-        prompt: 生成图片所用的提示词，用于元数据记录。
+        prompt: 生成提示词，用于派生保存文件名；图层拆分场景可为 None。
         config: Seedream 配置实例，包含保存参数。
         save_path: 用户指定的保存路径，可选。
         custom_name: 自定义文件名前缀，可选。

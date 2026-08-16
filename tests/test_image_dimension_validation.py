@@ -200,9 +200,21 @@ def test_skip_dimensions_does_not_affect_data_uri_validation() -> None:
 
 
 def test_validate_image_input_accepts_valid_data_uri() -> None:
-    """合法尺寸的 Data URI 通过并原样返回。"""
+    """合法尺寸的小写 Data URI 通过并原样返回。"""
     data_uri = _png_data_uri(32, 32)
     assert validate_image_input(data_uri) == data_uri
+
+
+def test_validate_image_input_normalizes_data_uri_media_type() -> None:
+    """官方要求格式小写：大写格式与 image/jpg 归一为小写标准 MIME 后返回。"""
+    data_uri = _png_data_uri(32, 32)
+    # _png_data_uri 产出小写 png 头；手工改写为大写形式验证归一化。
+    upper_uri = data_uri.replace("data:image/png", "data:image/PNG")
+    assert validate_image_input(upper_uri) == data_uri
+
+    payload = data_uri.split(",", 1)[1]
+    jpg_uri = f"data:image/jpg;base64,{payload}"
+    assert validate_image_input(jpg_uri) == f"data:image/jpeg;base64,{payload}"
 
 
 def test_validate_image_input_wraps_non_image_data_uri_as_dimension_failure() -> None:

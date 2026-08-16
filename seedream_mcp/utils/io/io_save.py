@@ -304,7 +304,7 @@ class AutoSaveManager:
     async def save_image(
         self,
         url: str,
-        prompt: str = "",
+        prompt: str | None = None,
         tool_name: str = "seedream",
         custom_name: str | None = None,
         alt_text: str | None = None,
@@ -313,7 +313,7 @@ class AutoSaveManager:
 
         Args:
             url: 图片 URL。
-            prompt: 生成提示词。
+            prompt: 生成提示词；图层拆分等场景缺省时为 None，文件名回退内置基础名。
             tool_name: 工具名称。
             custom_name: 自定义文件名。
             alt_text: Markdown 替代文本。
@@ -331,7 +331,7 @@ class AutoSaveManager:
             # 创建保存路径；该操作内含 mkdir 与 resolve，移出事件循环线程执行。
             save_path = await asyncio.to_thread(
                 self.file_manager.create_save_path,
-                prompt=prompt,
+                prompt=prompt or "",
                 url=url,
                 tool_name=tool_name,
                 custom_name=custom_name,
@@ -428,7 +428,7 @@ class AutoSaveManager:
     async def save_base64_image(
         self,
         b64_data: str,
-        prompt: str = "",
+        prompt: str | None = None,
         tool_name: str = "seedream",
         custom_name: str | None = None,
         alt_text: str | None = None,
@@ -437,7 +437,7 @@ class AutoSaveManager:
 
         Args:
             b64_data: Base64 编码数据，可为 data URI 或纯 base64 字符串。
-            prompt: 生成提示词。
+            prompt: 生成提示词；图层拆分等场景缺省时为 None，文件名回退内置基础名。
             tool_name: 工具名称。
             custom_name: 自定义文件名。
             alt_text: Markdown 替代文本。
@@ -455,7 +455,7 @@ class AutoSaveManager:
                 mime, payload = parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
                 save_path = self.file_manager.create_save_path_from_extension(
-                    prompt=prompt,
+                    prompt=prompt or "",
                     extension=extension,
                     tool_name=tool_name,
                     custom_name=custom_name,

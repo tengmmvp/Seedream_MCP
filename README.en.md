@@ -170,7 +170,7 @@ Restart the corresponding client after configuration.
 # Model & generation
 --model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
                                                    # Model selection (default: doubao-seedream-5.0)
---default-size [1K|2K|3K|4K|<width>x<height>]      # Image size (default: 2K; must be compatible with the model)
+--default-size [1K|1.5K|2K|3K|4K|<width>x<height>] # Image size (default: 2K; must be compatible with the model)
 --watermark                                        # Enable watermark
 --no-watermark                                     # Disable watermark
 
@@ -205,7 +205,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
 # Switch to other models (e.g. 4.0 / 4.5) with a custom size and debug mode
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
 
-# High-precision image generation (5.0 Pro; note: sequential generation / web search / streaming output not supported; sizes 1K/2K only)
+# High-precision image generation (5.0 Pro; note: sequential generation / web search / streaming output not supported; sizes 1K/1.5K/2K only)
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 ```
 
@@ -220,14 +220,16 @@ Different models support different capabilities and parameter ranges. Please not
 | Web Search                                   | ❌             | ✅           | ❌        | ❌           |
 | Streaming Output                             | ❌             | ✅           | ✅        | ✅           |
 | Output Format (png/jpeg)                     | ✅             | ✅           | ❌        | ❌           |
-| Resolution Presets                           | 1K / 2K        | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
+| Layer Decomposition                          | ✅             | ❌           | ❌        | ❌           |
+| Transparent Background                       | ✅             | ❌           | ❌        | ❌           |
+| Resolution Presets                           | 1K / 1.5K / 2K | 2K / 3K / 4K | 2K / 4K   | 1K / 2K / 4K |
 | Custom Size Multiple                         | Multiple of 16 | No limit     | No limit  | No limit     |
 | Default Size (MCP)                           | 2048x2048      | 2048x2048    | 2048x2048 | 2048x2048    |
 | Max Reference Images                         | 10             | 14           | 14        | 14           |
 
-> **Default Size (MCP)**: The "Default Size (MCP)" row reflects the runtime resolved value of MCP's unified `default_size=2K` setting (corresponding to `2048x2048`), independent of each model's native default (e.g. 5.0 Pro's native default is `1024x1024`).
+> **Default Size (MCP)**: The "Default Size (MCP)" row reflects the runtime resolved value of MCP's unified `default_size=2K` setting (corresponding to `2048x2048`), independent of each model's native default.
 
-> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/2K` sizes are supported (default `2048x2048`), and the multi-image reference cap drops to 10.
+> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported (default `2048x2048`), the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
 
 ## 🎨 Features
 
@@ -257,8 +259,8 @@ Generate an image from a text prompt. This tool calls an external billed API and
 **Parameters:**
 
 - `prompt` (required) - Text prompt for image generation; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
-- `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
+- `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
@@ -309,10 +311,12 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 
 **Parameters:**
 
-- `prompt` (required) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
+- `prompt` (optional) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words; may be omitted only in the layer decomposition scenario, where the model automatically identifies elements to split
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
 - `image` (required) - URL or local file path of the input image
-- `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `layer_decomposition` (optional) - Enable layer decomposition, only supported by 5.0 Pro; splits the single input image into 1 base image and up to 16 PNG layers with alpha channels; layer entries additionally return `z_index`, `name`, `description`, and `bounding_box` fields; `output_format` only controls the base image format — layers are always PNG
+- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (requires a single input image with an alpha channel; mutually exclusive with `output_format=jpeg`) or `opaque` produces a regular image; only supported by 5.0 Pro
+- `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model; the layer decomposition scenario only supports presets and `auto` (adapts to the input image, and is the default when no size is specified)
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
@@ -364,9 +368,9 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 **Parameters:**
 
 - `prompt` (required) - Image fusion request or style instruction; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
 - `image` (required) - List of input image URLs or local file paths (2-14 images; 5.0 Pro max 10)
-- `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (5.0 Pro/5.0 Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
@@ -424,9 +428,9 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 **Parameters:**
 
 - `prompt` (required) - Text prompt for image generation; should clearly specify the quantity and content; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 4.0
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
 - `image` (optional) - Reference image(s); supports a single image (string) or multiple images (array); up to 14 reference images, and the sum of reference images and max_images must not exceed 15
-- `size` (optional) - Image size: `1K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
+- `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`

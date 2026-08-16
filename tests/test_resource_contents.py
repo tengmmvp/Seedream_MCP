@@ -97,10 +97,12 @@ async def test_models_info_resource_reports_key_capability_values() -> None:
 
     pro = by_alias["doubao-seedream-5.0-pro"]
     assert pro["max_reference_images"] == model_capabilities.SEEDREAM_50PRO_MAX_REFERENCE_IMAGES
-    assert pro["allowed_presets"] == ["1K", "2K"]
+    assert pro["allowed_presets"] == ["1.5K", "1K", "2K"]
     assert pro["supports_stream"] is False
     assert pro["supports_tools"] is False
     assert pro["supports_sequential_generation"] is False
+    assert pro["supports_layer_decomposition"] is True
+    assert pro["supports_background"] is True
     assert pro["size_pixel_multiple"] == model_capabilities.SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE
     assert pro["min_size_pixels"] == model_capabilities.SEEDREAM_50PRO_MIN_SIZE_PIXELS
     assert pro["max_size_pixels"] == model_capabilities.SEEDREAM_50PRO_MAX_SIZE_PIXELS
