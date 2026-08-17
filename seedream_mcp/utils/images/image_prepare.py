@@ -68,7 +68,8 @@ class ImagePreparer:
 
     预处理结果按 (输入, workspace_roots, 本地文件签名) 缓存，避免并行请求对同一参考图
     重复读取与编码；同一键的并发 miss 复用同一在途 task。本地文件纳入 mtime+size 防内容
-    替换返回陈旧编码。预处理并发上限为实例级全局约束，跨批量调用共享。
+    替换返回陈旧编码。预处理并发上限为实例级全局约束，跨批量调用共享；仅实际执行预处理
+    的调用占用并发槽位，缓存命中与在途 task 的等待在槽外完成。
     """
 
     def __init__(
@@ -163,9 +164,11 @@ class ImagePreparer:
 
         并发上限由实例级信号量约束：单图入口（client 直连）与批量入口共用同一
         全局上限，并行生成与并发工具调用叠加时总并发不超过配置的
-        prepare_concurrency。槽位经 _PrepareSemaphoreSlot 管理：创建者被取消且共享
-        task 仍在运行时，释放责任转移给 task 完成回调，脱缰 task 结束前持续占用
-        并发额度，取消风暴不会突破上限。
+        prepare_concurrency。仅创建并执行预处理的调用占用槽位，缓存命中与在途
+        task 的等待都在槽外完成，纯等待者不占用并发额度。槽位经
+        _PrepareSemaphoreSlot 管理：创建者被取消且共享 task 仍在运行时，释放责任
+        转移给 task 完成回调，脱缰 task 结束前持续占用并发额度，取消风暴不会突破
+        上限。
 
         Args:
             image: 图像输入字符串，三类来源的归一化语义与模块级函数一致。
@@ -178,61 +181,95 @@ class ImagePreparer:
             SeedreamValidationError: 输入格式无效、路径越界或维度超限等参数校验失败。
             SeedreamAPIError: 会话未授权工作区目录或图像处理其他失败。
         """
-        semaphore = self._get_prepare_semaphore()
-        await semaphore.acquire()
-        slot = _PrepareSemaphoreSlot(semaphore)
-        try:
-            return await self._prepare_image_input_locked(image, _roots_key, slot)
-        finally:
-            slot.release()
-
-    async def _prepare_image_input_locked(
-        self, image: str, _roots_key: tuple[str, ...] | None, slot: _PrepareSemaphoreSlot
-    ) -> str:
-        """执行图像预处理的缓存检索与执行，调用方已持有实例级信号量槽位。
-
-        签名计算、缓存命中与 single-flight 逻辑均在本实现体内，prepare_image_input
-        仅负责信号量守卫；批量路径经公共入口逐图进入，与单图直连共享同一守卫。创建者
-        在 shield 等待共享 task 时被取消的，槽位经 slot 转移给 task 本体释放。
-        """
-        if _roots_key is None:
-            from ..io.io_path import get_workspace_roots
-
-            _roots_key = tuple(str(r) for r in get_workspace_roots())
-        # URL/data-URI 无本地文件 I/O，直接用空签名短路；本地文件签名含同步 stat/resolve，
-        # 移至工作线程避免网络挂载工作区下阻塞事件循环。分类前先 strip，与
-        # prepare_image_input 入口及 _local_file_signature 的口径一致，防止前导空白
-        # 使 URL/data URI 误判为本地路径。
-        image = image.strip()
-        ref_kind = classify_image_reference(image)
-        if ref_kind == "local":
-            signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
-            key_image = image
-        elif len(image) > _LARGE_IMAGE_THRESHOLD:
-            # 超大 data URI 用摘要键，避免全串 O(n) 哈希与比较阻塞事件循环。
-            signature = (0.0, 0)
-            key_image = await asyncio.to_thread(self._data_uri_digest, image)
-        else:
-            signature = (0.0, 0)
-            key_image = image
-        cache_key: PrepareCacheKey = (key_image, _roots_key, signature)
+        cache_key, normalized_image = await self._resolve_cache_key(image, _roots_key)
 
         cached = self._prepare_cache.get(cache_key)
         if cached is not None:
             self._prepare_cache.move_to_end(cache_key)
             return cached
 
+        # 在途登记的先行检查在持有信号量之前完成：命中在途 task 的调用以纯等待者
+        # 身份在槽外 shield 等待，不占用并发槽位，等待者不再挤占实际执行者的额度。
         inflight = self._prepare_inflight.get(cache_key)
         if inflight is not None:
-            # shield 隔离取消传播：等待者被取消时仅取消其自身 await 的 outer，
-            # 底层共享 task 继续运行，保护其他等待者与缓存写入。
-            try:
-                return await asyncio.shield(inflight)
-            except asyncio.CancelledError:
-                # 等待者放弃消费后若再无其他等待者接手，task 失败将无人检索异常，
-                # 登记回调兜底记录；task 成功或被取消时回调静默。
-                arm_unretrieved_exception_logging(inflight)
-                raise
+            return await self._await_inflight(inflight)
+
+        semaphore = self._get_prepare_semaphore()
+        await semaphore.acquire()
+        slot = _PrepareSemaphoreSlot(semaphore)
+        try:
+            return await self._prepare_image_input_locked(normalized_image, cache_key, slot)
+        finally:
+            slot.release()
+
+    async def _resolve_cache_key(
+        self, image: str, _roots_key: tuple[str, ...] | None
+    ) -> tuple[PrepareCacheKey, str]:
+        """计算图像输入的缓存键并返回 strip 后的输入，不持有并发槽位。
+
+        缓存命中与在途等待路径只读缓存与注册表，不进入信号量，键计算因此须在槽外
+        完成。本地文件签名含同步 stat/resolve，移至工作线程避免网络挂载工作区下
+        阻塞事件循环；超过阈值的大输入改用摘要键，避免大 data URI 的 O(n) 哈希与
+        比较阻塞事件循环。分类前先 strip，与 _local_file_signature 的口径一致，
+        防止前导空白使 URL/data URI 误判为本地路径。
+
+        Args:
+            image: 图像输入字符串。
+            _roots_key: 工作区隔离键；None 时按当前请求 Roots 现取。
+
+        Returns:
+            (缓存键, strip 后输入) 二元组，strip 后输入供执行路径继续归一化。
+        """
+        if _roots_key is None:
+            from ..io.io_path import get_workspace_roots
+
+            _roots_key = tuple(str(r) for r in get_workspace_roots())
+        image = image.strip()
+        ref_kind = classify_image_reference(image)
+        if ref_kind == "local":
+            signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
+            key_image = image
+        elif len(image) > _LARGE_IMAGE_THRESHOLD:
+            signature = (0.0, 0)
+            key_image = await asyncio.to_thread(self._data_uri_digest, image)
+        else:
+            signature = (0.0, 0)
+            key_image = image
+        cache_key: PrepareCacheKey = (key_image, _roots_key, signature)
+        return cache_key, image
+
+    async def _await_inflight(self, inflight: "asyncio.Task[str]") -> str:
+        """以纯等待者身份在并发槽位外等待在途 task。
+
+        shield 隔离取消传播：等待者被取消时仅取消其自身 await 的 outer，底层共享
+        task 继续运行，保护其他等待者与缓存写入。等待者放弃消费后若再无其他等待者
+        接手，task 失败将无人检索异常，登记回调兜底记录；task 成功或被取消时回调
+        静默。
+        """
+        try:
+            return await asyncio.shield(inflight)
+        except asyncio.CancelledError:
+            arm_unretrieved_exception_logging(inflight)
+            raise
+
+    async def _prepare_image_input_locked(
+        self, image: str, cache_key: PrepareCacheKey, slot: _PrepareSemaphoreSlot
+    ) -> str:
+        """创建并等待预处理 task，调用方已持有实例级信号量槽位。
+
+        miss 路径的执行入口，键计算、缓存检索与在途登记的先行检查由
+        prepare_image_input 在槽外完成。信号量等待窗口内其他创建者可能已为同一键
+        登记在途 task，进入本实现先复查在途注册表：命中则归还槽位，改以纯等待者
+        身份在槽外等待。miss 时创建 _prepare_and_cache task 登记在途注册表并经
+        shield 等待；创建者在 shield 等待共享 task 时被取消的，槽位经 slot 转移
+        给 task 本体释放。
+        """
+        inflight = self._prepare_inflight.get(cache_key)
+        if inflight is not None:
+            # 等待信号量期间其他创建者已登记同一键，本调用不再是执行者：归还槽位
+            # 后以等待者身份在槽外等待，保持等待路径不占并发额度。
+            slot.release()
+            return await self._await_inflight(inflight)
 
         task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
         self._prepare_inflight[cache_key] = task

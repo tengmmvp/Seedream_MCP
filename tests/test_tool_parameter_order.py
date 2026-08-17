@@ -26,6 +26,7 @@ from seedream_mcp.tools.core.schemas import (
     SequentialGenerationInput,
     TextToImageInput,
 )
+from seedream_mcp.utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 
 # MCP 注册工具名到输入模型的映射，平铺 inputSchema 等价性断言的数据源。
 _TOOL_INPUT_MODELS = {
@@ -397,3 +398,36 @@ async def test_flat_tool_rejects_blank_string_inputs(tool_name: str, blank_args:
     """
     with pytest.raises(ToolError):
         await mcp.call_tool(tool_name, blank_args)
+
+
+# ==================== 组图参考图列表上限的 schema 层声明 ====================
+
+
+async def test_sequential_image_list_branch_declares_max_items() -> None:
+    """组图 image 列表分支的 inputSchema 声明 maxItems 14，与多图融合口径一致。
+
+    上限此前仅存在于模型 before-validator，inputSchema 不携带 maxItems，客户端
+    本地校验无法拒绝超量输入。镜像等价断言只锁定两侧一致，两侧同时丢失声明时
+    仍相等，本断言独立锁定声明存在。
+    """
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+    schema = by_name["seedream_sequential_generation"].input_schema
+    array_branch = next(
+        branch for branch in schema["properties"]["image"]["anyOf"] if branch.get("type") == "array"
+    )
+    assert array_branch["maxItems"] == SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+
+
+async def test_sequential_tool_rejects_oversized_image_list() -> None:
+    """组图参考图列表超过 14 张在 inputSchema 校验层即被拒绝，不进入工具体。
+
+    报错须源自平铺签名列表分支的 max_length 约束而非模型 before-validator 的
+    数量文案，据此锁定拒绝发生在 SDK 参数模型校验层。
+    """
+    images = [f"https://example.com/{i}.png" for i in range(15)]
+    with pytest.raises(ToolError) as exc_info:
+        await mcp.call_tool("seedream_sequential_generation", {"prompt": "a cat", "image": images})
+    message = str(exc_info.value)
+    assert "参考图片数量" not in message
+    assert "14" in message

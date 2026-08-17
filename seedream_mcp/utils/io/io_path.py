@@ -17,6 +17,9 @@ from typing import Any, AsyncIterator, Callable, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from mcp.shared.exceptions import NoBackChannelError
+
+from ..core.errors import SeedreamMCPError
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
 from .io_file import _is_reparse_point
@@ -78,35 +81,49 @@ def clear_resolved_env_root_cache() -> None:
     _RESOLVED_ENV_ROOT_CACHE.clear()
 
 
+def _resolve_configured_root() -> Path | None:
+    """解析已配置的工作区根目录，未配置或解析失败返回 None。
+
+    供 resolve_env_workspace_root 与 workspace_roots_scope 的 NoBackChannelError
+    分支共用同一解析与缓存：前者以 None 决定 CWD 回退，后者以 None 判定无显式边界
+    可回退并 fail-closed。expanduser 后为绝对路径的配置根按原始字符串缓存 resolve
+    结果，同配置重复访问不再触达文件系统；相对形态不缓存，每次现算。解析失败不
+    缓存，下次访问重试。
+    """
+    configured_root = _configured_workspace_root()
+    if not configured_root:
+        return None
+    try:
+        # expanduser 先行：~ 形态的展开结果只依赖用户主目录，与进程 CWD 无关，
+        # 以展开后的绝对性判定可缓存性，缓存键仍为配置原始字符串。
+        expanded_root = Path(configured_root).expanduser()
+        cacheable = expanded_root.is_absolute()
+        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root) if cacheable else None
+        if cached_root is not None:
+            return cached_root
+        resolved_root = expanded_root.resolve()
+    except Exception as e:
+        logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
+        return None
+    if cacheable:
+        _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
+    return resolved_root
+
+
 def resolve_env_workspace_root() -> Path:
     """解析工作区根目录，失败时回退当前工作目录。
 
     本地开发无 MCP Roots 时作为文件访问边界回退。优先读取活动配置，config 未就绪时
-    回退环境变量。无任何配置回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个
-    工作目录。expanduser 后为绝对路径的配置根按原始字符串缓存 resolve 结果，同配置
-    重复访问不再触达文件系统；相对形态不缓存，每次现算。
+    回退环境变量。配置根的解析与缓存由 _resolve_configured_root 提供，无可用配置根
+    回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个工作目录。
 
     Returns:
         已 resolve 的工作区根目录；无任何配置时为进程当前工作目录。
     """
     global _cwd_fallback_warned
-    configured_root = _configured_workspace_root()
-    if configured_root:
-        try:
-            # expanduser 先行：~ 形态的展开结果只依赖用户主目录，与进程 CWD 无关，
-            # 以展开后的绝对性判定可缓存性，缓存键仍为配置原始字符串。
-            expanded_root = Path(configured_root).expanduser()
-            cacheable = expanded_root.is_absolute()
-            cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root) if cacheable else None
-            if cached_root is not None:
-                return cached_root
-            resolved_root = expanded_root.resolve()
-        except Exception as e:
-            logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
-        else:
-            if cacheable:
-                _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
-            return resolved_root
+    resolved_root = _resolve_configured_root()
+    if resolved_root is not None:
+        return resolved_root
     if not _cwd_fallback_warned:
         _cwd_fallback_warned = True
         logger.warning(
@@ -240,13 +257,19 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
 
     将客户端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持
     Roots 时回退环境变量边界。客户端未声明 roots capability 时直接跳过
-    roots/list 往返，同样回退环境变量边界。
+    roots/list 往返，同样回退环境变量边界。当前协议会话无服务端反向通道时
+    roots/list 必抛 NoBackChannelError：未配置环境变量根则 fail-closed 抛出
+    SeedreamMCPError，已配置则回退该显式边界。
 
     Args:
         ctx: MCP 请求上下文，经其 session 读取客户端 Roots。
 
     Yields:
         当前请求解析出的工作区根目录列表；客户端不支持 Roots 时为空列表。
+
+    Raises:
+        SeedreamMCPError: 协议会话无反向通道且无环境变量工作区根可用，进入
+            作用域前抛出，使该请求的本地文件操作失败而非放宽边界。
     """
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: list[Path] = []
@@ -261,6 +284,25 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     if roots_supported:
         try:
             resolved_roots = await _resolve_workspace_roots_from_context(ctx)
+        except NoBackChannelError as exc:
+            # 当前协议会话不提供服务端发起请求的反向通道，roots/list 无法送达，
+            # 属协议能力缺失而非瞬时失败，重试不会好转，提级为 error。回退在未配置
+            # 环境变量根时会放宽文件访问边界到进程 CWD，此时 fail-closed；已配置
+            # 环境变量根则回退该显式边界。
+            configured_root = _resolve_configured_root()
+            if configured_root is None:
+                logger.error(
+                    "协议会话无反向通道，无法读取 MCP Roots，且无环境变量工作区根可用: {}", exc
+                )
+                raise SeedreamMCPError(
+                    "当前协议会话不支持读取 MCP Roots，且未配置 SEEDREAM_WORKSPACE_ROOT，"
+                    "拒绝将文件访问边界放宽到进程工作目录"
+                ) from exc
+            logger.error(
+                "协议会话无反向通道，无法读取 MCP Roots，回退环境变量边界 {}: {}",
+                configured_root,
+                exc,
+            )
         except Exception as exc:
             # 回退会放宽文件访问边界到环境变量根（未配置时为进程 CWD），多租户
             # streamable-http 部署须感知该回退，提级为 warning 而非 debug
@@ -402,6 +444,10 @@ def find_images_in_directory(
     安全前置条件：本函数自身不做工作区越界校验，调用方必须先完成工作区越界校验，
     确认 directory 位于允许的工作区根之内，再调用本函数。本函数经 utils/__init__
     重导出为公共工具，任何外部调用方均须遵守此前置条件。
+
+    单个目录内的条目列表在排序阶段全量物化，limit 早停不缩减单目录内的物化与
+    排序成本，仅使跨目录递归提前终止下降。重复扫描同一目录的成本由 io_scan 的
+    mtime 加 TTL 目录扫描缓存缓解。
 
     Args:
         directory: 搜索目录。

@@ -62,6 +62,25 @@ _MAX_REDIRECTS = 3
 # （如为原主机定制的鉴权或跟踪头）在跳向不同源时剥离，不原样发给重定向目标。
 _CROSS_ORIGIN_SAFE_REQUEST_HEADERS = frozenset({"user-agent", "accept"})
 
+# 同一图片格式的等价扩展名类：JPEG 的 .jpg 与 .jpeg、HEIF 的 .heif 与 .heic 互为
+# 别名后缀。字节签名嗅探结果与 URL 派生扩展名同属一个等价类时视为同格式，不改写
+# 落盘文件名；跨格式仍以字节签名为准修正。
+_FORMAT_EQUIVALENT_EXTENSIONS: tuple[frozenset[str], ...] = (
+    frozenset({".jpg", ".jpeg"}),
+    frozenset({".heif", ".heic"}),
+)
+
+
+def _extensions_in_same_format(first: str, second: str) -> bool:
+    """判断两个扩展名是否属于同一格式等价类，比较前归一化小写。"""
+    normalized_first = first.lower()
+    normalized_second = second.lower()
+    for equivalence in _FORMAT_EQUIVALENT_EXTENSIONS:
+        if normalized_first in equivalence and normalized_second in equivalence:
+            return True
+    return False
+
+
 # DNS 缓存条目硬上限：超限时先清理过期条目，仍超限则按最旧 expires_at 强制驱逐，
 # 防止长生命周期下持续解析不同 host 导致缓存无界增长。
 _DNS_CACHE_MAX_SIZE = 256
@@ -703,7 +722,8 @@ class DownloadManager:
         扩展名以实际字节签名为准：签名校验通过后用 head_bytes 推断真实格式，与
         save_path 的 URL 派生扩展名不一致时经 writer 返回值把最终路径修正为嗅探结果，
         与 base64 保存路径的 infer_extension_from_bytes 行为对齐，避免无后缀的签名
-        URL 恒落 .jpeg 或扩展名与内容不符。
+        URL 恒落 .jpeg 或扩展名与内容不符。同格式的别名扩展名属同一等价类不改写，
+        .jpg URL 的 JPEG 内容保留 .jpg，跨格式仍修正。
         """
         content_length = response.headers.get("content-length")
         if content_length:
@@ -747,9 +767,12 @@ class DownloadManager:
             # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘。
             if not is_known_image_bytes(head_bytes):
                 raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
-            # 签名已确认受支持，推断必然命中具体格式；与 URL 派生扩展名不一致时修正最终路径。
+            # 签名已确认受支持，推断必然命中具体格式；与 URL 派生扩展名不一致且不属
+            # 同一格式等价类时修正最终路径，同格式别名后缀互不改写。
             sniffed = infer_extension_from_bytes(head_bytes)
-            if sniffed != save_path.suffix.lower():
+            if sniffed != save_path.suffix.lower() and not _extensions_in_same_format(
+                sniffed, save_path.suffix
+            ):
                 final_save_path = save_path.with_suffix(sniffed)
                 return final_save_path
             return None

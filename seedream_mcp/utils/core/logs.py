@@ -231,11 +231,13 @@ def setup_logging(
     )
 
     # 压制第三方库的 DEBUG/INFO 噪音：桥接后其全量日志会淹没项目自身的业务日志。
-    # httpx 每次 API 调用输出一条 INFO "HTTP Request"，与 urllib3/aiohttp 同列压制。
+    # httpx 每次 API 调用输出一条 INFO "HTTP Request"，其传输层 httpcore 还会为每个
+    # 连接输出 INFO 连接日志，与 urllib3/aiohttp 同列压制。
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     logger.info("日志系统初始化完成，级别: {}", level)
     if enable_file and log_file:

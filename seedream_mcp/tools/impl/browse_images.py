@@ -562,11 +562,12 @@ async def _handle_browse_images_impl(
     next_offset = page_end if has_more else None
     total_count = None if has_more else len(all_images)
 
-    # 处理当前页为空的情况：
-    # - format_filter_exhausted：用户指定后缀全部不受支持，返回独立区分消息
-    # - total_count 为真：offset 超出最后一页越界，返回实际总数与成立的有效翻页引导
-    # - total_count == 0：无匹配图片；扫描中存在不可读目录时文案区分「目录不可读」，
-    #   避免权限问题被静默归并为「无图片」
+    # 处理当前页为空的情况，按错误可归因性分流：
+    # - format_filter_exhausted 与 offset 越界为模型可自纠的参数错误，走错误结果
+    #   路径返回 is_error=True 与结构化错误标记，客户端 UI 与模型据错误信号修正
+    #   参数后重试，符合官方错误信号约定；
+    # - 目录不可读与目录内无图片非模型可修复，维持空结果语义；扫描中存在不可读
+    #   目录时文案区分「目录不可读」，避免权限问题被静默归并为「无图片」。
     if not images:
         if format_filter_exhausted:
             supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
@@ -582,12 +583,17 @@ async def _handle_browse_images_impl(
                 # 空列表为文档明示的合法输入，无用户格式可回显时改用不含量词空位的
                 # 文案，避免双空格与残缺语义。
                 message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
-        elif total_count:
+            await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
+            return _build_browse_error(state=state, message=message)
+        if total_count:
+            # offset 越界消息携带实际总数与有效区间，模型修正 offset 后即可重试成功。
             message = (
                 f"offset={state.offset} 超出范围，目录共有 {total_count} 张图片，"
                 f"请使用 0 <= offset < {total_count}。"
             )
-        elif unreadable_dirs:
+            await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
+            return _build_browse_error(state=state, message=message)
+        if unreadable_dirs:
             unique_unreadable = list(dict.fromkeys(unreadable_dirs))
             if is_boundary_from_session_roots():
                 dirs_text = ", ".join(str(item) for item in unique_unreadable)

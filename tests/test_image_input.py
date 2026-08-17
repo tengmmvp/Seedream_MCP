@@ -8,14 +8,17 @@ import base64
 import io
 import os
 from pathlib import Path
+from typing import IO
 
 import pytest
 from PIL import Image
 
 from seedream_mcp.utils.core.errors import (
+    SeedreamAPIError,
     SeedreamValidationError,
     resolve_error_profile,
 )
+from seedream_mcp.utils.images import image_input as image_input_module
 from seedream_mcp.utils.images.image_input import prepare_image_input
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
@@ -151,6 +154,61 @@ async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_pa
 
     result = await prepare_image_input(str(image_path))
     assert result.startswith("data:image/")
+
+
+async def test_prepare_image_input_read_failure_masks_fallback_boundary(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回退边界下本地文件打开失败的错误消息不泄露服务器侧绝对路径。
+
+    打开阶段的 OSError 原文嵌有解析后的绝对路径，属服务器环境信息；遮蔽后仅回显
+    系统错误语义与调用方输入原样字符串，异常类型保持 SeedreamAPIError。
+    """
+    locked = tmp_path / "locked.png"
+    Image.new("RGB", (32, 32), color="white").save(locked)
+
+    def _deny_open(path: Path) -> IO[bytes]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(image_input_module, "open_no_follow_read", _deny_open)
+
+    with pytest.raises(SeedreamAPIError) as exc_info:
+        await prepare_image_input("locked.png")
+
+    message = exc_info.value.message
+    # OSError 原文的 filename 经 repr 渲染，反斜杠以转义形态出现，两种形态都不
+    # 得进入面向调用方的消息
+    resolved_root = str(tmp_path.resolve())
+    escaped_root = repr(resolved_root)[1:-1]
+    assert resolved_root not in message
+    assert escaped_root not in message
+    assert "Permission denied" in message
+    assert "locked.png" in message
+
+
+async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """会话 Roots 边界下打开失败回显异常原文，解析后的绝对路径属调用方授权信息。
+
+    与越界、诊断两条定位失败路径的遮蔽口径一致：仅回退边界遮蔽路径。
+    """
+    locked = tmp_path / "locked.png"
+    Image.new("RGB", (32, 32), color="white").save(locked)
+
+    def _deny_open(path: Path) -> IO[bytes]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(image_input_module, "open_no_follow_read", _deny_open)
+
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
+    try:
+        with pytest.raises(SeedreamAPIError) as exc_info:
+            await prepare_image_input("locked.png")
+        # OSError 原文的 filename 经 repr 渲染，以转义形态回显在消息中
+        assert repr(str((tmp_path / "locked.png").resolve())) in exc_info.value.message
+    finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
 
 
 async def test_prepare_image_input_in_bounds_failure_profiles_as_validation_error(

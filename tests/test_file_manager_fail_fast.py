@@ -51,6 +51,23 @@ def test_create_save_path_keeps_whitelisted_extension(tmp_path: Path) -> None:
     assert path.suffix.lower() == ".png"
 
 
+def test_create_save_path_from_extension_normalizes_non_image_extension(tmp_path: Path) -> None:
+    """入参扩展名不在白名单时收敛到默认图片扩展名，与 create_save_path 同口径。
+
+    字节签名嗅探入口不接受任意后缀落盘，.html 等非图片扩展名回退 .jpeg。
+    """
+    manager = FileManager(base_dir=tmp_path)
+    path = manager.create_save_path_from_extension(prompt="test", extension=".html", tool_name="t")
+    assert path.suffix.lower() == ".jpeg"
+
+
+def test_create_save_path_from_extension_keeps_whitelisted_extension(tmp_path: Path) -> None:
+    """入参扩展名在白名单内时原样保留，不触发默认回退。"""
+    manager = FileManager(base_dir=tmp_path)
+    path = manager.create_save_path_from_extension(prompt="test", extension=".png", tool_name="t")
+    assert path.suffix.lower() == ".png"
+
+
 def test_save_bytes_replaces_symlink_itself_without_write_through(tmp_path: Path) -> None:
     """save_bytes 落向符号链接路径时替换链接本身为常规文件，不写穿到其指向。
 

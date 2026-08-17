@@ -27,7 +27,6 @@ from ._helpers import (
     _safe_report_progress,
     _yield_for_cancellation,
 )
-from ._helpers import _resolve_base_dir as _resolve_base_dir  # noqa: F401
 from .auto_save import auto_save_from_base64, auto_save_from_urls
 from .context import GenerationExecutionContext, build_generation_context
 from .outputs import build_error_structured
@@ -52,8 +51,8 @@ if TYPE_CHECKING:
     from ...client import SeedreamClient
 
 
-# 门面对外导出的公共符号。_safe_*、_resolve_base_dir 与 _try_get_shared_* 等私有辅助
-# 供内部子模块和测试显式导入。
+# 门面对外导出的公共符号。_safe_* 与 _try_get_shared_* 等私有辅助供内部子模块和
+# 测试经各自定义模块显式导入。
 __all__ = [
     "GenerationExecutionContext",
     "aggregate_parallel_generation_results",

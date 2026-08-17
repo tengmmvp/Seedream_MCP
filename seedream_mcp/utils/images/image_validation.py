@@ -4,6 +4,9 @@
 维度，Data URI 经 base64 解码后同样校验。纯参数校验（尺寸、水印、prompt 等）与
 宽高比常量归 validators，本模块从其导入共用。validate_image_path 组合工作区边界
 判定与统一规则校验，供 image_input 等调用方使用。
+
+本模块首次使用时进程级覆写 PIL.Image.MAX_IMAGE_PIXELS 为 36M，嵌入本包的宿主
+进程须感知该副作用。
 """
 
 from __future__ import annotations
@@ -55,6 +58,9 @@ def _ensure_heif_opener_registered() -> None:
     from PIL import Image
     from pillow_heif import register_heif_opener
 
+    # 进程级覆写 PIL 的解压炸弹阈值：MAX_IMAGE_PIXELS 是 PIL.Image 的进程全局属性，
+    # 首次调用后宿主进程内所有 PIL 打开操作都以 36M 为上限，与自身的 36M 维度校验
+    # 对齐；嵌入本包的宿主进程须感知该副作用。
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     register_heif_opener()
     _heif_opener_registered = True

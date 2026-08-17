@@ -8,11 +8,13 @@ MCPServer 实例与共享资源生命周期管理由 resources 模块承担，�
 参数解析由 cli 模块承担，streamable-http 中间件与传输配置由 transport 模块承担，
 二者经本模块重导出。
 
-outputSchema 声明契约：五个 @mcp.tool 工具函数的返回类型注解为 pydantic model
-（GenerationStructuredOutput / BrowseImagesStructuredOutput），仅用于让 MCPServer 据此
-生成 outputSchema；运行时实际返回 CallToolResult（含面向模型的文本与 structuredContent）。
-故函数体中相应的 ``# type: ignore[return-value]`` 是该方案的必要组成，不可为统一返回
-类型而移除，否则 outputSchema 声明会失效。详见 AGENTS.md 的 outputSchema 声明契约一节。
+outputSchema 声明契约：五个 @mcp.tool 工具函数的返回类型注解为 SDK 官方惯用形
+``Annotated[CallToolResult, GenerationStructuredOutput / BrowseImagesStructuredOutput]``。
+mcp 2.0 的 FuncMetadata 对返回 CallToolResult 的工具取注解元数据首项的 pydantic
+model 生成 outputSchema，运行时返回的 CallToolResult 原样透传，同时携带面向模型的
+文本与 structuredContent，且经该 model 校验 structuredContent 后才送达客户端。注解与
+运行时返回类型一致，函数体无需 type: ignore。声明与运行时两侧由 test_output_schema
+与 test_output_schema_consistency 守护不漂移。
 
 inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明（prompt 居首），而非单一
 params 嵌套模型。MCPServer 的 FuncMetadata 不支持单参数 BaseModel 自动展开，
@@ -33,7 +35,7 @@ import sys
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, ToolAnnotations
 from pydantic import Field
 
 # 本地模块导入
@@ -249,7 +251,7 @@ async def seedream_text_to_image(
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
-) -> GenerationStructuredOutput:
+) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """文生图：根据文字指令生成单张图片。
 
     适用：从零开始按文字描述创建图片。示例：生成“赛博朋克风格的城市夜景”。
@@ -279,7 +281,7 @@ async def seedream_text_to_image(
         ),
         config=config,
         ctx=ctx,
-    )  # type: ignore[return-value]
+    )
 
 
 @mcp.tool(
@@ -306,7 +308,7 @@ async def seedream_image_to_image(
     image: str = Field(
         pattern=_NON_BLANK_PATTERN,
         description=(
-            "参考图片，支持 URL、data URI（data:image/*;base64,...）、本地文件路径。"
+            "参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
             "例如：https://example.com/ref.png 或 ./.seedream/images/portrait.jpg。"
         ),
     ),
@@ -381,7 +383,7 @@ async def seedream_image_to_image(
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
-) -> GenerationStructuredOutput:
+) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """图文生图：基于已有图片进行编辑。
 
     适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调
@@ -415,7 +417,7 @@ async def seedream_image_to_image(
         ),
         config=config,
         ctx=ctx,
-    )  # type: ignore[return-value]
+    )
 
 
 @mcp.tool(
@@ -441,8 +443,8 @@ async def seedream_multi_image_fusion(
         min_length=2,
         max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
         description=(
-            f"图片列表，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
-            f"数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
+            f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张），"
+            f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
             '例如：["https://example.com/a.png", "./.seedream/images/b.jpg"]。'
         ),
     ),
@@ -499,7 +501,7 @@ async def seedream_multi_image_fusion(
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
-) -> GenerationStructuredOutput:
+) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """多图融合：融合多张参考图片的特征生成新图片。
 
     适用：把多张图片的风格或元素合并到一张新图。示例：“将图1的服装换到图2的模特
@@ -531,7 +533,7 @@ async def seedream_multi_image_fusion(
         ),
         config=config,
         ctx=ctx,
-    )  # type: ignore[return-value]
+    )
 
 
 @mcp.tool(
@@ -555,13 +557,16 @@ async def seedream_sequential_generation(
     ),
     image: (
         Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]
-        | list[Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]]
+        | Annotated[
+            list[Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]],
+            Field(max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
+        ]
         | None
     ) = Field(
         default=None,
         description=(
-            f"可选的参考图片，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
-            f"单张或多张，单字符串视为单元素列表，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张。"
+            f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张，"
+            f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
         ),
     ),
     size: str | None = Field(
@@ -599,8 +604,8 @@ async def seedream_sequential_generation(
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
         description=(
-            "同一提示并行发起的独立生成次数，每次各产出一组图片，单组数量由 "
-            "max_images 控制；适合一次获取多组独立的组图结果。"
+            "同一提示并行发起的独立生成次数，每次各产出一组图片，组内图片数量由模型"
+            "按提示词决定，最多 max_images 张；适合一次获取多组独立的组图结果。"
         ),
     ),
     parallelism: int | None = Field(
@@ -626,7 +631,7 @@ async def seedream_sequential_generation(
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
-) -> GenerationStructuredOutput:
+) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """组图输出：一次生成多张内容关联的图片。
 
     适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：
@@ -659,7 +664,7 @@ async def seedream_sequential_generation(
         ),
         config=config,
         ctx=ctx,
-    )  # type: ignore[return-value]
+    )
 
 
 @mcp.tool(
@@ -712,7 +717,7 @@ async def seedream_browse_images(
         description="是否展示文件大小、修改时间等详细信息。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
-) -> BrowseImagesStructuredOutput:
+) -> Annotated[CallToolResult, BrowseImagesStructuredOutput]:
     """本地图片浏览：列出工作区中的图片文件。
 
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
@@ -733,7 +738,7 @@ async def seedream_browse_images(
             )
         ),
         ctx=ctx,
-    )  # type: ignore[return-value]
+    )
 
 
 # ==================== 平铺 inputSchema 收紧 ====================
@@ -759,6 +764,11 @@ def _tighten_flat_tool_schemas() -> None:
     子类化保留全部字段、校验器与序列化行为，仅收紧额外键策略。于 import 期执行，
     先于任何 tools/list 与 tools/call 生效；MCPServer 无公开的工具访问 API，经
     tool manager 取 Tool 对象修补其 parameters dict 与参数模型。
+
+    实现依赖 SDK 私有路径 ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``
+    的动态子类化，SDK 未对此作出公开 API 承诺。升级 mcp python-sdk 时须验证该
+    私有路径仍然成立，私有结构变更导致的收紧失效由
+    test_flat_input_schema_forbids_additional_properties 兜底报警。
     """
     for name in _FLAT_SCHEMA_TOOL_NAMES:
         tool = mcp._tool_manager.get_tool(name)

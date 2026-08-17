@@ -8,9 +8,13 @@ SSE 请求级错误事件按 4xx 终态处理，_call_api 不对其重试。
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
+from mcp.types import TextContent
 
+import seedream_mcp.client as client_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import _resolve_base_dir
@@ -21,6 +25,8 @@ from seedream_mcp.tools.core.results import (
     _sanitize_usage,
     aggregate_parallel_generation_results,
 )
+from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamValidationError,
@@ -305,3 +311,58 @@ async def test_http_400_api_error_not_retried(no_sleep: None) -> None:
 
     assert upstream_calls == 1
     assert excinfo.value.status_code == 400
+
+
+# ==================== 并行批次前置校验契约 ====================
+
+
+async def test_parallel_batch_prevalidate_failure_zero_dispatch_and_message_parity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公共参数前置校验失败时批次零请求分发，错误档位与文案和单请求路径一致。
+
+    锁定 _run_generation_requests 的 prevalidate 分支承诺：校验失败在分发前上抛，
+    由外层流水线统一降级为 validation_error 档，不进入逐请求错误聚合。公共参数
+    校验失败经替换 validate_common_generation_params 注入；schema 与 context 层的
+    同源校验已拦截自然非法输入，测试聚焦批次分发前的拦截行为本身。
+    """
+
+    def _failing_validate(**kwargs: Any) -> Any:
+        del kwargs
+        raise SeedreamValidationError("提示词超过长度上限", field="prompt", value=None)
+
+    monkeypatch.setattr(client_module, "validate_common_generation_params", _failing_validate)
+
+    api_calls = 0
+
+    async def fake_method(self, **kwargs):  # noqa: ANN001
+        nonlocal api_calls
+        del self, kwargs
+        api_calls += 1
+        return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+    monkeypatch.setattr(SeedreamClient, "text_to_image", fake_method)
+
+    config = SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
+    batch_result = await handle_text_to_image(
+        TextToImageInput(prompt="test", request_count=3, parallelism=2), config
+    )
+    single_result = await handle_text_to_image(TextToImageInput(prompt="test"), config)
+
+    # 分发前上抛：批内三个请求与单请求均未触达生成方法
+    assert api_calls == 0
+    assert batch_result.is_error is True
+    assert single_result.is_error is True
+    assert batch_result.structured_content is not None
+    assert batch_result.structured_content["error"]["type"] == "validation_error"
+    # 失败走外层统一降级分支，未进入逐请求错误聚合
+    assert batch_result.structured_content["batch"] is None
+
+    batch_text = next(
+        content.text for content in batch_result.content if isinstance(content, TextContent)
+    )
+    single_text = next(
+        content.text for content in single_result.content if isinstance(content, TextContent)
+    )
+    assert batch_text == single_text
+    assert "提示词超过长度上限" in batch_text

@@ -6,7 +6,9 @@ tools/call 协议集成：平铺参数经真实 JSON-RPC 调用路径反序列�
 结果均以 HTTP 200 的 CallToolResult 返回，isError 透传，structuredContent
 经 MCPServer 内部以 outputSchema 校验。以及 SDK 内层 DNS rebinding 防护按绑定
 地址重配的集成：非回环绑定下非白名单 Host 的 /mcp 请求放行，回环绑定下外部
-域名 Host 被最外层自定义回环 Host 守卫以 403 先行短路。
+域名 Host 被最外层自定义回环 Host 守卫以 403 先行短路，localhost 绑定下白名单
+仍启用，外部域名 Host 由 SDK 内层以 421 拒绝。末尾以真端口 uvicorn 后台线程跑
+生产启动器 _run_streamable_http 的默认 SSE 模式冒烟与优雅关闭链。
 
 httpx.ASGITransport 仅发送 http scope 不驱动 ASGI lifespan，故对触达 MCP 应用的
 200 用例以自建 _LifespanManager 显式运行 session_manager 生命周期（建立任务组）；
@@ -15,6 +17,9 @@ httpx.ASGITransport 仅发送 http scope 不驱动 ASGI lifespan，故对触达 
 
 import asyncio
 import json
+import socket
+import threading
+import time
 from typing import Any, MutableMapping
 
 import httpx
@@ -40,10 +45,19 @@ class _LifespanManager:
     lifespan.startup 等待 startup.complete，退出时发送 shutdown 等待
     shutdown.complete。Starlette 据此运行 session_manager.run() 建立请求处理任务组，
     否则 _handle_stateless_request 会因 _task_group 为 None 抛 RuntimeError。
+    startup.failed 与 shutdown.failed 同步置位事件并转译为 RuntimeError，lifespan
+    启动失败时用例立即失败而非在等待 complete 事件上无限挂起。
     """
 
     def __init__(self, app: Any) -> None:
         self._app = app
+        self._error: BaseException | None = None
+
+    def _fail(self, message: MutableMapping[str, Any]) -> None:
+        detail = message.get("message", "")
+        self._error = RuntimeError(f"ASGI lifespan 失败: {detail}")
+        self._startup_complete.set()
+        self._shutdown_complete.set()
 
     async def __aenter__(self) -> "_LifespanManager":
         self._startup_complete = asyncio.Event()
@@ -57,18 +71,27 @@ class _LifespanManager:
             msg_type = message["type"]
             if msg_type == "lifespan.startup.complete":
                 self._startup_complete.set()
+            elif msg_type == "lifespan.startup.failed":
+                self._fail(message)
             elif msg_type == "lifespan.shutdown.complete":
                 self._shutdown_complete.set()
+            elif msg_type == "lifespan.shutdown.failed":
+                self._fail(message)
 
         self._task = asyncio.ensure_future(self._app({"type": "lifespan"}, receive, send))
         await self._queue.put({"type": "lifespan.startup"})
         await self._startup_complete.wait()
+        if self._error is not None:
+            await self._task
+            raise self._error
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         await self._queue.put({"type": "lifespan.shutdown"})
         await self._shutdown_complete.wait()
         await self._task
+        if self._error is not None:
+            raise self._error
 
 
 def _build_app(
@@ -408,3 +431,109 @@ async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlis
     security = _transport_security_for_host("127.0.0.1")
     assert security.enable_dns_rebinding_protection is True
     assert "127.0.0.1:*" in security.allowed_hosts
+
+
+async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
+    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
+) -> None:
+    """localhost 绑定保留 SDK 内层 Host 白名单，外部域名 Host 被内层以 421 拒绝。
+
+    localhost 不参与免鉴权与 TLS 强制的绑定判定，但绑定 localhost 时若派生逻辑
+    关闭 SDK 内层防护，hosts 污染使监听实际暴露公网后请求将失去全部 Host 头防线。
+    本地 localhost Host 的请求放行返回 200，外部域名 Host 穿过中间件后到达 SDK
+    内层被 421 拒绝。会话管理器实例仅可运行一次，第二个请求前置 None 使
+    streamable_http_app 重建新实例，两次 lifespan 进入各运行一次。
+    """
+    app = _build_app("s3cret", stateless=True, json_response=True, host="localhost")
+
+    allowed = await _post_mcp_with_host(app, "localhost:8000")
+    assert allowed.status_code == 200
+    body = allowed.json()
+    assert body["jsonrpc"] == "2.0"
+    assert "error" not in body
+
+    server.mcp._lowlevel_server._session_manager = None
+    app = _build_app("s3cret", stateless=True, json_response=True, host="localhost")
+    rejected = await _post_mcp_with_host(app, "mcp.example.com")
+    assert rejected.status_code == 421
+
+    security = _transport_security_for_host("localhost")
+    assert security.enable_dns_rebinding_protection is True
+    assert "localhost:*" in security.allowed_hosts
+
+
+# ==================== 生产启动器真端口冒烟 ====================
+
+
+def _pick_free_port() -> int:
+    """占用一个 127.0.0.1 随机空闲端口并释放，返回端口号供服务器绑定。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
+    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
+) -> None:
+    """生产启动器真端口冒烟：默认 SSE 响应模式完成工具列表后优雅关闭无异常无挂起。
+
+    _run_streamable_http 在后台线程以真实 uvicorn 监听随机空闲端口，装配、事件
+    循环管理与退出清理链全部走生产代码。客户端以默认配置连接：legacy 握手与
+    tools/list 的 POST 响应均为 SSE 流，补全生产默认响应模式的端到端验证，同时
+    断言 initialize 的 serverInfo.version 为项目版本号。客户端退出后置
+    should_exit 触发优雅关闭，以 30 秒上限 join 线程，防关闭链挂死拖垮测试进程。
+    """
+    import uvicorn
+    from mcp.client import Client
+
+    port = _pick_free_port()
+    created_servers: list[uvicorn.Server] = []
+    real_server_cls = uvicorn.Server
+
+    class _CapturingServer(real_server_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            created_servers.append(self)
+
+    monkeypatch.setattr(uvicorn, "Server", _CapturingServer)
+
+    thread_errors: list[BaseException] = []
+
+    def _serve() -> None:
+        try:
+            server._run_streamable_http("127.0.0.1", port, "")
+        except BaseException as exc:
+            thread_errors.append(exc)
+
+    thread = threading.Thread(target=_serve, name="seedream-http-smoke", daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 20.0
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                    break
+            except OSError:
+                if time.monotonic() > deadline:
+                    pytest.fail("streamable-http 冒烟服务器未在时限内开始监听")
+                await asyncio.sleep(0.05)
+
+        async with Client(
+            f"http://127.0.0.1:{port}/mcp", mode="legacy", read_timeout_seconds=10.0
+        ) as client:
+            server_info = client.server_info
+            assert server_info is not None
+            assert server_info.version == resources.SERVER_VERSION
+            tools = await client.list_tools()
+            assert len(tools.tools) == 5
+
+        assert created_servers, "uvicorn.Server 未按生产路径构造"
+        created_servers[0].should_exit = True
+    finally:
+        if created_servers:
+            created_servers[0].should_exit = True
+        thread.join(timeout=30.0)
+        server.mcp._lowlevel_server._session_manager = None
+
+    assert not thread.is_alive(), "_run_streamable_http 优雅关闭链挂起"
+    assert thread_errors == []

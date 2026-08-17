@@ -1,12 +1,13 @@
 """下载安全测试：DNS 解析 TTL 缓存与连接后对端 IP 公网校验。"""
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager
+from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager, _DNS_CACHE_MAX_SIZE
 
 from _download_fakes import (
     _FakeResponse,
@@ -15,6 +16,9 @@ from _download_fakes import (
     _TimeoutThenSuccessSession,
     _patch_download_network,
 )
+
+# 合法 JPEG 魔法字节，供扩展名等价类用例的字节签名嗅探。
+_JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 24
 
 
 def _patch_unretrieved_callback(
@@ -557,3 +561,89 @@ def test_url_origin_treats_default_port_as_same_origin() -> None:
     assert _url_origin("https://a.example/x") != _url_origin("https://b.example/x")
     assert _url_origin("https://a.example/x") != _url_origin("http://a.example/x")
     assert _url_origin("https://a.example/x") != _url_origin("https://a.example:8443/x")
+
+
+# ---- DNS 缓存超限驱逐 ----
+
+
+def test_enforce_dns_cache_limit_evicts_expired_then_oldest() -> None:
+    """缓存超限时先清过期条目，仍超限再按最旧 expires_at 驱逐，条目数不超上限。"""
+    manager = DownloadManager()
+    now = time.time()
+    expired_hosts = [f"expired{i}.example.com" for i in range(3)]
+    for i, host in enumerate(expired_hosts):
+        manager._dns_cache[host] = (now - 100.0 - i, ("203.0.113.1",))
+    # 未过期条目比上限多 5 个：过期清理后仍超限，须按 expires_at 最旧强制驱逐
+    live_count = _DNS_CACHE_MAX_SIZE + 5
+    live_hosts = [f"live{i}.example.com" for i in range(live_count)]
+    for i, host in enumerate(live_hosts):
+        manager._dns_cache[host] = (now + 1000.0 + i, ("203.0.113.2",))
+
+    manager._enforce_dns_cache_limit()
+
+    # 过期条目无条件先清理
+    assert all(host not in manager._dns_cache for host in expired_hosts)
+    # 上限为硬限制，最终条目数恰为上限
+    assert len(manager._dns_cache) == _DNS_CACHE_MAX_SIZE
+    # 未过期条目按 expires_at 从旧到新驱逐最旧的 5 个
+    for host in live_hosts[:5]:
+        assert host not in manager._dns_cache
+    for host in live_hosts[5:]:
+        assert host in manager._dns_cache
+
+
+# ---- 扩展名等价类：同格式别名不改名，跨格式仍修正 ----
+
+
+@pytest.mark.asyncio
+async def test_download_keeps_jpg_suffix_for_jpeg_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """.jpg URL 的 JPEG 内容属同格式等价类，落盘保留 .jpg 不改名为 .jpeg。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=200,
+                headers={"content-type": "image/jpeg", "content-length": str(len(_JPEG_BYTES))},
+                content_chunks=[_JPEG_BYTES],
+            )
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.jpg"
+    result = await manager.download_image("https://example.com/img.jpg", save_path)
+
+    assert result["success"] is True
+    assert result["file_path"] == str(save_path)
+    assert save_path.exists()
+    assert save_path.read_bytes() == _JPEG_BYTES
+
+
+@pytest.mark.asyncio
+async def test_download_corrects_png_suffix_to_jpeg_for_jpeg_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """.png URL 返回 JPEG 内容属跨格式不一致，落盘扩展名仍修正为嗅探结果 .jpeg。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=200,
+                headers={"content-type": "image/jpeg", "content-length": str(len(_JPEG_BYTES))},
+                content_chunks=[_JPEG_BYTES],
+            )
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    corrected = tmp_path / "out.jpeg"
+    assert result["success"] is True
+    assert result["file_path"] == str(corrected)
+    assert corrected.exists()
+    assert corrected.read_bytes() == _JPEG_BYTES
+    assert not save_path.exists()

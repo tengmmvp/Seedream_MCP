@@ -55,7 +55,8 @@ async def prepare_image_input(image: str) -> str:
     Raises:
         SeedreamValidationError: 输入格式无效、路径越界、界内定位失败或维度超限等
             参数校验失败。
-        SeedreamAPIError: 当前会话未授权任何工作区目录，或图像处理发生其他失败。
+        SeedreamAPIError: 当前会话未授权任何工作区目录、本地文件读取失败，或图像
+            处理发生其他失败。
     """
     try:
         normalized = image.strip()
@@ -109,6 +110,32 @@ def _resolves_outside_workspace(normalized: str, resolved_roots: list[Path]) -> 
     return True
 
 
+def _format_local_read_error(exc: OSError, normalized: str) -> str:
+    """按边界来源构建本地文件读取失败的错误文案，遮蔽服务器侧绝对路径。
+
+    会话 Roots 声明的边界下，解析后的绝对路径属调用方授权声明信息，异常原文直接
+    回显；回退边界下绝对路径属服务器环境信息，仅回显系统错误语义与调用方输入的
+    原样字符串。异常的 str 形态与 filename 属性都可能嵌有解析后的绝对路径，回退
+    分支不得拼接原文，系统错误语义取 strerror，缺失时回退 errno 数值。
+
+    Args:
+        exc: 本地文件打开或读取阶段抛出的 OSError。
+        normalized: 调用方输入经 strip 后的字符串。
+
+    Returns:
+        按边界来源遮蔽后的错误文案。
+    """
+    if is_boundary_from_session_roots():
+        return f"读取图像文件失败: {exc}"
+    if exc.strerror:
+        reason = exc.strerror
+    elif exc.errno is not None:
+        reason = f"errno {exc.errno}"
+    else:
+        reason = "无法读取"
+    return f"读取图像文件失败: {reason}: {normalized}"
+
+
 def _prepare_local_image(normalized: str, original: str) -> str:
     """校验本地图片路径并读取编码为 Base64 Data URI。
 
@@ -118,8 +145,10 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     而非 API 调用失败：路径解析后落在全部工作区根之外时抛携带允许根列表的越界
     错误；界内定位失败则经 validate_image_path 做诊断性校验取具体失败原因，并给出
     相似路径建议，文件不存在、格式不支持等属调用方输入问题，不得归入 api_error
-    档误导排查方向。两条失败路径的文案均按边界来源遮蔽：回退边界来自服务器环境，
-    根绝对路径不进入面向调用方的错误消息。需在工作线程中调用。
+    档误导排查方向。读取阶段打开或读字节抛 OSError 时，经 _format_local_read_error
+    按边界来源遮蔽路径后转 SeedreamAPIError，与两条定位失败路径共用同一遮蔽口径。
+    两条失败路径的文案均按边界来源遮蔽：回退边界来自服务器环境，根绝对路径不进入
+    面向调用方的错误消息。需在工作线程中调用。
     """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
@@ -180,14 +209,18 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     validated_path, _ = found
 
-    # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 io_file 统一实现；
-    # 符号链接或打开失败抛 OSError，由 prepare_image_input 外层转 SeedreamAPIError。
+    # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 io_file 统一实现；打开或读取
+    # 抛 OSError 时异常原文嵌有服务器侧解析后的绝对路径，经 _format_local_read_error
+    # 按边界来源遮蔽后转 SeedreamAPIError，回退边界下路径不进入面向调用方的消息。
     # 内存特征：读取字节、b64 编码与最终 data URI 拼接的瞬时峰值约为单图的 5.5×，
     # 预处理并发 5 × 30MB 上限下瞬态约 800MB，不受 LRU 缓存字节上限约束，部署
     # 受限时须按此规划内存。
-    with open_no_follow_read(validated_path) as f:
-        # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存。
-        image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
+    try:
+        with open_no_follow_read(validated_path) as f:
+            # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存。
+            image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
+    except OSError as e:
+        raise SeedreamAPIError(_format_local_read_error(e, normalized)) from e
     if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
         raise SeedreamValidationError(
             f"文件过大: {format_file_size_mb(len(image_bytes))}，"

@@ -359,7 +359,8 @@ class FileManager:
 
         Args:
             prompt: 生成提示词，用于派生文件名基础部分。
-            extension: 文件扩展名，包含点号。
+            extension: 文件扩展名，包含点号；不在受支持图片扩展名白名单时回退默认
+                图片扩展名，防止任意后缀经本入口落盘。
             tool_name: 工具名称，用作保存子目录。
             custom_name: 自定义文件名基础部分，覆盖提示词派生。
             content_hash: 内容哈希，嵌入文件名用于去重与标识。
@@ -371,6 +372,10 @@ class FileManager:
         Raises:
             FileManagerError: 生成的保存路径越出基础目录。
         """
+        # 收敛到受支持图片扩展名白名单，与 create_save_path 对 URL 派生扩展名的同名
+        # 防护保持同一口径。
+        if extension not in SUPPORTED_IMAGE_EXTENSIONS:
+            extension = DEFAULT_IMAGE_EXTENSION
         base_name = custom_name or self.generate_name_from_prompt(prompt)
         filename = self.generate_unique_filename(base_name, extension, content_hash=content_hash)
         save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)

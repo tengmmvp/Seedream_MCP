@@ -25,6 +25,9 @@ async def reset_lifespan_singletons():
     if active is not None:
         await active.client.close()
         await active.download_manager.close()
+    for retired in list(resources._retired_resources):
+        await retired.client.close()
+        await retired.download_manager.close()
     server._reset_lifespan_state()
 
 

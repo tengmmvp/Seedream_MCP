@@ -4,13 +4,15 @@ import json
 from pathlib import Path
 
 import pytest
+from mcp.shared.exceptions import NoBackChannelError
 from mcp.types import ListRootsResult, Root
 from PIL import Image
 
+import seedream_mcp.utils.io.io_path as io_path_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import workspace_roots_resource
-from seedream_mcp.utils.core.errors import SeedreamAPIError
+from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamMCPError
 from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_scope
@@ -59,6 +61,44 @@ class _FailingSession:
 class _FailingContext:
     def __init__(self) -> None:
         self.session = _FailingSession()
+
+
+class _NoBackChannelSession:
+    """list_roots 抛 NoBackChannelError，模拟无服务端反向通道的 2026 协议会话。"""
+
+    async def list_roots(self) -> ListRootsResult:
+        raise NoBackChannelError("roots/list")
+
+
+class _NoBackChannelContext:
+    def __init__(self) -> None:
+        self.session = _NoBackChannelSession()
+
+
+class _MalformedResponseSession:
+    """list_roots 抛普通 ValueError，代表瞬时失败或替身异常。"""
+
+    async def list_roots(self) -> ListRootsResult:
+        raise ValueError("malformed roots payload")
+
+
+class _MalformedResponseContext:
+    def __init__(self) -> None:
+        self.session = _MalformedResponseSession()
+
+
+class _LevelCaptureLogger:
+    """替身 logger，分别收集 error 与 warning 消息，供断言日志级别。"""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
+
+    def error(self, message: str, *args: object) -> None:
+        self.errors.append(message.format(*args) if args else message)
+
+    def warning(self, message: str, *args: object) -> None:
+        self.warnings.append(message.format(*args) if args else message)
 
 
 @pytest.mark.asyncio
@@ -267,6 +307,57 @@ async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
 
     async with workspace_roots_scope(_FailingContext()):
         assert get_workspace_root() == env_root.resolve()
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_fails_closed_on_no_back_channel_without_env_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无反向通道且无环境变量根时 fail-closed 抛错，不放宽边界到进程 CWD。"""
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_workspace_root_provider", lambda: None)
+
+    with pytest.raises(SeedreamMCPError, match="SEEDREAM_WORKSPACE_ROOT"):
+        async with workspace_roots_scope(_NoBackChannelContext()):
+            raise AssertionError("无反向通道且无环境变量根时不得进入作用域")
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with_error_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无反向通道但已配置环境变量根时回退该根，且日志提级为 error 而非 warning。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    capture = _LevelCaptureLogger()
+    monkeypatch.setattr(io_path_module, "logger", capture)
+
+    async with workspace_roots_scope(_NoBackChannelContext()):
+        assert get_workspace_root() == env_root.resolve()
+
+    assert any("反向通道" in message for message in capture.errors)
+    assert capture.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_warns_and_falls_back_on_generic_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NoBackChannelError 之外的普通异常维持 warning 级回退，不 fail-closed。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    capture = _LevelCaptureLogger()
+    monkeypatch.setattr(io_path_module, "logger", capture)
+
+    async with workspace_roots_scope(_MalformedResponseContext()):
+        assert get_workspace_root() == env_root.resolve()
+
+    assert any("读取 MCP Roots 失败" in message for message in capture.warnings)
+    assert capture.errors == []
 
 
 @pytest.mark.asyncio

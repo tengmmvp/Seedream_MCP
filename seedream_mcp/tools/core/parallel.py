@@ -178,7 +178,7 @@ async def _run_generation_requests(
         # 批次级公共参数校验：批内各请求公共参数相同，分发前校验一次经共享计划
         # 缓存复用。校验失败在分发前上抛，异常与消息和单请求路径的首请求校验失败
         # 一致，由外层流水线统一降级，不进入逐请求错误聚合。
-        client.prevalidate_common_generation_params(
+        await client.prevalidate_common_generation_params(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             size=context.size,
@@ -212,7 +212,6 @@ async def _run_generation_requests(
             module_logger=module_logger,
             ctx=ctx,
         )
-        await _safe_report_progress(
-            ctx, progress=PROGRESS_GENERATION_DONE, message="并行请求执行完成"
-        )
+        # 末个请求完成时按完成数上报的进度已恰好到达 PROGRESS_GENERATION_DONE。
+        # 进度规范要求逐次上报严格递增，批次收尾重报同值构成违规，不再追加收尾上报。
         return result

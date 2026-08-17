@@ -1,9 +1,9 @@
-"""stateful streamable-http 会话级 lifespan 重入测试。
+"""共享 lifespan 资源的多消费者引用计数测试。
 
-mcp 1.28 的会话管理器在 stateful 模式下为每个会话独立运行低层 Server.run，每次
-运行都进入一次 app_lifespan，会话退出即触发对应 lifespan teardown。以嵌套的
-app_lifespan 复现双会话并发与先后退出场景，锁定 teardown 清理的引用计数门控：
-任一会话退出不得关闭其余会话仍在使用的共享资源，全部在途引用归零后才清理。
+mcp 2.0 下 streamable-http 的 lifespan 在会话管理器启动时进入一次，状态进程级
+共享，不再随会话进出。本套件以直调嵌套的 app_lifespan 锁定引用计数与退役逻辑的
+进程内多消费者契约：任一消费者退出不得关闭其余在途引用仍在使用的共享资源，全部
+在途引用归零后才清理。
 """
 
 import asyncio

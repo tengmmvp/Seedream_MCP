@@ -295,7 +295,7 @@ class SeedreamClient:
             output_format,
             stream,
             tools,
-        ) = self._validate_common_generation_params(
+        ) = await self._validate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -393,7 +393,7 @@ class SeedreamClient:
             output_format,
             stream,
             tools,
-        ) = self._validate_common_generation_params(
+        ) = await self._validate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -493,7 +493,7 @@ class SeedreamClient:
             output_format,
             stream,
             tools,
-        ) = self._validate_common_generation_params(
+        ) = await self._validate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -597,7 +597,7 @@ class SeedreamClient:
             output_format,
             stream,
             tools,
-        ) = self._validate_common_generation_params(
+        ) = await self._validate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,
@@ -681,7 +681,7 @@ class SeedreamClient:
         except Exception as e:
             raise self._finalize_generation_error("组图输出", e)
 
-    def _validate_common_generation_params(
+    async def _validate_common_generation_params(
         self,
         *,
         prompt: str | None,
@@ -703,6 +703,12 @@ class SeedreamClient:
         build_generation_context 的合成语义一致，消除直连调用与配置的双源分叉；
         图层拆分场景 size 未显式传入时按官方默认取 auto。各方法特有的图片数量与
         序列校验仍在各自方法内执行。
+
+        全量校验下沉 asyncio.to_thread 在工作线程执行：validate_prompt 对长提示词的
+        CJK 与英文计数为全量 O(n) 同步扫描，未绑定共享计划的直连调用每次都会在事件
+        循环线程重复该扫描，下沉后事件循环在扫描期间保持可调度。
+        validate_common_generation_params 为纯函数，只读入参与模块级常量，不写共享
+        状态，线程安全；计划缓存的读写留在事件循环线程，工作线程不触碰上下文变量。
 
         当前上下文绑定共享请求计划时按输入快照复用批内首次校验结果：批内各请求的
         公共参数相同，重复校验对结果无增量，仅重复 100k 级提示词的 CJK 计数扫描；
@@ -731,7 +737,8 @@ class SeedreamClient:
             cached = plan.validated_common_params
             if cached is not None and cached[0] == inputs:
                 return cached[1]
-        validated = validate_common_generation_params(
+        validated = await asyncio.to_thread(
+            validate_common_generation_params,
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=resolved_size,
@@ -747,7 +754,7 @@ class SeedreamClient:
             plan.validated_common_params = (inputs, validated)
         return validated
 
-    def prevalidate_common_generation_params(
+    async def prevalidate_common_generation_params(
         self,
         *,
         prompt: str | None,
@@ -768,7 +775,7 @@ class SeedreamClient:
         异常类型与消息和单请求路径的首请求校验失败一致。未绑定共享计划时仅执行
         校验，无缓存效果。
         """
-        self._validate_common_generation_params(
+        await self._validate_common_generation_params(
             prompt=prompt,
             optimize_prompt_options=optimize_prompt_options,
             size=size,

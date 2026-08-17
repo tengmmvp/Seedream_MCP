@@ -31,8 +31,13 @@ logger = get_logger(__name__)
 # 仅凭字符串判定会使公网暴露仍免鉴权。
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
+# 绑定即启用 SDK 内层 DNS rebinding 防护的地址集合。比 _LOOPBACK_HOSTS 多含
+# “localhost”：绑定判定与免鉴权语义不放宽，但 localhost 监听同样须保有 Host 头
+# 防线，与 streamable_http_app 对回环 host 自动启用防护的默认集合一致。
+_DNS_REBINDING_PROTECTED_HOSTS = _LOOPBACK_HOSTS | {"localhost"}
+
 # 回环绑定下 SDK 内层 DNS rebinding 防护的 Host/Origin 白名单，端口通配，与
-# MCPServer 构造期对回环 host 的默认白名单一致，亦与 _LoopbackHostGuardMiddleware
+# streamable_http_app 对回环 host 的默认白名单一致，亦与 _LoopbackHostGuardMiddleware
 # 容忍的回环 Host 集合语义对齐。
 _LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 _LOOPBACK_ALLOWED_ORIGINS = (
@@ -329,7 +334,8 @@ def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> 
     streamable_http_app 每次调用新建 Starlette app 但复用缓存的 _session_manager，
     同一 app 实例重复进入装配会在其用户中间件栈上叠加重复层。装配前检测本模块任一
     中间件已存在即整体跳过，使装配幂等；全新 app 正常装配。测试需重建会话管理器时
-    以 monkeypatch 重置 mcp._session_manager 为 None 强制重建，见 test_streamable_http_e2e。
+    以 monkeypatch 重置 mcp._lowlevel_server._session_manager 为 None 强制重建，见
+    test_streamable_http_e2e。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
     LoopbackHostGuard（仅回环绑定）-> HealthCheck -> LimitRequestBody -> Bearer -> app：
@@ -387,11 +393,13 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
 
     streamable_http_app 以 host 参数决定防护默认：host 为回环且未传 transport_security
     时自动启用回环 Host 白名单。本项目按实际绑定地址显式派生并传入：回环绑定维持该
-    白名单，与 _LoopbackHostGuardMiddleware 的回环 Host 容忍集合语义对齐；非回环绑定
+    白名单，与 _LoopbackHostGuardMiddleware 的回环 Host 容忍集合语义对齐；localhost
+    绑定同样启用该白名单，hosts 污染使 localhost 解析到非回环地址时监听仍保有 Host
+    头防线，该集合与 _LOOPBACK_HOSTS 的差异不影响绑定判定与免鉴权语义；非回环绑定
     关闭白名单，此时鉴权与 TLS 已由本项目 Bearer 中间件与 cli_main 的 fail-closed
     前置校验承担，SDK 内层白名单反而会把携带真实域名 Host 的全部 /mcp 请求以 421 拒绝。
     """
-    if host in _LOOPBACK_HOSTS:
+    if host in _DNS_REBINDING_PROTECTED_HOSTS:
         return TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=list(_LOOPBACK_ALLOWED_HOSTS),
@@ -487,7 +495,7 @@ def _run_streamable_http(
         transport_security=_transport_security_for_host(host),
         max_request_body_size=get_active_config().http_max_body_size,
     )
-    if host not in _LOOPBACK_HOSTS:
+    if host not in _DNS_REBINDING_PROTECTED_HOSTS:
         logger.info(
             "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
             host,

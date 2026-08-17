@@ -279,8 +279,11 @@ def _reset_lifespan_state() -> None:
 
 
 # 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。
+# version 必须显式传入：SDK 2.0 起未传 version 的服务器在 initialize 结果的 serverInfo
+# 中报告空串而非 SDK 包版本。
 mcp = MCPServer(
     SERVER_NAME,
     instructions=SERVER_INSTRUCTIONS,
+    version=SERVER_VERSION,
     lifespan=app_lifespan,
 )

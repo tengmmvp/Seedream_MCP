@@ -49,6 +49,28 @@ def test_validate_url_static_rejects_loopback_ip() -> None:
         DownloadManager()._validate_url_static("http://127.0.0.1/x.png")
 
 
+def test_validate_url_static_rejects_ipv6_loopback_literal() -> None:
+    """IPv6 回环字面量经 urlparse 方括号剥离后命中非公网判定，URL 级静态拒绝。"""
+    with pytest.raises(DownloadError, match="不安全的IP地址"):
+        DownloadManager()._validate_url_static("http://[::1]/x.png")
+
+
+def test_validate_url_static_rejects_ipv4_mapped_ipv6_literal() -> None:
+    """IPv4-mapped 段内嵌私网 10.0.0.1 的 IPv6 字面量须在 URL 级静态拒绝。"""
+    with pytest.raises(DownloadError, match="不安全的IP地址"):
+        DownloadManager()._validate_url_static("http://[::ffff:10.0.0.1]/x.png")
+
+
+def test_validate_url_static_rejects_nat64_embedded_private_ipv6_literal() -> None:
+    """NAT64 段内嵌私网 192.168.1.1 的 IPv6 字面量须在 URL 级静态拒绝。
+
+    64:ff9b::c0a8:101 的 well-known 前缀本身可全局路由，依赖内嵌 IPv4 递归校验
+    才能识别其指向 192.168.1.1，覆盖 urlparse 方括号剥离与递归判定的完整链路。
+    """
+    with pytest.raises(DownloadError, match="不安全的IP地址"):
+        DownloadManager()._validate_url_static("http://[64:ff9b::c0a8:101]/x.png")
+
+
 def test_validate_url_static_rejects_credentials_in_url() -> None:
     with pytest.raises(DownloadError, match="账号或密码"):
         DownloadManager()._validate_url_static("http://user:pass@host/x.png")

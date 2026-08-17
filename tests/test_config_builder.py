@@ -662,3 +662,56 @@ def test_build_config_auto_save_fsync_defaults_false(
     config = build_config_from_sources(env_file=str(env_file))
 
     assert config.auto_save_fsync is False
+
+
+# ==================== auto_save_max_total_bytes 0 哨兵表示不限制 ====================
+
+
+def test_build_config_zero_max_total_bytes_means_unlimited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=0 归一为 None，显式关闭总量上限。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=0\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_max_total_bytes is None
+
+
+def test_build_config_max_total_bytes_defaults_to_10gb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 auto_save_max_total_bytes 取默认 10GB 上限。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_max_total_bytes == 10 * 1024 * 1024 * 1024
+
+
+@pytest.mark.parametrize("invalid_value", ["-1", "-10737418240"])
+def test_build_config_rejects_negative_max_total_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """负数不被 0 哨兵路径吸收，经 validate 下界校验拒绝。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="auto_save_max_total_bytes"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+def test_seedream_config_rejects_programmatic_zero_max_total_bytes() -> None:
+    """程序构造直接传 0 不经 env 哨兵归一，仍由 validate 下界校验拒绝。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="auto_save_max_total_bytes"):
+        SeedreamConfig(api_key="k", auto_save_max_total_bytes=0)

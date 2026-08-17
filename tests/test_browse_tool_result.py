@@ -5,9 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
+from seedream_mcp.resources import mcp
 from seedream_mcp.tools import BrowseImagesInput
 from seedream_mcp.tools.impl import browse_images as browse_images_module
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
@@ -86,7 +87,7 @@ async def test_browse_images_empty_format_filter_skips_scan(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """空列表 format_filter 与"全部后缀不受支持"语义一致：跳过扫描返回空结果。
+    """空列表 format_filter 与"全部后缀不受支持"语义一致：跳过扫描并以工具错误返回。
 
     此前空列表因 falsy 判断直接退化为不过滤的全量扫描，与全不支持分支行为不一致。
     """
@@ -101,10 +102,11 @@ async def test_browse_images_empty_format_filter_skips_scan(
         BrowseImagesInput(directory=".", recursive=False, format_filter=[])
     )
 
-    assert result.is_error is False
+    assert result.is_error is True
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["status"] == "failed"
     assert result.structured_content["count"] == 0
+    assert result.structured_content["error"]["type"] == "browse_failed"
 
 
 @pytest.mark.asyncio
@@ -157,10 +159,14 @@ async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_browse_images_offset_beyond_end_keeps_total_count(
+async def test_browse_images_offset_beyond_end_signals_tool_error(
     workspace_root: Path,
 ) -> None:
-    # offset 越过最后一页：当前页为空，但 total_count 必须反映实际匹配数
+    """offset 越过最后一页为模型可自纠的参数错误，以工具错误信号返回。
+
+    文本与结构化错误两条通道均携带实际总数与有效区间，模型修正 offset 后即可
+    重试成功。
+    """
     for name in ("a.png", "b.png", "c.png"):
         (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -169,11 +175,13 @@ async def test_browse_images_offset_beyond_end_keeps_total_count(
     )
     sc = result.structured_content
     assert isinstance(sc, dict)
-    assert sc["status"] == "empty"
+    assert result.is_error is True
+    assert sc["status"] == "failed"
     assert sc["count"] == 0
-    assert sc["total_count"] == 3
-    assert sc["has_more"] is False
-    assert sc["next_offset"] is None
+    assert sc["error"]["type"] == "browse_failed"
+    assert "目录共有 3 张图片" in sc["error"]["message"]
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "0 <= offset < 3" in text
 
 
 @pytest.mark.asyncio
@@ -234,18 +242,73 @@ async def test_browse_images_format_filter_all_unsupported_echoes_original(
     formats.py 的 SUPPORTED_IMAGE_EXTENSIONS 含 .gif，若用 .gif 会落入
     supported_only 非空分支而不触发 format_filter_exhausted，无法覆盖区分消息。
     .svg 不在支持集合内，可真正命中 exhausted 分支。断言区分消息含
-    "均不在支持列表"与"支持"，status 为 empty 且 isError 为 False；format_filter 保留
+    "均不在支持列表"与"支持"，status 为 failed 且 isError 为 True；format_filter 保留
     用户原始非空列表 [".svg"] 供回显，不缩减为空列表。
     """
     result = await handle_browse_images(BrowseImagesInput(directory=".", format_filter=[".svg"]))
 
-    assert result.is_error is False
+    assert result.is_error is True
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["status"] == "failed"
     assert result.structured_content["format_filter"] == [".svg"]
+    assert result.structured_content["error"]["type"] == "browse_failed"
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "均不在支持列表" in text
     assert "支持" in text
+
+
+class _NoRootsContext:
+    """无会话的替身上下文：session 为 None 使工作区边界回退环境变量根。
+
+    mcp.call_tool 缺省构造的 Context 无请求上下文，访问 session 属性抛 ValueError
+    会使工具体整体失败，故显式传入本替身驱动完整调用链。
+    """
+
+    session = None
+
+    async def report_progress(self, *args: object, **kwargs: object) -> None:
+        """进度上报空实现。"""
+
+
+@pytest.mark.asyncio
+async def test_browse_images_offset_error_signal_visible_to_client(
+    workspace_root: Path,
+) -> None:
+    """offset 越界的错误信号经 MCPServer 调用链可被客户端识别。
+
+    经 mcp.call_tool 走完 inputSchema 校验与结果透传，返回的 CallToolResult 携带
+    isError 与稳定的结构化错误标记，客户端 UI 无需解析文本即可判定失败。
+    """
+    for name in ("a.png", "b.png"):
+        (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = await mcp.call_tool(
+        "seedream_browse_images",
+        {"directory": ".", "recursive": False, "limit": 2, "offset": 5},
+        context=_NoRootsContext(),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["error"]["type"] == "browse_failed"
+
+
+@pytest.mark.asyncio
+async def test_browse_images_format_filter_error_signal_visible_to_client(
+    workspace_root: Path,
+) -> None:
+    """format_filter 全不支持的错误信号经 MCPServer 调用链可被客户端识别。"""
+    result = await mcp.call_tool(
+        "seedream_browse_images",
+        {"directory": ".", "format_filter": [".svg"]},
+        context=_NoRootsContext(),
+    )
+
+    assert isinstance(result, CallToolResult)
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["error"]["type"] == "browse_failed"
 
 
 @pytest.mark.asyncio
@@ -478,9 +541,9 @@ async def test_browse_images_unsupported_format_message_sanitized(
         BrowseImagesInput(directory=".", format_filter=["api_key=secret"])
     )
 
-    assert result.is_error is False
+    assert result.is_error is True
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["status"] == "failed"
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "均不在支持列表" in text
     assert "secret" not in text
@@ -500,9 +563,9 @@ async def test_browse_images_empty_format_filter_message_has_no_blank_slot(
         BrowseImagesInput(directory=".", recursive=False, format_filter=[])
     )
 
-    assert result.is_error is False
+    assert result.is_error is True
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["status"] == "failed"
     assert result.structured_content["format_filter"] == []
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "未指定任何受支持的图片格式" in text

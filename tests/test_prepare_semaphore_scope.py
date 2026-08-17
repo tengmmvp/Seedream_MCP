@@ -89,6 +89,65 @@ async def test_concurrent_single_image_calls_share_instance_semaphore(
 
 
 @pytest.mark.asyncio
+async def test_waiters_do_not_occupy_semaphore_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """命中在途 task 的等待者在槽外等待，不占用预处理并发槽位。
+
+    等待路径曾与执行路径共用槽位：纯等待者足以占满全部槽位，真正的执行者反而被
+    挡在信号量外，全局吞吐塌缩到在途 task 自身的 1。等待者不占槽后，在途 task
+    挂起期间其他键的执行者仍可用满 limit 个槽位并发执行。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    preparer = client._image_preparer
+    limit = config.image_prepare_concurrency
+
+    current = 0
+    release = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal current
+        del image
+        current += 1
+        await release.wait()
+        current -= 1
+        return "prepared"
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    shared_url = "https://example.com/shared.png"
+    creator = asyncio.ensure_future(preparer.prepare_image_input(shared_url))
+    # 等待在途 task 已登记且创建者持有的槽位进入 fake_prepare
+    while len(preparer._prepare_inflight) < 1 or current < 1:
+        await asyncio.sleep(0)
+
+    # limit + 3 个并发调用命中同一在途 task，成为纯等待者，数量刻意超过并发上限
+    waiters = [
+        asyncio.ensure_future(preparer.prepare_image_input(shared_url)) for _ in range(limit + 3)
+    ]
+
+    # 其他键的执行者：等待者不占槽位时，剩余 limit - 1 个槽位全部可供其并发执行
+    others = [
+        asyncio.ensure_future(preparer.prepare_image_input(f"https://example.com/other-{i}.png"))
+        for i in range(limit - 1)
+    ]
+
+    for _ in range(1000):
+        if current >= limit:
+            break
+        await asyncio.sleep(0)
+
+    assert current == limit, "等待者不得占用并发槽位，空闲槽位须全部可供执行者使用"
+    assert preparer._get_prepare_semaphore()._value == 0
+
+    release.set()
+    results = await asyncio.gather(creator, *waiters, *others)
+
+    assert results == ["prepared"] * (2 * limit + 3)
+
+
+@pytest.mark.asyncio
 async def test_cancelled_creators_do_not_break_concurrency_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

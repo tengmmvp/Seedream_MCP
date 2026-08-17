@@ -8,7 +8,11 @@ from mcp.types import TextContent
 from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._helpers import _add_usage_value
+from seedream_mcp.tools.core._helpers import (
+    PROGRESS_COMPLETE,
+    PROGRESS_GENERATION_DONE,
+    _add_usage_value,
+)
 from seedream_mcp.tools.core.results import aggregate_parallel_generation_results
 from seedream_mcp.tools.core.schemas import (
     ImageToImageInput,
@@ -154,6 +158,61 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
     )
     assert "成功请求: 2" in response_text
     assert "失败请求: 1" in response_text
+
+
+class _ProgressCollectingContext:
+    """收集 report_progress 调用序列的替身 ctx。
+
+    request_context 属性缺失使 lifespan 共享资源探测落入不可得分支，流水线回退
+    按需新建客户端；report_progress 仅记录进度值供断言。
+    """
+
+    def __init__(self) -> None:
+        self.progress_values: list[float] = []
+
+    @property
+    def request_context(self) -> Any:
+        raise AttributeError("测试替身不提供请求上下文")
+
+    async def report_progress(self, *, progress: float, total: float, message: str) -> None:
+        del total, message
+        self.progress_values.append(progress)
+
+
+@pytest.mark.asyncio
+async def test_parallel_batch_progress_strictly_increasing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并行批次全程进度值严格递增，PROGRESS_GENERATION_DONE 恰好上报一次。
+
+    进度规范要求每次上报严格递增且不得重复取值。批次收尾曾重报 70.0，与末个请求
+    完成时按完成数上报的 70.0 相邻重复，本测试锁定该重复不再出现。
+    """
+
+    async def fake_method(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        }
+
+    client_module = import_module("seedream_mcp.client")
+    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+
+    ctx = _ProgressCollectingContext()
+    result = await handle_text_to_image(
+        TextToImageInput(prompt="test", request_count=3, parallelism=2),
+        _build_config(),
+        ctx,
+    )
+
+    assert result.is_error is False
+    values = ctx.progress_values
+    assert all(left < right for left, right in zip(values, values[1:]))
+    assert values.count(PROGRESS_GENERATION_DONE) == 1
+    assert values[-1] == PROGRESS_COMPLETE
 
 
 def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:

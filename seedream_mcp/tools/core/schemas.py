@@ -123,7 +123,7 @@ class _SingleImageInput(BaseModel):
 
     image: str = Field(
         ...,
-        description="参考图片，支持 URL、data URI（data:image/*;base64,...）、本地文件路径。"
+        description="参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
         "例如：https://example.com/ref.png 或 ./.seedream/images/portrait.jpg。",
     )
 
@@ -148,8 +148,8 @@ class _MultiImageInput(BaseModel):
         min_length=2,
         max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
         description=(
-            f"图片列表，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
-            f"数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张）。"
+            f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张），"
+            f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
             '例如：["https://example.com/a.png", "./.seedream/images/b.jpg"]。'
         ),
     )
@@ -171,11 +171,16 @@ class _SequentialImageInput(BaseModel):
     """组图参考图输入参数。"""
 
     # 运行时接受单字符串并经 before-validator 归一为单元素列表，声明与该行为一致。
-    image: str | list[str] | None = Field(
+    # 列表分支声明 max_length，与多图融合同语义字段的声明口径一致，inputSchema 的
+    # 列表分支据此携带 maxItems，客户端本地校验即可拒绝超量输入；单字符串分支归一
+    # 为单元素列表，无数量上限可言。
+    image: (
+        str | Annotated[list[str], Field(max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES)] | None
+    ) = Field(
         default=None,
         description=(
-            f"可选的参考图片，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
-            f"单张或多张，单字符串视为单元素列表，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张。"
+            f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张，"
+            f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
         ),
     )
 
@@ -273,6 +278,25 @@ class _ResponseAndExecutionInput(BaseModel):
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     )
 
+    @model_validator(mode="after")
+    def validate_parallel_options(self) -> "_ResponseAndExecutionInput":
+        """校验并行执行参数组合。
+
+        校验器随字段声明置于本基类，直接属性访问要求混入方具备全部三个字段，
+        未来输入模型漏混本基类时在首次实例化即抛 AttributeError 暴露遗漏，
+        不再因缺省值兜底而静默跳过校验。
+        """
+        try:
+            validate_parallel_generation_options(
+                request_count=self.request_count,
+                parallelism=self.parallelism,
+                stream=self.stream,
+                max_request_count=MAX_PARALLEL_REQUEST_COUNT,
+            )
+        except SeedreamValidationError as exc:
+            raise ValueError(exc.message) from exc
+        return self
+
 
 class BaseGenerationInput(BaseModel):
     """图片生成工具的通用输入校验基类。
@@ -306,23 +330,6 @@ class BaseGenerationInput(BaseModel):
         if not normalized:
             raise ValueError("该字段不能为空字符串")
         return normalized
-
-    @model_validator(mode="after")
-    def validate_parallel_options(self) -> "BaseGenerationInput":
-        """校验并行执行参数组合。"""
-        request_count = getattr(self, "request_count", 1)
-        parallelism = getattr(self, "parallelism", None)
-        stream = bool(getattr(self, "stream", False))
-        try:
-            validate_parallel_generation_options(
-                request_count=request_count,
-                parallelism=parallelism,
-                stream=stream,
-                max_request_count=MAX_PARALLEL_REQUEST_COUNT,
-            )
-        except SeedreamValidationError as exc:
-            raise ValueError(exc.message) from exc
-        return self
 
 
 class TextToImageInput(
@@ -425,15 +432,16 @@ class SequentialGenerationInput(
     )
 
     # 覆盖共享基类的 request_count 描述以表达组图特例：单次请求产出的是一组图片而非
-    # 单张，单组数量由 max_images 控制，共享描述的「每次各产出一张图」在本工具不成立。
+    # 单张，组内图片数量由模型按提示词决定、上限为 max_images，共享描述的
+    # 「每次各产出一张图」在本工具不成立。
     # 覆盖声明不改变字段顺序，平铺签名镜像由守护测试继续锁定。
     request_count: int = Field(
         default=1,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
         description=(
-            "同一提示并行发起的独立生成次数，每次各产出一组图片，单组数量由 "
-            "max_images 控制；适合一次获取多组独立的组图结果。"
+            "同一提示并行发起的独立生成次数，每次各产出一组图片，组内图片数量由模型"
+            "按提示词决定，最多 max_images 张；适合一次获取多组独立的组图结果。"
         ),
     )
 
@@ -483,7 +491,7 @@ class SequentialGenerationInput(
         # exclude_unset 序列化与审计）。
         if "max_images" not in self.model_fields_set:
             object.__setattr__(self, "max_images", resolve_sequential_max_images(None, images))
-            self.__pydantic_fields_set__.discard("max_images")
+            self.model_fields_set.discard("max_images")
 
         try:
             validate_sequential_image_limit(self.max_images, images)

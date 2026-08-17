@@ -73,7 +73,8 @@ class SeedreamConfig:
         auto_save_max_concurrent: 自动保存并发下载数上限。
         auto_save_date_folder: 是否按日期子目录保存图片。
         auto_save_cleanup_days: 旧文件自动清理天数。
-        auto_save_max_total_bytes: 保存目录总字节上限，超限按最旧文件优先驱逐。
+        auto_save_max_total_bytes: 保存目录总字节上限，超限按最旧文件优先驱逐；
+            None 表示不限制，配置链路显式设置 0 时归一为 None，负数由校验拒绝。
         auto_save_fsync: 自动保存落盘是否在原子替换前执行 fsync。默认关闭：写入经
             os.replace 原子可见，但字节到达稳定存储的时机由操作系统回写决定，进程或
             主机崩溃存在最近写入丢失的窗口；对崩溃一致性有要求时开启。
@@ -555,6 +556,20 @@ def _pick_optional_int(
     return parse_int(raw)
 
 
+def _pick_optional_int_zero_as_none(
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+) -> int | None:
+    """按 _pick_optional_int 取值，显式 0 归一为 None 表示不限制。
+
+    供以 0 为不限制哨兵的可选整数字段使用，使 env 链路可显式关闭该上限；负数与
+    其他非法值原样返回，由 validate 的下界校验拒绝。
+    """
+    value = _pick_optional_int(overrides, field_name, env_key, env_values)
+    if value == 0:
+        return None
+    return value
+
+
 def _pick_bool(
     overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> bool:
@@ -684,7 +699,7 @@ def _build_config_from_sources_unlocked(
             "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS",
             env_values,
         ),
-        "auto_save_max_total_bytes": _pick_optional_int(
+        "auto_save_max_total_bytes": _pick_optional_int_zero_as_none(
             override_values,
             "auto_save_max_total_bytes",
             "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES",
