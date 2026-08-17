@@ -123,7 +123,7 @@ def _stub_cli(monkeypatch: pytest.MonkeyPatch, args: Namespace, config: Seedream
     monkeypatch.setattr(server, "_build_arg_parser", lambda: _FakeParser())
     monkeypatch.setattr(server, "_build_config_from_args", lambda _args: config)
     monkeypatch.setattr(server, "setup_logging", lambda *a, **k: None)
-    monkeypatch.setattr(server, "_apply_http_bind_settings", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_warn_remote_exposure", lambda *a, **k: None)
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
@@ -138,7 +138,9 @@ def test_cli_main_dispatches_to_correct_runner(
     def _fake_run(*, transport: str) -> None:
         captured["stdio_transport"] = transport
 
-    def _fake_http_run(host, port, auth_token, ssl_certfile=None, ssl_keyfile=None):  # type: ignore[no-untyped-def]
+    def _fake_http_run(  # type: ignore[no-untyped-def]
+        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+    ):
         captured["http"] = {"host": host, "port": port, "auth_token": auth_token}
 
     monkeypatch.setattr(server.mcp, "run", _fake_run)
@@ -199,7 +201,9 @@ def test_cli_main_allows_non_loopback_http_with_tls(
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
     captured: dict[str, object] = {}
 
-    def _fake_http_run(host, port, auth_token, ssl_certfile=None, ssl_keyfile=None):  # type: ignore[no-untyped-def]
+    def _fake_http_run(  # type: ignore[no-untyped-def]
+        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+    ):
         captured["http"] = {
             "host": host,
             "port": port,
@@ -500,7 +504,9 @@ def test_cli_main_non_loopback_auth_token_from_active_config(
     _stub_cli(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
-    def _fake_http_run(host, port, auth_token, ssl_certfile=None, ssl_keyfile=None):  # type: ignore[no-untyped-def]
+    def _fake_http_run(  # type: ignore[no-untyped-def]
+        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+    ):
         captured["auth_token"] = auth_token
 
     monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
@@ -522,7 +528,9 @@ def test_cli_main_cli_auth_token_overrides_config_token(
     _stub_cli(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
-    def _fake_http_run(host, port, auth_token, ssl_certfile=None, ssl_keyfile=None):  # type: ignore[no-untyped-def]
+    def _fake_http_run(  # type: ignore[no-untyped-def]
+        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+    ):
         captured["auth_token"] = auth_token
 
     monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
@@ -534,25 +542,23 @@ def test_cli_main_cli_auth_token_overrides_config_token(
 # ==================== 绑定地址同步 SDK 内层防护 ====================
 
 
-def test_apply_http_bind_settings_security_follows_bind_host() -> None:
+def test_transport_security_derivation_follows_bind_host() -> None:
     """transport_security 按绑定地址派生：非回环关闭 SDK Host 白名单，回环保留白名单。
 
-    FastMCP 构造期以默认 host 定型回环白名单；若绑定设置不随实际地址重写，非回环
-    部署的全部 /mcp 请求会被 SDK 内层以 421 拒绝。stateless 一并写入，供会话
-    管理器首次 streamable_http_app 调用时快照。
+    SDK 2.0 起 streamable_http_app 以 host 参数决定防护默认；本项目按实际绑定地址
+    显式派生传入。若派生不随绑定地址切换，非回环部署的全部 /mcp 请求会被 SDK
+    内层以 421 拒绝。
     """
-    server._apply_http_bind_settings("0.0.0.0", stateless=True, auth_enabled=True)
-    non_loopback = server.mcp.settings.transport_security
+    from seedream_mcp.transport import _transport_security_for_host
+
+    non_loopback = _transport_security_for_host("0.0.0.0")
     assert non_loopback is not None
     assert non_loopback.enable_dns_rebinding_protection is False
-    assert server.mcp.settings.stateless_http is True
 
-    server._apply_http_bind_settings("127.0.0.1", stateless=False, auth_enabled=True)
-    loopback = server.mcp.settings.transport_security
+    loopback = _transport_security_for_host("127.0.0.1")
     assert loopback is not None
     assert loopback.enable_dns_rebinding_protection is True
     assert loopback.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-    assert server.mcp.settings.stateless_http is False
 
 
 # ==================== 回环 Host 校验大小写 ====================

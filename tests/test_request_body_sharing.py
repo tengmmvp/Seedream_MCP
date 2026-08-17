@@ -102,15 +102,15 @@ async def test_parallel_batch_builds_and_serializes_once(
         _build_config(),
     )
 
-    assert result.isError is False
+    assert result.is_error is False
     # 4 个请求都真实发出，共享 body 不代表去重 API 调用
     assert len(sent_bodies) == 4
     assert serialize_calls["serialize"] == 1
     assert build_calls["build"] == 1
     # 各请求复用同一 bytes 对象，而非各持一份等大拷贝
     assert all(body is sent_bodies[0] for body in sent_bodies)
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["batch"]["success_requests"] == 4
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["batch"]["success_requests"] == 4
 
 
 @pytest.mark.asyncio
@@ -132,7 +132,7 @@ async def test_staggered_parallel_batch_still_serializes_once(
         _build_config(),
     )
 
-    assert result.isError is False
+    assert result.is_error is False
     assert len(sent_bodies) == 4
     assert serialize_calls["serialize"] == 1
     assert build_calls["build"] == 1
@@ -151,7 +151,7 @@ async def test_single_request_path_behavior_unchanged(
 
     result = await handle_text_to_image(TextToImageInput(prompt="single"), _build_config())
 
-    assert result.isError is False
+    assert result.is_error is False
     assert len(sent_bodies) == 1
     assert serialize_calls["serialize"] == 1
     assert build_calls["build"] == 1
@@ -169,8 +169,8 @@ async def test_consecutive_calls_do_not_share_body(
     first = await handle_text_to_image(TextToImageInput(prompt="first"), _build_config())
     second = await handle_text_to_image(TextToImageInput(prompt="second"), _build_config())
 
-    assert first.isError is False
-    assert second.isError is False
+    assert first.is_error is False
+    assert second.is_error is False
     assert serialize_calls["serialize"] == 2
     assert len(sent_bodies) == 2
     # 不同批次的 body 是各自序列化的独立对象，内容亦随 prompt 不同
@@ -275,14 +275,14 @@ async def test_prevalidate_failure_matches_single_request_first_failure(
         config,
     )
 
-    assert batch_result.isError is True
-    assert isinstance(batch_result.structuredContent, dict)
-    batch_error = batch_result.structuredContent["error"]
+    assert batch_result.is_error is True
+    assert isinstance(batch_result.structured_content, dict)
+    batch_error = batch_result.structured_content["error"]
     assert batch_error["message"] == format_error_for_user(single_exc)
     assert batch_error["type"] == resolve_error_profile(single_exc).error_code
 
     # 单请求经同一 handler 的降级结果与批次完全一致，消费方无需按批次数区分错误形态
     single_result = await handle_text_to_image(TextToImageInput(prompt="p"), config)
 
-    assert single_result.isError is True
-    assert single_result.structuredContent == batch_result.structuredContent
+    assert single_result.is_error is True
+    assert single_result.structured_content == batch_result.structured_content

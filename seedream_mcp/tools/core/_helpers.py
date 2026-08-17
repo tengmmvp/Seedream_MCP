@@ -22,7 +22,7 @@ from ...utils.core.logs import get_logger
 from ...utils.io.io_path import is_within_resolved, get_workspace_root, normalize_path
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
 
 logger = get_logger(__name__)
 
@@ -231,7 +231,7 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
 
 
 async def _safe_report_progress(
-    ctx: Context[Any, Any, Any] | None,
+    ctx: Context[Any, Any] | None,
     *,
     progress: float,
     total: float = 100.0,
@@ -251,7 +251,7 @@ _VALID_LOG_LEVELS = ("debug", "info", "warning", "error")
 
 
 async def _safe_ctx_log(
-    ctx: Context[Any, Any, Any] | None,
+    ctx: Context[Any, Any] | None,
     level: str,
     message: str,
 ) -> None:

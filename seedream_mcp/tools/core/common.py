@@ -48,7 +48,7 @@ from .results import (  # noqa: F401
 from .schemas import GenerationInputParams
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
 
@@ -82,13 +82,13 @@ async def execute_generation_handler(
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
-    ctx: Context[Any, Any, Any] | None = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
     """执行生成类工具的通用处理流水线，返回 MCP 结构化工具结果。
 
     流水线依次为：构建并校验执行上下文、按 request_count 单次或并行调用客户端、按
     response_format 触发 URL 下载或 Base64 解码的自动保存、格式化面向模型的文本与
-    structuredContent。任意阶段抛出的异常都被捕获并降级为 ``isError=True`` 的结果，
+    structuredContent。任意阶段抛出的异常都被捕获并降级为 ``is_error=True`` 的结果，
     不向调用方抛出。
 
     Args:
@@ -234,8 +234,8 @@ async def execute_generation_handler(
         )
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)],
-            structuredContent=structured_result,
-            isError=is_generation_failed,
+            structured_content=structured_result,
+            is_error=is_generation_failed,
         )
     except Exception as exc:
         module_logger.error("{}处理失败", failure_prefix, exc_info=True)
@@ -253,10 +253,10 @@ async def execute_generation_handler(
             )
         return CallToolResult(
             content=[TextContent(type="text", text=error_message)],
-            structuredContent=build_error_structured(
+            structured_content=build_error_structured(
                 tool_name,
                 _classify_generation_error_type(exc),
                 user_facing_error,
             ),
-            isError=True,
+            is_error=True,
         )

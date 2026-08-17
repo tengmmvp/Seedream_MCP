@@ -34,7 +34,6 @@ async def reset_lifespan_singletons():
 def _activate_config(monkeypatch: pytest.MonkeyPatch, config: SeedreamConfig) -> None:
     """注入活动配置并按 stateful 模式设置传输标志。"""
     monkeypatch.setattr(config_module, "_active_config", config)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
 
 
 async def test_second_session_exit_keeps_shared_resource_for_first(

@@ -95,15 +95,15 @@ async def test_generation_handlers_support_parallel_requests(
     result = await handler(params, _build_config())
 
     assert call_count == 3
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
     response_text = next(
         content.text for content in result.content if isinstance(content, TextContent)
     )
     assert "并行请求信息:" in response_text
     assert "请求总数: 3" in response_text
     assert "成功请求: 3" in response_text
-    assert result.structuredContent["request_count"] == 3
+    assert result.structured_content["request_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -140,10 +140,10 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
 
     assert call_count == 3
     # 部分成功：有任一请求成功即 success=True，isError 为 False
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "partial"
-    batch = result.structuredContent["batch"]
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "partial"
+    batch = result.structured_content["batch"]
     assert batch["request_count"] == 3
     assert batch["success_requests"] == 2
     assert batch["failed_requests"] == 1
@@ -185,9 +185,9 @@ async def test_generation_handler_returns_call_tool_error_result_when_request_fa
 
     result = await handle_text_to_image(TextToImageInput(prompt="test"), _build_config())
 
-    assert result.isError is True
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "failed"
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "failed"
 
 
 def test_add_usage_value_recursively_accumulates_nested_dict_subkeys() -> None:

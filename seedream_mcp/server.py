@@ -3,19 +3,19 @@
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，以及风格预设
 Prompt 与工作区、服务器信息、模型信息三个资源。负责配置注入、cli_main 入口与
 传输分派。
-FastMCP 实例与共享资源生命周期管理由 resources 模块承担，本模块导入 mcp 完成注册
+MCPServer 实例与共享资源生命周期管理由 resources 模块承担，本模块导入 mcp 完成注册
 并重导出 resources 符号，保持 server 既有导入 surface 与 tests 访问路径不变。CLI
 参数解析由 cli 模块承担，streamable-http 中间件与传输配置由 transport 模块承担，
 二者经本模块重导出。
 
 outputSchema 声明契约：五个 @mcp.tool 工具函数的返回类型注解为 pydantic model
-（GenerationStructuredOutput / BrowseImagesStructuredOutput），仅用于让 FastMCP 据此
+（GenerationStructuredOutput / BrowseImagesStructuredOutput），仅用于让 MCPServer 据此
 生成 outputSchema；运行时实际返回 CallToolResult（含面向模型的文本与 structuredContent）。
 故函数体中相应的 ``# type: ignore[return-value]`` 是该方案的必要组成，不可为统一返回
 类型而移除，否则 outputSchema 声明会失效。详见 AGENTS.md 的 outputSchema 声明契约一节。
 
 inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明（prompt 居首），而非单一
-params 嵌套模型。FastMCP 1.28 的 FuncMetadata 不支持单参数 BaseModel 自动展开，
+params 嵌套模型。MCPServer 的 FuncMetadata 不支持单参数 BaseModel 自动展开，
 嵌套声明会把 inputSchema 收敛为一个 params 对象字段，客户端以平铺键名调用会被拒绝。
 平铺字段的名称、类型、默认值、约束与描述镜像自 tools.core.schemas 的对应输入模型，
 字段规则的单一来源仍是该模块；函数体内过滤值为 None 的可选字段后组装输入模型并
@@ -30,7 +30,7 @@ import json
 import sys
 from typing import Annotated, Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -71,9 +71,9 @@ from .tools.core.outputs import (
 )
 from .transport import (
     _LOOPBACK_HOSTS,
-    _apply_http_bind_settings,
     _resolve_http_auth_token,
     _run_streamable_http,
+    _warn_remote_exposure,
 )
 from .utils.core.errors import SeedreamConfigError, format_error_for_user
 from .utils.core.logs import get_logger, setup_logging
@@ -112,25 +112,25 @@ from .transport import (  # noqa: F401
 # 生成类工具的能力标注：会生成文件，非只读；不破坏既有数据；每次生成结果可能不同，
 # 非幂等；需联网调用 API，属开放世界操作。
 GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
 
 # 浏览类工具的能力标注：仅读取文件列表，只读且幂等；不破坏既有数据；仅访问本地
 # 文件系统，非开放世界操作。
 BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
 
 logger = get_logger(__name__)
 
 
-def _config_from_context(ctx: Context[Any, Any, Any]) -> SeedreamConfig:
+def _config_from_context(ctx: Context[Any, Any]) -> SeedreamConfig:
     """从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。
 
     工具与资源经 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局
@@ -236,7 +236,7 @@ async def seedream_text_to_image(
         max_length=255,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
-    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
+    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """文生图：根据文字指令生成单张图片。
 
@@ -364,7 +364,7 @@ async def seedream_image_to_image(
         max_length=255,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
-    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
+    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """图文生图：基于已有图片进行编辑。
 
@@ -479,7 +479,7 @@ async def seedream_multi_image_fusion(
         max_length=255,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
-    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
+    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """多图融合：融合多张参考图片的特征生成新图片。
 
@@ -596,7 +596,7 @@ async def seedream_sequential_generation(
         max_length=255,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
-    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
+    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> GenerationStructuredOutput:
     """组图输出：一次生成多张内容关联的图片。
 
@@ -681,7 +681,7 @@ async def seedream_browse_images(
         default=BrowseImagesInput.DEFAULT_SHOW_DETAILS,
         description="是否展示文件大小、修改时间等详细信息。",
     ),
-    ctx: Context[Any, Any, Any] = None,  # type: ignore[assignment]
+    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> BrowseImagesStructuredOutput:
     """本地图片浏览：列出工作区中的图片文件。
 
@@ -722,12 +722,12 @@ def _tighten_flat_tool_schemas() -> None:
     """对五个平铺签名工具的 inputSchema 顶层补 additionalProperties: false。
 
     平铺签名丢失模型 extra=forbid 的补偿：输入模型本身以 extra=forbid 拒绝未知键，
-    而 FastMCP 1.28 依据函数签名生成的参数模型默认忽略未知键，inputSchema 也不含
+    而 MCPServer 依据函数签名生成的参数模型默认忽略未知键，inputSchema 也不含
     additionalProperties 声明，拼错的参数名会被静默丢弃而非拒绝。本函数在注册后
     集中修补两处：inputSchema 顶层声明 additionalProperties: false，客户端本地校验
     即可拒绝拼错参数；参数模型替换为 extra=forbid 的子类，服务端运行时同样拒绝。
     子类化保留全部字段、校验器与序列化行为，仅收紧额外键策略。于 import 期执行，
-    先于任何 tools/list 与 tools/call 生效；FastMCP 无公开的工具访问 API，经
+    先于任何 tools/list 与 tools/call 生效；MCPServer 无公开的工具访问 API，经
     tool manager 取 Tool 对象修补其 parameters dict 与参数模型。
     """
     for name in _FLAT_SCHEMA_TOOL_NAMES:
@@ -750,13 +750,15 @@ _tighten_flat_tool_schemas()
 # ==================== MCP 资源定义 ====================
 
 
-@mcp.resource("seedream://workspace/roots", mime_type="application/json")
-async def workspace_roots_resource() -> str:
+@mcp.resource("seedream://workspace/roots{?verbose}", mime_type="application/json")
+async def workspace_roots_resource(ctx: Context[Any, Any], verbose: bool = False) -> str:
     """工作区根目录。
 
-    展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。
+    展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。SDK 2.0 起
+    Context 仅注入模板资源，静态 URI 无法取得请求上下文，故以可选 query 参数构成
+    模板；verbose 附各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots
+    读取仍匹配（query 参数可省略）。
     """
-    ctx = mcp.get_context()
     async with workspace_roots_scope(ctx):
         # 边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端
         # 授权声明，其绝对路径不进入面向调用方的输出，按未授权输出空列表。
@@ -764,16 +766,20 @@ async def workspace_roots_resource() -> str:
             roots = get_workspace_roots()
         else:
             roots = []
-    return json.dumps(
-        {"roots": [str(root).replace("\\", "/") for root in roots]}, ensure_ascii=False, indent=2
-    )
+    payload: dict[str, Any] = {"roots": [str(root).replace("\\", "/") for root in roots]}
+    if verbose:
+        payload["resolved"] = [str(root.resolve()) for root in roots]
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 @mcp.resource("seedream://server/info", mime_type="application/json")
 async def server_info_resource() -> str:
-    """服务器版本与当前生效配置摘要。"""
-    ctx = mcp.get_context()
-    config = _config_from_context(ctx)
+    """服务器版本与当前生效配置摘要。
+
+    SDK 2.0 起静态资源无请求上下文可注入；lifespan 注入的配置即进入 lifespan 时的
+    活动配置对象，直接读活动配置语义等价。
+    """
+    config = get_active_config()
     return json.dumps(
         {
             "name": SERVER_NAME,
@@ -919,9 +925,8 @@ def cli_main() -> int:
                     logger.error(message)
                     print(message, file=sys.stderr)
                     return 1
-            _apply_http_bind_settings(
+            _warn_remote_exposure(
                 args.host,
-                args.stateless,
                 auth_enabled=bool(auth_token),
             )
             _run_streamable_http(
@@ -930,6 +935,7 @@ def cli_main() -> int:
                 auth_token,
                 ssl_certfile=args.ssl_certfile,
                 ssl_keyfile=args.ssl_keyfile,
+                stateless=args.stateless,
             )
         else:
             mcp.run(transport=transport)

@@ -22,7 +22,7 @@ from ..core.schemas import TextToImageInput
 from ._common import TEXT_TO_IMAGE, _default_start_log_values
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
 
@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 async def handle_text_to_image(
     params: TextToImageInput,
     config: SeedreamConfig,
-    ctx: Context[Any, Any, Any] | None = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
     """处理文生图请求，依据文本提示词生成图片。
 
@@ -47,7 +47,7 @@ async def handle_text_to_image(
 
     Returns:
         MCP 标准工具结果，含面向模型的文本摘要与 structuredContent，失败时不抛出异常而
-        以 ``isError=True`` 返回。
+        以 ``is_error=True`` 返回。
     """
 
     async def _execute(

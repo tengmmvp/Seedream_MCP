@@ -38,7 +38,7 @@ from ...utils.io.io_path import (
 )
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
 
 logger = get_logger(__name__)
 
@@ -210,13 +210,13 @@ def _build_browse_error(
 ) -> CallToolResult:
     """集中构造 browse_images 工具的错误 CallToolResult。
 
-    各错误分支共享同一请求状态快照与 isError=True 语义，仅 message 不同；通过此辅助函数
+    各错误分支共享同一请求状态快照与 is_error=True 语义，仅 message 不同；通过此辅助函数
     统一构造，避免重复展开相同状态字段。structuredContent.error.type 恒为 browse_failed，
     message 同时作为可见文本与结构化错误原因，二者保持一致。
     """
     return CallToolResult(
         content=[TextContent(type="text", text=message)],
-        structuredContent=_build_browse_structured_result(
+        structured_content=_build_browse_structured_result(
             status=status,
             workspace_roots=state.workspace_roots,
             directory=state.directory,
@@ -230,7 +230,7 @@ def _build_browse_error(
             success=False,
             error=build_error_dict("browse_failed", message),
         ),
-        isError=True,
+        is_error=True,
     )
 
 
@@ -357,7 +357,7 @@ def _normalize_format_filter(raw: list[str] | None) -> tuple[list[str] | None, b
 
 async def handle_browse_images(
     params: BrowseImagesInput,
-    ctx: Context[Any, Any, Any] | None = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
     """处理图片浏览请求，扫描工作区内指定目录的图片文件并分页返回。
 
@@ -405,7 +405,7 @@ async def handle_browse_images(
 
 async def _handle_browse_images_impl(
     params: BrowseImagesInput,
-    ctx: Context[Any, Any, Any] | None = None,
+    ctx: Context[Any, Any] | None = None,
     *,
     resolved_directories: list[Path],
 ) -> CallToolResult:
@@ -587,7 +587,7 @@ async def _handle_browse_images_impl(
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
-            structuredContent=_build_browse_structured_result(
+            structured_content=_build_browse_structured_result(
                 status="empty",
                 workspace_roots=state.workspace_roots,
                 directory=state.directory,
@@ -604,7 +604,7 @@ async def _handle_browse_images_impl(
                 has_more=has_more,
                 next_offset=next_offset,
             ),
-            isError=False,
+            is_error=False,
         )
 
     display_lines, structured_images = await asyncio.to_thread(
@@ -627,7 +627,7 @@ async def _handle_browse_images_impl(
 
     return CallToolResult(
         content=[TextContent(type="text", text="\n".join(lines))],
-        structuredContent=_build_browse_structured_result(
+        structured_content=_build_browse_structured_result(
             status="completed",
             workspace_roots=state.workspace_roots,
             directory=state.directory,
@@ -644,5 +644,5 @@ async def _handle_browse_images_impl(
             has_more=has_more,
             next_offset=next_offset,
         ),
-        isError=False,
+        is_error=False,
     )

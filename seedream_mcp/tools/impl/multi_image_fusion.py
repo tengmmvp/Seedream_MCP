@@ -21,7 +21,7 @@ from ..core.schemas import MultiImageFusionInput
 from ._common import MULTI_IMAGE_FUSION, _default_start_log_values
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
 
@@ -31,7 +31,7 @@ logger = get_logger(__name__)
 async def handle_multi_image_fusion(
     params: MultiImageFusionInput,
     config: SeedreamConfig,
-    ctx: Context[Any, Any, Any] | None = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
     """处理多图融合请求，依据文本描述融合多张参考图特征生成新图像。
 
@@ -46,7 +46,7 @@ async def handle_multi_image_fusion(
 
     Returns:
         MCP 标准工具结果，含面向模型的文本摘要与 structuredContent，失败时不抛出异常而
-        以 ``isError=True`` 返回。
+        以 ``is_error=True`` 返回。
     """
     image = params.image
 

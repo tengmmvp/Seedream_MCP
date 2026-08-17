@@ -4,7 +4,7 @@
 Bearer 鉴权放行/拒绝、请求体上限超限早拒、合法请求经全栈返回 200。另含
 tools/call 协议集成：平铺参数经真实 JSON-RPC 调用路径反序列化，成功与失败
 结果均以 HTTP 200 的 CallToolResult 返回，isError 透传，structuredContent
-经 FastMCP 内部以 outputSchema 校验。以及 SDK 内层 DNS rebinding 防护按绑定
+经 MCPServer 内部以 outputSchema 校验。以及 SDK 内层 DNS rebinding 防护按绑定
 地址重配的集成：非回环绑定下非白名单 Host 的 /mcp 请求放行，回环绑定维持 421。
 
 httpx.ASGITransport 仅发送 http scope 不驱动 ASGI lifespan，故对触达 MCP 应用的
@@ -25,7 +25,7 @@ import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
-# FastMCP streamable-http 默认 MCP 端点路径
+# MCPServer streamable-http 默认 MCP 端点路径
 _MCP_PATH = "/mcp"
 # 生产请求体上限默认值，与 SeedreamConfig.http_max_body_size 默认一致
 _MAX_BODY = 64 * 1024 * 1024
@@ -69,15 +69,33 @@ class _LifespanManager:
         await self._task
 
 
-def _build_app(auth_token: str, *, body_limit: int = _MAX_BODY) -> Any:
-    """复刻 _run_streamable_http 的中间件装配顺序。
+def _build_app(
+    auth_token: str,
+    *,
+    body_limit: int = _MAX_BODY,
+    stateless: bool = False,
+    json_response: bool = False,
+    host: str = "127.0.0.1",
+) -> Any:
+    """复刻 _run_streamable_http 的传输参数与中间件装配顺序。
 
-    Starlette add_middleware 经 insert(0) 使后添加者为更外层：健康检查最外，其后请求体
-    上限，再后 Bearer 鉴权，应用在内。请求体上限位于鉴权之外，故声明超长 Content-Length
-    的请求在鉴权前即被 413 早拒；已认证 chunked 请求由 receive 字节累计保护，未授权
-    chunked 请求不读 body 直接 401，其体积限制依赖 uvicorn 或反向代理层。
+    SDK 2.0 起 stateless/json_response/transport_security/max_request_body_size 直传
+    streamable_http_app 构造，不再经 settings；transport_security 按绑定地址派生，
+    与生产的 _transport_security_for_host 同源。Starlette add_middleware 经 insert(0)
+    使后添加者为更外层：健康检查最外，其后请求体上限，再后 Bearer 鉴权，应用在内。
+    请求体上限位于鉴权之外，故声明超长 Content-Length 的请求在鉴权前即被 413 早拒；
+    已认证 chunked 请求由 receive 字节累计保护，未授权 chunked 请求不读 body 直接
+    401，其体积限制依赖 uvicorn 或反向代理层。
     """
-    app = server.mcp.streamable_http_app()
+    from seedream_mcp.transport import _transport_security_for_host
+
+    app = server.mcp.streamable_http_app(
+        host=host,
+        stateless_http=stateless,
+        json_response=json_response,
+        transport_security=_transport_security_for_host(host),
+        max_request_body_size=_MAX_BODY,
+    )
     if auth_token:
         app.add_middleware(server._BearerTokenAuthMiddleware, expected_token=auth_token)
     app.add_middleware(server._LimitRequestBodyMiddleware, max_body_size=body_limit)
@@ -110,7 +128,7 @@ async def reset_http_app_state(monkeypatch: pytest.MonkeyPatch):
     故每测试前置 None 强制重建；同时注入活动配置供 app_lifespan 构造共享 client。
     退出时关闭可能由 stateless 请求触发的 lifespan 共享单例，避免连接池跨测试泄漏。
     """
-    monkeypatch.setattr(server.mcp, "_session_manager", None)
+    server.mcp._lowlevel_server._session_manager = None
     server.set_active_config(SeedreamConfig(api_key="test_key"))
     yield
     active = resources._active_resource
@@ -128,9 +146,7 @@ async def test_e2e_valid_token_tools_list_returns_200(
     stateless 模式下 ServerSession 以 Initialized 态启动，tools/list 无需先发 initialize。
     json_response=True 使响应为确定性 JSON 200，避免 SSE 流在 ASGITransport 下的不确定性。
     """
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
-    monkeypatch.setattr(server.mcp.settings, "json_response", True)
-    app = _build_app("s3cret")
+    app = _build_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
@@ -230,7 +246,7 @@ async def test_e2e_tools_call_flat_params_success(
 
     SeedreamClient.text_to_image 以类级 fake 替换并捕获入参，锁定「wire 平铺键名 →
     工具签名 → 输入模型 → 流水线 → 客户端」的参数透传链路。auto_save 显式关闭，
-    避免 fake 返回的占位 URL 触发真实下载。structuredContent 由 FastMCP 内部以
+    避免 fake 返回的占位 URL 触发真实下载。structuredContent 由 MCPServer 内部以
     outputSchema 完成校验，校验失败会转为错误结果使本用例失败。
     """
     # 运行时解析 client 模块取类对象：test_package_lazy_import 会弹出并重建
@@ -249,9 +265,7 @@ async def test_e2e_tools_call_flat_params_success(
         }
 
     monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
-    monkeypatch.setattr(server.mcp.settings, "json_response", True)
-    app = _build_app("s3cret")
+    app = _build_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
@@ -312,9 +326,7 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
         raise SeedreamValidationError("提示词不能为空", field="prompt", value="")
 
     monkeypatch.setattr(client_cls, "text_to_image", failing_text_to_image)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
-    monkeypatch.setattr(server.mcp.settings, "json_response", True)
-    app = _build_app("s3cret")
+    app = _build_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
@@ -370,14 +382,10 @@ async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
 ) -> None:
     """非回环绑定按实际地址重配 SDK 内层 Host 校验，非白名单 Host 的 /mcp 不再 421。
 
-    FastMCP 构造期以默认 host 127.0.0.1 启用回环 Host 白名单，会话管理器在首次
-    streamable_http_app 调用时快照 transport_security 定型；未按实际绑定地址重配时，
-    非回环部署的全部 /mcp 请求都会被 SDK 内层以 421 拒绝。本用例经生产的
-    _apply_http_bind_settings 路径完成重配，以部署域名 Host 请求断言放行。
+    streamable_http_app 的 host 参数决定 SDK 内层 Host 校验默认；未按实际绑定地址派生时，
+    非回环部署的全部 /mcp 请求都会被 SDK 内层以 421 拒绝。本用例经 host 参数按实际绑定地址派生 transport_security，以部署域名 Host 请求断言放行。
     """
-    server._apply_http_bind_settings("0.0.0.0", stateless=True, auth_enabled=True)
-    monkeypatch.setattr(server.mcp.settings, "json_response", True)
-    app = _build_app("s3cret")
+    app = _build_app("s3cret", stateless=True, json_response=True, host="0.0.0.0")
 
     response = await _post_mcp_with_host(app, "mcp.example.com")
 
@@ -395,9 +403,7 @@ async def test_e2e_loopback_bind_keeps_sdk_host_allowlist(
     防护按绑定地址重配不得把回环防护一并关闭：回环绑定下 rebinding 域名请求仍须
     被 SDK 内层拒绝，与 _LoopbackHostGuardMiddleware 的回环防线语义对齐。
     """
-    server._apply_http_bind_settings("127.0.0.1", stateless=True, auth_enabled=True)
-    monkeypatch.setattr(server.mcp.settings, "json_response", True)
-    app = _build_app("s3cret")
+    app = _build_app("s3cret", stateless=True, json_response=True, host="127.0.0.1")
 
     response = await _post_mcp_with_host(app, "mcp.example.com")
 

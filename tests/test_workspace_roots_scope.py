@@ -9,7 +9,7 @@ from PIL import Image
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.server import mcp, workspace_roots_resource
+from seedream_mcp.server import workspace_roots_resource
 from seedream_mcp.utils.core.errors import SeedreamAPIError
 from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
@@ -111,15 +111,15 @@ async def test_run_browse_images_uses_mcp_roots_boundary(
         BrowseImagesInput(directory=".", recursive=False),
         ctx=_FakeContext([mcp_root]),
     )
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["count"] == 1
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["count"] == 1
 
     denied = await run_browse_images(
         BrowseImagesInput(directory=str(env_root), recursive=False),
         ctx=_FakeContext([mcp_root]),
     )
-    assert denied.isError is True
+    assert denied.is_error is True
 
 
 @pytest.mark.asyncio
@@ -182,9 +182,9 @@ async def test_run_browse_images_denies_when_mcp_roots_empty(
         BrowseImagesInput(directory=".", recursive=False),
         ctx=_FakeContext([]),
     )
-    assert result.isError is True
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["workspace_roots"] == []
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["workspace_roots"] == []
 
 
 @pytest.mark.asyncio
@@ -226,10 +226,10 @@ async def test_run_browse_images_relative_directory_resolves_all_roots(
         ctx=_FakeContext([first_root, second_root]),
     )
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["count"] == 1
-    assert Path(result.structuredContent["images"][0]["path"]) == Path("assets/from_second.png")
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["count"] == 1
+    assert Path(result.structured_content["images"][0]["path"]) == Path("assets/from_second.png")
 
 
 @pytest.mark.asyncio
@@ -250,9 +250,9 @@ async def test_run_browse_images_rejects_parent_escape_relative_path(
         ctx=_FakeContext([first_root, second_root]),
     )
 
-    assert result.isError is True
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "failed"
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -331,9 +331,9 @@ async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
         ctx=_FailingContext(),
     )
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["count"] == 1
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["count"] == 1
 
 
 @pytest.mark.asyncio
@@ -368,9 +368,8 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
     mcp_root.mkdir()
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
-    monkeypatch.setattr(mcp, "get_context", lambda: _FakeContext([mcp_root]))
 
-    result = await workspace_roots_resource()
+    result = await workspace_roots_resource(_FakeContext([mcp_root]))
     data = json.loads(result)
 
     # server 资源输出统一正斜杠，比对时归一化路径分隔符
@@ -389,9 +388,8 @@ async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
     env_root.mkdir()
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
-    monkeypatch.setattr(mcp, "get_context", lambda: _FakeContext([]))
 
-    result = await workspace_roots_resource()
+    result = await workspace_roots_resource(_FakeContext([]))
     data = json.loads(result)
 
     assert data["roots"] == []
@@ -412,9 +410,8 @@ async def test_workspace_roots_resource_capability_missing_returns_empty(
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     session = _CapabilityDeclaringSession([], declared=False)
-    monkeypatch.setattr(mcp, "get_context", lambda: _SpyContext(session))
 
-    result = await workspace_roots_resource()
+    result = await workspace_roots_resource(_SpyContext(session))
     data = json.loads(result)
 
     assert data["roots"] == []
@@ -430,9 +427,8 @@ async def test_workspace_roots_resource_list_roots_failure_returns_empty(
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
-    monkeypatch.setattr(mcp, "get_context", lambda: _FailingContext())
 
-    result = await workspace_roots_resource()
+    result = await workspace_roots_resource(_FailingContext())
     data = json.loads(result)
 
     assert data["roots"] == []

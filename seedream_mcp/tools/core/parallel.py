@@ -26,7 +26,7 @@ from .context import GenerationExecutionContext
 from .results import aggregate_parallel_generation_results
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import Context
+    from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
     from ...utils.io.io_download import DownloadManager
@@ -45,7 +45,7 @@ async def _execute_parallel_generation_requests(
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
     module_logger: Any,
-    ctx: Context[Any, Any, Any] | None = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> dict[str, Any]:
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
 
@@ -101,7 +101,7 @@ async def _execute_parallel_generation_requests(
 
 
 def get_lifespan_resource(
-    ctx: Context[Any, Any, Any] | None,
+    ctx: Context[Any, Any] | None,
     key: str,
     resource_type: type[_T],
 ) -> _T | None:
@@ -128,7 +128,7 @@ def get_lifespan_resource(
 
 
 def _try_get_shared_client(
-    ctx: Context[Any, Any, Any] | None,
+    ctx: Context[Any, Any] | None,
 ) -> SeedreamClient | None:
     """从 lifespan 上下文获取共享 SeedreamClient，无则返回 None。
 
@@ -140,7 +140,7 @@ def _try_get_shared_client(
 
 
 def _try_get_shared_download_manager(
-    ctx: Context[Any, Any, Any] | None,
+    ctx: Context[Any, Any] | None,
 ) -> DownloadManager | None:
     """从 lifespan 上下文获取共享 DownloadManager，无则返回 None。
 
@@ -155,7 +155,7 @@ async def _run_generation_requests(
     *,
     client: "SeedreamClient",
     context: GenerationExecutionContext,
-    ctx: Context[Any, Any, Any] | None,
+    ctx: Context[Any, Any] | None,
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],

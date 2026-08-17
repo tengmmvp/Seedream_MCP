@@ -1187,7 +1187,7 @@ async def test_parallel_batch_validates_common_params_once(
         SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False),
     )
 
-    assert result.isError is False
+    assert result.is_error is False
     assert calls["validate"] == 1
 
 

@@ -1,8 +1,7 @@
 """seedream://server/info 与 seedream://models/info 资源内容测试。
 
-经 monkeypatch 替换 mcp.get_context 注入携带 lifespan 配置的上下文替身后直接调用
-资源函数，参照 workspace_roots_resource 的既有测法。断言 server/info 的字段集与
-取值，以及 models/info 的模型清单、能力字段集与关键能力值，能力对照
+server/info 经 monkeypatch 注入活动配置后直接调用资源函数断言字段集与取值，
+以及 models/info 的模型清单、能力字段集与关键能力值，能力对照
 model_capabilities 的能力表。
 """
 
@@ -13,24 +12,11 @@ from dataclasses import asdict
 
 import pytest
 
-from seedream_mcp.config import LIFESPAN_KEY_CONFIG, SeedreamConfig
-from seedream_mcp.resources import SERVER_NAME, SERVER_VERSION, mcp
+from seedream_mcp import config as config_module
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.resources import SERVER_NAME, SERVER_VERSION
 from seedream_mcp.server import models_info_resource, server_info_resource
 from seedream_mcp.utils.model import model_capabilities
-
-
-class _FakeRequestContext:
-    """持有 lifespan 状态字典的最小请求上下文替身。"""
-
-    def __init__(self, lifespan_context: dict) -> None:
-        self.lifespan_context = lifespan_context
-
-
-class _FakeContext:
-    """仅暴露 request_context 的最小 MCP 上下文替身。"""
-
-    def __init__(self, lifespan_context: dict) -> None:
-        self.request_context = _FakeRequestContext(lifespan_context)
 
 
 def _test_config() -> SeedreamConfig:
@@ -49,9 +35,13 @@ def _test_config() -> SeedreamConfig:
 async def test_server_info_resource_reports_config_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """server/info 输出固定字段集，取值来自 lifespan 注入的配置。"""
+    """server/info 输出固定字段集，取值来自活动配置。
+
+    SDK 2.0 起静态资源无请求上下文，资源直接读活动配置；注入活动配置等效于
+    原 lifespan 注入路径（app_lifespan 进入时取的就是活动配置对象）。
+    """
     config = _test_config()
-    monkeypatch.setattr(mcp, "get_context", lambda: _FakeContext({LIFESPAN_KEY_CONFIG: config}))
+    monkeypatch.setattr(config_module, "_active_config", config)
 
     data = json.loads(await server_info_resource())
 

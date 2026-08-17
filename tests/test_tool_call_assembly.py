@@ -1,6 +1,6 @@
 """MCP tools/call 平铺参数装配语义测试。
 
-经 FastMCP 真实 call 路径（mcp.call_tool）锁定平铺签名的 wire 契约：平铺键名
+经 MCPServer 真实 call 路径（mcp.call_tool）锁定平铺签名的 wire 契约：平铺键名
 反序列化、可选字段未提供时不出现在 model_fields_set、组图 max_images 未提供时按
 参考图数量自动推导、嵌套模型与枚举字段接受 JSON 形态入参、浏览工具缺省字段携带
 模型默认值。run_* 处理器以间谍替换，聚焦 wire 参数到输入模型的装配边界。
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
 import seedream_mcp.server as server
@@ -30,7 +30,7 @@ def _ok_result() -> CallToolResult:
     """构造能通过 outputSchema 校验的最小成功结果，供间谍处理器返回。"""
     return CallToolResult(
         content=[TextContent(type="text", text="ok")],
-        structuredContent={"tool": "spy", "success": True},
+        structured_content={"tool": "spy", "success": True},
     )
 
 
@@ -69,7 +69,7 @@ def spy_run_handlers(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 async def test_flat_arguments_assemble_into_input_model(
     spy_run_handlers: dict[str, Any],
 ) -> None:
-    """平铺键名经 FastMCP 反序列化并组装为输入模型，可选字段缺省不进 fields_set。"""
+    """平铺键名经 MCPServer 反序列化并组装为输入模型，可选字段缺省不进 fields_set。"""
     result = await mcp.call_tool(
         "seedream_text_to_image",
         {
@@ -80,7 +80,7 @@ async def test_flat_arguments_assemble_into_input_model(
         },
     )
 
-    assert result.isError is False
+    assert result.is_error is False
     params = spy_run_handlers["params"]
     assert isinstance(params, TextToImageInput)
     assert params.prompt == "一只戴墨镜的猫"
@@ -133,7 +133,7 @@ async def test_sequential_max_images_explicit_value_is_respected(
 async def test_nested_model_field_accepts_plain_dict(
     spy_run_handlers: dict[str, Any],
 ) -> None:
-    """optimize_prompt_options 以普通 JSON 对象传入，经 FastMCP 反序列化为模型实例。"""
+    """optimize_prompt_options 以普通 JSON 对象传入，经 MCPServer 反序列化为模型实例。"""
     await mcp.call_tool(
         "seedream_text_to_image",
         {"prompt": "一只猫", "optimize_prompt_options": {"mode": "fast"}},

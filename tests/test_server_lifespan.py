@@ -46,29 +46,6 @@ async def test_app_lifespan_yields_config_and_client(
         assert state["download_manager"] is not None
 
 
-async def test_app_lifespan_reuses_singleton_across_reentry(
-    monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
-) -> None:
-    """stateless 模式下 FastMCP 每请求重入 lifespan；单例须跨重入复用同一实例。
-
-    若 lifespan 内直接创建并退出时关闭，第二次进入将拿到全新实例，丢失连接复用。
-    """
-    config = SeedreamConfig(api_key="test_key")
-    monkeypatch.setattr(config_module, "_active_config", config)
-    # stateless_http 模式 teardown 不清理单例，跨重入复用
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
-
-    async with server.app_lifespan(server.mcp) as first_state:
-        first_client = first_state["client"]
-        first_download_manager = first_state["download_manager"]
-
-    # 模拟第二请求重入 lifespan，应复用首次的实例而非重建
-    async with server.app_lifespan(server.mcp) as second_state:
-        assert second_state["client"] is first_client
-        assert second_state["download_manager"] is first_download_manager
-
-
 async def test_app_lifespan_stdio_cleans_up_on_teardown(
     monkeypatch: pytest.MonkeyPatch,
     reset_lifespan_singletons,
@@ -76,7 +53,6 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
     """stdio 模式 lifespan 退出时在同事件循环清理单例，实现进程级优雅关闭。"""
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
 
     async with server.app_lifespan(server.mcp) as state:
         assert state["client"] is not None
@@ -96,7 +72,6 @@ async def test_app_lifespan_cleans_up_on_exception_teardown(
     """
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
 
     with pytest.raises(RuntimeError, match="boom"):
         async with server.app_lifespan(server.mcp):
@@ -138,7 +113,6 @@ async def test_cleanup_shared_resources_drains_background_cleanup_first(
     monkeypatch.setattr(auto_save_module, "drain_background_cleanup_tasks", fake_drain)
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
 
     async with server.app_lifespan(server.mcp):
         pass
@@ -181,13 +155,26 @@ async def test_app_lifespan_concurrent_reentry_creates_one_client(
     monkeypatch: pytest.MonkeyPatch,
     reset_lifespan_singletons,
 ) -> None:
-    """并发重入 lifespan 应复用同一单例，验证 _shared_init_lock 防竞态。"""
+    """并发进入 lifespan 应复用同一单例，验证 _shared_init_lock 防竞态。
+
+    两个进入协程在 lifespan 体内以屏障会合，保证真正并发在途而非依赖 gather 的
+    调度时序；若锁内二次判定失效，第二个进入会构造新 client 使断言失败。
+    """
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
+
+    both_entered = asyncio.Event()
+    entered_count = 0
+    count_guard = asyncio.Lock()
 
     async def enter() -> Any:
+        nonlocal entered_count
         async with server.app_lifespan(server.mcp) as state:
+            async with count_guard:
+                entered_count += 1
+                if entered_count == 2:
+                    both_entered.set()
+            await both_entered.wait()
             return state["client"]
 
     client_a, client_b = await asyncio.gather(enter(), enter())
@@ -199,7 +186,6 @@ async def test_app_lifespan_rebuilds_on_config_change(
     reset_lifespan_singletons,
 ) -> None:
     """config 身份变化后下次进入 lifespan 重建单例，使热重载生效。"""
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", True)
     config_a = SeedreamConfig(api_key="key_a")
     monkeypatch.setattr(config_module, "_active_config", config_a)
     async with server.app_lifespan(server.mcp) as state:
@@ -225,7 +211,6 @@ async def test_app_lifespan_applies_download_concurrency_limit(
     """
     config = SeedreamConfig(api_key="test_key", auto_save_max_concurrent=3)
     monkeypatch.setattr(config_module, "_active_config", config)
-    monkeypatch.setattr(server.mcp.settings, "stateless_http", False)
 
     async with server.app_lifespan(server.mcp) as state:
         download_manager = state["download_manager"]
@@ -383,7 +368,7 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
         )
         # executor 收到的 client 即 lifespan 注入的共享实例
         assert captured_client is shared_client
-        assert not result.isError
+        assert not result.is_error
     finally:
         await shared_client.close()
 
@@ -462,29 +447,6 @@ def test_reset_lifespan_state_clears_sanitized_images_sentinel() -> None:
     results_module._last_sanitized_images = [{"url": "https://example.com/x.png"}]
     server._reset_lifespan_state()
     assert results_module._last_sanitized_images is None
-
-
-def test_reset_lifespan_state_restores_loopback_transport_security() -> None:
-    """复位协议把 SDK 内层 Host 白名单恢复回环默认，非回环绑定关闭不跨用例泄漏。
-
-    transport_security 与 stateless 同为会话管理器首次 streamable_http_app 调用时
-    快照定型的配置；上个用例按非回环绑定关闭防护后若不复位，后续用例新建的会话
-    管理器会继承关闭态，回环防护用例被静默削弱。
-    """
-    from mcp.server.transport_security import TransportSecuritySettings
-
-    from seedream_mcp.transport import _transport_security_for_host
-
-    server.mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=False
-    )
-
-    server._reset_lifespan_state()
-
-    restored = server.mcp.settings.transport_security
-    assert restored is not None
-    assert restored.enable_dns_rebinding_protection is True
-    assert restored == _transport_security_for_host("127.0.0.1")
 
 
 # ==================== 平铺 inputSchema 收紧版本守护 ====================

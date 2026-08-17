@@ -1,8 +1,8 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
 包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护四个 ASGI 中间件，以及
-streamable-http 监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 FastMCP 的
-streamable_http_app 外层，按装配逆序执行。FastMCP 实例 mcp 与共享资源清理函数在调用时
+streamable-http 监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 MCPServer 的
+streamable_http_app 外层，按装配逆序执行。MCPServer 实例 mcp 与共享资源清理函数在调用时
 从 resources 模块延迟导入，传输层不依赖 server 模块。
 """
 
@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
 # 回环绑定下 SDK 内层 DNS rebinding 防护的 Host/Origin 白名单，端口通配，与
-# FastMCP 构造期对回环 host 的默认白名单一致，亦与 _LoopbackHostGuardMiddleware
+# MCPServer 构造期对回环 host 的默认白名单一致，亦与 _LoopbackHostGuardMiddleware
 # 容忍的回环 Host 集合语义对齐。
 _LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 _LOOPBACK_ALLOWED_ORIGINS = (
@@ -385,11 +385,11 @@ def _resolve_http_auth_token(args: argparse.Namespace) -> str:
 def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     """按实际绑定地址派生 SDK 内层 DNS rebinding 防护配置。
 
-    FastMCP 构造期仅在未显式传入 transport_security 且 host 为回环时启用回环 Host
-    白名单；本项目以默认 host 构造实例，白名单随构造期定型。回环绑定维持该白名单，
-    与 _LoopbackHostGuardMiddleware 的回环 Host 容忍集合语义对齐；非回环绑定关闭
-    白名单，此时鉴权与 TLS 已由本项目 Bearer 中间件与 cli_main 的 fail-closed 前置
-    校验承担，SDK 内层白名单反而会把携带真实域名 Host 的全部 /mcp 请求以 421 拒绝。
+    streamable_http_app 以 host 参数决定防护默认：host 为回环且未传 transport_security
+    时自动启用回环 Host 白名单。本项目按实际绑定地址显式派生并传入：回环绑定维持该
+    白名单，与 _LoopbackHostGuardMiddleware 的回环 Host 容忍集合语义对齐；非回环绑定
+    关闭白名单，此时鉴权与 TLS 已由本项目 Bearer 中间件与 cli_main 的 fail-closed
+    前置校验承担，SDK 内层白名单反而会把携带真实域名 Host 的全部 /mcp 请求以 421 拒绝。
     """
     if host in _LOOPBACK_HOSTS:
         return TransportSecuritySettings(
@@ -398,33 +398,6 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
             allowed_origins=list(_LOOPBACK_ALLOWED_ORIGINS),
         )
     return TransportSecuritySettings(enable_dns_rebinding_protection=False)
-
-
-def _apply_http_bind_settings(host: str, stateless: bool, auth_enabled: bool) -> None:
-    """将 streamable-http 传输配置写入 FastMCP settings，并就暴露风险与鉴权状态告警。
-
-    实际监听地址与端口由 _run_streamable_http 显式传给 uvicorn，settings 的
-    host/port 无消费方，本函数不写入。写入 stateless_http 与 transport_security
-    两项：二者在首次 streamable_http_app 调用时被 StreamableHTTPSessionManager 快照
-    定型，此后再改 settings 不生效，本函数必须在任何 streamable_http_app 调用之前
-    执行。transport_security 经 _transport_security_for_host 按实际绑定地址同步
-    SDK 内层 DNS rebinding 防护，消除构造期默认回环白名单与非回环部署的错配。
-    stateless 启用无状态模式，更适合远程多客户端与负载均衡场景。
-
-    生产链路由 cli_main 完成非回环绑定的鉴权与 TLS 前置校验后调用，非回环绑定必
-    已启用鉴权；绕过 cli_main 直调本函数时无此保证，告警文案按传入的 auth_enabled
-    据实输出。
-    """
-    from .resources import mcp
-
-    mcp.settings.stateless_http = stateless
-    mcp.settings.transport_security = _transport_security_for_host(host)
-    if host not in _LOOPBACK_HOSTS:
-        logger.info(
-            "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
-            host,
-        )
-    _warn_remote_exposure(host, auth_enabled)
 
 
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
@@ -486,26 +459,39 @@ def _run_streamable_http(
     auth_token: str,
     ssl_certfile: str | None = None,
     ssl_keyfile: str | None = None,
+    stateless: bool = False,
 ) -> None:
     """启动 streamable-http 传输。
 
-    配置鉴权令牌时，在 FastMCP 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
+    配置鉴权令牌时，在 MCPServer 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
     请求返回 401。配置 TLS 证书时经 ssl_context_factory 构造最低 TLS 1.2 的服务端
-    上下文交给 uvicorn 启用 HTTPS。仅使用 FastMCP 公开接口
-    streamable_http_app() 获取 ASGI 应用，避免依赖其私有鉴权装配路径。
+    上下文交给 uvicorn 启用 HTTPS。仅使用 MCPServer 公开接口
+    streamable_http_app() 获取 ASGI 应用，避免依赖其私有鉴权装配路径。传输参数
+    stateless/transport_security/max_request_body_size 直传 app 构造：SDK 2.0 起
+    传输配置不再经 settings 写入，max_request_body_size 须显式传入活动配置的
+    http_max_body_size，SDK 默认 4MiB 远低于本项目 base64 图片输入的默认 64MB 上限。
 
     显式管理事件循环：uvicorn Server.serve 返回后循环仍存活，于其上运行共享资源的异步
     清理，使连接池在绑定的原循环上优雅释放。共享 HTTP 资源经 app_lifespan 创建并使用于
-    该循环，跨循环 aclose 对底层传输无效，故关闭须在同一循环。stateless_http 模式下
-    lifespan 不在 teardown 清理以保留连接复用，退出清理依赖此处完成；stateful 模式正常
-    在最后一个会话的 lifespan teardown 清理，此处兜底覆盖关闭时仍有在途会话的情形。
+    该循环，跨循环 aclose 对底层传输无效，故关闭须在同一循环。SDK 2.0 起 lifespan 在
+    会话管理器启动时进入一次，退出清理依赖此处完成，兜底覆盖关闭时仍有在途请求的情形。
     关闭循环前取消并回收残余任务，避免连接处理任务的清理 finally 被跳过。
     """
     import uvicorn
 
     from .resources import _cleanup_shared_resources, mcp
 
-    app = mcp.streamable_http_app()
+    app = mcp.streamable_http_app(
+        host=host,
+        stateless_http=stateless,
+        transport_security=_transport_security_for_host(host),
+        max_request_body_size=get_active_config().http_max_body_size,
+    )
+    if host not in _LOOPBACK_HOSTS:
+        logger.info(
+            "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
+            host,
+        )
     _attach_streamable_http_middleware(app, host, auth_token)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:

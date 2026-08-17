@@ -1,6 +1,6 @@
 """Seedream MCP 工具结构化输出模型。
 
-作为 outputSchema 的单一来源：FastMCP 依据本模块的 pydantic 模型生成各工具的
+作为 outputSchema 的单一来源：MCPServer 依据本模块的 pydantic 模型生成各工具的
 structuredContent schema；runtime 的 structuredContent 也须经本模块模型构造后
 model_dump，使声明 schema 与实际输出绑定、不漂移。基类通过 extra='allow' 容纳
 API 透传的新字段以保持向前兼容；build_error_dict 与 build_error_structured 收敛
@@ -58,7 +58,7 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
         batch: 并行批次统计，单次请求时为 None。
         auto_save: 自动保存摘要，未启用时仅含 enabled 键。
         truncated_events: SSE 解析因单事件体积超限丢弃的事件数，未发生丢弃时为
-            None；字段随本模型自动进入声明的 outputSchema，FastMCP 声明端无需额外动作。
+            None；字段随本模型自动进入声明的 outputSchema，MCPServer 声明端无需额外动作。
     """
 
     prompt: str | None = None

@@ -404,7 +404,7 @@ async def _run_failing_handler(exc: Exception):
         start_log_values_builder=lambda c: (),
         request_executor=failing_executor,
     )
-    assert result.isError is True
+    assert result.is_error is True
     return result.content[0].text
 
 

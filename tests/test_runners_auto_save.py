@@ -110,8 +110,8 @@ async def test_run_text_to_image_includes_auto_save_field(
 
     result = await run_text_to_image(params, config, ctx=None)
 
-    assert result.isError is False
-    structured = result.structuredContent
+    assert result.is_error is False
+    structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["auto_save"]["enabled"] is True
     save_results = structured["auto_save"]["results"]
@@ -185,8 +185,8 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
 
     result = await run_text_to_image(params, config, ctx=None)
 
-    assert result.isError is False
-    structured = result.structuredContent
+    assert result.is_error is False
+    structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["response_format"] == "b64_json"
     # 收集阶段只纳入携带 b64_json 的条目，失败占位项不进入保存队列。
@@ -230,8 +230,8 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
 
     result = await run_text_to_image(params, config, ctx=None)
 
-    assert result.isError is False
-    structured = result.structuredContent
+    assert result.is_error is False
+    structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["auto_save"]["enabled"] is True
     assert structured["auto_save"]["results"] == []
@@ -260,8 +260,8 @@ async def test_run_image_to_image_dispatches_via_composition_root(
 
     result = await run_image_to_image(params, config, ctx=None)
 
-    assert result.isError is False
-    structured = result.structuredContent
+    assert result.is_error is False
+    structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["data"][0]["url"] == GENERATED_URL
 
@@ -284,8 +284,8 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
 
     result = await run_multi_image_fusion(params, config, ctx=None)
 
-    assert result.isError is False
-    structured = result.structuredContent
+    assert result.is_error is False
+    structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["data"][0]["url"] == GENERATED_URL
 
@@ -308,7 +308,7 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
 
     result = await run_sequential_generation(params, config, ctx=None)
 
-    assert result.isError is False
-    structured = result.structuredContent
+    assert result.is_error is False
+    structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["data"][0]["url"] == GENERATED_URL

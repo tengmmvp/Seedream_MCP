@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, TypeVar
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult
 
 from ..config import SeedreamConfig

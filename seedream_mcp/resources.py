@@ -1,6 +1,6 @@
 """Seedream MCP 共享资源模块。
 
-持有 FastMCP 实例 mcp 与其生命周期所需的共享资源管理：服务器元数据常量、
+持有 MCPServer 实例 mcp 与其生命周期所需的共享资源管理：服务器元数据常量、
 app_lifespan 引用计数单例、活动与退役资源状态、同步与异步清理入口。server 模块
 导入 mcp 完成工具、资源与 prompt 注册并重导出本模块符号；transport 模块直接从
 本模块导入 mcp 与清理函数，避免经 server 形成反向依赖。
@@ -13,10 +13,9 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from .config import (
-    DEFAULT_HTTP_HOST,
     LIFESPAN_KEY_CLIENT,
     LIFESPAN_KEY_CONFIG,
     LIFESPAN_KEY_DOWNLOAD_MANAGER,
@@ -139,17 +138,16 @@ def _has_inflight_references() -> bool:
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """管理 FastMCP 生命周期，注入共享配置、SeedreamClient 与 DownloadManager。
+async def app_lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
+    """管理 MCPServer 生命周期，注入共享配置、SeedreamClient 与 DownloadManager。
 
-    资源以引用计数的模块级单例持有，跨 lifespan 重入复用。stateless_http 模式下 FastMCP
-    每请求重入 lifespan，活动资源仅登记在途引用而不关闭，使连接池跨请求复用。stateful
-    streamable-http 下 lifespan 按会话进入退出：会话管理器为每个会话独立运行低层
-    Server.run，各自进入一次 lifespan；teardown 仅递减在途引用，归零前不清理，任一
-    会话退出不影响其余会话持有的连接池。config 身份变化触发重建：新资源立即取代活动
-    槽位，旧资源若仍有在途引用则纳入退役追踪，待最后一个在途请求释放后再关闭，避免
-    运行期 set_config/reload_config 断开在途请求已持有的 HTTP 连接池。stdio 单次进入
-    lifespan，退出即在同事件循环清理。工具经 ctx.request_context.lifespan_context 取
+    资源以引用计数的模块级单例持有，跨 lifespan 重入复用。SDK 2.0 起 streamable-http
+    的 lifespan 在会话管理器启动时进入一次、状态进程级共享，stdio 单次进入，两种传输
+    下引用计数语义一致：teardown 递减在途引用，归零前不清理，任一退出不影响其余在途
+    请求持有的连接池。config 身份变化触发重建：新资源立即取代活动槽位，旧资源若仍有
+    在途引用则纳入退役追踪，待最后一个在途请求释放后再关闭，避免运行期
+    set_config/reload_config 断开在途请求已持有的 HTTP 连接池。stdio 退出即在同
+    事件循环清理。工具经 ctx.request_context.lifespan_context 取
     ["config"]/["client"]/["download_manager"]。
     """
     global _active_resource
@@ -177,12 +175,11 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         # 清理须在 finally 内执行：asynccontextmanager 的 yield 体抛异常时，异常经
         # athrow 注入并在 finally 后继续向外传播，写在 finally 之后的语句会被跳过，
         # 导致异常 teardown 下共享资源不被同循环清理。
-        # 清理以引用计数门控：stateful streamable-http 下 lifespan 按会话进入退出，
-        # 并发会话各自持有在途引用，任一会话退出不得关闭其余会话仍在使用的资源，
-        # 全部在途引用归零后才清理。归零判定与实际关闭之间隔 drain 的让出点，
-        # idle_only 使清理在等待后复检引用，覆盖期间新会话复用资源的交错。
-        stateless = getattr(server.settings, "stateless_http", False)
-        if not stateless and not _has_inflight_references():
+        # 清理以引用计数门控：并发在途引用存在时任一 teardown 不得关闭其余请求
+        # 仍在使用的资源，全部在途引用归零后才清理。归零判定与实际关闭之间隔
+        # drain 的让出点，idle_only 使清理在等待后复检引用，覆盖期间新请求复用
+        # 资源的交错。
+        if not _has_inflight_references():
             await _cleanup_shared_resources(idle_only=True)
 
 
@@ -251,11 +248,10 @@ def _sync_cleanup() -> None:
 def _reset_lifespan_state() -> None:
     """重置 lifespan 单例、活动与全局配置及初始化锁，仅供测试隔离调用。
 
-    重建 _shared_init_lock 避免跨事件循环复用绑定了旧循环的 asyncio.Lock，复位
-    mcp.settings 的 streamable-http 配置避免上一个用例的 stateless 与
-    transport_security 泄漏；监听 host/port 不经 settings 写入，无需复位。模块级
-    可变状态的复位清单集中在本函数，新增状态须登记于此：自动保存清理节流状态、
-    目录扫描缓存与生成结果净化哨兵分别经对应模块的复位函数清除。
+    重建 _shared_init_lock 避免跨事件循环复用绑定了旧循环的 asyncio.Lock；SDK 2.0
+    起传输配置直传 streamable_http_app 构造、不经 settings 持有，无跨用例泄漏需
+    复位。模块级可变状态的复位清单集中在本函数，新增状态须登记于此：自动保存清理
+    节流状态、目录扫描缓存与生成结果净化哨兵分别经对应模块的复位函数清除。
     """
     global _shared_init_lock, _active_resource
     _active_resource = None
@@ -272,13 +268,6 @@ def _reset_lifespan_state() -> None:
 
     config_module._global_config = None
     _shared_init_lock = asyncio.Lock()
-    mcp.settings.stateless_http = False
-    # transport_security 与 stateless 同为会话管理器首次 streamable_http_app 调用时
-    # 快照定型的配置，复位到回环默认防护，避免上个用例的非回环绑定关闭 SDK 内层
-    # Host 白名单后泄漏到后续用例。延迟导入遵循近邻层不在顶层互相依赖的约定。
-    from .transport import _transport_security_for_host
-
-    mcp.settings.transport_security = _transport_security_for_host(DEFAULT_HTTP_HOST)
     # 复位清单：io_save 的清理节流锁与任务集合绑定事件循环，io_scan 的目录扫描缓存
     # 跨用例残留目录解析结果，tools.core.results 的净化哨兵单槽持有最近一次生成的
     # 图片列表引用；三者与 lifespan 单例同步复位。延迟导入遵循子模块不在顶层
@@ -293,7 +282,7 @@ def _reset_lifespan_state() -> None:
 
 
 # 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。
-mcp = FastMCP(
+mcp = MCPServer(
     SERVER_NAME,
     instructions=SERVER_INSTRUCTIONS,
     lifespan=app_lifespan,

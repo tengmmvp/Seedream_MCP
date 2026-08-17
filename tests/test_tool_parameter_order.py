@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic.fields import FieldInfo
 
 from seedream_mcp.resources import mcp
@@ -127,7 +127,7 @@ async def test_flat_input_schema_property_order_matches_model_fields() -> None:
     by_name = {tool.name: tool for tool in tools}
 
     for name, model in _TOOL_INPUT_MODELS.items():
-        schema = by_name[name].inputSchema
+        schema = by_name[name].input_schema
         assert list(schema["properties"]) == list(model.model_fields), name
         assert "params" not in schema["properties"], name
         if name != "seedream_browse_images":
@@ -140,7 +140,7 @@ async def test_flat_input_schema_required_matches_model_fields() -> None:
     by_name = {tool.name: tool for tool in tools}
 
     for name, model in _TOOL_INPUT_MODELS.items():
-        schema = by_name[name].inputSchema
+        schema = by_name[name].input_schema
         expected = [field for field, info in model.model_fields.items() if info.is_required()]
         assert schema.get("required", []) == expected, name
 
@@ -156,7 +156,7 @@ async def test_flat_input_schema_field_definitions_match_model() -> None:
     by_name = {tool.name: tool for tool in tools}
 
     for name, model in _TOOL_INPUT_MODELS.items():
-        schema = by_name[name].inputSchema
+        schema = by_name[name].input_schema
         model_schema = model.model_json_schema()
         for field in model.model_fields:
             tool_prop = schema["properties"][field]
@@ -203,7 +203,7 @@ def _field_bounds(info: FieldInfo) -> tuple[int | None, int | None]:
 async def test_flat_input_schema_field_descriptions_mirror_model() -> None:
     """每个平铺参数的 inputSchema description 非空且与模型字段描述全等。
 
-    FastMCP 1.28 不解析工具 docstring 的参数说明，inputSchema 的参数 description
+    MCPServer 不解析工具 docstring 的参数说明，inputSchema 的参数 description
     唯一来源是平铺签名的 Field 默认值，工具 docstring 仅承担工具级描述。逐字段
     定义等价断言在两侧同时缺失 description 时会空过，本断言补上非空要求与显式
     相等，任一侧清空或单独改写描述即失败。
@@ -212,7 +212,7 @@ async def test_flat_input_schema_field_descriptions_mirror_model() -> None:
     by_name = {tool.name: tool for tool in tools}
 
     for name, model in _TOOL_INPUT_MODELS.items():
-        schema = by_name[name].inputSchema
+        schema = by_name[name].input_schema
         for field, info in model.model_fields.items():
             description = schema["properties"][field].get("description")
             assert isinstance(description, str) and description.strip(), (name, field)
@@ -229,7 +229,7 @@ async def test_flat_input_schema_nested_definitions_match_model() -> None:
     by_name = {tool.name: tool for tool in tools}
 
     for name, model in _TOOL_INPUT_MODELS.items():
-        schema = by_name[name].inputSchema
+        schema = by_name[name].input_schema
         assert schema.get("$defs", {}) == model.model_json_schema().get("$defs", {}), name
 
 
@@ -245,7 +245,7 @@ async def test_flat_schema_description_tokens_match_model_constraints() -> None:
     by_name = {tool.name: tool for tool in tools}
 
     for name, model in _TOOL_INPUT_MODELS.items():
-        schema = by_name[name].inputSchema
+        schema = by_name[name].input_schema
         for field, info in model.model_fields.items():
             description = schema["properties"][field].get("description")
             assert isinstance(description, str), (name, field)
@@ -266,14 +266,14 @@ async def test_flat_schema_description_tokens_match_model_constraints() -> None:
 async def test_flat_input_schema_forbids_additional_properties() -> None:
     """五工具 inputSchema 顶层 additionalProperties 恒为 False，声明平铺字段封闭集合。
 
-    平铺签名使 FastMCP 生成的 schema 不再继承输入模型的 extra=forbid 声明；
+    平铺签名使 MCPServer 生成的 schema 不再继承输入模型的 extra=forbid 声明；
     server 注册期的 _tighten_flat_tool_schemas 负责补偿，本断言锁定补偿不缺失。
     """
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
 
     for name in _TOOL_INPUT_MODELS:
-        schema = by_name[name].inputSchema
+        schema = by_name[name].input_schema
         assert schema.get("additionalProperties") is False, name
 
 
@@ -302,7 +302,7 @@ async def test_flat_tool_rejects_unknown_parameter_names(tool_name: str, typo_ar
     """五工具的平铺签名在运行时拒绝拼错参数名，不被静默丢弃。
 
     输入模型以 extra=forbid 拒绝未知键，嵌套 params 形态下拼错参数在模型校验即
-    失败；平铺签名经 FastMCP 参数模型默认忽略未知键，server 注册期把参数模型替换
+    失败；平铺签名经 MCPServer 参数模型默认忽略未知键，server 注册期把参数模型替换
     为 extra=forbid 子类补偿。客户端可据 inputSchema 在本地拒绝，服务端运行时
     同样拒绝，模型收到明确报错后可自行纠正参数名。其余参数均取合法值，确保
     报错仅源于未知键。

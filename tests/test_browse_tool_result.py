@@ -18,10 +18,10 @@ async def test_browse_images_returns_structured_success(workspace_root: Path) ->
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "completed"
-    assert result.structuredContent["count"] == 1
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "completed"
+    assert result.structured_content["count"] == 1
     assert any(isinstance(content, TextContent) for content in result.content)
 
 
@@ -29,10 +29,10 @@ async def test_browse_images_returns_structured_success(workspace_root: Path) ->
 async def test_browse_images_returns_empty_when_no_files(workspace_root: Path) -> None:
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "empty"
-    assert result.structuredContent["count"] == 0
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["count"] == 0
 
 
 @pytest.mark.asyncio
@@ -44,9 +44,9 @@ async def test_browse_images_rejects_out_of_workspace_directory(
 
     result = await handle_browse_images(BrowseImagesInput(directory=str(outside_dir)))
 
-    assert result.isError is True
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "failed"
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -74,10 +74,10 @@ async def test_browse_images_ignores_outside_images_without_crashing(
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=True))
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "empty"
-    assert result.structuredContent["count"] == 0
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["count"] == 0
 
 
 @pytest.mark.asyncio
@@ -100,10 +100,10 @@ async def test_browse_images_empty_format_filter_skips_scan(
         BrowseImagesInput(directory=".", recursive=False, format_filter=[])
     )
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "empty"
-    assert result.structuredContent["count"] == 0
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["count"] == 0
 
 
 @pytest.mark.asyncio
@@ -124,9 +124,9 @@ async def test_browse_images_fallback_error_preserves_format_filter(
     )
 
     assert isinstance(result, CallToolResult)
-    assert result.isError is True
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["format_filter"] == [".png"]
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["format_filter"] == [".png"]
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
     )
-    sc1 = page1.structuredContent
+    sc1 = page1.structured_content
     assert isinstance(sc1, dict)
     assert sc1["count"] == 2
     assert sc1["total_count"] is None  # has_more 时未扫完，total_count 不精确
@@ -147,7 +147,7 @@ async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
     page2 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=2)
     )
-    sc2 = page2.structuredContent
+    sc2 = page2.structured_content
     assert isinstance(sc2, dict)
     assert sc2["count"] == 1
     assert sc2["total_count"] == 3
@@ -166,7 +166,7 @@ async def test_browse_images_offset_beyond_end_keeps_total_count(
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=4)
     )
-    sc = result.structuredContent
+    sc = result.structured_content
     assert isinstance(sc, dict)
     assert sc["status"] == "empty"
     assert sc["count"] == 0
@@ -194,7 +194,7 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=5, offset=0)
     )
-    assert page1.structuredContent["count"] == 5
+    assert page1.structured_content["count"] == 5
 
     resolved_paths: list[Path] = []
     original_resolve = Path.resolve
@@ -209,7 +209,7 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     page2 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=1, offset=4)
     )
-    assert page2.structuredContent["count"] == 1
+    assert page2.structured_content["count"] == 1
     image_resolves = [p for p in resolved_paths if p.suffix == ".png"]
     assert image_resolves == [], "缓存命中的深页不应再对图片文件逐个 resolve"
 
@@ -238,10 +238,10 @@ async def test_browse_images_format_filter_all_unsupported_echoes_original(
     """
     result = await handle_browse_images(BrowseImagesInput(directory=".", format_filter=[".svg"]))
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "empty"
-    assert result.structuredContent["format_filter"] == [".svg"]
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["format_filter"] == [".svg"]
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "均不在支持列表" in text
     assert "支持" in text
@@ -297,9 +297,9 @@ async def test_browse_images_fallback_preserves_resolved_directories(
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
 
-    assert result.isError is True
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["resolved_directories"] == [str(workspace_root.resolve())]
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["resolved_directories"] == [str(workspace_root.resolve())]
 
 
 @pytest.mark.asyncio
@@ -319,15 +319,15 @@ async def test_browse_images_fallback_boundary_masks_paths_in_error(
 
     result = await handle_browse_images(BrowseImagesInput(directory=str(outside_dir)))
 
-    assert result.isError is True
+    assert result.is_error is True
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "服务器配置的工作区目录" in text
     assert str(workspace_root) not in text
     assert str(outside_dir.resolve().parent) not in text
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
     # 越界场景目录解析未产出任何界内目录，保持空列表而非占位符。
-    assert result.structuredContent["resolved_directories"] == []
+    assert result.structured_content["resolved_directories"] == []
 
 
 @pytest.mark.asyncio
@@ -341,8 +341,8 @@ async def test_browse_images_fallback_boundary_masks_paths_on_success(
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
-    assert result.isError is False
-    sc = result.structuredContent
+    assert result.is_error is False
+    sc = result.structured_content
     assert isinstance(sc, dict)
     assert sc["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
     assert sc["resolved_directories"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
@@ -368,9 +368,9 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "empty"
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "目录不可读或无图片文件" in text
     assert "1 个目录（回退边界场景不回显路径）" in text
@@ -454,14 +454,14 @@ async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
 
     result = await handle_browse_images(BrowseImagesInput(directory=directory))
 
-    assert result.isError is True
+    assert result.is_error is True
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "目录路径无效" in text
     assert "secret" not in text
     # 截断保留前 500 字符并附带截断标注，上限按标注开销放宽。
     assert len(text) <= 540
-    assert isinstance(result.structuredContent, dict)
-    structured_message = result.structuredContent["error"]["message"]
+    assert isinstance(result.structured_content, dict)
+    structured_message = result.structured_content["error"]["message"]
     assert "secret" not in structured_message
 
 
@@ -477,9 +477,9 @@ async def test_browse_images_unsupported_format_message_sanitized(
         BrowseImagesInput(directory=".", format_filter=["api_key=secret"])
     )
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "empty"
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "均不在支持列表" in text
     assert "secret" not in text
@@ -499,10 +499,10 @@ async def test_browse_images_empty_format_filter_message_has_no_blank_slot(
         BrowseImagesInput(directory=".", recursive=False, format_filter=[])
     )
 
-    assert result.isError is False
-    assert isinstance(result.structuredContent, dict)
-    assert result.structuredContent["status"] == "empty"
-    assert result.structuredContent["format_filter"] == []
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
+    assert result.structured_content["format_filter"] == []
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "未指定任何受支持的图片格式" in text
     assert "均不在支持列表" not in text

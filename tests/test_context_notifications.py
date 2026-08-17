@@ -120,33 +120,44 @@ async def test_tool_annotations_locked_to_current_hints() -> None:
         annotations = by_name[name].annotations
         assert annotations is not None, name
         readonly, destructive, idempotent, open_world = hints
-        assert annotations.readOnlyHint is readonly, name
-        assert annotations.destructiveHint is destructive, name
-        assert annotations.idempotentHint is idempotent, name
-        assert annotations.openWorldHint is open_world, name
+        assert annotations.read_only_hint is readonly, name
+        assert annotations.destructive_hint is destructive, name
+        assert annotations.idempotent_hint is idempotent, name
+        assert annotations.open_world_hint is open_world, name
 
 
 # ==================== MCP 资源注册 ====================
 
 
 async def test_resources_registered() -> None:
-    """注册 MCP resources，包含 workspace roots、server info 与 models info。"""
+    """注册 MCP 资源：workspace roots 以模板注册（SDK 2.0 起 Context 仅注入模板资源），
+    server info 与 models info 为静态资源。"""
     resources = await mcp.list_resources()
     uris = {str(resource.uri) for resource in resources}
 
-    assert "seedream://workspace/roots" in uris
     assert "seedream://server/info" in uris
     assert "seedream://models/info" in uris
 
+    templates = await mcp.list_resource_templates()
+    template_uris = {str(template.uri_template) for template in templates}
+    assert "seedream://workspace/roots{?verbose}" in template_uris
+
 
 async def test_json_resources_declare_application_json_mime() -> None:
-    """三个 JSON 内容资源声明 application/json MIME，与实际序列化格式一致。"""
+    """JSON 内容资源声明 application/json MIME，与实际序列化格式一致。
+
+    workspace roots 为模板资源，其 MIME 经 ResourceTemplate 携带；静态资源经
+    Resource 携带，两侧分别校验。
+    """
     resources = await mcp.list_resources()
     by_uri = {str(resource.uri): resource for resource in resources}
 
     for uri in (
-        "seedream://workspace/roots",
         "seedream://server/info",
         "seedream://models/info",
     ):
-        assert by_uri[uri].mimeType == "application/json", uri
+        assert by_uri[uri].mime_type == "application/json", uri
+
+    templates = await mcp.list_resource_templates()
+    by_template = {str(t.uri_template): t for t in templates}
+    assert by_template["seedream://workspace/roots{?verbose}"].mime_type == "application/json"
