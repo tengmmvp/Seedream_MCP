@@ -19,7 +19,8 @@ import re
 from pathlib import Path
 
 import seedream_mcp.config as config_module
-from test_docs_consistency import _env_block
+
+from _readme_helpers import _env_block
 
 # 环境变量键形态：前缀限定 SEEDREAM_/ARK_/LOG_，键名由大写字母、数字、下划线组成。
 # 前缀目录行（如 “- SEEDREAM_ 服务行为”）后接空白不构成完整键，不会被命中。
@@ -95,7 +96,7 @@ def test_readme_env_block_covers_example_assigned_keys() -> None:
     """README.md 环境变量配置块的键集须覆盖 .env.example 全部功能键。
 
     基准为简体 README.md，键集与 example 功能键全等或为其超集皆可；配置块定位
-    复用 test_docs_consistency 的 _env_block 锚点逻辑，避免两处提取实现漂移。
+    复用 _readme_helpers 的 _env_block 锚点逻辑，避免两处提取实现漂移。
     """
     readme_keys = set(_ENV_KEY_PATTERN.findall("\n".join(_env_block(_BASE_README).lines)))
     missing = _example_assigned_keys() - readme_keys

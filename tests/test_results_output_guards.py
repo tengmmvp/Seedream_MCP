@@ -17,7 +17,6 @@ from seedream_mcp.tools.core.results import (
     _sanitize_image_errors,
     extract_images,
     format_generation_response,
-    reset_last_sanitized_images,
     update_result_with_auto_save,
 )
 from seedream_mcp.utils.io.io_save import AutoSaveResult
@@ -530,16 +529,52 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
 # ==================== 双重净化收敛 ====================
 
 
-def test_sanitize_image_errors_second_pass_is_noop() -> None:
-    """同一列表重复净化只执行一次：超长片段的截断标记不叠加。"""
+def test_sanitized_flag_skips_repeat_sanitization_in_structured_outlet() -> None:
+    """结构化出口经 images_sanitized 复用文本出口的净化列表：截断标记不叠加。
+
+    重复净化非幂等：截断产物长度仍超上限时会再次截断，标记逐次叠加、内容逐次缩水；
+    两条出口的净化协调由显式参数承担，此处以对已净化文本的重复净化对照，锁定
+    flag=True 路径不产生第二次截断。
+    """
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"error": {"message": "x" * 600}}],
+    }
+    images = extract_images(result)
+
+    format_generation_response("文生图任务完成", result, "t", "2K", images=images)
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+        images=images,
+        images_sanitized=True,
+    )
+
+    message = structured["data"][0]["error"]["message"]
+    assert message.count("<truncated:") == 1
+    # 已净化文本再次进入净化会二次截断，对照证明上方结果来自单次净化。
+    re_sanitized = _sanitize_image_errors([{"error": {"message": message}}])
+    assert re_sanitized[0]["error"]["message"] != message
+
+
+def test_repeat_sanitization_without_flag_degrades_truncated_content() -> None:
+    """默认 flag=False 对未净化列表执行净化：独立调用场景自行净化兜底。"""
     images = [{"error": {"code": "E", "message": "x" * 600}}]
 
-    first = _sanitize_image_errors(images)
-    second = _sanitize_image_errors(images)
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result={"success": True, "status": "completed", "data": images},
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+        images=images,
+    )
 
-    assert second is first
-    message = second[0]["error"]["message"]
-    assert message.count("<truncated:") == 1
+    assert structured["data"][0]["error"]["message"].count("<truncated:") == 1
 
 
 # ==================== usage 字段净化 ====================
@@ -713,49 +748,50 @@ def test_structured_data_unknown_string_keys_sanitized() -> None:
     assert item["custom_count"] == 7
 
 
-# ==================== 净化哨兵复位协议 ====================
+# ==================== 净化协调与模块状态移除 ====================
 
 
-def test_reset_last_sanitized_images_clears_sentinel_slot() -> None:
-    """复位函数清空哨兵槽位：清空后槽位不再持有图片列表引用。"""
-    images = [{"url": "https://example.com/a.png"}]
-    _sanitize_image_errors(images)
-    assert results_module._last_sanitized_images is images
+def test_module_level_sanitized_sentinel_state_removed() -> None:
+    """模块级净化哨兵不复存在：净化状态随调用链显式传递，无跨调用模块状态可滞留。
 
-    reset_last_sanitized_images()
-
-    assert results_module._last_sanitized_images is None
-
-
-def test_failure_path_structured_result_resets_sanitized_sentinel() -> None:
-    """失败路径结构化出口用后复位哨兵：失败批次的图片列表不滞留槽位至下一次调用。
-
-    失败路径的文本出口经 _format_failure_section 提前返回、不经净化，结构化出口是
-    首个也是末个消费者；不复位时哨兵会持有失败批次图片直至下一次生成调用覆盖。
+    哨兵曾依赖两条出口间无 await 的隐式时序约定，且失败批次的图片列表引用会滞留
+    槽位至下一次生成调用覆盖；显式参数化后 results 模块不再持有可变模块级状态。
     """
-    # 先净化一份无关列表，模拟上一次调用在哨兵槽位的滞留。
-    _sanitize_image_errors([{"url": "https://example.com/prev.png"}])
+    assert not hasattr(results_module, "_last_sanitized_images")
+    assert not hasattr(results_module, "reset_last_sanitized_images")
+
+
+def test_failure_path_structured_outlet_sanitizes_images() -> None:
+    """失败路径文本出口经 _format_failure_section 提前返回，结构化出口为首个消费者。
+
+    默认 images_sanitized=False 在结构化出口完成首次净化，失败批次的图片列表同样
+    经过净化管线，凭据片段不借 data 项进入 structuredContent。
+    """
     result = {
         "success": False,
         "status": "failed",
         "error": {"message": "boom"},
-        "data": [{"url": "https://example.com/a.png"}],
+        "data": [{"url": "https://AKID:SECRET@mirror.example.com/a.png"}],
     }
+    images = extract_images(result)
 
+    text = format_generation_response("文生图任务完成", result, "test", "2K", images=images)
     structured = _build_generation_structured_result(
         tool_name="seedream_text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
         auto_save_error=None,
+        images=images,
     )
 
     assert structured["success"] is False
-    assert results_module._last_sanitized_images is None
+    assert "SECRET" not in text
+    assert "SECRET" not in structured["data"][0]["url"]
 
 
-def test_success_path_pipeline_sanitization_ends_with_cleared_sentinel() -> None:
-    """成功路径文本与结构化先后净化同一列表，流水线结束后哨兵为空、无引用滞留。"""
+def test_success_path_pipeline_sanitizes_each_outlet_content_once() -> None:
+    """成功路径文本出口净化写回，结构化出口以显式标记复用同一净化列表。"""
     result = {
         "success": True,
         "status": "completed",
@@ -771,11 +807,11 @@ def test_success_path_pipeline_sanitization_ends_with_cleared_sentinel() -> None
         auto_save_results=[],
         auto_save_error=None,
         images=images,
+        images_sanitized=True,
     )
 
     assert "URL: https://example.com/a.png" in text
     assert structured["data"][0]["url"] == "https://example.com/a.png"
-    assert results_module._last_sanitized_images is None
 
 
 # ==================== 请求级失败错误渲染 ====================
@@ -1301,3 +1337,85 @@ def test_forged_bool_index_form_routed_through_sanitization_path() -> None:
     # int 实例为本侧聚合写入的整数序号，保持原值直接渲染。
     assert "  请求序号: 2" in text
     assert structured["data"][1]["request_index"] == 2
+
+
+# ==================== 顶层 status/usage/batch 形态自守 ====================
+
+
+def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
+    """畸形顶层形态不使已计费成功生成翻错：文本与结构化两出口均正常产出。
+
+    status 为 int、usage 为 str、batch 为 list 时，结构化出口按声明 schema 收敛
+    （status 归 None、usage 归空 dict、batch 归 None），model 构造不抛校验异常；
+    文本出口的 usage 段落归空、batch 段落省略。
+    """
+    result = {
+        "success": True,
+        "status": 200,
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": "not-a-dict",
+        "batch": [1, 2],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert "URL: https://example.com/a.png" in text
+    assert "使用统计" not in text
+    assert "并行请求信息" not in text
+    assert structured["status"] is None
+    assert structured["usage"] == {}
+    assert structured["batch"] is None
+    assert structured["success"] is True
+    assert structured["data"][0]["url"] == "https://example.com/a.png"
+
+
+def test_malformed_status_shape_falls_back_to_none_in_structured_output() -> None:
+    """非 str 的 status 归 None 后净化分支不触达，str 形态保持净化语义不变。"""
+    structured_int = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result={"success": True, "status": 200, "data": []},
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+    structured_str = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result={"success": True, "status": "ok\r\ninjected", "data": []},
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert structured_int["status"] is None
+    assert structured_str["status"] == "ok  injected"
+
+
+def test_falsy_malformed_usage_batch_shapes_converge_quietly() -> None:
+    """usage 与 batch 的空值畸形形态同样收敛：None/空 str 归空 dict 与 None。"""
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": None,
+        "batch": "",
+    }
+
+    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert "使用统计" not in text
+    assert structured["usage"] == {}
+    assert structured["batch"] is None

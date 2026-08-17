@@ -1,5 +1,6 @@
 """browse_images 工具结构化结果、分页元数据与工作区越界拒绝测试。"""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -507,3 +508,117 @@ async def test_browse_images_empty_format_filter_message_has_no_blank_slot(
     assert "未指定任何受支持的图片格式" in text
     assert "均不在支持列表" not in text
     assert "  " not in text
+
+
+# ==================== 剔除项不占分页配额 ====================
+
+
+async def test_browse_images_dropped_entries_do_not_consume_page_quota(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """早停窗口内的越界条目不占分页配额：has_more 正确、尾部图片翻页可达。
+
+    扫描层按 scan_limit 早停，窗口内的越界条目在扫描之后才被剔除；若无补扫，
+    剔除项占满配额会使 has_more 假阴性、total_count 低报。经注入的扫描器返回
+    越界条目居首的有序列表，稳定复现剔除占额场景：limit=2 且窗口内含 1 个越界
+    条目时，首页须报 has_more 且次页取到尾部真图。
+    """
+    for i in range(3):
+        (workspace_root / f"img_{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    outside = workspace_root.parent / "outside_quota_probe_target.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_order = [outside] + [workspace_root / f"img_{i}.png" for i in range(3)]
+
+    def _fake_scan(**kwargs: object) -> list[Path]:
+        limit = kwargs["limit"]
+        assert isinstance(limit, int)
+        return scan_order[:limit]
+
+    monkeypatch.setattr(browse_images_module, "find_images_in_directory", _fake_scan)
+
+    page1 = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+    )
+    sc1 = page1.structured_content
+    assert isinstance(sc1, dict)
+    assert sc1["count"] == 2
+    assert sc1["has_more"] is True
+    assert sc1["total_count"] is None
+    assert sc1["next_offset"] == 2
+
+    page2 = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False, limit=2, offset=2)
+    )
+    sc2 = page2.structured_content
+    assert isinstance(sc2, dict)
+    assert sc2["count"] == 1
+    assert sc2["total_count"] == 3
+    assert sc2["has_more"] is False
+    assert sc2["next_offset"] is None
+    text2 = "".join(getattr(content, "text", "") for content in page2.content)
+    assert "img_2.png" in text2
+
+
+async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(
+    workspace_root: Path,
+) -> None:
+    """目录含 1 个越界符号链接与足量真图：has_more 与翻页正确、尾部可达。
+
+    真实符号链接的端到端路径：符号链接文件不列入扫描结果，即使列入也须在越界
+    复核被剔除且不占配额。Windows 符号链接创建权限不足时按既有先例 skip，
+    剔除占额语义由注入扫描器的用例稳定覆盖。
+    """
+    target = workspace_root.parent / "outside_browse_symlink_target.png"
+    target.write_bytes(b"\x89PNG\r\n\x1a\n")
+    link = workspace_root / "0_link.png"
+    try:
+        os.symlink(target, link)
+    except (OSError, AttributeError):
+        target.unlink(missing_ok=True)
+        pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
+
+    try:
+        for i in range(3):
+            (workspace_root / f"img_{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        page1 = await handle_browse_images(
+            BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+        )
+        sc1 = page1.structured_content
+        assert isinstance(sc1, dict)
+        assert sc1["has_more"] is True
+        text1 = "".join(getattr(content, "text", "") for content in page1.content)
+        assert "0_link.png" not in text1
+
+        page2 = await handle_browse_images(
+            BrowseImagesInput(directory=".", recursive=False, limit=2, offset=2)
+        )
+        sc2 = page2.structured_content
+        assert isinstance(sc2, dict)
+        assert sc2["total_count"] == 3
+        assert sc2["has_more"] is False
+        text2 = "".join(getattr(content, "text", "") for content in page2.content)
+        assert "img_2.png" in text2
+    finally:
+        target.unlink(missing_ok=True)
+
+
+# ==================== 相对目录路径无效的区分消息 ====================
+
+
+async def test_browse_images_invalid_relative_directory_reports_invalid_path(
+    workspace_root: Path,
+) -> None:
+    """无法规范化的相对目录报「目录路径无效」，不再误报为超出允许范围。
+
+    含内嵌空字节的相对路径在 normalize_path 抛 ValueError，路径缺陷与拼接的根
+    无关；首个根即失败时与绝对分支同口径返回路径无效消息，仅路径合法但全部越界
+    时才报超出范围。
+    """
+    result = await handle_browse_images(BrowseImagesInput(directory="ba\x00d"))
+
+    assert result.is_error is True
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "目录路径无效" in text
+    assert "目录超出允许范围" not in text

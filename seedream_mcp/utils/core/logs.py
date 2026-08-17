@@ -12,6 +12,7 @@ import functools
 import inspect
 import logging
 import sys
+import weakref
 from pathlib import Path
 from types import FrameType
 from typing import (
@@ -36,10 +37,13 @@ if TYPE_CHECKING:
 def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
     """检索并记录共享后台 task 的异常，消除事件循环告警噪音。
 
-    经 asyncio.shield 共享的 task 在创建者被取消后，其 outer 不再消费 task 结果；
+    经 asyncio.shield 共享的 task 在消费方被取消后，其 outer 不再消费 task 结果；
     若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
-    retrieved"。挂载本回调显式检索异常即清除该标记，有等待者正常消费时重复检索
-    无副作用。供 images 与 io 子包的 single-flight 在途 task 共用。
+    retrieved"。本回调显式检索异常即清除该标记并以 warning 记录孤儿失败。常规失败
+    路径不挂载本回调，异常由等待者消费并经既有错误通道记录，同一异常不重复入日志。
+    warning 经 logger.opt(exception=exc) 携带完整异常堆栈，与错误日志记录完整堆栈的
+    项目规范一致。供 images 与 io 子包的 single-flight 在途 task 经
+    arm_unretrieved_exception_logging 登记。
 
     Args:
         task: 可能不再有等待者消费结果的在途后台任务。
@@ -48,7 +52,29 @@ def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
         return
     exc = task.exception()
     if exc is not None:
-        logger.warning("后台共享任务失败: {}", exc)
+        logger.opt(exception=exc).warning("后台共享任务失败: {}", exc)
+
+
+# 已登记"未取回异常"检索回调的 task 集合。WeakSet 持弱引用，task 终结被回收后条目
+# 自动消失，不延长 task 生命周期；创建者与等待者相继放弃同一 task 时仅登记一次。
+_UNRETRIEVED_ARMED_TASKS: "weakref.WeakSet[asyncio.Task[Any]]" = weakref.WeakSet()
+
+
+def arm_unretrieved_exception_logging(task: "asyncio.Task[Any]") -> None:
+    """为共享 task 登记"未取回异常"检索回调，供消费方放弃等待时调用。
+
+    仅在消费方被取消、放弃消费 task 结果时登记：此后若无其他等待者接手，task 失败
+    将无人检索异常，回调兜底检索并记录。常规失败路径的异常由等待者正常消费，不登记
+    回调，避免同一异常在既有错误通道之外重复入日志。task 最终成功或被取消时回调检索
+    无异常，静默无害。
+
+    Args:
+        task: 消费方已放弃等待的共享后台任务。
+    """
+    if task in _UNRETRIEVED_ARMED_TASKS:
+        return
+    _UNRETRIEVED_ARMED_TASKS.add(task)
+    task.add_done_callback(log_unretrieved_task_exception)
 
 
 class InterceptHandler(logging.Handler):
@@ -141,7 +167,9 @@ def setup_logging(
         log_file: 日志文件路径，为 None 时使用默认路径 .seedream/logs/seedream_mcp.log。
         enable_console: 是否启用控制台输出。
         enable_file: 是否启用文件输出。
-        force_standard_logging: 是否强制接管标准库 logging 配置。
+        force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
+            logger 已有 handler 时 basicConfig 不生效，标准库日志未被拦截并输出
+            warning 提示。
     """
     logger.remove()
     # 全局剥离日志消息控制字符，防路径名与上游错误体经日志注入伪造行。
@@ -188,6 +216,14 @@ def setup_logging(
         )
 
     # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru。
+    # root logger 已有 handler 且未强制接管时 basicConfig 整体 no-op，标准库日志
+    # 绕过 loguru 桥接与控制字符防护，输出 warning 提示部署方处置；force 语义与
+    # basicConfig 调用参数不变。
+    if not force_standard_logging and logging.getLogger().hasHandlers():
+        logger.warning(
+            "标准库 root logger 已有 handler 且 force_standard_logging=False，"
+            "标准库日志未被 loguru 拦截，也不经控制字符防护"
+        )
     logging.basicConfig(
         handlers=[InterceptHandler()],
         level=0,

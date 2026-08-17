@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -19,17 +19,12 @@ import pytest
 import seedream_mcp.client as client_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.core.errors import SeedreamAPIError
+from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamTimeoutError
+
+from _client_fakes import _install_mock_transport
 
 # 错误路径读体独立上限，与 client._ERROR_BODY_BYTE_LIMIT 保持一致。
 _ERROR_BODY_CAP = 4 * 1024 * 1024
-
-
-async def _install_mock_transport(client: SeedreamClient, handler: Callable[[Any], Any]) -> None:
-    """关闭内部 httpx 客户端并替换为 MockTransport 驱动的实例。"""
-    assert client._client is not None
-    await client._client.aclose()
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 async def test_error_body_over_independent_cap_rejected(no_sleep: None) -> None:
@@ -314,3 +309,130 @@ async def test_stream_json_over_limit_error_not_wrapped_as_parse_failure(no_slee
         assert "JSON 解析失败" not in exc_info.value.message
         assert "已读取" in exc_info.value.message
         assert exc_info.value.status_code is None
+
+
+async def _delay_outside_patched_sleep(seconds: float) -> None:
+    """经 wait_for 超时实现延迟，绕开 no_sleep fixture 对 asyncio.sleep 的屏蔽。
+
+    慢滴流模拟要求块间存在真实时间间隔；重试退避又须被 no_sleep 跳过，两种等待
+    不能共用同一个 asyncio.sleep 入口。
+    """
+    loop = asyncio.get_running_loop()
+    await asyncio.wait_for(loop.create_future(), timeout=seconds)
+
+
+async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: None) -> None:
+    """SSE 慢滴流触发总时长预算并按超时重试，耗尽后归一为 SeedreamTimeoutError。
+
+    每块间隔 0.3 秒均小于按单次读计时的读取超时，读取超时永不触发；总时长预算取
+    api_timeout=1 秒，首块后约 1.2 秒处逐块检查命中截止时间。旧行为无总时长约束，
+    该流将完整消费返回结果。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=1, api_timeout=1)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+
+        async def _stream():
+            yield b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+            while True:
+                await _delay_outside_patched_sleep(0.3)
+                yield (
+                    b'data: {"type":"image_generation.partial_succeeded",'
+                    b'"url":"http://x/1.png"}\n\n'
+                )
+
+        return httpx.Response(200, content=_stream(), headers={"content-type": "text/event-stream"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
+            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+    # 首次超时被重试而非立即上抛，重试耗尽后归一为超时异常
+    assert attempts == config.max_retries + 1
+
+
+async def test_standard_slow_drip_json_over_total_budget_times_out(no_sleep: None) -> None:
+    """非流式 JSON 慢滴流由读体截止时间封顶，超预算同样按超时重试。"""
+    config = SeedreamConfig(api_key="k", max_retries=1, api_timeout=1)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+
+        async def _stream():
+            yield b"{"
+            while True:
+                await _delay_outside_patched_sleep(0.3)
+                yield b"x" * 64
+
+        return httpx.Response(200, content=_stream(), headers={"content-type": "application/json"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert attempts == config.max_retries + 1
+
+
+# ==================== 超大错误体的状态码重试语义 ====================
+
+
+async def test_5xx_oversized_error_body_retries_by_status_code(no_sleep: None) -> None:
+    """5xx + 超大错误体：响应体过大异常携带状态码，按 5xx 语义重试至耗尽。
+
+    无状态码时 _call_api 对该异常不重试，5xx 大错误体的可重试语义丢失。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=2)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            500,
+            headers={"content-length": str(10 * 1024 * 1024)},
+            content=b"{}",
+        )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="Content-Length") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        assert exc_info.value.status_code == 500
+        # 5xx 可重试语义保留：尝试次数为 max_retries + 1
+        assert attempts == config.max_retries + 1
+
+
+async def test_4xx_oversized_error_body_fails_fast(no_sleep: None) -> None:
+    """4xx + 超大错误体：异常携带 400 状态码但非可重试，单次即失败。"""
+    config = SeedreamConfig(api_key="k", max_retries=2)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            400,
+            headers={"content-length": str(10 * 1024 * 1024)},
+            content=b"{}",
+        )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="Content-Length") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        assert exc_info.value.status_code == 400
+        # 4xx 非可重试：仅尝试一次
+        assert attempts == 1

@@ -50,10 +50,11 @@ async def test_parallel_batch_cancellation_propagates_to_inflight_requests() -> 
     started = asyncio.Event()
     started_count = 0
     cancelled_count = 0
+    completed_count = 0
     release = asyncio.Event()
 
     async def executor(_client: SeedreamClient, _ctx: GenerationExecutionContext) -> dict[str, Any]:
-        nonlocal started_count, cancelled_count
+        nonlocal started_count, cancelled_count, completed_count
         started_count += 1
         started.set()
         try:
@@ -61,6 +62,7 @@ async def test_parallel_batch_cancellation_propagates_to_inflight_requests() -> 
         except asyncio.CancelledError:
             cancelled_count += 1
             raise
+        completed_count += 1
         return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
     batch = asyncio.ensure_future(
@@ -79,7 +81,10 @@ async def test_parallel_batch_cancellation_propagates_to_inflight_requests() -> 
     with pytest.raises(asyncio.CancelledError):
         await batch
 
-    # 取消已传播至已启动的请求：release 从未置位，故无请求完成
+    # 取消传播至已启动请求：每个已启动请求都被中断，无一走到完成产出
     assert started_count >= 1
     assert cancelled_count >= 1
-    assert release.is_set() is False
+    assert cancelled_count == started_count
+    assert completed_count == 0
+    # 信号量限流下在途请求数不超过 parallelism，取消不突破并发上限
+    assert started_count <= context.parallelism

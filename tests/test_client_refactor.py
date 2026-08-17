@@ -3,9 +3,8 @@
 import base64
 import asyncio
 import inspect
-from importlib import import_module
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List, Tuple
 
 import httpx
 import pytest
@@ -19,6 +18,7 @@ from seedream_mcp.utils.core.errors import (
     SeedreamValidationError,
     resolve_error_profile,
 )
+from seedream_mcp.utils.images import image_validation as image_validation_module
 
 
 class _LazyOptWrapper:
@@ -465,10 +465,16 @@ async def test_call_api_parses_sse_partial_failed_event() -> None:
     assert result["data"][0]["error"]["message"] == "blocked"
 
 
-@pytest.mark.asyncio
-async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
+async def _drive_reference_prepare_with_limited_concurrency(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    invoke: Callable[[SeedreamClient], Awaitable[None]],
+) -> Tuple[int, Dict[str, Any], int]:
+    """以受限并发的替身驱动参考图预处理，返回峰值并发、捕获请求与并发上限。
+
+    对实现体打桩而非替换公共 prepare_image_input 方法：并发信号量位于公共入口内部，
+    替换方法会使批量路径绕过信号量，断言的上限不再是真实约束；经实现体打桩信号量
+    守卫仍在路径内，真实入口的 to_thread 签名跳转也不进入计时路径。
+    """
     client = SeedreamClient(_build_config())
     client._image_preparer._prepare_concurrency = 2
 
@@ -491,21 +497,32 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
         captured_request.update(request_data)
         return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
-    # 对实现体打桩而非替换公共 prepare_image_input 方法：并发信号量位于公共入口内部，
-    # 替换方法会使批量路径绕过信号量，断言的上限不再是真实约束；经实现体打桩信号量
-    # 守卫仍在路径内，真实入口的 to_thread 签名跳转也不进入计时路径。
     monkeypatch.setattr(
         client._image_preparer, "_prepare_image_input_locked", fake_prepare_image_input
     )
     monkeypatch.setattr(client, "_call_api", fake_call_api)
+    await invoke(client)
+    return max_active_count, captured_request, client._image_preparer._prepare_concurrency
 
-    await client.multi_image_fusion(
-        prompt="test",
-        image=["image-1", "image-2", "image-3"],
-        size="2K",
+
+@pytest.mark.asyncio
+async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多图融合批量预处理并发不超过配置上限，且实际形成并发。"""
+
+    async def invoke(client: SeedreamClient) -> None:
+        await client.multi_image_fusion(
+            prompt="test",
+            image=["image-1", "image-2", "image-3"],
+            size="2K",
+        )
+
+    max_active_count, captured_request, concurrency = (
+        await _drive_reference_prepare_with_limited_concurrency(monkeypatch, invoke)
     )
 
-    assert 1 < max_active_count <= client._image_preparer._prepare_concurrency
+    assert 1 < max_active_count <= concurrency
     assert captured_request["image"] == [
         "prepared:image-1",
         "prepared:image-2",
@@ -552,44 +569,21 @@ async def test_multi_image_fusion_rejects_more_than_14_images() -> None:
 async def test_sequential_generation_prepares_reference_images_with_limited_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = SeedreamClient(_build_config())
-    client._image_preparer._prepare_concurrency = 2
+    """组图参考图批量预处理并发同样受配置上限约束。"""
 
-    active_count = 0
-    max_active_count = 0
-    captured_request: Dict[str, Any] = {}
+    async def invoke(client: SeedreamClient) -> None:
+        await client.sequential_generation(
+            prompt="test",
+            max_images=3,
+            image=["image-1", "image-2", "image-3"],
+            size="2K",
+        )
 
-    async def fake_prepare_image_input(
-        image: str, _roots_key: Any = None, _slot: Any = None
-    ) -> str:
-        nonlocal active_count, max_active_count
-        active_count += 1
-        max_active_count = max(max_active_count, active_count)
-        await asyncio.sleep(0.01)
-        active_count -= 1
-        return f"prepared:{image}"
-
-    async def fake_call_api(endpoint: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    # 对实现体打桩而非替换公共 prepare_image_input 方法：并发信号量位于公共入口内部，
-    # 替换方法会使批量路径绕过信号量，断言的上限不再是真实约束；经实现体打桩信号量
-    # 守卫仍在路径内，真实入口的 to_thread 签名跳转也不进入计时路径。
-    monkeypatch.setattr(
-        client._image_preparer, "_prepare_image_input_locked", fake_prepare_image_input
-    )
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
-
-    await client.sequential_generation(
-        prompt="test",
-        max_images=3,
-        image=["image-1", "image-2", "image-3"],
-        size="2K",
+    max_active_count, captured_request, concurrency = (
+        await _drive_reference_prepare_with_limited_concurrency(monkeypatch, invoke)
     )
 
-    assert 1 < max_active_count <= client._image_preparer._prepare_concurrency
+    assert 1 < max_active_count <= concurrency
     assert captured_request["image"] == [
         "prepared:image-1",
         "prepared:image-2",
@@ -728,6 +722,12 @@ async def test_image_to_image_invalid_data_uri_fails_before_api_call(
 async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """超限 Data URI 在预处理阶段拒绝，不触达 API。
+
+    大小上限经 monkeypatch 缩到 KB 级后以小输入触发同一条超限分支：被测路径为
+    image_validation._validate_data_uri 的 base64 长度检查，读取的是该模块命名空间
+    内的 MAX_IMAGE_FILE_SIZE 模块全局，patch 目标据此确定。
+    """
     client = SeedreamClient(_build_config())
     api_called = False
 
@@ -738,9 +738,9 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
         return {"success": True, "data": [], "usage": {}, "status": "ok"}
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", 64 * 1024)
 
-    oversized_raw = b"a" * (30 * 1024 * 1024 + 1)
-    oversized_b64 = base64.b64encode(oversized_raw).decode("ascii")
+    oversized_b64 = base64.b64encode(b"a" * (96 * 1024)).decode("ascii")
     oversized_data_uri = f"data:image/png;base64,{oversized_b64}"
 
     with pytest.raises(SeedreamValidationError, match="数据过大"):
@@ -880,8 +880,6 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
 
     近期命中不被淘汰。
     """
-    # 用对象式 monkeypatch 而非字符串式：字符串式经 getattr(seedream_mcp, "utils") 解析，
-    # 在 test_package_lazy_import 重载顶层包后 utils 子模块不再绑定到新包对象而失败。
     from seedream_mcp.utils.images import image_input
 
     client = SeedreamClient(_build_config())
@@ -1140,14 +1138,10 @@ async def test_empty_api_key_maps_to_config_error_profile() -> None:
 # ==================== 批次级公共参数校验提升 ====================
 
 
-def _client_cls() -> Any:
-    """取当前 sys.modules 中的 SeedreamClient 类，规避 client 模块被重载后的过期引用。"""
-    return getattr(import_module("seedream_mcp.client"), "SeedreamClient")
-
-
 def _install_validate_common_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
     """在 client 模块命名空间替换 validate_common_generation_params 为计数替身。"""
-    client_module = import_module("seedream_mcp.client")
+    import seedream_mcp.client as client_module
+
     calls = {"validate": 0}
     original = client_module.validate_common_generation_params
 
@@ -1180,7 +1174,7 @@ async def test_parallel_batch_validates_common_params_once(
         del self, client, url, request_body, request_timeout
         return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
-    monkeypatch.setattr(_client_cls(), "_send_standard_request", fake_send)
+    monkeypatch.setattr(SeedreamClient, "_send_standard_request", fake_send)
 
     result = await handle_text_to_image(
         TextToImageInput(prompt="parallel", request_count=4, parallelism=4),

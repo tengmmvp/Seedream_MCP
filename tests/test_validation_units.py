@@ -14,6 +14,7 @@ from seedream_mcp.utils.core.validators import (
     MAX_SEQUENTIAL_TOTAL_IMAGES,
     _coerce_positive_int_in_range,
     parse_bool,
+    validate_background,
     validate_max_images,
     validate_optimize_prompt_options,
     validate_parallel_generation_options,
@@ -21,6 +22,9 @@ from seedream_mcp.utils.core.validators import (
     validate_watermark,
 )
 from seedream_mcp.utils.model.model_capabilities import ModelCapabilities
+
+# 5.0 Pro 模型标识，background 透明通道参数仅该家族支持。
+_PRO_MODEL_ID = "doubao-seedream-5-0-pro-260628"
 
 # ==================== parse_bool ====================
 
@@ -329,6 +333,21 @@ def test_optimize_options_reject_unknown_keys() -> None:
         validate_optimize_prompt_options(
             {"mode": "standard", "level": 3}, "doubao-seedream-4-0-250828"
         )
+
+
+# ==================== validate_background：output_format 类型防御 ====================
+
+
+def test_validate_background_rejects_non_string_output_format() -> None:
+    """output_format 非字符串时显式报错，与 background 参数的类型防御口径一致。"""
+    with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
+        validate_background("transparent", _PRO_MODEL_ID, output_format=123)
+
+
+def test_validate_background_rejects_non_string_output_format_for_opaque() -> None:
+    """background 取 opaque 时同样先做 output_format 类型校验，不因短路跳过。"""
+    with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
+        validate_background("opaque", _PRO_MODEL_ID, output_format=["jpeg"])
 
 
 # ==================== 单边像素区间约束 ====================

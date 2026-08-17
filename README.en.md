@@ -78,7 +78,7 @@ curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-comp
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
-The service listens on container port `8000` via the streamable-http transport; the host port is controlled by `SEEDREAM_HTTP_PORT` (default 8000), and the MCP endpoint path is `/mcp`. The port mapping binds to the loopback address `127.0.0.1` by default; to allow direct connections from other machines, change the port mapping in docker-compose.yml to `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` or a specific host interface address. Client configuration (Claude Desktop shown; other streamable-http clients are analogous):
+The service listens on container port `8000` via the streamable-http transport; the host port is controlled by `SEEDREAM_HTTP_PORT` (default 8000), and the MCP endpoint path is `/mcp`. The port mapping binds to the loopback address `127.0.0.1` by default; to allow direct connections from other machines, change the port mapping in docker-compose.yml to `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` or a specific host interface address. Changing the port mapping to `0.0.0.0` exposes the service to the network, in which case `SEEDREAM_HTTP_AUTH_TOKEN` travels over plaintext HTTP; the deployment must sit behind a TLS reverse proxy, or provide TLS certificate arguments to the container via `SEEDREAM_EXTRA_CLI_ARGS`. Never expose the service without TLS. Client configuration (Claude Desktop shown; other streamable-http clients are analogous):
 
 ```json
 {
@@ -523,6 +523,7 @@ SEEDREAM_RESPONSE_BODY_LIMIT=               # Total upstream response-body read 
 SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # Max concurrent downloads
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+SEEDREAM_AUTO_SAVE_FSYNC=false               # fsync before finalizing writes: improves crash consistency at a slight throughput cost, off by default
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save directory (default 10GB; oldest evicted first when exceeded)
 
 # Workspace & transport

@@ -6,12 +6,35 @@ _prepare_inflight 中的同一 asyncio.Task，使底层 prepare_image_input 仅�
 """
 
 import asyncio
+from typing import Any
 
 import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.images import image_input
+
+
+def _patch_unretrieved_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list["asyncio.Task[Any]"]:
+    """把 logs.log_unretrieved_task_exception 替换为记录 task 并检索异常的替身。
+
+    arm_unretrieved_exception_logging 登记回调时经 logs 模块全局解析目标函数，对象式
+    遮蔽即生效。替身检索异常保持 "Task exception was never retrieved" 静默。返回已
+    触发回调的 task 列表，供断言登记时序。
+    """
+    from seedream_mcp.utils.core import logs
+
+    fired: list[asyncio.Task[Any]] = []
+
+    def record(task: asyncio.Task[Any]) -> None:
+        fired.append(task)
+        if not task.cancelled():
+            task.exception()
+
+    monkeypatch.setattr(logs, "log_unretrieved_task_exception", record)
+    return fired
 
 
 @pytest.mark.asyncio
@@ -219,3 +242,84 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
     assert call_count == 1
     assert len(client._image_preparer._prepare_inflight) == 0
     assert len(client._image_preparer._prepare_cache) == 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_failure_consumed_by_waiters_not_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """共享 inflight 抛错且由等待者正常消费时不登记"未取回异常"回调。
+
+    常规失败路径的异常经 shield 交还等待者、由调用方错误通道记录；若仍无条件挂
+    回调，同一异常会以"后台共享任务失败"重复入日志。回调仅在消费方放弃等待时登记。
+    """
+    fired = _patch_unretrieved_callback(monkeypatch)
+
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    roots_key = ("test-roots",)
+    inner_started = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        del image
+        inner_started.set()
+        await asyncio.sleep(0.05)
+        raise ValueError("prepare failed")
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    image_url = "https://example.com/ref.png"
+    creator = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, roots_key)
+    )
+    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
+
+    await inner_started.wait()
+    done, pending = await asyncio.wait({creator, waiter})
+    assert pending == set()
+    for task in done:
+        assert isinstance(task.exception(), ValueError)
+
+    # 推进事件循环跑完可能排队的 done callback 后仍无回调触发
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """创建者被取消且无其他等待者时，inflight 失败经登记的回调检索且仅触发一次。"""
+    fired = _patch_unretrieved_callback(monkeypatch)
+
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    roots_key = ("test-roots",)
+    inner_started = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        del image
+        inner_started.set()
+        await asyncio.sleep(0.05)
+        raise ValueError("prepare failed")
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    image_url = "https://example.com/ref.png"
+    creator = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, roots_key)
+    )
+    await inner_started.wait()
+    inflight = next(iter(client._image_preparer._prepare_inflight.values()))
+    creator.cancel()
+
+    done, pending = await asyncio.wait({creator, inflight})
+    assert pending == set()
+    assert done == {creator, inflight}
+    assert creator.cancelled()
+    # 推进事件循环跑完 inflight 完成时排队的 done callback
+    await asyncio.sleep(0)
+
+    assert fired == [inflight]
+    assert isinstance(inflight.exception(), ValueError)

@@ -1,8 +1,9 @@
 """io_download 下载测试共享的伪网络对象与辅助函数。
 
-供 test_download_manager_security 与 test_download_image_branches 复用，避免两处
-重复定义与语义漂移。流式内容采用多分块语义，支持单块与多块场景；对端 IP、连接、
-响应、session 均按 aiohttp 公开接口的最小子集模拟。
+供 test_download_manager_security、test_download_image_branches 与
+test_auto_save_and_download 复用，避免多处重复定义与语义漂移。流式内容采用多分块
+语义，支持单块与多块场景；对端 IP、连接、响应、session 均按 aiohttp 公开接口的
+最小子集模拟。
 """
 
 from __future__ import annotations

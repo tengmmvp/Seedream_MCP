@@ -86,7 +86,9 @@ def aggregate_parallel_generation_results(
 
     合并各成功请求的图片与用量统计，失败请求记入 batch.errors；success 由是否有任一成功
     请求决定，status 按 completed/partial/failed 三态推导，任一成功请求自身为 partial
-    时批次 status 至多为 partial。
+    时批次 status 至多为 partial。全部失败时以首个失败异常为代表分类错误码；无异常的
+    软失败结果从各结果字典提取上游 error.code 透传进 error 载荷，与单发路径透传上游
+    错误码的契约一致。
 
     Args:
         request_results: 各请求结果列表，成功为结果字典，失败或异常时对应位置为 None。
@@ -169,12 +171,26 @@ def aggregate_parallel_generation_results(
             (request_errors[i] for i in range(1, request_count + 1) if i in request_errors),
             None,
         )
-        error_type = (
-            _classify_generation_error_type(representative)
-            if representative is not None
-            else "generation_failed"
-        )
-        aggregated_result["error"] = build_error_dict(error_type, message)
+        if representative is not None:
+            error_type = _classify_generation_error_type(representative)
+            aggregated_result["error"] = build_error_dict(error_type, message)
+        else:
+            # 无异常的软失败结果（200 加顶层 error 的请求级失败）逐个回退提取上游
+            # error.code 参与结构化载荷：code 是上游自由文本，出口处经
+            # _build_generation_structured_result 的 dict error 分支净化后透传，
+            # 未提取到任何可用错误码时维持 generation_failed 兜底。
+            error_payload = build_error_dict("generation_failed", message)
+            for result in request_results:
+                if not isinstance(result, dict):
+                    continue
+                raw_error = result.get("error")
+                if not isinstance(raw_error, dict):
+                    continue
+                raw_code = raw_error.get("code")
+                if isinstance(raw_code, str) and raw_code.strip():
+                    error_payload["code"] = raw_code.strip()
+                    break
+            aggregated_result["error"] = error_payload
     return aggregated_result
 
 
@@ -226,27 +242,6 @@ def update_result_with_auto_save(
             copied_images[idx]["markdown_ref"] = save_result.markdown_ref
 
     return updated_result
-
-
-# 单槽哨兵：最近一次经 _sanitize_image_errors 净化写回的图片列表。文本与结构化
-# 两条出口在 common.py 中以同一列表先后调用本函数，两次调用之间无 await，事件
-# 循环内不会交错，第二次进入据此识别并跳过重复净化。Python 内建 list 不支持实例
-# 属性也不可弱引用，无法在列表对象上打标记，故以模块级单槽承载；命中后即清空。
-# 两条出口外不依赖槽位常驻：结构化出口作为末位消费者在用后显式复位，失败批次
-# 的图片列表不滞留槽位至下一次生成调用；槽位被其他调用覆盖时退化为重复净化，
-# 方向安全；资源生命周期边界可经 reset_last_sanitized_images 显式清空。
-_last_sanitized_images: list[dict[str, Any]] | None = None
-
-
-def reset_last_sanitized_images() -> None:
-    """清空净化哨兵槽位，供复位协议在资源生命周期边界显式调用。
-
-    哨兵默认持有至下一次生成调用覆盖；复位协议调用本函数立即释放槽位持有的
-    图片列表引用，避免其生命周期越过资源边界。清空后同一列表再次进入净化
-    仅退化为重复净化，对已净化内容幂等，方向安全。
-    """
-    global _last_sanitized_images
-    _last_sanitized_images = None
 
 
 def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> Any:
@@ -368,16 +363,13 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
     同样携带这两个键，统一净化闭合两条通道的注入面；未知键由结构化输出
     extra='allow' 直通，字符串值保守净化后保留而非剔除，容器值递归净化后重建，
     嵌套深处的凭据片段与 CRLF 同样不进入 structuredContent。净化结果写回列表条目后，
-    文本与结构化两条输出通道复用同一份净化值；已净化列表再次进入时经模块级
-    哨兵跳过，超长片段的截断标记不再叠加。仅对净化后内容发生变化的项做浅拷贝
-    替换列表位置，其余项原样引用，调用方持有的原图片字典对象不被修改。
-    SSE 失败事件在 io_sse 源头已净化，此处覆盖非 SSE 路径；对已脱敏内容幂等。
+    文本与结构化两条输出通道复用同一份净化值。同一列表的净化协调由调用方以
+    显式参数承担：common.py 顺序调用两条出口，文本出口成功分支首次净化写回，
+    结构化出口经 images_sanitized 标记跳过重复净化，重复净化会使超长片段的
+    截断标记逐次叠加，本函数自身不做重复进入判定。仅对净化后内容发生变化的项
+    做浅拷贝替换列表位置，其余项原样引用，调用方持有的原图片字典对象不被修改。
+    SSE 失败事件在 io_sse 源头已净化，此处覆盖非 SSE 路径。
     """
-    global _last_sanitized_images
-    if _last_sanitized_images is images:
-        _last_sanitized_images = None
-        return images
-
     for index, image in enumerate(images):
         updates: dict[str, Any] = {}
 
@@ -441,7 +433,6 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
             sanitized_item.update(updates)
             images[index] = sanitized_item
 
-    _last_sanitized_images = images
     return images
 
 
@@ -584,8 +575,12 @@ def _format_usage_section(usage: dict[str, Any]) -> list[str]:
 
     生成图片数已由自动保存摘要或图片列表段落表达——摘要分母即待保存图片总数，
     此处不再重复计数；无可渲染条目时整段省略。标量字段仅渲染数值取值：usage 为
-    上游透传 dict，字符串值经插值会把换行与敏感片段带入文本通道。
+    上游透传 dict，字符串值经插值会把换行与敏感片段带入文本通道。入口对非 dict
+    形态自守归空：client 与 io_sse 两层已归一 usage 形态，此处为纵深防线，畸形
+    形态不使已计费的成功生成在文本格式化阶段翻错。
     """
+    if not isinstance(usage, dict):
+        return []
     items: list[str] = []
 
     def _render_number(label: str, value: Any) -> None:
@@ -666,7 +661,8 @@ def format_generation_response(
     if images is None:
         images = extract_images(result)
     # 统一净化一次并写回列表：_format_image_item 直接消费已净化值，后续结构化
-    # 构建复用同一列表并经哨兵跳过重复净化；io_sse 源头净化保持独立防线。
+    # 构建经 images_sanitized 显式标记复用同一列表、跳过重复净化；io_sse 源头
+    # 净化保持独立防线。
     images = _sanitize_image_errors(images)
     usage = result.get("usage", {})
 
@@ -712,6 +708,7 @@ def _build_generation_structured_result(
     auto_save_results: list[AutoSaveResult] | None,
     auto_save_error: str | None,
     images: list[dict[str, Any]] | None = None,
+    images_sanitized: bool = False,
 ) -> dict[str, Any]:
     """构建 MCP 工具结果的 structuredContent 字段。
 
@@ -727,27 +724,34 @@ def _build_generation_structured_result(
         auto_save_error: 自动保存错误信息。
         images: 预提取的图片列表，传入时直接写入 data，避免重复调用 extract_images；
             None 时从 result 提取，便于函数独立调用。
+        images_sanitized: images 是否已经 format_generation_response 净化写回；
+            成功路径的文本出口先净化同一列表，置 True 跳过重复净化，使超长片段的
+            截断标记不叠加。默认 False，独立调用与失败批次路径在此完成首次净化。
 
     Returns:
         构造并经 model_dump 输出的 structuredContent 字典，成功路径排除 error 键。
     """
     # b64_json 模式下 data 内的完整 base64 为有意保留：用户显式请求 b64 即期望取回图像
     # 数据，故此处不做截断；并行与组图场景的大载荷由调用方或客户端按需处理。
-    sanitized_images = _sanitize_image_errors(
-        images if images is not None else extract_images(result)
-    )
-    # 结构化出口是净化哨兵的末位消费者，用后显式复位：成功路径的文本出口已先净化
-    # 同一列表，上方调用命中哨兵即清空，此处复位为幂等；失败路径的文本出口经
-    # _format_failure_section 提前返回、不经净化，上方调用为首次净化并写入哨兵，
-    # 复位使失败批次的图片列表不滞留哨兵槽位至下一次生成调用。
-    reset_last_sanitized_images()
+    if images is not None and images_sanitized:
+        sanitized_images = images
+    else:
+        sanitized_images = _sanitize_image_errors(
+            images if images is not None else extract_images(result)
+        )
     # status 的非 SSE 路径取自响应体原文，属上游自由文本；与 data/usage 同口径净化，
-    # 控制字符与凭据片段不借 status 键进入 structuredContent。
+    # 控制字符与凭据片段不借 status 键进入 structuredContent。非 str 形态归 None：
+    # 声明 schema 的 status 为 str | None，畸形形态直传会使 model 构造抛校验异常，
+    # 已计费的成功生成被翻错为失败结果。
     raw_status = result.get("status")
+    # usage 与 batch 的非 dict 形态同样按声明 schema 收敛：usage 归空 dict、batch 归
+    # None，client 与 io_sse 两层已归一形态，此处为纵深防线。
+    raw_usage = result.get("usage", {})
+    raw_batch = result.get("batch")
     payload: dict[str, Any] = {
         "tool": tool_name,
         "success": not _is_generation_failed(result),
-        "status": sanitize_error_text(raw_status) if isinstance(raw_status, str) else raw_status,
+        "status": sanitize_error_text(raw_status) if isinstance(raw_status, str) else None,
         "prompt": context.prompt,
         "size": context.size,
         "response_format": context.response_format,
@@ -760,13 +764,13 @@ def _build_generation_structured_result(
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         # data 项可能携带上游 per-image error 与 url/model/type 等自由字段，统一净化
-        # 后进入结构化输出，与异常路径防护一致。format_generation_response 已就同一
-        # 列表净化写回，上方经模块级哨兵跳过重复净化；独立调用场景自行净化兜底。
+        # 后进入结构化输出，与异常路径防护一致。成功路径的文本出口已就同一列表净化
+        # 写回，上方经 images_sanitized 跳过重复净化；独立调用场景自行净化兜底。
         "data": sanitized_images,
         # usage 为 client 侧原样透传的上游 dict，字符串值过净化管线防 CRLF 与凭据注入，
         # 数值键保持原值供聚合与计费核对。
-        "usage": _sanitize_usage(result.get("usage", {})),
-        "batch": result.get("batch"),
+        "usage": _sanitize_usage(raw_usage) if isinstance(raw_usage, dict) else {},
+        "batch": raw_batch if isinstance(raw_batch, dict) else None,
     }
 
     truncated_events = _extract_truncated_events(result)

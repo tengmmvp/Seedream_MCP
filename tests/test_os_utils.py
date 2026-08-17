@@ -181,6 +181,75 @@ async def test_atomic_replace_from_fd_writer_failure_cleans_temp_and_closes_fd_o
     assert len(closed) == 1
 
 
+async def test_atomic_replace_from_fd_replace_failure_cleans_temp(tmp_path: Path) -> None:
+    """异步骨架替换失败：目标被同名目录占用时异常上抛，随机临时文件被清理。
+
+    与同步版 atomic_replace_from_fd_sync 的既有用例互为镜像，守护异步骨架的
+    失败路径同样不留 .part 残留。
+    """
+    final = tmp_path / "out.bin"
+    final.mkdir()
+
+    async def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    with pytest.raises(OSError):
+        await atomic_replace_from_fd(final, writer, suffix=".part")
+
+    # 目录占用保留，临时文件经失败路径清理无残留
+    assert final.is_dir()
+    assert list(tmp_path.iterdir()) == [final]
+
+
+def _install_fsync_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """monkeypatch os.fsync 为计数透传实现，返回调用记录列表。"""
+    fsync_calls: list[int] = []
+    real_fsync = os.fsync
+
+    def _tracking_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _tracking_fsync)
+    return fsync_calls
+
+
+async def test_atomic_replace_from_fd_fsync_enabled_calls_os_fsync_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fsync=True 时异步骨架在 writer 写入后、替换前对 fd 执行 os.fsync 恰好一次。"""
+    final = tmp_path / "out.bin"
+    fsync_calls = _install_fsync_counter(monkeypatch)
+
+    async def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    await atomic_replace_from_fd(final, writer, suffix=".part", fsync=True)
+
+    assert final.read_bytes() == b"payload"
+    assert list(tmp_path.iterdir()) == [final]
+    assert len(fsync_calls) == 1
+
+
+async def test_atomic_replace_from_fd_fsync_default_off_skips_os_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """默认 fsync 关闭：落盘成功但不调用 os.fsync。"""
+    final = tmp_path / "out.bin"
+    fsync_calls = _install_fsync_counter(monkeypatch)
+
+    async def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    await atomic_replace_from_fd(final, writer, suffix=".part")
+
+    assert final.read_bytes() == b"payload"
+    assert fsync_calls == []
+
+
 # ==================== atomic_replace_from_fd_sync 同步原子落盘 ====================
 
 
@@ -244,3 +313,38 @@ def test_atomic_replace_from_fd_sync_replace_failure_cleans_temp(
     # 目录占用保留，临时文件经失败路径清理无残留
     assert final.is_dir()
     assert list(tmp_path.iterdir()) == [final]
+
+
+def test_atomic_replace_from_fd_sync_fsync_enabled_calls_os_fsync_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fsync=True 时同步骨架在 writer 写入后、替换前对 fd 执行 os.fsync 恰好一次。"""
+    final = tmp_path / "out.bin"
+    fsync_calls = _install_fsync_counter(monkeypatch)
+
+    def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    atomic_replace_from_fd_sync(final, writer, suffix=".part", fsync=True)
+
+    assert final.read_bytes() == b"payload"
+    assert list(tmp_path.iterdir()) == [final]
+    assert len(fsync_calls) == 1
+
+
+def test_atomic_replace_from_fd_sync_fsync_default_off_skips_os_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """默认 fsync 关闭：同步落盘成功但不调用 os.fsync。"""
+    final = tmp_path / "out.bin"
+    fsync_calls = _install_fsync_counter(monkeypatch)
+
+    def writer(fd: int) -> None:
+        with os.fdopen(fd, "wb", closefd=False) as f:
+            f.write(b"payload")
+
+    atomic_replace_from_fd_sync(final, writer, suffix=".part")
+
+    assert final.read_bytes() == b"payload"
+    assert fsync_calls == []

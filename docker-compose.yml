@@ -1,22 +1,23 @@
 services:
   seedream-mcp:
-    image: ghcr.io/tengmmvp/seedream_mcp:latest
+    # 固定 major.minor 标签，随稳定版补丁自动跟进，升级大版本时手动修改；预发布版本
+    # 会同样产出该标签，引用 rc 需改用精确版本号。
+    image: ghcr.io/tengmmvp/seedream_mcp:2.0
     container_name: seedream-mcp-server
-    command:
-      - "--transport"
-      - "streamable-http"
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8000"
-      - "--insecure-allow-non-tls"
+    # 末位参数默认豁免容器内非回环绑定的 TLS 门禁；对外暴露时以证书参数替换，如
+    # SEEDREAM_EXTRA_CLI_ARGS="--ssl-certfile /certs/tls.pem --ssl-keyfile /certs/tls.key"，
+    # 证书路径需自行在 volumes 增挂。
+    command: >-
+      --transport streamable-http
+      --host 0.0.0.0
+      --port 8000
+      ${SEEDREAM_EXTRA_CLI_ARGS:---insecure-allow-non-tls}
     ports:
-      # 默认仅绑定回环地址；需从其他设备直连时改为 "0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000" 或指定宿主机网卡地址。
+      # 默认仅本机回环可达；改为 0.0.0.0 对外暴露前必须先具备 TLS，详见 README 安全说明。
       - "127.0.0.1:${SEEDREAM_HTTP_PORT:-8000}:8000"
     environment:
-      # 必需：火山引擎 API 密钥
+      # 必需
       - ARK_API_KEY=${ARK_API_KEY}
-      # 必需：streamable-http 鉴权令牌
       - SEEDREAM_HTTP_AUTH_TOKEN=${SEEDREAM_HTTP_AUTH_TOKEN}
       # API 与模型
       - ARK_BASE_URL=${ARK_BASE_URL:-https://ark.cn-beijing.volces.com/api/v3}
@@ -37,28 +38,30 @@ services:
       - SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=${SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT:-30}
       - SEEDREAM_AUTO_SAVE_MAX_RETRIES=${SEEDREAM_AUTO_SAVE_MAX_RETRIES:-3}
       - SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=${SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE:-52428800}
-      # 上游响应体读取总量上限（字节；不设则按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导）
-      - SEEDREAM_RESPONSE_BODY_LIMIT=${SEEDREAM_RESPONSE_BODY_LIMIT:-}
       - SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=${SEEDREAM_AUTO_SAVE_MAX_CONCURRENT:-5}
       - SEEDREAM_AUTO_SAVE_DATE_FOLDER=${SEEDREAM_AUTO_SAVE_DATE_FOLDER:-true}
       - SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=${SEEDREAM_AUTO_SAVE_CLEANUP_DAYS:-30}
-      # 保存目录总字节上限（默认 10GB；超限按最旧文件优先驱逐）
+      # 保存目录总字节上限，超限按最旧文件优先驱逐。
       - SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=${SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES:-10737418240}
+      # 落盘 fsync 开关，开启提升崩溃一致性、略降写入吞吐。
+      - SEEDREAM_AUTO_SAVE_FSYNC=${SEEDREAM_AUTO_SAVE_FSYNC:-false}
+      # 上游响应
+      # 响应体读取总量上限（字节），留空按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导。
+      - SEEDREAM_RESPONSE_BODY_LIMIT=${SEEDREAM_RESPONSE_BODY_LIMIT:-}
       # 工作区与传输
-      # 本地文件访问工作区根目录（留空回退进程工作目录；MCP Roots 优先）
+      # 本地文件访问回退根目录，留空回退进程工作目录；MCP Roots 声明优先。
       - SEEDREAM_WORKSPACE_ROOT=${SEEDREAM_WORKSPACE_ROOT:-}
-      # streamable-http 请求体大小上限（字节，≥1MB）
+      # streamable-http 请求体上限（字节），不低于 1MB。
       - SEEDREAM_HTTP_MAX_BODY_SIZE=${SEEDREAM_HTTP_MAX_BODY_SIZE:-67108864}
-      # 客户端性能
+      # 性能与流式
       - SEEDREAM_IMAGE_PREPARE_CONCURRENCY=${SEEDREAM_IMAGE_PREPARE_CONCURRENCY:-5}
       - SEEDREAM_PREPARE_CACHE_MAX=${SEEDREAM_PREPARE_CACHE_MAX:-32}
       - SEEDREAM_PREPARE_CACHE_MAX_BYTES=${SEEDREAM_PREPARE_CACHE_MAX_BYTES:-268435456}
-      # 流式处理
       - SEEDREAM_STREAM_BUFFER_MAX_SIZE=${SEEDREAM_STREAM_BUFFER_MAX_SIZE:-10485760}
       - SEEDREAM_STREAM_CHUNK_SIZE=${SEEDREAM_STREAM_CHUNK_SIZE:-1048576}
     volumes:
       - ./.seedream:/app/.seedream
-      # 宿主未创建 .env 时 Docker 会自动创建同名目录导致挂载异常，需先 touch .env 或删除本行。
+      # .env 需宿主机先创建为文件，否则 Docker 会生成同名目录导致挂载失败。
       - ./.env:/app/.env:ro
     restart: unless-stopped
     healthcheck:

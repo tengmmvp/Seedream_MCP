@@ -24,7 +24,8 @@
     "delenv",
     "dotenv",
     "doubao",
-    "elif",
+    "buildx",
+    "certfile",
     "mcpserver",
     "getenv",
     "healthcheck",
@@ -53,11 +54,13 @@
     "tengmmvp",
     "testpaths",
     "timespec",
+    "uvicorn",
     "venv",
     "verifys",
     "volcengine",
     "volcenginesdkarkruntime",
     "zoneid",
+    "zhipu",
     "zread"
   ]
 }

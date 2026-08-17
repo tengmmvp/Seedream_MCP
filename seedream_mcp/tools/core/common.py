@@ -24,7 +24,6 @@ from ._helpers import (
     _classify_generation_error_type,
     _is_generation_failed,
     _resolve_failure_guidance,
-    _safe_ctx_log,
     _safe_report_progress,
     _yield_for_cancellation,
 )
@@ -101,7 +100,7 @@ async def execute_generation_handler(
         start_log_message: 请求开始时的日志模板。
         start_log_values_builder: 基于执行上下文构造日志模板参数的回调。
         request_executor: 执行单次生成请求的回调，由各 impl 提供 client 调用差异。
-        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
+        ctx: MCP 上下文，用于进度上报，无会话时可为 None。
 
     Returns:
         MCP 结构化工具结果。成功时含文本摘要与 structuredContent，失败时 isError 为 True。
@@ -115,12 +114,6 @@ async def execute_generation_handler(
         await _yield_for_cancellation()
         context = build_generation_context(params, config)
         await _safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
-        await _safe_ctx_log(
-            ctx,
-            "info",
-            f"{tool_name} 请求开始：尺寸={context.size}, "
-            f"请求数={context.request_count}, 并行度={context.parallelism}",
-        )
 
         module_logger.info(start_log_message, *start_log_values_builder(context))
 
@@ -189,19 +182,12 @@ async def execute_generation_handler(
                     # 回填合并改写了 data（补充 local_path/markdown_ref），展示与结构化
                     # 输出按合并后的结果重新提取；未触发合并时沿用上方已提取的列表。
                     images = extract_images(result)
-                    saved_count = sum(1 for r in auto_save_results if r.success)
-                    await _safe_ctx_log(
-                        ctx,
-                        "info",
-                        f"已自动保存 {saved_count}/{len(auto_save_results)} 张图片到本地",
-                    )
                 await _safe_report_progress(
                     ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成"
                 )
             except Exception as exc:
                 auto_save_error = format_error_for_user(exc)
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
-                await _safe_ctx_log(ctx, "warning", f"自动保存失败，已降级跳过：{auto_save_error}")
 
         # images 供后续纯函数复用，避免 extract_images 在格式化、结构化与日志阶段
         # 重复遍历同一结果。
@@ -217,6 +203,10 @@ async def execute_generation_handler(
             saveable_indices=saveable_indices,
         )
 
+        # 净化协调：文本出口仅在成功分支消费图片列表并就地净化写回，失败分支经
+        # _format_failure_section 提前返回、不经净化。结构化出口据此显式获知列表
+        # 净化状态：成功路径跳过重复净化复用同一份净化值，失败路径自行完成首次
+        # 净化，净化次数恒为一，超长片段的截断标记不叠加。
         structured_result = _build_generation_structured_result(
             tool_name=tool_name,
             result=result,
@@ -224,14 +214,9 @@ async def execute_generation_handler(
             auto_save_results=auto_save_results,
             auto_save_error=auto_save_error,
             images=images,
+            images_sanitized=not is_generation_failed,
         )
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
-        await _safe_ctx_log(
-            ctx,
-            "warning" if is_generation_failed else "info",
-            f"{tool_name} {'未成功' if is_generation_failed else '完成'}，"
-            f"共 {len(images)} 张图片",
-        )
         return CallToolResult(
             content=[TextContent(type="text", text=response_text)],
             structured_content=structured_result,
@@ -241,7 +226,6 @@ async def execute_generation_handler(
         module_logger.error("{}处理失败", failure_prefix, exc_info=True)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
-        await _safe_ctx_log(ctx, "error", f"{failure_prefix}失败：{user_facing_error}")
         # format_error_for_user 已在档案携带 user_hint 时把建议拼入文案，此时不再
         # 叠加查表排查建议，避免 429/402 等场景同一句建议逐字出现两遍；档案无
         # user_hint 时才以查表建议补充，参数类错误不附带凭据与网络指引。

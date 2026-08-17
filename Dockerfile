@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.14-slim
+# 基础镜像按 digest 固定以保证供应链可复现；tag 升级经 dependabot 更新 digest。
+FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
 
 # 设置工作目录
 WORKDIR /app
@@ -16,13 +17,14 @@ ENV PYTHONUNBUFFERED=1 \
 ARG UV_VERSION=0.9.18
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
-# 先复制项目清单并只安装依赖，源码未变更时命中缓存层；README 为 hatchling 构建元数据所需
-COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+# 先复制项目清单并只安装依赖，源码未变更时命中缓存层；README 与 LICENSE 为 hatchling
+# 构建元数据所需，缺 LICENSE 会使 PEP 639 的 license-files 静默落空
+COPY pyproject.toml uv.lock README.md LICENSE ./
+RUN uv sync --locked --no-dev --no-install-project
 
 # 复制源码后以非 editable 方式安装项目本体
 COPY seedream_mcp/ ./seedream_mcp/
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --locked --no-dev --no-editable
 
 # 使用项目虚拟环境作为运行时 Python
 ENV PATH="/app/.venv/bin:${PATH}"

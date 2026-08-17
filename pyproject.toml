@@ -10,12 +10,12 @@ authors = [
 ]
 description = "基于火山引擎 Seedream API 的 MCP 工具，支持 AI 图像生成功能"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
@@ -118,3 +118,6 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = "test_*.py"
+markers = [
+    "slow: 重量级守护用例，本地可用 -m \"not slow\" 排除加速，CI 保持默认全量运行",
+]

@@ -3,19 +3,16 @@
 同一工具调用的多个并行请求经共享请求计划只构建一次 request_data、只序列化一次
 body，各请求复用同一 bytes 对象；批次结束后计划释放，跨调用互不共享。网络层经
 monkeypatch 注入，不触达真实 API。
-
-被替换的类属性在测试运行时经 import_module 动态解析：test_package_lazy_import
-会重载 client 模块，模块级类引用会成为过期对象导致补丁失效。
 """
 
 from __future__ import annotations
 
 import asyncio
-from importlib import import_module
 from typing import Any, Dict, List
 
 import pytest
 
+from seedream_mcp.client import SeedreamClient, SharedRequestPlan
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
@@ -25,10 +22,7 @@ from seedream_mcp.utils.core.errors import (
     resolve_error_profile,
 )
 
-
-def _client_cls() -> Any:
-    """取当前 sys.modules 中的 SeedreamClient 类，规避 client 模块被重载后的过期引用。"""
-    return getattr(import_module("seedream_mcp.client"), "SeedreamClient")
+import seedream_mcp.client as client_module
 
 
 def _build_config() -> SeedreamConfig:
@@ -39,26 +33,26 @@ def _build_config() -> SeedreamConfig:
 def _install_serialize_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
     """在类上替换 _serialize_request 为计数替身，返回计数器字典。"""
     calls = {"serialize": 0}
-    original = _client_cls()._serialize_request
+    original = SeedreamClient._serialize_request
 
     def _spy(request_data: dict[str, Any]) -> bytes:
         calls["serialize"] += 1
         return original(request_data)
 
-    monkeypatch.setattr(_client_cls(), "_serialize_request", staticmethod(_spy))
+    monkeypatch.setattr(SeedreamClient, "_serialize_request", staticmethod(_spy))
     return calls
 
 
 def _install_build_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
     """在类上替换 _build_common_request 为计数替身，返回计数器字典。"""
     calls = {"build": 0}
-    original = _client_cls()._build_common_request
+    original = SeedreamClient._build_common_request
 
     def _spy(self: Any, **kwargs: Any) -> dict[str, Any]:
         calls["build"] += 1
         return original(self, **kwargs)
 
-    monkeypatch.setattr(_client_cls(), "_build_common_request", _spy)
+    monkeypatch.setattr(SeedreamClient, "_build_common_request", _spy)
     return calls
 
 
@@ -84,7 +78,7 @@ def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: List[bytes]) 
             "status": "completed",
         }
 
-    monkeypatch.setattr(_client_cls(), "_send_standard_request", fake_send)
+    monkeypatch.setattr(SeedreamClient, "_send_standard_request", fake_send)
 
 
 @pytest.mark.asyncio
@@ -188,7 +182,7 @@ async def test_direct_client_call_without_plan_serializes_independently(
     sent_bodies: List[bytes] = []
     _install_send_capture(monkeypatch, sent_bodies)
 
-    async with _client_cls()(_build_config()) as client:
+    async with SeedreamClient(_build_config()) as client:
         await client.text_to_image(prompt="direct")
 
     assert serialize_calls["serialize"] == 1
@@ -206,8 +200,7 @@ async def test_shared_plan_builder_failure_propagates_independently() -> None:
     锁定 get_or_build 契约：构建失败不污染计划，锁释放后每个调用方在锁内自行
     重试构建，异常原样传播，不被吞掉或合并为共享的一份失败。
     """
-    plan_cls = getattr(import_module("seedream_mcp.client"), "SharedRequestPlan")
-    plan = plan_cls()
+    plan = SharedRequestPlan()
     builder_failure = RuntimeError("prepare failed")
     attempts = {"count": 0}
 
@@ -247,7 +240,6 @@ async def test_prevalidate_failure_matches_single_request_first_failure(
     预校验在批次分发前上抛，整批以 isError 结果统一降级，不进入逐请求错误聚合；
     错误类型与消息与单请求路径首请求校验失败完全一致。
     """
-    client_module = import_module("seedream_mcp.client")
     validation_failure = SeedreamValidationError("预校验拒绝", field="size", value="bad")
 
     def failing_validate(**kwargs: Any) -> Any:
@@ -261,7 +253,7 @@ async def test_prevalidate_failure_matches_single_request_first_failure(
     # 单请求路径首请求失败：直连调用在生成方法入口校验公共参数并原样上抛
     single_exc: BaseException | None = None
     try:
-        async with _client_cls()(config) as client:
+        async with SeedreamClient(config) as client:
             await client.text_to_image(prompt="p")
     except Exception as exc:
         single_exc = exc

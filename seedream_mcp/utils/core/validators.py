@@ -671,8 +671,8 @@ def validate_background(
         规范化后的取值，未指定时为 None。
 
     Raises:
-        SeedreamValidationError: 取值非法、当前模型不支持该参数，或透明背景与
-            jpeg 输出格式互斥。
+        SeedreamValidationError: 取值非法、当前模型不支持该参数、output_format 非
+            字符串，或透明背景与 jpeg 输出格式互斥。
     """
     if background is None:
         return None
@@ -694,16 +694,17 @@ def validate_background(
             field="background",
             value=normalized,
         )
-    if (
-        normalized == "transparent"
-        and output_format is not None
-        and output_format.strip().lower() == "jpeg"
-    ):
-        raise SeedreamValidationError(
-            "透明背景输出为 png，background=transparent 与 output_format=jpeg 互斥",
-            field="background",
-            value=normalized,
-        )
+    if output_format is not None:
+        if not isinstance(output_format, str):
+            raise SeedreamValidationError(
+                "output_format 必须为字符串", field="output_format", value=output_format
+            )
+        if normalized == "transparent" and output_format.strip().lower() == "jpeg":
+            raise SeedreamValidationError(
+                "透明背景输出为 png，background=transparent 与 output_format=jpeg 互斥",
+                field="background",
+                value=normalized,
+            )
     return normalized
 
 

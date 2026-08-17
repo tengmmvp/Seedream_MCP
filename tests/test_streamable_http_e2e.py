@@ -1,11 +1,12 @@
 """streamable-http 端到端测试：经 httpx ASGITransport 驱动真实 ASGI 栈。
 
-覆盖 _run_streamable_http 装配的两中间件与 Starlette lifespan 的集成：
+覆盖 _run_streamable_http 装配的中间件栈与 Starlette lifespan 的集成：
 Bearer 鉴权放行/拒绝、请求体上限超限早拒、合法请求经全栈返回 200。另含
 tools/call 协议集成：平铺参数经真实 JSON-RPC 调用路径反序列化，成功与失败
 结果均以 HTTP 200 的 CallToolResult 返回，isError 透传，structuredContent
 经 MCPServer 内部以 outputSchema 校验。以及 SDK 内层 DNS rebinding 防护按绑定
-地址重配的集成：非回环绑定下非白名单 Host 的 /mcp 请求放行，回环绑定维持 421。
+地址重配的集成：非回环绑定下非白名单 Host 的 /mcp 请求放行，回环绑定下外部
+域名 Host 被最外层自定义回环 Host 守卫以 403 先行短路。
 
 httpx.ASGITransport 仅发送 http scope 不驱动 ASGI lifespan，故对触达 MCP 应用的
 200 用例以自建 _LifespanManager 显式运行 session_manager 生命周期（建立任务组）；
@@ -14,7 +15,6 @@ httpx.ASGITransport 仅发送 http scope 不驱动 ASGI lifespan，故对触达 
 
 import asyncio
 import json
-from importlib import import_module
 from typing import Any, MutableMapping
 
 import httpx
@@ -22,7 +22,9 @@ import pytest
 
 import seedream_mcp.resources as resources
 import seedream_mcp.server as server
-from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.client import SeedreamClient
+from seedream_mcp.config import SeedreamConfig, set_active_config
+from seedream_mcp.transport import _attach_streamable_http_middleware, _transport_security_for_host
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
 # MCPServer streamable-http 默认 MCP 端点路径
@@ -77,29 +79,24 @@ def _build_app(
     json_response: bool = False,
     host: str = "127.0.0.1",
 ) -> Any:
-    """复刻 _run_streamable_http 的传输参数与中间件装配顺序。
+    """按生产 _run_streamable_http 的装配路径构建传输栈。
 
-    SDK 2.0 起 stateless/json_response/transport_security/max_request_body_size 直传
-    streamable_http_app 构造，不再经 settings；transport_security 按绑定地址派生，
-    与生产的 _transport_security_for_host 同源。Starlette add_middleware 经 insert(0)
-    使后添加者为更外层：健康检查最外，其后请求体上限，再后 Bearer 鉴权，应用在内。
-    请求体上限位于鉴权之外，故声明超长 Content-Length 的请求在鉴权前即被 413 早拒；
-    已认证 chunked 请求由 receive 字节累计保护，未授权 chunked 请求不读 body 直接
-    401，其体积限制依赖 uvicorn 或反向代理层。
+    中间件经 transport._attach_streamable_http_middleware 复用生产装配函数：
+    请求体上限取注入活动配置的 http_max_body_size，Bearer 鉴权按 auth_token
+    装配，回环绑定额外叠加最外层 Host 守卫，装配顺序与生产完全同源。传输参数
+    stateless/transport_security/max_request_body_size 与生产一致直传
+    streamable_http_app 构造，transport_security 按绑定地址派生。请求体上限经
+    活动配置注入且配置合法下限为 1MB，超限用例以 1MB 上限配 1MB+1 请求体触发。
     """
-    from seedream_mcp.transport import _transport_security_for_host
-
+    set_active_config(SeedreamConfig(api_key="test_key", http_max_body_size=body_limit))
     app = server.mcp.streamable_http_app(
         host=host,
         stateless_http=stateless,
         json_response=json_response,
         transport_security=_transport_security_for_host(host),
-        max_request_body_size=_MAX_BODY,
+        max_request_body_size=body_limit,
     )
-    if auth_token:
-        app.add_middleware(server._BearerTokenAuthMiddleware, expected_token=auth_token)
-    app.add_middleware(server._LimitRequestBodyMiddleware, max_body_size=body_limit)
-    app.add_middleware(server._HealthCheckMiddleware)
+    _attach_streamable_http_middleware(app, host, auth_token)
     return app
 
 
@@ -125,11 +122,12 @@ async def reset_http_app_state(monkeypatch: pytest.MonkeyPatch):
     """每测试重置 session manager 单例并注入测试配置。
 
     streamable_http_app 首次调用后缓存 _session_manager，而其 run() 仅可调用一次，
-    故每测试前置 None 强制重建；同时注入活动配置供 app_lifespan 构造共享 client。
-    退出时关闭可能由 stateless 请求触发的 lifespan 共享单例，避免连接池跨测试泄漏。
+    故每测试前置 None 强制重建；同时注入活动配置供 app_lifespan 构造共享 client，
+    _build_app 按用例再覆盖为携带指定请求体上限的配置。退出时关闭可能由 stateless
+    请求触发的 lifespan 共享单例，避免连接池跨测试泄漏。
     """
     server.mcp._lowlevel_server._session_manager = None
-    server.set_active_config(SeedreamConfig(api_key="test_key"))
+    set_active_config(SeedreamConfig(api_key="test_key"))
     yield
     active = resources._active_resource
     if active is not None:
@@ -209,15 +207,16 @@ async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) ->
 async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> None:
     """请求体超 Content-Length 上限由请求体中间件在鉴权前返回 413。
 
-    生产阈值默认 64MB（config.http_max_body_size），单值由 test_request_body_limit 覆盖；
-    此处装配小阈值以真实发送超限字节体验证全栈集成，确认中间件在 ASGI 栈内短路。
+    上限经注入活动配置的 http_max_body_size 控制并取配置合法下限 1MB，以
+    1MB+1 字节的真实超限请求走全栈，确认中间件在 ASGI 栈内短路；上限单值
+    与配置解析由 test_request_body_limit 覆盖。
     """
-    app = _build_app("s3cret", body_limit=64)
+    app = _build_app("s3cret", body_limit=1024 * 1024)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
         response = await client.post(
             _MCP_PATH,
-            content=b"x" * 128,
+            content=b"x" * (1024 * 1024 + 1),
             headers={
                 "authorization": "Bearer s3cret",
                 "content-type": "application/json",
@@ -249,9 +248,6 @@ async def test_e2e_tools_call_flat_params_success(
     避免 fake 返回的占位 URL 触发真实下载。structuredContent 由 MCPServer 内部以
     outputSchema 完成校验，校验失败会转为错误结果使本用例失败。
     """
-    # 运行时解析 client 模块取类对象：test_package_lazy_import 会弹出并重建
-    # seedream_mcp.client 模块，收集期绑定的类对象会与 lifespan 实例所属类分裂。
-    client_cls = getattr(import_module("seedream_mcp.client"), "SeedreamClient")
     captured: dict[str, Any] = {}
 
     async def fake_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
@@ -264,7 +260,7 @@ async def test_e2e_tools_call_flat_params_success(
             "status": "completed",
         }
 
-    monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image)
+    monkeypatch.setattr(SeedreamClient, "text_to_image", fake_text_to_image)
     app = _build_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
@@ -316,8 +312,6 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
     工具级失败不上升为 JSON-RPC error：客户端据 isError 分支处理，错误详情在
     structuredContent.error 与文本 content 中。
     """
-    # 同上：运行时解析类对象，避免收集期绑定在模块重建后失配
-    client_cls = getattr(import_module("seedream_mcp.client"), "SeedreamClient")
     captured: dict[str, Any] = {}
 
     async def failing_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
@@ -325,7 +319,7 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
         captured["called"] = True
         raise SeedreamValidationError("提示词不能为空", field="prompt", value="")
 
-    monkeypatch.setattr(client_cls, "text_to_image", failing_text_to_image)
+    monkeypatch.setattr(SeedreamClient, "text_to_image", failing_text_to_image)
     app = _build_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
@@ -395,16 +389,22 @@ async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
     assert "error" not in body
 
 
-async def test_e2e_loopback_bind_keeps_sdk_host_allowlist(
+async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlist(
     monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
 ) -> None:
-    """回环绑定维持 SDK 内层回环 Host 白名单，外部域名 Host 仍被 421 拒绝。
+    """回环绑定下外部域名 Host 被最外层自定义 Host 守卫以 403 先行短路。
 
-    防护按绑定地址重配不得把回环防护一并关闭：回环绑定下 rebinding 域名请求仍须
-    被 SDK 内层拒绝，与 _LoopbackHostGuardMiddleware 的回环防线语义对齐。
+    生产回环栈最外层为 _LoopbackHostGuardMiddleware，rebinding 域名请求先于健康
+    检查、鉴权与 SDK 内层被 403 拒绝，不会走到 SDK 内层的 421。分层断言同时锁定
+    SDK 内层白名单仍按回环绑定配置：防护按绑定地址重配不得把回环防线一并关闭，
+    自定义守卫失效时 SDK 内层仍兜底。
     """
     app = _build_app("s3cret", stateless=True, json_response=True, host="127.0.0.1")
 
     response = await _post_mcp_with_host(app, "mcp.example.com")
 
-    assert response.status_code == 421
+    assert response.status_code == 403
+    assert response.json()["error"] == "invalid_host"
+    security = _transport_security_for_host("127.0.0.1")
+    assert security.enable_dns_rebinding_protection is True
+    assert "127.0.0.1:*" in security.allowed_hosts

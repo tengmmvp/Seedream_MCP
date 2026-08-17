@@ -18,7 +18,9 @@ inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明（pr
 params 嵌套模型。MCPServer 的 FuncMetadata 不支持单参数 BaseModel 自动展开，
 嵌套声明会把 inputSchema 收敛为一个 params 对象字段，客户端以平铺键名调用会被拒绝。
 平铺字段的名称、类型、默认值、约束与描述镜像自 tools.core.schemas 的对应输入模型，
-字段规则的单一来源仍是该模块；函数体内过滤值为 None 的可选字段后组装输入模型并
+字段规则的单一来源仍是该模块；模型层的 str_strip_whitespace 与各字段校验器的非空
+语义经签名层 ``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝而非进入
+工具体后才失败。函数体内过滤值为 None 的可选字段后组装输入模型并
 委托既有 run_* 处理器，跨字段校验在组装时照常触发。test_tool_parameter_order 以
 inputSchema 与模型 schema 的等价性断言锁定两侧不漂移。
 """
@@ -129,6 +131,13 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 
 logger = get_logger(__name__)
 
+# 非空语义镜像：输入模型经 str_strip_whitespace 先剥离首尾空白再做长度与校验器判定，
+# 纯空白字符串在模型层被拒；平铺签名的参数模型不含 strip 配置，等价约束以 pattern
+# 表达——含至少一个非空白字符。应用于声明了非空语义的字段：prompt 的 min_length=1、
+# image 与 save_path/custom_name/directory 的非空校验器。带内边距的合法值不受影响，
+# strip 仍由函数体内组装输入模型时完成。
+_NON_BLANK_PATTERN = r"\S"
+
 
 def _config_from_context(ctx: Context[Any, Any]) -> SeedreamConfig:
     """从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。
@@ -177,6 +186,7 @@ async def seedream_text_to_image(
     prompt: str = Field(
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
+        pattern=_NON_BLANK_PATTERN,
         description=(
             "用于生成图片的提示词，建议不超过300个汉字或600个英文单词。"
             "例如：一只戴墨镜的猫坐在月球上，写实风格。"
@@ -229,11 +239,13 @@ async def seedream_text_to_image(
     save_path: str | None = Field(
         default=None,
         max_length=1024,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
     ),
     custom_name: str | None = Field(
         default=None,
         max_length=255,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
@@ -280,6 +292,7 @@ async def seedream_image_to_image(
         default=None,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
+        pattern=_NON_BLANK_PATTERN,
         description=(
             "图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；"
             "图层拆分场景可缺省，由模型自动识别拆分意图。"
@@ -291,6 +304,7 @@ async def seedream_image_to_image(
         description="提示词优化配置，仅支持 standard 或 fast。",
     ),
     image: str = Field(
+        pattern=_NON_BLANK_PATTERN,
         description=(
             "参考图片，支持 URL、data URI（data:image/*;base64,...）、本地文件路径。"
             "例如：https://example.com/ref.png 或 ./.seedream/images/portrait.jpg。"
@@ -357,11 +371,13 @@ async def seedream_image_to_image(
     save_path: str | None = Field(
         default=None,
         max_length=1024,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
     ),
     custom_name: str | None = Field(
         default=None,
         max_length=255,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
@@ -411,6 +427,7 @@ async def seedream_multi_image_fusion(
     prompt: str = Field(
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
+        pattern=_NON_BLANK_PATTERN,
         description=(
             "融合目标或风格描述，建议不超过300个汉字或600个英文单词。"
             "请使用“图X”指定图像（如：将图1的服装换为图2的服装）。"
@@ -420,7 +437,7 @@ async def seedream_multi_image_fusion(
         default=None,
         description="提示词优化配置，仅支持 standard 或 fast。",
     ),
-    image: list[str] = Field(
+    image: list[Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]] = Field(
         min_length=2,
         max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
         description=(
@@ -472,11 +489,13 @@ async def seedream_multi_image_fusion(
     save_path: str | None = Field(
         default=None,
         max_length=1024,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
     ),
     custom_name: str | None = Field(
         default=None,
         max_length=255,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
@@ -524,6 +543,7 @@ async def seedream_sequential_generation(
     prompt: str = Field(
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
+        pattern=_NON_BLANK_PATTERN,
         description=(
             "连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。"
             "例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。"
@@ -533,7 +553,11 @@ async def seedream_sequential_generation(
         default=None,
         description="提示词优化配置，仅支持 standard 或 fast。",
     ),
-    image: str | list[str] | None = Field(
+    image: (
+        Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]
+        | list[Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]]
+        | None
+    ) = Field(
         default=None,
         description=(
             f"可选的参考图片，支持 URL、data URI（data:image/*;base64,...）或本地路径，"
@@ -574,7 +598,10 @@ async def seedream_sequential_generation(
         default=1,
         ge=1,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。",
+        description=(
+            "同一提示并行发起的独立生成次数，每次各产出一组图片，单组数量由 "
+            "max_images 控制；适合一次获取多组独立的组图结果。"
+        ),
     ),
     parallelism: int | None = Field(
         default=None,
@@ -589,11 +616,13 @@ async def seedream_sequential_generation(
     save_path: str | None = Field(
         default=None,
         max_length=1024,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
     ),
     custom_name: str | None = Field(
         default=None,
         max_length=255,
+        pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
@@ -642,6 +671,7 @@ async def seedream_browse_images(
     directory: str | None = Field(
         default=None,
         max_length=1024,
+        pattern=_NON_BLANK_PATTERN,
         description=(
             "要浏览的目录路径，默认浏览工作区根目录，即 MCP Roots 授权的首个根；"
             "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
@@ -751,13 +781,18 @@ _tighten_flat_tool_schemas()
 
 
 @mcp.resource("seedream://workspace/roots{?verbose}", mime_type="application/json")
-async def workspace_roots_resource(ctx: Context[Any, Any], verbose: bool = False) -> str:
+async def workspace_roots_resource(ctx: Context, verbose: bool = False) -> str:
     """工作区根目录。
 
-    展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。SDK 2.0 起
-    Context 仅注入模板资源，静态 URI 无法取得请求上下文，故以可选 query 参数构成
-    模板；verbose 附各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots
-    读取仍匹配（query 参数可省略）。
+    展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。verbose 附
+    各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots 读取仍匹配，
+    query 参数可省略。
+
+    mcp 2.0 的 Context 注入仅接线模板资源，静态 URI 无法取得请求上下文，故以可选
+    query 参数构成模板。模板资源处理器经 pydantic validate_call 包装，ctx 参数注解
+    必须为裸 Context：参数化形式如 Context[Any, Any] 会被重校验为脱离请求的空实例，
+    首次访问 ctx.session 即抛 ValueError，客户端收到 Error creating resource from
+    template。裸 Context 注解的实例原样透传，session 与 lifespan_context 均可用。
     """
     async with workspace_roots_scope(ctx):
         # 边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端

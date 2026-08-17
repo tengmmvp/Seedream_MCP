@@ -33,6 +33,9 @@ logger = get_logger(__name__)
 
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
+# 清理失败后的重试退避秒数：失败时写入该秒数形态的短退避时间戳，使失败重试有独立
+# 于完整节流间隔的下限，高频保存下持续失败的清理不再每次调用都触发全目录扫描。
+_CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS = 60
 # 按 base_dir 记录最近清理时间，跨请求共享节流；不同 base_dir 独立，互不抑制。
 # 用 OrderedDict 并设上限，避免异常多变的 base_dir 使键无界增长耗尽内存。
 _CLEANUP_LAST_RUN_MAX_ENTRIES = 16
@@ -62,7 +65,7 @@ async def drain_background_cleanup_tasks() -> None:
     请求路径的 AutoSaveManager.close 不等待清理，以免阻塞返回路径并引入跨请求耦合；
     stdio 经 lifespan teardown、streamable-http 经服务循环的退出清理间接调用本函数，
     保证进程退出时清理已完成、节流状态定局。任务自身失败已在
-    _run_cleanup_in_background 内回滚节流时间戳并记录日志，此处仅等待不重试；
+    _run_cleanup_in_background 内写入失败退避时间戳并记录日志，此处仅等待不重试；
     等待期间新 spawn 的任务不在本轮快照内，交由下次调用或进程退出兜底。
     """
     if _cleanup_tasks:
@@ -200,6 +203,7 @@ class AutoSaveManager:
         date_folder: 是否按日期创建文件夹。
         cleanup_days: 自动清理天数，0 表示不按天清理。
         max_total_bytes: 保存目录总字节上限，None 表示不限制。
+        fsync: 落盘是否在原子替换前执行 fsync。
     """
 
     def __init__(
@@ -213,6 +217,7 @@ class AutoSaveManager:
         cleanup_days: int = 30,
         max_total_bytes: int | None = None,
         download_manager: DownloadManager | None = None,
+        fsync: bool = False,
     ):
         """初始化自动保存管理器。
 
@@ -226,6 +231,8 @@ class AutoSaveManager:
             cleanup_days: 自动清理天数，0 表示不按天清理。
             max_total_bytes: 保存目录总字节上限，超出按最旧文件驱逐；None 表示不限制。
             download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭。
+            fsync: 落盘是否在写入后、原子替换前执行 os.fsync，透传至 save_bytes 字节
+                落盘与经下载管理器落盘两条路径。
         """
         self.file_manager = FileManager(base_dir)
         self.max_file_size = max_file_size
@@ -241,6 +248,7 @@ class AutoSaveManager:
         self.date_folder = date_folder
         self.cleanup_days = cleanup_days
         self.max_total_bytes = max_total_bytes
+        self.fsync = fsync
 
     async def __aenter__(self) -> AutoSaveManager:
         """进入上下文，直接返回自身，不预热下载会话。"""
@@ -255,7 +263,7 @@ class AutoSaveManager:
 
         仅关闭本实例自建的下载管理器；外部共享的下载管理器由其所有者管理，如 lifespan。
         不等待在途后台清理任务：清理仅访问文件系统、不依赖下载会话，失败已在任务内
-        回滚节流时间戳并记录日志，无需 close 同步；模块级任务集合上的等待反而使请求
+        写入退避时间戳并记录日志，无需 close 同步；模块级任务集合上的等待反而使请求
         返回路径被全量目录遍历阻塞，并造成跨请求延迟耦合。退出前的等待收敛在
         drain_background_cleanup_tasks，由进程级清理入口调用。
         """
@@ -268,9 +276,9 @@ class AutoSaveManager:
         清理入口不设开关短路：遗留 .part 孤儿清扫须在 auto-save 启用时无条件可达，
         两项清理策略均显式关闭的部署下进程崩溃遗留的临时文件同样被回收，不无界
         累积。按天清理与配额驱逐仍由 run_cleanup_policies 按各自开关分别门控。
-        节流时间戳仅在清理成功后保留，失败时回滚到清理前的值，使下次批量保存可尽快重试，
-        避免瞬时清理失败被节流一整小时。重试频率受限于批量保存调用频率，不会形成即时重试
-        风暴；锁内完成检查与占位保证并发请求不会同时进入清理。
+        节流时间戳仅在清理成功后保留，失败时改写为短退避时间戳，使下次重试至少
+        等待退避秒数，与完整节流间隔解耦；锁内完成检查与占位保证并发请求不会同时
+        进入清理。
         """
         base_key = str(self.file_manager.base_dir)
         now = time.time()
@@ -281,17 +289,17 @@ class AutoSaveManager:
             _cleanup_last_run[base_key] = now
             while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
                 _cleanup_last_run.popitem(last=False)
-        # 后台执行清理，不阻塞当前请求返回；失败回滚节流时间戳供下次重试。
-        task = asyncio.create_task(self._run_cleanup_in_background(base_key, previous))
+        # 后台执行清理，不阻塞当前请求返回；失败写入短退避时间戳供下次重试。
+        task = asyncio.create_task(self._run_cleanup_in_background(base_key))
         _cleanup_tasks.add(task)
         task.add_done_callback(_cleanup_tasks.discard)
 
-    async def _run_cleanup_in_background(self, base_key: str, previous: float) -> None:
-        """在后台线程执行清理，失败时回滚节流时间戳。
+    async def _run_cleanup_in_background(self, base_key: str) -> None:
+        """在后台线程执行清理，失败时写入短退避时间戳。
 
         run_cleanup_policies 对扫描级与逐项错误宽捕获并收入返回值 errors 列表而非
-        上抛，逐项失败同样回滚节流时间戳：部分失败意味着目录可能仍超限，下次批量
-        保存应尽快重试而非等待完整节流间隔。
+        上抛，逐项失败同样写入短退避时间戳：部分失败意味着目录可能仍超限，下次批量
+        保存应重试而非等待完整节流间隔，重试频率由退避秒数封顶。
         """
         try:
             # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历。
@@ -301,18 +309,25 @@ class AutoSaveManager:
                 self.max_total_bytes,
             )
         except Exception as e:
-            await self._rollback_cleanup_throttle(base_key, previous)
+            await self._apply_cleanup_failure_backoff(base_key)
             logger.warning("自动清理失败: {}", e, exc_info=True)
             return
         errors = outcome.get("errors") if isinstance(outcome, dict) else None
         if errors:
-            await self._rollback_cleanup_throttle(base_key, previous)
+            await self._apply_cleanup_failure_backoff(base_key)
             logger.warning("自动清理部分失败: {}", errors)
 
-    async def _rollback_cleanup_throttle(self, base_key: str, previous: float) -> None:
-        """回滚到清理前的时间戳，使下次批量保存能立即重试而非等待完整节流间隔。"""
+    async def _apply_cleanup_failure_backoff(self, base_key: str) -> None:
+        """清理失败后写入短退避时间戳，使失败重试有独立节流下限。
+
+        时间戳取 now - interval + backoff 形态，下次调用须再等待退避秒数方可重试；
+        回写清理前旧值会使失败后的首次调用立即再次触发全目录扫描，高频保存下持续
+        失败的清理退化为每次保存都扫描目录。
+        """
         async with _cleanup_lock:
-            _cleanup_last_run[base_key] = previous
+            _cleanup_last_run[base_key] = (
+                time.time() - _CLEANUP_MIN_INTERVAL_SECONDS + _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
+            )
 
     def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""
@@ -357,7 +372,9 @@ class AutoSaveManager:
                 date_folder=self.date_folder,
             )
 
-            download_result = await self.download_manager.download_image(url, save_path)
+            download_result = await self.download_manager.download_image(
+                url, save_path, fsync=self.fsync
+            )
 
             # 字节签名嗅探可能修正扩展名，实际落盘路径以下载结果的 file_path 为准；
             # URL 派生的 save_path 此时可能指向不存在的文件，不得用于对外报告。
@@ -483,7 +500,7 @@ class AutoSaveManager:
                 )
                 # save_path 由 create_save_path_from_extension 返回，父目录已确保存在，跳过重复 mkdir。
                 write_result = self.file_manager.save_bytes(
-                    save_path, content_bytes, ensure_parent=False
+                    save_path, content_bytes, ensure_parent=False, fsync=self.fsync
                 )
                 return write_result, mime
 

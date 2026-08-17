@@ -424,6 +424,19 @@ class SequentialGenerationInput(
         description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。",
     )
 
+    # 覆盖共享基类的 request_count 描述以表达组图特例：单次请求产出的是一组图片而非
+    # 单张，单组数量由 max_images 控制，共享描述的「每次各产出一张图」在本工具不成立。
+    # 覆盖声明不改变字段顺序，平铺签名镜像由守护测试继续锁定。
+    request_count: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_PARALLEL_REQUEST_COUNT,
+        description=(
+            "同一提示并行发起的独立生成次数，每次各产出一组图片，单组数量由 "
+            "max_images 控制；适合一次获取多组独立的组图结果。"
+        ),
+    )
+
     @field_validator("image", mode="before")
     @classmethod
     def validate_reference_images(cls, value: str | list[str] | None) -> list[str] | None:

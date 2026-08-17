@@ -128,6 +128,7 @@ async def atomic_replace_from_fd(
     final_path: Path,
     writer: Callable[[int], Awaitable[Path | None]],
     suffix: str = ".part",
+    fsync: bool = False,
 ) -> Path:
     """经随机名临时文件原子落盘，返回实际创建的随机临时路径。
 
@@ -149,6 +150,9 @@ async def atomic_replace_from_fd(
         writer: 接收 fd 的异步写入回调，须以 closefd=False 包装 fd，可返回覆盖用的
             最终路径或 None。
         suffix: 临时文件名后缀，用于可读性与调试定位。
+        fsync: writer 正常返回后、替换前是否对 fd 执行 os.fsync。默认关闭：写入经
+            os.replace 原子可见，但字节到达稳定存储的时机由操作系统回写决定，进程
+            或主机崩溃存在最近写入丢失的窗口；开启后经线程池执行 fsync 消除该窗口。
 
     Returns:
         实际创建的随机名临时路径（替换成功后已重命名为最终路径）。
@@ -161,6 +165,8 @@ async def atomic_replace_from_fd(
     try:
         try:
             override_path = await writer(fd)
+            if fsync:
+                await asyncio.to_thread(os.fsync, fd)
         finally:
             os.close(fd)
         target = final_path if override_path is None else override_path
@@ -207,6 +213,7 @@ def atomic_replace_from_fd_sync(
     final_path: Path,
     writer: Callable[[int], None],
     suffix: str = ".part",
+    fsync: bool = False,
 ) -> Path:
     """经随机名临时文件同步原子落盘，返回实际创建的随机临时路径。
 
@@ -223,6 +230,9 @@ def atomic_replace_from_fd_sync(
         final_path: 最终目标路径，临时文件在其所在目录创建以保证同文件系统原子替换。
         writer: 接收 fd 的同步写入回调，须以 closefd=False 包装 fd。
         suffix: 临时文件名后缀，用于可读性与调试定位。
+        fsync: writer 正常返回后、替换前是否对 fd 执行 os.fsync。默认关闭：写入经
+            os.replace 原子可见，但字节到达稳定存储的时机由操作系统回写决定，进程
+            或主机崩溃存在最近写入丢失的窗口；开启后执行 fsync 消除该窗口。
 
     Returns:
         实际创建的随机名临时路径（替换成功后已重命名为 final_path）。
@@ -235,6 +245,8 @@ def atomic_replace_from_fd_sync(
     try:
         try:
             writer(fd)
+            if fsync:
+                os.fsync(fd)
         finally:
             os.close(fd)
         temp_path.replace(final_path)

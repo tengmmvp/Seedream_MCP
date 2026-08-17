@@ -17,6 +17,28 @@ from _download_fakes import (
 )
 
 
+def _patch_unretrieved_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> "list[asyncio.Task[Any]]":
+    """把 logs.log_unretrieved_task_exception 替换为记录 task 并检索异常的替身。
+
+    arm_unretrieved_exception_logging 登记回调时经 logs 模块全局解析目标函数，对象式
+    遮蔽即生效。替身检索异常保持 "Task exception was never retrieved" 静默。返回已
+    触发回调的 task 列表，供断言登记时序。
+    """
+    from seedream_mcp.utils.core import logs
+
+    fired: "list[asyncio.Task[Any]]" = []
+
+    def record(task: "asyncio.Task[Any]") -> None:
+        fired.append(task)
+        if not task.cancelled():
+            task.exception()
+
+    monkeypatch.setattr(logs, "log_unretrieved_task_exception", record)
+    return fired
+
+
 class _FakeLoop:
     def __init__(self) -> None:
         self.calls = 0
@@ -87,6 +109,83 @@ async def test_resolve_public_ips_dedups_inflight_resolutions(
     # task 完成后在途登记已清空，缓存已写入
     assert manager._dns_inflight == {}
     assert "example.com" in manager._dns_cache
+
+
+@pytest.mark.asyncio
+async def test_resolve_failure_consumed_by_caller_not_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """在途解析抛错且由调用方正常消费时不登记"未取回异常"回调。
+
+    常规失败路径的异常经 shield 交还调用方、由既有错误通道记录；若仍无条件挂回调，
+    同一异常会以"后台共享任务失败"重复入日志。回调仅在消费方放弃等待时登记。
+    """
+    fired = _patch_unretrieved_callback(monkeypatch)
+
+    class _FailingResolveLoop:
+        """getaddrinfo 直接抛 OSError，构造在途解析失败。"""
+
+        async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+            del host, port, proto
+            raise OSError("dns boom")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: _FailingResolveLoop())
+
+    manager = DownloadManager(dns_cache_ttl=60)
+    with pytest.raises(DownloadError):
+        await manager._resolve_public_ips("example.com")
+
+    # 推进事件循环跑完可能排队的 done callback 后仍无回调触发
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """调用方被取消且无其他等待者时，在途解析失败经登记的回调检索且仅触发一次。"""
+    fired = _patch_unretrieved_callback(monkeypatch)
+
+    class _GatedFailingLoop:
+        """getaddrinfo 阻塞在 gate 上，放行后抛 OSError 以构造延迟的在途解析失败。"""
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.gate = asyncio.Event()
+
+        async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+            del host, port, proto
+            self.calls += 1
+            await self.gate.wait()
+            raise OSError("dns boom")
+
+    fake_loop = _GatedFailingLoop()
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+
+    manager = DownloadManager(dns_cache_ttl=60)
+    caller = asyncio.create_task(manager._resolve_public_ips("example.com"))
+    # 让出控制权使 caller 调度到在途等待点；getaddrinfo 已被调用一次并阻塞在 gate
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if fake_loop.calls == 1:
+            break
+    assert "example.com" in manager._dns_inflight
+
+    inflight = manager._dns_inflight["example.com"]
+    caller.cancel()
+    fake_loop.gate.set()
+
+    done, pending = await asyncio.wait({caller, inflight})
+    assert pending == set()
+    assert done == {caller, inflight}
+    assert caller.cancelled()
+    # 推进事件循环跑完 inflight 完成时排队的 done callback
+    await asyncio.sleep(0)
+
+    assert fired == [inflight]
+    assert isinstance(inflight.exception(), DownloadError)
 
 
 def test_validate_connected_peer_ip_blocks_non_public_ip() -> None:

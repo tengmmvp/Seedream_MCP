@@ -12,6 +12,7 @@ from loguru import logger
 
 from seedream_mcp.utils.core.logs import (
     _strip_message_control_chars,
+    arm_unretrieved_exception_logging,
     log_unretrieved_task_exception,
     setup_logging,
 )
@@ -21,7 +22,7 @@ _RecordException = namedtuple("_RecordException", "type value traceback")
 
 
 class _FakeLogger:
-    """替身 loguru logger，吸收 remove/add/info 调用并记录 add 的关键字参数。
+    """替身 loguru logger，吸收 remove/add/info 调用并记录 add 与 warning 的参数。
 
     真实 setup_logging 会调用 logger.remove() 清空全局 loguru handler 并 logger.add()
     注册新 handler，污染跨测试的全局日志状态。测试期间以替身替换模块级 logger，使其
@@ -30,6 +31,7 @@ class _FakeLogger:
 
     def __init__(self) -> None:
         self.add_kwargs: list[dict] = []
+        self.warnings: list[str] = []
 
     def remove(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
@@ -44,6 +46,9 @@ class _FakeLogger:
 
     def info(self, *args: object, **kwargs: object) -> None:
         del args, kwargs
+
+    def warning(self, message: str, *args: object) -> None:
+        self.warnings.append(message.format(*args) if args else message)
 
 
 @pytest.fixture
@@ -124,6 +129,76 @@ def test_setup_logging_suppresses_third_party_info_noise(
 
     for name in ("urllib3", "aiohttp", "asyncio", "httpx"):
         assert logging.getLogger(name).level == logging.WARNING
+
+
+# ==================== root 已有 handler 且未强制接管时的告警 ====================
+
+
+def test_setup_logging_warns_when_root_handlers_block_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """root logger 已有 handler 且未强制接管时输出 warning，提示标准库日志未被拦截。
+
+    basicConfig 在该场景整体 no-op，标准库日志绕过 loguru 桥接与控制字符防护；
+    force 语义不变，调用参数仍透传 force=False。
+    """
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [logging.NullHandler()])
+    captured_kwargs: dict = {}
+
+    def fake_basic_config(*args: object, **kwargs: object) -> None:
+        del args
+        captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
+    fake = _FakeLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+
+    setup_logging(
+        log_level="INFO",
+        enable_console=False,
+        enable_file=False,
+        force_standard_logging=False,
+    )
+
+    assert len(fake.warnings) == 1
+    assert "未被 loguru 拦截" in fake.warnings[0]
+    assert captured_kwargs["force"] is False
+
+
+def test_setup_logging_no_warning_when_force_takes_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """force=True 强制接管时 basicConfig 重装 root handlers，不输出告警。"""
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [logging.NullHandler()])
+    monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
+    fake = _FakeLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+
+    setup_logging(
+        log_level="INFO",
+        enable_console=False,
+        enable_file=False,
+        force_standard_logging=True,
+    )
+
+    assert fake.warnings == []
+
+
+def test_setup_logging_no_warning_when_root_has_no_handlers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """root 无 handler 时 basicConfig 正常安装桥接器，无需告警。"""
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
+    fake = _FakeLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+
+    setup_logging(log_level="INFO", enable_console=False, enable_file=False)
+
+    assert fake.warnings == []
 
 
 # ==================== 文件日志默认路径与桥接帧定位 ====================
@@ -244,10 +319,17 @@ def test_patcher_handles_record_without_exception() -> None:
 
 
 class _CaptureLogger:
-    """捕获 warning 调用的 loguru 替身，格式化 loguru 风格的模板参数。"""
+    """捕获 warning 调用的 loguru 替身，格式化 loguru 风格的模板参数并记录 opt 传参。"""
 
     def __init__(self) -> None:
         self.warnings: list[str] = []
+        self.opt_kwargs: list[dict] = []
+
+    def opt(self, *args: Any, **kwargs: Any) -> "_CaptureLogger":
+        del args
+        if kwargs:
+            self.opt_kwargs.append(dict(kwargs))
+        return self
 
     def warning(self, message: str, *args: Any) -> None:
         self.warnings.append(message.format(*args))
@@ -256,7 +338,7 @@ class _CaptureLogger:
 async def test_log_unretrieved_task_exception_warns_for_failed_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """已完成且携带异常的 task 经回调记录 warning，异常文本进入日志。"""
+    """已完成且携带异常的 task 经回调记录 warning，异常文本与完整堆栈进入日志。"""
     from seedream_mcp.utils.core import logs
 
     async def failing() -> None:
@@ -273,6 +355,8 @@ async def test_log_unretrieved_task_exception_warns_for_failed_task(
     log_unretrieved_task_exception(task)
 
     assert capture.warnings == ["后台共享任务失败: shared task failed"]
+    # warning 经 opt(exception=exc) 携带完整异常堆栈，满足错误日志记录完整堆栈的规范
+    assert capture.opt_kwargs == [{"exception": task.exception()}]
 
 
 async def test_log_unretrieved_task_exception_silent_for_cancelled_task(
@@ -295,5 +379,51 @@ async def test_log_unretrieved_task_exception_silent_for_cancelled_task(
     monkeypatch.setattr(logs, "logger", capture)
 
     log_unretrieved_task_exception(task)
+
+    assert capture.warnings == []
+
+
+async def test_arm_unretrieved_exception_logging_dedupes_repeated_arming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重复登记同一 task 仅挂一次回调，孤儿失败只记录一条 warning。"""
+    from seedream_mcp.utils.core import logs
+
+    async def failing() -> None:
+        raise RuntimeError("orphan failed")
+
+    task = asyncio.get_running_loop().create_task(failing())
+    arm_unretrieved_exception_logging(task)
+    arm_unretrieved_exception_logging(task)
+
+    capture = _CaptureLogger()
+    monkeypatch.setattr(logs, "logger", capture)
+
+    # 轮询推进事件循环至 task 完成并跑完排队的 done callback，期间不检索异常
+    while not task.done():
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert capture.warnings == ["后台共享任务失败: orphan failed"]
+
+
+async def test_arm_unretrieved_exception_logging_silent_when_task_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """登记后 task 成功完成时回调无异常可检索，不记录任何日志。"""
+    from seedream_mcp.utils.core import logs
+
+    async def succeeding() -> None:
+        return None
+
+    task = asyncio.get_running_loop().create_task(succeeding())
+    arm_unretrieved_exception_logging(task)
+
+    capture = _CaptureLogger()
+    monkeypatch.setattr(logs, "logger", capture)
+
+    while not task.done():
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
     assert capture.warnings == []

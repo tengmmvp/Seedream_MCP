@@ -38,7 +38,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: 📦 Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
 
       - name: 🎨 Check formatting
         run: uv run black --check seedream_mcp tests
@@ -56,8 +56,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows 矩阵验证 O_NOFOLLOW 兜底与 reparse point 剔除等平台专属安全路径。
-        os: [ubuntu-latest, windows-latest]
+        # Windows 验证 O_NOFOLLOW 兜底与 reparse point 剔除等平台专属安全路径，
+        # macOS 覆盖 POSIX 路径处理，与 OS Independent 声明对齐。
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.12", "3.13", "3.14"]
 
     steps:
@@ -76,7 +77,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: 📦 Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
 
       - name: ✅ Run tests
         run: uv run pytest -q
@@ -84,11 +85,20 @@ jobs:
   docker:
     name: 🐳 Docker Build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: 🧱 Build Docker image
-        run: docker build .
+      - name: 🛠️ Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: 🧱 Build multi-arch Docker image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

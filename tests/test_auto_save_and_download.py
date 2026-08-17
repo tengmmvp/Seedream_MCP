@@ -17,6 +17,7 @@ from seedream_mcp.utils.io.io_download import (
 
 from _download_fakes import (
     _PNG_BYTES,
+    _FakeResponse,
     _FakeSession,
     _patch_download_network,
     _png_success_response,
@@ -79,7 +80,7 @@ async def test_save_image_returns_failure_on_download_error(
     manager = AutoSaveManager(base_dir=tmp_path)
     try:
 
-        async def fake_download(url, save_path, headers=None):  # type: ignore[no-untyped-def]
+        async def fake_download(url, save_path, headers=None, fsync=False):  # type: ignore[no-untyped-def]
             raise DownloadError("网络错误")
 
         monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
@@ -188,36 +189,48 @@ async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
         await manager.close()
 
 
-async def test_maybe_cleanup_retries_after_failure(
+async def test_maybe_cleanup_failure_backoff_throttles_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """清理失败时节流时间戳回滚，下次批量保存可立即重试而非等待完整间隔。"""
+    """清理失败时写入短退避时间戳，失败重试有独立于完整节流间隔的下限。
+
+    旧行为回滚到清理前旧值，失败后的首次调用立即再次触发全目录扫描，高频保存下
+    持续失败的清理退化为每次保存都扫描；退避时间戳使下次重试至少等待 60 秒。
+    """
+    import time as time_module
+
     from seedream_mcp.utils.io import io_save as auto_save_module
 
     auto_save_module._cleanup_last_run.clear()
     calls: list[int] = []
 
-    def failing_then_succeeding_cleanup(days: int, max_total_bytes: int | None) -> dict:
+    def failing_cleanup(days: int, max_total_bytes: int | None) -> dict:
         calls.append(days)
-        if len(calls) == 1:
-            raise RuntimeError("transient cleanup failure")
-        return {"deleted_files": 0, "deleted_size": 0, "errors": []}
+        raise RuntimeError("persistent cleanup failure")
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
     try:
-        monkeypatch.setattr(
-            manager.file_manager, "run_cleanup_policies", failing_then_succeeding_cleanup
-        )
+        monkeypatch.setattr(manager.file_manager, "run_cleanup_policies", failing_cleanup)
 
-        # 首次清理失败：异常被吞，时间戳回滚使下次可重试
+        # 首次清理失败：异常被吞，写入短退避时间戳
         await manager._maybe_cleanup()
         await auto_save_module.drain_background_cleanup_tasks()
         assert calls == [30]
 
-        # 紧接着的第二次因上次失败未占用节流窗口，可立即重试
+        # 紧接着的第二次调用被退避时间戳节流，不再立即重试
         await manager._maybe_cleanup()
         await auto_save_module.drain_background_cleanup_tasks()
-        assert calls == [30, 30]
+        assert calls == [30]
+
+        # 退避时间戳形态为 now - interval + backoff：距下次可重试还需约退避秒数，
+        # 用例执行耗时可忽略，余量按退避值减 1 秒容差断言
+        base_key = str(manager.file_manager.base_dir)
+        stored = auto_save_module._cleanup_last_run[base_key]
+        remaining_wait = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS - (
+            time_module.time() - stored
+        )
+        assert remaining_wait >= auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS - 1
+        assert remaining_wait < auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
     finally:
         await manager.close()
 
@@ -237,7 +250,7 @@ async def test_close_does_not_wait_for_background_cleanup(
     started = asyncio.Event()
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
 
-    async def held_cleanup(base_key: str, previous: float) -> None:
+    async def held_cleanup(base_key: str) -> None:
         started.set()
         await release.wait()
 
@@ -279,5 +292,111 @@ async def test_save_base64_image_rejects_non_image_bytes(tmp_path: Path) -> None
         result = await manager.save_base64_image(bad_b64)
         assert result.success is False
         assert "不是受支持的图片格式" in (result.error or "")
+    finally:
+        await manager.close()
+
+
+async def test_download_image_rejects_html_content_type_single_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """200 + text/html 驱动 download_image 主循环：终态 DownloadError、单次尝试、不落盘。
+
+    HTML 错误页属语义明确的非图片响应，内容类型校验在写盘前拒绝；误入可重试分类
+    会徒增退避等待且最终仍不可能成功。
+    """
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(status=200, headers={"content-type": "text/html"})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="响应内容类型非图片"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert session._idx == 1
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_validate_url_rejects_ftp_scheme() -> None:
+    """ftp 协议在静态校验即被拒绝，validate_url 返回 False 而不抛出。"""
+    assert DownloadManager().validate_url("ftp://x/1.png") is False
+
+
+# ==================== fsync 开关透传 ====================
+
+
+async def test_save_base64_image_fsync_true_calls_os_fsync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """fsync=True 经 AutoSaveManager 透传到 save_bytes 落盘，os.fsync 被调用。"""
+    import os as os_module
+
+    fsync_calls: list[int] = []
+    real_fsync = os_module.fsync
+
+    def _tracking_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os_module, "fsync", _tracking_fsync)
+
+    manager = AutoSaveManager(base_dir=tmp_path, fsync=True)
+    try:
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
+        assert result.success is True
+        assert result.local_path is not None
+        assert Path(result.local_path).read_bytes()
+        assert len(fsync_calls) == 1
+    finally:
+        await manager.close()
+
+
+async def test_save_image_fsync_true_passes_through_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """fsync=True 经 AutoSaveManager 透传到下载落盘路径，下载完成后 os.fsync 被调用。"""
+    import os as os_module
+
+    fsync_calls: list[int] = []
+    real_fsync = os_module.fsync
+
+    def _tracking_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os_module, "fsync", _tracking_fsync)
+
+    download_manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, download_manager, session)
+    manager = AutoSaveManager(base_dir=tmp_path, download_manager=download_manager, fsync=True)
+
+    async with manager:
+        result = await manager.save_image("https://example.com/img.png", prompt="测试图片")
+
+    assert result.success is True
+    assert result.local_path is not None
+    assert Path(result.local_path).read_bytes() == _PNG_BYTES
+    assert len(fsync_calls) == 1
+
+
+async def test_save_base64_image_fsync_default_off_skips_os_fsync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """默认 fsync 关闭：落盘成功但不调用 os.fsync，不产生同步刷盘开销。"""
+    import os as os_module
+
+    fsync_calls: list[int] = []
+
+    def _tracking_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+
+    monkeypatch.setattr(os_module, "fsync", _tracking_fsync)
+
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+        result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
+        assert result.success is True
+        assert fsync_calls == []
     finally:
         await manager.close()

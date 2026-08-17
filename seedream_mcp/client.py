@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import random
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Iterator, Sequence, cast
@@ -798,7 +799,8 @@ class SeedreamClient:
 
         - `timeout`：连接建立、连接池获取与请求写入阶段的上限
         - `api_timeout`：响应读取阶段的单次读取间隔上限。httpx 的 read 超时按单次
-          读操作计时而非整个响应的累计时长，流式响应持续慢滴流时不构成总时长约束
+          读操作计时而非整个响应的累计时长，慢滴流响应的总时长约束由
+          _send_stream_request 与 _send_standard_request 的截止时间预算补足
         """
         if self._timeout is None:
             base_timeout = float(self.config.timeout)
@@ -1129,17 +1131,32 @@ class SeedreamClient:
         return min(self._response_body_byte_limit(), _ERROR_BODY_BYTE_LIMIT)
 
     async def _read_response_body_capped(
-        self, response: httpx.Response, *, max_bytes: int | None = None
+        self,
+        response: httpx.Response,
+        *,
+        max_bytes: int | None = None,
+        status_code: int | None = None,
+        deadline: float | None = None,
     ) -> bytes:
-        """流式读取响应体并施加总量上限，超限抛出 SeedreamAPIError。
+        """流式读取响应体并施加总量与总时长上限，超限抛出对应异常。
 
         max_bytes 缺省时取 _response_body_byte_limit；错误路径传入
         _error_body_byte_limit 的独立小上限。Content-Length 头先做快速预检，
         超限时无需读取直接拒绝；chunked 或缺失 Content-Length 的响应在
         aiter_bytes 累计读取中强制上限，超限时中断读取并抛出携带实际读取字节数的
-        错误。chunks 列表与 join 产物在返回前短暂并存，进程内存峰值约为已读字节
-        的 2 倍，默认上限下可达约 2GB，部署方需按此峰值规划进程内存。
-        响应的关闭由调用方负责（stream 上下文退出或显式 aclose）。
+        错误。status_code 由错误路径传入：超限异常携带该状态码，使 _call_api 按
+        429/5xx 可重试、4xx 立即失败的既有分类处置，5xx 大错误体的可重试语义不因
+        读体截断而丢失；成功路径不传，超限保持无状态码的立即失败。deadline 为
+        本次请求的 time.monotonic 截止时间，逐块检查封顶整个读体阶段：httpx 的
+        read 超时按单次读操作计时，上游以小于该间隔滴流时永不触发，超限抛
+        asyncio.TimeoutError 并入 _call_api 的超时重试路径。chunks 列表与 join
+        产物在返回前短暂并存，进程内存峰值约为已读字节的 2 倍，默认上限下可达约
+        2GB，部署方需按此峰值规划进程内存。响应的关闭由调用方负责，stream 上下文
+        退出或显式 aclose。
+
+        Raises:
+            SeedreamAPIError: 响应体超过 max_bytes，携带 status_code 提供时的状态码。
+            asyncio.TimeoutError: 提供 deadline 且读体中途超过截止时间。
         """
         if max_bytes is None:
             max_bytes = self._response_body_byte_limit()
@@ -1152,18 +1169,22 @@ class SeedreamClient:
             if declared_bytes > max_bytes:
                 raise SeedreamAPIError(
                     f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
-                    f"超过上限 {max_bytes} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
+                    f"超过上限 {max_bytes} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
+                    status_code=status_code,
                 )
         chunks: list[bytes] = []
         received = 0
         async for chunk in response.aiter_bytes():
             if not chunk:
                 continue
+            if deadline is not None and time.monotonic() > deadline:
+                raise asyncio.TimeoutError(f"响应体读取超过总时长预算: 已读取 {received} 字节")
             received += len(chunk)
             if received > max_bytes:
                 raise SeedreamAPIError(
                     f"响应体过大: 已读取 {received} 字节，超过上限 {max_bytes} 字节，"
-                    f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
+                    f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
+                    status_code=status_code,
                 )
             chunks.append(chunk)
         if received > _JOIN_OFFLOAD_THRESHOLD:
@@ -1190,13 +1211,18 @@ class SeedreamClient:
 
         return await asyncio.to_thread(_decode_as_message)
 
-    async def _raise_for_stream_response_status(self, response: httpx.Response) -> None:
+    async def _raise_for_stream_response_status(
+        self, response: httpx.Response, *, deadline: float | None = None
+    ) -> None:
         """将流式响应中的非 200 状态码转换为统一 API 异常。"""
         if response.status_code == 200:
             return
 
         raw_body = await self._read_response_body_capped(
-            response, max_bytes=self._error_body_byte_limit()
+            response,
+            max_bytes=self._error_body_byte_limit(),
+            status_code=response.status_code,
+            deadline=deadline,
         )
         error_data = await self._error_data_from_body(raw_body)
         self._raise_api_error_for(response.status_code, response.headers, error_data)
@@ -1209,12 +1235,19 @@ class SeedreamClient:
         request_body: bytes,
         request_timeout: httpx.Timeout,
     ) -> dict[str, Any]:
-        """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。"""
+        """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。
+
+        进入时按 config.api_timeout 记录本次尝试的总时长截止时间，SSE 解析与流式
+        JSON 读体全程受其封顶：httpx 的 read 超时按单次读操作计时，上游以小于该
+        间隔滴流时流式请求永不超时，超限抛 asyncio.TimeoutError 并入 _call_api 的
+        超时重试分支。重试由 _call_api 发起，每次尝试经本方法重新计预算。
+        """
+        deadline = time.monotonic() + float(self.config.api_timeout)
         async with client.stream(
             "POST", url, content=request_body, timeout=request_timeout
         ) as response:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
-            await self._raise_for_stream_response_status(response)
+            await self._raise_for_stream_response_status(response, deadline=deadline)
 
             if is_sse_response(response):
                 sse_result = await parse_sse_response(
@@ -1229,6 +1262,7 @@ class SeedreamClient:
                     ),
                     total_bytes_limit=self._response_body_byte_limit(),
                     log=self.logger,
+                    deadline=deadline,
                 )
                 truncated_events = sse_result.pop("truncated_events", 0)
                 if isinstance(truncated_events, int) and truncated_events > 0:
@@ -1236,9 +1270,9 @@ class SeedreamClient:
                 return sse_result
 
             try:
-                raw_body = await self._read_response_body_capped(response)
+                raw_body = await self._read_response_body_capped(response, deadline=deadline)
                 payload = await asyncio.to_thread(json.loads, raw_body)
-            except SeedreamAPIError:
+            except (SeedreamAPIError, asyncio.TimeoutError):
                 raise
             except Exception as exc:
                 raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
@@ -1257,19 +1291,26 @@ class SeedreamClient:
         以 build_request + send(stream=True) 发送：client.post 会使 httpx 先全量缓冲
         响应体，Content-Length 预检在缓冲完成后才生效，chunked 或缺失 Content-Length
         的巨型响应在缓冲阶段无任何拦截；流式发送使总量限额在接收过程中即强制执行。
+        进入时按 config.api_timeout 记录本次尝试的总时长截止时间并约束两段读体：
+        httpx 的 read 超时按单次读操作计时，上游以小于该间隔滴流时非流式请求同样
+        永不超时，超限抛 asyncio.TimeoutError 并入 _call_api 的超时重试分支。
         """
+        deadline = time.monotonic() + float(self.config.api_timeout)
         request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
         response = await client.send(request, stream=True)
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
             if response.status_code != 200:
                 raw_body = await self._read_response_body_capped(
-                    response, max_bytes=self._error_body_byte_limit()
+                    response,
+                    max_bytes=self._error_body_byte_limit(),
+                    status_code=response.status_code,
+                    deadline=deadline,
                 )
                 error_data = await self._error_data_from_body(raw_body)
                 self._raise_api_error_for(response.status_code, response.headers, error_data)
 
-            raw_body = await self._read_response_body_capped(response)
+            raw_body = await self._read_response_body_capped(response, deadline=deadline)
             try:
                 payload = await asyncio.to_thread(json.loads, raw_body)
             except Exception as exc:
@@ -1353,7 +1394,9 @@ class SeedreamClient:
                 pending_retry_after = exc.retry_after
                 if attempt == total_attempts - 1:
                     raise
-            except httpx.TimeoutException as exc:
+            except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
+                # httpx 读取超时与 SSE/读体总时长预算超限在此同语义处置：均可重试，
+                # 重试耗尽后归一为 SeedreamTimeoutError。
                 self.logger.warning(
                     "{} API 调用超时 (尝试 {}/{}): {}",
                     endpoint,

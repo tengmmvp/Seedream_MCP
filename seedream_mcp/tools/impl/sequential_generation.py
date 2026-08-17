@@ -44,7 +44,7 @@ async def handle_sequential_generation(
     Args:
         params: 经 pydantic 校验的组图输出入参模型。
         config: 当前生效的 SeedreamConfig。
-        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
+        ctx: MCP 上下文，用于进度上报，无会话时可为 None。
 
     Returns:
         MCP 标准工具结果，含面向模型的文本摘要与 structuredContent，失败时不抛出异常而

@@ -2,9 +2,11 @@
 
 Windows UNC 路径（\\\\host\\share 或 //host/share）的 resolve 会触发 SMB 认证，
 须在 resolve 前由 is_unc_path 拦截。覆盖 is_unc_path、is_within_resolved、
-normalize_path、_file_uri_to_path 对 UNC 的拒绝行为与越界判定语义。
+normalize_path、_file_uri_to_path 对 UNC 的拒绝行为与越界判定语义，以及
+normalize_path 对 Windows 驱动器相对路径的同口径拒绝。
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -127,6 +129,32 @@ def test_normalize_path_oserror_preserves_reason(
 
     with pytest.raises(ValueError, match="File name too long"):
         normalize_path(str(tmp_path / "x.png"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对路径仅 Windows 有 drive 语义")
+@pytest.mark.parametrize("base_dir", [None, str(Path.cwd())])
+def test_normalize_path_rejects_drive_relative_path(base_dir: str | None) -> None:
+    """Windows 驱动器相对路径（如 C:foo，有 drive 无 root）与 UNC 同口径拒绝。
+
+    pathlib 的 / 拼接对该形态会丢弃 base_dir，resolve 落到该盘的进程 CWD，静默
+    绕开调用方指定的基础目录；旧行为无声落入 base_dir 分支，断言拒绝而非误解析。
+    """
+    with pytest.raises(ValueError, match="驱动器相对"):
+        normalize_path("C:foo.png", base_dir)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对路径仅 Windows 有 drive 语义")
+def test_normalize_path_accepts_drive_absolute_path(tmp_path: Path) -> None:
+    """带根分隔符的驱动器绝对路径（如 C:\\foo）不受驱动器相对拒绝影响。"""
+    result = normalize_path(str(tmp_path / "x.png"))
+    assert result == (tmp_path / "x.png").resolve()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 无 drive 语义，C:foo 为普通相对路径")
+def test_normalize_path_posix_treats_colon_name_as_relative(tmp_path: Path) -> None:
+    """POSIX 上含冒号的输入是普通相对路径，正常按 base_dir 解析，不受拒绝分支影响。"""
+    result = normalize_path("C:foo.png", str(tmp_path))
+    assert result == (tmp_path / "C:foo.png").resolve()
 
 
 # ==================== _file_uri_to_path ====================

@@ -633,3 +633,32 @@ def test_build_config_rejects_non_positive_response_body_limit(
 
     with pytest.raises(SeedreamConfigError, match="response_body_limit"):
         build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== auto_save_fsync 落盘刷盘开关 ====================
+
+
+def test_build_config_loads_auto_save_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_AUTO_SAVE_FSYNC=true 经 .env 加载为 True。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_FSYNC", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_AUTO_SAVE_FSYNC=true\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_fsync is True
+
+
+def test_build_config_auto_save_fsync_defaults_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 auto_save_fsync 默认 False，落盘不做同步刷盘。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_FSYNC", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_fsync is False

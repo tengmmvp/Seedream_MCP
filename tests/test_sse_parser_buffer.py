@@ -1,7 +1,10 @@
 """SSE 流式解析的缓冲区上限保护与事件聚合测试。"""
 
+import asyncio
 import json
+import time
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -13,16 +16,7 @@ from seedream_mcp.utils.io.io_sse import (
     parse_sse_segment,
 )
 
-
-class _FakeLog:
-    def debug(self, *a, **k) -> None:
-        pass
-
-    def warning(self, *a, **k) -> None:
-        pass
-
-    def error(self, *a, **k) -> None:
-        pass
+from _client_fakes import _FakeLog, _FakeSSEResponse
 
 
 class _CapturingLog(_FakeLog):
@@ -31,18 +25,8 @@ class _CapturingLog(_FakeLog):
     def __init__(self) -> None:
         self.debug_calls: list[tuple[object, ...]] = []
 
-    def debug(self, *a, **k) -> None:
+    def debug(self, *a: Any, **k: Any) -> None:
         self.debug_calls.append(a)
-
-
-class _FakeSSEResponse:
-    def __init__(self, chunks: list[bytes]) -> None:
-        self._chunks = chunks
-
-    async def aiter_bytes(self, chunk_size: int):
-        del chunk_size
-        for c in self._chunks:
-            yield c
 
 
 async def test_parse_sse_response_collects_events_and_completed() -> None:
@@ -607,6 +591,109 @@ async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
 
     # 超限后停止读取：实际消费的块数远小于上游供给的块数
     assert consumed < total_chunks
+
+
+async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
+    """大量小事件超过条目数硬上限时终止解析并标记 partial，解析产物不无界累积。
+
+    总量上限约束的是线上字节；每个事件解析为 dict 后体积放大，字节未超限时条目数
+    仍可无限增长。512KB 限额按 64 字节最小事件下界派生 8192 条上限，供给 12000 个
+    53 字节的事件使累计字节 636KB 但条目数先行触顶，字节上限不触发。
+    """
+    event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
+    assert len(event) == 53
+    events_per_chunk = 100
+    total_chunks = 120
+    consumed = 0
+
+    class _CountingResponse(_FakeSSEResponse):
+        async def aiter_bytes(self, chunk_size: int):
+            nonlocal consumed
+            del chunk_size
+            for c in self._chunks:
+                consumed += 1
+                yield c
+
+    response = _CountingResponse([event * events_per_chunk] * total_chunks)
+    result = await parse_sse_response(
+        response,
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        # 512KB 派生条目上限 8192；全部 12000 事件的字节总量 636KB 会触发字节上限，
+        # 条目数在约 82 块处先行触顶，两道上限的触发先后由此区分
+        total_bytes_limit=512 * 1024,
+        log=_FakeLog(),
+    )
+
+    # 条目数封顶：已解析条目不超过上限加单块内事件数，远小于供给总数
+    assert len(result["data"]) <= 8192 + events_per_chunk
+    # 终止解析后停止读取：实际消费块数远小于供给
+    assert consumed < total_chunks
+    # 与单事件截断同口径计数并标记 partial，通知调用方结果不完整
+    assert result["truncated_events"] >= 1
+    assert result["status"] == "partial"
+
+
+async def test_parse_sse_response_item_limit_floor_keeps_legal_batches() -> None:
+    """极小总量限额下条目上限取绝对下限兜底，合法小批次不被误截。
+
+    2048 字节限额按字节下界推导仅得 32 条上限，小于组图单请求 15 张的合法规模
+    余量；绝对下限 64 兜底后 33 个事件批次完整解析，不产生截断计数。
+    """
+    event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
+    event_count = 33
+    # 33 × 53 = 1749 字节，未超 2048 字节总量限额，仅条目数维度可能触发
+    assert event_count * len(event) < 2048
+    result = await parse_sse_response(
+        _FakeSSEResponse([event * event_count]),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=2048,
+        log=_FakeLog(),
+    )
+    assert len(result["data"]) == event_count
+    assert result["truncated_events"] == 0
+
+
+async def test_parse_sse_response_terminates_on_deadline() -> None:
+    """逐块检查截止时间：预算耗尽后关闭响应、停止读取并抛 asyncio.TimeoutError。"""
+    event = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+    consumed = 0
+    closed = 0
+
+    class _DeadlineResponse(_FakeSSEResponse):
+        async def aiter_bytes(self, chunk_size: int):
+            nonlocal consumed
+            del chunk_size
+            for c in self._chunks:
+                consumed += 1
+                await asyncio.sleep(0.05)
+                yield c
+
+        async def aclose(self) -> None:
+            nonlocal closed
+            closed += 1
+
+    with pytest.raises(asyncio.TimeoutError, match="总时长预算"):
+        await parse_sse_response(
+            _DeadlineResponse([event] * 200),
+            model_id="m",
+            chunk_size=64,
+            buffer_max_size=4096,
+            event_truncate_threshold=4096,
+            total_bytes_limit=64 * 1024,
+            log=_FakeLog(),
+            # 截止时间已过，首个块即触发终止
+            deadline=time.monotonic() - 1.0,
+        )
+
+    # 超限后关闭响应并停止读取
+    assert closed == 1
+    assert consumed < 200
 
 
 def _resp_with_content_type(content_type: str) -> SimpleNamespace:

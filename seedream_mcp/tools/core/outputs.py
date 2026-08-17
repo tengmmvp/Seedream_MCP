@@ -24,7 +24,8 @@ class _BaseStructuredOutput(BaseModel):
         tool: 产生该结果的工具标识。
         success: 工具执行是否成功。
         status: 执行状态标签，如 completed、failed 或 empty，未携带时为 None。
-        error: 结构化错误载荷，含 type 与 message 两键，无错误时为 None。
+        error: 结构化错误载荷，含 type 与 message 两键；上游错误携带错误码时另含
+            code 键，如并发全失败路径透传的上游 code。无错误时为 None。
     """
 
     model_config = ConfigDict(extra="allow")

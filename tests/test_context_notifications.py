@@ -1,55 +1,21 @@
 """MCP 上下文通知容错封装与工具元数据测试。
 
-覆盖进度上报与日志推送的容错封装，以及工具与资源的元数据注册：
-- _safe_ctx_log：按级别分发到对应 Context 方法，客户端不支持 logging 能力时静默跳过
+覆盖进度上报的容错封装，以及工具与资源的元数据注册：
 - _safe_report_progress：上报失败不影响主流程
 - 工具顶层 title 注册，对齐 MCP 2025-06-18 规范的 Tool.title 顶层字段
 - 工具 annotations 四项能力 hint 逐项锁定，资源 MIME 与内容格式一致
+
+SDK 2.0 起 logging capability 按 SEP-2577 弃用，ctx.debug/info/warning/error 调用
+触发 MCPDeprecationWarning 且无替代推送 API；日志推送通道已移除，客户端实时通知
+仅经 report_progress(message=...) 的进度消息承载，离线排查走 loguru 文件日志。
 """
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from seedream_mcp.server import mcp
-from seedream_mcp.tools.core.common import _safe_ctx_log, _safe_report_progress
-
-# ==================== _safe_ctx_log ====================
-
-
-@pytest.mark.parametrize("level", ["debug", "info", "warning", "error"])
-async def test_safe_ctx_log_dispatches_to_corresponding_method(level: str) -> None:
-    ctx = MagicMock()
-    setattr(ctx, level, AsyncMock())
-
-    await _safe_ctx_log(ctx, level, "hello")
-
-    getattr(ctx, level).assert_awaited_once_with("hello")
-
-
-async def test_safe_ctx_log_silent_when_ctx_is_none() -> None:
-    # ctx 为 None 时不应抛异常
-    await _safe_ctx_log(None, "info", "hello")
-
-
-async def test_safe_ctx_log_ignores_invalid_level() -> None:
-    ctx = MagicMock()
-    ctx.info = AsyncMock()
-
-    await _safe_ctx_log(ctx, "trace", "hello")  # 非法级别应被忽略
-
-    ctx.info.assert_not_called()
-
-
-async def test_safe_ctx_log_swallows_client_errors() -> None:
-    ctx = MagicMock()
-    ctx.info = AsyncMock(side_effect=RuntimeError("client lacks logging capability"))
-
-    # 客户端不支持 logging 能力时不应抛异常
-    await _safe_ctx_log(ctx, "info", "hello")
-
+from seedream_mcp.tools.core.common import _safe_report_progress
 
 # ==================== _safe_report_progress ====================
 
@@ -72,6 +38,22 @@ async def test_safe_report_progress_swallows_errors() -> None:
     ctx.report_progress = AsyncMock(side_effect=RuntimeError("no progress support"))
 
     await _safe_report_progress(ctx, progress=50.0, message="mid")
+
+
+# ==================== 日志推送通道移除守护 ====================
+
+
+def test_deprecated_ctx_log_push_channel_removed() -> None:
+    """ctx.debug/info/warning/error 的推送封装不复存在，防止弃用通道被重新引入。
+
+    SDK 2.0 对四个方法标注 MCPDeprecationWarning（SEP-2577，logging capability 自
+    2026-07-28 弃用），且 2026-07-28 起推送需请求级 opt-in、默认不送达；重新封装该
+    通道会使全量测试重新出现弃用告警并依赖已弃用的送达语义。
+    """
+    import seedream_mcp.tools.core._helpers as helpers_module
+
+    for name in ("_safe_ctx_log", "_VALID_LOG_LEVELS"):
+        assert not hasattr(helpers_module, name), name
 
 
 # ==================== 工具顶层 title 对齐 MCP 规范 ====================

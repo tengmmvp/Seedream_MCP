@@ -78,7 +78,7 @@ curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-comp
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
-服务以 streamable-http 传输监听容器内 `8000` 端口，宿主机端口由 `SEEDREAM_HTTP_PORT` 控制（默认 8000），MCP 端点路径为 `/mcp`。端口映射默认仅绑定回环地址 `127.0.0.1`，需从其他设备直连时把 docker-compose.yml 中的端口映射改为 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主机网卡地址。客户端接入配置（以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理）：
+服务以 streamable-http 传输监听容器内 `8000` 端口，宿主机端口由 `SEEDREAM_HTTP_PORT` 控制（默认 8000），MCP 端点路径为 `/mcp`。端口映射默认仅绑定回环地址 `127.0.0.1`，需从其他设备直连时把 docker-compose.yml 中的端口映射改为 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主机网卡地址。端口映射改为 `0.0.0.0` 即把服务暴露给网络，此时 `SEEDREAM_HTTP_AUTH_TOKEN` 会以明文 HTTP 过网传输；必须将服务置于 TLS 反向代理之后，或通过 `SEEDREAM_EXTRA_CLI_ARGS` 向容器提供 TLS 证书参数，禁止在无 TLS 的状态下对外暴露。客户端接入配置（以 Claude Desktop 为例，其他支持 streamable-http 的客户端同理）：
 
 ```json
 {
@@ -523,6 +523,7 @@ SEEDREAM_RESPONSE_BODY_LIMIT=               # 上游响应体读取总量上限�
 SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # 最大并发下载数
 SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
+SEEDREAM_AUTO_SAVE_FSYNC=false               # 落盘前 fsync：开启提升崩溃一致性、略降写入吞吐，默认关闭
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 保存目录总字节上限（默认 10GB；超限按最旧文件驱逐）
 
 # 工作区与传输

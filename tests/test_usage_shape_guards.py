@@ -17,26 +17,7 @@ from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.io.io_sse import parse_sse_response
 
-
-class _FakeLog:
-    def debug(self, *a: Any, **k: Any) -> None:
-        pass
-
-    def warning(self, *a: Any, **k: Any) -> None:
-        pass
-
-    def error(self, *a: Any, **k: Any) -> None:
-        pass
-
-
-class _FakeSSEResponse:
-    def __init__(self, chunks: List[bytes]) -> None:
-        self._chunks = chunks
-
-    async def aiter_bytes(self, chunk_size: int):
-        del chunk_size
-        for chunk in self._chunks:
-            yield chunk
+from _client_fakes import _FakeLog, _FakeSSEResponse, _install_mock_transport
 
 
 @pytest.mark.parametrize("usage_value", ["text", 123])
@@ -55,9 +36,7 @@ async def test_non_stream_usage_non_dict_converged_to_empty(
         )
 
     async with SeedreamClient(config) as client:
-        assert client._client is not None
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await _install_mock_transport(client, _handler)
         result = await client.text_to_image(prompt="p")
 
     assert result["success"] is True
@@ -81,9 +60,7 @@ async def test_non_stream_usage_dict_preserved(no_sleep: None) -> None:
         )
 
     async with SeedreamClient(config) as client:
-        assert client._client is not None
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await _install_mock_transport(client, _handler)
         result = await client.text_to_image(prompt="p")
 
     assert result["usage"] == {"generated_images": 2}
@@ -143,9 +120,7 @@ async def test_stream_top_level_error_failure_keeps_usage_dict(no_sleep: None) -
         )
 
     async with SeedreamClient(config) as client:
-        assert client._client is not None
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await _install_mock_transport(client, _handler)
         result = await client.text_to_image(prompt="p", stream=True)
 
     assert result["success"] is False

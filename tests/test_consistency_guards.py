@@ -101,6 +101,7 @@ async def test_log_function_call_wraps_async() -> None:
     assert await async_fn(1) == 2
 
 
+@pytest.mark.slow
 def test_log_function_call_signature_survives_mypy(tmp_path: Path) -> None:
     """mypy 对装饰后方法的签名精确穿透，参数含 Any 的异步方法不退化为 Any。
 
@@ -108,6 +109,10 @@ def test_log_function_call_signature_survives_mypy(tmp_path: Path) -> None:
     约束求解时将 ParamSpec 擦除为 (*Any, **Any) -> Any，使直接 return 装饰方法
     结果的代码触发 no-any-return。本用例在严格模式下编译最小片段并断言零告警，
     防止装饰器声明回退到会触发擦除的形态。
+
+    本用例需起 mypy 子进程并以 --strict 编译，为全包最重的单用例，标记 slow；
+    本地迭代可用 ``pytest -m "not slow" --basetemp=./.pytest-tmp`` 排除以加速，
+    CI 保持默认全量运行不排除。
     """
     pytest.importorskip("mypy")
 

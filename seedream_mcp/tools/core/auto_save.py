@@ -45,6 +45,7 @@ def _build_auto_save_manager(
         cleanup_days=config.auto_save_cleanup_days,
         max_total_bytes=config.auto_save_max_total_bytes,
         download_manager=download_manager,
+        fsync=config.auto_save_fsync,
     )
 
 

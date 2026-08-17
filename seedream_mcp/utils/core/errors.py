@@ -576,9 +576,11 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
 
 
 # 敏感字段关键词：键名经边界匹配命中任一关键词即视为敏感，输出时以 *** 脱敏。
-# 边界匹配要求键名等于关键词或以下划线、连字符分隔包含关键词，避免短词如 key 误命中
-# monkey、keyboard 等无关键名。本清单与 _SENSITIVE_KEY_SUBSTRINGS 同时是自由文本
-# 键值脱敏键名交替组的派生源，构成 dict 键与自由文本两条脱敏路径的单一来源。
+# 边界匹配要求键名等于关键词或以下划线、连字符、点号、空格分隔后任一段等于关键词，
+# 避免短词如 key 误命中 monkey、keyboard 等无关键名。本清单与 _SENSITIVE_KEY_SUBSTRINGS
+# 派生自由文本键值脱敏键名交替组的泛化词分支；短词 key 与 auth 的复合形态另由
+# _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES 前缀族承接，两条路径在族内带分隔符的复合
+# 键名上对齐，并非由两清单整体派生的单一来源关系。
 _SENSITIVE_KEY_KEYWORDS = (
     "key",
     "token",
@@ -600,8 +602,8 @@ _SENSITIVE_KEY_KEYWORDS = (
 # privatekey、sshkey 等连字符或无分隔变体，无需边界限定。camelCase 复合词 secretKey、
 # accessKey、sessionKey、authKey、refreshToken、clientSecret 归一化小写后同样在此
 # 命中，与自由文本路径复合分支（access/auth/refresh/session/api-token、
-# client/api/signing/app-secret）覆盖的无分隔形态对齐，dict 键与自由文本两条脱敏
-# 路径的键名分支均由本清单派生。
+# client/api/signing/app-secret）覆盖的无分隔形态对齐。本清单只派生自由文本路径的
+# 泛化词分支，带分隔符的 X_key/X_auth 复合形态由前缀族分支另行对齐 dict 键路径。
 _SENSITIVE_KEY_SUBSTRINGS = (
     "authorization",
     "apikey",
@@ -633,9 +635,32 @@ _KEY_SEGMENT_SPLIT_PATTERN = re.compile(r"[_\- .]")
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出。
 _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 
-# 不参与自由文本键名交替组直接派生的短词：key 与 auth 单独出现特异性不足，
-# keyboard、author 一类普通词会被误吞，仅保留受限复合分支覆盖其敏感形态。
+# 不参与自由文本键名交替组直接派生的短词：key 单独出现特异性不足，hotkey、
+# keyword 一类普通词尾部含 key 字面且后跟分隔符时会被误吞，仅保留受限复合分支
+# 覆盖其敏感形态。auth 的误吞面仅 author 一类无分隔前缀词，由 (?<!\w) 左侧断言
+# 与键后分隔符要求排除后经独立分支覆盖，独立成段的 auth 与 dict 键路径同判敏感。
 _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS = frozenset({"key", "auth"})
+
+# key/auth 受限复合分支的前缀族：带分隔符的 X_key/X_auth 复合键名仅在前缀属于本族时
+# 命中，与 dict 键路径按段匹配判敏感的范围在族内对齐；无分隔符形态由
+# _SENSITIVE_KEY_SUBSTRINGS 的高确信子串覆盖，族外前缀的分隔形态如 hotel_key 仍只由
+# dict 键路径覆盖。前缀族为封闭字面交替，不含量词，回溯保持线性。
+_SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
+    "access",
+    "ssh",
+    "gpg",
+    "encryption",
+    "user",
+    "public",
+    "private",
+    "auth",
+    "client",
+    "api",
+    "signing",
+    "app",
+    "session",
+    "secret",
+)
 
 # 键名续段：以 . 、- 或 _ 起头、后接不含分隔符的词字符段。点号纳入续段分隔符后，
 # session.id 一类点号键名与 dict 键的点号切分口径一致，自由文本通道同样命中。续段
@@ -643,15 +668,19 @@ _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS = frozenset({"key", "auth"})
 # 允许跨分隔字符，嵌套量词的切分歧义会把 session_a_a_a 一类输入的回溯推到指数级。
 _SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[._-][^\W_.-]+)*"
 
-# 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。分支由
+# 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。泛化词分支由
 # _SENSITIVE_KEY_SUBSTRINGS 与 _SENSITIVE_KEY_KEYWORDS 派生，特异性足够的词生成
 # 「关键词 + 续段」分支，覆盖 session、session_id、session-id、session.id、jwt、
-# privatekey 等形态；短词 key 与 auth 走受限复合分支（api-key、auth-token、
-# client-secret），复合分支的可选分隔字符与续段同步纳入点号，api.key、access.token
-# 与 dict 键的点号切分同口径命中，api key 复合分支允许空格分隔，覆盖 "API Key:
-# <凭据>" 形态，键命中仍要求紧跟分隔符与值，普通句中无分隔符的 api key 词组不受
-# 影响。后缀形态如 max_tokens 中 token 前还有普通字母，派生分支要求续段以分隔符
-# 开头，该词形不受影响。新增敏感词只需扩展上方两清单，本组自动跟进。
+# privatekey 等形态；短词 key 与 auth 不参与直接派生，走受限复合分支：api-key 与
+# token/secret 复合族覆盖无分隔变体，前缀族的 X_key/X_auth 分支覆盖带分隔符变体，
+# 与 dict 键路径的段匹配口径对齐；auth 另有独立分支承接 auth 前缀复合键与独立成段
+# 形态（auth_header、basic-auth、auth），左侧 (?<!\w) 断言排除 oauth 一类无分隔前缀
+# 词，author 因键后必须紧跟分隔符与值而不受影响。复合分支的分隔字符与续段同步纳入
+# 点号与空格，api.key、access.token、user key 与 dict 键的分隔符切分同口径命中，
+# 键命中仍要求紧跟分隔符与值，普通句中无分隔符的词组不受影响。后缀形态如
+# max_tokens 中 token 前还有普通字母，派生分支要求续段以分隔符开头，该词形不受
+# 影响。新增敏感词只需扩展上方两清单或前缀族，本组自动跟进。前缀族为字面交替、
+# 分隔符为单字符类、续段边界唯一，不引入嵌套歧义量词，失败回溯随总长线性。
 _SENSITIVE_KEYVALUE_KEYS = (
     "|".join(
         keyword + _SENSITIVE_KEYVALUE_KEY_SUFFIX
@@ -664,14 +693,24 @@ _SENSITIVE_KEYVALUE_KEYS = (
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
     + r"|(?:client|api|signing|app)[-_.]?secret"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+    + r"|(?:"
+    + "|".join(_SENSITIVE_KEYVALUE_COMPOUND_PREFIXES)
+    + r")[-_. ]key"
+    + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+    + r"|(?:"
+    + "|".join(prefix for prefix in _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES if prefix != "auth")
+    + r")[-_. ]auth"
+    + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+    + r"|(?<!\w)auth"
+    + _SENSITIVE_KEYVALUE_KEY_SUFFIX
 )
 
 # 键值分隔符与值吸收共用的空白字符类：ASCII 空白加 Unicode 空白（NBSP、Ogham 空格、
 # U+2000 至 U+200A 空格区段、行/段分隔符、窄/中数学空格、全角空格），封堵
 # password\xa0=\xa0SECRET、token　:　SECRET 一类借 Unicode 空白分隔的绕过形态。
-# \n、\r、\x85 与既有的 \t、\x0b、\x0c 一并列入，控制字符压平前的首轮键值匹配中
-# 「冒号加换行」一类形态由本类承接空白段；压平后控制字符不复存在，第二轮中这些
-# 成员空转，保持类自身完备。
+# \n、\r、\x85、行/段分隔符与既有的 \t、\x0b、\x0c 一并列入，控制字符压平前的首轮
+# 键值匹配中「冒号加换行」一类形态由本类承接空白段；压平后控制字符不复存在，第
+# 二轮中这些成员空转，保持类自身完备。
 _KEYVALUE_WHITESPACE_CLASS = (
     r"[\t\n\r \x0b\x0c\x85\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
 )
@@ -746,11 +785,12 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     + r")\S+)*"
 )
 
-# 控制字符模式：C0 控制字符、DEL 与 NEL（U+0085）逐字符压平为空格，防止上游错误体
-# 或文件名经日志与结构化输出注入伪造行；替换为空格保留词边界可读性。\t 属 C0 区，
-# 按日志通道既有口径一并压平，制表符对齐在结构化输出中无语义。logs 的日志消息
+# 控制字符模式：C0 控制字符、DEL、NEL（U+0085）与行/段分隔符（U+2028/U+2029）逐字符
+# 压平为空格，防止上游错误体或文件名经日志与结构化输出注入伪造行；替换为空格保留
+# 词边界可读性。行/段分隔符与 _KEYVALUE_WHITESPACE_CLASS 的空白口径对齐。\t 属 C0
+# 区，按日志通道既有口径一并压平，制表符对齐在结构化输出中无语义。logs 的日志消息
 # patcher 共用本常量，两模块的控制字符口径单一来源。
-CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85]")
+CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 
 # 零宽不可见字符：ZWSP、ZWNJ、BOM 与软连字符。插入键名内部或键与分隔符之间时
 # 视觉不可见，键值匹配前整体移除以拼接出真实键名，还原后的 apikey、session.id
@@ -903,9 +943,10 @@ def _is_sensitive_key(key: Any) -> bool:
     段匹配，键名按下划线、连字符、点号、空格切分后任一段等于关键词方视为命中，
     位于复合键中段的关键词同样覆盖，user.session_id 与 request-session-id 命中。
     与自由文本路径的一致范围是分隔符定界的复合词；无分隔前缀复合词如
-    usersession_id 仅自由文本路径的未锚定匹配命中，键名段匹配不命中。短词 key
-    不误匹配 monkey、keyboard，空格分隔规则与自由文本复合分支 api key 一致，
-    dict 键 "api key" 同样命中。
+    usersession_id 仅自由文本路径的未锚定匹配命中，键名段匹配不命中；带分隔符的
+    X_key/X_auth 复合键在自由文本路径仅前缀族内命中，族外前缀如 hotel_key 只由
+    本路径覆盖。短词 key 不误匹配 monkey、keyboard，空格分隔规则与自由文本复合
+    分支 api key 一致，dict 键 "api key" 同样命中。
     """
     key_lower = str(key).lower()
     for substring in _SENSITIVE_KEY_SUBSTRINGS:

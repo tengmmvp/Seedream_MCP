@@ -43,38 +43,82 @@ def test_mime_mappings_are_immutable_readonly_views() -> None:
 # ==================== BMP ====================
 
 
+def _make_bmp(dib_size: int = 40, total_length: int = 64, reserved: bytes = b"\x00" * 4) -> bytes:
+    """手工构造合法头字节的 BMP：魔数、文件大小、保留字段、像素偏移与 DIB 头 size。
+
+    offset 14 起的 4 字节为 DIB 头 size 字段，取值须在已知头结构尺寸集合内；
+    尾部以零填充至 total_length，像素数据本身不参与签名判定。
+    """
+    header = (
+        b"BM"
+        + total_length.to_bytes(4, "little")
+        + reserved
+        + (14 + dib_size).to_bytes(4, "little")
+        + dib_size.to_bytes(4, "little")
+    )
+    return header + b"\x00" * (total_length - len(header))
+
+
 def test_infer_extension_returns_bmp_for_valid_signature() -> None:
-    """BM 签名且文件头完整（14 字节）时识别为 .bmp，扩展名推断不受真实性下界影响。"""
-    content = b"BM" + b"\x00" * 12  # len >= 14
-    assert infer_extension_from_bytes(content) == ".bmp"
+    """BM 签名且 DIB 头 size 字段合法时识别为 .bmp，扩展名推断不受真实性下界影响。"""
+    assert infer_extension_from_bytes(_make_bmp()) == ".bmp"
+
+
+def test_infer_extension_bmp_accepts_known_dib_header_sizes() -> None:
+    """BITMAPCOREHEADER 12、OS/2 简化头 16、BITMAPINFOHEADER 40 与扩展头均识别。"""
+    for dib_size in (12, 16, 40, 52, 56, 64, 108, 124):
+        assert infer_extension_from_bytes(_make_bmp(dib_size=dib_size)) == ".bmp"
 
 
 def test_infer_extension_bmp_accepts_nonzero_reserved_fields() -> None:
     """BM 前缀且保留字段非零的合法 BMP 变体同样识别，不据保留字段拒判。"""
-    content = b"BM" + b"\x00" * 4 + b"\x01\x00\x00\x00" + b"\x00" * 4
+    content = _make_bmp(reserved=b"\x01\x00\x00\x00")
     assert infer_extension_from_bytes(content) == ".bmp"
 
 
 def test_infer_extension_bmp_requires_min_length() -> None:
-    """BM 前缀但字节不足 14 时不识别为 BMP。"""
-    content = b"BM" + b"\x00" * 5  # len = 7 < 14
+    """BM 前缀但总长不足 18、读不到完整 DIB 头 size 字段时不识别为 BMP。"""
+    content = b"BM" + b"\x00" * 15  # len = 17 < 18
     assert infer_extension_from_bytes(content, default=".jpeg") == ".jpeg"
+
+
+def test_infer_extension_bmp_rejects_unknown_dib_header_size() -> None:
+    """DIB 头 size 字段取值不在已知头结构尺寸集合内时按未知内容处理。"""
+    content = _make_bmp(dib_size=36)
+    assert infer_extension_from_bytes(content, default=".jpeg") == ".jpeg"
+    assert is_known_image_bytes(content) is False
+
+
+def test_is_known_image_bytes_rejects_bm_prefixed_long_text() -> None:
+    """ "BM" 前缀的长文本即使超过 64 字节下界，也因 DIB 头 size 字段非法被拒判。"""
+    garbage = b"BM" + b"just some plain text padding here!!" * 2
+    assert len(garbage) >= 64
+    assert infer_extension_from_bytes(garbage, default=".jpeg") == ".jpeg"
+    assert is_known_image_bytes(garbage) is False
 
 
 # ==================== 下载内容真实性：BMP 按格式分级下界 ====================
 
 
 def test_is_known_image_bytes_bmp_requires_format_min_length() -> None:
-    """BMP 真实性判定施加 64 字节下界：BM 开头的短文本不再误判为图片。
+    """BMP 真实性判定施加 64 字节下界：头字段合法但内容不足 64 字节的截断形态被拒。
 
-    扩展名推断对 14 字节文件头仍放行，真实性校验按格式分级收紧，供下载与
+    扩展名推断对合法 DIB 头放行，真实性校验按格式分级收紧，供下载与
     Base64 解码路径拒绝 Content-Type 伪造的非图片内容。
     """
-    short_text = b"BM" + b"just some plain text padding here!!"
-    assert len(short_text) >= 14
-    assert len(short_text) < 64
-    assert infer_extension_from_bytes(short_text) == ".bmp"
-    assert is_known_image_bytes(short_text) is False
+    short_bmp = _make_bmp(total_length=40)
+    assert len(short_bmp) >= 18
+    assert len(short_bmp) < 64
+    assert infer_extension_from_bytes(short_bmp) == ".bmp"
+    assert is_known_image_bytes(short_bmp) is False
+
+
+def test_is_known_image_bytes_accepts_minimal_valid_bmp() -> None:
+    """手工构造合法头字节的最小 BMP 达到下界后通过真实性判定。"""
+    content = _make_bmp(total_length=64)
+
+    assert len(content) == 64
+    assert is_known_image_bytes(content) is True
 
 
 def test_is_known_image_bytes_rejects_three_byte_bm_prefix() -> None:

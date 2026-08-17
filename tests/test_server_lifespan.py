@@ -435,18 +435,18 @@ async def test_execute_generation_handler_passes_shared_download_manager(
         await shared_dm.close()
 
 
-def test_reset_lifespan_state_clears_sanitized_images_sentinel() -> None:
-    """复位协议清空 results 的净化哨兵单槽。
+def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
+    """复位协议不再清理 results 的净化哨兵：模块级哨兵已随显式传参重构移除。
 
-    哨兵默认持有最近一次生成的图片列表引用至下次覆盖；_reset_lifespan_state
-    登记调用 reset_last_sanitized_images 使引用不跨资源生命周期边界存活，
-    本断言锁定登记不被移除。
+    results 模块不再持有可变模块级状态，_reset_lifespan_state 的复位清单相应
+    收敛为 io_save 清理节流状态与 io_scan 目录扫描缓存；results 侧若重新引入
+    模块级可变状态，须在 _reset_lifespan_state 与本守护同步登记。
     """
     from seedream_mcp.tools.core import results as results_module
 
-    results_module._last_sanitized_images = [{"url": "https://example.com/x.png"}]
+    assert not hasattr(results_module, "_last_sanitized_images")
+    assert not hasattr(results_module, "reset_last_sanitized_images")
     server._reset_lifespan_state()
-    assert results_module._last_sanitized_images is None
 
 
 # ==================== 平铺 inputSchema 收紧版本守护 ====================

@@ -452,20 +452,23 @@ def validate_image_path(
 ) -> tuple[bool, str, Path | None]:
     """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
 
-    HTTP(S) URL 视为有效但标准化路径恒为 None，调用方须同时检查有效位与路径是否
-    为 None，据以分流 URL 与本地文件处理，不可仅凭有效位判定为本地路径。
+    HTTP(S) URL 与 Data URI 视为有效但标准化路径恒为 None：两者为非本地引用，
+    无工作区边界可言；Data URI 的内容校验由 validate_image_input 的 data_uri 分支
+    承担，本函数不重复执行。调用方须同时检查有效位与路径是否为 None，据以分流
+    非本地引用与本地文件处理，不可仅凭有效位判定为本地路径。
 
     Args:
-        path: 图片文件路径；HTTP(S) URL 有效但路径返回 None。
+        path: 图片文件路径；HTTP(S) URL 与 Data URI 有效但路径返回 None。
         base_dir: 工作区基础目录，用于越界校验；None 时回退首个工作区根，多根工作区
             仅校验首个根，完整多根校验须由调用方遍历各根分别调用。
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
-        三元组 (是否有效, 错误信息, 标准化路径)；URL 有效但路径为 None。
+        三元组 (是否有效, 错误信息, 标准化路径)；URL 与 Data URI 有效但路径为 None。
     """
     try:
-        if classify_image_reference(path) == "url":
+        kind = classify_image_reference(path)
+        if kind in ("url", "data_uri"):
             return True, "", None
 
         if base_dir is None:

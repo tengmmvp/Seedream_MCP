@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import threading
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
@@ -74,6 +74,9 @@ class SeedreamConfig:
         auto_save_date_folder: 是否按日期子目录保存图片。
         auto_save_cleanup_days: 旧文件自动清理天数。
         auto_save_max_total_bytes: 保存目录总字节上限，超限按最旧文件优先驱逐。
+        auto_save_fsync: 自动保存落盘是否在原子替换前执行 fsync。默认关闭：写入经
+            os.replace 原子可见，但字节到达稳定存储的时机由操作系统回写决定，进程或
+            主机崩溃存在最近写入丢失的窗口；对崩溃一致性有要求时开启。
         stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
         stream_chunk_size: SSE 流式响应读取块大小字节数。
         response_body_limit: 上游响应体读取总量上限字节数，None 时按
@@ -116,6 +119,7 @@ class SeedreamConfig:
     auto_save_max_total_bytes: int | None = _env_field(
         10 * 1024 * 1024 * 1024, "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES"
     )
+    auto_save_fsync: bool = _env_field(False, "SEEDREAM_AUTO_SAVE_FSYNC")
 
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
     stream_chunk_size: int = _env_field(1024 * 1024, "SEEDREAM_STREAM_CHUNK_SIZE")
@@ -372,11 +376,14 @@ def _field_default_str(field_name: str) -> str:
     """反射 SeedreamConfig 字段默认值并转为环境变量字符串默认值。
 
     bool 转为 true/false，None 转为空串，其余取 str。
-    字段无默认值时返回空串，仅 api_key 属此情形且它不进入 ENV_DEFAULTS。
+    字段无默认值（dataclasses.MISSING）时返回空串，哨兵的 repr 文本不进入
+    ENV_DEFAULTS 兜底值；当前仅 api_key 属无默认值情形且它不进入 ENV_DEFAULTS。
     """
     for f in fields(SeedreamConfig):
         if f.name == field_name:
             default = f.default
+            if default is MISSING:
+                return ""
             if isinstance(default, bool):
                 return "true" if default else "false"
             if default is None:
@@ -682,6 +689,9 @@ def _build_config_from_sources_unlocked(
             "auto_save_max_total_bytes",
             "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES",
             env_values,
+        ),
+        "auto_save_fsync": _pick_bool(
+            override_values, "auto_save_fsync", "SEEDREAM_AUTO_SAVE_FSYNC", env_values
         ),
         "stream_buffer_max_size": _pick_int(
             override_values,

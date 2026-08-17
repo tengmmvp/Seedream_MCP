@@ -12,6 +12,7 @@ import tracemalloc
 from typing import Any
 
 from seedream_mcp.utils.core.errors import (
+    CONTROL_CHARS_PATTERN,
     SeedreamAPIError,
     SeedreamMCPError,
     SeedreamValidationError,
@@ -103,7 +104,9 @@ def test_bearer_pipeline_is_case_insensitive() -> None:
 
 
 def test_bearer_pipeline_preserves_surrounding_text() -> None:
-    assert _sanitize_output_string("auth: Bearer s3cret done") == "auth: Bearer *** done"
+    """非键名前缀的 Bearer 令牌保留前后文本；auth 键名形态优先走键值脱敏整体消隐。"""
+    assert _sanitize_output_string("header: Bearer s3cret done") == "header: Bearer *** done"
+    assert _sanitize_output_string("auth: Bearer s3cret done") == "auth: ***"
 
 
 def test_bearer_pipeline_passes_through_non_strings() -> None:
@@ -939,6 +942,17 @@ def test_control_chars_pattern_flattens_c0_del_and_nel() -> None:
     assert errors_module.CONTROL_CHARS_PATTERN.sub(" ", "a b中") == "a b中"
 
 
+def test_control_chars_pattern_flattens_line_paragraph_separators() -> None:
+    """行/段分隔符 U+2028/U+2029 与键值空白类口径对齐，压平为空格防日志注入伪造行。"""
+    line_sep = chr(0x2028)
+    para_sep = chr(0x2029)
+
+    assert CONTROL_CHARS_PATTERN.sub(" ", f"a{line_sep}b{para_sep}c") == "a b c"
+    assert sanitize_error_text(f"first{line_sep}FAKE{para_sep}apikey=leaked") == (
+        "first FAKE apikey=***"
+    )
+
+
 # ==================== 自由文本键名与 dict 键策略单一来源 ====================
 
 
@@ -1367,3 +1381,123 @@ def test_redact_sensitive_message_blocks_fullwidth_quote_separator() -> None:
     """全角引号 ＂ ＇ 作为分隔符引号组的变体命中，凭据不借全角引号逃逸。"""
     assert _redact_sensitive_message("api_key＂: sk-1") == "api_key＂: ***"
     assert _redact_sensitive_message("api_key＇: sk-1") == "api_key＇: ***"
+
+
+# ==================== key/auth 受限复合分支两路径一致性 ====================
+
+# 两条脱敏路径应一致判定敏感的复合键名全集：X_key/X_auth 前缀族内的下划线、连字符、
+# 点号与空格分隔变体，以及 auth 前缀复合键。dict 键路径按段匹配判敏感，自由文本
+# 路径经前缀族复合分支命中，二者不得漂移。
+_CONSISTENT_SENSITIVE_COMPOUND_KEYS = (
+    "access_key_id",
+    "ssh_key",
+    "auth_header",
+    "encryption_key",
+    "user_key",
+    "public_key",
+    "private_key",
+    "gpg_key",
+    "signing_key",
+    "client_key",
+    "app_key",
+    "session_key",
+    "secret_key",
+    "auth_key",
+    "user_auth",
+    "session_auth",
+    "client_auth",
+    "api_auth",
+    "secret_auth",
+    "auth_scheme",
+    "auth-mode",
+    "access-key",
+    "ssh.key",
+    "user key",
+    "auth",
+)
+
+# 两条路径应一致判定为普通的词形：无分隔符复合词与族外前缀的普通词组。
+_CONSISTENT_PLAIN_COMPOUND_KEYS = (
+    "keyboard",
+    "monkey",
+    "keynote",
+    "author",
+    "author_name",
+    "user profile",
+    "user keyboard",
+    "ssh keyboard layout",
+)
+
+
+def test_compound_key_hit_verdicts_align_across_dict_and_free_text_paths() -> None:
+    """对抗性一致性锁定：敏感复合键名在 dict 键路径与自由文本键值路径同判敏感。
+
+    dict 键路径以 _is_sensitive_key 判定，自由文本路径以键值裸值剥离结果判定，
+    两侧判定不一致时本测试失败，防止前缀族分支再次与段匹配口径漂移。
+    """
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    for key in _CONSISTENT_SENSITIVE_COMPOUND_KEYS:
+        assert _is_sensitive_key(key) is True, key
+        assert _redact_sensitive_message(f"{key}=cred-value") == f"{key}=***", key
+
+
+def test_compound_key_plain_verdicts_align_across_dict_and_free_text_paths() -> None:
+    """对抗性一致性锁定：普通词形在两条路径同判不敏感，复合分支不误吞。"""
+    from seedream_mcp.utils.core.errors import _is_sensitive_key
+
+    for key in _CONSISTENT_PLAIN_COMPOUND_KEYS:
+        assert _is_sensitive_key(key) is False, key
+        assert _redact_sensitive_message(f"{key}=cred-value") == f"{key}=cred-value", key
+
+
+def test_redact_sensitive_message_strips_family_compound_keyvalues() -> None:
+    """前缀族 X_key/X_auth 复合键名的裸值剥离，dict 键路径判敏感的形态不再穿透。"""
+    assert _redact_sensitive_message("access_key_id=AKID123") == "access_key_id=***"
+    assert _redact_sensitive_message("ssh_key: ssh-rsa AAAA") == "ssh_key: ***"
+    assert _redact_sensitive_message("auth_header=Bearer abc") == "auth_header=***"
+    assert _redact_sensitive_message("encryption_key=aes-256") == "encryption_key=***"
+    assert _redact_sensitive_message("user_key: u-123 leaked") == "user_key: ***"
+
+
+def test_redact_sensitive_message_strips_bare_auth_keyvalue() -> None:
+    """独立成段的 auth 键名与 dict 键路径同判敏感，auth: value 的值整体脱敏。"""
+    assert _redact_sensitive_message("auth=Bearer abc123") == "auth=***"
+    assert _redact_sensitive_message("token check auth: SK-9") == "token check auth: ***"
+
+
+def test_filter_sensitive_data_redacts_family_compound_keys() -> None:
+    """dict 键路径对前缀族复合键同样脱敏，两条通道策略一致。"""
+    filtered = _filter_sensitive_data(
+        {"auth_header": "h", "ssh_key": "s", "user_key": "u", "note": "v"}
+    )
+    assert filtered == {"auth_header": "***", "ssh_key": "***", "user_key": "***", "note": "v"}
+
+
+def test_redact_sensitive_message_compound_branches_no_overmatch() -> None:
+    """无分隔符与族外前缀的普通词形不被复合分支误吞，普通键值对保留原文。"""
+    assert _redact_sensitive_message("keyboard=F1") == "keyboard=F1"
+    assert _redact_sensitive_message("monkey=see") == "monkey=see"
+    assert _redact_sensitive_message("keynote=abc") == "keynote=abc"
+    assert _redact_sensitive_message("author=Jane") == "author=Jane"
+    assert _redact_sensitive_message("oauth=xx") == "oauth=xx"
+    assert _redact_sensitive_message("ssh keyboard layout=us") == "ssh keyboard layout=us"
+
+
+def test_redact_sensitive_message_compound_branches_stay_fast() -> None:
+    """性能守护：前缀族复合分支的失败回溯保持线性，分隔长链不触发指数回溯。"""
+    hostile = "user_key" + "_a" * 20_000
+
+    start = time.perf_counter()
+    redacted = _redact_sensitive_message(hostile)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.5
+    # 末尾无分隔符与值，复合键命中失败，原文保留
+    assert redacted == hostile
+
+    auth_chain = "auth" + "_a" * 20_000
+    start = time.perf_counter()
+    redacted_auth = _redact_sensitive_message(auth_chain)
+    assert time.perf_counter() - start < 0.5
+    assert redacted_auth == auth_chain

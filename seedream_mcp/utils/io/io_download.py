@@ -44,7 +44,7 @@ from ..core.formats import (
     infer_extension_from_bytes,
     is_known_image_bytes,
 )
-from ..core.logs import get_logger, log_unretrieved_task_exception
+from ..core.logs import arm_unretrieved_exception_logging, get_logger
 from .io_file import atomic_replace_from_fd
 
 logger = get_logger(__name__)
@@ -481,11 +481,15 @@ class DownloadManager:
                 # 并发协程不会交错创建重复 task。
                 inflight = asyncio.ensure_future(self._resolve_and_cache(host))
                 self._dns_inflight[host] = inflight
-                # 检索共享 task 的异常结果：创建者被取消后 shield 的 outer 不再消费
-                # task 结果，无其他等待者时避免 "Task exception was never retrieved" 噪音。
-                inflight.add_done_callback(log_unretrieved_task_exception)
         # 锁外 await 共享在途 task；shield 使创建者被取消时不连带取消底层 task。
-        return await asyncio.shield(inflight)
+        try:
+            return await asyncio.shield(inflight)
+        except asyncio.CancelledError:
+            # 消费方放弃等待后若再无其他等待者接手，解析失败将无人检索异常，登记
+            # 回调兜底记录；常规失败由等待者消费并经既有错误通道记录，不登记，
+            # 避免同一异常重复入日志。
+            arm_unretrieved_exception_logging(inflight)
+            raise
 
     async def _resolve_and_cache(self, host: str) -> tuple[str, ...]:
         """执行单次解析与公网校验并写入缓存，供 _resolve_public_ips 在途去重。
@@ -685,12 +689,14 @@ class DownloadManager:
         content_type: str,
         attempt: int,
         start_time: float,
+        fsync: bool = False,
     ) -> dict[str, Any]:
         """将 200 响应体下载到临时文件，校验大小与字节签名后原子替换，返回结果字典。
 
         落盘协议由 io_file.atomic_replace_from_fd 统一提供，与 io_storage.save_bytes
         复用同一骨架：随机名临时文件规避符号链接 TOCTOU，写入后 os.replace 原子替换，失败
-        清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。content-length
+        清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。fsync 透传至
+        骨架，开启时写入后、替换前把已接收字节刷入稳定存储。content-length
         预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出 DownloadError，由
         调用方按终态或可重试分类处理。
 
@@ -749,7 +755,7 @@ class DownloadManager:
             return None
 
         # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成。
-        await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix)
+        await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix, fsync=fsync)
 
         download_time = time.time() - start_time
         logger.info(
@@ -776,6 +782,7 @@ class DownloadManager:
         temp_suffix: str,
         attempt: int,
         start_time: float,
+        fsync: bool = False,
     ) -> dict[str, Any]:
         """执行单次下载尝试，含逐跳重定向循环，返回成功落盘结果字典。
 
@@ -845,10 +852,15 @@ class DownloadManager:
                     content_type,
                     attempt,
                     start_time,
+                    fsync=fsync,
                 )
 
     async def download_image(
-        self, url: str, save_path: Path, headers: dict[str, str] | None = None
+        self,
+        url: str,
+        save_path: Path,
+        headers: dict[str, str] | None = None,
+        fsync: bool = False,
     ) -> dict[str, Any]:
         """异步下载图片。
 
@@ -856,6 +868,7 @@ class DownloadManager:
             url: 图片 URL。
             save_path: 保存路径，最终扩展名以字节签名嗅探结果为准。
             headers: 请求头；None 时使用内置默认头。
+            fsync: 写入后、原子替换前是否对临时文件执行 os.fsync 刷入稳定存储。
 
         Returns:
             下载结果字典，含 file_path、file_size、download_time、content_type 与
@@ -885,7 +898,7 @@ class DownloadManager:
 
                 session = await self._ensure_session()
                 return await self._attempt_download(
-                    session, url, headers, save_path, temp_suffix, attempt, start_time
+                    session, url, headers, save_path, temp_suffix, attempt, start_time, fsync=fsync
                 )
 
             except RetryableDownloadError as e:

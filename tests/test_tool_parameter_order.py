@@ -12,6 +12,7 @@ false 且拼错参数在运行时被 ToolError 拒绝，恢复输入模型 extra
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -145,12 +146,60 @@ async def test_flat_input_schema_required_matches_model_fields() -> None:
         assert schema.get("required", []) == expected, name
 
 
+# 平铺签名非空语义镜像的字段清单：模型层经 str_strip_whitespace 加 min_length 或
+# 非空校验器拒绝纯空白输入，平铺参数模型不含 strip 配置，等价约束以 pattern 表达。
+# 清单与 server._NON_BLANK_PATTERN 的应用范围一一对应，新增非空语义字段未同步
+# 镜像时，下方等价断言因缺 pattern 转红。
+_NON_BLANK_MIRROR_FIELDS = {
+    ("seedream_text_to_image", "prompt"),
+    ("seedream_text_to_image", "save_path"),
+    ("seedream_text_to_image", "custom_name"),
+    ("seedream_image_to_image", "prompt"),
+    ("seedream_image_to_image", "image"),
+    ("seedream_image_to_image", "save_path"),
+    ("seedream_image_to_image", "custom_name"),
+    ("seedream_multi_image_fusion", "prompt"),
+    ("seedream_multi_image_fusion", "image"),
+    ("seedream_multi_image_fusion", "save_path"),
+    ("seedream_multi_image_fusion", "custom_name"),
+    ("seedream_sequential_generation", "prompt"),
+    ("seedream_sequential_generation", "image"),
+    ("seedream_sequential_generation", "save_path"),
+    ("seedream_sequential_generation", "custom_name"),
+    ("seedream_browse_images", "directory"),
+}
+
+# 非空语义镜像的 pattern 取值，与 server._NON_BLANK_PATTERN 保持一致。
+_NON_BLANK_PATTERN = r"\S"
+
+
+def _strip_pattern_keys(node: Any) -> Any:
+    """递归剔除 schema 节点中的 pattern 键，供平铺与模型 schema 的等价比对。"""
+    if isinstance(node, dict):
+        return {key: _strip_pattern_keys(value) for key, value in node.items() if key != "pattern"}
+    if isinstance(node, list):
+        return [_strip_pattern_keys(item) for item in node]
+    return node
+
+
+def _contains_pattern(node: Any, pattern: str) -> bool:
+    """递归判定 schema 节点中是否声明了指定 pattern 约束。"""
+    if isinstance(node, dict):
+        if node.get("pattern") == pattern:
+            return True
+        return any(_contains_pattern(value, pattern) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_pattern(item, pattern) for item in node)
+    return False
+
+
 async def test_flat_input_schema_field_definitions_match_model() -> None:
     """逐字段 schema 定义与模型 json schema 全等，锁定描述与约束不漂移。
 
-    唯一刻意差异是组图的 max_images：平铺侧声明为 int | None，None 表示未提供，
-    组图据此区分「未提供时自动推导」与「显式传入」；该字段仅比对整数分支的
-    约束与描述。
+    两类刻意差异：组图的 max_images 平铺侧声明为 int | None，None 表示未提供，
+    组图据此区分「未提供时自动推导」与「显式传入」，仅比对整数分支的约束与描述；
+    声明非空语义的字段在平铺侧补 pattern 镜像，比对时剔除 pattern 键并另行断言
+    pattern 存在且取值正确，未声明非空语义的字段不得携带 pattern。
     """
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
@@ -168,7 +217,15 @@ async def test_flat_input_schema_field_definitions_match_model() -> None:
                 assert int_branch["minimum"] == model_prop["minimum"], name
                 assert int_branch["maximum"] == model_prop["maximum"], name
                 assert tool_prop["description"] == model_prop["description"], name
+                continue
+            if (name, field) in _NON_BLANK_MIRROR_FIELDS:
+                assert _contains_pattern(tool_prop, _NON_BLANK_PATTERN), (name, field)
+                assert _strip_pattern_keys(tool_prop) == _strip_pattern_keys(model_prop), (
+                    name,
+                    field,
+                )
             else:
+                assert not _contains_pattern(tool_prop, _NON_BLANK_PATTERN), (name, field)
                 assert tool_prop == model_prop, (name, field)
 
 
@@ -312,3 +369,31 @@ async def test_flat_tool_rejects_unknown_parameter_names(tool_name: str, typo_ar
     )
     with pytest.raises(ToolError, match=typo_key):
         await mcp.call_tool(tool_name, typo_args)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "blank_args"),
+    [
+        ("seedream_text_to_image", {"prompt": "   "}),
+        ("seedream_text_to_image", {"prompt": "a cat", "save_path": "   "}),
+        ("seedream_text_to_image", {"prompt": "a cat", "custom_name": ""}),
+        ("seedream_image_to_image", {"prompt": "a cat", "image": "   "}),
+        (
+            "seedream_multi_image_fusion",
+            {"prompt": "a cat", "image": ["https://example.com/a.png", "   "]},
+        ),
+        ("seedream_sequential_generation", {"prompt": "a cat", "image": "   "}),
+        ("seedream_sequential_generation", {"prompt": "a cat", "image": ["   "]}),
+        ("seedream_browse_images", {"directory": "   "}),
+    ],
+)
+async def test_flat_tool_rejects_blank_string_inputs(tool_name: str, blank_args: dict) -> None:
+    """纯空白字符串在平铺签名层被拒，不进入工具体后才失败。
+
+    模型层经 str_strip_whitespace 加 min_length 或非空校验器拒绝纯空白输入；
+    平铺参数模型不含 strip 配置，server 以 pattern 镜像该语义，使这些输入在
+    协议层即被拒绝，而非进入工具体后被 SDK 包成英文前缀的 ToolError。其余参数
+    均取合法值，确保报错仅源于空白输入。
+    """
+    with pytest.raises(ToolError):
+        await mcp.call_tool(tool_name, blank_args)

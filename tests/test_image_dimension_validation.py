@@ -25,6 +25,7 @@ from seedream_mcp.utils.images.image_validation import (
     _validate_image_dimensions,
     decode_and_validate_dimensions,
     validate_image_input,
+    validate_image_path,
 )
 
 
@@ -222,3 +223,21 @@ def test_validate_image_input_wraps_non_image_data_uri_as_dimension_failure() ->
     payload = base64.b64encode(b"definitely not an image").decode()
     with pytest.raises(SeedreamValidationError, match="图像维度解析失败"):
         validate_image_input(f"data:image/png;base64,{payload}")
+
+
+# ==================== validate_image_path 的非本地引用短路 ====================
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["https://example.com/x.png", "data:image/png;base64,iVBORw0KGgo="],
+)
+def test_validate_image_path_short_circuits_non_local_references(reference: str) -> None:
+    """URL 与 Data URI 同口径短路：视为有效引用且路径为 None，不当本地路径处理。
+
+    Data URI 此前落入本地路径分支，被拼接为根下畸形文件名后误报文件不存在；
+    其内容校验由 validate_image_input 的 data_uri 分支承担，本函数不重复执行。
+    """
+    is_valid, error, normalized = validate_image_path(reference, base_dir="/nonexistent")
+
+    assert (is_valid, error, normalized) == (True, "", None)

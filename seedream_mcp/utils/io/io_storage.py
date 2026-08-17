@@ -35,6 +35,16 @@ logger = get_logger(__name__)
 # 文件名长度上限，避免超出常见文件系统目录项长度限制。
 _MAX_FILENAME_LENGTH = 200
 
+# 文件名扩展名长度上限：splitext 剥离出的超过该值的扩展名不可能是合法图片后缀，
+# 按纯词干截断处理，防止超长扩展名原样保留使文件名长度截断失效。
+_MAX_EXTENSION_LENGTH = 16
+
+# 唯一文件名中词干基础的长度预算。Windows 默认 MAX_PATH 260，完整保存路径由
+# base_dir 前缀、日期子目录、工具子目录、时间戳与哈希后缀及扩展名构成；custom_name
+# 合法输入上限 255 字符，词干不加预算地拼接后必然超出 MAX_PATH 使自动保存必然失败，
+# 按预算截断使合法输入拼接完整路径后不再必然失败。
+_MAX_UNIQUE_BASE_LENGTH = 120
+
 # 遗留临时文件清扫的 mtime 宽限秒数：仅删除早于该时限的 .part 条目，在途下载与
 # 写入的临时文件（合法下载总预算为小时级）恒新于宽限值，不被并发清理击杀。
 _PART_SWEEP_GRACE_SECONDS = 24 * 3600
@@ -163,11 +173,15 @@ class FileManager:
         filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
         filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
 
-        # 限制文件名长度避免超出文件系统上限。
-        # max 兜底：扩展名本身超长时差值为负，负索引会从尾部误截，故下限取 0。
+        # 限制文件名长度避免超出文件系统上限。扩展名不超过上限时截断词干并保留
+        # 扩展名；超长扩展名不可能是合法后缀，按纯词干整体截断，防止 name[:0] + ext
+        # 使截断失效而突破上限。
         if len(filename) > _MAX_FILENAME_LENGTH:
             name, ext = os.path.splitext(filename)
-            filename = name[: max(0, _MAX_FILENAME_LENGTH - len(ext))] + ext
+            if len(ext) > _MAX_EXTENSION_LENGTH:
+                filename = filename[:_MAX_FILENAME_LENGTH]
+            else:
+                filename = name[: _MAX_FILENAME_LENGTH - len(ext)] + ext
 
         # Windows 保留设备名处理：CON.txt、NUL 等在 Windows 上会被解释为设备而非文件，
         # 命中时在首个点前追加下划线使词干不再匹配保留名。
@@ -220,18 +234,23 @@ class FileManager:
         """生成包含时间戳与唯一性后缀的文件名。
 
         Args:
-            base_name: 基础名称。
+            base_name: 基础名称，清理后的词干超过 _MAX_UNIQUE_BASE_LENGTH 时截断
+                至该长度，为时间戳、哈希/随机后缀与目录前缀预留长度预算。
             extension: 文件扩展名，包含点号。
             content_hash: 内容哈希值，提供则取其前 8 位嵌入文件名。
             timestamp: 时间戳，默认取当前时间。
 
         Returns:
-            唯一文件名。
+            唯一文件名，词干已按预算截断，完整路径长度可控。
         """
         if timestamp is None:
             timestamp = datetime.now()
 
         clean_base = self.sanitize_filename(base_name)
+        # 词干按预算截断：时间戳、哈希/随机后缀与目录前缀的长度在预算外拼接，
+        # 使 255 字符的合法 custom_name 生成的完整路径不再必然超出 MAX_PATH。
+        if len(clean_base) > _MAX_UNIQUE_BASE_LENGTH:
+            clean_base = clean_base[:_MAX_UNIQUE_BASE_LENGTH]
 
         # [:-3] 截掉微秒末三位，得到毫秒精度时间戳。
         time_str = timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -360,7 +379,12 @@ class FileManager:
         return save_path
 
     def save_bytes(
-        self, file_path: Path, data: bytes, overwrite: bool = False, ensure_parent: bool = True
+        self,
+        file_path: Path,
+        data: bytes,
+        overwrite: bool = False,
+        ensure_parent: bool = True,
+        fsync: bool = False,
     ) -> dict[str, Any]:
         """将字节数据写入文件，返回保存结果元数据。
 
@@ -373,6 +397,7 @@ class FileManager:
             data: 字节数据。
             overwrite: 是否覆盖已有文件。
             ensure_parent: 是否确保父目录存在；调用方已建目录时可传 False 跳过重复 mkdir。
+            fsync: 写入后、原子替换前是否对文件执行 os.fsync 刷入稳定存储。
 
         Returns:
             保存结果元数据，包含最终路径、大小与保存时间。
@@ -401,7 +426,7 @@ class FileManager:
                 with os.fdopen(fd, "wb", closefd=False) as f:
                     f.write(data)
 
-            atomic_replace_from_fd_sync(final_path, _writer, suffix=".part")
+            atomic_replace_from_fd_sync(final_path, _writer, suffix=".part", fsync=fsync)
             return {
                 "file_path": str(final_path),
                 "file_size": len(data),

@@ -7,7 +7,8 @@ handler；第三层为 core.schemas 下的输入模型，作为参数校验与 M
 
 采用 PEP 562 的 ``__getattr__`` 延迟加载：首次访问导出名时才导入对应子模块，不连带
 加载其余 impl、runners 与 schemas 子模块。``__all__`` 程序化派生
-自 ``_LAZY_EXPORTS`` 的键，二者天然一致，无需手动维护。
+自 ``_LAZY_EXPORTS`` 的键，二者天然一致，无需手动维护。``__dir__`` 纳入尚未触发
+导入的延迟导出名，dir() 补全与包入口模块的口径一致。
 """
 
 from __future__ import annotations
@@ -77,3 +78,8 @@ def __getattr__(name: str) -> Any:
     value = getattr(module, attr_name)
     globals()[name] = value
     return value
+
+
+def __dir__() -> list[str]:
+    """补全 dir() 结果，纳入尚未触发导入的延迟导出公开名。"""
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))

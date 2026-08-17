@@ -251,7 +251,7 @@ def _reset_lifespan_state() -> None:
     重建 _shared_init_lock 避免跨事件循环复用绑定了旧循环的 asyncio.Lock；SDK 2.0
     起传输配置直传 streamable_http_app 构造、不经 settings 持有，无跨用例泄漏需
     复位。模块级可变状态的复位清单集中在本函数，新增状态须登记于此：自动保存清理
-    节流状态、目录扫描缓存与生成结果净化哨兵分别经对应模块的复位函数清除。
+    节流状态与目录扫描缓存分别经对应模块的复位函数清除。
     """
     global _shared_init_lock, _active_resource
     _active_resource = None
@@ -269,16 +269,13 @@ def _reset_lifespan_state() -> None:
     config_module._global_config = None
     _shared_init_lock = asyncio.Lock()
     # 复位清单：io_save 的清理节流锁与任务集合绑定事件循环，io_scan 的目录扫描缓存
-    # 跨用例残留目录解析结果，tools.core.results 的净化哨兵单槽持有最近一次生成的
-    # 图片列表引用；三者与 lifespan 单例同步复位。延迟导入遵循子模块不在顶层
-    # import 跨层模块的项目约定。
-    from .tools.core.results import reset_last_sanitized_images
+    # 跨用例残留目录解析结果；两者与 lifespan 单例同步复位。延迟导入遵循子模块不在
+    # 顶层 import 跨层模块的项目约定。
     from .utils.io.io_save import reset_cleanup_state
     from .utils.io.io_scan import reset_directory_scan_cache
 
     reset_cleanup_state()
     reset_directory_scan_cache()
-    reset_last_sanitized_images()
 
 
 # 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。

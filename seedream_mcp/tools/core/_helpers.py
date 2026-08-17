@@ -1,6 +1,6 @@
 """生成工具底层辅助函数。
 
-用量累加、错误归一化、自动保存路径解析，以及面向 MCP 客户端的进度上报与日志推送。
+用量累加、错误归一化、自动保存路径解析，以及面向 MCP 客户端的进度上报。
 这些函数不依赖生成上下文与结果结构，作为其余子模块的公共基础。
 """
 
@@ -178,6 +178,55 @@ def _extract_parallel_request_error(
     return "请求失败"
 
 
+def _resolve_default_base_dir(config: SeedreamConfig) -> Path:
+    """解析自动保存的默认基础目录，供保存路径解析与预检共用。
+
+    Returns:
+        已 resolve 的默认保存目录。
+
+    Raises:
+        SeedreamValidationError: 未配置 auto_save_base_dir 且无法确定工作区根。
+    """
+    # 多根场景下取首个授权根作为自动保存默认落点。browse 与图像输入采用遍历全根的不同策略。
+    if config.auto_save_base_dir:
+        return Path(config.auto_save_base_dir).expanduser().resolve()
+    # MCP Roots 为空列表时 get_workspace_root 抛 ValueError，原样上抛会落入未识别
+    # 异常档案呈「未知错误」；转校验异常归入 validation_error 档，用户可见文案
+    # 指向工作区授权问题而非未知失败。
+    try:
+        workspace_root = get_workspace_root()
+    except ValueError as exc:
+        raise SeedreamValidationError(
+            f"无法确定自动保存基础目录: {exc}",
+            field="auto_save_base_dir",
+            value=config.auto_save_base_dir,
+        ) from exc
+    return (workspace_root / ".seedream" / "images").resolve()
+
+
+def _validate_save_path_bounds(default_base_dir: Path, save_path: str) -> Path:
+    """校验用户保存路径有效且落在默认目录之内，返回规范化后的用户路径。
+
+    Raises:
+        SeedreamValidationError: save_path 无效或越出默认保存目录。
+    """
+    try:
+        user_path = normalize_path(save_path, str(default_base_dir))
+    except ValueError as exc:
+        raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
+
+    # user_path 由 normalize_path 解析、default_base_dir 由调用方在上方解析，两者均已
+    # resolve，直接 relative_to 比较即可，避免对已 resolve 的二者再次重复 resolve。
+    if not is_within_resolved(user_path, default_base_dir):
+        raise SeedreamValidationError(
+            f"save_path 超出允许范围: {default_base_dir}",
+            field="save_path",
+            value=save_path,
+        )
+
+    return user_path
+
+
 def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
     """解析自动保存的基础目录路径，校验用户路径须落在默认目录之内。
 
@@ -193,41 +242,30 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
     Raises:
         SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
     """
-    # 多根场景下取首个授权根作为自动保存默认落点。browse 与图像输入采用遍历全根的不同策略。
-    if config.auto_save_base_dir:
-        default_base_dir = Path(config.auto_save_base_dir).expanduser().resolve()
-    else:
-        # MCP Roots 为空列表时 get_workspace_root 抛 ValueError，原样上抛会落入未识别
-        # 异常档案呈「未知错误」；转校验异常归入 validation_error 档，用户可见文案
-        # 指向工作区授权问题而非未知失败。
-        try:
-            workspace_root = get_workspace_root()
-        except ValueError as exc:
-            raise SeedreamValidationError(
-                f"无法确定自动保存基础目录: {exc}",
-                field="auto_save_base_dir",
-                value=config.auto_save_base_dir,
-            ) from exc
-        default_base_dir = (workspace_root / ".seedream" / "images").resolve()
-
+    default_base_dir = _resolve_default_base_dir(config)
     if not save_path:
         return default_base_dir
+    return _validate_save_path_bounds(default_base_dir, save_path)
 
-    try:
-        user_path = normalize_path(save_path, str(default_base_dir))
-    except ValueError as exc:
-        raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
 
-    # user_path 由 normalize_path 解析、default_base_dir 在本函数上方解析，两者均已 resolve，
-    # 直接 relative_to 比较即可，避免对已 resolve 的二者再次重复 resolve。
-    if not is_within_resolved(user_path, default_base_dir):
-        raise SeedreamValidationError(
-            f"save_path 超出允许范围: {default_base_dir}",
-            field="save_path",
-            value=save_path,
-        )
+def prevalidate_save_path(config: SeedreamConfig, save_path: str | None) -> None:
+    """在生成请求分发前预检 save_path 的边界合法性。
 
-    return user_path
+    预检与 _resolve_base_dir 共用同一默认目录解析与越界判定，只判定合法性不承担
+    保存阶段的完整解析；未提供 save_path 时不做任何检查，默认目录的解析失败留待
+    自动保存阶段处理。预检使非法 save_path 在 API 调用前以 validation_error 拒绝，
+    而不是在已计费的生成请求执行完毕后才于自动保存阶段降级为软警告。
+
+    Args:
+        config: Seedream 配置实例，包含自动保存相关参数。
+        save_path: 用户指定的保存路径，可选。
+
+    Raises:
+        SeedreamValidationError: save_path 无效或越出默认保存目录。
+    """
+    if not save_path:
+        return
+    _validate_save_path_bounds(_resolve_default_base_dir(config), save_path)
 
 
 async def _safe_report_progress(
@@ -245,35 +283,6 @@ async def _safe_report_progress(
         await ctx.report_progress(progress=progress, total=total, message=message)
     except Exception as exc:
         logger.debug("进度上报失败，已忽略: {}", exc)
-
-
-_VALID_LOG_LEVELS = ("debug", "info", "warning", "error")
-
-
-async def _safe_ctx_log(
-    ctx: Context[Any, Any] | None,
-    level: str,
-    message: str,
-) -> None:
-    """向 MCP 客户端推送日志通知，级别限 debug/info/warning/error。
-
-    客户端未声明 logging 能力或推送失败时静默跳过，不影响主流程。本函数面向客户端实时
-    可见的通知，与 loguru 文件日志互补，后者用于离线排查。
-    """
-    if ctx is None or level not in _VALID_LOG_LEVELS:
-        return
-
-    try:
-        if level == "debug":
-            await ctx.debug(message)
-        elif level == "info":
-            await ctx.info(message)
-        elif level == "warning":
-            await ctx.warning(message)
-        else:
-            await ctx.error(message)
-    except Exception as exc:
-        logger.debug("MCP 日志推送失败，已忽略: {}", exc)
 
 
 async def _yield_for_cancellation() -> None:

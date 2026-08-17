@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from seedream_mcp.utils.images import image_validation
 from seedream_mcp.utils.images.image_prepare import ImagePreparer
 
 # 合法 PNG 文件头，供构造可读取的候选常规文件
@@ -53,13 +54,21 @@ def test_multi_root_skips_invalid_picks_valid(tmp_path: Path) -> None:
     assert sig == (st.st_mtime, st.st_size)
 
 
-def test_multi_root_skips_oversized_picks_valid(tmp_path: Path) -> None:
-    """Root1 同名文件超 30MB（校验失败）+ Root2 合法 → 签名锁定 Root2。"""
+def test_multi_root_skips_oversized_picks_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root1 同名文件超过大小上限（校验失败）+ Root2 合法 → 签名锁定 Root2。
+
+    大小上限经 monkeypatch 缩到 KB 级后以小文件触发同一条超限跳过分支；被测路径
+    为 image_validation.image_candidate_stat 的资格检查，读取的是该模块命名空间内
+    的 MAX_IMAGE_FILE_SIZE 模块全局，patch 目标据此确定。
+    """
+    monkeypatch.setattr(image_validation, "MAX_IMAGE_FILE_SIZE", 64 * 1024)
     root1 = tmp_path / "big"
     root2 = tmp_path / "ok"
     root1.mkdir()
     root2.mkdir()
-    (root1 / "photo.png").write_bytes(b"\x00" * (30 * 1024 * 1024 + 1))
+    (root1 / "photo.png").write_bytes(b"\x00" * (64 * 1024 + 1))
     valid = root2 / "photo.png"
     valid.write_bytes(_PNG_BYTES)
 

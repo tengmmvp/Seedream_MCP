@@ -98,6 +98,46 @@ async def test_download_429_exhausts_retries_as_retryable_error(
     assert not save_path.exists()
 
 
+async def test_download_404_is_terminal_single_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """404 属语义明确的终态错误：立即抛 DownloadError，不进入退避重试。
+
+    404 不在 408/429/5xx 的可重试集合内，重试无法恢复资源不存在；断言异常非
+    RetryableDownloadError 子类，防止分类回归把终态错误送入退避循环。
+    """
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(status=404)])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="HTTP错误") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 终态错误单次尝试即上抛，未触发退避重试
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert session._idx == 1
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_redirect_without_location_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """302 重定向响应缺少 Location 头属终态错误：立即抛出且消息注明缺少 Location。"""
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(302, {})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="缺少 Location"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 重定向语义错误单次尝试即上抛，不进入退避重试
+    assert session._idx == 1
+    assert not save_path.exists()
+
+
 async def test_download_sniffs_extension_from_bytes_when_suffix_mismatched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:

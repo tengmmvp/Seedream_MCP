@@ -53,7 +53,8 @@ async def prepare_image_input(image: str) -> str:
         本地文件为 Base64 Data URI。
 
     Raises:
-        SeedreamValidationError: 输入格式无效、路径越界或维度超限等参数校验失败。
+        SeedreamValidationError: 输入格式无效、路径越界、界内定位失败或维度超限等
+            参数校验失败。
         SeedreamAPIError: 当前会话未授权任何工作区目录，或图像处理发生其他失败。
     """
     try:
@@ -113,11 +114,12 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     候选定位委托 image_validation.resolve_local_image_candidate，与
     ImagePreparer._local_file_signature 共用同一选择规则，缓存签名与实际读取
-    锁定同一文件。定位失败且路径解析后落在全部工作区根之外时，抛出携带允许根
-    列表的 SeedreamValidationError，属参数校验语义而非 API 调用失败；界内定位
-    失败则经 validate_image_path 做诊断性校验取具体失败原因，并给出相似路径建议。
-    越界与界内两条失败路径的文案均按边界来源遮蔽：回退边界来自服务器环境，根
-    绝对路径不进入面向调用方的错误消息。需在工作线程中调用。
+    锁定同一文件。定位失败的两条路径均抛 SeedreamValidationError，属参数校验语义
+    而非 API 调用失败：路径解析后落在全部工作区根之外时抛携带允许根列表的越界
+    错误；界内定位失败则经 validate_image_path 做诊断性校验取具体失败原因，并给出
+    相似路径建议，文件不存在、格式不支持等属调用方输入问题，不得归入 api_error
+    档误导排查方向。两条失败路径的文案均按边界来源遮蔽：回退边界来自服务器环境，
+    根绝对路径不进入面向调用方的错误消息。需在工作线程中调用。
     """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
@@ -148,7 +150,9 @@ def _prepare_local_image(normalized: str, original: str) -> str:
         # 诊断文案与相似路径建议均由服务器根下的绝对路径拼出，回退边界时与越界
         # 分支同口径遮蔽，改报仅回显调用方输入的泛化消息。
         if not is_boundary_from_session_roots():
-            raise SeedreamAPIError(f"图像路径校验失败: {normalized}")
+            raise SeedreamValidationError(
+                f"图像路径校验失败: {normalized}", field="image", value=normalized
+            )
         validation_errors: list[str] = []
         for root in workspace_roots:
             _, error_msg, _ = validate_image_path(
@@ -170,7 +174,9 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
                 f"  • {s}" for s in suggestions[:3]
             )
-        raise SeedreamAPIError(f"{error_text}{suggestion_text}")
+        raise SeedreamValidationError(
+            f"{error_text}{suggestion_text}", field="image", value=normalized
+        )
 
     validated_path, _ = found
 

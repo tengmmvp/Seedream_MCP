@@ -65,6 +65,13 @@ EXTENSION_BY_MIME: Mapping[str, str] = MappingProxyType(
 _HEIC_BRANDS: tuple[bytes, ...] = (b"heic", b"heix", b"hevc", b"heim", b"heis")
 _HEIF_BRANDS: tuple[bytes, ...] = (b"mif1", b"msf1")
 
+# BMP DIB 头 size 字段的合法取值：BITMAPCOREHEADER 12、OS/2 2.x 简化头 16、
+# BITMAPINFOHEADER 40 与 V2/V3/OS22X 完整头/V4/V5 扩展头 52/56/64/108/124。
+# 结构校验取 DIB 头字段而非 offset 2-5 文件大小字段与内容长度比对：下载侧以流式
+# 首部前缀做真实性校验，前缀长度小于完整文件，文件大小字段比对会误拒合法 BMP；
+# DIB 头位于文件前 18 字节，前缀形态同样可判。
+_BMP_DIB_HEADER_SIZES: frozenset[int] = frozenset({12, 16, 40, 52, 56, 64, 108, 124})
+
 
 def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTENSION) -> str:
     """基于文件头魔法字节推断图片扩展名。
@@ -86,9 +93,14 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
             return ".jpeg"
         if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
             return ".gif"
-        # BMP: "BM" 魔数且文件头完整（14 字节 BITMAPFILEHEADER）。个别合法 BMP 变体的
-        # offset 6-10 保留字段非零，不据此拒判；完整文件头长度足以约束误判面。
-        if content.startswith(b"BM") and len(content) >= 14:
+        # BMP: "BM" 魔数且 DIB 头 size 字段完整、取值合法。个别合法 BMP 变体的
+        # offset 6-10 保留字段非零，不据此拒判；"BM" 前缀的长文本因 DIB 头非法按
+        # 未知内容处理，走默认拒判路径。
+        if (
+            content.startswith(b"BM")
+            and len(content) >= 18
+            and int.from_bytes(content[14:18], "little") in _BMP_DIB_HEADER_SIZES
+        ):
             return ".bmp"
         if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
             return ".webp"
@@ -107,11 +119,10 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
     return default
 
 
-# 下载内容真实性判定按格式分级的最小合法长度下界：BMP 的 14 字节文件头约束过宽，
-# 以 BM 开头的任意短文本都会被判为图片；真实 BMP 至少由 14 字节文件头、40 字节
-# DIB 头与像素行构成，64 字节下界拦截短文本误判而不拒绝合法 BMP。其余格式签名
-# 特异性足够，不设下界。下载侧以流式首部做本校验时，累计字节数须覆盖目标格式的
-# 下界，否则合法内容会被误拒。
+# 下载内容真实性判定按格式分级的最小合法长度下界：BMP 推断已要求 DIB 头 size 字段
+# 合法，此处 64 字节下界进一步要求内容达到真实 BMP 的最小构成，即文件头、DIB 头与
+# 首行像素，拦截头字段合法但内容过短的截断形态。其余格式签名特异性足够，不设下界。
+# 下载侧以流式首部做本校验时，累计字节数须覆盖目标格式的下界，否则合法内容会被误拒。
 _MIN_KNOWN_BYTES_BY_EXTENSION: Mapping[str, int] = MappingProxyType({".bmp": 64})
 
 # 流式首部校验的最小累计窗口：各格式下界的最大值，下载侧的首部缓冲须至少覆盖

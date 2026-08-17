@@ -323,7 +323,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         标准化的 Path 对象。
 
     Raises:
-        ValueError: 路径为 UNC 形式或路径无效时抛出。
+        ValueError: 路径为 UNC 形式、Windows 驱动器相对形式或路径无效时抛出。
     """
     try:
         path_obj = Path(path)
@@ -331,6 +331,12 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝。
         if is_unc_path(str(path_obj)):
             raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
+
+        # 驱动器相对路径有 drive 无 root，pathlib 的 / 拼接对该形态会丢弃 base_dir，
+        # resolve 落到该盘的进程 CWD，静默绕开调用方指定的基础目录；与 UNC 同口径
+        # 在 resolve 前拒绝。POSIX 路径无 drive，恒不触发本分支。
+        if path_obj.drive and not path_obj.root:
+            raise ValueError(f"拒绝驱动器相对路径以避免绕过基础目录解析: {path}")
 
         if path_obj.is_absolute():
             return path_obj.resolve()

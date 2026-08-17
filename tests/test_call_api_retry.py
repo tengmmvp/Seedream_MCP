@@ -1,8 +1,10 @@
 """SeedreamClient._call_api 重试与错误分类守护。
 
-覆盖错误恢复路径的核心分支：429 指数退避重试后成功、4xx 客户端错误立即抛出、
-超时经重试用尽映射为 SeedreamTimeoutError、非可重试的意外错误不浪费退避。
-网络层经 monkeypatch 注入，不触达真实 API。
+重试循环对标准与流式两条分发路径共用，核心分支以分发目标参数化同时锁定两条
+路径：429 指数退避重试后成功、5xx 重试后成功、超时与网络错误重试耗尽后的异常
+映射、4xx 与意外错误立即抛出、Retry-After 退避取值与超上限信任服务端值。
+另有仅标准路径存在的 3xx 立即终态与响应体上限分支。网络层经 monkeypatch 注入，
+不触达真实 API。
 """
 
 import asyncio
@@ -20,9 +22,17 @@ from seedream_mcp.utils.core.errors import (
     SeedreamTimeoutError,
 )
 
+# 重试循环的两条分发目标：请求体不含 stream 标志经 _send_standard_request 发送，
+# 含 stream=True 经 _send_stream_request 发送，其余重试语义完全共用。
+_DISPATCH_TARGETS = [
+    pytest.param("_send_standard_request", {}, id="standard"),
+    pytest.param("_send_stream_request", {"stream": True}, id="stream"),
+]
 
+
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_retries_on_429_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: Dict[str, Any]
 ) -> None:
     """429 限流按退避重试，首次失败后第二次成功。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -44,14 +54,20 @@ async def test_call_api_retries_on_429_then_succeeds(
                 raise SeedreamAPIError("rate limited", status_code=429)
             return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        monkeypatch.setattr(client, send_method, fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     assert calls == 2
     assert result["success"] is True
 
 
-async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
+async def test_call_api_4xx_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    send_method: str,
+    extra_body: Dict[str, Any],
+) -> None:
     """4xx 客户端错误（非 429）立即抛出，不重试。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
@@ -70,9 +86,9 @@ async def test_call_api_4xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
             calls += 1
             raise SeedreamAPIError("bad request", status_code=400)
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, send_method, fake_send)
         with pytest.raises(SeedreamAPIError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     assert calls == 1
 
@@ -103,8 +119,12 @@ async def test_call_api_3xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
     assert calls == 1
 
 
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_timeout_retried_then_mapped(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    send_method: str,
+    extra_body: Dict[str, Any],
 ) -> None:
     """httpx 超时按 max_retries 重试用尽后映射为 SeedreamTimeoutError。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
@@ -124,16 +144,20 @@ async def test_call_api_timeout_retried_then_mapped(
             calls += 1
             raise httpx.TimeoutException("timed out")
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, send_method, fake_send)
         with pytest.raises(SeedreamTimeoutError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     # max_retries=1 表示首次失败后还可重试 1 次，故共 2 次尝试
     assert calls == 2
 
 
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_unexpected_error_not_retried(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    send_method: str,
+    extra_body: Dict[str, Any],
 ) -> None:
     """非可重试的意外错误立即抛出，不浪费退避等待。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -153,15 +177,16 @@ async def test_call_api_unexpected_error_not_retried(
             calls += 1
             raise ValueError("unexpected bug")
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, send_method, fake_send)
         with pytest.raises(ValueError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     assert calls == 1
 
 
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_retries_on_5xx_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: Dict[str, Any]
 ) -> None:
     """5xx 服务端错误按退避重试，首次失败后第二次成功。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -183,15 +208,19 @@ async def test_call_api_retries_on_5xx_then_succeeds(
                 raise SeedreamAPIError("server error", status_code=500)
             return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        monkeypatch.setattr(client, send_method, fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     assert calls == 2
     assert result["success"] is True
 
 
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_network_error_retries_then_mapped(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    send_method: str,
+    extra_body: Dict[str, Any],
 ) -> None:
     """httpx.RequestError（ConnectError）重试用尽后映射为 SeedreamNetworkError。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
@@ -211,15 +240,18 @@ async def test_call_api_network_error_retries_then_mapped(
             calls += 1
             raise httpx.ConnectError("connection refused")
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        monkeypatch.setattr(client, send_method, fake_send)
         with pytest.raises(SeedreamNetworkError):
-            await client._call_api("text_to_image", {"prompt": "p"})
+            await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     # max_retries=1 表示首次失败后还可重试 1 次，故共 2 次尝试
     assert calls == 2
 
 
-async def test_call_api_429_uses_retry_after_for_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
+async def test_call_api_429_uses_retry_after_for_backoff(
+    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: Dict[str, Any]
+) -> None:
     """带 retry_after 的 429 退避基于服务端 Retry-After，而非指数 2**attempt。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
@@ -250,8 +282,8 @@ async def test_call_api_429_uses_retry_after_for_backoff(monkeypatch: pytest.Mon
                 raise SeedreamAPIError("rate limited", status_code=429, retry_after=2.0)
             return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        monkeypatch.setattr(client, send_method, fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     assert calls == 2
     assert result["success"] is True
@@ -259,7 +291,10 @@ async def test_call_api_429_uses_retry_after_for_backoff(monkeypatch: pytest.Mon
     assert sleep_durations == [2.0]
 
 
-async def test_call_api_429_retry_after_above_backoff_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
+async def test_call_api_429_retry_after_above_backoff_cap(
+    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: Dict[str, Any]
+) -> None:
     """retry_after 超过指数退避上限时仍信任服务端值，不被 60 秒上限截断。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
@@ -289,8 +324,8 @@ async def test_call_api_429_retry_after_above_backoff_cap(monkeypatch: pytest.Mo
                 raise SeedreamAPIError("rate limited", status_code=429, retry_after=120.0)
             return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
-        monkeypatch.setattr(client, "_send_standard_request", fake_send)
-        result = await client._call_api("text_to_image", {"prompt": "p"})
+        monkeypatch.setattr(client, send_method, fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
 
     assert calls == 2
     assert result["success"] is True

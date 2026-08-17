@@ -6,32 +6,31 @@ README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版�
 
 配对策略：围栏代码块按出现顺序配对，先断言数量相等，再逐块比较第 N 块；基准
 版本为 README.md，其余两份与基准对齐。断言只比较语言无关要素，如 JSON 块全文、
-bash 块内的 KEY=value 赋值、环境变量键序、标题层级、链接 URL、表格列数与能力差
-异表的数字 token 序列，不比较自然语言正文。定位环境变量配置块时以含
-SEEDREAM_MODEL_ID 赋值行的 bash 块为锚点，定位能力差异表时以含 "1K / 1.5K / 2K"
-单元格的表格为锚点，均不依赖各语言的章节标题文字。
+bash 块内的 KEY=value 赋值与 CLI 旗标 token、环境变量键序、工具参数 bullet 列表
+的参数名序列、标题层级、链接 URL、表格列数与能力差异表的数字 token 序列，不比
+较自然语言正文。定位环境变量配置块时以含 SEEDREAM_MODEL_ID 赋值行的 bash 块为
+锚点，定位能力差异表时以含 "1K / 1.5K / 2K" 单元格的表格为锚点，均不依赖各语言
+的章节标题文字。围栏块解析与配置块定位的共享实现位于 _readme_helpers。
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
-from pathlib import Path
 from typing import TypeVar
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-BASE_README = "README.md"
-OTHER_READMES = ("README.en.md", "README.zh-TW.md")
+from _readme_helpers import BASE_README, CodeBlock, _env_block, _lang_blocks, _read_readme
 
-# 环境变量配置块的定位锚点，全文仅该 bash 块存在 SEEDREAM_MODEL_ID 赋值行。
-_ENV_BLOCK_ANCHOR = re.compile(r"^\s*SEEDREAM_MODEL_ID=")
+OTHER_READMES = ("README.en.md", "README.zh-TW.md")
 
 # bash 块内 KEY=value 形态的赋值提取。值取等号后到首个空白前的片段并剥除尾部
 # 标点，可为空串，避免句子收尾的右括号等标点在不同语言注释中的附着差异造成误
 # 报；注释行中的赋值同样提取，用于捕捉译文注释里漂移的键名与取值。
 _ASSIGNMENT_PATTERN = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=(\S*)")
 _VALUE_TRAILING_PUNCTUATION = ")]}.,;:!?"
+
+# CLI 旗标 token 提取后的行尾标点剥除集合，与赋值取值的剥除口径一致。
+_FLAG_TRAILING_PUNCTUATION = ")]}.,;:!?"
 
 # 环境变量键名形态，与 .env.example 守护测试的口径一致。
 _ENV_KEY_PATTERN = re.compile(r"\b(?:SEEDREAM|ARK)_[A-Z0-9_]+")
@@ -44,51 +43,10 @@ _HTML_LINK_PATTERN = re.compile(r'(?:href|src)="([^"]+)"')
 # ATX 标题行，井号序列后须跟空白。
 _HEADING_PATTERN = re.compile(r"^(#{1,6})(?=\s)")
 
+# 工具参数 bullet 行形态：行首反引号包裹的参数名，参数名本身语言无关。
+_PARAM_BULLET_PATTERN = re.compile(r"^- `([A-Za-z_][A-Za-z0-9_]*)`")
+
 _T = TypeVar("_T")
-
-
-@dataclass(frozen=True)
-class CodeBlock:
-    """一个围栏代码块。line 为起始围栏所在行号，lines 为围栏内的正文行。"""
-
-    lang: str
-    line: int
-    lines: tuple[str, ...]
-
-
-def _read_readme(name: str) -> str:
-    """读取仓库根目录下指定文件名的 README 全文。"""
-    return (PROJECT_ROOT / name).read_text(encoding="utf-8")
-
-
-def _fenced_blocks(text: str) -> list[CodeBlock]:
-    """按行扫描全文，返回全部围栏代码块，按出现顺序排列。
-
-    以行首三反引号围栏开合切换状态，开栏行围栏标记后的文字即为语言标识。
-    """
-    blocks: list[CodeBlock] = []
-    lang: str | None = None
-    start_line = 0
-    body: list[str] = []
-    for lineno, raw in enumerate(text.splitlines(), start=1):
-        if not raw.lstrip().startswith("```"):
-            if lang is not None:
-                body.append(raw)
-            continue
-        if lang is None:
-            lang = raw.lstrip()[3:].strip().lower()
-            start_line = lineno
-            body = []
-        else:
-            blocks.append(CodeBlock(lang, start_line, tuple(body)))
-            lang = None
-            body = []
-    return blocks
-
-
-def _lang_blocks(name: str, lang: str) -> list[CodeBlock]:
-    """读取指定 README 并返回给定语言的全部围栏块。"""
-    return [block for block in _fenced_blocks(_read_readme(name)) if block.lang == lang]
 
 
 def _prose_lines(name: str) -> list[tuple[int, str]]:
@@ -113,18 +71,42 @@ def _block_assignments(block: CodeBlock) -> list[tuple[str, str]]:
     return pairs
 
 
-def _env_block(name: str) -> CodeBlock:
-    """定位环境变量配置 bash 块，锚点为 SEEDREAM_MODEL_ID 赋值行。"""
-    candidates = [
-        block
-        for block in _lang_blocks(name, "bash")
-        if any(_ENV_BLOCK_ANCHOR.match(line) for line in block.lines)
-    ]
-    assert len(candidates) == 1, (
-        f"{name} 环境变量配置块定位失败，含 SEEDREAM_MODEL_ID 赋值行的 bash 块"
-        f"应唯一命中，实际命中 {len(candidates)} 个"
-    )
-    return candidates[0]
+def _block_flag_tokens(block: CodeBlock) -> list[str]:
+    """提取块内全部 CLI 旗标 token，按行序与行内出现顺序展开为扁平序列。
+
+    旗标为以 -- 开头的 token，剥除附着在译文注释里的行尾标点；旗标名与默认值
+    提示同为语言无关要素，启动参数清单与示例命令的单语漂移由序列比较暴露。
+    """
+    flags: list[str] = []
+    for line in block.lines:
+        for token in line.split():
+            if token.startswith("--"):
+                flags.append(token.rstrip(_FLAG_TRAILING_PUNCTUATION))
+    return flags
+
+
+def _param_bullet_groups(name: str) -> list[tuple[int, list[str]]]:
+    """把正文工具参数 bullet 行按连续行分组，每组的组首行号与参数名序列。
+
+    bullet 仅出现于正文而非围栏代码块内；分组按连续 bullet 行切分，各工具的
+    参数列表彼此隔离，新增、删除或调序参数而未三语同步时序列先行失配。
+    """
+    groups: list[tuple[int, list[str]]] = []
+    current: list[str] = []
+    start_line = 0
+    for lineno, raw in _prose_lines(name):
+        match = _PARAM_BULLET_PATTERN.match(raw)
+        if match is None:
+            if current:
+                groups.append((start_line, current))
+                current = []
+            continue
+        if not current:
+            start_line = lineno
+        current.append(match.group(1))
+    if current:
+        groups.append((start_line, current))
+    return groups
 
 
 def _env_block_keys(name: str) -> list[str]:
@@ -296,6 +278,62 @@ def test_bash_blocks_share_assignments_across_languages() -> None:
                 f"{BASE_README} 第 {base.line} 行起的同序块漂移:\n"
                 f"  {BASE_README}: {base_pairs}\n"
                 f"  {name}: {other_pairs}"
+            )
+
+
+def test_bash_blocks_share_cli_flag_tokens_across_languages() -> None:
+    """三语全部 bash 代码块内 CLI 旗标 token 序列一致。
+
+    启动参数清单与示例命令中的旗标为语言无关要素，按块配对比较旗标序列；某语言
+    单独增删旗标、改名或调序时，首个差异块的消息指明漂移的文件与块序。
+    """
+    base_blocks = _lang_blocks(BASE_README, "bash")
+    assert base_blocks, "README.md 应存在 bash 代码块，围栏解析失效或文档被清空"
+    assert any(
+        _block_flag_tokens(block) for block in base_blocks
+    ), "bash 代码块未提取到任何 CLI 旗标 token，旗标解析失效"
+
+    for name in OTHER_READMES:
+        other_blocks = _lang_blocks(name, "bash")
+        assert len(other_blocks) == len(base_blocks), (
+            f"{name} 的 bash 代码块数量为 {len(other_blocks)}，{BASE_README} 为 "
+            f"{len(base_blocks)}，存在单语增删的命令块"
+        )
+        for ordinal, (base, other) in enumerate(zip(base_blocks, other_blocks), start=1):
+            base_flags = _block_flag_tokens(base)
+            other_flags = _block_flag_tokens(other)
+            assert other_flags == base_flags, (
+                f"{name} 第 {other.line} 行起的第 {ordinal} 个 bash 块旗标序列与 "
+                f"{BASE_README} 第 {base.line} 行起的同序块漂移:\n"
+                f"  {BASE_README}: {base_flags}\n"
+                f"  {name}: {other_flags}"
+            )
+
+
+def test_tool_param_bullet_groups_match() -> None:
+    """各工具参数 bullet 列表的参数名序列三语一致。
+
+    五个工具的参数清单以行首反引号参数名的 bullet 列表表达，参数名与列表分组
+    均为语言无关要素；某语言单独增删参数 bullet 或拆并列表时，分组序列先行失配，
+    失败消息定位两份文件的差异分组行号。
+    """
+    base_groups = _param_bullet_groups(BASE_README)
+    assert base_groups, "未提取到任何工具参数 bullet 列表，bullet 解析失效或文档被清空"
+
+    for name in OTHER_READMES:
+        other_groups = _param_bullet_groups(name)
+        assert len(other_groups) == len(base_groups), (
+            f"{name} 的参数 bullet 列表为 {len(other_groups)} 组，{BASE_README} 为 "
+            f"{len(base_groups)} 组，存在单语增删的参数列表或分组漂移"
+        )
+        for ordinal, ((base_line, base_names), (other_line, other_names)) in enumerate(
+            zip(base_groups, other_groups), start=1
+        ):
+            assert other_names == base_names, (
+                f"{name} 第 {other_line} 行起的第 {ordinal} 组参数 bullet 序列与 "
+                f"{BASE_README} 第 {base_line} 行起的同序组漂移:\n"
+                f"  {BASE_README}: {base_names}\n"
+                f"  {name}: {other_names}"
             )
 
 

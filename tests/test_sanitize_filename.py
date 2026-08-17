@@ -1,6 +1,7 @@
-"""FileManager.sanitize_filename 的表驱动契约测试。
+"""FileManager.sanitize_filename 与唯一文件名长度预算的表驱动契约测试。
 
-覆盖不安全字符替换、控制字符剥离、长度截断、Windows 保留设备名规避与前导点处理，
+覆盖不安全字符替换、控制字符剥离、长度截断与超长扩展名按纯词干处理、Windows
+保留设备名规避与前导点处理，以及 generate_unique_filename 的词干预算守护，
 这些规则直接影响跨平台落盘正确性与安全性。
 """
 
@@ -8,7 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from seedream_mcp.utils.io.io_storage import FileManager, _MAX_FILENAME_LENGTH
+from seedream_mcp.utils.io.io_storage import (
+    FileManager,
+    _MAX_EXTENSION_LENGTH,
+    _MAX_FILENAME_LENGTH,
+    _MAX_UNIQUE_BASE_LENGTH,
+)
 
 
 @pytest.fixture
@@ -42,11 +48,62 @@ def test_sanitize_filename_truncates_long_name_keeping_extension(manager):
     assert sanitized.endswith(".png")
 
 
-def test_sanitize_filename_oversized_extension_clamps_to_zero(manager):
-    """扩展名自身超长时词干长度下限取 0，词干截空并完整保留扩展名，不从尾部误截。"""
+def test_sanitize_filename_keeps_extension_at_length_cap(manager):
+    """扩展名长度恰在上限内时截断词干并完整保留扩展名，总长精确落在上限。"""
+    ext = "." + "e" * (_MAX_EXTENSION_LENGTH - 1)
+    raw = "x" * 300 + ext
+    sanitized = manager.sanitize_filename(raw)
+    assert len(sanitized) == _MAX_FILENAME_LENGTH
+    assert sanitized.endswith(ext)
+
+
+def test_sanitize_filename_oversized_extension_treated_as_stem(manager):
+    """超长扩展名不可能是合法图片后缀，按纯词干截断，总长不超过上限。
+
+    旧行为按 name[:0] + ext 原样保留 300 字符扩展名，截断失效使结果突破上限。
+    """
     raw = "y" * 50 + "." + "z" * 300
     sanitized = manager.sanitize_filename(raw)
-    assert sanitized == "." + "z" * 300
+    assert sanitized == raw[:_MAX_FILENAME_LENGTH]
+    assert len(sanitized) == _MAX_FILENAME_LENGTH
+
+
+# ==================== 唯一文件名长度预算 ====================
+
+
+def test_generate_unique_filename_caps_base_within_budget(manager):
+    """255 字符合法 custom_name 的词干按预算截断，拼接时间戳与哈希后总长有界。"""
+    filename = manager.generate_unique_filename("c" * 255, ".png", content_hash="a" * 64)
+    # 词干截到预算上限，其后缀时间戳 19 位、分隔符与 8 位哈希、扩展名长度合计封顶
+    assert len(filename) <= _MAX_UNIQUE_BASE_LENGTH + 1 + 19 + 1 + 8 + len(".png")
+    assert filename.startswith("c" * _MAX_UNIQUE_BASE_LENGTH + "_")
+
+
+def test_generate_unique_filename_short_base_not_truncated(manager):
+    """短词干不受预算影响，原样保留。"""
+    filename = manager.generate_unique_filename("cat", ".png")
+    assert filename.startswith("cat_")
+
+
+def test_create_save_path_long_custom_name_stays_within_max_path(manager, tmp_path):
+    """长 custom_name 生成的完整保存路径不超 Windows 默认 MAX_PATH 260。
+
+    词干无预算时 200 字符 sanitize 结果叠加时间戳、哈希、日期与工具子目录后，
+    路径必然超出 MAX_PATH 使自动保存必然失败；预算截断使合法输入不再必然失败。
+    断言基于本仓库测试协议的短 basetemp 前提。
+    """
+    path = manager.create_save_path(
+        prompt="p",
+        url="https://example.com/img.png",
+        tool_name="seedream",
+        custom_name="c" * 255,
+    )
+    assert len(str(path)) < 260
+    # 相对 base_dir 的增量部分由日期目录、工具目录与预算内文件名构成，机器无关封顶
+    relative = str(path.relative_to(manager.base_dir))
+    assert len(relative) <= len("2026-08-17") + 1 + len("seedream") + 1 + (
+        _MAX_UNIQUE_BASE_LENGTH + 1 + 19 + 1 + 8 + len(".png")
+    )
 
 
 @pytest.mark.parametrize(

@@ -18,7 +18,6 @@ from ..core._helpers import (
     PROGRESS_COMPLETE,
     PROGRESS_SCAN_SPAN,
     PROGRESS_SCAN_START,
-    _safe_ctx_log,
     _safe_report_progress,
 )
 from ..core.outputs import BrowseImagesStructuredOutput, build_error_dict
@@ -253,6 +252,13 @@ def _scan_and_filter_directory(
     请求按当前工作区根重新执行，保留安全语义。``seen_images`` 跨目录共享以去重重叠根目录的
     重复图片；调用方按目录串行 await，无并发写竞争。
 
+    剔除项不占用分页配额：扫描层按 scan_limit 早停，早停窗口内的越界符号链接与跨目录
+    重复项在扫描之后才被剔除，若不补偿，剔除项占满配额会使 has_more 假阴性、total_count
+    低报、尾部图片翻页不可达。本函数在扫描命中上限、未填满配额且存在剔除时，按剔除计数
+    扩大 scan_limit 补扫，直至填满配额、扫到目录末尾或无剔除项。补扫经已处理位置的续扫
+    游标跳过此前已消费的扫描前缀，同目录的扫描结果为字典序稳定前缀，续扫不重复消费；
+    scan_limit 随剔除数严格递增，目录文件数有限，循环必然终止。
+
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
         recursive: 是否递归扫描子目录。
@@ -267,29 +273,46 @@ def _scan_and_filter_directory(
     Returns:
         新增 (原始路径, resolved 路径) 元组列表，长度不超过 remaining。
     """
-    # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
-    matched_image_pairs = cached_find_images_in_directory(
-        resolved_dir=resolved_dir,
-        recursive=recursive,
-        max_depth=max_depth,
-        format_filter=format_filter,
-        scan_limit=remaining,
-        scanner=find_images_in_directory,
-        unreadable_dirs=unreadable_dirs,
-    )
     new_entries: list[tuple[Path, Path]] = []
-    for image_path, image_resolved in matched_image_pairs:
-        # resolve 结果来自扫描缓存层；root 已 resolve，直接做 relative_to 比较。
-        if not any(is_within_resolved(image_resolved, root) for root in resolved_roots):
-            logger.warning("检测到越界图片路径，已忽略: {}", image_path)
-            continue
-        if image_path in seen_images:
-            continue
-        seen_images.add(image_path)
-        new_entries.append((image_path, image_resolved))
-        if len(new_entries) >= remaining:
-            break
-    return new_entries
+    scan_limit = remaining
+    # 续扫游标：当前轮扫描前缀中已消费的条目数，补扫轮从该位置继续，不重复消费。
+    consumed = 0
+    while True:
+        # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
+        matched_image_pairs = cached_find_images_in_directory(
+            resolved_dir=resolved_dir,
+            recursive=recursive,
+            max_depth=max_depth,
+            format_filter=format_filter,
+            scan_limit=scan_limit,
+            scanner=find_images_in_directory,
+            unreadable_dirs=unreadable_dirs,
+        )
+        # 返回量达到 scan_limit 说明目录可能仍有后续条目，未达到即已扫到末尾。
+        scan_hit_limit = len(matched_image_pairs) >= scan_limit
+        dropped = 0
+        while consumed < len(matched_image_pairs):
+            image_path, image_resolved = matched_image_pairs[consumed]
+            consumed += 1
+            # resolve 结果来自扫描缓存层；root 已 resolve，直接做 relative_to 比较。
+            if not any(is_within_resolved(image_resolved, root) for root in resolved_roots):
+                logger.warning("检测到越界图片路径，已忽略: {}", image_path)
+                dropped += 1
+                continue
+            if image_path in seen_images:
+                dropped += 1
+                continue
+            seen_images.add(image_path)
+            new_entries.append((image_path, image_resolved))
+            if len(new_entries) >= remaining:
+                break
+        if not scan_hit_limit or len(new_entries) >= remaining or dropped == 0:
+            return new_entries
+        # 早停窗口内存在剔除且配额未填满：按剔除计数扩大 scan_limit 补扫，使剔除项
+        # 不占掉本页可见配额。consumed 游标假设同目录补扫返回稳定前缀，扫描层按
+        # normcase 排序且缓存按 mtime 失效，单次请求内目录内容变化的竞态窗口极窄，
+        # 错位条目由 seen_images 去重兜底。
+        scan_limit = scan_limit + dropped
 
 
 def _build_display_entries(
@@ -368,7 +391,7 @@ async def handle_browse_images(
 
     Args:
         params: 经 pydantic 校验的图片浏览入参模型。
-        ctx: MCP 上下文，用于进度上报与日志推送，无会话时可为 None。
+        ctx: MCP 上下文，用于进度上报，无会话时可为 None。
 
     Returns:
         MCP 标准工具结果，含面向模型的图片列表文本与 structuredContent。
@@ -384,7 +407,6 @@ async def handle_browse_images(
         logger.error("浏览图片处理失败", exc_info=True)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         user_message = format_error_for_user(exc)
-        await _safe_ctx_log(ctx, "error", f"浏览图片失败：{user_message}")
         try:
             fallback_roots = get_workspace_roots()
         except Exception:
@@ -427,7 +449,6 @@ async def _handle_browse_images_impl(
 
     if not workspace_roots:
         message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
-        await _safe_ctx_log(ctx, "warning", message)
         return _build_browse_error(state=state, message=message)
 
     # 预解析工作区根与请求目录：resolve/normalize 均为可能阻塞网络挂载目录的同步
@@ -454,8 +475,12 @@ async def _handle_browse_images_impl(
             for root in resolved_root_list:
                 try:
                     candidate = normalize_path(state.directory, str(root))
-                except ValueError:
-                    continue
+                except ValueError as exc:
+                    # 相对路径的规范化失败由路径自身缺陷决定（UNC、驱动器相对、非法
+                    # 字符等），与拼接的根无关，首个根即失败时与绝对分支同口径返回
+                    # 「目录路径无效」；路径合法但全部越界才落到下方的超出范围分支。
+                    # 异常消息内含完整用户输入路径，经净化截断后才进入错误通道。
+                    return resolved_root_list, [], sanitize_error_text(f"目录路径无效: {exc}")
                 if not is_within_resolved(candidate, root):
                     continue
                 if candidate not in resolved_dir_list:
@@ -480,12 +505,6 @@ async def _handle_browse_images_impl(
             message = "目录超出允许范围。仅允许浏览服务器配置的工作区目录。"
         return _build_browse_error(state=state, message=message)
 
-    await _safe_ctx_log(
-        ctx,
-        "info",
-        f"浏览图片：目录={state.directory}, 递归={state.recursive}, "
-        f"最大深度={state.max_depth}, 限制={state.limit}",
-    )
     await _safe_report_progress(ctx, progress=PROGRESS_SCAN_START, message="开始扫描图片目录")
 
     logger.info(
@@ -498,10 +517,10 @@ async def _handle_browse_images_impl(
 
     # 搜索图片文件：_scan_and_filter_directory 经 cached_find_images_in_directory 扫描目录，
     # 翻页共享有序列表缓存，非递归按目录 mtime 失效、递归按 TTL 失效；scan_limit 用于早停
-    # 与切片判定 has_more。语义边界：越界项即 resolve 后落在工作区外的符号链接，与跨目录
-    # 重复项在扫描之后才被剔除，其占用早停配额时可见数偏少，has_more 可能提前为 False、
-    # total_count 偏小；该情形需越界条目恰好占满配额，属罕见边界。format_filter_exhausted
-    # 时跳过扫描，all_images 保持为空，由下方空结果分支统一返回。
+    # 与切片判定 has_more。越界项即 resolve 后落在工作区外的符号链接，与跨目录重复项在
+    # 扫描之后才被剔除；_scan_and_filter_directory 对被剔除项按剔除计数补扫，补齐其占用
+    # 的早停配额，分页语义不受剔除项影响。format_filter_exhausted 时跳过扫描，all_images
+    # 保持为空，由下方空结果分支统一返回。
     scan_limit = state.offset + state.limit + 1
     all_images: list[Path] = []
     image_resolved_map: dict[Path, Path] = {}
@@ -563,13 +582,11 @@ async def _handle_browse_images_impl(
                 # 空列表为文档明示的合法输入，无用户格式可回显时改用不含量词空位的
                 # 文案，避免双空格与残缺语义。
                 message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
-            log_message = "图片格式过滤条件全部不受支持"
         elif total_count:
             message = (
                 f"offset={state.offset} 超出范围，目录共有 {total_count} 张图片，"
                 f"请使用 0 <= offset < {total_count}。"
             )
-            log_message = f"offset={state.offset} 越界（目录共 {total_count} 张）"
         elif unreadable_dirs:
             unique_unreadable = list(dict.fromkeys(unreadable_dirs))
             if is_boundary_from_session_roots():
@@ -579,11 +596,8 @@ async def _handle_browse_images_impl(
                 # 仅按数量提示，明细进日志。
                 dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"
             message = f"目录不可读或无图片文件：{dirs_text}"
-            log_message = f"未找到匹配图片且 {len(unique_unreadable)} 个目录不可读"
         else:
             message = "未找到图片文件，请确认目录或过滤条件。"
-            log_message = "未找到匹配的图片文件"
-        await _safe_ctx_log(ctx, "info", log_message)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
         return CallToolResult(
             content=[TextContent(type="text", text=message)],
@@ -622,7 +636,6 @@ async def _handle_browse_images_impl(
         range_text = f"第 {state.offset + 1}-{page_last} 张"
         lines.append(f"{range_text}，仍有更多，继续翻页请传 offset={next_offset}")
 
-    await _safe_ctx_log(ctx, "info", f"浏览完成：共 {len(structured_images)} 张图片")
     await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
 
     return CallToolResult(

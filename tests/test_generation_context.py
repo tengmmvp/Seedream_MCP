@@ -1,6 +1,7 @@
 """生成执行上下文构建、并行结果聚合与响应格式化测试。"""
 
 from dataclasses import fields
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -359,6 +360,101 @@ def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() 
     assert "请求频率超限" in result["batch"]["errors"][1]["message"]
 
 
+def test_aggregate_all_failed_result_dicts_carry_upstream_error_code() -> None:
+    """全为失败 dict 且无异常时 error 载荷携带上游 code，与单发路径契约一致。
+
+    200 加顶层 error 的请求级失败（如内容策略拒绝）经并行聚合后不再丢失上游错误码；
+    提取取首个携带非空字符串 code 的结果，未提取到时维持 generation_failed 兜底。
+    """
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {"code": "ContentFilterBlocked", "message": "内容不符合规范"},
+            },
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {"code": "ContentFilterBlocked", "message": "内容不符合规范"},
+            },
+        ],
+        request_errors={},
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "ContentFilterBlocked"
+    assert "内容不符合规范" in result["error"]["message"]
+
+
+def test_aggregate_all_failed_result_dicts_without_code_keep_fallback() -> None:
+    """失败 dict 无可用 code 时 error 载荷不含 code 键，type 维持兜底档。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            {"success": False, "status": "failed", "data": [], "error": {"message": "boom"}},
+        ],
+        request_errors={},
+    )
+
+    assert result["error"]["type"] == "generation_failed"
+    assert "code" not in result["error"]
+
+
+def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> None:
+    """并发全失败的内容策略拒绝经结构化出口透传上游 code，且净化语义保持。
+
+    聚合 error 携带的 code 为上游自由文本，_build_generation_structured_result 的
+    dict error 分支净化后透传；携带 CRLF 与凭据样式片段的 code 不借该通道注入。
+    """
+    from seedream_mcp.tools.core.results import _build_generation_structured_result
+
+    aggregated = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {
+                    "code": "E-1\r\nFAKE api_key=leaked",
+                    "message": "并行请求全部失败。请求1: 内容不符合规范",
+                },
+            },
+        ],
+        request_errors={},
+    )
+
+    structured = _build_generation_structured_result(
+        tool_name="seedream_text_to_image",
+        result=aggregated,
+        context=GenerationExecutionContext(
+            prompt="t",
+            optimize_prompt_options=None,
+            size="2K",
+            watermark=False,
+            response_format="url",
+            output_format=None,
+            stream=False,
+            tools=None,
+            layer_decomposition=False,
+            background=None,
+            max_images=None,
+            request_count=1,
+            parallelism=1,
+            enable_auto_save=False,
+            save_path=None,
+            custom_name=None,
+        ),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert structured["error"]["code"] == "E-1  FAKE api_key=***"
+    assert "leaked" not in str(structured["error"])
+
+
 def test_aggregate_parallel_generation_results_uses_result_error_when_success_false() -> None:
     result = aggregate_parallel_generation_results(
         request_results=[
@@ -491,3 +587,62 @@ def test_input_schema_rejects_non_bool_auto_save() -> None:
     """
     with pytest.raises(ValidationError):
         TextToImageInput(prompt="t", auto_save="maybe")
+
+
+# ==================== save_path 生成前预检 ====================
+
+
+def test_build_generation_context_rejects_out_of_bounds_save_path(
+    tmp_path: Path,
+) -> None:
+    """越界 save_path 在上下文构建阶段即拒绝，早于计费的生成请求分发。
+
+    此前越界路径在自动保存阶段才抛校验异常并被降级为软警告，图片已按默认目录之外
+    的目标无法落盘；预检与 _resolve_base_dir 共用同一判定入口，错误档位为
+    validation_error。
+    """
+    base = tmp_path / "save_root"
+    base.mkdir()
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+
+    with pytest.raises(SeedreamValidationError, match="超出允许范围") as exc_info:
+        build_generation_context(TextToImageInput(prompt="test", save_path="../../outside"), config)
+
+    assert exc_info.value.field == "save_path"
+
+
+def test_build_generation_context_rejects_invalid_save_path_format() -> None:
+    """无法规范化的 save_path 同属校验档，在上下文构建阶段即拒绝。"""
+    config = _build_config()
+
+    with pytest.raises(SeedreamValidationError, match="保存路径无效"):
+        build_generation_context(
+            TextToImageInput(prompt="test", save_path="a" + "\x00" + "b"), config
+        )
+
+
+def test_build_generation_context_accepts_in_bounds_save_path(tmp_path: Path) -> None:
+    """界内 save_path 预检放行，上下文照常携带原始值交由保存阶段完整解析。"""
+    base = tmp_path / "save_root"
+    base.mkdir()
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+
+    context = build_generation_context(TextToImageInput(prompt="test", save_path="sub/dir"), config)
+
+    assert context.save_path == "sub/dir"
+
+
+def test_build_generation_context_skips_precheck_without_save_path() -> None:
+    """未提供 save_path 时不做预检：默认目录解析失败留待自动保存阶段处理。"""
+    from seedream_mcp.utils.io import io_path as io_path_module
+
+    config = SeedreamConfig(api_key="test_key")
+    token = io_path_module._WORKSPACE_ROOTS_VAR.set(())
+    try:
+        # 空 Roots 且未配置 auto_save_base_dir 时预检直接跳过，不在此抛出
+        # 无法确定自动保存基础目录的校验异常。
+        context = build_generation_context(TextToImageInput(prompt="test"), config)
+    finally:
+        io_path_module._WORKSPACE_ROOTS_VAR.reset(token)
+
+    assert context.save_path is None

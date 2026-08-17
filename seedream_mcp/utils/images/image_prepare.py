@@ -14,7 +14,7 @@ from typing import Sequence
 
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate
-from ..core.logs import get_logger, log_unretrieved_task_exception
+from ..core.logs import arm_unretrieved_exception_logging, get_logger
 from ..io.io_path import resolve_workspace_roots
 
 logger = get_logger(__name__)
@@ -226,14 +226,16 @@ class ImagePreparer:
         if inflight is not None:
             # shield 隔离取消传播：等待者被取消时仅取消其自身 await 的 outer，
             # 底层共享 task 继续运行，保护其他等待者与缓存写入。
-            return await asyncio.shield(inflight)
+            try:
+                return await asyncio.shield(inflight)
+            except asyncio.CancelledError:
+                # 等待者放弃消费后若再无其他等待者接手，task 失败将无人检索异常，
+                # 登记回调兜底记录；task 成功或被取消时回调静默。
+                arm_unretrieved_exception_logging(inflight)
+                raise
 
         task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
         self._prepare_inflight[cache_key] = task
-        # 检索共享 task 的异常结果：创建者被取消后 shield 的 outer 不再消费 task 结果，
-        # 若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
-        # retrieved"；回调内显式检索并记录，消除噪音日志。
-        task.add_done_callback(log_unretrieved_task_exception)
         try:
             # shield 隔离取消传播：创建者被取消时仅取消其自身 await 的 outer，底层共享
             # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理。
@@ -243,6 +245,9 @@ class ImagePreparer:
             # 取消次数会无界叠加突破并发上限。把释放责任转移给 task 本体，task 结束前
             # 槽位保持占用，新请求与等待者继续受限。
             slot.transfer_to_task(task)
+            # 创建者放弃消费后若再无等待者接手，task 失败将无人检索异常，登记回调兜底
+            # 记录；常规失败路径的异常由等待者消费并经既有错误通道记录，不登记。
+            arm_unretrieved_exception_logging(task)
             raise
 
     async def _prepare_and_cache(self, image: str, cache_key: PrepareCacheKey) -> str:

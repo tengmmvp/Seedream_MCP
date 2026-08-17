@@ -3,19 +3,16 @@
 通过 run_text_to_image 验证完整生成流水线：mock SeedreamClient 返回含 url 的结果，
 经 execute_generation_handler 触发 auto_save_from_urls，最终产出含 auto_save 字段的
 CallToolResult；另测自动保存阶段抛错时降级——结果仍为 success 且保留原始 url。
-
-客户端与自动保存管理器类在调用时经 importlib 动态获取，避免 test_package_lazy_import
-重载 seedream_mcp.client 后留下指向旧类对象的失效引用，导致 monkeypatch 失效。
 """
 
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
 import pytest
 from mcp.types import TextContent
 
+from seedream_mcp.client import SeedreamClient
 from seedream_mcp.tools.core.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
@@ -28,6 +25,7 @@ from seedream_mcp.tools.runners import (
     run_sequential_generation,
     run_text_to_image,
 )
+from seedream_mcp.utils.io import io_save
 
 GENERATED_URL = "https://example.com/generated.png"
 
@@ -42,7 +40,7 @@ def _client_result() -> dict[str, Any]:
 
 
 def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    client_cls = importlib.import_module("seedream_mcp.client").SeedreamClient
+    client_cls = SeedreamClient
 
     async def fake_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
         del self, kwargs
@@ -52,7 +50,7 @@ def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    auto_save_module = importlib.import_module("seedream_mcp.utils.io.io_save")
+    auto_save_module = io_save
     mgr_cls = auto_save_module.AutoSaveManager
     result_cls = auto_save_module.AutoSaveResult
 
@@ -73,7 +71,7 @@ def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    mgr_cls = importlib.import_module("seedream_mcp.utils.io.io_save").AutoSaveManager
+    mgr_cls = io_save.AutoSaveManager
 
     async def failing_save_multiple(
         self: Any, images: list[dict[str, Any]], tool_name: str
@@ -86,7 +84,7 @@ def _patch_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> None:
     """monkeypatch SeedreamClient 的指定生成方法返回标准成功结果。"""
-    client_cls = importlib.import_module("seedream_mcp.client").SeedreamClient
+    client_cls = SeedreamClient
 
     async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
         del self, kwargs
@@ -131,8 +129,8 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
     失败占位项不进入保存队列；saveable_indices 对位使保存结果回填到 data 中的
     原始位置而非首位。
     """
-    client_cls = importlib.import_module("seedream_mcp.client").SeedreamClient
-    auto_save_module = importlib.import_module("seedream_mcp.utils.io.io_save")
+    client_cls = SeedreamClient
+    auto_save_module = io_save
 
     async def fake_text_to_image_b64(self: Any, **kwargs: Any) -> dict[str, Any]:
         del self, kwargs
@@ -240,6 +238,42 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
     data = structured["data"]
     assert data[0]["url"] == GENERATED_URL
     assert "local_path" not in data[0]
+
+
+@pytest.mark.asyncio
+async def test_run_text_to_image_rejects_out_of_bounds_save_path_before_api_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """越界 save_path 在校验阶段失败：client 生成方法不被调用，请求不计费执行。
+
+    此前越界路径在自动保存阶段才抛校验异常并被降级为软警告，生成请求已计费执行；
+    上下文构建阶段的预检使其以 validation_error 档拒绝。
+    """
+    client_cls = SeedreamClient
+    calls: list[dict[str, Any]] = []
+
+    async def fake_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self
+        calls.append(kwargs)
+        return _client_result()
+
+    monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image)
+
+    from seedream_mcp.config import SeedreamConfig
+
+    base = tmp_path / "save_root"
+    base.mkdir()
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+    params = TextToImageInput(prompt="a cat", save_path="../../outside")
+
+    result = await run_text_to_image(params, config, ctx=None)
+
+    assert result.is_error is True
+    assert calls == [], "越界 save_path 须在 client 生成方法调用前被拒绝"
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    assert structured["error"]["type"] == "validation_error"
+    assert "超出允许范围" in structured["error"]["message"]
 
 
 @pytest.mark.asyncio
