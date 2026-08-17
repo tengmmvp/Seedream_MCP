@@ -525,6 +525,7 @@ SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 SEEDREAM_AUTO_SAVE_FSYNC=false               # fsync before finalizing writes: improves crash consistency at a slight throughput cost, off by default
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save directory (default 10GB; oldest evicted first when exceeded)
+SEEDREAM_PREVIEW_ENABLED=true                 # Attach thumbnail previews of saved images to generation results (requires auto-save; default on)
 
 # Workspace & transport
 SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)

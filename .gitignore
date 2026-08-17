@@ -162,6 +162,9 @@ dmypy.json
 # PyCharm
 .idea/
 
+# Qoder
+.qoder/
+
 # Vim/Emacs
 *.swp
 *.swo
@@ -193,6 +196,9 @@ Thumbs.db
 tmp/
 temp/
 .tmp/
+
+# Playwright MCP 会话快照
+.playwright-mcp/
 
 # 运行时产物目录
 .seedream/

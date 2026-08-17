@@ -87,6 +87,9 @@ class SeedreamConfig:
         prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
         prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限，防止大图缓存
             累积撑爆内存。
+        preview_enabled: 是否在生成工具结果中附带已保存图片的缩略图预览。预览为
+            长边不超过 768 像素的 JPEG ImageContent，与文本摘要同在 content 数组；
+            关闭后仅返回文本与 structuredContent，行为与本功能引入前一致。
         workspace_root: 无 MCP Roots 时本地文件访问边界的回退目录。
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌。
         http_max_body_size: streamable-http 请求体大小上限字节数；默认 64MB，MCP 正常
@@ -132,6 +135,8 @@ class SeedreamConfig:
     prepare_cache_max: int = _env_field(32, "SEEDREAM_PREPARE_CACHE_MAX")
 
     prepare_cache_max_bytes: int = _env_field(256 * 1024 * 1024, "SEEDREAM_PREPARE_CACHE_MAX_BYTES")
+
+    preview_enabled: bool = _env_field(True, "SEEDREAM_PREVIEW_ENABLED")
 
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
@@ -737,6 +742,9 @@ def _build_config_from_sources_unlocked(
             "prepare_cache_max_bytes",
             "SEEDREAM_PREPARE_CACHE_MAX_BYTES",
             env_values,
+        ),
+        "preview_enabled": _pick_bool(
+            override_values, "preview_enabled", "SEEDREAM_PREVIEW_ENABLED", env_values
         ),
         "workspace_root": _pick_optional_str(
             override_values, "workspace_root", "SEEDREAM_WORKSPACE_ROOT", env_values

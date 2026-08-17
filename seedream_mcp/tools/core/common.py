@@ -3,16 +3,19 @@
 内部按职责拆分到 _helpers/context/results/auto_save/parallel 子模块；本模块聚合公共
 符号，供 tools/impl 与测试经 ``from ...core.common import X`` 导入。
 ``execute_generation_handler`` 作为四类生成工具的统一处理流水线留在此处，依次执行参数
-归一化与校验、客户端调用、自动保存、响应与结构化结果格式化，并对异常做统一降级处理。
+归一化与校验、客户端调用、自动保存、响应与结构化结果格式化，成功路径按配置生成已保存
+图片的缩略图预览，并对异常做统一降级处理。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from ...config import SeedreamConfig
+from ...utils.images.image_thumbnail import build_preview_contents
 from ...utils.io.io_save import AutoSaveResult
 from ...utils.core.errors import format_error_for_user, resolve_error_profile
 from ._helpers import (
@@ -86,7 +89,8 @@ async def execute_generation_handler(
 
     流水线依次为：构建并校验执行上下文、按 request_count 单次或并行调用客户端、按
     response_format 触发 URL 下载或 Base64 解码的自动保存、格式化面向模型的文本与
-    structuredContent。任意阶段抛出的异常都被捕获并降级为 ``is_error=True`` 的结果，
+    structuredContent，随后在预览开启且存在成功保存图片时生成缩略图 ImageContent 追加
+    进 content。任意阶段抛出的异常都被捕获并降级为 ``is_error=True`` 的结果，
     不向调用方抛出。
 
     Args:
@@ -102,7 +106,8 @@ async def execute_generation_handler(
         ctx: MCP 上下文，用于进度上报，无会话时可为 None。
 
     Returns:
-        MCP 结构化工具结果。成功时含文本摘要与 structuredContent，失败时 isError 为 True。
+        MCP 结构化工具结果。成功时含文本摘要与 structuredContent，预览开启且自动保存
+        成功时另含缩略图 ImageContent；失败时 isError 为 True。
     """
     try:
         from ...client import SeedreamClient
@@ -215,9 +220,22 @@ async def execute_generation_handler(
             images=images,
             images_sanitized=not is_generation_failed,
         )
+
+        # 预览从自动保存落盘的本地文件生成：未开启、生成失败或没有成功保存的图片时
+        # 列表为空，content 退化为纯文本，行为与本功能引入前一致。单张缩略图失败在
+        # build_preview_contents 内部跳过，不影响工具结果。
+        preview_contents: list[ImageContent] = []
+        if config.preview_enabled and not is_generation_failed and auto_save_results:
+            saved_paths = [
+                Path(save_result.local_path)
+                for save_result in auto_save_results
+                if save_result.success and save_result.local_path
+            ]
+            preview_contents = await build_preview_contents(saved_paths)
+
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
         return CallToolResult(
-            content=[TextContent(type="text", text=response_text)],
+            content=[TextContent(type="text", text=response_text), *preview_contents],
             structured_content=structured_result,
             is_error=is_generation_failed,
         )

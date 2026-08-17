@@ -525,6 +525,7 @@ SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
 SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
 SEEDREAM_AUTO_SAVE_FSYNC=false               # 落盘前 fsync：开启提升崩溃一致性、略降写入吞吐，默认关闭
 SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 保存目录总字节上限（默认 10GB；超限按最旧文件驱逐）
+SEEDREAM_PREVIEW_ENABLED=true                 # 生成结果附带已保存图片的缩略图（对话内直接预览，依赖自动保存；默认开启）
 
 # 工作区与传输
 SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界回退目录（MCP Roots 优先）
