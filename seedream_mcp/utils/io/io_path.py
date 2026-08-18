@@ -3,8 +3,9 @@
 以 MCP Roots 作为文件访问边界，提供路径规范化与越界判定原语，拦截包含 ``..``
 或经由符号链接指向工作区之外的路径；无 MCP Roots 时回退 SEEDREAM_WORKSPACE_ROOT
 环境变量。工具链的 roots 经 server 层 Resolve 依赖注入取回（SEP-2577 非废弃
-形态），由 workspace_roots_scope_from_result 应用；资源处理器不经工具依赖机制，
-保留 workspace_roots_scope 的会话直连形态。另提供目录图片查找与拼写相近路径
+形态），由 workspace_roots_scope_from_result 应用；资源处理器在 2026-07-28 及
+以后的会话上同样经该函数应用多轮取回的 roots 结果，旧修订会话保留
+workspace_roots_scope 的 roots/list 直连。另提供目录图片查找与拼写相近路径
 建议。组合工作区边界与图像规则的 validate_image_path 位于 images 子包的
 image_validation，本模块保持纯路径职责。
 """
@@ -307,13 +308,15 @@ async def workspace_roots_scope_from_result(
 async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     """在当前请求作用域内绑定 MCP Roots，退出时自动恢复。
 
-    资源处理器专用入口：SDK 的 resolver 依赖机制仅覆盖工具签名，资源侧保留
-    经 ctx.session.list_roots 直连读取的形态。将客户端 Roots 设置到上下文变
-    量作为该请求的文件访问边界；客户端不支持 Roots 时回退环境变量边界。客户
-    端未声明 roots capability 时直接跳过 roots/list 往返，同样回退环境变量边
-    界。当前协议会话无服务端反向通道时 roots/list 必抛 NoBackChannelError：
-    未配置环境变量根则 fail-closed 抛出 SeedreamMCPError，已配置则回退该显式
-    边界。工具链的边界应用走 workspace_roots_scope_from_result。
+    资源处理器在旧修订会话上的取回入口：SDK 的 resolver 依赖机制仅覆盖工具
+    签名，2026-07-28 及以后的资源会话改由 server 层经 InputRequiredResult 多轮
+    取回后走 workspace_roots_scope_from_result，本函数承接旧修订会话的
+    ctx.session.list_roots 直连（SEP-2577 废弃但为旧修订上唯一途径）。将客户
+    端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持 Roots 时
+    回退环境变量边界。客户端未声明 roots capability 时直接跳过 roots/list 往
+    返，同样回退环境变量边界。当前协议会话无服务端反向通道时 roots/list 必抛
+    NoBackChannelError：未配置环境变量根则 fail-closed 抛出 SeedreamMCPError，
+    已配置则回退该显式边界。
 
     Args:
         ctx: MCP 请求上下文，经其 session 读取客户端 Roots。

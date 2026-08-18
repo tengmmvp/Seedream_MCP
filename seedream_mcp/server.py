@@ -36,7 +36,14 @@ from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.resolve import ListRoots, Resolve
-from mcp.types import CallToolResult, ListRootsResult, ToolAnnotations
+from mcp.types import (
+    CallToolResult,
+    InputRequiredResult,
+    ListRootsRequest,
+    ListRootsResult,
+    ToolAnnotations,
+)
+from mcp_types.version import is_version_at_least
 from pydantic import Field
 
 # 本地模块导入
@@ -91,6 +98,7 @@ from .utils.io.io_path import (
     is_boundary_from_session_roots,
     session_declares_roots_capability,
     workspace_roots_scope,
+    workspace_roots_scope_from_result,
 )
 from .utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 
@@ -124,12 +132,11 @@ GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     open_world_hint=True,
 )
 
-# 浏览类工具的能力标注：仅读取文件列表，只读且幂等；不破坏既有数据；仅访问本地
-# 文件系统，非开放世界操作。
+# 浏览类工具的能力标注：仅读取文件列表，只读；仅访问本地文件系统，非开放世界
+# 操作。规范仅为非只读工具定义 destructive_hint 与 idempotent_hint，只读工具
+# 携带两者不构成有效声明，按规范口径省略。
 BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     read_only_hint=True,
-    destructive_hint=False,
-    idempotent_hint=True,
     open_world_hint=False,
 )
 
@@ -823,8 +830,65 @@ _tighten_flat_tool_schemas()
 # ==================== MCP 资源定义 ====================
 
 
+# 资源侧 roots 多轮请求的 input_requests 键名：客户端应答后重试，结果经
+# ctx.input_responses 以同键取回。
+_ROOTS_INPUT_REQUEST_KEY = "roots"
+
+# roots 经 InputRequiredResult 取回所需的最低协商版本：旧修订会话无法序列化该
+# 结果类型，客户端会收到 -32603，故仅 2026-07-28 及以后走多轮形态。
+_MODERN_PROTOCOL_VERSION = "2026-07-28"
+
+
+def _resource_roots_via_input_required(ctx: Context) -> bool:
+    """判定资源处理器是否应经 InputRequiredResult 多轮形态取回 roots。
+
+    会话可访问、客户端已声明 roots capability 且协商版本支持多轮请求时返回 True；
+    无会话上下文（ctx.session 抛 ValueError）、未声明 capability 或版本未知时
+    返回 False，由调用方走 roots/list 直连或环境变量回退。capability 探测沿用
+    session_declares_roots_capability 的保守语义，SDK Client 侧 capability 声明与
+    回调注册联动，声明即能应答多轮请求。
+    """
+    try:
+        session = ctx.session
+    except ValueError:
+        return False
+    if session is None or not session_declares_roots_capability(session):
+        return False
+    # protocol_version 经 getattr 容错读取：真实 Context 恒有该属性，鸭子类型测试
+    # 替身可能缺省，缺省按旧修订走直连回退。
+    version = getattr(ctx, "protocol_version", None)
+    if not isinstance(version, str):
+        return False
+    return is_version_at_least(version, _MODERN_PROTOCOL_VERSION)
+
+
+def _session_roots_for_display() -> list[Any]:
+    """在已应用工作区边界的作用域内读取面向展示的 roots 列表。
+
+    边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端
+    授权声明，其绝对路径不进入面向调用方的输出，按未授权输出空列表。
+    """
+    if is_boundary_from_session_roots():
+        return get_workspace_roots()
+    return []
+
+
+def _render_workspace_roots_payload(roots: list[Any], verbose: bool) -> str:
+    """渲染 roots 资源的 JSON 输出。
+
+    roots 元素经 _file_uri_to_path 或 resolve_env_workspace_root 产出，均为已
+    resolve 的物理路径；verbose 的 resolved 字段直接复用该值，不再二次 resolve。
+    """
+    payload: dict[str, Any] = {"roots": [str(root).replace("\\", "/") for root in roots]}
+    if verbose:
+        payload["resolved"] = [str(root) for root in roots]
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 @mcp.resource("seedream://workspace/roots{?verbose}", mime_type="application/json")
-async def workspace_roots_resource(ctx: Context, verbose: bool = False) -> str:
+async def workspace_roots_resource(
+    ctx: Context, verbose: bool = False
+) -> str | InputRequiredResult:
     """工作区根目录。
 
     展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。verbose 附
@@ -837,21 +901,27 @@ async def workspace_roots_resource(ctx: Context, verbose: bool = False) -> str:
     首次访问 ctx.session 即抛 ValueError，客户端收到 Error creating resource from
     template。裸 Context 注解的实例原样透传，session 与 lifespan_context 均可用。
 
-    资源处理器不经工具的 resolver 依赖机制，roots 读取保留 workspace_roots_scope
-    的会话直连形态（SEP-2577 废弃但废弃期内完全可用）；SDK 为资源侧提供非废弃
-    取回形态时在此跟进。
+    roots 取回按协商版本分流：2026-07-28 及以后的会话无服务端反向通道，经
+    InputRequiredResult 携带 ListRootsRequest 的多轮形态取回，客户端以
+    list_roots 回调应答并重试，结果从 ctx.input_responses 按同键读取；旧修订
+    会话保留 workspace_roots_scope 的 roots/list 直连（SEP-2577 废弃但为旧修订
+    上唯一途径，与 SDK resolver 的 legacy 分支同构）。客户端声明 roots capability
+    与回调注册在 SDK Client 侧联动，声明即能应答；未声明 capability 时不发起取回，
+    回退环境变量边界。
     """
+    if _resource_roots_via_input_required(ctx):
+        responses = ctx.input_responses or {}
+        roots_result = responses.get(_ROOTS_INPUT_REQUEST_KEY)
+        if not isinstance(roots_result, ListRootsResult):
+            return InputRequiredResult(
+                input_requests={_ROOTS_INPUT_REQUEST_KEY: ListRootsRequest()}
+            )
+        async with workspace_roots_scope_from_result(roots_result):
+            roots = _session_roots_for_display()
+        return _render_workspace_roots_payload(roots, verbose)
     async with workspace_roots_scope(ctx):
-        # 边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端
-        # 授权声明，其绝对路径不进入面向调用方的输出，按未授权输出空列表。
-        if is_boundary_from_session_roots():
-            roots = get_workspace_roots()
-        else:
-            roots = []
-    payload: dict[str, Any] = {"roots": [str(root).replace("\\", "/") for root in roots]}
-    if verbose:
-        payload["resolved"] = [str(root.resolve()) for root in roots]
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+        roots = _session_roots_for_display()
+    return _render_workspace_roots_payload(roots, verbose)
 
 
 @mcp.resource("seedream://server/info", mime_type="application/json")

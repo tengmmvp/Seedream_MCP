@@ -83,15 +83,17 @@ async def test_tool_annotations_locked_to_current_hints() -> None:
     """五工具 annotations 逐项锁定，防止行为提示被无意改动。
 
     生成类工具非只读、非破坏、非幂等且需联网调用 API，四个 hint 依次为
-    False/False/False/True；浏览类工具只读本地文件列表、可重复调用，为
-    True/False/True/False。客户端据此决定确认策略与并行调用方式。
+    False/False/False/True；浏览类工具只读本地文件列表，read_only 与 open_world
+    为 True/False。规范仅为非只读工具定义 destructive_hint 与 idempotent_hint，
+    只读工具不携带两者，断言其为 None 锁定该规范口径。客户端据此决定确认策略
+    与并行调用方式。
     """
     expected = {
         "text_to_image": (False, False, False, True),
         "image_to_image": (False, False, False, True),
         "multi_image_fusion": (False, False, False, True),
         "sequential_generation": (False, False, False, True),
-        "browse_images": (True, False, True, False),
+        "browse_images": (True, None, None, False),
     }
 
     tools = await mcp.list_tools()

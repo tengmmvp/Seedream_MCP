@@ -108,3 +108,37 @@ async def test_workspace_roots_resource_reports_client_roots(
             "roots": [expected_display],
             "resolved": [str(declared_root.resolve())],
         }
+
+
+async def test_workspace_roots_resource_modern_round_trip_reports_client_roots(
+    tmp_path: Path,
+    reset_lifespan_singletons: None,
+) -> None:
+    """默认协商（2026-07-28）加 roots callback 时，资源经多轮请求取回授权根目录。
+
+    2026 会话无服务端反向通道，roots 直连必抛 NoBackChannelError；模板资源返回
+    InputRequiredResult 携带 roots 请求，客户端 read_resource 驱动多轮循环、
+    callback 应答后重试，最终输出与 legacy 直连等价的授权根目录。
+    """
+    declared_root = tmp_path / "workspace"
+    declared_root.mkdir()
+    callback_calls = 0
+
+    async def roots_callback(context: ClientRequestContext) -> ListRootsResult:
+        nonlocal callback_calls
+        del context
+        callback_calls += 1
+        return ListRootsResult(roots=[Root(uri=declared_root.as_uri(), name="workspace")])
+
+    async with Client(server.mcp, list_roots_callback=roots_callback) as client:
+        plain = await client.read_resource("seedream://workspace/roots")
+        expected_display = str(declared_root.resolve()).replace("\\", "/")
+        assert _single_text_payload(plain) == {"roots": [expected_display]}
+
+        verbose = await client.read_resource("seedream://workspace/roots?verbose=true")
+        assert _single_text_payload(verbose) == {
+            "roots": [expected_display],
+            "resolved": [str(declared_root.resolve())],
+        }
+
+    assert callback_calls == 2

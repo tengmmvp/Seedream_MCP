@@ -55,11 +55,16 @@ async def _execute_parallel_generation_requests(
     request_results: list[dict[str, Any] | None] = [None] * context.request_count
     request_errors: dict[int, Exception] = {}
     completed_requests = 0
+    # 进度上报的批次级序列化锁。完成数快照与上报发送之间隔着 await：两个并发完成的
+    # 请求可能以「高值先快照后让出、低值先让出后送达」的交错向客户端发出回退的通知，
+    # 违反规范对 progress 严格递增的要求。快照取自请求自身完成时刻的同步段，先完成的
+    # 请求先进入锁的等待队列（asyncio.Lock 按等待顺序唤醒），锁内仅发送，发送顺序与
+    # 快照顺序一致，发出的序列恒严格递增。
+    progress_report_lock = asyncio.Lock()
 
     async def _run_single_request(request_index: int) -> None:
         """在信号量槽内执行单次请求并记录结果或异常，槽外上报进度。"""
         nonlocal completed_requests
-        report_progress = False
         async with semaphore:
             await _yield_for_cancellation()
             try:
@@ -73,18 +78,19 @@ async def _execute_parallel_generation_requests(
                     format_error_for_user(exc),
                 )
             finally:
-                # asyncio 单线程模型下，自增之间无 await，不会被其他协程抢占，无需加锁。
+                # asyncio 单线程模型下，自增与快照之间无 await，不会被其他协程抢占。
                 completed_requests += 1
-                report_progress = True
-        # 进度上报移出信号量槽，避免慢客户端背压拖延槽位释放、阻塞后续请求启动。
-        if report_progress:
-            progress = PROGRESS_GENERATION_START + (
-                PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START
-            ) * (completed_requests / context.request_count)
+                progress_snapshot = PROGRESS_GENERATION_START + (
+                    PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START
+                ) * (completed_requests / context.request_count)
+                message_snapshot = f"并行请求进度 {completed_requests}/{context.request_count}"
+        # 进度上报移出信号量槽，避免慢客户端背压拖延槽位释放、阻塞后续请求启动；
+        # 序列化锁仅约束上报本身，慢客户端的发送延迟不回拖信号量槽位。
+        async with progress_report_lock:
             await _safe_report_progress(
                 ctx,
-                progress=progress,
-                message=f"并行请求进度 {completed_requests}/{context.request_count}",
+                progress=progress_snapshot,
+                message=message_snapshot,
             )
 
     await asyncio.gather(

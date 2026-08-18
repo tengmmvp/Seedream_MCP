@@ -1,5 +1,6 @@
 """生成类工具并行请求支持、schema 约束与失败结果封装测试。"""
 
+import asyncio
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -222,6 +223,69 @@ async def test_parallel_batch_progress_strictly_increasing(
     assert all(left < right for left, right in zip(values, values[1:]))
     assert values.count(PROGRESS_GENERATION_DONE) == 1
     assert values[-1] == PROGRESS_COMPLETE
+
+
+class _ReorderingProgressContext:
+    """模拟慢客户端交错送达的进度收集替身。
+
+    首个批次中间进度（开区间 (START, DONE) 内）进入 report_progress 后先让出一次
+    事件循环再记录：完成数快照较低的请求在让出期间，后完成请求的高值进度可先行
+    送达客户端。未序列化上报时收集序列出现回退，违反规范对 progress 严格递增的
+    要求。
+    """
+
+    def __init__(self) -> None:
+        self.progress_values: list[float] = []
+        self._yielded = False
+
+    @property
+    def request_context(self) -> Any:
+        raise AttributeError("测试替身不提供请求上下文")
+
+    async def report_progress(self, *, progress: float, total: float, message: str) -> None:
+        del total, message
+        if not self._yielded and PROGRESS_GENERATION_START < progress < PROGRESS_GENERATION_DONE:
+            self._yielded = True
+            await asyncio.sleep(0)
+        self.progress_values.append(progress)
+
+
+@pytest.mark.asyncio
+async def test_parallel_batch_progress_delivery_order_strictly_increasing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """慢客户端交错送达下，并行批次的进度通知仍按严格递增顺序到达。
+
+    规范要求 progress 每次上报严格递增且不得回退。批次进度按完成数快照计算，
+    快照与发送之间隔着 await：首个中间进度让出事件循环时，后完成请求的高值
+    进度可先行送达。上报经批次级锁序列化后，发送顺序与完成顺序一致，本测试
+    锁定该交错场景下收集序列不回退。
+    """
+
+    async def fake_method(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        }
+
+    client_module = import_module("seedream_mcp.client")
+    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+
+    ctx = _ReorderingProgressContext()
+    result = await handle_text_to_image(
+        TextToImageInput(prompt="test", request_count=3, parallelism=2),
+        _build_config(),
+        ctx,
+    )
+
+    assert result.is_error is False
+    values = ctx.progress_values
+    assert all(left < right for left, right in zip(values, values[1:]))
+    # 交错替身确实触发过让出，保证本测试覆盖的是慢客户端交错路径而非顺序快路径。
+    assert ctx._yielded is True
 
 
 @pytest.mark.asyncio

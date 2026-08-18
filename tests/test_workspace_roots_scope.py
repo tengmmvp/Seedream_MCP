@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from mcp.shared.exceptions import NoBackChannelError
-from mcp.types import ListRootsResult, Root
+from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult, Root
 from PIL import Image
 
 import seedream_mcp.utils.io.io_path as io_path_module
@@ -38,10 +38,15 @@ class _CapabilityDeclaringSession(_FakeSession):
         super().__init__(roots)
         self.declared = declared
         self.capability_probes = 0
+        self.list_roots_calls = 0
 
     def check_client_capability(self, capability: object) -> bool:
         self.capability_probes += 1
         return self.declared
+
+    async def list_roots(self) -> ListRootsResult:
+        self.list_roots_calls += 1
+        return await super().list_roots()
 
 
 class _SpyContext:
@@ -527,3 +532,121 @@ async def test_workspace_roots_resource_list_roots_failure_returns_empty(
 
     assert data["roots"] == []
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+
+
+class _ModernProtocolContext:
+    """2026-07-28 会话替身：协商版本为多轮形态，可携带重试轮应答。"""
+
+    def __init__(
+        self,
+        roots: list[Path],
+        responses: dict[str, object] | None = None,
+        declared: bool = True,
+        protocol_version: str = "2026-07-28",
+    ) -> None:
+        self.session = _CapabilityDeclaringSession(roots, declared=declared)
+        self.protocol_version = protocol_version
+        self.input_responses = responses
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_modern_session_first_round_requests_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026 会话首轮返回 InputRequiredResult 携带 roots 请求，不经直连取回。
+
+    SEP-2577 下 2026 会话无服务端反向通道，直连 roots/list 必抛 NoBackChannelError
+    且触发废弃告警；资源侧改为返回多轮请求，由客户端应答后重试。首轮无应答时
+    返回 InputRequiredResult，input_requests 按约定键携带 ListRootsRequest。
+    """
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    ctx = _ModernProtocolContext([mcp_root])
+
+    result = await workspace_roots_resource(ctx)
+
+    assert isinstance(result, InputRequiredResult)
+    assert set(result.input_requests) == {"roots"}
+    assert isinstance(result.input_requests["roots"], ListRootsRequest)
+    # 首轮不得退回 roots/list 直连：多轮形态下直连在该版本会话上必然失败。
+    assert ctx.session.list_roots_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_modern_session_retry_round_reports_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026 会话重试轮从 input_responses 取回 roots，输出客户端授权根目录。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    ctx = _ModernProtocolContext([mcp_root], responses={"roots": _roots_result([mcp_root])})
+
+    result = await workspace_roots_resource(ctx)
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
+    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+    # 应答已就位时不发起多轮请求，也不经直连取回。
+    assert ctx.session.list_roots_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_modern_session_malformed_response_asks_again(
+    tmp_path: Path,
+) -> None:
+    """重试轮应答形态异常时再次返回 InputRequiredResult，不落到直连或环境回退。"""
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    ctx = _ModernProtocolContext([mcp_root], responses={"roots": "not-a-roots-result"})
+
+    result = await workspace_roots_resource(ctx)
+
+    assert isinstance(result, InputRequiredResult)
+    assert set(result.input_requests) == {"roots"}
+    assert ctx.session.list_roots_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_modern_session_capability_missing_falls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026 会话但未声明 roots capability 时不发起多轮请求，回退空列表输出。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    ctx = _ModernProtocolContext([], declared=False)
+
+    result = await workspace_roots_resource(ctx)
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == []
+    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
+    tmp_path: Path,
+) -> None:
+    """旧修订版本即使声明 capability 也保持 roots/list 直连，不走多轮形态。
+
+    InputRequiredResult 仅存在于 2026-07-28 及以后，旧修订会话返回该类型客户端
+    会收到 -32603；legacy 直连是旧修订上唯一取回途径。
+    """
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    ctx = _ModernProtocolContext([mcp_root], protocol_version="2025-11-25")
+
+    result = await workspace_roots_resource(ctx)
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
+    assert ctx.session.list_roots_calls == 1
