@@ -23,7 +23,7 @@ from seedream_mcp.tools.impl.browse_images import _build_browse_structured_resul
 
 def test_generation_success_path_matches_schema() -> None:
     structured = {
-        "tool": "seedream_text_to_image",
+        "tool": "text_to_image",
         "success": True,
         "status": "completed",
         "prompt": "a cat",
@@ -46,7 +46,7 @@ def test_generation_success_path_matches_schema() -> None:
 
 def test_generation_exception_path_error_is_dict() -> None:
     structured = {
-        "tool": "seedream_text_to_image",
+        "tool": "text_to_image",
         "success": False,
         "status": "failed",
         "error": {"type": "SeedreamAPIError", "message": "认证失败"},
@@ -58,7 +58,7 @@ def test_generation_exception_path_error_is_dict() -> None:
 
 def test_generation_failed_result_error_is_str() -> None:
     structured = {
-        "tool": "seedream_text_to_image",
+        "tool": "text_to_image",
         "success": False,
         "status": "failed",
         "prompt": "a cat",
@@ -82,7 +82,7 @@ def test_generation_failed_result_error_is_str() -> None:
 
 def test_browse_success_path_matches_schema() -> None:
     structured = {
-        "tool": "seedream_browse_images",
+        "tool": "browse_images",
         "success": True,
         "status": "completed",
         "directory": ".",
@@ -103,7 +103,7 @@ def test_browse_success_path_matches_schema() -> None:
 
 def test_browse_failure_path_matches_schema() -> None:
     structured = {
-        "tool": "seedream_browse_images",
+        "tool": "browse_images",
         "success": False,
         "status": "failed",
         "error": {"type": "browse_failed", "message": "目录超出允许范围"},
@@ -115,7 +115,7 @@ def test_browse_failure_path_matches_schema() -> None:
 
 def test_browse_empty_path_matches_schema() -> None:
     structured = {
-        "tool": "seedream_browse_images",
+        "tool": "browse_images",
         "success": True,
         "status": "empty",
         "directory": ".",
@@ -167,7 +167,7 @@ def test_real_generation_builder_success_output_instantiates_schema() -> None:
         "usage": {"generated_images": 1},
     }
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=context,
         auto_save_results=None,
@@ -175,7 +175,7 @@ def test_real_generation_builder_success_output_instantiates_schema() -> None:
     )
     obj = GenerationStructuredOutput(**structured)
     assert obj.success is True
-    assert obj.tool == "seedream_text_to_image"
+    assert obj.tool == "text_to_image"
     assert obj.prompt == "a cat"
     assert obj.data == [{"url": "https://example.com/1.png"}]
 
@@ -186,7 +186,7 @@ def test_real_generation_builder_failure_output_instantiates_schema() -> None:
     context = build_generation_context(TextToImageInput(prompt="a cat", size="2K"), config)
     result = {"success": False, "status": "failed", "error": "生成超时"}
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=context,
         auto_save_results=None,

@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import OrderedDict
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate
+from ..core import logs as core_logs
 from ..core.logs import arm_unretrieved_exception_logging, get_logger
 from ..io.io_path import resolve_workspace_roots
 
@@ -63,13 +64,31 @@ class _PrepareSemaphoreSlot:
         self._semaphore.release()
 
 
+class _PrepareInflight:
+    """single-flight 在途条目：共享 task 与活动消费者计数。
+
+    创建者与每个等待者各持一份消费者计数，await 期间登记、finally 释放，计数归零
+    即最后一个潜在消费者已放弃等待。任一消费者经 shield 收到结果或异常时置位
+    observed，表示结果已送抵消费者一侧的既有错误通道；兜底日志仅在计数归零且
+    结果未被任何人消费时登记，保证同一异常不重复入日志。
+    """
+
+    __slots__ = ("task", "consumers", "observed")
+
+    def __init__(self, task: "asyncio.Task[str]") -> None:
+        self.task = task
+        self.consumers = 0
+        self.observed = False
+
+
 class ImagePreparer:
     """参考图预处理缓存管理器，LRU + single-flight 去重。
 
     预处理结果按 (输入, workspace_roots, 本地文件签名) 缓存，避免并行请求对同一参考图
     重复读取与编码；同一键的并发 miss 复用同一在途 task。本地文件纳入 mtime+size 防内容
     替换返回陈旧编码。预处理并发上限为实例级全局约束，跨批量调用共享；仅实际执行预处理
-    的调用占用并发槽位，缓存命中与在途 task 的等待在槽外完成。
+    的调用占用并发槽位，缓存命中与在途 task 的等待在槽外完成。在途条目带消费者计数，
+    全部消费者放弃且结果未被消费时才登记孤儿失败兜底日志。
     """
 
     def __init__(
@@ -89,7 +108,7 @@ class ImagePreparer:
         self._prepare_cache_max = prepare_cache_max
         self._prepare_cache_max_bytes = prepare_cache_max_bytes
         self._prepare_cache_bytes = 0
-        self._prepare_inflight: dict[PrepareCacheKey, asyncio.Task[str]] = {}
+        self._prepare_inflight: dict[PrepareCacheKey, _PrepareInflight] = {}
         self._prepare_concurrency = prepare_concurrency
         # 信号量为实例级并在全部预处理入口（单图与批量）间共享，使配置的并发上限在
         # 并行生成、并发工具调用与单图直连叠加时仍是全局上限。asyncio.Semaphore 在
@@ -178,8 +197,9 @@ class ImagePreparer:
             归一化后的图像输入，本地文件为 Base64 Data URI。
 
         Raises:
-            SeedreamValidationError: 输入格式无效、路径越界或维度超限等参数校验失败。
-            SeedreamAPIError: 会话未授权工作区目录或图像处理其他失败。
+            SeedreamValidationError: 输入格式无效、路径越界、维度超限或图像内容
+                处理失败等调用方输入问题。
+            SeedreamConfigError: 会话未授权工作区目录且无环境回退根。
         """
         cache_key, normalized_image = await self._resolve_cache_key(image, _roots_key)
 
@@ -188,7 +208,7 @@ class ImagePreparer:
             self._prepare_cache.move_to_end(cache_key)
             return cached
 
-        # 在途登记的先行检查在持有信号量之前完成：命中在途 task 的调用以纯等待者
+        # 在途登记的先行检查在持有信号量之前完成：命中在途条目的调用以纯等待者
         # 身份在槽外 shield 等待，不占用并发槽位，等待者不再挤占实际执行者的额度。
         inflight = self._prepare_inflight.get(cache_key)
         if inflight is not None:
@@ -238,19 +258,57 @@ class ImagePreparer:
         cache_key: PrepareCacheKey = (key_image, _roots_key, signature)
         return cache_key, image
 
-    async def _await_inflight(self, inflight: "asyncio.Task[str]") -> str:
-        """以纯等待者身份在并发槽位外等待在途 task。
+    async def _await_inflight(
+        self, entry: _PrepareInflight, on_cancel: Callable[[], None] | None = None
+    ) -> str:
+        """以消费者身份在并发槽位外等待在途 task。
 
-        shield 隔离取消传播：等待者被取消时仅取消其自身 await 的 outer，底层共享
-        task 继续运行，保护其他等待者与缓存写入。等待者放弃消费后若再无其他等待者
-        接手，task 失败将无人检索异常，登记回调兜底记录；task 成功或被取消时回调
+        shield 隔离取消传播：本调用被取消时仅取消其自身 await 的 outer，底层共享
+        task 继续运行，保护其他消费者与缓存写入。on_cancel 在取消异常向外传播前
+        执行，供创建者把并发槽位的释放责任转移给 task 本体。本调用登记一份消费者
+        计数，结果或异常送达时置位 entry.observed；放弃等待且计数归零即再无潜在
+        消费者时，经 _arm_if_abandoned 登记兜底日志回调，task 成功或被取消时回调
         静默。
         """
+        entry.consumers += 1
         try:
-            return await asyncio.shield(inflight)
-        except asyncio.CancelledError:
-            arm_unretrieved_exception_logging(inflight)
-            raise
+            try:
+                result = await asyncio.shield(entry.task)
+            except asyncio.CancelledError:
+                if on_cancel is not None:
+                    on_cancel()
+                raise
+            except Exception:
+                # task 的异常经 shield 送达本消费者，置位已消费标记；该异常随后由
+                # 调用方的既有错误通道记录，最后一个消费者放弃时不再登记兜底日志。
+                entry.observed = True
+                raise
+            entry.observed = True
+            return result
+        finally:
+            entry.consumers -= 1
+            self._arm_if_abandoned(entry)
+
+    def _arm_if_abandoned(self, entry: _PrepareInflight) -> None:
+        """最后一个潜在消费者放弃且结果未被消费时，登记兜底日志回调。
+
+        计数归零后 task 若失败将无人检索异常，经 logs 的登记入口挂兜底回调；仍有
+        消费者在等待或任一消费者已收到结果时，异常由其既有错误通道记录，不登记。
+        触发时回调再复查计数与已消费标记：登记之后新消费者加入又放弃或消费的窗口
+        内，登记前提可能已不成立，复查失败即静默跳过，避免同一异常重复入日志。
+
+        Args:
+            entry: 触发复查的在途条目。
+        """
+
+        def _log_if_orphaned(task: "asyncio.Task[str]") -> None:
+            # 触发时经模块属性解析通用记录函数，保持调用方可替换该实现做测试观测。
+            if entry.consumers == 0 and not entry.observed:
+                core_logs.log_unretrieved_task_exception(task)
+
+        if entry.consumers > 0 or entry.observed:
+            return
+        arm_unretrieved_exception_logging(entry.task, _log_if_orphaned)
 
     async def _prepare_image_input_locked(
         self, image: str, cache_key: PrepareCacheKey, slot: _PrepareSemaphoreSlot
@@ -258,12 +316,20 @@ class ImagePreparer:
         """创建并等待预处理 task，调用方已持有实例级信号量槽位。
 
         miss 路径的执行入口，键计算、缓存检索与在途登记的先行检查由
-        prepare_image_input 在槽外完成。信号量等待窗口内其他创建者可能已为同一键
-        登记在途 task，进入本实现先复查在途注册表：命中则归还槽位，改以纯等待者
-        身份在槽外等待。miss 时创建 _prepare_and_cache task 登记在途注册表并经
-        shield 等待；创建者在 shield 等待共享 task 时被取消的，槽位经 slot 转移
-        给 task 本体释放。
+        prepare_image_input 在槽外完成。获取信号量的等待窗口内，同键的先完成者可能
+        已写缓存并清在途登记，或另一创建者已登记在途 task：进入本实现先复查缓存，
+        命中直接返回；再复查在途注册表，命中则归还槽位改以纯等待者身份在槽外等待。
+        两道复查与槽外的先行检查对称，并发满载时后到者不重复执行全量读盘与编码。
+        miss 时创建 _prepare_and_cache task 登记在途注册表并经 shield 等待；创建者
+        在 shield 等待共享 task 时被取消的，槽位经 on_cancel 回调转移给 task 本体
+        释放，全部消费者放弃且结果未被消费时才登记孤儿失败兜底日志。
         """
+        cached = self._prepare_cache.get(cache_key)
+        if cached is not None:
+            # 等待信号量期间先完成者已写入缓存并清在途登记，本调用直接命中返回。
+            self._prepare_cache.move_to_end(cache_key)
+            return cached
+
         inflight = self._prepare_inflight.get(cache_key)
         if inflight is not None:
             # 等待信号量期间其他创建者已登记同一键，本调用不再是执行者：归还槽位
@@ -272,20 +338,19 @@ class ImagePreparer:
             return await self._await_inflight(inflight)
 
         task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
-        self._prepare_inflight[cache_key] = task
-        try:
-            # shield 隔离取消传播：创建者被取消时仅取消其自身 await 的 outer，底层共享
-            # task 继续运行至完成，_prepare_inflight 由 task 完成时的 finally 清理。
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
+        # 在途登记持有 _PrepareInflight 条目：共享 task 供后到等待者复用，消费者
+        # 计数与已消费标记供兜底日志的登记判定，_prepare_inflight 由 task 完成时
+        # 的 finally 清理。
+        entry = _PrepareInflight(task)
+        self._prepare_inflight[cache_key] = entry
+
+        def _transfer_slot() -> None:
             # 创建者被取消而共享 task 脱缰继续运行：若随创建者 finally 释放本槽位，
-            # 取消次数会无界叠加突破并发上限。把释放责任转移给 task 本体，task 结束前
-            # 槽位保持占用，新请求与等待者继续受限。
+            # 取消次数会无界叠加突破并发上限。把释放责任转移给 task 本体，task 结束
+            # 前槽位保持占用，新请求与等待者继续受限。
             slot.transfer_to_task(task)
-            # 创建者放弃消费后若再无等待者接手，task 失败将无人检索异常，登记回调兜底
-            # 记录；常规失败路径的异常由等待者消费并经既有错误通道记录，不登记。
-            arm_unretrieved_exception_logging(task)
-            raise
+
+        return await self._await_inflight(entry, on_cancel=_transfer_slot)
 
     async def _prepare_and_cache(self, image: str, cache_key: PrepareCacheKey) -> str:
         """执行图像预处理并写入 LRU 缓存，供 single-flight 去重复用。

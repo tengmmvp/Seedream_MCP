@@ -443,7 +443,9 @@ def find_images_in_directory(
 
     安全前置条件：本函数自身不做工作区越界校验，调用方必须先完成工作区越界校验，
     确认 directory 位于允许的工作区根之内，再调用本函数。本函数经 utils/__init__
-    重导出为公共工具，任何外部调用方均须遵守此前置条件。
+    重导出为公共工具，任何外部调用方均须遵守此前置条件。UNC 形式的 directory 入参
+    与 normalize_path 同口径在 resolve 前拒绝，返回空列表并记录告警，避免越界校验
+    尚未介入时 resolve 触发 SMB 认证。
 
     单个目录内的条目列表在排序阶段全量物化，limit 早停不缩减单目录内的物化与
     排序成本，仅使跨目录递归提前终止下降。重复扫描同一目录的成本由 io_scan 的
@@ -469,6 +471,13 @@ def find_images_in_directory(
     images: list[Path] = []
 
     if limit is not None and limit <= 0:
+        return images
+
+    if is_unc_path(directory):
+        # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，与 normalize_path 等 resolve
+        # 站点同口径在 resolve 前拦截。浏览扫描对拒绝对象返回空列表，告警不回显原始
+        # 路径全文，与项目的脱敏口径一致。
+        logger.warning("拒绝 UNC 形式的目录扫描入参，返回空结果")
         return images
 
     try:

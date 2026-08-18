@@ -170,7 +170,7 @@ def test_structured_data_url_field_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -218,7 +218,7 @@ def test_long_url_with_credentials_still_stripped_without_truncation() -> None:
     """超长 URL 的 userinfo 凭据剥离仍生效，剥离后的 URL 完整保留。"""
     long_url = "https://AKID:" + "p" * 600 + "@mirror.example.com/a.png?sig=abc"
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result={"success": True, "status": "completed", "data": [{"url": long_url}]},
         context=_context(),
         auto_save_results=[],
@@ -278,7 +278,7 @@ def test_image_item_free_fields_sanitized_in_text_output() -> None:
 def test_structured_data_free_fields_sanitized() -> None:
     """structuredContent.data 项的 size/output_format/model/type/error.code 净化。"""
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=_dirty_free_field_result(),
         context=_context(),
         auto_save_results=[],
@@ -492,7 +492,7 @@ def test_truncated_events_surfaced_in_both_channels() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -517,7 +517,7 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
         assert "丢弃" not in text
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result={**base, "truncated_events": 0},
         context=_context(),
         auto_save_results=[],
@@ -545,7 +545,7 @@ def test_sanitized_flag_skips_repeat_sanitization_in_structured_outlet() -> None
 
     format_generation_response("文生图任务完成", result, "t", "2K", images=images)
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -566,7 +566,7 @@ def test_repeat_sanitization_without_flag_degrades_truncated_content() -> None:
     images = [{"error": {"code": "E", "message": "x" * 600}}]
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result={"success": True, "status": "completed", "data": images},
         context=_context(),
         auto_save_results=[],
@@ -595,7 +595,7 @@ def test_structured_usage_string_values_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -638,7 +638,7 @@ def test_structured_usage_deeply_nested_sanitized_without_recursion_error() -> N
         nested = {"nested": nested, "label": "x"}
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result={
             "success": True,
             "status": "completed",
@@ -665,7 +665,7 @@ def test_structured_usage_cyclic_reference_terminated_with_placeholder() -> None
     cyclic["self"] = cyclic
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result={
             "success": True,
             "status": "completed",
@@ -701,7 +701,7 @@ def test_forged_local_path_and_markdown_ref_sanitized_in_both_channels() -> None
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -731,7 +731,7 @@ def test_structured_data_unknown_string_keys_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -777,7 +777,7 @@ def test_failure_path_structured_outlet_sanitizes_images() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K", images=images)
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -801,7 +801,7 @@ def test_success_path_pipeline_sanitizes_each_outlet_content_once() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K", images=images)
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -843,7 +843,7 @@ def test_structured_failure_error_code_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -915,7 +915,7 @@ def test_structured_failure_dict_message_normalized_and_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -937,7 +937,7 @@ def test_structured_failure_list_message_normalized_and_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -959,7 +959,7 @@ def test_structured_failure_non_dict_error_normalized_and_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1046,7 +1046,7 @@ def test_structured_status_sanitized_and_max_images_surfaced() -> None:
 
     context = dataclasses.replace(_context(), max_images=4)
     structured = _build_generation_structured_result(
-        tool_name="seedream_sequential_generation",
+        tool_name="sequential_generation",
         result={"success": True, "status": "ok\r\ninjected", "data": [], "usage": {}},
         context=context,
         auto_save_results=None,
@@ -1086,7 +1086,7 @@ def test_forged_string_request_and_image_index_sanitized_in_both_channels() -> N
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1127,7 +1127,7 @@ def test_per_image_dict_error_message_normalized_and_sanitized() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1158,7 +1158,7 @@ def test_per_image_list_error_code_normalized_and_sanitized() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1212,7 +1212,7 @@ def test_structured_failure_none_error_value_falls_back_to_unknown() -> None:
     result = {"success": False, "status": "failed", "data": [], "error": None}
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1276,7 +1276,7 @@ def test_non_str_url_size_local_path_sanitized_in_both_channels() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1325,7 +1325,7 @@ def test_forged_bool_index_form_routed_through_sanitization_path() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1359,7 +1359,7 @@ def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -1379,14 +1379,14 @@ def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
 def test_malformed_status_shape_falls_back_to_none_in_structured_output() -> None:
     """非 str 的 status 归 None 后净化分支不触达，str 形态保持净化语义不变。"""
     structured_int = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result={"success": True, "status": 200, "data": []},
         context=_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
     structured_str = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result={"success": True, "status": "ok\r\ninjected", "data": []},
         context=_context(),
         auto_save_results=[],
@@ -1409,7 +1409,7 @@ def test_falsy_malformed_usage_batch_shapes_converge_quietly() -> None:
 
     text = format_generation_response("文生图任务完成", result, "test", "2K")
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],

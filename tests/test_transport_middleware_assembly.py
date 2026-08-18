@@ -82,9 +82,10 @@ def test_attach_skips_auth_and_host_guard_for_remote_without_token(
 def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None:
     """同一 app 实例二次装配跳过 add_middleware，中间件栈不叠加。
 
-    streamable_http_app 每次调用新建 Starlette app 但复用缓存的 _session_manager，
-    若同一 app 实例重复进入装配，重复层会使每个请求被多次包覆。装配幂等守卫
-    保证二次调用不再增加任何中间件。
+    streamable_http_app 每次调用新建 Starlette app，并无条件新建
+    StreamableHTTPSessionManager 覆盖 self._session_manager，不存在会话管理器复用；
+    幂等守卫针对的是同一 app 实例重复进入装配时自建中间件栈的叠加，重复层会使
+    每个请求被多次包覆，二次调用不得再增加任何中间件。
     """
     app = _FakeStarletteApp()
 

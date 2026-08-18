@@ -9,13 +9,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from ...config import SeedreamConfig
-from ...utils.images.image_thumbnail import build_preview_contents
+from ...utils.images.image_thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
 from ...utils.io.io_save import AutoSaveResult
 from ...utils.core.errors import format_error_for_user, resolve_error_profile
 from ._helpers import (
@@ -29,6 +30,7 @@ from ._helpers import (
     _resolve_failure_guidance,
     _safe_report_progress,
     _yield_for_cancellation,
+    prevalidate_save_path,
 )
 from .auto_save import auto_save_from_base64, auto_save_from_urls
 from .context import GenerationExecutionContext, build_generation_context
@@ -117,6 +119,9 @@ async def execute_generation_handler(
         )
         await _yield_for_cancellation()
         context = build_generation_context(params, config)
+        # save_path 预检含目录 resolve 等同步文件系统调用，下沉工作线程执行，
+        # 网络挂载或 UNC 路径下不阻塞事件循环；预检仍在计费请求分发前完成。
+        await asyncio.to_thread(prevalidate_save_path, config, params.save_path)
         await _safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
 
         module_logger.info(start_log_message, *start_log_values_builder(context))
@@ -223,7 +228,9 @@ async def execute_generation_handler(
 
         # 预览从自动保存落盘的本地文件生成：未开启、生成失败或没有成功保存的图片时
         # 列表为空，content 退化为纯文本，行为与本功能引入前一致。单张缩略图失败在
-        # build_preview_contents 内部跳过，不影响工具结果。
+        # build_preview_contents 内部跳过，不影响工具结果。保存张数超过上限时仅取
+        # 前 PREVIEW_MAX_IMAGES 张生成预览，文本附截断说明，完整清单仍在
+        # structuredContent.data。
         preview_contents: list[ImageContent] = []
         if config.preview_enabled and not is_generation_failed and auto_save_results:
             saved_paths = [
@@ -231,6 +238,18 @@ async def execute_generation_handler(
                 for save_result in auto_save_results
                 if save_result.success and save_result.local_path
             ]
+            if len(saved_paths) > PREVIEW_MAX_IMAGES:
+                module_logger.info(
+                    "已保存图片 {} 张超过预览上限 {}，仅生成前 {} 张缩略图预览",
+                    len(saved_paths),
+                    PREVIEW_MAX_IMAGES,
+                    PREVIEW_MAX_IMAGES,
+                )
+                response_text += (
+                    f"\n（共已保存 {len(saved_paths)} 张，"
+                    f"仅附前 {PREVIEW_MAX_IMAGES} 张缩略图预览）"
+                )
+                saved_paths = saved_paths[:PREVIEW_MAX_IMAGES]
             preview_contents = await build_preview_contents(saved_paths)
 
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")

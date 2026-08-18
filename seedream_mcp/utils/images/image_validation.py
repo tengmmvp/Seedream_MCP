@@ -87,6 +87,25 @@ def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None
         _validate_image_dimensions(img.size[0], img.size[1], value_label)
 
 
+# 无法识别图像内容的固定错误文案。UnidentifiedImageError 的 str 嵌有 BytesIO
+# 对象的内存地址，直接拼入用户可见消息会把服务器侧对象地址带给调用方。
+UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
+
+
+def is_unidentified_image_error(exc: BaseException) -> bool:
+    """判断异常是否为 PIL 的无法识别图像内容类型，供各解码失败包装分支共用。
+
+    Args:
+        exc: 解码阶段抛出的异常。
+
+    Returns:
+        异常为 PIL.UnidentifiedImageError 时返回 True。
+    """
+    from PIL import Image
+
+    return isinstance(exc, Image.UnidentifiedImageError)
+
+
 # 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
 # 参考图即输入图像，其维度约束含最短边、宽高比上下限、总像素上限。
@@ -315,11 +334,14 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
                     )
                 decode_and_validate_dimensions(image_bytes, file_path)
             except OSError as exc:
-                raise SeedreamValidationError(
-                    f"无法读取文件: {path} -> {exc}",
-                    field="image",
-                    value=file_path,
-                ) from exc
+                # UnidentifiedImageError 属 OSError 子类，内容不可识别时改用固定文案，
+                # 避免异常原文中的 BytesIO 对象地址进入用户可见消息。
+                message = (
+                    UNIDENTIFIED_IMAGE_MESSAGE
+                    if is_unidentified_image_error(exc)
+                    else f"无法读取文件: {path} -> {exc}"
+                )
+                raise SeedreamValidationError(message, field="image", value=file_path) from exc
             except (ValueError, Image.DecompressionBombError) as e:
                 raise SeedreamValidationError(
                     f"图像维度解析失败: {str(e)}",
@@ -408,9 +430,14 @@ def _validate_data_uri(data_uri: str) -> str:
         try:
             decode_and_validate_dimensions(raw, data_uri)
         except (OSError, ValueError, Image.DecompressionBombError) as e:
-            raise SeedreamValidationError(
-                f"图像维度解析失败: {str(e)}", field="image", value=data_uri
-            ) from e
+            # 内容不可识别时改用固定文案，避免异常原文中的 BytesIO 对象地址进入
+            # 用户可见消息。
+            message = (
+                UNIDENTIFIED_IMAGE_MESSAGE
+                if is_unidentified_image_error(e)
+                else f"图像维度解析失败: {str(e)}"
+            )
+            raise SeedreamValidationError(message, field="image", value=data_uri) from e
 
         return f"data:image/{canonical_fmt};base64,{b64}"
 

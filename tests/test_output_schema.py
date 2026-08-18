@@ -25,7 +25,7 @@ async def test_all_tools_declare_output_schema() -> None:
 
 async def test_generation_tools_output_schema_covers_core_fields() -> None:
     tools = await mcp.list_tools()
-    generation_tools = {tool.name: tool for tool in tools if tool.name != "seedream_browse_images"}
+    generation_tools = {tool.name: tool for tool in tools if tool.name != "browse_images"}
 
     for name, tool in generation_tools.items():
         schema = tool.output_schema
@@ -37,7 +37,7 @@ async def test_generation_tools_output_schema_covers_core_fields() -> None:
 
 async def test_browse_tool_output_schema_covers_core_fields() -> None:
     tools = await mcp.list_tools()
-    browse = next(tool for tool in tools if tool.name == "seedream_browse_images")
+    browse = next(tool for tool in tools if tool.name == "browse_images")
     schema = browse.output_schema
     assert schema is not None
 

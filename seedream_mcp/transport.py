@@ -331,11 +331,11 @@ def _middleware_attached(app: Any) -> bool:
 def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> None:
     """向 streamable-http app 装配中间件栈，重复装配时跳过。
 
-    streamable_http_app 每次调用新建 Starlette app 但复用缓存的 _session_manager，
-    同一 app 实例重复进入装配会在其用户中间件栈上叠加重复层。装配前检测本模块任一
-    中间件已存在即整体跳过，使装配幂等；全新 app 正常装配。测试需重建会话管理器时
-    以 monkeypatch 重置 mcp._lowlevel_server._session_manager 为 None 强制重建，见
-    test_streamable_http_e2e。
+    streamable_http_app 每次调用都无条件新建 StreamableHTTPSessionManager 并覆盖
+    self._session_manager，随后新建 Starlette app，不存在会话管理器复用。本装配守卫
+    仅针对本项目自建中间件栈：同一 app 实例重复进入装配会在其用户中间件栈上叠加
+    重复层，装配前检测本模块任一中间件已存在即整体跳过，使装配幂等；全新 app 正常
+    装配。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
     LoopbackHostGuard（仅回环绑定）-> HealthCheck -> LimitRequestBody -> Bearer -> app：
@@ -395,15 +395,25 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     时自动启用回环 Host 白名单。本项目按实际绑定地址显式派生并传入：回环绑定维持该
     白名单，与 _LoopbackHostGuardMiddleware 的回环 Host 容忍集合语义对齐；localhost
     绑定同样启用该白名单，hosts 污染使 localhost 解析到非回环地址时监听仍保有 Host
-    头防线，该集合与 _LOOPBACK_HOSTS 的差异不影响绑定判定与免鉴权语义；非回环绑定
-    关闭白名单，此时鉴权与 TLS 已由本项目 Bearer 中间件与 cli_main 的 fail-closed
-    前置校验承担，SDK 内层白名单反而会把携带真实域名 Host 的全部 /mcp 请求以 421 拒绝。
+    头防线，该集合与 _LOOPBACK_HOSTS 的差异不影响绑定判定与免鉴权语义。非回环绑定
+    默认整体关闭该防护，鉴权与 TLS 已由本项目 Bearer 中间件与 cli_main 的 fail-closed
+    前置校验承担，SDK 内层白名单反而会把携带真实域名 Host 的全部 /mcp 请求以 421
+    拒绝；活动配置了 SEEDREAM_HTTP_ALLOWED_HOSTS 时改为启用防护并按该列表放行，
+    条目支持 host、host:port 与尾部 :* 端口通配，语义对齐 SDK
+    TransportSecuritySettings.allowed_hosts，适用于无反向代理、直连公网域名的部署，
+    Host 不在列表的请求由 SDK 内层以 421 拒绝。
     """
     if host in _DNS_REBINDING_PROTECTED_HOSTS:
         return TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=list(_LOOPBACK_ALLOWED_HOSTS),
             allowed_origins=list(_LOOPBACK_ALLOWED_ORIGINS),
+        )
+    allowed_hosts = get_active_config().http_allowed_hosts
+    if allowed_hosts:
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=list(allowed_hosts),
         )
     return TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
@@ -489,17 +499,24 @@ def _run_streamable_http(
 
     from .resources import _cleanup_shared_resources, mcp
 
+    transport_security = _transport_security_for_host(host)
     app = mcp.streamable_http_app(
         host=host,
         stateless_http=stateless,
-        transport_security=_transport_security_for_host(host),
+        transport_security=transport_security,
         max_request_body_size=get_active_config().http_max_body_size,
     )
     if host not in _DNS_REBINDING_PROTECTED_HOSTS:
-        logger.info(
-            "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
-            host,
-        )
+        if transport_security.enable_dns_rebinding_protection:
+            logger.info(
+                "非回环绑定 {} 已启用 SDK Host 校验，按 SEEDREAM_HTTP_ALLOWED_HOSTS 白名单放行",
+                host,
+            )
+        else:
+            logger.info(
+                "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
+                host,
+            )
     _attach_streamable_http_middleware(app, host, auth_token)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:

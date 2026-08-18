@@ -145,14 +145,15 @@ def test_validate_image_input_accepts_valid_local_png(tmp_path: Path) -> None:
     assert Path(result).resolve() == path.resolve()
 
 
-def test_validate_image_input_wraps_non_image_local_file_as_unreadable(
+def test_validate_image_input_wraps_non_image_local_file_as_unidentified(
     tmp_path: Path,
 ) -> None:
-    """本地文件字节不可解码时按 OSError 分支包装为无法读取文件。"""
+    """本地文件内容不可识别时包装为固定文案，不泄露 BytesIO 对象地址。"""
     path = tmp_path / "fake.png"
     path.write_bytes(b"definitely not an image")
-    with pytest.raises(SeedreamValidationError, match="无法读取文件"):
+    with pytest.raises(SeedreamValidationError, match="无法识别的图像内容") as exc_info:
         validate_image_input(str(path), skip_dimensions=False)
+    assert "_io.BytesIO" not in exc_info.value.message
 
 
 def test_validate_image_input_wraps_decompression_bomb_for_local_file(
@@ -182,7 +183,7 @@ def test_skip_dimensions_bypasses_local_decode_failure(tmp_path: Path) -> None:
     """skip_dimensions 为 True 时不做 PIL 解码，损坏字节的图片文件仍通过。"""
     path = tmp_path / "fake.png"
     path.write_bytes(b"definitely not an image")
-    with pytest.raises(SeedreamValidationError, match="无法读取文件"):
+    with pytest.raises(SeedreamValidationError, match="无法识别的图像内容"):
         validate_image_input(str(path), skip_dimensions=False)
     result = validate_image_input(str(path), skip_dimensions=True)
     assert Path(result).resolve() == path.resolve()
@@ -218,11 +219,12 @@ def test_validate_image_input_normalizes_data_uri_media_type() -> None:
     assert validate_image_input(jpg_uri) == f"data:image/jpeg;base64,{payload}"
 
 
-def test_validate_image_input_wraps_non_image_data_uri_as_dimension_failure() -> None:
-    """Data URI 负载不可解码时包装为图像维度解析失败。"""
+def test_validate_image_input_wraps_non_image_data_uri_as_unidentified() -> None:
+    """Data URI 负载不可识别时包装为固定文案，不泄露 BytesIO 对象地址。"""
     payload = base64.b64encode(b"definitely not an image").decode()
-    with pytest.raises(SeedreamValidationError, match="图像维度解析失败"):
+    with pytest.raises(SeedreamValidationError, match="无法识别的图像内容") as exc_info:
         validate_image_input(f"data:image/png;base64,{payload}")
+    assert "_io.BytesIO" not in exc_info.value.message
 
 
 # ==================== validate_image_path 的非本地引用短路 ====================

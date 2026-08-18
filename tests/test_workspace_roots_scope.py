@@ -12,7 +12,7 @@ import seedream_mcp.utils.io.io_path as io_path_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import workspace_roots_resource
-from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamMCPError
+from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamMCPError
 from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_scope
@@ -241,7 +241,7 @@ async def test_client_prepare_image_input_denies_when_mcp_roots_empty(
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
     async with workspace_roots_scope(_FakeContext([])):
-        with pytest.raises(SeedreamAPIError, match="未授权任何工作区目录"):
+        with pytest.raises(SeedreamConfigError, match="未授权任何工作区目录"):
             await client._prepare_image_input("local.png")
 
 

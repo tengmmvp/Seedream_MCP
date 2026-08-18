@@ -2,9 +2,11 @@
 
 重试循环对标准与流式两条分发路径共用，核心分支以分发目标参数化同时锁定两条
 路径：429 指数退避重试后成功、5xx 重试后成功、超时与网络错误重试耗尽后的异常
-映射、4xx 与意外错误立即抛出、Retry-After 退避取值与超上限信任服务端值。
-另有仅标准路径存在的 3xx 立即终态与响应体上限分支。网络层经 monkeypatch 注入，
-不触达真实 API。
+映射、4xx 与意外错误立即抛出、Retry-After 退避取值与超上限信任服务端值。流式
+非 200 分支另以 httpx.MockTransport 驱动真实 _send_stream_request 覆盖：5xx 按
+重试次数耗尽且异常携带状态码、429 按服务端 Retry-After 退避、3xx 立即终态不
+重试。200 坏体与响应体上限分支仅标准路径在本文件经 MockTransport 覆盖。网络层
+经 monkeypatch 或 MockTransport 注入，不触达真实 API。
 """
 
 import asyncio
@@ -21,6 +23,8 @@ from seedream_mcp.utils.core.errors import (
     SeedreamNetworkError,
     SeedreamTimeoutError,
 )
+
+from _client_fakes import _install_mock_transport
 
 # 重试循环的两条分发目标：请求体不含 stream 标志经 _send_standard_request 发送，
 # 含 stream=True 经 _send_stream_request 发送，其余重试语义完全共用。
@@ -426,3 +430,94 @@ async def test_standard_request_rejects_chunked_body_over_limit(
         # 错误消息携带实际读取字节数，且无状态码不可重试
         assert "已读取" in exc_info.value.message
         assert exc_info.value.status_code is None
+
+
+# ==================== 流式非 200：MockTransport 驱动真实 _send_stream_request ====================
+
+
+async def test_stream_5xx_retries_with_status_code(no_sleep: None) -> None:
+    """流式 5xx 经 _raise_for_stream_response_status 装配状态码，按重试次数耗尽失败。
+
+    流式参数化用例整体替换 _send_stream_request，未触达非 200 的读体限额、状态码
+    装配与错误分类；本组用例以 MockTransport 让真实流式发送路径发出请求并收到
+    非 200，锁定该分支装配的 status_code 使 5xx 保持可重试语义。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=2)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        del request
+        attempts += 1
+        return httpx.Response(
+            500,
+            json={"error": {"code": "InternalServiceError", "message": "upstream boom"}},
+        )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="服务器内部错误") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+        # 错误链路携带状态码与上游错误码，5xx 语义重试至耗尽
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.error_code == "InternalServiceError"
+        assert attempts == config.max_retries + 1
+
+
+async def test_stream_429_uses_retry_after_for_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """流式 429 带 Retry-After：异常携带 retry_after，退避按服务端值而非指数基数。"""
+    config = SeedreamConfig(api_key="k", max_retries=2)
+    attempts = 0
+    sleep_durations: List[float] = []
+
+    async def _capture_sleep(*args: object, **kwargs: object) -> None:
+        del kwargs
+        if args:
+            sleep_durations.append(float(args[0]))  # type: ignore[arg-type]
+
+    # 抖动归零使退避值确定等于 Retry-After，便于精确断言
+    monkeypatch.setattr(asyncio, "sleep", _capture_sleep)
+    monkeypatch.setattr(random, "uniform", lambda *_: 0.0)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        del request
+        attempts += 1
+        return httpx.Response(429, headers={"retry-after": "2"}, json={})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="请求频率超限") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.retry_after == 2.0
+        # 3 次尝试间共 2 次退避，均等于服务端 Retry-After 值而非指数 2**attempt
+        assert attempts == config.max_retries + 1
+        assert sleep_durations == [2.0, 2.0]
+
+
+async def test_stream_3xx_not_retried(no_sleep: None) -> None:
+    """流式 3xx 立即终态抛出，不进入退避重试。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        del request
+        attempts += 1
+        return httpx.Response(302, headers={"location": "https://example.com/elsewhere"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError) as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+        assert exc_info.value.status_code == 302
+        assert attempts == 1

@@ -57,7 +57,7 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
         metadata.tool_name
         for metadata in (TEXT_TO_IMAGE, IMAGE_TO_IMAGE, MULTI_IMAGE_FUSION, SEQUENTIAL_GENERATION)
     }
-    declared.add("seedream_browse_images")
+    declared.add("browse_images")
 
     assert declared == registered
 

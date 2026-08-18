@@ -220,6 +220,69 @@ def test_build_config_loads_http_auth_token_from_env_file(
     assert config.http_auth_token == "token123"
 
 
+# ==================== SEEDREAM_HTTP_ALLOWED_HOSTS Host 允许列表 ====================
+
+
+def test_build_config_loads_http_allowed_hosts_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_HTTP_ALLOWED_HOSTS 按逗号拆分为条目列表，host:port 与 :* 通配原样保留。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n" "SEEDREAM_HTTP_ALLOWED_HOSTS=mcp.example.com,mcp.example.com:*\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == ["mcp.example.com", "mcp.example.com:*"]
+
+
+def test_build_config_http_allowed_hosts_strips_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """条目前后空白被去除，空条目被丢弃。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_HOSTS= mcp.example.com , , api.example.com:8443 \n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == ["mcp.example.com", "api.example.com:8443"]
+
+
+@pytest.mark.parametrize("raw_value", ["", "   ", ","])
+def test_build_config_blank_http_allowed_hosts_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    """空串、纯空白与全空条目均归 None，等价于未配置。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts is None
+
+
+def test_build_config_http_allowed_hosts_defaults_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 http_allowed_hosts 为 None，非回环绑定整体关闭 SDK Host 校验。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts is None
+
+
 def test_to_dict_masks_sensitive_fields() -> None:
     """to_dict 对 api_key 与 http_auth_token 脱敏。"""
     from seedream_mcp.config import SeedreamConfig

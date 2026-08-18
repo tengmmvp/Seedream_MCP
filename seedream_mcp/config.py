@@ -94,6 +94,10 @@ class SeedreamConfig:
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌。
         http_max_body_size: streamable-http 请求体大小上限字节数；默认 64MB，MCP 正常
             载荷远小于 100MB，单图 data URI 上限约 40MB，兼顾多图融合。
+        http_allowed_hosts: 非回环绑定的 Host 头允许列表，条目支持 host、host:port
+            与尾部 :* 端口通配，语义对齐 SDK TransportSecuritySettings.allowed_hosts；
+            None 表示未配置，非回环绑定整体关闭 SDK 内层 Host 校验。仅经
+            SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量按逗号分隔解析，CLI 不暴露参数。
     """
 
     api_key: str
@@ -141,6 +145,7 @@ class SeedreamConfig:
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
     http_max_body_size: int = _env_field(64 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
+    http_allowed_hosts: list[str] | None = _env_field(None, "SEEDREAM_HTTP_ALLOWED_HOSTS")
 
     def __post_init__(self) -> None:
         self.validate()
@@ -544,6 +549,24 @@ def _pick_optional_str(
     return str(raw).strip() or None
 
 
+def _pick_optional_str_list(
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+) -> list[str] | None:
+    """按优先级取值后按逗号拆分为去空白条目列表，空值归 None 表示未配置。
+
+    拆分后逐项 strip 并丢弃空条目，容忍列表前后与条目间的空白书写差异；全部条目
+    为空时同样归 None，与空串语义一致，等价于未配置。
+    """
+    raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
+    if raw is None:
+        return None
+    normalized = str(raw).strip()
+    if not normalized:
+        return None
+    entries = [entry.strip() for entry in normalized.split(",")]
+    return [entry for entry in entries if entry] or None
+
+
 def _pick_int(
     overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> int:
@@ -754,6 +777,9 @@ def _build_config_from_sources_unlocked(
         ),
         "http_max_body_size": _pick_int(
             override_values, "http_max_body_size", "SEEDREAM_HTTP_MAX_BODY_SIZE", env_values
+        ),
+        "http_allowed_hosts": _pick_optional_str_list(
+            override_values, "http_allowed_hosts", "SEEDREAM_HTTP_ALLOWED_HOSTS", env_values
         ),
     }
     # 断言所有带 env metadata 的字段都在构造调用中显式传值，防止新增 _env_field 字段

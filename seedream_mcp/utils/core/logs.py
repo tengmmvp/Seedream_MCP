@@ -39,10 +39,12 @@ def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
 
     经 asyncio.shield 共享的 task 在消费方被取消后，其 outer 不再消费 task 结果；
     若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
-    retrieved"。本回调显式检索异常即清除该标记并以 warning 记录孤儿失败。常规失败
-    路径不挂载本回调，异常由等待者消费并经既有错误通道记录，同一异常不重复入日志。
-    warning 经 logger.opt(exception=exc) 携带完整异常堆栈，与错误日志记录完整堆栈的
-    项目规范一致。供 images 与 io 子包的 single-flight 在途 task 经
+    retrieved"。本回调显式检索异常即清除该标记并以 warning 记录孤儿失败。登记时机
+    由调用方的消费者计数约束：创建者与每个等待者各持一份计数，仅当计数归零即最后
+    一个潜在消费者已放弃、且结果未被任何消费者接收时才登记本回调，异常已送抵消费
+    者的场景由其既有错误通道记录，同一异常不重复入日志。warning 经
+    logger.opt(exception=exc) 携带完整异常堆栈，与错误日志记录完整堆栈的项目规范
+    一致。供 images 与 io 子包的 single-flight 在途 task 经
     arm_unretrieved_exception_logging 登记。
 
     Args:
@@ -60,21 +62,28 @@ def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
 _UNRETRIEVED_ARMED_TASKS: "weakref.WeakSet[asyncio.Task[Any]]" = weakref.WeakSet()
 
 
-def arm_unretrieved_exception_logging(task: "asyncio.Task[Any]") -> None:
+def arm_unretrieved_exception_logging(
+    task: "asyncio.Task[Any]",
+    callback: Callable[["asyncio.Task[Any]"], None] | None = None,
+) -> None:
     """为共享 task 登记"未取回异常"检索回调，供消费方放弃等待时调用。
 
-    仅在消费方被取消、放弃消费 task 结果时登记：此后若无其他等待者接手，task 失败
-    将无人检索异常，回调兜底检索并记录。常规失败路径的异常由等待者正常消费，不登记
-    回调，避免同一异常在既有错误通道之外重复入日志。task 最终成功或被取消时回调检索
-    无异常，静默无害。
+    登记时机由调用方以消费者计数约束：仅最后一个潜在消费者放弃等待且结果未被任何
+    消费者接收时调用本函数，此后若无其他等待者接手，task 失败将无人检索异常，回调
+    兜底检索并记录；异常已送抵消费者的场景不登记，避免同一异常在既有错误通道之外
+    重复入日志。task 最终成功或被取消时回调检索无异常，静默无害。
 
     Args:
         task: 消费方已放弃等待的共享后台任务。
+        callback: 触发时执行的回调，缺省为通用检索记录回调
+            log_unretrieved_task_exception；调用方持有消费者计数等附加上下文时可
+            传入自定义回调，在触发时复查登记前提是否仍然成立。
     """
     if task in _UNRETRIEVED_ARMED_TASKS:
         return
     _UNRETRIEVED_ARMED_TASKS.add(task)
-    task.add_done_callback(log_unretrieved_task_exception)
+    resolved_callback = callback if callback is not None else log_unretrieved_task_exception
+    task.add_done_callback(resolved_callback)
 
 
 class InterceptHandler(logging.Handler):

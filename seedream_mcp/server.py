@@ -180,11 +180,11 @@ def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool(
-    name="seedream_text_to_image",
+    name="text_to_image",
     title="Seedream 文生图",
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
-async def seedream_text_to_image(
+async def text_to_image(
     prompt: str = Field(
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
@@ -255,8 +255,8 @@ async def seedream_text_to_image(
     """文生图：根据文字指令生成单张图片。
 
     适用：从零开始按文字描述创建图片。示例：生成“赛博朋克风格的城市夜景”。
-    不适用：需要基于已有图片修改时改用 seedream_image_to_image；需要一次生成多张
-    风格一致的图片时改用 seedream_sequential_generation。
+    不适用：需要基于已有图片修改时改用 image_to_image；需要一次生成多张
+    风格一致的图片时改用 sequential_generation。
     """
     config = _config_from_context(ctx)
     return await run_text_to_image(
@@ -285,11 +285,11 @@ async def seedream_text_to_image(
 
 
 @mcp.tool(
-    name="seedream_image_to_image",
+    name="image_to_image",
     title="Seedream 图文生图",
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
-async def seedream_image_to_image(
+async def image_to_image(
     prompt: str | None = Field(
         default=None,
         min_length=PROMPT_MIN_LENGTH,
@@ -388,8 +388,8 @@ async def seedream_image_to_image(
 
     适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调
     迁移、改变背景或视角尺寸等。示例：“把人物背景换成海滩”。
-    不适用：纯文字生图改用 seedream_text_to_image；融合多张图片特征改用
-    seedream_multi_image_fusion。
+    不适用：纯文字生图改用 text_to_image；融合多张图片特征改用
+    multi_image_fusion。
     """
     config = _config_from_context(ctx)
     return await run_image_to_image(
@@ -421,11 +421,11 @@ async def seedream_image_to_image(
 
 
 @mcp.tool(
-    name="seedream_multi_image_fusion",
+    name="multi_image_fusion",
     title="Seedream 多图融合",
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
-async def seedream_multi_image_fusion(
+async def multi_image_fusion(
     prompt: str = Field(
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
@@ -506,8 +506,8 @@ async def seedream_multi_image_fusion(
 
     适用：把多张图片的风格或元素合并到一张新图。示例：“将图1的服装换到图2的模特
     身上”，需用“图1/图2”指代输入图片顺序。
-    不适用：仅编辑单张图片改用 seedream_image_to_image；生成一组连贯分镜改用
-    seedream_sequential_generation。
+    不适用：仅编辑单张图片改用 image_to_image；生成一组连贯分镜改用
+    sequential_generation。
     """
     config = _config_from_context(ctx)
     return await run_multi_image_fusion(
@@ -537,11 +537,11 @@ async def seedream_multi_image_fusion(
 
 
 @mcp.tool(
-    name="seedream_sequential_generation",
+    name="sequential_generation",
     title="Seedream 组图输出",
     annotations=GENERATION_TOOL_ANNOTATIONS,
 )
-async def seedream_sequential_generation(
+async def sequential_generation(
     prompt: str = Field(
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
@@ -637,7 +637,7 @@ async def seedream_sequential_generation(
     适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：
     “生成4格漫画，主角依次出现在4个场景”。注意 5.0 Pro 不支持组图，请改用
     5.0/5.0 Lite/4.5/4.0。
-    不适用：融合多张参考图特征改用 seedream_multi_image_fusion。
+    不适用：融合多张参考图特征改用 multi_image_fusion。
     """
     config = _config_from_context(ctx)
     return await run_sequential_generation(
@@ -668,17 +668,17 @@ async def seedream_sequential_generation(
 
 
 @mcp.tool(
-    name="seedream_browse_images",
+    name="browse_images",
     title="Seedream 图片浏览",
     annotations=BROWSE_TOOL_ANNOTATIONS,
 )
-async def seedream_browse_images(
+async def browse_images(
     directory: str | None = Field(
         default=None,
         max_length=1024,
         pattern=_NON_BLANK_PATTERN,
         description=(
-            "要浏览的目录路径，默认浏览工作区根目录，即 MCP Roots 授权的首个根；"
+            "要浏览的目录路径，默认浏览全部授权的工作区根目录，多根时合并扫描去重；"
             "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
             "均未设置时回退进程当前工作目录。"
         ),
@@ -745,11 +745,11 @@ async def seedream_browse_images(
 
 # 需要收紧 inputSchema 的五个平铺签名工具。
 _FLAT_SCHEMA_TOOL_NAMES = (
-    "seedream_text_to_image",
-    "seedream_image_to_image",
-    "seedream_multi_image_fusion",
-    "seedream_sequential_generation",
-    "seedream_browse_images",
+    "text_to_image",
+    "image_to_image",
+    "multi_image_fusion",
+    "sequential_generation",
+    "browse_images",
 )
 
 
@@ -861,7 +861,7 @@ async def models_info_resource() -> str:
 
 
 # 风格预设固定前缀，指引模型调用文生图工具并指明 prompt 参数来源。
-_STYLE_PROMPT_PREFIX = "请使用 seedream_text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
+_STYLE_PROMPT_PREFIX = "请使用 text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
 
 
 def _build_style_prompt(subject: str, style_suffix: str) -> str:

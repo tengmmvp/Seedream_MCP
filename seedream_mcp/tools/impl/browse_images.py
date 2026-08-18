@@ -177,7 +177,7 @@ def _build_browse_structured_result(
         workspace_root_values = [_FALLBACK_BOUNDARY_PLACEHOLDER] if workspace_roots else []
         resolved_directory_values = [_FALLBACK_BOUNDARY_PLACEHOLDER] if resolved_directories else []
     payload: dict[str, Any] = {
-        "tool": "seedream_browse_images",
+        "tool": "browse_images",
         "success": success,
         "status": status,
         "directory": directory,

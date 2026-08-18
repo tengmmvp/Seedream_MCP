@@ -30,11 +30,11 @@ from seedream_mcp.utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REF
 
 # MCP 注册工具名到输入模型的映射，平铺 inputSchema 等价性断言的数据源。
 _TOOL_INPUT_MODELS = {
-    "seedream_text_to_image": TextToImageInput,
-    "seedream_image_to_image": ImageToImageInput,
-    "seedream_multi_image_fusion": MultiImageFusionInput,
-    "seedream_sequential_generation": SequentialGenerationInput,
-    "seedream_browse_images": BrowseImagesInput,
+    "text_to_image": TextToImageInput,
+    "image_to_image": ImageToImageInput,
+    "multi_image_fusion": MultiImageFusionInput,
+    "sequential_generation": SequentialGenerationInput,
+    "browse_images": BrowseImagesInput,
 }
 
 
@@ -132,7 +132,7 @@ async def test_flat_input_schema_property_order_matches_model_fields() -> None:
         schema = by_name[name].input_schema
         assert list(schema["properties"]) == list(model.model_fields), name
         assert "params" not in schema["properties"], name
-        if name != "seedream_browse_images":
+        if name != "browse_images":
             assert list(schema["properties"])[0] == "prompt", name
 
 
@@ -152,22 +152,22 @@ async def test_flat_input_schema_required_matches_model_fields() -> None:
 # 清单与 server._NON_BLANK_PATTERN 的应用范围一一对应，新增非空语义字段未同步
 # 镜像时，下方等价断言因缺 pattern 转红。
 _NON_BLANK_MIRROR_FIELDS = {
-    ("seedream_text_to_image", "prompt"),
-    ("seedream_text_to_image", "save_path"),
-    ("seedream_text_to_image", "custom_name"),
-    ("seedream_image_to_image", "prompt"),
-    ("seedream_image_to_image", "image"),
-    ("seedream_image_to_image", "save_path"),
-    ("seedream_image_to_image", "custom_name"),
-    ("seedream_multi_image_fusion", "prompt"),
-    ("seedream_multi_image_fusion", "image"),
-    ("seedream_multi_image_fusion", "save_path"),
-    ("seedream_multi_image_fusion", "custom_name"),
-    ("seedream_sequential_generation", "prompt"),
-    ("seedream_sequential_generation", "image"),
-    ("seedream_sequential_generation", "save_path"),
-    ("seedream_sequential_generation", "custom_name"),
-    ("seedream_browse_images", "directory"),
+    ("text_to_image", "prompt"),
+    ("text_to_image", "save_path"),
+    ("text_to_image", "custom_name"),
+    ("image_to_image", "prompt"),
+    ("image_to_image", "image"),
+    ("image_to_image", "save_path"),
+    ("image_to_image", "custom_name"),
+    ("multi_image_fusion", "prompt"),
+    ("multi_image_fusion", "image"),
+    ("multi_image_fusion", "save_path"),
+    ("multi_image_fusion", "custom_name"),
+    ("sequential_generation", "prompt"),
+    ("sequential_generation", "image"),
+    ("sequential_generation", "save_path"),
+    ("sequential_generation", "custom_name"),
+    ("browse_images", "directory"),
 }
 
 # 非空语义镜像的 pattern 取值，与 server._NON_BLANK_PATTERN 保持一致。
@@ -338,22 +338,22 @@ async def test_flat_input_schema_forbids_additional_properties() -> None:
 @pytest.mark.parametrize(
     ("tool_name", "typo_args"),
     [
-        ("seedream_text_to_image", {"prompt": "a cat", "watermarkss": True}),
-        ("seedream_text_to_image", {"prompt": "a cat", "sze": "2K"}),
+        ("text_to_image", {"prompt": "a cat", "watermarkss": True}),
+        ("text_to_image", {"prompt": "a cat", "sze": "2K"}),
         (
-            "seedream_image_to_image",
+            "image_to_image",
             {"prompt": "a cat", "image": "https://example.com/cat.png", "sze": "2K"},
         ),
         (
-            "seedream_multi_image_fusion",
+            "multi_image_fusion",
             {
                 "prompt": "a cat",
                 "image": ["https://example.com/cat.png"],
                 "responce_format": "url",
             },
         ),
-        ("seedream_sequential_generation", {"prompt": "a cat", "max_imagess": 4}),
-        ("seedream_browse_images", {"directory": ".", "recursve": True}),
+        ("sequential_generation", {"prompt": "a cat", "max_imagess": 4}),
+        ("browse_images", {"directory": ".", "recursve": True}),
     ],
 )
 async def test_flat_tool_rejects_unknown_parameter_names(tool_name: str, typo_args: dict) -> None:
@@ -375,17 +375,17 @@ async def test_flat_tool_rejects_unknown_parameter_names(tool_name: str, typo_ar
 @pytest.mark.parametrize(
     ("tool_name", "blank_args"),
     [
-        ("seedream_text_to_image", {"prompt": "   "}),
-        ("seedream_text_to_image", {"prompt": "a cat", "save_path": "   "}),
-        ("seedream_text_to_image", {"prompt": "a cat", "custom_name": ""}),
-        ("seedream_image_to_image", {"prompt": "a cat", "image": "   "}),
+        ("text_to_image", {"prompt": "   "}),
+        ("text_to_image", {"prompt": "a cat", "save_path": "   "}),
+        ("text_to_image", {"prompt": "a cat", "custom_name": ""}),
+        ("image_to_image", {"prompt": "a cat", "image": "   "}),
         (
-            "seedream_multi_image_fusion",
+            "multi_image_fusion",
             {"prompt": "a cat", "image": ["https://example.com/a.png", "   "]},
         ),
-        ("seedream_sequential_generation", {"prompt": "a cat", "image": "   "}),
-        ("seedream_sequential_generation", {"prompt": "a cat", "image": ["   "]}),
-        ("seedream_browse_images", {"directory": "   "}),
+        ("sequential_generation", {"prompt": "a cat", "image": "   "}),
+        ("sequential_generation", {"prompt": "a cat", "image": ["   "]}),
+        ("browse_images", {"directory": "   "}),
     ],
 )
 async def test_flat_tool_rejects_blank_string_inputs(tool_name: str, blank_args: dict) -> None:
@@ -412,7 +412,7 @@ async def test_sequential_image_list_branch_declares_max_items() -> None:
     """
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
-    schema = by_name["seedream_sequential_generation"].input_schema
+    schema = by_name["sequential_generation"].input_schema
     array_branch = next(
         branch for branch in schema["properties"]["image"]["anyOf"] if branch.get("type") == "array"
     )
@@ -427,7 +427,7 @@ async def test_sequential_tool_rejects_oversized_image_list() -> None:
     """
     images = [f"https://example.com/{i}.png" for i in range(15)]
     with pytest.raises(ToolError) as exc_info:
-        await mcp.call_tool("seedream_sequential_generation", {"prompt": "a cat", "image": images})
+        await mcp.call_tool("sequential_generation", {"prompt": "a cat", "image": images})
     message = str(exc_info.value)
     assert "参考图片数量" not in message
     assert "14" in message

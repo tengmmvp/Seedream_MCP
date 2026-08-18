@@ -1403,7 +1403,11 @@ class SeedreamClient:
                     raise
             except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
                 # httpx 读取超时与 SSE/读体总时长预算超限在此同语义处置：均可重试，
-                # 重试耗尽后归一为 SeedreamTimeoutError。
+                # 重试耗尽后归一为 SeedreamTimeoutError。读体期 deadline 超时可能发生在
+                # 已收到 200 状态行之后，与 200+确定坏体不重试的原则有意并存：超时时
+                # 结果未知，无法区分服务端是否已完成生成与计费，故对齐主流 SDK 对超时
+                # 一律重试的惯例；200+确定坏体则已是已知失败结果，立即上抛防止对非幂等
+                # 生成 API 重复请求导致重复计费。
                 self.logger.warning(
                     "{} API 调用超时 (尝试 {}/{}): {}",
                     endpoint,

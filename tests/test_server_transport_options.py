@@ -542,23 +542,63 @@ def test_cli_main_cli_auth_token_overrides_config_token(
 # ==================== 绑定地址同步 SDK 内层防护 ====================
 
 
-def test_transport_security_derivation_follows_bind_host() -> None:
-    """transport_security 按绑定地址派生：非回环关闭 SDK Host 白名单，回环保留白名单。
+def _inject_transport_config(monkeypatch: pytest.MonkeyPatch, config: SeedreamConfig) -> None:
+    """向 transport 模块注入活动配置替身，隔离 _transport_security_for_host 的配置读取。"""
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+
+
+def test_transport_security_derivation_follows_bind_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """transport_security 按绑定地址派生：非回环默认关闭 SDK Host 白名单，回环保留白名单。
 
     SDK 2.0 起 streamable_http_app 以 host 参数决定防护默认；本项目按实际绑定地址
-    显式派生传入。若派生不随绑定地址切换，非回环部署的全部 /mcp 请求会被 SDK
-    内层以 421 拒绝。
+    显式派生传入。未配置允许列表时非回环绑定必须整体关闭，否则非回环部署的全部
+    /mcp 请求会被 SDK 内层以 421 拒绝。
     """
-    from seedream_mcp.transport import _transport_security_for_host
+    _inject_transport_config(monkeypatch, SeedreamConfig(api_key="test_key"))
 
-    non_loopback = _transport_security_for_host("0.0.0.0")
+    non_loopback = transport_module._transport_security_for_host("0.0.0.0")
     assert non_loopback is not None
     assert non_loopback.enable_dns_rebinding_protection is False
 
-    loopback = _transport_security_for_host("127.0.0.1")
+    loopback = transport_module._transport_security_for_host("127.0.0.1")
     assert loopback is not None
     assert loopback.enable_dns_rebinding_protection is True
     assert loopback.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+
+
+def test_transport_security_non_loopback_with_allowed_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非回环绑定配置 SEEDREAM_HTTP_ALLOWED_HOSTS 时启用 SDK Host 校验并按列表放行。"""
+    _inject_transport_config(
+        monkeypatch,
+        SeedreamConfig(
+            api_key="test_key",
+            http_allowed_hosts=["mcp.example.com", "mcp.example.com:*"],
+        ),
+    )
+
+    security = transport_module._transport_security_for_host("0.0.0.0")
+
+    assert security.enable_dns_rebinding_protection is True
+    assert security.allowed_hosts == ["mcp.example.com", "mcp.example.com:*"]
+
+
+def test_transport_security_loopback_ignores_allowed_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回环绑定不读允许列表，仍维持回环白名单，不受 SEEDREAM_HTTP_ALLOWED_HOSTS 影响。"""
+    _inject_transport_config(
+        monkeypatch,
+        SeedreamConfig(api_key="test_key", http_allowed_hosts=["mcp.example.com"]),
+    )
+
+    security = transport_module._transport_security_for_host("127.0.0.1")
+
+    assert security.enable_dns_rebinding_protection is True
+    assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 
 
 # ==================== 回环 Host 校验大小写 ====================

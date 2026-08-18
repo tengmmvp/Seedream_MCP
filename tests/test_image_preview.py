@@ -21,6 +21,7 @@ from seedream_mcp.client import SeedreamClient
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.images.image_thumbnail import (
+    PREVIEW_MAX_IMAGES,
     THUMBNAIL_MAX_EDGE,
     build_preview_contents,
     build_thumbnail_bytes,
@@ -167,6 +168,66 @@ async def test_generation_result_carries_preview_after_text(
     structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["data"][0]["local_path"].endswith("saved.png")
+
+
+@pytest.mark.asyncio
+async def test_generation_result_truncates_preview_beyond_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """保存张数超过预览上限时缩略图恰为上限张，文本含截断说明，结构化数据完整。"""
+    total = PREVIEW_MAX_IMAGES + 2
+
+    async def fake_text_to_image_many(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self, kwargs
+        return {
+            "success": True,
+            "data": [
+                {"url": f"https://example.com/generated-{index}.png"} for index in range(total)
+            ],
+            "usage": {"generated_images": total},
+            "status": "completed",
+        }
+
+    monkeypatch.setattr(SeedreamClient, "text_to_image", fake_text_to_image_many)
+
+    saved_paths = [_write_png(tmp_path / f"saved-{index}.png", (64, 48)) for index in range(total)]
+    result_cls = io_save.AutoSaveResult
+
+    async def fake_save_multiple(
+        self: Any, images: list[dict[str, Any]], tool_name: str
+    ) -> list[Any]:
+        del self, tool_name
+        return [
+            result_cls(
+                success=True,
+                original_url=images[index]["url"],
+                local_path=str(saved_paths[index]),
+                markdown_ref=f"![image](saved-{index}.png)",
+            )
+            for index in range(len(images))
+        ]
+
+    monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", fake_save_multiple)
+
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
+
+    assert result.is_error is False
+    # 缩略图张数收敛到上限，超出的保存项不再进入 content。
+    image_blocks = [content for content in result.content if isinstance(content, ImageContent)]
+    assert len(image_blocks) == PREVIEW_MAX_IMAGES
+    response_text = next(
+        content.text for content in result.content if isinstance(content, TextContent)
+    )
+    assert f"共已保存 {total} 张" in response_text
+    assert f"仅附前 {PREVIEW_MAX_IMAGES} 张缩略图预览" in response_text
+    # 截断只作用于预览，structuredContent.data 仍包含全部保存条目。
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    assert len(structured["data"]) == total
+    assert all(entry.get("local_path") for entry in structured["data"])
 
 
 @pytest.mark.asyncio

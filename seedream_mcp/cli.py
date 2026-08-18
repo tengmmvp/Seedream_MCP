@@ -149,8 +149,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--host",
         default=DEFAULT_HTTP_HOST,
-        help="streamable-http 监听地址（默认 127.0.0.1，仅 streamable-http 生效；"
-        "绑定非回环地址必须配置 --auth-token 与 TLS，否则拒绝启动）",
+        help="streamable-http 监听地址，默认 127.0.0.1，仅 streamable-http 生效；"
+        "绑定 127.0.0.1/::1 以外地址（含 localhost）必须配置 --auth-token 与 TLS，"
+        "否则拒绝启动",
     )
     parser.add_argument(
         "--port",
@@ -162,7 +163,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--stateless",
         action="store_true",
         default=False,
-        help="streamable-http 启用无状态模式，更适合远程多客户端与负载均衡（默认关闭）",
+        help="streamable-http 启用无状态模式，默认关闭。仅影响 2025 规范的有会话 legacy "
+        "客户端链路，2026-07-28 客户端本就无会话；开启后 legacy 会话失去反向通道，"
+        "MCP Roots 不可读，本地文件访问边界回退 SEEDREAM_WORKSPACE_ROOT，未配置时"
+        "相关工具直接失败",
     )
     parser.add_argument(
         "--auth-token",

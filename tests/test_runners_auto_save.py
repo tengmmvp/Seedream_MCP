@@ -196,7 +196,7 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
             "alt_text": "Generated image 1",
         }
     ]
-    assert captured["tool_name"] == "seedream_text_to_image"
+    assert captured["tool_name"] == "text_to_image"
     # auto_save.results 回填保存结果。
     save_results = structured["auto_save"]["results"]
     assert len(save_results) == 1

@@ -94,7 +94,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 }
 ```
 
-`<token>` 为占位符，须与服务端环境变量 `SEEDREAM_HTTP_AUTH_TOKEN` 一致；若经 TLS 反向代理或容器内 TLS 暴露，`url` 改用 `https://` 形态（如 `https://mcp.example.com/mcp`）。
+`<token>` 为占位符，须与服务端环境变量 `SEEDREAM_HTTP_AUTH_TOKEN` 一致；若经 TLS 反向代理或容器内 TLS 暴露，`url` 改用 `https://` 形态（如 `https://mcp.example.com/mcp`）。静态令牌鉴权不提供 OAuth 受保护资源元数据发现，标准 OAuth 客户端需手动配置凭据。
 
 ## 🔧 客户端配置
 
@@ -237,7 +237,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 ## 🛠️ 可用工具
 
 <details>
-<summary><b>1. <code>seedream_text_to_image</code></b> — 文生图</summary>
+<summary><b>1. <code>text_to_image</code></b> — 文生图</summary>
 
 根据文本提示词生成图像。该工具调用外部计费 API、在本地产出文件，非只读。
 
@@ -261,7 +261,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 ```json
 {
-  "name": "seedream_text_to_image",
+  "name": "text_to_image",
   "arguments": {
     "prompt": "水彩风格的江南水乡，清晨薄雾"
   }
@@ -271,7 +271,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 </details>
 
 <details>
-<summary><b>2. <code>seedream_image_to_image</code></b> — 图文生图</summary>
+<summary><b>2. <code>image_to_image</code></b> — 图文生图</summary>
 
 根据输入图像和文本提示生成新图像。该工具调用外部计费 API、在本地产出文件，非只读。
 
@@ -298,10 +298,10 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 ```json
 {
-  "name": "seedream_image_to_image",
+  "name": "image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": ".seedream/images/2026-08-15/seedream_image_to_image/portrait.jpeg"
+    "image": ".seedream/images/2026-08-15/image_to_image/portrait.jpeg"
   }
 }
 ```
@@ -309,7 +309,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 </details>
 
 <details>
-<summary><b>3. <code>seedream_multi_image_fusion</code></b> — 多图融合</summary>
+<summary><b>3. <code>multi_image_fusion</code></b> — 多图融合</summary>
 
 将多张图像融合生成新图像。该工具调用外部计费 API、在本地产出文件，非只读。
 
@@ -334,12 +334,12 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 ```json
 {
-  "name": "seedream_multi_image_fusion",
+  "name": "multi_image_fusion",
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_a.jpeg",
-      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_b.jpeg"
+      ".seedream/images/2026-08-15/multi_image_fusion/person_a.jpeg",
+      ".seedream/images/2026-08-15/multi_image_fusion/person_b.jpeg"
     ]
   }
 }
@@ -348,7 +348,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 </details>
 
 <details>
-<summary><b>4. <code>seedream_sequential_generation</code></b> — 组图输出</summary>
+<summary><b>4. <code>sequential_generation</code></b> — 组图输出</summary>
 
 连续生成多张图像，支持文生组图、单图生组图、多图生组图（仅 doubao-seedream-5.0 系列（5.0/5.0-lite）/4.5/4.0 支持；5.0 Pro 不支持组图）。该工具调用外部计费 API、在本地产出文件，非只读。
 
@@ -374,7 +374,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 ```json
 {
-  "name": "seedream_sequential_generation",
+  "name": "sequential_generation",
   "arguments": {
     "prompt": "四格漫画：一只柴犬的一天，起床、吃饭、散步、睡觉"
   }
@@ -384,7 +384,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 </details>
 
 <details>
-<summary><b>5. <code>seedream_browse_images</code></b> — 图片浏览</summary>
+<summary><b>5. <code>browse_images</code></b> — 图片浏览</summary>
 
 浏览工作区中的图片文件，获取文件路径用于图像生成。该工具只读、幂等、不访问网络。
 
@@ -402,7 +402,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 ```json
 {
-  "name": "seedream_browse_images",
+  "name": "browse_images",
   "arguments": {}
 }
 ```
@@ -531,6 +531,7 @@ SEEDREAM_PREVIEW_ENABLED=true                 # 生成结果附带已保存图�
 SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界回退目录（MCP Roots 优先）
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定必须配置，否则拒绝启动；另需 TLS 或 --insecure-allow-non-tls 豁免）
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 请求体上限（字节，≥1MB，默认 64MB；单图 data URI 约 40MB，兼顾多图融合）
+SEEDREAM_HTTP_ALLOWED_HOSTS=                # 非回环直连部署的 Host 头允许列表，逗号分隔，支持 host:port 与尾部 :* 通配（如 mcp.example.com,mcp.example.com:*）；留空则整体关闭 SDK 内层 Host 校验，适用反向代理场景
 
 # 客户端性能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

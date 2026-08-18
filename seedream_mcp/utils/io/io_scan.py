@@ -23,10 +23,11 @@ logger = get_logger(__name__)
 
 # 进程级目录图片列表缓存。键为 (目录路径, recursive, max_depth, 格式过滤元组)，不含
 # scan_limit：同目录同扫描配置的不同翻页共享一份有序列表，命中时返回浅拷贝供调用方切片，
-# 将深翻页从每页扫描降为首次扫描加 O(1) 命中。条目按 LRU 管理：命中刷新热度，超限驱逐
-# 最久未使用目录，轮询目录数超过上限时热目录不因先插入而被逐出。单事件循环内各请求按
-# 目录串行 await，跨请求并发经由 GIL 保证 dict 读写原子性，最坏情况为缓存击穿即多请求
-# 各扫一次再覆写，仅影响性能。
+# 将深翻页从每页扫描降为首次扫描加 O(1) 命中。条目按 LRU 管理：命中与覆写均刷新热度，
+# 超限驱逐最久未使用目录，轮询目录数超过上限时热目录不因先插入而被逐出。单事件循环内
+# 各请求按目录串行 await，跨线程并发调用下 GIL 仅保证单键读写原子，get 与 move_to_end、
+# 迭代与 pop 等复合操作不保证原子，竞态由各操作点内联捕获化解，最坏情况为缓存击穿即多
+# 请求各扫一次再覆写，仅影响性能。
 _DIRECTORY_SCAN_CACHE: OrderedDict[
     tuple[str, bool, int, tuple[str, ...]], _DirectoryScanCacheEntry
 ] = OrderedDict()
@@ -114,17 +115,30 @@ def _store_scan_entry(
     complete: bool,
     unreadable_dirs: list[Path],
 ) -> None:
-    """写入扫描缓存，条目数超限时驱逐最近最少使用的条目。"""
+    """写入扫描缓存，覆写已存在键时刷新 LRU 位，条目数超限时驱逐最近最少使用条目。"""
     if len(images) > _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
         # 超过单条目列表上限的大目录不缓存，回退每页扫描，避免无界内存占用。
         return
-    if len(_DIRECTORY_SCAN_CACHE) >= _DIRECTORY_SCAN_CACHE_MAX_ENTRIES:
-        # 驱逐 LRU 链首即最久未命中条目；并发 to_thread 下 next(iter()) 与 pop 可能
-        # 竞态抛 KeyError，捕获容错。
+    while len(_DIRECTORY_SCAN_CACHE) >= _DIRECTORY_SCAN_CACHE_MAX_ENTRIES:
+        # 驱逐 LRU 链首即最久未命中条目。本函数经 to_thread 跨线程并发调用，另一
+        # 线程在迭代器存活期间增删键会使 next 抛 RuntimeError，取得键之后 pop 之前
+        # 键被移除会抛 KeyError；两种竞态各以内联捕获化解并循环重试，容量降回上限
+        # 之下即退出。
         try:
-            _DIRECTORY_SCAN_CACHE.pop(next(iter(_DIRECTORY_SCAN_CACHE)))
+            evict_key = next(iter(_DIRECTORY_SCAN_CACHE))
+        except (RuntimeError, StopIteration):
+            continue
+        try:
+            _DIRECTORY_SCAN_CACHE.pop(evict_key)
         except KeyError:
             pass
+    # 覆写已存在键时显式刷新 LRU 位：OrderedDict 对既有键赋值保持条目原位置，TTL
+    # 过期重扫覆写后热条目会滞留旧位置，缓存压力下最常访问目录反被优先逐出。键在
+    # 判定后写入前被并发驱逐时 move_to_end 抛 KeyError，静默放弃后按新键追加。
+    try:
+        _DIRECTORY_SCAN_CACHE.move_to_end(cache_key)
+    except KeyError:
+        pass
     _DIRECTORY_SCAN_CACHE[cache_key] = _DirectoryScanCacheEntry(
         mtime_ns=mtime_ns,
         captured_at=time.monotonic(),

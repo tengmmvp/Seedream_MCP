@@ -153,7 +153,7 @@ def test_structured_non_dict_error_sanitized() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
@@ -179,7 +179,7 @@ def test_structured_usage_shared_reference_preserved_not_truncated() -> None:
     }
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],

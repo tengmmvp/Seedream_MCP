@@ -352,6 +352,7 @@ class DownloadManager:
         self.max_file_size = max_file_size
         self._connection_limit = connection_limit
         self._dns_cache_ttl = max(1, dns_cache_ttl)
+        # DNS 缓存条目的 expires_at 以 time.monotonic 为基准，写入与过期比较须同基准。
         self._dns_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
         self._dns_inflight: dict[str, asyncio.Task[tuple[str, ...]]] = {}
         self._dns_cache_lock = asyncio.Lock()
@@ -486,7 +487,7 @@ class DownloadManager:
             DownloadError: 解析结果为空、含非法 IP 或命中非公网地址等终态失败。
             RetryableDownloadError: DNS 瞬时解析故障等可重试失败。
         """
-        now = time.time()
+        now = time.monotonic()
         async with self._dns_cache_lock:
             cached = self._dns_cache.get(host)
             if cached is not None:
@@ -518,7 +519,7 @@ class DownloadManager:
         try:
             ip_tuple = await self._resolve_public_ips_uncached(host)
             async with self._dns_cache_lock:
-                self._dns_cache[host] = (time.time() + self._dns_cache_ttl, ip_tuple)
+                self._dns_cache[host] = (time.monotonic() + self._dns_cache_ttl, ip_tuple)
                 if len(self._dns_cache) > _DNS_CACHE_MAX_SIZE:
                     self._enforce_dns_cache_limit()
             return ip_tuple
@@ -582,7 +583,7 @@ class DownloadManager:
         先清理已过期条目；若仍超限则按最旧 expires_at 强制驱逐至阈值内，使上限成为
         硬限制而非软限制。调用方须已持有 ``_dns_cache_lock``。
         """
-        now = time.time()
+        now = time.monotonic()
         for expired_host in [h for h, (exp, _) in self._dns_cache.items() if exp <= now]:
             self._dns_cache.pop(expired_host, None)
         while len(self._dns_cache) > _DNS_CACHE_MAX_SIZE:
@@ -724,6 +725,9 @@ class DownloadManager:
         与 base64 保存路径的 infer_extension_from_bytes 行为对齐，避免无后缀的签名
         URL 恒落 .jpeg 或扩展名与内容不符。同格式的别名扩展名属同一等价类不改写，
         .jpg URL 的 JPEG 内容保留 .jpg，跨格式仍修正。
+
+        start_time 为挂钟基准的起始时刻，仅用于 download_time 的人读度量，不参与
+        预算判定；预算基准由 _attempt_download 以单调钟另行持有。
         """
         content_length = response.headers.get("content-length")
         if content_length:
@@ -780,6 +784,7 @@ class DownloadManager:
         # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成。
         await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix, fsync=fsync)
 
+        # download_time 为人读的挂钟度量语义，不参与预算判定。
         download_time = time.time() - start_time
         logger.info(
             "图片下载成功: {} ({} 字节, {:.2f}秒)",
@@ -805,6 +810,7 @@ class DownloadManager:
         temp_suffix: str,
         attempt: int,
         start_time: float,
+        wall_start_time: float,
         fsync: bool = False,
     ) -> dict[str, Any]:
         """执行单次下载尝试，含逐跳重定向循环，返回成功落盘结果字典。
@@ -818,7 +824,9 @@ class DownloadManager:
 
         重定向链逐跳累计校验总预算：会话 total 超时按单次请求计窗，每跳各享全额窗口，
         跟随下一跳前按起始时间累计校验，超限抛 asyncio.TimeoutError 交由外层按超时
-        分类重试，恶意慢滴流重定向链不得把单次尝试拖至跳数倍封顶。
+        分类重试，恶意慢滴流重定向链不得把单次尝试拖至跳数倍封顶。start_time 为
+        单调钟基准的预算起点；wall_start_time 为挂钟基准，仅透传给
+        _download_response_to_temp 的 download_time 人读度量。
 
         请求头跨源防护：调用方为原始主机定制的请求头在重定向跳向不同源时剥离，仅保留
         User-Agent 与 Accept 等通用头，防止定制头原样发给重定向目标泄露内部信息。
@@ -841,8 +849,9 @@ class DownloadManager:
                 next_url = self._handle_redirect_response(response, current_url, redirect_count)
                 if next_url is not None:
                     # 跟随下一跳前按起始时间累计校验总预算：每跳的会话 total 超时独立
-                    # 计窗，无累计校验时慢滴流重定向链可把单次尝试拖至跳数倍封顶。
-                    elapsed = time.time() - start_time
+                    # 计窗，无累计校验时慢滴流重定向链可把单次尝试拖至跳数倍封顶；
+                    # start_time 为单调钟基准，与 download_image 的捕获同基准。
+                    elapsed = time.monotonic() - start_time
                     if elapsed >= self._download_total_budget():
                         raise asyncio.TimeoutError(
                             f"重定向链累计耗时 {elapsed:.0f} 秒已超总预算 "
@@ -874,7 +883,7 @@ class DownloadManager:
                     temp_suffix,
                     content_type,
                     attempt,
-                    start_time,
+                    wall_start_time,
                     fsync=fsync,
                 )
 
@@ -905,7 +914,10 @@ class DownloadManager:
         if headers is None:
             headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
 
-        start_time = time.time()
+        # 预算基准取单调钟：墙钟受系统对时回拨影响，会使累计预算判定失真；
+        # download_time 的人读挂钟度量另取 wall_start_time。
+        start_time = time.monotonic()
+        wall_start_time = time.time()
         last_error: DownloadError | None = None
         # 临时文件的可读性后缀：原扩展名后追加 .part，实际路径由原子落盘骨架内 mkstemp 随机生成。
         temp_suffix = (save_path.suffix or ".bin") + ".part"
@@ -921,7 +933,15 @@ class DownloadManager:
 
                 session = await self._ensure_session()
                 return await self._attempt_download(
-                    session, url, headers, save_path, temp_suffix, attempt, start_time, fsync=fsync
+                    session,
+                    url,
+                    headers,
+                    save_path,
+                    temp_suffix,
+                    attempt,
+                    start_time,
+                    wall_start_time,
+                    fsync=fsync,
                 )
 
             except RetryableDownloadError as e:
@@ -981,7 +1001,7 @@ class DownloadManager:
                 # 跨尝试累计时长预算从 start_time 起算，耗尽即停止重试：慢滴流响应
                 # 单次尝试可耗满会话总时长上限，无累计预算时重试按尝试数成倍放大
                 # 单个保存任务的占用；预算与单次封顶取同一值，见 _download_total_budget。
-                elapsed = time.time() - start_time
+                elapsed = time.monotonic() - start_time
                 if elapsed >= self._download_total_budget():
                     logger.warning(
                         "下载累计耗时 {:.0f} 秒已超总预算 {:.0f} 秒，停止重试: {}",

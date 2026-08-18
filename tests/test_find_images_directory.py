@@ -455,6 +455,68 @@ def test_cached_find_images_hot_directory_survives_cache_pressure(
     assert scanned_dirs == [str(hot), str(other_dirs[0]), str(other_dirs[1])]
 
 
+def test_cached_find_images_ttl_rescan_overwrite_refreshes_lru_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TTL 过期重扫覆写既有键时刷新 LRU 位，重扫后的热条目不得滞留旧位置被逐出。
+
+    OrderedDict 对既有键赋值不移动条目位置：递归扫描靠 TTL 失效，过期重扫走
+    覆写路径且不经过命中刷新，若覆写不刷新热度，缓存压力下最常访问的目录仍
+    位于链首被优先逐出，下次访问退化为全量重扫。以注入的扫描计数器断言重扫
+    覆写后的热目录在驱逐压力下存活、后续访问命中缓存不再扫描。
+    """
+    monkeypatch.setattr(scan_module, "_DIRECTORY_SCAN_CACHE_MAX_ENTRIES", 2)
+    scan_module.reset_directory_scan_cache()
+
+    hot = tmp_path / "hot"
+    hot.mkdir()
+    (hot / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    other_dirs: list[Path] = []
+    for i in range(2):
+        other = tmp_path / f"d{i}"
+        other.mkdir()
+        (other / f"{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        other_dirs.append(other)
+
+    scanned_dirs: list[str] = []
+    original_scan = scan_module.find_images_in_directory
+
+    def counting_scan(**kwargs: Any) -> list[Path]:
+        scanned_dirs.append(kwargs["directory"])
+        return original_scan(**kwargs)
+
+    def scan(dir_key: Path) -> None:
+        cached_find_images_in_directory(
+            resolved_dir=dir_key,
+            recursive=True,
+            max_depth=1,
+            format_filter=None,
+            scan_limit=10,
+            scanner=counting_scan,
+        )
+
+    scan(hot)
+    scan(other_dirs[0])
+
+    # 模拟 TTL 过期：递归条目按 TTL 失效，对 hot 的重扫走覆写路径
+    ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
+    real_monotonic = scan_module.time.monotonic
+    base = real_monotonic()
+    monkeypatch.setattr(scan_module.time, "monotonic", lambda: base + ttl + 1)
+
+    # 过期重扫覆写 hot：正确行为下覆写刷新 LRU 位，hot 成为最近使用
+    scan(hot)
+    # 缓存已满 2 条，插入 d1 触发驱逐，被逐出的应是最久未用的 d0 而非刚重扫的 hot
+    scan(other_dirs[1])
+    # TTL 内命中缓存，不再重扫
+    scan(hot)
+
+    assert (
+        scanned_dirs.count(str(hot)) == 2
+    ), "TTL 过期重扫覆写后热条目须刷新 LRU 位，不得被优先逐出"
+    assert scanned_dirs == [str(hot), str(other_dirs[0]), str(hot), str(other_dirs[1])]
+
+
 def test_find_images_does_not_descend_into_reparse_point(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

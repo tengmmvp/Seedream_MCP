@@ -397,7 +397,7 @@ async def _run_failing_handler(exc: Exception):
         params=TextToImageInput(prompt="test prompt", auto_save=False),
         config=config,
         module_logger=MagicMock(),
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         completion_title="文生图任务完成",
         failure_prefix="文生图生成",
         start_log_message="",

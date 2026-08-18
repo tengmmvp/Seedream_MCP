@@ -384,7 +384,7 @@ async def test_download_image_stops_retry_when_total_budget_exhausted(
         clock_now[0] += 7200.0
         return value
 
-    monkeypatch.setattr(download_module.time, "time", _advancing_time)
+    monkeypatch.setattr(download_module.time, "monotonic", _advancing_time)
 
     save_path = tmp_path / "out.png"
     with pytest.raises(DownloadError):
@@ -435,7 +435,7 @@ async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhaus
     session = _SlowHopClockSession(redirects, clock_now, hop_seconds=budget)
     _patch_download_network(monkeypatch, manager, session)
     monkeypatch.setattr(manager, "_download_total_budget", lambda: budget)
-    monkeypatch.setattr(download_module.time, "time", lambda: clock_now[0])
+    monkeypatch.setattr(download_module.time, "monotonic", lambda: clock_now[0])
 
     save_path = tmp_path / "out.png"
     with pytest.raises(DownloadError, match="下载超时.*重定向链累计耗时"):
@@ -569,7 +569,8 @@ def test_url_origin_treats_default_port_as_same_origin() -> None:
 def test_enforce_dns_cache_limit_evicts_expired_then_oldest() -> None:
     """缓存超限时先清过期条目，仍超限再按最旧 expires_at 驱逐，条目数不超上限。"""
     manager = DownloadManager()
-    now = time.time()
+    # expires_at 以 time.monotonic 为基准，构造条目须与代码同基准
+    now = time.monotonic()
     expired_hosts = [f"expired{i}.example.com" for i in range(3)]
     for i, host in enumerate(expired_hosts):
         manager._dns_cache[host] = (now - 100.0 - i, ("203.0.113.1",))

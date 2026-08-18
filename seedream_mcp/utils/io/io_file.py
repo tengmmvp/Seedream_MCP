@@ -198,10 +198,13 @@ def _is_reparse_point(path: Path) -> bool:
     os.scandir(follow_symlinks=False) 与 os.walk(followlinks=False) 均不拦截 junction：
     junction 属 reparse point，is_symlink 对其返回 False，会被下降进入目标执行 OS 级
     listdir。本函数用 reparse point 属性位检测，供目录遍历下降前剔除。仅 Windows 存在
-    junction，其他平台直接返回 False。
+    junction，其他平台直接返回 False；平台判定先于 lstat，POSIX 的目录扫描热路径逐条
+    调用本函数时不产生任何系统调用。
 
     供 io_storage 的清理遍历与 io_path 的浏览扫描共用，保持 reparse point 检测单一实现。
     """
+    if sys.platform != "win32":
+        return False
     try:
         st = path.lstat()
     except OSError:

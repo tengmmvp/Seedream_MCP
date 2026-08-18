@@ -524,7 +524,7 @@ class BrowseImagesInput(BaseModel):
         default=None,
         max_length=1024,
         description=(
-            "要浏览的目录路径，默认浏览工作区根目录，即 MCP Roots 授权的首个根；"
+            "要浏览的目录路径，默认浏览全部授权的工作区根目录，多根时合并扫描去重；"
             "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
             "均未设置时回退进程当前工作目录。"
         ),

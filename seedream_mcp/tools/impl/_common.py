@@ -78,7 +78,7 @@ class ToolMetadata:
 
 
 TEXT_TO_IMAGE = ToolMetadata(
-    tool_name="seedream_text_to_image",
+    tool_name="text_to_image",
     completion_title="文生图任务完成",
     failure_prefix="文生图生成",
     start_log_message=(
@@ -87,7 +87,7 @@ TEXT_TO_IMAGE = ToolMetadata(
 )
 
 IMAGE_TO_IMAGE = ToolMetadata(
-    tool_name="seedream_image_to_image",
+    tool_name="image_to_image",
     completion_title="图文生图任务完成",
     failure_prefix="图文生图生成",
     start_log_message=(
@@ -96,7 +96,7 @@ IMAGE_TO_IMAGE = ToolMetadata(
 )
 
 MULTI_IMAGE_FUSION = ToolMetadata(
-    tool_name="seedream_multi_image_fusion",
+    tool_name="multi_image_fusion",
     completion_title="多图融合任务完成",
     failure_prefix="多图融合",
     start_log_message=(
@@ -105,7 +105,7 @@ MULTI_IMAGE_FUSION = ToolMetadata(
 )
 
 SEQUENTIAL_GENERATION = ToolMetadata(
-    tool_name="seedream_sequential_generation",
+    tool_name="sequential_generation",
     completion_title="组图输出任务完成",
     failure_prefix="组图输出",
     start_log_message=(

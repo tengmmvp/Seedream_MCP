@@ -37,6 +37,30 @@ def _patch_unretrieved_callback(
     return fired
 
 
+class _WarningCapture:
+    """捕获 warning 调用的 loguru 替身，按模板参数格式化后记录消息文本。
+
+    供兜底日志用例以真实回调链路观测记录次数：monkeypatch logs.logger 后，
+    log_unretrieved_task_exception 的 warning 全部落入本替身，opt 携带的堆栈
+    参数被丢弃，只断言消息与次数。
+    """
+
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+
+    def bind(self, **kwargs: Any) -> "_WarningCapture":
+        # 客户端构造会经 get_logger 调 bind，替身须容忍该链路
+        del kwargs
+        return self
+
+    def opt(self, *args: Any, **kwargs: Any) -> "_WarningCapture":
+        del args, kwargs
+        return self
+
+    def warning(self, message: str, *args: Any) -> None:
+        self.warnings.append(message.format(*args))
+
+
 @pytest.mark.asyncio
 async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     monkeypatch: pytest.MonkeyPatch,
@@ -311,7 +335,7 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
         client._image_preparer.prepare_image_input(image_url, roots_key)
     )
     await inner_started.wait()
-    inflight = next(iter(client._image_preparer._prepare_inflight.values()))
+    inflight = next(iter(client._image_preparer._prepare_inflight.values())).task
     creator.cancel()
 
     done, pending = await asyncio.wait({creator, inflight})
@@ -323,3 +347,142 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
 
     assert fired == [inflight]
     assert isinstance(inflight.exception(), ValueError)
+
+
+@pytest.mark.asyncio
+async def test_prepare_rechecks_cache_after_semaphore_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """获取信号量后的缓存复查：等待窗口内先完成者已写缓存时，获槽者直接命中。
+
+    并发满载时后到者在信号量上排队，等待期间同键先完成者已写入缓存并清在途
+    登记；获槽后若只复查在途注册表，后到者会重复执行全量读盘与编码。以持槽
+    阻塞构造等待窗口，窗口内预置缓存条目，断言获槽后底层预处理不再执行。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    preparer = client._image_preparer
+    roots_key = ("test-roots",)
+
+    call_count = 0
+
+    async def fake_prepare(image: str) -> str:
+        nonlocal call_count
+        del image
+        call_count += 1
+        return "prepared:unexpected"
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    # 预置实例级信号量为单槽并由本测试持槽，构造后到者在 acquire 上排队的窗口
+    semaphore = asyncio.Semaphore(1)
+    preparer._prepare_semaphore = semaphore
+    preparer._prepare_semaphore_loop = asyncio.get_running_loop()
+    await semaphore.acquire()
+
+    image_data_uri = "data:image/png;base64,aGVsbG8="
+    late = asyncio.ensure_future(preparer.prepare_image_input(image_data_uri, roots_key))
+    # 推进事件循环：后到者完成键计算并挂起在信号量 acquire 上，尚未登记在途 task
+    await asyncio.sleep(0)
+    assert len(preparer._prepare_inflight) == 0
+
+    # 等待窗口内同键先完成者写入缓存并清在途登记
+    preparer._prepare_cache[(image_data_uri, roots_key, (0.0, 0))] = "prepared:cached"
+
+    semaphore.release()
+    assert await late == "prepared:cached"
+    # 缓存复查命中后不再执行底层预处理，也不登记在途条目
+    assert call_count == 0
+    assert len(preparer._prepare_inflight) == 0
+
+
+@pytest.mark.asyncio
+async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """等待者放弃后创建者仍消费失败：不登记兜底回调，异常仅经既有错误通道入日志。
+
+    旧缺陷：等待者取消即登记 done 回调，回调只要 task.exception() 非 None 就记录
+    warning，无法感知该异常随后被创建者经 shield 正常消费，同一失败带堆栈两次
+    进入日志。消费者计数下，等待者放弃时创建者仍持有计数，不登记兜底；创建者
+    消费异常后计数归零且结果已送抵消费者一侧，亦不登记。
+    """
+    from seedream_mcp.utils.core import logs
+
+    capture = _WarningCapture()
+    monkeypatch.setattr(logs, "logger", capture)
+
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    roots_key = ("test-roots",)
+    inner_started = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        del image
+        inner_started.set()
+        await asyncio.sleep(0.05)
+        raise ValueError("prepare failed")
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    image_url = "https://example.com/ref.png"
+    creator = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, roots_key)
+    )
+    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
+
+    await inner_started.wait()
+    waiter.cancel()
+
+    done, pending = await asyncio.wait({creator, waiter})
+    assert pending == set()
+    assert waiter.cancelled()
+    # 创建者经 shield 收到该异常，异常由其调用侧的既有错误通道负责记录
+    assert isinstance(creator.exception(), ValueError)
+
+    # 推进事件循环跑完可能排队的 done callback 后，兜底日志为零条
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert capture.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """创建者独自放弃且无等待者接手时，孤儿失败经兜底回调入日志且恰好一次。"""
+    from seedream_mcp.utils.core import logs
+
+    capture = _WarningCapture()
+    monkeypatch.setattr(logs, "logger", capture)
+
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    roots_key = ("test-roots",)
+    inner_started = asyncio.Event()
+
+    async def fake_prepare(image: str) -> str:
+        del image
+        inner_started.set()
+        await asyncio.sleep(0.05)
+        raise ValueError("prepare failed")
+
+    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+
+    image_url = "https://example.com/ref.png"
+    creator = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, roots_key)
+    )
+    await inner_started.wait()
+    inflight = next(iter(client._image_preparer._prepare_inflight.values())).task
+    creator.cancel()
+
+    done, pending = await asyncio.wait({creator, inflight})
+    assert pending == set()
+    assert creator.cancelled()
+
+    # 推进事件循环跑完 inflight 完成时排队的 done callback
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # 同一孤儿失败仅一条兜底 warning，不因重复登记而多次记录
+    assert capture.warnings == ["后台共享任务失败: prepare failed"]

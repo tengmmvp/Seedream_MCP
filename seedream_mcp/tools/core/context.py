@@ -24,7 +24,6 @@ from ...utils.core.validators import (
     validate_stream,
 )
 from ...utils.model.model_capabilities import get_max_reference_images
-from ._helpers import prevalidate_save_path
 from .schemas import GenerationInputParams
 
 
@@ -80,10 +79,10 @@ def build_generation_context(
     输入模型已保证 prompt 在必填工具非空（图文生图的图层拆分场景可缺省）、布尔与
     枚举字段合法、request_count 与 parallelism 的
     范围及组合约束。本函数仅做 schema 表达不了的校验与合成：尺寸、输出格式、流式、
-    联网工具与参考图数量依赖 config.model_id 的能力校验；save_path 在此预检边界
-    合法性，使非法路径在计费的生成请求执行前即被拒绝；size、watermark、auto_save、
-    parallelism 未显式提供时按 config 默认值合成。全量重校验由 client 各生成方法入口
-    承担。
+    联网工具与参考图数量依赖 config.model_id 的能力校验；size、watermark、auto_save、
+    parallelism 未显式提供时按 config 默认值合成。save_path 边界预检由调用方流水线
+    在本函数之后执行，其中目录解析为同步文件系统调用，经工作线程下沉避免阻塞事件
+    循环。全量重校验由 client 各生成方法入口承担。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
@@ -144,10 +143,6 @@ def build_generation_context(
         getattr(params, "background", None), config.model_id, output_format=output_format
     )
     stream = validate_stream(params.stream, config.model_id)
-    # save_path 越界在此预检而非留待自动保存阶段：生成请求已计费执行后才抛校验异常
-    # 会被降级为软警告，图片仍落在默认目录之外取回困难；预检与 _resolve_base_dir
-    # 共用同一判定入口，自动保存阶段照旧执行完整解析。
-    prevalidate_save_path(config, params.save_path)
 
     return GenerationExecutionContext(
         prompt=params.prompt,

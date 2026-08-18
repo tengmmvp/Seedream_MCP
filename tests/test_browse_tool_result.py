@@ -283,7 +283,7 @@ async def test_browse_images_offset_error_signal_visible_to_client(
         (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await mcp.call_tool(
-        "seedream_browse_images",
+        "browse_images",
         {"directory": ".", "recursive": False, "limit": 2, "offset": 5},
         context=_NoRootsContext(),
     )
@@ -300,7 +300,7 @@ async def test_browse_images_format_filter_error_signal_visible_to_client(
 ) -> None:
     """format_filter 全不支持的错误信号经 MCPServer 调用链可被客户端识别。"""
     result = await mcp.call_tool(
-        "seedream_browse_images",
+        "browse_images",
         {"directory": ".", "format_filter": [".svg"]},
         context=_NoRootsContext(),
     )

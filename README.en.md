@@ -94,7 +94,7 @@ The service listens on container port `8000` via the streamable-http transport; 
 }
 ```
 
-`<token>` is a placeholder and must match the server-side `SEEDREAM_HTTP_AUTH_TOKEN` environment variable; when the service is exposed through a TLS reverse proxy or in-container TLS, use the `https://` form for `url` (e.g. `https://mcp.example.com/mcp`).
+`<token>` is a placeholder and must match the server-side `SEEDREAM_HTTP_AUTH_TOKEN` environment variable; when the service is exposed through a TLS reverse proxy or in-container TLS, use the `https://` form for `url` (e.g. `https://mcp.example.com/mcp`). Static token auth does not advertise OAuth protected-resource metadata; standard OAuth clients must configure credentials manually.
 
 ## 🔧 Client Configuration
 
@@ -237,7 +237,7 @@ Different models support different capabilities and parameter ranges. Please not
 ## 🛠️ Available Tools
 
 <details>
-<summary><b>1. <code>seedream_text_to_image</code></b> — Text-to-Image</summary>
+<summary><b>1. <code>text_to_image</code></b> — Text-to-Image</summary>
 
 Generate an image from a text prompt. This tool calls an external billed API and produces files locally; it is not read-only.
 
@@ -261,7 +261,7 @@ Generate an image from a text prompt. This tool calls an external billed API and
 
 ```json
 {
-  "name": "seedream_text_to_image",
+  "name": "text_to_image",
   "arguments": {
     "prompt": "水彩风格的江南水乡，清晨薄雾"
   }
@@ -271,7 +271,7 @@ Generate an image from a text prompt. This tool calls an external billed API and
 </details>
 
 <details>
-<summary><b>2. <code>seedream_image_to_image</code></b> — Image-to-Image</summary>
+<summary><b>2. <code>image_to_image</code></b> — Image-to-Image</summary>
 
 Generate a new image from an input image and a text prompt. This tool calls an external billed API and produces files locally; it is not read-only.
 
@@ -298,10 +298,10 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 
 ```json
 {
-  "name": "seedream_image_to_image",
+  "name": "image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": ".seedream/images/2026-08-15/seedream_image_to_image/portrait.jpeg"
+    "image": ".seedream/images/2026-08-15/image_to_image/portrait.jpeg"
   }
 }
 ```
@@ -309,7 +309,7 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 </details>
 
 <details>
-<summary><b>3. <code>seedream_multi_image_fusion</code></b> — Multi-Image Fusion</summary>
+<summary><b>3. <code>multi_image_fusion</code></b> — Multi-Image Fusion</summary>
 
 Fuse multiple images into a new image. This tool calls an external billed API and produces files locally; it is not read-only.
 
@@ -334,12 +334,12 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 
 ```json
 {
-  "name": "seedream_multi_image_fusion",
+  "name": "multi_image_fusion",
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_a.jpeg",
-      ".seedream/images/2026-08-15/seedream_multi_image_fusion/person_b.jpeg"
+      ".seedream/images/2026-08-15/multi_image_fusion/person_a.jpeg",
+      ".seedream/images/2026-08-15/multi_image_fusion/person_b.jpeg"
     ]
   }
 }
@@ -348,7 +348,7 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 </details>
 
 <details>
-<summary><b>4. <code>seedream_sequential_generation</code></b> — Sequential Generation</summary>
+<summary><b>4. <code>sequential_generation</code></b> — Sequential Generation</summary>
 
 Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence (only the doubao-seedream-5.0 series (5.0/5.0-lite)/4.5/4.0 supported; 5.0 Pro does not support sequential generation). This tool calls an external billed API and produces files locally; it is not read-only.
 
@@ -374,7 +374,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 
 ```json
 {
-  "name": "seedream_sequential_generation",
+  "name": "sequential_generation",
   "arguments": {
     "prompt": "四格漫画：一只柴犬的一天，起床、吃饭、散步、睡觉"
   }
@@ -384,7 +384,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 </details>
 
 <details>
-<summary><b>5. <code>seedream_browse_images</code></b> — Browse Images</summary>
+<summary><b>5. <code>browse_images</code></b> — Browse Images</summary>
 
 Browse image files in the workspace and get file paths for image generation. This tool is read-only, idempotent, and does not access the network.
 
@@ -402,7 +402,7 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 ```json
 {
-  "name": "seedream_browse_images",
+  "name": "browse_images",
   "arguments": {}
 }
 ```
@@ -531,6 +531,7 @@ SEEDREAM_PREVIEW_ENABLED=true                 # Attach thumbnail previews of sav
 SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (required for non-loopback binding, or the service refuses to start; TLS or the --insecure-allow-non-tls exemption is also required)
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
+SEEDREAM_HTTP_ALLOWED_HOSTS=                # Comma-separated Host allowlist for direct non-loopback exposure (supports host:port and trailing :*); empty disables the SDK inner Host check (suitable behind a reverse proxy)
 
 # Client performance
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

@@ -12,7 +12,7 @@ import base64
 import os
 from pathlib import Path
 
-from ..core.errors import SeedreamAPIError, SeedreamMCPError, SeedreamValidationError
+from ..core.errors import SeedreamConfigError, SeedreamMCPError, SeedreamValidationError
 from ..core.formats import MIME_BY_EXTENSION, format_file_size_mb, infer_extension_from_bytes
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
@@ -26,7 +26,9 @@ from ..io.io_path import (
 )
 from .image_validation import (
     MAX_IMAGE_FILE_SIZE,
+    UNIDENTIFIED_IMAGE_MESSAGE,
     decode_and_validate_dimensions,
+    is_unidentified_image_error,
     resolve_local_image_candidate,
     validate_image_input,
     validate_image_path,
@@ -53,10 +55,10 @@ async def prepare_image_input(image: str) -> str:
         本地文件为 Base64 Data URI。
 
     Raises:
-        SeedreamValidationError: 输入格式无效、路径越界、界内定位失败或维度超限等
-            参数校验失败。
-        SeedreamAPIError: 当前会话未授权任何工作区目录、本地文件读取失败，或图像
-            处理发生其他失败。
+        SeedreamValidationError: 输入格式无效、路径越界、界内定位失败、本地文件读取
+            失败或图像处理发生其他失败。本阶段不触网也不调用上游 API，全部失败均属
+            预处理本地校验语义，不参与 client 的 API 重试。
+        SeedreamConfigError: 当前会话未授权任何工作区目录。
     """
     try:
         normalized = image.strip()
@@ -77,7 +79,9 @@ async def prepare_image_input(image: str) -> str:
     except SeedreamMCPError:
         raise
     except Exception as e:
-        raise SeedreamAPIError(f"图像处理失败: {e}") from e
+        # 兜底包装覆盖的异常均来自对调用方输入的本地处理，预处理阶段不存在上游
+        # API 语义，归校验档不给凭据与网络的误导建议。
+        raise SeedreamValidationError(f"图像处理失败: {e}") from e
 
 
 def _resolves_outside_workspace(normalized: str, resolved_roots: list[Path]) -> bool:
@@ -146,13 +150,15 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     错误；界内定位失败则经 validate_image_path 做诊断性校验取具体失败原因，并给出
     相似路径建议，文件不存在、格式不支持等属调用方输入问题，不得归入 api_error
     档误导排查方向。读取阶段打开或读字节抛 OSError 时，经 _format_local_read_error
-    按边界来源遮蔽路径后转 SeedreamAPIError，与两条定位失败路径共用同一遮蔽口径。
-    两条失败路径的文案均按边界来源遮蔽：回退边界来自服务器环境，根绝对路径不进入
-    面向调用方的错误消息。需在工作线程中调用。
+    按边界来源遮蔽路径后转 SeedreamValidationError，本地文件读取失败同为调用方
+    输入问题而非上游 API 失败。两条失败路径的文案均按边界来源遮蔽：回退边界来自
+    服务器环境，根绝对路径不进入面向调用方的错误消息。需在工作线程中调用。
     """
     workspace_roots = get_workspace_roots()
     if not workspace_roots:
-        raise SeedreamAPIError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
+        # 会话 Roots 与环境回退根均为空属会话与服务器配置问题，归 config_error 档
+        # 使排查建议指向服务端配置而非凭据与网络。
+        raise SeedreamConfigError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
 
     resolved_roots = resolve_workspace_roots(workspace_roots)
 
@@ -211,7 +217,8 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     # O_NOFOLLOW 防护最终路径分量、拒绝符号链接，由 io_file 统一实现；打开或读取
     # 抛 OSError 时异常原文嵌有服务器侧解析后的绝对路径，经 _format_local_read_error
-    # 按边界来源遮蔽后转 SeedreamAPIError，回退边界下路径不进入面向调用方的消息。
+    # 按边界来源遮蔽后转 SeedreamValidationError，回退边界下路径不进入面向调用方的
+    # 消息。读取失败属本地输入问题而非上游 API 失败，归校验档使排查建议指向参数。
     # 内存特征：读取字节、b64 编码与最终 data URI 拼接的瞬时峰值约为单图的 5.5×，
     # 预处理并发 5 × 30MB 上限下瞬态约 800MB，不受 LRU 缓存字节上限约束，部署
     # 受限时须按此规划内存。
@@ -220,13 +227,17 @@ def _prepare_local_image(normalized: str, original: str) -> str:
             # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存。
             image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
     except OSError as e:
-        raise SeedreamAPIError(_format_local_read_error(e, normalized)) from e
+        raise SeedreamValidationError(
+            _format_local_read_error(e, normalized), field="image", value=normalized
+        ) from e
     if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
+        # value 通道与定位失败路径同口径携带调用方输入原样串，服务器侧解析出的
+        # 绝对路径不进入错误对象。
         raise SeedreamValidationError(
             f"文件过大: {format_file_size_mb(len(image_bytes))}，"
             f"最大支持{format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
             field="image",
-            value=str(validated_path),
+            value=normalized,
         )
     # 维度校验复用已读字节，维度相关异常与 image_validation 路径对齐为 SeedreamValidationError。
     # PIL 函数内惰性导入与 image_validation 模式一致：本函数运行于工作线程，首次导入的
@@ -234,17 +245,20 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     from PIL import Image
 
     try:
-        decode_and_validate_dimensions(image_bytes, str(validated_path))
+        decode_and_validate_dimensions(image_bytes, normalized)
     except SeedreamValidationError:
         raise
     except (ValueError, OSError, Image.DecompressionBombError) as e:
         # OSError 覆盖 PIL.UnidentifiedImageError：扩展名合法但内容损坏同样属参数
         # 校验语义，与 _validate_file_path 的维度解析分支对齐为 SeedreamValidationError。
-        raise SeedreamValidationError(
-            f"图像维度解析失败: {str(e)}",
-            field="image",
-            value=str(validated_path),
-        ) from e
+        # 内容不可识别时改用固定文案，异常原文中的 BytesIO 对象地址不进入用户
+        # 可见消息；value 通道携带调用方输入原样串。
+        message = (
+            UNIDENTIFIED_IMAGE_MESSAGE
+            if is_unidentified_image_error(e)
+            else f"图像维度解析失败: {str(e)}"
+        )
+        raise SeedreamValidationError(message, field="image", value=normalized) from e
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     # MIME 以字节签名复核为准，签名不可识别时回退扩展名映射；扩展名可伪造，
     # 与 auto_save 保存路径的 infer_extension_from_bytes 保持同一口径。

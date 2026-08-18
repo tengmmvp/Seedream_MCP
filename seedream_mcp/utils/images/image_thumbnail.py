@@ -2,9 +2,9 @@
 
 从自动保存落盘的图片文件生成 MCP 工具结果 content 携带的 ImageContent 预览：
 长边不超过 THUMBNAIL_MAX_EDGE 像素的 JPEG，体积远小于原图，多图结果的协议消息
-不因预览显著膨胀。解码像素上限沿用 image_validation 设置的进程级
-PIL MAX_IMAGE_PIXELS，解码开销与拒绝边界与其一致。单张生成失败安全跳过，不影响
-其余图片与工具结果本身。
+不因预览显著膨胀。缩略图生成入口经 image_validation 的幂等注册无条件设置进程级
+PIL MAX_IMAGE_PIXELS，解码开销与拒绝边界和参考图校验一致，不依赖调用方先经过
+参考图校验。单张生成失败安全跳过，不影响其余图片与工具结果本身。
 """
 
 from __future__ import annotations
@@ -29,6 +29,14 @@ logger = get_logger(__name__)
 THUMBNAIL_MAX_EDGE = 768
 THUMBNAIL_JPEG_QUALITY = 80
 THUMBNAIL_MIME_TYPE = "image/jpeg"
+
+# 预览张数上限：组图与并行的合法组合可达 150 张已保存图片，全量内嵌会使单条
+# CallToolResult 膨胀至数 MB 以上；上限对齐单工具并行请求量级，控制协议消息体积。
+PREVIEW_MAX_IMAGES = 10
+
+# 预览解码并发上限：4K 单张解码为 RGB 约占 50MB 内存，全量并发解码时瞬态内存可达
+# GB 级；并发收敛到 3 与参考图预处理路径的内存规划口径对齐。
+PREVIEW_DECODE_CONCURRENCY = 3
 
 
 def _flatten_to_rgb(image: Image.Image) -> Image.Image:
@@ -68,9 +76,15 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
     Returns:
         JPEG 缩略图字节；无法生成时为 None。
     """
-    # PIL 与图像模块的其余惰性导入惯例一致：首载含解码器注册，落点在工作线程
+    # PIL 惰性导入与图像模块的其余惯例一致：首载含解码器注册，落点在工作线程
     # 而非事件循环线程，server 导入链不因此急载 PIL。
     from PIL import Image
+
+    from .image_validation import _ensure_heif_opener_registered
+
+    # 幂等注册 HEIF 解码器并把进程级 PIL MAX_IMAGE_PIXELS 设为 36M，使本路径的
+    # 解码像素上限无条件成立，不依赖调用方先经过参考图校验。
+    _ensure_heif_opener_registered()
 
     try:
         with Image.open(image_path) as image:
@@ -88,11 +102,11 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
 
 
 async def build_preview_contents(image_paths: list[Path]) -> list[ImageContent]:
-    """并发为已保存图片生成 ImageContent 预览列表。
+    """限流并发为已保存图片生成 ImageContent 预览列表。
 
-    PIL 解码与缩放为同步 CPU 操作，逐张经 asyncio.to_thread 下放工作线程并发
-    执行；生成失败的路径跳过，返回列表仅含成功项且与输入顺序一致。空输入返回
-    空列表。
+    PIL 解码与缩放为同步 CPU 操作，逐张经 asyncio.to_thread 下放工作线程执行，
+    并发由 PREVIEW_DECODE_CONCURRENCY 信号量限流；生成失败的路径跳过，返回列表
+    仅含成功项且与输入顺序一致。空输入返回空列表。
 
     Args:
         image_paths: 自动保存成功的图片文件路径列表。
@@ -102,9 +116,13 @@ async def build_preview_contents(image_paths: list[Path]) -> list[ImageContent]:
     """
     if not image_paths:
         return []
-    thumbnails = await asyncio.gather(
-        *(asyncio.to_thread(build_thumbnail_bytes, path) for path in image_paths)
-    )
+    semaphore = asyncio.Semaphore(PREVIEW_DECODE_CONCURRENCY)
+
+    async def _decode_with_limit(path: Path) -> bytes | None:
+        async with semaphore:
+            return await asyncio.to_thread(build_thumbnail_bytes, path)
+
+    thumbnails = await asyncio.gather(*(_decode_with_limit(path) for path in image_paths))
     contents: list[ImageContent] = []
     for thumbnail in thumbnails:
         if thumbnail is None:

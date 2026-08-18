@@ -63,11 +63,11 @@ async def test_tools_register_top_level_title() -> None:
     tools = await mcp.list_tools()
     titles = {tool.name: tool.title for tool in tools}
 
-    assert titles["seedream_text_to_image"] == "Seedream 文生图"
-    assert titles["seedream_image_to_image"] == "Seedream 图文生图"
-    assert titles["seedream_multi_image_fusion"] == "Seedream 多图融合"
-    assert titles["seedream_sequential_generation"] == "Seedream 组图输出"
-    assert titles["seedream_browse_images"] == "Seedream 图片浏览"
+    assert titles["text_to_image"] == "Seedream 文生图"
+    assert titles["image_to_image"] == "Seedream 图文生图"
+    assert titles["multi_image_fusion"] == "Seedream 多图融合"
+    assert titles["sequential_generation"] == "Seedream 组图输出"
+    assert titles["browse_images"] == "Seedream 图片浏览"
 
 
 async def test_tool_titles_not_duplicated_in_annotations() -> None:
@@ -87,11 +87,11 @@ async def test_tool_annotations_locked_to_current_hints() -> None:
     True/False/True/False。客户端据此决定确认策略与并行调用方式。
     """
     expected = {
-        "seedream_text_to_image": (False, False, False, True),
-        "seedream_image_to_image": (False, False, False, True),
-        "seedream_multi_image_fusion": (False, False, False, True),
-        "seedream_sequential_generation": (False, False, False, True),
-        "seedream_browse_images": (True, False, True, False),
+        "text_to_image": (False, False, False, True),
+        "image_to_image": (False, False, False, True),
+        "multi_image_fusion": (False, False, False, True),
+        "sequential_generation": (False, False, False, True),
+        "browse_images": (True, False, True, False),
     }
 
     tools = await mcp.list_tools()

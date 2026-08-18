@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.core._helpers import prevalidate_save_path
 from seedream_mcp.tools.core.common import (
     GenerationExecutionContext,
     aggregate_parallel_generation_results,
@@ -427,7 +428,7 @@ def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> No
     )
 
     structured = _build_generation_structured_result(
-        tool_name="seedream_text_to_image",
+        tool_name="text_to_image",
         result=aggregated,
         context=GenerationExecutionContext(
             prompt="t",
@@ -595,7 +596,7 @@ def test_input_schema_rejects_non_bool_auto_save() -> None:
 def test_build_generation_context_rejects_out_of_bounds_save_path(
     tmp_path: Path,
 ) -> None:
-    """越界 save_path 在上下文构建阶段即拒绝，早于计费的生成请求分发。
+    """越界 save_path 在预检阶段即拒绝，早于计费的生成请求分发。
 
     此前越界路径在自动保存阶段才抛校验异常并被降级为软警告，图片已按默认目录之外
     的目标无法落盘；预检与 _resolve_base_dir 共用同一判定入口，错误档位为
@@ -606,33 +607,32 @@ def test_build_generation_context_rejects_out_of_bounds_save_path(
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
 
     with pytest.raises(SeedreamValidationError, match="超出允许范围") as exc_info:
-        build_generation_context(TextToImageInput(prompt="test", save_path="../../outside"), config)
+        prevalidate_save_path(config, "../../outside")
 
     assert exc_info.value.field == "save_path"
 
 
-def test_build_generation_context_rejects_invalid_save_path_format() -> None:
-    """无法规范化的 save_path 同属校验档，在上下文构建阶段即拒绝。"""
+def test_prevalidate_save_path_rejects_invalid_format() -> None:
+    """无法规范化的 save_path 同属校验档，在预检阶段即拒绝。"""
     config = _build_config()
 
     with pytest.raises(SeedreamValidationError, match="保存路径无效"):
-        build_generation_context(
-            TextToImageInput(prompt="test", save_path="a" + "\x00" + "b"), config
-        )
+        prevalidate_save_path(config, "a" + "\x00" + "b")
 
 
-def test_build_generation_context_accepts_in_bounds_save_path(tmp_path: Path) -> None:
+def test_prevalidate_save_path_accepts_in_bounds_path(tmp_path: Path) -> None:
     """界内 save_path 预检放行，上下文照常携带原始值交由保存阶段完整解析。"""
     base = tmp_path / "save_root"
     base.mkdir()
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
 
+    prevalidate_save_path(config, "sub/dir")
     context = build_generation_context(TextToImageInput(prompt="test", save_path="sub/dir"), config)
 
     assert context.save_path == "sub/dir"
 
 
-def test_build_generation_context_skips_precheck_without_save_path() -> None:
+def test_prevalidate_save_path_skips_without_save_path() -> None:
     """未提供 save_path 时不做预检：默认目录解析失败留待自动保存阶段处理。"""
     from seedream_mcp.utils.io import io_path as io_path_module
 
@@ -641,6 +641,7 @@ def test_build_generation_context_skips_precheck_without_save_path() -> None:
     try:
         # 空 Roots 且未配置 auto_save_base_dir 时预检直接跳过，不在此抛出
         # 无法确定自动保存基础目录的校验异常。
+        prevalidate_save_path(config, None)
         context = build_generation_context(TextToImageInput(prompt="test"), config)
     finally:
         io_path_module._WORKSPACE_ROOTS_VAR.reset(token)

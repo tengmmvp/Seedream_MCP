@@ -71,7 +71,7 @@ async def test_flat_arguments_assemble_into_input_model(
 ) -> None:
     """平铺键名经 MCPServer 反序列化并组装为输入模型，可选字段缺省不进 fields_set。"""
     result = await mcp.call_tool(
-        "seedream_text_to_image",
+        "text_to_image",
         {
             "prompt": "一只戴墨镜的猫",
             "size": "2K",
@@ -96,7 +96,7 @@ async def test_sequential_max_images_omitted_derives_from_reference_count(
 ) -> None:
     """组图 max_images 未提供时按参考图数量自动推导，与嵌套形态行为一致。"""
     await mcp.call_tool(
-        "seedream_sequential_generation",
+        "sequential_generation",
         {
             "prompt": "生成4格漫画",
             "image": ["https://example.com/a.png", "https://example.com/b.png"],
@@ -116,7 +116,7 @@ async def test_sequential_max_images_explicit_value_is_respected(
 ) -> None:
     """显式提供的 max_images 登记进 fields_set 并以传入值为准，不触发推导。"""
     await mcp.call_tool(
-        "seedream_sequential_generation",
+        "sequential_generation",
         {
             "prompt": "生成4格漫画",
             "image": ["https://example.com/a.png"],
@@ -135,7 +135,7 @@ async def test_nested_model_field_accepts_plain_dict(
 ) -> None:
     """optimize_prompt_options 以普通 JSON 对象传入，经 MCPServer 反序列化为模型实例。"""
     await mcp.call_tool(
-        "seedream_text_to_image",
+        "text_to_image",
         {"prompt": "一只猫", "optimize_prompt_options": {"mode": "fast"}},
     )
 
@@ -148,7 +148,7 @@ async def test_browse_defaults_apply_when_arguments_omitted(
     spy_run_handlers: dict[str, Any],
 ) -> None:
     """浏览工具全部参数缺省时组装出的输入模型携带模型声明的默认值。"""
-    await mcp.call_tool("seedream_browse_images", {})
+    await mcp.call_tool("browse_images", {})
 
     params = spy_run_handlers["params"]
     assert isinstance(params, BrowseImagesInput)
@@ -164,4 +164,4 @@ async def test_browse_defaults_apply_when_arguments_omitted(
 async def test_flat_constraint_violation_raises_tool_error() -> None:
     """平铺参数违反约束时经 Tool.run 包装为 ToolError，不逃逸为未捕获异常。"""
     with pytest.raises(ToolError, match="request_count"):
-        await mcp.call_tool("seedream_text_to_image", {"prompt": "一只猫", "request_count": 99})
+        await mcp.call_tool("text_to_image", {"prompt": "一只猫", "request_count": 99})

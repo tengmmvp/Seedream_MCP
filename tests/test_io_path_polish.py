@@ -1,9 +1,10 @@
 """io_path 行为修复回归测试。
 
 覆盖：相似路径建议对空目标名不误报、get_relative_path 对绝对路径回退分支不再重复
-resolve、resolve_env_workspace_root 对 expanduser 后为绝对路径的配置值（含 ~ 形态）
-缓存 resolve 结果而相对形态每次现算、resolve_workspace_roots 不再对已 resolve 的根
-重复 resolve、工作区根提供者的注册协议与未注册回退。
+resolve、resolve_env_workspace_root 对 expanduser 后为绝对路径的配置值缓存 resolve
+结果而相对形态每次现算、resolve_workspace_roots 不再对已 resolve 的根重复 resolve、
+工作区根提供者的注册协议与未注册回退、find_images_in_directory 对 UNC 形式目录入参
+在 resolve 前拒绝。
 """
 
 from __future__ import annotations
@@ -210,3 +211,22 @@ def test_register_env_workspace_root_provider_replaces_previous() -> None:
         assert io_path_module._configured_workspace_root() == "/other/root"
     finally:
         io_path_module.register_env_workspace_root_provider(original)
+
+
+def test_find_images_rejects_unc_directory_before_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNC 形式的目录入参在 resolve 前被拒：返回空列表且不触发任何路径解析。
+
+    UNC 路径在 Windows 的 resolve 会触发 SMB 认证，浏览扫描须与 normalize_path
+    等 resolve 站点同口径前置拦截，不因越界校验尚未介入就向远端泄露凭据。正斜杠
+    与反斜杠两种 UNC 前缀形态均须覆盖。
+    """
+
+    def _explode_resolve(self: Path, strict: bool = False) -> Path:
+        raise AssertionError("UNC 形式的目录入参不得进入 resolve")
+
+    monkeypatch.setattr(Path, "resolve", _explode_resolve)
+
+    assert io_path_module.find_images_in_directory("//server/share", recursive=False) == []
+    assert io_path_module.find_images_in_directory("\\\\server\\share", recursive=True) == []

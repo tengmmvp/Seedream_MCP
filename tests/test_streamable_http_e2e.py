@@ -142,10 +142,11 @@ def _tools_call_request(name: str, arguments: dict[str, Any]) -> bytes:
 
 @pytest.fixture
 async def reset_http_app_state(monkeypatch: pytest.MonkeyPatch):
-    """每测试重置 session manager 单例并注入测试配置。
+    """每测试清除上一测试遗留的 session manager 引用并注入测试配置。
 
-    streamable_http_app 首次调用后缓存 _session_manager，而其 run() 仅可调用一次，
-    故每测试前置 None 强制重建；同时注入活动配置供 app_lifespan 构造共享 client，
+    streamable_http_app 每次调用都无条件新建并覆盖 _session_manager，其 run()
+    仅可调用一次；前置置 None 属跨测试隔离 hygiene，使上一测试已运行过的管理器
+    引用不残留。同时注入活动配置供 app_lifespan 构造共享 client，
     _build_app 按用例再覆盖为携带指定请求体上限的配置。退出时关闭可能由 stateless
     请求触发的 lifespan 共享单例，避免连接池跨测试泄漏。
     """
@@ -294,7 +295,7 @@ async def test_e2e_tools_call_flat_params_success(
             response = await client.post(
                 _MCP_PATH,
                 content=_tools_call_request(
-                    "seedream_text_to_image",
+                    "text_to_image",
                     {
                         "prompt": "一只戴墨镜的猫坐在月球上",
                         "size": "2K",
@@ -318,7 +319,7 @@ async def test_e2e_tools_call_flat_params_success(
     result = body["result"]
     assert result["isError"] is False
     structured = result["structuredContent"]
-    assert structured["tool"] == "seedream_text_to_image"
+    assert structured["tool"] == "text_to_image"
     assert structured["success"] is True
     assert structured["data"][0]["url"] == "https://example.com/out.png"
     # 平铺参数经完整调用链透传到客户端入参
@@ -353,7 +354,7 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
             response = await client.post(
                 _MCP_PATH,
                 content=_tools_call_request(
-                    "seedream_text_to_image", {"prompt": "一只猫", "auto_save": False}
+                    "text_to_image", {"prompt": "一只猫", "auto_save": False}
                 ),
                 headers={
                     "authorization": "Bearer s3cret",
@@ -441,8 +442,8 @@ async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
     localhost 不参与免鉴权与 TLS 强制的绑定判定，但绑定 localhost 时若派生逻辑
     关闭 SDK 内层防护，hosts 污染使监听实际暴露公网后请求将失去全部 Host 头防线。
     本地 localhost Host 的请求放行返回 200，外部域名 Host 穿过中间件后到达 SDK
-    内层被 421 拒绝。会话管理器实例仅可运行一次，第二个请求前置 None 使
-    streamable_http_app 重建新实例，两次 lifespan 进入各运行一次。
+    内层被 421 拒绝。第二个 app 经 streamable_http_app 无条件新建自己的会话
+    管理器，两次 lifespan 进入各运行一次。
     """
     app = _build_app("s3cret", stateless=True, json_response=True, host="localhost")
 
@@ -452,7 +453,6 @@ async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
     assert body["jsonrpc"] == "2.0"
     assert "error" not in body
 
-    server.mcp._lowlevel_server._session_manager = None
     app = _build_app("s3cret", stateless=True, json_response=True, host="localhost")
     rejected = await _post_mcp_with_host(app, "mcp.example.com")
     assert rejected.status_code == 421

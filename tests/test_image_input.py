@@ -14,7 +14,6 @@ import pytest
 from PIL import Image
 
 from seedream_mcp.utils.core.errors import (
-    SeedreamAPIError,
     SeedreamValidationError,
     resolve_error_profile,
 )
@@ -162,7 +161,9 @@ async def test_prepare_image_input_read_failure_masks_fallback_boundary(
     """回退边界下本地文件打开失败的错误消息不泄露服务器侧绝对路径。
 
     打开阶段的 OSError 原文嵌有解析后的绝对路径，属服务器环境信息；遮蔽后仅回显
-    系统错误语义与调用方输入原样字符串，异常类型保持 SeedreamAPIError。
+    系统错误语义与调用方输入原样字符串。本地文件读取失败属调用方输入问题而非
+    上游 API 失败，异常类型为 SeedreamValidationError，value 通道与定位失败路径
+    同口径携带调用方输入原样串。
     """
     locked = tmp_path / "locked.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
@@ -172,7 +173,7 @@ async def test_prepare_image_input_read_failure_masks_fallback_boundary(
 
     monkeypatch.setattr(image_input_module, "open_no_follow_read", _deny_open)
 
-    with pytest.raises(SeedreamAPIError) as exc_info:
+    with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input("locked.png")
 
     message = exc_info.value.message
@@ -184,6 +185,32 @@ async def test_prepare_image_input_read_failure_masks_fallback_boundary(
     assert escaped_root not in message
     assert "Permission denied" in message
     assert "locked.png" in message
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == "locked.png"
+
+
+async def test_prepare_image_input_read_failure_profiles_as_validation_error(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地文件读取失败归入 validation_error 档，不给凭据与网络排查建议。
+
+    PermissionError 一类读取失败是本地输入问题；此前归入 api_error 档会给用户
+    「请确认 API Key 和网络可用后重试」的误导建议。
+    """
+    locked = tmp_path / "locked2.png"
+    Image.new("RGB", (32, 32), color="white").save(locked)
+
+    def _deny_open(path: Path) -> IO[bytes]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(image_input_module, "open_no_follow_read", _deny_open)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("locked2.png")
+
+    profile = resolve_error_profile(exc_info.value)
+    assert profile.error_code == "validation_error"
+    assert "API Key" not in profile.user_hint
 
 
 async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
@@ -203,7 +230,7 @@ async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
-        with pytest.raises(SeedreamAPIError) as exc_info:
+        with pytest.raises(SeedreamValidationError) as exc_info:
             await prepare_image_input("locked.png")
         # OSError 原文的 filename 经 repr 渲染，以转义形态回显在消息中
         assert repr(str((tmp_path / "locked.png").resolve())) in exc_info.value.message
@@ -296,14 +323,60 @@ async def test_prepare_image_input_corrupt_content_raises_validation_error(
 ) -> None:
     """扩展名合法但内容损坏属参数校验语义，抛 SeedreamValidationError 而非 API 错误。
 
-    与 _validate_file_path 的维度解析分支同口径：损坏内容是调用方输入问题，
-    错误码归约为 validation_error，不误导调用方重试或排查上游 API。
+    与 _validate_file_path 的解码失败分支同口径：损坏内容是调用方输入问题，
+    错误码归约为 validation_error，不误导调用方重试或排查上游 API。内容不可识别
+    时用户可见消息为固定文案，PIL 异常原文中的 BytesIO 对象地址不进入消息。
     """
     corrupt = tmp_path / "corrupt.png"
     corrupt.write_bytes(b"definitely-not-an-image-0123456789")
 
-    with pytest.raises(SeedreamValidationError, match="图像维度解析失败"):
+    with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input(str(corrupt))
+
+    assert "无法识别的图像内容" in exc_info.value.message
+    assert "_io.BytesIO" not in exc_info.value.message
+
+
+async def test_prepare_image_input_corrupt_data_uri_message_masks_bytesio_address() -> None:
+    """Data URI 负载损坏时用户可见消息为固定文案，不含 BytesIO 对象地址。"""
+    payload = base64.b64encode(b"definitely-not-an-image-0123456789").decode("ascii")
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input(f"data:image/png;base64,{payload}")
+
+    assert "无法识别的图像内容" in exc_info.value.message
+    assert "_io.BytesIO" not in exc_info.value.message
+
+
+async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """定位 stat 与读取之间文件被替换为超大内容时，读取量复核以文件过大拒绝。
+
+    候选定位阶段的 stat 只校验当时的大小，读取阶段限制读取量为上限加一并复核，
+    防 TOCTOU 窗口内被替换的巨型文件撑爆内存；伪造 read 返回超限字节，断言不
+    进入 Base64 编码即被拒，value 通道携带调用方输入而非服务器侧绝对路径。
+    """
+
+    class _OversizedFile:
+        def read(self, limit: int) -> bytes:
+            return b"\x00" * limit
+
+        def __enter__(self) -> "_OversizedFile":
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            return None
+
+    oversized = tmp_path / "oversized.png"
+    Image.new("RGB", (16, 16), color="white").save(oversized)
+    monkeypatch.setattr(image_input_module, "open_no_follow_read", lambda _path: _OversizedFile())
+
+    with pytest.raises(SeedreamValidationError, match="文件过大") as exc_info:
+        await prepare_image_input("oversized.png")
+
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == "oversized.png"
 
 
 async def test_prepare_image_input_mime_follows_byte_signature(

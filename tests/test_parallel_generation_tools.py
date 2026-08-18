@@ -1,6 +1,7 @@
 """生成类工具并行请求支持、schema 约束与失败结果封装测试。"""
 
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -9,8 +10,15 @@ from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import (
+    PROGRESS_AUTOSAVE_DONE,
+    PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,
     PROGRESS_GENERATION_DONE,
+    PROGRESS_GENERATION_START,
+    PROGRESS_RECEIVED,
+    PROGRESS_SCAN_SPAN,
+    PROGRESS_SCAN_START,
+    PROGRESS_VALIDATED,
     _add_usage_value,
 )
 from seedream_mcp.tools.core.results import aggregate_parallel_generation_results
@@ -25,6 +33,7 @@ from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
 from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
+from seedream_mcp.utils.io import io_save
 
 
 def _build_config() -> SeedreamConfig:
@@ -213,6 +222,138 @@ async def test_parallel_batch_progress_strictly_increasing(
     assert all(left < right for left, right in zip(values, values[1:]))
     assert values.count(PROGRESS_GENERATION_DONE) == 1
     assert values[-1] == PROGRESS_COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_single_request_progress_full_sequence_with_auto_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """单请求成功路径在 auto_save 开启下的完整进度序列恰为七个里程碑且严格递增。"""
+
+    async def fake_method(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        }
+
+    client_module = import_module("seedream_mcp.client")
+    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+
+    async def fake_save_multiple(
+        self: Any, images: list[dict[str, Any]], tool_name: str
+    ) -> list[Any]:
+        del self, tool_name
+        return [
+            io_save.AutoSaveResult(
+                success=True,
+                original_url=images[0]["url"],
+                local_path=str(tmp_path / "saved.png"),
+                markdown_ref="![image](saved.png)",
+            )
+        ]
+
+    monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", fake_save_multiple)
+
+    # 关闭预览聚焦进度序列，预览分支不新增进度上报。
+    config = SeedreamConfig(
+        api_key="test_key",
+        max_retries=1,
+        auto_save_base_dir=str(tmp_path),
+        preview_enabled=False,
+    )
+    ctx = _ProgressCollectingContext()
+    result = await handle_text_to_image(TextToImageInput(prompt="test"), config, ctx)
+
+    assert result.is_error is False
+    values = ctx.progress_values
+    assert all(left < right for left, right in zip(values, values[1:]))
+    assert values == [
+        PROGRESS_RECEIVED,
+        PROGRESS_VALIDATED,
+        PROGRESS_GENERATION_START,
+        PROGRESS_GENERATION_DONE,
+        PROGRESS_AUTOSAVE_START,
+        PROGRESS_AUTOSAVE_DONE,
+        PROGRESS_COMPLETE,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_single_request_progress_without_auto_save_jumps_70_to_100(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auto_save 关闭时进度从生成完成直接跳到请求处理完成，序列仍严格递增。"""
+
+    async def fake_method(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        return {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        }
+
+    client_module = import_module("seedream_mcp.client")
+    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+
+    ctx = _ProgressCollectingContext()
+    result = await handle_text_to_image(TextToImageInput(prompt="test"), _build_config(), ctx)
+
+    assert result.is_error is False
+    values = ctx.progress_values
+    assert all(left < right for left, right in zip(values, values[1:]))
+    # 70 到 100 的跳变保持严格递增，自动保存两档不再上报。
+    assert PROGRESS_AUTOSAVE_START not in values
+    assert PROGRESS_AUTOSAVE_DONE not in values
+    assert values[values.index(PROGRESS_GENERATION_DONE) + 1] == PROGRESS_COMPLETE
+    assert values[-1] == PROGRESS_COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_context_failure_progress_jumps_directly_to_complete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """上下文构建失败的错误路径进度从已接收直达完成，两值序列仍严格递增。"""
+
+    async def unexpected_call(self, **kwargs):  # noqa: ANN001
+        del self, kwargs
+        raise AssertionError("上下文构建失败不应触达生成请求")
+
+    client_module = import_module("seedream_mcp.client")
+    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", unexpected_call)
+
+    base = tmp_path / "save_root"
+    base.mkdir()
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+    ctx = _ProgressCollectingContext()
+    result = await handle_text_to_image(
+        TextToImageInput(prompt="test", save_path="../../outside"), config, ctx
+    )
+
+    assert result.is_error is True
+    assert ctx.progress_values == [PROGRESS_RECEIVED, PROGRESS_COMPLETE]
+
+
+def test_progress_milestone_constants_strictly_increasing() -> None:
+    """生成阶梯七个里程碑常量严格递增，浏览阶梯峰值不越过完成里程碑。
+
+    防止后续调整常量取值时破坏各阶段进度的严格递增契约。PROGRESS_SCAN_SPAN 是
+    浏览工具的跨度增量而非里程碑，不参与里程碑排序，单独约束其峰值区间。
+    """
+    milestones = [
+        PROGRESS_RECEIVED,
+        PROGRESS_VALIDATED,
+        PROGRESS_GENERATION_START,
+        PROGRESS_GENERATION_DONE,
+        PROGRESS_AUTOSAVE_START,
+        PROGRESS_AUTOSAVE_DONE,
+        PROGRESS_COMPLETE,
+    ]
+    assert all(left < right for left, right in zip(milestones, milestones[1:]))
+    assert PROGRESS_SCAN_START < PROGRESS_SCAN_START + PROGRESS_SCAN_SPAN < PROGRESS_COMPLETE
 
 
 def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:
