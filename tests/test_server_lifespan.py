@@ -124,6 +124,75 @@ async def test_cleanup_shared_resources_drains_background_cleanup_first(
     assert resources._active_resource is None
 
 
+async def test_cleanup_shared_resources_unconditional_closes_inflight(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons,
+) -> None:
+    """idle_only=False 的进程退出兜底无视在途引用，无条件关闭全部资源。
+
+    streamable-http 退出清理经 _run_streamable_http 的 finally 走本分支，覆盖
+    关闭时仍有在途会话的异常退出场景；若误按引用计数门控，异常退出时在途引用
+    会阻止连接池关闭。
+    """
+
+    class _Closeable:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _FakeResource:
+        def __init__(self, refcount: int) -> None:
+            self.client = _Closeable()
+            self.download_manager = _Closeable()
+            self.refcount = refcount
+
+    active = _FakeResource(refcount=2)
+    retired = _FakeResource(refcount=1)
+    monkeypatch.setattr(resources, "_active_resource", active)
+    monkeypatch.setattr(resources, "_retired_resources", [retired])
+
+    await resources._cleanup_shared_resources(idle_only=False)
+
+    assert active.client.closed and active.download_manager.closed
+    assert retired.client.closed and retired.download_manager.closed
+    assert resources._active_resource is None
+    assert resources._retired_resources == []
+
+
+async def test_build_active_resource_closes_client_when_manager_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """download_manager 初始化失败时补偿关闭已创建的 client，不泄漏半初始化资源。
+
+    _build_active_resource 的部分初始化回滚：client 进入成功而 manager 进入抛错
+    时，已创建的 client 须经 _safe_close 关闭后异常上抛，活动槽位不被污染。
+    """
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.utils.io import io_download
+
+    close_calls: list[str] = []
+
+    async def _failing_manager_aenter(self: object) -> object:
+        raise RuntimeError("manager init failed")
+
+    async def _record_client_close(self: SeedreamClient) -> None:
+        close_calls.append("client")
+        if self._client is not None:
+            await self._client.aclose()
+
+    monkeypatch.setattr(io_download.DownloadManager, "__aenter__", _failing_manager_aenter)
+    monkeypatch.setattr(SeedreamClient, "close", _record_client_close)
+
+    config = SeedreamConfig(api_key="test_key")
+    with pytest.raises(RuntimeError, match="manager init failed"):
+        await resources._build_active_resource(config)
+
+    assert close_calls == ["client"]
+    assert resources._active_resource is None
+
+
 def test_config_from_context_prefers_lifespan_config() -> None:
     """_config_from_context 优先取 lifespan 注入的 config，回退活动配置。"""
     config = SeedreamConfig(api_key="lifespan_key")

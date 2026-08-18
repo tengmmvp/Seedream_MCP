@@ -217,7 +217,12 @@ class _LimitRequestBodyMiddleware:
             raise
 
         if too_large:
-            await _finalize_too_large()
+            # 与 try 内路径的防护对齐：客户端超限后立即断开时，补发 413 的 send
+            # 对已死连接抛异常，吞掉后仅记 debug，不向应用层冒泡污染错误通道。
+            try:
+                await _finalize_too_large()
+            except Exception:
+                logger.debug("请求体超限后补发 413 失败，连接可能已关闭")
 
     async def _send_too_large(self, send: Any) -> None:
         body = json.dumps(
@@ -542,13 +547,18 @@ def _run_streamable_http(
     try:
         loop.run_until_complete(server.serve())
     finally:
+        # 清理两段各自拦 BaseException：优雅停机窗口内（uvicorn 已按有界超时排空）
+        # 的二次 Ctrl+C 触发 KeyboardInterrupt、清理协程被取消抛 CancelledError，
+        # 二者均不得跳过其后的 loop.close 与线程循环复位，否则进程退出阶段遗留
+        # 未关闭的循环并在 GC 阶段产生 pending-task 告警噪音。吞掉后按既定顺序
+        # 继续退出，与 cli_main 对 KeyboardInterrupt 的优雅契约一致。
         try:
             loop.run_until_complete(_drain_pending_tasks())
-        except Exception as exc:
+        except BaseException as exc:
             logger.warning("streamable-http 残余任务回收失败: {}", exc)
         try:
             loop.run_until_complete(_cleanup_shared_resources())
-        except Exception as exc:
+        except BaseException as exc:
             logger.warning("streamable-http 退出清理失败: {}", exc)
         loop.close()
         # 复位线程事件循环引用：残留已关闭的循环会使后续 get_event_loop 取到不可用对象。

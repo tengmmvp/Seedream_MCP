@@ -331,8 +331,18 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: list[Path] = []
 
-    session = getattr(ctx, "session", None)
-    list_roots = getattr(session, "list_roots", None)
+    # 无请求上下文的 Context 其 session 属性抛 ValueError，getattr 默认值只压制
+    # AttributeError 不压制 property 内抛出的异常，直接读取会把本函数承诺的
+    # 「回退环境变量边界」击穿为裸 ValueError；与 server 侧
+    # _workspace_roots_dependency 的 except ValueError 同形态处理。ctx 为 None
+    # 的直调场景按无会话处理，维持既有 getattr 语义。
+    session = None
+    if ctx is not None:
+        try:
+            session = ctx.session
+        except ValueError:
+            session = None
+    list_roots = getattr(session, "list_roots", None) if session is not None else None
     roots_supported = session is not None and callable(list_roots)
     if roots_supported and not session_declares_roots_capability(session):
         logger.debug("客户端未声明 roots capability，跳过 roots/list，回退环境变量边界")

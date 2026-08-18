@@ -37,6 +37,7 @@ import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
 
 from ...version import __version__
+from ..core import logs as core_logs
 from ..core.errors import SeedreamMCPError
 from ..core.formats import (
     DEFAULT_MAX_FILE_SIZE,
@@ -250,6 +251,23 @@ class DownloadError(SeedreamMCPError):
     pass
 
 
+class _DnsInflight:
+    """DNS 在途解析条目：共享 task 与消费者计数，驱动兜底日志的登记判定。
+
+    与 images.image_prepare 的 _PrepareInflight 同构：创建者与每个等待者各持一份
+    消费者计数，await 期间登记、finally 释放；任一消费者经 shield 收到结果或异常
+    时置位 observed。最后一个消费者放弃且结果未被任何人消费时才登记孤儿失败兜底
+    日志，异常已送抵消费者的场景由既有错误通道记录，同一异常不重复入日志。
+    """
+
+    __slots__ = ("task", "consumers", "observed")
+
+    def __init__(self, task: "asyncio.Task[tuple[str, ...]]") -> None:
+        self.task = task
+        self.consumers = 0
+        self.observed = False
+
+
 class RetryableDownloadError(DownloadError):
     """可重试的下载错误，如 HTTP 5xx、DNS 瞬时解析失败等瞬时故障。
 
@@ -354,7 +372,7 @@ class DownloadManager:
         self._dns_cache_ttl = max(1, dns_cache_ttl)
         # DNS 缓存条目的 expires_at 以 time.monotonic 为基准，写入与过期比较须同基准。
         self._dns_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
-        self._dns_inflight: dict[str, asyncio.Task[tuple[str, ...]]] = {}
+        self._dns_inflight: dict[str, _DnsInflight] = {}
         self._dns_cache_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
@@ -495,21 +513,43 @@ class DownloadManager:
                 if expires_at > now:
                     return cached_ips
                 self._dns_cache.pop(host, None)
-            inflight = self._dns_inflight.get(host)
-            if inflight is None:
+            entry = self._dns_inflight.get(host)
+            if entry is None:
                 # 缓存与在途登记在同一锁区间内完成，中间无 await，单线程事件循环下
                 # 并发协程不会交错创建重复 task。
-                inflight = asyncio.ensure_future(self._resolve_and_cache(host))
-                self._dns_inflight[host] = inflight
-        # 锁外 await 共享在途 task；shield 使创建者被取消时不连带取消底层 task。
+                entry = _DnsInflight(asyncio.ensure_future(self._resolve_and_cache(host)))
+                self._dns_inflight[host] = entry
+        # 锁外以消费者身份 await 共享 task；shield 使被取消的等待者不连带取消底层
+        # task，保护共享同一解析的其余等待者。
+        entry.consumers += 1
         try:
-            return await asyncio.shield(inflight)
-        except asyncio.CancelledError:
-            # 消费方放弃等待后若再无其他等待者接手，解析失败将无人检索异常，登记
-            # 回调兜底记录；常规失败由等待者消费并经既有错误通道记录，不登记，
-            # 避免同一异常重复入日志。
-            arm_unretrieved_exception_logging(inflight)
-            raise
+            try:
+                return await asyncio.shield(entry.task)
+            except Exception:
+                # 异常经 shield 送抵本消费者，由 download_image 的既有错误通道记录；
+                # 置位已消费标记后，最后一个消费者放弃时不再登记兜底日志。
+                entry.observed = True
+                raise
+        finally:
+            entry.consumers -= 1
+            self._arm_dns_if_abandoned(entry)
+
+    def _arm_dns_if_abandoned(self, entry: _DnsInflight) -> None:
+        """最后一个潜在消费者放弃且结果未被消费时，登记兜底日志回调。
+
+        仍有消费者在等待或任一消费者已收到结果时，异常由其既有错误通道记录，
+        不登记；登记前提在回调触发时复查：登记之后新消费者加入又放弃或消费的
+        窗口内前提可能已不成立，复查失败即静默跳过，避免同一异常重复入日志。
+        """
+
+        def _log_if_orphaned(task: "asyncio.Task[tuple[str, ...]]") -> None:
+            # 触发时经模块属性解析通用记录函数，保持调用方可替换该实现做测试观测。
+            if entry.consumers == 0 and not entry.observed:
+                core_logs.log_unretrieved_task_exception(task)
+
+        if entry.consumers > 0 or entry.observed:
+            return
+        arm_unretrieved_exception_logging(entry.task, _log_if_orphaned)
 
     async def _resolve_and_cache(self, host: str) -> tuple[str, ...]:
         """执行单次解析与公网校验并写入缓存，供 _resolve_public_ips 在途去重。

@@ -549,6 +549,14 @@ class _ModernProtocolContext:
         self.input_responses = responses
 
 
+class _VersionlessModernContext(_ModernProtocolContext):
+    """缺省 protocol_version 的鸭子类型替身：非 str 形态按旧修订回退直连。"""
+
+    def __init__(self, roots: list[Path], declared: bool = True) -> None:
+        super().__init__(roots, declared=declared)
+        del self.protocol_version
+
+
 @pytest.mark.asyncio
 async def test_workspace_roots_resource_modern_session_first_round_requests_input(
     tmp_path: Path,
@@ -632,6 +640,51 @@ async def test_workspace_roots_resource_modern_session_capability_missing_falls_
 
 
 @pytest.mark.asyncio
+async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
+    tmp_path: Path,
+) -> None:
+    """protocol_version 缺省或非 str 时按旧修订回退直连，不误入多轮形态。
+
+    版本判定守卫（isinstance str）被移除时，is_version_at_least(None) 会抛
+    TypeError 使资源读取整体报错，或误判版本令旧修订会话收到无法序列化的
+    InputRequiredResult；缺省形态须安全落到 roots/list 直连。
+    """
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    ctx = _VersionlessModernContext([mcp_root])
+
+    result = await workspace_roots_resource(ctx)
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
+    assert ctx.session.list_roots_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_resource_modern_round_empty_roots_not_leak_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多轮重试轮应答空 roots 列表时输出空列表，不回退暴露环境根。
+
+    空授权与未授权的输出语义一致：会话边界为空列表时不得回落 env 根的
+    绝对路径。
+    """
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    ctx = _ModernProtocolContext([], responses={"roots": _roots_result([])})
+
+    result = await workspace_roots_resource(ctx)
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == []
+    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+
+
+@pytest.mark.asyncio
 async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
     tmp_path: Path,
 ) -> None:
@@ -650,3 +703,34 @@ async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
     data = json.loads(result)
     assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
     assert ctx.session.list_roots_calls == 1
+
+
+class _NoSessionContext:
+    """无请求上下文的 Context 替身：session 属性抛 ValueError（SDK 真实形态）。"""
+
+    @property
+    def session(self) -> object:
+        raise ValueError("Context is not available outside of a request")
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_without_request_context_falls_back_to_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无请求上下文的资源读取回退环境变量边界，不被裸 ValueError 击穿。
+
+    Context.session 的 property 在无请求上下文时抛 ValueError，getattr 默认值
+    无法压制；回退分支本身即为此状态而设，被异常击穿会使资源读取整体失败。
+    """
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+
+    result = await workspace_roots_resource(_NoSessionContext())
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    # 回退边界属服务器环境，不向调用方回显绝对路径，输出空 roots。
+    assert data["roots"] == []
+    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]

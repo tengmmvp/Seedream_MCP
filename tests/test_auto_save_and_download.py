@@ -157,6 +157,56 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     assert cleanup_calls == [30, 30]
 
 
+async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """节流表容量驱逐按最近使用序进行，刚刷新时间戳的键不被移除。
+
+    对已存在键赋值不移动条目位置：按插入位置驱逐会把链首刚刷新节流时间戳的
+    键连同时间戳一起移除，同目录的下一次保存视为从未节流而再次触发并发清理，
+    正常清理被并发方的删除竞争误判为失败。写入后移到链尾保证驱逐的是真正
+    最久未用的键。
+    """
+    import time as time_module
+
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    auto_save_module._cleanup_last_run.clear()
+    cleanup_calls: list[int] = []
+
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict:
+        cleanup_calls.append(days)
+        return {"deleted_files": 0, "deleted_size": 0, "errors": []}
+
+    # 预置 16 个已过期键占满容量上限，目标目录居链首（修复前写入不移动位置，
+    # 驱逐时恰为被逐出的链首键）。
+    stale = time_module.time() - 7200
+    auto_save_module._cleanup_last_run[str(tmp_path)] = stale
+    for i in range(15):
+        auto_save_module._cleanup_last_run[f"old-{i}"] = stale
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
+    monkeypatch.setattr(manager.file_manager, "run_cleanup_policies", fake_run_cleanup)
+    await manager._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30]
+
+    # 第 17 个键触发容量驱逐：被逐出的是最久未用的 old 键，目标目录的节流
+    # 时间戳随最近使用序保留。
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    manager_other = AutoSaveManager(base_dir=other_dir, cleanup_days=30)
+    monkeypatch.setattr(manager_other.file_manager, "run_cleanup_policies", fake_run_cleanup)
+    await manager_other._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30, 30]
+
+    # 紧随其后同目录的请求被节流，不再次触发清理。
+    await manager._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+    assert cleanup_calls == [30, 30]
+
+
 async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
     tmp_path: Path,
 ) -> None:

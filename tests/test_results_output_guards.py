@@ -186,6 +186,44 @@ def test_structured_data_url_field_sanitized() -> None:
     assert "mirror.example.com/a.png" in url
 
 
+def test_structured_data_non_dict_error_sanitized() -> None:
+    """data 项 error 为非 dict 形态时同样净化，不借形态绕过注入面。
+
+    error 字符串与容器形态和 dict 内的 message/code 同为上游自由内容：凭据
+    片段被脱敏、CRLF 被压平后才进入 structuredContent，与顶层 error 的非 dict
+    净化路径对称。
+    """
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [
+            {"error": "boom\r\nAuthorization: Bearer sk-leaked"},
+            {"error": ["line\r\n", "api_key=leaked"]},
+        ],
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    string_error = structured["data"][0]["error"]
+    assert isinstance(string_error, str)
+    assert "\r" not in string_error
+    assert "\n" not in string_error
+    assert "sk-leaked" not in string_error
+    assert "Bearer" not in string_error
+
+    container_error = structured["data"][1]["error"]
+    assert isinstance(container_error, list)
+    assert "\r" not in container_error[0]
+    assert "leaked" not in container_error[1]
+    assert "***" in container_error[1]
+
+
 def test_structured_data_clean_url_passed_through_without_copy() -> None:
     """无凭据无控制字符的 URL 净化后值不变，data 项不产生多余拷贝。"""
     images = [{"url": "https://example.com/clean.png"}]

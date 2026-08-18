@@ -286,7 +286,12 @@ class AutoSaveManager:
             previous = _cleanup_last_run.get(base_key, 0.0)
             if now - previous < _CLEANUP_MIN_INTERVAL_SECONDS:
                 return
+            # 写入后移到链尾保持真 LRU：对已存在键赋值不移动条目位置，刚刷新节流
+            # 时间戳的键若滞留链首会被容量驱逐连时间戳一并移除，同目录的下一次
+            # 保存视为从未节流而再次触发并发清理，正常清理被并发方的删除竞争
+            # 误判为失败并写入退避时间戳。
             _cleanup_last_run[base_key] = now
+            _cleanup_last_run.move_to_end(base_key)
             while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
                 _cleanup_last_run.popitem(last=False)
         # 后台执行清理，不阻塞当前请求返回；失败写入短退避时间戳供下次重试。
@@ -322,12 +327,14 @@ class AutoSaveManager:
 
         时间戳取 now - interval + backoff 形态，下次调用须再等待退避秒数方可重试；
         回写清理前旧值会使失败后的首次调用立即再次触发全目录扫描，高频保存下持续
-        失败的清理退化为每次保存都扫描目录。
+        失败的清理退化为每次保存都扫描目录。与 _maybe_cleanup 同步移到链尾，保持
+        驱逐按最近使用序进行。
         """
         async with _cleanup_lock:
             _cleanup_last_run[base_key] = (
                 time.time() - _CLEANUP_MIN_INTERVAL_SECONDS + _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
             )
+            _cleanup_last_run.move_to_end(base_key)
 
     def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""

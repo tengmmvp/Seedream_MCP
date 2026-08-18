@@ -383,6 +383,44 @@ async def test_request_body_limit_reraises_downstream_exception_within_limit() -
         await middleware(scope, receive, None)
 
 
+async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
+    """下游正常返回后的收尾 413 补发失败被吞掉，不向应用层冒泡。
+
+    客户端发送超限 chunked body 后立即断开时，收尾补发 413 的 send 对已死
+    连接抛异常；与 try 内路径的吞并防护对齐，失败不冒泡污染错误通道。
+    """
+    small_limit = 1024
+    messages = [
+        {"type": "http.request", "body": b"x" * 600, "more_body": True},
+        {"type": "http.request", "body": b"x" * 600, "more_body": False},
+    ]
+    counter = {"i": 0}
+
+    async def receive() -> dict:
+        if counter["i"] < len(messages):
+            msg = messages[counter["i"]]
+            counter["i"] += 1
+            return msg
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        # 模拟已断开的死连接：任何响应写入都失败。
+        del message
+        raise RuntimeError("client disconnected")
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        # 下游读到截断的空终帧后正常返回，走到中间件的收尾 413 分支。
+        while True:
+            msg = await receive()
+            if msg["type"] == "http.request" and not msg.get("more_body", False):
+                break
+
+    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    scope = {"type": "http", "headers": []}
+    # 修复前：收尾 413 在 try 之外，send 失败原样冒泡 RuntimeError。
+    await middleware(scope, receive, send)
+
+
 # ==================== SEEDREAM_HTTP_MAX_BODY_SIZE 配置解析 ====================
 
 

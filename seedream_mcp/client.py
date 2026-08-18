@@ -1441,8 +1441,13 @@ class SeedreamClient:
                 if pending_retry_after is not None:
                     await asyncio.sleep(pending_retry_after + random.uniform(0, 1))
                 else:
+                    # 指数先做整数封顶再转 float：max_retries 无上界校验，病态大配置下
+                    # attempt 达到 1024 时 float(2**1024) 抛 OverflowError，且该计算位于
+                    # 全部 except 块之外，会把重试失败翻成不可解读的错误分类。2^6=64 已
+                    # 超过 60 秒退避上限，封顶后各 attempt 的等待语义不变。
+                    capped_exponent = 2 ** min(attempt, 6)
                     await asyncio.sleep(
-                        min(float(2**attempt) + random.uniform(0, 1), _MAX_BACKOFF_SECONDS)
+                        min(float(capped_exponent) + random.uniform(0, 1), _MAX_BACKOFF_SECONDS)
                     )
 
         raise SeedreamAPIError(f"{endpoint} API 调用意外结束")

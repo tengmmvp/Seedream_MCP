@@ -177,7 +177,7 @@ async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
             break
     assert "example.com" in manager._dns_inflight
 
-    inflight = manager._dns_inflight["example.com"]
+    inflight = manager._dns_inflight["example.com"].task
     caller.cancel()
     fake_loop.gate.set()
 
@@ -190,6 +190,55 @@ async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
 
     assert fired == [inflight]
     assert isinstance(inflight.exception(), DownloadError)
+
+
+@pytest.mark.asyncio
+async def test_resolve_cancel_with_surviving_waiter_not_armed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取消的等待者仍有幸存同伴时不登记兜底日志，异常由幸存者消费。
+
+    消费者计数归零前还有其他等待者在等待同一在途解析：解析失败的异常经
+    shield 送抵幸存者并经既有错误通道记录；取消方若仍登记回调，同一异常
+    会以「后台共享任务失败」重复入日志。
+    """
+    fired = _patch_unretrieved_callback(monkeypatch)
+
+    class _GatedFailingLoop:
+        """getaddrinfo 阻塞在 gate 上，放行后抛 OSError 构造延迟的解析失败。"""
+
+        def __init__(self) -> None:
+            self.gate = asyncio.Event()
+
+        async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+            del host, port, proto
+            await self.gate.wait()
+            raise OSError("dns boom")
+
+    fake_loop = _GatedFailingLoop()
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+
+    manager = DownloadManager(dns_cache_ttl=60)
+    cancelled = asyncio.create_task(manager._resolve_public_ips("example.com"))
+    survivor = asyncio.create_task(manager._resolve_public_ips("example.com"))
+    # 让出控制权使两任务均到达在途等待点
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if "example.com" in manager._dns_inflight:
+            break
+    assert "example.com" in manager._dns_inflight
+
+    cancelled.cancel()
+    fake_loop.gate.set()
+
+    with pytest.raises(DownloadError):
+        await survivor
+    assert cancelled.cancelled()
+    # 推进事件循环跑完在途 task 完成时排队的 done callback
+    await asyncio.sleep(0)
+
+    # 异常已由幸存者消费，取消方不登记兜底日志。
+    assert fired == []
 
 
 def test_validate_connected_peer_ip_blocks_non_public_ip() -> None:

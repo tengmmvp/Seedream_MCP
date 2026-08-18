@@ -347,9 +347,9 @@ def _sanitize_unknown_value(value: Any) -> Any:
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """净化图片项内的上游自由字段，就地写回传入列表并返回同一列表。
 
-    覆盖 error.message、error.code、url、size、output_format、model、type、
-    local_path、markdown_ref、request_index/image_index 的非 int 形态与未知键：
-    均为上游可回显自由内容的字段，可能携带 userinfo 凭据或 CRLF。
+    覆盖 error.message、error.code、error 的非 dict 形态、url、size、output_format、
+    model、type、local_path、markdown_ref、request_index/image_index 的非 int 形态与
+    未知键：均为上游可回显自由内容的字段，可能携带 userinfo 凭据或 CRLF。
     url/local_path/markdown_ref 与未知键为数据字段，走 sanitize_data_text 保留
     完整可用性——签名 URL 常见 400-700 字符、本地路径截断即不可寻址；其余短标识
     与自由文本走 sanitize_error_text，截断语义正确。七个已知字段的非 str 形态与
@@ -393,6 +393,13 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
                     sanitized_error["code"] = sanitized_code
             if sanitized_error is not None:
                 updates["error"] = sanitized_error
+        elif error is not None:
+            # 非 dict 形态与 dict 内的 message/code 同为上游自由内容：字符串走错误
+            # 文本净化截断，容器经净化树逐层收敛，凭据与 CRLF 不借非 dict 形态绕过
+            # 净化直通 structuredContent。
+            sanitized_non_dict = _sanitize_value_tree(error, sanitize_error_text)
+            if sanitized_non_dict != error:
+                updates["error"] = sanitized_non_dict
 
         for field in ("size", "output_format", "model", "type"):
             value = image.get(field)

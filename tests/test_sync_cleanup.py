@@ -96,3 +96,28 @@ def test_sync_cleanup_noop_when_no_shared_resources(monkeypatch: pytest.MonkeyPa
     resources._sync_cleanup()
 
     assert resources._active_resource is None
+
+
+def test_sync_cleanup_closes_retired_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同步清理兜底同样关闭退役资源并清空追踪列表。
+
+    config 热切换产生退役资源后进程同步退出（cli_main finally）时，退役列表中的
+    连接池若不被关闭将遗留到进程结束；退役循环失效属兜底路径回归。
+    """
+    retired_client_a, retired_manager_a = _Closeable(), _Closeable()
+    retired_client_b, retired_manager_b = _Closeable(), _Closeable()
+    monkeypatch.setattr(resources, "_active_resource", None)
+    monkeypatch.setattr(
+        resources,
+        "_retired_resources",
+        [
+            _FakeResource(retired_client_a, retired_manager_a),
+            _FakeResource(retired_client_b, retired_manager_b),
+        ],
+    )
+
+    resources._sync_cleanup()
+
+    assert retired_client_a.closed and retired_manager_a.closed
+    assert retired_client_b.closed and retired_manager_b.closed
+    assert resources._retired_resources == []

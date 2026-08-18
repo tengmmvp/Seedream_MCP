@@ -123,6 +123,40 @@ async def test_call_api_3xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
     assert calls == 1
 
 
+async def test_call_api_exponential_backoff_no_overflow_on_huge_retries(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """max_retries 超过 1024 的病态配置下退避指数不抛 OverflowError。
+
+    指数退避的计算位于全部 except 块之外，attempt 达到 1024 时
+    float(2**1024) 溢出会把重试失败翻成不可解读的溢出包装；指数先做整数
+    封顶后，大配置全程按既有的 5xx 可重试语义走完重试并以上游错误收尾。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=1030)
+    calls = 0
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> Dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            raise SeedreamAPIError("server error", status_code=500)
+
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        with pytest.raises(SeedreamAPIError) as excinfo:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert calls == config.max_retries + 1
+    assert "too large to convert" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_timeout_retried_then_mapped(
     monkeypatch: pytest.MonkeyPatch,
