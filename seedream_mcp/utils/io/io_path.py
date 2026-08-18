@@ -2,8 +2,11 @@
 
 以 MCP Roots 作为文件访问边界，提供路径规范化与越界判定原语，拦截包含 ``..``
 或经由符号链接指向工作区之外的路径；无 MCP Roots 时回退 SEEDREAM_WORKSPACE_ROOT
-环境变量。另提供目录图片查找与拼写相近路径建议。组合工作区边界与图像规则的
-validate_image_path 位于 images 子包的 image_validation，本模块保持纯路径职责。
+环境变量。工具链的 roots 经 server 层 Resolve 依赖注入取回（SEP-2577 非废弃
+形态），由 workspace_roots_scope_from_result 应用；资源处理器不经工具依赖机制，
+保留 workspace_roots_scope 的会话直连形态。另提供目录图片查找与拼写相近路径
+建议。组合工作区边界与图像规则的 validate_image_path 位于 images 子包的
+image_validation，本模块保持纯路径职责。
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from mcp.shared.exceptions import NoBackChannelError
+from mcp.types import ListRootsResult
 
 from ..core.errors import SeedreamMCPError
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
@@ -216,7 +220,16 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
         return []
 
     roots_result = await asyncio.wait_for(list_roots(), timeout=_ROOTS_LIST_TIMEOUT_SECONDS)
+    return _roots_result_to_paths(roots_result)
 
+
+def _roots_result_to_paths(roots_result: Any) -> list[Path]:
+    """将 ListRootsResult 转换为去重后的本地路径列表。
+
+    各 Root 的 file:// URI 转为本地路径，UNC 形式被 _file_uri_to_path 拒绝以避免
+    触发 SMB 连接，不可解析或重复的条目跳过。会话直连与 resolver 注入两条取回
+    路径共用本转换。
+    """
     resolved_roots: list[Path] = []
     for root in getattr(roots_result, "roots", []):
         uri_value = getattr(root, "uri", None)
@@ -232,11 +245,12 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
     return resolved_roots
 
 
-def _session_declares_roots_capability(session: Any) -> bool:
-    """判断会话对端客户端是否在 initialize 阶段声明了 roots capability。
+def session_declares_roots_capability(session: Any) -> bool:
+    """判断会话对端客户端是否声明了 roots capability。
 
-    未声明 roots 的客户端对 roots/list 请求必然返回方法不支持错误，先经会话内存中的
-    capability 声明探测可跳过这次每请求一次的线上往返。check_client_capability
+    未声明 roots 的客户端对 roots 取回必然失败，先经会话内存中的 capability
+    声明探测可跳过线上往返：会话直连形态据此跳过 roots/list 请求，工具链的
+    roots 依赖解析器据此不发起取回并注入 None。check_client_capability
     不可达或探测异常时保守视为已声明，保持旧版 SDK 与测试替身下的原有行为。
     """
     check_capability = getattr(session, "check_client_capability", None)
@@ -252,14 +266,54 @@ def _session_declares_roots_capability(session: Any) -> bool:
 
 
 @asynccontextmanager
+async def workspace_roots_scope_from_result(
+    roots_result: ListRootsResult | None,
+) -> AsyncIterator[list[Path]]:
+    """在当前请求作用域内应用经工具 resolver 注入的 MCP Roots。
+
+    SEP-2577 非废弃形态：工具链不再经 ctx.session.list_roots 直连读取，由
+    server 工具签名的 Resolve 依赖在调用前按协商版本取回并注入本函数消费。
+    roots_result 为 None 表示客户端未声明 roots capability，依赖解析器未发起
+    取回，此处不设置边界、下游回退环境变量根；结果非 None 时经
+    _roots_result_to_paths 转换后设置请求级边界。取回本身的失败由 SDK 在
+    调用层报错而非在此降级，较直连形态的回退更保守，不放宽文件访问边界。
+
+    Args:
+        roots_result: 依赖解析器注入的客户端 roots 结果；未声明能力时为 None。
+
+    Yields:
+        当前请求解析出的工作区根目录列表；未声明能力时为空列表。
+    """
+    token: Token[tuple[Path, ...] | None] | None = None
+    resolved_roots: list[Path] = []
+    if roots_result is not None:
+        resolved_roots = _roots_result_to_paths(roots_result)
+        token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
+        if resolved_roots:
+            logger.debug("已应用 MCP Roots 边界: {}", resolved_roots)
+        else:
+            logger.debug("MCP Roots 为空，当前请求按无本地目录权限处理")
+    else:
+        logger.debug("客户端未声明 roots capability，未发起 roots 取回，回退环境变量边界")
+
+    try:
+        yield resolved_roots
+    finally:
+        if token is not None:
+            _WORKSPACE_ROOTS_VAR.reset(token)
+
+
+@asynccontextmanager
 async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     """在当前请求作用域内绑定 MCP Roots，退出时自动恢复。
 
-    将客户端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持
-    Roots 时回退环境变量边界。客户端未声明 roots capability 时直接跳过
-    roots/list 往返，同样回退环境变量边界。当前协议会话无服务端反向通道时
-    roots/list 必抛 NoBackChannelError：未配置环境变量根则 fail-closed 抛出
-    SeedreamMCPError，已配置则回退该显式边界。
+    资源处理器专用入口：SDK 的 resolver 依赖机制仅覆盖工具签名，资源侧保留
+    经 ctx.session.list_roots 直连读取的形态。将客户端 Roots 设置到上下文变
+    量作为该请求的文件访问边界；客户端不支持 Roots 时回退环境变量边界。客户
+    端未声明 roots capability 时直接跳过 roots/list 往返，同样回退环境变量边
+    界。当前协议会话无服务端反向通道时 roots/list 必抛 NoBackChannelError：
+    未配置环境变量根则 fail-closed 抛出 SeedreamMCPError，已配置则回退该显式
+    边界。工具链的边界应用走 workspace_roots_scope_from_result。
 
     Args:
         ctx: MCP 请求上下文，经其 session 读取客户端 Roots。
@@ -277,7 +331,7 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     session = getattr(ctx, "session", None)
     list_roots = getattr(session, "list_roots", None)
     roots_supported = session is not None and callable(list_roots)
-    if roots_supported and not _session_declares_roots_capability(session):
+    if roots_supported and not session_declares_roots_capability(session):
         logger.debug("客户端未声明 roots capability，跳过 roots/list，回退环境变量边界")
         roots_supported = False
 

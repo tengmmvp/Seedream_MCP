@@ -261,10 +261,12 @@ class _NoRootsContext:
     """无会话的替身上下文：session 为 None 使工作区边界回退环境变量根。
 
     mcp.call_tool 缺省构造的 Context 无请求上下文，访问 session 属性抛 ValueError
-    会使工具体整体失败，故显式传入本替身驱动完整调用链。
+    会使工具体整体失败，故显式传入本替身驱动完整调用链。protocol_version 为
+    None 对齐无请求 Context 的形态，工具的 resolver 依赖注入据此选择取回路径。
     """
 
     session = None
+    protocol_version = None
 
     async def report_progress(self, *args: object, **kwargs: object) -> None:
         """进度上报空实现。"""

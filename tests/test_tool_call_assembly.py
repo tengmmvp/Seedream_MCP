@@ -44,13 +44,17 @@ def spy_run_handlers(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """
     captured: dict[str, Any] = {}
 
-    async def _spy_generation(params: Any, config: Any = None, ctx: Any = None) -> CallToolResult:
-        del config, ctx
+    async def _spy_generation(
+        params: Any, config: Any = None, ctx: Any = None, workspace_roots: Any = None
+    ) -> CallToolResult:
+        del config, ctx, workspace_roots
         captured["params"] = params
         return _ok_result()
 
-    async def _spy_browse(params: Any, ctx: Any = None) -> CallToolResult:
-        del ctx
+    async def _spy_browse(
+        params: Any, ctx: Any = None, workspace_roots: Any = None
+    ) -> CallToolResult:
+        del ctx, workspace_roots
         captured["params"] = params
         return _ok_result()
 

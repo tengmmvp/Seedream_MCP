@@ -1,10 +1,12 @@
 """MCP 工具适配器层，作为 composition root 组装 core 流水线与 impl 处理器。
 
-每个 ``run_*`` 函数经 ``workspace_roots_scope`` 注入 MCP Roots 工作区边界，再将
-pydantic 校验后的入参模型本身委托给对应 ``handle_*``，保持类型化流水线直至
-core 层。本模块位于 tools/ 顶层而非 core/，使依赖方向为 core <- impl <- runners，
-避免 core 反向依赖 impl 造成包级循环。四个生成工具共享 ``_run_generation_tool``
-完成工作区边界与委托；图片浏览工具无 config 入参，单独直接委托。
+每个 ``run_*`` 函数经 ``workspace_roots_scope_from_result`` 应用 MCP Roots 工作
+区边界，roots 结果由 server 层工具签名的 Resolve 依赖按协商版本取回注入，
+SEP-2577 下不经会话直连读取；再将 pydantic 校验后的入参模型本身委托给对应
+``handle_*``，保持类型化流水线直至 core 层。本模块位于 tools/ 顶层而非 core/，
+使依赖方向为 core <- impl <- runners，避免 core 反向依赖 impl 造成包级循环。
+四个生成工具共享 ``_run_generation_tool`` 完成工作区边界与委托；图片浏览工具
+无 config 入参，单独直接委托。
 """
 
 from __future__ import annotations
@@ -12,10 +14,10 @@ from __future__ import annotations
 from typing import Awaitable, Callable, TypeVar
 
 from mcp.server.mcpserver import Context
-from mcp.types import CallToolResult
+from mcp.types import CallToolResult, ListRootsResult
 
 from ..config import SeedreamConfig
-from ..utils.io.io_path import workspace_roots_scope
+from ..utils.io.io_path import workspace_roots_scope_from_result
 from .core.schemas import (
     BrowseImagesInput,
     GenerationInputParams,
@@ -45,9 +47,10 @@ async def _run_generation_tool(
     config: SeedreamConfig,
     ctx: Context | None,
     handler: _GenerationHandler[_GenerationInputT],
+    workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """在工作区边界内将类型化入参模型委托给生成 handler。"""
-    async with workspace_roots_scope(ctx):
+    async with workspace_roots_scope_from_result(workspace_roots):
         return await handler(params, config, ctx)
 
 
@@ -55,42 +58,51 @@ async def run_text_to_image(
     params: TextToImageInput,
     config: SeedreamConfig,
     ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """注入工作区边界后委托 ``handle_text_to_image`` 处理文生图请求。"""
-    return await _run_generation_tool(params, config, ctx, handle_text_to_image)
+    return await _run_generation_tool(params, config, ctx, handle_text_to_image, workspace_roots)
 
 
 async def run_image_to_image(
     params: ImageToImageInput,
     config: SeedreamConfig,
     ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """注入工作区边界后委托 ``handle_image_to_image`` 处理图文生图请求。"""
-    return await _run_generation_tool(params, config, ctx, handle_image_to_image)
+    return await _run_generation_tool(params, config, ctx, handle_image_to_image, workspace_roots)
 
 
 async def run_multi_image_fusion(
     params: MultiImageFusionInput,
     config: SeedreamConfig,
     ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """注入工作区边界后委托 ``handle_multi_image_fusion`` 处理多图融合请求。"""
-    return await _run_generation_tool(params, config, ctx, handle_multi_image_fusion)
+    return await _run_generation_tool(
+        params, config, ctx, handle_multi_image_fusion, workspace_roots
+    )
 
 
 async def run_sequential_generation(
     params: SequentialGenerationInput,
     config: SeedreamConfig,
     ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """注入工作区边界后委托 ``handle_sequential_generation`` 处理组图输出请求。"""
-    return await _run_generation_tool(params, config, ctx, handle_sequential_generation)
+    return await _run_generation_tool(
+        params, config, ctx, handle_sequential_generation, workspace_roots
+    )
 
 
 async def run_browse_images(
     params: BrowseImagesInput,
     ctx: Context | None = None,
+    workspace_roots: ListRootsResult | None = None,
 ) -> CallToolResult:
     """注入工作区边界后委托 ``handle_browse_images`` 处理图片浏览请求。"""
-    async with workspace_roots_scope(ctx):
+    async with workspace_roots_scope_from_result(workspace_roots):
         return await handle_browse_images(params, ctx=ctx)

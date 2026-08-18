@@ -35,7 +35,8 @@ import sys
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
-from mcp.types import CallToolResult, ToolAnnotations
+from mcp.server.mcpserver.resolve import ListRoots, Resolve
+from mcp.types import CallToolResult, ListRootsResult, ToolAnnotations
 from pydantic import Field
 
 # 本地模块导入
@@ -88,6 +89,7 @@ from .utils.core.validators import (
 from .utils.io.io_path import (
     get_workspace_roots,
     is_boundary_from_session_roots,
+    session_declares_roots_capability,
     workspace_roots_scope,
 )
 from .utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
@@ -176,6 +178,27 @@ def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in kwargs.items() if value is not None}
 
 
+def _workspace_roots_dependency(
+    ctx: Context = None,  # type: ignore[assignment]
+) -> ListRootsResult | ListRoots | None:
+    """五个工具共用的 roots 依赖解析器，SEP-2577 非废弃形态。
+
+    返回 ListRoots() 时 SDK 在工具调用前按协商版本取回客户端 roots 并注入
+    工具参数；客户端未声明 roots capability 时返回 None 不发起取回，工具链
+    经 workspace_roots_scope_from_result 回退环境变量边界，与直连形态下先探测
+    能力跳过往返的语义一致。resolver 参数对模型不可见，不进入 inputSchema。
+    无请求上下文的调用（如直连 call_tool 的测试路径）取 session 抛 ValueError，
+    同样返回 None 走环境变量回退。
+    """
+    try:
+        session = ctx.session
+    except ValueError:
+        return None
+    if session is None or not session_declares_roots_capability(session):
+        return None
+    return ListRoots()
+
+
 # ==================== MCP 工具函数定义 ====================
 
 
@@ -250,6 +273,7 @@ async def text_to_image(
         pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
+    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """文生图：根据文字指令生成单张图片。
@@ -281,6 +305,7 @@ async def text_to_image(
         ),
         config=config,
         ctx=ctx,
+        workspace_roots=workspace_roots,
     )
 
 
@@ -382,6 +407,7 @@ async def image_to_image(
         pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
+    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """图文生图：基于已有图片进行编辑。
@@ -417,6 +443,7 @@ async def image_to_image(
         ),
         config=config,
         ctx=ctx,
+        workspace_roots=workspace_roots,
     )
 
 
@@ -500,6 +527,7 @@ async def multi_image_fusion(
         pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
+    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """多图融合：融合多张参考图片的特征生成新图片。
@@ -533,6 +561,7 @@ async def multi_image_fusion(
         ),
         config=config,
         ctx=ctx,
+        workspace_roots=workspace_roots,
     )
 
 
@@ -630,6 +659,7 @@ async def sequential_generation(
         pattern=_NON_BLANK_PATTERN,
         description="自定义文件名前缀，未提供时根据提示词自动生成。",
     ),
+    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """组图输出：一次生成多张内容关联的图片。
@@ -664,6 +694,7 @@ async def sequential_generation(
         ),
         config=config,
         ctx=ctx,
+        workspace_roots=workspace_roots,
     )
 
 
@@ -716,6 +747,7 @@ async def browse_images(
         default=BrowseImagesInput.DEFAULT_SHOW_DETAILS,
         description="是否展示文件大小、修改时间等详细信息。",
     ),
+    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, BrowseImagesStructuredOutput]:
     """本地图片浏览：列出工作区中的图片文件。
@@ -738,6 +770,7 @@ async def browse_images(
             )
         ),
         ctx=ctx,
+        workspace_roots=workspace_roots,
     )
 
 
@@ -803,6 +836,10 @@ async def workspace_roots_resource(ctx: Context, verbose: bool = False) -> str:
     必须为裸 Context：参数化形式如 Context[Any, Any] 会被重校验为脱离请求的空实例，
     首次访问 ctx.session 即抛 ValueError，客户端收到 Error creating resource from
     template。裸 Context 注解的实例原样透传，session 与 lifespan_context 均可用。
+
+    资源处理器不经工具的 resolver 依赖机制，roots 读取保留 workspace_roots_scope
+    的会话直连形态（SEP-2577 废弃但废弃期内完全可用）；SDK 为资源侧提供非废弃
+    取回形态时在此跟进。
     """
     async with workspace_roots_scope(ctx):
         # 边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端

@@ -23,9 +23,12 @@ class _FakeSession:
         self._roots = roots
 
     async def list_roots(self) -> ListRootsResult:
-        return ListRootsResult(
-            roots=[Root(uri=root.as_uri(), name=root.name) for root in self._roots]
-        )
+        return _roots_result(self._roots)
+
+
+def _roots_result(roots: list[Path]) -> ListRootsResult:
+    """构造工具链 resolver 注入形态的 roots 结果。"""
+    return ListRootsResult(roots=[Root(uri=root.as_uri(), name=root.name) for root in roots])
 
 
 class _CapabilityDeclaringSession(_FakeSession):
@@ -149,7 +152,7 @@ async def test_run_browse_images_uses_mcp_roots_boundary(
 
     result = await run_browse_images(
         BrowseImagesInput(directory=".", recursive=False),
-        ctx=_FakeContext([mcp_root]),
+        workspace_roots=_roots_result([mcp_root]),
     )
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
@@ -157,7 +160,7 @@ async def test_run_browse_images_uses_mcp_roots_boundary(
 
     denied = await run_browse_images(
         BrowseImagesInput(directory=str(env_root), recursive=False),
-        ctx=_FakeContext([mcp_root]),
+        workspace_roots=_roots_result([mcp_root]),
     )
     assert denied.is_error is True
 
@@ -220,7 +223,7 @@ async def test_run_browse_images_denies_when_mcp_roots_empty(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
         BrowseImagesInput(directory=".", recursive=False),
-        ctx=_FakeContext([]),
+        workspace_roots=_roots_result([]),
     )
     assert result.is_error is True
     assert isinstance(result.structured_content, dict)
@@ -263,7 +266,7 @@ async def test_run_browse_images_relative_directory_resolves_all_roots(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
         BrowseImagesInput(directory="assets", recursive=False),
-        ctx=_FakeContext([first_root, second_root]),
+        workspace_roots=_roots_result([first_root, second_root]),
     )
 
     assert result.is_error is False
