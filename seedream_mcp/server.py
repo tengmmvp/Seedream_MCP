@@ -1,10 +1,10 @@
 """Seedream MCP 服务器主模块。
 
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，风格预设
-Prompt 与工作区、服务器信息、模型信息三个资源，并承担配置注入、cli_main 入口
-与传输分派。MCPServer 实例与共享资源生命周期由 resources 模块承担，本模块导入
-mcp 完成注册并重导出 resources/cli/transport 符号，保持既有导入 surface 与
-tests 访问路径不变。
+Prompt 与工作区、服务器信息、模型信息、Agent Skills 五个资源，并承担配置注入、
+cli_main 入口与传输分派。MCPServer 实例与共享资源生命周期由 resources 模块承担，
+本模块导入 mcp 完成注册并重导出 resources/cli/transport 符号，保持既有导入
+surface 与 tests 访问路径不变。
 
 outputSchema 声明契约：五个工具函数的返回类型注解为
 ``Annotated[CallToolResult, ...StructuredOutput]``，SDK 据注解元数据中的 pydantic
@@ -30,7 +30,9 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 from mcp.server.mcpserver.resolve import ListRoots, Resolve
+from mcp.shared.path_security import PathEscapeError, safe_join
 from mcp.types import (
     CallToolResult,
     InputRequiredResult,
@@ -917,6 +919,62 @@ async def models_info_resource() -> str:
             models.append({"alias": alias, "model_id": model_id, **caps_dict})
         _models_info_payload = json.dumps({"models": models}, ensure_ascii=False, indent=2)
     return _models_info_payload
+
+
+# ==================== MCP Agent Skills 资源 ====================
+
+
+# Agent Skills 开放标准目录随包分发，双轨暴露：包内 skills/ 目录可整目录拷贝到
+# ~/.claude/skills/ 手动安装；服务器侧经 skill:// 资源供客户端自动发现。目录须保持
+# 在包内以随 wheel 与 sdist 分发。渐进式披露三层对应：SKILL.md 静态资源常驻
+# resources/list，正文在读取时加载，references 模板资源按需读取。
+_SKILL_NAME = "seedream-image-generation"
+_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+_SKILL_MANIFEST_PATH = _SKILLS_DIR / _SKILL_NAME / "SKILL.md"
+_SKILL_REFERENCES_DIR = _SKILLS_DIR / _SKILL_NAME / "references"
+
+# 与 skills/seedream-image-generation/SKILL.md frontmatter 的 description 保持一致，
+# 两侧一致性由 test_skill_resource_description_matches_frontmatter 锁定。
+_SKILL_DESCRIPTION = (
+    "Seedream 图像生成 MCP 服务器的使用指南，覆盖文生图、图生图、多图融合、"
+    "组图生成与图层拆分。当用户要求生成图片、画图、改图、换风格、融合多张图、"
+    "制作连环画或故事书、拆分图层、生成透明背景，或需要调用 text_to_image、"
+    "image_to_image、multi_image_fusion、sequential_generation、browse_images 工具，"
+    "选择模型与尺寸档位，排查 401/402/403/413/429 报错，以及找回已保存的图片时"
+    "使用本技能。Use when generating or editing images via the Seedream MCP server."
+)
+
+# SKILL.md 载荷缓存：随包分发的静态文件进程内不变，首次读取后缓存。
+_skill_manifest_payload: str | None = None
+
+
+@mcp.resource(
+    "skill://seedream-image-generation/SKILL.md",
+    mime_type="text/markdown",
+    description=_SKILL_DESCRIPTION,
+)
+async def skill_manifest_resource() -> str:
+    """Agent Skill 主文件，图像生成指南入口，正文即渐进式披露的第二层。"""
+    global _skill_manifest_payload
+    if _skill_manifest_payload is None:
+        _skill_manifest_payload = _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
+    return _skill_manifest_payload
+
+
+@mcp.resource(
+    "skill://seedream-image-generation/references/{+path}",
+    mime_type="text/markdown",
+    description="Agent Skill 参考文件：多步工作流与故障排查，按需读取。",
+)
+async def skill_reference_resource(path: str) -> str:
+    """读取 skill 目录 references 内的参考文档，渐进式披露第三层。"""
+    try:
+        target = safe_join(_SKILL_REFERENCES_DIR, path)
+    except PathEscapeError:
+        raise ResourceNotFoundError(f"skill 参考文件路径越界: {path}")
+    if not target.is_file():
+        raise ResourceNotFoundError(f"skill 参考文件不存在: {path}")
+    return target.read_text(encoding="utf-8")
 
 
 # ==================== MCP 风格预设 Prompt 定义 ====================

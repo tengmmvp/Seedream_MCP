@@ -413,11 +413,32 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 除工具外，伺服器還公開以下 MCP 資源供用戶端讀取執行時資訊：
 
-| 資源 URI                     | 說明                                                                                                                 |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `seedream://workspace/roots` | 用戶端授權的 MCP 工作區 Roots；未授權時為空，避免暴露伺服器本地目錄                                                  |
-| `seedream://server/info`     | 伺服器名稱、版本與目前生效設定摘要（模型、預設尺寸、自動儲存開關，共五項欄位）                                       |
-| `seedream://models/info`     | 各模型別名與能力宣告：支援的尺寸檔位、像素範圍、像素倍數、參考圖上限、輸出格式/工具/串流等能力，供用戶端按需選擇模型 |
+| 資源 URI                                               | 說明                                                                                                                 |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `seedream://workspace/roots`                           | 用戶端授權的 MCP 工作區 Roots；未授權時為空，避免暴露伺服器本地目錄                                                  |
+| `seedream://server/info`                               | 伺服器名稱、版本與目前生效設定摘要（模型、預設尺寸、自動儲存開關，共五項欄位）                                       |
+| `seedream://models/info`                               | 各模型別名與能力宣告：支援的尺寸檔位、像素範圍、像素倍數、參考圖上限、輸出格式/工具/串流等能力，供用戶端按需選擇模型 |
+| `skill://seedream-image-generation/SKILL.md`           | Agent Skill 主檔案：圖像生成指南入口，內文含工具速查、模型選擇與參數規則                                             |
+| `skill://seedream-image-generation/references/{+path}` | Agent Skill 參考檔案範本：多步工作流與故障排查，按需讀取                                                             |
+
+## 🧠 Agent Skills
+
+伺服器隨包分發 [Agent Skills](https://agentskills.io) 開放標準技能目錄，為 AI 用戶端提供圖像生成的完整方法論，兩種方式可用：
+
+- **資源自動發現**：用戶端直接讀取上表 `skill://` 資源，主檔案常駐資源清單，參考檔案按需讀取
+- **手動安裝**：將包內 `seedream_mcp/skills/seedream-image-generation/` 整目錄拷貝到用戶端技能目錄，例如 Claude Code 的 `~/.claude/skills/`
+
+```bash
+python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp.__file__).parent / 'skills' / 'seedream-image-generation'; shutil.copytree(src, pathlib.Path.home() / '.claude' / 'skills' / 'seedream-image-generation', dirs_exist_ok=True)"
+```
+
+技能目錄包含以下檔案：
+
+| 檔案                            | 內容                                                       |
+| ------------------------------- | ---------------------------------------------------------- |
+| `SKILL.md`                      | 生成指南主檔案：工具速查、模型選擇、提示詞寫法、參數規則   |
+| `references/workflows.md`       | 多步工作流：連環畫端到端、圖層拆分與再合成、風格一致性迭代 |
+| `references/troubleshooting.md` | 故障排查：錯誤碼對策、常見失敗模式、輸入與配額限制         |
 
 ## 🎭 風格預設
 

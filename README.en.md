@@ -413,11 +413,32 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 Beyond tools, the server exposes the following MCP resources for clients to read runtime information:
 
-| Resource URI                 | Description                                                                                                                                                                                       |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seedream://workspace/roots` | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories                                                                           |
-| `seedream://server/info`     | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                                     |
-| `seedream://models/info`     | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
+| Resource URI                                           | Description                                                                                                                                                                                       |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seedream://workspace/roots`                           | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories                                                                           |
+| `seedream://server/info`                               | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                                     |
+| `seedream://models/info`                               | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
+| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model selection, and parameter rules                                                                 |
+| `skill://seedream-image-generation/references/{+path}` | Agent Skill reference file template: multi-step workflows and troubleshooting, loaded on demand                                                                                                   |
+
+## 🧠 Agent Skills
+
+The server ships an [Agent Skills](https://agentskills.io) open-standard skill directory providing a complete image-generation methodology for AI clients, usable in two ways:
+
+- **Automatic discovery via resources**: clients read the `skill://` resources in the table above; the main file stays in the resource list, reference files load on demand
+- **Manual installation**: copy the bundled `seedream_mcp/skills/seedream-image-generation/` directory into the client's skills directory, e.g. `~/.claude/skills/` for Claude Code
+
+```bash
+python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp.__file__).parent / 'skills' / 'seedream-image-generation'; shutil.copytree(src, pathlib.Path.home() / '.claude' / 'skills' / 'seedream-image-generation', dirs_exist_ok=True)"
+```
+
+The skill directory contains:
+
+| File                            | Content                                                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `SKILL.md`                      | Main generation guide: tool cheat sheet, model selection, prompt writing, parameter rules                           |
+| `references/workflows.md`       | Multi-step workflows: end-to-end comic creation, layer decomposition and recomposition, style-consistency iteration |
+| `references/troubleshooting.md` | Troubleshooting: error-code remedies, common failure modes, input and quota constraints                             |
 
 ## 🎭 Style Presets
 
