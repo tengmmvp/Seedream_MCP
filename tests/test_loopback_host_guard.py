@@ -1,8 +1,6 @@
-"""_LoopbackHostGuardMiddleware 的 Host 头校验测试。
+"""_LoopbackHostGuardMiddleware 的 Host 头校验测试，守护回环绑定下的 DNS rebinding 防线。
 
-覆盖回环 Host 放行（含端口剥离与 IPv6 方括号形态）、外部域名拒绝、Host 缺失
-fail-closed、websocket 同样校验（恶意 Host 以 1008 关闭）与 lifespan 透传，
-守护回环绑定下的 DNS rebinding 防线。
+覆盖 http 与 websocket 的回环放行、外部 Host 拒绝与 Host 缺失 fail-closed。
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ async def _noop_receive() -> dict[str, Any]:
 
 
 class _MessageSink:
-    """收集 ASGI send 消息，供断言短路响应状态与响应体。"""
+    """收集 ASGI send 消息，供断言短路响应状态码与 websocket 关闭码。"""
 
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
@@ -119,8 +117,8 @@ async def test_guard_rejects_missing_host_header() -> None:
 async def test_guard_closes_websocket_with_non_loopback_host(host: bytes) -> None:
     """websocket scope 携带外部 Host 时以 1008 关闭，不进入内层应用。
 
-    websocket 无 HTTP 状态码可回，参照 Bearer 鉴权中间件的拒绝模式关闭握手；
-    不校验 websocket 会让 rebinding 借 websocket 通道绕过 Host 防线。
+    websocket 无状态码可回，参照 Bearer 鉴权中间件关闭握手；不校验会让 rebinding
+    借 websocket 通道绕过 Host 防线。
     """
     inner = _InnerApp()
     sink = _MessageSink()

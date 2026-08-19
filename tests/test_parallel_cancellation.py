@@ -1,8 +1,7 @@
 """并行生成批次中途取消传播守护。
 
-_run_generation_requests 在 request_count > 1 时经 asyncio.gather 编排多个请求；
-批次执行中触发取消时，取消信号经 gather 传播至已启动的请求，将其在 await 处中断，
-_run_generation_requests 本身抛出 CancelledError，无请求能完成。
+批次执行中取消时，取消信号经 gather 传播至已启动请求、在 await 处中断，
+_run_generation_requests 整批抛出 CancelledError，无请求能完成。
 """
 
 from __future__ import annotations

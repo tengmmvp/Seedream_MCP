@@ -1,30 +1,23 @@
 """Seedream MCP 服务器主模块。
 
-注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，以及风格预设
-Prompt 与工作区、服务器信息、模型信息三个资源。负责配置注入、cli_main 入口与
-传输分派。
-MCPServer 实例与共享资源生命周期管理由 resources 模块承担，本模块导入 mcp 完成注册
-并重导出 resources 符号，保持 server 既有导入 surface 与 tests 访问路径不变。CLI
-参数解析由 cli 模块承担，streamable-http 中间件与传输配置由 transport 模块承担，
-二者经本模块重导出。
+注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，风格预设
+Prompt 与工作区、服务器信息、模型信息三个资源，并承担配置注入、cli_main 入口
+与传输分派。MCPServer 实例与共享资源生命周期由 resources 模块承担，本模块导入
+mcp 完成注册并重导出 resources/cli/transport 符号，保持既有导入 surface 与
+tests 访问路径不变。
 
-outputSchema 声明契约：五个 @mcp.tool 工具函数的返回类型注解为 SDK 官方惯用形
-``Annotated[CallToolResult, GenerationStructuredOutput / BrowseImagesStructuredOutput]``。
-mcp 2.0 的 FuncMetadata 对返回 CallToolResult 的工具取注解元数据首项的 pydantic
-model 生成 outputSchema，运行时返回的 CallToolResult 原样透传，同时携带面向模型的
-文本与 structuredContent，且经该 model 校验 structuredContent 后才送达客户端。注解与
-运行时返回类型一致，函数体无需 type: ignore。声明与运行时两侧由 test_output_schema
-与 test_output_schema_consistency 守护不漂移。
+outputSchema 声明契约：五个工具函数的返回类型注解为
+``Annotated[CallToolResult, ...StructuredOutput]``，SDK 据注解元数据中的 pydantic
+model 生成 outputSchema 并校验 structuredContent，运行时返回的 CallToolResult
+原样透传。声明与运行时两侧由 test_output_schema 与 test_output_schema_consistency
+守护不漂移。
 
-inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明（prompt 居首），而非单一
-params 嵌套模型。MCPServer 的 FuncMetadata 不支持单参数 BaseModel 自动展开，
-嵌套声明会把 inputSchema 收敛为一个 params 对象字段，客户端以平铺键名调用会被拒绝。
-平铺字段的名称、类型、默认值、约束与描述镜像自 tools.core.schemas 的对应输入模型，
-字段规则的单一来源仍是该模块；模型层的 str_strip_whitespace 与各字段校验器的非空
-语义经签名层 ``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝而非进入
-工具体后才失败。函数体内过滤值为 None 的可选字段后组装输入模型并
-委托既有 run_* 处理器，跨字段校验在组装时照常触发。test_tool_parameter_order 以
-inputSchema 与模型 schema 的等价性断言锁定两侧不漂移。
+inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明而非单一 params 嵌套模型，
+FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inputSchema 收敛为
+一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.core.schemas
+的输入模型，字段规则单一来源在该模块；非空语义经签名层 ``_NON_BLANK_PATTERN``
+等价镜像，纯空白输入在协议层即被拒绝。函数体内过滤 None 字段后组装输入模型并
+委托既有 run_* 处理器。两侧等价性由 test_tool_parameter_order 断言锁定。
 """
 
 from __future__ import annotations
@@ -132,9 +125,8 @@ GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     open_world_hint=True,
 )
 
-# 浏览类工具的能力标注：仅读取文件列表，只读；仅访问本地文件系统，非开放世界
-# 操作。规范仅为非只读工具定义 destructive_hint 与 idempotent_hint，只读工具
-# 携带两者不构成有效声明，按规范口径省略。
+# 浏览类工具的能力标注：只读、仅访问本地文件系统、非开放世界；destructive_hint
+# 与 idempotent_hint 仅对非只读工具构成有效声明，按规范省略。
 BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     read_only_hint=True,
     open_world_hint=False,
@@ -142,21 +134,14 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 
 logger = get_logger(__name__)
 
-# 非空语义镜像：输入模型经 str_strip_whitespace 先剥离首尾空白再做长度与校验器判定，
-# 纯空白字符串在模型层被拒；平铺签名的参数模型不含 strip 配置，等价约束以 pattern
-# 表达——含至少一个非空白字符。应用于声明了非空语义的字段：prompt 的 min_length=1、
-# image 与 save_path/custom_name/directory 的非空校验器。带内边距的合法值不受影响，
+# 非空语义镜像：输入模型经 str_strip_whitespace 先剥离空白再校验，纯空白字符串被拒；
+# 平铺签名以 pattern 表达等价约束——至少一个非空白字符。带内边距的合法值不受影响，
 # strip 仍由函数体内组装输入模型时完成。
 _NON_BLANK_PATTERN = r"\S"
 
 
 def _config_from_context(ctx: Context[Any, Any]) -> SeedreamConfig:
-    """从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。
-
-    工具与资源经 ctx.request_context.lifespan_context 取配置，避免直接依赖模块级全局
-    状态，消除热重载窗口内活动配置与请求实际使用的配置不一致。复用 parallel 的
-    get_lifespan_resource 统一资源探测实现，lifespan 键与 parallel 一致取自 config。
-    """
+    """从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。"""
     config = get_lifespan_resource(ctx, LIFESPAN_KEY_CONFIG, SeedreamConfig)
     if config is not None:
         return config
@@ -167,20 +152,9 @@ def _config_from_context(ctx: Context[Any, Any]) -> SeedreamConfig:
 def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
     """过滤值为 None 的函数签名默认值，仅保留显式提供的字段。
 
-    None 过滤作用于平铺函数签名的默认值：签名字段以 None 统一表示未提供，剔除后
-    组装输入模型使 model_fields_set 仅含显式提供的字段。模型中带非 None 默认值的
-    字段不受同等过滤——生成工具的 response_format/stream/request_count 与浏览工具
-    的 recursive/max_depth/limit/offset/show_details 经签名非 None 默认值取值，恒进入
-    model_fields_set；组图 max_images 虽在模型中以总上限为默认值，但其签名为 None
-    默认，未提供时被过滤、不进入 fields_set，随后按参考图数量自动推导。当前唯一
-    依赖 fields_set 区分的就是 max_images 推导，不受恒进入字段影响；未来若有新逻辑
-    依赖 model_fields_set 判定显式传入，须知上述字段不参与该区分。
-
-    Args:
-        kwargs: 平铺参数名到函数入参值的映射，必填字段由调用方保证非 None。
-
-    Returns:
-        剔除 None 值后的参数字典，用作输入模型构造的关键字参数。
+    剔除后组装输入模型使 model_fields_set 仅含显式提供的字段，组图 max_images 的
+    按参考图数量推导依赖该区分；response_format/stream/request_count 等带非 None
+    签名默认值的字段恒进入 fields_set，不参与该区分，新逻辑不得依赖其判定显式传入。
     """
     return {key: value for key, value in kwargs.items() if value is not None}
 
@@ -190,12 +164,10 @@ def _workspace_roots_dependency(
 ) -> ListRootsResult | ListRoots | None:
     """五个工具共用的 roots 依赖解析器，SEP-2577 非废弃形态。
 
-    返回 ListRoots() 时 SDK 在工具调用前按协商版本取回客户端 roots 并注入
-    工具参数；客户端未声明 roots capability 时返回 None 不发起取回，工具链
-    经 workspace_roots_scope_from_result 回退环境变量边界，与直连形态下先探测
-    能力跳过往返的语义一致。resolver 参数对模型不可见，不进入 inputSchema。
-    无请求上下文的调用（如直连 call_tool 的测试路径）取 session 抛 ValueError，
-    同样返回 None 走环境变量回退。
+    会话已声明 roots capability 时返回 ListRoots()，SDK 在工具调用前取回客户端
+    roots 并注入工具参数；否则返回 None 不发起取回，工具链经
+    workspace_roots_scope_from_result 回退环境变量边界。resolver 参数对模型不可见，
+    不进入 inputSchema。
     """
     try:
         session = ctx.session
@@ -285,7 +257,7 @@ async def text_to_image(
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """文生图：根据文字指令生成单张图片。
 
-    适用：从零开始按文字描述创建图片。示例：生成“赛博朋克风格的城市夜景”。
+    适用：从零开始按文字描述创建图片。示例：生成「赛博朋克风格的城市夜景」。
     不适用：需要基于已有图片修改时改用 image_to_image；需要一次生成多张
     风格一致的图片时改用 sequential_generation。
     """
@@ -420,7 +392,7 @@ async def image_to_image(
     """图文生图：基于已有图片进行编辑。
 
     适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调
-    迁移、改变背景或视角尺寸等。示例：“把人物背景换成海滩”。
+    迁移、改变背景或视角尺寸等。示例：「把人物背景换成海滩」。
     不适用：纯文字生图改用 text_to_image；融合多张图片特征改用
     multi_image_fusion。
     """
@@ -539,8 +511,8 @@ async def multi_image_fusion(
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """多图融合：融合多张参考图片的特征生成新图片。
 
-    适用：把多张图片的风格或元素合并到一张新图。示例：“将图1的服装换到图2的模特
-    身上”，需用“图1/图2”指代输入图片顺序。
+    适用：把多张图片的风格或元素合并到一张新图。示例：「将图1的服装换到图2的模特
+    身上」，需用「图1/图2」指代输入图片顺序。
     不适用：仅编辑单张图片改用 image_to_image；生成一组连贯分镜改用
     sequential_generation。
     """
@@ -672,7 +644,7 @@ async def sequential_generation(
     """组图输出：一次生成多张内容关联的图片。
 
     适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：
-    “生成4格漫画，主角依次出现在4个场景”。注意 5.0 Pro 不支持组图，请改用
+    「生成4格漫画，主角依次出现在4个场景」。注意 5.0 Pro 不支持组图，请改用
     5.0/5.0 Lite/4.5/4.0。
     不适用：融合多张参考图特征改用 multi_image_fusion。
     """
@@ -796,19 +768,11 @@ _FLAT_SCHEMA_TOOL_NAMES = (
 def _tighten_flat_tool_schemas() -> None:
     """对五个平铺签名工具的 inputSchema 顶层补 additionalProperties: false。
 
-    平铺签名丢失模型 extra=forbid 的补偿：输入模型本身以 extra=forbid 拒绝未知键，
-    而 MCPServer 依据函数签名生成的参数模型默认忽略未知键，inputSchema 也不含
-    additionalProperties 声明，拼错的参数名会被静默丢弃而非拒绝。本函数在注册后
-    集中修补两处：inputSchema 顶层声明 additionalProperties: false，客户端本地校验
-    即可拒绝拼错参数；参数模型替换为 extra=forbid 的子类，服务端运行时同样拒绝。
-    子类化保留全部字段、校验器与序列化行为，仅收紧额外键策略。于 import 期执行，
-    先于任何 tools/list 与 tools/call 生效；MCPServer 无公开的工具访问 API，经
-    tool manager 取 Tool 对象修补其 parameters dict 与参数模型。
-
-    实现依赖 SDK 私有路径 ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``
-    的动态子类化，SDK 未对此作出公开 API 承诺。升级 mcp python-sdk 时须验证该
-    私有路径仍然成立，私有结构变更导致的收紧失效由
-    test_flat_input_schema_forbids_additional_properties 兜底报警。
+    签名参数模型默认忽略未知键，拼错的参数名会被静默丢弃；本函数在注册后集中修补
+    inputSchema 顶层声明与参数模型两处，使客户端本地校验与服务端运行时都拒绝未知
+    键。于 import 期执行，先于任何 tools/list 与 tools/call 生效。依赖 SDK 私有
+    路径 ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，升级 SDK 须验证
+    仍成立，失效由 test_flat_input_schema_forbids_additional_properties 兜底报警。
     """
     for name in _FLAT_SCHEMA_TOOL_NAMES:
         tool = mcp._tool_manager.get_tool(name)
@@ -842,11 +806,8 @@ _MODERN_PROTOCOL_VERSION = "2026-07-28"
 def _resource_roots_via_input_required(ctx: Context) -> bool:
     """判定资源处理器是否应经 InputRequiredResult 多轮形态取回 roots。
 
-    会话可访问、客户端已声明 roots capability 且协商版本支持多轮请求时返回 True；
-    无会话上下文（ctx.session 抛 ValueError）、未声明 capability 或版本未知时
-    返回 False，由调用方走 roots/list 直连或环境变量回退。capability 探测沿用
-    session_declares_roots_capability 的保守语义，SDK Client 侧 capability 声明与
-    回调注册联动，声明即能应答多轮请求。
+    会话可访问、已声明 roots capability 且协商版本不低于 2026-07-28 时返回
+    True；否则返回 False，由调用方走 roots/list 直连或环境变量回退。
     """
     try:
         session = ctx.session
@@ -854,8 +815,7 @@ def _resource_roots_via_input_required(ctx: Context) -> bool:
         return False
     if session is None or not session_declares_roots_capability(session):
         return False
-    # protocol_version 经 getattr 容错读取：真实 Context 恒有该属性，鸭子类型测试
-    # 替身可能缺省，缺省按旧修订走直连回退。
+    # protocol_version 经 getattr 容错读取，测试替身缺省时按旧修订回退。
     version = getattr(ctx, "protocol_version", None)
     if not isinstance(version, str):
         return False
@@ -863,10 +823,9 @@ def _resource_roots_via_input_required(ctx: Context) -> bool:
 
 
 def _session_roots_for_display() -> list[Any]:
-    """在已应用工作区边界的作用域内读取面向展示的 roots 列表。
+    """读取面向展示的 roots 列表，须在已应用工作区边界的作用域内调用。
 
-    边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得时属服务器环境而非客户端
-    授权声明，其绝对路径不进入面向调用方的输出，按未授权输出空列表。
+    边界经环境变量或进程 CWD 回退取得时不属客户端授权声明，按未授权输出空列表。
     """
     if is_boundary_from_session_roots():
         return get_workspace_roots()
@@ -892,22 +851,8 @@ async def workspace_roots_resource(
     """工作区根目录。
 
     展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。verbose 附
-    各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots 读取仍匹配，
-    query 参数可省略。
-
-    mcp 2.0 的 Context 注入仅接线模板资源，静态 URI 无法取得请求上下文，故以可选
-    query 参数构成模板。模板资源处理器经 pydantic validate_call 包装，ctx 参数注解
-    必须为裸 Context：参数化形式如 Context[Any, Any] 会被重校验为脱离请求的空实例，
-    首次访问 ctx.session 即抛 ValueError，客户端收到 Error creating resource from
-    template。裸 Context 注解的实例原样透传，session 与 lifespan_context 均可用。
-
-    roots 取回按协商版本分流：2026-07-28 及以后的会话无服务端反向通道，经
-    InputRequiredResult 携带 ListRootsRequest 的多轮形态取回，客户端以
-    list_roots 回调应答并重试，结果从 ctx.input_responses 按同键读取；旧修订
-    会话保留 workspace_roots_scope 的 roots/list 直连（SEP-2577 废弃但为旧修订
-    上唯一途径，与 SDK resolver 的 legacy 分支同构）。客户端声明 roots capability
-    与回调注册在 SDK Client 侧联动，声明即能应答；未声明 capability 时不发起取回，
-    回退环境变量边界。
+    各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots 读取仍
+    匹配，query 参数可省略。
     """
     if _resource_roots_via_input_required(ctx):
         responses = ctx.input_responses or {}
@@ -926,11 +871,7 @@ async def workspace_roots_resource(
 
 @mcp.resource("seedream://server/info", mime_type="application/json")
 async def server_info_resource() -> str:
-    """服务器版本与当前生效配置摘要。
-
-    SDK 2.0 起静态资源无请求上下文可注入；lifespan 注入的配置即进入 lifespan 时的
-    活动配置对象，直接读活动配置语义等价。
-    """
+    """服务器版本与当前生效配置摘要。"""
     config = get_active_config()
     return json.dumps(
         {
@@ -1009,9 +950,7 @@ def cli_main() -> int:
     """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
 
     Returns:
-        进程退出码：
-        - 0: 正常退出
-        - 1: 配置错误或运行异常
+        进程退出码，0 为正常退出，1 为配置错误或运行异常。
     """
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -1022,14 +961,12 @@ def cli_main() -> int:
         print(f"配置错误: {exc.message}", file=sys.stderr)
         return 1
 
-    # 注入活动配置，共享 client/tools 与 io_path 经 get_active_config 共用此实例，
-    # 避免无 MCP Roots 时 io_path 重建第二个 config 造成双事实来源。
+    # 注入活动配置，server 与 io_path 经 get_active_config 共用此实例。
     set_active_config(config)
 
-    # 初始化日志系统并打印启动信息。setup_logging 含目录创建等 I/O，只读容器或受限
-    # 账号下可能抛 OSError，此处捕获并降级为 stderr 输出与退出码 1，与配置错误的优雅
-    # 契约一致，避免直接 traceback 崩溃。OSError 不经 format_error_for_user：其未知错误
-    # 档案标签会误导排查方向，且回显的绝对路径会泄露用户目录结构。
+    # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后
+    # 降级为 stderr 输出与退出码 1；不经 format_error_for_user，以免未知错误标签
+    # 误导排查并回显绝对路径。
     try:
         setup_logging(
             config.log_level,

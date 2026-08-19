@@ -1,4 +1,8 @@
-"""下载安全测试：DNS 解析 TTL 缓存与连接后对端 IP 公网校验。"""
+"""下载管理器测试：DNS 解析 TTL 缓存与在途去重、连接后对端 IP 公网校验、
+重定向逐跳校验、重试退避与累计预算、DNS 缓存驱逐、扩展名等价类。
+
+用 fake loop/session 模拟，不依赖真实网络。
+"""
 
 import asyncio
 import time
@@ -26,9 +30,8 @@ def _patch_unretrieved_callback(
 ) -> "list[asyncio.Task[Any]]":
     """把 logs.log_unretrieved_task_exception 替换为记录 task 并检索异常的替身。
 
-    arm_unretrieved_exception_logging 登记回调时经 logs 模块全局解析目标函数，对象式
-    遮蔽即生效。替身检索异常保持 "Task exception was never retrieved" 静默。返回已
-    触发回调的 task 列表，供断言登记时序。
+    替身经模块属性遮蔽即生效，检索异常避免 "Task exception was never retrieved"
+    告警。返回已触发回调的 task 列表，供断言登记时序。
     """
     from seedream_mcp.utils.core import logs
 
@@ -44,6 +47,8 @@ def _patch_unretrieved_callback(
 
 
 class _FakeLoop:
+    """模拟事件循环的 getaddrinfo，固定返回公网 IP 列表。"""
+
     def __init__(self) -> None:
         self.calls = 0
 
@@ -86,11 +91,7 @@ async def test_validate_public_dns_uses_ttl_cache(monkeypatch: pytest.MonkeyPatc
 async def test_resolve_public_ips_dedups_inflight_resolutions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """同 host 并发解析在缓存冷启动时共享同一在途 task，仅触发一次 getaddrinfo。
-
-    getaddrinfo 阻塞在 gate 上使两并发调用重叠：首个调用 miss 缓存创建并登记在途 task，
-    次个调用发现登记项后 await 同一 task，避免各自独立解析。
-    """
+    """同 host 并发解析在缓存冷启动时共享同一在途 task，仅触发一次 getaddrinfo。"""
     fake_loop = _BlockingFakeLoop()
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
 
@@ -119,10 +120,10 @@ async def test_resolve_public_ips_dedups_inflight_resolutions(
 async def test_resolve_failure_consumed_by_caller_not_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """在途解析抛错且由调用方正常消费时不登记"未取回异常"回调。
+    """在途解析抛错且由调用方正常消费时不登记「未取回异常」回调。
 
-    常规失败路径的异常经 shield 交还调用方、由既有错误通道记录；若仍无条件挂回调，
-    同一异常会以"后台共享任务失败"重复入日志。回调仅在消费方放弃等待时登记。
+    异常经 shield 交还调用方并由既有错误通道记录，无条件挂回调会使同一异常
+    以「后台共享任务失败」重复入日志。
     """
     fired = _patch_unretrieved_callback(monkeypatch)
 
@@ -196,12 +197,7 @@ async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
 async def test_resolve_cancel_with_surviving_waiter_not_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """取消的等待者仍有幸存同伴时不登记兜底日志，异常由幸存者消费。
-
-    消费者计数归零前还有其他等待者在等待同一在途解析：解析失败的异常经
-    shield 送抵幸存者并经既有错误通道记录；取消方若仍登记回调，同一异常
-    会以「后台共享任务失败」重复入日志。
-    """
+    """取消的等待者仍有幸存同伴时不登记兜底日志，异常由幸存者消费。"""
     fired = _patch_unretrieved_callback(monkeypatch)
 
     class _GatedFailingLoop:
@@ -261,10 +257,9 @@ def test_validate_connected_peer_ip_allows_public_ip() -> None:
 
 
 # ---- download_image 端到端：逐跳重定向校验与重试退避 ----
-# mock 网络层，验证把各 SSRF 子组件串联起来的 download_image 主循环：
-# 重定向目标须重新走静态校验、重定向上限、5xx 退避重试后成功落盘。
-# 重定向到内网/回环的安全拒绝由 *_via_real_static_validation 用例覆盖（保留真实
-# _validate_url_for_request 串联），避免架空校验的空芯用例。
+# mock 网络层，验证重定向目标重新走静态校验、重定向上限与 5xx 退避重试。
+# 重定向到内网/回环的安全拒绝由 *_via_real_static_validation 用例覆盖，保留真实
+# _validate_url_for_request 串联，避免架空校验的空芯用例。
 
 
 @pytest.mark.asyncio
@@ -273,11 +268,8 @@ async def test_download_image_rejects_redirect_to_private_ip_via_real_static_val
 ) -> None:
     """端到端串联：保留真实 _validate_url_for_request 的重定向内网拒绝。
 
-    逐跳重定向到内网 IP 须被静态校验拒绝。上述两条重定向用例经 _patch_download_network
-    把 _validate_url_for_request 架空为直通，实测的是重定向上限而非安全拒绝。本用例仅
-    stub 依赖网络的 DNS 解析与 session 注入，保留真实的 _validate_url_for_request 串联，
-    使 302 目标 169.254.169.254 经 _validate_url_static 命中非公网判定被拒绝，覆盖
-    SSRF 第四层防护的端到端安全语义。
+    仅 stub 依赖网络的 DNS 解析与 session 注入，使 302 目标 169.254.169.254 经
+    _validate_url_static 命中非公网判定被拒绝。
     """
     manager = DownloadManager()
     session = _FakeSession(
@@ -341,8 +333,7 @@ async def test_download_image_rejects_uppercase_scheme_downgrade_redirect(
 ) -> None:
     """初始 URL scheme 为大写 HTTPS 时，重定向降级到 http 同样被拒绝。
 
-    降级判定的 scheme 比较经小写归一化，与 _url_origin 和 _validate_url_static 的
-    口径一致，大写起始 URL 不构成绕过降级检查的输入面。
+    降级判定的 scheme 比较经小写归一化，大写起始 URL 不构成绕过输入面。
     """
     manager = DownloadManager()
     session = _FakeSession([_FakeResponse(302, {"location": "http://mirror.example.com/x.png"})])
@@ -412,12 +403,10 @@ async def test_download_image_exhausts_retries_then_raises(
 async def test_download_image_stops_retry_when_total_budget_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """跨尝试累计时长预算耗尽即停止重试，单个保存任务占用不随尝试数成倍放大。
+    """跨尝试累计时长预算耗尽即停止重试，占用不随尝试数成倍放大。
 
-    恶意慢滴流响应每次尝试都可耗满单次会话总时长上限，无累计预算时 max_retries
-    次重试使最长占用放大为单次封顶乘尝试数。以每次读时钟即前进超过预算的伪时钟
-    驱动：首次尝试失败后累计耗时已超预算，直接停止重试，尝试次数为 1 而非
-    max_retries + 1。
+    每次读时钟即前进超过预算的伪时钟驱动：首次尝试失败后累计已超预算，
+    尝试次数为 1 而非 max_retries + 1。
     """
     import seedream_mcp.utils.io.io_download as download_module
 
@@ -446,8 +435,7 @@ async def test_download_image_stops_retry_when_total_budget_exhausted(
 class _SlowHopClockSession:
     """每跳推进伪时钟一个完整预算窗口的重定向链会话，模拟慢滴流链。
 
-    伪时钟读数恒定，仅 get 调用推进时间，建模会话 total 超时按单次请求计窗、
-    每跳各享全额窗口的最坏情形。
+    伪时钟仅随 get 调用推进，建模每跳各享全额超时窗口的最坏情形。
     """
 
     def __init__(self, responses: list, clock_now: list[float], hop_seconds: float) -> None:
@@ -471,9 +459,7 @@ async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhaus
 ) -> None:
     """重定向链按起始时间累计校验总预算，单次尝试不随跳数放大到多倍封顶。
 
-    每跳耗满一个预算窗口的慢链与读数恒定的伪时钟驱动：首跳后累计已满预算，
-    跟随下一跳前即按超时分类截停，经退避外层的跨尝试预算检查停止重试。总占用
-    为一个预算窗口，而非 1+3 跳各享全额窗口的约 4 倍。
+    首跳后累计已满预算，跟随下一跳前即按超时分类截停，总占用恰为一个预算窗口。
     """
     import seedream_mcp.utils.io.io_download as download_module
 
@@ -545,11 +531,7 @@ _CUSTOM_HEADERS = {
 async def test_download_image_strips_custom_headers_on_cross_origin_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """重定向跳向不同源时剥离定制请求头，仅保留 User-Agent 与 Accept 等通用头。
-
-    调用方为原始主机定制的 Authorization、跟踪头原样发给重定向目标会向第三方源
-    泄露凭据与内部信息。
-    """
+    """重定向跳向不同源时剥离定制请求头，仅保留 User-Agent 与 Accept 等通用头。"""
     manager = DownloadManager()
     session = _HeaderCaptureSession(
         [

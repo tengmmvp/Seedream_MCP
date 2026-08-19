@@ -59,7 +59,7 @@ def test_browse_directory_accepts_max_length_boundary() -> None:
 
 
 def test_browse_directory_rejects_exceeding_max_length() -> None:
-    """browse directory 长度 1025 应被 pydantic 拒绝，错误消息不再整体回显超长输入。"""
+    """browse directory 长度 1025 应被 pydantic 拒绝。"""
     with pytest.raises(ValidationError):
         BrowseImagesInput.model_validate({"directory": "a" * 1025})
 

@@ -1,8 +1,7 @@
 """runtime structuredContent 与声明 outputSchema 的一致性测试。
 
-验证 _build_generation_structured_result 与 handle_browse_images 产出的 structuredContent
-能够被 GenerationStructuredOutput 或 BrowseImagesStructuredOutput 实例化，即符合声明的 outputSchema。
-防止 schema 与实际输出漂移，例如 format_filter 类型不一致类 bug。
+验证 _build_generation_structured_result 与 _build_browse_structured_result 的产出
+能实例化对应输出模型，防止 schema 与实际输出漂移。
 """
 
 from __future__ import annotations
@@ -153,10 +152,7 @@ def test_extract_images_normalizes_null_and_non_dict_to_empty() -> None:
 def test_real_generation_builder_success_output_instantiates_schema() -> None:
     """调用真实 _build_generation_structured_result 须能实例化输出 schema。
 
-    手工 dict 实例化 GenerationStructuredOutput 的用例无法发现 builder 漏写字段或
-    类型漂移。本用例经 build_generation_context 产出真实上下文，再交由真实 builder
-    构造 structuredContent，最后实例化 pydantic 模型，端到端验证 builder 输出与
-    声明的 outputSchema 一致。
+    手工 dict 用例发现不了 builder 漏写字段或类型漂移，本用例端到端构造真实输出。
     """
     config = SeedreamConfig(api_key="k")
     context = build_generation_context(TextToImageInput(prompt="a cat", size="2K"), config)
@@ -198,10 +194,7 @@ def test_real_generation_builder_failure_output_instantiates_schema() -> None:
 
 
 def test_real_browse_builder_output_instantiates_schema(tmp_path: Path) -> None:
-    """调用真实 _build_browse_structured_result 须能实例化输出 schema。
-
-    目标模型为 BrowseImagesStructuredOutput。
-    """
+    """调用真实 _build_browse_structured_result 须能实例化 BrowseImagesStructuredOutput。"""
     workspace = tmp_path / "ws"
     structured = _build_browse_structured_result(
         status="completed",

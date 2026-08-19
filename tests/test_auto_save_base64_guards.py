@@ -64,6 +64,7 @@ def test_prepare_base64_payload_empty_string(manager: AutoSaveManager) -> None:
 
 
 def test_prepare_base64_payload_none(manager: AutoSaveManager) -> None:
+    """None payload 与空串同口径，抛 AutoSaveError。"""
     with pytest.raises(AutoSaveError, match="空"):
         manager._prepare_base64_payload(None, None)
 
@@ -78,7 +79,7 @@ async def test_prepare_base64_payload_estimate_exceeds_limit(tmp_path: Path) -> 
     """估算大小超过 max_file_size 时在解码前拒绝，避免内存放大。"""
     mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=100, cleanup_days=0)
     try:
-        # 200 chars → estimated 150 bytes > 100
+        # 200 字符估算 150 字节，超过 100 上限
         with pytest.raises(AutoSaveError, match="Base64数据过大"):
             mgr._prepare_base64_payload("A" * 200, None)
     finally:
@@ -130,7 +131,7 @@ def test_prepare_base64_payload_valid_png(manager: AutoSaveManager) -> None:
     content_bytes, extension, content_hash = manager._prepare_base64_payload(payload, None)
     assert content_bytes == png_bytes
     assert extension == ".png"
-    assert len(content_hash) == 64  # sha256 hex digest
+    assert len(content_hash) == 64  # sha256 十六进制摘要长度
 
 
 def test_prepare_base64_payload_with_mime(manager: AutoSaveManager) -> None:

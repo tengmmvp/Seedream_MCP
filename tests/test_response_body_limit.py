@@ -1,9 +1,8 @@
 """上游响应体读取限额域守护测试。
 
-覆盖错误体独立小上限、错误体 JSON 解析线程卸载、非 JSON 错误体 message 截断、
-response_body_limit 显式配置与推导、SSE 事件截断阈值的 base64 严格上界，以及
-流式 JSON 超限错误不被解析失败包装的回归锁定。网络层经 httpx.MockTransport 模拟，
-不触达真实 API。
+覆盖错误体独立上限、错误体 JSON 线程卸载、message 截断、response_body_limit
+显式配置与推导、SSE 截断阈值上界与流式超限错误语义。网络层经 httpx.MockTransport
+模拟，不触达真实 API。
 """
 
 from __future__ import annotations
@@ -81,8 +80,7 @@ async def test_error_body_json_parse_offloaded_to_thread(
 ) -> None:
     """错误体 json.loads 在工作线程执行，解析期间事件循环保持可调度。
 
-    对含标记的错误体注入 0.15 秒解析延迟：若解析回到事件循环，自旋心跳任务在
-    解析窗口内将被饿死；线程卸载则心跳持续计数。
+    对含标记的错误体注入 0.15 秒解析延迟：若解析回到事件循环，心跳任务将被饿死。
     """
     config = SeedreamConfig(api_key="k", max_retries=3)
     body = json.dumps({"message": "x" * (2 * 1024 * 1024)}).encode()
@@ -252,9 +250,8 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
 async def test_stream_truncated_events_passed_through_in_payload(no_sleep: None) -> None:
     """SSE 事件因超限被丢弃时，truncated_events 计数透传进 api result payload。
 
-    单个未完成事件超过 event_truncate_threshold 即被丢弃并计数；阈值推导为
-    max(stream_buffer_max_size, base64 严格上界 + 信封余量)，压缩配置后约为 5464
-    字节，首个分块送出 6KB 无分隔符前缀触发截断，随后送达的 completed 事件正常解析。
+    单个未完成事件超过阈值即被丢弃并计数；首个分块送出 6KB 无分隔符事件，超过
+    压缩配置后的阈值触发截断，随后的 completed 事件正常解析。
     """
     config = SeedreamConfig(
         api_key="k",
@@ -312,7 +309,7 @@ async def test_stream_json_over_limit_error_not_wrapped_as_parse_failure(no_slee
 async def _delay_outside_patched_sleep(seconds: float) -> None:
     """经 wait_for 超时实现延迟，绕开 no_sleep fixture 对 asyncio.sleep 的屏蔽。
 
-    慢滴流模拟要求块间存在真实时间间隔；重试退避又须被 no_sleep 跳过，两种等待
+    慢滴流要求块间存在真实时间间隔，重试退避又须被 no_sleep 跳过，两种等待
     不能共用同一个 asyncio.sleep 入口。
     """
     loop = asyncio.get_running_loop()
@@ -322,9 +319,8 @@ async def _delay_outside_patched_sleep(seconds: float) -> None:
 async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: None) -> None:
     """SSE 慢滴流触发总时长预算并按超时重试，耗尽后归一为 SeedreamTimeoutError。
 
-    每块间隔 0.3 秒均小于按单次读计时的读取超时，读取超时永不触发；总时长预算取
-    api_timeout=1 秒，首块后约 1.2 秒处逐块检查命中截止时间。旧行为无总时长约束，
-    该流将完整消费返回结果。
+    每块间隔 0.3 秒小于单次读超时，由 api_timeout=1 秒的总时长预算在约 1.2 秒处
+    命中；旧行为无总时长约束，该流将被完整消费。
     """
     config = SeedreamConfig(api_key="k", max_retries=1, api_timeout=1)
     attempts = 0
@@ -384,7 +380,7 @@ async def test_standard_slow_drip_json_over_total_budget_times_out(no_sleep: Non
 
 
 async def test_5xx_oversized_error_body_retries_by_status_code(no_sleep: None) -> None:
-    """5xx + 超大错误体：响应体过大异常携带状态码，按 5xx 语义重试至耗尽。
+    """5xx 超大错误体的响应体过大异常携带状态码，按 5xx 语义重试至耗尽。
 
     无状态码时 _call_api 对该异常不重试，5xx 大错误体的可重试语义丢失。
     """
@@ -412,7 +408,7 @@ async def test_5xx_oversized_error_body_retries_by_status_code(no_sleep: None) -
 
 
 async def test_4xx_oversized_error_body_fails_fast(no_sleep: None) -> None:
-    """4xx + 超大错误体：异常携带 400 状态码但非可重试，单次即失败。"""
+    """4xx 超大错误体异常携带 400 状态码但非可重试，单次即失败。"""
     config = SeedreamConfig(api_key="k", max_retries=2)
     attempts = 0
 

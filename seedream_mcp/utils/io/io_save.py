@@ -49,9 +49,8 @@ _cleanup_tasks: set[asyncio.Task[None]] = set()
 def reset_cleanup_state() -> None:
     """重置清理节流的模块级状态，供 resources 复位协议与测试隔离调用。
 
-    asyncio.Lock 首次 acquire 后绑定当时的事件循环；pytest-asyncio 每个测试用例
-    使用全新事件循环，跨循环复用旧锁会在 acquire 时报错。本函数重建 _cleanup_lock
-    并清空 _cleanup_last_run，使后续调用从干净状态启动。
+    asyncio.Lock 首次 acquire 后绑定当时的事件循环，pytest-asyncio 每用例新建
+    循环，跨循环复用旧锁会在 acquire 时报错，故重建 _cleanup_lock 并清空状态。
     """
     global _cleanup_lock, _cleanup_last_run, _cleanup_tasks
     _cleanup_lock = asyncio.Lock()
@@ -62,11 +61,10 @@ def reset_cleanup_state() -> None:
 async def drain_background_cleanup_tasks() -> None:
     """等待在途的后台清理任务全部完成，供进程级退出清理调用。
 
-    请求路径的 AutoSaveManager.close 不等待清理，以免阻塞返回路径并引入跨请求耦合；
-    stdio 经 lifespan teardown、streamable-http 经服务循环的退出清理间接调用本函数，
-    保证进程退出时清理已完成、节流状态定局。任务自身失败已在
-    _run_cleanup_in_background 内写入失败退避时间戳并记录日志，此处仅等待不重试；
-    等待期间新 spawn 的任务不在本轮快照内，交由下次调用或进程退出兜底。
+    请求路径的 close 不等待清理以免阻塞返回路径；stdio 经 lifespan teardown、
+    streamable-http 经退出清理间接调用本函数。任务失败已在任务内写入失败退避
+    时间戳并记录日志，此处仅等待不重试；等待期间新 spawn 的任务交由下次调用
+    或进程退出兜底。
     """
     if _cleanup_tasks:
         await asyncio.gather(*list(_cleanup_tasks), return_exceptions=True)
@@ -86,11 +84,9 @@ _MARKDOWN_ALT_MAX_LENGTH = 200
 def _build_markdown_alt(alt_text: str | None) -> str:
     """净化 Markdown 替代文本，返回可直接嵌入 ``![...](...)`` 的文本。
 
-    alt 为调用方可控自由文本：控制字符压平防注入，``\\``、``[``、``]`` 反斜杠转义
-    保持图片引用的结构完整，超长在转义前截断到上限的一半。单字符转义后至多放大为
-    两个字符，按上限的一半截断使转义结果必然不超上限，截断点也不会把反斜杠转义对
-    劈成尾随孤立反斜杠。空文本回退固定文案；不使用 prompt 兜底，提示词在结构化输出
-    顶层已有专门字段，拼入 alt 只会放大输出且引入注入面。
+    控制字符压平防注入，``\\``、``[``、``]`` 反斜杠转义保持引用结构完整；超长在
+    转义前截断到上限的一半，使转义结果必然不超上限且不劈开转义对。空文本回退固定
+    文案，不用 prompt 兜底，提示词在结构化输出顶层已有专门字段。
     """
     if not alt_text:
         return "Generated Image"
@@ -133,12 +129,12 @@ class AutoSaveResult:
     """自动保存结果，封装保存状态、本地路径、Markdown 引用与元数据。
 
     Attributes:
-        success: 是否保存成功
-        original_url: 原始图片 URL，Base64 保存路径为 base64 标识串
-        local_path: 保存成功时的本地文件路径，未保存时为 None
-        markdown_ref: Markdown 图片引用，未生成时为 None
-        error: 失败时的错误描述，成功时为 None
-        metadata: 保存结果元数据，缺省为空字典
+        success: 是否保存成功。
+        original_url: 原始图片 URL，Base64 保存路径为 base64 标识串。
+        local_path: 保存成功时的本地文件路径。
+        markdown_ref: Markdown 图片引用。
+        error: 失败时的错误描述。
+        metadata: 保存结果元数据，缺省为空字典。
     """
 
     def __init__(
@@ -150,16 +146,7 @@ class AutoSaveResult:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
     ):
-        """初始化自动保存结果。
-
-        Args:
-            success: 是否保存成功。
-            original_url: 原始图片 URL，Base64 保存路径为 base64 标识串。
-            local_path: 保存成功时的本地文件路径，未保存时为 None。
-            markdown_ref: Markdown 图片引用，未生成时为 None。
-            error: 失败时的错误描述，成功时为 None。
-            metadata: 保存结果元数据；None 时置为空字典。
-        """
+        """初始化自动保存结果。"""
         self.success = success
         self.original_url = original_url
         self.local_path = local_path
@@ -170,10 +157,9 @@ class AutoSaveResult:
     def to_dict(self) -> dict[str, Any]:
         """将保存结果序列化为字典，仅包含已设置的字段。
 
-        original_url、local_path 与 markdown_ref 为数据字段，过 sanitize_data_text
-        剥离 userinfo 凭据与控制字符但不做常规截断，签名 URL 与本地路径保持完整可用；
-        error 为自由文本，过 sanitize_error_text 截断。各字段的净化与 results.py 中
-        data 项的对应字段对齐，防止同名字段在两条输出通道防护不对称。
+        original_url、local_path 与 markdown_ref 过 sanitize_data_text 剥离凭据与
+        控制字符但不截断，签名 URL 与本地路径保持完整可用；error 为自由文本过
+        sanitize_error_text 截断，净化口径与 results.py 的 data 项对齐。
         """
         result = {"success": self.success, "original_url": sanitize_data_text(self.original_url)}
 
@@ -193,18 +179,7 @@ class AutoSaveResult:
 
 
 class AutoSaveManager:
-    """自动保存管理器，协调并发下载、文件写入与节流清理。
-
-    Attributes:
-        file_manager: 文件管理器，负责保存路径生成与字节写入。
-        download_manager: 下载管理器，自建或由外部共享。
-        max_file_size: 最大文件大小（字节）。
-        max_concurrent: 最大并发下载数。
-        date_folder: 是否按日期创建文件夹。
-        cleanup_days: 自动清理天数，0 表示不按天清理。
-        max_total_bytes: 保存目录总字节上限，None 表示不限制。
-        fsync: 落盘是否在原子替换前执行 fsync。
-    """
+    """自动保存管理器，协调并发下载、文件写入与节流清理。"""
 
     def __init__(
         self,
@@ -261,11 +236,9 @@ class AutoSaveManager:
     async def close(self) -> None:
         """释放底层下载资源。
 
-        仅关闭本实例自建的下载管理器；外部共享的下载管理器由其所有者管理，如 lifespan。
-        不等待在途后台清理任务：清理仅访问文件系统、不依赖下载会话，失败已在任务内
-        写入退避时间戳并记录日志，无需 close 同步；模块级任务集合上的等待反而使请求
-        返回路径被全量目录遍历阻塞，并造成跨请求延迟耦合。退出前的等待收敛在
-        drain_background_cleanup_tasks，由进程级清理入口调用。
+        仅关闭本实例自建的下载管理器，外部共享的由其所有者管理；不等待在途后台
+        清理任务，避免请求返回路径被全量目录遍历阻塞，退出前的等待收敛在
+        drain_background_cleanup_tasks。
         """
         if self._owns_download_manager:
             await self.download_manager.close()
@@ -273,12 +246,10 @@ class AutoSaveManager:
     async def _maybe_cleanup(self) -> None:
         """按目录节流触发清理，每个 base_dir 在最短间隔内仅执行一次。
 
-        清理入口不设开关短路：遗留 .part 孤儿清扫须在 auto-save 启用时无条件可达，
-        两项清理策略均显式关闭的部署下进程崩溃遗留的临时文件同样被回收，不无界
-        累积。按天清理与配额驱逐仍由 run_cleanup_policies 按各自开关分别门控。
-        节流时间戳仅在清理成功后保留，失败时改写为短退避时间戳，使下次重试至少
-        等待退避秒数，与完整节流间隔解耦；锁内完成检查与占位保证并发请求不会同时
-        进入清理。
+        清理入口不设开关短路：.part 孤儿清扫须在 auto-save 启用时无条件可达，两项
+        清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐仍按
+        各自开关门控。节流时间戳仅清理成功后保留，失败改写为短退避时间戳；锁内
+        完成检查与占位，并发请求不会同时进入清理。
         """
         base_key = str(self.file_manager.base_dir)
         now = time.time()
@@ -286,10 +257,8 @@ class AutoSaveManager:
             previous = _cleanup_last_run.get(base_key, 0.0)
             if now - previous < _CLEANUP_MIN_INTERVAL_SECONDS:
                 return
-            # 写入后移到链尾保持真 LRU：对已存在键赋值不移动条目位置，刚刷新节流
-            # 时间戳的键若滞留链首会被容量驱逐连时间戳一并移除，同目录的下一次
-            # 保存视为从未节流而再次触发并发清理，正常清理被并发方的删除竞争
-            # 误判为失败并写入退避时间戳。
+            # 写入后移到链尾保持真 LRU：对已有键赋值不移动位置，刚刷新的节流时间戳
+            # 若滞留链首会被容量驱逐，同目录下次保存会误判为从未节流而并发触发清理。
             _cleanup_last_run[base_key] = now
             _cleanup_last_run.move_to_end(base_key)
             while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
@@ -302,12 +271,11 @@ class AutoSaveManager:
     async def _run_cleanup_in_background(self, base_key: str) -> None:
         """在后台线程执行清理，失败时写入短退避时间戳。
 
-        run_cleanup_policies 对扫描级与逐项错误宽捕获并收入返回值 errors 列表而非
-        上抛，逐项失败同样写入短退避时间戳：部分失败意味着目录可能仍超限，下次批量
-        保存应重试而非等待完整节流间隔，重试频率由退避秒数封顶。
+        run_cleanup_policies 宽捕获扫描级与逐项错误并收入 errors 而非上抛，逐项
+        失败同样写退避时间戳：目录可能仍超限，下次保存应按退避秒数重试而非等待
+        完整节流间隔。
         """
         try:
-            # 单次目录扫描依次执行按天清理与总量配额驱逐，避免两策略各自全目录遍历。
             outcome = await asyncio.to_thread(
                 self.file_manager.run_cleanup_policies,
                 self.cleanup_days,
@@ -325,10 +293,9 @@ class AutoSaveManager:
     async def _apply_cleanup_failure_backoff(self, base_key: str) -> None:
         """清理失败后写入短退避时间戳，使失败重试有独立节流下限。
 
-        时间戳取 now - interval + backoff 形态，下次调用须再等待退避秒数方可重试；
-        回写清理前旧值会使失败后的首次调用立即再次触发全目录扫描，高频保存下持续
-        失败的清理退化为每次保存都扫描目录。与 _maybe_cleanup 同步移到链尾，保持
-        驱逐按最近使用序进行。
+        时间戳取 now - interval + backoff 形态，下次调用须再等待退避秒数方可重试，
+        避免高频保存下持续失败的清理退化为每次保存都扫描目录；与 _maybe_cleanup
+        同步移到链尾，保持驱逐按最近使用序。
         """
         async with _cleanup_lock:
             _cleanup_last_run[base_key] = (
@@ -427,8 +394,8 @@ class AutoSaveManager:
     ) -> tuple[bytes, str, str]:
         """同步解码 base64 并推断扩展名与内容哈希。
 
-        strip/b64decode/sha256 均为 CPU 密集或全量遍历操作，集中于此供 save_base64_image
-        经 asyncio.to_thread 调用，避免阻塞事件循环。
+        strip/b64decode/sha256 均为 CPU 密集或全量遍历操作，集中于此供
+        save_base64_image 经 asyncio.to_thread 调用。
         """
         raw_payload = payload or ""
         if not raw_payload or raw_payload.isspace():
@@ -460,8 +427,8 @@ class AutoSaveManager:
         if not is_known_image_bytes(content_bytes):
             raise AutoSaveError("Base64 数据不是受支持的图片格式")
 
-        # 扩展名以字节签名嗅探为准，与下载路径嗅探修正最终路径的口径对称；mime 仅作
-        # 嗅探失败时的回退，data URI 声明与字节不符时落盘扩展名仍与实际内容一致。
+        # 扩展名以字节签名为准，与下载路径口径对称；mime 仅作嗅探失败回退，data URI
+        # 声明与字节不符时落盘扩展名仍与实际内容一致。
         extension = infer_extension_from_bytes(
             content_bytes, default=self._extension_from_mime(mime)
         )
@@ -556,10 +523,10 @@ class AutoSaveManager:
     ) -> list[AutoSaveResult]:
         """并发执行保存任务并归集结果。
 
-        限制并发、将异常归一化为失败结果、统计成功数并触发节流清理。fallback_url_key
-        指定 url 分支从 image_data 取原始标识的键；为 None 时固定为 "base64"。
-        入参为协程工厂而非协程对象：协程在获得信号量后才创建，批量被整体取消时仍在
-        排队的任务不遗留未 await 的协程对象，避免 GC 阶段的 RuntimeWarning 噪音。
+        限制并发、将异常归一化为失败结果、统计成功数并触发节流清理；fallback_url_key
+        指定 url 分支从 image_data 取原始标识的键，None 时固定为 "base64"。入参为
+        协程工厂而非协程对象，批量被整体取消时仍在排队的任务不遗留未 await 的协程，
+        避免 GC 阶段的 RuntimeWarning 噪音。
         """
         # semaphore 保持局部构造：AutoSaveManager 按调用新建且每个实例至多执行一次
         # 批量保存，提升为实例属性不会带来复用收益。

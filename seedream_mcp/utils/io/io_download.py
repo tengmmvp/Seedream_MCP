@@ -2,21 +2,16 @@
 
 核心安全设计为四层 SSRF 防护，纵深防御逐层收紧：
 
-1. 静态 URL 校验：由 ``_validate_url_static`` 实现，解析阶段即拒绝私网、保留地址及
-   非公网 IP 字面量，把 ``file://``、``http://127.0.0.1`` 等直接伪造挡在网络层外。
-2. DNS 公网解析与连接钉死：由 ``_resolve_public_ips`` 校验主机名解析结果均为公网 IP，
-   会话连接器绑定 ``_PublicIpPinningResolver`` 把连接目标钉死为校验通过的公网 IP，
-   aiohttp 不在连接前二次独立解析，从根本上闭合 DNS rebinding 窗口。
-3. 连接后对端 IP 复核：由 ``_validate_connected_peer_ip`` 实现，实际建立连接后再次校验
-   对端 IP，作为第二层钉死之上的纵深防御，应对解析器与连接之间的残余窗口。
-4. 逐跳重定向校验：由 ``_attempt_download`` 的重定向循环实现，禁用自动重定向，每跳目标都
-   重新走完整校验，防止经由重定向绕过跳转到内网；跳向不同源时剥离调用方定制请求头，
-   仅保留通用头，防止定制头原样发给重定向目标。
+1. 静态 URL 校验：解析阶段即拒绝非 http/https 协议、凭据、本地主机名与非公网 IP
+   字面量。
+2. DNS 公网解析与连接钉死：域名解析结果须全部为公网 IP，会话连接器绑定
+   ``_PublicIpPinningResolver`` 把连接目标钉死为校验通过的 IP，闭合 DNS rebinding 窗口。
+3. 连接后对端 IP 复核：连接建立后再次校验对端 IP，作为钉死之上的纵深防御。
+4. 逐跳重定向校验：禁用自动重定向，每跳重新走完整校验；跳向不同源时剥离调用方
+   定制请求头。
 
-其余关键设计：失败按递增延迟加随机抖动重试；下载先写 ``tempfile.mkstemp`` 生成的
-不可预测随机名临时文件再 ``os.replace`` 原子替换，避免半写文件对外可见并规避可预测
-路径被预置符号链接覆盖；响应须经 Content-Type 与字节签名双重校验后方落盘，防
-Content-Type 伪造。
+其余关键设计：失败按递增延迟加随机抖动重试；先写不可预测随机名临时文件再
+``os.replace`` 原子替换；响应须经 Content-Type 与字节签名双重校验后方落盘。
 """
 
 from __future__ import annotations
@@ -59,13 +54,12 @@ _WRITE_BATCH_BYTES = 4 * 1024 * 1024
 # 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验。
 _MAX_REDIRECTS = 3
 
-# 跨源重定向时保留的通用请求头：与目标主机无关、不含调用方定制信息。其余请求头
-# （如为原主机定制的鉴权或跟踪头）在跳向不同源时剥离，不原样发给重定向目标。
+# 跨源重定向时保留的通用请求头：跳向不同源时其余定制头（如鉴权或跟踪头）被剥离，
+# 不原样发给重定向目标。
 _CROSS_ORIGIN_SAFE_REQUEST_HEADERS = frozenset({"user-agent", "accept"})
 
-# 同一图片格式的等价扩展名类：JPEG 的 .jpg 与 .jpeg、HEIF 的 .heif 与 .heic 互为
-# 别名后缀。字节签名嗅探结果与 URL 派生扩展名同属一个等价类时视为同格式，不改写
-# 落盘文件名；跨格式仍以字节签名为准修正。
+# 同一图片格式的等价扩展名类：.jpg 与 .jpeg、.heif 与 .heic 互为别名后缀。字节签名
+# 嗅探结果与 URL 派生扩展名同属一个等价类时视为同格式，不改写落盘文件名。
 _FORMAT_EQUIVALENT_EXTENSIONS: tuple[frozenset[str], ...] = (
     frozenset({".jpg", ".jpeg"}),
     frozenset({".heif", ".heic"}),
@@ -82,26 +76,21 @@ def _extensions_in_same_format(first: str, second: str) -> bool:
     return False
 
 
-# DNS 缓存条目硬上限：超限时先清理过期条目，仍超限则按最旧 expires_at 强制驱逐，
-# 防止长生命周期下持续解析不同 host 导致缓存无界增长。
+# DNS 缓存条目硬上限：超限时先清理过期条目，仍超限则按最旧 expires_at 强制驱逐。
 _DNS_CACHE_MAX_SIZE = 256
 
-# Windows getaddrinfo 失败抛 gaierror 时 errno 携带 winsock2.h 的 WSA 错误码，而非
-# POSIX EAI_* 常量（Windows 的 Python 通常不暴露 EAI_* 别名），须以字面值并入终态
-# 集合才能在 Windows 生效：
-#   11001 WSAHOST_NOT_FOUND：主机不存在，对应 POSIX EAI_NONAME 终态。
-#   11004 WSANO_DATA：无该类型 DNS 记录，对应 POSIX EAI_NODATA 终态。
-#   11003 WSANO_RECOVERY：不可恢复的解析器故障，对应 POSIX EAI_FAIL 类终态。
-# 11002 WSATRY_AGAIN 对应 EAI_AGAIN 瞬时故障，保持可重试不入终态集合。POSIX 平台的
-# EAI_* 码为负值或个位小值，与上述正数值不相交，双平台码表经数值并集统一且无歧义。
+# Windows getaddrinfo 失败抛 gaierror 时 errno 携带 winsock2.h 的 WSA 错误码而非
+# POSIX EAI_* 常量，须以字面值并入终态集合：11001 主机不存在对应 EAI_NONAME，
+# 11004 无该类型 DNS 记录对应 EAI_NODATA，11003 不可恢复故障对应 EAI_FAIL；11002
+# 为瞬时故障保持可重试。POSIX 的 EAI_* 码为负值或个位小值，与正数 WSA 码经数值
+# 并集统一且无歧义。
 _WSA_HOST_NOT_FOUND = 11001
 _WSA_NO_DATA = 11004
 _WSA_NO_RECOVERY = 11003
 
-# getaddrinfo 的 gaierror 中属永久失败的错误码集合：域名不存在、查询参数不受支持或
-# 不可恢复的解析器故障（EAI_FAIL 为 non-recoverable failure），重试无法恢复。其余
-# 错误码一律按可重试分类，包括 EAI_AGAIN 等瞬时解析故障；瞬时抖动远多于永久错误，
-# 且重试次数上限兜底。平台缺少对应常量时经 getattr 取 None 后从集合中剔除。
+# getaddrinfo 的 gaierror 中属永久失败的错误码集合：域名不存在、参数不受支持或不可
+# 恢复的解析器故障，重试无法恢复；其余错误码（含 EAI_AGAIN 等瞬时故障）一律可重试，
+# 重试次数上限兜底。平台缺少对应常量时经 getattr 剔除。
 _TERMINAL_GAI_ERRNOS = frozenset(
     code
     for code in (
@@ -133,9 +122,8 @@ def sanitize_url(url: str) -> str:
     """
     try:
         parsed = urlparse(url)
-        # 重建不含 userinfo 的 netloc，避免 user:pass@ 凭据进入日志。
-        # hostname 对 IPv6 字面量会剥离方括号，重建时需补回，否则 IPv6 字面量的
-        # host 与端口边界将变得模糊。
+        # 重建不含 userinfo 的 netloc；hostname 对 IPv6 字面量剥离方括号，需补回以
+        # 保持 host 与端口边界。
         host = parsed.hostname or ""
         if ":" in host:
             host = f"[{host}]"
@@ -209,9 +197,8 @@ def _public_ip_rejection_reason(
 ) -> str | None:
     """返回 IP 不可作为公网下载目标的拒绝原因，None 表示通过。
 
-    统一静态 URL、DNS 解析、连接对端 IP 三处校验：拒绝非公网地址、RFC 6598 CGNAT 段，
-    以及 6to4/Teredo 等可封装内网地址的 IPv6 段。入参覆盖 ip_address 解析可能返回的
-    IPv4 与 IPv6 两类地址，递归校验 IPv6 内嵌 IPv4 时传入提取出的 IPv4Address。
+    统一静态 URL、DNS 解析与连接对端 IP 三处校验：拒绝非公网地址、RFC 6598 CGNAT
+    段及 6to4/Teredo 等可封装内网地址的 IPv6 段，IPv6 内嵌 IPv4 递归校验。
     """
     if ip_obj.version == 4 and ip_obj in _CGNAT_NETWORK:
         return "CGNAT地址(100.64.0.0/10)"
@@ -254,10 +241,9 @@ class DownloadError(SeedreamMCPError):
 class _DnsInflight:
     """DNS 在途解析条目：共享 task 与消费者计数，驱动兜底日志的登记判定。
 
-    与 images.image_prepare 的 _PrepareInflight 同构：创建者与每个等待者各持一份
-    消费者计数，await 期间登记、finally 释放；任一消费者经 shield 收到结果或异常
-    时置位 observed。最后一个消费者放弃且结果未被任何人消费时才登记孤儿失败兜底
-    日志，异常已送抵消费者的场景由既有错误通道记录，同一异常不重复入日志。
+    与 images.image_prepare 的 _PrepareInflight 同构：消费者 await 期间登记计数、
+    finally 释放，收到结果或异常时置位 observed；全部消费者放弃且结果未被消费时
+    才登记孤儿失败兜底日志。
     """
 
     __slots__ = ("task", "consumers", "observed")
@@ -271,8 +257,7 @@ class _DnsInflight:
 class RetryableDownloadError(DownloadError):
     """可重试的下载错误，如 HTTP 5xx、DNS 瞬时解析失败等瞬时故障。
 
-    继承 DownloadError，可被按 DownloadError 捕获的调用方统一处理；重试循环中
-    须先于 DownloadError 单独捕获，将其作为可重试故障而非终态错误处理。
+    重试循环中须先于 DownloadError 单独捕获，作为可重试故障而非终态错误处理。
     """
 
     pass
@@ -281,11 +266,9 @@ class RetryableDownloadError(DownloadError):
 class _PublicIpPinningResolver(AbstractResolver):
     """自定义 DNS 解析器，把连接目标钉死为经 SSRF 公网校验的 IP，防 DNS rebinding。
 
-    aiohttp 默认解析器会在连接前独立解析主机名，存在静态校验与连接之间的 DNS
-    rebinding 窗口。本解析器接管解析，域名结果一律经 ``_resolve_public_ips`` 公网
-    校验，使 aiohttp 只能连接到校验通过的公网 IP。返回结果保留 URL 原始主机名作为
-    ``hostname``，aiohttp 据此设置 TLS 的 SNI 与证书校验目标，故证书校验不被削弱。
-    IP 字面量由 aiohttp 连接器在调用解析器前直接短路，此处不再重复处理。
+    接管 aiohttp 的连接前解析，域名结果一律经 ``_resolve_public_ips`` 公网校验，
+    只能连接到校验通过的公网 IP。返回结果保留 URL 原始主机名作为 ``hostname``，
+    TLS 的 SNI 与证书校验目标不变，证书校验不被削弱；IP 字面量由连接器直接短路。
     """
 
     def __init__(self, manager: "DownloadManager") -> None:
@@ -295,9 +278,6 @@ class _PublicIpPinningResolver(AbstractResolver):
         self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
     ) -> list[ResolveResult]:
         """解析主机名为经公网校验的 IP 列表，连接目标随之钉死为校验结果。
-
-        返回的 ResolveResult 保留 URL 原始主机名作为 hostname，供 aiohttp 设置 TLS
-        的 SNI 与证书校验目标。解析失败的异常语义由 ``_resolve_public_ips`` 定义。
 
         Args:
             host: 待解析的主机名。
@@ -311,7 +291,6 @@ class _PublicIpPinningResolver(AbstractResolver):
             DownloadError: 解析结果为空、含非法 IP 或命中非公网地址等终态失败。
             RetryableDownloadError: DNS 瞬时解析故障等可重试失败。
         """
-        # 忽略调用方请求的 family，返回全部校验通过 IP 及其真实 family，由 aiohttp 选择。
         ips = await self._manager._resolve_public_ips(host)
         results: list[ResolveResult] = []
         for ip in ips:
@@ -334,14 +313,7 @@ class _PublicIpPinningResolver(AbstractResolver):
 
 
 class DownloadManager:
-    """异步图片下载管理器，内置 SSRF 四层防护与递增退避重试。
-
-    Attributes:
-        timeout: 下载超时时间（秒）。
-        max_retries: 最大重试次数。
-        retry_delay: 重试延迟时间（秒）。
-        max_file_size: 最大文件大小（字节）。
-    """
+    """异步图片下载管理器，内置 SSRF 四层防护与递增退避重试。"""
 
     def __init__(
         self,
@@ -360,9 +332,8 @@ class DownloadManager:
             retry_delay: 重试延迟时间（秒）。
             max_file_size: 最大文件大小（字节）。
             dns_cache_ttl: DNS 解析缓存 TTL（秒）。
-            connection_limit: 底层连接器的并发连接上限，None 时沿用 aiohttp 默认。供
-                资源层施加进程级下载并发上限；经构造参数传入使会话因 close 重建时
-                连接器自动保持同一上限，不依赖调用方在会话建立后二次注入。
+            connection_limit: 底层连接器的并发连接上限，None 时沿用 aiohttp 默认；
+                经构造参数传入使会话重建时连接器自动保持同一上限。
         """
         self.timeout = timeout
         self.max_retries = max_retries
@@ -389,26 +360,21 @@ class DownloadManager:
     def _download_total_budget(self) -> float:
         """返回单次下载会话、跨尝试累计与重定向链逐跳累计共用的总时长上限，单位秒。
 
-        上限按停滞超时的 120 倍推导且不低于 1 小时，默认配置下为 1 小时（50MB 上限
-        对应约 14KB/s 平均速率），只封堵恶意慢速滴流，不影响正常慢网络下大图片的完整
-        下载。会话 timeout、download_image 的跨尝试累计预算与 _attempt_download 的
-        重定向链逐跳累计校验取同一值：无累计校验时慢滴流响应每次尝试都可耗满单次
-        封顶，重定向链每跳又各享全额单次窗口，重试与跳数把单个保存任务的最长占用
-        放大为单次封顶乘尝试数；三处取同一值后总占用被约束在单次封顶的小常数倍内。
+        上限按停滞超时的 120 倍推导且不低于 1 小时，默认配置下为 1 小时，只封堵
+        恶意慢速滴流，不影响正常慢网络下大图片的完整下载。三处取同一值：无累计
+        校验时，重试与重定向跳数会把单个保存任务的最长占用放大为单次封顶乘尝试
+        数；统一后总占用被约束在单次封顶的小常数倍内。
         """
         return max(float(self.timeout) * 120, 3600.0)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """获取可用的 aiohttp 会话。
 
-        首次创建用双检锁串行化，避免并发请求各自创建会话导致旧会话泄漏。会话绑定
-        ``_PublicIpPinningResolver`` 的连接器，使 aiohttp 连接目标经 SSRF 公网校验后
-        钉死，不在连接前二次独立解析，闭合 DNS rebinding 窗口。构造期注入的
-        connection_limit 在每次构造连接器时传入，会话重建分支自动保持同一上限。
-
-        超时策略：sock_connect 与 sock_read 仅约束连接建立与单次读取停滞，服务端按
-        停滞阈值间歇发送字节的慢滴流响应可无限拖住任务，故另设宽松的总时长上限
-        封顶整个下载，上限值经 _download_total_budget 推导。
+        首次创建用双检锁串行化，避免并发请求各自创建会话导致泄漏；会话绑定
+        ``_PublicIpPinningResolver`` 的连接器，连接目标经 SSRF 公网校验后钉死，
+        connection_limit 在每次构造连接器时传入。sock_connect/sock_read 仅约束
+        连接建立与单次读取停滞，慢滴流响应可无限拖住任务，故另以宽松总时长上限
+        封顶整个下载。
         """
         if self._session is None or self._session.closed:
             async with self._session_lock:
@@ -487,13 +453,10 @@ class DownloadManager:
     async def _resolve_public_ips(self, host: str) -> tuple[str, ...]:
         """解析域名并校验所有解析结果为公网 IP，属 SSRF 第二层防护。
 
-        防 DNS rebinding：攻击者可能让静态校验阶段解析到公网 IP，随后在真正
-        发起连接前将 DNS 切换到内网地址。解析结果带 TTL 缓存以减少重复查询。
-
-        同 host 并发下载在缓存冷启动时经在途 task 去重共享一次 getaddrinfo：缓存 miss
-        且无在途 task 时创建并登记，并发调用 await 同一 task，避免 N 个并发下载各自触发
-        系统解析。在途 task 经 asyncio.shield 隔离取消传播，创建者被取消时底层 task 继续
-        运行至完成并写入缓存，保护共享同一 task 的其他等待者。
+        防 DNS rebinding：攻击者可在静态校验后把 DNS 切换到内网地址。结果带 TTL
+        缓存；同 host 并发下载在缓存冷启动时经在途 task 去重共享一次 getaddrinfo，
+        在途 task 经 shield 隔离取消传播，创建者被取消时底层 task 继续运行并写入
+        缓存，保护其他等待者。
 
         Args:
             host: 待解析并校验的主机名。
@@ -515,19 +478,16 @@ class DownloadManager:
                 self._dns_cache.pop(host, None)
             entry = self._dns_inflight.get(host)
             if entry is None:
-                # 缓存与在途登记在同一锁区间内完成，中间无 await，单线程事件循环下
-                # 并发协程不会交错创建重复 task。
+                # 缓存与在途登记在同一锁区间内完成且中间无 await，不会交错创建重复 task。
                 entry = _DnsInflight(asyncio.ensure_future(self._resolve_and_cache(host)))
                 self._dns_inflight[host] = entry
-        # 锁外以消费者身份 await 共享 task；shield 使被取消的等待者不连带取消底层
-        # task，保护共享同一解析的其余等待者。
+        # 锁外 shield 等待共享 task，被取消的等待者不连带取消底层解析。
         entry.consumers += 1
         try:
             try:
                 return await asyncio.shield(entry.task)
             except Exception:
-                # 异常经 shield 送抵本消费者，由 download_image 的既有错误通道记录；
-                # 置位已消费标记后，最后一个消费者放弃时不再登记兜底日志。
+                # 异常送达本消费者，置位已消费标记，不再登记兜底日志。
                 entry.observed = True
                 raise
         finally:
@@ -537,9 +497,8 @@ class DownloadManager:
     def _arm_dns_if_abandoned(self, entry: _DnsInflight) -> None:
         """最后一个潜在消费者放弃且结果未被消费时，登记兜底日志回调。
 
-        仍有消费者在等待或任一消费者已收到结果时，异常由其既有错误通道记录，
-        不登记；登记前提在回调触发时复查：登记之后新消费者加入又放弃或消费的
-        窗口内前提可能已不成立，复查失败即静默跳过，避免同一异常重复入日志。
+        回调触发时复查登记前提：登记后新消费者加入又放弃或消费的窗口内前提可能
+        已不成立，复查失败即静默跳过，避免同一异常重复入日志。
         """
 
         def _log_if_orphaned(task: "asyncio.Task[tuple[str, ...]]") -> None:
@@ -570,15 +529,11 @@ class DownloadManager:
     async def _resolve_public_ips_uncached(self, host: str) -> tuple[str, ...]:
         """执行单次 getaddrinfo 与公网校验，不做缓存与在途去重。
 
-        getaddrinfo 由事件循环卸载到线程执行器，无内置超时；以 wait_for 施加上限，超时
-        抛 asyncio.TimeoutError 交由 download_image 重试。wait_for 超时仅取消等待协程，
-        底层 getaddrinfo 工作线程无法被中断，会继续运行至系统解析完成后丢弃结果；该线程
-        一次性且其结果已被丢弃。经 _resolve_public_ips 的在途去重，同一 host 至多一个在途
-        登记的解析；超时重试期间被放弃的旧线程可能与新线程短暂并存，但在途数受 max_retries
-        与 max_concurrent 下载并发上限约束，故不额外施加并发信号量。asyncio.TimeoutError
-        是内建 TimeoutError（OSError 子类）的别名，须在调用方先于
-        except OSError 捕获以保持可重试语义。gaierror 按错误码分类：域名不存在类错误为
-        终态 DownloadError，EAI_AGAIN 等瞬时解析故障为可重试错误，同样交由重试。
+        getaddrinfo 卸载到线程执行器且无内置超时，以 wait_for 施加上限，超时交由
+        download_image 重试；wait_for 仅取消等待协程，底层线程继续运行但结果已丢弃，
+        在途数受 max_retries 与下载并发上限约束。asyncio.TimeoutError 是内建
+        TimeoutError（OSError 子类）的别名，须在调用方先于 except OSError 捕获。
+        gaierror 按错误码分类：永久错误为终态 DownloadError，瞬时故障可重试。
         """
         loop = asyncio.get_running_loop()
         try:
@@ -683,9 +638,8 @@ class DownloadManager:
     ) -> None:
         """连接建立后再次校验对端 IP，属 SSRF 第三层防护。
 
-        第二层 resolve-and-pin 已把连接目标钉死为校验通过的公网 IP，本层作为纵深
-        防御：即便存在解析器与连接之间的残余窗口使对端 IP 落入内网，仍据此拒绝。
-        无法提取对端 IP 时 fail-closed 拒绝下载，避免因校验信息缺失而放行潜在的内网连接。
+        作为 resolve-and-pin 之上的纵深防御：解析器与连接之间的残余窗口使对端
+        IP 落入内网时仍据此拒绝；无法提取对端 IP 时 fail-closed 拒绝下载。
 
         Args:
             response: 已建立连接的响应对象。
@@ -732,9 +686,8 @@ class DownloadManager:
         if redirect_count >= _MAX_REDIRECTS:
             raise DownloadError("重定向次数过多")
         next_url = urljoin(current_url, location)
-        # 拒绝协议降级：https 起始的下载不允许经重定向落到 http，消除降级到明文链路
-        # 的攻击面，与逐跳完整校验共同收紧重定向信任边界。scheme 先归一化小写再
-        # 比较，与 _url_origin 和 _validate_url_static 的既有口径一致。
+        # 拒绝协议降级：https 起始的下载不允许经重定向落到明文 http；scheme 归一化
+        # 小写后比较，与 _url_origin 等既有口径一致。
         current_scheme = (urlparse(current_url).scheme or "").lower()
         next_scheme = (urlparse(next_url).scheme or "").lower()
         if current_scheme == "https" and next_scheme != "https":
@@ -754,20 +707,11 @@ class DownloadManager:
         """将 200 响应体下载到临时文件，校验大小与字节签名后原子替换，返回结果字典。
 
         落盘协议由 io_file.atomic_replace_from_fd 统一提供，与 io_storage.save_bytes
-        复用同一骨架：随机名临时文件规避符号链接 TOCTOU，写入后 os.replace 原子替换，失败
-        清理临时文件。writer 以 closefd=False 包装 fd，骨架独占 fd 关闭。fsync 透传至
-        骨架，开启时写入后、替换前把已接收字节刷入稳定存储。content-length
-        预检、流式写入累计上限、首字节签名校验三道关卡任一失败均抛出 DownloadError，由
-        调用方按终态或可重试分类处理。
-
-        扩展名以实际字节签名为准：签名校验通过后用 head_bytes 推断真实格式，与
-        save_path 的 URL 派生扩展名不一致时经 writer 返回值把最终路径修正为嗅探结果，
-        与 base64 保存路径的 infer_extension_from_bytes 行为对齐，避免无后缀的签名
-        URL 恒落 .jpeg 或扩展名与内容不符。同格式的别名扩展名属同一等价类不改写，
-        .jpg URL 的 JPEG 内容保留 .jpg，跨格式仍修正。
-
-        start_time 为挂钟基准的起始时刻，仅用于 download_time 的人读度量，不参与
-        预算判定；预算基准由 _attempt_download 以单调钟另行持有。
+        复用同一骨架；content-length 预检、流式写入累计上限、首字节签名校验三道
+        关卡任一失败均抛 DownloadError。扩展名以实际字节签名为准：与 save_path 的
+        URL 派生扩展名不一致且不属同一格式等价类时，经 writer 返回值修正最终路径，
+        与 base64 保存路径的 infer_extension_from_bytes 对齐。start_time 为挂钟
+        基准，仅用于 download_time 人读度量，不参与预算判定。
         """
         content_length = response.headers.get("content-length")
         if content_length:
@@ -811,8 +755,7 @@ class DownloadManager:
             # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘。
             if not is_known_image_bytes(head_bytes):
                 raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
-            # 签名已确认受支持，推断必然命中具体格式；与 URL 派生扩展名不一致且不属
-            # 同一格式等价类时修正最终路径，同格式别名后缀互不改写。
+            # 与 URL 派生扩展名不一致且不属同一格式等价类时修正最终路径。
             sniffed = infer_extension_from_bytes(head_bytes)
             if sniffed != save_path.suffix.lower() and not _extensions_in_same_format(
                 sniffed, save_path.suffix
@@ -824,7 +767,6 @@ class DownloadManager:
         # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成。
         await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix, fsync=fsync)
 
-        # download_time 为人读的挂钟度量语义，不参与预算判定。
         download_time = time.time() - start_time
         logger.info(
             "图片下载成功: {} ({} 字节, {:.2f}秒)",
@@ -855,24 +797,14 @@ class DownloadManager:
     ) -> dict[str, Any]:
         """执行单次下载尝试，含逐跳重定向循环，返回成功落盘结果字典。
 
-        SSRF 第四层防护：禁用自动重定向改为逐跳手动处理，每跳重新走静态、DNS 与连接
-        对端 IP 完整校验，防止经由重定向绕过跳转到内网地址。依赖网络状态的 DNS 校验
-        在本方法内执行，保障外层 download_image 的 max_retries 对网络故障生效。
-        resolve-and-pin：会话连接器绑定 _PublicIpPinningResolver，校验通过的公网 IP 被
-        钉死为连接目标，aiohttp 不再独立二次解析，DNS rebinding 无从把实际连接切向内网；
-        _validate_connected_peer_ip 作为纵深防御保留。
-
-        重定向链逐跳累计校验总预算：会话 total 超时按单次请求计窗，每跳各享全额窗口，
-        跟随下一跳前按起始时间累计校验，超限抛 asyncio.TimeoutError 交由外层按超时
-        分类重试，恶意慢滴流重定向链不得把单次尝试拖至跳数倍封顶。start_time 为
-        单调钟基准的预算起点；wall_start_time 为挂钟基准，仅透传给
-        _download_response_to_temp 的 download_time 人读度量。
-
-        请求头跨源防护：调用方为原始主机定制的请求头在重定向跳向不同源时剥离，仅保留
-        User-Agent 与 Accept 等通用头，防止定制头原样发给重定向目标泄露内部信息。
-
-        HTTP 5xx 抛 RetryableDownloadError 由外层纳入退避重试；4xx、文件过大、字节签名、
-        重定向等语义明确的终态错误抛 DownloadError 由外层原样上抛不重试。
+        SSRF 第四层防护：禁用自动重定向，每跳重新走静态、DNS 与连接对端 IP 完整
+        校验；会话连接器已把校验通过的公网 IP 钉死为连接目标，DNS rebinding 无从
+        把实际连接切向内网。重定向链逐跳累计校验总预算：会话 total 超时按单次请求
+        计窗，跟随下一跳前按起始时间累计校验，慢滴流重定向链不得把单次尝试拖至
+        跳数倍封顶。跳向不同源时剥离调用方定制请求头，仅保留通用头。HTTP 5xx 抛
+        RetryableDownloadError 由外层纳入退避重试，其余语义明确的终态错误原样上抛
+        不重试。start_time 为单调钟基准的预算起点，wall_start_time 仅供
+        download_time 人读度量。
         """
         current_url = url
         current_headers = headers
@@ -888,9 +820,7 @@ class DownloadManager:
 
                 next_url = self._handle_redirect_response(response, current_url, redirect_count)
                 if next_url is not None:
-                    # 跟随下一跳前按起始时间累计校验总预算：每跳的会话 total 超时独立
-                    # 计窗，无累计校验时慢滴流重定向链可把单次尝试拖至跳数倍封顶；
-                    # start_time 为单调钟基准，与 download_image 的捕获同基准。
+                    # 每跳的会话 total 超时独立计窗，跟随前按单调钟累计校验总预算。
                     elapsed = time.monotonic() - start_time
                     if elapsed >= self._download_total_budget():
                         raise asyncio.TimeoutError(
@@ -906,8 +836,8 @@ class DownloadManager:
                     continue
 
                 if response.status != 200:
-                    # 5xx 与 408/429 多为 CDN/网关瞬时故障或限流，纳入重试而非终态失败，
-                    # 避免并发批量下载触发限流后自动保存静默丢弃本地副本。
+                    # 5xx 与 408/429 多为瞬时故障或限流，纳入重试避免批量下载触发限流
+                    # 后自动保存静默丢弃本地副本。
                     if response.status in (408, 429) or 500 <= response.status < 600:
                         raise RetryableDownloadError(f"HTTP错误: {response.status}")
                     raise DownloadError(f"HTTP错误: {response.status}")
@@ -947,9 +877,8 @@ class DownloadManager:
             attempts。
 
         Raises:
-            DownloadError: URL 校验、内容校验等终态失败，或重试耗尽仍失败；
-                文件系统永久错误与无效 URL 同样以终态方式抛出。非下载语义的
-                意外异常按原类型上抛，不包装为 DownloadError。
+            DownloadError: URL 校验、内容校验等终态失败或重试耗尽；文件系统永久
+                错误与无效 URL 同为终态。非下载语义的意外异常按原类型上抛。
         """
         if headers is None:
             headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
@@ -1025,9 +954,8 @@ class DownloadManager:
                 logger.warning("文件系统错误 (尝试 {}): {}", attempt + 1, e, exc_info=True)
 
             except Exception as e:
-                # 编程 bug、序列化失败、值错误等非可重试意外错误直接抛出，不浪费退避等待。
-                # 上方分支已精确覆盖可重试场景：HTTP 5xx、超时、网络/传输、可重试文件系统错误。
-                # 调用方 auto_save 仍有兜底 except Exception 负责降级返回原始 URL。
+                # 编程 bug 等非可重试意外错误直接抛出不浪费退避等待；调用方 auto_save
+                # 仍有兜底 except Exception 负责降级返回原始 URL。
                 logger.warning(
                     "下载出现非预期错误，不再重试 (尝试 {}): {}",
                     attempt + 1,
@@ -1038,9 +966,8 @@ class DownloadManager:
 
             # 非末次尝试则按线性递增延迟加随机抖动退避后重试，抖动避免并发任务重试同步。
             if attempt < self.max_retries:
-                # 跨尝试累计时长预算从 start_time 起算，耗尽即停止重试：慢滴流响应
-                # 单次尝试可耗满会话总时长上限，无累计预算时重试按尝试数成倍放大
-                # 单个保存任务的占用；预算与单次封顶取同一值，见 _download_total_budget。
+                # 跨尝试累计预算耗尽即停止重试，防止重试按尝试数成倍放大单个保存
+                # 任务的占用；预算取值见 _download_total_budget。
                 elapsed = time.monotonic() - start_time
                 if elapsed >= self._download_total_budget():
                     logger.warning(

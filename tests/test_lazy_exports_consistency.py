@@ -1,10 +1,8 @@
 """守护测试：seedream_mcp.utils 包门面的延迟导出声明保持一致。
 
-``utils/__init__.py`` 采用 PEP 562 ``__getattr__`` 按需加载，公开接口由 ``__all__``
-与 ``_LAZY_EXPORTS`` 两处声明共同维护：前者列出对外公开的符号名，后者提供
-"导出名 -> (子模块, 属性名)" 的加载映射。二者一旦因只改一处而漂移，会导致对外
-符号静默丢失或 ``AttributeError``。本测试锁定两者一致性，并校验映射
-指向的真实目标均可解析。
+``utils/__init__.py`` 的公开接口由 ``__all__`` 与 ``_LAZY_EXPORTS`` 两处声明共同
+维护，只改一处而漂移会使对外符号静默丢失或抛 ``AttributeError``。本测试锁定两者
+一致，并校验映射指向的真实目标可解析。
 """
 
 from importlib import import_module

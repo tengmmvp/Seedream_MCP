@@ -37,11 +37,7 @@ _ENV_METADATA_KEY = "env"
 
 
 def _env_field(default: Any, env_name: str) -> Any:
-    """为 dataclass 字段绑定默认值与环境变量名元数据。
-
-    env_name 经字段 metadata 声明，使字段定义成为字段默认值与环境变量名映射的单一数据源，
-    _FIELD_ENV_MAP 与 ENV_DEFAULTS 据此反射派生。
-    """
+    """为 dataclass 字段绑定默认值与环境变量名，字段定义即两者映射的单一数据源。"""
     return field(default=default, metadata={_ENV_METADATA_KEY: env_name})
 
 
@@ -49,23 +45,20 @@ def _env_field(default: Any, env_name: str) -> Any:
 class SeedreamConfig:
     """Seedream MCP 工具配置。
 
-    封装 Seedream 服务的所有配置参数，包括 API 认证、模型设置、日志配置和自动保存功能。
-    各字段默认值与环境变量名经 _env_field 绑定于字段定义。
+    各字段默认值与环境变量名经 _env_field 绑定于字段定义，构造时经 validate
+    校验并规范化。
 
     Attributes:
         api_key: 火山引擎 API 密钥。
         base_url: API 端点 URL。
-        allow_http_base_url: http:// 明文 base_url 的显式豁免开关；http 明文会使 API
-            密钥在网络上裸传，默认拒绝。
+        allow_http_base_url: http:// 明文 base_url 的显式豁免开关；默认拒绝，仅自建
+            可信内网端点开启。
         model_id: 模型标识，构造校验时展开别名为完整 Model ID。
         default_size: 默认图像尺寸，构造校验时按模型能力标准化。
-        default_watermark: 默认是否在生成图片上添加水印。
         timeout: 通用超时秒数。
         api_timeout: API 调用超时秒数。
         max_retries: API 调用最大重试次数。
-        log_level: 日志级别。
         log_file: 日志文件路径，未设置时使用日志系统默认路径。
-        auto_save_enabled: 是否启用自动保存。
         auto_save_base_dir: 自动保存根目录，未设置时回退工作区 .seedream/images 目录。
         auto_save_download_timeout: 自动保存下载超时秒数。
         auto_save_max_retries: 自动保存下载最大重试次数。
@@ -74,30 +67,24 @@ class SeedreamConfig:
         auto_save_date_folder: 是否按日期子目录保存图片。
         auto_save_cleanup_days: 旧文件自动清理天数。
         auto_save_max_total_bytes: 保存目录总字节上限，超限按最旧文件优先驱逐；
-            None 表示不限制，配置链路显式设置 0 时归一为 None，负数由校验拒绝。
-        auto_save_fsync: 自动保存落盘是否在原子替换前执行 fsync。默认关闭：写入经
-            os.replace 原子可见，但字节到达稳定存储的时机由操作系统回写决定，进程或
-            主机崩溃存在最近写入丢失的窗口；对崩溃一致性有要求时开启。
+            None 表示不限制，显式设置 0 时归一为 None。
+        auto_save_fsync: 自动保存落盘是否在原子替换前执行 fsync，默认关闭；对崩溃
+            一致性有要求时开启。
         stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
         stream_chunk_size: SSE 流式响应读取块大小字节数。
-        response_body_limit: 上游响应体读取总量上限字节数，None 时按
-            auto_save_max_file_size × 20 推导；非流式 JSON、流式 JSON 与 SSE
-            三条读取路径共用。
+        response_body_limit: 上游响应体读取总量上限字节数，三条读取路径共用；None 时
+            按 auto_save_max_file_size × 20 推导。
         image_prepare_concurrency: 参考图预处理并发上限。
         prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
-        prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限，防止大图缓存
-            累积撑爆内存。
-        preview_enabled: 是否在生成工具结果中附带已保存图片的缩略图预览。预览为
-            长边不超过 768 像素的 JPEG ImageContent，与文本摘要同在 content 数组；
-            关闭后仅返回文本与 structuredContent，行为与本功能引入前一致。
+        prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限。
+        preview_enabled: 是否在生成工具结果中附带已保存图片的缩略图预览，长边不超过
+            768 像素；关闭后仅返回文本与 structuredContent。
         workspace_root: 无 MCP Roots 时本地文件访问边界的回退目录。
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌。
-        http_max_body_size: streamable-http 请求体大小上限字节数；默认 64MB，MCP 正常
-            载荷远小于 100MB，单图 data URI 上限约 40MB，兼顾多图融合。
+        http_max_body_size: streamable-http 请求体大小上限字节数，默认 64MB。
         http_allowed_hosts: 非回环绑定的 Host 头允许列表，条目支持 host、host:port
-            与尾部 :* 端口通配，语义对齐 SDK TransportSecuritySettings.allowed_hosts；
-            None 表示未配置，非回环绑定整体关闭 SDK 内层 Host 校验。仅经
-            SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量按逗号分隔解析，CLI 不暴露参数。
+            与尾部 :* 端口通配；None 表示整体关闭 SDK 内层 Host 校验。仅经
+            SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，CLI 不暴露参数。
     """
 
     api_key: str
@@ -172,9 +159,7 @@ class SeedreamConfig:
             raise SeedreamConfigError(
                 f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
             )
-        # netloc 缺失的畸形 URL 在构造期拒绝：https:// 与 https:foo 等形态若放行到运行时，
-        # 会在 httpx 拼请求时抛 UnsupportedProtocol 落入网络错误重试，错误归约档变为
-        # network_error 而非此处的 config_error。
+        # netloc 缺失的畸形 URL 在构造期拒绝，避免运行期才以网络错误档失败。
         if not urlparse(self.base_url).netloc.strip():
             raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
         if base_url_scheme == "http":
@@ -306,8 +291,7 @@ class SeedreamConfig:
     def _validate_dir_field(self, value: str, field_name: str) -> None:
         """校验给定路径指向有效目录，存在但非目录时抛 SeedreamConfigError。
 
-        仅校验已存在路径的目录性，不要求目录预先存在，
-        使未创建的目录也能通过校验以便后续按需创建。
+        不要求目录预先存在，未创建的目录可通过校验以便按需创建。
         """
         try:
             dir_path = Path(value).expanduser()
@@ -332,11 +316,7 @@ class SeedreamConfig:
         return build_config_from_sources(env_file=env_file)
 
     def to_dict(self) -> dict[str, Any]:
-        """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。
-
-        敏感判定复用 errors 的 _is_sensitive_key 边界匹配，与结构化错误输出的脱敏
-        标准保持同一来源。
-        """
+        """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。"""
         result: dict[str, Any] = {}
         for config_field in fields(self):
             value = getattr(self, config_field.name)
@@ -352,26 +332,23 @@ class SeedreamConfig:
         )
 
 
-# dataclass 字段名到环境变量名的映射，从 SeedreamConfig 各字段的 env 元数据反射派生，
-# 使字段定义成为单一数据源。新增字段仅需在其 _env_field 声明中登记环境变量名。
+# dataclass 字段名到环境变量名的映射，从各字段的 env 元数据反射派生；新增字段仅需
+# 在 _env_field 声明中登记环境变量名。
 _FIELD_ENV_MAP: dict[str, str] = {
     f.name: f.metadata[_ENV_METADATA_KEY]
     for f in fields(SeedreamConfig)
     if _ENV_METADATA_KEY in f.metadata
 }
 
-# api_key 为必填字段、无默认值，不适用 _env_field 登记，其环境变量名在此显式列出，
-# 与配置构建显式读取 ARK_API_KEY 的路径保持一致。
+# api_key 必填无默认值，不经 _env_field 登记，环境变量名在此显式列出。
 _NON_METADATA_FIELD_ENV: dict[str, str] = {"api_key": "ARK_API_KEY"}
 
 
 def _env_var_suffix(*field_names: str) -> str:
     """反查字段对应的环境变量名，生成校验错误消息的变量名提示后缀。
 
-    以 _FIELD_ENV_MAP 为单一数据源，api_key 经 _NON_METADATA_FIELD_ENV 补齐。跨字段
-    约束可传入多个字段名，斜杠连接各自的变量名。无法反查的字段名跳过，全部不可反查
-    时返回空串，消息保持原样。validate 在实例构造期执行，晚于本模块加载完成，直接
-    读取模块级映射无可见性问题。
+    跨字段约束可传入多个字段名，斜杠连接各自的变量名；无法反查的字段名跳过，
+    全部不可反查时返回空串，消息保持原样。
     """
     env_names: list[str] = []
     for name in field_names:
@@ -386,9 +363,7 @@ def _env_var_suffix(*field_names: str) -> str:
 def _field_default_str(field_name: str) -> str:
     """反射 SeedreamConfig 字段默认值并转为环境变量字符串默认值。
 
-    bool 转为 true/false，None 转为空串，其余取 str。
-    字段无默认值（dataclasses.MISSING）时返回空串，哨兵的 repr 文本不进入
-    ENV_DEFAULTS 兜底值；当前仅 api_key 属无默认值情形且它不进入 ENV_DEFAULTS。
+    bool 转 true/false，None 与无默认值字段转空串，其余取 str。
     """
     for f in fields(SeedreamConfig):
         if f.name == field_name:
@@ -411,10 +386,7 @@ ENV_DEFAULTS: dict[str, str] = {
 
 
 def normalize_model_selector(value: object) -> str:
-    """规范化模型选择器。
-
-    支持将友好别名映射为真实 Model ID；未命中的值保持原样。
-    """
+    """规范化模型选择器：友好别名映射为完整 Model ID，未命中原样返回。"""
     normalized = str(value).strip()
     return MODEL_ALIASES.get(normalized, normalized)
 
@@ -445,23 +417,18 @@ def parse_int(value: object) -> int:
 def _read_env_values(env_file: str | None) -> dict[str, str]:
     """读取 .env 文件键值为字典，不写入进程环境变量。
 
-    显式传入 env_file 时只读取该文件，不再合并项目根或当前工作目录的 .env；
-    未提供时按项目根 .env 与当前工作目录 .env 合并读取，当前工作目录覆盖项目根。
-    项目根 .env 仅源码 checkout 下存在，wheel 安装态实际只有当前工作目录 .env
-    参与合并。
+    显式传入 env_file 时只读取该文件；未提供时按项目根 .env 与当前工作目录
+    .env 合并读取，当前工作目录覆盖项目根。
     """
 
     def _load_single_env_file(path: Path) -> dict[str, str]:
         try:
             values = dotenv_values(path)
         except OSError as exc:
-            # .env 存在但 open 失败（权限拒绝、磁盘不可用等）与文件不存在同属配置来源
-            # 不可得，统一包装为含路径与原因的配置错误，经 cli_main 的优雅错误路径输出，
-            # 不向调用方裸抛 OSError。
+            # 读取失败统一包装为含路径与原因的配置错误，经 cli_main 优雅错误路径输出。
             raise SeedreamConfigError(f"配置文件不可读: {path} -> {exc}") from exc
         except UnicodeDecodeError as exc:
-            # dotenv 以 UTF-8 解码；中文 Windows 记事本默认 ANSI/GBK 保存含中文注释的
-            # .env 时进入此分支，同样包装为优雅配置错误并提示编码要求，不裸抛。
+            # 编码错误同样包装为配置错误并提示需 UTF-8，不裸抛。
             raise SeedreamConfigError(f"配置文件编码错误: {path} 需为 UTF-8 编码 -> {exc}") from exc
         return {k: str(v) for k, v in values.items() if v is not None}
 
@@ -494,11 +461,7 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
 
 
 def _value_is_set(value: object) -> bool:
-    """判定一个取值是否应视为已设置。
-
-    字符串需 strip 后非空，与系统环境变量、.env 文件值的空值判定保持一致；
-    其余类型仅排除 None，使布尔、整数等显式覆盖仍被采纳。
-    """
+    """判定取值是否视为已设置：字符串 strip 后非空，其余类型仅排除 None。"""
     if isinstance(value, str):
         return bool(value.strip())
     return value is not None
@@ -513,10 +476,7 @@ def _pick_config_value(
 ) -> object:
     """按优先级选取配置值：overrides > 系统环境变量 > env 文件 > 默认值。
 
-    三层来源统一采用 _value_is_set 做空值判定，空白字符串在任一层都视为未设置而穿透到
-    下一层，避免空白 override 被原样采用而空白 env/file 被当作未设置的语义分裂。系统
-    环境变量直接读取 os.environ，因配置构建不再向其注入 .env 值，故 os.environ 仅含
-    真实的系统环境变量。
+    各层统一以 _value_is_set 判空，空白字符串视为未设置而穿透到下一层。
     """
     if key in overrides and _value_is_set(overrides[key]):
         return overrides[key]
@@ -532,8 +492,7 @@ def _pick_config_value(
     return default_value
 
 
-# 类型化配置取值辅助：统一经 _pick_config_value 按优先级取值后再做类型转换，
-# 每个辅助对应一种目标类型，供 _build_config_from_sources_unlocked 调用。
+# 类型化取值辅助：经 _pick_config_value 按优先级取值后再做类型转换。
 def _pick_str(
     overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> str:
@@ -554,8 +513,7 @@ def _pick_optional_str_list(
 ) -> list[str] | None:
     """按优先级取值后按逗号拆分为去空白条目列表，空值归 None 表示未配置。
 
-    拆分后逐项 strip 并丢弃空条目，容忍列表前后与条目间的空白书写差异；全部条目
-    为空时同样归 None，与空串语义一致，等价于未配置。
+    逐项 strip 并丢弃空条目，全部条目为空时同样归 None。
     """
     raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None:
@@ -589,8 +547,7 @@ def _pick_optional_int_zero_as_none(
 ) -> int | None:
     """按 _pick_optional_int 取值，显式 0 归一为 None 表示不限制。
 
-    供以 0 为不限制哨兵的可选整数字段使用，使 env 链路可显式关闭该上限；负数与
-    其他非法值原样返回，由 validate 的下界校验拒绝。
+    负数等非法值原样返回，由 validate 的下界校验拒绝。
     """
     value = _pick_optional_int(overrides, field_name, env_key, env_values)
     if value == 0:
@@ -610,15 +567,11 @@ def build_config_from_sources(
     overrides: Mapping[str, object] | None = None,
     env_file: str | None = None,
 ) -> SeedreamConfig:
-    """从统一来源构建配置对象，线程安全。
-
-    通过 ``_config_build_lock`` 串行化构建；streamable-http 多请求场景下可能并发
-    触发配置构建，串行化保证构建语义与单线程完全一致。
+    """从统一来源构建配置对象，经 ``_config_build_lock`` 串行化，线程安全。
 
     Args:
         overrides: 调用方显式覆盖值，CLI 参数为典型来源。
-        env_file: 可选 .env 文件路径，未提供时按“项目根 `.env` -> 当前工作目录 `.env`”
-            合并读取，当前工作目录的值覆盖项目根。
+        env_file: 可选 .env 文件路径，未提供时按「项目根 -> 当前工作目录」合并读取。
 
     Raises:
         SeedreamConfigError: 配置文件不可读、缺少 API 密钥或配置项校验失败。
@@ -647,9 +600,7 @@ def _build_config_from_sources_unlocked(
     if not api_key:
         raise SeedreamConfigError("未找到ARK_API_KEY环境变量或配置文件值。")
 
-    # override 键名 "model" 对应 SeedreamConfig.model_id 字段，属有意的命名间接映射：
-    # CLI 暴露更简短的 "model"，取值后再经 normalize_model_selector 写入 model_id。
-    # 多数 override 键名与目标字段同名，仅 "model" 与下方 "watermark" 为 CLI 简称的例外。
+    # override 键名 "model" 对应 model_id 字段，属 CLI 简称的有意命名间接映射。
     raw_model = str(
         _pick_config_value(
             override_values,
@@ -671,8 +622,7 @@ def _build_config_from_sources_unlocked(
         "default_size": _pick_str(
             override_values, "default_size", "SEEDREAM_DEFAULT_SIZE", env_values
         ),
-        # override 键名 "watermark" 对应 SeedreamConfig.default_watermark 字段，
-        # 与 "model" 同属 CLI 简称，未与字段同名。
+        # override 键名 "watermark" 对应 default_watermark 字段，同为 CLI 简称。
         "default_watermark": _pick_bool(
             override_values, "watermark", "SEEDREAM_DEFAULT_WATERMARK", env_values
         ),
@@ -782,8 +732,7 @@ def _build_config_from_sources_unlocked(
             override_values, "http_allowed_hosts", "SEEDREAM_HTTP_ALLOWED_HOSTS", env_values
         ),
     }
-    # 断言所有带 env metadata 的字段都在构造调用中显式传值，防止新增 _env_field 字段
-    # 被静默忽略而仅回落到默认值。开发期同步遗漏会立即暴露。
+    # 断言所有带 env metadata 的字段都显式传值，防止新增字段被静默忽略。
     missing_env_fields = set(_FIELD_ENV_MAP.keys()) - set(config_kwargs.keys())
     if missing_env_fields:
         raise AssertionError(
@@ -794,15 +743,11 @@ def _build_config_from_sources_unlocked(
 
 # 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态。
 _config_build_lock = threading.Lock()
-# 全局配置实例的惰性初始化锁。与 _config_build_lock 分离，因为 get_global_config
-# 持该锁时会调用 from_env，而 from_env 内部又复用 _config_build_lock，共用同一把
-# 锁会造成不可重入死锁。
+# 全局配置惰性初始化锁；与 _config_build_lock 分离，避免嵌套获取造成死锁。
 _global_config_lock = threading.Lock()
 
 _global_config: SeedreamConfig | None = None
-# CLI 注入的活动配置，优先于 _global_config。server 经 get_active_config 共用此源，
-# io_path 经模块加载期注册的工作区根提供者间接读取同一活动配置；reload_config 重置
-# 其为 None 以回退重建后的全局配置，消除活动配置与全局配置的双单例分叉。
+# CLI 注入的活动配置，优先于 _global_config；reload_config 置 None 回退全局配置。
 _active_config: SeedreamConfig | None = None
 
 
@@ -818,10 +763,8 @@ def get_global_config() -> SeedreamConfig:
 
 
 def set_config(config: SeedreamConfig) -> None:
-    """替换当前生效的配置实例。
+    """替换当前生效的配置实例，_active_config 已设置时一并更新。
 
-    CLI 启动后 get_active_config 优先返回 _active_config，仅写 _global_config 会被遮蔽；
-    故当 _active_config 已设置时一并更新，保证 set_config 在任何阶段都让后续读取拿到新实例。
     生效配置变更同时使 io_path 的回退根 resolve 缓存失效。
     """
     global _global_config, _active_config
@@ -840,11 +783,9 @@ def get_active_config() -> SeedreamConfig:
 
 
 def set_active_config(config: SeedreamConfig | None) -> None:
-    """设置或清除 CLI 注入的活动配置。
+    """设置或清除 CLI 注入的活动配置，None 表示清除后回退全局默认。
 
-    None 表示清除活动配置，后续 get_active_config 回退到全局默认。CLI 启动时注入，
-    使 server 与 io_path 经注册的提供者共用同一活动配置源；测试复位协议经
-    set_active_config(None) 同步使 io_path 的回退根缓存失效。
+    变更同时使 io_path 的回退根缓存失效。
     """
     global _active_config
     with _global_config_lock:
@@ -853,10 +794,8 @@ def set_active_config(config: SeedreamConfig | None) -> None:
 
 
 def reload_config(env_file: str | None = None) -> None:
-    """重新加载全局配置并重置活动配置。
+    """重新加载全局配置并清除活动配置，后续读取回退到新的全局实例。
 
-    重建全局配置实例并清除活动配置，使后续 get_active_config 回退到新的全局实例，
-    确保 server 的 client/tools 与 io_path 读到一致的新配置，消除双单例分叉；
     io_path 的回退根 resolve 缓存随之失效。
     """
     global _global_config, _active_config
@@ -869,11 +808,8 @@ def reload_config(env_file: str | None = None) -> None:
 def _registered_workspace_root_provider() -> str | None:
     """向 io_path 提供当前生效的工作区根目录原始值。
 
-    活动配置就绪时返回其 workspace_root，配置值在构建时已按优先级合并环境变量与
-    .env；配置构建失败即活动配置不可得时回退读取 SEEDREAM_WORKSPACE_ROOT 环境变量，
-    与 io_path 未注册提供者时的回退一致。OSError 与配置错误同口径处理：配置构建中
-    残余的文件系统错误沿提供者上抛会把 io_path 的每次边界解析变为崩溃，一律回退
-    环境变量。
+    活动配置就绪时返回其 workspace_root；配置构建失败或抛 OSError 时回退读取
+    SEEDREAM_WORKSPACE_ROOT 环境变量。
     """
     try:
         config = get_active_config()
@@ -886,6 +822,5 @@ def _registered_workspace_root_provider() -> str | None:
     return env_root.strip() if env_root else None
 
 
-# 模块加载即完成注入：任何加载了 config 的进程，io_path 的回退读取都经本提供者取得
-# 活动配置值，消除 io_path 对顶层 config 的延迟 import 向上依赖。
+# 模块加载即注册，io_path 的回退根读取经此提供者取活动配置值。
 register_env_workspace_root_provider(_registered_workspace_root_provider)

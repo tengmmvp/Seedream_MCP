@@ -1,10 +1,5 @@
-"""io_path 行为修复回归测试。
-
-覆盖：相似路径建议对空目标名不误报、get_relative_path 对绝对路径回退分支不再重复
-resolve、resolve_env_workspace_root 对 expanduser 后为绝对路径的配置值缓存 resolve
-结果而相对形态每次现算、resolve_workspace_roots 不再对已 resolve 的根重复 resolve、
-工作区根提供者的注册协议与未注册回退、find_images_in_directory 对 UNC 形式目录入参
-在 resolve 前拒绝。
+"""io_path 行为修复回归测试，覆盖相似路径建议、相对路径计算、工作区根解析与
+提供者注册、目录图片查找。
 """
 
 from __future__ import annotations
@@ -30,8 +25,7 @@ def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
 ) -> None:
     """目标名为空串时不产生建议，避免空串子串匹配把任意图片误当相近项。
 
-    ``/``、``.``、``..`` 等输入的 Path.name 为空串，旧实现的 ``"" in name`` 恒真，
-    会把搜索目录前 5 张任意图片当相近建议返回。
+    ``/``、``.`` 等输入的 Path.name 为空串，旧实现的 ``"" in name`` 恒真。
     """
     for name in ("a.png", "b.png", "c.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -101,7 +95,7 @@ def test_resolve_env_workspace_root_caches_resolved_result(
     first = io_path_module.resolve_env_workspace_root()
     cached_again = io_path_module.resolve_env_workspace_root()
     assert first == cached_again == first_root
-    # 同配置两次解析只触发一次该路径的 resolve；期间 cwd 兜底分支未走，无其他 resolve
+    # 同配置两次解析仅触发一次该路径的 resolve，cwd 兜底分支未走
     assert [p for p in resolve_calls if p in tracked] == [str(first_root)]
 
     configured["value"] = str(second_root)
@@ -132,9 +126,8 @@ def test_resolve_env_workspace_root_relative_config_recomputes_after_cwd_change(
 ) -> None:
     """相对路径形态的配置根不进缓存，进程 CWD 变更后按新 CWD 重新解析。
 
-    缓存以配置原始字符串为键，相对路径的 resolve 结果随 CWD 变化；若照常缓存，
-    CWD 变更后的访问会命中首个 CWD 下的陈旧 resolve。绝对路径形态仍走缓存，由
-    test_resolve_env_workspace_root_caches_resolved_result 锁定。
+    相对路径的 resolve 结果随 CWD 变化，缓存会命中陈旧值；绝对路径形态仍走缓存，
+    由 test_resolve_env_workspace_root_caches_resolved_result 锁定。
     """
     first_cwd = tmp_path / "first"
     second_cwd = tmp_path / "second"
@@ -156,9 +149,8 @@ def test_resolve_env_workspace_root_tilde_form_uses_cache(
 ) -> None:
     """~ 形态的配置根进入 resolve 缓存，重复访问不再触达文件系统。
 
-    ~ 展开结果只依赖用户主目录环境，与进程 CWD 无关，按展开后的绝对性判定可缓存；
-    旧实现以展开前的 is_absolute 排除 ~ 形态，stdio 客户端未声明 roots 时每次文件
-    访问都在事件循环同步 expanduser+resolve。同配置两次解析只应触发一次 resolve。
+    ~ 展开结果只依赖用户主目录而与 CWD 无关，按展开后绝对性判定可缓存；旧实现
+    以展开前的 is_absolute 排除该形态。
     """
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_configured_workspace_root", lambda: "~")
@@ -218,9 +210,8 @@ def test_find_images_rejects_unc_directory_before_resolve(
 ) -> None:
     """UNC 形式的目录入参在 resolve 前被拒：返回空列表且不触发任何路径解析。
 
-    UNC 路径在 Windows 的 resolve 会触发 SMB 认证，浏览扫描须与 normalize_path
-    等 resolve 站点同口径前置拦截，不因越界校验尚未介入就向远端泄露凭据。正斜杠
-    与反斜杠两种 UNC 前缀形态均须覆盖。
+    UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须与其他 resolve 站点同口径
+    前置拦截，不向远端泄露凭据。
     """
 
     def _explode_resolve(self: Path, strict: bool = False) -> Path:

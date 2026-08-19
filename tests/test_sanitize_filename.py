@@ -1,8 +1,7 @@
 """FileManager.sanitize_filename 与唯一文件名长度预算的表驱动契约测试。
 
 覆盖不安全字符替换、控制字符剥离、长度截断与超长扩展名按纯词干处理、Windows
-保留设备名规避与前导点处理，以及 generate_unique_filename 的词干预算守护，
-这些规则直接影响跨平台落盘正确性与安全性。
+保留设备名规避与前导点处理，以及 generate_unique_filename 的词干预算守护。
 """
 
 from __future__ import annotations
@@ -88,9 +87,8 @@ def test_generate_unique_filename_short_base_not_truncated(manager):
 def test_create_save_path_long_custom_name_stays_within_max_path(manager, tmp_path):
     """长 custom_name 生成的完整保存路径不超 Windows 默认 MAX_PATH 260。
 
-    词干无预算时 200 字符 sanitize 结果叠加时间戳、哈希、日期与工具子目录后，
-    路径必然超出 MAX_PATH 使自动保存必然失败；预算截断使合法输入不再必然失败。
-    断言基于本仓库测试协议的短 basetemp 前提。
+    旧行为：词干无预算时路径必然超出 MAX_PATH 使自动保存失败。断言基于本仓库
+    测试协议的短 basetemp 前提。
     """
     path = manager.create_save_path(
         prompt="p",

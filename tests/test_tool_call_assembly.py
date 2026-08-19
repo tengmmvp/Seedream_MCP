@@ -1,9 +1,8 @@
 """MCP tools/call 平铺参数装配语义测试。
 
-经 MCPServer 真实 call 路径（mcp.call_tool）锁定平铺签名的 wire 契约：平铺键名
-反序列化、可选字段未提供时不出现在 model_fields_set、组图 max_images 未提供时按
-参考图数量自动推导、嵌套模型与枚举字段接受 JSON 形态入参、浏览工具缺省字段携带
-模型默认值。run_* 处理器以间谍替换，聚焦 wire 参数到输入模型的装配边界。
+经 MCPServer 真实 call 路径锁定平铺签名的 wire 契约：平铺键名反序列化、可选字段
+缺省不进 fields_set、组图 max_images 按参考图数量自动推导、嵌套模型接受 JSON
+形态入参、浏览工具缺省携带默认值。run_* 处理器以间谍替换。
 """
 
 from __future__ import annotations
@@ -36,11 +35,10 @@ def _ok_result() -> CallToolResult:
 
 @pytest.fixture
 def spy_run_handlers(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """以间谍替换 server 模块的五个 run_* 处理器，返回捕获入参的字典。
+    """以间谍替换 server 模块的五个 run_* 处理器，捕获平铺参数组装出的输入模型。
 
-    工具函数体内的 run_* 名经模块全局查找，替换后可捕获平铺参数组装出的输入模型，
-    隔离下游流水线。同时注入活动配置：生成类工具经 _config_from_context 回退
-    全局活动配置，间谍路径不消费该配置但解析必须成功。
+    工具函数体内的 run_* 名经模块全局查找，替换后隔离下游流水线；同时注入活动
+    配置，间谍路径不消费但 _config_from_context 解析必须成功。
     """
     captured: dict[str, Any] = {}
 
@@ -111,7 +109,7 @@ async def test_sequential_max_images_omitted_derives_from_reference_count(
     assert isinstance(params, SequentialGenerationInput)
     assert params.image == ["https://example.com/a.png", "https://example.com/b.png"]
     assert "max_images" not in params.model_fields_set
-    # 未显式提供时上限 = 总上限 15 - 参考图 2 张
+    # 未显式提供时上限 = 总上限 15 - 参考图 2 张。
     assert params.max_images == 13
 
 

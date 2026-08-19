@@ -1,12 +1,8 @@
 """生成请求的并行执行与 lifespan 共享资源获取。
 
-单次请求直接调用 request_executor；request_count > 1 时按 parallelism 构造信号量限流
-并发，逐个请求完成后按完成数上报进度。共享的 SeedreamClient 与 DownloadManager 优先从
-lifespan 上下文获取，以复用 HTTP/aiohttp 连接池，无 lifespan 场景由调用方回退新建。
-
-批次执行期间经 client.shared_request_plan_scope 绑定共享请求计划：同批请求在 client
-侧只构建一次 request_data、只序列化一次 body，N 个并行请求峰值内存 1×body；作用域
-退出时统一复位绑定并释放计划引用。
+单次请求直接调用 request_executor；request_count > 1 时按 parallelism 信号量限流并发，
+按完成数上报进度。共享的 SeedreamClient 与 DownloadManager 优先从 lifespan 上下文获取，
+无 lifespan 场景由调用方回退新建。
 """
 
 from __future__ import annotations
@@ -32,8 +28,7 @@ if TYPE_CHECKING:
     from ...utils.io.io_download import DownloadManager
 
 
-# lifespan 共享资源取值的泛型辅助，client/download_manager/config 三处探测共用。
-# lifespan 上下文字典键定义在 config 模块，经顶部 import 复用，core 层不依赖顶层装配模块。
+# lifespan 共享资源取值的泛型辅助，三处资源探测共用。
 _T = TypeVar("_T")
 
 
@@ -55,11 +50,8 @@ async def _execute_parallel_generation_requests(
     request_results: list[dict[str, Any] | None] = [None] * context.request_count
     request_errors: dict[int, Exception] = {}
     completed_requests = 0
-    # 进度上报的批次级序列化锁。完成数快照与上报发送之间隔着 await：两个并发完成的
-    # 请求可能以「高值先快照后让出、低值先让出后送达」的交错向客户端发出回退的通知，
-    # 违反规范对 progress 严格递增的要求。快照取自请求自身完成时刻的同步段，先完成的
-    # 请求先进入锁的等待队列（asyncio.Lock 按等待顺序唤醒），锁内仅发送，发送顺序与
-    # 快照顺序一致，发出的序列恒严格递增。
+    # 进度上报序列化锁：快照与发送之间隔着 await，并发完成可能交错发出回退进度，
+    # 违反 progress 严格递增要求；锁内仅发送，发送顺序与完成顺序一致。
     progress_report_lock = asyncio.Lock()
 
     async def _run_single_request(request_index: int) -> None:
@@ -78,14 +70,13 @@ async def _execute_parallel_generation_requests(
                     format_error_for_user(exc),
                 )
             finally:
-                # asyncio 单线程模型下，自增与快照之间无 await，不会被其他协程抢占。
+                # 自增与快照之间无 await，不会被其他协程抢占。
                 completed_requests += 1
                 progress_snapshot = PROGRESS_GENERATION_START + (
                     PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START
                 ) * (completed_requests / context.request_count)
                 message_snapshot = f"并行请求进度 {completed_requests}/{context.request_count}"
-        # 进度上报移出信号量槽，避免慢客户端背压拖延槽位释放、阻塞后续请求启动；
-        # 序列化锁仅约束上报本身，慢客户端的发送延迟不回拖信号量槽位。
+        # 上报移出信号量槽，慢客户端背压不拖延槽位释放。
         async with progress_report_lock:
             await _safe_report_progress(
                 ctx,
@@ -113,12 +104,8 @@ def get_lifespan_resource(
 ) -> _T | None:
     """从 lifespan 上下文按键取类型匹配的共享资源，无则返回 None。
 
-    无 ctx 或无 lifespan 上下文时返回 None，由调用方回退新建，单元测试直接调用
-    handler 时即走此路径。client、download_manager 与 config 三处共享资源探测共用
-    此实现。取值路径上各属性缺失的异常形态均视为“不可得”：mcp 的
-    Context.request_context 在无请求上下文时抛 ValueError，request_context 为
-    None 时 .lifespan_context 抛 AttributeError，旧版本构造路径可能抛 LookupError，
-    捕获三者确保守卫本身不逃逸异常。
+    无 ctx 或无 lifespan 上下文时返回 None，由调用方回退新建；取值路径上各属性缺失
+    的异常形态均视为「不可得」，捕获后返回 None，确保守卫本身不逃逸异常。
     """
     if ctx is None:
         return None
@@ -136,10 +123,7 @@ def get_lifespan_resource(
 def _try_get_shared_client(
     ctx: Context[Any, Any] | None,
 ) -> SeedreamClient | None:
-    """从 lifespan 上下文获取共享 SeedreamClient，无则返回 None。
-
-    复用共享客户端可共享 HTTP 连接池。无 lifespan 的场景返回 None，由调用方回退新建。
-    """
+    """从 lifespan 上下文获取共享 SeedreamClient，复用 HTTP 连接池，无则返回 None。"""
     from ...client import SeedreamClient
 
     return get_lifespan_resource(ctx, LIFESPAN_KEY_CLIENT, SeedreamClient)
@@ -148,10 +132,8 @@ def _try_get_shared_client(
 def _try_get_shared_download_manager(
     ctx: Context[Any, Any] | None,
 ) -> DownloadManager | None:
-    """从 lifespan 上下文获取共享 DownloadManager，无则返回 None。
-
-    复用共享下载管理器可跨请求复用 aiohttp 连接池，避免每次生成重复 TLS 握手。
-    """
+    """从 lifespan 上下文获取共享 DownloadManager，跨请求复用 aiohttp 连接池，
+    无则返回 None。"""
     from ...utils.io.io_download import DownloadManager
 
     return get_lifespan_resource(ctx, LIFESPAN_KEY_DOWNLOAD_MANAGER, DownloadManager)
@@ -169,21 +151,19 @@ async def _run_generation_requests(
 ) -> dict[str, Any]:
     """在给定客户端上执行单次或并行生成请求并返回结果。
 
-    request_count 为 1 时直接调用 request_executor；否则委托
-    ``_execute_parallel_generation_requests`` 并行执行。进度按阶段上报。
+    request_count 为 1 时直接调用 request_executor，否则并行执行。批次执行期间绑定
+    共享请求计划，client 侧对同批请求只构建一次 request_data、只序列化一次 body；
+    公共参数校验同样提升为批次级，分发前校验一次并经计划缓存复用。
 
-    批次执行期间绑定共享请求计划，client 侧据此对同批请求只构建一次 request_data、
-    只序列化一次 body；作用域退出时经 finally 复位绑定并释放计划，异常与取消路径
-    均不泄漏。公共参数校验同样提升为批次级：分发前经
-    prevalidate_common_generation_params 校验一次并写入计划缓存，批内各生成方法
-    按输入快照命中缓存，100k 级提示词的 CJK 计数不再逐请求重复。
+    Args:
+        request_executor: 执行单次生成请求的回调，由各 impl 提供 client 调用差异。
+        ctx: MCP 上下文，用于进度上报，可为 None。
     """
     from ...client import shared_request_plan_scope
 
     with shared_request_plan_scope():
-        # 批次级公共参数校验：批内各请求公共参数相同，分发前校验一次经共享计划
-        # 缓存复用。校验失败在分发前上抛，异常与消息和单请求路径的首请求校验失败
-        # 一致，由外层流水线统一降级，不进入逐请求错误聚合。
+        # 批内公共参数相同，分发前校验一次；失败在分发前上抛，与单请求路径口径
+        # 一致，不进入逐请求错误聚合。
         await client.prevalidate_common_generation_params(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
@@ -218,6 +198,5 @@ async def _run_generation_requests(
             module_logger=module_logger,
             ctx=ctx,
         )
-        # 末个请求完成时按完成数上报的进度已恰好到达 PROGRESS_GENERATION_DONE。
-        # 进度规范要求逐次上报严格递增，批次收尾重报同值构成违规，不再追加收尾上报。
+        # 末个请求的进度已到达 PROGRESS_GENERATION_DONE，重报同值违反严格递增要求。
         return result

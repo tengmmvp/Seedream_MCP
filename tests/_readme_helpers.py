@@ -20,7 +20,13 @@ _ENV_BLOCK_ANCHOR = re.compile(r"^\s*SEEDREAM_MODEL_ID=")
 
 @dataclass(frozen=True)
 class CodeBlock:
-    """一个围栏代码块。line 为起始围栏所在行号，lines 为围栏内的正文行。"""
+    """一个围栏代码块。
+
+    Attributes:
+        lang: 围栏语言标识。
+        line: 起始围栏所在行号。
+        lines: 围栏内的正文行。
+    """
 
     lang: str
     line: int
@@ -28,14 +34,27 @@ class CodeBlock:
 
 
 def _read_readme(name: str) -> str:
-    """读取仓库根目录下指定文件名的 README 全文。"""
+    """读取仓库根目录下指定文件名的 README 全文。
+
+    Args:
+        name: README 文件名。
+
+    Returns:
+        文件全文文本。
+    """
     return (PROJECT_ROOT / name).read_text(encoding="utf-8")
 
 
 def _fenced_blocks(text: str) -> list[CodeBlock]:
-    """按行扫描全文，返回全部围栏代码块，按出现顺序排列。
+    """按行扫描全文提取全部围栏代码块。
 
     以行首三反引号围栏开合切换状态，开栏行围栏标记后的文字即为语言标识。
+
+    Args:
+        text: README 全文文本。
+
+    Returns:
+        按出现顺序排列的围栏块列表。
     """
     blocks: list[CodeBlock] = []
     lang: str | None = None
@@ -58,12 +77,30 @@ def _fenced_blocks(text: str) -> list[CodeBlock]:
 
 
 def _lang_blocks(name: str, lang: str) -> list[CodeBlock]:
-    """读取指定 README 并返回给定语言的全部围栏块。"""
+    """读取指定 README 并返回给定语言的全部围栏块。
+
+    Args:
+        name: README 文件名。
+        lang: 围栏语言标识。
+
+    Returns:
+        该语言的围栏块列表，按出现顺序排列。
+    """
     return [block for block in _fenced_blocks(_read_readme(name)) if block.lang == lang]
 
 
 def _env_block(name: str) -> CodeBlock:
-    """定位环境变量配置 bash 块，锚点为 SEEDREAM_MODEL_ID 赋值行。"""
+    """定位环境变量配置 bash 块，锚点为 SEEDREAM_MODEL_ID 赋值行。
+
+    Args:
+        name: README 文件名。
+
+    Returns:
+        唯一命中锚点的 bash 围栏块。
+
+    Raises:
+        AssertionError: 含锚点赋值行的 bash 块不唯一。
+    """
     candidates = [
         block
         for block in _lang_blocks(name, "bash")

@@ -67,7 +67,7 @@ def test_sequential_generation_reference_images_exceed_14() -> None:
 
 
 # 以下用例直接验证 validate_sequential_image_limit 的模型能力表驱动上限，
-# 守护"参考图上限随模型变化"的数据驱动语义，防止回归为硬编码 14。
+# 守护「参考图上限随模型变化」的数据驱动语义，防止回归为硬编码 14。
 
 _PRO = "doubao-seedream-5.0-pro"
 _LITE = "doubao-seedream-5.0-lite"

@@ -4,10 +4,9 @@
 文件大小、宽高比、输出格式、提示词长度、组图总数与并行参数等。
 
 设计要点：
-- 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、倍数约束、输出格式、
-  联网工具、流式输出、参考图上限等，统一委托 model_capabilities 的能力声明判定，
-  新增模型只需扩展能力表而无需改动校验代码。
-- HEIC/HEIF 解码器惰性注册，避免模块导入时产生全局副作用。
+- 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、倍数约束、输出
+  格式、联网工具、流式输出、参考图上限等，统一委托 model_capabilities 的能力声明
+  判定，新增模型只需扩展能力表而无需改动校验代码。
 - 布尔字符串解析 parse_bool 与宽高比上下限常量由本模块单一持有，config 的
   _pick_bool 与 image_validation 的维度校验均为消费方。
 """
@@ -36,8 +35,7 @@ VALID_BACKGROUND_MODES = frozenset({"transparent", "opaque"})
 # 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
-# 图像宽高比上下限，输入参考图与输出尺寸校验共用同一规则。image_validation 从本模块
-# 导入使用，维持单一来源。
+# 图像宽高比上下限，输入参考图与输出尺寸校验共用；image_validation 由此导入，维持单一来源。
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
 # 生成工具类型白名单，目前仅支持联网搜索；schemas.GenerationToolType 枚举的取值
@@ -46,23 +44,20 @@ VALID_GENERATION_TOOL_TYPES = frozenset({"web_search"})
 # 响应格式白名单，schemas.ResponseFormat 枚举的取值集合以本常量为源，同一守护测试
 # 断言两侧一致。
 VALID_RESPONSE_FORMATS = frozenset({"url", "b64_json"})
-# 像素尺寸字符串正则：宽高各 2-5 位十进制，覆盖 10-99999px 范围。\d 在 Python re
-# 匹配任意 Unicode 十进制数字，阿拉伯-印度数字一类的非 ASCII 数字串同样命中，
-# int() 对其可正常转换，解析结果与 ASCII 数字一致，行为良性并按此声明。
-# IGNORECASE 对本模式无实际作用，模式不含字母字符，保留标志以维持既有声明。
+# 像素尺寸字符串正则：宽高各 2-5 位十进制。\d 匹配任意 Unicode 十进制数字，
+# 非 ASCII 数字串同样命中，int() 可正常转换，行为良性并按此声明；IGNORECASE 对
+# 不含字母的本模式无实际作用，保留标志以维持既有声明。
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 # 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张。
 MAX_SEQUENTIAL_TOTAL_IMAGES = 15
 # 并行生成上限：request_count 与 parallelism 共用此上界。
 MAX_PARALLEL_REQUEST_COUNT = 10
-# CJK 字符计数范围：基本区 + 扩展 A 区 + 兼容汉字 + 扩展 B 及以后（平面 2 与 3 的
-# CJK 表意扩展区）与假名（平假名、片假名、半角片假名），覆盖生僻字与日文避免计数
-# 偏低；仅影响超限告警计数，不参与任何放行判定。
+# CJK 字符计数范围：CJK 表意文字各区与假名，覆盖生僻字与日文避免计数偏低；
+# 仅影响超限告警计数，不参与任何放行判定。
 CJK_CHAR_PATTERN = re.compile("[㐀-䶿一-鿿豈-﫿" "\U00020000-\U0003ffffぁ-ヿｦ-ﾟ]")
 
 
-# 英文单词计数模式：字母串允许一个撇号连接（如 don't 计为一个单词），模块级预编译
-# 与 CJK_CHAR_PATTERN 保持同一形式，供 validate_prompt 的超限计数共用。
+# 英文单词计数模式：字母串允许一个撇号连接，don't 计为一个单词。
 ENGLISH_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 
 # ==================== 底层私有工具函数 ====================
@@ -105,9 +100,8 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
             validated_value = int(value)
         except (ValueError, TypeError, OverflowError):
             raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
-        # Decimal 与 Fraction 一类数值经 int() 会静默截断小数部分，与 float 分支同规则
-        # 拒绝非整数值；Decimal 无穷经 int() 抛 OverflowError，与解析失败同规则转译为
-        # 校验错误。字符串经 int() 解析已保证无损转换，不参与等值比较。
+        # Decimal/Fraction 经 int() 会静默截断小数，与 float 分支同规则拒绝非整数值；
+        # 字符串经 int() 解析已保证无损转换，不参与等值比较。
         if not isinstance(value, str) and value != validated_value:
             raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
 
@@ -124,18 +118,14 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
 
 
 def parse_bool(value: object) -> bool:
-    """将值解析为布尔。
-
-    无法识别的取值显式报错而非静默当作 False，避免 enabled 这类拼写错误导致
-    功能未生效却无报错。布尔解析知识归本模块单一所有，config 与本模块的
-    校验函数均为消费方。
+    """将值解析为布尔，无法识别的取值显式报错而非静默当作 False。
 
     Args:
         value: 待解析的取值。
 
     Returns:
-        value 为 bool 时原样返回；true/yes/on/1 解析为 True，
-        false/no/off/0 解析为 False，None 视为未配置并返回 False。
+        bool 原样返回；true/yes/on/1 解析为 True，false/no/off/0 解析为 False；
+        None 视为未配置并返回 False。
 
     Raises:
         SeedreamConfigError: 取值无法解析为布尔时抛出。
@@ -188,16 +178,9 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
             "提示词包含无法编码的字符（如未配对的代理字符）", field="prompt", value=None
         )
 
-    # 短文本粗筛：长度不超过中文阈值时两项计数必然在限内（单字符至多计 1 个中文、
-    # 单词至少 1 个字符），跳过正则扫描，避免长提示词的 findall 在调用路径上物化
-    # 十万级单字符列表。
-    #
-    # 计数扫描为全量 O(n) 且无法在本函数内下沉工作线程：调用链上
-    # SeedreamClient._validate_common_generation_params 与公共导出 validate_prompt
-    # 均为同步契约，改为协函数需连带 client 调用点与公共 API 语义一并调整，超出
-    # 本模块边界。实测最坏（schema 上限 100K 中文字符）双 subn 计数约 25ms 事件
-    # 循环占用，其中 encode 代理检查仅约 0.2ms；长提示词的重排与下沉需由调用侧
-    # 在异步上下文统一规划。
+    # 短文本粗筛：长度不超过中文阈值时两项计数必然在限内，跳过正则扫描避免物化
+    # 大列表。计数扫描为全量 O(n)，本函数与公共导出 validate_prompt 均为同步契约、
+    # 无法下沉线程，重排需由调用侧在异步上下文统一规划。
     chinese_count = 0
     english_word_count = 0
     if len(prompt) > max_chinese_chars:
@@ -206,7 +189,7 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
         english_word_count = ENGLISH_WORD_PATTERN.subn("", prompt)[1]
 
     if chinese_count > max_chinese_chars or english_word_count > max_english_words:
-        # 文档为"建议"而非硬限制：超限时仅记录警告，不阻断调用。
+        # 官方文档为「建议」而非硬限制，超限仅告警不阻断。
         logger.warning(
             "提示词较长（中文{}个/英文{}个），建议不超过{}个汉字或{}个英文单词，可能影响生成效果",
             chinese_count,
@@ -219,20 +202,10 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
 
 def validate_watermark(watermark: Any) -> bool:
-    """验证水印参数配置。
+    """验证水印参数，接受布尔或布尔字符串，返回标准化后的布尔值。
 
-    支持布尔值或可转换为布尔值的字符串（true/false、yes/no、on/off、1/0）。
-    布尔字符串经本模块 parse_bool 解析，解析失败对外抛出 SeedreamValidationError
-    以保持校验层异常类型。
-
-    Args:
-        watermark: 水印开关配置，支持 bool 或 str 类型。
-
-    Returns:
-        标准化后的布尔值。
-
-    Raises:
-        SeedreamValidationError: 当参数类型或格式无效时抛出。
+    布尔字符串经 parse_bool 解析，解析失败转抛 SeedreamValidationError 以保持
+    校验层异常类型。
     """
     if isinstance(watermark, bool):
         return watermark
@@ -251,17 +224,7 @@ def validate_watermark(watermark: Any) -> bool:
 
 
 def validate_response_format(response_format: str) -> str:
-    """验证响应格式参数。
-
-    Args:
-        response_format: 响应格式类型，支持 url 或 b64_json。
-
-    Returns:
-        小写形式的标准化格式值。
-
-    Raises:
-        SeedreamValidationError: 当格式参数无效时抛出。
-    """
+    """验证响应格式参数，仅接受 url 或 b64_json，返回小写标准化值。"""
     if not isinstance(response_format, str):
         raise SeedreamValidationError(
             "response_format 必须为字符串", field="response_format", value=response_format
@@ -285,18 +248,8 @@ def validate_response_format(response_format: str) -> str:
 def validate_output_format(output_format: Any, model_id: str) -> str | None:
     """验证图像输出文件格式并检查模型兼容性。
 
-    output_format 仅 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）支持，
-    4.5/4.0 不支持；未知模型放行，由能力表统一判定。
-
-    Args:
-        output_format: 输出格式字符串，当前支持 jpeg/png；None 表示未指定。
-        model_id: 模型标识符，用于能力兼容性校验。
-
-    Returns:
-        规范化后的格式小写名；输入为 None 时返回 None。
-
-    Raises:
-        SeedreamValidationError: 当格式非法或当前模型不支持 output_format 时抛出。
+    仅支持 jpeg/png；output_format 由 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）
+    支持，4.5/4.0 不支持，未知模型放行由能力表统一判定。输入为 None 时返回 None。
     """
     if output_format is None:
         return None
@@ -336,18 +289,9 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
 def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]] | None:
     """验证生成工具配置并检查模型兼容性。
 
-    联网搜索 web_search 由 doubao-seedream-5.0 / 5.0-lite 系列支持，
-    5.0 Pro/4.5/4.0 不支持；未知模型放行，由能力表统一判定。
-
-    Args:
-        tools: 生成工具数组，每项为含 type 字段的对象；None 表示未指定。
-        model_id: 模型标识符，用于能力兼容性校验。
-
-    Returns:
-        规范化后的工具数组，每项为 {"type": <小写类型>}；输入为 None 时返回 None。
-
-    Raises:
-        SeedreamValidationError: 当结构非法或当前模型不支持 tools 时抛出。
+    每项为仅含 type 字段的对象，type 仅支持 web_search；联网搜索由
+    doubao-seedream-5.0 / 5.0-lite 系列支持，5.0 Pro/4.5/4.0 不支持，未知模型
+    放行由能力表统一判定。输入为 None 时返回 None。
     """
     if tools is None:
         return None
@@ -417,21 +361,10 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
 
 
 def validate_stream(stream: bool, model_id: str) -> bool:
-    """验证流式输出参数与模型兼容性。
+    """验证流式输出参数与模型兼容性，原样返回 stream。
 
-    Seedream 5.0 Pro 不支持流式输出 stream，传参即报错；仅 doubao-seedream-5.0 系列
-    （5.0/5.0-lite 同一模型）/4.5/4.0 支持。
-
-    Args:
-        stream: 流式输出开关。
-        model_id: 模型标识符。
-
-    Returns:
-        原样返回 stream。
-
-    Raises:
-        SeedreamValidationError: stream 非布尔值，或 stream 为真且模型不支持
-            流式输出时抛出。
+    stream 为真且模型不支持流式输出时抛出 SeedreamValidationError；5.0 Pro 不支持，
+    5.0 系列（5.0/5.0-lite 同一模型）/4.5/4.0 支持。
     """
     if not isinstance(stream, bool):
         raise SeedreamValidationError("stream 必须为布尔值", field="stream", value=stream)
@@ -447,19 +380,9 @@ def validate_stream(stream: bool, model_id: str) -> bool:
 
 
 def validate_max_images(max_images: Any) -> int:
-    """验证最大图像数量参数。
+    """验证最大图像数量参数，确保为 1-15 内的整数。
 
-    确保参数为整数类型且在合理范围内（1-15），委托 _coerce_positive_int_in_range
-    完成校验，与其他整数参数共享统一的错误消息格式。
-
-    Args:
-        max_images: 最大图像数量，支持整数或可转换为整数的值。
-
-    Returns:
-        验证后的整数值。
-
-    Raises:
-        SeedreamValidationError: 当参数类型错误或超出范围时抛出。
+    委托 _coerce_positive_int_in_range 完成校验，与其他整数参数共享统一的错误格式。
     """
     return _coerce_positive_int_in_range(max_images, "max_images", 1, MAX_SEQUENTIAL_TOTAL_IMAGES)
 
@@ -479,9 +402,6 @@ def validate_size(size: str, *, layer_decomposition: bool = False, model_id: str
 
     Returns:
         大写格式的标准化尺寸值；图层拆分场景的 auto 归一为小写返回。
-
-    Raises:
-        SeedreamValidationError: 当尺寸参数无效时抛出。
     """
     if not isinstance(size, str):
         raise SeedreamValidationError("图像尺寸必须为字符串", field="size", value=size)
@@ -530,22 +450,10 @@ def validate_size(size: str, *, layer_decomposition: bool = False, model_id: str
 def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bool = False) -> str:
     """验证图像尺寸与模型的兼容性。
 
-    尺寸规则由 model_capabilities 的能力声明驱动，含预设档位白名单 allowed_presets、
-    像素总区间 min/max_size_pixels、像素倍数约束 size_pixel_multiple，例如 5.0 Pro
-    要求宽高为 16 的倍数。新增模型只需扩展能力声明即可，无需改动本函数。图层拆分
-    场景下 "auto" 由模型自适应输出，仅校验模型支持图层拆分，不走档位与像素校验。
-
-    Args:
-        size: 图像尺寸规格，支持 1K/1.5K/2K/3K/4K 或 <宽>x<高>；图层拆分场景
-            另支持 auto。
-        model_id: 模型标识符。
-        layer_decomposition: 是否处于图层拆分场景。
-
-    Returns:
-        验证通过的尺寸值。
-
-    Raises:
-        SeedreamValidationError: 当尺寸与模型不兼容时抛出。
+    尺寸规则由 model_capabilities 能力声明驱动：预设档位白名单 allowed_presets、
+    像素总区间 min/max_size_pixels、倍数约束 size_pixel_multiple（如 5.0 Pro 要求
+    宽高为 16 的倍数），新增模型只需扩展能力声明。图层拆分场景的 "auto" 仅校验
+    模型支持图层拆分，不走档位与像素校验。
     """
     size = validate_size(size, layer_decomposition=layer_decomposition, model_id=model_id)
     caps = get_model_capabilities(model_id)
@@ -622,17 +530,8 @@ def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> boo
     """验证图层拆分开关与模型的兼容性。
 
     图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，仅
-    5.0 Pro 支持，且要求单张参考图输入（image_to_image 工具的输入形态已保证）。
-
-    Args:
-        layer_decomposition: 图层拆分开关，None 视为未启用。
-        model_id: 模型标识符。
-
-    Returns:
-        归一后的开关布尔值，未启用时为 False。
-
-    Raises:
-        SeedreamValidationError: 开关值非法，或当前模型不支持图层拆分。
+    5.0 Pro 支持；单张参考图输入的前提由 image_to_image 工具的输入形态保证。
+    None 视为未启用返回 False，开关非法或模型不支持时抛出 SeedreamValidationError。
     """
     if layer_decomposition is None:
         return False
@@ -657,22 +556,9 @@ def validate_background(
 ) -> str | None:
     """验证图片透明通道参数与模型的兼容性。
 
-    background 控制是否生成带透明通道的图片，仅 5.0 Pro 的图生图场景支持，且要求
-    输入单张带透明通道的图片；输入图格式约束由上游校验，此处做值域、模型门控与
-    output_format 互斥校验。透明背景输出为带 alpha 通道的 png，与 jpeg 输出格式
-    互斥，同时指定按官方语义报错。
-
-    Args:
-        background: 透明通道取值，transparent 或 opaque，None 表示未指定。
-        model_id: 模型标识符。
-        output_format: 同请求指定的输出格式，None 表示未指定。
-
-    Returns:
-        规范化后的取值，未指定时为 None。
-
-    Raises:
-        SeedreamValidationError: 取值非法、当前模型不支持该参数、output_format 非
-            字符串，或透明背景与 jpeg 输出格式互斥。
+    background 控制是否生成带透明通道的图片，仅 5.0 Pro 图生图支持，输入图的
+    格式约束由上游校验，此处做值域、模型门控与 output_format 互斥校验；透明
+    背景输出为带 alpha 的 png，与 jpeg 互斥同时指定时报错。
     """
     if background is None:
         return None
@@ -709,20 +595,7 @@ def validate_background(
 
 
 def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None:
-    """验证提示词优化选项的配置。
-
-    检查优化模式是否有效，并确保与模型兼容。
-
-    Args:
-        options: 优化选项字典，包含 mode 等配置。
-        model_id: 模型标识符。
-
-    Returns:
-        验证后的优化选项字典；输入为 None 时返回 None。
-
-    Raises:
-        SeedreamValidationError: 当选项配置无效或与模型不兼容时抛出。
-    """
+    """验证提示词优化选项并检查模型兼容性，可配置字段仅 mode，取值 standard/fast。"""
     if options is None:
         return None
 
@@ -731,9 +604,8 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None
             "optimize_prompt_options 必须为对象", field="optimize_prompt_options", value=options
         )
 
-    # 未知字段显式拒绝而非静默丢弃，与 validate_generation_tools 的处理方式一致；
-    # schemas.py 的 OptimizePromptOptions extra="forbid" 已覆盖工具层，此处补齐
-    # 公共 client 直调路径。
+    # 未知字段显式拒绝而非静默丢弃；schemas 的 extra="forbid" 已覆盖工具层，
+    # 此处补齐公共 client 直调路径。
     extra_keys = set(options.keys()) - {"mode"}
     if extra_keys:
         raise SeedreamValidationError(
@@ -778,17 +650,9 @@ def validate_parallel_generation_options(
 ) -> tuple[int, int]:
     """校验并行生成参数组合，返回规范化后的 (request_count, parallelism)。
 
-    未指定 parallelism 时取 min(request_count, max_request_count)；
-    parallelism 不得超过 request_count；stream 为真时 request_count 必须为 1。
-
-    Args:
-        request_count: 请求总数。
-        parallelism: 并行度，None 表示未指定。
-        stream: 是否流式输出。
-        max_request_count: request_count 与 parallelism 的公共上界。
-
-    Raises:
-        SeedreamValidationError: 当参数越界或组合非法时抛出。
+    未指定 parallelism 时取 min(request_count, max_request_count)；parallelism
+    不得超过 request_count；stream 为真时 request_count 必须为 1。
+    max_request_count 为两者公共上界。
     """
     validated_request_count = _coerce_positive_int_in_range(
         request_count, "request_count", 1, max_request_count
@@ -823,21 +687,9 @@ def validate_sequential_image_limit(
 ) -> None:
     """验证组图输出的总图片数量限制。
 
-    参考图上限由模型能力表统一提供，消除硬编码同步点。model_id 缺省时按通用上限
-    校验，供无模型上下文的 schema 层粗校验使用；精确校验由 client 层传入实际
-    model_id 完成。
-
-    要求：
-    - 参考图数量不超过模型能力上限。5.0 Pro 为 10，其余家族为 14。
-    - 参考图数量与生成数量之和不超过 15。
-
-    Args:
-        max_images: 组图生成数量上限。
-        reference_images: 参考图列表，可为 None。
-        model_id: 模型标识符，缺省时按通用参考图上限校验。
-
-    Raises:
-        SeedreamValidationError: 参考图数量超限或与生成数量之和超限时抛出。
+    参考图数量不超过模型能力上限（5.0 Pro 为 10，其余家族为 14），且与生成数量
+    之和不超过 15。model_id 缺省时按通用上限粗校验，供无模型上下文的 schema 层
+    使用；精确校验由 client 层传入实际 model_id 完成。
     """
     max_reference = get_max_reference_images(model_id)
     reference_count = len(reference_images) if reference_images else 0
@@ -864,15 +716,8 @@ def resolve_sequential_max_images(
 ) -> int:
     """根据参考图数量推导组图最大生成数量。
 
-    当未显式指定 max_images 时，默认为 15 - len(reference_images)，
-    以保证"参考图数量 + 生成数量 <= 15"。
-
-    Args:
-        max_images: 用户指定的最大生成数量，None 表示未指定。
-        reference_images: 参考图片列表，可为空。
-
-    Returns:
-        推导后的最大生成数量。
+    未显式指定 max_images 时默认为 15 - len(reference_images)，保证「参考图数量 +
+    生成数量 <= 15」。
     """
     if max_images is not None:
         return max_images
@@ -917,30 +762,12 @@ def validate_common_generation_params(
     model_id: str,
     layer_decomposition: bool = False,
 ) -> ValidatedCommonParams:
-    """集中校验生成类工具的公共参数并返回校验后的各值。
+    """集中校验生成类工具的公共参数并返回校验后的各值，字段语义见 ValidatedCommonParams。
 
     供 client 生成方法入口做公共库 API 自校验：新增公共参数校验规则只需在此扩展，
-    调用方自动受益。工具层的值域校验由 schemas.py 的 Field 约束承担，与本函数构成
-    defense-in-depth。
-
-    Args:
-        prompt: 提示词文本；图层拆分场景可为 None，由模型自动识别拆分意图。
-        optimize_prompt_options: 提示词优化选项，可为 None。
-        size: 尺寸规格。
-        watermark: 水印开关。
-        response_format: 响应格式。
-        output_format: 输出格式，可为 None。
-        stream: 流式输出开关。
-        tools: 生成工具数组，可为 None。
-        model_id: 模型标识符。
-        layer_decomposition: 是否处于图层拆分场景，true 时 size 额外接受 auto、
-            prompt 允许缺省。
-
-    Returns:
-        校验后的公共参数集合，字段语义见 ValidatedCommonParams。
-
-    Raises:
-        SeedreamValidationError: 任一参数校验未通过，含非图层场景缺省 prompt。
+    调用方自动受益；工具层的值域校验由 schemas.py 的 Field 约束承担，与本函数构成
+    defense-in-depth。图层拆分场景下 prompt 允许缺省、size 额外接受 auto，非图层
+    场景缺省 prompt 抛出 SeedreamValidationError。
     """
     if prompt is None and not layer_decomposition:
         raise SeedreamValidationError("prompt 不能为空", field="prompt", value=None)

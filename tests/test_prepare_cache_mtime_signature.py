@@ -1,8 +1,6 @@
 """守护测试：_prepare_image_input 本地文件缓存键含 (mtime, size) 签名。
 
-本地文件内容替换后，签名变化使缓存失效、重新编码，避免返回陈旧编码。签名由
-_local_file_signature 基于 os.stat 生成；通过改变文件大小触发 size 维度变化，
-规避 Windows mtime 精度问题。
+本地文件替换后签名变化使缓存失效；以 size 维度变化触发，规避 Windows mtime 精度问题。
 """
 
 from pathlib import Path
@@ -40,8 +38,7 @@ async def test_prepare_image_input_invalidates_cache_when_local_file_size_change
     assert call_count == 1
     assert len(client._image_preparer._prepare_cache) == 1
 
-    # 覆写文件：使用不同长度的字节确保 size 维度变化使签名失效；
-    # size 为精确值，借此规避 Windows mtime 精度问题
+    # 覆写为更长的内容，确保 size 维度变化使签名失效
     image_file.write_bytes(b"replaced-content-with-more-bytes")
 
     # 第二次调用：签名变化 → cache miss → 重新调用底层

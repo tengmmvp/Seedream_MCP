@@ -1,7 +1,7 @@
 """生成工具底层辅助函数。
 
-用量累加、错误归一化、自动保存路径解析，以及面向 MCP 客户端的进度上报。
-这些函数不依赖生成上下文与结果结构，作为其余子模块的公共基础。
+用量累加、错误归一化、保存路径解析与进度上报，不依赖生成上下文与结果结构，
+作为其余子模块的公共基础。
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ PROGRESS_GENERATION_DONE = 70.0
 PROGRESS_AUTOSAVE_START = 75.0
 PROGRESS_AUTOSAVE_DONE = 95.0
 PROGRESS_COMPLETE = 100.0
-# 浏览工具阶梯
+# 浏览工具扫描进度起点与跨度：多目录扫描按已扫目录占比在区间内插值上报。
 PROGRESS_SCAN_START = 20.0
 PROGRESS_SCAN_SPAN = 70.0
 
@@ -43,8 +43,7 @@ PROGRESS_SCAN_SPAN = 70.0
 def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
     """累加用量统计值。
 
-    标量数值字段直接累加；嵌套 dict 字段对其标量子键递归累加合并，使并发聚合与单请求
-    原样保留的用量结构一致。布尔与非数值标量跳过以避免污染汇总结果。
+    标量数值直接累加，嵌套 dict 递归合并子键；布尔与非数值标量跳过，避免污染汇总。
     """
     if isinstance(value, dict):
         current = usage.get(key)
@@ -68,11 +67,7 @@ def _is_generation_failed(result: dict[str, Any]) -> bool:
 
 
 def _normalize_error_message(raw_error: Any) -> str | None:
-    """将不同形态的错误对象提取为可读文本，经统一脱敏后返回。
-
-    上游错误文本可能回显鉴权片段，出口处过 sanitize_error_text 使并行聚合消息与
-    异常路径的防护一致。
-    """
+    """将不同形态的错误对象提取为可读文本，经 sanitize_error_text 脱敏后返回。"""
     if isinstance(raw_error, str):
         message = raw_error.strip()
         return sanitize_error_text(message) if message else None
@@ -92,19 +87,14 @@ def _normalize_error_message(raw_error: Any) -> str | None:
 
 
 def _classify_generation_error_type(exc: Exception) -> str:
-    """将异常映射为稳定的结构化错误码，避免向 structuredContent 暴露内部异常类名。
-
-    错误码统一来自 errors 模块的归约档案，单发与并发路径共用此函数使两条路径的错误码
-    契约一致，且不泄露实现细节。
-    """
+    """将异常映射为归约档案的稳定错误码，不向 structuredContent 暴露异常类名。"""
     return resolve_error_profile(exc).error_code
 
 
 # 凭据与连接类错误的共用排查建议。
 _NETWORK_CREDENTIAL_GUIDANCE = "请确认 API Key 和网络可用后重试。"
 
-# 有意走默认排查建议的错误码：generation_failed 是基类与未识别异常的兜底档案码，
-# 无比通用建议更具体的指引，不进入错误码查表；错误码全集守护测试据此放行。
+# generation_failed 为兜底档案码，无更具体指引，有意不进入下方查表；守护测试据此放行。
 _FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES = frozenset({"generation_failed"})
 
 # 失败排查建议按错误码查表
@@ -121,12 +111,9 @@ _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
 }
 _DEFAULT_FAILURE_GUIDANCE = "请根据错误信息排查后重试。"
 
-# HTTP 状态码级排查建议：SeedreamAPIError 的多个业务失败状态（400/404 等）归约到
-# 同一个 api_error 错误码，仅按错误码查表会把参数错误与端点错误统一导向凭据与网络
-# 排查，与档案 user_hint 矛盾。guidance 拼接仅在归约档案未携带 user_hint 时发生，
-# 而 _HTTP_STATUS_PROFILES 对以下各状态均已配置 user_hint，故本表当前不会触达，
-# 仅作为档案移除或新增状态缺 hint 时的兜底；建议文案与各状态档案 user_hint 语义
-# 一致，未列举状态回退错误码查表。
+# HTTP 状态码级排查建议：多个业务失败状态归约到同一 api_error 错误码，按状态区分
+# 建议。拼接仅发生在档案未携带 user_hint 时，本表作为缺 hint 时的兜底；未列举状态
+# 回退错误码查表。
 _FAILURE_GUIDANCE_BY_STATUS: dict[int, str] = {
     400: "请核对请求参数。",
     401: _NETWORK_CREDENTIAL_GUIDANCE,
@@ -137,11 +124,8 @@ _FAILURE_GUIDANCE_BY_STATUS: dict[int, str] = {
 
 
 def _resolve_failure_guidance(exc: Exception) -> str:
-    """按 HTTP 状态码或错误归约档案的错误码选择失败排查建议，供异常降级文案拼接。
-
-    SeedreamAPIError 优先按 status_code 查状态级建议表，无状态码或状态未列举时按
-    归约档案错误码兜底查表，两表均未命中回退通用建议。
-    """
+    """选择失败排查建议：优先按 status_code 查状态级表，其次按错误码查表，均未命中
+    回退通用建议。"""
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int):
         status_guidance = _FAILURE_GUIDANCE_BY_STATUS.get(status_code)
@@ -181,18 +165,13 @@ def _extract_parallel_request_error(
 def _resolve_default_base_dir(config: SeedreamConfig) -> Path:
     """解析自动保存的默认基础目录，供保存路径解析与预检共用。
 
-    Returns:
-        已 resolve 的默认保存目录。
-
     Raises:
         SeedreamValidationError: 未配置 auto_save_base_dir 且无法确定工作区根。
     """
-    # 多根场景下取首个授权根作为自动保存默认落点。browse 与图像输入采用遍历全根的不同策略。
     if config.auto_save_base_dir:
         return Path(config.auto_save_base_dir).expanduser().resolve()
-    # MCP Roots 为空列表时 get_workspace_root 抛 ValueError，原样上抛会落入未识别
-    # 异常档案呈「未知错误」；转校验异常归入 validation_error 档，用户可见文案
-    # 指向工作区授权问题而非未知失败。
+    # get_workspace_root 的 ValueError 转校验异常，归入 validation_error 档，用户可见
+    # 文案指向工作区授权问题而非未知失败。
     try:
         workspace_root = get_workspace_root()
     except ValueError as exc:
@@ -215,8 +194,7 @@ def _validate_save_path_bounds(default_base_dir: Path, save_path: str) -> Path:
     except ValueError as exc:
         raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
 
-    # user_path 由 normalize_path 解析、default_base_dir 由调用方在上方解析，两者均已
-    # resolve，直接 relative_to 比较即可，避免对已 resolve 的二者再次重复 resolve。
+    # 两路径均已 resolve，直接比较即可，无需重复 resolve。
     if not is_within_resolved(user_path, default_base_dir):
         raise SeedreamValidationError(
             f"save_path 超出允许范围: {default_base_dir}",
@@ -228,16 +206,8 @@ def _validate_save_path_bounds(default_base_dir: Path, save_path: str) -> Path:
 
 
 def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
-    """解析自动保存的基础目录路径，校验用户路径须落在默认目录之内。
-
-    优先使用用户指定路径，若未指定则使用配置中的默认路径。
-
-    Args:
-        config: Seedream 配置实例，包含自动保存相关参数。
-        save_path: 用户指定的保存路径，可选。
-
-    Returns:
-        解析后的安全路径对象。
+    """解析自动保存的基础目录，save_path 未指定时返回默认目录，指定时校验须落在
+    默认目录之内。
 
     Raises:
         SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
@@ -251,14 +221,9 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
 def prevalidate_save_path(config: SeedreamConfig, save_path: str | None) -> None:
     """在生成请求分发前预检 save_path 的边界合法性。
 
-    预检与 _resolve_base_dir 共用同一默认目录解析与越界判定，只判定合法性不承担
-    保存阶段的完整解析；未提供 save_path 时不做任何检查，默认目录的解析失败留待
-    自动保存阶段处理。预检使非法 save_path 在 API 调用前以 validation_error 拒绝，
-    而不是在已计费的生成请求执行完毕后才于自动保存阶段降级为软警告。
-
-    Args:
-        config: Seedream 配置实例，包含自动保存相关参数。
-        save_path: 用户指定的保存路径，可选。
+    与 _resolve_base_dir 共用同一默认目录解析与越界判定，使非法 save_path 在计费
+    请求前即以 validation_error 拒绝，而非留待自动保存阶段降级为软警告。未提供
+    save_path 时不做检查。
 
     Raises:
         SeedreamValidationError: save_path 无效或越出默认保存目录。

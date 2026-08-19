@@ -1,10 +1,10 @@
 """生成图片的缩略图预览。
 
-从自动保存落盘的图片文件生成 MCP 工具结果 content 携带的 ImageContent 预览：
-长边不超过 THUMBNAIL_MAX_EDGE 像素的 JPEG，体积远小于原图，多图结果的协议消息
-不因预览显著膨胀。缩略图生成入口经 image_validation 的幂等注册无条件设置进程级
-PIL MAX_IMAGE_PIXELS，解码开销与拒绝边界和参考图校验一致，不依赖调用方先经过
-参考图校验。单张生成失败安全跳过，不影响其余图片与工具结果本身。
+从自动保存落盘的图片生成工具结果携带的 ImageContent 预览：长边不超过
+THUMBNAIL_MAX_EDGE 像素的 JPEG，体积远小于原图，多图结果的协议消息不因预览显著
+膨胀。解码像素上限经 image_validation 的幂等注册无条件设置进程级 PIL
+MAX_IMAGE_PIXELS，不依赖调用方先经过参考图校验。单张生成失败安全跳过，不影响
+其余图片与工具结果本身。
 """
 
 from __future__ import annotations
@@ -24,18 +24,16 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# 预览缩略图规格：长边上限与 JPEG 质量共同决定单张预览体积，典型取值下每张
-# 约几十 KB，十张量级的并行与组图结果总载荷保持在 MB 级以内。
+# 预览缩略图规格：典型取值下单张约几十 KB，十张量级的结果总载荷保持 MB 级以内。
 THUMBNAIL_MAX_EDGE = 768
 THUMBNAIL_JPEG_QUALITY = 80
 THUMBNAIL_MIME_TYPE = "image/jpeg"
 
-# 预览张数上限：组图与并行的合法组合可达 150 张已保存图片，全量内嵌会使单条
-# CallToolResult 膨胀至数 MB 以上；上限对齐单工具并行请求量级，控制协议消息体积。
+# 预览张数上限：组图与并行的合法组合可达 150 张，全量内嵌会使单条 CallToolResult
+# 膨胀至数 MB 以上。
 PREVIEW_MAX_IMAGES = 10
 
-# 预览解码并发上限：4K 单张解码为 RGB 约占 50MB 内存，全量并发解码时瞬态内存可达
-# GB 级；并发收敛到 3 与参考图预处理路径的内存规划口径对齐。
+# 预览解码并发上限：4K 单张解码为 RGB 约占 50MB 内存，全量并发时瞬态可达 GB 级。
 PREVIEW_DECODE_CONCURRENCY = 3
 
 
@@ -44,12 +42,6 @@ def _flatten_to_rgb(image: Image.Image) -> Image.Image:
 
     JPEG 不支持透明通道：RGBA、LA 与带 transparency 的调色板模式合成白色背景，
     其余模式直接转换，透明区域在预览中呈白底而非丢失通道后发黑。
-
-    Args:
-        image: PIL 已打开的图片对象。
-
-    Returns:
-        RGB 模式的图片对象；输入已为 RGB 时原样返回。
     """
     from PIL import Image
 
@@ -76,14 +68,12 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
     Returns:
         JPEG 缩略图字节；无法生成时为 None。
     """
-    # PIL 惰性导入与图像模块的其余惯例一致：首载含解码器注册，落点在工作线程
-    # 而非事件循环线程，server 导入链不因此急载 PIL。
+    # PIL 惰性导入，首载含解码器注册，落点在工作线程而非事件循环。
     from PIL import Image
 
     from .image_validation import _ensure_heif_opener_registered
 
-    # 幂等注册 HEIF 解码器并把进程级 PIL MAX_IMAGE_PIXELS 设为 36M，使本路径的
-    # 解码像素上限无条件成立，不依赖调用方先经过参考图校验。
+    # 幂等注册 HEIF 解码器并无条件设置 36M 解码像素上限。
     _ensure_heif_opener_registered()
 
     try:

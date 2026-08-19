@@ -1,9 +1,7 @@
 """streamable-http 请求体大小限制中间件测试。
 
-直接实例化 ``_LimitRequestBodyMiddleware`` 并以 ASGI scope/receive/send 模拟调用，
-覆盖超限早拒（413）、未超限放行、非数字 Content-Length 降级 chunked 字节累计防护、
-超限截断后下游异常被吞统一回 413、未超限下游异常原样重抛与非 http scope 透传，
-与 Bearer 鉴权中间件测试同构。Content-Length 头仅作早拒快速路径，畸形声明降级后
+直接实例化 ``_LimitRequestBodyMiddleware`` 以 ASGI scope/receive/send 模拟调用，
+与 Bearer 鉴权中间件测试同构。Content-Length 仅作早拒快速路径，畸形声明降级后
 由 receive 字节累计兜底。
 """
 
@@ -20,7 +18,7 @@ _LIMIT = 64 * 1024 * 1024
 
 
 async def test_request_body_limit_rejects_oversized_content_length() -> None:
-    """Content-Length 超上限 → 413 + body 含 request_too_large。"""
+    """Content-Length 超上限时回 413，body 含 request_too_large。"""
     sent: list[dict] = []
 
     async def send(message: dict) -> None:
@@ -125,9 +123,8 @@ async def test_request_body_limit_passes_websocket_scope() -> None:
 
 
 async def test_request_body_limit_rejects_oversized_chunked_body() -> None:
-    """无 Content-Length 的分块 body 累计超限 → receive_wrapper 截断并回 413。
+    """无 Content-Length 的分块 body 累计超限时由 receive_wrapper 截断并回 413。
 
-    覆盖 chunked 防御路径：缺失 Content-Length 时按实际接收字节累计，超限短路。
     用小 limit 避免构造百兆级字节串。
     """
     small_limit = 1024
@@ -166,7 +163,7 @@ async def test_request_body_limit_rejects_oversized_chunked_body() -> None:
 
 
 async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
-    """无 Content-Length 的分块 body 累计未超限 → 正常放行下游。"""
+    """无 Content-Length 的分块 body 累计未超限时正常放行下游。"""
     small_limit = 1024
     received: dict[str, object] = {}
     messages = [
@@ -199,9 +196,7 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
 async def test_request_body_limit_skips_413_when_downstream_already_responded() -> None:
     """下游先发 response.start 再触发超限时不得补发第二个 response.start。
 
-    防御性路径：现行实现截断 body 后下游应在发出响应头前失败或返回，此处模拟
-    下游已开始响应才读到超限 body 的形态，断言真实 send 只收到一个
-    http.response.start，连接异常交由服务器协议层处理。
+    模拟下游已开始响应才读到超限 body 的形态，连接异常交由服务器协议层处理。
     """
     small_limit = 1024
     sent: list[dict] = []
@@ -240,11 +235,7 @@ async def test_request_body_limit_skips_413_when_downstream_already_responded() 
 
 
 async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunked() -> None:
-    """非数字 Content-Length 头降级为 0，超限防护由 chunked 字节累计承担。
-
-    被污染上游可声明畸形 Content-Length 绕过早拒快速路径，降级后请求进入下游，
-    receive 字节累计仍须拦截超限并以 413 短路。
-    """
+    """非数字 Content-Length 头降级为 0，超限防护由 chunked 字节累计承担。"""
     small_limit = 1024
     sent: list[dict] = []
     received: dict[str, object] = {}
@@ -316,11 +307,7 @@ async def test_request_body_limit_non_numeric_content_length_within_limit_passes
 
 
 async def test_request_body_limit_swallows_downstream_exception_after_truncation() -> None:
-    """超限截断后下游读到空终帧抛异常时被吞掉，统一回 413 而非冒泡 500。
-
-    下游按截断的空终帧判定请求畸形而抛异常属预期形态；too_large 已置位时
-    异常被中间件吞掉并补发 413，保证客户端收到确定的超限语义。
-    """
+    """超限截断后下游读到空终帧抛异常时被吞掉，统一回 413 而非冒泡 500。"""
     small_limit = 1024
     sent: list[dict] = []
     messages = [
@@ -386,8 +373,7 @@ async def test_request_body_limit_reraises_downstream_exception_within_limit() -
 async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
     """下游正常返回后的收尾 413 补发失败被吞掉，不向应用层冒泡。
 
-    客户端发送超限 chunked body 后立即断开时，收尾补发 413 的 send 对已死
-    连接抛异常；与 try 内路径的吞并防护对齐，失败不冒泡污染错误通道。
+    客户端发送超限 body 后立即断开时，收尾 413 的 send 对死连接抛异常。
     """
     small_limit = 1024
     messages = [
@@ -417,7 +403,7 @@ async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
 
     middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
-    # 修复前：收尾 413 在 try 之外，send 失败原样冒泡 RuntimeError。
+    # 旧行为：收尾 413 在 try 之外，send 失败原样冒泡。
     await middleware(scope, receive, send)
 
 

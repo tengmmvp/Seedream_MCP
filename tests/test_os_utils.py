@@ -1,11 +1,7 @@
-"""io_file.open_no_follow_read 守护测试。
+"""io_file 守护测试：open_no_follow_read 的符号链接拒绝与 atomic_replace 原子落盘骨架。
 
-覆盖三种场景：
-(a) 平台支持 O_NOFOLLOW 时，最终分量为符号链接的路径被拒绝；
-(b) 模拟平台不支持 O_NOFOLLOW，monkeypatch 置 O_NOFOLLOW=0，is_symlink 兜底分支拒绝符号链接；
-(c) 正常文件读取成功。
-
-Windows 创建符号链接需特权或开发者模式，相关用例以 try/skip 跳过，避免 WinError 1314。
+open_no_follow_read 覆盖平台 O_NOFOLLOW、monkeypatch 模拟不支持时的 is_symlink 兜底
+与正常读取三种场景。Windows 创建符号链接需特权或开发者模式，相关用例以探测结果 skip。
 """
 
 import os
@@ -83,10 +79,7 @@ def test_open_no_follow_read_fallback_rejects_symlink_without_no_follow(
 def test_open_no_follow_fallback_allows_normal_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """模拟不支持 O_NOFOLLOW 时，正常文件即非符号链接的读取仍成功。
-
-    确保兜底分支不会误伤普通文件。
-    """
+    """模拟不支持 O_NOFOLLOW 时，正常文件读取仍成功，兜底分支不误伤。"""
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
 
     path = tmp_path / "plain.bin"
@@ -101,9 +94,7 @@ def test_open_no_follow_fallback_rejects_fstat_toctou_mismatch(
 ) -> None:
     """fstat 与 lstat 的 st_ino 不一致时拒绝打开，闭合 TOCTOU 竞态。
 
-    经 _open_no_follow_fallback 的同一性复核拒绝。模拟平台不支持 O_NOFOLLOW，强制走
-    lstat+fstat 同一性复核分支；monkeypatch os.fstat 返回不同 inode，模拟校验与打开
-    之间最终分量被替换为符号链接的场景。
+    monkeypatch os.fstat 返回不同 inode，模拟校验与打开之间最终分量被替换的场景。
     """
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
     path = tmp_path / "plain.bin"
@@ -184,8 +175,7 @@ async def test_atomic_replace_from_fd_writer_failure_cleans_temp_and_closes_fd_o
 async def test_atomic_replace_from_fd_replace_failure_cleans_temp(tmp_path: Path) -> None:
     """异步骨架替换失败：目标被同名目录占用时异常上抛，随机临时文件被清理。
 
-    与同步版 atomic_replace_from_fd_sync 的既有用例互为镜像，守护异步骨架的
-    失败路径同样不留 .part 残留。
+    与同步版 atomic_replace_from_fd_sync 的用例互为镜像。
     """
     final = tmp_path / "out.bin"
     final.mkdir()

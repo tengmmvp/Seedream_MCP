@@ -1,4 +1,4 @@
-"""生成执行上下文构建、并行结果聚合与响应格式化测试。"""
+"""生成执行上下文构建、并行结果聚合、响应格式化与 save_path 预检测试。"""
 
 from dataclasses import fields
 from pathlib import Path
@@ -162,8 +162,8 @@ def test_build_generation_context_rejects_explicit_empty_size() -> None:
 def test_build_generation_context_rejects_reference_images_over_pro_limit() -> None:
     """5.0 Pro 的参考图上限 10 在 context 层即时拒绝，与尺寸等能力校验同层。
 
-    schema 上限只能表达全家族默认 14；若留给 client 层，进度已上报"参数校验完成"
-    后才报错，错误呈现层次不一致。
+    schema 上限只能表达全家族默认 14；留给 client 层则进度已上报「参数校验完成」
+    后才报错。
     """
     from seedream_mcp.tools.core.schemas import MultiImageFusionInput
 
@@ -364,8 +364,8 @@ def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() 
 def test_aggregate_all_failed_result_dicts_carry_upstream_error_code() -> None:
     """全为失败 dict 且无异常时 error 载荷携带上游 code，与单发路径契约一致。
 
-    200 加顶层 error 的请求级失败（如内容策略拒绝）经并行聚合后不再丢失上游错误码；
-    提取取首个携带非空字符串 code 的结果，未提取到时维持 generation_failed 兜底。
+    200 加顶层 error 的请求级失败经聚合后不丢失上游错误码，未提取到时维持
+    generation_failed 兜底。
     """
     result = aggregate_parallel_generation_results(
         request_results=[
@@ -407,8 +407,7 @@ def test_aggregate_all_failed_result_dicts_without_code_keep_fallback() -> None:
 def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> None:
     """并发全失败的内容策略拒绝经结构化出口透传上游 code，且净化语义保持。
 
-    聚合 error 携带的 code 为上游自由文本，_build_generation_structured_result 的
-    dict error 分支净化后透传；携带 CRLF 与凭据样式片段的 code 不借该通道注入。
+    聚合 error 的 code 为上游自由文本，携带 CRLF 与凭据片段时不借该通道注入。
     """
     from seedream_mcp.tools.core.results import _build_generation_structured_result
 
@@ -581,11 +580,7 @@ def test_build_generation_context_explicit_auto_save_overrides_config() -> None:
 
 
 def test_input_schema_rejects_non_bool_auto_save() -> None:
-    """auto_save 类型约束属 schema 字段声明，不可解析的值在构造输入模型时即被拒绝。
-
-    可解析的布尔字符串如 yes/true 经 pydantic 宽松模式归一化为 bool，与 MCP 客户端
-    传 JSON 布尔的路径行为一致。
-    """
+    """auto_save 类型约束属 schema 字段声明，不可解析的值在构造输入模型时即被拒绝。"""
     with pytest.raises(ValidationError):
         TextToImageInput(prompt="t", auto_save="maybe")
 
@@ -598,9 +593,8 @@ def test_build_generation_context_rejects_out_of_bounds_save_path(
 ) -> None:
     """越界 save_path 在预检阶段即拒绝，早于计费的生成请求分发。
 
-    此前越界路径在自动保存阶段才抛校验异常并被降级为软警告，图片已按默认目录之外
-    的目标无法落盘；预检与 _resolve_base_dir 共用同一判定入口，错误档位为
-    validation_error。
+    此前越界路径在自动保存阶段才抛校验异常并被降级为软警告；预检与
+    _resolve_base_dir 共用同一判定入口，错误档位为 validation_error。
     """
     base = tmp_path / "save_root"
     base.mkdir()
@@ -639,8 +633,8 @@ def test_prevalidate_save_path_skips_without_save_path() -> None:
     config = SeedreamConfig(api_key="test_key")
     token = io_path_module._WORKSPACE_ROOTS_VAR.set(())
     try:
-        # 空 Roots 且未配置 auto_save_base_dir 时预检直接跳过，不在此抛出
-        # 无法确定自动保存基础目录的校验异常。
+        # 空 Roots 且未配置 auto_save_base_dir 时预检直接跳过，不抛无法确定
+        # 自动保存基础目录的校验异常。
         prevalidate_save_path(config, None)
         context = build_generation_context(TextToImageInput(prompt="test"), config)
     finally:

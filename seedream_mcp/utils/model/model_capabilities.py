@@ -1,10 +1,9 @@
 """Seedream 模型家族解析与能力声明。
 
-集中管理各模型家族的识别与能力差异，含 output_format、tools、stream、组图、参考图上限等维度，
-供 validation、config、client、schemas 共享，避免分散的子串判定与能力表重复。
-
-本模块是数据驱动校验的唯一数据源：MODEL_CAPABILITIES 等数据表驱动各处的模型相关
-判定，新增模型只需扩展数据表而无需修改调用方代码。需注意 5.0 Pro 的 Model ID 含
+集中管理各模型家族的识别与能力差异，含 output_format、tools、stream、组图、参考图
+上限等维度，供 validation、config、client、schemas 共享，避免分散的子串判定与能力
+表重复。MODEL_CAPABILITIES 等数据表是数据驱动校验的唯一数据源，新增模型只需扩展
+数据表而无需修改调用方代码。需注意 5.0 Pro 的 Model ID 含
 "doubao-seedream-5-0" 子串，与 5.0 Lite 规则重叠，家族解析时须先匹配 Pro 以免误判。
 """
 
@@ -14,9 +13,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
-# 参考图上限常量，由能力表按家族引用。
+# 参考图上限常量：5.0 Pro 为 10，其余家族为 14，由能力表按家族引用。
 SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10
-SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14  # 5.0 Lite / 4.5 / 4.0 最多 14 张参考图。
+SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14
 
 # 各家族像素尺寸范围与倍数约束，供 validate_size_for_model 数据驱动校验。
 # 5.0 Pro 上限对应官方 2048x2048x1.1025（4624220）的像素乘积上限。
@@ -45,18 +44,18 @@ class ModelCapabilities:
     Attributes:
         family: 模型家族规范名。
         display_name: 面向用户输出的模型展示名，供错误消息引用。
-        supports_output_format: 是否支持 output_format 参数，仅 5.0 系列支持。
-        supports_tools: 是否支持联网搜索等生成工具，仅 doubao-seedream-5.0 系列（5.0/5.0-lite 同一模型）支持。
-        supports_stream: 是否支持流式输出，5.0 Pro 不支持。
-        max_reference_images: 参考图数量上限，5.0 Pro 为 10，其余家族为 14。
-        allowed_presets: 允许的尺寸预设档位白名单，驱动 validate_size_for_model 档位校验。
+        supports_output_format: 是否支持 output_format 参数。
+        supports_tools: 是否支持联网搜索等生成工具。
+        supports_stream: 是否支持流式输出。
+        max_reference_images: 参考图数量上限。
+        allowed_presets: 允许的尺寸预设档位白名单。
         min_size_pixels: 像素总量的下限，None 表示该家族不约束像素区间。
         max_size_pixels: 像素总量的上限，None 表示该家族不约束像素区间。
-        size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束；5.0 Pro 要求宽高为 16 的倍数。
+        size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束。
         supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
-        supports_sequential_generation: 是否支持组图生成，5.0 Pro 不支持。
-        supports_layer_decomposition: 是否支持 layer_decomposition 图层拆分，仅 5.0 Pro 支持。
-        supports_background: 是否支持 background 透明通道参数，仅 5.0 Pro 支持。
+        supports_sequential_generation: 是否支持组图生成。
+        supports_layer_decomposition: 是否支持 layer_decomposition 图层拆分。
+        supports_background: 是否支持 background 透明通道参数。
     """
 
     family: str
@@ -75,8 +74,7 @@ class ModelCapabilities:
     supports_background: bool = False
 
 
-# 家族解析 token 表：顺序敏感，5.0 Pro 须先于 5.0 Lite。
-# Pro 的 Model ID 含 "doubao-seedream-5-0" 子串，若 Lite 规则在前会被误归入 Lite。
+# 家族解析 token 表：顺序敏感，Pro 的 Model ID 含 Lite 的匹配子串，须先匹配 Pro。
 _MODEL_FAMILY_TOKENS: list[tuple[str, tuple[str, ...]]] = [
     (MODEL_FAMILY_50_PRO, ("doubao-seedream-5-0-pro", "doubao-seedream-5.0-pro")),
     (MODEL_FAMILY_50_LITE, ("doubao-seedream-5-0", "doubao-seedream-5.0")),
@@ -86,8 +84,7 @@ _MODEL_FAMILY_TOKENS: list[tuple[str, tuple[str, ...]]] = [
 
 
 # 模型友好别名到真实 Model ID 的映射，config.normalize_model_selector 据此展开别名。
-# 与 MODEL_CAPABILITIES、DEPRECATED_MODEL_TOKENS 同一只读口径包装，防止公共清单被
-# 调用方原地改写污染全局判定。
+# 各公共清单均取只读口径包装，防止被调用方原地改写。
 MODEL_ALIASES: Mapping[str, str] = MappingProxyType(
     {
         "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
@@ -99,8 +96,6 @@ MODEL_ALIASES: Mapping[str, str] = MappingProxyType(
 )
 
 # 已下线模型的特征 token，model_id 命中任意 token 时 config 校验拒绝。
-# frozenset 不可变，与 MODEL_CAPABILITIES 的只读视图口径一致，防止公共清单被
-# 原地改写污染全局判定。
 DEPRECATED_MODEL_TOKENS: frozenset[str] = frozenset(
     {
         "doubao-seedream-3-0",
@@ -121,7 +116,6 @@ def _resolve_model_family(model_id: str) -> str:
 
 
 # 各家族能力表；unknown 默认放行全部能力，兼容 Endpoint ID 等无法识别的模型。
-# 以 MappingProxyType 包装为只读视图，防止公共数据表被调用方原地改写污染全局判定。
 MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
     {
         MODEL_FAMILY_50_PRO: ModelCapabilities(
@@ -203,9 +197,5 @@ def get_model_capabilities(model_id: str) -> ModelCapabilities:
 
 
 def get_max_reference_images(model_id: str) -> int:
-    """返回模型支持的最大参考图数量，由能力表统一提供。
-
-    - Seedream 5.0 Pro：10 张
-    - Seedream 5.0 Lite / 4.5 / 4.0 及未知模型：14 张
-    """
+    """返回模型支持的最大参考图数量，由能力表统一提供。"""
     return get_model_capabilities(model_id).max_reference_images

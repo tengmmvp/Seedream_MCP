@@ -158,7 +158,7 @@ def test_cli_main_dispatches_to_correct_runner(
 def test_cli_main_refuses_non_loopback_http_without_auth_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """非回环 + 无鉴权令牌 → fail-closed 拒绝启动。"""
+    """非回环绑定且未提供鉴权令牌时 fail-closed 拒绝启动。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
@@ -172,10 +172,7 @@ def test_cli_main_refuses_non_loopback_http_without_auth_token(
 def test_cli_main_refuses_non_loopback_http_without_tls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """非回环 + 令牌 + 无 TLS + 未显式 opt-in 时 fail-closed 拒绝启动。
-
-    防止令牌明文传输。
-    """
+    """非回环绑定携带令牌但无 TLS 且未显式豁免时 fail-closed 拒绝启动，防止令牌明文传输。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
@@ -191,7 +188,7 @@ def test_cli_main_refuses_non_loopback_http_without_tls(
 def test_cli_main_allows_non_loopback_http_with_tls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """非回环 + 令牌 + TLS 证书 → 正常分发并透传 SSL。"""
+    """非回环绑定携带令牌与 TLS 证书时正常分发并透传 SSL 选项。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
@@ -220,7 +217,7 @@ def test_cli_main_allows_non_loopback_http_with_tls(
 def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """非回环 + 令牌 + 显式 --insecure-allow-non-tls → 允许，适用于反代终结 TLS 场景。"""
+    """非回环绑定携带令牌并显式 --insecure-allow-non-tls 时允许，适用于反代终结 TLS 场景。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
@@ -491,9 +488,8 @@ def test_cli_main_non_loopback_auth_token_from_active_config(
 ) -> None:
     """无 --auth-token、令牌经活动配置注入时非回环启动通过并透传该令牌。
 
-    生产容器部署依赖 SEEDREAM_HTTP_AUTH_TOKEN 环境变量在配置构建期汇入
-    http_auth_token 字段；cli_main 把配置注入活动配置后 _resolve_http_auth_token
-    回退读取该字段，鉴权不得只认 CLI 参数。
+    生产部署依赖环境变量在配置构建期汇入 http_auth_token 字段，鉴权不得只认
+    CLI 参数。
     """
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
@@ -552,9 +548,8 @@ def test_transport_security_derivation_follows_bind_host(
 ) -> None:
     """transport_security 按绑定地址派生：非回环默认关闭 SDK Host 白名单，回环保留白名单。
 
-    SDK 2.0 起 streamable_http_app 以 host 参数决定防护默认；本项目按实际绑定地址
-    显式派生传入。未配置允许列表时非回环绑定必须整体关闭，否则非回环部署的全部
-    /mcp 请求会被 SDK 内层以 421 拒绝。
+    未配置允许列表时非回环绑定必须整体关闭，否则全部 /mcp 请求会被 SDK 内层
+    以 421 拒绝。
     """
     _inject_transport_config(monkeypatch, SeedreamConfig(api_key="test_key"))
 
@@ -661,7 +656,7 @@ async def test_drain_pending_tasks_cancels_and_collects_pending() -> None:
 async def test_drain_pending_tasks_gives_up_when_task_swallows_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """吞掉 CancelledError 的任务在超时后被放弃等待，回收不无限挂起退出流程。"""
+    """吞掉 CancelledError 的任务在超时后被放弃等待，回收流程不会无限挂起。"""
     monkeypatch.setattr(transport_module, "_DRAIN_PENDING_TIMEOUT_SECONDS", 0.1)
     state = {"cancels": 0}
 
@@ -682,7 +677,7 @@ async def test_drain_pending_tasks_gives_up_when_task_swallows_cancel(
     assert not task.done()
     assert state["cancels"] == 1
 
-    # 收尾：第二次取消触发吞满阈值后任务退出，避免遗留 pending 任务。
+    # 收尾：再次取消使任务退出，避免遗留 pending 任务。
     task.cancel()
     await asyncio.wait_for(task, timeout=5.0)
     assert task.done() and not task.cancelled()

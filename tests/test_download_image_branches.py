@@ -1,9 +1,6 @@
 """download_image 重试分类与 _download_response_to_temp 内部分支测试。
 
-覆盖 download_image 的可重试/终态错误分类，aiohttp.ClientError/OSError 重试，
-泛 Exception 不重试，DNS 解析错误的瞬时可重试与私网终态分类，以及
-_download_response_to_temp 的 content-length 解析失败、流式累计超限、字节签名
-不匹配、fd 泄漏兜底四条分支。用 fake session/response 模拟，不依赖真实网络。
+用 fake session/response 模拟，不依赖真实网络。
 """
 
 import asyncio
@@ -59,11 +56,7 @@ async def test_download_image_retries_on_aiohttp_client_error(
 async def test_download_retries_on_rate_limit_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None, status: int
 ) -> None:
-    """408 请求超时与 429 限流属可重试：退避后第二次成功落盘。
-
-    并发批量下载触发 CDN 限流是常见形态，若按终态失败自动保存会静默丢弃本地
-    副本，只剩 24 小时过期的源 URL。
-    """
+    """408 请求超时与 429 限流属可重试：退避后第二次成功落盘。"""
     manager = DownloadManager()
     session = _FakeSession(
         [
@@ -101,11 +94,7 @@ async def test_download_429_exhausts_retries_as_retryable_error(
 async def test_download_404_is_terminal_single_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """404 属语义明确的终态错误：立即抛 DownloadError，不进入退避重试。
-
-    404 不在 408/429/5xx 的可重试集合内，重试无法恢复资源不存在；断言异常非
-    RetryableDownloadError 子类，防止分类回归把终态错误送入退避循环。
-    """
+    """404 属语义明确的终态错误：立即抛 DownloadError，不进入退避重试。"""
     manager = DownloadManager()
     session = _FakeSession([_FakeResponse(status=404)])
     _patch_download_network(monkeypatch, manager, session)
@@ -141,11 +130,7 @@ async def test_download_redirect_without_location_is_terminal(
 async def test_download_sniffs_extension_from_bytes_when_suffix_mismatched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """URL 派生扩展名与实际字节不符时按字节签名修正，落盘与结果路径一致。
-
-    签名 CDN 链接常无路径后缀（恒得默认 .jpeg）或声明与内容不符；嗅探后内容与
-    扩展名保持一致，与 base64 保存路径行为对齐。
-    """
+    """URL 派生扩展名与实际字节不符时按字节签名修正，落盘与结果路径一致。"""
     from _download_fakes import _FakeSession
 
     manager = DownloadManager()
@@ -228,7 +213,7 @@ async def test_download_image_does_not_retry_on_disk_quota_exceeded(
     with pytest.raises(DownloadError, match="文件系统永久错误"):
         await manager.download_image("https://example.com/img.png", save_path)
 
-    # 配额超限需管理员介入，重试仅徒增延迟，故单次尝试即终态抛出
+    # 配额超限需管理员介入，重试无意义，单次尝试即终态
     assert session.call_count == 1
     assert not save_path.exists()
 
@@ -236,12 +221,7 @@ async def test_download_image_does_not_retry_on_disk_quota_exceeded(
 async def test_download_image_does_not_retry_on_invalid_url_client_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """aiohttp.InvalidUrlClientError 属 URL 语法永久错误，立即抛出不重试。
-
-    InvalidUrlClientError 继承 ClientError，但重试无法修复 URL 语法问题，须在
-    ClientError 臂内单独识别为终态错误，抛出 DownloadError，区别于连接类瞬时
-    ClientError 的退避重试。
-    """
+    """aiohttp.InvalidUrlClientError 属 URL 语法永久错误，立即抛出不重试。"""
     manager = DownloadManager()
     session = _RaisingThenSuccessSession(
         aiohttp.InvalidUrlClientError("http://bad url"), _png_success_response()
@@ -269,11 +249,7 @@ def _patch_loop_getaddrinfo(monkeypatch: pytest.MonkeyPatch, fake_getaddrinfo: A
 async def test_download_retries_on_transient_dns_resolution_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """EAI_AGAIN 瞬时解析失败按可重试处理，退避后重新解析并成功落盘。
-
-    gaierror 虽是 OSError 子类，但瞬时解析抖动与解析超时同属可恢复故障；若按终态
-    DownloadError 上抛会绕过退避重试，单次 DNS 抖动即导致保存失败。
-    """
+    """EAI_AGAIN 瞬时解析失败按可重试处理，退避后重新解析并成功落盘。"""
     manager = DownloadManager()
     session = _FakeSession([_png_success_response()])
     resolve_calls: List[int] = []
@@ -329,8 +305,7 @@ async def test_download_wsa_host_not_found_is_terminal(
 ) -> None:
     """Windows WSAHOST_NOT_FOUND(11001) 域名不存在属终态：单次解析即上抛不退避。
 
-    Windows 的 getaddrinfo 失败 errno 为 WSA 错误码而非 POSIX EAI_* 常量，终态集合
-    未并入 WSA 码表时该平台全部按可重试退避，永久性域名错误也会耗尽重试次数。
+    Windows 的 getaddrinfo 失败 errno 为 WSA 错误码而非 POSIX EAI_* 常量。
     """
     manager = DownloadManager()
     resolve_calls: List[int] = []
@@ -462,10 +437,7 @@ async def test_download_response_rejects_streaming_cumulative_oversize(
 
 
 async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path) -> None:
-    """Content-Type 声称 image/png 但字节签名非受支持图片格式 → DownloadError。
-
-    防御 Content-Type 伪造使非图片或可执行内容落盘。
-    """
+    """Content-Type 声称 image/png 但字节签名非受支持图片格式 → DownloadError。"""
     manager = DownloadManager()
     response = _FakeResponse(
         headers={"content-type": "image/png", "content-length": "13"},
@@ -490,12 +462,7 @@ async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path)
 async def test_download_response_closes_fd_when_aiofiles_open_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """aiofiles.open 包装 fd 失败时，落盘骨架兜底 os.close 关闭 fd 避免泄漏。
-
-    atomic_replace_from_fd 已成功返回 fd，但 writer 内 aiofiles.open 包装该 fd 时失败
-    抛出异常：骨架为 fd 唯一关闭点，在 finally 中 os.close(fd) 恰好一次。此处追踪
-    os.close 调用以确认兜底生效且无双重关闭。
-    """
+    """aiofiles.open 包装 fd 失败时，落盘骨架在 finally 中 os.close 兜底，恰一次。"""
     manager = DownloadManager()
     response = _FakeResponse(
         headers={"content-type": "image/png", "content-length": str(len(_PNG_BYTES))},

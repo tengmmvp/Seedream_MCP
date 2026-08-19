@@ -114,7 +114,7 @@ async def test_tool_annotations_locked_to_current_hints() -> None:
 
 
 async def test_resources_registered() -> None:
-    """注册 MCP 资源：workspace roots 以模板注册（SDK 2.0 起 Context 仅注入模板资源），
+    """注册 MCP 资源：workspace roots 以模板注册，SDK 2.0 起 Context 仅注入模板资源；
     server info 与 models info 为静态资源。"""
     resources = await mcp.list_resources()
     uris = {str(resource.uri) for resource in resources}

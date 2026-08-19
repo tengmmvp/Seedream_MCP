@@ -1,4 +1,8 @@
-"""FileManager 快速失败与保存路径扩展名收敛测试。"""
+"""FileManager 快速失败与保存路径扩展名收敛测试。
+
+构造阶段拒绝非法 base_dir；save_bytes 覆盖符号链接替换不写穿、原子落盘不留
+临时文件、冲突改名与失败清理。
+"""
 
 import os
 from pathlib import Path
@@ -20,9 +24,8 @@ def test_file_manager_rejects_non_directory_base_dir(tmp_path: Path) -> None:
 def test_file_manager_rejects_unresolvable_base_dir() -> None:
     """含嵌入 null 字符的 base_dir 被拒绝为 FileManagerError，不向调用方穿透。
 
-    Python 3.12 在 resolve 阶段即抛 OSError；3.13 起 pathlib 重构后 resolve 容忍
-    非法字符、迟至 mkdir 才抛 ValueError，两个版本统一归一为 FileManagerError，
-    不限定具体文案以保持跨版本稳定。
+    Python 3.12 在 resolve 阶段抛 OSError，3.13 起迟至 mkdir 才抛 ValueError，
+    两版本统一归一且不限定文案以保持跨版本稳定。
     """
     with pytest.raises(FileManagerError):
         FileManager(base_dir=Path("\0invalid"))
@@ -71,9 +74,8 @@ def test_create_save_path_from_extension_keeps_whitelisted_extension(tmp_path: P
 def test_save_bytes_replaces_symlink_itself_without_write_through(tmp_path: Path) -> None:
     """save_bytes 落向符号链接路径时替换链接本身为常规文件，不写穿到其指向。
 
-    原子落盘经随机名临时文件 + os.replace：POSIX rename 对符号链接目标的语义是
-    替换该链接而非跟随，写穿攻击者预置链接到任意文件的路径不存在；断言数据落在
-    链接路径本身且原指向目标始终未被创建，守护该替换语义不被回归为跟随写入。
+    原子落盘经随机名临时文件 + os.replace，rename 对符号链接是替换而非跟随，
+    断言数据落在链接路径且原指向目标未被创建。
     """
     victim_target = tmp_path / "nonexistent_target"
     link = tmp_path / "link"

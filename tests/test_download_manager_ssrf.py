@@ -1,7 +1,8 @@
-"""SSRF 防护层单元测试。覆盖静态拒绝与私网解析。
+"""SSRF 防护层单元测试。
 
-覆盖 _validate_url_static 的各静态拒绝分支与 _resolve_public_ips 的私网解析拒绝，
-这些是 CLAUDE.md 宣称的核心安全特性，此前零回归覆盖。
+覆盖 _validate_url_static 的各静态拒绝分支、_resolve_public_ips 的私网与 CGNAT
+解析拒绝、_public_ip_rejection_reason 的公网判定与 _PublicIpPinningResolver 的
+IP 钉扎。用 fake loop 模拟 DNS 解析，不依赖真实网络。
 """
 
 import asyncio
@@ -64,8 +65,7 @@ def test_validate_url_static_rejects_ipv4_mapped_ipv6_literal() -> None:
 def test_validate_url_static_rejects_nat64_embedded_private_ipv6_literal() -> None:
     """NAT64 段内嵌私网 192.168.1.1 的 IPv6 字面量须在 URL 级静态拒绝。
 
-    64:ff9b::c0a8:101 的 well-known 前缀本身可全局路由，依赖内嵌 IPv4 递归校验
-    才能识别其指向 192.168.1.1，覆盖 urlparse 方括号剥离与递归判定的完整链路。
+    64:ff9b:: 前缀本身可全局路由，须递归校验内嵌 IPv4 才能识别私网目标。
     """
     with pytest.raises(DownloadError, match="不安全的IP地址"):
         DownloadManager()._validate_url_static("http://[64:ff9b::c0a8:101]/x.png")
@@ -156,8 +156,7 @@ def test_public_ip_rejection_accepts_nat64_embedded_public() -> None:
 def test_public_ip_rejection_rejects_6to4_address() -> None:
     """6to4 段 2002::/16 的地址可封装任意 IPv4 路由，须拒绝。
 
-    内嵌的 203.0.113.0 虽为公网文档段，但 6to4 隧道本身允许封装内网路由，
-    is_global 对该前缀判定为非公网，先于 sixtofour 属性校验触发拒绝。
+    内嵌的 203.0.113.0 虽为公网文档段，但 6to4 隧道允许封装内网路由。
     """
     ip = ipaddress.ip_address("2002:cb00:7100::1")
     assert _public_ip_rejection_reason(ip) is not None
@@ -209,10 +208,7 @@ async def test_public_ip_pinning_resolver_preserves_hostname_for_multiple_ips(
 async def test_public_ip_pinning_resolver_no_entries_when_no_public_ips(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_resolve_public_ips 返回空时 resolve 不返回可用条目。
-
-    私网与非法 IP 无从进入连接目标。
-    """
+    """_resolve_public_ips 返回空时 resolve 不返回可用条目，私网与非法 IP 无从连接。"""
     manager = DownloadManager()
     monkeypatch.setattr(manager, "_resolve_public_ips", AsyncMock(return_value=()))
 

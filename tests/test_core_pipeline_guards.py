@@ -36,6 +36,7 @@ from seedream_mcp.utils.io import io_path as io_path_module
 
 
 def _context() -> GenerationExecutionContext:
+    """构造本文件共用的最小生成执行上下文，关闭自动保存。"""
     return GenerationExecutionContext(
         prompt="test",
         optimize_prompt_options=None,

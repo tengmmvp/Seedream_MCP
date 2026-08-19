@@ -49,5 +49,5 @@ def test_infer_extension_falls_back_to_default_for_unknown_brand() -> None:
 
 
 def test_is_known_image_bytes_returns_false_for_non_image_magic() -> None:
-    """非已知图片 magic 字节视为未知，供下载字节校验拒绝。"""
+    """非已知图片魔法字节视为未知，供下载字节校验拒绝。"""
     assert is_known_image_bytes(b"\x00" * 32) is False

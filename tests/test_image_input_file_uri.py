@@ -1,12 +1,10 @@
 """_file_uri_to_path 的 file:// URI 解析与主机拒绝测试。
 
-函数位于 ``utils/io/io_path``，将 MCP Roots 声明的 file:// URI 转为本地路径。
-安全契约：拒绝非 localhost 主机的 file://host/share，避免 Windows 下触发 SMB
-连接泄露凭据；放行标准本地绝对路径 file:///abs/path。
+将 MCP Roots 声明的 file:// URI 转为本地路径，拒绝非 localhost 主机的
+file://host/share，避免 Windows 下触发 SMB 连接泄露凭据。
 
-注：file://localhost//server/share 形式的 UNC 是否被拒绝取决于 Path.resolve 对
-不可达 UNC 主机是否抛错，属非确定行为，依赖网络/SMB 状态，故不纳入断言；
-实际的 SMB 防护由拒绝非 localhost 主机的 netloc 守卫保证，跨平台稳定。
+file://localhost//server/share 形式 UNC 的行为取决于 Path.resolve 对不可达
+UNC 主机是否抛错，非确定故不断言；SMB 防护由拒绝非 localhost netloc 保证。
 """
 
 from __future__ import annotations

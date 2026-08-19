@@ -1,4 +1,4 @@
-"""生成类工具并行请求支持、schema 约束与失败结果封装测试。"""
+"""生成类工具并行请求支持、进度序列、schema 约束与失败结果封装测试。"""
 
 import asyncio
 from importlib import import_module
@@ -173,8 +173,7 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
 class _ProgressCollectingContext:
     """收集 report_progress 调用序列的替身 ctx。
 
-    request_context 属性缺失使 lifespan 共享资源探测落入不可得分支，流水线回退
-    按需新建客户端；report_progress 仅记录进度值供断言。
+    request_context 属性缺失使流水线回退按需新建客户端；report_progress 仅记录进度值。
     """
 
     def __init__(self) -> None:
@@ -195,8 +194,7 @@ async def test_parallel_batch_progress_strictly_increasing(
 ) -> None:
     """并行批次全程进度值严格递增，PROGRESS_GENERATION_DONE 恰好上报一次。
 
-    进度规范要求每次上报严格递增且不得重复取值。批次收尾曾重报 70.0，与末个请求
-    完成时按完成数上报的 70.0 相邻重复，本测试锁定该重复不再出现。
+    进度规范要求严格递增且不重复；收尾曾重报 70.0，与末请求完成的 70.0 相邻重复。
     """
 
     async def fake_method(self, **kwargs):  # noqa: ANN001
@@ -228,10 +226,8 @@ async def test_parallel_batch_progress_strictly_increasing(
 class _ReorderingProgressContext:
     """模拟慢客户端交错送达的进度收集替身。
 
-    首个批次中间进度（开区间 (START, DONE) 内）进入 report_progress 后先让出一次
-    事件循环再记录：完成数快照较低的请求在让出期间，后完成请求的高值进度可先行
-    送达客户端。未序列化上报时收集序列出现回退，违反规范对 progress 严格递增的
-    要求。
+    首个批次中间进度进入 report_progress 后先让出一次事件循环再记录，后完成请求
+    的高值进度可先行送达；未序列化上报时收集序列出现回退。
     """
 
     def __init__(self) -> None:
@@ -256,10 +252,7 @@ async def test_parallel_batch_progress_delivery_order_strictly_increasing(
 ) -> None:
     """慢客户端交错送达下，并行批次的进度通知仍按严格递增顺序到达。
 
-    规范要求 progress 每次上报严格递增且不得回退。批次进度按完成数快照计算，
-    快照与发送之间隔着 await：首个中间进度让出事件循环时，后完成请求的高值
-    进度可先行送达。上报经批次级锁序列化后，发送顺序与完成顺序一致，本测试
-    锁定该交错场景下收集序列不回退。
+    进度按完成数快照计算、快照与发送间隔着 await，上报经批次级锁序列化。
     """
 
     async def fake_method(self, **kwargs):  # noqa: ANN001
@@ -404,8 +397,7 @@ async def test_context_failure_progress_jumps_directly_to_complete(
 def test_progress_milestone_constants_strictly_increasing() -> None:
     """生成阶梯七个里程碑常量严格递增，浏览阶梯峰值不越过完成里程碑。
 
-    防止后续调整常量取值时破坏各阶段进度的严格递增契约。PROGRESS_SCAN_SPAN 是
-    浏览工具的跨度增量而非里程碑，不参与里程碑排序，单独约束其峰值区间。
+    PROGRESS_SCAN_SPAN 是跨度增量而非里程碑，不参与排序，单独约束峰值区间。
     """
     milestones = [
         PROGRESS_RECEIVED,
@@ -489,11 +481,7 @@ def test_add_usage_value_deepcopies_dict_when_existing_is_non_dict() -> None:
 
 
 def test_aggregate_all_failed_requests_reuse_exception_error_code() -> None:
-    """并行全失败时 error.type 取代表异常的归约错误码，与单发路径契约一致。
-
-    首个失败异常为 401 时批次 error.type 为 auth_error，不回落硬编码的
-    generation_failed。
-    """
+    """并行全失败时 error.type 取代表异常的归约错误码，与单发路径契约一致。"""
     aggregated = aggregate_parallel_generation_results(
         request_results=[None],
         request_errors={1: SeedreamAPIError("x", status_code=401)},

@@ -113,8 +113,7 @@ async def test_staggered_parallel_batch_still_serializes_once(
 ) -> None:
     """parallelism 小于 request_count 的错峰批次同样只序列化一次。
 
-    信号量错峰下后启动的请求在先完成者之后进入构建阶段，共享计划在批次 gather
-    结束前不释放，不得退化为重复构建与序列化。
+    共享计划在批次 gather 结束前不释放，不得退化为重复构建与序列化。
     """
     serialize_calls = _install_serialize_spy(monkeypatch)
     build_calls = _install_build_spy(monkeypatch)
@@ -195,11 +194,7 @@ async def test_direct_client_call_without_plan_serializes_independently(
 
 @pytest.mark.asyncio
 async def test_shared_plan_builder_failure_propagates_independently() -> None:
-    """builder 抛错时各请求独立收到原异常，计划不写入，后续请求可重试构建。
-
-    锁定 get_or_build 契约：构建失败不污染计划，锁释放后每个调用方在锁内自行
-    重试构建，异常原样传播，不被吞掉或合并为共享的一份失败。
-    """
+    """builder 抛错时各请求独立收到原异常，计划不写入，后续请求可重试构建。"""
     plan = SharedRequestPlan()
     builder_failure = RuntimeError("prepare failed")
     attempts = {"count": 0}
@@ -237,8 +232,7 @@ async def test_prevalidate_failure_matches_single_request_first_failure(
 ) -> None:
     """批次级预校验失败经 handle_text_to_image 降级的类型与消息与单请求路径一致。
 
-    预校验在批次分发前上抛，整批以 isError 结果统一降级，不进入逐请求错误聚合；
-    错误类型与消息与单请求路径首请求校验失败完全一致。
+    预校验在批次分发前上抛，整批统一降级，不进入逐请求错误聚合。
     """
     validation_failure = SeedreamValidationError("预校验拒绝", field="size", value="bad")
 

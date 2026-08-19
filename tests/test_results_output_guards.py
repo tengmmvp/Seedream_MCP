@@ -1,9 +1,7 @@
 """results 输出格式化守护测试：自动保存摘要形态、路径折叠与上游 URL 脱敏。
 
-锁定的输出契约：自动保存段落折叠为 N/M 摘要、仅失败项保留明细且编号与图片列表
-同基准（取可保存图片在 extract_images 归一化列表中的原始索引）；保存路径在文本
-中每张图仅出现一次；URL 为数据字段——净化剥离 userinfo 凭据与 CRLF 但不截断，
-签名 URL 完整保留。
+自动保存段落折叠为 N/M 摘要、仅失败项保留明细且编号与图片列表同基准；保存路径
+每张图仅出现一次；URL 为数据字段，净化剥离 userinfo 凭据与 CRLF 但不截断。
 """
 
 from __future__ import annotations
@@ -103,7 +101,7 @@ def test_auto_save_success_collapses_to_summary_line() -> None:
     assert "状态: 失败" in text
     assert "自动保存: 1/1 成功" in text
     assert "  本地路径: images/ok.png" in text
-    # 成功项不再有「已保存到」明细行；URL/Markdown 引用行收敛后路径全文仅一次。
+    # 成功项不再有「已保存到」明细行，路径全文仅出现一次。
     assert "已保存到" not in text
     assert text.count("images/ok.png") == 1
 
@@ -155,7 +153,7 @@ def test_image_item_url_line_sanitized_in_text_output() -> None:
     assert "AKID:SECRET@" not in text
     assert "SECRET" not in text
     assert "mirror.example.com/a.png" in text
-    # URL 行内不得携带原始 CR/LF；行结构本身以换行分隔，逐行断言 URL 行形态。
+    # URL 行内不得携带原始 CR/LF，逐行断言 URL 行形态。
     url_line = next(line for line in text.splitlines() if line.startswith("  URL: "))
     assert "\r" not in url_line
     assert url_line == "  URL: https://mirror.example.com/a.png  FAKE-LINE api_key=***"
@@ -189,9 +187,7 @@ def test_structured_data_url_field_sanitized() -> None:
 def test_structured_data_non_dict_error_sanitized() -> None:
     """data 项 error 为非 dict 形态时同样净化，不借形态绕过注入面。
 
-    error 字符串与容器形态和 dict 内的 message/code 同为上游自由内容：凭据
-    片段被脱敏、CRLF 被压平后才进入 structuredContent，与顶层 error 的非 dict
-    净化路径对称。
+    字符串与容器形态同为上游自由内容，与顶层 error 的非 dict 净化路径对称。
     """
     result = {
         "success": True,
@@ -510,8 +506,7 @@ def test_fifteen_image_batch_text_form_has_no_duplicate_path_lines() -> None:
     assert "自动保存: 15/15 成功" in text
     assert "生成图片数" not in text
     for i in range(1, 16):
-        # URL 行输出完整地址、本地路径行输出持久化位置；markdown_ref 行不输出，
-        # 路径文本仅在「本地路径」行出现一次。
+        # URL 行与本地路径行各自输出，markdown_ref 行不输出，路径文本仅出现一次。
         assert text.count(f"images/{i}.png") == 1
 
 
@@ -570,9 +565,7 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
 def test_sanitized_flag_skips_repeat_sanitization_in_structured_outlet() -> None:
     """结构化出口经 images_sanitized 复用文本出口的净化列表：截断标记不叠加。
 
-    重复净化非幂等：截断产物长度仍超上限时会再次截断，标记逐次叠加、内容逐次缩水；
-    两条出口的净化协调由显式参数承担，此处以对已净化文本的重复净化对照，锁定
-    flag=True 路径不产生第二次截断。
+    重复净化非幂等，截断标记会逐次叠加、内容逐次缩水。
     """
     result = {
         "success": True,
@@ -792,8 +785,7 @@ def test_structured_data_unknown_string_keys_sanitized() -> None:
 def test_module_level_sanitized_sentinel_state_removed() -> None:
     """模块级净化哨兵不复存在：净化状态随调用链显式传递，无跨调用模块状态可滞留。
 
-    哨兵曾依赖两条出口间无 await 的隐式时序约定，且失败批次的图片列表引用会滞留
-    槽位至下一次生成调用覆盖；显式参数化后 results 模块不再持有可变模块级状态。
+    旧行为：哨兵依赖两条出口间无 await 的隐式时序，失败批次的图片列表会滞留槽位。
     """
     assert not hasattr(results_module, "_last_sanitized_images")
     assert not hasattr(results_module, "reset_last_sanitized_images")
@@ -802,8 +794,8 @@ def test_module_level_sanitized_sentinel_state_removed() -> None:
 def test_failure_path_structured_outlet_sanitizes_images() -> None:
     """失败路径文本出口经 _format_failure_section 提前返回，结构化出口为首个消费者。
 
-    默认 images_sanitized=False 在结构化出口完成首次净化，失败批次的图片列表同样
-    经过净化管线，凭据片段不借 data 项进入 structuredContent。
+    默认 images_sanitized=False 在结构化出口完成首次净化，凭据不借 data 项进入
+    structuredContent。
     """
     result = {
         "success": False,
@@ -896,10 +888,7 @@ def test_structured_failure_error_code_sanitized() -> None:
 
 
 def test_failure_text_dict_message_normalized_and_sanitized() -> None:
-    """请求级 error.message 为 dict 形态时归一化为文本后脱敏。
-
-    Bearer 凭据不进入文本通道。
-    """
+    """请求级 error.message 为 dict 形态时归一化为文本后脱敏，凭据不进入文本通道。"""
     result = {
         "success": False,
         "status": "failed",
@@ -942,10 +931,7 @@ def test_failure_text_non_dict_error_normalized_and_sanitized() -> None:
 
 
 def test_structured_failure_dict_message_normalized_and_sanitized() -> None:
-    """结构化出口的非 str error.message 归一化为文本后脱敏。
-
-    凭据不进入 structuredContent。
-    """
+    """结构化出口的非 str error.message 归一化为文本后脱敏，凭据不进入 structuredContent。"""
     result = {
         "success": False,
         "status": "failed",
@@ -1013,10 +999,7 @@ def test_structured_failure_non_dict_error_normalized_and_sanitized() -> None:
 
 
 def test_unknown_value_deeply_nested_sanitized_without_recursion_error() -> None:
-    """950 层嵌套 list 的未知键值净化正常完成：迭代展开不触发解释器递归上限。
-
-    深处的字符串仍被净化，凭据片段与 CRLF 不进入 structuredContent。
-    """
+    """950 层嵌套 list 的未知键值净化正常完成：迭代展开不触发递归上限，深处字符串仍被净化。"""
     deep: Any = "echo\r\nFAKE api_key=leaked"
     for _ in range(950):
         deep = [deep]
@@ -1044,9 +1027,8 @@ def test_unknown_value_cyclic_reference_terminated_with_placeholder() -> None:
 def test_parallel_error_code_fallback_branch_is_sanitized() -> None:
     """code 回退分支与 message 同口径脱敏，被劫持上游无法经 code 注入换行与凭据。
 
-    上游 200 响应顶层 error 仅含 code 键时，其自由文本经 _extract_parallel_request_error
-    进入 batch.errors[].message 直达 structuredContent；该分支漏脱敏时 CRLF 与 Bearer
-    片段原样透传，违背 usage/data 同场景已建立的净化标准。
+    上游 200 响应顶层 error 仅含 code 键时其自由文本直达 structuredContent，
+    该分支漏脱敏会原样透传。
     """
     from seedream_mcp.tools.core._helpers import _extract_parallel_request_error
 
@@ -1061,8 +1043,8 @@ def test_parallel_error_code_fallback_branch_is_sanitized() -> None:
 def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> None:
     """深嵌套 {"data": ...} 链经迭代下钻提取，不因 RecursionError 使成功生成翻错。
 
-    json.loads 的 C 层栈开销低于 Python 帧，深度千级嵌套可成功解析；递归实现的
-    _coerce 在同等深度抛 RecursionError，被外层降级为错误结果。
+    json.loads 的 C 层栈开销低于 Python 帧，千级嵌套可成功解析；递归实现会抛
+    RecursionError 并被降级为错误结果。
     """
     from seedream_mcp.tools.core.results import extract_images
 
@@ -1102,8 +1084,7 @@ def test_structured_status_sanitized_and_max_images_surfaced() -> None:
 def test_forged_string_request_and_image_index_sanitized_in_both_channels() -> None:
     """单请求路径伪造 request_index/image_index 为 CRLF 自由文本：两通道均净化。
 
-    跳过净化的前提是本侧聚合写入的整数序号，单请求路径的 data 项为上游原样
-    透传；非 int 形态按错误文本净化，int 实例保持原值直接渲染。
+    跳过净化的前提是本侧聚合写入的整数序号，非 int 形态按错误文本净化。
     """
     result = {
         "success": True,
@@ -1383,9 +1364,8 @@ def test_forged_bool_index_form_routed_through_sanitization_path() -> None:
 def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
     """畸形顶层形态不使已计费成功生成翻错：文本与结构化两出口均正常产出。
 
-    status 为 int、usage 为 str、batch 为 list 时，结构化出口按声明 schema 收敛
-    （status 归 None、usage 归空 dict、batch 归 None），model 构造不抛校验异常；
-    文本出口的 usage 段落归空、batch 段落省略。
+    status 为 int、usage 为 str、batch 为 list 时，结构化出口按声明 schema 收敛，
+    model 构造不抛校验异常。
     """
     result = {
         "success": True,

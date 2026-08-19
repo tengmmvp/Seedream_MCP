@@ -14,8 +14,7 @@ from seedream_mcp.tools.core.schemas import TextToImageInput
 class _WarningCaptureLogger:
     """替身 logger，记录 warning 调用以断言超限建议确实触发。
 
-    loguru 不经标准库 logging 传播，caplog 无法捕获；以替身替换 validation 模块的
-    logger，直接收集 warning 文案，断言警告真实发生而非静默通过。
+    loguru 不经标准库 logging 传播，caplog 无法捕获，故以替身直接收集 warning 文案。
     """
 
     def __init__(self) -> None:
@@ -28,7 +27,7 @@ class _WarningCaptureLogger:
 
 @pytest.fixture
 def warning_logger(monkeypatch: pytest.MonkeyPatch) -> _WarningCaptureLogger:
-    """以记录型替身替换 validation.logger，返回收集到的 warning 列表。"""
+    """以记录型替身替换 validation.logger，返回替身供断言读取 warnings。"""
     fake = _WarningCaptureLogger()
     monkeypatch.setattr(validation_module, "logger", fake)
     return fake
@@ -43,9 +42,9 @@ def test_validate_prompt_chinese_limit_warns_but_returns(
     warning_logger: _WarningCaptureLogger,
 ) -> None:
     text = "你" * 301
-    # 文档为"建议"而非硬限制：超限仅记录警告，不阻断调用
+    # 文档为「建议」而非硬限制：超限仅记录警告，不阻断调用。
     assert validate_prompt(text) == text
-    # 超限须真正触发 warning，且文案携带实际中文计数
+    # 超限须真正触发 warning，且文案携带实际中文计数。
     assert len(warning_logger.warnings) == 1
     assert "301" in warning_logger.warnings[0]
 
@@ -76,7 +75,7 @@ def test_validate_prompt_mixed_limits_warns_but_returns(
     text_en = ("word " * 601).strip()
     assert validate_prompt(text_cn) == text_cn
     assert validate_prompt(text_en) == text_en
-    # 中英文分别超限各触发一次 warning
+    # 中英文分别超限各触发一次 warning。
     assert len(warning_logger.warnings) == 2
 
 
@@ -114,13 +113,13 @@ def test_validate_prompt_long_prompt_counts_match_reference(
     """
     long_cjk = "春" * 100_000
     long_en = ("word " * 20_001).strip()
-    # validate_prompt 返回 strip 后文本，构造时先去除首尾空白保持断言可比
+    # validate_prompt 返回 strip 后文本，构造时先去除首尾空白保持断言可比。
     mixed = (("春天来了 " + "word " * 10) * 2_000).strip()
 
     for text in (long_cjk, long_en, mixed):
         assert validate_prompt(text) == text
 
-    # 三条超限提示各触发一次警告，文案中的计数与独立基准一致
+    # 三条超限提示各触发一次警告，文案中的计数与独立基准一致。
     assert len(warning_logger.warnings) == 3
     assert f"中文{_reference_cjk_count(long_cjk)}" in warning_logger.warnings[0]
     assert f"英文{20_001}" in warning_logger.warnings[1]

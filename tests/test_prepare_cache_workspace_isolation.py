@@ -1,8 +1,7 @@
 """守护测试：预处理缓存键的 workspace 隔离、签名 strip 一致性与摘要键容错。
 
-workspace_roots 缺失缓存键维度会使不同工作区的请求跨租户命中，本地图片被错误地
-按另一工作区的缓存结果返回；签名路径与读取路径的 strip 不一致会架空 mtime+size
-失效保护；摘要键对未配对代理字符不容错会使批量预处理整批中断。
+workspace_roots 缺席会使不同工作区跨租户命中；签名与读取路径 strip 不一致会架空
+mtime+size 失效保护；摘要键不容错未配对代理字符会中断整批预处理。
 """
 
 import io
@@ -36,8 +35,7 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
         call_count += 1
         return f"prepared:{image}"
 
-    # 用对象式 monkeypatch 直接作用于模块对象，避免字符串路径解析在
-    # seedream_mcp 顶层 __getattr__ lazy export 下受测试顺序影响
+    # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
     monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare_image_input)
 
     # 两次调用返回不同 roots，模拟不同请求上下文 / 租户
@@ -59,7 +57,7 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
 
     assert first == "prepared:same-image.png"
     assert second == "prepared:same-image.png"
-    # workspace_roots 不同 → cache_key 不同 → 缓存未命中 → 底层被调用两次
+    # workspace_roots 不同则 cache_key 不同，缓存未命中，底层被调用两次
     assert call_count == 2
 
 
@@ -96,15 +94,13 @@ async def test_prepare_signature_strips_whitespace_like_read_path(
 ) -> None:
     """带首尾空白路径的签名与读取定位同一物理文件，文件替换后缓存按 mtime+size 失效。
 
-    签名路径不 strip 时对带空白输入恒得 (0.0, 0) 签名，mtime+size 失效保护被架空，
-    编辑替换图片后持续返回旧编码；strip 后两条路径对同一物理文件求签名。
+    签名路径不 strip 时带空白输入恒得 (0.0, 0) 签名，失效保护被架空。
     """
     image_path = tmp_path / "ref.png"
     Image.new("RGB", (32, 32), color="white").save(image_path, format="PNG")
 
-    # 读取路径经 image_input 顶层 from-import 绑定 get_workspace_roots，签名与缓存键
-    # 路径在函数内延迟导入后解析 io_path 模块属性，两个名字必须同时替换，否则读取
-    # 路径落到真实回退根，测试结果取决于 basetemp 是否恰在回退根之内。
+    # 读取路径经 image_input 的 from-import 绑定，签名路径延迟导入解析 io_path 属性，
+    # 两个名字须同时替换，否则读取路径落到真实回退根，结果取决于 basetemp 位置。
     monkeypatch.setattr(path_utils, "get_workspace_roots", lambda: [tmp_path])
     monkeypatch.setattr(image_input, "get_workspace_roots", lambda: [tmp_path])
     preparer = ImagePreparer(
@@ -143,8 +139,7 @@ def test_data_uri_digest_tolerates_unpaired_surrogate() -> None:
 async def test_prepare_large_data_uri_with_surrogate_raises_validation_error() -> None:
     """超大含代理字符 data URI 报参数级校验错误，不抛 UnicodeEncodeError 中断整批。
 
-    摘要键容错后，非法输入在 validate_image_input 的 base64 解码处失败，与
-    image_validation 的 Base64 解码失败文案口径一致。
+    摘要键容错后非法输入在 base64 解码处失败，文案与 image_validation 口径一致。
     """
     hostile = "data:image/png;base64," + "\ud800" + "a" * (1024 * 1024 + 32)
     preparer = ImagePreparer(

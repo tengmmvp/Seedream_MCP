@@ -1,9 +1,7 @@
 """MODEL_ALIASES 全别名归一化守护。
 
-遍历 ``config.MODEL_ALIASES`` 全部条目，断言每个别名经 ``normalize_model_selector`` 与
-``SeedreamConfig`` 构造后均解析到映射目标 model_id。补齐 test_config_model_selection 中
-test_config_accepts_current_models 漏测 doubao-seedream-5.0-lite 且仅 Pro 有归一化断言的缺口。
-新增别名时本参数化测试自动覆盖，无需手工补列。
+参数化遍历全部别名，新增别名自动覆盖；补齐 test_config_accepts_current_models
+仅对 Pro 断言归一化的缺口。
 """
 
 import pytest

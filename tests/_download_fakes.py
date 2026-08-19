@@ -44,6 +44,8 @@ class _FakeTransport:
 
 
 class _FakeConnection:
+    """模拟 aiohttp 连接，暴露携带对端 IP 的 transport。"""
+
     def __init__(self, peer_ip: str = "8.8.8.8") -> None:
         self.transport = _FakeTransport(peer_ip)
 
@@ -52,7 +54,12 @@ class _FakeResponse:
     """模拟 aiohttp.ClientResponse：暴露 status/headers/content/connection。
 
     实现异步上下文管理器协议以支持 ``async with session.get(...) as response``。
-    content 经多分块流产出；connection 供 download_image 主循环的对端 IP 复核。
+
+    Attributes:
+        status: HTTP 状态码。
+        headers: 响应头映射。
+        content: 响应体，经多分块流产出。
+        connection: 伪连接，供 download_image 主循环复核对端 IP。
     """
 
     def __init__(
@@ -96,6 +103,9 @@ class _RaisingThenSuccessSession:
 
     覆盖 download_image 各 except 臂的重试路径：get 直接抛出而非经上下文管理器，
     等效模拟网络层在建立连接前即失败的场景，异常仍被同一 except 臂捕获。
+
+    Attributes:
+        call_count: get 调用次数，供断言重试次数。
     """
 
     def __init__(self, exc: BaseException, success_response: _FakeResponse) -> None:
@@ -117,6 +127,9 @@ class _TimeoutThenSuccessSession:
 
     覆盖 download_image 中 ``except asyncio.TimeoutError`` 重试分支：连接或读取阶段
     超时经退避后由后续尝试成功落盘。
+
+    Attributes:
+        call_count: get 调用次数，供断言重试次数。
     """
 
     def __init__(self, success_response: _FakeResponse) -> None:
@@ -139,6 +152,11 @@ def _patch_download_network(
 
     _validate_connected_peer_ip 不 mock：fake response 携带公网 peer_ip，真实运行以
     覆盖成功路径中对端 IP 复核的串联。
+
+    Args:
+        monkeypatch: pytest 打桩器。
+        manager: 被注入伪网络的下载管理器。
+        session: 替换真实网络会话的伪会话。
     """
 
     async def _pass_url(url: str) -> None:

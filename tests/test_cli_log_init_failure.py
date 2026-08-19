@@ -1,8 +1,7 @@
 """cli_main 日志初始化失败的优雅退出测试。
 
 setup_logging 含目录创建等 I/O，在只读容器或受限账号下可能抛 OSError。cli_main
-捕获该异常并以退出码 1 结束，向 stderr 输出排查指引而不裸抛堆栈。本测试只依赖
-该行为契约，不依赖注释措辞。
+捕获该异常并以退出码 1 结束，向 stderr 输出排查指引而不裸抛堆栈。
 """
 
 from __future__ import annotations

@@ -53,7 +53,7 @@ async def test_parse_sse_response_collects_events_and_completed() -> None:
 async def test_parse_sse_response_preserves_complete_events_before_truncation() -> None:
     """缓冲区超限截断不完整尾部时，已就绪的完整事件不得丢失。"""
     complete = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
-    oversized_tail = b"y" * 2000  # 不完整尾部，超过 event_truncate_threshold
+    oversized_tail = b"y" * 2000  # 不完整尾部，超过 event_truncate_threshold。
     result = await parse_sse_response(
         _FakeSSEResponse([complete + oversized_tail]),
         model_id="m",
@@ -65,7 +65,7 @@ async def test_parse_sse_response_preserves_complete_events_before_truncation() 
     )
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/1.png"
-    # 截断导致数据丢失时 status 标记为 partial，通知调用方结果不完整
+    # 截断导致数据丢失时 status 标记为 partial，通知调用方结果不完整。
     assert result["status"] == "partial"
 
 
@@ -86,7 +86,7 @@ async def test_parse_sse_response_raises_on_request_level_error() -> None:
 async def test_parse_sse_request_level_error_code_narrowed_to_string() -> None:
     """请求级错误事件的 code 仅非空字符串被保留，数字与空串均置 None。
 
-    与 errors.handle_api_error 的错误码收窄口径一致，数字码转字符串属臆测语义。
+    与 errors.handle_api_error 的收窄口径一致。
     """
     for code_json, expected in [
         (b'"code":40012', None),
@@ -108,11 +108,7 @@ async def test_parse_sse_request_level_error_code_narrowed_to_string() -> None:
 
 
 async def test_parse_sse_request_level_error_message_truncated_to_8kb() -> None:
-    """请求级错误事件的超长 message 拼入异常前经 8KB 截断，与 handle_api_error 同口径。
-
-    使用同一截断辅助函数而非独立实现：截断保留前缀并标注原长度，超大错误体不随
-    异常 message 进入日志。
-    """
+    """请求级错误事件的超长 message 拼入异常前经 8KB 截断，与 handle_api_error 同口径。"""
     long_message = "x" * 20000
     chunks = [b'data: {"error":{"message":"' + long_message.encode() + b'","code":"e"}}\n\n']
     with pytest.raises(SeedreamAPIError) as exc_info:
@@ -127,7 +123,7 @@ async def test_parse_sse_request_level_error_message_truncated_to_8kb() -> None:
         )
     message = exc_info.value.message
     assert message.startswith("<truncated:20000 chars>")
-    # 截断后总长为标注前缀 + 8KB 片段 + 省略号，远小于原始 20000 字符
+    # 截断后总长为标注前缀 + 8KB 片段 + 省略号，远小于原始 20000 字符。
     assert len(message) < 8 * 1024 + 100
 
 
@@ -151,7 +147,7 @@ async def test_parse_sse_response_logs_unknown_event_type_with_segment_size() ->
         call for call in log.debug_calls if "image_generation.unknown_future" in str(call)
     ]
     assert unknown_logs, "未知 type 事件须记录 debug 日志"
-    # 日志参数含事件段字节规模；段长不含事件分隔符 \n\n
+    # 日志参数含事件段字节规模；段长不含事件分隔符 \n\n。
     assert str(len(unknown) - 2) in str(unknown_logs[0])
 
 
@@ -161,7 +157,7 @@ async def test_parse_sse_response_progress_log_by_threshold(
     """进度日志按字节增量阈值记录，不依赖 processed_bytes 恰好命中整 MB 取模。"""
     monkeypatch.setattr(sse_parser_module, "_SSE_PROGRESS_LOG_INTERVAL_BYTES", 100)
     log = _CapturingLog()
-    # 无事件分隔符的不完整流仅累计字节，驱动进度分支
+    # 无事件分隔符的不完整流仅累计字节，驱动进度分支。
     chunk = b"z" * 60
     await parse_sse_response(
         _FakeSSEResponse([chunk, chunk, chunk, chunk]),
@@ -173,16 +169,12 @@ async def test_parse_sse_response_progress_log_by_threshold(
         log=log,
     )
     progress_logs = [call for call in log.debug_calls if "已处理" in str(call)]
-    # 240 字节按 100 字节间隔至少记录两次；取模判定下 240 % 1MB 永不为 0
+    # 240 字节按 100 字节间隔至少记录两次；取模判定下 240 % 1MB 永不为 0。
     assert len(progress_logs) >= 2
 
 
 def test_parse_sse_segment_joins_multiline_data_into_single_json() -> None:
-    """SSE 单事件跨多行 data: 时，parse_sse_segment 用 \\n 拼接为完整 JSON。
-
-    验证逐行提取 data 值并以 \\n 拼接的多行 data 合并行为，
-    确保客户端将合法 JSON 拆成两行发送时仍能正确还原对象。
-    """
+    """SSE 单事件跨多行 data: 时以 \\n 拼接为完整 JSON，客户端拆行发送仍可还原。"""
     segment = (
         b'data: {"type": "image_generation.completed",\n' b'data: "usage": {"generated_images": 2}}'
     )
@@ -195,8 +187,7 @@ def test_parse_sse_segment_joins_multiline_data_into_single_json() -> None:
 def test_parse_sse_segment_strips_single_leading_space_only() -> None:
     """data: 字段仅剥离首个前导空格：data:x 与 data: x 语义一致，多余空白属负载。
 
-    SSE 规范规定字段值仅移除单个前导 U+0020；JSON 负载对剩余前后空白天然容忍，
-    三种形态均解析为同一事件对象。
+    SSE 规范仅移除单个前导 U+0020，剩余空白由 JSON 解析容忍。
     """
     completed = b'{"type":"image_generation.completed","usage":{}}'
     for segment in (
@@ -211,7 +202,7 @@ def test_parse_sse_segment_strips_single_leading_space_only() -> None:
 
 
 def test_parse_sse_segment_done_marker_without_space_still_recognized() -> None:
-    """data:[DONE] 无空格形态同样识别为流结束哨兵，不进入 json 解析。"""
+    """data:[DONE] 无空格形态同样识别为流结束哨兵，不进入 JSON 解析。"""
     assert parse_sse_segment(b"data: [DONE]", log=None) is None
     assert parse_sse_segment(b"data:[DONE]", log=None) is None
 
@@ -246,7 +237,7 @@ async def test_parse_sse_response_classifies_partial_failed_event() -> None:
         log=_FakeLog(),
     )
     assert result["success"] is True
-    # 含 error 项使 status 从 completed 降级为 partial
+    # 含 error 项使 status 从 completed 降级为 partial。
     assert result["status"] == "partial"
     assert len(result["data"]) == 1
     assert result["data"][0]["type"] == "image_generation.partial_failed"
@@ -297,8 +288,8 @@ async def test_parse_sse_response_normalizes_cr_line_endings() -> None:
 async def test_parse_sse_response_crlf_multiline_event_survives_arbitrary_split() -> None:
     """CRLF 多行 data 事件在任意分块点下完整解析，不产生假事件分隔符。
 
-    逐字节分块穷尽全部切分点，含 \r 与 \n 的边界；块尾孤立 \r 被归一为 \n 后与
-    次块首 \n 拼接曾把多行 data 事件静默拆丢。4 字节分块另覆盖常规分片形态。
+    逐字节分块穷尽全部切分点；块尾孤立 \r 与次块首 \n 拼出假分隔符曾拆丢多行
+    事件。4 字节分块另覆盖常规分片形态。
     """
     line1 = b'data: {"type": "image_generation.partial_succeeded",'
     line2 = b'data:  "url":"http://x/1.png"}'
@@ -326,7 +317,7 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
     full_event = (
         b'data: {"type": "image_generation.completed",' b'"usage":{"generated_images":2}}\n\n'
     )
-    # 拆成 4 字节一块，模拟分片到达
+    # 拆成 4 字节一块，模拟分片到达。
     chunks = [full_event[i : i + 4] for i in range(0, len(full_event), 4)]
     result = await parse_sse_response(
         _FakeSSEResponse(chunks),
@@ -344,10 +335,9 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
 async def test_parse_sse_response_offloads_large_segment_to_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """单事件体积超过 64KB 阈值时切片与 json.loads 一并卸载到工作线程。
+    """超 64KB 的大事件把切片与 json.loads 卸载到工作线程，小事件保持同步。
 
-    小事件保持同步。大段卸载任务为 _slice_parse_segment(buffer, start, end, log)，
-    段体积即 end - start；completed 小事件不得触发 to_thread。
+    卸载任务为 _slice_parse_segment(buffer, start, end, log)，段体积即 end - start。
     """
     offload_sizes: list[int] = []
     real_to_thread = sse_parser_module.asyncio.to_thread
@@ -374,7 +364,6 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
         log=_FakeLog(),
     )
     assert len(result["data"]) == 1
-    # 仅超 64KB 的大事件经 to_thread 卸载，completed 小事件保持同步解析
     assert len(offload_sizes) == 1
     assert offload_sizes[0] > 64 * 1024
 
@@ -399,8 +388,7 @@ async def test_parse_sse_response_empty_stream_returns_none_status() -> None:
 async def test_parse_sse_response_propagates_tools_from_completed_event() -> None:
     """completed 事件携带的 tools 字段须透传到结果，与官方响应字段对齐。
 
-    响应侧 tools 当前无下游消费者，保留透传仅为字段完整性；联网搜索用量经
-    usage.tool_usage 表达。"""
+    响应侧 tools 当前无下游消费者，保留透传仅为字段完整性。"""
     chunks = [
         b'data: {"type":"image_generation.completed",'
         b'"usage":{"generated_images":1},'
@@ -419,12 +407,8 @@ async def test_parse_sse_response_propagates_tools_from_completed_event() -> Non
 
 
 async def test_parse_sse_response_counts_truncated_events() -> None:
-    """超限丢弃的 SSE 事件以 truncated_events 计数区分图片失败与事件丢弃。
-
-    正常流无丢弃时 truncated_events 为 0；超限丢弃时计数大于 0 且 status 标记 partial。
-    截断阈值与前缀回收阈值解耦：超大事件按 event_truncate_threshold 判定丢弃。
-    """
-    # 正常流：无事件丢弃
+    """超限丢弃的 SSE 事件以 truncated_events 计数，正常流为 0，丢弃时标记 partial。"""
+    # 正常流：无事件丢弃。
     normal_chunks = [
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
@@ -440,9 +424,9 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
     )
     assert normal_result["truncated_events"] == 0
 
-    # 超限流：单个不完整事件超过截断阈值被丢弃
+    # 超限流：单个不完整事件超过截断阈值被丢弃。
     complete = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
-    oversized_tail = b"y" * 2000  # 不完整尾部，超过 event_truncate_threshold
+    oversized_tail = b"y" * 2000  # 不完整尾部，超过 event_truncate_threshold。
     truncated_result = await parse_sse_response(
         _FakeSSEResponse([complete + oversized_tail]),
         model_id="m",
@@ -459,13 +443,12 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
 async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
     """流末尾不完整事件解析失败时计入 truncated_events，不再静默丢失。
 
-    与超阈值丢事件同口径：计数使 status 标记 partial 通知调用方结果不完整，并记录
-    debug 日志携带丢弃字节数；残留段之前的完整事件不受影响。
+    与超阈值丢弃同口径标记 partial 并记录 debug 日志，残留段之前的完整事件不受影响。
     """
     log = _CapturingLog()
     chunks = [
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
-        # 不完整 JSON 且无结尾空行：残留段含 data 负载但解析失败
+        # 不完整 JSON 且无结尾空行：残留段含 data 负载但解析失败。
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2',
     ]
     result = await parse_sse_response(
@@ -485,10 +468,9 @@ async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
 
 
 async def test_parse_sse_response_done_sentinel_tail_not_counted_truncated() -> None:
-    """[DONE] 哨兵残留（无结尾空行）与纯空白尾部不计为丢失事件。
+    """无结尾空行的 [DONE] 哨兵与纯空白尾部不计为丢失事件。
 
-    哨兵与空白行经解析同样返回 None，但不构成数据丢失；误计会使 completed 状态
-    被降级为 partial，谎报结果不完整。
+    哨兵与空白行解析返回 None 但不构成数据丢失，误计会把 completed 谎报为 partial。
     """
     sentinel_chunks = [
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
@@ -524,12 +506,12 @@ async def test_parse_sse_response_done_sentinel_tail_not_counted_truncated() -> 
 
 
 async def test_parse_sse_response_large_event_not_truncated_below_file_size_threshold() -> None:
-    """截断阈值对齐 auto_save 文件上限后，单张合法大图事件不被误丢。
+    """单事件体积介于前缀回收阈值与截断阈值之间时须完整解析，不被误丢。
 
-    模拟 stream + b64_json 场景：单事件体积介于前缀回收阈值与对齐后的截断阈值之间时，
-    须完整解析而非截断丢弃，守护前缀回收阈值与截断阈值解耦不被回归。
+    模拟 stream + b64_json 场景，守护截断阈值对齐 auto_save 文件上限后与回收阈值
+    解耦不被回归。
     """
-    # 事件体积 8KB，大于 buffer_max_size(2KB) 但小于 event_truncate_threshold(32KB)
+    # 事件体积 8KB，大于 buffer_max_size 2KB 但小于 event_truncate_threshold 32KB。
     big_payload = "B" * 8000
     big_event = json.dumps(
         {
@@ -557,13 +539,9 @@ async def test_parse_sse_response_large_event_not_truncated_below_file_size_thre
 
 
 async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
-    """多事件滴流累计超过总量上限时终止解析、停止读取并抛出明确异常。
-
-    单事件阈值拦不住每个事件都合法但数量无限的滴流流，累计接收字节超限即关闭
-    响应并抛 SeedreamAPIError，错误消息注明响应流总量超限。
-    """
+    """多事件滴流累计超过总量上限时终止解析、停止读取并抛 SeedreamAPIError。"""
     event = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
-    # 每块 4 个完整事件（体积均低于单事件阈值），共 8 块持续滴流
+    # 每块 4 个完整事件、共 8 块持续滴流，单事件体积均低于单事件阈值。
     chunk = event * 4
     total_chunks = 8
     consumed = 0
@@ -584,21 +562,20 @@ async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
             chunk_size=64,
             buffer_max_size=4096,
             event_truncate_threshold=4096,
-            # 上限设为两块体积，第三块接收后累计即超限
+            # 上限设为两块体积，第三块接收后累计即超限。
             total_bytes_limit=len(chunk) * 2,
             log=_FakeLog(),
         )
 
-    # 超限后停止读取：实际消费的块数远小于上游供给的块数
+    # 超限后停止读取：实际消费块数远小于上游供给。
     assert consumed < total_chunks
 
 
 async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
-    """大量小事件超过条目数硬上限时终止解析并标记 partial，解析产物不无界累积。
+    """大量小事件字节未超限仍以条目数硬上限终止解析并标记 partial。
 
-    总量上限约束的是线上字节；每个事件解析为 dict 后体积放大，字节未超限时条目数
-    仍可无限增长。512KB 限额按 64 字节最小事件下界派生 8192 条上限，供给 12000 个
-    53 字节的事件使累计字节 636KB 但条目数先行触顶，字节上限不触发。
+    512KB 限额按 64 字节事件下界派生 8192 条上限；供给 12000 个 53 字节事件共
+    636KB，条目数在字节上限前先行触顶。
     """
     event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
     assert len(event) == 53
@@ -621,17 +598,16 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
-        # 512KB 派生条目上限 8192；全部 12000 事件的字节总量 636KB 会触发字节上限，
-        # 条目数在约 82 块处先行触顶，两道上限的触发先后由此区分
+        # 条目数在约 82 块处先行触顶，字节上限不触发。
         total_bytes_limit=512 * 1024,
         log=_FakeLog(),
     )
 
-    # 条目数封顶：已解析条目不超过上限加单块内事件数，远小于供给总数
+    # 条目数封顶：已解析条目不超过上限加单块内事件数。
     assert len(result["data"]) <= 8192 + events_per_chunk
-    # 终止解析后停止读取：实际消费块数远小于供给
+    # 终止解析后停止读取：实际消费块数远小于供给。
     assert consumed < total_chunks
-    # 与单事件截断同口径计数并标记 partial，通知调用方结果不完整
+    # 与单事件截断同口径计数并标记 partial。
     assert result["truncated_events"] >= 1
     assert result["status"] == "partial"
 
@@ -639,12 +615,12 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
 async def test_parse_sse_response_item_limit_floor_keeps_legal_batches() -> None:
     """极小总量限额下条目上限取绝对下限兜底，合法小批次不被误截。
 
-    2048 字节限额按字节下界推导仅得 32 条上限，小于组图单请求 15 张的合法规模
-    余量；绝对下限 64 兜底后 33 个事件批次完整解析，不产生截断计数。
+    2048 字节限额推导仅得 32 条上限，低于绝对下限 64；兜底后 33 个事件批次完整
+    解析，不产生截断计数。
     """
     event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
     event_count = 33
-    # 33 × 53 = 1749 字节，未超 2048 字节总量限额，仅条目数维度可能触发
+    # 33 × 53 = 1749 字节，未超 2048 字节总量限额，仅条目数维度可能触发。
     assert event_count * len(event) < 2048
     result = await parse_sse_response(
         _FakeSSEResponse([event * event_count]),
@@ -687,11 +663,11 @@ async def test_parse_sse_response_terminates_on_deadline() -> None:
             event_truncate_threshold=4096,
             total_bytes_limit=64 * 1024,
             log=_FakeLog(),
-            # 截止时间已过，首个块即触发终止
+            # 截止时间已过，首个块即触发终止。
             deadline=time.monotonic() - 1.0,
         )
 
-    # 超限后关闭响应并停止读取
+    # 预算耗尽后关闭响应并停止读取。
     assert closed == 1
     assert consumed < 200
 

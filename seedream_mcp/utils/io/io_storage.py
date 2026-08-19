@@ -35,14 +35,13 @@ logger = get_logger(__name__)
 # 文件名长度上限，避免超出常见文件系统目录项长度限制。
 _MAX_FILENAME_LENGTH = 200
 
-# 文件名扩展名长度上限：splitext 剥离出的超过该值的扩展名不可能是合法图片后缀，
-# 按纯词干截断处理，防止超长扩展名原样保留使文件名长度截断失效。
+# 文件名扩展名长度上限：超过该值的扩展名不可能是合法图片后缀，按纯词干截断，
+# 防止超长扩展名使文件名长度截断失效。
 _MAX_EXTENSION_LENGTH = 16
 
-# 唯一文件名中词干基础的长度预算。Windows 默认 MAX_PATH 260，完整保存路径由
-# base_dir 前缀、日期子目录、工具子目录、时间戳与哈希后缀及扩展名构成；custom_name
-# 合法输入上限 255 字符，词干不加预算地拼接后必然超出 MAX_PATH 使自动保存必然失败，
-# 按预算截断使合法输入拼接完整路径后不再必然失败。
+# 唯一文件名词干基础的长度预算：Windows 默认 MAX_PATH 260，custom_name 合法输入
+# 上限 255 字符，不加预算地拼接完整路径后必然超限使自动保存必然失败，按预算截断
+# 使合法输入不再必然失败。
 _MAX_UNIQUE_BASE_LENGTH = 120
 
 # 遗留临时文件清扫的 mtime 宽限秒数：仅删除早于该时限的 .part 条目，在途下载与
@@ -105,8 +104,8 @@ class FileManager:
             resolved = raw_base.resolve()
         except (OSError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
-        # 仅拒绝指向已存在文件的路径。目录越界防护不在本类职责内，
-        # 由调用方 tools/core/_helpers._resolve_base_dir 做已 resolve 路径的包含校验。
+        # 仅拒绝指向已存在文件的路径；目录越界防护不在本类职责内，由调用方
+        # tools/core/_helpers._resolve_base_dir 做包含校验。
         if resolved.exists() and not resolved.is_dir():
             raise FileManagerError(f"保存路径不是目录: {resolved}")
         base_dir = resolved
@@ -173,9 +172,8 @@ class FileManager:
         filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
         filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
 
-        # 限制文件名长度避免超出文件系统上限。扩展名不超过上限时截断词干并保留
-        # 扩展名；超长扩展名不可能是合法后缀，按纯词干整体截断，防止 name[:0] + ext
-        # 使截断失效而突破上限。
+        # 超长文件名截断词干并保留扩展名；超长扩展名不可能是合法后缀，按纯词干
+        # 整体截断，防止 name[:0] + ext 使截断失效。
         if len(filename) > _MAX_FILENAME_LENGTH:
             name, ext = os.path.splitext(filename)
             if len(ext) > _MAX_EXTENSION_LENGTH:
@@ -183,10 +181,9 @@ class FileManager:
             else:
                 filename = name[: _MAX_FILENAME_LENGTH - len(ext)] + ext
 
-        # Windows 保留设备名处理：CON.txt、NUL 等在 Windows 上会被解释为设备而非文件，
-        # 命中时在首个点前追加下划线使词干不再匹配保留名。
-        # Windows 解析设备名前会剥离前导点与首尾空格，按同样规则归一化词干再判断。
-        # 直接 split(".",1) 对前导点输入（如 .CON）会使首段为空而漏检，故先 lstrip 再取词干。
+        # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，命中时在
+        # 首个点前追加下划线。Windows 解析前会剥离前导点与首尾空格，按同规则归一化
+        # 词干再判断；先 lstrip 防止前导点输入（如 .CON）首段为空而漏检。
         normalized_stem = filename.lstrip(". ").split(".", 1)[0].strip(". ")
         if normalized_stem.upper() in _WINDOWS_RESERVED_NAMES:
             parts = filename.split(".", 1)
@@ -247,8 +244,7 @@ class FileManager:
             timestamp = datetime.now()
 
         clean_base = self.sanitize_filename(base_name)
-        # 词干按预算截断：时间戳、哈希/随机后缀与目录前缀的长度在预算外拼接，
-        # 使 255 字符的合法 custom_name 生成的完整路径不再必然超出 MAX_PATH。
+        # 词干按预算截断，为时间戳、哈希/随机后缀与目录前缀预留长度。
         if len(clean_base) > _MAX_UNIQUE_BASE_LENGTH:
             clean_base = clean_base[:_MAX_UNIQUE_BASE_LENGTH]
 
@@ -372,8 +368,7 @@ class FileManager:
         Raises:
             FileManagerError: 生成的保存路径越出基础目录。
         """
-        # 收敛到受支持图片扩展名白名单，与 create_save_path 对 URL 派生扩展名的同名
-        # 防护保持同一口径。
+        # 与 create_save_path 同口径收敛到受支持图片扩展名白名单。
         if extension not in SUPPORTED_IMAGE_EXTENSIONS:
             extension = DEFAULT_IMAGE_EXTENSION
         base_name = custom_name or self.generate_name_from_prompt(prompt)
@@ -411,7 +406,6 @@ class FileManager:
             FileManagerError: 目录创建或文件写入失败。
         """
         try:
-            # 默认确保父目录存在；批量保存入口或上游已建目录时可由调用方关闭。
             if ensure_parent:
                 self.ensure_directory(file_path.parent)
             # 不允许覆盖时，若文件已存在则追加内容短哈希生成不冲突的新文件名。
@@ -422,11 +416,9 @@ class FileManager:
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
 
-            # 原子落盘协议由 io_file.atomic_replace_from_fd_sync 同步提供，与 io_download
-            # 下载路径的异步骨架对应同一协议：随机名临时文件规避符号链接 TOCTOU，写入后
-            # os.replace 原子替换，失败清理临时文件。writer 以 closefd=False 包装 fd，骨架
-            # 独占 fd 关闭。save_bytes 为同步公共接口且数据已在内存，走同步落盘路径避免在
-            # 事件循环内 asyncio.run 驱动异步骨架的分层倒置与 RuntimeError 风险。
+            # 原子落盘由 io_file 的同步骨架提供，与 io_download 的异步骨架同一协议；
+            # save_bytes 为同步接口且数据已在内存，走同步路径避免在事件循环内
+            # asyncio.run 驱动异步骨架。
             def _writer(fd: int) -> None:
                 with os.fdopen(fd, "wb", closefd=False) as f:
                     f.write(data)
@@ -464,11 +456,9 @@ class FileManager:
         Returns:
             Markdown 引用字符串。
         """
-        # 以基础目录为基准生成相对路径：保存文件恒位于 base_dir 之下，相对化必然成功，
-        # 且不受进程 CWD 变化影响。统一为正斜杠以兼容 Markdown 引用；空格、圆括号、
-        # # 与 % 经百分号编码：# 会被 Markdown 视为 fragment 起点截断引用目标，% 会被
-        # 误解码，custom_name 经 sanitize_filename 后两者均得以保留。百分号必须最先
-        # 编码，后编码会使其余编码产物中的百分号被二次编码。
+        # 相对 base_dir 生成路径且统一正斜杠；空格、圆括号、# 与 % 百分号编码：# 会
+        # 被视为 fragment 起点，% 会被误解码。百分号必须最先编码，后编码会使其余
+        # 编码产物中的百分号被二次编码。
         relative_path = self.relative_to_base(file_path)
         markdown_path = relative_path.replace("\\", "/")
         markdown_path = (
@@ -490,16 +480,11 @@ class FileManager:
     def run_cleanup_policies(self, days: int, max_total_bytes: int | None) -> dict[str, Any]:
         """单次目录扫描依次执行按天清理、总量配额驱逐与遗留临时文件清扫。
 
-        共享一次遍历结果执行三项处理，避免重复全目录 os.walk。按天策略经 _apply_age_policy
-        删除过期文件；配额驱逐基于按天清理后的剩余文件计算，剔除已删条目避免对已删路径
-        重复 unlink。days 小于 1 跳过按天清理，max_total_bytes 为 None 跳过配额驱逐，
-        .part 清扫与空目录回收不受两项清理开关门控。
-
-        注意：空目录清理针对 base_dir 内全部空目录且独立于按天门控执行，不区分目录
-        是否由本服务创建；用户在保存目录内自行维护的空目录（如占位目录）也会被移除，
-        需保留目录结构请在目录内放置占位文件。清理末尾还会清扫超龄的 .part 遗留临时
-        文件，行为详见 _sweep_orphan_part_files，共享目录部署下其他工具的半成品下载在
-        宽限期内不受影响。
+        共享一次遍历结果执行三项处理，避免重复全目录 os.walk；配额驱逐基于按天
+        清理后的剩余文件计算。days 小于 1 跳过按天清理，max_total_bytes 为 None
+        跳过配额驱逐，.part 清扫与空目录回收不受两项开关门控。空目录清理不区分
+        目录来源，用户自建的空目录也会被移除，需保留目录结构请放置占位文件；超龄
+        .part 清扫的宽限语义见 _sweep_orphan_part_files。
 
         Args:
             days: 按天清理的保留天数，小于 1 跳过按天清理。
@@ -534,8 +519,8 @@ class FileManager:
             swept_files, swept_size = self._sweep_orphan_part_files(part_files, errors)
             deleted_files += swept_files
             deleted_size += swept_size
-            # 空目录清理独立于按天门控执行：CLEANUP_DAYS=0 且仅配置总量配额的部署下，
-            # 日期子目录清空后同样回收，不随 days 门控慢性累积目录项。
+            # 空目录回收独立于按天门控，配额驱逐清空的目录当轮即回收，不慢性累积
+            # 目录项。
             self._prune_empty_dirs(directories)
         except Exception as e:
             errors.append(f"清理过程出错: {e}")
@@ -548,15 +533,11 @@ class FileManager:
     ) -> tuple[int, int]:
         """删除超龄遗留的 .part 临时文件，返回删除数量与释放字节数。
 
-        常规清理扫描仅收集受支持图片扩展名，.part 临时文件在进程崩溃或临时清理
-        失败时遗留且不在其列，不经清扫将永久累积。仅删除 mtime 早于宽限值的条目：
-        在途下载与写入的临时文件恒新于宽限值，与后台清理并发时不被击杀；.part 亦
-        为常见下载工具的半成品命名，共享目录部署下其他工具的在途文件同样受宽限
-        保护。候选由 _collect_all_files 在同一目录遍历中顺带收集，遍历防护口径为
-        下降前剪除符号链接与 reparse point 目录、root 与子目录 within-base 复核、
-        文件级 lstat 链与 S_ISREG 判定，防删除动作经 junction 物理越出 base_dir。
-        本方法基于收集时的 mtime 与字节数执行宽限过滤与删除，两阶段结构与按天
-        清理一致。
+        常规清理仅收集图片扩展名，进程崩溃或清理失败遗留的 .part 不在其列，不经
+        清扫将永久累积。仅删 mtime 早于宽限值的条目，在途下载与写入的临时文件恒
+        新于宽限值，并发清理不击杀；.part 亦为常见下载工具的半成品命名，其他工具
+        的在途文件同样受宽限保护。候选由 _collect_all_files 在同一遍历中顺带收集，
+        遍历防护口径见该函数，防删除动作经 junction 越出 base_dir。
         """
         now = datetime.now().timestamp()
         deleted = 0
@@ -598,11 +579,10 @@ class FileManager:
     ) -> tuple[int, int]:
         """按总量配额从已扫描文件中驱逐最旧文件，返回删除文件数与累计释放字节数。
 
-        heapq.nsmallest 仅取可能被删的最旧候选：非零字节文件每删一个至少减少 1 字节，
-        覆盖超额量至多需 excess 个；0 字节文件不减少总量但占据最旧位置也可能被删，计入
-        候选上界，最终封顶为文件总数，避免对全量文件排序。逐候选删除至总量达标；个别
-        unlink 失败时固定候选窗口可能提前耗尽而总量仍超限，失败记入 errors 由下次节流
-        清理重试。
+        heapq.nsmallest 仅取可能被删的最旧候选：非零字节文件每删一个至少减 1 字节，
+        覆盖超额量至多需 excess 个；0 字节文件不减少总量但占最旧位置也可能被删，
+        计入上界并封顶为文件总数，避免全量排序。个别 unlink 失败时固定候选窗口可能
+        提前耗尽而总量仍超限，记入 errors 由下次节流清理重试。
         """
         total = sum(size for _path, size, _mtime in files)
         if total <= max_total_bytes:
@@ -633,16 +613,13 @@ class FileManager:
     ) -> tuple[list[tuple[Path, int, float]], list[tuple[Path, int, float]], list[Path]]:
         """遍历基础目录，收集图片文件、.part 遗留候选与待评估的空目录候选。
 
-        os.walk(followlinks=False) 不下降进入符号链接目录。Windows NTFS junction 属
-        reparse point 但 is_symlink 返回 False，followlinks 无法拦截，仍会被下降进入
-        junction 目标，下降后 root 解析到 base_dir 之外。每层先经 _resolved_within_base
-        复核 root 真实位置，越界则跳过该层的目录与文件处理，防止经 junction 误删 base_dir
-        之外的条目造成数据破坏。os.walk 下降 junction 时已发生的 OS 级 listdir 无法在此
-        拦截，涉及 NTLM/SMB 出站认证风险，部署方应确保 base_dir 不接受不可信写入。
-
-        一次扫描产出全部 (path, size, mtime) 供按天清理、总量配额与遗留 .part 清扫
-        三者共用，按天策略在调用方按 cutoff 过滤，避免各自重复全目录遍历。.part 候选
-        不依赖图片扩展名过滤，条目名以 .part 结尾即收集。
+        os.walk(followlinks=False) 不下降符号链接目录，但 NTFS junction 属 reparse
+        point 且 is_symlink 返回 False，仍会被下降进目标使 root 解析到 base_dir 之外。
+        每层经 _resolved_within_base 复核 root 真实位置、下降前剔除符号链接、reparse
+        与越界目录，防止经 junction 误删 base_dir 之外的条目；os.walk 已下降 junction
+        的 OS 级 listdir 无法拦截，涉及 SMB 出站认证风险，部署方应确保 base_dir 不接受
+        不可信写入。一次扫描产出全部 (path, size, mtime) 供三项清理共用；.part 候选
+        按条目名后缀收集，不依赖图片扩展名过滤。
 
         Args:
             errors: 收集 stat 失败的错误描述列表，与删除阶段共享同一列表。
@@ -657,8 +634,7 @@ class FileManager:
         directories: list[Path] = []
         for root, dirs, files in os.walk(self.base_dir, followlinks=False):
             root_path = Path(root)
-            # root 字符串经 os.walk 从已 resolve 的 base_dir 拼接而来，仍可能因 NTFS
-            # junction 被下降到 base_dir 之外；resolve 一次复核真实位置。
+            # root 仍可能因 junction 被下降到 base_dir 之外，resolve 复核真实位置。
             try:
                 root_resolved = root_path.resolve()
             except Exception as e:
@@ -666,21 +642,16 @@ class FileManager:
                 dirs[:] = []
                 continue
             if not self._resolved_within_base(root_resolved):
-                # 越界：清空 dirs 阻止 os.walk 继续下降到越界子目录，含 NTFS junction
-                # 目标，避免无谓的越界遍历与潜在 SMB 出站认证暴露。
+                # 清空 dirs 阻止继续下降越界子目录，避免越界遍历与 SMB 出站认证暴露。
                 logger.warning("路径不在基础目录内: {}", root_resolved)
                 dirs[:] = []
                 continue
-            # 下降前剔除符号链接、NTFS junction 与越界目录。os.walk(followlinks=False)
-            # 不拦截 junction，因其属 reparse point 而 is_symlink 返回 False；若不在此
-            # 剔除会下降进入 junction 或越界目录目标执行 OS 级 listdir，涉及潜在 SMB
-            # 出站认证暴露。dirs[:] 原地赋值阻止 os.walk 继续下降到被剔除的目录。
+            # os.walk 不拦截 junction，在此剔除并原地改写 dirs 阻止下降。
             pruned_dirs: list[str] = []
             for name in dirs:
                 dir_path = root_path / name
-                # 单次 lstat 同时判定符号链接与 reparse point 属性，与文件分支同口径，
-                # 免掉 is_symlink 与逐路径 reparse 判定的重复 lstat；listdir 与 lstat
-                # 之间条目消失属正常轮替，跳过不下降。
+                # 单次 lstat 同时判定符号链接与 reparse 属性，免掉重复 stat；条目
+                # 消失属正常轮替，跳过不下降。
                 try:
                     dir_lstat = dir_path.lstat()
                 except OSError as e:
@@ -704,25 +675,21 @@ class FileManager:
             dirs[:] = pruned_dirs
             for name in files:
                 file_path = root_path / name
-                # 仅收集本服务支持的图片文件与 .part 遗留临时文件，跳过 base_dir 内
-                # 其他类型文件，避免误删用户数据。
+                # 仅收集受支持图片与 .part 临时文件，跳过其他类型避免误删用户数据。
                 is_image = file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
                 if not is_image and not name.endswith(".part"):
                     continue
-                # 单次 lstat 同时判定符号链接与 reparse point 属性：is_symlink 与
-                # 逐路径 reparse 判定各自再 lstat 一次，全目录清理时每文件三次 stat。
+                # 单次 lstat 同时判定符号链接与 reparse 属性，避免每文件三次 stat。
                 try:
                     lstat_result = file_path.lstat()
                 except OSError as e:
                     if not is_image:
-                        # 在途下载完成时 .part 条目被原子重命名消失，stat 竞态属正常
-                        # 轮替，不计错误以免误判清理失败回滚节流。
+                        # .part 条目被原子重命名消失属正常轮替，不计错误以免回滚节流。
                         continue
                     errors.append(f"获取文件信息失败 {file_path}: {e}")
                     logger.warning("获取文件信息失败: {} -> {}", file_path, e)
                     continue
-                # 符号链接文件的目标可能在 base_dir 之外；reparse point 文件会被后续
-                # stat 跟随，与目录分支对称，命中则跳过。
+                # 符号链接目标可能在 base_dir 之外，reparse 文件会被 stat 跟随，命中跳过。
                 if stat.S_ISLNK(lstat_result.st_mode):
                     continue
                 if _has_reparse_attribute(lstat_result):
@@ -739,8 +706,7 @@ class FileManager:
                         part_files.append(entry)
                 except OSError as e:
                     if not is_image:
-                        # 与 lstat 分支同因：在途下载的 .part 条目完成时被原子重命名
-                        # 消失，stat 竞态属正常轮替，不计错误以免误判清理失败回滚节流。
+                        # 与 lstat 分支同因，不计错误。
                         continue
                     errors.append(f"获取文件信息失败 {file_path}: {e}")
                     logger.warning("获取文件信息失败: {} -> {}", file_path, e)

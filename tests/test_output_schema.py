@@ -1,9 +1,7 @@
-"""工具 outputSchema 结构化输出声明测试。
+"""工具 outputSchema 结构化输出声明测试，对齐 MCP 2025-06-18 规范。
 
-验证所有工具都声明了 outputSchema，对齐 MCP 2025-06-18 规范，供客户端程序化解析与校验。
-outputSchema 由 MCPServer 依据工具返回类型注解自动生成，涉及 GenerationStructuredOutput
-与 BrowseImagesStructuredOutput；运行时工具仍返回手动构造的 CallToolResult，
-保留人类可读 content 文本与 structuredContent。
+outputSchema 由工具返回类型注解自动生成；运行时仍返回手动构造的 CallToolResult，
+保留人类可读 content 与 structuredContent。
 """
 
 from __future__ import annotations

@@ -1,12 +1,9 @@
 """MCP 工具适配器层，作为 composition root 组装 core 流水线与 impl 处理器。
 
-每个 ``run_*`` 函数经 ``workspace_roots_scope_from_result`` 应用 MCP Roots 工作
-区边界，roots 结果由 server 层工具签名的 Resolve 依赖按协商版本取回注入，
-SEP-2577 下不经会话直连读取；再将 pydantic 校验后的入参模型本身委托给对应
-``handle_*``，保持类型化流水线直至 core 层。本模块位于 tools/ 顶层而非 core/，
-使依赖方向为 core <- impl <- runners，避免 core 反向依赖 impl 造成包级循环。
-四个生成工具共享 ``_run_generation_tool`` 完成工作区边界与委托；图片浏览工具
-无 config 入参，单独直接委托。
+每个 ``run_*`` 函数经 ``workspace_roots_scope_from_result`` 应用 MCP Roots 工作区
+边界，roots 结果由 server 层按协商版本取回注入；再将 pydantic 校验后的入参模型委托
+给对应 ``handle_*``。本模块位于 tools/ 顶层，依赖方向为 core <- impl <- runners，
+避免 core 反向依赖 impl。
 """
 
 from __future__ import annotations
@@ -32,8 +29,8 @@ from .impl.multi_image_fusion import handle_multi_image_fusion
 from .impl.sequential_generation import handle_sequential_generation
 from .impl.text_to_image import handle_text_to_image
 
-# 泛型参数绑定输入协议：handler 接受各自的具体输入模型，与传入 params 的具体类型一致，
-# 避免 Callable 逆变要求 handler 接受任意协议实现。
+# 泛型参数绑定输入协议，使 handler 接受与 params 一致的具体输入模型，避免
+# Callable 逆变要求其接受任意协议实现。
 _GenerationInputT = TypeVar("_GenerationInputT", bound=GenerationInputParams)
 
 _GenerationHandler = Callable[

@@ -15,8 +15,8 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 # 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。
 DEFAULT_IMAGE_EXTENSION = ".jpeg"
 
-# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in 成员判断；
-# 有序版本为不可变元组，防止公共容器被原地变异污染共享行为。
+# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in
+# 成员判断；有序版本为不可变元组，防止公共容器被原地改写。
 SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (
     ".jpg",
     ".jpeg",
@@ -30,9 +30,7 @@ SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (
 )
 SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)
 
-# 扩展名到 MIME 类型映射，用于本地文件转 Data URI。以 MappingProxyType 包装为
-# 只读视图，与 SUPPORTED_IMAGE_EXTENSIONS 的 frozenset 口径一致，防止公共映射被
-# 原地改写污染共享行为。
+# 扩展名到 MIME 类型映射，用于本地文件转 Data URI，取只读视图防止公共映射被原地改写。
 MIME_BY_EXTENSION: Mapping[str, str] = MappingProxyType(
     {
         ".jpg": "image/jpeg",
@@ -65,26 +63,17 @@ EXTENSION_BY_MIME: Mapping[str, str] = MappingProxyType(
 _HEIC_BRANDS: tuple[bytes, ...] = (b"heic", b"heix", b"hevc", b"heim", b"heis")
 _HEIF_BRANDS: tuple[bytes, ...] = (b"mif1", b"msf1")
 
-# BMP DIB 头 size 字段的合法取值：BITMAPCOREHEADER 12、OS/2 2.x 简化头 16、
-# BITMAPINFOHEADER 40 与 V2/V3/OS22X 完整头/V4/V5 扩展头 52/56/64/108/124。
-# 结构校验取 DIB 头字段而非 offset 2-5 文件大小字段与内容长度比对：下载侧以流式
-# 首部前缀做真实性校验，前缀长度小于完整文件，文件大小字段比对会误拒合法 BMP；
+# BMP DIB 头 size 字段的合法取值：BITMAPCOREHEADER 12、OS/2 简化头 16、
+# BITMAPINFOHEADER 40 与 V4/V5 等扩展头 52-124。取 DIB 头字段而非文件大小字段
+# 比对：下载侧以流式首部前缀校验，前缀短于完整文件，大小字段比对会误拒合法 BMP；
 # DIB 头位于文件前 18 字节，前缀形态同样可判。
 _BMP_DIB_HEADER_SIZES: frozenset[int] = frozenset({12, 16, 40, 52, 56, 64, 108, 124})
 
 
 def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTENSION) -> str:
-    """基于文件头魔法字节推断图片扩展名。
+    """基于文件头魔法字节推断图片扩展名，含点号，无法识别时返回 ``default``。
 
-    以文件头 magic bytes 为准而非扩展名，避免扩展名缺失或伪造导致类型误判；
-    仅识别受支持的格式，无法识别时返回 ``default``。
-
-    Args:
-        content: 图片字节内容。
-        default: 无法识别时返回的默认扩展名，含点号。
-
-    Returns:
-        推断出的扩展名，含点号。
+    以文件头为准而非扩展名，避免扩展名缺失或伪造导致类型误判；仅识别受支持的格式。
     """
     try:
         if content.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -93,9 +82,8 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
             return ".jpeg"
         if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
             return ".gif"
-        # BMP: "BM" 魔数且 DIB 头 size 字段完整、取值合法。个别合法 BMP 变体的
-        # offset 6-10 保留字段非零，不据此拒判；"BM" 前缀的长文本因 DIB 头非法按
-        # 未知内容处理，走默认拒判路径。
+        # BMP: "BM" 魔数且 DIB 头 size 字段取值合法。offset 6-10 保留字段非零的
+        # 合法变体不据此拒判；"BM" 前缀的长文本因 DIB 头非法按未知内容处理。
         if (
             content.startswith(b"BM")
             and len(content) >= 18
@@ -119,10 +107,9 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
     return default
 
 
-# 下载内容真实性判定按格式分级的最小合法长度下界：BMP 推断已要求 DIB 头 size 字段
-# 合法，此处 64 字节下界进一步要求内容达到真实 BMP 的最小构成，即文件头、DIB 头与
-# 首行像素，拦截头字段合法但内容过短的截断形态。其余格式签名特异性足够，不设下界。
-# 下载侧以流式首部做本校验时，累计字节数须覆盖目标格式的下界，否则合法内容会被误拒。
+# 内容真实性判定的按格式最小长度下界：BMP 的 64 字节要求达到文件头、DIB 头与首行
+# 像素的最小构成，拦截头字段合法但内容过短的截断形态；其余格式签名特异性足够，不设
+# 下界。流式首部校验的累计字节数须覆盖目标格式下界，否则合法内容会被误拒。
 _MIN_KNOWN_BYTES_BY_EXTENSION: Mapping[str, int] = MappingProxyType({".bmp": 64})
 
 # 流式首部校验的最小累计窗口：各格式下界的最大值，下载侧的首部缓冲须至少覆盖
@@ -151,19 +138,10 @@ def parse_data_uri(data: str) -> tuple[str | None, str]:
     """解析 data URI，返回 (media_type, payload)。
 
     scheme 前缀按 RFC 3986 大小写不敏感判定，与 image_ref 的分类口径一致，使
-    ``DATA:image/png;base64,....`` 也能进入校验流水线获得精确报错而非笼统的
-    "格式无效"。非 data URI、缺逗号分隔符或入参非字符串时返回 (None, 原始字符串)。
-    media_type 取自 header 的媒体类型部分，例如 ``data:image/png;base64,....`` 解析为
-    ``image/png``；header 缺少媒体类型时该字段为 None。payload 为首个逗号后的负载，
-    不做 base64 解码，由调用方按编码标记自行处理。供 validation 与 auto_save 共享，
-    消除两处 data URI 拆分逻辑的重复。
-
-    Args:
-        data: 待解析的 data URI 字符串。
-
-    Returns:
-        (media_type, payload) 形式的元组；非 data URI、缺逗号分隔符或
-        入参非字符串时为 (None, 原始字符串)。
+    ``DATA:image/png;base64,....`` 也进入校验流水线获得精确报错。media_type 取自
+    header 的媒体类型部分，缺失时为 None；payload 为首个逗号后的负载，不做 base64
+    解码，由调用方按编码标记处理。非 data URI、缺逗号分隔符或入参非字符串时返回
+    (None, 原始字符串)。
     """
     if not isinstance(data, str):
         return None, data

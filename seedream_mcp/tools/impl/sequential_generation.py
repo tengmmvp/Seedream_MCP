@@ -1,8 +1,8 @@
 """组图输出工具的 impl 处理器。
 
-作为薄适配器：从入参取出参考图与 max_images 字段，与 prompt 等封装为 ``_execute``
-回调，再委托 ``execute_generation_handler`` 流水线完成校验、调用、保存与结果格式化。
-字段规则与校验由 schemas.SequentialGenerationInput 单一定义。
+薄适配器：取出参考图与 max_images 字段，与 prompt 等封装为 ``_execute`` 回调，委托
+``execute_generation_handler`` 统一编排；字段规则与校验由
+``SequentialGenerationInput`` 单一定义。
 """
 
 from __future__ import annotations
@@ -36,19 +36,14 @@ async def handle_sequential_generation(
 ) -> CallToolResult:
     """处理组图输出请求，基于参考图与文本生成一组内容关联的图片。
 
-    流程由 ``execute_generation_handler`` 统一编排：参数经 schema 校验后构建执行上下文，
-    调用客户端生成，可选自动保存，最终返回结构化工具结果。完整字段规则与默认值见
-    ``SequentialGenerationInput``，本函数仅透传入参模型。max_images 未显式提供时已由
-    schema 按参考图数量自动推导，本函数直接使用推导值。
-
-    Args:
-        params: 经 pydantic 校验的组图输出入参模型。
-        config: 当前生效的 SeedreamConfig。
-        ctx: MCP 上下文，用于进度上报，无会话时可为 None。
+    入参经 schema 校验后由 ``execute_generation_handler`` 统一编排：构建执行上下文、
+    调用客户端生成、可选自动保存并格式化结果；字段规则与默认值见
+    ``SequentialGenerationInput``。max_images 未显式提供时由 schema 按参考图数量
+    自动推导。
 
     Returns:
-        MCP 标准工具结果，含面向模型的文本摘要与 structuredContent，失败时不抛出异常而
-        以 ``is_error=True`` 返回。
+        含文本摘要与 structuredContent 的工具结果；失败不抛异常，以 ``is_error=True``
+        返回。
     """
     image = params.image
     max_images = params.max_images

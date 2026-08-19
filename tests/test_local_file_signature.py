@@ -1,7 +1,6 @@
 """_local_file_signature 缓存键签名测试。
 
-验证候选文件选择与读取路径对齐、最终分量符号链接拒绝、越界守卫不沦为存在性 oracle。
-重点守护多 Root 工作区下签名与读取锁定同一文件，避免命中陈旧缓存。
+守护多 Root 下签名与读取路径锁定同一文件、避免陈旧缓存，越界文件不泄露存在性。
 """
 
 from __future__ import annotations
@@ -38,14 +37,13 @@ def test_absolute_path_outside_roots_returns_zero(tmp_path: Path) -> None:
 
 
 def test_multi_root_skips_invalid_picks_valid(tmp_path: Path) -> None:
-    """Root1 同名条目无效（目录）+ Root2 有效文件 → 签名锁定 Root2，避免陈旧缓存。"""
+    """Root1 同名条目为目录不可读取、Root2 为有效文件时，签名锁定 Root2 避免陈旧缓存。"""
     root1 = tmp_path / "r1"
     root2 = tmp_path / "r2"
     root1.mkdir()
     root2.mkdir()
-    # Root1 的 photo.png 是目录（非 regular），读取路径会跳过
+    # Root1 的 photo.png 是目录，读取路径会跳过
     (root1 / "photo.png").mkdir()
-    # Root2 的 photo.png 是可读取的有效文件
     valid = root2 / "photo.png"
     valid.write_bytes(_PNG_BYTES)
 
@@ -57,11 +55,10 @@ def test_multi_root_skips_invalid_picks_valid(tmp_path: Path) -> None:
 def test_multi_root_skips_oversized_picks_valid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Root1 同名文件超过大小上限（校验失败）+ Root2 合法 → 签名锁定 Root2。
+    """Root1 同名文件超大小上限、Root2 合法时，签名锁定 Root2。
 
-    大小上限经 monkeypatch 缩到 KB 级后以小文件触发同一条超限跳过分支；被测路径
-    为 image_validation.image_candidate_stat 的资格检查，读取的是该模块命名空间内
-    的 MAX_IMAGE_FILE_SIZE 模块全局，patch 目标据此确定。
+    大小上限经 monkeypatch 缩到 KB 级触发同一条跳过分支；被测代码读取的是
+    image_validation 命名空间的 MAX_IMAGE_FILE_SIZE，patch 目标据此确定。
     """
     monkeypatch.setattr(image_validation, "MAX_IMAGE_FILE_SIZE", 64 * 1024)
     root1 = tmp_path / "big"
@@ -78,11 +75,7 @@ def test_multi_root_skips_oversized_picks_valid(
 
 
 def test_signature_delegates_to_shared_candidate_resolution(tmp_path: Path) -> None:
-    """签名委托共享定位 resolve_local_image_candidate，与读取路径同源。
-
-    候选选择规则抽取为 image_validation 的单一实现后，签名与读取不可能因两侧
-    规则漂移锁定不同文件。
-    """
+    """签名与读取共用 resolve_local_image_candidate 定位候选，不会因规则漂移锁定不同文件。"""
     from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
 
     root1 = tmp_path / "r1"
@@ -111,9 +104,8 @@ def test_signature_delegates_to_shared_candidate_resolution(tmp_path: Path) -> N
 def test_final_component_symlink_follows_target_within_root(tmp_path: Path) -> None:
     """界内符号链接按 resolve 跟随语义取目标文件的签名，与读取路径锁定同一文件。
 
-    候选定位统一 resolve 后做越界判定，符号链接越界防御由该比较承担，而非拒绝
-    链接本身；界内链接等价于直接引用目标，签名与读取都落在目标物理文件上，
-    mtime+size 失效保护对链接替换同样生效。
+    越界防御由 resolve 后的越界判定承担而非拒绝链接本身；界内链接等价直接引用
+    目标，mtime+size 失效保护对链接替换同样生效。
     """
     target = tmp_path / "real.png"
     target.write_bytes(_PNG_BYTES)

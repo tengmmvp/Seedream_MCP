@@ -18,10 +18,9 @@ async def test_seedream_client_httpx_async_client_disables_trust_env() -> None:
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
     try:
-        # 触发 httpx.AsyncClient 创建，这是 _call_api 路径的前置步骤
+        # _ensure_client 是 _call_api 的前置步骤，触发 AsyncClient 创建。
         await client._ensure_client()
         assert client._client is not None
-        # 直接读 httpx.AsyncClient.trust_env 验证守护不变量
         assert client._client.trust_env is False
     finally:
         await client.close()
@@ -34,7 +33,6 @@ async def test_download_manager_aiohttp_session_disables_trust_env() -> None:
     try:
         session = await manager._ensure_session()
         assert isinstance(session, aiohttp.ClientSession)
-        # 直接读 aiohttp.ClientSession.trust_env 验证守护不变量
         assert session.trust_env is False
     finally:
         await manager.close()

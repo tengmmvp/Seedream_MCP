@@ -1,4 +1,4 @@
-"""setup_logging 的 force_standard_logging 透传测试与日志控制字符 patcher 测试。"""
+"""setup_logging 行为测试与日志控制字符 patcher、孤儿任务异常日志测试。"""
 
 import asyncio
 import logging
@@ -24,9 +24,7 @@ _RecordException = namedtuple("_RecordException", "type value traceback")
 class _FakeLogger:
     """替身 loguru logger，吸收 remove/add/info 调用并记录 add 与 warning 的参数。
 
-    真实 setup_logging 会调用 logger.remove() 清空全局 loguru handler 并 logger.add()
-    注册新 handler，污染跨测试的全局日志状态。测试期间以替身替换模块级 logger，使其
-    不动真实全局，杜绝 handler 泄漏。
+    以替身替换模块级 logger，避免 remove/add 改写全局 handler 造成跨测试污染。
     """
 
     def __init__(self) -> None:
@@ -53,10 +51,7 @@ class _FakeLogger:
 
 @pytest.fixture
 def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> None:
-    """以替身替换 setup_logging 模块内的 loguru 全局。
-
-    防止 remove/add 改写真实全局 handler。
-    """
+    """以替身替换 setup_logging 模块内的 loguru 全局，防止改写真实全局 handler。"""
     monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", _FakeLogger())
 
 
@@ -123,8 +118,7 @@ def test_setup_logging_suppresses_third_party_info_noise(
 ) -> None:
     """第三方噪音压制清单覆盖 httpx 与其传输层 httpcore 的 INFO 噪音。
 
-    每次 API 调用一条的 INFO "HTTP Request" 与 httpcore 的每连接 INFO 日志不再
-    淹没业务日志。
+    每请求一条的 httpx INFO 与每连接一条的 httpcore INFO 不再淹没业务日志。
     """
     setup_logging(log_level="INFO", enable_console=False, enable_file=False)
 
@@ -140,8 +134,7 @@ def test_setup_logging_warns_when_root_handlers_block_bridge(
 ) -> None:
     """root logger 已有 handler 且未强制接管时输出 warning，提示标准库日志未被拦截。
 
-    basicConfig 在该场景整体 no-op，标准库日志绕过 loguru 桥接与控制字符防护；
-    force 语义不变，调用参数仍透传 force=False。
+    basicConfig 整体 no-op，标准库日志绕过桥接与控制字符防护；force 仍透传 False。
     """
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [logging.NullHandler()])
@@ -209,14 +202,12 @@ def test_setup_logging_no_warning_when_root_has_no_handlers(
 def _real_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path]:
     """在 tmp 工作目录以真实 loguru 初始化文件日志，返回默认日志文件路径。
 
-    结束时移除全局 sink、重置全局 patcher 并恢复标准库 root handlers，
-    不向后续用例泄漏全局日志状态。
+    结束时移除全局 sink、重置 patcher 并恢复 root handlers，不泄漏全局状态。
     """
     monkeypatch.chdir(tmp_path)
     root_handlers = list(logging.getLogger().handlers)
     try:
-        # force 强制重装 root handlers 使 InterceptHandler 生效，与生产调用参数一致；
-        # 缺省 force=False 在 root 已有 handler 时不会安装桥接器
+        # force=True 重装 root handlers 使桥接生效，缺省值在 root 已有 handler 时不安装
         setup_logging(
             log_level="INFO",
             enable_console=False,

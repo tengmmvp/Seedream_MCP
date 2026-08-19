@@ -1,14 +1,11 @@
-"""Seedream MCP 工具包入口，按三层导出工具对外符号。
+"""Seedream MCP 工具包入口，聚合再导出三层工具符号。
 
-第一层为 impl 下的 ``handle_*`` 业务处理器，封装各工具的客户端调用与结果组装；第二层
-为 runners 下的 ``run_*`` 适配器，作为 composition root 注入工作区边界后委托对应
-handler；第三层为 core.schemas 下的输入模型，作为参数校验与 MCP inputSchema 的单一
-来源。依赖方向为 core <- impl <- runners，本包仅做聚合再导出。
+impl 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装；runners 的 ``run_*``
+适配器作为 composition root 注入工作区边界后委托 handler；core.schemas 的输入模型
+是参数校验与 MCP inputSchema 的单一来源。依赖方向为 core <- impl <- runners。
 
-采用 PEP 562 的 ``__getattr__`` 延迟加载：首次访问导出名时才导入对应子模块，不连带
-加载其余 impl、runners 与 schemas 子模块。``__all__`` 程序化派生
-自 ``_LAZY_EXPORTS`` 的键，二者天然一致，无需手动维护。``__dir__`` 纳入尚未触发
-导入的延迟导出名，dir() 补全与包入口模块的口径一致。
+导出经 PEP 562 ``__getattr__`` 延迟加载，首次访问才导入对应子模块；``__all__``
+派生自 ``_LAZY_EXPORTS`` 的键，``__dir__`` 纳入尚未导入的延迟导出名。
 """
 
 from __future__ import annotations
@@ -64,7 +61,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "TextToImageInput": (".core.schemas", "TextToImageInput"),
 }
 
-# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步。
+# 公开接口声明，派生自 _LAZY_EXPORTS 的键。
 __all__ = list(_LAZY_EXPORTS)
 
 

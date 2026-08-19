@@ -27,18 +27,15 @@ logger = get_logger(__name__)
 # ==================== 传输层常量 ====================
 
 # streamable-http 可信回环地址集合：仅字面量回环地址免鉴权。
-# 不含 “localhost”，其解析依赖 hosts/DNS，污染时可指向非回环地址，
-# 仅凭字符串判定会使公网暴露仍免鉴权。
+# 不含 "localhost"：其解析依赖 hosts/DNS，污染时可指向非回环地址。
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
-# 绑定即启用 SDK 内层 DNS rebinding 防护的地址集合。比 _LOOPBACK_HOSTS 多含
-# “localhost”：绑定判定与免鉴权语义不放宽，但 localhost 监听同样须保有 Host 头
-# 防线，与 streamable_http_app 对回环 host 自动启用防护的默认集合一致。
+# 绑定即启用 SDK 内层 DNS rebinding 防护的地址集合，比 _LOOPBACK_HOSTS 多含
+# "localhost"，与 streamable_http_app 的默认防护集合一致。
 _DNS_REBINDING_PROTECTED_HOSTS = _LOOPBACK_HOSTS | {"localhost"}
 
-# 回环绑定下 SDK 内层 DNS rebinding 防护的 Host/Origin 白名单，端口通配，与
-# streamable_http_app 对回环 host 的默认白名单一致，亦与 _LoopbackHostGuardMiddleware
-# 容忍的回环 Host 集合语义对齐。
+# 回环绑定下 SDK 防护的 Host/Origin 白名单，端口通配，与
+# _LoopbackHostGuardMiddleware 的容忍集合语义对齐。
 _LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 _LOOPBACK_ALLOWED_ORIGINS = (
     "http://127.0.0.1:*",
@@ -59,17 +56,14 @@ async def _send_asgi_json(
     body: bytes,
     extra_headers: tuple[tuple[bytes, bytes], ...] = (),
 ) -> None:
-    """发送统一格式的 JSON ASGI 响应。
+    """发送统一格式的 JSON ASGI 响应，content-type 固定为 application/json。
 
-    构造 http.response.start 与 http.response.body 两条消息，content-type 固定为
-    application/json，content-length 按实得 body 字节计算；extra_headers 附加在标准头
-    之后，供 www-authenticate 等响应头复用，消除四个中间件的手写重复。
+    extra_headers 附加在标准头之后，供 www-authenticate 等响应头复用。
     """
     headers: list[tuple[bytes, bytes]] = [
         (b"content-type", b"application/json"),
         (b"content-length", str(len(body)).encode("ascii")),
-        # 鉴权失败、请求超限与健康探针响应禁止缓存，避免中间代理或浏览器缓存
-        # 敏感状态码响应后误导后续请求。
+        # 鉴权失败、超限与健康探针响应禁止缓存，避免代理缓存敏感状态码响应。
         (b"cache-control", b"no-store"),
     ]
     headers.extend(extra_headers)
@@ -142,9 +136,9 @@ class _BearerTokenAuthMiddleware:
 class _LimitRequestBodyMiddleware:
     """streamable-http 请求体大小限制 ASGI 中间件。
 
-    先按 Content-Length 头早拒超过上限的请求作为快速路径；再包装 receive 累计 chunked 实际
-    接收字节数，超限即短路返回 413，防止缺失或谎报 Content-Length 的超大请求体在 pydantic
-    物料化前撑爆内存。仅作用于 http 请求，websocket 等非 http 流量原样透传。
+    先按 Content-Length 头早拒超限请求，再包装 receive 累计实际接收字节数，超限
+    短路返回 413，防止谎报或缺失 Content-Length 的超大请求体撑爆内存。仅作用于
+    http 请求，其余流量原样透传。
     """
 
     def __init__(self, app: Any, max_body_size: int) -> None:
@@ -176,8 +170,7 @@ class _LimitRequestBodyMiddleware:
 
         async def receive_wrapper() -> Any:
             nonlocal total_received, too_large
-            # 一旦已判定超限，后续调用直接返回空终帧，不再向底层 receive 读取真实消息，
-            # 彻底切断超大 body 的剩余投递。
+            # 已判定超限后直接返回空终帧，切断剩余 body 投递。
             if too_large:
                 return {"type": "http.request", "body": b"", "more_body": False}
             message = await receive()
@@ -199,9 +192,8 @@ class _LimitRequestBodyMiddleware:
             await send(message)
 
         async def _finalize_too_large() -> None:
-            # 防御性不可达路径：现行 receive_wrapper 截断后，下游在读到空终帧时应在发出
-            # 响应头之前失败或正常返回。若下游已开始响应再补发 http.response.start 会违反
-            # ASGI 单响应约定，此处仅记日志，连接异常交由服务器协议层处理。
+            # 防御性不可达路径：下游已开始响应时补发 413 会违反 ASGI 单响应约定，
+            # 仅记日志。
             if response_started:
                 logger.warning("请求体超限但下游已开始响应，跳过补发 413 以避免双响应")
                 return
@@ -210,15 +202,15 @@ class _LimitRequestBodyMiddleware:
         try:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
-            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，避免冒泡为 500。
+            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，
+            # 避免冒泡为 500。
             if too_large:
                 await _finalize_too_large()
                 return
             raise
 
         if too_large:
-            # 与 try 内路径的防护对齐：客户端超限后立即断开时，补发 413 的 send
-            # 对已死连接抛异常，吞掉后仅记 debug，不向应用层冒泡污染错误通道。
+            # 客户端超限后断开时，补发 413 可能对已死连接抛异常，吞掉仅记 debug。
             try:
                 await _finalize_too_large()
             except Exception:
@@ -234,10 +226,8 @@ class _LimitRequestBodyMiddleware:
 class _HealthCheckMiddleware:
     """streamable-http 健康检查中间件，短路 GET /health 返回进程存活状态。
 
-    位于请求体限制与 Bearer 鉴权之外执行，负载均衡与健康探针无需令牌即可探活；
-    回环绑定时位于 Host 校验之内，rebinding 域名请求连探活也被拒，本机探针的 Host
-    恒为回环字面量或 localhost，不受影响。仅做 liveness 判定，不探测上游 API，
-    避免拖慢探针。
+    位于请求体限制与鉴权之外，探针无需令牌；回环绑定时位于 Host 校验之内，
+    rebinding 请求连探活也被拒。仅做 liveness 判定，不探测上游 API。
     """
 
     def __init__(self, app: Any) -> None:
@@ -257,20 +247,15 @@ class _HealthCheckMiddleware:
 class _LoopbackHostGuardMiddleware:
     """回环绑定时校验 Host 头，防 DNS rebinding 使外部域名请求直达本机服务。
 
-    回环绑定且未配置鉴权时，浏览器经 DNS rebinding 可对 127.0.0.1 发起同源请求，
-    绕过 CORS 直达工具面枚举文件或盗用 API key。校验 Host 头为回环地址可阻断外部
-    域名请求；本地以 127.0.0.1/localhost/[::1] 访问不受影响。http 与 websocket 流量
-    均校验：websocket 无 HTTP 状态码可回，参照鉴权中间件模式以 1008 关闭；Host 头
-    缺失（HTTP/1.0 等路径）按 403 拒绝，与整层 fail-closed 取向一致。
+    回环绑定且未配置鉴权时，浏览器经 DNS rebinding 可绕过 CORS 直达工具面；校验
+    Host 为回环地址可阻断，本地以 127.0.0.1/localhost/[::1] 访问不受影响。http 与
+    websocket 均校验，websocket 以 1008 关闭；Host 头缺失按 403 拒绝。
     """
 
-    # 允许的 Host 头值（剥离端口后），均解析到回环或即回环字面量。此处保留 “localhost”
-    # 与 _LOOPBACK_HOSTS 排除它并不矛盾：绑定判定决定服务实际监听位置，hosts 污染会使
-    # 绑定 localhost 实际暴露公网，故必须 fail-closed；而远程攻击者无法借污染令请求
-    # 携带 Host: localhost 抵达本机（rebinding 场景 Host 恒为攻击者域名，伪造该 Host
-    # 需本机裸 socket，等价于本地访问），容忍本地方便默认以 localhost 访问的客户端。
-    # 不含未加方括号的裸 “::1”：IPv6 字面量在 Host 头中必须带方括号，裸形态属畸形，
-    # 剥端口逻辑会将其截断为非回环值，按 fail-closed 拒绝。
+    # 允许的 Host 头值（剥离端口后）。容忍 "localhost" 与绑定判定排除它并不矛盾：
+    # 绑定 localhost 在 hosts 污染下会实际暴露公网，须 fail-closed；而 rebinding
+    # 请求的 Host 恒为攻击者域名，无法借污染携带 Host: localhost 抵达本机。不含
+    # 裸 "::1"：Host 头中 IPv6 字面量必须带方括号，裸形态属畸形。
     _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]"})
 
     def __init__(self, app: Any) -> None:
@@ -283,8 +268,7 @@ class _LoopbackHostGuardMiddleware:
             # Host 头的主机名大小写不敏感，比较前统一小写，避免大写回环 Host 被误拒。
             if host is None or self._strip_port(host).lower() not in self._ALLOWED_HOSTS:
                 if scope_type == "websocket":
-                    # websocket 握手无 HTTP 状态码可回，按本文件鉴权中间件模式以
-                    # 1008 Policy Violation 关闭，阻断 rebinding 借 websocket 绕过校验。
+                    # websocket 无 HTTP 状态码可回，按鉴权中间件模式以 1008 关闭。
                     await send({"type": "websocket.close", "code": 1008})
                 else:
                     await self._send_forbidden(send)
@@ -334,21 +318,12 @@ def _middleware_attached(app: Any) -> bool:
 
 
 def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> None:
-    """向 streamable-http app 装配中间件栈，重复装配时跳过。
-
-    streamable_http_app 每次调用都无条件新建 StreamableHTTPSessionManager 并覆盖
-    self._session_manager，随后新建 Starlette app，不存在会话管理器复用。本装配守卫
-    仅针对本项目自建中间件栈：同一 app 实例重复进入装配会在其用户中间件栈上叠加
-    重复层，装配前检测本模块任一中间件已存在即整体跳过，使装配幂等；全新 app 正常
-    装配。
+    """向 streamable-http app 装配中间件栈，重复装配时跳过以保证幂等。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    LoopbackHostGuard（仅回环绑定）-> HealthCheck -> LimitRequestBody -> Bearer -> app：
-    Bearer 最先添加居最内，其后添加请求体限制使其位于鉴权之外，从而声明超长
-    Content-Length 的请求在鉴权前即被 413 早拒；健康检查再外一层，探针免令牌探活；
-    回环绑定时 Host 校验最后添加居最外层，rebinding 请求先于健康检查被拒。
-    已认证的 chunked 请求由 receive 字节累计保护；未授权 chunked 请求不读 body 直接 401，
-    其体积限制依赖 uvicorn 或反向代理层。
+    LoopbackHostGuard（仅回环绑定）-> HealthCheck -> LimitRequestBody -> Bearer
+    -> app：声明超长 Content-Length 的请求在鉴权前即被 413 早拒，探针免令牌探活，
+    回环绑定时 rebinding 请求先于健康检查被拒。
     """
     if _middleware_attached(app):
         logger.warning("streamable-http 中间件已装配，跳过重复装配以避免中间件栈叠加")
@@ -359,13 +334,9 @@ def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> 
     app.add_middleware(
         _LimitRequestBodyMiddleware, max_body_size=get_active_config().http_max_body_size
     )
-    # 健康检查位于请求体限制与鉴权之外短路 GET /health，探针无需令牌；回环绑定时位于
-    # Host 校验之内，rebinding 域名请求连探活也被拒，负载均衡探针以真实回环 Host 访问
-    # 不受影响。
+    # 健康检查在鉴权之外短路 GET /health，探针免令牌。
     app.add_middleware(_HealthCheckMiddleware)
-    # 回环绑定时启用 Host 头校验，阻断 DNS rebinding 使外部域名请求直达本机服务。
-    # 最后添加使其成为最外层，先于健康检查拒掉外部域名请求，本地 127.0.0.1/localhost
-    # 访问不受影响。
+    # 回环绑定时最外层启用 Host 校验，先于健康检查拒掉 rebinding 请求。
     if host in _LOOPBACK_HOSTS:
         app.add_middleware(_LoopbackHostGuardMiddleware)
 
@@ -376,12 +347,7 @@ def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> 
 def _tls12_ssl_context_factory(
     config: Any, default_factory: Callable[[], ssl.SSLContext]
 ) -> ssl.SSLContext:
-    """在 uvicorn 默认构造的 TLS 上下文之上强制最低协议版本 TLS 1.2。
-
-    uvicorn 按 certfile/keyfile 自建的上下文未固定最低版本，旧客户端可能协商到
-    已知弱点的 TLS 1.0/1.1。经 default_factory 取 uvicorn 默认上下文后抬高下限，
-    证书加载等其余行为与 uvicorn 原生路径保持一致。
-    """
+    """在 uvicorn 默认构造的 TLS 上下文之上强制最低协议版本 TLS 1.2。"""
     context = default_factory()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     return context
@@ -396,17 +362,9 @@ def _resolve_http_auth_token(args: argparse.Namespace) -> str:
 def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     """按实际绑定地址派生 SDK 内层 DNS rebinding 防护配置。
 
-    streamable_http_app 以 host 参数决定防护默认：host 为回环且未传 transport_security
-    时自动启用回环 Host 白名单。本项目按实际绑定地址显式派生并传入：回环绑定维持该
-    白名单，与 _LoopbackHostGuardMiddleware 的回环 Host 容忍集合语义对齐；localhost
-    绑定同样启用该白名单，hosts 污染使 localhost 解析到非回环地址时监听仍保有 Host
-    头防线，该集合与 _LOOPBACK_HOSTS 的差异不影响绑定判定与免鉴权语义。非回环绑定
-    默认整体关闭该防护，鉴权与 TLS 已由本项目 Bearer 中间件与 cli_main 的 fail-closed
-    前置校验承担，SDK 内层白名单反而会把携带真实域名 Host 的全部 /mcp 请求以 421
-    拒绝；活动配置了 SEEDREAM_HTTP_ALLOWED_HOSTS 时改为启用防护并按该列表放行，
-    条目支持 host、host:port 与尾部 :* 端口通配，语义对齐 SDK
-    TransportSecuritySettings.allowed_hosts，适用于无反向代理、直连公网域名的部署，
-    Host 不在列表的请求由 SDK 内层以 421 拒绝。
+    回环与 localhost 绑定启用防护并按回环白名单放行；非回环绑定默认整体关闭，
+    活动配置了 SEEDREAM_HTTP_ALLOWED_HOSTS 时改为启用并按该列表放行，条目支持
+    host、host:port 与尾部 :* 端口通配，Host 不在列表的请求由 SDK 以 421 拒绝。
     """
     if host in _DNS_REBINDING_PROTECTED_HOSTS:
         return TransportSecuritySettings(
@@ -424,11 +382,9 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
 
 
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
-    """根据绑定地址与鉴权状态输出风险告警，同时写入日志与控制台。
+    """按绑定地址与鉴权状态输出风险告警，同时写日志与 stderr。
 
-    生产链路经 cli_main 调用时，非回环绑定的鉴权前置校验已 fail-closed 完成，
-    非回环分支必走已启用鉴权文案；绕过 cli_main 直调本函数时鉴权可能未启用，
-    未启用分支据实输出告警。任何调用路径都不得输出与生效配置相反的状态。
+    任何调用路径都不得输出与生效配置相反的状态。
     """
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
@@ -456,11 +412,8 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
 async def _drain_pending_tasks() -> None:
     """取消并回收当前事件循环上的残余任务，避免 loop.close 触发 pending 警告。
 
-    server.serve 返回后连接处理等任务可能仍待处理，直接关闭循环会跳过其连接清理
-    finally 并产生 "Task was destroyed but it is pending!" 警告。排除当前自身任务后
-    取消其余任务，并以带超时的等待回收其退出。个别任务吞掉 CancelledError 时无限
-    等待会挂起整个退出流程，超时后放弃等待交由循环关闭收尾，代价至多是遗留 pending
-    警告，不再阻塞进程退出。
+    排除自身任务后取消其余任务并带超时等待回收；超时后放弃等待交由循环关闭收尾，
+    至多遗留 pending 警告，不阻塞进程退出。
     """
     current = asyncio.current_task()
     pending = [task for task in asyncio.all_tasks() if task is not current]
@@ -486,19 +439,13 @@ def _run_streamable_http(
 ) -> None:
     """启动 streamable-http 传输。
 
-    配置鉴权令牌时，在 MCPServer 应用外层包裹 Bearer 校验中间件，未携带有效令牌的
-    请求返回 401。配置 TLS 证书时经 ssl_context_factory 构造最低 TLS 1.2 的服务端
-    上下文交给 uvicorn 启用 HTTPS。仅使用 MCPServer 公开接口
-    streamable_http_app() 获取 ASGI 应用，避免依赖其私有鉴权装配路径。传输参数
-    stateless/transport_security/max_request_body_size 直传 app 构造：SDK 2.0 起
-    传输配置不再经 settings 写入，max_request_body_size 须显式传入活动配置的
-    http_max_body_size，SDK 默认 4MiB 远低于本项目 base64 图片输入的默认 64MB 上限。
+    仅使用 MCPServer 公开接口 streamable_http_app() 获取 ASGI 应用；鉴权与请求体
+    限制经本项目中间件承担，TLS 经 ssl_context_factory 强制最低 TLS 1.2。
+    max_request_body_size 须显式传入活动配置的 http_max_body_size，SDK 默认 4MiB
+    远低于本项目 base64 图片输入的 64MB 上限。
 
-    显式管理事件循环：uvicorn Server.serve 返回后循环仍存活，于其上运行共享资源的异步
-    清理，使连接池在绑定的原循环上优雅释放。共享 HTTP 资源经 app_lifespan 创建并使用于
-    该循环，跨循环 aclose 对底层传输无效，故关闭须在同一循环。SDK 2.0 起 lifespan 在
-    会话管理器启动时进入一次，退出清理依赖此处完成，兜底覆盖关闭时仍有在途请求的情形。
-    关闭循环前取消并回收残余任务，避免连接处理任务的清理 finally 被跳过。
+    显式管理事件循环：serve 返回后于同一循环运行共享资源清理与残余任务回收，
+    HTTP 传输绑定该循环，跨循环 aclose 对底层传输无效。
     """
     import uvicorn
 
@@ -529,10 +476,8 @@ def _run_streamable_http(
         ssl_kwargs["ssl_keyfile"] = ssl_keyfile
         ssl_kwargs["ssl_context_factory"] = _tls12_ssl_context_factory
         logger.info("streamable-http 已启用 TLS，最低协议版本 TLS 1.2")
-    # timeout_graceful_shutdown 缺省为 None 时 uvicorn 无限等待连接排空，MCP 客户端
-    # 常态持有的长开 SSE 流会使 serve() 在 SIGTERM 后永不返回，下方 finally 清理链被
-    # 整体跳过。取与残余任务回收一致的有界超时，超时后 uvicorn 取消在途连接，进程
-    # 进入本函数的退出清理。
+    # uvicorn 缺省无限等待连接排空，长开 SSE 流会使 serve() 在 SIGTERM 后永不返回；
+    # 取有界超时，超时后取消在途连接并进入本函数的退出清理。
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -547,11 +492,8 @@ def _run_streamable_http(
     try:
         loop.run_until_complete(server.serve())
     finally:
-        # 清理两段各自拦 BaseException：优雅停机窗口内（uvicorn 已按有界超时排空）
-        # 的二次 Ctrl+C 触发 KeyboardInterrupt、清理协程被取消抛 CancelledError，
-        # 二者均不得跳过其后的 loop.close 与线程循环复位，否则进程退出阶段遗留
-        # 未关闭的循环并在 GC 阶段产生 pending-task 告警噪音。吞掉后按既定顺序
-        # 继续退出，与 cli_main 对 KeyboardInterrupt 的优雅契约一致。
+        # 两段清理各自拦 BaseException：二次 Ctrl+C 与清理被取消均不得跳过其后的
+        # loop.close 与循环复位，吞掉后按既定顺序退出。
         try:
             loop.run_until_complete(_drain_pending_tasks())
         except BaseException as exc:

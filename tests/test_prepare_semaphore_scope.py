@@ -1,9 +1,7 @@
 """守护测试：ImagePreparer 预处理并发上限为实例级约束，单图与批量入口共用。
 
-防止信号量退化为每次调用各建一份或仅覆盖批量入口的回归：并行生成与
-streamable-http 并发工具调用共享同一 preparer 时，若每个批量调用各持独立信号量，
-或单图直连调用不经信号量，全局并发随调用数线性放大，突破
-SEEDREAM_IMAGE_PREPARE_CONCURRENCY 声明的全局上限。
+防止信号量退化为每次调用各建一份或仅覆盖批量入口：并发调用共享同一 preparer，
+全局并发随调用数放大，突破 SEEDREAM_IMAGE_PREPARE_CONCURRENCY 上限。
 """
 
 import asyncio
@@ -94,9 +92,8 @@ async def test_waiters_do_not_occupy_semaphore_slots(
 ) -> None:
     """命中在途 task 的等待者在槽外等待，不占用预处理并发槽位。
 
-    等待路径曾与执行路径共用槽位：纯等待者足以占满全部槽位，真正的执行者反而被
-    挡在信号量外，全局吞吐塌缩到在途 task 自身的 1。等待者不占槽后，在途 task
-    挂起期间其他键的执行者仍可用满 limit 个槽位并发执行。
+    等待路径曾与执行路径共用槽位，纯等待者即可占满槽位使吞吐塌缩；不占槽后，
+    其他键的执行者仍可用满 limit 个槽位。
     """
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
@@ -127,7 +124,7 @@ async def test_waiters_do_not_occupy_semaphore_slots(
         asyncio.ensure_future(preparer.prepare_image_input(shared_url)) for _ in range(limit + 3)
     ]
 
-    # 其他键的执行者：等待者不占槽位时，剩余 limit - 1 个槽位全部可供其并发执行
+    # 其他键的执行者，可用满剩余 limit - 1 个槽位
     others = [
         asyncio.ensure_future(preparer.prepare_image_input(f"https://example.com/other-{i}.png"))
         for i in range(limit - 1)
@@ -153,9 +150,8 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
 ) -> None:
     """串行取消创建者留下的脱缰 task 持续占用并发槽位，峰值并发不超过上限。
 
-    创建者被取消时 shield 使共享 task 继续运行；若其槽位随创建者一并释放，脱缰
-    task 与后续请求叠加会使峰值并发随取消次数无界放大，突破
-    SEEDREAM_IMAGE_PREPARE_CONCURRENCY 声明的全局上限。
+    创建者被取消时 shield 使共享 task 继续运行；若槽位随之释放，峰值并发随取消
+    次数无界放大。
     """
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
@@ -195,8 +191,8 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
     while entered < 3:
         await asyncio.sleep(0)
 
-    # 发起满额新请求并推进事件循环至无可继续：修复前脱缰 task 不占槽位，3+limit 个
-    # 任务同时进入 fake_prepare；修复后仅 limit-3 个新请求进入，其余阻塞在信号量。
+    # 发起满额新请求：修复前 3+limit 个任务同时进入 fake_prepare，修复后仅 limit-3
+    # 个新请求进入，其余阻塞在信号量。
     followers = [
         asyncio.ensure_future(
             preparer.prepare_image_input(f"https://example.com/follower-{index}.png")
@@ -215,8 +211,7 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
     release.set()
     results = await asyncio.gather(*followers)
     assert results == ["prepared"] * limit
-    # 推进事件循环至全部脱缰 task 终结且其完成回调执行完毕，再校验信号量计数复原，
-    # 确认槽位既未泄漏也未重复释放。
+    # 推进事件循环至脱缰 task 终结且回调执行完毕，再校验槽位未泄漏也未重复释放。
     settled = 0
     while settled < 4:
         before = preparer._get_prepare_semaphore()._value
@@ -228,14 +223,13 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
 def test_instance_semaphore_rebuilds_across_event_loops() -> None:
     """同一 preparer 跨事件循环依次使用时不因信号量绑定旧循环而报错。
 
-    asyncio.Semaphore 首次使用时绑定事件循环，跨循环复用会抛 RuntimeError；实例
-    信号量须以循环身份守卫按需重建。URL 输入的预处理为纯校验路径，无本地 I/O。
+    asyncio.Semaphore 首次使用绑定事件循环，跨循环复用抛 RuntimeError，须按循环
+    身份重建；URL 输入的预处理无本地 I/O。
     """
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
     preparer = client._image_preparer
-    # 图片数超过上限一位，迫使信号量产生等待者：等待 future 在创建时绑定事件循环，
-    # 无守卫的实例信号量在第二次 asyncio.run 会因跨循环复用抛 RuntimeError
+    # 图片数超过上限一位，迫使信号量产生等待者
     batch = [f"https://example.com/x{i}.png" for i in range(config.image_prepare_concurrency + 1)]
 
     async def _run_once() -> list[str]:

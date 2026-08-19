@@ -21,8 +21,7 @@ from seedream_mcp.utils.model.model_capabilities import (
 def test_all_model_aliases_resolve_to_known_family() -> None:
     """所有 MODEL_ALIASES 解析出的家族必须非 unknown。
 
-    新增模型时若遗漏在 _MODEL_FAMILY_TOKENS 补充 token，会静默返回 unknown 并放行
-    全部能力，导致尺寸/tools/stream 校验跳过。此测试守护该同步点。
+    遗漏在 _MODEL_FAMILY_TOKENS 补 token 会静默 unknown 并放行全部能力，校验被跳过。
     """
     for alias, model_id in MODEL_ALIASES.items():
         assert _resolve_model_family(model_id) != MODEL_FAMILY_UNKNOWN, (

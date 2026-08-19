@@ -1,16 +1,9 @@
 """Seedream MCP 工具函数包。
 
-聚合异常处理、数据验证、日志、下载、文件管理、自动保存与路径处理等子模块的
-公开接口，提供如下能力：
-- 异常处理：自定义异常类型定义
-- 数据验证：参数校验与格式验证
-- 日志管理：日志系统配置
-- 文件管理：下载、存储、自动保存
-- 路径处理：路径规范化、验证与搜索
-
-采用 PEP 562 的 ``__getattr__`` 延迟加载：包导入时不初始化 PIL、aiohttp、aiofiles
-等重型依赖，仅在首次访问导出名时按需导入对应子模块，兼顾导入性能与循环引用规避。
-``__all__`` 程序化派生自 ``_LAZY_EXPORTS`` 的键，二者天然一致，无需手动维护。
+聚合异常处理、数据验证、日志、下载、存储、自动保存与路径处理等子模块的公开接口。
+采用 PEP 562 的 ``__getattr__`` 延迟加载：包导入不初始化 PIL、aiohttp、aiofiles 等
+重型依赖，首次访问导出名时才按需导入对应子模块，兼顾导入性能与循环引用规避。
+``__all__`` 派生自 ``_LAZY_EXPORTS`` 的键，二者天然一致，无需手动维护。
 """
 
 from __future__ import annotations
@@ -18,10 +11,9 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-# 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)
-# 包导入不再触发 PIL/aiohttp/aiofiles 等重型依赖初始化，仅在首次访问时按需加载。
+# 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)。
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    # 异常处理（core），errors.py 定义的异常类型全集
+    # 异常处理（core）
     "SeedreamMCPError": (".core.errors", "SeedreamMCPError"),
     "SeedreamConfigError": (".core.errors", "SeedreamConfigError"),
     "SeedreamAPIError": (".core.errors", "SeedreamAPIError"),
@@ -50,7 +42,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "suggest_similar_paths": (".io.io_path", "suggest_similar_paths"),
 }
 
-# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键以消除手动同步。
+# 公开接口，派生自 _LAZY_EXPORTS 的键。
 __all__ = list(_LAZY_EXPORTS)
 
 

@@ -1,15 +1,9 @@
 """`.env.example` 与 config 实际读取的环境变量键双向守护测试。
 
-example 中出现的全部 SEEDREAM_/ARK_/LOG_ 键（注释与赋值行都算）须与配置构建实际
-读取的键集合一致：example 多出的键属文档残留应删除，config 读取而 example 未登记
-的键属文档遗漏。集合来源以 config 实际读取的全部 env 为准，即 _FIELD_ENV_MAP 的
-值集合与显式读取的 ARK_API_KEY。
-
-另一守护维度为 README 与 example 的键集关系：README.md 环境变量配置块的键集须覆盖
-example 全部实际赋值的功能键，example 登记功能键而 README 未同步时失败。
-
-用户面样本 docs/samples/claude_desktop_config.json 是第三处配置键声明点，其
-mcpServers 各条目 env 的键集须为 config 实际读取键集的子集，键名漂移时失败。
+example 中出现的全部 SEEDREAM_/ARK_/LOG_ 键（注释与赋值行都算）须与 config 实际
+读取的键集合一致，多出为文档残留、缺失为文档遗漏。另守护 README.md 环境变量
+配置块覆盖 example 全部功能赋值键，以及 docs/samples/claude_desktop_config.json
+样本 env 键集为 config 读取键集的子集。
 """
 
 from __future__ import annotations
@@ -23,7 +17,7 @@ import seedream_mcp.config as config_module
 from _readme_helpers import _env_block
 
 # 环境变量键形态：前缀限定 SEEDREAM_/ARK_/LOG_，键名由大写字母、数字、下划线组成。
-# 前缀目录行（如 “- SEEDREAM_ 服务行为”）后接空白不构成完整键，不会被命中。
+# 前缀目录行（如 "- SEEDREAM_ 服务行为"）后接空白不构成完整键，不会被命中。
 _ENV_KEY_PATTERN = re.compile(r"\b(?:SEEDREAM|ARK|LOG)_[A-Z0-9_]+")
 
 # .env.example 实际赋值行形态，行首即为键名与等号，注释行以 # 开头不会命中。
@@ -95,8 +89,7 @@ def test_config_env_keys_are_all_documented_in_example() -> None:
 def test_readme_env_block_covers_example_assigned_keys() -> None:
     """README.md 环境变量配置块的键集须覆盖 .env.example 全部功能键。
 
-    基准为简体 README.md，键集与 example 功能键全等或为其超集皆可；配置块定位
-    复用 _readme_helpers 的 _env_block 锚点逻辑，避免两处提取实现漂移。
+    键集与 example 功能键全等或为其超集皆可。
     """
     readme_keys = set(_ENV_KEY_PATTERN.findall("\n".join(_env_block(_BASE_README).lines)))
     missing = _example_assigned_keys() - readme_keys
@@ -107,8 +100,7 @@ def test_readme_env_block_covers_example_assigned_keys() -> None:
 def test_desktop_sample_env_keys_are_all_read_by_config() -> None:
     """claude_desktop_config.json 的 env 键须全部被 config 读取。
 
-    样本是用户直接复制的配置声明点，config 键改名而样本未同步时在此失败，
-    子集关系成立即可，样本允许只登记部分键。
+    子集关系成立即可，样本允许只登记部分键；config 键改名而样本未同步时在此失败。
     """
     unknown = _desktop_sample_env_keys() - _config_read_env_keys()
 

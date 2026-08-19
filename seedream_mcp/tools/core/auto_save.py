@@ -1,8 +1,8 @@
 """生成结果的自动保存：从 URL 下载或从 Base64 解码并落盘。
 
-``_auto_save`` 作为两个公开入口的公共骨架，按 resolve 得到的基础目录为每次调用独立构造
-AutoSaveManager 并在保存结束后关闭，使下载连接池的作用域限定在单次保存任务内，不跨工具
-调用残留状态。共享 DownloadManager 由调用方通过 lifespan 注入传入。
+``_auto_save`` 为两个公开入口的公共骨架，每次调用独立构造并在结束后关闭
+AutoSaveManager，下载连接池不跨工具调用残留；共享 DownloadManager 由调用方经
+lifespan 注入传入。
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ from .results import extract_images, is_saveable_image
 
 logger = get_logger(__name__)
 
-# AutoSaveManager 批量保存方法的可调用类型：接收 manager、image_data、tool_name，返回保存结果列表。
+# AutoSaveManager 批量保存方法的可调用类型。
 BatchSaveMethod = Callable[
     [AutoSaveManager, list[dict[str, Any]], str], Awaitable[list[AutoSaveResult]]
 ]
 
-# 自动保存结果与可保存图片原始索引的二元组：索引列表供回填阶段按位置写入。
+# 自动保存结果与可保存图片原始索引的二元组，索引列表供回填阶段按位置写入。
 AutoSaveOutcome = tuple[list[AutoSaveResult], list[int]]
 
 
@@ -64,13 +64,15 @@ async def _auto_save(
 ) -> AutoSaveOutcome:
     """执行 URL 与 Base64 两个自动保存入口共用的保存流程。
 
-    data_key 区分结果字典中取值的键，取值为 url 或 b64_json；save_method 为
-    AutoSaveManager 的批量保存方法，即 save_multiple_images 或
-    save_multiple_base64_images；empty_warning 为无可保存数据时的告警文案。
+    Args:
+        data_key: 结果字典的取值键，url 或 b64_json。
+        save_method: AutoSaveManager 的批量保存方法。
+        empty_warning: 无可保存数据时的告警文案。
+        images: 调用方预提取的图片列表，None 时从 result 提取。
 
     Returns:
-        (保存结果列表, 可保存图片在归一化列表中的原始索引列表)。索引列表供回填
-        阶段按位置写入，消除收集与回填两次独立过滤可能错位的风险。
+        (保存结果列表, 可保存图片在归一化列表中的原始索引列表)，索引列表供回填
+        阶段按位置写入。
     """
 
     def _resolve_and_build() -> AutoSaveManager:
@@ -100,10 +102,9 @@ async def _auto_save(
         logger.warning(empty_warning)
         return [], []
 
-    # manager 构造含 FileManager.__init__ 的 resolve/exists/mkdir 等同步文件系统调用，
-    # 经 to_thread 在工作线程内完成避免在事件循环线程内同步阻塞。
+    # manager 构造含同步文件系统调用，经 to_thread 避免阻塞事件循环。
     auto_save_manager = await asyncio.to_thread(_resolve_and_build)
-    # async with 确保 save 阶段任意异常均释放 manager 自建的下载连接池，不依赖手动 close。
+    # async with 确保 save 阶段任意异常均释放 manager 自建的下载连接池。
     async with auto_save_manager:
         results = await save_method(auto_save_manager, image_data, tool_name)
         return results, saveable_indices
@@ -121,23 +122,14 @@ async def auto_save_from_urls(
 ) -> AutoSaveOutcome:
     """从 URL 异步下载并保存图片。
 
-    根据配置项自动解析基础目录，支持批量下载并记录保存结果，
-    包含超时控制、重试机制及并发管理。
-
     Args:
-        result: 图片生成结果字典，包含 URL 等信息。
-        prompt: 生成提示词，用于派生保存文件名；图层拆分场景可为 None。
-        config: Seedream 配置实例，包含保存参数。
-        save_path: 用户指定的保存路径，可选。
-        custom_name: 自定义文件名前缀，可选。
-        tool_name: 工具名称标识，用于路径组织。
-        download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
-        images: 调用方对 result 预提取的图片列表，传入时跳过内部 extract_images 以
-            避免重复计算；None 时按需从 result 提取，便于函数独立调用。
+        prompt: 用于派生保存文件名，图层拆分场景可为 None。
+        download_manager: 可选共享下载管理器，复用 aiohttp 连接池，未提供时内部新建。
+        images: 调用方预提取的图片列表，None 时从 result 提取。
 
     Returns:
-        (保存结果对象列表, 可保存图片原始索引列表) 二元组。索引列表供回填阶段
-        按位置写入本地路径。
+        (保存结果列表, 可保存图片原始索引列表) 二元组，索引列表供回填阶段按位置
+        写入本地路径。
 
     Raises:
         SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
@@ -169,23 +161,14 @@ async def auto_save_from_base64(
 ) -> AutoSaveOutcome:
     """从 Base64 数据异步解码并保存图片。
 
-    根据配置项自动解析基础目录，支持批量解码并保存，
-    包含文件大小限制、重试机制及并发管理。
-
     Args:
-        result: 图片生成结果字典，包含 b64_json 等信息。
-        prompt: 生成提示词，用于派生保存文件名；图层拆分场景可为 None。
-        config: Seedream 配置实例，包含保存参数。
-        save_path: 用户指定的保存路径，可选。
-        custom_name: 自定义文件名前缀，可选。
-        tool_name: 工具名称标识，用于路径组织。
-        download_manager: 可选的共享下载管理器，复用 aiohttp 连接池；未提供时由内部新建。
-        images: 调用方对 result 预提取的图片列表，传入时跳过内部 extract_images 以
-            避免重复计算；None 时按需从 result 提取，便于函数独立调用。
+        prompt: 用于派生保存文件名，图层拆分场景可为 None。
+        download_manager: 可选共享下载管理器，复用 aiohttp 连接池，未提供时内部新建。
+        images: 调用方预提取的图片列表，None 时从 result 提取。
 
     Returns:
-        (保存结果对象列表, 可保存图片原始索引列表) 二元组。索引列表供回填阶段
-        按位置写入本地路径。
+        (保存结果列表, 可保存图片原始索引列表) 二元组，索引列表供回填阶段按位置
+        写入本地路径。
 
     Raises:
         SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。

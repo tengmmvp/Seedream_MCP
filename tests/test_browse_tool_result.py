@@ -1,4 +1,9 @@
-"""browse_images 工具结构化结果、分页元数据与工作区越界拒绝测试。"""
+"""browse_images 工具结构化结果、分页元数据与工作区越界拒绝测试。
+
+多数用例直连 handle_browse_images，工作区边界经 workspace_root fixture 注入的
+SEEDREAM_WORKSPACE_ROOT 回退取得；走完整 MCPServer 调用链的用例以
+_NoRootsContext 提供无会话的替身上下文。
+"""
 
 import os
 from pathlib import Path
@@ -87,7 +92,7 @@ async def test_browse_images_empty_format_filter_skips_scan(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """空列表 format_filter 与"全部后缀不受支持"语义一致：跳过扫描并以工具错误返回。
+    """空列表 format_filter 与「全部后缀不受支持」语义一致：跳过扫描并以工具错误返回。
 
     此前空列表因 falsy 判断直接退化为不过滤的全量扫描，与全不支持分支行为不一致。
     """
@@ -459,7 +464,7 @@ def test_format_file_info_degrades_on_malformed_timestamp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """畸形时间戳使 fromtimestamp 抛 ValueError 时降级为“文件信息不可用”。
+    """畸形时间戳使 fromtimestamp 抛 ValueError 时降级为「文件信息不可用」。
 
     不向调用方抛异常；stat 本身成功，降级分支须同时置空 size_mb 与 modified
     两键，避免半份详情误导调用方。以替身模块替换 browse_images 命名空间内的

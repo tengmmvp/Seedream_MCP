@@ -1,8 +1,7 @@
-"""runners → tools/core/auto_save 端到端测试。
+"""runners 到 tools/core/auto_save 的端到端测试。
 
-通过 run_text_to_image 验证完整生成流水线：mock SeedreamClient 返回含 url 的结果，
-经 execute_generation_handler 触发 auto_save_from_urls，最终产出含 auto_save 字段的
-CallToolResult；另测自动保存阶段抛错时降级——结果仍为 success 且保留原始 url。
+mock SeedreamClient 返回含 url 的结果，经 run_text_to_image 走完整生成流水线，
+产出含 auto_save 字段的 CallToolResult；另测自动保存抛错时降级为保留原始 url。
 """
 
 from __future__ import annotations
@@ -124,11 +123,7 @@ async def test_run_text_to_image_includes_auto_save_field(
 async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfills(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """response_format=b64_json 时自动保存走 Base64 分支：按 b64_json 收集并按原始索引回填。
-
-    失败占位项不进入保存队列；saveable_indices 对位使保存结果回填到 data 中的
-    原始位置而非首位。
-    """
+    """response_format=b64_json 时按 b64_json 收集并按原始索引回填，失败占位项不进保存队列。"""
     client_cls = SeedreamClient
     auto_save_module = io_save
 
@@ -246,8 +241,7 @@ async def test_run_text_to_image_rejects_out_of_bounds_save_path_before_api_call
 ) -> None:
     """越界 save_path 在校验阶段失败：client 生成方法不被调用，请求不计费执行。
 
-    此前越界路径在自动保存阶段才抛校验异常并被降级为软警告，生成请求已计费执行；
-    上下文构建阶段的预检使其以 validation_error 档拒绝。
+    旧行为：越界路径在自动保存阶段才抛异常并降级为软警告，请求已计费执行。
     """
     client_cls = SeedreamClient
     calls: list[dict[str, Any]] = []
@@ -328,9 +322,9 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
 async def test_run_sequential_generation_dispatches_via_composition_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """run_sequential_generation 经 composition root 委托实现处理器。
+    """run_sequential_generation 经 composition root 委托 handle_sequential_generation。
 
-    委托目标为 handle_sequential_generation，最终调用 client.sequential_generation。
+    最终调用 client.sequential_generation。
     """
     _patch_client_method(monkeypatch, "sequential_generation")
     _patch_save_success(monkeypatch)

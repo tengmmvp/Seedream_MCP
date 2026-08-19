@@ -1,13 +1,11 @@
 """Seedream MCP 路径处理工具：MCP 工作区 Roots 边界与路径越界校验。
 
 以 MCP Roots 作为文件访问边界，提供路径规范化与越界判定原语，拦截包含 ``..``
-或经由符号链接指向工作区之外的路径；无 MCP Roots 时回退 SEEDREAM_WORKSPACE_ROOT
-环境变量。工具链的 roots 经 server 层 Resolve 依赖注入取回（SEP-2577 非废弃
-形态），由 workspace_roots_scope_from_result 应用；资源处理器在 2026-07-28 及
-以后的会话上同样经该函数应用多轮取回的 roots 结果，旧修订会话保留
-workspace_roots_scope 的 roots/list 直连。另提供目录图片查找与拼写相近路径
-建议。组合工作区边界与图像规则的 validate_image_path 位于 images 子包的
-image_validation，本模块保持纯路径职责。
+或经由符号链接指向工作区之外的路径；无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT
+环境变量。roots 取回有三种形态：工具链经 server 层 Resolve 依赖注入（SEP-2577
+非废弃形态）、资源处理器在 2026-07-28 及以后的会话上经 InputRequiredResult
+多轮取回，均由 workspace_roots_scope_from_result 应用；旧修订会话保留
+workspace_roots_scope 的 roots/list 直连。另提供目录图片查找与拼写相近路径建议。
 """
 
 from __future__ import annotations
@@ -36,25 +34,21 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     default=None,
 )
 
-# roots/list 请求的显式短超时：每次工具调用前都有一次线上往返，不设超时将退化为依赖
-# 会话层读超时，慢客户端或半开连接会把工具调用拖到分钟级；超时按读取失败回退环境变量边界。
+# roots/list 请求的显式短超时：不设超时将依赖会话层读超时，慢客户端或半开连接会把
+# 工具调用拖到分钟级；超时按读取失败回退环境变量边界。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
 
 # 回退 CWD 告警只记录一次；无 Roots 时本解析随每次文件访问触发，逐次告警会淹没日志。
 _cwd_fallback_warned = False
 
-# 已 resolve 回退根的进程级缓存，键为配置原始字符串。回退边界模式下每次文件访问都会
-# 经过本解析，expanduser 与 resolve 属文件系统调用，缓存消除事件循环上的重复阻塞。
-# 仅缓存 expanduser 后为绝对路径的配置值：相对路径的 resolve 结果随进程 CWD 变化，
-# 以原始字符串为键会把首个 CWD 下的解析固化给后续访问，相对形态每次现算；~ 形态的
-# 展开结果只依赖用户主目录环境，与进程 CWD 无关，展开后为绝对路径即可缓存。键含配置
-# 原始值，配置变更自然产生新键；解析失败不缓存，下次访问重试。活动配置变更时经
-# clear_resolved_env_root_cache 显式失效。
+# 已 resolve 回退根的进程级缓存，键为配置原始字符串，消除回退边界下每次文件访问的
+# 重复 expanduser/resolve 文件系统调用。仅缓存 expanduser 后为绝对路径的配置值：
+# 相对路径的 resolve 结果随进程 CWD 变化，须每次现算；解析失败不缓存，下次访问
+# 重试。活动配置变更时经 clear_resolved_env_root_cache 显式失效。
 _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 
-# 工作区根目录提供者：由 config 模块加载时经 register_env_workspace_root_provider
-# 注入，返回活动配置的 workspace_root 原始字符串，未配置返回 None。本模块不向上
-# import 顶层 config，配置值的读取方向由 config 向下注入。
+# 工作区根目录提供者：由 config 模块加载时注入，返回活动配置的 workspace_root
+# 原始字符串，未配置返回 None；依赖方向为 config 向下注入，本模块不向上 import。
 EnvWorkspaceRootProvider = Callable[[], str | None]
 _env_workspace_root_provider: EnvWorkspaceRootProvider | None = None
 
@@ -65,13 +59,8 @@ _env_workspace_root_provider: EnvWorkspaceRootProvider | None = None
 def register_env_workspace_root_provider(provider: EnvWorkspaceRootProvider) -> None:
     """注册工作区根目录提供者，config 侧在模块加载时注入取值入口。
 
-    依赖方向为 config 向下注入：提供者返回活动配置的 workspace_root 原始字符串，
-    未配置返回 None；活动配置未就绪时的环境变量回退语义由提供者自身封装，与本模块
-    未注册提供者时的回退一致。
-
     Args:
-        provider: 工作区根目录提供者，返回活动配置的 workspace_root 原始字符串，
-            未配置返回 None。
+        provider: 返回活动配置的 workspace_root 原始字符串，未配置返回 None。
     """
     global _env_workspace_root_provider
     _env_workspace_root_provider = provider
@@ -80,8 +69,7 @@ def register_env_workspace_root_provider(provider: EnvWorkspaceRootProvider) -> 
 def clear_resolved_env_root_cache() -> None:
     """清空已 resolve 回退根的进程级缓存。
 
-    活动配置变更时由 config 侧的配置写入路径调用，使后续访问按新配置重新解析；
-    测试复位协议经 set_active_config(None) 间接触发，跨用例不残留上个配置的解析结果。
+    活动配置变更时由 config 侧调用，使后续访问按新配置重新解析。
     """
     _RESOLVED_ENV_ROOT_CACHE.clear()
 
@@ -89,18 +77,14 @@ def clear_resolved_env_root_cache() -> None:
 def _resolve_configured_root() -> Path | None:
     """解析已配置的工作区根目录，未配置或解析失败返回 None。
 
-    供 resolve_env_workspace_root 与 workspace_roots_scope 的 NoBackChannelError
-    分支共用同一解析与缓存：前者以 None 决定 CWD 回退，后者以 None 判定无显式边界
-    可回退并 fail-closed。expanduser 后为绝对路径的配置根按原始字符串缓存 resolve
-    结果，同配置重复访问不再触达文件系统；相对形态不缓存，每次现算。解析失败不
-    缓存，下次访问重试。
+    供 resolve_env_workspace_root 的 CWD 回退判定与 workspace_roots_scope 的
+    NoBackChannelError fail-closed 判定共用。expanduser 后为绝对路径的配置根按
+    原始字符串缓存 resolve 结果；相对形态与解析失败不缓存，下次访问现算或重试。
     """
     configured_root = _configured_workspace_root()
     if not configured_root:
         return None
     try:
-        # expanduser 先行：~ 形态的展开结果只依赖用户主目录，与进程 CWD 无关，
-        # 以展开后的绝对性判定可缓存性，缓存键仍为配置原始字符串。
         expanded_root = Path(configured_root).expanduser()
         cacheable = expanded_root.is_absolute()
         cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root) if cacheable else None
@@ -118,9 +102,8 @@ def _resolve_configured_root() -> Path | None:
 def resolve_env_workspace_root() -> Path:
     """解析工作区根目录，失败时回退当前工作目录。
 
-    本地开发无 MCP Roots 时作为文件访问边界回退。优先读取活动配置，config 未就绪时
-    回退环境变量。配置根的解析与缓存由 _resolve_configured_root 提供，无可用配置根
-    回退进程 CWD 时记录告警，提示文件访问边界已放宽为整个工作目录。
+    本地开发无 MCP Roots 时的文件访问边界回退。无可用配置根回退进程 CWD 时记录
+    一次告警，提示边界已放宽为整个工作目录。
 
     Returns:
         已 resolve 的工作区根目录；无任何配置时为进程当前工作目录。
@@ -180,12 +163,11 @@ def get_workspace_root() -> Path:
 def is_boundary_from_session_roots() -> bool:
     """判断当前请求的工作区边界是否来自客户端会话 Roots 声明。
 
-    workspace_roots_scope 仅在客户端声明 roots capability 且 roots/list 成功时写入
-    工作区根上下文变量；变量为 None 说明边界经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD
-    回退取得，属服务器环境而非客户端授权声明，其绝对路径不进入面向调用方的输出。
+    经 SEEDREAM_WORKSPACE_ROOT 或进程 CWD 回退取得的边界属服务器环境而非客户端
+    授权声明，其绝对路径不进入面向调用方的输出。
 
     Returns:
-        边界来自会话 Roots 声明返回 True，经环境变量或进程 CWD 回退返回 False。
+        来自会话 Roots 声明返回 True，环境变量或 CWD 回退返回 False。
     """
     return _WORKSPACE_ROOTS_VAR.get() is not None
 
@@ -193,16 +175,10 @@ def is_boundary_from_session_roots() -> bool:
 def resolve_workspace_roots(roots: Sequence[Path | str]) -> list[Path]:
     """将工作区根目录列表归一为 Path 列表，保持入参顺序。
 
-    两类生产方在产出时已完成 resolve：会话 Roots 经 ``_file_uri_to_path`` 转换即
-    resolve，环境变量回退经 ``resolve_env_workspace_root`` 返回已 resolve 路径。本
-    函数不再重复 resolve，消除每请求对同一批根的重复文件系统调用；仅做 Path 归一，
-    兼容字符串入参形态。
+    入参在产出时已完成 resolve，本函数不再重复 resolve，仅做 Path 归一。
 
     Args:
         roots: 已 resolve 的工作区根目录列表，元素可为 Path 或路径字符串。
-
-    Returns:
-        归一后的根目录列表，保持入参顺序。
     """
     return [Path(root) for root in roots]
 
@@ -249,10 +225,8 @@ def _roots_result_to_paths(roots_result: Any) -> list[Path]:
 def session_declares_roots_capability(session: Any) -> bool:
     """判断会话对端客户端是否声明了 roots capability。
 
-    未声明 roots 的客户端对 roots 取回必然失败，先经会话内存中的 capability
-    声明探测可跳过线上往返：会话直连形态据此跳过 roots/list 请求，工具链的
-    roots 依赖解析器据此不发起取回并注入 None。check_client_capability
-    不可达或探测异常时保守视为已声明，保持旧版 SDK 与测试替身下的原有行为。
+    据此可跳过必然失败的 roots 取回线上往返；check_client_capability 不可达或探测
+    异常时保守视为已声明，保持旧版 SDK 与测试替身下的原有行为。
     """
     check_capability = getattr(session, "check_client_capability", None)
     if not callable(check_capability):
@@ -272,12 +246,10 @@ async def workspace_roots_scope_from_result(
 ) -> AsyncIterator[list[Path]]:
     """在当前请求作用域内应用经工具 resolver 注入的 MCP Roots。
 
-    SEP-2577 非废弃形态：工具链不再经 ctx.session.list_roots 直连读取，由
-    server 工具签名的 Resolve 依赖在调用前按协商版本取回并注入本函数消费。
-    roots_result 为 None 表示客户端未声明 roots capability，依赖解析器未发起
-    取回，此处不设置边界、下游回退环境变量根；结果非 None 时经
-    _roots_result_to_paths 转换后设置请求级边界。取回本身的失败由 SDK 在
-    调用层报错而非在此降级，较直连形态的回退更保守，不放宽文件访问边界。
+    SEP-2577 非废弃形态：工具链不经 ctx.session.list_roots 直连，由 server 工具
+    签名的 Resolve 依赖按协商版本取回后注入本函数消费。roots_result 为 None 表示
+    客户端未声明 roots capability，此处不设置边界、下游回退环境变量根；取回失败
+    由 SDK 在调用层报错而非在此降级，不放宽文件访问边界。
 
     Args:
         roots_result: 依赖解析器注入的客户端 roots 结果；未声明能力时为 None。
@@ -308,15 +280,13 @@ async def workspace_roots_scope_from_result(
 async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     """在当前请求作用域内绑定 MCP Roots，退出时自动恢复。
 
-    资源处理器在旧修订会话上的取回入口：SDK 的 resolver 依赖机制仅覆盖工具
-    签名，2026-07-28 及以后的资源会话改由 server 层经 InputRequiredResult 多轮
-    取回后走 workspace_roots_scope_from_result，本函数承接旧修订会话的
-    ctx.session.list_roots 直连（SEP-2577 废弃但为旧修订上唯一途径）。将客户
-    端 Roots 设置到上下文变量作为该请求的文件访问边界；客户端不支持 Roots 时
-    回退环境变量边界。客户端未声明 roots capability 时直接跳过 roots/list 往
-    返，同样回退环境变量边界。当前协议会话无服务端反向通道时 roots/list 必抛
-    NoBackChannelError：未配置环境变量根则 fail-closed 抛出 SeedreamMCPError，
-    已配置则回退该显式边界。
+    资源处理器在旧修订会话上的取回入口：新修订会话改由 server 层经
+    InputRequiredResult 多轮取回后走 workspace_roots_scope_from_result，本函数
+    承接旧修订会话的 ctx.session.list_roots 直连（SEP-2577 废弃但为旧修订上
+    唯一途径）。客户端 Roots 设置到上下文变量作为该请求的文件访问边界；未声明
+    roots capability 时跳过 roots/list 往返，回退环境变量边界。当前协议会话无
+    服务端反向通道时 roots/list 必抛 NoBackChannelError：未配置环境变量根则
+    fail-closed 抛 SeedreamMCPError，已配置则回退该显式边界。
 
     Args:
         ctx: MCP 请求上下文，经其 session 读取客户端 Roots。
@@ -331,11 +301,8 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: list[Path] = []
 
-    # 无请求上下文的 Context 其 session 属性抛 ValueError，getattr 默认值只压制
-    # AttributeError 不压制 property 内抛出的异常，直接读取会把本函数承诺的
-    # 「回退环境变量边界」击穿为裸 ValueError；与 server 侧
-    # _workspace_roots_dependency 的 except ValueError 同形态处理。ctx 为 None
-    # 的直调场景按无会话处理，维持既有 getattr 语义。
+    # 无请求上下文的 Context 其 session 属性抛 ValueError，须显式捕获以维持
+    # 「回退环境变量边界」的承诺；ctx 为 None 的直调场景按无会话处理。
     session = None
     if ctx is not None:
         try:
@@ -352,10 +319,8 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
         try:
             resolved_roots = await _resolve_workspace_roots_from_context(ctx)
         except NoBackChannelError as exc:
-            # 当前协议会话不提供服务端发起请求的反向通道，roots/list 无法送达，
-            # 属协议能力缺失而非瞬时失败，重试不会好转，提级为 error。回退在未配置
-            # 环境变量根时会放宽文件访问边界到进程 CWD，此时 fail-closed；已配置
-            # 环境变量根则回退该显式边界。
+            # 协议能力缺失而非瞬时失败，重试不会好转，提级为 error；未配置环境
+            # 变量根时回退会放宽边界到进程 CWD，故 fail-closed。
             configured_root = _resolve_configured_root()
             if configured_root is None:
                 logger.error(
@@ -371,8 +336,7 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
                 exc,
             )
         except Exception as exc:
-            # 回退会放宽文件访问边界到环境变量根（未配置时为进程 CWD），多租户
-            # streamable-http 部署须感知该回退，提级为 warning 而非 debug
+            # 回退会放宽文件访问边界，多租户部署须感知，提级为 warning。
             logger.warning("读取 MCP Roots 失败，回退环境变量边界: {}", exc)
         else:
             token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
@@ -428,9 +392,6 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         path: 输入路径，可为相对或绝对。
         base_dir: 基础目录，用于解析相对路径。
 
-    Returns:
-        标准化的 Path 对象。
-
     Raises:
         ValueError: 路径为 UNC 形式、Windows 驱动器相对形式或路径无效时抛出。
     """
@@ -441,9 +402,8 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         if is_unc_path(str(path_obj)):
             raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
 
-        # 驱动器相对路径有 drive 无 root，pathlib 的 / 拼接对该形态会丢弃 base_dir，
-        # resolve 落到该盘的进程 CWD，静默绕开调用方指定的基础目录；与 UNC 同口径
-        # 在 resolve 前拒绝。POSIX 路径无 drive，恒不触发本分支。
+        # 驱动器相对路径有 drive 无 root，pathlib 拼接对该形态会丢弃 base_dir 落到
+        # 该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；POSIX 无 drive 恒不触发。
         if path_obj.drive and not path_obj.root:
             raise ValueError(f"拒绝驱动器相对路径以避免绕过基础目录解析: {path}")
 
@@ -461,7 +421,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         raise
     except OSError as e:
         # ENAMETOOLONG 等文件系统错误单独分支，errno 原因进入错误文案，供调用方
-        # 区分路径拼写问题与系统级长度限制，不归并为笼统的格式错误。
+        # 区分拼写问题与系统级长度限制。
         logger.error("路径标准化失败 {}: {}", path, e)
         raise ValueError(f"无效的路径格式: {path} ({e})") from e
     except Exception as e:
@@ -487,8 +447,7 @@ def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
             relative_path = path_obj.relative_to(base_path)
             return str(relative_path)
         except ValueError:
-            # 已是绝对路径时直接返回字符串，不再重复 resolve；is_absolute 为纯词法
-            # 判定，浏览链路传入的已 resolve 路径由此免除一次逐级 stat。
+            # is_absolute 为纯词法判定，浏览链路传入的已 resolve 路径免除一次逐级 stat。
             if path_obj.is_absolute():
                 return str(path_obj)
             return str(path_obj.resolve())
@@ -508,15 +467,11 @@ def find_images_in_directory(
 ) -> list[Path]:
     """在目录中查找图片文件。
 
-    安全前置条件：本函数自身不做工作区越界校验，调用方必须先完成工作区越界校验，
-    确认 directory 位于允许的工作区根之内，再调用本函数。本函数经 utils/__init__
-    重导出为公共工具，任何外部调用方均须遵守此前置条件。UNC 形式的 directory 入参
-    与 normalize_path 同口径在 resolve 前拒绝，返回空列表并记录告警，避免越界校验
-    尚未介入时 resolve 触发 SMB 认证。
-
-    单个目录内的条目列表在排序阶段全量物化，limit 早停不缩减单目录内的物化与
-    排序成本，仅使跨目录递归提前终止下降。重复扫描同一目录的成本由 io_scan 的
-    mtime 加 TTL 目录扫描缓存缓解。
+    安全前置条件：本函数不做工作区越界校验，调用方必须先确认 directory 位于允许
+    的工作区根之内；本函数经 utils/__init__ 重导出，外部调用方同样受此约束。UNC
+    形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回空列表并记录告警。
+    单个目录内的条目列表在排序阶段全量物化，limit 仅使跨目录递归提前终止；重复
+    扫描的成本由 io_scan 的 mtime 加 TTL 缓存缓解。
 
     Args:
         directory: 搜索目录。
@@ -524,16 +479,15 @@ def find_images_in_directory(
         max_depth: 最大搜索深度。
         extensions: 指定的文件扩展名列表。
         limit: 返回数量上限，<=0 时返回空列表；扫描按 normcase 稳定顺序，凑够即提前停止。
-        unreadable_dirs: 可选收集列表，扫描中因权限或系统错误无法读取的目录会追加至此，
-            供调用方区分「目录不可读」与「目录内无图片」；未提供时不可读目录仅记日志跳过。
+        unreadable_dirs: 可选收集列表，不可读目录追加至此供调用方区分「目录不可读」
+            与「目录内无图片」；未提供时仅记日志跳过。
 
     Returns:
         找到的图片文件路径列表。目录不存在或预检失败时返回空列表。
 
     Raises:
-        OSError: 扫描中途的文件系统错误（如条目 stat 失败）向上传播，由调用方区分
-            「扫完」与「中途出错」；单个目录不可读属预期信号，经 unreadable_dirs
-            收集后跳过该目录，不视为扫描失败。
+        OSError: 扫描中途的文件系统错误向上传播，供调用方区分「扫完」与「中途
+            出错」；单个目录不可读经 unreadable_dirs 收集后跳过，不视为失败。
     """
     images: list[Path] = []
 
@@ -541,9 +495,8 @@ def find_images_in_directory(
         return images
 
     if is_unc_path(directory):
-        # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，与 normalize_path 等 resolve
-        # 站点同口径在 resolve 前拦截。浏览扫描对拒绝对象返回空列表，告警不回显原始
-        # 路径全文，与项目的脱敏口径一致。
+        # 与 normalize_path 等 resolve 站点同口径在 resolve 前拦截；告警不回显原始
+        # 路径全文，与项目脱敏口径一致。
         logger.warning("拒绝 UNC 形式的目录扫描入参，返回空结果")
         return images
 
@@ -583,9 +536,8 @@ def find_images_in_directory(
                 entry.is_file(follow_symlinks=False)
                 and entry_path.suffix.lower() in target_extensions
             ):
-                # OneDrive 占位文件等 reparse 文件不是 symlink，is_file 不拒绝；与目录
-                # 分支同规则剔除，避免列为参考图后读取跟随 reparse 目标。后缀命中后才
-                # 判定，非图片条目不付 lstat 开销。
+                # OneDrive 占位文件等 reparse 非 symlink，is_file 不拒绝，与目录分支
+                # 同规则剔除；后缀命中后才判定，非图片条目不付 lstat 开销。
                 if _is_reparse_point(entry_path):
                     logger.warning("跳过 reparse point 文件: {}", entry_path)
                     continue
@@ -606,19 +558,16 @@ def find_images_in_directory(
 
 
 def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None) -> list[str]:
-    """在搜索目录下建议与目标路径拼写相近的图片路径。
-
-    用于路径校验失败时给出纠错建议，缓解用户手误导致的路径错误。
+    """在搜索目录下建议与目标路径拼写相近的图片路径，供路径校验失败时纠错。
 
     Args:
         target_path: 目标路径。
-        search_dirs: 搜索目录列表；未提供时不扫描任何目录并返回空列表，强制调用方
-            显式指定边界。不默认扫描进程 CWD，避免本函数经公开导出被直接调用时以
-            CWD 为界泄露本地图片文件名。
+        search_dirs: 搜索目录列表；未提供时返回空列表，强制调用方显式指定边界，
+            避免公开导出后以 CWD 为界泄露本地图片文件名。
 
     Returns:
-        相似路径建议列表，最多 5 条。目标以 ``/``、``.`` 等结尾使文件名归一为空串时
-        不产生建议，避免空串子串匹配把任意前几张图片误当相近项。
+        相似路径建议列表，最多 5 条。目标文件名归一为空串时不产生建议，避免空串
+        子串匹配误报。
     """
     suggestions: list[str] = []
 

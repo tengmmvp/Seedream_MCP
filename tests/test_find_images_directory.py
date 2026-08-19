@@ -20,7 +20,7 @@ from seedream_mcp.utils.io.io_path import find_images_in_directory
 
 
 def test_limit_returns_sorted_prefix_not_creation_order(tmp_path: Path) -> None:
-    # 打乱创建顺序，确保结果不是"碰巧按创建序"
+    # 打乱创建顺序，确保结果不是「碰巧按创建序」
     for i in [5, 0, 9, 2, 7, 1, 8, 3, 6, 4]:
         (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -122,11 +122,9 @@ def test_non_positive_limit_returns_empty_without_scan(
 
 def test_recursive_order_matches_global_sorted_path(tmp_path: Path) -> None:
     # 递归且包含前缀目录名 a/a1/a10 与多层级 a/b：
-    # 深度优先加同级按 normcase 排序，须与对全部结果做 sorted(Path) 全局等价；
-    # 同父兄弟前缀相同，整串比较退化为子段比较，等价于 Path 的 parts 全局序，
-    # 这是分页跨请求顺序连续一致的前提，须作为回归锁定。
-    # 注意 Windows 文件系统大小写不敏感，不能同时建 b/ 与 B/ 目录以免冲突，
-    # 大小写排序改由单层 test_sort_matches_path_semantics 覆盖。
+    # 深度优先加同级按 normcase 排序须与全局 sorted(Path) 等价，是分页跨请求
+    # 顺序连续一致的前提。Windows 大小写不敏感，不能同时建 b/ 与 B/ 目录，
+    # 大小写排序由单层 test_sort_matches_path_semantics 覆盖。
     (tmp_path / "a" / "b").mkdir(parents=True)
     for name in ("a1", "a10", "sub1", "sub10"):
         (tmp_path / name).mkdir()
@@ -150,11 +148,8 @@ def test_recursive_order_matches_global_sorted_path(tmp_path: Path) -> None:
 def test_find_images_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
     """符号链接目录指向 base 之外时，递归扫描不得下降进入该目录遍历外部图片。
 
-    防御与 io_storage.FileManager.run_cleanup_policies 同类的符号链接越界风险：find_images_in_directory
-    使用 os.scandir 配合 entry.is_dir(follow_symlinks=False) 拒绝下降符号链接目录。若错误地
-    跟随符号链接目录下降，会把 base 之外的外部图片纳入结果，构成路径边界逃逸，与 browse_images
-    的工作区边界保证冲突。构造 base 内的符号链接目录指向 base 外的目录（含一张图片），并另放
-    一张 base 内真实图片，断言返回结果含真实图片但不含经由符号链接目录下降到的外部图片。
+    entry.is_dir(follow_symlinks=False) 拒绝下降符号链接目录；误跟随会把 base 外
+    图片纳入结果，构成边界逃逸，与 browse_images 的工作区边界保证冲突。
     """
     # base 之外的外部目录放置一张图片
     outside_dir = tmp_path.parent / "outside_find_symlink_target"
@@ -204,7 +199,7 @@ def test_find_images_returns_empty_when_directory_missing(tmp_path: Path) -> Non
 def test_find_images_swallows_permission_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """os.scandir 抛 PermissionError 时扫描该目录返回 False，整体不抛异常、返回空。"""
+    """os.scandir 抛 PermissionError 时该目录被跳过，整体不抛异常、返回空列表。"""
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     def _raise_permission(path: Any) -> Any:
@@ -276,9 +271,8 @@ def test_cached_find_images_recursive_uses_ttl_cache(
 ) -> None:
     """递归扫描用 TTL 缓存：TTL 内命中缓存返回陈旧结果，过期后重扫。
 
-    重扫看到子目录新增图。子目录新增文件不改变顶层目录 mtime，递归无法用 mtime
-    失效，改用 TTL：TTL 内复用缓存换取翻页性能（接受短时陈旧），过期后重新
-    扫描反映新增。
+    子目录新增文件不改变顶层目录 mtime，递归无法按 mtime 失效，改用 TTL 换取
+    翻页性能，过期后重扫反映新增。
     """
     sub = tmp_path / "sub"
     sub.mkdir()
@@ -344,9 +338,7 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
 def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> None:
     """大目录深翻页：小 scan_limit 缓存不完整前缀，更大 scan_limit 重扫扩展前缀。
 
-    回看命中不重扫。覆盖 complete=False 前缀增量扩展这一新逻辑：旧实现从不缓存
-    不完整列表，深翻页每页重扫；新实现缓存前缀并随 scan_limit 增长扩展，回看与
-    同范围重复请求直接命中。
+    前缀随 scan_limit 增长扩展，回看与同范围重复请求直接命中缓存不重扫。
     """
     for i in range(5):
         (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -380,7 +372,7 @@ def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> Non
 
 
 def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
-    """扫到目录末尾(complete=True)后，任意 scan_limit 均命中全量，不再扫描。"""
+    """扫到目录末尾（complete=True）后，任意 scan_limit 均命中全量，不再扫描。"""
     for name in ("a.png", "b.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
@@ -408,9 +400,8 @@ def test_cached_find_images_hot_directory_survives_cache_pressure(
 ) -> None:
     """缓存命中刷新条目热度，轮询目录数超过上限时热目录不被逐出。
 
-    旧实现为 FIFO 驱逐：热目录先插入即位于链首，轮询超过上限数量的其他目录后热
-    目录被逐出，下一次访问退化为全量重扫。LRU 下命中刷新 move_to_end，被逐出的
-    是最久未命中的目录。以注入的扫描计数器断言热目录全程只扫一次。
+    FIFO 驱逐下热目录先插入即位于链首，轮询超上限后被逐出退化为重扫；LRU 命中
+    刷新 move_to_end，被逐出的是最久未命中的目录。
     """
     monkeypatch.setattr(scan_module, "_DIRECTORY_SCAN_CACHE_MAX_ENTRIES", 2)
     scan_module.reset_directory_scan_cache()
@@ -460,10 +451,8 @@ def test_cached_find_images_ttl_rescan_overwrite_refreshes_lru_position(
 ) -> None:
     """TTL 过期重扫覆写既有键时刷新 LRU 位，重扫后的热条目不得滞留旧位置被逐出。
 
-    OrderedDict 对既有键赋值不移动条目位置：递归扫描靠 TTL 失效，过期重扫走
-    覆写路径且不经过命中刷新，若覆写不刷新热度，缓存压力下最常访问的目录仍
-    位于链首被优先逐出，下次访问退化为全量重扫。以注入的扫描计数器断言重扫
-    覆写后的热目录在驱逐压力下存活、后续访问命中缓存不再扫描。
+    OrderedDict 对既有键赋值不移动位置：递归扫描靠 TTL 失效，过期重扫走覆写
+    路径且不经过命中刷新，覆写不刷新热度时最常访问的目录被优先逐出。
     """
     monkeypatch.setattr(scan_module, "_DIRECTORY_SCAN_CACHE_MAX_ENTRIES", 2)
     scan_module.reset_directory_scan_cache()
@@ -522,10 +511,8 @@ def test_find_images_does_not_descend_into_reparse_point(
 ) -> None:
     """NTFS junction 等 reparse point 目录不下降，与 io_storage 清理路径防护对齐。
 
-    junction 的 is_symlink 返回 False，entry.is_dir(follow_symlinks=False) 对其返回 True
-    仍会下降，从而进入 junction 目标执行 OS 级 listdir，涉及 SMB 出站认证暴露。find_images
-    下降前须经 io_file._is_reparse_point 剔除。用 monkeypatch 让该函数对指定子目录返回
-    True，断言该子树不被扫描而真实图片仍正常返回，回归保护此防护不退化。
+    junction 的 is_symlink 返回 False，is_dir(follow_symlinks=False) 对其仍返回 True
+    而下降进入目标执行 OS 级 listdir，涉及 SMB 出站认证暴露，须经 _is_reparse_point 剔除。
     """
     junction_dir = tmp_path / "junction_dir"
     junction_dir.mkdir()
@@ -551,10 +538,8 @@ def test_find_images_excludes_reparse_point_file(
 ) -> None:
     """reparse point 文件不列入结果，与目录分支及 io_storage 清理遍历防护口径对称。
 
-    OneDrive 占位 .png、投影 FS 条目等 reparse 文件不是 symlink，entry.is_file(
-    follow_symlinks=False) 对其返回 True，仅靠后缀过滤会把它列为参考图，后续读取路径的
-    open_no_follow_read 兜底只拦 S_ISLNK 而跟随 reparse 目标。用 monkeypatch 让
-    _is_reparse_point 对指定文件返回 True，断言该文件被剔除而真实图片正常返回。
+    OneDrive 占位 .png 等 reparse 文件不是 symlink，is_file(follow_symlinks=False)
+    对其仍返回 True，仅靠后缀过滤会列为参考图而读取时跟随 reparse 目标。
     """
     placeholder = tmp_path / "onedrive_placeholder.png"
     placeholder.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -578,10 +563,8 @@ def test_cached_find_images_prefix_extension_not_clamped_by_cache_cap(
 ) -> None:
     """缓存前缀扩展不得把缓存条目上限施加到实际扫描量。
 
-    回归保护：扩展 scan_limit 曾被 min(单条目列表上限) 截断，超过上限的大目录深翻页
-    只扫到上限条数即返回短页，调用方把短页误判为扫完全量并谎报 total_count。缓存
-    上限只应决定结果是否写缓存，不应截断扫描本身。以 monkeypatch 缩小条目上限常数
-    模拟万张目录，避免真实建万级文件。
+    扩展 scan_limit 曾被单条目列表上限截断而返回短页，调用方误判扫完全量。上限只
+    决定是否写缓存，不截断扫描本身。以 monkeypatch 缩小上限常数模拟万张目录。
     """
     for i in range(7):
         (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -653,8 +636,7 @@ def test_find_images_propagates_mid_scan_oserror(
 ) -> None:
     """扫描循环体内的 OSError 向上传播，不再吞掉后返回部分结果。
 
-    旧实现的外层 catch 收窄前，中途 IO 错误被记日志后返回已收集的部分列表，调用方
-    无法区分「扫完」与「中途出错」。
+    旧实现吞掉中途 IO 错误返回部分列表，调用方无法区分「扫完」与「中途出错」。
     """
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     _patch_scandir_with_exploding_entry(tmp_path, monkeypatch)
@@ -668,9 +650,8 @@ def test_cached_find_images_mid_scan_error_not_cached_as_complete(
 ) -> None:
     """扫描中途异常向上传播且不写缓存条目，部分列表不得被冻结为 complete。
 
-    调用链：cached_find_images_in_directory 的 complete 按「返回量小于 scan_limit」
-    判定，若扫描器吞掉中途异常返回部分列表，缓存层会把短列表整条缓存为 complete，
-    目录后半部分在缓存有效期内不可见。异常传播使缓存写入不可达，杜绝该冻结。
+    complete 按「返回量小于 scan_limit」判定，扫描器吞错返回短列表会被整条缓存
+    为 complete，目录后半部分在缓存有效期内不可见。
     """
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     original_scandir = _patch_scandir_with_exploding_entry(tmp_path, monkeypatch)

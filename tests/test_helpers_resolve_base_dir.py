@@ -1,9 +1,8 @@
 """_resolve_base_dir 与 validate_image_path 的基础目录边界安全测试。
 
-直接针对 ``tools/core/_helpers._resolve_base_dir`` 的当前契约：用户 save_path
-经规范化后必须落在配置的 auto_save_base_dir 之内，含 ``..`` 逃逸或绝对路径越界
-均抛 SeedreamValidationError；另覆盖 validate_image_path 在 base_dir 缺省回退
-工作区根时的越界强制。
+用户 save_path 经规范化后必须落在配置的 auto_save_base_dir 之内，含 ``..`` 逃逸
+或绝对路径越界均抛 SeedreamValidationError；另覆盖 validate_image_path 在
+base_dir 缺省回退工作区根时的越界强制。
 """
 
 from __future__ import annotations
@@ -104,8 +103,8 @@ def test_validate_image_path_none_base_dir_falls_back_and_enforces_bounds(
 ) -> None:
     """base_dir 为 None 时回退 get_workspace_root() 并始终执行越界校验。
 
-    越界路径（含 .. 穿越）即使不传 base_dir 也须被判无效，不再静默放行；边界内真实小图
-    返回有效。monkeypatch get_workspace_root 返回独立 workspace，隔离环境变量与配置。
+    越界路径（含 .. 穿越）不传 base_dir 也须判无效；monkeypatch get_workspace_root
+    返回独立 workspace，隔离环境变量与配置。
     """
     import seedream_mcp.utils.images.image_validation as image_validation_module
     from PIL import Image

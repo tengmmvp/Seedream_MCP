@@ -1,7 +1,7 @@
 """包级延迟导入测试：导入 seedream_mcp 不立即加载 client 与 server。
 
-涉及包身份与 sys.modules 快照的用例一律子进程运行：进程内 reload 会替换模块对象，
-迫使其他测试文件以 import_module 间接取类规避过期引用，污染成本扩散到整个套件。
+涉及包身份与 sys.modules 快照的用例一律子进程运行，进程内 reload 会替换模块对象、
+污染整个套件。
 """
 
 import subprocess
@@ -12,8 +12,7 @@ from pathlib import Path
 def _run_in_subprocess(code: str) -> None:
     """在干净子进程中断言，失败时透传 stderr。
 
-    cwd 固定为仓库根，使 ``python -c`` 的 sys.path 首项稳定指向项目根，
-    不依赖 pytest 进程的当前工作目录。
+    cwd 固定为仓库根，不依赖 pytest 进程的当前工作目录。
     """
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -73,9 +72,7 @@ def test_unknown_attribute_raises_attribute_error() -> None:
 def test_import_server_does_not_eager_load_pil() -> None:
     """导入 seedream_mcp.server 不得触发 PIL 加载。
 
-    PIL 首次导入含解码器注册，成本达数十毫秒；图像相关模块一律函数内惰性导入，
-    使该成本落点在工作线程而非事件循环线程。子进程运行守护，避免本进程已加载
-    的模块污染断言。
+    PIL 首次导入含解码器注册，图像模块一律函数内惰性导入，使成本落在工作线程。
     """
     _run_in_subprocess(
         "import sys, seedream_mcp.server; "

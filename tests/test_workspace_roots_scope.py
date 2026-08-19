@@ -19,6 +19,8 @@ from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_sc
 
 
 class _FakeSession:
+    """以固定根目录应答 list_roots 的会话替身。"""
+
     def __init__(self, roots: list[Path]) -> None:
         self._roots = roots
 
@@ -57,16 +59,22 @@ class _SpyContext:
 
 
 class _FakeContext:
+    """组合固定 roots 会话的上下文替身。"""
+
     def __init__(self, roots: list[Path]) -> None:
         self.session = _FakeSession(roots)
 
 
 class _FailingSession:
+    """list_roots 抛 RuntimeError 的会话替身。"""
+
     async def list_roots(self) -> ListRootsResult:
         raise RuntimeError("list_roots failed")
 
 
 class _FailingContext:
+    """组合 list_roots 失败会话的上下文替身。"""
+
     def __init__(self) -> None:
         self.session = _FailingSession()
 
@@ -79,6 +87,8 @@ class _NoBackChannelSession:
 
 
 class _NoBackChannelContext:
+    """组合无反向通道会话的上下文替身。"""
+
     def __init__(self) -> None:
         self.session = _NoBackChannelSession()
 
@@ -91,6 +101,8 @@ class _MalformedResponseSession:
 
 
 class _MalformedResponseContext:
+    """组合畸形应答会话的上下文替身。"""
+
     def __init__(self) -> None:
         self.session = _MalformedResponseSession()
 
@@ -375,8 +387,7 @@ async def test_workspace_roots_scope_skips_list_roots_without_capability(
 ) -> None:
     """客户端未声明 roots capability 时跳过 roots/list 往返，直接回退环境变量边界。
 
-    未声明 roots 的客户端对 roots/list 必然报方法不支持，逐请求发起往返只会引入
-    失败等待与告警噪音；以会话内存中的 capability 声明即可短路。
+    未声明的客户端对 roots/list 必然报方法不支持，发起往返只引入失败等待与噪音。
     """
     env_root = tmp_path / "env"
     env_root.mkdir()
@@ -459,8 +470,7 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 客户端通过 MCP Roots 授权目录时，seedream://workspace/roots 须报告客户端 roots，
-    # 而非服务器 env/cwd，与浏览工具访问边界一致。
+    """客户端经 MCP Roots 授权时资源报告客户端 roots，而非服务器 env/cwd。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
@@ -471,7 +481,7 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
     result = await workspace_roots_resource(_FakeContext([mcp_root]))
     data = json.loads(result)
 
-    # server 资源输出统一正斜杠，比对时归一化路径分隔符
+    # server 资源输出统一正斜杠，比对时归一化路径分隔符。
     assert str(mcp_root.resolve()).replace("\\", "/") in data["roots"]
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
 
@@ -481,8 +491,7 @@ async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 客户端明确不授权任何目录即 list_roots 返回空时，资源须返回空列表，
-    # 不得回退到 env/cwd 暴露服务器本地目录。
+    """客户端明确授权空列表时资源返回空列表，不回退 env/cwd 暴露服务器目录。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
 
@@ -502,8 +511,7 @@ async def test_workspace_roots_resource_capability_missing_returns_empty(
 ) -> None:
     """客户端未声明 roots capability 时资源输出空列表，不回退暴露 env 根。
 
-    未声明 capability 时 scope 跳过 roots/list，边界回退环境变量根；回退根属
-    服务器环境而非客户端授权声明，其绝对路径不得进入面向调用方的输出。
+    回退根属服务器环境而非客户端授权声明，其绝对路径不得进入面向调用方的输出。
     """
     env_root = tmp_path / "env"
     env_root.mkdir()
@@ -564,9 +572,8 @@ async def test_workspace_roots_resource_modern_session_first_round_requests_inpu
 ) -> None:
     """2026 会话首轮返回 InputRequiredResult 携带 roots 请求，不经直连取回。
 
-    SEP-2577 下 2026 会话无服务端反向通道，直连 roots/list 必抛 NoBackChannelError
-    且触发废弃告警；资源侧改为返回多轮请求，由客户端应答后重试。首轮无应答时
-    返回 InputRequiredResult，input_requests 按约定键携带 ListRootsRequest。
+    2026 会话无反向通道，直连 roots/list 必抛 NoBackChannelError；首轮无应答时
+    input_requests 按约定键携带 ListRootsRequest。
     """
     mcp_root = tmp_path / "mcp"
     mcp_root.mkdir()
@@ -645,9 +652,8 @@ async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
 ) -> None:
     """protocol_version 缺省或非 str 时按旧修订回退直连，不误入多轮形态。
 
-    版本判定守卫（isinstance str）被移除时，is_version_at_least(None) 会抛
-    TypeError 使资源读取整体报错，或误判版本令旧修订会话收到无法序列化的
-    InputRequiredResult；缺省形态须安全落到 roots/list 直连。
+    版本判定守卫被移除时 is_version_at_least(None) 抛 TypeError，或令旧修订会话
+    收到无法序列化的 InputRequiredResult。
     """
     mcp_root = tmp_path / "mcp"
     mcp_root.mkdir()
@@ -666,11 +672,7 @@ async def test_workspace_roots_resource_modern_round_empty_roots_not_leak_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """多轮重试轮应答空 roots 列表时输出空列表，不回退暴露环境根。
-
-    空授权与未授权的输出语义一致：会话边界为空列表时不得回落 env 根的
-    绝对路径。
-    """
+    """多轮重试轮应答空 roots 时输出空列表，与未授权同语义，不回退暴露环境根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -690,8 +692,7 @@ async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
 ) -> None:
     """旧修订版本即使声明 capability 也保持 roots/list 直连，不走多轮形态。
 
-    InputRequiredResult 仅存在于 2026-07-28 及以后，旧修订会话返回该类型客户端
-    会收到 -32603；legacy 直连是旧修订上唯一取回途径。
+    InputRequiredResult 仅存在于 2026-07-28 及以后，旧修订客户端收到会报 -32603。
     """
     mcp_root = tmp_path / "mcp"
     mcp_root.mkdir()
@@ -720,8 +721,8 @@ async def test_workspace_roots_scope_without_request_context_falls_back_to_env(
 ) -> None:
     """无请求上下文的资源读取回退环境变量边界，不被裸 ValueError 击穿。
 
-    Context.session 的 property 在无请求上下文时抛 ValueError，getattr 默认值
-    无法压制；回退分支本身即为此状态而设，被异常击穿会使资源读取整体失败。
+    Context.session 的 property 在无请求上下文时抛 ValueError，回退分支即为此
+    状态而设。
     """
     env_root = tmp_path / "env"
     env_root.mkdir()

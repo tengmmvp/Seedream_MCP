@@ -1,4 +1,8 @@
-"""FileManager 的 validate_path 越界守卫与 run_cleanup_policies 清理测试。"""
+"""FileManager 的 validate_path 越界守卫、run_cleanup_policies 清理与 Markdown 引用测试。
+
+清理覆盖按天过期、总量配额驱逐、超龄 .part 清扫与空目录修剪，并锁定符号链接不
+跟随、仅删图片扩展名等边界。全部用例在 tmp_path 临时目录构造文件。
+"""
 
 import os
 import sys
@@ -106,10 +110,7 @@ def test_run_cleanup_age_skips_symlink_pointing_outside(tmp_path: Path) -> None:
 def test_run_cleanup_age_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
     """符号链接目录指向 base_dir 之外时，清理不得下降进入该目录遍历外部条目。
 
-    构造 base_dir 内的符号链接目录，指向 base_dir 之外的临时目录；该外部目录含一个
-    mtime 已过期的 marker 文件。若清理错误地跟随符号链接目录下降，会 stat 到该
-    marker 并因过期将其删除；Windows 下还可能触发指向外部资源的 SMB 出站认证。
-    断言清理后外部 marker 仍存在、内容未被触碰、且未计入删除数量。
+    误跟随会把外部过期文件删除，Windows 下还可能触发 SMB 出站认证。
     """
     manager = FileManager(base_dir=tmp_path)
 
@@ -178,11 +179,7 @@ def test_run_cleanup_quota_noop_when_under_limit(tmp_path: Path) -> None:
 def test_run_cleanup_policies_runs_age_then_quota_in_single_scan(
     tmp_path: Path,
 ) -> None:
-    """单次扫描依次执行按天清理与总量配额：过期文件先删，剩余超配额再驱逐最旧。
-
-    验证两策略共用一次扫描结果且配额驱逐基于按天清理后的剩余文件：过期文件既被按天
-    删除，不再被配额驱逐重复处理。
-    """
+    """单次扫描依次执行按天清理与总量配额：过期文件先删，剩余超配额再驱逐最旧。"""
     manager = FileManager(base_dir=tmp_path)
 
     now = datetime.now()
@@ -338,9 +335,8 @@ def test_generate_markdown_reference_encodes_spaces_and_parens(tmp_path: Path) -
 def test_generate_markdown_reference_encodes_hash_and_percent(tmp_path: Path) -> None:
     """文件名含 # 与 % 时同样百分号编码，引用目标不被截断或误解码。
 
-    custom_name 经 sanitize_filename 后 # 与 % 得以保留：# 会被 Markdown 视为
-    fragment 起点截断引用目标，% 会被按百分号编码误解码。百分号先于其余字符
-    编码，编码产物中的百分号不被二次编码为 %2520。
+    # 是 Markdown fragment 起点，% 会被按百分号编码误解码；百分号先编码，产物
+    不被二次编码为 %2520。
     """
     manager = FileManager(base_dir=tmp_path)
 

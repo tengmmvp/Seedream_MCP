@@ -72,7 +72,7 @@ def test_suggest_similar_paths_finds_close_names(tmp_path: Path) -> None:
     (tmp_path / "portrait.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (tmp_path / "other.jpg").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    # 匹配方向为目标名是候选文件名的子串，覆盖"缺扩展名/少打字母"的手误形态
+    # 匹配方向为目标名是候选文件名的子串，覆盖「缺扩展名/少打字母」的手误形态
     suggestions = suggest_similar_paths("portrait", search_dirs=[str(tmp_path)])
 
     assert suggestions == [str(tmp_path / "portrait.png")]

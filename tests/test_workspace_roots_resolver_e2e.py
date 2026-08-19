@@ -1,9 +1,8 @@
 """工具链 roots resolver 注入端到端守护测试。
 
-经 SDK in-process Client 驱动真实 tools/call 管线：resolver 依赖在工具执行前按
-协商版本取回客户端 roots 并注入，workspace_roots_scope_from_result 应用为文件
-访问边界。SEP-2577 下工具链不经 ctx.session.list_roots 直连读取，本套件锁定
-resolver 形态的边界生效、未声明能力的回退与越界拒绝语义。
+经 SDK in-process Client 驱动真实 tools/call 管线：resolver 按协商版本取回
+客户端 roots 并应用为文件访问边界，SEP-2577 下不经 ctx.session.list_roots
+直连。锁定边界生效、未声明能力的回退与越界拒绝。
 """
 
 from __future__ import annotations
@@ -40,6 +39,8 @@ async def reset_lifespan_singletons(monkeypatch: pytest.MonkeyPatch):
 
 
 def _make_callback(roots: list[Path]) -> Any:
+    """构造按指定根目录应答的 roots callback。"""
+
     async def roots_callback(context: ClientRequestContext) -> ListRootsResult:
         del context
         return ListRootsResult(roots=[Root(uri=root.as_uri(), name=root.name) for root in roots])
@@ -48,6 +49,7 @@ def _make_callback(roots: list[Path]) -> Any:
 
 
 async def _browse(client: Client, directory: str) -> CallToolResult:
+    """调用 browse_images 列出指定目录，非递归。"""
     return await client.call_tool("browse_images", {"directory": directory, "recursive": False})
 
 
@@ -88,9 +90,8 @@ async def test_resolver_falls_back_when_roots_capability_not_declared(
 ) -> None:
     """客户端未声明 roots capability 时 resolver 不发起取回，回退配置根。
 
-    默认协商（2026-07-28）下无 roots callback 即不声明能力，工具照常执行并
-    以 SEEDREAM_WORKSPACE_ROOT 为边界；活动配置的 workspace_root 与该环境
-    变量同源，此处直接注入携带该值的配置等效表达。
+    无 roots callback 即不声明能力；活动配置的 workspace_root 与环境变量同源，
+    直接注入携带该值的配置等效表达。
     """
     env_root = tmp_path / "env"
     env_root.mkdir()
@@ -113,10 +114,9 @@ async def test_resolver_over_modern_negotiation(
     tmp_path: Path,
     reset_lifespan_singletons: None,
 ) -> None:
-    """默认协商（2026-07-28）加 roots callback 时，resolver 经 MRTR 取回根目录。
+    """默认协商（2026-07-28）加 roots callback 时，resolver 经多轮往返取回根目录。
 
-    2026-07-28 连接的 roots 取回由多轮往返承载，客户端应答后调用继续，边界
-    语义与 legacy 协商一致。
+    边界语义与 legacy 协商一致。
     """
     declared_root = tmp_path / "modern"
     declared_root.mkdir()

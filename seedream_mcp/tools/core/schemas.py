@@ -1,8 +1,8 @@
 """Seedream MCP 工具输入模型。
 
-作为参数校验与 MCP inputSchema 的单一来源：MCPServer 依据本模块的 pydantic 模型生成
-各工具入参 schema，impl 层 handler 不重复描述字段规则。通用字段抽到 ``_*Input`` 基类
-按需多重继承组合为各工具的最终输入模型。
+作为参数校验与 MCP inputSchema 的单一来源，MCPServer 依据本模块的 pydantic 模型生成
+各工具入参 schema。通用字段抽到 ``_*Input`` 基类，按需多重继承组合为各工具的最终
+输入模型。
 """
 
 from __future__ import annotations
@@ -71,17 +71,7 @@ class OptimizePromptOptions(BaseModel):
     @field_validator("mode")
     @classmethod
     def validate_mode(cls, value: str) -> str:
-        """校验并规范化优化模式。
-
-        Args:
-            value: 用户输入的优化模式字符串。
-
-        Returns:
-            规范化后的模式值。
-
-        Raises:
-            ValueError: 模式不在允许范围内。
-        """
+        """校验并规范化优化模式，不在允许范围内时抛 ValueError。"""
         normalized = value.strip().lower()
         if normalized not in VALID_OPTIMIZE_MODES:
             raise ValueError(f"mode 仅支持 {sorted(VALID_OPTIMIZE_MODES)}")
@@ -102,10 +92,8 @@ class GenerationTool(BaseModel):
 class _PromptAndOptimizeInput(BaseModel):
     """提示词与提示词优化参数。"""
 
-    # prompt 在基类声明以确立字段顺序：模型字段顺序是 server.py 平铺签名的镜像来源，
-    # prompt 须居首，平铺契约的等价性由 test_tool_call_assembly 锁定。
-    # 基类定义仅锚定字段顺序，长度约束与描述以各子类的覆盖为准；图文生图覆盖为
-    # str | None 以支持图层拆分场景缺省，其余子类保持必填并复用同一长度常量。
+    # prompt 在基类声明以锚定字段顺序：模型字段顺序是 server.py 平铺签名的镜像来源，
+    # prompt 须居首；图文生图子类覆盖为 str | None 以支持图层拆分场景缺省。
     prompt: str = Field(
         ...,
         min_length=PROMPT_MIN_LENGTH,
@@ -130,11 +118,8 @@ class _SingleImageInput(BaseModel):
     @field_validator("image")
     @classmethod
     def reject_blank_image(cls, value: str) -> str:
-        """拒绝空白字符串，与多图输入的校验深度一致。
-
-        空白值若放行到 client 归一化层才报错，错误会从 schema 级参数错误退化为
-        isError 工具结果，报错层次与其他参数不一致。
-        """
+        """拒绝空白字符串，使其在 schema 层即报错，而非放行到 client 归一化层后
+        退化为 isError 工具结果。"""
         if not value.strip():
             raise ValueError("image 不能为空字符串")
         return value
@@ -157,11 +142,8 @@ class _MultiImageInput(BaseModel):
     @field_validator("image")
     @classmethod
     def reject_blank_items(cls, value: list[str]) -> list[str]:
-        """逐项拒绝空白字符串，与组图输入的校验深度一致。
-
-        空白项若放行到 client 归一化层才报错，错误会从 schema 级参数错误退化为
-        isError 工具结果，报错层次与文案与其他参数不一致。
-        """
+        """逐项拒绝空白字符串，使其在 schema 层即报错，而非放行到 client 归一化层
+        后退化为 isError 工具结果。"""
         if any(not item.strip() for item in value):
             raise ValueError("image 列表中的每一项都必须是非空字符串")
         return value
@@ -170,10 +152,8 @@ class _MultiImageInput(BaseModel):
 class _SequentialImageInput(BaseModel):
     """组图参考图输入参数。"""
 
-    # 运行时接受单字符串并经 before-validator 归一为单元素列表，声明与该行为一致。
-    # 列表分支声明 max_length，与多图融合同语义字段的声明口径一致，inputSchema 的
-    # 列表分支据此携带 maxItems，客户端本地校验即可拒绝超量输入；单字符串分支归一
-    # 为单元素列表，无数量上限可言。
+    # 运行时接受单字符串并经 before-validator 归一为单元素列表；列表分支声明
+    # max_length 使 inputSchema 携带 maxItems，客户端本地校验即可拒绝超量输入。
     image: (
         str | Annotated[list[str], Field(max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES)] | None
     ) = Field(
@@ -186,11 +166,8 @@ class _SequentialImageInput(BaseModel):
 
 
 class _LayerDecompositionInput(BaseModel):
-    """图层拆分与透明通道参数，仅图文生图工具暴露。
-
-    两参数均仅 5.0 Pro 支持，模型能力门控在 context 构建与 client 全量重校验两处
-    执行；字段排布在 image 与 size 之间，决定平铺签名的字段顺序。
-    """
+    """图层拆分与透明通道参数，仅图文生图工具暴露，均仅 5.0 Pro 支持，能力门控在
+    context 构建与 client 重校验两处执行。"""
 
     layer_decomposition: bool | None = Field(
         default=None,
@@ -282,9 +259,8 @@ class _ResponseAndExecutionInput(BaseModel):
     def validate_parallel_options(self) -> "_ResponseAndExecutionInput":
         """校验并行执行参数组合。
 
-        校验器随字段声明置于本基类，直接属性访问要求混入方具备全部三个字段，
-        未来输入模型漏混本基类时在首次实例化即抛 AttributeError 暴露遗漏，
-        不再因缺省值兜底而静默跳过校验。
+        校验器随字段声明置于本基类，混入方漏字段时在首次实例化即抛 AttributeError
+        暴露遗漏。
         """
         try:
             validate_parallel_generation_options(
@@ -313,17 +289,7 @@ class BaseGenerationInput(BaseModel):
     @field_validator("save_path", "custom_name", check_fields=False)
     @classmethod
     def validate_non_empty(cls, value: str | None) -> str | None:
-        """校验字符串字段非空。
-
-        Args:
-            value: 待校验的字符串值。
-
-        Returns:
-            去除首尾空格后的字符串，None 时跳过校验。
-
-        Raises:
-            ValueError: 字符串为空或仅含空格。
-        """
+        """去除首尾空格并拒绝空串，None 跳过校验。"""
         if value is None:
             return None
         normalized = value.strip()
@@ -361,9 +327,8 @@ class ImageToImageInput(
     支持图像元素增删、风格转化、材质替换、色调迁移、改变背景/视角/尺寸等操作。
     """
 
-    # 图层拆分场景 prompt 可缺省：模型将自动识别图片中的主要元素并拆分为独立图层；
-    # 其余场景必填，组合约束由下方 model_validator 保证。基类锚定为必填 str 以固定
-    # 字段顺序，本类宽化覆盖为可选，组合约束在运行时兜底。
+    # 图层拆分场景 prompt 可缺省，其余场景必填；基类锚定为必填 str 以固定字段顺序，
+    # 本类宽化覆盖为可选，组合约束由下方 model_validator 在运行时兜底。
     prompt: str | None = Field(  # type: ignore[assignment]
         default=None,
         min_length=PROMPT_MIN_LENGTH,
@@ -378,8 +343,7 @@ class ImageToImageInput(
             raise ValueError("prompt 不能为空，仅图层拆分场景允许缺省")
         return self
 
-    # 覆盖共享基类的 size 描述以表达图层拆分特例：仅档位与 auto、缺省合成 auto；
-    # 覆盖声明不改变字段顺序，平铺签名镜像由守护测试继续锁定。
+    # 覆盖共享基类的 size 描述以表达图层拆分特例，覆盖声明不改变字段顺序。
     size: str | None = Field(
         default=None,
         description=(
@@ -431,10 +395,8 @@ class SequentialGenerationInput(
         description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。",
     )
 
-    # 覆盖共享基类的 request_count 描述以表达组图特例：单次请求产出的是一组图片而非
-    # 单张，组内图片数量由模型按提示词决定、上限为 max_images，共享描述的
-    # 「每次各产出一张图」在本工具不成立。
-    # 覆盖声明不改变字段顺序，平铺签名镜像由守护测试继续锁定。
+    # 覆盖共享基类的 request_count 描述：单次请求产出一组图片而非单张，共享描述的
+    # 「每次各产出一张图」在本工具不成立；覆盖声明不改变字段顺序。
     request_count: int = Field(
         default=1,
         ge=1,
@@ -448,17 +410,7 @@ class SequentialGenerationInput(
     @field_validator("image", mode="before")
     @classmethod
     def validate_reference_images(cls, value: str | list[str] | None) -> list[str] | None:
-        """校验参考图片列表。
-
-        Args:
-            value: 单张图片或图片列表，None 时跳过校验。
-
-        Returns:
-            规范化后的图片列表，None 时返回 None。
-
-        Raises:
-            ValueError: 图片数量或格式不符合要求。
-        """
+        """归一单字符串为列表并校验数量与格式，None 时跳过校验。"""
         if value is None:
             return None
         if isinstance(value, str):
@@ -481,14 +433,10 @@ class SequentialGenerationInput(
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
         """校验参考图数量与生成数量的总和限制。"""
-        # 字段声明含 str 形态以对齐 inputSchema，但 before-validator 已把单字符串归一为
-        # 列表，after 阶段的运行时值恒为 list[str] | None，此处收窄供下游计数消费。
+        # after 阶段运行时值恒为 list[str] | None（before-validator 已归一），收窄供计数。
         images = cast("list[str] | None", self.image)
-        # max_images 未显式传入时，按参考图数量自动推导，取生成总上限减去参考图数量。
-        # 派生写入用 object.__setattr__ 绕过 validate_assignment 并从 model_fields_set
-        # 剔除：普通赋值会把派生值登记进 fields_set 且再触发一轮本 after-validator，
-        # 使派生与显式传入不可区分，误导依据 fields_set 判断显式传入的逻辑（如
-        # exclude_unset 序列化与审计）。
+        # max_images 未显式传入时按参考图数量推导；object.__setattr__ 绕过
+        # validate_assignment 并从 fields_set 剔除，使派生值与显式传入可区分。
         if "max_images" not in self.model_fields_set:
             object.__setattr__(self, "max_images", resolve_sequential_max_images(None, images))
             self.model_fields_set.discard("max_images")
@@ -501,13 +449,11 @@ class SequentialGenerationInput(
 
 
 class BrowseImagesInput(BaseModel):
-    """本地图片浏览：浏览工作目录中的图片文件，便于用户选择参考图或查看已生成内容。
+    """本地图片浏览：浏览工作目录中的图片文件，便于选择参考图或查看已生成内容。
 
-    字段默认值的单一来源：各字段 Field 默认值引用类上声明的 ClassVar 常量，避免魔法值
-    漂移；impl handler 以类型化属性读取，缺省字段直接携带默认值。
+    字段默认值引用类上声明的 ClassVar 常量作为单一来源，避免魔法值漂移。
     """
 
-    # ClassVar 声明使 pydantic 将其排除出模型字段，仅作为默认值单一来源供 Field 引用。
     DEFAULT_RECURSIVE: ClassVar[bool] = True
     DEFAULT_MAX_DEPTH: ClassVar[int] = 3
     DEFAULT_LIMIT: ClassVar[int] = 50
@@ -551,8 +497,7 @@ class BrowseImagesInput(BaseModel):
         le=100000,
         description="分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。",
     )
-    # 后缀为 jpeg/png 一类短词，单项上限 16 仅拒绝异常超长输入，防止错误消息
-    # 对超大字符串整体回显。
+    # 单项上限 16 仅拒绝异常超长输入，防止错误消息整体回显超大字符串。
     format_filter: list[Annotated[str, Field(max_length=16)]] | None = Field(
         default=None,
         description=(
@@ -568,17 +513,7 @@ class BrowseImagesInput(BaseModel):
     @field_validator("directory")
     @classmethod
     def validate_directory(cls, value: str | None) -> str | None:
-        """校验目录路径。
-
-        Args:
-            value: 用户指定的目录路径。
-
-        Returns:
-            规范化后的路径，None 时跳过校验。
-
-        Raises:
-            ValueError: 路径为空字符串。
-        """
+        """去除首尾空格并拒绝空串，None 跳过校验。"""
         if value is None:
             return None
         normalized = value.strip()
@@ -589,14 +524,7 @@ class BrowseImagesInput(BaseModel):
     @field_validator("format_filter")
     @classmethod
     def normalize_suffixes(cls, value: list[str] | None) -> list[str] | None:
-        """规范化文件后缀列表。
-
-        Args:
-            value: 用户提供的后缀列表。
-
-        Returns:
-            规范化后的后缀列表，统一小写并补齐点前缀；输入为 None 时返回 None。
-        """
+        """后缀统一小写并补齐点前缀，None 时返回 None。"""
         if value is None:
             return None
         normalized = []
@@ -611,12 +539,12 @@ class BrowseImagesInput(BaseModel):
 class GenerationInputParams(Protocol):
     """四个生成工具输入模型共享字段的协议类型。
 
-    供 core 流水线以类型化属性访问读取共享字段，替代弱类型 dict.get；各生成工具的
-    具体输入模型经结构化子类型自动满足本协议，无需显式继承。
+    供 core 流水线以类型化属性访问读取共享字段；各工具的具体输入模型经结构化子类型
+    自动满足本协议，无需显式继承。
     """
 
-    # prompt 经只读 property 声明：各工具实现为 str（必填工具）或 str | None（图文
-    # 生图的图层拆分场景可缺省），只读协变使两类实现均满足本协议。
+    # prompt 经只读 property 声明：各工具实现为 str 或 str | None，只读协变使两类
+    # 实现均满足本协议。
     @property
     def prompt(self) -> str | None: ...
 

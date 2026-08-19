@@ -46,6 +46,12 @@ class _LazyOptWrapper:
 
 
 class FakeLogger:
+    """记录 info 消息的日志替身，其余级别静默丢弃。
+
+    Attributes:
+        info_messages: 完成参数格式化后的 info 消息列表。
+    """
+
     def __init__(self) -> None:
         self.info_messages: List[str] = []
 
@@ -876,10 +882,7 @@ async def test_multi_image_fusion_accepts_up_to_10_images_for_pro(
 async def test_prepare_image_input_caches_result_and_evicts_lru(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """_prepare_image_input 命中缓存不重复调用底层，LRU 淘汰最久未用条目。
-
-    近期命中不被淘汰。
-    """
+    """_prepare_image_input 命中缓存不重复调用底层，LRU 淘汰最久未用而保留近期命中。"""
     from seedream_mcp.utils.images import image_input
 
     client = SeedreamClient(_build_config())
@@ -926,9 +929,8 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
 def test_serialize_request_outputs_utf8_without_ascii_escape() -> None:
     """_serialize_request 以 ensure_ascii=False 输出 UTF-8 bytes。
 
-    中文原样出现而非 \\uXXXX 转义：静态方法可直接通过类调用，无需实例化。验证
-    返回 bytes，"中文" 的 UTF-8 字节序列原样出现，且不包含 ASCII 转义形式（字面
-    \\u4e2d），确保中文提示词不被转义膨胀。
+    中文以 UTF-8 字节序列原样出现而非 \\uXXXX 转义，提示词不被转义膨胀；静态
+    方法可经类直接调用，无需实例化。
     """
     result = SeedreamClient._serialize_request({"prompt": "中文测试"})
 
@@ -1053,9 +1055,9 @@ async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
 async def test_call_api_non_dict_json_payload_raises_format_error(
     raw_payload: Any, expected_type: str
 ) -> None:
-    """标准路径 200 响应体为非 dict JSON 时抛出明确的响应格式错误。
+    """标准路径 200 响应体为非 dict JSON 时抛出带类型标记的响应格式错误。
 
-    抛出明确的错误而非 AttributeError。
+    错误消息携带实际 JSON 类型而非 AttributeError。
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1139,7 +1141,7 @@ async def test_empty_api_key_maps_to_config_error_profile() -> None:
 
 
 def _install_validate_common_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
-    """在 client 模块命名空间替换 validate_common_generation_params 为计数替身。"""
+    """在 client 模块命名空间替换 validate_common_generation_params 为计数替身，返回记录调用次数的字典。"""
     import seedream_mcp.client as client_module
 
     calls = {"validate": 0}

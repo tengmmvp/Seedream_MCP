@@ -37,7 +37,7 @@ def test_parse_retry_after_http_date_past_returns_none() -> None:
 
 
 def test_parse_retry_after_zero_clamped_to_min() -> None:
-    """值为 0 时按下限兜底为最小等待秒数，避免紧密重试风暴。"""
+    """值为 0 时按下限兜底为最小等待秒数，避免密集重试风暴。"""
     assert parse_retry_after({"retry-after": "0"}) == 1.0
 
 

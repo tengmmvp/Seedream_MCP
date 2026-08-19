@@ -1,7 +1,7 @@
-"""image_input 预处理测试。
+"""image_input 预处理测试：URL 与 Data URI 主干、本地文件读取与工作区边界校验。
 
-覆盖指向工作区外符号链接的越界拒绝（resolve 跟随后路径越界被拒）与本地图片
-单次读取后的内存维度校验路径。
+越界与诊断消息区分会话 Roots 边界与 SEEDREAM_WORKSPACE_ROOT 回退边界，后者
+不回显服务器根路径。
 """
 
 import base64
@@ -27,10 +27,8 @@ async def test_prepare_image_input_rejects_symlink_escape(
 ) -> None:
     """指向工作区外的符号链接须被越界校验拒绝，防止经符号链接逃逸工作区边界。
 
-    normalize_path 的 resolve 会跟随符号链接，故链接目标须位于工作区之外才能触发越界
-    拒绝；若目标位于工作区内，resolve 后得到常规文件路径，O_NOFOLLOW 打开该常规文件
-    不抛错，测试将沦为空芯。越界属参数校验语义，抛 SeedreamValidationError；以会话
-    Roots 声明边界，消息附调用方授权的根列表供自纠。
+    目标位于工作区内时 resolve 后为常规文件、O_NOFOLLOW 打开不抛错，测试将沦为
+    空芯。以会话 Roots 声明边界，消息附调用方授权的根列表供自纠。
     """
     # 目标文件位于工作区（tmp_path）之外；resolve 跟随符号链接后路径越界被拒
     target = tmp_path.parent / "symlink_escape_target.png"
@@ -60,9 +58,7 @@ async def test_prepare_image_input_out_of_bounds_error_carries_roots(
 ) -> None:
     """绝对路径落在工作区根之外时抛校验错误，消息携带允许的根列表供纠错。
 
-    越界属参数问题而非 API 调用失败，异常类型须为 SeedreamValidationError，
-    错误码归约为 validation_error 而非 api_error。以会话 Roots 声明边界，
-    根列表为调用方自授权信息，回显不受回退边界遮蔽约束。
+    会话 Roots 声明的根列表属调用方自授权信息，回显不受回退边界遮蔽约束。
     """
     outside = tmp_path.parent / "outside_workspace_image.png"
     Image.new("RGB", (32, 32), color="white").save(outside)
@@ -85,9 +81,7 @@ async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
 ) -> None:
     """回退边界（无会话 Roots）下的越界消息不回显服务器环境根路径。
 
-    边界经 SEEDREAM_WORKSPACE_ROOT 回退取得时根路径属于服务器本地目录结构，
-    消息改述为仅允许服务器配置的工作区目录，与 browse_images 的回退遮蔽
-    标准一致。
+    与 browse_images 的回退遮蔽口径一致。
     """
     outside = tmp_path.parent / "outside_workspace_masked.png"
     Image.new("RGB", (32, 32), color="white").save(outside)
@@ -108,8 +102,7 @@ async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
 ) -> None:
     """会话 Roots 边界下界内不存在的路径仍走诊断分支：报文件不存在而非越界。
 
-    具体失败原因与相似路径建议均回显调用方授权声明的根下信息，不受回退遮蔽约束。
-    界内定位失败属调用方输入问题，错误档位为 validation_error 而非 api_error。
+    失败原因与相似路径建议回显调用方授权的根下信息，不受回退遮蔽约束。
     """
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
@@ -127,9 +120,7 @@ async def test_prepare_image_input_in_bounds_diagnostics_masks_fallback_boundary
 ) -> None:
     """回退边界下界内定位失败的诊断分支不泄露服务器根绝对路径与相似路径建议。
 
-    具体失败原因文案与相似路径建议都由服务器环境根下的绝对路径拼出，遮蔽为仅
-    回显调用方输入的泛化消息。根下放置名称相近的真实图片，确保遮蔽前建议分支
-    确实可命中，测试不沦为空芯。界内定位失败为校验档，不给凭据与网络排查建议。
+    根下放置名称相近的真实图片，确保遮蔽前建议分支确实可命中，测试不沦为空芯。
     """
     sibling = tmp_path / "missing_sibling.png"
     Image.new("RGB", (32, 32), color="white").save(sibling)
@@ -160,10 +151,8 @@ async def test_prepare_image_input_read_failure_masks_fallback_boundary(
 ) -> None:
     """回退边界下本地文件打开失败的错误消息不泄露服务器侧绝对路径。
 
-    打开阶段的 OSError 原文嵌有解析后的绝对路径，属服务器环境信息；遮蔽后仅回显
-    系统错误语义与调用方输入原样字符串。本地文件读取失败属调用方输入问题而非
-    上游 API 失败，异常类型为 SeedreamValidationError，value 通道与定位失败路径
-    同口径携带调用方输入原样串。
+    OSError 原文嵌有解析后的绝对路径，遮蔽后仅回显系统错误语义与调用方输入
+    原样串。
     """
     locked = tmp_path / "locked.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
@@ -286,7 +275,7 @@ async def test_prepare_image_input_rejects_url_without_netloc() -> None:
 async def test_prepare_image_input_rejects_url_userinfo_credentials() -> None:
     """携带 userinfo 凭据的参考图 URL 须在主管道即拒绝，凭据不得随请求体送往上游 API。
 
-    守护 URL 分支接入统一校验，防止 userinfo 拒绝沦为仅 data_uri/本地分支可达的死代码。
+    守护 URL 分支接入统一校验，防止拒绝仅 data_uri/本地分支可达。
     """
     with pytest.raises(SeedreamValidationError, match="用户名密码"):
         await prepare_image_input("https://AKID:SECRET@mirror.example.com/ref.png")
@@ -307,9 +296,8 @@ async def test_prepare_image_input_rejects_invalid_data_uri() -> None:
 async def test_prepare_image_input_accepts_uppercase_data_scheme() -> None:
     """scheme 大小写不敏感：大写 DATA: 前缀的合法 Data URI 正常校验通过。
 
-    RFC 3986 scheme 大小写不敏感；此前大写前缀在 parse_data_uri 处拆分失败，
-    报笼统的"格式无效"而非走精确校验分支。官方要求图片格式为小写，返回值经
-    归一化为小写标准形态。
+    此前大写前缀在 parse_data_uri 拆分失败而报笼统的「格式无效」；返回值归一化
+    为小写标准形态。
     """
     buffer = io.BytesIO()
     Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
@@ -323,9 +311,7 @@ async def test_prepare_image_input_corrupt_content_raises_validation_error(
 ) -> None:
     """扩展名合法但内容损坏属参数校验语义，抛 SeedreamValidationError 而非 API 错误。
 
-    与 _validate_file_path 的解码失败分支同口径：损坏内容是调用方输入问题，
-    错误码归约为 validation_error，不误导调用方重试或排查上游 API。内容不可识别
-    时用户可见消息为固定文案，PIL 异常原文中的 BytesIO 对象地址不进入消息。
+    用户可见消息为固定文案，PIL 异常原文中的 BytesIO 对象地址不进入消息。
     """
     corrupt = tmp_path / "corrupt.png"
     corrupt.write_bytes(b"definitely-not-an-image-0123456789")
@@ -353,9 +339,7 @@ async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
 ) -> None:
     """定位 stat 与读取之间文件被替换为超大内容时，读取量复核以文件过大拒绝。
 
-    候选定位阶段的 stat 只校验当时的大小，读取阶段限制读取量为上限加一并复核，
-    防 TOCTOU 窗口内被替换的巨型文件撑爆内存；伪造 read 返回超限字节，断言不
-    进入 Base64 编码即被拒，value 通道携带调用方输入而非服务器侧绝对路径。
+    读取阶段限制读取量为上限加一并复核，防 TOCTOU 窗口内的巨型文件撑爆内存。
     """
 
     class _OversizedFile:
@@ -384,8 +368,7 @@ async def test_prepare_image_input_mime_follows_byte_signature(
 ) -> None:
     """data URI 的 MIME 以字节签名为准：PNG 内容存为 .jpg 时标注 image/png。
 
-    扩展名可伪造，与 auto_save 保存路径的 infer_extension_from_bytes 口径一致；
-    签名不可识别时才回退扩展名映射。
+    扩展名可伪造，签名不可识别时才回退扩展名映射。
     """
     mismatched = tmp_path / "actually-png.jpg"
     Image.new("RGB", (32, 32), color="white").save(mismatched, format="PNG")

@@ -1,11 +1,10 @@
 """生成类工具 impl 共享的工具元数据与开始日志参数构造。
 
-四个生成 handler 透传给 ``execute_generation_handler`` 的工具名、完成标题、失败前缀与
-开始日志模板高度同构，集中收敛为不可变 ``ToolMetadata`` 描述，各 handler 解包后传入
-流水线；失败排查建议由 core 层按错误类型统一选择，不属于工具级常量。开始日志的参数
-构造回调由本模块提供：文生图、图文生图、多图融合共享 ``_default_start_log_values``；
-组图输出的日志须包含运行时 max_images，由 ``_sequential_start_log_values_factory``
-产出捕获该值的 builder。
+四个生成 handler 传给 ``execute_generation_handler`` 的工具名、完成标题、失败前缀与
+开始日志模板高度同构，收敛为不可变 ``ToolMetadata``。开始日志参数构造回调由本模块
+提供：文生图、图文生图、多图融合共享 ``_default_start_log_values``；组图输出须包含
+运行时 max_images，由 ``_sequential_start_log_values_factory`` 产出捕获该值的
+builder。
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ if TYPE_CHECKING:
 def _default_start_log_values(
     context: "GenerationExecutionContext",
 ) -> tuple[Any, ...]:
-    """构造文生图、图文生图、多图融合共享的开始日志参数元组。"""
+    """构造三个生成工具共享的开始日志参数元组。"""
     return (
         len(context.prompt or ""),
         context.size,
@@ -52,8 +51,8 @@ def _sequential_start_log_values_factory(
 class ToolMetadata:
     """单个生成工具透传给 ``execute_generation_handler`` 的标量元数据。
 
-    仅收纳各工具逐字不同且为常量的字符串字段；开始日志参数构造回调因组图输出依赖
-    运行时入参，由各 handler 显式传入，数据表与运行时逻辑各司其职。
+    仅收纳各工具逐字不同的常量字段；开始日志参数构造回调依赖运行时入参，由各
+    handler 显式传入。
 
     Attributes:
         tool_name: 工具标识，写入 structuredContent.tool 与日志。

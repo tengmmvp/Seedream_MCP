@@ -1,7 +1,6 @@
 """_cache_prepared_result 字节上限淘汰守护。
 
-验证按累计字节双重上限的 LRU 淘汰：新条目超字节预算时先淘汰最旧条目腾位后才缓存；
-单条结果大于 max_bytes 时跳过缓存；条目数超限时字节计数同步扣减。_prepare_cache_bytes
+字节与条目数双重上限：超预算按 LRU 淘汰最旧条目腾位，单条超限跳过缓存，
 计数始终与缓存内条目长度之和一致。
 """
 
@@ -36,7 +35,6 @@ def test_cache_evicts_lru_until_byte_budget_fits() -> None:
     assert _key("a") not in client._image_preparer._prepare_cache
     assert list(client._image_preparer._prepare_cache.keys()) == [_key("b"), _key("c"), _key("d")]
     assert client._image_preparer._prepare_cache_bytes == 100
-    # 计数与缓存内容一致
     assert client._image_preparer._prepare_cache_bytes == sum(
         len(v) for v in client._image_preparer._prepare_cache.values()
     )

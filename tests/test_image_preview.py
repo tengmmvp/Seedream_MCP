@@ -1,9 +1,8 @@
 """生成工具结果的缩略图预览测试。
 
-覆盖三层：image_thumbnail 的缩略图生成（尺寸收敛、透明通道白底、失败归 None 与
-顺序保持）；execute_generation_handler 流水线按配置与保存结果装配 ImageContent；
-SEEDREAM_PREVIEW_ENABLED 环境变量解析。集成用例经 run_text_to_image 触发，mock
-client 与自动保存，自动保存返回真实落盘的 PNG 以驱动真实缩略图编码。
+覆盖 image_thumbnail 的缩略图生成、流水线按配置与保存结果装配 ImageContent、
+SEEDREAM_PREVIEW_ENABLED 解析。集成用例经 run_text_to_image 触发，mock client
+与自动保存，自动保存返回真实落盘的 PNG 驱动真实缩略图编码。
 """
 
 from __future__ import annotations
@@ -109,6 +108,8 @@ async def test_build_preview_contents_empty_input_returns_empty() -> None:
 
 
 def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mock 客户端文生图成功，返回单图结果。"""
+
     async def fake_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
         del self, kwargs
         return {

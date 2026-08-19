@@ -117,6 +117,10 @@ def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dic
 
     解析失败时记录日志并返回 None。负载全程按 bytes 处理并直接交给 json.loads，
     避免大事件场景下整段事件的 str decode 分配造成瞬时内存峰值。
+
+    Args:
+        segment: 单个 SSE 事件段的原始字节。
+        log: 解析失败时记录日志的 logger；None 时不记录。
     """
     start = 0
     end = len(segment)
@@ -147,17 +151,17 @@ def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dic
 
 
 # 大事件卸载阈值：超过此大小的 segment 的「切片 + json.loads」整体改到工作线程执行，
-# 避免 stream + b64_json 多 MB 事件在事件循环中产生 memcpy 与解析阻塞。小事件保持
+# 避免 stream + b64_json 多 MB 事件在事件循环中产生 memcpy 与解析阻塞；小事件保持
 # 同步处理以省去线程调度开销。
 _SSE_OFFLOAD_THRESHOLD = 64 * 1024
 
-# 处理进度 debug 日志的最小字节间隔：按增量阈值记录，替代对整 MB 取模的判定，模判定
-# 在任意 chunk_size 下几乎不会恰好命中。
+# 处理进度 debug 日志的最小字节间隔：按增量阈值记录，模判定在任意 chunk_size 下
+# 几乎不会恰好命中。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 
 # 单个 SSE 事件线上形态的最小字节估计：合法事件含 data: 字段名、JSON 对象信封与
-# 空行分隔。该值是保守上界而非紧确界，极简事件的线上形态可比其更小，按其派生的
-# 条目上限相应偏松；上限的存在性与字节总量上限同源，共同约束解析产物的内存放大。
+# 空行分隔。该值偏大于真实最小值，按其派生的条目上限相应偏松，与字节总量上限共同
+# 约束解析产物的内存放大。
 _SSE_MIN_EVENT_BYTES = 64
 
 # 解析条目数的绝对下限：组图单请求合法产出至多 15 张图片，总量限额极小的部署按字节
@@ -237,8 +241,8 @@ def _classify_sse_event(
         err = event["error"]
         raw_code = err.get("code")
         raise SeedreamAPIError(
-            # message 经与 handle_api_error 相同的 8KB 截断辅助处理，超大错误体不随
-            # 异常进入日志；非字符串形态由该辅助归一化为文本。
+            # message 经与 handle_api_error 相同的截断辅助处理，超大错误体不随异常
+            # 进入日志，非字符串形态归一化为文本。
             message=truncate_upstream_message_fragment(err.get("message", "流式请求失败")),
             status_code=400,
             # 仅接受非空字符串错误码，与 errors.handle_api_error 同口径：上游数字码
@@ -277,22 +281,20 @@ async def parse_sse_response(
         response: httpx 流式响应对象，按 ``chunk_size`` 分块读取。
         model_id: 模型标识，用于填充图片项 model 字段的缺省值。
         chunk_size: 每次从流中读取的字节数。
-        buffer_max_size: 已消费前缀的回收阈值，buffer 偏移达到此值时批量回收前缀以控制
-            常驻内存。不用于单事件截断，避免合法大图被误丢。
-        event_truncate_threshold: 单个未完成 SSE 事件的截断阈值，仅作防异常流无限增长
-            撑爆内存的安全阀；须大于单张合法图片 base64 负载上限，避免 stream + b64_json
-            的大图事件被误截断而永久丢失。与 buffer_max_size 解耦，前者管前缀回收频率，
-            后者管单事件体积上限。
-        total_bytes_limit: 响应流累计接收字节总量上限，含全部事件段与不完整尾部。
-            单事件阈值拦不住以大量小事件滴流的超限流，累计总量在读取过程中强制此上限，
-            超限时终止解析并关闭响应。与非流式/流式 JSON 路径共用同一限额。解析产物
-            的图片项条目数另按该限额除以最小事件字节下界派生独立硬上限，大量小事件
-            在字节未超限时仍触顶终止，防止解析产物内存放大。
+        buffer_max_size: 已消费前缀的回收阈值，buffer 偏移达到此值时批量回收前缀以
+            控制常驻内存。
+        event_truncate_threshold: 单个未完成 SSE 事件的截断阈值，仅作防异常流无限
+            增长撑爆内存的安全阀；须大于单张合法图片 base64 负载上限，避免大图事件
+            被误截断而永久丢失。与 buffer_max_size 解耦，前者管前缀回收频率，后者
+            管单事件体积上限。
+        total_bytes_limit: 响应流累计接收字节总量上限，含全部事件段与不完整尾部，
+            超限时终止解析并关闭响应；单事件阈值拦不住大量小事件滴流的超限流，与
+            非流式/流式 JSON 路径共用同一限额。解析产物条目数另按该限额除以最小
+            事件字节下界派生独立硬上限，防止解析产物内存放大。
         log: loguru logger 实例，用于记录进度与告警。
         deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。读取超时按
-            单次读操作计时，上游以小于该间隔持续滴流时读取超时永不触发，截止时间
-            逐块封顶整个解析阶段；超限时关闭响应并抛 asyncio.TimeoutError，由
-            client 侧并入超时重试路径。
+            单次读操作计时，持续滴流时永不触发，截止时间逐块封顶整个解析阶段；
+            超限时关闭响应并抛 asyncio.TimeoutError，由 client 并入超时重试。
 
     Returns:
         包含 success/data/usage/status/tools 的统一结果字典。
@@ -335,19 +337,17 @@ async def parse_sse_response(
     # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)。
     offset = 0
     processed_bytes = 0
-    # 上次进度日志记录时的累计字节数，与 _SSE_PROGRESS_LOG_INTERVAL_BYTES 共同决定记录时机。
+    # 上次进度日志记录时的累计字节数。
     last_progress_log_bytes = 0
-    # 超限丢弃的 SSE 事件计数；用于在返回结果中区分“图片部分失败”与“事件因体积超限被丢弃”。
+    # 超限丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件因体积超限被丢弃」。
     truncated_events = 0
     # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀。
     search_hint = 0
-    # 上一块末尾孤立 \r 的悬置标志。块尾 \r 无法独立判定是 CRLF 前半还是单独 CR 行尾，
-    # 先不归一化，留待与次块首字节拼接后判定，防止其被提前转为 \n 与次块首 \n 拼成
-    # \n\n 假事件分隔符导致多行 data 事件被静默拆丢。
+    # 块尾孤立 \r 无法独立判定是 CRLF 前半还是单独 CR 行尾，悬置至与次块首字节拼接
+    # 后判定，防止提前归一化拼出假 \n\n 分隔符拆丢多行 data 事件。
     pending_cr = False
-    # 图片项条目数硬上限：总量上限约束的是线上接收字节，解析产物 items 为逐事件
-    # 物化的 dict 列表，大量小事件在字节未超限时仍可放大内存；按最小事件字节下界
-    # 从同一限额派生条目上界，字节限额不变时条目数有独立封顶。
+    # 图片项条目数硬上限：大量小事件在字节未超限时仍可放大解析产物内存，按最小
+    # 事件字节下界从同一限额派生条目上界。
     max_items = max(total_bytes_limit // _SSE_MIN_EVENT_BYTES, _SSE_MIN_ITEMS_LIMIT)
     # 条目数触顶标志：触顶后终止读取，流末尾残留段不再解析。
     items_capped = False
@@ -356,19 +356,17 @@ async def parse_sse_response(
         if not chunk:
             continue
 
-        # 总时长预算：逐块检查截止时间。读取超时按单次读操作计时，上游以小于该
-        # 间隔持续滴流时读取超时永不触发，截止时间封顶整个解析阶段；超限关闭响应
-        # 并抛超时类错误，由 client 侧并入既有超时重试路径。
+        # 总时长预算：逐块检查截止时间，封顶整个解析阶段；超限关闭响应抛超时错误，
+        # 由 client 侧并入既有超时重试路径。
         if deadline is not None and time.monotonic() > deadline:
             log.warning("SSE 响应流超过总时长预算，终止解析")
             await _close_stream_response(response)
             raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
 
-        # 规范化行尾为 \n 以兼容 CRLF/CR，使事件分隔 \n\n 判定对所有行尾风格一致，
-        # 避免上游或中间代理改用 CRLF 时事件无法切分致整流丢失。
-        # 悬置 \r 前置拼回本块头部一并归一化，块尾新出现的孤立 \r 撤出本块继续悬置。
-        # 仅在含 \r 时才分配替换副本；LF-only 为 SSE 流常态，此时退化为一次 memchr
-        # 包含扫描，避免每块无条件分配两个全块临时对象造成的分配与 GC 开销。
+        # 行尾归一为 \n 以兼容 CRLF/CR，防止上游或中间代理改用 CRLF 时事件无法切分
+        # 致整流丢失。悬置 \r 前置拼回本块头部一并归一化，块尾新出现的孤立 \r 撤出
+        # 继续悬置；仅在含 \r 时才分配替换副本，LF-only 常态下退化为一次包含扫描，
+        # 避免每块无条件分配全块临时对象。
         raw_len = len(chunk)
         if pending_cr:
             chunk = b"\r" + chunk
@@ -382,8 +380,7 @@ async def parse_sse_response(
         buffer += chunk
         processed_bytes += raw_len
 
-        # 响应流总量上限：单事件截断阈值拦不住以大量小事件滴流的超限流，累计接收
-        # 字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
+        # 累计接收字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
         if processed_bytes > total_bytes_limit:
             log.warning(
                 "SSE 响应流总量超限: 已接收 {} 字节，上限 {} 字节",
@@ -402,10 +399,9 @@ async def parse_sse_response(
 
         # SSE 事件以空行分隔，即 b"\n\n"；先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件。
         while True:
-            # 从 max(offset, search_hint - 1) 续扫 b"\n\n"。search_hint 记录上次未命中时的
-            # buffer 长度，回退一字节以覆盖跨块分隔符边界：旧块末尾单个 \n 与新块首个 \n
-            # 拼成的 \n\n。单个未完成事件按大块分多次送达时，避免每块都从 offset 重扫已确认
-            # 无分隔符的尾部，将单事件扫描由平方复杂度降为线性。
+            # 从 max(offset, search_hint - 1) 续扫 b"\n\n"：search_hint 记录上次未命中时的
+            # buffer 长度，回退一字节覆盖跨块分隔符边界，避免单个大事件分多次送达时每块
+            # 从 offset 重扫，将扫描由平方复杂度降为线性。
             sep = buffer.find(b"\n\n", max(offset, search_hint - 1))
             if sep == -1:
                 search_hint = len(buffer)
@@ -419,8 +415,7 @@ async def parse_sse_response(
                 continue
             apply_completed(*_classify_sse_event(event, model_id, items, log, sep - seg_start))
 
-        # 条目数硬上限：与单事件截断同口径终止解析并计数标记 partial，通知调用方
-        # 结果不完整；触顶后关闭响应停止读取，后续流内容不再消费。
+        # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
         if len(items) >= max_items:
             log.warning(
                 "SSE 事件条目数超过上限 {}: 已累计 {} 条，终止解析",
@@ -439,9 +434,8 @@ async def parse_sse_response(
             # 内容前移致旧索引失效；剩余部分已由上方 while 循环确认无分隔符，按当前长度刷新。
             search_hint = len(buffer)
 
-        # 不完整尾部超过缓冲区上限：单个事件体积过大，无法完整解析。
-        # while 循环已抽干所有完整事件，故 [offset, end) 必为单个未完成事件；
-        # 丢弃该尾部以免内存无限增长，[0, offset) 内的完整事件均已处理进 items，不会跨界错位。
+        # while 已抽干全部完整事件，[offset, end) 必为单个未完成事件；超阈值丢弃该
+        # 尾部以免内存无限增长，已处理事件不会跨界错位。
         live_len = len(buffer) - offset
         if live_len > event_truncate_threshold:
             log.warning(
@@ -466,14 +460,13 @@ async def parse_sse_response(
                 *_classify_sse_event(trailing_event, model_id, items, log, trailing_len)
             )
         elif trailing_len > 0 and _has_lost_data_payload(buffer[offset:]):
-            # 流末尾残留段含 data 负载但解析失败：与超阈值丢事件同口径计数并记录，
-            # truncated_events 使 status 标记 partial，通知调用方结果不完整。
+            # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
+            # 标记 partial。
             truncated_events += 1
             log.debug("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
 
-    # 与非流式 _build_api_result 保持一致：当 data 项含 error 即存在部分失败时
-    # 标记 status=partial，避免流式/非流式在同等部分失败场景下 status 语义不一致，
-    # 进而误导下游对生成结果完整性的判断。
+    # data 项含 error 即存在部分失败时标记 status=partial，与非流式
+    # _build_api_result 口径一致，避免误导下游对结果完整性的判断。
     if status in (None, "completed") and any(
         isinstance(item, dict) and "error" in item for item in items
     ):

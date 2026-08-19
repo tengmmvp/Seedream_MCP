@@ -89,7 +89,7 @@ def test_validate_size_for_model_accepts_seedream_50_pro_2k_preset() -> None:
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_3k_preset() -> None:
-    # 关键回归：5.0 Pro 的 id 含 "doubao-seedream-5-0" 子串，若误判为 5.0 Lite 则 3K 会通过
+    # 关键回归：5.0 Pro 的 id 含 "doubao-seedream-5-0" 子串，误判为 5.0 Lite 时 3K 会通过；
     # 档位串接按数值序排列，1K 排在 1.5K 之前。
     with pytest.raises(SeedreamValidationError, match=r"仅支持 1K/1\.5K/2K"):
         validate_size_for_model("3K", "doubao-seedream-5-0-pro-260628")
@@ -131,7 +131,7 @@ def test_validate_size_for_model_rejects_seedream_50_pro_oversized_pixel() -> No
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_non_multiple_of_16() -> None:
-    # 1300x732 总像素 951600 落在 [921600, 4194304] 内且宽高比合规，仅触发 16 倍数约束
+    # 1300x732 总像素 951600 落在 [921600, 4624220] 内且宽高比合规，仅触发 16 倍数约束。
     with pytest.raises(SeedreamValidationError, match="16 的倍数"):
         validate_size_for_model("1300x732", "doubao-seedream-5-0-pro-260628")
 

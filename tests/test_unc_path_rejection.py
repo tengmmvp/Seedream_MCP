@@ -1,9 +1,8 @@
 """UNC 路径拒绝测试。
 
-Windows UNC 路径（\\\\host\\share 或 //host/share）的 resolve 会触发 SMB 认证，
-须在 resolve 前由 is_unc_path 拦截。覆盖 is_unc_path、is_within_resolved、
-normalize_path、_file_uri_to_path 对 UNC 的拒绝行为与越界判定语义，以及
-normalize_path 对 Windows 驱动器相对路径的同口径拒绝。
+Windows UNC 路径的 resolve 会触发 SMB 认证，须在 resolve 前拦截。覆盖
+is_unc_path、is_within_resolved、normalize_path、_file_uri_to_path 的拒绝语义，
+以及 normalize_path 对 Windows 驱动器相对路径的同口径拒绝。
 """
 
 import sys
@@ -114,11 +113,7 @@ def test_normalize_path_resolves_relative(tmp_path: Path) -> None:
 def test_normalize_path_oserror_preserves_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """OSError 归一为 ValueError 时保留 errno 原因，不丢失为笼统的路径格式错误。
-
-    ENAMETOOLONG 等文件系统错误进错误文案，调用方可据此区分路径拼写问题与系统级
-    长度限制。
-    """
+    """OSError 归一为 ValueError 时保留 errno 原因，不丢失为笼统的路径格式错误。"""
     import errno
 
     def _raise_enametoolong(self: Path, strict: bool = False) -> Path:
@@ -136,8 +131,8 @@ def test_normalize_path_oserror_preserves_reason(
 def test_normalize_path_rejects_drive_relative_path(base_dir: str | None) -> None:
     """Windows 驱动器相对路径（如 C:foo，有 drive 无 root）与 UNC 同口径拒绝。
 
-    pathlib 的 / 拼接对该形态会丢弃 base_dir，resolve 落到该盘的进程 CWD，静默
-    绕开调用方指定的基础目录；旧行为无声落入 base_dir 分支，断言拒绝而非误解析。
+    pathlib 的 / 拼接对该形态会丢弃 base_dir，resolve 落到该盘进程 CWD，静默绕开
+    指定的基础目录。
     """
     with pytest.raises(ValueError, match="驱动器相对"):
         normalize_path("C:foo.png", base_dir)
@@ -177,7 +172,7 @@ def test_file_uri_to_path_rejects_unc_path_form() -> None:
 def test_file_uri_to_path_accepts_localhost(tmp_path: Path) -> None:
     f = tmp_path / "x.png"
     f.touch()
-    # file://localhost/path 形式应被接受
+    # file://localhost/path 形式应被接受。
     uri = f.as_uri().replace("file:///", "file://localhost/", 1)
     result = _file_uri_to_path(uri)
     assert result is not None
@@ -201,8 +196,7 @@ def test_resolve_local_image_candidate_skips_unc_without_resolve(
 ) -> None:
     """UNC 输入在候选定位中于 resolve 前被拦截，不触发 SMB 连接。
 
-    直接比较优化不得丢失 UNC 前置守卫；断言 Path.resolve 未被调用而非仅返回 None，
-    防止未来回归为"先 resolve 后拒绝"。
+    断言 Path.resolve 未被调用而非仅断言返回 None，防止回归为先 resolve 后拒绝。
     """
     from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
 
@@ -220,9 +214,8 @@ def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
 ) -> None:
     """UNC 根下相对路径拼接出的候选在 resolve 前被逐候选守卫拦截。
 
-    输入级 UNC 检查只覆盖 UNC 形态的直接输入；根本身为 UNC 时，相对路径经
-    base / normalized 拼出的候选同样以 UNC 前缀开头，resolve 会触发 SMB 认证。
-    断言 Path.resolve 未被调用，防止回归为"先 resolve 后跳过"。
+    输入级检查只覆盖 UNC 直接输入；UNC 根拼出的候选同样以 UNC 前缀开头，resolve
+    会触发 SMB 认证。断言 Path.resolve 未被调用。
     """
     from seedream_mcp.utils.images.image_input import _resolves_outside_workspace
 
@@ -240,8 +233,7 @@ def test_validate_image_input_rejects_unc_before_resolve(
 ) -> None:
     """公开导出的 validate_image_input 对 UNC 输入在 resolve 前拒绝，不触发 SMB。
 
-    _resolve_local_image_path 入口守卫与 normalize_path 同口径；断言 Path.resolve
-    未被调用而非仅断言抛错，防止回归为先解析后拒绝。
+    断言 Path.resolve 未被调用而非仅断言抛错，防止回归为先解析后拒绝。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
     from seedream_mcp.utils.images.image_validation import validate_image_input

@@ -1,9 +1,8 @@
 """共享 lifespan 资源的多消费者引用计数测试。
 
-mcp 2.0 下 streamable-http 的 lifespan 在会话管理器启动时进入一次，状态进程级
-共享，不再随会话进出。本套件以直调嵌套的 app_lifespan 锁定引用计数与退役逻辑的
-进程内多消费者契约：任一消费者退出不得关闭其余在途引用仍在使用的共享资源，全部
-在途引用归零后才清理。
+mcp 2.0 下 streamable-http 的 lifespan 只在会话管理器启动时进入一次、状态进程级
+共享。本套件以直调嵌套的 app_lifespan 锁定契约：任一消费者退出不得关闭其余在途
+引用仍在使用的共享资源，全部在途引用归零后才清理。
 """
 
 import asyncio
@@ -18,7 +17,7 @@ from seedream_mcp.config import SeedreamConfig
 
 @pytest.fixture
 async def reset_lifespan_singletons():
-    """重置模块级单例与传输模式，测试后关闭残留实例并再次复位，避免跨测试污染。"""
+    """重置模块级单例与全局配置，测试后关闭残留实例并再次复位，避免跨测试污染。"""
     server._reset_lifespan_state()
     yield
     active = resources._active_resource
@@ -32,7 +31,7 @@ async def reset_lifespan_singletons():
 
 
 def _activate_config(monkeypatch: pytest.MonkeyPatch, config: SeedreamConfig) -> None:
-    """注入活动配置并按 stateful 模式设置传输标志。"""
+    """注入活动配置。"""
     monkeypatch.setattr(config_module, "_active_config", config)
 
 
@@ -70,9 +69,8 @@ async def test_exit_skips_cleanup_while_retired_resource_in_flight(
 ) -> None:
     """退役资源仍有在途会话时，活动槽位归零也不触发清理。
 
-    会话 1 持有旧 config 的资源期间 config 变更，会话 2 进入使旧资源退役。
-    会话 2 先退出的时刻活动资源引用已归零，但退役资源仍被会话 1 使用，清理须
-    继续搁置至会话 1 退出。
+    会话 1 持有旧资源期间 config 变更、会话 2 进入使旧资源退役；会话 2 先退出时
+    活动引用已归零，清理仍搁置至会话 1 退出。
     """
     _activate_config(monkeypatch, SeedreamConfig(api_key="key_a"))
 
@@ -120,9 +118,9 @@ async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
 ) -> None:
     """teardown 清理在 drain 让出期间有新会话进入时放弃关闭，复用的资源保持可用。
 
-    复现归零判定与实际关闭之间的交错：会话 1 的 teardown 进入清理并在
-    drain_background_cleanup_tasks 处挂起，期间会话 2 经引用计数复用仍挂活动槽位
-    的资源。清理恢复后必须复检在途引用并放弃关闭，否则会话 2 持有的连接池被关掉。
+    复现归零判定与实际关闭间的交错：会话 1 的 teardown 挂起在
+    drain_background_cleanup_tasks 处，期间会话 2 复用仍挂活动槽位的资源；清理
+    恢复后须复检在途引用并放弃关闭。
     """
     from seedream_mcp.utils.io import io_save
 

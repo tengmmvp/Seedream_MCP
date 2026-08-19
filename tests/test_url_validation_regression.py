@@ -11,7 +11,7 @@ from seedream_mcp.utils.images.image_validation import validate_image_input
 
 
 def test_validate_image_input_rejects_missing_host_without_message_rewrap() -> None:
-    """缺少 host 的 URL 必须直接报"无效的URL格式"，不得被二次包装。"""
+    """缺少 host 的 URL 必须直接报「无效的URL格式」，不得被二次包装。"""
     with pytest.raises(SeedreamValidationError, match="^无效的URL格式$") as exc_info:
         validate_image_input("http://")
     assert exc_info.value.message == "无效的URL格式"

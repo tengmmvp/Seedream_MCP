@@ -1,9 +1,6 @@
 """参考图维度校验三层防护测试：最短边、宽高比与总像素边界及解码包装分支。
 
-覆盖 image_validation 的 _validate_image_dimensions 数值边界、
-decode_and_validate_dimensions 的 PIL 原生异常传播、本地文件与 Data URI 两条路径
-对解码失败与解压炸弹的包装，以及 validate_image_input 的 skip_dimensions 差异行为。
-图件全部经 PIL 在内存或临时目录生成，不依赖外部文件；PIL 解压炸弹用例通过调低
+测试图片经 PIL 在内存或临时目录生成，不依赖外部文件；解压炸弹用例通过调低
 Image.MAX_IMAGE_PIXELS 触发，避免构造真实大图占用内存。
 """
 
@@ -88,8 +85,8 @@ def test_ratio_rejects_1_to_17_and_17_to_1() -> None:
 def test_total_pixels_accepts_limit_and_limit_minus_one() -> None:
     """总像素恰为上限 3600 万与上限减一通过，超限被拒。
 
-    3600 万加一不存在同时满足最短边与宽高比约束的整数宽高组合，故以最小的
-    可表示超限组合 6000x6001 断言拒绝路径。
+    上限加一不存在满足最短边与宽高比约束的整数宽高组合，以最小超限组合
+    6000x6001 断言拒绝。
     """
     assert MAX_IMAGE_PIXELS == 36_000_000
     _validate_image_dimensions(6000, 6000, "limit.png")
@@ -237,8 +234,8 @@ def test_validate_image_input_wraps_non_image_data_uri_as_unidentified() -> None
 def test_validate_image_path_short_circuits_non_local_references(reference: str) -> None:
     """URL 与 Data URI 同口径短路：视为有效引用且路径为 None，不当本地路径处理。
 
-    Data URI 此前落入本地路径分支，被拼接为根下畸形文件名后误报文件不存在；
-    其内容校验由 validate_image_input 的 data_uri 分支承担，本函数不重复执行。
+    Data URI 此前落入本地路径分支，被拼接为畸形文件名后误报不存在；其内容校验
+    由 validate_image_input 承担。
     """
     is_valid, error, normalized = validate_image_path(reference, base_dir="/nonexistent")
 

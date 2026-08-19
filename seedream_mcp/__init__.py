@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     )
     from .server import cli_main, mcp  # noqa: F401
 
-# PEP 562 延迟加载表：公开属性名 -> (子模块相对路径, 属性名)，首次访问时经 __getattr__ 导入并缓存到 globals()。
+# PEP 562 延迟加载表：公开属性名 -> (子模块, 属性名)，首次访问时导入并缓存。
 _LAZY_EXPORTS = {
     "SeedreamClient": (".client", "SeedreamClient"),
     "SeedreamConfig": (".config", "SeedreamConfig"),
@@ -38,7 +38,7 @@ _LAZY_EXPORTS = {
     "cli_main": (".server", "cli_main"),
 }
 
-# 公开接口声明，程序化派生自 _LAZY_EXPORTS 的键并补充 __version__，消除手动同步。
+# 公开接口声明，派生自 _LAZY_EXPORTS 的键并补充 __version__。
 __all__ = ["__version__"] + list(_LAZY_EXPORTS)
 
 

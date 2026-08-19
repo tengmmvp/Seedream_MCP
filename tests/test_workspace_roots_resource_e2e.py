@@ -1,10 +1,8 @@
 """seedream://workspace/roots 模板资源端到端守护测试。
 
-经 SDK in-process Client 驱动真实读取管线：URI 模板匹配、pydantic validate_call
-包装、Context 注入与 handler 执行全部在管线内完成，测试不直调 handler。项目曾因
-参数化 Context 注解使模板资源以 Error creating resource from template 失败，本
-套件锁定该管线与回退语义不回退。另守护 initialize 握手报告的 serverInfo.version
-为项目版本号。
+经 SDK in-process Client 驱动真实读取管线，测试不直调 handler；项目曾因参数化
+Context 注解使模板资源创建失败，本套件锁定管线与回退语义。另守护 initialize
+报告的 serverInfo.version 为项目版本号。
 """
 
 from __future__ import annotations
@@ -52,8 +50,7 @@ async def test_initialize_reports_project_version(
 ) -> None:
     """initialize 握手的 serverInfo.version 非空且等于项目 __version__。
 
-    SDK 2.0 起未向 MCPServer 传 version 的服务器在 serverInfo 中报告空串，
-    客户端侧的版本展示与兼容性判断将失去依据。
+    SDK 2.0 起未传 version 的服务器会报告空串，客户端版本判断失去依据。
     """
     async with Client(server.mcp, mode="legacy") as client:
         server_info = client.server_info
@@ -68,9 +65,7 @@ async def test_workspace_roots_resource_reads_over_wire_without_roots_callback(
 ) -> None:
     """默认协商路径读取模板资源返回 JSON，客户端未声明 roots 时输出空 roots。
 
-    客户端未设 roots callback 即不声明 roots capability，handler 跳过 roots/list
-    往返回退环境变量边界。回退边界属服务器环境而非客户端授权声明，其绝对路径不
-    进入面向调用方的输出，两种读取形态均为受控的空列表。
+    回退边界属服务器环境而非客户端授权声明，其绝对路径不进入面向调用方的输出。
     """
     async with Client(server.mcp) as client:
         plain = await client.read_resource("seedream://workspace/roots")
@@ -86,10 +81,8 @@ async def test_workspace_roots_resource_reports_client_roots(
 ) -> None:
     """legacy 协商加 roots callback 时，模板资源经会话 Roots 往返输出授权根目录。
 
-    handler 经注入的 Context 发起 roots/list，客户端 callback 应答的根目录进入
-    输出：roots 为反斜杠归一后的展示形态，verbose 附 resolve 后的物理路径。此
-    路径同时守护 Context 注入实例的 session 可用性，参数化注解回退为脱离请求的
-    实例时首次访问 ctx.session 即失败。
+    roots 为反斜杠归一后的展示形态，verbose 附 resolve 后的物理路径；同时守护
+    Context 注入实例的 session 可用性。
     """
     declared_root = tmp_path / "workspace"
     declared_root.mkdir()
@@ -116,9 +109,8 @@ async def test_workspace_roots_resource_modern_round_trip_reports_client_roots(
 ) -> None:
     """默认协商（2026-07-28）加 roots callback 时，资源经多轮请求取回授权根目录。
 
-    2026 会话无服务端反向通道，roots 直连必抛 NoBackChannelError；模板资源返回
-    InputRequiredResult 携带 roots 请求，客户端 read_resource 驱动多轮循环、
-    callback 应答后重试，最终输出与 legacy 直连等价的授权根目录。
+    2026 会话无反向通道，资源返回 InputRequiredResult 由客户端应答后重试，输出
+    与 legacy 等价。
     """
     declared_root = tmp_path / "workspace"
     declared_root.mkdir()

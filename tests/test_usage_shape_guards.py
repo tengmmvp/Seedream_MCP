@@ -1,8 +1,7 @@
 """API 结果 usage 字段异形守卫测试。
 
-非流式 JSON 与 SSE completed 事件两条路径对非 dict 的 usage 收敛为空 dict，
-结果结构 usage 恒为 dict；合法 dict 原样保留。网络层经 httpx.MockTransport 与
-伪 SSE 响应注入，不触达真实 API。
+非流式 JSON 与 SSE completed 两条路径对非 dict 的 usage 收敛为空 dict，合法
+dict 原样保留；网络层经 httpx.MockTransport 与伪 SSE 注入，不触达真实 API。
 """
 
 from __future__ import annotations
@@ -67,6 +66,7 @@ async def test_non_stream_usage_dict_preserved(no_sleep: None) -> None:
 
 
 def _sse_chunks(usage_json: str) -> List[bytes]:
+    """构造 completed 事件携带指定 usage JSON 的两事件 SSE 字节块。"""
     return [
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
         b'data: {"type":"image_generation.completed","usage":' + usage_json.encode() + b"}\n\n",
@@ -74,6 +74,7 @@ def _sse_chunks(usage_json: str) -> List[bytes]:
 
 
 async def _parse_sse(chunks: List[bytes]) -> Dict[str, Any]:
+    """以固定测试参数解析伪 SSE 响应。"""
     return await parse_sse_response(
         _FakeSSEResponse(chunks),
         model_id="m",
@@ -107,8 +108,7 @@ async def test_sse_completed_usage_dict_preserved() -> None:
 async def test_stream_top_level_error_failure_keeps_usage_dict(no_sleep: None) -> None:
     """stream 请求级失败路径同样保证 usage 恒为 dict：异形 usage 收敛为空 dict。
 
-    顶层 error 守卫的失败返回位于 usage 守卫之后，失败结果不因错误路径绕过
-    usage 归一化。
+    顶层 error 守卫的失败返回不绕过 usage 归一化。
     """
     config = SeedreamConfig(api_key="k", max_retries=1)
 

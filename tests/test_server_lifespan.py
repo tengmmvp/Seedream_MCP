@@ -1,7 +1,7 @@
 """app_lifespan 注入测试：验证 yield 含 config 与可用 client 的字典。
 
-SeedreamClient 与 DownloadManager 为模块级单例，以修复 stateless_http
-模式下每请求重入 lifespan 导致连接池退化的问题。此文件同时守护单例的跨重入复用语义。
+SeedreamClient 与 DownloadManager 为模块级单例，修复 stateless_http 模式下每请求
+重入 lifespan 导致的连接池退化；同时守护单例的跨重入复用语义。
 """
 
 import asyncio
@@ -70,8 +70,7 @@ async def test_app_lifespan_cleans_up_on_exception_teardown(
 ) -> None:
     """yield 体抛异常的 teardown 同样执行共享资源清理，防止异常退出泄漏连接池。
 
-    清理语句位于 finally 内：asynccontextmanager 的异常经 athrow 注入并在 finally
-    后继续向外传播，写在 finally 之后的语句会被跳过。
+    清理语句位于 finally 内，写在 finally 之后的语句会因异常继续传播被跳过。
     """
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
@@ -86,8 +85,8 @@ async def test_app_lifespan_cleans_up_on_exception_teardown(
 def test_get_lifespan_resource_swallows_value_error_from_request_context() -> None:
     """ctx.request_context 抛 ValueError 时守卫返回 None 而非异常逃逸。
 
-    mcp 的 Context.request_context 在无请求上下文时抛 ValueError 而非 AttributeError，
-    仅捕 AttributeError 会令异常从本应回退 None 的守卫路径逃逸。
+    mcp 的 request_context 无请求上下文时抛 ValueError 而非 AttributeError，
+    仅捕后者会令异常从本应回退 None 的守卫路径逃逸。
     """
 
     class _ValueErrorCtx:
@@ -130,9 +129,8 @@ async def test_cleanup_shared_resources_unconditional_closes_inflight(
 ) -> None:
     """idle_only=False 的进程退出兜底无视在途引用，无条件关闭全部资源。
 
-    streamable-http 退出清理经 _run_streamable_http 的 finally 走本分支，覆盖
-    关闭时仍有在途会话的异常退出场景；若误按引用计数门控，异常退出时在途引用
-    会阻止连接池关闭。
+    streamable-http 退出清理走本分支，覆盖关闭时仍有在途会话的场景；误按引用
+    计数门控会阻止连接池关闭。
     """
 
     class _Closeable:
@@ -164,11 +162,7 @@ async def test_cleanup_shared_resources_unconditional_closes_inflight(
 async def test_build_active_resource_closes_client_when_manager_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """download_manager 初始化失败时补偿关闭已创建的 client，不泄漏半初始化资源。
-
-    _build_active_resource 的部分初始化回滚：client 进入成功而 manager 进入抛错
-    时，已创建的 client 须经 _safe_close 关闭后异常上抛，活动槽位不被污染。
-    """
+    """download_manager 初始化失败时补偿关闭已创建的 client，不泄漏半初始化资源。"""
     from seedream_mcp.client import SeedreamClient
     from seedream_mcp.utils.io import io_download
 
@@ -229,8 +223,8 @@ async def test_app_lifespan_concurrent_reentry_creates_one_client(
 ) -> None:
     """并发进入 lifespan 应复用同一单例，验证 _shared_init_lock 防竞态。
 
-    两个进入协程在 lifespan 体内以屏障会合，保证真正并发在途而非依赖 gather 的
-    调度时序；若锁内二次判定失效，第二个进入会构造新 client 使断言失败。
+    两个进入协程以屏障会合保证真正并发在途；锁内二次判定失效时第二个进入会
+    构造新 client。
     """
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
@@ -278,8 +272,8 @@ async def test_app_lifespan_applies_download_concurrency_limit(
 ) -> None:
     """共享 DownloadManager 经构造参数施加进程级下载并发上限到会话连接器。
 
-    AutoSaveManager 每次批量保存局部构造的信号量只约束单次调用，跨请求叠加的下载
-    并发须由共享会话的连接器统一限制，否则全进程连接数可达调用次数乘以配置上限。
+    批量保存局部构造的信号量只约束单次调用，跨请求叠加的并发须由共享会话的
+    连接器统一限制。
     """
     config = SeedreamConfig(api_key="test_key", auto_save_max_concurrent=3)
     monkeypatch.setattr(config_module, "_active_config", config)
@@ -294,8 +288,8 @@ async def test_app_lifespan_applies_download_concurrency_limit(
 async def test_download_manager_connection_limit_survives_session_rebuild() -> None:
     """close 后重建的会话连接器保持构造期注入的并发上限。
 
-    并发上限经 DownloadManager 构造参数传入，_ensure_session 每次构造连接器均施加
-    该值；若依赖会话建立后二次注入，会话重建分支会静默失去上限。
+    并发上限经构造参数传入，_ensure_session 每次构造连接器均施加；依赖会话
+    建立后二次注入会在重建时静默失去上限。
     """
     from seedream_mcp.utils.io.io_download import DownloadManager
 
@@ -312,10 +306,9 @@ async def test_download_manager_connection_limit_survives_session_rebuild() -> N
 def test_reset_lifespan_state_clears_global_config() -> None:
     """复位协议覆盖 config._global_config，用例触发的懒加载配置不跨用例残留。
 
-    set_active_config(None) 只清除 CLI 注入的活动配置；全局配置懒加载缓存若不在
-    复位清单内，上个用例按其环境构建的配置会被后续用例经 get_active_config 读到。
-    复位与断言均经函数内 import 取 sys.modules 的当前 config 模块对象，与延迟
-    消费方（io_path 等）的调用时解析保持同一目标。
+    set_active_config(None) 只清除活动配置，全局配置懒加载缓存不在复位清单内会
+    跨用例残留。复位与断言经函数内 import 取 sys.modules 的当前模块对象，与延迟
+    消费方的调用时解析同目标。
     """
     from seedream_mcp import config as current_config_module
 
@@ -330,8 +323,8 @@ def test_reset_lifespan_state_clears_global_config() -> None:
 class _FakeLifespanCtx:
     """模拟 MCP Context，仅提供 lifespan_context 访问路径与 no-op 进度/日志方法。
 
-    execute_generation_handler 内的 _safe_report_progress / _safe_ctx_log 会调用
-    ctx.report_progress / ctx.info 等方法；此处提供空实现使流水线不报错。
+    execute_generation_handler 会调用 ctx.report_progress / ctx.info 等方法，
+    此处提供空实现使流水线不报错。
     """
 
     def __init__(self, lifespan_context: Any) -> None:
@@ -510,9 +503,8 @@ async def test_execute_generation_handler_passes_shared_download_manager(
 def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
     """复位协议不再清理 results 的净化哨兵：模块级哨兵已随显式传参重构移除。
 
-    results 模块不再持有可变模块级状态，_reset_lifespan_state 的复位清单相应
-    收敛为 io_save 清理节流状态与 io_scan 目录扫描缓存；results 侧若重新引入
-    模块级可变状态，须在 _reset_lifespan_state 与本守护同步登记。
+    results 侧若重新引入模块级可变状态，须在 _reset_lifespan_state 与本守护
+    同步登记。
     """
     from seedream_mcp.tools.core import results as results_module
 
@@ -527,10 +519,8 @@ def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
 def test_tighten_flat_tool_schemas_private_surface_guard() -> None:
     """五工具经 SDK 私有面全部命中并完成收紧，SDK 升级改动私有 API 时本测试转红。
 
-    _tighten_flat_tool_schemas 依赖 mcp._tool_manager.get_tool 与 Tool.fn_metadata.
-    arg_model 两个私有入口，get_tool 返回 None 时仅告警跳过，fail-open 会让封闭性
-    静默缺失。逐工具断言命中与两处收紧到位，私有面漂移即失败，提示维护者适配
-    SDK 变化而非静默失去 inputSchema 封闭性。
+    依赖 mcp._tool_manager.get_tool 与 Tool.fn_metadata.arg_model 两个私有入口，
+    get_tool 未命中仅告警跳过，fail-open 会使封闭性静默缺失。
     """
     assert len(server._FLAT_SCHEMA_TOOL_NAMES) == 5
 

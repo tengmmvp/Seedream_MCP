@@ -1,18 +1,12 @@
 """streamable-http 端到端测试：经 httpx ASGITransport 驱动真实 ASGI 栈。
 
-覆盖 _run_streamable_http 装配的中间件栈与 Starlette lifespan 的集成：
-Bearer 鉴权放行/拒绝、请求体上限超限早拒、合法请求经全栈返回 200。另含
-tools/call 协议集成：平铺参数经真实 JSON-RPC 调用路径反序列化，成功与失败
-结果均以 HTTP 200 的 CallToolResult 返回，isError 透传，structuredContent
-经 MCPServer 内部以 outputSchema 校验。以及 SDK 内层 DNS rebinding 防护按绑定
-地址重配的集成：非回环绑定下非白名单 Host 的 /mcp 请求放行，回环绑定下外部
-域名 Host 被最外层自定义回环 Host 守卫以 403 先行短路，localhost 绑定下白名单
-仍启用，外部域名 Host 由 SDK 内层以 421 拒绝。末尾以真端口 uvicorn 后台线程跑
-生产启动器 _run_streamable_http 的默认 SSE 模式冒烟与优雅关闭链。
+覆盖 Bearer 鉴权、请求体上限、健康检查等中间件集成，tools/call 平铺参数反序列化
+与 CallToolResult 返回，SDK 内层 DNS rebinding 防护按绑定地址重配，以及真端口
+uvicorn 生产启动器冒烟。
 
-httpx.ASGITransport 仅发送 http scope 不驱动 ASGI lifespan，故对触达 MCP 应用的
-200 用例以自建 _LifespanManager 显式运行 session_manager 生命周期（建立任务组）；
-401/413 由中间件在应用前短路，不依赖 lifespan。
+httpx.ASGITransport 不驱动 ASGI lifespan，触达 MCP 应用的用例以自建
+_LifespanManager 显式运行 session_manager 生命周期；401/413 由中间件在应用前
+短路，不依赖 lifespan。
 """
 
 import asyncio
@@ -32,21 +26,18 @@ from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.transport import _attach_streamable_http_middleware, _transport_security_for_host
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
-# MCPServer streamable-http 默认 MCP 端点路径
+# MCPServer streamable-http 默认 MCP 端点路径。
 _MCP_PATH = "/mcp"
-# 生产请求体上限默认值，与 SeedreamConfig.http_max_body_size 默认一致
+# 生产请求体上限默认值，与 SeedreamConfig.http_max_body_size 默认一致。
 _MAX_BODY = 64 * 1024 * 1024
 
 
 class _LifespanManager:
-    """最小 ASGI lifespan 驱动器。
+    """最小 ASGI lifespan 驱动器，等价替代未引入的 asgi_lifespan。
 
-    项目未依赖 asgi_lifespan，此处实现等价的 startup/shutdown 协议：发送
-    lifespan.startup 等待 startup.complete，退出时发送 shutdown 等待
-    shutdown.complete。Starlette 据此运行 session_manager.run() 建立请求处理任务组，
-    否则 _handle_stateless_request 会因 _task_group 为 None 抛 RuntimeError。
-    startup.failed 与 shutdown.failed 同步置位事件并转译为 RuntimeError，lifespan
-    启动失败时用例立即失败而非在等待 complete 事件上无限挂起。
+    发送 lifespan.startup/shutdown 并等待 complete，使 Starlette 运行
+    session_manager 建立请求处理任务组；failed 消息转译为 RuntimeError，用例立即
+    失败而非在等待 complete 事件上无限挂起。
     """
 
     def __init__(self, app: Any) -> None:
@@ -104,12 +95,9 @@ def _build_app(
 ) -> Any:
     """按生产 _run_streamable_http 的装配路径构建传输栈。
 
-    中间件经 transport._attach_streamable_http_middleware 复用生产装配函数：
-    请求体上限取注入活动配置的 http_max_body_size，Bearer 鉴权按 auth_token
-    装配，回环绑定额外叠加最外层 Host 守卫，装配顺序与生产完全同源。传输参数
-    stateless/transport_security/max_request_body_size 与生产一致直传
-    streamable_http_app 构造，transport_security 按绑定地址派生。请求体上限经
-    活动配置注入且配置合法下限为 1MB，超限用例以 1MB 上限配 1MB+1 请求体触发。
+    中间件经 transport._attach_streamable_http_middleware 复用生产装配且顺序同源，
+    transport_security 按绑定地址派生后与其余传输参数直传 streamable_http_app；
+    请求体上限经活动配置注入，配置合法下限 1MB，超限用例以 1MB 配 1MB+1 触发。
     """
     set_active_config(SeedreamConfig(api_key="test_key", http_max_body_size=body_limit))
     app = server.mcp.streamable_http_app(
@@ -142,13 +130,11 @@ def _tools_call_request(name: str, arguments: dict[str, Any]) -> bytes:
 
 @pytest.fixture
 async def reset_http_app_state(monkeypatch: pytest.MonkeyPatch):
-    """每测试清除上一测试遗留的 session manager 引用并注入测试配置。
+    """每测试清除遗留的 session manager 引用并注入测试配置。
 
-    streamable_http_app 每次调用都无条件新建并覆盖 _session_manager，其 run()
-    仅可调用一次；前置置 None 属跨测试隔离 hygiene，使上一测试已运行过的管理器
-    引用不残留。同时注入活动配置供 app_lifespan 构造共享 client，
-    _build_app 按用例再覆盖为携带指定请求体上限的配置。退出时关闭可能由 stateless
-    请求触发的 lifespan 共享单例，避免连接池跨测试泄漏。
+    streamable_http_app 每次调用无条件新建并覆盖 _session_manager，前置置 None 属
+    跨测试隔离；退出时关闭可能由 stateless 请求触发的 lifespan 共享单例，避免
+    连接池跨测试泄漏。
     """
     server.mcp._lowlevel_server._session_manager = None
     set_active_config(SeedreamConfig(api_key="test_key"))
@@ -186,7 +172,7 @@ async def test_e2e_valid_token_tools_list_returns_200(
             )
 
     assert response.status_code == 200
-    # 响应体须为合法 JSON-RPC 2.0，且 tools/list 结果非空
+    # 响应体须为合法 JSON-RPC 2.0，且 tools/list 结果非空。
     body = response.json()
     assert body["jsonrpc"] == "2.0"
     assert body["id"] == 1
@@ -231,9 +217,8 @@ async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) ->
 async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> None:
     """请求体超 Content-Length 上限由请求体中间件在鉴权前返回 413。
 
-    上限经注入活动配置的 http_max_body_size 控制并取配置合法下限 1MB，以
-    1MB+1 字节的真实超限请求走全栈，确认中间件在 ASGI 栈内短路；上限单值
-    与配置解析由 test_request_body_limit 覆盖。
+    上限取配置合法下限 1MB 并以 1MB+1 请求体走全栈；单值与配置解析由
+    test_request_body_limit 覆盖。
     """
     app = _build_app("s3cret", body_limit=1024 * 1024)
     transport = httpx.ASGITransport(app=app)
@@ -267,10 +252,9 @@ async def test_e2e_tools_call_flat_params_success(
 ) -> None:
     """平铺参数经真实 tools/call 路径反序列化成功，返回 200 与结构化输出。
 
-    SeedreamClient.text_to_image 以类级 fake 替换并捕获入参，锁定「wire 平铺键名 →
-    工具签名 → 输入模型 → 流水线 → 客户端」的参数透传链路。auto_save 显式关闭，
-    避免 fake 返回的占位 URL 触发真实下载。structuredContent 由 MCPServer 内部以
-    outputSchema 完成校验，校验失败会转为错误结果使本用例失败。
+    text_to_image 以类级 fake 替换并捕获入参，锁定平铺键名到客户端入参的透传链路；
+    auto_save 显式关闭以避免占位 URL 触发真实下载，structuredContent 经 outputSchema
+    校验。
     """
     captured: dict[str, Any] = {}
 
@@ -322,7 +306,7 @@ async def test_e2e_tools_call_flat_params_success(
     assert structured["tool"] == "text_to_image"
     assert structured["success"] is True
     assert structured["data"][0]["url"] == "https://example.com/out.png"
-    # 平铺参数经完整调用链透传到客户端入参
+    # 平铺参数经完整调用链透传到客户端入参。
     assert captured["prompt"] == "一只戴墨镜的猫坐在月球上"
     assert captured["size"] == "2K"
     assert captured["watermark"] is False
@@ -333,8 +317,7 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
 ) -> None:
     """下游校验失败经处理器封装为 isError 结果透传，仍以 HTTP 200 的 JSON-RPC 返回。
 
-    工具级失败不上升为 JSON-RPC error：客户端据 isError 分支处理，错误详情在
-    structuredContent.error 与文本 content 中。
+    工具级失败不上升为 JSON-RPC error，客户端据 isError 分支处理。
     """
     captured: dict[str, Any] = {}
 
@@ -398,10 +381,10 @@ async def _post_mcp_with_host(app: Any, host_header: str) -> httpx.Response:
 async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
     monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
 ) -> None:
-    """非回环绑定按实际地址重配 SDK 内层 Host 校验，非白名单 Host 的 /mcp 不再 421。
+    """非回环绑定按实际地址重配 SDK 内层 Host 校验，非白名单 Host 不再被 421 拒绝。
 
-    streamable_http_app 的 host 参数决定 SDK 内层 Host 校验默认；未按实际绑定地址派生时，
-    非回环部署的全部 /mcp 请求都会被 SDK 内层以 421 拒绝。本用例经 host 参数按实际绑定地址派生 transport_security，以部署域名 Host 请求断言放行。
+    host 参数未按实际绑定地址派生时，非回环部署的全部 /mcp 请求都会被 SDK 内层
+    以 421 拒绝。
     """
     app = _build_app("s3cret", stateless=True, json_response=True, host="0.0.0.0")
 
@@ -418,10 +401,7 @@ async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlis
 ) -> None:
     """回环绑定下外部域名 Host 被最外层自定义 Host 守卫以 403 先行短路。
 
-    生产回环栈最外层为 _LoopbackHostGuardMiddleware，rebinding 域名请求先于健康
-    检查、鉴权与 SDK 内层被 403 拒绝，不会走到 SDK 内层的 421。分层断言同时锁定
-    SDK 内层白名单仍按回环绑定配置：防护按绑定地址重配不得把回环防线一并关闭，
-    自定义守卫失效时 SDK 内层仍兜底。
+    分层断言同时锁定 SDK 内层白名单仍按回环绑定配置，自定义守卫失效时内层仍兜底。
     """
     app = _build_app("s3cret", stateless=True, json_response=True, host="127.0.0.1")
 
@@ -439,11 +419,9 @@ async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
 ) -> None:
     """localhost 绑定保留 SDK 内层 Host 白名单，外部域名 Host 被内层以 421 拒绝。
 
-    localhost 不参与免鉴权与 TLS 强制的绑定判定，但绑定 localhost 时若派生逻辑
-    关闭 SDK 内层防护，hosts 污染使监听实际暴露公网后请求将失去全部 Host 头防线。
-    本地 localhost Host 的请求放行返回 200，外部域名 Host 穿过中间件后到达 SDK
-    内层被 421 拒绝。第二个 app 经 streamable_http_app 无条件新建自己的会话
-    管理器，两次 lifespan 进入各运行一次。
+    localhost 若按派生逻辑关闭内层防护，hosts 污染使监听实际暴露公网后请求将失去
+    全部 Host 头防线。第二个 app 经 streamable_http_app 无条件新建会话管理器，两次
+    lifespan 进入各运行一次。
     """
     app = _build_app("s3cret", stateless=True, json_response=True, host="localhost")
 
@@ -475,13 +453,11 @@ def _pick_free_port() -> int:
 async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
     monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
 ) -> None:
-    """生产启动器真端口冒烟：默认 SSE 响应模式完成工具列表后优雅关闭无异常无挂起。
+    """生产启动器真端口冒烟：默认 SSE 模式完成工具列表后优雅关闭无异常无挂起。
 
-    _run_streamable_http 在后台线程以真实 uvicorn 监听随机空闲端口，装配、事件
-    循环管理与退出清理链全部走生产代码。客户端以默认配置连接：legacy 握手与
-    tools/list 的 POST 响应均为 SSE 流，补全生产默认响应模式的端到端验证，同时
-    断言 initialize 的 serverInfo.version 为项目版本号。客户端退出后置
-    should_exit 触发优雅关闭，以 30 秒上限 join 线程，防关闭链挂死拖垮测试进程。
+    _run_streamable_http 在后台线程以真实 uvicorn 监听随机端口，全链走生产代码；
+    断言 serverInfo.version 为项目版本号，置 should_exit 后以 30 秒上限 join 线程
+    防关闭链挂死。
     """
     import uvicorn
     from mcp.client import Client

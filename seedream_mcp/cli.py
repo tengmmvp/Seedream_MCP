@@ -23,8 +23,6 @@ from .version import __version__
 def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     """从命令行参数构建服务器配置对象。
 
-    优先级：命令行参数 > 系统环境变量 > .env 文件 > 默认值。
-
     Raises:
         SeedreamConfigError: 缺少 API 密钥等必需参数。
     """
@@ -43,11 +41,7 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
 
 
 def _log_level_type(value: str) -> str:
-    """将日志级别转为大写后返回。
-
-    作为 argparse 的 type 回调使用，使 CLI 与系统环境变量、.env 文件在
-    日志级别上的大小写不敏感行为保持一致。
-    """
+    """argparse type 回调，将日志级别转为大写以保持大小写不敏感。"""
     return value.upper()
 
 
@@ -63,10 +57,7 @@ def _port_type(value: str) -> int:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """构建命令行参数解析器。
-
-    定义所有支持的命令行选项，包括 API 配置、模型选择、日志级别等。
-    """
+    """构建命令行参数解析器，定义全部命令行选项。"""
     parser = argparse.ArgumentParser(
         description="Seedream MCP 服务器 - AI 图像生成工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -197,9 +188,5 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable-http"]:
-    """构建 MCP 运行传输方式。
-
-    SSE 传输已被 MCP 2025-03-26 规范弃用并由 Streamable HTTP 取代，
-    本服务仅支持 stdio 本地传输与 streamable-http 远程传输两种方式。
-    """
+    """构建 MCP 运行传输方式，仅支持 stdio 与 streamable-http。"""
     return cast(Literal["stdio", "streamable-http"], args.transport)

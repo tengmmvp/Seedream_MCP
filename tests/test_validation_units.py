@@ -310,7 +310,7 @@ def test_parallel_options_parallelism_above_max() -> None:
 
 
 def test_parallel_options_parallelism_equal_request_count_ok() -> None:
-    """parallelism == request_count 不触发"不能大于"约束。"""
+    """parallelism == request_count 不触发「不能大于」约束。"""
     rc, par = validate_parallel_generation_options(request_count=3, parallelism=3, stream=False)
     assert rc == 3
     assert par == 3
@@ -354,6 +354,7 @@ def test_validate_background_rejects_non_string_output_format_for_opaque() -> No
 
 
 def _make_caps(min_pixels: int | None, max_pixels: int | None) -> ModelCapabilities:
+    """构造仅像素上下限可变、其余字段取默认的测试能力声明。"""
     return ModelCapabilities(
         family="test-family",
         display_name="测试模型",

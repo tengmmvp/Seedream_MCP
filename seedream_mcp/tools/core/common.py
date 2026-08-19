@@ -1,10 +1,9 @@
 """生成类工具通用处理门面。
 
-内部按职责拆分到 _helpers/context/results/auto_save/parallel 子模块；本模块聚合公共
-符号，供 tools/impl 与测试经 ``from ...core.common import X`` 导入。
-``execute_generation_handler`` 作为四类生成工具的统一处理流水线留在此处，依次执行参数
-归一化与校验、客户端调用、自动保存、响应与结构化结果格式化，成功路径按配置生成已保存
-图片的缩略图预览，并对异常做统一降级处理。
+内部按职责拆分到 _helpers/context/results/auto_save/parallel 子模块，本模块聚合公共
+符号供 tools/impl 与测试导入。``execute_generation_handler`` 是四类生成工具的统一处理
+流水线，依次执行参数归一化与校验、客户端调用、自动保存、结果格式化与预览生成，异常
+统一降级为错误结果。
 """
 
 from __future__ import annotations
@@ -56,8 +55,7 @@ if TYPE_CHECKING:
     from ...client import SeedreamClient
 
 
-# 门面对外导出的公共符号。_safe_* 与 _try_get_shared_* 等私有辅助供内部子模块和
-# 测试经各自定义模块显式导入。
+# 门面对外导出的公共符号，私有辅助经各自定义模块显式导入。
 __all__ = [
     "GenerationExecutionContext",
     "aggregate_parallel_generation_results",
@@ -87,29 +85,27 @@ async def execute_generation_handler(
     ],
     ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
-    """执行生成类工具的通用处理流水线，返回 MCP 结构化工具结果。
+    """执行生成类工具的统一处理流水线，返回 MCP 结构化工具结果。
 
-    流水线依次为：构建并校验执行上下文、按 request_count 单次或并行调用客户端、按
-    response_format 触发 URL 下载或 Base64 解码的自动保存、格式化面向模型的文本与
-    structuredContent，随后在预览开启且存在成功保存图片时生成缩略图 ImageContent 追加
-    进 content。任意阶段抛出的异常都被捕获并降级为 ``is_error=True`` 的结果，
-    不向调用方抛出。
+    按 request_count 单次或并行调用客户端，按 response_format 自动保存，随后格式化文本
+    与 structuredContent，预览开启且存在成功保存图片时追加缩略图 ImageContent。任意
+    阶段抛出的异常均降级为 ``is_error=True`` 的结果，不向调用方抛出。
 
     Args:
-        params: 经 pydantic 校验的工具输入模型，由各 impl handler 透传。
-        config: 当前生效的 SeedreamConfig。
-        module_logger: 各 impl 模块的 loguru logger，用于离线日志。
-        tool_name: 工具标识，写入 structuredContent.tool 与日志。
-        completion_title: 成功时响应文本的标题。
-        failure_prefix: 失败时错误消息与日志的前缀。
-        start_log_message: 请求开始时的日志模板。
-        start_log_values_builder: 基于执行上下文构造日志模板参数的回调。
-        request_executor: 执行单次生成请求的回调，由各 impl 提供 client 调用差异。
-        ctx: MCP 上下文，用于进度上报，无会话时可为 None。
+        params: 经 pydantic 校验的工具输入模型。
+        config: 当前生效配置。
+        module_logger: 调用方模块的 loguru logger。
+        tool_name: 工具标识，写入 structuredContent.tool。
+        completion_title: 成功响应文本的标题。
+        failure_prefix: 失败消息与日志的前缀。
+        start_log_message: 请求开始日志模板。
+        start_log_values_builder: 由执行上下文构造日志模板参数。
+        request_executor: 执行单次生成请求，由各 impl 提供 client 调用差异。
+        ctx: MCP 上下文，用于进度上报，可为 None。
 
     Returns:
-        MCP 结构化工具结果。成功时含文本摘要与 structuredContent，预览开启且自动保存
-        成功时另含缩略图 ImageContent；失败时 isError 为 True。
+        工具结果，成功时含文本摘要与 structuredContent 及可选缩略图，失败时 isError
+        为 True。
     """
     try:
         from ...client import SeedreamClient
@@ -119,15 +115,14 @@ async def execute_generation_handler(
         )
         await _yield_for_cancellation()
         context = build_generation_context(params, config)
-        # save_path 预检含目录 resolve 等同步文件系统调用，下沉工作线程执行，
-        # 网络挂载或 UNC 路径下不阻塞事件循环；预检仍在计费请求分发前完成。
+        # 预检含目录 resolve 等同步文件系统调用，下沉工作线程避免阻塞事件循环；
+        # 仍在计费请求分发前完成。
         await asyncio.to_thread(prevalidate_save_path, config, params.save_path)
         await _safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
 
         module_logger.info(start_log_message, *start_log_values_builder(context))
 
-        # 优先复用 lifespan 注入的共享客户端，避免每次请求重建 HTTP 连接池；
-        # 无 lifespan 上下文时，例如直接调用 handler 的单元测试，回退到按需新建。
+        # 优先复用 lifespan 共享客户端；无 lifespan 上下文时回退按需新建。
         shared_client = _try_get_shared_client(ctx)
         if shared_client is not None:
             result = await _run_generation_requests(
@@ -151,8 +146,7 @@ async def execute_generation_handler(
         saveable_indices: list[int] = []
         auto_save_error: str | None = None
         is_generation_failed = _is_generation_failed(result)
-        # 图片列表在自动保存前提取一次并传入 auto_save_from_*，供收集阶段直接复用，
-        # 消除收集阶段对同一结果的重复提取。
+        # 图片列表提取一次供自动保存与格式化阶段复用，避免重复提取。
         images = extract_images(result)
         if context.enable_auto_save and not is_generation_failed:
             try:
@@ -188,8 +182,7 @@ async def execute_generation_handler(
                     result = update_result_with_auto_save(
                         result, auto_save_results, saveable_indices
                     )
-                    # 回填合并改写了 data（补充 local_path/markdown_ref），展示与结构化
-                    # 输出按合并后的结果重新提取；未触发合并时沿用上方已提取的列表。
+                    # 合并改写了 data，重新提取供展示与结构化输出复用。
                     images = extract_images(result)
                 await _safe_report_progress(
                     ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成"
@@ -198,8 +191,6 @@ async def execute_generation_handler(
                 auto_save_error = format_error_for_user(exc)
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
 
-        # images 供后续纯函数复用，避免 extract_images 在格式化、结构化与日志阶段
-        # 重复遍历同一结果。
         response_text = format_generation_response(
             completion_title,
             result,
@@ -212,10 +203,8 @@ async def execute_generation_handler(
             saveable_indices=saveable_indices,
         )
 
-        # 净化协调：文本出口仅在成功分支消费图片列表并就地净化写回，失败分支经
-        # _format_failure_section 提前返回、不经净化。结构化出口据此显式获知列表
-        # 净化状态：成功路径跳过重复净化复用同一份净化值，失败路径自行完成首次
-        # 净化，净化次数恒为一，超长片段的截断标记不叠加。
+        # 净化协调：文本出口已在成功分支净化写回同一列表，失败分支不经净化；
+        # images_sanitized 据此让结构化出口在成功路径跳过重复净化，截断标记不叠加。
         structured_result = _build_generation_structured_result(
             tool_name=tool_name,
             result=result,
@@ -226,11 +215,8 @@ async def execute_generation_handler(
             images_sanitized=not is_generation_failed,
         )
 
-        # 预览从自动保存落盘的本地文件生成：未开启、生成失败或没有成功保存的图片时
-        # 列表为空，content 退化为纯文本，行为与本功能引入前一致。单张缩略图失败在
-        # build_preview_contents 内部跳过，不影响工具结果。保存张数超过上限时仅取
-        # 前 PREVIEW_MAX_IMAGES 张生成预览，文本附截断说明，完整清单仍在
-        # structuredContent.data。
+        # 预览从已保存的本地文件生成，未开启、生成失败或无成功保存时退化为纯文本；
+        # 超上限仅取前 PREVIEW_MAX_IMAGES 张，完整清单仍在 structuredContent.data。
         preview_contents: list[ImageContent] = []
         if config.preview_enabled and not is_generation_failed and auto_save_results:
             saved_paths = [
@@ -262,9 +248,8 @@ async def execute_generation_handler(
         module_logger.error("{}处理失败", failure_prefix, exc_info=True)
         await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
-        # format_error_for_user 已在档案携带 user_hint 时把建议拼入文案，此时不再
-        # 叠加查表排查建议，避免 429/402 等场景同一句建议逐字出现两遍；档案无
-        # user_hint 时才以查表建议补充，参数类错误不附带凭据与网络指引。
+        # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍；
+        # 否则以查表建议补充。
         if resolve_error_profile(exc).user_hint:
             error_message = f"{failure_prefix}失败：{user_facing_error}"
         else:

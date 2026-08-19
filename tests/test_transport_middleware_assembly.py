@@ -1,8 +1,7 @@
-"""streamable-http 中间件装配幂等性测试。
+"""streamable-http 中间件装配与幂等性测试。
 
-_attach_streamable_http_middleware 在同一 app 实例上重复装配会叠加重复中间件层，
-装配前检测本模块任一中间件已存在即整体跳过。以镜像 Starlette user_middleware 语义
-的替身 app 计数装配结果，锁定二次装配不叠加。
+以镜像 Starlette user_middleware 语义的替身 app 锁定装配层次与顺序；同一 app
+重复装配时检测已有中间件即整体跳过，不叠加。
 """
 
 from __future__ import annotations
@@ -82,10 +81,8 @@ def test_attach_skips_auth_and_host_guard_for_remote_without_token(
 def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None:
     """同一 app 实例二次装配跳过 add_middleware，中间件栈不叠加。
 
-    streamable_http_app 每次调用新建 Starlette app，并无条件新建
-    StreamableHTTPSessionManager 覆盖 self._session_manager，不存在会话管理器复用；
-    幂等守卫针对的是同一 app 实例重复进入装配时自建中间件栈的叠加，重复层会使
-    每个请求被多次包覆，二次调用不得再增加任何中间件。
+    streamable_http_app 每次调用新建 app 与会话管理器，幂等守卫针对的是同一 app
+    重复装配时中间件层的叠加，重复层会使每个请求被多次包覆。
     """
     app = _FakeStarletteApp()
 
@@ -118,9 +115,7 @@ def test_warn_remote_exposure_reports_truthful_auth_state(
 ) -> None:
     """告警文案与传入的鉴权状态一致，任何调用路径不得输出相反状态。
 
-    生产链路经 cli_main fail-closed 校验后非回环绑定必已启用鉴权，但直调
-    _warn_remote_exposure 可达未启用分支；非回环且未启用时若沿用已启用文案，
-    运维会据虚假信息误判暴露面已受保护。
+    非回环且未启用时若沿用已启用文案，运维会误判暴露面已受保护。
     """
     _warn_remote_exposure(host, auth_enabled)
 

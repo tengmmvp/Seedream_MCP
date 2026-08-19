@@ -1,6 +1,7 @@
 """AutoSaveManager 与 DownloadManager 关键路径测试。
 
-覆盖自动保存成功/降级、清理节流的实例独立性、下载内容类型校验与对端 IP fail-closed。
+覆盖自动保存成功/降级、清理节流按 base_dir 跨实例共享与按目录隔离、下载内容
+类型校验与对端 IP fail-closed、fsync 开关透传。
 """
 
 import asyncio
@@ -46,6 +47,8 @@ def test_is_image_compatible_content_type_rejects_non_image() -> None:
 
 
 class _FakeResponseNoConnection:
+    """connection 为 None 的伪响应，驱动对端 IP 提取失败的 fail-closed 路径。"""
+
     connection = None
 
 

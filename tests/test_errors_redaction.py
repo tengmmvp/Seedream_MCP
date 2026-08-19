@@ -1,8 +1,8 @@
 """errors.py 敏感数据脱敏与值截断的契约测试。
 
-覆盖 ``_filter_sensitive_data`` 的敏感字段归零、Bearer 令牌剥离与 list 分支，
-以及 ``_truncate_value_for_output`` 的截断标记，确保上游错误体回显的鉴权信息
-与大对象不会进入结构化输出或日志。
+覆盖 ``_filter_sensitive_data`` 的敏感字段归零、``_redact_sensitive_message`` 与
+sanitize_error_text/sanitize_data_text 的自由文本脱敏及 ``_truncate_value_for_output``
+的截断，确保上游错误体回显的鉴权信息与大对象不进入结构化输出或日志。
 """
 
 from __future__ import annotations
@@ -41,8 +41,7 @@ def test_filter_sensitive_data_redacts_sensitive_keys() -> None:
 def test_filter_sensitive_data_strips_credentials_in_non_sensitive_value() -> None:
     """非敏感键的字符串值中内嵌的鉴权信息被剥离，令牌不残留于结构化输出。
 
-    authorization: 键名形态触发键值裸值剥离，吸收 scheme 词并替换值为 ***，与 message 层
-    对 Authorization 的脱敏一致；纯 Bearer 令牌由 Bearer 模式保留前缀，见 list 测试。
+    键名形态吸收 scheme 词并替换值为 ***；纯 Bearer 令牌由 Bearer 模式保留前缀。
     """
     filtered = _filter_sensitive_data({"header": "Authorization: Bearer abc123"})
 
@@ -158,9 +157,8 @@ def test_truncate_value_returns_small_container_unchanged() -> None:
 def test_truncate_value_estimates_large_string_container_without_repr() -> None:
     """大字符串元素的小容器判长不物化整份 repr，tracemalloc 峰值远低于物化形态。
 
-    3 元素 dict 各 4MB 字符串的完整 repr 约 12MB，仅判长即丢弃属纯浪费分配；
-    估计路径对元素直接取 len，峰值内存以 2MB 为上界锁定，回归到 repr 物化时
-    峰值至少 12MB 即失败。
+    3 元素各 4MB 的 dict 完整 repr 约 12MB，估计路径按元素 len 判长，峰值以 2MB
+    为上界锁定。
     """
     big = {f"field{i}": "x" * (4 * 1024 * 1024) for i in range(3)}
 
@@ -204,10 +202,7 @@ def test_api_error_to_dict_redacts_bearer_in_message() -> None:
 
 
 def test_format_error_for_user_redacts_bearer_in_api_error_message() -> None:
-    """format_error_for_user 对 APIError 的 message 做 Bearer 脱敏。
-
-    令牌不进入用户可见输出。
-    """
+    """format_error_for_user 对 APIError 的 message 做 Bearer 脱敏，令牌不进入用户可见输出。"""
     err = SeedreamAPIError(message="Invalid Bearer sk-secret-token-123")
 
     rendered = format_error_for_user(err)
@@ -390,8 +385,7 @@ def test_redact_sensitive_message_absorption_stops_at_next_keyvalue() -> None:
 def test_redact_sensitive_message_preserves_adjacent_non_sensitive_keyvalue() -> None:
     """值吸收在任意键名形态前停止：多键 JSON 只脱敏敏感键，相邻非敏感键值对保留。
 
-    停止前瞻识别可选引号加任意键名加分隔符的结构，不限于敏感词；非敏感键不再被
-    前一个敏感值的贪婪吸收整体吞掉，JSON 回显的括号得以配平。
+    停止前瞻识别任意键名加分隔符的结构，非敏感键不被贪婪吸收吞掉，JSON 括号配平。
     """
     redacted = _redact_sensitive_message('{"api_key": "SK-1", "note": "keep me"}')
     assert "SK-1" not in redacted
@@ -413,8 +407,7 @@ def test_redact_sensitive_message_preserves_adjacent_non_sensitive_keyvalue() ->
 def test_redact_sensitive_message_long_space_run_stays_fast() -> None:
     """性能守护：长空格串输入的脱敏在时限内完成，防止分隔符二次方回溯回归。
 
-    分隔符中允许同一段空格被两个量词分别吸收时，键名后长空格串的失败匹配呈
-    二次方回溯，20010 字符输入实测秒级；切分路径唯一化后同输入毫秒级完成。
+    同一段空格被两个量词分别吸收时失败匹配呈二次方，20010 字符输入曾实测秒级。
     """
     hostile = "token" + " " * 20_000 + "value"
 
@@ -435,10 +428,7 @@ def test_redact_sensitive_message_long_space_run_stays_fast() -> None:
 
 
 def test_redact_sensitive_message_unicode_whitespace_run_stays_fast() -> None:
-    """性能守护：Unicode 空白长串与引号空白组合的脱敏保持线性。
-
-    防止扩展字符类后的回溯回归。
-    """
+    """性能守护：Unicode 空白长串与引号空白组合的脱敏保持线性，防字符类扩展后回溯回归。"""
     nbsp_run = "token" + chr(0xA0) * 20_000 + "value"
     start = time.perf_counter()
     redacted = _redact_sensitive_message(nbsp_run)
@@ -457,8 +447,7 @@ def test_redact_sensitive_message_unicode_whitespace_run_stays_fast() -> None:
 def test_redact_sensitive_message_underscore_chain_stays_fast() -> None:
     """性能守护：键名续段星号的失败回溯保持线性，连字符长链不得触发指数回溯。
 
-    续段字符类若允许跨分隔符字符，嵌套量词的切分歧义会使 session_a_a 一类输入的
-    失败回溯指数级膨胀，200 段即超分钟级；边界唯一化后 2 万段仍为毫秒级。
+    续段字符类跨分隔符字符时嵌套量词切分歧义，200 段即超分钟级。
     """
     hostile = "session" + "_a" * 20_000
 
@@ -472,12 +461,7 @@ def test_redact_sensitive_message_underscore_chain_stays_fast() -> None:
 
 
 def test_redact_sensitive_message_escaped_quote_run_stays_fast() -> None:
-    """性能守护：数千转义引号的对抗输入保持线性耗时，反斜杠容忍不引入回溯退化。
-
-    引号组计数受限且反斜杠为可选前缀，相邻空白段之间必有引号字符定界，空白
-    吸收的切分路径唯一；分隔符分支为有限交替，转义引号长串的失败匹配在每个
-    扫描位置只付出常数代价。
-    """
+    """性能守护：数千转义引号的对抗输入保持线性耗时，反斜杠容忍不引入回溯退化。"""
     hostile = "noise " + '\\"' * 4000 + " api_key: sk-1"
     start = time.perf_counter()
     redacted = _redact_sensitive_message(hostile)
@@ -606,7 +590,7 @@ def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
 
 
 def test_sanitize_data_text_preserves_long_url_without_truncation() -> None:
-    """约 674 字符的签名 URL 原样保留：数据字段不做错误文本的 500 字符截断。"""
+    """约 670 字符的签名 URL 原样保留：数据字段不做错误文本的 500 字符截断。"""
     signed_url = "https://tos.example.com/obj/a.png?X-Tos-Signature=" + "s" * 620
     assert len(signed_url) > 500
 
@@ -635,8 +619,7 @@ def test_sanitize_data_text_keeps_full_sanitization_modes() -> None:
 def test_sanitize_data_text_preserves_url_query_params() -> None:
     """纯 URL 数据字段不应用键值脱敏：查询参数是 URL 组成而非凭据回显。
 
-    token=/Secret= 等查询参数名触发键值剥离会把签名 URL 的查询串整体替换为 ***，
-    数据字段随之不可用；大小写 scheme 前缀同样按纯 URL 处理。
+    token=/Secret= 等查询参数名触发剥离会把查询串整体替换为 ***，数据字段不可用。
     """
     url = "https://example.com/a.png?token=abc&x-expires=99&Secret=zzz&api_key=k1"
 
@@ -655,10 +638,7 @@ def test_sanitize_data_text_url_light_path_still_strips_userinfo() -> None:
 
 
 def test_sanitize_data_text_strips_padding_before_url_judgment() -> None:
-    """纯 URL 判定先 strip 首尾空白，带空白前缀的签名 URL 走轻量路径。
-
-    查询串不被键值脱敏破坏。
-    """
+    """纯 URL 判定先 strip 首尾空白，带空白前缀的签名 URL 走轻量路径。"""
     url = "https://example.com/a.png?token=abc&Signature=xyz"
 
     assert sanitize_data_text("  " + url) == url
@@ -741,11 +721,7 @@ def test_handle_api_error_normalizes_list_upstream_message() -> None:
 
 
 def test_api_error_deeply_nested_message_does_not_raise_recursion_error() -> None:
-    """十万层嵌套 list 形态 message 归一化不外逃 RecursionError，降级为占位文本。
-
-    json.dumps 与 str() 对超深嵌套结构先后触发解释器递归上限，归一化逐级回退到
-    类型占位符，to_dict 与用户可见输出通道均不受影响。
-    """
+    """十万层嵌套 list 形态 message 归一化不外逃 RecursionError，降级为占位文本。"""
     deep: Any = []
     for _ in range(100_000):
         deep = [deep]
@@ -762,10 +738,7 @@ def test_api_error_deeply_nested_message_does_not_raise_recursion_error() -> Non
 
 
 def test_to_dict_message_truncates_before_redaction() -> None:
-    """to_dict 的 message 先截断后脱敏。
-
-    截断丢弃段凭据随截断消失，保留段凭据被剥离，输出长度受上限约束。
-    """
+    """to_dict 的 message 先截断后脱敏：丢弃段凭据随截断消失，保留段凭据被剥离。"""
     boundary_split = SeedreamAPIError(message="a" * 495 + "api_key=" + "SECRET" * 200)
     rendered = str(boundary_split.to_dict()["message"])
     assert "SECRET" not in rendered
@@ -778,10 +751,7 @@ def test_to_dict_message_truncates_before_redaction() -> None:
 
 
 def test_format_error_for_user_truncates_before_redaction() -> None:
-    """format_error_for_user 与 to_dict 同次序：先截断再脱敏。
-
-    截断约束正则工作长度，再剥离保留段凭据。
-    """
+    """format_error_for_user 与 to_dict 同次序：先截断再脱敏。"""
     err = SeedreamAPIError(message="a" * 495 + "api_key=" + "SECRET" * 200)
     rendered = format_error_for_user(err)
     assert "SECRET" not in rendered
@@ -793,11 +763,8 @@ def test_format_error_for_user_truncates_before_redaction() -> None:
 def test_to_dict_deeply_nested_details_do_not_raise_recursion_error() -> None:
     """十万层嵌套 dict/list 形态 details 不外逃 RecursionError。
 
-    _filter_sensitive_data 以显式栈替代递归，深嵌套结构的敏感字段过滤不触发
-    解释器递归上限，与 _normalize_non_str_message 对超深 message 的兜底口径对齐；
-    to_dict 的 truncate-first 管线中判长估计在累计长度超限处提前终止，dict 链
-    每层累计键长、首层即收敛为元素数摘要；list 链无键长累计，走到深度上限兜底
-    为类型占位符，两条路径 details 均为有界文本。
+    _filter_sensitive_data 以显式栈替代递归；判长估计在累计长度超限处提前终止，
+    dict 链首层收敛为元素数摘要，list 链走到深度上限兜底为类型占位符。
     """
     deep_dict: Any = {}
     for _ in range(100_000):
@@ -819,10 +786,7 @@ def test_to_dict_deeply_nested_details_do_not_raise_recursion_error() -> None:
 
 
 def test_to_dict_details_truncated_like_response_data() -> None:
-    """details 与 response_data 截断口径对齐，超大容器收敛为元素数摘要。
-
-    不撑爆结构化输出。
-    """
+    """details 与 response_data 截断口径对齐，超大容器收敛为元素数摘要。"""
     oversized = {f"field{i}": "x" * 50 for i in range(60)}
     err = SeedreamMCPError("msg", details=oversized)
 
@@ -886,11 +850,7 @@ def test_redact_sensitive_message_blocks_quote_space_quote_separator() -> None:
 
 
 def test_redact_sensitive_message_strips_escaped_quote_keyvalue_forms() -> None:
-    """json.dumps/repr 转义引号形态的键值分隔同样命中，凭据不借归一化产物逃逸。
-
-    键名后的引号与值侧引号均带前导反斜杠，分隔符的引号组与分隔符字符容忍可选
-    反斜杠后获得与未转义形态同等的命中。
-    """
+    """json.dumps/repr 转义引号形态的键值分隔同样命中，凭据不借归一化产物逃逸。"""
     redacted = _redact_sensitive_message('auth failed for \\"api_key\\": \\"sk-xxx\\"')
     assert "sk-xxx" not in redacted
     assert redacted == 'auth failed for \\"api_key\\": ***'
@@ -1022,8 +982,7 @@ def test_is_sensitive_key_matches_camelcase_sensitive_compounds() -> None:
 def test_is_sensitive_key_matches_camelcase_token_secret_compounds() -> None:
     """camelCase token/secret 复合键命中子串清单，与自由文本复合分支同口径。
 
-    refreshToken、clientSecret 一类无分隔复合词此前仅自由文本路径的复合分支
-    覆盖，dict 键路径不命中；子串清单补齐后两条路径一致。
+    refreshToken、clientSecret 一类无分隔复合词此前 dict 键路径不命中，补齐后一致。
     """
     from seedream_mcp.utils.core.errors import _is_sensitive_key
 
@@ -1077,7 +1036,7 @@ def test_filter_sensitive_data_redacts_camelcase_sensitive_dict_keys() -> None:
 
 
 def test_redact_sensitive_message_strips_space_separated_api_key() -> None:
-    """空格复合词 "API Key: <凭据>" 同样命中键值脱敏，分隔符前不允许空格的绕过封堵。"""
+    """空格复合词 "API Key: <凭据>" 同样命中键值脱敏，封堵分隔符前带空格的绕过。"""
     assert _redact_sensitive_message("API Key: AKIAIOSFODNN7EXAMPLE") == "API Key: ***"
     assert _redact_sensitive_message("api key = secret123") == "api key = ***"
     # 对照组：连字符与下划线变体仍命中
@@ -1189,8 +1148,7 @@ def test_sanitize_response_data_redacts_values_of_small_container() -> None:
 def test_sanitize_response_data_preserves_typical_error_body_fields() -> None:
     """常规体量的上游错误体保留结构，error.code 与 request_id 排障字段不丢失。
 
-    判长预算取结构化数据通道的放宽上限，单键 error 容器不再被整体收敛为元素数
-    摘要；超大容器仍按元素数与预算双上限收敛。
+    判长预算取结构化数据通道的放宽上限，超大容器仍按元素数与预算双上限收敛。
     """
     from seedream_mcp.utils.core.errors import _sanitize_response_data
 
@@ -1214,8 +1172,7 @@ def test_sanitize_response_data_preserves_typical_error_body_fields() -> None:
 def test_redact_sensitive_message_strips_literal_escape_separator_family() -> None:
     """字面转义序列 \t \r \f 与十六进制转义 \u000b \x0b 分隔的键值同样剥离。
 
-    json.dumps 与 repr 只把 \n 归约为既有覆盖，制表符、回车、换页与十六进制
-    变体的转义产物获得同等覆盖，凭据不借转义形态逃逸。
+    凭据不借 json.dumps/repr 的转义产物逃逸。
     """
     assert _redact_sensitive_message("api_key\\tsk-1") == "api_key\\t***"
     assert _redact_sensitive_message("api_key\\rsk-1") == "api_key\\r***"
@@ -1269,8 +1226,7 @@ def test_real_control_separator_credentials_blocked_in_both_outputs() -> None:
 def test_redact_sensitive_message_control_char_run_stays_fast() -> None:
     """性能守护：控制空白长串在无值形态下失败回溯保持线性。
 
-    控制空白分支与前后空白量词若可分别吸收同一段空白，长串失败匹配呈二次方；
-    分支尾部前瞻限定其只在控制空白串尾命中，切分路径唯一，两万字符毫秒级完成。
+    控制空白分支与前后空白量词分别吸收同一段空白时呈二次方，前瞻限定后切分唯一。
     """
     hostile = "token" + "\t" * 20_000
 
@@ -1432,8 +1388,7 @@ _CONSISTENT_PLAIN_COMPOUND_KEYS = (
 def test_compound_key_hit_verdicts_align_across_dict_and_free_text_paths() -> None:
     """对抗性一致性锁定：敏感复合键名在 dict 键路径与自由文本键值路径同判敏感。
 
-    dict 键路径以 _is_sensitive_key 判定，自由文本路径以键值裸值剥离结果判定，
-    两侧判定不一致时本测试失败，防止前缀族分支再次与段匹配口径漂移。
+    两侧判定不一致时失败，防止前缀族分支与段匹配口径漂移。
     """
     from seedream_mcp.utils.core.errors import _is_sensitive_key
 

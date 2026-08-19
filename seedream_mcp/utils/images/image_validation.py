@@ -1,12 +1,10 @@
 """图像输入校验：URL、本地文件路径与 Data URI 的格式与维度校验。
 
 涉及 I/O 的图像校验归本模块：本地文件经 O_NOFOLLOW 读取字节后交 PIL 解码校验
-维度，Data URI 经 base64 解码后同样校验。纯参数校验（尺寸、水印、prompt 等）与
+维度，Data URI 经 base64 解码后同样校验；纯参数校验（尺寸、水印、prompt 等）与
 宽高比常量归 validators，本模块从其导入共用。validate_image_path 组合工作区边界
-判定与统一规则校验，供 image_input 等调用方使用。
-
-本模块首次使用时进程级覆写 PIL.Image.MAX_IMAGE_PIXELS 为 36M，嵌入本包的宿主
-进程须感知该副作用。
+判定与统一规则校验。首次使用时进程级覆写 PIL.Image.MAX_IMAGE_PIXELS 为 36M，
+嵌入本包的宿主进程须感知该副作用。
 """
 
 from __future__ import annotations
@@ -41,9 +39,8 @@ from .image_ref import classify_image_reference
 
 logger = get_logger(__name__)
 
-# HEIC/HEIF 解码器惰性注册，避免模块导入时的全局副作用，首次校验图片时按需注册。
-# check-then-set 非线程安全，并发首调用可能重复注册；register_heif_opener 与
-# MAX_IMAGE_PIXELS 赋值均幂等，重复执行无功能影响。
+# HEIC/HEIF 解码器惰性注册，首次校验图片时按需执行。check-then-set 非线程安全，
+# 但 register_heif_opener 与 MAX_IMAGE_PIXELS 赋值均幂等，并发重复注册无功能影响。
 _heif_opener_registered = False
 
 
@@ -58,9 +55,7 @@ def _ensure_heif_opener_registered() -> None:
     from PIL import Image
     from pillow_heif import register_heif_opener
 
-    # 进程级覆写 PIL 的解压炸弹阈值：MAX_IMAGE_PIXELS 是 PIL.Image 的进程全局属性，
-    # 首次调用后宿主进程内所有 PIL 打开操作都以 36M 为上限，与自身的 36M 维度校验
-    # 对齐；嵌入本包的宿主进程须感知该副作用。
+    # 进程级覆写 PIL 解压炸弹阈值，宿主进程内所有 PIL 打开操作随之以 36M 为上限。
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     register_heif_opener()
     _heif_opener_registered = True
@@ -93,14 +88,7 @@ UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
 
 
 def is_unidentified_image_error(exc: BaseException) -> bool:
-    """判断异常是否为 PIL 的无法识别图像内容类型，供各解码失败包装分支共用。
-
-    Args:
-        exc: 解码阶段抛出的异常。
-
-    Returns:
-        异常为 PIL.UnidentifiedImageError 时返回 True。
-    """
+    """判断异常是否为 PIL.UnidentifiedImageError，供各解码失败包装分支共用。"""
     from PIL import Image
 
     return isinstance(exc, Image.UnidentifiedImageError)
@@ -108,8 +96,7 @@ def is_unidentified_image_error(exc: BaseException) -> bool:
 
 # 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
-# 参考图即输入图像，其维度约束含最短边、宽高比上下限、总像素上限。
-# 宽高比上下限由 validators 持有，输出尺寸校验与本模块共用同一规则。
+# 参考图即输入图像：最短边与总像素上限在此，宽高比上下限由 validators 持有共用。
 MIN_IMAGE_EDGE = 15
 MAX_IMAGE_PIXELS = 6000 * 6000
 
@@ -122,10 +109,9 @@ def _get_validation_base_dir() -> Path:
 def _resolve_local_image_path(file_path: str) -> Path:
     """解析本地图片路径，相对路径基于校验基础目录解析，绝对路径保持原样。
 
-    不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的现行定位
-    口径一致：调用方按字面值完成工作区边界判定后再进入本函数，展开会使实际读取
-    目标脱离已判定的边界。UNC 路径在 resolve 前抛 ValueError 拒绝，与
-    normalize_path 同口径，避免 Windows 下 resolve 触发 SMB 认证。
+    不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的定位口径
+    一致，展开会使实际读取目标脱离已判定的工作区边界。UNC 路径在 resolve 前抛
+    ValueError 拒绝，避免 Windows 下 resolve 触发 SMB 认证。
 
     Raises:
         ValueError: 路径为 UNC 形式。
@@ -139,17 +125,7 @@ def _resolve_local_image_path(file_path: str) -> Path:
 
 
 def _validate_url(url: str) -> str:
-    """验证 HTTP/HTTPS URL 的格式正确性，检查 scheme、netloc 等部分是否完整。
-
-    Args:
-        url: 待验证的 URL 字符串。
-
-    Returns:
-        验证通过时返回原始 URL。
-
-    Raises:
-        SeedreamValidationError: 当 URL 格式无效时抛出。
-    """
+    """验证 HTTP/HTTPS URL 的格式，scheme 与 netloc 须完整且不携带 userinfo 凭据。"""
     try:
         parsed = urlparse(url)
         scheme = (parsed.scheme or "").lower()
@@ -168,12 +144,6 @@ def image_candidate_stat(path: Path) -> os.stat_result | None:
 
     资格规则：常规文件、扩展名在支持白名单、大小不超过 MAX_IMAGE_FILE_SIZE；
     任一不满足或 stat 失败返回 None。
-
-    Args:
-        path: 待检查的候选文件路径。
-
-    Returns:
-        通过资格检查的 stat 结果；任一条件不满足或 stat 失败返回 None。
     """
     try:
         st = path.stat()
@@ -193,35 +163,25 @@ def resolve_local_image_candidate(
 ) -> tuple[Path, os.stat_result] | None:
     """按输入路径与已 resolve 的工作区根列表定位可读取的候选图片文件。
 
-    绝对路径直接作为候选；相对路径按根序逐一拼接。候选 resolve 一次后经
-    is_within_resolved 与各已 resolve 根直接比较（拦截 ``..`` 与符号链接越界），
-    通过后经 image_candidate_stat 做文件资格检查，返回首个命中的
-    (resolve 后物理路径, stat)。越界判定沿用已 resolve 结果不再重复解析，
-    Windows/网络挂载下的重复 resolve 是缓存命中路径的主要剩余开销。
-    ImagePreparer 的缓存签名与
-    image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件，杜绝两侧
-    规则漂移导致签名命中与读取内容不一致的陈旧缓存。未命中返回 None，由调用方
-    决定回退或报错。
+    绝对路径直接作为候选，相对路径按根序逐一拼接；候选 resolve 一次后经
+    is_within_resolved 与各根比较（拦截 ``..`` 与符号链接越界），通过
+    image_candidate_stat 资格检查后返回首个命中的 (resolve 后物理路径, stat)，
+    未命中返回 None。ImagePreparer 的缓存签名与 image_input 的读取路径共用此
+    定位，保证签名与实际读取锁定同一文件。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        resolved_roots: 已 resolve 的工作区根列表，相对路径按根序拼接候选。
-
-    Returns:
-        首个命中的 (resolve 后物理路径, stat) 二元组；未命中返回 None。
+        resolved_roots: 已 resolve 的工作区根列表。
     """
-    # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，输入级前置拦截与
-    # normalize_path、_resolve_local_image_path 同口径；反斜杠形态的 UNC 在
-    # POSIX 上非绝对路径，先拼后查会使 UNC 前缀丢失于根路径之下，故必须在
-    # 候选构造前判定。
+    # UNC 的 resolve 在 Windows 会触发 SMB 认证，须在候选构造前判定；反斜杠形态
+    # 的 UNC 在 POSIX 上非绝对路径，先拼后查会丢失 UNC 前缀。
     if is_unc_path(image):
         return None
     candidates = (
         [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_roots]
     )
     for candidate in candidates:
-        # UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
-        # 避免凭据在越界拒绝尚未发生时已向远端泄露；直接比较优化不得丢失该前置守卫。
+        # UNC 根拼接出的候选仍为 UNC 前缀，resolve 前拦截以免触发 SMB 认证。
         if is_unc_path(str(candidate)):
             continue
         try:
@@ -237,10 +197,7 @@ def resolve_local_image_candidate(
 
 
 def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
-    """校验图像宽高下限、宽高比与总像素约束，不满足时抛出 SeedreamValidationError。
-
-    供本地文件与 Data URI 两条校验路径复用，避免维度规则重复实现导致漂移。
-    """
+    """校验图像宽高下限、宽高比与总像素约束，供本地文件与 Data URI 两条路径复用。"""
     if width < MIN_IMAGE_EDGE or height < MIN_IMAGE_EDGE:
         raise SeedreamValidationError(
             f"图像宽高长度至少{MIN_IMAGE_EDGE}px", field="image", value=value
@@ -261,18 +218,13 @@ def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
 
 
 def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
-    """验证本地文件路径的存在性、格式与尺寸限制。
+    """验证本地文件路径的存在性、文件类型、扩展名与大小，默认还校验图像维度。
 
-    执行存在性、文件类型、扩展名、文件大小检查；skip_dimensions 为 False 时还校验
-    图像维度。路径的工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基础目录
-    取自环境配置，与 MCP 运行时的 Roots 集合来源不同，故不在函数内做边界断言，以免
-    误拒 Roots 授权但环境根之外的合法路径。调用方 validate_image_path 与
-    resolve_local_image_candidate 已在前置环节用正确的 Roots 集合完成越界拦截。
-
-    图像维度读取经 open_no_follow_read 打开最终分量。path 已由
-    _resolve_local_image_path 调用 resolve() 跟随符号链接，故 O_NOFOLLOW 对初始输入
-    即符号链接的防护效果减弱，其贡献仅限 resolve 与 open 之间的 TOCTOU 窗口防护；
-    主要的符号链接越界防御由调用方的边界 resolve 与比较提供。
+    工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基础目录取自环境配置，
+    与 MCP Roots 来源不同，函数内不做边界断言以免误拒 Roots 授权的合法路径。维度
+    读取经 open_no_follow_read 打开最终分量；path 已由 _resolve_local_image_path
+    resolve 跟随符号链接，O_NOFOLLOW 仅防 resolve 与 open 之间的 TOCTOU 窗口，
+    主要越界防御由调用方的边界 resolve 与比较提供。
 
     Args:
         file_path: 本地文件的完整路径。
@@ -282,7 +234,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         文件的绝对路径。
 
     Raises:
-        SeedreamValidationError: 当文件不存在、格式不支持或尺寸超限时抛出。
+        SeedreamValidationError: 文件不存在、格式不支持或尺寸超限时抛出。
     """
     try:
         path = _resolve_local_image_path(file_path)
@@ -319,8 +271,8 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         if not skip_dimensions:
             from PIL import Image
 
-            # 经 open_no_follow_read 读取字节后交共享解码校验，拒绝最终分量符号链接，
-            # 与 image_input._prepare_local_image 保持一致的安全语义。
+            # 经 open_no_follow_read 读取后交共享解码校验，拒绝最终分量符号链接，
+            # 与 image_input 的读取保持同一安全语义。
             try:
                 with open_no_follow_read(path) as f:
                     # 限制读取量并复核，防 stat 与 read 间文件被替换为超大文件撑爆内存。
@@ -334,8 +286,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
                     )
                 decode_and_validate_dimensions(image_bytes, file_path)
             except OSError as exc:
-                # UnidentifiedImageError 属 OSError 子类，内容不可识别时改用固定文案，
-                # 避免异常原文中的 BytesIO 对象地址进入用户可见消息。
+                # UnidentifiedImageError 属 OSError 子类；不可识别时用固定文案。
                 message = (
                     UNIDENTIFIED_IMAGE_MESSAGE
                     if is_unidentified_image_error(exc)
@@ -358,29 +309,19 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 
 
 def _validate_data_uri(data_uri: str) -> str:
-    """验证 Data URI 格式图像数据的格式、可解码性、大小与像素维度。
+    """验证 Data URI 的格式、可解码性、大小与像素维度。
 
-    官方要求 ``<图片格式>`` 为小写；本函数校验通过后把 media type 归一化为
-    小写标准 MIME（``image/jpg`` 一并归一为 ``image/jpeg``）重建 Data URI 返回，
-    使送往上游的载荷恒为官方要求的标准形态，用户侧大小写误写不再依赖上游报错。
-
-    Args:
-        data_uri: Data URI 格式的图像字符串。
-
-    Returns:
-        验证通过且 media type 归一化后的 Data URI。
-
-    Raises:
-        SeedreamValidationError: 当格式无效、数据损坏或尺寸超限时抛出。
+    校验通过后把 media type 归一化为小写标准 MIME（``image/jpg`` 一并归一为
+    ``image/jpeg``）重建 Data URI 返回，使送往上游的载荷恒为官方要求的标准形态，
+    用户侧大小写误写不再依赖上游报错。
     """
     try:
-        # 经 formats.parse_data_uri 统一拆分 media type 与负载，消除与 auto_save 的重复解析。
+        # 经 formats.parse_data_uri 统一拆分，与 auto_save 共用单一解析。
         media_type, b64 = parse_data_uri(data_uri)
         if media_type is None or not b64:
             raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)
 
-        # parse_data_uri 仅拆出 media type 与负载；编码标记需在原始 header 中确认，
-        # 确保后续按 base64 解码而非误处理 url-encoded 或纯文本负载。
+        # 编码标记需在原始 header 确认，确保按 base64 解码而非误处理其他编码负载。
         header_lower = data_uri.split(",", 1)[0].lower()
         if not header_lower.startswith("data:image/") or ";base64" not in header_lower:
             raise SeedreamValidationError(
@@ -389,15 +330,14 @@ def _validate_data_uri(data_uri: str) -> str:
                 value=data_uri,
             )
 
-        # 提取并验证图像格式。media_type 形如 image/png，取斜杠后部分为格式标识；
-        # 白名单派生自 SUPPORTED_IMAGE_EXTENSIONS 以保持单一来源。
+        # 格式标识取 media_type 斜杠后部分；白名单派生自 SUPPORTED_IMAGE_EXTENSIONS。
         fmt = media_type.lower().split("image/")[-1]
         allowed = {ext.lstrip(".") for ext in SUPPORTED_IMAGE_EXTENSIONS}
         if fmt not in allowed:
             raise SeedreamValidationError(
                 f"不支持的Data URI图片格式: {fmt}", field="image", value=data_uri
             )
-        # 官方要求格式小写；标准 MIME 子类型经 formats 的单一映射派生（jpg 随之归一为 jpeg）。
+        # 官方要求格式小写；标准 MIME 子类型经 formats 单一映射派生，jpg 随之归一为 jpeg。
         canonical_fmt = MIME_BY_EXTENSION[f".{fmt}"].split("/", 1)[1]
 
         # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大。
@@ -430,8 +370,7 @@ def _validate_data_uri(data_uri: str) -> str:
         try:
             decode_and_validate_dimensions(raw, data_uri)
         except (OSError, ValueError, Image.DecompressionBombError) as e:
-            # 内容不可识别时改用固定文案，避免异常原文中的 BytesIO 对象地址进入
-            # 用户可见消息。
+            # 内容不可识别时改用固定文案。
             message = (
                 UNIDENTIFIED_IMAGE_MESSAGE
                 if is_unidentified_image_error(e)
@@ -450,9 +389,8 @@ def _validate_data_uri(data_uri: str) -> str:
 def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     """验证图像输入的有效性，支持 HTTP/HTTPS URL、本地文件路径与 Data URI 三种格式。
 
-    本函数对本地文件路径仅校验存在性、格式与维度，不强制工作区越界校验。调用方须先经
-    本模块的 validate_image_path 完成基于 MCP Roots 的越界判定后再调用本函数，避免
-    直接传入本地路径绕过工作区边界。
+    本函数对本地文件路径不做工作区越界校验，调用方须先经 validate_image_path 完成
+    基于 MCP Roots 的越界判定，避免直接传入本地路径绕过工作区边界。
 
     Args:
         image: 图像 URL、文件路径或 Data URI。
@@ -462,7 +400,7 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
         验证通过的图像路径或原始输入。
 
     Raises:
-        SeedreamValidationError: 当图像输入格式无效或不可访问时抛出。
+        SeedreamValidationError: 图像输入格式无效或不可访问时抛出。
     """
     if not image or not isinstance(image, str):
         raise SeedreamValidationError("图像路径不能为空", field="image", value=image)
@@ -485,10 +423,9 @@ def validate_image_path(
 ) -> tuple[bool, str, Path | None]:
     """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
 
-    HTTP(S) URL 与 Data URI 视为有效但标准化路径恒为 None：两者为非本地引用，
-    无工作区边界可言；Data URI 的内容校验由 validate_image_input 的 data_uri 分支
-    承担，本函数不重复执行。调用方须同时检查有效位与路径是否为 None，据以分流
-    非本地引用与本地文件处理，不可仅凭有效位判定为本地路径。
+    HTTP(S) URL 与 Data URI 为非本地引用，无工作区边界可言，视为有效但标准化路径
+    恒为 None；Data URI 的内容校验由 validate_image_input 承担。调用方须同时检查
+    有效位与路径是否为 None，不可仅凭有效位判定为本地路径。
 
     Args:
         path: 图片文件路径；HTTP(S) URL 与 Data URI 有效但路径返回 None。
@@ -497,7 +434,7 @@ def validate_image_path(
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
-        三元组 (是否有效, 错误信息, 标准化路径)；URL 与 Data URI 有效但路径为 None。
+        三元组 (是否有效, 错误信息, 标准化路径)。
     """
     try:
         kind = classify_image_reference(path)
@@ -508,7 +445,7 @@ def validate_image_path(
             base_dir = str(get_workspace_root())
         normalized_path = normalize_path(path, base_dir)
         base_path = Path(base_dir).resolve()
-        # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析
+        # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析。
         if not is_within_resolved(normalized_path, base_path):
             return False, "路径超出允许的工作区目录范围", normalized_path
 

@@ -1,8 +1,7 @@
 """图像输入来源分类的单一判定实现。
 
-URL、Data URI 与本地文件路径三类的判定若散布于各调用方，易出现大小写策略不一致：
-data URI 判定取小写而 http/https scheme 判定大小写敏感，导致大写 scheme 的 URL
-误入本地文件分支。本模块提供统一判定，scheme 大小写不敏感符合 RFC 3986。
+统一 URL、Data URI 与本地文件路径三类判定，scheme 大小写不敏感符合 RFC 3986，
+避免各调用方大小写策略漂移导致大写 scheme 的 URL 误入本地文件分支。
 """
 
 from __future__ import annotations
@@ -18,10 +17,6 @@ def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
 
     Args:
         image: 图像输入字符串，调用方应先 strip 首尾空白。
-
-    Returns:
-        ``"url"`` 表示 HTTP/HTTPS URL，``"data_uri"`` 表示 Data URI，``"local"``
-        表示本地文件路径。
     """
     prefix = image[:16].lower()
     if prefix.startswith(("http://", "https://")):

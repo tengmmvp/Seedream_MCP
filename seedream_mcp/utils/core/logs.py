@@ -37,14 +37,11 @@ if TYPE_CHECKING:
 def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
     """检索并记录共享后台 task 的异常，消除事件循环告警噪音。
 
-    经 asyncio.shield 共享的 task 在消费方被取消后，其 outer 不再消费 task 结果；
-    若 task 随后失败且无其他等待者，事件循环会告警 "Task exception was never
-    retrieved"。本回调显式检索异常即清除该标记并以 warning 记录孤儿失败。登记时机
-    由调用方的消费者计数约束：创建者与每个等待者各持一份计数，仅当计数归零即最后
-    一个潜在消费者已放弃、且结果未被任何消费者接收时才登记本回调，异常已送抵消费
-    者的场景由其既有错误通道记录，同一异常不重复入日志。warning 经
-    logger.opt(exception=exc) 携带完整异常堆栈，与错误日志记录完整堆栈的项目规范
-    一致。供 images 与 io 子包的 single-flight 在途 task 经
+    经 asyncio.shield 共享的 task 在消费方被取消后可能无人消费结果，失败时事件循环
+    会告警 "Task exception was never retrieved"；本回调显式检索异常即清除该标记并以
+    warning 记录孤儿失败。登记时机由调用方的消费者计数约束，仅最后一个潜在消费者
+    放弃且结果未被接收时才登记，异常已送抵消费者的场景由其既有错误通道记录，同一
+    异常不重复入日志。供 images 与 io 子包的 single-flight 在途 task 经
     arm_unretrieved_exception_logging 登记。
 
     Args:
@@ -57,8 +54,8 @@ def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
         logger.opt(exception=exc).warning("后台共享任务失败: {}", exc)
 
 
-# 已登记"未取回异常"检索回调的 task 集合。WeakSet 持弱引用，task 终结被回收后条目
-# 自动消失，不延长 task 生命周期；创建者与等待者相继放弃同一 task 时仅登记一次。
+# 已登记「未取回异常」检索回调的 task 集合。WeakSet 持弱引用，不延长 task 生命
+# 周期；创建者与等待者相继放弃同一 task 时仅登记一次。
 _UNRETRIEVED_ARMED_TASKS: "weakref.WeakSet[asyncio.Task[Any]]" = weakref.WeakSet()
 
 
@@ -66,18 +63,16 @@ def arm_unretrieved_exception_logging(
     task: "asyncio.Task[Any]",
     callback: Callable[["asyncio.Task[Any]"], None] | None = None,
 ) -> None:
-    """为共享 task 登记"未取回异常"检索回调，供消费方放弃等待时调用。
+    """为共享 task 登记「未取回异常」检索回调，供消费方放弃等待时调用。
 
-    登记时机由调用方以消费者计数约束：仅最后一个潜在消费者放弃等待且结果未被任何
-    消费者接收时调用本函数，此后若无其他等待者接手，task 失败将无人检索异常，回调
-    兜底检索并记录；异常已送抵消费者的场景不登记，避免同一异常在既有错误通道之外
-    重复入日志。task 最终成功或被取消时回调检索无异常，静默无害。
+    仅最后一个潜在消费者放弃且结果未被接收时调用本函数，此后 task 失败将无人检索
+    异常，回调兜底检索并记录；异常已送抵消费者的场景不登记，避免重复入日志。task
+    成功或被取消时回调检索无异常，静默无害。
 
     Args:
         task: 消费方已放弃等待的共享后台任务。
-        callback: 触发时执行的回调，缺省为通用检索记录回调
-            log_unretrieved_task_exception；调用方持有消费者计数等附加上下文时可
-            传入自定义回调，在触发时复查登记前提是否仍然成立。
+        callback: 触发时执行的回调，缺省为 log_unretrieved_task_exception；调用方
+            持有消费者计数等附加上下文时可传自定义回调，在触发时复查登记前提。
     """
     if task in _UNRETRIEVED_ARMED_TASKS:
         return
@@ -101,8 +96,7 @@ class InterceptHandler(logging.Handler):
         except ValueError:
             log_level = record.levelno
 
-        # 向上跳过 emit 自身帧与 logging 模块内部的帧，定位真实调用者以计算正确的
-        # 日志深度。首帧无条件跳过，其后仅当帧位于 logging 模块内时继续跳过。
+        # 向上跳过 emit 自身帧与 logging 模块内部的帧，定位真实调用者以计算日志深度。
         frame: FrameType | None = logging.currentframe()
         depth = 0
         while frame is not None and (depth == 0 or frame.f_code.co_filename == logging.__file__):
@@ -120,15 +114,11 @@ _LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 def _strip_message_control_chars(record: Any) -> None:
     """剥离日志消息与异常消息的控制字符，防日志注入。
 
-    路径名、上游错误体等可能含 CR/LF 等控制字符，原样记录会在日志文件中伪造额外行，
-    干扰审计取证。作为全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点，无需
-    逐处 sanitize 路径或错误文本。exc_info 渲染的 traceback 不经过 record["message"]，
-    其异常消息文本经 _strip_exception_control_chars 同步清洗；traceback 帧的源代码行
-    来自本地文件，不含不可信输入。
-
-    本层只压平控制字符，不剥离键值形态的凭据：日志通道有意保留异常原文的可见内容
-    便于排障，键值凭据脱敏由调用点承担，client 的 _sanitize_request_for_logging 在
-    请求记录前先行过滤，异常文本不在此层剥离。
+    作为全局 patcher 在每条日志格式化前剥离，一处覆盖所有日志点：路径名、上游错误
+    体中的 CR/LF 原样记录会在日志文件中伪造额外行。exc_info 的异常消息文本经
+    _strip_exception_control_chars 同步清洗，traceback 帧源代码行来自本地文件不受
+    影响。本层只压平控制字符，不剥离键值形态的凭据：日志通道有意保留异常原文便于
+    排障，键值脱敏由调用点承担。
     """
     message = record["message"]
     if _LOG_MESSAGE_CONTROL_CHARS.search(message):
@@ -139,10 +129,9 @@ def _strip_message_control_chars(record: Any) -> None:
 def _strip_exception_control_chars(record: Any) -> None:
     """清洗 exc_info 记录携带的异常消息文本中的控制字符。
 
-    loguru 对 exception 字段的 traceback 渲染独立于 message，异常 str 输出由 args
-    派生，原地清洗 args 即同时修正本条与后续对该异常实例的字符串化显示，使携带
-    换行的上游错误消息无法在日志文件中伪造行。仅处理含字符串 args 的异常，无 args
-    或重写 __str__ 的异常保持原样，帧源代码行不受影响。
+    异常 str 输出由 args 派生，原地清洗 args 即同时修正本条与后续对该异常实例的
+    字符串化显示，携带换行的上游错误消息无法在日志文件中伪造行；仅处理含字符串
+    args 的异常，无 args 或重写 __str__ 的保持原样。
     """
     exc = record.get("exception")
     if exc is None:
@@ -167,21 +156,17 @@ def setup_logging(
 ) -> None:
     """设置日志配置。
 
-    未显式传入 log_file 时，默认日志路径为 ``.seedream/logs/seedream_mcp.log``，
-    该相对路径相对于进程工作目录（CWD）解析；不同启动方式的 CWD 可能不同，如需固定
-    位置请传入绝对路径或经 LOG_FILE 环境变量配置。
+    未显式传入 log_file 时，默认路径 ``.seedream/logs/seedream_mcp.log`` 相对进程
+    工作目录解析；不同启动方式的 CWD 可能不同，如需固定位置请传入绝对路径或经
+    LOG_FILE 环境变量配置。
 
     Args:
         log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
-        log_file: 日志文件路径，为 None 时使用默认路径 .seedream/logs/seedream_mcp.log。
-        enable_console: 是否启用控制台输出。
-        enable_file: 是否启用文件输出。
         force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
-            logger 已有 handler 时 basicConfig 不生效，标准库日志未被拦截并输出
-            warning 提示。
+            logger 已有 handler 时标准库日志不被拦截，输出 warning 提示。
     """
     logger.remove()
-    # 全局剥离日志消息控制字符，防路径名与上游错误体经日志注入伪造行。
+    # 全局 patcher 剥离日志消息控制字符，防日志注入。
     logger.configure(patcher=_strip_message_control_chars)
 
     level = log_level.upper()
@@ -224,10 +209,9 @@ def setup_logging(
             enqueue=True,
         )
 
-    # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru。
-    # root logger 已有 handler 且未强制接管时 basicConfig 整体 no-op，标准库日志
-    # 绕过 loguru 桥接与控制字符防护，输出 warning 提示部署方处置；force 语义与
-    # basicConfig 调用参数不变。
+    # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru；root
+    # logger 已有 handler 且未强制接管时 basicConfig 整体 no-op，标准库日志绕过
+    # 桥接与控制字符防护，输出 warning 提示部署方处置。
     if not force_standard_logging and logging.getLogger().hasHandlers():
         logger.warning(
             "标准库 root logger 已有 handler 且 force_standard_logging=False，"
@@ -239,9 +223,8 @@ def setup_logging(
         force=force_standard_logging,
     )
 
-    # 压制第三方库的 DEBUG/INFO 噪音：桥接后其全量日志会淹没项目自身的业务日志。
-    # httpx 每次 API 调用输出一条 INFO "HTTP Request"，其传输层 httpcore 还会为每个
-    # 连接输出 INFO 连接日志，与 urllib3/aiohttp 同列压制。
+    # 压制第三方库的 DEBUG/INFO 噪音：httpx 每次 API 调用、httpcore 每个连接均输出
+    # INFO 日志，桥接后全量进入会淹没项目业务日志。
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -254,20 +237,14 @@ def setup_logging(
 
 
 def get_logger(name: str | None = None) -> Logger:
-    """获取 logger 实例。
+    """获取绑定了指定名称的 loguru logger 实例。
 
-    name 仅绑定到日志记录的 extra 字段，输出中渲染的模块名始终取真实调用帧；
-    当前调用方统一传 ``__name__``，二者恰好一致，传自定义名称不会改变渲染输出。
-
-    Args:
-        name: 绑定到 extra 的名称，为 None 时自动取调用模块名。
-
-    Returns:
-        绑定了指定名称的 loguru logger 实例。
+    name 仅绑定到 extra 字段，输出中渲染的模块名始终取真实调用帧；当前调用方统一
+    传 ``__name__``，二者恰好一致，传自定义名称不改变渲染输出。name 为 None 时自动
+    取调用模块名。
     """
     if name is None:
-        # 自动获取调用模块名。inspect.currentframe() 返回的帧对象会形成引用环，
-        # CPython 建议使用后立即显式 del 以便循环引用垃圾回收及时回收该帧。
+        # 自动获取调用模块名；帧对象会形成引用环，用后立即显式 del 以便及时回收。
         current = inspect.currentframe()
         try:
             caller = current.f_back if current is not None else None
@@ -283,27 +260,18 @@ R = TypeVar("R")
 
 
 def log_function_call(func: Callable[P, R]) -> Callable[P, R]:
-    """装饰函数并在调用入口记录日志。
+    """装饰函数并在调用入口记录日志，同步与异步在实现内分流。
 
-    使用 ``ParamSpec`` 透传被装饰函数的参数规格，``TypeVar`` 绑定原始返回类型；
-    同步与异步在实现内分流，装饰后的静态签名与原函数完全一致，``await`` 链路保持
-    精确返回类型。异步函数的 ``R`` 求解为其原生 coroutine 类型，与未装饰时一致。
-    声明采用单一 ``Callable[P, R]`` 而非 overload 区分同步与异步分支：mypy 对
-    签名含 ``Any`` 的异步函数做 overload 约束求解时会把 ParamSpec 整体擦除为
-    ``(*Any, **Any) -> Any``，单一签名不经接口约束求解，类型可精确穿透。
-
-    Args:
-        func: 要装饰的函数。
-
-    Returns:
-        装饰后的函数。
+    以 ``ParamSpec``/``TypeVar`` 透传参数规格与返回类型，装饰后的静态签名与原函数
+    完全一致。声明采用单一 ``Callable[P, R]`` 而非 overload 区分同步异步：mypy 对
+    签名含 ``Any`` 的异步函数做 overload 约束求解时会把 ParamSpec 擦除为
+    ``(*Any, **Any) -> Any``，单一签名可精确穿透。
     """
 
-    # 仅记录调用入口日志；异常交由被装饰函数自身的错误处理统一记录，避免在此重复
-    # 输出 ERROR 与函数内部日志叠加，造成同一失败被记录多次。
+    # 仅记录调用入口；异常由被装饰函数自身的错误处理统一记录，避免同一失败重复入日志。
     if inspect.iscoroutinefunction(func):
-        # 异步函数的返回类型即 coroutine，Awaitable[R] 视图使 await 表达式还原出 R，
-        # 内层包装按 R 声明返回类型，外层 cast 收敛包装产生的第二层 coroutine 容器。
+        # Awaitable[R] 视图使 await 表达式还原出 R，内层按 R 声明，外层 cast 收敛
+        # 包装产生的第二层 coroutine 容器。
         async_func = cast("Callable[P, Awaitable[R]]", func)
 
         @functools.wraps(func)

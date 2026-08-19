@@ -327,10 +327,7 @@ def test_build_config_none_overrides_fall_through_to_defaults(
 def test_build_config_loads_image_prepare_concurrency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SEEDREAM_IMAGE_PREPARE_CONCURRENCY 经 .env 加载生效。
-
-    加载到 image_prepare_concurrency 字段。
-    """
+    """SEEDREAM_IMAGE_PREPARE_CONCURRENCY 经 .env 加载到 image_prepare_concurrency 字段。"""
     monkeypatch.delenv("SEEDREAM_IMAGE_PREPARE_CONCURRENCY", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_IMAGE_PREPARE_CONCURRENCY=7\n")

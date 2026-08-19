@@ -2,9 +2,8 @@
 
 覆盖 _classify_generation_error_type 的 8 个分支、handle_api_error 的状态码阶梯文案
 与上游错误体提取、format_error_for_user 的 isinstance 分支与 message 截断、
-_resolve_failure_guidance 的状态码/错误码查表与流水线降级文案拼接。guidance 拼接
-语义：归约档案携带 user_hint 时该建议即最终建议，不再叠加查表值；档案无建议时
-才以查表值补充。
+_resolve_failure_guidance 的查表与流水线降级文案拼接。guidance 拼接语义：归约
+档案携带 user_hint 时该建议即最终建议，档案无建议时才以查表值补充。
 """
 
 from typing import Any
@@ -119,10 +118,7 @@ def test_handle_api_error_extracts_upstream_error_dict() -> None:
 
 
 def test_handle_api_error_drops_non_string_error_code() -> None:
-    """上游 error.code 为数字或空串时 error_code 置 None，不臆测转字符串。
-
-    数字码转字符串属臆测语义，与 str | None 注解不符；丢弃时 message 拼装不受影响。
-    """
+    """上游 error.code 为数字或空串时 error_code 置 None，不臆测转字符串。"""
     numeric = handle_api_error(400, {"error": {"code": 40012, "message": "invalid image"}})
     assert numeric.error_code is None
     assert "invalid image" in numeric.message
@@ -218,12 +214,12 @@ def test_format_network_error() -> None:
 
 
 def test_format_generic_seedream_error() -> None:
-    """SeedreamMCPError 基类走通用"操作失败"分支。"""
+    """SeedreamMCPError 基类走通用「操作失败」分支。"""
     assert "操作失败" in format_error_for_user(SeedreamMCPError("something"))
 
 
 def test_format_unknown_error() -> None:
-    """非 SeedreamMCPError 异常归为"未知错误"。"""
+    """非 SeedreamMCPError 异常归为「未知错误」。"""
     assert "未知错误" in format_error_for_user(ValueError("unexpected"))
 
 
@@ -262,10 +258,7 @@ def test_handle_api_error_402_user_hint_mentions_balance() -> None:
 
 
 def test_handle_api_error_413_payload_too_large_profile() -> None:
-    """413 映射到请求体过大档案，结构化错误码为 payload_too_large。
-
-    message 含请求体过大。
-    """
+    """413 映射到请求体过大档案，结构化错误码为 payload_too_large，message 含请求体过大。"""
     exc = handle_api_error(413, {})
     assert exc.status_code == 413
     assert _classify_generation_error_type(exc) == "payload_too_large"
@@ -352,7 +345,7 @@ def test_resolve_failure_guidance_unknown_code_falls_back_to_generic() -> None:
 def test_resolve_failure_guidance_prefers_status_over_error_code(
     status: int, expected: str
 ) -> None:
-    """携带状态码的 API 错误按状态级建议表取值，400/404 不再落到凭据与网络指引。"""
+    """携带状态码的 API 错误按状态级建议表取值，400/404 不落到凭据与网络指引。"""
     guidance = _resolve_failure_guidance(SeedreamAPIError("boom", status_code=status))
     assert guidance == expected
     if status in (400, 404):
@@ -366,11 +359,10 @@ def test_resolve_failure_guidance_api_error_without_status_falls_back_to_error_c
 
 
 def test_failure_guidance_table_covers_all_profile_error_codes() -> None:
-    """errors.py 归约档案的全部错误码均可经查表解析，走默认的码显式登记。
+    """归约档案的全部错误码均可经查表解析或显式登记为默认建议，双向锁定。
 
-    收集 HTTP 状态档案、异常类型档案与四个兜底档案的错误码全集，与
-    _FAILURE_GUIDANCE_BY_ERROR_CODE 的键做双向锁定：未列表且未登记的码在此失败，
-    提示新增档案时同步维护查表；查表中残留已废弃的码同样失败。
+    档案错误码全集须与 _FAILURE_GUIDANCE_BY_ERROR_CODE 的键及默认登记集一致：
+    新增档案未同步维护查表或查表残留废弃码均在此失败。
     """
     profile_codes = {profile.error_code for profile in errors_module._HTTP_STATUS_PROFILES.values()}
     profile_codes |= {profile.error_code for _, profile in errors_module._EXCEPTION_PROFILES}
