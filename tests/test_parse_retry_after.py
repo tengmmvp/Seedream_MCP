@@ -26,9 +26,14 @@ def test_parse_retry_after_invalid_returns_none() -> None:
 
 def test_parse_retry_after_http_date_future() -> None:
     future = datetime.now(timezone.utc) + timedelta(seconds=60)
+    remaining_before = (future - datetime.now(timezone.utc)).total_seconds()
     result = parse_retry_after({"retry-after": format_datetime(future, usegmt=True)})
     assert result is not None
-    assert 50 <= result <= 60
+    # 双侧动态界：解析发生在取 remaining_before 之后、断言时刻之前，剩余差值
+    # 单调递减，结果必落在两时刻之间；秒级取整丢亚秒精度，下界放宽 1 秒容差。
+    # 固定阈值下界在重负载 CI 上会假红。
+    remaining_after = (future - datetime.now(timezone.utc)).total_seconds()
+    assert remaining_after - 1 <= result <= remaining_before
 
 
 def test_parse_retry_after_http_date_past_returns_none() -> None:

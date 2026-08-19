@@ -19,14 +19,14 @@ from ..core.common import (
     GenerationExecutionContext,
 )
 from ..core.schemas import SequentialGenerationInput
-from ._common import SEQUENTIAL_GENERATION, _sequential_start_log_values_factory
+from ._common import SEQUENTIAL_GENERATION
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 async def handle_sequential_generation(
@@ -46,7 +46,6 @@ async def handle_sequential_generation(
         返回。
     """
     image = params.image
-    max_images = params.max_images
 
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
@@ -57,7 +56,7 @@ async def handle_sequential_generation(
             image=image,
             size=context.size,
             watermark=context.watermark,
-            max_images=max_images,
+            max_images=context.max_images,
             response_format=context.response_format,
             output_format=context.output_format,
             stream=context.stream,
@@ -67,9 +66,8 @@ async def handle_sequential_generation(
     return await execute_generation_handler(
         params=params,
         config=config,
+        metadata=SEQUENTIAL_GENERATION,
         module_logger=logger,
-        **SEQUENTIAL_GENERATION.as_handler_kwargs(),
-        start_log_values_builder=_sequential_start_log_values_factory(max_images),
         request_executor=_execute,
         ctx=ctx,
     )

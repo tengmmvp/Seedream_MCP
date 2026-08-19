@@ -1,7 +1,7 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接与原子落盘骨架。
 
 提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd（异步）与
-atomic_replace_from_fd_sync（同步变体），另有 _is_reparse_point 判定 NTFS
+atomic_replace_from_fd_sync（同步变体），另有 is_reparse_point 判定 NTFS
 junction 等非符号链接型 reparse point，供 io_path 的浏览扫描使用。
 open_no_follow_read 拒绝最终路径分量为符号链接：支持 O_NOFOLLOW 的平台由内核在
 open 时原子拒绝；Windows 等不支持平台退化为打开前 lstat 与打开后 fstat 比对
@@ -41,7 +41,7 @@ def _cleanup_temp_file(temp_path: Path) -> None:
     except OSError as exc:
         from ..core.logs import get_logger
 
-        get_logger(__name__).warning("清理临时文件失败: {} -> {}", temp_path, exc)
+        get_logger().warning("清理临时文件失败: {} -> {}", temp_path, exc)
 
 
 def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
@@ -79,6 +79,9 @@ def open_no_follow_read(path: PathLike) -> IO[bytes]:
     最终路径分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时退化为 lstat/fstat
     同一性比对兜底。
 
+    Args:
+        path: 目标文件路径，最终路径分量不得为符号链接。
+
     Raises:
         OSError: 最终路径分量为符号链接、打开期间最终分量被替换，或其他打开失败。
     """
@@ -95,6 +98,10 @@ def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Pat
     基于 ``tempfile.mkstemp`` 以独占创建方式打开，规避可预测临时路径被预置符号链接
     覆盖任意文件的风险。``dir_path`` 须已存在且与目标路径同文件系统，以保证
     ``os.replace`` 的原子性；调用方写入完成后负责替换与失败清理。
+
+    Args:
+        dir_path: 临时文件所在目录，须已存在且与目标路径同文件系统。
+        suffix: 临时文件名后缀，默认 ``.part``。
 
     Returns:
         ``(fd, temp_path)`` 二元组，``fd`` 已以只写独占方式打开。
@@ -124,8 +131,8 @@ async def atomic_replace_from_fd(
         final_path: 最终目标路径，临时文件在其所在目录创建以保证同文件系统原子替换。
         writer: 接收 fd 的异步写入回调，可返回覆盖用的最终路径或 None。
         suffix: 临时文件名后缀，用于可读性与调试定位。
-        fsync: 替换前是否对 fd 执行 os.fsync。默认关闭，写入经 os.replace 已原子
-            可见，但进程或主机崩溃存在最近写入丢失的窗口，开启后消除该窗口。
+        fsync: 替换前是否对 fd 执行 os.fsync。默认关闭；开启后大幅缩小但未消除
+            rename 的持久化窗口，POSIX 上未 fsync 父目录时崩溃可能丢失 rename 本身。
 
     Returns:
         实际创建的随机名临时路径（替换成功后已重命名为最终路径）。
@@ -154,10 +161,10 @@ async def atomic_replace_from_fd(
 _FILE_ATTRIBUTE_REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
 
 
-def _has_reparse_attribute(st: os.stat_result) -> bool:
+def has_reparse_attribute(st: os.stat_result) -> bool:
     """判断 lstat 结果是否携带 NTFS reparse point 属性位，非 Windows 恒为 False。
 
-    调用方已持有 lstat 结果时经本函数判定，避免 _is_reparse_point 再次 lstat；
+    调用方已持有 lstat 结果时经本函数判定，避免 is_reparse_point 再次 lstat；
     st_file_attributes 仅 Windows 的 stat 结果存在，平台判定先行。
     """
     if sys.platform != "win32":
@@ -165,7 +172,7 @@ def _has_reparse_attribute(st: os.stat_result) -> bool:
     return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
-def _is_reparse_point(path: Path) -> bool:
+def is_reparse_point(path: Path) -> bool:
     """判断路径是否为 NTFS junction 等非符号链接型 reparse point。
 
     junction 属 reparse point，is_symlink 对其返回 False，scandir 与 os.walk 的
@@ -180,7 +187,7 @@ def _is_reparse_point(path: Path) -> bool:
         st = path.lstat()
     except OSError:
         return False
-    return _has_reparse_attribute(st)
+    return has_reparse_attribute(st)
 
 
 def atomic_replace_from_fd_sync(

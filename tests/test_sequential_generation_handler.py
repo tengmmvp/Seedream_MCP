@@ -41,6 +41,9 @@ async def test_handle_sequential_generation_passes_derived_max_images_when_omitt
     # schema 推导：总上限 15 减去 1 张参考图
     assert captured_kwargs["max_images"] == 14
     assert captured_kwargs["image"] == ["image-1"]
+    # prompt 原样透传；size 未显式提供时按 config 默认值合成。
+    assert captured_kwargs["prompt"] == "test"
+    assert captured_kwargs["size"] == config.default_size
 
 
 @pytest.mark.asyncio

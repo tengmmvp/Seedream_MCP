@@ -3,8 +3,10 @@
 import base64
 import asyncio
 import inspect
+import json
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Tuple
 
 import httpx
 import pytest
@@ -15,6 +17,7 @@ from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
+    SeedreamMCPError,
     SeedreamValidationError,
     resolve_error_profile,
 )
@@ -120,6 +123,19 @@ def test_build_common_request_merges_extra_and_skips_none() -> None:
 
 def _build_config() -> SeedreamConfig:
     return SeedreamConfig(api_key="test_key", max_retries=1)
+
+
+@asynccontextmanager
+async def _client_with_mock_transport(
+    handler: Callable[[httpx.Request], Any],
+) -> AsyncIterator[SeedreamClient]:
+    """构建内部 httpx 客户端挂 MockTransport 的 SeedreamClient，退出时关闭连接。"""
+    client = SeedreamClient(_build_config())
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        yield client
+    finally:
+        await client.close()
 
 
 def test_build_common_request_omits_prompt_key_when_none() -> None:
@@ -366,13 +382,8 @@ async def test_call_api_parses_non_stream_response() -> None:
             },
         )
 
-    client = SeedreamClient(_build_config())
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    try:
+    async with _client_with_mock_transport(handler) as client:
         result = await client._call_api("text_to_image", {"prompt": "hello"})
-    finally:
-        await client.close()
 
     assert result["success"] is True
     assert result["status"] == "succeeded"
@@ -422,13 +433,8 @@ async def test_call_api_parses_sse_response() -> None:
             content=sse_payload,
         )
 
-    client = SeedreamClient(_build_config())
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    try:
+    async with _client_with_mock_transport(handler) as client:
         result = await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
-    finally:
-        await client.close()
 
     assert result["success"] is True
     assert result["status"] == "completed"
@@ -454,13 +460,8 @@ async def test_call_api_parses_sse_partial_failed_event() -> None:
             content=sse_payload,
         )
 
-    client = SeedreamClient(_build_config())
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    try:
+    async with _client_with_mock_transport(handler) as client:
         result = await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
-    finally:
-        await client.close()
 
     assert result["success"] is True
     assert result["status"] == "partial"
@@ -986,8 +987,8 @@ def test_build_api_result_top_level_error_with_only_error_items_marks_failure() 
     assert result["status"] == "failed"
 
 
-def test_build_api_result_top_level_error_with_valid_images_keeps_success() -> None:
-    """顶层 error 但 data 含有效图片：已产出且已计费的结果维持成功口径，不透传 error。"""
+def test_build_api_result_top_level_error_with_valid_images_keeps_success_and_error() -> None:
+    """顶层 error 但 data 含有效图片：维持 success=True，同时附 error 键透传上游部分错误。"""
     client = SeedreamClient(_build_config())
     result = client._build_api_result(
         {
@@ -997,7 +998,7 @@ def test_build_api_result_top_level_error_with_valid_images_keeps_success() -> N
     )
 
     assert result["success"] is True
-    assert "error" not in result
+    assert result["error"]["code"] == "PartialServiceDegraded"
     assert result["data"][0]["url"] == "https://example.com/1.png"
 
 
@@ -1027,12 +1028,8 @@ async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
             json={"error": {"code": "StreamRejected", "message": "流式请求被拒绝"}},
         )
 
-    client = SeedreamClient(_build_config())
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
+    async with _client_with_mock_transport(handler) as client:
         result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
-    finally:
-        await client.close()
 
     assert result["success"] is False
     assert result["status"] == "failed"
@@ -1067,14 +1064,9 @@ async def test_call_api_non_dict_json_payload_raises_format_error(
             return httpx.Response(200, content="null", headers={"content-type": "application/json"})
         return httpx.Response(200, json=raw_payload)
 
-    client = SeedreamClient(_build_config())
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    try:
+    async with _client_with_mock_transport(handler) as client:
         with pytest.raises(SeedreamAPIError) as excinfo:
             await client._call_api("text_to_image", {"prompt": "hello"})
-    finally:
-        await client.close()
 
     assert "响应格式错误" in excinfo.value.message
     assert expected_type in excinfo.value.message
@@ -1102,18 +1094,39 @@ async def test_stream_request_non_dict_json_payload_raises_format_error(
             return httpx.Response(200, content="null", headers={"content-type": "application/json"})
         return httpx.Response(200, json=raw_payload)
 
-    client = SeedreamClient(_build_config())
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-    try:
+    async with _client_with_mock_transport(handler) as client:
         with pytest.raises(SeedreamAPIError) as excinfo:
             await client._call_api("text_to_image", {"prompt": "hello", "stream": True})
-    finally:
-        await client.close()
 
     assert "响应格式错误" in excinfo.value.message
     assert expected_type in excinfo.value.message
     assert "AttributeError" not in excinfo.value.message
+
+
+# ==================== 错误体解析输入界 ====================
+
+
+@pytest.mark.asyncio
+async def test_error_data_from_body_oversized_body_degrades_to_message() -> None:
+    """超过 _ERROR_JSON_PARSE_LIMIT 的错误体不做完整 dict 解析，降级为 message 形态。"""
+    oversized = json.dumps({"error": {"code": "E", "message": "x" * (70 * 1024)}}).encode("utf-8")
+
+    data = await SeedreamClient._error_data_from_body(oversized)
+
+    assert set(data.keys()) == {"message"}
+    assert data["message"].startswith('{"error"')
+
+
+def test_normalize_api_error_passes_through_mcp_error_hierarchy() -> None:
+    """SeedreamMCPError 体系内的异常原样返回，体系外异常包装为 SeedreamAPIError。"""
+    client = SeedreamClient(_build_config())
+    hierarchy_error = SeedreamMCPError("workspace root missing")
+    outside_error = ValueError("boom")
+
+    assert client._normalize_api_error(hierarchy_error) is hierarchy_error
+    wrapped = client._normalize_api_error(outside_error)
+    assert isinstance(wrapped, SeedreamAPIError)
+    assert wrapped.__cause__ is outside_error
 
 
 # ==================== 空 API Key 归约档 ====================

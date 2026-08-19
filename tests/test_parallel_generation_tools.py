@@ -1,7 +1,6 @@
 """生成类工具并行请求支持、进度序列、schema 约束与失败结果封装测试。"""
 
 import asyncio
-from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +8,7 @@ import pytest
 from mcp.types import TextContent
 from pydantic import ValidationError
 
+from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import (
     PROGRESS_AUTOSAVE_DONE,
@@ -40,6 +40,28 @@ from seedream_mcp.utils.io import io_save
 def _build_config() -> SeedreamConfig:
     # 关闭自动保存：测试 mock 返回占位 URL，避免对 example.com 发起真实下载拖慢 CI
     return SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
+
+
+def _success_result(url: str) -> dict[str, Any]:
+    """构造 client 生成方法返回的标准单图成功 dict。"""
+    return {
+        "success": True,
+        "data": [{"url": url}],
+        "usage": {"generated_images": 1},
+        "status": "completed",
+    }
+
+
+def _patch_generation_success(
+    monkeypatch: pytest.MonkeyPatch, method_name: str = "text_to_image"
+) -> None:
+    """monkeypatch SeedreamClient 指定生成方法返回固定单图成功结果。"""
+
+    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self, kwargs
+        return _success_result("https://example.com/1.png")
+
+    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
 
 
 @pytest.mark.asyncio
@@ -95,16 +117,9 @@ async def test_generation_handlers_support_parallel_requests(
         nonlocal call_count
         del self, kwargs
         call_count += 1
-        return {
-            "success": True,
-            "data": [{"url": f"https://example.com/{call_count}.png"}],
-            "usage": {"generated_images": 1},
-            "status": "completed",
-        }
+        return _success_result(f"https://example.com/{call_count}.png")
 
-    client_module = import_module("seedream_mcp.client")
-    client_cls = getattr(client_module, "SeedreamClient")
-    monkeypatch.setattr(client_cls, method_name, fake_method)
+    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
 
     result = await handler(params, _build_config())
 
@@ -134,16 +149,9 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
         # 第 2 次调用模拟单请求失败，其余成功；因并行执行顺序非确定，仅断言失败计数
         if call_count == 2:
             raise SeedreamAPIError("模拟单请求失败", status_code=500)
-        return {
-            "success": True,
-            "data": [{"url": f"https://example.com/{call_count}.png"}],
-            "usage": {"generated_images": 1},
-            "status": "completed",
-        }
+        return _success_result(f"https://example.com/{call_count}.png")
 
-    client_module = import_module("seedream_mcp.client")
-    client_cls = getattr(client_module, "SeedreamClient")
-    monkeypatch.setattr(client_cls, "text_to_image", fake_method)
+    monkeypatch.setattr(SeedreamClient, "text_to_image", fake_method)
 
     # 关闭自动保存以避免对占位 URL 发起真实下载，聚焦并行失败聚合断言
     config = SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
@@ -197,17 +205,7 @@ async def test_parallel_batch_progress_strictly_increasing(
     进度规范要求严格递增且不重复；收尾曾重报 70.0，与末请求完成的 70.0 相邻重复。
     """
 
-    async def fake_method(self, **kwargs):  # noqa: ANN001
-        del self, kwargs
-        return {
-            "success": True,
-            "data": [{"url": "https://example.com/1.png"}],
-            "usage": {"generated_images": 1},
-            "status": "completed",
-        }
-
-    client_module = import_module("seedream_mcp.client")
-    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+    _patch_generation_success(monkeypatch)
 
     ctx = _ProgressCollectingContext()
     result = await handle_text_to_image(
@@ -255,17 +253,7 @@ async def test_parallel_batch_progress_delivery_order_strictly_increasing(
     进度按完成数快照计算、快照与发送间隔着 await，上报经批次级锁序列化。
     """
 
-    async def fake_method(self, **kwargs):  # noqa: ANN001
-        del self, kwargs
-        return {
-            "success": True,
-            "data": [{"url": "https://example.com/1.png"}],
-            "usage": {"generated_images": 1},
-            "status": "completed",
-        }
-
-    client_module = import_module("seedream_mcp.client")
-    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+    _patch_generation_success(monkeypatch)
 
     ctx = _ReorderingProgressContext()
     result = await handle_text_to_image(
@@ -287,17 +275,7 @@ async def test_single_request_progress_full_sequence_with_auto_save(
 ) -> None:
     """单请求成功路径在 auto_save 开启下的完整进度序列恰为七个里程碑且严格递增。"""
 
-    async def fake_method(self, **kwargs):  # noqa: ANN001
-        del self, kwargs
-        return {
-            "success": True,
-            "data": [{"url": "https://example.com/1.png"}],
-            "usage": {"generated_images": 1},
-            "status": "completed",
-        }
-
-    client_module = import_module("seedream_mcp.client")
-    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+    _patch_generation_success(monkeypatch)
 
     async def fake_save_multiple(
         self: Any, images: list[dict[str, Any]], tool_name: str
@@ -344,17 +322,7 @@ async def test_single_request_progress_without_auto_save_jumps_70_to_100(
 ) -> None:
     """auto_save 关闭时进度从生成完成直接跳到请求处理完成，序列仍严格递增。"""
 
-    async def fake_method(self, **kwargs):  # noqa: ANN001
-        del self, kwargs
-        return {
-            "success": True,
-            "data": [{"url": "https://example.com/1.png"}],
-            "usage": {"generated_images": 1},
-            "status": "completed",
-        }
-
-    client_module = import_module("seedream_mcp.client")
-    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", fake_method)
+    _patch_generation_success(monkeypatch)
 
     ctx = _ProgressCollectingContext()
     result = await handle_text_to_image(TextToImageInput(prompt="test"), _build_config(), ctx)
@@ -379,8 +347,7 @@ async def test_context_failure_progress_jumps_directly_to_complete(
         del self, kwargs
         raise AssertionError("上下文构建失败不应触达生成请求")
 
-    client_module = import_module("seedream_mcp.client")
-    monkeypatch.setattr(client_module.SeedreamClient, "text_to_image", unexpected_call)
+    monkeypatch.setattr(SeedreamClient, "text_to_image", unexpected_call)
 
     base = tmp_path / "save_root"
     base.mkdir()
@@ -435,9 +402,7 @@ async def test_generation_handler_returns_call_tool_error_result_when_request_fa
         del self, kwargs
         raise SeedreamValidationError("提示词不能为空", field="prompt", value="")
 
-    client_module = import_module("seedream_mcp.client")
-    client_cls = getattr(client_module, "SeedreamClient")
-    monkeypatch.setattr(client_cls, "text_to_image", failing_method)
+    monkeypatch.setattr(SeedreamClient, "text_to_image", failing_method)
 
     result = await handle_text_to_image(TextToImageInput(prompt="test"), _build_config())
 

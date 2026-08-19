@@ -75,12 +75,12 @@ class ModelCapabilities:
 
 
 # 家族解析 token 表：顺序敏感，Pro 的 Model ID 含 Lite 的匹配子串，须先匹配 Pro。
-_MODEL_FAMILY_TOKENS: list[tuple[str, tuple[str, ...]]] = [
+_MODEL_FAMILY_TOKENS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (MODEL_FAMILY_50_PRO, ("doubao-seedream-5-0-pro", "doubao-seedream-5.0-pro")),
     (MODEL_FAMILY_50_LITE, ("doubao-seedream-5-0", "doubao-seedream-5.0")),
     (MODEL_FAMILY_45, ("doubao-seedream-4-5", "doubao-seedream-4.5")),
     (MODEL_FAMILY_40, ("doubao-seedream-4-0", "doubao-seedream-4.0")),
-]
+)
 
 
 # 模型友好别名到真实 Model ID 的映射，config.normalize_model_selector 据此展开别名。

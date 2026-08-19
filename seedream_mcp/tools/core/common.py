@@ -1,14 +1,15 @@
 """生成类工具通用处理门面。
 
 内部按职责拆分到 _helpers/context/results/auto_save/parallel 子模块，本模块聚合公共
-符号供 tools/impl 与测试导入。``execute_generation_handler`` 是四类生成工具的统一处理
-流水线，依次执行参数归一化与校验、客户端调用、自动保存、结果格式化与预览生成，异常
-统一降级为错误结果。
+符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
+``execute_generation_handler`` 是四类生成工具的统一处理流水线，依次执行参数归一化与
+校验、客户端调用、自动保存、结果净化与格式化及预览生成，异常统一降级为错误结果。
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 
@@ -18,18 +19,22 @@ from ...config import SeedreamConfig
 from ...utils.images.image_thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
 from ...utils.io.io_save import AutoSaveResult
 from ...utils.core.errors import format_error_for_user, resolve_error_profile
-from ._helpers import (
+from ._helpers import (  # noqa: F401
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,
+    PROGRESS_GENERATION_DONE,
+    PROGRESS_GENERATION_START,
     PROGRESS_RECEIVED,
+    PROGRESS_SCAN_SPAN,
+    PROGRESS_SCAN_START,
     PROGRESS_VALIDATED,
     _classify_generation_error_type,
     _is_generation_failed,
     _resolve_failure_guidance,
-    _safe_report_progress,
     _yield_for_cancellation,
     prevalidate_save_path,
+    safe_report_progress,
 )
 from .auto_save import auto_save_from_base64, auto_save_from_urls
 from .context import GenerationExecutionContext, build_generation_context
@@ -42,6 +47,7 @@ from .parallel import (
 )
 from .results import (  # noqa: F401
     _build_generation_structured_result,
+    _sanitize_image_errors,
     aggregate_parallel_generation_results,
     extract_images,
     format_generation_response,
@@ -50,6 +56,8 @@ from .results import (  # noqa: F401
 from .schemas import GenerationInputParams
 
 if TYPE_CHECKING:
+    from loguru import Logger
+
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
@@ -58,6 +66,7 @@ if TYPE_CHECKING:
 # 门面对外导出的公共符号，私有辅助经各自定义模块显式导入。
 __all__ = [
     "GenerationExecutionContext",
+    "ToolMetadata",
     "aggregate_parallel_generation_results",
     "auto_save_from_base64",
     "auto_save_from_urls",
@@ -66,20 +75,39 @@ __all__ = [
     "extract_images",
     "format_generation_response",
     "get_lifespan_resource",
+    "safe_report_progress",
     "update_result_with_auto_save",
 ]
+
+
+@dataclass(frozen=True)
+class ToolMetadata:
+    """单个生成工具透传给 ``execute_generation_handler`` 的静态元数据。
+
+    收纳各工具逐字不同的常量字段与开始日志参数构造回调，回调依赖运行时执行上下文，
+    由各工具的元数据常量绑定各自的构造实现。
+
+    Attributes:
+        tool_name: 工具标识，写入 structuredContent.tool 与日志。
+        completion_title: 成功时响应文本的标题。
+        failure_prefix: 失败时错误消息与日志的前缀。
+        start_log_message: 请求开始时的日志模板。
+        start_log_values_builder: 由执行上下文构造开始日志模板的参数序列。
+    """
+
+    tool_name: str
+    completion_title: str
+    failure_prefix: str
+    start_log_message: str
+    start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]]
 
 
 async def execute_generation_handler(
     *,
     params: GenerationInputParams,
     config: SeedreamConfig,
-    module_logger: Any,
-    tool_name: str,
-    completion_title: str,
-    failure_prefix: str,
-    start_log_message: str,
-    start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]],
+    metadata: ToolMetadata,
+    module_logger: Logger,
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
@@ -87,19 +115,16 @@ async def execute_generation_handler(
 ) -> CallToolResult:
     """执行生成类工具的统一处理流水线，返回 MCP 结构化工具结果。
 
-    按 request_count 单次或并行调用客户端，按 response_format 自动保存，随后格式化文本
-    与 structuredContent，预览开启且存在成功保存图片时追加缩略图 ImageContent。任意
-    阶段抛出的异常均降级为 ``is_error=True`` 的结果，不向调用方抛出。
+    按 request_count 单次或并行调用客户端，按 response_format 自动保存，随后净化
+    图片数据并格式化文本与 structuredContent，预览开启且存在成功保存图片时追加缩略图
+    ImageContent。任意阶段抛出的异常均降级为 ``is_error=True`` 的结果，不向调用方
+    抛出。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
         config: 当前生效配置。
+        metadata: 工具静态元数据，携带工具名、文案前缀与开始日志模板及参数构造回调。
         module_logger: 调用方模块的 loguru logger。
-        tool_name: 工具标识，写入 structuredContent.tool。
-        completion_title: 成功响应文本的标题。
-        failure_prefix: 失败消息与日志的前缀。
-        start_log_message: 请求开始日志模板。
-        start_log_values_builder: 由执行上下文构造日志模板参数。
         request_executor: 执行单次生成请求，由各 impl 提供 client 调用差异。
         ctx: MCP 上下文，用于进度上报，可为 None。
 
@@ -110,17 +135,17 @@ async def execute_generation_handler(
     try:
         from ...client import SeedreamClient
 
-        await _safe_report_progress(
-            ctx, progress=PROGRESS_RECEIVED, message=f"{failure_prefix}请求已接收"
+        await safe_report_progress(
+            ctx, progress=PROGRESS_RECEIVED, message=f"{metadata.failure_prefix}请求已接收"
         )
         await _yield_for_cancellation()
         context = build_generation_context(params, config)
         # 预检含目录 resolve 等同步文件系统调用，下沉工作线程避免阻塞事件循环；
         # 仍在计费请求分发前完成。
         await asyncio.to_thread(prevalidate_save_path, config, params.save_path)
-        await _safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
+        await safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
 
-        module_logger.info(start_log_message, *start_log_values_builder(context))
+        module_logger.info(metadata.start_log_message, *metadata.start_log_values_builder(context))
 
         # 优先复用 lifespan 共享客户端；无 lifespan 上下文时回退按需新建。
         shared_client = _try_get_shared_client(ctx)
@@ -150,7 +175,7 @@ async def execute_generation_handler(
         images = extract_images(result)
         if context.enable_auto_save and not is_generation_failed:
             try:
-                await _safe_report_progress(
+                await safe_report_progress(
                     ctx, progress=PROGRESS_AUTOSAVE_START, message="开始自动保存"
                 )
                 await _yield_for_cancellation()
@@ -162,7 +187,7 @@ async def execute_generation_handler(
                         config,
                         context.save_path,
                         context.custom_name,
-                        tool_name,
+                        metadata.tool_name,
                         download_manager=shared_download_manager,
                         images=images,
                     )
@@ -173,7 +198,7 @@ async def execute_generation_handler(
                         config,
                         context.save_path,
                         context.custom_name,
-                        tool_name,
+                        metadata.tool_name,
                         download_manager=shared_download_manager,
                         images=images,
                     )
@@ -184,34 +209,35 @@ async def execute_generation_handler(
                     )
                     # 合并改写了 data，重新提取供展示与结构化输出复用。
                     images = extract_images(result)
-                await _safe_report_progress(
+                await safe_report_progress(
                     ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成"
                 )
             except Exception as exc:
                 auto_save_error = format_error_for_user(exc)
                 module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
 
+        # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
+        # 净化非幂等，重复净化会使超长片段的截断标记叠加。
+        sanitized_images = _sanitize_image_errors(images)
+
         response_text = format_generation_response(
-            completion_title,
+            metadata.completion_title,
             result,
             context.size,
             auto_save_results,
             context.enable_auto_save,
             auto_save_error=auto_save_error,
-            images=images,
+            images=sanitized_images,
             saveable_indices=saveable_indices,
         )
 
-        # 净化协调：文本出口已在成功分支净化写回同一列表，失败分支不经净化；
-        # images_sanitized 据此让结构化出口在成功路径跳过重复净化，截断标记不叠加。
         structured_result = _build_generation_structured_result(
-            tool_name=tool_name,
+            tool_name=metadata.tool_name,
             result=result,
             context=context,
             auto_save_results=auto_save_results,
             auto_save_error=auto_save_error,
-            images=images,
-            images_sanitized=not is_generation_failed,
+            images=sanitized_images,
         )
 
         # 预览从已保存的本地文件生成，未开启、生成失败或无成功保存时退化为纯文本；
@@ -237,28 +263,29 @@ async def execute_generation_handler(
                 saved_paths = saved_paths[:PREVIEW_MAX_IMAGES]
             preview_contents = await build_preview_contents(saved_paths)
 
-        await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
         return CallToolResult(
             content=[TextContent(type="text", text=response_text), *preview_contents],
             structured_content=structured_result,
             is_error=is_generation_failed,
         )
     except Exception as exc:
-        module_logger.error("{}处理失败", failure_prefix, exc_info=True)
-        await _safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
+        module_logger.error("{}处理失败", metadata.failure_prefix, exc_info=True)
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
         # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍；
         # 否则以查表建议补充。
         if resolve_error_profile(exc).user_hint:
-            error_message = f"{failure_prefix}失败：{user_facing_error}"
+            error_message = f"{metadata.failure_prefix}失败：{user_facing_error}"
         else:
             error_message = (
-                f"{failure_prefix}失败：{user_facing_error}\n{_resolve_failure_guidance(exc)}"
+                f"{metadata.failure_prefix}失败：{user_facing_error}\n"
+                f"{_resolve_failure_guidance(exc)}"
             )
         return CallToolResult(
             content=[TextContent(type="text", text=error_message)],
             structured_content=build_error_structured(
-                tool_name,
+                metadata.tool_name,
                 _classify_generation_error_type(exc),
                 user_facing_error,
             ),

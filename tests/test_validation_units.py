@@ -272,11 +272,6 @@ def test_parallel_options_defaults_parallelism_to_request_count() -> None:
     assert par == 3
 
 
-def test_parallel_options_default_parallelism_capped_by_max() -> None:
-    rc, par = validate_parallel_generation_options(request_count=4, parallelism=None, stream=False)
-    assert par == 4
-
-
 def test_parallel_options_explicit_parallelism() -> None:
     rc, par = validate_parallel_generation_options(request_count=4, parallelism=2, stream=False)
     assert rc == 4

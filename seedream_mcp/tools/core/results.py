@@ -96,15 +96,23 @@ def aggregate_parallel_generation_results(
 
     for request_index, result in enumerate(request_results, start=1):
         if not result or _is_generation_failed(result):
-            error_message = _extract_parallel_request_error(
-                result, request_errors.get(request_index)
-            )
+            request_exc = request_errors.get(request_index)
+            error_message = _extract_parallel_request_error(result, request_exc)
             error_items.append({"request_index": request_index, "message": error_message})
+            # 占位项 error 与 build_error_dict 同契约：type 取异常归约码，软失败结果
+            # 无异常时维持 generation_failed 兜底档。
             merged_data.append(
                 {
-                    "type": "image_generation.request_failed",
+                    "type": _REQUEST_FAILED_TYPE,
                     "request_index": request_index,
-                    "error": {"message": error_message},
+                    "error": {
+                        "type": (
+                            _classify_generation_error_type(request_exc)
+                            if request_exc is not None
+                            else "generation_failed"
+                        ),
+                        "message": error_message,
+                    },
                 }
             )
             continue
@@ -194,6 +202,8 @@ def update_result_with_auto_save(
     auto_save_results 直接构建，不在此写入。
 
     Args:
+        result: 待合并的生成结果字典。
+        auto_save_results: 自动保存结果列表，与 saveable_indices 按位置对位。
         saveable_indices: 可保存图片在归一化列表中的原始索引，由收集阶段产出。
 
     Returns:
@@ -298,98 +308,153 @@ def _sanitize_unknown_value(value: Any) -> Any:
     return _sanitize_value_tree(value, sanitize_data_text)
 
 
+def _sanitize_image_error_entry(error: Any) -> dict[str, Any]:
+    """净化图片项的 error 字段，返回需回写的更新项。
+
+    dict 形态净化 message 与 code 两个自由文本分量；非 dict 形态整体经容器净化，
+    凭据与 CRLF 不借形态绕过。
+    """
+    updates: dict[str, Any] = {}
+    if isinstance(error, dict):
+        sanitized_error: dict[str, Any] | None = None
+        message = error.get("message")
+        if message is not None:
+            sanitized_message = sanitize_error_text(normalize_message_text(message))
+            if sanitized_message != message:
+                sanitized_error = {**error, "message": sanitized_message}
+        code = error.get("code")
+        if code is not None:
+            sanitized_code = sanitize_error_text(normalize_message_text(code))
+            if sanitized_code != code:
+                if sanitized_error is None:
+                    sanitized_error = dict(error)
+                sanitized_error["code"] = sanitized_code
+        if sanitized_error is not None:
+            updates["error"] = sanitized_error
+    elif error is not None:
+        sanitized_non_dict = _sanitize_value_tree(error, sanitize_error_text)
+        if sanitized_non_dict != error:
+            updates["error"] = sanitized_non_dict
+    return updates
+
+
+def _sanitize_fields_with(
+    image: dict[str, Any], fields: tuple[str, ...], sanitize_string: Callable[[Any], Any]
+) -> dict[str, Any]:
+    """按指定净化函数净化一组字段，返回需回写的更新项。"""
+    updates: dict[str, Any] = {}
+    for field in fields:
+        value = image.get(field)
+        sanitized_value = _sanitize_value_tree(value, sanitize_string)
+        if sanitized_value != value:
+            updates[field] = sanitized_value
+    return updates
+
+
+def _sanitize_index_fields(image: dict[str, Any]) -> dict[str, Any]:
+    """净化 request_index/image_index 字段，返回需回写的更新项。
+
+    int 实例为本侧写入的序号直接保留，bool 与其他非 int 形态按错误文本净化。
+    """
+    updates: dict[str, Any] = {}
+    for field in ("request_index", "image_index"):
+        value = image.get(field)
+        if not isinstance(value, bool) and isinstance(value, int):
+            continue
+        sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
+        if sanitized_value != value:
+            updates[field] = sanitized_value
+    return updates
+
+
+def _sanitize_unknown_fields(image: dict[str, Any]) -> dict[str, Any]:
+    """净化不在已知键清单内的字段，返回需回写的更新项。"""
+    updates: dict[str, Any] = {}
+    for key, value in image.items():
+        if key in _KNOWN_IMAGE_KEYS:
+            continue
+        sanitized_value = _sanitize_unknown_value(value)
+        if sanitized_value != value:
+            updates[key] = sanitized_value
+    return updates
+
+
+# 并行批次失败占位项的 type 标识；其 error.message 已在聚合源头净化。
+_REQUEST_FAILED_TYPE = "image_generation.request_failed"
+
+
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """净化图片项内上游可回显自由内容的字段，就地写回传入列表并返回同一列表。
+    """净化图片项内上游可回显自由内容的字段，返回净化后的列表。
 
     覆盖 error 与 size/output_format/model/type、url/local_path/markdown_ref、序号字段
     的非 int 形态及未知键。短标识与自由文本走 sanitize_error_text 截断语义；url 与
     local_path/markdown_ref 及未知键走 sanitize_data_text 保留完整可用性。各字段非
-    字符串形态经 _sanitize_value_tree 逐层净化，凭据与 CRLF 不借容器形态绕过；
-    error 的非字符串形态先归一化为文本再净化；int 序号保持原值。仅净化后内容变化
-    的项做浅拷贝替换列表位置，其余项原样引用。同一列表的净化协调由调用方经
-    images_sanitized 承担，重复净化会使超长片段的截断标记叠加，本函数自身不做
-    重复进入判定。SSE 失败事件已在 io_sse 源头净化，此处覆盖非 SSE 路径。
+    字符串形态经 _sanitize_value_tree 逐层净化；error 的非字符串形态先归一化为文本
+    再净化；int 序号保持原值。仅净化后内容变化的项做浅拷贝，其余项保持原对象引用，
+    传入列表不被修改。净化非幂等，重复净化会使超长片段的截断标记叠加，调用方须
+    保证同一列表仅净化一次。SSE 失败事件已在 io_sse 源头净化，此处覆盖非 SSE 路径。
     """
+    sanitized_images = images
     for index, image in enumerate(images):
         updates: dict[str, Any] = {}
-
-        error = image.get("error")
-        if isinstance(error, dict):
-            sanitized_error: dict[str, Any] | None = None
-            message = error.get("message")
-            if message is not None:
-                sanitized_message = sanitize_error_text(normalize_message_text(message))
-                if sanitized_message != message:
-                    sanitized_error = {**error, "message": sanitized_message}
-            code = error.get("code")
-            if code is not None:
-                sanitized_code = sanitize_error_text(normalize_message_text(code))
-                if sanitized_code != code:
-                    if sanitized_error is None:
-                        sanitized_error = dict(error)
-                    sanitized_error["code"] = sanitized_code
-            if sanitized_error is not None:
-                updates["error"] = sanitized_error
-        elif error is not None:
-            sanitized_non_dict = _sanitize_value_tree(error, sanitize_error_text)
-            if sanitized_non_dict != error:
-                updates["error"] = sanitized_non_dict
-
-        for field in ("size", "output_format", "model", "type"):
-            value = image.get(field)
-            sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
-            if sanitized_value != value:
-                updates[field] = sanitized_value
-
-        for field in ("request_index", "image_index"):
-            value = image.get(field)
-            # int 实例为本侧写入的序号直接保留，bool 与其他非 int 形态按错误文本净化。
-            if not isinstance(value, bool) and isinstance(value, int):
-                continue
-            sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
-            if sanitized_value != value:
-                updates[field] = sanitized_value
-
-        for field in ("url", "local_path", "markdown_ref"):
-            value = image.get(field)
-            sanitized_value = _sanitize_value_tree(value, sanitize_data_text)
-            if sanitized_value != value:
-                updates[field] = sanitized_value
-
-        for key, value in image.items():
-            if key in _KNOWN_IMAGE_KEYS:
-                continue
-            sanitized_value = _sanitize_unknown_value(value)
-            if sanitized_value != value:
-                updates[key] = sanitized_value
-
+        # 并行失败占位项的 error 已在聚合源头净化，跳过 error 分量避免二次净化
+        # 使超长消息的截断标记叠加；其余字段照常净化。
+        if image.get("type") != _REQUEST_FAILED_TYPE:
+            updates.update(_sanitize_image_error_entry(image.get("error")))
+        updates.update(
+            _sanitize_fields_with(
+                image, ("size", "output_format", "model", "type"), sanitize_error_text
+            )
+        )
+        updates.update(_sanitize_index_fields(image))
+        updates.update(
+            _sanitize_fields_with(image, ("url", "local_path", "markdown_ref"), sanitize_data_text)
+        )
+        updates.update(_sanitize_unknown_fields(image))
         if updates:
-            sanitized_item = dict(image)
-            sanitized_item.update(updates)
-            images[index] = sanitized_item
+            if sanitized_images is images:
+                sanitized_images = list(images)
+            sanitized_images[index] = {**image, **updates}
+    return sanitized_images
 
-    return images
+
+def _is_aggregated_result(result: dict[str, Any]) -> bool:
+    """判定结果是否由并行聚合格式产出。
+
+    batch 键仅由 aggregate_parallel_generation_results 写入，client 的单请求归一化
+    不透传该键；聚合格式的 error 与 batch.errors 的 message 已在聚合源头净化，出口
+    侧据此跳过二次净化，避免超长片段的截断标记叠加。
+    """
+    return isinstance(result.get("batch"), dict)
 
 
 def _format_failure_section(result: dict[str, Any]) -> str:
     """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。
 
-    error 为上游自由内容，一律经净化与归一化输出：dict 形态优先按 message/msg/
-    detail/error/code 阶梯提取，未命中时归一化 message 分量；空值回落未知错误，
-    字面量 None 与字典 repr 不进入用户可见文本。
+    单请求路径的 error 为上游自由内容，一律经净化与归一化输出：dict 形态优先按
+    message/msg/detail/error/code 阶梯提取，未命中时归一化 message 分量；空值回落
+    未知错误，字面量 None 与字典 repr 不进入用户可见文本。聚合格式结果的错误消息
+    已在源头净化，直接渲染不重复净化。
     """
     # 空值归入未知错误，与结构化出口口径一致。
     raw_error = result.get("error") or "未知错误"
     if isinstance(raw_error, dict):
-        # dict 形态优先复用五级提取阶梯，与并行聚合的错误提取同口径。
-        error_text = _normalize_error_message(raw_error)
-        if error_text is None:
+        if _is_aggregated_result(result):
+            # 聚合出口的 message 已在源头净化，重复净化会使截断标记叠加。
             message = raw_error.get("message")
-            error_text = (
-                sanitize_error_text(normalize_message_text(message))
-                if message is not None
-                else "未知错误"
-            )
+            error_text = message if isinstance(message, str) and message else "未知错误"
+        else:
+            # dict 形态优先复用五级提取阶梯，与并行聚合的错误提取同口径。
+            ladder_text = _normalize_error_message(raw_error)
+            if ladder_text is None:
+                message = raw_error.get("message")
+                error_text = (
+                    sanitize_error_text(normalize_message_text(message))
+                    if message is not None
+                    else "未知错误"
+                )
+            else:
+                error_text = ladder_text
     else:
         error_text = sanitize_error_text(normalize_message_text(raw_error))
     failure_message = f"图片生成失败: {error_text}"
@@ -405,7 +470,9 @@ def _format_failure_section(result: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         request_index = item.get("request_index")
-        error_message = sanitize_error_text(normalize_message_text(item.get("message", "请求失败")))
+        # 聚合写入的 message 已在源头净化，非 str 形态仅归一化渲染。
+        message = item.get("message", "请求失败")
+        error_message = message if isinstance(message, str) else normalize_message_text(message)
         if request_index is None:
             parts.append(f"  {error_message}")
         else:
@@ -481,7 +548,7 @@ def _format_auto_save_section(
             display_index = saveable_indices[i] + 1
         else:
             display_index = i + 1
-        # 与结构化通道 to_dict 的净化对齐，防止换行注入。
+        # 保存失败原因过错误消息净化口径，防止换行注入。
         error_text = sanitize_error_text(save_result.error or "未知原因")
         parts.append(f"  图片 {display_index}: 保存失败 - {error_text}")
     parts.append("")
@@ -547,7 +614,8 @@ def format_generation_response(
 
     Args:
         auto_save_error: 自动保存错误信息，存在时表示已降级跳过。
-        images: 预提取的图片列表，None 时按需从 result 提取。
+        images: 预提取且已净化的图片列表，None 时内部提取并净化；已净化的列表重复
+            净化会使截断标记叠加，调用方不得重复传入净化前的列表。
         saveable_indices: 可保存图片在归一化列表中的原始索引，与 auto_save_results
             按位置对位；None 时自动保存段落回退保存序号。
 
@@ -558,9 +626,7 @@ def format_generation_response(
         return _format_failure_section(result)
 
     if images is None:
-        images = extract_images(result)
-    # 统一净化一次并写回列表，结构化出口经 images_sanitized 复用、跳过重复净化。
-    images = _sanitize_image_errors(images)
+        images = _sanitize_image_errors(extract_images(result))
     usage = result.get("usage", {})
 
     parts: list[str] = [title, f"尺寸: {size}", ""]
@@ -605,7 +671,6 @@ def _build_generation_structured_result(
     auto_save_results: list[AutoSaveResult] | None,
     auto_save_error: str | None,
     images: list[dict[str, Any]] | None = None,
-    images_sanitized: bool = False,
 ) -> dict[str, Any]:
     """构建 MCP 工具结果的 structuredContent 字段。
 
@@ -613,20 +678,17 @@ def _build_generation_structured_result(
     绑定；成功与失败同构，成功路径不输出 error 键。
 
     Args:
-        images: 预提取的图片列表，None 时从 result 提取。
-        images_sanitized: images 是否已净化写回；置 True 跳过重复净化，避免超长片段
-            截断标记叠加，默认 False 时在此完成首次净化。
+        images: 预提取且已净化的图片列表，None 时内部提取并净化；已净化的列表重复
+            净化会使截断标记叠加，调用方不得重复传入净化前的列表。
 
     Returns:
         structuredContent 字典，成功路径排除 error 键。
     """
-    # b64_json 为用户显式请求的图像载荷，有意不做截断。
-    if images is not None and images_sanitized:
-        sanitized_images = images
-    else:
-        sanitized_images = _sanitize_image_errors(
-            images if images is not None else extract_images(result)
-        )
+    # b64_json 为用户显式请求的图像载荷，有意不做截断。流水线传入的 images 已
+    # 净化，直接消费；独立调用未传时在此完成首次净化。
+    sanitized_images = (
+        images if images is not None else _sanitize_image_errors(extract_images(result))
+    )
     # status 为上游自由文本，同口径净化；非 str 归 None，畸形形态不使构造抛校验异常。
     raw_status = result.get("status")
     # usage 与 batch 的非 dict 形态按声明 schema 收敛为空 dict 与 None。
@@ -672,11 +734,14 @@ def _build_generation_structured_result(
         raw_error = result.get("error") or "未知错误"
         if isinstance(raw_error, dict):
             sanitized_error = dict(raw_error)
-            # message 可为任意 JSON 形态，非字符串先归一化为文本再净化。
-            if "message" in sanitized_error:
+            # 聚合出口的 message 已在源头净化，重复净化会使截断标记叠加，跳过；
+            # 单请求路径的 message 为上游自由内容，可为任意 JSON 形态，非字符串先
+            # 归一化为文本再净化。
+            if "message" in sanitized_error and not _is_aggregated_result(result):
                 sanitized_error["message"] = sanitize_error_text(
                     normalize_message_text(sanitized_error["message"])
                 )
+            # code 为上游自由文本，两种来源下均净化。
             if isinstance(sanitized_error.get("code"), str):
                 sanitized_error["code"] = sanitize_error_text(sanitized_error["code"])
             payload["error"] = sanitized_error

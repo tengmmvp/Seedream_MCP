@@ -159,8 +159,8 @@ class _SequentialImageInput(BaseModel):
     ) = Field(
         default=None,
         description=(
-            f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张，"
-            f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+            f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
+            "（5.0 Pro 不支持组图生成），每张支持图像 URL、本地文件路径或 Base64 图片数据。"
         ),
     )
 
@@ -305,13 +305,6 @@ class TextToImageInput(
     _PromptAndOptimizeInput,
 ):
     """文生图：通过提供清晰准确的文字指令，即可快速获得符合描述的高质量单张图片。"""
-
-    prompt: str = Field(
-        ...,
-        min_length=PROMPT_MIN_LENGTH,
-        max_length=PROMPT_MAX_LENGTH,
-        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
-    )
 
 
 class ImageToImageInput(

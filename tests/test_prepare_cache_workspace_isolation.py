@@ -7,7 +7,6 @@ mtime+size 失效保护；摘要键不容错未配对代理字符会中断整批
 import io
 import os
 from pathlib import Path
-from typing import Dict, List
 
 import pytest
 from PIL import Image
@@ -39,13 +38,13 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
     monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare_image_input)
 
     # 两次调用返回不同 roots，模拟不同请求上下文 / 租户
-    roots_sequence: List[List[Path]] = [
+    roots_sequence: list[list[Path]] = [
         [Path("/workspace/tenant-a")],
         [Path("/workspace/tenant-b")],
     ]
-    call_index: Dict[str, int] = {"i": 0}
+    call_index: dict[str, int] = {"i": 0}
 
-    def fake_get_workspace_roots() -> List[Path]:
+    def fake_get_workspace_roots() -> list[Path]:
         idx = call_index["i"]
         call_index["i"] += 1
         return list(roots_sequence[idx % len(roots_sequence)])

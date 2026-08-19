@@ -4,20 +4,29 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 import seedream_mcp.utils.io.io_path as io_path_module
 
 
-@pytest.fixture(autouse=True)
-def _clear_env_root_cache() -> Iterator[None]:
-    """每个用例前后清空回退根缓存，隔离模块级可变状态。"""
-    io_path_module.clear_resolved_env_root_cache()
-    yield
-    io_path_module.clear_resolved_env_root_cache()
+def _patch_resolve_counter(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """以计数 spy 包装 Path.resolve，返回被 resolve 的路径记录。
+
+    get_relative_path 等被测函数会以内层 except Exception 吞异常并按兜底值返回，
+    抛错补丁在回归发生时静默退化，守护必须以调用计数而非异常传播实现。
+    """
+    resolve_calls: list[str] = []
+    original_resolve = Path.resolve
+
+    def _counting_resolve(self: Path, strict: bool = False) -> Path:
+        resolve_calls.append(str(self))
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _counting_resolve)
+    return resolve_calls
 
 
 def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
@@ -46,28 +55,22 @@ def test_get_relative_path_absolute_fallback_skips_resolve(
 
     浏览链路传入的路径均已 resolve，回退分支的重复 resolve 属纯冗余 stat。
     """
-
-    def _explode_resolve(self: Path, strict: bool = False) -> Path:
-        raise AssertionError("绝对路径回退分支不应再次 resolve")
-
-    monkeypatch.setattr(Path, "resolve", _explode_resolve)
+    resolve_calls = _patch_resolve_counter(monkeypatch)
     base = tmp_path / "base"
     target = tmp_path / "x.png"
 
     assert io_path_module.get_relative_path(target, str(base)) == str(target)
+    assert resolve_calls == [], "绝对路径回退分支不应再次 resolve"
 
 
 def test_get_relative_path_relative_success_keeps_plain_relative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """可相对化的入参返回纯相对路径，全程不触发 resolve。"""
+    resolve_calls = _patch_resolve_counter(monkeypatch)
 
-    def _explode_resolve(self: Path, strict: bool = False) -> Path:
-        raise AssertionError("相对化成功分支不应调用 resolve")
-
-    monkeypatch.setattr(Path, "resolve", _explode_resolve)
-
-    assert io_path_module.get_relative_path("x.png", str(tmp_path)) == "x.png"
+    assert io_path_module.get_relative_path(tmp_path / "x.png", str(tmp_path)) == "x.png"
+    assert resolve_calls == [], "相对化成功分支不应调用 resolve"
 
 
 def test_resolve_env_workspace_root_caches_resolved_result(
@@ -208,10 +211,12 @@ def test_register_env_workspace_root_provider_replaces_previous() -> None:
 def test_find_images_rejects_unc_directory_before_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UNC 形式的目录入参在 resolve 前被拒：返回空列表且不触发任何路径解析。
+    """UNC 形式的目录入参在 resolve 前被拒：记录告警、返回空列表且不触发路径解析。
 
     UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须与其他 resolve 站点同口径
-    前置拦截，不向远端泄露凭据。
+    前置拦截，不向远端泄露凭据。前置拦截经告警文案锁定：find_images_in_directory
+    的兜底 except 会吞掉 resolve 抛出的异常并同样返回空列表，仅断言空返回无法
+    区分前置拦截与异常兜底两条路径。
     """
 
     def _explode_resolve(self: Path, strict: bool = False) -> Path:
@@ -219,5 +224,12 @@ def test_find_images_rejects_unc_directory_before_resolve(
 
     monkeypatch.setattr(Path, "resolve", _explode_resolve)
 
-    assert io_path_module.find_images_in_directory("//server/share", recursive=False) == []
-    assert io_path_module.find_images_in_directory("\\\\server\\share", recursive=True) == []
+    warnings: list[str] = []
+    handler_id = logger.add(lambda message: warnings.append(str(message)), level="WARNING")
+    try:
+        assert io_path_module.find_images_in_directory("//server/share", recursive=False) == []
+        assert io_path_module.find_images_in_directory("\\\\server\\share", recursive=True) == []
+    finally:
+        logger.remove(handler_id)
+
+    assert any("拒绝 UNC 形式的目录扫描入参" in message for message in warnings)

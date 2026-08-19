@@ -114,6 +114,18 @@ def test_sequential_generation_parameter_order() -> None:
     ]
 
 
+def test_browse_images_parameter_order() -> None:
+    assert list(BrowseImagesInput.model_fields.keys()) == [
+        "directory",
+        "recursive",
+        "max_depth",
+        "limit",
+        "offset",
+        "format_filter",
+        "show_details",
+    ]
+
+
 # ==================== 平铺 inputSchema 与模型 schema 等价性 ====================
 
 

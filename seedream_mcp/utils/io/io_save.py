@@ -1,6 +1,6 @@
 """自动保存协调模块。
 
-协调图片的批量并发下载与本地文件写入，内置按目录节流的旧文件清理。
+协调图片的批量并发下载与本地文件写入，内置按清理根目录节流的旧文件清理。
 下载或写入失败时采用降级策略，保留原始 URL 而不中断整体生成流程。
 """
 
@@ -26,18 +26,19 @@ from ..core.formats import (
     parse_data_uri,
 )
 from ..core.logs import get_logger
-from .io_download import DownloadManager, DownloadError, sanitize_url
+from .io_download import DownloadManager, DownloadError
+from .io_url import sanitize_url
 from .io_storage import FileManager, FileManagerError
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
 # 清理失败后的重试退避秒数：失败时写入该秒数形态的短退避时间戳，使失败重试有独立
 # 于完整节流间隔的下限，高频保存下持续失败的清理不再每次调用都触发全目录扫描。
 _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS = 60
-# 按 base_dir 记录最近清理时间，跨请求共享节流；不同 base_dir 独立，互不抑制。
-# 用 OrderedDict 并设上限，避免异常多变的 base_dir 使键无界增长耗尽内存。
+# 按清理根目录记录最近清理时间，跨请求共享节流；不同清理根独立，互不抑制。
+# 用 OrderedDict 并设上限，避免异常多变的清理根使键无界增长耗尽内存。
 _CLEANUP_LAST_RUN_MAX_ENTRIES = 16
 _cleanup_last_run: OrderedDict[str, float] = OrderedDict()
 # 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理。
@@ -184,6 +185,7 @@ class AutoSaveManager:
     def __init__(
         self,
         base_dir: Path | None = None,
+        cleanup_base_dir: Path | None = None,
         download_timeout: int = 30,
         max_retries: int = 3,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
@@ -198,18 +200,27 @@ class AutoSaveManager:
 
         Args:
             base_dir: 基础保存目录。
+            cleanup_base_dir: 清理与节流的根目录，None 时与 base_dir 一致；save_path
+                使 base_dir 指向子目录时传入配置默认保存根，按天清理与总量配额仍
+                覆盖整个默认根，不被 per-request 子目录碎片化。
             download_timeout: 下载超时时间，仅自建下载管理器时生效。
             max_retries: 最大重试次数，仅自建下载管理器时生效。
             max_file_size: 最大文件大小，本实例自持；自建下载管理器时同时作为其上限。
             max_concurrent: 最大并发下载数。
             date_folder: 是否按日期创建文件夹。
             cleanup_days: 自动清理天数，0 表示不按天清理。
-            max_total_bytes: 保存目录总字节上限，超出按最旧文件驱逐；None 表示不限制。
+            max_total_bytes: 清理根目录总字节上限，超出按最旧文件驱逐；None 表示不限制。
             download_manager: 外部共享的下载管理器，提供时复用其 HTTP 会话且不由本实例关闭。
             fsync: 落盘是否在写入后、原子替换前执行 os.fsync，透传至 save_bytes 字节
                 落盘与经下载管理器落盘两条路径。
         """
         self.file_manager = FileManager(base_dir)
+        # 清理与节流的根界独立于保存目录：save_path 把保存收敛到子目录时，按天清理
+        # 与总量配额仍以默认保存根为界整体执行；未提供时与保存目录共用同一实例。
+        if cleanup_base_dir is None:
+            self._cleanup_file_manager = self.file_manager
+        else:
+            self._cleanup_file_manager = FileManager(cleanup_base_dir)
         self.max_file_size = max_file_size
         if download_manager is not None:
             self.download_manager = download_manager
@@ -244,31 +255,32 @@ class AutoSaveManager:
             await self.download_manager.close()
 
     async def _maybe_cleanup(self) -> None:
-        """按目录节流触发清理，每个 base_dir 在最短间隔内仅执行一次。
+        """按清理根目录节流触发清理，每个清理根在最短间隔内仅执行一次。
 
-        清理入口不设开关短路：.part 孤儿清扫须在 auto-save 启用时无条件可达，两项
-        清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐仍按
-        各自开关门控。节流时间戳仅清理成功后保留，失败改写为短退避时间戳；锁内
-        完成检查与占位，并发请求不会同时进入清理。
+        清理范围以 _cleanup_file_manager 的根为界，save_path 使保存目录指向子目录时
+        仍覆盖整个默认保存根。清理入口不设开关短路：.part 孤儿清扫须在 auto-save
+        启用时无条件可达，两项清理策略均显式关闭的部署下遗留临时文件同样被回收；
+        按天清理与配额驱逐仍按各自开关门控。节流时间戳仅清理成功后保留，失败改写
+        为短退避时间戳；锁内完成检查与占位，并发请求不会同时进入清理。
         """
-        base_key = str(self.file_manager.base_dir)
+        cleanup_key = str(self._cleanup_file_manager.base_dir)
         now = time.time()
         async with _cleanup_lock:
-            previous = _cleanup_last_run.get(base_key, 0.0)
+            previous = _cleanup_last_run.get(cleanup_key, 0.0)
             if now - previous < _CLEANUP_MIN_INTERVAL_SECONDS:
                 return
             # 写入后移到链尾保持真 LRU：对已有键赋值不移动位置，刚刷新的节流时间戳
             # 若滞留链首会被容量驱逐，同目录下次保存会误判为从未节流而并发触发清理。
-            _cleanup_last_run[base_key] = now
-            _cleanup_last_run.move_to_end(base_key)
+            _cleanup_last_run[cleanup_key] = now
+            _cleanup_last_run.move_to_end(cleanup_key)
             while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
                 _cleanup_last_run.popitem(last=False)
         # 后台执行清理，不阻塞当前请求返回；失败写入短退避时间戳供下次重试。
-        task = asyncio.create_task(self._run_cleanup_in_background(base_key))
+        task = asyncio.create_task(self._run_cleanup_in_background(cleanup_key))
         _cleanup_tasks.add(task)
         task.add_done_callback(_cleanup_tasks.discard)
 
-    async def _run_cleanup_in_background(self, base_key: str) -> None:
+    async def _run_cleanup_in_background(self, cleanup_key: str) -> None:
         """在后台线程执行清理，失败时写入短退避时间戳。
 
         run_cleanup_policies 宽捕获扫描级与逐项错误并收入 errors 而非上抛，逐项
@@ -277,20 +289,20 @@ class AutoSaveManager:
         """
         try:
             outcome = await asyncio.to_thread(
-                self.file_manager.run_cleanup_policies,
+                self._cleanup_file_manager.run_cleanup_policies,
                 self.cleanup_days,
                 self.max_total_bytes,
             )
         except Exception as e:
-            await self._apply_cleanup_failure_backoff(base_key)
+            await self._apply_cleanup_failure_backoff(cleanup_key)
             logger.warning("自动清理失败: {}", e, exc_info=True)
             return
         errors = outcome.get("errors") if isinstance(outcome, dict) else None
         if errors:
-            await self._apply_cleanup_failure_backoff(base_key)
+            await self._apply_cleanup_failure_backoff(cleanup_key)
             logger.warning("自动清理部分失败: {}", errors)
 
-    async def _apply_cleanup_failure_backoff(self, base_key: str) -> None:
+    async def _apply_cleanup_failure_backoff(self, cleanup_key: str) -> None:
         """清理失败后写入短退避时间戳，使失败重试有独立节流下限。
 
         时间戳取 now - interval + backoff 形态，下次调用须再等待退避秒数方可重试，
@@ -298,10 +310,10 @@ class AutoSaveManager:
         同步移到链尾，保持驱逐按最近使用序。
         """
         async with _cleanup_lock:
-            _cleanup_last_run[base_key] = (
+            _cleanup_last_run[cleanup_key] = (
                 time.time() - _CLEANUP_MIN_INTERVAL_SECONDS + _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
             )
-            _cleanup_last_run.move_to_end(base_key)
+            _cleanup_last_run.move_to_end(cleanup_key)
 
     def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""

@@ -234,6 +234,52 @@ async def test_request_body_limit_skips_413_when_downstream_already_responded() 
     assert starts[0]["status"] == 200
 
 
+async def test_request_body_limit_sends_413_when_downstream_output_never_forwarded() -> None:
+    """下游读到截断终帧后才发响应的流式超限主路径须补发 413。
+
+    无 Content-Length 分帧超限且下游输出全部发生在超限判定之后时，输出被
+    send_wrapper 全部吞掉、从未触达真实客户端，补发 413 是客户端收到的唯一
+    响应；若以“下游发出过 response.start”为跳过条件，客户端只能收到服务器
+    兜底 500。
+    """
+    small_limit = 1024
+    sent: list[dict] = []
+    messages = [
+        {"type": "http.request", "body": b"x" * 600, "more_body": True},
+        {"type": "http.request", "body": b"x" * 600, "more_body": False},
+    ]
+    counter = {"i": 0}
+
+    async def receive() -> dict:
+        if counter["i"] < len(messages):
+            msg = messages[counter["i"]]
+            counter["i"] += 1
+            return msg
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        # 先读完全部 body 触发超限截断，此后发出的响应全被 send_wrapper 吞掉。
+        while True:
+            msg = await receive()
+            if msg["type"] == "http.request" and not msg.get("more_body", False):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"partial"})
+
+    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    scope = {"type": "http", "headers": []}
+    await middleware(scope, receive, send)
+
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    body_msg = next(m for m in sent if m.get("type") == "http.response.body")
+    assert json.loads(body_msg["body"].decode("utf-8"))["error"] == "request_too_large"
+
+
 async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunked() -> None:
     """非数字 Content-Length 头降级为 0，超限防护由 chunked 字节累计承担。"""
     small_limit = 1024

@@ -2,13 +2,14 @@
 
 基于 loguru 初始化日志系统，配置控制台与文件双通道输出。文件日志按 10 MB 轮换、
 保留 30 天并压缩归档。通过 InterceptHandler 将标准库 logging 调用重定向至 loguru，
-统一第三方库与项目内部的日志通道。
+统一第三方库与项目内部的日志通道。另含 asyncio 任务孤儿异常登记设施
+arm_unretrieved_exception_logging 与 log_unretrieved_task_exception，被 io_download
+与 image_prepare 消费，共享后台 task 失败无人检索时以 warning 记录。
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import sys
 import weakref
@@ -153,6 +154,10 @@ def setup_logging(
 
     Args:
         log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
+        log_file: 日志文件路径；None 时默认 ``.seedream/logs/seedream_mcp.log``
+            相对进程工作目录解析。
+        enable_console: 是否启用控制台通道，输出至 stderr。
+        enable_file: 是否启用文件通道，按 10 MB 轮换、保留 30 天并压缩归档。
         force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
             logger 已有 handler 时标准库日志不被拦截，输出 warning 提示。
     """
@@ -227,20 +232,9 @@ def setup_logging(
         logger.info("日志文件: {}", log_file)
 
 
-def get_logger(name: str | None = None) -> Logger:
-    """获取绑定了指定名称的 loguru logger 实例。
+def get_logger() -> Logger:
+    """返回项目统一的 loguru logger 实例。
 
-    name 仅绑定到 extra 字段，输出中渲染的模块名始终取真实调用帧；当前调用方统一
-    传 ``__name__``，二者恰好一致，传自定义名称不改变渲染输出。name 为 None 时自动
-    取调用模块名。
+    输出中渲染的模块名由 sink 从真实调用帧取值，无需调用方传入名称。
     """
-    if name is None:
-        # 自动获取调用模块名；帧对象会形成引用环，用后立即显式 del 以便及时回收。
-        current = inspect.currentframe()
-        try:
-            caller = current.f_back if current is not None else None
-            name = caller.f_globals.get("__name__", "unknown") if caller is not None else "unknown"
-        finally:
-            del current
-
-    return logger.bind(name=name)
+    return logger

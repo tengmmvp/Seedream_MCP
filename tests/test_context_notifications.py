@@ -1,7 +1,7 @@
 """MCP 上下文通知容错封装与工具元数据测试。
 
 覆盖进度上报的容错封装，以及工具与资源的元数据注册：
-- _safe_report_progress：上报失败不影响主流程
+- safe_report_progress：上报失败不影响主流程
 - 工具顶层 title 注册，对齐 MCP 2025-06-18 规范的 Tool.title 顶层字段
 - 工具 annotations 四项能力 hint 逐项锁定，资源 MIME 与内容格式一致
 
@@ -15,29 +15,29 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 from seedream_mcp.server import mcp
-from seedream_mcp.tools.core.common import _safe_report_progress
+from seedream_mcp.tools.core.common import safe_report_progress
 
-# ==================== _safe_report_progress ====================
+# ==================== safe_report_progress ====================
 
 
 async def test_safe_report_progress_invokes_report_progress() -> None:
     ctx = MagicMock()
     ctx.report_progress = AsyncMock()
 
-    await _safe_report_progress(ctx, progress=42.0, message="mid")
+    await safe_report_progress(ctx, progress=42.0, message="mid")
 
     ctx.report_progress.assert_awaited_once_with(progress=42.0, total=100.0, message="mid")
 
 
 async def test_safe_report_progress_silent_when_ctx_is_none() -> None:
-    await _safe_report_progress(None, progress=10.0, message="start")
+    await safe_report_progress(None, progress=10.0, message="start")
 
 
 async def test_safe_report_progress_swallows_errors() -> None:
     ctx = MagicMock()
     ctx.report_progress = AsyncMock(side_effect=RuntimeError("no progress support"))
 
-    await _safe_report_progress(ctx, progress=50.0, message="mid")
+    await safe_report_progress(ctx, progress=50.0, message="mid")
 
 
 # ==================== 日志推送通道移除守护 ====================

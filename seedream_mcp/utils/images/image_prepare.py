@@ -17,7 +17,7 @@ from ..core import logs as core_logs
 from ..core.logs import arm_unretrieved_exception_logging, get_logger
 from ..io.io_path import resolve_workspace_roots
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]

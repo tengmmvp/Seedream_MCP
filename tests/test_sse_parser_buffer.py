@@ -245,6 +245,27 @@ async def test_parse_sse_response_classifies_partial_failed_event() -> None:
     assert result["data"][0]["error"]["message"] == "blocked"
 
 
+async def test_parse_sse_response_strips_leading_bom() -> None:
+    """流首 UTF-8 BOM 紧贴首个 data: 行时被一次性剥离，首事件完整解析不丢失。"""
+    chunks = [
+        b'\xef\xbb\xbfdata: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_FakeLog(),
+    )
+    assert len(result["data"]) == 1
+    assert result["data"][0]["url"] == "http://x/1.png"
+    assert result["status"] == "completed"
+    assert result["truncated_events"] == 0
+
+
 async def test_parse_sse_response_normalizes_crlf_line_endings() -> None:
     """CRLF 行尾被归一化为 \\n，事件分隔 \\n\\n 仍正确切分。"""
     chunks = [
@@ -694,6 +715,11 @@ def test_is_sse_response_strips_leading_whitespace() -> None:
 
 def test_is_sse_response_rejects_non_sse_media_type() -> None:
     assert is_sse_response(_resp_with_content_type("application/json")) is False
+
+
+def test_is_sse_response_rejects_prefixed_lookalike_media_type() -> None:
+    """text/event-stream-evil 等前缀仿冒 media type 经严格等值判定拒绝。"""
+    assert is_sse_response(_resp_with_content_type("text/event-stream-evil")) is False
 
 
 def test_is_sse_response_rejects_missing_content_type() -> None:

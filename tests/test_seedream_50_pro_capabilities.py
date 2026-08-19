@@ -9,19 +9,22 @@ from __future__ import annotations
 
 import pytest
 
+from seedream_mcp.client import SeedreamClient
+from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.model.model_capabilities import (
-    get_max_reference_images,
-    get_model_capabilities,
-)
 from seedream_mcp.utils.core.validators import (
     validate_background,
+    validate_common_generation_params,
     validate_generation_tools,
     validate_layer_decomposition,
     validate_optimize_prompt_options,
     validate_output_format,
     validate_size_for_model,
     validate_stream,
+)
+from seedream_mcp.utils.model.model_capabilities import (
+    get_max_reference_images,
+    get_model_capabilities,
 )
 
 PRO = "doubao-seedream-5-0-pro-260628"
@@ -163,8 +166,6 @@ def test_tools_accepted_for_endpoint_id() -> None:
 
 def test_supports_sequential_generation_false_for_pro() -> None:
     """Pro 的能力声明须关闭组图支持，驱动 client 层拒绝组图调用。"""
-    from seedream_mcp.utils.model.model_capabilities import get_model_capabilities
-
     assert get_model_capabilities(PRO).supports_sequential_generation is False
     assert get_model_capabilities(LITE).supports_sequential_generation is True
 
@@ -227,8 +228,6 @@ def test_layer_preset_message_derives_from_model_capabilities() -> None:
 
 
 def test_common_params_prompt_none_accepted_with_layer_decomposition() -> None:
-    from seedream_mcp.utils.core.validators import validate_common_generation_params
-
     validated = validate_common_generation_params(
         prompt=None,
         optimize_prompt_options=None,
@@ -246,8 +245,6 @@ def test_common_params_prompt_none_accepted_with_layer_decomposition() -> None:
 
 
 def test_common_params_prompt_none_rejected_without_layer_decomposition() -> None:
-    from seedream_mcp.utils.core.validators import validate_common_generation_params
-
     with pytest.raises(SeedreamValidationError, match="prompt 不能为空"):
         validate_common_generation_params(
             prompt=None,
@@ -303,9 +300,6 @@ def test_background_transparent_allows_unspecified_output_format() -> None:
 
 async def test_pro_model_rejects_sequential_generation_call() -> None:
     """Pro 模型调用组图生成须在能力判定处被拒绝，不进入参数校验与 API 调用。"""
-    from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.config import SeedreamConfig
-
     client = SeedreamClient(SeedreamConfig(api_key="k", model_id=PRO, max_retries=1))
     with pytest.raises(SeedreamValidationError, match="不支持组图"):
         await client.sequential_generation(prompt="t", max_images=3, size="2K")

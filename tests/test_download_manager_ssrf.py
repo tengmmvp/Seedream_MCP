@@ -18,16 +18,7 @@ from seedream_mcp.utils.io.io_download import (
     _public_ip_rejection_reason,
 )
 
-
-class _FakeLoop:
-    """模拟事件循环的 getaddrinfo，返回指定 IP 列表。"""
-
-    def __init__(self, ips: list[str]) -> None:
-        self._ips = ips
-
-    async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
-        del host, port, proto
-        return [(None, None, None, None, (ip, 0)) for ip in self._ips]
+from _download_fakes import _FakeLoop
 
 
 def test_validate_url_static_rejects_localhost() -> None:

@@ -2,7 +2,8 @@
 
 多数用例直连 handle_browse_images，工作区边界经 workspace_root fixture 注入的
 SEEDREAM_WORKSPACE_ROOT 回退取得；走完整 MCPServer 调用链的用例以
-_NoRootsContext 提供无会话的替身上下文。
+_NoRootsContext 提供无会话的替身上下文。需要越界目录或越界文件的用例将工作区与
+越界路径同置于 tmp_path 之下，不污染共享 basetemp。
 """
 
 import os
@@ -15,11 +16,12 @@ from pydantic import ValidationError
 
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools import BrowseImagesInput
+from seedream_mcp.tools.core import browse as browse_core_module
+from seedream_mcp.tools.core.browse import _FALLBACK_BOUNDARY_PLACEHOLDER
 from seedream_mcp.tools.impl import browse_images as browse_images_module
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
 
 
-@pytest.mark.asyncio
 async def test_browse_images_returns_structured_success(workspace_root: Path) -> None:
     (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -32,7 +34,6 @@ async def test_browse_images_returns_structured_success(workspace_root: Path) ->
     assert any(isinstance(content, TextContent) for content in result.content)
 
 
-@pytest.mark.asyncio
 async def test_browse_images_returns_empty_when_no_files(workspace_root: Path) -> None:
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
@@ -42,12 +43,15 @@ async def test_browse_images_returns_empty_when_no_files(workspace_root: Path) -
     assert result.structured_content["count"] == 0
 
 
-@pytest.mark.asyncio
 async def test_browse_images_rejects_out_of_workspace_directory(
-    workspace_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    outside_dir = workspace_root.parent / "outside_dir_for_test"
-    outside_dir.mkdir(exist_ok=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside_dir_for_test"
+    outside_dir.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
 
     result = await handle_browse_images(BrowseImagesInput(directory=str(outside_dir)))
 
@@ -56,7 +60,6 @@ async def test_browse_images_rejects_out_of_workspace_directory(
     assert result.structured_content["status"] == "failed"
 
 
-@pytest.mark.asyncio
 async def test_browse_images_ignores_outside_images_without_crashing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -74,7 +77,7 @@ async def test_browse_images_ignores_outside_images_without_crashing(
         return [outside_img]
 
     monkeypatch.setattr(
-        browse_images_module,
+        browse_core_module,
         "find_images_in_directory",
         _fake_find_images_in_directory,
     )
@@ -87,7 +90,6 @@ async def test_browse_images_ignores_outside_images_without_crashing(
     assert result.structured_content["count"] == 0
 
 
-@pytest.mark.asyncio
 async def test_browse_images_empty_format_filter_skips_scan(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -101,7 +103,7 @@ async def test_browse_images_empty_format_filter_skips_scan(
     def _fail_find(*args, **kwargs):
         raise AssertionError("无有效后缀时不应触发目录扫描")
 
-    monkeypatch.setattr(browse_images_module, "find_images_in_directory", _fail_find)
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fail_find)
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, format_filter=[])
@@ -114,18 +116,16 @@ async def test_browse_images_empty_format_filter_skips_scan(
     assert result.structured_content["error"]["type"] == "browse_failed"
 
 
-@pytest.mark.asyncio
 async def test_browse_images_fallback_error_preserves_format_filter(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """外层兜底错误分支回显经同一规则过滤的 format_filter，不丢失用户原始输入。"""
-    from mcp.types import CallToolResult
 
-    async def _exploding_impl(params, ctx, **kwargs):
+    async def _exploding_request(params, ctx, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(browse_images_module, "_handle_browse_images_impl", _exploding_impl)
+    monkeypatch.setattr(browse_images_module, "execute_browse_request", _exploding_request)
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, format_filter=[".png", ".exe"])
@@ -137,7 +137,6 @@ async def test_browse_images_fallback_error_preserves_format_filter(
     assert result.structured_content["format_filter"] == [".png"]
 
 
-@pytest.mark.asyncio
 async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
     for name in ("a.png", "b.png", "c.png"):
         (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -163,7 +162,6 @@ async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
     assert sc2["next_offset"] is None
 
 
-@pytest.mark.asyncio
 async def test_browse_images_offset_beyond_end_signals_tool_error(
     workspace_root: Path,
 ) -> None:
@@ -189,7 +187,6 @@ async def test_browse_images_offset_beyond_end_signals_tool_error(
     assert "0 <= offset < 3" in text
 
 
-@pytest.mark.asyncio
 async def test_browse_images_deep_page_reuses_resolved_paths(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -237,7 +234,6 @@ def test_browse_images_input_rejects_oversized_offset() -> None:
     assert BrowseImagesInput(offset=0).offset == 0
 
 
-@pytest.mark.asyncio
 async def test_browse_images_format_filter_all_unsupported_echoes_original(
     workspace_root: Path,
 ) -> None:
@@ -277,7 +273,6 @@ class _NoRootsContext:
         """进度上报空实现。"""
 
 
-@pytest.mark.asyncio
 async def test_browse_images_offset_error_signal_visible_to_client(
     workspace_root: Path,
 ) -> None:
@@ -301,7 +296,6 @@ async def test_browse_images_offset_error_signal_visible_to_client(
     assert result.structured_content["error"]["type"] == "browse_failed"
 
 
-@pytest.mark.asyncio
 async def test_browse_images_format_filter_error_signal_visible_to_client(
     workspace_root: Path,
 ) -> None:
@@ -318,7 +312,6 @@ async def test_browse_images_format_filter_error_signal_visible_to_client(
     assert result.structured_content["error"]["type"] == "browse_failed"
 
 
-@pytest.mark.asyncio
 async def test_browse_images_full_page_appends_pagination_hint(workspace_root: Path) -> None:
     """满页且仍有更多时文本尾部追加 offset 翻页引导；末页不追加。
 
@@ -343,14 +336,13 @@ async def test_browse_images_full_page_appends_pagination_hint(workspace_root: P
     assert "offset=" not in text2
 
 
-@pytest.mark.asyncio
 async def test_browse_images_fallback_preserves_resolved_directories(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """impl 在目录解析完成后抛未预期异常时，兜底 structuredContent 回显已解析目录。
 
-    resolved_directories 列表由外层创建并共享给 impl；兜底分支不再恒为空列表。
+    resolved_directories 列表由外层创建并共享给 core 流水线；兜底分支不再恒为空列表。
     以会话 Roots 场景断言真实路径回显：env/CWD 回退场景的路径回显被占位符遮蔽，
     无法承载本断言。
     """
@@ -359,7 +351,7 @@ async def test_browse_images_fallback_preserves_resolved_directories(
     def _exploding_display_entries(**kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(browse_images_module, "_build_display_entries", _exploding_display_entries)
+    monkeypatch.setattr(browse_core_module, "_build_display_entries", _exploding_display_entries)
     (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
@@ -373,9 +365,9 @@ async def test_browse_images_fallback_preserves_resolved_directories(
     assert result.structured_content["resolved_directories"] == [str(workspace_root.resolve())]
 
 
-@pytest.mark.asyncio
 async def test_browse_images_fallback_boundary_masks_paths_in_error(
-    workspace_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """无会话 Roots 时越界拒绝不回显 env/CWD 绝对路径。
 
@@ -383,17 +375,18 @@ async def test_browse_images_fallback_boundary_masks_paths_in_error(
     SEEDREAM_WORKSPACE_ROOT 回退取得。越界消息与 structuredContent 的
     workspace_roots 均以占位符替代，不向调用方暴露服务器本地目录结构。
     """
-    from seedream_mcp.tools.impl.browse_images import _FALLBACK_BOUNDARY_PLACEHOLDER
-
-    outside_dir = workspace_root.parent / "outside_dir_for_masking_test"
-    outside_dir.mkdir(exist_ok=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside_dir_for_masking_test"
+    outside_dir.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
 
     result = await handle_browse_images(BrowseImagesInput(directory=str(outside_dir)))
 
     assert result.is_error is True
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "服务器配置的工作区目录" in text
-    assert str(workspace_root) not in text
+    assert str(workspace) not in text
     assert str(outside_dir.resolve().parent) not in text
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
@@ -401,13 +394,10 @@ async def test_browse_images_fallback_boundary_masks_paths_in_error(
     assert result.structured_content["resolved_directories"] == []
 
 
-@pytest.mark.asyncio
 async def test_browse_images_fallback_boundary_masks_paths_on_success(
     workspace_root: Path,
 ) -> None:
     """无会话 Roots 的成功浏览同样遮蔽边界路径，展示层保持相对路径。"""
-    from seedream_mcp.tools.impl.browse_images import _FALLBACK_BOUNDARY_PLACEHOLDER
-
     (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
@@ -420,7 +410,6 @@ async def test_browse_images_fallback_boundary_masks_paths_on_success(
     assert sc["images"][0]["path"] == "demo.png"
 
 
-@pytest.mark.asyncio
 async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -448,7 +437,6 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     assert str(workspace_root.resolve()) not in text
 
 
-@pytest.mark.asyncio
 async def test_browse_images_empty_without_unreadable_keeps_plain_message(
     workspace_root: Path,
 ) -> None:
@@ -467,7 +455,7 @@ def test_format_file_info_degrades_on_malformed_timestamp(
     """畸形时间戳使 fromtimestamp 抛 ValueError 时降级为「文件信息不可用」。
 
     不向调用方抛异常；stat 本身成功，降级分支须同时置空 size_mb 与 modified
-    两键，避免半份详情误导调用方。以替身模块替换 browse_images 命名空间内的
+    两键，避免半份详情误导调用方。以替身模块替换 browse 命名空间内的
     datetime 名字，使 datetime.datetime.fromtimestamp 抛 ValueError；内建
     datetime 类为不可变类型，无法直接对其打属性补丁。
     """
@@ -480,9 +468,9 @@ def test_format_file_info_degrades_on_malformed_timestamp(
             raise ValueError("year is out of range")
 
     fake_datetime_module = SimpleNamespace(datetime=_ExplodingDatetime)
-    monkeypatch.setattr(browse_images_module, "datetime", fake_datetime_module)
+    monkeypatch.setattr(browse_core_module, "datetime", fake_datetime_module)
 
-    text, details = browse_images_module._format_file_info("a.png", image, True)
+    text, details = browse_core_module._format_file_info("a.png", image, True)
 
     assert text == "a.png | 文件信息不可用"
     assert details == {"size_mb": None, "modified": None}
@@ -498,7 +486,7 @@ def test_build_display_entries_sanitizes_file_name_credentials(
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
     resolved_roots = resolve_workspace_roots([workspace_root])
 
-    lines, entries = browse_images_module._build_display_entries(
+    lines, entries = browse_core_module._build_display_entries(
         images=[image],
         image_resolved_map={image: image.resolve()},
         resolved_roots=resolved_roots,
@@ -510,7 +498,6 @@ def test_build_display_entries_sanitizes_file_name_credentials(
     assert "***" in entries[0]["path"]
 
 
-@pytest.mark.asyncio
 async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
     workspace_root: Path,
 ) -> None:
@@ -536,7 +523,6 @@ async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
     assert "secret" not in structured_message
 
 
-@pytest.mark.asyncio
 async def test_browse_images_unsupported_format_message_sanitized(
     workspace_root: Path,
 ) -> None:
@@ -557,7 +543,6 @@ async def test_browse_images_unsupported_format_message_sanitized(
     assert "***" in text
 
 
-@pytest.mark.asyncio
 async def test_browse_images_empty_format_filter_message_has_no_blank_slot(
     workspace_root: Path,
 ) -> None:
@@ -584,7 +569,7 @@ async def test_browse_images_empty_format_filter_message_has_no_blank_slot(
 
 
 async def test_browse_images_dropped_entries_do_not_consume_page_quota(
-    workspace_root: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """早停窗口内的越界条目不占分页配额：has_more 正确、尾部图片翻页可达。
@@ -594,18 +579,21 @@ async def test_browse_images_dropped_entries_do_not_consume_page_quota(
     越界条目居首的有序列表，稳定复现剔除占额场景：limit=2 且窗口内含 1 个越界
     条目时，首页须报 has_more 且次页取到尾部真图。
     """
-    for i in range(3):
-        (workspace_root / f"img_{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    outside = workspace_root.parent / "outside_quota_probe_target.png"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside_quota_probe_target.png"
     outside.write_bytes(b"\x89PNG\r\n\x1a\n")
-    scan_order = [outside] + [workspace_root / f"img_{i}.png" for i in range(3)]
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+    for i in range(3):
+        (workspace / f"img_{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_order = [outside] + [workspace / f"img_{i}.png" for i in range(3)]
 
     def _fake_scan(**kwargs: object) -> list[Path]:
         limit = kwargs["limit"]
         assert isinstance(limit, int)
         return scan_order[:limit]
 
-    monkeypatch.setattr(browse_images_module, "find_images_in_directory", _fake_scan)
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
 
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)

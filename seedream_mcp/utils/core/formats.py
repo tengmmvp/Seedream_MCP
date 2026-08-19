@@ -7,7 +7,7 @@ image_input、io_storage 等模块共享，避免多处重复定义。
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 
 # 自动保存单文件大小上限默认值，config 与 io_download 共享此单一来源。
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
@@ -134,14 +134,14 @@ def format_file_size_mb(size_bytes: int) -> str:
     return f"{size_bytes / 1024 / 1024:.1f}MB"
 
 
-def parse_data_uri(data: str) -> tuple[str | None, str]:
+def parse_data_uri(data: Any) -> tuple[str | None, Any]:
     """解析 data URI，返回 (media_type, payload)。
 
     scheme 前缀按 RFC 3986 大小写不敏感判定，与 image_ref 的分类口径一致，使
     ``DATA:image/png;base64,....`` 也进入校验流水线获得精确报错。media_type 取自
     header 的媒体类型部分，缺失时为 None；payload 为首个逗号后的负载，不做 base64
     解码，由调用方按编码标记处理。非 data URI、缺逗号分隔符或入参非字符串时返回
-    (None, 原始字符串)。
+    (None, 原样入参)，非字符串入参原样落于 payload 位。
     """
     if not isinstance(data, str):
         return None, data

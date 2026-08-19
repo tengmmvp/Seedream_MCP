@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 from pathlib import Path
 
 from ..core.errors import SeedreamConfigError, SeedreamMCPError, SeedreamValidationError
@@ -20,7 +19,6 @@ from ..io.io_path import (
     is_unc_path,
     get_workspace_roots,
     is_boundary_from_session_roots,
-    is_within_resolved,
     resolve_workspace_roots,
     suggest_similar_paths,
 )
@@ -29,13 +27,14 @@ from .image_validation import (
     UNIDENTIFIED_IMAGE_MESSAGE,
     decode_and_validate_dimensions,
     is_unidentified_image_error,
+    iter_local_candidates,
     resolve_local_image_candidate,
     validate_image_input,
     validate_image_path,
 )
 from .image_ref import classify_image_reference
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 async def prepare_image_input(image: str) -> str:
@@ -77,27 +76,13 @@ async def prepare_image_input(image: str) -> str:
 def _resolves_outside_workspace(normalized: str, resolved_roots: list[Path]) -> bool:
     """判断输入路径解析后的物理位置是否落在全部工作区根之外。
 
-    候选构造与 resolve_local_image_candidate 一致：绝对路径原样、相对路径按根序
-    拼接，任一候选命中任一根即界内。UNC 路径不 resolve 以免触发 SMB 连接，UNC
-    输入直接返回 False 交诊断分支处理。
+    候选管线与 resolve_local_image_candidate 共用 iter_local_candidates，任一
+    候选命中任一根即界内。UNC 路径不 resolve 以免触发 SMB 连接，UNC 输入直接
+    返回 False 交诊断分支处理。
     """
     if is_unc_path(normalized):
         return False
-    if os.path.isabs(normalized):
-        candidates = [Path(normalized)]
-    else:
-        candidates = [base / normalized for base in resolved_roots]
-    for candidate in candidates:
-        # UNC 根拼接出的相对路径候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
-        if is_unc_path(str(candidate)):
-            continue
-        try:
-            resolved_candidate = candidate.resolve()
-        except (OSError, ValueError):
-            continue
-        if any(is_within_resolved(resolved_candidate, base) for base in resolved_roots):
-            return False
-    return True
+    return not any(iter_local_candidates(normalized, resolved_roots))
 
 
 def _format_local_read_error(exc: OSError, normalized: str) -> str:
@@ -221,9 +206,10 @@ def _prepare_local_image(normalized: str, original: str) -> str:
         raise SeedreamValidationError(message, field="image", value=normalized) from e
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     # MIME 以字节签名为准、扩展名回退：扩展名可伪造，与 auto_save 保存路径同口径。
+    # 两来源的扩展名均为映射键，直取使键缺失以 KeyError 显式暴露而非静默回落。
     inferred_extension = infer_extension_from_bytes(image_bytes, default="")
     suffix = inferred_extension or validated_path.suffix.lower()
-    mime_type = MIME_BY_EXTENSION.get(suffix, "image/jpeg")
+    mime_type = MIME_BY_EXTENSION[suffix]
 
     logger.info("成功处理图片文件: {} ({} bytes)", validated_path, len(image_bytes))
     return f"data:{mime_type};base64,{image_b64}"

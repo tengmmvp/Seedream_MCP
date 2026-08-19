@@ -40,7 +40,7 @@ SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生
 
 # ==================== MCP 服务器实例与共享资源状态 ====================
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 class _SharedResource:
@@ -134,7 +134,7 @@ def _has_inflight_references() -> bool:
 @asynccontextmanager
 async def app_lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
     """管理 MCPServer 生命周期，向 lifespan_context 注入共享配置、SeedreamClient
-    与 DownloadManager，键为 config/client/download_manager。
+    与 DownloadManager，键名见 config 模块 LIFESPAN_KEY_* 常量。
 
     资源以引用计数的模块级单例持有，跨 lifespan 重入复用；teardown 递减在途引用，
     归零前不清理，任一退出不影响其余在途请求持有的连接池。config 身份变化触发重建：

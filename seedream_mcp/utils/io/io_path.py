@@ -11,7 +11,9 @@ workspace_roots_scope 的 roots/list 直连。另提供目录图片查找与拼�
 from __future__ import annotations
 
 import asyncio
+import heapq
 import os
+import sys
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -25,9 +27,9 @@ from mcp.types import ListRootsResult
 from ..core.errors import SeedreamMCPError
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
-from .io_file import _is_reparse_point
+from .io_file import has_reparse_attribute, is_reparse_point
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     "seedream_workspace_roots",
@@ -35,7 +37,7 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
 )
 
 # roots/list 请求的显式短超时：不设超时将依赖会话层读超时，慢客户端或半开连接会把
-# 工具调用拖到分钟级；超时按读取失败回退环境变量边界。
+# 工具调用拖到分钟级；超时按读取失败进入回退判定，无环境变量根时 fail-closed。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
 
 # 回退 CWD 告警只记录一次；无 Roots 时本解析随每次文件访问触发，逐次告警会淹没日志。
@@ -197,7 +199,7 @@ async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
         return []
 
     roots_result = await asyncio.wait_for(list_roots(), timeout=_ROOTS_LIST_TIMEOUT_SECONDS)
-    return _roots_result_to_paths(roots_result)
+    return await asyncio.to_thread(_roots_result_to_paths, roots_result)
 
 
 def _roots_result_to_paths(roots_result: Any) -> list[Path]:
@@ -286,9 +288,9 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     InputRequiredResult 多轮取回后走 workspace_roots_scope_from_result，本函数
     承接旧修订会话的 ctx.session.list_roots 直连（SEP-2577 废弃但为旧修订上
     唯一途径）。客户端 Roots 设置到上下文变量作为该请求的文件访问边界；未声明
-    roots capability 时跳过 roots/list 往返，回退环境变量边界。当前协议会话无
-    服务端反向通道时 roots/list 必抛 NoBackChannelError：未配置环境变量根则
-    fail-closed 抛 SeedreamMCPError，已配置则回退该显式边界。
+    roots capability 时跳过 roots/list 往返，回退环境变量边界。roots/list 读取
+    失败（协议会话无反向通道，或超时等瞬时失败）统一判定：未配置环境变量根则
+    fail-closed 抛 SeedreamMCPError，已配置则回退该显式边界并记录 error。
 
     Args:
         ctx: MCP 请求上下文，经其 session 读取客户端 Roots。
@@ -297,8 +299,9 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
         当前请求解析出的工作区根目录列表；客户端不支持 Roots 时为空列表。
 
     Raises:
-        SeedreamMCPError: 协议会话无反向通道且无环境变量工作区根可用，进入
-            作用域前抛出，使该请求的本地文件操作失败而非放宽边界。
+        SeedreamMCPError: roots/list 读取失败（协议会话无反向通道或超时等瞬时
+            失败）且无环境变量工作区根可用，进入作用域前抛出，使该请求的本地
+            文件操作失败而非放宽边界到进程工作目录。
     """
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: list[Path] = []
@@ -338,8 +341,20 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
                 exc,
             )
         except Exception as exc:
-            # 回退会放宽文件访问边界，多租户部署须感知，提级为 warning。
-            logger.warning("读取 MCP Roots 失败，回退环境变量边界: {}", exc)
+            # 超时等瞬时读取失败与无反向通道同判定：回退会放宽文件访问边界，未配置
+            # 环境变量根时 fail-closed；已配置则回退该显式边界并提级为 error。
+            configured_root = _resolve_configured_root()
+            if configured_root is None:
+                logger.error("读取 MCP Roots 瞬时失败，且无环境变量工作区根可用: {}", exc)
+                raise SeedreamMCPError(
+                    "读取 MCP Roots 发生瞬时失败，且未配置 SEEDREAM_WORKSPACE_ROOT，"
+                    "拒绝将文件访问边界放宽到进程工作目录"
+                ) from exc
+            logger.error(
+                "读取 MCP Roots 失败，回退环境变量边界 {}: {}",
+                configured_root,
+                exc,
+            )
         else:
             token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
             if resolved_roots:
@@ -390,6 +405,8 @@ def is_unc_path(path_str: str) -> bool:
 def normalize_path(path: str, base_dir: str | None = None) -> Path:
     """标准化文件路径为绝对 Path 对象。
 
+    win32 平台剥离最终分量尾部的点与空格，使返回的路径名与实际打开的文件名一致。
+
     Args:
         path: 输入路径，可为相对或绝对。
         base_dir: 基础目录，用于解析相对路径。
@@ -408,6 +425,14 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # 该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；POSIX 无 drive 恒不触发。
         if path_obj.drive and not path_obj.root:
             raise ValueError(f"拒绝驱动器相对路径以避免绕过基础目录解析: {path}")
+
+        # Win32 命名空间打开文件时剥离最终分量尾部的点与空格，先做同口径名称归一，
+        # 已验证路径字符串才与实际打开的文件名一致；仅名称级归一，不改变越界判定。
+        if sys.platform == "win32":
+            final_name = path_obj.name
+            polished_name = final_name.rstrip(". ") if final_name else final_name
+            if polished_name and polished_name != final_name:
+                path_obj = path_obj.with_name(polished_name)
 
         if path_obj.is_absolute():
             return path_obj.resolve()
@@ -472,8 +497,9 @@ def find_images_in_directory(
     安全前置条件：本函数不做工作区越界校验，调用方必须先确认 directory 位于允许
     的工作区根之内；本函数经 utils/__init__ 重导出，外部调用方同样受此约束。UNC
     形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回空列表并记录告警。
-    单个目录内的条目列表在排序阶段全量物化，limit 仅使跨目录递归提前终止；重复
-    扫描的成本由 io_scan 的 mtime 加 TTL 缓存缓解。
+    单个目录的条目列表按需物化：limit 场景只物化排序前缀，非图片条目占位致结果
+    不足且目录未扫尽时倍增前缀重扫，无 limit 时一次物化全量有序列表；limit 亦使
+    跨目录递归提前终止，重复扫描的成本由 io_scan 的 mtime 加 TTL 缓存缓解。
 
     Args:
         directory: 搜索目录。
@@ -522,37 +548,57 @@ def find_images_in_directory(
         """按 normcase 稳定顺序深度优先扫描；凑够 target_count 即返回 True 提前终止。"""
         if current_depth > max_depth:
             return False
-        try:
-            with os.scandir(path) as it:
-                entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
-        except OSError as e:
-            logger.warning("无法访问目录 {}: {}", path, e)
-            if unreadable_dirs is not None:
-                unreadable_dirs.append(path)
-            return False
 
-        for entry in entries:
-            entry_path = Path(entry.path)
-            # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历。
-            if (
-                entry.is_file(follow_symlinks=False)
-                and entry_path.suffix.lower() in target_extensions
-            ):
-                # OneDrive 占位文件等 reparse 非 symlink，is_file 不拒绝，与目录分支
-                # 同规则剔除；后缀命中后才判定，非图片条目不付 lstat 开销。
-                if _is_reparse_point(entry_path):
-                    logger.warning("跳过 reparse point 文件: {}", entry_path)
-                    continue
-                images.append(entry_path)
-                if target_count >= 0 and len(images) >= target_count:
-                    return True
-            elif entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth:
-                if _is_reparse_point(entry_path):
-                    logger.warning("跳过 reparse point 目录: {}", entry_path)
-                    continue
-                if scan_directory(entry_path, current_depth + 1):
-                    return True
-        return False
+        # 排序前缀按需扩展：heapq.nsmallest 与 sorted 前缀同序，limit 场景首轮按
+        # target_count 截取条目，非图片条目占位致图片不足且目录未扫尽时倍增前缀重扫，
+        # 物化量与前缀长度成正比而非目录全量；无 limit 时一次全量排序。
+        prefix_len = target_count
+        consumed = 0
+        while True:
+            try:
+                with os.scandir(path) as it:
+                    if target_count >= 0:
+                        entries = heapq.nsmallest(
+                            prefix_len, it, key=lambda entry: os.path.normcase(entry.path)
+                        )
+                    else:
+                        entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
+            except OSError as e:
+                logger.warning("无法访问目录 {}: {}", path, e)
+                if unreadable_dirs is not None:
+                    unreadable_dirs.append(path)
+                return False
+
+            for entry in entries[consumed:]:
+                entry_path = Path(entry.path)
+                # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历。
+                if (
+                    entry.is_file(follow_symlinks=False)
+                    and entry_path.suffix.lower() in target_extensions
+                ):
+                    # OneDrive 占位文件等 reparse 非 symlink，is_file 不拒绝，与目录分支
+                    # 同规则剔除；复用遍历条目的 lstat 结果判定，不付逐文件二次 lstat，
+                    # 后缀命中后才判定，非图片条目不付 stat 开销。
+                    if has_reparse_attribute(entry.stat(follow_symlinks=False)):
+                        logger.warning("跳过 reparse point 文件: {}", entry_path)
+                        continue
+                    images.append(entry_path)
+                    if target_count >= 0 and len(images) >= target_count:
+                        return True
+                elif (
+                    entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth
+                ):
+                    if is_reparse_point(entry_path):
+                        logger.warning("跳过 reparse point 目录: {}", entry_path)
+                        continue
+                    if scan_directory(entry_path, current_depth + 1):
+                        return True
+
+            if target_count < 0 or len(entries) < prefix_len:
+                # 无 limit 或返回条目少于前缀长度即目录已扫尽，不存在可扩展前缀。
+                return False
+            consumed = prefix_len
+            prefix_len *= 2
 
     scan_directory(dir_path)
 

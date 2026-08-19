@@ -17,6 +17,23 @@ from seedream_mcp.utils.io.io_path import (
     normalize_path,
 )
 
+
+def _patch_resolve_exploding_only_on_unc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path.resolve 改为仅对 UNC 路径爆炸，非 UNC 路径回退真实 resolve。
+
+    全量爆炸补丁会把合法根目录与候选的 resolve 一并误报，守卫范围收窄到
+    UNC 前缀路径：UNC 进入 resolve 即时失败，其余路径保持真实解析语义。
+    """
+    original_resolve = Path.resolve
+
+    def _resolve_guard(self: Path, strict: bool = False) -> Path:
+        if is_unc_path(str(self)):
+            raise AssertionError("UNC 路径不得进入 resolve（会触发 SMB 认证）")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _resolve_guard)
+
+
 # ==================== is_unc_path ====================
 
 
@@ -196,14 +213,12 @@ def test_resolve_local_image_candidate_skips_unc_without_resolve(
 ) -> None:
     """UNC 输入在候选定位中于 resolve 前被拦截，不触发 SMB 连接。
 
-    断言 Path.resolve 未被调用而非仅断言返回 None，防止回归为先 resolve 后拒绝。
+    断言 UNC 路径未进入 resolve 而非仅断言返回 None，防止回归为先 resolve 后
+    拒绝；合法根目录的 resolve 不在守卫范围。
     """
     from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
 
-    def _explode(self):  # type: ignore[no-untyped-def]
-        raise AssertionError("UNC 候选不得进入 resolve（会触发 SMB 认证）")
-
-    monkeypatch.setattr(Path, "resolve", _explode)
+    _patch_resolve_exploding_only_on_unc(monkeypatch)
 
     assert resolve_local_image_candidate("\\\\attacker\\share\\x.png", [tmp_path]) is None
     assert resolve_local_image_candidate("//attacker/share/x.png", [tmp_path]) is None
@@ -215,14 +230,11 @@ def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
     """UNC 根下相对路径拼接出的候选在 resolve 前被逐候选守卫拦截。
 
     输入级检查只覆盖 UNC 直接输入；UNC 根拼出的候选同样以 UNC 前缀开头，resolve
-    会触发 SMB 认证。断言 Path.resolve 未被调用。
+    会触发 SMB 认证。断言 UNC 候选未进入 resolve，合法路径的 resolve 不误报。
     """
     from seedream_mcp.utils.images.image_input import _resolves_outside_workspace
 
-    def _explode(self):  # type: ignore[no-untyped-def]
-        raise AssertionError("UNC 候选不得进入 resolve（会触发 SMB 认证）")
-
-    monkeypatch.setattr(Path, "resolve", _explode)
+    _patch_resolve_exploding_only_on_unc(monkeypatch)
 
     unc_root = Path("\\\\attacker\\share")
     assert _resolves_outside_workspace("relative/x.png", [unc_root]) is True
@@ -233,15 +245,12 @@ def test_validate_image_input_rejects_unc_before_resolve(
 ) -> None:
     """公开导出的 validate_image_input 对 UNC 输入在 resolve 前拒绝，不触发 SMB。
 
-    断言 Path.resolve 未被调用而非仅断言抛错，防止回归为先解析后拒绝。
+    断言 UNC 路径未进入 resolve 而非仅断言抛错，防止回归为先解析后拒绝。
     """
     from seedream_mcp.utils.core.errors import SeedreamValidationError
     from seedream_mcp.utils.images.image_validation import validate_image_input
 
-    def _explode(self):  # type: ignore[no-untyped-def]
-        raise AssertionError("UNC 输入不得进入 resolve（会触发 SMB 认证）")
-
-    monkeypatch.setattr(Path, "resolve", _explode)
+    _patch_resolve_exploding_only_on_unc(monkeypatch)
 
     with pytest.raises(SeedreamValidationError, match="UNC"):
         validate_image_input("\\\\attacker\\share\\x.png")

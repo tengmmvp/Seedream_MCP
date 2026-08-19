@@ -20,9 +20,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "SeedreamValidationError": (".core.errors", "SeedreamValidationError"),
     "SeedreamTimeoutError": (".core.errors", "SeedreamTimeoutError"),
     "SeedreamNetworkError": (".core.errors", "SeedreamNetworkError"),
-    # 参数校验（core）与图像校验（images）
+    # 参数校验（core）
     "validate_prompt": (".core.validators", "validate_prompt"),
-    "validate_image_input": (".images.image_validation", "validate_image_input"),
     "validate_size": (".core.validators", "validate_size"),
     # 日志管理（core）
     "setup_logging": (".core.logs", "setup_logging"),

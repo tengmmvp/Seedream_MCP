@@ -107,6 +107,20 @@ class _MalformedResponseContext:
         self.session = _MalformedResponseSession()
 
 
+class _TimeoutSession:
+    """list_roots 抛 TimeoutError 的会话替身，模拟 roots/list 瞬时超时。"""
+
+    async def list_roots(self) -> ListRootsResult:
+        raise TimeoutError("roots/list timed out")
+
+
+class _TimeoutContext:
+    """组合瞬时超时会话的上下文替身。"""
+
+    def __init__(self) -> None:
+        self.session = _TimeoutSession()
+
+
 class _LevelCaptureLogger:
     """替身 logger，分别收集 error 与 warning 消息，供断言日志级别。"""
 
@@ -362,11 +376,11 @@ async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with
 
 
 @pytest.mark.asyncio
-async def test_workspace_roots_scope_warns_and_falls_back_on_generic_error(
+async def test_workspace_roots_scope_errors_and_falls_back_on_generic_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NoBackChannelError 之外的普通异常维持 warning 级回退，不 fail-closed。"""
+    """NoBackChannelError 之外的普通异常在已配置环境变量根时回退该根，日志提级为 error。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -376,8 +390,44 @@ async def test_workspace_roots_scope_warns_and_falls_back_on_generic_error(
     async with workspace_roots_scope(_MalformedResponseContext()):
         assert get_workspace_root() == env_root.resolve()
 
-    assert any("读取 MCP Roots 失败" in message for message in capture.warnings)
-    assert capture.errors == []
+    assert any("读取 MCP Roots 失败" in message for message in capture.errors)
+    assert capture.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_fails_closed_on_transient_error_without_env_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """roots/list 瞬时失败且无环境变量根时与无反向通道同判定 fail-closed。
+
+    瞬时失败回退环境变量边界而未配置根时会放宽到进程 CWD，与 NoBackChannelError
+    分支同一风险形态，不得因失败可重试而放宽边界。
+    """
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_workspace_root_provider", lambda: None)
+
+    with pytest.raises(SeedreamMCPError, match="SEEDREAM_WORKSPACE_ROOT"):
+        async with workspace_roots_scope(_TimeoutContext()):
+            raise AssertionError("瞬时失败且无环境变量根时不得进入作用域")
+
+
+@pytest.mark.asyncio
+async def test_workspace_roots_scope_transient_error_falls_back_to_env_root_with_error_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """roots/list 瞬时失败但已配置环境变量根时回退该显式边界，日志提级为 error。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    capture = _LevelCaptureLogger()
+    monkeypatch.setattr(io_path_module, "logger", capture)
+
+    async with workspace_roots_scope(_TimeoutContext()):
+        assert get_workspace_root() == env_root.resolve()
+
+    assert any("读取 MCP Roots 失败" in message for message in capture.errors)
+    assert capture.warnings == []
 
 
 @pytest.mark.asyncio

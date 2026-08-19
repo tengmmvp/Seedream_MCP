@@ -70,7 +70,7 @@ async def test_parallel_batch_cancellation_propagates_to_inflight_requests() -> 
             context=context,
             ctx=None,
             request_executor=executor,
-            module_logger=get_logger("test"),
+            module_logger=get_logger(),
         )
     )
     # 等待至少一个请求进入 executor 并挂起，模拟批次执行中

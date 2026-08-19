@@ -123,24 +123,24 @@ def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_save_real_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """mock 批量保存成功且落盘真实 PNG，返回其路径供断言复用。"""
+    """mock 单图保存成功且落盘真实 PNG，返回其路径供断言复用。
+
+    mock 挂在 save_image 而非 save_multiple_images：前者经实例属性运行时解析，
+    批量编排真实执行，保存动作替换为返回真实落盘的 PNG。
+    """
     saved = _write_png(tmp_path / "saved.png", (1200, 800))
     result_cls = io_save.AutoSaveResult
 
-    async def fake_save_multiple(
-        self: Any, images: list[dict[str, Any]], tool_name: str
-    ) -> list[Any]:
-        del self, tool_name
-        return [
-            result_cls(
-                success=True,
-                original_url=images[0]["url"],
-                local_path=str(saved),
-                markdown_ref="![image](saved.png)",
-            )
-        ]
+    async def fake_save_image(self: Any, **kwargs: Any) -> Any:
+        del self
+        return result_cls(
+            success=True,
+            original_url=kwargs.get("url", ""),
+            local_path=str(saved),
+            markdown_ref="![image](saved.png)",
+        )
 
-    monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", fake_save_multiple)
+    monkeypatch.setattr(io_save.AutoSaveManager, "save_image", fake_save_image)
     return saved
 
 
@@ -194,21 +194,19 @@ async def test_generation_result_truncates_preview_beyond_limit(
     saved_paths = [_write_png(tmp_path / f"saved-{index}.png", (64, 48)) for index in range(total)]
     result_cls = io_save.AutoSaveResult
 
-    async def fake_save_multiple(
-        self: Any, images: list[dict[str, Any]], tool_name: str
-    ) -> list[Any]:
-        del self, tool_name
-        return [
-            result_cls(
-                success=True,
-                original_url=images[index]["url"],
-                local_path=str(saved_paths[index]),
-                markdown_ref=f"![image](saved-{index}.png)",
-            )
-            for index in range(len(images))
-        ]
+    # 单图保存按 URL 尾号回索引定位对应落盘文件，批量编排真实执行。
+    async def fake_save_image(self: Any, **kwargs: Any) -> Any:
+        del self
+        url = kwargs.get("url", "")
+        index = int(url.rsplit("-", 1)[-1].split(".", 1)[0])
+        return result_cls(
+            success=True,
+            original_url=url,
+            local_path=str(saved_paths[index]),
+            markdown_ref=f"![image](saved-{index}.png)",
+        )
 
-    monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", fake_save_multiple)
+    monkeypatch.setattr(io_save.AutoSaveManager, "save_image", fake_save_image)
 
     from seedream_mcp.config import SeedreamConfig
 

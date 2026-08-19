@@ -14,8 +14,10 @@ import pytest
 from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager, _DNS_CACHE_MAX_SIZE
 
 from _download_fakes import (
+    _FakeLoop,
     _FakeResponse,
     _FakeSession,
+    _GatedFailingLoop,
     _PNG_BYTES,
     _TimeoutThenSuccessSession,
     _patch_download_network,
@@ -46,21 +48,6 @@ def _patch_unretrieved_callback(
     return fired
 
 
-class _FakeLoop:
-    """模拟事件循环的 getaddrinfo，固定返回公网 IP 列表。"""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
-        del host, port, proto
-        self.calls += 1
-        return [
-            (None, None, None, None, ("8.8.8.8", 0)),
-            (None, None, None, None, ("1.1.1.1", 0)),
-        ]
-
-
 class _BlockingFakeLoop:
     """getaddrinfo 阻塞在 gate 上，使并发解析重叠以验证在途 task 去重。"""
 
@@ -76,15 +63,17 @@ class _BlockingFakeLoop:
 
 
 @pytest.mark.asyncio
-async def test_validate_public_dns_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_loop = _FakeLoop()
+async def test_resolve_public_ips_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TTL 内重复解析同 host 命中缓存，仅触发一次 getaddrinfo。"""
+    fake_loop = _FakeLoop(ips=["8.8.8.8", "1.1.1.1"])
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
 
     manager = DownloadManager(dns_cache_ttl=60)
-    await manager._validate_public_dns("example.com")
-    await manager._validate_public_dns("example.com")
+    first = await manager._resolve_public_ips("example.com")
+    second = await manager._resolve_public_ips("example.com")
 
     assert fake_loop.calls == 1
+    assert first == second == ("1.1.1.1", "8.8.8.8")
 
 
 @pytest.mark.asyncio
@@ -153,19 +142,6 @@ async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
     """调用方被取消且无其他等待者时，在途解析失败经登记的回调检索且仅触发一次。"""
     fired = _patch_unretrieved_callback(monkeypatch)
 
-    class _GatedFailingLoop:
-        """getaddrinfo 阻塞在 gate 上，放行后抛 OSError 以构造延迟的在途解析失败。"""
-
-        def __init__(self) -> None:
-            self.calls = 0
-            self.gate = asyncio.Event()
-
-        async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
-            del host, port, proto
-            self.calls += 1
-            await self.gate.wait()
-            raise OSError("dns boom")
-
     fake_loop = _GatedFailingLoop()
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
 
@@ -199,17 +175,6 @@ async def test_resolve_cancel_with_surviving_waiter_not_armed(
 ) -> None:
     """取消的等待者仍有幸存同伴时不登记兜底日志，异常由幸存者消费。"""
     fired = _patch_unretrieved_callback(monkeypatch)
-
-    class _GatedFailingLoop:
-        """getaddrinfo 阻塞在 gate 上，放行后抛 OSError 构造延迟的解析失败。"""
-
-        def __init__(self) -> None:
-            self.gate = asyncio.Event()
-
-        async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
-            del host, port, proto
-            await self.gate.wait()
-            raise OSError("dns boom")
 
     fake_loop = _GatedFailingLoop()
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
@@ -276,13 +241,14 @@ async def test_download_image_rejects_redirect_to_private_ip_via_real_static_val
         [_FakeResponse(302, {"location": "http://169.254.169.254/latest/meta-data/"})]
     )
 
-    async def _pass_dns(host: str) -> None:
+    async def _pass_dns(host: str) -> tuple[str, ...]:
         del host
+        return ("93.184.216.34",)
 
     async def _fake_ensure_session() -> Any:
         return session
 
-    monkeypatch.setattr(manager, "_validate_public_dns", _pass_dns)
+    monkeypatch.setattr(manager, "_resolve_public_ips", _pass_dns)
     monkeypatch.setattr(manager, "_ensure_session", _fake_ensure_session)
 
     with pytest.raises(DownloadError, match="不安全|非公网"):
@@ -301,13 +267,14 @@ async def test_download_image_rejects_redirect_to_loopback_via_real_static_valid
     manager = DownloadManager()
     session = _FakeSession([_FakeResponse(302, {"location": "http://127.0.0.1/"})])
 
-    async def _pass_dns(host: str) -> None:
+    async def _pass_dns(host: str) -> tuple[str, ...]:
         del host
+        return ("93.184.216.34",)
 
     async def _fake_ensure_session() -> Any:
         return session
 
-    monkeypatch.setattr(manager, "_validate_public_dns", _pass_dns)
+    monkeypatch.setattr(manager, "_resolve_public_ips", _pass_dns)
     monkeypatch.setattr(manager, "_ensure_session", _fake_ensure_session)
 
     with pytest.raises(DownloadError, match="不安全|非公网"):
@@ -355,6 +322,22 @@ async def test_download_image_rejects_excessive_redirects(
 
     with pytest.raises(DownloadError, match="重定向次数过多"):
         await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
+
+
+@pytest.mark.asyncio
+async def test_download_image_rejects_malformed_redirect_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Location 为不闭合 IPv6 括号等畸形目标时抛终态 DownloadError，ValueError 不逃逸。"""
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(302, {"location": "//[::1/x"})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="无效的URL"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert not save_path.exists()
 
 
 @pytest.mark.asyncio

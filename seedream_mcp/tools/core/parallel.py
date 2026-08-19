@@ -15,8 +15,8 @@ from ...utils.core.errors import format_error_for_user
 from ._helpers import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
-    _safe_report_progress,
     _yield_for_cancellation,
+    safe_report_progress,
 )
 from .context import GenerationExecutionContext
 from .results import aggregate_parallel_generation_results
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from ...client import SeedreamClient
     from ...utils.io.io_download import DownloadManager
+    from loguru import Logger
 
 
 # lifespan 共享资源取值的泛型辅助，三处资源探测共用。
@@ -39,7 +40,7 @@ async def _execute_parallel_generation_requests(
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
-    module_logger: Any,
+    module_logger: Logger,
     ctx: Context[Any, Any] | None = None,
 ) -> dict[str, Any]:
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
@@ -78,7 +79,7 @@ async def _execute_parallel_generation_requests(
                 message_snapshot = f"并行请求进度 {completed_requests}/{context.request_count}"
         # 上报移出信号量槽，慢客户端背压不拖延槽位释放。
         async with progress_report_lock:
-            await _safe_report_progress(
+            await safe_report_progress(
                 ctx,
                 progress=progress_snapshot,
                 message=message_snapshot,
@@ -147,7 +148,7 @@ async def _run_generation_requests(
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
-    module_logger: Any,
+    module_logger: Logger,
 ) -> dict[str, Any]:
     """在给定客户端上执行单次或并行生成请求并返回结果。
 
@@ -176,17 +177,17 @@ async def _run_generation_requests(
             layer_decomposition=context.layer_decomposition,
         )
         if context.request_count == 1:
-            await _safe_report_progress(
+            await safe_report_progress(
                 ctx, progress=PROGRESS_GENERATION_START, message="开始调用图像生成接口"
             )
             await _yield_for_cancellation()
             result = await request_executor(client, context)
-            await _safe_report_progress(
+            await safe_report_progress(
                 ctx, progress=PROGRESS_GENERATION_DONE, message="图像生成完成"
             )
             return result
 
-        await _safe_report_progress(
+        await safe_report_progress(
             ctx,
             progress=PROGRESS_GENERATION_START,
             message=f"开始并行请求，共 {context.request_count} 次",

@@ -141,12 +141,27 @@ class SeedreamConfig:
     def validate(self) -> None:
         """校验配置参数合法性与业务约束，并在通过时做规范化写回。
 
-        规范化包括展开模型别名为 model_id、按模型能力校验并标准化 default_size、
-        将 log_level 统一为大写。
+        各域校验拆分至 _validate_* 私有方法，本方法仅按清单顺序编排。规范化包括
+        展开模型别名为 model_id、按模型能力校验并标准化 default_size、将 log_level
+        统一为大写。
 
         Raises:
             SeedreamConfigError: 任一配置项校验失败。
         """
+        self._validate_api_credentials()
+        self._validate_api_endpoint()
+        self._validate_model_selection()
+        self._validate_default_size()
+        self._validate_client_timeouts()
+        self._validate_log_level()
+        self._validate_auto_save_bounds()
+        self._validate_streaming_bounds()
+        self._validate_prepare_cache_bounds()
+        self._validate_dir_fields()
+        self._validate_http_fields()
+
+    def _validate_api_credentials(self) -> None:
+        """校验 api_key 非空且非默认占位符。"""
         if not self.api_key or self.api_key.strip() == "":
             raise SeedreamConfigError(f"API密钥不能为空{_env_var_suffix('api_key')}")
         if self.api_key == "your_api_key_here":
@@ -154,6 +169,8 @@ class SeedreamConfig:
                 f"请设置有效的API密钥，不能使用默认占位符{_env_var_suffix('api_key')}"
             )
 
+    def _validate_api_endpoint(self) -> None:
+        """校验 base_url 的 scheme、主机名与 http 明文豁免。"""
         # RFC 3986 规定 scheme 大小写不敏感，HTTPS:// 等大写形态经 urlparse 取小写后判定。
         base_url_scheme = urlparse(self.base_url).scheme.lower() if self.base_url else ""
         if not self.base_url or base_url_scheme not in ("http", "https"):
@@ -171,11 +188,13 @@ class SeedreamConfig:
                 )
             from .utils.core.logs import get_logger
 
-            get_logger(__name__).warning(
+            get_logger().warning(
                 "ARK_BASE_URL 使用 http:// 且已豁免，API 密钥将在网络上明文传输，"
                 "仅限自建可信内网端点使用"
             )
 
+    def _validate_model_selection(self) -> None:
+        """校验 model_id 并展开别名为完整 Model ID。"""
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError(f"model_id不能为空{_env_var_suffix('model_id')}")
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
@@ -187,6 +206,8 @@ class SeedreamConfig:
                 f"请使用 {aliases} 或对应 Endpoint ID{_env_var_suffix('model_id')}"
             )
 
+    def _validate_default_size(self) -> None:
+        """校验 default_size 非空并按模型能力标准化。"""
         if not isinstance(self.default_size, str) or not self.default_size.strip():
             raise SeedreamConfigError(f"default_size不能为空{_env_var_suffix('default_size')}")
 
@@ -202,6 +223,8 @@ class SeedreamConfig:
                 f"default_size无效: {exc.message}{_env_var_suffix('default_size')}"
             ) from exc
 
+    def _validate_client_timeouts(self) -> None:
+        """校验通用超时、API 超时与 API 重试次数下界。"""
         if self.timeout <= 0:
             raise SeedreamConfigError(f"timeout必须大于0{_env_var_suffix('timeout')}")
         if self.api_timeout <= 0:
@@ -209,6 +232,8 @@ class SeedreamConfig:
         if self.max_retries < 1:
             raise SeedreamConfigError(f"max_retries不能小于1{_env_var_suffix('max_retries')}")
 
+    def _validate_log_level(self) -> None:
+        """校验 log_level 合法并规范化为大写。"""
         if self.log_level.upper() not in LEGAL_LOG_LEVELS:
             raise SeedreamConfigError(
                 f"log_level必须是以下值之一: {list(LEGAL_LOG_LEVELS)}"
@@ -216,6 +241,8 @@ class SeedreamConfig:
             )
         object.__setattr__(self, "log_level", self.log_level.upper())
 
+    def _validate_auto_save_bounds(self) -> None:
+        """校验自动保存各数值字段的下界。"""
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError(
                 f"auto_save_download_timeout必须大于0"
@@ -244,6 +271,8 @@ class SeedreamConfig:
                 f"{_env_var_suffix('auto_save_max_total_bytes')}"
             )
 
+    def _validate_streaming_bounds(self) -> None:
+        """校验流式缓冲、读取块与响应体读取上限。"""
         if self.stream_buffer_max_size <= 0:
             raise SeedreamConfigError(
                 f"stream_buffer_max_size必须大于0{_env_var_suffix('stream_buffer_max_size')}"
@@ -262,6 +291,8 @@ class SeedreamConfig:
                 f"response_body_limit必须大于0{_env_var_suffix('response_body_limit')}"
             )
 
+    def _validate_prepare_cache_bounds(self) -> None:
+        """校验图像预处理并发与预处理缓存容量下界。"""
         if self.image_prepare_concurrency <= 0:
             raise SeedreamConfigError(
                 f"image_prepare_concurrency必须大于0"
@@ -277,16 +308,62 @@ class SeedreamConfig:
                 f"prepare_cache_max_bytes不能小于1{_env_var_suffix('prepare_cache_max_bytes')}"
             )
 
+    def _validate_dir_fields(self) -> None:
+        """校验各目录型字段指向有效目录。"""
         if self.auto_save_base_dir:
             self._validate_dir_field(self.auto_save_base_dir, "auto_save_base_dir")
 
         if self.workspace_root:
             self._validate_dir_field(self.workspace_root, "workspace_root")
 
+    def _validate_http_fields(self) -> None:
+        """校验 streamable-http 请求体下限与 Host 允许列表。"""
         if self.http_max_body_size < 1024 * 1024:
             raise SeedreamConfigError(
                 f"http_max_body_size 不能低于 1MB（1048576 字节）"
                 f"{_env_var_suffix('http_max_body_size')}"
+            )
+        self._validate_http_allowed_hosts()
+
+    def _validate_http_allowed_hosts(self) -> None:
+        """校验 http_allowed_hosts 条目形态，端口通配未配套裸 host 时告警。
+
+        Raises:
+            SeedreamConfigError: 条目含 scheme/斜杠、非尾部通配或端口非数字。
+        """
+        hosts = self.http_allowed_hosts
+        if hosts is None:
+            return
+        bare_hosts: set[str] = set()
+        wildcard_hosts: set[str] = set()
+        for entry in hosts:
+            # Host 头值不含 scheme 与路径，条目写出这两者即配置错误。
+            if "://" in entry or "/" in entry:
+                raise SeedreamConfigError(
+                    f"http_allowed_hosts 条目不得包含 scheme 或斜杠: {entry}"
+                    f"{_env_var_suffix('http_allowed_hosts')}"
+                )
+            decomposed = _decompose_allowed_host_entry(entry)
+            if decomposed is None:
+                raise SeedreamConfigError(
+                    f"http_allowed_hosts 条目仅支持 host、host:port、host:* 形态: {entry}"
+                    f"{_env_var_suffix('http_allowed_hosts')}"
+                )
+            host_part, port_part = decomposed
+            if port_part == "":
+                bare_hosts.add(host_part)
+            elif port_part == ":*":
+                wildcard_hosts.add(host_part)
+
+        uncovered = wildcard_hosts - bare_hosts
+        if uncovered:
+            from .utils.core.logs import get_logger
+
+            get_logger().warning(
+                "http_allowed_hosts 中 {} 仅列出端口通配形态而未列裸 host，"
+                "无端口 Host 头的请求不匹配通配条目会被 SDK 以 421 拒绝，"
+                "建议同时列出裸 host 形态",
+                ", ".join(sorted(uncovered)),
             )
 
     def _validate_dir_field(self, value: str, field_name: str) -> None:
@@ -359,6 +436,40 @@ def _env_var_suffix(*field_names: str) -> str:
     if not env_names:
         return ""
     return f"（环境变量 {'/'.join(env_names)}）"
+
+
+def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
+    """拆分 Host 允许列表条目为 host 与端口后缀，无法识别的形态返回 None。
+
+    端口后缀为空串、":<1-65535 的 ASCII 数字>" 或 ":*"；host 为方括号 IPv6 字面量
+    或不含冒号与通配符、首尾无点号的非空主机名，通配符出现在非尾部端口位置、
+    端口非数字或超范围均判为非法。
+    """
+    if entry.startswith("["):
+        end = entry.find("]")
+        # end <= 1 覆盖未闭合与空内容两种畸形方括号形态。
+        if end <= 1:
+            return None
+        host, suffix = entry[: end + 1], entry[end + 1 :]
+    else:
+        idx = entry.rfind(":")
+        host, suffix = (entry, "") if idx == -1 else (entry[:idx], entry[idx:])
+        if (
+            not host
+            or host.startswith(".")
+            or host.endswith(".")
+            or any(ch in host for ch in (":", "*", "[", "]"))
+        ):
+            return None
+    if suffix in ("", ":*"):
+        return host, suffix
+    if suffix.startswith(":"):
+        port_text = suffix[1:]
+        if port_text.isascii() and port_text.isdigit():
+            port = int(port_text)
+            if 1 <= port <= 65535:
+                return host, suffix
+    return None
 
 
 def _field_default_str(field_name: str) -> str:
@@ -451,7 +562,7 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
         if default_env_path.is_file() and runtime_env_path != default_env_path:
             from .utils.core.logs import get_logger
 
-            get_logger(__name__).warning(
+            get_logger().warning(
                 "当前工作目录 .env（{}）覆盖了项目根 .env（{}）的配置值；"
                 "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
                 runtime_env_path,
@@ -603,7 +714,8 @@ def _build_config_from_sources_unlocked(
     if not api_key:
         raise SeedreamConfigError("未找到ARK_API_KEY环境变量或配置文件值。")
 
-    # override 键名 "model" 对应 model_id 字段，属 CLI 简称的有意命名间接映射。
+    # override 键名 "model" 对应 model_id 字段，属 CLI 简称的有意命名间接映射；
+    # 别名展开统一由 validate 完成，构建侧不再重复规范化。
     raw_model = str(
         _pick_config_value(
             override_values,
@@ -613,7 +725,6 @@ def _build_config_from_sources_unlocked(
             ENV_DEFAULTS["SEEDREAM_MODEL_ID"],
         )
     )
-    model_id = normalize_model_selector(raw_model)
 
     config_kwargs: dict[str, Any] = {
         "api_key": api_key,
@@ -621,7 +732,7 @@ def _build_config_from_sources_unlocked(
         "allow_http_base_url": _pick_bool(
             override_values, "allow_http_base_url", "SEEDREAM_ALLOW_HTTP_BASE_URL", env_values
         ),
-        "model_id": model_id,
+        "model_id": raw_model,
         "default_size": _pick_str(
             override_values, "default_size", "SEEDREAM_DEFAULT_SIZE", env_values
         ),
@@ -775,7 +886,7 @@ def set_config(config: SeedreamConfig) -> None:
         _global_config = config
         if _active_config is not None:
             _active_config = config
-    clear_resolved_env_root_cache()
+        clear_resolved_env_root_cache()
 
 
 def get_active_config() -> SeedreamConfig:
@@ -793,7 +904,7 @@ def set_active_config(config: SeedreamConfig | None) -> None:
     global _active_config
     with _global_config_lock:
         _active_config = config
-    clear_resolved_env_root_cache()
+        clear_resolved_env_root_cache()
 
 
 def reload_config(env_file: str | None = None) -> None:
@@ -805,7 +916,7 @@ def reload_config(env_file: str | None = None) -> None:
     with _global_config_lock:
         _global_config = SeedreamConfig.from_env(env_file)
         _active_config = None
-    clear_resolved_env_root_cache()
+        clear_resolved_env_root_cache()
 
 
 def _registered_workspace_root_provider() -> str | None:

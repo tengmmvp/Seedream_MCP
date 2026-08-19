@@ -18,7 +18,7 @@ from pathlib import Path
 from ..core.logs import get_logger
 from .io_path import find_images_in_directory
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 # 进程级目录图片列表缓存。键不含 scan_limit：同目录同扫描配置的不同翻页共享一份
@@ -176,6 +176,9 @@ def cached_find_images_in_directory(
     Returns:
         排序后的 (原始路径, resolved 路径) 元组列表；缓存命中时为已缓存的有序
         前缀或全量，未命中时至多 scan_limit 条。
+
+    Raises:
+        OSError: 底层扫描函数抛出时原样透传，缓存层不吞不包装。
     """
     cache_key = (
         str(resolved_dir),

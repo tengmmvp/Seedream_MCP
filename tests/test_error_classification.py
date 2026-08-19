@@ -18,6 +18,7 @@ from seedream_mcp.tools.core._helpers import (
     _resolve_failure_guidance,
 )
 from seedream_mcp.tools.core.common import (
+    ToolMetadata,
     _classify_generation_error_type,
     execute_generation_handler,
 )
@@ -385,15 +386,18 @@ async def _run_failing_handler(exc: Exception):
         del client, context
         raise exc
 
-    result = await execute_generation_handler(
-        params=TextToImageInput(prompt="test prompt", auto_save=False),
-        config=config,
-        module_logger=MagicMock(),
+    metadata = ToolMetadata(
         tool_name="text_to_image",
         completion_title="文生图任务完成",
         failure_prefix="文生图生成",
         start_log_message="",
         start_log_values_builder=lambda c: (),
+    )
+    result = await execute_generation_handler(
+        params=TextToImageInput(prompt="test prompt", auto_save=False),
+        config=config,
+        module_logger=MagicMock(),
+        metadata=metadata,
         request_executor=failing_executor,
     )
     assert result.is_error is True

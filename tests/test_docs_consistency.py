@@ -19,7 +19,14 @@ import re
 from collections.abc import Sequence
 from typing import TypeVar
 
-from _readme_helpers import BASE_README, CodeBlock, _env_block, _lang_blocks, _read_readme
+from _readme_helpers import (
+    BASE_README,
+    CodeBlock,
+    _env_block,
+    _fenced_blocks,
+    _lang_blocks,
+    _read_readme,
+)
 
 OTHER_READMES = ("README.en.md", "README.zh-TW.md")
 
@@ -50,16 +57,22 @@ _T = TypeVar("_T")
 
 
 def _prose_lines(name: str) -> list[tuple[int, str]]:
-    """返回不在任何围栏代码块内的正文行，带 1 基行号。"""
-    result: list[tuple[int, str]] = []
-    in_code = False
-    for lineno, raw in enumerate(_read_readme(name).splitlines(), start=1):
-        if raw.lstrip().startswith("```"):
-            in_code = not in_code
-            continue
-        if not in_code:
-            result.append((lineno, raw))
-    return result
+    """返回不在任何围栏代码块内的正文行，带 1 基行号。
+
+    排除行区间由 _readme_helpers 的围栏解析结果推导，围栏开合判定单一来源；
+    每块区间覆盖起始围栏行、块内正文行与闭合围栏行。
+    """
+    text = _read_readme(name)
+    fenced = {
+        lineno
+        for block in _fenced_blocks(text)
+        for lineno in range(block.line, block.line + len(block.lines) + 2)
+    }
+    return [
+        (lineno, raw)
+        for lineno, raw in enumerate(text.splitlines(), start=1)
+        if lineno not in fenced
+    ]
 
 
 def _block_assignments(block: CodeBlock) -> list[tuple[str, str]]:

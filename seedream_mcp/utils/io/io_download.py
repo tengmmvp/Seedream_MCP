@@ -20,7 +20,6 @@ import asyncio
 import errno
 import ipaddress
 import random
-import re
 import socket
 import time
 from pathlib import Path
@@ -42,8 +41,9 @@ from ..core.formats import (
 )
 from ..core.logs import arm_unretrieved_exception_logging, get_logger
 from .io_file import atomic_replace_from_fd
+from .io_url import sanitize_url
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数。
 _DOWNLOAD_CHUNK_SIZE = 256 * 1024
@@ -53,6 +53,10 @@ _WRITE_BATCH_BYTES = 4 * 1024 * 1024
 
 # 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验。
 _MAX_REDIRECTS = 3
+
+# 非终态响应体的排空读取上限：连接须消费完响应体方可回池复用，重定向与 HTTP 错误
+# 的响应体通常很小，64KB 足以覆盖；残留更多时放弃复用，由连接关闭兜底。
+_DRAIN_RESPONSE_BYTES = 65536
 
 # 跨源重定向时保留的通用请求头：跳向不同源时其余定制头（如鉴权或跟踪头）被剥离，
 # 不原样发给重定向目标。
@@ -109,45 +113,21 @@ _TERMINAL_GAI_ERRNOS = frozenset(
 )
 
 
-def sanitize_url(url: str) -> str:
-    """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
-
-    控制字符 CRLF 等会被剥离，防止攻击者经由 URL 在日志中伪造行，注入误导性记录。
-
-    Args:
-        url: 原始 URL 字符串。
-
-    Returns:
-        脱敏后的 URL；解析失败返回 ``<invalid-url>``。
-    """
-    try:
-        parsed = urlparse(url)
-        # 重建不含 userinfo 的 netloc；hostname 对 IPv6 字面量剥离方括号，需补回以
-        # 保持 host 与端口边界。
-        host = parsed.hostname or ""
-        if ":" in host:
-            host = f"[{host}]"
-        netloc = host
-        if parsed.port is not None:
-            netloc = f"{netloc}:{parsed.port}"
-        if parsed.query:
-            result = f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
-        else:
-            result = f"{parsed.scheme}://{netloc}{parsed.path}"
-    except Exception:
-        return "<invalid-url>"
-    # 剥离控制字符，防止 CRLF 经 URL 注入伪造日志行。
-    return re.sub(r"[\x00-\x1f\x7f]", "", result)
-
-
 def _url_origin(url: str) -> tuple[str, str, int]:
     """返回 URL 的请求源三元组 (scheme, host, effective_port)，供跨源判定。
 
     未显式给出端口时按 scheme 取默认端口，使 ``https://a.example`` 与
     ``https://a.example:443`` 判定为同源。端口字段非法时按默认端口处理，该 URL
     的请求本身会因语法问题被下游拒绝，此处不提前报错。
+
+    Raises:
+        DownloadError: URL 含 urlparse 无法解析的畸形语法，如不闭合的 IPv6 括号。
     """
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        # urlparse 对不闭合 IPv6 括号等畸形输入抛 ValueError，归一为终态无效 URL 错误。
+        raise DownloadError(f"无效的URL: {sanitize_url(url)}") from exc
     scheme = (parsed.scheme or "").lower()
     host = (parsed.hostname or "").lower()
     try:
@@ -368,21 +348,19 @@ class DownloadManager:
         return max(float(self.timeout) * 120, 3600.0)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
-        """获取可用的 aiohttp 会话。
-
-        首次创建用双检锁串行化，避免并发请求各自创建会话导致泄漏；会话绑定
-        ``_PublicIpPinningResolver`` 的连接器，连接目标经 SSRF 公网校验后钉死，
-        connection_limit 在每次构造连接器时传入。sock_connect/sock_read 仅约束
-        连接建立与单次读取停滞，慢滴流响应可无限拖住任务，故另以宽松总时长上限
-        封顶整个下载。
-        """
+        """获取可用的 aiohttp 会话，无会话或已关闭时创建并返回。"""
+        # 双检锁串行化创建，避免并发请求各自创建会话导致泄漏。
         if self._session is None or self._session.closed:
             async with self._session_lock:
                 if self._session is None or self._session.closed:
+                    # 连接器绑定 _PublicIpPinningResolver，连接目标经 SSRF 公网校验后
+                    # 钉死；connection_limit 在每次构造连接器时传入保持同一上限。
                     connector_kwargs: dict[str, Any] = {"resolver": _PublicIpPinningResolver(self)}
                     if self._connection_limit is not None:
                         connector_kwargs["limit"] = self._connection_limit
                     connector = aiohttp.TCPConnector(**connector_kwargs)
+                    # sock_connect/sock_read 仅约束连接建立与单次读取停滞，慢滴流响应
+                    # 可无限拖住任务，故另以宽松总时长上限封顶整个下载。
                     self._session = aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(
                             total=self._download_total_budget(),
@@ -422,10 +400,15 @@ class DownloadManager:
             校验的 IP 字面量，调用方无需再做 DNS 解析校验。
 
         Raises:
-            DownloadError: 协议不受支持、主机名缺失、携带凭据、本地主机名或非公网
-                IP 字面量。
+            DownloadError: 协议不受支持、主机名缺失、携带凭据、本地主机名、非公网
+                IP 字面量，或 URL 含 urlparse 无法解析的畸形语法。
         """
-        result = urlparse(url)
+        try:
+            result = urlparse(url)
+        except ValueError as exc:
+            # urlparse 对不闭合 IPv6 括号等畸形输入抛 ValueError，归一为终态无效
+            # URL 错误，validate_url 的 bool 契约不被异常逃逸破坏。
+            raise DownloadError(f"无效的URL: {sanitize_url(url)}") from exc
         scheme = (result.scheme or "").lower()
         if scheme not in {"http", "https"}:
             raise DownloadError(f"不支持的URL协议: {scheme or '<empty>'}")
@@ -527,25 +510,29 @@ class DownloadManager:
                 self._dns_inflight.pop(host, None)
 
     async def _resolve_public_ips_uncached(self, host: str) -> tuple[str, ...]:
-        """执行单次 getaddrinfo 与公网校验，不做缓存与在途去重。
+        """执行单次 getaddrinfo 解析与公网校验，不做缓存与在途去重。
 
-        getaddrinfo 卸载到线程执行器且无内置超时，以 wait_for 施加上限，超时交由
-        download_image 重试；wait_for 仅取消等待协程，底层线程继续运行但结果已丢弃，
-        在途数受 max_retries 与下载并发上限约束。asyncio.TimeoutError 是内建
-        TimeoutError（OSError 子类）的别名，须在调用方先于 except OSError 捕获。
-        gaierror 按错误码分类：永久错误为终态 DownloadError，瞬时故障可重试。
+        Raises:
+            DownloadError: 解析结果为空、含非法 IP、命中非公网地址，或永久性解析
+                失败。
+            RetryableDownloadError: DNS 瞬时解析故障等可重试失败。
         """
         loop = asyncio.get_running_loop()
         try:
+            # getaddrinfo 卸载到线程执行器且无内置超时，以 wait_for 施加上限；wait_for
+            # 仅取消等待协程，底层线程继续运行但结果已丢弃，在途数受 max_retries 与
+            # 下载并发上限约束。
             infos = await asyncio.wait_for(
                 loop.getaddrinfo(host, None, proto=socket.IPPROTO_TCP),
                 timeout=self.timeout,
             )
         except asyncio.TimeoutError:
+            # asyncio.TimeoutError 是内建 TimeoutError（OSError 子类）的别名，须先于
+            # except OSError 捕获；超时交由 download_image 重试。
             raise
         except socket.gaierror as exc:
-            # gaierror 是 OSError 子类，须先于 OSError 捕获；errno 命中永久失败集合才
-            # 保持终态，瞬时故障与不可靠 errno 一律按可重试上抛。
+            # gaierror 是 OSError 子类，同样先于 OSError 捕获；errno 命中永久失败集合
+            # 才保持终态，瞬时故障与不可靠 errno 一律按可重试上抛。
             if exc.errno is not None and exc.errno in _TERMINAL_GAI_ERRNOS:
                 raise DownloadError(f"域名解析失败: {host} ({exc})") from exc
             raise RetryableDownloadError(f"域名解析失败: {host} ({exc})") from exc
@@ -585,15 +572,11 @@ class DownloadManager:
             oldest_host = min(self._dns_cache, key=lambda h: self._dns_cache[h][0])
             self._dns_cache.pop(oldest_host, None)
 
-    async def _validate_public_dns(self, host: str) -> None:
-        """异步解析域名并确保解析结果全部为公网 IP。"""
-        await self._resolve_public_ips(host)
-
     async def _validate_url_for_request(self, url: str) -> None:
         """执行请求前 URL 安全校验，串联第一层静态校验与第二层 DNS 校验。"""
         host, needs_dns_check = self._validate_url_static(url)
         if needs_dns_check:
-            await self._validate_public_dns(host)
+            await self._resolve_public_ips(host)
 
     @staticmethod
     def _extract_peer_ip(response: aiohttp.ClientResponse) -> str | None:
@@ -675,8 +658,8 @@ class DownloadManager:
             下一跳绝对 URL；当前响应非重定向时返回 None。
 
         Raises:
-            DownloadError: 重定向响应缺少 Location 头、超过跳数上限或目标协议不允许
-                降级。
+            DownloadError: 重定向响应缺少 Location 头、超过跳数上限、目标协议不允许
+                降级，或 Location 目标含 urlparse 无法解析的畸形语法。
         """
         if response.status not in {301, 302, 303, 307, 308}:
             return None
@@ -685,11 +668,16 @@ class DownloadManager:
             raise DownloadError("重定向响应缺少 Location 头")
         if redirect_count >= _MAX_REDIRECTS:
             raise DownloadError("重定向次数过多")
-        next_url = urljoin(current_url, location)
-        # 拒绝协议降级：https 起始的下载不允许经重定向落到明文 http；scheme 归一化
-        # 小写后比较，与 _url_origin 等既有口径一致。
-        current_scheme = (urlparse(current_url).scheme or "").lower()
-        next_scheme = (urlparse(next_url).scheme or "").lower()
+        try:
+            next_url = urljoin(current_url, location)
+            # 拒绝协议降级：https 起始的下载不允许经重定向落到明文 http；scheme 归一化
+            # 小写后比较，与 _url_origin 等既有口径一致。
+            current_scheme = (urlparse(current_url).scheme or "").lower()
+            next_scheme = (urlparse(next_url).scheme or "").lower()
+        except ValueError as exc:
+            # urljoin/urlparse 对不闭合 IPv6 括号等畸形目标抛 ValueError，归一为终态
+            # 无效 URL 错误。
+            raise DownloadError(f"无效的URL: {sanitize_url(location)}") from exc
         if current_scheme == "https" and next_scheme != "https":
             raise DownloadError("重定向目标协议不允许降级到 https 之外")
         return next_url
@@ -701,17 +689,30 @@ class DownloadManager:
         temp_suffix: str,
         content_type: str,
         attempt: int,
-        start_time: float,
+        wall_start_time: float,
         fsync: bool = False,
     ) -> dict[str, Any]:
-        """将 200 响应体下载到临时文件，校验大小与字节签名后原子替换，返回结果字典。
+        """将 200 响应体流式下载到临时文件，经校验后原子替换，返回结果字典。
 
-        落盘协议由 io_file.atomic_replace_from_fd 统一提供，与 io_storage.save_bytes
-        复用同一骨架；content-length 预检、流式写入累计上限、首字节签名校验三道
-        关卡任一失败均抛 DownloadError。扩展名以实际字节签名为准：与 save_path 的
-        URL 派生扩展名不一致且不属同一格式等价类时，经 writer 返回值修正最终路径，
-        与 base64 保存路径的 infer_extension_from_bytes 对齐。start_time 为挂钟
-        基准，仅用于 download_time 人读度量，不参与预算判定。
+        扩展名以实际字节签名为准：与 save_path 的 URL 派生扩展名不一致且不属同一
+        格式等价类时，落盘路径修正为嗅探扩展名。wall_start_time 为挂钟基准，仅供
+        download_time 人读度量，不参与预算判定。
+
+        Args:
+            response: 已确认状态 200 的响应对象。
+            save_path: 目标保存路径。
+            temp_suffix: 临时文件命名的可读性后缀，实际路径由落盘骨架随机生成。
+            content_type: 响应内容类型，原样进入结果字典。
+            attempt: 当前尝试序号，结果字典中 attempts 记为其加一。
+            wall_start_time: 挂钟基准起始时间。
+            fsync: 原子替换前是否对临时文件执行 os.fsync。
+
+        Returns:
+            含 success/file_path/file_size/download_time/content_type/attempts 的
+            结果字典。
+
+        Raises:
+            DownloadError: content-length 预检、流式累计上限或字节签名校验失败。
         """
         content_length = response.headers.get("content-length")
         if content_length:
@@ -764,10 +765,11 @@ class DownloadManager:
                 return final_save_path
             return None
 
-        # temp_suffix 仅用于随机临时文件命名的可读性后缀，实际路径由骨架内 mkstemp 随机生成。
+        # 落盘协议由 io_file.atomic_replace_from_fd 统一提供，与 io_storage.save_bytes
+        # 复用同一骨架；temp_suffix 仅用于随机临时文件命名的可读性后缀。
         await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix, fsync=fsync)
 
-        download_time = time.time() - start_time
+        download_time = time.time() - wall_start_time
         logger.info(
             "图片下载成功: {} ({} 字节, {:.2f}秒)",
             final_save_path,
@@ -831,11 +833,15 @@ class DownloadManager:
                     # 一旦剥离后续跳回原源也不恢复定制头。
                     if _url_origin(next_url) != _url_origin(current_url):
                         current_headers = _strip_custom_headers_for_cross_origin(headers)
+                    # 排空本跳残留响应体，连接方可回池被下一跳复用，免于逐跳重建 TCP+TLS。
+                    await response.content.read(_DRAIN_RESPONSE_BYTES)
                     redirect_count += 1
                     current_url = next_url
                     continue
 
                 if response.status != 200:
+                    # 排空错误响应体使连接回池，重试与后续下载复用连接，免于重建 TCP+TLS。
+                    await response.content.read(_DRAIN_RESPONSE_BYTES)
                     # 5xx 与 408/429 多为瞬时故障或限流，纳入重试避免批量下载触发限流
                     # 后自动保存静默丢弃本地副本。
                     if response.status in (408, 429) or 500 <= response.status < 600:

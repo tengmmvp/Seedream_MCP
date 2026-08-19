@@ -21,11 +21,13 @@ def test_file_uri_to_path_rejects_non_localhost_host() -> None:
 
 
 def test_file_uri_to_path_accepts_absolute_local_path() -> None:
-    """file:///abs/path.png 放行为本地 Path，跨平台一致。"""
+    """file:///abs/path.png 放行为本地 Path，转换结果跨平台一致。"""
     resolved = _file_uri_to_path("file:///abs/path.png")
 
     assert resolved is not None
     assert isinstance(resolved, Path)
+    assert "abs" in resolved.parts
+    assert "path.png" in resolved.parts
 
 
 def test_file_uri_to_path_rejects_non_file_scheme() -> None:

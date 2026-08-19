@@ -25,6 +25,8 @@ from __future__ import annotations
 # 标准库导入
 import json
 import sys
+from dataclasses import asdict
+from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import Context
@@ -36,11 +38,16 @@ from mcp.types import (
     ListRootsResult,
     ToolAnnotations,
 )
-from mcp_types.version import is_version_at_least
+from mcp.types.version import is_version_at_least
 from pydantic import Field
 
 # 本地模块导入
-from .cli import _build_arg_parser, _build_config_from_args, _build_run_options
+from .cli import (
+    _build_arg_parser,
+    _build_config_from_args,
+    _build_run_options,
+    _validate_transport_args,
+)
 from .config import (
     LIFESPAN_KEY_CONFIG,
     MODEL_ALIASES,
@@ -93,7 +100,10 @@ from .utils.io.io_path import (
     workspace_roots_scope,
     workspace_roots_scope_from_result,
 )
-from .utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+from .utils.model.model_capabilities import (
+    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    get_model_capabilities,
+)
 
 # resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 为本模块直接
 # 使用，其余供 tests 与既有 import 路径经 server 模块访问。
@@ -132,7 +142,7 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     open_world_hint=False,
 )
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # 非空语义镜像：输入模型经 str_strip_whitespace 先剥离空白再校验，纯空白字符串被拒；
 # 平铺签名以 pattern 表达等价约束——至少一个非空白字符。带内边距的合法值不受影响，
@@ -573,8 +583,8 @@ async def sequential_generation(
     ) = Field(
         default=None,
         description=(
-            f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张，"
-            f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+            f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
+            "（5.0 Pro 不支持组图生成），每张支持图像 URL、本地文件路径或 Base64 图片数据。"
         ),
     ),
     size: str | None = Field(
@@ -822,7 +832,7 @@ def _resource_roots_via_input_required(ctx: Context) -> bool:
     return is_version_at_least(version, _MODERN_PROTOCOL_VERSION)
 
 
-def _session_roots_for_display() -> list[Any]:
+def _session_roots_for_display() -> list[Path]:
     """读取面向展示的 roots 列表，须在已应用工作区边界的作用域内调用。
 
     边界经环境变量或进程 CWD 回退取得时不属客户端授权声明，按未授权输出空列表。
@@ -832,7 +842,7 @@ def _session_roots_for_display() -> list[Any]:
     return []
 
 
-def _render_workspace_roots_payload(roots: list[Any], verbose: bool) -> str:
+def _render_workspace_roots_payload(roots: list[Path], verbose: bool) -> str:
     """渲染 roots 资源的 JSON 输出。
 
     roots 元素经 _file_uri_to_path 或 resolve_env_workspace_root 产出，均为已
@@ -886,23 +896,27 @@ async def server_info_resource() -> str:
     )
 
 
+# models/info 资源的静态载荷缓存：MODEL_ALIASES 与能力表均为进程级静态数据，
+# 首次读取时构建 JSON 后缓存，重复 resources/read 不再重复 asdict 派生与序列化。
+_models_info_payload: str | None = None
+
+
 @mcp.resource("seedream://models/info", mime_type="application/json")
 async def models_info_resource() -> str:
     """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
-    from dataclasses import asdict
-
-    from .utils.model.model_capabilities import get_model_capabilities
-
-    # asdict 派生能力字段，ModelCapabilities 新增字段自动出现在本资源，无需手工同步。
-    models = []
-    for alias, model_id in MODEL_ALIASES.items():
-        caps_dict = asdict(get_model_capabilities(model_id))
-        if "allowed_presets" in caps_dict and isinstance(
-            caps_dict["allowed_presets"], (set, frozenset, list)
-        ):
-            caps_dict["allowed_presets"] = sorted(caps_dict["allowed_presets"])
-        models.append({"alias": alias, "model_id": model_id, **caps_dict})
-    return json.dumps({"models": models}, ensure_ascii=False, indent=2)
+    global _models_info_payload
+    if _models_info_payload is None:
+        # asdict 派生能力字段，ModelCapabilities 新增字段自动出现在本资源，无需手工同步。
+        models = []
+        for alias, model_id in MODEL_ALIASES.items():
+            caps_dict = asdict(get_model_capabilities(model_id))
+            if "allowed_presets" in caps_dict and isinstance(
+                caps_dict["allowed_presets"], (set, frozenset, list)
+            ):
+                caps_dict["allowed_presets"] = sorted(caps_dict["allowed_presets"])
+            models.append({"alias": alias, "model_id": model_id, **caps_dict})
+        _models_info_payload = json.dumps({"models": models}, ensure_ascii=False, indent=2)
+    return _models_info_payload
 
 
 # ==================== MCP 风格预设 Prompt 定义 ====================
@@ -984,15 +998,12 @@ def cli_main() -> int:
 
     try:
         transport = _build_run_options(args)
+        error = _validate_transport_args(args)
+        if error is not None:
+            logger.error(error)
+            print(error, file=sys.stderr)
+            return 1
         if transport == "streamable-http":
-            if (args.ssl_certfile is None) != (args.ssl_keyfile is None):
-                message = (
-                    "配置错误：--ssl-certfile 与 --ssl-keyfile 必须同时提供或同时省略，"
-                    "仅提供其一无法建立 TLS。"
-                )
-                logger.error(message)
-                print(message, file=sys.stderr)
-                return 1
             auth_token = _resolve_http_auth_token(args)
             is_loopback = args.host in _LOOPBACK_HOSTS
             has_tls = bool(args.ssl_certfile)

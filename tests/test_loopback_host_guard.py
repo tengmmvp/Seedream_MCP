@@ -101,6 +101,23 @@ async def test_guard_rejects_non_loopback_hosts(host: bytes) -> None:
     assert sink.status() == 403
 
 
+@pytest.mark.parametrize("host", [b"LOCALHOST", b"LOCALHOST:8000", b"EVIL.EXAMPLE.COM"])
+async def test_guard_rejects_uppercase_host_forms(host: bytes) -> None:
+    """Host 比较为大小写敏感口径，大写回环 Host 同样 403 拒绝。
+
+    与 SDK 内层 Host 校验同为精确比较，大写回环 Host 在内层也不匹配回环白名单，
+    本层拒绝不产生内外层判定分歧。
+    """
+    inner = _InnerApp()
+    sink = _MessageSink()
+    guard = _LoopbackHostGuardMiddleware(inner)
+
+    await guard(_http_scope([(b"host", host)]), _noop_receive, sink)
+
+    assert inner.called_scopes == []
+    assert sink.status() == 403
+
+
 async def test_guard_rejects_missing_host_header() -> None:
     """Host 头缺失（HTTP/1.0 等路径）按 403 fail-closed，不留免校验放行缺口。"""
     inner = _InnerApp()

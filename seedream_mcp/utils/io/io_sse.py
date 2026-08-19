@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+from collections.abc import Iterator
 from typing import Any, cast
 
 from ..core.errors import (
@@ -32,7 +34,7 @@ def is_sse_response(response: Any) -> bool:
     """
     content_type = str(response.headers.get("content-type", ""))
     media_type = content_type.split(";")[0].strip().lower()
-    return media_type.startswith("text/event-stream")
+    return media_type == "text/event-stream"
 
 
 def format_sse_success_event(event: dict[str, Any], model_id: str) -> dict[str, Any]:
@@ -168,6 +170,12 @@ _SSE_MIN_EVENT_BYTES = 64
 # 下界推导会得到误伤合法批次的过小上限，绝对下限兜底。
 _SSE_MIN_ITEMS_LIMIT = 64
 
+# CRLF/CR 行尾的单遍归一化模式：一次扫描同时匹配两种行尾，避免两次 replace 全块扫描。
+_CR_LINE_ENDING_RE = re.compile(b"\r\n|\r")
+
+# 流首 UTF-8 BOM：部分服务在 SSE 流头部附带 BOM，紧贴首个 data: 行时须剥离。
+_UTF8_BOM = b"\xef\xbb\xbf"
+
 
 def _slice_parse_segment(
     buffer: bytearray, start: int, end: int, log: Any
@@ -180,19 +188,122 @@ def _slice_parse_segment(
     return parse_sse_segment(buffer[start:end], log)
 
 
-async def _parse_segment_range(
-    buffer: bytearray, start: int, end: int, log: Any
-) -> dict[str, Any] | None:
-    """切出 buffer[start:end] 事件段并解析，大段把切片与解析一并卸载到工作线程。
+class _SSEFrameBuffer:
+    """SSE 分帧缓冲：在增量到达的字节流上切分空行分隔的完整事件段。
 
-    主循环在 await 期间挂起，buffer 的全部变更点（追加、前缀回收、超限截断）均位于
-    本协程内，协程挂起即冻结追加，线程内读到的 buffer 内容稳定，无需快照副本。
-    小段在事件循环内同步切片解析，避免线程调度开销。返回值语义与 ``parse_sse_segment``
-    一致。
+    集中持有缓冲、消费偏移、续扫提示与悬置 CR 四个分帧状态；行尾统一归一为换行符
+    以兼容 CRLF/CR，防止上游或中间代理改用 CRLF 时事件无法切分致整流丢失。
     """
-    if end - start > _SSE_OFFLOAD_THRESHOLD:
-        return await asyncio.to_thread(_slice_parse_segment, buffer, start, end, log)
-    return parse_sse_segment(buffer[start:end], log)
+
+    def __init__(self) -> None:
+        # bytearray 累积流式数据：bytes 拼接为 O(n²) 拷贝，bytearray.extend 均摊 O(1)。
+        self._buffer = bytearray()
+        # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期
+        # 批量回收均摊为 O(1)。
+        self._offset = 0
+        # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认
+        # 无分隔符的前缀。
+        self._search_hint = 0
+        # 块尾孤立 \r 无法独立判定是 CRLF 前半还是单独 CR 行尾，悬置至与次块首字节
+        # 拼接后判定，防止提前归一化拼出假 \n\n 分隔符拆丢多行 data 事件。
+        self._pending_cr = False
+
+    def extend(self, chunk: bytes) -> int:
+        """归一化行尾后追加块到缓冲，返回追加前的原始块长度供字节总量计账。
+
+        悬置 \r 前置拼回本块头部一并归一化，块尾新出现的孤立 \r 撤出继续悬置；
+        仅在含 \r 时才分配替换副本，LF-only 常态下退化为一次包含扫描，避免每块
+        无条件分配全块临时对象。
+        """
+        raw_len = len(chunk)
+        if self._pending_cr:
+            chunk = b"\r" + chunk
+            self._pending_cr = False
+        if b"\r" in chunk:
+            normalized = _CR_LINE_ENDING_RE.sub(b"\n", chunk)
+            if chunk.endswith(b"\r"):
+                normalized = normalized[:-1]
+                self._pending_cr = True
+            chunk = normalized
+        self._buffer += chunk
+        return raw_len
+
+    def drain(self) -> Iterator[tuple[int, int]]:
+        """按序产出缓冲内全部完整事件段的闭开区间，直到无空行分隔符。
+
+        每产出一段即推进消费偏移；调用方中途停止迭代时，状态停留在最后产出的
+        段之后，剩余字节保留为未完成尾部。
+        """
+        while True:
+            # 从 max(offset, search_hint - 1) 续扫 b"\n\n"，回退一字节覆盖跨块分隔符
+            # 边界，避免单个大事件分多次送达时每块从 offset 重扫，将扫描由平方
+            # 复杂度降为线性。
+            sep = self._buffer.find(b"\n\n", max(self._offset, self._search_hint - 1))
+            if sep == -1:
+                self._search_hint = len(self._buffer)
+                return
+            seg_start = self._offset
+            self._offset = sep + 2
+            # offset 已推进至旧 search_hint 之后，重置使下次从新 offset 起扫，避免
+            # 滞后提示误跳过新区间。
+            self._search_hint = 0
+            yield seg_start, sep
+
+    async def parse_segment(self, start: int, end: int, log: Any) -> dict[str, Any] | None:
+        """切出闭开区间内的事件段并解析，大段把切片与解析一并卸载到工作线程。"""
+        if end - start > _SSE_OFFLOAD_THRESHOLD:
+            return await asyncio.to_thread(_slice_parse_segment, self._buffer, start, end, log)
+        return parse_sse_segment(self._buffer[start:end], log)
+
+    def recycle(self, threshold: int) -> None:
+        """已消费前缀达到 threshold 时批量回收，O(n) 回收均摊到至少 threshold 字节。"""
+        if self._offset > 0 and self._offset >= threshold:
+            del self._buffer[: self._offset]
+            self._offset = 0
+            # 内容前移致旧索引失效；剩余部分已由 drain 确认无分隔符，按当前长度刷新。
+            self._search_hint = len(self._buffer)
+
+    def truncate_oversized_tail(self, threshold: int) -> int:
+        """丢弃超过 threshold 的未完成尾部事件，返回被丢弃的字节数，未超限返回 0。"""
+        live_len = len(self._buffer) - self._offset
+        if live_len <= threshold:
+            return 0
+        del self._buffer[self._offset :]
+        # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即
+        # offset 起扫。
+        self._search_hint = len(self._buffer)
+        return live_len
+
+    def close_pending_cr(self) -> None:
+        """流结束时悬置的孤立 CR 字节补作换行行尾，保持行尾归一语义。"""
+        if self._pending_cr:
+            self._buffer += b"\n"
+            self._pending_cr = False
+
+    def tail_range(self) -> tuple[int, int]:
+        """返回未消费尾部的闭开区间，供流末尾残留段解析。"""
+        return self._offset, len(self._buffer)
+
+    def tail_bytes(self) -> bytearray:
+        """返回未消费尾部的副本，供残留段数据丢失判定。"""
+        return self._buffer[self._offset :]
+
+
+class _SSEItemCollector:
+    """SSE 图片条目累计器：维护条目列表与按总量限额派生的条目硬上限。
+
+    大量小事件在字节未超限时仍可放大解析产物内存，条目上界按最小事件字节下界从
+    同一限额派生；触顶后终止读取，流末尾残留段不再解析。
+    """
+
+    def __init__(self, total_bytes_limit: int) -> None:
+        self.items: list[dict[str, Any]] = []
+        self.max_items = max(total_bytes_limit // _SSE_MIN_EVENT_BYTES, _SSE_MIN_ITEMS_LIMIT)
+        self.capped = False
+
+    def reached_cap(self) -> bool:
+        """条目数达到硬上限，调用方应终止解析。"""
+        return len(self.items) >= self.max_items
 
 
 async def _close_stream_response(response: Any) -> None:
@@ -304,7 +415,6 @@ async def parse_sse_response(
             错误事件。
         asyncio.TimeoutError: 提供 deadline 且解析中途超过截止时间。
     """
-    items: list[dict[str, Any]] = []
     usage: dict[str, Any] = {}
     status: str | None = None
     tools: list[dict[str, Any]] | None = None
@@ -332,29 +442,28 @@ async def parse_sse_response(
             status = "completed"
             tools = evt_tools
 
-    # 使用 bytearray 累积流式数据：bytes 拼接为 O(n²) 拷贝，bytearray.extend 均摊 O(1)。
-    buffer = bytearray()
-    # 已消费前缀偏移：用偏移指针替代逐次 del buffer[:n] 的 O(n) 前缀删除，定期批量回收均摊为 O(1)。
-    offset = 0
+    frames = _SSEFrameBuffer()
+    collector = _SSEItemCollector(total_bytes_limit)
     processed_bytes = 0
     # 上次进度日志记录时的累计字节数。
     last_progress_log_bytes = 0
     # 超限丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件因体积超限被丢弃」。
     truncated_events = 0
-    # b"\n\n" 续扫提示：记录上次未命中时的 buffer 长度，跨块续扫时跳过已确认无分隔符的前缀。
-    search_hint = 0
-    # 块尾孤立 \r 无法独立判定是 CRLF 前半还是单独 CR 行尾，悬置至与次块首字节拼接
-    # 后判定，防止提前归一化拼出假 \n\n 分隔符拆丢多行 data 事件。
-    pending_cr = False
-    # 图片项条目数硬上限：大量小事件在字节未超限时仍可放大解析产物内存，按最小
-    # 事件字节下界从同一限额派生条目上界。
-    max_items = max(total_bytes_limit // _SSE_MIN_EVENT_BYTES, _SSE_MIN_ITEMS_LIMIT)
-    # 条目数触顶标志：触顶后终止读取，流末尾残留段不再解析。
-    items_capped = False
+    # 流首 BOM 剥离标记：BOM 仅可能出现在流首，只对首个到达的非空块生效一次。
+    stripped_bom = False
 
     async for chunk in response.aiter_bytes(chunk_size):
         if not chunk:
             continue
+
+        # 流首 UTF-8 BOM 剥离：BOM 紧贴首个 data: 行时会使该行无法匹配 data: 字段名，
+        # 整个首事件丢失，故在进入行级处理前剥掉。
+        if not stripped_bom:
+            stripped_bom = True
+            if chunk.startswith(_UTF8_BOM):
+                chunk = chunk[len(_UTF8_BOM) :]
+                if not chunk:
+                    continue
 
         # 总时长预算：逐块检查截止时间，封顶整个解析阶段；超限关闭响应抛超时错误，
         # 由 client 侧并入既有超时重试路径。
@@ -363,22 +472,7 @@ async def parse_sse_response(
             await _close_stream_response(response)
             raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
 
-        # 行尾归一为 \n 以兼容 CRLF/CR，防止上游或中间代理改用 CRLF 时事件无法切分
-        # 致整流丢失。悬置 \r 前置拼回本块头部一并归一化，块尾新出现的孤立 \r 撤出
-        # 继续悬置；仅在含 \r 时才分配替换副本，LF-only 常态下退化为一次包含扫描，
-        # 避免每块无条件分配全块临时对象。
-        raw_len = len(chunk)
-        if pending_cr:
-            chunk = b"\r" + chunk
-            pending_cr = False
-        if b"\r" in chunk:
-            normalized = chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-            if chunk.endswith(b"\r"):
-                normalized = normalized[:-1]
-                pending_cr = True
-            chunk = normalized
-        buffer += chunk
-        processed_bytes += raw_len
+        processed_bytes += frames.extend(chunk)
 
         # 累计接收字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
         if processed_bytes > total_bytes_limit:
@@ -397,73 +491,57 @@ async def parse_sse_response(
             last_progress_log_bytes = processed_bytes
             log.debug("已处理 {} 字节数据", processed_bytes)
 
-        # SSE 事件以空行分隔，即 b"\n\n"；先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件。
-        while True:
-            # 从 max(offset, search_hint - 1) 续扫 b"\n\n"：search_hint 记录上次未命中时的
-            # buffer 长度，回退一字节覆盖跨块分隔符边界，避免单个大事件分多次送达时每块
-            # 从 offset 重扫，将扫描由平方复杂度降为线性。
-            sep = buffer.find(b"\n\n", max(offset, search_hint - 1))
-            if sep == -1:
-                search_hint = len(buffer)
-                break
-            seg_start = offset
-            offset = sep + 2
-            # offset 已推进至旧 search_hint 之后，重置使下次从新 offset 起扫，避免滞后提示误跳过新区间。
-            search_hint = 0
-            event = await _parse_segment_range(buffer, seg_start, sep, log)
+        # 先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件；条目触顶即时停止
+        # 解析本 chunk 剩余事件，上限以事件为粒度精确生效，关闭响应与截断计数由
+        # 下方触顶块统一承担。
+        for seg_start, seg_end in frames.drain():
+            event = await frames.parse_segment(seg_start, seg_end, log)
             if event is None:
                 continue
-            apply_completed(*_classify_sse_event(event, model_id, items, log, sep - seg_start))
-            # 条目触顶即时停止解析本 chunk 剩余事件，上限以事件为粒度精确生效；
-            # 关闭响应与截断计数由下方 chunk 级触顶块统一承担。
-            if len(items) >= max_items:
+            apply_completed(
+                *_classify_sse_event(event, model_id, collector.items, log, seg_end - seg_start)
+            )
+            if collector.reached_cap():
                 break
 
         # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
-        if len(items) >= max_items:
+        if collector.reached_cap():
             log.warning(
                 "SSE 事件条目数超过上限 {}: 已累计 {} 条，终止解析",
-                max_items,
-                len(items),
+                collector.max_items,
+                len(collector.items),
             )
             await _close_stream_response(response)
             truncated_events += 1
-            items_capped = True
+            collector.capped = True
             break
 
-        # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少 buffer_max_size 字节。
-        if offset > 0 and offset >= buffer_max_size:
-            del buffer[:offset]
-            offset = 0
-            # 内容前移致旧索引失效；剩余部分已由上方 while 循环确认无分隔符，按当前长度刷新。
-            search_hint = len(buffer)
+        # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少
+        # buffer_max_size 字节。
+        frames.recycle(buffer_max_size)
 
-        # while 已抽干全部完整事件，[offset, end) 必为单个未完成事件；超阈值丢弃该
+        # drain 已抽干全部完整事件，未消费尾部必为单个未完成事件；超阈值丢弃该
         # 尾部以免内存无限增长，已处理事件不会跨界错位。
-        live_len = len(buffer) - offset
-        if live_len > event_truncate_threshold:
+        dropped_bytes = frames.truncate_oversized_tail(event_truncate_threshold)
+        if dropped_bytes:
             log.warning(
                 "单个 SSE 事件超过截断阈值 ({} > {})，丢弃该不完整事件",
-                live_len,
+                dropped_bytes,
                 event_truncate_threshold,
             )
-            del buffer[offset:]
             truncated_events += 1
-            # buffer 缩短至已消费前缀，刷新为当前长度；下次从 max(offset, len-1) 即 offset 起扫。
-            search_hint = len(buffer)
 
     # 条目数触顶时流已被终止，残留段不再解析；正常流结束才进入末尾残留处理。
-    if not items_capped:
-        # 流在悬置 \r 处结束：单独 CR 亦为完整行尾，补作 \n 保持归一语义后进入残留解析。
-        if pending_cr:
-            buffer += b"\n"
-        trailing_len = len(buffer) - offset
-        trailing_event = await _parse_segment_range(buffer, offset, len(buffer), log)
+    if not collector.capped:
+        frames.close_pending_cr()
+        trailing_start, trailing_end = frames.tail_range()
+        trailing_len = trailing_end - trailing_start
+        trailing_event = await frames.parse_segment(trailing_start, trailing_end, log)
         if trailing_event is not None:
             apply_completed(
-                *_classify_sse_event(trailing_event, model_id, items, log, trailing_len)
+                *_classify_sse_event(trailing_event, model_id, collector.items, log, trailing_len)
             )
-        elif trailing_len > 0 and _has_lost_data_payload(buffer[offset:]):
+        elif trailing_len > 0 and _has_lost_data_payload(frames.tail_bytes()):
             # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
             # 标记 partial。
             truncated_events += 1
@@ -472,7 +550,7 @@ async def parse_sse_response(
     # data 项含 error 即存在部分失败时标记 status=partial，与非流式
     # _build_api_result 口径一致，避免误导下游对结果完整性的判断。
     if status in (None, "completed") and any(
-        isinstance(item, dict) and "error" in item for item in items
+        isinstance(item, dict) and "error" in item for item in collector.items
     ):
         status = "partial"
 
@@ -482,7 +560,7 @@ async def parse_sse_response(
 
     return {
         "success": True,
-        "data": items,
+        "data": collector.items,
         "usage": usage,
         "status": status,
         "tools": tools,

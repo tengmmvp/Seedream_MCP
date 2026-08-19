@@ -85,10 +85,10 @@ def test_generate_unique_filename_short_base_not_truncated(manager):
 
 
 def test_create_save_path_long_custom_name_stays_within_max_path(manager, tmp_path):
-    """长 custom_name 生成的完整保存路径不超 Windows 默认 MAX_PATH 260。
+    """长 custom_name 生成的路径增量由日期目录、工具目录与预算内文件名封顶。
 
-    旧行为：词干无预算时路径必然超出 MAX_PATH 使自动保存失败。断言基于本仓库
-    测试协议的短 basetemp 前提。
+    旧行为：词干无预算时文件名必然超出 MAX_PATH 使自动保存失败。完整路径长度
+    依赖 basetemp 所在位置，仅以机器无关的相对 base_dir 增量断言封顶。
     """
     path = manager.create_save_path(
         prompt="p",
@@ -96,8 +96,6 @@ def test_create_save_path_long_custom_name_stays_within_max_path(manager, tmp_pa
         tool_name="seedream",
         custom_name="c" * 255,
     )
-    assert len(str(path)) < 260
-    # 相对 base_dir 的增量部分由日期目录、工具目录与预算内文件名构成，机器无关封顶
     relative = str(path.relative_to(manager.base_dir))
     assert len(relative) <= len("2026-08-17") + 1 + len("seedream") + 1 + (
         _MAX_UNIQUE_BASE_LENGTH + 1 + 19 + 1 + 8 + len(".png")

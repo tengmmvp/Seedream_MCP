@@ -33,22 +33,6 @@ class SeedreamMCPError(Exception):
         self.error_code = error_code
         self.details = details or {}
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为字典，供结构化错误输出使用。
-
-        message、error_code 与 details 统一按 sanitize_error_text 声明的
-        truncate-first 口径净化：非字符串先归一化为文本，先截断后脱敏，超大容器
-        收敛为元素数摘要；error_code 为 None 时保持 None，子类无需各自处理。
-        """
-        return {
-            "error": self.__class__.__name__,
-            "message": _sanitize_message_for_output(self.message),
-            "error_code": (
-                None if self.error_code is None else _sanitize_message_for_output(self.error_code)
-            ),
-            "details": _sanitize_response_data(self.details),
-        }
-
 
 class SeedreamConfigError(SeedreamMCPError):
     """配置加载或校验失败。"""
@@ -78,17 +62,6 @@ class SeedreamAPIError(SeedreamMCPError):
         self.response_data = response_data or {}
         self.retry_after = retry_after
 
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为字典，在基类基础上补充 status_code 与脱敏后的 response_data。"""
-        result = super().to_dict()
-        result.update(
-            {
-                "status_code": self.status_code,
-                "response_data": _sanitize_response_data(self.response_data),
-            }
-        )
-        return result
-
 
 class SeedreamValidationError(SeedreamMCPError):
     """请求参数校验失败。
@@ -102,22 +75,6 @@ class SeedreamValidationError(SeedreamMCPError):
         super().__init__(message)
         self.field = field
         self.value = value
-
-    def to_dict(self) -> dict[str, Any]:
-        """序列化为字典，在基类基础上补充出错的字段名与值。
-
-        value 与 details 同口径净化：容器走 _sanitize_response_data，str/bytes 走
-        _sanitize_message_for_output，数值与布尔原样保留。
-        """
-        if isinstance(self.value, (dict, list)):
-            sanitized_value: Any = _sanitize_response_data(self.value)
-        elif isinstance(self.value, (str, bytes)):
-            sanitized_value = _sanitize_message_for_output(self.value, limit=_VALUE_OUTPUT_LIMIT)
-        else:
-            sanitized_value = _sanitize_output_string(self.value)
-        result = super().to_dict()
-        result.update({"field": self.field, "value": sanitized_value})
-        return result
 
 
 class SeedreamTimeoutError(SeedreamMCPError):
@@ -317,6 +274,14 @@ def handle_api_error(
     基础文案取自 _HTTP_STATUS_PROFILES，再尝试拼入响应体携带的上游 error.code 与
     message，message 片段经 8KB 截断；status_code 与 retry_after 原样保留在异常上，
     供上层判定可重试性与退避时长。
+
+    Args:
+        response_status: HTTP 状态码。
+        response_data: 上游错误响应体，error 与 message 字段内容拼入异常文案。
+        retry_after: 服务器建议的重试等待秒数。
+
+    Returns:
+        装配完成的 SeedreamAPIError，供调用方直接 raise。
     """
     error_message = _lookup_http_error_profile(response_status).base_message
 
@@ -422,13 +387,10 @@ def format_error_for_user(error: Exception) -> str:
     return line
 
 
-# 异常 value 序列化时的长度上限：避免 data URI 等大对象撑爆日志/结构化响应。
+# _truncate_value_for_output 的默认截断上限：调用方未显式传入 limit 时的兜底值。
 _VALUE_OUTPUT_LIMIT = 200
 # 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应。
 _MESSAGE_OUTPUT_LIMIT = 500
-# 结构化数据通道（response_data/details 等容器）的输出预算：放宽至 2KB 使单键
-# error 错误体的 code/request_id 等排障字段不被整体摘要吞掉，仍可挡住超大容器。
-_STRUCTURED_DATA_OUTPUT_LIMIT = 2048
 # dict/list 元素数超过此值即跳过长度估计直接给摘要，超大容器不进入逐元素遍历。
 _CONTAINER_REPR_ELEMENT_LIMIT = 50
 # 容器嵌套深度上限：超过后长度估计返回 None，截断走类型占位符，与 RecursionError
@@ -733,24 +695,12 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     return cast("_SanitizedValue", _URL_USERINFO_PATTERN.sub(r"\1", redacted))
 
 
-def _redact_sensitive_message(value: Any) -> str:
-    """剥离 message 中的敏感键值裸值、Bearer 令牌、控制字符与 URL userinfo。
-
-    非字符串先归一化为文本再进脱敏管线，dict 形态不借 str/repr 穿透；委托
-    _sanitize_output_string，与结构化字段共用同一净化实现。
-    """
-    return cast("str", _sanitize_output_string(normalize_message_text(value)))
-
-
 def _sanitize_message_for_output(value: Any, limit: int = _MESSAGE_OUTPUT_LIMIT) -> str:
-    """对异常 message 先截断再剥离敏感片段，供 to_dict 与 format_error_for_user 共用。
+    """对异常 message 先截断再剥离敏感片段，供 format_error_for_user 输出净化。
 
-    与 sanitize_error_text 同一 truncate-first 口径：截断上限约束脱敏正则的工作
-    长度，丢弃段凭据随截断消失，保留段凭据被脱敏剥离，截断点落在键名中间时值已
-    一并丢弃；非字符串先归一化为文本再进管线。
+    非字符串先归一化为文本再进管线，dict 形态不借 str/repr 穿透。
     """
-    text = normalize_message_text(value)
-    return _redact_sensitive_message(_truncate_value_for_output(text, limit=limit))
+    return sanitize_error_text(normalize_message_text(value), limit=limit)
 
 
 def sanitize_error_text(
@@ -825,62 +775,3 @@ def _is_sensitive_key(key: Any) -> bool:
             return True
     segments = frozenset(_KEY_SEGMENT_SPLIT_PATTERN.split(key_lower))
     return not segments.isdisjoint(_SENSITIVE_KEY_KEYWORD_SET)
-
-
-def _filter_sensitive_data(data: Any) -> Any:
-    """过滤字典/列表中的敏感字段，深层嵌套经显式栈迭代处理。
-
-    键名命中敏感关键词的值替换为 ***；非敏感键与列表项的字符串值经
-    _sanitize_output_string 剥离敏感片段，容器项继续下钻。显式栈替代递归，超深
-    嵌套不触发解释器递归上限；已访问容器经 id 记录，循环引用与多处共享引用的
-    容器均以 <truncated:cyclic> 占位折叠。非容器类型原样返回。
-    """
-    if not isinstance(data, (dict, list)):
-        return data
-    result: Any = {} if isinstance(data, dict) else []
-    seen: set[int] = {id(data)}
-    pending: list[tuple[Any, Any]] = [(data, result)]
-    while pending:
-        source, target = pending.pop()
-        if isinstance(source, dict):
-            for key, value in source.items():
-                if _is_sensitive_key(key):
-                    target[key] = "***"
-                    continue
-                value = _sanitize_output_string(value)
-                if isinstance(value, (dict, list)):
-                    if id(value) in seen:
-                        target[key] = "<truncated:cyclic>"
-                        continue
-                    child: Any = {} if isinstance(value, dict) else []
-                    target[key] = child
-                    seen.add(id(value))
-                    pending.append((value, child))
-                else:
-                    target[key] = value
-        else:
-            for item in source:
-                item = _sanitize_output_string(item)
-                if isinstance(item, (dict, list)):
-                    if id(item) in seen:
-                        target.append("<truncated:cyclic>")
-                        continue
-                    nested: Any = {} if isinstance(item, dict) else []
-                    target.append(nested)
-                    seen.add(id(item))
-                    pending.append((item, nested))
-                else:
-                    target.append(item)
-    return result
-
-
-def _sanitize_response_data(data: Any) -> Any:
-    """对 API 响应数据先截断后脱敏，避免敏感信息或大对象进入结构化错误输出。
-
-    截断先行约束脱敏正则的工作长度，超大容器先收敛为元素数摘要，保留段的敏感
-    片段仍被剥离；判长预算取结构化通道放宽上限，常规错误体的 code/request_id
-    等排障字段不被整体摘要吞掉。
-    """
-    return _filter_sensitive_data(
-        _truncate_value_for_output(data, limit=_STRUCTURED_DATA_OUTPUT_LIMIT)
-    )

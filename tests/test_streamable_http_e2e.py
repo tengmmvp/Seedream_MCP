@@ -128,27 +128,11 @@ def _tools_call_request(name: str, arguments: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
-@pytest.fixture
-async def reset_http_app_state(monkeypatch: pytest.MonkeyPatch):
-    """每测试清除遗留的 session manager 引用并注入测试配置。
-
-    streamable_http_app 每次调用无条件新建并覆盖 _session_manager，前置置 None 属
-    跨测试隔离；退出时关闭可能由 stateless 请求触发的 lifespan 共享单例，避免
-    连接池跨测试泄漏。
-    """
-    server.mcp._lowlevel_server._session_manager = None
-    set_active_config(SeedreamConfig(api_key="test_key"))
-    yield
-    active = resources._active_resource
-    if active is not None:
-        await active.client.close()
-        await active.download_manager.close()
-    server._reset_lifespan_state()
+# 传输栈复位 fixture reset_http_app_state 由 tests/conftest.py 共享提供，
+# 在 lifespan 复位之上额外清空 streamable-http 会话管理器引用
 
 
-async def test_e2e_valid_token_tools_list_returns_200(
-    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
-) -> None:
+async def test_e2e_valid_token_tools_list_returns_200(reset_http_app_state: None) -> None:
     """合法 Bearer + 正常请求体经两中间件放行，触达 MCP 应用返回 200。
 
     stateless 模式下 ServerSession 以 Initialized 态启动，tools/list 无需先发 initialize。
@@ -379,7 +363,7 @@ async def _post_mcp_with_host(app: Any, host_header: str) -> httpx.Response:
 
 
 async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
-    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
+    reset_http_app_state: None,
 ) -> None:
     """非回环绑定按实际地址重配 SDK 内层 Host 校验，非白名单 Host 不再被 421 拒绝。
 
@@ -397,7 +381,7 @@ async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
 
 
 async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlist(
-    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
+    reset_http_app_state: None,
 ) -> None:
     """回环绑定下外部域名 Host 被最外层自定义 Host 守卫以 403 先行短路。
 
@@ -415,7 +399,7 @@ async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlis
 
 
 async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
-    monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
+    reset_http_app_state: None,
 ) -> None:
     """localhost 绑定保留 SDK 内层 Host 白名单，外部域名 Host 被内层以 421 拒绝。
 
@@ -444,10 +428,45 @@ async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
 
 
 def _pick_free_port() -> int:
-    """占用一个 127.0.0.1 随机空闲端口并释放，返回端口号供服务器绑定。"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    """占用一个 127.0.0.1 随机空闲端口并释放，返回端口号供服务器绑定。
+
+    bind 失败时换下一个端口重试一次，仍失败则上抛。
+    """
+    for _ in range(2):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                return int(sock.getsockname()[1])
+        except OSError:
+            continue
+    raise OSError("两次尝试均未能绑定 127.0.0.1 空闲端口")
+
+
+async def _start_smoke_server_and_wait(
+    port: int, thread_errors: list[BaseException]
+) -> tuple[threading.Thread, bool]:
+    """后台线程运行生产启动器并等待端口可连接，返回线程与是否就绪。
+
+    未就绪时线程句柄仍随返回值交回，供调用方收尾后换端口重试。
+    """
+
+    def _serve() -> None:
+        try:
+            server._run_streamable_http("127.0.0.1", port, "")
+        except BaseException as exc:
+            thread_errors.append(exc)
+
+    thread = threading.Thread(target=_serve, name="seedream-http-smoke", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20.0
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return thread, True
+        except OSError:
+            if time.monotonic() > deadline:
+                return thread, False
+            await asyncio.sleep(0.05)
 
 
 async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
@@ -456,13 +475,13 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
     """生产启动器真端口冒烟：默认 SSE 模式完成工具列表后优雅关闭无异常无挂起。
 
     _run_streamable_http 在后台线程以真实 uvicorn 监听随机端口，全链走生产代码；
-    断言 serverInfo.version 为项目版本号，置 should_exit 后以 30 秒上限 join 线程
+    端口被抢等监听未就绪时收尾线程并换端口重试一次，两次失败才判失败。断言
+    serverInfo.version 为项目版本号，置 should_exit 后以 30 秒上限 join 线程
     防关闭链挂死。
     """
     import uvicorn
     from mcp.client import Client
 
-    port = _pick_free_port()
     created_servers: list[uvicorn.Server] = []
     real_server_cls = uvicorn.Server
 
@@ -474,26 +493,22 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
     monkeypatch.setattr(uvicorn, "Server", _CapturingServer)
 
     thread_errors: list[BaseException] = []
+    thread: threading.Thread | None = None
+    listening = False
+    for attempt in range(2):
+        port = _pick_free_port()
+        thread, listening = await _start_smoke_server_and_wait(port, thread_errors)
+        if listening:
+            break
+        # 监听未就绪：收尾本线程后丢弃失败痕迹，换端口重试一次
+        for created in created_servers:
+            created.should_exit = True
+        thread.join(timeout=30.0)
+        thread_errors.clear()
+    if not listening:
+        pytest.fail("streamable-http 冒烟服务器未在时限内开始监听")
 
-    def _serve() -> None:
-        try:
-            server._run_streamable_http("127.0.0.1", port, "")
-        except BaseException as exc:
-            thread_errors.append(exc)
-
-    thread = threading.Thread(target=_serve, name="seedream-http-smoke", daemon=True)
-    thread.start()
     try:
-        deadline = time.monotonic() + 20.0
-        while True:
-            try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.25):
-                    break
-            except OSError:
-                if time.monotonic() > deadline:
-                    pytest.fail("streamable-http 冒烟服务器未在时限内开始监听")
-                await asyncio.sleep(0.05)
-
         async with Client(
             f"http://127.0.0.1:{port}/mcp", mode="legacy", read_timeout_seconds=10.0
         ) as client:
@@ -504,12 +519,11 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
             assert len(tools.tools) == 5
 
         assert created_servers, "uvicorn.Server 未按生产路径构造"
-        created_servers[0].should_exit = True
+        created_servers[-1].should_exit = True
     finally:
-        if created_servers:
-            created_servers[0].should_exit = True
+        for created in created_servers:
+            created.should_exit = True
         thread.join(timeout=30.0)
-        server.mcp._lowlevel_server._session_manager = None
 
     assert not thread.is_alive(), "_run_streamable_http 优雅关闭链挂起"
     assert thread_errors == []

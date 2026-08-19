@@ -48,7 +48,7 @@ def _png_data_uri(width: int, height: int) -> str:
 def _lower_pil_pixel_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """把 PIL 解压炸弹阈值调低到 10000 像素，供小图触发防护分支。
 
-    同时固定注册哨兵为已注册，防止 _ensure_heif_opener_registered 在解码前用
+    同时固定注册哨兵为已注册，防止 ensure_image_decoders_ready 在解码前用
     模块常量 3600 万覆盖已调低的阈值。
     """
     monkeypatch.setattr(image_validation, "_heif_opener_registered", True)

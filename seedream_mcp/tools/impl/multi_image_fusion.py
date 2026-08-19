@@ -18,14 +18,14 @@ from ..core.common import (
     GenerationExecutionContext,
 )
 from ..core.schemas import MultiImageFusionInput
-from ._common import MULTI_IMAGE_FUSION, _default_start_log_values
+from ._common import MULTI_IMAGE_FUSION
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 async def handle_multi_image_fusion(
@@ -63,9 +63,8 @@ async def handle_multi_image_fusion(
     return await execute_generation_handler(
         params=params,
         config=config,
+        metadata=MULTI_IMAGE_FUSION,
         module_logger=logger,
-        **MULTI_IMAGE_FUSION.as_handler_kwargs(),
-        start_log_values_builder=_default_start_log_values,
         request_executor=_execute,
         ctx=ctx,
     )

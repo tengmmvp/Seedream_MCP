@@ -119,11 +119,23 @@ def test_setup_logging_suppresses_third_party_info_noise(
     """第三方噪音压制清单覆盖 httpx 与其传输层 httpcore 的 INFO 噪音。
 
     每请求一条的 httpx INFO 与每连接一条的 httpcore INFO 不再淹没业务日志。
+    basicConfig 以替身接管避免改写 root handlers；压制前先归零各级别再断言被
+    重设为 WARNING，防止先前用例的残留使断言空转；退出前恢复原级别。
     """
-    setup_logging(log_level="INFO", enable_console=False, enable_file=False)
+    monkeypatch.setattr(logging, "basicConfig", lambda *args, **kwargs: None)
+    names = ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore")
+    levels_before = {name: logging.getLogger(name).level for name in names}
+    try:
+        for name in names:
+            logging.getLogger(name).setLevel(logging.NOTSET)
 
-    for name in ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore"):
-        assert logging.getLogger(name).level == logging.WARNING
+        setup_logging(log_level="INFO", enable_console=False, enable_file=False)
+
+        for name in names:
+            assert logging.getLogger(name).level == logging.WARNING
+    finally:
+        for name, level in levels_before.items():
+            logging.getLogger(name).setLevel(level)
 
 
 # ==================== root 已有 handler 且未强制接管时的告警 ====================
@@ -202,10 +214,14 @@ def test_setup_logging_no_warning_when_root_has_no_handlers(
 def _real_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path]:
     """在 tmp 工作目录以真实 loguru 初始化文件日志，返回默认日志文件路径。
 
-    结束时移除全局 sink、重置 patcher 并恢复 root handlers，不泄漏全局状态。
+    结束时移除全局 sink、重置 patcher 并恢复 root handlers 与 root 级别，不泄漏
+    全局状态；basicConfig(force=True) 会把 root 级别设为 0，仅恢复 handlers 会
+    残留该覆写。
     """
     monkeypatch.chdir(tmp_path)
-    root_handlers = list(logging.getLogger().handlers)
+    root = logging.getLogger()
+    root_handlers = list(root.handlers)
+    root_level = root.level
     try:
         # force=True 重装 root handlers 使桥接生效，缺省值在 root 已有 handler 时不安装
         setup_logging(
@@ -218,7 +234,8 @@ def _real_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Gener
     finally:
         logger.remove()
         logger.configure(patcher=None)
-        logging.getLogger().handlers = root_handlers
+        root.handlers = root_handlers
+        root.setLevel(root_level)
 
 
 def test_setup_logging_default_file_lands_under_seedream_logs(

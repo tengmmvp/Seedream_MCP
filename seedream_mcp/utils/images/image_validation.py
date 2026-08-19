@@ -14,7 +14,7 @@ import io
 import os
 import stat
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlparse
 
 from ..core.errors import SeedreamValidationError
@@ -37,14 +37,14 @@ from ..io.io_path import (
 )
 from .image_ref import classify_image_reference
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # HEIC/HEIF 解码器惰性注册，首次校验图片时按需执行。check-then-set 非线程安全，
 # 但 register_heif_opener 与 MAX_IMAGE_PIXELS 赋值均幂等，并发重复注册无功能影响。
 _heif_opener_registered = False
 
 
-def _ensure_heif_opener_registered() -> None:
+def ensure_image_decoders_ready() -> None:
     """注册 HEIC/HEIF 解码器并配置 PIL 解压炸弹防护，仅首次调用时执行。
 
     PIL 与 pillow_heif 延迟导入，避免模块导入期加载图像库产生全局副作用。
@@ -77,7 +77,7 @@ def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None
     """
     from PIL import Image
 
-    _ensure_heif_opener_registered()
+    ensure_image_decoders_ready()
     with Image.open(io.BytesIO(image_bytes)) as img:
         _validate_image_dimensions(img.size[0], img.size[1], value_label)
 
@@ -158,38 +158,57 @@ def image_candidate_stat(path: Path) -> os.stat_result | None:
     return st
 
 
-def resolve_local_image_candidate(
-    image: str, resolved_roots: list[Path]
-) -> tuple[Path, os.stat_result] | None:
-    """按输入路径与已 resolve 的工作区根列表定位可读取的候选图片文件。
+def iter_local_candidates(image: str, resolved_roots: list[Path]) -> Iterator[Path]:
+    """按输入路径与已 resolve 的工作区根列表迭代界内候选的物理路径。
 
     绝对路径直接作为候选，相对路径按根序逐一拼接；候选 resolve 一次后经
-    is_within_resolved 与各根比较（拦截 ``..`` 与符号链接越界），通过
-    image_candidate_stat 资格检查后返回首个命中的 (resolve 后物理路径, stat)，
-    未命中返回 None。ImagePreparer 的缓存签名与 image_input 的读取路径共用此
-    定位，保证签名与实际读取锁定同一文件。
+    is_within_resolved 与各根比较（拦截 ``..`` 与符号链接越界），仅产出落在任一
+    根内的 resolve 后物理路径。UNC 前缀的候选不 resolve，避免在 Windows 触发
+    SMB 认证。候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
         resolved_roots: 已 resolve 的工作区根列表。
+
+    Yields:
+        resolve 后落在任一工作区根内的候选物理路径，按候选构造顺序产出。
     """
-    # UNC 的 resolve 在 Windows 会触发 SMB 认证，须在候选构造前判定；反斜杠形态
-    # 的 UNC 在 POSIX 上非绝对路径，先拼后查会丢失 UNC 前缀。
-    if is_unc_path(image):
-        return None
     candidates = (
         [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_roots]
     )
     for candidate in candidates:
-        # UNC 根拼接出的候选仍为 UNC 前缀，resolve 前拦截以免触发 SMB 认证。
+        # UNC 根拼接出的候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
         if is_unc_path(str(candidate)):
             continue
         try:
             resolved_candidate = candidate.resolve()
         except (OSError, ValueError):
             continue
-        if not any(is_within_resolved(resolved_candidate, base) for base in resolved_roots):
-            continue
+        if any(is_within_resolved(resolved_candidate, base) for base in resolved_roots):
+            yield resolved_candidate
+
+
+def resolve_local_image_candidate(
+    image: str, resolved_roots: list[Path]
+) -> tuple[Path, os.stat_result] | None:
+    """定位可读取的候选图片文件，候选管线由 iter_local_candidates 统一提供。
+
+    界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
+    (resolve 后物理路径, stat)，未命中返回 None。ImagePreparer 的缓存签名与
+    image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件。
+
+    Args:
+        image: 输入路径字符串，可为绝对或相对路径。
+        resolved_roots: 已 resolve 的工作区根列表。
+
+    Returns:
+        首个命中候选的 (物理路径, stat)；无命中时为 None。
+    """
+    # UNC 的 resolve 在 Windows 会触发 SMB 认证，须在候选构造前判定；反斜杠形态
+    # 的 UNC 在 POSIX 上非绝对路径，先拼后查会丢失 UNC 前缀。
+    if is_unc_path(image):
+        return None
+    for resolved_candidate in iter_local_candidates(image, resolved_roots):
         st = image_candidate_stat(resolved_candidate)
         if st is not None:
             return resolved_candidate, st
@@ -308,6 +327,13 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         ) from e
 
 
+# Data URI 允许的格式标识白名单，派生自 SUPPORTED_IMAGE_EXTENSIONS，避免每次
+# 校验重建集合。
+_DATA_URI_ALLOWED_FORMATS: frozenset[str] = frozenset(
+    ext.lstrip(".") for ext in SUPPORTED_IMAGE_EXTENSIONS
+)
+
+
 def _validate_data_uri(data_uri: str) -> str:
     """验证 Data URI 的格式、可解码性、大小与像素维度。
 
@@ -332,8 +358,7 @@ def _validate_data_uri(data_uri: str) -> str:
 
         # 格式标识取 media_type 斜杠后部分；白名单派生自 SUPPORTED_IMAGE_EXTENSIONS。
         fmt = media_type.lower().split("image/")[-1]
-        allowed = {ext.lstrip(".") for ext in SUPPORTED_IMAGE_EXTENSIONS}
-        if fmt not in allowed:
+        if fmt not in _DATA_URI_ALLOWED_FORMATS:
             raise SeedreamValidationError(
                 f"不支持的Data URI图片格式: {fmt}", field="image", value=data_uri
             )
@@ -437,6 +462,7 @@ def validate_image_path(
         三元组 (是否有效, 错误信息, 标准化路径)。
     """
     try:
+        path = path.strip()
         kind = classify_image_reference(path)
         if kind in ("url", "data_uri"):
             return True, "", None

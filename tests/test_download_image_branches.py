@@ -131,8 +131,6 @@ async def test_download_sniffs_extension_from_bytes_when_suffix_mismatched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """URL 派生扩展名与实际字节不符时按字节签名修正，落盘与结果路径一致。"""
-    from _download_fakes import _FakeSession
-
     manager = DownloadManager()
     session = _FakeSession([_png_success_response()])
     _patch_download_network(monkeypatch, manager, session)
@@ -281,7 +279,6 @@ async def test_download_dns_resolving_private_ip_is_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """解析到私网 IP 属 SSRF 第二层防护的终态拒绝，不进入退避重试。"""
-    manager = DownloadManager()
     resolve_calls: List[int] = []
 
     async def _private_ip_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
@@ -292,8 +289,10 @@ async def test_download_dns_resolving_private_ip_is_terminal(
     _patch_loop_getaddrinfo(monkeypatch, _private_ip_getaddrinfo)
 
     save_path = tmp_path / "out.png"
-    with pytest.raises(DownloadError, match="不安全地址"):
-        await manager.download_image("https://example.com/img.png", save_path)
+    # 经上下文管理器进入使真实会话在断言后确定关闭，避免依赖 GC 兜底
+    async with DownloadManager() as manager:
+        with pytest.raises(DownloadError, match="不安全地址"):
+            await manager.download_image("https://example.com/img.png", save_path)
 
     # 终态错误单次尝试即上抛，未触发退避重试
     assert len(resolve_calls) == 1
@@ -307,7 +306,6 @@ async def test_download_wsa_host_not_found_is_terminal(
 
     Windows 的 getaddrinfo 失败 errno 为 WSA 错误码而非 POSIX EAI_* 常量。
     """
-    manager = DownloadManager()
     resolve_calls: List[int] = []
 
     async def _wsa_11001_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
@@ -318,8 +316,10 @@ async def test_download_wsa_host_not_found_is_terminal(
     _patch_loop_getaddrinfo(monkeypatch, _wsa_11001_getaddrinfo)
 
     save_path = tmp_path / "out.png"
-    with pytest.raises(DownloadError, match="域名解析失败") as excinfo:
-        await manager.download_image("https://example.com/img.png", save_path)
+    # 经上下文管理器进入使真实会话在断言后确定关闭，避免依赖 GC 兜底
+    async with DownloadManager() as manager:
+        with pytest.raises(DownloadError, match="域名解析失败") as excinfo:
+            await manager.download_image("https://example.com/img.png", save_path)
 
     # 终态错误且非可重试子类，单次尝试即上抛，未触发退避重试
     assert not isinstance(excinfo.value, RetryableDownloadError)
@@ -331,7 +331,6 @@ async def test_download_wsa_try_again_is_retryable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """Windows WSATRY_AGAIN(11002) 对应 EAI_AGAIN 瞬时故障：按可重试退避。"""
-    manager = DownloadManager()
     resolve_calls: List[int] = []
 
     async def _wsa_11002_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
@@ -342,11 +341,13 @@ async def test_download_wsa_try_again_is_retryable(
     _patch_loop_getaddrinfo(monkeypatch, _wsa_11002_getaddrinfo)
 
     save_path = tmp_path / "out.png"
-    with pytest.raises(RetryableDownloadError, match="域名解析失败"):
-        await manager.download_image("https://example.com/img.png", save_path)
+    # 经上下文管理器进入使真实会话在断言后确定关闭，避免依赖 GC 兜底
+    async with DownloadManager() as manager:
+        with pytest.raises(RetryableDownloadError, match="域名解析失败"):
+            await manager.download_image("https://example.com/img.png", save_path)
 
-    # 可重试错误按 max_retries 上限反复解析，而非单次终态上抛
-    assert len(resolve_calls) == manager.max_retries + 1
+        # 可重试错误按 max_retries 上限反复解析，而非单次终态上抛
+        assert len(resolve_calls) == manager.max_retries + 1
     assert not save_path.exists()
 
 

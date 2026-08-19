@@ -4,6 +4,7 @@ import pytest
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamConfigError
+from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
 
 
 def test_config_accepts_endpoint_id() -> None:
@@ -18,9 +19,6 @@ def test_default_model_id_matches_alias_table() -> None:
     默认值与 MODEL_ALIASES 同字面量双源维护，漏改一侧会使默认模型与别名展开
     结果指向不同版本。
     """
-    from seedream_mcp.config import SeedreamConfig
-    from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
-
     config = SeedreamConfig(api_key="k")
     assert config.model_id == MODEL_ALIASES["doubao-seedream-5.0"]
 
@@ -41,6 +39,7 @@ def test_config_rejects_deprecated_seededit_3_0() -> None:
 
 
 def test_config_accepts_current_models() -> None:
+    """当前模型别名经别名表展开为完整 Model ID，展开契约与 MODEL_ALIASES 锁定。"""
     for model in (
         "doubao-seedream-5.0-pro",
         "doubao-seedream-5.0",
@@ -48,7 +47,7 @@ def test_config_accepts_current_models() -> None:
         "doubao-seedream-4.0",
     ):
         config = SeedreamConfig(api_key="k", model_id=model)
-        assert config.model_id
+        assert config.model_id == MODEL_ALIASES[model]
 
 
 def test_config_normalizes_seedream_50_pro_alias() -> None:

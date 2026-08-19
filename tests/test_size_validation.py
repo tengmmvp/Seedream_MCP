@@ -48,6 +48,15 @@ def test_validate_size_for_model_rejects_invalid_pixel_format() -> None:
         validate_size_for_model("abc", "doubao-seedream-4-5-251128")
 
 
+def test_validate_size_for_model_leading_zero_pixels_report_range_error() -> None:
+    # 前导零像素串按数值 1x1 进入像素区间校验，报范围类错误而非格式类错误。
+    with pytest.raises(SeedreamValidationError, match="总像素需在"):
+        validate_size_for_model("01x01", "doubao-seedream-4-5-251128")
+    # 宽高为零的输入在宽高比计算前按数值拦截，同样报范围类错误。
+    with pytest.raises(SeedreamValidationError, match="必须为正整数"):
+        validate_size_for_model("00x00", "doubao-seedream-4-5-251128")
+
+
 def test_config_accepts_pixel_default_size() -> None:
     config = SeedreamConfig(
         api_key="test_key",
@@ -107,7 +116,7 @@ def test_validate_size_for_model_rejects_seedream_50_pro_1_5k_for_lite() -> None
 def test_validate_size_for_model_accepts_seedream_50_pro_upper_pixel_bound() -> None:
     # 官方像素上限 2048x2048x1.1025=4624220；邻界值 2048x2256=4620288 不超限且
     # 宽高均为 16 的倍数，通过。
-    assert validate_size_for_model("2048x2256", "doubao-seedream-5-0-pro-260628") == ("2048x2256")
+    assert validate_size_for_model("2048x2256", "doubao-seedream-5-0-pro-260628") == "2048x2256"
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_above_pixel_bound() -> None:
@@ -136,10 +145,13 @@ def test_validate_size_for_model_rejects_seedream_50_pro_non_multiple_of_16() ->
         validate_size_for_model("1300x732", "doubao-seedream-5-0-pro-260628")
 
 
-def test_validate_image_input_rejects_oversized_data_uri_before_decode() -> None:
+def test_validate_image_input_rejects_oversized_data_uri_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """巨型 base64 在解码前按文本长度估算拒绝，避免先解码触发内存放大。"""
-    from seedream_mcp.utils.images.image_validation import MAX_IMAGE_FILE_SIZE, validate_image_input
+    import seedream_mcp.utils.images.image_validation as image_validation_module
 
-    huge_b64 = "A" * (MAX_IMAGE_FILE_SIZE * 4 // 3 + 100)
+    monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", 1024)
+    huge_b64 = "A" * (1024 * 4 // 3 + 100)
     with pytest.raises(SeedreamValidationError, match="数据过大"):
-        validate_image_input(f"data:image/png;base64,{huge_b64}")
+        image_validation_module.validate_image_input(f"data:image/png;base64,{huge_b64}")

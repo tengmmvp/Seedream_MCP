@@ -12,9 +12,11 @@ import pytest
 from mcp.types import TextContent
 
 from seedream_mcp.client import SeedreamClient
+from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
+    ResponseFormat,
     SequentialGenerationInput,
     TextToImageInput,
 )
@@ -49,16 +51,12 @@ def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    auto_save_module = io_save
-    mgr_cls = auto_save_module.AutoSaveManager
-    result_cls = auto_save_module.AutoSaveResult
-
     async def fake_save_multiple(
         self: Any, images: list[dict[str, Any]], tool_name: str
     ) -> list[Any]:
         del self, tool_name
         return [
-            result_cls(
+            io_save.AutoSaveResult(
                 success=True,
                 original_url=images[0]["url"],
                 local_path="/saved/generated.png",
@@ -66,30 +64,34 @@ def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
             )
         ]
 
-    monkeypatch.setattr(mgr_cls, "save_multiple_images", fake_save_multiple)
+    monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", fake_save_multiple)
 
 
 def _patch_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    mgr_cls = io_save.AutoSaveManager
-
     async def failing_save_multiple(
         self: Any, images: list[dict[str, Any]], tool_name: str
     ) -> list[Any]:
         del self, images, tool_name
         raise RuntimeError("下载失败")
 
-    monkeypatch.setattr(mgr_cls, "save_multiple_images", failing_save_multiple)
+    monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", failing_save_multiple)
 
 
-def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> None:
-    """monkeypatch SeedreamClient 的指定生成方法返回标准成功结果。"""
-    client_cls = SeedreamClient
+def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> list[dict[str, Any]]:
+    """monkeypatch SeedreamClient 的指定生成方法返回标准成功结果。
+
+    Returns:
+        被 patch 方法的调用记录（每次调用的关键字参数），供分发断言使用。
+    """
+    calls: list[dict[str, Any]] = []
 
     async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
-        del self, kwargs
+        del self
+        calls.append(kwargs)
         return _client_result()
 
-    monkeypatch.setattr(client_cls, method_name, fake_method)
+    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
+    return calls
 
 
 @pytest.mark.asyncio
@@ -99,8 +101,6 @@ async def test_run_text_to_image_includes_auto_save_field(
     """生成成功且自动保存成功时，结果含 auto_save 字段与本地路径。"""
     _patch_client_success(monkeypatch)
     _patch_save_success(monkeypatch)
-
-    from seedream_mcp.config import SeedreamConfig
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
     params = TextToImageInput(prompt="a cat")
@@ -125,7 +125,6 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
 ) -> None:
     """response_format=b64_json 时按 b64_json 收集并按原始索引回填，失败占位项不进保存队列。"""
     client_cls = SeedreamClient
-    auto_save_module = io_save
 
     async def fake_text_to_image_b64(self: Any, **kwargs: Any) -> dict[str, Any]:
         del self, kwargs
@@ -155,7 +154,7 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
         captured["images"] = images
         captured["tool_name"] = tool_name
         return [
-            auto_save_module.AutoSaveResult(
+            io_save.AutoSaveResult(
                 success=True,
                 original_url="base64",
                 local_path="/saved/decoded.png",
@@ -165,13 +164,10 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
 
     monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image_b64)
     monkeypatch.setattr(
-        auto_save_module.AutoSaveManager,
+        io_save.AutoSaveManager,
         "save_multiple_base64_images",
         fake_save_multiple_base64,
     )
-
-    from seedream_mcp.config import SeedreamConfig
-    from seedream_mcp.tools.core.schemas import ResponseFormat
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
     params = TextToImageInput(prompt="a cat", response_format=ResponseFormat.B64_JSON)
@@ -216,8 +212,6 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
     _patch_client_success(monkeypatch)
     _patch_save_failure(monkeypatch)
 
-    from seedream_mcp.config import SeedreamConfig
-
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
     params = TextToImageInput(prompt="a cat")
 
@@ -253,8 +247,6 @@ async def test_run_text_to_image_rejects_out_of_bounds_save_path_before_api_call
 
     monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image)
 
-    from seedream_mcp.config import SeedreamConfig
-
     base = tmp_path / "save_root"
     base.mkdir()
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
@@ -276,18 +268,17 @@ async def test_run_image_to_image_dispatches_via_composition_root(
 ) -> None:
     """run_image_to_image 经 composition root 委托 handle_image_to_image。
 
-    最终调用 client.image_to_image。
+    最终调用 client.image_to_image，错分发时被 patch 方法零调用即时显式失败。
     """
-    _patch_client_method(monkeypatch, "image_to_image")
+    calls = _patch_client_method(monkeypatch, "image_to_image")
     _patch_save_success(monkeypatch)
-
-    from seedream_mcp.config import SeedreamConfig
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
     params = ImageToImageInput(prompt="edit", image="https://example.com/ref.png")
 
     result = await run_image_to_image(params, config, ctx=None)
 
+    assert len(calls) == 1, "生成请求未分发到被 patch 的 client.image_to_image"
     assert result.is_error is False
     structured = result.structured_content
     assert isinstance(structured, dict)
@@ -298,11 +289,12 @@ async def test_run_image_to_image_dispatches_via_composition_root(
 async def test_run_multi_image_fusion_dispatches_via_composition_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """run_multi_image_fusion 经 composition root 委托 handle_multi_image_fusion。"""
-    _patch_client_method(monkeypatch, "multi_image_fusion")
-    _patch_save_success(monkeypatch)
+    """run_multi_image_fusion 经 composition root 委托 handle_multi_image_fusion。
 
-    from seedream_mcp.config import SeedreamConfig
+    最终调用 client.multi_image_fusion，错分发时被 patch 方法零调用即时显式失败。
+    """
+    calls = _patch_client_method(monkeypatch, "multi_image_fusion")
+    _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
     params = MultiImageFusionInput(
@@ -312,6 +304,7 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
 
     result = await run_multi_image_fusion(params, config, ctx=None)
 
+    assert len(calls) == 1, "生成请求未分发到被 patch 的 client.multi_image_fusion"
     assert result.is_error is False
     structured = result.structured_content
     assert isinstance(structured, dict)
@@ -324,18 +317,17 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
 ) -> None:
     """run_sequential_generation 经 composition root 委托 handle_sequential_generation。
 
-    最终调用 client.sequential_generation。
+    最终调用 client.sequential_generation，错分发时被 patch 方法零调用即时显式失败。
     """
-    _patch_client_method(monkeypatch, "sequential_generation")
+    calls = _patch_client_method(monkeypatch, "sequential_generation")
     _patch_save_success(monkeypatch)
-
-    from seedream_mcp.config import SeedreamConfig
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
     params = SequentialGenerationInput(prompt="sequence", max_images=2)
 
     result = await run_sequential_generation(params, config, ctx=None)
 
+    assert len(calls) == 1, "生成请求未分发到被 patch 的 client.sequential_generation"
     assert result.is_error is False
     structured = result.structured_content
     assert isinstance(structured, dict)

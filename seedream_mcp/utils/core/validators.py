@@ -5,8 +5,8 @@
 
 设计要点：
 - 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、倍数约束、输出
-  格式、联网工具、流式输出、参考图上限等，统一委托 model_capabilities 的能力声明
-  判定，新增模型只需扩展能力表而无需改动校验代码。
+  格式、联网工具、流式输出、参考图上限、组图支持等，统一委托 model_capabilities
+  的能力声明判定，新增模型只需扩展能力表而无需改动校验代码。
 - 布尔字符串解析 parse_bool 与宽高比上下限常量由本模块单一持有，config 的
   _pick_bool 与 image_validation 的维度校验均为消费方。
 """
@@ -20,7 +20,7 @@ from .errors import SeedreamConfigError, SeedreamValidationError
 from .logs import get_logger
 from ..model.model_capabilities import get_max_reference_images, get_model_capabilities
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 # ==================== 常量定义 ====================
@@ -45,8 +45,8 @@ VALID_GENERATION_TOOL_TYPES = frozenset({"web_search"})
 # 断言两侧一致。
 VALID_RESPONSE_FORMATS = frozenset({"url", "b64_json"})
 # 像素尺寸字符串正则：宽高各 2-5 位十进制。\d 匹配任意 Unicode 十进制数字，
-# 非 ASCII 数字串同样命中，int() 可正常转换，行为良性并按此声明；IGNORECASE 对
-# 不含字母的本模式无实际作用，保留标志以维持既有声明。
+# 非 ASCII 数字串同样命中，int() 可正常转换，行为良性并按此声明；IGNORECASE 使
+# 分隔符接受大写 X，命中后输出统一归一为小写 x。
 PIXEL_SIZE_PATTERN = re.compile(r"^(\d{2,5})x(\d{2,5})$", re.IGNORECASE)
 # 组图总数上限：参考图数量与生成数量之和不超过 15，故参考图至多 14 张。
 MAX_SEQUENTIAL_TOTAL_IMAGES = 15
@@ -391,18 +391,25 @@ def validate_max_images(max_images: Any) -> int:
 # ==================== 尺寸验证函数 ====================
 
 
-def validate_size(size: str, *, layer_decomposition: bool = False, model_id: str = "") -> str:
-    """验证图像尺寸参数是否在允许的范围内。
+def _resolve_size_token(
+    size: str, *, layer_decomposition: bool = False, model_id: str = ""
+) -> str | tuple[int, int]:
+    """校验尺寸输入形态并归一化，返回档位/auto 字符串标记或像素元组。
 
     Args:
-        size: 图像尺寸规格，支持 1K/1.5K/2K/3K/4K 或 <宽>x<高>。
+        size: 原始尺寸输入。
         layer_decomposition: 是否处于图层拆分场景，true 时额外接受按输入图
-            尺寸自适应的 "auto"。
+            尺寸自适应的 "auto" 且拒绝宽高像素值。
         model_id: 模型标识符，图层拆分场景拒绝像素值时按该模型能力声明的档位
             白名单生成错误文案；缺省时按未知家族的全集档位表述。
 
     Returns:
-        大写格式的标准化尺寸值；图层拆分场景的 auto 归一为小写返回。
+        分辨率档位的大写字符串、图层拆分场景的小写 "auto" 或像素规格的
+        (宽, 高) 元组。
+
+    Raises:
+        SeedreamValidationError: 输入非字符串、为空、形态非法，或图层拆分场景
+            传入像素值时抛出。
     """
     if not isinstance(size, str):
         raise SeedreamValidationError("图像尺寸必须为字符串", field="size", value=size)
@@ -438,14 +445,34 @@ def validate_size(size: str, *, layer_decomposition: bool = False, model_id: str
 
     pixel_size = _parse_pixel_size(normalized)
     if pixel_size is not None:
-        width, height = pixel_size
-        return f"{width}x{height}"
+        return pixel_size
 
     raise SeedreamValidationError(
         "图像尺寸必须为 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值",
         field="size",
         value=size,
     )
+
+
+def validate_size(size: str, *, layer_decomposition: bool = False, model_id: str = "") -> str:
+    """验证图像尺寸参数是否在允许的范围内。
+
+    Args:
+        size: 图像尺寸规格，支持 1K/1.5K/2K/3K/4K 或 <宽>x<高>。
+        layer_decomposition: 是否处于图层拆分场景，true 时额外接受按输入图
+            尺寸自适应的 "auto"。
+        model_id: 模型标识符，图层拆分场景拒绝像素值时按该模型能力声明的档位
+            白名单生成错误文案；缺省时按未知家族的全集档位表述。
+
+    Returns:
+        标准化尺寸值：档位为大写，图层拆分场景的 auto 归一为小写，像素规格
+        归一为小写 x 分隔且剥离前导零。
+    """
+    token = _resolve_size_token(size, layer_decomposition=layer_decomposition, model_id=model_id)
+    if isinstance(token, tuple):
+        width, height = token
+        return f"{width}x{height}"
+    return token
 
 
 def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bool = False) -> str:
@@ -455,43 +482,50 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     像素总区间 min/max_size_pixels、倍数约束 size_pixel_multiple（如 5.0 Pro 要求
     宽高为 16 的倍数），新增模型只需扩展能力声明。图层拆分场景的 "auto" 仅校验
     模型支持图层拆分，不走档位与像素校验。
+
+    Returns:
+        标准化尺寸值：档位为大写，auto 为小写，像素规格归一为小写 x 分隔且
+        剥离前导零。
     """
-    size = validate_size(size, layer_decomposition=layer_decomposition, model_id=model_id)
+    token = _resolve_size_token(size, layer_decomposition=layer_decomposition, model_id=model_id)
     caps = get_model_capabilities(model_id)
 
-    if size == "auto":
-        if not caps.supports_layer_decomposition:
-            raise SeedreamValidationError(
-                f"{caps.display_name} 模型不支持图层拆分，size 不接受 auto",
-                field="size",
-                value=size,
-            )
-        return size
+    if isinstance(token, str):
+        if token == "auto":
+            if not caps.supports_layer_decomposition:
+                raise SeedreamValidationError(
+                    f"{caps.display_name} 模型不支持图层拆分，size 不接受 auto",
+                    field="size",
+                    value=token,
+                )
+            return token
 
-    # 分辨率档位校验：各家族支持的档位白名单由能力表声明。
-    if size in VALID_SIZE_PRESETS:
-        if size not in caps.allowed_presets:
+        # 分辨率档位校验：各家族支持的档位白名单由能力表声明。
+        if token not in caps.allowed_presets:
             presets_str = "/".join(sorted(caps.allowed_presets, key=_preset_numeric_sort_key))
             raise SeedreamValidationError(
                 f"在 {caps.display_name} 模型下仅支持 {presets_str}，"
                 "请调整 size 参数或更换为支持该尺寸的模型",
                 field="size",
-                value=size,
+                value=token,
             )
-        return size
+        return token
 
-    # 像素值校验：解析宽高后依次校验宽高比、像素总量与倍数约束。
-    parsed = _parse_pixel_size(size)
-    if parsed is None:
-        raise SeedreamValidationError("图像尺寸格式无效", field="size", value=size)
-    width, height = parsed
+    # 像素值校验：宽高元组由 _resolve_size_token 单次解析后贯穿校验链，前导零
+    # 输入按数值参与判定，不因归一化字符串破坏重解析而误报格式错误。
+    width, height = token
+    pixel_text = f"{width}x{height}"
+    if width <= 0 or height <= 0:
+        raise SeedreamValidationError(
+            "像素尺寸的宽与高必须为正整数", field="size", value=pixel_text
+        )
 
     ratio = width / height
     if ratio < MIN_IMAGE_RATIO or ratio > MAX_IMAGE_RATIO:
         raise SeedreamValidationError(
             f"尺寸宽高比需在 [{MIN_IMAGE_RATIO}, {MAX_IMAGE_RATIO}] 范围内",
             field="size",
-            value=size,
+            value=pixel_text,
         )
 
     total_pixels = width * height
@@ -510,7 +544,7 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
         raise SeedreamValidationError(
             f"在 {caps.display_name} 模型下，像素尺寸总像素需{bound_text}",
             field="size",
-            value=size,
+            value=pixel_text,
         )
     if caps.size_pixel_multiple is not None and (
         width % caps.size_pixel_multiple != 0 or height % caps.size_pixel_multiple != 0
@@ -518,10 +552,10 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
         raise SeedreamValidationError(
             f"在 {caps.display_name} 模型下，像素宽高须为 {caps.size_pixel_multiple} 的倍数",
             field="size",
-            value=size,
+            value=pixel_text,
         )
 
-    return size
+    return pixel_text
 
 
 # ==================== 高级验证函数 ====================
@@ -681,6 +715,26 @@ def validate_parallel_generation_options(
         )
 
     return validated_request_count, validated_parallelism
+
+
+def validate_sequential_generation_support(model_id: str) -> None:
+    """验证模型对组图生成的支持。
+
+    组图由 5.0/5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持，由能力表统一判定。
+
+    Args:
+        model_id: 模型标识符。
+
+    Raises:
+        SeedreamValidationError: 模型能力声明不支持组图生成时抛出。
+    """
+    caps = get_model_capabilities(model_id)
+    if not caps.supports_sequential_generation:
+        raise SeedreamValidationError(
+            f"{caps.display_name} 不支持组图生成，请切换为支持组图的模型",
+            field="model",
+            value=model_id,
+        )
 
 
 def validate_sequential_image_limit(

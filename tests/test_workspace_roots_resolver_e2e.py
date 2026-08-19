@@ -14,28 +14,13 @@ import pytest
 from mcp.client import Client, ClientRequestContext
 from mcp.types import CallToolResult, ListRootsResult, Root
 
-import seedream_mcp.resources as resources
 import seedream_mcp.server as server
 from seedream_mcp import config as config_module
 from seedream_mcp.config import SeedreamConfig
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n"
 
-
-@pytest.fixture
-async def reset_lifespan_singletons(monkeypatch: pytest.MonkeyPatch):
-    """重置 lifespan 单例并注入活动配置，测试后关闭残留实例并再次复位。"""
-    server._reset_lifespan_state()
-    monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="test_key"))
-    yield
-    active = resources._active_resource
-    if active is not None:
-        await active.client.close()
-        await active.download_manager.close()
-    for retired in list(resources._retired_resources):
-        await retired.client.close()
-        await retired.download_manager.close()
-    server._reset_lifespan_state()
+# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
 
 
 def _make_callback(roots: list[Path]) -> Any:

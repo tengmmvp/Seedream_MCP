@@ -78,6 +78,26 @@ def test_attach_skips_auth_and_host_guard_for_remote_without_token(
     assert app.attached_classes() == [_HealthCheckMiddleware, _LimitRequestBodyMiddleware]
 
 
+def test_attach_explicit_max_body_size_skips_config_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式传入 max_body_size 时不读取活动配置，生产路径取值一次直接复用。"""
+
+    def _fail_read() -> SeedreamConfig:
+        raise AssertionError("显式传入 max_body_size 时不应读取活动配置")
+
+    monkeypatch.setattr(transport_module, "get_active_config", _fail_read)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "", max_body_size=1048576)
+
+    assert app.attached_classes() == [
+        _LoopbackHostGuardMiddleware,
+        _HealthCheckMiddleware,
+        _LimitRequestBodyMiddleware,
+    ]
+
+
 def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None:
     """同一 app 实例二次装配跳过 add_middleware，中间件栈不叠加。
 

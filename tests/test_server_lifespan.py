@@ -15,20 +15,7 @@ import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import TextToImageInput
 
-
-@pytest.fixture
-async def reset_lifespan_singletons():
-    """重置模块级单例与传输模式，测试后关闭本测试创建的实例，避免跨测试污染与资源泄漏。"""
-    server._reset_lifespan_state()
-    yield
-    active = resources._active_resource
-    if active is not None:
-        await active.client.close()
-        await active.download_manager.close()
-    for retired in list(resources._retired_resources):
-        await retired.client.close()
-        await retired.download_manager.close()
-    server._reset_lifespan_state()
+# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
 
 
 async def test_app_lifespan_yields_config_and_client(
@@ -404,7 +391,7 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
     from unittest.mock import MagicMock
 
     from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.tools.core.common import execute_generation_handler
+    from seedream_mcp.tools.core.common import ToolMetadata, execute_generation_handler
 
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
@@ -417,17 +404,20 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
         captured_client = client
         return {"success": True, "data": [], "usage": {}, "status": "completed"}
 
+    metadata = ToolMetadata(
+        tool_name="text_to_image",
+        completion_title="文生图完成",
+        failure_prefix="文生图",
+        start_log_message="",
+        start_log_values_builder=lambda c: (),
+    )
     ctx = _FakeLifespanCtx({"client": shared_client})
     try:
         result = await execute_generation_handler(
             params=TextToImageInput(prompt="test", auto_save=False),
             config=config,
             module_logger=MagicMock(),
-            tool_name="text_to_image",
-            completion_title="文生图完成",
-            failure_prefix="文生图",
-            start_log_message="",
-            start_log_values_builder=lambda c: (),
+            metadata=metadata,
             request_executor=fake_executor,
             ctx=ctx,
         )
@@ -446,6 +436,7 @@ async def test_execute_generation_handler_passes_shared_download_manager(
 
     from seedream_mcp.client import SeedreamClient
     from seedream_mcp.tools.core import common as common_module
+    from seedream_mcp.tools.core.common import ToolMetadata
     from seedream_mcp.utils.io.io_download import DownloadManager
 
     config = SeedreamConfig(api_key="test_key")
@@ -479,17 +470,20 @@ async def test_execute_generation_handler_passes_shared_download_manager(
 
     monkeypatch.setattr(common_module, "auto_save_from_urls", fake_auto_save_from_urls)
 
+    metadata = ToolMetadata(
+        tool_name="text_to_image",
+        completion_title="文生图完成",
+        failure_prefix="文生图",
+        start_log_message="",
+        start_log_values_builder=lambda c: (),
+    )
     ctx = _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm})
     try:
         await common_module.execute_generation_handler(
             params=TextToImageInput(prompt="test", auto_save=True, response_format="url"),
             config=config,
             module_logger=MagicMock(),
-            tool_name="text_to_image",
-            completion_title="文生图完成",
-            failure_prefix="文生图",
-            start_log_message="",
-            start_log_values_builder=lambda c: (),
+            metadata=metadata,
             request_executor=fake_executor,
             ctx=ctx,
         )

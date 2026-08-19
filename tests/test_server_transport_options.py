@@ -233,20 +233,37 @@ def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(
     "certfile,keyfile",
     [("c.pem", None), (None, "k.pem")],
 )
-def test_cli_main_refuses_unpaired_tls_cert_and_key(
-    monkeypatch: pytest.MonkeyPatch, certfile: str | None, keyfile: str | None
+def test_validate_transport_args_rejects_unpaired_tls_cert_and_key(
+    certfile: str | None, keyfile: str | None
 ) -> None:
     """ssl_certfile 与 ssl_keyfile 必须同时提供或同时省略，仅提供其一无法建立 TLS。"""
-    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
-    args.host = "0.0.0.0"
-    args.auth_token = "s3cret"
     args.ssl_certfile = certfile
     args.ssl_keyfile = keyfile
-    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(server, "_run_streamable_http", lambda *a, **k: None)
 
-    assert server.cli_main() == 1
+    message = server._validate_transport_args(args)
+
+    assert message is not None
+    assert "--ssl-certfile 与 --ssl-keyfile 必须同时提供或同时省略" in message
+
+
+def test_validate_transport_args_accepts_paired_tls_options() -> None:
+    """证书与私钥成对提供或同时省略时校验通过，返回 None。"""
+    paired = _make_cli_args("streamable-http")
+    paired.ssl_certfile = "c.pem"
+    paired.ssl_keyfile = "k.pem"
+    assert server._validate_transport_args(paired) is None
+
+    both_absent = _make_cli_args("streamable-http")
+    assert server._validate_transport_args(both_absent) is None
+
+
+def test_validate_transport_args_skips_stdio_transport() -> None:
+    """stdio 传输不涉及 TLS 参数，参数不成对也不构成错误。"""
+    args = _make_cli_args("stdio")
+    args.ssl_certfile = "c.pem"
+    args.ssl_keyfile = None
+    assert server._validate_transport_args(args) is None
 
 
 def test_cli_main_config_error_returns_exit_code_one(
@@ -601,10 +618,17 @@ def test_transport_security_loopback_ignores_allowed_hosts(
 
 @pytest.mark.parametrize(
     "host",
-    [b"LOCALHOST", b"LocalHost:8000", b"LOCALHOST:8000"],
+    [
+        b"127.0.0.1",
+        b"127.0.0.1:8000",
+        b"localhost",
+        b"localhost:8000",
+        b"[::1]",
+        b"[::1]:8000",
+    ],
 )
-async def test_loopback_host_guard_matching_is_case_insensitive(host: bytes) -> None:
-    """Host 头主机名大小写不敏感，大写回环 Host 放行而非 403。"""
+async def test_loopback_host_guard_allows_lowercase_loopback_host(host: bytes) -> None:
+    """小写回环 Host 精确匹配白名单后放行，本地访问不受影响。"""
     inner_called: list[bool] = []
 
     async def inner(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -619,9 +643,29 @@ async def test_loopback_host_guard_matching_is_case_insensitive(host: bytes) -> 
     assert inner_called == [True]
 
 
+@pytest.mark.parametrize(
+    "host",
+    [b"LOCALHOST", b"LocalHost:8000", b"LOCALHOST:8000"],
+)
+async def test_loopback_host_guard_matching_is_case_sensitive(host: bytes) -> None:
+    """Host 头与回环白名单为大小写敏感精确比较，大写回环 Host 被 403 拒绝。"""
+    sent: list[dict] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    async def inner(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("大写回环 Host 不应进入下游")
+
+    guard = transport_module._LoopbackHostGuardMiddleware(inner)
+    await guard({"type": "http", "headers": [(b"host", host)]}, None, send)
+
+    assert sent[0]["status"] == 403
+
+
 @pytest.mark.parametrize("host", [b"EVIL.EXAMPLE.COM", b"Evil.Example.Com:8000"])
 async def test_loopback_host_guard_rejects_uppercase_external_host(host: bytes) -> None:
-    """大写外部域名 Host 仍被 403 拒绝，大小写归一不放宽 fail-closed 取向。"""
+    """大写外部域名 Host 仍被 403 拒绝，比较大小写敏感不放宽 fail-closed 取向。"""
     sent: list[dict] = []
 
     async def send(message):  # type: ignore[no-untyped-def]

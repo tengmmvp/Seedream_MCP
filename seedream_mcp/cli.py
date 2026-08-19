@@ -190,3 +190,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable-http"]:
     """构建 MCP 运行传输方式，仅支持 stdio 与 streamable-http。"""
     return cast(Literal["stdio", "streamable-http"], args.transport)
+
+
+def _validate_transport_args(args: argparse.Namespace) -> str | None:
+    """校验传输相关 CLI 参数组合，返回错误消息；参数合法时返回 None。
+
+    仅 streamable-http 需要校验：TLS 证书与私钥必须成对提供或同时省略。
+    """
+    if args.transport != "streamable-http":
+        return None
+    if (args.ssl_certfile is None) != (args.ssl_keyfile is None):
+        return (
+            "配置错误：--ssl-certfile 与 --ssl-keyfile 必须同时提供或同时省略，"
+            "仅提供其一无法建立 TLS。"
+        )
+    return None

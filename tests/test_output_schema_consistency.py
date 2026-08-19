@@ -15,9 +15,9 @@ from seedream_mcp.tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
 )
+from seedream_mcp.tools.core.browse import _BrowseRequestState, _build_browse_structured_result
 from seedream_mcp.tools.core.results import _build_generation_structured_result
-from seedream_mcp.tools.core.schemas import TextToImageInput
-from seedream_mcp.tools.impl.browse_images import _build_browse_structured_result
+from seedream_mcp.tools.core.schemas import BrowseImagesInput, TextToImageInput
 
 
 def test_generation_success_path_matches_schema() -> None:
@@ -196,17 +196,15 @@ def test_real_generation_builder_failure_output_instantiates_schema() -> None:
 def test_real_browse_builder_output_instantiates_schema(tmp_path: Path) -> None:
     """调用真实 _build_browse_structured_result 须能实例化 BrowseImagesStructuredOutput。"""
     workspace = tmp_path / "ws"
-    structured = _build_browse_structured_result(
-        status="completed",
+    state = _BrowseRequestState.from_params(
+        BrowseImagesInput(directory=".", recursive=True, max_depth=3, limit=50, offset=0),
         workspace_roots=[workspace],
-        directory=".",
         resolved_directories=[workspace],
-        recursive=True,
-        max_depth=3,
-        limit=50,
-        offset=0,
-        show_details=False,
         format_filter=[".png", ".jpg"],
+    )
+    structured = _build_browse_structured_result(
+        state,
+        status="completed",
         images=[{"index": 1, "path": "a.png"}],
     )
     obj = BrowseImagesStructuredOutput(**structured)

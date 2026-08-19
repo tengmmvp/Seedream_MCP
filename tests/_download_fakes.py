@@ -1,9 +1,9 @@
 """io_download 下载测试共享的伪网络对象与辅助函数。
 
-供 test_download_manager_security、test_download_image_branches 与
-test_auto_save_and_download 复用，避免多处重复定义与语义漂移。流式内容采用多分块
-语义，支持单块与多块场景；对端 IP、连接、响应、session 均按 aiohttp 公开接口的
-最小子集模拟。
+供 test_download_manager_security、test_download_manager_ssrf、
+test_download_image_branches 与 test_auto_save_and_download 复用，避免多处重复
+定义与语义漂移。流式内容采用多分块语义，支持单块与多块场景；对端 IP、连接、
+响应、session 与 DNS 解析 loop 均按 aiohttp 公开接口的最小子集模拟。
 """
 
 from __future__ import annotations
@@ -20,15 +20,69 @@ _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 
 
 class _FakeStreamContent:
-    """模拟 aiohttp 响应体的分块流，逐块产出。"""
+    """模拟 aiohttp 响应体的分块流，支持逐块迭代与限额 read 两种消费方式。"""
 
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = list(chunks)
+        self._chunk_idx = 0
+        self._chunk_offset = 0
 
     async def iter_chunked(self, size: int):  # type: ignore[no-untyped-def]
         del size
-        for chunk in self._chunks:
+        while self._chunk_idx < len(self._chunks):
+            chunk = self._chunks[self._chunk_idx]
+            self._chunk_idx += 1
+            self._chunk_offset = 0
             yield chunk
+
+    async def read(self, size: int = -1) -> bytes:
+        """取走至多 size 字节的剩余响应体，模拟 aiohttp StreamReader 的限额排空。"""
+        parts: list[bytes] = []
+        taken = 0
+        while self._chunk_idx < len(self._chunks) and (size < 0 or taken < size):
+            chunk = self._chunks[self._chunk_idx]
+            piece = chunk[self._chunk_offset :]
+            if size >= 0:
+                piece = piece[: size - taken]
+            self._chunk_offset += len(piece)
+            if self._chunk_offset >= len(self._chunks[self._chunk_idx]):
+                self._chunk_idx += 1
+                self._chunk_offset = 0
+            parts.append(piece)
+            taken += len(piece)
+        return b"".join(parts)
+
+
+class _FakeLoop:
+    """模拟事件循环的 getaddrinfo，返回指定 IP 列表并累计调用次数。"""
+
+    def __init__(self, ips: list[str]) -> None:
+        self._ips = list(ips)
+        self.calls = 0
+
+    async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+        del host, port, proto
+        self.calls += 1
+        return [(None, None, None, None, (ip, 0)) for ip in self._ips]
+
+
+class _GatedFailingLoop:
+    """getaddrinfo 阻塞在 gate 上，放行后抛 OSError 构造延迟的解析失败。
+
+    Attributes:
+        calls: getaddrinfo 调用次数，供等待调度时序的断言，不使用时可忽略。
+        gate: 控制解析完成的放行事件。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.gate = asyncio.Event()
+
+    async def getaddrinfo(self, host, port, proto):  # type: ignore[no-untyped-def]
+        del host, port, proto
+        self.calls += 1
+        await self.gate.wait()
+        raise OSError("dns boom")
 
 
 class _FakeTransport:

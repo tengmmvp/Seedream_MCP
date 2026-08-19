@@ -17,6 +17,9 @@ def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
 
     Args:
         image: 图像输入字符串，调用方应先 strip 首尾空白。
+
+    Returns:
+        输入来源类型："url"、"data_uri"、"local" 三者之一。
     """
     prefix = image[:16].lower()
     if prefix.startswith(("http://", "https://")):

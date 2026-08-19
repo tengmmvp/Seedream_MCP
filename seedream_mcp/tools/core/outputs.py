@@ -15,8 +15,9 @@ from pydantic import BaseModel, ConfigDict
 class _BaseStructuredOutput(BaseModel):
     """结构化输出基类。
 
-    声明所有工具共有字段，extra='allow' 容纳 API 透传的新字段以向前兼容；客户端解析
-    structuredContent 时应对未列出的字段容错。
+    声明所有工具共有字段。顶层字段全部为本侧装配自构，forbid 使声明与实际输出强
+    绑定，多写或拼错顶层键在构造期即暴露；上游透传内容位于 data/usage 等声明为
+    Any 的嵌套字段内，不受顶层封闭约束影响。
 
     Attributes:
         status: 执行状态标签，如 completed、failed 或 empty，未携带时为 None。
@@ -24,7 +25,7 @@ class _BaseStructuredOutput(BaseModel):
             键；无错误时为 None。
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     tool: str
     success: bool
@@ -36,10 +37,18 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     """生成类工具的结构化输出 schema，覆盖文生图、图文生图、多图融合与组图输出。
 
     Attributes:
+        prompt: 生成提示词回显；图文生图的图层拆分场景可为 None。
+        size: 生效的生成尺寸。
+        response_format: 响应格式，url 或 b64_json。
+        output_format: 输出图片格式，未指定时为 None。
+        stream: 是否启用流式输出。
+        tools: 模型工具配置，未指定时为 None。
         layer_decomposition: 是否开启图层拆分，非 False 取值仅出现在图文生图。
         background: 透明通道取值，非 None 取值仅出现在图文生图显式指定时。
         max_images: 组图单次请求的生成数量上限，未显式传入时为按参考图数量推导的
             生效值；非组图工具为 None。
+        request_count: 同一提示并行发起的独立生成次数。
+        parallelism: 并行度上限。
         data: 图片条目列表，条目含 url 或 b64_json 及自动保存回填的本地路径信息；
             图层拆分场景条目另含 z_index、name、description、bounding_box 字段。
         usage: 用量统计字典，键由上游透传；5.0 Pro 另含 input_images 输入图片数。
@@ -74,9 +83,17 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
         directory: 用户请求的目录字符串，未提供时归一为当前目录 "."。
         resolved_directories: 实际解析并扫描的目录列表；边界来自回退配置时为占位符回显。
         workspace_roots: 工作区根回显；边界来自回退配置时为占位符回显。
-        total_count: 匹配图片总数，未扫完全量时为 None。
+        count: 当前页返回的图片条数。
+        total_count: 全量匹配图片总数，未扫完全量时为 None；count 表达当前页条数，
+            total_count 表达全量匹配数，二者分页语义不同。
+        offset: 当前页起始偏移。
+        has_more: 是否仍有未返回的匹配图片。
         next_offset: 下一页起始偏移，无更多图片时为 None。
         images: 当前页图片条目，含 index 与 path，可选 size_mb 与 modified。
+        recursive: 是否递归查找子目录。
+        max_depth: 递归查找的最大深度。
+        limit: 单页返回的最大文件数量。
+        show_details: 图片条目是否包含文件大小与修改时间详情。
         format_filter: 生效的图片扩展名过滤列表，未提供时为 None。
     """
 

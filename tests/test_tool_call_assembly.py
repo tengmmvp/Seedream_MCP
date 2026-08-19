@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -17,8 +18,14 @@ import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools.core.schemas import (
+    BackgroundMode,
     BrowseImagesInput,
+    GenerationTool,
+    GenerationToolType,
+    ImageToImageInput,
+    MultiImageFusionInput,
     OptimizePromptOptions,
+    OutputFormat,
     ResponseFormat,
     SequentialGenerationInput,
     TextToImageInput,
@@ -34,11 +41,12 @@ def _ok_result() -> CallToolResult:
 
 
 @pytest.fixture
-def spy_run_handlers(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def spy_run_handlers(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
     """以间谍替换 server 模块的五个 run_* 处理器，捕获平铺参数组装出的输入模型。
 
     工具函数体内的 run_* 名经模块全局查找，替换后隔离下游流水线；同时注入活动
-    配置，间谍路径不消费但 _config_from_context 解析必须成功。
+    配置并在用例结束后复位为 None，间谍路径不消费但 _config_from_context 解析
+    必须成功。
     """
     captured: dict[str, Any] = {}
 
@@ -65,7 +73,8 @@ def spy_run_handlers(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         monkeypatch.setattr(server, name, _spy_generation)
     monkeypatch.setattr(server, "run_browse_images", _spy_browse)
     server.set_active_config(SeedreamConfig(api_key="test_key"))
-    return captured
+    yield captured
+    server.set_active_config(None)
 
 
 async def test_flat_arguments_assemble_into_input_model(
@@ -91,6 +100,130 @@ async def test_flat_arguments_assemble_into_input_model(
     assert params.auto_save is False
     assert params.watermark is None
     assert "watermark" not in params.model_fields_set
+
+
+async def test_image_to_image_full_flat_arguments_assemble_into_input_model(
+    spy_run_handlers: dict[str, Any],
+) -> None:
+    """图生图全字段平铺参数装配为输入模型，全部显式传入字段登记进 fields_set。"""
+    result = await mcp.call_tool(
+        "image_to_image",
+        {
+            "prompt": "把背景换成雪山",
+            "optimize_prompt_options": {"mode": "fast"},
+            "image": "https://example.com/ref.png",
+            "layer_decomposition": True,
+            "background": "transparent",
+            "size": "2K",
+            "watermark": False,
+            "response_format": "b64_json",
+            "output_format": "png",
+            "stream": True,
+            "tools": [{"type": "web_search"}],
+            "request_count": 1,
+            "parallelism": 1,
+            "auto_save": True,
+            "save_path": "./saved",
+            "custom_name": "portrait",
+        },
+    )
+
+    assert result.is_error is False
+    params = spy_run_handlers["params"]
+    assert isinstance(params, ImageToImageInput)
+    assert params.prompt == "把背景换成雪山"
+    assert params.optimize_prompt_options == OptimizePromptOptions(mode="fast")
+    assert params.image == "https://example.com/ref.png"
+    assert params.layer_decomposition is True
+    assert params.background == BackgroundMode.TRANSPARENT
+    assert params.size == "2K"
+    assert params.watermark is False
+    assert params.response_format is ResponseFormat.B64_JSON
+    assert params.output_format == OutputFormat.PNG
+    assert params.stream is True
+    assert params.tools == [GenerationTool(type=GenerationToolType.WEB_SEARCH)]
+    assert params.request_count == 1
+    assert params.parallelism == 1
+    assert params.auto_save is True
+    assert params.save_path == "./saved"
+    assert params.custom_name == "portrait"
+    assert params.model_fields_set == {
+        "prompt",
+        "optimize_prompt_options",
+        "image",
+        "layer_decomposition",
+        "background",
+        "size",
+        "watermark",
+        "response_format",
+        "output_format",
+        "stream",
+        "tools",
+        "request_count",
+        "parallelism",
+        "auto_save",
+        "save_path",
+        "custom_name",
+    }
+
+
+async def test_multi_image_fusion_full_flat_arguments_assemble_into_input_model(
+    spy_run_handlers: dict[str, Any],
+) -> None:
+    """多图融合全字段平铺参数装配为输入模型，image 列表与嵌套模型均按传入值落位。"""
+    result = await mcp.call_tool(
+        "multi_image_fusion",
+        {
+            "prompt": "将图1的服装换到图2的模特身上",
+            "optimize_prompt_options": {"mode": "standard"},
+            "image": ["https://example.com/a.png", "./.seedream/images/b.jpg"],
+            "size": "2048x2048",
+            "watermark": False,
+            "response_format": "url",
+            "output_format": "jpeg",
+            "stream": False,
+            "tools": [{"type": "web_search"}],
+            "request_count": 2,
+            "parallelism": 2,
+            "auto_save": False,
+            "save_path": "./fusion",
+            "custom_name": "fusion_set",
+        },
+    )
+
+    assert result.is_error is False
+    params = spy_run_handlers["params"]
+    assert isinstance(params, MultiImageFusionInput)
+    assert params.prompt == "将图1的服装换到图2的模特身上"
+    assert params.optimize_prompt_options == OptimizePromptOptions(mode="standard")
+    assert params.image == ["https://example.com/a.png", "./.seedream/images/b.jpg"]
+    assert params.size == "2048x2048"
+    assert params.watermark is False
+    assert params.response_format is ResponseFormat.URL
+    assert params.output_format == OutputFormat.JPEG
+    assert params.stream is False
+    assert params.tools == [GenerationTool(type=GenerationToolType.WEB_SEARCH)]
+    assert params.request_count == 2
+    assert params.parallelism == 2
+    assert params.auto_save is False
+    assert params.save_path == "./fusion"
+    assert params.custom_name == "fusion_set"
+    assert params.model_fields_set == {
+        "prompt",
+        "optimize_prompt_options",
+        "image",
+        "size",
+        "watermark",
+        "response_format",
+        "output_format",
+        "stream",
+        "tools",
+        "request_count",
+        "parallelism",
+        "auto_save",
+        "save_path",
+        "custom_name",
+    }
 
 
 async def test_sequential_max_images_omitted_derives_from_reference_count(

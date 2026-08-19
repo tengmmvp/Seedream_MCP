@@ -15,14 +15,16 @@ import hmac
 import json
 import ssl
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import get_active_config
 from .utils.core.logs import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # ==================== 传输层常量 ====================
 
@@ -51,7 +53,7 @@ _DRAIN_PENDING_TIMEOUT_SECONDS = 5.0
 
 
 async def _send_asgi_json(
-    send: Any,
+    send: Send,
     status: int,
     body: bytes,
     extra_headers: tuple[tuple[bytes, bytes], ...] = (),
@@ -88,11 +90,11 @@ class _BearerTokenAuthMiddleware:
     使用 hmac.compare_digest 做常数时间比较，避免时序侧信道泄露令牌。
     """
 
-    def __init__(self, app: Any, expected_token: str) -> None:
+    def __init__(self, app: ASGIApp, expected_token: str) -> None:
         self.app = app
         self._expected = expected_token.encode("utf-8")
 
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """ASGI 调用入口：非 http 流量按类型处置，http 流量校验令牌后放行或回 401。"""
         scope_type = scope.get("type")
         if scope_type == "lifespan":
@@ -109,7 +111,7 @@ class _BearerTokenAuthMiddleware:
 
         await self._send_unauthorized(send)
 
-    def _request_authorized(self, scope: Any) -> bool:
+    def _request_authorized(self, scope: Scope) -> bool:
         """判定请求是否携带匹配的 Bearer 令牌，非 Bearer 授权方案同样拒绝。"""
         for name, value in scope.get("headers", []):
             if name == b"authorization":
@@ -118,7 +120,7 @@ class _BearerTokenAuthMiddleware:
                 return False
         return False
 
-    async def _send_unauthorized(self, send: Any) -> None:
+    async def _send_unauthorized(self, send: Send) -> None:
         body = json.dumps(
             {"error": "invalid_token", "error_description": "Authentication required"}
         ).encode("utf-8")
@@ -136,16 +138,18 @@ class _BearerTokenAuthMiddleware:
 class _LimitRequestBodyMiddleware:
     """streamable-http 请求体大小限制 ASGI 中间件。
 
-    先按 Content-Length 头早拒超限请求，再包装 receive 累计实际接收字节数，超限
-    短路返回 413，防止谎报或缺失 Content-Length 的超大请求体撑爆内存。仅作用于
-    http 请求，其余流量原样透传。
+    与 SDK 内层 RequestBodyLimitMiddleware 构成有意识的双层纵深：本层位于 Bearer
+    鉴权之外，声明超长 Content-Length 的请求在鉴权前即被 413 早拒，未携带有效令牌
+    的超大请求不再消耗鉴权比较；内层覆盖全部请求方法兜底。本层先按 Content-Length
+    头早拒，再包装 receive 累计实际接收字节数，超限短路返回 413，防止谎报或缺失
+    Content-Length 的超大请求体撑爆内存。仅作用于 http 请求，其余流量原样透传。
     """
 
-    def __init__(self, app: Any, max_body_size: int) -> None:
+    def __init__(self, app: ASGIApp, max_body_size: int) -> None:
         self.app = app
         self._max_body_size = max_body_size
 
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """ASGI 调用入口：包装 receive 与 send 实施字节上限，超限短路返回 413。"""
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
@@ -166,9 +170,9 @@ class _LimitRequestBodyMiddleware:
 
         total_received = 0
         too_large = False
-        response_started = False
+        forwarded = False
 
-        async def receive_wrapper() -> Any:
+        async def receive_wrapper() -> Message:
             nonlocal total_received, too_large
             # 已判定超限后直接返回空终帧，切断剩余 body 投递。
             if too_large:
@@ -181,21 +185,22 @@ class _LimitRequestBodyMiddleware:
                     return {"type": "http.request", "body": b"", "more_body": False}
             return message
 
-        async def send_wrapper(message: Any) -> None:
-            nonlocal response_started
-            # 下游发出首个响应头即视为响应已开始，此后补发 413 会构成双响应。
-            if message.get("type") == "http.response.start":
-                response_started = True
+        async def send_wrapper(message: Message) -> None:
+            nonlocal forwarded
             # 一旦判定超限，吞掉下游响应，由本中间件统一回 413 避免双响应。
             if too_large:
                 return
+            # 置位须在真实转发之前：send 中途抛异常时协议状态不明，宁可视为已
+            # 转发也不冒双响应风险。
+            forwarded = True
             await send(message)
 
         async def _finalize_too_large() -> None:
-            # 防御性不可达路径：下游已开始响应时补发 413 会违反 ASGI 单响应约定，
-            # 仅记日志。
-            if response_started:
-                logger.warning("请求体超限但下游已开始响应，跳过补发 413 以避免双响应")
+            # 无/谎报 Content-Length 的流式超限主路径上，下游输出已全被吞掉、
+            # 从未触达真实客户端，补发 413 是客户端收到的唯一响应；仅当下游
+            # 输出已真实转发过传输层时补发才违反 ASGI 单响应约定，此时仅记日志。
+            if forwarded:
+                logger.warning("请求体超限但下游响应已转发，跳过补发 413 以避免双响应")
                 return
             await self._send_too_large(send)
 
@@ -216,7 +221,7 @@ class _LimitRequestBodyMiddleware:
             except Exception:
                 logger.debug("请求体超限后补发 413 失败，连接可能已关闭")
 
-    async def _send_too_large(self, send: Any) -> None:
+    async def _send_too_large(self, send: Send) -> None:
         body = json.dumps(
             {"error": "request_too_large", "error_description": "Request body exceeds limit"}
         ).encode("utf-8")
@@ -230,10 +235,10 @@ class _HealthCheckMiddleware:
     rebinding 请求连探活也被拒。仅做 liveness 判定，不探测上游 API。
     """
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
             scope.get("type") == "http"
             and scope.get("method") == "GET"
@@ -258,15 +263,16 @@ class _LoopbackHostGuardMiddleware:
     # 裸 "::1"：Host 头中 IPv6 字面量必须带方括号，裸形态属畸形。
     _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]"})
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope.get("type")
         if scope_type in ("http", "websocket"):
             host = self._host_header(scope)
-            # Host 头的主机名大小写不敏感，比较前统一小写，避免大写回环 Host 被误拒。
-            if host is None or self._strip_port(host).lower() not in self._ALLOWED_HOSTS:
+            # 与 SDK 内层 Host 校验同为大小写敏感精确比较：本层拒绝的大写回环
+            # Host 在内层同样不匹配白名单，大写形态由此 403 拒绝。
+            if host is None or self._strip_port(host) not in self._ALLOWED_HOSTS:
                 if scope_type == "websocket":
                     # websocket 无 HTTP 状态码可回，按鉴权中间件模式以 1008 关闭。
                     await send({"type": "websocket.close", "code": 1008})
@@ -276,7 +282,7 @@ class _LoopbackHostGuardMiddleware:
         await self.app(scope, receive, send)
 
     @staticmethod
-    def _host_header(scope: Any) -> bytes | None:
+    def _host_header(scope: Scope) -> bytes | None:
         for name, value in scope.get("headers", []):
             if name == b"host":
                 return value  # type: ignore[no-any-return]
@@ -291,7 +297,7 @@ class _LoopbackHostGuardMiddleware:
         idx = host.rfind(b":")
         return host if idx == -1 else host[:idx]
 
-    async def _send_forbidden(self, send: Any) -> None:
+    async def _send_forbidden(self, send: Send) -> None:
         body = json.dumps(
             {"error": "invalid_host", "error_description": "Host not allowed"}
         ).encode("utf-8")
@@ -317,8 +323,13 @@ def _middleware_attached(app: Any) -> bool:
     return False
 
 
-def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> None:
+def _attach_streamable_http_middleware(
+    app: Any, host: str, auth_token: str, max_body_size: int | None = None
+) -> None:
     """向 streamable-http app 装配中间件栈，重复装配时跳过以保证幂等。
+
+    max_body_size 未显式传入时回退读取活动配置；生产调用方已取过该配置时显式
+    传入，避免同一配置重复解析。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
     LoopbackHostGuard（仅回环绑定）-> HealthCheck -> LimitRequestBody -> Bearer
@@ -331,9 +342,9 @@ def _attach_streamable_http_middleware(app: Any, host: str, auth_token: str) -> 
     if auth_token:
         app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
-    app.add_middleware(
-        _LimitRequestBodyMiddleware, max_body_size=get_active_config().http_max_body_size
-    )
+    if max_body_size is None:
+        max_body_size = get_active_config().http_max_body_size
+    app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=max_body_size)
     # 健康检查在鉴权之外短路 GET /health，探针免令牌。
     app.add_middleware(_HealthCheckMiddleware)
     # 回环绑定时最外层启用 Host 校验，先于健康检查拒掉 rebinding 请求。
@@ -365,6 +376,9 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     回环与 localhost 绑定启用防护并按回环白名单放行；非回环绑定默认整体关闭，
     活动配置了 SEEDREAM_HTTP_ALLOWED_HOSTS 时改为启用并按该列表放行，条目支持
     host、host:port 与尾部 :* 端口通配，Host 不在列表的请求由 SDK 以 421 拒绝。
+    该路径不设置 allowed_origins，携带 Origin 头的浏览器客户端会被 SDK 以 403
+    拒绝；本传输面向非浏览器 MCP 客户端，需浏览器接入应经反向代理剥离 Origin
+    头或另行评估。
     """
     if host in _DNS_REBINDING_PROTECTED_HOSTS:
         return TransportSecuritySettings(
@@ -452,11 +466,13 @@ def _run_streamable_http(
     from .resources import _cleanup_shared_resources, mcp
 
     transport_security = _transport_security_for_host(host)
+    # 请求体上限取一次配置，同时供 SDK 内层与本项目中间件两层消费。
+    max_body_size = get_active_config().http_max_body_size
     app = mcp.streamable_http_app(
         host=host,
         stateless_http=stateless,
         transport_security=transport_security,
-        max_request_body_size=get_active_config().http_max_body_size,
+        max_request_body_size=max_body_size,
     )
     if host not in _DNS_REBINDING_PROTECTED_HOSTS:
         if transport_security.enable_dns_rebinding_protection:
@@ -469,7 +485,7 @@ def _run_streamable_http(
                 "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
                 host,
             )
-    _attach_streamable_http_middleware(app, host, auth_token)
+    _attach_streamable_http_middleware(app, host, auth_token, max_body_size=max_body_size)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:
         ssl_kwargs["ssl_certfile"] = ssl_certfile
@@ -496,16 +512,18 @@ def _run_streamable_http(
     try:
         loop.run_until_complete(server.serve())
     finally:
-        # 两段清理各自拦 BaseException：二次 Ctrl+C 与清理被取消均不得跳过其后的
-        # loop.close 与循环复位，吞掉后按既定顺序退出。
-        try:
-            loop.run_until_complete(_drain_pending_tasks())
-        except BaseException as exc:
-            logger.warning("streamable-http 残余任务回收失败: {}", exc)
+        # 先清理共享资源再回收残余任务：资源清理内部会等待后台清理任务收尾，
+        # 先行取消会使被等待的任务已取消、等待形同虚设。两段清理各自拦
+        # BaseException：二次 Ctrl+C 与清理被取消均不得跳过其后的 loop.close
+        # 与循环复位，吞掉后按既定顺序退出。
         try:
             loop.run_until_complete(_cleanup_shared_resources())
         except BaseException as exc:
             logger.warning("streamable-http 退出清理失败: {}", exc)
+        try:
+            loop.run_until_complete(_drain_pending_tasks())
+        except BaseException as exc:
+            logger.warning("streamable-http 残余任务回收失败: {}", exc)
         loop.close()
         # 复位线程事件循环引用：残留已关闭的循环会使后续 get_event_loop 取到不可用对象。
         asyncio.set_event_loop(None)

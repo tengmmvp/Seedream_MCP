@@ -387,13 +387,9 @@ async def test_call_api_no_status_code_not_retried(
         del request
         return httpx.Response(200, content=b"not-json", headers={"content-type": "text/plain"})
 
-    transport = httpx.MockTransport(_handler)
-
     async with SeedreamClient(config) as client:
         # 用 MockTransport 替换内部 httpx 客户端，驱动真实 _send_standard_request
-        assert client._client is not None
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(transport=transport)
+        await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="JSON 解析失败") as exc_info:
             await client._call_api("text_to_image", {"prompt": "p"})
@@ -421,9 +417,7 @@ async def test_standard_request_rejects_oversized_content_length(
         )
 
     async with SeedreamClient(config) as client:
-        assert client._client is not None
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
             await client._call_api("text_to_image", {"prompt": "p"})
@@ -454,9 +448,7 @@ async def test_standard_request_rejects_chunked_body_over_limit(
         return httpx.Response(200, content=_stream())
 
     async with SeedreamClient(config) as client:
-        assert client._client is not None
-        await client._client.aclose()
-        client._client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
             await client._call_api("text_to_image", {"prompt": "p"})

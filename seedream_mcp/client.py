@@ -10,6 +10,7 @@ import hashlib
 import json
 import random
 import time
+import types
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Iterator, Sequence, cast
@@ -20,6 +21,7 @@ from .config import SeedreamConfig, get_active_config
 from .utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
+    SeedreamMCPError,
     SeedreamNetworkError,
     SeedreamTimeoutError,
     SeedreamValidationError,
@@ -28,7 +30,7 @@ from .utils.core.errors import (
     parse_retry_after,
 )
 from .utils.core.logs import get_logger
-from .utils.model.model_capabilities import get_max_reference_images, get_model_capabilities
+from .utils.model.model_capabilities import get_max_reference_images
 from .utils.core.validators import (
     ValidatedCommonParams,
     resolve_sequential_max_images,
@@ -36,6 +38,7 @@ from .utils.core.validators import (
     validate_common_generation_params,
     validate_layer_decomposition,
     validate_max_images,
+    validate_sequential_generation_support,
     validate_sequential_image_limit,
 )
 from .utils.io.io_sse import is_sse_response, parse_sse_response
@@ -50,6 +53,13 @@ _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 
 # SSE 事件信封余量
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
+
+# base64 最坏膨胀系数：n 字节数据经编码最长为 4*ceil(n/3) 字符，SSE 事件截断阈值
+# 由 4*ceil(n/3)+信封余量推导
+_B64_WORST_CASE_NUMERATOR = 4
+
+# 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象
+_ERROR_JSON_PARSE_LIMIT = 64 * 1024
 
 # 响应体 join 卸载阈值
 _JOIN_OFFLOAD_THRESHOLD = 8 * 1024 * 1024
@@ -188,7 +198,7 @@ class SeedreamClient:
             config: 配置对象，若为 None 则使用全局默认配置。
         """
         self.config = config or get_active_config()
-        self.logger = get_logger(__name__)
+        self.logger = get_logger()
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._timeout: httpx.Timeout | None = None
@@ -204,7 +214,12 @@ class SeedreamClient:
         await self._ensure_client()
         return self
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
+    ) -> None:
         """退出异步上下文，关闭客户端连接并释放资源。"""
         await self.close()
 
@@ -278,6 +293,9 @@ class SeedreamClient:
         Raises:
             SeedreamAPIError: API 调用失败。
             SeedreamValidationError: 参数验证失败。
+            SeedreamTimeoutError: API 调用超时且重试次数耗尽。
+            SeedreamNetworkError: 网络错误且重试次数耗尽。
+            SeedreamConfigError: API 密钥为空。
         """
         (
             validated_prompt,
@@ -369,6 +387,9 @@ class SeedreamClient:
         Raises:
             SeedreamAPIError: API 调用失败或图像处理失败。
             SeedreamValidationError: 参数验证失败。
+            SeedreamTimeoutError: API 调用超时且重试次数耗尽。
+            SeedreamNetworkError: 网络错误且重试次数耗尽。
+            SeedreamConfigError: API 密钥为空或图像预处理配置缺失。
         """
         image = self._normalize_single_image(image)
         resolved_layer_decomposition = validate_layer_decomposition(
@@ -466,6 +487,9 @@ class SeedreamClient:
         Raises:
             SeedreamAPIError: API 调用失败或图像处理失败。
             SeedreamValidationError: 参数验证失败。
+            SeedreamTimeoutError: API 调用超时且重试次数耗尽。
+            SeedreamNetworkError: 网络错误且重试次数耗尽。
+            SeedreamConfigError: API 密钥为空或图像预处理配置缺失。
         """
         max_reference = get_max_reference_images(self.config.model_id)
         image = self._normalize_image_sequence(
@@ -561,14 +585,11 @@ class SeedreamClient:
         Raises:
             SeedreamAPIError: API 调用失败或图像处理失败。
             SeedreamValidationError: 参数验证失败。
+            SeedreamTimeoutError: API 调用超时且重试次数耗尽。
+            SeedreamNetworkError: 网络错误且重试次数耗尽。
+            SeedreamConfigError: API 密钥为空或图像预处理配置缺失。
         """
-        model_caps = get_model_capabilities(self.config.model_id)
-        if not model_caps.supports_sequential_generation:
-            raise SeedreamValidationError(
-                f"{model_caps.display_name} 不支持组图生成，请切换为支持组图的模型",
-                field="model",
-                value=self.config.model_id,
-            )
+        validate_sequential_generation_support(self.config.model_id)
 
         (
             validated_prompt,
@@ -802,7 +823,6 @@ class SeedreamClient:
                         raise
                     except Exception as e:
                         self.logger.error("HTTP 客户端创建失败: {}", e)
-                        self._client = None
                         raise SeedreamAPIError(f"HTTP 客户端初始化失败: {str(e)}") from e
 
     def _get_headers(self) -> dict[str, str]:
@@ -966,9 +986,10 @@ class SeedreamClient:
 
         success 仅代表 HTTP 层成功，即已收到 200 响应；body 级的部分失败或空数据
         由 status 与 data 共同表达，status 取值为 completed/partial/failed，
-        调用方应同时检查 status 而非仅依赖 success。顶层 error 为非空 dict 且 data
-        无有效图片时属请求级软失败：success 置 False 并透传 error 键，调用方据此
-        取回上游错误码与原因，不再被吞为成功零图。
+        调用方应同时检查 status 而非仅依赖 success。顶层 error 为非空 dict 时始终
+        透传 error 键：data 无有效图片属请求级软失败，success 置 False、status 置
+        failed，不再被吞为成功零图；data 含有效图片则维持 success=True 并保留
+        error 键，供调用方诊断上游部分错误。
         """
         data = payload.get("data")
         if isinstance(data, list):
@@ -1005,8 +1026,9 @@ class SeedreamClient:
             )
             usage = {}
 
-        top_error = payload.get("error")
-        if isinstance(top_error, dict) and top_error and not _has_valid_image_items(data):
+        raw_top_error = payload.get("error")
+        top_error = raw_top_error if isinstance(raw_top_error, dict) and raw_top_error else None
+        if top_error is not None and not _has_valid_image_items(data):
             self.logger.warning(
                 "200 响应携带顶层 error 且无有效图片，标记为请求级失败: code={}",
                 top_error.get("code"),
@@ -1019,13 +1041,16 @@ class SeedreamClient:
                 "error": top_error,
                 "tools": payload.get("tools"),
             }
-        return {
+        result: dict[str, Any] = {
             "success": True,
             "data": data or [],
             "usage": usage,
             "status": status,
             "tools": payload.get("tools"),
         }
+        if top_error is not None:
+            result["error"] = top_error
+        return result
 
     @staticmethod
     def _retry_after_or_none(status_code: int, headers: Any) -> float | None:
@@ -1131,12 +1156,16 @@ class SeedreamClient:
     async def _error_data_from_body(raw_body: bytes) -> dict[str, Any]:
         """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。
 
-        解码文本经 handle_api_error 截断后才进入异常 message。
+        响应体超过 _ERROR_JSON_PARSE_LIMIT 时不做完整 dict 解析，直接降级为
+        message 形态，避免大字典长期驻留异常对象；解码文本经 handle_api_error
+        截断后才进入异常 message。
         """
-        try:
-            parsed: Any = await asyncio.to_thread(json.loads, raw_body)
-        except Exception:
-            parsed = None
+        parsed: Any = None
+        if len(raw_body) <= _ERROR_JSON_PARSE_LIMIT:
+            try:
+                parsed = await asyncio.to_thread(json.loads, raw_body)
+            except Exception:
+                parsed = None
         if isinstance(parsed, dict):
             return parsed
 
@@ -1148,7 +1177,7 @@ class SeedreamClient:
     async def _raise_for_stream_response_status(
         self, response: httpx.Response, *, deadline: float | None = None
     ) -> None:
-        """将流式响应中的非 200 状态码转换为统一 API 异常。"""
+        """将非 200 状态码转换为统一 API 异常，流式与非流式发送路径共用。"""
         if response.status_code == 200:
             return
 
@@ -1160,6 +1189,21 @@ class SeedreamClient:
         )
         error_data = await self._error_data_from_body(raw_body)
         self._raise_api_error_for(response.status_code, response.headers, error_data)
+
+    async def _parse_json_success_response(
+        self, response: httpx.Response, *, deadline: float | None
+    ) -> dict[str, Any]:
+        """读取 200 响应体并解析 JSON，归一化为统一结果结构。
+
+        读体超限与超时异常原样上抛；JSON 解析失败包装为无状态码的
+        SeedreamAPIError，按不可重试处置。
+        """
+        raw_body = await self._read_response_body_capped(response, deadline=deadline)
+        try:
+            payload = await asyncio.to_thread(json.loads, raw_body)
+        except Exception as exc:
+            raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
+        return self._build_api_result(self._require_dict_payload(payload))
 
     async def _send_stream_request(
         self,
@@ -1190,7 +1234,7 @@ class SeedreamClient:
                     buffer_max_size=self.config.stream_buffer_max_size,
                     event_truncate_threshold=max(
                         self.config.stream_buffer_max_size,
-                        4 * ((self.config.auto_save_max_file_size + 2) // 3)
+                        _B64_WORST_CASE_NUMERATOR * ((self.config.auto_save_max_file_size + 2) // 3)
                         + _SSE_EVENT_ENVELOPE_MARGIN,
                     ),
                     total_bytes_limit=self._response_body_byte_limit(),
@@ -1202,14 +1246,7 @@ class SeedreamClient:
                     sse_result["truncated_events"] = truncated_events
                 return sse_result
 
-            try:
-                raw_body = await self._read_response_body_capped(response, deadline=deadline)
-                payload = await asyncio.to_thread(json.loads, raw_body)
-            except (SeedreamAPIError, asyncio.TimeoutError):
-                raise
-            except Exception as exc:
-                raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
-            return self._build_api_result(self._require_dict_payload(payload))
+            return await self._parse_json_success_response(response, deadline=deadline)
 
     async def _send_standard_request(
         self,
@@ -1230,22 +1267,8 @@ class SeedreamClient:
         response = await client.send(request, stream=True)
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
-            if response.status_code != 200:
-                raw_body = await self._read_response_body_capped(
-                    response,
-                    max_bytes=self._error_body_byte_limit(),
-                    status_code=response.status_code,
-                    deadline=deadline,
-                )
-                error_data = await self._error_data_from_body(raw_body)
-                self._raise_api_error_for(response.status_code, response.headers, error_data)
-
-            raw_body = await self._read_response_body_capped(response, deadline=deadline)
-            try:
-                payload = await asyncio.to_thread(json.loads, raw_body)
-            except Exception as exc:
-                raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
-            return self._build_api_result(self._require_dict_payload(payload))
+            await self._raise_for_stream_response_status(response, deadline=deadline)
+            return await self._parse_json_success_response(response, deadline=deadline)
         finally:
             await response.aclose()
 
@@ -1381,20 +1404,11 @@ class SeedreamClient:
         return await self._image_preparer.prepare_images_in_parallel(images)
 
     def _normalize_api_error(self, error: Exception) -> Exception:
-        """归一化 API 错误：已是 Seedream 错误的异常原样返回，其余包装为 SeedreamAPIError。
+        """归一化 API 错误：Seedream 错误体系内的异常原样返回，其余包装为 SeedreamAPIError。
 
         仅兜底包装 _call_api 之外的异常，按状态码装配异常由 handle_api_error 承担。
         """
-        if isinstance(
-            error,
-            (
-                SeedreamAPIError,
-                SeedreamConfigError,
-                SeedreamValidationError,
-                SeedreamTimeoutError,
-                SeedreamNetworkError,
-            ),
-        ):
+        if isinstance(error, SeedreamMCPError):
             return error
 
         wrapped = SeedreamAPIError(f"API 调用失败: {error}")

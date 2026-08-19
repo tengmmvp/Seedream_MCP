@@ -22,7 +22,7 @@ from ..core.logs import get_logger
 if TYPE_CHECKING:
     from PIL import Image
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # 预览缩略图规格：典型取值下单张约几十 KB，十张量级的结果总载荷保持 MB 级以内。
 THUMBNAIL_MAX_EDGE = 768
@@ -36,16 +36,31 @@ PREVIEW_MAX_IMAGES = 10
 # 预览解码并发上限：4K 单张解码为 RGB 约占 50MB 内存，全量并发时瞬态可达 GB 级。
 PREVIEW_DECODE_CONCURRENCY = 3
 
+# 进程级解码限流信号量：并发上限约束覆盖全部调用而非单次调用；信号量绑定首次
+# 使用时的事件循环，跨循环按需重建。
+_decode_semaphore: asyncio.Semaphore | None = None
+_decode_semaphore_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_decode_semaphore() -> asyncio.Semaphore:
+    """返回绑定当前事件循环的进程级解码限流信号量，事件循环更替时重建。"""
+    global _decode_semaphore, _decode_semaphore_loop
+    loop = asyncio.get_running_loop()
+    if _decode_semaphore is None or _decode_semaphore_loop is not loop:
+        _decode_semaphore = asyncio.Semaphore(PREVIEW_DECODE_CONCURRENCY)
+        _decode_semaphore_loop = loop
+    return _decode_semaphore
+
 
 def _flatten_to_rgb(image: Image.Image) -> Image.Image:
     """把任意模式的图片归一为不带透明通道的 RGB。
 
-    JPEG 不支持透明通道：RGBA、LA 与带 transparency 的调色板模式合成白色背景，
+    JPEG 不支持透明通道：带透明波段或带 transparency 元信息的模式合成白色背景，
     其余模式直接转换，透明区域在预览中呈白底而非丢失通道后发黑。
     """
     from PIL import Image
 
-    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+    if "A" in image.getbands() or "transparency" in image.info:
         rgba = image.convert("RGBA")
         background = Image.new("RGB", rgba.size, (255, 255, 255))
         background.paste(rgba, mask=rgba.getchannel("A"))
@@ -69,16 +84,18 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
         JPEG 缩略图字节；无法生成时为 None。
     """
     # PIL 惰性导入，首载含解码器注册，落点在工作线程而非事件循环。
-    from PIL import Image
+    from PIL import Image, ImageOps
 
-    from .image_validation import _ensure_heif_opener_registered
+    from .image_validation import ensure_image_decoders_ready
 
     # 幂等注册 HEIF 解码器并无条件设置 36M 解码像素上限。
-    _ensure_heif_opener_registered()
+    ensure_image_decoders_ready()
 
     try:
         with Image.open(image_path) as image:
-            flattened = _flatten_to_rgb(image)
+            # EXIF 方向在 flatten 前归一，透明合成与缩放基于物理方向。
+            oriented = ImageOps.exif_transpose(image)
+            flattened = _flatten_to_rgb(oriented)
             flattened.thumbnail(
                 (THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE),
                 Image.Resampling.LANCZOS,
@@ -86,8 +103,8 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
             buffer = BytesIO()
             flattened.save(buffer, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY)
             return buffer.getvalue()
-    except Exception:
-        logger.warning("缩略图生成失败，跳过该张预览: {}", image_path.name)
+    except Exception as e:
+        logger.warning("缩略图生成失败，跳过该张预览: {} -> {}", image_path.name, e)
         return None
 
 
@@ -106,7 +123,7 @@ async def build_preview_contents(image_paths: list[Path]) -> list[ImageContent]:
     """
     if not image_paths:
         return []
-    semaphore = asyncio.Semaphore(PREVIEW_DECODE_CONCURRENCY)
+    semaphore = _get_decode_semaphore()
 
     async def _decode_with_limit(path: Path) -> bytes | None:
         async with semaphore:

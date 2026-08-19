@@ -19,6 +19,7 @@ from seedream_mcp.utils.core.errors import (
 )
 from seedream_mcp.utils.images import image_input as image_input_module
 from seedream_mcp.utils.images.image_input import prepare_image_input
+from seedream_mcp.utils.images.image_validation import validate_image_path
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
@@ -388,3 +389,23 @@ def test_validate_image_input_keeps_home_prefix_literal(workspace_root: Path) ->
     resolved = _resolve_local_image_path("~/x.png")
 
     assert "~" in str(resolved)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "  https://example.com/x.png",
+        "http://example.com/x.png\t",
+        "\ndata:image/png;base64,iVBORw0KGgo=",
+        "data:image/png;base64,iVBORw0KGgo= ",
+    ],
+)
+def test_validate_image_path_strips_surrounding_whitespace(reference: str) -> None:
+    """带首尾空白的 URL 与 Data URI 先 strip 再分类，不再误入本地路径分支。
+
+    与 validate_image_input 的入参口径对齐；此前前导空白使分类落入 local 分支，
+    非本地引用被拼接为畸形文件名误报路径错误。
+    """
+    is_valid, error, normalized = validate_image_path(reference, base_dir="/nonexistent")
+
+    assert (is_valid, error, normalized) == (True, "", None)

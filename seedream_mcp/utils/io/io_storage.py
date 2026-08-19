@@ -24,13 +24,13 @@ from ..core.formats import (
 )
 from ..core.logs import get_logger
 from .io_file import (
-    _has_reparse_attribute,
     atomic_replace_from_fd_sync,
+    has_reparse_attribute,
 )
 from .io_path import is_within_resolved
 from .io_url import get_file_extension_from_url
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 # 文件名长度上限，避免超出常见文件系统目录项长度限制。
 _MAX_FILENAME_LENGTH = 200
@@ -335,12 +335,7 @@ class FileManager:
 
         filename = self.generate_unique_filename(base_name, extension)
 
-        save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
-
-        if not self.validate_path(save_path):
-            raise FileManagerError(f"路径不安全: {save_path}")
-
-        return save_path
+        return self._finalize_save_path(filename, tool_name, date_folder)
 
     def create_save_path_from_extension(
         self,
@@ -373,6 +368,19 @@ class FileManager:
             extension = DEFAULT_IMAGE_EXTENSION
         base_name = custom_name or self.generate_name_from_prompt(prompt)
         filename = self.generate_unique_filename(base_name, extension, content_hash=content_hash)
+        return self._finalize_save_path(filename, tool_name, date_folder)
+
+    def _finalize_save_path(self, filename: str, tool_name: str, date_folder: bool) -> Path:
+        """按日期与工具子目录组织保存路径并校验越界，返回最终保存路径。
+
+        Args:
+            filename: 已含扩展名的唯一文件名。
+            tool_name: 工具名称，用作保存子目录。
+            date_folder: 是否按日期创建一级子目录。
+
+        Raises:
+            FileManagerError: 生成的保存路径越出基础目录。
+        """
         save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
         if not self.validate_path(save_path):
             raise FileManagerError(f"路径不安全: {save_path}")
@@ -611,15 +619,17 @@ class FileManager:
     def _collect_all_files(
         self, errors: list[str]
     ) -> tuple[list[tuple[Path, int, float]], list[tuple[Path, int, float]], list[Path]]:
-        """遍历基础目录，收集图片文件、.part 遗留候选与待评估的空目录候选。
+        """递归遍历基础目录，收集图片文件、.part 遗留候选与待评估的空目录候选。
 
-        os.walk(followlinks=False) 不下降符号链接目录，但 NTFS junction 属 reparse
-        point 且 is_symlink 返回 False，仍会被下降进目标使 root 解析到 base_dir 之外。
-        每层经 _resolved_within_base 复核 root 真实位置、下降前剔除符号链接、reparse
-        与越界目录，防止经 junction 误删 base_dir 之外的条目；os.walk 已下降 junction
-        的 OS 级 listdir 无法拦截，涉及 SMB 出站认证风险，部署方应确保 base_dir 不接受
-        不可信写入。一次扫描产出全部 (path, size, mtime) 供三项清理共用；.part 候选
-        按条目名后缀收集，不依赖图片扩展名过滤。
+        以 os.scandir 递归下降，目录与文件条目各经一次 ``entry.stat(follow_symlinks=
+        False)`` 同时取得符号链接与 reparse 判定、常规文件校验及 size/mtime，替代
+        lstat 后再 stat 跟随的双系统调用。NTFS junction 属 reparse point 且 is_symlink
+        返回 False，is_dir(follow_symlinks=False) 对其仍返回 True，下降前剔除 reparse
+        并经 resolve 复核真实位置在 base_dir 之内，防止经 junction 误删 base_dir 之外
+        的条目；scandir 已下降 junction 的 OS 级 listdir 无法拦截，涉及 SMB 出站认证
+        风险，部署方应确保 base_dir 不接受不可信写入。一次扫描产出全部
+        (path, size, mtime) 供三项清理共用；.part 候选按条目名后缀收集，不依赖图片
+        扩展名过滤。
 
         Args:
             errors: 收集 stat 失败的错误描述列表，与删除阶段共享同一列表。
@@ -632,84 +642,79 @@ class FileManager:
         all_files: list[tuple[Path, int, float]] = []
         part_files: list[tuple[Path, int, float]] = []
         directories: list[Path] = []
-        for root, dirs, files in os.walk(self.base_dir, followlinks=False):
-            root_path = Path(root)
-            # root 仍可能因 junction 被下降到 base_dir 之外，resolve 复核真实位置。
+
+        def _scan_directory(directory: Path) -> None:
             try:
-                root_resolved = root_path.resolve()
-            except Exception as e:
-                logger.warning("路径验证失败: {} -> {}", root_path, e)
-                dirs[:] = []
-                continue
-            if not self._resolved_within_base(root_resolved):
-                # 清空 dirs 阻止继续下降越界子目录，避免越界遍历与 SMB 出站认证暴露。
-                logger.warning("路径不在基础目录内: {}", root_resolved)
-                dirs[:] = []
-                continue
-            # os.walk 不拦截 junction，在此剔除并原地改写 dirs 阻止下降。
-            pruned_dirs: list[str] = []
-            for name in dirs:
-                dir_path = root_path / name
-                # 单次 lstat 同时判定符号链接与 reparse 属性，免掉重复 stat；条目
-                # 消失属正常轮替，跳过不下降。
-                try:
-                    dir_lstat = dir_path.lstat()
-                except OSError as e:
-                    logger.warning("获取目录信息失败: {} -> {}", dir_path, e)
+                with os.scandir(directory) as iterator:
+                    entries = list(iterator)
+            except OSError as e:
+                # 目录不可读仅记录警告：计入 errors 会使清理持续判失败而反复退避重试。
+                logger.warning("扫描目录失败: {} -> {}", directory, e)
+                return
+            for entry in entries:
+                entry_path = Path(entry.path)
+                if entry.is_dir(follow_symlinks=False):
+                    # 单次 no-follow stat 同时判定符号链接与 reparse 属性；条目
+                    # 消失属正常轮替，跳过不下降。
+                    try:
+                        dir_stat = entry.stat(follow_symlinks=False)
+                    except OSError as e:
+                        logger.warning("获取目录信息失败: {} -> {}", entry_path, e)
+                        continue
+                    if stat.S_ISLNK(dir_stat.st_mode):
+                        continue
+                    if has_reparse_attribute(dir_stat):
+                        logger.warning("跳过 reparse point 目录: {}", entry_path)
+                        continue
+                    try:
+                        dir_resolved = entry_path.resolve()
+                    except Exception as e:
+                        logger.warning("路径验证失败: {} -> {}", entry_path, e)
+                        continue
+                    if not self._resolved_within_base(dir_resolved):
+                        logger.warning("路径不在基础目录内: {}", dir_resolved)
+                        continue
+                    directories.append(entry_path)
+                    _scan_directory(entry_path)
                     continue
-                if stat.S_ISLNK(dir_lstat.st_mode):
-                    continue
-                if _has_reparse_attribute(dir_lstat):
-                    logger.warning("跳过 reparse point 目录: {}", dir_path)
-                    continue
-                try:
-                    dir_resolved = dir_path.resolve()
-                except Exception as e:
-                    logger.warning("路径验证失败: {} -> {}", dir_path, e)
-                    continue
-                if not self._resolved_within_base(dir_resolved):
-                    logger.warning("路径不在基础目录内: {}", dir_resolved)
-                    continue
-                directories.append(dir_path)
-                pruned_dirs.append(name)
-            dirs[:] = pruned_dirs
-            for name in files:
-                file_path = root_path / name
                 # 仅收集受支持图片与 .part 临时文件，跳过其他类型避免误删用户数据。
-                is_image = file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
-                if not is_image and not name.endswith(".part"):
+                is_image = entry_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+                if not is_image and not entry.name.endswith(".part"):
                     continue
-                # 单次 lstat 同时判定符号链接与 reparse 属性，避免每文件三次 stat。
                 try:
-                    lstat_result = file_path.lstat()
+                    entry_stat = entry.stat(follow_symlinks=False)
                 except OSError as e:
                     if not is_image:
                         # .part 条目被原子重命名消失属正常轮替，不计错误以免回滚节流。
                         continue
-                    errors.append(f"获取文件信息失败 {file_path}: {e}")
-                    logger.warning("获取文件信息失败: {} -> {}", file_path, e)
+                    errors.append(f"获取文件信息失败 {entry_path}: {e}")
+                    logger.warning("获取文件信息失败: {} -> {}", entry_path, e)
                     continue
-                # 符号链接目标可能在 base_dir 之外，reparse 文件会被 stat 跟随，命中跳过。
-                if stat.S_ISLNK(lstat_result.st_mode):
+                # 符号链接与 reparse 文件目标可能在 base_dir 之外，no-follow stat 不
+                # 跟随，命中即跳过；FIFO、套接字等非常规文件同样不纳入清理。
+                if stat.S_ISLNK(entry_stat.st_mode):
                     continue
-                if _has_reparse_attribute(lstat_result):
-                    logger.warning("跳过 reparse point 文件: {}", file_path)
+                if has_reparse_attribute(entry_stat):
+                    logger.warning("跳过 reparse point 文件: {}", entry_path)
                     continue
-                try:
-                    stat_result = file_path.stat()
-                    if not stat.S_ISREG(stat_result.st_mode):
-                        continue
-                    entry = (file_path, stat_result.st_size, stat_result.st_mtime)
-                    if is_image:
-                        all_files.append(entry)
-                    else:
-                        part_files.append(entry)
-                except OSError as e:
-                    if not is_image:
-                        # 与 lstat 分支同因，不计错误。
-                        continue
-                    errors.append(f"获取文件信息失败 {file_path}: {e}")
-                    logger.warning("获取文件信息失败: {} -> {}", file_path, e)
+                if not stat.S_ISREG(entry_stat.st_mode):
+                    continue
+                collected = (entry_path, entry_stat.st_size, entry_stat.st_mtime)
+                if is_image:
+                    all_files.append(collected)
+                else:
+                    part_files.append(collected)
+
+        # 扫描根复核真实位置后下降，防止 base_dir 自身被替换为指向外部的符号链接。
+        try:
+            root_resolved = self.base_dir.resolve()
+        except Exception as e:
+            logger.warning("路径验证失败: {} -> {}", self.base_dir, e)
+            return all_files, part_files, directories
+        if not self._resolved_within_base(root_resolved):
+            logger.warning("路径不在基础目录内: {}", root_resolved)
+            return all_files, part_files, directories
+        _scan_directory(self.base_dir)
         return all_files, part_files, directories
 
     @staticmethod

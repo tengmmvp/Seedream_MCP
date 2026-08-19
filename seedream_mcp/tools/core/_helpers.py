@@ -24,7 +24,7 @@ from ...utils.io.io_path import is_within_resolved, get_workspace_root, normaliz
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 # 进度里程碑常量
@@ -233,7 +233,7 @@ def prevalidate_save_path(config: SeedreamConfig, save_path: str | None) -> None
     _validate_save_path_bounds(_resolve_default_base_dir(config), save_path)
 
 
-async def _safe_report_progress(
+async def safe_report_progress(
     ctx: Context[Any, Any] | None,
     *,
     progress: float,

@@ -17,7 +17,7 @@ from seedream_mcp.tools.core.common import (
 )
 from seedream_mcp.tools.core.schemas import ImageToImageInput, TextToImageInput
 from seedream_mcp.utils.io.io_save import AutoSaveResult
-from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 
 
 def _build_config() -> SeedreamConfig:
@@ -343,7 +343,24 @@ def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() 
     assert result["data"][0]["request_index"] == 1
     assert result["data"][1]["request_index"] == 2
     assert "请求超时" in result["data"][1]["error"]["message"]
+    # 占位项 error 携带 type 归约码，与 build_error_dict 的 {type,message} 契约一致；
+    # 未识别异常经 resolve_error_profile 归入 generation_failed 兜底档。
+    assert result["data"][1]["error"]["type"] == "generation_failed"
     assert result["data"][2]["request_index"] == 3
+
+
+def test_aggregate_failed_placeholder_error_type_classifies_exception() -> None:
+    """占位项 error.type 取请求异常的归约错误码，与顶层代表异常同档。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            None,
+            {"success": True, "data": [{"url": "u"}], "usage": {}, "status": "completed"},
+        ],
+        request_errors={1: SeedreamAPIError("认证失败", status_code=401)},
+    )
+
+    assert result["data"][0]["type"] == "image_generation.request_failed"
+    assert result["data"][0]["error"]["type"] == "auth_error"
 
 
 def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() -> None:
@@ -426,27 +443,12 @@ def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> No
         request_errors={},
     )
 
+    config = SeedreamConfig(api_key="k", default_size="2K", auto_save_enabled=False)
+    context = build_generation_context(TextToImageInput(prompt="t"), config)
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=aggregated,
-        context=GenerationExecutionContext(
-            prompt="t",
-            optimize_prompt_options=None,
-            size="2K",
-            watermark=False,
-            response_format="url",
-            output_format=None,
-            stream=False,
-            tools=None,
-            layer_decomposition=False,
-            background=None,
-            max_images=None,
-            request_count=1,
-            parallelism=1,
-            enable_auto_save=False,
-            save_path=None,
-            custom_name=None,
-        ),
+        context=context,
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -470,6 +472,9 @@ def test_aggregate_parallel_generation_results_uses_result_error_when_success_fa
     assert "请求频率超限" in result["error"]["message"]
     assert result["data"][0]["error"]["message"] == "鉴权失败"
     assert result["data"][1]["error"]["message"] == "请求频率超限"
+    # 软失败结果无异常可归约，占位项 type 维持 generation_failed 兜底档。
+    assert result["data"][0]["error"]["type"] == "generation_failed"
+    assert result["data"][1]["error"]["type"] == "generation_failed"
     assert result["batch"]["errors"][0]["message"] == "鉴权失败"
     assert "请求频率超限" in result["batch"]["errors"][1]["message"]
 
@@ -585,7 +590,7 @@ def test_input_schema_rejects_non_bool_auto_save() -> None:
 # ==================== save_path 生成前预检 ====================
 
 
-def test_build_generation_context_rejects_out_of_bounds_save_path(
+def test_prevalidate_save_path_rejects_out_of_bounds_save_path(
     tmp_path: Path,
 ) -> None:
     """越界 save_path 在预检阶段即拒绝，早于计费的生成请求分发。

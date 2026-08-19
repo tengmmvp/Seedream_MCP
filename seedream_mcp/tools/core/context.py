@@ -34,13 +34,22 @@ class GenerationExecutionContext:
 
     Attributes:
         prompt: 生成提示词；图文生图的图层拆分场景可缺省。
+        optimize_prompt_options: 提示词优化配置，未提供时为 None。
+        size: 生效的生成尺寸；缺省时按 config 默认值合成，图层拆分场景缺省为 auto。
         watermark: 是否添加水印，缺省时取 config 默认值。
+        response_format: 响应格式，url 或 b64_json。
+        output_format: 输出图片格式，未提供时为 None。
+        stream: 是否启用流式输出。
+        tools: 模型工具配置，未提供时为 None。
         layer_decomposition: 是否开启图层拆分，仅 5.0 Pro 图生图可用。
         background: 透明通道取值，未指定时为 None。
         max_images: 组图单次请求的生成数量上限，未显式传入时为按参考图数量推导的
             生效值；非组图工具为 None。
+        request_count: 同一提示并行发起的独立生成次数。
         parallelism: 并行度上限，缺省时取 request_count 与全局上限的较小值。
         enable_auto_save: 是否启用自动保存，缺省时取 config 默认值。
+        save_path: 用户指定的保存目录，未提供时为 None。
+        custom_name: 自定义文件名前缀，未提供时为 None。
     """
 
     prompt: str | None

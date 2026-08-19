@@ -7,7 +7,7 @@ dict 原样保留；网络层经 httpx.MockTransport 与伪 SSE 注入，不触�
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 import httpx
 import pytest
@@ -20,7 +20,6 @@ from _client_fakes import _FakeLog, _FakeSSEResponse, _install_mock_transport
 
 
 @pytest.mark.parametrize("usage_value", ["text", 123])
-@pytest.mark.asyncio
 async def test_non_stream_usage_non_dict_converged_to_empty(
     usage_value: Any, no_sleep: None
 ) -> None:
@@ -43,7 +42,6 @@ async def test_non_stream_usage_non_dict_converged_to_empty(
     assert result["usage"] == {}
 
 
-@pytest.mark.asyncio
 async def test_non_stream_usage_dict_preserved(no_sleep: None) -> None:
     """合法 dict usage 原样保留，守卫不过度丢弃。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
@@ -65,7 +63,7 @@ async def test_non_stream_usage_dict_preserved(no_sleep: None) -> None:
     assert result["usage"] == {"generated_images": 2}
 
 
-def _sse_chunks(usage_json: str) -> List[bytes]:
+def _sse_chunks(usage_json: str) -> list[bytes]:
     """构造 completed 事件携带指定 usage JSON 的两事件 SSE 字节块。"""
     return [
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
@@ -73,7 +71,7 @@ def _sse_chunks(usage_json: str) -> List[bytes]:
     ]
 
 
-async def _parse_sse(chunks: List[bytes]) -> Dict[str, Any]:
+async def _parse_sse(chunks: list[bytes]) -> dict[str, Any]:
     """以固定测试参数解析伪 SSE 响应。"""
     return await parse_sse_response(
         _FakeSSEResponse(chunks),
@@ -104,7 +102,6 @@ async def test_sse_completed_usage_dict_preserved() -> None:
     assert result["usage"] == {"generated_images": 1}
 
 
-@pytest.mark.asyncio
 async def test_stream_top_level_error_failure_keeps_usage_dict(no_sleep: None) -> None:
     """stream 请求级失败路径同样保证 usage 恒为 dict：异形 usage 收敛为空 dict。
 

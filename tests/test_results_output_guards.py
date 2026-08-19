@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from seedream_mcp.tools.core import results as results_module
+from seedream_mcp.tools.core._helpers import _extract_parallel_request_error
 from seedream_mcp.tools.core.context import GenerationExecutionContext
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
@@ -365,15 +367,20 @@ def test_auto_save_result_to_dict_sanitizes_original_url() -> None:
 
 
 def test_prompt_not_echoed_in_text_channel() -> None:
-    """提示词不在文本通道回显：调用方刚发送过，structuredContent.prompt 已携带。"""
+    """提示词不在文本通道回显：调用方刚发送过，structuredContent.prompt 已携带。
+
+    锁定完整文本形态，任何新增回显行都会使全等断言失败。
+    """
     text = format_generation_response(
         "文生图任务完成",
         {"success": True, "status": "completed", "data": [{"url": "https://example.com/a.png"}]},
         "2K",
     )
 
+    assert text == (
+        "文生图任务完成\n" "尺寸: 2K\n" "\n" "图片 1:\n" "  URL: https://example.com/a.png\n"
+    )
     assert "提示词" not in text
-    assert "a very long prompt" not in text
 
 
 def test_url_line_kept_alongside_local_path() -> None:
@@ -552,38 +559,40 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
 # ==================== 双重净化收敛 ====================
 
 
-def test_sanitized_flag_skips_repeat_sanitization_in_structured_outlet() -> None:
-    """结构化出口经 images_sanitized 复用文本出口的净化列表：截断标记不叠加。
+def test_pipeline_single_sanitization_shared_by_both_outlets() -> None:
+    """流水线净化一次并共用同一列表：两出口的截断标记均恰有一次。
 
-    重复净化非幂等，截断标记会逐次叠加、内容逐次缩水。
+    重复净化非幂等，截断标记会逐次叠加、内容逐次缩水；已净化列表再入净化管线的
+    对照行为由末条断言证明。
     """
     result = {
         "success": True,
         "status": "completed",
         "data": [{"error": {"message": "x" * 600}}],
     }
-    images = extract_images(result)
+    sanitized_images = _sanitize_image_errors(extract_images(result))
 
-    format_generation_response("文生图任务完成", result, "2K", images=images)
+    text = format_generation_response("文生图任务完成", result, "2K", images=sanitized_images)
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
         auto_save_error=None,
-        images=images,
-        images_sanitized=True,
+        images=sanitized_images,
     )
 
     message = structured["data"][0]["error"]["message"]
     assert message.count("<truncated:") == 1
+    assert "错误信息:" in text
+    assert "<truncated:" in text
     # 已净化文本再次进入净化会二次截断，对照证明上方结果来自单次净化。
     re_sanitized = _sanitize_image_errors([{"error": {"message": message}}])
     assert re_sanitized[0]["error"]["message"] != message
 
 
-def test_repeat_sanitization_without_flag_degrades_truncated_content() -> None:
-    """默认 flag=False 对未净化列表执行净化：独立调用场景自行净化兜底。"""
+def test_independent_structured_call_sanitizes_internally() -> None:
+    """独立调用未传 images 时在结构化出口内部完成首次净化，截断标记恰一次。"""
     images = [{"error": {"code": "E", "message": "x" * 600}}]
 
     structured = _build_generation_structured_result(
@@ -592,10 +601,54 @@ def test_repeat_sanitization_without_flag_degrades_truncated_content() -> None:
         context=_context(),
         auto_save_results=[],
         auto_save_error=None,
-        images=images,
     )
 
     assert structured["data"][0]["error"]["message"].count("<truncated:") == 1
+
+
+def test_sanitize_image_errors_does_not_mutate_input_list() -> None:
+    """净化返回新列表，传入列表不被就地改写：调用方持有的原始数据不受出口净化影响。"""
+    images = [{"url": "https://AKID:SECRET@mirror.example.com/a.png", "size": "2K\r\nFAKE"}]
+
+    sanitized = _sanitize_image_errors(images)
+
+    assert images[0]["url"] == "https://AKID:SECRET@mirror.example.com/a.png"
+    assert images[0]["size"] == "2K\r\nFAKE"
+    assert sanitized[0]["url"] == "https://mirror.example.com/a.png"
+    assert sanitized[0]["size"] == "2K  FAKE"
+
+
+def test_aggregated_failure_message_not_resanitized_in_both_outlets() -> None:
+    """聚合格式结果的失败消息已在源头净化：两出口直接渲染，截断标记不叠加。
+
+    消息总长超过截断上限且已携带截断标记，出口若重复净化会再次截断叠加第二个
+    标记。
+    """
+    truncated_message = "<truncated:600 chars> " + "x" * 500
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"type": "api_error", "message": truncated_message},
+        "batch": {
+            "request_count": 1,
+            "success_requests": 0,
+            "failed_requests": 1,
+            "errors": [{"request_index": 1, "message": truncated_message}],
+        },
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert f"图片生成失败: {truncated_message}" in text
+    assert f"  请求 1: {truncated_message}" in text
+    assert structured["error"]["message"] == truncated_message
 
 
 # ==================== usage 字段净化 ====================
@@ -782,9 +835,9 @@ def test_module_level_sanitized_sentinel_state_removed() -> None:
 
 
 def test_failure_path_structured_outlet_sanitizes_images() -> None:
-    """失败路径文本出口经 _format_failure_section 提前返回，结构化出口为首个消费者。
+    """失败路径文本出口经 _format_failure_section 提前返回，结构化出口完成净化。
 
-    默认 images_sanitized=False 在结构化出口完成首次净化，凭据不借 data 项进入
+    独立调用未传 images 时净化发生在结构化出口内部，凭据不借 data 项进入
     structuredContent。
     """
     result = {
@@ -793,16 +846,14 @@ def test_failure_path_structured_outlet_sanitizes_images() -> None:
         "error": {"message": "boom"},
         "data": [{"url": "https://AKID:SECRET@mirror.example.com/a.png"}],
     }
-    images = extract_images(result)
 
-    text = format_generation_response("文生图任务完成", result, "2K", images=images)
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
         auto_save_error=None,
-        images=images,
     )
 
     assert structured["success"] is False
@@ -811,23 +862,22 @@ def test_failure_path_structured_outlet_sanitizes_images() -> None:
 
 
 def test_success_path_pipeline_sanitizes_each_outlet_content_once() -> None:
-    """成功路径文本出口净化写回，结构化出口以显式标记复用同一净化列表。"""
+    """成功路径净化一次，文本与结构化出口共用同一净化列表。"""
     result = {
         "success": True,
         "status": "completed",
         "data": [{"url": "https://example.com/a.png"}],
     }
-    images = extract_images(result)
+    sanitized_images = _sanitize_image_errors(extract_images(result))
 
-    text = format_generation_response("文生图任务完成", result, "2K", images=images)
+    text = format_generation_response("文生图任务完成", result, "2K", images=sanitized_images)
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
         context=_context(),
         auto_save_results=[],
         auto_save_error=None,
-        images=images,
-        images_sanitized=True,
+        images=sanitized_images,
     )
 
     assert "URL: https://example.com/a.png" in text
@@ -1020,8 +1070,6 @@ def test_parallel_error_code_fallback_branch_is_sanitized() -> None:
     上游 200 响应顶层 error 仅含 code 键时其自由文本直达 structuredContent，
     该分支漏脱敏会原样透传。
     """
-    from seedream_mcp.tools.core._helpers import _extract_parallel_request_error
-
     message = _extract_parallel_request_error(
         {"error": {"code": "InjectedHeader\r\nAuthorization: Bearer leak"}}, None
     )
@@ -1036,8 +1084,6 @@ def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> 
     json.loads 的 C 层栈开销低于 Python 帧，千级嵌套可成功解析；递归实现会抛
     RecursionError 并被降级为错误结果。
     """
-    from seedream_mcp.tools.core.results import extract_images
-
     inner: dict[str, Any] = {"url": "https://example.com/deep.png"}
     result: dict[str, Any] = inner
     for _ in range(1500):
@@ -1050,10 +1096,6 @@ def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> 
 
 def test_structured_status_sanitized_and_max_images_surfaced() -> None:
     """status 上游原文经净化进入 structuredContent，max_images 生效值原样回显。"""
-    import dataclasses
-
-    from seedream_mcp.tools.core.results import _build_generation_structured_result
-
     context = dataclasses.replace(_context(), max_images=4)
     structured = _build_generation_structured_result(
         tool_name="sequential_generation",

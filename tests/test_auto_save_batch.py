@@ -1,5 +1,7 @@
-"""AutoSaveManager 批量并发的部分失败聚合测试，覆盖核心降级路径。"""
+"""AutoSaveManager 批量并发的部分失败聚合与清理范围测试。"""
 
+import os
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -46,3 +48,94 @@ async def test_save_multiple_images_aggregates_partial_failure(
     # 任务完成状态确定，不悬垂到用例事件循环之外
     await drain_background_cleanup_tasks()
     await manager.close()
+
+
+async def test_maybe_cleanup_age_covers_default_root_beyond_request_base_dir(
+    tmp_path: Path,
+) -> None:
+    """save_path 使保存目录指向子目录时，按天清理仍覆盖默认根下的历史目录。"""
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    default_root = tmp_path / "images"
+    request_dir = default_root / "custom"
+    request_dir.mkdir(parents=True)
+
+    expired = default_root / "2025-01-01" / "old.png"
+    expired.parent.mkdir(parents=True)
+    expired.write_bytes(b"x" * 100)
+    expired_time = (datetime.now() - timedelta(days=40)).timestamp()
+    os.utime(expired, (expired_time, expired_time))
+
+    manager = AutoSaveManager(base_dir=request_dir, cleanup_base_dir=default_root, cleanup_days=30)
+    try:
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+
+        assert not expired.exists()
+    finally:
+        await manager.close()
+
+
+async def test_maybe_cleanup_quota_enforced_across_default_root(tmp_path: Path) -> None:
+    """总量配额按默认根整体计算，跨请求子目录驱逐默认根下的最旧文件。"""
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    default_root = tmp_path / "images"
+    request_dir = default_root / "custom"
+    request_dir.mkdir(parents=True)
+
+    now = datetime.now()
+    oldest = default_root / "2025-01-01" / "old.png"
+    oldest.parent.mkdir(parents=True)
+    oldest.write_bytes(b"x" * 100)
+    oldest_time = (now - timedelta(days=40)).timestamp()
+    os.utime(oldest, (oldest_time, oldest_time))
+    newest = request_dir / "new.png"
+    newest.write_bytes(b"y" * 100)
+    newest_time = (now - timedelta(days=1)).timestamp()
+    os.utime(newest, (newest_time, newest_time))
+
+    manager = AutoSaveManager(
+        base_dir=request_dir,
+        cleanup_base_dir=default_root,
+        cleanup_days=0,
+        max_total_bytes=150,
+    )
+    try:
+        await manager._maybe_cleanup()
+        await auto_save_module.drain_background_cleanup_tasks()
+
+        assert not oldest.exists()
+        assert newest.exists()
+    finally:
+        await manager.close()
+
+
+async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """同一默认根下不同请求子目录共享节流，清理仅触发一次。"""
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    default_root = tmp_path / "images"
+    request_a = default_root / "a"
+    request_b = default_root / "b"
+    request_a.mkdir(parents=True)
+    request_b.mkdir()
+
+    cleanup_calls: list[int] = []
+
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict:
+        cleanup_calls.append(days)
+        return {"deleted_files": 0, "deleted_size": 0, "errors": []}
+
+    manager_a = AutoSaveManager(base_dir=request_a, cleanup_base_dir=default_root, cleanup_days=30)
+    manager_b = AutoSaveManager(base_dir=request_b, cleanup_base_dir=default_root, cleanup_days=30)
+    monkeypatch.setattr(manager_a._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+    monkeypatch.setattr(manager_b._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+
+    await manager_a._maybe_cleanup()
+    await manager_b._maybe_cleanup()  # 同默认根，被节流
+    await auto_save_module.drain_background_cleanup_tasks()
+
+    assert cleanup_calls == [30]

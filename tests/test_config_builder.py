@@ -283,6 +283,104 @@ def test_build_config_http_allowed_hosts_defaults_to_none(
     assert config.http_allowed_hosts is None
 
 
+def test_build_config_accepts_all_valid_http_allowed_hosts_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """host、host:port、host:* 与方括号 IPv6 形态均通过构建期条目校验。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_HOSTS="
+        "api.example.com,api.example.com:8443,api.example.com:*,[2001:db8::1]:*\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == (
+        "api.example.com",
+        "api.example.com:8443",
+        "api.example.com:*",
+        "[2001:db8::1]:*",
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_value,match",
+    [
+        ("https://api.example.com", "scheme 或斜杠"),
+        ("api.example.com/path", "scheme 或斜杠"),
+        ("*:8080", "host、host:port、host:\\*"),
+        ("*.example.com", "host、host:port、host:\\*"),
+        ("*", "host、host:port、host:\\*"),
+        ("api.example.com:https", "host、host:port、host:\\*"),
+        ("api.example.com:", "host、host:port、host:\\*"),
+        ("[2001:db8::1", "host、host:port、host:\\*"),
+        ("api.example.com:0", "host、host:port、host:\\*"),
+        ("api.example.com:99999", "host、host:port、host:\\*"),
+        ("api.example.com:８０", "host、host:port、host:\\*"),
+        ("api.example.com.", "host、host:port、host:\\*"),
+        (".api.example.com", "host、host:port、host:\\*"),
+    ],
+)
+def test_build_config_rejects_malformed_http_allowed_hosts_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str, match: str
+) -> None:
+    """含 scheme/斜杠、非尾部通配、端口非数字或超范围、首尾点号的条目构建期拒绝。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")
+
+    with pytest.raises(SeedreamConfigError, match=match) as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert raw_value in excinfo.value.message
+    assert "环境变量 SEEDREAM_HTTP_ALLOWED_HOSTS" in excinfo.value.message
+
+
+def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """仅列端口通配未列裸 host 时构建成功并告警，配套裸 host 后不再告警。
+
+    SDK 的 host:* 通配仅匹配带端口的 Host 头，无端口 Host 会被 421 拒绝，
+    构建期告警提示补配裸 host；告警不构成拒绝。
+    """
+    from loguru import logger as loguru_logger
+
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=api.example.com:*\n"
+    )
+
+    records: list[object] = []
+    handler_id = loguru_logger.add(lambda message: records.append(message), level="WARNING")
+    try:
+        config = build_config_from_sources(env_file=str(env_file))
+    finally:
+        loguru_logger.remove(handler_id)
+
+    assert config.http_allowed_hosts == ("api.example.com:*",)
+    assert any("api.example.com" in str(record) for record in records)
+
+    paired_env_file = tmp_path / "paired.env"
+    _write_env_file(
+        paired_env_file,
+        "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=api.example.com,api.example.com:*\n",
+    )
+    quiet_records: list[object] = []
+    handler_id = loguru_logger.add(lambda message: quiet_records.append(message), level="WARNING")
+    try:
+        paired_config = build_config_from_sources(env_file=str(paired_env_file))
+    finally:
+        loguru_logger.remove(handler_id)
+
+    assert paired_config.http_allowed_hosts == ("api.example.com", "api.example.com:*")
+    assert not any("http_allowed_hosts" in str(record) for record in quiet_records)
+
+
 def test_to_dict_masks_sensitive_fields() -> None:
     """to_dict 对 api_key 与 http_auth_token 脱敏。"""
     from seedream_mcp.config import SeedreamConfig

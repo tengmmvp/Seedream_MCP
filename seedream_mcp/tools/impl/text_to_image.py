@@ -19,14 +19,14 @@ from ..core.common import (
     GenerationExecutionContext,
 )
 from ..core.schemas import TextToImageInput
-from ._common import TEXT_TO_IMAGE, _default_start_log_values
+from ._common import TEXT_TO_IMAGE
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 async def handle_text_to_image(
@@ -62,9 +62,8 @@ async def handle_text_to_image(
     return await execute_generation_handler(
         params=params,
         config=config,
+        metadata=TEXT_TO_IMAGE,
         module_logger=logger,
-        **TEXT_TO_IMAGE.as_handler_kwargs(),
-        start_log_values_builder=_default_start_log_values,
         request_executor=_execute,
         ctx=ctx,
     )
