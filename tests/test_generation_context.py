@@ -490,7 +490,6 @@ def test_format_generation_response_reports_parallel_failure_details() -> None:
                 ],
             },
         },
-        prompt="test",
         size="2K",
     )
 
@@ -515,7 +514,6 @@ def test_format_failure_section_extracts_message_from_dict_error() -> None:
                 "errors": [{"request_index": 1, "message": "认证失败"}],
             },
         },
-        prompt="test",
         size="2K",
     )
     failure_line = text.splitlines()[0]
@@ -533,7 +531,6 @@ def test_format_generation_response_shows_input_images_for_pro_usage() -> None:
             "data": [{"url": "https://example.com/1.png", "size": "1024x1024"}],
             "usage": {"input_images": 1, "generated_images": 1, "output_tokens": 100},
         },
-        prompt="test",
         size="1024x1024",
     )
 

@@ -89,7 +89,6 @@ def test_auto_save_success_collapses_to_summary_line() -> None:
     text = format_generation_response(
         "文生图任务完成",
         merged,
-        "test",
         "2K",
         [_save_result(success=True)],
         auto_save_enabled=True,
@@ -111,7 +110,6 @@ def test_auto_save_section_failed_save_uses_original_image_index() -> None:
     text = format_generation_response(
         "文生图任务完成",
         _mixed_result(),
-        "test",
         "2K",
         [_save_result(success=False)],
         auto_save_enabled=True,
@@ -128,7 +126,6 @@ def test_auto_save_section_falls_back_to_save_ordinal_without_indices() -> None:
     text = format_generation_response(
         "文生图任务完成",
         _mixed_result(),
-        "test",
         "2K",
         [_save_result(success=False)],
         auto_save_enabled=True,
@@ -148,7 +145,7 @@ def test_image_item_url_line_sanitized_in_text_output() -> None:
         "data": [{"url": _DIRTY_URL}],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "AKID:SECRET@" not in text
     assert "SECRET" not in text
@@ -239,7 +236,6 @@ def test_long_signed_url_preserved_intact_after_sanitization() -> None:
     text = format_generation_response(
         "文生图任务完成",
         {"success": True, "status": "completed", "data": [{"url": _SIGNED_URL}]},
-        "test",
         "2K",
     )
 
@@ -297,7 +293,7 @@ def _dirty_free_field_result() -> dict[str, Any]:
 
 def test_image_item_free_fields_sanitized_in_text_output() -> None:
     """文本通道 size/output_format/错误码行净化：CRLF 压平，无换行注入。"""
-    text = format_generation_response("文生图任务完成", _dirty_free_field_result(), "test", "2K")
+    text = format_generation_response("文生图任务完成", _dirty_free_field_result(), "2K")
 
     # model/type 不在文本通道渲染，其 CRLF 注入防护经结构化通道断言覆盖。
     assert "\r" not in text
@@ -338,7 +334,6 @@ def test_auto_save_section_failure_error_sanitized_in_text_output() -> None:
     text = format_generation_response(
         "文生图任务完成",
         _mixed_result(),
-        "test",
         "2K",
         [save_result],
         auto_save_enabled=True,
@@ -374,7 +369,6 @@ def test_prompt_not_echoed_in_text_channel() -> None:
     text = format_generation_response(
         "文生图任务完成",
         {"success": True, "status": "completed", "data": [{"url": "https://example.com/a.png"}]},
-        "a very long prompt about a cat",
         "2K",
     )
 
@@ -396,7 +390,7 @@ def test_url_line_kept_alongside_local_path() -> None:
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "  URL: https://example.com/a.png" in text
     assert "Markdown 引用" not in text
@@ -408,7 +402,6 @@ def test_url_line_kept_when_auto_save_disabled() -> None:
     text = format_generation_response(
         "文生图任务完成",
         {"success": True, "status": "completed", "data": [{"url": "https://example.com/a.png"}]},
-        "test",
         "2K",
         auto_save_enabled=False,
     )
@@ -421,7 +414,6 @@ def test_url_line_kept_when_save_degraded_to_url() -> None:
     text = format_generation_response(
         "文生图任务完成",
         _mixed_result(),
-        "test",
         "2K",
         [_save_result(success=False)],
         auto_save_enabled=True,
@@ -457,7 +449,6 @@ def test_single_image_text_form_is_compact() -> None:
     text = format_generation_response(
         "文生图任务完成",
         result,
-        "test",
         "2K",
         save_results,
         auto_save_enabled=True,
@@ -496,7 +487,6 @@ def test_fifteen_image_batch_text_form_has_no_duplicate_path_lines() -> None:
     text = format_generation_response(
         "组图任务完成",
         {"success": True, "status": "completed", "data": images, "usage": {"generated_images": 15}},
-        "test",
         "2K",
         save_results,
         auto_save_enabled=True,
@@ -523,7 +513,7 @@ def test_truncated_events_surfaced_in_both_channels() -> None:
         "truncated_events": 2,
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -546,7 +536,7 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
     }
 
     for result in (base, {**base, "truncated_events": 0}):
-        text = format_generation_response("文生图任务完成", result, "test", "2K")
+        text = format_generation_response("文生图任务完成", result, "2K")
         assert "丢弃" not in text
 
     structured = _build_generation_structured_result(
@@ -574,7 +564,7 @@ def test_sanitized_flag_skips_repeat_sanitization_in_structured_outlet() -> None
     }
     images = extract_images(result)
 
-    format_generation_response("文生图任务完成", result, "t", "2K", images=images)
+    format_generation_response("文生图任务完成", result, "2K", images=images)
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -652,7 +642,7 @@ def test_usage_text_renders_numeric_values_only() -> None:
         "usage": {"output_tokens": "100\r\nFAKE: injected", "total_tokens": 50},
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "FAKE" not in text
     assert "总 tokens: 50" in text
@@ -730,7 +720,7 @@ def test_forged_local_path_and_markdown_ref_sanitized_in_both_channels() -> None
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -805,7 +795,7 @@ def test_failure_path_structured_outlet_sanitizes_images() -> None:
     }
     images = extract_images(result)
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K", images=images)
+    text = format_generation_response("文生图任务完成", result, "2K", images=images)
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -829,7 +819,7 @@ def test_success_path_pipeline_sanitizes_each_outlet_content_once() -> None:
     }
     images = extract_images(result)
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K", images=images)
+    text = format_generation_response("文生图任务完成", result, "2K", images=images)
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -856,7 +846,7 @@ def test_failure_text_renders_top_level_error_message_not_unknown() -> None:
         "error": {"code": "StreamRejected", "message": "流式请求被拒绝\r\nFAKE api_key=leaked"},
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "图片生成失败: 流式请求被拒绝" in text
     assert "未知错误" not in text
@@ -895,7 +885,7 @@ def test_failure_text_dict_message_normalized_and_sanitized() -> None:
         "error": {"message": {"authorization": "Bearer sk-text-leaked"}},
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "图片生成失败:" in text
     assert "sk-text-leaked" not in text
@@ -910,7 +900,7 @@ def test_failure_text_list_message_normalized_and_sanitized() -> None:
         "error": {"message": ["api_key=SK-LIST-LEAK"]},
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "SK-LIST-LEAK" not in text
     assert "api_key=***" in text
@@ -924,7 +914,7 @@ def test_failure_text_non_dict_error_normalized_and_sanitized() -> None:
         "error": ["Authorization: Bearer sk-top-leaked"],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "sk-top-leaked" not in text
     assert "***" in text
@@ -1103,7 +1093,7 @@ def test_forged_string_request_and_image_index_sanitized_in_both_channels() -> N
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -1144,7 +1134,7 @@ def test_per_image_dict_error_message_normalized_and_sanitized() -> None:
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -1175,7 +1165,7 @@ def test_per_image_list_error_code_normalized_and_sanitized() -> None:
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -1205,7 +1195,7 @@ def test_b64_json_non_sized_form_renders_absent_without_error() -> None:
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "  URL: https://example.com/a.png" in text
     assert "  Base64 数据: 无" in text
@@ -1220,7 +1210,7 @@ def test_failure_text_none_error_value_falls_back_to_unknown() -> None:
     """error 键存在但值为 None 时回落未知错误，不渲染字面量 None。"""
     result = {"success": False, "status": "failed", "data": [], "error": None}
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "图片生成失败: 未知错误" in text
     assert "None" not in text
@@ -1237,7 +1227,7 @@ def test_structured_failure_none_error_value_falls_back_to_unknown() -> None:
         auto_save_results=[],
         auto_save_error=None,
     )
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert structured["error"]["message"] == "未知错误"
     assert "None" not in str(structured["error"])
@@ -1252,7 +1242,7 @@ def test_failure_text_dict_error_without_message_extracts_code_via_ladder() -> N
     """dict error 缺 message 键时经五级阶梯落到 code，dict repr 不进入文本。"""
     result = {"success": False, "status": "failed", "data": [], "error": {"code": "E"}}
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "图片生成失败: E" in text
     assert "{'code'" not in text
@@ -1262,7 +1252,7 @@ def test_failure_text_dict_error_none_message_falls_back_to_unknown() -> None:
     """dict error 的 message 为 None 时回落未知错误，字面 None 不进入文本。"""
     result = {"success": False, "status": "failed", "data": [], "error": {"message": None}}
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
 
     assert "图片生成失败: 未知错误" in text
     assert "None" not in text
@@ -1293,7 +1283,7 @@ def test_non_str_url_size_local_path_sanitized_in_both_channels() -> None:
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -1342,7 +1332,7 @@ def test_forged_bool_index_form_routed_through_sanitization_path() -> None:
         ],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -1375,7 +1365,7 @@ def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
         "batch": [1, 2],
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
@@ -1425,7 +1415,7 @@ def test_falsy_malformed_usage_batch_shapes_converge_quietly() -> None:
         "batch": "",
     }
 
-    text = format_generation_response("文生图任务完成", result, "test", "2K")
+    text = format_generation_response("文生图任务完成", result, "2K")
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,

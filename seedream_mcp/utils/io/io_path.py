@@ -249,7 +249,9 @@ async def workspace_roots_scope_from_result(
     SEP-2577 非废弃形态：工具链不经 ctx.session.list_roots 直连，由 server 工具
     签名的 Resolve 依赖按协商版本取回后注入本函数消费。roots_result 为 None 表示
     客户端未声明 roots capability，此处不设置边界、下游回退环境变量根；取回失败
-    由 SDK 在调用层报错而非在此降级，不放宽文件访问边界。
+    由 SDK 在调用层报错而非在此降级，不放宽文件访问边界。file URI 转 Path 的
+    resolve 属同步文件系统调用，下沉工作线程执行，与 browse 链路的目录预解析
+    同一口径。
 
     Args:
         roots_result: 依赖解析器注入的客户端 roots 结果；未声明能力时为 None。
@@ -260,7 +262,7 @@ async def workspace_roots_scope_from_result(
     token: Token[tuple[Path, ...] | None] | None = None
     resolved_roots: list[Path] = []
     if roots_result is not None:
-        resolved_roots = _roots_result_to_paths(roots_result)
+        resolved_roots = await asyncio.to_thread(_roots_result_to_paths, roots_result)
         token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
         if resolved_roots:
             logger.debug("已应用 MCP Roots 边界: {}", resolved_roots)

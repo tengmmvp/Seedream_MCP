@@ -478,12 +478,16 @@ def _run_streamable_http(
         logger.info("streamable-http 已启用 TLS，最低协议版本 TLS 1.2")
     # uvicorn 缺省无限等待连接排空，长开 SSE 流会使 serve() 在 SIGTERM 后永不返回；
     # 取有界超时，超时后取消在途连接并进入本函数的退出清理。
+    # log_config=None 跳过 uvicorn 内置 dictConfig，uvicorn.* 日志传播到 root
+    # logger 经 InterceptHandler 汇入 loguru：access log 不再写 stdout 独立通道，
+    # 控制字符防护与文件日志通道对 uvicorn 日志同样生效。
     server = uvicorn.Server(
         uvicorn.Config(
             app,
             host=host,
             port=port,
             timeout_graceful_shutdown=int(_DRAIN_PENDING_TIMEOUT_SECONDS),
+            log_config=None,
             **ssl_kwargs,
         )
     )

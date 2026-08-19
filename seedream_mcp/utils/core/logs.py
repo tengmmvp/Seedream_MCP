@@ -8,22 +8,13 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import inspect
 import logging
 import sys
 import weakref
 from pathlib import Path
 from types import FrameType
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Awaitable,
-    Callable,
-    ParamSpec,
-    TypeVar,
-    cast,
-)
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -253,37 +244,3 @@ def get_logger(name: str | None = None) -> Logger:
             del current
 
     return logger.bind(name=name)
-
-
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-def log_function_call(func: Callable[P, R]) -> Callable[P, R]:
-    """装饰函数并在调用入口记录日志，同步与异步在实现内分流。
-
-    以 ``ParamSpec``/``TypeVar`` 透传参数规格与返回类型，装饰后的静态签名与原函数
-    完全一致。声明采用单一 ``Callable[P, R]`` 而非 overload 区分同步异步：mypy 对
-    签名含 ``Any`` 的异步函数做 overload 约束求解时会把 ParamSpec 擦除为
-    ``(*Any, **Any) -> Any``，单一签名可精确穿透。
-    """
-
-    # 仅记录调用入口；异常由被装饰函数自身的错误处理统一记录，避免同一失败重复入日志。
-    if inspect.iscoroutinefunction(func):
-        # Awaitable[R] 视图使 await 表达式还原出 R，内层按 R 声明，外层 cast 收敛
-        # 包装产生的第二层 coroutine 容器。
-        async_func = cast("Callable[P, Awaitable[R]]", func)
-
-        @functools.wraps(func)
-        async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            logger.info("函数调用: {}()", func.__qualname__)
-            return await async_func(*args, **kwargs)
-
-        return cast("Callable[P, R]", async_wrapper)
-
-    @functools.wraps(func)
-    def sync_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        logger.info("函数调用: {}()", func.__qualname__)
-        return func(*args, **kwargs)
-
-    return sync_wrapper

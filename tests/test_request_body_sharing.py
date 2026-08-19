@@ -193,8 +193,8 @@ async def test_direct_client_call_without_plan_serializes_independently(
 
 
 @pytest.mark.asyncio
-async def test_shared_plan_builder_failure_propagates_independently() -> None:
-    """builder 抛错时各请求独立收到原异常，计划不写入，后续请求可重试构建。"""
+async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
+    """builder 抛错时首个异常被缓存并重放给同批后到者，构建只执行一次。"""
     plan = SharedRequestPlan()
     builder_failure = RuntimeError("prepare failed")
     attempts = {"count": 0}
@@ -209,16 +209,28 @@ async def test_shared_plan_builder_failure_propagates_independently() -> None:
         return_exceptions=True,
     )
 
-    # 各请求独立收到同一原异常对象，不被包装为其他类型
+    # 各请求收到同一原异常对象，不被包装为其他类型
     assert all(outcome is builder_failure for outcome in outcomes)
-    # 每个调用方都在锁内自行重试构建，无一被短路跳过
-    assert attempts["count"] == 3
+    # 构建只执行一次：确定性失败重试只会重复读盘与解码等全量副作用
+    assert attempts["count"] == 1
     # 计划未写入失败产物
     assert plan.request_data is None
 
-    # 后续请求可重试构建并成功写入计划
+    # 计划存续期内后到的构建请求同样被缓存异常短路
     async def working_builder() -> dict[str, Any]:
         return {"model": "m"}
+
+    replayed: BaseException | None = None
+    try:
+        await plan.get_or_build(working_builder)
+    except Exception as exc:
+        replayed = exc
+
+    assert replayed is builder_failure
+    assert attempts["count"] == 1
+
+    # 失败缓存随 release 清空，新计划重新构建并成功写入
+    plan.release()
 
     built = await plan.get_or_build(working_builder)
 

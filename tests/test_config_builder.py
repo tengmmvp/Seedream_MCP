@@ -226,7 +226,7 @@ def test_build_config_loads_http_auth_token_from_env_file(
 def test_build_config_loads_http_allowed_hosts_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """SEEDREAM_HTTP_ALLOWED_HOSTS 按逗号拆分为条目列表，host:port 与 :* 通配原样保留。"""
+    """SEEDREAM_HTTP_ALLOWED_HOSTS 按逗号拆分为条目元组，host:port 与 :* 通配原样保留。"""
     monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(
@@ -236,7 +236,7 @@ def test_build_config_loads_http_allowed_hosts_list(
 
     config = build_config_from_sources(env_file=str(env_file))
 
-    assert config.http_allowed_hosts == ["mcp.example.com", "mcp.example.com:*"]
+    assert config.http_allowed_hosts == ("mcp.example.com", "mcp.example.com:*")
 
 
 def test_build_config_http_allowed_hosts_strips_entries(
@@ -253,7 +253,7 @@ def test_build_config_http_allowed_hosts_strips_entries(
 
     config = build_config_from_sources(env_file=str(env_file))
 
-    assert config.http_allowed_hosts == ["mcp.example.com", "api.example.com:8443"]
+    assert config.http_allowed_hosts == ("mcp.example.com", "api.example.com:8443")
 
 
 @pytest.mark.parametrize("raw_value", ["", "   ", ","])

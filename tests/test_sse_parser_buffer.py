@@ -603,8 +603,8 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
         log=_FakeLog(),
     )
 
-    # 条目数封顶：已解析条目不超过上限加单块内事件数。
-    assert len(result["data"]) <= 8192 + events_per_chunk
+    # 条目数封顶：触顶判定以事件为粒度即时生效，已解析条目恰好等于上限。
+    assert len(result["data"]) == 8192
     # 终止解析后停止读取：实际消费块数远小于供给。
     assert consumed < total_chunks
     # 与单事件截断同口径计数并标记 partial。

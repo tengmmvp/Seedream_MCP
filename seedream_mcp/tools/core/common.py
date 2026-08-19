@@ -194,7 +194,6 @@ async def execute_generation_handler(
         response_text = format_generation_response(
             completion_title,
             result,
-            context.prompt,
             context.size,
             auto_save_results,
             context.enable_auto_save,

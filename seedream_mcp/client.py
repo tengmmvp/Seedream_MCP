@@ -27,7 +27,7 @@ from .utils.core.errors import (
     handle_api_error,
     parse_retry_after,
 )
-from .utils.core.logs import get_logger, log_function_call
+from .utils.core.logs import get_logger
 from .utils.model.model_capabilities import get_max_reference_images, get_model_capabilities
 from .utils.core.validators import (
     ValidatedCommonParams,
@@ -74,19 +74,29 @@ class SharedRequestPlan:
         self.request_data: dict[str, Any] | None = None
         self.body: bytes | None = None
         self.validated_common_params: tuple[tuple[Any, ...], ValidatedCommonParams] | None = None
+        self._build_error: Exception | None = None
 
     async def get_or_build(
         self, builder: Callable[[], Awaitable[dict[str, Any]]]
     ) -> dict[str, Any]:
         """返回共享 request_data：首个到者执行 builder 构建，其余复用同一 dict。
 
-        builder 在锁内执行；构建抛出时不写入计划，后到者在锁内自行重试构建。
+        builder 在锁内执行；构建抛出时缓存首个异常并在锁内重放给后到者。批内
+        输入相同，重试构建只会重复读盘与解码等全量副作用，重放同一异常对象即可，
+        其 traceback 在多个接收方处累积追加不影响按 message 的错误消费。失败
+        缓存随 release 随计划一并清空，下一批次重新构建。
         """
         if self.request_data is not None:
             return self.request_data
         async with self._lock:
             if self.request_data is None:
-                self.request_data = await builder()
+                if self._build_error is not None:
+                    raise self._build_error
+                try:
+                    self.request_data = await builder()
+                except Exception as exc:
+                    self._build_error = exc
+                    raise
             return cast(dict[str, Any], self.request_data)
 
     async def get_or_serialize(
@@ -110,6 +120,7 @@ class SharedRequestPlan:
         self.request_data = None
         self.body = None
         self.validated_common_params = None
+        self._build_error = None
 
 
 # 当前批次的共享计划绑定，None 表示未绑定，直连调用走独立构建与序列化路径。
@@ -161,6 +172,9 @@ class SeedreamClient:
     """Seedream API 客户端。
 
     各生成方法在入口重新校验参数，公共库 API 与 MCP 工具后端两种调用路径行为一致。
+    四个生成方法保持同构的显式模板而非抽象为公共骨架：方法签名是公共库 API 的
+    直读契约，图片字段归一化与请求差异以平铺代码表达，引入间接层只会转移而不会
+    消除复杂度。
 
     Attributes:
         config: 客户端配置对象。
@@ -235,7 +249,6 @@ class SeedreamClient:
             request_data["tools"] = tools
         return request_data
 
-    @log_function_call
     async def text_to_image(
         self,
         prompt: str | None = None,
@@ -315,7 +328,6 @@ class SeedreamClient:
         except Exception as e:
             raise self._finalize_generation_error("文生图", e)
 
-    @log_function_call
     async def image_to_image(
         self,
         prompt: str | None = None,
@@ -422,7 +434,6 @@ class SeedreamClient:
         except Exception as e:
             raise self._finalize_generation_error("图文生图", e)
 
-    @log_function_call
     async def multi_image_fusion(
         self,
         prompt: str | None = None,
@@ -512,7 +523,6 @@ class SeedreamClient:
         except Exception as e:
             raise self._finalize_generation_error("多图融合", e)
 
-    @log_function_call
     async def sequential_generation(
         self,
         prompt: str | None = None,

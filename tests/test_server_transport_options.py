@@ -571,7 +571,7 @@ def test_transport_security_non_loopback_with_allowed_hosts(
         monkeypatch,
         SeedreamConfig(
             api_key="test_key",
-            http_allowed_hosts=["mcp.example.com", "mcp.example.com:*"],
+            http_allowed_hosts=("mcp.example.com", "mcp.example.com:*"),
         ),
     )
 
@@ -587,7 +587,7 @@ def test_transport_security_loopback_ignores_allowed_hosts(
     """回环绑定不读允许列表，仍维持回环白名单，不受 SEEDREAM_HTTP_ALLOWED_HOSTS 影响。"""
     _inject_transport_config(
         monkeypatch,
-        SeedreamConfig(api_key="test_key", http_allowed_hosts=["mcp.example.com"]),
+        SeedreamConfig(api_key="test_key", http_allowed_hosts=("mcp.example.com",)),
     )
 
     security = transport_module._transport_security_for_host("127.0.0.1")

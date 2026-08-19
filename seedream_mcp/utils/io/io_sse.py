@@ -414,6 +414,10 @@ async def parse_sse_response(
             if event is None:
                 continue
             apply_completed(*_classify_sse_event(event, model_id, items, log, sep - seg_start))
+            # 条目触顶即时停止解析本 chunk 剩余事件，上限以事件为粒度精确生效；
+            # 关闭响应与截断计数由下方 chunk 级触顶块统一承担。
+            if len(items) >= max_items:
+                break
 
         # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
         if len(items) >= max_items:

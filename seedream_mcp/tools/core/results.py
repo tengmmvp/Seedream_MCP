@@ -534,7 +534,6 @@ def _extract_truncated_events(result: dict[str, Any]) -> int | None:
 def format_generation_response(
     title: str,
     result: dict[str, Any],
-    prompt: str | None,
     size: str,
     auto_save_results: list[AutoSaveResult] | None = None,
     auto_save_enabled: bool = False,
@@ -547,7 +546,6 @@ def format_generation_response(
     提示词不在文本通道回显，完整值由 structuredContent.prompt 携带。
 
     Args:
-        prompt: 为保持既有调用签名保留，文本通道不回显。
         auto_save_error: 自动保存错误信息，存在时表示已降级跳过。
         images: 预提取的图片列表，None 时按需从 result 提取。
         saveable_indices: 可保存图片在归一化列表中的原始索引，与 auto_save_results
