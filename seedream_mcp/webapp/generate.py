@@ -7,6 +7,7 @@ structured_content 字典；落在保存根内的结果条目附 web_path 相对
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -48,7 +49,8 @@ _GenerationRunner = Callable[[_InputT, SeedreamConfig, Context | None], Awaitabl
 def augment_generation_payload(structured: dict[str, object], save_root: Path) -> None:
     """为落在保存根内的结果条目附 web_path 相对路径，供前端拼接图片端点。
 
-    保存根不可解析或条目路径异常时静默跳过，增强失败不影响既有响应字段。
+    条目缺 local_path、路径解析失败或越出保存根时静默跳过，增强只新增
+    web_path 字段，不改动既有内容。
     """
     data = structured.get("data")
     if not isinstance(data, list):
@@ -108,8 +110,12 @@ async def _run_web_generation(
     structured = result.structured_content if result.structured_content is not None else {}
     if not isinstance(structured, dict):
         structured = {}
-    try:
+
+    def _augment_payload() -> None:
         augment_generation_payload(structured, _resolve_default_base_dir(config))
+
+    try:
+        await asyncio.to_thread(_augment_payload)
     except SeedreamValidationError:
         logger.debug("保存根不可解析，跳过 web_path 增强")
     status = 200 if not result.is_error else _shared.generation_status(structured)

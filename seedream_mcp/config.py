@@ -684,8 +684,8 @@ def _pick_request_state_key_bytes(
 ) -> tuple[bytes, ...] | None:
     """按优先级取值后按逗号拆分并逐条 hex 解码为密钥字节，空值归 None。
 
-    条目不是合法十六进制时抛 SeedreamConfigError，消息给出格式要求与生成命令
-    提示且不回显密钥内容；解码后单钥字节数下限与重复键由 validate 校验。
+    解码失败的错误消息给出格式要求与生成命令提示，不回显密钥内容；解码后
+    单钥字节数下限与重复键由 validate 校验。
 
     Raises:
         SeedreamConfigError: 任一条目无法以十六进制解码。

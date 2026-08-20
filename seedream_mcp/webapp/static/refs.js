@@ -8,8 +8,9 @@ import { $, state } from "./api.js";
 
 const SINGLE_REF_LIMIT = 1;
 const FUSION_REF_MIN = 2;
-// data URI 有 4/3 膨胀，40MB 上传留出服务端 64MB 与单图 30MB 解码上限的余量。
-const UPLOAD_SOFT_LIMIT_BYTES = 40 * 1024 * 1024;
+// data URI 有 4/3 膨胀，累计 45MB 字符给服务端 64MB 请求体上限留余量，
+// 防多图融合多张上传触发 413。
+const UPLOAD_TOTAL_LIMIT_CHARS = 45 * 1024 * 1024;
 
 /* 声明各工具的参考图数量区间与提示词必填性；上限随当前模型能力收缩。 */
 export function toolConfig(tool) {
@@ -74,10 +75,26 @@ export function renderReferences() {
   $("ref-count-note").textContent = `${state.refs.length} / ${config.max}`;
 }
 
+/* 上传累计校验：对现有 data_uri 参考图按字符数求和，新增后总量超限即拒绝。
+   handleFiles 与灯箱回填均经 addReference 汇聚，此处是唯一闸口。 */
+function dataUriTotalChars() {
+  return state.refs.reduce(
+    (sum, ref) => (ref.kind === "data_uri" ? sum + ref.value.length : sum),
+    0,
+  );
+}
+
 export function addReference(kind, value, preview) {
   const config = toolConfig(state.tool);
   if (state.refs.length >= config.max) {
     alert(`该工具最多 ${config.max} 张参考图`);
+    return;
+  }
+  if (
+    kind === "data_uri" &&
+    dataUriTotalChars() + value.length > UPLOAD_TOTAL_LIMIT_CHARS
+  ) {
+    alert("参考图总量超过 45MB 上限，请改用图片 URL");
     return;
   }
   state.refs.push({ kind, value, preview: preview || null });
@@ -86,10 +103,6 @@ export function addReference(kind, value, preview) {
 
 export function handleFiles(files) {
   for (const file of files) {
-    if (file.size > UPLOAD_SOFT_LIMIT_BYTES) {
-      alert(`「${file.name}」超过 40MB，请改用图片 URL`);
-      continue;
-    }
     const reader = new FileReader();
     reader.onload = () =>
       addReference("data_uri", reader.result, reader.result);

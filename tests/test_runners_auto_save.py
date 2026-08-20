@@ -79,11 +79,7 @@ def _patch_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> list[dict[str, Any]]:
-    """monkeypatch SeedreamClient 的指定生成方法返回标准成功结果。
-
-    Returns:
-        被 patch 方法每次调用的关键字参数记录，供分发断言使用。
-    """
+    """monkeypatch SeedreamClient 指定生成方法返回标准成功结果，记录每次调用的关键字参数。"""
     calls: list[dict[str, Any]] = []
 
     async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:

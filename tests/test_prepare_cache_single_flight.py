@@ -88,7 +88,7 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
 
     assert call_count == 1
     assert first == second == "prepared:https://example.com/ref.png"
-    # 在途 task 完成后应被清理；HTTP URL 跳过缓存，缓存为空
+    # 在途 task 完成后清空在途登记；HTTP URL 跳过缓存，缓存为空
     assert len(client._image_preparer._prepare_inflight) == 0
     assert len(client._image_preparer._prepare_cache) == 0
 
@@ -131,7 +131,7 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     await inner_started.wait()
     assert len(client._image_preparer._prepare_inflight) == 1
 
-    # 取消创建者，底层 inflight task 不应被连带取消。
+    # 取消创建者，底层 inflight task 不受连带取消。
     creator.cancel()
 
     # 等待两个 task 终结。

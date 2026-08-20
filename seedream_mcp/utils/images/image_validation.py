@@ -422,7 +422,7 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
         skip_dimensions: 是否跳过本地文件的像素维度校验。
 
     Returns:
-        验证通过的图像路径或原始输入。
+        验证通过的图像输入：URL 原样返回，本地文件为绝对路径，Data URI 以归一化的 media type 重建返回。
 
     Raises:
         SeedreamValidationError: 图像输入格式无效或不可访问时抛出。

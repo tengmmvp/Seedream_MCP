@@ -40,7 +40,7 @@ async def test_prepare_image_input_invalidates_cache_when_local_file_size_change
     # 覆写为更长的内容，确保 size 维度变化使签名失效
     image_file.write_bytes(b"replaced-content-with-more-bytes")
 
-    # 第二次调用：签名变化 → cache miss → 重新调用底层
+    # 第二次调用：签名变化导致 cache miss，重新调用底层
     second = await client._image_preparer.prepare_image_input(str(image_file), roots_key)
     assert call_count == 2
     assert first != second

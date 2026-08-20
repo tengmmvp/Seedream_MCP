@@ -322,7 +322,7 @@ async def test_log_unretrieved_task_exception_warns_for_failed_task(
     log_unretrieved_task_exception(task)
 
     assert capture.warnings == ["后台共享任务失败: shared task failed"]
-    # warning 经 opt(exception=exc) 携带完整异常堆栈，满足错误日志记录完整堆栈的规范
+    # warning 经 opt(exception=exc) 携带完整异常堆栈，孤儿异常可从日志完整定位
     assert capture.opt_kwargs == [{"exception": task.exception()}]
 
 

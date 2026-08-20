@@ -559,8 +559,8 @@ def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> boo
     """验证图层拆分开关与模型的兼容性。
 
     图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，仅
-    5.0 Pro 支持；单张参考图输入的前提由 image_to_image 工具的输入形态保证。
-    None 视为未启用返回 False。
+    5.0 Pro 支持，未知模型放行由能力表统一判定；单张参考图输入的前提由
+    image_to_image 工具的输入形态保证。None 视为未启用返回 False。
 
     Raises:
         SeedreamValidationError: layer_decomposition 非布尔，或为真而模型不支持
@@ -589,9 +589,10 @@ def validate_background(
 ) -> str | None:
     """验证图片透明通道参数与模型的兼容性。
 
-    background 控制是否生成带透明通道的图片，仅 5.0 Pro 图生图支持，输入图的
-    格式约束由上游校验，此处做值域、模型门控与 output_format 互斥校验；透明
-    背景输出为带 alpha 的 png，与 jpeg 互斥同时指定时报错。
+    background 控制是否生成带透明通道的图片，仅 5.0 Pro 图生图支持，未知模型
+    放行由能力表统一判定。输入图的格式约束由上游校验，此处做值域、模型门控与
+    output_format 互斥校验；透明背景输出为带 alpha 的 png，与 jpeg 互斥同时
+    指定时报错。
 
     Raises:
         SeedreamValidationError: background 非字符串或取值不在 transparent/opaque

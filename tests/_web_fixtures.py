@@ -31,6 +31,8 @@ from seedream_mcp.webapp.constants import (
 
 _MAX_BODY = 64 * 1024 * 1024
 
+# Web 端点路径全集：与 routes.register_web_routes 的注册表双向对齐，注册断言
+# 按相等校验。新增端点须同步本清单，漏登记或漏注册都会使测试变红。
 EXPECTED_WEB_PATHS = frozenset(
     {
         WEB_ROOT_PATH,
@@ -84,16 +86,14 @@ def write_workspace_config(tmp_path: Path) -> Path:
 
 def prepare_static_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """以 tmp 目录顶替静态资源目录，写入 index 页、脚本与 404 页供各用例消费。"""
-    from seedream_mcp.webapp import meta as meta_module
-    from seedream_mcp.webapp import routes as routes_module
+    from seedream_mcp.webapp import constants as web_constants
 
     static_dir = tmp_path / "static"
     static_dir.mkdir()
     (static_dir / "index.html").write_text("<!doctype html><title>web</title>", encoding="utf-8")
     (static_dir / "404.html").write_text("<!doctype html><p>404</p>", encoding="utf-8")
     (static_dir / "app.js").write_bytes(b"// placeholder")
-    monkeypatch.setattr(meta_module, "STATIC_DIR", static_dir)
-    monkeypatch.setattr(routes_module, "STATIC_DIR", static_dir)
+    monkeypatch.setattr(web_constants, "STATIC_DIR", static_dir)
     return static_dir
 
 

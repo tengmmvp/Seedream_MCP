@@ -484,13 +484,16 @@ select:focus {
 }
 
 @keyframes dot-wave {
+
   0%,
   100% {
     opacity: 0.12;
   }
+
   8% {
     opacity: 0.85;
   }
+
   16% {
     opacity: 0.12;
   }
@@ -525,7 +528,17 @@ select:focus {
   object-fit: contain;
   background: var(--linen);
   display: block;
+}
+
+/* 仅可进灯箱的条目由 JS 加 zoomable 类，url-only 条目保持默认光标。 */
+.result-card img.zoomable {
   cursor: zoom-in;
+}
+
+.result-card-error {
+  padding: 12px;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 .result-card-info {

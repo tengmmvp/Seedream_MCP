@@ -49,6 +49,11 @@ _cwd_fallback_warned = False
 # 重试。活动配置变更时经 clear_resolved_env_root_cache 显式失效。
 _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 
+# 已 resolve 自动保存基础目录的进程级缓存，键与失效口径与回退根缓存一致，供 tools
+# 层的默认保存目录解析复用，消除已显式配置保存根时每次生成请求的重复
+# expanduser/resolve 文件系统调用。
+_RESOLVED_SAVE_BASE_DIR_CACHE: dict[str, Path] = {}
+
 # 工作区根目录提供者：由 config 模块加载时注入，返回活动配置的 workspace_root
 # 原始字符串，未配置返回 None；依赖方向为 config 向下注入，本模块不向上 import。
 EnvWorkspaceRootProvider = Callable[[], str | None]
@@ -69,11 +74,37 @@ def register_env_workspace_root_provider(provider: EnvWorkspaceRootProvider) -> 
 
 
 def clear_resolved_env_root_cache() -> None:
-    """清空已 resolve 回退根的进程级缓存。
+    """清空已 resolve 配置路径的进程级缓存。
 
-    活动配置变更时由 config 侧调用，使后续访问按新配置重新解析。
+    覆盖回退工作区根与自动保存基础目录两处缓存。活动配置变更时由 config 侧调用，
+    使后续访问按新配置重新解析。
     """
     _RESOLVED_ENV_ROOT_CACHE.clear()
+    _RESOLVED_SAVE_BASE_DIR_CACHE.clear()
+
+
+def resolve_cached_save_base_dir(configured_dir: str) -> Path:
+    """解析已配置的自动保存基础目录，按配置原始字符串做进程级缓存。
+
+    缓存口径与回退根一致：仅缓存 expanduser 后为绝对路径的配置值，相对路径的
+    resolve 结果随进程 CWD 变化须每次现算；解析异常向上抛出且不缓存，下次调用
+    重试。缓存随 clear_resolved_env_root_cache 失效。
+
+    Args:
+        configured_dir: 配置的自动保存基础目录原始字符串。
+
+    Returns:
+        resolve 后的保存基础目录。
+    """
+    expanded_dir = Path(configured_dir).expanduser()
+    if not expanded_dir.is_absolute():
+        return expanded_dir.resolve()
+    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(configured_dir)
+    if cached_dir is not None:
+        return cached_dir
+    resolved_dir = expanded_dir.resolve()
+    _RESOLVED_SAVE_BASE_DIR_CACHE[configured_dir] = resolved_dir
+    return resolved_dir
 
 
 def _resolve_configured_root() -> Path | None:

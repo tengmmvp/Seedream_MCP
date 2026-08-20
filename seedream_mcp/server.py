@@ -153,8 +153,9 @@ from .utils.model.model_capabilities import (
     get_model_capabilities,
 )
 
-# resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 为本模块直接
-# 使用，其余供 tests 与既有 import 路径经 server 模块访问。
+# resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 与
+# rebind_request_state_security 为本模块直接使用，其余供 tests 与既有 import 路径
+# 经 server 模块访问。
 from .resources import (  # noqa: F401
     SERVER_NAME,
     SERVER_VERSION,

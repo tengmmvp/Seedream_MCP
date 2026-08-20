@@ -1,7 +1,7 @@
 """AutoSaveManager Base64 解码守卫与批量保存异常处理的单元测试。
 
 覆盖 _prepare_base64_payload 的空数据/估算超限/解码失败/非图片格式/解码后超限守卫、
-_run_batch_save 的 CancelledError 重抛与 Exception→fallback 降级分支，以及
+_run_batch_save 的 CancelledError 重抛与 Exception 降级 fallback 分支，以及
 AutoSaveResult.to_dict 的数据字段净化与 markdown alt 兜底。
 """
 
@@ -295,7 +295,7 @@ async def test_save_multiple_base64_images_end_to_end(
     payload = base64.b64encode(png_bytes).decode()
     image_data = [
         {"b64_json": payload, "prompt": "cat"},
-        {"b64_json": "", "prompt": "bad"},  # 空 payload → 保存失败
+        {"b64_json": "", "prompt": "bad"},  # 空 payload 保存失败
     ]
 
     results = await manager.save_multiple_base64_images(image_data, tool_name="t2i")

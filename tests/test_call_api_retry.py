@@ -327,7 +327,7 @@ async def test_call_api_429_uses_retry_after_for_backoff(
 
     assert calls == 2
     assert result["success"] is True
-    # retry_after=2.0 路径：单次退避等于 Retry-After 值；指数路径 attempt 0 应为 2**0=1.0
+    # retry_after=2.0 路径：单次退避等于 Retry-After 值；指数路径 attempt 0 为 2**0=1.0
     assert sleep_durations == [2.0]
 
 
@@ -371,6 +371,63 @@ async def test_call_api_429_retry_after_above_backoff_cap(
     assert result["success"] is True
     # retry_after=120 超过 _MAX_BACKOFF_SECONDS=60，应信任服务端值 120 而非被截断为 60
     assert sleep_durations == [120.0]
+
+
+@pytest.mark.parametrize(
+    "jitter,slept",
+    [
+        pytest.param(-0.2, 2.0, id="negative-floor"),
+        pytest.param(0.2, 2.4, id="positive-scale"),
+    ],
+)
+@pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
+async def test_call_api_429_retry_after_jitter_floors_at_nominal(
+    monkeypatch: pytest.MonkeyPatch,
+    send_method: str,
+    extra_body: dict[str, Any],
+    jitter: float,
+    slept: float,
+) -> None:
+    """Retry-After 退避的负向抖动夹取回名义值，正向抖动仍放大至 1.2 倍。
+
+    回归背景为抖动乘数可直接把服务端明示的等待下限压低 20%，重试早于
+    Retry-After 要求发起。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    calls = 0
+    sleep_durations: list[float] = []
+
+    async def _capture_sleep(*args: object, **kwargs: object) -> None:
+        del kwargs
+        if args:
+            sleep_durations.append(float(args[0]))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "sleep", _capture_sleep)
+    monkeypatch.setattr(random, "uniform", lambda *_: jitter)
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            if calls < 2:
+                raise SeedreamAPIError("rate limited", status_code=429, retry_after=2.0)
+            return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+        monkeypatch.setattr(client, send_method, fake_send)
+        result = await client._call_api("text_to_image", {"prompt": "p", **extra_body})
+
+    assert calls == 2
+    assert result["success"] is True
+    # 负向抖动等待不低于名义 Retry-After，正向抖动可达 1.2 倍
+    assert sleep_durations == [slept]
 
 
 async def test_call_api_no_status_code_not_retried(

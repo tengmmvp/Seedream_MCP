@@ -171,7 +171,7 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
 ```
 
-鉴权模型：静态页面（`/web` 与 `/web/static`）免令牌加载，页面本身不含任何数据；全部 `/web/api` 接口强制 Bearer 令牌——首次访问在页面输入一次即可，令牌仅保存在浏览器本地，图片经服务端中转以 blob 加载，令牌不出现在 URL 中。回环绑定且未配置令牌的部署全程无感。
+鉴权方式：网页本身无需令牌即可打开；网页的功能接口在部署配置了令牌时需要验证——首次使用在页面中输入一次即可，令牌只保存在浏览器本地，不会出现在网址中。仅本机使用且未配置令牌时，全程无需输入任何东西，接口也只接受来自本页面与本机程序的请求。
 
 ## ⚙️ 启动参数
 

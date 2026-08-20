@@ -62,7 +62,7 @@ def test_every_public_export_resolves_via_getattr() -> None:
 
 
 def test_unknown_attribute_raises_attribute_error() -> None:
-    """访问未声明的属性应抛出 AttributeError，而非静默返回 None。"""
+    """访问未声明的属性须抛出 AttributeError，而非静默返回 None。"""
     import pytest
 
     import seedream_mcp

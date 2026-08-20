@@ -368,7 +368,7 @@ async def test_download_image_retries_5xx_then_succeeds(
 async def test_download_image_exhausts_retries_then_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """所有尝试均返回 5xx → 退避重试用尽后抛出 last_error，文件未落盘。"""
+    """所有尝试均返回 5xx 时，退避重试用尽后抛出 last_error，文件未落盘。"""
     manager = DownloadManager()
     # _FakeSession 超出序列后重复返回最后一个响应，故所有尝试均为 500
     session = _FakeSession([_FakeResponse(500, {})])

@@ -71,6 +71,28 @@ jobs:
       - name: 🧱 Check package build
         run: uv build --wheel
 
+      - name: 🧩 Assert wheel assets
+        run: |
+          uv run python -c "
+          import glob, sys, zipfile
+          wheels = sorted(glob.glob('dist/*.whl'))
+          if not wheels:
+              sys.exit('dist/ 下未找到 wheel')
+          with zipfile.ZipFile(wheels[-1]) as zf:
+              names = set(zf.namelist())
+          required = [
+              'seedream_mcp/webapp/static/index.html',
+              'seedream_mcp/webapp/static/style.css',
+              'seedream_mcp/webapp/static/main.js',
+              'seedream_mcp/webapp/static/404.html',
+              'seedream_mcp/skills/seedream-image-generation/SKILL.md',
+          ]
+          missing = [asset for asset in required if asset not in names]
+          if missing:
+              sys.exit(f'wheel 缺少资产: {missing}')
+          print('✅ wheel 资产断言通过')
+          "
+
   # 发布到 PyPI：基于 OIDC Trusted Publishing，用短期令牌替代长期 API token。
   pypi-release:
     name: 📤 Publish to PyPI

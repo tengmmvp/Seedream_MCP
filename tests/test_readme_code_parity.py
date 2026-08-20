@@ -186,8 +186,8 @@ def _style_prompt_names(name: str) -> set[str]:
 def test_tool_param_bullets_exactly_match_input_model_fields() -> None:
     """各工具参数 bullet 清单与输入模型字段集全等，双向不得缺漏。
 
-    方向上文档不得缺参数（模型新增字段而文档漏更即失败）；当前两侧精确相等，
-    文档多列参数同样视为漂移，防止文档残留已删除的字段误导调用方。
+    模型新增字段而文档漏更即失败；两侧按精确相等断言，文档多列参数同样
+    视为漂移，防止文档残留已删除的字段误导调用方。
     """
     bullets = _tool_param_bullets(BASE_README)
     assert set(bullets) == set(_TOOL_INPUT_MODELS), (

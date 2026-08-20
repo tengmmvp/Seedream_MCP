@@ -45,6 +45,8 @@ services:
       - SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=${SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES:-10737418240}
       # 落盘 fsync 开关，开启提升崩溃一致性、略降写入吞吐。
       - SEEDREAM_AUTO_SAVE_FSYNC=${SEEDREAM_AUTO_SAVE_FSYNC:-false}
+      # 生成结果附带已保存图片的缩略图预览，依赖自动保存，关闭退化纯文本。
+      - SEEDREAM_PREVIEW_ENABLED=${SEEDREAM_PREVIEW_ENABLED:-true}
       # 上游响应
       # 响应体读取总量上限（字节），留空按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导。
       - SEEDREAM_RESPONSE_BODY_LIMIT=${SEEDREAM_RESPONSE_BODY_LIMIT:-}
@@ -53,6 +55,12 @@ services:
       - SEEDREAM_WORKSPACE_ROOT=${SEEDREAM_WORKSPACE_ROOT:-}
       # streamable-http 请求体上限（字节），不低于 1MB。
       - SEEDREAM_HTTP_MAX_BODY_SIZE=${SEEDREAM_HTTP_MAX_BODY_SIZE:-67108864}
+      # Web 操作台开关，开启后浏览器直用生成与图库页面；默认关闭，stdio 不受影响。
+      - SEEDREAM_WEB_ENABLED=${SEEDREAM_WEB_ENABLED:-false}
+      # 非回环绑定的 Host 头允许列表（逗号分隔），留空整体关闭 Host 校验。
+      - SEEDREAM_HTTP_ALLOWED_HOSTS=${SEEDREAM_HTTP_ALLOWED_HOSTS:-}
+      # requestState 多副本共享密钥环，留空保持进程内临时密钥，单进程无需配置。
+      - SEEDREAM_REQUEST_STATE_KEYS=${SEEDREAM_REQUEST_STATE_KEYS:-}
       # 性能与流式
       - SEEDREAM_IMAGE_PREPARE_CONCURRENCY=${SEEDREAM_IMAGE_PREPARE_CONCURRENCY:-5}
       - SEEDREAM_PREPARE_CACHE_MAX=${SEEDREAM_PREPARE_CACHE_MAX:-32}

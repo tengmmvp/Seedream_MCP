@@ -117,12 +117,28 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
         return None
 
 
+async def build_thumbnail_bytes_limited(image_path: Path) -> bytes | None:
+    """在进程级解码限流信号量内生成单张缩略图字节。
+
+    与批量预览共用同一并发上限，Web 操作台缩略图端点等独立调用方不绕开限流；
+    信号量绑定当前事件循环且随循环更替自动重建，跨循环调用安全。
+
+    Args:
+        image_path: 已保存图片的文件路径。
+
+    Returns:
+        JPEG 缩略图字节；无法生成时为 None。
+    """
+    async with _get_decode_semaphore():
+        return await asyncio.to_thread(build_thumbnail_bytes, image_path)
+
+
 async def build_preview_contents(image_paths: list[Path]) -> list[ImageContent]:
     """限流并发为已保存图片生成 ImageContent 预览列表。
 
-    PIL 解码与缩放为同步 CPU 操作，逐张经 asyncio.to_thread 下放工作线程执行，
-    并发由 PREVIEW_DECODE_CONCURRENCY 信号量限流；生成失败的路径跳过，返回列表
-    仅含成功项且与输入顺序一致。空输入返回空列表。
+    PIL 解码与缩放为同步 CPU 操作，逐张经 build_thumbnail_bytes_limited 下放
+    工作线程并由 PREVIEW_DECODE_CONCURRENCY 信号量限流；生成失败的路径跳过，
+    返回列表仅含成功项且与输入顺序一致。空输入返回空列表。
 
     Args:
         image_paths: 自动保存成功的图片文件路径列表。
@@ -132,13 +148,10 @@ async def build_preview_contents(image_paths: list[Path]) -> list[ImageContent]:
     """
     if not image_paths:
         return []
-    semaphore = _get_decode_semaphore()
 
-    async def _decode_with_limit(path: Path) -> bytes | None:
-        async with semaphore:
-            return await asyncio.to_thread(build_thumbnail_bytes, path)
-
-    thumbnails = await asyncio.gather(*(_decode_with_limit(path) for path in image_paths))
+    thumbnails = await asyncio.gather(
+        *(build_thumbnail_bytes_limited(path) for path in image_paths)
+    )
     contents: list[ImageContent] = []
     for thumbnail in thumbnails:
         if thumbnail is None:

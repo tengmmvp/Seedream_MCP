@@ -122,6 +122,3 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = "test_*.py"
-markers = [
-    "slow: 重量级守护用例，本地可用 -m \"not slow\" 排除加速，CI 保持默认全量运行",
-]

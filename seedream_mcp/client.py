@@ -1383,9 +1383,16 @@ class SeedreamClient:
 
             # 等待时延按 ±20% 抖动：同一批次并行的多条请求收到相同 Retry-After
             # 或走相同指数退避时，抖动拉开重试相位，避免同步群聚再击上游。
+            # Retry-After 为服务端明示的等待下限，负向抖动夹取回名义值，正向抖动
+            # 仍可放大至 1.2 倍，重试不早于服务端要求发起。
             if attempt < total_attempts - 1:
                 if pending_retry_after is not None:
-                    await asyncio.sleep(pending_retry_after * (1 + random.uniform(-0.2, 0.2)))
+                    await asyncio.sleep(
+                        max(
+                            pending_retry_after,
+                            pending_retry_after * (1 + random.uniform(-0.2, 0.2)),
+                        )
+                    )
                 else:
                     capped_exponent = 2 ** min(attempt, _BACKOFF_EXPONENT_CAP)
                     await asyncio.sleep(

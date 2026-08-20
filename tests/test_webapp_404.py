@@ -89,3 +89,48 @@ async def test_web_disabled_keeps_default_plain_404(
 
     assert response.status_code == 404
     assert not response.headers.get("content-type", "").startswith("text/html")
+
+
+async def test_trailing_slash_redirects_to_trimmed_path(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """尾斜杠路径 307 到去尾斜杠形态，恢复被兜底路由吞掉的 redirect_slashes 语义。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        mcp_response = await client.get("/mcp/", follow_redirects=False)
+        web_response = await client.get("/web/", follow_redirects=False)
+        unknown_final = await client.get("/unknown/", follow_redirects=True)
+
+    assert mcp_response.status_code == 307
+    assert mcp_response.headers["location"] == "/mcp"
+    assert web_response.status_code == 307
+    assert web_response.headers["location"] == "/web"
+    assert unknown_final.status_code == 404
+
+
+async def test_page_responses_carry_security_headers(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """入口页与 404 页响应携带 CSP 与 nosniff，收敛脚本注入与 MIME 嗅探面。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    index_response = await _get(app, "/web")
+    missing_response = await _get(app, "/random/nowhere")
+
+    for response in (index_response, missing_response):
+        assert "default-src 'self'" in response.headers["content-security-policy"]
+        assert "script-src 'self'" in response.headers["content-security-policy"]
+        assert response.headers["x-content-type-options"] == "nosniff"

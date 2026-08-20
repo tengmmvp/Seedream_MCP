@@ -18,6 +18,7 @@ from seedream_mcp.transport import (
     _HealthCheckMiddleware,
     _LimitRequestBodyMiddleware,
     _LoopbackHostGuardMiddleware,
+    _WebOriginGuardMiddleware,
     _attach_streamable_http_middleware,
     _warn_remote_exposure,
 )
@@ -150,6 +151,162 @@ def test_attach_omits_exempt_kwargs_when_web_disabled(active_config: None) -> No
     assert "exempt_prefixes" not in kwargs
 
 
+def test_attach_assembles_origin_guard_for_web_without_token(active_config: None) -> None:
+    """web_enabled 且无令牌时以 Origin 守卫补位 Bearer，占据鉴权层最内侧。"""
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "", web_enabled=True)
+
+    # 守卫与 Bearer 同槽：add_middleware 后添加者居前，守卫先于请求体上限装配，
+    # 执行序依次为 LoopbackHostGuard、HealthCheck、LimitRequestBody、Guard。
+    assert app.attached_classes() == [
+        _LoopbackHostGuardMiddleware,
+        _HealthCheckMiddleware,
+        _LimitRequestBodyMiddleware,
+        _WebOriginGuardMiddleware,
+    ]
+
+
+def test_attach_omits_origin_guard_when_token_present(active_config: None) -> None:
+    """有令牌时 Origin 守卫不装配，Bearer 已挡 drive-by，API 访问由令牌判定。"""
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret", web_enabled=True)
+
+    assert _WebOriginGuardMiddleware not in app.attached_classes()
+    assert app.bearer_kwargs() is not None
+
+
+def test_attach_passes_api_prefix_to_origin_guard(active_config: None) -> None:
+    """守卫的 API 前缀取自 webapp 常量单一来源，带尾斜杠避免误守 /web/api 同名前缀。"""
+    from seedream_mcp.webapp.constants import WEB_API_PREFIX
+
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "", web_enabled=True)
+
+    guard_kwargs = next(
+        ref.kwargs for ref in app.user_middleware if ref.cls is _WebOriginGuardMiddleware
+    )
+    assert guard_kwargs.get("api_prefix") == f"{WEB_API_PREFIX}/"
+
+
+# ==================== Origin 守卫同源判定 ====================
+
+_API_PREFIX = "/web/api/"
+
+
+def _make_guard_app() -> tuple[list[object], _WebOriginGuardMiddleware]:
+    """构造记录到达路径的守卫中间件与下游替身，返回记录列表与守卫实例。"""
+    reached: list[object] = []
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        reached.append(scope.get("path"))
+
+    return reached, _WebOriginGuardMiddleware(downstream, api_prefix=_API_PREFIX)
+
+
+async def _run_guard(guard: _WebOriginGuardMiddleware, scope: dict) -> list[dict]:
+    sent: list[dict] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    await guard(scope, None, send)
+    return sent
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        (b"http://127.0.0.1:8000", b"127.0.0.1:8000"),
+        (b"http://127.0.0.1", b"127.0.0.1"),
+        (b"http://LOCALHOST:8000", b"localhost:8000"),
+        (b"http://[::1]:8000", b"[::1]:8000"),
+    ],
+)
+async def test_origin_guard_passes_same_origin(origin: bytes, host: bytes) -> None:
+    """同源 Origin 放行进入下游，netloc 比对忽略大小写、IPv6 方括号形态参与比对。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": "/web/api/config-info",
+            "headers": [(b"origin", origin), (b"host", host)],
+        },
+    )
+
+    assert reached == ["/web/api/config-info"]
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("origin", "host"),
+    [
+        (b"http://evil.example", b"127.0.0.1:8000"),
+        (b"http://127.0.0.1:9999", b"127.0.0.1:8000"),
+        (b"http://127.0.0.1:8000", b"127.0.0.1"),
+        (b"null", b"127.0.0.1:8000"),
+        (b"http://127.0.0.1:8000", None),
+    ],
+)
+async def test_origin_guard_rejects_cross_origin(origin: bytes, host: bytes | None) -> None:
+    """跨源 Origin 一律 403：域名不同、端口不一致、null 形态与 Host 缺失均拒绝。"""
+    reached, guard = _make_guard_app()
+    headers = [(b"origin", origin)] + ([] if host is None else [(b"host", host)])
+
+    sent = await _run_guard(
+        guard, {"type": "http", "path": "/web/api/config-info", "headers": headers}
+    )
+
+    assert reached == []
+    assert sent[0]["status"] == 403
+    body = sent[1]["body"].decode("utf-8")
+    assert "invalid_origin" in body
+
+
+async def test_origin_guard_passes_without_origin_header() -> None:
+    """无 Origin 头放行，curl 等非浏览器客户端与本地进程不受影响。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {"type": "http", "path": "/web/api/config-info", "headers": [(b"host", b"127.0.0.1")]},
+    )
+
+    assert reached == ["/web/api/config-info"]
+    assert sent == []
+
+
+@pytest.mark.parametrize("path", ["/web", "/web/static/app.js", "/mcp", "/webx/api/x"])
+async def test_origin_guard_only_checks_api_prefix(path: str) -> None:
+    """非 API 前缀路径不校验 Origin，静态页面与 MCP 端点不受守卫影响。"""
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "path": path,
+            "headers": [(b"origin", b"http://evil.example"), (b"host", b"127.0.0.1")],
+        },
+    )
+
+    assert reached == [path]
+    assert sent == []
+
+
+async def test_origin_guard_passes_non_http_scope() -> None:
+    """lifespan 等非 http 流量直接透传，不读 headers。"""
+    reached, guard = _make_guard_app()
+
+    await guard({"type": "lifespan"}, None, None)
+
+    assert reached == [None]
+
+
 # ==================== 暴露风险告警文案测试 ====================
 
 
@@ -183,12 +340,21 @@ def test_warn_remote_exposure_reports_truthful_auth_state(
 def test_warn_remote_exposure_appends_web_notice_when_enabled(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """web_enabled 时告警追加 Web 豁免语义说明，默认形态不出现该文案。"""
+    """web_enabled 时告警按鉴权状态分支追加 Web 说明，默认形态不出现该文案。"""
     _warn_remote_exposure("127.0.0.1", True)
     assert "Web 操作台已开启" not in capsys.readouterr().err
 
     _warn_remote_exposure("127.0.0.1", True, web_enabled=True)
 
-    output = capsys.readouterr().err
-    assert "Web 操作台已开启" in output
-    assert "/web/api 接口仍要求 Bearer 令牌" in output
+    token_output = capsys.readouterr().err
+    assert "Web 操作台已开启" in token_output
+    assert "/web/api 接口仍要求 Bearer 令牌" in token_output
+    assert "未配置令牌" not in token_output
+
+    _warn_remote_exposure("127.0.0.1", False, web_enabled=True)
+
+    no_token_output = capsys.readouterr().err
+    assert "Web 操作台已开启且未配置令牌" in no_token_output
+    assert "跨源请求将被拒绝" in no_token_output
+    assert "建议配置 --auth-token" in no_token_output
+    assert "仍要求 Bearer 令牌" not in no_token_output

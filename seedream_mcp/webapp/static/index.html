@@ -86,7 +86,7 @@
                 <input
                   type="file"
                   id="ref-file"
-                  accept="image/jpeg,image/png,image/webp,image/bmp,image/tiff,image/heic,image/heif"
+                  accept="image/gif,image/jpeg,image/png,image/webp,image/bmp,image/tiff,image/heic,image/heif"
                   multiple
                   hidden
                 />
@@ -111,7 +111,7 @@
                 <label class="field-label" for="size">尺寸</label>
                 <select id="size"></select>
               </div>
-              <div class="field" id="custom-size-field">
+              <div class="field hidden" id="custom-size-field">
                 <label class="field-label" for="custom-size">自定义宽高</label>
                 <div class="custom-size-row">
                   <input
@@ -216,7 +216,11 @@
 
           <section class="panel result-panel">
             <div class="result-status" id="result-status">尚未生成</div>
-            <div class="result-loading hidden" id="result-loading" aria-hidden="true">
+            <div
+              class="result-loading hidden"
+              id="result-loading"
+              aria-hidden="true"
+            >
               <div class="render-dots" id="render-dots"></div>
             </div>
             <div class="result-grid" id="result-grid"></div>
@@ -257,7 +261,7 @@
       </section>
     </main>
 
-    <div class="lightbox hidden" id="lightbox">
+    <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true">
       <div class="lightbox-inner">
         <img id="lightbox-img" alt="预览" />
         <div class="lightbox-bar">

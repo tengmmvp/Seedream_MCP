@@ -14,6 +14,23 @@ from seedream_mcp.utils.io.io_save import (
 )
 
 
+def _oversized_header_png(width: int, height: int) -> bytes:
+    """真实 1x1 PNG 改写 IHDR 宽高为给定值并重算 CRC，结构合法可被 PIL 识别。
+
+    头尺寸可任意放大而文件本身只有几十字节，正是解压炸弹的字节形态。
+    """
+    import io
+    import struct
+    import zlib
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+    forged = bytearray(buffer.getvalue())
+    forged[16:29] = struct.pack(">II5B", width, height, 8, 2, 0, 0, 0)
+    forged[29:33] = struct.pack(">I", zlib.crc32(bytes(forged[12:29])) & 0xFFFFFFFF)
+    return bytes(forged)
+
+
 async def test_save_multiple_images_aggregates_partial_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -116,19 +133,9 @@ async def test_save_image_rejects_oversized_pixel_header(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """下载内容像素头超过 36M 上限时删除落盘文件并按保存失败降级保留 URL。"""
-    import io
-    import struct
-    import zlib
-
-    # 真实 1x1 PNG 改写 IHDR 宽高为 10000x10000 并重算 CRC：结构合法可被 PIL 识别，
-    # 头尺寸超限而文件本身只有几十字节，正是解压炸弹的字节形态。
-    buffer = io.BytesIO()
-    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
-    bomb = bytearray(buffer.getvalue())
-    bomb[16:29] = struct.pack(">II5B", 10_000, 10_000, 8, 2, 0, 0, 0)
-    bomb[29:33] = struct.pack(">I", zlib.crc32(bytes(bomb[12:29])) & 0xFFFFFFFF)
+    bomb = _oversized_header_png(10_000, 10_000)
     target = tmp_path / "bomb.png"
-    target.write_bytes(bytes(bomb))
+    target.write_bytes(bomb)
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
@@ -152,6 +159,126 @@ async def test_save_image_rejects_oversized_pixel_header(
     assert "像素" in (result.error or "")
     await drain_background_cleanup_tasks()
     await manager.close()
+
+
+async def test_save_image_rejects_decompression_bomb_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """头像素超过 2 倍上限触发 PIL DecompressionBombError 时按像素超限口径拒绝。
+
+    回归背景为该异常是 Exception 直接子类而非 OSError 子类，此前 except 元组接不
+    住，异常击穿保存降级链路成为未知错误且落盘文件不被清理。9000x9000=81M 超过
+    2x36M，打开阶段即抛错，具体尺寸不可得，错误文案不含宽高形态。
+    """
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    bomb = _oversized_header_png(9_000, 9_000)
+    target = tmp_path / "bomb_error.png"
+    target.write_bytes(bomb)
+
+    # 复位就绪标志强制走冷路径，本次调用内 MAX_IMAGE_PIXELS 被置为 36M，81M 头
+    # 像素在打开阶段触发 DecompressionBombError 而非显式头尺寸校验分支。
+    monkeypatch.setattr(auto_save_module, "_decoders_ready", False)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
+
+    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict:
+        del url, save_path, fsync
+        return {
+            "success": True,
+            "file_path": str(target),
+            "file_size": len(bomb),
+            "download_time": 0.0,
+            "content_type": "image/png",
+            "attempts": 1,
+        }
+
+    monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+    monkeypatch.setattr(manager.download_manager, "validate_url", lambda url: True)
+
+    result = await manager.save_image("http://x/bomb_error.png", prompt="p")
+
+    error = result.error or ""
+    assert result.success is False
+    assert not target.exists()
+    assert "超过保存上限" in error
+    assert "9000x9000" not in error
+    await drain_background_cleanup_tasks()
+    await manager.close()
+
+
+async def test_save_image_rejects_pixels_between_limit_and_double(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """头像素在 36M 至 2 倍上限的告警区间由显式头尺寸校验拒绝并携带具体尺寸。
+
+    PIL 在该区间仅告警不抛错，锁定显式校验分支独立可用，不依赖解压炸弹异常路径。
+    """
+    bomb = _oversized_header_png(6_100, 6_100)  # 37.21M，介于 36M 与 72M 之间
+    target = tmp_path / "band.png"
+    target.write_bytes(bomb)
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
+
+    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict:
+        del url, save_path, fsync
+        return {
+            "success": True,
+            "file_path": str(target),
+            "file_size": len(bomb),
+            "download_time": 0.0,
+            "content_type": "image/png",
+            "attempts": 1,
+        }
+
+    monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+    monkeypatch.setattr(manager.download_manager, "validate_url", lambda url: True)
+
+    result = await manager.save_image("http://x/band.png", prompt="p")
+
+    assert result.success is False
+    assert not target.exists()
+    assert "6100x6100" in (result.error or "")
+    await drain_background_cleanup_tasks()
+    await manager.close()
+
+
+def test_pixel_limit_rejection_cold_path_initializes_decoders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """冷路径调用时设置解压炸弹阈值并注册 HEIF 解码器，再次调用不重复初始化。
+
+    io 组不反向依赖 images 组的注册入口，初始化在 io_save 内同口径惰性执行；以
+    注册计数 spy 断言调用与幂等，不构造真实 HEIF 载荷。
+    """
+    import io
+
+    import pillow_heif
+    from PIL import Image as PilImage
+
+    from seedream_mcp.utils.io import io_save as auto_save_module
+
+    tiny = tmp_path / "tiny.png"
+    buffer = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+    tiny.write_bytes(buffer.getvalue())
+
+    register_calls: list[int] = []
+
+    def counting_register(**kwargs: object) -> None:
+        del kwargs
+        register_calls.append(1)
+
+    monkeypatch.setattr(auto_save_module, "_decoders_ready", False)
+    monkeypatch.setattr(pillow_heif, "register_heif_opener", counting_register)
+    monkeypatch.setattr(PilImage, "MAX_IMAGE_PIXELS", 89_478_485)
+
+    assert auto_save_module._pixel_limit_rejection(tiny) is None
+    assert register_calls == [1]
+    assert PilImage.MAX_IMAGE_PIXELS == auto_save_module._DOWNLOAD_MAX_PIXELS
+
+    auto_save_module._pixel_limit_rejection(tiny)
+    assert register_calls == [1]
 
 
 async def test_maybe_cleanup_throttle_shared_across_request_subdirs(

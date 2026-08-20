@@ -5,10 +5,10 @@ atomic_replace_from_fd_sync，另有 is_reparse_point 判定 NTFS junction 等
 非符号链接型 reparse point，供 io_path 的浏览扫描使用。open_no_follow_read
 拒绝最终路径分量为符号链接：支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝，
 Windows 等不支持平台退化为 lstat 与 fstat 的同一性比对兜底，闭合 TOCTOU 竞态。
-atomic_replace_from_fd 封装「随机临时文件→写入→os.replace 原子替换→失败清理」
-协议供 io_storage 与 io_download 复用，writer 可返回 Path 覆盖最终路径，以支持
-按字节签名修正扩展名等写入后才知的目标。共享函数抛 OSError，由调用方按各自
-异常类型包装。
+atomic_replace_from_fd 封装随机临时文件写入、os.replace 原子替换与失败清理的
+完整协议供 io_storage 与 io_download 复用，writer 可返回 Path 覆盖最终路径，以
+支持按字节签名修正扩展名等写入后才知的目标。共享函数抛 OSError，由调用方按
+各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
 父目录在校验与打开之间被替换为指向工作区外的符号链接时读取会逃逸出工作区，该攻击

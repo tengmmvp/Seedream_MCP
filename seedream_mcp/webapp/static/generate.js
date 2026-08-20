@@ -3,7 +3,14 @@
 
 "use strict";
 
-import { $, apiFetch, fetchBlobUrl, revokeObjectUrls, state } from "./api.js";
+import {
+  $,
+  apiFetch,
+  fetchBlobUrl,
+  fetchExternalBlobUrl,
+  revokeObjectUrls,
+  state,
+} from "./api.js";
 import { renderReferences, toolConfig } from "./refs.js";
 import { openLightbox } from "./gallery.js";
 
@@ -211,20 +218,22 @@ export async function submitGenerate(event) {
     });
     const payload = await response.json();
     if (response.ok) {
+      await renderResults(payload);
       setStatus("done", "完成。");
-      renderResults(payload);
-    } else if (payload && payload.error && payload.error.message) {
+    } else {
       setStatus("failed", "生成失败。");
-      showResultError(payload.error);
-    } else if (payload && payload.error_description) {
-      setStatus("failed", "生成失败。");
-      showResultError({
-        type: payload.error,
-        message: payload.error_description,
-      });
+      showResultError(normalizePayloadError(payload, response));
     }
   } catch (error) {
-    if (error.message !== "unauthorized") {
+    if (error.message === "unauthorized") {
+      setStatus("failed", "需要重新输入令牌。");
+    } else if (error instanceof SyntaxError) {
+      setStatus("failed", "生成失败。");
+      showResultError({
+        type: "bad_response",
+        message: "响应不是有效的 JSON，服务可能异常，请稍后重试。",
+      });
+    } else {
       setStatus("failed", "请求失败。");
       showResultError({
         type: "network",
@@ -243,35 +252,41 @@ function showResultError(error) {
   box.classList.remove("hidden");
 }
 
-/* web_path 优先走本服务图片端点（blob 免令牌入 URL），否则回退上游 url。 */
+/* 失败载荷归一：error.message、error_description、状态码三级回退，未知响应
+   形态也给出可读信息。 */
+function normalizePayloadError(payload, response) {
+  const error = payload && payload.error;
+  if (error && typeof error === "object" && error.message) return error;
+  if (payload && typeof payload.error_description === "string") {
+    return { type: error || "error", message: payload.error_description };
+  }
+  return { type: error || "error", message: `HTTP ${response.status}` };
+}
+
+/* 结果渲染：web_path 优先走本服务鉴权图片端点（blob 免令牌入 URL），外链 url
+   走裸 fetch 防令牌外送、失败回退 img.src 直连（跨域 img 标签不受 CORS 限制）。
+   单张失败只降级该卡片显示占位错误，不中断整批渲染。 */
 async function renderResults(payload) {
   const grid = $("result-grid");
   const items = Array.isArray(payload.data) ? payload.data : [];
   for (const item of items) {
     const card = document.createElement("div");
     card.className = "result-card";
+    appendCardInfo(card, item);
     if (item.web_path || item.url) {
       const img = document.createElement("img");
       img.alt = item.local_path || item.url || "生成结果";
-      card.appendChild(img);
+      card.insertBefore(img, card.firstChild);
       grid.appendChild(card);
-      const source = item.web_path
-        ? `/web/api/image?path=${encodeURIComponent(item.web_path)}`
-        : item.url;
-      const blobUrl = await fetchBlobUrl(source);
-      if (blobUrl) {
-        img.src = blobUrl;
-        img.addEventListener("click", () => openLightbox(item));
+      try {
+        await loadResultImage(img, item);
+      } catch (error) {
+        console.error("结果图片加载失败:", error);
+        appendCardError(card, "图片加载失败");
       }
+    } else {
+      grid.appendChild(card);
     }
-    const info = document.createElement("div");
-    info.className = "result-card-info";
-    const path = document.createElement("span");
-    path.className = "result-path";
-    path.textContent = item.local_path || item.url || "";
-    path.title = path.textContent;
-    info.appendChild(path);
-    card.appendChild(info);
   }
   if (!items.length)
     grid.appendChild(document.createTextNode("本次没有返回图片。"));
@@ -289,4 +304,39 @@ async function renderResults(payload) {
     meta.textContent = metaLines.join("\n");
     meta.classList.remove("hidden");
   }
+}
+
+/* 单张结果图装载：仅 web_path 条目可进灯箱并带 zoomable 光标；url-only 条目
+   无本地路径，不可回填也不响应点击。 */
+async function loadResultImage(img, item) {
+  if (item.web_path) {
+    const blobUrl = await fetchBlobUrl(
+      `/web/api/image?path=${encodeURIComponent(item.web_path)}`,
+    );
+    if (!blobUrl) throw new Error("image endpoint 请求失败");
+    img.src = blobUrl;
+    img.classList.add("zoomable");
+    img.addEventListener("click", () => openLightbox(item));
+    return;
+  }
+  const objectUrl = await fetchExternalBlobUrl(item.url);
+  img.src = objectUrl || item.url;
+}
+
+function appendCardInfo(card, item) {
+  const info = document.createElement("div");
+  info.className = "result-card-info";
+  const path = document.createElement("span");
+  path.className = "result-path";
+  path.textContent = item.local_path || item.url || "";
+  path.title = path.textContent;
+  info.appendChild(path);
+  card.appendChild(info);
+}
+
+function appendCardError(card, message) {
+  const error = document.createElement("div");
+  error.className = "result-card-error";
+  error.textContent = message;
+  card.appendChild(error);
 }

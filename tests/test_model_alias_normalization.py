@@ -15,7 +15,7 @@ from seedream_mcp.config import MODEL_ALIASES, SeedreamConfig, normalize_model_s
     ids=list(MODEL_ALIASES),
 )
 def test_normalize_model_selector_resolves_every_alias(alias: str, model_id: str) -> None:
-    """normalize_model_selector 应将每个别名展开为映射目标 model_id。"""
+    """normalize_model_selector 将每个别名展开为映射目标 model_id。"""
     assert normalize_model_selector(alias) == model_id
 
 
@@ -25,7 +25,7 @@ def test_normalize_model_selector_resolves_every_alias(alias: str, model_id: str
     ids=list(MODEL_ALIASES),
 )
 def test_seedream_config_normalizes_every_alias(alias: str, model_id: str) -> None:
-    """SeedreamConfig 构造时应将每个别名归一化为映射目标 model_id。"""
+    """SeedreamConfig 构造时将每个别名归一化为映射目标 model_id。"""
     config = SeedreamConfig(api_key="k", model_id=alias)
 
     assert config.model_id == model_id

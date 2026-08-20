@@ -171,7 +171,7 @@ Users without an MCP client can work directly in the browser: start the streamab
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
 ```
 
-Auth model: static pages (`/web` and `/web/static`) load without a token and contain no data; every `/web/api` endpoint requires the Bearer token — enter it once in the page, it is stored only in the browser, and images load through the server as blobs so the token never appears in URLs. Loopback deployments without a token are unaffected.
+Access control: the page itself opens without a token; its API calls require one only when the deployment is configured with a token — enter it once in the page and the browser remembers it; the token never appears in URLs. For local-only use without a token, nothing is ever asked, and the API accepts requests only from this page and local programs.
 
 ## ⚙️ CLI Options
 

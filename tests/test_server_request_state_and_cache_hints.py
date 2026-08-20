@@ -109,9 +109,7 @@ def test_static_list_cache_hints_cover_only_static_faces() -> None:
 def _singleton_boundary() -> RequestStateBoundary:
     """返回单例 middleware 中的 requestState boundary，供重绑用例定位。"""
     return next(
-        mw
-        for mw in resources_module.mcp._lowlevel_server.middleware
-        if isinstance(mw, RequestStateBoundary)
+        mw for mw in resources_module.mcp.middleware if isinstance(mw, RequestStateBoundary)
     )
 
 
@@ -137,5 +135,14 @@ def test_rebind_request_state_security_skips_when_boundary_missing(
 ) -> None:
     """SDK 私有路径中找不到 boundary 时告警跳过，返回 False 且不抛异常。"""
     monkeypatch.setattr(resources_module.mcp._lowlevel_server, "middleware", [], raising=False)
+
+    assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
+
+
+def test_rebind_request_state_security_survives_missing_public_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公开属性 mcp.middleware 缺失时告警返回 False，探测失败不阻断启动。"""
+    monkeypatch.delattr(type(resources_module.mcp), "middleware")
 
     assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False

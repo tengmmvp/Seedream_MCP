@@ -298,14 +298,22 @@ def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
 
     单例密钥环在模块导入期经默认环境源构造，``--config-file`` 加载的密钥不会
     到达它，故由启动路径在活动配置就绪后调用本函数；keys 为 None 时重绑回 SDK
-    进程临时密钥。经 SDK 私有属性定位 boundary，探测失败时告警并返回 False，
-    不阻断启动。
+    进程临时密钥。经 SDK 公开属性 mcp.middleware 定位 boundary，探测失败时告警
+    并返回 False，不阻断启动。
 
     Args:
         keys: 最终活动配置解析出的密钥环字节，None 表示未配置。
     """
+    try:
+        middleware_chain = mcp.middleware
+    except AttributeError:
+        logger.error(
+            "SDK 公开属性 mcp.middleware 不可用，requestState 密钥环重绑被跳过，"
+            "单例保持导入期形态；多副本部署的密钥共享可能失效"
+        )
+        return False
     boundary = None
-    for middleware in mcp._lowlevel_server.middleware:
+    for middleware in middleware_chain:
         if isinstance(middleware, RequestStateBoundary):
             boundary = middleware
             break

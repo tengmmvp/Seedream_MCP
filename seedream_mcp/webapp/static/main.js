@@ -2,23 +2,22 @@
 
 "use strict";
 
-import {
-  $,
-  hideTokenGate,
-  showTokenGate,
-  state,
-  TOKEN_STORAGE_KEY,
-} from "./api.js";
+import { $, hideTokenGate, state, TOKEN_STORAGE_KEY } from "./api.js";
 import { applyToolUI, loadConfigInfo, submitGenerate } from "./generate.js";
 import {
   closeLightbox,
+  GALLERY_PAGE_SIZE,
   refreshGallery,
   useLightboxAsReference,
 } from "./gallery.js";
 import { handleFiles, renderReferences } from "./refs.js";
 
+function currentView() {
+  return location.hash === "#/gallery" ? "gallery" : "generate";
+}
+
 export function applyRoute() {
-  const view = location.hash === "#/gallery" ? "gallery" : "generate";
+  const view = currentView();
   $("view-generate").classList.toggle("hidden", view !== "generate");
   $("view-gallery").classList.toggle("hidden", view !== "gallery");
   document.querySelectorAll(".view-switch a").forEach((link) => {
@@ -68,12 +67,15 @@ function bindEvents() {
     refreshGallery();
   });
   $("gallery-prev").addEventListener("click", () => {
-    state.gallery.offset = Math.max(0, state.gallery.offset - 60);
+    state.gallery.offset = Math.max(
+      0,
+      state.gallery.offset - GALLERY_PAGE_SIZE,
+    );
     refreshGallery();
   });
   $("gallery-next").addEventListener("click", () => {
     if (state.gallery.hasMore) {
-      state.gallery.offset += 60;
+      state.gallery.offset += GALLERY_PAGE_SIZE;
       refreshGallery();
     }
   });
@@ -83,6 +85,12 @@ function bindEvents() {
     if (event.target === $("lightbox")) closeLightbox();
   });
   $("lightbox-use").addEventListener("click", useLightboxAsReference);
+  /* 灯箱可见时 Escape 等价点击关闭。 */
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("lightbox").classList.contains("hidden")) {
+      closeLightbox();
+    }
+  });
 
   $("token-submit").addEventListener("click", async () => {
     const token = $("token-input").value.trim();
@@ -94,9 +102,16 @@ function bindEvents() {
       hideTokenGate();
       $("token-error").classList.add("hidden");
       applyToolUI();
+      /* 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，令牌补齐后重刷。 */
+      if (currentView() === "gallery") refreshGallery();
     } catch (error) {
-      if (error.message !== "unauthorized") throw error;
       $("token-error").classList.remove("hidden");
+      if (error.message === "unauthorized") {
+        $("token-error").textContent = "令牌无效，请重试。";
+      } else {
+        $("token-error").textContent = "服务器异常，请重试";
+        console.error(error);
+      }
       state.token = "";
       localStorage.removeItem(TOKEN_STORAGE_KEY);
     }
@@ -115,6 +130,8 @@ async function main() {
     await loadConfigInfo();
     hideTokenGate();
     applyToolUI();
+    /* 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，配置就绪后补刷。 */
+    if (currentView() === "gallery") refreshGallery();
   } catch (error) {
     if (error.message !== "unauthorized") {
       $("server-meta").textContent = "配置加载失败";

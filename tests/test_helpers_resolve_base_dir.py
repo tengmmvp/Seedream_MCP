@@ -98,6 +98,40 @@ def test_resolve_base_dir_falls_back_to_workspace_images_when_base_dir_none(
     assert resolved == (workspace / ".seedream" / "images").resolve()
 
 
+def test_resolve_default_base_dir_caches_resolved_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式配置的 auto_save_base_dir 经进程级缓存，同一配置串仅首次触发 resolve。
+
+    缓存随 clear_resolved_env_root_cache 失效，失效后再次调用按配置重新解析。
+    """
+    from seedream_mcp.utils.io.io_path import clear_resolved_env_root_cache
+
+    base = tmp_path / "save_root"
+    base.mkdir()
+    config = _make_config(base)
+
+    resolve_calls = 0
+    real_resolve = Path.resolve
+
+    def counting_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return real_resolve(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+
+    first = _resolve_base_dir(config, None)
+    assert resolve_calls == 1
+    again = _resolve_base_dir(config, None)
+    assert resolve_calls == 1
+    assert again == first
+
+    clear_resolved_env_root_cache()
+    _resolve_base_dir(config, None)
+    assert resolve_calls == 2
+
+
 def test_validate_image_path_none_base_dir_falls_back_and_enforces_bounds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

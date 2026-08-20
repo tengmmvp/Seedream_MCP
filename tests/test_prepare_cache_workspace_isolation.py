@@ -22,7 +22,7 @@ from seedream_mcp.utils.io import io_path as path_utils
 async def test_prepare_image_input_cache_isolated_by_workspace_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """workspace_roots 变化时同一 image 输入不应命中缓存，底层 prepare 被重新调用。"""
+    """workspace_roots 变化时同一 image 输入缓存不命中，底层 prepare 被重新调用。"""
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
 

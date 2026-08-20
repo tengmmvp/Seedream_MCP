@@ -12,7 +12,6 @@ export const state = {
   refs: [],
   objectUrls: [],
   gallery: { offset: 0, hasMore: false, items: [] },
-  lightboxPath: null,
 };
 
 export const $ = (id) => document.getElementById(id);
@@ -34,13 +33,28 @@ export async function apiFetch(path, options = {}) {
   return response;
 }
 
-/* 图片走 blob 模式：令牌只进请求头不进 URL，对象 URL 登记后统一回收。 */
+/* 本服务图片走 blob 模式：令牌只进请求头不进 URL，对象 URL 登记后统一回收。
+   仅用于 /web/api 路径。 */
 export async function fetchBlobUrl(path) {
   const response = await apiFetch(path);
   if (!response.ok) return null;
   const url = URL.createObjectURL(await response.blob());
   state.objectUrls.push(url);
   return url;
+}
+
+/* 外链图片走裸 fetch：不携带 Authorization，避免令牌外送到上游 CDN；对象 URL
+   同样登记后统一回收。fetch 失败（如 CORS）返回 null，由调用方回退直连 src。 */
+export async function fetchExternalBlobUrl(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const objectUrl = URL.createObjectURL(await response.blob());
+    state.objectUrls.push(objectUrl);
+    return objectUrl;
+  } catch {
+    return null;
+  }
 }
 
 export function showTokenGate() {

@@ -15,7 +15,7 @@ from seedream_mcp.utils.io.io_path import _file_uri_to_path
 
 
 def test_file_uri_to_path_rejects_non_localhost_host() -> None:
-    """file://host/share 的 netloc 非空且非 localhost → 拒绝并返回 None，跨平台一致。"""
+    """file://host/share 的 netloc 非空且非 localhost 时拒绝并返回 None，跨平台一致。"""
     assert _file_uri_to_path("file://host/share") is None
     assert _file_uri_to_path("file://server/share/path.png") is None
 

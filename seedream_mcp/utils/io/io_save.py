@@ -37,6 +37,30 @@ logger = get_logger()
 # 数 KB 的伪造尺寸头图片落盘后在预览解码时放大为数百 MB 内存占用。
 _DOWNLOAD_MAX_PIXELS = 36_000_000
 
+# PIL 解码器就绪标志。image_validation 的 ensure_image_decoders_ready 属 images 组，
+# io 组不得反向依赖，故在此以同口径本地化：惰性设置解压炸弹阈值并注册 HEIF 解码器。
+# check-then-set 非线程安全，但两项操作均幂等，并发重复执行无功能影响。
+_decoders_ready = False
+
+
+def _ensure_decoders_ready() -> None:
+    """设置 PIL 解压炸弹阈值并注册 HEIF 解码器，仅首次调用时执行。
+
+    PIL 与 pillow_heif 延迟导入，避免模块导入期加载图像库产生全局副作用。
+    """
+    global _decoders_ready
+    if _decoders_ready:
+        return
+    from PIL import Image
+    from pillow_heif import register_heif_opener
+
+    # 进程级覆写 PIL 解压炸弹阈值，头声明像素超过 2 倍 36M 的图片在打开阶段即被
+    # PIL 抛 DecompressionBombError，1 至 2 倍区间仍由显式头尺寸校验兜底。
+    Image.MAX_IMAGE_PIXELS = _DOWNLOAD_MAX_PIXELS
+    register_heif_opener()
+    _decoders_ready = True
+
+
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
 # 清理失败后的重试退避秒数：失败时写入该秒数形态的短退避时间戳，使失败重试有独立
@@ -110,13 +134,18 @@ def _pixel_limit_rejection(path: Path) -> str | None:
     只读头部不解码像素，供工作线程调用。头损坏等无法解析的形态返回 None 交由
     既有保存链路处置，本校验不引入新的失败面。
     """
-    # PIL 惰性导入，落点在工作线程；UnidentifiedImageError 为 OSError 子类。
-    from PIL import UnidentifiedImageError
-    from PIL import Image
+    # PIL 惰性导入，落点在工作线程；UnidentifiedImageError 为 OSError 子类，
+    # DecompressionBombError 为 Exception 直接子类，须单独显式捕获。
+    from PIL import Image, UnidentifiedImageError
 
+    _ensure_decoders_ready()
     try:
         with Image.open(path) as image:
             width, height = image.size
+    except Image.DecompressionBombError:
+        # 头声明像素超过 2 倍上限时 PIL 在打开阶段即抛错，具体尺寸不可得，仍按
+        # 像素超限口径拒绝，交由外层删除已落盘文件并降级。
+        return f"图像像素超过保存上限 {_DOWNLOAD_MAX_PIXELS}，已删除落盘文件并放弃保存"
     except (UnidentifiedImageError, OSError):
         return None
     if width * height > _DOWNLOAD_MAX_PIXELS:

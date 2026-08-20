@@ -152,7 +152,12 @@ def test_cli_main_dispatches_to_correct_runner(
         stateless=False,
         web_enabled=False,
     ):
-        captured["http"] = {"host": host, "port": port, "auth_token": auth_token}
+        captured["http"] = {
+            "host": host,
+            "port": port,
+            "auth_token": auth_token,
+            "web_enabled": web_enabled,
+        }
 
     monkeypatch.setattr(server.mcp, "run", _fake_run)
     monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
@@ -163,7 +168,36 @@ def test_cli_main_dispatches_to_correct_runner(
     if transport == "stdio":
         assert captured == {"stdio_transport": "stdio"}
     else:
-        assert captured == {"http": {"host": "127.0.0.1", "port": 8000, "auth_token": ""}}
+        assert captured == {
+            "http": {"host": "127.0.0.1", "port": 8000, "auth_token": "", "web_enabled": False}
+        }
+
+
+def test_cli_main_forwards_web_enabled_to_http_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--web 经 _build_config_from_args 进 config.web_enabled 后转发到 http runner。"""
+    args = _make_cli_args("streamable-http")
+    args.web = True
+    config = SeedreamConfig(api_key="test_key", web_enabled=True)
+    _stub_cli(monkeypatch, args, config)
+    captured: dict[str, object] = {}
+
+    def _fake_http_run(  # type: ignore[no-untyped-def]
+        host,
+        port,
+        auth_token,
+        ssl_certfile=None,
+        ssl_keyfile=None,
+        stateless=False,
+        web_enabled=False,
+    ):
+        captured["web_enabled"] = web_enabled
+
+    monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
+
+    assert server.cli_main() == 0
+    assert captured["web_enabled"] is True
 
 
 def test_cli_main_refuses_non_loopback_http_without_auth_token(
@@ -487,7 +521,7 @@ async def test_bearer_auth_middleware_decides_on_first_authorization_header() ->
 
 
 async def test_bearer_auth_middleware_passes_lifespan_scope() -> None:
-    """lifespan 类型 ASGI 消息应直接透传，不校验鉴权。"""
+    """lifespan 类型 ASGI 消息直接透传，不校验鉴权。"""
     received: dict[str, object] = {}
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]

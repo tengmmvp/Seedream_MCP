@@ -14,7 +14,7 @@ WEB_INDEX_PATH = "/web"
 # 根路径重定向端点：浏览器敲域名根路径时直接落到操作台，仅 Web 开启时注册。
 WEB_ROOT_PATH = "/"
 
-# 静态资源挂载路径与对应 URL 前缀（带尾斜杠，用于前缀匹配）。
+# 静态资源挂载路径与对应 URL 前缀，前缀带尾斜杠用于前缀匹配。
 WEB_STATIC_MOUNT_PATH = "/web/static"
 WEB_STATIC_URL_PREFIX = "/web/static/"
 
@@ -26,8 +26,22 @@ WEB_API_PREFIX = "/web/api"
 WEB_EXEMPT_EXACT_PATHS: frozenset[str] = frozenset({WEB_INDEX_PATH, WEB_ROOT_PATH})
 WEB_EXEMPT_PATH_PREFIXES: tuple[str, ...] = (WEB_STATIC_URL_PREFIX,)
 
-# 静态资源目录随包分发，mount 时经 STATIC_DIR 定位。
+# 静态资源目录随包分发，消费方（meta 与 routes）统一经模块属性
+# constants.STATIC_DIR 取用，目录指向因此可在运行期整体替换。
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# 服务端渲染的静态页面（入口页与 404 页）统一携带的安全响应头：CSP 把脚本与
+# 数据加载收敛到同源，图片另放开 blob/data/https 供生成结果与预览展示，内联
+# 样式为页面内嵌 <style> 保留；nosniff 阻断 MIME 嗅探。
+PAGE_SECURITY_HEADERS: dict[str, str] = {
+    "content-security-policy": (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "img-src 'self' blob: data: https:; "
+        "style-src 'self' 'unsafe-inline'"
+    ),
+    "x-content-type-options": "nosniff",
+}
 
 # 各 API 端点路径常量，routes 注册与测试断言共用单一来源。
 WEB_API_CONFIG_INFO = f"{WEB_API_PREFIX}/config-info"

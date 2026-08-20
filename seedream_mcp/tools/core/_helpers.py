@@ -19,7 +19,12 @@ from ...utils.core.errors import (
     sanitize_error_text,
 )
 from ...utils.core.logs import get_logger
-from ...utils.io.io_path import is_within_resolved, get_workspace_root, normalize_path
+from ...utils.io.io_path import (
+    get_workspace_root,
+    is_within_resolved,
+    normalize_path,
+    resolve_cached_save_base_dir,
+)
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
@@ -167,7 +172,9 @@ def _resolve_default_base_dir(config: SeedreamConfig) -> Path:
         SeedreamValidationError: 未配置 auto_save_base_dir 且无法确定工作区根。
     """
     if config.auto_save_base_dir:
-        return Path(config.auto_save_base_dir).expanduser().resolve()
+        # 显式配置的保存根经 io_path 的进程级缓存 resolve，同一配置串仅首次发生
+        # expanduser/resolve 文件系统调用；配置写入路径统一使缓存失效。
+        return resolve_cached_save_base_dir(config.auto_save_base_dir)
     # get_workspace_root 的 ValueError 转校验异常，归入 validation_error 档，用户可见
     # 文案指向工作区授权问题而非未知失败。
     try:

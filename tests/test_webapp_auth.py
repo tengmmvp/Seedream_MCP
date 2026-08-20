@@ -102,6 +102,7 @@ def test_mount_web_static_is_idempotent(tmp_path: Path, monkeypatch: pytest.Monk
     """重复挂载不叠加 Mount 条目，目录缺失时跳过不抛异常。"""
     from starlette.routing import Mount
 
+    from seedream_mcp.webapp import constants as web_constants
     from seedream_mcp.webapp import routes as routes_module
 
     static_dir = prepare_static_dir(monkeypatch, tmp_path)
@@ -115,7 +116,7 @@ def test_mount_web_static_is_idempotent(tmp_path: Path, monkeypatch: pytest.Monk
     assert mounts[0].path == "/web/static"
 
     missing_dir = tmp_path / "missing"
-    monkeypatch.setattr(routes_module, "STATIC_DIR", missing_dir)
+    monkeypatch.setattr(web_constants, "STATIC_DIR", missing_dir)
     empty_app: Any = type("_App", (), {"routes": []})()
     routes_module.mount_web_static(empty_app)
     assert empty_app.routes == []

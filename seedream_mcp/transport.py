@@ -1,9 +1,9 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
-包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护四个 ASGI 中间件，以及
-streamable-http 监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 MCPServer 的
-streamable_http_app 外层，按装配逆序执行。MCPServer 实例 mcp 与共享资源清理函数在调用时
-从 resources 模块延迟导入，传输层不依赖 server 模块。
+包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护与 Web 操作台同源 Origin
+校验五个 ASGI 中间件，以及 streamable-http 监听与 TLS 配置。中间件经 Starlette
+add_middleware 装配到 MCPServer 的 streamable_http_app 外层，按装配逆序执行。MCPServer
+实例 mcp 与共享资源清理函数在调用时从 resources 模块延迟导入，传输层不依赖 server 模块。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import ssl
 import sys
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -44,7 +45,7 @@ _LOOPBACK_ALLOWED_ORIGINS = (
     "http://[::1]:*",
 )
 
-# 残余任务回收的最长等待秒数，超时即放弃等待交由循环关闭收尾。
+# 残余任务回收的最长等待秒数，超时即放弃等待交由循环关闭收尾；同时作为 uvicorn 优雅关停超时。
 _DRAIN_PENDING_TIMEOUT_SECONDS = 5.0
 
 
@@ -324,6 +325,66 @@ class _LoopbackHostGuardMiddleware:
         await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
 
 
+class _WebOriginGuardMiddleware:
+    """无令牌 Web 部署下 /web/api 前缀请求的同源 Origin 校验 ASGI 中间件。
+
+    仅在 web_enabled 且未配置令牌时装配：有令牌时 Bearer 已挡 drive-by，无需
+    本层。无 Origin 头放行，覆盖 curl 等非浏览器客户端与本地进程；携带 Origin
+    的请求取其经 urlsplit 解析出的 netloc 与 Host 头全值做忽略大小写的字符串
+    相等比对，端口参与比对：同源页面的 Origin 与请求 Host 恒为同一 host:port，
+    域名不同、端口不一致、Origin 为 null 与 Host 缺失均按跨源 403 拒绝。仅守
+    API 前缀，静态页面本身无敏感数据不做校验。
+    """
+
+    def __init__(self, app: ASGIApp, api_prefix: str) -> None:
+        self.app = app
+        self._api_prefix = api_prefix
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """ASGI 调用入口：API 前缀的 http 请求校验 Origin 同源，其余流量透传。"""
+        if scope.get("type") == "http" and scope.get("path", "").startswith(self._api_prefix):
+            origin = self._origin_header(scope)
+            if origin is not None and not self._same_origin(scope, origin):
+                await self._send_forbidden(send)
+                return
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _origin_header(scope: Scope) -> bytes | None:
+        for name, value in scope.get("headers", []):
+            if name == b"origin":
+                return value  # type: ignore[no-any-return]
+        return None
+
+    @staticmethod
+    def _host_header(scope: Scope) -> bytes | None:
+        for name, value in scope.get("headers", []):
+            if name == b"host":
+                return value  # type: ignore[no-any-return]
+        return None
+
+    @classmethod
+    def _same_origin(cls, scope: Scope, origin: bytes) -> bool:
+        """判定 Origin 与 Host 是否同源：两者 netloc 全值忽略大小写相等。
+
+        Origin 解析不出 netloc 或 Host 头缺失时无法确立同源，按跨源拒绝；
+        头值按 ASGI 约定以 latin-1 解码。
+        """
+        host = cls._host_header(scope)
+        if not host:
+            return False
+        origin_netloc = urlsplit(origin.decode("latin-1")).netloc
+        if not origin_netloc:
+            return False
+        return origin_netloc.lower() == host.decode("latin-1").lower()
+
+    async def _send_forbidden(self, send: Send) -> None:
+        body = json.dumps(
+            {"error": "invalid_origin", "error_description": "Cross-origin request rejected"}
+        ).encode("utf-8")
+        await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
+
+
 # ==================== streamable-http 中间件装配 ====================
 
 # 本模块装配到 streamable-http app 的全部中间件类，供重复装配检测使用。
@@ -331,6 +392,7 @@ _STREAMABLE_HTTP_MIDDLEWARE_CLASSES = (
     _BearerTokenAuthMiddleware,
     _LimitRequestBodyMiddleware,
     _LoopbackHostGuardMiddleware,
+    _WebOriginGuardMiddleware,
     _HealthCheckMiddleware,
 )
 
@@ -357,9 +419,10 @@ def _attach_streamable_http_middleware(
     静态页面的免鉴权路径表，API 路径始终要求令牌。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    LoopbackHostGuard -> HealthCheck -> LimitRequestBody -> Bearer -> app，其中
-    LoopbackHostGuard 仅回环绑定时装配：超长请求在鉴权前被 413 早拒，探针免令牌，
-    回环绑定时 rebinding 请求先于健康检查被拒。
+    LoopbackHostGuard -> HealthCheck -> LimitRequestBody -> 鉴权层 -> app，鉴权层
+    为 Bearer（配置令牌时）或 Web Origin 守卫（web_enabled 且无令牌时，仅守
+    /web/api 前缀）；LoopbackHostGuard 仅回环绑定时装配：超长请求在鉴权前被
+    413 早拒，探针免令牌，回环绑定时 rebinding 请求先于健康检查被拒。
     """
     if _middleware_attached(app):
         logger.warning("streamable-http 中间件已装配，跳过重复装配以避免中间件栈叠加")
@@ -377,6 +440,11 @@ def _attach_streamable_http_middleware(
         else:
             app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
+    elif web_enabled:
+        from .webapp.constants import WEB_API_PREFIX
+
+        app.add_middleware(_WebOriginGuardMiddleware, api_prefix=f"{WEB_API_PREFIX}/")
+        logger.info("Web 操作台未配置令牌，已启用 /web/api 同源 Origin 校验")
     if max_body_size is None:
         max_body_size = get_active_config().http_max_body_size
     app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=max_body_size)
@@ -449,7 +517,18 @@ def _warn_remote_exposure(host: str, auth_enabled: bool, web_enabled: bool = Fal
             "请使用 --auth-token 配置鉴权。"
         )
     if web_enabled:
-        message += "Web 操作台已开启：/web 与 /web/static 静态页面免鉴权，全部 /web/api 接口仍要求 Bearer 令牌。"
+        # Web 附加句与实际防线一致：有令牌时 API 由 Bearer 把守；无令牌时由
+        # Origin 守卫限制为同源访问，文案不得陈述不存在的防线。
+        if auth_enabled:
+            message += (
+                "Web 操作台已开启：/web 与 /web/static 静态页面免鉴权，"
+                "全部 /web/api 接口仍要求 Bearer 令牌。"
+            )
+        else:
+            message += (
+                "Web 操作台已开启且未配置令牌：/web/api 仅允许同源浏览器与本地进程访问"
+                "（跨源请求将被拒绝），建议配置 --auth-token。"
+            )
     logger.warning(message)
     # 控制台输出走 stderr，与 server.py 的运行告警一致，避免污染 stdio 传输的 stdout。
     print(message, file=sys.stderr)
@@ -475,34 +554,22 @@ async def _drain_pending_tasks() -> None:
         )
 
 
-def _run_streamable_http(
-    host: str,
-    port: int,
-    auth_token: str,
-    ssl_certfile: str | None = None,
-    ssl_keyfile: str | None = None,
-    stateless: bool = False,
-    web_enabled: bool = False,
-) -> None:
-    """启动 streamable-http 传输。
+def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabled: bool) -> Any:
+    """按生产装配序构造 streamable-http ASGI 应用并装配中间件，返回待 serve 的 app。
 
-    仅使用 MCPServer 公开接口 streamable_http_app() 获取 ASGI 应用；鉴权与请求体
-    限制经本项目中间件承担，TLS 经 ssl_context_factory 强制最低 TLS 1.2。
-    max_request_body_size 须显式传入活动配置的 http_max_body_size，SDK 默认 4MiB
-    远低于本项目 base64 图片输入的 64MB 上限。
-
-    显式管理事件循环：serve 返回后于同一循环运行共享资源清理与残余任务回收，
-    HTTP 传输绑定该循环，跨循环 aclose 对底层传输无效。
+    装配序为：构造 transport_security -> 注册 Web 路由（web）-> streamable_http_app
+    -> 挂载 Web 静态资源（web）-> 装配中间件。Web 路由注册必须先于
+    streamable_http_app：SDK 构造 app 时一次性拷贝自定义路由引用，事后追加不生效；
+    静态挂载则在 app 构造后向活体路由表追加。仅使用 MCPServer 公开接口
+    streamable_http_app() 获取 ASGI 应用；max_request_body_size 显式传入活动配置的
+    http_max_body_size，SDK 默认 4MiB 远低于本项目 base64 图片输入的 64MB 上限，
+    该上限同时供 SDK 内层与本项目中间件两层消费。_run_streamable_http 与生产装配
+    测试共用本函数构建同源栈。
     """
-    import uvicorn
-
-    from .resources import _cleanup_shared_resources, mcp
+    from .resources import mcp
 
     transport_security = _transport_security_for_host(host)
-    # 请求体上限取一次配置，同时供 SDK 内层与本项目中间件两层消费。
     max_body_size = get_active_config().http_max_body_size
-    # Web 路由注册必须先于 streamable_http_app：SDK 构造 app 时一次性拷贝自定义
-    # 路由引用，事后追加不生效；静态挂载则在 app 构造后向活体路由表追加。
     if web_enabled:
         from .webapp import register_web_routes
 
@@ -531,6 +598,29 @@ def _run_streamable_http(
     _attach_streamable_http_middleware(
         app, host, auth_token, max_body_size=max_body_size, web_enabled=web_enabled
     )
+    return app
+
+
+def _run_streamable_http(
+    host: str,
+    port: int,
+    auth_token: str,
+    ssl_certfile: str | None = None,
+    ssl_keyfile: str | None = None,
+    stateless: bool = False,
+    web_enabled: bool = False,
+) -> None:
+    """启动 streamable-http 传输。
+
+    app 构造与中间件装配经 _build_streamable_app 完成；TLS 经 ssl_context_factory
+    强制最低 TLS 1.2。显式管理事件循环：serve 返回后于同一循环运行共享资源清理与
+    残余任务回收，HTTP 传输绑定该循环，跨循环 aclose 对底层传输无效。
+    """
+    import uvicorn
+
+    from .resources import _cleanup_shared_resources
+
+    app = _build_streamable_app(host, stateless, auth_token, web_enabled)
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:
         ssl_kwargs["ssl_certfile"] = ssl_certfile

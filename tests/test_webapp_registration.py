@@ -18,14 +18,18 @@ from _web_fixtures import (
 
 
 def test_register_web_routes_registers_expected_paths(clean_web_routes: None) -> None:
-    """注册后 MCPServer 自定义路由覆盖全部 Web 端点路径。"""
+    """注册后 MCPServer 自定义路由恰好覆盖全部 Web 端点路径，无多余亦无遗漏。
+
+    custom_route 注册表是 Web 域外唯一的 custom_route 消费点，兜底 catch-all
+    由 mount_web_static 直接追加到 app 路由表，不进入本断言集合。
+    """
     from seedream_mcp.resources import mcp
     from seedream_mcp.webapp import register_web_routes
 
     register_web_routes()
 
     registered = {getattr(route, "path", None) for route in mcp._custom_starlette_routes}
-    assert EXPECTED_WEB_PATHS <= registered
+    assert registered == EXPECTED_WEB_PATHS
 
 
 def test_register_web_routes_is_idempotent(clean_web_routes: None) -> None:
@@ -78,8 +82,8 @@ async def test_root_redirects_to_web_index(
 async def test_config_info_reachable_when_registered(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """注册并构建后 config-info 返回模型与保存根信息。"""
-    save_root = write_workspace_config(tmp_path)
+    """注册并构建后 config-info 返回模型信息与保存根可用性布尔。"""
+    write_workspace_config(tmp_path)
     app = build_web_app()
 
     async with httpx.AsyncClient(
@@ -91,4 +95,27 @@ async def test_config_info_reachable_when_registered(
     payload = response.json()
     assert payload["models"]
     assert all("allowed_presets" in model for model in payload["models"])
-    assert payload["save_root"] == str(save_root)
+    assert payload["save_root_available"] is True
+    assert "save_root" not in payload
+
+
+async def test_config_info_reports_save_root_unavailable(
+    clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """保存根不可解析时回 False，且不出现任何路径字段。"""
+    import seedream_mcp.utils.io.io_path as io_path_module
+
+    app = build_web_app()
+    token = io_path_module._WORKSPACE_ROOTS_VAR.set([])
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client:
+            response = await client.get("/web/api/config-info")
+    finally:
+        io_path_module._WORKSPACE_ROOTS_VAR.reset(token)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["save_root_available"] is False
+    assert "save_root" not in payload

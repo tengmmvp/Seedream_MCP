@@ -357,7 +357,7 @@ async def test_download_wsa_try_again_is_retryable(
 
 
 async def test_download_response_rejects_invalid_content_length(tmp_path: Path) -> None:
-    """content-length 非整数 → DownloadError，不进入文件写入阶段。"""
+    """content-length 非整数时抛出 DownloadError，不进入文件写入阶段。"""
     manager = DownloadManager()
     response = _FakeResponse(
         headers={"content-type": "image/png", "content-length": "not-a-number"}
@@ -379,7 +379,7 @@ async def test_download_response_rejects_invalid_content_length(tmp_path: Path) 
 
 
 async def test_download_response_rejects_oversized_content_length(tmp_path: Path) -> None:
-    """content-length 超 max_file_size → DownloadError 早拒。"""
+    """content-length 超 max_file_size 时提前抛出 DownloadError。"""
     manager = DownloadManager(max_file_size=100)
     response = _FakeResponse(headers={"content-type": "image/png", "content-length": "101"})
     temp_suffix = ".png.part"
@@ -396,7 +396,7 @@ async def test_download_response_rejects_oversized_content_length(tmp_path: Path
 
 
 async def test_download_response_rejects_negative_content_length(tmp_path: Path) -> None:
-    """content-length 为负值 → DownloadError，不进入文件写入阶段。
+    """content-length 为负值时抛出 DownloadError，不进入文件写入阶段。
 
     int('-1') 合法但负值无意义，原本 -1 > max_file_size 为 False 会绕过预检查。
     """
@@ -420,7 +420,7 @@ async def test_download_response_rejects_negative_content_length(tmp_path: Path)
 async def test_download_response_rejects_streaming_cumulative_oversize(
     tmp_path: Path,
 ) -> None:
-    """无 content-length 时按流式累计字节数，超 max_file_size → DownloadError。"""
+    """无 content-length 时按流式累计字节数，超 max_file_size 抛出 DownloadError。"""
     manager = DownloadManager(max_file_size=100)
     # 两块各 60 字节，累计 120 超过上限 100
     response = _FakeResponse(
@@ -440,7 +440,7 @@ async def test_download_response_rejects_streaming_cumulative_oversize(
 
 
 async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path) -> None:
-    """Content-Type 声称 image/png 但字节签名非受支持图片格式 → DownloadError。"""
+    """Content-Type 声称 image/png 但字节签名非受支持图片格式时抛出 DownloadError。"""
     manager = DownloadManager()
     response = _FakeResponse(
         headers={"content-type": "image/png", "content-length": "13"},

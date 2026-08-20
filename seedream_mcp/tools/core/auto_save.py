@@ -34,7 +34,7 @@ AutoSaveOutcome = tuple[list[AutoSaveResult], list[int]]
 # 名字携带、调用期经类属性解析，保持与直接属性访问一致的迟绑定语义。
 @dataclass(frozen=True)
 class _AutoSaveSpec:
-    """单条自动保存路径的差异常量。
+    """单一自动保存入口的差异常量。
 
     Attributes:
         data_key: 图片项的取值键，url 或 b64_json。

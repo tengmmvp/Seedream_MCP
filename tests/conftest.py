@@ -128,11 +128,12 @@ async def reset_http_app_state(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         yield
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def clean_web_routes() -> Iterator[None]:
     """快照并恢复 MCPServer 自定义路由与 webapp 注册守卫，跨用例隔离 Web 注册状态。
 
-    使未注册形态的用例不受其他用例注册过的 Web 路由污染。
+    autouse 使未注册形态的用例不受其他用例注册过的 Web 路由污染；显式声明
+    该 fixture 的用例参数仅为表意，无额外效果。
     """
     from seedream_mcp.resources import mcp
     from seedream_mcp.webapp import routes as web_routes_module

@@ -2,11 +2,7 @@
 
 注册须在 streamable_http_app 调用之前完成，SDK 构造 app 时一次性拷贝自定义
 路由引用；挂载则在 app 构造之后向 Starlette 活体路由表追加 Mount。两步的调用
-点由 transport 的 _run_streamable_http 依序触发，时序约束在该调用处本地可见。
-
-模块级 _routes_registered 守卫仅覆盖本进程内的重复注册（测试反复构建 app 的
-场景）；跨进程的重复注册由注册表与 mcp._custom_starlette_routes 的路径交集
-复查兜底，重复路径记告警跳过。
+点由 transport 的 _build_streamable_app 依序触发，时序约束在该调用处本地可见。
 
 handler 按域拆分：meta（入口页/重定向/config-info）、generate（四个生成端点）、
 gallery（图库浏览）、files（缩略图与原图）；新增端点时在对应域模块实现后于
@@ -18,8 +14,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..utils.core.logs import get_logger
+from . import constants
 from .constants import (
-    STATIC_DIR,
     WEB_API_BROWSE,
     WEB_API_CONFIG_INFO,
     WEB_API_GENERATE_IMAGE_TO_IMAGE,
@@ -35,13 +31,13 @@ from .constants import (
 
 logger = get_logger()
 
-# 模块级注册守卫：register_web_routes 会被多次调用（重复构建 app 的测试场景），
-# SDK 侧无去重，重复注册会使同一路由匹配两次。
+# 模块级注册守卫：测试反复构建 app 会多次调用注册，SDK 侧无去重，重复注册使
+# 同一路由匹配两次；守卫状态与路由表不同步的残留由注册时的路径交集复查兜底。
 _routes_registered = False
 
 
 def register_web_routes() -> None:
-    """向 MCPServer 单例幂等注册全部 Web 路由，幂等性以已注册路径集合兜底。"""
+    """向 MCPServer 单例注册全部 Web 路由，重复调用经守卫与路径复查保持幂等。"""
     global _routes_registered
     if _routes_registered:
         return
@@ -90,10 +86,13 @@ def mount_web_static(app: Any) -> None:
     for route in getattr(app, "routes", []):
         if isinstance(route, Mount) and route.path == WEB_STATIC_MOUNT_PATH:
             return
-    if not STATIC_DIR.is_dir():
-        logger.error("Web 静态资源目录不存在，跳过挂载: {}", STATIC_DIR)
+    # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
+    if not constants.STATIC_DIR.is_dir():
+        logger.error("Web 静态资源目录不存在，跳过挂载: {}", constants.STATIC_DIR)
         return
-    app.routes.append(Mount(WEB_STATIC_MOUNT_PATH, app=StaticFiles(directory=str(STATIC_DIR))))
+    app.routes.append(
+        Mount(WEB_STATIC_MOUNT_PATH, app=StaticFiles(directory=str(constants.STATIC_DIR)))
+    )
     app.routes.append(
         Route(
             "/{path:path}",

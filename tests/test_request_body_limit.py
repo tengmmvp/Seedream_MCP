@@ -47,7 +47,7 @@ async def test_request_body_limit_rejects_oversized_content_length() -> None:
 
 
 async def test_request_body_limit_allows_within_limit() -> None:
-    """未超限的声明长度应放行，调用下游 app。"""
+    """未超限的声明长度放行，调用下游 app。"""
     received: dict[str, object] = {}
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -64,7 +64,7 @@ async def test_request_body_limit_allows_within_limit() -> None:
 
 
 async def test_request_body_limit_boundary_equal_to_limit_passes() -> None:
-    """Content-Length 恰等于上限应放行：比较为严格大于。"""
+    """Content-Length 恰等于上限放行：比较为严格大于。"""
     received: dict[str, object] = {}
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -95,7 +95,7 @@ async def test_request_body_limit_missing_content_length_passes() -> None:
 
 
 async def test_request_body_limit_passes_lifespan_scope() -> None:
-    """lifespan 类型 ASGI 消息应直接透传，不检查请求体大小。"""
+    """lifespan 类型 ASGI 消息直接透传，不检查请求体大小。"""
     received: dict[str, object] = {}
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -109,7 +109,7 @@ async def test_request_body_limit_passes_lifespan_scope() -> None:
 
 
 async def test_request_body_limit_passes_websocket_scope() -> None:
-    """websocket 类型 ASGI 消息应直接透传，不检查请求体大小。"""
+    """websocket 类型 ASGI 消息直接透传，不检查请求体大小。"""
     received: dict[str, object] = {}
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
