@@ -1094,6 +1094,7 @@ def cli_main() -> int:
             _warn_remote_exposure(
                 args.host,
                 auth_enabled=bool(auth_token),
+                web_enabled=config.web_enabled,
             )
             _run_streamable_http(
                 args.host,
@@ -1102,6 +1103,7 @@ def cli_main() -> int:
                 ssl_certfile=args.ssl_certfile,
                 ssl_keyfile=args.ssl_keyfile,
                 stateless=args.stateless,
+                web_enabled=config.web_enabled,
             )
         else:
             mcp.run(transport=transport)

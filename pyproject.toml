@@ -46,6 +46,7 @@ dependencies = [
     "Pillow>=11.3.0,<13",
     "pillow-heif>=1.5.0,<2",
     "uvicorn>=0.47.0,<1",
+    "starlette>=0.38.0,<2",
 ]
 
 [dependency-groups]

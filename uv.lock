@@ -1518,6 +1518,7 @@ dependencies = [
     { name = "pillow-heif" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "starlette" },
     { name = "uvicorn" },
 ]
 
@@ -1542,6 +1543,7 @@ requires-dist = [
     { name = "pillow-heif", specifier = ">=1.5.0,<2" },
     { name = "pydantic", specifier = ">=2.12.0,<3" },
     { name = "python-dotenv", specifier = ">=1.0.0,<2" },
+    { name = "starlette", specifier = ">=0.38.0,<2" },
     { name = "uvicorn", specifier = ">=0.47.0,<1" },
 ]
 

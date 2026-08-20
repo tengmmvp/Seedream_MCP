@@ -91,6 +91,8 @@ class SeedreamConfig:
         workspace_root: 无 MCP Roots 时本地文件访问边界的回退目录。
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌。
         http_max_body_size: streamable-http 请求体大小上限字节数，默认 64MB。
+        web_enabled: 是否在 streamable-http 传输上开启 Web 操作台，默认关闭；开启后
+            同一进程提供 /web 网页与 /web/api 接口，stdio 传输不受影响。
         http_allowed_hosts: 非回环绑定的 Host 头允许列表，条目支持 host、host:port
             与尾部 :* 端口通配；None 表示整体关闭 SDK 内层 Host 校验。仅经
             SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，CLI 不暴露参数。
@@ -145,6 +147,7 @@ class SeedreamConfig:
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
     http_max_body_size: int = _env_field(64 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
+    web_enabled: bool = _env_field(False, "SEEDREAM_WEB_ENABLED")
     http_allowed_hosts: tuple[str, ...] | None = _env_field(None, "SEEDREAM_HTTP_ALLOWED_HOSTS")
     request_state_secret_keys: tuple[bytes, ...] | None = _env_field(
         None, "SEEDREAM_REQUEST_STATE_KEYS"
@@ -799,6 +802,7 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "workspace_root": (_pick_optional_str, None),
     "http_auth_token": (_pick_optional_str, None),
     "http_max_body_size": (_pick_int, None),
+    "web_enabled": (_pick_bool, "web"),
     "http_allowed_hosts": (_pick_optional_str_tuple, None),
     "request_state_secret_keys": (_pick_request_state_key_bytes, None),
 }

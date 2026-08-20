@@ -163,6 +163,16 @@ Generic configuration (the `command` + `args` + `env` fields are the same as abo
 
 Restart the corresponding client after configuration.
 
+## 🖥️ Web Console
+
+Users without an MCP client can work directly in the browser: start the streamable-http transport with the `--web` flag (or `SEEDREAM_WEB_ENABLED=true`), then open `http://127.0.0.1:8000/web` to use text-to-image, image-to-image, multi-image fusion, sequential generation and the history gallery. Off by default; stdio transport and runs without the flag expose no web endpoints.
+
+```bash
+ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
+```
+
+Auth model: static pages (`/web` and `/web/static`) load without a token and contain no data; every `/web/api` endpoint requires the Bearer token — enter it once in the page, it is stored only in the browser, and images load through the server as blobs so the token never appears in URLs. Loopback deployments without a token are unaffected.
+
 ## ⚙️ CLI Options
 
 ```bash
@@ -183,6 +193,8 @@ Restart the corresponding client after configuration.
 --host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address requires --auth-token along with TLS (or the --insecure-allow-non-tls exemption), and the service refuses to start without them)
 --port INTEGER                                     # streamable-http listen port (default: 8000)
 --stateless                                        # streamable-http stateless mode, suited for remote multi-client and load balancing (default off)
+--web                                              # Enable the web console served at /web (default off; streamable-http only)
+--no-web                                           # Disable the web console, overriding an enabled SEEDREAM_WEB_ENABLED
 
 # Security
 --auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; alternatively use SEEDREAM_HTTP_AUTH_TOKEN)
@@ -194,7 +206,7 @@ Restart the corresponding client after configuration.
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level
 ```
 
-> **Security note**: `localhost` is not treated as a loopback address (its resolution depends on hosts/DNS and may be poisoned to a non-loopback address). Binding to it likewise requires a Bearer auth token and TLS, and the service refuses to start without them; for loopback semantics without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback bindings must likewise configure a Bearer token and TLS. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which are exposed in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address.
+> **Security note**: `localhost` is not treated as a loopback address (its resolution depends on hosts/DNS and may be poisoned to a non-loopback address). Binding to it likewise requires a Bearer auth token and TLS, and the service refuses to start without them; for loopback semantics without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback bindings must likewise configure a Bearer token and TLS. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which are exposed in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
 
 ### Usage Examples
 
@@ -552,6 +564,7 @@ SEEDREAM_PREVIEW_ENABLED=true                 # Attach thumbnail previews of sav
 SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (required for non-loopback binding, or the service refuses to start; TLS or the --insecure-allow-non-tls exemption is also required)
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
+SEEDREAM_WEB_ENABLED=false                  # Web console toggle (--web/--no-web overrides; streamable-http only, serves the /web UI and image gallery when enabled, off by default)
 SEEDREAM_HTTP_ALLOWED_HOSTS=                # Comma-separated Host allowlist for direct non-loopback exposure (supports host:port and trailing :*); empty disables the SDK inner Host check (suitable behind a reverse proxy)
 SEEDREAM_REQUEST_STATE_KEYS=               # Shared requestState key ring for multi-replica HTTP deployments, comma-separated hex with each key decoding to at least 32 bytes; empty keeps the SDK default per-process ephemeral key and single-process deployments can omit it
 

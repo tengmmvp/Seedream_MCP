@@ -33,6 +33,7 @@ def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
         "model": args.model,
         "default_size": args.default_size,
         "watermark": args.watermark,
+        "web": args.web,
         "log_level": args.log_level,
     }
     return build_config_from_sources(
@@ -159,6 +160,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "客户端链路，2026-07-28 客户端本就无会话；开启后 legacy 会话失去反向通道，"
         "MCP Roots 不可读，本地文件访问边界回退 SEEDREAM_WORKSPACE_ROOT，未配置时"
         "相关工具直接失败",
+    )
+    web_group = parser.add_mutually_exclusive_group()
+    web_group.add_argument(
+        "--web",
+        dest="web",
+        action="store_true",
+        default=None,
+        help="开启 Web 操作台，浏览器访问 http://<host>:<port>/web 直接使用（未传入时按"
+        " SEEDREAM_WEB_ENABLED 配置，默认关闭；仅 streamable-http 生效）",
+    )
+    web_group.add_argument(
+        "--no-web",
+        dest="web",
+        action="store_false",
+        help="关闭 Web 操作台，覆盖 SEEDREAM_WEB_ENABLED 的开启设置（仅 streamable-http 生效）",
     )
     parser.add_argument(
         "--auth-token",

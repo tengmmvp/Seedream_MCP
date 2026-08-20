@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23f54e00'/%3E%3C/svg%3E"
+    />
+    <title>Seedream 工作室</title>
+    <link rel="stylesheet" href="/web/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">✦</span>Seedream 工作室
+      </div>
+      <nav class="view-switch" aria-label="视图切换">
+        <a href="#/generate" data-view="generate">生成台</a>
+        <a href="#/gallery" data-view="gallery">图库</a>
+      </nav>
+      <div class="top-meta mono" id="server-meta"></div>
+    </header>
+
+    <div class="token-gate hidden" id="token-gate">
+      <div class="token-card">
+        <h2 class="token-title">连接服务器</h2>
+        <p class="token-desc">该部署启用了令牌鉴权，请输入访问令牌后继续。</p>
+        <input
+          type="password"
+          id="token-input"
+          placeholder="访问令牌"
+          autocomplete="off"
+        />
+        <button type="button" class="btn btn-primary" id="token-submit">
+          继续
+        </button>
+        <p class="token-error hidden" id="token-error">令牌无效，请重试。</p>
+      </div>
+    </div>
+
+    <main>
+      <section id="view-generate" class="view">
+        <div class="generate-layout">
+          <form class="panel form-panel" id="generate-form" autocomplete="off">
+            <div class="tool-tabs" id="tool-tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                data-tool="text-to-image"
+                class="active"
+              >
+                文生图
+              </button>
+              <button type="button" role="tab" data-tool="image-to-image">
+                图生图
+              </button>
+              <button type="button" role="tab" data-tool="multi-image-fusion">
+                多图融合
+              </button>
+              <button
+                type="button"
+                role="tab"
+                data-tool="sequential-generation"
+              >
+                组图
+              </button>
+            </div>
+
+            <label class="field-label" for="prompt" id="prompt-label"
+              >提示词</label
+            >
+            <textarea
+              id="prompt"
+              rows="6"
+              placeholder="描述画面：主体、动作、环境与风格…"
+            ></textarea>
+            <p class="field-hint" id="prompt-hint">建议不超过 300 字。</p>
+
+            <div id="reference-section" class="hidden">
+              <label class="field-label"
+                >参考图 <span class="label-note" id="ref-count-note"></span
+              ></label>
+              <div id="reference-list" class="reference-list"></div>
+              <div class="ref-add-row">
+                <input
+                  type="file"
+                  id="ref-file"
+                  accept="image/jpeg,image/png,image/webp,image/bmp,image/tiff,image/heic,image/heif"
+                  multiple
+                  hidden
+                />
+                <button type="button" class="btn btn-secondary" id="ref-upload">
+                  上传图片
+                </button>
+                <input
+                  type="text"
+                  id="ref-url"
+                  class="ref-url-input"
+                  placeholder="或粘贴图片 URL"
+                />
+                <button type="button" class="btn btn-ghost" id="ref-add-url">
+                  添加
+                </button>
+              </div>
+              <p class="field-hint">提示词中以「图1」「图2」指代各参考图。</p>
+            </div>
+
+            <div class="param-grid">
+              <div class="field">
+                <label class="field-label" for="size">尺寸</label>
+                <select id="size"></select>
+              </div>
+              <div class="field" id="custom-size-field">
+                <label class="field-label" for="custom-size">自定义宽高</label>
+                <div class="custom-size-row">
+                  <input
+                    type="number"
+                    id="size-width"
+                    placeholder="宽"
+                    min="16"
+                    max="8192"
+                  />
+                  <span class="custom-size-x" aria-hidden="true">×</span>
+                  <input
+                    type="number"
+                    id="size-height"
+                    placeholder="高"
+                    min="16"
+                    max="8192"
+                  />
+                </div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="request-count">生成张数</label>
+                <input
+                  type="number"
+                  id="request-count"
+                  min="1"
+                  max="10"
+                  value="1"
+                />
+              </div>
+              <div class="field field-checkbox">
+                <label class="checkbox-label"
+                  ><input type="checkbox" id="watermark" />添加水印</label
+                >
+              </div>
+              <div class="field hidden" id="max-images-field">
+                <label class="field-label" for="max-images">组图数量</label>
+                <input
+                  type="number"
+                  id="max-images"
+                  min="1"
+                  max="15"
+                  value="15"
+                />
+              </div>
+              <div class="field hidden" id="layer-field">
+                <label class="checkbox-label"
+                  ><input
+                    type="checkbox"
+                    id="layer-decomposition"
+                  />图层拆分</label
+                >
+              </div>
+            </div>
+
+            <details class="advanced">
+              <summary>高级选项</summary>
+              <div class="param-grid">
+                <div class="field">
+                  <label class="field-label" for="output-format"
+                    >输出格式</label
+                  >
+                  <select id="output-format">
+                    <option value="">跟随服务器</option>
+                    <option value="jpeg">JPEG</option>
+                    <option value="png">PNG</option>
+                  </select>
+                </div>
+                <div class="field field-checkbox">
+                  <label class="checkbox-label"
+                    ><input
+                      type="checkbox"
+                      id="auto-save"
+                      checked
+                    />自动保存</label
+                  >
+                </div>
+                <div class="field field-wide">
+                  <label class="field-label" for="save-path">保存子路径</label>
+                  <input
+                    type="text"
+                    id="save-path"
+                    placeholder="可选，保存目录内的相对子路径"
+                  />
+                </div>
+                <div class="field field-wide">
+                  <label class="field-label" for="custom-name"
+                    >文件名前缀</label
+                  >
+                  <input type="text" id="custom-name" placeholder="可选" />
+                </div>
+              </div>
+            </details>
+
+            <button
+              type="submit"
+              class="btn btn-primary btn-generate"
+              id="generate-btn"
+            >
+              生成图片
+            </button>
+          </form>
+
+          <section class="panel result-panel">
+            <div class="result-status" id="result-status">尚未生成</div>
+            <div class="result-loading hidden" id="result-loading" aria-hidden="true">
+              <div class="render-dots" id="render-dots"></div>
+            </div>
+            <div class="result-grid" id="result-grid"></div>
+            <div class="result-error hidden" id="result-error"></div>
+            <div class="result-meta hidden mono" id="result-meta"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-gallery" class="view hidden">
+        <div class="gallery-bar">
+          <label class="field-label" for="format-filter">格式</label>
+          <select id="format-filter">
+            <option value="">全部</option>
+            <option value=".png">PNG</option>
+            <option value=".jpg">JPG</option>
+            <option value=".jpeg">JPEG</option>
+            <option value=".webp">WebP</option>
+          </select>
+          <button type="button" class="btn btn-secondary" id="gallery-refresh">
+            刷新
+          </button>
+          <span class="gallery-count" id="gallery-count"></span>
+        </div>
+        <div class="gallery-grid" id="gallery-grid"></div>
+        <div class="gallery-empty hidden" id="gallery-empty">
+          保存目录还没有图片。
+        </div>
+        <div class="gallery-pager">
+          <button type="button" class="btn btn-secondary" id="gallery-prev">
+            上一页
+          </button>
+          <span class="gallery-page mono" id="gallery-page"></span>
+          <button type="button" class="btn btn-secondary" id="gallery-next">
+            下一页
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <div class="lightbox hidden" id="lightbox">
+      <div class="lightbox-inner">
+        <img id="lightbox-img" alt="预览" />
+        <div class="lightbox-bar">
+          <span class="lightbox-caption mono" id="lightbox-caption"></span>
+          <span class="lightbox-actions">
+            <button type="button" class="btn btn-secondary" id="lightbox-use">
+              用作参考图
+            </button>
+            <button type="button" class="btn btn-ghost" id="lightbox-close">
+              关闭
+            </button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/web/static/main.js"></script>
+  </body>
+</html>

@@ -28,6 +28,7 @@ class _MiddlewareRef:
     """替身中间件条目，暴露 cls 属性镜像 starlette.middleware.Middleware 的形态。"""
 
     cls: type
+    kwargs: dict[str, Any]
 
 
 class _FakeStarletteApp:
@@ -37,11 +38,17 @@ class _FakeStarletteApp:
         self.user_middleware: list[_MiddlewareRef] = []
 
     def add_middleware(self, middleware_class: type, **kwargs: Any) -> None:
-        del kwargs
-        self.user_middleware.insert(0, _MiddlewareRef(middleware_class))
+        self.user_middleware.insert(0, _MiddlewareRef(middleware_class, dict(kwargs)))
 
     def attached_classes(self) -> list[type]:
         return [ref.cls for ref in self.user_middleware]
+
+    def bearer_kwargs(self) -> dict[str, Any] | None:
+        """返回 Bearer 中间件条目的装配关键字参数，未装配时为 None。"""
+        for ref in self.user_middleware:
+            if ref.cls is _BearerTokenAuthMiddleware:
+                return ref.kwargs
+        return None
 
 
 @pytest.fixture
@@ -114,6 +121,35 @@ def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None
     assert app.attached_classes() == first_pass
 
 
+def test_attach_passes_web_exempt_paths_when_web_enabled(active_config: None) -> None:
+    """web_enabled 且配置令牌时 Bearer 装配携带 Web 静态页面豁免表。"""
+    from seedream_mcp.webapp.constants import (
+        WEB_EXEMPT_EXACT_PATHS,
+        WEB_EXEMPT_PATH_PREFIXES,
+    )
+
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret", web_enabled=True)
+
+    kwargs = app.bearer_kwargs()
+    assert kwargs is not None
+    assert kwargs.get("exempt_exact") == WEB_EXEMPT_EXACT_PATHS
+    assert kwargs.get("exempt_prefixes") == WEB_EXEMPT_PATH_PREFIXES
+
+
+def test_attach_omits_exempt_kwargs_when_web_disabled(active_config: None) -> None:
+    """web 关闭时 Bearer 装配不携带任何豁免参数，全部路径仍要求令牌。"""
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
+
+    kwargs = app.bearer_kwargs()
+    assert kwargs is not None
+    assert "exempt_exact" not in kwargs
+    assert "exempt_prefixes" not in kwargs
+
+
 # ==================== 暴露风险告警文案测试 ====================
 
 
@@ -142,3 +178,17 @@ def test_warn_remote_exposure_reports_truthful_auth_state(
     output = capsys.readouterr().err
     assert expected_fragment in output
     assert absent_fragment not in output
+
+
+def test_warn_remote_exposure_appends_web_notice_when_enabled(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """web_enabled 时告警追加 Web 豁免语义说明，默认形态不出现该文案。"""
+    _warn_remote_exposure("127.0.0.1", True)
+    assert "Web 操作台已开启" not in capsys.readouterr().err
+
+    _warn_remote_exposure("127.0.0.1", True, web_enabled=True)
+
+    output = capsys.readouterr().err
+    assert "Web 操作台已开启" in output
+    assert "/web/api 接口仍要求 Bearer 令牌" in output

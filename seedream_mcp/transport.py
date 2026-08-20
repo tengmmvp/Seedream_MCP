@@ -87,11 +87,23 @@ class _BearerTokenAuthMiddleware:
     校验请求 Authorization 头中的 Bearer 令牌，匹配则放行，否则 HTTP 流量返回 401。
     启用鉴权时拒绝 websocket 等非 HTTP 流量并以 code 1008 关闭，避免绕过 Bearer 校验。
     使用 hmac.compare_digest 做常数时间比较，避免时序侧信道泄露令牌。
+
+    exempt_exact 与 exempt_prefixes 声明免鉴权路径：Web 操作台的静态页面组
+    使用，浏览器原生导航无法携带 Authorization 头。API 路径不得进入豁免表；
+    路径含 ``..`` 时一律不豁免，与路由层穿越防护构成纵深。
     """
 
-    def __init__(self, app: ASGIApp, expected_token: str) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        expected_token: str,
+        exempt_exact: frozenset[str] = frozenset(),
+        exempt_prefixes: tuple[str, ...] = (),
+    ) -> None:
         self.app = app
         self._expected = expected_token.encode("utf-8")
+        self._exempt_exact = exempt_exact
+        self._exempt_prefixes = exempt_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """ASGI 调用入口：非 http 流量按类型处置，http 流量校验令牌后放行或回 401。"""
@@ -104,11 +116,20 @@ class _BearerTokenAuthMiddleware:
                 await send({"type": "websocket.close", "code": 1008})
             return
 
-        if self._request_authorized(scope):
+        if self._path_exempt(scope) or self._request_authorized(scope):
             await self.app(scope, receive, send)
             return
 
         await self._send_unauthorized(send)
+
+    def _path_exempt(self, scope: Scope) -> bool:
+        """判定请求路径是否命中免鉴权表，含上跳段的路径拒绝豁免。"""
+        path = scope.get("path", "")
+        if ".." in path:
+            return False
+        return path in self._exempt_exact or any(
+            path.startswith(prefix) for prefix in self._exempt_prefixes
+        )
 
     def _request_authorized(self, scope: Scope) -> bool:
         """判定请求是否携带匹配的 Bearer 令牌，非 Bearer 授权方案同样拒绝。"""
@@ -323,12 +344,17 @@ def _middleware_attached(app: Any) -> bool:
 
 
 def _attach_streamable_http_middleware(
-    app: Any, host: str, auth_token: str, max_body_size: int | None = None
+    app: Any,
+    host: str,
+    auth_token: str,
+    max_body_size: int | None = None,
+    web_enabled: bool = False,
 ) -> None:
     """向 streamable-http app 装配中间件栈，重复装配时跳过以保证幂等。
 
     max_body_size 未显式传入时回退读取活动配置；生产调用方已取过该配置时显式
-    传入，避免同一配置重复解析。
+    传入，避免同一配置重复解析。web_enabled 开启时向 Bearer 中间件传入 Web
+    静态页面的免鉴权路径表，API 路径始终要求令牌。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
     LoopbackHostGuard -> HealthCheck -> LimitRequestBody -> Bearer -> app，其中
@@ -339,7 +365,17 @@ def _attach_streamable_http_middleware(
         logger.warning("streamable-http 中间件已装配，跳过重复装配以避免中间件栈叠加")
         return
     if auth_token:
-        app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
+        if web_enabled:
+            from .webapp.constants import WEB_EXEMPT_EXACT_PATHS, WEB_EXEMPT_PATH_PREFIXES
+
+            app.add_middleware(
+                _BearerTokenAuthMiddleware,
+                expected_token=auth_token,
+                exempt_exact=WEB_EXEMPT_EXACT_PATHS,
+                exempt_prefixes=WEB_EXEMPT_PATH_PREFIXES,
+            )
+        else:
+            app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
     if max_body_size is None:
         max_body_size = get_active_config().http_max_body_size
@@ -392,7 +428,7 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     return TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 
-def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
+def _warn_remote_exposure(host: str, auth_enabled: bool, web_enabled: bool = False) -> None:
     """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致，同时写日志与 stderr。"""
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
@@ -412,6 +448,8 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
             f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险；"
             "请使用 --auth-token 配置鉴权。"
         )
+    if web_enabled:
+        message += "Web 操作台已开启：/web 与 /web/static 静态页面免鉴权，全部 /web/api 接口仍要求 Bearer 令牌。"
     logger.warning(message)
     # 控制台输出走 stderr，与 server.py 的运行告警一致，避免污染 stdio 传输的 stdout。
     print(message, file=sys.stderr)
@@ -444,6 +482,7 @@ def _run_streamable_http(
     ssl_certfile: str | None = None,
     ssl_keyfile: str | None = None,
     stateless: bool = False,
+    web_enabled: bool = False,
 ) -> None:
     """启动 streamable-http 传输。
 
@@ -462,6 +501,12 @@ def _run_streamable_http(
     transport_security = _transport_security_for_host(host)
     # 请求体上限取一次配置，同时供 SDK 内层与本项目中间件两层消费。
     max_body_size = get_active_config().http_max_body_size
+    # Web 路由注册必须先于 streamable_http_app：SDK 构造 app 时一次性拷贝自定义
+    # 路由引用，事后追加不生效；静态挂载则在 app 构造后向活体路由表追加。
+    if web_enabled:
+        from .webapp import register_web_routes
+
+        register_web_routes()
     app = mcp.streamable_http_app(
         host=host,
         stateless_http=stateless,
@@ -479,7 +524,13 @@ def _run_streamable_http(
                 "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",
                 host,
             )
-    _attach_streamable_http_middleware(app, host, auth_token, max_body_size=max_body_size)
+    if web_enabled:
+        from .webapp import mount_web_static
+
+        mount_web_static(app)
+    _attach_streamable_http_middleware(
+        app, host, auth_token, max_body_size=max_body_size, web_enabled=web_enabled
+    )
     ssl_kwargs: dict[str, Any] = {}
     if ssl_certfile:
         ssl_kwargs["ssl_certfile"] = ssl_certfile

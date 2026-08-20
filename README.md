@@ -163,6 +163,16 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 
 配置后重启对应客户端即可使用。
 
+## 🖥️ Web 操作台
+
+不使用 MCP 客户端的用户也可以直接通过网页使用：以 `--web` 旗标（或环境变量 `SEEDREAM_WEB_ENABLED=true`）启动 streamable-http 传输后，浏览器访问 `http://127.0.0.1:8000/web` 即可打开操作台，覆盖文生图、图生图、多图融合、组图生成与历史图库。默认关闭，stdio 传输与未开启时不暴露任何 Web 端点。
+
+```bash
+ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
+```
+
+鉴权模型：静态页面（`/web` 与 `/web/static`）免令牌加载，页面本身不含任何数据；全部 `/web/api` 接口强制 Bearer 令牌——首次访问在页面输入一次即可，令牌仅保存在浏览器本地，图片经服务端中转以 blob 加载，令牌不出现在 URL 中。回环绑定且未配置令牌的部署全程无感。
+
 ## ⚙️ 启动参数
 
 ```bash
@@ -183,6 +193,8 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 --host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址必须配置 --auth-token 与 TLS（或 --insecure-allow-non-tls 豁免），否则拒绝启动)
 --port INTEGER                                     # streamable-http 监听端口 (默认: 8000)
 --stateless                                        # streamable-http 无状态模式，适合远程多客户端与负载均衡 (默认关闭)
+--web                                              # 开启 Web 操作台，浏览器访问 /web 直接使用 (默认关闭，仅 streamable-http 生效)
+--no-web                                           # 关闭 Web 操作台，覆盖 SEEDREAM_WEB_ENABLED 的开启设置
 
 # 安全
 --auth-token TEXT                                  # Bearer 鉴权令牌（非回环绑定必须配置，也可用 SEEDREAM_HTTP_AUTH_TOKEN）
@@ -194,7 +206,7 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 --log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别
 ```
 
-> **安全提示**：`localhost` 不被视为回环地址（其解析依赖 hosts/DNS，可能被污染指向非回环），绑定它同样要求配置 Bearer 鉴权令牌与 TLS，未配置则服务拒绝启动；如需回环免鉴权语义，请改绑 `127.0.0.1` 或 `::1`。非回环绑定同样必须配置 Bearer 令牌与 TLS。生产与容器部署应通过环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递密钥，而非 CLI `--api-key` / `--auth-token`（命令行参数会暴露在进程列表与 shell 历史记录中）；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。
+> **安全提示**：`localhost` 不被视为回环地址（其解析依赖 hosts/DNS，可能被污染指向非回环），绑定它同样要求配置 Bearer 鉴权令牌与 TLS，未配置则服务拒绝启动；如需回环免鉴权语义，请改绑 `127.0.0.1` 或 `::1`。非回环绑定同样必须配置 Bearer 令牌与 TLS。生产与容器部署应通过环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递密钥，而非 CLI `--api-key` / `--auth-token`（命令行参数会暴露在进程列表与 shell 历史记录中）；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。Web 操作台不改变上述传输层安全要求：开启后新增的 API 面全部强制令牌，免鉴权的仅限无数据的静态页面骨架。
 
 ### 使用示例
 
@@ -552,6 +564,7 @@ SEEDREAM_PREVIEW_ENABLED=true                 # 生成结果附带已保存图�
 SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界回退目录（MCP Roots 优先）
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定必须配置，否则拒绝启动；另需 TLS 或 --insecure-allow-non-tls 豁免）
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 请求体上限（字节，≥1MB，默认 64MB；单图 data URI 约 40MB，兼顾多图融合）
+SEEDREAM_WEB_ENABLED=false                  # Web 操作台开关（--web/--no-web 覆盖；仅 streamable-http 生效，开启后浏览器可访问 /web 页面与历史图库，默认关闭）
 SEEDREAM_HTTP_ALLOWED_HOSTS=                # 非回环直连部署的 Host 头允许列表，逗号分隔，支持 host:port 与尾部 :* 通配（如 mcp.example.com,mcp.example.com:*）；留空则整体关闭 SDK 内层 Host 校验，适用反向代理场景
 SEEDREAM_REQUEST_STATE_KEYS=               # 多副本 HTTP 部署共享的 requestState 密钥环，逗号分隔十六进制，每键解码后不少于 32 字节；留空保持 SDK 默认进程临时密钥，单进程部署可省略
 

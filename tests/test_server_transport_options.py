@@ -105,6 +105,7 @@ def _make_cli_args(transport: str) -> Namespace:
         model=None,
         default_size=None,
         watermark=None,
+        web=False,
         log_level=None,
         base_url=None,
         transport=transport,
@@ -143,7 +144,13 @@ def test_cli_main_dispatches_to_correct_runner(
         captured["stdio_transport"] = transport
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
-        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+        host,
+        port,
+        auth_token,
+        ssl_certfile=None,
+        ssl_keyfile=None,
+        stateless=False,
+        web_enabled=False,
     ):
         captured["http"] = {"host": host, "port": port, "auth_token": auth_token}
 
@@ -203,7 +210,13 @@ def test_cli_main_allows_non_loopback_http_with_tls(
     captured: dict[str, object] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
-        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+        host,
+        port,
+        auth_token,
+        ssl_certfile=None,
+        ssl_keyfile=None,
+        stateless=False,
+        web_enabled=False,
     ):
         captured["http"] = {
             "host": host,
@@ -525,7 +538,13 @@ def test_cli_main_non_loopback_auth_token_from_active_config(
     captured: dict[str, object] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
-        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+        host,
+        port,
+        auth_token,
+        ssl_certfile=None,
+        ssl_keyfile=None,
+        stateless=False,
+        web_enabled=False,
     ):
         captured["auth_token"] = auth_token
 
@@ -549,7 +568,13 @@ def test_cli_main_cli_auth_token_overrides_config_token(
     captured: dict[str, object] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
-        host, port, auth_token, ssl_certfile=None, ssl_keyfile=None, stateless=False
+        host,
+        port,
+        auth_token,
+        ssl_certfile=None,
+        ssl_keyfile=None,
+        stateless=False,
+        web_enabled=False,
     ):
         captured["auth_token"] = auth_token
 
