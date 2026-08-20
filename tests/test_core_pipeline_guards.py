@@ -154,7 +154,7 @@ def test_structured_non_dict_error_sanitized() -> None:
 
 
 def test_structured_usage_shared_reference_preserved_not_truncated() -> None:
-    """合法共享引用不在同一路径重复出现，净化后两处引用均完整展开。"""
+    """多处引用同一对象不构成循环引用，净化后各处引用均完整展开，不误标 <truncated:cyclic>。"""
     shared = {"note": "echo\r\nFAKE"}
     shared_list = ["x\r\ny"]
     result = {

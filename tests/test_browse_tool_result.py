@@ -243,8 +243,8 @@ async def test_browse_images_format_filter_all_unsupported_echoes_original(
 ) -> None:
     """format_filter 全部为不支持后缀时返回区分消息并回显原始输入。
 
-    用 .svg 而非任务示例的 .gif：formats 支持集合含 .gif，会落入 supported_only
-    非空分支而不触发 exhausted 分支；.svg 不在支持集合内，可真正命中。
+    用 .svg 而非 .gif：.gif 属受支持后缀，会落入 supported_only 非空分支而不
+    触发 exhausted 分支；.svg 不在支持集合内，可真正命中。
     """
     result = await handle_browse_images(BrowseImagesInput(directory=".", format_filter=[".svg"]))
 

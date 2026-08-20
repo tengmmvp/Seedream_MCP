@@ -18,7 +18,7 @@ from seedream_mcp.utils.io.io_storage import (
 
 @pytest.fixture
 def manager(tmp_path):
-    """以临时目录构造 FileManager，测试不落盘只调纯函数。"""
+    """以临时目录构造 FileManager，测试不写文件内容，仅覆盖文件名与保存路径生成。"""
     return FileManager(base_dir=tmp_path)
 
 

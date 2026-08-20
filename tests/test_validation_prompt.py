@@ -46,7 +46,6 @@ def test_validate_prompt_chinese_limit_warns_but_returns(
     text = "你" * 301
     # 文档为「建议」而非硬限制：超限仅记录警告，不阻断调用。
     assert validate_prompt(text) == text
-    # 超限须真正触发 warning，且文案携带实际中文计数。
     assert len(warning_logger.warnings) == 1
     assert "301" in warning_logger.warnings[0]
 
@@ -81,7 +80,6 @@ def test_validate_prompt_mixed_limits_warns_but_returns(
     text_en = ("word " * 601).strip()
     assert validate_prompt(text_cn) == text_cn
     assert validate_prompt(text_en) == text_en
-    # 中英文分别超限各触发一次 warning。
     assert len(warning_logger.warnings) == 2
 
 

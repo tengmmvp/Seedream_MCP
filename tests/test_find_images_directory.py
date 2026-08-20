@@ -316,7 +316,7 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     within_ttl = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=100)
     assert [raw.name for raw, _resolved in within_ttl] == ["a.png"]
 
-    # 模拟 TTL 过期：推进 browse_images.time.monotonic 返回值越过 TTL
+    # 模拟 TTL 过期：推进 io_scan 的 time.monotonic 返回值越过 TTL
     ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
     real_monotonic = scan_module.time.monotonic
     base = real_monotonic()

@@ -38,17 +38,12 @@ def _patch_unretrieved_callback(
 class _WarningCapture:
     """捕获 warning 调用的 loguru 替身，按模板参数格式化后记录消息文本。
 
-    monkeypatch logs.logger 后兜底 warning 落入本替身，bind/opt 的附加参数被
+    monkeypatch logs.logger 后兜底 warning 落入本替身，opt 的附加参数被
     丢弃，供用例断言消息与次数。
     """
 
     def __init__(self) -> None:
         self.warnings: list[str] = []
-
-    def bind(self, **kwargs: Any) -> "_WarningCapture":
-        # 客户端构造会经 get_logger 调 bind，替身须容忍该链路
-        del kwargs
-        return self
 
     def opt(self, *args: Any, **kwargs: Any) -> "_WarningCapture":
         del args, kwargs

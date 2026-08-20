@@ -33,7 +33,6 @@ async def test_app_lifespan_yields_config_and_client(
         assert client is not None
         # client 在 lifespan 期内应已持有可用的 httpx 客户端
         assert client._client is not None
-        # download_manager 同样注入
         assert state["download_manager"] is not None
 
 

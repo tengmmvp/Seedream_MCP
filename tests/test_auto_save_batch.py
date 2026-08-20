@@ -271,6 +271,8 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
 
     monkeypatch.setattr(auto_save_module, "_decoders_ready", False)
     monkeypatch.setattr(pillow_heif, "register_heif_opener", counting_register)
+    # 预置 PIL 默认阈值，与 36M 区分：冷路径断言才能证明阈值确被写入，不被
+    # 先前用例残留的 36M 假绿。
     monkeypatch.setattr(PilImage, "MAX_IMAGE_PIXELS", 89_478_485)
 
     assert auto_save_module._pixel_limit_rejection(tiny) is None

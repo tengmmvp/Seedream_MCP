@@ -57,7 +57,7 @@ def test_generation_exception_path_error_is_dict() -> None:
     assert isinstance(obj.error, dict)
 
 
-def test_generation_failed_result_error_is_str() -> None:
+def test_generation_failed_result_error_is_dict() -> None:
     """失败路径完整字段的 structuredContent 可实例化，error 为 dict 形态。"""
     structured = {
         "tool": "text_to_image",

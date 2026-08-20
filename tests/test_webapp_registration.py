@@ -20,8 +20,8 @@ from _web_fixtures import (
 def test_register_web_routes_registers_expected_paths(clean_web_routes: None) -> None:
     """注册后 MCPServer 自定义路由恰好覆盖全部 Web 端点路径，无多余亦无遗漏。
 
-    custom_route 注册表是 Web 域外唯一的 custom_route 消费点，兜底 catch-all
-    由 mount_web_static 直接追加到 app 路由表，不进入本断言集合。
+    项目内 custom_route 注册仅来自 Web 域，注册表内容恰为全部 Web 端点路径；
+    兜底 catch-all 由 mount_web_static 直接追加到 app 路由表，不进入本断言集合。
     """
     from seedream_mcp.resources import mcp
     from seedream_mcp.webapp import register_web_routes

@@ -67,10 +67,10 @@ def test_open_no_follow_read_rejects_symlink_when_supported(tmp_path: Path) -> N
 def test_open_no_follow_read_fallback_rejects_symlink_without_no_follow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """模拟平台不支持 O_NOFOLLOW：is_symlink 兜底分支拒绝符号链接读取。"""
+    """模拟平台不支持 O_NOFOLLOW：lstat/S_ISLNK 兜底分支拒绝符号链接读取。"""
     link = _make_symlink(tmp_path, "read_fallback")
 
-    # 强制 no_follow 取值为 0，触发 is_symlink 兜底分支
+    # 强制 no_follow 取值为 0，触发 lstat/S_ISLNK 兜底分支
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
     with pytest.raises(OSError, match="拒绝读取符号链接"):
         open_no_follow_read(link)

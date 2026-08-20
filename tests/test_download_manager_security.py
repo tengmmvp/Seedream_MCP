@@ -458,7 +458,7 @@ async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhaus
     with pytest.raises(DownloadError, match="下载超时.*重定向链累计耗时"):
         await manager.download_image("https://example.com/img.png", save_path)
 
-    # 首跳后累计耗满预算即截停，仅发出一次请求；总占用恰为一个预算窗口
+    # 首跳后累计耗满预算即截停，仅发出一次请求
     assert session._idx == 1, "累计预算已耗尽时不得跟随下一跳"
     assert clock_now[0] - 1000.0 == budget
     assert not save_path.exists()

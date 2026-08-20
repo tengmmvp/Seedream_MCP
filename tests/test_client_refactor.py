@@ -753,7 +753,7 @@ async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
 async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """5.0 Pro 多图融合强制 sequential_image_generation=disabled 保持单图输出。"""
+    """5.0 Pro 不支持组图，多图融合强制 sequential_image_generation=disabled 保持单图输出。"""
     client = SeedreamClient(_build_pro_config())
     captured_request: dict[str, Any] = {}
 
@@ -770,7 +770,6 @@ async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
 
     await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
 
-    # 5.0 Pro 不支持组图，sequential_image_generation 须强制 disabled 以单图输出
     assert captured_request["sequential_image_generation"] == "disabled"
 
 

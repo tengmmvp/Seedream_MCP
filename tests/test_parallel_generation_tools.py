@@ -293,7 +293,7 @@ async def test_single_request_progress_full_sequence_with_auto_save(
 
     monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", fake_save_multiple)
 
-    # 关闭预览聚焦进度序列，预览分支不新增进度上报。
+    # 关闭预览：替身保存结果的 local_path 指向不存在的文件，避免预览读盘触发失败告警。
     config = SeedreamConfig(
         api_key="test_key",
         max_retries=1,

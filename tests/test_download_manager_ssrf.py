@@ -121,7 +121,7 @@ async def test_resolve_public_ips_accepts_public_resolution(
 
 
 def test_validate_url_static_rejects_cgnat_ip() -> None:
-    """RFC 6598 CGNAT 段 100.64.0.0/10 不被 ipaddress.is_global 排除，须显式拒绝。"""
+    """RFC 6598 CGNAT 段显式拒绝以给出精确拒绝原因，并对 is_global 实现差异保持纵深防御。"""
     with pytest.raises(DownloadError, match="CGNAT"):
         DownloadManager()._validate_url_static("http://100.64.0.1/x.png")
 

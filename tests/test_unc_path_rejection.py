@@ -198,7 +198,6 @@ def test_file_uri_to_path_accepts_localhost(tmp_path: Path) -> None:
     """file://localhost/path 形式接受并解析为本地路径。"""
     f = tmp_path / "x.png"
     f.touch()
-    # file://localhost/path 形式应被接受。
     uri = f.as_uri().replace("file:///", "file://localhost/", 1)
     result = _file_uri_to_path(uri)
     assert result is not None

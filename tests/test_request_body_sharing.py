@@ -223,7 +223,7 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
     assert replayed is builder_failure
     assert attempts["count"] == 1
 
-    # 失败缓存随 release 清空，新计划重新构建并成功写入
+    # 失败缓存随 release 清空，同一计划重新构建并成功写入
     plan.release()
 
     built = await plan.get_or_build(working_builder)

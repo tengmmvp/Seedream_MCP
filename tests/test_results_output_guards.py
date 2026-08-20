@@ -25,7 +25,7 @@ from _generation_fixtures import make_generation_context
 # 带 userinfo 凭据与 CRLF 的上游 URL：净化后凭据被剥离、换行被压平。
 _DIRTY_URL = "https://AKID:SECRET@mirror.example.com/a.png\r\nFAKE-LINE api_key=leaked"
 
-# 火山 TOS 签名 URL 约 674 字符：数据字段净化不得截断，否则 URL 不可用。
+# 火山 TOS 签名 URL 约 670 字符：数据字段净化不得截断，否则 URL 不可用。
 _SIGNED_URL = "https://tos.example.com/obj/a.png?X-Tos-Signature=" + "s" * 620
 
 
@@ -212,7 +212,7 @@ def test_structured_data_clean_url_passed_through_without_copy() -> None:
 
 
 def test_long_signed_url_preserved_intact_after_sanitization() -> None:
-    """约 674 字符的签名 URL 净化后完整保留：数据字段不做错误文本的 500 字符截断。"""
+    """约 670 字符的签名 URL 净化后完整保留：数据字段不做错误文本的 500 字符截断。"""
     assert len(_SIGNED_URL) > 500
 
     text = format_generation_response(

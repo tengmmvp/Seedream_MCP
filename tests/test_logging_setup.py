@@ -31,7 +31,7 @@ def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_setup_logging_respects_force_standard_logging_false(
     monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
 ) -> None:
-    """force_standard_logging=False 时 basicConfig 不带 force。"""
+    """force_standard_logging=False 时 basicConfig 显式传入 force=False。"""
     captured_kwargs = {}
 
     def fake_basic_config(*args, **kwargs) -> None:
