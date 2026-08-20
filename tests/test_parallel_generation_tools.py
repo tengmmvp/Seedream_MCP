@@ -2,10 +2,10 @@
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import pytest
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from seedream_mcp.client import SeedreamClient
@@ -36,6 +36,11 @@ from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 from seedream_mcp.utils.io import io_save
 
+# 参数化用例覆盖的四种生成工具输入模型，供 handler 与 params 参数共用注解。
+ParallelHandlerParams = (
+    TextToImageInput | ImageToImageInput | MultiImageFusionInput | SequentialGenerationInput
+)
+
 
 def _build_config() -> SeedreamConfig:
     # 关闭自动保存：测试 mock 返回占位 URL，避免对 example.com 发起真实下载拖慢 CI
@@ -64,7 +69,6 @@ def _patch_generation_success(
     monkeypatch.setattr(SeedreamClient, method_name, fake_method)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("handler", "method_name", "params"),
     [
@@ -107,13 +111,13 @@ def _patch_generation_success(
 )
 async def test_generation_handlers_support_parallel_requests(
     monkeypatch: pytest.MonkeyPatch,
-    handler,
+    handler: Callable[[ParallelHandlerParams, SeedreamConfig], Awaitable[CallToolResult]],
     method_name: str,
-    params,
+    params: ParallelHandlerParams,
 ) -> None:
     call_count = 0
 
-    async def fake_method(self, **kwargs):  # noqa: ANN001
+    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
         nonlocal call_count
         del self, kwargs
         call_count += 1
@@ -135,14 +139,13 @@ async def test_generation_handlers_support_parallel_requests(
     assert result.structured_content["request_count"] == 3
 
 
-@pytest.mark.asyncio
 async def test_parallel_requests_partial_failure_recorded_in_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """N 个并行请求中单个失败：其余成功完成，异常进入 batch.errors，status 为 partial。"""
     call_count = 0
 
-    async def fake_method(self, **kwargs):  # noqa: ANN001
+    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
         nonlocal call_count
         del self, kwargs
         call_count += 1
@@ -196,7 +199,6 @@ class _ProgressCollectingContext:
         self.progress_values.append(progress)
 
 
-@pytest.mark.asyncio
 async def test_parallel_batch_progress_strictly_increasing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,7 +246,6 @@ class _ReorderingProgressContext:
         self.progress_values.append(progress)
 
 
-@pytest.mark.asyncio
 async def test_parallel_batch_progress_delivery_order_strictly_increasing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,7 +270,6 @@ async def test_parallel_batch_progress_delivery_order_strictly_increasing(
     assert ctx._yielded is True
 
 
-@pytest.mark.asyncio
 async def test_single_request_progress_full_sequence_with_auto_save(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -316,7 +316,6 @@ async def test_single_request_progress_full_sequence_with_auto_save(
     ]
 
 
-@pytest.mark.asyncio
 async def test_single_request_progress_without_auto_save_jumps_70_to_100(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -337,13 +336,12 @@ async def test_single_request_progress_without_auto_save_jumps_70_to_100(
     assert values[-1] == PROGRESS_COMPLETE
 
 
-@pytest.mark.asyncio
 async def test_context_failure_progress_jumps_directly_to_complete(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """上下文构建失败的错误路径进度从已接收直达完成，两值序列仍严格递增。"""
 
-    async def unexpected_call(self, **kwargs):  # noqa: ANN001
+    async def unexpected_call(self: Any, **kwargs: Any) -> None:
         del self, kwargs
         raise AssertionError("上下文构建失败不应触达生成请求")
 
@@ -394,11 +392,10 @@ def test_parallel_options_reject_stream_with_parallel_requests_in_schema() -> No
         TextToImageInput(prompt="test", request_count=2, stream=True)
 
 
-@pytest.mark.asyncio
 async def test_generation_handler_returns_call_tool_error_result_when_request_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def failing_method(self, **kwargs):  # noqa: ANN001
+    async def failing_method(self: Any, **kwargs: Any) -> None:
         del self, kwargs
         raise SeedreamValidationError("提示词不能为空", field="prompt", value="")
 

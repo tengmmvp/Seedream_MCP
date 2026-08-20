@@ -348,7 +348,8 @@ def _validate_data_uri(data_uri: str) -> str:
             raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)
 
         # 编码标记需在原始 header 确认，确保按 base64 解码而非误处理其他编码负载。
-        header_lower = data_uri.split(",", 1)[0].lower()
+        # partition 只物化头部片段，不拷贝 40MB 级 base64 载荷。
+        header_lower = data_uri.partition(",")[0].lower()
         if not header_lower.startswith("data:image/") or ";base64" not in header_lower:
             raise SeedreamValidationError(
                 "Data URI 必须为 data:image/<格式>;base64, 前缀（scheme 大小写不敏感）",

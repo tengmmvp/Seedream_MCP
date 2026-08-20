@@ -13,13 +13,15 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.caching import CacheHint, CacheableMethod
+from mcp.server.mcpserver import MCPServer, RequestStateSecurity
 
 from .config import (
     LIFESPAN_KEY_CLIENT,
     LIFESPAN_KEY_CONFIG,
     LIFESPAN_KEY_DOWNLOAD_MANAGER,
     SeedreamConfig,
+    active_request_state_keys,
     get_active_config,
     set_active_config,
 )
@@ -247,12 +249,46 @@ def _reset_lifespan_state() -> None:
     reset_directory_scan_cache()
 
 
+# ==================== 服务器构造 ====================
+
+# 静态列表面的客户端缓存提示时长：tools 与 prompts 注册于 import 期进程内不变，
+# skill:// 资源与 models/info 为静态载荷，server/discover 同为静态声明，均可安全
+# 声明 60 秒新鲜度；resources/read 随会话读取变化，server/info 随活动配置变化，
+# workspace/roots 随会话声明变化，均不纳入。
+_STATIC_LIST_CACHE_TTL_MS = 60_000
+
+_STATIC_LIST_CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
+    "tools/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
+    "prompts/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
+    "resources/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
+    "resources/templates/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
+    "server/discover": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
+}
+
+
+def _build_request_state_security() -> RequestStateSecurity | None:
+    """按活动配置构造 requestState 密钥环策略，未配置时返回 None 保持 SDK 默认。"""
+    keys = active_request_state_keys()
+    if not keys:
+        return None
+    return RequestStateSecurity(keys=keys)
+
+
+def _create_mcp_server() -> MCPServer:
+    """构造进程级 MCPServer 实例，静态列表面附缓存提示并按配置启用密钥环。"""
+    return MCPServer(
+        SERVER_NAME,
+        instructions=SERVER_INSTRUCTIONS,
+        version=SERVER_VERSION,
+        lifespan=app_lifespan,
+        cache_hints=_STATIC_LIST_CACHE_HINTS,
+        request_state_security=_build_request_state_security(),
+    )
+
+
 # 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。
 # version 必须显式传入：SDK 2.0 起未传 version 的服务器在 initialize 结果的 serverInfo
-# 中报告空串而非 SDK 包版本。
-mcp = MCPServer(
-    SERVER_NAME,
-    instructions=SERVER_INSTRUCTIONS,
-    version=SERVER_VERSION,
-    lifespan=app_lifespan,
-)
+# 中报告空串而非 SDK 包版本。request_state_security 为 None 时 SDK 回退进程临时
+# 密钥，单进程部署行为不变；多副本 HTTP 部署经 SEEDREAM_REQUEST_STATE_KEYS 共享
+# 密钥环，重试落到其他实例仍可解封 requestState。
+mcp = _create_mcp_server()

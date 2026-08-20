@@ -9,7 +9,6 @@ from seedream_mcp.tools.core.common import build_generation_context
 from seedream_mcp.tools.core.schemas import SequentialGenerationInput
 
 
-@pytest.mark.asyncio
 async def test_handle_sequential_generation_passes_derived_max_images_when_omitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -46,7 +45,6 @@ async def test_handle_sequential_generation_passes_derived_max_images_when_omitt
     assert captured_kwargs["size"] == config.default_size
 
 
-@pytest.mark.asyncio
 async def test_handle_sequential_generation_keeps_explicit_max_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

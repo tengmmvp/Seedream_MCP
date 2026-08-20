@@ -13,9 +13,10 @@ import asyncio
 import logging
 import sys
 import weakref
+from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 

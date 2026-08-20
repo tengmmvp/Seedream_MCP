@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import OrderedDict
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate

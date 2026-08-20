@@ -24,8 +24,9 @@ import os
 import stat
 import sys
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import IO, Awaitable, Callable
+from typing import IO
 
 PathLike = str | Path
 

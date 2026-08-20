@@ -409,29 +409,10 @@ async def build_browse_fallback_result(
     )
 
 
-async def execute_browse_request(
-    params: BrowseImagesInput,
-    ctx: Context[Any, Any] | None,
-    *,
-    resolved_directories: list[Path],
-) -> CallToolResult:
-    """执行图片浏览主逻辑：读取边界、解析目录、扫描分页并装配工具结果。
-
-    仅允许访问 MCP Roots 授权的工作区目录；扫描结果经目录级缓存加速翻页，切片多取
-    一张以判定 has_more。未预期异常向上抛出，由 impl 外层 ``handle_browse_images``
-    兜底降级。
-
-    Args:
-        params: 经 pydantic 校验的工具输入模型。
-        ctx: MCP 上下文，用于进度上报，可为 None。
-        resolved_directories: 外层创建的共享列表，解析结果逐步填充，供成功与兜底
-            分支读取。
-
-    Returns:
-        浏览工具结果，参数可自纠错误与不可归因空目录为 is_error=True。
-    """
-    raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
-    directory = params.directory if params.directory is not None else "."
+async def _resolve_browse_directories(
+    directory: str,
+) -> tuple[list[Path], list[Path], list[Path], str | None]:
+    """目录解析阶段：读取工作区根并解析请求目录，供越界判定与扫描取用。"""
 
     # 工作区根读取与请求目录的 resolve/normalize 可能阻塞网络挂载目录，整体下沉
     # 线程；会话 Roots 时边界为 ContextVar 直读，下沉无额外开销。后续以已 resolve
@@ -476,42 +457,18 @@ async def execute_browse_request(
                     resolved_dir_list.append(candidate)
         return workspace_roots, resolved_root_list, resolved_dir_list, None
 
-    workspace_roots, resolved_roots, resolved_dir_list, dir_error = await asyncio.to_thread(
-        _read_roots_and_resolve_dirs
-    )
+    return await asyncio.to_thread(_read_roots_and_resolve_dirs)
 
-    state = _BrowseRequestState.from_params(
-        params,
-        workspace_roots=workspace_roots,
-        resolved_directories=resolved_directories,
-        format_filter=raw_format_filter,
-    )
 
-    if not workspace_roots:
-        message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
-        return _build_browse_error(state=state, message=message)
-
-    if dir_error is not None:
-        return _build_browse_error(state=state, message=dir_error)
-    resolved_directories.extend(resolved_dir_list)
-
-    if not resolved_directories:
-        # 回退边界下不回显允许根清单，避免暴露服务器环境结构。
-        if is_boundary_from_session_roots():
-            allowed_roots = ", ".join(str(root) for root in workspace_roots)
-            message = f"目录超出允许范围。仅允许浏览工作区目录: {allowed_roots}"
-        else:
-            message = "目录超出允许范围。仅允许浏览服务器配置的工作区目录。"
-        return _build_browse_error(state=state, message=message)
-
-    logger.info(
-        "浏览图片: dirs={}, recursive={}, max_depth={}, limit={}",
-        resolved_directories,
-        state.recursive,
-        state.max_depth,
-        state.limit,
-    )
-
+async def _scan_browse_entries(
+    *,
+    ctx: Context[Any, Any] | None,
+    state: _BrowseRequestState,
+    resolved_directories: list[Path],
+    resolved_roots: list[Path],
+    format_filter_exhausted: bool,
+) -> tuple[list[Path], dict[Path, Path], list[Path]]:
+    """扫描阶段：逐目录扫描并合并越界过滤与去重后的图片条目，上报扫描进度。"""
     # 逐目录扫描并合并结果，scan_limit 取 offset+limit+1，多取一张用于判定 has_more；
     # 越界项与重复项的剔除及补扫见 _scan_and_filter_directory。format_filter_exhausted
     # 时跳过扫描与扫描进度上报，由空结果分支统一返回。
@@ -549,63 +506,95 @@ async def execute_browse_request(
                     progress=PROGRESS_SCAN_START + PROGRESS_SCAN_SPAN * dir_index / total_dirs,
                     message=f"已扫描 {dir_index}/{total_dirs} 个目录，找到 {len(all_images)} 张图片",
                 )
+    return all_images, image_resolved_map, unreadable_dirs
 
+
+def _paginate_browse_images(
+    *,
+    all_images: list[Path],
+    offset: int,
+    limit: int,
+) -> tuple[list[Path], bool, int | None, int | None]:
+    """分页切片阶段：切出当前页图片并派生 has_more、next_offset 与 total_count。"""
     # 分页切片：has_more 时未扫完全量、总数未知，total_count 置 None。
-    page_end = state.offset + state.limit
-    images = all_images[state.offset : page_end]
+    page_end = offset + limit
+    images = all_images[offset:page_end]
     has_more = len(all_images) > page_end
     next_offset = page_end if has_more else None
     total_count = None if has_more else len(all_images)
+    return images, has_more, next_offset, total_count
 
+
+async def _build_empty_browse_result(
+    *,
+    ctx: Context[Any, Any] | None,
+    state: _BrowseRequestState,
+    format_filter_exhausted: bool,
+    total_count: int | None,
+    has_more: bool,
+    next_offset: int | None,
+    unreadable_dirs: list[Path],
+) -> CallToolResult:
+    """空页装配阶段：按错误可归因性分流为参数错误结果或空结果。"""
     # 空页按错误可归因性分流：format_filter_exhausted 与 offset 越界是模型可自纠的
     # 参数错误，返回 is_error=True 与结构化错误标记；目录不可读与无图片非模型可修复，
     # 维持空结果语义，文案区分「目录不可读」与「无图片」。
-    if not images:
-        if format_filter_exhausted:
-            supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
-            if state.format_filter:
-                # 用户 filter 字符串经净化后拼入消息；支持列表为静态服务端数据，
-                # 不参与净化。
-                user_formats = sanitize_error_text(", ".join(state.format_filter))
-                message = (
-                    f"指定的图片格式 {user_formats} 均不在支持列表内，支持: {supported_list}。"
-                )
-            else:
-                # 空列表无格式可回显，改用不含空位的文案，避免残缺语义。
-                message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
-            await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-            return _build_browse_error(state=state, message=message)
-        if total_count:
-            # 消息携带总数与有效区间，模型修正 offset 后即可重试。
-            message = (
-                f"offset={state.offset} 超出范围，目录共有 {total_count} 张图片，"
-                f"请使用 0 <= offset < {total_count}。"
-            )
-            await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-            return _build_browse_error(state=state, message=message)
-        if unreadable_dirs:
-            unique_unreadable = list(dict.fromkeys(unreadable_dirs))
-            if is_boundary_from_session_roots():
-                dirs_text = ", ".join(str(item) for item in unique_unreadable)
-            else:
-                # 回退边界不回显路径，仅按数量提示，明细进日志。
-                dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"
-            message = f"目录不可读或无图片文件：{dirs_text}"
+    if format_filter_exhausted:
+        supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
+        if state.format_filter:
+            # 用户 filter 字符串经净化后拼入消息；支持列表为静态服务端数据，
+            # 不参与净化。
+            user_formats = sanitize_error_text(", ".join(state.format_filter))
+            message = f"指定的图片格式 {user_formats} 均不在支持列表内，支持: {supported_list}。"
         else:
-            message = "未找到图片文件，请确认目录或过滤条件。"
-        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
-        return CallToolResult(
-            content=[TextContent(type="text", text=message)],
-            structured_content=_build_browse_structured_result(
-                state,
-                status="empty",
-                total_count=total_count,
-                has_more=has_more,
-                next_offset=next_offset,
-            ),
-            is_error=False,
+            # 空列表无格式可回显，改用不含空位的文案，避免残缺语义。
+            message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
+        return _build_browse_error(state=state, message=message)
+    if total_count:
+        # 消息携带总数与有效区间，模型修正 offset 后即可重试。
+        message = (
+            f"offset={state.offset} 超出范围，目录共有 {total_count} 张图片，"
+            f"请使用 0 <= offset < {total_count}。"
         )
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
+        return _build_browse_error(state=state, message=message)
+    if unreadable_dirs:
+        unique_unreadable = list(dict.fromkeys(unreadable_dirs))
+        if is_boundary_from_session_roots():
+            dirs_text = ", ".join(str(item) for item in unique_unreadable)
+        else:
+            # 回退边界不回显路径，仅按数量提示，明细进日志。
+            dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"
+        message = f"目录不可读或无图片文件：{dirs_text}"
+    else:
+        message = "未找到图片文件，请确认目录或过滤条件。"
+    await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structured_content=_build_browse_structured_result(
+            state,
+            status="empty",
+            total_count=total_count,
+            has_more=has_more,
+            next_offset=next_offset,
+        ),
+        is_error=False,
+    )
 
+
+async def _build_browse_success_result(
+    *,
+    ctx: Context[Any, Any] | None,
+    state: _BrowseRequestState,
+    images: list[Path],
+    image_resolved_map: dict[Path, Path],
+    resolved_roots: list[Path],
+    has_more: bool,
+    next_offset: int | None,
+    total_count: int | None,
+) -> CallToolResult:
+    """成功装配阶段：生成展示条目与翻页引导并组装 completed 结果。"""
     display_lines, structured_images = await asyncio.to_thread(
         _build_display_entries,
         images=images,
@@ -633,4 +622,99 @@ async def execute_browse_request(
             next_offset=next_offset,
         ),
         is_error=False,
+    )
+
+
+async def execute_browse_request(
+    params: BrowseImagesInput,
+    ctx: Context[Any, Any] | None,
+    *,
+    resolved_directories: list[Path],
+) -> CallToolResult:
+    """执行图片浏览主逻辑：读取边界、解析目录、扫描分页并装配工具结果。
+
+    仅允许访问 MCP Roots 授权的工作区目录；扫描结果经目录级缓存加速翻页，切片多取
+    一张以判定 has_more。未预期异常向上抛出，由 impl 外层 ``handle_browse_images``
+    兜底降级。
+
+    Args:
+        params: 经 pydantic 校验的工具输入模型。
+        ctx: MCP 上下文，用于进度上报，可为 None。
+        resolved_directories: 外层创建的共享列表，解析结果逐步填充，供成功与兜底
+            分支读取。
+
+    Returns:
+        浏览工具结果，参数可自纠错误与不可归因空目录为 is_error=True。
+    """
+    raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
+    directory = params.directory if params.directory is not None else "."
+
+    workspace_roots, resolved_roots, resolved_dir_list, dir_error = (
+        await _resolve_browse_directories(directory)
+    )
+
+    state = _BrowseRequestState.from_params(
+        params,
+        workspace_roots=workspace_roots,
+        resolved_directories=resolved_directories,
+        format_filter=raw_format_filter,
+    )
+
+    if not workspace_roots:
+        message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
+        return _build_browse_error(state=state, message=message)
+
+    if dir_error is not None:
+        return _build_browse_error(state=state, message=dir_error)
+    resolved_directories.extend(resolved_dir_list)
+
+    if not resolved_directories:
+        # 回退边界下不回显允许根清单，避免暴露服务器环境结构。
+        if is_boundary_from_session_roots():
+            allowed_roots = ", ".join(str(root) for root in workspace_roots)
+            message = f"目录超出允许范围。仅允许浏览工作区目录: {allowed_roots}"
+        else:
+            message = "目录超出允许范围。仅允许浏览服务器配置的工作区目录。"
+        return _build_browse_error(state=state, message=message)
+
+    logger.info(
+        "浏览图片: dirs={}, recursive={}, max_depth={}, limit={}",
+        resolved_directories,
+        state.recursive,
+        state.max_depth,
+        state.limit,
+    )
+
+    all_images, image_resolved_map, unreadable_dirs = await _scan_browse_entries(
+        ctx=ctx,
+        state=state,
+        resolved_directories=resolved_directories,
+        resolved_roots=resolved_roots,
+        format_filter_exhausted=format_filter_exhausted,
+    )
+
+    images, has_more, next_offset, total_count = _paginate_browse_images(
+        all_images=all_images, offset=state.offset, limit=state.limit
+    )
+
+    if not images:
+        return await _build_empty_browse_result(
+            ctx=ctx,
+            state=state,
+            format_filter_exhausted=format_filter_exhausted,
+            total_count=total_count,
+            has_more=has_more,
+            next_offset=next_offset,
+            unreadable_dirs=unreadable_dirs,
+        )
+
+    return await _build_browse_success_result(
+        ctx=ctx,
+        state=state,
+        images=images,
+        image_resolved_map=image_resolved_map,
+        resolved_roots=resolved_roots,
+        has_more=has_more,
+        next_offset=next_offset,
+        total_count=total_count,
     )

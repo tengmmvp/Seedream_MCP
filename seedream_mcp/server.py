@@ -48,6 +48,7 @@ from .cli import (
     _build_arg_parser,
     _build_config_from_args,
     _build_run_options,
+    _validate_http_security,
     _validate_transport_args,
 )
 from .config import (
@@ -234,6 +235,7 @@ async def text_to_image(
     ),
     tools: list[GenerationTool] | None = Field(
         default=None,
+        max_length=8,
         description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
     ),
     request_count: int = Field(
@@ -368,6 +370,7 @@ async def image_to_image(
     ),
     tools: list[GenerationTool] | None = Field(
         default=None,
+        max_length=8,
         description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
     ),
     request_count: int = Field(
@@ -488,6 +491,7 @@ async def multi_image_fusion(
     ),
     tools: list[GenerationTool] | None = Field(
         default=None,
+        max_length=8,
         description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
     ),
     request_count: int = Field(
@@ -617,6 +621,7 @@ async def sequential_generation(
     ),
     tools: list[GenerationTool] | None = Field(
         default=None,
+        max_length=8,
         description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
     ),
     request_count: int = Field(
@@ -783,14 +788,28 @@ def _tighten_flat_tool_schemas() -> None:
     签名参数模型默认忽略未知键，拼错的参数名会被静默丢弃；本函数在注册后集中修补
     inputSchema 顶层声明与参数模型两处，使客户端本地校验与服务端运行时都拒绝未知
     键。于 import 期执行，先于任何 tools/list 与 tools/call 生效。依赖 SDK 私有
-    路径 ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，升级 SDK 须验证
-    仍成立，失效由 test_flat_input_schema_forbids_additional_properties 兜底报警。
+    路径 ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，两处入口先探测
+    属性存在性，缺失时记录错误并跳过收紧，不抛异常不阻断启动；失效由
+    test_flat_input_schema_forbids_additional_properties 兜底报警。
     """
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    if tool_manager is None:
+        logger.error(
+            "SDK 私有路径 mcp._tool_manager 已变更，inputSchema 收紧被跳过，"
+            "additionalProperties 契约守护测试将失败，请适配新版 MCP SDK。"
+        )
+        return
     for name in _FLAT_SCHEMA_TOOL_NAMES:
-        tool = mcp._tool_manager.get_tool(name)
+        tool = tool_manager.get_tool(name)
         if tool is None:
             logger.warning("未找到待收紧 inputSchema 的工具: {}", name)
             continue
+        if getattr(getattr(tool, "fn_metadata", None), "arg_model", None) is None:
+            logger.error(
+                "SDK 私有路径 tool.fn_metadata.arg_model 已变更，inputSchema 收紧被跳过，"
+                "additionalProperties 契约守护测试将失败，请适配新版 MCP SDK。"
+            )
+            return
         tool.parameters["additionalProperties"] = False
         arg_model = tool.fn_metadata.arg_model
         tool.fn_metadata.arg_model = type(
@@ -1056,33 +1075,16 @@ def cli_main() -> int:
 
     try:
         transport = _build_run_options(args)
+        auth_token = ""
         error = _validate_transport_args(args)
+        if error is None and transport == "streamable-http":
+            auth_token = _resolve_http_auth_token(args)
+            error = _validate_http_security(args, auth_token, _LOOPBACK_HOSTS)
         if error is not None:
             logger.error(error)
             print(error, file=sys.stderr)
             return 1
         if transport == "streamable-http":
-            auth_token = _resolve_http_auth_token(args)
-            is_loopback = args.host in _LOOPBACK_HOSTS
-            has_tls = bool(args.ssl_certfile)
-            if not is_loopback:
-                if not auth_token:
-                    message = (
-                        f"安全错误：streamable-http 绑定到非回环地址 {args.host} 必须配置鉴权令牌，"
-                        "请通过 --auth-token 或 SEEDREAM_HTTP_AUTH_TOKEN 提供，避免未授权访问。"
-                    )
-                    logger.error(message)
-                    print(message, file=sys.stderr)
-                    return 1
-                if not has_tls and not args.insecure_allow_non_tls:
-                    message = (
-                        f"安全错误：streamable-http 绑定到非回环地址 {args.host} 必须配置 TLS，"
-                        "请通过 --ssl-certfile/--ssl-keyfile 提供，或在受信反向代理终结 TLS 时"
-                        "显式传 --insecure-allow-non-tls，避免 Bearer 令牌明文传输被窃听。"
-                    )
-                    logger.error(message)
-                    print(message, file=sys.stderr)
-                    return 1
             _warn_remote_exposure(
                 args.host,
                 auth_enabled=bool(auth_token),

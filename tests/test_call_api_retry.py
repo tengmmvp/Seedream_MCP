@@ -9,9 +9,11 @@
 经 monkeypatch 或 MockTransport 注入，不触达真实 API。
 """
 
+from __future__ import annotations
+
 import asyncio
 import random
-from typing import Any, Dict, List
+from typing import Any
 
 import httpx
 import pytest
@@ -36,7 +38,7 @@ _DISPATCH_TARGETS = [
 
 @pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_retries_on_429_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: Dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: dict[str, Any]
 ) -> None:
     """429 限流按退避重试，首次失败后第二次成功。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -50,7 +52,7 @@ async def test_call_api_retries_on_429_then_succeeds(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -70,7 +72,7 @@ async def test_call_api_4xx_not_retried(
     monkeypatch: pytest.MonkeyPatch,
     no_sleep: None,
     send_method: str,
-    extra_body: Dict[str, Any],
+    extra_body: dict[str, Any],
 ) -> None:
     """4xx 客户端错误（非 429）立即抛出，不重试。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -84,7 +86,7 @@ async def test_call_api_4xx_not_retried(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -110,7 +112,7 @@ async def test_call_api_3xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_slee
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -143,7 +145,7 @@ async def test_call_api_exponential_backoff_no_overflow_on_huge_retries(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -162,7 +164,7 @@ async def test_call_api_timeout_retried_then_mapped(
     monkeypatch: pytest.MonkeyPatch,
     no_sleep: None,
     send_method: str,
-    extra_body: Dict[str, Any],
+    extra_body: dict[str, Any],
 ) -> None:
     """httpx 超时按 max_retries 重试用尽后映射为 SeedreamTimeoutError。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
@@ -176,7 +178,7 @@ async def test_call_api_timeout_retried_then_mapped(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -195,7 +197,7 @@ async def test_call_api_unexpected_error_not_retried(
     monkeypatch: pytest.MonkeyPatch,
     no_sleep: None,
     send_method: str,
-    extra_body: Dict[str, Any],
+    extra_body: dict[str, Any],
 ) -> None:
     """非可重试的意外错误立即抛出，不浪费退避等待。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -209,7 +211,7 @@ async def test_call_api_unexpected_error_not_retried(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -224,7 +226,7 @@ async def test_call_api_unexpected_error_not_retried(
 
 @pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_retries_on_5xx_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: Dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None, send_method: str, extra_body: dict[str, Any]
 ) -> None:
     """5xx 服务端错误按退避重试，首次失败后第二次成功。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
@@ -238,7 +240,7 @@ async def test_call_api_retries_on_5xx_then_succeeds(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -258,7 +260,7 @@ async def test_call_api_network_error_retries_then_mapped(
     monkeypatch: pytest.MonkeyPatch,
     no_sleep: None,
     send_method: str,
-    extra_body: Dict[str, Any],
+    extra_body: dict[str, Any],
 ) -> None:
     """httpx.RequestError（ConnectError）重试用尽后映射为 SeedreamNetworkError。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
@@ -272,7 +274,7 @@ async def test_call_api_network_error_retries_then_mapped(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -288,12 +290,12 @@ async def test_call_api_network_error_retries_then_mapped(
 
 @pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_429_uses_retry_after_for_backoff(
-    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: Dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: dict[str, Any]
 ) -> None:
     """带 retry_after 的 429 退避基于服务端 Retry-After，而非指数 2**attempt。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
-    sleep_durations: List[float] = []
+    sleep_durations: list[float] = []
 
     async def _capture_sleep(*args: object, **kwargs: object) -> None:
         del kwargs
@@ -312,7 +314,7 @@ async def test_call_api_429_uses_retry_after_for_backoff(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -331,12 +333,12 @@ async def test_call_api_429_uses_retry_after_for_backoff(
 
 @pytest.mark.parametrize("send_method,extra_body", _DISPATCH_TARGETS)
 async def test_call_api_429_retry_after_above_backoff_cap(
-    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: Dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, send_method: str, extra_body: dict[str, Any]
 ) -> None:
     """retry_after 超过指数退避上限时仍信任服务端值，不被 60 秒上限截断。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
-    sleep_durations: List[float] = []
+    sleep_durations: list[float] = []
 
     async def _capture_sleep(*args: object, **kwargs: object) -> None:
         del kwargs
@@ -354,7 +356,7 @@ async def test_call_api_429_retry_after_above_backoff_cap(
             url: str,
             request_body: bytes,
             request_timeout: httpx.Timeout,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
             nonlocal calls
             del client, url, request_body, request_timeout
             calls += 1
@@ -498,7 +500,7 @@ async def test_stream_429_uses_retry_after_for_backoff(
     """流式 429 带 Retry-After：异常携带 retry_after，退避按服务端值而非指数基数。"""
     config = SeedreamConfig(api_key="k", max_retries=2)
     attempts = 0
-    sleep_durations: List[float] = []
+    sleep_durations: list[float] = []
 
     async def _capture_sleep(*args: object, **kwargs: object) -> None:
         del kwargs

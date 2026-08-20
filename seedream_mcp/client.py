@@ -48,6 +48,10 @@ from .utils.images.image_prepare import ImagePreparer
 # 指数退避单次等待上限
 _MAX_BACKOFF_SECONDS = 60
 
+# 指数退避的指数封顶：2^6=64 已超 _MAX_BACKOFF_SECONDS，封顶不改变等待语义，
+# 仅避免病态大的 max_retries 配置下 float(2**1024) 抛 OverflowError
+_BACKOFF_EXPONENT_CAP = 6
+
 # 错误响应体独立读取上限
 _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 
@@ -1053,9 +1057,14 @@ class SeedreamClient:
         return result
 
     @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        """判定状态码是否可重试，429 与 5xx 可重试，其余不可。"""
+        return status_code == 429 or status_code >= 500
+
+    @staticmethod
     def _retry_after_or_none(status_code: int, headers: Any) -> float | None:
         """对可重试状态码（429/5xx）解析 Retry-After，其余返回 None。"""
-        if status_code == 429 or status_code >= 500:
+        if SeedreamClient._is_retryable_status(status_code):
             return parse_retry_after(headers)
         return None
 
@@ -1328,7 +1337,7 @@ class SeedreamClient:
                     )
                     raise
                 status_code = exc.status_code
-                if status_code != 429 and status_code < 500:
+                if not self._is_retryable_status(status_code):
                     self.logger.warning(
                         "{} API 调用失败（状态码={}），不再重试: {}",
                         endpoint,
@@ -1381,16 +1390,18 @@ class SeedreamClient:
                 )
                 raise
 
+            # 等待时延按 ±20% 抖动：同一批次并行的多条请求收到相同 Retry-After
+            # 或走相同指数退避时，抖动拉开重试相位，避免同步群聚再击上游。
             if attempt < total_attempts - 1:
                 if pending_retry_after is not None:
-                    await asyncio.sleep(pending_retry_after + random.uniform(0, 1))
+                    await asyncio.sleep(pending_retry_after * (1 + random.uniform(-0.2, 0.2)))
                 else:
-                    # 指数先做整数封顶再转 float：病态大的 max_retries 配置下
-                    # float(2**1024) 抛 OverflowError；2^6=64 已超 60 秒退避上限，
-                    # 封顶不改变等待语义。
-                    capped_exponent = 2 ** min(attempt, 6)
+                    capped_exponent = 2 ** min(attempt, _BACKOFF_EXPONENT_CAP)
                     await asyncio.sleep(
-                        min(float(capped_exponent) + random.uniform(0, 1), _MAX_BACKOFF_SECONDS)
+                        min(
+                            float(capped_exponent) * (1 + random.uniform(-0.2, 0.2)),
+                            _MAX_BACKOFF_SECONDS,
+                        )
                     )
 
         raise SeedreamAPIError(f"{endpoint} API 调用意外结束")

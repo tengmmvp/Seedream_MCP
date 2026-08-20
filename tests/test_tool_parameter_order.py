@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import ValidationError
 from pydantic.fields import FieldInfo
 
 from seedream_mcp.resources import mcp
@@ -428,3 +429,20 @@ async def test_sequential_tool_rejects_oversized_image_list() -> None:
     message = str(exc_info.value)
     assert "参考图片数量" not in message
     assert "14" in message
+
+
+# ==================== 模型工具列表条目上限 ====================
+
+
+async def test_generation_tool_rejects_oversized_tools_list() -> None:
+    """tools 含 9 项条目被校验拒绝，平铺签名与输入模型两侧各自独立锁定。
+
+    合法调用至多 1 个 web_search 条目，上限 8 仅拦截异常超量输入。等价性断言
+    只校验两侧同步，两侧同时丢失上限时仍相等，故分别经工具调用与模型构造两路
+    拒绝。
+    """
+    entries = [{"type": "web_search"}] * 9
+    with pytest.raises(ToolError):
+        await mcp.call_tool("text_to_image", {"prompt": "a cat", "tools": entries})
+    with pytest.raises(ValidationError):
+        TextToImageInput(prompt="a cat", tools=entries)

@@ -342,7 +342,7 @@ async def test_parallel_batch_prevalidate_failure_zero_dispatch_and_message_pari
 
     api_calls = 0
 
-    async def fake_method(self, **kwargs):  # noqa: ANN001
+    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
         nonlocal api_calls
         del self, kwargs
         api_calls += 1

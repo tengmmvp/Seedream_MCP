@@ -9,9 +9,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
 
 # 参考图上限常量：5.0 Pro 为 10，其余家族为 14，由能力表按家族引用。
 SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10

@@ -13,7 +13,6 @@ from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.images import image_input
 
 
-@pytest.mark.asyncio
 async def test_concurrent_parallel_calls_share_instance_semaphore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -54,7 +53,6 @@ async def test_concurrent_parallel_calls_share_instance_semaphore(
     assert results_b == [f"prepared:{image}" for image in batch_b]
 
 
-@pytest.mark.asyncio
 async def test_concurrent_single_image_calls_share_instance_semaphore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -86,7 +84,6 @@ async def test_concurrent_single_image_calls_share_instance_semaphore(
     assert results == [f"prepared:{image}" for image in images]
 
 
-@pytest.mark.asyncio
 async def test_waiters_do_not_occupy_semaphore_slots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -144,7 +141,6 @@ async def test_waiters_do_not_occupy_semaphore_slots(
     assert results == ["prepared"] * (2 * limit + 3)
 
 
-@pytest.mark.asyncio
 async def test_cancelled_creators_do_not_break_concurrency_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

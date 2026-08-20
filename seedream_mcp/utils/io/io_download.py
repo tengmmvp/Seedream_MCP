@@ -160,6 +160,7 @@ _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
 _IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
 _IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")
+_SITE_LOCAL_NETWORK = ipaddress.ip_network("fec0::/10")
 
 
 def _embedded_ipv4_in_six(
@@ -179,9 +180,16 @@ def _public_ip_rejection_reason(
 
     统一静态 URL、DNS 解析与连接对端 IP 三处校验：拒绝非公网地址、RFC 6598 CGNAT
     段及 6to4/Teredo 等可封装内网地址的 IPv6 段，IPv6 内嵌 IPv4 递归校验。
+    组播与 IPv6 site-local 须显式拒绝：Python 的 is_global 对组播段（IPv4 224/4、
+    IPv6 ff00::/8）与已废弃的 fec0::/10 返回 True，依赖隐式语义会随 Python 版本
+    漂移，显式分支同时消除该不确定性。
     """
     if ip_obj.version == 4 and ip_obj in _CGNAT_NETWORK:
         return "CGNAT地址(100.64.0.0/10)"
+    if ip_obj.is_multicast:
+        return "组播地址"
+    if ip_obj.version == 6 and ip_obj in _SITE_LOCAL_NETWORK:
+        return "IPv6 site-local地址(fec0::/10)"
     if not ip_obj.is_global:
         return "非公网地址"
     # isinstance 收窄到 IPv6Address，使内嵌段提取与 sixtofour/teredo 属性访问均受类型校验。

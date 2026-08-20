@@ -135,7 +135,6 @@ class _LevelCaptureLogger:
         self.warnings.append(message.format(*args) if args else message)
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_prioritizes_mcp_roots_over_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -168,7 +167,6 @@ def test_resolve_env_workspace_root_reads_global_config(
     assert resolve_env_workspace_root() == tmp_path.resolve()
 
 
-@pytest.mark.asyncio
 async def test_run_browse_images_uses_mcp_roots_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -196,7 +194,6 @@ async def test_run_browse_images_uses_mcp_roots_boundary(
     assert denied.is_error is True
 
 
-@pytest.mark.asyncio
 async def test_client_prepare_image_input_prefers_mcp_roots_over_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -218,7 +215,6 @@ async def test_client_prepare_image_input_prefers_mcp_roots_over_env(
     assert prepared.startswith("data:image/")
 
 
-@pytest.mark.asyncio
 async def test_client_prepare_image_input_allows_second_mcp_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,7 +238,6 @@ async def test_client_prepare_image_input_allows_second_mcp_root(
     assert prepared.startswith("data:image/")
 
 
-@pytest.mark.asyncio
 async def test_run_browse_images_denies_when_mcp_roots_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -261,7 +256,6 @@ async def test_run_browse_images_denies_when_mcp_roots_empty(
     assert result.structured_content["workspace_roots"] == []
 
 
-@pytest.mark.asyncio
 async def test_client_prepare_image_input_denies_when_mcp_roots_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -279,7 +273,6 @@ async def test_client_prepare_image_input_denies_when_mcp_roots_empty(
             await client._prepare_image_input("local.png")
 
 
-@pytest.mark.asyncio
 async def test_run_browse_images_relative_directory_resolves_all_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -306,7 +299,6 @@ async def test_run_browse_images_relative_directory_resolves_all_roots(
     assert Path(result.structured_content["images"][0]["path"]) == Path("assets/from_second.png")
 
 
-@pytest.mark.asyncio
 async def test_run_browse_images_rejects_parent_escape_relative_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -329,7 +321,6 @@ async def test_run_browse_images_rejects_parent_escape_relative_path(
     assert result.structured_content["status"] == "failed"
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -343,7 +334,6 @@ async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
         assert get_workspace_root() == env_root.resolve()
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_fails_closed_on_no_back_channel_without_env_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,7 +346,6 @@ async def test_workspace_roots_scope_fails_closed_on_no_back_channel_without_env
             raise AssertionError("无反向通道且无环境变量根时不得进入作用域")
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with_error_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -375,7 +364,6 @@ async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with
     assert capture.warnings == []
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_errors_and_falls_back_on_generic_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -394,7 +382,6 @@ async def test_workspace_roots_scope_errors_and_falls_back_on_generic_error(
     assert capture.warnings == []
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_fails_closed_on_transient_error_without_env_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -411,7 +398,6 @@ async def test_workspace_roots_scope_fails_closed_on_transient_error_without_env
             raise AssertionError("瞬时失败且无环境变量根时不得进入作用域")
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_transient_error_falls_back_to_env_root_with_error_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -430,7 +416,6 @@ async def test_workspace_roots_scope_transient_error_falls_back_to_env_root_with
     assert capture.warnings == []
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_skips_list_roots_without_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -456,7 +441,6 @@ async def test_workspace_roots_scope_skips_list_roots_without_capability(
     assert session.capability_probes == 1
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_calls_list_roots_when_capability_declared(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -476,7 +460,6 @@ async def test_workspace_roots_scope_calls_list_roots_when_capability_declared(
     assert session.capability_probes == 1
 
 
-@pytest.mark.asyncio
 async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -496,7 +479,6 @@ async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
     assert result.structured_content["count"] == 1
 
 
-@pytest.mark.asyncio
 async def test_client_prepare_image_input_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -515,7 +497,6 @@ async def test_client_prepare_image_input_falls_back_to_env_when_list_roots_fail
     assert prepared.startswith("data:image/")
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_reports_client_roots_not_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -536,7 +517,6 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -554,7 +534,6 @@ async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
     assert str(env_root.resolve()) not in data["roots"]
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_capability_missing_returns_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -575,7 +554,6 @@ async def test_workspace_roots_resource_capability_missing_returns_empty(
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_list_roots_failure_returns_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -615,7 +593,6 @@ class _VersionlessModernContext(_ModernProtocolContext):
         del self.protocol_version
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_modern_session_first_round_requests_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -638,7 +615,6 @@ async def test_workspace_roots_resource_modern_session_first_round_requests_inpu
     assert ctx.session.list_roots_calls == 0
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_modern_session_retry_round_reports_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -661,7 +637,6 @@ async def test_workspace_roots_resource_modern_session_retry_round_reports_roots
     assert ctx.session.list_roots_calls == 0
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_modern_session_malformed_response_asks_again(
     tmp_path: Path,
 ) -> None:
@@ -677,7 +652,6 @@ async def test_workspace_roots_resource_modern_session_malformed_response_asks_a
     assert ctx.session.list_roots_calls == 0
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_modern_session_capability_missing_falls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -696,7 +670,6 @@ async def test_workspace_roots_resource_modern_session_capability_missing_falls_
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
     tmp_path: Path,
 ) -> None:
@@ -717,7 +690,6 @@ async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
     assert ctx.session.list_roots_calls == 1
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_modern_round_empty_roots_not_leak_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -736,7 +708,6 @@ async def test_workspace_roots_resource_modern_round_empty_roots_not_leak_env(
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
     tmp_path: Path,
 ) -> None:
@@ -764,7 +735,6 @@ class _NoSessionContext:
         raise ValueError("Context is not available outside of a request")
 
 
-@pytest.mark.asyncio
 async def test_workspace_roots_scope_without_request_context_falls_back_to_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

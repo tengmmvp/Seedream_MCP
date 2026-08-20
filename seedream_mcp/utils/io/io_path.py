@@ -242,6 +242,20 @@ def session_declares_roots_capability(session: Any) -> bool:
     return bool(declared)
 
 
+def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | None]:
+    """将已解析的 Roots 置位到请求上下文变量并记录边界日志，返回复位用 token。
+
+    workspace_roots_scope_from_result 与 workspace_roots_scope 的置位收尾共用，
+    日志语义两侧一致：非空 Roots 记录已应用边界，空 Roots 按无本地目录权限处理。
+    """
+    token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
+    if resolved_roots:
+        logger.debug("已应用 MCP Roots 边界: {}", resolved_roots)
+    else:
+        logger.debug("MCP Roots 为空，当前请求按无本地目录权限处理")
+    return token
+
+
 @asynccontextmanager
 async def workspace_roots_scope_from_result(
     roots_result: ListRootsResult | None,
@@ -265,11 +279,7 @@ async def workspace_roots_scope_from_result(
     resolved_roots: list[Path] = []
     if roots_result is not None:
         resolved_roots = await asyncio.to_thread(_roots_result_to_paths, roots_result)
-        token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
-        if resolved_roots:
-            logger.debug("已应用 MCP Roots 边界: {}", resolved_roots)
-        else:
-            logger.debug("MCP Roots 为空，当前请求按无本地目录权限处理")
+        token = _apply_roots_token(resolved_roots)
     else:
         logger.debug("客户端未声明 roots capability，未发起 roots 取回，回退环境变量边界")
 
@@ -356,11 +366,7 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
                 exc,
             )
         else:
-            token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
-            if resolved_roots:
-                logger.debug("已应用 MCP Roots 边界: {}", resolved_roots)
-            else:
-                logger.debug("MCP Roots 为空，当前请求按无本地目录权限处理")
+            token = _apply_roots_token(resolved_roots)
 
     try:
         yield resolved_roots

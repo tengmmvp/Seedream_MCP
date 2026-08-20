@@ -8,7 +8,7 @@ MockTransport 注入逻辑造成语义漂移。伪 SSE 响应按 aiohttp/httpx �
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Callable, List
+from typing import Any, AsyncIterator, Callable
 
 import httpx
 
@@ -31,7 +31,7 @@ class _FakeLog:
 class _FakeSSEResponse:
     """按预设分块序列产出字节的伪流式响应，忽略 chunk_size。"""
 
-    def __init__(self, chunks: List[bytes]) -> None:
+    def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
 
     async def aiter_bytes(self, chunk_size: int) -> AsyncIterator[bytes]:

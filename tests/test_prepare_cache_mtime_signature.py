@@ -12,7 +12,6 @@ from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.images import image_input
 
 
-@pytest.mark.asyncio
 async def test_prepare_image_input_invalidates_cache_when_local_file_size_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

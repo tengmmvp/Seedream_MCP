@@ -454,27 +454,6 @@ def _resolve_size_token(
     )
 
 
-def validate_size(size: str, *, layer_decomposition: bool = False, model_id: str = "") -> str:
-    """验证图像尺寸参数是否在允许的范围内。
-
-    Args:
-        size: 图像尺寸规格，支持 1K/1.5K/2K/3K/4K 或 <宽>x<高>。
-        layer_decomposition: 是否处于图层拆分场景，true 时额外接受按输入图
-            尺寸自适应的 "auto"。
-        model_id: 模型标识符，图层拆分场景拒绝像素值时按该模型能力声明的档位
-            白名单生成错误文案；缺省时按未知家族的全集档位表述。
-
-    Returns:
-        标准化尺寸值：档位为大写，图层拆分场景的 auto 归一为小写，像素规格
-        归一为小写 x 分隔且剥离前导零。
-    """
-    token = _resolve_size_token(size, layer_decomposition=layer_decomposition, model_id=model_id)
-    if isinstance(token, tuple):
-        width, height = token
-        return f"{width}x{height}"
-    return token
-
-
 def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bool = False) -> str:
     """验证图像尺寸与模型的兼容性。
 
@@ -629,7 +608,7 @@ def validate_background(
     return normalized
 
 
-def validate_optimize_prompt_options(options: Any, model_id: str) -> dict | None:
+def validate_optimize_prompt_options(options: Any, model_id: str) -> dict[str, Any] | None:
     """验证提示词优化选项并检查模型兼容性，可配置字段仅 mode，取值 standard/fast。"""
     if options is None:
         return None

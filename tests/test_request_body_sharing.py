@@ -8,7 +8,7 @@ monkeypatch 注入，不触达真实 API。
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 
@@ -30,7 +30,7 @@ def _build_config() -> SeedreamConfig:
     return SeedreamConfig(api_key="test_key", max_retries=1, auto_save_enabled=False)
 
 
-def _install_serialize_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
+def _install_serialize_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """在类上替换 _serialize_request 为计数替身，返回计数器字典。"""
     calls = {"serialize": 0}
     original = SeedreamClient._serialize_request
@@ -43,7 +43,7 @@ def _install_serialize_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
     return calls
 
 
-def _install_build_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
+def _install_build_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """在类上替换 _build_common_request 为计数替身，返回计数器字典。"""
     calls = {"build": 0}
     original = SeedreamClient._build_common_request
@@ -56,7 +56,7 @@ def _install_build_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
     return calls
 
 
-def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: List[bytes]) -> None:
+def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: list[bytes]) -> None:
     """在类上替换 _send_standard_request，记录每个请求实际发送的 body 对象。"""
 
     async def fake_send(
@@ -66,7 +66,7 @@ def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: List[bytes]) 
         url: str,
         request_body: bytes,
         request_timeout: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         del self, client, url, request_timeout
         bodies.append(request_body)
         # 在途窗口：让同批请求先后进入序列化阶段再完成，模拟真实网络并发
@@ -81,14 +81,13 @@ def _install_send_capture(monkeypatch: pytest.MonkeyPatch, bodies: List[bytes]) 
     monkeypatch.setattr(SeedreamClient, "_send_standard_request", fake_send)
 
 
-@pytest.mark.asyncio
 async def test_parallel_batch_builds_and_serializes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """4 个并行请求恰好构建一次、序列化一次，且 4 份发送复用同一 bytes 对象。"""
     serialize_calls = _install_serialize_spy(monkeypatch)
     build_calls = _install_build_spy(monkeypatch)
-    sent_bodies: List[bytes] = []
+    sent_bodies: list[bytes] = []
     _install_send_capture(monkeypatch, sent_bodies)
 
     result = await handle_text_to_image(
@@ -107,7 +106,6 @@ async def test_parallel_batch_builds_and_serializes_once(
     assert result.structured_content["batch"]["success_requests"] == 4
 
 
-@pytest.mark.asyncio
 async def test_staggered_parallel_batch_still_serializes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,7 +115,7 @@ async def test_staggered_parallel_batch_still_serializes_once(
     """
     serialize_calls = _install_serialize_spy(monkeypatch)
     build_calls = _install_build_spy(monkeypatch)
-    sent_bodies: List[bytes] = []
+    sent_bodies: list[bytes] = []
     _install_send_capture(monkeypatch, sent_bodies)
 
     result = await handle_text_to_image(
@@ -132,14 +130,13 @@ async def test_staggered_parallel_batch_still_serializes_once(
     assert all(body is sent_bodies[0] for body in sent_bodies)
 
 
-@pytest.mark.asyncio
 async def test_single_request_path_behavior_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """单请求路径行为不变：构建一次、序列化一次、发送一份 body。"""
     serialize_calls = _install_serialize_spy(monkeypatch)
     build_calls = _install_build_spy(monkeypatch)
-    sent_bodies: List[bytes] = []
+    sent_bodies: list[bytes] = []
     _install_send_capture(monkeypatch, sent_bodies)
 
     result = await handle_text_to_image(TextToImageInput(prompt="single"), _build_config())
@@ -150,13 +147,12 @@ async def test_single_request_path_behavior_unchanged(
     assert build_calls["build"] == 1
 
 
-@pytest.mark.asyncio
 async def test_consecutive_calls_do_not_share_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """批次结束即释放计划：两次独立调用各自序列化，不命中上一批次的陈旧 body。"""
     serialize_calls = _install_serialize_spy(monkeypatch)
-    sent_bodies: List[bytes] = []
+    sent_bodies: list[bytes] = []
     _install_send_capture(monkeypatch, sent_bodies)
 
     first = await handle_text_to_image(TextToImageInput(prompt="first"), _build_config())
@@ -171,14 +167,13 @@ async def test_consecutive_calls_do_not_share_body(
     assert sent_bodies[0] != sent_bodies[1]
 
 
-@pytest.mark.asyncio
 async def test_direct_client_call_without_plan_serializes_independently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """未绑定共享计划的直连 client 调用走独立构建与序列化路径，公共 API 行为不变。"""
     serialize_calls = _install_serialize_spy(monkeypatch)
     build_calls = _install_build_spy(monkeypatch)
-    sent_bodies: List[bytes] = []
+    sent_bodies: list[bytes] = []
     _install_send_capture(monkeypatch, sent_bodies)
 
     async with SeedreamClient(_build_config()) as client:
@@ -192,7 +187,6 @@ async def test_direct_client_call_without_plan_serializes_independently(
 # ==================== 共享计划失败路径 ====================
 
 
-@pytest.mark.asyncio
 async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
     """builder 抛错时首个异常被缓存并重放给同批后到者，构建只执行一次。"""
     plan = SharedRequestPlan()
@@ -238,7 +232,6 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
     assert plan.request_data == {"model": "m"}
 
 
-@pytest.mark.asyncio
 async def test_prevalidate_failure_matches_single_request_first_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

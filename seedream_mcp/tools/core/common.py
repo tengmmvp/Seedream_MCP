@@ -9,9 +9,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult, ImageContent, TextContent
 
@@ -102,6 +103,186 @@ class ToolMetadata:
     start_log_values_builder: Callable[[GenerationExecutionContext], Sequence[Any]]
 
 
+async def _prepare_generation_context(
+    *,
+    params: GenerationInputParams,
+    config: SeedreamConfig,
+    metadata: ToolMetadata,
+    ctx: Context[Any, Any] | None,
+    module_logger: Logger,
+) -> GenerationExecutionContext:
+    """校验与上下文准备阶段：预检参数、构建执行上下文并记录请求开始日志。"""
+    await safe_report_progress(
+        ctx, progress=PROGRESS_RECEIVED, message=f"{metadata.failure_prefix}请求已接收"
+    )
+    await _yield_for_cancellation()
+    context = build_generation_context(params, config)
+    # 预检含目录 resolve 等同步文件系统调用，下沉工作线程避免阻塞事件循环；
+    # 仍在计费请求分发前完成。
+    if params.save_path:
+        await asyncio.to_thread(prevalidate_save_path, config, params.save_path)
+    await safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
+
+    module_logger.info(metadata.start_log_message, *metadata.start_log_values_builder(context))
+    return context
+
+
+async def _dispatch_generation_requests(
+    *,
+    config: SeedreamConfig,
+    context: GenerationExecutionContext,
+    ctx: Context[Any, Any] | None,
+    request_executor: Callable[
+        ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
+    ],
+    module_logger: Logger,
+) -> dict[str, Any]:
+    """请求分发阶段：优先复用 lifespan 共享客户端执行单发或并行生成请求。"""
+    from ...client import SeedreamClient
+
+    # 优先复用 lifespan 共享客户端；无 lifespan 上下文时回退按需新建。
+    shared_client = _try_get_shared_client(ctx)
+    if shared_client is not None:
+        return await _run_generation_requests(
+            client=shared_client,
+            context=context,
+            ctx=ctx,
+            request_executor=request_executor,
+            module_logger=module_logger,
+        )
+    async with SeedreamClient(config) as client:
+        return await _run_generation_requests(
+            client=client,
+            context=context,
+            ctx=ctx,
+            request_executor=request_executor,
+            module_logger=module_logger,
+        )
+
+
+async def _auto_save_generation_images(
+    *,
+    result: dict[str, Any],
+    images: list[dict[str, Any]],
+    is_generation_failed: bool,
+    context: GenerationExecutionContext,
+    config: SeedreamConfig,
+    tool_name: str,
+    ctx: Context[Any, Any] | None,
+    module_logger: Logger,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[AutoSaveResult], list[int], str | None]:
+    """自动保存阶段：保存成功生成的图片，失败时降级记录错误并保留原结果。"""
+    auto_save_results: list[AutoSaveResult] = []
+    saveable_indices: list[int] = []
+    auto_save_error: str | None = None
+    if context.enable_auto_save and not is_generation_failed:
+        try:
+            await safe_report_progress(
+                ctx, progress=PROGRESS_AUTOSAVE_START, message="开始自动保存"
+            )
+            await _yield_for_cancellation()
+            shared_download_manager = _try_get_shared_download_manager(ctx)
+            if context.response_format == "url":
+                auto_save_results, saveable_indices = await auto_save_from_urls(
+                    result,
+                    context.prompt,
+                    config,
+                    context.save_path,
+                    context.custom_name,
+                    tool_name,
+                    download_manager=shared_download_manager,
+                    images=images,
+                )
+            else:
+                auto_save_results, saveable_indices = await auto_save_from_base64(
+                    result,
+                    context.prompt,
+                    config,
+                    context.save_path,
+                    context.custom_name,
+                    tool_name,
+                    download_manager=shared_download_manager,
+                    images=images,
+                )
+
+            if auto_save_results:
+                result = update_result_with_auto_save(result, auto_save_results, saveable_indices)
+                # 合并改写了 data，重新提取供展示与结构化输出复用。
+                images = extract_images(result)
+            await safe_report_progress(ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成")
+        except Exception as exc:
+            auto_save_error = format_error_for_user(exc)
+            module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
+    return result, images, auto_save_results, saveable_indices, auto_save_error
+
+
+def _format_generation_outputs(
+    *,
+    metadata: ToolMetadata,
+    result: dict[str, Any],
+    context: GenerationExecutionContext,
+    auto_save_results: list[AutoSaveResult],
+    auto_save_error: str | None,
+    sanitized_images: list[dict[str, Any]],
+    saveable_indices: list[int],
+) -> tuple[str, dict[str, Any]]:
+    """结果格式化阶段：生成响应文本与 structuredContent。"""
+    response_text = format_generation_response(
+        metadata.completion_title,
+        result,
+        context.size,
+        auto_save_results,
+        context.enable_auto_save,
+        auto_save_error=auto_save_error,
+        images=sanitized_images,
+        saveable_indices=saveable_indices,
+    )
+
+    structured_result = _build_generation_structured_result(
+        tool_name=metadata.tool_name,
+        result=result,
+        context=context,
+        auto_save_results=auto_save_results,
+        auto_save_error=auto_save_error,
+        images=sanitized_images,
+    )
+    return response_text, structured_result
+
+
+async def _build_generation_preview(
+    *,
+    config: SeedreamConfig,
+    is_generation_failed: bool,
+    auto_save_results: list[AutoSaveResult],
+    module_logger: Logger,
+    response_text: str,
+) -> tuple[str, list[ImageContent]]:
+    """预览装配阶段：为成功保存的图片生成缩略图内容并补充超上限说明。"""
+    # 预览从已保存的本地文件生成，未开启、生成失败或无成功保存时退化为纯文本；
+    # 超上限仅取前 PREVIEW_MAX_IMAGES 张，完整清单仍在 structuredContent.data。
+    preview_contents: list[ImageContent] = []
+    if config.preview_enabled and not is_generation_failed and auto_save_results:
+        saved_paths = [
+            Path(save_result.local_path)
+            for save_result in auto_save_results
+            if save_result.success and save_result.local_path
+        ]
+        if len(saved_paths) > PREVIEW_MAX_IMAGES:
+            module_logger.info(
+                "已保存图片 {} 张超过预览上限 {}，仅生成前 {} 张缩略图预览",
+                len(saved_paths),
+                PREVIEW_MAX_IMAGES,
+                PREVIEW_MAX_IMAGES,
+            )
+            response_text += (
+                f"\n（共已保存 {len(saved_paths)} 张，"
+                f"仅附前 {PREVIEW_MAX_IMAGES} 张缩略图预览）"
+            )
+            saved_paths = saved_paths[:PREVIEW_MAX_IMAGES]
+        preview_contents = await build_preview_contents(saved_paths)
+    return response_text, preview_contents
+
+
 async def execute_generation_handler(
     *,
     params: GenerationInputParams,
@@ -133,135 +314,59 @@ async def execute_generation_handler(
         为 True。
     """
     try:
-        from ...client import SeedreamClient
-
-        await safe_report_progress(
-            ctx, progress=PROGRESS_RECEIVED, message=f"{metadata.failure_prefix}请求已接收"
+        context = await _prepare_generation_context(
+            params=params,
+            config=config,
+            metadata=metadata,
+            ctx=ctx,
+            module_logger=module_logger,
         )
-        await _yield_for_cancellation()
-        context = build_generation_context(params, config)
-        # 预检含目录 resolve 等同步文件系统调用，下沉工作线程避免阻塞事件循环；
-        # 仍在计费请求分发前完成。
-        await asyncio.to_thread(prevalidate_save_path, config, params.save_path)
-        await safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
 
-        module_logger.info(metadata.start_log_message, *metadata.start_log_values_builder(context))
+        result = await _dispatch_generation_requests(
+            config=config,
+            context=context,
+            ctx=ctx,
+            request_executor=request_executor,
+            module_logger=module_logger,
+        )
 
-        # 优先复用 lifespan 共享客户端；无 lifespan 上下文时回退按需新建。
-        shared_client = _try_get_shared_client(ctx)
-        if shared_client is not None:
-            result = await _run_generation_requests(
-                client=shared_client,
-                context=context,
-                ctx=ctx,
-                request_executor=request_executor,
-                module_logger=module_logger,
-            )
-        else:
-            async with SeedreamClient(config) as client:
-                result = await _run_generation_requests(
-                    client=client,
-                    context=context,
-                    ctx=ctx,
-                    request_executor=request_executor,
-                    module_logger=module_logger,
-                )
-
-        auto_save_results: list[AutoSaveResult] = []
-        saveable_indices: list[int] = []
-        auto_save_error: str | None = None
         is_generation_failed = _is_generation_failed(result)
         # 图片列表提取一次供自动保存与格式化阶段复用，避免重复提取。
         images = extract_images(result)
-        if context.enable_auto_save and not is_generation_failed:
-            try:
-                await safe_report_progress(
-                    ctx, progress=PROGRESS_AUTOSAVE_START, message="开始自动保存"
-                )
-                await _yield_for_cancellation()
-                shared_download_manager = _try_get_shared_download_manager(ctx)
-                if context.response_format == "url":
-                    auto_save_results, saveable_indices = await auto_save_from_urls(
-                        result,
-                        context.prompt,
-                        config,
-                        context.save_path,
-                        context.custom_name,
-                        metadata.tool_name,
-                        download_manager=shared_download_manager,
-                        images=images,
-                    )
-                else:
-                    auto_save_results, saveable_indices = await auto_save_from_base64(
-                        result,
-                        context.prompt,
-                        config,
-                        context.save_path,
-                        context.custom_name,
-                        metadata.tool_name,
-                        download_manager=shared_download_manager,
-                        images=images,
-                    )
-
-                if auto_save_results:
-                    result = update_result_with_auto_save(
-                        result, auto_save_results, saveable_indices
-                    )
-                    # 合并改写了 data，重新提取供展示与结构化输出复用。
-                    images = extract_images(result)
-                await safe_report_progress(
-                    ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成"
-                )
-            except Exception as exc:
-                auto_save_error = format_error_for_user(exc)
-                module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
+        result, images, auto_save_results, saveable_indices, auto_save_error = (
+            await _auto_save_generation_images(
+                result=result,
+                images=images,
+                is_generation_failed=is_generation_failed,
+                context=context,
+                config=config,
+                tool_name=metadata.tool_name,
+                ctx=ctx,
+                module_logger=module_logger,
+            )
+        )
 
         # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
         # 净化非幂等，重复净化会使超长片段的截断标记叠加。
         sanitized_images = _sanitize_image_errors(images)
 
-        response_text = format_generation_response(
-            metadata.completion_title,
-            result,
-            context.size,
-            auto_save_results,
-            context.enable_auto_save,
-            auto_save_error=auto_save_error,
-            images=sanitized_images,
-            saveable_indices=saveable_indices,
-        )
-
-        structured_result = _build_generation_structured_result(
-            tool_name=metadata.tool_name,
+        response_text, structured_result = _format_generation_outputs(
+            metadata=metadata,
             result=result,
             context=context,
             auto_save_results=auto_save_results,
             auto_save_error=auto_save_error,
-            images=sanitized_images,
+            sanitized_images=sanitized_images,
+            saveable_indices=saveable_indices,
         )
 
-        # 预览从已保存的本地文件生成，未开启、生成失败或无成功保存时退化为纯文本；
-        # 超上限仅取前 PREVIEW_MAX_IMAGES 张，完整清单仍在 structuredContent.data。
-        preview_contents: list[ImageContent] = []
-        if config.preview_enabled and not is_generation_failed and auto_save_results:
-            saved_paths = [
-                Path(save_result.local_path)
-                for save_result in auto_save_results
-                if save_result.success and save_result.local_path
-            ]
-            if len(saved_paths) > PREVIEW_MAX_IMAGES:
-                module_logger.info(
-                    "已保存图片 {} 张超过预览上限 {}，仅生成前 {} 张缩略图预览",
-                    len(saved_paths),
-                    PREVIEW_MAX_IMAGES,
-                    PREVIEW_MAX_IMAGES,
-                )
-                response_text += (
-                    f"\n（共已保存 {len(saved_paths)} 张，"
-                    f"仅附前 {PREVIEW_MAX_IMAGES} 张缩略图预览）"
-                )
-                saved_paths = saved_paths[:PREVIEW_MAX_IMAGES]
-            preview_contents = await build_preview_contents(saved_paths)
+        response_text, preview_contents = await _build_generation_preview(
+            config=config,
+            is_generation_failed=is_generation_failed,
+            auto_save_results=auto_save_results,
+            module_logger=module_logger,
+            response_text=response_text,
+        )
 
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
         return CallToolResult(

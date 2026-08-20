@@ -32,6 +32,11 @@ from .io_storage import FileManager, FileManagerError
 
 logger = get_logger()
 
+# 下载落盘像素上限，与输入参考图侧 image_validation 的 36M 口径一致。PIL 的解压
+# 炸弹阈值语义为超过 2 倍才抛错、1 至 2 倍区间仅告警照常解码，显式头尺寸校验防止
+# 数 KB 的伪造尺寸头图片落盘后在预览解码时放大为数百 MB 内存占用。
+_DOWNLOAD_MAX_PIXELS = 36_000_000
+
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
 _CLEANUP_MIN_INTERVAL_SECONDS = 3600
 # 清理失败后的重试退避秒数：失败时写入该秒数形态的短退避时间戳，使失败重试有独立
@@ -97,6 +102,29 @@ def _build_markdown_alt(alt_text: str | None) -> str:
         flattened = flattened[:max_flat_length]
     escaped = flattened.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
     return escaped or "Generated Image"
+
+
+def _pixel_limit_rejection(path: Path) -> str | None:
+    """读取图像头尺寸判定是否超过下载落盘像素上限，返回拒绝原因或 None。
+
+    只读头部不解码像素，供工作线程调用。头损坏等无法解析的形态返回 None 交由
+    既有保存链路处置，本校验不引入新的失败面。
+    """
+    # PIL 惰性导入，落点在工作线程；UnidentifiedImageError 为 OSError 子类。
+    from PIL import UnidentifiedImageError
+    from PIL import Image
+
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+    except (UnidentifiedImageError, OSError):
+        return None
+    if width * height > _DOWNLOAD_MAX_PIXELS:
+        return (
+            f"图像像素 {width}x{height} 超过保存上限 {_DOWNLOAD_MAX_PIXELS}，"
+            "已删除落盘文件并放弃保存"
+        )
+    return None
 
 
 def _build_save_metadata(
@@ -365,6 +393,13 @@ class AutoSaveManager:
             # 字节签名嗅探可能修正扩展名，实际落盘路径以下载结果的 file_path 为准；
             # URL 派生的 save_path 此时可能指向不存在的文件，不得用于对外报告。
             final_path = Path(download_result["file_path"])
+
+            # 下载内容像素上限校验：输入参考图路径已有显式 36M 拒绝，此处补齐下载
+            # 侧同一口径。超限即删除已落盘文件并按保存失败降级，保留原始 URL。
+            pixel_rejection = await asyncio.to_thread(_pixel_limit_rejection, final_path)
+            if pixel_rejection is not None:
+                await asyncio.to_thread(final_path.unlink, True)
+                raise AutoSaveError(pixel_rejection)
 
             markdown_alt = _build_markdown_alt(alt_text)
             markdown_ref = self.file_manager.generate_markdown_reference(final_path, markdown_alt)

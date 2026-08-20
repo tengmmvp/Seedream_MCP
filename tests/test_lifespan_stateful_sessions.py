@@ -15,21 +15,6 @@ import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 
 
-@pytest.fixture
-async def reset_lifespan_singletons():
-    """重置模块级单例与全局配置，测试后关闭残留实例并再次复位，避免跨测试污染。"""
-    server._reset_lifespan_state()
-    yield
-    active = resources._active_resource
-    if active is not None:
-        await active.client.close()
-        await active.download_manager.close()
-    for retired in list(resources._retired_resources):
-        await retired.client.close()
-        await retired.download_manager.close()
-    server._reset_lifespan_state()
-
-
 def _activate_config(monkeypatch: pytest.MonkeyPatch, config: SeedreamConfig) -> None:
     """注入活动配置。"""
     monkeypatch.setattr(config_module, "_active_config", config)

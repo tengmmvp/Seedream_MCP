@@ -7,10 +7,11 @@
 
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
-from typing import Mapping, Any, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 
 class SeedreamMCPError(Exception):

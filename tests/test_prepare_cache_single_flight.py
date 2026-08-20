@@ -58,7 +58,6 @@ class _WarningCapture:
         self.warnings.append(message.format(*args))
 
 
-@pytest.mark.asyncio
 async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -94,7 +93,6 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     assert len(client._image_preparer._prepare_cache) == 0
 
 
-@pytest.mark.asyncio
 async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -151,7 +149,6 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     assert len(client._image_preparer._prepare_cache) == 0
 
 
-@pytest.mark.asyncio
 async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -201,7 +198,6 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     assert len(client._image_preparer._prepare_cache) == 0
 
 
-@pytest.mark.asyncio
 async def test_prepare_image_input_error_propagates_to_all_sharers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,7 +244,6 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
     assert len(client._image_preparer._prepare_cache) == 0
 
 
-@pytest.mark.asyncio
 async def test_prepare_failure_consumed_by_waiters_not_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -289,7 +284,6 @@ async def test_prepare_failure_consumed_by_waiters_not_armed(
     assert fired == []
 
 
-@pytest.mark.asyncio
 async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -328,7 +322,6 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
     assert isinstance(inflight.exception(), ValueError)
 
 
-@pytest.mark.asyncio
 async def test_prepare_rechecks_cache_after_semaphore_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -374,7 +367,6 @@ async def test_prepare_rechecks_cache_after_semaphore_wait(
     assert len(preparer._prepare_inflight) == 0
 
 
-@pytest.mark.asyncio
 async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -422,7 +414,6 @@ async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
     assert capture.warnings == []
 
 
-@pytest.mark.asyncio
 async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

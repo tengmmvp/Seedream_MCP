@@ -553,6 +553,7 @@ SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallba
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (required for non-loopback binding, or the service refuses to start; TLS or the --insecure-allow-non-tls exemption is also required)
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
 SEEDREAM_HTTP_ALLOWED_HOSTS=                # Comma-separated Host allowlist for direct non-loopback exposure (supports host:port and trailing :*); empty disables the SDK inner Host check (suitable behind a reverse proxy)
+SEEDREAM_REQUEST_STATE_KEYS=               # Shared requestState key ring for multi-replica HTTP deployments, comma-separated hex with each key decoding to at least 32 bytes; empty keeps the SDK default per-process ephemeral key and single-process deployments can omit it
 
 # Client performance
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

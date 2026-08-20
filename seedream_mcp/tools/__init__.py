@@ -1,8 +1,9 @@
-"""Seedream MCP 工具包入口，聚合再导出三层工具符号。
+"""Seedream MCP 工具包入口，聚合再导出 runners 适配器与输入模型。
 
-impl 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装；runners 的 ``run_*``
-适配器作为 composition root 注入工作区边界后委托 handler；core.schemas 的输入模型
-是参数校验与 MCP inputSchema 的单一来源。依赖方向为 core <- impl <- runners。
+impl 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装，经直接子模块路径
+导入消费，不在包门面重导出；runners 的 ``run_*`` 适配器作为 composition root
+注入工作区边界后委托 handler；core.schemas 的输入模型是参数校验与 MCP
+inputSchema 的单一来源。依赖方向为 core <- impl <- runners。
 
 导出经 PEP 562 ``__getattr__`` 延迟加载，首次访问才导入对应子模块；``__all__``
 派生自 ``_LAZY_EXPORTS`` 的键，``__dir__`` 纳入尚未导入的延迟导出名。
@@ -21,13 +22,6 @@ if TYPE_CHECKING:
         SequentialGenerationInput,
         TextToImageInput,
     )
-    from .impl.browse_images import handle_browse_images  # noqa: F401
-    from .impl.image_to_image import handle_image_to_image  # noqa: F401
-    from .impl.multi_image_fusion import handle_multi_image_fusion  # noqa: F401
-    from .impl.sequential_generation import (  # noqa: F401
-        handle_sequential_generation,
-    )
-    from .impl.text_to_image import handle_text_to_image  # noqa: F401
     from .runners import (  # noqa: F401
         run_browse_images,
         run_image_to_image,
@@ -38,15 +32,6 @@ if TYPE_CHECKING:
 
 # 延迟加载映射：导出名 -> (子模块相对名，子模块内属性名)
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
-    # impl 业务处理器
-    "handle_browse_images": (".impl.browse_images", "handle_browse_images"),
-    "handle_image_to_image": (".impl.image_to_image", "handle_image_to_image"),
-    "handle_multi_image_fusion": (".impl.multi_image_fusion", "handle_multi_image_fusion"),
-    "handle_sequential_generation": (
-        ".impl.sequential_generation",
-        "handle_sequential_generation",
-    ),
-    "handle_text_to_image": (".impl.text_to_image", "handle_text_to_image"),
     # runners 适配器
     "run_browse_images": (".runners", "run_browse_images"),
     "run_image_to_image": (".runners", "run_image_to_image"),

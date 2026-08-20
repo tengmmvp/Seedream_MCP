@@ -226,6 +226,7 @@ class _ResponseAndExecutionInput(BaseModel):
     )
     tools: list[GenerationTool] | None = Field(
         default=None,
+        max_length=8,
         description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
     )
     request_count: int = Field(

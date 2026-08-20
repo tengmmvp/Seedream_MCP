@@ -75,35 +75,31 @@ def infer_extension_from_bytes(content: bytes, default: str = DEFAULT_IMAGE_EXTE
 
     以文件头为准而非扩展名，避免扩展名缺失或伪造导致类型误判；仅识别受支持的格式。
     """
-    try:
-        if content.startswith(b"\x89PNG\r\n\x1a\n"):
-            return ".png"
-        if content.startswith(b"\xff\xd8\xff"):
-            return ".jpeg"
-        if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
-            return ".gif"
-        # BMP: "BM" 魔数且 DIB 头 size 字段取值合法。offset 6-10 保留字段非零的
-        # 合法变体不据此拒判；"BM" 前缀的长文本因 DIB 头非法按未知内容处理。
-        if (
-            content.startswith(b"BM")
-            and len(content) >= 18
-            and int.from_bytes(content[14:18], "little") in _BMP_DIB_HEADER_SIZES
-        ):
-            return ".bmp"
-        if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
-            return ".webp"
-        if content.startswith(b"II*\x00") or content.startswith(b"MM\x00*"):
-            return ".tiff"
-        # HEIC/HEIF：ISO BMFF 格式，4 字节 size + "ftyp" + 4 字节 brand。
-        if len(content) >= 12 and content[4:8] == b"ftyp":
-            brand = bytes(content[8:12])
-            if brand in _HEIC_BRANDS:
-                return ".heic"
-            if brand in _HEIF_BRANDS:
-                return ".heif"
-    except Exception:
-        # 字节过短或切片异常时降级为默认扩展名，保证稳定返回。
-        pass
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return ".jpeg"
+    if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
+        return ".gif"
+    # BMP: "BM" 魔数且 DIB 头 size 字段取值合法。offset 6-10 保留字段非零的
+    # 合法变体不据此拒判；"BM" 前缀的长文本因 DIB 头非法按未知内容处理。
+    if (
+        content.startswith(b"BM")
+        and len(content) >= 18
+        and int.from_bytes(content[14:18], "little") in _BMP_DIB_HEADER_SIZES
+    ):
+        return ".bmp"
+    if content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP":
+        return ".webp"
+    if content.startswith(b"II*\x00") or content.startswith(b"MM\x00*"):
+        return ".tiff"
+    # HEIC/HEIF：ISO BMFF 格式，4 字节 size + "ftyp" + 4 字节 brand。
+    if len(content) >= 12 and content[4:8] == b"ftyp":
+        brand = bytes(content[8:12])
+        if brand in _HEIC_BRANDS:
+            return ".heic"
+        if brand in _HEIF_BRANDS:
+            return ".heif"
     return default
 
 

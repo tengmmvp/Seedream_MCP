@@ -553,6 +553,7 @@ SEEDREAM_WORKSPACE_ROOT=                    # 本地开发时文件读写边界�
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定必须配置，否则拒绝启动；另需 TLS 或 --insecure-allow-non-tls 豁免）
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 请求体上限（字节，≥1MB，默认 64MB；单图 data URI 约 40MB，兼顾多图融合）
 SEEDREAM_HTTP_ALLOWED_HOSTS=                # 非回环直连部署的 Host 头允许列表，逗号分隔，支持 host:port 与尾部 :* 通配（如 mcp.example.com,mcp.example.com:*）；留空则整体关闭 SDK 内层 Host 校验，适用反向代理场景
+SEEDREAM_REQUEST_STATE_KEYS=               # 多副本 HTTP 部署共享的 requestState 密钥环，逗号分隔十六进制，每键解码后不少于 32 字节；留空保持 SDK 默认进程临时密钥，单进程部署可省略
 
 # 客户端性能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

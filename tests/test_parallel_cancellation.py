@@ -39,7 +39,6 @@ def _make_context(request_count: int, parallelism: int) -> GenerationExecutionCo
     )
 
 
-@pytest.mark.asyncio
 async def test_parallel_batch_cancellation_propagates_to_inflight_requests() -> None:
     """批次执行中取消：已启动请求在 await 处被中断，整批抛出 CancelledError。"""
     config = SeedreamConfig(api_key="k")

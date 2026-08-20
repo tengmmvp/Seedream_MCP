@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from seedream_mcp.utils.io.io_save import (
     AutoSaveManager,
@@ -109,6 +110,48 @@ async def test_maybe_cleanup_quota_enforced_across_default_root(tmp_path: Path) 
         assert newest.exists()
     finally:
         await manager.close()
+
+
+async def test_save_image_rejects_oversized_pixel_header(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """下载内容像素头超过 36M 上限时删除落盘文件并按保存失败降级保留 URL。"""
+    import io
+    import struct
+    import zlib
+
+    # 真实 1x1 PNG 改写 IHDR 宽高为 10000x10000 并重算 CRC：结构合法可被 PIL 识别，
+    # 头尺寸超限而文件本身只有几十字节，正是解压炸弹的字节形态。
+    buffer = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+    bomb = bytearray(buffer.getvalue())
+    bomb[16:29] = struct.pack(">II5B", 10_000, 10_000, 8, 2, 0, 0, 0)
+    bomb[29:33] = struct.pack(">I", zlib.crc32(bytes(bomb[12:29])) & 0xFFFFFFFF)
+    target = tmp_path / "bomb.png"
+    target.write_bytes(bytes(bomb))
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
+
+    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict:
+        return {
+            "success": True,
+            "file_path": str(target),
+            "file_size": len(bomb),
+            "download_time": 0.0,
+            "content_type": "image/png",
+            "attempts": 1,
+        }
+
+    monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
+    monkeypatch.setattr(manager.download_manager, "validate_url", lambda url: True)
+
+    result = await manager.save_image("http://x/bomb.png", prompt="p")
+
+    assert result.success is False
+    assert not target.exists()
+    assert "像素" in (result.error or "")
+    await drain_background_cleanup_tasks()
+    await manager.close()
 
 
 async def test_maybe_cleanup_throttle_shared_across_request_subdirs(

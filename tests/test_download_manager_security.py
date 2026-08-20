@@ -62,7 +62,6 @@ class _BlockingFakeLoop:
         return [(None, None, None, None, ("8.8.8.8", 0))]
 
 
-@pytest.mark.asyncio
 async def test_resolve_public_ips_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """TTL 内重复解析同 host 命中缓存，仅触发一次 getaddrinfo。"""
     fake_loop = _FakeLoop(ips=["8.8.8.8", "1.1.1.1"])
@@ -76,7 +75,6 @@ async def test_resolve_public_ips_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch
     assert first == second == ("1.1.1.1", "8.8.8.8")
 
 
-@pytest.mark.asyncio
 async def test_resolve_public_ips_dedups_inflight_resolutions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,7 +103,6 @@ async def test_resolve_public_ips_dedups_inflight_resolutions(
     assert "example.com" in manager._dns_cache
 
 
-@pytest.mark.asyncio
 async def test_resolve_failure_consumed_by_caller_not_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -135,7 +132,6 @@ async def test_resolve_failure_consumed_by_caller_not_armed(
     assert fired == []
 
 
-@pytest.mark.asyncio
 async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,7 +165,6 @@ async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
     assert isinstance(inflight.exception(), DownloadError)
 
 
-@pytest.mark.asyncio
 async def test_resolve_cancel_with_surviving_waiter_not_armed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,13 +216,24 @@ def test_validate_connected_peer_ip_allows_public_ip() -> None:
     )
 
 
+def test_validate_connected_peer_ip_blocks_multicast() -> None:
+    """组播地址经 is_global 放行，须由显式分支拒绝，阻断向内网组播监听者的探测。"""
+    manager = DownloadManager()
+
+    for peer_ip in ("224.0.0.1", "239.1.1.1", "ff02::1", "fec0::1"):
+        fake_response = _FakeResponse(peer_ip=peer_ip)
+        with pytest.raises(DownloadError, match="组播地址|site-local"):
+            manager._validate_connected_peer_ip(  # type: ignore[arg-type]
+                fake_response, "https://example.com"
+            )
+
+
 # ---- download_image 端到端：逐跳重定向校验与重试退避 ----
 # mock 网络层，验证重定向目标重新走静态校验、重定向上限与 5xx 退避重试。
 # 重定向到内网/回环的安全拒绝由 *_via_real_static_validation 用例覆盖，保留真实
 # _validate_url_for_request 串联，避免架空校验的空芯用例。
 
 
-@pytest.mark.asyncio
 async def test_download_image_rejects_redirect_to_private_ip_via_real_static_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -256,7 +262,6 @@ async def test_download_image_rejects_redirect_to_private_ip_via_real_static_val
         await manager.download_image("http://example.com/img.png", tmp_path / "out.png")
 
 
-@pytest.mark.asyncio
 async def test_download_image_rejects_redirect_to_loopback_via_real_static_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -281,7 +286,6 @@ async def test_download_image_rejects_redirect_to_loopback_via_real_static_valid
         await manager.download_image("http://example.com/img.png", tmp_path / "out.png")
 
 
-@pytest.mark.asyncio
 async def test_download_image_rejects_https_to_http_downgrade_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -294,7 +298,6 @@ async def test_download_image_rejects_https_to_http_downgrade_redirect(
         await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
 
 
-@pytest.mark.asyncio
 async def test_download_image_rejects_uppercase_scheme_downgrade_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -310,7 +313,6 @@ async def test_download_image_rejects_uppercase_scheme_downgrade_redirect(
         await manager.download_image("HTTPS://example.com/img.png", tmp_path / "out.png")
 
 
-@pytest.mark.asyncio
 async def test_download_image_rejects_excessive_redirects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,7 +326,6 @@ async def test_download_image_rejects_excessive_redirects(
         await manager.download_image("https://example.com/img.png", tmp_path / "out.png")
 
 
-@pytest.mark.asyncio
 async def test_download_image_rejects_malformed_redirect_location(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -340,7 +341,6 @@ async def test_download_image_rejects_malformed_redirect_location(
     assert not save_path.exists()
 
 
-@pytest.mark.asyncio
 async def test_download_image_retries_5xx_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -363,7 +363,6 @@ async def test_download_image_retries_5xx_then_succeeds(
     assert save_path.read_bytes() == _PNG_BYTES
 
 
-@pytest.mark.asyncio
 async def test_download_image_exhausts_retries_then_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -382,7 +381,6 @@ async def test_download_image_exhausts_retries_then_raises(
     assert session._idx == manager.max_retries + 1
 
 
-@pytest.mark.asyncio
 async def test_download_image_stops_retry_when_total_budget_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -436,7 +434,6 @@ class _SlowHopClockSession:
         return resp
 
 
-@pytest.mark.asyncio
 async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -465,7 +462,6 @@ async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhaus
     assert not save_path.exists()
 
 
-@pytest.mark.asyncio
 async def test_download_image_retries_timeout_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -510,7 +506,6 @@ _CUSTOM_HEADERS = {
 }
 
 
-@pytest.mark.asyncio
 async def test_download_image_strips_custom_headers_on_cross_origin_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -541,7 +536,6 @@ async def test_download_image_strips_custom_headers_on_cross_origin_redirect(
     assert "accept" in second_keys
 
 
-@pytest.mark.asyncio
 async def test_download_image_keeps_headers_on_same_origin_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -610,7 +604,6 @@ def test_enforce_dns_cache_limit_evicts_expired_then_oldest() -> None:
 # ---- 扩展名等价类：同格式别名不改名，跨格式仍修正 ----
 
 
-@pytest.mark.asyncio
 async def test_download_keeps_jpg_suffix_for_jpeg_signature(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -636,7 +629,6 @@ async def test_download_keeps_jpg_suffix_for_jpeg_signature(
     assert save_path.read_bytes() == _JPEG_BYTES
 
 
-@pytest.mark.asyncio
 async def test_download_corrects_png_suffix_to_jpeg_for_jpeg_signature(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

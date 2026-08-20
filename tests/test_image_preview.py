@@ -79,7 +79,6 @@ def test_build_thumbnail_bytes_returns_none_for_invalid_input(tmp_path: Path) ->
     assert build_thumbnail_bytes(tmp_path / "missing.png") is None
 
 
-@pytest.mark.asyncio
 async def test_build_preview_contents_preserves_order_and_skips_failures(
     tmp_path: Path,
 ) -> None:
@@ -101,7 +100,6 @@ async def test_build_preview_contents_preserves_order_and_skips_failures(
     assert second_decoded.size == (300, 200)
 
 
-@pytest.mark.asyncio
 async def test_build_preview_contents_empty_input_returns_empty() -> None:
     """空输入直接返回空列表，不进入线程调度。"""
     assert await build_preview_contents([]) == []
@@ -144,7 +142,6 @@ def _patch_save_real_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Pa
     return saved
 
 
-@pytest.mark.asyncio
 async def test_generation_result_carries_preview_after_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -171,7 +168,6 @@ async def test_generation_result_carries_preview_after_text(
     assert structured["data"][0]["local_path"].endswith("saved.png")
 
 
-@pytest.mark.asyncio
 async def test_generation_result_truncates_preview_beyond_limit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -229,7 +225,6 @@ async def test_generation_result_truncates_preview_beyond_limit(
     assert all(entry.get("local_path") for entry in structured["data"])
 
 
-@pytest.mark.asyncio
 async def test_generation_result_preview_disabled_keeps_text_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -250,7 +245,6 @@ async def test_generation_result_preview_disabled_keeps_text_only(
     assert all(isinstance(content, TextContent) for content in result.content)
 
 
-@pytest.mark.asyncio
 async def test_generation_result_no_preview_when_save_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -274,7 +268,6 @@ async def test_generation_result_no_preview_when_save_fails(
     assert all(isinstance(content, TextContent) for content in result.content)
 
 
-@pytest.mark.asyncio
 async def test_generation_result_no_preview_when_generation_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

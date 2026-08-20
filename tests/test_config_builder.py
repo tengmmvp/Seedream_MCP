@@ -873,3 +873,155 @@ def test_seedream_config_rejects_programmatic_zero_max_total_bytes() -> None:
 
     with pytest.raises(SeedreamConfigError, match="auto_save_max_total_bytes"):
         SeedreamConfig(api_key="k", auto_save_max_total_bytes=0)
+
+
+# ==================== SEEDREAM_REQUEST_STATE_KEYS requestState 密钥环 ====================
+
+
+def test_build_config_loads_single_request_state_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """单键十六进制串解码为 32 字节密钥并以字节元组持有。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    key_hex = "ab" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={key_hex}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys == (bytes.fromhex(key_hex),)
+
+
+def test_build_config_loads_rotation_request_state_key_ring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """多键逗号分隔按序解码，首键密封全键解封的轮换顺序原样保留。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    first_hex, second_hex = "ab" * 32, "cd" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={first_hex},{second_hex}\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys == (bytes.fromhex(first_hex), bytes.fromhex(second_hex))
+
+
+def test_build_config_request_state_keys_strip_blank_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """条目前后空白被去除，空条目被丢弃。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    first_hex, second_hex = "ab" * 32, "cd" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS= {first_hex} , , {second_hex} \n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys == (bytes.fromhex(first_hex), bytes.fromhex(second_hex))
+
+
+@pytest.mark.parametrize("raw_value", ["", "   ", ","])
+def test_build_config_blank_request_state_keys_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    """空串、纯空白与全空条目均归 None，等价于未启用密钥环。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={raw_value}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys is None
+
+
+def test_build_config_request_state_keys_default_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时不启用密钥环，保持 SDK 默认进程临时密钥。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys is None
+
+
+@pytest.mark.parametrize("bad_hex", ["zz" * 32, "0x" + "ab" * 32, "abc"])
+def test_build_config_rejects_non_hex_request_state_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_hex: str
+) -> None:
+    """非十六进制条目构建期拒绝，消息含格式要求与生成命令且不回显密钥内容。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={bad_hex}\n")
+
+    with pytest.raises(SeedreamConfigError, match="十六进制") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "secrets.token_hex(32)" in excinfo.value.message
+    assert bad_hex not in excinfo.value.message
+    assert "环境变量 SEEDREAM_REQUEST_STATE_KEYS" in excinfo.value.message
+
+
+@pytest.mark.parametrize("short_hex", ["ab" * 31, "ab" * 16])
+def test_build_config_rejects_short_request_state_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_hex: str
+) -> None:
+    """解码后不足 32 字节的密钥构建期拒绝，消息含生成命令提示。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={short_hex}\n")
+
+    with pytest.raises(SeedreamConfigError, match="32 字节") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "secrets.token_hex(32)" in excinfo.value.message
+
+
+def test_build_config_rejects_duplicate_request_state_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重复密钥在轮换环内只允许登记一次，重复登记构建期拒绝。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    key_hex = "ab" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={key_hex},{key_hex}\n"
+    )
+
+    with pytest.raises(SeedreamConfigError, match="重复"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+def test_seedream_config_accepts_programmatic_request_state_key_ring() -> None:
+    """程序构造直接传解码后的字节密钥，经 validate 下界校验后原样持有。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 32,))
+
+    assert config.request_state_secret_keys == (b"\x01" * 32,)
+
+
+def test_seedream_config_rejects_programmatic_short_request_state_key() -> None:
+    """程序构造的短密钥不经 env 解码路径，仍由 validate 下界校验拒绝。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="32 字节"):
+        SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 31,))
+
+
+def test_to_dict_masks_request_state_secret_keys() -> None:
+    """to_dict 对 request_state_secret_keys 脱敏，密钥字节不进入导出字典。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 32,))
+    dumped = config.to_dict()
+
+    assert dumped["request_state_secret_keys"] == "***"

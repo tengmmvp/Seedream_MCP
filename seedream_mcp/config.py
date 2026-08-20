@@ -33,6 +33,11 @@ LIFESPAN_KEY_CLIENT = "client"
 LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
+# http_max_body_size 的构建期下限；字段默认 64*1024*1024 即 64MB 为其 64 倍，
+# 过小的上限连常规 MCP JSON 载荷都无法容纳，构建期直接拒绝。
+_HTTP_MAX_BODY_SIZE_FLOOR = 1024 * 1024
+# requestState 密钥环单钥的字节数下限，与 SDK RequestStateSecurity 的密钥强度要求一致。
+_REQUEST_STATE_KEY_MIN_BYTES = 32
 _ENV_METADATA_KEY = "env"
 
 
@@ -86,6 +91,10 @@ class SeedreamConfig:
             与尾部 :* 端口通配，取不可变元组与 frozen 配置对齐；None 表示整体关闭
             SDK 内层 Host 校验。仅经 SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，
             CLI 不暴露参数。
+        request_state_secret_keys: requestState 密钥环，多副本 HTTP 部署共享的
+            十六进制密钥列表，逐键 hex 解码后以字节形态持有，首键密封、全键解封
+            支持零停机轮换；None 表示不启用，保持 SDK 默认的进程临时密钥。仅经
+            SEEDREAM_REQUEST_STATE_KEYS 环境变量解析，CLI 不暴露参数。
     """
 
     api_key: str
@@ -134,6 +143,9 @@ class SeedreamConfig:
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
     http_max_body_size: int = _env_field(64 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
     http_allowed_hosts: tuple[str, ...] | None = _env_field(None, "SEEDREAM_HTTP_ALLOWED_HOSTS")
+    request_state_secret_keys: tuple[bytes, ...] | None = _env_field(
+        None, "SEEDREAM_REQUEST_STATE_KEYS"
+    )
 
     def __post_init__(self) -> None:
         self.validate()
@@ -159,6 +171,7 @@ class SeedreamConfig:
         self._validate_prepare_cache_bounds()
         self._validate_dir_fields()
         self._validate_http_fields()
+        self._validate_request_state_keys()
 
     def _validate_api_credentials(self) -> None:
         """校验 api_key 非空且非默认占位符。"""
@@ -245,7 +258,7 @@ class SeedreamConfig:
         """校验自动保存各数值字段的下界。"""
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError(
-                f"auto_save_download_timeout必须大于0"
+                "auto_save_download_timeout必须大于0"
                 f"{_env_var_suffix('auto_save_download_timeout')}"
             )
         if self.auto_save_max_retries < 0:
@@ -254,12 +267,11 @@ class SeedreamConfig:
             )
         if self.auto_save_max_file_size <= 0:
             raise SeedreamConfigError(
-                f"auto_save_max_file_size必须大于0" f"{_env_var_suffix('auto_save_max_file_size')}"
+                "auto_save_max_file_size必须大于0" f"{_env_var_suffix('auto_save_max_file_size')}"
             )
         if self.auto_save_max_concurrent <= 0:
             raise SeedreamConfigError(
-                f"auto_save_max_concurrent必须大于0"
-                f"{_env_var_suffix('auto_save_max_concurrent')}"
+                "auto_save_max_concurrent必须大于0" f"{_env_var_suffix('auto_save_max_concurrent')}"
             )
         if self.auto_save_cleanup_days < 0:
             raise SeedreamConfigError(
@@ -267,7 +279,7 @@ class SeedreamConfig:
             )
         if self.auto_save_max_total_bytes is not None and self.auto_save_max_total_bytes <= 0:
             raise SeedreamConfigError(
-                f"auto_save_max_total_bytes必须大于0"
+                "auto_save_max_total_bytes必须大于0"
                 f"{_env_var_suffix('auto_save_max_total_bytes')}"
             )
 
@@ -283,7 +295,7 @@ class SeedreamConfig:
             )
         if self.stream_chunk_size > self.stream_buffer_max_size:
             raise SeedreamConfigError(
-                f"stream_chunk_size不能大于stream_buffer_max_size"
+                "stream_chunk_size不能大于stream_buffer_max_size"
                 f"{_env_var_suffix('stream_chunk_size', 'stream_buffer_max_size')}"
             )
         if self.response_body_limit is not None and self.response_body_limit <= 0:
@@ -295,7 +307,7 @@ class SeedreamConfig:
         """校验图像预处理并发与预处理缓存容量下界。"""
         if self.image_prepare_concurrency <= 0:
             raise SeedreamConfigError(
-                f"image_prepare_concurrency必须大于0"
+                "image_prepare_concurrency必须大于0"
                 f"{_env_var_suffix('image_prepare_concurrency')}"
             )
 
@@ -318,9 +330,9 @@ class SeedreamConfig:
 
     def _validate_http_fields(self) -> None:
         """校验 streamable-http 请求体下限与 Host 允许列表。"""
-        if self.http_max_body_size < 1024 * 1024:
+        if self.http_max_body_size < _HTTP_MAX_BODY_SIZE_FLOOR:
             raise SeedreamConfigError(
-                f"http_max_body_size 不能低于 1MB（1048576 字节）"
+                f"http_max_body_size 不能低于 1MB（{_HTTP_MAX_BODY_SIZE_FLOOR} 字节）"
                 f"{_env_var_suffix('http_max_body_size')}"
             )
         self._validate_http_allowed_hosts()
@@ -365,6 +377,32 @@ class SeedreamConfig:
                 "建议同时列出裸 host 形态",
                 ", ".join(sorted(uncovered)),
             )
+
+    def _validate_request_state_keys(self) -> None:
+        """校验 requestState 密钥环的单钥字节数下限与重复键。
+
+        Raises:
+            SeedreamConfigError: 任一密钥解码后不足 32 字节，或与在先密钥重复。
+        """
+        keys = self.request_state_secret_keys
+        if keys is None:
+            return
+        seen: set[bytes] = set()
+        for index, key in enumerate(keys):
+            if len(key) < _REQUEST_STATE_KEY_MIN_BYTES:
+                raise SeedreamConfigError(
+                    f"request_state_secret_keys 第 {index} 个密钥解码后仅 {len(key)} 字节，"
+                    f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
+                    f'生成命令: python -c "import secrets; print(secrets.token_hex(32))"'
+                    f"{_env_var_suffix('request_state_secret_keys')}"
+                )
+            if key in seen:
+                raise SeedreamConfigError(
+                    f"request_state_secret_keys 第 {index} 个密钥与在先密钥重复，"
+                    f"轮换环内同一密钥只需登记一次"
+                    f"{_env_var_suffix('request_state_secret_keys')}"
+                )
+            seen.add(key)
 
     def _validate_dir_field(self, value: str, field_name: str) -> None:
         """校验给定路径指向有效目录，存在但非目录时抛 SeedreamConfigError。
@@ -639,6 +677,40 @@ def _pick_optional_str_tuple(
     return tuple(valid_entries) or None
 
 
+def _pick_request_state_key_bytes(
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+) -> tuple[bytes, ...] | None:
+    """按优先级取值后按逗号拆分并逐条 hex 解码为密钥字节，空值归 None。
+
+    条目不是合法十六进制时抛 SeedreamConfigError，消息给出格式要求与生成命令
+    提示且不回显密钥内容；解码后单钥字节数下限与重复键由 validate 校验。
+
+    Raises:
+        SeedreamConfigError: 任一条目无法以十六进制解码。
+    """
+    raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
+    if raw is None:
+        return None
+    normalized = str(raw).strip()
+    if not normalized:
+        return None
+    material: list[bytes] = []
+    for index, entry in enumerate(normalized.split(",")):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            material.append(bytes.fromhex(entry))
+        except ValueError as exc:
+            raise SeedreamConfigError(
+                f"request_state_secret_keys 第 {index} 个条目不是合法的十六进制密钥，"
+                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
+                f'生成命令: python -c "import secrets; print(secrets.token_hex(32))"'
+                f"{_env_var_suffix(field_name)}"
+            ) from exc
+    return tuple(material) or None
+
+
 def _pick_int(
     overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> int:
@@ -845,6 +917,9 @@ def _build_config_from_sources_unlocked(
         "http_allowed_hosts": _pick_optional_str_tuple(
             override_values, "http_allowed_hosts", "SEEDREAM_HTTP_ALLOWED_HOSTS", env_values
         ),
+        "request_state_secret_keys": _pick_request_state_key_bytes(
+            override_values, "request_state_secret_keys", "SEEDREAM_REQUEST_STATE_KEYS", env_values
+        ),
     }
     # 断言所有带 env metadata 的字段都显式传值，防止新增字段被静默忽略。
     missing_env_fields = set(_FIELD_ENV_MAP.keys()) - set(config_kwargs.keys())
@@ -917,6 +992,23 @@ def reload_config(env_file: str | None = None) -> None:
         _global_config = SeedreamConfig.from_env(env_file)
         _active_config = None
         clear_resolved_env_root_cache()
+
+
+def active_request_state_keys() -> tuple[bytes, ...] | None:
+    """向 resources 提供 requestState 密钥环的活动配置取值。
+
+    活动配置就绪时返回其 request_state_secret_keys；配置构建失败或读取抛
+    OSError 时返回 None，保持 SDK 默认的进程临时密钥，模块导入不因缺配置而
+    中断，真正的配置错误由启动路径报告。
+
+    Returns:
+        解码后的密钥字节元组，未配置时为 None。
+    """
+    try:
+        config = get_active_config()
+    except (SeedreamConfigError, OSError):
+        return None
+    return config.request_state_secret_keys
 
 
 def _registered_workspace_root_provider() -> str | None:

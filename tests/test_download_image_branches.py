@@ -3,13 +3,15 @@
 用 fake session/response 模拟，不依赖真实网络。
 """
 
+from __future__ import annotations
+
 import asyncio
 import errno
 import os
 import socket
 import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 import aiofiles
 import aiohttp
@@ -250,7 +252,7 @@ async def test_download_retries_on_transient_dns_resolution_failure(
     """EAI_AGAIN 瞬时解析失败按可重试处理，退避后重新解析并成功落盘。"""
     manager = DownloadManager()
     session = _FakeSession([_png_success_response()])
-    resolve_calls: List[int] = []
+    resolve_calls: list[int] = []
 
     async def _gaierror_then_success(host: str, port: int, **kwargs: object) -> Any:
         del host, port, kwargs
@@ -279,7 +281,7 @@ async def test_download_dns_resolving_private_ip_is_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """解析到私网 IP 属 SSRF 第二层防护的终态拒绝，不进入退避重试。"""
-    resolve_calls: List[int] = []
+    resolve_calls: list[int] = []
 
     async def _private_ip_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
         del host, port, kwargs
@@ -306,7 +308,7 @@ async def test_download_wsa_host_not_found_is_terminal(
 
     Windows 的 getaddrinfo 失败 errno 为 WSA 错误码而非 POSIX EAI_* 常量。
     """
-    resolve_calls: List[int] = []
+    resolve_calls: list[int] = []
 
     async def _wsa_11001_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
         del host, port, kwargs
@@ -331,7 +333,7 @@ async def test_download_wsa_try_again_is_retryable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
     """Windows WSATRY_AGAIN(11002) 对应 EAI_AGAIN 瞬时故障：按可重试退避。"""
-    resolve_calls: List[int] = []
+    resolve_calls: list[int] = []
 
     async def _wsa_11002_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
         del host, port, kwargs
@@ -471,7 +473,7 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
     )
     temp_suffix = ".png.part"
 
-    closed_fds: List[int] = []
+    closed_fds: list[int] = []
     real_os_close = os.close
 
     def _tracking_close(fd: int) -> None:

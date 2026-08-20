@@ -10,7 +10,7 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 from ..core.errors import (
@@ -375,6 +375,168 @@ def _classify_sse_event(
     return False, None, None
 
 
+async def _drain_sse_complete_events(
+    frames: _SSEFrameBuffer,
+    collector: _SSEItemCollector,
+    *,
+    model_id: str,
+    log: Any,
+    apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
+) -> None:
+    """事件解析阶段：抽干缓冲内全部完整事件段并分类处理，条目触顶时即时停止。"""
+    # 先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件；条目触顶即时停止
+    # 解析本 chunk 剩余事件，上限以事件为粒度精确生效，关闭响应与截断计数由
+    # 下方触顶块统一承担。
+    for seg_start, seg_end in frames.drain():
+        event = await frames.parse_segment(seg_start, seg_end, log)
+        if event is None:
+            continue
+        apply_completed(
+            *_classify_sse_event(event, model_id, collector.items, log, seg_end - seg_start)
+        )
+        if collector.reached_cap():
+            break
+
+
+async def _consume_sse_chunks(
+    response: Any,
+    *,
+    model_id: str,
+    chunk_size: int,
+    buffer_max_size: int,
+    event_truncate_threshold: int,
+    total_bytes_limit: int,
+    log: Any,
+    deadline: float | None,
+    frames: _SSEFrameBuffer,
+    collector: _SSEItemCollector,
+    apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
+) -> int:
+    """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件限额截断。"""
+    processed_bytes = 0
+    # 上次进度日志记录时的累计字节数。
+    last_progress_log_bytes = 0
+    # 超限丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件因体积超限被丢弃」。
+    truncated_events = 0
+    # 流首 BOM 剥离标记：BOM 仅可能出现在流首，只对首个到达的非空块生效一次。
+    stripped_bom = False
+
+    async for chunk in response.aiter_bytes(chunk_size):
+        if not chunk:
+            continue
+
+        # 流首 UTF-8 BOM 剥离：BOM 紧贴首个 data: 行时会使该行无法匹配 data: 字段名，
+        # 整个首事件丢失，故在进入行级处理前剥掉。
+        if not stripped_bom:
+            stripped_bom = True
+            if chunk.startswith(_UTF8_BOM):
+                chunk = chunk[len(_UTF8_BOM) :]
+                if not chunk:
+                    continue
+
+        # 总时长预算：逐块检查截止时间，封顶整个解析阶段；超限关闭响应抛超时错误，
+        # 由 client 侧并入既有超时重试路径。
+        if deadline is not None and time.monotonic() > deadline:
+            log.warning("SSE 响应流超过总时长预算，终止解析")
+            await _close_stream_response(response)
+            raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
+
+        processed_bytes += frames.extend(chunk)
+
+        # 累计接收字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
+        if processed_bytes > total_bytes_limit:
+            log.warning(
+                "SSE 响应流总量超限: 已接收 {} 字节，上限 {} 字节",
+                processed_bytes,
+                total_bytes_limit,
+            )
+            await _close_stream_response(response)
+            raise SeedreamAPIError(
+                f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
+                f"超过上限 {total_bytes_limit} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
+            )
+
+        if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:
+            last_progress_log_bytes = processed_bytes
+            log.debug("已处理 {} 字节数据", processed_bytes)
+
+        await _drain_sse_complete_events(
+            frames, collector, model_id=model_id, log=log, apply_completed=apply_completed
+        )
+
+        # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
+        if collector.reached_cap():
+            log.warning(
+                "SSE 事件条目数超过上限 {}: 已累计 {} 条，终止解析",
+                collector.max_items,
+                len(collector.items),
+            )
+            await _close_stream_response(response)
+            truncated_events += 1
+            collector.capped = True
+            break
+
+        # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少
+        # buffer_max_size 字节。
+        frames.recycle(buffer_max_size)
+
+        # drain 已抽干全部完整事件，未消费尾部必为单个未完成事件；超阈值丢弃该
+        # 尾部以免内存无限增长，已处理事件不会跨界错位。
+        dropped_bytes = frames.truncate_oversized_tail(event_truncate_threshold)
+        if dropped_bytes:
+            log.warning(
+                "单个 SSE 事件超过截断阈值 ({} > {})，丢弃该不完整事件",
+                dropped_bytes,
+                event_truncate_threshold,
+            )
+            truncated_events += 1
+
+    return truncated_events
+
+
+async def _resolve_sse_trailing_segment(
+    frames: _SSEFrameBuffer,
+    collector: _SSEItemCollector,
+    *,
+    model_id: str,
+    log: Any,
+    apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
+) -> int:
+    """流末尾残留处理阶段：解析残留事件，数据负载丢失时计入截断计数。"""
+    frames.close_pending_cr()
+    trailing_start, trailing_end = frames.tail_range()
+    trailing_len = trailing_end - trailing_start
+    trailing_event = await frames.parse_segment(trailing_start, trailing_end, log)
+    if trailing_event is not None:
+        apply_completed(
+            *_classify_sse_event(trailing_event, model_id, collector.items, log, trailing_len)
+        )
+        return 0
+    if trailing_len > 0 and _has_lost_data_payload(frames.tail_bytes()):
+        # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
+        # 标记 partial。
+        log.debug("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
+        return 1
+    return 0
+
+
+def _finalize_sse_status(
+    status: str | None, items: list[dict[str, Any]], truncated_events: int
+) -> str | None:
+    """状态汇总阶段：按部分失败与事件截断把完成状态收敛为 partial。"""
+    # data 项含 error 即存在部分失败时标记 status=partial，与非流式
+    # _build_api_result 口径一致，避免误导下游对结果完整性的判断。
+    if status in (None, "completed") and any(
+        isinstance(item, dict) and "error" in item for item in items
+    ):
+        status = "partial"
+
+    # 单个事件超限被丢弃时结果不完整，标记 partial 通知调用方存在数据丢失。
+    if truncated_events > 0 and status in (None, "completed"):
+        status = "partial"
+    return status
+
+
 async def parse_sse_response(
     response: Any,
     *,
@@ -444,119 +606,32 @@ async def parse_sse_response(
 
     frames = _SSEFrameBuffer()
     collector = _SSEItemCollector(total_bytes_limit)
-    processed_bytes = 0
-    # 上次进度日志记录时的累计字节数。
-    last_progress_log_bytes = 0
-    # 超限丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件因体积超限被丢弃」。
-    truncated_events = 0
-    # 流首 BOM 剥离标记：BOM 仅可能出现在流首，只对首个到达的非空块生效一次。
-    stripped_bom = False
 
-    async for chunk in response.aiter_bytes(chunk_size):
-        if not chunk:
-            continue
-
-        # 流首 UTF-8 BOM 剥离：BOM 紧贴首个 data: 行时会使该行无法匹配 data: 字段名，
-        # 整个首事件丢失，故在进入行级处理前剥掉。
-        if not stripped_bom:
-            stripped_bom = True
-            if chunk.startswith(_UTF8_BOM):
-                chunk = chunk[len(_UTF8_BOM) :]
-                if not chunk:
-                    continue
-
-        # 总时长预算：逐块检查截止时间，封顶整个解析阶段；超限关闭响应抛超时错误，
-        # 由 client 侧并入既有超时重试路径。
-        if deadline is not None and time.monotonic() > deadline:
-            log.warning("SSE 响应流超过总时长预算，终止解析")
-            await _close_stream_response(response)
-            raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
-
-        processed_bytes += frames.extend(chunk)
-
-        # 累计接收字节超限即终止解析并关闭响应，防止恶意或受损上游无限送数撑爆内存。
-        if processed_bytes > total_bytes_limit:
-            log.warning(
-                "SSE 响应流总量超限: 已接收 {} 字节，上限 {} 字节",
-                processed_bytes,
-                total_bytes_limit,
-            )
-            await _close_stream_response(response)
-            raise SeedreamAPIError(
-                f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
-                f"超过上限 {total_bytes_limit} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
-            )
-
-        if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:
-            last_progress_log_bytes = processed_bytes
-            log.debug("已处理 {} 字节数据", processed_bytes)
-
-        # 先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件；条目触顶即时停止
-        # 解析本 chunk 剩余事件，上限以事件为粒度精确生效，关闭响应与截断计数由
-        # 下方触顶块统一承担。
-        for seg_start, seg_end in frames.drain():
-            event = await frames.parse_segment(seg_start, seg_end, log)
-            if event is None:
-                continue
-            apply_completed(
-                *_classify_sse_event(event, model_id, collector.items, log, seg_end - seg_start)
-            )
-            if collector.reached_cap():
-                break
-
-        # 条目数触顶：与单事件截断同口径终止解析并计数标记 partial，关闭响应停止读取。
-        if collector.reached_cap():
-            log.warning(
-                "SSE 事件条目数超过上限 {}: 已累计 {} 条，终止解析",
-                collector.max_items,
-                len(collector.items),
-            )
-            await _close_stream_response(response)
-            truncated_events += 1
-            collector.capped = True
-            break
-
-        # 周期性回收已消费前缀；阈值取 buffer_max_size，使每次 O(n) 回收均摊到至少
-        # buffer_max_size 字节。
-        frames.recycle(buffer_max_size)
-
-        # drain 已抽干全部完整事件，未消费尾部必为单个未完成事件；超阈值丢弃该
-        # 尾部以免内存无限增长，已处理事件不会跨界错位。
-        dropped_bytes = frames.truncate_oversized_tail(event_truncate_threshold)
-        if dropped_bytes:
-            log.warning(
-                "单个 SSE 事件超过截断阈值 ({} > {})，丢弃该不完整事件",
-                dropped_bytes,
-                event_truncate_threshold,
-            )
-            truncated_events += 1
+    truncated_events = await _consume_sse_chunks(
+        response,
+        model_id=model_id,
+        chunk_size=chunk_size,
+        buffer_max_size=buffer_max_size,
+        event_truncate_threshold=event_truncate_threshold,
+        total_bytes_limit=total_bytes_limit,
+        log=log,
+        deadline=deadline,
+        frames=frames,
+        collector=collector,
+        apply_completed=apply_completed,
+    )
 
     # 条目数触顶时流已被终止，残留段不再解析；正常流结束才进入末尾残留处理。
     if not collector.capped:
-        frames.close_pending_cr()
-        trailing_start, trailing_end = frames.tail_range()
-        trailing_len = trailing_end - trailing_start
-        trailing_event = await frames.parse_segment(trailing_start, trailing_end, log)
-        if trailing_event is not None:
-            apply_completed(
-                *_classify_sse_event(trailing_event, model_id, collector.items, log, trailing_len)
-            )
-        elif trailing_len > 0 and _has_lost_data_payload(frames.tail_bytes()):
-            # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
-            # 标记 partial。
-            truncated_events += 1
-            log.debug("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
+        truncated_events += await _resolve_sse_trailing_segment(
+            frames,
+            collector,
+            model_id=model_id,
+            log=log,
+            apply_completed=apply_completed,
+        )
 
-    # data 项含 error 即存在部分失败时标记 status=partial，与非流式
-    # _build_api_result 口径一致，避免误导下游对结果完整性的判断。
-    if status in (None, "completed") and any(
-        isinstance(item, dict) and "error" in item for item in collector.items
-    ):
-        status = "partial"
-
-    # 单个事件超限被丢弃时结果不完整，标记 partial 通知调用方存在数据丢失。
-    if truncated_events > 0 and status in (None, "completed"):
-        status = "partial"
+    status = _finalize_sse_status(status, collector.items, truncated_events)
 
     return {
         "success": True,

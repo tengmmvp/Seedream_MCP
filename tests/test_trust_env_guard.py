@@ -5,14 +5,12 @@ trust_env=False 确保 httpx 与 aiohttp 仅使用显式配置的代理，忽略
 """
 
 import aiohttp
-import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.io.io_download import DownloadManager
 
 
-@pytest.mark.asyncio
 async def test_seedream_client_httpx_async_client_disables_trust_env() -> None:
     """SeedreamClient 内部 httpx.AsyncClient 的 trust_env 必须为 False。"""
     config = SeedreamConfig(api_key="test_key", max_retries=1)
@@ -26,7 +24,6 @@ async def test_seedream_client_httpx_async_client_disables_trust_env() -> None:
         await client.close()
 
 
-@pytest.mark.asyncio
 async def test_download_manager_aiohttp_session_disables_trust_env() -> None:
     """DownloadManager 内部 aiohttp.ClientSession 的 trust_env 必须为 False。"""
     manager = DownloadManager()

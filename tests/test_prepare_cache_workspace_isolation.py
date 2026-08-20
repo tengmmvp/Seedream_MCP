@@ -19,7 +19,6 @@ from seedream_mcp.utils.images.image_prepare import ImagePreparer
 from seedream_mcp.utils.io import io_path as path_utils
 
 
-@pytest.mark.asyncio
 async def test_prepare_image_input_cache_isolated_by_workspace_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -60,7 +59,6 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
     assert call_count == 2
 
 
-@pytest.mark.asyncio
 async def test_prepare_image_input_cache_hit_when_workspace_roots_stable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -87,7 +85,6 @@ async def test_prepare_image_input_cache_hit_when_workspace_roots_stable(
 # ==================== 签名路径与读取路径的 strip 一致性 ====================
 
 
-@pytest.mark.asyncio
 async def test_prepare_signature_strips_whitespace_like_read_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -134,7 +131,6 @@ def test_data_uri_digest_tolerates_unpaired_surrogate() -> None:
     assert len(digest) == len("sha256:") + 32
 
 
-@pytest.mark.asyncio
 async def test_prepare_large_data_uri_with_surrogate_raises_validation_error() -> None:
     """超大含代理字符 data URI 报参数级校验错误，不抛 UnicodeEncodeError 中断整批。
 

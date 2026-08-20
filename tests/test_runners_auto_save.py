@@ -6,6 +6,7 @@ mock SeedreamClient 返回含 url 的结果，经 run_text_to_image 走完整生
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -94,9 +95,8 @@ def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> l
     return calls
 
 
-@pytest.mark.asyncio
 async def test_run_text_to_image_includes_auto_save_field(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """生成成功且自动保存成功时，结果含 auto_save 字段与本地路径。"""
     _patch_client_success(monkeypatch)
@@ -119,9 +119,8 @@ async def test_run_text_to_image_includes_auto_save_field(
     assert data[0]["local_path"] == "/saved/generated.png"
 
 
-@pytest.mark.asyncio
 async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfills(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """response_format=b64_json 时按 b64_json 收集并按原始索引回填，失败占位项不进保存队列。"""
     client_cls = SeedreamClient
@@ -204,9 +203,8 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
     assert "  Base64 数据: 4 字符" in response_text
 
 
-@pytest.mark.asyncio
 async def test_run_text_to_image_degrades_when_auto_save_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """自动保存阶段抛错时降级：结果仍 success、保留原始 url、记录 error。"""
     _patch_client_success(monkeypatch)
@@ -229,9 +227,8 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
     assert "local_path" not in data[0]
 
 
-@pytest.mark.asyncio
 async def test_run_text_to_image_rejects_out_of_bounds_save_path_before_api_call(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """越界 save_path 在校验阶段失败：client 生成方法不被调用，请求不计费执行。
 
@@ -262,9 +259,8 @@ async def test_run_text_to_image_rejects_out_of_bounds_save_path_before_api_call
     assert "超出允许范围" in structured["error"]["message"]
 
 
-@pytest.mark.asyncio
 async def test_run_image_to_image_dispatches_via_composition_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """run_image_to_image 经 composition root 委托 handle_image_to_image。
 
@@ -285,9 +281,8 @@ async def test_run_image_to_image_dispatches_via_composition_root(
     assert structured["data"][0]["url"] == GENERATED_URL
 
 
-@pytest.mark.asyncio
 async def test_run_multi_image_fusion_dispatches_via_composition_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """run_multi_image_fusion 经 composition root 委托 handle_multi_image_fusion。
 
@@ -311,9 +306,8 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
     assert structured["data"][0]["url"] == GENERATED_URL
 
 
-@pytest.mark.asyncio
 async def test_run_sequential_generation_dispatches_via_composition_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """run_sequential_generation 经 composition root 委托 handle_sequential_generation。
 

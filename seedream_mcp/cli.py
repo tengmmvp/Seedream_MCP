@@ -7,6 +7,7 @@ SeedreamConfig。
 from __future__ import annotations
 
 import argparse
+from collections.abc import Collection
 from typing import Literal, cast
 
 from .config import (
@@ -203,5 +204,32 @@ def _validate_transport_args(args: argparse.Namespace) -> str | None:
         return (
             "配置错误：--ssl-certfile 与 --ssl-keyfile 必须同时提供或同时省略，"
             "仅提供其一无法建立 TLS。"
+        )
+    return None
+
+
+def _validate_http_security(
+    args: argparse.Namespace,
+    auth_token: str,
+    loopback_hosts: Collection[str],
+) -> str | None:
+    """校验 streamable-http 绑定安全性，返回错误消息；安全组合时返回 None。
+
+    非回环绑定必须配置鉴权令牌，携带令牌后还须配置 TLS 或显式豁免，避免未授权
+    访问与 Bearer 令牌明文传输。auth_token 为解析后的最终令牌，回环地址集合由
+    调用方传入，本模块不依赖传输层私有符号。仅 streamable-http 需要校验。
+    """
+    if args.transport != "streamable-http" or args.host in loopback_hosts:
+        return None
+    if not auth_token:
+        return (
+            f"安全错误：streamable-http 绑定到非回环地址 {args.host} 必须配置鉴权令牌，"
+            "请通过 --auth-token 或 SEEDREAM_HTTP_AUTH_TOKEN 提供，避免未授权访问。"
+        )
+    if not args.ssl_certfile and not args.insecure_allow_non_tls:
+        return (
+            f"安全错误：streamable-http 绑定到非回环地址 {args.host} 必须配置 TLS，"
+            "请通过 --ssl-certfile/--ssl-keyfile 提供，或在受信反向代理终结 TLS 时"
+            "显式传 --insecure-allow-non-tls，避免 Bearer 令牌明文传输被窃听。"
         )
     return None
