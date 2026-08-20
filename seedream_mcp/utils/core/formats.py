@@ -130,6 +130,18 @@ def format_file_size_mb(size_bytes: int) -> str:
     return f"{size_bytes / 1024 / 1024:.1f}MB"
 
 
+def format_file_too_large(size_bytes: int, max_size: int, label: str = "文件") -> str:
+    """构造数据大小超限的用户可见文案，输入校验与保存路径共用同一格式。
+
+    label 为超限主体名称，Base64 估算与解码后等调用点传入各自主体；大小与上限的
+    拼接格式在此单一收口，新增校验点不得再自行拼接。
+    """
+    return (
+        f"{label}过大: {format_file_size_mb(size_bytes)}，"
+        f"最大支持{format_file_size_mb(max_size)}"
+    )
+
+
 def parse_data_uri(data: Any) -> tuple[str | None, Any]:
     """解析 data URI，返回 (media_type, payload)。
 

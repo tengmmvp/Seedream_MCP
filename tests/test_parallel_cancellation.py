@@ -17,25 +17,15 @@ from seedream_mcp.tools.core.context import GenerationExecutionContext
 from seedream_mcp.tools.core.parallel import _run_generation_requests
 from seedream_mcp.utils.core.logs import get_logger
 
+from _generation_fixtures import make_generation_context
+
 
 def _make_context(request_count: int, parallelism: int) -> GenerationExecutionContext:
-    return GenerationExecutionContext(
+    return make_generation_context(
         prompt="p",
-        optimize_prompt_options=None,
-        size="2K",
-        watermark=False,
-        response_format="url",
-        output_format=None,
-        stream=False,
-        tools=None,
-        layer_decomposition=False,
-        background=None,
-        max_images=None,
         request_count=request_count,
         parallelism=parallelism,
         enable_auto_save=False,
-        save_path=None,
-        custom_name=None,
     )
 
 

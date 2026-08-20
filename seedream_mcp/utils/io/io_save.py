@@ -20,7 +20,7 @@ from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
-    format_file_size_mb,
+    format_file_too_large,
     infer_extension_from_bytes,
     is_known_image_bytes,
     parse_data_uri,
@@ -207,6 +207,43 @@ class AutoSaveResult:
         return result
 
 
+async def _run_save_with_degradation(
+    operation: Callable[[], Awaitable[AutoSaveResult]],
+    original_url: str,
+    known_errors: tuple[type[Exception], ...],
+    log_label: str,
+    log_context: str,
+) -> AutoSaveResult:
+    """执行保存操作并把各类异常统一降级为失败结果，URL 与 Base64 两条保存路径共用。
+
+    known_errors 内的已知异常按原文透传，OSError 归为文件系统错误，其余异常归为
+    未知错误。日志与返回文案由 log_label 与 log_context 拼出，log_context 为空串时
+    日志只含异常本身。
+
+    Args:
+        operation: 保存操作协程工厂，正常完成时其返回值原样透传。
+        original_url: 降级结果的原始标识。
+        known_errors: 按原文透传的已知异常类型。
+        log_label: 日志场景前缀。
+        log_context: 日志中插在异常前的已净化上下文。
+
+    Returns:
+        保存操作的结果，或各类异常降级后的失败结果。
+    """
+    try:
+        return await operation()
+    except known_errors as e:
+        logger.error("{}失败: {}{}", log_label, log_context, e)
+        return AutoSaveResult(success=False, original_url=original_url, error=str(e))
+    except OSError as e:
+        # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底。
+        logger.error("{}文件系统错误: {}{}", log_label, log_context, e)
+        return AutoSaveResult(success=False, original_url=original_url, error=f"文件系统错误: {e}")
+    except Exception as e:
+        logger.error("{}出现未知错误: {}{}", log_label, log_context, e)
+        return AutoSaveResult(success=False, original_url=original_url, error=f"未知错误: {e}")
+
+
 class AutoSaveManager:
     """自动保存管理器，协调并发下载、文件写入与节流清理。"""
 
@@ -370,7 +407,8 @@ class AutoSaveManager:
             保存结果；下载或写入失败时 success 为 False 并携带错误描述，不向调用方
             抛出下载与文件系统异常。
         """
-        try:
+
+        async def _perform_save() -> AutoSaveResult:
             logger.info("开始自动保存图片: {}", sanitize_url(url))
 
             if not self.download_manager.validate_url(url):
@@ -425,16 +463,13 @@ class AutoSaveManager:
             logger.info("图片保存成功: {}", final_path)
             return result
 
-        except (DownloadError, FileManagerError, AutoSaveError) as e:
-            logger.error("图片保存失败: {} -> {}", sanitize_url(url), e)
-            return AutoSaveResult(success=False, original_url=url, error=str(e))
-        except OSError as e:
-            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底。
-            logger.error("图片保存文件系统错误: {} -> {}", sanitize_url(url), e)
-            return AutoSaveResult(success=False, original_url=url, error=f"文件系统错误: {e}")
-        except Exception as e:
-            logger.error("图片保存出现未知错误: {} -> {}", sanitize_url(url), e)
-            return AutoSaveResult(success=False, original_url=url, error=f"未知错误: {e}")
+        return await _run_save_with_degradation(
+            _perform_save,
+            original_url=url,
+            known_errors=(DownloadError, FileManagerError, AutoSaveError),
+            log_label="图片保存",
+            log_context=f"{sanitize_url(url)} -> ",
+        )
 
     def _prepare_base64_payload(
         self, payload: str | None, mime: str | None
@@ -451,8 +486,7 @@ class AutoSaveManager:
         estimated_size = (len(raw_payload) * 3) // 4
         if estimated_size > self.max_file_size:
             raise AutoSaveError(
-                f"Base64数据过大: 约 {format_file_size_mb(estimated_size)}，"
-                f"最大支持 {format_file_size_mb(self.max_file_size)}"
+                format_file_too_large(estimated_size, self.max_file_size, label="Base64数据")
             )
 
         # 火山引擎 base64 通常不含空白，直传 validate=True 校验避免对大串做全量复制；
@@ -467,8 +501,7 @@ class AutoSaveManager:
 
         if len(content_bytes) > self.max_file_size:
             raise AutoSaveError(
-                f"解码后数据过大: {format_file_size_mb(len(content_bytes))}，"
-                f"最大支持 {format_file_size_mb(self.max_file_size)}"
+                format_file_too_large(len(content_bytes), self.max_file_size, label="解码后数据")
             )
 
         if not is_known_image_bytes(content_bytes):
@@ -503,7 +536,8 @@ class AutoSaveManager:
             保存结果；解码或写入失败时 success 为 False 并携带错误描述，不向调用方
             抛出解码与文件系统异常。
         """
-        try:
+
+        async def _perform_save() -> AutoSaveResult:
             logger.info("开始自动保存 Base64 图片")
 
             # data URI 解析含对大 base64 串的 partition 全量拷贝，与解码、路径生成、写入一样
@@ -527,10 +561,17 @@ class AutoSaveManager:
 
             write_result, mime = await asyncio.to_thread(_prepare_and_save)
 
+            final_path = Path(write_result["file_path"])
+
+            # 落盘内容像素上限校验：b64_json 返回的内容不经下载侧校验，此处补齐同一
+            # 口径。超限即删除已落盘文件并按保存失败降级。
+            pixel_rejection = await asyncio.to_thread(_pixel_limit_rejection, final_path)
+            if pixel_rejection is not None:
+                await asyncio.to_thread(final_path.unlink, True)
+                raise AutoSaveError(pixel_rejection)
+
             markdown_alt = _build_markdown_alt(alt_text)
-            markdown_ref = self.file_manager.generate_markdown_reference(
-                Path(write_result["file_path"]), markdown_alt
-            )
+            markdown_ref = self.file_manager.generate_markdown_reference(final_path, markdown_alt)
 
             metadata = _build_save_metadata(
                 tool_name=tool_name,
@@ -549,16 +590,13 @@ class AutoSaveManager:
                 metadata=metadata,
             )
 
-        except (FileManagerError, AutoSaveError) as e:
-            logger.error("Base64 图片保存失败: {}", e)
-            return AutoSaveResult(success=False, original_url="base64", error=str(e))
-        except OSError as e:
-            # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底。
-            logger.error("Base64 图片保存文件系统错误: {}", e)
-            return AutoSaveResult(success=False, original_url="base64", error=f"文件系统错误: {e}")
-        except Exception as e:
-            logger.error("Base64 图片保存出现未知错误: {}", e)
-            return AutoSaveResult(success=False, original_url="base64", error=f"未知错误: {e}")
+        return await _run_save_with_degradation(
+            _perform_save,
+            original_url="base64",
+            known_errors=(FileManagerError, AutoSaveError),
+            log_label="Base64 图片保存",
+            log_context="",
+        )
 
     async def _run_batch_save(
         self,

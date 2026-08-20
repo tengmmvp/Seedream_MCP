@@ -5,7 +5,6 @@ import logging
 from collections import namedtuple
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
 
 import pytest
 from loguru import logger
@@ -17,42 +16,16 @@ from seedream_mcp.utils.core.logs import (
     setup_logging,
 )
 
+from _log_fakes import RecordingLogger
+
 # 模拟 loguru record["exception"] 的 RecordException 结构，含 type、value、traceback 三元组
 _RecordException = namedtuple("_RecordException", "type value traceback")
-
-
-class _FakeLogger:
-    """替身 loguru logger，吸收 remove/add/info 调用并记录 add 与 warning 的参数。
-
-    以替身替换模块级 logger，避免 remove/add 改写全局 handler 造成跨测试污染。
-    """
-
-    def __init__(self) -> None:
-        self.add_kwargs: list[dict] = []
-        self.warnings: list[str] = []
-
-    def remove(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    def add(self, *args: object, **kwargs: object) -> int:
-        del args
-        self.add_kwargs.append(dict(kwargs))
-        return 0
-
-    def configure(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    def info(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    def warning(self, message: str, *args: object) -> None:
-        self.warnings.append(message.format(*args) if args else message)
 
 
 @pytest.fixture
 def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> None:
     """以替身替换 setup_logging 模块内的 loguru 全局，防止改写真实全局 handler。"""
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", _FakeLogger())
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", RecordingLogger())
 
 
 def test_setup_logging_respects_force_standard_logging_false(
@@ -106,7 +79,7 @@ def test_console_sink_colorize_follows_tty_autodetection(
 
     强制 True 会使重定向到文件或管道的非终端 sink 输出 ANSI 转义序列，污染采集日志。
     """
-    fake = _FakeLogger()
+    fake = RecordingLogger()
     monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(log_level="INFO", enable_console=True, enable_file=False)
@@ -159,7 +132,7 @@ def test_setup_logging_warns_when_root_handlers_block_bridge(
         captured_kwargs.update(kwargs)
 
     monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
-    fake = _FakeLogger()
+    fake = RecordingLogger()
     monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(
@@ -181,7 +154,7 @@ def test_setup_logging_no_warning_when_force_takes_over(
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [logging.NullHandler()])
     monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
-    fake = _FakeLogger()
+    fake = RecordingLogger()
     monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(
@@ -201,7 +174,7 @@ def test_setup_logging_no_warning_when_root_has_no_handlers(
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [])
     monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
-    fake = _FakeLogger()
+    fake = RecordingLogger()
     monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(log_level="INFO", enable_console=False, enable_file=False)
@@ -329,23 +302,6 @@ def test_patcher_handles_record_without_exception() -> None:
 # ==================== log_unretrieved_task_exception ====================
 
 
-class _CaptureLogger:
-    """捕获 warning 调用的 loguru 替身，格式化 loguru 风格的模板参数并记录 opt 传参。"""
-
-    def __init__(self) -> None:
-        self.warnings: list[str] = []
-        self.opt_kwargs: list[dict] = []
-
-    def opt(self, *args: Any, **kwargs: Any) -> "_CaptureLogger":
-        del args
-        if kwargs:
-            self.opt_kwargs.append(dict(kwargs))
-        return self
-
-    def warning(self, message: str, *args: Any) -> None:
-        self.warnings.append(message.format(*args))
-
-
 async def test_log_unretrieved_task_exception_warns_for_failed_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -360,7 +316,7 @@ async def test_log_unretrieved_task_exception_warns_for_failed_task(
     while not task.done():
         await asyncio.sleep(0)
 
-    capture = _CaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(logs, "logger", capture)
 
     log_unretrieved_task_exception(task)
@@ -386,7 +342,7 @@ async def test_log_unretrieved_task_exception_silent_for_cancelled_task(
     except asyncio.CancelledError:
         pass
 
-    capture = _CaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(logs, "logger", capture)
 
     log_unretrieved_task_exception(task)
@@ -407,7 +363,7 @@ async def test_arm_unretrieved_exception_logging_dedupes_repeated_arming(
     arm_unretrieved_exception_logging(task)
     arm_unretrieved_exception_logging(task)
 
-    capture = _CaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(logs, "logger", capture)
 
     # 轮询推进事件循环至 task 完成并跑完排队的 done callback，期间不检索异常
@@ -430,7 +386,7 @@ async def test_arm_unretrieved_exception_logging_silent_when_task_succeeds(
     task = asyncio.get_running_loop().create_task(succeeding())
     arm_unretrieved_exception_logging(task)
 
-    capture = _CaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(logs, "logger", capture)
 
     while not task.done():

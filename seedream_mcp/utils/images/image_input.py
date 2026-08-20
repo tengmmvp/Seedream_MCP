@@ -12,7 +12,7 @@ import base64
 from pathlib import Path
 
 from ..core.errors import SeedreamConfigError, SeedreamMCPError, SeedreamValidationError
-from ..core.formats import MIME_BY_EXTENSION, format_file_size_mb, infer_extension_from_bytes
+from ..core.formats import MIME_BY_EXTENSION, format_file_too_large, infer_extension_from_bytes
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
@@ -183,8 +183,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
         # value 携带调用方输入原样串，不含服务器侧绝对路径。
         raise SeedreamValidationError(
-            f"文件过大: {format_file_size_mb(len(image_bytes))}，"
-            f"最大支持{format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+            format_file_too_large(len(image_bytes), MAX_IMAGE_FILE_SIZE),
             field="image",
             value=normalized,
         )

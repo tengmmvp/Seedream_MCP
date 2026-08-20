@@ -11,7 +11,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Iterator
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ..core.errors import (
     SeedreamAPIError,
@@ -19,15 +19,20 @@ from ..core.errors import (
     truncate_upstream_message_fragment,
 )
 
+if TYPE_CHECKING:
+    # 注解经 __future__ 字符串化不在运行时求值，httpx 与 Logger 仅类型检查期导入。
+    import httpx
+    from loguru import Logger
 
-def is_sse_response(response: Any) -> bool:
+
+def is_sse_response(response: httpx.Response) -> bool:
     """判断响应是否为 SSE 事件流。
 
     先剥离 ``;`` 参数与首尾空白再判定 media type，兼容含前导空白的
     `` text/event-stream`` 与带 charset 参数的 ``text/event-stream; charset=utf-8``。
 
     Args:
-        response: HTTP 响应对象。
+        response: httpx 响应对象。
 
     Returns:
         Content-Type 为 text/event-stream 返回 True，否则返回 False。
@@ -114,7 +119,9 @@ def _has_lost_data_payload(tail: bytes | bytearray) -> bool:
     return False
 
 
-def parse_sse_segment(segment: bytes | bytearray, log: Any | None = None) -> dict[str, Any] | None:
+def parse_sse_segment(
+    segment: bytes | bytearray, log: Logger | None = None
+) -> dict[str, Any] | None:
     """解析单个 SSE 事件段，返回事件对象。
 
     解析失败时记录日志并返回 None。负载全程按 bytes 处理并直接交给 json.loads，
@@ -178,7 +185,7 @@ _UTF8_BOM = b"\xef\xbb\xbf"
 
 
 def _slice_parse_segment(
-    buffer: bytearray, start: int, end: int, log: Any
+    buffer: bytearray, start: int, end: int, log: Logger
 ) -> dict[str, Any] | None:
     """在工作线程内切出 buffer[start:end] 事件段并解析。
 
@@ -249,7 +256,7 @@ class _SSEFrameBuffer:
             self._search_hint = 0
             yield seg_start, sep
 
-    async def parse_segment(self, start: int, end: int, log: Any) -> dict[str, Any] | None:
+    async def parse_segment(self, start: int, end: int, log: Logger) -> dict[str, Any] | None:
         """切出闭开区间内的事件段并解析，大段把切片与解析一并卸载到工作线程。"""
         if end - start > _SSE_OFFLOAD_THRESHOLD:
             return await asyncio.to_thread(_slice_parse_segment, self._buffer, start, end, log)
@@ -306,7 +313,7 @@ class _SSEItemCollector:
         return len(self.items) >= self.max_items
 
 
-async def _close_stream_response(response: Any) -> None:
+async def _close_stream_response(response: httpx.Response) -> None:
     """尽力关闭流式响应，停止继续从上游读取。
 
     仅持有 aclose 的 httpx 响应需要显式关闭；伪响应对象（测试替身）无此方法则跳过。
@@ -325,7 +332,7 @@ def _classify_sse_event(
     event: dict[str, Any],
     model_id: str,
     items: list[dict[str, Any]],
-    log: Any,
+    log: Logger,
     segment_len: int,
 ) -> tuple[bool, dict[str, Any] | None, list[dict[str, Any]] | None]:
     """分类单个 SSE 事件：追加图片项或返回完成元信息；请求级错误抛 SeedreamAPIError。
@@ -380,7 +387,7 @@ async def _drain_sse_complete_events(
     collector: _SSEItemCollector,
     *,
     model_id: str,
-    log: Any,
+    log: Logger,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
 ) -> None:
     """事件解析阶段：抽干缓冲内全部完整事件段并分类处理，条目触顶时即时停止。"""
@@ -399,14 +406,14 @@ async def _drain_sse_complete_events(
 
 
 async def _consume_sse_chunks(
-    response: Any,
+    response: httpx.Response,
     *,
     model_id: str,
     chunk_size: int,
     buffer_max_size: int,
     event_truncate_threshold: int,
     total_bytes_limit: int,
-    log: Any,
+    log: Logger,
     deadline: float | None,
     frames: _SSEFrameBuffer,
     collector: _SSEItemCollector,
@@ -414,7 +421,6 @@ async def _consume_sse_chunks(
 ) -> int:
     """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件限额截断。"""
     processed_bytes = 0
-    # 上次进度日志记录时的累计字节数。
     last_progress_log_bytes = 0
     # 超限丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件因体积超限被丢弃」。
     truncated_events = 0
@@ -499,7 +505,7 @@ async def _resolve_sse_trailing_segment(
     collector: _SSEItemCollector,
     *,
     model_id: str,
-    log: Any,
+    log: Logger,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
 ) -> int:
     """流末尾残留处理阶段：解析残留事件，数据负载丢失时计入截断计数。"""
@@ -538,14 +544,14 @@ def _finalize_sse_status(
 
 
 async def parse_sse_response(
-    response: Any,
+    response: httpx.Response,
     *,
     model_id: str,
     chunk_size: int,
     buffer_max_size: int,
     event_truncate_threshold: int,
     total_bytes_limit: int,
-    log: Any,
+    log: Logger,
     deadline: float | None = None,
 ) -> dict[str, Any]:
     """增量解析 SSE 响应为统一的图片项列表与完成元信息。

@@ -502,6 +502,22 @@ def test_field_env_map_covers_all_optional_config_fields() -> None:
     assert set(config_module._FIELD_ENV_MAP) == optional_field_names
 
 
+def test_build_config_missing_picker_registration_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env metadata 字段漏登记 _FIELD_PICKERS 取值表时，构建期以 KeyError 暴露。
+
+    取值表驱动构建依赖该 fail-loud 语义，防止新增字段被静默跳过而取默认值。
+    """
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.delitem(config_module._FIELD_PICKERS, "timeout")
+
+    with pytest.raises(KeyError):
+        build_config_from_sources(env_file=str(env_file))
+
+
 # ==================== __post_init__ 字段边界校验 ====================
 
 
@@ -752,6 +768,20 @@ def test_seedream_config_chunk_size_error_mentions_both_env_vars() -> None:
         match="环境变量 SEEDREAM_STREAM_CHUNK_SIZE/SEEDREAM_STREAM_BUFFER_MAX_SIZE",
     ):
         SeedreamConfig(api_key="k", stream_chunk_size=2048, stream_buffer_max_size=1024)
+
+
+def test_build_config_unparsable_int_error_mentions_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整数字段值解析失败的消息附带环境变量名，用户可直接定位写坏的变量。"""
+    monkeypatch.delenv("SEEDREAM_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_TIMEOUT=abc\n")
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 SEEDREAM_TIMEOUT") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "无法解析整数值" in excinfo.value.message
 
 
 # ==================== response_body_limit 响应体读取上限 ====================

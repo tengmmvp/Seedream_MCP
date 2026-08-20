@@ -34,27 +34,12 @@ from seedream_mcp.utils.core.errors import (
 )
 from seedream_mcp.utils.io import io_path as io_path_module
 
+from _generation_fixtures import make_generation_context
+
 
 def _context() -> GenerationExecutionContext:
     """构造本文件共用的最小生成执行上下文，关闭自动保存。"""
-    return GenerationExecutionContext(
-        prompt="test",
-        optimize_prompt_options=None,
-        size="2K",
-        watermark=False,
-        response_format="url",
-        output_format=None,
-        stream=False,
-        tools=None,
-        layer_decomposition=False,
-        background=None,
-        max_images=None,
-        request_count=1,
-        parallelism=1,
-        enable_auto_save=False,
-        save_path=None,
-        custom_name=None,
-    )
+    return make_generation_context(enable_auto_save=False)
 
 
 # ==================== 聚合状态摊平 ====================

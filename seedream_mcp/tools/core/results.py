@@ -387,13 +387,12 @@ _REQUEST_FAILED_TYPE = "image_generation.request_failed"
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """净化图片项内上游可回显自由内容的字段，返回净化后的列表。
 
-    覆盖 error 与 size/output_format/model/type、url/local_path/markdown_ref、序号字段
-    的非 int 形态及未知键。短标识与自由文本走 sanitize_error_text 截断语义；url 与
-    local_path/markdown_ref 及未知键走 sanitize_data_text 保留完整可用性。各字段非
-    字符串形态经 _sanitize_value_tree 逐层净化；error 的非字符串形态先归一化为文本
-    再净化；int 序号保持原值。仅净化后内容变化的项做浅拷贝，其余项保持原对象引用，
-    传入列表不被修改。净化非幂等，重复净化会使超长片段的截断标记叠加，调用方须
-    保证同一列表仅净化一次。SSE 失败事件已在 io_sse 源头净化，此处覆盖非 SSE 路径。
+    error 与 size/output_format/model/type 等短标识走 sanitize_error_text 截断语义；
+    url、local_path/markdown_ref 与未知键走 sanitize_data_text 保留完整可用性；非
+    字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。仅净化后内容变化
+    的项做浅拷贝，其余项保持原对象引用，传入列表不被修改。净化非幂等，重复净化会使
+    超长片段的截断标记叠加，调用方须保证同一列表仅净化一次。SSE 失败事件已在
+    io_sse 源头净化，此处覆盖非 SSE 路径。
     """
     sanitized_images = images
     for index, image in enumerate(images):

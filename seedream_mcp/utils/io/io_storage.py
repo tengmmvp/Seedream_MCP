@@ -155,8 +155,8 @@ class FileManager:
     def _resolved_within_base(self, resolved_path: Path) -> bool:
         """判断已 resolve 的路径是否位于基础目录内，直接比较，不再 resolve。
 
-        复用 io_path.is_within_resolved 的单一实现，避免两处包含判定逻辑分叉漂移。
-        供 run_cleanup_policies 等热路径复用，避免对已 resolve 路径重复解析。
+        委托 io_path.is_within_resolved 保持包含判定的单一实现，供
+        run_cleanup_policies 等热路径复用，避免对已 resolve 路径重复解析。
         """
         return is_within_resolved(resolved_path, self.base_dir)
 
@@ -253,7 +253,6 @@ class FileManager:
 
         unique_suffix = uuid.uuid4().hex[:8]
 
-        # 拼接文件名：优先嵌入内容哈希，否则用随机后缀确保不冲突。
         if content_hash:
             hash_part = content_hash[:8]
             filename = f"{clean_base}_{time_str}_{hash_part}{extension}"
@@ -416,7 +415,6 @@ class FileManager:
         try:
             if ensure_parent:
                 self.ensure_directory(file_path.parent)
-            # 不允许覆盖时，若文件已存在则追加内容短哈希生成不冲突的新文件名。
             final_path = file_path
             if final_path.exists() and not overwrite:
                 base = final_path.stem

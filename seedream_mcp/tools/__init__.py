@@ -43,7 +43,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "TextToImageInput": (".core.schemas", "TextToImageInput"),
 }
 
-# 公开接口声明，派生自 _LAZY_EXPORTS 的键。
 __all__ = list(_LAZY_EXPORTS)
 
 

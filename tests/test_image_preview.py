@@ -35,6 +35,18 @@ def _write_png(path: Path, size: tuple[int, int], mode: str = "RGB") -> Path:
     return path
 
 
+def _write_jpeg(path: Path, size: tuple[int, int], orientation: int | None = None) -> Path:
+    """按给定尺寸写一张纯色 JPEG，orientation 非 None 时写入 EXIF 方向标签。"""
+    image = Image.new("RGB", size, (30, 120, 200))
+    if orientation is not None:
+        exif = Image.Exif()
+        exif[274] = orientation
+        image.save(path, format="JPEG", exif=exif)
+    else:
+        image.save(path, format="JPEG")
+    return path
+
+
 def test_build_thumbnail_bytes_downsamples_large_image(tmp_path: Path) -> None:
     """大于上限的图片按长边收敛到 768 且保持纵横比。"""
     source = _write_png(tmp_path / "large.png", (1600, 1000))
@@ -77,6 +89,44 @@ def test_build_thumbnail_bytes_returns_none_for_invalid_input(tmp_path: Path) ->
 
     assert build_thumbnail_bytes(corrupt) is None
     assert build_thumbnail_bytes(tmp_path / "missing.png") is None
+
+
+def test_build_thumbnail_bytes_applies_exif_orientation_after_draft(tmp_path: Path) -> None:
+    """JPEG 大图的方向标签在 draft 缩尺解码后仍被读取并正确转置。
+
+    4096x3072 以方向 6 保存，draft 先把解码分辨率降为二分之一，转置交换宽高后
+    按长边收敛到 768，锁定 draft 与 EXIF 方向判定的执行顺序互不干扰。
+    """
+    source = _write_jpeg(tmp_path / "oriented.jpg", (4096, 3072), orientation=6)
+
+    thumbnail = build_thumbnail_bytes(source)
+
+    assert thumbnail is not None
+    with Image.open(BytesIO(thumbnail)) as decoded:
+        assert decoded.size == (576, 768)
+
+
+def test_build_thumbnail_bytes_jpeg_without_exif(tmp_path: Path) -> None:
+    """无 EXIF 的 JPEG 跳过整图转置拷贝，缩尺解码后仍正常生成缩略图。"""
+    source = _write_jpeg(tmp_path / "plain.jpg", (4096, 3072))
+
+    thumbnail = build_thumbnail_bytes(source)
+
+    assert thumbnail is not None
+    with Image.open(BytesIO(thumbnail)) as decoded:
+        assert decoded.format == "JPEG"
+        assert decoded.size == (768, 576)
+
+
+def test_build_thumbnail_bytes_png_without_exif_unchanged(tmp_path: Path) -> None:
+    """PNG 不进入 JPEG draft 分支，无 EXIF 时按原尺寸编码。"""
+    source = _write_png(tmp_path / "plain.png", (120, 90))
+
+    thumbnail = build_thumbnail_bytes(source)
+
+    assert thumbnail is not None
+    with Image.open(BytesIO(thumbnail)) as decoded:
+        assert decoded.size == (120, 90)
 
 
 async def test_build_preview_contents_preserves_order_and_skips_failures(

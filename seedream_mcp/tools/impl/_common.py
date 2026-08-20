@@ -1,10 +1,8 @@
 """生成类工具 impl 共享的工具元数据常量与开始日志参数构造。
 
-四个生成 handler 传给 ``execute_generation_handler`` 的工具名、完成标题、失败前缀、
-开始日志模板与参数构造回调高度同构，收敛为不可变的 ``ToolMetadata`` 常量；数据类
-定义于 core 门面，依赖方向保持 core <- impl。开始日志参数构造回调：文生图、图文
-生图、多图融合共享 ``_default_start_log_values``；组图输出须包含运行时 max_images，
-由 ``_sequential_start_log_values`` 从执行上下文读取。
+四个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，收敛为
+不可变的 ``ToolMetadata`` 常量；数据类定义于 core 门面，依赖方向保持 core <-
+impl。组图输出的开始日志须携带运行时 max_images，经独立回调从执行上下文读取。
 """
 
 from __future__ import annotations

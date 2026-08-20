@@ -25,56 +25,7 @@ from seedream_mcp.utils.core.errors import (
 )
 from seedream_mcp.utils.images import image_validation as image_validation_module
 
-
-class _LazyOptWrapper:
-    """opt(lazy=True) 返回的包装：求值 lazy callable 实参后委托回 FakeLogger。
-
-    loguru 的 lazy=True 把 lambda 作为实参传入，须在记录时求值后再格式化；若 opt 直接
-    返回自身，lambda 对象本身进入格式化字符串，掩盖 _summarize_prompt 等求值路径未运行。
-    """
-
-    def __init__(self, owner: "FakeLogger") -> None:
-        self._owner = owner
-
-    def info(self, message: str, *args: Any) -> None:
-        evaluated = tuple(arg() if callable(arg) else arg for arg in args)
-        self._owner.info(message, *evaluated)
-
-    def debug(self, message: str, *args: Any) -> None:
-        del message, args
-
-    def warning(self, message: str, *args: Any) -> None:
-        del message, args
-
-    def error(self, message: str, *args: Any, **kwargs: Any) -> None:
-        del message, args, kwargs
-
-
-class FakeLogger:
-    """记录 info 消息的日志替身，其余级别静默丢弃。
-
-    Attributes:
-        info_messages: 完成参数格式化后的 info 消息列表。
-    """
-
-    def __init__(self) -> None:
-        self.info_messages: list[str] = []
-
-    def opt(self, *args: Any, **kwargs: Any) -> _LazyOptWrapper:
-        del args, kwargs
-        return _LazyOptWrapper(self)
-
-    def info(self, message: str, *args: Any) -> None:
-        self.info_messages.append(message.format(*args) if args else message)
-
-    def debug(self, message: str, *args: Any) -> None:
-        del message, args
-
-    def warning(self, message: str, *args: Any) -> None:
-        del message, args
-
-    def error(self, message: str, *args: Any, **kwargs: Any) -> None:
-        del message, args, kwargs
+from _log_fakes import RecordingLogger
 
 
 def test_build_common_request_assembles_shared_params() -> None:
@@ -232,7 +183,7 @@ async def test_text_to_image_log_does_not_include_prompt_plaintext(
 ) -> None:
     """info 日志只输出 prompt_meta 摘要，提示词明文不进入日志。"""
     client = SeedreamClient(_build_config())
-    fake_logger = FakeLogger()
+    fake_logger = RecordingLogger()
     monkeypatch.setattr(client, "logger", fake_logger)
 
     async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:

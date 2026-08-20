@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from mcp.server.mcpserver import RequestStateSecurity
+from mcp.server.request_state import RequestStateBoundary
 
 import seedream_mcp.resources as resources_module
 from seedream_mcp import config as config_module
@@ -103,3 +104,38 @@ def test_static_list_cache_hints_cover_only_static_faces() -> None:
     }
     assert all(hint.ttl_ms == resources_module._STATIC_LIST_CACHE_TTL_MS for hint in hints.values())
     assert all(hint.scope == "private" for hint in hints.values())
+
+
+def _singleton_boundary() -> RequestStateBoundary:
+    """返回单例 middleware 中的 requestState boundary，供重绑用例定位。"""
+    return next(
+        mw
+        for mw in resources_module.mcp._lowlevel_server.middleware
+        if isinstance(mw, RequestStateBoundary)
+    )
+
+
+@pytest.mark.parametrize("keys", [None, (b"\x02" * 32,)])
+def test_rebind_request_state_security_updates_boundary(
+    keys: tuple[bytes, ...] | None,
+) -> None:
+    """重绑以传入密钥环替换 boundary 的 security，None 形态重绑回 SDK 默认。"""
+    boundary = _singleton_boundary()
+    before = boundary._security
+
+    assert resources_module.rebind_request_state_security(keys) is True
+
+    after = boundary._security
+    assert after is not before
+    if keys:
+        assert isinstance(after, RequestStateSecurity)
+    boundary._security = before
+
+
+def test_rebind_request_state_security_skips_when_boundary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK 私有路径中找不到 boundary 时告警跳过，返回 False 且不抛异常。"""
+    monkeypatch.setattr(resources_module.mcp._lowlevel_server, "middleware", [], raising=False)
+
+    assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False

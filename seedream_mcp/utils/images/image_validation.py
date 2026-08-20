@@ -23,6 +23,7 @@ from ..core.formats import (
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
     format_file_size_mb,
+    format_file_too_large,
     parse_data_uri,
 )
 from ..core.validators import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
@@ -281,8 +282,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         file_size = stat_result.st_size
         if file_size > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"文件过大: {format_file_size_mb(file_size)}，"
-                f"最大支持{format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+                format_file_too_large(file_size, MAX_IMAGE_FILE_SIZE),
                 field="image",
                 value=file_path,
             )
@@ -298,8 +298,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
                     image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
                 if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
                     raise SeedreamValidationError(
-                        f"文件过大: {format_file_size_mb(len(image_bytes))}，"
-                        f"最大支持{format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+                        format_file_too_large(len(image_bytes), MAX_IMAGE_FILE_SIZE),
                         field="image",
                         value=file_path,
                     )
@@ -357,7 +356,7 @@ def _validate_data_uri(data_uri: str) -> str:
                 value=data_uri,
             )
 
-        # 格式标识取 media_type 斜杠后部分；白名单派生自 SUPPORTED_IMAGE_EXTENSIONS。
+        # 格式标识取 media_type 斜杠后部分。
         fmt = media_type.lower().split("image/")[-1]
         if fmt not in _DATA_URI_ALLOWED_FORMATS:
             raise SeedreamValidationError(

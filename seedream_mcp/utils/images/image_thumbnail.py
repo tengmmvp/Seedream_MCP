@@ -93,8 +93,17 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
 
     try:
         with Image.open(image_path) as image:
-            # EXIF 方向在 flatten 前归一，透明合成与缩放基于物理方向。
-            oriented = ImageOps.exif_transpose(image)
+            # JPEG 先请求 draft 缩尺解码：解码器按请求尺寸缩减采样，只解码必要分辨率
+            # 的像素，解码量下降约 4 至 16 倍；请求尺寸取上限的两倍，为后续缩放保留
+            # 质量余量。draft 须在像素数据加载前调用才生效，对非 JPEG 格式为无害空
+            # 操作，格式判定仅为显式表达意图。
+            if image.format == "JPEG":
+                image.draft("RGB", (THUMBNAIL_MAX_EDGE * 2, THUMBNAIL_MAX_EDGE * 2))
+            # EXIF 方向在 flatten 前归一，透明合成与缩放基于物理方向。仅携带非默认
+            # 方向标签的图片才做转置，其余图片省去 exif_transpose 的全分辨率拷贝。
+            # draft 只缩减解码分辨率，不改写 EXIF 元数据，方向判定在其后仍然可靠。
+            # 274 为 EXIF Orientation 标签编号。
+            oriented = ImageOps.exif_transpose(image) if image.getexif().get(274, 1) != 1 else image
             flattened = _flatten_to_rgb(oriented)
             flattened.thumbnail(
                 (THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE),

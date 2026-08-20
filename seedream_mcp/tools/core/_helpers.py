@@ -62,7 +62,7 @@ def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
 
 
 def _is_generation_failed(result: dict[str, Any]) -> bool:
-    """判定生成结果是否视为失败，纳入 HTTP 层 success 与显式 status==failed。"""
+    """判定生成结果是否失败，综合 HTTP 层 success 与显式 status==failed 两信号。"""
     return not bool(result.get("success")) or result.get("status") == "failed"
 
 

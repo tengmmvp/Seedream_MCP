@@ -251,6 +251,10 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
 
     仅支持 jpeg/png；output_format 由 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）
     支持，4.5/4.0 不支持，未知模型放行由能力表统一判定。输入为 None 时返回 None。
+
+    Raises:
+        SeedreamValidationError: output_format 非字符串、为空、取值不在 jpeg/png
+            白名单，或模型能力声明不支持 output_format 时抛出。
     """
     if output_format is None:
         return None
@@ -293,6 +297,10 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
     每项为仅含 type 字段的对象，type 仅支持 web_search；联网搜索由
     doubao-seedream-5.0 / 5.0-lite 系列支持，5.0 Pro/4.5/4.0 不支持，未知模型
     放行由能力表统一判定。输入为 None 时返回 None。
+
+    Raises:
+        SeedreamValidationError: tools 非数组、模型不支持联网工具、数组项非对象、
+            项含 type 外字段，或项的 type 非字符串、为空、取值不在白名单时抛出。
     """
     if tools is None:
         return None
@@ -364,8 +372,10 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
 def validate_stream(stream: bool, model_id: str) -> bool:
     """验证流式输出参数与模型兼容性，原样返回 stream。
 
-    stream 为真且模型不支持流式输出时抛出 SeedreamValidationError；5.0 Pro 不支持，
-    5.0 系列（5.0/5.0-lite 同一模型）/4.5/4.0 支持。
+    5.0 Pro 不支持流式输出，5.0 系列（5.0/5.0-lite 同一模型）/4.5/4.0 支持。
+
+    Raises:
+        SeedreamValidationError: stream 非布尔，或为真而模型不支持流式输出时抛出。
     """
     if not isinstance(stream, bool):
         raise SeedreamValidationError("stream 必须为布尔值", field="stream", value=stream)
@@ -465,6 +475,11 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     Returns:
         标准化尺寸值：档位为大写，auto 为小写，像素规格归一为小写 x 分隔且
         剥离前导零。
+
+    Raises:
+        SeedreamValidationError: 尺寸形态非法、档位不在模型白名单、auto 而模型
+            不支持图层拆分，或像素宽高非正、宽高比越界、总像素越界、宽高不是
+            声明倍数时抛出。
     """
     token = _resolve_size_token(size, layer_decomposition=layer_decomposition, model_id=model_id)
     caps = get_model_capabilities(model_id)
@@ -545,7 +560,11 @@ def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> boo
 
     图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，仅
     5.0 Pro 支持；单张参考图输入的前提由 image_to_image 工具的输入形态保证。
-    None 视为未启用返回 False，开关非法或模型不支持时抛出 SeedreamValidationError。
+    None 视为未启用返回 False。
+
+    Raises:
+        SeedreamValidationError: layer_decomposition 非布尔，或为真而模型不支持
+            图层拆分时抛出。
     """
     if layer_decomposition is None:
         return False
@@ -573,6 +592,11 @@ def validate_background(
     background 控制是否生成带透明通道的图片，仅 5.0 Pro 图生图支持，输入图的
     格式约束由上游校验，此处做值域、模型门控与 output_format 互斥校验；透明
     背景输出为带 alpha 的 png，与 jpeg 互斥同时指定时报错。
+
+    Raises:
+        SeedreamValidationError: background 非字符串或取值不在 transparent/opaque
+            白名单、模型不支持透明通道、output_format 非字符串，或 transparent
+            与 output_format=jpeg 同时指定时抛出。
     """
     if background is None:
         return None
@@ -609,7 +633,12 @@ def validate_background(
 
 
 def validate_optimize_prompt_options(options: Any, model_id: str) -> dict[str, Any] | None:
-    """验证提示词优化选项并检查模型兼容性，可配置字段仅 mode，取值 standard/fast。"""
+    """验证提示词优化选项并检查模型兼容性，可配置字段仅 mode，取值 standard/fast。
+
+    Raises:
+        SeedreamValidationError: options 非对象、含 mode 外字段、mode 非字符串或
+            不在 standard/fast 白名单，或模型仅支持 standard 而传入 fast 时抛出。
+    """
     if options is None:
         return None
 
@@ -667,6 +696,11 @@ def validate_parallel_generation_options(
     未指定 parallelism 时取 min(request_count, max_request_count)；parallelism
     不得超过 request_count；stream 为真时 request_count 必须为 1。
     max_request_count 为两者公共上界。
+
+    Raises:
+        SeedreamValidationError: request_count 或 parallelism 非整数、越出公共上界
+            区间、parallelism 大于 request_count，或 stream 为真而 request_count
+            大于 1 时抛出。
     """
     validated_request_count = _coerce_positive_int_in_range(
         request_count, "request_count", 1, max_request_count
@@ -724,6 +758,10 @@ def validate_sequential_image_limit(
     参考图数量不超过模型能力上限（5.0 Pro 为 10，其余家族为 14），且与生成数量
     之和不超过 15。model_id 缺省时按通用上限粗校验，供无模型上下文的 schema 层
     使用；精确校验由 client 层传入实际 model_id 完成。
+
+    Raises:
+        SeedreamValidationError: 参考图数量超过模型能力上限，或与生成数量之和
+            超过 15 时抛出。
     """
     max_reference = get_max_reference_images(model_id)
     reference_count = len(reference_images) if reference_images else 0
@@ -800,8 +838,11 @@ def validate_common_generation_params(
 
     供 client 生成方法入口做公共库 API 自校验：新增公共参数校验规则只需在此扩展，
     调用方自动受益；工具层的值域校验由 schemas.py 的 Field 约束承担，与本函数构成
-    defense-in-depth。图层拆分场景下 prompt 允许缺省、size 额外接受 auto，非图层
-    场景缺省 prompt 抛出 SeedreamValidationError。
+    defense-in-depth。图层拆分场景下 prompt 允许缺省、size 额外接受 auto。
+
+    Raises:
+        SeedreamValidationError: 非图层拆分场景缺省 prompt，或任一公共参数在其
+            对应单项校验中非法时抛出。
     """
     if prompt is None and not layer_decomposition:
         raise SeedreamValidationError("prompt 不能为空", field="prompt", value=None)

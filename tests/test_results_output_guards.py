@@ -11,7 +11,6 @@ from typing import Any
 
 from seedream_mcp.tools.core import results as results_module
 from seedream_mcp.tools.core._helpers import _extract_parallel_request_error
-from seedream_mcp.tools.core.context import GenerationExecutionContext
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
     _sanitize_image_errors,
@@ -21,33 +20,13 @@ from seedream_mcp.tools.core.results import (
 )
 from seedream_mcp.utils.io.io_save import AutoSaveResult
 
+from _generation_fixtures import make_generation_context
+
 # 带 userinfo 凭据与 CRLF 的上游 URL：净化后凭据被剥离、换行被压平。
 _DIRTY_URL = "https://AKID:SECRET@mirror.example.com/a.png\r\nFAKE-LINE api_key=leaked"
 
 # 火山 TOS 签名 URL 约 674 字符：数据字段净化不得截断，否则 URL 不可用。
 _SIGNED_URL = "https://tos.example.com/obj/a.png?X-Tos-Signature=" + "s" * 620
-
-
-def _context(enable_auto_save: bool = True) -> GenerationExecutionContext:
-    """构造默认开启自动保存的生成执行上下文。"""
-    return GenerationExecutionContext(
-        prompt="test",
-        optimize_prompt_options=None,
-        size="2K",
-        watermark=False,
-        response_format="url",
-        output_format=None,
-        stream=False,
-        tools=None,
-        layer_decomposition=False,
-        background=None,
-        max_images=None,
-        request_count=1,
-        parallelism=1,
-        enable_auto_save=enable_auto_save,
-        save_path=None,
-        custom_name=None,
-    )
 
 
 def _mixed_result() -> dict[str, Any]:
@@ -170,7 +149,7 @@ def test_structured_data_url_field_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -201,7 +180,7 @@ def test_structured_data_non_dict_error_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -253,7 +232,7 @@ def test_long_url_with_credentials_still_stripped_without_truncation() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result={"success": True, "status": "completed", "data": [{"url": long_url}]},
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -313,7 +292,7 @@ def test_structured_data_free_fields_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=_dirty_free_field_result(),
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -525,7 +504,7 @@ def test_truncated_events_surfaced_in_both_channels() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -550,7 +529,7 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result={**base, "truncated_events": 0},
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -577,7 +556,7 @@ def test_pipeline_single_sanitization_shared_by_both_outlets() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
         images=sanitized_images,
@@ -599,7 +578,7 @@ def test_independent_structured_call_sanitizes_internally() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result={"success": True, "status": "completed", "data": images},
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -642,7 +621,7 @@ def test_aggregated_failure_message_not_resanitized_in_both_outlets() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -672,7 +651,7 @@ def test_structured_usage_string_values_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -720,7 +699,7 @@ def test_structured_usage_deeply_nested_sanitized_without_recursion_error() -> N
             "data": [{"url": "https://example.com/a.png"}],
             "usage": nested,
         },
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -747,7 +726,7 @@ def test_structured_usage_cyclic_reference_terminated_with_placeholder() -> None
             "data": [{"url": "https://example.com/a.png"}],
             "usage": cyclic,
         },
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -778,7 +757,7 @@ def test_forged_local_path_and_markdown_ref_sanitized_in_both_channels() -> None
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -808,7 +787,7 @@ def test_structured_data_unknown_string_keys_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -852,7 +831,7 @@ def test_failure_path_structured_outlet_sanitizes_images() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -875,7 +854,7 @@ def test_success_path_pipeline_sanitizes_each_outlet_content_once() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
         images=sanitized_images,
@@ -916,7 +895,7 @@ def test_structured_failure_error_code_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -982,7 +961,7 @@ def test_structured_failure_dict_message_normalized_and_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1004,7 +983,7 @@ def test_structured_failure_list_message_normalized_and_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1026,7 +1005,7 @@ def test_structured_failure_non_dict_error_normalized_and_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1097,7 +1076,7 @@ def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> 
 
 def test_structured_status_sanitized_and_max_images_surfaced() -> None:
     """status 上游原文经净化进入 structuredContent，max_images 生效值原样回显。"""
-    context = dataclasses.replace(_context(), max_images=4)
+    context = dataclasses.replace(make_generation_context(), max_images=4)
     structured = _build_generation_structured_result(
         tool_name="sequential_generation",
         result={"success": True, "status": "ok\r\ninjected", "data": [], "usage": {}},
@@ -1140,7 +1119,7 @@ def test_forged_string_request_and_image_index_sanitized_in_both_channels() -> N
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1181,7 +1160,7 @@ def test_per_image_dict_error_message_normalized_and_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1212,7 +1191,7 @@ def test_per_image_list_error_code_normalized_and_sanitized() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1266,7 +1245,7 @@ def test_structured_failure_none_error_value_falls_back_to_unknown() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1330,7 +1309,7 @@ def test_non_str_url_size_local_path_sanitized_in_both_channels() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1379,7 +1358,7 @@ def test_forged_bool_index_form_routed_through_sanitization_path() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1412,7 +1391,7 @@ def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1432,14 +1411,14 @@ def test_malformed_status_shape_falls_back_to_none_in_structured_output() -> Non
     structured_int = _build_generation_structured_result(
         tool_name="text_to_image",
         result={"success": True, "status": 200, "data": []},
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
     structured_str = _build_generation_structured_result(
         tool_name="text_to_image",
         result={"success": True, "status": "ok\r\ninjected", "data": []},
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )
@@ -1462,7 +1441,7 @@ def test_falsy_malformed_usage_batch_shapes_converge_quietly() -> None:
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result=result,
-        context=_context(),
+        context=make_generation_context(),
         auto_save_results=[],
         auto_save_error=None,
     )

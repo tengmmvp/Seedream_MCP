@@ -31,7 +31,6 @@ import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
 
 from ...version import __version__
-from ..core import logs as core_logs
 from ..core.errors import SeedreamMCPError
 from ..core.formats import (
     DEFAULT_MAX_FILE_SIZE,
@@ -39,7 +38,7 @@ from ..core.formats import (
     infer_extension_from_bytes,
     is_known_image_bytes,
 )
-from ..core.logs import arm_unretrieved_exception_logging, get_logger
+from ..core.logs import InflightEntry, get_logger
 from .io_file import atomic_replace_from_fd
 from .io_url import sanitize_url
 
@@ -226,22 +225,6 @@ class DownloadError(SeedreamMCPError):
     pass
 
 
-class _DnsInflight:
-    """DNS 在途解析条目：共享 task 与消费者计数，驱动兜底日志的登记判定。
-
-    与 images.image_prepare 的 _PrepareInflight 同构：消费者 await 期间登记计数、
-    finally 释放，收到结果或异常时置位 observed；全部消费者放弃且结果未被消费时
-    才登记孤儿失败兜底日志。
-    """
-
-    __slots__ = ("task", "consumers", "observed")
-
-    def __init__(self, task: "asyncio.Task[tuple[str, ...]]") -> None:
-        self.task = task
-        self.consumers = 0
-        self.observed = False
-
-
 class RetryableDownloadError(DownloadError):
     """可重试的下载错误，如 HTTP 5xx、DNS 瞬时解析失败等瞬时故障。
 
@@ -331,7 +314,7 @@ class DownloadManager:
         self._dns_cache_ttl = max(1, dns_cache_ttl)
         # DNS 缓存条目的 expires_at 以 time.monotonic 为基准，写入与过期比较须同基准。
         self._dns_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
-        self._dns_inflight: dict[str, _DnsInflight] = {}
+        self._dns_inflight: dict[str, InflightEntry[tuple[str, ...]]] = {}
         self._dns_cache_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
@@ -445,9 +428,8 @@ class DownloadManager:
         """解析域名并校验所有解析结果为公网 IP，属 SSRF 第二层防护。
 
         防 DNS rebinding：攻击者可在静态校验后把 DNS 切换到内网地址。结果带 TTL
-        缓存；同 host 并发下载在缓存冷启动时经在途 task 去重共享一次 getaddrinfo，
-        在途 task 经 shield 隔离取消传播，创建者被取消时底层 task 继续运行并写入
-        缓存，保护其他等待者。
+        缓存；同 host 并发下载经 InflightEntry 在途去重共享一次解析，取消传播隔离
+        与孤儿异常兜底由其统一承担。
 
         Args:
             host: 待解析并校验的主机名。
@@ -470,36 +452,10 @@ class DownloadManager:
             entry = self._dns_inflight.get(host)
             if entry is None:
                 # 缓存与在途登记在同一锁区间内完成且中间无 await，不会交错创建重复 task。
-                entry = _DnsInflight(asyncio.ensure_future(self._resolve_and_cache(host)))
+                entry = InflightEntry(asyncio.ensure_future(self._resolve_and_cache(host)))
                 self._dns_inflight[host] = entry
-        # 锁外 shield 等待共享 task，被取消的等待者不连带取消底层解析。
-        entry.consumers += 1
-        try:
-            try:
-                return await asyncio.shield(entry.task)
-            except Exception:
-                # 异常送达本消费者，置位已消费标记，不再登记兜底日志。
-                entry.observed = True
-                raise
-        finally:
-            entry.consumers -= 1
-            self._arm_dns_if_abandoned(entry)
-
-    def _arm_dns_if_abandoned(self, entry: _DnsInflight) -> None:
-        """最后一个潜在消费者放弃且结果未被消费时，登记兜底日志回调。
-
-        回调触发时复查登记前提：登记后新消费者加入又放弃或消费的窗口内前提可能
-        已不成立，复查失败即静默跳过，避免同一异常重复入日志。
-        """
-
-        def _log_if_orphaned(task: "asyncio.Task[tuple[str, ...]]") -> None:
-            # 触发时经模块属性解析通用记录函数，保持调用方可替换该实现做测试观测。
-            if entry.consumers == 0 and not entry.observed:
-                core_logs.log_unretrieved_task_exception(task)
-
-        if entry.consumers > 0 or entry.observed:
-            return
-        arm_unretrieved_exception_logging(entry.task, _log_if_orphaned)
+        # 锁外以消费者身份等待共享 task，取消与孤儿异常兜底由 InflightEntry 统一处理。
+        return await entry.consume()
 
     async def _resolve_and_cache(self, host: str) -> tuple[str, ...]:
         """执行单次解析与公网校验并写入缓存，供 _resolve_public_ips 在途去重。
@@ -764,7 +720,6 @@ class DownloadManager:
             # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘。
             if not is_known_image_bytes(head_bytes):
                 raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
-            # 与 URL 派生扩展名不一致且不属同一格式等价类时修正最终路径。
             sniffed = infer_extension_from_bytes(head_bytes)
             if sniffed != save_path.suffix.lower() and not _extensions_in_same_format(
                 sniffed, save_path.suffix
@@ -856,7 +811,6 @@ class DownloadManager:
                         raise RetryableDownloadError(f"HTTP错误: {response.status}")
                     raise DownloadError(f"HTTP错误: {response.status}")
 
-                # 检查内容类型：HTML 错误页、JSON 等明确非图片类型直接拒绝。
                 content_type = response.headers.get("content-type", "")
                 if not _is_image_compatible_content_type(content_type):
                     raise DownloadError(f"响应内容类型非图片: {content_type.split(';')[0].strip()}")

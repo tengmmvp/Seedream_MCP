@@ -9,12 +9,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate
-from ..core import logs as core_logs
-from ..core.logs import arm_unretrieved_exception_logging, get_logger
+from ..core.logs import InflightEntry, get_logger
 from ..io.io_path import resolve_workspace_roots
 
 logger = get_logger()
@@ -59,24 +58,8 @@ class _PrepareSemaphoreSlot:
 
     def _release_when_task_done(self, task: "asyncio.Task[str]") -> None:
         """task 完成回调，释放经转移的槽位，恰好执行一次由转移语义保证。"""
-        del task
+        del task  # 回调签名要求接收 task，释放逻辑不使用。
         self._semaphore.release()
-
-
-class _PrepareInflight:
-    """single-flight 在途条目：共享 task 与活动消费者计数。
-
-    消费者 await 期间登记计数、finally 释放；任一消费者经 shield 收到结果或异常时
-    置位 observed。兜底日志仅在计数归零且结果未被消费时登记，避免同一异常重复
-    入日志。
-    """
-
-    __slots__ = ("task", "consumers", "observed")
-
-    def __init__(self, task: "asyncio.Task[str]") -> None:
-        self.task = task
-        self.consumers = 0
-        self.observed = False
 
 
 class ImagePreparer:
@@ -105,7 +88,7 @@ class ImagePreparer:
         self._prepare_cache_max = prepare_cache_max
         self._prepare_cache_max_bytes = prepare_cache_max_bytes
         self._prepare_cache_bytes = 0
-        self._prepare_inflight: dict[PrepareCacheKey, _PrepareInflight] = {}
+        self._prepare_inflight: dict[PrepareCacheKey, InflightEntry[str]] = {}
         self._prepare_concurrency = prepare_concurrency
         # asyncio.Semaphore 首次使用时绑定事件循环，跨循环复用会报错，持循环身份
         # 守卫按需重建。
@@ -191,7 +174,7 @@ class ImagePreparer:
         # 在途检查在获取信号量前完成，等待者不占并发槽位。
         inflight = self._prepare_inflight.get(cache_key)
         if inflight is not None:
-            return await self._await_inflight(inflight)
+            return await inflight.consume()
 
         semaphore = self._get_prepare_semaphore()
         await semaphore.acquire()
@@ -232,51 +215,6 @@ class ImagePreparer:
         cache_key: PrepareCacheKey = (key_image, _roots_key, signature)
         return cache_key, image
 
-    async def _await_inflight(
-        self, entry: _PrepareInflight, on_cancel: Callable[[], None] | None = None
-    ) -> str:
-        """以消费者身份在并发槽位外等待在途 task。
-
-        shield 隔离取消传播：本调用被取消时仅取消自身 await，底层共享 task 继续
-        运行；on_cancel 在取消异常向外传播前执行，供创建者转移槽位释放责任。消费
-        者计数在 await 期间登记，结果或异常送达时置位 observed；放弃等待且计数归零
-        时经 _arm_if_abandoned 登记兜底日志回调。
-        """
-        entry.consumers += 1
-        try:
-            try:
-                result = await asyncio.shield(entry.task)
-            except asyncio.CancelledError:
-                if on_cancel is not None:
-                    on_cancel()
-                raise
-            except Exception:
-                # 异常经 shield 送达本消费者，置位已消费标记，不再登记兜底日志。
-                entry.observed = True
-                raise
-            entry.observed = True
-            return result
-        finally:
-            entry.consumers -= 1
-            self._arm_if_abandoned(entry)
-
-    def _arm_if_abandoned(self, entry: _PrepareInflight) -> None:
-        """最后一个潜在消费者放弃且结果未被消费时，登记兜底日志回调。
-
-        计数归零后 task 若失败将无人检索异常，经 logs 的登记入口挂兜底回调；回调
-        触发时复查计数与已消费标记，登记后前提可能已不成立，复查失败即静默跳过，
-        避免同一异常重复入日志。
-        """
-
-        def _log_if_orphaned(task: "asyncio.Task[str]") -> None:
-            # 触发时经模块属性解析通用记录函数，保持调用方可替换该实现做测试观测。
-            if entry.consumers == 0 and not entry.observed:
-                core_logs.log_unretrieved_task_exception(task)
-
-        if entry.consumers > 0 or entry.observed:
-            return
-        arm_unretrieved_exception_logging(entry.task, _log_if_orphaned)
-
     async def _prepare_image_input_locked(
         self, image: str, cache_key: PrepareCacheKey, slot: _PrepareSemaphoreSlot
     ) -> str:
@@ -298,11 +236,11 @@ class ImagePreparer:
         if inflight is not None:
             # 等待信号量期间他人已登记同键，归还槽位转为纯等待者。
             slot.release()
-            return await self._await_inflight(inflight)
+            return await inflight.consume()
 
         task = asyncio.ensure_future(self._prepare_and_cache(image, cache_key))
         # 共享 task 供后到等待者复用，注册表在 task 完成时的 finally 清理。
-        entry = _PrepareInflight(task)
+        entry = InflightEntry(task)
         self._prepare_inflight[cache_key] = entry
 
         def _transfer_slot() -> None:
@@ -310,7 +248,7 @@ class ImagePreparer:
             # 取消叠加突破并发上限。
             slot.transfer_to_task(task)
 
-        return await self._await_inflight(entry, on_cancel=_transfer_slot)
+        return await entry.consume(on_cancel=_transfer_slot)
 
     async def _prepare_and_cache(self, image: str, cache_key: PrepareCacheKey) -> str:
         """执行图像预处理并写入 LRU 缓存，供 single-flight 去重复用。

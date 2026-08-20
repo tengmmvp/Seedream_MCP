@@ -411,7 +411,8 @@ async def test_parse_sse_response_empty_stream_returns_none_status() -> None:
 async def test_parse_sse_response_propagates_tools_from_completed_event() -> None:
     """completed 事件携带的 tools 字段须透传到结果，与官方响应字段对齐。
 
-    响应侧 tools 当前无下游消费者，保留透传仅为字段完整性。"""
+    响应侧 tools 当前无下游消费者，保留透传仅为字段完整性。
+    """
     chunks = [
         b'data: {"type":"image_generation.completed",'
         b'"usage":{"generated_images":1},'

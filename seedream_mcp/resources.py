@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from mcp.server.caching import CacheHint, CacheableMethod
 from mcp.server.mcpserver import MCPServer, RequestStateSecurity
+from mcp.server.request_state import RequestStateBoundary
 
 from .config import (
     LIFESPAN_KEY_CLIENT,
@@ -287,5 +288,34 @@ def _create_mcp_server() -> MCPServer:
 # version 必须显式传入：SDK 2.0 起未传 version 的服务器在 initialize 结果的 serverInfo
 # 中报告空串而非 SDK 包版本。request_state_security 为 None 时 SDK 回退进程临时密钥；
 # 多副本 HTTP 部署经 SEEDREAM_REQUEST_STATE_KEYS 共享密钥环，重试落到其他实例仍可
-# 解封 requestState。
+# 解封 requestState。密钥环经默认环境源在导入期固化，--config-file 场景由启动路径的
+# rebind_request_state_security 以最终活动配置重绑。
 mcp = _create_mcp_server()
+
+
+def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
+    """以最终活动配置重绑单例的 requestState 密钥环，返回是否重绑成功。
+
+    单例密钥环在模块导入期经默认环境源构造，``--config-file`` 加载的密钥不会
+    到达它，故由启动路径在活动配置就绪后调用本函数；keys 为 None 时重绑回 SDK
+    进程临时密钥。经 SDK 私有属性定位 boundary，探测失败时告警并返回 False，
+    不阻断启动。
+
+    Args:
+        keys: 最终活动配置解析出的密钥环字节，None 表示未配置。
+    """
+    boundary = None
+    for middleware in mcp._lowlevel_server.middleware:
+        if isinstance(middleware, RequestStateBoundary):
+            boundary = middleware
+            break
+    if boundary is None or not hasattr(boundary, "_security"):
+        logger.error(
+            "SDK 私有路径中未找到 RequestStateBoundary，requestState 密钥环"
+            "重绑被跳过，单例保持导入期形态；多副本部署的密钥共享可能失效"
+        )
+        return False
+    boundary._security = (
+        RequestStateSecurity(keys=keys) if keys else RequestStateSecurity.ephemeral()
+    )
+    return True

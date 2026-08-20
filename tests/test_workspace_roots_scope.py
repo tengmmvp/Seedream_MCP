@@ -17,6 +17,8 @@ from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_scope
 
+from _log_fakes import RecordingLogger
+
 
 class _FakeSession:
     """以固定根目录应答 list_roots 的会话替身。"""
@@ -119,20 +121,6 @@ class _TimeoutContext:
 
     def __init__(self) -> None:
         self.session = _TimeoutSession()
-
-
-class _LevelCaptureLogger:
-    """替身 logger，分别收集 error 与 warning 消息，供断言日志级别。"""
-
-    def __init__(self) -> None:
-        self.errors: list[str] = []
-        self.warnings: list[str] = []
-
-    def error(self, message: str, *args: object) -> None:
-        self.errors.append(message.format(*args) if args else message)
-
-    def warning(self, message: str, *args: object) -> None:
-        self.warnings.append(message.format(*args) if args else message)
 
 
 async def test_workspace_roots_scope_prioritizes_mcp_roots_over_env(
@@ -363,7 +351,7 @@ async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
-    capture = _LevelCaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(io_path_module, "logger", capture)
 
     async with workspace_roots_scope(_NoBackChannelContext()):
@@ -381,7 +369,7 @@ async def test_workspace_roots_scope_errors_and_falls_back_on_generic_error(
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
-    capture = _LevelCaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(io_path_module, "logger", capture)
 
     async with workspace_roots_scope(_MalformedResponseContext()):
@@ -415,7 +403,7 @@ async def test_workspace_roots_scope_transient_error_falls_back_to_env_root_with
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
-    capture = _LevelCaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(io_path_module, "logger", capture)
 
     async with workspace_roots_scope(_TimeoutContext()):

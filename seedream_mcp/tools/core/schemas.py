@@ -2,7 +2,8 @@
 
 作为参数校验与 MCP inputSchema 的单一来源，MCPServer 依据本模块的 pydantic 模型生成
 各工具入参 schema。通用字段抽到 ``_*Input`` 基类，按需多重继承组合为各工具的最终
-输入模型。
+输入模型。字段描述与约束常量集中声明在模块头部，server.py 的平铺签名同处引用，
+构成双源镜像的单一来源。
 """
 
 from __future__ import annotations
@@ -23,9 +24,130 @@ from ...utils.core.validators import (
     validate_sequential_image_limit,
 )
 
-# prompt 字段长度约束，四个生成工具共享，集中声明避免散落多处。
+# ==================== 平铺签名共享常量 ====================
+# 以下约束与描述常量是双源镜像的单一来源，本模块的字段定义与 server.py 平铺签名
+# 同处引用，两侧等价性由 test_tool_parameter_order 锁定。
+
+# prompt 长度界限为四个生成工具共享的产品决策，上限仅拦截异常超长输入。
 PROMPT_MIN_LENGTH = 1
 PROMPT_MAX_LENGTH = 100000
+
+# tools 条目数上限为产品决策：合法调用至多一个条目，上限仅拦截异常超量输入。
+TOOLS_MAX_ITEMS = 8
+
+# 保存目录与浏览目录的长度上限为产品决策的防御性界限。
+SAVE_PATH_MAX_LENGTH = 1024
+DIRECTORY_MAX_LENGTH = 1024
+
+# 文件名前缀长度上限对齐文件系统单文件名 255 字节的常见上限。
+CUSTOM_NAME_MAX_LENGTH = 255
+
+# 多图融合参考图最少两张为上游 API 限制。
+MULTI_IMAGE_MIN_ITEMS = 2
+
+REQUEST_COUNT_MIN = 1
+PARALLELISM_MIN = 1
+MAX_IMAGES_MIN = 1
+
+# 浏览工具的深度、数量与偏移界限为产品决策，防止单次扫描或翻页过深。
+MAX_DEPTH_MIN = 1
+MAX_DEPTH_MAX = 10
+LIMIT_MIN = 1
+LIMIT_MAX = 200
+OFFSET_MIN = 0
+OFFSET_MAX = 100000
+
+# 后缀单项长度上限防止错误消息整体回显超大字符串。
+FORMAT_FILTER_ITEM_MAX_LENGTH = 16
+
+# 非空语义镜像的 pattern：输入模型经 str_strip_whitespace 剥离空白后校验，纯空白
+# 输入被拒；平铺签名无 strip 配置，以该 pattern 声明至少一个非空白字符的等价约束，
+# 带内边距的合法值不受影响，strip 仍由函数体内组装输入模型时完成。
+NON_BLANK_PATTERN = r"\S"
+
+# 四个生成工具的 prompt 描述。
+TEXT_TO_IMAGE_PROMPT_DESCRIPTION = (
+    "用于生成图片的提示词，建议不超过300个汉字或600个英文单词。"
+    "例如：一只戴墨镜的猫坐在月球上，写实风格。"
+)
+IMAGE_TO_IMAGE_PROMPT_DESCRIPTION = (
+    "图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；"
+    "图层拆分场景可缺省，由模型自动识别拆分意图。"
+    "例如：把背景换成雪山、将照片转为水彩画风格。"
+)
+MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION = (
+    "融合目标或风格描述，建议不超过300个汉字或600个英文单词。"
+    "请使用“图X”指定图像（如：将图1的服装换为图2的服装）。"
+)
+SEQUENTIAL_PROMPT_DESCRIPTION = (
+    "连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。"
+    "例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。"
+)
+
+# 生成工具共享字段的描述。
+OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION = "提示词优化配置，仅支持 standard 或 fast。"
+SINGLE_IMAGE_DESCRIPTION = (
+    "参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
+    "例如：https://example.com/ref.png 或 ./.seedream/images/portrait.jpg。"
+)
+MULTI_IMAGE_DESCRIPTION = (
+    f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张），"
+    f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+    '例如：["https://example.com/a.png", "./.seedream/images/b.jpg"]。'
+)
+SEQUENTIAL_IMAGE_DESCRIPTION = (
+    f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
+    "（5.0 Pro 不支持组图生成），每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+)
+LAYER_DECOMPOSITION_DESCRIPTION = (
+    "是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图"
+    "与最多 16 个带透明通道的 PNG 图层，可配合 prompt 指定拆分意图。"
+)
+BACKGROUND_DESCRIPTION = (
+    "图片透明通道，仅 5.0 Pro 图生图支持；transparent 生成透明背景图"
+    "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
+)
+SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。"
+SIZE_WITH_LAYER_DESCRIPTION = (
+    "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；"
+    "图层拆分场景仅支持档位与 auto，未提供时默认 auto；"
+    "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
+)
+WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
+MAX_IMAGES_DESCRIPTION = f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}。"
+RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_json 返回 base64 数据。"
+OUTPUT_FORMAT_DESCRIPTION = "输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。"
+STREAM_DESCRIPTION = "是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。"
+TOOLS_DESCRIPTION = (
+    "模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。"
+)
+REQUEST_COUNT_DESCRIPTION = "同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。"
+REQUEST_COUNT_SEQUENTIAL_DESCRIPTION = (
+    "同一提示并行发起的独立生成次数，每次各产出一组图片，组内图片数量由模型"
+    "按提示词决定，最多 max_images 张；适合一次获取多组独立的组图结果。"
+)
+PARALLELISM_DESCRIPTION = (
+    "并行度上限（1-10）；未提供时自动取 min(request_count, 10)，一般无需手动指定。"
+)
+AUTO_SAVE_DESCRIPTION = "是否自动保存到本地；未提供时遵循全局配置（默认开启）。"
+SAVE_PATH_DESCRIPTION = "自定义保存目录，未提供时使用自动保存配置的默认路径。"
+CUSTOM_NAME_DESCRIPTION = "自定义文件名前缀，未提供时根据提示词自动生成。"
+
+# 浏览工具字段的描述。
+DIRECTORY_DESCRIPTION = (
+    "要浏览的目录路径，默认浏览全部授权的工作区根目录，多根时合并扫描去重；"
+    "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
+    "均未设置时回退进程当前工作目录。"
+)
+RECURSIVE_DESCRIPTION = "是否递归查找子目录。"
+MAX_DEPTH_DESCRIPTION = "递归查找的最大深度（1-10）。"
+LIMIT_DESCRIPTION = "返回的最大文件数量（1-200）。"
+OFFSET_DESCRIPTION = "分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
+FORMAT_FILTER_DESCRIPTION = (
+    "需要过滤的图片后缀列表，如 ['.jpeg', '.png']；仅保留受支持的后缀。"
+    "空列表或全部后缀不受支持时视为无有效后缀：跳过扫描返回空结果并回显原始输入。"
+)
+SHOW_DETAILS_DESCRIPTION = "是否展示文件大小、修改时间等详细信息。"
 
 
 class ResponseFormat(str, Enum):
@@ -98,11 +220,11 @@ class _PromptAndOptimizeInput(BaseModel):
         ...,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
-        description="用于生成图片的提示词，建议不超过300个汉字或600个英文单词。例如：一只戴墨镜的猫坐在月球上，写实风格。",
+        description=TEXT_TO_IMAGE_PROMPT_DESCRIPTION,
     )
     optimize_prompt_options: OptimizePromptOptions | None = Field(
         default=None,
-        description="提示词优化配置，仅支持 standard 或 fast。",
+        description=OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
     )
 
 
@@ -111,8 +233,7 @@ class _SingleImageInput(BaseModel):
 
     image: str = Field(
         ...,
-        description="参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
-        "例如：https://example.com/ref.png 或 ./.seedream/images/portrait.jpg。",
+        description=SINGLE_IMAGE_DESCRIPTION,
     )
 
     @field_validator("image")
@@ -130,13 +251,9 @@ class _MultiImageInput(BaseModel):
 
     image: list[str] = Field(
         ...,
-        min_length=2,
+        min_length=MULTI_IMAGE_MIN_ITEMS,
         max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-        description=(
-            f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张），"
-            f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
-            '例如：["https://example.com/a.png", "./.seedream/images/b.jpg"]。'
-        ),
+        description=MULTI_IMAGE_DESCRIPTION,
     )
 
     @field_validator("image")
@@ -158,10 +275,7 @@ class _SequentialImageInput(BaseModel):
         str | Annotated[list[str], Field(max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES)] | None
     ) = Field(
         default=None,
-        description=(
-            f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
-            "（5.0 Pro 不支持组图生成），每张支持图像 URL、本地文件路径或 Base64 图片数据。"
-        ),
+        description=SEQUENTIAL_IMAGE_DESCRIPTION,
     )
 
 
@@ -171,17 +285,11 @@ class _LayerDecompositionInput(BaseModel):
 
     layer_decomposition: bool | None = Field(
         default=None,
-        description=(
-            "是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图"
-            "与最多 16 个带透明通道的 PNG 图层，可配合 prompt 指定拆分意图。"
-        ),
+        description=LAYER_DECOMPOSITION_DESCRIPTION,
     )
     background: BackgroundMode | None = Field(
         default=None,
-        description=(
-            "图片透明通道，仅 5.0 Pro 图生图支持；transparent 生成透明背景图"
-            "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
-        ),
+        description=BACKGROUND_DESCRIPTION,
     )
 
 
@@ -190,11 +298,11 @@ class _SizeAndWatermarkInput(BaseModel):
 
     size: str | None = Field(
         default=None,
-        description="生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。",
+        description=SIZE_DESCRIPTION,
     )
     watermark: bool | None = Field(
         default=None,
-        description="是否添加水印；未提供时沿用全局默认值（默认不添加）。",
+        description=WATERMARK_DESCRIPTION,
     )
 
 
@@ -203,9 +311,9 @@ class _SequentialMaxImagesInput(BaseModel):
 
     max_images: int = Field(
         default=MAX_SEQUENTIAL_TOTAL_IMAGES,
-        ge=1,
+        ge=MAX_IMAGES_MIN,
         le=MAX_SEQUENTIAL_TOTAL_IMAGES,
-        description=f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}。",
+        description=MAX_IMAGES_DESCRIPTION,
     )
 
 
@@ -214,46 +322,46 @@ class _ResponseAndExecutionInput(BaseModel):
 
     response_format: ResponseFormat = Field(
         default=ResponseFormat.URL,
-        description="响应格式，url 返回可下载链接，b64_json 返回 base64 数据。",
+        description=RESPONSE_FORMAT_DESCRIPTION,
     )
     output_format: OutputFormat | None = Field(
         default=None,
-        description="输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。",
+        description=OUTPUT_FORMAT_DESCRIPTION,
     )
     stream: bool = Field(
         default=False,
-        description="是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。",
+        description=STREAM_DESCRIPTION,
     )
     tools: list[GenerationTool] | None = Field(
         default=None,
-        max_length=8,
-        description="模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。",
+        max_length=TOOLS_MAX_ITEMS,
+        description=TOOLS_DESCRIPTION,
     )
     request_count: int = Field(
         default=1,
-        ge=1,
+        ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。",
+        description=REQUEST_COUNT_DESCRIPTION,
     )
     parallelism: int | None = Field(
         default=None,
-        ge=1,
+        ge=PARALLELISM_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description="并行度上限（1-10）；未提供时自动取 min(request_count, 10)，一般无需手动指定。",
+        description=PARALLELISM_DESCRIPTION,
     )
     auto_save: bool | None = Field(
         default=None,
-        description="是否自动保存到本地；未提供时遵循全局配置（默认开启）。",
+        description=AUTO_SAVE_DESCRIPTION,
     )
     save_path: str | None = Field(
         default=None,
-        max_length=1024,
-        description="自定义保存目录，未提供时使用自动保存配置的默认路径。",
+        max_length=SAVE_PATH_MAX_LENGTH,
+        description=SAVE_PATH_DESCRIPTION,
     )
     custom_name: str | None = Field(
         default=None,
-        max_length=255,
-        description="自定义文件名前缀，未提供时根据提示词自动生成。",
+        max_length=CUSTOM_NAME_MAX_LENGTH,
+        description=CUSTOM_NAME_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -327,7 +435,7 @@ class ImageToImageInput(
         default=None,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
-        description="图片修改或风格转换的指令，建议不超过300个汉字或600个英文单词；图层拆分场景可缺省，由模型自动识别拆分意图。例如：把背景换成雪山、将照片转为水彩画风格。",
+        description=IMAGE_TO_IMAGE_PROMPT_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -340,11 +448,7 @@ class ImageToImageInput(
     # 覆盖共享基类的 size 描述以表达图层拆分特例，覆盖声明不改变字段顺序。
     size: str | None = Field(
         default=None,
-        description=(
-            "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；"
-            "图层拆分场景仅支持档位与 auto，未提供时默认 auto；"
-            "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
-        ),
+        description=SIZE_WITH_LAYER_DESCRIPTION,
     )
 
 
@@ -364,7 +468,7 @@ class MultiImageFusionInput(
         ...,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
-        description="融合目标或风格描述，建议不超过300个汉字或600个英文单词。请使用“图X”指定图像（如：将图1的服装换为图2的服装）。",
+        description=MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
     )
 
 
@@ -386,19 +490,16 @@ class SequentialGenerationInput(
         ...,
         min_length=PROMPT_MIN_LENGTH,
         max_length=PROMPT_MAX_LENGTH,
-        description="连贯的组图提示，需明确数量与内容，不超过300个汉字或600个英文单词。例如：生成4格漫画分镜，主角是戴红帽子的女孩，依次出现在咖啡馆、街道、公园、家中。",
+        description=SEQUENTIAL_PROMPT_DESCRIPTION,
     )
 
     # 覆盖共享基类的 request_count 描述：单次请求产出一组图片而非单张，共享描述的
     # 「每次各产出一张图」在本工具不成立；覆盖声明不改变字段顺序。
     request_count: int = Field(
         default=1,
-        ge=1,
+        ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
-        description=(
-            "同一提示并行发起的独立生成次数，每次各产出一组图片，组内图片数量由模型"
-            "按提示词决定，最多 max_images 张；适合一次获取多组独立的组图结果。"
-        ),
+        description=REQUEST_COUNT_SEQUENTIAL_DESCRIPTION,
     )
 
     @field_validator("image", mode="before")
@@ -446,7 +547,7 @@ class SequentialGenerationInput(
 class BrowseImagesInput(BaseModel):
     """本地图片浏览：浏览工作目录中的图片文件，便于选择参考图或查看已生成内容。
 
-    字段默认值引用类上声明的 ClassVar 常量作为单一来源，避免魔法值漂移。
+    默认值以 ClassVar 声明为单一来源，server.py 平铺签名与本类字段同处引用。
     """
 
     DEFAULT_RECURSIVE: ClassVar[bool] = True
@@ -463,46 +564,40 @@ class BrowseImagesInput(BaseModel):
 
     directory: str | None = Field(
         default=None,
-        max_length=1024,
-        description=(
-            "要浏览的目录路径，默认浏览全部授权的工作区根目录，多根时合并扫描去重；"
-            "无 Roots 时回退 SEEDREAM_WORKSPACE_ROOT 配置的本地工作区根，"
-            "均未设置时回退进程当前工作目录。"
-        ),
+        max_length=DIRECTORY_MAX_LENGTH,
+        description=DIRECTORY_DESCRIPTION,
     )
     recursive: bool = Field(
         default=DEFAULT_RECURSIVE,
-        description="是否递归查找子目录。",
+        description=RECURSIVE_DESCRIPTION,
     )
     max_depth: int = Field(
         default=DEFAULT_MAX_DEPTH,
-        ge=1,
-        le=10,
-        description="递归查找的最大深度（1-10）。",
+        ge=MAX_DEPTH_MIN,
+        le=MAX_DEPTH_MAX,
+        description=MAX_DEPTH_DESCRIPTION,
     )
     limit: int = Field(
         default=DEFAULT_LIMIT,
-        ge=1,
-        le=200,
-        description="返回的最大文件数量（1-200）。",
+        ge=LIMIT_MIN,
+        le=LIMIT_MAX,
+        description=LIMIT_DESCRIPTION,
     )
     offset: int = Field(
         default=DEFAULT_OFFSET,
-        ge=0,
-        le=100000,
-        description="分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。",
+        ge=OFFSET_MIN,
+        le=OFFSET_MAX,
+        description=OFFSET_DESCRIPTION,
     )
-    # 单项上限 16 仅拒绝异常超长输入，防止错误消息整体回显超大字符串。
-    format_filter: list[Annotated[str, Field(max_length=16)]] | None = Field(
-        default=None,
-        description=(
-            "需要过滤的图片后缀列表，如 ['.jpeg', '.png']；仅保留受支持的后缀。"
-            "空列表或全部后缀不受支持时视为无有效后缀：跳过扫描返回空结果并回显原始输入。"
-        ),
+    format_filter: list[Annotated[str, Field(max_length=FORMAT_FILTER_ITEM_MAX_LENGTH)]] | None = (
+        Field(
+            default=None,
+            description=FORMAT_FILTER_DESCRIPTION,
+        )
     )
     show_details: bool = Field(
         default=DEFAULT_SHOW_DETAILS,
-        description="是否展示文件大小、修改时间等详细信息。",
+        description=SHOW_DETAILS_DESCRIPTION,
     )
 
     @field_validator("directory")

@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from seedream_mcp.utils.io.io_save import (
     AutoSaveError,
@@ -169,6 +170,38 @@ async def test_save_base64_image_sniffed_extension_overrides_conflicting_mime(
     assert result.local_path is not None
     assert Path(result.local_path).suffix == ".jpeg"
     assert Path(result.local_path).read_bytes() == jpeg_bytes
+
+
+async def test_save_base64_image_rejects_oversized_pixel_header(
+    manager: AutoSaveManager, tmp_path: Path
+) -> None:
+    """b64 保存路径在落盘后校验像素头，超限时删除文件并按保存失败降级。
+
+    恶意上游可用数 KB 的伪造尺寸头图片经 b64_json 返回，落盘后在预览解码时放大
+    为巨额内存占用，b64 链路须与下载链路同一口径拒绝，original_url 保持 base64
+    标识且不留残留文件。
+    """
+    import io
+    import struct
+    import zlib
+
+    # 真实 1x1 PNG 改写 IHDR 宽高为 10000x10000 并重算 CRC：结构合法可被 PIL 识别，
+    # 头尺寸超限而文件本身只有几十字节，正是解压炸弹的字节形态。
+    buffer = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+    bomb = bytearray(buffer.getvalue())
+    bomb[16:29] = struct.pack(">II5B", 10_000, 10_000, 8, 2, 0, 0, 0)
+    bomb[29:33] = struct.pack(">I", zlib.crc32(bytes(bomb[12:29])) & 0xFFFFFFFF)
+    payload = base64.b64encode(bytes(bomb)).decode()
+
+    result = await manager.save_base64_image(
+        payload, prompt="p", custom_name="bomb", tool_name="t2i"
+    )
+
+    assert result.success is False
+    assert result.original_url == "base64"
+    assert "像素" in (result.error or "")
+    assert not list(tmp_path.rglob("*.png"))
 
 
 # ==================== _run_batch_save 异常处理 ====================

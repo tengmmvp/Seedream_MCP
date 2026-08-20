@@ -11,7 +11,7 @@ import os
 import threading
 from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 from dotenv import dotenv_values
@@ -37,6 +37,8 @@ DEFAULT_HTTP_PORT = 8000
 _HTTP_MAX_BODY_SIZE_FLOOR = 1024 * 1024
 # requestState 密钥环单钥的字节数下限，与 SDK RequestStateSecurity 的密钥强度要求一致。
 _REQUEST_STATE_KEY_MIN_BYTES = 32
+# 密钥环错误消息提示的密钥生成命令，生成一个解码后恰为 32 字节的十六进制密钥。
+_REQUEST_STATE_KEYGEN_COMMAND = 'python -c "import secrets; print(secrets.token_hex(32))"'
 _ENV_METADATA_KEY = "env"
 
 
@@ -393,7 +395,7 @@ class SeedreamConfig:
                 raise SeedreamConfigError(
                     f"request_state_secret_keys 第 {index} 个密钥解码后仅 {len(key)} 字节，"
                     f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
-                    f'生成命令: python -c "import secrets; print(secrets.token_hex(32))"'
+                    f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
                     f"{_env_var_suffix('request_state_secret_keys')}"
                 )
             if key in seen:
@@ -448,8 +450,8 @@ class SeedreamConfig:
         )
 
 
-# dataclass 字段名到环境变量名的映射，从各字段的 env 元数据反射派生；新增字段仅需
-# 在 _env_field 声明中登记环境变量名。
+# dataclass 字段名到环境变量名的映射，从各字段的 env 元数据反射派生；新增字段在
+# _env_field 声明中登记环境变量名后进入本映射，取值辅助须另行登记 _FIELD_PICKERS。
 _FIELD_ENV_MAP: dict[str, str] = {
     f.name: f.metadata[_ENV_METADATA_KEY]
     for f in fields(SeedreamConfig)
@@ -702,17 +704,29 @@ def _pick_request_state_key_bytes(
             raise SeedreamConfigError(
                 f"request_state_secret_keys 第 {index} 个条目不是合法的十六进制密钥，"
                 f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
-                f'生成命令: python -c "import secrets; print(secrets.token_hex(32))"'
+                f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
                 f"{_env_var_suffix(field_name)}"
             ) from exc
     return tuple(material) or None
 
 
+def _parse_int_with_env_hint(value: object, field_name: str) -> int:
+    """parse_int 的字段级包装，解析失败的消息附带该字段环境变量名提示。
+
+    parse_int 仅接收取值、不知字段来源，环境变量名提示统一在取值层补充。
+    """
+    try:
+        return parse_int(value)
+    except SeedreamConfigError as exc:
+        raise SeedreamConfigError(f"{exc.message}{_env_var_suffix(field_name)}") from exc
+
+
 def _pick_int(
     overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> int:
-    return parse_int(
-        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
+    return _parse_int_with_env_hint(
+        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key]),
+        field_name,
     )
 
 
@@ -722,7 +736,7 @@ def _pick_optional_int(
     raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None or not str(raw).strip():
         return None
-    return parse_int(raw)
+    return _parse_int_with_env_hint(raw, field_name)
 
 
 def _pick_optional_int_zero_as_none(
@@ -744,6 +758,50 @@ def _pick_bool(
     return parse_bool(
         _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     )
+
+
+# 取值辅助的统一签名：接收 overrides 映射、override 键名、环境变量键名与 env 文件值，
+# 返回具体字段类型的取值。
+_ConfigValuePicker = Callable[[Mapping[str, object], str, str, Mapping[str, str]], object]
+
+# 配置字段的声明式取值表：字段到取值辅助与 override 键名覆盖的映射，覆盖为 None 时
+# override 键名即字段名；model_id 与 default_watermark 的 override 键名是 CLI 简称的
+# 有意命名间接映射，别名展开统一由 validate 完成，构建侧不重复规范化。构建循环遍历
+# _FIELD_ENV_MAP 并索引本表，新增 env metadata 字段漏登记时以 KeyError 在构建期暴露。
+_FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
+    "base_url": (_pick_str, None),
+    "allow_http_base_url": (_pick_bool, None),
+    "model_id": (_pick_str, "model"),
+    "default_size": (_pick_str, None),
+    "default_watermark": (_pick_bool, "watermark"),
+    "timeout": (_pick_int, None),
+    "api_timeout": (_pick_int, None),
+    "max_retries": (_pick_int, None),
+    "log_level": (_pick_str, None),
+    "log_file": (_pick_optional_str, None),
+    "auto_save_enabled": (_pick_bool, None),
+    "auto_save_base_dir": (_pick_optional_str, None),
+    "auto_save_download_timeout": (_pick_int, None),
+    "auto_save_max_retries": (_pick_int, None),
+    "auto_save_max_file_size": (_pick_int, None),
+    "auto_save_max_concurrent": (_pick_int, None),
+    "auto_save_date_folder": (_pick_bool, None),
+    "auto_save_cleanup_days": (_pick_int, None),
+    "auto_save_max_total_bytes": (_pick_optional_int_zero_as_none, None),
+    "auto_save_fsync": (_pick_bool, None),
+    "stream_buffer_max_size": (_pick_int, None),
+    "stream_chunk_size": (_pick_int, None),
+    "response_body_limit": (_pick_optional_int, None),
+    "image_prepare_concurrency": (_pick_int, None),
+    "prepare_cache_max": (_pick_int, None),
+    "prepare_cache_max_bytes": (_pick_int, None),
+    "preview_enabled": (_pick_bool, None),
+    "workspace_root": (_pick_optional_str, None),
+    "http_auth_token": (_pick_optional_str, None),
+    "http_max_body_size": (_pick_int, None),
+    "http_allowed_hosts": (_pick_optional_str_tuple, None),
+    "request_state_secret_keys": (_pick_request_state_key_bytes, None),
+}
 
 
 def build_config_from_sources(
@@ -784,146 +842,11 @@ def _build_config_from_sources_unlocked(
     if not api_key:
         raise SeedreamConfigError("未找到ARK_API_KEY环境变量或配置文件值。")
 
-    # override 键名 "model" 对应 model_id 字段，属 CLI 简称的有意命名间接映射；
-    # 别名展开统一由 validate 完成，构建侧不再重复规范化。
-    raw_model = str(
-        _pick_config_value(
-            override_values,
-            "model",
-            "SEEDREAM_MODEL_ID",
-            env_values,
-            ENV_DEFAULTS["SEEDREAM_MODEL_ID"],
-        )
-    )
-
-    config_kwargs: dict[str, Any] = {
-        "api_key": api_key,
-        "base_url": _pick_str(override_values, "base_url", "ARK_BASE_URL", env_values),
-        "allow_http_base_url": _pick_bool(
-            override_values, "allow_http_base_url", "SEEDREAM_ALLOW_HTTP_BASE_URL", env_values
-        ),
-        "model_id": raw_model,
-        "default_size": _pick_str(
-            override_values, "default_size", "SEEDREAM_DEFAULT_SIZE", env_values
-        ),
-        # override 键名 "watermark" 对应 default_watermark 字段，同为 CLI 简称。
-        "default_watermark": _pick_bool(
-            override_values, "watermark", "SEEDREAM_DEFAULT_WATERMARK", env_values
-        ),
-        "timeout": _pick_int(override_values, "timeout", "SEEDREAM_TIMEOUT", env_values),
-        "api_timeout": _pick_int(
-            override_values, "api_timeout", "SEEDREAM_API_TIMEOUT", env_values
-        ),
-        "max_retries": _pick_int(
-            override_values, "max_retries", "SEEDREAM_MAX_RETRIES", env_values
-        ),
-        "log_level": _pick_str(override_values, "log_level", "LOG_LEVEL", env_values),
-        "log_file": _pick_optional_str(override_values, "log_file", "LOG_FILE", env_values),
-        "auto_save_enabled": _pick_bool(
-            override_values, "auto_save_enabled", "SEEDREAM_AUTO_SAVE_ENABLED", env_values
-        ),
-        "auto_save_base_dir": _pick_optional_str(
-            override_values, "auto_save_base_dir", "SEEDREAM_AUTO_SAVE_BASE_DIR", env_values
-        ),
-        "auto_save_download_timeout": _pick_int(
-            override_values,
-            "auto_save_download_timeout",
-            "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT",
-            env_values,
-        ),
-        "auto_save_max_retries": _pick_int(
-            override_values,
-            "auto_save_max_retries",
-            "SEEDREAM_AUTO_SAVE_MAX_RETRIES",
-            env_values,
-        ),
-        "auto_save_max_file_size": _pick_int(
-            override_values,
-            "auto_save_max_file_size",
-            "SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE",
-            env_values,
-        ),
-        "auto_save_max_concurrent": _pick_int(
-            override_values,
-            "auto_save_max_concurrent",
-            "SEEDREAM_AUTO_SAVE_MAX_CONCURRENT",
-            env_values,
-        ),
-        "auto_save_date_folder": _pick_bool(
-            override_values,
-            "auto_save_date_folder",
-            "SEEDREAM_AUTO_SAVE_DATE_FOLDER",
-            env_values,
-        ),
-        "auto_save_cleanup_days": _pick_int(
-            override_values,
-            "auto_save_cleanup_days",
-            "SEEDREAM_AUTO_SAVE_CLEANUP_DAYS",
-            env_values,
-        ),
-        "auto_save_max_total_bytes": _pick_optional_int_zero_as_none(
-            override_values,
-            "auto_save_max_total_bytes",
-            "SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES",
-            env_values,
-        ),
-        "auto_save_fsync": _pick_bool(
-            override_values, "auto_save_fsync", "SEEDREAM_AUTO_SAVE_FSYNC", env_values
-        ),
-        "stream_buffer_max_size": _pick_int(
-            override_values,
-            "stream_buffer_max_size",
-            "SEEDREAM_STREAM_BUFFER_MAX_SIZE",
-            env_values,
-        ),
-        "stream_chunk_size": _pick_int(
-            override_values, "stream_chunk_size", "SEEDREAM_STREAM_CHUNK_SIZE", env_values
-        ),
-        "response_body_limit": _pick_optional_int(
-            override_values,
-            "response_body_limit",
-            "SEEDREAM_RESPONSE_BODY_LIMIT",
-            env_values,
-        ),
-        "image_prepare_concurrency": _pick_int(
-            override_values,
-            "image_prepare_concurrency",
-            "SEEDREAM_IMAGE_PREPARE_CONCURRENCY",
-            env_values,
-        ),
-        "prepare_cache_max": _pick_int(
-            override_values, "prepare_cache_max", "SEEDREAM_PREPARE_CACHE_MAX", env_values
-        ),
-        "prepare_cache_max_bytes": _pick_int(
-            override_values,
-            "prepare_cache_max_bytes",
-            "SEEDREAM_PREPARE_CACHE_MAX_BYTES",
-            env_values,
-        ),
-        "preview_enabled": _pick_bool(
-            override_values, "preview_enabled", "SEEDREAM_PREVIEW_ENABLED", env_values
-        ),
-        "workspace_root": _pick_optional_str(
-            override_values, "workspace_root", "SEEDREAM_WORKSPACE_ROOT", env_values
-        ),
-        "http_auth_token": _pick_optional_str(
-            override_values, "http_auth_token", "SEEDREAM_HTTP_AUTH_TOKEN", env_values
-        ),
-        "http_max_body_size": _pick_int(
-            override_values, "http_max_body_size", "SEEDREAM_HTTP_MAX_BODY_SIZE", env_values
-        ),
-        "http_allowed_hosts": _pick_optional_str_tuple(
-            override_values, "http_allowed_hosts", "SEEDREAM_HTTP_ALLOWED_HOSTS", env_values
-        ),
-        "request_state_secret_keys": _pick_request_state_key_bytes(
-            override_values, "request_state_secret_keys", "SEEDREAM_REQUEST_STATE_KEYS", env_values
-        ),
-    }
-    # 断言所有带 env metadata 的字段都显式传值，防止新增字段被静默忽略。
-    missing_env_fields = set(_FIELD_ENV_MAP.keys()) - set(config_kwargs.keys())
-    if missing_env_fields:
-        raise AssertionError(
-            f"以下字段已声明 env metadata 但未在配置构建中传值: {sorted(missing_env_fields)}"
+    config_kwargs: dict[str, Any] = {"api_key": api_key}
+    for field_name, env_key in _FIELD_ENV_MAP.items():
+        picker, override_key = _FIELD_PICKERS[field_name]
+        config_kwargs[field_name] = picker(
+            override_values, override_key or field_name, env_key, env_values
         )
     return SeedreamConfig(**config_kwargs)
 

@@ -242,6 +242,25 @@ def session_declares_roots_capability(session: Any) -> bool:
     return bool(declared)
 
 
+def _fallback_roots_or_fail_closed(exc: Exception, reason: str) -> None:
+    """读取 roots 失败后的共用回退处置：已配置环境变量根时保持空 roots 回退该边界。
+
+    未配置环境变量根时回退会放宽文件访问边界到进程 CWD，抛 SeedreamMCPError
+    拒绝进入作用域；已配置则提级 error 日志并保持空 roots，由下游的环境变量
+    兜底链路取得显式边界。
+
+    Raises:
+        SeedreamMCPError: 未配置 SEEDREAM_WORKSPACE_ROOT 且读取失败。
+    """
+    configured_root = _resolve_configured_root()
+    if configured_root is None:
+        logger.error("{}，且无环境变量工作区根可用: {}", reason, exc)
+        raise SeedreamMCPError(
+            f"{reason}，且未配置 SEEDREAM_WORKSPACE_ROOT，" "拒绝将文件访问边界放宽到进程工作目录"
+        ) from exc
+    logger.error("{}，回退环境变量边界 {}: {}", reason, configured_root, exc)
+
+
 def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | None]:
     """将已解析的 Roots 置位到请求上下文变量并记录边界日志，返回复位用 token。
 
@@ -298,9 +317,8 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     InputRequiredResult 多轮取回后走 workspace_roots_scope_from_result，本函数
     承接旧修订会话的 ctx.session.list_roots 直连（SEP-2577 废弃但为旧修订上
     唯一途径）。客户端 Roots 设置到上下文变量作为该请求的文件访问边界；未声明
-    roots capability 时跳过 roots/list 往返，回退环境变量边界。roots/list 读取
-    失败（协议会话无反向通道，或超时等瞬时失败）统一判定：未配置环境变量根则
-    fail-closed 抛 SeedreamMCPError，已配置则回退该显式边界并记录 error。
+    roots capability 时跳过 roots/list 往返，回退环境变量边界；读取失败的回退
+    判定见 Raises。
 
     Args:
         ctx: MCP 请求上下文，经其 session 读取客户端 Roots。
@@ -334,37 +352,12 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
         try:
             resolved_roots = await _resolve_workspace_roots_from_context(ctx)
         except NoBackChannelError as exc:
-            # 协议能力缺失而非瞬时失败，重试不会好转，提级为 error；未配置环境
-            # 变量根时回退会放宽边界到进程 CWD，故 fail-closed。
-            configured_root = _resolve_configured_root()
-            if configured_root is None:
-                logger.error(
-                    "协议会话无反向通道，无法读取 MCP Roots，且无环境变量工作区根可用: {}", exc
-                )
-                raise SeedreamMCPError(
-                    "当前协议会话不支持读取 MCP Roots，且未配置 SEEDREAM_WORKSPACE_ROOT，"
-                    "拒绝将文件访问边界放宽到进程工作目录"
-                ) from exc
-            logger.error(
-                "协议会话无反向通道，无法读取 MCP Roots，回退环境变量边界 {}: {}",
-                configured_root,
-                exc,
-            )
+            # 协议能力缺失而非瞬时失败，重试不会好转，提级为 error；回退判定与
+            # 瞬时失败共用 _fallback_roots_or_fail_closed。
+            _fallback_roots_or_fail_closed(exc, "协议会话无反向通道，无法读取 MCP Roots")
         except Exception as exc:
-            # 超时等瞬时读取失败与无反向通道同判定：回退会放宽文件访问边界，未配置
-            # 环境变量根时 fail-closed；已配置则回退该显式边界并提级为 error。
-            configured_root = _resolve_configured_root()
-            if configured_root is None:
-                logger.error("读取 MCP Roots 瞬时失败，且无环境变量工作区根可用: {}", exc)
-                raise SeedreamMCPError(
-                    "读取 MCP Roots 发生瞬时失败，且未配置 SEEDREAM_WORKSPACE_ROOT，"
-                    "拒绝将文件访问边界放宽到进程工作目录"
-                ) from exc
-            logger.error(
-                "读取 MCP Roots 失败，回退环境变量边界 {}: {}",
-                configured_root,
-                exc,
-            )
+            # 超时等瞬时读取失败：回退会放宽文件访问边界，与无反向通道同判定。
+            _fallback_roots_or_fail_closed(exc, "读取 MCP Roots 失败")
         else:
             token = _apply_roots_token(resolved_roots)
 
@@ -501,8 +494,8 @@ def find_images_in_directory(
     """在目录中查找图片文件。
 
     安全前置条件：本函数不做工作区越界校验，调用方必须先确认 directory 位于允许
-    的工作区根之内；本函数经 utils/__init__ 重导出，外部调用方同样受此约束。UNC
-    形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回空列表并记录告警。
+    的工作区根之内。UNC 形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回
+    空列表并记录告警。
     单个目录的条目列表按需物化：limit 场景只物化排序前缀，非图片条目占位致结果
     不足且目录未扫尽时倍增前缀重扫，无 limit 时一次物化全量有序列表；limit 亦使
     跨目录递归提前终止，重复扫描的成本由 io_scan 的 mtime 加 TTL 缓存缓解。
@@ -583,8 +576,11 @@ def find_images_in_directory(
                 ):
                     # OneDrive 占位文件等 reparse 非 symlink，is_file 不拒绝，与目录分支
                     # 同规则剔除；复用遍历条目的 lstat 结果判定，不付逐文件二次 lstat，
-                    # 后缀命中后才判定，非图片条目不付 stat 开销。
-                    if has_reparse_attribute(entry.stat(follow_symlinks=False)):
+                    # 后缀命中后才判定，非图片条目不付 stat 开销。reparse 判定仅
+                    # Windows 有意义，POSIX 上短路跳过 stat 求值。
+                    if sys.platform == "win32" and has_reparse_attribute(
+                        entry.stat(follow_symlinks=False)
+                    ):
                         logger.warning("跳过 reparse point 文件: {}", entry_path)
                         continue
                     images.append(entry_path)
