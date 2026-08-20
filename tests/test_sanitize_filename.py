@@ -27,7 +27,7 @@ def manager(tmp_path):
     [
         # 不安全字符统一替换为下划线
         ('a<b>:c"/d\\e|f?g*', "a_b__c__d_e_f_g_"),
-        # 控制字符（含 DEL）直接剥离
+        # 控制字符连同 DEL 一并剥离
         ("bad\x00file\x1fname\x7f", "badfilename"),
         # 常规文件名原样保留
         ("photo_2024.png", "photo_2024.png"),
@@ -36,6 +36,7 @@ def manager(tmp_path):
     ],
 )
 def test_sanitize_filename_character_rules(manager, raw, expected):
+    """不安全字符替换为下划线，控制字符剥离，常规与中文名保留。"""
     assert manager.sanitize_filename(raw) == expected
 
 
@@ -118,6 +119,7 @@ def test_create_save_path_long_custom_name_stays_within_max_path(manager, tmp_pa
     ],
 )
 def test_sanitize_filename_windows_reserved_names(manager, raw, expected):
+    """Windows 保留设备名追加下划线规避，非保留名不受影响。"""
     assert manager.sanitize_filename(raw) == expected
 
 

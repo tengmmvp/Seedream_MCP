@@ -211,7 +211,7 @@ async def test_response_body_limit_derived_from_file_size(no_sleep: None) -> Non
 
 
 async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) -> None:
-    """解码后恰好 n 字节的边界事件（n mod 3 = 1）不被截断。
+    """解码后恰好 n 字节且 n mod 3 = 1 的边界事件不被截断。
 
     n mod 3 余 1 时旧近似式 ⌈4n/3⌉ 比真实 base64 长度 4⌈n/3⌉ 小 2 字节，
     叠加 data: 前缀与 JSON 包络后旧阈值会误截断本用例的合法事件。
@@ -224,7 +224,7 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
         + b'"}\n\n'
         + b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n'
     )
-    # 事件总长（含信封）超过旧公式阈值，证明本用例落在旧公式的误截断区间
+    # 事件总长含信封，超过旧公式阈值，证明本用例落在旧公式的误截断区间
     assert len(event_bytes) > (n * 4 + 2) // 3
 
     config = SeedreamConfig(

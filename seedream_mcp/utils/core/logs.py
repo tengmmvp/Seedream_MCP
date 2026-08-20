@@ -163,7 +163,6 @@ def setup_logging(
             logger 已有 handler 时标准库日志不被拦截，输出 warning 提示。
     """
     logger.remove()
-    # 全局 patcher 剥离日志消息控制字符，防日志注入。
     logger.configure(patcher=_strip_message_control_chars)
 
     level = log_level.upper()

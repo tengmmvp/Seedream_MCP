@@ -28,6 +28,7 @@ def test_build_arg_parser_no_longer_exposes_mount_path() -> None:
 
 
 def test_build_arg_parser_supports_seedream_50_model_choice() -> None:
+    """--model 接受 seedream 5.0 别名。"""
     parser = server._build_arg_parser()
     args = parser.parse_args(["--model", "doubao-seedream-5.0"])
 
@@ -60,6 +61,7 @@ def test_build_arg_parser_log_level_case_insensitive(level: str) -> None:
 
 
 def test_build_arg_parser_supports_tls_options() -> None:
+    """--ssl-certfile 与 --ssl-keyfile 可解析，默认不豁免非 TLS。"""
     parser = server._build_arg_parser()
     args = parser.parse_args(["--ssl-certfile", "c.pem", "--ssl-keyfile", "k.pem"])
 
@@ -90,6 +92,7 @@ def test_tls12_ssl_context_factory_enforces_minimum_version() -> None:
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
 def test_build_run_options_returns_transport(transport: str) -> None:
+    """stdio 与 streamable-http 均解析为合法 run 选项。"""
     args = Namespace(transport=transport)
 
     assert server._build_run_options(args) == transport
@@ -130,6 +133,7 @@ def _stub_cli(monkeypatch: pytest.MonkeyPatch, args: Namespace, config: Seedream
 def test_cli_main_dispatches_to_correct_runner(
     monkeypatch: pytest.MonkeyPatch, transport: str
 ) -> None:
+    """cli_main 按传输类型分发到对应 runner 并返回 0。"""
     args = _make_cli_args(transport)
     config = SeedreamConfig(api_key="test_key")
     _stub_cli(monkeypatch, args, config)
@@ -319,6 +323,7 @@ def test_cli_main_runtime_exception_returns_exit_code_one(
 
 
 async def test_bearer_auth_middleware_accepts_valid_token() -> None:
+    """合法 Bearer 令牌放行进入下游应用。"""
     received: dict[str, object] = {}
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -332,6 +337,7 @@ async def test_bearer_auth_middleware_accepts_valid_token() -> None:
 
 
 async def test_bearer_auth_middleware_rejects_invalid_token() -> None:
+    """令牌不符的请求被 401 拒绝，不进入下游应用。"""
     sent: list[dict] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
@@ -373,6 +379,7 @@ async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
 
 
 async def test_bearer_auth_middleware_rejects_missing_header() -> None:
+    """缺少 Authorization 头的请求被 401 拒绝。"""
     sent: list[dict] = []
 
     async def send(message):  # type: ignore[no-untyped-def]

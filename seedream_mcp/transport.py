@@ -8,7 +8,6 @@ streamable_http_app 外层，按装配逆序执行。MCPServer 实例 mcp 与共
 
 from __future__ import annotations
 
-# 标准库导入
 import argparse
 import asyncio
 import hmac
@@ -138,11 +137,11 @@ class _BearerTokenAuthMiddleware:
 class _LimitRequestBodyMiddleware:
     """streamable-http 请求体大小限制 ASGI 中间件。
 
-    与 SDK 内层 RequestBodyLimitMiddleware 构成有意识的双层纵深：本层位于 Bearer
-    鉴权之外，声明超长 Content-Length 的请求在鉴权前即被 413 早拒，未携带有效令牌
-    的超大请求不再消耗鉴权比较；内层覆盖全部请求方法兜底。本层先按 Content-Length
-    头早拒，再包装 receive 累计实际接收字节数，超限短路返回 413，防止谎报或缺失
-    Content-Length 的超大请求体撑爆内存。仅作用于 http 请求，其余流量原样透传。
+    与 SDK 内层 RequestBodyLimitMiddleware 构成双层纵深：本层位于 Bearer 鉴权之外，
+    声明超长 Content-Length 的请求在鉴权前即被 413 早拒；内层覆盖全部请求方法兜底。
+    本层先按 Content-Length 头早拒，再包装 receive 累计实际接收字节数，超限短路返回
+    413，防止谎报或缺失 Content-Length 的请求体撑爆内存。仅作用于 http 请求，其余
+    流量原样透传。
     """
 
     def __init__(self, app: ASGIApp, max_body_size: int) -> None:
@@ -257,8 +256,8 @@ class _LoopbackHostGuardMiddleware:
     websocket 均校验，websocket 以 1008 关闭；Host 头缺失按 403 拒绝。
     """
 
-    # 允许的 Host 头值（剥离端口后）。容忍 "localhost" 与绑定判定排除它并不矛盾：
-    # 绑定 localhost 在 hosts 污染下会实际暴露公网，须 fail-closed；而 rebinding
+    # 允许的 Host 头值，比较前已剥离端口。容忍 "localhost" 与绑定判定排除它并不
+    # 矛盾：绑定 localhost 在 hosts 污染下会实际暴露公网，须 fail-closed；rebinding
     # 请求的 Host 恒为攻击者域名，无法借污染携带 Host: localhost 抵达本机。不含
     # 裸 "::1"：Host 头中 IPv6 字面量必须带方括号，裸形态属畸形。
     _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]"})
@@ -332,8 +331,8 @@ def _attach_streamable_http_middleware(
     传入，避免同一配置重复解析。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    LoopbackHostGuard（仅回环绑定）-> HealthCheck -> LimitRequestBody -> Bearer
-    -> app：声明超长 Content-Length 的请求在鉴权前即被 413 早拒，探针免令牌探活，
+    LoopbackHostGuard -> HealthCheck -> LimitRequestBody -> Bearer -> app，其中
+    LoopbackHostGuard 仅回环绑定时装配：超长请求在鉴权前被 413 早拒，探针免令牌，
     回环绑定时 rebinding 请求先于健康检查被拒。
     """
     if _middleware_attached(app):
@@ -345,9 +344,7 @@ def _attach_streamable_http_middleware(
     if max_body_size is None:
         max_body_size = get_active_config().http_max_body_size
     app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=max_body_size)
-    # 健康检查在鉴权之外短路 GET /health，探针免令牌。
     app.add_middleware(_HealthCheckMiddleware)
-    # 回环绑定时最外层启用 Host 校验，先于健康检查拒掉 rebinding 请求。
     if host in _LOOPBACK_HOSTS:
         app.add_middleware(_LoopbackHostGuardMiddleware)
 
@@ -396,10 +393,7 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
 
 
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
-    """按绑定地址与鉴权状态输出风险告警，同时写日志与 stderr。
-
-    任何调用路径都不得输出与生效配置相反的状态。
-    """
+    """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致，同时写日志与 stderr。"""
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
             message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"

@@ -286,7 +286,6 @@ def handle_api_error(
     """
     error_message = _lookup_http_error_profile(response_status).base_message
 
-    # 尝试从响应体中提取更详细的上游错误信息与错误码。
     error_code: str | None = None
     if isinstance(response_data, dict):
         if "error" in response_data:
@@ -378,8 +377,6 @@ def format_error_for_user(error: Exception) -> str:
     else:
         raw_message = str(error)
         code_hint = ""
-    # 三类分支统一经 _sanitize_message_for_output 先截断后脱敏，dict/list 形态同样
-    # 先归一化再净化。
     message = _sanitize_message_for_output(raw_message)
 
     line = f"{profile.display_title}: {message}{code_hint}"
@@ -388,7 +385,7 @@ def format_error_for_user(error: Exception) -> str:
     return line
 
 
-# _truncate_value_for_output 的默认截断上限：调用方未显式传入 limit 时的兜底值。
+# _truncate_value_for_output 的默认截断上限。
 _VALUE_OUTPUT_LIMIT = 200
 # 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应。
 _MESSAGE_OUTPUT_LIMIT = 500
@@ -564,12 +561,11 @@ _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
 _SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[._-][^\W_.-]+)*"
 
 # 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。泛化词分支由
-# 两清单派生为「关键词 + 续段」，覆盖 session、session_id、jwt、privatekey 等形态；
-# 短词 key 与 auth 走受限复合分支，无分隔变体由 api-key 与 token/secret 复合族覆盖、
-# 带分隔变体由前缀族的 X_key/X_auth 分支覆盖，与 dict 键路径口径对齐；auth 另有
-# 独立分支承接独立成段与前缀复合形态，(?<!\w) 断言排除 oauth 一类无分隔前缀词。
-# 键命中要求紧跟分隔符与值，max_tokens 等普通词形不受影响。新增敏感词只需扩展
-# 清单或前缀族，本组自动跟进；各分支为字面交替，失败回溯随总长线性。
+# 两清单派生为「关键词 + 续段」；短词 key 与 auth 走受限复合分支，无分隔变体由
+# api-key 与 token/secret 复合族覆盖，带分隔变体由前缀族的 X_key/X_auth 分支覆盖，
+# 与 dict 键路径口径对齐；auth 另有独立分支，(?<!\w) 断言排除 oauth 一类无分隔
+# 前缀词。键命中要求紧跟分隔符与值，max_tokens 等普通词形不受影响；新增敏感词
+# 只需扩展清单或前缀族，本组自动跟进。各分支为字面交替，失败回溯随总长线性。
 _SENSITIVE_KEYVALUE_KEYS = (
     "|".join(
         keyword + _SENSITIVE_KEYVALUE_KEY_SUFFIX
@@ -594,10 +590,9 @@ _SENSITIVE_KEYVALUE_KEYS = (
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
 )
 
-# 键值分隔符与值吸收共用的空白字符类：ASCII 空白加 Unicode 空白（NBSP、Ogham 空格、
-# U+2000 至 U+200A 空格区段、行/段分隔符、窄/中数学空格、全角空格），封堵借
-# Unicode 空白分隔的绕过形态；控制空白成员在压平前的首轮匹配中承接「冒号加换行」
-# 形态，压平后空转，保持类自身完备。
+# 键值分隔符与值吸收共用的空白字符类：ASCII 空白加 Unicode 空白，封堵借 Unicode
+# 空白分隔的绕过形态；控制空白成员在压平前的首轮匹配中承接「冒号加换行」形态，
+# 压平后空转，保持类自身完备。
 _KEYVALUE_WHITESPACE_CLASS = (
     r"[\t\n\r \x0b\x0c\x85\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]"
 )
@@ -618,12 +613,10 @@ _SENSITIVE_KEYVALUE_ALT = (
 )
 
 # 键值分隔符：键名后允许至多两段「引号 + 空白」组合，引号前容忍可选反斜杠，引号
-# 字符含全角变体（U+FF02 ＂ 与 U+FF07 ＇），覆盖 JSON/Python repr 回显、json.dumps
-# 转义产物与「引号-空白-引号」形态；分隔符字符为 ASCII 或全角变体（U+FF1A 全角
-# 冒号、U+FE55 小型冒号、U+FF1D 全角等号），转义族与控制空白独占分支见
-# _SENSITIVE_KEYVALUE_ALT。空白段取 _KEYVALUE_WHITESPACE_CLASS，Unicode 空白同样
-# 命中；引号与空白组成计数受限的单一非捕获组、各分支有限交替，失败回溯随总长
-# 线性。
+# 与分隔符字符均含全角变体，覆盖 JSON/Python repr 回显、json.dumps 转义产物与
+# 「引号-空白-引号」形态；转义族与控制空白独占分支见 _SENSITIVE_KEYVALUE_ALT，
+# 空白段取 _KEYVALUE_WHITESPACE_CLASS。引号与空白组成计数受限的单一非捕获组、
+# 各分支有限交替，失败回溯随总长线性。
 _SENSITIVE_KEYVALUE_SEPARATOR = (
     _KEYVALUE_WHITESPACE_CLASS
     + r"*(?:\\?['\"＂＇]"
@@ -638,13 +631,12 @@ _SENSITIVE_KEYVALUE_SEPARATOR = (
 # 词呈现键名加分隔符结构时值吸收停止，非敏感键值对作为独立键值对保留原文。
 _SENSITIVE_KEYVALUE_ANY_KEY = r"['\"]?[\w-]+" + _SENSITIVE_KEYVALUE_SEPARATOR
 
-# 敏感键值裸值模式：敏感键名后跟分隔符（ASCII 或全角的 :/=）与值时剥离值部分，
-# 覆盖 api-key=xxx、apikey: xxx、Authorization: Basic xxx、Cookie: SESSIONID=vvv
-# 等上游错误体回显形态。值吸收贪婪多词、在下一个键名加分隔符形态前停止，多词
-# 凭据整体剥离，相邻非敏感键值对保留独立形态与括号配平；具体复合键名置于泛化词
-# 前优先命中长变体。已知误吞面：Cookie: 巧克力蛋糕食谱推荐 一类整段文本与
-# next token: <eos> 一类普通键值同样被吞，敏感键后的多词值无法与非敏感尾词可靠
-# 区分，按 fail-closed 方向宁多脱不漏凭据。
+# 敏感键值裸值模式：敏感键名后跟分隔符与值时剥离值部分，覆盖 api-key=xxx、
+# Authorization: Basic xxx、Cookie: SESSIONID=vvv 等上游错误体回显形态。值吸收
+# 贪婪多词、在下一个键名加分隔符形态前停止，多词凭据整体剥离，相邻非敏感键值对
+# 保留独立形态与括号配平；具体复合键名置于泛化词前优先命中长变体。已知误吞面：
+# Cookie: 后的整段文本与 next token: <eos> 一类普通键值同样被吞，敏感键后的多词
+# 值无法与非敏感尾词可靠区分，按 fail-closed 方向宁多脱不漏凭据。
 _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     r"(?i)("
     + _SENSITIVE_KEYVALUE_KEYS
@@ -668,10 +660,9 @@ CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 _INVISIBLE_CHARS_PATTERN = re.compile(r"[\u200b\u200c\ufeff\u00ad]")
 
 # URL userinfo 剥离模式：http(s) URL 携带 user:pass@ 凭据时剥去 userinfo，防止
-# 原值回显把凭据送进结构化输出与用户可见文本。userinfo 区间为协议前缀后到首个
-# 空白、斜杠、问号或井号前的连续段，密码含 @ 时贪婪取区间内最后一个 @ 定边界，
-# user:p@ss@example.com 剥净不残留；协议限定 http(s) 且要求词边界，不误伤
-# mailto:user@host。
+# 原值回显把凭据送进结构化输出与用户可见文本。密码含 @ 时贪婪匹配取区间内最后
+# 一个 @ 定边界，user:p@ss@example.com 剥净不残留；协议限定 http(s) 且要求词
+# 边界，不误伤 mailto:user@host。
 _URL_USERINFO_PATTERN = re.compile(r"(?i)\b((?:https?)://)[^\s/?#]+@")
 
 

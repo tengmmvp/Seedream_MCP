@@ -39,18 +39,22 @@ from seedream_mcp.utils.core.errors import (
 
 
 def test_classify_config_error() -> None:
+    """SeedreamConfigError 归为 config_error。"""
     assert _classify_generation_error_type(SeedreamConfigError("c")) == "config_error"
 
 
 def test_classify_validation_error() -> None:
+    """SeedreamValidationError 归为 validation_error。"""
     assert _classify_generation_error_type(SeedreamValidationError("v")) == "validation_error"
 
 
 def test_classify_timeout_error() -> None:
+    """SeedreamTimeoutError 归为 timeout_error。"""
     assert _classify_generation_error_type(SeedreamTimeoutError("t")) == "timeout_error"
 
 
 def test_classify_network_error() -> None:
+    """SeedreamNetworkError 归为 network_error。"""
     assert _classify_generation_error_type(SeedreamNetworkError("n")) == "network_error"
 
 
@@ -73,7 +77,7 @@ def test_classify_api_error_other_status() -> None:
 
 
 def test_classify_api_error_no_status() -> None:
-    """APIError 无状态码（None）也归为 api_error。"""
+    """APIError 无状态码时也归为 api_error。"""
     exc = SeedreamAPIError("unknown")
     assert _classify_generation_error_type(exc) == "api_error"
 
@@ -164,6 +168,7 @@ def test_handle_api_error_no_error_code_when_absent() -> None:
 
 
 def test_format_config_error() -> None:
+    """配置错误的用户可见文案含「配置错误」。"""
     assert "配置错误" in format_error_for_user(SeedreamConfigError("bad config"))
 
 
@@ -200,16 +205,19 @@ def test_format_api_error_without_code() -> None:
 
 
 def test_format_validation_error() -> None:
+    """参数验证错误的用户可见文案含「参数验证失败」。"""
     assert "参数验证失败" in format_error_for_user(SeedreamValidationError("bad param"))
 
 
 def test_format_timeout_error() -> None:
+    """超时错误的用户可见文案含超时与网络指引。"""
     result = format_error_for_user(SeedreamTimeoutError("timed out"))
     assert "请求超时" in result
     assert "网络" in result
 
 
 def test_format_network_error() -> None:
+    """网络错误的用户可见文案含「网络连接错误」。"""
     result = format_error_for_user(SeedreamNetworkError("conn refused"))
     assert "网络连接错误" in result
 
@@ -423,7 +431,7 @@ async def test_handler_failure_text_network_error_uses_profile_hint_only() -> No
 
 
 async def test_handler_failure_text_without_hint_appends_table_guidance() -> None:
-    """档案无 user_hint 的错误（如未知异常）才追加查表排查建议行。"""
+    """档案无 user_hint 的错误才追加查表排查建议行。"""
     text = await _run_failing_handler(ValueError("unexpected"))
 
     assert text.endswith("请根据错误信息排查后重试。")

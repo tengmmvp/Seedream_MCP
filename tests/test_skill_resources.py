@@ -1,9 +1,9 @@
 """Agent Skills 开放标准目录与 skill:// 资源守护测试。
 
-三组守护：静态文件符合 Agent Skills 规范（frontmatter 约束、行数预算、引用
-可解析、工具名不杜撰）；资源注册形态（静态主文件 + references 模板，mime 为
-text/markdown）；经 in-process Client 的线上读取管线（内容与磁盘一致、越界
-与缺失路径收敛 -32602）。frontmatter 用轻量正则解析，不引入 pyyaml 依赖。
+三组守护：静态文件符合 Agent Skills 规范，覆盖 frontmatter 约束、行数预算、
+引用可解析与工具名不杜撰；资源注册形态为静态主文件加 references 模板，mime 为
+text/markdown；经 in-process Client 的线上读取管线验证内容与磁盘一致、越界
+与缺失路径收敛 -32602。frontmatter 用轻量正则解析，不引入 pyyaml 依赖。
 """
 
 from __future__ import annotations

@@ -169,7 +169,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     validated_path, _ = found
 
-    # O_NOFOLLOW 拒绝符号链接；读取失败经 _format_local_read_error 遮蔽路径后归校验档。
+    # O_NOFOLLOW 拒绝最终分量的符号链接。
     # 内存峰值：读取字节、b64 编码与 data URI 拼接约为单图的 5.5×，并发 5 × 30MB 上限
     # 下瞬态约 800MB，不受 LRU 缓存字节上限约束。
     try:

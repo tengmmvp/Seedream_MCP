@@ -139,6 +139,7 @@ async def test_workspace_roots_scope_prioritizes_mcp_roots_over_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """MCP Roots 在作用域内优先于环境变量根，退出后恢复。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
@@ -171,6 +172,7 @@ async def test_run_browse_images_uses_mcp_roots_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """浏览工具以 MCP Roots 为边界：界内可浏览，env 根目录被拒绝。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
@@ -198,6 +200,7 @@ async def test_client_prepare_image_input_prefers_mcp_roots_over_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """参考图预处理以 MCP Roots 为边界，env 根内文件不可读。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
@@ -219,6 +222,7 @@ async def test_client_prepare_image_input_allows_second_mcp_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """多个 MCP Roots 依序解析相对路径，第二个根内的文件同样可读。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     first_root = tmp_path / "root_a"
@@ -242,6 +246,7 @@ async def test_run_browse_images_denies_when_mcp_roots_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """客户端授权空 Roots 列表时浏览被拒绝，不回退 env 根放宽边界。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     (env_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -260,6 +265,7 @@ async def test_client_prepare_image_input_denies_when_mcp_roots_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """客户端授权空 Roots 列表时参考图读取被拒绝，不回退 env 根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     image_path = env_root / "local.png"
@@ -277,6 +283,7 @@ async def test_run_browse_images_relative_directory_resolves_all_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """相对目录在全部 Roots 下解析，命中第二个根内的嵌套目录。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     first_root = tmp_path / "root_a"
@@ -303,6 +310,7 @@ async def test_run_browse_images_rejects_parent_escape_relative_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """.. 相对路径穿越出全部 Roots 时以结构化错误拒绝。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     first_root = tmp_path / "root_a"
@@ -325,6 +333,7 @@ async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """roots/list 失败时回退环境变量根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
 
@@ -464,6 +473,7 @@ async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """roots/list 失败时浏览回退 env 根，仍可浏览界内图片。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     (env_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -483,6 +493,7 @@ async def test_client_prepare_image_input_falls_back_to_env_when_list_roots_fail
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """roots/list 失败时参考图预处理回退 env 根，界内文件仍可读。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     image_path = env_root / "local.png"
@@ -728,7 +739,7 @@ async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
 
 
 class _NoSessionContext:
-    """无请求上下文的 Context 替身：session 属性抛 ValueError（SDK 真实形态）。"""
+    """无请求上下文的 Context 替身：session 属性抛 ValueError，对齐 SDK 真实形态。"""
 
     @property
     def session(self) -> object:

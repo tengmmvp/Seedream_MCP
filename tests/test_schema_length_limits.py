@@ -1,8 +1,8 @@
 """工具输入 schema 字符串边界测试。
 
 pydantic 在 core schema 层强制 max_length 约束，超长值在字段校验器运行前即被拒绝。
-覆盖 prompt（100000）/save_path（1024）/custom_name（255）/browse directory（1024）/
-browse format_filter 单项（16）的接受与超长拒绝边界，以及单图 image 的空白拒绝边界，
+覆盖 prompt 100000、save_path 1024、custom_name 255、browse directory 1024 与
+browse format_filter 单项 16 的接受与超长拒绝边界，以及单图 image 的空白拒绝边界，
 锁定 inputSchema 约束不被回归。统一使用 model_validate 构造输入。
 """
 

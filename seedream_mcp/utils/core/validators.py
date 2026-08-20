@@ -458,8 +458,8 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     """验证图像尺寸与模型的兼容性。
 
     尺寸规则由 model_capabilities 能力声明驱动：预设档位白名单 allowed_presets、
-    像素总区间 min/max_size_pixels、倍数约束 size_pixel_multiple（如 5.0 Pro 要求
-    宽高为 16 的倍数），新增模型只需扩展能力声明。图层拆分场景的 "auto" 仅校验
+    像素总区间 min/max_size_pixels、倍数约束 size_pixel_multiple，如 5.0 Pro 要求
+    宽高为 16 的倍数，新增模型只需扩展能力声明。图层拆分场景的 "auto" 仅校验
     模型支持图层拆分，不走档位与像素校验。
 
     Returns:

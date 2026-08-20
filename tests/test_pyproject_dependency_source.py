@@ -6,6 +6,7 @@ import tomllib
 
 
 def test_runtime_dependencies_have_single_source() -> None:
+    """运行时依赖只存在于 project.dependencies，hatch default env 不得另设依赖清单。"""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
 

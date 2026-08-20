@@ -25,7 +25,7 @@ from seedream_mcp.utils.core.errors import SeedreamConfigError
 def test_read_env_values_wraps_os_error_as_config_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """.env 存在但读取抛 OSError（如权限拒绝）时包装为含路径的 SeedreamConfigError。
+    """.env 存在但读取失败抛 OSError 时包装为含路径的 SeedreamConfigError。
 
     未包装时 OSError 会沿配置构建上抛，越过 cli_main 只捕 SeedreamConfigError 的
     优雅错误路径，以裸 traceback 崩溃。

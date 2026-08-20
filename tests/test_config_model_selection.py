@@ -8,7 +8,7 @@ from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
 
 
 def test_config_accepts_endpoint_id() -> None:
-    # 文档允许用 Endpoint ID 替代 Model ID，不得被下线模型黑名单拒绝
+    """Endpoint ID 替代 Model ID 时接受，不得被下线模型黑名单拒绝。"""
     config = SeedreamConfig(api_key="k", model_id="ep-20241001-abcde")
     assert config.model_id == "ep-20241001-abcde"
 
@@ -24,16 +24,19 @@ def test_default_model_id_matches_alias_table() -> None:
 
 
 def test_config_rejects_deprecated_seedream_3_0() -> None:
+    """已下线的 3.0 完整 Model ID 构建期拒绝。"""
     with pytest.raises(SeedreamConfigError, match="已下线"):
         SeedreamConfig(api_key="k", model_id="doubao-seedream-3-0-t2i-250515")
 
 
 def test_config_rejects_deprecated_seedream_3_0_alias() -> None:
+    """已下线的 3.0 别名同样拒绝。"""
     with pytest.raises(SeedreamConfigError, match="已下线"):
         SeedreamConfig(api_key="k", model_id="doubao-seedream-3.0")
 
 
 def test_config_rejects_deprecated_seededit_3_0() -> None:
+    """已下线的 seededit 3.0 模型同样拒绝。"""
     with pytest.raises(SeedreamConfigError, match="已下线"):
         SeedreamConfig(api_key="k", model_id="doubao-seededit-3.0-i2i-250515")
 
@@ -51,5 +54,6 @@ def test_config_accepts_current_models() -> None:
 
 
 def test_config_normalizes_seedream_50_pro_alias() -> None:
+    """5.0 Pro 别名展开为完整 Model ID。"""
     config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0-pro")
     assert config.model_id == "doubao-seedream-5-0-pro-260628"

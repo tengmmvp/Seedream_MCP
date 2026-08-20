@@ -8,6 +8,7 @@ from seedream_mcp.utils.core.validators import validate_sequential_image_limit
 
 
 def test_sequential_generation_total_limit_ok() -> None:
+    """参考图与 max_images 均在联合上限内时接受。"""
     images = [f"https://example.com/{i}.png" for i in range(5)]
     obj = SequentialGenerationInput(prompt="test", max_images=10, image=images)
     assert obj.max_images == 10
@@ -15,22 +16,26 @@ def test_sequential_generation_total_limit_ok() -> None:
 
 
 def test_sequential_generation_total_limit_exceed() -> None:
+    """参考图数量与 max_images 之和超过总上限 15 时拒绝。"""
     images = [f"https://example.com/{i}.png" for i in range(6)]
     with pytest.raises(ValueError, match="不能超过15"):
         SequentialGenerationInput(prompt="test", max_images=10, image=images)
 
 
 def test_sequential_generation_without_reference_ok() -> None:
+    """无参考图时 max_images=15 恰达上限，接受。"""
     obj = SequentialGenerationInput(prompt="test", max_images=15)
     assert obj.image is None
 
 
 def test_sequential_generation_default_max_images_is_15() -> None:
+    """无参考图时 max_images 默认 15。"""
     obj = SequentialGenerationInput(prompt="test")
     assert obj.max_images == 15
 
 
 def test_sequential_generation_default_max_images_with_reference_images() -> None:
+    """带参考图时 max_images 默认按 15 减参考图数量派生。"""
     images = [f"https://example.com/{i}.png" for i in range(3)]
     obj = SequentialGenerationInput(prompt="test", image=images)
     assert obj.max_images == 12
@@ -38,6 +43,7 @@ def test_sequential_generation_default_max_images_with_reference_images() -> Non
 
 
 def test_sequential_generation_reference_images_max_14_ok() -> None:
+    """参考图恰为上限 14 张时接受。"""
     images = [f"https://example.com/{i}.png" for i in range(14)]
     obj = SequentialGenerationInput(prompt="test", max_images=1, image=images)
     assert len(obj.image or []) == 14
@@ -47,7 +53,7 @@ def test_sequential_generation_derived_max_images_not_in_fields_set() -> None:
     """派生的 max_images 不进入 model_fields_set，与显式传入保持可区分。
 
     普通赋值会把派生值登记进 fields_set，误导以 fields_set 判断"是否显式传入"的
-    下游逻辑（exclude_unset 序列化、审计），并多触发一轮 after-validator。
+    下游逻辑如 exclude_unset 序列化与审计，并多触发一轮 after-validator。
     """
     images = [f"https://example.com/{i}.png" for i in range(3)]
     obj = SequentialGenerationInput(prompt="test", image=images)
@@ -61,6 +67,7 @@ def test_sequential_generation_derived_max_images_not_in_fields_set() -> None:
 
 
 def test_sequential_generation_reference_images_exceed_14() -> None:
+    """参考图超过 14 张时拒绝。"""
     images = [f"https://example.com/{i}.png" for i in range(15)]
     with pytest.raises(ValueError, match="1-14"):
         SequentialGenerationInput(prompt="test", max_images=1, image=images)

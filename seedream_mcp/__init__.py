@@ -43,7 +43,7 @@ __all__ = ["__version__"] + list(_LAZY_EXPORTS)
 
 
 def __getattr__(name: str) -> Any:
-    """延迟加载公开导出，避免包导入触发重模块初始化。"""
+    """延迟加载公开导出，避免包导入即触发重量级子模块初始化。"""
     target = _LAZY_EXPORTS.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

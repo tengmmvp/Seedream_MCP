@@ -7,21 +7,24 @@ from seedream_mcp.utils.core.validators import validate_size_for_model
 
 
 def test_validate_size_rejects_extreme_aspect_ratio() -> None:
-    # 宽高比超 16 在像素路径被拒，适用于任意模型。
+    """宽高比超上限的尺寸在像素路径被拒，适用于任意模型。"""
     with pytest.raises(SeedreamValidationError, match="宽高比"):
         validate_size_for_model("200x10", "doubao-seedream-5-0-260128")
 
 
 def test_validate_size_lite_rejects_unsupported_preset() -> None:
+    """5.0 Lite 不支持的档位拒绝。"""
     with pytest.raises(SeedreamValidationError, match="5.0 模型下仅支持"):
         validate_size_for_model("1K", "doubao-seedream-5-0-260128")
 
 
 def test_validate_size_45_rejects_unsupported_preset() -> None:
+    """4.5 不支持的档位拒绝。"""
     with pytest.raises(SeedreamValidationError, match="4.5 模型下仅支持"):
         validate_size_for_model("3K", "doubao-seedream-4-5-251128")
 
 
 def test_validate_size_40_rejects_unsupported_preset() -> None:
+    """4.0 不支持的档位拒绝。"""
     with pytest.raises(SeedreamValidationError, match="4.0 模型下仅支持"):
         validate_size_for_model("3K", "doubao-seedream-4-0-250828")

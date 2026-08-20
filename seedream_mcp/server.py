@@ -1,10 +1,10 @@
 """Seedream MCP 服务器主模块。
 
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，风格预设
-Prompt 与工作区、服务器信息、模型信息、Agent Skills 五个资源，并承担配置注入、
-cli_main 入口与传输分派。MCPServer 实例与共享资源生命周期由 resources 模块承担，
-本模块导入 mcp 完成注册并重导出 resources/cli/transport 符号，保持既有导入
-surface 与 tests 访问路径不变。
+Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源，并承担配置注入、
+cli_main 入口与传输分派。MCPServer 实例与共享资源生命周期由 resources 模块持有，
+本模块导入 mcp 完成注册并重导出 resources/cli/transport 符号，保持既有导入面与
+tests 访问路径不变。
 
 outputSchema 声明契约：五个工具函数的返回类型注解为
 ``Annotated[CallToolResult, ...StructuredOutput]``，SDK 据注解元数据中的 pydantic
@@ -22,7 +22,6 @@ FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inpu
 
 from __future__ import annotations
 
-# 标准库导入
 import json
 import sys
 from dataclasses import asdict
@@ -43,7 +42,6 @@ from mcp.types import (
 from mcp.types.version import is_version_at_least
 from pydantic import Field
 
-# 本地模块导入
 from .cli import (
     _build_arg_parser,
     _build_config_from_args,
@@ -120,7 +118,7 @@ from .resources import (  # noqa: F401
     mcp,
 )
 
-# ASGI 中间件与请求体上限常量重导出，供 tests 经 server 模块访问。
+# ASGI 中间件类重导出，供 tests 经 server 模块访问。
 from .transport import (  # noqa: F401
     _BearerTokenAuthMiddleware,
     _HealthCheckMiddleware,
@@ -129,8 +127,7 @@ from .transport import (  # noqa: F401
 
 # ==================== 工具注解常量 ====================
 
-# 生成类工具的能力标注：会生成文件，非只读；不破坏既有数据；每次生成结果可能不同，
-# 非幂等；需联网调用 API，属开放世界操作。
+# 生成类工具的能力标注：非只读、非幂等、需联网调用 API 的开放世界操作。
 GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=False,
@@ -138,8 +135,8 @@ GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     open_world_hint=True,
 )
 
-# 浏览类工具的能力标注：只读、仅访问本地文件系统、非开放世界；destructive_hint
-# 与 idempotent_hint 仅对非只读工具构成有效声明，按规范省略。
+# 浏览类工具的能力标注：只读、仅访问本地文件系统、非开放世界。destructive_hint
+# 与 idempotent_hint 仅对非只读工具构成有效声明，省略。
 BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     read_only_hint=True,
     open_world_hint=False,
@@ -943,10 +940,9 @@ async def models_info_resource() -> str:
 # ==================== MCP Agent Skills 资源 ====================
 
 
-# Agent Skills 开放标准目录随包分发，双轨暴露：包内 skills/ 目录可整目录拷贝到
-# ~/.claude/skills/ 手动安装；服务器侧经 skill:// 资源供客户端自动发现。目录须保持
-# 在包内以随 wheel 与 sdist 分发。渐进式披露三层对应：SKILL.md 静态资源常驻
-# resources/list，正文在读取时加载，references 模板资源按需读取。
+# Agent Skills 目录须保持在包内以随 wheel 与 sdist 分发，双轨暴露：整目录拷贝到
+# ~/.claude/skills/ 手动安装，或经 skill:// 资源供客户端自动发现。渐进式披露三层：
+# SKILL.md 条目常驻 resources/list，正文在读取时加载，references 模板资源按需读取。
 _SKILL_NAME = "seedream-image-generation"
 _SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 _SKILL_MANIFEST_PATH = _SKILLS_DIR / _SKILL_NAME / "SKILL.md"

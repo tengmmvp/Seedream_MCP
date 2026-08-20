@@ -103,7 +103,7 @@ def test_validate_image_path_none_base_dir_falls_back_and_enforces_bounds(
 ) -> None:
     """base_dir 为 None 时回退 get_workspace_root() 并始终执行越界校验。
 
-    越界路径（含 .. 穿越）不传 base_dir 也须判无效；monkeypatch get_workspace_root
+    越界路径含 .. 穿越时不传 base_dir 也须判无效；monkeypatch get_workspace_root
     返回独立 workspace，隔离环境变量与配置。
     """
     import seedream_mcp.utils.images.image_validation as image_validation_module

@@ -58,39 +58,47 @@ def test_deprecated_model_tokens_is_immutable_frozenset() -> None:
 
 
 def test_validate_watermark_bool_true() -> None:
+    """watermark 为 bool True 接受。"""
     assert validate_watermark(True) is True
 
 
 def test_validate_watermark_bool_false() -> None:
+    """watermark 为 bool False 接受。"""
     assert validate_watermark(False) is False
 
 
 @pytest.mark.parametrize("val", ["true", "TRUE", "True", "1", "yes", "YES", "on"])
 def test_validate_watermark_truthy_strings(val: str) -> None:
+    """真值字符串各变体归一化为 True。"""
     assert validate_watermark(val) is True
 
 
 @pytest.mark.parametrize("val", ["false", "FALSE", "0", "no", "No", "off"])
 def test_validate_watermark_falsy_strings(val: str) -> None:
+    """假值字符串各变体归一化为 False。"""
     assert validate_watermark(val) is False
 
 
 def test_validate_watermark_strips_whitespace() -> None:
+    """首尾空白剥离后解析。"""
     assert validate_watermark("  true  ") is True
     assert validate_watermark("  off\n") is False
 
 
 def test_validate_watermark_invalid_string() -> None:
+    """无法识别的字符串抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="水印参数"):
         validate_watermark("maybe")
 
 
 def test_validate_watermark_invalid_type() -> None:
+    """非字符串非布尔类型抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="水印参数"):
         validate_watermark(123)
 
 
 def test_validate_watermark_none_rejected() -> None:
+    """None 不接受，与 parse_bool 的缺省语义区分。"""
     with pytest.raises(SeedreamValidationError, match="水印参数"):
         validate_watermark(None)
 
@@ -99,29 +107,35 @@ def test_validate_watermark_none_rejected() -> None:
 
 
 def test_validate_response_format_url() -> None:
+    """url 取值接受。"""
     assert validate_response_format("url") == "url"
 
 
 def test_validate_response_format_b64_json() -> None:
+    """b64_json 取值接受。"""
     assert validate_response_format("b64_json") == "b64_json"
 
 
 def test_validate_response_format_normalizes_case_and_whitespace() -> None:
+    """大小写与首尾空白归一化后匹配合法取值。"""
     assert validate_response_format("URL") == "url"
     assert validate_response_format(" B64_JSON ") == "b64_json"
 
 
 def test_validate_response_format_invalid_value() -> None:
+    """非法取值抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="response_format"):
         validate_response_format("jpeg")
 
 
 def test_validate_response_format_empty() -> None:
+    """空字符串抛校验错误。"""
     with pytest.raises(SeedreamValidationError):
         validate_response_format("")
 
 
 def test_validate_response_format_non_string() -> None:
+    """非字符串输入抛校验错误。"""
     with pytest.raises(SeedreamValidationError):
         validate_response_format(123)
 
@@ -130,19 +144,22 @@ def test_validate_response_format_non_string() -> None:
 
 
 def test_validate_max_images_int() -> None:
+    """int 输入原值接受。"""
     assert validate_max_images(5) == 5
 
 
 def test_validate_max_images_boundary_min() -> None:
+    """下界值 1 接受。"""
     assert validate_max_images(1) == 1
 
 
 def test_validate_max_images_boundary_max() -> None:
+    """上界值 MAX_SEQUENTIAL_TOTAL_IMAGES 接受。"""
     assert validate_max_images(MAX_SEQUENTIAL_TOTAL_IMAGES) == MAX_SEQUENTIAL_TOTAL_IMAGES
 
 
 def test_validate_max_images_integer_float() -> None:
-    """整数浮点（如 3.0）允许转换为 int。"""
+    """整数浮点如 3.0 允许转换为 int。"""
     assert validate_max_images(3.0) == 3
 
 
@@ -159,15 +176,18 @@ def test_validate_max_images_bool_rejected() -> None:
 
 
 def test_validate_max_images_string_int() -> None:
+    """整数字符串转换为 int。"""
     assert validate_max_images("4") == 4
 
 
 def test_validate_max_images_below_min() -> None:
+    """低于下界抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须在"):
         validate_max_images(0)
 
 
 def test_validate_max_images_above_max() -> None:
+    """高于上界抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须在"):
         validate_max_images(MAX_SEQUENTIAL_TOTAL_IMAGES + 1)
 
@@ -176,14 +196,17 @@ def test_validate_max_images_above_max() -> None:
 
 
 def test_coerce_int_in_range() -> None:
+    """区间内 int 原值返回。"""
     assert _coerce_positive_int_in_range(5, "f", 1, 10) == 5
 
 
 def test_coerce_integer_float() -> None:
+    """整数浮点转换为 int。"""
     assert _coerce_positive_int_in_range(5.0, "f", 1, 10) == 5
 
 
 def test_coerce_non_integer_float_rejected() -> None:
+    """非整数浮点拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
         _coerce_positive_int_in_range(5.5, "f", 1, 10)
 
@@ -214,44 +237,53 @@ def test_coerce_fraction_infinity_boundary_unconstructible() -> None:
 
 
 def test_coerce_bool_rejected() -> None:
+    """bool 是 int 子类但须被拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
         _coerce_positive_int_in_range(True, "f", 1, 10)
 
 
 def test_coerce_false_bool_rejected() -> None:
+    """False 同 True 一样被拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
         _coerce_positive_int_in_range(False, "f", 1, 10)
 
 
 def test_coerce_string_int() -> None:
+    """整数字符串转换为 int。"""
     assert _coerce_positive_int_in_range("3", "f", 1, 10) == 3
 
 
 def test_coerce_invalid_string() -> None:
+    """无法解析的字符串抛整数校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
         _coerce_positive_int_in_range("abc", "f", 1, 10)
 
 
 def test_coerce_none_rejected() -> None:
+    """None 抛整数校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
         _coerce_positive_int_in_range(None, "f", 1, 10)
 
 
 def test_coerce_below_min() -> None:
+    """低于区间下界抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须在"):
         _coerce_positive_int_in_range(0, "f", 1, 10)
 
 
 def test_coerce_above_max() -> None:
+    """高于区间上界抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须在"):
         _coerce_positive_int_in_range(11, "f", 1, 10)
 
 
 def test_coerce_boundary_min() -> None:
+    """区间下界值接受。"""
     assert _coerce_positive_int_in_range(1, "f", 1, 10) == 1
 
 
 def test_coerce_boundary_max() -> None:
+    """区间上界值接受。"""
     assert _coerce_positive_int_in_range(10, "f", 1, 10) == 10
 
 
@@ -273,12 +305,14 @@ def test_parallel_options_defaults_parallelism_to_request_count() -> None:
 
 
 def test_parallel_options_explicit_parallelism() -> None:
+    """显式 parallelism 在合法范围内原值生效。"""
     rc, par = validate_parallel_generation_options(request_count=4, parallelism=2, stream=False)
     assert rc == 4
     assert par == 2
 
 
 def test_parallel_options_parallelism_exceeds_request_count() -> None:
+    """parallelism 大于 request_count 抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="不能大于"):
         validate_parallel_generation_options(request_count=2, parallelism=3, stream=False)
 
@@ -290,16 +324,19 @@ def test_parallel_options_stream_single_request() -> None:
 
 
 def test_parallel_options_stream_rejects_multi_request() -> None:
+    """stream=true 搭配多请求抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="stream=true"):
         validate_parallel_generation_options(request_count=2, parallelism=None, stream=True)
 
 
 def test_parallel_options_request_count_above_max() -> None:
+    """request_count 超上限抛校验错误。"""
     with pytest.raises(SeedreamValidationError):
         validate_parallel_generation_options(request_count=11, parallelism=None, stream=False)
 
 
 def test_parallel_options_parallelism_above_max() -> None:
+    """parallelism 超上限抛校验错误。"""
     with pytest.raises(SeedreamValidationError):
         validate_parallel_generation_options(request_count=10, parallelism=11, stream=False)
 

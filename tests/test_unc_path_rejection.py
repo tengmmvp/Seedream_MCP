@@ -48,6 +48,7 @@ def _patch_resolve_exploding_only_on_unc(monkeypatch: pytest.MonkeyPatch) -> Non
     ],
 )
 def test_is_unc_path_detects_unc(path: str) -> None:
+    """反斜杠与正斜杠形态的 UNC 路径均被识别。"""
     assert is_unc_path(path) is True
 
 
@@ -67,6 +68,7 @@ def test_is_unc_path_strips_leading_whitespace() -> None:
     ],
 )
 def test_is_unc_path_rejects_non_unc(path: str) -> None:
+    """绝对、相对与空字符串等非 UNC 输入不命中。"""
     assert is_unc_path(path) is False
 
 
@@ -85,6 +87,7 @@ def test_is_within_resolved_accepts_inside(tmp_path: Path) -> None:
 
 
 def test_is_within_resolved_rejects_outside(tmp_path: Path) -> None:
+    """路径不在给定根内判 False。"""
     inside = (tmp_path / "sub" / "file.png").resolve()
     outside = (tmp_path.parent / "sibling").resolve()
     outside.mkdir(exist_ok=True)
@@ -106,16 +109,19 @@ def test_is_within_resolved_accepts_one_of_multiple_bases(tmp_path: Path) -> Non
 
 
 def test_normalize_path_rejects_unc_backslash() -> None:
+    """反斜杠 UNC 输入抛 ValueError。"""
     with pytest.raises(ValueError, match="UNC"):
         normalize_path("\\\\host\\share\\file.png")
 
 
 def test_normalize_path_rejects_unc_forward_slash() -> None:
+    """正斜杠 UNC 输入抛 ValueError。"""
     with pytest.raises(ValueError, match="UNC"):
         normalize_path("//host/share/file.png")
 
 
 def test_normalize_path_accepts_normal_absolute(tmp_path: Path) -> None:
+    """普通绝对路径正常规范化，结果与原路径 resolve 等价。"""
     f = tmp_path / "x.png"
     f.touch()
     result = normalize_path(str(f))
@@ -123,6 +129,7 @@ def test_normalize_path_accepts_normal_absolute(tmp_path: Path) -> None:
 
 
 def test_normalize_path_resolves_relative(tmp_path: Path) -> None:
+    """相对路径按 base_dir 解析为绝对路径。"""
     result = normalize_path("sub/file.png", str(tmp_path))
     assert result == (tmp_path / "sub" / "file.png").resolve()
 
@@ -146,7 +153,7 @@ def test_normalize_path_oserror_preserves_reason(
 @pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对路径仅 Windows 有 drive 语义")
 @pytest.mark.parametrize("base_dir", [None, str(Path.cwd())])
 def test_normalize_path_rejects_drive_relative_path(base_dir: str | None) -> None:
-    """Windows 驱动器相对路径（如 C:foo，有 drive 无 root）与 UNC 同口径拒绝。
+    """Windows 驱动器相对路径 C:foo 有 drive 无 root，与 UNC 同口径拒绝。
 
     pathlib 的 / 拼接对该形态会丢弃 base_dir，resolve 落到该盘进程 CWD，静默绕开
     指定的基础目录。
@@ -157,7 +164,7 @@ def test_normalize_path_rejects_drive_relative_path(base_dir: str | None) -> Non
 
 @pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对路径仅 Windows 有 drive 语义")
 def test_normalize_path_accepts_drive_absolute_path(tmp_path: Path) -> None:
-    """带根分隔符的驱动器绝对路径（如 C:\\foo）不受驱动器相对拒绝影响。"""
+    """带根分隔符的驱动器绝对路径 C:\\foo 不受驱动器相对拒绝影响。"""
     result = normalize_path(str(tmp_path / "x.png"))
     assert result == (tmp_path / "x.png").resolve()
 
@@ -173,6 +180,7 @@ def test_normalize_path_posix_treats_colon_name_as_relative(tmp_path: Path) -> N
 
 
 def test_file_uri_to_path_rejects_non_file_scheme() -> None:
+    """非 file scheme 的 URI 返回 None。"""
     assert _file_uri_to_path("http://example.com/x.png") is None
 
 
@@ -187,6 +195,7 @@ def test_file_uri_to_path_rejects_unc_path_form() -> None:
 
 
 def test_file_uri_to_path_accepts_localhost(tmp_path: Path) -> None:
+    """file://localhost/path 形式接受并解析为本地路径。"""
     f = tmp_path / "x.png"
     f.touch()
     # file://localhost/path 形式应被接受。
@@ -197,6 +206,7 @@ def test_file_uri_to_path_accepts_localhost(tmp_path: Path) -> None:
 
 
 def test_file_uri_to_path_accepts_local_file(tmp_path: Path) -> None:
+    """标准本地 file URI 接受并解析为原路径。"""
     f = tmp_path / "img.png"
     f.touch()
     result = _file_uri_to_path(f.as_uri())
@@ -205,6 +215,7 @@ def test_file_uri_to_path_accepts_local_file(tmp_path: Path) -> None:
 
 
 def test_file_uri_to_path_rejects_malformed_uri() -> None:
+    """畸形 file URI 返回 None 而非抛异常。"""
     assert _file_uri_to_path("file://") is None
 
 

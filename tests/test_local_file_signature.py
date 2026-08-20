@@ -25,6 +25,7 @@ def test_url_and_data_uri_return_zero_signature() -> None:
 
 
 def test_nonexistent_relative_path_returns_zero(tmp_path: Path) -> None:
+    """相对路径在 roots 下无候选文件时返回零。"""
     assert ImagePreparer._local_file_signature("nope.png", (str(tmp_path),)) == (0.0, 0)
 
 

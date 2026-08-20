@@ -30,7 +30,7 @@ from .schemas import GenerationInputParams
 class GenerationExecutionContext:
     """生成类工具执行上下文，统一封装四类生成工具共享参数。
 
-    frozen=True 保证不可变，流水线各阶段读取同一份校验后的快照。
+    流水线各阶段读取同一份校验后的不可变快照。
 
     Attributes:
         prompt: 生成提示词；图文生图的图层拆分场景可缺省。
@@ -75,17 +75,17 @@ def build_generation_context(
 ) -> GenerationExecutionContext:
     """从类型化输入模型构建统一执行上下文。
 
-    只做 schema 表达不了的校验与合成：依赖 config.model_id 的尺寸、输出格式、流式、
-    联网工具与参考图数量能力校验；size、watermark、auto_save 缺省时按 config 默认值
-    合成，parallelism 缺省取 request_count 与全局上限的较小值。save_path 边界预检由
-    调用方流水线在本函数之后执行，全量重校验由 client 各生成方法入口承担。
+    依赖 config.model_id 的尺寸、输出格式、流式、联网工具与参考图数量能力校验；
+    size、watermark、auto_save 缺省时按 config 默认值合成，parallelism 缺省取
+    request_count 与全局上限的较小值。save_path 边界预检由调用方流水线在本函数之后
+    执行，全量重校验由 client 各生成方法入口承担。
 
     Raises:
         SeedreamValidationError: 尺寸、输出格式、流式、联网工具、提示词优化、图层
             拆分、透明通道或参考图数量校验未通过。
     """
-    # 数量上限依赖 model_id（5.0 Pro 为 10、其余为 14），须与尺寸/流式等能力校验
-    # 同层在此执行，避免进度上报「参数校验完成」后才在请求执行器内报错。
+    # 数量上限依赖 model_id，5.0 Pro 为 10、其余为 14；须与尺寸/流式等能力校验同层
+    # 在此执行，避免进度上报「参数校验完成」后才在请求执行器内报错。
     images = getattr(params, "image", None)
     if isinstance(images, list):
         max_reference = get_max_reference_images(config.model_id)
@@ -110,7 +110,7 @@ def build_generation_context(
     layer_decomposition = validate_layer_decomposition(
         getattr(params, "layer_decomposition", None), config.model_id
     )
-    # 图层拆分场景缺省尺寸为 auto（按输入图自适应），不取 config.default_size。
+    # 图层拆分场景缺省尺寸为 auto，按输入图自适应，不取 config.default_size。
     if layer_decomposition and params.size is None:
         size = "auto"
     else:

@@ -45,7 +45,7 @@ def test_sync_cleanup_closes_shared_resources(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_sync_cleanup_swallows_runtime_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """asyncio.run 抛 RuntimeError（无/已有事件循环）时被吞，引用已清空不抛出。
+    """asyncio.run 因无事件循环或已有事件循环抛 RuntimeError 时被吞，引用已清空不抛出。
 
     uvicorn 退出时事件循环已停止或主线程已有运行循环，属预期场景，余量交 GC/OS。
     """

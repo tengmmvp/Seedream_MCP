@@ -516,7 +516,7 @@ def _paginate_browse_images(
     limit: int,
 ) -> tuple[list[Path], bool, int | None, int | None]:
     """分页切片阶段：切出当前页图片并派生 has_more、next_offset 与 total_count。"""
-    # 分页切片：has_more 时未扫完全量、总数未知，total_count 置 None。
+    # has_more 时未扫完全量、总数未知，total_count 置 None。
     page_end = offset + limit
     images = all_images[offset:page_end]
     has_more = len(all_images) > page_end

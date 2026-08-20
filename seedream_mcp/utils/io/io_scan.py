@@ -92,7 +92,7 @@ def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
     """将扫描结果的每个原始路径 resolve 一次，返回 (原始路径, resolved 路径) 对列表。
 
     resolve 是扫描链路中开销最大的逐文件调用，只在扫描完成时执行一次并随缓存共享；
-    resolve 失败的条目（如网络挂载临时不可达）跳过不缓存，待下次扫描重试。
+    网络挂载临时不可达等 resolve 失败的条目跳过不缓存，待下次扫描重试。
     """
     pairs: list[tuple[Path, Path]] = []
     for image_path in images:
@@ -201,8 +201,9 @@ def cached_find_images_in_directory(
             if unreadable_dirs is not None:
                 unreadable_dirs.extend(cached.unreadable_dirs)
             return cached.images[:]
-        # 扩展量不受单条目列表上限约束：该上限只决定是否写入缓存（见 _store_scan_entry），
-        # 若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为扫完全量。
+        # 扩展量不受单条目列表上限约束：该上限只决定 _store_scan_entry 是否写入
+        # 缓存，若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为
+        # 扫完全量。
         scan_limit = max(scan_limit, len(cached.images) * _SCAN_PREFIX_GROWTH_FACTOR)
     # 扫描前捕获目录 mtime 使指纹与 images 自洽：扫描后捕获会在并发写入时反映新增
     # 而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖 mtime 失效，跳过捕获。

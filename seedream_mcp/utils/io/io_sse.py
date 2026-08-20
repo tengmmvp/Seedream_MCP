@@ -588,7 +588,7 @@ async def parse_sse_response(
     ) -> None:
         """记录完成事件的元信息，主循环与流末尾残留处理共用。
 
-        上游 completed 事件的 usage 字段异形（如字符串或数字）时收敛为空 dict，
+        上游 completed 事件的 usage 为字符串或数字等异形时收敛为空 dict，
         与非流式 client._build_api_result 的守卫同口径，保证结果结构 usage 恒为 dict。
         """
         nonlocal usage, status, tools

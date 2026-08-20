@@ -45,7 +45,7 @@ _MAX_EXTENSION_LENGTH = 16
 _MAX_UNIQUE_BASE_LENGTH = 120
 
 # 遗留临时文件清扫的 mtime 宽限秒数：仅删除早于该时限的 .part 条目，在途下载与
-# 写入的临时文件（合法下载总预算为小时级）恒新于宽限值，不被并发清理击杀。
+# 写入的临时文件恒新于宽限值不被并发清理击杀，合法下载总预算为小时级，低于宽限。
 _PART_SWEEP_GRACE_SECONDS = 24 * 3600
 
 # Windows 保留设备名，命中时在词干后追加下划线避免被解释为设备而非文件。
@@ -183,7 +183,7 @@ class FileManager:
 
         # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，命中时在
         # 首个点前追加下划线。Windows 解析前会剥离前导点与首尾空格，按同规则归一化
-        # 词干再判断；先 lstrip 防止前导点输入（如 .CON）首段为空而漏检。
+        # 词干再判断；先 lstrip 防止 .CON 一类前导点输入首段为空而漏检。
         normalized_stem = filename.lstrip(". ").split(".", 1)[0].strip(". ")
         if normalized_stem.upper() in _WINDOWS_RESERVED_NAMES:
             parts = filename.split(".", 1)

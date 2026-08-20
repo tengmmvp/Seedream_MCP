@@ -32,6 +32,7 @@ def test_file_manager_rejects_unresolvable_base_dir() -> None:
 
 
 def test_file_manager_accepts_valid_base_dir(tmp_path: Path) -> None:
+    """合法 base_dir 接受并完成创建。"""
     base_dir = tmp_path / "images"
     manager = FileManager(base_dir=base_dir)
 
@@ -49,6 +50,7 @@ def test_create_save_path_normalizes_non_image_extension(tmp_path: Path) -> None
 
 
 def test_create_save_path_keeps_whitelisted_extension(tmp_path: Path) -> None:
+    """白名单内的图片扩展名原样保留。"""
     manager = FileManager(base_dir=tmp_path)
     path = manager.create_save_path(prompt="test", url="https://example.com/img.png", tool_name="t")
     assert path.suffix.lower() == ".png"

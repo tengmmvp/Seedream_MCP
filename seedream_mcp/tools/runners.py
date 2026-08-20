@@ -30,8 +30,7 @@ from .impl.multi_image_fusion import handle_multi_image_fusion
 from .impl.sequential_generation import handle_sequential_generation
 from .impl.text_to_image import handle_text_to_image
 
-# 泛型参数绑定输入协议，使 handler 接受与 params 一致的具体输入模型，避免
-# Callable 逆变要求其接受任意协议实现。
+# 泛型绑定具体输入模型，避免 Callable 逆变要求 handler 接受任意协议实现。
 _GenerationInputT = TypeVar("_GenerationInputT", bound=GenerationInputParams)
 
 _GenerationHandler = Callable[

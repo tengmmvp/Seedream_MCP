@@ -21,6 +21,7 @@ from seedream_mcp.tools.core.common import safe_report_progress
 
 
 async def test_safe_report_progress_invokes_report_progress() -> None:
+    """进度上报经 ctx.report_progress 透传，total 固定 100。"""
     ctx = MagicMock()
     ctx.report_progress = AsyncMock()
 
@@ -30,10 +31,12 @@ async def test_safe_report_progress_invokes_report_progress() -> None:
 
 
 async def test_safe_report_progress_silent_when_ctx_is_none() -> None:
+    """ctx 为 None 时静默跳过，不抛异常。"""
     await safe_report_progress(None, progress=10.0, message="start")
 
 
 async def test_safe_report_progress_swallows_errors() -> None:
+    """上报抛异常时被吞掉，不影响主流程。"""
     ctx = MagicMock()
     ctx.report_progress = AsyncMock(side_effect=RuntimeError("no progress support"))
 
@@ -46,9 +49,8 @@ async def test_safe_report_progress_swallows_errors() -> None:
 def test_deprecated_ctx_log_push_channel_removed() -> None:
     """ctx.debug/info/warning/error 的推送封装不复存在，防止弃用通道被重新引入。
 
-    SDK 2.0 对四个方法标注 MCPDeprecationWarning（SEP-2577，logging capability 自
-    2026-07-28 弃用），且 2026-07-28 起推送需请求级 opt-in、默认不送达；重新封装该
-    通道会使全量测试重新出现弃用告警并依赖已弃用的送达语义。
+    SDK 2.0 按 SEP-2577 对四个方法标注 MCPDeprecationWarning，推送需请求级
+    opt-in 默认不送达；重新封装会使全量测试重现弃用告警并依赖已弃用的送达语义。
     """
     import seedream_mcp.tools.core._helpers as helpers_module
 
@@ -60,6 +62,7 @@ def test_deprecated_ctx_log_push_channel_removed() -> None:
 
 
 async def test_tools_register_top_level_title() -> None:
+    """五工具注册顶层 title，对齐 MCP 规范的 Tool.title 字段。"""
     tools = await mcp.list_tools()
     titles = {tool.name: tool.title for tool in tools}
 
@@ -71,7 +74,7 @@ async def test_tools_register_top_level_title() -> None:
 
 
 async def test_tool_titles_not_duplicated_in_annotations() -> None:
-    # title 应在顶层 Tool.title，不应再残留于 annotations.title
+    """title 只出现在顶层 Tool.title，annotations 内不重复携带。"""
     tools = await mcp.list_tools()
     for tool in tools:
         if tool.annotations is None:
@@ -82,11 +85,10 @@ async def test_tool_titles_not_duplicated_in_annotations() -> None:
 async def test_tool_annotations_locked_to_current_hints() -> None:
     """五工具 annotations 逐项锁定，防止行为提示被无意改动。
 
-    生成类工具非只读、非破坏、非幂等且需联网调用 API，四个 hint 依次为
-    False/False/False/True；浏览类工具只读本地文件列表，read_only 与 open_world
-    为 True/False。规范仅为非只读工具定义 destructive_hint 与 idempotent_hint，
-    只读工具不携带两者，断言其为 None 锁定该规范口径。客户端据此决定确认策略
-    与并行调用方式。
+    生成类工具需联网调用 API，四个 hint 依次为 False/False/False/True；浏览类
+    只读本地文件，read_only 与 open_world 为 True/False。规范仅为非只读工具定义
+    destructive 与 idempotent hint，只读工具两者为 None。客户端据此决定确认
+    策略与并行调用方式。
     """
     expected = {
         "text_to_image": (False, False, False, True),

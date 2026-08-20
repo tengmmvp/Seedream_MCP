@@ -99,7 +99,7 @@ async def test_resolver_over_modern_negotiation(
     tmp_path: Path,
     reset_lifespan_singletons: None,
 ) -> None:
-    """默认协商（2026-07-28）加 roots callback 时，resolver 经多轮往返取回根目录。
+    """默认协商 2026-07-28 加 roots callback 时，resolver 经多轮往返取回根目录。
 
     边界语义与 legacy 协商一致。
     """

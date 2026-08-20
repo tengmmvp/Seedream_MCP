@@ -35,10 +35,6 @@ async def handle_multi_image_fusion(
 ) -> CallToolResult:
     """处理多图融合请求，依据文本描述融合多张参考图特征生成新图像。
 
-    入参经 schema 校验后由 ``execute_generation_handler`` 统一编排：构建执行上下文、
-    调用客户端生成、可选自动保存并格式化结果；字段规则与默认值见
-    ``MultiImageFusionInput``。
-
     Returns:
         含文本摘要与 structuredContent 的工具结果；失败不抛异常，以 ``is_error=True``
         返回。

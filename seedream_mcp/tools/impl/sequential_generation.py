@@ -36,10 +36,7 @@ async def handle_sequential_generation(
 ) -> CallToolResult:
     """处理组图输出请求，基于参考图与文本生成一组内容关联的图片。
 
-    入参经 schema 校验后由 ``execute_generation_handler`` 统一编排：构建执行上下文、
-    调用客户端生成、可选自动保存并格式化结果；字段规则与默认值见
-    ``SequentialGenerationInput``。max_images 未显式提供时由 schema 按参考图数量
-    自动推导。
+    max_images 未显式提供时由 schema 按参考图数量自动推导。
 
     Returns:
         含文本摘要与 structuredContent 的工具结果；失败不抛异常，以 ``is_error=True``

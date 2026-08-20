@@ -97,7 +97,6 @@ _NETWORK_CREDENTIAL_GUIDANCE = "请确认 API Key 和网络可用后重试。"
 # generation_failed 为兜底档案码，无更具体指引，有意不进入下方查表；守护测试据此放行。
 _FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES = frozenset({"generation_failed"})
 
-# 失败排查建议按错误码查表
 _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
     "validation_error": "请根据错误信息调整对应参数取值。",
     "payload_too_large": "请根据错误信息调整对应参数取值。",
@@ -111,9 +110,8 @@ _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
 }
 _DEFAULT_FAILURE_GUIDANCE = "请根据错误信息排查后重试。"
 
-# HTTP 状态码级排查建议：多个业务失败状态归约到同一 api_error 错误码，按状态区分
-# 建议。拼接仅发生在档案未携带 user_hint 时，本表作为缺 hint 时的兜底；未列举状态
-# 回退错误码查表。
+# HTTP 状态码级排查建议：多个业务失败状态归约到同一 api_error 错误码，按状态码
+# 区分建议；未列举状态回退错误码查表。
 _FAILURE_GUIDANCE_BY_STATUS: dict[int, str] = {
     400: "请核对请求参数。",
     401: _NETWORK_CREDENTIAL_GUIDANCE,

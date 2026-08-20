@@ -17,7 +17,7 @@ from seedream_mcp.utils.core.logs import (
     setup_logging,
 )
 
-# 模拟 loguru record["exception"] 的 RecordException 结构（type, value, traceback）
+# 模拟 loguru record["exception"] 的 RecordException 结构，含 type、value、traceback 三元组
 _RecordException = namedtuple("_RecordException", "type value traceback")
 
 
@@ -58,6 +58,7 @@ def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_setup_logging_respects_force_standard_logging_false(
     monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
 ) -> None:
+    """force_standard_logging=False 时 basicConfig 不带 force。"""
     captured_kwargs = {}
 
     def fake_basic_config(*args, **kwargs) -> None:
@@ -79,6 +80,7 @@ def test_setup_logging_respects_force_standard_logging_false(
 def test_setup_logging_respects_force_standard_logging_true(
     monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
 ) -> None:
+    """force_standard_logging=True 时 basicConfig 透传 force。"""
     captured_kwargs = {}
 
     def fake_basic_config(*args, **kwargs) -> None:

@@ -213,10 +213,8 @@ def test_find_images_rejects_unc_directory_before_resolve(
 ) -> None:
     """UNC 形式的目录入参在 resolve 前被拒：记录告警、返回空列表且不触发路径解析。
 
-    UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须与其他 resolve 站点同口径
-    前置拦截，不向远端泄露凭据。前置拦截经告警文案锁定：find_images_in_directory
-    的兜底 except 会吞掉 resolve 抛出的异常并同样返回空列表，仅断言空返回无法
-    区分前置拦截与异常兜底两条路径。
+    Windows 的 resolve 会触发 SMB 认证。前置拦截经告警文案锁定：find_images_in_directory
+    的兜底 except 会吞掉 resolve 异常并同样返回空列表，仅断言空返回无法区分两条路径。
     """
 
     def _explode_resolve(self: Path, strict: bool = False) -> Path:

@@ -115,6 +115,7 @@ async def test_generation_handlers_support_parallel_requests(
     method_name: str,
     params: ParallelHandlerParams,
 ) -> None:
+    """四个生成工具的 handler 均支持并行请求，按 request_count 分发并汇总。"""
     call_count = 0
 
     async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
@@ -378,16 +379,19 @@ def test_progress_milestone_constants_strictly_increasing() -> None:
 
 
 def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:
+    """request_count 超上限 10 被 schema 拒绝。"""
     with pytest.raises(ValidationError, match="request_count"):
         TextToImageInput(prompt="test", request_count=11)
 
 
 def test_parallel_options_reject_parallelism_greater_than_request_count_in_schema() -> None:
+    """parallelism 大于 request_count 被 schema 拒绝。"""
     with pytest.raises(ValidationError, match="parallelism 不能大于 request_count"):
         TextToImageInput(prompt="test", request_count=2, parallelism=3)
 
 
 def test_parallel_options_reject_stream_with_parallel_requests_in_schema() -> None:
+    """并行请求与 stream 互斥，schema 层拒绝组合。"""
     with pytest.raises(ValidationError, match="stream=true 时 request_count 必须为 1"):
         TextToImageInput(prompt="test", request_count=2, stream=True)
 
@@ -395,6 +399,8 @@ def test_parallel_options_reject_stream_with_parallel_requests_in_schema() -> No
 async def test_generation_handler_returns_call_tool_error_result_when_request_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """底层校验异常翻为 CallToolResult 工具错误，不向外抛。"""
+
     async def failing_method(self: Any, **kwargs: Any) -> None:
         del self, kwargs
         raise SeedreamValidationError("提示词不能为空", field="prompt", value="")

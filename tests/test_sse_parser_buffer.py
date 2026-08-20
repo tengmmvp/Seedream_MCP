@@ -30,6 +30,7 @@ class _CapturingLog(_FakeLog):
 
 
 async def test_parse_sse_response_collects_events_and_completed() -> None:
+    """完整流解析出 data 事件、completed 状态与 usage。"""
     chunks = [
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
@@ -70,6 +71,7 @@ async def test_parse_sse_response_preserves_complete_events_before_truncation() 
 
 
 async def test_parse_sse_response_raises_on_request_level_error() -> None:
+    """请求级错误事件抛 SeedreamAPIError，携带上游 message。"""
     chunks = [b'data: {"error":{"message":"bad request","code":"x"}}\n\n']
     with pytest.raises(SeedreamAPIError, match="bad request"):
         await parse_sse_response(
@@ -714,6 +716,7 @@ def test_is_sse_response_strips_leading_whitespace() -> None:
 
 
 def test_is_sse_response_rejects_non_sse_media_type() -> None:
+    """非 SSE media type 判定为非流式响应。"""
     assert is_sse_response(_resp_with_content_type("application/json")) is False
 
 

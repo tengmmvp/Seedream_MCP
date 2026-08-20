@@ -65,17 +65,16 @@ _B64_WORST_CASE_NUMERATOR = 4
 # 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象
 _ERROR_JSON_PARSE_LIMIT = 64 * 1024
 
-# 响应体 join 卸载阈值
+# 响应体累计超过该阈值时 join 移交工作线程执行
 _JOIN_OFFLOAD_THRESHOLD = 8 * 1024 * 1024
 
 
 class SharedRequestPlan:
     """单次工具调用内并行请求的共享计划。
 
-    同一批次的多并行请求经本对象共享同一份 request_data 与序列化 body，构建与
-    序列化各恰好发生一次。经 ``shared_request_plan_scope`` 绑定到当前上下文后由
-    client 各生成方法与 ``_call_api`` 读取，批次结束后随作用域退出复位并释放引用。
-    request_data 在共享期间不可变：构建完成后仅读取、不改写。
+    同一批次的多并行请求共享同一份 request_data 与序列化 body，构建与序列化各
+    恰好发生一次。经 ``shared_request_plan_scope`` 绑定到当前上下文后由 client
+    各生成方法与 ``_call_api`` 读取，批次结束随作用域退出释放。
 
     Attributes:
         request_data: 共享的请求参数字典，构建完成后批内只读。
@@ -95,10 +94,9 @@ class SharedRequestPlan:
     ) -> dict[str, Any]:
         """返回共享 request_data：首个到者执行 builder 构建，其余复用同一 dict。
 
-        builder 在锁内执行；构建抛出时缓存首个异常并在锁内重放给后到者。批内
-        输入相同，重试构建只会重复读盘与解码等全量副作用，重放同一异常对象即可，
-        其 traceback 在多个接收方处累积追加不影响按 message 的错误消费。失败
-        缓存随 release 随计划一并清空，下一批次重新构建。
+        builder 在锁内执行；构建抛出时缓存首个异常并重放给后到者。批内输入相同，
+        重试构建只会重复读盘与解码等全量副作用，故重放同一异常对象。失败缓存随
+        release 清空，下一批次重新构建。
         """
         if self.request_data is not None:
             return self.request_data
@@ -147,8 +145,7 @@ _ACTIVE_REQUEST_PLAN: ContextVar[SharedRequestPlan | None] = ContextVar(
 def shared_request_plan_scope() -> Iterator[SharedRequestPlan]:
     """绑定新的共享请求计划至当前上下文，退出时复位绑定并释放计划引用。
 
-    作用域内的 client 生成调用读取绑定计划，同批请求只构建一次 request_data、
-    只序列化一次 body；异常与取消路径均经 finally 复位。
+    异常与取消路径同样经 finally 复位。
     """
     plan = SharedRequestPlan()
     token = _ACTIVE_REQUEST_PLAN.set(plan)
@@ -170,10 +167,10 @@ async def _build_request_data(
 
 
 def _has_valid_image_items(data: Any) -> bool:
-    """判定 200 响应的 data 字段是否含至少一个非错误的图片条目。
+    """判定 200 响应的 data 字段是否含至少一个非错误图片条目。
 
     list 形态取不含 error 键的 dict 条目，dict 形态本身计为一个条目，None 与
-    标量形态无图片。供 _build_api_result 的顶层 error 守卫使用。
+    标量形态无图片。
     """
     if isinstance(data, list):
         return any(isinstance(item, dict) and "error" not in item for item in data)
@@ -705,8 +702,8 @@ class SeedreamClient:
 
         size 与 watermark 未显式传入时按 config.default_size / default_watermark
         兜底合成；图层拆分场景 size 未显式传入时按官方默认取 auto。各方法特有的
-        图片数量与序列校验仍在各自方法内执行。当前上下文绑定共享请求计划时按
-        输入快照复用批内首次校验结果；直连调用未绑定计划，每次独立校验。
+        图片数量与序列校验仍在各自方法内执行。绑定共享请求计划时按输入快照复用
+        批内首次校验结果。
         """
         if layer_decomposition and size is None:
             resolved_size = "auto"
@@ -761,8 +758,8 @@ class SeedreamClient:
     ) -> None:
         """批次分发前校验公共参数一次，结果经共享计划供同批各请求复用。
 
-        供 tools 并行层在批次请求分发前调用。校验失败立即上抛，异常类型与消息和
-        单请求路径一致；未绑定共享计划时仅执行校验，无缓存效果。
+        校验失败立即上抛，异常类型与消息和单请求路径一致；未绑定共享计划时仅执行
+        校验，无缓存效果。
         """
         await self._validate_common_generation_params(
             prompt=prompt,
@@ -806,7 +803,7 @@ class SeedreamClient:
         """确保 HTTP 客户端已创建，首次创建经双检锁串行化。
 
         Raises:
-            SeedreamConfigError: API 密钥为空，原样透传保持配置排查指引。
+            SeedreamConfigError: API 密钥为空。
             SeedreamAPIError: 客户端创建失败。
         """
         if self._client is None:
@@ -988,11 +985,10 @@ class SeedreamClient:
     def _build_api_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         """统一归一化 API 返回结果结构。
 
-        success 仅代表 HTTP 层成功，即已收到 200 响应；body 级的部分失败或空数据
-        由 status 与 data 共同表达，status 取值为 completed/partial/failed，
-        调用方应同时检查 status 而非仅依赖 success。顶层 error 为非空 dict 时始终
-        透传 error 键：data 无有效图片属请求级软失败，success 置 False、status 置
-        failed，不再被吞为成功零图；data 含有效图片则维持 success=True 并保留
+        success 仅代表收到 200 响应；body 级的部分失败或空数据由 status 与 data
+        共同表达，status 取值为 completed/partial/failed，调用方应同时检查 status。
+        顶层 error 为非空 dict 时始终透传 error 键：data 无有效图片属请求级失败，
+        success 置 False、status 置 failed；data 含有效图片则维持 success=True 并保留
         error 键，供调用方诊断上游部分错误。
         """
         data = payload.get("data")
@@ -1063,7 +1059,7 @@ class SeedreamClient:
 
     @staticmethod
     def _retry_after_or_none(status_code: int, headers: Any) -> float | None:
-        """对可重试状态码（429/5xx）解析 Retry-After，其余返回 None。"""
+        """对可重试状态码解析 Retry-After，其余返回 None。"""
         if SeedreamClient._is_retryable_status(status_code):
             return parse_retry_after(headers)
         return None
@@ -1116,16 +1112,13 @@ class SeedreamClient:
     ) -> bytes:
         """流式读取响应体并施加总量与总时长上限，超限抛出对应异常。
 
-        max_bytes 缺省时取 _response_body_byte_limit，错误路径传入
-        _error_body_byte_limit 的独立小上限。Content-Length 头先做快速预检，chunked
-        或缺失 Content-Length 的响应在累计读取中强制上限。status_code 由错误路径
-        传入，使超限异常按 429/5xx 可重试、4xx 立即失败的既有分类处置；成功路径
-        不传，超限保持无状态码的立即失败。deadline 为本次请求的 time.monotonic
-        截止时间，逐块检查封顶整个读体阶段。读体期间进程内存峰值约为已读字节的
-        2 倍。响应的关闭由调用方负责。
+        max_bytes 缺省时取 _response_body_byte_limit，错误路径传入更小的独立上限。
+        status_code 由错误路径传入，使超限异常沿用 429/5xx 可重试、4xx 立即失败的
+        既有分类；成功路径不传，超限保持无状态码的立即失败。deadline 为
+        time.monotonic 截止时间，逐块检查封顶整个读体阶段。响应的关闭由调用方负责。
 
         Raises:
-            SeedreamAPIError: 响应体超过 max_bytes，携带 status_code 提供时的状态码。
+            SeedreamAPIError: 响应体超过 max_bytes，status_code 非空时携带该状态码。
             asyncio.TimeoutError: 提供 deadline 且读体中途超过截止时间。
         """
         if max_bytes is None:
@@ -1224,9 +1217,8 @@ class SeedreamClient:
     ) -> dict[str, Any]:
         """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。
 
-        每次尝试按 config.api_timeout 记录总时长截止时间，封顶 SSE 解析与流式读体，
-        超限抛 asyncio.TimeoutError 并入 _call_api 的超时重试分支；重试由 _call_api
-        发起，每次尝试重新计预算。
+        每次尝试按 config.api_timeout 记录总时长截止时间，封顶 SSE 解析与流式读体；
+        超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
         """
         deadline = time.monotonic() + float(self.config.api_timeout)
         async with client.stream(
@@ -1268,8 +1260,8 @@ class SeedreamClient:
         """发送非流式请求，将 JSON 响应解析为统一结果结构。
 
         以流式发送实施总量限额，避免 client.post 先全量缓冲使 Content-Length 预检
-        失效。每次尝试按 config.api_timeout 记录总时长截止时间并约束读体，超限抛
-        asyncio.TimeoutError 并入 _call_api 的超时重试分支。
+        失效。每次尝试按 config.api_timeout 记录总时长截止时间并约束读体；超限抛
+        asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
         """
         deadline = time.monotonic() + float(self.config.api_timeout)
         request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
@@ -1284,10 +1276,9 @@ class SeedreamClient:
     async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         """调用 Seedream API。
 
-        按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误类型
-        分类处理：非 2xx 中仅 429 与 5xx 可重试，其余状态码（含 3xx 与 401-499）立即
-        抛出；超时及网络错误按指数退避或服务端 Retry-After 重试，重试次数用尽后抛出
-        对应的 Seedream 异常。
+        按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误
+        类型分类：非 2xx 中仅 429 与 5xx 可重试，其余状态码立即抛出；超时与网络
+        错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的 Seedream 异常。
         """
         await self._ensure_client()
         client = self._get_http_client()

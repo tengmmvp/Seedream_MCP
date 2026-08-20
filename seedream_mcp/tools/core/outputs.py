@@ -84,8 +84,8 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
         resolved_directories: 实际解析并扫描的目录列表；边界来自回退配置时为占位符回显。
         workspace_roots: 工作区根回显；边界来自回退配置时为占位符回显。
         count: 当前页返回的图片条数。
-        total_count: 全量匹配图片总数，未扫完全量时为 None；count 表达当前页条数，
-            total_count 表达全量匹配数，二者分页语义不同。
+        total_count: 全量匹配图片总数，未扫完全量时为 None；与表达当前页条数的
+            count 分页语义不同。
         offset: 当前页起始偏移。
         has_more: 是否仍有未返回的匹配图片。
         next_offset: 下一页起始偏移，无更多图片时为 None。

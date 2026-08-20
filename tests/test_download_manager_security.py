@@ -198,6 +198,7 @@ async def test_resolve_cancel_with_surviving_waiter_not_armed(
 
 
 def test_validate_connected_peer_ip_blocks_non_public_ip() -> None:
+    """连接后复核拒绝非公网对端 IP。"""
     manager = DownloadManager()
     fake_response = _FakeResponse(peer_ip="127.0.0.1")
 
@@ -208,6 +209,7 @@ def test_validate_connected_peer_ip_blocks_non_public_ip() -> None:
 
 
 def test_validate_connected_peer_ip_allows_public_ip() -> None:
+    """连接后复核放行公网对端 IP。"""
     manager = DownloadManager()
     fake_response = _FakeResponse(peer_ip="8.8.8.8")
 

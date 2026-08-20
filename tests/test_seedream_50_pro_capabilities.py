@@ -1,8 +1,8 @@
 """Seedream 5.0 Pro 能力差异校验。
 
-5.0 Pro 的 Model ID（doubao-seedream-5-0-pro-*）包含 "doubao-seedream-5-0" 子串，
-历史上会被误判为 5.0 Lite。本模块回归其与 5.0 Lite 在工具、输出格式、参考图上限、
-提示词优化模式上的差异。
+5.0 Pro 的 Model ID 形如 doubao-seedream-5-0-pro-*，包含 "doubao-seedream-5-0"
+子串，历史上会被误判为 5.0 Lite。本模块回归其与 5.0 Lite 在工具、输出格式、参考图
+上限、提示词优化模式上的差异。
 """
 
 from __future__ import annotations
@@ -37,14 +37,17 @@ MODEL_40 = "doubao-seedream-4-0-250828"
 
 
 def test_pro_model_detected_as_pro() -> None:
+    """Pro 完整标识按 Pro 家族解析。"""
     assert get_model_capabilities(PRO).max_reference_images == 10
 
 
 def test_lite_model_not_detected_as_pro() -> None:
+    """Lite 完整标识不误判为 Pro。"""
     assert get_model_capabilities(LITE).max_reference_images == 14
 
 
 def test_pro_alias_detected_as_pro() -> None:
+    """Pro 别名同样按 Pro 家族解析。"""
     assert get_model_capabilities("doubao-seedream-5.0-pro").max_reference_images == 10
 
 
@@ -52,15 +55,18 @@ def test_pro_alias_detected_as_pro() -> None:
 
 
 def test_tools_accepted_for_lite() -> None:
+    """Lite 接受联网搜索工具。"""
     assert validate_generation_tools([{"type": "web_search"}], LITE) == [{"type": "web_search"}]
 
 
 def test_tools_rejected_for_pro() -> None:
+    """Pro 拒绝联网搜索工具。"""
     with pytest.raises(SeedreamValidationError, match="不支持联网搜索"):
         validate_generation_tools([{"type": "web_search"}], PRO)
 
 
 def test_tools_rejected_for_45() -> None:
+    """4.5 拒绝联网搜索工具。"""
     with pytest.raises(SeedreamValidationError, match="不支持联网搜索"):
         validate_generation_tools([{"type": "web_search"}], MODEL_45)
 
@@ -69,19 +75,23 @@ def test_tools_rejected_for_45() -> None:
 
 
 def test_output_format_accepted_for_pro() -> None:
+    """Pro 接受 png 输出格式。"""
     assert validate_output_format("png", PRO) == "png"
 
 
 def test_output_format_accepted_for_lite() -> None:
+    """Lite 接受 jpeg 输出格式。"""
     assert validate_output_format("jpeg", LITE) == "jpeg"
 
 
 def test_output_format_rejected_for_45() -> None:
+    """4.5 拒绝 output_format 参数。"""
     with pytest.raises(SeedreamValidationError, match="5.0 系列"):
         validate_output_format("png", MODEL_45)
 
 
 def test_output_format_rejected_for_40() -> None:
+    """4.0 拒绝 output_format 参数。"""
     with pytest.raises(SeedreamValidationError, match="5.0 系列"):
         validate_output_format("png", MODEL_40)
 
@@ -90,18 +100,22 @@ def test_output_format_rejected_for_40() -> None:
 
 
 def test_max_reference_images_pro_is_10() -> None:
+    """Pro 参考图上限为 10。"""
     assert get_max_reference_images(PRO) == 10
 
 
 def test_max_reference_images_lite_is_14() -> None:
+    """Lite 参考图上限为 14。"""
     assert get_max_reference_images(LITE) == 14
 
 
 def test_max_reference_images_45_is_14() -> None:
+    """4.5 参考图上限为 14。"""
     assert get_max_reference_images(MODEL_45) == 14
 
 
 def test_max_reference_images_40_is_14() -> None:
+    """4.0 参考图上限为 14。"""
     assert get_max_reference_images(MODEL_40) == 14
 
 
@@ -109,19 +123,23 @@ def test_max_reference_images_40_is_14() -> None:
 
 
 def test_optimize_fast_accepted_for_pro() -> None:
+    """Pro 接受 fast 优化模式。"""
     assert validate_optimize_prompt_options({"mode": "fast"}, PRO) == {"mode": "fast"}
 
 
 def test_optimize_fast_rejected_for_lite() -> None:
+    """Lite 仅支持 standard，fast 拒绝。"""
     with pytest.raises(SeedreamValidationError, match="standard"):
         validate_optimize_prompt_options({"mode": "fast"}, LITE)
 
 
 def test_optimize_fast_accepted_for_40() -> None:
+    """4.0 接受 fast 优化模式。"""
     assert validate_optimize_prompt_options({"mode": "fast"}, MODEL_40) == {"mode": "fast"}
 
 
 def test_optimize_standard_accepted_for_pro() -> None:
+    """Pro 接受 standard 优化模式。"""
     assert validate_optimize_prompt_options({"mode": "standard"}, PRO) == {"mode": "standard"}
 
 
@@ -129,15 +147,18 @@ def test_optimize_standard_accepted_for_pro() -> None:
 
 
 def test_stream_disabled_ok_for_pro() -> None:
+    """Pro 关闭流式时接受。"""
     assert validate_stream(False, PRO) is False
 
 
 def test_stream_enabled_rejected_for_pro() -> None:
+    """Pro 开启流式被拒绝。"""
     with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
         validate_stream(True, PRO)
 
 
 def test_stream_enabled_ok_for_lite() -> None:
+    """Lite 开启流式接受。"""
     assert validate_stream(True, LITE) is True
 
 
@@ -151,11 +172,12 @@ def test_stream_non_bool_rejected_for_supporting_model() -> None:
 
 
 def test_output_format_accepted_for_endpoint_id() -> None:
-    # Endpoint ID 无法识别模型，放行交由 API 校验，与 stream/size/optimize 策略一致
+    """Endpoint ID 无法识别模型时放行，交由 API 校验。"""
     assert validate_output_format("png", "ep-20241001-abcde") == "png"
 
 
 def test_tools_accepted_for_endpoint_id() -> None:
+    """Endpoint ID 的 tools 同样放行，与 output_format 策略一致。"""
     assert validate_generation_tools([{"type": "web_search"}], "ep-20241001-abcde") == [
         {"type": "web_search"}
     ]
@@ -174,40 +196,46 @@ def test_supports_sequential_generation_false_for_pro() -> None:
 
 
 def test_layer_decomposition_accepted_for_pro() -> None:
+    """Pro 接受图层拆分。"""
     assert validate_layer_decomposition(True, PRO) is True
 
 
 def test_layer_decomposition_rejected_for_lite() -> None:
+    """Lite 拒绝图层拆分。"""
     with pytest.raises(SeedreamValidationError, match="不支持 layer_decomposition"):
         validate_layer_decomposition(True, LITE)
 
 
 def test_layer_decomposition_none_defaults_false() -> None:
+    """未指定图层拆分默认关闭。"""
     assert validate_layer_decomposition(None, LITE) is False
 
 
 def test_layer_decomposition_rejects_non_bool() -> None:
+    """非布尔图层拆分值拒绝。"""
     with pytest.raises(SeedreamValidationError, match="布尔值"):
         validate_layer_decomposition("true", PRO)
 
 
 def test_size_auto_accepted_for_pro_with_layer_decomposition() -> None:
+    """Pro 开启图层拆分时接受 auto 尺寸。"""
     assert validate_size_for_model("auto", PRO, layer_decomposition=True) == "auto"
 
 
 def test_size_auto_rejected_without_layer_decomposition() -> None:
+    """未开启图层拆分时 auto 尺寸拒绝。"""
     with pytest.raises(SeedreamValidationError):
         validate_size_for_model("auto", PRO)
 
 
 def test_size_auto_rejected_for_lite_even_with_layer_decomposition() -> None:
-    # Lite 不支持图层拆分，auto 在门控层即被拒绝
+    """Lite 不支持图层拆分，auto 在门控层即被拒绝。"""
     with pytest.raises(SeedreamValidationError, match="不支持图层拆分"):
         validate_size_for_model("auto", LITE, layer_decomposition=True)
 
 
 def test_size_pixel_value_rejected_in_layer_decomposition_scenario() -> None:
-    # 官方图层拆分场景仅支持分辨率档位方式，宽高像素值直接拒绝
+    """图层拆分场景仅支持分辨率档位，宽高像素值直接拒绝。"""
     with pytest.raises(SeedreamValidationError, match="仅支持分辨率档位"):
         validate_size_for_model("2048x2048", PRO, layer_decomposition=True)
 
@@ -228,6 +256,7 @@ def test_layer_preset_message_derives_from_model_capabilities() -> None:
 
 
 def test_common_params_prompt_none_accepted_with_layer_decomposition() -> None:
+    """图层拆分场景下 prompt 允许为空。"""
     validated = validate_common_generation_params(
         prompt=None,
         optimize_prompt_options=None,
@@ -245,6 +274,7 @@ def test_common_params_prompt_none_accepted_with_layer_decomposition() -> None:
 
 
 def test_common_params_prompt_none_rejected_without_layer_decomposition() -> None:
+    """非图层拆分场景下 prompt 为空拒绝。"""
     with pytest.raises(SeedreamValidationError, match="prompt 不能为空"):
         validate_common_generation_params(
             prompt=None,
@@ -263,38 +293,45 @@ def test_common_params_prompt_none_rejected_without_layer_decomposition() -> Non
 
 
 def test_background_transparent_accepted_for_pro() -> None:
+    """Pro 接受透明背景。"""
     assert validate_background("transparent", PRO) == "transparent"
 
 
 def test_background_opaque_accepted_for_pro() -> None:
+    """Pro 接受不透明背景。"""
     assert validate_background("opaque", PRO) == "opaque"
 
 
 def test_background_rejected_for_lite() -> None:
+    """Lite 拒绝 background 参数。"""
     with pytest.raises(SeedreamValidationError, match="不支持 background"):
         validate_background("transparent", LITE)
 
 
 def test_background_rejects_invalid_value() -> None:
+    """非法 background 取值拒绝。"""
     with pytest.raises(SeedreamValidationError, match="background 必须为"):
         validate_background("alpha", PRO)
 
 
 def test_background_none_returns_none() -> None:
+    """未指定 background 返回 None。"""
     assert validate_background(None, LITE) is None
 
 
 def test_background_transparent_rejects_jpeg_output_format() -> None:
-    # 官方语义：透明背景输出为 png，与 output_format=jpeg 互斥
+    """透明背景输出为 png，与 output_format=jpeg 互斥。"""
     with pytest.raises(SeedreamValidationError, match="互斥"):
         validate_background("transparent", PRO, output_format="jpeg")
 
 
 def test_background_transparent_allows_png_output_format() -> None:
+    """透明背景与 png 输出格式兼容。"""
     assert validate_background("transparent", PRO, output_format="png") == "transparent"
 
 
 def test_background_transparent_allows_unspecified_output_format() -> None:
+    """未指定输出格式时透明背景通过。"""
     assert validate_background("transparent", PRO, output_format=None) == "transparent"
 
 

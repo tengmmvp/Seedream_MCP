@@ -48,6 +48,7 @@ async def test_handle_sequential_generation_passes_derived_max_images_when_omitt
 async def test_handle_sequential_generation_keeps_explicit_max_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """max_images 显式提供时原样透传，不被推导值覆盖。"""
     config = SeedreamConfig(api_key="test_key")
     captured_kwargs: dict = {}
 

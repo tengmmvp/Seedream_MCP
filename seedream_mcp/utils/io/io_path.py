@@ -555,9 +555,8 @@ def find_images_in_directory(
         if current_depth > max_depth:
             return False
 
-        # 排序前缀按需扩展：heapq.nsmallest 与 sorted 前缀同序，limit 场景首轮按
-        # target_count 截取条目，非图片条目占位致图片不足且目录未扫尽时倍增前缀重扫，
-        # 物化量与前缀长度成正比而非目录全量；无 limit 时一次全量排序。
+        # 排序前缀按需扩展：heapq.nsmallest 与 sorted 前缀同序，物化量与前缀长度
+        # 成正比而非目录全量；无 limit 时一次全量排序。
         prefix_len = target_count
         consumed = 0
         while True:
@@ -667,7 +666,8 @@ def _file_uri_to_path(uri: str) -> Path | None:
         path_part = url2pathname(parsed.path or "")
     except Exception:
         # Python 3.14 起 url2pathname 对非 localhost authority 的 file URI 直接抛
-        # URLError（含 POSIX 上的 //server/share 形态），语义同为拒绝，归一为 None。
+        # URLError，POSIX 上的 //server/share 形态同样如此，语义同为拒绝，归一为
+        # None。
         return None
     netloc = parsed.netloc or ""
     if netloc and netloc.lower() != "localhost":

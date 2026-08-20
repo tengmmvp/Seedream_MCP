@@ -29,6 +29,7 @@ def _build_config() -> SeedreamConfig:
 
 
 def test_build_generation_context_uses_default_size_when_omitted() -> None:
+    """未显式传 size 时回落 config.default_size，单请求默认并行度 1。"""
     config = _build_config()
     context = build_generation_context(TextToImageInput(prompt="test"), config)
 
@@ -60,6 +61,7 @@ def test_build_generation_context_layer_decomposition_defaults_size_auto() -> No
 
 
 def test_build_generation_context_layer_decomposition_keeps_explicit_size() -> None:
+    """图层拆分场景显式 size 原样保留，不被 auto 覆盖。"""
     config = _build_pro_config()
     context = build_generation_context(
         ImageToImageInput(
@@ -75,6 +77,7 @@ def test_build_generation_context_layer_decomposition_keeps_explicit_size() -> N
 
 
 def test_build_generation_context_layer_decomposition_rejected_for_lite() -> None:
+    """lite 模型开启 layer_decomposition 即校验拒绝。"""
     config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-260128")
 
     with pytest.raises(SeedreamValidationError, match="不支持 layer_decomposition"):
@@ -87,6 +90,7 @@ def test_build_generation_context_layer_decomposition_rejected_for_lite() -> Non
 
 
 def test_build_generation_context_background_carried_to_context() -> None:
+    """background 参数透传到 context，图层拆分缺省 False。"""
     config = _build_pro_config()
     context = build_generation_context(
         ImageToImageInput(
@@ -112,11 +116,13 @@ def test_build_generation_context_layer_scenario_allows_missing_prompt() -> None
 
 
 def test_image_to_image_input_rejects_missing_prompt_without_layer() -> None:
+    """非图层拆分场景 prompt 缺省在输入模型层即拒绝。"""
     with pytest.raises(ValidationError, match="prompt 不能为空"):
         ImageToImageInput(image="https://example.com/a.png")
 
 
 def test_build_generation_context_rejects_transparent_with_jpeg() -> None:
+    """transparent 背景与 jpeg 输出格式互斥，context 构建时拒绝。"""
     config = _build_pro_config()
 
     with pytest.raises(SeedreamValidationError, match="互斥"):
@@ -132,6 +138,7 @@ def test_build_generation_context_rejects_transparent_with_jpeg() -> None:
 
 
 def test_generation_execution_context_field_order_matches_mcp_order() -> None:
+    """GenerationExecutionContext 字段顺序与 MCP 工具签名平铺顺序一致。"""
     assert [field.name for field in fields(GenerationExecutionContext)] == [
         "prompt",
         "optimize_prompt_options",
@@ -153,6 +160,7 @@ def test_generation_execution_context_field_order_matches_mcp_order() -> None:
 
 
 def test_build_generation_context_rejects_explicit_empty_size() -> None:
+    """显式空字符串 size 在 context 构建时拒绝。"""
     config = _build_config()
 
     with pytest.raises(SeedreamValidationError, match="图像尺寸不能为空"):
@@ -193,6 +201,7 @@ def test_build_generation_context_allows_default_model_reference_limit() -> None
 
 
 def test_build_generation_context_sets_default_parallelism_by_request_count() -> None:
+    """未显式传并行度时默认取请求总数。"""
     config = _build_config()
     context = build_generation_context(TextToImageInput(prompt="test", request_count=3), config)
 
@@ -201,6 +210,7 @@ def test_build_generation_context_sets_default_parallelism_by_request_count() ->
 
 
 def test_build_generation_context_uses_explicit_parallelism() -> None:
+    """显式 parallelism 原样生效，不被请求总数覆盖。"""
     config = _build_config()
     context = build_generation_context(
         TextToImageInput(prompt="test", request_count=4, parallelism=2),
@@ -217,6 +227,7 @@ def test_input_schema_rejects_zero_parallelism() -> None:
 
 
 def test_build_generation_context_accepts_seedream_50_output_format_and_tools() -> None:
+    """5.0 系列的 output_format 与 tools 透传到 context。"""
     config = SeedreamConfig(
         api_key="test_key",
         model_id="doubao-seedream-5-0-260128",
@@ -237,6 +248,7 @@ def test_build_generation_context_accepts_seedream_50_output_format_and_tools() 
 
 
 def test_build_generation_context_rejects_output_format_for_seedream_45() -> None:
+    """4.5 模型传 output_format 在 context 构建时拒绝。"""
     config = SeedreamConfig(
         api_key="test_key",
         model_id="doubao-seedream-4-5-251128",
@@ -248,6 +260,7 @@ def test_build_generation_context_rejects_output_format_for_seedream_45() -> Non
 
 
 def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
+    """5.0 Pro 开启 stream 在 context 构建时拒绝。"""
     config = SeedreamConfig(
         api_key="test_key",
         model_id="doubao-seedream-5-0-pro-260628",
@@ -259,6 +272,7 @@ def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
 
 
 def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -> None:
+    """5.0 标准模型的 fast 优化模式在 context 构建时拒绝。"""
     config = SeedreamConfig(
         api_key="test_key",
         model_id="doubao-seedream-5-0-260128",
@@ -275,6 +289,7 @@ def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -
 
 
 def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None:
+    """自动保存回填只作用于可保存图片项，失败占位项不携带本地路径。"""
     result = {
         "success": True,
         "data": [
@@ -311,6 +326,7 @@ def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None
 
 
 def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() -> None:
+    """并行结果聚合合并 data、usage 与批次统计，异常请求落为占位项。"""
     request_results = [
         {
             "success": True,
@@ -364,6 +380,7 @@ def test_aggregate_failed_placeholder_error_type_classifies_exception() -> None:
 
 
 def test_aggregate_parallel_generation_results_all_failed_keeps_error_details() -> None:
+    """全部失败时聚合保留每个请求的错误明细与批次 errors 列表。"""
     result = aggregate_parallel_generation_results(
         request_results=[None, None],
         request_errors={1: RuntimeError("认证失败"), 2: RuntimeError("请求频率超限")},
@@ -458,6 +475,7 @@ def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> No
 
 
 def test_aggregate_parallel_generation_results_uses_result_error_when_success_false() -> None:
+    """success=False 的软失败结果按其 error 载荷聚合，无异常时维持兜底档。"""
     result = aggregate_parallel_generation_results(
         request_results=[
             {"success": False, "error": "鉴权失败"},
@@ -480,6 +498,7 @@ def test_aggregate_parallel_generation_results_uses_result_error_when_success_fa
 
 
 def test_format_generation_response_reports_parallel_failure_details() -> None:
+    """全失败文本输出并行失败详情，逐请求列出错误信息。"""
     text = format_generation_response(
         title="文生图任务完成",
         result={
@@ -529,6 +548,7 @@ def test_format_failure_section_extracts_message_from_dict_error() -> None:
 
 
 def test_format_generation_response_shows_input_images_for_pro_usage() -> None:
+    """usage.input_images 在文本统计中展示，生成图片数收敛不再重复输出。"""
     text = format_generation_response(
         title="图文生图任务完成",
         result={

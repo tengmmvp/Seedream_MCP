@@ -58,8 +58,8 @@ _MAX_REDIRECTS = 3
 # 的响应体通常很小，64KB 足以覆盖；残留更多时放弃复用，由连接关闭兜底。
 _DRAIN_RESPONSE_BYTES = 65536
 
-# 跨源重定向时保留的通用请求头：跳向不同源时其余定制头（如鉴权或跟踪头）被剥离，
-# 不原样发给重定向目标。
+# 跨源重定向时保留的通用请求头：跳向不同源时鉴权或跟踪一类定制头被剥离，不原样
+# 发给重定向目标。
 _CROSS_ORIGIN_SAFE_REQUEST_HEADERS = frozenset({"user-agent", "accept"})
 
 # 同一图片格式的等价扩展名类：.jpg 与 .jpeg、.heif 与 .heic 互为别名后缀。字节签名
@@ -93,7 +93,7 @@ _WSA_NO_DATA = 11004
 _WSA_NO_RECOVERY = 11003
 
 # getaddrinfo 的 gaierror 中属永久失败的错误码集合：域名不存在、参数不受支持或不可
-# 恢复的解析器故障，重试无法恢复；其余错误码（含 EAI_AGAIN 等瞬时故障）一律可重试，
+# 恢复的解析器故障，重试无法恢复；其余错误码含 EAI_AGAIN 等瞬时故障，一律可重试，
 # 重试次数上限兜底。平台缺少对应常量时经 getattr 剔除。
 _TERMINAL_GAI_ERRNOS = frozenset(
     code

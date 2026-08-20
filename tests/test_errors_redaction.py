@@ -23,7 +23,7 @@ from seedream_mcp.utils.core.errors import (
     sanitize_error_text,
 )
 
-# ==================== Bearer 令牌剥离管线（_sanitize_output_string） ====================
+# ==================== Bearer 令牌剥离管线：_sanitize_output_string ====================
 
 
 def test_bearer_pipeline_replaces_token() -> None:
@@ -32,6 +32,7 @@ def test_bearer_pipeline_replaces_token() -> None:
 
 
 def test_bearer_pipeline_is_case_insensitive() -> None:
+    """Bearer 前缀大小写不敏感，小写形态同样命中剥离。"""
     assert _sanitize_output_string("bearer ABC") == "bearer ***"
 
 
@@ -42,6 +43,7 @@ def test_bearer_pipeline_preserves_surrounding_text() -> None:
 
 
 def test_bearer_pipeline_passes_through_non_strings() -> None:
+    """非字符串输入原样返回。"""
     assert _sanitize_output_string(123) == 123
     assert _sanitize_output_string(None) is None
 
@@ -50,14 +52,17 @@ def test_bearer_pipeline_passes_through_non_strings() -> None:
 
 
 def test_truncate_value_returns_none_unchanged() -> None:
+    """None 原样返回。"""
     assert _truncate_value_for_output(None) is None
 
 
 def test_truncate_value_returns_short_string_unchanged() -> None:
+    """限长内的短字符串原样返回。"""
     assert _truncate_value_for_output("abc") == "abc"
 
 
 def test_truncate_value_truncates_long_string_with_marker() -> None:
+    """超长字符串截断并附截断标记。"""
     long_value = "x" * 300
 
     truncated = _truncate_value_for_output(long_value, limit=200)
@@ -66,6 +71,7 @@ def test_truncate_value_truncates_long_string_with_marker() -> None:
 
 
 def test_truncate_value_summarizes_oversized_dict() -> None:
+    """超限 dict 以键数摘要替代内容。"""
     oversized = {f"key{i}": "x" * 50 for i in range(10)}
 
     truncated = _truncate_value_for_output(oversized, limit=200)
@@ -74,6 +80,7 @@ def test_truncate_value_summarizes_oversized_dict() -> None:
 
 
 def test_truncate_value_summarizes_oversized_list() -> None:
+    """超限 list 以元素数摘要替代内容。"""
     oversized = ["x" * 50] * 10
 
     truncated = _truncate_value_for_output(oversized, limit=200)
@@ -82,6 +89,7 @@ def test_truncate_value_summarizes_oversized_list() -> None:
 
 
 def test_truncate_value_returns_small_container_unchanged() -> None:
+    """限长内的小容器原样返回。"""
     small = {"a": 1}
 
     assert _truncate_value_for_output(small) == small
@@ -451,7 +459,7 @@ def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
     assert original_dirty_item["error"]["message"] == "api_key: sk-leaked"
 
 
-# ==================== 数据字段净化：不截断（sanitize_data_text） ====================
+# ==================== 数据字段净化不截断：sanitize_data_text ====================
 
 
 def test_sanitize_data_text_preserves_long_url_without_truncation() -> None:
@@ -606,7 +614,7 @@ def test_format_error_for_user_truncates_before_redaction() -> None:
 
 
 def test_sanitize_error_text_blocks_quoted_keyvalue_forms() -> None:
-    """JSON/Python repr 的引号键值形态（键名后紧跟引号再接冒号）同样命中剥离。"""
+    """JSON/Python repr 的引号键值形态同样命中剥离，键名后紧跟引号再接冒号。"""
     assert "xxx" not in sanitize_error_text("{'api_key': 'xxx'}")
     assert "xxx" not in sanitize_error_text('{"api_key": "xxx"}')
     # 值吸收为贪婪多词，收尾引号与花括号并入脱敏值一并消隐，方向 fail-safe。

@@ -56,7 +56,7 @@ async def test_concurrent_parallel_calls_share_instance_semaphore(
 async def test_concurrent_single_image_calls_share_instance_semaphore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """并发单图入口（client 直连路径）同样受实例级信号量约束，峰值并发不超过上限。"""
+    """并发单图入口即 client 直连路径同样受实例级信号量约束，峰值并发不超过上限。"""
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
     preparer = client._image_preparer

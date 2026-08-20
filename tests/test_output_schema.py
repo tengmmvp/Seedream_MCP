@@ -10,6 +10,7 @@ from seedream_mcp.server import mcp
 
 
 async def test_all_tools_declare_output_schema() -> None:
+    """全部工具声明 object 形态 outputSchema，含 tool 与 success 字段。"""
     tools = await mcp.list_tools()
     assert tools, "未注册任何工具"
 
@@ -22,6 +23,7 @@ async def test_all_tools_declare_output_schema() -> None:
 
 
 async def test_generation_tools_output_schema_covers_core_fields() -> None:
+    """生成类工具 outputSchema 覆盖数据与统计核心字段。"""
     tools = await mcp.list_tools()
     generation_tools = {tool.name: tool for tool in tools if tool.name != "browse_images"}
 
@@ -34,6 +36,7 @@ async def test_generation_tools_output_schema_covers_core_fields() -> None:
 
 
 async def test_browse_tool_output_schema_covers_core_fields() -> None:
+    """浏览工具 outputSchema 覆盖图片列表与目录核心字段。"""
     tools = await mcp.list_tools()
     browse = next(tool for tool in tools if tool.name == "browse_images")
     schema = browse.output_schema

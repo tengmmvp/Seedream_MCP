@@ -9,8 +9,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-# 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)。
-# 原有条目经全仓 grep 确认零消费后清空，仅保留机制骨架。
+# 延迟加载映射：导出名 -> (子模块相对名, 子模块内属性名)，刻意保持为空。
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {}
 
 # 公开接口，派生自 _LAZY_EXPORTS 的键。

@@ -35,10 +35,6 @@ async def handle_image_to_image(
 ) -> CallToolResult:
     """处理图文生图请求，基于参考图与文本指令生成新图像。
 
-    入参经 schema 校验后由 ``execute_generation_handler`` 统一编排：构建执行上下文、
-    调用客户端生成、可选自动保存并格式化结果；字段规则与默认值见
-    ``ImageToImageInput``。
-
     Returns:
         含文本摘要与 structuredContent 的工具结果；失败不抛异常，以 ``is_error=True``
         返回。

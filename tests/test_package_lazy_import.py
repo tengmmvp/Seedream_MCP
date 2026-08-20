@@ -25,6 +25,7 @@ def _run_in_subprocess(code: str) -> None:
 
 
 def test_import_seedream_package_does_not_eager_import_client_or_server() -> None:
+    """导入包不立即加载 client 与 server 子模块。"""
     _run_in_subprocess(
         "import sys, seedream_mcp; "
         "assert 'seedream_mcp.client' not in sys.modules; "
@@ -33,6 +34,7 @@ def test_import_seedream_package_does_not_eager_import_client_or_server() -> Non
 
 
 def test_accessing_export_triggers_lazy_import() -> None:
+    """访问导出符号才触发对应子模块加载。"""
     _run_in_subprocess(
         "import sys, seedream_mcp; "
         "_ = seedream_mcp.SeedreamClient; _ = seedream_mcp.mcp; "

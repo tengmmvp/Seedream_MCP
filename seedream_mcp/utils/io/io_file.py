@@ -1,12 +1,10 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接与原子落盘骨架。
 
-提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd（异步）与
-atomic_replace_from_fd_sync（同步变体），另有 is_reparse_point 判定 NTFS
-junction 等非符号链接型 reparse point，供 io_path 的浏览扫描使用。
-open_no_follow_read 拒绝最终路径分量为符号链接：支持 O_NOFOLLOW 的平台由内核在
-open 时原子拒绝；Windows 等不支持平台退化为打开前 lstat 与打开后 fstat 比对
-st_ino/st_dev 同一性，若校验与打开之间最终分量被替换则不一致，据此拒绝，闭合
-TOCTOU 竞态。open_temp_fd 以不可预测随机名创建临时文件供调用方写入后原子替换；
+提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd 与同步变体
+atomic_replace_from_fd_sync，另有 is_reparse_point 判定 NTFS junction 等
+非符号链接型 reparse point，供 io_path 的浏览扫描使用。open_no_follow_read
+拒绝最终路径分量为符号链接：支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝，
+Windows 等不支持平台退化为 lstat 与 fstat 的同一性比对兜底，闭合 TOCTOU 竞态。
 atomic_replace_from_fd 封装「随机临时文件→写入→os.replace 原子替换→失败清理」
 协议供 io_storage 与 io_download 复用，writer 可返回 Path 覆盖最终路径，以支持
 按字节签名修正扩展名等写入后才知的目标。共享函数抛 OSError，由调用方按各自

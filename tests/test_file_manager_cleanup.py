@@ -15,17 +15,20 @@ from seedream_mcp.utils.io.io_storage import FileManager
 
 
 def test_validate_path_accepts_inside_base(tmp_path: Path) -> None:
+    """base 内嵌套路径通过校验。"""
     manager = FileManager(base_dir=tmp_path)
     assert manager.validate_path(tmp_path / "nested" / "image.png") is True
 
 
 def test_validate_path_rejects_outside_base(tmp_path: Path) -> None:
+    """base 之外的兄弟路径被拒绝。"""
     manager = FileManager(base_dir=tmp_path)
     outside = tmp_path.parent / "sibling.png"
     assert manager.validate_path(outside) is False
 
 
 def test_run_cleanup_age_removes_expired_and_keeps_recent(tmp_path: Path) -> None:
+    """按天清理删除过期文件，保留未过期文件。"""
     manager = FileManager(base_dir=tmp_path)
 
     old_file = tmp_path / "old.png"
@@ -198,7 +201,7 @@ def test_run_cleanup_policies_runs_age_then_quota_in_single_scan(
     recent_new_t = (now - timedelta(days=1, seconds=1)).timestamp()
     os.utime(recent_new, (recent_new_t, recent_new_t))
 
-    # 按天 30 天删除 expired（100B）；剩余 200B，配额 150 须再驱逐 recent_old（最旧）
+    # 按天 30 天删除 expired 的 100B；剩余 200B，配额 150 须再驱逐最旧的 recent_old
     result = manager.run_cleanup_policies(days=30, max_total_bytes=150)
 
     assert result["deleted_files"] == 2

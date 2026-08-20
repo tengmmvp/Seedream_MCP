@@ -82,7 +82,7 @@ def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> l
     """monkeypatch SeedreamClient 的指定生成方法返回标准成功结果。
 
     Returns:
-        被 patch 方法的调用记录（每次调用的关键字参数），供分发断言使用。
+        被 patch 方法每次调用的关键字参数记录，供分发断言使用。
     """
     calls: list[dict[str, Any]] = []
 

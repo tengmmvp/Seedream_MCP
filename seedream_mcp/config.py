@@ -33,8 +33,7 @@ LIFESPAN_KEY_CLIENT = "client"
 LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
-# http_max_body_size 的构建期下限；字段默认 64*1024*1024 即 64MB 为其 64 倍，
-# 过小的上限连常规 MCP JSON 载荷都无法容纳，构建期直接拒绝。
+# http_max_body_size 的构建期下限；过小的上限连常规 MCP JSON 载荷都无法容纳。
 _HTTP_MAX_BODY_SIZE_FLOOR = 1024 * 1024
 # requestState 密钥环单钥的字节数下限，与 SDK RequestStateSecurity 的密钥强度要求一致。
 _REQUEST_STATE_KEY_MIN_BYTES = 32
@@ -60,10 +59,13 @@ class SeedreamConfig:
             可信内网端点开启。
         model_id: 模型标识，构造校验时展开别名为完整 Model ID。
         default_size: 默认图像尺寸，构造校验时按模型能力标准化。
+        default_watermark: 是否默认为生成结果添加水印。
         timeout: 通用超时秒数。
         api_timeout: API 调用超时秒数。
         max_retries: API 调用最大重试次数。
+        log_level: 日志级别，构造校验时统一为大写。
         log_file: 日志文件路径，未设置时使用日志系统默认路径。
+        auto_save_enabled: 是否启用生成图片的自动保存。
         auto_save_base_dir: 自动保存根目录，未设置时回退工作区 .seedream/images 目录。
         auto_save_download_timeout: 自动保存下载超时秒数。
         auto_save_max_retries: 自动保存下载最大重试次数。
@@ -88,13 +90,12 @@ class SeedreamConfig:
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌。
         http_max_body_size: streamable-http 请求体大小上限字节数，默认 64MB。
         http_allowed_hosts: 非回环绑定的 Host 头允许列表，条目支持 host、host:port
-            与尾部 :* 端口通配，取不可变元组与 frozen 配置对齐；None 表示整体关闭
-            SDK 内层 Host 校验。仅经 SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，
-            CLI 不暴露参数。
+            与尾部 :* 端口通配；None 表示整体关闭 SDK 内层 Host 校验。仅经
+            SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，CLI 不暴露参数。
         request_state_secret_keys: requestState 密钥环，多副本 HTTP 部署共享的
-            十六进制密钥列表，逐键 hex 解码后以字节形态持有，首键密封、全键解封
-            支持零停机轮换；None 表示不启用，保持 SDK 默认的进程临时密钥。仅经
-            SEEDREAM_REQUEST_STATE_KEYS 环境变量解析，CLI 不暴露参数。
+            十六进制密钥列表，首键密封、全键解封支持零停机轮换；None 表示不启用，
+            保持 SDK 默认的进程临时密钥。仅经 SEEDREAM_REQUEST_STATE_KEYS
+            环境变量解析，CLI 不暴露参数。
     """
 
     api_key: str
@@ -153,9 +154,8 @@ class SeedreamConfig:
     def validate(self) -> None:
         """校验配置参数合法性与业务约束，并在通过时做规范化写回。
 
-        各域校验拆分至 _validate_* 私有方法，本方法仅按清单顺序编排。规范化包括
-        展开模型别名为 model_id、按模型能力校验并标准化 default_size、将 log_level
-        统一为大写。
+        各域校验拆分至 _validate_* 私有方法。规范化包括展开模型别名、按模型能力
+        标准化 default_size、将 log_level 统一为大写。
 
         Raises:
             SeedreamConfigError: 任一配置项校验失败。
@@ -464,7 +464,7 @@ def _env_var_suffix(*field_names: str) -> str:
     """反查字段对应的环境变量名，生成校验错误消息的变量名提示后缀。
 
     跨字段约束可传入多个字段名，斜杠连接各自的变量名；无法反查的字段名跳过，
-    全部不可反查时返回空串，消息保持原样。
+    全部不可反查时返回空串。
     """
     env_names: list[str] = []
     for name in field_names:
@@ -480,8 +480,7 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     """拆分 Host 允许列表条目为 host 与端口后缀，无法识别的形态返回 None。
 
     端口后缀为空串、":<1-65535 的 ASCII 数字>" 或 ":*"；host 为方括号 IPv6 字面量
-    或不含冒号与通配符、首尾无点号的非空主机名，通配符出现在非尾部端口位置、
-    端口非数字或超范围均判为非法。
+    或不含冒号与通配符、首尾无点号的非空主机名。
     """
     if entry.startswith("["):
         end = entry.find("]")
@@ -578,7 +577,6 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
             # 读取失败统一包装为含路径与原因的配置错误，经 cli_main 优雅错误路径输出。
             raise SeedreamConfigError(f"配置文件不可读: {path} -> {exc}") from exc
         except UnicodeDecodeError as exc:
-            # 编码错误同样包装为配置错误并提示需 UTF-8，不裸抛。
             raise SeedreamConfigError(f"配置文件编码错误: {path} 需为 UTF-8 编码 -> {exc}") from exc
         return {k: str(v) for k, v in values.items() if v is not None}
 
@@ -663,8 +661,7 @@ def _pick_optional_str_tuple(
 ) -> tuple[str, ...] | None:
     """按优先级取值后按逗号拆分为去空白条目元组，空值归 None 表示未配置。
 
-    逐项 strip 并丢弃空条目，全部条目为空时同样归 None；元组形态与 frozen
-    配置的不可变语义对齐。
+    逐项 strip 并丢弃空条目，全部条目为空时同样归 None。
     """
     raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None:
@@ -757,7 +754,8 @@ def build_config_from_sources(
 
     Args:
         overrides: 调用方显式覆盖值，CLI 参数为典型来源。
-        env_file: 可选 .env 文件路径，未提供时按「项目根 -> 当前工作目录」合并读取。
+        env_file: 可选 .env 文件路径，未提供时先读项目根 .env 再读当前工作目录
+            .env，后者覆盖前者。
 
     Raises:
         SeedreamConfigError: 配置文件不可读、缺少 API 密钥或配置项校验失败。
@@ -936,7 +934,7 @@ _config_build_lock = threading.Lock()
 _global_config_lock = threading.Lock()
 
 _global_config: SeedreamConfig | None = None
-# CLI 注入的活动配置，优先于 _global_config；reload_config 置 None 回退全局配置。
+# CLI 注入的活动配置，优先于 _global_config。
 _active_config: SeedreamConfig | None = None
 
 

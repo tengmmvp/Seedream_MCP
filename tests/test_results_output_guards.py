@@ -24,11 +24,12 @@ from seedream_mcp.utils.io.io_save import AutoSaveResult
 # 带 userinfo 凭据与 CRLF 的上游 URL：净化后凭据被剥离、换行被压平。
 _DIRTY_URL = "https://AKID:SECRET@mirror.example.com/a.png\r\nFAKE-LINE api_key=leaked"
 
-# 火山 TOS 签名 URL 量级（约 674 字符）：数据字段净化不得截断，否则 URL 不可用。
+# 火山 TOS 签名 URL 约 674 字符：数据字段净化不得截断，否则 URL 不可用。
 _SIGNED_URL = "https://tos.example.com/obj/a.png?X-Tos-Signature=" + "s" * 620
 
 
 def _context(enable_auto_save: bool = True) -> GenerationExecutionContext:
+    """构造默认开启自动保存的生成执行上下文。"""
     return GenerationExecutionContext(
         prompt="test",
         optimize_prompt_options=None,
@@ -228,7 +229,7 @@ def test_structured_data_clean_url_passed_through_without_copy() -> None:
     assert sanitized[0] is images[0]
 
 
-# ==================== URL 数据字段不截断（签名 URL 回归） ====================
+# ==================== URL 数据字段不截断：签名 URL 回归 ====================
 
 
 def test_long_signed_url_preserved_intact_after_sanitization() -> None:
@@ -534,7 +535,7 @@ def test_truncated_events_surfaced_in_both_channels() -> None:
 
 
 def test_truncated_events_absent_or_zero_not_rendered() -> None:
-    """未发生丢弃（缺键或 0）时两通道均不输出该信息。"""
+    """未发生丢弃即缺键或 0 时两通道均不输出该信息。"""
     base = {
         "success": True,
         "status": "completed",

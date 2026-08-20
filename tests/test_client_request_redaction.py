@@ -1,7 +1,8 @@
 """SeedreamClient 请求日志脱敏与 image 字段摘要的单元测试。
 
-覆盖 _summarize_image_field（URL / data URI / 本地路径 / list 截断 / 非字符串）
-与 _sanitize_request_for_logging（prompt 脱敏、image 替换、其余字段引用不变、不 mutate 原始 dict）。
+覆盖 _summarize_image_field 的 URL / data URI / 本地路径 / list 截断 / 非字符串摘要，
+与 _sanitize_request_for_logging 的 prompt 脱敏、image 替换、其余字段引用不变、
+不 mutate 原始 dict。
 """
 
 import pytest
@@ -21,14 +22,17 @@ def client() -> SeedreamClient:
 
 
 def test_summarize_https_url(client: SeedreamClient) -> None:
+    """https URL 摘要为 <image_url>。"""
     assert client._summarize_image_field("https://example.com/x.png") == "<image_url>"
 
 
 def test_summarize_http_url(client: SeedreamClient) -> None:
+    """http URL 同样摘要为 <image_url>。"""
     assert client._summarize_image_field("http://example.com/x.png") == "<image_url>"
 
 
 def test_summarize_data_uri(client: SeedreamClient) -> None:
+    """data URI 摘要为带字符数的占位标记。"""
     uri = "data:image/png;base64,iVBORw0KGgo="
     result = client._summarize_image_field(uri)
     assert result == f"<data_uri:{len(uri)} chars>"
@@ -42,22 +46,27 @@ def test_summarize_data_uri_case_insensitive(client: SeedreamClient) -> None:
 
 
 def test_summarize_local_path(client: SeedreamClient) -> None:
+    """POSIX 绝对路径摘要为 <local_image_path>。"""
     assert client._summarize_image_field("/tmp/images/x.png") == "<local_image_path>"
 
 
 def test_summarize_local_path_windows(client: SeedreamClient) -> None:
+    """Windows 绝对路径同样摘要为 <local_image_path>。"""
     assert client._summarize_image_field("C:\\Users\\test\\x.png") == "<local_image_path>"
 
 
 def test_summarize_relative_path(client: SeedreamClient) -> None:
+    """相对路径同样摘要为 <local_image_path>。"""
     assert client._summarize_image_field("images/x.png") == "<local_image_path>"
 
 
 def test_summarize_non_string_int(client: SeedreamClient) -> None:
+    """非字符串 int 摘要为类型占位标记。"""
     assert client._summarize_image_field(123) == "<int>"
 
 
 def test_summarize_non_string_none(client: SeedreamClient) -> None:
+    """None 摘要为类型占位标记。"""
     assert client._summarize_image_field(None) == "<NoneType>"
 
 
@@ -89,6 +98,7 @@ def test_summarize_list_without_truncation(client: SeedreamClient) -> None:
 
 
 def test_summarize_empty_list(client: SeedreamClient) -> None:
+    """空列表摘要 count=0 且不截断。"""
     result = client._summarize_image_field([])
     assert result["type"] == "list"
     assert result["count"] == 0
@@ -109,23 +119,27 @@ def test_summarize_list_samples_recursively(client: SeedreamClient) -> None:
 
 
 def test_sanitize_redacts_prompt(client: SeedreamClient) -> None:
+    """prompt 替换为长度占位标记，其余字段保留。"""
     safe = client._sanitize_request_for_logging({"prompt": "secret prompt", "size": "2K"})
     assert safe["prompt"] == "<redacted:13 chars>"
     assert safe["size"] == "2K"
 
 
 def test_sanitize_redacts_image_url(client: SeedreamClient) -> None:
+    """image 为 URL 时替换为 <image_url>。"""
     safe = client._sanitize_request_for_logging({"image": "https://x/y.png", "prompt": "p"})
     assert safe["image"] == "<image_url>"
 
 
 def test_sanitize_redacts_image_data_uri(client: SeedreamClient) -> None:
+    """image 为 data URI 时替换为字符数占位标记。"""
     uri = "data:image/png;base64,iVBORw0KGgo="
     safe = client._sanitize_request_for_logging({"image": uri})
     assert safe["image"] == f"<data_uri:{len(uri)} chars>"
 
 
 def test_sanitize_redacts_image_list(client: SeedreamClient) -> None:
+    """image 为 list 时替换为采样摘要 dict。"""
     safe = client._sanitize_request_for_logging({"image": ["https://x/1.png", "https://x/2.png"]})
     assert isinstance(safe["image"], dict)
     assert safe["image"]["count"] == 2
@@ -163,5 +177,6 @@ def test_sanitize_prompt_non_string(client: SeedreamClient) -> None:
 
 
 def test_sanitize_prompt_empty_string(client: SeedreamClient) -> None:
+    """空 prompt 记为 0 字符。"""
     safe = client._sanitize_request_for_logging({"prompt": ""})
     assert safe["prompt"] == "<redacted:0 chars>"

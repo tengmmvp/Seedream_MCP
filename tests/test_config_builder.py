@@ -17,6 +17,7 @@ def _write_env_file(path: Path, content: str) -> None:
 def test_build_config_priority_prefers_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """运行时覆盖优先于系统环境变量与 env 文件。"""
     env_file = tmp_path / "config.env"
     _write_env_file(
         env_file,
@@ -41,6 +42,7 @@ def test_build_config_priority_prefers_overrides(
 def test_build_config_priority_prefers_system_env_over_env_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """系统环境变量优先于 env 文件。"""
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")
     monkeypatch.setenv("ARK_API_KEY", "env_key")
@@ -53,6 +55,7 @@ def test_build_config_priority_prefers_system_env_over_env_file(
 def test_build_config_resolves_seedream_50_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """env 文件中的 5.0 别名解析为完整模型 ID。"""
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-5.0\n")
     monkeypatch.delenv("ARK_API_KEY", raising=False)
@@ -66,6 +69,7 @@ def test_build_config_resolves_seedream_50_alias(
 def test_build_config_uses_seedream_50_as_default_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """未指定模型时默认取 5.0 并解析为完整模型 ID。"""
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")
     monkeypatch.delenv("ARK_API_KEY", raising=False)
@@ -77,6 +81,7 @@ def test_build_config_uses_seedream_50_as_default_model(
 
 
 def test_build_config_raises_when_explicit_env_file_missing(tmp_path: Path) -> None:
+    """显式指定的 env 文件缺失时抛 SeedreamConfigError。"""
     missing_env = tmp_path / "missing.env"
 
     with pytest.raises(SeedreamConfigError, match="配置文件不存在"):
@@ -86,6 +91,7 @@ def test_build_config_raises_when_explicit_env_file_missing(tmp_path: Path) -> N
 def test_build_config_reads_cwd_env_when_env_file_not_provided(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """未显式指定 env 文件时读取工作目录下的 .env。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
     monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
@@ -104,6 +110,7 @@ def test_build_config_reads_cwd_env_when_env_file_not_provided(
 def test_build_config_falls_back_to_default_env_when_cwd_env_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """工作目录无 .env 时回退默认 env 文件。"""
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     monkeypatch.chdir(runtime_dir)
@@ -121,6 +128,7 @@ def test_build_config_falls_back_to_default_env_when_cwd_env_missing(
 def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """cwd .env 缺键时由默认 env 文件补齐，合并后生效。"""
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     monkeypatch.chdir(runtime_dir)
@@ -143,7 +151,7 @@ def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
 def test_build_config_does_not_inject_dotenv_to_os_environ(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 配置构建不从 .env 向 os.environ 注入任何值，避免全局状态污染
+    """.env 值进入配置对象但不注入 os.environ，避免全局状态污染。"""
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     workspace_root = runtime_dir / "workspace"
@@ -175,6 +183,7 @@ def test_build_config_does_not_inject_dotenv_to_os_environ(
 def test_build_config_explicit_env_file_is_not_polluted_by_previous_env_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """显式 env 文件的构建结果不受此前其他 env 文件影响。"""
     monkeypatch.delenv("ARK_API_KEY", raising=False)
     monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
 
@@ -194,7 +203,7 @@ def test_build_config_explicit_env_file_is_not_polluted_by_previous_env_file(
 def test_build_config_does_not_write_back_to_os_environ(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 配置构建读取系统 env 但不回写，.env 值不污染 os.environ
+    """构建读取系统 env 但不回写，.env 值不污染 os.environ。"""
     monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
@@ -532,7 +541,7 @@ def test_seedream_config_rejects_chunk_size_greater_than_buffer() -> None:
 
 
 def test_seedream_config_accepts_zero_cleanup_days() -> None:
-    """cleanup_days 下界为 0（含），表示不清理；不得被当成负数拒绝。"""
+    """cleanup_days 下界含 0，表示不清理，不得被当成负数拒绝。"""
     from seedream_mcp.config import SeedreamConfig
 
     config = SeedreamConfig(api_key="k", auto_save_cleanup_days=0)
@@ -565,7 +574,7 @@ def test_seedream_config_rejects_invalid_validate_branches(kwargs: dict, match: 
     """
     from seedream_mcp.config import SeedreamConfig
 
-    # api_key 未在 kwargs 中时补充合法值，已在 kwargs 中时（占位符用例）不覆盖
+    # api_key 未在 kwargs 中时补充合法值，占位符用例已在 kwargs 中时不覆盖
     full_kwargs = {"api_key": "k", **kwargs} if "api_key" not in kwargs else kwargs
     with pytest.raises(SeedreamConfigError, match=match):
         SeedreamConfig(**full_kwargs)

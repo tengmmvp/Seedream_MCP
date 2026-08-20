@@ -103,6 +103,7 @@ def test_build_common_request_assembles_shared_params() -> None:
 
 
 def test_build_common_request_merges_extra_and_skips_none() -> None:
+    """extra 参数并入请求体，None 值字段省略对应键。"""
     config = SeedreamConfig(api_key="k")
     client = SeedreamClient(config)
     request = client._build_common_request(
@@ -159,6 +160,7 @@ def test_build_common_request_omits_prompt_key_when_none() -> None:
 
 
 def test_public_generation_methods_keep_expected_parameter_order() -> None:
+    """四个公开生成方法的参数顺序与既定契约一致，prompt 恒居首。"""
     signature_expectations = {
         "text_to_image": {
             "ordered_parameters": [
@@ -228,6 +230,7 @@ def test_public_generation_methods_keep_expected_parameter_order() -> None:
 async def test_text_to_image_log_does_not_include_prompt_plaintext(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """info 日志只输出 prompt_meta 摘要，提示词明文不进入日志。"""
     client = SeedreamClient(_build_config())
     fake_logger = FakeLogger()
     monkeypatch.setattr(client, "logger", fake_logger)
@@ -288,6 +291,7 @@ async def test_generation_methods_synthesize_defaults_from_config(
 async def test_image_to_image_resolves_relative_path_from_workspace_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """相对路径参考图经工作区根解析并编码为 data URI 发请求。"""
     workspace = tmp_path / "workspace"
     image_file = workspace / "images" / "ref.png"
     image_file.parent.mkdir(parents=True, exist_ok=True)
@@ -314,6 +318,7 @@ async def test_image_to_image_resolves_relative_path_from_workspace_root(
 async def test_text_to_image_includes_seedream_50_output_format_and_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """5.0 系列请求体携带 output_format 与 tools 参数。"""
     client = SeedreamClient(
         SeedreamConfig(
             api_key="test_key",
@@ -344,6 +349,7 @@ async def test_text_to_image_includes_seedream_50_output_format_and_tools(
 async def test_text_to_image_normalizes_seedream_50_alias_before_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """别名 model_id 在请求前归一化为具体版本号，请求体携带归一结果。"""
     client = SeedreamClient(
         SeedreamConfig(
             api_key="test_key",
@@ -367,6 +373,8 @@ async def test_text_to_image_normalizes_seedream_50_alias_before_request(
 
 
 async def test_call_api_parses_non_stream_response() -> None:
+    """非流式 200 JSON 响应解析为成功结果结构与数据项。"""
+
     async def handler(request: httpx.Request) -> httpx.Response:
         del request
         return httpx.Response(
@@ -389,6 +397,7 @@ async def test_call_api_parses_non_stream_response() -> None:
 async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """4.5 模型传 output_format 在 API 调用前即被校验拒绝。"""
     client = SeedreamClient(
         SeedreamConfig(
             api_key="test_key",
@@ -413,6 +422,7 @@ async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_ca
 
 
 async def test_call_api_parses_sse_response() -> None:
+    """SSE 响应解析出 data 事件、completed 状态与 usage。"""
     sse_payload = (
         'data: {"type":"image_generation.partial_succeeded","url":"https://example.com/1.png"}\n\n'
         'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n'
@@ -437,6 +447,7 @@ async def test_call_api_parses_sse_response() -> None:
 
 
 async def test_call_api_parses_sse_partial_failed_event() -> None:
+    """SSE partial_failed 事件进入 data 项，status 降级为 partial。"""
     sse_payload = (
         "data: "
         '{"type":"image_generation.partial_failed","image_index":2,'
@@ -532,6 +543,7 @@ async def test_multi_image_fusion_prepares_images_with_limited_concurrency(
 async def test_multi_image_fusion_accepts_up_to_14_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """默认模型多图融合接受至多 14 张参考图。"""
     client = SeedreamClient(_build_config())
     input_images = [f"https://example.com/{idx}.png" for idx in range(14)]
     captured_request: dict[str, Any] = {}
@@ -555,6 +567,7 @@ async def test_multi_image_fusion_accepts_up_to_14_images(
 
 
 async def test_multi_image_fusion_rejects_more_than_14_images() -> None:
+    """默认模型超过 14 张参考图在请求前拒绝。"""
     client = SeedreamClient(_build_config())
     input_images = [f"https://example.com/{idx}.png" for idx in range(15)]
 
@@ -590,6 +603,7 @@ async def test_sequential_generation_prepares_reference_images_with_limited_conc
 async def test_sequential_generation_without_max_images_uses_reference_aware_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """携带参考图时缺省 max_images 取 14，与无参考图的默认值区分。"""
     client = SeedreamClient(_build_config())
     captured_request: dict[str, Any] = {}
 
@@ -615,6 +629,7 @@ async def test_sequential_generation_without_max_images_uses_reference_aware_def
 
 
 def test_normalize_image_sequence_rejects_non_list_input() -> None:
+    """image 传入非列表形态时抛出参数校验错误。"""
     with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
         SeedreamClient._normalize_image_sequence(
             images="not-a-list",  # type: ignore[arg-type]
@@ -625,6 +640,7 @@ def test_normalize_image_sequence_rejects_non_list_input() -> None:
 
 
 def test_summarize_prompt_does_not_expose_prompt_plaintext() -> None:
+    """prompt 摘要只含长度与哈希，明文不出现。"""
     prompt = "sensitive prompt"
     meta = SeedreamClient._summarize_prompt(prompt)
 
@@ -691,6 +707,7 @@ def test_build_api_result_non_str_status_with_error_data_marks_partial() -> None
 async def test_image_to_image_invalid_data_uri_fails_before_api_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """非法 base64 的 Data URI 在预处理阶段拒绝，不触达 API。"""
     client = SeedreamClient(_build_config())
     api_called = False
 
@@ -717,9 +734,8 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
 ) -> None:
     """超限 Data URI 在预处理阶段拒绝，不触达 API。
 
-    大小上限经 monkeypatch 缩到 KB 级后以小输入触发同一条超限分支：被测路径为
-    image_validation._validate_data_uri 的 base64 长度检查，读取的是该模块命名空间
-    内的 MAX_IMAGE_FILE_SIZE 模块全局，patch 目标据此确定。
+    大小上限经 monkeypatch 缩到 KB 级触发同一条超限分支；上限读取的是
+    image_validation 命名空间内的 MAX_IMAGE_FILE_SIZE，patch 目标据此确定。
     """
     client = SeedreamClient(_build_config())
     api_called = False
@@ -747,6 +763,7 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
 
 
 async def test_sequential_generation_invalid_image_type_raises_validation_error() -> None:
+    """image 传入非字符串形态时抛出参数校验错误。"""
     client = SeedreamClient(_build_config())
 
     with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串或字符串列表"):
@@ -767,6 +784,7 @@ def _build_pro_config() -> SeedreamConfig:
 
 
 async def test_sequential_generation_rejects_seedream_50_pro() -> None:
+    """5.0 Pro 不支持组图，调用即拒绝。"""
     client = SeedreamClient(_build_pro_config())
 
     with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持组图"):
@@ -774,6 +792,7 @@ async def test_sequential_generation_rejects_seedream_50_pro() -> None:
 
 
 async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
+    """5.0 Pro 不支持流式输出，stream=True 即拒绝。"""
     client = SeedreamClient(_build_pro_config())
 
     with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
@@ -783,6 +802,7 @@ async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
 async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """5.0 Pro 多图融合强制 sequential_image_generation=disabled 保持单图输出。"""
     client = SeedreamClient(_build_pro_config())
     captured_request: dict[str, Any] = {}
 
@@ -806,6 +826,7 @@ async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
 async def test_multi_image_fusion_disables_sequential_for_sequential_capable_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """支持组图的默认模型在多图融合中同样恒传 disabled。"""
     client = SeedreamClient(_build_config())
     captured_request: dict[str, Any] = {}
 
@@ -828,6 +849,7 @@ async def test_multi_image_fusion_disables_sequential_for_sequential_capable_mod
 
 
 async def test_multi_image_fusion_rejects_more_than_10_images_for_pro() -> None:
+    """5.0 Pro 超过 10 张参考图在请求前拒绝。"""
     client = SeedreamClient(_build_pro_config())
     input_images = [f"https://example.com/{idx}.png" for idx in range(11)]
 
@@ -838,6 +860,7 @@ async def test_multi_image_fusion_rejects_more_than_10_images_for_pro() -> None:
 async def test_multi_image_fusion_accepts_up_to_10_images_for_pro(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """5.0 Pro 多图融合接受至多 10 张参考图。"""
     client = SeedreamClient(_build_pro_config())
     input_images = [f"https://example.com/{idx}.png" for idx in range(10)]
     captured_request: dict[str, Any] = {}
@@ -915,7 +938,7 @@ def test_serialize_request_outputs_utf8_without_ascii_escape() -> None:
 
     assert isinstance(result, bytes)
     assert "中文".encode("utf-8") in result
-    # ASCII 转义形式（字面反斜杠 u 4 e 2 d）不得出现
+    # 字面反斜杠 u 4 e 2 d 的 ASCII 转义形式不得出现
     assert b"\\u4e2d" not in result
 
 

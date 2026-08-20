@@ -427,7 +427,8 @@ class SequentialGenerationInput(
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":
         """校验参考图数量与生成数量的总和限制。"""
-        # after 阶段运行时值恒为 list[str] | None（before-validator 已归一），收窄供计数。
+        # before-validator 已归一，after 阶段运行时值恒为 list[str] | None，cast 收窄
+        # 供计数。
         images = cast("list[str] | None", self.image)
         # max_images 未显式传入时按参考图数量推导；object.__setattr__ 绕过
         # validate_assignment 并从 fields_set 剔除，使派生值与显式传入可区分。

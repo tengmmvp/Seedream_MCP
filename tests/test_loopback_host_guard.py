@@ -68,7 +68,7 @@ def _websocket_scope(headers: list[tuple[bytes, bytes]]) -> dict[str, Any]:
     ],
 )
 async def test_guard_allows_loopback_hosts(host: bytes) -> None:
-    """回环 Host（含带端口与 IPv6 方括号形态）放行到内层应用，不产生 403。"""
+    """回环 Host 含带端口与 IPv6 方括号形态均放行到内层应用，不产生 403。"""
     inner = _InnerApp()
     sink = _MessageSink()
     guard = _LoopbackHostGuardMiddleware(inner)
@@ -119,7 +119,7 @@ async def test_guard_rejects_uppercase_host_forms(host: bytes) -> None:
 
 
 async def test_guard_rejects_missing_host_header() -> None:
-    """Host 头缺失（HTTP/1.0 等路径）按 403 fail-closed，不留免校验放行缺口。"""
+    """Host 头缺失如 HTTP/1.0 路径按 403 fail-closed，不留免校验放行缺口。"""
     inner = _InnerApp()
     sink = _MessageSink()
     guard = _LoopbackHostGuardMiddleware(inner)

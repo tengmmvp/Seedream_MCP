@@ -13,7 +13,7 @@ from seedream_mcp.utils.images.image_ref import classify_image_reference
 @pytest.mark.parametrize(
     "image,expected",
     [
-        # URL：scheme 大小写不敏感（RFC 3986），历史回归点
+        # URL：scheme 按 RFC 3986 大小写不敏感，历史回归点
         ("http://example.com/x.png", "url"),
         ("https://example.com/x.png", "url"),
         ("HTTP://example.com/x.png", "url"),

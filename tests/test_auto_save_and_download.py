@@ -29,6 +29,7 @@ _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwAD
 
 
 def test_is_image_compatible_content_type_accepts_image_and_binary() -> None:
+    """图片与二进制内容类型视为兼容。"""
     assert _is_image_compatible_content_type("image/png")
     assert _is_image_compatible_content_type("image/jpeg; charset=utf-8")
     assert _is_image_compatible_content_type("application/octet-stream")
@@ -38,6 +39,7 @@ def test_is_image_compatible_content_type_accepts_image_and_binary() -> None:
 
 
 def test_is_image_compatible_content_type_rejects_non_image() -> None:
+    """非图片内容类型被拒绝，image/svg 同在拒绝之列。"""
     assert not _is_image_compatible_content_type("text/html")
     assert not _is_image_compatible_content_type("text/html; charset=utf-8")
     assert not _is_image_compatible_content_type("application/json")
@@ -63,6 +65,7 @@ def test_validate_connected_peer_ip_fails_closed_without_peer() -> None:
 
 
 async def test_save_base64_image_writes_file(tmp_path: Path) -> None:
+    """合法 PNG base64 落盘为实际存在的 .png 文件。"""
     manager = AutoSaveManager(base_dir=tmp_path)
     try:
         result = await manager.save_base64_image(_PNG_B64, prompt="测试图片")
@@ -181,8 +184,8 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
         cleanup_calls.append(days)
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 
-    # 预置 16 个已过期键占满容量上限，目标目录居链首（修复前写入不移动位置，
-    # 驱逐时恰为被逐出的链首键）。
+    # 预置 16 个已过期键占满容量上限，目标目录居链首；修复前写入不移动位置，
+    # 驱逐时恰为被逐出的链首键。
     stale = time_module.time() - 7200
     auto_save_module._cleanup_last_run[str(tmp_path)] = stale
     for i in range(15):

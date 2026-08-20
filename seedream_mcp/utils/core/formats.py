@@ -16,7 +16,7 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 DEFAULT_IMAGE_EXTENSION = ".jpeg"
 
 # 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in
-# 成员判断；有序版本为不可变元组，防止公共容器被原地改写。
+# 成员判断。
 SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (
     ".jpg",
     ".jpeg",

@@ -87,7 +87,7 @@ async def test_prepare_base64_payload_estimate_exceeds_limit(tmp_path: Path) -> 
 
 
 def test_prepare_base64_payload_decode_failure(manager: AutoSaveManager) -> None:
-    """非法 base64 字符触发解码失败（validate=True 拒绝非字母表字符）。"""
+    """非法 base64 字符触发解码失败，validate=True 拒绝非字母表字符。"""
     with pytest.raises(AutoSaveError, match="Base64解码失败"):
         manager._prepare_base64_payload("!!!!not_valid_base64!!!!", None)
 
@@ -143,7 +143,7 @@ def test_prepare_base64_payload_with_mime(manager: AutoSaveManager) -> None:
 
 
 def test_prepare_base64_payload_strips_whitespace(manager: AutoSaveManager) -> None:
-    """payload 含空白字符（换行/空格/制表）时被 strip 后正常解码。"""
+    """payload 含换行、空格与制表空白时被 strip 后正常解码。"""
     png_bytes = _minimal_png_bytes()
     clean_payload = base64.b64encode(png_bytes).decode()
     dirty_payload = clean_payload[:5] + " \n\t " + clean_payload[5:]

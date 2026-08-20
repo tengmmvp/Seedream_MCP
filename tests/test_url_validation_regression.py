@@ -23,6 +23,7 @@ def test_validate_image_input_rejects_missing_host_without_message_rewrap() -> N
 
 
 def test_validate_image_input_rejects_empty_input() -> None:
+    """空串与纯空白输入直接报「不能为空」。"""
     with pytest.raises(SeedreamValidationError, match="不能为空"):
         validate_image_input("")
     with pytest.raises(SeedreamValidationError, match="不能为空"):
@@ -30,6 +31,7 @@ def test_validate_image_input_rejects_empty_input() -> None:
 
 
 def test_validate_image_input_accepts_valid_http_url() -> None:
+    """合法 https URL 校验通过并原样返回。"""
     url = "https://example.com/path/image.png"
     assert validate_image_input(url) == url
 

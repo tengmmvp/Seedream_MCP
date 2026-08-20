@@ -31,7 +31,7 @@ def test_all_model_aliases_resolve_to_known_family() -> None:
 
 
 def test_resolve_model_family_pro_before_lite() -> None:
-    # Pro 的 Model ID 含 "doubao-seedream-5-0" 子串，必须解析为 Pro 而非 Lite
+    """Pro 的 Model ID 含 5-0 子串仍须解析为 Pro 而非 Lite。"""
     assert _resolve_model_family("doubao-seedream-5-0-pro-260628") == MODEL_FAMILY_50_PRO
     assert _resolve_model_family("doubao-seedream-5.0-pro") == MODEL_FAMILY_50_PRO
     assert _resolve_model_family("doubao-seedream-5-0-260128") == MODEL_FAMILY_50_LITE
@@ -43,6 +43,7 @@ def test_resolve_model_family_pro_before_lite() -> None:
 
 
 def test_get_model_capabilities_pro_profile() -> None:
+    """Pro 能力声明关闭 tools 与 stream，参考图上限 10。"""
     caps = get_model_capabilities("doubao-seedream-5-0-pro-260628")
     assert caps.supports_output_format is True
     assert caps.supports_tools is False
@@ -51,6 +52,7 @@ def test_get_model_capabilities_pro_profile() -> None:
 
 
 def test_get_model_capabilities_lite_profile() -> None:
+    """Lite 能力声明开启 tools 与 stream，参考图上限 14。"""
     caps = get_model_capabilities("doubao-seedream-5-0-260128")
     assert caps.supports_output_format is True
     assert caps.supports_tools is True
@@ -59,7 +61,7 @@ def test_get_model_capabilities_lite_profile() -> None:
 
 
 def test_get_model_capabilities_legacy_and_unknown_default_to_permissive() -> None:
-    # 4.5/4.0 不支持 output_format/tools；未知模型放行全部能力
+    """4.5/4.0 不支持 output_format 与 tools，未知模型放行全部能力。"""
     assert get_model_capabilities("doubao-seedream-4-5-251128").supports_output_format is False
     assert get_model_capabilities("doubao-seedream-4-0-250828").supports_output_format is False
 

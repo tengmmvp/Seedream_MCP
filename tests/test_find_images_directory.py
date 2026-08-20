@@ -1,7 +1,7 @@
 """find_images_in_directory 的字典序遍历与 limit 提前停止测试。
 
 回归保护：分页浏览在大目录下不能退化为全量收集+排序。limit 必须真正限制返回量，
-顺序为文件名字典序（与全局 sorted 前 N 等价），保证跨请求分页连续一致。
+顺序为文件名字典序、与全局 sorted 前 N 等价，保证跨请求分页连续一致。
 """
 
 from __future__ import annotations
@@ -48,7 +48,8 @@ def _scan(
 
 
 def test_limit_returns_sorted_prefix_not_creation_order(tmp_path: Path) -> None:
-    # 打乱创建顺序，确保结果不是「碰巧按创建序」
+    """limit 返回字典序前缀而非创建顺序。"""
+    # 打乱创建顺序，确保结果不是碰巧按创建序
     for i in [5, 0, 9, 2, 7, 1, 8, 3, 6, 4]:
         (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -58,6 +59,7 @@ def test_limit_returns_sorted_prefix_not_creation_order(tmp_path: Path) -> None:
 
 
 def test_limit_one_returns_first_sorted(tmp_path: Path) -> None:
+    """limit=1 返回字典序首张。"""
     for name in ("c.png", "a.png", "b.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -67,6 +69,7 @@ def test_limit_one_returns_first_sorted(tmp_path: Path) -> None:
 
 
 def test_no_limit_returns_all_sorted(tmp_path: Path) -> None:
+    """无 limit 返回全量并按字典序排序。"""
     for name in ("c.png", "a.png", "b.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -79,8 +82,7 @@ def test_recursive_limit_one_skips_later_subtrees(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 递归结构：root 下 a/ 与 b/ 各含一张图。limit=1 时字典序遍历进 a/ 取到首张即停，
-    # 不应再扫描 b/，直接证明 limit 提前停止真正限制了扫描量。
+    """递归 limit=1 取到字典序首张即停止，不扫描后续子树，证明 limit 真正限制扫描量。"""
     sub_a = tmp_path / "a"
     sub_b = tmp_path / "b"
     sub_a.mkdir()
@@ -104,6 +106,7 @@ def test_recursive_limit_one_skips_later_subtrees(
 
 
 def test_limit_respects_extension_filter(tmp_path: Path) -> None:
+    """limit 只统计图片文件，非图片扩展名不占限额。"""
     # 非图片文件参与字典序占位但不进入结果
     (tmp_path / "0_readme.txt").write_bytes(b"x")
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -115,6 +118,7 @@ def test_limit_respects_extension_filter(tmp_path: Path) -> None:
 
 
 def test_sort_matches_path_semantics(tmp_path: Path) -> None:
+    """遍历序与 sorted(Path) 逐位一致。"""
     # 大小写混排：遍历序必须与 sorted(Path) 完全一致。
     # Path 比较走 os.path.normcase：Windows 大小写不敏感、POSIX 敏感——两者须逐位等价。
     names = ("Z.png", "a.png", "B.png")
@@ -131,7 +135,7 @@ def test_non_positive_limit_returns_empty_without_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # limit<=0：返回数量上限为 0，直接返回空列表，且不应触发任何目录扫描
+    """limit<=0 返回数量上限为 0，直接返回空列表且不触发目录扫描。"""
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     scanned: list[str] = []
@@ -149,11 +153,10 @@ def test_non_positive_limit_returns_empty_without_scan(
 
 
 def test_recursive_order_matches_global_sorted_path(tmp_path: Path) -> None:
-    # 递归且包含前缀目录名 a/a1/a10 与多层级 a/b：深度优先加同级按 normcase
-    # 排序须与全局 sorted(Path) 等价，是分页跨请求顺序连续一致的前提。期望列表
-    # 显式构造全部图片 Path 后整体 sorted，与单层 test_sort_matches_path_semantics
-    # 同法；空目录 a1 等仅作前缀占位、不产出条目。Windows 大小写不敏感，不能同时
-    # 建 b/ 与 B/ 目录，大小写排序由单层 test_sort_matches_path_semantics 覆盖。
+    """递归深度优先加同级 normcase 排序与全局 sorted(Path) 等价，是分页跨请求
+    顺序连续一致的前提。"""
+    # 前缀目录名 a/a1/a10 与多层级 a/b 混排，空目录仅作前缀占位不产出条目。
+    # Windows 大小写不敏感，不能同时建 b/ 与 B/ 目录，大小写排序由单层用例覆盖。
     (tmp_path / "a" / "b").mkdir(parents=True)
     for name in ("a1", "a10", "sub1", "sub10"):
         (tmp_path / name).mkdir()
@@ -335,7 +338,7 @@ def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
     assert all(raw.resolve() == resolved for raw, resolved in first)
     assert len(scan_module._DIRECTORY_SCAN_CACHE) == 1
 
-    # 不同 scan_limit（模拟翻页）命中同一缓存，返回全量 3 而非 scan_limit=2 的前缀
+    # 不同 scan_limit 模拟翻页，命中同一缓存，返回全量 3 而非 scan_limit=2 的前缀
     paged = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=2)
     assert len(paged) == 3
 
@@ -369,14 +372,14 @@ def test_cached_find_images_prefix_expands_on_deeper_page(tmp_path: Path) -> Non
     assert not entry.complete
     assert len(entry.images) == 4
 
-    # 回看 scan_limit=2：缓存前缀 4 不小于 2，命中返回前缀，不重扫（images 仍为 4）
+    # 回看 scan_limit=2：缓存前缀 4 不小于 2，命中返回前缀，不重扫，images 保持 4
     back = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=2)
     assert len(back) == 4
     assert len(_entry().images) == 4
 
 
 def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
-    """扫到目录末尾（complete=True）后，任意 scan_limit 均命中全量，不再扫描。"""
+    """扫到目录末尾即 complete=True 后，任意 scan_limit 均命中全量，不再扫描。"""
     for name in ("a.png", "b.png"):
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
     scan_module.reset_directory_scan_cache()
@@ -384,7 +387,7 @@ def test_cached_find_images_complete_skips_rescan(tmp_path: Path) -> None:
     def _entry() -> Any:
         return next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
 
-    # scan_limit=10 远大于目录 2 图，返回 2 条且 complete=True（扫到末尾）
+    # scan_limit=10 远大于目录 2 图，返回 2 条且扫到末尾 complete=True
     _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10)
     entry = _entry()
     assert entry.complete

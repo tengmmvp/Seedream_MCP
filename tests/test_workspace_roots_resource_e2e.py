@@ -90,7 +90,7 @@ async def test_workspace_roots_resource_modern_round_trip_reports_client_roots(
     tmp_path: Path,
     reset_lifespan_singletons: None,
 ) -> None:
-    """默认协商（2026-07-28）加 roots callback 时，资源经多轮请求取回授权根目录。
+    """默认协商 2026-07-28 加 roots callback 时，资源经多轮请求取回授权根目录。
 
     2026 会话无反向通道，资源返回 InputRequiredResult 由客户端应答后重试，输出
     与 legacy 等价。

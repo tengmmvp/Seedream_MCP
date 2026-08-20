@@ -22,6 +22,7 @@ async def test_app_lifespan_yields_config_and_client(
     monkeypatch: pytest.MonkeyPatch,
     reset_lifespan_singletons,
 ) -> None:
+    """lifespan yield 的状态字典含活动配置与已就绪的 client 与 download_manager。"""
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
 
@@ -191,6 +192,7 @@ def test_config_from_context_prefers_lifespan_config() -> None:
 def test_config_from_context_falls_back_when_state_not_dict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """lifespan 状态非 dict 时回退活动配置。"""
     fallback = SeedreamConfig(api_key="fallback_key")
     monkeypatch.setattr(server, "get_active_config", lambda: fallback)
 
@@ -291,11 +293,10 @@ async def test_download_manager_connection_limit_survives_session_rebuild() -> N
 
 
 def test_reset_lifespan_state_clears_global_config() -> None:
-    """复位协议覆盖 config._global_config，用例触发的懒加载配置不跨用例残留。
+    """复位协议覆盖 config._global_config，懒加载配置不跨用例残留。
 
-    set_active_config(None) 只清除活动配置，全局配置懒加载缓存不在复位清单内会
-    跨用例残留。复位与断言经函数内 import 取 sys.modules 的当前模块对象，与延迟
-    消费方的调用时解析同目标。
+    set_active_config(None) 只清活动配置，全局懒加载缓存须经复位清单清理。复位与
+    断言经函数内 import 取 sys.modules 当前模块对象，与延迟消费方同目标。
     """
     from seedream_mcp import config as current_config_module
 
@@ -373,7 +374,7 @@ def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
     assert _try_get_shared_client(_FakeLifespanCtx("not a dict")) is None
     assert _try_get_shared_download_manager(_FakeLifespanCtx("not a dict")) is None
 
-    # 值类型不匹配（非 SeedreamClient / DownloadManager）
+    # 值类型不匹配，非 SeedreamClient / DownloadManager
     bad_ctx = _FakeLifespanCtx({"client": "fake", "download_manager": 123})
     assert _try_get_shared_client(bad_ctx) is None
     assert _try_get_shared_download_manager(bad_ctx) is None

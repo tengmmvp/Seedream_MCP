@@ -8,7 +8,6 @@ app_lifespan 引用计数单例、活动与退役资源状态、同步与异步�
 
 from __future__ import annotations
 
-# 标准库导入
 import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -138,10 +137,10 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
     """管理 MCPServer 生命周期，向 lifespan_context 注入共享配置、SeedreamClient
     与 DownloadManager，键名见 config 模块 LIFESPAN_KEY_* 常量。
 
-    资源以引用计数的模块级单例持有，跨 lifespan 重入复用；teardown 递减在途引用，
-    归零前不清理，任一退出不影响其余在途请求持有的连接池。config 身份变化触发重建：
-    新资源立即取代活动槽位，旧资源待最后一个在途请求释放后再关闭，运行期
-    set_config/reload_config 不断开在途请求已持有的 HTTP 连接池。
+    资源以引用计数的模块级单例持有，跨 lifespan 重入复用；teardown 仅递减在途引用，
+    归零前不清理。config 身份变化触发重建：新资源立即取代活动槽位，旧资源待最后一个
+    在途请求释放后再关闭，运行期 set_config/reload_config 不影响在途请求已持有的
+    HTTP 连接池。
     """
     global _active_resource
     config = get_active_config()
@@ -240,8 +239,7 @@ def _reset_lifespan_state() -> None:
 
     config_module._global_config = None
     _shared_init_lock = asyncio.Lock()
-    # io_save 的清理节流状态与 io_scan 的目录扫描缓存同步复位；延迟导入遵循跨层
-    # 模块不顶层 import 的项目约定。
+    # io_save 的清理节流状态与 io_scan 的目录扫描缓存同步复位。
     from .utils.io.io_save import reset_cleanup_state
     from .utils.io.io_scan import reset_directory_scan_cache
 
@@ -251,10 +249,9 @@ def _reset_lifespan_state() -> None:
 
 # ==================== 服务器构造 ====================
 
-# 静态列表面的客户端缓存提示时长：tools 与 prompts 注册于 import 期进程内不变，
-# skill:// 资源与 models/info 为静态载荷，server/discover 同为静态声明，均可安全
-# 声明 60 秒新鲜度；resources/read 随会话读取变化，server/info 随活动配置变化，
-# workspace/roots 随会话声明变化，均不纳入。
+# 静态列表面的客户端缓存提示时长。纳入的键均为 import 期固定的静态声明，可安全
+# 声明新鲜度；resources/read、server/info、workspace/roots 随会话与活动配置变化，
+# 不纳入。
 _STATIC_LIST_CACHE_TTL_MS = 60_000
 
 _STATIC_LIST_CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
@@ -286,9 +283,9 @@ def _create_mcp_server() -> MCPServer:
     )
 
 
-# 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 亦复用同一实例。
+# 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 复用同一实例。
 # version 必须显式传入：SDK 2.0 起未传 version 的服务器在 initialize 结果的 serverInfo
-# 中报告空串而非 SDK 包版本。request_state_security 为 None 时 SDK 回退进程临时
-# 密钥，单进程部署行为不变；多副本 HTTP 部署经 SEEDREAM_REQUEST_STATE_KEYS 共享
-# 密钥环，重试落到其他实例仍可解封 requestState。
+# 中报告空串而非 SDK 包版本。request_state_security 为 None 时 SDK 回退进程临时密钥；
+# 多副本 HTTP 部署经 SEEDREAM_REQUEST_STATE_KEYS 共享密钥环，重试落到其他实例仍可
+# 解封 requestState。
 mcp = _create_mcp_server()

@@ -1,7 +1,7 @@
 """`.env.example` 与 config 实际读取的环境变量键双向守护测试。
 
-example 中出现的全部 SEEDREAM_/ARK_/LOG_ 键（注释与赋值行都算）须与 config 实际
-读取的键集合一致，多出为文档残留、缺失为文档遗漏。另守护 README.md 环境变量
+example 中出现的全部 SEEDREAM_/ARK_/LOG_ 键须与 config 实际读取的键集合一致，
+注释与赋值行都计入，多出为文档残留、缺失为文档遗漏。另守护 README.md 环境变量
 配置块覆盖 example 全部功能赋值键，以及 docs/samples/claude_desktop_config.json
 样本 env 键集为 config 读取键集的子集。
 """
@@ -17,7 +17,7 @@ import seedream_mcp.config as config_module
 from _readme_helpers import _env_block
 
 # 环境变量键形态：前缀限定 SEEDREAM_/ARK_/LOG_，键名由大写字母、数字、下划线组成。
-# 前缀目录行（如 "- SEEDREAM_ 服务行为"）后接空白不构成完整键，不会被命中。
+# 形如「- SEEDREAM_ 服务行为」的前缀目录行后接空白，不构成完整键，不会被命中。
 _ENV_KEY_PATTERN = re.compile(r"\b(?:SEEDREAM|ARK|LOG)_[A-Z0-9_]+")
 
 # .env.example 实际赋值行形态，行首即为键名与等号，注释行以 # 开头不会命中。
@@ -38,7 +38,7 @@ def _example_path() -> Path:
 
 
 def _example_env_keys() -> set[str]:
-    """提取 .env.example 全文（注释与赋值行）出现的全部环境变量键。"""
+    """提取 .env.example 全文出现的全部环境变量键，注释与赋值行都计入。"""
     content = _example_path().read_text(encoding="utf-8")
     return set(_ENV_KEY_PATTERN.findall(content))
 

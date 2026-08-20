@@ -33,7 +33,7 @@ def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
     """从生成结果中提取图片数据列表。
 
     支持数组、单个图片字典或嵌套 {"data": ...} 形态，None 与非字典元素一律剔除，
-    保证返回值始终为 list[Dict]，符合 GenerationStructuredOutput.data 的声明。
+    保证返回值始终为 list[dict]，符合 GenerationStructuredOutput.data 的声明。
 
     Args:
         result: 图片生成结果字典。
@@ -549,7 +549,7 @@ def _format_auto_save_section(
             display_index = saveable_indices[i] + 1
         else:
             display_index = i + 1
-        # 保存失败原因过错误消息净化口径，防止换行注入。
+        # 保存失败原因经错误消息净化口径处理，防止换行注入。
         error_text = sanitize_error_text(save_result.error or "未知原因")
         parts.append(f"  图片 {display_index}: 保存失败 - {error_text}")
     parts.append("")

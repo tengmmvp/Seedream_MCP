@@ -7,24 +7,29 @@ from seedream_mcp.utils.core.errors import parse_retry_after
 
 
 def test_parse_retry_after_delta_seconds() -> None:
+    """delta-seconds 形态解析为等待秒数。"""
     assert parse_retry_after({"retry-after": "120"}) == 120.0
 
 
 def test_parse_retry_after_missing_returns_none() -> None:
+    """缺键或空值返回 None。"""
     assert parse_retry_after({}) is None
     assert parse_retry_after({"retry-after": ""}) is None
 
 
 def test_parse_retry_after_capped_at_max() -> None:
+    """超大秒数被上限钳制。"""
     assert parse_retry_after({"retry-after": "99999"}) == 300.0
 
 
 def test_parse_retry_after_invalid_returns_none() -> None:
+    """非法与负数值返回 None。"""
     assert parse_retry_after({"retry-after": "not-a-number"}) is None
     assert parse_retry_after({"retry-after": "-5"}) is None
 
 
 def test_parse_retry_after_http_date_future() -> None:
+    """未来 HTTP-date 解析为剩余等待秒数。"""
     future = datetime.now(timezone.utc) + timedelta(seconds=60)
     remaining_before = (future - datetime.now(timezone.utc)).total_seconds()
     result = parse_retry_after({"retry-after": format_datetime(future, usegmt=True)})
@@ -37,6 +42,7 @@ def test_parse_retry_after_http_date_future() -> None:
 
 
 def test_parse_retry_after_http_date_past_returns_none() -> None:
+    """过去 HTTP-date 无需等待，返回 None。"""
     past = datetime.now(timezone.utc) - timedelta(seconds=60)
     assert parse_retry_after({"retry-after": format_datetime(past, usegmt=True)}) is None
 

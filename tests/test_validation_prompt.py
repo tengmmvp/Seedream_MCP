@@ -34,6 +34,7 @@ def warning_logger(monkeypatch: pytest.MonkeyPatch) -> _WarningCaptureLogger:
 
 
 def test_validate_prompt_chinese_limit_ok() -> None:
+    """中文计数未超阈值时原样返回。"""
     text = "你" * 300
     assert validate_prompt(text) == text
 
@@ -41,6 +42,7 @@ def test_validate_prompt_chinese_limit_ok() -> None:
 def test_validate_prompt_chinese_limit_warns_but_returns(
     warning_logger: _WarningCaptureLogger,
 ) -> None:
+    """中文计数超阈值仅警告不阻断，文案携带实际计数。"""
     text = "你" * 301
     # 文档为「建议」而非硬限制：超限仅记录警告，不阻断调用。
     assert validate_prompt(text) == text
@@ -50,6 +52,7 @@ def test_validate_prompt_chinese_limit_warns_but_returns(
 
 
 def test_validate_prompt_english_limit_ok() -> None:
+    """英文词数未超阈值时原样返回。"""
     text = ("word " * 600).strip()
     assert validate_prompt(text) == text
 
@@ -57,6 +60,7 @@ def test_validate_prompt_english_limit_ok() -> None:
 def test_validate_prompt_english_limit_warns_but_returns(
     warning_logger: _WarningCaptureLogger,
 ) -> None:
+    """英文词数超阈值仅警告不阻断，文案携带实际词数。"""
     text = ("word " * 601).strip()
     assert validate_prompt(text) == text
     assert len(warning_logger.warnings) == 1
@@ -64,6 +68,7 @@ def test_validate_prompt_english_limit_warns_but_returns(
 
 
 def test_validate_prompt_mixed_limits_ok() -> None:
+    """中英文混合且均未超阈值时原样返回。"""
     text = ("你" * 200) + " " + ("word " * 400).strip()
     assert validate_prompt(text) == text
 
@@ -71,6 +76,7 @@ def test_validate_prompt_mixed_limits_ok() -> None:
 def test_validate_prompt_mixed_limits_warns_but_returns(
     warning_logger: _WarningCaptureLogger,
 ) -> None:
+    """中英文分别超限各触发一次警告。"""
     text_cn = "你" * 301
     text_en = ("word " * 601).strip()
     assert validate_prompt(text_cn) == text_cn
@@ -88,12 +94,14 @@ def test_validate_prompt_within_limit_emits_no_warning(
 
 
 def test_pydantic_input_accepts_english_600_words() -> None:
+    """pydantic 输入模型接受阈值内的英文提示词。"""
     prompt = ("word " * 600).strip()
     obj = TextToImageInput(prompt=prompt)
     assert obj.prompt == prompt
 
 
 def test_pydantic_input_accepts_english_601_words_for_structure_validation_only() -> None:
+    """pydantic 输入模型仅做结构校验，超建议词数不拒绝。"""
     prompt = ("word " * 601).strip()
     obj = TextToImageInput(prompt=prompt)
     assert obj.prompt == prompt

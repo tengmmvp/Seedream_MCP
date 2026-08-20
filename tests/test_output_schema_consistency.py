@@ -21,6 +21,7 @@ from seedream_mcp.tools.core.schemas import BrowseImagesInput, TextToImageInput
 
 
 def test_generation_success_path_matches_schema() -> None:
+    """成功路径 structuredContent 可实例化 GenerationStructuredOutput。"""
     structured = {
         "tool": "text_to_image",
         "success": True,
@@ -44,6 +45,7 @@ def test_generation_success_path_matches_schema() -> None:
 
 
 def test_generation_exception_path_error_is_dict() -> None:
+    """异常路径 error 为 dict 形态且可实例化输出模型。"""
     structured = {
         "tool": "text_to_image",
         "success": False,
@@ -56,6 +58,7 @@ def test_generation_exception_path_error_is_dict() -> None:
 
 
 def test_generation_failed_result_error_is_str() -> None:
+    """失败路径完整字段的 structuredContent 可实例化，error 为 dict 形态。"""
     structured = {
         "tool": "text_to_image",
         "success": False,
@@ -80,6 +83,7 @@ def test_generation_failed_result_error_is_str() -> None:
 
 
 def test_browse_success_path_matches_schema() -> None:
+    """浏览成功路径 structuredContent 可实例化 BrowseImagesStructuredOutput。"""
     structured = {
         "tool": "browse_images",
         "success": True,
@@ -101,6 +105,7 @@ def test_browse_success_path_matches_schema() -> None:
 
 
 def test_browse_failure_path_matches_schema() -> None:
+    """浏览失败路径 error 为 dict 形态且可实例化输出模型。"""
     structured = {
         "tool": "browse_images",
         "success": False,
@@ -113,6 +118,7 @@ def test_browse_failure_path_matches_schema() -> None:
 
 
 def test_browse_empty_path_matches_schema() -> None:
+    """空结果路径 status=empty 可实例化输出模型。"""
     structured = {
         "tool": "browse_images",
         "success": True,
@@ -128,8 +134,7 @@ def test_browse_empty_path_matches_schema() -> None:
 
 
 def test_extract_images_normalizes_dict_data_to_list() -> None:
-    # 上游可能返回 {"data": {"url": ...}} 非列表形态，
-    # extract_images 须统一为 list，使 structuredContent.data 与 outputSchema 的 List 声明一致。
+    """上游非列表 data 形态统一归一为列表，与 outputSchema 的 List 声明一致。"""
     assert extract_images({"data": {"url": "https://example.com/x.png"}}) == [
         {"url": "https://example.com/x.png"}
     ]
@@ -141,8 +146,7 @@ def test_extract_images_normalizes_dict_data_to_list() -> None:
 
 
 def test_extract_images_normalizes_null_and_non_dict_to_empty() -> None:
-    # data: null 会被 _build_api_result 保留，不得产出 [None]，否则违反 List[Dict] 声明、
-    # 触发 outputSchema 校验失败把成功响应变成 ToolError；列表中的 null 与其他非字典元素同样剔除。
+    """null 与非字典元素剔除，不产出 [None] 违反 List[Dict] 声明使成功响应翻为 ToolError。"""
     assert extract_images({"data": None}) == []
     assert extract_images({"data": [None, {"url": "x"}, None]}) == [{"url": "x"}]
     assert extract_images({}) == []  # 缺少 data 键

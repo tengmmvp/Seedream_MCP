@@ -85,8 +85,8 @@ __all__ = [
 class ToolMetadata:
     """单个生成工具透传给 ``execute_generation_handler`` 的静态元数据。
 
-    收纳各工具逐字不同的常量字段与开始日志参数构造回调，回调依赖运行时执行上下文，
-    由各工具的元数据常量绑定各自的构造实现。
+    常量字段直接收纳；开始日志参数依赖运行时执行上下文，经回调由各工具的元数据常量
+    绑定构造实现。
 
     Attributes:
         tool_name: 工具标识，写入 structuredContent.tool 与日志。
@@ -140,7 +140,6 @@ async def _dispatch_generation_requests(
     """请求分发阶段：优先复用 lifespan 共享客户端执行单发或并行生成请求。"""
     from ...client import SeedreamClient
 
-    # 优先复用 lifespan 共享客户端；无 lifespan 上下文时回退按需新建。
     shared_client = _try_get_shared_client(ctx)
     if shared_client is not None:
         return await _run_generation_requests(
@@ -378,8 +377,7 @@ async def execute_generation_handler(
         module_logger.error("{}处理失败", metadata.failure_prefix, exc_info=True)
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
-        # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍；
-        # 否则以查表建议补充。
+        # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。
         if resolve_error_profile(exc).user_hint:
             error_message = f"{metadata.failure_prefix}失败：{user_facing_error}"
         else:

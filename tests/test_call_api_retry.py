@@ -74,7 +74,7 @@ async def test_call_api_4xx_not_retried(
     send_method: str,
     extra_body: dict[str, Any],
 ) -> None:
-    """4xx 客户端错误（非 429）立即抛出，不重试。"""
+    """非 429 的 4xx 客户端错误立即抛出，不重试。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -100,7 +100,7 @@ async def test_call_api_4xx_not_retried(
 
 
 async def test_call_api_3xx_not_retried(monkeypatch: pytest.MonkeyPatch, no_sleep: None) -> None:
-    """3xx（如 302）不可重试，立即终态抛出，不进入退避循环。"""
+    """3xx 重定向如 302 不可重试，立即终态抛出，不进入退避循环。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     calls = 0
 
@@ -262,7 +262,7 @@ async def test_call_api_network_error_retries_then_mapped(
     send_method: str,
     extra_body: dict[str, Any],
 ) -> None:
-    """httpx.RequestError（ConnectError）重试用尽后映射为 SeedreamNetworkError。"""
+    """httpx.RequestError 如 ConnectError 重试用尽后映射为 SeedreamNetworkError。"""
     config = SeedreamConfig(api_key="k", max_retries=1)
     calls = 0
 
@@ -376,12 +376,11 @@ async def test_call_api_429_retry_after_above_backoff_cap(
 async def test_call_api_no_status_code_not_retried(
     monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """无 HTTP 状态码的错误（如 200 响应体 JSON 解析失败）不可重试，立即抛出。
+    """无 HTTP 状态码的错误不可重试，立即抛出，以 200 响应体 JSON 解析失败驱动。
 
-    生成 API 非幂等，服务端可能已按该请求完成生成与计费，重试会导致重复计费。
-    经 httpx.MockTransport 返回 200 + 非 JSON 体，驱动真实的 _send_standard_request
-    代码路径：状态码 200 放行，json.loads 抛 ValueError 被包装为 status_code=None 的
-    SeedreamAPIError，_call_api 捕获后不重试直接上抛。
+    生成 API 非幂等，服务端可能已完成生成与计费，重试会重复计费。经 MockTransport
+    返回 200 + 非 JSON 体驱动真实 _send_standard_request：json.loads 抛 ValueError
+    被包装为 status_code=None 的 SeedreamAPIError 后不重试直接上抛。
     """
     config = SeedreamConfig(api_key="k", max_retries=3)
 
@@ -405,8 +404,8 @@ async def test_standard_request_rejects_oversized_content_length(
 ) -> None:
     """非流式路径：Content-Length 声明超过总量上限的响应在读取前即拒绝。
 
-    上限为 auto_save_max_file_size × 20（默认 1GB），此处压缩配置为 1024×20 字节
-    以便测试；伪造远超实际 body 的 Content-Length 模拟被污染上游的巨型响应声明。
+    上限为 auto_save_max_file_size × 20，默认 1GB，此处压缩配置为 1024×20 字节以便
+    测试；伪造远超实际 body 的 Content-Length 模拟被污染上游的巨型响应声明。
     """
     config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
 

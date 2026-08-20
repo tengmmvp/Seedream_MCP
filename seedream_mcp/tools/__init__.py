@@ -4,9 +4,6 @@ impl 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装�
 导入消费，不在包门面重导出；runners 的 ``run_*`` 适配器作为 composition root
 注入工作区边界后委托 handler；core.schemas 的输入模型是参数校验与 MCP
 inputSchema 的单一来源。依赖方向为 core <- impl <- runners。
-
-导出经 PEP 562 ``__getattr__`` 延迟加载，首次访问才导入对应子模块；``__all__``
-派生自 ``_LAZY_EXPORTS`` 的键，``__dir__`` 纳入尚未导入的延迟导出名。
 """
 
 from __future__ import annotations
@@ -51,7 +48,7 @@ __all__ = list(_LAZY_EXPORTS)
 
 
 def __getattr__(name: str) -> Any:
-    """按 PEP 562 延迟加载公开导出，首次访问时才导入对应子模块并缓存到模块字典。"""
+    """按 PEP 562 延迟加载公开导出，首次访问时导入对应子模块。"""
     target = _LAZY_EXPORTS.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

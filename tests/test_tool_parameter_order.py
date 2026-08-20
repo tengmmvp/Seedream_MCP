@@ -1,6 +1,6 @@
 """生成工具 Input schema 字段顺序与 MCP 平铺 inputSchema 等价性守护。
 
-锁定两层契约：schemas 输入模型的字段顺序（prompt 居首），以及平铺工具签名生成
+锁定两层契约：schemas 输入模型的字段顺序以 prompt 居首，以及平铺工具签名生成
 的 inputSchema 与模型 schema 在字段顺序、required、逐字段定义上的等价性，任何
 一侧改动未同步即失败。另锁定封闭性：顶层 additionalProperties 为 false、拼错
 参数在运行时被 ToolError 拒绝。等价性延伸到描述维度：逐字段 description 非空
@@ -38,6 +38,7 @@ _TOOL_INPUT_MODELS = {
 
 
 def test_text_to_image_parameter_order() -> None:
+    """text_to_image 输入模型字段顺序，prompt 居首。"""
     assert list(TextToImageInput.model_fields.keys()) == [
         "prompt",
         "optimize_prompt_options",
@@ -56,6 +57,7 @@ def test_text_to_image_parameter_order() -> None:
 
 
 def test_image_to_image_parameter_order() -> None:
+    """image_to_image 输入模型字段顺序，prompt 居首。"""
     assert list(ImageToImageInput.model_fields.keys()) == [
         "prompt",
         "optimize_prompt_options",
@@ -77,6 +79,7 @@ def test_image_to_image_parameter_order() -> None:
 
 
 def test_multi_image_fusion_parameter_order() -> None:
+    """multi_image_fusion 输入模型字段顺序，prompt 居首。"""
     assert list(MultiImageFusionInput.model_fields.keys()) == [
         "prompt",
         "optimize_prompt_options",
@@ -96,6 +99,7 @@ def test_multi_image_fusion_parameter_order() -> None:
 
 
 def test_sequential_generation_parameter_order() -> None:
+    """sequential_generation 输入模型字段顺序，max_images 位于 size 之后。"""
     assert list(SequentialGenerationInput.model_fields.keys()) == [
         "prompt",
         "optimize_prompt_options",
@@ -116,6 +120,7 @@ def test_sequential_generation_parameter_order() -> None:
 
 
 def test_browse_images_parameter_order() -> None:
+    """browse_images 输入模型字段顺序，directory 居首。"""
     assert list(BrowseImagesInput.model_fields.keys()) == [
         "directory",
         "recursive",

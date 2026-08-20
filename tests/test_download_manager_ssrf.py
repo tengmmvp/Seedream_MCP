@@ -22,21 +22,25 @@ from _download_fakes import _FakeLoop
 
 
 def test_validate_url_static_rejects_localhost() -> None:
+    """localhost 主机名静态拒绝。"""
     with pytest.raises(DownloadError, match="本地主机"):
         DownloadManager()._validate_url_static("http://localhost/x.png")
 
 
 def test_validate_url_static_rejects_local_suffix() -> None:
+    """.local 后缀主机名同样拒绝。"""
     with pytest.raises(DownloadError, match="本地主机"):
         DownloadManager()._validate_url_static("http://myhost.local/x.png")
 
 
 def test_validate_url_static_rejects_private_ip() -> None:
+    """私网 IPv4 字面量静态拒绝。"""
     with pytest.raises(DownloadError, match="不安全的IP地址"):
         DownloadManager()._validate_url_static("http://192.168.1.1/x.png")
 
 
 def test_validate_url_static_rejects_loopback_ip() -> None:
+    """回环 IPv4 字面量静态拒绝。"""
     with pytest.raises(DownloadError, match="不安全的IP地址"):
         DownloadManager()._validate_url_static("http://127.0.0.1/x.png")
 
@@ -63,27 +67,32 @@ def test_validate_url_static_rejects_nat64_embedded_private_ipv6_literal() -> No
 
 
 def test_validate_url_static_rejects_credentials_in_url() -> None:
+    """URL 携带账号密码时静态拒绝。"""
     with pytest.raises(DownloadError, match="账号或密码"):
         DownloadManager()._validate_url_static("http://user:pass@host/x.png")
 
 
 def test_validate_url_static_rejects_non_http_scheme() -> None:
+    """非 http/https scheme 静态拒绝。"""
     with pytest.raises(DownloadError, match="URL协议"):
         DownloadManager()._validate_url_static("ftp://host/x.png")
 
 
 def test_validate_url_static_rejects_missing_host() -> None:
+    """缺主机名的 URL 静态拒绝。"""
     with pytest.raises(DownloadError, match="主机名"):
         DownloadManager()._validate_url_static("http:///path")
 
 
 def test_validate_url_static_allows_public_ip_without_dns() -> None:
+    """公网 IP 字面量直接放行且无需 DNS 解析。"""
     host, needs_dns = DownloadManager()._validate_url_static("http://8.8.8.8/x.png")
     assert host == "8.8.8.8"
     assert needs_dns is False
 
 
 def test_validate_url_static_requires_dns_for_hostname() -> None:
+    """主机名形态标记需要 DNS 解析。"""
     host, needs_dns = DownloadManager()._validate_url_static("http://example.com/x.png")
     assert host == "example.com"
     assert needs_dns is True
@@ -103,6 +112,7 @@ async def test_resolve_public_ips_rejects_private_resolution(
 async def test_resolve_public_ips_accepts_public_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """公网 IP 解析结果原样返回。"""
     manager = DownloadManager()
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: _FakeLoop(["8.8.8.8", "1.1.1.1"]))
 
@@ -119,6 +129,7 @@ def test_validate_url_static_rejects_cgnat_ip() -> None:
 async def test_resolve_public_ips_rejects_cgnat_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """DNS 解析到 CGNAT 段时拒绝。"""
     manager = DownloadManager()
     monkeypatch.setattr(asyncio, "get_running_loop", lambda: _FakeLoop(["100.64.10.20"]))
 

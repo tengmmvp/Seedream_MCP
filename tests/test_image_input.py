@@ -31,7 +31,7 @@ async def test_prepare_image_input_rejects_symlink_escape(
     目标位于工作区内时 resolve 后为常规文件、O_NOFOLLOW 打开不抛错，测试将沦为
     空芯。以会话 Roots 声明边界，消息附调用方授权的根列表供自纠。
     """
-    # 目标文件位于工作区（tmp_path）之外；resolve 跟随符号链接后路径越界被拒
+    # 目标文件位于工作区 tmp_path 之外；resolve 跟随符号链接后路径越界被拒
     target = tmp_path.parent / "symlink_escape_target.png"
     Image.new("RGB", (32, 32), color="white").save(target)
     link = tmp_path / "link.png"
@@ -80,7 +80,7 @@ async def test_prepare_image_input_out_of_bounds_error_carries_roots(
 async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """回退边界（无会话 Roots）下的越界消息不回显服务器环境根路径。
+    """无会话 Roots 的回退边界下，越界消息不回显服务器环境根路径。
 
     与 browse_images 的回退遮蔽口径一致。
     """

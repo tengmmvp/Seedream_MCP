@@ -162,7 +162,7 @@ def iter_local_candidates(image: str, resolved_roots: list[Path]) -> Iterator[Pa
     """按输入路径与已 resolve 的工作区根列表迭代界内候选的物理路径。
 
     绝对路径直接作为候选，相对路径按根序逐一拼接；候选 resolve 一次后经
-    is_within_resolved 与各根比较（拦截 ``..`` 与符号链接越界），仅产出落在任一
+    is_within_resolved 与各根比较，拦截 ``..`` 与符号链接越界，仅产出落在任一
     根内的 resolve 后物理路径。UNC 前缀的候选不 resolve，避免在 Windows 触发
     SMB 认证。候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
 

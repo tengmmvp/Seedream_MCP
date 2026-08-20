@@ -3,8 +3,7 @@
 集中管理各模型家族的识别与能力差异，含 output_format、tools、stream、组图、参考图
 上限等维度，供 validation、config、client、schemas 共享，避免分散的子串判定与能力
 表重复。MODEL_CAPABILITIES 等数据表是数据驱动校验的唯一数据源，新增模型只需扩展
-数据表而无需修改调用方代码。需注意 5.0 Pro 的 Model ID 含
-"doubao-seedream-5-0" 子串，与 5.0 Lite 规则重叠，家族解析时须先匹配 Pro 以免误判。
+数据表而无需修改调用方代码。
 """
 
 from __future__ import annotations

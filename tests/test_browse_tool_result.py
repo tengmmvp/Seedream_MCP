@@ -23,6 +23,7 @@ from seedream_mcp.tools.impl.browse_images import handle_browse_images
 
 
 async def test_browse_images_returns_structured_success(workspace_root: Path) -> None:
+    """正常浏览返回 completed 结构化结果与文本内容。"""
     (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
@@ -35,6 +36,7 @@ async def test_browse_images_returns_structured_success(workspace_root: Path) ->
 
 
 async def test_browse_images_returns_empty_when_no_files(workspace_root: Path) -> None:
+    """无图片文件时返回 empty 状态与 count=0。"""
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
     assert result.is_error is False
@@ -47,6 +49,7 @@ async def test_browse_images_rejects_out_of_workspace_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """目录越出工作区边界时以 failed 结构化错误拒绝。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside_dir = tmp_path / "outside_dir_for_test"
@@ -64,6 +67,7 @@ async def test_browse_images_ignores_outside_images_without_crashing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """扫描结果混入越界图片时被剔除，不崩溃并返回 empty。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside"
@@ -138,6 +142,7 @@ async def test_browse_images_fallback_error_preserves_format_filter(
 
 
 async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
+    """分页元数据正确：has_more 时 total_count 为 None，末页给出精确总数。"""
     for name in ("a.png", "b.png", "c.png"):
         (workspace_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
@@ -193,10 +198,9 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
 ) -> None:
     """深翻页命中扫描缓存时不重复 resolve 图片文件。
 
-    图片路径的 resolve 由扫描缓存层在首次扫描完成时执行并随 (原始, resolved) 对缓存；
-    第二次浏览的深页命中完整缓存时免于 O(offset) 次逐文件 resolve，仅剩目录级 resolve
-    （工作区根与请求目录）。统计第二次浏览期间后缀为 .png 的 Path.resolve 调用数，
-    断言为零。
+    (原始, resolved) 对随首次扫描缓存；深页命中完整缓存时免于 O(offset) 次逐文件
+    resolve，仅剩工作区根与请求目录的目录级 resolve。统计第二次浏览期间 .png 的
+    resolve 调用数并断言为零。
     """
     for i in range(5):
         (workspace_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -239,12 +243,8 @@ async def test_browse_images_format_filter_all_unsupported_echoes_original(
 ) -> None:
     """format_filter 全部为不支持后缀时返回区分消息并回显原始输入。
 
-    structuredContent 回显用户原始 format_filter。用 .svg 而非任务示例的 .gif：
-    formats.py 的 SUPPORTED_IMAGE_EXTENSIONS 含 .gif，若用 .gif 会落入
-    supported_only 非空分支而不触发 format_filter_exhausted，无法覆盖区分消息。
-    .svg 不在支持集合内，可真正命中 exhausted 分支。断言区分消息含
-    "均不在支持列表"与"支持"，status 为 failed 且 isError 为 True；format_filter 保留
-    用户原始非空列表 [".svg"] 供回显，不缩减为空列表。
+    用 .svg 而非任务示例的 .gif：formats 支持集合含 .gif，会落入 supported_only
+    非空分支而不触发 exhausted 分支；.svg 不在支持集合内，可真正命中。
     """
     result = await handle_browse_images(BrowseImagesInput(directory=".", format_filter=[".svg"]))
 
@@ -342,7 +342,6 @@ async def test_browse_images_fallback_preserves_resolved_directories(
 ) -> None:
     """impl 在目录解析完成后抛未预期异常时，兜底 structuredContent 回显已解析目录。
 
-    resolved_directories 列表由外层创建并共享给 core 流水线；兜底分支不再恒为空列表。
     以会话 Roots 场景断言真实路径回显：env/CWD 回退场景的路径回显被占位符遮蔽，
     无法承载本断言。
     """
@@ -371,7 +370,7 @@ async def test_browse_images_fallback_boundary_masks_paths_in_error(
 ) -> None:
     """无会话 Roots 时越界拒绝不回显 env/CWD 绝对路径。
 
-    直接调用 handle_browse_images（未进入 workspace_roots_scope），边界经
+    直接调用 handle_browse_images，不经 workspace_roots_scope，边界经
     SEEDREAM_WORKSPACE_ROOT 回退取得。越界消息与 structuredContent 的
     workspace_roots 均以占位符替代，不向调用方暴露服务器本地目录结构。
     """
@@ -454,10 +453,9 @@ def test_format_file_info_degrades_on_malformed_timestamp(
 ) -> None:
     """畸形时间戳使 fromtimestamp 抛 ValueError 时降级为「文件信息不可用」。
 
-    不向调用方抛异常；stat 本身成功，降级分支须同时置空 size_mb 与 modified
-    两键，避免半份详情误导调用方。以替身模块替换 browse 命名空间内的
-    datetime 名字，使 datetime.datetime.fromtimestamp 抛 ValueError；内建
-    datetime 类为不可变类型，无法直接对其打属性补丁。
+    降级须同时置空 size_mb 与 modified 两键，避免半份详情误导调用方。以替身
+    模块替换 browse 命名空间内的 datetime 名字构造异常；内建 datetime 类为
+    不可变类型，无法直接对其打属性补丁。
     """
     image = tmp_path / "a.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -503,9 +501,8 @@ async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
 ) -> None:
     """无效目录错误消息经净化截断，不整体回显超长输入与凭据样式片段。
 
-    以 // 前缀构造跨平台命中的 UNC 路径，normalize_path 在 resolve 前拒绝并携带
-    完整原始路径抛 ValueError；错误消息须收敛到错误文本输出上限内，且输入中的
-    api_key 裸值被脱敏。
+    以 // 前缀构造跨平台命中的 UNC 路径，normalize_path 在 resolve 前拒绝；
+    错误消息收敛到输出上限内且 api_key 裸值被脱敏。
     """
     directory = "//server/share/api_key=secret" + "a" * 900
     assert len(directory) <= 1024  # schema 侧 max_length 内，进入 handler 触发拒绝
@@ -574,10 +571,9 @@ async def test_browse_images_dropped_entries_do_not_consume_page_quota(
 ) -> None:
     """早停窗口内的越界条目不占分页配额：has_more 正确、尾部图片翻页可达。
 
-    扫描层按 scan_limit 早停，窗口内的越界条目在扫描之后才被剔除；若无补扫，
-    剔除项占满配额会使 has_more 假阴性、total_count 低报。经注入的扫描器返回
-    越界条目居首的有序列表，稳定复现剔除占额场景：limit=2 且窗口内含 1 个越界
-    条目时，首页须报 has_more 且次页取到尾部真图。
+    扫描层按 scan_limit 早停，窗口内越界条目在扫描后才剔除；无补扫时剔除项
+    占满配额会使 has_more 假阴性、total_count 低报。经注入扫描器返回越界条目
+    居首的有序列表，稳定复现剔除占额场景。
     """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
