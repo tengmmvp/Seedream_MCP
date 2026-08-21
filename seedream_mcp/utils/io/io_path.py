@@ -445,6 +445,11 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         ValueError: 路径为 UNC 形式、Windows 驱动器相对形式或路径无效时抛出。
     """
     try:
+        # 空字节在任何文件系统都不是合法路径分量。Python 3.13 起 Windows 的
+        # resolve 对含空字节路径不再抛 ValueError 而是原样返回，此前依赖隐式异常
+        # 拒绝的口径随之失效，改为入口显式拒绝保证跨版本行为一致。
+        if "\x00" in path:
+            raise ValueError(f"路径含空字节: {path}")
         path_obj = Path(path)
 
         # UNC 路径在 Windows 的 resolve 会触发 SMB 认证，须在 resolve 前拒绝。

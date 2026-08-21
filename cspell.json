@@ -132,6 +132,8 @@
     "secretkey",
     "secretvalue",
     "seededit",
+    "sessionful",
+    "sessionless",
     "seedream",
     "sessionkey",
     "sessiontoken",
