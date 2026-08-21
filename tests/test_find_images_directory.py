@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -522,13 +523,19 @@ def test_find_images_does_not_descend_into_reparse_point(
     assert "inside_junction.png" not in result_names
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="文件分支的 reparse 剔除带 win32 短路，POSIX 上不经过替身判定",
+)
 def test_find_images_excludes_reparse_point_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """reparse point 文件不列入结果，与目录分支及 io_storage 清理遍历防护口径对称。
 
     OneDrive 占位 .png 等 reparse 文件不是 symlink，is_file(follow_symlinks=False)
-    对其仍返回 True，仅靠后缀过滤会列为参考图而读取时跟随 reparse 目标。
+    对其仍返回 True，仅靠后缀过滤会列为参考图而读取时跟随 reparse 目标。目录分支
+    的 is_reparse_point 判定无平台短路故跨平台可用替身驱动；文件分支为省 POSIX 上
+    的无效 stat 在 win32 上短路，替身仅在 Windows 生效，非 Windows 平台跳过本用例。
     """
     placeholder = tmp_path / "onedrive_placeholder.png"
     # 占位文件取独有长度：Windows 的 DirEntry.stat 不携带 st_ino，替身按 st_size

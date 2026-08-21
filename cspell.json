@@ -130,6 +130,7 @@
     "refreshtoken",
     "sdist",
     "secretkey",
+    "secretvalue",
     "seededit",
     "seedream",
     "sessionkey",
