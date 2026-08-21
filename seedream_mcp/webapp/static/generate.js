@@ -49,7 +49,7 @@ export async function loadConfigInfo() {
 
   const outputFormatField = $("output-format").closest(".field");
   if (current && !current.supports_output_format)
-    outputFormatField.classList.add("hidden");
+    outputFormatField.classList.add("collapsed");
 
   updateToolAvailability();
 }
@@ -70,7 +70,7 @@ export function applyToolUI() {
     current &&
     current.supports_layer_decomposition;
 
-  $("reference-section").classList.toggle("hidden", !config.refs);
+  $("reference-section").classList.toggle("collapsed", !config.refs);
   $("prompt-label").textContent = "提示词";
   $("prompt-hint").textContent = config.promptOptional
     ? layerAllowed
@@ -78,11 +78,11 @@ export function applyToolUI() {
       : "纯改图时可留空；建议不超过 300 字。"
     : "建议不超过 300 字。";
   $("max-images-field").classList.toggle(
-    "hidden",
+    "collapsed",
     state.tool !== "sequential-generation",
   );
   const layerField = $("layer-field");
-  layerField.classList.toggle("hidden", !layerAllowed);
+  layerField.classList.toggle("collapsed", !layerAllowed);
   if (!layerAllowed) $("layer-decomposition").checked = false;
   while (state.refs.length > config.max) state.refs.pop();
   renderReferences();
@@ -163,8 +163,12 @@ export function buildRequestBody() {
   return body;
 }
 
+// 点阵退场计时器：fade-out 过渡结束后收起容器并清空点阵。
+let loadingHideTimer = 0;
+
 /**
- * 状态行与等待动画的联动：running 时状态行带呼吸点，预览区域铺对角波点阵。
+ * 状态行与等待动画的联动：running 时文案后带呼吸点，预览区域铺对角波点阵；
+ * 结束态点阵淡出且高度同步收缩，结果区连续上移不跳位。
  *
  * @param {string} kind - 状态类别，取 running / done / failed。
  * @param {string} text - 状态文案。
@@ -173,6 +177,7 @@ export function setStatus(kind, text) {
   const status = $("result-status");
   status.className = `result-status ${kind}`;
   status.textContent = "";
+  status.appendChild(document.createTextNode(text));
   if (kind === "running") {
     const dots = document.createElement("span");
     dots.className = "loading-dots";
@@ -181,14 +186,25 @@ export function setStatus(kind, text) {
     dots.appendChild(document.createElement("i"));
     status.appendChild(dots);
   }
-  status.appendChild(document.createTextNode(text));
   const loading = $("result-loading");
-  loading.classList.toggle("hidden", kind !== "running");
   if (kind === "running") {
+    clearTimeout(loadingHideTimer);
+    loading.classList.remove("hidden", "fade-out");
     buildRenderDots();
-  } else {
-    $("render-dots").innerHTML = "";
+    return;
   }
+  // reduced-motion 下无过渡可等，直接收起；否则给淡出 360ms 走完再清理。
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    loading.classList.add("hidden");
+    $("render-dots").innerHTML = "";
+    return;
+  }
+  loading.classList.add("fade-out");
+  loadingHideTimer = setTimeout(() => {
+    loading.classList.add("hidden");
+    loading.classList.remove("fade-out");
+    $("render-dots").innerHTML = "";
+  }, 400);
 }
 
 // 渲染点阵：按容器尺寸铺点，点亮延迟随行列递增，形成左上到右下扫过的
@@ -229,7 +245,7 @@ export async function submitGenerate(event) {
   const button = $("generate-btn");
   button.disabled = true;
   button.textContent = "生成中…";
-  setStatus("running", "生成中，请稍候…");
+  setStatus("running", "生成中，请稍候");
   $("result-error").classList.add("hidden");
   $("result-meta").classList.add("hidden");
   revokeObjectUrls("generate");
@@ -301,12 +317,17 @@ async function renderResults(payload) {
     if (item.web_path || item.url) {
       const img = document.createElement("img");
       img.alt = item.web_path || item.url || "生成结果";
+      img.classList.add("developing");
+      img.addEventListener("load", () => img.classList.add("loaded"));
+      // 外链直连失败时退出显影态，显示裂图而非透明空块。
+      img.addEventListener("error", () => img.classList.remove("developing"));
       card.insertBefore(img, card.firstChild);
       grid.appendChild(card);
       try {
         await loadResultImage(img, item);
       } catch (error) {
         console.error("结果图片加载失败:", error);
+        img.classList.remove("developing");
         appendCardError(card, "图片加载失败");
       }
     } else {

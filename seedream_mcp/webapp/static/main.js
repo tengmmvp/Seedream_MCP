@@ -49,13 +49,13 @@ function bindEvents() {
     const url = $("ref-url").value.trim();
     if (url) {
       state.refs.push({ kind: "url", value: url, preview: null });
-      renderReferences();
+      renderReferences(state.refs.length - 1);
       $("ref-url").value = "";
     }
   });
   $("size").addEventListener("change", () => {
     $("custom-size-field").classList.toggle(
-      "hidden",
+      "collapsed",
       $("size").value !== "custom",
     );
   });

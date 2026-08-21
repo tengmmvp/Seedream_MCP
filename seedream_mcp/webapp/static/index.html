@@ -77,33 +77,40 @@
             ></textarea>
             <p class="field-hint" id="prompt-hint">建议不超过 300 字。</p>
 
-            <div id="reference-section" class="hidden">
-              <label class="field-label"
-                >参考图 <span class="label-note" id="ref-count-note"></span
-              ></label>
-              <div id="reference-list" class="reference-list"></div>
-              <div class="ref-add-row">
-                <input
-                  type="file"
-                  id="ref-file"
-                  accept="image/gif,image/jpeg,image/png,image/webp,image/bmp,image/tiff,image/heic,image/heif"
-                  multiple
-                  hidden
-                />
-                <button type="button" class="btn btn-secondary" id="ref-upload">
-                  上传图片
-                </button>
-                <input
-                  type="text"
-                  id="ref-url"
-                  class="ref-url-input"
-                  placeholder="或粘贴图片 URL"
-                />
-                <button type="button" class="btn btn-ghost" id="ref-add-url">
-                  添加
-                </button>
+            <div id="reference-section" class="collapse collapsed">
+              <div class="collapse-inner">
+                <label class="field-label"
+                  >参考图
+                  <span class="label-note" id="ref-count-note"></span
+                ></label>
+                <div id="reference-list" class="reference-list"></div>
+                <div class="ref-add-row">
+                  <input
+                    type="file"
+                    id="ref-file"
+                    accept="image/gif,image/jpeg,image/png,image/webp,image/bmp,image/tiff,image/heic,image/heif"
+                    multiple
+                    hidden
+                  />
+                  <button
+                    type="button"
+                    class="btn btn-secondary"
+                    id="ref-upload"
+                  >
+                    上传图片
+                  </button>
+                  <input
+                    type="text"
+                    id="ref-url"
+                    class="ref-url-input"
+                    placeholder="或粘贴图片 URL"
+                  />
+                  <button type="button" class="btn btn-ghost" id="ref-add-url">
+                    添加
+                  </button>
+                </div>
+                <p class="field-hint">提示词中以「图1」「图2」指代各参考图。</p>
               </div>
-              <p class="field-hint">提示词中以「图1」「图2」指代各参考图。</p>
             </div>
 
             <div class="param-grid">
@@ -111,24 +118,28 @@
                 <label class="field-label" for="size">尺寸</label>
                 <select id="size"></select>
               </div>
-              <div class="field hidden" id="custom-size-field">
-                <label class="field-label" for="custom-size">自定义宽高</label>
-                <div class="custom-size-row">
-                  <input
-                    type="number"
-                    id="size-width"
-                    placeholder="宽"
-                    min="16"
-                    max="8192"
-                  />
-                  <span class="custom-size-x" aria-hidden="true">×</span>
-                  <input
-                    type="number"
-                    id="size-height"
-                    placeholder="高"
-                    min="16"
-                    max="8192"
-                  />
+              <div class="field collapse collapsed" id="custom-size-field">
+                <div class="collapse-inner">
+                  <label class="field-label" for="custom-size"
+                    >自定义宽高</label
+                  >
+                  <div class="custom-size-row">
+                    <input
+                      type="number"
+                      id="size-width"
+                      placeholder="宽"
+                      min="16"
+                      max="8192"
+                    />
+                    <span class="custom-size-x" aria-hidden="true">×</span>
+                    <input
+                      type="number"
+                      id="size-height"
+                      placeholder="高"
+                      min="16"
+                      max="8192"
+                    />
+                  </div>
                 </div>
               </div>
               <div class="field">
@@ -146,38 +157,44 @@
                   ><input type="checkbox" id="watermark" />添加水印</label
                 >
               </div>
-              <div class="field hidden" id="max-images-field">
-                <label class="field-label" for="max-images">组图数量</label>
-                <input
-                  type="number"
-                  id="max-images"
-                  min="1"
-                  max="15"
-                  value="15"
-                />
+              <div class="field collapse collapsed" id="max-images-field">
+                <div class="collapse-inner">
+                  <label class="field-label" for="max-images">组图数量</label>
+                  <input
+                    type="number"
+                    id="max-images"
+                    min="1"
+                    max="15"
+                    value="15"
+                  />
+                </div>
               </div>
-              <div class="field hidden" id="layer-field">
-                <label class="checkbox-label"
-                  ><input
-                    type="checkbox"
-                    id="layer-decomposition"
-                  />图层拆分</label
-                >
+              <div class="field collapse collapsed" id="layer-field">
+                <div class="collapse-inner">
+                  <label class="checkbox-label"
+                    ><input
+                      type="checkbox"
+                      id="layer-decomposition"
+                    />图层拆分</label
+                  >
+                </div>
               </div>
             </div>
 
             <details class="advanced">
               <summary>高级选项</summary>
               <div class="param-grid">
-                <div class="field">
-                  <label class="field-label" for="output-format"
-                    >输出格式</label
-                  >
-                  <select id="output-format">
-                    <option value="">跟随服务器</option>
-                    <option value="jpeg">JPEG</option>
-                    <option value="png">PNG</option>
-                  </select>
+                <div class="field collapse">
+                  <div class="collapse-inner">
+                    <label class="field-label" for="output-format"
+                      >输出格式</label
+                    >
+                    <select id="output-format">
+                      <option value="">跟随服务器</option>
+                      <option value="jpeg">JPEG</option>
+                      <option value="png">PNG</option>
+                    </select>
+                  </div>
                 </div>
                 <div class="field field-checkbox">
                   <label class="checkbox-label"
@@ -240,8 +257,37 @@
             <option value=".jpeg">JPEG</option>
             <option value=".webp">WebP</option>
           </select>
-          <button type="button" class="btn btn-secondary" id="gallery-refresh">
-            刷新
+          <button
+            type="button"
+            class="icon-btn"
+            id="gallery-refresh"
+            aria-label="刷新图库"
+            title="刷新图库"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="14"
+              height="14"
+              aria-hidden="true"
+              focusable="false"
+            >
+              <polyline
+                points="23 4 23 10 17 10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
           </button>
           <span class="gallery-count" id="gallery-count"></span>
         </div>
@@ -263,7 +309,7 @@
 
     <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true">
       <div class="lightbox-inner">
-        <img id="lightbox-img" alt="预览" />
+        <img id="lightbox-img" class="developing" alt="预览" />
         <div class="lightbox-bar">
           <span class="lightbox-caption mono" id="lightbox-caption"></span>
           <span class="lightbox-actions">

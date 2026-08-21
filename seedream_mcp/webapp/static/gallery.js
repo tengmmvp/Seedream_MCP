@@ -38,10 +38,21 @@ function showGalleryError(message) {
 
 /**
  * 按当前偏移与格式过滤请求图库并渲染缩略图网格与翻页器；连点由请求序号
- * 守卫收敛到最后一次。
+ * 守卫收敛到最后一次，刷新按钮在请求期间保持 busy 旋转。
  */
 export async function refreshGallery() {
   const seq = ++requestSeq;
+  $("gallery-refresh").classList.add("busy");
+  try {
+    await refreshGalleryForSeq(seq);
+  } finally {
+    // 仅最新请求有权摘除 busy，旧请求的收尾不得打断新请求的旋转。
+    if (seq === requestSeq) $("gallery-refresh").classList.remove("busy");
+  }
+}
+
+// 请求主体：seq 为本次请求序号，过期响应在内部各检查点丢弃。
+async function refreshGalleryForSeq(seq) {
   // 配置未就绪时不渲染任何空态结论，由 main 的补刷在 config-info 落地后重进。
   if (!state.configInfo) return;
   if (!state.configInfo.save_root_available) {
@@ -99,6 +110,8 @@ export async function refreshGallery() {
     figure.className = "gallery-item";
     const img = document.createElement("img");
     img.alt = item.path;
+    img.classList.add("developing");
+    img.addEventListener("load", () => img.classList.add("loaded"));
     figure.appendChild(img);
     const caption = document.createElement("figcaption");
     const detail = [
@@ -144,35 +157,73 @@ export async function refreshGallery() {
 }
 
 /**
- * 打开灯箱并装载原图；序号守卫丢弃打开新图或已关闭后的过期响应。
+ * 打开灯箱并装载原图。原图 blob 就绪后才显示灯箱，入场一次到位，避免
+ * 先开空框再被图片撑开造成的尺寸突变；序号守卫丢弃过期响应。
  *
  * @param {Object} item - 目标条目，仅使用 web_path 字段。
  */
 export async function openLightbox(item) {
   if (!item || !item.web_path) return;
   const seq = ++lightboxSeq;
-  $("lightbox-caption").textContent = item.web_path;
-  $("lightbox").classList.remove("hidden");
   releaseLightboxUrl();
-  const response = await apiFetch(
-    `/web/api/image?path=${encodeURIComponent(item.web_path)}`,
-  );
-  if (!response.ok) return;
+  let response = null;
+  try {
+    response = await apiFetch(
+      `/web/api/image?path=${encodeURIComponent(item.web_path)}`,
+    );
+  } catch {
+    // 401 已弹令牌门；其余网络异常不开灯箱，缩略图仍在可重试。
+    return;
+  }
+  if (!response.ok) {
+    console.error("原图加载失败:", item.web_path);
+    return;
+  }
   const blob = await response.blob();
   // 序号已变：新图已打开或灯箱已关闭，本次结果整包丢弃。
   if (seq !== lightboxSeq) return;
   currentLightboxBlob = blob;
   currentLightboxUrl = URL.createObjectURL(blob);
-  $("lightbox-img").src = currentLightboxUrl;
+  $("lightbox-caption").textContent = item.web_path;
+  const lightbox = $("lightbox");
+  lightbox.classList.remove("hidden");
+  void lightbox.offsetWidth;
+  lightbox.classList.add("open");
+  const img = $("lightbox-img");
+  img.classList.remove("loaded");
+  img.addEventListener("load", () => img.classList.add("loaded"), {
+    once: true,
+  });
+  img.src = currentLightboxUrl;
 }
 
-/** 关闭灯箱并释放当前对象 URL 与 blob。 */
+// 灯箱退场收尾计时器：过渡走完后再挂 hidden 并释放资源。
+let lightboxCloseTimer = 0;
+
+/** 关闭灯箱：退场过渡结束后释放当前对象 URL 与 blob。 */
 export function closeLightbox() {
   lightboxSeq++;
+  $("lightbox").classList.remove("open");
+  clearTimeout(lightboxCloseTimer);
+  // reduced-motion 下无过渡可等，立即收尾。
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    finishLightboxClose();
+    return;
+  }
+  lightboxCloseTimer = setTimeout(finishLightboxClose, 260);
+}
+
+// 灯箱退场收尾：挂 hidden 并释放对象 URL 与 blob。
+function finishLightboxClose() {
+  const lightbox = $("lightbox");
+  // 计时窗口内被重新打开时不收尾，交由新一轮关闭处理。
+  if (lightbox.classList.contains("open")) return;
+  lightbox.classList.add("hidden");
   releaseLightboxUrl();
   currentLightboxBlob = null;
-  $("lightbox").classList.add("hidden");
-  $("lightbox-img").removeAttribute("src");
+  const img = $("lightbox-img");
+  img.removeAttribute("src");
+  img.classList.remove("loaded");
 }
 
 function releaseLightboxUrl() {

@@ -46,14 +46,19 @@ export function toolConfig(tool) {
   return { refs: false, min: 0, max: 0, promptOptional: false };
 }
 
-/** 按当前工具配置重渲染参考图列表与计数。 */
-export function renderReferences() {
+/**
+ * 按当前工具配置重渲染参考图列表与计数。
+ *
+ * @param {number} [enterIndex=-1] - 播放入场动画的条目序号，默认不播。
+ */
+export function renderReferences(enterIndex = -1) {
   const config = toolConfig(state.tool);
   const list = $("reference-list");
   list.innerHTML = "";
   state.refs.forEach((ref, index) => {
     const item = document.createElement("div");
     item.className = "reference-item";
+    if (index === enterIndex) item.classList.add("enter");
     const badge = document.createElement("span");
     badge.className = "ref-badge";
     badge.textContent = String(index + 1);
@@ -93,7 +98,7 @@ function dataUriTotalChars() {
 
 /**
  * 添加一张参考图并重渲染；超数量上限或 data URI 累计超限时弹窗拒绝。
- * handleFiles 与灯箱回填均经此汇聚，是上传累计校验的唯一闸口。
+ * 上传与灯箱回填均经此汇聚受校验，URL 手输路径在 main.js 直接入列。
  *
  * @param {string} kind - 来源类型，取 data_uri 或 url。
  * @param {string} value - 参考图值，data URI 或图片 URL。
@@ -113,7 +118,7 @@ export function addReference(kind, value, preview) {
     return;
   }
   state.refs.push({ kind, value, preview: preview || null });
-  renderReferences();
+  renderReferences(state.refs.length - 1);
 }
 
 /**
