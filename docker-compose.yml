@@ -2,7 +2,7 @@ services:
   seedream-mcp:
     # 固定 major.minor 标签，随稳定版补丁自动跟进，升级大版本时手动修改；预发布版本
     # 会同样产出该标签，引用 rc 需改用精确版本号。
-    image: ghcr.io/tengmmvp/seedream_mcp:2.0
+    image: ghcr.io/tengmmvp/seedream_mcp:3.0
     container_name: seedream-mcp-server
     # 末位参数默认豁免容器内非回环绑定的 TLS 门禁；对外暴露时以证书参数替换，如
     # SEEDREAM_EXTRA_CLI_ARGS="--ssl-certfile /certs/tls.pem --ssl-keyfile /certs/tls.key"，
