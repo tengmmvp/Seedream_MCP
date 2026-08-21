@@ -146,7 +146,7 @@ export function buildRequestBody() {
     body.max_images = Number($("max-images").value) || undefined;
   }
   if (
-    !$("layer-field").classList.contains("hidden") &&
+    !$("layer-field").classList.contains("collapsed") &&
     $("layer-decomposition").checked
   ) {
     body.layer_decomposition = true;

@@ -82,9 +82,10 @@ jobs:
               names = set(zf.namelist())
           required = [
               'seedream_mcp/webapp/static/index.html',
-              'seedream_mcp/webapp/static/style.css',
-              'seedream_mcp/webapp/static/main.js',
               'seedream_mcp/webapp/static/404.html',
+              'seedream_mcp/webapp/static/css/style.css',
+              'seedream_mcp/webapp/static/js/main.js',
+              'seedream_mcp/webapp/static/assets/bg-letter.svg',
               'seedream_mcp/skills/seedream-image-generation/SKILL.md',
           ]
           missing = [asset for asset in required if asset not in names]

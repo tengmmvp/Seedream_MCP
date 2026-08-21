@@ -48,9 +48,31 @@ body {
   display: none !important;
 }
 
+/* ==================== 背景水印 ==================== */
+
+.bg-letter {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: -1;
+  pointer-events: none;
+  user-select: none;
+}
+
+.bg-letter img {
+  display: block;
+  width: clamp(320px, 44vw, 560px);
+  height: auto;
+}
+
 /* ==================== 顶栏 ==================== */
 
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--paper-bg);
   display: flex;
   align-items: center;
   gap: 24px;
@@ -337,6 +359,32 @@ select:focus {
   padding: 8px 0;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: flex-end;
+}
+
+.collapse.collapse-x {
+  grid-template-columns: 1fr;
+}
+
+.collapse.collapse-x:not(.collapsed) {
+  margin-right: 24px;
+}
+
+.collapse.collapse-x.collapsed {
+  grid-template-rows: 1fr;
+  grid-template-columns: 0fr;
+}
+
+.collapse-x .collapse-inner {
+  min-width: 0;
+}
+
+.collapse-x .checkbox-label {
+  white-space: nowrap;
+}
+
 .custom-size-row {
   display: flex;
   align-items: center;
@@ -483,7 +531,6 @@ select:focus {
   margin-bottom: 16px;
 }
 
-/* 渲染点阵：点按行列错相点亮，形成左上到右下扫过的对角波。 */
 .render-dots {
   position: absolute;
   inset: 0;
@@ -549,7 +596,6 @@ select:focus {
   display: block;
 }
 
-/* 仅可进灯箱的条目由 JS 加 zoomable 类，url-only 条目保持默认光标。 */
 .result-card img.zoomable {
   cursor: zoom-in;
 }
@@ -652,6 +698,10 @@ select:focus {
 }
 
 .gallery-pager {
+  position: sticky;
+  bottom: 0;
+  background: var(--paper-bg);
+  padding: 8px 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -779,6 +829,11 @@ img.developing.loaded {
     transition: grid-template-rows 200ms var(--motion-enter);
   }
 
+  .collapse-x {
+    transition: grid-template-columns 200ms var(--motion-enter),
+      margin-right 200ms var(--motion-enter);
+  }
+
   .collapse-inner {
     transition: opacity 160ms var(--motion-enter);
   }
@@ -813,7 +868,6 @@ img.developing.loaded {
     transition: transform 240ms var(--motion-develop);
   }
 
-  /* 覆盖基础区的 transition 声明以追加 transform，reduced-motion 下按压瞬时不产生位移过渡。 */
   .btn {
     transition: color 150ms cubic-bezier(0.4, 0, 0.2, 1),
       background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
@@ -834,12 +888,10 @@ img.developing.loaded {
       transform 120ms var(--motion-enter);
   }
 
-  /* 悬停整圈旋转：动画结束与无变换态同相，移除后无回跳。 */
   .icon-btn:hover:not(:disabled) svg {
     animation: spin-once 400ms var(--motion-enter);
   }
 
-  /* 加载中持续缓转；额外列出 hover 形态压过悬停整圈，避免两动画争抢。 */
   .icon-btn.busy svg,
   .icon-btn.busy:hover:not(:disabled) svg {
     animation: spin-loop 900ms linear infinite;

@@ -10,6 +10,7 @@ import re
 
 from seedream_mcp.webapp.constants import STATIC_DIR
 
+_JS_DIR = "js"
 _JS_MODULES = ("api.js", "generate.js", "gallery.js", "main.js", "refs.js")
 
 
@@ -32,4 +33,4 @@ def test_index_referenced_static_assets_exist() -> None:
 def test_frontend_js_modules_exist() -> None:
     """五个前端 JS 模块齐备，缺任一即破坏入口模块导入图。"""
     for name in _JS_MODULES:
-        assert (STATIC_DIR / name).is_file(), f"前端模块缺失: {name}"
+        assert (STATIC_DIR / _JS_DIR / name).is_file(), f"前端模块缺失: {name}"

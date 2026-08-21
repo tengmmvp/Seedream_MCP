@@ -8,9 +8,12 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23f54e00'/%3E%3C/svg%3E"
     />
     <title>Seedream 工作室</title>
-    <link rel="stylesheet" href="/web/static/style.css" />
+    <link rel="stylesheet" href="/web/static/css/style.css" />
   </head>
   <body>
+    <div class="bg-letter" aria-hidden="true">
+      <img src="/web/static/assets/bg-letter.svg" alt="" />
+    </div>
     <header class="topbar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">✦</span>Seedream 工作室
@@ -118,7 +121,20 @@
                 <label class="field-label" for="size">尺寸</label>
                 <select id="size"></select>
               </div>
-              <div class="field collapse collapsed" id="custom-size-field">
+              <div class="field">
+                <label class="field-label" for="request-count">生成张数</label>
+                <input
+                  type="number"
+                  id="request-count"
+                  min="1"
+                  max="10"
+                  value="1"
+                />
+              </div>
+              <div
+                class="field field-wide collapse collapsed"
+                id="custom-size-field"
+              >
                 <div class="collapse-inner">
                   <label class="field-label" for="custom-size"
                     >自定义宽高</label
@@ -142,20 +158,25 @@
                   </div>
                 </div>
               </div>
-              <div class="field">
-                <label class="field-label" for="request-count">生成张数</label>
-                <input
-                  type="number"
-                  id="request-count"
-                  min="1"
-                  max="10"
-                  value="1"
-                />
-              </div>
               <div class="field field-checkbox">
-                <label class="checkbox-label"
-                  ><input type="checkbox" id="watermark" />添加水印</label
-                >
+                <div class="checkbox-row">
+                  <div
+                    class="collapse collapse-x collapsed"
+                    id="layer-field"
+                  >
+                    <div class="collapse-inner">
+                      <label class="checkbox-label"
+                        ><input
+                          type="checkbox"
+                          id="layer-decomposition"
+                        />图层拆分</label
+                      >
+                    </div>
+                  </div>
+                  <label class="checkbox-label"
+                    ><input type="checkbox" id="watermark" />添加水印</label
+                  >
+                </div>
               </div>
               <div class="field collapse collapsed" id="max-images-field">
                 <div class="collapse-inner">
@@ -167,16 +188,6 @@
                     max="15"
                     value="15"
                   />
-                </div>
-              </div>
-              <div class="field collapse collapsed" id="layer-field">
-                <div class="collapse-inner">
-                  <label class="checkbox-label"
-                    ><input
-                      type="checkbox"
-                      id="layer-decomposition"
-                    />图层拆分</label
-                  >
                 </div>
               </div>
             </div>
@@ -324,6 +335,6 @@
       </div>
     </div>
 
-    <script type="module" src="/web/static/main.js"></script>
+    <script type="module" src="/web/static/js/main.js"></script>
   </body>
 </html>

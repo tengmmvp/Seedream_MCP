@@ -11,6 +11,7 @@ gallery（图库浏览）、files（缩略图与原图）；新增端点时在�
 
 from __future__ import annotations
 
+import mimetypes
 from typing import Any
 
 from starlette.responses import Response
@@ -34,6 +35,9 @@ from .constants import (
 )
 
 logger = get_logger()
+
+# Windows 注册表把 .svg 的 MIME 污染成 image/svg，img 标签只认 image/svg+xml。
+mimetypes.add_type("image/svg+xml", ".svg")
 
 # 模块级注册守卫：测试反复构建 app 会多次调用注册，SDK 侧无去重，重复注册使
 # 同一路由匹配两次；守卫状态与路由表不同步的残留由注册时的路径交集复查兜底。

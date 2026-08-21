@@ -33,7 +33,7 @@ async def test_production_app_serves_web_console(
     async with _make_client(app) as client:
         index_response = await client.get("/web")
         api_response = await client.get("/web/api/config-info")
-        static_response = await client.get("/web/static/main.js")
+        static_response = await client.get("/web/static/js/main.js")
         html_direct_response = await client.get("/web/static/index.html")
         missing_response = await client.get("/web/api/does-not-exist")
 
