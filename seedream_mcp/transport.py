@@ -229,9 +229,12 @@ class _LimitRequestBodyMiddleware:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
             # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，
-            # 避免冒泡为 500。
+            # 避免冒泡为 500；补发对已死连接同样可能抛异常，吞掉仅记 debug。
             if too_large:
-                await _finalize_too_large()
+                try:
+                    await _finalize_too_large()
+                except Exception:
+                    logger.debug("请求体超限后补发 413 失败，连接可能已关闭")
                 return
             raise
 
@@ -367,13 +370,18 @@ class _WebOriginGuardMiddleware:
     def _same_origin(cls, scope: Scope, origin: bytes) -> bool:
         """判定 Origin 与 Host 是否同源：两者 netloc 全值忽略大小写相等。
 
-        Origin 解析不出 netloc 或 Host 头缺失时无法确立同源，按跨源拒绝；
-        头值按 ASGI 约定以 latin-1 解码。
+        Origin 解析不出 netloc、头值畸形无法解析或 Host 头缺失时无法确立同源，
+        均按跨源拒绝；头值按 ASGI 约定以 latin-1 解码。
         """
         host = cls._host_header(scope)
         if not host:
             return False
-        origin_netloc = urlsplit(origin.decode("latin-1")).netloc
+        try:
+            origin_netloc = urlsplit(origin.decode("latin-1")).netloc
+        except ValueError:
+            # 畸形 Origin 如未闭合的 IPv6 方括号会使 urlsplit 抛 ValueError，按
+            # 跨源拒绝而非穿透为 500。
+            return False
         if not origin_netloc:
             return False
         return origin_netloc.lower() == host.decode("latin-1").lower()

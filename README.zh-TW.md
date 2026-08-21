@@ -549,7 +549,7 @@ LOG_FILE=                                   # 日誌檔案路徑（預設 .seedr
 # 自動儲存
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=                # 圖片儲存根目錄（預設 <工作區根>/.seedream/images，工作區根取 MCP Roots 首項或 SEEDREAM_WORKSPACE_ROOT）
-SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒）
+SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒），上限 720
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下載失敗最大重試次數（0 表示不重試）
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 單張圖片大小上限（位元組，預設 50MB）；另兼作流式單事件截斷閾值與回應體讀取上限的推導基準
 SEEDREAM_RESPONSE_BODY_LIMIT=               # 上游回應體讀取總量上限（位元組；不設則按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推導，非流式/流式 JSON 與 SSE 共用）

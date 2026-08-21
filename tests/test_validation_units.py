@@ -230,12 +230,6 @@ def test_coerce_infinite_decimal_rejected(value: Decimal) -> None:
         _coerce_positive_int_in_range(value, "f", 1, 10)
 
 
-def test_coerce_fraction_infinity_boundary_unconstructible() -> None:
-    """Fraction 无法表示无穷，构造即抛 OverflowError，该形态到不了校验层。"""
-    with pytest.raises(OverflowError):
-        Fraction(Decimal("Infinity"))
-
-
 def test_coerce_bool_rejected() -> None:
     """bool 是 int 子类但须被拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):

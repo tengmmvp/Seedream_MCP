@@ -549,7 +549,7 @@ LOG_FILE=                                   # Log file path (default .seedream/l
 # Auto-save
 SEEDREAM_AUTO_SAVE_ENABLED=true
 SEEDREAM_AUTO_SAVE_BASE_DIR=                # Image save root directory (default <workspace root>/.seedream/images; workspace root is the first MCP Root or SEEDREAM_WORKSPACE_ROOT)
-SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds)
+SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds, max 720)
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # Max retries for failed downloads (0 disables retry)
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB); also the derivation base for the stream single-event truncate threshold and the response-body read limit
 SEEDREAM_RESPONSE_BODY_LIMIT=               # Total upstream response-body read limit (bytes; derived as SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 when unset, shared by non-stream/stream JSON and SSE)

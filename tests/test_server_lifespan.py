@@ -94,19 +94,37 @@ async def test_cleanup_shared_resources_drains_background_cleanup_first(
     """进程级清理先等待在途后台清理任务收尾，再关闭共享资源。"""
     from seedream_mcp.utils.io import io_save as auto_save_module
 
-    drain_calls: list[bool] = []
+    events: list[str] = []
+    real_drain = auto_save_module.drain_background_cleanup_tasks
 
-    async def fake_drain() -> None:
-        drain_calls.append(True)
+    async def recording_drain() -> None:
+        events.append("drain")
+        await real_drain()
 
-    monkeypatch.setattr(auto_save_module, "drain_background_cleanup_tasks", fake_drain)
+    monkeypatch.setattr(auto_save_module, "drain_background_cleanup_tasks", recording_drain)
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
 
-    async with server.app_lifespan(server.mcp):
-        pass
+    async with server.app_lifespan(server.mcp) as state:
+        client = state["client"]
+        download_manager = state["download_manager"]
+        real_client_close = client.close
+        real_manager_close = download_manager.close
 
-    assert drain_calls == [True]
+        async def recording_client_close() -> None:
+            events.append("close:client")
+            await real_client_close()
+
+        async def recording_manager_close() -> None:
+            events.append("close:download_manager")
+            await real_manager_close()
+
+        monkeypatch.setattr(client, "close", recording_client_close)
+        monkeypatch.setattr(download_manager, "close", recording_manager_close)
+
+    assert events[0] == "drain", "drain 须先于全部共享资源 close 执行"
+    assert "drain" not in events[1:]
+    assert set(events[1:]) == {"close:client", "close:download_manager"}
     assert resources._active_resource is None
 
 

@@ -55,7 +55,7 @@ async def test_generate_returns_structured_payload_with_web_path(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """成功结果的 data 条目附上相对保存根的 web_path。"""
+    """成功结果的 data 条目附 web_path 且 local_path 改写为同一相对形态。"""
     save_root = write_workspace_config(tmp_path)
     local_path = save_root / "2026-08-20" / "text_to_image" / "a.png"
     local_path.parent.mkdir(parents=True)
@@ -76,6 +76,7 @@ async def test_generate_returns_structured_payload_with_web_path(
     assert response.status_code == 200
     entry = response.json()["data"][0]
     assert entry["web_path"] == "2026-08-20/text_to_image/a.png"
+    assert entry["local_path"] == "2026-08-20/text_to_image/a.png"
 
 
 async def test_generate_skips_web_path_outside_save_root(
@@ -84,7 +85,7 @@ async def test_generate_skips_web_path_outside_save_root(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """保存根之外的 local_path 不附 web_path，既有字段保持原样。"""
+    """保存根之外的条目删除 local_path 键且不附 web_path，绝对路径不出端点。"""
     write_workspace_config(tmp_path)
     outside = tmp_path / "elsewhere.png"
     outside.write_bytes(b"png")
@@ -100,7 +101,9 @@ async def test_generate_skips_web_path_outside_save_root(
     )
 
     assert response.status_code == 200
-    assert "web_path" not in response.json()["data"][0]
+    entry = response.json()["data"][0]
+    assert "web_path" not in entry
+    assert "local_path" not in entry
 
 
 async def test_generate_multi_image_fusion_returns_structured_payload_with_web_path(
@@ -294,6 +297,30 @@ async def test_generate_runner_validation_error_returns_400(
     assert "参考图数量超出上限" in payload["error_description"]
 
 
+async def test_generate_runner_validation_error_masks_save_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """runner 校验错误消息中的保存根绝对路径替换为占位符后返回。"""
+    save_root = write_workspace_config(tmp_path)
+
+    async def _explode(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
+        del params, config, ctx
+        raise SeedreamValidationError(f"保存路径须位于 {save_root} 之内", field="save_path")
+
+    monkeypatch.setattr(generate_module, "run_text_to_image", _explode)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 400
+    description = response.json()["error_description"]
+    assert str(save_root) not in description
+    assert "<保存根>" in description
+
+
 async def test_generate_runner_unexpected_error_returns_500(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -419,7 +446,7 @@ def test_augment_generation_payload_skips_non_string_local_path(tmp_path: Path) 
 def test_augment_generation_payload_tolerates_resolve_oserror(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """条目路径解析抛 OSError 时静默跳过，条目与顶层键均不被改写。"""
+    """条目路径解析抛 OSError 时删除 local_path 键，其余键与顶层键不被改写。"""
 
     class _ExplodingPath:
         def __init__(self, _raw: object) -> None:
@@ -433,7 +460,7 @@ def test_augment_generation_payload_tolerates_resolve_oserror(
 
     generate_module.augment_generation_payload(structured, tmp_path)
 
-    assert structured == {"data": [{"local_path": "x.png", "keep": 1}], "success": True}
+    assert structured == {"data": [{"keep": 1}], "success": True}
 
 
 def _make_stub_resource() -> SimpleNamespace:

@@ -287,12 +287,8 @@ class _SSEFrameBuffer:
             self._buffer += b"\n"
             self._pending_cr = False
 
-    def tail_range(self) -> tuple[int, int]:
-        """返回未消费尾部的闭开区间，供流末尾残留段解析。"""
-        return self._offset, len(self._buffer)
-
     def tail_bytes(self) -> bytearray:
-        """返回未消费尾部的副本，供残留段数据丢失判定。"""
+        """返回未消费尾部的副本，供残留段解析与数据丢失判定共用。"""
         return self._buffer[self._offset :]
 
 
@@ -508,17 +504,25 @@ async def _resolve_sse_trailing_segment(
     log: Logger,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
 ) -> int:
-    """流末尾残留处理阶段：解析残留事件，数据负载丢失时计入截断计数。"""
+    """流末尾残留处理阶段：解析残留事件，数据负载丢失时计入截断计数。
+
+    尾部只切出一份副本，解析与丢失判定共用同一字节；尾部可接近单事件截断阈值
+    量级，多轮全量拷贝会叠加瞬时内存峰值。超卸载阈值的解析移交工作线程，与
+    drain 路径的大事件卸载同口径。
+    """
     frames.close_pending_cr()
-    trailing_start, trailing_end = frames.tail_range()
-    trailing_len = trailing_end - trailing_start
-    trailing_event = await frames.parse_segment(trailing_start, trailing_end, log)
+    tail = frames.tail_bytes()
+    trailing_len = len(tail)
+    if trailing_len > _SSE_OFFLOAD_THRESHOLD:
+        trailing_event = await asyncio.to_thread(parse_sse_segment, tail, log)
+    else:
+        trailing_event = parse_sse_segment(tail, log)
     if trailing_event is not None:
         apply_completed(
             *_classify_sse_event(trailing_event, model_id, collector.items, log, trailing_len)
         )
         return 0
-    if trailing_len > 0 and _has_lost_data_payload(frames.tail_bytes()):
+    if trailing_len > 0 and _has_lost_data_payload(tail):
         # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
         # 标记 partial。
         log.debug("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)

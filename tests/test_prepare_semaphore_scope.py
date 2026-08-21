@@ -113,8 +113,12 @@ async def test_waiters_do_not_occupy_semaphore_slots(
     shared_url = "https://example.com/shared.png"
     creator = asyncio.ensure_future(preparer.prepare_image_input(shared_url))
     # 等待在途 task 已登记且创建者持有的槽位进入 fake_prepare
-    while len(preparer._prepare_inflight) < 1 or current < 1:
+    for _ in range(1000):
+        if len(preparer._prepare_inflight) >= 1 and current >= 1:
+            break
         await asyncio.sleep(0)
+    else:
+        pytest.fail("等待超限：在途 task 登记与创建者进入预处理未在 1000 次让出内出现")
 
     # limit + 3 个并发调用命中同一在途 task，成为纯等待者，数量刻意超过并发上限
     waiters = [
@@ -177,15 +181,23 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
         creator = asyncio.ensure_future(
             preparer.prepare_image_input(f"https://example.com/cancelled-{index}.png")
         )
-        while len(preparer._prepare_inflight) < index + 1:
+        for _ in range(1000):
+            if len(preparer._prepare_inflight) >= index + 1:
+                break
             await asyncio.sleep(0)
+        else:
+            pytest.fail(f"等待超限：第 {index} 个创建者的在途 task 未在 1000 次让出内登记")
         creator.cancel()
         with pytest.raises(asyncio.CancelledError):
             await creator
 
     # 等待脱缰 task 全部进入 fake_prepare，确保它们计入并发观测。
-    while entered < 3:
+    for _ in range(1000):
+        if entered >= 3:
+            break
         await asyncio.sleep(0)
+    else:
+        pytest.fail("等待超限：脱缰 task 未在 1000 次让出内全部进入预处理")
 
     # 发起满额新请求：修复前 3+limit 个任务同时进入 fake_prepare，修复后仅 limit-3
     # 个新请求进入，其余阻塞在信号量。

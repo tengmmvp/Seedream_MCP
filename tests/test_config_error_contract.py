@@ -1,9 +1,12 @@
-"""config 错误契约测试：.env 读取失败包装、弃用模型提示派生与工作区根提供者回退。
+"""config 错误契约测试：.env 读取失败包装、弃用模型提示派生、工作区根提供者回退
+与下载停滞超时上界。
 
-三者的共同契约是配置侧的失败不向调用方裸抛 OSError、不残留硬编码清单：.env 读取
-失败包装为含路径与原因的 SeedreamConfigError，经 cli_main 的优雅错误路径输出；
-弃用模型错误提示从 DEPRECATED_MODEL_TOKENS 派生，新增下线模型自动同步；工作区根
-提供者在配置构建抛 OSError 时回退环境变量，不让异常沿 provider 上抛。
+共同契约是配置侧的失败不向调用方裸抛 OSError、不残留硬编码清单、不失守派生
+数值边界：.env 读取失败包装为含路径与原因的 SeedreamConfigError，经 cli_main 的
+优雅错误路径输出；弃用模型错误提示从 DEPRECATED_MODEL_TOKENS 派生，新增下线模型
+自动同步；工作区根提供者在配置构建抛 OSError 时回退环境变量，不让异常沿
+provider 上抛；下载停滞超时超过 720 秒会使下载总预算反超 .part 清扫宽限，在
+构造期拒绝。
 """
 
 from __future__ import annotations
@@ -89,3 +92,18 @@ def test_workspace_root_provider_falls_back_to_env_on_os_error(
     monkeypatch.setattr(config_module, "get_active_config", _raise_os_error)
 
     assert _registered_workspace_root_provider() == str(tmp_path)
+
+
+def test_auto_save_download_timeout_bound_aligns_with_part_sweep_grace() -> None:
+    """下载停滞超时上界 720 秒：预算恰等于 .part 清扫宽限时通过，721 秒拒绝。
+
+    下载总预算按停滞超时的 120 倍推导，超过 720 秒会反超 24 小时清扫宽限，
+    在途慢下载的临时文件被并发清扫删除。
+    """
+    SeedreamConfig(api_key="test_key", auto_save_download_timeout=720)
+
+    with pytest.raises(SeedreamConfigError, match="清扫宽限") as excinfo:
+        SeedreamConfig(api_key="test_key", auto_save_download_timeout=721)
+
+    assert "720" in excinfo.value.message
+    assert "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT" in excinfo.value.message

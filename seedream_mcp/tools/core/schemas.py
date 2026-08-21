@@ -60,6 +60,9 @@ OFFSET_MAX = 100000
 # 后缀单项长度上限防止错误消息整体回显超大字符串。
 FORMAT_FILTER_ITEM_MAX_LENGTH = 16
 
+# 后缀条目数上限：其余列表字段均有条目界，无界列表在大请求体下造成遍历与回显放大。
+FORMAT_FILTER_MAX_ITEMS = 32
+
 # 非空语义镜像的 pattern：输入模型经 str_strip_whitespace 剥离空白后校验，纯空白
 # 输入被拒；平铺签名无 strip 配置，以该 pattern 声明至少一个非空白字符的等价约束，
 # 带内边距的合法值不受影响，strip 仍由函数体内组装输入模型时完成。
@@ -592,6 +595,7 @@ class BrowseImagesInput(BaseModel):
     format_filter: list[Annotated[str, Field(max_length=FORMAT_FILTER_ITEM_MAX_LENGTH)]] | None = (
         Field(
             default=None,
+            max_length=FORMAT_FILTER_MAX_ITEMS,
             description=FORMAT_FILTER_DESCRIPTION,
         )
     )

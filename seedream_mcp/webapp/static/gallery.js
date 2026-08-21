@@ -1,21 +1,24 @@
-/* 图库域：浏览分页、缩略图网格与灯箱。
-   灯箱支持把历史图片回填为参考图。 */
+/**
+ * @fileoverview 图库域：浏览分页、缩略图网格与灯箱。灯箱支持把历史图片回填
+ * 为参考图。
+ */
 
 "use strict";
 
 import { $, apiFetch, fetchBlobUrl, revokeObjectUrls, state } from "./api.js";
 import { addReference } from "./refs.js";
 
+/** 图库单页条数。 */
 export const GALLERY_PAGE_SIZE = 60;
 
-/* 缩略图分批并发：整页 60 张串行加载过慢，批大小 6 做受限并发。 */
+// 缩略图分批并发：整页 60 张串行加载过慢，批大小 6 做受限并发。
 const THUMBNAIL_BATCH_SIZE = 6;
 
-/* 请求序号守卫：翻页或刷新连点时，仅最后一次请求的响应可落地。 */
+// 请求序号守卫：翻页或刷新连点时，仅最后一次请求的响应可落地。
 let requestSeq = 0;
 
-/* 灯箱当前对象 URL 与原始 blob：独立于全局 objectUrls 生命周期，随开关与
-   换图精确回收；blob 保留供「用作参考图」转 data URI。 */
+// 灯箱当前对象 URL 与原始 blob：独立于全局 objectUrls 生命周期，随开关与
+// 换图精确回收；blob 保留供「用作参考图」转 data URI。
 let currentLightboxUrl = null;
 let currentLightboxBlob = null;
 let lightboxSeq = 0;
@@ -27,9 +30,19 @@ function resetGalleryPager() {
   $("gallery-next").disabled = true;
 }
 
+// 图库区错误提示：浏览失败时落空态文案位，替代静默返回。
+function showGalleryError(message) {
+  $("gallery-empty").textContent = message;
+  $("gallery-empty").classList.remove("hidden");
+}
+
+/**
+ * 按当前偏移与格式过滤请求图库并渲染缩略图网格与翻页器；连点由请求序号
+ * 守卫收敛到最后一次。
+ */
 export async function refreshGallery() {
   const seq = ++requestSeq;
-  /* 配置未就绪时不渲染任何空态结论，由 main 的补刷在 config-info 落地后重进。 */
+  // 配置未就绪时不渲染任何空态结论，由 main 的补刷在 config-info 落地后重进。
   if (!state.configInfo) return;
   if (!state.configInfo.save_root_available) {
     state.gallery.offset = 0;
@@ -49,22 +62,34 @@ export async function refreshGallery() {
     show_details: true,
   };
   if (format) body.format_filter = [format];
-  const response = await apiFetch("/web/api/browse", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) return;
+  let response = null;
+  try {
+    response = await apiFetch("/web/api/browse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    // 401 已弹令牌门，令牌补齐后由提交回调补刷；其余网络异常落图库错误提示。
+    if (error.message === "unauthorized") return;
+    if (seq === requestSeq) showGalleryError("图库加载失败，请稍后重试。");
+    return;
+  }
+  if (!response.ok) {
+    if (seq === requestSeq) showGalleryError("图库加载失败，请稍后重试。");
+    return;
+  }
   const payload = await response.json();
   if (seq !== requestSeq) return;
-  /* 页码一律以响应回显的 offset 为准，避免竞态期间本地偏移已被改写。 */
+  // 页码一律以响应回显的 offset 为准，避免竞态期间本地偏移已被改写。
   if (typeof payload.offset === "number") {
     state.gallery.offset = payload.offset;
   }
   state.gallery.hasMore = Boolean(payload.has_more);
   state.gallery.items = payload.images || [];
 
-  revokeObjectUrls();
+  // 只回收图库缩略图池，生成台结果图的 blob URL 不受翻页与刷新波及。
+  revokeObjectUrls("gallery");
   const grid = $("gallery-grid");
   grid.innerHTML = "";
   $("gallery-empty").textContent = "保存目录还没有图片。";
@@ -77,7 +102,7 @@ export async function refreshGallery() {
     figure.appendChild(img);
     const caption = document.createElement("figcaption");
     const detail = [
-      item.size_mb ? `${item.size_mb}MB` : "",
+      item.size_mb ? `${item.size_mb.toFixed(2)}MB` : "",
       item.modified || "",
     ]
       .filter(Boolean)
@@ -99,10 +124,11 @@ export async function refreshGallery() {
         try {
           const blobUrl = await fetchBlobUrl(
             `/web/api/thumbnail?path=${encodeURIComponent(entry.path)}`,
+            "gallery",
           );
           if (blobUrl) entry.img.src = blobUrl;
         } catch {
-          /* 单张缩略图失败不阻断同批与后续批次 */
+          // 单张缩略图失败不阻断同批与后续批次。
         }
       }),
     );
@@ -117,6 +143,11 @@ export async function refreshGallery() {
   $("gallery-next").disabled = !state.gallery.hasMore;
 }
 
+/**
+ * 打开灯箱并装载原图；序号守卫丢弃打开新图或已关闭后的过期响应。
+ *
+ * @param {Object} item - 目标条目，仅使用 web_path 字段。
+ */
 export async function openLightbox(item) {
   if (!item || !item.web_path) return;
   const seq = ++lightboxSeq;
@@ -128,13 +159,14 @@ export async function openLightbox(item) {
   );
   if (!response.ok) return;
   const blob = await response.blob();
-  /* 序号已变：新图已打开或灯箱已关闭，本次结果整包丢弃。 */
+  // 序号已变：新图已打开或灯箱已关闭，本次结果整包丢弃。
   if (seq !== lightboxSeq) return;
   currentLightboxBlob = blob;
   currentLightboxUrl = URL.createObjectURL(blob);
   $("lightbox-img").src = currentLightboxUrl;
 }
 
+/** 关闭灯箱并释放当前对象 URL 与 blob。 */
 export function closeLightbox() {
   lightboxSeq++;
   releaseLightboxUrl();
@@ -150,9 +182,11 @@ function releaseLightboxUrl() {
   }
 }
 
-/* 回填参考图：config-info 不再下发保存根绝对路径，前端无从拼本地路径，改用
-   灯箱已持有的 blob 转 data URI 作为参考图值。文生图工具自动切到图生图，
-   hash 变化由浏览器原生 hashchange 事件驱动视图切换。 */
+/**
+ * 回填参考图：config-info 不再下发保存根绝对路径，前端无从拼本地路径，改用
+ * 灯箱已持有的 blob 转 data URI 作为参考图值。文生图工具自动切到图生图，
+ * hash 变化由浏览器原生 hashchange 事件驱动视图切换。
+ */
 export async function useLightboxAsReference() {
   const blob = currentLightboxBlob;
   if (!blob || !state.configInfo || !state.configInfo.save_root_available)

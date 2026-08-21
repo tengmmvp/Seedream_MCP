@@ -598,8 +598,10 @@ _KEYVALUE_WHITESPACE_CLASS = (
 )
 
 # 控制空白字符类：作为分隔符交替组的独占分支，覆盖无冒号等号的「键后直接跟
-# 控制空白再跟值」形态，只在压平前的首轮键值匹配中存在。
-_KEYVALUE_CONTROL_WHITESPACE_CLASS = r"[\t\n\r\x0b\x0c\x85]"
+# 控制空白再跟值」形态，只在压平前的首轮键值匹配中存在。成员为全部 C0 与 NEL
+# 中 isspace 为真的字符，含 \x1c-\x1f 的 FS/GS/RS/US；这些字符压平后仅成普通
+# 空格，不构成冒号等号类分隔符，遗漏时凭据在两条匹配轮次中都存活。
+_KEYVALUE_CONTROL_WHITESPACE_CLASS = r"[\t\n\r\x0b\x0c\x1c-\x1f\x85]"
 
 # 键值分隔符交替组：字面转义族覆盖 \n、\uXXXX 一类转义序列，json.dumps 与 repr
 # 转义后的键值凭据仍被命中；冒号等号族容忍可选反斜杠前缀；控制空白分支经尾部

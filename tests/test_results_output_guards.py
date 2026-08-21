@@ -14,6 +14,7 @@ from seedream_mcp.tools.core._helpers import _extract_parallel_request_error
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
     _sanitize_image_errors,
+    aggregate_parallel_generation_results,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
@@ -629,6 +630,105 @@ def test_aggregated_failure_message_not_resanitized_in_both_outlets() -> None:
     assert f"图片生成失败: {truncated_message}" in text
     assert f"  请求 1: {truncated_message}" in text
     assert structured["error"]["message"] == truncated_message
+
+
+# ==================== 占位标记豁免与伪造 sentinel ====================
+
+
+def test_forged_request_failed_sentinel_sanitized_in_single_request_path() -> None:
+    """单请求路径伪造占位 sentinel type 不获得豁免：error 照常净化。
+
+    豁免以聚合来源加内部标记双因子判定，上游透传的 data 项无法借伪造
+    sentinel type 免除净化。
+    """
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [
+            {
+                "type": "image_generation.request_failed",
+                "error": {"message": "boom\r\nAuthorization: Bearer sk-forged"},
+            }
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert "sk-forged" not in text
+    assert "\r" not in text
+    message = structured["data"][0]["error"]["message"]
+    # 键值脱敏先于 Bearer 剥离吸收 Authorization 整段，值收敛为 ***。
+    assert message == "boom  Authorization: ***"
+
+
+def test_aggregated_placeholder_exempt_and_marker_stripped() -> None:
+    """聚合占位项凭内部标记豁免二次净化，标记键不进入 structuredContent。"""
+    truncated_message = "<truncated:600 chars> " + "x" * 500
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"type": "api_error", "message": "并行请求全部失败"},
+        "data": [
+            {
+                "type": "image_generation.request_failed",
+                results_module._PLACEHOLDER_MARKER: True,
+                "request_index": 1,
+                "error": {"type": "api_error", "message": truncated_message},
+            }
+        ],
+        "batch": {
+            "request_count": 1,
+            "success_requests": 0,
+            "failed_requests": 1,
+            "errors": [{"request_index": 1, "message": truncated_message}],
+        },
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    item = structured["data"][0]
+    assert results_module._PLACEHOLDER_MARKER not in item
+    assert item["error"]["message"] == truncated_message
+
+
+def test_aggregate_strips_injected_placeholder_marker_from_upstream_items() -> None:
+    """聚合复制上游图片项时剔除其携带的占位标记键，伪造标记不获得豁免。"""
+    aggregated = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": True,
+                "status": "completed",
+                "usage": {},
+                "data": [
+                    {
+                        "url": "https://example.com/a.png",
+                        results_module._PLACEHOLDER_MARKER: True,
+                        "error": {"message": "x\r\napi_key=leaked"},
+                    }
+                ],
+            }
+        ],
+        request_errors={},
+    )
+
+    merged = aggregated["data"][0]
+    assert merged["url"] == "https://example.com/a.png"
+    assert results_module._PLACEHOLDER_MARKER not in merged
+    sanitized = _sanitize_image_errors([merged], aggregated=True)
+    assert "leaked" not in sanitized[0]["error"]["message"]
 
 
 # ==================== usage 字段净化 ====================
@@ -1449,3 +1549,64 @@ def test_falsy_malformed_usage_batch_shapes_converge_quietly() -> None:
     assert "使用统计" not in text
     assert structured["usage"] == {}
     assert structured["batch"] is None
+
+
+# ==================== error 旁键净化 ====================
+
+
+def test_per_image_error_extra_keys_sanitized() -> None:
+    """per-image error 的 message/code 外键过净化管线，凭据不借旁路键穿透。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [
+            {
+                "type": "image_generation.partial_failed",
+                "error": {
+                    "message": "ok",
+                    "code": "E",
+                    "detail": "api_key=sk-side-leaked\r\nFAKE",
+                    "extra": {"Authorization": "Bearer sk-extra-leaked"},
+                },
+            }
+        ],
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    error = structured["data"][0]["error"]
+    assert error["message"] == "ok"
+    assert error["code"] == "E"
+    assert "sk-side-leaked" not in error["detail"]
+    assert "\r" not in error["detail"]
+    assert "api_key=***" in error["detail"]
+    assert "sk-extra-leaked" not in str(error)
+
+
+def test_structured_failure_error_extra_keys_sanitized() -> None:
+    """顶层 error 的 message/code 外键同样过净化管线，旁路键不泄露凭据。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {
+            "message": "boom",
+            "param": "api_key=sk-top-side-leaked\r\nFAKE",
+        },
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert "sk-top-side-leaked" not in structured["error"]["param"]
+    assert "api_key=***" in structured["error"]["param"]

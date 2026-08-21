@@ -341,7 +341,7 @@ class SeedreamClient:
 
             response = await self._call_api("text_to_image", request_data)
 
-            self.logger.info("文生图任务完成")
+            self._log_task_outcome("文生图", response)
             return response
 
         except Exception as e:
@@ -450,7 +450,7 @@ class SeedreamClient:
 
             response = await self._call_api("image_to_image", request_data)
 
-            self.logger.info("图文生图任务完成")
+            self._log_task_outcome("图文生图", response)
             return response
 
         except Exception as e:
@@ -542,7 +542,7 @@ class SeedreamClient:
 
             response = await self._call_api("multi_image_fusion", request_data)
 
-            self.logger.info("多图融合任务完成")
+            self._log_task_outcome("多图融合", response)
             return response
 
         except Exception as e:
@@ -679,7 +679,7 @@ class SeedreamClient:
 
             response = await self._call_api("sequential_generation", request_data)
 
-            self.logger.info("组图输出任务完成")
+            self._log_task_outcome("组图输出", response)
             return response
 
         except Exception as e:
@@ -1423,6 +1423,20 @@ class SeedreamClient:
         wrapped = SeedreamAPIError(f"API 调用失败: {error}")
         wrapped.__cause__ = error
         return wrapped
+
+    def _log_task_outcome(self, task_label: str, response: dict[str, Any]) -> None:
+        """按统一结果结构记录任务结局日志，四生成方法在 _call_api 正常返回后共用。
+
+        success 仅代表收到 200 响应，软失败与部分失败以结果结构表达而非异常，
+        失败结果不得再落「任务完成」日志与失败并存；抛异常路径的失败日志由
+        _finalize_generation_error 承担。
+        """
+        if not response.get("success"):
+            self.logger.error("{}任务失败", task_label)
+        elif response.get("status") == "partial":
+            self.logger.warning("{}任务部分完成", task_label)
+        else:
+            self.logger.info("{}任务完成", task_label)
 
     def _finalize_generation_error(self, task_label: str, error: Exception) -> Exception:
         """记录任务失败日志并返回归一化异常，供四生成方法 except 分支复用。"""

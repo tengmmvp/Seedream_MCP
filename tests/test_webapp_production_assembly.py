@@ -33,7 +33,8 @@ async def test_production_app_serves_web_console(
     async with _make_client(app) as client:
         index_response = await client.get("/web")
         api_response = await client.get("/web/api/config-info")
-        static_response = await client.get("/web/static/index.html")
+        static_response = await client.get("/web/static/main.js")
+        html_direct_response = await client.get("/web/static/index.html")
         missing_response = await client.get("/web/api/does-not-exist")
 
     assert index_response.status_code == 200
@@ -41,6 +42,7 @@ async def test_production_app_serves_web_console(
     assert api_response.status_code == 200
     assert api_response.json()["save_root_available"] is True
     assert static_response.status_code == 200
+    assert html_direct_response.status_code == 404
     assert missing_response.status_code == 404
 
 
@@ -62,7 +64,7 @@ async def test_production_app_without_web_returns_404(
 async def test_origin_guard_allows_same_origin_and_rejects_cross_origin(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """无令牌 Web 部署：同源 Origin 与无 Origin 放行，跨源 Origin 被 403 拒绝。"""
+    """无令牌 Web 部署：同源 Origin 与无 Origin 放行，跨源与畸形 Origin 被 403 拒绝。"""
     write_workspace_config(tmp_path)
     app = _build_streamable_app("127.0.0.1", False, "", True)
 
@@ -76,11 +78,17 @@ async def test_origin_guard_allows_same_origin_and_rejects_cross_origin(
             "/web/api/config-info",
             headers={"host": "127.0.0.1:8000", "origin": "http://evil.example"},
         )
+        malformed_origin = await client.get(
+            "/web/api/config-info",
+            headers={"host": "127.0.0.1:8000", "origin": "http://[::1"},
+        )
 
     assert same_origin.status_code == 200
     assert no_origin.status_code == 200
     assert cross_origin.status_code == 403
     assert cross_origin.json()["error"] == "invalid_origin"
+    assert malformed_origin.status_code == 403
+    assert malformed_origin.json()["error"] == "invalid_origin"
 
 
 async def test_origin_guard_not_assembled_when_token_configured(

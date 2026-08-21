@@ -15,6 +15,7 @@ from PIL import Image
 from seedream_mcp.utils.core.formats import (
     EXTENSION_BY_MIME,
     MIME_BY_EXTENSION,
+    SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
     infer_extension_from_bytes,
     is_known_image_bytes,
@@ -38,6 +39,28 @@ def test_mime_mappings_are_immutable_readonly_views() -> None:
         MIME_BY_EXTENSION[".exe"] = "application/x-msdownload"  # type: ignore[index]
     with pytest.raises(TypeError):
         EXTENSION_BY_MIME["image/x"] = ".x"  # type: ignore[index]
+
+
+# ==================== MIME 反推表反转派生 ====================
+
+
+def test_extension_by_mime_derives_from_mime_by_extension() -> None:
+    """MIME 反推表由扩展名正向表反转派生：键集与值域闭合，往返映射一致。
+
+    平行手写双表在新增格式时会漂移；反向表键集须等于支持扩展集经正向表去重
+    后的 MIME 值域，值域落在支持扩展集内。
+    """
+    assert set(EXTENSION_BY_MIME) == {MIME_BY_EXTENSION[ext] for ext in SUPPORTED_IMAGE_EXTENSIONS}
+    assert set(EXTENSION_BY_MIME.values()) <= SUPPORTED_IMAGE_EXTENSIONS
+    for mime, ext in EXTENSION_BY_MIME.items():
+        assert MIME_BY_EXTENSION[ext] == mime
+
+
+def test_extension_by_mime_resolves_jpeg_conflict_to_canonical_extension() -> None:
+    """.jpg 与 .jpeg 同映射 image/jpeg，反转冲突显式择 .jpeg，不依赖键序。"""
+    assert MIME_BY_EXTENSION[".jpg"] == MIME_BY_EXTENSION[".jpeg"] == "image/jpeg"
+    assert EXTENSION_BY_MIME["image/jpeg"] == ".jpeg"
+    assert ".jpg" not in set(EXTENSION_BY_MIME.values())
 
 
 # ==================== BMP ====================

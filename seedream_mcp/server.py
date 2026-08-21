@@ -79,6 +79,7 @@ from .tools.core.schemas import (
     DIRECTORY_MAX_LENGTH,
     FORMAT_FILTER_DESCRIPTION,
     FORMAT_FILTER_ITEM_MAX_LENGTH,
+    FORMAT_FILTER_MAX_ITEMS,
     GenerationTool,
     IMAGE_TO_IMAGE_PROMPT_DESCRIPTION,
     LAYER_DECOMPOSITION_DESCRIPTION,
@@ -745,6 +746,7 @@ async def browse_images(
         list[Annotated[str, Field(max_length=FORMAT_FILTER_ITEM_MAX_LENGTH)]] | None
     ) = Field(
         default=None,
+        max_length=FORMAT_FILTER_MAX_ITEMS,
         description=FORMAT_FILTER_DESCRIPTION,
     ),
     show_details: bool = Field(

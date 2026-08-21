@@ -105,6 +105,7 @@ def aggregate_parallel_generation_results(
             merged_data.append(
                 {
                     "type": _REQUEST_FAILED_TYPE,
+                    _PLACEHOLDER_MARKER: True,
                     "request_index": request_index,
                     "error": {
                         "type": (
@@ -129,6 +130,8 @@ def aggregate_parallel_generation_results(
         images = extract_images(result)
         for image in images:
             normalized_image = image.copy()
+            # 剔除上游可能携带的占位标记键，使豁免判定只对本侧写入的标记生效。
+            normalized_image.pop(_PLACEHOLDER_MARKER, None)
             normalized_image["request_index"] = request_index
             merged_data.append(normalized_image)
 
@@ -317,20 +320,29 @@ def _sanitize_image_error_entry(error: Any) -> dict[str, Any]:
     """
     updates: dict[str, Any] = {}
     if isinstance(error, dict):
-        sanitized_error: dict[str, Any] | None = None
+        sanitized_error = dict(error)
+        changed = False
         message = error.get("message")
         if message is not None:
             sanitized_message = sanitize_error_text(normalize_message_text(message))
             if sanitized_message != message:
-                sanitized_error = {**error, "message": sanitized_message}
+                sanitized_error["message"] = sanitized_message
+                changed = True
         code = error.get("code")
         if code is not None:
             sanitized_code = sanitize_error_text(normalize_message_text(code))
             if sanitized_code != code:
-                if sanitized_error is None:
-                    sanitized_error = dict(error)
                 sanitized_error["code"] = sanitized_code
-        if sanitized_error is not None:
+                changed = True
+        # message/code 以外的键同样过净化管线，凭据与 CRLF 不借旁路键穿透。
+        for key, value in error.items():
+            if key in ("message", "code"):
+                continue
+            sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
+            if sanitized_value != value:
+                sanitized_error[key] = sanitized_value
+                changed = True
+        if changed:
             updates["error"] = sanitized_error
     elif error is not None:
         sanitized_non_dict = _sanitize_value_tree(error, sanitize_error_text)
@@ -383,8 +395,15 @@ def _sanitize_unknown_fields(image: dict[str, Any]) -> dict[str, Any]:
 # 并行批次失败占位项的 type 标识；其 error.message 已在聚合源头净化。
 _REQUEST_FAILED_TYPE = "image_generation.request_failed"
 
+# 占位项的内部标记键：error 净化豁免仅在聚合结果内对携带该标记的条目生效，
+# 上游透传的 data 项即使伪造 sentinel type 也无法获得豁免。聚合复制上游项时剔除
+# 该键防注入，净化出口剔除该键使其不进入 structuredContent。
+_PLACEHOLDER_MARKER = "__seedream_request_failed__"
 
-def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+
+def _sanitize_image_errors(
+    images: list[dict[str, Any]], *, aggregated: bool = False
+) -> list[dict[str, Any]]:
     """净化图片项内上游可回显自由内容的字段，返回净化后的列表。
 
     error 与 size/output_format/model/type 等短标识走 sanitize_error_text 截断语义；
@@ -392,15 +411,23 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
     字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。仅净化后内容变化
     的项做浅拷贝，其余项保持原对象引用，传入列表不被修改。净化非幂等，重复净化会使
     超长片段的截断标记叠加，调用方须保证同一列表仅净化一次。SSE 失败事件已在
-    io_sse 源头净化，此处覆盖非 SSE 路径。
+    io_sse 源头净化，此处覆盖非 SSE 路径。aggregated 为真时，携带本侧占位标记的
+    并行失败占位项跳过 error 净化并剔除标记键；伪造 sentinel type 的上游透传项不
+    携带标记，照常净化。
     """
     sanitized_images = images
     for index, image in enumerate(images):
         updates: dict[str, Any] = {}
-        # 并行失败占位项的 error 已在聚合源头净化，跳过 error 分量避免二次净化
-        # 使超长消息的截断标记叠加；其余字段照常净化。
-        if image.get("type") != _REQUEST_FAILED_TYPE:
-            updates.update(_sanitize_image_error_entry(image.get("error")))
+        # 占位项豁免以聚合来源加内部标记双因子判定：error 已在聚合源头净化，
+        # 跳过避免截断标记叠加，出口剔除标记键；其余字段照常净化。
+        if aggregated and image.get(_PLACEHOLDER_MARKER) is True:
+            if sanitized_images is images:
+                sanitized_images = list(images)
+            sanitized_images[index] = {
+                key: value for key, value in image.items() if key != _PLACEHOLDER_MARKER
+            }
+            continue
+        updates.update(_sanitize_image_error_entry(image.get("error")))
         updates.update(
             _sanitize_fields_with(
                 image, ("size", "output_format", "model", "type"), sanitize_error_text
@@ -626,7 +653,9 @@ def format_generation_response(
         return _format_failure_section(result)
 
     if images is None:
-        images = _sanitize_image_errors(extract_images(result))
+        images = _sanitize_image_errors(
+            extract_images(result), aggregated=_is_aggregated_result(result)
+        )
     usage = result.get("usage", {})
 
     parts: list[str] = [title, f"尺寸: {size}", ""]
@@ -687,7 +716,11 @@ def _build_generation_structured_result(
     # b64_json 为用户显式请求的图像载荷，有意不做截断。流水线传入的 images 已
     # 净化，直接消费；独立调用未传时在此完成首次净化。
     sanitized_images = (
-        images if images is not None else _sanitize_image_errors(extract_images(result))
+        images
+        if images is not None
+        else _sanitize_image_errors(
+            extract_images(result), aggregated=_is_aggregated_result(result)
+        )
     )
     # status 为上游自由文本，同口径净化；非 str 归 None，畸形形态不使构造抛校验异常。
     raw_status = result.get("status")
@@ -744,6 +777,13 @@ def _build_generation_structured_result(
             # code 为上游自由文本，两种来源下均净化。
             if isinstance(sanitized_error.get("code"), str):
                 sanitized_error["code"] = sanitize_error_text(sanitized_error["code"])
+            # message/code 以外的键过容器净化，与图片项 error 分量同口径。
+            for key, value in raw_error.items():
+                if key in ("message", "code"):
+                    continue
+                sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
+                if sanitized_value != value:
+                    sanitized_error[key] = sanitized_value
             payload["error"] = sanitized_error
         else:
             payload["error"] = build_error_dict(

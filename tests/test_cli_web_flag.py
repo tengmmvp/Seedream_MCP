@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
 
+import seedream_mcp.cli as cli
 import seedream_mcp.server as server
 from seedream_mcp.config import build_config_from_sources
 
@@ -69,6 +71,20 @@ def test_web_enabled_via_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert config.web_enabled is True
 
 
+def _make_cli_args(web: bool | None, config_file: str | None) -> Namespace:
+    """构造 _build_config_from_args 读取的全部 CLI 字段，未测字段取 None。"""
+    return Namespace(
+        api_key=None,
+        base_url=None,
+        model=None,
+        default_size=None,
+        watermark=None,
+        web=web,
+        log_level=None,
+        config_file=config_file,
+    )
+
+
 def test_cli_no_web_overrides_env_file_true(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -77,7 +93,7 @@ def test_cli_no_web_overrides_env_file_true(
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_WEB_ENABLED=true\n")
 
-    config = build_config_from_sources(overrides={"web": False}, env_file=str(env_file))
+    config = cli._build_config_from_args(_make_cli_args(web=False, config_file=str(env_file)))
 
     assert config.web_enabled is False
 
@@ -88,6 +104,6 @@ def test_cli_web_overrides_env_file_false(tmp_path: Path, monkeypatch: pytest.Mo
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_WEB_ENABLED=false\n")
 
-    config = build_config_from_sources(overrides={"web": True}, env_file=str(env_file))
+    config = cli._build_config_from_args(_make_cli_args(web=True, config_file=str(env_file)))
 
     assert config.web_enabled is True

@@ -48,6 +48,7 @@ from .parallel import (
 )
 from .results import (  # noqa: F401
     _build_generation_structured_result,
+    _is_aggregated_result,
     _sanitize_image_errors,
     aggregate_parallel_generation_results,
     extract_images,
@@ -347,7 +348,7 @@ async def execute_generation_handler(
 
         # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
         # 净化非幂等，重复净化会使超长片段的截断标记叠加。
-        sanitized_images = _sanitize_image_errors(images)
+        sanitized_images = _sanitize_image_errors(images, aggregated=_is_aggregated_result(result))
 
         response_text, structured_result = _format_generation_outputs(
             metadata=metadata,

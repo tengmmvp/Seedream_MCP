@@ -116,6 +116,47 @@ async def test_trailing_slash_redirects_to_trimmed_path(
     assert unknown_final.status_code == 404
 
 
+async def test_protocol_relative_path_not_redirected(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """协议相对形态 //host 去尾斜杠后仍是开放重定向目标，不走重定向落 404。
+
+    请求以绝对 URL 直发：相对路径形态会被 httpx 按 RFC 3986 join 成外域地址。
+    """
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.get("http://127.0.0.1//evil.com/", follow_redirects=False)
+
+    assert response.status_code == 404
+    assert "location" not in response.headers
+
+
+async def test_static_mount_denies_html_direct_access(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """静态挂载封禁 html 直达：页面只经 meta 端点携带安全头直出，JS 资源仍 200。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    html_response = await _get(app, "/web/static/index.html")
+    script_response = await _get(app, "/web/static/app.js")
+
+    assert html_response.status_code == 404
+    assert script_response.status_code == 200
+
+
 async def test_page_responses_carry_security_headers(
     tmp_path: Path,
     monkeypatch: Any,

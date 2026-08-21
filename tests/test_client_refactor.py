@@ -1162,3 +1162,88 @@ async def test_direct_client_calls_validate_common_params_per_call(
     await client.text_to_image(prompt="second")
 
     assert calls["validate"] == 2
+
+
+# ==================== 任务结局日志分级 ====================
+
+
+async def test_text_to_image_logs_info_completion_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成功结果落 info 级任务完成日志，错误与告警桶保持为空。"""
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        del endpoint, request_data
+        return {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {},
+            "status": "completed",
+        }
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    await client.text_to_image(prompt="p", size="2K")
+
+    assert any("文生图任务完成" in message for message in fake_logger.info_messages)
+    assert fake_logger.errors == []
+    assert fake_logger.warnings == []
+
+
+async def test_multi_image_fusion_logs_error_on_soft_failure_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """200 加顶层 error 的软失败经结果结构返回时落 error 级任务失败日志。
+
+    success=False 不抛异常，完成日志曾与失败结果并存。
+    """
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
+        return [f"prepared:{item}" for item in images]
+
+    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        del endpoint, request_data
+        return {
+            "success": False,
+            "data": [],
+            "usage": {},
+            "status": "failed",
+            "error": {"code": "E", "message": "boom"},
+        }
+
+    monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    await client.multi_image_fusion(prompt="p", image=["i1", "i2"], size="2K")
+
+    assert any("多图融合任务失败" in message for message in fake_logger.errors)
+    assert not any("多图融合任务完成" in message for message in fake_logger.info_messages)
+
+
+async def test_sequential_generation_logs_warning_on_partial_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """status=partial 的部分完成结果落 warning 级日志，不再谎报完成。"""
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        del endpoint, request_data
+        return {
+            "success": True,
+            "data": [{"error": {"code": "E", "message": "blocked"}}],
+            "usage": {},
+            "status": "partial",
+        }
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    await client.sequential_generation(prompt="p", max_images=2, size="2K")
+
+    assert any("组图输出任务部分完成" in message for message in fake_logger.warnings)
+    assert not any("组图输出任务完成" in message for message in fake_logger.info_messages)
+    assert fake_logger.errors == []

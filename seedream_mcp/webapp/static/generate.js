@@ -1,5 +1,7 @@
-/* 生成台域：配置加载、工具切换的表单形态、请求组装与结果渲染。
-   表单字段名与后端 schemas.py 的 *Input 模型一一对应，新增参数须两侧同步。 */
+/**
+ * @fileoverview 生成台域：配置加载、工具切换的表单形态、请求组装与结果渲染。
+ * 表单字段名与后端 schemas.py 的 *Input 模型一一对应，新增参数须两侧同步。
+ */
 
 "use strict";
 
@@ -14,7 +16,11 @@ import {
 import { renderReferences, toolConfig } from "./refs.js";
 import { openLightbox } from "./gallery.js";
 
-/* config-info 是启动面：填充尺寸档位与能力开关；模型跟随服务器配置无下拉。 */
+/**
+ * config-info 是启动面：填充尺寸档位与能力开关；模型跟随服务器配置无下拉。
+ *
+ * @throws {Error} 请求失败时上抛，由调用方走令牌门或错误文案。
+ */
 export async function loadConfigInfo() {
   const response = await apiFetch("/web/api/config-info");
   if (!response.ok) throw new Error("config-info 请求失败");
@@ -48,8 +54,10 @@ export async function loadConfigInfo() {
   updateToolAvailability();
 }
 
-/* 当前模型能力下各表单区的显隐与提示词必填态；提示词可留空的说明只在对应
-   能力真实可用时提及，避免误导用户寻找不存在的开关。 */
+/**
+ * 当前模型能力下各表单区的显隐与提示词必填态；提示词可留空的说明只在对应
+ * 能力真实可用时提及，避免误导用户寻找不存在的开关。
+ */
 export function applyToolUI() {
   const config = toolConfig(state.tool);
   const current = state.configInfo
@@ -80,8 +88,10 @@ export function applyToolUI() {
   renderReferences();
 }
 
-/* 按模型能力启停工具 tab：不支持组图的模型禁用组图入口，当前工具被禁时
-   回落文生图。 */
+/**
+ * 按模型能力启停工具 tab：不支持组图的模型禁用组图入口，当前工具被禁时
+ * 回落文生图。
+ */
 export function updateToolAvailability() {
   const current = state.configInfo
     ? (state.configInfo.models || []).find(
@@ -105,6 +115,11 @@ export function updateToolAvailability() {
   }
 }
 
+/**
+ * 从表单状态组装生成请求体。
+ *
+ * @returns {Object} 请求体对象。
+ */
 export function buildRequestBody() {
   const config = toolConfig(state.tool);
   const body = { prompt: $("prompt").value.trim() };
@@ -148,7 +163,12 @@ export function buildRequestBody() {
   return body;
 }
 
-/* 状态行与等待动画的联动：running 时状态行带呼吸点，预览区域铺对角波点阵。 */
+/**
+ * 状态行与等待动画的联动：running 时状态行带呼吸点，预览区域铺对角波点阵。
+ *
+ * @param {string} kind - 状态类别，取 running / done / failed。
+ * @param {string} text - 状态文案。
+ */
 export function setStatus(kind, text) {
   const status = $("result-status");
   status.className = `result-status ${kind}`;
@@ -171,8 +191,8 @@ export function setStatus(kind, text) {
   }
 }
 
-/* 渲染点阵：按容器尺寸铺点，点亮延迟随行列递增，形成左上到右下扫过的
-   对角波。须在容器可见后调用，隐藏态取不到宽度。 */
+// 渲染点阵：按容器尺寸铺点，点亮延迟随行列递增，形成左上到右下扫过的
+// 对角波。须在容器可见后调用，隐藏态取不到宽度。
 function buildRenderDots() {
   const container = $("render-dots");
   container.innerHTML = "";
@@ -188,6 +208,11 @@ function buildRenderDots() {
   }
 }
 
+/**
+ * 生成表单提交处理器：前端校验后请求生成端点并渲染结果或错误。
+ *
+ * @param {Event} event - submit 事件。
+ */
 export async function submitGenerate(event) {
   event.preventDefault();
   const config = toolConfig(state.tool);
@@ -207,7 +232,7 @@ export async function submitGenerate(event) {
   setStatus("running", "生成中，请稍候…");
   $("result-error").classList.add("hidden");
   $("result-meta").classList.add("hidden");
-  revokeObjectUrls();
+  revokeObjectUrls("generate");
   $("result-grid").innerHTML = "";
 
   try {
@@ -252,8 +277,8 @@ function showResultError(error) {
   box.classList.remove("hidden");
 }
 
-/* 失败载荷归一：error.message、error_description、状态码三级回退，未知响应
-   形态也给出可读信息。 */
+// 失败载荷归一：error.message、error_description、状态码三级回退，未知响应
+// 形态也给出可读信息。
 function normalizePayloadError(payload, response) {
   const error = payload && payload.error;
   if (error && typeof error === "object" && error.message) return error;
@@ -263,9 +288,9 @@ function normalizePayloadError(payload, response) {
   return { type: error || "error", message: `HTTP ${response.status}` };
 }
 
-/* 结果渲染：web_path 优先走本服务鉴权图片端点（blob 免令牌入 URL），外链 url
-   走裸 fetch 防令牌外送、失败回退 img.src 直连（跨域 img 标签不受 CORS 限制）。
-   单张失败只降级该卡片显示占位错误，不中断整批渲染。 */
+// 结果渲染：web_path 优先走本服务鉴权图片端点（blob 免令牌入 URL），外链 url
+// 走裸 fetch 防令牌外送、失败回退 img.src 直连（跨域 img 标签不受 CORS 限制）。
+// 单张失败只降级该卡片显示占位错误，不中断整批渲染。
 async function renderResults(payload) {
   const grid = $("result-grid");
   const items = Array.isArray(payload.data) ? payload.data : [];
@@ -275,7 +300,7 @@ async function renderResults(payload) {
     appendCardInfo(card, item);
     if (item.web_path || item.url) {
       const img = document.createElement("img");
-      img.alt = item.local_path || item.url || "生成结果";
+      img.alt = item.web_path || item.url || "生成结果";
       card.insertBefore(img, card.firstChild);
       grid.appendChild(card);
       try {
@@ -306,12 +331,13 @@ async function renderResults(payload) {
   }
 }
 
-/* 单张结果图装载：仅 web_path 条目可进灯箱并带 zoomable 光标；url-only 条目
-   无本地路径，不可回填也不响应点击。 */
+// 单张结果图装载：仅 web_path 条目可进灯箱并带 zoomable 光标；url-only 条目
+// 无本地路径，不可回填也不响应点击。
 async function loadResultImage(img, item) {
   if (item.web_path) {
     const blobUrl = await fetchBlobUrl(
       `/web/api/image?path=${encodeURIComponent(item.web_path)}`,
+      "generate",
     );
     if (!blobUrl) throw new Error("image endpoint 请求失败");
     img.src = blobUrl;
@@ -319,7 +345,7 @@ async function loadResultImage(img, item) {
     img.addEventListener("click", () => openLightbox(item));
     return;
   }
-  const objectUrl = await fetchExternalBlobUrl(item.url);
+  const objectUrl = await fetchExternalBlobUrl(item.url, "generate");
   img.src = objectUrl || item.url;
 }
 
@@ -328,7 +354,8 @@ function appendCardInfo(card, item) {
   info.className = "result-card-info";
   const path = document.createElement("span");
   path.className = "result-path";
-  path.textContent = item.local_path || item.url || "";
+  // 结果路径展示取 web_path 相对形态，服务器绝对路径不出现在前端。
+  path.textContent = item.web_path || item.url || "";
   path.title = path.textContent;
   info.appendChild(path);
   card.appendChild(info);

@@ -13,6 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from starlette.responses import Response
+from starlette.staticfiles import StaticFiles
+from starlette.types import Receive, Scope, Send
+
 from ..utils.core.logs import get_logger
 from . import constants
 from .constants import (
@@ -36,6 +40,21 @@ logger = get_logger()
 _routes_registered = False
 
 
+class _GuardedStaticFiles(StaticFiles):
+    """封禁 html 直达的静态资源应用。
+
+    index 与 404 页须经 meta 域端点直出以携带 CSP 与 nosniff 安全头，StaticFiles
+    直出会绕过该头，故 html 请求一律 404；其余静态资源按原行为直出。
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """http 请求路径以 .html 结尾时直接回 404，其余透传父类。"""
+        if scope.get("type") == "http" and scope.get("path", "").endswith(".html"):
+            await Response(status_code=404)(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 def register_web_routes() -> None:
     """向 MCPServer 单例注册全部 Web 路由，重复调用经守卫与路径复查保持幂等。"""
     global _routes_registered
@@ -45,7 +64,17 @@ def register_web_routes() -> None:
     from ..resources import mcp
     from . import files, gallery, generate, meta
 
-    existing_paths = {getattr(route, "path", None) for route in mcp._custom_starlette_routes}
+    # 路径交集复查依赖 SDK 私有路由表，getattr 探测缺失时告警跳过复查；注册
+    # 本身经 custom_route 公开 API 完成，不受探测结果影响。
+    custom_routes = getattr(mcp, "_custom_starlette_routes", None)
+    if custom_routes is None:
+        logger.error(
+            "SDK 私有路由表 mcp._custom_starlette_routes 缺失，跳过路径交集复查，"
+            "请适配新版 MCP SDK"
+        )
+        existing_paths: set[str | None] = set()
+    else:
+        existing_paths = {getattr(route, "path", None) for route in custom_routes}
     routes: list[tuple[str, list[str], Any]] = [
         (WEB_ROOT_PATH, ["GET"], meta.web_root_redirect),
         (WEB_INDEX_PATH, ["GET"], meta.web_index),
@@ -79,7 +108,6 @@ def mount_web_static(app: Any) -> None:
     顺序（其路由固定先于挂载进入路由表），故兜底在此处与挂载成对追加。
     """
     from starlette.routing import Mount, Route
-    from starlette.staticfiles import StaticFiles
 
     from .meta import web_not_found
 
@@ -91,7 +119,10 @@ def mount_web_static(app: Any) -> None:
         logger.error("Web 静态资源目录不存在，跳过挂载: {}", constants.STATIC_DIR)
         return
     app.routes.append(
-        Mount(WEB_STATIC_MOUNT_PATH, app=StaticFiles(directory=str(constants.STATIC_DIR)))
+        Mount(
+            WEB_STATIC_MOUNT_PATH,
+            app=_GuardedStaticFiles(directory=str(constants.STATIC_DIR)),
+        )
     )
     app.routes.append(
         Route(

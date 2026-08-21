@@ -249,11 +249,12 @@ async def test_origin_guard_passes_same_origin(origin: bytes, host: bytes) -> No
         (b"http://127.0.0.1:9999", b"127.0.0.1:8000"),
         (b"http://127.0.0.1:8000", b"127.0.0.1"),
         (b"null", b"127.0.0.1:8000"),
+        (b"http://[::1", b"127.0.0.1:8000"),
         (b"http://127.0.0.1:8000", None),
     ],
 )
 async def test_origin_guard_rejects_cross_origin(origin: bytes, host: bytes | None) -> None:
-    """跨源 Origin 一律 403：域名不同、端口不一致、null 形态与 Host 缺失均拒绝。"""
+    """跨源 Origin 一律 403：域名不同、端口不一致、null、畸形与 Host 缺失均拒绝。"""
     reached, guard = _make_guard_app()
     headers = [(b"origin", origin)] + ([] if host is None else [(b"host", host)])
 

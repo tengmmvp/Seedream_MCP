@@ -45,17 +45,13 @@ MIME_BY_EXTENSION: Mapping[str, str] = MappingProxyType(
     }
 )
 
-# MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名，同样取只读视图。
+# MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名，由 MIME_BY_EXTENSION
+# 反转派生，同样取只读视图。.jpg 与 .jpeg 同映射 image/jpeg，反转的多键冲突经
+# 显式覆盖消解、保留 .jpeg，派生结果不依赖正向表的键序。
 EXTENSION_BY_MIME: Mapping[str, str] = MappingProxyType(
     {
-        "image/png": ".png",
+        **{mime: ext for ext, mime in MIME_BY_EXTENSION.items()},
         "image/jpeg": ".jpeg",
-        "image/webp": ".webp",
-        "image/gif": ".gif",
-        "image/bmp": ".bmp",
-        "image/tiff": ".tiff",
-        "image/heic": ".heic",
-        "image/heif": ".heif",
     }
 )
 

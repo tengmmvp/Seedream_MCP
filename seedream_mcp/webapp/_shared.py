@@ -19,6 +19,9 @@ GENERATION_ERROR_STATUS: dict[str, int] = {
 # 缩略图与原图响应允许浏览器私有缓存：已保存图片内容不再变化。
 PRIVATE_CACHE_HEADER = {"cache-control": "private, max-age=3600"}
 
+# 错误消息中保存根绝对路径的替换占位符，gallery 与 generate 域共用。
+SAVE_ROOT_PLACEHOLDER = "<保存根>"
+
 
 def error_json(error: str, description: str, status: int) -> JSONResponse:
     """构造与传输层中间件同形态的错误 JSON 响应。"""

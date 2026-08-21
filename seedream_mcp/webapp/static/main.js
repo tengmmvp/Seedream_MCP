@@ -1,4 +1,6 @@
-/* 装配层：hash 路由、事件绑定与启动流程。依赖其余全部模块。 */
+/**
+ * @fileoverview 装配层：hash 路由、事件绑定与启动流程。依赖其余全部模块。
+ */
 
 "use strict";
 
@@ -16,6 +18,7 @@ function currentView() {
   return location.hash === "#/gallery" ? "gallery" : "generate";
 }
 
+/** 按 hash 切换生成台与图库视图，进入图库时触发刷新。 */
 export function applyRoute() {
   const view = currentView();
   $("view-generate").classList.toggle("hidden", view !== "generate");
@@ -85,7 +88,7 @@ function bindEvents() {
     if (event.target === $("lightbox")) closeLightbox();
   });
   $("lightbox-use").addEventListener("click", useLightboxAsReference);
-  /* 灯箱可见时 Escape 等价点击关闭。 */
+  // 灯箱可见时 Escape 等价点击关闭。
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !$("lightbox").classList.contains("hidden")) {
       closeLightbox();
@@ -102,7 +105,7 @@ function bindEvents() {
       hideTokenGate();
       $("token-error").classList.add("hidden");
       applyToolUI();
-      /* 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，令牌补齐后重刷。 */
+      // 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，令牌补齐后重刷。
       if (currentView() === "gallery") refreshGallery();
     } catch (error) {
       $("token-error").classList.remove("hidden");
@@ -130,7 +133,7 @@ async function main() {
     await loadConfigInfo();
     hideTokenGate();
     applyToolUI();
-    /* 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，配置就绪后补刷。 */
+    // 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，配置就绪后补刷。
     if (currentView() === "gallery") refreshGallery();
   } catch (error) {
     if (error.message !== "unauthorized") {

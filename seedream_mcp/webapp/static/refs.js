@@ -1,6 +1,8 @@
-/* 参考图域：各工具的数量规则、增删与渲染。
-   参考图三来源——上传转 data URI、URL、图库回填的本地绝对路径；
-   提示词以「图N」指代列表序号。 */
+/**
+ * @fileoverview 参考图域：各工具的数量规则、增删与渲染。参考图三来源——
+ * 上传转 data URI、手输 URL、图库灯箱回填转 data URI；提示词以「图N」指代
+ * 列表序号。
+ */
 
 "use strict";
 
@@ -12,7 +14,12 @@ const FUSION_REF_MIN = 2;
 // 防多图融合多张上传触发 413。
 const UPLOAD_TOTAL_LIMIT_CHARS = 45 * 1024 * 1024;
 
-/* 声明各工具的参考图数量区间与提示词必填性；上限随当前模型能力收缩。 */
+/**
+ * 声明各工具的参考图数量区间与提示词必填性；上限随当前模型能力收缩。
+ *
+ * @param {string} tool - 工具标识。
+ * @returns {Object} 形如 {refs, min, max, promptOptional} 的配置。
+ */
 export function toolConfig(tool) {
   const current = state.configInfo
     ? (state.configInfo.models || []).find(
@@ -39,6 +46,7 @@ export function toolConfig(tool) {
   return { refs: false, min: 0, max: 0, promptOptional: false };
 }
 
+/** 按当前工具配置重渲染参考图列表与计数。 */
 export function renderReferences() {
   const config = toolConfig(state.tool);
   const list = $("reference-list");
@@ -75,8 +83,7 @@ export function renderReferences() {
   $("ref-count-note").textContent = `${state.refs.length} / ${config.max}`;
 }
 
-/* 上传累计校验：对现有 data_uri 参考图按字符数求和，新增后总量超限即拒绝。
-   handleFiles 与灯箱回填均经 addReference 汇聚，此处是唯一闸口。 */
+// 现有 data_uri 参考图的累计字符数。
 function dataUriTotalChars() {
   return state.refs.reduce(
     (sum, ref) => (ref.kind === "data_uri" ? sum + ref.value.length : sum),
@@ -84,6 +91,14 @@ function dataUriTotalChars() {
   );
 }
 
+/**
+ * 添加一张参考图并重渲染；超数量上限或 data URI 累计超限时弹窗拒绝。
+ * handleFiles 与灯箱回填均经此汇聚，是上传累计校验的唯一闸口。
+ *
+ * @param {string} kind - 来源类型，取 data_uri 或 url。
+ * @param {string} value - 参考图值，data URI 或图片 URL。
+ * @param {string|null} [preview] - 预览地址。
+ */
 export function addReference(kind, value, preview) {
   const config = toolConfig(state.tool);
   if (state.refs.length >= config.max) {
@@ -101,6 +116,11 @@ export function addReference(kind, value, preview) {
   renderReferences();
 }
 
+/**
+ * 逐个读取文件为 data URI 并加入参考图。
+ *
+ * @param {FileList} files - 待读取的文件列表。
+ */
 export function handleFiles(files) {
   for (const file of files) {
     const reader = new FileReader();

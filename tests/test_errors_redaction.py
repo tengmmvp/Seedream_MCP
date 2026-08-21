@@ -639,6 +639,23 @@ def test_sanitize_error_text_blocks_control_char_separator_bypass() -> None:
     assert "SECRET123" not in sanitize_error_text("token\x0b=SECRET123")
 
 
+def test_sanitize_error_text_blocks_file_separator_control_whitespace_bypass() -> None:
+    """FS/GS/RS/US 独占分隔的键值在压平前的首轮匹配命中，凭据不残留。
+
+    四个分隔符 isspace 为真，压平后仅成普通空格，不构成冒号等号类分隔符；
+    控制空白类遗漏时两条匹配轮次都无法命中，值原样存活。
+    """
+    for sep in ("\x1c", "\x1d", "\x1e", "\x1f"):
+        redacted = sanitize_error_text(f"token{sep}SECRETVALUE tail")
+        assert "SECRETVALUE" not in redacted, f"分隔符 {sep!r} 的凭据未剥离"
+        assert redacted.startswith("token")
+        assert sep not in redacted
+
+    # 冒号加分隔符的形态由压平后的次轮命中，与既有冒号口径一致。
+    assert sanitize_error_text("api_key:\x1cSECRET123") == "api_key: ***"
+    assert sanitize_error_text("token\x1d=SECRET") == "token ***"
+
+
 def test_sanitize_error_text_blocks_unicode_whitespace_separator_bypass() -> None:
     """NBSP、全角空格与 em 空白分隔的键值形态同样剥离，凭据不借 Unicode 空白逃逸。"""
     nbsp = chr(0xA0)

@@ -96,6 +96,21 @@ async def test_browse_internal_error_returns_500_json(
     assert response.json()["error"] == "internal_error"
 
 
+async def test_browse_error_message_masks_save_root(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """越界目录的错误消息以占位符替代保存根绝对路径，不向浏览器回显服务器路径。"""
+    save_root = write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"directory": ".."})
+
+    assert response.status_code == 400
+    message = response.json()["error"]["message"]
+    assert str(save_root) not in message
+    assert "<保存根>" in message
+
+
 async def test_browse_save_root_unavailable_returns_400(
     clean_web_routes: None, reset_http_app_state: None
 ) -> None:

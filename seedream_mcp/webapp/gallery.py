@@ -2,14 +2,16 @@
 
 显式把保存根声明为 roots，浏览范围与条目 path 都以保存根为基准，前端可将
 path 直接拼接为图片端点参数。workspace_roots 与 resolved_directories 回显
-字段携带服务器绝对路径，Web 前端不消费，返回浏览器前剥除以与 config-info
-的防泄露口径一致。条目路径归一为正斜杠，与 web_path 及前端 URL 拼接保持
-一致。
+字段携带服务器绝对路径，Web 前端不消费，返回浏览器前剥除；错误消息中的
+保存根绝对路径替换为占位符，与 config-info 的防泄露口径一致。条目路径归一
+为正斜杠，与 web_path 及前端 URL 拼接保持一致。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+from pathlib import Path
 
 from mcp.types import ListRootsResult, Root
 from pydantic import FileUrl, ValidationError
@@ -46,6 +48,16 @@ def _strip_roots_echo(structured: dict[str, object]) -> None:
         structured.pop(key, None)
 
 
+def _sanitize_error_message(structured: dict[str, object], save_root: Path) -> None:
+    """错误消息中的保存根绝对路径替换为占位符，不向浏览器泄露服务器路径。"""
+    error = structured.get("error")
+    if not isinstance(error, dict):
+        return
+    message = error.get("message")
+    if isinstance(message, str):
+        error["message"] = message.replace(str(save_root), _shared.SAVE_ROOT_PLACEHOLDER)
+
+
 async def web_browse(request: Request) -> Response:
     """图库浏览端点，请求体经 BrowseImagesInput 校验后透传 browse 工具。"""
     try:
@@ -61,8 +73,9 @@ async def web_browse(request: Request) -> Response:
             "invalid_request", f"参数校验失败: {exc.errors()[0].get('msg')}", 400
         )
 
+    # 保存根含 Path.resolve 文件系统调用，经 to_thread 下沉与 files 域同口径。
     try:
-        save_root = _resolve_default_base_dir(get_active_config())
+        save_root = await asyncio.to_thread(_resolve_default_base_dir, get_active_config())
     except SeedreamValidationError as exc:
         return _shared.save_root_unavailable(exc)
     roots = ListRootsResult(roots=[Root(uri=FileUrl(save_root.as_uri()), name="web-save-root")])
@@ -75,5 +88,7 @@ async def web_browse(request: Request) -> Response:
     if isinstance(structured, dict):
         _normalize_browse_paths(structured)
         _strip_roots_echo(structured)
+        if result.is_error:
+            _sanitize_error_message(structured, save_root)
     status = 200 if not result.is_error else 400
     return JSONResponse(structured, status_code=status)

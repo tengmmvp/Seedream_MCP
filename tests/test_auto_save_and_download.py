@@ -326,18 +326,6 @@ async def test_close_does_not_wait_for_background_cleanup(
     assert not auto_save_module._cleanup_tasks
 
 
-def test_is_known_image_bytes_detects_image_magic() -> None:
-    """下载字节签名校验：识别真实图片 magic，拒绝 HTML/可执行等伪造内容。"""
-    from seedream_mcp.utils.core.formats import is_known_image_bytes
-
-    assert is_known_image_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-    assert is_known_image_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 16)
-    assert is_known_image_bytes(b"GIF89a")
-    assert not is_known_image_bytes(b"<html><script>x</script></html>")
-    assert not is_known_image_bytes(b"MZ\x90\x00\x03\x00\x00\x00")
-    assert not is_known_image_bytes(b"\x00" * 32)
-
-
 async def test_save_base64_image_rejects_non_image_bytes(tmp_path: Path) -> None:
     """base64 解码后非图片字节须拒绝，对称下载路径的字节签名校验。"""
     from base64 import b64encode
@@ -373,8 +361,13 @@ async def test_download_image_rejects_html_content_type_single_attempt(
     assert not list(tmp_path.glob("*.part"))
 
 
-def test_validate_url_rejects_ftp_scheme() -> None:
-    """ftp 协议在静态校验即被拒绝，validate_url 返回 False 而不抛出。"""
+def test_validate_url_wrapper_returns_false_for_ftp_scheme() -> None:
+    """wrapper 契约：ftp 协议的静态拒绝经 validate_url 归约为返回 False，不向调用方抛 DownloadError。
+
+    抛错形态的静态校验分支由 test_download_manager_ssrf.py 的
+    test_validate_url_static_rejects_non_http_scheme 专属套件覆盖，此处仅锁定
+    wrapper 特有的 bool 返回契约。
+    """
     assert DownloadManager().validate_url("ftp://x/1.png") is False
 
 

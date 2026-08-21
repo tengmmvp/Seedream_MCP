@@ -1,7 +1,8 @@
 """Web 操作台生成端点：四个工具经 runners 层复用完整 MCP 流水线。
 
 请求体由 schemas.py 的 *Input 模型校验（字段与 MCP 工具同源），响应为工具的
-structured_content 字典；落在保存根内的结果条目附 web_path 相对路径供前端拼接
+structured_content 字典；结果条目与校验错误消息中的保存根绝对路径不出端点，
+local_path 改写为相对形态或删除，落在保存根内的条目附 web_path 供前端拼接
 图片端点。共享 client 经 context 替身借用，鉴权由外层 Bearer 中间件承担。
 """
 
@@ -46,11 +47,24 @@ _InputT = TypeVar("_InputT", bound=BaseModel)
 _GenerationRunner = Callable[[_InputT, SeedreamConfig, Context | None], Awaitable[CallToolResult]]
 
 
-def augment_generation_payload(structured: dict[str, object], save_root: Path) -> None:
-    """为落在保存根内的结果条目附 web_path 相对路径，供前端拼接图片端点。
+async def _sanitize_validation_message(message: str, config: SeedreamConfig) -> str:
+    """校验错误消息中的保存根绝对路径替换为占位符，根解析失败时保持原文。
 
-    条目缺 local_path、路径解析失败或越出保存根时静默跳过，增强只新增
-    web_path 字段，不改动既有内容。
+    保存根解析含文件系统调用，经 to_thread 下沉工作线程执行。
+    """
+    try:
+        save_root = await asyncio.to_thread(_resolve_default_base_dir, config)
+    except SeedreamValidationError:
+        return message
+    return message.replace(str(save_root), _shared.SAVE_ROOT_PLACEHOLDER)
+
+
+def augment_generation_payload(structured: dict[str, object], save_root: Path) -> None:
+    """改写 data 条目的 local_path 并附 web_path，供前端拼接图片端点。
+
+    落在保存根内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
+    越出保存根或路径解析失败的条目删除 local_path 键，前端不展示服务器绝对
+    路径。条目缺 local_path 或值非字符串时跳过，其余内容不改动。
     """
     data = structured.get("data")
     if not isinstance(data, list):
@@ -64,9 +78,13 @@ def augment_generation_payload(structured: dict[str, object], save_root: Path) -
         try:
             resolved = Path(local_path).resolve()
             if is_within_resolved(resolved, save_root):
-                item["web_path"] = resolved.relative_to(save_root).as_posix()
+                web_path = resolved.relative_to(save_root).as_posix()
+                item["web_path"] = web_path
+                item["local_path"] = web_path
+            else:
+                del item["local_path"]
         except (OSError, ValueError):
-            continue
+            del item["local_path"]
 
 
 async def _run_web_generation(
@@ -102,7 +120,8 @@ async def _run_web_generation(
     try:
         result = await runner(params, config, ctx)
     except SeedreamValidationError as exc:
-        return _shared.error_json("validation_error", exc.message, 400)
+        message = await _sanitize_validation_message(exc.message, config)
+        return _shared.error_json("validation_error", message, 400)
     except Exception:
         logger.exception("Web 生成请求执行异常")
         return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)

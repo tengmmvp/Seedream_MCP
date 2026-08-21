@@ -35,6 +35,10 @@ DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
 # http_max_body_size 的构建期下限；过小的上限连常规 MCP JSON 载荷都无法容纳。
 _HTTP_MAX_BODY_SIZE_FLOOR = 1024 * 1024
+# auto_save_download_timeout 的上界秒数：下载总预算按停滞超时的 120 倍推导，
+# 720 秒恰等于 .part 临时文件 24 小时清扫宽限；超过后预算反超宽限，在途慢下载
+# 的临时文件会被并发清扫删除。
+_AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS = 720
 # requestState 密钥环单钥的字节数下限，与 SDK RequestStateSecurity 的密钥强度要求一致。
 _REQUEST_STATE_KEY_MIN_BYTES = 32
 # 密钥环错误消息提示的密钥生成命令，生成一个解码后恰为 32 字节的十六进制密钥。
@@ -69,7 +73,7 @@ class SeedreamConfig:
         log_file: 日志文件路径，未设置时使用日志系统默认路径。
         auto_save_enabled: 是否启用生成图片的自动保存。
         auto_save_base_dir: 自动保存根目录，未设置时回退工作区 .seedream/images 目录。
-        auto_save_download_timeout: 自动保存下载超时秒数。
+        auto_save_download_timeout: 自动保存下载超时秒数，上界 720 秒。
         auto_save_max_retries: 自动保存下载最大重试次数。
         auto_save_max_file_size: 自动保存单文件大小上限字节数。
         auto_save_max_concurrent: 自动保存并发下载数上限。
@@ -260,10 +264,17 @@ class SeedreamConfig:
         object.__setattr__(self, "log_level", self.log_level.upper())
 
     def _validate_auto_save_bounds(self) -> None:
-        """校验自动保存各数值字段的下界。"""
+        """校验自动保存各数值字段的下界与下载停滞超时的上界。"""
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError(
                 "auto_save_download_timeout必须大于0"
+                f"{_env_var_suffix('auto_save_download_timeout')}"
+            )
+        if self.auto_save_download_timeout > _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS:
+            raise SeedreamConfigError(
+                f"auto_save_download_timeout不能大于{_AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS}"
+                "（会使下载总预算超过 .part 临时文件清扫宽限 24 小时，"
+                "在途慢下载的临时文件会被并发清扫）"
                 f"{_env_var_suffix('auto_save_download_timeout')}"
             )
         if self.auto_save_max_retries < 0:

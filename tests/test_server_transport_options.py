@@ -1,6 +1,6 @@
 """streamable-http 传输选项与鉴权中间件测试。
 
-覆盖 CLI 启动守卫、Bearer/Host 校验与传输关闭行为。
+覆盖 CLI 启动守卫、Bearer 鉴权中间件、绑定地址的传输安全派生与传输关闭行为。
 """
 
 import asyncio
@@ -677,73 +677,6 @@ def test_transport_security_loopback_ignores_allowed_hosts(
 
     assert security.enable_dns_rebinding_protection is True
     assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-
-
-# ==================== 回环 Host 校验大小写 ====================
-
-
-@pytest.mark.parametrize(
-    "host",
-    [
-        b"127.0.0.1",
-        b"127.0.0.1:8000",
-        b"localhost",
-        b"localhost:8000",
-        b"[::1]",
-        b"[::1]:8000",
-    ],
-)
-async def test_loopback_host_guard_allows_lowercase_loopback_host(host: bytes) -> None:
-    """小写回环 Host 精确匹配白名单后放行，本地访问不受影响。"""
-    inner_called: list[bool] = []
-
-    async def inner(scope, receive, send):  # type: ignore[no-untyped-def]
-        inner_called.append(True)
-
-    async def send(message):  # type: ignore[no-untyped-def]
-        raise AssertionError("放行路径不应产生短路响应")
-
-    guard = transport_module._LoopbackHostGuardMiddleware(inner)
-    await guard({"type": "http", "headers": [(b"host", host)]}, None, send)
-
-    assert inner_called == [True]
-
-
-@pytest.mark.parametrize(
-    "host",
-    [b"LOCALHOST", b"LocalHost:8000", b"LOCALHOST:8000"],
-)
-async def test_loopback_host_guard_matching_is_case_sensitive(host: bytes) -> None:
-    """Host 头与回环白名单为大小写敏感精确比较，大写回环 Host 被 403 拒绝。"""
-    sent: list[dict] = []
-
-    async def send(message):  # type: ignore[no-untyped-def]
-        sent.append(message)
-
-    async def inner(scope, receive, send):  # type: ignore[no-untyped-def]
-        raise AssertionError("大写回环 Host 不应进入下游")
-
-    guard = transport_module._LoopbackHostGuardMiddleware(inner)
-    await guard({"type": "http", "headers": [(b"host", host)]}, None, send)
-
-    assert sent[0]["status"] == 403
-
-
-@pytest.mark.parametrize("host", [b"EVIL.EXAMPLE.COM", b"Evil.Example.Com:8000"])
-async def test_loopback_host_guard_rejects_uppercase_external_host(host: bytes) -> None:
-    """大写外部域名 Host 仍被 403 拒绝，比较大小写敏感不放宽 fail-closed 取向。"""
-    sent: list[dict] = []
-
-    async def send(message):  # type: ignore[no-untyped-def]
-        sent.append(message)
-
-    async def inner(scope, receive, send):  # type: ignore[no-untyped-def]
-        raise AssertionError("外部域名 Host 不应进入下游")
-
-    guard = transport_module._LoopbackHostGuardMiddleware(inner)
-    await guard({"type": "http", "headers": [(b"host", host)]}, None, send)
-
-    assert sent[0]["status"] == 403
 
 
 # ==================== 残余任务回收 ====================
