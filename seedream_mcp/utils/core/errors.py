@@ -410,9 +410,10 @@ def _container_summary(value: Any) -> str:
 def _estimate_container_output_length(value: Any, limit: int) -> int | None:
     """迭代估计 dict/list 的输出长度，供截断判长使用，不物化完整 repr。
 
-    str/bytes 键与元素取 len，嵌套容器求和，其余元素按固定小常数计入；total 超过
-    limit 即提前返回，超限后的精确值无意义。显式栈配 id 判重终止循环引用展开，
-    嵌套深度超过 _CONTAINER_REPR_DEPTH_LIMIT 返回 None，由调用方以类型占位符兜底。
+    str/bytes 键与元素按 len 加单元素标点开销计入，嵌套容器求和，其余元素按固定
+    小常数计入；total 超过 limit 即提前返回，超限后的精确值无意义。显式栈配 id
+    判重终止循环引用展开，嵌套深度超过 _CONTAINER_REPR_DEPTH_LIMIT 返回 None，
+    由调用方以类型占位符兜底。
     """
     total = 0
     seen: set[int] = {id(value)}
@@ -605,7 +606,8 @@ _KEYVALUE_CONTROL_WHITESPACE_CLASS = r"[\t\n\r\x0b\x0c\x1c-\x1f\x85]"
 
 # 键值分隔符交替组：字面转义族覆盖 \n、\uXXXX 一类转义序列，json.dumps 与 repr
 # 转义后的键值凭据仍被命中；冒号等号族容忍可选反斜杠前缀；控制空白分支经尾部
-# 前瞻只在空白串尾命中。各分支首字符互斥，回溯保持线性。
+# 前瞻只在空白串尾命中。冒号等号族的可选反斜杠与各转义族共用首字符，各分支在
+# 首两字符上互斥，失败回溯随总长线性。
 _SENSITIVE_KEYVALUE_ALT = (
     r"(?:\\[nrtf]"
     r"|\\u[0-9a-fA-F]{4}"

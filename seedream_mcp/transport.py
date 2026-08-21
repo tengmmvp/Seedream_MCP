@@ -86,7 +86,8 @@ class _BearerTokenAuthMiddleware:
     """streamable-http Bearer 令牌鉴权 ASGI 中间件。
 
     校验请求 Authorization 头中的 Bearer 令牌，匹配则放行，否则 HTTP 流量返回 401。
-    启用鉴权时拒绝 websocket 等非 HTTP 流量并以 code 1008 关闭，避免绕过 Bearer 校验。
+    启用鉴权时 websocket 流量以 code 1008 关闭，其余非 http 流量除 lifespan 外直接
+    丢弃，避免绕过 Bearer 校验。
     使用 hmac.compare_digest 做常数时间比较，避免时序侧信道泄露令牌。
 
     exempt_exact 与 exempt_prefixes 声明免鉴权路径：Web 操作台的静态页面组

@@ -516,7 +516,7 @@ def _render_sanitized_value(value: Any) -> str:
 def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
     """格式化单张图片的可读详情行。
 
-    入参已由调用方净化，直接消费；URL 始终输出，local_path 存在时附加；
+    入参已由调用方净化，直接消费；URL 存在时始终输出，local_path 存在时附加；
     markdown_ref 可由本地路径推导，文本通道不单独成行。
     """
     parts = [f"图片 {index}:"]

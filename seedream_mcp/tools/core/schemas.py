@@ -467,6 +467,7 @@ class MultiImageFusionInput(
     如衣裤鞋帽与模特图融合成穿搭图，人物与风景融合为人物风景图等。
     """
 
+    # 覆盖共享基类的 prompt 描述以表达融合场景语义，覆盖声明不改变字段顺序。
     prompt: str = Field(
         ...,
         min_length=PROMPT_MIN_LENGTH,
@@ -489,6 +490,7 @@ class SequentialGenerationInput(
     而非扩大单组内的图片数量；单组图片数量由 max_images 控制，二者相互独立。
     """
 
+    # 覆盖共享基类的 prompt 描述以表达组图提示语义，覆盖声明不改变字段顺序。
     prompt: str = Field(
         ...,
         min_length=PROMPT_MIN_LENGTH,

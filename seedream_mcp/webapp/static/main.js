@@ -105,7 +105,7 @@ function bindEvents() {
       hideTokenGate();
       $("token-error").classList.add("hidden");
       applyToolUI();
-      // 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，令牌补齐后重刷。
+      // 直达 #/gallery 时首刷在 config-info 就绪前空转，令牌补齐后补刷。
       if (currentView() === "gallery") refreshGallery();
     } catch (error) {
       $("token-error").classList.remove("hidden");
@@ -133,7 +133,7 @@ async function main() {
     await loadConfigInfo();
     hideTokenGate();
     applyToolUI();
-    // 直达 #/gallery 时首刷发生在 config-info 之前而误判空态，配置就绪后补刷。
+    // 直达 #/gallery 时首刷在 config-info 就绪前空转，配置就绪后补刷。
     if (currentView() === "gallery") refreshGallery();
   } catch (error) {
     if (error.message !== "unauthorized") {

@@ -107,7 +107,7 @@ def mount_web_static(app: Any) -> None:
 
     兜底路由必须排在静态挂载之后：Starlette 按注册顺序匹配路径，先注册的
     ``/{path:path}`` 会吞掉全部静态资源请求。custom_route 注册表无法保证该
-    顺序（其路由固定先于挂载进入路由表），故兜底在此处与挂载成对追加。
+    顺序，其路由固定先于挂载进入路由表，故兜底在此处与挂载成对追加。
     """
     from starlette.routing import Mount, Route
 

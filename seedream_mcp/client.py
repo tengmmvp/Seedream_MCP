@@ -45,27 +45,27 @@ from .utils.io.io_sse import is_sse_response, parse_sse_response
 from .utils.images.image_ref import classify_image_reference
 from .utils.images.image_prepare import ImagePreparer
 
-# 指数退避单次等待上限
+# 指数退避单次等待上限。
 _MAX_BACKOFF_SECONDS = 60
 
 # 指数退避的指数封顶：2^6=64 已超 _MAX_BACKOFF_SECONDS，封顶不改变等待语义，
-# 仅避免病态大的 max_retries 配置下 float(2**1024) 抛 OverflowError
+# 仅避免病态大的 max_retries 配置下 float(2**1024) 抛 OverflowError。
 _BACKOFF_EXPONENT_CAP = 6
 
-# 错误响应体独立读取上限
+# 错误响应体独立读取上限。
 _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 
-# SSE 事件信封余量
+# SSE 事件信封余量。
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
 
 # base64 最坏膨胀系数：n 字节数据经编码最长为 4*ceil(n/3) 字符，SSE 事件截断阈值
-# 由 4*ceil(n/3)+信封余量推导
+# 由 4*ceil(n/3)+信封余量推导。
 _B64_WORST_CASE_NUMERATOR = 4
 
-# 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象
+# 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象。
 _ERROR_JSON_PARSE_LIMIT = 64 * 1024
 
-# 响应体累计超过该阈值时 join 移交工作线程执行
+# 响应体累计超过该阈值时 join 移交工作线程执行。
 _JOIN_OFFLOAD_THRESHOLD = 8 * 1024 * 1024
 
 
@@ -73,8 +73,8 @@ class SharedRequestPlan:
     """单次工具调用内并行请求的共享计划。
 
     同一批次的多并行请求共享同一份 request_data 与序列化 body，构建与序列化各
-    恰好发生一次。经 ``shared_request_plan_scope`` 绑定到当前上下文后由 client
-    各生成方法与 ``_call_api`` 读取，批次结束随作用域退出释放。
+    恰好发生一次。经 ``shared_request_plan_scope`` 绑定到当前上下文后由各生成
+    方法、公共参数校验与 ``_call_api`` 读取，批次结束随作用域退出释放。
 
     Attributes:
         request_data: 共享的请求参数字典，构建完成后批内只读。
@@ -196,7 +196,7 @@ class SeedreamClient:
         """初始化 Seedream API 客户端。
 
         Args:
-            config: 配置对象，若为 None 则使用全局默认配置。
+            config: 配置对象，若为 None 则取当前活动配置。
         """
         self.config = config or get_active_config()
         self.logger = get_logger()
@@ -782,7 +782,7 @@ class SeedreamClient:
             await client.aclose()
 
     def _build_http_timeout(self) -> httpx.Timeout:
-        """构建并缓存统一超时策略：timeout 管连接与写入，api_timeout 管读取。
+        """构建并缓存统一超时策略：timeout 管连接、写入与连接池获取，api_timeout 管读取。
 
         httpx 的 read 超时按单次读操作计时而非累计时长，慢滴流响应的总时长约束
         由发送路径的截止时间预算补足。
@@ -986,10 +986,11 @@ class SeedreamClient:
         """统一归一化 API 返回结果结构。
 
         success 仅代表收到 200 响应；body 级的部分失败或空数据由 status 与 data
-        共同表达，status 取值为 completed/partial/failed，调用方应同时检查 status。
-        顶层 error 为非空 dict 时始终透传 error 键：data 无有效图片属请求级失败，
-        success 置 False、status 置 failed；data 含有效图片则维持 success=True 并保留
-        error 键，供调用方诊断上游部分错误。
+        共同表达，调用方应同时检查 status。status 透传上游声明，非字符串归一为
+        None，原值为 completed 或缺省且 data 含错误条目时升格 partial。顶层 error
+        为非空 dict 时始终透传 error 键：data 无有效图片属请求级失败，success 置
+        False、status 置 failed；data 含有效图片则维持 success=True 并保留 error
+        键，供调用方诊断上游部分错误。
         """
         data = payload.get("data")
         if isinstance(data, list):
@@ -1277,7 +1278,7 @@ class SeedreamClient:
         """调用 Seedream API。
 
         按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误
-        类型分类：非 2xx 中仅 429 与 5xx 可重试，其余状态码立即抛出；超时与网络
+        类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；超时与网络
         错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的 Seedream 异常。
         """
         await self._ensure_client()
@@ -1415,7 +1416,7 @@ class SeedreamClient:
     def _normalize_api_error(self, error: Exception) -> Exception:
         """归一化 API 错误：Seedream 错误体系内的异常原样返回，其余包装为 SeedreamAPIError。
 
-        仅兜底包装 _call_api 之外的异常，按状态码装配异常由 handle_api_error 承担。
+        仅做兜底包装；按状态码装配异常由 handle_api_error 承担。
         """
         if isinstance(error, SeedreamMCPError):
             return error
@@ -1428,7 +1429,7 @@ class SeedreamClient:
         """按统一结果结构记录任务结局日志，四生成方法在 _call_api 正常返回后共用。
 
         success 仅代表收到 200 响应，软失败与部分失败以结果结构表达而非异常，
-        失败结果不得再落「任务完成」日志与失败并存；抛异常路径的失败日志由
+        失败与部分失败不得落「任务完成」日志；抛异常路径的失败日志由
         _finalize_generation_error 承担。
         """
         if not response.get("success"):

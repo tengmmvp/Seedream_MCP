@@ -1,10 +1,11 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接与原子落盘骨架。
 
 提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd 与同步变体
-atomic_replace_from_fd_sync，另有 is_reparse_point 判定 NTFS junction 等
-非符号链接型 reparse point，供 io_path 的浏览扫描使用。open_no_follow_read
-拒绝最终路径分量为符号链接：支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝，
-Windows 等不支持平台退化为 lstat 与 fstat 的同一性比对兜底，闭合 TOCTOU 竞态。
+atomic_replace_from_fd_sync，另有 is_reparse_point 与 has_reparse_attribute
+判定 NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与
+io_storage 的清理遍历使用。open_no_follow_read 拒绝最终路径分量为符号链接：
+支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝，Windows 等不支持平台退化为
+lstat 与 fstat 的同一性比对兜底，闭合 TOCTOU 竞态。
 atomic_replace_from_fd 封装随机临时文件写入、os.replace 原子替换与失败清理的
 完整协议供 io_storage 与 io_download 复用，writer 可返回 Path 覆盖最终路径，以
 支持按字节签名修正扩展名等写入后才知的目标。共享函数抛 OSError，由调用方按
@@ -177,8 +178,7 @@ def is_reparse_point(path: Path) -> bool:
     junction 属 reparse point，is_symlink 对其返回 False，scandir 与 os.walk 的
     follow_symlinks=False 均不拦截，会被下降进入目标执行 OS 级 listdir，本函数供
     目录遍历下降前剔除。仅 Windows 存在 junction，其他平台直接返回 False；平台
-    判定先于 lstat，POSIX 热路径逐条调用不产生系统调用。供 io_storage 的清理遍历
-    与 io_path 的浏览扫描共用，保持单一实现。
+    判定先于 lstat，POSIX 热路径逐条调用不产生系统调用。供 io_path 的浏览扫描使用。
     """
     if sys.platform != "win32":
         return False

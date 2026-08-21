@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 # 回退边界占位回显：边界来自 env/CWD 回退而非会话 Roots 声明时，不向调用方回显
-# 服务器本地路径，字段与消息统一以本占位符替代。
+# 服务器本地路径，结构化回显字段以本占位符替代，文本消息改用不含路径的文案。
 _FALLBACK_BOUNDARY_PLACEHOLDER = "<工作区根（服务器配置）>"
 
 
@@ -61,7 +61,8 @@ class _BrowseRequestState:
         limit: 单页图片数量上限。
         offset: 分页起始偏移。
         show_details: 图片条目是否附带大小与修改时间详情。
-        format_filter: 经支持列表过滤后的扩展名白名单，None 表示不限制。
+        format_filter: 生效的扩展名过滤值，部分受支持时仅保留受支持后缀，全部不受
+            支持时保留原始输入供回显；None 表示不限制。
     """
 
     workspace_roots: list[Path]
@@ -633,9 +634,9 @@ async def execute_browse_request(
 ) -> CallToolResult:
     """执行图片浏览主逻辑：读取边界、解析目录、扫描分页并装配工具结果。
 
-    仅允许访问 MCP Roots 授权的工作区目录；扫描结果经目录级缓存加速翻页，切片多取
-    一张以判定 has_more。未预期异常向上抛出，由 impl 外层 ``handle_browse_images``
-    兜底降级。
+    仅允许访问工作区 Roots 授权的目录；扫描结果经扫描缓存加速翻页，切片多取一张
+    以判定 has_more。未预期异常向上抛出，由 impl 外层 ``handle_browse_images`` 兜底
+    降级。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
@@ -644,7 +645,8 @@ async def execute_browse_request(
             分支读取。
 
     Returns:
-        浏览工具结果，参数可自纠错误与不可归因空目录为 is_error=True。
+        浏览工具结果，目录无效、越界与模型可自纠的参数错误为 is_error=True，目录
+        不可读与无图片维持空结果语义。
     """
     raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
     directory = params.directory if params.directory is not None else "."

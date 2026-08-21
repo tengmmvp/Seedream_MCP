@@ -79,7 +79,7 @@ async def web_config_info(_request: Request) -> Response:
 
     模型清单取进程级缓存；保存根含 Path.resolve 文件系统调用，经 to_thread
     下沉与 files 域同口径。保存根仅回传可用性布尔，不向浏览器泄露服务器绝对
-    路径；不可用时前端隐藏图库入口。
+    路径；不可用时前端在图库区给出配置指引。
     """
     config = get_active_config()
     try:

@@ -137,7 +137,7 @@ def _has_inflight_references() -> bool:
 def borrow_shared_handles() -> "_SharedResource | None":
     """返回当前活动的共享资源对象，供 webapp 上下文替身借用共享句柄。
 
-    无活动资源时返回 None，调用方按资源不在堂回退自建路径。借用方仅读取
+    无活动资源时返回 None，调用方按资源不在场回退自建路径。借用方仅读取
     client 与 download_manager 使用，不得关闭句柄或改动引用计数，资源的开启
     与关闭由 lifespan 引用计数统一管理。
     """

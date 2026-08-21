@@ -28,7 +28,7 @@ async def handle_browse_images(
 ) -> CallToolResult:
     """处理图片浏览请求，扫描工作区内指定目录的图片并分页返回。
 
-    仅允许访问 MCP Roots 授权的工作区目录；未预期异常降级为结构化错误返回，不向
+    仅允许访问工作区 Roots 授权的目录；未预期异常降级为结构化错误返回，不向
     调用方抛出。
 
     Args:

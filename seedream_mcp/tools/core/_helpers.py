@@ -172,8 +172,9 @@ def resolve_default_base_dir(config: SeedreamConfig) -> Path:
         SeedreamValidationError: 未配置 auto_save_base_dir 且无法确定工作区根。
     """
     if config.auto_save_base_dir:
-        # 显式配置的保存根经 io_path 的进程级缓存 resolve，同一配置串仅首次发生
-        # expanduser/resolve 文件系统调用；配置写入路径统一使缓存失效。
+        # 显式配置的保存根经 io_path 的进程级缓存 resolve，仅 expanduser 后为绝对
+        # 路径的配置串首次发生文件系统调用，相对路径随进程 CWD 变化须每次现算；
+        # 配置写入路径统一使缓存失效。
         return resolve_cached_save_base_dir(config.auto_save_base_dir)
     # get_workspace_root 的 ValueError 转校验异常，归入 validation_error 档，用户可见
     # 文案指向工作区授权问题而非未知失败。

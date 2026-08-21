@@ -18,7 +18,8 @@ const THUMBNAIL_BATCH_SIZE = 6;
 let requestSeq = 0;
 
 // 灯箱当前对象 URL 与原始 blob：独立于全局 objectUrls 生命周期，随开关与
-// 换图精确回收；blob 保留供「用作参考图」转 data URI。
+// 换图精确回收；blob 保留供「用作参考图」转 data URI；序号守卫丢弃换图或
+// 关闭后到达的过期响应。
 let currentLightboxUrl = null;
 let currentLightboxBlob = null;
 let lightboxSeq = 0;
@@ -172,7 +173,7 @@ export async function openLightbox(item) {
       `/web/api/image?path=${encodeURIComponent(item.web_path)}`,
     );
   } catch {
-    // 401 已弹令牌门；其余网络异常不开灯箱，缩略图仍在可重试。
+    // 401 已弹令牌门；其余网络异常不开灯箱，缩略图仍在，可再次点击重试。
     return;
   }
   if (!response.ok) {

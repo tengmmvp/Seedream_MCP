@@ -21,7 +21,6 @@ from .results import extract_images, is_saveable_image
 
 logger = get_logger()
 
-# AutoSaveManager 批量保存方法的可调用类型。
 BatchSaveMethod = Callable[
     [AutoSaveManager, list[dict[str, Any]], str], Awaitable[list[AutoSaveResult]]
 ]

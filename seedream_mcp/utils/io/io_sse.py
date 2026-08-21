@@ -164,8 +164,8 @@ def parse_sse_segment(
 # 同步处理以省去线程调度开销。
 _SSE_OFFLOAD_THRESHOLD = 64 * 1024
 
-# 处理进度 debug 日志的最小字节间隔：按增量阈值记录，模判定在任意 chunk_size 下
-# 几乎不会恰好命中。
+# 处理进度 debug 日志的最小字节间隔：累计字节每跨过该值输出一次，记录频次不随
+# chunk_size 取值漂移。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 
 # 单条解析产物的内存开销估计：事件 dict 本体、键字符串与内层 dict 等解析产物实测
@@ -570,8 +570,8 @@ async def parse_sse_response(
             控制常驻内存。
         event_truncate_threshold: 单个未完成 SSE 事件的截断阈值，仅作防异常流无限
             增长撑爆内存的安全阀；须大于单张合法图片 base64 负载上限，避免大图事件
-            被误截断而永久丢失。与 buffer_max_size 解耦，前者管前缀回收频率，后者
-            管单事件体积上限。
+            被误截断而永久丢失。与 buffer_max_size 解耦，前者管单事件体积上限，
+            后者管前缀回收频率。
         total_bytes_limit: 响应流累计接收字节总量上限，含全部事件段与不完整尾部，
             超限时终止解析并关闭响应；单事件阈值拦不住大量小事件滴流的超限流，与
             非流式/流式 JSON 路径共用同一限额。解析产物条目数另按该限额除以单条

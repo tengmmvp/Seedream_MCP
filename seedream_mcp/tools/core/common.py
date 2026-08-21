@@ -1,7 +1,7 @@
 """生成类工具通用处理门面。
 
-内部按职责拆分到 _helpers/context/results/auto_save/parallel 子模块，本模块聚合公共
-符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
+内部按职责拆分到 _helpers/context/results/auto_save/parallel/outputs/schemas
+子模块，本模块聚合公共符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
 ``execute_generation_handler`` 是四类生成工具的统一处理流水线，依次执行参数归一化与
 校验、客户端调用、自动保存、结果净化与格式化及预览生成，异常统一降级为错误结果。
 """
@@ -110,8 +110,8 @@ def preview_inclusion_scope(include_previews: bool) -> Iterator[None]:
 class ToolMetadata:
     """单个生成工具透传给 ``execute_generation_handler`` 的静态元数据。
 
-    常量字段直接收纳；开始日志参数依赖运行时执行上下文，经回调由各工具的元数据常量
-    绑定构造实现。
+    常量字段直接收纳；开始日志参数依赖运行时执行上下文，以回调形式由各工具的元数据
+    常量携带。
 
     Attributes:
         tool_name: 工具标识，写入 structuredContent.tool 与日志。

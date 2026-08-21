@@ -586,7 +586,7 @@ class DownloadManager:
     ) -> None:
         """连接建立后再次校验对端 IP，属 SSRF 第三层防护。
 
-        作为 resolve-and-pin 之上的纵深防御：解析器与连接之间的残余窗口使对端
+        作为公网解析钉死之上的纵深防御：解析器与连接之间的残余窗口使对端
         IP 落入内网时仍据此拒绝；无法提取对端 IP 时 fail-closed 拒绝下载。
 
         Args:

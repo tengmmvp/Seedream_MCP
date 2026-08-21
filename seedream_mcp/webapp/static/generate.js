@@ -167,7 +167,7 @@ export function buildRequestBody() {
 let loadingHideTimer = 0;
 
 /**
- * 状态行与等待动画的联动：running 时文案后带呼吸点，预览区域铺对角波点阵；
+ * 状态行与等待动画的联动：running 时文案后带呼吸点，等待区铺对角波点阵；
  * 结束态点阵淡出且高度同步收缩，结果区连续上移不跳位。
  *
  * @param {string} kind - 状态类别，取 running / done / failed。
@@ -304,9 +304,9 @@ function normalizePayloadError(payload, response) {
   return { type: error || "error", message: `HTTP ${response.status}` };
 }
 
-// 结果渲染：web_path 优先走本服务鉴权图片端点（blob 免令牌入 URL），外链 url
-// 走裸 fetch 防令牌外送、失败回退 img.src 直连（跨域 img 标签不受 CORS 限制）。
-// 单张失败只降级该卡片显示占位错误，不中断整批渲染。
+// 结果渲染：web_path 优先走本服务鉴权图片端点，blob 装载使令牌只进请求头
+// 不进 URL；外链 url 走裸 fetch 防令牌外送，失败回退 img.src 直连，跨域
+// img 标签不受 CORS 限制。单张失败只降级该卡片显示占位错误，不中断整批渲染。
 async function renderResults(payload) {
   const grid = $("result-grid");
   const items = Array.isArray(payload.data) ? payload.data : [];
