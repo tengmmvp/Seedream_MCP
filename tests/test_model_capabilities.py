@@ -3,6 +3,8 @@
 重点守护 5.0 Pro 须先于 5.0 Lite 解析的顺序，避免 Pro ID 含 "5-0" 子串被误判。
 """
 
+from dataclasses import asdict
+
 import pytest
 
 from seedream_mcp.config import MODEL_ALIASES
@@ -13,8 +15,10 @@ from seedream_mcp.utils.model.model_capabilities import (
     MODEL_FAMILY_50_LITE,
     MODEL_FAMILY_50_PRO,
     MODEL_FAMILY_UNKNOWN,
+    ModelCapabilities,
     _resolve_model_family,
     get_model_capabilities,
+    model_payloads,
 )
 
 
@@ -78,3 +82,36 @@ def test_model_capabilities_table_is_read_only() -> None:
     """能力表为只读映射视图，调用方原地改写被拒绝，公共数据表不被污染。"""
     with pytest.raises(TypeError):
         MODEL_CAPABILITIES["new-family"] = MODEL_CAPABILITIES[MODEL_FAMILY_50_PRO]  # type: ignore[index]
+
+
+def test_model_payloads_entries_match_alias_table() -> None:
+    """model_payloads 条目数与顺序对齐别名表，字段集为 asdict 展开加别名两键。"""
+    payloads = model_payloads()
+
+    assert len(payloads) == len(MODEL_ALIASES)
+    assert [entry["alias"] for entry in payloads] == list(MODEL_ALIASES)
+    expected_fields = set(ModelCapabilities.__dataclass_fields__)
+    for entry in payloads:
+        assert set(entry) == {"alias", "model_id"} | expected_fields, entry["alias"]
+        assert entry["model_id"] == MODEL_ALIASES[entry["alias"]]
+
+
+def test_model_payloads_allowed_presets_are_sorted_lists() -> None:
+    """allowed_presets 归一为有序列表，能力表的 frozenset 形态不进入载荷。"""
+    payloads = model_payloads()
+
+    for entry in payloads:
+        presets = entry["allowed_presets"]
+        assert isinstance(presets, list), entry["alias"]
+        assert presets == sorted(presets), entry["alias"]
+    by_alias = {entry["alias"]: entry for entry in payloads}
+    assert by_alias["doubao-seedream-5.0-pro"]["allowed_presets"] == ["1.5K", "1K", "2K"]
+    assert by_alias["doubao-seedream-4.5"]["allowed_presets"] == ["2K", "4K"]
+
+
+def test_model_payloads_capability_values_match_asdict() -> None:
+    """条目能力取值与 asdict 全等，仅 allowed_presets 归一为有序列表。"""
+    for entry in model_payloads():
+        expected = asdict(get_model_capabilities(entry["model_id"]))
+        expected["allowed_presets"] = sorted(expected["allowed_presets"])
+        assert {key: entry[key] for key in expected} == expected, entry["alias"]

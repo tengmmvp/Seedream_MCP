@@ -38,7 +38,8 @@ from ..core.formats import (
     infer_extension_from_bytes,
     is_known_image_bytes,
 )
-from ..core.logs import InflightEntry, get_logger
+from ..core.inflight import InflightEntry
+from ..core.logs import get_logger
 from .io_file import atomic_replace_from_fd
 from .io_url import sanitize_url
 

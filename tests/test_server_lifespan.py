@@ -69,6 +69,27 @@ async def test_app_lifespan_cleans_up_on_exception_teardown(
     assert resources._active_resource is None
 
 
+async def test_borrow_shared_handles_tracks_active_resource(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons,
+) -> None:
+    """borrow_shared_handles 在 lifespan 期返回活动资源，teardown 后返回 None。
+
+    公共借用入口供 webapp 上下文替身使用，返回对象即 lifespan 注入的同一
+    client 与 download_manager 的持有者。
+    """
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    async with server.app_lifespan(server.mcp) as state:
+        borrowed = resources.borrow_shared_handles()
+        assert borrowed is not None
+        assert borrowed.client is state["client"]
+        assert borrowed.download_manager is state["download_manager"]
+
+    assert resources.borrow_shared_handles() is None
+
+
 def test_get_lifespan_resource_swallows_value_error_from_request_context() -> None:
     """ctx.request_context 抛 ValueError 时守卫返回 None 而非异常逃逸。
 

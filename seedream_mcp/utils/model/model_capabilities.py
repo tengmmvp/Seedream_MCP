@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from types import MappingProxyType
 
 # 参考图上限常量：5.0 Pro 为 10，其余家族为 14，由能力表按家族引用。
@@ -198,3 +198,19 @@ def get_model_capabilities(model_id: str) -> ModelCapabilities:
 def get_max_reference_images(model_id: str) -> int:
     """返回模型支持的最大参考图数量，由能力表统一提供。"""
     return get_model_capabilities(model_id).max_reference_images
+
+
+def model_payloads() -> list[dict[str, object]]:
+    """按 MODEL_ALIASES 顺序产出各模型的能力展示载荷，供资源与 Web 清单共用。
+
+    每条目含 alias 与 model_id 及 asdict 展开的能力字段；allowed_presets 归一为
+    有序列表，能力表新增字段自动进入载荷，消费方无需手工同步字段清单。
+    """
+    payloads: list[dict[str, object]] = []
+    for alias, model_id in MODEL_ALIASES.items():
+        capabilities = asdict(get_model_capabilities(model_id))
+        presets = capabilities.get("allowed_presets")
+        if isinstance(presets, (set, frozenset, list)):
+            capabilities["allowed_presets"] = sorted(presets)
+        payloads.append({"alias": alias, "model_id": model_id, **capabilities})
+    return payloads

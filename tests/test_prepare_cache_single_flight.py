@@ -17,12 +17,12 @@ from seedream_mcp.utils.images import image_input
 def _patch_unretrieved_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list["asyncio.Task[Any]"]:
-    """把 logs.log_unretrieved_task_exception 替换为记录 task 并检索异常的替身。
+    """把 inflight.log_unretrieved_task_exception 替换为记录 task 并检索异常的替身。
 
-    回调经 logs 模块全局解析，对象式遮蔽即生效；替身检索异常避免 "Task exception
-    was never retrieved" 噪声。返回已触发回调的 task 列表。
+    回调经 inflight 模块全局解析，对象式遮蔽即生效；替身检索异常避免 "Task
+    exception was never retrieved" 噪声。返回已触发回调的 task 列表。
     """
-    from seedream_mcp.utils.core import logs
+    from seedream_mcp.utils.core import inflight
 
     fired: list[asyncio.Task[Any]] = []
 
@@ -31,14 +31,14 @@ def _patch_unretrieved_callback(
         if not task.cancelled():
             task.exception()
 
-    monkeypatch.setattr(logs, "log_unretrieved_task_exception", record)
+    monkeypatch.setattr(inflight, "log_unretrieved_task_exception", record)
     return fired
 
 
 class _WarningCapture:
     """捕获 warning 调用的 loguru 替身，按模板参数格式化后记录消息文本。
 
-    monkeypatch logs.logger 后兜底 warning 落入本替身，opt 的附加参数被
+    monkeypatch inflight.logger 后兜底 warning 落入本替身，opt 的附加参数被
     丢弃，供用例断言消息与次数。
     """
 
@@ -370,10 +370,10 @@ async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
     旧行为：等待者取消即登记回调，同一失败带堆栈两次进入日志；消费者计数下
     创建者仍持有计数，不登记兜底。
     """
-    from seedream_mcp.utils.core import logs
+    from seedream_mcp.utils.core import inflight
 
     capture = _WarningCapture()
-    monkeypatch.setattr(logs, "logger", capture)
+    monkeypatch.setattr(inflight, "logger", capture)
 
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
@@ -413,10 +413,10 @@ async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """创建者独自放弃且无等待者接手时，孤儿失败经兜底回调入日志且恰好一次。"""
-    from seedream_mcp.utils.core import logs
+    from seedream_mcp.utils.core import inflight
 
     capture = _WarningCapture()
-    monkeypatch.setattr(logs, "logger", capture)
+    monkeypatch.setattr(inflight, "logger", capture)
 
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)

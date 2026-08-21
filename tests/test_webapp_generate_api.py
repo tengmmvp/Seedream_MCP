@@ -35,8 +35,10 @@ def _install_runner(
 ) -> None:
     """把 api 命名空间内的 runner 符号替换为返回固定结果的替身。"""
 
-    async def _fake_runner(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
-        del params, config, ctx
+    async def _fake_runner(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, ctx, include_previews
         return _generation_result(payload, is_error)
 
     monkeypatch.setattr(generate_module, name, _fake_runner)
@@ -281,8 +283,10 @@ async def test_generate_runner_validation_error_returns_400(
 ) -> None:
     """runner 抛 SeedreamValidationError 映射 400 validation_error，携带原因。"""
 
-    async def _explode(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
-        del params, config, ctx
+    async def _explode(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, ctx, include_previews
         raise SeedreamValidationError("参考图数量超出上限", field="image")
 
     monkeypatch.setattr(generate_module, "run_text_to_image", _explode)
@@ -306,8 +310,10 @@ async def test_generate_runner_validation_error_masks_save_root(
     """runner 校验错误消息中的保存根绝对路径替换为占位符后返回。"""
     save_root = write_workspace_config(tmp_path)
 
-    async def _explode(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
-        del params, config, ctx
+    async def _explode(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, ctx, include_previews
         raise SeedreamValidationError(f"保存路径须位于 {save_root} 之内", field="save_path")
 
     monkeypatch.setattr(generate_module, "run_text_to_image", _explode)
@@ -329,8 +335,10 @@ async def test_generate_runner_unexpected_error_returns_500(
 ) -> None:
     """runner 抛未归类异常兜底 500 internal_error，不向响应泄露异常细节。"""
 
-    async def _explode(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
-        del params, config, ctx
+    async def _explode(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, ctx, include_previews
         raise RuntimeError("boom")
 
     monkeypatch.setattr(generate_module, "run_text_to_image", _explode)
@@ -353,8 +361,10 @@ async def test_generate_non_dict_structured_content_returns_empty_payload(
 ) -> None:
     """structured_content 非 dict 时回退空对象响应为 200，不抛异常。"""
 
-    async def _bad_shape(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
-        del params, config, ctx
+    async def _bad_shape(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, ctx, include_previews
         return CallToolResult(content=[], structured_content="bad")
 
     monkeypatch.setattr(generate_module, "run_text_to_image", _bad_shape)
@@ -365,6 +375,69 @@ async def test_generate_non_dict_structured_content_returns_empty_payload(
 
     assert response.status_code == 200
     assert response.json() == {}
+
+
+async def test_generate_runner_called_without_previews(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """端点以 include_previews=False 调 runner：Web 路径只消费结构化结果，跳过预览装配。"""
+    captured: list[bool] = []
+
+    async def _capture_runner(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, ctx
+        captured.append(include_previews)
+        return _generation_result({"tool": "text_to_image", "success": True, "data": []})
+
+    monkeypatch.setattr(generate_module, "run_text_to_image", _capture_runner)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    assert captured == [False]
+
+
+async def test_generate_masks_save_root_in_error_channels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """auto_save.results[].error、data[].error 嵌套 message 与顶层 error.message 中的
+    保存根绝对路径统一替换为占位符，响应体不再包含保存根字样。"""
+    save_root = write_workspace_config(tmp_path)
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": False,
+            "data": [
+                {"url": "https://x/a.png", "error": {"message": f"下载失败于 {save_root}\\a.png"}}
+            ],
+            "error": {"type": "generation_failed", "message": f"保存到 {save_root} 失败"},
+            "auto_save": {
+                "results": [{"success": False, "error": f"写入 {save_root}\\b.png 被拒绝"}]
+            },
+        },
+        is_error=True,
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 502
+    assert str(save_root) not in response.text
+    payload = response.json()
+    assert payload["error"]["message"] == "保存到 <保存根> 失败"
+    assert payload["data"][0]["error"]["message"] == "下载失败于 <保存根>\\a.png"
+    assert payload["auto_save"]["results"][0]["error"] == "写入 <保存根>\\b.png 被拒绝"
 
 
 async def test_generate_endpoint_requires_token(
@@ -463,6 +536,35 @@ def test_augment_generation_payload_tolerates_resolve_oserror(
     assert structured == {"data": [{"keep": 1}], "success": True}
 
 
+def test_sanitize_save_root_text_replaces_nested_string_values(tmp_path: Path) -> None:
+    """递归净化覆盖 dict 嵌套 message 与 list 字符串元素，非字符串叶子保持原样。"""
+    save_root = tmp_path / ".seedream" / "images"
+    structured: dict[str, object] = {
+        "error": {"message": f"根为 {save_root}"},
+        "data": [{"error": {"message": f"{save_root}\\a.png"}}, {"keep": 42}],
+        "urls": [f"{save_root}/b.png", "https://x/c.png"],
+    }
+
+    generate_module.sanitize_save_root_text(structured, save_root)
+
+    assert structured["error"] == {"message": "根为 <保存根>"}
+    data = structured["data"]
+    assert isinstance(data, list)
+    assert data[0] == {"error": {"message": "<保存根>\\a.png"}}
+    assert data[1] == {"keep": 42}
+    assert structured["urls"] == ["<保存根>/b.png", "https://x/c.png"]
+
+
+def test_sanitize_save_root_text_keeps_non_string_leaves(tmp_path: Path) -> None:
+    """int、bool、None 叶子不参与替换，顶层非容器值调用为无操作。"""
+    structured: dict[str, object] = {"count": 3, "ok": True, "empty": None}
+
+    generate_module.sanitize_save_root_text(structured, tmp_path)
+    generate_module.sanitize_save_root_text(42, tmp_path)
+
+    assert structured == {"count": 3, "ok": True, "empty": None}
+
+
 def _make_stub_resource() -> SimpleNamespace:
     """构造共享资源替身，close 为异步桩以兼容 lifespan 复位 fixture 的收尾关闭。"""
     client = MagicMock()
@@ -481,8 +583,10 @@ async def test_generate_endpoint_receives_shared_client_context(
     """端点把 shim 上下文传入 runner，lifespan 字典携带共享资源同一实例。"""
     captured: list[Any] = []
 
-    async def _capture_runner(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
-        del params, config
+    async def _capture_runner(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, include_previews
         captured.append(ctx)
         return _generation_result({"tool": "text_to_image", "success": True, "data": []})
 
@@ -512,8 +616,10 @@ async def test_generate_concurrent_requests_share_active_resource_client(
     """并发请求各自收到 shim 上下文且共享同一 client，全部成功无异常。"""
     captured: list[Any] = []
 
-    async def _capture_runner(params: Any, config: Any, ctx: Any = None) -> CallToolResult:
-        del params, config
+    async def _capture_runner(
+        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
+    ) -> CallToolResult:
+        del params, config, include_previews
         captured.append(ctx)
         await asyncio.sleep(0)
         return _generation_result({"tool": "text_to_image", "success": True, "data": []})

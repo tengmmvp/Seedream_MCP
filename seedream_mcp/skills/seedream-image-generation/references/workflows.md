@@ -34,7 +34,7 @@
 2. **拼接生图 prompt**。把 `scenes_detail` 数组按序连成一个字符串，开头补用户的原始主题，末尾补 `最后，为故事书创作一个封面。再检查所有图片，去除图片中的文字。`
 
 3. **调用 `sequential_generation`**。要点：
-   - 模型不要选 5.0 Pro（不支持组图）；默认 5.0 即可，风格偏卡通可选 4.0
+   - 服务器保持默认 5.0 配置即可；风格偏卡通的场景可由部署方切换为 4.0
    - `max_images` 对齐分镜数加封面，上限 15；5.0-lite 注意"参考图数量 + 生成数量 ≤ 15"的总额约束
    - 有角色设定参考图时传入 `image`，保持人物形象一致
 
@@ -44,7 +44,7 @@
 
 把一张图拆成可编辑的透明图层，再按需重组：
 
-1. **拆分**：`image_to_image`，`model` 显式指定 5.0 Pro，`layer_decomposition=true`。`size` 仅接受档位或 `auto`；需要透明底图时配 `background="transparent"`
+1. **拆分**：`image_to_image`，`layer_decomposition=true`（需服务器已配置为 5.0 Pro）。`size` 仅接受档位或 `auto`；需要透明底图时配 `background="transparent"`
 2. **结果结构**：1 张底图 + 至多 16 张透明 PNG 图层，每张图层带 `z_index`、`name`、`description`、`bounding_box` 元数据，图层始终为 PNG
 3. **再合成路径**：
    - 替换/修改某元素：把目标图层 PNG 作为 `image` 参数再过一次 `image_to_image`

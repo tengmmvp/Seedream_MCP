@@ -13,7 +13,8 @@ from collections.abc import Sequence
 
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate
-from ..core.logs import InflightEntry, get_logger
+from ..core.inflight import InflightEntry
+from ..core.logs import get_logger
 from ..io.io_path import resolve_workspace_roots
 
 logger = get_logger()

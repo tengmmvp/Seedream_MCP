@@ -192,7 +192,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 --transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
 --host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址必須設定 --auth-token 與 TLS（或 --insecure-allow-non-tls 豁免），否則拒絕啟動)
 --port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000)
---stateless                                        # streamable-http 無狀態模式，適合遠端多用戶端與負載平衡 (預設關閉)
+--stateless                                        # streamable-http 無狀態模式，僅作用於帶交握工作階段的舊規範修訂用戶端鏈路，代價是失去反向通道 (預設關閉)
 --web                                              # 開啟 Web 操作台，瀏覽器存取 /web 直接使用 (預設關閉，僅 streamable-http 生效)
 --no-web                                           # 關閉 Web 操作台，覆蓋 SEEDREAM_WEB_ENABLED 的開啟設定
 
@@ -430,7 +430,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | `seedream://workspace/roots`                           | 用戶端授權的 MCP 工作區 Roots；未授權時為空，避免暴露伺服器本地目錄                                                  |
 | `seedream://server/info`                               | 伺服器名稱、版本與目前生效設定摘要（模型、預設尺寸、自動儲存開關，共五項欄位）                                       |
 | `seedream://models/info`                               | 各模型別名與能力宣告：支援的尺寸檔位、像素範圍、像素倍數、參考圖上限、輸出格式/工具/串流等能力，供用戶端按需選擇模型 |
-| `skill://seedream-image-generation/SKILL.md`           | Agent Skill 主檔案：圖像生成指南入口，內文含工具速查、模型選擇與參數規則                                             |
+| `skill://seedream-image-generation/SKILL.md`           | Agent Skill 主檔案：圖像生成指南入口，內文含工具速查、模型差異與參數規則                                             |
 | `skill://seedream-image-generation/references/{+path}` | Agent Skill 參考檔案範本：多步工作流與故障排查，按需讀取                                                             |
 
 ## 🧠 Agent Skills
@@ -448,7 +448,7 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 
 | 檔案                            | 內容                                                       |
 | ------------------------------- | ---------------------------------------------------------- |
-| `SKILL.md`                      | 生成指南主檔案：工具速查、模型選擇、提示詞寫法、參數規則   |
+| `SKILL.md`                      | 生成指南主檔案：工具速查、模型差異、提示詞寫法、參數規則   |
 | `references/workflows.md`       | 多步工作流：連環畫端到端、圖層拆分與再合成、風格一致性迭代 |
 | `references/troubleshooting.md` | 故障排查：錯誤碼對策、常見失敗模式、輸入與配額限制         |
 
@@ -566,7 +566,7 @@ SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鑑權權�
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 請求內文上限（位元組，≥1MB，預設 64MB；單圖 data URI 約 40MB，兼顧多圖融合）
 SEEDREAM_WEB_ENABLED=false                  # Web 操作台開關（--web/--no-web 覆蓋；僅 streamable-http 生效，開啟後瀏覽器可存取 /web 頁面與歷史圖庫，預設關閉）
 SEEDREAM_HTTP_ALLOWED_HOSTS=                # 非回環直連部署的 Host 頭允許清單，逗號分隔，支援 host:port 與尾部 :* 萬用（如 mcp.example.com,mcp.example.com:*）；留空則整體關閉 SDK 內層 Host 校驗，適用反向代理場景
-SEEDREAM_REQUEST_STATE_KEYS=               # 多副本 HTTP 部署共享的 requestState 金鑰環，逗號分隔十六進位，每鍵解碼後不少於 32 位元組；留空保持 SDK 預設行程臨時金鑰，單行程部署可省略
+SEEDREAM_REQUEST_STATE_KEYS=               # 多副本 HTTP 部署共享的 requestState 金鑰環，逗號分隔十六進位，每鍵解碼後不少於 32 位元組；留空保持 SDK 預設行程臨時金鑰，單行程部署可省略；多副本部署下，按 2026-07-28 之前規範修訂連線的用戶端帶工作階段，需黏性路由固定到同一實例，2026-07-28 修訂的用戶端無工作階段，任意副本均可回應
 
 # 用戶端效能
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

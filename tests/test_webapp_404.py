@@ -139,21 +139,84 @@ async def test_protocol_relative_path_not_redirected(
     assert "location" not in response.headers
 
 
+async def test_backslash_protocol_relative_path_not_redirected(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """反斜杠与百分号编码形态的协议相对目标不重定向，封堵归一绕过的开放重定向。
+
+    浏览器把特殊 scheme 路径中的反斜杠按斜杠解析，/\\evil.com 会跳到外域；请求
+    以绝对 URL 直发，httpx 把字面反斜杠编码为 %5C，两种形态服务端同形处理。
+    """
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        backslash_response = await client.get(
+            "http://127.0.0.1/\\evil.com/", follow_redirects=False
+        )
+        encoded_response = await client.get("http://127.0.0.1/%5Cevil.com/", follow_redirects=False)
+
+    assert backslash_response.status_code == 404
+    assert "location" not in backslash_response.headers
+    assert encoded_response.status_code == 404
+    assert "location" not in encoded_response.headers
+
+
+async def test_decoded_backslash_path_not_redirected(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """解码后携带字面反斜杠的路径不重定向：生产服务器按 ASGI 规范解码 scope path。
+
+    httpx 传输栈不解码百分号序列，字面反斜杠形态经合成 scope 直调兜底 handler
+    锁定，确保 uvicorn 解码路径下的同形请求落 404。
+    """
+    from starlette.requests import Request
+
+    from seedream_mcp.webapp import meta as meta_module
+
+    prepare_static_dir(monkeypatch, tmp_path)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/\\evil.com/",
+        "raw_path": b"/\\evil.com/",
+        "query_string": b"",
+        "headers": [],
+    }
+
+    response = await meta_module.web_not_found(Request(scope))
+
+    assert response.status_code == 404
+
+
 async def test_static_mount_denies_html_direct_access(
     tmp_path: Path,
     monkeypatch: Any,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """静态挂载封禁 html 直达：页面只经 meta 端点携带安全头直出，JS 资源仍 200。"""
+    """静态挂载封禁 html 直达：页面只经 meta 端点携带安全头直出，JS 资源仍 200。
+
+    大写 .HTML 变体同样拒绝：Windows 文件系统大小写不敏感会命中页面文件，
+    小写匹配放行即绕过封禁；大小写不敏感文件系统之外该形态本就无文件可命中。
+    """
     prepare_static_dir(monkeypatch, tmp_path)
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     html_response = await _get(app, "/web/static/index.html")
+    html_upper_response = await _get(app, "/web/static/index.HTML")
     script_response = await _get(app, "/web/static/app.js")
 
     assert html_response.status_code == 404
+    assert html_upper_response.status_code == 404
     assert script_response.status_code == 200
 
 

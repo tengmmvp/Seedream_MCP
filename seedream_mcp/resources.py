@@ -9,6 +9,7 @@ app_lifespan 引用计数单例、活动与退役资源状态、同步与异步�
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
@@ -133,6 +134,16 @@ def _has_inflight_references() -> bool:
     return (active is not None and active.refcount > 0) or bool(_retired_resources)
 
 
+def borrow_shared_handles() -> "_SharedResource | None":
+    """返回当前活动的共享资源对象，供 webapp 上下文替身借用共享句柄。
+
+    无活动资源时返回 None，调用方按资源不在堂回退自建路径。借用方仅读取
+    client 与 download_manager 使用，不得关闭句柄或改动引用计数，资源的开启
+    与关闭由 lifespan 引用计数统一管理。
+    """
+    return _active_resource
+
+
 @asynccontextmanager
 async def app_lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
     """管理 MCPServer 生命周期，向 lifespan_context 注入共享配置、SeedreamClient
@@ -140,8 +151,8 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
 
     资源以引用计数的模块级单例持有，跨 lifespan 重入复用；teardown 仅递减在途引用，
     归零前不清理。config 身份变化触发重建：新资源立即取代活动槽位，旧资源待最后一个
-    在途请求释放后再关闭，运行期 set_config/reload_config 不影响在途请求已持有的
-    HTTP 连接池。
+    在途请求释放后再关闭，运行期配置身份变化经 set_active_config 行使，不影响在途
+    请求已持有的 HTTP 连接池。
     """
     global _active_resource
     config = get_active_config()
@@ -293,13 +304,28 @@ def _create_mcp_server() -> MCPServer:
 mcp = _create_mcp_server()
 
 
+def _warn_rebind_failure_on_stderr(keys: tuple[bytes, ...] | None) -> None:
+    """密钥环已配置而重绑失败时向 stderr 输出告警，只看控制台的部署者可见。
+
+    日志告警之外补 stderr 一行，多副本部署者不读日志文件时也能看到解封退化。
+    """
+    if not keys:
+        return
+    print(
+        "requestState 密钥环重绑失败：多副本部署的 requestState 解封将失败，"
+        "当前退化为进程临时密钥。",
+        file=sys.stderr,
+    )
+
+
 def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
     """以最终活动配置重绑单例的 requestState 密钥环，返回是否重绑成功。
 
     单例密钥环在模块导入期经默认环境源构造，``--config-file`` 加载的密钥不会
     到达它，故由启动路径在活动配置就绪后调用本函数；keys 为 None 时重绑回 SDK
-    进程临时密钥。经 SDK 公开属性 mcp.middleware 定位 boundary，探测失败时告警
-    并返回 False，不阻断启动。
+    进程临时密钥。经 SDK 公开属性 mcp.middleware 定位 boundary，探测失败时记录
+    错误并返回 False，不阻断启动；keys 非空时探测失败另向 stderr 输出多副本
+    解封退化告警。
 
     Args:
         keys: 最终活动配置解析出的密钥环字节，None 表示未配置。
@@ -311,6 +337,7 @@ def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
             "SDK 公开属性 mcp.middleware 不可用，requestState 密钥环重绑被跳过，"
             "单例保持导入期形态；多副本部署的密钥共享可能失效"
         )
+        _warn_rebind_failure_on_stderr(keys)
         return False
     boundary = None
     for middleware in middleware_chain:
@@ -322,6 +349,7 @@ def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
             "SDK 私有路径中未找到 RequestStateBoundary，requestState 密钥环"
             "重绑被跳过，单例保持导入期形态；多副本部署的密钥共享可能失效"
         )
+        _warn_rebind_failure_on_stderr(keys)
         return False
     boundary._security = (
         RequestStateSecurity(keys=keys) if keys else RequestStateSecurity.ephemeral()

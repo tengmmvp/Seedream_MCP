@@ -192,7 +192,7 @@ Access control: the page itself opens without a token; its API calls require one
 --transport [stdio|streamable-http]                # MCP transport (default: stdio)
 --host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address requires --auth-token along with TLS (or the --insecure-allow-non-tls exemption), and the service refuses to start without them)
 --port INTEGER                                     # streamable-http listen port (default: 8000)
---stateless                                        # streamable-http stateless mode, suited for remote multi-client and load balancing (default off)
+--stateless                                        # streamable-http stateless mode, only affects the sessionful legacy-revision client path at the cost of the back channel (default off)
 --web                                              # Enable the web console served at /web (default off; streamable-http only)
 --no-web                                           # Disable the web console, overriding an enabled SEEDREAM_WEB_ENABLED
 
@@ -430,7 +430,7 @@ Beyond tools, the server exposes the following MCP resources for clients to read
 | `seedream://workspace/roots`                           | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories                                                                           |
 | `seedream://server/info`                               | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                                     |
 | `seedream://models/info`                               | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
-| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model selection, and parameter rules                                                                 |
+| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model differences, and parameter rules                                                                 |
 | `skill://seedream-image-generation/references/{+path}` | Agent Skill reference file template: multi-step workflows and troubleshooting, loaded on demand                                                                                                   |
 
 ## 🧠 Agent Skills
@@ -448,7 +448,7 @@ The skill directory contains:
 
 | File                            | Content                                                                                                             |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `SKILL.md`                      | Main generation guide: tool cheat sheet, model selection, prompt writing, parameter rules                           |
+| `SKILL.md`                      | Main generation guide: tool cheat sheet, model differences, prompt writing, parameter rules                           |
 | `references/workflows.md`       | Multi-step workflows: end-to-end comic creation, layer decomposition and recomposition, style-consistency iteration |
 | `references/troubleshooting.md` | Troubleshooting: error-code remedies, common failure modes, input and quota constraints                             |
 
@@ -566,7 +566,7 @@ SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token 
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
 SEEDREAM_WEB_ENABLED=false                  # Web console toggle (--web/--no-web overrides; streamable-http only, serves the /web UI and image gallery when enabled, off by default)
 SEEDREAM_HTTP_ALLOWED_HOSTS=                # Comma-separated Host allowlist for direct non-loopback exposure (supports host:port and trailing :*); empty disables the SDK inner Host check (suitable behind a reverse proxy)
-SEEDREAM_REQUEST_STATE_KEYS=               # Shared requestState key ring for multi-replica HTTP deployments, comma-separated hex with each key decoding to at least 32 bytes; empty keeps the SDK default per-process ephemeral key and single-process deployments can omit it
+SEEDREAM_REQUEST_STATE_KEYS=               # Shared requestState key ring for multi-replica HTTP deployments, comma-separated hex with each key decoding to at least 32 bytes; empty keeps the SDK default per-process ephemeral key and single-process deployments can omit it; in multi-replica deployments, clients connecting with protocol revisions earlier than 2026-07-28 carry sessions and require sticky routing to a single replica, while 2026-07-28 clients are sessionless and any replica can answer
 
 # Client performance
 SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5

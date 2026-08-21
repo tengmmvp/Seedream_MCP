@@ -300,3 +300,24 @@ async def test_flat_constraint_violation_raises_tool_error() -> None:
     """平铺参数违反约束时经 Tool.run 包装为 ToolError，不逃逸为未捕获异常。"""
     with pytest.raises(ToolError, match="request_count"):
         await mcp.call_tool("text_to_image", {"prompt": "一只猫", "request_count": 99})
+
+
+async def test_cross_field_validation_error_carries_structured_content(
+    spy_run_handlers: dict[str, Any],
+) -> None:
+    """跨字段校验失败经工具体错误出口返回 is_error 结果，structuredContent 非空。
+
+    prompt 缺省且未开图层拆分时输入模型构造抛 ValidationError，不得冒泡为无
+    structuredContent 的协议层错误；错误形态与流水线失败分支一致，error.type
+    为 validation_error。
+    """
+    result = await mcp.call_tool("image_to_image", {"image": "https://example.com/ref.png"})
+
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["success"] is False
+    assert structured["error"]["type"] == "validation_error"
+    assert "prompt 不能为空" in structured["error"]["message"]
+    # 失败发生在输入模型构造阶段，间谍处理器未被触达。
+    assert "params" not in spy_run_handlers

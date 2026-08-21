@@ -131,18 +131,30 @@ def test_rebind_request_state_security_updates_boundary(
 
 
 def test_rebind_request_state_security_skips_when_boundary_missing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """SDK 私有路径中找不到 boundary 时告警跳过，返回 False 且不抛异常。"""
+    """SDK 私有路径中找不到 boundary 时告警跳过，返回 False 且不抛异常。
+
+    配置了密钥环的场景额外向 stderr 输出多副本解封退化告警，未配置时不输出。
+    """
     monkeypatch.setattr(resources_module.mcp._lowlevel_server, "middleware", [], raising=False)
 
     assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
 
+    stderr = capsys.readouterr().err
+    assert "多副本部署的 requestState 解封将失败" in stderr
+    assert "进程临时密钥" in stderr
+
+    assert resources_module.rebind_request_state_security(None) is False
+    assert capsys.readouterr().err == ""
+
 
 def test_rebind_request_state_security_survives_missing_public_attribute(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """公开属性 mcp.middleware 缺失时告警返回 False，探测失败不阻断启动。"""
     monkeypatch.delattr(type(resources_module.mcp), "middleware")
 
     assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
+
+    assert "退化为进程临时密钥" in capsys.readouterr().err

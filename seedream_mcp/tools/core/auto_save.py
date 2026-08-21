@@ -16,7 +16,7 @@ from ...config import SeedreamConfig
 from ...utils.io.io_save import AutoSaveManager, AutoSaveResult
 from ...utils.io.io_download import DownloadManager
 from ...utils.core.logs import get_logger
-from ._helpers import _resolve_base_dir, _resolve_default_base_dir
+from ._helpers import _resolve_base_dir, resolve_default_base_dir
 from .results import extract_images, is_saveable_image
 
 logger = get_logger()
@@ -99,7 +99,7 @@ async def _auto_save(
 
     def _resolve_and_build() -> AutoSaveManager:
         # 清理范围固定为配置默认保存根，save_path 仅界定本次保存的子目录。
-        cleanup_base_dir = _resolve_default_base_dir(config)
+        cleanup_base_dir = resolve_default_base_dir(config)
         resolved_base_dir = _resolve_base_dir(config, save_path)
         return _build_auto_save_manager(
             config, resolved_base_dir, cleanup_base_dir, download_manager

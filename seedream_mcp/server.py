@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -37,10 +37,11 @@ from mcp.types import (
     InputRequiredResult,
     ListRootsRequest,
     ListRootsResult,
+    TextContent,
     ToolAnnotations,
 )
 from mcp.types.version import is_version_at_least
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from .cli import (
     _build_arg_parser,
@@ -51,7 +52,6 @@ from .cli import (
 )
 from .config import (
     LIFESPAN_KEY_CONFIG,
-    MODEL_ALIASES,
     SeedreamConfig,
     get_active_config,
     set_active_config,
@@ -129,6 +129,8 @@ from .tools.core.schemas import (
 from .tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
+    build_error_dict,
+    build_error_structured,
 )
 from .transport import (
     _LOOPBACK_HOSTS,
@@ -151,7 +153,7 @@ from .utils.io.io_path import (
 )
 from .utils.model.model_capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-    get_model_capabilities,
+    model_payloads,
 )
 
 # resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 与
@@ -211,6 +213,52 @@ def _filter_unset_params(kwargs: dict[str, Any]) -> dict[str, Any]:
     签名默认值的字段恒进入 fields_set，不参与该区分，新逻辑不得依赖其判定显式传入。
     """
     return {key: value for key, value in kwargs.items() if value is not None}
+
+
+def _validation_error_message(exc: ValidationError) -> str:
+    """把输入模型构造期的校验失败展开为可读文本，逐条呈现字段路径与消息。"""
+    parts: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(item) for item in error["loc"])
+        message = str(error["msg"])
+        parts.append(f"{location}: {message}" if location else message)
+    return "；".join(parts)
+
+
+def _validation_error_result(
+    tool_name: str,
+    exc: ValidationError,
+    build_structured: Callable[[str, str], dict[str, Any]],
+) -> CallToolResult:
+    """输入模型构造失败的统一错误出口，返回携带 structuredContent 的 is_error 结果。
+
+    跨字段校验不进入 SDK 参数模型，构造期 ValidationError 直接冒泡会得到无
+    structuredContent 的错误结果，与流水线错误形态并存使按 structuredContent 消费
+    的客户端须处理缺席分支。此处统一为流水线同款错误结果，error.type 固定
+    validation_error，structuredContent 由各工具的构造回调按声明的 outputSchema
+    组装，SDK 的输出校验才能放行。
+    """
+    message = _validation_error_message(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structured_content=build_structured(tool_name, message),
+        is_error=True,
+    )
+
+
+def _generation_validation_structured(tool_name: str, message: str) -> dict[str, Any]:
+    """生成类工具校验错误的 structuredContent，复用流水线的错误出口形态。"""
+    return build_error_structured(tool_name, "validation_error", message)
+
+
+def _browse_validation_structured(tool_name: str, message: str) -> dict[str, Any]:
+    """浏览工具校验错误的 structuredContent，按浏览工具声明的 outputSchema 组装。"""
+    return BrowseImagesStructuredOutput(
+        tool=tool_name,
+        success=False,
+        status="failed",
+        error=build_error_dict("validation_error", message),
+    ).model_dump()
 
 
 def _workspace_roots_dependency(
@@ -323,8 +371,8 @@ async def text_to_image(
     风格一致的图片时改用 sequential_generation。
     """
     config = _config_from_context(ctx)
-    return await run_text_to_image(
-        TextToImageInput(
+    try:
+        params = TextToImageInput(
             **_filter_unset_params(
                 {
                     "prompt": prompt,
@@ -342,7 +390,11 @@ async def text_to_image(
                     "custom_name": custom_name,
                 }
             )
-        ),
+        )
+    except ValidationError as exc:
+        return _validation_error_result("text_to_image", exc, _generation_validation_structured)
+    return await run_text_to_image(
+        params,
         config=config,
         ctx=ctx,
         workspace_roots=workspace_roots,
@@ -442,8 +494,8 @@ async def image_to_image(
     multi_image_fusion。
     """
     config = _config_from_context(ctx)
-    return await run_image_to_image(
-        ImageToImageInput(
+    try:
+        params = ImageToImageInput(
             **_filter_unset_params(
                 {
                     "prompt": prompt,
@@ -464,7 +516,11 @@ async def image_to_image(
                     "custom_name": custom_name,
                 }
             )
-        ),
+        )
+    except ValidationError as exc:
+        return _validation_error_result("image_to_image", exc, _generation_validation_structured)
+    return await run_image_to_image(
+        params,
         config=config,
         ctx=ctx,
         workspace_roots=workspace_roots,
@@ -556,8 +612,8 @@ async def multi_image_fusion(
     sequential_generation。
     """
     config = _config_from_context(ctx)
-    return await run_multi_image_fusion(
-        MultiImageFusionInput(
+    try:
+        params = MultiImageFusionInput(
             **_filter_unset_params(
                 {
                     "prompt": prompt,
@@ -576,7 +632,13 @@ async def multi_image_fusion(
                     "custom_name": custom_name,
                 }
             )
-        ),
+        )
+    except ValidationError as exc:
+        return _validation_error_result(
+            "multi_image_fusion", exc, _generation_validation_structured
+        )
+    return await run_multi_image_fusion(
+        params,
         config=config,
         ctx=ctx,
         workspace_roots=workspace_roots,
@@ -680,8 +742,8 @@ async def sequential_generation(
     不适用：融合多张参考图特征改用 multi_image_fusion。
     """
     config = _config_from_context(ctx)
-    return await run_sequential_generation(
-        SequentialGenerationInput(
+    try:
+        params = SequentialGenerationInput(
             **_filter_unset_params(
                 {
                     "prompt": prompt,
@@ -701,7 +763,13 @@ async def sequential_generation(
                     "custom_name": custom_name,
                 }
             )
-        ),
+        )
+    except ValidationError as exc:
+        return _validation_error_result(
+            "sequential_generation", exc, _generation_validation_structured
+        )
+    return await run_sequential_generation(
+        params,
         config=config,
         ctx=ctx,
         workspace_roots=workspace_roots,
@@ -761,8 +829,8 @@ async def browse_images(
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
     递归、分页、按格式过滤。仅可浏览工作区目录内文件。
     """
-    return await run_browse_images(
-        BrowseImagesInput(
+    try:
+        params = BrowseImagesInput(
             **_filter_unset_params(
                 {
                     "directory": directory,
@@ -774,7 +842,11 @@ async def browse_images(
                     "show_details": show_details,
                 }
             )
-        ),
+        )
+    except ValidationError as exc:
+        return _validation_error_result("browse_images", exc, _browse_validation_structured)
+    return await run_browse_images(
+        params,
         ctx=ctx,
         workspace_roots=workspace_roots,
     )
@@ -924,7 +996,7 @@ async def server_info_resource() -> str:
 
 
 # models/info 资源的静态载荷缓存：MODEL_ALIASES 与能力表均为进程级静态数据，
-# 首次读取时构建 JSON 后缓存，重复 resources/read 不再重复 asdict 派生与序列化。
+# 首次读取时构建 JSON 后缓存，重复 resources/read 不再重复载荷派生与序列化。
 _models_info_payload: str | None = None
 
 
@@ -933,16 +1005,11 @@ async def models_info_resource() -> str:
     """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
     global _models_info_payload
     if _models_info_payload is None:
-        # asdict 派生能力字段，ModelCapabilities 新增字段自动出现在本资源，无需手工同步。
-        models = []
-        for alias, model_id in MODEL_ALIASES.items():
-            caps_dict = asdict(get_model_capabilities(model_id))
-            if "allowed_presets" in caps_dict and isinstance(
-                caps_dict["allowed_presets"], (set, frozenset, list)
-            ):
-                caps_dict["allowed_presets"] = sorted(caps_dict["allowed_presets"])
-            models.append({"alias": alias, "model_id": model_id, **caps_dict})
-        _models_info_payload = json.dumps({"models": models}, ensure_ascii=False, indent=2)
+        # 载荷派生收敛到 model_capabilities 的公共 builder，与 Web 模型清单同源；
+        # ModelCapabilities 新增字段自动出现在本资源，无需手工同步。
+        _models_info_payload = json.dumps(
+            {"models": model_payloads()}, ensure_ascii=False, indent=2
+        )
     return _models_info_payload
 
 
@@ -964,7 +1031,7 @@ _SKILL_DESCRIPTION = (
     "组图生成与图层拆分。当用户要求生成图片、画图、改图、换风格、融合多张图、"
     "制作连环画或故事书、拆分图层、生成透明背景，或需要调用 text_to_image、"
     "image_to_image、multi_image_fusion、sequential_generation、browse_images 工具，"
-    "选择模型与尺寸档位，排查 401/402/403/413/429 报错，以及找回已保存的图片时"
+    "确认模型与尺寸档位，排查 401/402/403/413/429 报错，以及找回已保存的图片时"
     "使用本技能。Use when generating or editing images via the Seedream MCP server."
 )
 
@@ -1061,7 +1128,7 @@ def cli_main() -> int:
     set_active_config(config)
 
     # 按最终活动配置重绑导入期固化的密钥环，使 --config-file 携带的密钥生效；
-    # 探测失败时 rebind 内部告警不阻断。
+    # 探测失败时 rebind 内部记录错误并在配置了密钥环时向 stderr 告警，不阻断启动。
     rebind_request_state_security(config.request_state_secret_keys)
 
     # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后

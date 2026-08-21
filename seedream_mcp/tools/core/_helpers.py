@@ -165,8 +165,8 @@ def _extract_parallel_request_error(
     return "请求失败"
 
 
-def _resolve_default_base_dir(config: SeedreamConfig) -> Path:
-    """解析自动保存的默认基础目录，供保存路径解析与预检共用。
+def resolve_default_base_dir(config: SeedreamConfig) -> Path:
+    """解析自动保存的默认基础目录，供保存路径解析、预检与 Web 域共用。
 
     Raises:
         SeedreamValidationError: 未配置 auto_save_base_dir 且无法确定工作区根。
@@ -217,7 +217,7 @@ def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
     Raises:
         SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
     """
-    default_base_dir = _resolve_default_base_dir(config)
+    default_base_dir = resolve_default_base_dir(config)
     if not save_path:
         return default_base_dir
     return _validate_save_path_bounds(default_base_dir, save_path)
@@ -235,7 +235,7 @@ def prevalidate_save_path(config: SeedreamConfig, save_path: str | None) -> None
     """
     if not save_path:
         return
-    _validate_save_path_bounds(_resolve_default_base_dir(config), save_path)
+    _validate_save_path_bounds(resolve_default_base_dir(config), save_path)
 
 
 async def safe_report_progress(

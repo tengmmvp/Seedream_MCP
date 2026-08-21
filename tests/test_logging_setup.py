@@ -9,10 +9,12 @@ from pathlib import Path
 import pytest
 from loguru import logger
 
-from seedream_mcp.utils.core.logs import (
-    _strip_message_control_chars,
+from seedream_mcp.utils.core.inflight import (
     arm_unretrieved_exception_logging,
     log_unretrieved_task_exception,
+)
+from seedream_mcp.utils.core.logs import (
+    _strip_message_control_chars,
     setup_logging,
 )
 
@@ -306,7 +308,7 @@ async def test_log_unretrieved_task_exception_warns_for_failed_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """已完成且携带异常的 task 经回调记录 warning，异常文本与完整堆栈进入日志。"""
-    from seedream_mcp.utils.core import logs
+    from seedream_mcp.utils.core import inflight
 
     async def failing() -> None:
         raise RuntimeError("shared task failed")
@@ -317,7 +319,7 @@ async def test_log_unretrieved_task_exception_warns_for_failed_task(
         await asyncio.sleep(0)
 
     capture = RecordingLogger()
-    monkeypatch.setattr(logs, "logger", capture)
+    monkeypatch.setattr(inflight, "logger", capture)
 
     log_unretrieved_task_exception(task)
 
@@ -330,7 +332,7 @@ async def test_log_unretrieved_task_exception_silent_for_cancelled_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """cancelled task 的回调不记录任何日志，CancelledError 不是失败。"""
-    from seedream_mcp.utils.core import logs
+    from seedream_mcp.utils.core import inflight
 
     async def pending() -> None:
         await asyncio.sleep(3600)
@@ -343,7 +345,7 @@ async def test_log_unretrieved_task_exception_silent_for_cancelled_task(
         pass
 
     capture = RecordingLogger()
-    monkeypatch.setattr(logs, "logger", capture)
+    monkeypatch.setattr(inflight, "logger", capture)
 
     log_unretrieved_task_exception(task)
 
@@ -354,7 +356,7 @@ async def test_arm_unretrieved_exception_logging_dedupes_repeated_arming(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """重复登记同一 task 仅挂一次回调，孤儿失败只记录一条 warning。"""
-    from seedream_mcp.utils.core import logs
+    from seedream_mcp.utils.core import inflight
 
     async def failing() -> None:
         raise RuntimeError("orphan failed")
@@ -364,7 +366,7 @@ async def test_arm_unretrieved_exception_logging_dedupes_repeated_arming(
     arm_unretrieved_exception_logging(task)
 
     capture = RecordingLogger()
-    monkeypatch.setattr(logs, "logger", capture)
+    monkeypatch.setattr(inflight, "logger", capture)
 
     # 轮询推进事件循环至 task 完成并跑完排队的 done callback，期间不检索异常
     while not task.done():
@@ -378,7 +380,7 @@ async def test_arm_unretrieved_exception_logging_silent_when_task_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """登记后 task 成功完成时回调无异常可检索，不记录任何日志。"""
-    from seedream_mcp.utils.core import logs
+    from seedream_mcp.utils.core import inflight
 
     async def succeeding() -> None:
         return None
@@ -387,7 +389,7 @@ async def test_arm_unretrieved_exception_logging_silent_when_task_succeeds(
     arm_unretrieved_exception_logging(task)
 
     capture = RecordingLogger()
-    monkeypatch.setattr(logs, "logger", capture)
+    monkeypatch.setattr(inflight, "logger", capture)
 
     while not task.done():
         await asyncio.sleep(0)

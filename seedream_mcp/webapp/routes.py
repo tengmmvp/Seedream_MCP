@@ -44,12 +44,14 @@ class _GuardedStaticFiles(StaticFiles):
     """封禁 html 直达的静态资源应用。
 
     index 与 404 页须经 meta 域端点直出以携带 CSP 与 nosniff 安全头，StaticFiles
-    直出会绕过该头，故 html 请求一律 404；其余静态资源按原行为直出。
+    直出会绕过该头，故 html 请求一律 404；其余静态资源按原行为直出。扩展名匹配
+    大小写不敏感：Windows 文件系统大小写不敏感，.HTML 形态同样命中页面文件，
+    小写匹配会放行直出，故判定前先小写化。
     """
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """http 请求路径以 .html 结尾时直接回 404，其余透传父类。"""
-        if scope.get("type") == "http" and scope.get("path", "").endswith(".html"):
+        """http 请求路径以 .html 结尾（大小写不敏感）时回 404，其余透传父类。"""
+        if scope.get("type") == "http" and scope.get("path", "").lower().endswith(".html"):
             await Response(status_code=404)(scope, receive, send)
             return
         await super().__call__(scope, receive, send)

@@ -168,13 +168,15 @@ _SSE_OFFLOAD_THRESHOLD = 64 * 1024
 # 几乎不会恰好命中。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 
-# 单个 SSE 事件线上形态的最小字节估计：合法事件含 data: 字段名、JSON 对象信封与
-# 空行分隔。该值偏大于真实最小值，按其派生的条目上限相应偏松，与字节总量上限共同
-# 约束解析产物的内存放大。
-_SSE_MIN_EVENT_BYTES = 64
+# 单条解析产物的内存开销估计：事件 dict 本体、键字符串与内层 dict 等解析产物实测
+# 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 字节总量限额」
+# 从同一限额派生，口径对准解析产物内存：对抗性 64 字节量级的最小合法事件滴流撑满
+# 字节限额时产物被封在与限额同量级，而非按线上字节推导时放大一个数量级以上。合法
+# 批次至多 15 张图且单事件常在 KB 以上，远达不到该上限。
+_SSE_ITEM_OVERHEAD_BYTES = 448
 
-# 解析条目数的绝对下限：组图单请求合法产出至多 15 张图片，总量限额极小的部署按字节
-# 下界推导会得到误伤合法批次的过小上限，绝对下限兜底。
+# 解析条目数的绝对下限：组图单请求合法产出至多 15 张图片，总量限额极小的部署按
+# 单条产物开销推导会得到误伤合法批次的过小上限，绝对下限兜底。
 _SSE_MIN_ITEMS_LIMIT = 64
 
 # CRLF/CR 行尾的单遍归一化模式：一次扫描同时匹配两种行尾，避免两次 replace 全块扫描。
@@ -295,13 +297,13 @@ class _SSEFrameBuffer:
 class _SSEItemCollector:
     """SSE 图片条目累计器：维护条目列表与按总量限额派生的条目硬上限。
 
-    大量小事件在字节未超限时仍可放大解析产物内存，条目上界按最小事件字节下界从
-    同一限额派生；触顶后终止读取，流末尾残留段不再解析。
+    大量小事件在字节未超限时仍可放大解析产物内存，条目上界按单条解析产物的内存
+    开销估计从同一限额派生；触顶后终止读取，流末尾残留段不再解析。
     """
 
     def __init__(self, total_bytes_limit: int) -> None:
         self.items: list[dict[str, Any]] = []
-        self.max_items = max(total_bytes_limit // _SSE_MIN_EVENT_BYTES, _SSE_MIN_ITEMS_LIMIT)
+        self.max_items = max(total_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, _SSE_MIN_ITEMS_LIMIT)
         self.capped = False
 
     def reached_cap(self) -> bool:
@@ -572,8 +574,8 @@ async def parse_sse_response(
             管单事件体积上限。
         total_bytes_limit: 响应流累计接收字节总量上限，含全部事件段与不完整尾部，
             超限时终止解析并关闭响应；单事件阈值拦不住大量小事件滴流的超限流，与
-            非流式/流式 JSON 路径共用同一限额。解析产物条目数另按该限额除以最小
-            事件字节下界派生独立硬上限，防止解析产物内存放大。
+            非流式/流式 JSON 路径共用同一限额。解析产物条目数另按该限额除以单条
+            解析产物的内存开销估计派生独立硬上限，防止产物内存放大。
         log: loguru logger 实例，用于记录进度与告警。
         deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。读取超时按
             单次读操作计时，持续滴流时永不触发，截止时间逐块封顶整个解析阶段；

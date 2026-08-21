@@ -1,6 +1,6 @@
 ---
 name: seedream-image-generation
-description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生图、图生图、多图融合、组图生成与图层拆分。当用户要求生成图片、画图、改图、换风格、融合多张图、制作连环画或故事书、拆分图层、生成透明背景，或需要调用 text_to_image、image_to_image、multi_image_fusion、sequential_generation、browse_images 工具，选择模型与尺寸档位，排查 401/402/403/413/429 报错，以及找回已保存的图片时使用本技能。Use when generating or editing images via the Seedream MCP server.
+description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生图、图生图、多图融合、组图生成与图层拆分。当用户要求生成图片、画图、改图、换风格、融合多张图、制作连环画或故事书、拆分图层、生成透明背景，或需要调用 text_to_image、image_to_image、multi_image_fusion、sequential_generation、browse_images 工具，确认模型与尺寸档位，排查 401/402/403/413/429 报错，以及找回已保存的图片时使用本技能。Use when generating or editing images via the Seedream MCP server.
 ---
 
 # Seedream 图像生成指南
@@ -12,13 +12,13 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 - 用户要求把多张图片融合、合成、拼贴（多图融合）
 - 用户要求制作连环画、故事书、分镜组图（组图生成）
 - 用户要求拆分图层、生成透明背景素材（仅 5.0 Pro）
-- 用户询问选哪个模型、尺寸档位，或要找回之前生成的图片
+- 用户询问当前模型、尺寸档位，或要找回之前生成的图片
 
 ## 环境与前置
 
 - 本 skill 假定客户端已连接 Seedream MCP 服务器并完成鉴权配置
-- 服务器默认模型 `doubao-seedream-5.0`，未显式指定 model 参数时使用默认值
-- 不确定当前生效配置时，先读资源 `seedream://server/info` 确认模型、默认尺寸与自动保存开关
+- 生效模型由服务器配置决定，单次调用不可切换
+- 不确定当前配置时，先读资源 `seedream://server/info` 确认模型、默认尺寸与自动保存开关
 
 ## 工具速查
 
@@ -30,9 +30,9 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 | `sequential_generation` | 一次生成一组连贯组图   | `prompt`                               | 5.0 Pro 不支持组图           |
 | `browse_images`         | 浏览已保存图片         | 无（全部可选）                         | 只读，不访问网络             |
 
-## 模型选择
+## 模型差异
 
-按结构性差异取舍，不要背参数值：
+模型由部署方经服务器配置选定，以下差异供理解当前配置的能力边界，单次调用不可切换：
 
 - `doubao-seedream-5.0`（默认）：能力面最全，组图、联网搜索、流式均支持
 - `doubao-seedream-5.0-pro`：独占图层拆分与透明背景，支持 fast 档提示词优化；但没有组图、联网搜索、流式，可参考图数量更少、尺寸档位更少
@@ -49,7 +49,7 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 
 ## 关键参数规则
 
-- `model`：省略时用服务器默认模型；图层拆分必须显式指定 5.0 Pro
+- 模型：由服务器配置决定，单次调用不可切换；图层拆分与透明背景需部署方将服务器配置为 5.0 Pro
 - `size`：档位（`1K`/`1.5K`/`2K`/`3K`/`4K`）或 `宽x高` 像素；省略时默认 `2K`；图层拆分场景仅接受档位或 `auto`
 - `watermark`：默认不加水印
 - `optimize_prompt_options`：`standard` 或 `fast`；`fast` 仅 5.0 Pro 与 4.0 支持

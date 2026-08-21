@@ -22,9 +22,9 @@
 - **引用的图片 URL 已失效**：API 返回的 URL 仅保留 24 小时。对策：改用本地保存路径（`browse_images` 定位），或重新生成
 - **尺寸档位被拒**：不同模型支持的档位与像素区间不同（如 5.0 Pro 档位更少且有 16 像素倍数约束）。对策：读 `seedream://models/info` 拿当前模型的 `allowed_presets`、`min/max_size_pixels` 后重新取值
 - **能力不支持**：
-  - 5.0 Pro 调组图/联网搜索/流式 → 换 5.0 系列
+  - 服务器配置为 5.0 Pro 时组图/联网搜索/流式不可用 → 由部署方将服务器切换到 5.0 系列
   - 4.5/4.0 传 `output_format` 或 `optimize_prompt_options` → 去掉该参数
-  - 非 5.0 Pro 调 `layer_decomposition`/`background` → 换 5.0 Pro
+  - 非 5.0 Pro 调 `layer_decomposition`/`background` → 由部署方将服务器切换到 5.0 Pro
 - **413 请求体过大**：Base64 传图体积膨胀明显。对策：压缩或缩小图片后重传；有公网可达地址时改用 URL
 - **5.0-lite 组图张数报错**：约束是"参考图数量 + 生成数量 ≤ 15"，调低 `max_images` 或减少参考图
 - **生成成功但未找到保存文件**：确认 `auto_save` 未被显式关闭；按保存路径规则查找（见 SKILL.md"图片的保存与复用"）

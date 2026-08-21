@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ..config import get_active_config
-from ..tools.core._helpers import _resolve_default_base_dir
+from ..tools.core._helpers import resolve_default_base_dir
 from ..tools.core.schemas import BrowseImagesInput
 from ..tools.runners import run_browse_images
 from ..utils.core.errors import SeedreamValidationError
@@ -73,9 +73,8 @@ async def web_browse(request: Request) -> Response:
             "invalid_request", f"参数校验失败: {exc.errors()[0].get('msg')}", 400
         )
 
-    # 保存根含 Path.resolve 文件系统调用，经 to_thread 下沉与 files 域同口径。
     try:
-        save_root = await asyncio.to_thread(_resolve_default_base_dir, get_active_config())
+        save_root = await asyncio.to_thread(resolve_default_base_dir, get_active_config())
     except SeedreamValidationError as exc:
         return _shared.save_root_unavailable(exc)
     roots = ListRootsResult(roots=[Root(uri=FileUrl(save_root.as_uri()), name="web-save-root")])

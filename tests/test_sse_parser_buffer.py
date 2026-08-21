@@ -598,8 +598,8 @@ async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
 async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
     """大量小事件字节未超限仍以条目数硬上限终止解析并标记 partial。
 
-    512KB 限额按 64 字节事件下界派生 8192 条上限；供给 12000 个 53 字节事件共
-    636KB，条目数在字节上限前先行触顶。
+    512KB 限额按单条解析产物内存开销 448 字节派生 1170 条上限；供给 12000 个
+    53 字节事件共 636KB 线上字节，条目数在字节上限前先行触顶。
     """
     event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
     assert len(event) == 53
@@ -622,13 +622,13 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
-        # 条目数在约 82 块处先行触顶，字节上限不触发。
+        # 条目数在约 12 块处先行触顶，字节上限不触发。
         total_bytes_limit=512 * 1024,
         log=_FakeLog(),
     )
 
     # 条目数封顶：触顶判定以事件为粒度即时生效，已解析条目恰好等于上限。
-    assert len(result["data"]) == 8192
+    assert len(result["data"]) == 512 * 1024 // sse_parser_module._SSE_ITEM_OVERHEAD_BYTES
     # 终止解析后停止读取：实际消费块数远小于供给。
     assert consumed < total_chunks
     # 与单事件截断同口径计数并标记 partial。
@@ -639,8 +639,8 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
 async def test_parse_sse_response_item_limit_floor_keeps_legal_batches() -> None:
     """极小总量限额下条目上限取绝对下限兜底，合法小批次不被误截。
 
-    2048 字节限额推导仅得 32 条上限，低于绝对下限 64；兜底后 33 个事件批次完整
-    解析，不产生截断计数。
+    2048 字节限额按单条产物内存开销推导仅得 4 条上限，低于绝对下限 64；兜底后
+    33 个事件批次完整解析，不产生截断计数。
     """
     event = b'data: {"type":"image_generation.partial_succeeded"}\n\n'
     event_count = 33

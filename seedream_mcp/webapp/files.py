@@ -15,7 +15,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
 from ..config import get_active_config
-from ..tools.core._helpers import _resolve_default_base_dir
+from ..tools.core._helpers import resolve_default_base_dir
 from ..utils.core.errors import SeedreamValidationError
 from ..utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS
 from ..utils.images.image_thumbnail import build_thumbnail_bytes_limited
@@ -66,7 +66,7 @@ async def _resolve_request_path(request: Request) -> Path | Response:
     rel = request.query_params.get("path", "")
 
     def _resolve() -> Path:
-        return resolve_web_relative_path(rel, _resolve_default_base_dir(config))
+        return resolve_web_relative_path(rel, resolve_default_base_dir(config))
 
     try:
         return await asyncio.to_thread(_resolve)

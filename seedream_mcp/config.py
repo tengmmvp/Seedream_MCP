@@ -887,19 +887,6 @@ def get_global_config() -> SeedreamConfig:
         return _global_config
 
 
-def set_config(config: SeedreamConfig) -> None:
-    """替换当前生效的配置实例，_active_config 已设置时一并更新。
-
-    生效配置变更同时使 io_path 的回退根 resolve 缓存失效。
-    """
-    global _global_config, _active_config
-    with _global_config_lock:
-        _global_config = config
-        if _active_config is not None:
-            _active_config = config
-        clear_resolved_env_root_cache()
-
-
 def get_active_config() -> SeedreamConfig:
     """获取活动配置：CLI 注入的活动配置优先，回退全局默认实例。"""
     if _active_config is not None:
@@ -915,18 +902,6 @@ def set_active_config(config: SeedreamConfig | None) -> None:
     global _active_config
     with _global_config_lock:
         _active_config = config
-        clear_resolved_env_root_cache()
-
-
-def reload_config(env_file: str | None = None) -> None:
-    """重新加载全局配置并清除活动配置，后续读取回退到新的全局实例。
-
-    io_path 的回退根 resolve 缓存随之失效。
-    """
-    global _global_config, _active_config
-    with _global_config_lock:
-        _global_config = SeedreamConfig.from_env(env_file)
-        _active_config = None
         clear_resolved_env_root_cache()
 
 
