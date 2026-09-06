@@ -171,7 +171,7 @@ Users without an MCP client can work directly in the browser: start the streamab
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
 ```
 
-Access control: the page itself opens without a token; its API calls require one only when the deployment is configured with a token — enter it once in the page and the browser remembers it; the token never appears in URLs. For local-only use without a token, nothing is ever asked, and the API accepts requests only from this page and local programs.
+Access control: the page itself opens without a token; its API calls require one only when the deployment is configured with a token — the token you enter lives only in the current tab's session, expires when the tab closes, and never appears in URLs. For local-only use without a token, nothing is ever asked, and the API accepts requests only from this page and local programs.
 
 ## ⚙️ CLI Options
 
@@ -430,7 +430,7 @@ Beyond tools, the server exposes the following MCP resources for clients to read
 | `seedream://workspace/roots`                           | MCP workspace Roots authorized by the client; empty when none authorized, avoiding exposure of server-local directories                                                                           |
 | `seedream://server/info`                               | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                                     |
 | `seedream://models/info`                               | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
-| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model differences, and parameter rules                                                                 |
+| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model differences, and parameter rules                                                               |
 | `skill://seedream-image-generation/references/{+path}` | Agent Skill reference file template: multi-step workflows and troubleshooting, loaded on demand                                                                                                   |
 
 ## 🧠 Agent Skills
@@ -448,7 +448,7 @@ The skill directory contains:
 
 | File                            | Content                                                                                                             |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `SKILL.md`                      | Main generation guide: tool cheat sheet, model differences, prompt writing, parameter rules                           |
+| `SKILL.md`                      | Main generation guide: tool cheat sheet, model differences, prompt writing, parameter rules                         |
 | `references/workflows.md`       | Multi-step workflows: end-to-end comic creation, layer decomposition and recomposition, style-consistency iteration |
 | `references/troubleshooting.md` | Troubleshooting: error-code remedies, common failure modes, input and quota constraints                             |
 

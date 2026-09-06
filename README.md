@@ -171,7 +171,7 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
 ```
 
-鉴权方式：网页本身无需令牌即可打开；网页的功能接口在部署配置了令牌时需要验证——首次使用在页面中输入一次即可，令牌只保存在浏览器本地，不会出现在网址中。仅本机使用且未配置令牌时，全程无需输入任何东西，接口也只接受来自本页面与本机程序的请求。
+鉴权方式：网页本身无需令牌即可打开；网页的功能接口在部署配置了令牌时需要验证——在页面中输入后令牌仅存于当前标签页会话，关闭标签页即失效，下次使用需重新输入，不会出现在网址中。仅本机使用且未配置令牌时，全程无需输入任何东西，接口也只接受来自本页面与本机程序的请求。
 
 ## ⚙️ 启动参数
 

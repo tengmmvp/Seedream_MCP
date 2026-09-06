@@ -171,7 +171,7 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http --web --auth-token your_token_here
 ```
 
-鑑權方式：網頁本身無需權杖即可開啟；網頁的功能介面在部署設定了權杖時需要驗證——首次使用在頁面中輸入一次即可，權杖只保存在瀏覽器本地，不會出現在網址中。僅本機使用且未設定權杖時，全程無需輸入任何東西，介面也只接受來自本頁面與本機程式的請求。
+鑑權方式：網頁本身無需權杖即可開啟；網頁的功能介面在部署設定了權杖時需要驗證——在頁面中輸入後權杖僅存於目前分頁的工作階段，關閉分頁即失效，下次使用需重新輸入，不會出現在網址中。僅本機使用且未設定權杖時，全程無需輸入任何東西，介面也只接受來自本頁面與本機程式的請求。
 
 ## ⚙️ 啟動參數
 
