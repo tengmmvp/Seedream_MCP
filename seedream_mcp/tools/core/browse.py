@@ -163,9 +163,8 @@ def _build_browse_structured_result(
 
     请求回显字段取自 state，差异字段经关键字参数传入。经
     ``BrowseImagesStructuredOutput`` 构造后 model_dump，使输出与声明的 outputSchema
-    绑定，字段漂移在构造时暴露；无错误时不输出 error 键。边界来自 env/CWD 回退而非
-    会话 Roots 声明时，workspace_roots 与 resolved_directories 以占位符替代，不回显
-    服务器本地目录。
+    绑定，字段漂移在构造时暴露。边界来自 env/CWD 回退而非会话 Roots 声明时，
+    workspace_roots 与 resolved_directories 以占位符替代，不回显服务器本地目录。
 
     Args:
         state: 单次浏览请求的状态快照，提供回显字段。
@@ -470,9 +469,9 @@ async def _scan_browse_entries(
     format_filter_exhausted: bool,
 ) -> tuple[list[Path], dict[Path, Path], list[Path]]:
     """扫描阶段：逐目录扫描并合并越界过滤与去重后的图片条目，上报扫描进度。"""
-    # 逐目录扫描并合并结果，scan_limit 取 offset+limit+1，多取一张用于判定 has_more；
-    # 越界项与重复项的剔除及补扫见 _scan_and_filter_directory。format_filter_exhausted
-    # 时跳过扫描与扫描进度上报，由空结果分支统一返回。
+    # scan_limit 多取一张用于判定 has_more；越界与重复项的剔除及补扫见
+    # _scan_and_filter_directory。format_filter_exhausted 时跳过扫描与进度上报，
+    # 由空结果分支统一返回。
     scan_limit = state.offset + state.limit + 1
     all_images: list[Path] = []
     image_resolved_map: dict[Path, Path] = {}
@@ -499,8 +498,7 @@ async def _scan_browse_entries(
             for image_path, image_resolved in new_entries:
                 all_images.append(image_path)
                 image_resolved_map[image_path] = image_resolved
-            # 多目录时按目录占比上报中间进度，区间为 20% 至 90%；上报须留在事件
-            # 循环，不能在线程内调用 ctx。
+            # 多目录按已扫目录占比上报进度；上报须留在事件循环，不能在线程内调用 ctx。
             if total_dirs > 1:
                 await safe_report_progress(
                     ctx,
@@ -563,7 +561,8 @@ async def _build_empty_browse_result(
     if unreadable_dirs:
         unique_unreadable = list(dict.fromkeys(unreadable_dirs))
         if is_boundary_from_session_roots():
-            dirs_text = ", ".join(str(item) for item in unique_unreadable)
+            # 目录路径来自服务器文件系统，逐项净化后才拼入用户可见消息。
+            dirs_text = ", ".join(sanitize_data_text(str(item)) for item in unique_unreadable)
         else:
             # 回退边界不回显路径，仅按数量提示，明细进日志。
             dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"

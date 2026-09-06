@@ -2,8 +2,7 @@
 
 作为参数校验与 MCP inputSchema 的单一来源，MCPServer 依据本模块的 pydantic 模型生成
 各工具入参 schema。通用字段抽到 ``_*Input`` 基类，按需多重继承组合为各工具的最终
-输入模型。字段描述与约束常量集中声明在模块头部，server.py 的平铺签名同处引用，
-构成双源镜像的单一来源。
+输入模型。
 """
 
 from __future__ import annotations
@@ -312,6 +311,7 @@ class _SizeAndWatermarkInput(BaseModel):
 class _SequentialMaxImagesInput(BaseModel):
     """组图最大生成数量参数。"""
 
+    # default 仅为声明占位，实际值恒由 validate_total_image_limit 按模型能力推导覆盖。
     max_images: int = Field(
         default=MAX_SEQUENTIAL_TOTAL_IMAGES,
         ge=MAX_IMAGES_MIN,

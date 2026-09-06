@@ -2,9 +2,9 @@
 
 每个 ``run_*`` 函数经 ``workspace_roots_scope_from_result`` 应用 MCP Roots 工作区
 边界，roots 结果由 server 层按协商版本取回注入；再将 pydantic 校验后的入参模型委托
-给对应 ``handle_*``。本模块位于 tools/ 顶层，依赖方向为 core <- impl <- runners，
-避免 core 反向依赖 impl。``include_previews`` 开关经 ``preview_inclusion_scope``
-沿异步上下文传入流水线，impl 处理器签名不感知该开关。
+给对应 ``handle_*``。依赖方向为 core <- impl <- runners，避免 core 反向依赖 impl。
+``include_previews`` 开关经 ``preview_inclusion_scope`` 沿异步上下文传入流水线，
+impl 处理器签名不感知该开关。
 """
 
 from __future__ import annotations

@@ -164,7 +164,6 @@ def aggregate_parallel_generation_results(
             message = f"并行请求全部失败。{error_preview}"
         else:
             message = "并行请求全部失败"
-        # 以首个失败异常为代表分类错误码，与单发路径契约一致。
         representative = next(
             (request_errors[i] for i in range(1, request_count + 1) if i in request_errors),
             None,
@@ -704,7 +703,7 @@ def _build_generation_structured_result(
     """构建 MCP 工具结果的 structuredContent 字段。
 
     经 GenerationStructuredOutput 构造后 model_dump，使输出与声明的 outputSchema
-    绑定；成功与失败同构，成功路径不输出 error 键。
+    绑定；成功与失败同构。
 
     Args:
         images: 预提取且已净化的图片列表，None 时内部提取并净化；已净化的列表重复
@@ -755,7 +754,8 @@ def _build_generation_structured_result(
     if context.enable_auto_save:
         payload["auto_save"] = {
             "enabled": True,
-            "error": sanitize_error_text(auto_save_error),
+            # 已由 format_error_for_user 在源头净化，二次净化会叠加截断标记。
+            "error": auto_save_error,
             "results": [r.to_dict() for r in auto_save_results] if auto_save_results else [],
         }
     else:

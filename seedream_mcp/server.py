@@ -14,17 +14,20 @@ outputSchema 并校验 structuredContent，运行时返回的 CallToolResult 原
 inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明而非单一 params 嵌套模型，
 FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inputSchema 收敛为
 一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.core.schemas
-的输入模型，描述与约束字面量经该模块的共享常量引用；非空语义经签名层
-``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝。函数体内过滤 None
-字段后组装输入模型并委托既有 run_* 处理器。两侧等价性由 test_tool_parameter_order
-断言锁定。
+的输入模型，描述与约束字面量经该模块的共享常量引用，四个生成工具语义相同参数的
+Field 默认值共用模块级 FieldInfo 常量；非空语义经签名层
+``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝。工具体以 locals()
+推导参数字典，排除集为签名中不属于输入模型的参数名，签名是参数字典的单一来源；
+_run_tool_pipeline 过滤 None 字段组装输入模型并委托既有 run_* 处理器，未知键立即
+抛 TypeError，守护排除集配置错误。两侧等价性由 test_tool_parameter_order 断言
+锁定。
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -41,7 +44,7 @@ from mcp.types import (
     ToolAnnotations,
 )
 from mcp.types.version import is_version_at_least
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .cli import (
     _build_arg_parser,
@@ -195,6 +198,63 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 
 logger = get_logger()
 
+# ==================== 生成工具共享 Field 常量 ====================
+
+# pydantic 构建 arg_model 时对默认值 FieldInfo 深拷贝合并，共享实例不被改写，
+# 等价性由 test_tool_parameter_order 锁定。image_to_image 的 size 与
+# sequential_generation 的 request_count 描述不同，保留内联。
+_OPTIMIZE_PROMPT_OPTIONS_FIELD: OptimizePromptOptions | None = Field(
+    default=None, description=OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION
+)
+_SIZE_FIELD: str | None = Field(default=None, description=SIZE_DESCRIPTION)
+_WATERMARK_FIELD: bool | None = Field(default=None, description=WATERMARK_DESCRIPTION)
+_RESPONSE_FORMAT_FIELD: ResponseFormat = Field(
+    default=ResponseFormat.URL, description=RESPONSE_FORMAT_DESCRIPTION
+)
+_OUTPUT_FORMAT_FIELD: OutputFormat | None = Field(
+    default=None, description=OUTPUT_FORMAT_DESCRIPTION
+)
+_STREAM_FIELD: bool = Field(default=False, description=STREAM_DESCRIPTION)
+_TOOLS_FIELD: list[GenerationTool] | None = Field(
+    default=None, max_length=TOOLS_MAX_ITEMS, description=TOOLS_DESCRIPTION
+)
+_REQUEST_COUNT_FIELD: int = Field(
+    default=1,
+    ge=REQUEST_COUNT_MIN,
+    le=MAX_PARALLEL_REQUEST_COUNT,
+    description=REQUEST_COUNT_DESCRIPTION,
+)
+_PARALLELISM_FIELD: int | None = Field(
+    default=None,
+    ge=PARALLELISM_MIN,
+    le=MAX_PARALLEL_REQUEST_COUNT,
+    description=PARALLELISM_DESCRIPTION,
+)
+_AUTO_SAVE_FIELD: bool | None = Field(default=None, description=AUTO_SAVE_DESCRIPTION)
+_SAVE_PATH_FIELD: str | None = Field(
+    default=None,
+    max_length=SAVE_PATH_MAX_LENGTH,
+    pattern=_NON_BLANK_PATTERN,
+    description=SAVE_PATH_DESCRIPTION,
+)
+_CUSTOM_NAME_FIELD: str | None = Field(
+    default=None,
+    max_length=CUSTOM_NAME_MAX_LENGTH,
+    pattern=_NON_BLANK_PATTERN,
+    description=CUSTOM_NAME_DESCRIPTION,
+)
+
+
+# 工具体 locals() 推导参数字典的排除集：签名中不属于输入模型的参数名。
+_PIPELINE_EXCLUDED_LOCALS = frozenset({"workspace_roots", "ctx"})
+
+
+def _pipeline_kwargs(frame_locals: dict[str, Any]) -> dict[str, Any]:
+    """从工具函数帧局部变量导出输入模型参数字典，排除集为唯一过滤来源。"""
+    return {
+        key: value for key, value in frame_locals.items() if key not in _PIPELINE_EXCLUDED_LOCALS
+    }
+
 
 def _config_from_context(ctx: Context[Any, Any]) -> SeedreamConfig:
     """从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。"""
@@ -261,6 +321,38 @@ def _browse_validation_structured(tool_name: str, message: str) -> dict[str, Any
     ).model_dump()
 
 
+async def _run_tool_pipeline(
+    tool_name: str,
+    model_cls: type[BaseModel],
+    kwargs: dict[str, Any],
+    build_structured: Callable[[str, str], dict[str, Any]],
+    runner: Callable[..., Awaitable[CallToolResult]],
+    *,
+    config: SeedreamConfig | None,
+    ctx: Context[Any, Any] | None,
+    workspace_roots: ListRootsResult | None,
+) -> CallToolResult:
+    """从平铺实参组装输入模型并委托 runner，构造期校验失败经构造回调返回错误结果。
+
+    参数字典含输入模型未声明的键时抛 TypeError，排除集配置错误在开发期即暴露，
+    不下沉为运行时校验错误或被 None 过滤吞掉。config 为 None 时 runner 不接收
+    配置形参，浏览工具走该分支；config 起的尾部形参均为 keyword-only，可空调用
+    点按名传递避免转置。
+    """
+    unknown_keys = kwargs.keys() - model_cls.model_fields.keys()
+    if unknown_keys:
+        raise TypeError(
+            f"工具 {tool_name} 参数字典含输入模型未知字段: " f"{', '.join(sorted(unknown_keys))}"
+        )
+    try:
+        params = model_cls(**_filter_unset_params(kwargs))
+    except ValidationError as exc:
+        return _validation_error_result(tool_name, exc, build_structured)
+    if config is None:
+        return await runner(params, ctx=ctx, workspace_roots=workspace_roots)
+    return await runner(params, config=config, ctx=ctx, workspace_roots=workspace_roots)
+
+
 def _workspace_roots_dependency(
     ctx: Context = None,  # type: ignore[assignment]
 ) -> ListRootsResult | ListRoots | None:
@@ -304,63 +396,18 @@ async def text_to_image(
         pattern=_NON_BLANK_PATTERN,
         description=TEXT_TO_IMAGE_PROMPT_DESCRIPTION,
     ),
-    optimize_prompt_options: OptimizePromptOptions | None = Field(
-        default=None,
-        description=OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
-    ),
-    size: str | None = Field(
-        default=None,
-        description=SIZE_DESCRIPTION,
-    ),
-    watermark: bool | None = Field(
-        default=None,
-        description=WATERMARK_DESCRIPTION,
-    ),
-    response_format: ResponseFormat = Field(
-        default=ResponseFormat.URL,
-        description=RESPONSE_FORMAT_DESCRIPTION,
-    ),
-    output_format: OutputFormat | None = Field(
-        default=None,
-        description=OUTPUT_FORMAT_DESCRIPTION,
-    ),
-    stream: bool = Field(
-        default=False,
-        description=STREAM_DESCRIPTION,
-    ),
-    tools: list[GenerationTool] | None = Field(
-        default=None,
-        max_length=TOOLS_MAX_ITEMS,
-        description=TOOLS_DESCRIPTION,
-    ),
-    request_count: int = Field(
-        default=1,
-        ge=REQUEST_COUNT_MIN,
-        le=MAX_PARALLEL_REQUEST_COUNT,
-        description=REQUEST_COUNT_DESCRIPTION,
-    ),
-    parallelism: int | None = Field(
-        default=None,
-        ge=PARALLELISM_MIN,
-        le=MAX_PARALLEL_REQUEST_COUNT,
-        description=PARALLELISM_DESCRIPTION,
-    ),
-    auto_save: bool | None = Field(
-        default=None,
-        description=AUTO_SAVE_DESCRIPTION,
-    ),
-    save_path: str | None = Field(
-        default=None,
-        max_length=SAVE_PATH_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=SAVE_PATH_DESCRIPTION,
-    ),
-    custom_name: str | None = Field(
-        default=None,
-        max_length=CUSTOM_NAME_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=CUSTOM_NAME_DESCRIPTION,
-    ),
+    optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
+    size: str | None = _SIZE_FIELD,
+    watermark: bool | None = _WATERMARK_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
+    tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    request_count: int = _REQUEST_COUNT_FIELD,
+    parallelism: int | None = _PARALLELISM_FIELD,
+    auto_save: bool | None = _AUTO_SAVE_FIELD,
+    save_path: str | None = _SAVE_PATH_FIELD,
+    custom_name: str | None = _CUSTOM_NAME_FIELD,
     workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
@@ -370,32 +417,13 @@ async def text_to_image(
     不适用：需要基于已有图片修改时改用 image_to_image；需要一次生成多张
     风格一致的图片时改用 sequential_generation。
     """
-    config = _config_from_context(ctx)
-    try:
-        params = TextToImageInput(
-            **_filter_unset_params(
-                {
-                    "prompt": prompt,
-                    "optimize_prompt_options": optimize_prompt_options,
-                    "size": size,
-                    "watermark": watermark,
-                    "response_format": response_format,
-                    "output_format": output_format,
-                    "stream": stream,
-                    "tools": tools,
-                    "request_count": request_count,
-                    "parallelism": parallelism,
-                    "auto_save": auto_save,
-                    "save_path": save_path,
-                    "custom_name": custom_name,
-                }
-            )
-        )
-    except ValidationError as exc:
-        return _validation_error_result("text_to_image", exc, _generation_validation_structured)
-    return await run_text_to_image(
-        params,
-        config=config,
+    return await _run_tool_pipeline(
+        "text_to_image",
+        TextToImageInput,
+        _pipeline_kwargs(locals()),
+        _generation_validation_structured,
+        run_text_to_image,
+        config=_config_from_context(ctx),
         ctx=ctx,
         workspace_roots=workspace_roots,
     )
@@ -414,10 +442,7 @@ async def image_to_image(
         pattern=_NON_BLANK_PATTERN,
         description=IMAGE_TO_IMAGE_PROMPT_DESCRIPTION,
     ),
-    optimize_prompt_options: OptimizePromptOptions | None = Field(
-        default=None,
-        description=OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
-    ),
+    optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
     image: str = Field(
         pattern=_NON_BLANK_PATTERN,
         description=SINGLE_IMAGE_DESCRIPTION,
@@ -434,55 +459,16 @@ async def image_to_image(
         default=None,
         description=SIZE_WITH_LAYER_DESCRIPTION,
     ),
-    watermark: bool | None = Field(
-        default=None,
-        description=WATERMARK_DESCRIPTION,
-    ),
-    response_format: ResponseFormat = Field(
-        default=ResponseFormat.URL,
-        description=RESPONSE_FORMAT_DESCRIPTION,
-    ),
-    output_format: OutputFormat | None = Field(
-        default=None,
-        description=OUTPUT_FORMAT_DESCRIPTION,
-    ),
-    stream: bool = Field(
-        default=False,
-        description=STREAM_DESCRIPTION,
-    ),
-    tools: list[GenerationTool] | None = Field(
-        default=None,
-        max_length=TOOLS_MAX_ITEMS,
-        description=TOOLS_DESCRIPTION,
-    ),
-    request_count: int = Field(
-        default=1,
-        ge=REQUEST_COUNT_MIN,
-        le=MAX_PARALLEL_REQUEST_COUNT,
-        description=REQUEST_COUNT_DESCRIPTION,
-    ),
-    parallelism: int | None = Field(
-        default=None,
-        ge=PARALLELISM_MIN,
-        le=MAX_PARALLEL_REQUEST_COUNT,
-        description=PARALLELISM_DESCRIPTION,
-    ),
-    auto_save: bool | None = Field(
-        default=None,
-        description=AUTO_SAVE_DESCRIPTION,
-    ),
-    save_path: str | None = Field(
-        default=None,
-        max_length=SAVE_PATH_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=SAVE_PATH_DESCRIPTION,
-    ),
-    custom_name: str | None = Field(
-        default=None,
-        max_length=CUSTOM_NAME_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=CUSTOM_NAME_DESCRIPTION,
-    ),
+    watermark: bool | None = _WATERMARK_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
+    tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    request_count: int = _REQUEST_COUNT_FIELD,
+    parallelism: int | None = _PARALLELISM_FIELD,
+    auto_save: bool | None = _AUTO_SAVE_FIELD,
+    save_path: str | None = _SAVE_PATH_FIELD,
+    custom_name: str | None = _CUSTOM_NAME_FIELD,
     workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
@@ -493,35 +479,13 @@ async def image_to_image(
     不适用：纯文字生图改用 text_to_image；融合多张图片特征改用
     multi_image_fusion。
     """
-    config = _config_from_context(ctx)
-    try:
-        params = ImageToImageInput(
-            **_filter_unset_params(
-                {
-                    "prompt": prompt,
-                    "optimize_prompt_options": optimize_prompt_options,
-                    "image": image,
-                    "layer_decomposition": layer_decomposition,
-                    "background": background,
-                    "size": size,
-                    "watermark": watermark,
-                    "response_format": response_format,
-                    "output_format": output_format,
-                    "stream": stream,
-                    "tools": tools,
-                    "request_count": request_count,
-                    "parallelism": parallelism,
-                    "auto_save": auto_save,
-                    "save_path": save_path,
-                    "custom_name": custom_name,
-                }
-            )
-        )
-    except ValidationError as exc:
-        return _validation_error_result("image_to_image", exc, _generation_validation_structured)
-    return await run_image_to_image(
-        params,
-        config=config,
+    return await _run_tool_pipeline(
+        "image_to_image",
+        ImageToImageInput,
+        _pipeline_kwargs(locals()),
+        _generation_validation_structured,
+        run_image_to_image,
+        config=_config_from_context(ctx),
         ctx=ctx,
         workspace_roots=workspace_roots,
     )
@@ -539,68 +503,23 @@ async def multi_image_fusion(
         pattern=_NON_BLANK_PATTERN,
         description=MULTI_IMAGE_FUSION_PROMPT_DESCRIPTION,
     ),
-    optimize_prompt_options: OptimizePromptOptions | None = Field(
-        default=None,
-        description=OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
-    ),
+    optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
     image: list[Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]] = Field(
         min_length=MULTI_IMAGE_MIN_ITEMS,
         max_length=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
         description=MULTI_IMAGE_DESCRIPTION,
     ),
-    size: str | None = Field(
-        default=None,
-        description=SIZE_DESCRIPTION,
-    ),
-    watermark: bool | None = Field(
-        default=None,
-        description=WATERMARK_DESCRIPTION,
-    ),
-    response_format: ResponseFormat = Field(
-        default=ResponseFormat.URL,
-        description=RESPONSE_FORMAT_DESCRIPTION,
-    ),
-    output_format: OutputFormat | None = Field(
-        default=None,
-        description=OUTPUT_FORMAT_DESCRIPTION,
-    ),
-    stream: bool = Field(
-        default=False,
-        description=STREAM_DESCRIPTION,
-    ),
-    tools: list[GenerationTool] | None = Field(
-        default=None,
-        max_length=TOOLS_MAX_ITEMS,
-        description=TOOLS_DESCRIPTION,
-    ),
-    request_count: int = Field(
-        default=1,
-        ge=REQUEST_COUNT_MIN,
-        le=MAX_PARALLEL_REQUEST_COUNT,
-        description=REQUEST_COUNT_DESCRIPTION,
-    ),
-    parallelism: int | None = Field(
-        default=None,
-        ge=PARALLELISM_MIN,
-        le=MAX_PARALLEL_REQUEST_COUNT,
-        description=PARALLELISM_DESCRIPTION,
-    ),
-    auto_save: bool | None = Field(
-        default=None,
-        description=AUTO_SAVE_DESCRIPTION,
-    ),
-    save_path: str | None = Field(
-        default=None,
-        max_length=SAVE_PATH_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=SAVE_PATH_DESCRIPTION,
-    ),
-    custom_name: str | None = Field(
-        default=None,
-        max_length=CUSTOM_NAME_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=CUSTOM_NAME_DESCRIPTION,
-    ),
+    size: str | None = _SIZE_FIELD,
+    watermark: bool | None = _WATERMARK_FIELD,
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
+    tools: list[GenerationTool] | None = _TOOLS_FIELD,
+    request_count: int = _REQUEST_COUNT_FIELD,
+    parallelism: int | None = _PARALLELISM_FIELD,
+    auto_save: bool | None = _AUTO_SAVE_FIELD,
+    save_path: str | None = _SAVE_PATH_FIELD,
+    custom_name: str | None = _CUSTOM_NAME_FIELD,
     workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
@@ -611,35 +530,13 @@ async def multi_image_fusion(
     不适用：仅编辑单张图片改用 image_to_image；生成一组连贯分镜改用
     sequential_generation。
     """
-    config = _config_from_context(ctx)
-    try:
-        params = MultiImageFusionInput(
-            **_filter_unset_params(
-                {
-                    "prompt": prompt,
-                    "optimize_prompt_options": optimize_prompt_options,
-                    "image": image,
-                    "size": size,
-                    "watermark": watermark,
-                    "response_format": response_format,
-                    "output_format": output_format,
-                    "stream": stream,
-                    "tools": tools,
-                    "request_count": request_count,
-                    "parallelism": parallelism,
-                    "auto_save": auto_save,
-                    "save_path": save_path,
-                    "custom_name": custom_name,
-                }
-            )
-        )
-    except ValidationError as exc:
-        return _validation_error_result(
-            "multi_image_fusion", exc, _generation_validation_structured
-        )
-    return await run_multi_image_fusion(
-        params,
-        config=config,
+    return await _run_tool_pipeline(
+        "multi_image_fusion",
+        MultiImageFusionInput,
+        _pipeline_kwargs(locals()),
+        _generation_validation_structured,
+        run_multi_image_fusion,
+        config=_config_from_context(ctx),
         ctx=ctx,
         workspace_roots=workspace_roots,
     )
@@ -657,10 +554,7 @@ async def sequential_generation(
         pattern=_NON_BLANK_PATTERN,
         description=SEQUENTIAL_PROMPT_DESCRIPTION,
     ),
-    optimize_prompt_options: OptimizePromptOptions | None = Field(
-        default=None,
-        description=OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
-    ),
+    optimize_prompt_options: OptimizePromptOptions | None = _OPTIMIZE_PROMPT_OPTIONS_FIELD,
     image: (
         Annotated[str, Field(pattern=_NON_BLANK_PATTERN)]
         | Annotated[
@@ -672,65 +566,28 @@ async def sequential_generation(
         default=None,
         description=SEQUENTIAL_IMAGE_DESCRIPTION,
     ),
-    size: str | None = Field(
-        default=None,
-        description=SIZE_DESCRIPTION,
-    ),
-    watermark: bool | None = Field(
-        default=None,
-        description=WATERMARK_DESCRIPTION,
-    ),
+    size: str | None = _SIZE_FIELD,
+    watermark: bool | None = _WATERMARK_FIELD,
     max_images: int | None = Field(
         default=None,
         ge=MAX_IMAGES_MIN,
         le=MAX_SEQUENTIAL_TOTAL_IMAGES,
         description=MAX_IMAGES_DESCRIPTION,
     ),
-    response_format: ResponseFormat = Field(
-        default=ResponseFormat.URL,
-        description=RESPONSE_FORMAT_DESCRIPTION,
-    ),
-    output_format: OutputFormat | None = Field(
-        default=None,
-        description=OUTPUT_FORMAT_DESCRIPTION,
-    ),
-    stream: bool = Field(
-        default=False,
-        description=STREAM_DESCRIPTION,
-    ),
-    tools: list[GenerationTool] | None = Field(
-        default=None,
-        max_length=TOOLS_MAX_ITEMS,
-        description=TOOLS_DESCRIPTION,
-    ),
+    response_format: ResponseFormat = _RESPONSE_FORMAT_FIELD,
+    output_format: OutputFormat | None = _OUTPUT_FORMAT_FIELD,
+    stream: bool = _STREAM_FIELD,
+    tools: list[GenerationTool] | None = _TOOLS_FIELD,
     request_count: int = Field(
         default=1,
         ge=REQUEST_COUNT_MIN,
         le=MAX_PARALLEL_REQUEST_COUNT,
         description=REQUEST_COUNT_SEQUENTIAL_DESCRIPTION,
     ),
-    parallelism: int | None = Field(
-        default=None,
-        ge=PARALLELISM_MIN,
-        le=MAX_PARALLEL_REQUEST_COUNT,
-        description=PARALLELISM_DESCRIPTION,
-    ),
-    auto_save: bool | None = Field(
-        default=None,
-        description=AUTO_SAVE_DESCRIPTION,
-    ),
-    save_path: str | None = Field(
-        default=None,
-        max_length=SAVE_PATH_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=SAVE_PATH_DESCRIPTION,
-    ),
-    custom_name: str | None = Field(
-        default=None,
-        max_length=CUSTOM_NAME_MAX_LENGTH,
-        pattern=_NON_BLANK_PATTERN,
-        description=CUSTOM_NAME_DESCRIPTION,
-    ),
+    parallelism: int | None = _PARALLELISM_FIELD,
+    auto_save: bool | None = _AUTO_SAVE_FIELD,
+    save_path: str | None = _SAVE_PATH_FIELD,
+    custom_name: str | None = _CUSTOM_NAME_FIELD,
     workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
@@ -741,36 +598,13 @@ async def sequential_generation(
     5.0/5.0 Lite/4.5/4.0。
     不适用：融合多张参考图特征改用 multi_image_fusion。
     """
-    config = _config_from_context(ctx)
-    try:
-        params = SequentialGenerationInput(
-            **_filter_unset_params(
-                {
-                    "prompt": prompt,
-                    "optimize_prompt_options": optimize_prompt_options,
-                    "image": image,
-                    "size": size,
-                    "watermark": watermark,
-                    "max_images": max_images,
-                    "response_format": response_format,
-                    "output_format": output_format,
-                    "stream": stream,
-                    "tools": tools,
-                    "request_count": request_count,
-                    "parallelism": parallelism,
-                    "auto_save": auto_save,
-                    "save_path": save_path,
-                    "custom_name": custom_name,
-                }
-            )
-        )
-    except ValidationError as exc:
-        return _validation_error_result(
-            "sequential_generation", exc, _generation_validation_structured
-        )
-    return await run_sequential_generation(
-        params,
-        config=config,
+    return await _run_tool_pipeline(
+        "sequential_generation",
+        SequentialGenerationInput,
+        _pipeline_kwargs(locals()),
+        _generation_validation_structured,
+        run_sequential_generation,
+        config=_config_from_context(ctx),
         ctx=ctx,
         workspace_roots=workspace_roots,
     )
@@ -829,24 +663,13 @@ async def browse_images(
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
     递归、分页、按格式过滤。仅可浏览工作区目录内文件。
     """
-    try:
-        params = BrowseImagesInput(
-            **_filter_unset_params(
-                {
-                    "directory": directory,
-                    "recursive": recursive,
-                    "max_depth": max_depth,
-                    "limit": limit,
-                    "offset": offset,
-                    "format_filter": format_filter,
-                    "show_details": show_details,
-                }
-            )
-        )
-    except ValidationError as exc:
-        return _validation_error_result("browse_images", exc, _browse_validation_structured)
-    return await run_browse_images(
-        params,
+    return await _run_tool_pipeline(
+        "browse_images",
+        BrowseImagesInput,
+        _pipeline_kwargs(locals()),
+        _browse_validation_structured,
+        run_browse_images,
+        config=None,
         ctx=ctx,
         workspace_roots=workspace_roots,
     )
@@ -871,7 +694,8 @@ def _tighten_flat_tool_schemas() -> None:
     键。于 import 期执行，先于任何 tools/list 与 tools/call 生效。依赖 SDK 私有
     路径 ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，先探测属性
     存在性，缺失时记录错误并跳过收紧，不抛异常不阻断启动；失效由
-    test_flat_input_schema_forbids_additional_properties 兜底报警。
+    test_flat_input_schema_forbids_additional_properties 兜底报警。SDK 升级 2.x
+    minor 版本时需复核这两个私有路径仍存在，行为由守护测试锁定。
     """
     tool_manager = getattr(mcp, "_tool_manager", None)
     if tool_manager is None:
@@ -1128,7 +952,7 @@ def cli_main() -> int:
     set_active_config(config)
 
     # 按最终活动配置重绑导入期固化的密钥环，使 --config-file 携带的密钥生效；
-    # 探测失败时 rebind 内部记录错误并在配置了密钥环时向 stderr 告警，不阻断启动。
+    # 探测失败时 rebind 返回 False 不阻断启动。
     rebind_request_state_security(config.request_state_secret_keys)
 
     # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后

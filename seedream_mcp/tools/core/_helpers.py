@@ -23,6 +23,7 @@ from ...utils.io.io_path import (
     get_workspace_root,
     is_within_resolved,
     normalize_path,
+    resolve_cached_default_save_base_dir,
     resolve_cached_save_base_dir,
 )
 
@@ -186,7 +187,9 @@ def resolve_default_base_dir(config: SeedreamConfig) -> Path:
             field="auto_save_base_dir",
             value=config.auto_save_base_dir,
         ) from exc
-    return (workspace_root / ".seedream" / "images").resolve()
+    # 默认目录的常量拼接路径同样经进程级缓存 resolve，键派生自工作区根；配置写入
+    # 路径统一使缓存失效。
+    return resolve_cached_default_save_base_dir(workspace_root)
 
 
 def _validate_save_path_bounds(default_base_dir: Path, save_path: str) -> Path:

@@ -2,8 +2,8 @@
 
 内部按职责拆分到 _helpers/context/results/auto_save/parallel/outputs/schemas
 子模块，本模块聚合公共符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
-``execute_generation_handler`` 是四类生成工具的统一处理流水线，依次执行参数归一化与
-校验、客户端调用、自动保存、结果净化与格式化及预览生成，异常统一降级为错误结果。
+``execute_generation_handler`` 是四类生成工具的统一处理流水线，各阶段职责与异常降级
+契约见该函数 docstring。
 """
 
 from __future__ import annotations
@@ -96,8 +96,7 @@ _preview_enabled: ContextVar[bool] = ContextVar("seedream_preview_enabled", defa
 def preview_inclusion_scope(include_previews: bool) -> Iterator[None]:
     """在作用域内设置预览装配开关，退出时恢复先前的取值。
 
-    供 runner 层把调用方的预览开关传播进执行流水线；仅消费 Web 端点等不消费
-    ImageContent 的调用方传 False，MCP 工具路径保持默认 True。
+    仅 Web 端点等不消费 ImageContent 的调用方传 False，MCP 工具路径保持默认 True。
     """
     token = _preview_enabled.set(include_previews)
     try:
@@ -317,7 +316,6 @@ async def execute_generation_handler(
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
     ctx: Context[Any, Any] | None = None,
-    include_previews: bool = True,
 ) -> CallToolResult:
     """执行生成类工具的统一处理流水线，返回 MCP 结构化工具结果。
 
@@ -333,8 +331,6 @@ async def execute_generation_handler(
         module_logger: 调用方模块的 loguru logger。
         request_executor: 执行单次生成请求，由各 impl 提供 client 调用差异。
         ctx: MCP 上下文，用于进度上报，可为 None。
-        include_previews: 是否装配已保存图片的缩略图预览；runner 层经
-            preview_inclusion_scope 传播的关闭态与之叠加，任一关闭即跳过预览装配。
 
     Returns:
         工具结果，成功时含文本摘要与 structuredContent 及可选缩略图，失败时 isError
@@ -388,7 +384,7 @@ async def execute_generation_handler(
         )
 
         preview_contents: list[ImageContent] = []
-        if include_previews and _preview_enabled.get():
+        if _preview_enabled.get():
             response_text, preview_contents = await _build_generation_preview(
                 config=config,
                 is_generation_failed=is_generation_failed,

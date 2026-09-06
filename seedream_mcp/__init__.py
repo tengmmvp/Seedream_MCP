@@ -34,7 +34,6 @@ _LAZY_EXPORTS = {
     "cli_main": (".server", "cli_main"),
 }
 
-# 公开接口声明，派生自 _LAZY_EXPORTS 的键并补充 __version__。
 __all__ = ["__version__"] + list(_LAZY_EXPORTS)
 
 
