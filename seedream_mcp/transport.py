@@ -1,7 +1,7 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
 包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护与 Web 操作台同源 Origin
-校验五个 ASGI 中间件，以及 streamable-http 监听与 TLS 配置。中间件经 Starlette
+与跨站 Sec-Fetch 校验五个 ASGI 中间件，以及 streamable-http 监听与 TLS 配置。中间件经 Starlette
 add_middleware 装配到 MCPServer 的 streamable_http_app 外层，按装配逆序执行。MCPServer
 实例 mcp 与共享资源清理函数在调用时从 resources 模块延迟导入，传输层不依赖 server 模块。
 """
@@ -49,7 +49,7 @@ _LOOPBACK_ALLOWED_ORIGINS = (
 _DRAIN_PENDING_TIMEOUT_SECONDS = 5.0
 
 
-# ==================== ASGI 响应辅助 ====================
+# ==================== ASGI 辅助 ====================
 
 
 async def _send_asgi_json(
@@ -77,6 +77,20 @@ async def _send_asgi_json(
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+def _header_value(scope: Scope, name: bytes) -> bytes | None:
+    """返回 scope 请求头中首个匹配名称的原始值，缺失时为 None。"""
+    for header_name, value in scope.get("headers", []):
+        if header_name == name:
+            return value  # type: ignore[no-any-return]
+    return None
+
+
+async def _send_forbidden(send: Send, error: str, description: str) -> None:
+    """发送 403 JSON 拒绝响应并附 connection: close，Host 与 Origin 守卫共用。"""
+    body = json.dumps({"error": error, "error_description": description}).encode("utf-8")
+    await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
 
 
 # ==================== ASGI 中间件 ====================
@@ -108,7 +122,6 @@ class _BearerTokenAuthMiddleware:
         self._exempt_prefixes = exempt_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI 调用入口：非 http 流量按类型处置，http 流量校验令牌后放行或回 401。"""
         scope_type = scope.get("type")
         if scope_type == "lifespan":
             await self.app(scope, receive, send)
@@ -135,12 +148,12 @@ class _BearerTokenAuthMiddleware:
 
     def _request_authorized(self, scope: Scope) -> bool:
         """判定请求是否携带匹配的 Bearer 令牌，非 Bearer 授权方案同样拒绝。"""
-        for name, value in scope.get("headers", []):
-            if name == b"authorization":
-                if value[:7].lower() == b"bearer ":
-                    return hmac.compare_digest(value[7:].strip(), self._expected)
-                return False
-        return False
+        value = _header_value(scope, b"authorization")
+        if value is None:
+            return False
+        if value[:7].lower() != b"bearer ":
+            return False
+        return hmac.compare_digest(value[7:].strip(), self._expected)
 
     async def _send_unauthorized(self, send: Send) -> None:
         body = json.dumps(
@@ -172,19 +185,17 @@ class _LimitRequestBodyMiddleware:
         self._max_body_size = max_body_size
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI 调用入口：包装 receive 与 send 实施字节上限，超限短路返回 413。"""
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
 
         content_length = 0
-        for name, value in scope.get("headers", []):
-            if name == b"content-length":
-                try:
-                    content_length = int(value)
-                except ValueError:
-                    pass
-                break
+        value = _header_value(scope, b"content-length")
+        if value is not None:
+            try:
+                content_length = int(value)
+            except ValueError:
+                pass
 
         if content_length > self._max_body_size:
             await self._send_too_large(send)
@@ -230,7 +241,7 @@ class _LimitRequestBodyMiddleware:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
             # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，
-            # 避免冒泡为 500；补发对已死连接同样可能抛异常，吞掉仅记 debug。
+            # 避免冒泡为 500。
             if too_large:
                 try:
                     await _finalize_too_large()
@@ -240,7 +251,6 @@ class _LimitRequestBodyMiddleware:
             raise
 
         if too_large:
-            # 客户端超限后断开时，补发 413 可能对已死连接抛异常，吞掉仅记 debug。
             try:
                 await _finalize_too_large()
             except Exception:
@@ -294,7 +304,7 @@ class _LoopbackHostGuardMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope.get("type")
         if scope_type in ("http", "websocket"):
-            host = self._host_header(scope)
+            host = _header_value(scope, b"host")
             # 与 SDK 内层 Host 校验同为大小写敏感精确比较：本层拒绝的大写回环
             # Host 在内层同样不匹配白名单，大写形态由此 403 拒绝。
             if host is None or self._strip_port(host) not in self._ALLOWED_HOSTS:
@@ -302,16 +312,9 @@ class _LoopbackHostGuardMiddleware:
                     # websocket 无 HTTP 状态码可回，按鉴权中间件模式以 1008 关闭。
                     await send({"type": "websocket.close", "code": 1008})
                 else:
-                    await self._send_forbidden(send)
+                    await _send_forbidden(send, "invalid_host", "Host not allowed")
                 return
         await self.app(scope, receive, send)
-
-    @staticmethod
-    def _host_header(scope: Scope) -> bytes | None:
-        for name, value in scope.get("headers", []):
-            if name == b"host":
-                return value  # type: ignore[no-any-return]
-        return None
 
     @staticmethod
     def _strip_port(host: bytes) -> bytes:
@@ -322,59 +325,48 @@ class _LoopbackHostGuardMiddleware:
         idx = host.rfind(b":")
         return host if idx == -1 else host[:idx]
 
-    async def _send_forbidden(self, send: Send) -> None:
-        body = json.dumps(
-            {"error": "invalid_host", "error_description": "Host not allowed"}
-        ).encode("utf-8")
-        await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
-
 
 class _WebOriginGuardMiddleware:
-    """无令牌 Web 部署下 /web/api 前缀请求的同源 Origin 校验 ASGI 中间件。
+    """无令牌 Web 部署下 /web/api 前缀请求的同源 Origin 与跨站加载校验中间件。
 
     仅在 web_enabled 且未配置令牌时装配：有令牌时 Bearer 已挡 drive-by，无需
     本层。无 Origin 头放行，覆盖 curl 等非浏览器客户端与本地进程；携带 Origin
     的请求取其经 urlsplit 解析出的 netloc 与 Host 头全值做忽略大小写的字符串
     相等比对，端口参与比对：同源页面的 Origin 与请求 Host 恒为同一 host:port，
-    域名不同、端口不一致、Origin 为 null 与 Host 缺失均按跨源 403 拒绝。仅守
-    API 前缀，静态页面本身无敏感数据不做校验。
+    域名不同、端口不一致、Origin 为 null 与 Host 缺失均按跨源 403 拒绝。Origin
+    守卫覆盖不了不带 Origin 头的跨站 img/no-cors 加载，GET 与 HEAD 请求另按
+    浏览器管控不可伪造的 Sec-Fetch-Site 头拒绝 same-site 与 cross-site 形态：
+    same-site 覆盖同注册域兄弟子域的图片嵌入，HEAD 覆盖 no-cors 探测；
+    same-origin、none 与无该头的旧客户端放行。仅守 API 前缀，静态页面本身无
+    敏感数据不做校验。
     """
+
+    # 拒绝的 Sec-Fetch-Site 取值集合；same-origin 与 none 是合法流量不在其列。
+    _REJECTED_FETCH_SITES = frozenset({b"same-site", b"cross-site"})
 
     def __init__(self, app: ASGIApp, api_prefix: str) -> None:
         self.app = app
         self._api_prefix = api_prefix
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI 调用入口：API 前缀的 http 请求校验 Origin 同源，其余流量透传。"""
         if scope.get("type") == "http" and scope.get("path", "").startswith(self._api_prefix):
-            origin = self._origin_header(scope)
+            origin = _header_value(scope, b"origin")
             if origin is not None and not self._same_origin(scope, origin):
-                await self._send_forbidden(send)
+                await _send_forbidden(send, "invalid_origin", "Cross-origin request rejected")
+                return
+            if self._cross_site_fetch(scope):
+                await _send_forbidden(send, "cross_site_fetch", "Cross-site request rejected")
                 return
         await self.app(scope, receive, send)
 
     @staticmethod
-    def _origin_header(scope: Scope) -> bytes | None:
-        for name, value in scope.get("headers", []):
-            if name == b"origin":
-                return value  # type: ignore[no-any-return]
-        return None
-
-    @staticmethod
-    def _host_header(scope: Scope) -> bytes | None:
-        for name, value in scope.get("headers", []):
-            if name == b"host":
-                return value  # type: ignore[no-any-return]
-        return None
-
-    @classmethod
-    def _same_origin(cls, scope: Scope, origin: bytes) -> bool:
+    def _same_origin(scope: Scope, origin: bytes) -> bool:
         """判定 Origin 与 Host 是否同源：两者 netloc 全值忽略大小写相等。
 
         Origin 解析不出 netloc、头值畸形无法解析或 Host 头缺失时无法确立同源，
         均按跨源拒绝；头值按 ASGI 约定以 latin-1 解码。
         """
-        host = cls._host_header(scope)
+        host = _header_value(scope, b"host")
         if not host:
             return False
         try:
@@ -387,11 +379,15 @@ class _WebOriginGuardMiddleware:
             return False
         return origin_netloc.lower() == host.decode("latin-1").lower()
 
-    async def _send_forbidden(self, send: Send) -> None:
-        body = json.dumps(
-            {"error": "invalid_origin", "error_description": "Cross-origin request rejected"}
-        ).encode("utf-8")
-        await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
+    @classmethod
+    def _cross_site_fetch(cls, scope: Scope) -> bool:
+        """判定 GET/HEAD 请求是否自报跨站：Sec-Fetch-Site 值为 same-site 或 cross-site。"""
+        if scope.get("method") not in ("GET", "HEAD"):
+            return False
+        site = _header_value(scope, b"sec-fetch-site")
+        if site is None:
+            return False
+        return site.strip().lower() in cls._REJECTED_FETCH_SITES
 
 
 # ==================== streamable-http 中间件装配 ====================
@@ -453,7 +449,7 @@ def _attach_streamable_http_middleware(
         from .webapp.constants import WEB_API_PREFIX
 
         app.add_middleware(_WebOriginGuardMiddleware, api_prefix=f"{WEB_API_PREFIX}/")
-        logger.info("Web 操作台未配置令牌，已启用 /web/api 同源 Origin 校验")
+        logger.info("Web 操作台未配置令牌，已启用 /web/api 同源 Origin 与跨站 Sec-Fetch 校验")
     if max_body_size is None:
         max_body_size = get_active_config().http_max_body_size
     app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=max_body_size)
@@ -527,7 +523,8 @@ def _warn_remote_exposure(host: str, auth_enabled: bool, web_enabled: bool = Fal
         )
     if web_enabled:
         # Web 附加句与实际防线一致：有令牌时 API 由 Bearer 把守；无令牌时由
-        # Origin 守卫限制为同源访问，文案不得陈述不存在的防线。
+        # Origin 守卫与 Sec-Fetch 跨站校验限制为同源访问，文案不得陈述不存在
+        # 的防线。
         if auth_enabled:
             message += (
                 "Web 操作台已开启：/web 与 /web/static 静态页面免鉴权，"
@@ -535,8 +532,8 @@ def _warn_remote_exposure(host: str, auth_enabled: bool, web_enabled: bool = Fal
             )
         else:
             message += (
-                "Web 操作台已开启且未配置令牌：/web/api 仅允许同源浏览器与本地进程访问"
-                "（跨源请求将被拒绝），建议配置 --auth-token。"
+                "Web 操作台已开启且未配置令牌：/web/api 仅允许同源浏览器与本地进程访问，"
+                "跨源与跨站请求（含兄弟子域图片嵌入）将被拒绝，建议配置 --auth-token。"
             )
     logger.warning(message)
     # 控制台输出走 stderr，与 server.py 的运行告警一致，避免污染 stdio 传输的 stdout。
