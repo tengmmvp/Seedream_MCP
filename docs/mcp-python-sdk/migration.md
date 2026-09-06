@@ -4,6 +4,11 @@ This guide covers the breaking changes introduced in v2 of the MCP Python SDK an
 
 Version 2 of the MCP Python SDK introduces several breaking changes to improve the API, align with the MCP specification, and provide better type safety.
 
+!!! note "Not ready to migrate yet?"
+    The v1.x maintenance line keeps receiving critical bug fixes and security patches, and its
+    documentation is at [/v1/](https://py.sdk.modelcontextprotocol.io/v1/). If your package depends
+    on `mcp`, keep a `<2` upper bound until you've migrated.
+
 ## Find your changes
 
 Every section heading below names the API it affects, so searching this page for the symbol your code uses is the fastest route to the change that broke it. The guide lists changes only: an SDK API not mentioned here behaves as it did in v1, and the "what did not change" summaries — [`MCPServer`](#what-is-unchanged-on-mcpserver), [lowlevel `Server`](#lowlevel-server-what-did-not-change), and [auth](#unchanged-auth-surfaces) — spell out the surfaces most migrators stop to check.
@@ -12,7 +17,7 @@ Every section heading below names the API it affects, so searching this page for
 
 | Change | First symptom | Section |
 |---|---|---|
-| `FastMCP` renamed to `MCPServer` | `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` | [`FastMCP` renamed](#fastmcp-renamed-to-mcpserver) |
+| `FastMCP` renamed to `MCPServer` | `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` (newer 2.x releases follow it with a pointer to this guide) | [`FastMCP` renamed](#fastmcp-renamed-to-mcpserver) |
 | Fields renamed from camelCase to snake_case | `AttributeError: 'Tool' object has no attribute 'inputSchema'` | [snake_case fields](#field-names-changed-from-camelcase-to-snake_case) |
 | `mcp.types` names removed | `ImportError: cannot import name 'Content' from 'mcp.types'` | [Removed types](#removed-type-aliases-and-classes) |
 | `McpError` renamed to `MCPError` | `ImportError: cannot import name 'McpError' from 'mcp'` | [`McpError` renamed](#mcperror-renamed-to-mcperror) |
@@ -667,6 +672,8 @@ All submodules under `mcp.server.fastmcp.*` are now under `mcp.server.mcpserver.
 - `ToolError`, `ResourceError` — from `mcp.server.mcpserver.exceptions`
 - `MCPServerError` (renamed from `FastMCPError`) — from `mcp.server.mcpserver.exceptions`
 
+Importing `mcp.server.fastmcp`, or anything below it, raises `ModuleNotFoundError` (newer 2.x releases include a link to this section in its message), so existing `except ImportError` or `except ModuleNotFoundError` fallbacks around the v1 import keep working.
+
 ### What is unchanged on `MCPServer`
 
 Beyond the changes covered in this section, the everyday `FastMCP` surface carries over to `MCPServer` as-is:
@@ -750,7 +757,7 @@ Transport-specific parameters have been moved off the `MCPServer` constructor an
 - `sse_path`, `message_path` - SSE transport paths, on `run(transport="sse", ...)` and `sse_app()`
 - `streamable_http_path` - StreamableHTTP endpoint path, on `run(transport="streamable-http", ...)` and `streamable_http_app()`
 - `json_response`, `stateless_http` - StreamableHTTP behavior, same two places; each also removes a server-to-client channel, see [Server-initiated sampling, elicitation, and roots raise `NoBackChannelError`](#server-initiated-sampling-elicitation-and-roots-raise-nobackchannelerror)
-- `max_request_body_size` - StreamableHTTP request-body limit, same two places
+- `max_request_body_size` - HTTP request-body limit, on `run()` for both HTTP transports and on both app methods
 - `event_store`, `retry_interval` - StreamableHTTP event handling, same two places
 - `transport_security` - DNS rebinding protection, on `run()` for both HTTP transports and on both app methods
 
@@ -987,8 +994,8 @@ its behavior is unchanged.
 `MCPError` carries `ErrorData` and is the SDK's protocol-error type — raise it
 when the request itself should be rejected (missing client capability,
 elicitation required, invalid parameters). For tool *execution* failures the
-calling LLM should see and react to, raise any other exception or return
-`CallToolResult(is_error=True, ...)` directly; that path is unchanged.
+calling LLM should see and react to, raise `ToolError` or return
+`CallToolResult(is_error=True, ...)` directly.
 
 The client sees this change too. `Client.call_tool()` and
 `ClientSession.call_tool()` raise on a JSON-RPC error response, so a tool that
@@ -1011,7 +1018,7 @@ except MCPError as e:
 
 ### Resource not found returns `-32602` and resource lookups raise typed exceptions (SEP-2164)
 
-Reading a missing resource now returns JSON-RPC error code `-32602` (invalid params) with the requested URI in `error.data` (`{"uri": ...}`), per [SEP-2164](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2164). Previously the server returned code `0` with no `data`. Clients can now reliably distinguish not-found from other errors; a template handler that raises `ResourceNotFoundError` (from `mcp.server.mcpserver.exceptions`) produces this same response.
+Reading a missing resource now returns JSON-RPC error code `-32602` (invalid params) with the requested URI in `error.data` (`{"uri": ...}`), per [SEP-2164](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2164). Previously the server returned code `0` with no `data`. Clients can now reliably distinguish not-found from other errors; a resource handler (static or template) that raises `ResourceNotFoundError` (from `mcp.server.mcpserver.exceptions`) produces this same response.
 
 The underlying lookups now raise typed exceptions instead of `ValueError`. `ResourceManager.get_resource()` raises `ResourceNotFoundError` when no resource or template matches the URI, and `ResourceTemplate.create_resource()` raises `ResourceError` when the template function fails. Neither subclasses `ValueError`, so callers catching `ValueError` should switch to `ResourceNotFoundError` / `ResourceError` (both importable from `mcp.server.mcpserver.exceptions`; `ResourceNotFoundError` subclasses `ResourceError`).
 
@@ -2732,7 +2739,7 @@ One behavioral caveat when moving progress-reporting handlers onto `Client(serve
 
 Every deprecation below is a runtime warning as well as a type-checker one: deprecated methods and helpers emit `mcp.MCPDeprecationWarning` on each call, and the deprecated `Server(...)` constructor parameters (`on_set_logging_level`, `on_roots_list_changed`, `on_progress`) emit it at construction time. The category subclasses `UserWarning`, not `DeprecationWarning`, so it is visible by default; [Deprecated features](deprecated.md) has the full list and each replacement.
 
-Under pytest's `filterwarnings = ["error"]`, that warning becomes an exception at the first deprecated call. Inside an `@mcp.tool()` handler the exception is caught like any other and returned as `CallToolResult(is_error=True)` (`Error executing tool ...: The logging capability is deprecated as of 2026-07-28 (SEP-2577).`), which reads as a failing tool rather than a warning. Keep the warnings visible but non-fatal with:
+Under pytest's `filterwarnings = ["error"]`, that warning becomes an exception at the first deprecated call. Inside an `@mcp.tool()` handler the exception is caught like any other and returned as `CallToolResult(is_error=True)` (`Error executing tool ...`, with the `MCPDeprecationWarning` traceback in the server log), which reads as a failing tool rather than a warning. Keep the warnings visible but non-fatal with:
 
 ```toml
 [tool.pytest.ini_options]
