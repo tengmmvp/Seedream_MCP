@@ -1,11 +1,13 @@
 """Web 操作台生成端点：四个工具经 runners 层复用完整 MCP 流水线。
 
 请求体由 schemas.py 的 *Input 模型校验，字段与 MCP 工具同源，响应为工具的
-structured_content 字典；结果条目与校验错误消息中的保存根绝对路径不出端点，
-local_path 改写为相对形态或删除，落在保存根内的条目附 web_path 供前端拼接
-图片端点，错误自由文本中的保存根路径替换为占位符。共享 client 经 context
-替身借用，鉴权由外层 Bearer 中间件承担；端点仅消费 structuredContent，预览
-装配关闭，请求体解析与响应体序列化下沉工作线程执行。
+structured_content 字典；生成链路不伪造会话 Roots，文件边界由 runner 内的
+环境变量回退链处理，与客户端未声明 roots capability 的 MCP 会话同构。结果
+条目与校验错误消息中的保存根绝对路径不出端点，local_path 改写为相对形态
+或删除，落在保存根内的条目附 web_path 供前端拼接图片端点，错误自由文本中
+的保存根路径替换为占位符。共享 client 经 context 替身借用，鉴权由外层
+Bearer 中间件承担；端点仅消费 structuredContent，预览装配关闭，请求体解析
+与响应体序列化下沉工作线程执行。
 """
 
 from __future__ import annotations
@@ -19,10 +21,9 @@ from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, ListRootsResult
 from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from ..config import SeedreamConfig, get_active_config
-from ..tools.core._helpers import resolve_default_base_dir
 from ..tools.core.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
@@ -60,39 +61,25 @@ class _GenerationRunner(Protocol[_RunnerInputT]):
     ) -> CallToolResult: ...
 
 
-async def _sanitize_validation_message(message: str, config: SeedreamConfig) -> str:
-    """校验错误消息中的保存根绝对路径替换为占位符，根解析失败时保持原文。
-
-    保存根解析含文件系统调用，经 to_thread 下沉工作线程执行。
-    """
-    try:
-        save_root = await asyncio.to_thread(resolve_default_base_dir, config)
-    except SeedreamValidationError:
-        return message
-    return message.replace(str(save_root), _shared.SAVE_ROOT_PLACEHOLDER)
-
-
 def sanitize_save_root_text(value: object, save_root: Path) -> None:
     """递归替换结构化结果字符串值中的保存根绝对路径为占位符，就地改写。
 
-    dict 与 list 逐层下钻，str 值替换全部保存根出现处，与
-    _sanitize_validation_message 同口径，覆盖 auto_save.results[].error、
-    data[].error 嵌套 message 与顶层
-    error.message 等错误自由文本通道；非字符串叶子值保持原样。须在
+    dict 与 list 逐层下钻，str 值经 _shared.mask_save_root_text 替换全部
+    保存根出现处，覆盖 auto_save.results[].error、data[].error 嵌套 message
+    与顶层 error.message 等错误自由文本通道；非字符串叶子值保持原样。须在
     augment_generation_payload 之后调用，此时保存根内 local_path 已改写为相对
     形态，不受替换波及。
     """
-    root_text = str(save_root)
     if isinstance(value, dict):
         for key, item in value.items():
             if isinstance(item, str):
-                value[key] = item.replace(root_text, _shared.SAVE_ROOT_PLACEHOLDER)
+                value[key] = _shared.mask_save_root_text(item, save_root)
             else:
                 sanitize_save_root_text(item, save_root)
     elif isinstance(value, list):
         for index, item in enumerate(value):
             if isinstance(item, str):
-                value[index] = item.replace(root_text, _shared.SAVE_ROOT_PLACEHOLDER)
+                value[index] = _shared.mask_save_root_text(item, save_root)
             else:
                 sanitize_save_root_text(item, save_root)
 
@@ -142,11 +129,10 @@ async def _run_web_generation(
 ) -> Response:
     """解析请求体并执行生成 runner，按结果形态映射响应。
 
-    请求体经 pydantic 输入模型校验，响应体为工具的结构化结果字典；失败结果按
-    error.type 映射状态码，响应体保持完整结构化结果供前端展示错误详情。端点
-    仅消费 structuredContent，经 include_previews=False 跳过预览装配；请求体
-    解析与响应体序列化是随参考图体积线性增长的同步 CPU 工作，下沉工作线程
-    避免阻塞事件循环。
+    请求体经 pydantic 输入模型校验，响应体为工具的结构化结果字典；失败结果
+    按 error.type 映射状态码，响应体保持完整结构化结果供前端展示错误详情。
+    请求体解析与响应体序列化是随参考图体积线性增长的同步 CPU 工作，下沉
+    工作线程避免阻塞事件循环。
     """
     try:
         body_bytes = await request.body()
@@ -169,10 +155,16 @@ async def _run_web_generation(
 
     config = get_active_config()
     ctx = cast("Context | None", build_web_request_context())
+    # 不伪造会话 Roots 传入 runner：伪造会解锁本地路径错误回显分支泄露服务器
+    # 路径，UNC 工作区根也在 file URI 转换层丢失使回退边界失效。边界交由
+    # runner 内的环境变量回退链处理，与客户端未声明 roots 的会话同构。
+    save_root = await _shared.resolve_web_save_root(config)
+    if isinstance(save_root, JSONResponse):
+        return save_root
     try:
         result = await runner(params, config, ctx, include_previews=False)
     except SeedreamValidationError as exc:
-        message = await _sanitize_validation_message(exc.message, config)
+        message = _shared.mask_save_root_text(exc.message, save_root)
         return _shared.error_json("validation_error", message, 400)
     except Exception:
         logger.exception("Web 生成请求执行异常")
@@ -182,12 +174,7 @@ async def _run_web_generation(
     if not isinstance(structured, dict):
         structured = {}
 
-    try:
-        save_root = await asyncio.to_thread(resolve_default_base_dir, config)
-    except SeedreamValidationError:
-        logger.debug("保存根不可解析，跳过 web_path 增强与错误文本净化")
-    else:
-        await asyncio.to_thread(_finalize_web_payload, structured, save_root)
+    await asyncio.to_thread(_finalize_web_payload, structured, save_root)
 
     status = 200 if not result.is_error else _shared.generation_status(structured)
     payload = await asyncio.to_thread(

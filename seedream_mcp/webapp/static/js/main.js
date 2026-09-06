@@ -12,7 +12,7 @@ import {
   refreshGallery,
   useLightboxAsReference,
 } from "./gallery.js";
-import { handleFiles, renderReferences } from "./refs.js";
+import { addReference, handleFiles } from "./refs.js";
 
 function currentView() {
   return location.hash === "#/gallery" ? "gallery" : "generate";
@@ -48,9 +48,10 @@ function bindEvents() {
   $("ref-add-url").addEventListener("click", () => {
     const url = $("ref-url").value.trim();
     if (url) {
-      state.refs.push({ kind: "url", value: url, preview: null });
-      renderReferences(state.refs.length - 1);
-      $("ref-url").value = "";
+      // addReference 拒绝时保留输入，用户刚粘贴的 URL 不被抹掉。
+      if (addReference("url", url)) {
+        $("ref-url").value = "";
+      }
     }
   });
   $("size").addEventListener("change", () => {
@@ -99,7 +100,7 @@ function bindEvents() {
     const token = $("token-input").value.trim();
     if (!token) return;
     state.token = token;
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
     try {
       await loadConfigInfo();
       hideTokenGate();
@@ -116,7 +117,7 @@ function bindEvents() {
         console.error(error);
       }
       state.token = "";
-      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
     }
   });
   $("token-input").addEventListener("keydown", (event) => {

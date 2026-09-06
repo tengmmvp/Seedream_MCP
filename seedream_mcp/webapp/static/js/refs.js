@@ -98,27 +98,29 @@ function dataUriTotalChars() {
 
 /**
  * 添加一张参考图并重渲染；超数量上限或 data URI 累计超限时弹窗拒绝。
- * 上传与灯箱回填均经此汇聚受校验，URL 手输路径在 main.js 直接入列。
+ * 上传、灯箱回填与 URL 手输均经此汇聚受校验。
  *
  * @param {string} kind - 来源类型，取 data_uri 或 url。
  * @param {string} value - 参考图值，data URI 或图片 URL。
  * @param {string|null} [preview] - 预览地址。
+ * @returns {boolean} 成功入列返回 true，被拒绝返回 false。
  */
 export function addReference(kind, value, preview) {
   const config = toolConfig(state.tool);
   if (state.refs.length >= config.max) {
     alert(`该工具最多 ${config.max} 张参考图`);
-    return;
+    return false;
   }
   if (
     kind === "data_uri" &&
     dataUriTotalChars() + value.length > UPLOAD_TOTAL_LIMIT_CHARS
   ) {
     alert("参考图总量超过 45MB 上限，请改用图片 URL");
-    return;
+    return false;
   }
   state.refs.push({ kind, value, preview: preview || null });
   renderReferences(state.refs.length - 1);
+  return true;
 }
 
 /**

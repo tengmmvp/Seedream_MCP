@@ -5,12 +5,12 @@
 
 "use strict";
 
-/** localStorage 中 Bearer 令牌的存储键。 */
+/** sessionStorage 中 Bearer 令牌的存储键。 */
 export const TOKEN_STORAGE_KEY = "seedream_web_token";
 
 /**
- * 前端唯一的全局可变状态；令牌经 localStorage 跨会话持久化，其余字段随页面
- * 会话存亡。
+ * 前端唯一的全局可变状态；令牌经 sessionStorage 暂存于当前浏览器会话，不跨
+ * 会话落盘持久化，其余字段随页面会话存亡。
  *
  * @property {string} token - Bearer 令牌。
  * @property {Object|null} configInfo - config-info 响应，启动时加载。
@@ -22,7 +22,7 @@ export const TOKEN_STORAGE_KEY = "seedream_web_token";
  * @property {Object} gallery - 图库分页状态，形如 {offset, hasMore, items}。
  */
 export const state = {
-  token: localStorage.getItem(TOKEN_STORAGE_KEY) || "",
+  token: sessionStorage.getItem(TOKEN_STORAGE_KEY) || "",
   configInfo: null,
   tool: "text-to-image",
   refs: [],

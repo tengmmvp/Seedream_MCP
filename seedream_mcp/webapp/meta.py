@@ -7,15 +7,12 @@ config-info 是前端的启动面：模型能力与尺寸档位同源 model_capa
 
 from __future__ import annotations
 
-import asyncio
 from urllib.parse import unquote
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from ..config import get_active_config
-from ..tools.core._helpers import resolve_default_base_dir
-from ..utils.core.errors import SeedreamValidationError
 from ..utils.model.model_capabilities import model_payloads
 from ..version import __version__
 from . import _shared, constants
@@ -26,7 +23,7 @@ _MODELS_PAYLOAD: list[dict[str, object]] | None = None
 
 
 def _models_payload() -> list[dict[str, object]]:
-    """构建模型能力清单，进程级缓存 model_payloads 首次结果供 config-info 复用。"""
+    """构建模型能力清单。"""
     global _MODELS_PAYLOAD
     if _MODELS_PAYLOAD is None:
         _MODELS_PAYLOAD = model_payloads()
@@ -77,17 +74,13 @@ async def web_root_redirect(_request: Request) -> Response:
 async def web_config_info(_request: Request) -> Response:
     """返回前端所需的模型能力、默认值与保存根可用性。
 
-    模型清单取进程级缓存；保存根含 Path.resolve 文件系统调用，经 to_thread
-    下沉与 files 域同口径。保存根仅回传可用性布尔，不向浏览器泄露服务器绝对
-    路径；不可用时前端在图库区给出配置指引。
+    保存根解析经 _shared.resolve_web_save_root 与 gallery、generate 域同契约；
+    仅回传可用性布尔，不向浏览器泄露服务器绝对路径；不可用时前端在图库区
+    给出配置指引。
     """
     config = get_active_config()
-    try:
-        await asyncio.to_thread(resolve_default_base_dir, config)
-    except SeedreamValidationError:
-        save_root_available = False
-    else:
-        save_root_available = True
+    resolved = await _shared.resolve_web_save_root(config)
+    save_root_available = not isinstance(resolved, JSONResponse)
     return JSONResponse(
         {
             "server_version": __version__,
