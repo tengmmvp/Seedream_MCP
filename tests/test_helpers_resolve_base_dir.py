@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._helpers import _resolve_base_dir
+from seedream_mcp.tools.core._helpers import _resolve_base_dir, resolve_default_base_dir
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
 
@@ -130,6 +130,88 @@ def test_resolve_default_base_dir_caches_resolved_config(
     clear_resolved_env_root_cache()
     _resolve_base_dir(config, None)
     assert resolve_calls == 2
+
+
+def test_resolve_default_base_dir_caches_workspace_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未配置 auto_save_base_dir 时默认目录经进程级缓存，二次调用不重复 resolve。
+
+    首次调用预热回退根与默认目录两级缓存，第二次调用整链零 resolve。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+    config = SeedreamConfig(api_key="test_key")
+
+    first = resolve_default_base_dir(config)
+    expected = (workspace / ".seedream" / "images").resolve()
+
+    resolve_calls = 0
+    real_resolve = Path.resolve
+
+    def counting_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return real_resolve(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "resolve", counting_resolve)
+
+    again = resolve_default_base_dir(config)
+    assert resolve_calls == 0
+    assert again == first == expected
+
+
+def test_resolve_default_base_dir_cache_invalidated_by_active_config_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """set_active_config 写入新配置后默认分支缓存一并失效，按新工作区根重新解析。"""
+    from seedream_mcp.config import set_active_config
+    from seedream_mcp.utils.io.io_path import _RESOLVED_SAVE_BASE_DIR_CACHE
+
+    config = SeedreamConfig(api_key="test_key")
+
+    workspace_a = tmp_path / "ws_a"
+    workspace_a.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace_a))
+    first = resolve_default_base_dir(config)
+    assert first == (workspace_a / ".seedream" / "images").resolve()
+    assert f"default:{workspace_a.resolve()}" in _RESOLVED_SAVE_BASE_DIR_CACHE
+
+    workspace_b = tmp_path / "ws_b"
+    workspace_b.mkdir()
+    set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace_b)))
+    assert _RESOLVED_SAVE_BASE_DIR_CACHE == {}
+
+    second = resolve_default_base_dir(config)
+    assert second == (workspace_b / ".seedream" / "images").resolve()
+
+
+def test_save_base_dir_cache_keys_isolate_explicit_and_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式与默认分支缓存键分别带 explicit:/default: 前缀，互不串键。
+
+    显式配置串取工作区根本身，无前缀时两分支将共用同一键相互污染，前缀隔离后
+    各自键值独立。
+    """
+    from seedream_mcp.utils.io.io_path import _RESOLVED_SAVE_BASE_DIR_CACHE
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+    explicit_config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(workspace))
+    default_config = SeedreamConfig(api_key="test_key")
+
+    explicit_dir = resolve_default_base_dir(explicit_config)
+    default_dir = resolve_default_base_dir(default_config)
+
+    assert explicit_dir == workspace.resolve()
+    assert default_dir == (workspace / ".seedream" / "images").resolve()
+    assert set(_RESOLVED_SAVE_BASE_DIR_CACHE) == {
+        f"explicit:{workspace}",
+        f"default:{workspace.resolve()}",
+    }
 
 
 def test_validate_image_path_none_base_dir_falls_back_and_enforces_bounds(

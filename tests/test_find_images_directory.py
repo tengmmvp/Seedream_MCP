@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +47,13 @@ def _scan(
     if scanner is not None:
         kwargs["scanner"] = scanner
     return cached_find_images_in_directory(**kwargs)
+
+
+def _advance_past_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 io_scan 的 time.monotonic 推进到 TTL 之外，模拟缓存过期。"""
+    ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
+    base = scan_module.time.monotonic()
+    monkeypatch.setattr(scan_module.time, "monotonic", lambda: base + ttl + 1)
 
 
 def test_limit_returns_sorted_prefix_not_creation_order(tmp_path: Path) -> None:
@@ -317,14 +325,79 @@ def test_cached_find_images_recursive_uses_ttl_cache(
     within_ttl = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=100)
     assert [raw.name for raw, _resolved in within_ttl] == ["a.png"]
 
-    # 模拟 TTL 过期：推进 io_scan 的 time.monotonic 返回值越过 TTL
-    ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
-    real_monotonic = scan_module.time.monotonic
-    base = real_monotonic()
-    monkeypatch.setattr(scan_module.time, "monotonic", lambda: base + ttl + 1)
+    _advance_past_ttl(monkeypatch)
 
     expired = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=100)
     assert sorted(raw.name for raw, _resolved in expired) == ["a.png", "b.png"]
+
+
+def test_cached_find_images_unsettled_entry_ttl_bounds_stale_mtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未沉淀条目的 mtime 失效叠加 TTL 上界：目录 mtime 未变但超 TTL 后重新扫描。
+
+    捕获时目录 mtime 距墙钟不足 FAT 粒度窗口的条目未沉淀，粗粒度时间戳感知不到
+    同名增删，须由 TTL 上界兜底最终重扫。
+    """
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    # 构造未沉淀条目：目录 mtime 距捕获时刻不足 2 秒粒度窗口
+    mtime_ns = int((time.time() - 1) * 1e9)
+    os.utime(tmp_path, ns=(mtime_ns, mtime_ns))
+    dir_stat = tmp_path.stat()
+    scan_module.reset_directory_scan_cache()
+
+    first = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10)
+    assert [raw.name for raw, _resolved in first] == ["a.png"]
+    entry = next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
+    assert entry.settled is False
+
+    # 新增图片后把目录时间戳恢复为扫描前的值，模拟粗粒度 mtime 未感知该变更
+    (tmp_path / "b.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    os.utime(tmp_path, ns=(dir_stat.st_atime_ns, dir_stat.st_mtime_ns))
+
+    # mtime 指纹一致且在 TTL 内：命中缓存返回陈旧的 1 张
+    within_ttl = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=100)
+    assert [raw.name for raw, _resolved in within_ttl] == ["a.png"]
+
+    # 超 TTL 后上界兜底失效，重扫反映新增
+    _advance_past_ttl(monkeypatch)
+
+    expired = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=100)
+    assert sorted(raw.name for raw, _resolved in expired) == ["a.png", "b.png"]
+
+
+def test_cached_find_images_settled_entry_survives_ttl_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """沉淀条目 mtime 未变即新鲜：超 TTL 后仍命中缓存，不触发重扫。
+
+    捕获时目录已静止超 FAT 粒度窗口，此后任何变更必然使粗粒度 mtime 前移，mtime
+    指纹未变即结果仍准确，常态文件系统不再每 TTL 全量重扫大目录。
+    """
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    # 构造沉淀条目：目录 mtime 早于捕获时刻 2 秒粒度窗口以上
+    mtime_ns = int((time.time() - 3) * 1e9)
+    os.utime(tmp_path, ns=(mtime_ns, mtime_ns))
+    scan_module.reset_directory_scan_cache()
+
+    scanned_dirs: list[str] = []
+    original_scan = scan_module.find_images_in_directory
+
+    def counting_scan(**kwargs: Any) -> list[Path]:
+        scanned_dirs.append(kwargs["directory"])
+        return original_scan(**kwargs)
+
+    first = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10, scanner=counting_scan)
+    assert [raw.name for raw, _resolved in first] == ["a.png"]
+    entry = next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
+    assert entry.settled is True
+
+    # mtime 未变的沉淀条目超 TTL 后仍命中，不触发重扫
+    _advance_past_ttl(monkeypatch)
+
+    hit = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=100, scanner=counting_scan)
+    assert [raw.name for raw, _resolved in hit] == ["a.png"]
+    assert scanned_dirs == [str(tmp_path)], "沉淀条目 mtime 未变时超 TTL 不得重扫"
 
 
 def test_cached_find_images_cache_hit_returns_full_list(tmp_path: Path) -> None:
@@ -477,11 +550,8 @@ def test_cached_find_images_ttl_rescan_overwrite_refreshes_lru_position(
     scan(hot)
     scan(other_dirs[0])
 
-    # 模拟 TTL 过期：递归条目按 TTL 失效，对 hot 的重扫走覆写路径
-    ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
-    real_monotonic = scan_module.time.monotonic
-    base = real_monotonic()
-    monkeypatch.setattr(scan_module.time, "monotonic", lambda: base + ttl + 1)
+    # 递归条目按 TTL 失效，对 hot 的重扫走覆写路径
+    _advance_past_ttl(monkeypatch)
 
     # 过期重扫覆写 hot：正确行为下覆写刷新 LRU 位，hot 成为最近使用
     scan(hot)

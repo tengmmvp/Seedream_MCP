@@ -91,6 +91,42 @@ async def test_origin_guard_allows_same_origin_and_rejects_cross_origin(
     assert malformed_origin.json()["error"] == "invalid_origin"
 
 
+async def test_fetch_metadata_guard_rejects_cross_site_fetch(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """无令牌 Web 部署：GET/HEAD 携带 same-site 或 cross-site 的 Sec-Fetch-Site 被 403 拒绝。
+
+    跨站 img/no-cors 加载不携带 Origin，Origin 守卫对其无效，依赖该头兜底；
+    same-site 覆盖同注册域兄弟子域嵌入，HEAD 覆盖 no-cors 探测，same-origin 与
+    无该头的旧客户端放行。
+    """
+    write_workspace_config(tmp_path)
+    app = _build_streamable_app("127.0.0.1", False, "", True)
+
+    async with _make_client(app) as client:
+        cross_site = await client.get(
+            "/web/api/config-info", headers={"sec-fetch-site": "cross-site"}
+        )
+        same_site = await client.get(
+            "/web/api/config-info", headers={"sec-fetch-site": "same-site"}
+        )
+        head_cross_site = await client.head(
+            "/web/api/config-info", headers={"sec-fetch-site": "cross-site"}
+        )
+        same_origin = await client.get(
+            "/web/api/config-info", headers={"sec-fetch-site": "same-origin"}
+        )
+        no_header = await client.get("/web/api/config-info", headers={"host": "127.0.0.1:8000"})
+
+    assert cross_site.status_code == 403
+    assert cross_site.json()["error"] == "cross_site_fetch"
+    assert same_site.status_code == 403
+    assert same_site.json()["error"] == "cross_site_fetch"
+    assert head_cross_site.status_code == 403
+    assert same_origin.status_code == 200
+    assert no_header.status_code == 200
+
+
 async def test_origin_guard_not_assembled_when_token_configured(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:

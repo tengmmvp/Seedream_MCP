@@ -11,7 +11,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.images import image_input
+from seedream_mcp.utils.images import image_prepare
 
 
 def _patch_unretrieved_callback(
@@ -72,7 +72,7 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
         return f"prepared:{image}"
 
     # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # URL 输入的 _local_file_signature 恒为 (0.0, 0)，两次 cache_key 完全一致
     image_url = "https://example.com/ref.png"
@@ -113,7 +113,7 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
         return f"prepared:{image}"
 
     # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # URL 输入的 _local_file_signature 恒为 (0.0, 0)，两次 cache_key 完全一致
     image_url = "https://example.com/ref.png"
@@ -166,7 +166,7 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
         await asyncio.sleep(0.1)
         return f"prepared:{image}"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
@@ -215,7 +215,7 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
         await asyncio.sleep(0.05)
         raise ValueError("prepare failed")
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
@@ -259,7 +259,7 @@ async def test_prepare_failure_consumed_by_waiters_not_armed(
         await asyncio.sleep(0.05)
         raise ValueError("prepare failed")
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
@@ -296,7 +296,7 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
         await asyncio.sleep(0.05)
         raise ValueError("prepare failed")
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
@@ -338,7 +338,7 @@ async def test_prepare_rechecks_cache_after_semaphore_wait(
         call_count += 1
         return "prepared:unexpected"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 预置实例级信号量为单槽并由本测试持槽，构造后到者在 acquire 上排队的窗口
     semaphore = asyncio.Semaphore(1)
@@ -386,7 +386,7 @@ async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
         await asyncio.sleep(0.05)
         raise ValueError("prepare failed")
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
@@ -429,7 +429,7 @@ async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
         await asyncio.sleep(0.05)
         raise ValueError("prepare failed")
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(

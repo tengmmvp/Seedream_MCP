@@ -220,13 +220,74 @@ async def test_static_mount_denies_html_direct_access(
     assert script_response.status_code == 200
 
 
+async def test_static_mount_denies_html_trailing_punctuation_variants(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """尾随斜杠、点与空格形态的 html 路径同样 404，封堵归一化绕过。
+
+    Starlette normpath 剥尾斜杠、Win32 路径归一剥尾部点与空格，剥后仍命中
+    真实页面文件；封禁判定不同口径归一即被这三种形态绕过直出页面。
+    """
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    trailing_slash = await _get(app, "/web/static/index.html/")
+    trailing_dot = await _get(app, "/web/static/index.html.")
+    trailing_space = await _get(app, "/web/static/index.html%20")
+
+    assert trailing_slash.status_code == 404
+    assert trailing_dot.status_code == 404
+    assert trailing_space.status_code == 404
+
+
+async def test_static_mount_denies_html_short_name_variant(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """Windows 8.3 短名形态的页面请求同样 404，封禁须按物理路径判定。
+
+    index~1.htm 的请求路径后缀是 .htm，按路径后缀判定会放行，OS 解析短名却
+    命中 index.html。短名生成随卷开关不可控，故在 lookup_path 层模拟 OS 把
+    短名解析到真实文件；拦截记录非空保证别名确经模拟层命中，封禁断言不空转。
+    """
+    from starlette.staticfiles import StaticFiles
+
+    from seedream_mcp.webapp.routes import _GuardedStaticFiles
+
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    intercepted: list[str] = []
+    original_lookup = StaticFiles.lookup_path
+
+    def short_name_lookup(self: StaticFiles, path: str) -> tuple[str, Any]:
+        if path == "index~1.htm":
+            intercepted.append(path)
+            return original_lookup(self, "index.html")
+        return original_lookup(self, path)
+
+    monkeypatch.setattr(_GuardedStaticFiles, "lookup_path", short_name_lookup)
+
+    response = await _get(app, "/web/static/index~1.htm")
+
+    assert intercepted
+    assert response.status_code == 404
+
+
 async def test_page_responses_carry_security_headers(
     tmp_path: Path,
     monkeypatch: Any,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """入口页与 404 页响应携带 CSP 与 nosniff，收敛脚本注入与 MIME 嗅探面。"""
+    """入口页与 404 页响应携带 CSP 与 nosniff，收敛脚本注入、iframe 嵌入与嗅探面。"""
     prepare_static_dir(monkeypatch, tmp_path)
     write_workspace_config(tmp_path)
     app = build_web_app()
@@ -237,4 +298,22 @@ async def test_page_responses_carry_security_headers(
     for response in (index_response, missing_response):
         assert "default-src 'self'" in response.headers["content-security-policy"]
         assert "script-src 'self'" in response.headers["content-security-policy"]
+        assert "frame-ancestors 'self'" in response.headers["content-security-policy"]
         assert response.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_static_direct_output_carries_nosniff(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """静态直出的 js/css/svg 附 nosniff，阻断浏览器对静态资源的 MIME 嗅探。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    script_response = await _get(app, "/web/static/app.js")
+
+    assert script_response.status_code == 200
+    assert script_response.headers["x-content-type-options"] == "nosniff"

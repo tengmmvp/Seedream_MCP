@@ -308,6 +308,52 @@ async def test_origin_guard_passes_non_http_scope() -> None:
     assert reached == [None]
 
 
+@pytest.mark.parametrize(
+    ("method", "site", "reaches_downstream"),
+    [
+        ("GET", b"cross-site", False),
+        ("GET", b"CROSS-SITE", False),
+        ("GET", b"same-site", False),
+        ("GET", b"SAME-SITE", False),
+        ("HEAD", b"cross-site", False),
+        ("HEAD", b"same-site", False),
+        ("POST", b"cross-site", True),
+        ("POST", b"same-site", True),
+        ("GET", b"same-origin", True),
+        ("GET", b"none", True),
+        ("HEAD", b"same-origin", True),
+        ("HEAD", b"none", True),
+    ],
+)
+async def test_origin_guard_fetch_site_rejection_matrix(
+    method: str, site: bytes, reaches_downstream: bool
+) -> None:
+    """GET 与 HEAD 的 Sec-Fetch-Site 为 same-site 或 cross-site 时 403，其余放行。
+
+    same-site 覆盖同注册域兄弟子域的无 Origin 图片嵌入，HEAD 覆盖 no-cors 探测；
+    same-origin 与 none 是合法流量，非 GET/HEAD 请求与无该头的旧客户端放行。
+    """
+    reached, guard = _make_guard_app()
+
+    sent = await _run_guard(
+        guard,
+        {
+            "type": "http",
+            "method": method,
+            "path": "/web/api/config-info",
+            "headers": [(b"sec-fetch-site", site), (b"host", b"127.0.0.1")],
+        },
+    )
+
+    if reaches_downstream:
+        assert reached == ["/web/api/config-info"]
+        assert sent == []
+    else:
+        assert reached == []
+        assert sent[0]["status"] == 403
+        assert b"cross_site_fetch" in sent[1]["body"]
+
+
 # ==================== 暴露风险告警文案测试 ====================
 
 
@@ -356,6 +402,6 @@ def test_warn_remote_exposure_appends_web_notice_when_enabled(
 
     no_token_output = capsys.readouterr().err
     assert "Web 操作台已开启且未配置令牌" in no_token_output
-    assert "跨源请求将被拒绝" in no_token_output
+    assert "跨源与跨站请求（含兄弟子域图片嵌入）将被拒绝" in no_token_output
     assert "建议配置 --auth-token" in no_token_output
     assert "仍要求 Bearer 令牌" not in no_token_output

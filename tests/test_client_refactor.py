@@ -835,7 +835,7 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_prepare_image_input 命中缓存不重复调用底层，LRU 淘汰最久未用而保留近期命中。"""
-    from seedream_mcp.utils.images import image_input
+    from seedream_mcp.utils.images import image_prepare
 
     client = SeedreamClient(_build_config())
     client._image_preparer._prepare_cache_max = 3
@@ -847,7 +847,7 @@ async def test_prepare_image_input_caches_result_and_evicts_lru(
         call_count += 1
         return f"prepared:{image}"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 同一输入第二次走缓存，底层 prepare_image_input 只调一次
     first = await client._image_preparer.prepare_image_input("img-1")

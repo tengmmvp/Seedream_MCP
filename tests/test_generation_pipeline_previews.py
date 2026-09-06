@@ -17,7 +17,7 @@ from PIL import Image
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core import common as common_module
-from seedream_mcp.tools.core.common import execute_generation_handler
+from seedream_mcp.tools.core.common import execute_generation_handler, preview_inclusion_scope
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.text_to_image import TEXT_TO_IMAGE
 from seedream_mcp.tools.runners import run_text_to_image
@@ -108,10 +108,10 @@ async def test_preview_scope_resets_after_runner_call(
     assert calls == [1]
 
 
-async def test_execute_handler_explicit_include_previews_false_skips_preview(
+async def test_execute_handler_skips_preview_when_scope_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """execute_generation_handler 显式 include_previews=False 同样跳过预览装配。"""
+    """preview_inclusion_scope 关闭态下 execute_generation_handler 跳过预览装配。"""
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
@@ -126,15 +126,15 @@ async def test_execute_handler_explicit_include_previews_false_skips_preview(
             "status": "completed",
         }
 
-    result = await execute_generation_handler(
-        params=TextToImageInput(prompt="a cat"),
-        config=config,
-        metadata=TEXT_TO_IMAGE,
-        module_logger=get_logger(),
-        request_executor=_executor,
-        ctx=None,
-        include_previews=False,
-    )
+    with preview_inclusion_scope(False):
+        result = await execute_generation_handler(
+            params=TextToImageInput(prompt="a cat"),
+            config=config,
+            metadata=TEXT_TO_IMAGE,
+            module_logger=get_logger(),
+            request_executor=_executor,
+            ctx=None,
+        )
 
     assert result.is_error is False
     assert calls == []

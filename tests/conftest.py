@@ -133,16 +133,20 @@ def clean_web_routes() -> Iterator[None]:
     """快照并恢复 MCPServer 自定义路由与 webapp 注册守卫，跨用例隔离 Web 注册状态。
 
     autouse 使未注册形态的用例不受其他用例注册过的 Web 路由污染；显式声明
-    该 fixture 的用例参数仅为表意，无额外效果。
+    该 fixture 的用例参数仅为表意，无额外效果。守卫按实例身份登记，恢复时把
+    当前实例按快照时的登记形态写回。
     """
     from seedream_mcp.resources import mcp
     from seedream_mcp.webapp import routes as web_routes_module
 
     saved_routes = list(mcp._custom_starlette_routes)
-    saved_flag = web_routes_module._routes_registered
+    was_registered = mcp in web_routes_module._registered_servers
     yield
     mcp._custom_starlette_routes[:] = saved_routes
-    web_routes_module._routes_registered = saved_flag
+    if was_registered:
+        web_routes_module._registered_servers.add(mcp)
+    else:
+        web_routes_module._registered_servers.discard(mcp)
 
 
 @pytest.fixture(autouse=True)

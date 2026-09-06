@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Awaitable, Callable
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -19,6 +19,7 @@ from mcp.types import CallToolResult
 
 import seedream_mcp.resources as resources_module
 from _web_fixtures import build_web_app, write_workspace_config
+from seedream_mcp.webapp import _shared as _shared_module
 from seedream_mcp.config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.webapp import generate as generate_module
@@ -30,18 +31,52 @@ def _generation_result(payload: dict[str, Any], is_error: bool = False) -> CallT
     return CallToolResult(content=[], structured_content=payload, is_error=is_error)
 
 
+def _make_fake_runner(
+    *,
+    result: CallToolResult | None = None,
+    error: Exception | None = None,
+    captured: list[dict[str, Any]] | None = None,
+    yield_once: bool = False,
+) -> Callable[..., Awaitable[CallToolResult]]:
+    """构造生成 runner 替身：返回固定结果或抛指定异常，可选记录调用实参。
+
+    captured 每次调用追加 ctx/workspace_roots/include_previews 三键字典；
+    yield_once 在返回前让出事件循环一次，模拟并发共享的挂起点。
+    """
+
+    async def _runner(
+        params: Any,
+        config: Any,
+        ctx: Any = None,
+        workspace_roots: Any = None,
+        include_previews: bool = True,
+    ) -> CallToolResult:
+        del params, config
+        if captured is not None:
+            captured.append(
+                {
+                    "ctx": ctx,
+                    "workspace_roots": workspace_roots,
+                    "include_previews": include_previews,
+                }
+            )
+        if yield_once:
+            await asyncio.sleep(0)
+        if error is not None:
+            raise error
+        assert result is not None
+        return result
+
+    return _runner
+
+
 def _install_runner(
     monkeypatch: pytest.MonkeyPatch, name: str, payload: dict[str, Any], is_error: bool = False
 ) -> None:
     """把 api 命名空间内的 runner 符号替换为返回固定结果的替身。"""
-
-    async def _fake_runner(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, ctx, include_previews
-        return _generation_result(payload, is_error)
-
-    monkeypatch.setattr(generate_module, name, _fake_runner)
+    monkeypatch.setattr(
+        generate_module, name, _make_fake_runner(result=_generation_result(payload, is_error))
+    )
 
 
 async def _post_json(app: Any, path: str, body: dict[str, Any]) -> httpx.Response:
@@ -283,13 +318,11 @@ async def test_generate_runner_validation_error_returns_400(
 ) -> None:
     """runner 抛 SeedreamValidationError 映射 400 validation_error，携带原因。"""
 
-    async def _explode(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, ctx, include_previews
-        raise SeedreamValidationError("参考图数量超出上限", field="image")
-
-    monkeypatch.setattr(generate_module, "run_text_to_image", _explode)
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(error=SeedreamValidationError("参考图数量超出上限", field="image")),
+    )
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -310,13 +343,13 @@ async def test_generate_runner_validation_error_masks_save_root(
     """runner 校验错误消息中的保存根绝对路径替换为占位符后返回。"""
     save_root = write_workspace_config(tmp_path)
 
-    async def _explode(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, ctx, include_previews
-        raise SeedreamValidationError(f"保存路径须位于 {save_root} 之内", field="save_path")
-
-    monkeypatch.setattr(generate_module, "run_text_to_image", _explode)
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            error=SeedreamValidationError(f"保存路径须位于 {save_root} 之内", field="save_path")
+        ),
+    )
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
@@ -335,13 +368,9 @@ async def test_generate_runner_unexpected_error_returns_500(
 ) -> None:
     """runner 抛未归类异常兜底 500 internal_error，不向响应泄露异常细节。"""
 
-    async def _explode(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, ctx, include_previews
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(generate_module, "run_text_to_image", _explode)
+    monkeypatch.setattr(
+        generate_module, "run_text_to_image", _make_fake_runner(error=RuntimeError("boom"))
+    )
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -361,13 +390,11 @@ async def test_generate_non_dict_structured_content_returns_empty_payload(
 ) -> None:
     """structured_content 非 dict 时回退空对象响应为 200，不抛异常。"""
 
-    async def _bad_shape(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, ctx, include_previews
-        return CallToolResult(content=[], structured_content="bad")
-
-    monkeypatch.setattr(generate_module, "run_text_to_image", _bad_shape)
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(result=CallToolResult(content=[], structured_content="bad")),
+    )
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -384,23 +411,76 @@ async def test_generate_runner_called_without_previews(
     reset_http_app_state: None,
 ) -> None:
     """端点以 include_previews=False 调 runner：Web 路径只消费结构化结果，跳过预览装配。"""
-    captured: list[bool] = []
-
-    async def _capture_runner(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, ctx
-        captured.append(include_previews)
-        return _generation_result({"tool": "text_to_image", "success": True, "data": []})
-
-    monkeypatch.setattr(generate_module, "run_text_to_image", _capture_runner)
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
+            captured=captured,
+        ),
+    )
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
     assert response.status_code == 200
-    assert captured == [False]
+    assert [call["include_previews"] for call in captured] == [False]
+
+
+async def test_generate_runner_receives_no_forged_workspace_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """端点不向 runner 伪造会话 Roots，文件边界走环境变量回退链。
+
+    伪造 Roots 有两重回归：UNC 工作区根经 file URI 转换层丢失使回退边界失效、
+    本地路径错误回显分支解锁泄露服务器路径；保存根作边界还会造成保存目录
+    双重嵌套。
+    """
+    write_workspace_config(tmp_path)
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
+            captured=captured,
+        ),
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    assert [call["workspace_roots"] for call in captured] == [None]
+
+
+async def test_generate_rejects_when_save_root_unresolvable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """保存根不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
+
+    def _unresolvable(config: Any) -> Any:
+        del config
+        raise SeedreamValidationError("无法确定自动保存基础目录", field="auto_save_base_dir")
+
+    monkeypatch.setattr(_shared_module, "resolve_default_base_dir", _unresolvable)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "save_root_unavailable"
+    assert "SEEDREAM_AUTO_SAVE_BASE_DIR" in body["error_description"]
 
 
 async def test_generate_masks_save_root_in_error_channels(
@@ -581,16 +661,15 @@ async def test_generate_endpoint_receives_shared_client_context(
     reset_http_app_state: None,
 ) -> None:
     """端点把 shim 上下文传入 runner，lifespan 字典携带共享资源同一实例。"""
-    captured: list[Any] = []
-
-    async def _capture_runner(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, include_previews
-        captured.append(ctx)
-        return _generation_result({"tool": "text_to_image", "success": True, "data": []})
-
-    monkeypatch.setattr(generate_module, "run_text_to_image", _capture_runner)
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
+            captured=captured,
+        ),
+    )
     stub = _make_stub_resource()
     monkeypatch.setattr(resources_module, "_active_resource", stub)
     write_workspace_config(tmp_path)
@@ -600,7 +679,7 @@ async def test_generate_endpoint_receives_shared_client_context(
 
     assert response.status_code == 200
     assert len(captured) == 1
-    ctx = captured[0]
+    ctx = captured[0]["ctx"]
     assert ctx is not None
     lifespan = ctx.request_context.lifespan_context
     assert lifespan[LIFESPAN_KEY_CLIENT] is stub.client
@@ -614,17 +693,16 @@ async def test_generate_concurrent_requests_share_active_resource_client(
     reset_http_app_state: None,
 ) -> None:
     """并发请求各自收到 shim 上下文且共享同一 client，全部成功无异常。"""
-    captured: list[Any] = []
-
-    async def _capture_runner(
-        params: Any, config: Any, ctx: Any = None, include_previews: bool = True
-    ) -> CallToolResult:
-        del params, config, include_previews
-        captured.append(ctx)
-        await asyncio.sleep(0)
-        return _generation_result({"tool": "text_to_image", "success": True, "data": []})
-
-    monkeypatch.setattr(generate_module, "run_text_to_image", _capture_runner)
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
+            captured=captured,
+            yield_once=True,
+        ),
+    )
     stub = _make_stub_resource()
     monkeypatch.setattr(resources_module, "_active_resource", stub)
     write_workspace_config(tmp_path)
@@ -642,7 +720,8 @@ async def test_generate_concurrent_requests_share_active_resource_client(
 
     assert all(response.status_code == 200 for response in responses)
     assert len(captured) == 3
-    assert all(ctx is not None for ctx in captured)
+    assert all(call["ctx"] is not None for call in captured)
     assert all(
-        ctx.request_context.lifespan_context[LIFESPAN_KEY_CLIENT] is stub.client for ctx in captured
+        call["ctx"].request_context.lifespan_context[LIFESPAN_KEY_CLIENT] is stub.client
+        for call in captured
     )

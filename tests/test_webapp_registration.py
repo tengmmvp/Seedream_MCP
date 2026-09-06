@@ -7,14 +7,46 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import httpx
+import pytest
 
 from _web_fixtures import (
     EXPECTED_WEB_PATHS,
     build_web_app,
     write_workspace_config,
 )
+
+
+class _FakeServer:
+    """镜像 custom_route 与 _custom_starlette_routes 最小面的 MCPServer 替身。"""
+
+    def __init__(self) -> None:
+        self._custom_starlette_routes: list[Any] = []
+
+    def custom_route(self, path: str, methods: Any = None, include_in_schema: bool = True) -> Any:
+        def decorator(handler: Any) -> Any:
+            self._custom_starlette_routes.append(SimpleNamespace(path=path, handler=handler))
+            return handler
+
+        return decorator
+
+
+class _RouteCountingServer:
+    """无私有路由表的替身：custom_route 调用即计数，供注册守卫行为断言。"""
+
+    def __init__(self) -> None:
+        self.custom_route_calls: list[str] = []
+
+    def custom_route(self, path: str, methods: Any = None, include_in_schema: bool = True) -> Any:
+        self.custom_route_calls.append(path)
+
+        def decorator(handler: Any) -> Any:
+            return handler
+
+        return decorator
 
 
 def test_register_web_routes_registers_expected_paths(clean_web_routes: None) -> None:
@@ -42,6 +74,59 @@ def test_register_web_routes_is_idempotent(clean_web_routes: None) -> None:
     register_web_routes()
 
     assert len(mcp._custom_starlette_routes) == count_first
+
+
+def test_register_web_routes_reregisters_for_recreated_server(
+    clean_web_routes: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """宿主重造 MCPServer 实例后守卫按实例身份区分，新实例的注册不被误跳过。"""
+    import seedream_mcp.resources as resources_module
+    from seedream_mcp.webapp import register_web_routes
+
+    register_web_routes()
+    fresh = _FakeServer()
+    monkeypatch.setattr(resources_module, "mcp", fresh)
+
+    register_web_routes()
+
+    registered = {route.path for route in fresh._custom_starlette_routes}
+    assert registered == EXPECTED_WEB_PATHS
+
+
+def test_register_web_routes_guard_hit_rechecks_route_table(
+    clean_web_routes: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """守卫命中仍复查路径交集：路由表被外部清空后重复调用补注册缺失项。"""
+    import seedream_mcp.resources as resources_module
+    from seedream_mcp.webapp import register_web_routes
+
+    fresh = _FakeServer()
+    monkeypatch.setattr(resources_module, "mcp", fresh)
+    register_web_routes()
+    fresh._custom_starlette_routes.clear()
+
+    register_web_routes()
+
+    registered = {route.path for route in fresh._custom_starlette_routes}
+    assert registered == EXPECTED_WEB_PATHS
+
+
+def test_register_web_routes_guard_falls_back_to_identity_without_route_table(
+    clean_web_routes: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """私有路由表缺失时守卫退回纯身份判定：二次调用不再注册任何路由。"""
+    import seedream_mcp.resources as resources_module
+    from seedream_mcp.webapp import register_web_routes
+
+    fresh = _RouteCountingServer()
+    monkeypatch.setattr(resources_module, "mcp", fresh)
+
+    register_web_routes()
+    first_count = len(fresh.custom_route_calls)
+    register_web_routes()
+
+    assert first_count == len(EXPECTED_WEB_PATHS)
+    assert len(fresh.custom_route_calls) == first_count
 
 
 async def test_web_endpoints_absent_when_not_registered(

@@ -85,8 +85,8 @@ def test_ratio_rejects_1_to_17_and_17_to_1() -> None:
 def test_total_pixels_accepts_limit_and_limit_minus_one() -> None:
     """总像素恰为上限 3600 万与上限减一通过，超限被拒。
 
-    上限加一不存在满足最短边与宽高比约束的整数宽高组合，以最小超限组合
-    6000x6001 断言拒绝。
+    MAX_IMAGE_PIXELS 是参考图与下载两入口共用的口径基准。上限加一不存在满足
+    最短边与宽高比约束的整数宽高组合，以最小超限组合 6000x6001 断言拒绝。
     """
     assert MAX_IMAGE_PIXELS == 36_000_000
     _validate_image_dimensions(6000, 6000, "limit.png")

@@ -9,7 +9,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.images import image_input
+from seedream_mcp.utils.images import image_prepare
 
 
 async def test_prepare_image_input_invalidates_cache_when_local_file_size_changes(
@@ -30,7 +30,7 @@ async def test_prepare_image_input_invalidates_cache_when_local_file_size_change
         call_count += 1
         return f"prepared:{image}#{call_count}"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 第一次调用：cache miss，底层被调用，结果写入缓存
     first = await client._image_preparer.prepare_image_input(str(image_file), roots_key)

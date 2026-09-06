@@ -14,9 +14,8 @@ from PIL import Image
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.images import image_input
+from seedream_mcp.utils.images import image_input, image_prepare
 from seedream_mcp.utils.images.image_prepare import ImagePreparer
-from seedream_mcp.utils.io import io_path as path_utils
 
 
 async def test_prepare_image_input_cache_isolated_by_workspace_roots(
@@ -34,7 +33,7 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
         return f"prepared:{image}"
 
     # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare_image_input)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare_image_input)
 
     # 两次调用返回不同 roots，模拟不同请求上下文 / 租户
     roots_sequence: list[list[Path]] = [
@@ -48,7 +47,7 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
         call_index["i"] += 1
         return list(roots_sequence[idx % len(roots_sequence)])
 
-    monkeypatch.setattr(path_utils, "get_workspace_roots", fake_get_workspace_roots)
+    monkeypatch.setattr(image_prepare, "get_workspace_roots", fake_get_workspace_roots)
 
     first = await client._image_preparer.prepare_image_input("same-image.png")
     second = await client._image_preparer.prepare_image_input("same-image.png")
@@ -73,8 +72,8 @@ async def test_prepare_image_input_cache_hit_when_workspace_roots_stable(
         call_count += 1
         return f"prepared:{image}"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare_image_input)
-    monkeypatch.setattr(path_utils, "get_workspace_roots", lambda: [Path("/workspace/same")])
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare_image_input)
+    monkeypatch.setattr(image_prepare, "get_workspace_roots", lambda: [Path("/workspace/same")])
 
     await client._image_preparer.prepare_image_input("img.png")
     await client._image_preparer.prepare_image_input("img.png")
@@ -95,9 +94,10 @@ async def test_prepare_signature_strips_whitespace_like_read_path(
     image_path = tmp_path / "ref.png"
     Image.new("RGB", (32, 32), color="white").save(image_path, format="PNG")
 
-    # 读取路径经 image_input 的 from-import 绑定，签名路径延迟导入解析 io_path 属性，
-    # 两个名字须同时替换，否则读取路径落到真实回退根，结果取决于 basetemp 位置。
-    monkeypatch.setattr(path_utils, "get_workspace_roots", lambda: [tmp_path])
+    # 缓存键与签名路径经 image_prepare 的 from-import 绑定，读取路径经 image_input
+    # 的 from-import 绑定，两个名字须分别替换，否则读取路径落到真实回退根，结果
+    # 取决于 basetemp 位置。
+    monkeypatch.setattr(image_prepare, "get_workspace_roots", lambda: [tmp_path])
     monkeypatch.setattr(image_input, "get_workspace_roots", lambda: [tmp_path])
     preparer = ImagePreparer(
         prepare_cache_max=8, prepare_cache_max_bytes=64 * 1024 * 1024, prepare_concurrency=2

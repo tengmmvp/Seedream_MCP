@@ -321,3 +321,32 @@ async def test_cross_field_validation_error_carries_structured_content(
     assert "prompt 不能为空" in structured["error"]["message"]
     # 失败发生在输入模型构造阶段，间谍处理器未被触达。
     assert "params" not in spy_run_handlers
+
+
+async def test_run_tool_pipeline_rejects_unknown_kwargs_keys() -> None:
+    """参数字典含输入模型未知键时立即抛 TypeError，指明工具名与未知键。
+
+    工具体内 kwargs 字典是输入模型字段集的手工拷贝，拼错键若无前置校验只会
+    下沉为运行时校验错误或被 None 过滤吞掉；TypeError 须发生在输入模型构造
+    之前，runner 不得被触达。
+    """
+    reached = False
+
+    async def _spy(params: Any, **_: Any) -> CallToolResult:
+        nonlocal reached
+        reached = True
+        return _ok_result()
+
+    with pytest.raises(TypeError, match=r"text_to_image.*watermarkss"):
+        await server._run_tool_pipeline(
+            "text_to_image",
+            TextToImageInput,
+            {"prompt": "一只猫", "watermarkss": True},
+            server._generation_validation_structured,
+            _spy,
+            config=None,
+            ctx=None,
+            workspace_roots=None,
+        )
+
+    assert reached is False

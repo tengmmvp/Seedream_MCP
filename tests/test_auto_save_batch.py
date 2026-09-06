@@ -256,6 +256,7 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
     import pillow_heif
     from PIL import Image as PilImage
 
+    from seedream_mcp.utils.core.formats import MAX_IMAGE_PIXELS
     from seedream_mcp.utils.io import io_save as auto_save_module
 
     tiny = tmp_path / "tiny.png"
@@ -277,7 +278,7 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
 
     assert auto_save_module._pixel_limit_rejection(tiny) is None
     assert register_calls == [1]
-    assert PilImage.MAX_IMAGE_PIXELS == auto_save_module._DOWNLOAD_MAX_PIXELS
+    assert PilImage.MAX_IMAGE_PIXELS == MAX_IMAGE_PIXELS
 
     auto_save_module._pixel_limit_rejection(tiny)
     assert register_calls == [1]

@@ -436,6 +436,42 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     assert str(workspace_root.resolve()) not in text
 
 
+async def test_browse_images_empty_message_sanitizes_unreadable_dir_paths(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """会话 Roots 边界的空结果消息对不可读目录路径逐项净化后再拼接。
+
+    路径来自服务器文件系统，控制字符经净化压平、敏感键值脱敏，不原文进入
+    用户可见文本。经 _WORKSPACE_ROOTS_VAR 直设会话边界驱动 Roots 回显分支。
+    """
+    from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
+
+    hostile = workspace_root / "dir\r\napi_key=leak"
+
+    def _fake_find(*args, **kwargs):
+        kwargs["unreadable_dirs"].append(hostile)
+        return []
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_find)
+
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
+    try:
+        result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=True))
+    finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
+
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "empty"
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "目录不可读或无图片文件" in text
+    assert "\r" not in text
+    assert "\n" not in text
+    assert "api_key=***" in text
+    assert "leak" not in text
+
+
 async def test_browse_images_empty_without_unreadable_keeps_plain_message(
     workspace_root: Path,
 ) -> None:

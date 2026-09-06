@@ -96,19 +96,100 @@ async def test_browse_internal_error_returns_500_json(
     assert response.json()["error"] == "internal_error"
 
 
-async def test_browse_error_message_masks_save_root(
+async def test_browse_rejects_directory_escaping_save_root(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """越界目录的错误消息以占位符替代保存根绝对路径，不向浏览器回显服务器路径。"""
+    """directory 上跳越出保存根被端点拒绝，回退链边界宽于保存根不放大浏览范围。"""
     save_root = write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_browse(app, {"directory": ".."})
 
     assert response.status_code == 400
-    message = response.json()["error"]["message"]
-    assert str(save_root) not in message
-    assert "<保存根>" in message
+    body = response.json()
+    assert body["error"] == "invalid_request"
+    assert "保存根" in body["error_description"]
+    assert str(save_root) not in response.text
+
+
+async def test_browse_rejects_unc_directory_before_any_filesystem_access(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """UNC 形态 directory 在 resolve 前被拒，不触发 SMB 连接或裸异常。
+
+    字符串级拒绝的消息明确点名 UNC 与 SMB；若拒绝失效改为真实连接，
+    错误形态退化为 OSError 包装文本，断言随之失败。
+    """
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"directory": r"\\attacker\share\x"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "invalid_request"
+    assert "UNC" in body["error_description"] or "SMB" in body["error_description"]
+
+
+async def test_browse_rejects_null_byte_directory_as_clean_400(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """空字节 directory 映射为统一 400，不以裸 ValueError 逃出端点。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"directory": "a\u0000b"})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+
+
+async def test_browse_echoes_original_directory_not_absolute_save_root(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """成功响应的 directory 回显用户原始输入，绝对保存根路径不出端点。"""
+    save_root = write_workspace_config(tmp_path)
+    day_dir = save_root / "2026-08-21"
+    day_dir.mkdir()
+    (day_dir / "a.png").write_bytes(make_png_bytes())
+    app = build_web_app()
+
+    response = await _post_browse(app, {"directory": "2026-08-21"})
+
+    assert response.status_code == 200
+    assert response.json()["directory"] == "2026-08-21"
+    assert str(save_root) not in response.text
+
+
+async def test_browse_reports_save_root_outside_workspace_boundary(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """显式保存根越出工作区边界时报配置指引，不产生误导性目录越界错误。"""
+    from seedream_mcp.config import SeedreamConfig, set_active_config
+
+    outside_root = tmp_path / "elsewhere"
+    outside_root.mkdir()
+    (outside_root / "a.png").write_bytes(make_png_bytes())
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path / "ws"),
+            auto_save_base_dir=str(outside_root),
+        )
+    )
+    (tmp_path / "ws").mkdir()
+    app = build_web_app()
+
+    response = await _post_browse(app, {})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "save_root_outside_workspace"
+    assert "SEEDREAM_WORKSPACE_ROOT" in body["error_description"]
 
 
 async def test_browse_save_root_unavailable_returns_400(
@@ -128,3 +209,25 @@ async def test_browse_save_root_unavailable_returns_400(
     payload = response.json()
     assert payload["error"] == "save_root_unavailable"
     assert "SEEDREAM_WORKSPACE_ROOT" in payload["error_description"]
+
+
+async def test_browse_rejects_resolved_directory_exceeding_length_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """resolved 绝对路径超出 directory 长度上界时回 400，不绕过输入契约。
+
+    model_copy(update=...) 跳过字段校验，长度上界经端点手工复核兜底。
+    """
+    from seedream_mcp.webapp import gallery as gallery_module
+
+    write_workspace_config(tmp_path)
+    monkeypatch.setattr(gallery_module, "DIRECTORY_MAX_LENGTH", 8)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"show_details": True})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"

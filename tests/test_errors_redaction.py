@@ -15,6 +15,7 @@ from typing import Any
 from seedream_mcp.utils.core.errors import (
     CONTROL_CHARS_PATTERN,
     SeedreamAPIError,
+    SeedreamValidationError,
     _sanitize_output_string,
     _truncate_value_for_output,
     format_error_for_user,
@@ -125,6 +126,18 @@ def test_truncate_value_summarizes_huge_nested_container_quickly() -> None:
 
     assert truncated == "<truncated:dict, 1 keys>"
     assert elapsed < 0.5
+
+
+def test_validation_error_truncates_long_value_at_construction() -> None:
+    """SeedreamValidationError 构造期统一截断超长 value，短值与 None 原样保留。
+
+    各校验点直接传原始 data URI 等输入值，巨型载荷不挂载到异常实例上。
+    """
+    error = SeedreamValidationError("参数无效", field="image", value="x" * 300)
+
+    assert error.value == "<truncated:300 chars> " + "x" * 200 + "..."
+    assert SeedreamValidationError("m", value="abc").value == "abc"
+    assert SeedreamValidationError("m").value is None
 
 
 # ==================== sanitize_error_text：敏感键值裸值剥离 ====================

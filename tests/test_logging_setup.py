@@ -93,14 +93,15 @@ def test_console_sink_colorize_follows_tty_autodetection(
 def test_setup_logging_suppresses_third_party_info_noise(
     monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
 ) -> None:
-    """第三方噪音压制清单覆盖 httpx 与其传输层 httpcore 的 INFO 噪音。
+    """第三方噪音压制清单覆盖 httpx/httpcore 与 mcp SDK v2 的 httpx2/httpcore2。
 
-    每请求一条的 httpx INFO 与每连接一条的 httpcore INFO 不再淹没业务日志。
+    每请求一条的 httpx INFO 与每连接一条的 httpcore INFO 不再淹没业务日志，
+    httpx2/httpcore2 为 mcp SDK v2 的 HTTP 客户端日志源，同样压制。
     basicConfig 以替身接管避免改写 root handlers；压制前先归零各级别再断言被
     重设为 WARNING，防止先前用例的残留使断言空转；退出前恢复原级别。
     """
     monkeypatch.setattr(logging, "basicConfig", lambda *args, **kwargs: None)
-    names = ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore")
+    names = ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore", "httpx2", "httpcore2")
     levels_before = {name: logging.getLogger(name).level for name in names}
     try:
         for name in names:

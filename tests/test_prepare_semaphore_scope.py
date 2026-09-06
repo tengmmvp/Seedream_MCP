@@ -10,7 +10,7 @@ import pytest
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.images import image_input
+from seedream_mcp.utils.images import image_prepare
 
 
 async def test_concurrent_parallel_calls_share_instance_semaphore(
@@ -36,7 +36,7 @@ async def test_concurrent_parallel_calls_share_instance_semaphore(
         return f"prepared:{image}"
 
     # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 每批图片数超过上限：退化实现下两批各自的信号量上限会叠加突破全局上限
     batch_a = [f"https://example.com/a{i}.png" for i in range(limit + 1)]
@@ -73,7 +73,7 @@ async def test_concurrent_single_image_calls_share_instance_semaphore(
         current -= 1
         return f"prepared:{image}"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 并发单图调用数数倍于上限：若信号量仅在批量入口生效，峰值会随调用数放大
     images = [f"https://example.com/s{i}.png" for i in range(limit * 3)]
@@ -108,7 +108,7 @@ async def test_waiters_do_not_occupy_semaphore_slots(
         current -= 1
         return "prepared"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     shared_url = "https://example.com/shared.png"
     creator = asyncio.ensure_future(preparer.prepare_image_input(shared_url))
@@ -173,7 +173,7 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
         current -= 1
         return "prepared"
 
-    monkeypatch.setattr(image_input, "prepare_image_input", fake_prepare)
+    monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 串行发起 3 个请求并各自取消创建者：取消不传播到共享 task，3 个脱缰 task 继续在途。
     # 以 _prepare_inflight 条目数判定创建者已挂起在 shield 等待点，避免依赖时序。
