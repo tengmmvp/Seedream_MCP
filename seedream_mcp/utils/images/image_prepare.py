@@ -11,13 +11,11 @@ import hashlib
 from collections import OrderedDict
 from collections.abc import Sequence
 
+from .image_input import prepare_image_input
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate
 from ..core.inflight import InflightEntry
-from ..core.logs import get_logger
-from ..io.io_path import resolve_workspace_roots
-
-logger = get_logger()
+from ..io.io_path import get_workspace_roots, resolve_workspace_roots
 
 # 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
@@ -199,8 +197,6 @@ class ImagePreparer:
             (缓存键, strip 后输入) 二元组。
         """
         if _roots_key is None:
-            from ..io.io_path import get_workspace_roots
-
             _roots_key = tuple(str(r) for r in get_workspace_roots())
         image = image.strip()
         ref_kind = classify_image_reference(image)
@@ -257,8 +253,6 @@ class ImagePreparer:
         inflight 在本 task 完成时清理；创建者被取消时 task 继续运行直至完成，
         保护共享同一 task 的其他等待者，避免连带取消。
         """
-        from .image_input import prepare_image_input
-
         try:
             prepared = await prepare_image_input(image)
             # URL 校验后原样返回，缓存无收益反而占用 LRU 条目，故不缓存；data URI
@@ -302,8 +296,6 @@ class ImagePreparer:
         Raises:
             SeedreamMCPError: 任一图像预处理失败时抛出，与单图入口的异常语义一致。
         """
-        from ..io.io_path import get_workspace_roots
-
         # 批内预计算一次工作区键，避免每图重复读取 ContextVar 与构造元组。
         roots_key = tuple(str(r) for r in get_workspace_roots())
 

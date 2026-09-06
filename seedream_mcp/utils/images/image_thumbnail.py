@@ -88,7 +88,6 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
 
     from .image_validation import ensure_image_decoders_ready
 
-    # 幂等注册 HEIF 解码器并无条件设置 36M 解码像素上限。
     ensure_image_decoders_ready()
 
     try:

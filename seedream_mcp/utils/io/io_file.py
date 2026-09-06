@@ -3,17 +3,12 @@
 提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd 与同步变体
 atomic_replace_from_fd_sync，另有 is_reparse_point 与 has_reparse_attribute
 判定 NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与
-io_storage 的清理遍历使用。open_no_follow_read 拒绝最终路径分量为符号链接：
-支持 O_NOFOLLOW 的平台由内核在 open 时原子拒绝，Windows 等不支持平台退化为
-lstat 与 fstat 的同一性比对兜底，闭合 TOCTOU 竞态。
-atomic_replace_from_fd 封装随机临时文件写入、os.replace 原子替换与失败清理的
-完整协议供 io_storage 与 io_download 复用，writer 可返回 Path 覆盖最终路径，以
-支持按字节签名修正扩展名等写入后才知的目标。共享函数抛 OSError，由调用方按
-各自异常类型包装。
+io_storage 的清理遍历使用。共享函数抛 OSError，由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
 父目录在校验与打开之间被替换为指向工作区外的符号链接时读取会逃逸出工作区，该攻击
-需本地写权限与精确时序，属下层威胁。
+需本地写权限与精确时序，属下层威胁。lstat/fstat 同一性回退依赖 st_ino/st_dev 充当
+稳定文件指纹，FAT/FAT32/ReFS 卷的 file index 不保证稳定，替换竞态在该类卷上可能漏判。
 """
 
 from __future__ import annotations
@@ -76,8 +71,8 @@ def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
 def open_no_follow_read(path: PathLike) -> IO[bytes]:
     """以 O_RDONLY | O_NOFOLLOW 打开文件，返回二进制只读文件对象。
 
-    最终路径分量若为符号链接则拒绝；平台不支持 O_NOFOLLOW 时退化为 lstat/fstat
-    同一性比对兜底。
+    最终路径分量若为符号链接则拒绝：支持 O_NOFOLLOW 的平台由内核在 open 时原子
+    拒绝，不支持平台退化为 lstat/fstat 同一性比对兜底。
 
     Args:
         path: 目标文件路径，最终路径分量不得为符号链接。

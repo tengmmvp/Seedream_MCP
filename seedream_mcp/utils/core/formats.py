@@ -15,6 +15,9 @@ DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 # 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。
 DEFAULT_IMAGE_EXTENSION = ".jpeg"
 
+# 参考图与下载两入口的像素上限单一来源。
+MAX_IMAGE_PIXELS = 36_000_000
+
 # 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in
 # 成员判断。
 SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (

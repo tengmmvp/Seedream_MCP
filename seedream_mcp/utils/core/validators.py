@@ -494,7 +494,6 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
                 )
             return token
 
-        # 分辨率档位校验：各家族支持的档位白名单由能力表声明。
         if token not in caps.allowed_presets:
             presets_str = "/".join(sorted(caps.allowed_presets, key=_preset_numeric_sort_key))
             raise SeedreamValidationError(

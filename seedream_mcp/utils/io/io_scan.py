@@ -3,8 +3,9 @@
 以 (目录路径, recursive, max_depth, 格式过滤元组) 为键缓存有序扫描结果，供
 browse_images 翻页共享，消除深翻页的重复文件系统扫描。条目存储 (原始路径,
 resolved 路径) 对，扫描完成时 resolve 一次，深翻页命中免于逐文件重复 resolve。
-非递归扫描以目录 mtime 失效，新增图片立即反映；递归扫描改用 TTL 失效，接受
-短时陈旧换取翻页性能。扫描底层函数由调用方注入，本模块只负责缓存策略。
+非递归扫描以目录 mtime 失效，捕获时已沉淀超 FAT 时间戳粒度窗口的条目 mtime 未变
+即新鲜，未沉淀条目叠加 TTL 上界兜底粗粒度时间戳；递归扫描改用 TTL 失效，接受短时
+陈旧换取翻页性能。扫描底层函数由调用方注入，本模块只负责缓存策略。
 """
 
 from __future__ import annotations
@@ -32,9 +33,13 @@ _DIRECTORY_SCAN_CACHE: OrderedDict[
 _DIRECTORY_SCAN_CACHE_MAX_ENTRIES = 64
 # 单条目图片列表长度上限：超过的大目录不缓存全量列表，回退每页扫描，避免无界内存占用。
 _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN = 10000
-# 递归扫描缓存 TTL：子目录新增图片不改变顶层目录 mtime，以 TTL 兜底保证最终一致。
-# 取 30 秒平衡翻页缓存命中与新增图片的可见延迟，过短会使间隔翻页必然全量重扫。
+# 扫描缓存 TTL：递归扫描以 TTL 失效，子目录新增图片不改变顶层目录 mtime；非递归
+# 扫描的未沉淀条目在目录 mtime 之上叠加同一 TTL，兜底粗粒度时间戳。取 30 秒平衡
+# 翻页缓存命中与新增图片的可见延迟，过短会使间隔翻页必然全量重扫。
 _DIRECTORY_SCAN_CACHE_TTL_SECONDS = 30.0
+# FAT/exFAT 目录时间戳的 2 秒粒度窗口。静止超该窗口后任何变更必然使粗粒度
+# mtime 前移，据此判定的沉淀条目 mtime 未变即新鲜，无需 TTL 重扫。
+_FAT_TIMESTAMP_GRANULARITY_SECONDS = 2.0
 # 前缀扩展的几何倍率：命中但前缀不足时按 max(scan_limit, 倍率×已缓存条数) 重扫，
 # 使第 K 页的前缀扩展按指数预取，累计扫描代价从 O(K²) 降为 O(K)，摊销单次扫描开销。
 _SCAN_PREFIX_GROWTH_FACTOR = 2
@@ -46,6 +51,8 @@ class _DirectoryScanCacheEntry:
 
     Attributes:
         mtime_ns: 非递归扫描捕获的目录 mtime 指纹，递归扫描为 None 改用 TTL 失效。
+        settled: 非递归扫描捕获时目录 mtime 已静止超 FAT 时间戳粒度窗口的标记，
+            mtime 未变即永久新鲜；递归条目恒 False，仅按 TTL 失效。
         captured_at: 缓存写入时的单调时钟时间戳，供 TTL 失效判定。
         images: 有序 (原始路径, resolved 路径) 对列表，resolve 在扫描完成时执行一次并
             随条目缓存，可能为目录末尾前的稳定前缀。
@@ -56,6 +63,7 @@ class _DirectoryScanCacheEntry:
     """
 
     mtime_ns: int | None
+    settled: bool
     captured_at: float
     images: list[tuple[Path, Path]]
     complete: bool
@@ -82,10 +90,18 @@ def _get_directory_mtime_ns(path: Path) -> int | None:
 def _is_scan_entry_fresh(
     entry: _DirectoryScanCacheEntry, resolved_dir: Path, recursive: bool
 ) -> bool:
-    """判定缓存条目是否仍然有效：递归按 TTL，非递归按目录 mtime 指纹。"""
+    """判定缓存条目是否仍然有效。
+
+    递归条目仅按 TTL 失效；非递归条目按目录 mtime 指纹失效，沉淀条目 mtime 未变
+    即新鲜，未沉淀条目叠加 TTL 上界兜底粗粒度时间戳。
+    """
     if recursive:
         return time.monotonic() - entry.captured_at < _DIRECTORY_SCAN_CACHE_TTL_SECONDS
-    return _get_directory_mtime_ns(resolved_dir) == entry.mtime_ns
+    if _get_directory_mtime_ns(resolved_dir) != entry.mtime_ns:
+        return False
+    if entry.settled:
+        return True
+    return time.monotonic() - entry.captured_at < _DIRECTORY_SCAN_CACHE_TTL_SECONDS
 
 
 def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
@@ -107,6 +123,7 @@ def _store_scan_entry(
     cache_key: tuple[str, bool, int, tuple[str, ...]],
     *,
     mtime_ns: int | None,
+    settled: bool,
     images: list[tuple[Path, Path]],
     complete: bool,
     unreadable_dirs: list[Path],
@@ -135,6 +152,7 @@ def _store_scan_entry(
         pass
     _DIRECTORY_SCAN_CACHE[cache_key] = _DirectoryScanCacheEntry(
         mtime_ns=mtime_ns,
+        settled=settled,
         captured_at=time.monotonic(),
         images=images,
         complete=complete,
@@ -208,6 +226,10 @@ def cached_find_images_in_directory(
     # 扫描前捕获目录 mtime 使指纹与 images 自洽：扫描后捕获会在并发写入时反映新增
     # 而 images 未含，命中时持续返回陈旧列表。递归扫描不依赖 mtime 失效，跳过捕获。
     base_mtime = None if recursive else _get_directory_mtime_ns(resolved_dir)
+    # 沉淀判定依据见 _FAT_TIMESTAMP_GRANULARITY_SECONDS 注释。
+    settled = base_mtime is not None and (
+        time.time() - base_mtime / 1_000_000_000 >= _FAT_TIMESTAMP_GRANULARITY_SECONDS
+    )
     scan_unreadable: list[Path] = []
     scanned_images = scan(
         directory=str(resolved_dir),
@@ -220,11 +242,13 @@ def cached_find_images_in_directory(
     # complete 按扫描器原始返回量判定：resolve 失败被剔除不影响目录已枚举完毕的事实。
     images = _resolve_scan_pairs(scanned_images)
     complete = len(scanned_images) < scan_limit
-    # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空；非递归仅在 stat 成功时缓存。
+    # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空且不沉淀；非递归仅在 stat 成功
+    # 时缓存。
     if recursive or base_mtime is not None:
         _store_scan_entry(
             cache_key,
             mtime_ns=base_mtime,
+            settled=settled,
             images=images,
             complete=complete,
             unreadable_dirs=list(scan_unreadable),

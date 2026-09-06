@@ -49,9 +49,10 @@ _cwd_fallback_warned = False
 # 重试。活动配置变更时经 clear_resolved_env_root_cache 显式失效。
 _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 
-# 已 resolve 自动保存基础目录的进程级缓存，键与失效口径与回退根缓存一致，供 tools
-# 层的默认保存目录解析复用，消除已显式配置保存根时每次生成请求的重复
-# expanduser/resolve 文件系统调用。
+# 已 resolve 自动保存基础目录的进程级缓存，缓存口径与回退根一致，供 tools 层的
+# 保存目录解析复用。键两类：显式配置分支为 "explicit:"+配置原始字符串，默认分支
+# 为 "default:"+工作区根字符串，前缀隔离两类键防撞车。活动配置变更时随
+# clear_resolved_env_root_cache 一并失效。
 _RESOLVED_SAVE_BASE_DIR_CACHE: dict[str, Path] = {}
 
 # 工作区根目录提供者：由 config 模块加载时注入，返回活动配置的 workspace_root
@@ -84,11 +85,9 @@ def clear_resolved_env_root_cache() -> None:
 
 
 def resolve_cached_save_base_dir(configured_dir: str) -> Path:
-    """解析已配置的自动保存基础目录，按配置原始字符串做进程级缓存。
+    """解析已显式配置的自动保存基础目录，按 "explicit:"+配置串做进程级缓存。
 
-    缓存口径与回退根一致：仅缓存 expanduser 后为绝对路径的配置值，相对路径的
-    resolve 结果随进程 CWD 变化须每次现算；解析异常向上抛出且不缓存，下次调用
-    重试。缓存随 clear_resolved_env_root_cache 失效。
+    缓存口径与回退工作区根一致，随 clear_resolved_env_root_cache 一并失效。
 
     Args:
         configured_dir: 配置的自动保存基础目录原始字符串。
@@ -99,11 +98,33 @@ def resolve_cached_save_base_dir(configured_dir: str) -> Path:
     expanded_dir = Path(configured_dir).expanduser()
     if not expanded_dir.is_absolute():
         return expanded_dir.resolve()
-    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(configured_dir)
+    cache_key = f"explicit:{configured_dir}"
+    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(cache_key)
     if cached_dir is not None:
         return cached_dir
     resolved_dir = expanded_dir.resolve()
-    _RESOLVED_SAVE_BASE_DIR_CACHE[configured_dir] = resolved_dir
+    _RESOLVED_SAVE_BASE_DIR_CACHE[cache_key] = resolved_dir
+    return resolved_dir
+
+
+def resolve_cached_default_save_base_dir(workspace_root: Path) -> Path:
+    """解析工作区根下的默认保存目录，按 "default:"+工作区根字符串做进程级缓存。
+
+    与显式配置分支共用 _RESOLVED_SAVE_BASE_DIR_CACHE，随
+    clear_resolved_env_root_cache 一并失效。
+
+    Args:
+        workspace_root: 已 resolve 的工作区根目录。
+
+    Returns:
+        resolve 后的 workspace_root/.seedream/images。
+    """
+    cache_key = f"default:{workspace_root}"
+    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(cache_key)
+    if cached_dir is not None:
+        return cached_dir
+    resolved_dir = (workspace_root / ".seedream" / "images").resolve()
+    _RESOLVED_SAVE_BASE_DIR_CACHE[cache_key] = resolved_dir
     return resolved_dir
 
 
@@ -111,8 +132,7 @@ def _resolve_configured_root() -> Path | None:
     """解析已配置的工作区根目录，未配置或解析失败返回 None。
 
     供 resolve_env_workspace_root 的 CWD 回退判定与 workspace_roots_scope 的
-    NoBackChannelError fail-closed 判定共用。expanduser 后为绝对路径的配置根按
-    原始字符串缓存 resolve 结果；相对形态与解析失败不缓存，下次访问现算或重试。
+    NoBackChannelError fail-closed 判定共用。
     """
     configured_root = _configured_workspace_root()
     if not configured_root:
@@ -217,10 +237,7 @@ def resolve_workspace_roots(roots: Sequence[Path | str]) -> list[Path]:
 
 
 async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
-    """从 MCP 上下文读取客户端 Roots 并转换为本地路径列表。
-
-    将各 Root 的 file:// URI 转为本地路径，拒绝 UNC 形式以避免触发 SMB 连接。
-    """
+    """从 MCP 上下文读取客户端 Roots 并转换为本地路径列表。"""
     if ctx is None:
         return []
 
@@ -432,6 +449,31 @@ def is_unc_path(path_str: str) -> bool:
     return stripped.startswith("\\\\") or stripped.startswith("//")
 
 
+def has_windows_colon_component(path: str) -> bool:
+    """判断 win32 下路径是否存在含冒号的分量，即 NTFS 备用数据流形态。
+
+    驱动器符与其带根形态为合法前缀，跳过；非 win32 平台恒返回 False，冒号在
+    POSIX 是合法文件名字符。normalize_path 与参考图读取链共用本判定，保持
+    单一规则。
+
+    Args:
+        path: 输入路径字符串，可为相对或绝对。
+
+    Returns:
+        win32 下存在含冒号的路径分量返回 True；非 win32 平台或无冒号分量返回 False。
+    """
+    if sys.platform != "win32":
+        return False
+    path_obj = Path(path)
+    drive = path_obj.drive
+    for part in path_obj.parts:
+        if part == drive or part == drive + path_obj.root:
+            continue
+        if ":" in part:
+            return True
+    return False
+
+
 def normalize_path(path: str, base_dir: str | None = None) -> Path:
     """标准化文件路径为绝对 Path 对象。
 
@@ -442,7 +484,8 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         base_dir: 基础目录，用于解析相对路径。
 
     Raises:
-        ValueError: 路径为 UNC 形式、Windows 驱动器相对形式或路径无效时抛出。
+        ValueError: 路径为 UNC 形式、Windows 驱动器相对形式、Windows 路径分量含冒号
+            或路径无效时抛出。
     """
     try:
         # 空字节在任何文件系统都不是合法路径分量。Python 3.13 起 Windows 的
@@ -464,6 +507,11 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # Win32 命名空间打开文件时剥离最终分量尾部的点与空格，先做同口径名称归一，
         # 已验证路径字符串才与实际打开的文件名一致；仅名称级归一，不改变越界判定。
         if sys.platform == "win32":
+            # 分量含冒号是 NTFS 备用数据流形态，流名不参与越界判定，逐分量拒绝；
+            # 驱动器符与其带根形态为合法前缀，判定经 has_windows_colon_component
+            # 与参考图读取链共用单一来源。
+            if has_windows_colon_component(path):
+                raise ValueError(f"拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {path}")
             final_name = path_obj.name
             polished_name = final_name.rstrip(". ") if final_name else final_name
             if polished_name and polished_name != final_name:

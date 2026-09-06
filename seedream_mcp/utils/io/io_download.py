@@ -660,8 +660,7 @@ class DownloadManager:
         """将 200 响应体流式下载到临时文件，经校验后原子替换，返回结果字典。
 
         扩展名以实际字节签名为准：与 save_path 的 URL 派生扩展名不一致且不属同一
-        格式等价类时，落盘路径修正为嗅探扩展名。wall_start_time 为挂钟基准，仅供
-        download_time 人读度量，不参与预算判定。
+        格式等价类时，落盘路径修正为嗅探扩展名。
 
         Args:
             response: 已确认状态 200 的响应对象。
@@ -730,7 +729,7 @@ class DownloadManager:
             return None
 
         # 落盘协议由 io_file.atomic_replace_from_fd 统一提供，与 io_storage.save_bytes
-        # 复用同一骨架；temp_suffix 仅用于随机临时文件命名的可读性后缀。
+        # 复用同一骨架。
         await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix, fsync=fsync)
 
         download_time = time.time() - wall_start_time
@@ -769,8 +768,7 @@ class DownloadManager:
         计窗，跟随下一跳前按起始时间累计校验，慢滴流重定向链不得把单次尝试拖至
         跳数倍封顶。跳向不同源时剥离调用方定制请求头，仅保留通用头。HTTP 5xx 抛
         RetryableDownloadError 由外层纳入退避重试，其余语义明确的终态错误原样上抛
-        不重试。start_time 为单调钟基准的预算起点，wall_start_time 仅供
-        download_time 人读度量。
+        不重试。
         """
         current_url = url
         current_headers = headers

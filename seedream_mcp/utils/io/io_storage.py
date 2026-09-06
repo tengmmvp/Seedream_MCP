@@ -244,7 +244,6 @@ class FileManager:
             timestamp = datetime.now()
 
         clean_base = self.sanitize_filename(base_name)
-        # 词干按预算截断，为时间戳、哈希/随机后缀与目录前缀预留长度。
         if len(clean_base) > _MAX_UNIQUE_BASE_LENGTH:
             clean_base = clean_base[:_MAX_UNIQUE_BASE_LENGTH]
 
@@ -362,7 +361,6 @@ class FileManager:
         Raises:
             FileManagerError: 生成的保存路径越出基础目录。
         """
-        # 与 create_save_path 同口径收敛到受支持图片扩展名白名单。
         if extension not in SUPPORTED_IMAGE_EXTENSIONS:
             extension = DEFAULT_IMAGE_EXTENSION
         base_name = custom_name or self.generate_name_from_prompt(prompt)
@@ -422,9 +420,7 @@ class FileManager:
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
 
-            # 原子落盘由 io_file 的同步骨架提供，与 io_download 的异步骨架同一协议；
-            # save_bytes 为同步接口且数据已在内存，走同步路径避免在事件循环内
-            # asyncio.run 驱动异步骨架。
+            # 原子落盘由 io_file 的同步骨架提供，与 io_download 的异步骨架同一协议。
             def _writer(fd: int) -> None:
                 with os.fdopen(fd, "wb", closefd=False) as f:
                     f.write(data)
@@ -570,8 +566,6 @@ class FileManager:
         """对已扫描文件按保留天数删除过期项，返回已删路径名列表与释放字节数。
 
         cutoff 以 epoch 秒比较 st_mtime，规避本地时区与夏令时跳变导致的清理边界漂移。
-        供 run_cleanup_policies 使用，cutoff 计算与过期过滤集中于此避免重复实现；
-        调用方负责 days 小于 1 的跳过判定。
         """
         cutoff_epoch = datetime.now().timestamp() - days * 86400
         expired_files = [(p, s, m) for (p, s, m) in all_files if m < cutoff_epoch]
@@ -628,6 +622,10 @@ class FileManager:
         风险，部署方应确保 base_dir 不接受不可信写入。一次扫描产出全部
         (path, size, mtime) 供三项清理共用；.part 候选按条目名后缀收集，不依赖图片
         扩展名过滤。
+
+        残余风险：快照与删除两阶段之间，同名替换的新文件沿用旧 mtime 时会按快照的
+        过期判定误删新内容；base_dir 内指向界外文件的硬链接 unlink 只删除界内链接
+        自身，同时使界外同一文件的链接计数减一。
 
         Args:
             errors: 收集 stat 失败的错误描述列表，与删除阶段共享同一列表。
@@ -741,8 +739,7 @@ class FileManager:
     def _prune_empty_dirs(directories: list[Path]) -> None:
         """按深度逆序删除已变空的子目录，使父目录在子目录删除后变空而级联得到清理。
 
-        清理不区分目录来源：base_dir 内用户自建的空目录同样会被移除，行为边界已在
-        run_cleanup_policies 对外披露。目录删除失败仅记录警告，不计入 errors 列表。
+        目录删除失败仅记录警告，不计入 errors 列表。
         """
         for dir_path in sorted(directories, key=lambda p: len(p.parts), reverse=True):
             try:

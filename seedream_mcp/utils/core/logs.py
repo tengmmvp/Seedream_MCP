@@ -48,7 +48,6 @@ class InterceptHandler(logging.Handler):
         logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
 
 
-# 日志消息中的控制字符，剥离以防文件名、上游错误体等经由日志注入伪造日志行。
 # 字符类取 errors.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
 _LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 
@@ -169,12 +168,15 @@ def setup_logging(
     )
 
     # 压制第三方库的 DEBUG/INFO 噪音：httpx 每次 API 调用、httpcore 每个连接均输出
-    # INFO 日志，桥接后全量进入会淹没项目业务日志。
+    # INFO 日志，桥接后全量进入会淹没项目业务日志；httpx2/httpcore2 为 mcp SDK v2
+    # 的 HTTP 客户端日志源，一并压制。
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
+    logging.getLogger("httpcore2").setLevel(logging.WARNING)
 
     logger.info("日志系统初始化完成，级别: {}", level)
     if enable_file and log_file:

@@ -18,6 +18,8 @@ def sanitize_url(url: str) -> str:
     """脱敏 URL 用于日志，保留 scheme/host/path，剥离凭据、查询参数与控制字符。
 
     控制字符 CRLF 等会被剥离，防止攻击者经由 URL 在日志中伪造行，注入误导性记录。
+    scheme 非 http/https 或 host 与 path 同时为空时无 authority 可保留，改输出
+    ``scheme:<redacted>``。
 
     Args:
         url: 原始 URL 字符串。
@@ -27,21 +29,23 @@ def sanitize_url(url: str) -> str:
     """
     try:
         parsed = urlparse(url)
-        # 重建不含 userinfo 的 netloc；hostname 对 IPv6 字面量剥离方括号，需补回以
-        # 保持 host 与端口边界。
         host = parsed.hostname or ""
-        if ":" in host:
-            host = f"[{host}]"
-        netloc = host
-        if parsed.port is not None:
-            netloc = f"{netloc}:{parsed.port}"
-        if parsed.query:
-            result = f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
+        if parsed.scheme not in ("http", "https") or (not host and not parsed.path):
+            result = f"{parsed.scheme}:<redacted>"
         else:
-            result = f"{parsed.scheme}://{netloc}{parsed.path}"
+            # 重建不含 userinfo 的 netloc；hostname 对 IPv6 字面量剥离方括号，需补回
+            # 以保持 host 与端口边界。
+            if ":" in host:
+                host = f"[{host}]"
+            netloc = host
+            if parsed.port is not None:
+                netloc = f"{netloc}:{parsed.port}"
+            if parsed.query:
+                result = f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
+            else:
+                result = f"{parsed.scheme}://{netloc}{parsed.path}"
     except Exception:
         return "<invalid-url>"
-    # 剥离控制字符，防止 CRLF 经 URL 注入伪造日志行。
     return re.sub(r"[\x00-\x1f\x7f]", "", result)
 
 

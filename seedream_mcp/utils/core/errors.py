@@ -69,13 +69,14 @@ class SeedreamValidationError(SeedreamMCPError):
 
     Attributes:
         field: 出错的参数字段名。
-        value: 出错的参数值。
+        value: 出错的参数值，超长在构造期截断为前缀，巨型 data URI 等输入不整体挂载；
+            截断前缀未经脱敏，输出到用户可见层前仍须经 sanitize_error_text。
     """
 
     def __init__(self, message: str, field: str | None = None, value: Any | None = None):
         super().__init__(message)
         self.field = field
-        self.value = value
+        self.value = _truncate_value_for_output(value)
 
 
 class SeedreamTimeoutError(SeedreamMCPError):
@@ -480,9 +481,7 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
 
 
 # 敏感字段关键词：键名等于关键词或按分隔符切分后任一段等于关键词即视为敏感，
-# 输出以 *** 脱敏，段匹配避免短词 key 误吞 monkey、keyboard 一类普通键名。短词
-# key 与 auth 的复合形态由 _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES 前缀族承接，
-# 两条路径在族内带分隔符的复合键名上对齐。
+# 输出以 *** 脱敏，段匹配避免短词 key 误吞 monkey、keyboard 一类普通键名。
 _SENSITIVE_KEY_KEYWORDS = (
     "key",
     "token",
@@ -501,8 +500,7 @@ _SENSITIVE_KEY_KEYWORDS = (
 )
 
 # 高确信度敏感词：直接子串匹配，覆盖 x-authorization、my-apikey、privatekey 等
-# 连字符或无分隔变体，camelCase 归一化小写后同样命中；带分隔符的 X_key/X_auth
-# 复合形态归前缀族分支对齐，本清单只派生自由文本路径的泛化词分支。
+# 连字符或无分隔变体，camelCase 归一化小写后同样命中。
 _SENSITIVE_KEY_SUBSTRINGS = (
     "authorization",
     "apikey",
@@ -537,8 +535,7 @@ _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS = frozenset({"key", "auth"})
 
 # key/auth 受限复合分支的前缀族：带分隔符的 X_key/X_auth 仅在前缀属于本族时命中，
-# 与 dict 键路径的段匹配在族内对齐；无分隔形态由高确信子串覆盖，族外前缀如
-# hotel_key 只由 dict 键路径覆盖。封闭字面交替，回溯保持线性。
+# 口径差异见 _is_sensitive_key。封闭字面交替，回溯保持线性。
 _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
     "access",
     "ssh",
@@ -556,17 +553,14 @@ _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
     "secret",
 )
 
-# 键名续段：以 . 、- 或 _ 起头、后接不含分隔符的词字符段，点号纳入后 session.id
-# 与 dict 键的点号切分口径一致。续段边界唯一确定，失败回溯随总长线性，避免嵌套
-# 量词的指数级回溯。
+# 键名续段：以 . 、- 或 _ 起头、后接不含分隔符的词字符段。续段边界唯一确定，
+# 失败回溯随总长线性，避免嵌套量词的指数级回溯。
 _SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[._-][^\W_.-]+)*"
 
-# 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。泛化词分支由
-# 两清单派生为「关键词 + 续段」；短词 key 与 auth 走受限复合分支，无分隔变体由
-# api-key 与 token/secret 复合族覆盖，带分隔变体由前缀族的 X_key/X_auth 分支覆盖，
-# 与 dict 键路径口径对齐；auth 另有独立分支，(?<!\w) 断言排除 oauth 一类无分隔
-# 前缀词。键命中要求紧跟分隔符与值，max_tokens 等普通词形不受影响；新增敏感词
-# 只需扩展清单或前缀族，本组自动跟进。各分支为字面交替，失败回溯随总长线性。
+# 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。分支由关键词
+# 清单与前缀族派生，两路径口径以 _is_sensitive_key 为单点。键命中要求紧跟分隔符
+# 与值，max_tokens 等普通词形不受影响；新增敏感词只需扩展清单或前缀族。各分支为
+# 字面交替，失败回溯随总长线性。
 _SENSITIVE_KEYVALUE_KEYS = (
     "|".join(
         keyword + _SENSITIVE_KEYVALUE_KEY_SUFFIX
@@ -638,9 +632,9 @@ _SENSITIVE_KEYVALUE_ANY_KEY = r"['\"]?[\w-]+" + _SENSITIVE_KEYVALUE_SEPARATOR
 # 敏感键值裸值模式：敏感键名后跟分隔符与值时剥离值部分，覆盖 api-key=xxx、
 # Authorization: Basic xxx、Cookie: SESSIONID=vvv 等上游错误体回显形态。值吸收
 # 贪婪多词、在下一个键名加分隔符形态前停止，多词凭据整体剥离，相邻非敏感键值对
-# 保留独立形态与括号配平；具体复合键名置于泛化词前优先命中长变体。已知误吞面：
-# Cookie: 后的整段文本与 next token: <eos> 一类普通键值同样被吞，敏感键后的多词
-# 值无法与非敏感尾词可靠区分，按 fail-closed 方向宁多脱不漏凭据。
+# 保留独立形态与括号配平。已知误吞面：Cookie: 后的整段文本与 next token: <eos>
+# 一类普通键值同样被吞，敏感键后的多词值无法与非敏感尾词可靠区分，按 fail-closed
+# 方向宁多脱不漏凭据。
 _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     r"(?i)("
     + _SENSITIVE_KEYVALUE_KEYS
@@ -762,8 +756,10 @@ def _is_sensitive_key(key: Any) -> bool:
 
     高确信度词子串匹配覆盖连字符、无分隔与 camelCase 变体；其余关键词按分隔符
     切分后段匹配，复合键中段同样命中，如 user.session_id 与 request-session-id，
-    短词 key 不误匹配 monkey、keyboard。与自由文本路径的口径差异：无分隔复合词
-    usersession_id 仅自由文本路径命中，族外前缀的 hotel_key 仅本路径命中。
+    短词 key 不误匹配 monkey、keyboard。本函数与自由文本路径的两路径口径在此单点
+    说明：带分隔符的 X_key/X_auth 复合键在前缀族内两路径一致命中；界外差异为无
+    分隔复合词 usersession_id 仅自由文本路径命中、族外前缀的 hotel_key 仅本路径
+    命中。
     """
     key_lower = str(key).lower()
     for substring in _SENSITIVE_KEY_SUBSTRINGS:

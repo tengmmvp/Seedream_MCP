@@ -20,6 +20,7 @@ from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
+    MAX_IMAGE_PIXELS,
     format_file_too_large,
     infer_extension_from_bytes,
     is_known_image_bytes,
@@ -31,11 +32,6 @@ from .io_url import sanitize_url
 from .io_storage import FileManager, FileManagerError
 
 logger = get_logger()
-
-# 下载落盘像素上限，与输入参考图侧 image_validation 的 36M 口径一致。PIL 的解压
-# 炸弹阈值语义为超过 2 倍才抛错、1 至 2 倍区间仅告警照常解码，显式头尺寸校验防止
-# 数 KB 的伪造尺寸头图片落盘后在预览解码时放大为数百 MB 内存占用。
-_DOWNLOAD_MAX_PIXELS = 36_000_000
 
 # PIL 解码器就绪标志。image_validation 的 ensure_image_decoders_ready 属 images 组，
 # io 组不得反向依赖，故在此以同口径本地化：惰性设置解压炸弹阈值并注册 HEIF 解码器。
@@ -56,7 +52,7 @@ def _ensure_decoders_ready() -> None:
 
     # 进程级覆写 PIL 解压炸弹阈值，头声明像素超过 2 倍 36M 的图片在打开阶段即被
     # PIL 抛 DecompressionBombError，1 至 2 倍区间仍由显式头尺寸校验兜底。
-    Image.MAX_IMAGE_PIXELS = _DOWNLOAD_MAX_PIXELS
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     register_heif_opener()
     _decoders_ready = True
 
@@ -129,10 +125,11 @@ def _build_markdown_alt(alt_text: str | None) -> str:
 
 
 def _pixel_limit_rejection(path: Path) -> str | None:
-    """读取图像头尺寸判定是否超过下载落盘像素上限，返回拒绝原因或 None。
+    """读取图像头尺寸判定是否超过下载落盘像素上限 MAX_IMAGE_PIXELS，返回拒绝原因或 None。
 
-    只读头部不解码像素，供工作线程调用。头损坏等无法解析的形态返回 None 交由
-    既有保存链路处置，本校验不引入新的失败面。
+    只读头部不解码像素，供工作线程调用；显式校验防止数 KB 的伪造尺寸头图片落盘后
+    在预览解码时放大为数百 MB 内存占用。头损坏等无法解析的形态返回 None 交由既有
+    保存链路处置，本校验不引入新的失败面。
     """
     # PIL 惰性导入，落点在工作线程；UnidentifiedImageError 为 OSError 子类，
     # DecompressionBombError 为 Exception 直接子类，须单独显式捕获。
@@ -145,12 +142,12 @@ def _pixel_limit_rejection(path: Path) -> str | None:
     except Image.DecompressionBombError:
         # 头声明像素超过 2 倍上限时 PIL 在打开阶段即抛错，具体尺寸不可得，仍按
         # 像素超限口径拒绝，交由外层删除已落盘文件并降级。
-        return f"图像像素超过保存上限 {_DOWNLOAD_MAX_PIXELS}，已删除落盘文件并放弃保存"
+        return f"图像像素超过保存上限 {MAX_IMAGE_PIXELS}，已删除落盘文件并放弃保存"
     except (UnidentifiedImageError, OSError):
         return None
-    if width * height > _DOWNLOAD_MAX_PIXELS:
+    if width * height > MAX_IMAGE_PIXELS:
         return (
-            f"图像像素 {width}x{height} 超过保存上限 {_DOWNLOAD_MAX_PIXELS}，"
+            f"图像像素 {width}x{height} 超过保存上限 {MAX_IMAGE_PIXELS}，"
             "已删除落盘文件并放弃保存"
         )
     return None
@@ -309,8 +306,6 @@ class AutoSaveManager:
                 落盘与经下载管理器落盘两条路径。
         """
         self.file_manager = FileManager(base_dir)
-        # 清理与节流的根界独立于保存目录：save_path 把保存收敛到子目录时，按天清理
-        # 与总量配额仍以默认保存根为界整体执行；未提供时与保存目录共用同一实例。
         if cleanup_base_dir is None:
             self._cleanup_file_manager = self.file_manager
         else:
@@ -351,11 +346,10 @@ class AutoSaveManager:
     async def _maybe_cleanup(self) -> None:
         """按清理根目录节流触发清理，每个清理根在最短间隔内仅执行一次。
 
-        清理范围以 _cleanup_file_manager 的根为界，save_path 使保存目录指向子目录时
-        仍覆盖整个默认保存根。清理入口不设开关短路：.part 孤儿清扫须在 auto-save
-        启用时无条件可达，两项清理策略均显式关闭的部署下遗留临时文件同样被回收；
-        按天清理与配额驱逐仍按各自开关门控。节流时间戳仅清理成功后保留，失败改写
-        为短退避时间戳；锁内完成检查与占位，并发请求不会同时进入清理。
+        清理入口不设开关短路：.part 孤儿清扫须在 auto-save 启用时无条件可达，两项
+        清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐仍按
+        各自开关门控。节流时间戳仅清理成功后保留，失败改写为短退避时间戳；锁内
+        完成检查与占位，并发请求不会同时进入清理。
         """
         cleanup_key = str(self._cleanup_file_manager.base_dir)
         now = time.time()

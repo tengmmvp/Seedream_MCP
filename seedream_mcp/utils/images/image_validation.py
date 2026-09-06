@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 from ..core.errors import SeedreamValidationError
 from ..core.formats import (
+    MAX_IMAGE_PIXELS,
     MIME_BY_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
@@ -31,6 +32,7 @@ from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
     is_unc_path,
+    has_windows_colon_component,
     get_workspace_root,
     is_within_resolved,
     normalize_path,
@@ -97,9 +99,9 @@ def is_unidentified_image_error(exc: BaseException) -> bool:
 
 # 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
 MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
-# 参考图即输入图像：最短边与总像素上限在此，宽高比上下限由 validators 持有共用。
+# 参考图即输入图像：最短边上限在此，总像素上限由 formats 单一来源提供，宽高比
+# 上下限由 validators 持有共用。
 MIN_IMAGE_EDGE = 15
-MAX_IMAGE_PIXELS = 6000 * 6000
 
 
 def _get_validation_base_dir() -> Path:
@@ -204,11 +206,32 @@ def resolve_local_image_candidate(
 
     Returns:
         首个命中候选的 (物理路径, stat)；无命中时为 None。
+
+    Raises:
+        SeedreamValidationError: win32 下输入路径分量含冒号，即 NTFS 备用数据流
+            形态时抛出，先于候选构造与文件读取。
     """
     # UNC 的 resolve 在 Windows 会触发 SMB 认证，须在候选构造前判定；反斜杠形态
     # 的 UNC 在 POSIX 上非绝对路径，先拼后查会丢失 UNC 前缀。
     if is_unc_path(image):
         return None
+    # classify 仅特判 http(s) 与 data，file:// 等其余 scheme 形态落入本地分支；
+    # 先按形态给出诊断，不落入冒号分量拒绝被误报为 NTFS 备用数据流。
+    if "://" in image:
+        raise SeedreamValidationError(
+            f"仅支持图像 URL（http/https）、Data URI 或本地路径: {image}",
+            field="image",
+            value=image,
+        )
+    # 分量含冒号是 NTFS 备用数据流形态，流名不参与越界判定，界内文件名携带流
+    # 后缀时读取命中的是同文件的另一数据流；判定与 normalize_path 共用单一来源，
+    # 参考图链与浏览、保存链拒绝口径一致。
+    if has_windows_colon_component(image):
+        raise SeedreamValidationError(
+            f"拒绝参考图路径分量含冒号以避免访问 NTFS 备用数据流: {image}",
+            field="image",
+            value=image,
+        )
     for resolved_candidate in iter_local_candidates(image, resolved_roots):
         st = image_candidate_stat(resolved_candidate)
         if st is not None:
@@ -347,8 +370,8 @@ def _validate_data_uri(data_uri: str) -> str:
             raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)
 
         # 编码标记需在原始 header 确认，确保按 base64 解码而非误处理其他编码负载。
-        # partition 只物化头部片段，不拷贝 40MB 级 base64 载荷。
-        header_lower = data_uri.partition(",")[0].lower()
+        # 头部切片只物化逗号前片段；逗号必然存在，缺逗号形态已被上方分支拒绝。
+        header_lower = data_uri[: data_uri.find(",")].lower()
         if not header_lower.startswith("data:image/") or ";base64" not in header_lower:
             raise SeedreamValidationError(
                 "Data URI 必须为 data:image/<格式>;base64, 前缀（scheme 大小写不敏感）",
@@ -434,7 +457,6 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     if not image:
         raise SeedreamValidationError("图像路径不能为空", field="image", value=image)
 
-    # 三类来源统一经 classify_image_reference 判定，scheme 大小写不敏感。
     kind = classify_image_reference(image)
     if kind == "data_uri":
         return _validate_data_uri(image)
