@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image
@@ -131,7 +132,7 @@ async def test_prepare_local_input_localizes_candidate_once(
     calls = 0
     real = image_validation.resolve_local_image_candidate
 
-    def counting(image: str, **kwargs: object) -> object:
+    def counting(image: str, **kwargs: Any) -> object:
         nonlocal calls
         calls += 1
         return real(image, **kwargs)

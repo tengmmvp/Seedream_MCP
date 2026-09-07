@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -498,7 +499,7 @@ async def test_standard_request_rejects_chunked_body_over_limit(
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
 
-        async def _stream():
+        async def _stream() -> AsyncIterator[bytes]:
             # 上限 1024×20=20480 字节，共送出 40KB 确保跨过上限
             for _ in range(40):
                 yield b"x" * 1024

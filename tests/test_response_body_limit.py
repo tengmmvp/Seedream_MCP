@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -35,7 +36,7 @@ async def test_error_body_over_independent_cap_rejected(no_sleep: None) -> None:
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
 
-        async def _stream():
+        async def _stream() -> AsyncIterator[bytes]:
             for _ in range(5 * 1024):
                 yield b"x" * 1024
 
@@ -274,7 +275,7 @@ async def test_stream_truncated_events_passed_through_in_payload(no_sleep: None)
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
 
-        async def _stream():
+        async def _stream() -> AsyncIterator[bytes]:
             # 不完整事件：无空行分隔，超过阈值后被丢弃并计数
             yield b"data: " + b"A" * 6000
             yield b'data: {"type":"image_generation.completed","usage":{}}\n\n'
@@ -299,7 +300,7 @@ async def test_stream_json_over_limit_error_not_wrapped_as_parse_failure(no_slee
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
 
-        async def _stream():
+        async def _stream() -> AsyncIterator[bytes]:
             for _ in range(40):  # 40KB，超过推导上限 20480
                 yield b"x" * 1024
 
@@ -339,7 +340,7 @@ async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: N
         nonlocal attempts
         attempts += 1
 
-        async def _stream():
+        async def _stream() -> AsyncIterator[bytes]:
             yield b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
             while True:
                 await _delay_outside_patched_sleep(0.3)
@@ -369,7 +370,7 @@ async def test_standard_slow_drip_json_over_total_budget_times_out(no_sleep: Non
         nonlocal attempts
         attempts += 1
 
-        async def _stream():
+        async def _stream() -> AsyncIterator[bytes]:
             yield b"{"
             while True:
                 await _delay_outside_patched_sleep(0.3)

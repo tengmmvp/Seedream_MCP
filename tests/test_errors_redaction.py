@@ -455,7 +455,7 @@ def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
     """非 SSE 路径的 per-image error.message 净化后返回新列表，传入列表与条目不被修改。"""
     from seedream_mcp.tools.core.results import _sanitize_image_errors
 
-    images = [
+    images: list[dict[str, Any]] = [
         {"url": "https://a/1.png"},
         {"error": {"code": "X", "message": "api_key: sk-leaked"}},
     ]

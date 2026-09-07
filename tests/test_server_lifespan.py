@@ -5,22 +5,23 @@ SeedreamClient 与 DownloadManager 为模块级单例，修复 stateless_http �
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from mcp.server.mcpserver import Context
 
 from seedream_mcp import config as config_module
 import seedream_mcp.resources as resources
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.tools.core.schemas import ResponseFormat, TextToImageInput
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
 
 
 async def test_app_lifespan_yields_config_and_client(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """lifespan yield 的状态字典含活动配置与已就绪的 client 与 download_manager。"""
     config = SeedreamConfig(api_key="test_key")
@@ -38,7 +39,7 @@ async def test_app_lifespan_yields_config_and_client(
 
 async def test_app_lifespan_stdio_cleans_up_on_teardown(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """stdio 模式 lifespan 退出时在同事件循环清理单例，实现进程级优雅关闭。"""
     config = SeedreamConfig(api_key="test_key")
@@ -53,7 +54,7 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
 
 async def test_app_lifespan_cleans_up_on_exception_teardown(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """yield 体抛异常的 teardown 同样执行共享资源清理，防止异常退出泄漏连接池。
 
@@ -71,7 +72,7 @@ async def test_app_lifespan_cleans_up_on_exception_teardown(
 
 async def test_borrow_shared_handles_tracks_active_resource(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """borrow_shared_handles 在 lifespan 期返回活动资源，teardown 后返回 None。
 
@@ -105,12 +106,17 @@ def test_get_lifespan_resource_swallows_value_error_from_request_context() -> No
     from seedream_mcp.config import LIFESPAN_KEY_CLIENT
     from seedream_mcp.tools.core.common import get_lifespan_resource
 
-    assert get_lifespan_resource(_ValueErrorCtx(), LIFESPAN_KEY_CLIENT, object) is None
+    assert (
+        get_lifespan_resource(
+            cast(Context[Any, Any], _ValueErrorCtx()), LIFESPAN_KEY_CLIENT, object
+        )
+        is None
+    )
 
 
 async def test_cleanup_shared_resources_drains_background_cleanup_first(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """进程级清理先等待在途后台清理任务收尾，再关闭共享资源。"""
     from seedream_mcp.utils.io import io_save as auto_save_module
@@ -151,7 +157,7 @@ async def test_cleanup_shared_resources_drains_background_cleanup_first(
 
 async def test_cleanup_shared_resources_unconditional_closes_inflight(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """idle_only=False 的进程退出兜底无视在途引用，无条件关闭全部资源。
 
@@ -246,7 +252,7 @@ def test_config_from_context_falls_back_when_state_not_dict(
 
 async def test_app_lifespan_concurrent_reentry_creates_one_client(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """并发进入 lifespan 应复用同一单例，验证 _shared_init_lock 防竞态。
 
@@ -276,7 +282,7 @@ async def test_app_lifespan_concurrent_reentry_creates_one_client(
 
 async def test_app_lifespan_rebuilds_on_config_change(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """config 身份变化后下次进入 lifespan 重建单例，使热重载生效。"""
     config_a = SeedreamConfig(api_key="key_a")
@@ -295,7 +301,7 @@ async def test_app_lifespan_rebuilds_on_config_change(
 
 async def test_app_lifespan_applies_download_concurrency_limit(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """共享 DownloadManager 经构造参数施加进程级下载并发上限到会话连接器。
 
@@ -318,15 +324,16 @@ async def test_download_manager_connection_limit_survives_session_rebuild() -> N
     并发上限经构造参数传入，_ensure_session 每次构造连接器均施加；依赖会话
     建立后二次注入会在重建时静默失去上限。
     """
+    from aiohttp import BaseConnector
     from seedream_mcp.utils.io.io_download import DownloadManager
 
     manager = DownloadManager(connection_limit=2)
     session = await manager._ensure_session()
-    assert session.connector.limit == 2
+    assert cast(BaseConnector, session.connector).limit == 2
     await manager.close()
     rebuilt = await manager._ensure_session()
     assert rebuilt is not session
-    assert rebuilt.connector.limit == 2
+    assert cast(BaseConnector, rebuilt.connector).limit == 2
     await manager.close()
 
 
@@ -355,7 +362,7 @@ class _FakeLifespanCtx:
 
     def __init__(self, lifespan_context: Any) -> None:
         class _FakeRequestContext:
-            pass
+            lifespan_context: Any
 
         self.request_context = _FakeRequestContext()
         self.request_context.lifespan_context = lifespan_context
@@ -389,7 +396,10 @@ async def test_try_get_shared_client_returns_lifespan_instance() -> None:
     shared_client = SeedreamClient(config)
     shared_dm = DownloadManager()
     try:
-        ctx = _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm})
+        ctx = cast(
+            Context[Any, Any],
+            _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm}),
+        )
         assert _try_get_shared_client(ctx) is shared_client
         assert _try_get_shared_download_manager(ctx) is shared_dm
     finally:
@@ -409,16 +419,19 @@ def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
     assert _try_get_shared_download_manager(None) is None
 
     # lifespan 非 dict
-    assert _try_get_shared_client(_FakeLifespanCtx("not a dict")) is None
-    assert _try_get_shared_download_manager(_FakeLifespanCtx("not a dict")) is None
+    assert _try_get_shared_client(cast(Context[Any, Any], _FakeLifespanCtx("not a dict"))) is None
+    assert (
+        _try_get_shared_download_manager(cast(Context[Any, Any], _FakeLifespanCtx("not a dict")))
+        is None
+    )
 
     # 值类型不匹配，非 SeedreamClient / DownloadManager
-    bad_ctx = _FakeLifespanCtx({"client": "fake", "download_manager": 123})
+    bad_ctx = cast(Context[Any, Any], _FakeLifespanCtx({"client": "fake", "download_manager": 123}))
     assert _try_get_shared_client(bad_ctx) is None
     assert _try_get_shared_download_manager(bad_ctx) is None
 
     # dict 中缺 key
-    empty_ctx = _FakeLifespanCtx({})
+    empty_ctx = cast(Context[Any, Any], _FakeLifespanCtx({}))
     assert _try_get_shared_client(empty_ctx) is None
     assert _try_get_shared_download_manager(empty_ctx) is None
 
@@ -438,7 +451,7 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
 
     captured_client: Any = None
 
-    async def fake_executor(client: Any, context: Any) -> dict:
+    async def fake_executor(client: Any, context: Any) -> dict[str, Any]:
         nonlocal captured_client
         captured_client = client
         return {"success": True, "data": [], "usage": {}, "status": "completed"}
@@ -450,7 +463,7 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
         start_log_message="",
         start_log_values_builder=lambda c: (),
     )
-    ctx = _FakeLifespanCtx({"client": shared_client})
+    ctx = cast(Context[Any, Any], _FakeLifespanCtx({"client": shared_client}))
     try:
         result = await execute_generation_handler(
             params=TextToImageInput(prompt="test", auto_save=False),
@@ -485,7 +498,7 @@ async def test_execute_generation_handler_passes_shared_download_manager(
 
     captured_dm: Any = None
 
-    async def fake_executor(client: Any, context: Any) -> dict:
+    async def fake_executor(client: Any, context: Any) -> dict[str, Any]:
         return {
             "success": True,
             "data": [{"url": "http://x/1.png"}],
@@ -502,7 +515,7 @@ async def test_execute_generation_handler_passes_shared_download_manager(
         tool_name: Any,
         download_manager: Any = None,
         images: Any = None,
-    ) -> tuple:
+    ) -> tuple[list[Any], list[Any]]:
         nonlocal captured_dm
         captured_dm = download_manager
         return [], []
@@ -516,10 +529,15 @@ async def test_execute_generation_handler_passes_shared_download_manager(
         start_log_message="",
         start_log_values_builder=lambda c: (),
     )
-    ctx = _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm})
+    ctx = cast(
+        Context[Any, Any],
+        _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm}),
+    )
     try:
         await common_module.execute_generation_handler(
-            params=TextToImageInput(prompt="test", auto_save=True, response_format="url"),
+            params=TextToImageInput(
+                prompt="test", auto_save=True, response_format=cast(ResponseFormat, "url")
+            ),
             config=config,
             module_logger=MagicMock(),
             metadata=metadata,

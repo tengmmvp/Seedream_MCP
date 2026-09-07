@@ -2,11 +2,14 @@
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+from mcp.server.mcpserver import Context
 from mcp.shared.exceptions import NoBackChannelError
 from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult, Root
 from PIL import Image
+from pydantic import FileUrl
 
 import seedream_mcp.utils.io.io_path as io_path_module
 from seedream_mcp.client import SeedreamClient
@@ -31,7 +34,9 @@ class _FakeSession:
 
 def _roots_result(roots: list[Path]) -> ListRootsResult:
     """构造工具链 resolver 注入形态的 roots 结果。"""
-    return ListRootsResult(roots=[Root(uri=root.as_uri(), name=root.name) for root in roots])
+    return ListRootsResult(
+        roots=[Root(uri=cast(FileUrl, root.as_uri()), name=root.name) for root in roots]
+    )
 
 
 class _CapabilityDeclaringSession(_FakeSession):
@@ -314,7 +319,7 @@ async def test_run_browse_images_rejects_absolute_path_outside_roots(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
         BrowseImagesInput(directory=str(tmp_path), recursive=False),
-        ctx=_FakeContext([first_root, second_root]),
+        ctx=cast("Context[Any, Any]", _FakeContext([first_root, second_root])),
     )
 
     assert result.is_error is True
@@ -469,7 +474,7 @@ async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
         BrowseImagesInput(directory=".", recursive=False),
-        ctx=_FailingContext(),
+        ctx=cast("Context[Any, Any]", _FailingContext()),
     )
 
     assert result.is_error is False
@@ -508,8 +513,8 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
 
-    result = await workspace_roots_resource(_FakeContext([mcp_root]))
-    data = json.loads(result)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", _FakeContext([mcp_root])))
+    data = json.loads(cast(str, result))
 
     # server 资源输出统一正斜杠，比对时归一化路径分隔符。
     assert str(mcp_root.resolve()).replace("\\", "/") in data["roots"]
@@ -526,8 +531,8 @@ async def test_workspace_roots_resource_empty_roots_falls_back_to_env(
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
 
-    result = await workspace_roots_resource(_FakeContext([]))
-    data = json.loads(result)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", _FakeContext([])))
+    data = json.loads(cast(str, result))
 
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
@@ -542,8 +547,8 @@ async def test_workspace_roots_resource_capability_missing_falls_back_to_env(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     session = _CapabilityDeclaringSession([], declared=False)
 
-    result = await workspace_roots_resource(_SpyContext(session))
-    data = json.loads(result)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", _SpyContext(session)))
+    data = json.loads(cast(str, result))
 
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
@@ -557,8 +562,8 @@ async def test_workspace_roots_resource_list_roots_failure_falls_back_to_env(
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
 
-    result = await workspace_roots_resource(_FailingContext())
-    data = json.loads(result)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", _FailingContext()))
+    data = json.loads(cast(str, result))
 
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
@@ -599,11 +604,12 @@ async def test_workspace_roots_resource_modern_session_first_round_requests_inpu
     mcp_root.mkdir()
     ctx = _ModernProtocolContext([mcp_root])
 
-    result = await workspace_roots_resource(ctx)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
     assert isinstance(result, InputRequiredResult)
-    assert set(result.input_requests) == {"roots"}
-    assert isinstance(result.input_requests["roots"], ListRootsRequest)
+    requests = cast("dict[str, object]", result.input_requests)
+    assert set(requests) == {"roots"}
+    assert isinstance(requests["roots"], ListRootsRequest)
     # 首轮不得退回 roots/list 直连：多轮形态下直连在该版本会话上必然失败。
     assert ctx.session.list_roots_calls == 0
 
@@ -620,7 +626,7 @@ async def test_workspace_roots_resource_modern_session_retry_round_reports_roots
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     ctx = _ModernProtocolContext([mcp_root], responses={"roots": _roots_result([mcp_root])})
 
-    result = await workspace_roots_resource(ctx)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
     assert isinstance(result, str)
     data = json.loads(result)
@@ -638,10 +644,11 @@ async def test_workspace_roots_resource_modern_session_malformed_response_asks_a
     mcp_root.mkdir()
     ctx = _ModernProtocolContext([mcp_root], responses={"roots": "not-a-roots-result"})
 
-    result = await workspace_roots_resource(ctx)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
     assert isinstance(result, InputRequiredResult)
-    assert set(result.input_requests) == {"roots"}
+    requests = cast("dict[str, object]", result.input_requests)
+    assert set(requests) == {"roots"}
     assert ctx.session.list_roots_calls == 0
 
 
@@ -655,7 +662,7 @@ async def test_workspace_roots_resource_modern_session_capability_missing_falls_
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     ctx = _ModernProtocolContext([], declared=False)
 
-    result = await workspace_roots_resource(ctx)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
     assert isinstance(result, str)
     data = json.loads(result)
@@ -674,7 +681,7 @@ async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
     mcp_root.mkdir()
     ctx = _VersionlessModernContext([mcp_root])
 
-    result = await workspace_roots_resource(ctx)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
     assert isinstance(result, str)
     data = json.loads(result)
@@ -692,7 +699,7 @@ async def test_workspace_roots_resource_modern_round_empty_roots_falls_back_to_e
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     ctx = _ModernProtocolContext([], responses={"roots": _roots_result([])})
 
-    result = await workspace_roots_resource(ctx)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
     assert isinstance(result, str)
     data = json.loads(result)
@@ -710,7 +717,7 @@ async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
     mcp_root.mkdir()
     ctx = _ModernProtocolContext([mcp_root], protocol_version="2025-11-25")
 
-    result = await workspace_roots_resource(ctx)
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
     assert isinstance(result, str)
     data = json.loads(result)
@@ -739,7 +746,7 @@ async def test_workspace_roots_scope_without_request_context_falls_back_to_env(
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
 
-    result = await workspace_roots_resource(_NoSessionContext())
+    result = await workspace_roots_resource(cast("Context[Any, Any]", _NoSessionContext()))
 
     assert isinstance(result, str)
     data = json.loads(result)

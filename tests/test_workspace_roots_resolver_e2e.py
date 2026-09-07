@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 from mcp.client import Client, ClientRequestContext
 from mcp.types import CallToolResult, ListRootsResult, Root
+from pydantic import FileUrl
 
 import seedream_mcp.server as server
 from seedream_mcp import config as config_module
@@ -28,7 +29,9 @@ def _make_callback(roots: list[Path]) -> Any:
 
     async def roots_callback(context: ClientRequestContext) -> ListRootsResult:
         del context
-        return ListRootsResult(roots=[Root(uri=root.as_uri(), name=root.name) for root in roots])
+        return ListRootsResult(
+            roots=[Root(uri=FileUrl(root.as_uri()), name=root.name) for root in roots]
+        )
 
     return roots_callback
 

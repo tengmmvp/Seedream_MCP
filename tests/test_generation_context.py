@@ -2,6 +2,7 @@
 
 from dataclasses import fields
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -15,7 +16,14 @@ from seedream_mcp.tools.core.common import (
     format_generation_response,
     update_result_with_auto_save,
 )
-from seedream_mcp.tools.core.schemas import ImageToImageInput, TextToImageInput
+from seedream_mcp.tools.core.schemas import (
+    BackgroundMode,
+    GenerationTool,
+    ImageToImageInput,
+    OptimizePromptOptions,
+    OutputFormat,
+    TextToImageInput,
+)
 from seedream_mcp.utils.io.io_save import AutoSaveResult
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 
@@ -94,7 +102,9 @@ def test_build_generation_context_background_carried_to_context() -> None:
     config = _build_pro_config()
     context = build_generation_context(
         ImageToImageInput(
-            prompt="透明背景", image="https://example.com/a.png", background="transparent"
+            prompt="透明背景",
+            image="https://example.com/a.png",
+            background=cast(BackgroundMode, "transparent"),
         ),
         config,
     )
@@ -130,8 +140,8 @@ def test_build_generation_context_rejects_transparent_with_jpeg() -> None:
             ImageToImageInput(
                 prompt="透明背景",
                 image="https://example.com/a.png",
-                background="transparent",
-                output_format="jpeg",
+                background=cast(BackgroundMode, "transparent"),
+                output_format=cast(OutputFormat, "jpeg"),
             ),
             config,
         )
@@ -237,8 +247,8 @@ def test_build_generation_context_accepts_seedream_50_output_format_and_tools() 
     context = build_generation_context(
         TextToImageInput(
             prompt="test",
-            output_format="png",
-            tools=[{"type": "web_search"}],
+            output_format=cast(OutputFormat, "png"),
+            tools=[cast(GenerationTool, {"type": "web_search"})],
         ),
         config,
     )
@@ -256,7 +266,9 @@ def test_build_generation_context_rejects_output_format_for_seedream_45() -> Non
     )
 
     with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 系列"):
-        build_generation_context(TextToImageInput(prompt="test", output_format="png"), config)
+        build_generation_context(
+            TextToImageInput(prompt="test", output_format=cast(OutputFormat, "png")), config
+        )
 
 
 def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
@@ -283,7 +295,10 @@ def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -
         SeedreamValidationError, match="仅支持 optimize_prompt_options.mode=standard"
     ):
         build_generation_context(
-            TextToImageInput(prompt="test", optimize_prompt_options={"mode": "fast"}),
+            TextToImageInput(
+                prompt="test",
+                optimize_prompt_options=cast(OptimizePromptOptions, {"mode": "fast"}),
+            ),
             config,
         )
 
@@ -342,7 +357,7 @@ def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() 
             "status": "completed",
         },
     ]
-    request_errors = {2: RuntimeError("请求超时")}
+    request_errors: dict[int, Exception] = {2: RuntimeError("请求超时")}
 
     result = aggregate_parallel_generation_results(
         request_results=request_results,
@@ -604,7 +619,7 @@ def test_build_generation_context_explicit_auto_save_overrides_config() -> None:
 def test_input_schema_rejects_non_bool_auto_save() -> None:
     """auto_save 类型约束属 schema 字段声明，不可解析的值在构造输入模型时即被拒绝。"""
     with pytest.raises(ValidationError):
-        TextToImageInput(prompt="t", auto_save="maybe")
+        TextToImageInput(prompt="t", auto_save=cast(Any, "maybe"))
 
 
 # ==================== save_path 生成前预检 ====================
@@ -673,7 +688,7 @@ async def test_execute_generation_handler_maps_unresolvable_save_root_to_config_
     monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", "~/pics")
     monkeypatch.setattr(io_path, "resolve_cached_save_base_dir", _runtime_error)
 
-    async def fake_executor(client: object, context: object) -> dict:
+    async def fake_executor(client: object, context: object) -> dict[str, Any]:
         raise AssertionError("预检失败后不应分发计费请求")
 
     result = await execute_generation_handler(

@@ -44,7 +44,7 @@ def _context() -> GenerationExecutionContext:
 
 def test_aggregate_partial_request_status_flattens_batch_to_partial() -> None:
     """任一成功请求自身为 partial 时批次 status 为 partial，不得上报 completed。"""
-    request_results = [
+    request_results: list[dict[str, Any] | None] = [
         {
             "success": True,
             "data": [{"url": "https://example.com/1.png"}],
@@ -78,7 +78,7 @@ def test_aggregate_partial_request_status_flattens_batch_to_partial() -> None:
 
 def test_aggregate_all_completed_requests_report_completed() -> None:
     """全部请求 completed 且无失败时批次 status 保持 completed，不误降级。"""
-    request_results = [
+    request_results: list[dict[str, Any] | None] = [
         {
             "success": True,
             "data": [{"url": f"https://example.com/{index}.png"}],
@@ -98,7 +98,7 @@ def test_aggregate_all_completed_requests_report_completed() -> None:
 
 def test_aggregate_failed_request_with_top_level_error_extracts_message() -> None:
     """请求级软失败结果进入并行聚合时，错误消息取自透传的顶层 error 而非兜底文案。"""
-    request_results = [
+    request_results: list[dict[str, Any] | None] = [
         {
             "success": False,
             "status": "failed",

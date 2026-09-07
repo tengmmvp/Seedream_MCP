@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.common import extract_images
@@ -22,7 +23,7 @@ from seedream_mcp.tools.core.schemas import BrowseImagesInput, TextToImageInput
 
 def test_generation_success_path_matches_schema() -> None:
     """成功路径 structuredContent 可实例化 GenerationStructuredOutput。"""
-    structured = {
+    structured: dict[str, Any] = {
         "tool": "text_to_image",
         "success": True,
         "status": "completed",
@@ -46,7 +47,7 @@ def test_generation_success_path_matches_schema() -> None:
 
 def test_generation_exception_path_error_is_dict() -> None:
     """异常路径 error 为 dict 形态且可实例化输出模型。"""
-    structured = {
+    structured: dict[str, Any] = {
         "tool": "text_to_image",
         "success": False,
         "status": "failed",
@@ -59,7 +60,7 @@ def test_generation_exception_path_error_is_dict() -> None:
 
 def test_generation_failed_result_error_is_dict() -> None:
     """失败路径完整字段的 structuredContent 可实例化，error 为 dict 形态。"""
-    structured = {
+    structured: dict[str, Any] = {
         "tool": "text_to_image",
         "success": False,
         "status": "failed",
@@ -84,7 +85,7 @@ def test_generation_failed_result_error_is_dict() -> None:
 
 def test_browse_success_path_matches_schema() -> None:
     """浏览成功路径 structuredContent 可实例化 BrowseImagesStructuredOutput。"""
-    structured = {
+    structured: dict[str, Any] = {
         "tool": "browse_images",
         "success": True,
         "status": "completed",
@@ -106,7 +107,7 @@ def test_browse_success_path_matches_schema() -> None:
 
 def test_browse_failure_path_matches_schema() -> None:
     """浏览失败路径 error 为 dict 形态且可实例化输出模型。"""
-    structured = {
+    structured: dict[str, Any] = {
         "tool": "browse_images",
         "success": False,
         "status": "failed",
@@ -119,7 +120,7 @@ def test_browse_failure_path_matches_schema() -> None:
 
 def test_browse_empty_path_matches_schema() -> None:
     """空结果路径 status=empty 可实例化输出模型。"""
-    structured = {
+    structured: dict[str, Any] = {
         "tool": "browse_images",
         "success": True,
         "status": "empty",

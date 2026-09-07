@@ -6,6 +6,7 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -60,8 +61,9 @@ def test_validate_connected_peer_ip_fails_closed_without_peer() -> None:
     manager = DownloadManager()
 
     with pytest.raises(DownloadError, match="无法获取连接对端IP"):
-        manager._validate_connected_peer_ip(  # type: ignore[arg-type]
-            _FakeResponseNoConnection(), "https://example.com/x.png"
+        manager._validate_connected_peer_ip(
+            _FakeResponseNoConnection(),  # type: ignore[arg-type]
+            "https://example.com/x.png",
         )
 
 
@@ -138,7 +140,7 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     auto_save_module._cleanup_last_run.clear()
     cleanup_calls: list[int] = []
 
-    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict:
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
         cleanup_calls.append(days)
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 
@@ -181,7 +183,7 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     auto_save_module._cleanup_last_run.clear()
     cleanup_calls: list[int] = []
 
-    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict:
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
         cleanup_calls.append(days)
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 
@@ -261,7 +263,7 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
     auto_save_module._cleanup_last_run.clear()
     calls: list[int] = []
 
-    def failing_cleanup(days: int, max_total_bytes: int | None) -> dict:
+    def failing_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
         calls.append(days)
         raise RuntimeError("persistent cleanup failure")
 

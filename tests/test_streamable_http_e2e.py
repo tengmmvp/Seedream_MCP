@@ -484,9 +484,8 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
     from mcp.client import Client
 
     created_servers: list[uvicorn.Server] = []
-    real_server_cls = uvicorn.Server
 
-    class _CapturingServer(real_server_cls):
+    class _CapturingServer(uvicorn.Server):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             created_servers.append(self)
@@ -508,6 +507,8 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
         thread_errors.clear()
     if not listening:
         pytest.fail("streamable-http 冒烟服务器未在时限内开始监听")
+
+    assert thread is not None
 
     try:
         async with Client(

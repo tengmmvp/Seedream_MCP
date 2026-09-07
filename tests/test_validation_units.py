@@ -137,7 +137,7 @@ def test_validate_response_format_empty() -> None:
 def test_validate_response_format_non_string() -> None:
     """非字符串输入抛校验错误。"""
     with pytest.raises(SeedreamValidationError):
-        validate_response_format(123)
+        validate_response_format(123)  # type: ignore[arg-type]
 
 
 # ==================== validate_max_images ====================
@@ -387,13 +387,13 @@ def test_optimize_options_reject_unknown_keys() -> None:
 def test_validate_background_rejects_non_string_output_format() -> None:
     """output_format 非字符串时显式报错，与 background 参数的类型防御口径一致。"""
     with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
-        validate_background("transparent", _PRO_MODEL_ID, output_format=123)
+        validate_background("transparent", _PRO_MODEL_ID, output_format=123)  # type: ignore[arg-type]
 
 
 def test_validate_background_rejects_non_string_output_format_for_opaque() -> None:
     """background 取 opaque 时同样先做 output_format 类型校验，不因短路跳过。"""
     with pytest.raises(SeedreamValidationError, match="output_format 必须为字符串"):
-        validate_background("opaque", _PRO_MODEL_ID, output_format=["jpeg"])
+        validate_background("opaque", _PRO_MODEL_ID, output_format=["jpeg"])  # type: ignore[arg-type]
 
 
 # ==================== 单边像素区间约束 ====================

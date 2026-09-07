@@ -7,9 +7,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from starlette.types import Message, Receive, Send
 
 import seedream_mcp.transport as transport_module
 from seedream_mcp.config import SeedreamConfig
@@ -194,20 +195,20 @@ def test_attach_passes_api_prefix_to_origin_guard(active_config: None) -> None:
 # ==================== 健康检查中间件 ====================
 
 
-async def _run_health_check(method: str, path: str) -> tuple[list[object], list[dict[str, Any]]]:
+async def _run_health_check(method: str, path: str) -> tuple[list[object], list[Message]]:
     """以给定方法与路径调用健康检查中间件，返回到达下游的路径与发出的消息。"""
     reached: list[object] = []
 
     async def downstream(scope: Any, receive: Any, send: Any) -> None:
         reached.append(scope.get("path"))
 
-    sent: list[dict[str, Any]] = []
+    sent: list[Message] = []
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     middleware = _HealthCheckMiddleware(downstream)
-    await middleware({"type": "http", "method": method, "path": path}, None, send)
+    await middleware({"type": "http", "method": method, "path": path}, cast(Receive, None), send)
     return reached, sent
 
 
@@ -260,13 +261,13 @@ def _make_guard_app() -> tuple[list[object], _WebOriginGuardMiddleware]:
     return reached, _WebOriginGuardMiddleware(downstream, api_prefix=_API_PREFIX)
 
 
-async def _run_guard(guard: _WebOriginGuardMiddleware, scope: dict) -> list[dict]:
-    sent: list[dict] = []
+async def _run_guard(guard: _WebOriginGuardMiddleware, scope: dict[str, Any]) -> list[Message]:
+    sent: list[Message] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
         sent.append(message)
 
-    await guard(scope, None, send)
+    await guard(scope, cast(Receive, None), send)
     return sent
 
 
@@ -357,7 +358,7 @@ async def test_origin_guard_passes_non_http_scope() -> None:
     """lifespan 等非 http 流量直接透传，不读 headers。"""
     reached, guard = _make_guard_app()
 
-    await guard({"type": "lifespan"}, None, None)
+    await guard({"type": "lifespan"}, cast(Receive, None), cast(Send, None))
 
     assert reached == [None]
 

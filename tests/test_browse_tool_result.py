@@ -10,8 +10,10 @@ SEEDREAM_WORKSPACE_ROOT 回退取得，存储区为工作区派生的 .seedream/
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, NoReturn, cast
 
 import pytest
+from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
@@ -88,7 +90,7 @@ async def test_browse_directory_error_branches_report_terminal_progress(
 
     invalid_ctx = RecordingProgressContext()
     invalid_result = await handle_browse_images(
-        BrowseImagesInput(directory="ba\x00d"), ctx=invalid_ctx
+        BrowseImagesInput(directory="ba\x00d"), ctx=cast("Context[Any, Any]", invalid_ctx)
     )
     assert invalid_result.is_error is True
     assert invalid_ctx.calls[-1][0] == 100.0
@@ -97,7 +99,8 @@ async def test_browse_directory_error_branches_report_terminal_progress(
 
     out_of_scope_ctx = RecordingProgressContext()
     out_of_scope_result = await handle_browse_images(
-        BrowseImagesInput(directory=str(outside_dir)), ctx=out_of_scope_ctx
+        BrowseImagesInput(directory=str(outside_dir)),
+        ctx=cast("Context[Any, Any]", out_of_scope_ctx),
     )
     assert out_of_scope_result.is_error is True
     assert out_of_scope_ctx.calls[-1][0] == 100.0
@@ -119,7 +122,7 @@ async def test_browse_images_ignores_outside_images_without_crashing(
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
 
-    def _fake_find_images_in_directory(*args, **kwargs):
+    def _fake_find_images_in_directory(*args: object, **kwargs: object) -> list[Path]:
         return [outside_img]
 
     monkeypatch.setattr(
@@ -146,7 +149,7 @@ async def test_browse_images_empty_format_filter_skips_scan(
     """
     (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    def _fail_find(*args, **kwargs):
+    def _fail_find(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("无有效后缀时不应触发目录扫描")
 
     monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fail_find)
@@ -168,7 +171,7 @@ async def test_browse_images_fallback_error_preserves_format_filter(
 ) -> None:
     """外层兜底错误分支回显经同一规则过滤的 format_filter，不丢失用户原始输入。"""
 
-    async def _exploding_request(params, ctx, **kwargs):
+    async def _exploding_request(params: object, ctx: object, **kwargs: object) -> NoReturn:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(browse_images_module, "execute_browse_request", _exploding_request)
@@ -333,7 +336,7 @@ async def test_browse_images_offset_error_signal_visible_to_client(
     result = await mcp.call_tool(
         "browse_images",
         {"directory": ".", "recursive": False, "limit": 2, "offset": 5},
-        context=_NoRootsContext(),
+        context=cast("Context[Any, Any]", _NoRootsContext()),
     )
 
     assert isinstance(result, CallToolResult)
@@ -349,7 +352,7 @@ async def test_browse_images_format_filter_error_signal_visible_to_client(
     result = await mcp.call_tool(
         "browse_images",
         {"directory": ".", "format_filter": [".svg"]},
-        context=_NoRootsContext(),
+        context=cast("Context[Any, Any]", _NoRootsContext()),
     )
 
     assert isinstance(result, CallToolResult)
@@ -391,7 +394,7 @@ async def test_browse_images_fallback_preserves_resolved_directories(
 
     from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
-    def _exploding_display_entries(**kwargs):
+    def _exploding_display_entries(**kwargs: object) -> NoReturn:
         raise RuntimeError("boom")
 
     monkeypatch.setattr(browse_core_module, "_build_display_entries", _exploding_display_entries)
@@ -469,7 +472,7 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
 
     save_root = _seed_save_root(workspace_root)
 
-    def _raise_permission(path):
+    def _raise_permission(path: object) -> NoReturn:
         raise PermissionError("denied")
 
     monkeypatch.setattr(path_module.os, "scandir", _raise_permission)
@@ -497,7 +500,7 @@ async def test_browse_images_empty_message_sanitizes_unreadable_dir_paths(
 
     hostile = workspace_root / "dir\r\napi_key=leak"
 
-    def _fake_find(*args, **kwargs):
+    def _fake_find(*args: object, **kwargs: Any) -> list[Path]:
         kwargs["unreadable_dirs"].append(hostile)
         return []
 

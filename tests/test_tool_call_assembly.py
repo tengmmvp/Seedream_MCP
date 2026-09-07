@@ -91,6 +91,7 @@ async def test_flat_arguments_assemble_into_input_model(
         },
     )
 
+    assert isinstance(result, CallToolResult)
     assert result.is_error is False
     params = spy_run_handlers["params"]
     assert isinstance(params, TextToImageInput)
@@ -128,6 +129,7 @@ async def test_image_to_image_full_flat_arguments_assemble_into_input_model(
         },
     )
 
+    assert isinstance(result, CallToolResult)
     assert result.is_error is False
     params = spy_run_handlers["params"]
     assert isinstance(params, ImageToImageInput)
@@ -191,6 +193,7 @@ async def test_multi_image_fusion_full_flat_arguments_assemble_into_input_model(
         },
     )
 
+    assert isinstance(result, CallToolResult)
     assert result.is_error is False
     params = spy_run_handlers["params"]
     assert isinstance(params, MultiImageFusionInput)
@@ -313,6 +316,7 @@ async def test_cross_field_validation_error_carries_structured_content(
     """
     result = await mcp.call_tool("image_to_image", {"image": "https://example.com/ref.png"})
 
+    assert isinstance(result, CallToolResult)
     assert result.is_error is True
     structured = result.structured_content
     assert structured is not None

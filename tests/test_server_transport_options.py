@@ -5,8 +5,10 @@
 
 import asyncio
 from argparse import Namespace
+from typing import Any, cast
 
 import pytest
+from starlette.types import Receive, Send
 
 import seedream_mcp.server as server
 import seedream_mcp.transport as transport_module
@@ -241,7 +243,7 @@ def test_cli_main_allows_non_loopback_http_with_tls(
     args.ssl_certfile = "/fake/cert.pem"
     args.ssl_keyfile = "/fake/key.pem"
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    captured: dict[str, object] = {}
+    captured: dict[str, dict[str, object]] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
         host,
@@ -378,14 +380,14 @@ async def test_bearer_auth_middleware_accepts_valid_token() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer s3cret")]}
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
 
 async def test_bearer_auth_middleware_rejects_invalid_token() -> None:
     """令牌不符的请求被 401 拒绝，不进入下游应用。"""
-    sent: list[dict] = []
+    sent: list[dict[str, Any]] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
         sent.append(message)
@@ -395,14 +397,14 @@ async def test_bearer_auth_middleware_rejects_invalid_token() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer wrong")]}
-    await middleware(scope, None, send)
+    await middleware(scope, cast(Receive, None), send)
 
     assert sent[0]["status"] == 401
 
 
 async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
     """401 响应须含 www-authenticate 头与 invalid_token 错误体，符合 RFC 6750。"""
-    sent: list[dict] = []
+    sent: list[dict[str, Any]] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
         sent.append(message)
@@ -412,7 +414,7 @@ async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer wrong")]}
-    await middleware(scope, None, send)
+    await middleware(scope, cast(Receive, None), send)
 
     start, body_msg = sent[0], sent[1]
     assert start["type"] == "http.response.start"
@@ -427,7 +429,7 @@ async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
 
 async def test_bearer_auth_middleware_rejects_missing_header() -> None:
     """缺少 Authorization 头的请求被 401 拒绝。"""
-    sent: list[dict] = []
+    sent: list[dict[str, Any]] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
         sent.append(message)
@@ -437,7 +439,7 @@ async def test_bearer_auth_middleware_rejects_missing_header() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": []}
-    await middleware(scope, None, send)
+    await middleware(scope, cast(Receive, None), send)
 
     assert sent[0]["status"] == 401
 
@@ -451,14 +453,14 @@ async def test_bearer_auth_middleware_accepts_case_insensitive_scheme() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"bearer s3cret")]}
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
 
 async def test_bearer_auth_middleware_rejects_non_bearer_scheme() -> None:
     """非 Bearer 授权方案直接拒绝，不回退比较令牌值。"""
-    sent: list[dict] = []
+    sent: list[dict[str, Any]] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
         sent.append(message)
@@ -468,7 +470,7 @@ async def test_bearer_auth_middleware_rejects_non_bearer_scheme() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Basic czNjcmV0")]}
-    await middleware(scope, None, send)
+    await middleware(scope, cast(Receive, None), send)
 
     assert sent[0]["status"] == 401
 
@@ -482,14 +484,14 @@ async def test_bearer_auth_middleware_strips_token_whitespace() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer  s3cret ")]}
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
 
 async def test_bearer_auth_middleware_decides_on_first_authorization_header() -> None:
     """多个 authorization 头取首个即判定：首个非 Bearer 或首个令牌不符均拒绝。"""
-    sent: list[dict] = []
+    sent: list[dict[str, Any]] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
         sent.append(message)
@@ -505,7 +507,7 @@ async def test_bearer_auth_middleware_decides_on_first_authorization_header() ->
             (b"authorization", b"Bearer s3cret"),
         ],
     }
-    await middleware(scope, None, send)
+    await middleware(scope, cast(Receive, None), send)
     assert sent[0]["status"] == 401
 
     sent.clear()
@@ -516,7 +518,7 @@ async def test_bearer_auth_middleware_decides_on_first_authorization_header() ->
             (b"authorization", b"Bearer s3cret"),
         ],
     }
-    await middleware(scope_second, None, send)
+    await middleware(scope_second, cast(Receive, None), send)
     assert sent[0]["status"] == 401
 
 
@@ -529,14 +531,14 @@ async def test_bearer_auth_middleware_passes_lifespan_scope() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "lifespan", "headers": []}
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
 
 async def test_bearer_auth_middleware_rejects_websocket_scope() -> None:
     """启用鉴权时 websocket 流量应被拒绝，避免绕过 Bearer 校验。"""
-    sent: list[dict] = []
+    sent: list[dict[str, Any]] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
         sent.append(message)
@@ -546,7 +548,7 @@ async def test_bearer_auth_middleware_rejects_websocket_scope() -> None:
 
     middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "websocket", "headers": []}
-    await middleware(scope, None, send)
+    await middleware(scope, cast(Receive, None), send)
 
     assert sent == [{"type": "websocket.close", "code": 1008}]
 

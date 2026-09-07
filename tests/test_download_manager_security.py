@@ -7,8 +7,9 @@
 import asyncio
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from aiohttp import ClientResponse
 import pytest
 
 from seedream_mcp.utils.io.io_download import DownloadError, DownloadManager, _DNS_CACHE_MAX_SIZE
@@ -201,8 +202,8 @@ def test_validate_connected_peer_ip_blocks_non_public_ip() -> None:
     fake_response = _FakeResponse(peer_ip="127.0.0.1")
 
     with pytest.raises(DownloadError, match="非公网地址"):
-        manager._validate_connected_peer_ip(  # type: ignore[arg-type]
-            fake_response, "https://example.com"
+        manager._validate_connected_peer_ip(
+            cast(ClientResponse, fake_response), "https://example.com"
         )
 
 
@@ -211,9 +212,7 @@ def test_validate_connected_peer_ip_allows_public_ip() -> None:
     manager = DownloadManager()
     fake_response = _FakeResponse(peer_ip="8.8.8.8")
 
-    manager._validate_connected_peer_ip(  # type: ignore[arg-type]
-        fake_response, "https://example.com"
-    )
+    manager._validate_connected_peer_ip(cast(ClientResponse, fake_response), "https://example.com")
 
 
 def test_validate_connected_peer_ip_blocks_multicast() -> None:
@@ -223,8 +222,8 @@ def test_validate_connected_peer_ip_blocks_multicast() -> None:
     for peer_ip in ("224.0.0.1", "239.1.1.1", "ff02::1", "fec0::1"):
         fake_response = _FakeResponse(peer_ip=peer_ip)
         with pytest.raises(DownloadError, match="组播地址|site-local"):
-            manager._validate_connected_peer_ip(  # type: ignore[arg-type]
-                fake_response, "https://example.com"
+            manager._validate_connected_peer_ip(
+                cast(ClientResponse, fake_response), "https://example.com"
             )
 
 
@@ -419,7 +418,9 @@ class _SlowHopClockSession:
     伪时钟仅随 get 调用推进，建模每跳各享全额超时窗口的最坏情形。
     """
 
-    def __init__(self, responses: list, clock_now: list[float], hop_seconds: float) -> None:
+    def __init__(
+        self, responses: list[_FakeResponse], clock_now: list[float], hop_seconds: float
+    ) -> None:
         self._responses = list(responses)
         self._idx = 0
         self._clock_now = clock_now
@@ -483,7 +484,7 @@ async def test_download_image_retries_timeout_then_succeeds(
 class _HeaderCaptureSession:
     """按序返回预设响应并捕获每次 get 的请求头，供重定向头剥离断言使用。"""
 
-    def __init__(self, responses: list) -> None:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
         self._responses = list(responses)
         self._idx = 0
         self.captured_headers: list[dict[str, str]] = []
@@ -491,8 +492,8 @@ class _HeaderCaptureSession:
     def get(self, url: str, **kwargs: object) -> object:
         del url
         assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
-        headers = kwargs.get("headers") or {}
-        self.captured_headers.append(dict(headers))  # type: ignore[arg-type]
+        headers = cast("dict[str, str]", kwargs.get("headers") or {})
+        self.captured_headers.append(dict(headers))
         resp = self._responses[min(self._idx, len(self._responses) - 1)]
         self._idx += 1
         return resp

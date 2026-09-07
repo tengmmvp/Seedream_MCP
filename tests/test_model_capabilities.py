@@ -4,6 +4,7 @@
 """
 
 from dataclasses import asdict
+from typing import cast
 
 import pytest
 
@@ -93,7 +94,7 @@ def test_model_payloads_entries_match_alias_table() -> None:
     expected_fields = set(ModelCapabilities.__dataclass_fields__)
     for entry in payloads:
         assert set(entry) == {"alias", "model_id"} | expected_fields, entry["alias"]
-        assert entry["model_id"] == MODEL_ALIASES[entry["alias"]]
+        assert entry["model_id"] == MODEL_ALIASES[cast(str, entry["alias"])]
 
 
 def test_model_payloads_allowed_presets_are_sorted_lists() -> None:
@@ -112,6 +113,6 @@ def test_model_payloads_allowed_presets_are_sorted_lists() -> None:
 def test_model_payloads_capability_values_match_asdict() -> None:
     """条目能力取值与 asdict 全等，仅 allowed_presets 归一为有序列表。"""
     for entry in model_payloads():
-        expected = asdict(get_model_capabilities(entry["model_id"]))
+        expected = asdict(get_model_capabilities(cast(str, entry["model_id"])))
         expected["allowed_presets"] = sorted(expected["allowed_presets"])
         assert {key: entry[key] for key in expected} == expected, entry["alias"]

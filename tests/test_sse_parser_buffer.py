@@ -1,11 +1,15 @@
 """SSE 流式解析的缓冲区上限保护与事件聚合测试。"""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
+import httpx
 import pytest
 
 import seedream_mcp.utils.io.io_sse as sse_parser_module
@@ -18,6 +22,9 @@ from seedream_mcp.utils.io.io_sse import (
 
 from _client_fakes import _FakeLog, _FakeSSEResponse
 
+if TYPE_CHECKING:
+    from loguru import Logger
+
 
 class _CapturingLog(_FakeLog):
     """捕获 debug 调用参数的日志替身，供进度与未知事件日志断言使用。"""
@@ -29,6 +36,16 @@ class _CapturingLog(_FakeLog):
         self.debug_calls.append(a)
 
 
+def _sse_response(chunks: list[bytes]) -> httpx.Response:
+    """构造伪流式响应，以 httpx.Response 类型供解析器调用。"""
+    return cast(httpx.Response, _FakeSSEResponse(chunks))
+
+
+def _log() -> Logger:
+    """构造吞日志替身，以 Logger 类型供解析器调用。"""
+    return cast("Logger", _FakeLog())
+
+
 async def test_parse_sse_response_collects_events_and_completed() -> None:
     """完整流解析出 data 事件、completed 状态与 usage。"""
     chunks = [
@@ -36,13 +53,13 @@ async def test_parse_sse_response_collects_events_and_completed() -> None:
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert result["success"] is True
     assert len(result["data"]) == 1
@@ -56,13 +73,13 @@ async def test_parse_sse_response_preserves_complete_events_before_truncation() 
     complete = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
     oversized_tail = b"y" * 2000  # 不完整尾部，超过 event_truncate_threshold。
     result = await parse_sse_response(
-        _FakeSSEResponse([complete + oversized_tail]),
+        _sse_response([complete + oversized_tail]),
         model_id="m",
         chunk_size=64,
         buffer_max_size=512,
         event_truncate_threshold=512,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/1.png"
@@ -75,13 +92,13 @@ async def test_parse_sse_response_raises_on_request_level_error() -> None:
     chunks = [b'data: {"error":{"message":"bad request","code":"x"}}\n\n']
     with pytest.raises(SeedreamAPIError, match="bad request"):
         await parse_sse_response(
-            _FakeSSEResponse(chunks),
+            _sse_response(chunks),
             model_id="m",
             chunk_size=64,
             buffer_max_size=4096,
             event_truncate_threshold=4096,
             total_bytes_limit=64 * 1024,
-            log=_FakeLog(),
+            log=_log(),
         )
 
 
@@ -98,13 +115,13 @@ async def test_parse_sse_request_level_error_code_narrowed_to_string() -> None:
         chunks = [b'data: {"error":{"message":"bad request",' + code_json + b"}}\n\n"]
         with pytest.raises(SeedreamAPIError, match="bad request") as exc_info:
             await parse_sse_response(
-                _FakeSSEResponse(chunks),
+                _sse_response(chunks),
                 model_id="m",
                 chunk_size=64,
                 buffer_max_size=4096,
                 event_truncate_threshold=4096,
                 total_bytes_limit=64 * 1024,
-                log=_FakeLog(),
+                log=_log(),
             )
         assert exc_info.value.error_code == expected
 
@@ -115,13 +132,13 @@ async def test_parse_sse_request_level_error_message_truncated_to_8kb() -> None:
     chunks = [b'data: {"error":{"message":"' + long_message.encode() + b'","code":"e"}}\n\n']
     with pytest.raises(SeedreamAPIError) as exc_info:
         await parse_sse_response(
-            _FakeSSEResponse(chunks),
+            _sse_response(chunks),
             model_id="m",
             chunk_size=64,
             buffer_max_size=64 * 1024,
             event_truncate_threshold=64 * 1024,
             total_bytes_limit=256 * 1024,
-            log=_FakeLog(),
+            log=_log(),
         )
     message = exc_info.value.message
     assert message.startswith("<truncated:20000 chars>")
@@ -135,13 +152,13 @@ async def test_parse_sse_response_logs_unknown_event_type_with_segment_size() ->
     unknown = b'data: {"type":"image_generation.unknown_future","payload":"x"}\n\n'
     chunks = [unknown, b'data: {"type":"image_generation.completed","usage":{}}\n\n']
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=log,
+        log=cast("Logger", log),
     )
     assert result["data"] == []
     assert result["status"] == "completed"
@@ -162,13 +179,13 @@ async def test_parse_sse_response_progress_log_by_threshold(
     # 无事件分隔符的不完整流仅累计字节，驱动进度分支。
     chunk = b"z" * 60
     await parse_sse_response(
-        _FakeSSEResponse([chunk, chunk, chunk, chunk]),
+        _sse_response([chunk, chunk, chunk, chunk]),
         model_id="m",
         chunk_size=16,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=log,
+        log=cast("Logger", log),
     )
     progress_logs = [call for call in log.debug_calls if "已处理" in str(call)]
     # 240 字节按 100 字节间隔至少记录两次；取模判定下 240 % 1MB 永不为 0。
@@ -240,13 +257,13 @@ async def test_parse_sse_response_classifies_partial_failed_event() -> None:
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert result["success"] is True
     # 含 error 项使 status 从 completed 降级为 partial。
@@ -264,13 +281,13 @@ async def test_parse_sse_response_strips_leading_bom() -> None:
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/1.png"
@@ -285,13 +302,13 @@ async def test_parse_sse_response_normalizes_crlf_line_endings() -> None:
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\r\n\r\n',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/1.png"
@@ -305,13 +322,13 @@ async def test_parse_sse_response_normalizes_cr_line_endings() -> None:
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\r\r',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/2.png"
@@ -331,13 +348,13 @@ async def test_parse_sse_response_crlf_multiline_event_survives_arbitrary_split(
     for size in (1, 4):
         chunks = [stream[i : i + size] for i in range(0, len(stream), size)]
         result = await parse_sse_response(
-            _FakeSSEResponse(chunks),
+            _sse_response(chunks),
             model_id="m",
             chunk_size=64,
             buffer_max_size=4096,
             event_truncate_threshold=4096,
             total_bytes_limit=64 * 1024,
-            log=_FakeLog(),
+            log=_log(),
         )
         assert len(result["data"]) == 1, f"分块大小 {size} 下事件不得丢失"
         assert result["data"][0]["url"] == "http://x/1.png"
@@ -353,13 +370,13 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
     # 拆成 4 字节一块，模拟分片到达。
     chunks = [full_event[i : i + 4] for i in range(0, len(full_event), 4)]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert result["status"] == "completed"
     assert result["usage"]["generated_images"] == 2
@@ -375,10 +392,10 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
     offload_sizes: list[int] = []
     real_to_thread = sse_parser_module.asyncio.to_thread
 
-    async def spy(func: object, *args: object, **kwargs: object) -> object:
+    async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
         if func is sse_parser_module._slice_parse_segment and len(args) == 4:
-            offload_sizes.append(int(args[2]) - int(args[1]))  # type: ignore[arg-type]
-        return await real_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
+            offload_sizes.append(int(args[2]) - int(args[1]))
+        return await real_to_thread(func, *args, **kwargs)
 
     monkeypatch.setattr(sse_parser_module.asyncio, "to_thread", spy)
 
@@ -388,13 +405,13 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=256 * 1024,
         event_truncate_threshold=256 * 1024,
         total_bytes_limit=256 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert len(result["data"]) == 1
     assert len(offload_sizes) == 1
@@ -404,13 +421,13 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
 async def test_parse_sse_response_empty_stream_returns_none_status() -> None:
     """空流无任何事件：返回 success=True、空 data、status=None、tools=None。"""
     result = await parse_sse_response(
-        _FakeSSEResponse([]),
+        _sse_response([]),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert result["success"] is True
     assert result["data"] == []
@@ -429,13 +446,13 @@ async def test_parse_sse_response_propagates_tools_from_completed_event() -> Non
         b'"tools":[{"type":"web_search"}]}\n\n',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert result["tools"] == [{"type": "web_search"}]
 
@@ -448,13 +465,13 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
     ]
     normal_result = await parse_sse_response(
-        _FakeSSEResponse(normal_chunks),
+        _sse_response(normal_chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert normal_result["truncated_events"] == 0
 
@@ -462,13 +479,13 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
     complete = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
     oversized_tail = b"y" * 2000  # 不完整尾部，超过 event_truncate_threshold。
     truncated_result = await parse_sse_response(
-        _FakeSSEResponse([complete + oversized_tail]),
+        _sse_response([complete + oversized_tail]),
         model_id="m",
         chunk_size=64,
         buffer_max_size=512,
         event_truncate_threshold=512,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert truncated_result["truncated_events"] >= 1
     assert truncated_result["status"] == "partial"
@@ -486,13 +503,13 @@ async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=log,
+        log=cast("Logger", log),
     )
     assert len(result["data"]) == 1
     assert result["truncated_events"] == 1
@@ -509,13 +526,13 @@ async def test_parse_sse_response_counts_deeply_nested_trailing_event() -> None:
         deep,
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=256 * 1024,
         event_truncate_threshold=256 * 1024,
         total_bytes_limit=256 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert len(result["data"]) == 1
     assert result["truncated_events"] == 1
@@ -532,13 +549,13 @@ async def test_parse_sse_response_done_sentinel_tail_not_counted_truncated() -> 
         b"data: [DONE]",
     ]
     sentinel_result = await parse_sse_response(
-        _FakeSSEResponse(sentinel_chunks),
+        _sse_response(sentinel_chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert sentinel_result["truncated_events"] == 0
     assert sentinel_result["status"] == "completed"
@@ -548,13 +565,13 @@ async def test_parse_sse_response_done_sentinel_tail_not_counted_truncated() -> 
         b"\n  \n",
     ]
     whitespace_result = await parse_sse_response(
-        _FakeSSEResponse(whitespace_chunks),
+        _sse_response(whitespace_chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert whitespace_result["truncated_events"] == 0
     assert whitespace_result["status"] == "completed"
@@ -580,13 +597,13 @@ async def test_parse_sse_response_large_event_not_truncated_below_file_size_thre
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
     ]
     result = await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        _sse_response(chunks),
         model_id="m",
         chunk_size=64,
         buffer_max_size=2048,
         event_truncate_threshold=32 * 1024,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert result["truncated_events"] == 0
     assert len(result["data"]) == 1
@@ -602,7 +619,7 @@ async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
     consumed = 0
 
     class _CountingResponse(_FakeSSEResponse):
-        async def aiter_bytes(self, chunk_size: int):
+        async def aiter_bytes(self, chunk_size: int) -> AsyncIterator[bytes]:
             nonlocal consumed
             del chunk_size
             for c in self._chunks:
@@ -612,14 +629,14 @@ async def test_parse_sse_response_terminates_on_total_bytes_limit() -> None:
     response = _CountingResponse([chunk] * total_chunks)
     with pytest.raises(SeedreamAPIError, match="SSE 响应流总量超限"):
         await parse_sse_response(
-            response,
+            cast(httpx.Response, response),
             model_id="m",
             chunk_size=64,
             buffer_max_size=4096,
             event_truncate_threshold=4096,
             # 上限设为两块体积，第三块接收后累计即超限。
             total_bytes_limit=len(chunk) * 2,
-            log=_FakeLog(),
+            log=_log(),
         )
 
     # 超限后停止读取：实际消费块数远小于上游供给。
@@ -639,7 +656,7 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
     consumed = 0
 
     class _CountingResponse(_FakeSSEResponse):
-        async def aiter_bytes(self, chunk_size: int):
+        async def aiter_bytes(self, chunk_size: int) -> AsyncIterator[bytes]:
             nonlocal consumed
             del chunk_size
             for c in self._chunks:
@@ -648,14 +665,14 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
 
     response = _CountingResponse([event * events_per_chunk] * total_chunks)
     result = await parse_sse_response(
-        response,
+        cast(httpx.Response, response),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         # 条目数在约 12 块处先行触顶，字节上限不触发。
         total_bytes_limit=512 * 1024,
-        log=_FakeLog(),
+        log=_log(),
     )
 
     # 条目数封顶：触顶判定以事件为粒度即时生效，已解析条目恰好等于上限。
@@ -678,13 +695,13 @@ async def test_parse_sse_response_item_limit_floor_keeps_legal_batches() -> None
     # 33 × 53 = 1749 字节，未超 2048 字节总量限额，仅条目数维度可能触发。
     assert event_count * len(event) < 2048
     result = await parse_sse_response(
-        _FakeSSEResponse([event * event_count]),
+        _sse_response([event * event_count]),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=2048,
-        log=_FakeLog(),
+        log=_log(),
     )
     assert len(result["data"]) == event_count
     assert result["truncated_events"] == 0
@@ -697,7 +714,7 @@ async def test_parse_sse_response_terminates_on_deadline() -> None:
     closed = 0
 
     class _DeadlineResponse(_FakeSSEResponse):
-        async def aiter_bytes(self, chunk_size: int):
+        async def aiter_bytes(self, chunk_size: int) -> AsyncIterator[bytes]:
             nonlocal consumed
             del chunk_size
             for c in self._chunks:
@@ -711,13 +728,13 @@ async def test_parse_sse_response_terminates_on_deadline() -> None:
 
     with pytest.raises(asyncio.TimeoutError, match="总时长预算"):
         await parse_sse_response(
-            _DeadlineResponse([event] * 200),
+            cast(httpx.Response, _DeadlineResponse([event] * 200)),
             model_id="m",
             chunk_size=64,
             buffer_max_size=4096,
             event_truncate_threshold=4096,
             total_bytes_limit=64 * 1024,
-            log=_FakeLog(),
+            log=_log(),
             # 截止时间已过，首个块即触发终止。
             deadline=time.monotonic() - 1.0,
         )
@@ -727,9 +744,9 @@ async def test_parse_sse_response_terminates_on_deadline() -> None:
     assert consumed < 200
 
 
-def _resp_with_content_type(content_type: str) -> SimpleNamespace:
+def _resp_with_content_type(content_type: str) -> httpx.Response:
     """构造仅含 content-type 头的伪响应对象。"""
-    return SimpleNamespace(headers={"content-type": content_type})
+    return cast(httpx.Response, SimpleNamespace(headers={"content-type": content_type}))
 
 
 def test_is_sse_response_matches_plain_media_type() -> None:
@@ -759,4 +776,4 @@ def test_is_sse_response_rejects_prefixed_lookalike_media_type() -> None:
 
 def test_is_sse_response_rejects_missing_content_type() -> None:
     """缺省 content-type 头时返回 False，交由调用方走非流式解析。"""
-    assert is_sse_response(SimpleNamespace(headers={})) is False
+    assert is_sse_response(cast(httpx.Response, SimpleNamespace(headers={}))) is False

@@ -12,6 +12,7 @@ import sys
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -158,7 +159,7 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     # PIL 已导入时快照解压炸弹阈值，收尾恢复：HEIC 注册分支经 Image.MAX_IMAGE_PIXELS
     # 做进程级覆写且不自行恢复；未导入时不快照，避免复位本身触发 PIL 的惰性导入。
-    pil_image_module = sys.modules.get("PIL.Image")
+    pil_image_module: Any = sys.modules.get("PIL.Image")
     max_pixels_before = pil_image_module.MAX_IMAGE_PIXELS if pil_image_module is not None else None
 
     # HEIC 解码器注册标志为模块全局，重置以隔离注册时序相关用例

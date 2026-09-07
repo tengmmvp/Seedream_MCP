@@ -165,7 +165,7 @@ def test_stream_enabled_ok_for_lite() -> None:
 def test_stream_non_bool_rejected_for_supporting_model() -> None:
     """非布尔的 stream 在支持流式的模型下同样于参数级拒绝，不透传上游。"""
     with pytest.raises(SeedreamValidationError, match="stream 必须为布尔值"):
-        validate_stream("true", LITE)
+        validate_stream("true", LITE)  # type: ignore[arg-type]
 
 
 # ==================== Endpoint ID 无法识别模型时由 API 校验放行 ====================

@@ -22,7 +22,7 @@ def _activate_config(monkeypatch: pytest.MonkeyPatch, config: SeedreamConfig) ->
 
 async def test_second_session_exit_keeps_shared_resource_for_first(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """双会话并发时会话 2 退出仅递减引用，会话 1 的连接池保持可用。"""
     _activate_config(monkeypatch, SeedreamConfig(api_key="test_key"))
@@ -50,7 +50,7 @@ async def test_second_session_exit_keeps_shared_resource_for_first(
 
 async def test_exit_skips_cleanup_while_retired_resource_in_flight(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """退役资源仍有在途会话时，活动槽位归零也不触发清理。
 
@@ -83,7 +83,7 @@ async def test_exit_skips_cleanup_while_retired_resource_in_flight(
 
 async def test_new_session_rebuilds_after_all_sessions_exit(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """全部会话退出触发清理后，新会话进入重建共享资源而非复用已关闭实例。"""
     _activate_config(monkeypatch, SeedreamConfig(api_key="test_key"))
@@ -99,7 +99,7 @@ async def test_new_session_rebuilds_after_all_sessions_exit(
 
 async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
     monkeypatch: pytest.MonkeyPatch,
-    reset_lifespan_singletons,
+    reset_lifespan_singletons: None,
 ) -> None:
     """teardown 清理在 drain 让出期间有新会话进入时放弃关闭，复用的资源保持可用。
 

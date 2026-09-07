@@ -7,7 +7,7 @@ dict 原样保留；网络层经 httpx.MockTransport 与伪 SSE 注入，不触�
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
@@ -17,6 +17,9 @@ from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.io.io_sse import parse_sse_response
 
 from _client_fakes import _FakeLog, _FakeSSEResponse, _install_mock_transport
+
+if TYPE_CHECKING:
+    from loguru import Logger
 
 
 @pytest.mark.parametrize("usage_value", ["text", 123])
@@ -74,13 +77,13 @@ def _sse_chunks(usage_json: str) -> list[bytes]:
 async def _parse_sse(chunks: list[bytes]) -> dict[str, Any]:
     """以固定测试参数解析伪 SSE 响应。"""
     return await parse_sse_response(
-        _FakeSSEResponse(chunks),
+        cast(httpx.Response, _FakeSSEResponse(chunks)),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,
-        log=_FakeLog(),
+        log=cast("Logger", _FakeLog()),
     )
 
 

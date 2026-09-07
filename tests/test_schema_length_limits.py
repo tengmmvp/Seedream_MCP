@@ -6,6 +6,8 @@ browse format_filter 单项 16 与条目数 32 的接受与超长拒绝边界，
 空白拒绝边界，锁定 inputSchema 约束不被回归。统一使用 model_validate 构造输入。
 """
 
+from typing import cast
+
 import pytest
 from pydantic import ValidationError
 
@@ -29,7 +31,7 @@ def test_save_path_accepts_max_length_boundary() -> None:
     """save_path 长度恰为 1024 应被接受。"""
     model = TextToImageInput.model_validate({"prompt": "x", "save_path": "a" * 1024})
 
-    assert len(model.save_path) == 1024
+    assert len(cast(str, model.save_path)) == 1024
 
 
 def test_save_path_rejects_exceeding_max_length() -> None:
@@ -42,7 +44,7 @@ def test_custom_name_accepts_max_length_boundary() -> None:
     """custom_name 长度恰为 255 应被接受。"""
     model = TextToImageInput.model_validate({"prompt": "x", "custom_name": "a" * 255})
 
-    assert len(model.custom_name) == 255
+    assert len(cast(str, model.custom_name)) == 255
 
 
 def test_custom_name_rejects_exceeding_max_length() -> None:
@@ -55,7 +57,7 @@ def test_browse_directory_accepts_max_length_boundary() -> None:
     """browse directory 长度恰为 1024 应被接受。"""
     model = BrowseImagesInput.model_validate({"directory": "a" * 1024})
 
-    assert len(model.directory) == 1024
+    assert len(cast(str, model.directory)) == 1024
 
 
 def test_browse_directory_rejects_exceeding_max_length() -> None:
@@ -81,7 +83,7 @@ def test_browse_format_filter_accepts_item_count_boundary() -> None:
     """format_filter 条目数恰为 32 应被接受。"""
     model = BrowseImagesInput.model_validate({"format_filter": [f".e{i}" for i in range(32)]})
 
-    assert len(model.format_filter) == 32
+    assert len(cast("list[str]", model.format_filter)) == 32
 
 
 def test_browse_format_filter_rejects_exceeding_item_count() -> None:

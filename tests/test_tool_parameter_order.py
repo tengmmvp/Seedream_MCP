@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 
 from seedream_mcp.resources import mcp
@@ -28,7 +28,7 @@ from seedream_mcp.tools.core.schemas import (
 from seedream_mcp.utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 
 # MCP 注册工具名到输入模型的映射，平铺 inputSchema 等价性断言的数据源。
-_TOOL_INPUT_MODELS = {
+_TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "text_to_image": TextToImageInput,
     "image_to_image": ImageToImageInput,
     "multi_image_fusion": MultiImageFusionInput,
@@ -368,7 +368,9 @@ async def test_flat_input_schema_forbids_additional_properties() -> None:
         ("browse_images", {"directory": ".", "recursve": True}),
     ],
 )
-async def test_flat_tool_rejects_unknown_parameter_names(tool_name: str, typo_args: dict) -> None:
+async def test_flat_tool_rejects_unknown_parameter_names(
+    tool_name: str, typo_args: dict[str, Any]
+) -> None:
     """五工具的平铺签名在运行时拒绝拼错参数名，不被静默丢弃。
 
     平铺参数模型默认忽略未知键，server 注册期替换为 extra=forbid 子类补偿，服务端
@@ -397,7 +399,9 @@ async def test_flat_tool_rejects_unknown_parameter_names(tool_name: str, typo_ar
         ("browse_images", {"directory": "   "}),
     ],
 )
-async def test_flat_tool_rejects_blank_string_inputs(tool_name: str, blank_args: dict) -> None:
+async def test_flat_tool_rejects_blank_string_inputs(
+    tool_name: str, blank_args: dict[str, Any]
+) -> None:
     """纯空白字符串在平铺签名层被拒，不进入工具体后才失败。
 
     模型层经 strip 加非空校验拒绝，平铺参数模型不含 strip 配置，server 以 pattern
@@ -449,7 +453,7 @@ async def test_generation_tool_rejects_oversized_tools_list() -> None:
     只校验两侧同步，两侧同时丢失上限时仍相等，故分别经工具调用与模型构造两路
     拒绝。
     """
-    entries = [{"type": "web_search"}] * 9
+    entries: list[Any] = [{"type": "web_search"}] * 9
     with pytest.raises(ToolError):
         await mcp.call_tool("text_to_image", {"prompt": "a cat", "tools": entries})
     with pytest.raises(ValidationError):

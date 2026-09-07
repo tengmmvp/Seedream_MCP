@@ -2,9 +2,10 @@
 
 import asyncio
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 import pytest
+from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
@@ -196,7 +197,7 @@ async def test_parallel_batch_progress_strictly_increasing(
     result = await handle_text_to_image(
         TextToImageInput(prompt="test", request_count=3, parallelism=2),
         _build_config(),
-        ctx,
+        cast(Context, ctx),
     )
 
     assert result.is_error is False
@@ -243,7 +244,7 @@ async def test_parallel_batch_progress_delivery_order_strictly_increasing(
     result = await handle_text_to_image(
         TextToImageInput(prompt="test", request_count=3, parallelism=2),
         _build_config(),
-        ctx,
+        cast(Context, ctx),
     )
 
     assert result.is_error is False
@@ -283,7 +284,7 @@ async def test_single_request_progress_full_sequence_with_auto_save(
         preview_enabled=False,
     )
     ctx = RecordingProgressContext()
-    result = await handle_text_to_image(TextToImageInput(prompt="test"), config, ctx)
+    result = await handle_text_to_image(TextToImageInput(prompt="test"), config, cast(Context, ctx))
 
     assert result.is_error is False
     values = ctx.progress_values
@@ -307,7 +308,9 @@ async def test_single_request_progress_without_auto_save_jumps_70_to_100(
     _patch_generation_success(monkeypatch)
 
     ctx = RecordingProgressContext()
-    result = await handle_text_to_image(TextToImageInput(prompt="test"), _build_config(), ctx)
+    result = await handle_text_to_image(
+        TextToImageInput(prompt="test"), _build_config(), cast(Context, ctx)
+    )
 
     assert result.is_error is False
     values = ctx.progress_values
@@ -335,7 +338,7 @@ async def test_context_failure_progress_jumps_directly_to_complete(
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
     ctx = RecordingProgressContext()
     result = await handle_text_to_image(
-        TextToImageInput(prompt="test", save_path="a\x00b"), config, ctx
+        TextToImageInput(prompt="test", save_path="a\x00b"), config, cast(Context, ctx)
     )
 
     assert result.is_error is True
@@ -454,7 +457,7 @@ def test_aggregate_all_failed_without_exceptions_falls_back_to_generation_failed
 
 def test_aggregate_parallel_generation_results_deep_merges_usage() -> None:
     """聚合多请求 usage：嵌套 dict 子键递归累加，标量数值累加，bool/str 跳过。"""
-    request_results = [
+    request_results: list[dict[str, Any] | None] = [
         {
             "success": True,
             "data": [{"url": "https://example.com/1.png"}],

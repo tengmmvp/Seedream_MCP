@@ -683,7 +683,9 @@ def test_augment_generation_payload_skips_non_dict_items(tmp_path: Path) -> None
 
 def test_augment_generation_payload_skips_non_string_local_path(tmp_path: Path) -> None:
     """local_path 非字符串时跳过该条目，不附 web_path 且既有键不变。"""
-    structured = {"data": [{"local_path": 123, "keep": "v"}, {"local_path": None, "keep": 2}]}
+    structured: dict[str, object] = {
+        "data": [{"local_path": 123, "keep": "v"}, {"local_path": None, "keep": 2}]
+    }
 
     generate_module.augment_generation_payload(structured, tmp_path)
 

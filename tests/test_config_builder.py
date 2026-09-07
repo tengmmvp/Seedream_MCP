@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -541,7 +542,7 @@ def test_build_config_missing_picker_registration_fails_loudly(
     ],
 )
 def test_seedream_config_rejects_invalid_positive_or_non_negative_field(
-    kwargs: dict, match: str
+    kwargs: dict[str, Any], match: str
 ) -> None:
     """各数值字段越界时 __post_init__ 经 validate 抛 SeedreamConfigError。"""
     from seedream_mcp.config import SeedreamConfig
@@ -586,7 +587,9 @@ def test_seedream_config_accepts_zero_cleanup_days() -> None:
         ({"auto_save_max_retries": -1}, "auto_save_max_retries"),
     ],
 )
-def test_seedream_config_rejects_invalid_validate_branches(kwargs: dict, match: str) -> None:
+def test_seedream_config_rejects_invalid_validate_branches(
+    kwargs: dict[str, Any], match: str
+) -> None:
     """validate() 各拒绝分支经构造期校验拒绝非法配置。
 
     覆盖占位符密钥、非法协议 base_url、空 model_id、非正 timeout/api_timeout、
@@ -747,7 +750,9 @@ def test_build_config_rejects_base_url_without_netloc(
         ({"model_id": "doubao-seededit-3-0-250828"}, "SEEDREAM_MODEL_ID"),
     ],
 )
-def test_seedream_config_validation_errors_mention_env_var(kwargs: dict, env_name: str) -> None:
+def test_seedream_config_validation_errors_mention_env_var(
+    kwargs: dict[str, Any], env_name: str
+) -> None:
     """校验失败消息附带对应环境变量名，用户可直接定位配置来源。"""
     from seedream_mcp.config import SeedreamConfig
 

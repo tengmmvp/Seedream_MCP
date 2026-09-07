@@ -3,6 +3,7 @@
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image
@@ -139,7 +140,7 @@ async def test_save_image_rejects_oversized_pixel_header(
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
-    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict:
+    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
         return {
             "success": True,
             "file_path": str(target),
@@ -182,7 +183,7 @@ async def test_save_image_rejects_decompression_bomb_error(
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
-    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict:
+    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
         del url, save_path, fsync
         return {
             "success": True,
@@ -220,7 +221,7 @@ async def test_save_image_rejects_pixels_between_limit_and_double(
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
-    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict:
+    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
         del url, save_path, fsync
         return {
             "success": True,
@@ -298,7 +299,7 @@ async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
 
     cleanup_calls: list[int] = []
 
-    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict:
+    def fake_run_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
         cleanup_calls.append(days)
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 

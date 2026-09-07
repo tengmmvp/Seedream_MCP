@@ -6,10 +6,11 @@ _resolve_failure_guidance 的查表与流水线降级文案拼接。guidance 拼
 档案携带 user_hint 时该建议即最终建议，档案无建议时才以查表值补充。
 """
 
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from mcp.types import TextContent
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import (
@@ -386,7 +387,7 @@ def test_failure_guidance_table_covers_all_profile_error_codes() -> None:
     )
 
 
-async def _run_failing_handler(exc: Exception):
+async def _run_failing_handler(exc: Exception) -> str:
     """以给定异常驱动 execute_generation_handler 的降级分支，返回结果文本。"""
     config = SeedreamConfig(api_key="test_key")
 
@@ -409,7 +410,7 @@ async def _run_failing_handler(exc: Exception):
         request_executor=failing_executor,
     )
     assert result.is_error is True
-    return result.content[0].text
+    return cast(TextContent, result.content[0]).text
 
 
 async def test_handler_failure_text_validation_error_uses_profile_hint_only() -> None:

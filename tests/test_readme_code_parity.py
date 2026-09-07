@@ -14,6 +14,7 @@ from pathlib import Path
 
 import seedream_mcp
 from _readme_helpers import BASE_README, _fenced_blocks, _read_readme
+from pydantic import BaseModel
 from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
@@ -24,7 +25,7 @@ from seedream_mcp.tools.core.schemas import (
 from seedream_mcp.utils.model.model_capabilities import MODEL_CAPABILITIES
 
 # 工具名到输入模型的映射，镜像 server.py 平铺签名组装各工具时使用的输入模型。
-_TOOL_INPUT_MODELS = {
+_TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "text_to_image": TextToImageInput,
     "image_to_image": ImageToImageInput,
     "multi_image_fusion": MultiImageFusionInput,
@@ -144,7 +145,7 @@ def _tables(name: str) -> list[list[str]]:
     return tables
 
 
-def _capability_table(name: str) -> list[list[str]]:
+def _capability_table(name: str) -> list[str]:
     """定位模型能力差异表，锚点为含 "1K / 1.5K / 2K" 单元格的唯一表格。"""
     candidates = [
         rows

@@ -5,6 +5,7 @@ import logging
 from collections import namedtuple
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from loguru import logger
@@ -36,7 +37,7 @@ def test_setup_logging_respects_force_standard_logging_false(
     """force_standard_logging=False 时 basicConfig 显式传入 force=False。"""
     captured_kwargs = {}
 
-    def fake_basic_config(*args, **kwargs) -> None:
+    def fake_basic_config(*args: object, **kwargs: object) -> None:
         del args
         captured_kwargs.update(kwargs)
 
@@ -58,7 +59,7 @@ def test_setup_logging_respects_force_standard_logging_true(
     """force_standard_logging=True 时 basicConfig 透传 force。"""
     captured_kwargs = {}
 
-    def fake_basic_config(*args, **kwargs) -> None:
+    def fake_basic_config(*args: object, **kwargs: object) -> None:
         del args
         captured_kwargs.update(kwargs)
 
@@ -128,7 +129,7 @@ def test_setup_logging_warns_when_root_handlers_block_bridge(
     """
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [logging.NullHandler()])
-    captured_kwargs: dict = {}
+    captured_kwargs: dict[str, object] = {}
 
     def fake_basic_config(*args: object, **kwargs: object) -> None:
         del args
@@ -247,7 +248,7 @@ def test_intercept_handler_locates_real_caller_frame(
 
 def test_patcher_strips_message_control_chars() -> None:
     """日志消息中的 CR/LF 被逐字符替换为空格，防日志注入伪造行。"""
-    record: dict = {"message": "a\r\nb"}
+    record: dict[str, Any] = {"message": "a\r\nb"}
 
     _strip_message_control_chars(record)
 
@@ -256,7 +257,7 @@ def test_patcher_strips_message_control_chars() -> None:
 
 def test_patcher_strips_nel_and_vertical_tab() -> None:
     """控制字符类与 errors 模块共用单一来源：NEL 与垂直制表符同样压平为空格。"""
-    record: dict = {"message": "a\x85b\x0bc\x00d\x7f"}
+    record: dict[str, Any] = {"message": "a\x85b\x0bc\x00d\x7f"}
 
     _strip_message_control_chars(record)
 
@@ -266,7 +267,7 @@ def test_patcher_strips_nel_and_vertical_tab() -> None:
 def test_patcher_strips_exception_message_control_chars() -> None:
     """exc_info 渲染的异常消息文本同样清洗，换行不落入日志伪造额外行。"""
     exc = ValueError("line1\nFAKE-INFO token=leaked\r\nline3")
-    record: dict = {
+    record: dict[str, Any] = {
         "message": "boom",
         "exception": _RecordException(ValueError, exc, None),
     }
@@ -283,7 +284,7 @@ def test_patcher_leaves_clean_exception_untouched() -> None:
     """无控制字符的异常消息保持原样，不做多余改写。"""
     exc = ValueError("clean message")
     args_before = exc.args
-    record: dict = {
+    record: dict[str, Any] = {
         "message": "boom",
         "exception": _RecordException(ValueError, exc, None),
     }
@@ -295,7 +296,7 @@ def test_patcher_leaves_clean_exception_untouched() -> None:
 
 def test_patcher_handles_record_without_exception() -> None:
     """exception 为 None 的常规记录正常处理，不抛错。"""
-    record: dict = {"message": "plain", "exception": None}
+    record: dict[str, Any] = {"message": "plain", "exception": None}
 
     _strip_message_control_chars(record)
 

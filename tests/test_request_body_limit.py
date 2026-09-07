@@ -8,8 +8,10 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
+from starlette.types import Message, Receive, Send
 
 import seedream_mcp.server as server
 from seedream_mcp.config import build_config_from_sources
@@ -20,9 +22,9 @@ _LIMIT = 64 * 1024 * 1024
 
 async def test_request_body_limit_rejects_oversized_content_length() -> None:
     """Content-Length 超上限时回 413，body 含 request_too_large。"""
-    sent: list[dict] = []
+    sent: list[Message] = []
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -33,7 +35,7 @@ async def test_request_body_limit_rejects_oversized_content_length() -> None:
         "type": "http",
         "headers": [(b"content-length", str(_LIMIT + 1).encode("ascii"))],
     }
-    await middleware(scope, None, send)
+    await middleware(scope, cast(Receive, None), send)
 
     assert len(sent) == 2
     start, body_msg = sent[0], sent[1]
@@ -59,7 +61,7 @@ async def test_request_body_limit_allows_within_limit() -> None:
         "type": "http",
         "headers": [(b"content-length", b"1048576")],  # 1MB
     }
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
@@ -76,7 +78,7 @@ async def test_request_body_limit_boundary_equal_to_limit_passes() -> None:
         "type": "http",
         "headers": [(b"content-length", str(_LIMIT).encode("ascii"))],
     }
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
@@ -90,7 +92,7 @@ async def test_request_body_limit_missing_content_length_passes() -> None:
 
     middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {"type": "http", "headers": []}
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
@@ -104,7 +106,7 @@ async def test_request_body_limit_passes_lifespan_scope() -> None:
 
     middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {"type": "lifespan", "headers": []}
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
@@ -118,7 +120,7 @@ async def test_request_body_limit_passes_websocket_scope() -> None:
 
     middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {"type": "websocket", "headers": []}
-    await middleware(scope, None, None)
+    await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
 
@@ -129,21 +131,21 @@ async def test_request_body_limit_rejects_oversized_chunked_body() -> None:
     用小 limit 避免构造百兆级字节串。
     """
     small_limit = 1024
-    sent: list[dict] = []
+    sent: list[Message] = []
     messages = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
             return msg
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -173,7 +175,7 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
@@ -189,7 +191,7 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
 
     middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
-    await middleware(scope, receive, None)
+    await middleware(scope, receive, cast(Send, None))
 
     assert received == {"called": True}
 
@@ -200,21 +202,21 @@ async def test_request_body_limit_skips_413_when_downstream_already_responded() 
     模拟下游已开始响应才读到超限 body 的形态，连接异常交由服务器协议层处理。
     """
     small_limit = 1024
-    sent: list[dict] = []
+    sent: list[Message] = []
     messages = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
             return msg
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -244,21 +246,21 @@ async def test_request_body_limit_sends_413_when_downstream_output_never_forward
     兜底 500。
     """
     small_limit = 1024
-    sent: list[dict] = []
+    sent: list[Message] = []
     messages = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
             return msg
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -284,7 +286,7 @@ async def test_request_body_limit_sends_413_when_downstream_output_never_forward
 async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunked() -> None:
     """非数字 Content-Length 头降级为 0，超限防护由 chunked 字节累计承担。"""
     small_limit = 1024
-    sent: list[dict] = []
+    sent: list[Message] = []
     received: dict[str, object] = {}
     messages = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
@@ -292,14 +294,14 @@ async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunk
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
             return msg
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -332,7 +334,7 @@ async def test_request_body_limit_non_numeric_content_length_within_limit_passes
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
@@ -348,7 +350,7 @@ async def test_request_body_limit_non_numeric_content_length_within_limit_passes
 
     middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": [(b"content-length", b"abc")]}
-    await middleware(scope, receive, None)
+    await middleware(scope, receive, cast(Send, None))
 
     assert received == {"called": True}
 
@@ -356,21 +358,21 @@ async def test_request_body_limit_non_numeric_content_length_within_limit_passes
 async def test_request_body_limit_swallows_downstream_exception_after_truncation() -> None:
     """超限截断后下游读到空终帧抛异常时被吞掉，统一回 413 而非冒泡 500。"""
     small_limit = 1024
-    sent: list[dict] = []
+    sent: list[Message] = []
     messages = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
             return msg
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
@@ -401,7 +403,7 @@ async def test_request_body_limit_reraises_downstream_exception_within_limit() -
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
@@ -414,7 +416,7 @@ async def test_request_body_limit_reraises_downstream_exception_within_limit() -
     middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     with pytest.raises(RuntimeError, match="downstream boom"):
-        await middleware(scope, receive, None)
+        await middleware(scope, receive, cast(Send, None))
 
 
 async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
@@ -429,14 +431,14 @@ async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
     ]
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
             return msg
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         # 模拟已断开的死连接：任何响应写入都失败。
         del message
         raise RuntimeError("client disconnected")
@@ -462,22 +464,22 @@ async def test_request_body_limit_truncation_keeps_disconnect_watch_yielding() -
     """
     small_limit = 64
     prefix = b'{"jsonrpc":"2.0","id":1,"method":"tools/call"}'
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": prefix, "more_body": True},
         {"type": "http.request", "body": b"x" * 4096, "more_body": True},
         {"type": "http.disconnect"},
     ]
     counter = {"i": 0}
-    sent: list[dict] = []
+    sent: list[Message] = []
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] < len(messages):
             msg = messages[counter["i"]]
             counter["i"] += 1
             return msg
         return {"type": "http.disconnect"}
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def watch_disconnect(receive) -> None:  # type: ignore[no-untyped-def]
@@ -512,10 +514,10 @@ async def test_request_body_limit_sends_413_while_client_stalls_after_overflow()
     small_limit = 64
     prefix = b'{"jsonrpc":"2.0","id":1,"method":"tools/call"}'
     stall = asyncio.Event()
-    sent: list[dict] = []
+    sent: list[Message] = []
     counter = {"i": 0}
 
-    async def receive() -> dict:
+    async def receive() -> Message:
         if counter["i"] == 0:
             counter["i"] += 1
             return {"type": "http.request", "body": prefix, "more_body": True}
@@ -525,7 +527,7 @@ async def test_request_body_limit_sends_413_while_client_stalls_after_overflow()
         await stall.wait()
         raise AssertionError("停发客户端不再返回任何帧")
 
-    async def send(message: dict) -> None:
+    async def send(message: Message) -> None:
         sent.append(message)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]

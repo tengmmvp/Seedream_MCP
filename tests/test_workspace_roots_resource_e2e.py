@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from mcp.client import Client, ClientRequestContext
-from mcp.types import ListRootsResult, ReadResourceResult, Root
+from mcp.types import (
+    ListRootsResult,
+    ReadResourceResult,
+    Root,
+    TextResourceContents,
+)
+from pydantic import FileUrl
 
 import seedream_mcp.utils.io.io_path as io_path_module
 
@@ -22,13 +29,14 @@ import seedream_mcp.server as server
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
 
 
-def _single_text_payload(result: ReadResourceResult) -> dict:
+def _single_text_payload(result: ReadResourceResult) -> dict[str, Any]:
     """断言读取结果为单一 JSON 文本内容并返回解析后的字典。"""
     assert len(result.contents) == 1
     content = result.contents[0]
     assert content.mime_type == "application/json"
+    assert isinstance(content, TextResourceContents)
     assert isinstance(content.text, str)
-    return json.loads(content.text)
+    return cast("dict[str, Any]", json.loads(content.text))
 
 
 async def test_initialize_reports_project_version(
@@ -85,7 +93,9 @@ async def test_workspace_roots_resource_reports_client_roots(
 
     async def roots_callback(context: ClientRequestContext) -> ListRootsResult:
         del context
-        return ListRootsResult(roots=[Root(uri=declared_root.as_uri(), name="workspace")])
+        return ListRootsResult(
+            roots=[Root(uri=cast(FileUrl, declared_root.as_uri()), name="workspace")]
+        )
 
     async with Client(server.mcp, mode="legacy", list_roots_callback=roots_callback) as client:
         plain = await client.read_resource("seedream://workspace/roots")
@@ -116,7 +126,9 @@ async def test_workspace_roots_resource_modern_round_trip_reports_client_roots(
         nonlocal callback_calls
         del context
         callback_calls += 1
-        return ListRootsResult(roots=[Root(uri=declared_root.as_uri(), name="workspace")])
+        return ListRootsResult(
+            roots=[Root(uri=cast(FileUrl, declared_root.as_uri()), name="workspace")]
+        )
 
     async with Client(server.mcp, list_roots_callback=roots_callback) as client:
         plain = await client.read_resource("seedream://workspace/roots")

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from starlette.types import Message
 
 from seedream_mcp.transport import _LoopbackHostGuardMiddleware
 
@@ -20,9 +21,9 @@ class _MessageSink:
     """收集 ASGI send 消息，供断言短路响应状态码与 websocket 关闭码。"""
 
     def __init__(self) -> None:
-        self.messages: list[dict[str, Any]] = []
+        self.messages: list[Message] = []
 
-    async def __call__(self, message: dict[str, Any]) -> None:
+    async def __call__(self, message: Message) -> None:
         self.messages.append(message)
 
     def status(self) -> int | None:

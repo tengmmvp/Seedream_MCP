@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from seedream_mcp.utils.io.io_storage import (
@@ -17,7 +19,7 @@ from seedream_mcp.utils.io.io_storage import (
 
 
 @pytest.fixture
-def manager(tmp_path):
+def manager(tmp_path: Path) -> FileManager:
     """以临时目录构造 FileManager，测试不写文件内容，仅覆盖文件名与保存路径生成。"""
     return FileManager(base_dir=tmp_path)
 
@@ -35,12 +37,12 @@ def manager(tmp_path):
         ("猫咪照片.jpg", "猫咪照片.jpg"),
     ],
 )
-def test_sanitize_filename_character_rules(manager, raw, expected):
+def test_sanitize_filename_character_rules(manager: FileManager, raw: str, expected: str) -> None:
     """不安全字符替换为下划线，控制字符剥离，常规与中文名保留。"""
     assert manager.sanitize_filename(raw) == expected
 
 
-def test_sanitize_filename_truncates_long_name_keeping_extension(manager):
+def test_sanitize_filename_truncates_long_name_keeping_extension(manager: FileManager) -> None:
     """超长文件名截断词干并保留扩展名，总长不超过上限。"""
     raw = "x" * 300 + ".png"
     sanitized = manager.sanitize_filename(raw)
@@ -48,7 +50,7 @@ def test_sanitize_filename_truncates_long_name_keeping_extension(manager):
     assert sanitized.endswith(".png")
 
 
-def test_sanitize_filename_keeps_extension_at_length_cap(manager):
+def test_sanitize_filename_keeps_extension_at_length_cap(manager: FileManager) -> None:
     """扩展名长度恰在上限内时截断词干并完整保留扩展名，总长精确落在上限。"""
     ext = "." + "e" * (_MAX_EXTENSION_LENGTH - 1)
     raw = "x" * 300 + ext
@@ -57,7 +59,7 @@ def test_sanitize_filename_keeps_extension_at_length_cap(manager):
     assert sanitized.endswith(ext)
 
 
-def test_sanitize_filename_oversized_extension_treated_as_stem(manager):
+def test_sanitize_filename_oversized_extension_treated_as_stem(manager: FileManager) -> None:
     """超长扩展名不可能是合法图片后缀，按纯词干截断，总长不超过上限。
 
     旧行为按 name[:0] + ext 原样保留 300 字符扩展名，截断失效使结果突破上限。
@@ -71,7 +73,7 @@ def test_sanitize_filename_oversized_extension_treated_as_stem(manager):
 # ==================== 唯一文件名长度预算 ====================
 
 
-def test_generate_unique_filename_caps_base_within_budget(manager):
+def test_generate_unique_filename_caps_base_within_budget(manager: FileManager) -> None:
     """255 字符合法 custom_name 的词干按预算截断，拼接时间戳与哈希后总长有界。"""
     filename = manager.generate_unique_filename("c" * 255, ".png", content_hash="a" * 64)
     # 词干截到预算上限，其后缀时间戳 19 位、分隔符与 8 位哈希、扩展名长度合计封顶
@@ -79,13 +81,15 @@ def test_generate_unique_filename_caps_base_within_budget(manager):
     assert filename.startswith("c" * _MAX_UNIQUE_BASE_LENGTH + "_")
 
 
-def test_generate_unique_filename_short_base_not_truncated(manager):
+def test_generate_unique_filename_short_base_not_truncated(manager: FileManager) -> None:
     """短词干不受预算影响，原样保留。"""
     filename = manager.generate_unique_filename("cat", ".png")
     assert filename.startswith("cat_")
 
 
-def test_create_save_path_long_custom_name_stays_within_max_path(manager, tmp_path):
+def test_create_save_path_long_custom_name_stays_within_max_path(
+    manager: FileManager, tmp_path: Path
+) -> None:
     """长 custom_name 生成的路径增量由日期目录、工具目录与预算内文件名封顶。
 
     旧行为：词干无预算时文件名必然超出 MAX_PATH 使自动保存失败。完整路径长度
@@ -118,12 +122,14 @@ def test_create_save_path_long_custom_name_stays_within_max_path(manager, tmp_pa
         ("contact.png", "contact.png"),
     ],
 )
-def test_sanitize_filename_windows_reserved_names(manager, raw, expected):
+def test_sanitize_filename_windows_reserved_names(
+    manager: FileManager, raw: str, expected: str
+) -> None:
     """Windows 保留设备名追加下划线规避，非保留名不受影响。"""
     assert manager.sanitize_filename(raw) == expected
 
 
-def test_sanitize_filename_all_unsafe_falls_back_to_unnamed(manager):
+def test_sanitize_filename_all_unsafe_falls_back_to_unnamed(manager: FileManager) -> None:
     """清理后为空白时回退 unnamed，保证落盘始终有可用文件名。"""
     assert manager.sanitize_filename("   ") == "unnamed"
     # 不安全字符替换为下划线而非剥离，??? 清理后为 ___ 而非空白

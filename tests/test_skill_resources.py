@@ -14,7 +14,7 @@ import threading
 import pytest
 from mcp import MCPError
 from mcp.client import Client
-from mcp.types import ReadResourceResult
+from mcp.types import ReadResourceResult, TextResourceContents
 
 import seedream_mcp.server as server
 
@@ -53,7 +53,7 @@ def _single_text_content(result: ReadResourceResult) -> str:
     assert len(result.contents) == 1
     content = result.contents[0]
     assert content.mime_type == "text/markdown"
-    assert isinstance(content.text, str)
+    assert isinstance(content, TextResourceContents)
     return content.text
 
 

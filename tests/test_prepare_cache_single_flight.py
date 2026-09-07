@@ -411,10 +411,10 @@ async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
         client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
     await inner_started.wait()
-    inflight = next(iter(client._image_preparer._prepare_inflight.values())).task
+    shared_task = next(iter(client._image_preparer._prepare_inflight.values())).task
     creator.cancel()
 
-    done, pending = await asyncio.wait({creator, inflight})
+    done, pending = await asyncio.wait({creator, shared_task})
     assert pending == set()
     assert creator.cancelled()
 
