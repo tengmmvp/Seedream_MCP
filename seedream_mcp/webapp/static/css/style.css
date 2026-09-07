@@ -477,6 +477,13 @@ select:focus {
   flex: 1;
 }
 
+/* 参考图与灯箱区的行内错误提示 */
+.inline-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 /* ==================== 结果区 ==================== */
 
 .result-status {

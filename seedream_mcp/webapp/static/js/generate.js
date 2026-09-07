@@ -11,6 +11,7 @@ import {
   fetchBlobUrl,
   fetchExternalBlobUrl,
   revokeObjectUrls,
+  showInlineError,
   state,
 } from "./api.js";
 import { renderReferences, toolConfig } from "./refs.js";
@@ -288,9 +289,7 @@ export async function submitGenerate(event) {
 }
 
 function showResultError(error) {
-  const box = $("result-error");
-  box.textContent = `[${error.type || "error"}] ${error.message || ""}`;
-  box.classList.remove("hidden");
+  showInlineError($("result-error"), `[${error.type || "error"}] ${error.message || ""}`);
 }
 
 // 失败载荷归一：error.message、error_description、状态码三级回退，未知响应

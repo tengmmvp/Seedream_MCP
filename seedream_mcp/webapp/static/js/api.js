@@ -39,6 +39,27 @@ export const state = {
 export const $ = (id) => document.getElementById(id);
 
 /**
+ * 行内错误提示的统一形态：写文本并显示节点。
+ *
+ * @param {HTMLElement|null} element - 提示节点。
+ * @param {string} message - 提示文本。
+ */
+export function showInlineError(element, message) {
+  element.textContent = message;
+  element.classList.remove("hidden");
+}
+
+/**
+ * 清除行内错误提示：隐藏节点并清空残留文本。
+ *
+ * @param {HTMLElement|null} element - 提示节点。
+ */
+export function clearInlineError(element) {
+  element.textContent = "";
+  element.classList.add("hidden");
+}
+
+/**
  * 对象 URL 生命周期出口：回收指定池的全部登记并清空，与两个 fetch 的登记端
  * 配对，防止 blob URL 累积泄漏。
  *

@@ -56,6 +56,23 @@ async def test_unknown_api_path_returns_json_404(
     assert response.json()["error"] == "not_found"
 
 
+async def test_api_prefix_without_trailing_slash_returns_json_404(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """无尾斜杠的 /web/api 同样回 JSON 404，与子路径口径一致。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _get(app, "/web/api")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_found"
+
+
 async def test_fallback_does_not_swallow_static_or_known_routes(
     tmp_path: Path,
     monkeypatch: Any,
@@ -299,18 +316,44 @@ async def test_page_responses_carry_security_headers(
 
     for response in (index_response, missing_response):
         assert "default-src 'self'" in response.headers["content-security-policy"]
+        assert "connect-src 'self' https:" in response.headers["content-security-policy"]
         assert "script-src 'self'" in response.headers["content-security-policy"]
         assert "frame-ancestors 'self'" in response.headers["content-security-policy"]
         assert response.headers["x-content-type-options"] == "nosniff"
 
 
-async def test_static_direct_output_carries_nosniff(
+async def test_missing_pages_fall_back_to_plain_text(
     tmp_path: Path,
     monkeypatch: Any,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """静态直出的 js/css/svg 附 nosniff，阻断浏览器对静态资源的 MIME 嗅探。"""
+    """静态页文件缺失时入口页降级纯文本 200、404 页降级纯文本 404，不落 500。"""
+    from seedream_mcp.webapp import constants as web_constants
+
+    empty_dir = tmp_path / "empty-static"
+    empty_dir.mkdir()
+    monkeypatch.setattr(web_constants, "STATIC_DIR", empty_dir)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    index_response = await _get(app, "/web")
+    missing_response = await _get(app, "/random/nowhere")
+
+    assert index_response.status_code == 200
+    assert index_response.headers["content-type"].startswith("text/plain")
+    assert "页面缺失" in index_response.text
+    assert missing_response.status_code == 404
+    assert missing_response.headers["content-type"].startswith("text/plain")
+
+
+async def test_static_direct_output_carries_security_headers(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """静态直出的 js/css/svg 附 nosniff 与 CSP，阻断 MIME 嗅探与 svg 同源脚本面。"""
     prepare_static_dir(monkeypatch, tmp_path)
     write_workspace_config(tmp_path)
     app = build_web_app()
@@ -319,3 +362,8 @@ async def test_static_direct_output_carries_nosniff(
 
     assert script_response.status_code == 200
     assert script_response.headers["x-content-type-options"] == "nosniff"
+    static_csp = script_response.headers["content-security-policy"]
+    assert "default-src 'self'" in static_csp
+    assert "script-src 'self'" in static_csp
+    assert "object-src 'none'" in static_csp
+    assert "frame-ancestors 'self'" in static_csp

@@ -184,6 +184,22 @@ async def test_config_info_reachable_when_registered(
     assert "save_root" not in payload
 
 
+async def test_config_info_response_is_not_cacheable(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """config-info 附 cache-control: no-store，鉴权探测状态不落代理缓存。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.get("/web/api/config-info")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
 async def test_config_info_reports_save_root_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -23,7 +23,7 @@ from starlette.types import Scope
 from ..utils.core.logs import get_logger
 from . import constants
 from .constants import (
-    PAGE_SECURITY_HEADERS,
+    STATIC_SECURITY_HEADERS,
     WEB_API_BROWSE,
     WEB_API_CONFIG_INFO,
     WEB_API_GENERATE_IMAGE_TO_IMAGE,
@@ -48,7 +48,7 @@ _registered_servers: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 
 class _GuardedStaticFiles(StaticFiles):
-    """封禁页面文件直达并为直出补 nosniff 的静态资源应用。
+    """封禁页面文件直达并为直出附安全头的静态资源应用。
 
     index 与 404 页须经 meta 域端点直出以携带 CSP 与 nosniff 安全头，StaticFiles
     直出会绕过该头，故页面文件在 GET/HEAD 服务路径上 404；其余方法到不了
@@ -56,8 +56,8 @@ class _GuardedStaticFiles(StaticFiles):
     file_response 按解析后的
     物理路径后缀执行，.html、.htm 与 .xhtml 均封且大小写不敏感：Starlette lookup_path 以
     realpath 定位文件，8.3 短名、大小写变体与尾随字符等别名族都解析到真实页面
-    文件，请求路径后缀判定覆盖不了这些形态。其余静态资源按原行为直出，并统一补
-    x-content-type-options: nosniff 阻断对 css/js/svg 的 MIME 嗅探。
+    文件，请求路径后缀判定覆盖不了这些形态。其余静态资源按原行为直出，并统一附
+    nosniff 与静态 CSP 阻断对 css/js/svg 的 MIME 嗅探与 svg 直出的同源脚本面。
     """
 
     def file_response(
@@ -67,11 +67,12 @@ class _GuardedStaticFiles(StaticFiles):
         scope: Scope,
         status_code: int = 200,
     ) -> Response:
-        """物理路径以页面扩展名结尾时回 404，其余直出附 nosniff，304 分支同样覆盖。"""
+        """物理路径以页面扩展名结尾时回 404，其余直出附安全头，304 分支同样覆盖。"""
         if os.fspath(full_path).lower().endswith((".html", ".htm", ".xhtml")):
             return Response(status_code=404)
         response = super().file_response(full_path, stat_result, scope, status_code)
-        response.headers["x-content-type-options"] = PAGE_SECURITY_HEADERS["x-content-type-options"]
+        for name, value in STATIC_SECURITY_HEADERS.items():
+            response.headers[name] = value
         return response
 
 

@@ -6,7 +6,7 @@
 
 "use strict";
 
-import { $, state } from "./api.js";
+import { $, clearInlineError, showInlineError, state } from "./api.js";
 
 const SINGLE_REF_LIMIT = 1;
 const FUSION_REF_MIN = 2;
@@ -96,8 +96,17 @@ function dataUriTotalChars() {
   );
 }
 
+// 参考图区行内错误提示：拒绝原因落在表单内，替代阻塞式弹窗。
+function showRefError(message) {
+  showInlineError($("ref-error"), message);
+}
+
+function clearRefError() {
+  clearInlineError($("ref-error"));
+}
+
 /**
- * 添加一张参考图并重渲染；超数量上限或 data URI 累计超限时弹窗拒绝。
+ * 添加一张参考图并重渲染；超数量上限或 data URI 累计超限时行内提示拒绝。
  * 上传、灯箱回填与 URL 手输均经此汇聚受校验。
  *
  * @param {string} kind - 来源类型，取 data_uri 或 url。
@@ -108,16 +117,17 @@ function dataUriTotalChars() {
 export function addReference(kind, value, preview) {
   const config = toolConfig(state.tool);
   if (state.refs.length >= config.max) {
-    alert(`该工具最多 ${config.max} 张参考图`);
+    showRefError(`该工具最多 ${config.max} 张参考图`);
     return false;
   }
   if (
     kind === "data_uri" &&
     dataUriTotalChars() + value.length > UPLOAD_TOTAL_LIMIT_CHARS
   ) {
-    alert("参考图总量超过 45MB 上限，请改用图片 URL");
+    showRefError("参考图总量超过 45MB 上限，请改用图片 URL");
     return false;
   }
+  clearRefError();
   state.refs.push({ kind, value, preview: preview || null });
   renderReferences(state.refs.length - 1);
   return true;

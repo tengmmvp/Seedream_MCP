@@ -5,7 +5,7 @@
 
 "use strict";
 
-import { $, apiFetch, fetchBlobUrl, revokeObjectUrls, state } from "./api.js";
+import { $, apiFetch, clearInlineError, fetchBlobUrl, revokeObjectUrls, showInlineError, state } from "./api.js";
 import { addReference } from "./refs.js";
 
 /** 图库单页条数。 */
@@ -33,8 +33,7 @@ function resetGalleryPager() {
 
 // 图库区错误提示：浏览失败时落空态文案位，替代静默返回。
 function showGalleryError(message) {
-  $("gallery-empty").textContent = message;
-  $("gallery-empty").classList.remove("hidden");
+  showInlineError($("gallery-empty"), message);
 }
 
 /**
@@ -192,6 +191,7 @@ export async function openLightbox(item) {
   currentLightboxBlob = blob;
   currentLightboxUrl = URL.createObjectURL(blob);
   $("lightbox-caption").textContent = item.web_path;
+  clearInlineError($("lightbox-error"));
   const lightbox = $("lightbox");
   lightbox.classList.remove("hidden");
   void lightbox.offsetWidth;
@@ -256,7 +256,8 @@ export async function useLightboxAsReference() {
     const dataUri = await blobToDataUri(blob);
     addReference("data_uri", dataUri, dataUri);
   } catch {
-    alert("回填参考图失败，请改用上传或图片 URL。");
+    // 回填失败提示落在灯箱栏内，替代阻塞式弹窗。
+    showInlineError($("lightbox-error"), "回填参考图失败，请改用上传或图片 URL。");
     return;
   }
   closeLightbox();

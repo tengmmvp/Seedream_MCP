@@ -112,6 +112,7 @@
                     添加
                   </button>
                 </div>
+                <p class="inline-error hidden" id="ref-error"></p>
                 <p class="field-hint">提示词中以「图1」「图2」指代各参考图。</p>
               </div>
             </div>
@@ -323,6 +324,7 @@
         <img id="lightbox-img" class="developing" alt="预览" />
         <div class="lightbox-bar">
           <span class="lightbox-caption mono" id="lightbox-caption"></span>
+          <span class="inline-error hidden" id="lightbox-error"></span>
           <span class="lightbox-actions">
             <button type="button" class="btn btn-secondary" id="lightbox-use">
               用作参考图

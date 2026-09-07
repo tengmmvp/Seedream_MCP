@@ -31,10 +31,13 @@ def _models_payload() -> list[dict[str, object]]:
 
 
 async def web_index(_request: Request) -> Response:
-    """返回 Web 操作台入口页，附 CSP 与 nosniff 安全头。"""
+    """返回 Web 操作台入口页，附 CSP 与 nosniff 安全头；页面缺失时降级纯文本。"""
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
+    page = constants.STATIC_DIR / "index.html"
+    if not page.is_file():
+        return Response("Web 操作台页面缺失，请检查安装完整性。", media_type="text/plain")
     return FileResponse(
-        constants.STATIC_DIR / "index.html",
+        page,
         media_type="text/html",
         headers=PAGE_SECURITY_HEADERS,
     )
@@ -48,7 +51,7 @@ async def web_not_found(request: Request) -> Response:
     scheme 路径中的反斜杠归一为斜杠，去尾斜杠后以斜杠或字面反斜杠开头的形态
     会解析成协议相对的外域目标；判定前先做百分号解码与反斜杠归一，归一形以
     // 开头即不重定向，落入后续 404 分支。API 前缀回统一 JSON 错误，其余路径
-    回附安全头的风格化 404 页。
+    回附安全头的风格化 404 页，页面文件缺失时降级纯文本避免 500。
     """
     path = request.url.path
     if path != "/" and path.endswith("/"):
@@ -56,10 +59,14 @@ async def web_not_found(request: Request) -> Response:
         normalized = unquote(trimmed).replace("\\", "/")
         if trimmed and not normalized.startswith("//"):
             return RedirectResponse(trimmed, status_code=307)
-    if path.startswith(WEB_API_PREFIX + "/"):
+    if path == WEB_API_PREFIX or path.startswith(WEB_API_PREFIX + "/"):
         return _shared.error_json("not_found", "接口不存在", 404)
+    # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
+    page = constants.STATIC_DIR / "404.html"
+    if not page.is_file():
+        return Response("404 Not Found", status_code=404, media_type="text/plain")
     return FileResponse(
-        constants.STATIC_DIR / "404.html",
+        page,
         status_code=404,
         media_type="text/html",
         headers=PAGE_SECURITY_HEADERS,
@@ -76,7 +83,8 @@ async def web_config_info(_request: Request) -> Response:
 
     存储区解析经 _shared.resolve_web_save_root 与 gallery、generate 域同契约；
     仅回传可用性布尔，不向浏览器泄露服务器绝对路径；不可用时前端在图库区
-    给出配置指引。
+    给出配置指引。响应附 cache-control: no-store，兼作鉴权探测端点的状态
+    不落代理缓存。
     """
     config = get_active_config()
     resolved = await _shared.resolve_web_save_root()
@@ -90,5 +98,6 @@ async def web_config_info(_request: Request) -> Response:
             "save_root_available": save_root_available,
             "auto_save_enabled": config.auto_save_enabled,
             "preview_enabled": config.preview_enabled,
-        }
+        },
+        headers={"cache-control": "no-store"},
     )
