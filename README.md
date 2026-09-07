@@ -583,6 +583,7 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 流式响应每次读取块�
 - **多租户 streamable-http 部署建议显式设置 `SEEDREAM_WORKSPACE_ROOT`**：工作位置按 MCP Roots > 该环境变量 > 用户主目录顺位取值，显式声明可使读取范围与存储区落点确定。
 - **未认证请求的体积限制**：未携带有效令牌的 chunked 请求不读 body 即返回 401，其体积限制依赖 uvicorn 层或前置反向代理；公网暴露部署请在代理层配置请求体上限。
 - **Linux 宿主挂载目录属主**：容器以 uid 1000 的非 root 用户运行，Linux 宿主上 compose 挂载的 `./.seedream` 目录需对该用户可写（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影响。
+- **出站连接不走系统代理**：API 调用与图片下载的出站 HTTP 客户端固定忽略 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 等系统代理环境变量，防止代理截获 API Key 或绕过下载安全校验；企业代理环境需保证主机直连公网，或经网络层透明代理转发。
 
 ## 👥 贡献者
 

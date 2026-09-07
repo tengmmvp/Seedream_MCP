@@ -583,6 +583,7 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (
 - **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: the workspace resolves in the order MCP Roots > this variable > the user home directory; an explicit declaration makes both the read scope and the storage root location deterministic.
 - **Body size of unauthenticated requests**: unauthenticated chunked requests are rejected with 401 before their body is read; their size limiting relies on uvicorn or a fronting reverse proxy. Configure a request body limit at the proxy layer for public deployments.
 - **Ownership of the mounted directory on Linux hosts**: the container runs as a non-root user with uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user (`mkdir -p .seedream && chown 1000:1000 .seedream`); Docker Desktop is unaffected.
+- **Outbound connections ignore system proxies**: the outbound HTTP clients for API calls and image downloads ignore system proxy environment variables (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`, etc.) by design, preventing a proxy from intercepting the API key or bypassing download security checks; in corporate proxy environments, ensure the host has direct internet access or is served by a transparent network-layer proxy.
 
 ## 👥 Contributors
 

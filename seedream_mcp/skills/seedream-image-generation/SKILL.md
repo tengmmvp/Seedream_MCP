@@ -50,7 +50,7 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 ## 关键参数规则
 
 - 模型：由服务器配置决定，单次调用不可切换；图层拆分与透明背景需部署方将服务器配置为 5.0 Pro
-- `size`：档位（`1K`/`1.5K`/`2K`/`3K`/`4K`）或 `宽x高` 像素；省略时默认 `2K`；图层拆分场景仅接受档位或 `auto`
+- `size`：档位（`1K`/`1.5K`/`2K`/`3K`/`4K`）或 `宽x高` 像素；省略时使用服务器默认尺寸（未另行配置时为 `2K`）；图层拆分场景仅接受档位或 `auto`
 - `watermark`：默认不加水印
 - `optimize_prompt_options`：`standard` 或 `fast`；`fast` 仅 5.0 Pro 与 4.0 支持
 - `response_format`：默认 `url`；`output_format` 仅 5.0 系列支持 jpeg/png 选择
