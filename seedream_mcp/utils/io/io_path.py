@@ -309,18 +309,6 @@ def get_workspace_root() -> Path:
     return workspace_roots[0]
 
 
-def is_boundary_from_session_roots() -> bool:
-    """判断当前请求的工作区是否来自客户端会话 Roots 声明。
-
-    经 SEEDREAM_WORKSPACE_ROOT 或用户主目录回退取得的工作位置属服务器环境而非
-    客户端授权声明，其绝对路径不进入面向调用方的输出；空 Roots 声明等同未声明。
-
-    Returns:
-        来自非空会话 Roots 声明返回 True，环境回退返回 False。
-    """
-    return bool(_WORKSPACE_ROOTS_VAR.get())
-
-
 async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
     """从 MCP 上下文读取客户端 Roots 并转换为本地路径列表。"""
     if ctx is None:
@@ -610,116 +598,11 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         raise ValueError(f"无效的路径格式: {path}") from e
 
 
-def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
-    """获取相对路径。
-
-    Args:
-        path: 文件路径。
-        base_dir: 基础目录，默认为当前工作目录。
-
-    Returns:
-        相对路径字符串；无法相对化时回退绝对路径字符串。
-    """
-    try:
-        path_obj = Path(path)
-        base_path = Path(base_dir) if base_dir else Path.cwd()
-
-        try:
-            relative_path = path_obj.relative_to(base_path)
-            return str(relative_path)
-        except ValueError:
-            # is_absolute 为纯词法判定，浏览链路传入的已 resolve 路径免除一次逐级 stat。
-            if path_obj.is_absolute():
-                return str(path_obj)
-            return str(path_obj.resolve())
-
-    except Exception as e:
-        logger.error("获取相对路径失败 {}: {}", path, e)
-        return str(path)
-
-
-# ==================== 面向调用方的路径遮蔽与相对化 ====================
-
-# 读权限成员绝对路径在面向调用方输出中的占位符：存储区与工作区根各一。
-SAVE_ROOT_PLACEHOLDER = "<存储区>"
-WORKSPACE_ROOT_PLACEHOLDER = "<工作区根>"
-
-
-def _replace_path_prefix(text: str, prefix: str, placeholder: str) -> str:
-    """把文本中作为完整路径前缀出现的 prefix 替换为占位符。
-
-    命中位置的下一个字符是名字延续字符时视为同名兄弟路径不替换。延续字符取
-    字母、数字、下划线、连字符与点，字母数字按 Unicode 判定覆盖中文等非 ASCII
-    文件名，连字符与点同为常见文件名成分；其余字符（分隔符、空白、句读标点与
-    结尾）均为路径边界，照常替换，成员路径后接句读标点的场景不因放宽而漏遮蔽。
-    """
-    out: list[str] = []
-    cursor = 0
-    while True:
-        hit = text.find(prefix, cursor)
-        if hit < 0:
-            out.append(text[cursor:])
-            break
-        end = hit + len(prefix)
-        next_char = text[end : end + 1]
-        continues_name = bool(next_char) and (next_char.isalnum() or next_char in "_-.")
-        if not continues_name:
-            out.append(text[cursor:hit])
-            out.append(placeholder)
-            cursor = end
-        else:
-            out.append(text[cursor : hit + 1])
-            cursor = hit + 1
-    return "".join(out)
-
-
-def mask_scope_paths(
-    text: str,
-    save_root: Path,
-    read_scope: list[Path],
-    extra: list[tuple[Path, str]] | None = None,
-) -> str:
-    """把文本中的读权限成员绝对路径替换为占位符，供错误与回显文案共用。
-
-    存储区替换为 <存储区>，其余成员（工作区根）替换为 <工作区根>；extra 追加
-    额外的遮蔽对（如 Web 通道请求内 save_path 指定的保存目录）。全部替换对按
-    路径长度降序应用，嵌套路径先替换更长前缀，保留更具体的占位语义；命中均为
-    完整路径前缀替换，前缀同名兄弟目录不受波及。异常文案中文件名经 repr 渲染
-    时反斜杠加倍为转义形态，成员路径含反斜杠时同串追加一次加倍形态替换，两种
-    形态互不为对方前缀，先后应用不互相破坏。
-
-    Args:
-        text: 待遮蔽的文本。
-        save_root: 已 resolve 的存储区，占位语义的判定基准。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区）。
-        extra: 额外的 (路径, 占位符) 遮蔽对。
-
-    Returns:
-        成员绝对路径已替换为占位符的文本。
-    """
-    pairs: list[tuple[Path, str]] = [
-        *(
-            (
-                member,
-                SAVE_ROOT_PLACEHOLDER if member == save_root else WORKSPACE_ROOT_PLACEHOLDER,
-            )
-            for member in read_scope
-        ),
-        *(extra or []),
-    ]
-    for path_value, placeholder in sorted(pairs, key=lambda pair: len(str(pair[0])), reverse=True):
-        prefix = str(path_value)
-        text = _replace_path_prefix(text, prefix, placeholder)
-        if "\\" in prefix:
-            text = _replace_path_prefix(text, prefix.replace("\\", "\\\\"), placeholder)
-    return text
-
-
 def save_root_relative(path: str | Path, save_root: Path) -> str | None:
-    """返回路径的存储区相对正斜杠形态，供条目回显与建议路径共用。
+    """返回路径的存储区相对正斜杠形态，供 Web 端点改写条目路径共用。
 
     Args:
-        path: 待相对化的路径，浏览链路传入已 resolve 路径免除逐级 stat。
+        path: 待相对化的路径。
         save_root: 已 resolve 的存储区。
 
     Returns:

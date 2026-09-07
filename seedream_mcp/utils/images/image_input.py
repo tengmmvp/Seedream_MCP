@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from pathlib import Path
 
 from ..core.errors import SeedreamMCPError, SeedreamValidationError
@@ -18,8 +19,8 @@ from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
     get_read_context,
     is_unc_path,
-    mask_scope_paths,
-    save_root_relative,
+    is_within_resolved,
+    normalize_path,
     suggest_similar_paths,
 )
 from .image_validation import (
@@ -84,6 +85,20 @@ def _resolves_outside_workspace(normalized: str, save_root: Path, read_scope: li
     return not any(iter_local_candidates(normalized, save_root, read_scope))
 
 
+def _relative_breaks_save_root(normalized: str, save_root: Path) -> bool:
+    """判断相对输入解析后是否越出存储区，相对路径仅限存储区内。
+
+    非法路径形态交后续分支处理，此处返回 False 不抢报。
+    """
+    if os.path.isabs(normalized):
+        return False
+    try:
+        resolved = normalize_path(normalized, str(save_root))
+    except (OSError, ValueError):
+        return False
+    return not is_within_resolved(resolved, save_root)
+
+
 def _format_local_read_error(exc: OSError, normalized: str) -> str:
     """构建本地文件读取失败的错误文案，不回显服务器侧绝对路径。
 
@@ -107,11 +122,17 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     部单点求值，各分支共享，消除一次失败请求内的重复解析。越界抛携带配置指引
     的错误；界内定位失败经 validate_image_path 做诊断性校验，取具体失败原因并附
     存储区内的相似路径建议。各失败均属参数校验语义而非 API 调用失败，归
-    SeedreamValidationError；错误文案不回显服务器侧路径。需在工作线程中调用。
+    SeedreamValidationError。需在工作线程中调用。
     """
     _, save_root, read_scope = get_read_context()
     found = resolve_local_image_candidate(normalized, save_root=save_root, read_scope=read_scope)
     if found is None:
+        if _relative_breaks_save_root(normalized, save_root):
+            raise SeedreamValidationError(
+                "相对路径仅限图片保存目录内，其他位置请使用绝对路径",
+                field="image",
+                value=normalized,
+            )
         if _resolves_outside_workspace(normalized, save_root, read_scope):
             raise SeedreamValidationError(
                 "路径不在读取范围内；可通过客户端工作区（MCP Roots）、"
@@ -119,25 +140,14 @@ def _prepare_local_image(normalized: str, original: str) -> str:
                 field="image",
                 value=normalized,
             )
-        # 诊断错误消息含解析后的绝对路径，读权限成员逐项替换为占位符后回显，存储区
-        # 外的工作区根路径同样遮蔽；建议限定在存储区内扫描并转为存储区相对形态，
-        # 均不泄露服务器路径。
         _, error_msg, _ = validate_image_path(normalized, skip_dimensions=True)
-        error_text = mask_scope_paths(error_msg or "图像路径校验失败", save_root, read_scope)
+        error_text = error_msg or "图像路径校验失败"
         suggestions = suggest_similar_paths(original, search_dirs=[str(save_root)])
         suggestion_text = ""
         if suggestions:
-            relative_suggestions = [
-                relative
-                for relative in (
-                    save_root_relative(suggestion, save_root) for suggestion in suggestions[:3]
-                )
-                if relative is not None
-            ]
-            if relative_suggestions:
-                suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
-                    f"  • {s}" for s in relative_suggestions
-                )
+            suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
+                f"  • {suggestion}" for suggestion in suggestions[:3]
+            )
         raise SeedreamValidationError(
             f"{error_text}{suggestion_text}", field="image", value=normalized
         )

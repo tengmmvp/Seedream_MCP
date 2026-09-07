@@ -25,6 +25,7 @@ _run_tool_pipeline 过滤 None 字段组装输入模型并委托既有 run_* 处
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
@@ -149,7 +150,6 @@ from .utils.core.validators import (
 )
 from .utils.io.io_path import (
     get_workspace_roots,
-    is_boundary_from_session_roots,
     session_declares_roots_capability,
     workspace_roots_scope,
     workspace_roots_scope_from_result,
@@ -661,8 +661,8 @@ async def browse_images(
     """本地图片浏览：列出读权限（工作区 ∪ 存储区）内的图片文件。
 
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
-    递归、分页、按格式过滤。默认浏览存储区；条目存储区内为存储区相对路径，
-    存储区外在客户端声明 Roots 时为绝对路径，否则为所浏览目录相对路径。
+    递归、分页、按格式过滤。默认浏览存储区；返回的条目为绝对路径，可直接填入
+    参考图参数。
     """
     return await _run_tool_pipeline(
         "browse_images",
@@ -756,14 +756,16 @@ def _resource_roots_via_input_required(ctx: Context) -> bool:
     return is_version_at_least(version, _MODERN_PROTOCOL_VERSION)
 
 
-def _session_roots_for_display() -> list[Path]:
-    """读取面向展示的 roots 列表，须在已应用工作区边界的作用域内调用。
+def _workspace_roots_or_empty() -> list[Path]:
+    """读取当前生效的工作区根，回退链不可解析时降级空列表并记录日志。
 
-    边界经环境变量或用户主目录回退取得时不属客户端授权声明，按未授权输出空列表。
+    含 resolve 等同步文件系统调用，调用方须经工作线程执行。
     """
-    if is_boundary_from_session_roots():
+    try:
         return get_workspace_roots()
-    return []
+    except SeedreamConfigError as exc:
+        logger.warning("工作区根不可解析，roots 资源返回空列表: {}", exc.message)
+        return []
 
 
 def _render_workspace_roots_payload(roots: list[Path], verbose: bool) -> str:
@@ -784,9 +786,9 @@ async def workspace_roots_resource(
 ) -> str | InputRequiredResult:
     """工作区根目录。
 
-    展示客户端授权的 MCP Roots，未授权时为空，避免暴露服务器本地目录。verbose 附
-    各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots 读取仍
-    匹配，query 参数可省略。
+    展示当前生效的工作区根：会话声明 MCP Roots 时为其声明值，否则为环境回退根。
+    verbose 附各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots
+    读取仍匹配，query 参数可省略。
     """
     if _resource_roots_via_input_required(ctx):
         responses = ctx.input_responses or {}
@@ -796,10 +798,10 @@ async def workspace_roots_resource(
                 input_requests={_ROOTS_INPUT_REQUEST_KEY: ListRootsRequest()}
             )
         async with workspace_roots_scope_from_result(roots_result):
-            roots = _session_roots_for_display()
+            roots = await asyncio.to_thread(_workspace_roots_or_empty)
         return _render_workspace_roots_payload(roots, verbose)
     async with workspace_roots_scope(ctx):
-        roots = _session_roots_for_display()
+        roots = await asyncio.to_thread(_workspace_roots_or_empty)
     return _render_workspace_roots_payload(roots, verbose)
 
 

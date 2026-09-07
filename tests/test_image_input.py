@@ -104,32 +104,26 @@ async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
     assert exc_info.value.field == "image"
 
 
-async def test_prepare_image_input_in_bounds_diagnostics_masks_fallback_boundary(
+async def test_prepare_image_input_in_bounds_diagnostics_echo_real_paths(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """界内定位失败的诊断分支不泄露服务器绝对路径，相似路径建议为存储区相对形态。
-
-    存储区内放置名称相近的真实图片，确保建议分支确实可命中，测试不沦为空芯。
-    """
+    """界内定位失败的诊断消息携带解析后的真实绝对路径。"""
     del tmp_path
-    sibling = _save_root(workspace_root) / "missing_sibling.png"
-    Image.new("RGB", (32, 32), color="white").save(sibling)
+    save_root = _save_root(workspace_root)
 
     with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input("missing_sib.png")
     assert "路径不在读取范围内" not in exc_info.value.message
-    assert str(workspace_root.resolve()) not in exc_info.value.message
-    assert "missing_sib.png" in exc_info.value.message
+    assert str((save_root / "missing_sib.png").resolve()) in exc_info.value.message
     assert exc_info.value.field == "image"
 
 
-async def test_prepare_image_input_diagnostics_mask_workspace_root_outside_save_root(
+async def test_prepare_image_input_rejects_relative_escape_outside_save_root(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """落在存储区外、工作区根内的未命中路径，诊断消息同样遮蔽工作区根。
+    """相对路径经 ``..`` 解析到存储区之外时拒绝，即便目标仍在工作区内。
 
-    旧实现只替换存储区前缀，``../`` 形态解析到工作区根下时解析后绝对路径
-    原样回显给调用方。
+    相对路径仅限存储区内，工作区内的其他位置须使用绝对路径访问。
     """
     del tmp_path
     _save_root(workspace_root)
@@ -138,10 +132,9 @@ async def test_prepare_image_input_diagnostics_mask_workspace_root_outside_save_
         await prepare_image_input("../missing.png")
 
     message = exc_info.value.message
-    assert "路径不在读取范围内" not in message
-    assert "文件不存在" in message
-    assert str(workspace_root.resolve()) not in message
-    assert "<工作区根>" in message
+    assert "相对路径仅限图片保存目录内" in message
+    assert "绝对路径" in message
+    assert exc_info.value.field == "image"
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:

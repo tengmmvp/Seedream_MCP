@@ -12,7 +12,6 @@ import seedream_mcp.utils.io.io_path as io_path_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import workspace_roots_resource
-from seedream_mcp.tools.core.browse import _FALLBACK_BOUNDARY_PLACEHOLDER
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_scope
@@ -249,8 +248,10 @@ async def test_run_browse_images_falls_back_when_mcp_roots_empty(
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["count"] == 1
-    # 空声明等同未声明，工作区回显按环境回退形态以占位符替代。
-    assert result.structured_content["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
+    # 空声明等同未声明，工作区回显按环境回退根的真实路径。
+    assert result.structured_content["workspace_roots"] == [
+        str(env_root.resolve()).replace("\\", "/")
+    ]
 
 
 async def test_client_prepare_image_input_falls_back_when_mcp_roots_empty(
@@ -294,7 +295,8 @@ async def test_run_browse_images_relative_directory_resolves_against_save_root(
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["count"] == 1
-    assert Path(result.structured_content["images"][0]["path"]) == Path("assets/from_save_root.png")
+    entry_path = (nested_dir / "from_save_root.png").resolve().as_posix()
+    assert result.structured_content["images"][0]["path"] == entry_path
 
 
 async def test_run_browse_images_rejects_absolute_path_outside_roots(
@@ -514,11 +516,11 @@ async def test_workspace_roots_resource_reports_client_roots_not_env(
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
 
 
-async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
+async def test_workspace_roots_resource_empty_roots_falls_back_to_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """客户端明确授权空列表时资源返回空列表，不回退 env/cwd 暴露服务器目录。"""
+    """客户端明确授权空列表等同未声明，资源回显环境回退根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
 
@@ -527,18 +529,14 @@ async def test_workspace_roots_resource_empty_roots_does_not_leak_server_dir(
     result = await workspace_roots_resource(_FakeContext([]))
     data = json.loads(result)
 
-    assert data["roots"] == []
-    assert str(env_root.resolve()) not in data["roots"]
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
 
-async def test_workspace_roots_resource_capability_missing_returns_empty(
+async def test_workspace_roots_resource_capability_missing_falls_back_to_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """客户端未声明 roots capability 时资源输出空列表，不回退暴露 env 根。
-
-    回退根属服务器环境而非客户端授权声明，其绝对路径不得进入面向调用方的输出。
-    """
+    """客户端未声明 roots capability 时不发起取回，资源回显环境回退根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -547,15 +545,14 @@ async def test_workspace_roots_resource_capability_missing_returns_empty(
     result = await workspace_roots_resource(_SpyContext(session))
     data = json.loads(result)
 
-    assert data["roots"] == []
-    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
 
-async def test_workspace_roots_resource_list_roots_failure_returns_empty(
+async def test_workspace_roots_resource_list_roots_failure_falls_back_to_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 失败回退 env 边界时资源输出空列表，不暴露服务器 env 根。"""
+    """roots/list 失败回退 env 边界时资源回显环境回退根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -563,8 +560,7 @@ async def test_workspace_roots_resource_list_roots_failure_returns_empty(
     result = await workspace_roots_resource(_FailingContext())
     data = json.loads(result)
 
-    assert data["roots"] == []
-    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
 
 class _ModernProtocolContext:
@@ -653,7 +649,7 @@ async def test_workspace_roots_resource_modern_session_capability_missing_falls_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2026 会话但未声明 roots capability 时不发起多轮请求，回退空列表输出。"""
+    """2026 会话但未声明 roots capability 时不发起多轮请求，回显环境回退根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -663,8 +659,7 @@ async def test_workspace_roots_resource_modern_session_capability_missing_falls_
 
     assert isinstance(result, str)
     data = json.loads(result)
-    assert data["roots"] == []
-    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
 
 async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
@@ -687,11 +682,11 @@ async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
     assert ctx.session.list_roots_calls == 1
 
 
-async def test_workspace_roots_resource_modern_round_empty_roots_not_leak_env(
+async def test_workspace_roots_resource_modern_round_empty_roots_falls_back_to_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """多轮重试轮应答空 roots 时输出空列表，与未授权同语义，不回退暴露环境根。"""
+    """多轮重试轮应答空 roots 时与未授权同语义，回显环境回退根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -701,8 +696,7 @@ async def test_workspace_roots_resource_modern_round_empty_roots_not_leak_env(
 
     assert isinstance(result, str)
     data = json.loads(result)
-    assert data["roots"] == []
-    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
 
 
 async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
@@ -749,6 +743,4 @@ async def test_workspace_roots_scope_without_request_context_falls_back_to_env(
 
     assert isinstance(result, str)
     data = json.loads(result)
-    # 回退边界属服务器环境，不向调用方回显绝对路径，输出空 roots。
-    assert data["roots"] == []
-    assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]

@@ -13,7 +13,7 @@ from pathlib import Path
 from starlette.responses import JSONResponse
 
 from ..utils.core.errors import SeedreamConfigError
-from ..utils.io.io_path import get_read_scope, resolve_save_root
+from ..utils.io.io_path import resolve_save_root
 
 GENERATION_ERROR_STATUS: dict[str, int] = {
     "validation_error": 400,
@@ -49,18 +49,6 @@ async def resolve_web_save_root() -> Path | JSONResponse:
         return await asyncio.to_thread(resolve_save_root)
     except SeedreamConfigError as exc:
         return save_root_unavailable(exc)
-
-
-def read_scope_or_default(save_root: Path) -> list[Path]:
-    """读权限求值，配置类失败退化为仅存储区。
-
-    含 resolve 等同步文件系统调用，调用方须在工作线程执行；生成与图库两域的
-    遮蔽上下文派生共用本单点，失败降级口径不再随调用点漂移。
-    """
-    try:
-        return get_read_scope()
-    except SeedreamConfigError:
-        return [save_root]
 
 
 def generation_status(structured: dict[str, object]) -> int:

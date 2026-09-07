@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from mcp.client import Client, ClientRequestContext
 from mcp.types import ListRootsResult, ReadResourceResult, Root
+
+import seedream_mcp.utils.io.io_path as io_path_module
 
 import seedream_mcp.resources as resources
 import seedream_mcp.server as server
@@ -44,18 +47,28 @@ async def test_initialize_reports_project_version(
 
 
 async def test_workspace_roots_resource_reads_over_wire_without_roots_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     reset_lifespan_singletons: None,
 ) -> None:
-    """默认协商路径读取模板资源返回 JSON，客户端未声明 roots 时输出空 roots。
+    """默认协商路径读取模板资源返回 JSON，客户端未声明 roots 时回显环境回退根。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    # 声明读取入口为 config 注册的提供者而非裸环境变量，以提供者注入固定回退根。
+    monkeypatch.setitem(
+        io_path_module._env_value_providers, "SEEDREAM_WORKSPACE_ROOT", lambda: str(env_root)
+    )
 
-    回退边界属服务器环境而非客户端授权声明，其绝对路径不进入面向调用方的输出。
-    """
     async with Client(server.mcp) as client:
+        expected_display = str(env_root.resolve()).replace("\\", "/")
         plain = await client.read_resource("seedream://workspace/roots")
-        assert _single_text_payload(plain) == {"roots": []}
+        assert _single_text_payload(plain) == {"roots": [expected_display]}
 
         verbose = await client.read_resource("seedream://workspace/roots?verbose=true")
-        assert _single_text_payload(verbose) == {"roots": [], "resolved": []}
+        assert _single_text_payload(verbose) == {
+            "roots": [expected_display],
+            "resolved": [str(env_root.resolve())],
+        }
 
 
 async def test_workspace_roots_resource_reports_client_roots(

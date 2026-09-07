@@ -1,5 +1,5 @@
-"""io_path 行为修复回归测试，覆盖相似路径建议、相对路径计算、工作区根解析与
-提供者注册、目录图片查找。
+"""io_path 行为修复回归测试，覆盖相似路径建议、工作区根解析与提供者注册、
+目录图片查找。
 """
 
 from __future__ import annotations
@@ -10,23 +10,6 @@ import pytest
 from loguru import logger
 
 import seedream_mcp.utils.io.io_path as io_path_module
-
-
-def _patch_resolve_counter(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """以计数 spy 包装 Path.resolve，返回被 resolve 的路径记录。
-
-    get_relative_path 等被测函数会以内层 except Exception 吞异常并按兜底值返回，
-    抛错补丁在回归发生时静默退化，守护必须以调用计数而非异常传播实现。
-    """
-    resolve_calls: list[str] = []
-    original_resolve = Path.resolve
-
-    def _counting_resolve(self: Path, strict: bool = False) -> Path:
-        resolve_calls.append(str(self))
-        return original_resolve(self, strict=strict)
-
-    monkeypatch.setattr(Path, "resolve", _counting_resolve)
-    return resolve_calls
 
 
 def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
@@ -46,31 +29,6 @@ def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
     assert io_path_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)]) == [
         str(tmp_path / "a.png")
     ]
-
-
-def test_get_relative_path_absolute_fallback_skips_resolve(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """无法相对化且入参已是绝对路径时直接返回字符串，不再重复 resolve。
-
-    浏览链路传入的路径均已 resolve，回退分支的重复 resolve 属纯冗余 stat。
-    """
-    resolve_calls = _patch_resolve_counter(monkeypatch)
-    base = tmp_path / "base"
-    target = tmp_path / "x.png"
-
-    assert io_path_module.get_relative_path(target, str(base)) == str(target)
-    assert resolve_calls == [], "绝对路径回退分支不应再次 resolve"
-
-
-def test_get_relative_path_relative_success_keeps_plain_relative(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """可相对化的入参返回纯相对路径，全程不触发 resolve。"""
-    resolve_calls = _patch_resolve_counter(monkeypatch)
-
-    assert io_path_module.get_relative_path(tmp_path / "x.png", str(tmp_path)) == "x.png"
-    assert resolve_calls == [], "相对化成功分支不应调用 resolve"
 
 
 def test_resolve_env_workspace_root_caches_resolved_result(
@@ -340,71 +298,6 @@ def test_resolve_save_root_wraps_runtime_error_with_configured_value(
     message = exc_info.value.message
     assert message == "存储区配置无法解析: ~/pics"
     assert "C:" not in message and "Users" not in message
-
-
-def test_mask_scope_paths_keeps_sibling_prefix_intact(tmp_path: Path) -> None:
-    """前缀同名兄弟目录不被遮蔽波及，命中必须是完整路径前缀。"""
-    ws = tmp_path / "ws"
-    sibling = tmp_path / "ws2"
-    save_root = ws / ".seedream" / "images"
-
-    masked = io_path_module.mask_scope_paths(
-        f"文件不存在: {sibling / 'out.png'} | {ws / 'in' / 'ok.png'}",
-        save_root,
-        [ws, save_root],
-    )
-
-    assert f"{io_path_module.WORKSPACE_ROOT_PLACEHOLDER}/in/ok.png" in masked.replace("\\", "/")
-    assert str(sibling) in masked
-    assert "ws2" in masked
-
-
-@pytest.mark.parametrize("sibling_name", ["ws-backup", "ws.v2", "ws图片", "ws_2"])
-def test_mask_scope_paths_keeps_common_filename_sibling_prefixes(
-    tmp_path: Path, sibling_name: str
-) -> None:
-    """以连字符、点、中文与下划线延续的兄弟目录同为名字延续，不误遮蔽。
-
-    误遮蔽会把越界路径改写为占位符加残留尾巴，向调用方错误指示该路径位于
-    工作区根之内。
-    """
-    ws = tmp_path / "ws"
-    sibling = tmp_path / sibling_name
-    save_root = ws / ".seedream" / "images"
-
-    masked = io_path_module.mask_scope_paths(str(sibling / "out.png"), save_root, [ws, save_root])
-
-    assert str(sibling) in masked, masked
-
-
-@pytest.mark.parametrize("trailing", ["。", "，", "！"])
-def test_mask_scope_paths_replaces_member_before_punctuation(tmp_path: Path, trailing: str) -> None:
-    """成员路径后紧跟句读标点仍按路径边界替换，放宽延续字符不引入漏遮蔽。"""
-    ws = tmp_path / "ws"
-    save_root = ws / ".seedream" / "images"
-
-    masked = io_path_module.mask_scope_paths(f"已写入 {ws}{trailing}", save_root, [ws, save_root])
-
-    assert str(ws) not in masked
-    assert masked.startswith(f"已写入 {io_path_module.WORKSPACE_ROOT_PLACEHOLDER}")
-
-
-def test_mask_scope_paths_masks_repr_escaped_windows_paths(tmp_path: Path) -> None:
-    """OSError 文案经 repr 渲染的文件名反斜杠加倍，遮蔽同时覆盖转义形态。
-
-    单反斜杠前缀在加倍文本中不出现，两种形态互不为对方前缀，先后应用互不破坏。
-    """
-    save_root = tmp_path / ".seedream" / "images"
-    save_root.mkdir(parents=True)
-    resolved = save_root.resolve()
-    plain = str(resolved)
-    escaped = plain.replace("\\", "\\\\")
-    text = f"无法访问文件: {plain}\\x.png -> [WinError 5] 拒绝访问: '{escaped}\\x.png'"
-
-    masked = io_path_module.mask_scope_paths(text, resolved, [resolved])
-
-    assert plain not in masked and escaped not in masked
-    assert masked.count(io_path_module.SAVE_ROOT_PLACEHOLDER) == 2, masked
 
 
 def test_clear_resolved_env_root_cache_resets_home_fallback(

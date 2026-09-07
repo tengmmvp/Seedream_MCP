@@ -1,10 +1,10 @@
-"""Web 操作台图库浏览端点：存储区边界校验后透传 browse 工具并剥除服务器侧回显。
+"""Web 操作台图库浏览端点：存储区边界校验后透传 browse 工具并收敛前端消费形态。
 
 与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务存储区内文件，图库
-浏览同样以存储区为界，解析出存储区的请求目录在端点拒绝。条目 path 为存储区
-相对形态，前端可直接拼接为图片端点参数；workspace_roots 与 resolved_directories
-回显字段携带服务器绝对路径，Web 前端不消费，返回浏览器前剥除；错误消息中的
-读权限成员绝对路径替换为占位符，与 config-info 的防泄露口径一致。
+浏览同样以存储区为界，解析出存储区的请求目录在端点拒绝。browse 条目为绝对
+路径，Web 层改写为存储区相对形态供前端直接拼接为图片端点参数；
+workspace_roots 与 resolved_directories 回显字段 Web 前端不消费，返回浏览器
+前剥除。
 """
 
 from __future__ import annotations
@@ -22,37 +22,36 @@ from ..tools.runners import run_browse_images
 from ..utils.core.logs import get_logger
 from ..utils.io.io_path import (
     is_within_resolved,
-    mask_scope_paths,
     normalize_path,
+    save_root_relative,
 )
 from . import _shared
 
 logger = get_logger()
 
-# browse 工具为 MCP 客户端回显的边界字段，携带服务器绝对路径，不出 Web 端点。
+# browse 工具为 MCP 客户端回显的边界字段，Web 前端不消费，不出 Web 端点。
 _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 
 
-def _strip_roots_echo(structured: dict[str, object]) -> None:
-    """剥除携带服务器绝对路径的边界回显字段，Web 前端不消费。"""
+def _converge_for_web(structured: dict[str, object], save_root: Path) -> None:
+    """剥除 Web 前端不消费的边界字段，条目 path 改写为存储区相对形态。
+
+    Web 文件端点以存储区相对路径服务文件，前端拼接依赖相对形态；相对化为纯
+    词法计算，不触达文件系统。
+    """
     for key in _ROOTS_ECHO_KEYS:
         structured.pop(key, None)
-
-
-def _sanitize_error_message(
-    structured: dict[str, object], save_root: Path, read_scope: list[Path]
-) -> None:
-    """错误消息中的读权限成员绝对路径替换为占位符，不向浏览器泄露服务器路径。
-
-    读权限由调用方经 _shared.read_scope_or_default 在工作线程预先派生，本函数
-    为纯文本改写，不触达文件系统。
-    """
-    error = structured.get("error")
-    if not isinstance(error, dict):
+    images = structured.get("images")
+    if not isinstance(images, list):
         return
-    message = error.get("message")
-    if isinstance(message, str):
-        error["message"] = mask_scope_paths(message, save_root, read_scope)
+    for item in images:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if isinstance(path, str):
+            relative = save_root_relative(path, save_root)
+            if relative is not None:
+                item["path"] = relative
 
 
 async def _directory_outside_save_root(directory: str, save_root: Path) -> bool:
@@ -98,11 +97,6 @@ async def web_browse(request: Request) -> Response:
         return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)
     structured = result.structured_content if result.structured_content is not None else {}
     if isinstance(structured, dict):
-        _strip_roots_echo(structured)
-        if result.is_error:
-            # 读权限求值含同步文件系统调用，下沉工作线程；失败降级口径由
-            # _shared.read_scope_or_default 单点定义。
-            read_scope = await asyncio.to_thread(_shared.read_scope_or_default, save_root)
-            _sanitize_error_message(structured, save_root, read_scope)
+        _converge_for_web(structured, save_root)
     status = 200 if not result.is_error else 400
     return JSONResponse(structured, status_code=status)

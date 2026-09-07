@@ -18,7 +18,6 @@ from pydantic import ValidationError
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools import BrowseImagesInput
 from seedream_mcp.tools.core import browse as browse_core_module
-from seedream_mcp.tools.core.browse import _FALLBACK_BOUNDARY_PLACEHOLDER
 from seedream_mcp.tools.impl import browse_images as browse_images_module
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
@@ -354,11 +353,8 @@ async def test_browse_images_fallback_preserves_resolved_directories(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """impl 在目录解析完成后抛未预期异常时，兜底 structuredContent 回显已解析目录。
+    """impl 在目录解析完成后抛未预期异常时，兜底 structuredContent 回显已解析目录。"""
 
-    以会话 Roots 场景断言真实路径回显：环境回退场景的路径回显被占位符遮蔽，
-    无法承载本断言。
-    """
     from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
     def _exploding_display_entries(**kwargs):
@@ -376,22 +372,23 @@ async def test_browse_images_fallback_preserves_resolved_directories(
 
     assert result.is_error is True
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["resolved_directories"] == [str(save_root.resolve())]
+    assert result.structured_content["resolved_directories"] == [
+        str(save_root.resolve()).replace("\\", "/")
+    ]
 
 
-async def test_browse_images_fallback_boundary_masks_paths_in_error(
+async def test_browse_images_fallback_boundary_echoes_real_roots_on_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无会话 Roots 时越界拒绝不回显环境回退的绝对路径。
+    """无会话 Roots 时越界拒绝回显环境回退的真实根，消息为固定配置指引文案。
 
     直接调用 handle_browse_images，不经 workspace_roots_scope，工作区经
-    SEEDREAM_WORKSPACE_ROOT 回退取得。越界消息不携带路径，structuredContent 的
-    workspace_roots 以占位符替代，不向调用方暴露服务器本地目录结构。
+    SEEDREAM_WORKSPACE_ROOT 回退取得。
     """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    outside_dir = tmp_path / "outside_dir_for_masking_test"
+    outside_dir = tmp_path / "outside_dir_for_test"
     outside_dir.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
 
@@ -400,28 +397,29 @@ async def test_browse_images_fallback_boundary_masks_paths_in_error(
     assert result.is_error is True
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "目录不在读取范围内" in text
-    assert str(workspace) not in text
-    assert str(outside_dir.resolve().parent) not in text
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
-    # 越界场景目录解析未产出任何界内目录，保持空列表而非占位符。
+    assert result.structured_content["workspace_roots"] == [
+        str(workspace.resolve()).replace("\\", "/")
+    ]
+    # 越界场景目录解析未产出任何界内目录，保持空列表。
     assert result.structured_content["resolved_directories"] == []
 
 
-async def test_browse_images_fallback_boundary_masks_paths_on_success(
+async def test_browse_images_fallback_boundary_echoes_real_paths_on_success(
     workspace_root: Path,
 ) -> None:
-    """无会话 Roots 的成功浏览同样遮蔽边界路径，展示层保持相对路径。"""
-    (_seed_save_root(workspace_root) / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    """无会话 Roots 的成功浏览回显真实边界与绝对路径条目，与 Roots 会话同形态。"""
+    save_root = _seed_save_root(workspace_root)
+    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
     assert result.is_error is False
     sc = result.structured_content
     assert isinstance(sc, dict)
-    assert sc["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
-    assert sc["resolved_directories"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
-    assert sc["images"][0]["path"] == "demo.png"
+    assert sc["workspace_roots"] == [str(workspace_root.resolve()).replace("\\", "/")]
+    assert sc["resolved_directories"] == [str(save_root.resolve()).replace("\\", "/")]
+    assert sc["images"][0]["path"] == (save_root / "demo.png").resolve().as_posix()
 
 
 async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
@@ -435,7 +433,7 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     """
     import seedream_mcp.utils.io.io_path as path_module
 
-    _seed_save_root(workspace_root)
+    save_root = _seed_save_root(workspace_root)
 
     def _raise_permission(path):
         raise PermissionError("denied")
@@ -449,18 +447,17 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     assert result.structured_content["status"] == "empty"
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "目录不可读或无图片文件" in text
-    assert "1 个目录（回退边界场景不回显路径）" in text
-    assert str(workspace_root.resolve()) not in text
+    assert str(save_root.resolve()).replace("\\", "/") in text
 
 
 async def test_browse_images_empty_message_sanitizes_unreadable_dir_paths(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """会话 Roots 边界的空结果消息对不可读目录路径逐项净化后再拼接。
+    """空结果消息对不可读目录路径逐项净化后再拼接。
 
     路径来自服务器文件系统，控制字符经净化压平、敏感键值脱敏，不原文进入
-    用户可见文本。经 _WORKSPACE_ROOTS_VAR 直设会话边界驱动 Roots 回显分支。
+    用户可见文本。
     """
     from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
@@ -527,31 +524,29 @@ def test_format_file_info_degrades_on_malformed_timestamp(
     assert details == {"size_mb": None, "modified": None}
 
 
-def test_build_display_entries_sanitizes_file_name_credentials(
+def test_build_display_entries_keeps_file_name_verbatim(
     workspace_root: Path,
 ) -> None:
-    """含凭据样式片段的文件名经净化进入文本与结构化两条通道，不外泄片段。"""
+    """含凭据样式片段的文件名原样进入文本与结构化两条通道，保证按条目回流可命中。"""
     image = _seed_save_root(workspace_root) / "img api_key=secret.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     lines, entries = browse_core_module._build_display_entries(
         images=[image],
         image_resolved_map={image: image.resolve()},
-        save_root=workspace_root / ".seedream" / "images",
-        scan_base=workspace_root / ".seedream" / "images",
         show_details=False,
     )
 
-    assert "secret" not in lines[0]
-    assert "secret" not in entries[0]["path"]
-    assert "***" in entries[0]["path"]
+    expected = image.resolve().as_posix()
+    assert lines[0] == f"1. {expected}"
+    assert entries[0]["path"] == expected
 
 
-async def test_browse_images_directory_outside_save_root_lists_relative_entries(
+async def test_browse_images_directory_outside_save_root_lists_absolute_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """回退边界下浏览存储区外目录，条目相对该目录展示，不出现绝对路径。"""
+    """回退边界下浏览存储区外目录，条目为绝对路径，与 Roots 会话同形态。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     photos = workspace / "photos"
@@ -564,20 +559,15 @@ async def test_browse_images_directory_outside_save_root_lists_relative_entries(
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     images = result.structured_content["images"]
-    assert images[0]["path"] == "cat.png"
-    assert str(workspace) not in images[0]["path"]
-    text = "".join(getattr(content, "text", "") for content in result.content)
-    assert str(workspace) not in text
+    assert images[0]["path"] == (photos / "cat.png").resolve().as_posix()
 
 
 async def test_browse_images_outside_save_root_lists_absolute_under_session_roots(
     tmp_path: Path,
 ) -> None:
-    """会话 Roots 边界下存储区外条目回显绝对路径，可直接回流 image 参数。
+    """会话 Roots 边界下存储区外条目为绝对路径，可直接回流 image 参数。
 
-    相对形态在该场景存在跨请求重名歧义，且直接回流会以存储区为基准解析，
-    存储区存在同名文件时静默读错图；所列目录本就是客户端声明的授权空间，
-    绝对路径无新增泄露。
+    与回退边界用例共同锁定条目形态不随会话边界漂移。
     """
     photos = tmp_path / "photos"
     photos.mkdir()
@@ -777,17 +767,29 @@ async def test_browse_images_invalid_relative_directory_reports_invalid_path(
     assert "目录超出允许范围" not in text
 
 
-async def test_browse_session_roots_masks_save_root_outside_roots_echo(
+async def test_browse_images_rejects_relative_escape_outside_save_root(
+    workspace_root: Path,
+) -> None:
+    """相对目录经 ``..`` 解析到存储区之外时拒绝，即便目标仍在工作区内。"""
+    _seed_save_root(workspace_root)
+
+    result = await handle_browse_images(BrowseImagesInput(directory="../..", recursive=False))
+
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "failed"
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "相对路径仅限图片保存目录内" in text
+
+
+async def test_browse_session_roots_echoes_save_root_outside_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """会话 Roots 下显式存储区位于 Roots 之外时，解析目录回显以占位符替代。
+    """会话 Roots 下显式存储区位于 Roots 之外时，解析目录与条目仍回显真实路径。
 
-    默认浏览解析到服务器配置的存储区，越出客户端授权空间的部分不得回显
-    绝对路径。
+    默认浏览解析到服务器配置的存储区，读权限判定已覆盖越界防护，回显不做遮蔽。
     """
-    import json
-
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
     workspace = tmp_path / "proj"
@@ -811,7 +813,6 @@ async def test_browse_session_roots_masks_save_root_outside_roots_echo(
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     resolved = result.structured_content["resolved_directories"]
-    assert resolved == [_FALLBACK_BOUNDARY_PLACEHOLDER]
-    assert str(outside_root) not in json.dumps(result.structured_content, ensure_ascii=False)
-    # 条目仍为存储区相对，功能不受回显遮蔽影响
-    assert result.structured_content["images"][0]["path"] == "2026-09-06/a.png"
+    assert resolved == [str(outside_root.resolve()).replace("\\", "/")]
+    entry_path = (outside_root / "2026-09-06" / "a.png").resolve().as_posix()
+    assert result.structured_content["images"][0]["path"] == entry_path

@@ -81,8 +81,8 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
 
     Attributes:
         directory: 用户请求的目录字符串，未提供时归一为当前目录 "."。
-        resolved_directories: 实际解析并扫描的目录列表；边界来自回退配置时为占位符回显。
-        workspace_roots: 工作区根回显；边界来自回退配置时为占位符回显。
+        resolved_directories: 实际解析并扫描的目录列表，正斜杠绝对路径。
+        workspace_roots: 工作区根回显，正斜杠绝对路径。
         count: 当前页返回的图片条数。
         total_count: 全量匹配图片总数，未扫完全量时为 None；与表达当前页条数的
             count 分页语义不同。

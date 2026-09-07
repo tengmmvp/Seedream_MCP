@@ -147,14 +147,14 @@ async def test_generate_skips_web_path_outside_save_root(
     assert "local_path" not in entry
 
 
-async def test_generate_masks_save_path_destination_in_auto_save_results(
+async def test_generate_save_path_outside_drops_local_path_keys(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """save_path 越出存储区时，auto_save.results 的 local_path 删除、markdown_ref
-    不出现，存储区外目的地不经任何通道返回浏览器。"""
+    """save_path 越出存储区时，data 与 auto_save.results 条目的 local_path 与
+    markdown_ref 键删除，Web 文件端点无法服务存储区外文件。"""
     write_workspace_config(tmp_path)
     destination = tmp_path / "tmp-export" / "batch"
     destination.mkdir(parents=True)
@@ -429,13 +429,13 @@ async def test_generate_runner_validation_error_returns_400(
     assert "参考图数量超出上限" in payload["error_description"]
 
 
-async def test_generate_runner_validation_error_masks_save_root(
+async def test_generate_runner_validation_error_echoes_message(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 校验错误消息中的存储区绝对路径替换为占位符后返回。"""
+    """runner 校验错误消息原样返回，携带存储区路径。"""
     save_root = write_workspace_config(tmp_path)
 
     monkeypatch.setattr(
@@ -451,8 +451,7 @@ async def test_generate_runner_validation_error_masks_save_root(
 
     assert response.status_code == 400
     description = response.json()["error_description"]
-    assert str(save_root) not in description
-    assert "<存储区>" in description
+    assert str(save_root) in description
 
 
 async def test_generate_runner_unexpected_error_returns_500(
@@ -580,14 +579,13 @@ async def test_generate_rejects_when_save_root_unresolvable(
     assert "SEEDREAM_AUTO_SAVE_BASE_DIR" in body["error_description"]
 
 
-async def test_generate_masks_save_root_in_error_channels(
+async def test_generate_error_channels_carry_messages_verbatim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """auto_save.results[].error、data[].error 嵌套 message 与顶层 error.message 中的
-    存储区绝对路径统一替换为占位符，响应体不再包含存储区字样。"""
+    """auto_save.results[].error、data[].error 嵌套 message 与顶层 error.message 原样透传。"""
     save_root = write_workspace_config(tmp_path)
     _install_runner(
         monkeypatch,
@@ -610,11 +608,10 @@ async def test_generate_masks_save_root_in_error_channels(
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
     assert response.status_code == 502
-    assert str(save_root) not in response.text
     payload = response.json()
-    assert payload["error"]["message"] == "保存到 <存储区> 失败"
-    assert payload["data"][0]["error"]["message"] == "下载失败于 <存储区>\\a.png"
-    assert payload["auto_save"]["results"][0]["error"] == "写入 <存储区>\\b.png 被拒绝"
+    assert payload["error"]["message"] == f"保存到 {save_root} 失败"
+    assert payload["data"][0]["error"]["message"] == f"下载失败于 {save_root}\\a.png"
+    assert payload["auto_save"]["results"][0]["error"] == f"写入 {save_root}\\b.png 被拒绝"
 
 
 async def test_generate_endpoint_requires_token(
@@ -713,34 +710,6 @@ def test_augment_generation_payload_tolerates_resolve_oserror(
     assert structured == {"data": [{"keep": 1}], "success": True}
 
 
-def test_sanitize_save_root_text_replaces_nested_string_values(tmp_path: Path) -> None:
-    """递归净化覆盖 dict 嵌套 message 与 list 字符串元素，非字符串叶子保持原样。"""
-    save_root = tmp_path / ".seedream" / "images"
-    structured: dict[str, object] = {
-        "error": {"message": f"根为 {save_root}"},
-        "data": [{"error": {"message": f"{save_root}\\a.png"}}, {"keep": 42}],
-        "urls": [f"{save_root}/b.png", "https://x/c.png"],
-    }
-
-    generate_module.sanitize_save_root_text(structured, save_root, [save_root])
-
-    assert structured["error"] == {"message": "根为 <存储区>"}
-    data = structured["data"]
-    assert isinstance(data, list)
-    assert data[0] == {"error": {"message": "<存储区>\\a.png"}}
-    assert data[1] == {"keep": 42}
-    assert structured["urls"] == ["<存储区>/b.png", "https://x/c.png"]
-
-
-def test_sanitize_save_root_text_keeps_non_string_leaves(tmp_path: Path) -> None:
-    """int、bool、None 叶子不参与替换，容器内原值保持。"""
-    structured: dict[str, object] = {"count": 3, "ok": True, "empty": None}
-
-    generate_module.sanitize_save_root_text(structured, tmp_path, [])
-
-    assert structured == {"count": 3, "ok": True, "empty": None}
-
-
 def _make_stub_resource() -> SimpleNamespace:
     """构造共享资源替身，close 为异步桩以兼容 lifespan 复位 fixture 的收尾关闭。"""
     client = MagicMock()
@@ -823,17 +792,13 @@ async def test_generate_concurrent_requests_share_active_resource_client(
     )
 
 
-async def test_generate_masks_save_path_destination_in_error_channel(
+async def test_generate_save_path_destination_in_error_channel_verbatim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """save_path 目的地出现在 auto_save.results[].error 文案中时被占位符遮蔽。
-
-    文件系统错误原文嵌目的地绝对路径，保存目录不在读权限成员内，不额外遮蔽
-    即从 error 通道漏出。
-    """
+    """save_path 目的地出现在 auto_save.results[].error 文案中时原样透传。"""
     write_workspace_config(tmp_path)
     destination = tmp_path / "denied-export"
     destination.mkdir()
@@ -866,7 +831,5 @@ async def test_generate_masks_save_path_destination_in_error_channel(
     )
 
     assert response.status_code == 200
-    assert str(destination) not in response.text
     error_text = response.json()["auto_save"]["results"][0]["error"]
-    assert "<保存目录>" in error_text
-    assert "denied-export" not in error_text
+    assert absolute_file in error_text

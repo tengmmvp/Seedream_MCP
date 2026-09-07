@@ -89,19 +89,22 @@ SEQUENTIAL_PROMPT_DESCRIPTION = (
 # 生成工具共享字段的描述。
 OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION = "提示词优化配置，仅支持 standard 或 fast。"
 SINGLE_IMAGE_DESCRIPTION = (
-    "参考图片，支持图像 URL、本地文件路径或 Base64 图片数据；"
-    "相对路径以图片保存目录为基准，browse_images 条目可直接复用。"
-    "例如：https://example.com/ref.png 或 2026-08-15/image_to_image/portrait.jpeg。"
+    "参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
+    "本地文件路径须在读取范围内，越界会被拒绝。"
+    "其中相对路径仅限图片保存目录内。"
+    "例如：https://example.com/a.png 或 2026-08-15/image_to_image/b.jpeg。"
 )
 MULTI_IMAGE_DESCRIPTION = (
     f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张），"
-    f"每张支持图像 URL、本地文件路径或 Base64 图片数据，相对路径以图片保存目录为基准。"
-    '例如：["https://example.com/a.png", "2026-08-15/text_to_image/b.jpeg"]。'
+    f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+    "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
+    "例如：https://example.com/a.png 或 2026-08-15/multi_image_fusion/b.jpeg。"
 )
 SEQUENTIAL_IMAGE_DESCRIPTION = (
     f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
-    "（5.0 Pro 不支持组图生成），每张支持图像 URL、本地文件路径或 Base64 图片数据，"
-    "相对路径以图片保存目录为基准。"
+    "（5.0 Pro 不支持组图生成），每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+    "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
+    "例如：https://example.com/a.png 或 2026-08-15/sequential_generation/b.jpeg。"
 )
 LAYER_DECOMPOSITION_DESCRIPTION = (
     "是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图"
@@ -139,11 +142,10 @@ CUSTOM_NAME_DESCRIPTION = "自定义文件名前缀，未提供时根据提示�
 
 # 浏览工具字段的描述。
 DIRECTORY_DESCRIPTION = (
-    "要浏览的目录路径，默认浏览图片保存目录；"
-    "相对路径以图片保存目录为基准，绝对路径须在读权限范围内"
-    "（工作区 ∪ 图片保存目录）。保存目录内的条目为保存目录相对路径；"
-    "保存目录外的条目在客户端声明工作区 Roots 时为绝对路径，"
-    "否则为所浏览目录的相对路径（拼接所浏览目录前缀后使用）。"
+    "要浏览的目录路径，默认浏览图片保存目录。"
+    "本地文件路径须在读取范围内，越界会被拒绝。"
+    "其中相对路径仅限图片保存目录内。"
+    "返回的条目为本地文件路径，可直接填入参考图参数。"
 )
 RECURSIVE_DESCRIPTION = "是否递归查找子目录。"
 MAX_DEPTH_DESCRIPTION = "递归查找的最大深度（1-10）。"

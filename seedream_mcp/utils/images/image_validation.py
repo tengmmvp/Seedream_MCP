@@ -164,22 +164,23 @@ def image_candidate_stat(path: Path) -> os.stat_result | None:
 def iter_local_candidates(
     image: str, base_dir: str | Path, read_scope: list[Path]
 ) -> Iterator[Path]:
-    """迭代落在读权限内的候选物理路径。
+    """迭代界内的候选物理路径：绝对路径判读权限，相对路径仅限存储区内。
 
     绝对路径直接作为候选，相对路径以 base_dir（存储区）拼接；候选 resolve 一次
-    后与读权限集合逐项比较，拦截 ``..`` 与符号链接逃逸，仅产出落在任一范围内的
-    resolve 后物理路径。UNC 前缀的候选不 resolve，避免在 Windows 触发 SMB 认证。
-    候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
+    后按形态判定：绝对候选与读权限集合逐项比较，相对候选须落在存储区之内，
+    ``..`` 与符号链接逃逸同样被拦截。UNC 前缀的候选不 resolve，避免在 Windows
+    触发 SMB 认证。候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        base_dir: 相对路径的解析基准，为存储区。
+        base_dir: 相对路径的解析基准与边界，为存储区。
         read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区）。
 
     Yields:
-        resolve 后落在读权限内的候选物理路径。
+        resolve 后落在对应边界内的候选物理路径。
     """
-    candidates = [Path(image)] if os.path.isabs(image) else [Path(base_dir) / image]
+    is_absolute = os.path.isabs(image)
+    candidates = [Path(image)] if is_absolute else [Path(base_dir) / image]
     for candidate in candidates:
         # UNC 根拼接出的候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
         if is_unc_path(str(candidate)):
@@ -188,7 +189,10 @@ def iter_local_candidates(
             resolved_candidate = candidate.resolve()
         except (OSError, ValueError):
             continue
-        if any(is_within_resolved(resolved_candidate, base) for base in read_scope):
+        if is_absolute:
+            if any(is_within_resolved(resolved_candidate, base) for base in read_scope):
+                yield resolved_candidate
+        elif is_within_resolved(resolved_candidate, Path(base_dir)):
             yield resolved_candidate
 
 
@@ -198,7 +202,7 @@ def resolve_local_image_candidate(
     save_root: Path | None = None,
     read_scope: list[Path] | None = None,
 ) -> tuple[Path, os.stat_result] | None:
-    """定位可读取的候选图片文件：相对路径以存储区为基准，判定面向读权限集合。
+    """定位可读取的候选图片文件：绝对路径判读权限，相对路径仅限存储区内。
 
     界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
     (resolve 后物理路径, stat)，未命中返回 None。ImagePreparer 的缓存签名与
