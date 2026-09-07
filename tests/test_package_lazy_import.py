@@ -4,6 +4,7 @@
 污染整个套件。
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -81,3 +82,23 @@ def test_import_server_does_not_eager_load_pil() -> None:
         "loaded = [m for m in sys.modules if m == 'PIL' or m.startswith('PIL.')]; "
         "assert not loaded, f'PIL eagerly imported: {loaded}'"
     )
+
+
+def test_dunder_main_help_smoke() -> None:
+    """python -m seedream_mcp --help 退出码 0 且打印用法行。
+
+    PYTHONUTF8=1 固定子进程输出编码，中文帮助文案在 Windows 管道下不因控制台
+    代码页抛 UnicodeEncodeError。
+    """
+    completed = subprocess.run(
+        [sys.executable, "-m", "seedream_mcp", "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "usage" in completed.stdout

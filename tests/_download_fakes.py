@@ -119,7 +119,7 @@ class _FakeResponse:
     def __init__(
         self,
         status: int = 200,
-        headers: dict | None = None,
+        headers: dict[str, str] | None = None,
         content_chunks: list[bytes] | None = None,
         peer_ip: str = "8.8.8.8",
     ) -> None:
@@ -138,7 +138,7 @@ class _FakeResponse:
 class _FakeSession:
     """按序返回预设响应序列，超出后重复返回最后一个。"""
 
-    def __init__(self, responses: list) -> None:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
         self._responses = responses
         self._idx = 0
 
