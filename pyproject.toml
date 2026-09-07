@@ -53,6 +53,7 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-cov>=7.0",
     "black>=23.0.0",
     "flake8>=6.0.0",
     "mypy>=1.0.0",
@@ -102,6 +103,19 @@ extend-exclude = '''
 
 [tool.mypy]
 python_version = "3.12"
+# 默认检查范围：包源码加 tests 下划线 helper 家族，其余测试文件错误未清零待分阶段纳入。
+files = [
+    "seedream_mcp",
+    "tests/_client_fakes.py",
+    "tests/_download_fakes.py",
+    "tests/_generation_fixtures.py",
+    "tests/_inflight_fakes.py",
+    "tests/_log_fakes.py",
+    "tests/_os_fakes.py",
+    "tests/_progress_fakes.py",
+    "tests/_readme_helpers.py",
+    "tests/_web_fixtures.py",
+]
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

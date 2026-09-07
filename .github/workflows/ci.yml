@@ -47,7 +47,7 @@ jobs:
         run: uv run flake8 seedream_mcp tests
 
       - name: 🔎 Run mypy
-        run: uv run mypy seedream_mcp
+        run: uv run mypy
 
       - name: 🔤 Check spelling
         run: npx --yes cspell@9 lint --no-progress "seedream_mcp/**" "tests/**" "*.md" "*.toml" ".env.example"
@@ -83,7 +83,7 @@ jobs:
         run: uv sync --locked
 
       - name: ✅ Run tests
-        run: uv run pytest -q
+        run: uv run pytest -q --cov=seedream_mcp --cov-report=term
 
   docker:
     name: 🐳 Docker Build
