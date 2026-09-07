@@ -40,7 +40,7 @@ _PARAM_BULLET_PATTERN = re.compile(r"^- `([A-Za-z_][A-Za-z0-9_]*)`")
 
 # server.py 注册装饰器形态，工具与风格预设的注册名单都取源码装饰器为单一依据。
 _TOOL_DECORATOR_PATTERN = re.compile(r'@mcp\.tool\(\s*name="([a-z_]+)"')
-_PROMPT_DECORATOR_PATTERN = re.compile(r'@mcp\.prompt\(name="([^"]+)"')
+_PROMPT_DECORATOR_PATTERN = re.compile(r'@mcp\.prompt\(\s*name="([^"]+)"')
 
 # 能力差异表定位锚点：分辨率档位行的 "1K / 1.5K / 2K" 单元格全文唯一。
 _CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"

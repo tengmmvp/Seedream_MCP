@@ -95,7 +95,7 @@ class _BrowseRequestState:
         """
         return cls(
             workspace_roots=workspace_roots,
-            directory=params.directory if params.directory is not None else ".",
+            directory=params.effective_directory,
             resolved_directories=resolved_directories,
             recursive=params.recursive,
             max_depth=params.max_depth,
@@ -608,7 +608,7 @@ async def execute_browse_request(
         不可读与无图片维持空结果语义。
     """
     raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
-    directory = params.directory if params.directory is not None else "."
+    directory = params.effective_directory
 
     workspace_roots, read_scope, resolved_dir, dir_error = await _resolve_browse_directories(
         directory

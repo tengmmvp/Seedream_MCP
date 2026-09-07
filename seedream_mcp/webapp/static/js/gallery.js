@@ -131,6 +131,11 @@ async function refreshGalleryForSeq(seq) {
     return { img, path: item.path };
   });
 
+  const markUnavailable = (entry) => {
+    entry.img.classList.add("thumb-error");
+    entry.img.alt = "缩略图不可用";
+  };
+
   for (let i = 0; i < pending.length; i += THUMBNAIL_BATCH_SIZE) {
     if (seq !== requestSeq) return;
     await Promise.all(
@@ -141,8 +146,9 @@ async function refreshGalleryForSeq(seq) {
             "gallery",
           );
           if (blobUrl) entry.img.src = blobUrl;
+          else markUnavailable(entry);
         } catch {
-          // 单张缩略图失败不阻断同批与后续批次。
+          markUnavailable(entry);
         }
       }),
     );

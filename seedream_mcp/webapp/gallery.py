@@ -36,7 +36,8 @@ _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 def _converge_for_web(structured: dict[str, object], save_root: Path) -> None:
     """剥除 Web 前端不消费的边界字段，条目 path 改写为存储区相对形态。
 
-    Web 文件端点以存储区相对路径服务文件，前端拼接依赖相对形态；相对化为纯
+    Web 文件端点以存储区相对路径服务文件，前端拼接依赖相对形态；存储区外
+    条目删除 path 键，与 generate 端 _rewrite_item_path 同契约。相对化为纯
     词法计算，不触达文件系统。
     """
     for key in _ROOTS_ECHO_KEYS:
@@ -52,6 +53,8 @@ def _converge_for_web(structured: dict[str, object], save_root: Path) -> None:
             relative = save_root_relative(path, save_root)
             if relative is not None:
                 item["path"] = relative
+            else:
+                del item["path"]
 
 
 async def _directory_outside_save_root(directory: str, save_root: Path) -> bool:
@@ -85,7 +88,7 @@ async def web_browse(request: Request) -> Response:
     save_root = await _shared.resolve_web_save_root()
     if isinstance(save_root, JSONResponse):
         return save_root
-    directory = params.directory if params.directory is not None else "."
+    directory = params.effective_directory
     if await _directory_outside_save_root(directory, save_root):
         return _shared.error_json(
             "invalid_directory", "目录不在存储区内，Web 图库仅浏览存储区目录", 400

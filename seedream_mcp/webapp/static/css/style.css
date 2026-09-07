@@ -796,6 +796,19 @@ img.developing.loaded {
   transform: none;
 }
 
+/* 缩略图加载失败占位 */
+img.developing.thumb-error {
+  opacity: 1;
+  transform: none;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 6px,
+    rgba(127, 127, 127, 0.12) 6px,
+    rgba(127, 127, 127, 0.12) 12px
+  );
+}
+
 /* 灯箱开合 */
 .lightbox {
   opacity: 0;

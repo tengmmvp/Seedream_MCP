@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, ClassVar, Protocol, cast
+from typing import Annotated, ClassVar, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -17,7 +17,6 @@ from ...utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMA
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
-    VALID_OPTIMIZE_MODES,
     resolve_sequential_max_images,
     validate_parallel_generation_options,
     validate_sequential_image_limit,
@@ -193,19 +192,21 @@ class OptimizePromptOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    mode: str = Field(
+    mode: Literal["standard", "fast"] = Field(
         default="standard",
         description="提示词优化模式：standard 高质量（全模型），fast 优先速度（仅 5.0 Pro / 4.0 支持）。",
     )
 
-    @field_validator("mode")
+    @field_validator("mode", mode="before")
     @classmethod
-    def validate_mode(cls, value: str) -> str:
-        """校验并规范化优化模式，不在允许范围内时抛 ValueError。"""
-        normalized = value.strip().lower()
-        if normalized not in VALID_OPTIMIZE_MODES:
-            raise ValueError(f"mode 仅支持 {sorted(VALID_OPTIMIZE_MODES)}")
-        return normalized
+    def normalize_mode(cls, value: object) -> object:
+        """strip 与 lower 归一，非法值以中文文案拒绝，合法值由 Literal 入 schema。"""
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized not in ("standard", "fast"):
+                raise ValueError("mode 仅支持 ['fast', 'standard']")
+            return normalized
+        return value
 
 
 class GenerationTool(BaseModel):
@@ -566,6 +567,11 @@ class BrowseImagesInput(BaseModel):
     DEFAULT_LIMIT: ClassVar[int] = 50
     DEFAULT_OFFSET: ClassVar[int] = 0
     DEFAULT_SHOW_DETAILS: ClassVar[bool] = False
+
+    @property
+    def effective_directory(self) -> str:
+        """浏览目录缺省为 "."，浏览核心与 Web 预检共用单一缺省来源。"""
+        return self.directory if self.directory is not None else "."
 
     model_config = ConfigDict(
         extra="forbid",

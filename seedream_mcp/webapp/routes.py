@@ -43,8 +43,7 @@ logger = get_logger()
 mimetypes.add_type("image/svg+xml", ".svg")
 
 # 注册守卫登记表：按 MCPServer 实例身份弱引用登记已完成注册的对象，宿主或测试
-# 重造实例时守卫不误跳过新实例的注册；守卫命中路径同样复查路径交集，仅跳过
-# 真正重复的注册。
+# 重造实例时守卫不误跳过新实例的注册。
 _registered_servers: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 
@@ -108,8 +107,8 @@ def register_web_routes() -> None:
         (WEB_API_THUMBNAIL, ["GET"], files.web_thumbnail),
         (WEB_API_IMAGE, ["GET"], files.web_image),
     ]
-    # 私有路由表不可得时无从复查路径，退回纯身份守卫；表可得时以循环内的
-    # 逐路径跳过为唯一幂等机制，路由表被清空或截断自动补注册缺失项。
+    # 表可得时以循环内的逐路径跳过为唯一幂等机制，路由表被清空或截断自动
+    # 补注册缺失项。
     if custom_routes is None:
         if mcp in _registered_servers:
             return

@@ -36,7 +36,7 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 
 - `doubao-seedream-5.0`（默认）：能力面最全，组图、联网搜索、流式均支持
 - `doubao-seedream-5.0-pro`：独占图层拆分与透明背景，支持 fast 档提示词优化；但没有组图、联网搜索、流式，可参考图数量更少、尺寸档位更少
-- `doubao-seedream-4.5` / `doubao-seedream-4.0`：输出仅 jpeg，不支持提示词优化
+- `doubao-seedream-4.5` / `doubao-seedream-4.0`：输出仅 jpeg；提示词优化 4.5 仅支持 standard 档，4.0 支持 standard 与 fast
 
 完整能力数据以读取 `seedream://models/info` 资源为准，不要凭记忆复述像素区间、档位清单等数值。
 
@@ -55,7 +55,7 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 - `optimize_prompt_options`：`standard` 或 `fast`；`fast` 仅 5.0 Pro 与 4.0 支持
 - `response_format`：默认 `url`；`output_format` 仅 5.0 系列支持 jpeg/png 选择
 - `stream`：5.0 Pro 不支持
-- `tools`：`[{"type": "web_search"}]` 开启联网搜索，5.0 Pro 不支持
+- `tools`：`[{"type": "web_search"}]` 开启联网搜索，仅 5.0 系列支持，5.0 Pro/4.5/4.0 不支持
 - `request_count`：1-10 张候选图；组图场景语义为"每次产出一组"
 - `max_images`（组图）：1-15，省略时自动取 15 减去参考图数量
 - `layer_decomposition`（图层拆分）：输出 1 张底图 + 至多 16 张透明 PNG 图层，仅 5.0 Pro 图生图

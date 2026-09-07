@@ -901,34 +901,53 @@ async def skill_reference_resource(path: str) -> str:
 # 风格预设固定前缀，指引模型调用文生图工具并指明 prompt 参数来源。
 _STYLE_PROMPT_PREFIX = "请使用 text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
 
+# 四个风格 prompt 的 subject 参数共享注解，单一来源防描述漂移。
+_STYLE_SUBJECT_ANNOTATION = Annotated[str, Field(description="生成图片的主题描述")]
+
 
 def _build_style_prompt(subject: str, style_suffix: str) -> str:
     """组装风格预设提示词：固定前缀后接主题与风格描述后缀。"""
     return f"{_STYLE_PROMPT_PREFIX}{subject}，{style_suffix}"
 
 
-@mcp.prompt(name="seedream_style_anime", description="动漫风格生图提示词模板")
-def style_anime_prompt(subject: str = "一个女孩站在樱花树下") -> str:
+@mcp.prompt(name="seedream_style_anime", title="动漫风格生图", description="动漫风格生图提示词模板")
+def style_anime_prompt(
+    subject: _STYLE_SUBJECT_ANNOTATION = "一个女孩站在樱花树下",
+) -> str:
     """生成日系动漫风格图片的提示词模板，可作为文生图 prompt 使用。"""
     return _build_style_prompt(
         subject, "日系动漫风格，赛璐珞上色，鲜艳饱和的色彩，精细流畅的线条，柔和光影，高细节"
     )
 
 
-@mcp.prompt(name="seedream_style_realistic", description="写实摄影风格生图提示词模板")
-def style_realistic_prompt(subject: str = "城市夜景") -> str:
+@mcp.prompt(
+    name="seedream_style_realistic",
+    title="写实摄影风格生图",
+    description="写实摄影风格生图提示词模板",
+)
+def style_realistic_prompt(
+    subject: _STYLE_SUBJECT_ANNOTATION = "城市夜景",
+) -> str:
     """生成写实摄影风格图片的提示词模板，可作为文生图 prompt 使用。"""
     return _build_style_prompt(subject, "写实摄影风格，高清细节，自然光影，景深效果，专业摄影质感")
 
 
-@mcp.prompt(name="seedream_style_watercolor", description="水彩画风格生图提示词模板")
-def style_watercolor_prompt(subject: str = "山间小屋") -> str:
+@mcp.prompt(
+    name="seedream_style_watercolor", title="水彩画风格生图", description="水彩画风格生图提示词模板"
+)
+def style_watercolor_prompt(
+    subject: _STYLE_SUBJECT_ANNOTATION = "山间小屋",
+) -> str:
     """生成水彩画风格图片的提示词模板，可作为文生图 prompt 使用。"""
     return _build_style_prompt(subject, "水彩画风格，柔和晕染，通透色彩，手绘质感，留白")
 
 
-@mcp.prompt(name="seedream_style_oil_painting", description="油画风格生图提示词模板")
-def style_oil_painting_prompt(subject: str = "海边夕阳") -> str:
+@mcp.prompt(
+    name="seedream_style_oil_painting", title="油画风格生图", description="油画风格生图提示词模板"
+)
+def style_oil_painting_prompt(
+    subject: _STYLE_SUBJECT_ANNOTATION = "海边夕阳",
+) -> str:
     """生成油画风格图片的提示词模板，可作为文生图 prompt 使用。"""
     return _build_style_prompt(subject, "油画风格，厚重笔触，丰富层次，经典光影，艺术质感")
 

@@ -411,14 +411,14 @@ def _sanitize_image_errors(
     的项做浅拷贝，其余项保持原对象引用，传入列表不被修改。净化非幂等，重复净化会使
     超长片段的截断标记叠加，调用方须保证同一列表仅净化一次。SSE 失败事件已在
     io_sse 源头净化，此处覆盖非 SSE 路径。aggregated 为真时，携带本侧占位标记的
-    并行失败占位项跳过 error 净化并剔除标记键；伪造 sentinel type 的上游透传项不
+    并行失败占位项整体跳过净化并剔除标记键；伪造 sentinel type 的上游透传项不
     携带标记，照常净化。
     """
     sanitized_images = images
     for index, image in enumerate(images):
         updates: dict[str, Any] = {}
-        # 占位项豁免以聚合来源加内部标记双因子判定：error 已在聚合源头净化，
-        # 跳过避免截断标记叠加，出口剔除标记键；其余字段照常净化。
+        # 占位项豁免以聚合来源加内部标记双因子判定：全部字段均为本侧生成的常量、
+        # 序号与聚合源头已净化的消息，整体跳过净化，出口仅剔除标记键。
         if aggregated and image.get(_PLACEHOLDER_MARKER) is True:
             if sanitized_images is images:
                 sanitized_images = list(images)
@@ -784,6 +784,8 @@ def _build_generation_structured_result(
                 sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
                 if sanitized_value != value:
                     sanitized_error[key] = sanitized_value
+            # 上游透传错误不含 type 键时兜底补齐，与 build_error_dict 的错误结构对齐。
+            sanitized_error.setdefault("type", "generation_failed")
             payload["error"] = sanitized_error
         else:
             payload["error"] = build_error_dict(
