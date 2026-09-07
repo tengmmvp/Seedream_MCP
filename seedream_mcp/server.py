@@ -871,12 +871,28 @@ _skill_manifest_payload: str | None = None
     mime_type="text/markdown",
     description=_SKILL_DESCRIPTION,
 )
+def _read_skill_manifest() -> str:
+    """读取 SKILL.md 主文件，含 read_text 同步文件系统调用。"""
+    return _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
+
+
 async def skill_manifest_resource() -> str:
     """Agent Skill 主文件，图像生成指南入口，正文即渐进式披露的第二层。"""
     global _skill_manifest_payload
     if _skill_manifest_payload is None:
-        _skill_manifest_payload = _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
+        _skill_manifest_payload = await asyncio.to_thread(_read_skill_manifest)
     return _skill_manifest_payload
+
+
+def _read_skill_reference(path: str) -> str:
+    """定位并读取 skill 参考文档，含 safe_join 与 is_file 等同步文件系统调用。"""
+    try:
+        target = safe_join(_SKILL_REFERENCES_DIR, path)
+    except PathEscapeError:
+        raise ResourceNotFoundError(f"skill 参考文件路径越界: {path}")
+    if not target.is_file():
+        raise ResourceNotFoundError(f"skill 参考文件不存在: {path}")
+    return target.read_text(encoding="utf-8")
 
 
 @mcp.resource(
@@ -886,13 +902,7 @@ async def skill_manifest_resource() -> str:
 )
 async def skill_reference_resource(path: str) -> str:
     """读取 skill 目录 references 内的参考文档，渐进式披露第三层。"""
-    try:
-        target = safe_join(_SKILL_REFERENCES_DIR, path)
-    except PathEscapeError:
-        raise ResourceNotFoundError(f"skill 参考文件路径越界: {path}")
-    if not target.is_file():
-        raise ResourceNotFoundError(f"skill 参考文件不存在: {path}")
-    return target.read_text(encoding="utf-8")
+    return await asyncio.to_thread(_read_skill_reference, path)
 
 
 # ==================== MCP 风格预设 Prompt 定义 ====================
@@ -1027,7 +1037,7 @@ def cli_main() -> int:
         logger.info("收到中断信号，正在退出。")
         return 0
     except Exception as exc:
-        logger.error("服务器运行异常", exc_info=True)
+        logger.exception("服务器运行异常")
         print(f"服务器运行失败: {format_error_for_user(exc)}", file=sys.stderr)
         return 1
     finally:

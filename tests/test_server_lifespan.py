@@ -563,3 +563,32 @@ def test_tighten_flat_tool_schemas_private_surface_guard() -> None:
         assert tool.parameters.get("additionalProperties") is False, name
         arg_model = tool.fn_metadata.arg_model
         assert arg_model.model_config.get("extra") == "forbid", name
+
+
+# ==================== requestState 密钥环重绑 ====================
+
+
+def test_rebind_request_state_security_syncs_declared_audience() -> None:
+    """策略显式声明 audience 时重绑同步 boundary._audience，条件分支活体受测。
+
+    _audience 构造期自旧策略预计算，不随 _security 替换自动更新，缺同步会使
+    新旧策略的封签 audience 口径不一致。
+    """
+    from mcp.server.mcpserver import RequestStateSecurity
+    from mcp.server.request_state import RequestStateBoundary
+
+    boundary = next(
+        middleware
+        for middleware in resources.mcp.middleware
+        if isinstance(middleware, RequestStateBoundary)
+    )
+    before_security = boundary._security
+    before_audience = boundary._audience
+    policy = RequestStateSecurity(keys=(b"\x01" * 32,), audience="seedream-rebind")
+
+    assert resources.rebind_request_state_security(policy) is True
+
+    assert boundary._security is policy
+    assert boundary._audience == "seedream-rebind"
+    boundary._security = before_security
+    boundary._audience = before_audience

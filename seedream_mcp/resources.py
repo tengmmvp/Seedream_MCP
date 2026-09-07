@@ -304,12 +304,12 @@ def _create_mcp_server() -> MCPServer:
 mcp = _create_mcp_server()
 
 
-def _warn_rebind_failure_on_stderr(keys: tuple[bytes, ...] | None) -> None:
-    """密钥环已配置而重绑失败时向 stderr 输出告警，只看控制台的部署者可见。
+def _warn_rebind_failure_on_stderr(configured: bool) -> None:
+    """已配置密钥环而重绑失败时向 stderr 输出告警，只看控制台的部署者可见。
 
     日志告警之外补 stderr 一行，多副本部署者不读日志文件时也能看到解封退化。
     """
-    if not keys:
+    if not configured:
         return
     print(
         "requestState 密钥环重绑失败：多副本部署的 requestState 解封将失败，"
@@ -318,18 +318,22 @@ def _warn_rebind_failure_on_stderr(keys: tuple[bytes, ...] | None) -> None:
     )
 
 
-def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
-    """以最终活动配置重绑单例的 requestState 密钥环，返回是否重绑成功。
+def rebind_request_state_security(
+    source: tuple[bytes, ...] | RequestStateSecurity | None,
+) -> bool:
+    """以最终活动配置重绑单例的 requestState 策略，返回是否重绑成功。
 
     单例密钥环在模块导入期经默认环境源构造，``--config-file`` 加载的密钥不会
-    到达它，故由启动路径在活动配置就绪后调用本函数；keys 为 None 时重绑回 SDK
-    进程临时密钥。经 SDK provisional 属性 mcp.middleware 定位 RequestStateBoundary
-    并直写私有 _security，探测失败时记录错误并返回 False，不阻断启动；keys 非空
-    时探测失败另向 stderr 输出多副本解封退化告警。属 SDK 升级适配点，SDK 提供
-    公开替换入口后应切换。
+    到达它，故由启动路径在活动配置就绪后调用本函数；source 传密钥环字节时构造
+    密钥环策略，传 None 时重绑回 SDK 进程临时密钥，也可直接传入现成策略对象。
+    经 SDK provisional 属性 mcp.middleware 定位 RequestStateBoundary 并直写私有
+    _security；_audience 构造期自旧策略预计算、不随 _security 替换自动更新，策略
+    声明 audience 时一并同步。探测失败时记录错误并返回 False，不阻断启动；source
+    非空时探测失败另向 stderr 输出多副本解封退化告警。属 SDK 升级适配点，SDK
+    提供公开替换入口后应切换。
 
     Args:
-        keys: 最终活动配置解析出的密钥环字节，None 表示未配置。
+        source: 密钥环字节、现成 RequestStateSecurity 策略或 None（未配置）。
     """
     try:
         middleware_chain = mcp.middleware
@@ -338,7 +342,7 @@ def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
             "SDK 公开属性 mcp.middleware 不可用，requestState 密钥环重绑被跳过，"
             "单例保持导入期形态；多副本部署的密钥共享可能失效"
         )
-        _warn_rebind_failure_on_stderr(keys)
+        _warn_rebind_failure_on_stderr(bool(source))
         return False
     boundary = None
     for middleware in middleware_chain:
@@ -350,9 +354,16 @@ def rebind_request_state_security(keys: tuple[bytes, ...] | None) -> bool:
             "SDK 私有路径中未找到 RequestStateBoundary，requestState 密钥环"
             "重绑被跳过，单例保持导入期形态；多副本部署的密钥共享可能失效"
         )
-        _warn_rebind_failure_on_stderr(keys)
+        _warn_rebind_failure_on_stderr(bool(source))
         return False
-    boundary._security = (
-        RequestStateSecurity(keys=keys) if keys else RequestStateSecurity.ephemeral()
-    )
+    if isinstance(source, RequestStateSecurity):
+        policy = source
+    elif source:
+        policy = RequestStateSecurity(keys=source)
+    else:
+        policy = RequestStateSecurity.ephemeral()
+    boundary._security = policy
+    # _audience 是构造期从旧 policy 预计算的封签取值来源，不随 _security 替换自动更新。
+    if policy.audience is not None:
+        boundary._audience = policy.audience
     return True

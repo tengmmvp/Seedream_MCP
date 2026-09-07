@@ -9,6 +9,7 @@ text/markdown；经 in-process Client 的线上读取管线验证内容与磁盘
 from __future__ import annotations
 
 import re
+import threading
 
 import pytest
 from mcp import MCPError
@@ -165,6 +166,45 @@ async def test_skill_reference_readable_over_wire(
     assert _single_text_content(result) == (_SKILL_REFERENCES_DIR / relative).read_text(
         encoding="utf-8"
     )
+
+
+async def test_skill_reference_read_runs_off_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """参考文档定位与读取经工作线程执行，同步文件系统调用不占事件循环。"""
+    original = server._read_skill_reference
+    seen_threads: list[int] = []
+
+    def spy(path: str) -> str:
+        seen_threads.append(threading.get_ident())
+        return original(path)
+
+    monkeypatch.setattr(server, "_read_skill_reference", spy)
+    text = await server.skill_reference_resource("workflows.md")
+
+    assert text == (_SKILL_REFERENCES_DIR / "workflows.md").read_text(encoding="utf-8")
+    assert len(seen_threads) == 1
+    assert seen_threads[0] != threading.get_ident()
+
+
+async def test_skill_manifest_read_runs_off_event_loop_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SKILL.md 首次读取经工作线程执行，同步文件系统调用不占事件循环。"""
+    monkeypatch.setattr(server, "_skill_manifest_payload", None)
+    original = server._read_skill_manifest
+    seen_threads: list[int] = []
+
+    def spy() -> str:
+        seen_threads.append(threading.get_ident())
+        return original()
+
+    monkeypatch.setattr(server, "_read_skill_manifest", spy)
+    text = await server.skill_manifest_resource()
+
+    assert text == _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
+    assert len(seen_threads) == 1
+    assert seen_threads[0] != threading.get_ident()
 
 
 async def test_skill_reference_missing_file_raises_invalid_params(
