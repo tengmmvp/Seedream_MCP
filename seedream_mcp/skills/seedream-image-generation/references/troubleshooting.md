@@ -20,7 +20,7 @@
 ## 常见失败模式与对策
 
 - **引用的图片 URL 已失效**：API 返回的 URL 仅保留 24 小时。对策：改用本地保存路径（`browse_images` 定位），或重新生成
-- **尺寸档位被拒**：不同模型支持的档位与像素区间不同（如 5.0 Pro 档位更少且有 16 像素倍数约束）。对策：读 `seedream://models/info` 拿当前模型的 `allowed_presets`、`min/max_size_pixels` 后重新取值
+- **尺寸档位被拒**：不同模型支持的档位与像素区间不同（如 5.0 Pro 档位更少）。对策：读 `seedream://models/info` 拿当前模型的 `allowed_presets`、`min/max_size_pixels` 后重新取值
 - **能力不支持**：
   - 服务器配置为 5.0 Pro 时组图/联网搜索/流式不可用 → 由部署方将服务器切换到 5.0 系列
   - 4.5/4.0 传 `output_format` → 去掉该参数

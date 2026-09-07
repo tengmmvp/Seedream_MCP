@@ -238,7 +238,6 @@ Different models support different capabilities and parameter ranges. Please not
 | Layer Decomposition                          | ✅             | ❌             | ❌        | ❌           |
 | Transparent Background                       | ✅             | ❌             | ❌        | ❌           |
 | Resolution Presets                           | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K   | 1K / 2K / 4K |
-| Custom Size Multiple                         | Multiple of 16 | No limit       | No limit  | No limit     |
 | Default Size (MCP)                           | 2048x2048      | 2048x2048      | 2048x2048 | 2048x2048    |
 | Max Reference Images                         | 10             | 14             | 14        | 14           |
 
@@ -425,13 +424,13 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 Beyond tools, the server exposes the following MCP resources for clients to read runtime information:
 
-| Resource URI                                           | Description                                                                                                                                                                                       |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seedream://workspace/roots`                           | Currently effective workspace roots: MCP Roots authorized by the client, falling back to the environment-configured working directory when none are declared                                      |
-| `seedream://server/info`                               | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                                     |
-| `seedream://models/info`                               | Per-model aliases and capability declarations: supported size presets, pixel ranges, pixel multiples, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
-| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model differences, and parameter rules                                                               |
-| `skill://seedream-image-generation/references/{+path}` | Agent Skill reference file template: multi-step workflows and troubleshooting, loaded on demand                                                                                                   |
+| Resource URI                                           | Description                                                                                                                                                                      |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seedream://workspace/roots`                           | Currently effective workspace roots: MCP Roots authorized by the client, falling back to the environment-configured working directory when none are declared                     |
+| `seedream://server/info`                               | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                    |
+| `seedream://models/info`                               | Per-model aliases and capability declarations: supported size presets, pixel ranges, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
+| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model differences, and parameter rules                                              |
+| `skill://seedream-image-generation/references/{+path}` | Agent Skill reference file template: multi-step workflows and troubleshooting, loaded on demand                                                                                  |
 
 ## 🧠 Agent Skills
 

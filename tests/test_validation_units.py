@@ -391,7 +391,6 @@ def _make_caps(min_pixels: int | None, max_pixels: int | None) -> ModelCapabilit
         allowed_presets=frozenset({"1K"}),
         min_size_pixels=min_pixels,
         max_size_pixels=max_pixels,
-        size_pixel_multiple=None,
     )
 
 

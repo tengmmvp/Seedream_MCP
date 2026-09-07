@@ -16,11 +16,10 @@ from types import MappingProxyType
 SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10
 SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14
 
-# 各家族像素尺寸范围与倍数约束，供 validate_size_for_model 数据驱动校验。
+# 各家族像素尺寸范围，供 validate_size_for_model 数据驱动校验。
 # 5.0 Pro 上限对应官方 2048x2048x1.1025（4624220）的像素乘积上限。
 SEEDREAM_50PRO_MIN_SIZE_PIXELS = 1280 * 720
 SEEDREAM_50PRO_MAX_SIZE_PIXELS = 4624220
-SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE = 16
 SEEDREAM_5X_MIN_SIZE_PIXELS = 2560 * 1440
 SEEDREAM_5X_MAX_SIZE_PIXELS = 4096 * 4096
 SEEDREAM_45_MIN_SIZE_PIXELS = 2560 * 1440
@@ -50,7 +49,6 @@ class ModelCapabilities:
         allowed_presets: 允许的尺寸预设档位白名单。
         min_size_pixels: 像素总量的下限，None 表示该家族不约束像素区间。
         max_size_pixels: 像素总量的上限，None 表示该家族不约束像素区间。
-        size_pixel_multiple: 像素宽高须为该值的倍数，None 表示不约束。
         supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
         supports_sequential_generation: 是否支持组图生成。
         supports_layer_decomposition: 是否支持 layer_decomposition 图层拆分。
@@ -66,7 +64,6 @@ class ModelCapabilities:
     allowed_presets: frozenset[str]
     min_size_pixels: int | None
     max_size_pixels: int | None
-    size_pixel_multiple: int | None
     supports_fast_optimize_prompt: bool = True
     supports_sequential_generation: bool = True
     supports_layer_decomposition: bool = False
@@ -127,7 +124,6 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
             allowed_presets=frozenset({"1K", "1.5K", "2K"}),
             min_size_pixels=SEEDREAM_50PRO_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_50PRO_MAX_SIZE_PIXELS,
-            size_pixel_multiple=SEEDREAM_50PRO_SIZE_PIXEL_MULTIPLE,
             supports_fast_optimize_prompt=True,
             supports_sequential_generation=False,
             supports_layer_decomposition=True,
@@ -143,7 +139,6 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
             allowed_presets=frozenset({"2K", "3K", "4K"}),
             min_size_pixels=SEEDREAM_5X_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_5X_MAX_SIZE_PIXELS,
-            size_pixel_multiple=None,
             supports_fast_optimize_prompt=False,
         ),
         MODEL_FAMILY_45: ModelCapabilities(
@@ -156,7 +151,6 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
             allowed_presets=frozenset({"2K", "4K"}),
             min_size_pixels=SEEDREAM_45_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_45_MAX_SIZE_PIXELS,
-            size_pixel_multiple=None,
             supports_fast_optimize_prompt=False,
         ),
         MODEL_FAMILY_40: ModelCapabilities(
@@ -169,7 +163,6 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
             allowed_presets=frozenset({"1K", "2K", "4K"}),
             min_size_pixels=SEEDREAM_40_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_40_MAX_SIZE_PIXELS,
-            size_pixel_multiple=None,
             supports_fast_optimize_prompt=True,
         ),
         MODEL_FAMILY_UNKNOWN: ModelCapabilities(
@@ -182,7 +175,6 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
             allowed_presets=frozenset({"1K", "1.5K", "2K", "3K", "4K"}),
             min_size_pixels=None,
             max_size_pixels=None,
-            size_pixel_multiple=None,
             supports_layer_decomposition=True,
             supports_background=True,
         ),

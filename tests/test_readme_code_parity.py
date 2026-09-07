@@ -237,18 +237,6 @@ def test_capability_table_reference_image_limits_match() -> None:
         )
 
 
-def test_capability_table_pixel_multiple_matches() -> None:
-    """能力差异表自定义尺寸倍数行与 size_pixel_multiple 一致，不限制对应 None。"""
-    cells = _capability_row(BASE_README, "自定义尺寸倍数")
-    for family, cell in zip(_CAPABILITY_COLUMN_FAMILIES, cells[1:]):
-        numbers = re.findall(r"\d+", cell)
-        documented = int(numbers[0]) if numbers else None
-        assert documented == MODEL_CAPABILITIES[family].size_pixel_multiple, (
-            f"{family} 尺寸倍数文档 {documented} != 代码 "
-            f"{MODEL_CAPABILITIES[family].size_pixel_multiple}"
-        )
-
-
 def test_capability_table_boolean_rows_match_capabilities() -> None:
     """能力差异表布尔行的 ✅/❌ 与对应能力声明字段一致。"""
     for label_keyword, attribute in _CAPABILITY_BOOL_ROWS.items():

@@ -467,10 +467,9 @@ def _resolve_size_token(
 def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bool = False) -> str:
     """验证图像尺寸与模型的兼容性。
 
-    尺寸规则由 model_capabilities 能力声明驱动：预设档位白名单 allowed_presets、
-    像素总区间 min/max_size_pixels、倍数约束 size_pixel_multiple，如 5.0 Pro 要求
-    宽高为 16 的倍数，新增模型只需扩展能力声明。图层拆分场景的 "auto" 仅校验
-    模型支持图层拆分，不走档位与像素校验。
+    尺寸规则由 model_capabilities 能力声明驱动：预设档位白名单 allowed_presets
+    与像素总区间 min/max_size_pixels，新增模型只需扩展能力声明。图层拆分场景
+    的 "auto" 仅校验模型支持图层拆分，不走档位与像素校验。
 
     Returns:
         标准化尺寸值：档位为大写，auto 为小写，像素规格归一为小写 x 分隔且
@@ -478,8 +477,7 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
 
     Raises:
         SeedreamValidationError: 尺寸形态非法、档位不在模型白名单、auto 而模型
-            不支持图层拆分，或像素宽高非正、宽高比越界、总像素越界、宽高不是
-            声明倍数时抛出。
+            不支持图层拆分，或像素宽高非正、宽高比越界、总像素越界时抛出。
     """
     token = _resolve_size_token(size, layer_decomposition=layer_decomposition, model_id=model_id)
     caps = get_model_capabilities(model_id)
@@ -536,14 +534,6 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
             bound_text = f"不超过 {max_pixels}"
         raise SeedreamValidationError(
             f"在 {caps.display_name} 模型下，像素尺寸总像素需{bound_text}",
-            field="size",
-            value=pixel_text,
-        )
-    if caps.size_pixel_multiple is not None and (
-        width % caps.size_pixel_multiple != 0 or height % caps.size_pixel_multiple != 0
-    ):
-        raise SeedreamValidationError(
-            f"在 {caps.display_name} 模型下，像素宽高须为 {caps.size_pixel_multiple} 的倍数",
             field="size",
             value=pixel_text,
         )

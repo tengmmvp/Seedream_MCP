@@ -185,13 +185,6 @@ def test_validate_size_for_model_rejects_seedream_50_pro_oversized_pixel() -> No
         validate_size_for_model("2048x4096", "doubao-seedream-5-0-pro-260628")
 
 
-def test_validate_size_for_model_rejects_seedream_50_pro_non_multiple_of_16() -> None:
-    """总像素与宽高比合规但宽高非 16 倍数时仅触发倍数约束。"""
-    # 1300x732 总像素 951600 落在 [921600, 4624220] 内且宽高比合规。
-    with pytest.raises(SeedreamValidationError, match="16 的倍数"):
-        validate_size_for_model("1300x732", "doubao-seedream-5-0-pro-260628")
-
-
 def test_validate_image_input_rejects_oversized_data_uri_before_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

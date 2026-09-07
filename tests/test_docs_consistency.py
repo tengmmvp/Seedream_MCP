@@ -170,7 +170,7 @@ def _table_columns(name: str) -> list[tuple[int, int]]:
 # 能力差异表定位锚点，分辨率档位行的 "1K / 1.5K / 2K" 单元格为语言无关内容，全文唯一。
 _CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
 
-# 单元格内数字 token 提取，尺寸档位、倍数、像素值与参考图上限等取值均为数字。
+# 单元格内数字 token 提取，尺寸档位、像素值与参考图上限等取值均为数字。
 _NUMBER_TOKEN_PATTERN = re.compile(r"\d+")
 
 
@@ -463,7 +463,7 @@ def test_capability_table_number_tokens_match() -> None:
 
     列数守护只锁定表格结构，单元格取值不在其比对范围，任一语言单独修改数值
     不会变红。数字 token 为语言无关要素，按行成序列比较即可覆盖尺寸档位、
-    倍数、默认像素与参考图上限等取值；失败消息定位两份文件的差异行号。
+    默认像素与参考图上限等取值；失败消息定位两份文件的差异行号。
     """
     base_rows = _capability_table(BASE_README)
     base_tokens = [_row_number_tokens(raw) for _, raw in base_rows]

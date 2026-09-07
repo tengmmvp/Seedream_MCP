@@ -238,7 +238,6 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 | 圖層拆分                   | ✅             | ❌             | ❌        | ❌           |
 | 透明背景                   | ✅             | ❌             | ❌        | ❌           |
 | 解析度選項                 | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K   | 1K / 2K / 4K |
-| 自訂尺寸倍數               | 16 的倍數      | 不限制         | 不限制    | 不限制       |
 | MCP 預設尺寸               | 2048x2048      | 2048x2048      | 2048x2048 | 2048x2048    |
 | 參考圖上限                 | 10 張          | 14 張          | 14 張     | 14 張        |
 
@@ -425,13 +424,13 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 除工具外，伺服器還公開以下 MCP 資源供用戶端讀取執行時資訊：
 
-| 資源 URI                                               | 說明                                                                                                                 |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `seedream://workspace/roots`                           | 當前生效的工作區根：用戶端授權的 MCP Roots，未宣告時回退環境配置的工作目錄                                           |
-| `seedream://server/info`                               | 伺服器名稱、版本與目前生效設定摘要（模型、預設尺寸、自動儲存開關，共五項欄位）                                       |
-| `seedream://models/info`                               | 各模型別名與能力宣告：支援的尺寸檔位、像素範圍、像素倍數、參考圖上限、輸出格式/工具/串流等能力，供用戶端按需選擇模型 |
-| `skill://seedream-image-generation/SKILL.md`           | Agent Skill 主檔案：圖像生成指南入口，內文含工具速查、模型差異與參數規則                                             |
-| `skill://seedream-image-generation/references/{+path}` | Agent Skill 參考檔案範本：多步工作流與故障排查，按需讀取                                                             |
+| 資源 URI                                               | 說明                                                                                                       |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `seedream://workspace/roots`                           | 當前生效的工作區根：用戶端授權的 MCP Roots，未宣告時回退環境配置的工作目錄                                 |
+| `seedream://server/info`                               | 伺服器名稱、版本與目前生效設定摘要（模型、預設尺寸、自動儲存開關，共五項欄位）                             |
+| `seedream://models/info`                               | 各模型別名與能力宣告：支援的尺寸檔位、像素範圍、參考圖上限、輸出格式/工具/串流等能力，供用戶端按需選擇模型 |
+| `skill://seedream-image-generation/SKILL.md`           | Agent Skill 主檔案：圖像生成指南入口，內文含工具速查、模型差異與參數規則                                   |
+| `skill://seedream-image-generation/references/{+path}` | Agent Skill 參考檔案範本：多步工作流與故障排查，按需讀取                                                   |
 
 ## 🧠 Agent Skills
 
