@@ -509,7 +509,7 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
         # end <= 1 覆盖未闭合与空内容两种畸形方括号形态。
         if end <= 1:
             return None
-        host, suffix = entry[: end + 1], entry[end + 1:]
+        host, suffix = entry[: end + 1], entry[end + 1 :]
     else:
         idx = entry.rfind(":")
         host, suffix = (entry, "") if idx == -1 else (entry[:idx], entry[idx:])
