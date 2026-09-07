@@ -191,6 +191,60 @@ def test_attach_passes_api_prefix_to_origin_guard(active_config: None) -> None:
     assert guard_kwargs.get("api_prefix") == f"{WEB_API_PREFIX}/"
 
 
+# ==================== 健康检查中间件 ====================
+
+
+async def _run_health_check(method: str, path: str) -> tuple[list[object], list[dict[str, Any]]]:
+    """以给定方法与路径调用健康检查中间件，返回到达下游的路径与发出的消息。"""
+    reached: list[object] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        reached.append(scope.get("path"))
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    middleware = _HealthCheckMiddleware(downstream)
+    await middleware({"type": "http", "method": method, "path": path}, None, send)
+    return reached, sent
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+async def test_health_check_short_circuits_probe_methods(method: str) -> None:
+    """GET 与 HEAD /health 均短路 200；HEAD 按探活语义返回空 body。"""
+    reached, sent = await _run_health_check(method, "/health")
+
+    assert reached == []
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 200
+    body_msg = sent[1]
+    assert body_msg["type"] == "http.response.body"
+    if method == "GET":
+        assert body_msg["body"] == b'{"status":"ok"}'
+    else:
+        assert body_msg["body"] == b""
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE"])
+async def test_health_check_passes_through_non_probe_methods(method: str) -> None:
+    """非 GET/HEAD 的 /health 请求进入下游，由 MCP 端点按自身规则响应。"""
+    reached, sent = await _run_health_check(method, "/health")
+
+    assert reached == ["/health"]
+    assert sent == []
+
+
+@pytest.mark.parametrize("path", ["/healthz", "/mcp", "/web"])
+async def test_health_check_only_matches_exact_health_path(path: str) -> None:
+    """非 /health 路径不经探活短路，正常进入下游。"""
+    reached, sent = await _run_health_check("GET", path)
+
+    assert reached == [path]
+    assert sent == []
+
+
 # ==================== Origin 守卫同源判定 ====================
 
 _API_PREFIX = "/web/api/"

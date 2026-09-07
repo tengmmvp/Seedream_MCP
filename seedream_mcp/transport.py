@@ -175,8 +175,12 @@ class _LimitRequestBodyMiddleware:
 
     与 SDK 内层 RequestBodyLimitMiddleware 构成双层纵深：本层位于 Bearer 鉴权之外，
     声明超长 Content-Length 的请求在鉴权前即被 413 早拒；内层覆盖全部请求方法兜底。
-    本层先按 Content-Length 头早拒，再包装 receive 累计实际接收字节数，超限短路返回
-    413，防止谎报或缺失 Content-Length 的请求体撑爆内存。仅作用于 http 请求，其余
+    本层先按 Content-Length 头早拒，再包装 receive 累计实际接收字节数，防止谎报或
+    缺失 Content-Length 的请求体撑爆内存；累计超限在判定点即经真实 send 直发 413，
+    下游输出已转发时除外以免双响应，不等下游 app 收尾：客户端可能停发终帧，挂起的
+    app 会使迟发的 413 永远发不出并把任务与连接钉住。超限后的 http.request 帧仅
+    丢弃 body、保留真实帧的 more_body，其余帧原样透传，下游断连轮询在真实 receive
+    上自然挂起，客户端收到 413 断开或发完终帧后请求收尾。仅作用于 http 请求，其余
     流量原样透传。
     """
 
@@ -203,24 +207,40 @@ class _LimitRequestBodyMiddleware:
 
         total_received = 0
         too_large = False
+        # sent_413 标记 413 已由本中间件直发，forwarded 标记下游输出已触达传输层。
+        sent_413 = False
         forwarded = False
 
         async def receive_wrapper() -> Message:
-            nonlocal total_received, too_large
-            # 已判定超限后直接返回空终帧，切断剩余 body 投递。
-            if too_large:
-                return {"type": "http.request", "body": b"", "more_body": False}
+            nonlocal total_received, too_large, sent_413
+            # 始终先等待真实 receive 再按需丢弃 body：同步合成帧会让下游断连
+            # 轮询失去让出点、忙转冻结事件循环。
             message = await receive()
-            if message.get("type") == "http.request":
-                total_received += len(message.get("body", b""))
-                if total_received > self._max_body_size:
+            if message.get("type") != "http.request":
+                return message
+            total_received += len(message.get("body", b""))
+            if too_large or total_received > self._max_body_size:
+                if not too_large:
                     too_large = True
-                    return {"type": "http.request", "body": b"", "more_body": False}
+                    if not forwarded:
+                        # 判定点即直发 413：客户端可能停发终帧，等下游收尾再发会把
+                        # 连接钉死在永远挂起的 app 上。先置位再发送：send 中途失败
+                        # 时协议状态不明，补发有双响应风险。
+                        sent_413 = True
+                        try:
+                            await self._send_too_large(send)
+                        except Exception:
+                            logger.debug("请求体超限的 413 直发失败，连接可能已关闭")
+                return {
+                    "type": "http.request",
+                    "body": b"",
+                    "more_body": bool(message.get("more_body", False)),
+                }
             return message
 
         async def send_wrapper(message: Message) -> None:
             nonlocal forwarded
-            # 一旦判定超限，吞掉下游响应，由本中间件统一回 413 避免双响应。
+            # 一旦判定超限，吞掉下游响应，避免与已直发的 413 构成双响应。
             if too_large:
                 return
             # 置位须在真实转发之前：send 中途抛异常时协议状态不明，宁可视为已
@@ -229,9 +249,11 @@ class _LimitRequestBodyMiddleware:
             await send(message)
 
         async def _finalize_too_large() -> None:
-            # 无/谎报 Content-Length 的流式超限主路径上，下游输出已全被吞掉、
-            # 从未触达真实客户端，补发 413 是客户端收到的唯一响应；仅当下游
-            # 输出已真实转发过传输层时补发才违反 ASGI 单响应约定，此时仅记日志。
+            # 直发形态已出过 413，静默收尾即可；下游输出已真实转发过传输层时补发
+            # 才违反 ASGI 单响应约定，此时仅记日志；其余形态的下游输出从未触达
+            # 客户端，补发 413 是客户端收到的唯一响应。
+            if sent_413:
+                return
             if forwarded:
                 logger.warning("请求体超限但下游响应已转发，跳过补发 413 以避免双响应")
                 return
@@ -240,8 +262,8 @@ class _LimitRequestBodyMiddleware:
         try:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
-            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并统一回 413，
-            # 避免冒泡为 500。
+            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并交由
+            # _finalize_too_large 收尾，避免冒泡为 500。
             if too_large:
                 try:
                     await _finalize_too_large()
@@ -264,10 +286,11 @@ class _LimitRequestBodyMiddleware:
 
 
 class _HealthCheckMiddleware:
-    """streamable-http 健康检查中间件，短路 GET /health 返回进程存活状态。
+    """streamable-http 健康检查中间件，短路 GET 与 HEAD /health 返回进程存活状态。
 
     位于请求体限制与鉴权之外，探针无需令牌；回环绑定时位于 Host 校验之内，
-    rebinding 请求连探活也被拒。仅做 liveness 判定，不探测上游 API。
+    rebinding 请求连探活也被拒。HEAD 按探活语义返回 200 空 body。仅做 liveness
+    判定，不探测上游 API。
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -276,10 +299,12 @@ class _HealthCheckMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
             scope.get("type") == "http"
-            and scope.get("method") == "GET"
+            and scope.get("method") in ("GET", "HEAD")
             and scope.get("path") == "/health"
         ):
-            await _send_asgi_json(send, 200, b'{"status":"ok"}')
+            method = scope.get("method")
+            body = b'{"status":"ok"}' if method == "GET" else b""
+            await _send_asgi_json(send, 200, body)
             return
         await self.app(scope, receive, send)
 

@@ -5,6 +5,7 @@
 由 receive 字节累计兜底。
 """
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -451,6 +452,106 @@ async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
     scope = {"type": "http", "headers": []}
     # 旧行为：收尾 413 在 try 之外，send 失败原样冒泡。
     await middleware(scope, receive, send)
+
+
+async def test_request_body_limit_truncation_keeps_disconnect_watch_yielding() -> None:
+    """超限截断后下游 watch_disconnect 式轮询仍有真实让出点，请求有界完成并回 413。
+
+    截断若同步合成空终帧而不透传真实 receive，轮询会陷入无让出点忙转并冻结
+    事件循环；截断须丢弃 body 内容但保留真实帧序，http.disconnect 原样送达。
+    """
+    small_limit = 64
+    prefix = b'{"jsonrpc":"2.0","id":1,"method":"tools/call"}'
+    messages = [
+        {"type": "http.request", "body": prefix, "more_body": True},
+        {"type": "http.request", "body": b"x" * 4096, "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+    counter = {"i": 0}
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        if counter["i"] < len(messages):
+            msg = messages[counter["i"]]
+            counter["i"] += 1
+            return msg
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async def watch_disconnect(receive) -> None:  # type: ignore[no-untyped-def]
+        while (await receive()).get("type") != "http.disconnect":
+            pass
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        first = await receive()
+        assert first["body"] == prefix
+        watcher = asyncio.create_task(watch_disconnect(receive))
+        await watcher
+        # 断连送达时 413 已在超限判定点直发，不待本 app 收尾补发
+        assert any(m.get("type") == "http.response.start" and m.get("status") == 413 for m in sent)
+
+    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    scope = {"type": "http", "headers": []}
+    await asyncio.wait_for(middleware(scope, receive, send), timeout=5.0)
+
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    body_msg = next(m for m in sent if m.get("type") == "http.response.body")
+    assert json.loads(body_msg["body"].decode("utf-8"))["error"] == "request_too_large"
+
+
+async def test_request_body_limit_sends_413_while_client_stalls_after_overflow() -> None:
+    """超限后客户端停发终帧时，413 仍不等下游 app 完成即经真实 send 直发。
+
+    413 若耦合到 app 收尾，停发客户端使 receive 永不返回终帧，下游挂起、连接
+    被无限钉住；判定点直发使客户端及时收到 413 并按 connection: close 断开。
+    """
+    small_limit = 64
+    prefix = b'{"jsonrpc":"2.0","id":1,"method":"tools/call"}'
+    stall = asyncio.Event()
+    sent: list[dict] = []
+    counter = {"i": 0}
+
+    async def receive() -> dict:
+        if counter["i"] == 0:
+            counter["i"] += 1
+            return {"type": "http.request", "body": prefix, "more_body": True}
+        if counter["i"] == 1:
+            counter["i"] += 1
+            return {"type": "http.request", "body": b"x" * 4096, "more_body": True}
+        await stall.wait()
+        raise AssertionError("停发客户端不再返回任何帧")
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        while (await receive()).get("type") != "http.disconnect":
+            pass
+
+    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    scope = {"type": "http", "headers": []}
+    task = asyncio.create_task(middleware(scope, receive, send))
+
+    async def wait_for_413_start() -> None:
+        while not any(
+            m.get("type") == "http.response.start" and m.get("status") == 413 for m in sent
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_413_start(), timeout=5.0)
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    body_msg = next(m for m in sent if m.get("type") == "http.response.body")
+    assert json.loads(body_msg["body"].decode("utf-8"))["error"] == "request_too_large"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 # ==================== SEEDREAM_HTTP_MAX_BODY_SIZE 配置解析 ====================
