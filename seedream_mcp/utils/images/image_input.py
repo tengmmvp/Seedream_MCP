@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from ..core.errors import SeedreamMCPError, SeedreamValidationError
@@ -23,6 +26,7 @@ from ..io.io_path import (
     suggest_similar_paths,
 )
 from .image_validation import (
+    LocalImageCandidate,
     iter_local_candidates,
     read_and_decode_local_image,
     resolve_local_image_candidate,
@@ -33,6 +37,22 @@ from .image_ref import classify_image_reference
 
 logger = get_logger()
 
+# 已完成候选定位的调用方经此传入 (路径, stat)，读取链复用同一候选不再二次定位，
+# 消除签名定位与读取定位之间文件被替换的错位窗口。
+local_candidate_ctx: ContextVar[LocalImageCandidate | None] = ContextVar(
+    "local_candidate", default=None
+)
+
+
+@asynccontextmanager
+async def local_candidate_scope(candidate: LocalImageCandidate | None) -> AsyncIterator[None]:
+    """在作用域内向读取链注入本地候选，退出时复位上下文不泄漏。"""
+    token = local_candidate_ctx.set(candidate)
+    try:
+        yield
+    finally:
+        local_candidate_ctx.reset(token)
+
 
 async def prepare_image_input(image: str) -> str:
     """将单张图像输入归一化为 API 所需格式。
@@ -41,7 +61,8 @@ async def prepare_image_input(image: str) -> str:
     - Data URI：经格式与维度校验后将 media type 归一化为小写标准 MIME 返回。
     - 本地文件路径：读取并编码为 Base64 Data URI 返回。
 
-    URL 校验、Data URI 校验与本地文件读取均在工作线程中执行，避免阻塞事件循环。
+    URL 的 urlparse 全量解析与 Data URI 的 base64 解码均有阻塞事件循环的成本，
+    均下沉工作线程执行。
 
     Args:
         image: 图像输入字符串，可为 HTTP/HTTPS URL、Data URI 或本地文件路径。
@@ -54,11 +75,7 @@ async def prepare_image_input(image: str) -> str:
         normalized = image.strip()
 
         kind = classify_image_reference(normalized)
-        if kind == "url":
-            # 巨型 URL 的 urlparse 全量解析有阻塞事件循环的成本，下沉工作线程执行。
-            return await asyncio.to_thread(validate_image_input, normalized)
-
-        if kind == "data_uri":
+        if kind != "local":
             return await asyncio.to_thread(validate_image_input, normalized)
 
         return await asyncio.to_thread(_prepare_local_image, normalized, image)
@@ -69,7 +86,7 @@ async def prepare_image_input(image: str) -> str:
         raise SeedreamValidationError(f"图像处理失败: {e}") from e
 
 
-def _resolves_outside_workspace(normalized: str, save_root: Path, read_scope: list[Path]) -> bool:
+def _resolves_outside_read_scope(normalized: str, save_root: Path, read_scope: list[Path]) -> bool:
     """判断输入路径解析后的物理位置是否落在读权限之外。
 
     候选管线与 resolve_local_image_candidate 共用 iter_local_candidates，任一
@@ -96,10 +113,11 @@ def _relative_breaks_save_root(normalized: str, save_root: Path) -> bool:
 
 
 def _format_local_read_error(exc: OSError, normalized: str) -> str:
-    """构建本地文件读取失败的错误文案，不回显服务器侧绝对路径。
+    """构建本地文件读取失败的错误文案，回显解析后的绝对路径。
 
-    异常的 str 与 filename 均可能嵌有服务器侧绝对路径，仅回显系统错误语义与
-    调用方输入的原样字符串。系统错误语义取 strerror，缺失时回退 errno 数值。
+    路径取异常携带的 filename，缺失时回退调用方输入的原样字符串，与诊断分支
+    回显 resolve 后绝对路径的口径一致。系统错误语义取 strerror，缺失时回退
+    errno 数值。
     """
     if exc.strerror:
         reason = exc.strerror
@@ -107,46 +125,51 @@ def _format_local_read_error(exc: OSError, normalized: str) -> str:
         reason = f"errno {exc.errno}"
     else:
         reason = "无法读取"
-    return f"读取图像文件失败: {reason}: {normalized}"
+    return f"读取图像文件失败: {reason}: {exc.filename or normalized}"
 
 
 def _prepare_local_image(normalized: str, original: str) -> str:
     """校验本地图片路径并读取编码为 Base64 Data URI。
 
     候选定位委托 resolve_local_image_candidate，与 ImagePreparer 的缓存签名共用
-    同一选择规则，锁定同一文件。(存储区, 读权限) 经 get_read_context 在函数顶
+    同一选择规则，锁定同一文件；调用方已完成定位时经 local_candidate_ctx 传入，
+    读取复用同一候选不再二次定位。(存储区, 读权限) 经 get_read_context 在函数顶
     部单点求值，各分支共享，消除一次失败请求内的重复解析。越界抛携带配置指引
     的错误；界内定位失败经 validate_image_path 做诊断性校验，取具体失败原因并附
     存储区内的相似路径建议。各失败均属参数校验语义而非 API 调用失败，归
     SeedreamValidationError。需在工作线程中调用。
     """
-    _, save_root, read_scope = get_read_context()
-    found = resolve_local_image_candidate(normalized, save_root=save_root, read_scope=read_scope)
+    found = local_candidate_ctx.get()
     if found is None:
-        if _relative_breaks_save_root(normalized, save_root):
-            raise SeedreamValidationError(
-                "相对路径仅限图片保存目录内，其他位置请使用绝对路径",
-                field="image",
-                value=normalized,
-            )
-        if _resolves_outside_workspace(normalized, save_root, read_scope):
-            raise SeedreamValidationError(
-                "路径不在读取范围内；可通过客户端工作区（MCP Roots）、"
-                "SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR 授权该目录",
-                field="image",
-                value=normalized,
-            )
-        _, error_msg, _ = validate_image_path(normalized, skip_dimensions=True)
-        error_text = error_msg or "图像路径校验失败"
-        suggestions = suggest_similar_paths(original, search_dirs=[str(save_root)])
-        suggestion_text = ""
-        if suggestions:
-            suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
-                f"  • {suggestion}" for suggestion in suggestions[:3]
-            )
-        raise SeedreamValidationError(
-            f"{error_text}{suggestion_text}", field="image", value=normalized
+        _, save_root, read_scope = get_read_context()
+        found = resolve_local_image_candidate(
+            normalized, save_root=save_root, read_scope=read_scope
         )
+        if found is None:
+            if _relative_breaks_save_root(normalized, save_root):
+                raise SeedreamValidationError(
+                    "相对路径仅限图片保存目录内，其他位置请使用绝对路径",
+                    field="image",
+                    value=normalized,
+                )
+            if _resolves_outside_read_scope(normalized, save_root, read_scope):
+                raise SeedreamValidationError(
+                    "路径不在读取范围内；可通过客户端工作区（MCP Roots）、"
+                    "SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR 授权该目录",
+                    field="image",
+                    value=normalized,
+                )
+            _, error_msg, _ = validate_image_path(normalized, skip_dimensions=True)
+            error_text = error_msg or "图像路径校验失败"
+            suggestions = suggest_similar_paths(original, search_dirs=[str(save_root)])
+            suggestion_text = ""
+            if suggestions:
+                suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
+                    f"  • {suggestion}" for suggestion in suggestions[:3]
+                )
+            raise SeedreamValidationError(
+                f"{error_text}{suggestion_text}", field="image", value=normalized
+            )
 
     validated_path, _ = found
 

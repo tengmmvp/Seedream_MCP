@@ -37,11 +37,11 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
-    # URL 输入的 _local_file_signature 恒为 (0.0, 0)，两次 cache_key 完全一致
+    # URL 输入的缓存签名恒为 (0.0, 0)，两次 cache_key 完全一致
     image_url = "https://example.com/ref.png"
     first, second = await asyncio.gather(
-        client._image_preparer.prepare_image_input(image_url, roots_key),
-        client._image_preparer.prepare_image_input(image_url, roots_key),
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key),
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key),
     )
 
     assert call_count == 1
@@ -78,12 +78,14 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
-    # URL 输入的 _local_file_signature 恒为 (0.0, 0)，两次 cache_key 完全一致
+    # URL 输入的缓存签名恒为 (0.0, 0)，两次 cache_key 完全一致
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
-        client._image_preparer.prepare_image_input(image_url, roots_key)
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
-    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
+    )
 
     # 等待底层 task 启动，此时 creator 与 waiter 均已挂起在共享 task 上。
     await inner_started.wait()
@@ -133,9 +135,11 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
-        client._image_preparer.prepare_image_input(image_url, roots_key)
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
-    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
+    )
 
     # 等待底层 task 启动，此时 creator 与 waiter 均已挂起在共享 task 上。
     await inner_started.wait()
@@ -182,9 +186,11 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
-        client._image_preparer.prepare_image_input(image_url, roots_key)
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
-    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
+    )
 
     await inner_started.wait()
     # 两者 await 同一 inflight task，task 抛错时均收到该异常
@@ -226,9 +232,11 @@ async def test_prepare_failure_consumed_by_waiters_not_armed(
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
-        client._image_preparer.prepare_image_input(image_url, roots_key)
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
-    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
+    )
 
     await inner_started.wait()
     done, pending = await asyncio.wait({creator, waiter})
@@ -263,7 +271,7 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
-        client._image_preparer.prepare_image_input(image_url, roots_key)
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
     await inner_started.wait()
     inflight = next(iter(client._image_preparer._prepare_inflight.values())).task
@@ -310,7 +318,7 @@ async def test_prepare_rechecks_cache_after_semaphore_wait(
     await semaphore.acquire()
 
     image_data_uri = "data:image/png;base64,aGVsbG8="
-    late = asyncio.ensure_future(preparer.prepare_image_input(image_data_uri, roots_key))
+    late = asyncio.ensure_future(preparer.prepare_image_input(image_data_uri, scope_key=roots_key))
     # 推进事件循环：后到者完成键计算并挂起在信号量 acquire 上，尚未登记在途 task
     await asyncio.sleep(0)
     assert len(preparer._prepare_inflight) == 0
@@ -355,9 +363,11 @@ async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
-        client._image_preparer.prepare_image_input(image_url, roots_key)
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
-    waiter = asyncio.ensure_future(client._image_preparer.prepare_image_input(image_url, roots_key))
+    waiter = asyncio.ensure_future(
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
+    )
 
     await inner_started.wait()
     waiter.cancel()
@@ -398,7 +408,7 @@ async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
 
     image_url = "https://example.com/ref.png"
     creator = asyncio.ensure_future(
-        client._image_preparer.prepare_image_input(image_url, roots_key)
+        client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
     await inner_started.wait()
     inflight = next(iter(client._image_preparer._prepare_inflight.values())).task

@@ -13,8 +13,9 @@ import base64
 import io
 import os
 import stat
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 from urllib.parse import urlparse
 
 from ..core.errors import SeedreamValidationError
@@ -42,6 +43,20 @@ from .image_ref import classify_image_reference
 
 logger = get_logger()
 
+# 无法识别图像内容的固定错误文案。UnidentifiedImageError 的 str 嵌有 BytesIO
+# 对象的内存地址，直接拼入用户可见消息会把服务器侧对象地址带给调用方。
+UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
+
+# 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
+MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
+
+# 参考图即输入图像：最短边上限在此，总像素上限由 formats 单一来源提供，宽高比
+# 上下限由 validators 持有共用。
+MIN_IMAGE_EDGE = 15
+
+# 本地候选定位结果：(resolve 后物理路径, stat)，缓存签名计算与读取链共用同一候选。
+LocalImageCandidate = tuple[Path, os.stat_result]
+
 # HEIC/HEIF 解码器惰性注册，首次校验图片时按需执行。check-then-set 非线程安全，
 # 但 register_heif_opener 与 MAX_IMAGE_PIXELS 赋值均幂等，并发重复注册无功能影响。
 _heif_opener_registered = False
@@ -65,10 +80,11 @@ def ensure_image_decoders_ready() -> None:
 
 
 def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None:
-    """解码图像字节并校验像素维度，供本地文件与预处理两条路径复用。
+    """解码图像字节并校验像素维度与数据完整性，供本地文件与预处理两条路径复用。
 
     image_bytes 为已读取的完整图像字节，value_label 用于错误信息。维度超限由
-    _validate_image_dimensions 抛 SeedreamValidationError；解码异常抛 PIL 原生类型，
+    _validate_image_dimensions 抛 SeedreamValidationError；img.verify 校验像素数据
+    完整性，头合法但数据截断的文件在本地即被拒；解码与校验异常抛 PIL 原生类型，
     由调用方按所属模块的异常基类包装。
 
     Args:
@@ -83,6 +99,9 @@ def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None
     ensure_image_decoders_ready()
     with Image.open(io.BytesIO(image_bytes)) as img:
         _validate_image_dimensions(img.size[0], img.size[1], value_label)
+        # verify 不解码像素，仅校验数据完整性；本路径不复用解码结果，verify 后
+        # 图像不可用的限制无影响。
+        img.verify()
 
 
 def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> None:
@@ -106,11 +125,6 @@ def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> Non
             else f"图像维度解析失败: {str(exc)}"
         )
         raise SeedreamValidationError(message, field="image", value=field_value) from exc
-
-
-# 无法识别图像内容的固定错误文案。UnidentifiedImageError 的 str 嵌有 BytesIO
-# 对象的内存地址，直接拼入用户可见消息会把服务器侧对象地址带给调用方。
-UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
 
 
 def is_unidentified_image_error(exc: BaseException) -> bool:
@@ -159,13 +173,6 @@ def read_and_decode_local_image(
         )
     decode_and_validate_image_bytes(image_bytes, field_value)
     return image_bytes
-
-
-# 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
-MAX_IMAGE_FILE_SIZE = 30 * 1024 * 1024
-# 参考图即输入图像：最短边上限在此，总像素上限由 formats 单一来源提供，宽高比
-# 上下限由 validators 持有共用。
-MIN_IMAGE_EDGE = 15
 
 
 def _get_validation_base_dir() -> Path:
@@ -265,7 +272,7 @@ def resolve_local_image_candidate(
     *,
     save_root: Path | None = None,
     read_scope: list[Path] | None = None,
-) -> tuple[Path, os.stat_result] | None:
+) -> LocalImageCandidate | None:
     """定位可读取的候选图片文件：绝对路径判读权限，相对路径仅限存储区内。
 
     界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
@@ -421,14 +428,11 @@ def _validate_data_uri(data_uri: str) -> str:
     """
     try:
         # 经 formats.parse_data_uri 统一拆分，与 auto_save 共用单一解析。
-        media_type, b64 = parse_data_uri(data_uri)
+        media_type, b64, is_base64 = parse_data_uri(data_uri)
         if media_type is None or not b64:
             raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)
 
-        # 编码标记需在原始 header 确认，确保按 base64 解码而非误处理其他编码负载。
-        # 头部切片只物化逗号前片段；逗号必然存在，缺逗号形态已被上方分支拒绝。
-        header_lower = data_uri[: data_uri.find(",")].lower()
-        if not header_lower.startswith("data:image/") or ";base64" not in header_lower:
+        if not is_base64 or not media_type.lower().startswith("image/"):
             raise SeedreamValidationError(
                 "Data URI 必须为 data:image/<格式>;base64, 前缀（scheme 大小写不敏感）",
                 field="image",

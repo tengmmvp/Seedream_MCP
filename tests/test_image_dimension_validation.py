@@ -132,6 +132,28 @@ def test_decode_raises_decompression_bomb_error_when_limit_lowered(
         decode_and_validate_dimensions(_png_bytes(200, 200), "bomb.png")
 
 
+def test_decode_rejects_truncated_png_bytes() -> None:
+    """头合法但像素数据截断的 PNG 经 verify 在本地被拒，不再放行到上游报错。
+
+    截断后 Image.open 仍成功且 size 正常，仅 img.verify 能发现数据不完整。
+    """
+    full = _png_bytes(32, 32)
+    truncated = full[: len(full) - 10]
+
+    with pytest.raises(OSError):
+        decode_and_validate_dimensions(truncated, "truncated.png")
+
+
+def test_validate_image_input_wraps_truncated_local_file(tmp_path: Path) -> None:
+    """截断 PNG 经完整校验链包装为维度解析失败的校验错误。"""
+    path = tmp_path / "truncated.png"
+    full = _png_bytes(32, 32)
+    path.write_bytes(full[: len(full) - 10])
+
+    with pytest.raises(SeedreamValidationError, match="图像维度解析失败"):
+        validate_image_input(str(path))
+
+
 # ==================== validate_image_input 本地文件路径 ====================
 
 

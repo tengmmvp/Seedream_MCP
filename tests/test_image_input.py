@@ -1,7 +1,7 @@
 """image_input 预处理测试：URL 与 Data URI 主干、本地文件读取与读权限校验。
 
-相对路径以存储区为基准，绝对路径判定面向读权限（工作区 ∪ 存储区）；越界与
-诊断消息统一不回显服务器侧绝对路径。
+相对路径以存储区为基准，绝对路径判定面向读权限（工作区 ∪ 存储区）；读取失败与
+诊断消息统一回显解析后的绝对路径。
 """
 
 import base64
@@ -146,13 +146,13 @@ async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_pa
     assert result.startswith("data:image/")
 
 
-async def test_prepare_image_input_read_failure_masks_fallback_boundary(
+async def test_prepare_image_input_read_failure_echoes_resolved_path(
     workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """本地文件打开失败的错误消息不泄露服务器侧绝对路径。
+    """本地文件打开失败的错误消息回显解析后的绝对路径，与诊断分支口径一致。
 
-    OSError 原文嵌有解析后的绝对路径，遮蔽后仅回显系统错误语义与调用方输入
-    原样串。
+    OSError 的 filename 携带解析后的绝对路径，错误信息直接回显该路径与系统错误
+    语义，调用方输入以 value 字段保留。
     """
     del tmp_path
     locked = _save_root(workspace_root) / "locked.png"
@@ -167,12 +167,7 @@ async def test_prepare_image_input_read_failure_masks_fallback_boundary(
         await prepare_image_input("locked.png")
 
     message = exc_info.value.message
-    # OSError 原文的 filename 经 repr 渲染，反斜杠以转义形态出现，两种形态都不
-    # 得进入面向调用方的消息
-    resolved_root = str(workspace_root.resolve())
-    escaped_root = repr(resolved_root)[1:-1]
-    assert resolved_root not in message
-    assert escaped_root not in message
+    assert str(locked.resolve()) in message
     assert "Permission denied" in message
     assert "locked.png" in message
     assert exc_info.value.field == "image"
@@ -204,10 +199,10 @@ async def test_prepare_image_input_read_failure_profiles_as_validation_error(
     assert "API Key" not in profile.user_hint
 
 
-async def test_prepare_image_input_read_failure_masks_session_roots_boundary(
+async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
     workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """会话 Roots 边界下打开失败同样不回显异常原文路径，遮蔽口径统一。"""
+    """会话 Roots 边界下打开失败同样回显解析后路径，回显口径统一。"""
     del tmp_path
     locked = _save_root(workspace_root) / "locked.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
@@ -221,7 +216,7 @@ async def test_prepare_image_input_read_failure_masks_session_roots_boundary(
     try:
         with pytest.raises(SeedreamValidationError) as exc_info:
             await prepare_image_input("locked.png")
-        assert str(locked.resolve()) not in exc_info.value.message
+        assert str(locked.resolve()) in exc_info.value.message
         assert "Permission denied" in exc_info.value.message
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
