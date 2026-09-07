@@ -18,7 +18,7 @@
 
   - 暂不支持组图生成、联网搜索、流式输出。
 
-- **Seedream 5.0 lite** 、 **Seedream 4.5 / 4.0**
+- **Seedream 5.0 lite**、**Seedream 4.5 / 4.0**
   - 生成组图（组图：基于您输入的内容，生成的一组内容关联的图片；需配置 `sequential_image_generation` 为 `auto`）
     - 多图生组图：输入多张参考图片（2\-14）+ 文本提示词，生成一组内容关联的图片（输入的参考图数量 + 最终生成的图片数量 ≤ 15 张）。
 
@@ -53,22 +53,16 @@
 
 ### Body 参数
 
-**model** `string` `必选` | 模型 ID
-
-您需要调用的模型的 ID（Model ID），[开通模型服务](https://console.volcengine.com/ark/region:cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)，并 [查询 Model ID](https://docs.volcengine.com/docs/82379/1330310#9df4d9fd)。
-
-您也可通过 Endpoint ID 来调用模型，获得限流、计费类型（前付费 / 后付费）、运行状态查询、监控、安全等高级能力，可参考 [获取 Endpoint ID](https://docs.volcengine.com/docs/82379/1099522)。
-
 **prompt** `string` | 提示词
 
 用于生成图像或指定图层拆分意图的提示词。
 
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>提示词语言支持</strong> ：所有模型均支持中英文提示词；</div>
+- <div data-tips="true" data-tips-type="tip"><strong>提示词语言支持</strong>：所有模型均支持中英文提示词；</div>
   - <div data-tips="true" data-tips-type="tip"><code>Seedream 5.0 pro</code> 额外支持俄语、阿拉伯语、菲律宾语、泰语、土耳其语、韩语、马来语、西班牙语、葡萄牙语、印尼语、法语、德语、越南语、日语。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>提示词字数建议</strong> ：中文提示词不超过 300 字，英文提示词不超过 600 词。字数过多信息容易分散，模型可能因此忽略细节，只关注重点，造成图片缺失部分元素。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>提示词字数建议</strong>：中文提示词不超过 300 字，英文提示词不超过 600 词。字数过多信息容易分散，模型可能因此忽略细节，只关注重点，造成图片缺失部分元素。</div>
 
 **图片生成场景 ** **`必选`**
 
@@ -92,7 +86,7 @@
 
 Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 4.0 最多支持传入 14 张参考图。
 
-**单张图片传入要求** ：
+**单张图片传入要求**：
 
 - 图片格式：jpeg、png、webp、bmp、tiff、gif、heic、heif
 
@@ -108,7 +102,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 当开启图层拆分模式时（`layer_decomposition` 为 `true`），`image` 为必选参数，且仅支持输入单张图片（传入多张报错）。
 
-**单张图片传入要求** ：
+**单张图片传入要求**：
 
 - 图片格式：png、jpeg
 
@@ -138,7 +132,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - <div data-tips="true" data-tips-type="tip">响应结构体 <code>data</code> 中，将返回每个产出图层的位置和内容信息，包括图层顺序（<code>z_index</code>）、边界框信息（<code>bounding_box</code>）、名称（<code>name</code>）和描述（<code>description</code>）。</div>
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -168,9 +162,9 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="tip">采用方式 2 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong> ：<code>2048x1024</code>。总像素值 2048x1024=2097152，符合 [921600, 4624220] 的区间要求；宽高比 2048/1024=2，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>2048x1024</code>。总像素值 2048x1024=2097152，符合 [921600, 4624220] 的区间要求；宽高比 2048/1024=2，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong> ：<code>512x512</code>。总像素值 512x512=262144，未达到 921600 的最低要求，故该示例值无效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>512x512</code>。总像素值 512x512=262144，未达到 921600 的最低要求，故该示例值无效。</div>
 
 使用方式 1 时，模型实际映射的宽高像素参考值（不限于以下标准值，仅列常见）：
 
@@ -205,9 +199,9 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 仅支持通过指定分辨率档位的方式设置。输出图的分辨率规则如下：
 
-- **底图** ：输出底图的分辨率和 `size` 指定的分辨率一致；输出底图和原待拆分图的宽高比一致。
+- **底图**：输出底图的分辨率和 `size` 指定的分辨率一致；输出底图和原待拆分图的宽高比一致。
 
-- **各图层** ：输出图层的分辨率和 `size` 指定的分辨率接近；每个输出图层和其在原图中的宽高比一致。
+- **各图层**：输出图层的分辨率和 `size` 指定的分辨率接近；每个输出图层和其在原图中的宽高比一致。
 
 `size` 的默认值与可选值：
 
@@ -276,9 +270,9 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="tip">采用方式 2 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong> ：<code>3750x1250</code>。总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>3750x1250</code>。总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong> ：<code>1500x1500</code>。总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但未同时满足两项限制，故该示例值无效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>1500x1500</code>。总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但未同时满足两项限制，故该示例值无效。</div>
 
 采用方式 1 时，模型实际映射的宽高像素参考值：
 
@@ -327,9 +321,9 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="tip">采用方式 2 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong> ：<code>3750x1250</code>。总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>3750x1250</code>。总像素值 3750x1250=4687500，符合 [3686400, 16777216] 的区间要求；宽高比 3750/1250=3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong> ：<code>1500x1500</code>。总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但未同时满足两项限制，故该示例值无效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>1500x1500</code>。总像素值 1500x1500=2250000，未达到 3686400 的最低要求；宽高 1500/1500=1，虽符合 [1/16, 16] 的区间要求，但未同时满足两项限制，故该示例值无效。</div>
 
 采用方式 1 时，模型实际映射的宽高像素参考值：
 
@@ -370,9 +364,9 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="tip">采用方式 2 时，需同时满足总像素取值范围和宽高比取值范围。其中，总像素是对单张图宽度和高度的像素乘积限制，而不是对宽度或高度的单独值进行限制。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong> ：<code>1600x600</code>。总像素值 1600x600=960000，符合 [921600, 16777216] 的区间要求；宽高比 1600/600=8/3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>有效示例</strong>：<code>1600x600</code>。总像素值 1600x600=960000，符合 [921600, 16777216] 的区间要求；宽高比 1600/600=8/3，符合 [1/16, 16] 的区间要求，故该示例值有效。</div>
 
-- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong> ：<code>800x800</code>。总像素值 800x800=640000，未达到 921600 的最低要求；宽高 800/800=1，虽符合 [1/16, 16] 的区间要求，但未同时满足两项限制，故该示例值无效。</div>
+- <div data-tips="true" data-tips-type="tip"><strong>无效示例</strong>：<code>800x800</code>。总像素值 800x800=640000，未达到 921600 的最低要求；宽高 800/800=1，虽符合 [1/16, 16] 的区间要求，但未同时满足两项限制，故该示例值无效。</div>
 
 采用方式 1 时，模型实际映射的宽高像素参考值：
 
@@ -433,7 +427,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - <div data-tips="true" data-tips-type="warning">图层拆分场景下，<code>output_format</code> 仅控制底图的输出格式，图层始终以 <code>png</code> 格式输出。</div>
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -449,13 +443,13 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="warning" data-tips-is-title="true">使用限制</div>
 
-- <div data-tips="true" data-tips-type="warning">仅支持图生图场景，且只支持输入 <strong>1 张带透明通道</strong> 的图片；</div>
+- <div data-tips="true" data-tips-type="warning">仅支持图生图场景，且只支持输入 <strong>1 张带透明通道</strong>的图片；</div>
 
 - <div data-tips="true" data-tips-type="warning">透明背景模式下，输出图片默认为 <code>png</code> 格式，若同时配置 <code>output_format</code> 为 <code>jpeg</code>，将触发报错；</div>
 
 - <div data-tips="true" data-tips-type="warning">若传入了不支持透明通道的文件格式（如 <code>jpeg</code>），将触发报错。</div>
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -463,7 +457,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 指定生成图像的返回格式。支持以下两种返回方式：
 
-- `url`：返回图片下载链接， **链接在图片生成后 24 小时内有效，请及时下载图片** 。
+- `url`：返回图片下载链接，**链接在图片生成后 24 小时内有效，请及时下载图片**。
 
 - `b64_json`：以 Base64 编码字符串的 JSON 格式返回图像数据。
 
@@ -477,7 +471,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 组图输出示例详见 [Seedream 图像创作教程 - 组图输出](https://docs.volcengine.com/docs/82379/1824121#ec79cfda)。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
@@ -489,7 +483,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 组图功能的配置。仅当 `sequential_image_generation` 为 `auto` 时生效。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
@@ -505,9 +499,9 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="tip">实际可生成的图片数量，除受到 <code>max_images</code> 影响外，还受到输入的参考图数量影响。 <strong>输入的参考图数量+最终生成的图片数量≤15 张</strong> 。</div>
+<div data-tips="true" data-tips-type="tip">实际可生成的图片数量，除受到 <code>max_images</code> 影响外，还受到输入的参考图数量影响。<strong>输入的参考图数量+最终生成的图片数量≤15 张</strong>。</div>
 
-**取值范围** ：`[1, 15]`
+**取值范围**：`[1, 15]`
 
 **stream** `boolean` `默认值 false` | 流式输出开关
 
@@ -519,7 +513,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 流式输出示例详见 [Seedream 图像创作教程 - 流式输出](https://docs.volcengine.com/docs/82379/1824121#e5bef0d7)。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
@@ -531,7 +525,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 配置模型要调用的工具。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
@@ -556,6 +550,12 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 - `false`：不添加水印。
 
 - `true`：在图片右下角添加“AI 生成”字样的水印标识。
+
+**model** `string` `必选` | 模型 ID
+
+您需要调用的模型的 ID（Model ID），[开通模型服务](https://console.volcengine.com/ark/region:cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)，并 [查询 Model ID](https://docs.volcengine.com/docs/82379/1330310#9df4d9fd)。
+
+您也可通过 Endpoint ID 来调用模型，获得限流、计费类型（前付费 / 后付费）、运行状态查询、监控、安全等高级能力，可参考 [获取 Endpoint ID](https://docs.volcengine.com/docs/82379/1099522)。
 
 &nbsp;
 
@@ -587,7 +587,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 `data.url`
 
-图片 URL，当 `response_format` 指定为 `url` 时返回。该链接将在生成后 **24 小时内失效** ，请务必及时保存图像。
+图片 URL，当 `response_format` 指定为 `url` 时返回。该链接将在生成后 **24 小时内失效**，请务必及时保存图像。
 
 推荐配置火山引擎 TOS 提供的数据订阅功能，将您的模型推理产物自动转存到自己的 TOS 桶中，便于长期备份或二次加工。详细介绍请参见 [TOS 数据订阅](https://docs.volcengine.com/docs/6349/1366744)。
 
@@ -613,7 +613,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - <div data-tips="true" data-tips-type="warning">图层拆分场景下，<code>output_format</code> 仅控制底图的输出格式，图层始终以 <code>png</code> 格式输出。</div>
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -625,7 +625,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 图层的叠放顺序索引。底图固定为 `0`，图层从 `1` 开始递增，数值越大越靠上层。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -635,7 +635,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 当前图层拆分元素的名称/标签。由模型根据拆分出的主体特征自动生成，用于标识该图层的主体内容。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -645,7 +645,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 当前图层拆分元素的详细描述。由模型生成的语义描述，提供比 `name` 更丰富的图层特征（如颜色、状态、材质等）。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -661,7 +661,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
   - <div data-tips="true" data-tips-type="tip">若需将图层还原到输出底图中，建议优先使用 <code>absolute</code> 坐标。</div>
   - <div data-tips="true" data-tips-type="tip">若需将图层还原到任意自定义的画布中，可使用 <code>normalized</code> 坐标。</div>
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -737,7 +737,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - <div data-tips="true" data-tips-type="tip">若失败原因为内部服务异常（500）：不会继续请求下一个图片生成任务。</div>
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
@@ -777,7 +777,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 本次请求中配置并被模型调用的工具列表
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
@@ -811,7 +811,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 输入模型的图片张数。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
 
@@ -827,7 +827,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 使用工具的用量信息
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
