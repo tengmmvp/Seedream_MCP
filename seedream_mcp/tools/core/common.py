@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult, ImageContent, TextContent
 
+from ...client import SeedreamClient
 from ...config import SeedreamConfig
 from ...utils.images.image_thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
 from ...utils.io.io_save import AutoSaveResult
@@ -62,8 +63,6 @@ if TYPE_CHECKING:
     from loguru import Logger
 
     from mcp.server.mcpserver import Context
-
-    from ...client import SeedreamClient
 
 
 # 门面对外导出的公共符号，私有辅助经各自定义模块显式导入。
@@ -159,8 +158,6 @@ async def _dispatch_generation_requests(
     module_logger: Logger,
 ) -> dict[str, Any]:
     """请求分发阶段：优先复用 lifespan 共享客户端执行单发或并行生成请求。"""
-    from ...client import SeedreamClient
-
     shared_client = _try_get_shared_client(ctx)
     if shared_client is not None:
         return await _run_generation_requests(
@@ -397,7 +394,7 @@ async def execute_generation_handler(
             is_error=is_generation_failed,
         )
     except Exception as exc:
-        module_logger.error("{}处理失败", metadata.failure_prefix, exc_info=True)
+        module_logger.exception("{}处理失败", metadata.failure_prefix)
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
         # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。

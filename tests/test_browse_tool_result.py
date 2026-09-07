@@ -15,6 +15,7 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
+from _progress_fakes import RecordingProgressContext
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools import BrowseImagesInput
 from seedream_mcp.tools.core import browse as browse_core_module
@@ -71,6 +72,39 @@ async def test_browse_images_rejects_out_of_workspace_directory(
     assert result.structured_content["status"] == "failed"
 
 
+async def test_browse_directory_error_branches_report_terminal_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """目录无效与目录越界两个早退分支上报 100% 失败终态，与其余错误分支一致。
+
+    两分支非模型可自纠的参数错误，error.type 保持 browse_failed。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside_dir_for_test"
+    outside_dir.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+
+    invalid_ctx = RecordingProgressContext()
+    invalid_result = await handle_browse_images(
+        BrowseImagesInput(directory="ba\x00d"), ctx=invalid_ctx
+    )
+    assert invalid_result.is_error is True
+    assert invalid_ctx.calls[-1][0] == 100.0
+    assert invalid_ctx.calls[-1][2] == "浏览图片处理失败"
+    assert invalid_result.structured_content["error"]["type"] == "browse_failed"
+
+    out_of_scope_ctx = RecordingProgressContext()
+    out_of_scope_result = await handle_browse_images(
+        BrowseImagesInput(directory=str(outside_dir)), ctx=out_of_scope_ctx
+    )
+    assert out_of_scope_result.is_error is True
+    assert out_of_scope_ctx.calls[-1][0] == 100.0
+    assert out_of_scope_ctx.calls[-1][2] == "浏览图片处理失败"
+    assert out_of_scope_result.structured_content["error"]["type"] == "browse_failed"
+
+
 async def test_browse_images_ignores_outside_images_without_crashing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -125,7 +159,7 @@ async def test_browse_images_empty_format_filter_skips_scan(
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["status"] == "failed"
     assert result.structured_content["count"] == 0
-    assert result.structured_content["error"]["type"] == "browse_failed"
+    assert result.structured_content["error"]["type"] == "validation_error"
 
 
 async def test_browse_images_fallback_error_preserves_format_filter(
@@ -196,7 +230,7 @@ async def test_browse_images_offset_beyond_end_signals_tool_error(
     assert result.is_error is True
     assert sc["status"] == "failed"
     assert sc["count"] == 0
-    assert sc["error"]["type"] == "browse_failed"
+    assert sc["error"]["type"] == "validation_error"
     assert "目录共有 3 张图片" in sc["error"]["message"]
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "0 <= offset < 3" in text
@@ -263,7 +297,7 @@ async def test_browse_images_format_filter_all_unsupported_echoes_original(
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["status"] == "failed"
     assert result.structured_content["format_filter"] == [".svg"]
-    assert result.structured_content["error"]["type"] == "browse_failed"
+    assert result.structured_content["error"]["type"] == "validation_error"
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "均不在支持列表" in text
     assert "支持" in text
@@ -305,7 +339,7 @@ async def test_browse_images_offset_error_signal_visible_to_client(
     assert isinstance(result, CallToolResult)
     assert result.is_error is True
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["error"]["type"] == "browse_failed"
+    assert result.structured_content["error"]["type"] == "validation_error"
 
 
 async def test_browse_images_format_filter_error_signal_visible_to_client(
@@ -321,7 +355,7 @@ async def test_browse_images_format_filter_error_signal_visible_to_client(
     assert isinstance(result, CallToolResult)
     assert result.is_error is True
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["error"]["type"] == "browse_failed"
+    assert result.structured_content["error"]["type"] == "validation_error"
 
 
 async def test_browse_images_full_page_appends_pagination_hint(workspace_root: Path) -> None:
@@ -497,6 +531,68 @@ async def test_browse_images_empty_without_unreadable_keeps_plain_message(
     assert "目录不可读" not in text
 
 
+async def test_browse_images_truncated_empty_result_marks_incompleteness(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """条目预算截断的空页不声称完备：文本携带可见标记，总数与 has_more 置未知。
+
+    截断静默时空页会误报「未找到图片文件」且 total_count=0，模型无从得知目录
+    可能仍有图片。
+    """
+    import seedream_mcp.utils.io.io_path as path_module
+
+    save_root = _seed_save_root(workspace_root)
+    for i in range(8):
+        (save_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(path_module, "_SCAN_ENTRY_BUDGET", 5)
+
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
+
+    assert result.is_error is False
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["status"] == "empty"
+    assert sc["count"] == 0
+    assert sc["total_count"] is None
+    assert sc["has_more"] is None
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "未找到图片文件" in text
+    assert "目录条目过多，结果可能不完整" in text
+
+
+async def test_browse_images_truncated_partial_page_marks_incompleteness(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """截断前已收集的部分页携带标记，total_count 不以低报的精确值声称完备。"""
+    import seedream_mcp.utils.io.io_path as path_module
+
+    save_root = _seed_save_root(workspace_root)
+    early = save_root / "a"
+    early.mkdir()
+    (early / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    late = save_root / "b"
+    late.mkdir()
+    for i in range(20):
+        (late / f"note_{i:02d}.txt").write_bytes(b"x")
+    # 预算使子目录 a 完整产出 1 图、子目录 b 触发截断，页内条目为部分结果
+    monkeypatch.setattr(path_module, "_SCAN_ENTRY_BUDGET", 15)
+
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=True))
+
+    assert result.is_error is False
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["status"] == "completed"
+    assert sc["count"] == 1
+    assert sc["total_count"] is None
+    assert sc["has_more"] is None
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "x.png" in text
+    assert "目录条目过多，结果可能不完整" in text
+
+
 def test_format_file_info_degrades_on_malformed_timestamp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -540,6 +636,42 @@ def test_build_display_entries_keeps_file_name_verbatim(
     expected = image.resolve().as_posix()
     assert lines[0] == f"1. {expected}"
     assert entries[0]["path"] == expected
+
+
+def test_build_display_entries_flattens_newlines_in_text_channel(tmp_path: Path) -> None:
+    """含换行文件名的文本行压平换行，防止向清单注入伪造行；结构化路径保持原样。
+
+    POSIX 允许文件名携带换行，文本通道原样输出会伪造额外清单行；结构化通道的
+    路径需可回流命中真实文件，不做压平。
+    """
+    image = tmp_path / "a\nb\r.png"
+
+    lines, entries = browse_core_module._build_display_entries(
+        images=[image],
+        image_resolved_map={image: image},
+        show_details=False,
+    )
+
+    assert entries[0]["path"] == image.as_posix()
+    assert lines == [f"1. {tmp_path.as_posix()}/a b .png"]
+
+
+def test_build_display_entries_flattens_unicode_line_separator(tmp_path: Path) -> None:
+    """含 U+2028 行分隔符的文件名在文本通道压平为空格，与 errors 净化口径单一来源。
+
+    仅替换 \\n 与 \\r 时 U+2028/U+2029 等 Unicode 行分隔符仍会伪造编号行；控制
+    字符口径统一经 CONTROL_CHARS_PATTERN 覆盖 C0、DEL、NEL 与行段分隔符。
+    """
+    image = tmp_path / "a\u2028b.png"
+
+    lines, entries = browse_core_module._build_display_entries(
+        images=[image],
+        image_resolved_map={image: image},
+        show_details=False,
+    )
+
+    assert entries[0]["path"] == image.as_posix()
+    assert lines == [f"1. {tmp_path.as_posix()}/a b.png"]
 
 
 async def test_browse_images_directory_outside_save_root_lists_absolute_entries(

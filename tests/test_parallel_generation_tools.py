@@ -8,6 +8,7 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
+from _progress_fakes import RecordingProgressContext
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import (
@@ -181,24 +182,6 @@ async def test_parallel_requests_partial_failure_recorded_in_batch(
     assert "失败请求: 1" in response_text
 
 
-class _ProgressCollectingContext:
-    """收集 report_progress 调用序列的替身 ctx。
-
-    request_context 属性缺失使流水线回退按需新建客户端；report_progress 仅记录进度值。
-    """
-
-    def __init__(self) -> None:
-        self.progress_values: list[float] = []
-
-    @property
-    def request_context(self) -> Any:
-        raise AttributeError("测试替身不提供请求上下文")
-
-    async def report_progress(self, *, progress: float, total: float, message: str) -> None:
-        del total, message
-        self.progress_values.append(progress)
-
-
 async def test_parallel_batch_progress_strictly_increasing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -209,7 +192,7 @@ async def test_parallel_batch_progress_strictly_increasing(
 
     _patch_generation_success(monkeypatch)
 
-    ctx = _ProgressCollectingContext()
+    ctx = RecordingProgressContext()
     result = await handle_text_to_image(
         TextToImageInput(prompt="test", request_count=3, parallelism=2),
         _build_config(),
@@ -299,7 +282,7 @@ async def test_single_request_progress_full_sequence_with_auto_save(
         auto_save_base_dir=str(tmp_path),
         preview_enabled=False,
     )
-    ctx = _ProgressCollectingContext()
+    ctx = RecordingProgressContext()
     result = await handle_text_to_image(TextToImageInput(prompt="test"), config, ctx)
 
     assert result.is_error is False
@@ -323,7 +306,7 @@ async def test_single_request_progress_without_auto_save_jumps_70_to_100(
 
     _patch_generation_success(monkeypatch)
 
-    ctx = _ProgressCollectingContext()
+    ctx = RecordingProgressContext()
     result = await handle_text_to_image(TextToImageInput(prompt="test"), _build_config(), ctx)
 
     assert result.is_error is False
@@ -350,7 +333,7 @@ async def test_context_failure_progress_jumps_directly_to_complete(
     base = tmp_path / "save_root"
     base.mkdir()
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
-    ctx = _ProgressCollectingContext()
+    ctx = RecordingProgressContext()
     result = await handle_text_to_image(
         TextToImageInput(prompt="test", save_path="a\x00b"), config, ctx
     )

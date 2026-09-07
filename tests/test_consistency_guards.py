@@ -1,17 +1,20 @@
 """跨层一致性守护测试。
 
 锁定三组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
-MCP 注册工具名与 impl ToolMetadata 工具名、路径相似建议与 CLI 端口解析的边界行为。
-新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
+MCP 注册工具名与 impl ToolMetadata 工具名、路径相似建议与 CLI 端口解析的边界行为；
+另含 loguru exc_info 关键字的全源码静态守护。新增取值或改名时两侧须同步，本文件
+在各处失败即暴露漂移。
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import pytest
 
+import seedream_mcp
 from seedream_mcp.tools.core.schemas import BackgroundMode, GenerationToolType, ResponseFormat
 from seedream_mcp.utils.core.validators import (
     VALID_BACKGROUND_MODES,
@@ -58,6 +61,25 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
     declared.add("browse_images")
 
     assert declared == registered
+
+
+def test_loguru_calls_never_pass_exc_info_keyword() -> None:
+    """全源码不出现 loguru 调用的 exc_info= 关键字，堆栈统一经 logger.exception。
+
+    loguru 把未知关键字交 str.format 后丢弃，exc_info=True 的堆栈从不落日志；
+    logs.py 的标准库桥接以 logger.opt(exception=...) 转写，白名单豁免。
+    """
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative = source_path.relative_to(package_root).as_posix()
+        if relative == "utils/core/logs.py":
+            continue
+        source_text = source_path.read_text(encoding="utf-8")
+        if re.search(r"\bexc_info\s*=", source_text):
+            offenders.append(relative)
+
+    assert offenders == []
 
 
 # ==================== 零覆盖小面 ====================

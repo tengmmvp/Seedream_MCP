@@ -117,7 +117,7 @@ def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
     """构建结构化错误载荷，各工具错误分支共用同一字段集。
 
     Args:
-        error_type: 归约档案错误码，作为载荷的 type 取值。
+        error_type: 载荷的 type 取值，为归约档案错误码或浏览工具的 browse_failed。
         message: 面向用户的错误消息。
 
     Returns:

@@ -318,7 +318,10 @@ class _SizeAndWatermarkInput(BaseModel):
 class _SequentialMaxImagesInput(BaseModel):
     """组图最大生成数量参数。"""
 
-    # default 仅为声明占位，实际值恒由 validate_total_image_limit 按模型能力推导覆盖。
+    # default 仅为声明占位，未显式传入时由 validate_total_image_limit 按参考图数量
+    # 推导为 15 减参考图数；server.py 平铺签名声明 default: null，经
+    # _filter_unset_params 剔 None 与 validator 覆盖缺省值，两处字面不一、行为
+    # 等价，互为镜像。
     max_images: int = Field(
         default=MAX_SEQUENTIAL_TOTAL_IMAGES,
         ge=MAX_IMAGES_MIN,

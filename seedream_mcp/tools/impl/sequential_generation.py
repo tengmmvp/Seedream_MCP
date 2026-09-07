@@ -14,10 +14,7 @@ from mcp.types import CallToolResult
 from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
 
-from ..core.common import (
-    execute_generation_handler,
-    GenerationExecutionContext,
-)
+from ..core.common import execute_generation_handler
 from ..core.schemas import SequentialGenerationInput
 from ._common import SEQUENTIAL_GENERATION
 
@@ -25,6 +22,7 @@ if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
+    from ..core.common import GenerationExecutionContext
 
 logger = get_logger()
 

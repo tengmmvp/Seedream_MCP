@@ -11,6 +11,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from ...client import SeedreamClient
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
 from ...utils.core.errors import format_error_for_user
 from ._helpers import (
@@ -25,7 +26,6 @@ from .results import aggregate_parallel_generation_results
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
-    from ...client import SeedreamClient
     from ...utils.io.io_download import DownloadManager
     from loguru import Logger
 
@@ -126,8 +126,6 @@ def _try_get_shared_client(
     ctx: Context[Any, Any] | None,
 ) -> SeedreamClient | None:
     """从 lifespan 上下文获取共享 SeedreamClient，复用 HTTP 连接池，无则返回 None。"""
-    from ...client import SeedreamClient
-
     return get_lifespan_resource(ctx, LIFESPAN_KEY_CLIENT, SeedreamClient)
 
 

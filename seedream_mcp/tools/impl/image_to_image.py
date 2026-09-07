@@ -13,10 +13,7 @@ from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
-from ..core.common import (
-    execute_generation_handler,
-    GenerationExecutionContext,
-)
+from ..core.common import execute_generation_handler
 from ..core.schemas import ImageToImageInput
 from ._common import IMAGE_TO_IMAGE
 
@@ -24,6 +21,7 @@ if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
+    from ..core.common import GenerationExecutionContext
 
 logger = get_logger()
 
@@ -48,7 +46,7 @@ async def handle_image_to_image(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             image=image,
-            layer_decomposition=context.layer_decomposition or None,
+            layer_decomposition=context.layer_decomposition,
             background=context.background,
             size=context.size,
             watermark=context.watermark,

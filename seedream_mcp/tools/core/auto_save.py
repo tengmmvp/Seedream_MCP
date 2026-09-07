@@ -171,7 +171,8 @@ async def auto_save_from_urls(
         写入本地路径。
 
     Raises:
-        SeedreamValidationError: save_path 路径无效或存储区配置无法解析。
+        SeedreamValidationError: save_path 路径无效。
+        SeedreamConfigError: 存储区配置无法解析，经 resolve_save_root 抛出。
     """
     return await _auto_save(
         result=result,
@@ -208,7 +209,8 @@ async def auto_save_from_base64(
         写入本地路径。
 
     Raises:
-        SeedreamValidationError: save_path 路径无效或存储区配置无法解析。
+        SeedreamValidationError: save_path 路径无效。
+        SeedreamConfigError: 存储区配置无法解析，经 resolve_save_root 抛出。
     """
     return await _auto_save(
         result=result,

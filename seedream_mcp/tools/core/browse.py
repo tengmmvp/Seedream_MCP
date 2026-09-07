@@ -16,7 +16,11 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult, TextContent
 
-from ...utils.core.errors import sanitize_data_text, sanitize_error_text
+from ...utils.core.errors import (
+    CONTROL_CHARS_PATTERN,
+    sanitize_data_text,
+    sanitize_error_text,
+)
 from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import (
@@ -42,6 +46,9 @@ logger = get_logger()
 
 # 空结果文案中不可读目录的列举上限，超出部分按计数提示，全部明细保留在日志。
 _MAX_UNREADABLE_DIR_LISTING = 5
+
+# 扫描因条目预算截断时文本通道的可见标记，提示模型返回结果可能不完整。
+_SCAN_TRUNCATION_MARKER = "目录条目过多，结果可能不完整"
 
 
 @dataclass(frozen=True)
@@ -203,15 +210,22 @@ def _build_browse_structured_result(
     return output.model_dump()
 
 
-def _build_browse_error(*, state: _BrowseRequestState, message: str) -> CallToolResult:
+def _build_browse_error(
+    *,
+    state: _BrowseRequestState,
+    message: str,
+    error_type: str = "browse_failed",
+) -> CallToolResult:
     """集中构造错误 CallToolResult，各错误分支仅 message 不同。
 
-    统一 is_error=True 语义与请求状态回显；structuredContent.error.type 恒为
-    browse_failed，message 同时作为可见文本与结构化错误原因。
+    统一 is_error=True 语义与请求状态回显；模型可自纠的参数错误经 error_type 传
+    validation_error，与输入模型构造失败口径一致，其余分支保持 browse_failed；
+    message 同时作为可见文本与结构化错误原因。
 
     Args:
         state: 单次浏览请求的状态快照，供回显字段取值。
         message: 面向用户的错误消息。
+        error_type: structuredContent.error.type 取值，缺省 browse_failed。
 
     Returns:
         is_error=True 的工具结果。
@@ -222,7 +236,7 @@ def _build_browse_error(*, state: _BrowseRequestState, message: str) -> CallTool
             state,
             status="failed",
             success=False,
-            error=build_error_dict("browse_failed", message),
+            error=build_error_dict(error_type, message),
         ),
         is_error=True,
     )
@@ -238,6 +252,7 @@ def _scan_and_filter_directory(
     read_scope: list[Path],
     seen_images: set[Path],
     unreadable_dirs: list[Path],
+    truncated_dirs: list[Path],
 ) -> list[tuple[Path, Path]]:
     """扫描单个目录并做越界判定与去重，返回新增的 (原始路径, resolved 路径) 列表。
 
@@ -257,6 +272,7 @@ def _scan_and_filter_directory(
             竞态错位重复。
         unreadable_dirs: 不可读目录收集列表，就地更新，供空结果分支区分目录
             不可读与目录内无图片。
+        truncated_dirs: 截断目录收集列表，就地更新，供装配分支标记结果不完整。
 
     Returns:
         新增 (原始路径, resolved 路径) 元组列表，长度不超过 remaining。
@@ -275,6 +291,7 @@ def _scan_and_filter_directory(
             scan_limit=scan_limit,
             scanner=find_images_in_directory,
             unreadable_dirs=unreadable_dirs,
+            truncated_dirs=truncated_dirs,
         )
         # 返回量达到 scan_limit 说明可能仍有后续条目，否则已扫到末尾。
         scan_hit_limit = len(matched_image_pairs) >= scan_limit
@@ -328,7 +345,10 @@ def _build_display_entries(
         img_resolved = image_resolved_map[img]
         # 归一正斜杠，跨平台口径一致。
         display_path = str(img_resolved).replace("\\", "/")
-        detail_text, details = _format_file_info(display_path, img_resolved, show_details)
+        # 文本通道压平控制字符，防止含控制字符文件名伪造清单行；口径与 errors 的
+        # 净化共用 CONTROL_CHARS_PATTERN；结构化路径保持原样供回流。
+        text_path = CONTROL_CHARS_PATTERN.sub(" ", display_path)
+        detail_text, details = _format_file_info(text_path, img_resolved, show_details)
         lines.append(f"{idx}. {detail_text}")
         entry: dict[str, Any] = {"index": idx, "path": display_path}
         entry.update(details)
@@ -439,7 +459,7 @@ async def _scan_browse_entries(
     resolved_dir: Path,
     read_scope: list[Path],
     format_filter_exhausted: bool,
-) -> tuple[list[Path], dict[Path, Path], list[Path]]:
+) -> tuple[list[Path], dict[Path, Path], list[Path], list[Path]]:
     """扫描阶段：扫描请求目录并合并越界过滤与去重后的图片条目，上报扫描进度。"""
     # scan_limit 多取一张用于判定 has_more；越界与重复项的剔除及补扫见
     # _scan_and_filter_directory。format_filter_exhausted 时跳过扫描与进度上报，
@@ -448,6 +468,7 @@ async def _scan_browse_entries(
     all_images: list[Path] = []
     image_resolved_map: dict[Path, Path] = {}
     unreadable_dirs: list[Path] = []
+    truncated_dirs: list[Path] = []
     if not format_filter_exhausted:
         await safe_report_progress(ctx, progress=PROGRESS_SCAN_START, message="开始扫描图片目录")
         # seen_images 兜底单目录内缓存前缀扩展的竞态错位重复。
@@ -462,11 +483,12 @@ async def _scan_browse_entries(
             read_scope=read_scope,
             seen_images=seen_images,
             unreadable_dirs=unreadable_dirs,
+            truncated_dirs=truncated_dirs,
         )
         for image_path, image_resolved in new_entries:
             all_images.append(image_path)
             image_resolved_map[image_path] = image_resolved
-    return all_images, image_resolved_map, unreadable_dirs
+    return all_images, image_resolved_map, unreadable_dirs, truncated_dirs
 
 
 def _paginate_browse_images(
@@ -474,14 +496,26 @@ def _paginate_browse_images(
     all_images: list[Path],
     offset: int,
     limit: int,
-) -> tuple[list[Path], bool, int | None, int | None]:
-    """分页切片阶段：切出当前页图片并派生 has_more、next_offset 与 total_count。"""
+    truncated: bool,
+) -> tuple[list[Path], bool | None, int | None, int | None]:
+    """分页切片阶段：切出当前页图片并派生 has_more、next_offset 与 total_count。
+
+    截断时总数未知：total_count 置 None，未翻满页也不以 has_more=False 声称无
+    更多，改置 None 表示未知。
+    """
     # has_more 时未扫完全量、总数未知，total_count 置 None。
     page_end = offset + limit
     images = all_images[offset:page_end]
-    has_more = len(all_images) > page_end
-    next_offset = page_end if has_more else None
-    total_count = None if has_more else len(all_images)
+    has_more: bool | None = len(all_images) > page_end
+    next_offset: int | None = page_end if has_more else None
+    if has_more:
+        total_count = None
+    elif truncated:
+        total_count = None
+        has_more = None
+        next_offset = None
+    else:
+        total_count = len(all_images)
     return images, has_more, next_offset, total_count
 
 
@@ -491,14 +525,16 @@ async def _build_empty_browse_result(
     state: _BrowseRequestState,
     format_filter_exhausted: bool,
     total_count: int | None,
-    has_more: bool,
+    has_more: bool | None,
     next_offset: int | None,
     unreadable_dirs: list[Path],
+    truncated: bool,
 ) -> CallToolResult:
     """空页装配阶段：按错误可归因性分流为参数错误结果或空结果。"""
     # 空页按错误可归因性分流：format_filter_exhausted 与 offset 越界是模型可自纠的
     # 参数错误，返回 is_error=True 与结构化错误标记；目录不可读与无图片非模型可修复，
-    # 维持空结果语义，文案区分「目录不可读」与「无图片」。
+    # 维持空结果语义，文案区分「目录不可读」与「无图片」；截断时空结果不声称完备，
+    # 追加可见标记。
     if format_filter_exhausted:
         supported_list = ", ".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
         if state.format_filter:
@@ -510,7 +546,7 @@ async def _build_empty_browse_result(
             # 空列表无格式可回显，改用不含空位的文案，避免残缺语义。
             message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-        return _build_browse_error(state=state, message=message)
+        return _build_browse_error(state=state, message=message, error_type="validation_error")
     if total_count:
         # 消息携带总数与有效区间，模型修正 offset 后即可重试。
         message = (
@@ -518,7 +554,7 @@ async def _build_empty_browse_result(
             f"请使用 0 <= offset < {total_count}。"
         )
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-        return _build_browse_error(state=state, message=message)
+        return _build_browse_error(state=state, message=message, error_type="validation_error")
     if unreadable_dirs:
         unique_unreadable = list(dict.fromkeys(unreadable_dirs))
         logger.info("不可读目录明细: {}", [str(item) for item in unique_unreadable])
@@ -531,6 +567,8 @@ async def _build_empty_browse_result(
         message = f"目录不可读或无图片文件：{dirs_text}"
     else:
         message = "未找到图片文件，请确认目录或过滤条件。"
+    if truncated:
+        message = f"{message}（{_SCAN_TRUNCATION_MARKER}）"
     await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
     return CallToolResult(
         content=[TextContent(type="text", text=message)],
@@ -551,9 +589,10 @@ async def _build_browse_success_result(
     state: _BrowseRequestState,
     images: list[Path],
     image_resolved_map: dict[Path, Path],
-    has_more: bool,
+    has_more: bool | None,
     next_offset: int | None,
     total_count: int | None,
+    truncated: bool,
 ) -> CallToolResult:
     """成功装配阶段：生成展示条目与翻页引导并组装 completed 结果。"""
     display_lines, structured_images = await asyncio.to_thread(
@@ -568,6 +607,8 @@ async def _build_browse_success_result(
         page_last = state.offset + len(images)
         range_text = f"第 {state.offset + 1}-{page_last} 张"
         lines.append(f"{range_text}，仍有更多，继续翻页请传 offset={next_offset}")
+    if truncated:
+        lines.append(f"（{_SCAN_TRUNCATION_MARKER}）")
 
     await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
 
@@ -622,12 +663,14 @@ async def execute_browse_request(
     )
 
     if dir_error is not None:
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return _build_browse_error(state=state, message=dir_error)
     if resolved_dir is None:
         message = (
             "目录不在读取范围内；可通过客户端工作区（MCP Roots）、"
             "SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR 授权该目录"
         )
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return _build_browse_error(state=state, message=message)
     resolved_directories.append(resolved_dir)
 
@@ -639,7 +682,7 @@ async def execute_browse_request(
         state.limit,
     )
 
-    all_images, image_resolved_map, unreadable_dirs = await _scan_browse_entries(
+    all_images, image_resolved_map, unreadable_dirs, truncated_dirs = await _scan_browse_entries(
         ctx=ctx,
         state=state,
         resolved_dir=resolved_dir,
@@ -648,7 +691,10 @@ async def execute_browse_request(
     )
 
     images, has_more, next_offset, total_count = _paginate_browse_images(
-        all_images=all_images, offset=state.offset, limit=state.limit
+        all_images=all_images,
+        offset=state.offset,
+        limit=state.limit,
+        truncated=bool(truncated_dirs),
     )
 
     if not images:
@@ -660,6 +706,7 @@ async def execute_browse_request(
             has_more=has_more,
             next_offset=next_offset,
             unreadable_dirs=unreadable_dirs,
+            truncated=bool(truncated_dirs),
         )
 
     return await _build_browse_success_result(
@@ -670,4 +717,5 @@ async def execute_browse_request(
         has_more=has_more,
         next_offset=next_offset,
         total_count=total_count,
+        truncated=bool(truncated_dirs),
     )

@@ -42,6 +42,7 @@ def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
     """累加用量统计值。
 
     标量数值直接累加，嵌套 dict 递归合并子键；布尔与非数值标量跳过，避免污染汇总。
+    同键既有值与新值形态冲突（标量对字典）时后到值覆盖既有值。
     """
     if isinstance(value, dict):
         current = usage.get(key)
@@ -49,12 +50,15 @@ def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
             for sub_key, sub_value in value.items():
                 _add_usage_value(current, sub_key, sub_value)
         else:
+            if current is not None:
+                logger.debug("用量键 {} 的既有标量被字典值覆盖", key)
             usage[key] = copy.deepcopy(value)
         return
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return
     current = usage.get(key, 0)
     if isinstance(current, bool) or not isinstance(current, (int, float)):
+        logger.debug("用量键 {} 的既有值被标量值重置后累加", key)
         current = 0
     usage[key] = current + value
 
@@ -187,7 +191,8 @@ def prevalidate_save_path(save_path: str | None) -> None:
     阶段降级为软警告。未提供 save_path 时不做检查。
 
     Raises:
-        SeedreamValidationError: save_path 路径无效或存储区配置无法解析。
+        SeedreamValidationError: save_path 路径无效。
+        SeedreamConfigError: 存储区配置无法解析，经 resolve_save_root 抛出。
     """
     if not save_path:
         return
