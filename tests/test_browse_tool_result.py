@@ -1,8 +1,8 @@
 """browse_images 工具结构化结果、分页元数据与读权限拒绝测试。
 
 多数用例直连 handle_browse_images，工作区经 workspace_root fixture 注入的
-SEEDREAM_WORKSPACE_ROOT 回退取得，存储根为工作区派生的 .seedream/images，测试
-图片统一放存储根内；走完整 MCPServer 调用链的用例以 _NoRootsContext 提供无会话
+SEEDREAM_WORKSPACE_ROOT 回退取得，存储区为工作区派生的 .seedream/images，测试
+图片统一放存储区内；走完整 MCPServer 调用链的用例以 _NoRootsContext 提供无会话
 的替身上下文。需要越界目录或越界文件的用例将工作区与越界路径同置于 tmp_path
 之下，不污染共享 basetemp。
 """
@@ -25,7 +25,7 @@ from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
 def _seed_save_root(ws: Path) -> Path:
-    """返回 ws 派生的存储根并确保存在，测试图片统一放存储根内。"""
+    """返回 ws 派生的存储区并确保存在，测试图片统一放存储区内。"""
     root = ws / ".seedream" / "images"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -210,7 +210,7 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     """深翻页命中扫描缓存时不重复 resolve 图片文件。
 
     (原始, resolved) 对随首次扫描缓存；深页命中完整缓存时免于 O(offset) 次逐文件
-    resolve，仅剩存储根与请求目录的目录级 resolve。统计第二次浏览期间 .png 的
+    resolve，仅剩存储区与请求目录的目录级 resolve。统计第二次浏览期间 .png 的
     resolve 调用数并断言为零。
     """
     save_root = _seed_save_root(workspace_root)
@@ -551,7 +551,7 @@ async def test_browse_images_directory_outside_save_root_lists_relative_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """回退边界下浏览存储根外目录，条目相对该目录展示，不出现绝对路径。"""
+    """回退边界下浏览存储区外目录，条目相对该目录展示，不出现绝对路径。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     photos = workspace / "photos"
@@ -573,10 +573,10 @@ async def test_browse_images_directory_outside_save_root_lists_relative_entries(
 async def test_browse_images_outside_save_root_lists_absolute_under_session_roots(
     tmp_path: Path,
 ) -> None:
-    """会话 Roots 边界下存储根外条目回显绝对路径，可直接回流 image 参数。
+    """会话 Roots 边界下存储区外条目回显绝对路径，可直接回流 image 参数。
 
-    相对形态在该场景存在跨请求重名歧义，且直接回流会以存储根为基准解析，
-    存储根存在同名文件时静默读错图；所列目录本就是客户端声明的授权空间，
+    相对形态在该场景存在跨请求重名歧义，且直接回流会以存储区为基准解析，
+    存储区存在同名文件时静默读错图；所列目录本就是客户端声明的授权空间，
     绝对路径无新增泄露。
     """
     photos = tmp_path / "photos"
@@ -781,9 +781,9 @@ async def test_browse_session_roots_masks_save_root_outside_roots_echo(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """会话 Roots 下显式存储根位于 Roots 之外时，解析目录回显以占位符替代。
+    """会话 Roots 下显式存储区位于 Roots 之外时，解析目录回显以占位符替代。
 
-    默认浏览解析到服务器配置的存储根，越出客户端授权空间的部分不得回显
+    默认浏览解析到服务器配置的存储区，越出客户端授权空间的部分不得回显
     绝对路径。
     """
     import json
@@ -813,5 +813,5 @@ async def test_browse_session_roots_masks_save_root_outside_roots_echo(
     resolved = result.structured_content["resolved_directories"]
     assert resolved == [_FALLBACK_BOUNDARY_PLACEHOLDER]
     assert str(outside_root) not in json.dumps(result.structured_content, ensure_ascii=False)
-    # 条目仍为存储根相对，功能不受回显遮蔽影响
+    # 条目仍为存储区相对，功能不受回显遮蔽影响
     assert result.structured_content["images"][0]["path"] == "2026-09-06/a.png"

@@ -1,8 +1,8 @@
-"""Web 操作台文件端点：缩略图与原图，均以保存根为边界做越界防护。
+"""Web 操作台文件端点：缩略图与原图，均以存储区为边界做越界防护。
 
 路径安全为四重校验：空/绝对/含冒号（盘符与 ADS）/上跳段拒绝、扩展名白名单、
 normalize_path 与 is_within_resolved 的边界比较、is_file 存在性；违规 400、
-未命中 404。保存根解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
+未命中 404。存储区解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
 下沉至工作线程；缩略图解码经 build_thumbnail_bytes_limited 受进程级信号量限流。
 """
 
@@ -22,14 +22,14 @@ from . import _shared
 
 
 def resolve_web_relative_path(rel: str, save_root: Path) -> Path:
-    """把 Web 请求的相对路径解析为保存根内的图片物理路径。
+    """把 Web 请求的相对路径解析为存储区内的图片物理路径。
 
     Args:
-        rel: 相对保存根的路径字符串，来自前端 web_path 或图库返回值。
-        save_root: 已 resolve 的保存根目录。
+        rel: 相对存储区的路径字符串，来自前端 web_path 或图库返回值。
+        save_root: 已 resolve 的存储区目录。
 
     Returns:
-        resolve 后落在保存根内的常规文件路径。
+        resolve 后落在存储区内的常规文件路径。
 
     Raises:
         ValueError: 路径为空、绝对形态、任意位置含冒号（Windows 盘符与 ADS
@@ -40,7 +40,7 @@ def resolve_web_relative_path(rel: str, save_root: Path) -> Path:
     if not rel:
         raise ValueError("路径不能为空")
     if Path(rel).is_absolute() or rel.startswith(("\\", "/")) or ":" in rel:
-        raise ValueError("仅接受相对保存根的路径")
+        raise ValueError("仅接受相对存储区的路径")
     for segment in rel.replace("\\", "/").split("/"):
         if segment == "..":
             raise ValueError("路径不允许包含上跳段")
@@ -55,10 +55,10 @@ def resolve_web_relative_path(rel: str, save_root: Path) -> Path:
 
 
 async def _resolve_request_path(request: Request) -> Path | Response:
-    """在工作线程完成保存根解析与请求路径校验，错误按原状态码映射。
+    """在工作线程完成存储区解析与请求路径校验，错误按原状态码映射。
 
     Returns:
-        落在保存根内的物理路径；解析失败时为对应的 400/404 错误响应。
+        落在存储区内的物理路径；解析失败时为对应的 400/404 错误响应。
     """
     rel = request.query_params.get("path", "")
 
@@ -88,7 +88,7 @@ async def web_thumbnail(request: Request) -> Response:
 
 
 async def web_image(request: Request) -> Response:
-    """原图端点：以文件流返回保存根内的图片。"""
+    """原图端点：以文件流返回存储区内的图片。"""
     resolved = await _resolve_request_path(request)
     if isinstance(resolved, Response):
         return resolved

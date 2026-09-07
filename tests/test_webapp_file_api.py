@@ -204,7 +204,7 @@ async def test_file_endpoints_save_root_unavailable_returns_400(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储根不可解析时缩略图与原图端点均回 400 save_root_unavailable。"""
+    """存储区不可解析时缩略图与原图端点均回 400 save_root_unavailable。"""
     import seedream_mcp.utils.io.io_path as io_path_module
     from seedream_mcp.config import SeedreamConfig, set_active_config
 

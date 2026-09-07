@@ -1,7 +1,7 @@
 """_local_file_signature 缓存键签名测试。
 
 守护签名与读取路径锁定同一文件、避免陈旧缓存，越界文件不泄露存在性。相对路径
-以存储根为基准，判定面向读权限集合（工作区 ∪ 存储根）。
+以存储区为基准，判定面向读权限集合（工作区 ∪ 存储区）。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 
 @pytest.fixture
 def save_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """以 tmp 为工作区根，返回派生的存储根并预建目录。"""
+    """以 tmp 为工作区根，返回派生的存储区并预建目录。"""
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
     root = tmp_path / ".seedream" / "images"
     root.mkdir(parents=True)
@@ -35,13 +35,13 @@ def test_url_and_data_uri_return_zero_signature() -> None:
 
 
 def test_nonexistent_relative_path_returns_zero(save_root: Path) -> None:
-    """相对路径在存储根下无候选文件时返回零。"""
+    """相对路径在存储区下无候选文件时返回零。"""
     del save_root
     assert ImagePreparer._local_file_signature("nope.png") == (0.0, 0)
 
 
 def test_absolute_path_outside_scope_returns_zero(tmp_path: Path, save_root: Path) -> None:
-    """绝对路径在读权限（工作区 ∪ 存储根）之外时返回零，避免越界文件成为存在性 oracle。"""
+    """绝对路径在读权限（工作区 ∪ 存储区）之外时返回零，避免越界文件成为存在性 oracle。"""
     del save_root
     outside = tmp_path.parent / "signature-outside.png"
     outside.write_bytes(_PNG_BYTES)
@@ -49,7 +49,7 @@ def test_absolute_path_outside_scope_returns_zero(tmp_path: Path, save_root: Pat
 
 
 def test_directory_named_as_image_returns_zero(save_root: Path) -> None:
-    """存储根内与图片同名的目录不可作为候选，签名返回零。"""
+    """存储区内与图片同名的目录不可作为候选，签名返回零。"""
     (save_root / "photo.png").mkdir()
     assert ImagePreparer._local_file_signature("photo.png") == (0.0, 0)
 

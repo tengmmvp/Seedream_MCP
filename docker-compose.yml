@@ -51,7 +51,7 @@ services:
       # 响应体读取总量上限（字节），留空按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导。
       - SEEDREAM_RESPONSE_BODY_LIMIT=${SEEDREAM_RESPONSE_BODY_LIMIT:-}
       # 工作区与传输
-      # 工作位置声明（读取范围成员与存储根派生基座），默认 /app 使挂载目录进入读取范围。
+      # 工作位置声明（读取范围成员与存储区派生基准），默认 /app 使挂载目录进入读取范围。
       - SEEDREAM_WORKSPACE_ROOT=${SEEDREAM_WORKSPACE_ROOT:-/app}
       # streamable-http 请求体上限（字节），不低于 1MB。
       - SEEDREAM_HTTP_MAX_BODY_SIZE=${SEEDREAM_HTTP_MAX_BODY_SIZE:-67108864}

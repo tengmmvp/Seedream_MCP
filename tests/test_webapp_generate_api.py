@@ -126,7 +126,7 @@ async def test_generate_skips_web_path_outside_save_root(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """保存根之外的条目删除 local_path 键且不附 web_path，绝对路径不出端点。"""
+    """存储区之外的条目删除 local_path 键且不附 web_path，绝对路径不出端点。"""
     write_workspace_config(tmp_path)
     outside = tmp_path / "elsewhere.png"
     outside.write_bytes(b"png")
@@ -153,8 +153,8 @@ async def test_generate_masks_save_path_destination_in_auto_save_results(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """save_path 越出保存根时，auto_save.results 的 local_path 删除、markdown_ref
-    不出现，保存根外目的地不经任何通道返回浏览器。"""
+    """save_path 越出存储区时，auto_save.results 的 local_path 删除、markdown_ref
+    不出现，存储区外目的地不经任何通道返回浏览器。"""
     write_workspace_config(tmp_path)
     destination = tmp_path / "tmp-export" / "batch"
     destination.mkdir(parents=True)
@@ -210,7 +210,7 @@ async def test_generate_rewrites_auto_save_results_local_path_inside_save_root(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """保存根内的 auto_save.results 条目同样附 web_path 相对形态，与 data 条目同口径。"""
+    """存储区内的 auto_save.results 条目同样附 web_path 相对形态，与 data 条目同口径。"""
     save_root = write_workspace_config(tmp_path)
     local_path = save_root / "2026-08-20" / "text_to_image" / "a.png"
     local_path.parent.mkdir(parents=True)
@@ -244,7 +244,7 @@ async def test_generate_multi_image_fusion_returns_structured_payload_with_web_p
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """融合端点复用 run_multi_image_fusion，保存根内条目附 web_path。"""
+    """融合端点复用 run_multi_image_fusion，存储区内条目附 web_path。"""
     save_root = write_workspace_config(tmp_path)
     local_path = save_root / "2026-08-20" / "multi_image_fusion" / "a.png"
     local_path.parent.mkdir(parents=True)
@@ -435,7 +435,7 @@ async def test_generate_runner_validation_error_masks_save_root(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 校验错误消息中的保存根绝对路径替换为占位符后返回。"""
+    """runner 校验错误消息中的存储区绝对路径替换为占位符后返回。"""
     save_root = write_workspace_config(tmp_path)
 
     monkeypatch.setattr(
@@ -452,7 +452,7 @@ async def test_generate_runner_validation_error_masks_save_root(
     assert response.status_code == 400
     description = response.json()["error_description"]
     assert str(save_root) not in description
-    assert "<存储根>" in description
+    assert "<存储区>" in description
 
 
 async def test_generate_runner_unexpected_error_returns_500(
@@ -533,7 +533,7 @@ async def test_generate_runner_receives_no_forged_workspace_roots(
     """端点不向 runner 伪造会话 Roots，文件边界走环境变量回退链。
 
     伪造 Roots 有两重回归：UNC 工作区根经 file URI 转换层丢失使回退边界失效、
-    本地路径错误回显分支解锁泄露服务器路径；保存根作边界还会造成保存目录
+    本地路径错误回显分支解锁泄露服务器路径；存储区作边界还会造成保存目录
     双重嵌套。
     """
     write_workspace_config(tmp_path)
@@ -560,7 +560,7 @@ async def test_generate_rejects_when_save_root_unresolvable(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储根不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
+    """存储区不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
     import seedream_mcp.utils.io.io_path as io_path_module
 
     def _unresolvable(configured_dir: str) -> Any:
@@ -587,7 +587,7 @@ async def test_generate_masks_save_root_in_error_channels(
     reset_http_app_state: None,
 ) -> None:
     """auto_save.results[].error、data[].error 嵌套 message 与顶层 error.message 中的
-    保存根绝对路径统一替换为占位符，响应体不再包含保存根字样。"""
+    存储区绝对路径统一替换为占位符，响应体不再包含存储区字样。"""
     save_root = write_workspace_config(tmp_path)
     _install_runner(
         monkeypatch,
@@ -612,9 +612,9 @@ async def test_generate_masks_save_root_in_error_channels(
     assert response.status_code == 502
     assert str(save_root) not in response.text
     payload = response.json()
-    assert payload["error"]["message"] == "保存到 <存储根> 失败"
-    assert payload["data"][0]["error"]["message"] == "下载失败于 <存储根>\\a.png"
-    assert payload["auto_save"]["results"][0]["error"] == "写入 <存储根>\\b.png 被拒绝"
+    assert payload["error"]["message"] == "保存到 <存储区> 失败"
+    assert payload["data"][0]["error"]["message"] == "下载失败于 <存储区>\\a.png"
+    assert payload["auto_save"]["results"][0]["error"] == "写入 <存储区>\\b.png 被拒绝"
 
 
 async def test_generate_endpoint_requires_token(
@@ -724,12 +724,12 @@ def test_sanitize_save_root_text_replaces_nested_string_values(tmp_path: Path) -
 
     generate_module.sanitize_save_root_text(structured, save_root, [save_root])
 
-    assert structured["error"] == {"message": "根为 <存储根>"}
+    assert structured["error"] == {"message": "根为 <存储区>"}
     data = structured["data"]
     assert isinstance(data, list)
-    assert data[0] == {"error": {"message": "<存储根>\\a.png"}}
+    assert data[0] == {"error": {"message": "<存储区>\\a.png"}}
     assert data[1] == {"keep": 42}
-    assert structured["urls"] == ["<存储根>/b.png", "https://x/c.png"]
+    assert structured["urls"] == ["<存储区>/b.png", "https://x/c.png"]
 
 
 def test_sanitize_save_root_text_keeps_non_string_leaves(tmp_path: Path) -> None:

@@ -22,12 +22,12 @@ from ..io.io_path import get_read_scope, resolve_save_root
 # 与 Data URI 的归一化结果是输入的纯函数，读权限隔离元组恒为空。
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 
-# 批内共享的读取上下文：(存储根, 读权限列表)，供缓存键隔离与签名定位一次求值。
+# 批内共享的读取上下文：(存储区, 读权限列表)，供缓存键隔离与签名定位一次求值。
 ReadContext = tuple[Path, list[Path]]
 
 
 def _current_read_context() -> tuple[tuple[str, ...], Path, list[Path]]:
-    """一次求值 (读权限字符串元组, 存储根, 读权限列表)，供本地输入共享。
+    """一次求值 (读权限字符串元组, 存储区, 读权限列表)，供本地输入共享。
 
     含首次 resolve 的文件系统调用，调用方在工作线程执行。
     """
@@ -176,7 +176,7 @@ class ImagePreparer:
             image: 图像输入字符串，三类来源的归一化语义与模块级函数一致。
             _scope_key: 本地输入的读权限隔离键；批量路径预计算共享，None 时按当前
                 请求现取，非本地输入不消费该键。
-            _read_context: 本地输入的 (存储根, 读权限) 共享上下文；批量路径预计算
+            _read_context: 本地输入的 (存储区, 读权限) 共享上下文；批量路径预计算
                 共享，None 时与隔离键一并现取。
 
         Returns:

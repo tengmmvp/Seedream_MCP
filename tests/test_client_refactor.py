@@ -242,7 +242,7 @@ async def test_generation_methods_synthesize_defaults_from_config(
 async def test_image_to_image_resolves_relative_path_from_save_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """相对路径参考图以存储根为基准解析并编码为 data URI 发请求。"""
+    """相对路径参考图以存储区为基准解析并编码为 data URI 发请求。"""
     workspace = tmp_path / "workspace"
     save_root = workspace / ".seedream" / "images"
     image_file = save_root / "ref.png"

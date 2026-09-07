@@ -21,7 +21,7 @@ async def _post_browse(app: Any, body: dict[str, Any]) -> httpx.Response:
 async def test_browse_lists_images_with_relative_paths(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """存储根内图片以相对路径返回，不出现盘符绝对路径，边界回显字段被剥除。"""
+    """存储区内图片以相对路径返回，不出现盘符绝对路径，边界回显字段被剥除。"""
     save_root = write_workspace_config(tmp_path)
     day_dir = save_root / "2026-08-20" / "text_to_image"
     day_dir.mkdir(parents=True)
@@ -99,7 +99,7 @@ async def test_browse_internal_error_returns_500_json(
 async def test_browse_rejects_directory_outside_save_root(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """读权限（工作区）内、存储根外的目录在端点拒绝：Web 文件端点仅服务存储根。"""
+    """读权限（工作区）内、存储区外的目录在端点拒绝：Web 文件端点仅服务存储区。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -108,7 +108,7 @@ async def test_browse_rejects_directory_outside_save_root(
     assert response.status_code == 400
     body = response.json()
     assert body["error"] == "invalid_directory"
-    assert "保存根" in body["error_description"]
+    assert "存储区" in body["error_description"]
 
 
 async def test_browse_rejects_directory_outside_read_scope(
@@ -129,7 +129,7 @@ async def test_browse_rejects_directory_outside_read_scope(
 async def test_browse_rejects_parent_escape_relative_directory(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """相对 ``..`` 穿越解析出存储根的请求目录被端点拒绝，不回显服务器路径。"""
+    """相对 ``..`` 穿越解析出存储区的请求目录被端点拒绝，不回显服务器路径。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -170,7 +170,7 @@ async def test_browse_rejects_null_byte_directory_as_clean_400(
 async def test_browse_echoes_original_directory_not_absolute_save_root(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """成功响应的 directory 回显用户原始输入，绝对存储根路径不出端点。"""
+    """成功响应的 directory 回显用户原始输入，绝对存储区路径不出端点。"""
     save_root = write_workspace_config(tmp_path)
     day_dir = save_root / "2026-08-21"
     day_dir.mkdir()
@@ -187,7 +187,7 @@ async def test_browse_echoes_original_directory_not_absolute_save_root(
 async def test_browse_serves_explicit_save_root_outside_workspace(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """显式存储根独立于工作区时图库正常浏览，读权限包含存储根自身。"""
+    """显式存储区独立于工作区时图库正常浏览，读权限包含存储区自身。"""
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
     outside_root = tmp_path / "elsewhere"

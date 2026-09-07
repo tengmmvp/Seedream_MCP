@@ -1,8 +1,8 @@
 """Seedream MCP 路径处理工具：目录体系的位置求值与读权限判定。
 
-位置求值按 docs/development/directory-system.md：存储根 = 显式存储声明 >
-基座派生 ``<基座>/.seedream/images``；基座 = MCP Roots 首项 >
-SEEDREAM_WORKSPACE_ROOT > 用户主目录。读权限 = 工作区声明集合 ∪ 存储根。
+位置求值按 docs/development/directory-system.md：存储区 = 显式存储声明 >
+基准派生 ``<基准>/.seedream/images``；基准 = MCP Roots 首项 >
+SEEDREAM_WORKSPACE_ROOT > 用户主目录。读权限 = 工作区声明集合 ∪ 存储区。
 提供路径规范化、越界判定原语，拦截包含 ``..`` 或经由符号链接指向权限范围
 之外的路径。roots 取回有三种形态：工具链经 server 层 Resolve 依赖注入
 （SEP-2577 非废弃形态）、资源处理器在 2026-07-28 及以后的会话上经
@@ -102,7 +102,7 @@ def register_env_workspace_root_provider(provider: EnvValueProvider) -> None:
 
 
 def register_env_save_base_dir_provider(provider: EnvValueProvider) -> None:
-    """注册存储根提供者，config 侧在模块加载时注入取值入口。
+    """注册存储区提供者，config 侧在模块加载时注入取值入口。
 
     Args:
         provider: 返回活动配置的 auto_save_base_dir 原始字符串，未配置返回 None。
@@ -216,7 +216,7 @@ def _resolve_home_fallback_root() -> Path:
         _home_fallback_logged = True
         logger.info(
             "未声明 MCP Roots 且未配置 SEEDREAM_WORKSPACE_ROOT，工作位置保底为用户"
-            "主目录 {}，默认存储根为 {}",
+            "主目录 {}，默认存储区为 {}",
             home,
             home / ".seedream" / "images",
         )
@@ -229,7 +229,7 @@ def resolve_env_workspace_root() -> Path:
     无任何工作类声明时落用户主目录，首次回退记录一次日志提示默认存储位置。
 
     Returns:
-        已 resolve 的工作位置基座目录；无任何配置时为用户主目录。
+        已 resolve 的工作位置基准目录；无任何配置时为用户主目录。
 
     Raises:
         SeedreamConfigError: 无配置且用户主目录不可解析。
@@ -241,16 +241,16 @@ def resolve_env_workspace_root() -> Path:
 
 
 def resolve_save_root() -> Path:
-    """求值存储根：显式存储声明直接生效，否则由基座派生。
+    """求值存储区：显式存储声明直接生效，否则由基准派生。
 
-    显式声明与基座派生两分支的 resolve 结果分别经进程级缓存，配置写入路径
+    显式声明与基准派生两分支的 resolve 结果分别经进程级缓存，配置写入路径
     统一使缓存失效。
 
     Returns:
-        resolve 后的存储根目录。
+        resolve 后的存储区目录。
 
     Raises:
-        SeedreamConfigError: 显式存储声明无法解析（路径非法或超长），或基座声明链
+        SeedreamConfigError: 显式存储声明无法解析（路径非法或超长），或基准声明链
             不可解析，均属部署配置缺陷归配置错误档案。
     """
     configured = _configured_env_value(_SAVE_BASE_DIR_ENV)
@@ -260,16 +260,16 @@ def resolve_save_root() -> Path:
         except (OSError, RuntimeError, ValueError) as exc:
             # 异常原文嵌 expanduser 展开后的服务器绝对路径，仅进日志；用户消息只
             # 回显其自行配置的原始值。
-            logger.error("存储根配置无法解析 '{}': {}", configured, exc)
-            raise SeedreamConfigError(f"存储根配置无法解析: {configured}") from exc
+            logger.error("存储区配置无法解析 '{}': {}", configured, exc)
+            raise SeedreamConfigError(f"存储区配置无法解析: {configured}") from exc
     return resolve_cached_default_save_base_dir(get_workspace_root())
 
 
 def get_read_context() -> tuple[list[Path], Path, list[Path]]:
-    """一次求值 (工作区声明集合, 存储根, 读权限)，供读取链各消费方共享单次结果。
+    """一次求值 (工作区声明集合, 存储区, 读权限)，供读取链各消费方共享单次结果。
 
     工作区声明链不可解析（无 Roots 与环境根且主目录不可解析）时工作区为空、
-    读权限退化为仅存储根并记录，显式存储声明可用即不整体失败；存储根自身
+    读权限退化为仅存储区并记录，显式存储声明可用即不整体失败；存储区自身
     不可解析时照常上抛。调用级 save_path 写入目录置位期间并入读权限尾部，
     实现该声明的调用内读写资格。
     """
@@ -277,7 +277,7 @@ def get_read_context() -> tuple[list[Path], Path, list[Path]]:
     try:
         workspace_roots = get_workspace_roots()
     except SeedreamConfigError as exc:
-        logger.error("工作位置声明链不可解析，读权限退化为仅存储根: {}", exc.message)
+        logger.error("工作位置声明链不可解析，读权限退化为仅存储区: {}", exc.message)
         workspace_roots = []
     scope = list(workspace_roots)
     if save_root not in scope:
@@ -289,7 +289,7 @@ def get_read_context() -> tuple[list[Path], Path, list[Path]]:
 
 
 def get_read_scope() -> list[Path]:
-    """读权限集合 = 工作区声明集合 ∪ 存储根，求值细节见 get_read_context。"""
+    """读权限集合 = 工作区声明集合 ∪ 存储区，求值细节见 get_read_context。"""
     return get_read_context()[2]
 
 
@@ -327,7 +327,7 @@ def get_workspace_roots() -> list[Path]:
 
 
 def get_workspace_root() -> Path:
-    """获取当前请求的基座：Roots 首项或环境回退根，多 Roots 时取首项。
+    """获取当前请求的基准：Roots 首项或环境回退根，多 Roots 时取首项。
 
     Raises:
         ValueError: 防御分支，回退链恒产出非空集合，正常不触发。
@@ -669,8 +669,8 @@ def get_relative_path(path: str | Path, base_dir: str | None = None) -> str:
 
 # ==================== 面向调用方的路径遮蔽与相对化 ====================
 
-# 读权限成员绝对路径在面向调用方输出中的占位符：存储根与工作区根各一。
-SAVE_ROOT_PLACEHOLDER = "<存储根>"
+# 读权限成员绝对路径在面向调用方输出中的占位符：存储区与工作区根各一。
+SAVE_ROOT_PLACEHOLDER = "<存储区>"
 WORKSPACE_ROOT_PLACEHOLDER = "<工作区根>"
 
 
@@ -710,7 +710,7 @@ def mask_scope_paths(
 ) -> str:
     """把文本中的读权限成员绝对路径替换为占位符，供错误与回显文案共用。
 
-    存储根替换为 <存储根>，其余成员（工作区根）替换为 <工作区根>；extra 追加
+    存储区替换为 <存储区>，其余成员（工作区根）替换为 <工作区根>；extra 追加
     额外的遮蔽对（如 Web 通道请求内 save_path 指定的保存目录）。全部替换对按
     路径长度降序应用，嵌套路径先替换更长前缀，保留更具体的占位语义；命中均为
     完整路径前缀替换，前缀同名兄弟目录不受波及。异常文案中文件名经 repr 渲染
@@ -719,8 +719,8 @@ def mask_scope_paths(
 
     Args:
         text: 待遮蔽的文本。
-        save_root: 已 resolve 的存储根，占位语义的判定基准。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储根）。
+        save_root: 已 resolve 的存储区，占位语义的判定基准。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区）。
         extra: 额外的 (路径, 占位符) 遮蔽对。
 
     Returns:
@@ -745,14 +745,14 @@ def mask_scope_paths(
 
 
 def save_root_relative(path: str | Path, save_root: Path) -> str | None:
-    """返回路径的存储根相对正斜杠形态，供条目回显与建议路径共用。
+    """返回路径的存储区相对正斜杠形态，供条目回显与建议路径共用。
 
     Args:
         path: 待相对化的路径，浏览链路传入已 resolve 路径免除逐级 stat。
-        save_root: 已 resolve 的存储根。
+        save_root: 已 resolve 的存储区。
 
     Returns:
-        正斜杠相对路径字符串；路径落在存储根外时为 None。
+        正斜杠相对路径字符串；路径落在存储区外时为 None。
     """
     try:
         return Path(path).relative_to(save_root).as_posix()

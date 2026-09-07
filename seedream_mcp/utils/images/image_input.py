@@ -103,10 +103,10 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     """校验本地图片路径并读取编码为 Base64 Data URI。
 
     候选定位委托 resolve_local_image_candidate，与 ImagePreparer 的缓存签名共用
-    同一选择规则，锁定同一文件。(存储根, 读权限) 经 get_read_context 在函数顶
+    同一选择规则，锁定同一文件。(存储区, 读权限) 经 get_read_context 在函数顶
     部单点求值，各分支共享，消除一次失败请求内的重复解析。越界抛携带配置指引
     的错误；界内定位失败经 validate_image_path 做诊断性校验，取具体失败原因并附
-    存储根内的相似路径建议。各失败均属参数校验语义而非 API 调用失败，归
+    存储区内的相似路径建议。各失败均属参数校验语义而非 API 调用失败，归
     SeedreamValidationError；错误文案不回显服务器侧路径。需在工作线程中调用。
     """
     _, save_root, read_scope = get_read_context()
@@ -119,8 +119,8 @@ def _prepare_local_image(normalized: str, original: str) -> str:
                 field="image",
                 value=normalized,
             )
-        # 诊断错误消息含解析后的绝对路径，读权限成员逐项替换为占位符后回显，存储根
-        # 外的工作区根路径同样遮蔽；建议限定在存储根内扫描并转为存储根相对形态，
+        # 诊断错误消息含解析后的绝对路径，读权限成员逐项替换为占位符后回显，存储区
+        # 外的工作区根路径同样遮蔽；建议限定在存储区内扫描并转为存储区相对形态，
         # 均不泄露服务器路径。
         _, error_msg, _ = validate_image_path(normalized, skip_dimensions=True)
         error_text = mask_scope_paths(error_msg or "图像路径校验失败", save_root, read_scope)

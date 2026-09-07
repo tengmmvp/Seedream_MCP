@@ -1,7 +1,7 @@
-"""存储根求值与 save_path 调用级声明的解析测试。
+"""存储区求值与 save_path 调用级声明的解析测试。
 
-resolve_save_root 按显式存储声明 > 基座派生求值，两级分支的缓存随配置写入失效；
-save_path 为调用级存储声明，位置不受限，相对形态以存储根为基准，仅做输入清洗。
+resolve_save_root 按显式存储声明 > 基准派生求值，两级分支的缓存随配置写入失效；
+save_path 为调用级存储声明，位置不受限，相对形态以存储区为基准，仅做输入清洗。
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _use_config(config: SeedreamConfig, monkeypatch: pytest.MonkeyPatch) -> None
 def test_resolve_base_dir_returns_save_root_when_save_path_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未提供 save_path 时返回存储根（显式存储声明直接生效）。"""
+    """未提供 save_path 时返回存储区（显式存储声明直接生效）。"""
     base = tmp_path / "save_root"
     base.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base)), monkeypatch)
@@ -40,7 +40,7 @@ def test_resolve_base_dir_returns_save_root_when_save_path_missing(
 def test_resolve_base_dir_resolves_relative_save_path_against_save_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """save_path 相对形态以存储根为基准解析。"""
+    """save_path 相对形态以存储区为基准解析。"""
     base = tmp_path / "save_root"
     base.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base)), monkeypatch)
@@ -51,7 +51,7 @@ def test_resolve_base_dir_resolves_relative_save_path_against_save_root(
 def test_resolve_base_dir_accepts_save_path_outside_save_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """save_path 为调用级存储声明，指向存储根之外的绝对路径放行。"""
+    """save_path 为调用级存储声明，指向存储区之外的绝对路径放行。"""
     base = tmp_path / "save_root"
     base.mkdir()
     elsewhere = tmp_path / "elsewhere"
@@ -77,7 +77,7 @@ def test_resolve_base_dir_rejects_invalid_save_path_form(
 def test_resolve_save_root_derives_from_workspace_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未配置存储声明时存储根由基座派生：<工作区根>/.seedream/images。"""
+    """未配置存储声明时存储区由基准派生：<工作区根>/.seedream/images。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)), monkeypatch)
@@ -146,7 +146,7 @@ def test_resolve_save_root_caches_workspace_default(
 def test_resolve_save_root_cache_invalidated_by_active_config_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """set_active_config 写入新配置后默认分支缓存一并失效，按新基座重新解析。"""
+    """set_active_config 写入新配置后默认分支缓存一并失效，按新基准重新解析。"""
     workspace_a = tmp_path / "ws_a"
     workspace_a.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace_a)), monkeypatch)
@@ -183,7 +183,7 @@ def test_resolve_save_root_cache_keys_isolate_explicit_and_default(
 def test_validate_image_path_none_base_dir_falls_back_and_enforces_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """base_dir 为 None 时回退存储根，越界判定面向读权限集合。"""
+    """base_dir 为 None 时回退存储区，越界判定面向读权限集合。"""
     from PIL import Image
 
     from seedream_mcp.utils.images.image_validation import validate_image_path
@@ -194,7 +194,7 @@ def test_validate_image_path_none_base_dir_falls_back_and_enforces_scope(
     save_root.mkdir(parents=True)
     _use_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)), monkeypatch)
 
-    # 存储根内真实小图：返回有效，证明存储根基准解析正常放行合法路径。
+    # 存储区内真实小图：返回有效，证明存储区基准解析正常放行合法路径。
     img = save_root / "ok.png"
     Image.new("RGB", (32, 32), color=(0, 0, 255)).save(img)
     is_valid, err, normalized = validate_image_path(str(img))
@@ -202,7 +202,7 @@ def test_validate_image_path_none_base_dir_falls_back_and_enforces_scope(
     assert err == ""
     assert normalized is not None
 
-    # 读权限外路径：工作区与存储根均不包含，判无效并指向配置指引。
+    # 读权限外路径：工作区与存储区均不包含，判无效并指向配置指引。
     escape = tmp_path / "escape.png"
     is_valid_escape, err_escape, _ = validate_image_path(str(escape))
     assert is_valid_escape is False

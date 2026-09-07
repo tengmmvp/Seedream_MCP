@@ -291,7 +291,7 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 
 - `prompt` (optional) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words; may be omitted only in the layer decomposition scenario, where the model automatically identifies elements to split
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
-- `image` (required) - Input image; supports image URL, local file path, or Base64 image data; relative paths resolve against the storage root (the image save directory)
+- `image` (required) - Input image; supports image URL, local file path, or Base64 image data; relative paths resolve against the image save directory
 - `layer_decomposition` (optional) - Enable layer decomposition, only supported by 5.0 Pro; splits the single input image into 1 base image and up to 16 PNG layers with alpha channels; layer entries additionally return `z_index`, `name`, `description`, and `bounding_box` fields; `output_format` only controls the base image format — layers are always PNG
 - `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (requires a single input image with an alpha channel; mutually exclusive with `output_format=jpeg`) or `opaque` produces a regular image; only supported by 5.0 Pro
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model; the layer decomposition scenario only supports presets and `auto` (adapts to the input image, and is the default when no size is specified)
@@ -329,7 +329,7 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 
 - `prompt` (required) - Image fusion request or style instruction; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
-- `image` (required) - Input images (2-14; 5.0 Pro max 10); each supports image URL, local file path, or Base64 image data; relative paths resolve against the storage root
+- `image` (required) - Input images (2-14; 5.0 Pro max 10); each supports image URL, local file path, or Base64 image data; relative paths resolve against the image save directory
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
@@ -368,7 +368,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 
 - `prompt` (required) - Text prompt for image generation; should clearly specify the quantity and content; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
-- `image` (optional) - Reference images (up to 14, and the sum of reference images and max_images must not exceed 15); each supports image URL, local file path, or Base64 image data; relative paths resolve against the storage root
+- `image` (optional) - Reference images (up to 14, and the sum of reference images and max_images must not exceed 15); each supports image URL, local file path, or Base64 image data; relative paths resolve against the image save directory
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
@@ -402,7 +402,7 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 **Parameters:**
 
-- `directory` (optional) - Directory path to browse; defaults to the storage root (the image save directory). Relative paths resolve against the storage root; absolute paths must fall within the read scope (workspace ∪ storage root). Entries inside the storage root are storage-root-relative paths; entries outside it are absolute paths when the client declares workspace Roots, otherwise relative to the browsed directory (prefix with the browsed directory before use)
+- `directory` (optional) - Directory path to browse; defaults to the image save directory. Relative paths resolve against the image save directory; absolute paths must fall within the read scope (workspace ∪ image save directory). Entries inside the save directory are save-directory-relative paths; entries outside it are absolute paths when the client declares workspace Roots, otherwise relative to the browsed directory (prefix with the browsed directory before use)
 - `recursive` (optional) - Whether to search subdirectories recursively; default `true`
 - `max_depth` (optional) - Maximum search depth; range 1-10; default 3
 - `limit` (optional) - Maximum number of files to return; range 1-200; default 50

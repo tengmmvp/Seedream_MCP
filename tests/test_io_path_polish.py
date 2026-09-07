@@ -292,9 +292,9 @@ def test_find_images_rejects_unc_directory_before_resolve(
 def test_read_context_degrades_to_save_root_when_home_unresolvable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """主目录不可解析且显式存储声明可用时，读权限退化为仅存储根不整体失败。
+    """主目录不可解析且显式存储声明可用时，读权限退化为仅存储区不整体失败。
 
-    显式 BASE_DIR 在场时基座链不参与存储根求值，工作区链的失败不应拖垮
+    显式 BASE_DIR 在场时基准链不参与存储区求值，工作区链的失败不应拖垮
     读取与浏览。
     """
     from seedream_mcp.utils.core.errors import SeedreamConfigError
@@ -314,7 +314,7 @@ def test_read_context_degrades_to_save_root_when_home_unresolvable(
     # 工作区链单点仍如实报配置指引
     with pytest.raises(SeedreamConfigError, match="SEEDREAM_WORKSPACE_ROOT"):
         io_path_module.get_workspace_roots()
-    # 读权限退化为仅存储根
+    # 读权限退化为仅存储区
     assert io_path_module.get_read_scope() == [save_root.resolve()]
 
 
@@ -338,7 +338,7 @@ def test_resolve_save_root_wraps_runtime_error_with_configured_value(
         io_path_module.resolve_save_root()
 
     message = exc_info.value.message
-    assert message == "存储根配置无法解析: ~/pics"
+    assert message == "存储区配置无法解析: ~/pics"
     assert "C:" not in message and "Users" not in message
 
 

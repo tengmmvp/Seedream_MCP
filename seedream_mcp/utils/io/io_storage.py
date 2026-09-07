@@ -95,11 +95,11 @@ class FileManager:
 
         Args:
             base_dir: 图片保存基础目录。默认为 io_path.resolve_save_root 求值的
-                存储根，与目录体系的单一求值权威一致。
+                存储区，与目录体系的单一求值权威一致。
 
         Raises:
             FileManagerError: 基础目录解析失败或指向已存在文件。
-            SeedreamValidationError: 默认存储根求值失败。
+            SeedreamValidationError: 默认存储区求值失败。
         """
         raw_base = resolve_save_root() if base_dir is None else Path(base_dir)
         try:

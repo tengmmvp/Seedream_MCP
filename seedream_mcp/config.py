@@ -73,7 +73,7 @@ class SeedreamConfig:
         log_level: 日志级别，构造校验时统一为大写。
         log_file: 日志文件路径，未设置时使用日志系统默认路径。
         auto_save_enabled: 是否启用生成图片的自动保存。
-        auto_save_base_dir: 自动保存根目录，未设置时回退工作区 .seedream/images 目录。
+        auto_save_base_dir: 自动存储区目录，未设置时回退工作区 .seedream/images 目录。
         auto_save_download_timeout: 自动保存下载超时秒数，上界 720 秒。
         auto_save_max_retries: 自动保存下载最大重试次数。
         auto_save_max_file_size: 自动保存单文件大小上限字节数。

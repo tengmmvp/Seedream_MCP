@@ -63,7 +63,7 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 
 ## 图片的保存与复用
 
-- 自动保存默认开启：生成结果自动下载到存储根（`SEEDREAM_AUTO_SAVE_BASE_DIR` 配置值或 `<工作位置>/.seedream/images`，工作位置取 MCP Roots 首项、`SEEDREAM_WORKSPACE_ROOT` 或用户主目录）的 `<日期>/<工具名>/` 子目录，文件名含 prompt 词干便于检索
+- 自动保存默认开启：生成结果自动下载到图片保存目录（`SEEDREAM_AUTO_SAVE_BASE_DIR` 配置值或 `<工作位置>/.seedream/images`，工作位置取 MCP Roots 首项、`SEEDREAM_WORKSPACE_ROOT` 或用户主目录）的 `<日期>/<工具名>/` 子目录，文件名含 prompt 词干便于检索
 - API 返回的图片 URL 仅保留 24 小时，过期即失效；引用历史图片一律使用本地保存路径
 - 保存路径可直接作为 `image` 参数回流：先 `browse_images` 定位历史图，再以该路径作参考图生成新图
 - 保存目录默认 30 天自动清理、总量 10GB 上限，重要图片请让用户另行归档

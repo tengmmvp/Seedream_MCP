@@ -1,6 +1,6 @@
 """image_input 预处理测试：URL 与 Data URI 主干、本地文件读取与读权限校验。
 
-相对路径以存储根为基准，绝对路径判定面向读权限（工作区 ∪ 存储根）；越界与
+相对路径以存储区为基准，绝对路径判定面向读权限（工作区 ∪ 存储区）；越界与
 诊断消息统一不回显服务器侧绝对路径。
 """
 
@@ -24,7 +24,7 @@ from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
 def _save_root(ws: Path) -> Path:
-    """返回 ws 派生的存储根并确保存在，相对路径测试文件统一放存储根内。"""
+    """返回 ws 派生的存储区并确保存在，相对路径测试文件统一放存储区内。"""
     root = ws / ".seedream" / "images"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -107,9 +107,9 @@ async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
 async def test_prepare_image_input_in_bounds_diagnostics_masks_fallback_boundary(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """界内定位失败的诊断分支不泄露服务器绝对路径，相似路径建议为存储根相对形态。
+    """界内定位失败的诊断分支不泄露服务器绝对路径，相似路径建议为存储区相对形态。
 
-    存储根内放置名称相近的真实图片，确保建议分支确实可命中，测试不沦为空芯。
+    存储区内放置名称相近的真实图片，确保建议分支确实可命中，测试不沦为空芯。
     """
     del tmp_path
     sibling = _save_root(workspace_root) / "missing_sibling.png"
@@ -126,9 +126,9 @@ async def test_prepare_image_input_in_bounds_diagnostics_masks_fallback_boundary
 async def test_prepare_image_input_diagnostics_mask_workspace_root_outside_save_root(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """落在存储根外、工作区根内的未命中路径，诊断消息同样遮蔽工作区根。
+    """落在存储区外、工作区根内的未命中路径，诊断消息同样遮蔽工作区根。
 
-    旧实现只替换存储根前缀，``../`` 形态解析到工作区根下时解析后绝对路径
+    旧实现只替换存储区前缀，``../`` 形态解析到工作区根下时解析后绝对路径
     原样回显给调用方。
     """
     del tmp_path

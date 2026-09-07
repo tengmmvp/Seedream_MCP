@@ -613,7 +613,7 @@ def test_input_schema_rejects_non_bool_auto_save() -> None:
 def test_prevalidate_save_path_accepts_path_outside_save_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """save_path 为调用级存储声明，指向存储根之外的位置预检放行。"""
+    """save_path 为调用级存储声明，指向存储区之外的位置预检放行。"""
     base = tmp_path / "save_root"
     base.mkdir()
     monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(base))
@@ -636,7 +636,7 @@ def test_prevalidate_save_path_rejects_invalid_format() -> None:
 def test_prevalidate_save_path_accepts_relative_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """相对 save_path 以存储根为基准预检放行，上下文照常携带原始值。"""
+    """相对 save_path 以存储区为基准预检放行，上下文照常携带原始值。"""
     base = tmp_path / "save_root"
     base.mkdir()
     monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(base))

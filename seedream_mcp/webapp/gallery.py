@@ -1,7 +1,7 @@
-"""Web 操作台图库浏览端点：存储根边界校验后透传 browse 工具并剥除服务器侧回显。
+"""Web 操作台图库浏览端点：存储区边界校验后透传 browse 工具并剥除服务器侧回显。
 
-与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务存储根内文件，图库
-浏览同样以存储根为界，解析出存储根的请求目录在端点拒绝。条目 path 为存储根
+与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务存储区内文件，图库
+浏览同样以存储区为界，解析出存储区的请求目录在端点拒绝。条目 path 为存储区
 相对形态，前端可直接拼接为图片端点参数；workspace_roots 与 resolved_directories
 回显字段携带服务器绝对路径，Web 前端不消费，返回浏览器前剥除；错误消息中的
 读权限成员绝对路径替换为占位符，与 config-info 的防泄露口径一致。
@@ -56,7 +56,7 @@ def _sanitize_error_message(
 
 
 async def _directory_outside_save_root(directory: str, save_root: Path) -> bool:
-    """解析请求目录并判定是否落在存储根外；形态非法交 browse 核心报具体原因。"""
+    """解析请求目录并判定是否落在存储区外；形态非法交 browse 核心报具体原因。"""
 
     def _outside() -> bool:
         try:
@@ -89,7 +89,7 @@ async def web_browse(request: Request) -> Response:
     directory = params.directory if params.directory is not None else "."
     if await _directory_outside_save_root(directory, save_root):
         return _shared.error_json(
-            "invalid_directory", "目录不在保存根内，Web 图库仅浏览保存根目录", 400
+            "invalid_directory", "目录不在存储区内，Web 图库仅浏览存储区目录", 400
         )
     try:
         result = await run_browse_images(params, ctx=None)

@@ -658,11 +658,11 @@ async def browse_images(
     workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, BrowseImagesStructuredOutput]:
-    """本地图片浏览：列出读权限（工作区 ∪ 存储根）内的图片文件。
+    """本地图片浏览：列出读权限（工作区 ∪ 存储区）内的图片文件。
 
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
-    递归、分页、按格式过滤。默认浏览存储根；条目存储根内为存储根相对路径，
-    存储根外在客户端声明 Roots 时为绝对路径，否则为所浏览目录相对路径。
+    递归、分页、按格式过滤。默认浏览存储区；条目存储区内为存储区相对路径，
+    存储区外在客户端声明 Roots 时为绝对路径，否则为所浏览目录相对路径。
     """
     return await _run_tool_pipeline(
         "browse_images",

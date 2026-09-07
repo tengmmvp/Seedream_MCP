@@ -362,7 +362,7 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
 async def test_auto_save_cleanup_boundary_stays_at_deployment_save_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """save_path 指向部署级存储根之外时，清理与配额边界仍恒为部署级存储根。
+    """save_path 指向部署级存储区之外时，清理与配额边界仍恒为部署级存储区。
 
     save_path 目录可能同时存放其他文件，不属服务专有，把按天清理与配额驱逐
     扩展到该处会误删非本服务文件；save_path 仅决定本次写入位置。

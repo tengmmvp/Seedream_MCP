@@ -1,6 +1,6 @@
 """图片浏览工具的核心执行流水线。
 
-读权限求值（工作区 ∪ 存储根）、请求目录解析、越界过滤扫描、分页配额与
+读权限求值（工作区 ∪ 存储区）、请求目录解析、越界过滤扫描、分页配额与
 structuredContent 装配；不经 ``execute_generation_handler`` 生成流水线，由 impl
 处理器薄壳委托调用，未预期异常不在本模块捕获，统一由外层兜底降级。
 """
@@ -181,7 +181,7 @@ def _build_browse_structured_result(
     """
     if is_boundary_from_session_roots():
         workspace_root_values = [str(root) for root in state.workspace_roots]
-        # 解析目录逐项判定是否落在会话 Roots 内：默认浏览解析到服务器配置的存储根，
+        # 解析目录逐项判定是否落在会话 Roots 内：默认浏览解析到服务器配置的存储区，
         # 显式存储声明可位于 Roots 之外，越出客户端授权空间的部分以占位符回显。
         resolved_directory_values = [
             (
@@ -270,7 +270,7 @@ def _scan_and_filter_directory(
         max_depth: 递归扫描的最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         remaining: 本目录新增条数的配额上限。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储根），越界判定基准。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区），越界判定基准。
         seen_images: 已见原始路径集合，就地更新，兜底扫描缓存前缀扩展轮次间的
             竞态错位重复。
         unreadable_dirs: 不可读目录收集列表，就地更新，供空结果分支区分目录
@@ -330,8 +330,8 @@ def _build_display_entries(
     """组装展示文本与结构化图片条目，条目路径按边界取可直接使用的形态。
 
     文件系统相关计算集中在本函数同步执行，由调用方经 ``asyncio.to_thread`` 在线程内
-    调用，避免网络挂载目录的 stat 阻塞事件循环。存储根内条目为存储根相对，与
-    image 参数的相对解析基准一致，可直接回流。存储根外条目按边界分派：会话 Roots
+    调用，避免网络挂载目录的 stat 阻塞事件循环。存储区内条目为存储区相对，与
+    image 参数的相对解析基准一致，可直接回流。存储区外条目按边界分派：会话 Roots
     声明下回显绝对路径（所列目录本就是客户端声明的授权空间，可直接回流）；回退
     边界下相对本次扫描目录展示，不泄露服务器路径，调用方拼接所浏览目录前缀后
     作为绝对路径使用。
@@ -339,8 +339,8 @@ def _build_display_entries(
     Args:
         images: 当前页的图片原始路径列表，已经扫描层越界过滤与去重。
         image_resolved_map: 原始路径到 resolved 路径的映射，由扫描阶段填充。
-        save_root: 已 resolve 的存储根，存储根内条目的相对化基准。
-        scan_base: 本次扫描的已解析目录，回退边界下存储根外条目的相对化基准。
+        save_root: 已 resolve 的存储区，存储区内条目的相对化基准。
+        scan_base: 本次扫描的已解析目录，回退边界下存储区外条目的相对化基准。
         show_details: 是否附带大小与修改时间详情。
 
     Returns:
@@ -356,7 +356,7 @@ def _build_display_entries(
         relative = save_root_relative(img_resolved, save_root)
         if relative is None:
             if session_boundary:
-                # 绝对路径归一正斜杠，与存储根相对条目同口径，混排页分隔符一致。
+                # 绝对路径归一正斜杠，与存储区相对条目同口径，混排页分隔符一致。
                 relative = str(img_resolved).replace("\\", "/")
             else:
                 relative = get_relative_path(img_resolved, str(scan_base)).replace("\\", "/")
@@ -429,7 +429,7 @@ async def build_browse_fallback_result(
 async def _resolve_browse_directories(
     directory: str,
 ) -> tuple[list[Path], Path, list[Path], Path | None, str | None]:
-    """目录解析阶段：求值读权限与存储根并解析请求目录，供越界判定与扫描取用。
+    """目录解析阶段：求值读权限与存储区并解析请求目录，供越界判定与扫描取用。
 
     解析成功返回单个已 resolve 目录；路径无效携带错误消息，越界返回 None。
     """
@@ -440,14 +440,14 @@ async def _resolve_browse_directories(
     def _read_scope_and_resolve_dir() -> (
         tuple[list[Path], Path, list[Path], Path | None, str | None]
     ):
-        """求值工作区、存储根与读权限并解析请求目录，返回五元组。
+        """求值工作区、存储区与读权限并解析请求目录，返回五元组。
 
-        三类位置经 get_read_context 单点求值共享，消除本函数内对存储根与工作区
+        三类位置经 get_read_context 单点求值共享，消除本函数内对存储区与工作区
         的重复解析。
         """
         workspace_roots, save_root, read_scope = get_read_context()
         try:
-            # 相对路径以存储根为基准；默认目录 "." 即存储根本身。
+            # 相对路径以存储区为基准；默认目录 "." 即存储区本身。
             resolved_dir = normalize_path(directory, str(save_root))
         except ValueError as exc:
             # 异常消息内含用户输入路径，经净化后才进入错误通道。
@@ -556,7 +556,7 @@ async def _build_empty_browse_result(
         unique_unreadable = list(dict.fromkeys(unreadable_dirs))
         if is_boundary_from_session_roots():
             # 落在会话 Roots 内的目录是客户端授权空间可回显；Roots 外的服务器目录
-            # （如显式存储根位于 Roots 之外时的子目录）不回显路径。
+            # （如显式存储区位于 Roots 之外时的子目录）不回显路径。
             session_roots = get_workspace_roots()
             named = [
                 str(item)
@@ -640,7 +640,7 @@ async def execute_browse_request(
 ) -> CallToolResult:
     """执行图片浏览主逻辑：求值读权限、解析目录、扫描分页并装配工具结果。
 
-    目录解析以存储根为基准，判定面向读权限（工作区 ∪ 存储根）；扫描结果经扫描
+    目录解析以存储区为基准，判定面向读权限（工作区 ∪ 存储区）；扫描结果经扫描
     缓存加速翻页，切片多取一张以判定 has_more。未预期异常向上抛出，由 impl 外层
     ``handle_browse_images`` 兜底降级。
 

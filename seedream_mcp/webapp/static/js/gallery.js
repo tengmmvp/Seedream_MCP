@@ -62,7 +62,7 @@ async function refreshGalleryForSeq(seq) {
     state.gallery.items = [];
     $("gallery-grid").innerHTML = "";
     $("gallery-empty").textContent =
-      "未配置保存根目录（SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR）";
+      "未配置存储区目录（SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR）";
     $("gallery-empty").classList.remove("hidden");
     resetGalleryPager();
     return;
@@ -235,7 +235,7 @@ function releaseLightboxUrl() {
 }
 
 /**
- * 回填参考图：config-info 不再下发保存根绝对路径，前端无从拼本地路径，改用
+ * 回填参考图：config-info 不再下发存储区绝对路径，前端无从拼本地路径，改用
  * 灯箱已持有的 blob 转 data URI 作为参考图值。文生图工具自动切到图生图，
  * hash 变化由浏览器原生 hashchange 事件驱动视图切换。
  */

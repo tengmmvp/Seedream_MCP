@@ -167,7 +167,7 @@ async def test_root_redirects_to_web_index(
 async def test_config_info_reachable_when_registered(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """注册并构建后 config-info 返回模型信息与保存根可用性布尔。"""
+    """注册并构建后 config-info 返回模型信息与存储区可用性布尔。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -190,7 +190,7 @@ async def test_config_info_reports_save_root_unavailable(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储根不可解析时回 False，且不出现任何路径字段。"""
+    """存储区不可解析时回 False，且不出现任何路径字段。"""
     import seedream_mcp.utils.io.io_path as io_path_module
     from seedream_mcp.config import SeedreamConfig, set_active_config
 

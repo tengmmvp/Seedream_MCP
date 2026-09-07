@@ -105,12 +105,12 @@ MIN_IMAGE_EDGE = 15
 
 
 def _get_validation_base_dir() -> Path:
-    """本地文件校验的基础目录，取存储根，与参考图读取链的解析基准一致。"""
+    """本地文件校验的基础目录，取存储区，与参考图读取链的解析基准一致。"""
     return resolve_save_root()
 
 
 def _resolve_local_image_path(file_path: str) -> Path:
-    """解析本地图片路径，相对路径以存储根为基准，绝对路径保持原样。
+    """解析本地图片路径，相对路径以存储区为基准，绝对路径保持原样。
 
     不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的定位口径
     一致。UNC 路径在 resolve 前抛 ValueError 拒绝，避免 Windows 下 resolve 触发
@@ -166,15 +166,15 @@ def iter_local_candidates(
 ) -> Iterator[Path]:
     """迭代落在读权限内的候选物理路径。
 
-    绝对路径直接作为候选，相对路径以 base_dir（存储根）拼接；候选 resolve 一次
+    绝对路径直接作为候选，相对路径以 base_dir（存储区）拼接；候选 resolve 一次
     后与读权限集合逐项比较，拦截 ``..`` 与符号链接逃逸，仅产出落在任一范围内的
     resolve 后物理路径。UNC 前缀的候选不 resolve，避免在 Windows 触发 SMB 认证。
     候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        base_dir: 相对路径的解析基准，为存储根。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储根）。
+        base_dir: 相对路径的解析基准，为存储区。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区）。
 
     Yields:
         resolve 后落在读权限内的候选物理路径。
@@ -198,7 +198,7 @@ def resolve_local_image_candidate(
     save_root: Path | None = None,
     read_scope: list[Path] | None = None,
 ) -> tuple[Path, os.stat_result] | None:
-    """定位可读取的候选图片文件：相对路径以存储根为基准，判定面向读权限集合。
+    """定位可读取的候选图片文件：相对路径以存储区为基准，判定面向读权限集合。
 
     界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
     (resolve 后物理路径, stat)，未命中返回 None。ImagePreparer 的缓存签名与
@@ -208,8 +208,8 @@ def resolve_local_image_candidate(
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        save_root: 已 resolve 的存储根，相对路径的解析基准。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储根）。
+        save_root: 已 resolve 的存储区，相对路径的解析基准。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区）。
 
     Returns:
         首个命中候选的 (物理路径, stat)；无命中时为 None。
@@ -497,7 +497,7 @@ def validate_image_path(path: str, skip_dimensions: bool = False) -> tuple[bool,
             return True, "", None
 
         normalized_path = normalize_path(path, str(resolve_save_root()))
-        # 越界判定面向读权限集合（工作区 ∪ 存储根），与候选定位同口径。
+        # 越界判定面向读权限集合（工作区 ∪ 存储区），与候选定位同口径。
         if not any(is_within_resolved(normalized_path, scope) for scope in get_read_scope()):
             return False, "路径不在读取范围内", normalized_path
 

@@ -159,9 +159,9 @@ def _extract_parallel_request_error(
 
 
 def _resolve_base_dir(save_path: str | None) -> Path:
-    """解析本次调用的写入目录：save_path 声明优先，否则取部署级存储根。
+    """解析本次调用的写入目录：save_path 声明优先，否则取部署级存储区。
 
-    save_path 为调用级存储声明，位置不受限；相对路径以部署级存储根为基准，
+    save_path 为调用级存储声明，位置不受限；相对路径以部署级存储区为基准，
     绝对形态不依赖基准、存储声明不可解析时不受阻；UNC、空字节、冒号分量等
     形态经 normalize_path 在 resolve 前拒绝。
 
@@ -190,7 +190,7 @@ def prevalidate_save_path(save_path: str | None) -> Path | None:
         解析后的本次调用写入目录；未提供 save_path 时为 None。
 
     Raises:
-        SeedreamValidationError: save_path 路径无效或存储根配置无法解析。
+        SeedreamValidationError: save_path 路径无效或存储区配置无法解析。
     """
     if not save_path:
         return None

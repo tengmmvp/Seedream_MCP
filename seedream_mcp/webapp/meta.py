@@ -72,9 +72,9 @@ async def web_root_redirect(_request: Request) -> Response:
 
 
 async def web_config_info(_request: Request) -> Response:
-    """返回前端所需的模型能力、默认值与保存根可用性。
+    """返回前端所需的模型能力、默认值与存储区可用性。
 
-    保存根解析经 _shared.resolve_web_save_root 与 gallery、generate 域同契约；
+    存储区解析经 _shared.resolve_web_save_root 与 gallery、generate 域同契约；
     仅回传可用性布尔，不向浏览器泄露服务器绝对路径；不可用时前端在图库区
     给出配置指引。
     """

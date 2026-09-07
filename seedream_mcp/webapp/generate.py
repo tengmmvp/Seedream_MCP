@@ -3,8 +3,8 @@
 请求体由 schemas.py 的 *Input 模型校验，字段与 MCP 工具同源，响应为工具的
 structured_content 字典；生成链路不伪造会话 Roots，文件边界由 runner 内的
 环境变量回退链处理，与客户端未声明 roots capability 的 MCP 会话同构。服务器
-绝对路径不出端点：data 与 auto_save.results 条目的 local_path 改写为保存根
-相对形态并附 web_path 供前端拼接图片端点，越出保存根的删除该键；markdown_ref
+绝对路径不出端点：data 与 auto_save.results 条目的 local_path 改写为存储区
+相对形态并附 web_path 供前端拼接图片端点，越出存储区的删除该键；markdown_ref
 恒由绝对路径拼出且前端不消费，整体删除；错误自由文本中的读权限成员路径替换
 为占位符。共享 client 经 context 替身借用，鉴权由外层 Bearer 中间件承担；
 端点仅消费 structuredContent，预览装配关闭，请求体解析与响应体序列化下沉
@@ -76,11 +76,11 @@ def sanitize_save_root_text(
     """替换结构化结果字符串值中的读权限成员绝对路径为占位符，就地改写。
 
     树遍历复用 results._sanitize_value_tree 的显式栈实现：深嵌套不触发递归上
-    限，循环引用以占位终止。str 值经 io_path.mask_scope_paths 替换存储根与
+    限，循环引用以占位终止。str 值经 io_path.mask_scope_paths 替换存储区与
     工作区根的全部出现处，extra_masks 追加请求内 save_path 声明的保存目录
     遮蔽，覆盖 auto_save.results[].error、data[].error 嵌套 message 与顶层
     error.message 等错误自由文本通道；非字符串叶子值保持原样。须在
-    augment_generation_payload 之后调用，此时保存根内 local_path 已改写为相对
+    augment_generation_payload 之后调用，此时存储区内 local_path 已改写为相对
     形态，不受替换波及。
     """
     sanitized = _sanitize_value_tree(
@@ -94,8 +94,8 @@ def sanitize_save_root_text(
 def _rewrite_item_path(item: dict[str, object], save_root: Path) -> None:
     """改写单个结果条目的路径字段，服务器绝对路径不出端点。
 
-    落在保存根内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
-    越出保存根（save_path 指定的保存根外目的地）或路径解析失败的条目删除
+    落在存储区内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
+    越出存储区（save_path 指定的存储区外目的地）或路径解析失败的条目删除
     local_path 键。markdown_ref 恒由绝对路径拼出而前端不消费，无条件删除。
     条目缺 local_path、值空串或非字符串时仅删 markdown_ref，其余内容不改动。
     """
@@ -118,8 +118,8 @@ def _rewrite_item_path(item: dict[str, object], save_root: Path) -> None:
 def augment_generation_payload(structured: dict[str, object], save_root: Path) -> None:
     """改写 data 与 auto_save.results 条目的路径字段并附 web_path。
 
-    供前端拼接图片端点；save_path 越出保存根时其条目同样经 _rewrite_item_path
-    收敛，不向浏览器泄露保存根外目的地。
+    供前端拼接图片端点；save_path 越出存储区时其条目同样经 _rewrite_item_path
+    收敛，不向浏览器泄露存储区外目的地。
     """
     data = structured.get("data")
     if isinstance(data, list):
@@ -170,8 +170,8 @@ def _finalize_web_payload(
 ) -> None:
     """响应出端前的改写步骤：先增强条目路径，再净化错误自由文本。
 
-    local_path 改写在前：保存根内条目此时替换为相对 web_path，不再携带可被
-    净化匹配的绝对前缀；保存根外条目被删除，残余绝对路径只存在于错误文本中。
+    local_path 改写在前：存储区内条目此时替换为相对 web_path，不再携带可被
+    净化匹配的绝对前缀；存储区外条目被删除，残余绝对路径只存在于错误文本中。
     读权限由 _masking_context 预先派生后传入，本函数不再触达文件系统。
     """
     augment_generation_payload(structured, save_root)

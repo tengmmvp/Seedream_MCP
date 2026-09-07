@@ -77,7 +77,7 @@ def build_web_app(
 
 
 def write_workspace_config(tmp_path: Path) -> Path:
-    """以 tmp 为工作区根注入活动配置并创建保存根目录，返回保存根路径。"""
+    """以 tmp 为工作区根注入活动配置并创建存储区目录，返回存储区路径。"""
     save_root = tmp_path / ".seedream" / "images"
     save_root.mkdir(parents=True)
     set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path)))
