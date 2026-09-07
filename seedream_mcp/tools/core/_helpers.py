@@ -180,21 +180,18 @@ def _resolve_base_dir(save_path: str | None) -> Path:
         ) from exc
 
 
-def prevalidate_save_path(save_path: str | None) -> Path | None:
-    """在生成请求分发前预检 save_path 的路径有效性并解析写入目录。
+def prevalidate_save_path(save_path: str | None) -> None:
+    """在生成请求分发前预检 save_path 的路径有效性。
 
     使非法 save_path 在计费请求前即以 validation_error 拒绝，而非留待自动保存
-    阶段降级为软警告；解析结果供调用内读写资格置位复用，不再二次解析。
-
-    Returns:
-        解析后的本次调用写入目录；未提供 save_path 时为 None。
+    阶段降级为软警告。未提供 save_path 时不做检查。
 
     Raises:
         SeedreamValidationError: save_path 路径无效或存储区配置无法解析。
     """
     if not save_path:
-        return None
-    return _resolve_base_dir(save_path)
+        return
+    _resolve_base_dir(save_path)
 
 
 async def safe_report_progress(

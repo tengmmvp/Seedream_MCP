@@ -17,10 +17,10 @@ import asyncio
 import heapq
 import os
 import sys
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterator
+from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -37,13 +37,6 @@ logger = get_logger()
 
 _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     "seedream_workspace_roots",
-    default=None,
-)
-
-# 调用级 save_path 写入目录：置位期间该目录并入读权限，实现目录体系的调用内读写
-# 资格。经 asyncio.to_thread 等工作线程传播的 contextvars 副本同样生效。
-_CALL_SAVE_PATH_ROOT_VAR: ContextVar[Path | None] = ContextVar(
-    "seedream_call_save_path_root",
     default=None,
 )
 
@@ -270,8 +263,7 @@ def get_read_context() -> tuple[list[Path], Path, list[Path]]:
 
     工作区声明链不可解析（无 Roots 与环境根且主目录不可解析）时工作区为空、
     读权限退化为仅存储区并记录，显式存储声明可用即不整体失败；存储区自身
-    不可解析时照常上抛。调用级 save_path 写入目录置位期间并入读权限尾部，
-    实现该声明的调用内读写资格。
+    不可解析时照常上抛。
     """
     save_root = resolve_save_root()
     try:
@@ -282,33 +274,12 @@ def get_read_context() -> tuple[list[Path], Path, list[Path]]:
     scope = list(workspace_roots)
     if save_root not in scope:
         scope.append(save_root)
-    call_save_dir = _CALL_SAVE_PATH_ROOT_VAR.get()
-    if call_save_dir is not None and call_save_dir not in scope:
-        scope.append(call_save_dir)
     return workspace_roots, save_root, scope
 
 
 def get_read_scope() -> list[Path]:
     """读权限集合 = 工作区声明集合 ∪ 存储区，求值细节见 get_read_context。"""
     return get_read_context()[2]
-
-
-@contextmanager
-def call_save_path_scope(resolved_dir: Path | None) -> Iterator[None]:
-    """在作用域内把调用级 save_path 写入目录并入读权限，退出时恢复。
-
-    目录体系的调用内读写资格：save_path 生效时其目标位置在本次调用内同时
-    获得读写资格，回显的绝对路径在同调用内可作参考图回流；资格随作用域结束
-    收回，不沉淀为持久读权限。resolved_dir 为 None 时仅占位透传，读权限不变。
-
-    Args:
-        resolved_dir: 已 resolve 的本次调用写入目录；未提供 save_path 时为 None。
-    """
-    token = _CALL_SAVE_PATH_ROOT_VAR.set(resolved_dir)
-    try:
-        yield
-    finally:
-        _CALL_SAVE_PATH_ROOT_VAR.reset(token)
 
 
 def get_workspace_roots() -> list[Path]:

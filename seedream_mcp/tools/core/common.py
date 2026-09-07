@@ -20,7 +20,6 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from ...config import SeedreamConfig
 from ...utils.images.image_thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
-from ...utils.io.io_path import call_save_path_scope
 from ...utils.io.io_save import AutoSaveResult
 from ...utils.core.errors import format_error_for_user, resolve_error_profile
 from ._helpers import (  # noqa: F401
@@ -132,12 +131,8 @@ async def _prepare_generation_context(
     metadata: ToolMetadata,
     ctx: Context[Any, Any] | None,
     module_logger: Logger,
-) -> tuple[GenerationExecutionContext, Path | None]:
-    """校验与上下文准备阶段：预检参数、构建执行上下文并记录请求开始日志。
-
-    save_path 预检同时解析出本次调用的写入目录，随上下文一并返回，供分发阶段的
-    调用内读写资格置位复用；未提供 save_path 时为 None。
-    """
+) -> GenerationExecutionContext:
+    """校验与上下文准备阶段：预检参数、构建执行上下文并记录请求开始日志。"""
     await safe_report_progress(
         ctx, progress=PROGRESS_RECEIVED, message=f"{metadata.failure_prefix}请求已接收"
     )
@@ -145,13 +140,12 @@ async def _prepare_generation_context(
     context = build_generation_context(params, config)
     # 预检含路径规范化等同步调用，下沉工作线程避免阻塞事件循环；仍在计费请求
     # 分发前完成。
-    resolved_save_dir: Path | None = None
     if params.save_path:
-        resolved_save_dir = await asyncio.to_thread(prevalidate_save_path, params.save_path)
+        await asyncio.to_thread(prevalidate_save_path, params.save_path)
     await safe_report_progress(ctx, progress=PROGRESS_VALIDATED, message="参数校验完成")
 
     module_logger.info(metadata.start_log_message, *metadata.start_log_values_builder(context))
-    return context, resolved_save_dir
+    return context
 
 
 async def _dispatch_generation_requests(
@@ -340,7 +334,7 @@ async def execute_generation_handler(
         为 True。
     """
     try:
-        context, resolved_save_dir = await _prepare_generation_context(
+        context = await _prepare_generation_context(
             params=params,
             config=config,
             metadata=metadata,
@@ -348,16 +342,13 @@ async def execute_generation_handler(
             module_logger=module_logger,
         )
 
-        # save_path 生效期间其写入目录并入读权限，本次调用内回显的绝对路径可作
-        # 参考图回流；参考图校验链在 dispatch 内消费该资格，作用域结束即收回。
-        with call_save_path_scope(resolved_save_dir):
-            result = await _dispatch_generation_requests(
-                config=config,
-                context=context,
-                ctx=ctx,
-                request_executor=request_executor,
-                module_logger=module_logger,
-            )
+        result = await _dispatch_generation_requests(
+            config=config,
+            context=context,
+            ctx=ctx,
+            request_executor=request_executor,
+            module_logger=module_logger,
+        )
 
         is_generation_failed = _is_generation_failed(result)
         # 图片列表提取一次供自动保存与格式化阶段复用，避免重复提取。
