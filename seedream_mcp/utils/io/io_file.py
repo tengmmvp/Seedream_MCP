@@ -1,9 +1,9 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接与原子落盘骨架。
 
 提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd 与同步变体
-atomic_replace_from_fd_sync，另有 is_reparse_point 与 has_reparse_attribute
-判定 NTFS junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与
-io_storage 的清理遍历使用。共享函数抛 OSError，由调用方按各自异常类型包装。
+atomic_replace_from_fd_sync，另有 has_reparse_attribute 判定 NTFS junction 等
+非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的清理遍历使用。
+共享函数抛 OSError，由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
 父目录在校验与打开之间被替换为指向工作区外的符号链接时读取会逃逸出工作区，该攻击
@@ -157,31 +157,14 @@ _FILE_ATTRIBUTE_REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
 
 
 def has_reparse_attribute(st: os.stat_result) -> bool:
-    """判断 lstat 结果是否携带 NTFS reparse point 属性位，非 Windows 恒为 False。
+    """判断 no-follow stat 结果是否携带 NTFS reparse point 属性位，非 Windows 恒为 False。
 
-    调用方已持有 lstat 结果时经本函数判定，避免 is_reparse_point 再次 lstat；
-    st_file_attributes 仅 Windows 的 stat 结果存在，平台判定先行。
+    调用方已持有 stat 结果时经本函数判定，不再单独 lstat；st_file_attributes 仅
+    Windows 的 stat 结果存在，平台判定先行。
     """
     if sys.platform != "win32":
         return False
     return bool(st.st_file_attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
-
-
-def is_reparse_point(path: Path) -> bool:
-    """判断路径是否为 NTFS junction 等非符号链接型 reparse point。
-
-    junction 属 reparse point，is_symlink 对其返回 False，scandir 与 os.walk 的
-    follow_symlinks=False 均不拦截，会被下降进入目标执行 OS 级 listdir，本函数供
-    目录遍历下降前剔除。仅 Windows 存在 junction，其他平台直接返回 False；平台
-    判定先于 lstat，POSIX 热路径逐条调用不产生系统调用。供 io_path 的浏览扫描使用。
-    """
-    if sys.platform != "win32":
-        return False
-    try:
-        st = path.lstat()
-    except OSError:
-        return False
-    return has_reparse_attribute(st)
 
 
 def atomic_replace_from_fd_sync(

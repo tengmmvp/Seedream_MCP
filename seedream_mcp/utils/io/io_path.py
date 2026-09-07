@@ -30,7 +30,7 @@ from mcp.types import ListRootsResult
 from ..core.errors import SeedreamConfigError
 from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
-from .io_file import has_reparse_attribute, is_reparse_point
+from .io_file import has_reparse_attribute
 from .io_scan import cached_find_images_in_directory
 
 logger = get_logger()
@@ -43,6 +43,56 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
 # roots/list 请求的显式短超时：不设超时将依赖会话层读超时，慢客户端或半开连接会把
 # 工具调用拖到分钟级；超时按读取失败处理，工作位置经声明链回退。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
+
+# 目录扫描的总条目预算：单次 find_images_in_directory 调用检视的不同条目（含非
+# 图片，重扫趟只计新增）累计超过该值即停止遍历，防止超大目录无界膨胀扫描耗时。
+_SCAN_ENTRY_BUDGET = 20000
+
+# Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件，
+# normalize_path 的拒绝与 io_storage 的文件名净化经 is_windows_reserved_name 共用。
+WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+)
+
+
+def is_windows_reserved_name(name: str) -> bool:
+    """判断文件名是否命中 Windows 保留设备名。
+
+    Windows 解析前剥离前导点与首尾空格并取首个点前词干，CON.txt、con. 与 .CON
+    同样命中；normalize_path 的拒绝与 io_storage 的文件名净化共用本判定。
+
+    Args:
+        name: 待判定的文件名。
+
+    Returns:
+        词干命中保留设备名清单返回 True。
+    """
+    normalized_stem = name.lstrip(". ").split(".", 1)[0].strip(". ")
+    return normalized_stem.upper() in WINDOWS_RESERVED_NAMES
+
 
 # 回退主目录日志只记录一次；无 Roots 时本解析随每次文件访问触发，逐次记录会淹没日志。
 _home_fallback_logged = False
@@ -243,11 +293,14 @@ def resolve_save_root() -> Path:
         resolve 后的存储区目录。
 
     Raises:
-        SeedreamConfigError: 显式存储声明无法解析（路径非法或超长），或基准声明链
-            不可解析，均属部署配置缺陷归配置错误档案。
+        SeedreamConfigError: 显式存储声明为 UNC 形态或无法解析（路径非法或超长），
+            或基准声明链不可解析，均属部署配置缺陷归配置错误档案。
     """
     configured = _configured_env_value(_SAVE_BASE_DIR_ENV)
     if configured:
+        # UNC 的 resolve 会触发 SMB 认证，入口在 resolve 前对原始声明值拒绝。
+        if is_unc_path(configured):
+            raise SeedreamConfigError(f"存储区配置不支持 UNC 路径: {configured}")
         try:
             return resolve_cached_save_base_dir(configured)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -541,8 +594,8 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         base_dir: 基础目录，用于解析相对路径。
 
     Raises:
-        ValueError: 路径为 UNC 形式、Windows 驱动器相对形式、Windows 路径分量含冒号
-            或路径无效时抛出。
+        ValueError: 路径为 UNC 形式、Windows 驱动器相对形式、Windows 路径分量含冒号、
+            最终分量为 Windows 保留设备名或路径无效时抛出。
     """
     try:
         # 空字节在任何文件系统都不是合法路径分量。Python 3.13 起 Windows 的
@@ -580,6 +633,10 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             polished_name = final_name.rstrip(". ") if final_name else final_name
             if polished_name and polished_name != final_name:
                 path_obj = path_obj.with_name(polished_name)
+            # Windows 保留设备名作最终分量会被解释为设备而非文件，判定经
+            # is_windows_reserved_name 与 sanitize_filename 单一来源。
+            if is_windows_reserved_name(polished_name):
+                raise ValueError(f"拒绝 Windows 保留设备名以避免被解释为设备而非文件: {path}")
 
         if path_obj.is_absolute():
             return path_obj.resolve()
@@ -626,12 +683,16 @@ def find_images_in_directory(
     extensions: list[str] | None = None,
     limit: int | None = None,
     unreadable_dirs: list[Path] | None = None,
+    truncated_dirs: list[Path] | None = None,
 ) -> list[Path]:
     """在目录中查找图片文件。
 
     安全前置条件：本函数不做工作区越界校验，调用方必须先确认 directory 位于允许
     的工作区根之内。UNC 形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回
     空列表并记录告警。
+    单次调用检视的条目数（含非图片）受 _SCAN_ENTRY_BUDGET 预算封顶，重扫趟只计
+    新增条目使倍增摊销不翻倍计数，超限丢弃当批、终止遍历并返回已收集结果，截断
+    的目录追加至 truncated_dirs 供调用方感知结果不完整。
     单个目录的条目列表按需物化：limit 场景只物化排序前缀，非图片条目占位致结果
     不足且目录未扫尽时倍增前缀重扫，无 limit 时一次物化全量有序列表；limit 亦使
     跨目录递归提前终止，重复扫描的成本由 io_scan 的 mtime 加 TTL 缓存缓解。
@@ -644,6 +705,8 @@ def find_images_in_directory(
         limit: 返回数量上限，<=0 时返回空列表；扫描按 normcase 稳定顺序，凑够即提前停止。
         unreadable_dirs: 可选收集列表，不可读目录追加至此供调用方区分「目录不可读」
             与「目录内无图片」；未提供时仅记日志跳过。
+        truncated_dirs: 可选收集列表，扫描因条目预算截断时追加截断目录，供调用方
+            区分「扫完全量」与「截断的部分结果」。
 
     Returns:
         找到的图片文件路径列表。目录不存在或预检失败时返回空列表。
@@ -678,8 +741,11 @@ def find_images_in_directory(
     # 无上限时记为 -1 表示收集全部。
     target_count = limit if limit is not None else -1
 
+    scanned_entries = 0
+
     def scan_directory(path: Path, current_depth: int = 0) -> bool:
-        """按 normcase 稳定顺序深度优先扫描；凑够 target_count 即返回 True 提前终止。"""
+        """按 normcase 稳定顺序深度优先扫描；凑够 target_count 或条目超预算即返回 True 终止。"""
+        nonlocal scanned_entries
         if current_depth > max_depth:
             return False
 
@@ -701,6 +767,19 @@ def find_images_in_directory(
                 if unreadable_dirs is not None:
                     unreadable_dirs.append(path)
                 return False
+
+            # 条目预算在物化后按本趟新增条目累计：重扫趟只计超出已消费前缀的部分，
+            # 倍增摊销不翻倍计数；超限丢弃本批并终止整个遍历。
+            scanned_entries += max(len(entries) - consumed, 0)
+            if scanned_entries > _SCAN_ENTRY_BUDGET:
+                logger.warning(
+                    "目录扫描条目数超过预算 {}，停止遍历并返回已收集结果: {}",
+                    _SCAN_ENTRY_BUDGET,
+                    path,
+                )
+                if truncated_dirs is not None:
+                    truncated_dirs.append(path)
+                return True
 
             for entry in entries[consumed:]:
                 entry_path = Path(entry.path)
@@ -724,7 +803,11 @@ def find_images_in_directory(
                 elif (
                     entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth
                 ):
-                    if is_reparse_point(entry_path):
+                    # junction 等 reparse 非 symlink，is_dir 不拒绝，与文件分支同口径
+                    # 复用遍历条目的 no-follow stat 判定；POSIX 上短路跳过 stat 求值。
+                    if sys.platform == "win32" and has_reparse_attribute(
+                        entry.stat(follow_symlinks=False)
+                    ):
                         logger.warning("跳过 reparse point 目录: {}", entry_path)
                         continue
                     if scan_directory(entry_path, current_depth + 1):

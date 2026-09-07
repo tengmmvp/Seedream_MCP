@@ -1,15 +1,21 @@
-"""按级别记录格式化消息的 loguru logger 测试替身。
+"""按级别记录格式化消息的 loguru logger 测试替身与真实日志的捕获器。
 
-供 test_client_refactor、test_logging_setup、test_workspace_roots_scope、
-test_validation_prompt、test_tighten_schema_runtime_probe 与
-test_prepare_cache_single_flight 复用，替代各文件自持的近实现替身。
+RecordingLogger 供 test_client_refactor、test_logging_setup、
+test_workspace_roots_scope、test_validation_prompt、test_tighten_schema_runtime_probe
+与 test_prepare_cache_single_flight 复用，替代各文件自持的近实现替身。
 opt(lazy=True) 的 callable 实参在记录时求值，若不求值，lambda 对象本身进入
 格式化字符串，会掩盖 _summarize_prompt 等求值路径未运行的回归。
+capture_loguru_messages 捕获进程级真实 loguru logger 的指定级别消息，供
+config_builder、find_images_directory 与 io_path_polish 等断言服务端告警。
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
+
+from seedream_mcp.utils.core.logs import get_logger
 
 
 class RecordingLogger:
@@ -63,3 +69,13 @@ class RecordingLogger:
 
     def debug(self, message: str, *args: Any) -> None:
         del message, args
+
+
+@contextmanager
+def capture_loguru_messages(records: list[str], level: str = "WARNING") -> Iterator[None]:
+    """把进程级真实 loguru logger 的指定级别格式化消息捕获进 records。"""
+    handler_id = get_logger().add(lambda message: records.append(str(message)), level=level)
+    try:
+        yield
+    finally:
+        get_logger().remove(handler_id)

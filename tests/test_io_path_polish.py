@@ -7,9 +7,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from loguru import logger
 
 import seedream_mcp.utils.io.io_path as io_path_module
+from _log_fakes import capture_loguru_messages
 
 
 def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
@@ -237,12 +237,9 @@ def test_find_images_rejects_unc_directory_before_resolve(
     monkeypatch.setattr(Path, "resolve", _explode_resolve)
 
     warnings: list[str] = []
-    handler_id = logger.add(lambda message: warnings.append(str(message)), level="WARNING")
-    try:
+    with capture_loguru_messages(warnings):
         assert io_path_module.find_images_in_directory("//server/share", recursive=False) == []
         assert io_path_module.find_images_in_directory("\\\\server\\share", recursive=True) == []
-    finally:
-        logger.remove(handler_id)
 
     assert any("拒绝 UNC 形式的目录扫描入参" in message for message in warnings)
 

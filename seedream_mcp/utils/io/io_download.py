@@ -902,12 +902,11 @@ class DownloadManager:
                         f"无效的URL: {sanitize_url(url)} [{type(e).__name__}]"
                     ) from e
                 last_error = DownloadError(f"网络错误: {sanitize_url(url)} [{type(e).__name__}]")
-                logger.warning(
+                logger.opt(exception=True).warning(
                     "网络错误 (尝试 {}): {} [{}]",
                     attempt + 1,
                     sanitize_url(url),
                     type(e).__name__,
-                    exc_info=True,
                 )
 
             except PermissionError as e:
@@ -919,16 +918,15 @@ class DownloadManager:
                 if e.errno in {errno.EROFS, errno.ENOSPC, errno.EDQUOT}:
                     raise DownloadError(f"文件系统永久错误，不可重试: {e}") from e
                 last_error = DownloadError(f"文件系统错误: {e}")
-                logger.warning("文件系统错误 (尝试 {}): {}", attempt + 1, e, exc_info=True)
+                logger.opt(exception=True).warning("文件系统错误 (尝试 {}): {}", attempt + 1, e)
 
             except Exception as e:
                 # 编程 bug 等非可重试意外错误直接抛出不浪费退避等待；调用方 auto_save
                 # 仍有兜底 except Exception 负责降级返回原始 URL。
-                logger.warning(
+                logger.opt(exception=True).warning(
                     "下载出现非预期错误，不再重试 (尝试 {}): {}",
                     attempt + 1,
                     e,
-                    exc_info=True,
                 )
                 raise
 

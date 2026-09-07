@@ -253,6 +253,47 @@ def test_normalize_path_posix_treats_ads_name_as_relative(tmp_path: Path) -> Non
     assert result == (tmp_path / "photo.png:hidden").resolve()
 
 
+# ==================== Windows 保留设备名最终分量拒绝 ====================
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="保留设备名拒绝仅 win32 生效，POSIX 上 con/nul 是合法文件名"
+)
+@pytest.mark.parametrize(
+    "final_component", ["CON", "NUL", "com1.png", "AUX.jpg", "LPT9.tar.gz", "con.", "nul. ."]
+)
+def test_normalize_path_rejects_windows_reserved_final_component(
+    tmp_path: Path, final_component: str
+) -> None:
+    """保留设备名作最终分量被解释为设备而非文件，与 UNC 同口径在 resolve 前拒绝。
+
+    判定按剥离前导点与首尾空格后的首段词干，CON.txt 与 con. 同样命中；相对输入与
+    绝对输入同口径。
+    """
+    with pytest.raises(ValueError, match="保留设备名"):
+        normalize_path(str(tmp_path / final_component))
+    with pytest.raises(ValueError, match="保留设备名"):
+        normalize_path(final_component, str(tmp_path))
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="保留设备名拒绝仅 win32 生效，POSIX 上 con/nul 是合法文件名"
+)
+def test_normalize_path_accepts_non_reserved_similar_names(tmp_path: Path) -> None:
+    """以保留名为前缀或子串的普通文件名不受拒绝分支影响。"""
+    image = tmp_path / "console.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    assert normalize_path(str(image)) == image.resolve()
+    assert normalize_path("contact.png", str(tmp_path)) == (tmp_path / "contact.png").resolve()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 上 con/nul 是合法文件名")
+def test_normalize_path_posix_treats_reserved_name_as_legal(tmp_path: Path) -> None:
+    """POSIX 上 con.png 是普通合法文件名，不经保留设备名拒绝分支。"""
+    assert normalize_path("con.png", str(tmp_path)) == (tmp_path / "con.png").resolve()
+
+
 # ==================== _file_uri_to_path ====================
 
 
@@ -293,6 +334,29 @@ def test_file_uri_to_path_accepts_local_file(tmp_path: Path) -> None:
 def test_file_uri_to_path_rejects_malformed_uri() -> None:
     """畸形 file URI 返回 None 而非抛异常。"""
     assert _file_uri_to_path("file://") is None
+
+
+# ==================== 存储区声明的 UNC 拒绝 ====================
+
+
+@pytest.mark.parametrize("unc_dir", ["//nas/pics", "\\\\nas\\pics"])
+def test_resolve_save_root_rejects_unc_declaration_before_resolve(
+    unc_dir: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式存储声明的 UNC 形态在 resolve 前被拒，抛配置错误且不触发 SMB 连接。
+
+    FileManager 的入口守卫在 resolve 之后才可能触达 base_dir=None 的求值结果，
+    存储区求值入口补齐 resolve 前拦截，保护全部消费方。
+    """
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+    from seedream_mcp.utils.io import io_path as io_path_module
+
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", unc_dir)
+    _patch_resolve_exploding_only_on_unc(monkeypatch)
+
+    with pytest.raises(SeedreamConfigError, match="UNC"):
+        io_path_module.resolve_save_root()
 
 
 def test_resolve_local_image_candidate_skips_unc_without_resolve(
@@ -357,13 +421,15 @@ def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
     输入级检查覆盖 UNC 直接输入；UNC 路径的 resolve 会触发 SMB 认证。断言 UNC
     输入未进入 resolve，合法路径的 resolve 不误报。
     """
-    from seedream_mcp.utils.images.image_input import _resolves_outside_workspace
+    from seedream_mcp.utils.images.image_input import _resolves_outside_read_scope
     from seedream_mcp.utils.io.io_path import get_read_context
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
     _, save_root, read_scope = get_read_context()
 
-    assert _resolves_outside_workspace("\\\\attacker\\share\\x.png", save_root, read_scope) is False
+    assert (
+        _resolves_outside_read_scope("\\\\attacker\\share\\x.png", save_root, read_scope) is False
+    )
 
 
 def test_validate_image_input_rejects_unc_before_resolve(

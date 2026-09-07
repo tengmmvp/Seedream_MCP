@@ -383,7 +383,7 @@ class AutoSaveManager:
             )
         except Exception as e:
             await self._apply_cleanup_failure_backoff(cleanup_key)
-            logger.warning("自动清理失败: {}", e, exc_info=True)
+            logger.opt(exception=True).warning("自动清理失败: {}", e)
             return
         errors = outcome.get("errors") if isinstance(outcome, dict) else None
         if errors:
@@ -566,7 +566,7 @@ class AutoSaveManager:
             # data URI 解析含对大 base64 串的 partition 全量拷贝，与解码、路径生成、写入一样
             # 属于同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞。
             def _prepare_and_save() -> tuple[dict[str, Any], str | None]:
-                mime, payload = parse_data_uri(b64_data)
+                mime, payload, _ = parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
                 save_path = self.file_manager.create_save_path_from_extension(
                     prompt=prompt or "",

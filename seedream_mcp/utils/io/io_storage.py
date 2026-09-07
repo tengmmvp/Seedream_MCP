@@ -27,7 +27,7 @@ from .io_file import (
     atomic_replace_from_fd_sync,
     has_reparse_attribute,
 )
-from .io_path import is_within_resolved, resolve_save_root
+from .io_path import is_unc_path, is_windows_reserved_name, is_within_resolved, resolve_save_root
 from .io_url import get_file_extension_from_url
 
 logger = get_logger()
@@ -47,34 +47,6 @@ _MAX_UNIQUE_BASE_LENGTH = 120
 # 遗留临时文件清扫的 mtime 宽限秒数：仅删除早于该时限的 .part 条目，在途下载与
 # 写入的临时文件恒新于宽限值不被并发清理击杀，合法下载总预算为小时级，低于宽限。
 _PART_SWEEP_GRACE_SECONDS = 24 * 3600
-
-# Windows 保留设备名，命中时在词干后追加下划线避免被解释为设备而非文件。
-_WINDOWS_RESERVED_NAMES = frozenset(
-    {
-        "CON",
-        "PRN",
-        "AUX",
-        "NUL",
-        "COM1",
-        "COM2",
-        "COM3",
-        "COM4",
-        "COM5",
-        "COM6",
-        "COM7",
-        "COM8",
-        "COM9",
-        "LPT1",
-        "LPT2",
-        "LPT3",
-        "LPT4",
-        "LPT5",
-        "LPT6",
-        "LPT7",
-        "LPT8",
-        "LPT9",
-    }
-)
 
 
 class FileManagerError(SeedreamMCPError):
@@ -98,17 +70,19 @@ class FileManager:
                 存储区，与目录体系的单一求值权威一致。
 
         Raises:
-            FileManagerError: 基础目录解析失败或指向已存在文件。
+            FileManagerError: 基础目录为 UNC 形式、解析失败或指向已存在文件。
             SeedreamConfigError: 默认存储区求值失败。
         """
         raw_base = resolve_save_root() if base_dir is None else Path(base_dir)
+        # UNC 的 resolve 会触发 SMB 认证，直连构造入口与调用方同口径在 resolve 前拒绝。
+        if is_unc_path(str(raw_base)):
+            raise FileManagerError(f"拒绝 UNC 路径以避免触发 SMB 连接: {raw_base}")
         try:
             resolved = raw_base.resolve()
         except (OSError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
         # 仅拒绝指向已存在文件的路径；save_path 为调用级存储声明，位置不受限，
-        # UNC、空字节等路径形态由调用方 tools/core/_helpers 在 resolve 前拒绝，
-        # 本类不做边界断言。
+        # 空字节等其余路径形态由调用方 tools/core/_helpers 在 resolve 前拒绝。
         if resolved.exists() and not resolved.is_dir():
             raise FileManagerError(f"保存路径不是目录: {resolved}")
         base_dir = resolved
@@ -185,10 +159,9 @@ class FileManager:
                 filename = name[: _MAX_FILENAME_LENGTH - len(ext)] + ext
 
         # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，命中时在
-        # 首个点前追加下划线。Windows 解析前会剥离前导点与首尾空格，按同规则归一化
-        # 词干再判断；先 lstrip 防止 .CON 一类前导点输入首段为空而漏检。
-        normalized_stem = filename.lstrip(". ").split(".", 1)[0].strip(". ")
-        if normalized_stem.upper() in _WINDOWS_RESERVED_NAMES:
+        # 首个点前追加下划线；词干归一判定经 is_windows_reserved_name 与
+        # normalize_path 单一来源。
+        if is_windows_reserved_name(filename):
             parts = filename.split(".", 1)
             parts[0] += "_"
             filename = ".".join(parts)

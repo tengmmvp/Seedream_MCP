@@ -58,9 +58,12 @@ class _DirectoryScanCacheEntry:
         images: 有序 (原始路径, resolved 路径) 对列表，resolve 在扫描完成时执行一次并
             随条目缓存，可能为目录末尾前的稳定前缀。
         complete: images 是否已扫到目录末尾；False 时为稳定前缀，随更大 scan_limit
-            重扫扩展，回看与同范围重复请求直接命中。
+            重扫扩展，回看与同范围重复请求直接命中。条目预算截断的扫描未到目录
+            末尾，恒不标记 complete，确保后续更大扫描可重新尝试。
         unreadable_dirs: 本次扫描中因权限或系统错误无法读取的目录列表，随条目缓存，
             缓存命中时同样透传给调用方。
+        truncated_dir: 本次扫描因条目预算截断时记录的截断目录，未截断为 None；
+            缓存命中时回放给调用方。
     """
 
     mtime_ns: int | None
@@ -69,6 +72,7 @@ class _DirectoryScanCacheEntry:
     images: list[tuple[Path, Path]]
     complete: bool
     unreadable_dirs: list[Path]
+    truncated_dir: Path | None
 
 
 def reset_directory_scan_cache() -> None:
@@ -128,6 +132,7 @@ def _store_scan_entry(
     images: list[tuple[Path, Path]],
     complete: bool,
     unreadable_dirs: list[Path],
+    truncated_dir: Path | None,
 ) -> None:
     """写入扫描缓存，覆写已存在键时刷新 LRU 位，条目数超限时驱逐最近最少使用条目。"""
     if len(images) > _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
@@ -158,6 +163,7 @@ def _store_scan_entry(
         images=images,
         complete=complete,
         unreadable_dirs=unreadable_dirs,
+        truncated_dir=truncated_dir,
     )
 
 
@@ -170,15 +176,17 @@ def cached_find_images_in_directory(
     scan_limit: int,
     scanner: Callable[..., list[Path]] | None = None,
     unreadable_dirs: list[Path] | None = None,
+    truncated_dirs: list[Path] | None = None,
 ) -> list[tuple[Path, Path]]:
     """扫描目录图片并经进程级缓存翻页共享有序结果，支持前缀增量扩展。
 
     缓存键不含 scan_limit，同目录同配置的不同翻页共享一份有序列表。命中且条目
     完整或前缀不少于 scan_limit 时返回浅拷贝；命中但前缀不足时按几何倍率扩展
     scan_limit 重扫并扩展缓存，扫描到目录末尾即标记 complete，后续任意
-    scan_limit 均不再扫描。scanner 可注入，默认 io_path.find_images_in_directory。
-    两个出口均返回独立副本，调用方原地修改不会篡改缓存；不可读目录信号随条目
-    缓存并经 unreadable_dirs 透传。
+    scan_limit 均不再扫描。条目预算截断的扫描未到目录末尾，不按 complete 缓存，
+    后续更大扫描可重新尝试。scanner 可注入，默认
+    io_path.find_images_in_directory。两个出口均返回独立副本，调用方原地修改
+    不会篡改缓存；不可读目录与截断信号随条目缓存并经对应收集列表透传。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -191,6 +199,8 @@ def cached_find_images_in_directory(
             使用默认实现。
         unreadable_dirs: 可选收集列表，扫描中无法读取的目录追加至此；缓存命中时
             回放条目内记录的不可读目录。
+        truncated_dirs: 可选收集列表，扫描因条目预算截断时追加截断目录；缓存
+            命中时回放条目内记录的截断目录。
 
     Returns:
         排序后的 (原始路径, resolved 路径) 元组列表；缓存命中时为已缓存的有序
@@ -225,6 +235,8 @@ def cached_find_images_in_directory(
         if cached.complete or len(cached.images) >= scan_limit:
             if unreadable_dirs is not None:
                 unreadable_dirs.extend(cached.unreadable_dirs)
+            if truncated_dirs is not None and cached.truncated_dir is not None:
+                truncated_dirs.append(cached.truncated_dir)
             return cached.images[:]
         # 扩展量不受单条目列表上限约束：该上限只决定 _store_scan_entry 是否写入
         # 缓存，若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为
@@ -238,6 +250,7 @@ def cached_find_images_in_directory(
         time.time() - base_mtime / 1_000_000_000 >= _FAT_TIMESTAMP_GRANULARITY_SECONDS
     )
     scan_unreadable: list[Path] = []
+    scan_truncated: list[Path] = []
     scanned_images = scan(
         directory=str(resolved_dir),
         recursive=recursive,
@@ -245,10 +258,12 @@ def cached_find_images_in_directory(
         extensions=format_filter,
         limit=scan_limit,
         unreadable_dirs=scan_unreadable,
+        truncated_dirs=scan_truncated,
     )
-    # complete 按扫描器原始返回量判定：resolve 失败被剔除不影响目录已枚举完毕的事实。
+    # complete 按扫描器原始返回量判定：resolve 失败被剔除不影响目录已枚举完毕的
+    # 事实；条目预算截断的扫描未到目录末尾，不得按 complete 缓存。
     images = _resolve_scan_pairs(scanned_images)
-    complete = len(scanned_images) < scan_limit
+    complete = len(scanned_images) < scan_limit and not scan_truncated
     # 递归扫描靠 TTL 失效故总是缓存，mtime 字段留空且不沉淀；非递归仅在 stat 成功
     # 时缓存。
     if recursive or base_mtime is not None:
@@ -259,8 +274,11 @@ def cached_find_images_in_directory(
             images=images,
             complete=complete,
             unreadable_dirs=list(scan_unreadable),
+            truncated_dir=scan_truncated[0] if scan_truncated else None,
         )
     if unreadable_dirs is not None:
         unreadable_dirs.extend(scan_unreadable)
+    if truncated_dirs is not None:
+        truncated_dirs.extend(scan_truncated)
     # 切片返回独立副本。
     return images[:]

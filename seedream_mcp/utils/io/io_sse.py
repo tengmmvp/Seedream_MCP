@@ -152,7 +152,15 @@ def parse_sse_segment(
         if not isinstance(parsed_payload, dict):
             raise ValueError("SSE 事件数据必须是对象")
         return cast(dict[str, Any], parsed_payload)
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, IndexError) as exc:
+    # 深嵌套负载在 json.loads 内抛 RecursionError，它是 RuntimeError 子类而非
+    # ValueError，须显式列入才能按解析失败丢弃。
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        ValueError,
+        IndexError,
+        RecursionError,
+    ) as exc:
         if log is not None:
             log.error("SSE事件解析失败: {}", str(exc))
             log.debug("SSE事件原始段长度: {} bytes", len(raw_segment))

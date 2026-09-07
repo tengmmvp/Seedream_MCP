@@ -17,6 +17,7 @@ import pytest
 
 import seedream_mcp.utils.io.io_scan as scan_module
 import seedream_mcp.utils.io.io_path as path_utils_module
+from _log_fakes import capture_loguru_messages
 from seedream_mcp.utils.io.io_scan import cached_find_images_in_directory
 from seedream_mcp.utils.io.io_path import find_images_in_directory
 
@@ -28,6 +29,7 @@ def _scan(
     max_depth: int,
     scan_limit: int,
     unreadable_dirs: list[Path] | None = None,
+    truncated_dirs: list[Path] | None = None,
     scanner: Callable[..., Any] | None = None,
 ) -> list[tuple[Path, Path]]:
     """cached_find_images_in_directory 的统一调用形态。
@@ -44,6 +46,8 @@ def _scan(
     }
     if unreadable_dirs is not None:
         kwargs["unreadable_dirs"] = unreadable_dirs
+    if truncated_dirs is not None:
+        kwargs["truncated_dirs"] = truncated_dirs
     if scanner is not None:
         kwargs["scanner"] = scanner
     return cached_find_images_in_directory(**kwargs)
@@ -566,24 +570,153 @@ def test_cached_find_images_ttl_rescan_overwrite_refreshes_lru_position(
     assert scanned_dirs == [str(hot), str(other_dirs[0]), str(hot), str(other_dirs[1])]
 
 
+def test_find_images_stops_at_scan_entry_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """单次调用遍历条目总数（含非图片）超预算即停止遍历并记录告警。
+
+    统计口径覆盖非图片条目：8 个图片条目对 5 的预算即触发，本批丢弃返回空列表。
+    """
+    for i in range(8):
+        (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 5)
+
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        result = find_images_in_directory(str(tmp_path), recursive=False)
+
+    assert result == []
+    assert any("目录扫描条目数超过预算" in message for message in warnings)
+
+
+def test_find_images_budget_counts_non_image_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非图片条目同样计入预算，仅图片条目不触发封顶。"""
+    for i in range(8):
+        (tmp_path / f"note_{i:02d}.txt").write_bytes(b"x")
+    monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 5)
+
+    assert find_images_in_directory(str(tmp_path), recursive=False) == []
+
+
+def test_find_images_prefix_rescan_budget_does_not_double_count(tmp_path: Path) -> None:
+    """前缀倍增重扫的条目预算只计每趟新增，9999 非图片 + 2 图片不被预算误杀。
+
+    旧口径按趟累计全目录条目：第一趟计 10001、重扫趟再计 10001，累计 20002 超过
+    20000 预算，整批被丢弃返回 0 张图；按新增条目摊销后 10001 条目录不超预算，
+    limit=21 经倍增前缀扫到目录末尾取回全部 2 张图片。
+    """
+    for i in range(9999):
+        (tmp_path / f"a_{i:04d}.txt").write_bytes(b"x")
+    (tmp_path / "z_0.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "z_1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = find_images_in_directory(str(tmp_path), recursive=False, limit=21)
+
+    assert [p.name for p in result] == ["z_0.png", "z_1.png"]
+
+
+def test_find_images_records_truncated_dir_on_budget_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """预算截断时截断目录追加至收集列表，供调用方区分「扫完全量」与「部分结果」。"""
+    for i in range(8):
+        (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 5)
+
+    truncated: list[Path] = []
+    result = find_images_in_directory(
+        str(tmp_path), recursive=False, unreadable_dirs=[], truncated_dirs=truncated
+    )
+
+    assert result == []
+    assert truncated == [tmp_path.resolve()]
+
+
+def test_cached_find_images_truncated_scan_not_cached_as_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """条目预算截断的扫描不按 complete 缓存，预算恢复后后续扫描可重新尝试。
+
+    截断结果被误标 complete 后，更大 scan_limit 的后续扫描会命中缓存短路返回
+    空列表，目录内真实图片在缓存有效期内不可见。
+    """
+    for i in range(8):
+        (tmp_path / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 5)
+    scan_module.reset_directory_scan_cache()
+
+    truncated: list[Path] = []
+    first = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10, truncated_dirs=truncated)
+    assert first == []
+    assert truncated == [tmp_path.resolve()]
+    entry = next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
+    assert entry.complete is False
+    assert entry.truncated_dir == tmp_path.resolve()
+
+    # 预算恢复后同目录扫描不命中 complete 短路，重扫取回全量
+    monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 100)
+    recovered = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10)
+    assert len(recovered) == 8
+
+
+def test_cached_find_images_replays_truncation_signal_on_cache_hit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """截断条目的缓存命中回放截断目录，调用方对部分前缀仍感知结果不完整。
+
+    子目录 a 先于截断点完成产出 1 张稳定前缀图，子目录 b 触发预算截断；缓存
+    前缀不少于更小 scan_limit 时直接命中，截断信号须随命中回放。
+    """
+    sub_a = tmp_path / "a"
+    sub_a.mkdir()
+    (sub_a / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    sub_b = tmp_path / "b"
+    sub_b.mkdir()
+    for i in range(20):
+        (sub_b / f"note_{i:02d}.txt").write_bytes(b"x")
+    monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 15)
+    scan_module.reset_directory_scan_cache()
+
+    first_truncated: list[Path] = []
+    first = _scan(
+        tmp_path, recursive=True, max_depth=3, scan_limit=10, truncated_dirs=first_truncated
+    )
+    assert [raw.name for raw, _resolved in first] == ["x.png"]
+    assert first_truncated == [sub_b.resolve()]
+
+    hit_truncated: list[Path] = []
+    hit = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=1, truncated_dirs=hit_truncated)
+    assert [raw.name for raw, _resolved in hit] == ["x.png"]
+    assert hit_truncated == [sub_b.resolve()]
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="目录分支的 reparse 剔除带 win32 短路，POSIX 上不经过替身判定",
+)
 def test_find_images_does_not_descend_into_reparse_point(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """NTFS junction 等 reparse point 目录不下降，与 io_storage 清理路径防护对齐。
 
     junction 的 is_symlink 返回 False，is_dir(follow_symlinks=False) 对其仍返回 True
-    而下降进入目标执行 OS 级 listdir，涉及 SMB 出站认证暴露，须经 is_reparse_point 剔除。
+    而下降进入目标执行 OS 级 listdir，涉及 SMB 出站认证暴露；目录分支复用遍历条目
+    的 no-follow stat 经 has_reparse_attribute 剔除，替身以唯一 mtime_ns 标记目标。
     """
     junction_dir = tmp_path / "junction_dir"
     junction_dir.mkdir()
     (junction_dir / "inside_junction.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (tmp_path / "real.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    marker_ns = 1_600_000_000_000_000_000
+    os.utime(junction_dir, ns=(marker_ns, marker_ns))
 
-    real_is_reparse = path_utils_module.is_reparse_point
+    real_has_reparse = path_utils_module.has_reparse_attribute
     monkeypatch.setattr(
         path_utils_module,
-        "is_reparse_point",
-        lambda p: real_is_reparse(p) or p.resolve() == junction_dir.resolve(),
+        "has_reparse_attribute",
+        lambda st: real_has_reparse(st) or st.st_mtime_ns == marker_ns,
     )
 
     result = find_images_in_directory(str(tmp_path), recursive=True)
@@ -603,9 +736,9 @@ def test_find_images_excludes_reparse_point_file(
     """reparse point 文件不列入结果，与目录分支及 io_storage 清理遍历防护口径对称。
 
     OneDrive 占位 .png 等 reparse 文件不是 symlink，is_file(follow_symlinks=False)
-    对其仍返回 True，仅靠后缀过滤会列为参考图而读取时跟随 reparse 目标。目录分支
-    的 is_reparse_point 判定无平台短路故跨平台可用替身驱动；文件分支为省 POSIX 上
-    的无效 stat 在 win32 上短路，替身仅在 Windows 生效，非 Windows 平台跳过本用例。
+    对其仍返回 True，仅靠后缀过滤会列为参考图而读取时跟随 reparse 目标。文件与
+    目录两分支均先判 win32 平台以省 POSIX 上的无效 stat，替身仅在 Windows 生效，
+    非 Windows 平台跳过本用例。
     """
     placeholder = tmp_path / "onedrive_placeholder.png"
     # 占位文件取独有长度：Windows 的 DirEntry.stat 不携带 st_ino，替身按 st_size

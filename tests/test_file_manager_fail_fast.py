@@ -31,6 +31,31 @@ def test_file_manager_rejects_unresolvable_base_dir() -> None:
         FileManager(base_dir=Path("\0invalid"))
 
 
+def test_file_manager_rejects_unc_base_dir_before_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNC 形式的 base_dir 在 resolve 前被拒绝，直连构造不触发 SMB 连接。
+
+    调用方 tools/core/_helpers 已有拒绝，本入口拦直连构造作为防御纵深；断言 UNC
+    未进入 resolve 而非仅断言抛错，防止回归为先解析后拒绝。
+    """
+    from seedream_mcp.utils.io.io_path import is_unc_path
+
+    original_resolve = Path.resolve
+
+    def _resolve_guard(self: Path, strict: bool = False) -> Path:
+        if is_unc_path(str(self)):
+            raise AssertionError("UNC 路径不得进入 resolve（会触发 SMB 认证）")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _resolve_guard)
+
+    with pytest.raises(FileManagerError, match="UNC"):
+        FileManager(base_dir=Path("//host/share"))
+    with pytest.raises(FileManagerError, match="UNC"):
+        FileManager(base_dir=Path(r"\\host\share"))
+
+
 def test_file_manager_accepts_valid_base_dir(tmp_path: Path) -> None:
     """合法 base_dir 接受并完成创建。"""
     base_dir = tmp_path / "images"

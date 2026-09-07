@@ -222,6 +222,16 @@ def test_parse_sse_segment_skips_non_data_lines() -> None:
     assert result["type"] == "image_generation.completed"
 
 
+def test_parse_sse_segment_deeply_nested_payload_dropped_without_raising() -> None:
+    """约 100KB 纯嵌套括号负载在 json.loads 内抛 RecursionError，按解析失败丢弃。
+
+    RecursionError 是 RuntimeError 子类而非 ValueError，未显式列入 except 元组时
+    会作为未分类异常逃出解析器，使流式请求整体失败且重试同样命中。
+    """
+    segment = b"data: " + b"[" * 50000 + b"]" * 50000
+    assert parse_sse_segment(segment, log=None) is None
+
+
 async def test_parse_sse_response_classifies_partial_failed_event() -> None:
     """partial_failed 事件归入 data 项并标记 status=partial。"""
     chunks = [
@@ -489,6 +499,27 @@ async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
     assert result["status"] == "partial"
     drop_logs = [call for call in log.debug_calls if "流末尾" in str(call)]
     assert drop_logs, "流末尾丢弃事件须记录 debug 日志"
+
+
+async def test_parse_sse_response_counts_deeply_nested_trailing_event() -> None:
+    """深嵌套括号的流末尾残留段按解析失败丢弃并计入截断计数，不作为异常逃出。"""
+    deep = b"data: " + b"[" * 50000 + b"]" * 50000
+    chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
+        deep,
+    ]
+    result = await parse_sse_response(
+        _FakeSSEResponse(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=256 * 1024,
+        event_truncate_threshold=256 * 1024,
+        total_bytes_limit=256 * 1024,
+        log=_FakeLog(),
+    )
+    assert len(result["data"]) == 1
+    assert result["truncated_events"] == 1
+    assert result["status"] == "partial"
 
 
 async def test_parse_sse_response_done_sentinel_tail_not_counted_truncated() -> None:
