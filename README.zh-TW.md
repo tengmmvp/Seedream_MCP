@@ -531,7 +531,7 @@ ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # API 基礎 URL，預�
 SEEDREAM_ALLOW_HTTP_BASE_URL=false                      # 豁免 http:// 的 ARK_BASE_URL（預設拒絕明文傳輸；僅自建可信內網端點設 true）
 
 # 模型設定
-SEEDREAM_MODEL_ID=doubao-seedream-5.0
+SEEDREAM_MODEL_ID=doubao-seedream-5.0                   # 模型別名 / 完整 Model ID / Endpoint ID（ep- 開頭）皆可
 
 # 預設值
 SEEDREAM_DEFAULT_SIZE=2K

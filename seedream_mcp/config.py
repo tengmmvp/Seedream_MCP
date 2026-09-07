@@ -64,7 +64,8 @@ class SeedreamConfig:
         base_url: API 端点 URL。
         allow_http_base_url: http:// 明文 base_url 的显式豁免开关；默认拒绝，仅自建
             可信内网端点开启。
-        model_id: 模型标识，构造校验时展开别名为完整 Model ID。
+        model_id: 模型标识，构造校验时展开别名为完整 Model ID；也可为 Endpoint ID
+            （ep- 开头）。
         default_size: 默认图像尺寸，构造校验时按模型能力标准化。
         default_watermark: 是否默认为生成结果添加水印。
         timeout: 通用超时秒数。
@@ -508,7 +509,7 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
         # end <= 1 覆盖未闭合与空内容两种畸形方括号形态。
         if end <= 1:
             return None
-        host, suffix = entry[: end + 1], entry[end + 1 :]
+        host, suffix = entry[: end + 1], entry[end + 1:]
     else:
         idx = entry.rfind(":")
         host, suffix = (entry, "") if idx == -1 else (entry[:idx], entry[idx:])

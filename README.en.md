@@ -531,7 +531,7 @@ ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # API base URL, defaults
 SEEDREAM_ALLOW_HTTP_BASE_URL=false                      # Exempt an http:// ARK_BASE_URL (plaintext rejected by default; set true only for trusted self-hosted intranet endpoints)
 
 # Model config
-SEEDREAM_MODEL_ID=doubao-seedream-5.0
+SEEDREAM_MODEL_ID=doubao-seedream-5.0                   # Accepts a model alias / full Model ID / Endpoint ID (ep-...)
 
 # Defaults
 SEEDREAM_DEFAULT_SIZE=2K
