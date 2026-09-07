@@ -29,6 +29,8 @@ from seedream_mcp.tools.runners import (
 )
 from seedream_mcp.utils.io import io_save
 
+from _generation_fixtures import _patch_client_success
+
 GENERATED_URL = "https://example.com/generated.png"
 
 
@@ -39,16 +41,6 @@ def _client_result() -> dict[str, Any]:
         "usage": {"generated_images": 1},
         "status": "completed",
     }
-
-
-def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    client_cls = SeedreamClient
-
-    async def fake_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
-        del self, kwargs
-        return _client_result()
-
-    monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image)
 
 
 def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:

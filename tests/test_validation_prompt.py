@@ -2,33 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 import seedream_mcp.utils.core.validators as validation_module
 from seedream_mcp.utils.core.validators import validate_prompt
 from seedream_mcp.tools.core.schemas import TextToImageInput
 
-
-class _WarningCaptureLogger:
-    """替身 logger，记录 warning 调用以断言超限建议确实触发。
-
-    loguru 不经标准库 logging 传播，caplog 无法捕获，故以替身直接收集 warning 文案。
-    """
-
-    def __init__(self) -> None:
-        self.warnings: list[str] = []
-
-    def warning(self, message: str, *args: Any, **kwargs: Any) -> None:
-        del kwargs
-        self.warnings.append(message.format(*args) if args else message)
+from _log_fakes import RecordingLogger
 
 
 @pytest.fixture
-def warning_logger(monkeypatch: pytest.MonkeyPatch) -> _WarningCaptureLogger:
+def warning_logger(monkeypatch: pytest.MonkeyPatch) -> RecordingLogger:
     """以记录型替身替换 validation.logger，返回替身供断言读取 warnings。"""
-    fake = _WarningCaptureLogger()
+    fake = RecordingLogger()
     monkeypatch.setattr(validation_module, "logger", fake)
     return fake
 
@@ -40,7 +26,7 @@ def test_validate_prompt_chinese_limit_ok() -> None:
 
 
 def test_validate_prompt_chinese_limit_warns_but_returns(
-    warning_logger: _WarningCaptureLogger,
+    warning_logger: RecordingLogger,
 ) -> None:
     """中文计数超阈值仅警告不阻断，文案携带实际计数。"""
     text = "你" * 301
@@ -57,7 +43,7 @@ def test_validate_prompt_english_limit_ok() -> None:
 
 
 def test_validate_prompt_english_limit_warns_but_returns(
-    warning_logger: _WarningCaptureLogger,
+    warning_logger: RecordingLogger,
 ) -> None:
     """英文词数超阈值仅警告不阻断，文案携带实际词数。"""
     text = ("word " * 601).strip()
@@ -73,7 +59,7 @@ def test_validate_prompt_mixed_limits_ok() -> None:
 
 
 def test_validate_prompt_mixed_limits_warns_but_returns(
-    warning_logger: _WarningCaptureLogger,
+    warning_logger: RecordingLogger,
 ) -> None:
     """中英文分别超限各触发一次警告。"""
     text_cn = "你" * 301
@@ -84,7 +70,7 @@ def test_validate_prompt_mixed_limits_warns_but_returns(
 
 
 def test_validate_prompt_within_limit_emits_no_warning(
-    warning_logger: _WarningCaptureLogger,
+    warning_logger: RecordingLogger,
 ) -> None:
     """未超限时不应触发任何 warning，验证 warning 不是无条件发出。"""
     validate_prompt("你" * 300)
@@ -111,7 +97,7 @@ def _reference_cjk_count(text: str) -> int:
 
 
 def test_validate_prompt_long_prompt_counts_match_reference(
-    warning_logger: _WarningCaptureLogger,
+    warning_logger: RecordingLogger,
 ) -> None:
     """100KB 级长提示词的中英文计数与独立基准一致，警告文案携带真实计数。
 
@@ -134,7 +120,7 @@ def test_validate_prompt_long_prompt_counts_match_reference(
 
 
 def test_validate_prompt_long_prompt_without_cjk_or_words_emits_no_warning(
-    warning_logger: _WarningCaptureLogger,
+    warning_logger: RecordingLogger,
 ) -> None:
     """超长但不含 CJK 与英文单词的提示词计数均为零，不触发警告。"""
     text = "！" * 100_000

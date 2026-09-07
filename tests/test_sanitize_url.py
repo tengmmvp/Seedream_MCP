@@ -1,4 +1,4 @@
-"""io_url.sanitize_url 的脱敏契约测试。
+"""io_url 的 URL 辅助契约测试：sanitize_url 脱敏与 get_file_extension_from_url 推断。
 
 锁定 http/https 的 scheme/host/path 保留与凭据、query 剥离，以及无 authority 形态
 收敛为 scheme:<redacted>，防止 data URI 被伪造成 data://、空串输出 :// 进入日志。
@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from seedream_mcp.utils.io.io_url import sanitize_url
+from seedream_mcp.utils.io.io_url import get_file_extension_from_url, sanitize_url
 
 
 def test_sanitize_url_preserves_scheme_host_path() -> None:
@@ -32,3 +32,11 @@ def test_sanitize_url_redacts_empty_and_authority_less_http() -> None:
 def test_sanitize_url_redacts_non_http_scheme_with_authority() -> None:
     """scheme 非 http/https 时即便带 host 也整体收敛，不重建 scheme:// 形态。"""
     assert sanitize_url("ftp://files.example.com/pub/x.png") == "ftp:<redacted>"
+
+
+def test_get_file_extension_from_url_direct_cases() -> None:
+    """路径后缀含点号归一小写；无后缀回落 .jpeg 默认值；query 不参与推断。"""
+    assert get_file_extension_from_url("https://example.com/a/b.png") == ".png"
+    assert get_file_extension_from_url("https://example.com/a/image") == ".jpeg"
+    assert get_file_extension_from_url("https://example.com/a/b.png?fmt=jpg&sig=x") == ".png"
+    assert get_file_extension_from_url("https://example.com/a/B.PNG") == ".png"

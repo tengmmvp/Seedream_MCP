@@ -1,7 +1,6 @@
 """MODEL_ALIASES 全别名归一化守护。
 
-参数化遍历全部别名，新增别名自动覆盖；补齐 test_config_accepts_current_models
-仅对 Pro 断言归一化的缺口。
+参数化遍历全部别名，新增别名自动覆盖。
 """
 
 import pytest

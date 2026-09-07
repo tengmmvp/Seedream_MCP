@@ -206,6 +206,8 @@ async def test_static_mount_denies_html_direct_access(
 
     大写 .HTML 变体同样拒绝：Windows 文件系统大小写不敏感会命中页面文件，
     小写匹配放行即绕过封禁；大小写不敏感文件系统之外该形态本就无文件可命中。
+    封禁逻辑耦合 _GuardedStaticFiles 覆盖的 Starlette 内部方法 file_response
+    与 SDK 私有属性 mcp._custom_starlette_routes，升级时本组用例为适配检查点。
     """
     prepare_static_dir(monkeypatch, tmp_path)
     write_workspace_config(tmp_path)

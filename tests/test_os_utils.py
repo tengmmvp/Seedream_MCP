@@ -15,6 +15,8 @@ from seedream_mcp.utils.io.io_file import (
     open_no_follow_read,
 )
 
+from _os_fakes import _install_fsync_counter
+
 
 def _can_create_symlink(tmp_path: Path) -> bool:
     """探测当前进程是否有权创建符号链接，Windows 需特权或开发者模式。"""
@@ -190,19 +192,6 @@ async def test_atomic_replace_from_fd_replace_failure_cleans_temp(tmp_path: Path
     # 目录占用保留，临时文件经失败路径清理无残留
     assert final.is_dir()
     assert list(tmp_path.iterdir()) == [final]
-
-
-def _install_fsync_counter(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """monkeypatch os.fsync 为计数透传实现，返回调用记录列表。"""
-    fsync_calls: list[int] = []
-    real_fsync = os.fsync
-
-    def _tracking_fsync(fd: int) -> None:
-        fsync_calls.append(fd)
-        real_fsync(fd)
-
-    monkeypatch.setattr(os, "fsync", _tracking_fsync)
-    return fsync_calls
 
 
 async def test_atomic_replace_from_fd_fsync_enabled_calls_os_fsync_once(

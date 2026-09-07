@@ -122,3 +122,4 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = "test_*.py"
+markers = ["slow: 真实端口与线程的端到端冒烟"]

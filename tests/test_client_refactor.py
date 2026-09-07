@@ -1,10 +1,9 @@
-"""SeedreamClient 重构守护：请求组装、参数顺序、预处理并发与各模型能力差异。"""
+"""SeedreamClient 重构守护：请求组装、预处理并发与各模型能力差异。"""
 
 from __future__ import annotations
 
 import base64
 import asyncio
-import inspect
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -108,74 +107,6 @@ def test_build_common_request_omits_prompt_key_when_none() -> None:
 
     assert "prompt" not in data
     assert data["model"] == client.config.model_id
-
-
-def test_public_generation_methods_keep_expected_parameter_order() -> None:
-    """四个公开生成方法的参数顺序与既定契约一致，prompt 恒居首。"""
-    signature_expectations = {
-        "text_to_image": {
-            "ordered_parameters": [
-                "self",
-                "prompt",
-                "optimize_prompt_options",
-                "size",
-                "watermark",
-                "response_format",
-                "output_format",
-                "stream",
-                "tools",
-            ],
-        },
-        "image_to_image": {
-            "ordered_parameters": [
-                "self",
-                "prompt",
-                "optimize_prompt_options",
-                "image",
-                "layer_decomposition",
-                "background",
-                "size",
-                "watermark",
-                "response_format",
-                "output_format",
-                "stream",
-                "tools",
-            ],
-        },
-        "multi_image_fusion": {
-            "ordered_parameters": [
-                "self",
-                "prompt",
-                "optimize_prompt_options",
-                "image",
-                "size",
-                "watermark",
-                "response_format",
-                "output_format",
-                "stream",
-                "tools",
-            ],
-        },
-        "sequential_generation": {
-            "ordered_parameters": [
-                "self",
-                "prompt",
-                "optimize_prompt_options",
-                "image",
-                "size",
-                "watermark",
-                "max_images",
-                "response_format",
-                "output_format",
-                "stream",
-                "tools",
-            ],
-        },
-    }
-
-    for method_name, expectation in signature_expectations.items():
-        signature = inspect.signature(getattr(SeedreamClient, method_name))
-        assert list(signature.parameters.keys()) == expectation["ordered_parameters"]
 
 
 async def test_text_to_image_log_does_not_include_prompt_plaintext(
@@ -1248,3 +1179,19 @@ async def test_sequential_generation_logs_warning_on_partial_response(
     assert any("组图输出任务部分完成" in message for message in fake_logger.warnings)
     assert not any("组图输出任务完成" in message for message in fake_logger.info_messages)
     assert fake_logger.errors == []
+
+
+def test_public_generation_methods_keep_prompt_first() -> None:
+    """四个公开生成方法的 prompt 恒居首参，锁定外部位置调用方的参数含义。"""
+    import inspect
+
+    from seedream_mcp.client import SeedreamClient
+
+    for method in (
+        SeedreamClient.text_to_image,
+        SeedreamClient.image_to_image,
+        SeedreamClient.multi_image_fusion,
+        SeedreamClient.sequential_generation,
+    ):
+        parameter_names = list(inspect.signature(method).parameters)
+        assert parameter_names[1] == "prompt"

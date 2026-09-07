@@ -469,6 +469,7 @@ async def _start_smoke_server_and_wait(
             await asyncio.sleep(0.05)
 
 
+@pytest.mark.slow
 async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
     monkeypatch: pytest.MonkeyPatch, reset_http_app_state: None
 ) -> None:

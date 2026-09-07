@@ -1,4 +1,4 @@
-"""模型 ID 配置守护：下线模型黑名单、当前模型接受与别名归一化。"""
+"""模型 ID 配置守护：下线模型黑名单与别名归一化。"""
 
 import pytest
 
@@ -39,18 +39,6 @@ def test_config_rejects_deprecated_seededit_3_0() -> None:
     """已下线的 seededit 3.0 模型同样拒绝。"""
     with pytest.raises(SeedreamConfigError, match="已下线"):
         SeedreamConfig(api_key="k", model_id="doubao-seededit-3.0-i2i-250515")
-
-
-def test_config_accepts_current_models() -> None:
-    """当前模型别名经别名表展开为完整 Model ID，展开契约与 MODEL_ALIASES 锁定。"""
-    for model in (
-        "doubao-seedream-5.0-pro",
-        "doubao-seedream-5.0",
-        "doubao-seedream-4.5",
-        "doubao-seedream-4.0",
-    ):
-        config = SeedreamConfig(api_key="k", model_id=model)
-        assert config.model_id == MODEL_ALIASES[model]
 
 
 def test_config_normalizes_seedream_50_pro_alias() -> None:

@@ -1,9 +1,10 @@
 """按级别记录格式化消息的 loguru logger 测试替身。
 
-供 test_client_refactor、test_logging_setup 与 test_workspace_roots_scope 复用，
-替代各文件自持的近实现替身。opt(lazy=True) 的 callable 实参在记录时求值，若不
-求值，lambda 对象本身进入格式化字符串，会掩盖 _summarize_prompt 等求值路径
-未运行的回归。
+供 test_client_refactor、test_logging_setup、test_workspace_roots_scope、
+test_validation_prompt、test_tighten_schema_runtime_probe 与
+test_prepare_cache_single_flight 复用，替代各文件自持的近实现替身。
+opt(lazy=True) 的 callable 实参在记录时求值，若不求值，lambda 对象本身进入
+格式化字符串，会掩盖 _summarize_prompt 等求值路径未运行的回归。
 """
 
 from __future__ import annotations

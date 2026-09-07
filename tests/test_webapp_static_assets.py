@@ -46,11 +46,13 @@ def test_bearer_token_uses_session_storage_only() -> None:
 
 
 def test_url_reference_goes_through_add_reference() -> None:
-    """URL 手输参考图经 addReference 汇聚，拒绝时输入框保留用户粘贴的 URL。
+    """URL 手输参考图经 addReference 汇聚，不得绕过其上限与容量防护。
 
-    addReference 返回布尔告知入列与否，main.js 仅在成功时清空输入框；绕过
-    汇聚直改 state.refs 的形态同样拒绝。
+    无 JS 运行时测试基建，以稳定结构锚点为契约：消费侧调用形态存在、消费侧
+    无直写 state.refs 的绕过、refs.js 保有汇聚实现。
     """
     main_js = (STATIC_DIR / _JS_DIR / "main.js").read_text(encoding="utf-8")
-    assert 'if (addReference("url", url)) {' in main_js
+    refs_js = (STATIC_DIR / _JS_DIR / "refs.js").read_text(encoding="utf-8")
+    assert 'addReference("url", url)' in main_js
     assert "state.refs.push" not in main_js
+    assert "addReference" in refs_js

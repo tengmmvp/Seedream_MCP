@@ -50,7 +50,7 @@ jobs:
         run: uv run mypy seedream_mcp
 
       - name: 🔤 Check spelling
-        run: npx --yes cspell@latest lint --no-progress "seedream_mcp/**" "tests/**" "*.md" "*.toml" ".env.example"
+        run: npx --yes cspell@9 lint --no-progress "seedream_mcp/**" "tests/**" "*.md" "*.toml" ".env.example"
 
   test:
     name: 🧪 Test (py${{ matrix.python-version }}, ${{ matrix.os }})

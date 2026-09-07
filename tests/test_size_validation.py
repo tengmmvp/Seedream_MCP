@@ -67,6 +67,30 @@ def test_validate_size_for_model_leading_zero_pixels_report_range_error() -> Non
         validate_size_for_model("00x00", "doubao-seedream-4-5-251128")
 
 
+def test_validate_size_rejects_extreme_aspect_ratio() -> None:
+    """宽高比超上限的尺寸在像素路径被拒，适用于任意模型。"""
+    with pytest.raises(SeedreamValidationError, match="宽高比"):
+        validate_size_for_model("200x10", "doubao-seedream-5-0-260128")
+
+
+def test_validate_size_lite_rejects_unsupported_preset() -> None:
+    """5.0 Lite 不支持的档位拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="5.0 模型下仅支持"):
+        validate_size_for_model("1K", "doubao-seedream-5-0-260128")
+
+
+def test_validate_size_45_rejects_unsupported_preset() -> None:
+    """4.5 不支持的档位拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="4.5 模型下仅支持"):
+        validate_size_for_model("3K", "doubao-seedream-4-5-251128")
+
+
+def test_validate_size_40_rejects_unsupported_preset() -> None:
+    """4.0 不支持的档位拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="4.0 模型下仅支持"):
+        validate_size_for_model("3K", "doubao-seedream-4-0-250828")
+
+
 def test_config_accepts_pixel_default_size() -> None:
     """像素形态 default_size 经配置校验接受。"""
     config = SeedreamConfig(

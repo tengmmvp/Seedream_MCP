@@ -23,6 +23,7 @@ from _download_fakes import (
     _patch_download_network,
     _png_success_response,
 )
+from _os_fakes import _install_fsync_counter
 
 # 1x1 透明 PNG 的 base64 编码
 _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -378,16 +379,7 @@ async def test_save_base64_image_fsync_true_calls_os_fsync(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """fsync=True 经 AutoSaveManager 透传到 save_bytes 落盘，os.fsync 被调用。"""
-    import os as os_module
-
-    fsync_calls: list[int] = []
-    real_fsync = os_module.fsync
-
-    def _tracking_fsync(fd: int) -> None:
-        fsync_calls.append(fd)
-        real_fsync(fd)
-
-    monkeypatch.setattr(os_module, "fsync", _tracking_fsync)
+    fsync_calls = _install_fsync_counter(monkeypatch)
 
     manager = AutoSaveManager(base_dir=tmp_path, fsync=True)
     try:
@@ -404,16 +396,7 @@ async def test_save_image_fsync_true_passes_through_download(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
 ) -> None:
     """fsync=True 经 AutoSaveManager 透传到下载落盘路径，下载完成后 os.fsync 被调用。"""
-    import os as os_module
-
-    fsync_calls: list[int] = []
-    real_fsync = os_module.fsync
-
-    def _tracking_fsync(fd: int) -> None:
-        fsync_calls.append(fd)
-        real_fsync(fd)
-
-    monkeypatch.setattr(os_module, "fsync", _tracking_fsync)
+    fsync_calls = _install_fsync_counter(monkeypatch)
 
     download_manager = DownloadManager()
     session = _FakeSession([_png_success_response()])
@@ -433,14 +416,7 @@ async def test_save_base64_image_fsync_default_off_skips_os_fsync(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """默认 fsync 关闭：落盘成功但不调用 os.fsync，不产生同步刷盘开销。"""
-    import os as os_module
-
-    fsync_calls: list[int] = []
-
-    def _tracking_fsync(fd: int) -> None:
-        fsync_calls.append(fd)
-
-    monkeypatch.setattr(os_module, "fsync", _tracking_fsync)
+    fsync_calls = _install_fsync_counter(monkeypatch)
 
     manager = AutoSaveManager(base_dir=tmp_path)
     try:

@@ -12,9 +12,7 @@ from typing import Any
 
 import pytest
 from mcp.types import ImageContent
-from PIL import Image
 
-from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core import common as common_module
 from seedream_mcp.tools.core.common import execute_generation_handler, preview_inclusion_scope
@@ -22,41 +20,8 @@ from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.text_to_image import TEXT_TO_IMAGE
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.core.logs import get_logger
-from seedream_mcp.utils.io import io_save
 
-
-def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """mock 客户端文生图成功，返回单图结果。"""
-
-    async def fake_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
-        del self, kwargs
-        return {
-            "success": True,
-            "data": [{"url": "https://example.com/generated.png"}],
-            "usage": {"generated_images": 1},
-            "status": "completed",
-        }
-
-    monkeypatch.setattr(SeedreamClient, "text_to_image", fake_text_to_image)
-
-
-def _patch_save_real_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """mock 单图保存成功且落盘真实 PNG，返回其路径供断言复用。"""
-    saved = tmp_path / "saved.png"
-    Image.new("RGB", (1200, 800), (200, 30, 30)).save(saved, format="PNG")
-    result_cls = io_save.AutoSaveResult
-
-    async def fake_save_image(self: Any, **kwargs: Any) -> Any:
-        del self
-        return result_cls(
-            success=True,
-            original_url=kwargs.get("url", ""),
-            local_path=str(saved),
-            markdown_ref="![image](saved.png)",
-        )
-
-    monkeypatch.setattr(io_save.AutoSaveManager, "save_image", fake_save_image)
-    return saved
+from _generation_fixtures import _patch_client_success, _patch_save_real_file
 
 
 def _patch_preview_spy(monkeypatch: pytest.MonkeyPatch) -> list[int]:

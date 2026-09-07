@@ -13,19 +13,7 @@ import pytest
 
 import seedream_mcp.server as server
 
-
-class _CaptureLogger:
-    """捕获 error 与 warning 调用的 loguru 替身，按 loguru 模板格式化参数。"""
-
-    def __init__(self) -> None:
-        self.errors: list[str] = []
-        self.warnings: list[str] = []
-
-    def error(self, message: str, *args: object) -> None:
-        self.errors.append(message.format(*args) if args else message)
-
-    def warning(self, message: str, *args: object) -> None:
-        self.warnings.append(message.format(*args) if args else message)
+from _log_fakes import RecordingLogger
 
 
 class _FakeTool:
@@ -49,7 +37,7 @@ class _FakeToolManager:
 
 
 def _install_fake_mcp(
-    monkeypatch: pytest.MonkeyPatch, capture: _CaptureLogger, tool_manager: Any
+    monkeypatch: pytest.MonkeyPatch, capture: RecordingLogger, tool_manager: Any
 ) -> None:
     """以替身接管 server 模块的 mcp 与 logger，隔离真实注册面。"""
     monkeypatch.setattr(server, "logger", capture)
@@ -60,7 +48,7 @@ def test_tighten_skips_silently_when_tool_manager_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """mcp 对象缺少 _tool_manager 属性时记录一条错误并整体跳过，不抛异常。"""
-    capture = _CaptureLogger()
+    capture = RecordingLogger()
     monkeypatch.setattr(server, "logger", capture)
     monkeypatch.setattr(server, "mcp", object())
 
@@ -77,7 +65,7 @@ def test_tighten_skips_when_tool_fn_metadata_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """工具缺少 fn_metadata 属性时记录一条错误并跳过，不改写任何工具。"""
-    capture = _CaptureLogger()
+    capture = RecordingLogger()
     tool = _FakeTool()
     _install_fake_mcp(monkeypatch, capture, _FakeToolManager(tool))
 
@@ -93,7 +81,7 @@ def test_tighten_skips_when_fn_metadata_arg_model_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """fn_metadata 存在但 arg_model 为 None 时同样判定私有面失效并跳过。"""
-    capture = _CaptureLogger()
+    capture = RecordingLogger()
     tool = _FakeTool(fn_metadata=SimpleNamespace(arg_model=None))
     _install_fake_mcp(monkeypatch, capture, _FakeToolManager(tool))
 

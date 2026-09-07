@@ -180,35 +180,6 @@ def test_resolve_save_root_cache_keys_isolate_explicit_and_default(
     assert _RESOLVED_SAVE_BASE_DIR_CACHE[f"explicit:{workspace}"] == workspace.resolve()
 
 
-def test_validate_image_path_none_base_dir_falls_back_and_enforces_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """base_dir 为 None 时回退存储区，越界判定面向读权限集合。"""
-    from PIL import Image
-
-    from seedream_mcp.utils.images.image_validation import validate_image_path
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    save_root = workspace / ".seedream" / "images"
-    save_root.mkdir(parents=True)
-    _use_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)), monkeypatch)
-
-    # 存储区内真实小图：返回有效，证明存储区基准解析正常放行合法路径。
-    img = save_root / "ok.png"
-    Image.new("RGB", (32, 32), color=(0, 0, 255)).save(img)
-    is_valid, err, normalized = validate_image_path(str(img))
-    assert is_valid is True
-    assert err == ""
-    assert normalized is not None
-
-    # 读权限外路径：工作区与存储区均不包含，判无效并指向配置指引。
-    escape = tmp_path / "escape.png"
-    is_valid_escape, err_escape, _ = validate_image_path(str(escape))
-    assert is_valid_escape is False
-    assert "路径不在读取范围内" in err_escape
-
-
 def test_resolve_base_dir_absolute_save_path_skips_unresolvable_save_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
