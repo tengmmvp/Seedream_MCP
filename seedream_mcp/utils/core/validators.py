@@ -35,6 +35,8 @@ VALID_BACKGROUND_MODES = frozenset({"transparent", "opaque"})
 # 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
+# 整数字面量的严格语法：可选正负号加十进制数字。
+_INT_TEXT_PATTERN = re.compile(r"[+-]?\d+")
 # 图像宽高比上下限，输入参考图与输出尺寸校验共用；image_validation 由此导入，维持单一来源。
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
@@ -97,6 +99,9 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
         validated_value = int(value)
     else:
         try:
+            # 字符串仅接受可选正负号加纯数字，int() 接受的下划线分隔等宽松写法在此拒绝。
+            if isinstance(value, str) and not _INT_TEXT_PATTERN.fullmatch(value.strip()):
+                raise ValueError
             validated_value = int(value)
         except (ValueError, TypeError, OverflowError):
             raise SeedreamValidationError(f"{field} 必须是整数", field=field, value=value)
@@ -142,6 +147,20 @@ def parse_bool(value: object) -> bool:
     raise SeedreamConfigError(f"无法解析为布尔值(期望 true/false/yes/no/on/off/1/0): {value!r}")
 
 
+def ensure_utf8_encodable(value: str, message: str, field: str) -> None:
+    """无法 UTF-8 编码的文本在参数层拒绝，纯 ASCII 输入免探测直接放行。
+
+    MCP JSON 可合法传入未配对 UTF-16 代理字符的转义序列，此类文本无法 UTF-8 编码，
+    若放行会在请求体序列化处才失败并呈现编码细节错误。
+    """
+    if value.isascii():
+        return
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise SeedreamValidationError(message, field=field, value=None)
+
+
 def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words: int = 600) -> str:
     """验证文本提示词的有效性和长度限制。
 
@@ -169,14 +188,7 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
     if not prompt:
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
-    # MCP JSON 可合法传入未配对 UTF-16 代理字符的转义序列，此类文本无法 UTF-8 编码，
-    # 若放行会在请求体序列化处才失败并呈现编码细节错误；在此提前以参数级提示拒绝。
-    try:
-        prompt.encode("utf-8")
-    except UnicodeEncodeError:
-        raise SeedreamValidationError(
-            "提示词包含无法编码的字符（如未配对的代理字符）", field="prompt", value=None
-        )
+    ensure_utf8_encodable(prompt, "提示词包含无法编码的字符（如未配对的代理字符）", "prompt")
 
     # 短文本粗筛：长度不超过中文阈值时两项计数必然在限内，跳过正则扫描避免物化
     # 大列表。计数扫描为全量 O(n)，超长提示词的扫描成本由调用侧

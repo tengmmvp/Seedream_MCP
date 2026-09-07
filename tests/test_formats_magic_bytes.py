@@ -19,6 +19,7 @@ from seedream_mcp.utils.core.formats import (
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
     infer_extension_from_bytes,
     is_known_image_bytes,
+    parse_data_uri,
 )
 
 # ==================== 公共容器不可变 ====================
@@ -61,6 +62,27 @@ def test_extension_by_mime_resolves_jpeg_conflict_to_canonical_extension() -> No
     assert MIME_BY_EXTENSION[".jpg"] == MIME_BY_EXTENSION[".jpeg"] == "image/jpeg"
     assert EXTENSION_BY_MIME["image/jpeg"] == ".jpeg"
     assert ".jpg" not in set(EXTENSION_BY_MIME.values())
+
+
+# ==================== parse_data_uri ====================
+
+
+def test_parse_data_uri_returns_base64_flag() -> None:
+    """解析返回 base64 编码标记，消费方不再自行切片 header 判定。"""
+    assert parse_data_uri("data:image/png;base64,aGk=") == ("image/png", "aGk=", True)
+    assert parse_data_uri("DATA:image/png;BASE64,aGk=") == ("image/png", "aGk=", True)
+    assert parse_data_uri("data:image/png,aGk=") == ("image/png", "aGk=", False)
+
+
+def test_parse_data_uri_non_data_input_returns_sentinel_triple() -> None:
+    """非 data URI、缺逗号与非字符串入参返回 (None, 原样入参, False)。"""
+    assert parse_data_uri("https://example.com/x.png") == (
+        None,
+        "https://example.com/x.png",
+        False,
+    )
+    assert parse_data_uri("data:image/png;base64") == (None, "data:image/png;base64", False)
+    assert parse_data_uri(b"not-a-string") == (None, b"not-a-string", False)
 
 
 # ==================== BMP ====================

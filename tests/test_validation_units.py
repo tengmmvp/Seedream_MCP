@@ -247,6 +247,26 @@ def test_coerce_string_int() -> None:
     assert _coerce_positive_int_in_range("3", "f", 1, 10) == 3
 
 
+@pytest.mark.parametrize("value", ["1_5", "+-5", "5x", "0x10", "1."])
+def test_coerce_lenient_int_syntax_strings_rejected(value: str) -> None:
+    """int() 宽松语法（下划线分隔、符号并置、非纯数字）的字符串拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_positive_int_in_range(value, "f", 1, 10)
+
+
+@pytest.mark.parametrize("value,expected", [(" 5 ", 5), ("+5", 5), ("-3", -3)])
+def test_coerce_string_with_sign_or_padding_accepted(value: str, expected: int) -> None:
+    """可选正负号与首尾空白的纯数字字符串仍接受。"""
+    assert _coerce_positive_int_in_range(value, "f", -10, 10) == expected
+
+
+@pytest.mark.parametrize("value", ["", "   ", "+", "-", "+-"])
+def test_coerce_empty_or_sign_only_strings_rejected(value: str) -> None:
+    """空串与仅符号串拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="必须是整数"):
+        _coerce_positive_int_in_range(value, "f", 1, 10)
+
+
 def test_coerce_invalid_string() -> None:
     """无法解析的字符串抛整数校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):

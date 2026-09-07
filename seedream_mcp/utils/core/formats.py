@@ -48,6 +48,11 @@ MIME_BY_EXTENSION: Mapping[str, str] = MappingProxyType(
     }
 )
 
+# 新增扩展名漏更 MIME 表时在导入期暴露，而非等到运行期 KeyError。
+assert (
+    SUPPORTED_IMAGE_EXTENSIONS <= MIME_BY_EXTENSION.keys()
+), "SUPPORTED_IMAGE_EXTENSIONS 存在未登记 MIME_BY_EXTENSION 的扩展名"
+
 # MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名，由 MIME_BY_EXTENSION
 # 反转派生，同样取只读视图。.jpg 与 .jpeg 同映射 image/jpeg，反转的多键冲突经
 # 显式覆盖消解、保留 .jpeg，派生结果不依赖正向表的键序。
@@ -141,24 +146,26 @@ def format_file_too_large(size_bytes: int, max_size: int, label: str = "文件")
     )
 
 
-def parse_data_uri(data: Any) -> tuple[str | None, Any]:
-    """解析 data URI，返回 (media_type, payload)。
+def parse_data_uri(data: Any) -> tuple[str | None, Any, bool]:
+    """解析 data URI，返回 (media_type, payload, is_base64)。
 
     scheme 前缀按 RFC 3986 大小写不敏感判定，与 image_ref 的分类口径一致，使
     ``DATA:image/png;base64,....`` 也进入校验流水线获得精确报错。media_type 取自
     header 的媒体类型部分，缺失时为 None；payload 为首个逗号后的负载，不做 base64
-    解码，由调用方按编码标记处理。非 data URI、缺逗号分隔符或入参非字符串时返回
-    (None, 原样入参)，非字符串入参原样落于 payload 位。
+    解码；is_base64 标记 header 是否携带 ``;base64`` 参数（大小写不敏感），由调用方
+    决定解码方式。非 data URI、缺逗号分隔符或入参非字符串时返回 (None, 原样入参,
+    False)，非字符串入参原样落于 payload 位。
     """
     if not isinstance(data, str):
-        return None, data
+        return None, data, False
     header, sep, payload = data.partition(",")
     if not sep or not header.lower().startswith("data:"):
-        return None, data
+        return None, data, False
     # header 形如 "data:image/png;base64"，去掉 scheme 前缀后取首个 ";" 前的媒体类型。
     body = header.split(":", 1)[1]
     if ";" in body:
         media_type = body.split(";", 1)[0] or None
     else:
         media_type = body or None
-    return media_type, payload
+    is_base64 = ";base64" in header.lower()
+    return media_type, payload, is_base64

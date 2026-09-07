@@ -33,6 +33,7 @@ from .utils.core.logs import get_logger
 from .utils.model.model_capabilities import get_max_reference_images
 from .utils.core.validators import (
     ValidatedCommonParams,
+    ensure_utf8_encodable,
     resolve_sequential_max_images,
     validate_background,
     validate_common_generation_params,
@@ -880,6 +881,9 @@ class SeedreamClient:
             raise SeedreamValidationError(
                 f"{field_name} 参数不能为空字符串", field=field_name, value=image
             )
+        ensure_utf8_encodable(
+            normalized, f"{field_name} 参数包含无法编码的字符（如未配对的代理字符）", field_name
+        )
         return normalized
 
     @staticmethod

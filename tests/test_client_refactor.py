@@ -522,6 +522,23 @@ def test_normalize_image_sequence_rejects_non_list_input() -> None:
         )
 
 
+def test_normalize_single_image_rejects_unencodable_surrogate() -> None:
+    """含未配对代理字符的 image 输入在参数层拒绝，不推迟到请求序列化报编码错误。"""
+    with pytest.raises(SeedreamValidationError, match="无法编码的字符"):
+        SeedreamClient._normalize_single_image("http://example.com/\ud800.png")
+
+
+def test_normalize_image_sequence_rejects_unencodable_surrogate() -> None:
+    """列表形态逐项经同一编码预检，代理字符同样在参数层拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="image\\[2\\]"):
+        SeedreamClient._normalize_image_sequence(
+            images=["http://example.com/a.png", "http://example.com/\ud800.png"],
+            min_count=1,
+            max_count=2,
+            field_name="image",
+        )
+
+
 def test_summarize_prompt_does_not_expose_prompt_plaintext() -> None:
     """prompt 摘要只含长度与哈希，明文不出现。"""
     prompt = "sensitive prompt"
