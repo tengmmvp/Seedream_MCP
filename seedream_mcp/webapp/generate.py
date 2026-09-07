@@ -2,12 +2,13 @@
 
 请求体由 schemas.py 的 *Input 模型校验，字段与 MCP 工具同源，响应为工具的
 structured_content 字典；生成链路不伪造会话 Roots，文件边界由 runner 内的
-环境变量回退链处理，与客户端未声明 roots capability 的 MCP 会话同构。结果
-条目与校验错误消息中的保存根绝对路径不出端点，local_path 改写为相对形态
-或删除，落在保存根内的条目附 web_path 供前端拼接图片端点，错误自由文本中
-的保存根路径替换为占位符。共享 client 经 context 替身借用，鉴权由外层
-Bearer 中间件承担；端点仅消费 structuredContent，预览装配关闭，请求体解析
-与响应体序列化下沉工作线程执行。
+环境变量回退链处理，与客户端未声明 roots capability 的 MCP 会话同构。服务器
+绝对路径不出端点：data 与 auto_save.results 条目的 local_path 改写为保存根
+相对形态并附 web_path 供前端拼接图片端点，越出保存根的删除该键；markdown_ref
+恒由绝对路径拼出且前端不消费，整体删除；错误自由文本中的读权限成员路径替换
+为占位符。共享 client 经 context 替身借用，鉴权由外层 Bearer 中间件承担；
+端点仅消费 structuredContent，预览装配关闭，请求体解析与响应体序列化下沉
+工作线程执行。
 """
 
 from __future__ import annotations
@@ -36,9 +37,14 @@ from ..tools.runners import (
     run_sequential_generation,
     run_text_to_image,
 )
-from ..utils.core.errors import SeedreamValidationError
+from ..tools.core._helpers import _resolve_base_dir
+from ..tools.core.results import _sanitize_value_tree
+from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from ..utils.core.logs import get_logger
-from ..utils.io.io_path import is_within_resolved
+from ..utils.io.io_path import (
+    mask_scope_paths,
+    save_root_relative,
+)
 from . import _shared
 from .context import build_web_request_context
 
@@ -61,65 +67,115 @@ class _GenerationRunner(Protocol[_RunnerInputT]):
     ) -> CallToolResult: ...
 
 
-def sanitize_save_root_text(value: object, save_root: Path) -> None:
-    """递归替换结构化结果字符串值中的保存根绝对路径为占位符，就地改写。
+def sanitize_save_root_text(
+    structured: dict[str, object],
+    save_root: Path,
+    read_scope: list[Path],
+    extra_masks: list[tuple[Path, str]] | None = None,
+) -> None:
+    """替换结构化结果字符串值中的读权限成员绝对路径为占位符，就地改写。
 
-    dict 与 list 逐层下钻，str 值经 _shared.mask_save_root_text 替换全部
-    保存根出现处，覆盖 auto_save.results[].error、data[].error 嵌套 message
-    与顶层 error.message 等错误自由文本通道；非字符串叶子值保持原样。须在
+    树遍历复用 results._sanitize_value_tree 的显式栈实现：深嵌套不触发递归上
+    限，循环引用以占位终止。str 值经 io_path.mask_scope_paths 替换存储根与
+    工作区根的全部出现处，extra_masks 追加请求内 save_path 声明的保存目录
+    遮蔽，覆盖 auto_save.results[].error、data[].error 嵌套 message 与顶层
+    error.message 等错误自由文本通道；非字符串叶子值保持原样。须在
     augment_generation_payload 之后调用，此时保存根内 local_path 已改写为相对
     形态，不受替换波及。
     """
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if isinstance(item, str):
-                value[key] = _shared.mask_save_root_text(item, save_root)
-            else:
-                sanitize_save_root_text(item, save_root)
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            if isinstance(item, str):
-                value[index] = _shared.mask_save_root_text(item, save_root)
-            else:
-                sanitize_save_root_text(item, save_root)
+    sanitized = _sanitize_value_tree(
+        structured,
+        lambda text: mask_scope_paths(text, save_root, read_scope, extra_masks),
+    )
+    structured.clear()
+    structured.update(sanitized)
+
+
+def _rewrite_item_path(item: dict[str, object], save_root: Path) -> None:
+    """改写单个结果条目的路径字段，服务器绝对路径不出端点。
+
+    落在保存根内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
+    越出保存根（save_path 指定的保存根外目的地）或路径解析失败的条目删除
+    local_path 键。markdown_ref 恒由绝对路径拼出而前端不消费，无条件删除。
+    条目缺 local_path、值空串或非字符串时仅删 markdown_ref，其余内容不改动。
+    """
+    item.pop("markdown_ref", None)
+    local_path = item.get("local_path")
+    if not isinstance(local_path, str) or not local_path:
+        return
+    try:
+        web_path = save_root_relative(Path(local_path).resolve(), save_root)
+    except (OSError, ValueError):
+        del item["local_path"]
+        return
+    if web_path is None:
+        del item["local_path"]
+        return
+    item["web_path"] = web_path
+    item["local_path"] = web_path
 
 
 def augment_generation_payload(structured: dict[str, object], save_root: Path) -> None:
-    """改写 data 条目的 local_path 并附 web_path，供前端拼接图片端点。
+    """改写 data 与 auto_save.results 条目的路径字段并附 web_path。
 
-    落在保存根内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
-    越出保存根或路径解析失败的条目删除 local_path 键，前端不展示服务器绝对
-    路径。条目缺 local_path、值空串或非字符串时跳过，其余内容不改动。
+    供前端拼接图片端点；save_path 越出保存根时其条目同样经 _rewrite_item_path
+    收敛，不向浏览器泄露保存根外目的地。
     """
     data = structured.get("data")
-    if not isinstance(data, list):
-        return
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        local_path = item.get("local_path")
-        if not isinstance(local_path, str) or not local_path:
-            continue
-        try:
-            resolved = Path(local_path).resolve()
-            if is_within_resolved(resolved, save_root):
-                web_path = resolved.relative_to(save_root).as_posix()
-                item["web_path"] = web_path
-                item["local_path"] = web_path
-            else:
-                del item["local_path"]
-        except (OSError, ValueError):
-            del item["local_path"]
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                _rewrite_item_path(item, save_root)
+    auto_save = structured.get("auto_save")
+    results = auto_save.get("results") if isinstance(auto_save, dict) else None
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict):
+                _rewrite_item_path(item, save_root)
 
 
-def _finalize_web_payload(structured: dict[str, object], save_root: Path) -> None:
-    """响应出端前的改写步骤：先增强 data 条目路径，再净化错误自由文本。
+def _destination_masks(params: BaseModel) -> list[tuple[Path, str]]:
+    """把请求内 save_path 声明的保存目录转为遮蔽对，错误文案不泄露目的地。
+
+    保存目录不在读权限成员内（save_path 可指向任意位置），文件系统错误文案
+    会嵌入其绝对路径，遮蔽仅覆盖成员时该通道漏出。目的地解析复用生成链路的
+    _resolve_base_dir 单点，遮蔽前缀与实际写入位置恒同规则；解析失败时无可靠
+    目的地可遮蔽，返回空列表。
+    """
+    save_path = getattr(params, "save_path", None)
+    if not isinstance(save_path, str) or not save_path:
+        return []
+    try:
+        return [(_resolve_base_dir(save_path), "<保存目录>")]
+    except (SeedreamValidationError, SeedreamConfigError):
+        return []
+
+
+def _masking_context(
+    params: BaseModel, save_root: Path
+) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """单点派生遮蔽上下文：读权限集合与 save_path 目的地遮蔽对一次求值。
+
+    调用方须在工作线程执行。成功与错误路径共用同一份结果，读权限不再逐阶段
+    重复派生，失败降级口径由 _shared.read_scope_or_default 单点定义。
+    """
+    return _shared.read_scope_or_default(save_root), _destination_masks(params)
+
+
+def _finalize_web_payload(
+    structured: dict[str, object],
+    save_root: Path,
+    read_scope: list[Path],
+    extra_masks: list[tuple[Path, str]] | None = None,
+) -> None:
+    """响应出端前的改写步骤：先增强条目路径，再净化错误自由文本。
 
     local_path 改写在前：保存根内条目此时替换为相对 web_path，不再携带可被
     净化匹配的绝对前缀；保存根外条目被删除，残余绝对路径只存在于错误文本中。
+    读权限由 _masking_context 预先派生后传入，本函数不再触达文件系统。
     """
     augment_generation_payload(structured, save_root)
-    sanitize_save_root_text(structured, save_root)
+    sanitize_save_root_text(structured, save_root, read_scope, extra_masks)
 
 
 async def _run_web_generation(
@@ -158,13 +214,18 @@ async def _run_web_generation(
     # 不伪造会话 Roots 传入 runner：伪造会解锁本地路径错误回显分支泄露服务器
     # 路径，UNC 工作区根也在 file URI 转换层丢失使回退边界失效。边界交由
     # runner 内的环境变量回退链处理，与客户端未声明 roots 的会话同构。
-    save_root = await _shared.resolve_web_save_root(config)
+    save_root = await _shared.resolve_web_save_root()
     if isinstance(save_root, JSONResponse):
         return save_root
+    # 遮蔽上下文单次派生：读权限与 save_path 遮蔽对在同一线程 hop 内求值，成功
+    # 响应与错误分支共用，不再逐阶段重复 resolve。
+    read_scope, extra_masks = await asyncio.to_thread(_masking_context, params, save_root)
     try:
         result = await runner(params, config, ctx, include_previews=False)
-    except SeedreamValidationError as exc:
-        message = _shared.mask_save_root_text(exc.message, save_root)
+    except (SeedreamValidationError, SeedreamConfigError) as exc:
+        message = mask_scope_paths(exc.message, save_root, read_scope, extra_masks)
+        if isinstance(exc, SeedreamConfigError):
+            return _shared.error_json("config_error", message, 503)
         return _shared.error_json("validation_error", message, 400)
     except Exception:
         logger.exception("Web 生成请求执行异常")
@@ -174,7 +235,7 @@ async def _run_web_generation(
     if not isinstance(structured, dict):
         structured = {}
 
-    await asyncio.to_thread(_finalize_web_payload, structured, save_root)
+    await asyncio.to_thread(_finalize_web_payload, structured, save_root, read_scope, extra_masks)
 
     status = 200 if not result.is_error else _shared.generation_status(structured)
     payload = await asyncio.to_thread(

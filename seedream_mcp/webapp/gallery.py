@@ -1,11 +1,10 @@
-"""Web 操作台图库浏览端点：以保存根为浏览基准委托 browse 工具。
+"""Web 操作台图库浏览端点：存储根边界校验后透传 browse 工具并剥除服务器侧回显。
 
-不伪造会话 Roots，浏览目录以绝对保存根路径传入并在端点侧校验不逃逸保存
-根，边界由 runner 内的环境变量回退链界定。条目 path 重写为保存根相对形态，
-前端可将 path 直接拼接为图片端点参数。workspace_roots 与
-resolved_directories 回显字段携带服务器绝对路径，Web 前端不消费，返回浏览
-器前剥除；错误消息中的保存根绝对路径替换为占位符，与 config-info 的防泄露
-口径一致。
+与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务存储根内文件，图库
+浏览同样以存储根为界，解析出存储根的请求目录在端点拒绝。条目 path 为存储根
+相对形态，前端可直接拼接为图片端点参数；workspace_roots 与 resolved_directories
+回显字段携带服务器绝对路径，Web 前端不消费，返回浏览器前剥除；错误消息中的
+读权限成员绝对路径替换为占位符，与 config-info 的防泄露口径一致。
 """
 
 from __future__ import annotations
@@ -18,13 +17,14 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from ..config import SeedreamConfig, get_active_config
-from ..tools.core._helpers import resolve_default_base_dir
-from ..tools.core.schemas import BrowseImagesInput, DIRECTORY_MAX_LENGTH
+from ..tools.core.schemas import BrowseImagesInput
 from ..tools.runners import run_browse_images
-from ..utils.core.errors import SeedreamValidationError
 from ..utils.core.logs import get_logger
-from ..utils.io.io_path import get_workspace_root, is_within_resolved, normalize_path
+from ..utils.io.io_path import (
+    is_within_resolved,
+    mask_scope_paths,
+    normalize_path,
+)
 from . import _shared
 
 logger = get_logger()
@@ -33,47 +33,39 @@ logger = get_logger()
 _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 
 
-def _rewrite_paths_relative_to_save_root(
-    structured: dict[str, object], workspace_base: Path, save_root: Path
-) -> None:
-    """条目 path 从边界根相对形态重写为保存根相对形态，与 web_path 口径一致。
-
-    browse 以首个包含根为相对化基准，边界经回退链取得时基准是工作区根；
-    回退形态下 resolved_directories 已被占位符脱敏，基准由调用方另行解析。
-    换基失败的条目退化为正斜杠归一。
-    """
-    images = structured.get("images")
-    if not isinstance(images, list):
-        return
-    for item in images:
-        if isinstance(item, dict) and isinstance(item.get("path"), str):
-            try:
-                item["path"] = (workspace_base / item["path"]).relative_to(save_root).as_posix()
-            except ValueError:
-                item["path"] = item["path"].replace("\\", "/")
-
-
 def _strip_roots_echo(structured: dict[str, object]) -> None:
     """剥除携带服务器绝对路径的边界回显字段，Web 前端不消费。"""
     for key in _ROOTS_ECHO_KEYS:
         structured.pop(key, None)
 
 
-def _sanitize_error_message(structured: dict[str, object], save_root: Path) -> None:
-    """错误消息中的保存根绝对路径替换为占位符，不向浏览器泄露服务器路径。"""
+def _sanitize_error_message(
+    structured: dict[str, object], save_root: Path, read_scope: list[Path]
+) -> None:
+    """错误消息中的读权限成员绝对路径替换为占位符，不向浏览器泄露服务器路径。
+
+    读权限由调用方经 _shared.read_scope_or_default 在工作线程预先派生，本函数
+    为纯文本改写，不触达文件系统。
+    """
     error = structured.get("error")
     if not isinstance(error, dict):
         return
     message = error.get("message")
     if isinstance(message, str):
-        error["message"] = _shared.mask_save_root_text(message, save_root)
+        error["message"] = mask_scope_paths(message, save_root, read_scope)
 
 
-def _resolve_browse_context(config: SeedreamConfig, directory: str) -> tuple[Path, Path, Path]:
-    """单次线程往返解析保存根、工作区根与用户目录。"""
-    save_root = resolve_default_base_dir(config)
-    workspace_base = get_workspace_root()
-    return save_root, workspace_base, normalize_path(directory, str(save_root))
+async def _directory_outside_save_root(directory: str, save_root: Path) -> bool:
+    """解析请求目录并判定是否落在存储根外；形态非法交 browse 核心报具体原因。"""
+
+    def _outside() -> bool:
+        try:
+            resolved = normalize_path(directory, str(save_root))
+        except ValueError:
+            return False
+        return not is_within_resolved(resolved, save_root)
+
+    return await asyncio.to_thread(_outside)
 
 
 async def web_browse(request: Request) -> Response:
@@ -91,35 +83,14 @@ async def web_browse(request: Request) -> Response:
             "invalid_request", f"参数校验失败: {exc.errors()[0].get('msg')}", 400
         )
 
-    # 不伪造会话 Roots：伪造使 UNC 保存根在 file URI 转换层丢失令图库全量
-    # 400。用户目录经 normalize_path 以保存根为基准解析，UNC、空字节与冒号
-    # 分量在 resolve 前的输入级即被拒，不触发网络与文件系统访问；三步解析
-    # 合并单次线程往返。
-    original_directory = params.directory or "."
-    try:
-        save_root, workspace_base, resolved_dir = await asyncio.to_thread(
-            _resolve_browse_context, get_active_config(), original_directory
-        )
-    except SeedreamValidationError as exc:
-        return _shared.save_root_unavailable(exc)
-    except ValueError as exc:
-        return _shared.error_json("invalid_request", f"目录无效: {exc}", 400)
-    # 显式配置的保存根越出工作区边界时 browse 无法授权浏览，报配置指引而非
-    # 误导性的目录越界错误。
-    if not is_within_resolved(save_root, workspace_base):
+    save_root = await _shared.resolve_web_save_root()
+    if isinstance(save_root, JSONResponse):
+        return save_root
+    directory = params.directory if params.directory is not None else "."
+    if await _directory_outside_save_root(directory, save_root):
         return _shared.error_json(
-            "save_root_outside_workspace",
-            "保存根不在工作区边界内，无法浏览；请将 SEEDREAM_WORKSPACE_ROOT"
-            " 配置为涵盖保存根的目录",
-            400,
+            "invalid_directory", "目录不在保存根内，Web 图库仅浏览保存根目录", 400
         )
-    if not is_within_resolved(resolved_dir, save_root):
-        return _shared.error_json("invalid_request", "目录须位于保存根之内", 400)
-    resolved_directory = str(resolved_dir)
-    # model_copy 跳过字段校验，长度上界在此手工复核。
-    if len(resolved_directory) > DIRECTORY_MAX_LENGTH:
-        return _shared.error_json("invalid_request", "目录路径长度超出上限", 400)
-    params = params.model_copy(update={"directory": resolved_directory})
     try:
         result = await run_browse_images(params, ctx=None)
     except Exception:
@@ -127,11 +98,11 @@ async def web_browse(request: Request) -> Response:
         return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)
     structured = result.structured_content if result.structured_content is not None else {}
     if isinstance(structured, dict):
-        # directory 回显还原为用户原始输入，绝对保存根路径不出端点。
-        structured["directory"] = original_directory
-        _rewrite_paths_relative_to_save_root(structured, workspace_base, save_root)
         _strip_roots_echo(structured)
         if result.is_error:
-            _sanitize_error_message(structured, save_root)
+            # 读权限求值含同步文件系统调用，下沉工作线程；失败降级口径由
+            # _shared.read_scope_or_default 单点定义。
+            read_scope = await asyncio.to_thread(_shared.read_scope_or_default, save_root)
+            _sanitize_error_message(structured, save_root, read_scope)
     status = 200 if not result.is_error else 400
     return JSONResponse(structured, status_code=status)

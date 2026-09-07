@@ -198,17 +198,25 @@ async def test_thumbnail_build_failure_returns_404(
 
 @pytest.mark.parametrize("endpoint", ["thumbnail", "image"])
 async def test_file_endpoints_save_root_unavailable_returns_400(
-    endpoint: str, clean_web_routes: None, reset_http_app_state: None
+    endpoint: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
 ) -> None:
-    """保存根不可解析时缩略图与原图端点均回 400 save_root_unavailable。"""
+    """存储根不可解析时缩略图与原图端点均回 400 save_root_unavailable。"""
     import seedream_mcp.utils.io.io_path as io_path_module
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
+    def _unresolvable(configured_dir: str) -> Path:
+        del configured_dir
+        raise OSError("simulated unresolvable path")
+
+    set_active_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
     app = build_web_app()
-    token = io_path_module._WORKSPACE_ROOTS_VAR.set([])
-    try:
-        response = await _get(app, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.png")
-    finally:
-        io_path_module._WORKSPACE_ROOTS_VAR.reset(token)
+
+    response = await _get(app, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.png")
 
     assert response.status_code == 400
     assert response.json()["error"] == "save_root_unavailable"

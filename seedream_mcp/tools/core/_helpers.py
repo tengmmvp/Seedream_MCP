@@ -11,7 +11,6 @@ import copy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...config import SeedreamConfig
 from ...utils.core.errors import (
     SeedreamValidationError,
     format_error_for_user,
@@ -19,13 +18,7 @@ from ...utils.core.errors import (
     sanitize_error_text,
 )
 from ...utils.core.logs import get_logger
-from ...utils.io.io_path import (
-    get_workspace_root,
-    is_within_resolved,
-    normalize_path,
-    resolve_cached_default_save_base_dir,
-    resolve_cached_save_base_dir,
-)
+from ...utils.io.io_path import normalize_path, resolve_save_root
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
@@ -41,9 +34,8 @@ PROGRESS_GENERATION_DONE = 70.0
 PROGRESS_AUTOSAVE_START = 75.0
 PROGRESS_AUTOSAVE_DONE = 95.0
 PROGRESS_COMPLETE = 100.0
-# 浏览工具扫描进度起点与跨度：多目录扫描按已扫目录占比在区间内插值上报。
+# 浏览工具扫描进度起点。
 PROGRESS_SCAN_START = 20.0
-PROGRESS_SCAN_SPAN = 70.0
 
 
 def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
@@ -166,80 +158,43 @@ def _extract_parallel_request_error(
     return "请求失败"
 
 
-def resolve_default_base_dir(config: SeedreamConfig) -> Path:
-    """解析自动保存的默认基础目录，供保存路径解析、预检与 Web 域共用。
+def _resolve_base_dir(save_path: str | None) -> Path:
+    """解析本次调用的写入目录：save_path 声明优先，否则取部署级存储根。
+
+    save_path 为调用级存储声明，位置不受限；相对路径以部署级存储根为基准，
+    绝对形态不依赖基准、存储声明不可解析时不受阻；UNC、空字节、冒号分量等
+    形态经 normalize_path 在 resolve 前拒绝。
 
     Raises:
-        SeedreamValidationError: 未配置 auto_save_base_dir 且无法确定工作区根。
+        SeedreamValidationError: save_path 路径无效。
+        SeedreamConfigError: 部署级存储声明不可解析，经 resolve_save_root 穿透。
     """
-    if config.auto_save_base_dir:
-        # 显式配置的保存根经 io_path 的进程级缓存 resolve，仅 expanduser 后为绝对
-        # 路径的配置串首次发生文件系统调用，相对路径随进程 CWD 变化须每次现算；
-        # 配置写入路径统一使缓存失效。
-        return resolve_cached_save_base_dir(config.auto_save_base_dir)
-    # get_workspace_root 的 ValueError 转校验异常，归入 validation_error 档，用户可见
-    # 文案指向工作区授权问题而非未知失败。
+    if not save_path:
+        return resolve_save_root()
+    base = None if Path(save_path).is_absolute() else str(resolve_save_root())
     try:
-        workspace_root = get_workspace_root()
+        return normalize_path(save_path, base)
     except ValueError as exc:
         raise SeedreamValidationError(
-            f"无法确定自动保存基础目录: {exc}",
-            field="auto_save_base_dir",
-            value=config.auto_save_base_dir,
+            f"保存路径无效: {exc}", field="save_path", value=save_path
         ) from exc
-    # 默认目录的常量拼接路径同样经进程级缓存 resolve，键派生自工作区根；配置写入
-    # 路径统一使缓存失效。
-    return resolve_cached_default_save_base_dir(workspace_root)
 
 
-def _validate_save_path_bounds(default_base_dir: Path, save_path: str) -> Path:
-    """校验用户保存路径有效且落在默认目录之内，返回规范化后的用户路径。
+def prevalidate_save_path(save_path: str | None) -> Path | None:
+    """在生成请求分发前预检 save_path 的路径有效性并解析写入目录。
 
-    Raises:
-        SeedreamValidationError: save_path 无效或越出默认保存目录。
-    """
-    try:
-        user_path = normalize_path(save_path, str(default_base_dir))
-    except ValueError as exc:
-        raise SeedreamValidationError(f"保存路径无效: {exc}", field="save_path", value=save_path)
+    使非法 save_path 在计费请求前即以 validation_error 拒绝，而非留待自动保存
+    阶段降级为软警告；解析结果供调用内读写资格置位复用，不再二次解析。
 
-    # 两路径均已 resolve，直接比较即可，无需重复 resolve。
-    if not is_within_resolved(user_path, default_base_dir):
-        raise SeedreamValidationError(
-            f"save_path 超出允许范围: {default_base_dir}",
-            field="save_path",
-            value=save_path,
-        )
-
-    return user_path
-
-
-def _resolve_base_dir(config: SeedreamConfig, save_path: str | None) -> Path:
-    """解析自动保存的基础目录，save_path 未指定时返回默认目录，指定时校验须落在
-    默认目录之内。
+    Returns:
+        解析后的本次调用写入目录；未提供 save_path 时为 None。
 
     Raises:
-        SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
-    """
-    default_base_dir = resolve_default_base_dir(config)
-    if not save_path:
-        return default_base_dir
-    return _validate_save_path_bounds(default_base_dir, save_path)
-
-
-def prevalidate_save_path(config: SeedreamConfig, save_path: str | None) -> None:
-    """在生成请求分发前预检 save_path 的边界合法性。
-
-    与 _resolve_base_dir 共用同一默认目录解析与越界判定，使非法 save_path 在计费
-    请求前即以 validation_error 拒绝，而非留待自动保存阶段降级为软警告。未提供
-    save_path 时不做检查。
-
-    Raises:
-        SeedreamValidationError: save_path 无效或越出默认保存目录。
+        SeedreamValidationError: save_path 路径无效或存储根配置无法解析。
     """
     if not save_path:
-        return
-    _validate_save_path_bounds(resolve_default_base_dir(config), save_path)
+        return None
+    return _resolve_base_dir(save_path)
 
 
 async def safe_report_progress(

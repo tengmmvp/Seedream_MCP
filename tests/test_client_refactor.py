@@ -239,12 +239,13 @@ async def test_generation_methods_synthesize_defaults_from_config(
     assert default_captured["watermark"] is False
 
 
-async def test_image_to_image_resolves_relative_path_from_workspace_root(
+async def test_image_to_image_resolves_relative_path_from_save_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """相对路径参考图经工作区根解析并编码为 data URI 发请求。"""
+    """相对路径参考图以存储根为基准解析并编码为 data URI 发请求。"""
     workspace = tmp_path / "workspace"
-    image_file = workspace / "images" / "ref.png"
+    save_root = workspace / ".seedream" / "images"
+    image_file = save_root / "ref.png"
     image_file.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (64, 64), color=(255, 0, 0)).save(image_file)
 
@@ -260,7 +261,7 @@ async def test_image_to_image_resolves_relative_path_from_workspace_root(
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
-    await client.image_to_image(prompt="test", image="images/ref.png", size="2K")
+    await client.image_to_image(prompt="test", image="ref.png", size="2K")
 
     assert isinstance(captured_request["image"], str)
     assert captured_request["image"].startswith("data:image/png;base64,")

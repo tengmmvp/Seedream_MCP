@@ -17,7 +17,6 @@ from mcp.types import TextContent
 import seedream_mcp.client as client_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._helpers import _resolve_base_dir
 from seedream_mcp.tools.core.context import GenerationExecutionContext
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
@@ -30,9 +29,7 @@ from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamValidationError,
-    format_error_for_user,
 )
-from seedream_mcp.utils.io import io_path as io_path_module
 
 from _generation_fixtures import make_generation_context
 
@@ -222,25 +219,6 @@ def test_sanitize_image_errors_clean_nested_containers_untouched() -> None:
     sanitized = _sanitize_image_errors(images)
 
     assert sanitized[0] is images[0]
-
-
-# ==================== 空工作区根降级文案 ====================
-
-
-def test_resolve_base_dir_empty_workspace_roots_maps_to_validation_error() -> None:
-    """无 auto_save_base_dir 且 MCP Roots 为空列表时归入校验档，不再呈未知错误。"""
-    config = SeedreamConfig(api_key="k")
-    token = io_path_module._WORKSPACE_ROOTS_VAR.set(())
-    try:
-        with pytest.raises(SeedreamValidationError) as excinfo:
-            _resolve_base_dir(config, None)
-    finally:
-        io_path_module._WORKSPACE_ROOTS_VAR.reset(token)
-
-    user_message = format_error_for_user(excinfo.value)
-    assert not user_message.startswith("未知错误")
-    assert user_message.startswith("参数验证失败")
-    assert "工作区" in user_message
 
 
 # ==================== SSE 请求级错误重试契约 ====================

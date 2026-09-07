@@ -12,32 +12,24 @@ from pathlib import Path
 
 from starlette.responses import JSONResponse
 
-from ..config import SeedreamConfig
-from ..tools.core._helpers import resolve_default_base_dir
-from ..utils.core.errors import SeedreamValidationError
+from ..utils.core.errors import SeedreamConfigError
+from ..utils.io.io_path import get_read_scope, resolve_save_root
 
 GENERATION_ERROR_STATUS: dict[str, int] = {
     "validation_error": 400,
     "payload_too_large": 400,
     "rate_limited": 429,
     "payment_required": 402,
+    "config_error": 503,
 }
 
 # 缩略图与原图响应允许浏览器私有缓存：已保存图片内容不再变化。
 PRIVATE_CACHE_HEADER = {"cache-control": "private, max-age=3600"}
 
-# 错误消息中保存根绝对路径的替换占位符，gallery 与 generate 域共用。
-SAVE_ROOT_PLACEHOLDER = "<保存根>"
-
 
 def error_json(error: str, description: str, status: int) -> JSONResponse:
     """构造与传输层中间件同形态的错误 JSON 响应。"""
     return JSONResponse({"error": error, "error_description": description}, status_code=status)
-
-
-def mask_save_root_text(text: str, save_root: Path) -> str:
-    """把文本中的保存根绝对路径替换为占位符，gallery 与 generate 域共用。"""
-    return text.replace(str(save_root), SAVE_ROOT_PLACEHOLDER)
 
 
 def save_root_unavailable(exc: Exception) -> JSONResponse:
@@ -51,12 +43,24 @@ def save_root_unavailable(exc: Exception) -> JSONResponse:
     )
 
 
-async def resolve_web_save_root(config: SeedreamConfig) -> Path | JSONResponse:
-    """解析保存根，含文件系统的解析下沉工作线程；不可解析时返回 400 响应。"""
+async def resolve_web_save_root() -> Path | JSONResponse:
+    """解析存储根，含文件系统的解析下沉工作线程；不可解析时返回 400 响应。"""
     try:
-        return await asyncio.to_thread(resolve_default_base_dir, config)
-    except SeedreamValidationError as exc:
+        return await asyncio.to_thread(resolve_save_root)
+    except SeedreamConfigError as exc:
         return save_root_unavailable(exc)
+
+
+def read_scope_or_default(save_root: Path) -> list[Path]:
+    """读权限求值，配置类失败退化为仅存储根。
+
+    含 resolve 等同步文件系统调用，调用方须在工作线程执行；生成与图库两域的
+    遮蔽上下文派生共用本单点，失败降级口径不再随调用点漂移。
+    """
+    try:
+        return get_read_scope()
+    except SeedreamConfigError:
+        return [save_root]
 
 
 def generation_status(structured: dict[str, object]) -> int:

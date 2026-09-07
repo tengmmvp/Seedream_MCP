@@ -13,7 +13,7 @@ import pytest
 from mcp.types import TextContent
 
 from seedream_mcp.client import SeedreamClient
-from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.tools.core.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
@@ -99,6 +99,7 @@ async def test_run_text_to_image_includes_auto_save_field(
     _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    set_active_config(config)
     params = TextToImageInput(prompt="a cat")
 
     result = await run_text_to_image(params, config, ctx=None)
@@ -113,6 +114,38 @@ async def test_run_text_to_image_includes_auto_save_field(
     data = structured["data"]
     assert data[0]["url"] == GENERATED_URL
     assert data[0]["local_path"] == "/saved/generated.png"
+
+
+async def test_run_text_to_image_absolute_save_path_survives_unresolvable_save_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """绝对 save_path 下存储声明不可解析时落盘不受阻，清理边界降级不阻塞保存。
+
+    预检与写入目录解析均不依赖基准；清理根解析失败经配置副本关闭按天清理与
+    配额驱逐，仅保留写入目录内的 .part 孤儿清扫。
+    """
+    import seedream_mcp.utils.io.io_path as io_path_module
+
+    def _unresolvable(configured_dir: str) -> Path:
+        raise OSError("simulated unresolvable path")
+
+    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
+    _patch_client_success(monkeypatch)
+    _patch_save_success(monkeypatch)
+
+    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics"))
+    set_active_config(config)
+    export_dir = tmp_path / "export"
+    params = TextToImageInput(prompt="a cat", save_path=str(export_dir))
+
+    result = await run_text_to_image(params, config, ctx=None)
+
+    assert result.is_error is False
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    save_results = structured["auto_save"]["results"]
+    assert len(save_results) == 1
+    assert save_results[0]["success"] is True
 
 
 async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfills(
@@ -165,6 +198,7 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
     )
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    set_active_config(config)
     params = TextToImageInput(prompt="a cat", response_format=ResponseFormat.B64_JSON)
 
     result = await run_text_to_image(params, config, ctx=None)
@@ -206,6 +240,7 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
     _patch_save_failure(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    set_active_config(config)
     params = TextToImageInput(prompt="a cat")
 
     result = await run_text_to_image(params, config, ctx=None)
@@ -222,13 +257,10 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
     assert "local_path" not in data[0]
 
 
-async def test_run_text_to_image_rejects_out_of_bounds_save_path_before_api_call(
+async def test_run_text_to_image_rejects_invalid_save_path_before_api_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """越界 save_path 在校验阶段失败：client 生成方法不被调用，请求不计费执行。
-
-    旧行为：越界路径在自动保存阶段才抛异常并降级为软警告，请求已计费执行。
-    """
+    """非法形态 save_path 在校验阶段失败：client 生成方法不被调用，请求不计费执行。"""
     client_cls = SeedreamClient
     calls: list[dict[str, Any]] = []
 
@@ -242,16 +274,17 @@ async def test_run_text_to_image_rejects_out_of_bounds_save_path_before_api_call
     base = tmp_path / "save_root"
     base.mkdir()
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
-    params = TextToImageInput(prompt="a cat", save_path="../../outside")
+    set_active_config(config)
+    params = TextToImageInput(prompt="a cat", save_path="a\x00b")
 
     result = await run_text_to_image(params, config, ctx=None)
 
     assert result.is_error is True
-    assert calls == [], "越界 save_path 须在 client 生成方法调用前被拒绝"
+    assert calls == [], "非法 save_path 须在 client 生成方法调用前被拒绝"
     structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["error"]["type"] == "validation_error"
-    assert "超出允许范围" in structured["error"]["message"]
+    assert "保存路径无效" in structured["error"]["message"]
 
 
 async def test_run_image_to_image_dispatches_via_composition_root(
@@ -265,6 +298,7 @@ async def test_run_image_to_image_dispatches_via_composition_root(
     _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    set_active_config(config)
     params = ImageToImageInput(prompt="edit", image="https://example.com/ref.png")
 
     result = await run_image_to_image(params, config, ctx=None)
@@ -287,6 +321,7 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
     _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    set_active_config(config)
     params = MultiImageFusionInput(
         prompt="fuse",
         image=["https://example.com/a.png", "https://example.com/b.png"],
@@ -312,6 +347,7 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
     _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    set_active_config(config)
     params = SequentialGenerationInput(prompt="sequence", max_images=2)
 
     result = await run_sequential_generation(params, config, ctx=None)
@@ -321,3 +357,59 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
     structured = result.structured_content
     assert isinstance(structured, dict)
     assert structured["data"][0]["url"] == GENERATED_URL
+
+
+async def test_auto_save_cleanup_boundary_stays_at_deployment_save_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_path 指向部署级存储根之外时，清理与配额边界仍恒为部署级存储根。
+
+    save_path 目录可能同时存放其他文件，不属服务专有，把按天清理与配额驱逐
+    扩展到该处会误删非本服务文件；save_path 仅决定本次写入位置。
+    """
+    from seedream_mcp.config import set_active_config
+    from seedream_mcp.tools.core import auto_save as auto_save_module
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = SeedreamConfig(api_key="test_key", workspace_root=str(workspace))
+    set_active_config(config)
+    captured: list[dict[str, Any]] = []
+
+    class _CapturingManager:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.append(kwargs)
+
+        async def __aenter__(self) -> "_CapturingManager":
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def save_multiple_images(
+            self, images: list[dict[str, Any]], tool_name: str
+        ) -> list[Any]:
+            del images, tool_name
+            return []
+
+        async def save_multiple_base64_images(
+            self, images: list[dict[str, Any]], tool_name: str
+        ) -> list[Any]:
+            del images, tool_name
+            return []
+
+    monkeypatch.setattr(auto_save_module, "AutoSaveManager", _CapturingManager)
+
+    await auto_save_module.auto_save_from_urls(
+        result={"data": [{"url": GENERATED_URL}]},
+        prompt="p",
+        config=config,
+        save_path=str(tmp_path / "export"),
+        custom_name=None,
+        tool_name="text_to_image",
+    )
+
+    assert captured, "AutoSaveManager 应被构造"
+    kwargs = captured[0]
+    assert kwargs["base_dir"] == (tmp_path / "export").resolve()
+    assert kwargs["cleanup_base_dir"] == (workspace / ".seedream" / "images").resolve()

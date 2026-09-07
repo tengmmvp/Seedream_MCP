@@ -237,6 +237,6 @@ def test_validate_image_path_short_circuits_non_local_references(reference: str)
     Data URI 此前落入本地路径分支，被拼接为畸形文件名后误报不存在；其内容校验
     由 validate_image_input 承担。
     """
-    is_valid, error, normalized = validate_image_path(reference, base_dir="/nonexistent")
+    is_valid, error, normalized = validate_image_path(reference)
 
     assert (is_valid, error, normalized) == (True, "", None)

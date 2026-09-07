@@ -185,20 +185,27 @@ async def test_config_info_reachable_when_registered(
 
 
 async def test_config_info_reports_save_root_unavailable(
-    clean_web_routes: None, reset_http_app_state: None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
 ) -> None:
-    """保存根不可解析时回 False，且不出现任何路径字段。"""
+    """存储根不可解析时回 False，且不出现任何路径字段。"""
     import seedream_mcp.utils.io.io_path as io_path_module
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
+    def _unresolvable(configured_dir: str) -> Path:
+        del configured_dir
+        raise OSError("simulated unresolvable path")
+
+    set_active_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
     app = build_web_app()
-    token = io_path_module._WORKSPACE_ROOTS_VAR.set([])
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-        ) as client:
-            response = await client.get("/web/api/config-info")
-    finally:
-        io_path_module._WORKSPACE_ROOTS_VAR.reset(token)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.get("/web/api/config-info")
 
     assert response.status_code == 200
     payload = response.json()

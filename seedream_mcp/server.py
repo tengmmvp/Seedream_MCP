@@ -658,10 +658,11 @@ async def browse_images(
     workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, BrowseImagesStructuredOutput]:
-    """本地图片浏览：列出工作区中的图片文件。
+    """本地图片浏览：列出读权限（工作区 ∪ 存储根）内的图片文件。
 
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
-    递归、分页、按格式过滤。仅可浏览工作区目录内文件。
+    递归、分页、按格式过滤。默认浏览存储根；条目存储根内为存储根相对路径，
+    存储根外在客户端声明 Roots 时为绝对路径，否则为所浏览目录相对路径。
     """
     return await _run_tool_pipeline(
         "browse_images",
@@ -758,7 +759,7 @@ def _resource_roots_via_input_required(ctx: Context) -> bool:
 def _session_roots_for_display() -> list[Path]:
     """读取面向展示的 roots 列表，须在已应用工作区边界的作用域内调用。
 
-    边界经环境变量或进程 CWD 回退取得时不属客户端授权声明，按未授权输出空列表。
+    边界经环境变量或用户主目录回退取得时不属客户端授权声明，按未授权输出空列表。
     """
     if is_boundary_from_session_roots():
         return get_workspace_roots()

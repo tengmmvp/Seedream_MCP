@@ -8,15 +8,17 @@ lifespan 注入传入。
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ...config import SeedreamConfig
+from ...utils.core.errors import SeedreamConfigError
 from ...utils.io.io_save import AutoSaveManager, AutoSaveResult
 from ...utils.io.io_download import DownloadManager
 from ...utils.core.logs import get_logger
-from ._helpers import _resolve_base_dir, resolve_default_base_dir
+from ._helpers import _resolve_base_dir
+from ...utils.io.io_path import resolve_save_root
 from .results import extract_images, is_saveable_image
 
 logger = get_logger()
@@ -55,7 +57,7 @@ _BASE64_SPEC = _AutoSaveSpec(
 def _build_auto_save_manager(
     config: SeedreamConfig,
     base_dir: Path,
-    cleanup_base_dir: Path,
+    cleanup_base_dir: Path | None,
     download_manager: DownloadManager | None,
 ) -> AutoSaveManager:
     """按配置构造自动保存管理器。"""
@@ -97,12 +99,23 @@ async def _auto_save(
     """
 
     def _resolve_and_build() -> AutoSaveManager:
-        # 清理范围固定为配置默认保存根，save_path 仅界定本次保存的子目录。
-        cleanup_base_dir = resolve_default_base_dir(config)
-        resolved_base_dir = _resolve_base_dir(config, save_path)
-        return _build_auto_save_manager(
-            config, resolved_base_dir, cleanup_base_dir, download_manager
-        )
+        # 清理与配额边界恒为部署级存储根：save_path 指定的目录可能同时存放其他
+        # 文件，不属服务专有，把按天清理与配额驱逐扩展到该处会误删非本服务文件；
+        # save_path 仅决定本次写入位置。
+        base_dir = _resolve_base_dir(save_path)
+        build_config = config
+        try:
+            cleanup_base_dir: Path | None = resolve_save_root()
+        except SeedreamConfigError as exc:
+            # 相对与缺省 save_path 的写入目录派生自存储根，其不可解析已在
+            # _resolve_base_dir 内先行抛出，此分支仅在绝对 save_path 下可达。
+            # 绝对 save_path 不依赖基准，写入不受部署级存储声明可解析性阻塞；
+            # 清理边界不可用时按天清理与配额驱逐经配置副本显式关闭，仅保留
+            # .part 孤儿清扫并退化为作用于写入目录，只回收本服务自建临时文件。
+            logger.warning("存储根不可解析，本次保存关闭按天清理与配额驱逐: {}", exc.message)
+            cleanup_base_dir = None
+            build_config = replace(config, auto_save_cleanup_days=0, auto_save_max_total_bytes=None)
+        return _build_auto_save_manager(build_config, base_dir, cleanup_base_dir, download_manager)
 
     if images is None:
         images = extract_images(result)
@@ -158,7 +171,7 @@ async def auto_save_from_urls(
         写入本地路径。
 
     Raises:
-        SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
+        SeedreamValidationError: save_path 路径无效或存储根配置无法解析。
     """
     return await _auto_save(
         result=result,
@@ -195,7 +208,7 @@ async def auto_save_from_base64(
         写入本地路径。
 
     Raises:
-        SeedreamValidationError: 无法确定工作区根，或 save_path 无效、越出默认保存目录。
+        SeedreamValidationError: save_path 路径无效或存储根配置无法解析。
     """
     return await _auto_save(
         result=result,

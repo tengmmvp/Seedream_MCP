@@ -20,9 +20,9 @@ from seedream_mcp.config import (
     DEPRECATED_MODEL_TOKENS,
     SeedreamConfig,
     _read_env_values,
-    _registered_workspace_root_provider,
 )
 from seedream_mcp.utils.core.errors import SeedreamConfigError
+from seedream_mcp.utils.io import io_path as io_path_module
 
 
 def test_read_env_values_wraps_os_error_as_config_error(
@@ -91,7 +91,8 @@ def test_workspace_root_provider_falls_back_to_env_on_os_error(
 
     monkeypatch.setattr(config_module, "get_active_config", _raise_os_error)
 
-    assert _registered_workspace_root_provider() == str(tmp_path)
+    provider = io_path_module._env_value_providers["SEEDREAM_WORKSPACE_ROOT"]
+    assert provider() == str(tmp_path)
 
 
 def test_auto_save_download_timeout_bound_aligns_with_part_sweep_grace() -> None:

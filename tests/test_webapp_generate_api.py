@@ -19,8 +19,12 @@ from mcp.types import CallToolResult
 
 import seedream_mcp.resources as resources_module
 from _web_fixtures import build_web_app, write_workspace_config
-from seedream_mcp.webapp import _shared as _shared_module
-from seedream_mcp.config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
+from seedream_mcp.config import (
+    LIFESPAN_KEY_CLIENT,
+    LIFESPAN_KEY_DOWNLOAD_MANAGER,
+    SeedreamConfig,
+    set_active_config,
+)
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.webapp import generate as generate_module
 from seedream_mcp.webapp.context import build_web_request_context
@@ -141,6 +145,97 @@ async def test_generate_skips_web_path_outside_save_root(
     entry = response.json()["data"][0]
     assert "web_path" not in entry
     assert "local_path" not in entry
+
+
+async def test_generate_masks_save_path_destination_in_auto_save_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """save_path 越出保存根时，auto_save.results 的 local_path 删除、markdown_ref
+    不出现，保存根外目的地不经任何通道返回浏览器。"""
+    write_workspace_config(tmp_path)
+    destination = tmp_path / "tmp-export" / "batch"
+    destination.mkdir(parents=True)
+    saved = destination / "x.png"
+    saved.write_bytes(b"png")
+    absolute = str(saved)
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [
+                {
+                    "url": "https://x/x.png",
+                    "local_path": absolute,
+                    "markdown_ref": f"![x]({absolute})",
+                }
+            ],
+            "auto_save": {
+                "enabled": True,
+                "results": [
+                    {
+                        "success": True,
+                        "original_url": "https://x/x.png",
+                        "local_path": absolute,
+                        "markdown_ref": f"![x]({absolute})",
+                    }
+                ],
+            },
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app, "/web/api/generate/text-to-image", {"prompt": "一只猫", "save_path": str(destination)}
+    )
+
+    assert response.status_code == 200
+    assert absolute not in response.text
+    assert str(tmp_path) not in response.text
+    payload = response.json()
+    assert "local_path" not in payload["data"][0]
+    assert "markdown_ref" not in payload["data"][0]
+    result_entry = payload["auto_save"]["results"][0]
+    assert "local_path" not in result_entry
+    assert "markdown_ref" not in result_entry
+
+
+async def test_generate_rewrites_auto_save_results_local_path_inside_save_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """保存根内的 auto_save.results 条目同样附 web_path 相对形态，与 data 条目同口径。"""
+    save_root = write_workspace_config(tmp_path)
+    local_path = save_root / "2026-08-20" / "text_to_image" / "a.png"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"png")
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [],
+            "auto_save": {
+                "enabled": True,
+                "results": [{"success": True, "local_path": str(local_path)}],
+            },
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    result_entry = response.json()["auto_save"]["results"][0]
+    assert result_entry["web_path"] == "2026-08-20/text_to_image/a.png"
+    assert result_entry["local_path"] == "2026-08-20/text_to_image/a.png"
 
 
 async def test_generate_multi_image_fusion_returns_structured_payload_with_web_path(
@@ -357,7 +452,7 @@ async def test_generate_runner_validation_error_masks_save_root(
     assert response.status_code == 400
     description = response.json()["error_description"]
     assert str(save_root) not in description
-    assert "<保存根>" in description
+    assert "<存储根>" in description
 
 
 async def test_generate_runner_unexpected_error_returns_500(
@@ -465,14 +560,16 @@ async def test_generate_rejects_when_save_root_unresolvable(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """保存根不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
+    """存储根不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
+    import seedream_mcp.utils.io.io_path as io_path_module
 
-    def _unresolvable(config: Any) -> Any:
-        del config
-        raise SeedreamValidationError("无法确定自动保存基础目录", field="auto_save_base_dir")
+    def _unresolvable(configured_dir: str) -> Any:
+        del configured_dir
+        raise OSError("simulated unresolvable path")
 
-    monkeypatch.setattr(_shared_module, "resolve_default_base_dir", _unresolvable)
     write_workspace_config(tmp_path)
+    set_active_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
@@ -515,9 +612,9 @@ async def test_generate_masks_save_root_in_error_channels(
     assert response.status_code == 502
     assert str(save_root) not in response.text
     payload = response.json()
-    assert payload["error"]["message"] == "保存到 <保存根> 失败"
-    assert payload["data"][0]["error"]["message"] == "下载失败于 <保存根>\\a.png"
-    assert payload["auto_save"]["results"][0]["error"] == "写入 <保存根>\\b.png 被拒绝"
+    assert payload["error"]["message"] == "保存到 <存储根> 失败"
+    assert payload["data"][0]["error"]["message"] == "下载失败于 <存储根>\\a.png"
+    assert payload["auto_save"]["results"][0]["error"] == "写入 <存储根>\\b.png 被拒绝"
 
 
 async def test_generate_endpoint_requires_token(
@@ -625,22 +722,21 @@ def test_sanitize_save_root_text_replaces_nested_string_values(tmp_path: Path) -
         "urls": [f"{save_root}/b.png", "https://x/c.png"],
     }
 
-    generate_module.sanitize_save_root_text(structured, save_root)
+    generate_module.sanitize_save_root_text(structured, save_root, [save_root])
 
-    assert structured["error"] == {"message": "根为 <保存根>"}
+    assert structured["error"] == {"message": "根为 <存储根>"}
     data = structured["data"]
     assert isinstance(data, list)
-    assert data[0] == {"error": {"message": "<保存根>\\a.png"}}
+    assert data[0] == {"error": {"message": "<存储根>\\a.png"}}
     assert data[1] == {"keep": 42}
-    assert structured["urls"] == ["<保存根>/b.png", "https://x/c.png"]
+    assert structured["urls"] == ["<存储根>/b.png", "https://x/c.png"]
 
 
 def test_sanitize_save_root_text_keeps_non_string_leaves(tmp_path: Path) -> None:
-    """int、bool、None 叶子不参与替换，顶层非容器值调用为无操作。"""
+    """int、bool、None 叶子不参与替换，容器内原值保持。"""
     structured: dict[str, object] = {"count": 3, "ok": True, "empty": None}
 
-    generate_module.sanitize_save_root_text(structured, tmp_path)
-    generate_module.sanitize_save_root_text(42, tmp_path)
+    generate_module.sanitize_save_root_text(structured, tmp_path, [])
 
     assert structured == {"count": 3, "ok": True, "empty": None}
 
@@ -725,3 +821,52 @@ async def test_generate_concurrent_requests_share_active_resource_client(
         call["ctx"].request_context.lifespan_context[LIFESPAN_KEY_CLIENT] is stub.client
         for call in captured
     )
+
+
+async def test_generate_masks_save_path_destination_in_error_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """save_path 目的地出现在 auto_save.results[].error 文案中时被占位符遮蔽。
+
+    文件系统错误原文嵌目的地绝对路径，保存目录不在读权限成员内，不额外遮蔽
+    即从 error 通道漏出。
+    """
+    write_workspace_config(tmp_path)
+    destination = tmp_path / "denied-export"
+    destination.mkdir()
+    absolute_file = str(destination / "x.png")
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [{"url": "https://x/x.png"}],
+            "auto_save": {
+                "enabled": True,
+                "results": [
+                    {
+                        "success": False,
+                        "original_url": "https://x/x.png",
+                        "error": f"文件系统错误: [WinError 5] 拒绝访问: '{absolute_file}'",
+                    }
+                ],
+            },
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app,
+        "/web/api/generate/text-to-image",
+        {"prompt": "一只猫", "save_path": str(destination)},
+    )
+
+    assert response.status_code == 200
+    assert str(destination) not in response.text
+    error_text = response.json()["auto_save"]["results"][0]["error"]
+    assert "<保存目录>" in error_text
+    assert "denied-export" not in error_text

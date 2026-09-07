@@ -79,7 +79,7 @@ async def web_config_info(_request: Request) -> Response:
     给出配置指引。
     """
     config = get_active_config()
-    resolved = await _shared.resolve_web_save_root(config)
+    resolved = await _shared.resolve_web_save_root()
     save_root_available = not isinstance(resolved, JSONResponse)
     return JSONResponse(
         {

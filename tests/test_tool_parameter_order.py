@@ -250,6 +250,8 @@ async def test_flat_input_schema_field_definitions_match_model() -> None:
 _DESCRIPTION_RANGE_PATTERN = re.compile(r"(\d+)\s*-\s*(\d+)")
 # 描述文案中的默认值数字形态，如「默认 0」，用于比对字段声明的默认值。
 _DESCRIPTION_DEFAULT_PATTERN = re.compile(r"默认\s*(\d+)")
+# 描述文案中保存路径示例的 ISO 日期层（如 2026-08-15），不是数值区间，扫描前剥除。
+_DESCRIPTION_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _field_bounds(info: FieldInfo) -> tuple[int | None, int | None]:
@@ -317,7 +319,8 @@ async def test_flat_schema_description_tokens_match_model_constraints() -> None:
             description = schema["properties"][field].get("description")
             assert isinstance(description, str), (name, field)
             lower, upper = _field_bounds(info)
-            for match in _DESCRIPTION_RANGE_PATTERN.finditer(description):
+            range_text = _DESCRIPTION_DATE_PATTERN.sub("", description)
+            for match in _DESCRIPTION_RANGE_PATTERN.finditer(range_text):
                 assert (int(match.group(1)), int(match.group(2))) == (lower, upper), (
                     name,
                     field,

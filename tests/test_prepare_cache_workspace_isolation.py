@@ -14,7 +14,7 @@ from PIL import Image
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.images import image_input, image_prepare
+from seedream_mcp.utils.images import image_prepare
 from seedream_mcp.utils.images.image_prepare import ImagePreparer
 
 
@@ -47,7 +47,7 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
         call_index["i"] += 1
         return list(roots_sequence[idx % len(roots_sequence)])
 
-    monkeypatch.setattr(image_prepare, "get_workspace_roots", fake_get_workspace_roots)
+    monkeypatch.setattr(image_prepare, "get_read_scope", fake_get_workspace_roots)
 
     first = await client._image_preparer.prepare_image_input("same-image.png")
     second = await client._image_preparer.prepare_image_input("same-image.png")
@@ -73,7 +73,7 @@ async def test_prepare_image_input_cache_hit_when_workspace_roots_stable(
         return f"prepared:{image}"
 
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare_image_input)
-    monkeypatch.setattr(image_prepare, "get_workspace_roots", lambda: [Path("/workspace/same")])
+    monkeypatch.setattr(image_prepare, "get_read_scope", lambda: [Path("/workspace/same")])
 
     await client._image_preparer.prepare_image_input("img.png")
     await client._image_preparer.prepare_image_input("img.png")
@@ -94,11 +94,8 @@ async def test_prepare_signature_strips_whitespace_like_read_path(
     image_path = tmp_path / "ref.png"
     Image.new("RGB", (32, 32), color="white").save(image_path, format="PNG")
 
-    # 缓存键与签名路径经 image_prepare 的 from-import 绑定，读取路径经 image_input
-    # 的 from-import 绑定，两个名字须分别替换，否则读取路径落到真实回退根，结果
-    # 取决于 basetemp 位置。
-    monkeypatch.setattr(image_prepare, "get_workspace_roots", lambda: [tmp_path])
-    monkeypatch.setattr(image_input, "get_workspace_roots", lambda: [tmp_path])
+    # 经环境变量走真实求值链：读权限含 tmp_path，文件在权限内可定位。
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
     preparer = ImagePreparer(
         prepare_cache_max=8, prepare_cache_max_bytes=64 * 1024 * 1024, prepare_concurrency=2
     )
@@ -143,3 +140,32 @@ async def test_prepare_large_data_uri_with_surrogate_raises_validation_error() -
 
     with pytest.raises(SeedreamValidationError, match="Base64 解码失败"):
         await preparer.prepare_image_input(hostile)
+
+
+async def test_prepare_remote_inputs_skip_read_scope_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """纯 URL 批次不读权限现取，显式存储声明不可解析时照常完成预处理。
+
+    读权限求值先于输入分类执行时，不触本地文件系统的 URL 参考图会被无关的
+    存储配置缺陷整体阻断。
+    """
+    import seedream_mcp.utils.io.io_path as io_path_module
+
+    def _unresolvable(configured_dir: str) -> Path:
+        del configured_dir
+        raise OSError("simulated unresolvable path")
+
+    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(Path("/configured-save-root")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
+
+    url = "https://cdn.example.com/x.png"
+    preparer = ImagePreparer(
+        prepare_cache_max=8, prepare_cache_max_bytes=64 * 1024 * 1024, prepare_concurrency=2
+    )
+
+    assert await preparer.prepare_image_input(url) == url
+    assert await preparer.prepare_images_in_parallel([url, "https://cdn.example.com/y.png"]) == [
+        url,
+        "https://cdn.example.com/y.png",
+    ]

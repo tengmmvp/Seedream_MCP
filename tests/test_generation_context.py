@@ -610,56 +610,154 @@ def test_input_schema_rejects_non_bool_auto_save() -> None:
 # ==================== save_path 生成前预检 ====================
 
 
-def test_prevalidate_save_path_rejects_out_of_bounds_save_path(
-    tmp_path: Path,
+def test_prevalidate_save_path_accepts_path_outside_save_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """越界 save_path 在预检阶段即拒绝，早于计费的生成请求分发。
-
-    此前越界路径在自动保存阶段才抛校验异常并被降级为软警告；预检与
-    _resolve_base_dir 共用同一判定入口，错误档位为 validation_error。
-    """
+    """save_path 为调用级存储声明，指向存储根之外的位置预检放行。"""
     base = tmp_path / "save_root"
     base.mkdir()
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(base))
+    config = _build_config()
 
-    with pytest.raises(SeedreamValidationError, match="超出允许范围") as exc_info:
-        prevalidate_save_path(config, "../../outside")
+    prevalidate_save_path("../../outside")
+    context = build_generation_context(
+        TextToImageInput(prompt="test", save_path="../../outside"), config
+    )
 
-    assert exc_info.value.field == "save_path"
+    assert context.save_path == "../../outside"
 
 
 def test_prevalidate_save_path_rejects_invalid_format() -> None:
     """无法规范化的 save_path 同属校验档，在预检阶段即拒绝。"""
-    config = _build_config()
-
     with pytest.raises(SeedreamValidationError, match="保存路径无效"):
-        prevalidate_save_path(config, "a" + "\x00" + "b")
+        prevalidate_save_path("a" + "\x00" + "b")
 
 
-def test_prevalidate_save_path_accepts_in_bounds_path(tmp_path: Path) -> None:
-    """界内 save_path 预检放行，上下文照常携带原始值交由保存阶段完整解析。"""
+def test_prevalidate_save_path_accepts_relative_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """相对 save_path 以存储根为基准预检放行，上下文照常携带原始值。"""
     base = tmp_path / "save_root"
     base.mkdir()
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(base))
+    config = _build_config()
 
-    prevalidate_save_path(config, "sub/dir")
+    prevalidate_save_path("sub/dir")
     context = build_generation_context(TextToImageInput(prompt="test", save_path="sub/dir"), config)
 
     assert context.save_path == "sub/dir"
 
 
 def test_prevalidate_save_path_skips_without_save_path() -> None:
-    """未提供 save_path 时不做预检：默认目录解析失败留待自动保存阶段处理。"""
-    from seedream_mcp.utils.io import io_path as io_path_module
+    """未提供 save_path 时不做预检。"""
+    config = _build_config()
 
-    config = SeedreamConfig(api_key="test_key")
-    token = io_path_module._WORKSPACE_ROOTS_VAR.set(())
-    try:
-        # 空 Roots 且未配置 auto_save_base_dir 时预检直接跳过，不抛无法确定
-        # 自动保存基础目录的校验异常。
-        prevalidate_save_path(config, None)
-        context = build_generation_context(TextToImageInput(prompt="test"), config)
-    finally:
-        io_path_module._WORKSPACE_ROOTS_VAR.reset(token)
+    prevalidate_save_path(None)
+    context = build_generation_context(TextToImageInput(prompt="test"), config)
 
     assert context.save_path is None
+
+
+def test_prevalidate_save_path_returns_resolved_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """预检返回解析后的写入目录，供分发阶段的调用内读写资格置位复用。"""
+    base = tmp_path / "save_root"
+    base.mkdir()
+    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(base))
+
+    assert prevalidate_save_path("sub/dir") == (base / "sub" / "dir").resolve()
+    assert prevalidate_save_path(None) is None
+
+
+async def test_execute_generation_handler_grants_call_save_path_read_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """save_path 生效的调用内其写入目录并入读权限，分发阶段的参考图校验可回流。"""
+    from unittest.mock import MagicMock
+
+    from seedream_mcp.tools.core.common import ToolMetadata, execute_generation_handler
+    from seedream_mcp.utils.io import io_path
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(ws))
+    monkeypatch.setattr(io_path, "_env_value_providers", {})
+    outside = tmp_path / "exports"
+    outside.mkdir()
+    save_root = (ws / ".seedream" / "images").resolve()
+
+    captured_scopes: list[list[Path]] = []
+
+    async def fake_executor(client: object, context: object) -> dict:
+        captured_scopes.append(io_path.get_read_scope())
+        return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+    metadata = ToolMetadata(
+        tool_name="text_to_image",
+        completion_title="文生图完成",
+        failure_prefix="文生图",
+        start_log_message="",
+        start_log_values_builder=lambda c: (),
+    )
+    common_kwargs: dict = {
+        "config": _build_config(),
+        "module_logger": MagicMock(),
+        "metadata": metadata,
+        "request_executor": fake_executor,
+    }
+
+    result = await execute_generation_handler(
+        params=TextToImageInput(prompt="test", auto_save=False, save_path=str(outside)),
+        **common_kwargs,
+    )
+
+    assert not result.is_error
+    assert captured_scopes == [[ws.resolve(), save_root, outside.resolve()]]
+
+    captured_scopes.clear()
+    await execute_generation_handler(
+        params=TextToImageInput(prompt="test", auto_save=False),
+        **common_kwargs,
+    )
+
+    assert captured_scopes == [[ws.resolve(), save_root]]
+
+
+async def test_execute_generation_handler_maps_unresolvable_save_root_to_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """存储声明不可解析属部署配置缺陷，MCP 通道归约 config_error 而非参数错误。"""
+    from unittest.mock import MagicMock
+
+    from seedream_mcp.tools.core.common import ToolMetadata, execute_generation_handler
+    from seedream_mcp.utils.io import io_path
+
+    def _runtime_error(configured_dir: str) -> Path:
+        raise RuntimeError("Could not resolve home directory")
+
+    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", "~/pics")
+    monkeypatch.setattr(io_path, "resolve_cached_save_base_dir", _runtime_error)
+
+    async def fake_executor(client: object, context: object) -> dict:
+        raise AssertionError("预检失败后不应分发计费请求")
+
+    result = await execute_generation_handler(
+        params=TextToImageInput(prompt="test", auto_save=False, save_path="sub"),
+        config=_build_config(),
+        module_logger=MagicMock(),
+        metadata=ToolMetadata(
+            tool_name="text_to_image",
+            completion_title="文生图完成",
+            failure_prefix="文生图",
+            start_log_message="",
+            start_log_values_builder=lambda c: (),
+        ),
+        request_executor=fake_executor,
+    )
+
+    assert result.is_error
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    error = structured["error"]
+    assert isinstance(error, dict) and error["type"] == "config_error"

@@ -20,6 +20,7 @@ from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, _is
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.io.io_path import (
     clear_resolved_env_root_cache,
+    register_env_save_base_dir_provider,
     register_env_workspace_root_provider,
 )
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
@@ -922,22 +923,27 @@ def active_request_state_keys() -> tuple[bytes, ...] | None:
     return config.request_state_secret_keys
 
 
-def _registered_workspace_root_provider() -> str | None:
-    """向 io_path 提供当前生效的工作区根目录原始值。
+def _make_env_location_provider(attr: str, env_name: str) -> Callable[[], str | None]:
+    """构造位置声明的配置提供者：活动配置属性优先，配置缺失回退同名环境变量。"""
 
-    活动配置就绪时返回其 workspace_root；配置构建失败或抛 OSError 时回退读取
-    SEEDREAM_WORKSPACE_ROOT 环境变量。
-    """
-    try:
-        config = get_active_config()
-    except (SeedreamConfigError, OSError):
-        config = None
-    if config is not None:
-        root = config.workspace_root
-        return root.strip() if root else None
-    env_root = os.getenv("SEEDREAM_WORKSPACE_ROOT")
-    return env_root.strip() if env_root else None
+    def provider() -> str | None:
+        try:
+            config = get_active_config()
+        except (SeedreamConfigError, OSError):
+            config = None
+        if config is not None:
+            value: str | None = getattr(config, attr)
+            return value.strip() if value else None
+        env_value = os.getenv(env_name)
+        return env_value.strip() if env_value else None
+
+    return provider
 
 
-# 模块加载即注册，io_path 的回退根读取经此提供者取活动配置值。
-register_env_workspace_root_provider(_registered_workspace_root_provider)
+# 模块加载即注册，io_path 的位置求值经提供者取活动配置值。
+register_env_workspace_root_provider(
+    _make_env_location_provider("workspace_root", "SEEDREAM_WORKSPACE_ROOT")
+)
+register_env_save_base_dir_provider(
+    _make_env_location_provider("auto_save_base_dir", "SEEDREAM_AUTO_SAVE_BASE_DIR")
+)

@@ -17,7 +17,6 @@ from seedream_mcp.tools.core._helpers import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
     PROGRESS_RECEIVED,
-    PROGRESS_SCAN_SPAN,
     PROGRESS_SCAN_START,
     PROGRESS_VALIDATED,
     _add_usage_value,
@@ -353,7 +352,7 @@ async def test_context_failure_progress_jumps_directly_to_complete(
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
     ctx = _ProgressCollectingContext()
     result = await handle_text_to_image(
-        TextToImageInput(prompt="test", save_path="../../outside"), config, ctx
+        TextToImageInput(prompt="test", save_path="a\x00b"), config, ctx
     )
 
     assert result.is_error is True
@@ -361,10 +360,7 @@ async def test_context_failure_progress_jumps_directly_to_complete(
 
 
 def test_progress_milestone_constants_strictly_increasing() -> None:
-    """生成阶梯七个里程碑常量严格递增，浏览阶梯峰值不越过完成里程碑。
-
-    PROGRESS_SCAN_SPAN 是跨度增量而非里程碑，不参与排序，单独约束峰值区间。
-    """
+    """生成阶梯七个里程碑常量严格递增，浏览扫描起点不越过完成里程碑。"""
     milestones = [
         PROGRESS_RECEIVED,
         PROGRESS_VALIDATED,
@@ -375,7 +371,7 @@ def test_progress_milestone_constants_strictly_increasing() -> None:
         PROGRESS_COMPLETE,
     ]
     assert all(left < right for left, right in zip(milestones, milestones[1:]))
-    assert PROGRESS_SCAN_START < PROGRESS_SCAN_START + PROGRESS_SCAN_SPAN < PROGRESS_COMPLETE
+    assert PROGRESS_SCAN_START < PROGRESS_COMPLETE
 
 
 def test_parallel_options_reject_request_count_over_limit_in_schema() -> None:

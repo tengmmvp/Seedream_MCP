@@ -1,7 +1,7 @@
-"""image_input 预处理测试：URL 与 Data URI 主干、本地文件读取与工作区边界校验。
+"""image_input 预处理测试：URL 与 Data URI 主干、本地文件读取与读权限校验。
 
-越界与诊断消息区分会话 Roots 边界与 SEEDREAM_WORKSPACE_ROOT 回退边界，后者
-不回显服务器根路径。
+相对路径以存储根为基准，绝对路径判定面向读权限（工作区 ∪ 存储根）；越界与
+诊断消息统一不回显服务器侧绝对路径。
 """
 
 import base64
@@ -23,13 +23,20 @@ from seedream_mcp.utils.images.image_validation import validate_image_path
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
+def _save_root(ws: Path) -> Path:
+    """返回 ws 派生的存储根并确保存在，相对路径测试文件统一放存储根内。"""
+    root = ws / ".seedream" / "images"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 async def test_prepare_image_input_rejects_symlink_escape(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """指向工作区外的符号链接须被越界校验拒绝，防止经符号链接逃逸工作区边界。
+    """指向读权限外的符号链接须被越界校验拒绝，防止经符号链接逃逸。
 
-    目标位于工作区内时 resolve 后为常规文件、O_NOFOLLOW 打开不抛错，测试将沦为
-    空芯。以会话 Roots 声明边界，消息附调用方授权的根列表供自纠。
+    目标位于权限内时 resolve 后为常规文件、O_NOFOLLOW 打开不抛错，测试将沦为
+    空芯。以会话 Roots 声明工作区，目标置于其外。
     """
     # 目标文件位于工作区 tmp_path 之外；resolve 跟随符号链接后路径越界被拒
     target = tmp_path.parent / "symlink_escape_target.png"
@@ -43,34 +50,25 @@ async def test_prepare_image_input_rejects_symlink_escape(
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
-        with pytest.raises(
-            SeedreamValidationError, match="路径超出允许的工作区目录范围"
-        ) as exc_info:
+        with pytest.raises(SeedreamValidationError, match="路径不在读取范围内"):
             await prepare_image_input(str(link))
-        assert "允许的根:" in exc_info.value.message
-        assert str(tmp_path.resolve()) in exc_info.value.message
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
         target.unlink(missing_ok=True)
 
 
-async def test_prepare_image_input_out_of_bounds_error_carries_roots(
+async def test_prepare_image_input_out_of_bounds_error_carries_config_guidance(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """绝对路径落在工作区根之外时抛校验错误，消息携带允许的根列表供纠错。
-
-    会话 Roots 声明的根列表属调用方自授权信息，回显不受回退边界遮蔽约束。
-    """
+    """绝对路径落在读权限之外时抛校验错误，消息携带配置项指引供纠错。"""
     outside = tmp_path.parent / "outside_workspace_image.png"
     Image.new("RGB", (32, 32), color="white").save(outside)
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
-        with pytest.raises(
-            SeedreamValidationError, match="路径超出允许的工作区目录范围"
-        ) as exc_info:
+        with pytest.raises(SeedreamValidationError, match="路径不在读取范围内") as exc_info:
             await prepare_image_input(str(outside))
-        assert str(tmp_path.resolve()) in exc_info.value.message
+        assert "SEEDREAM_WORKSPACE_ROOT" in exc_info.value.message
         assert exc_info.value.field == "image"
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
@@ -80,19 +78,13 @@ async def test_prepare_image_input_out_of_bounds_error_carries_roots(
 async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """无会话 Roots 的回退边界下，越界消息不回显服务器环境根路径。
-
-    与 browse_images 的回退遮蔽口径一致。
-    """
+    """无会话 Roots 的回退工作区下，越界消息不回显服务器环境路径。"""
     outside = tmp_path.parent / "outside_workspace_masked.png"
     Image.new("RGB", (32, 32), color="white").save(outside)
 
     try:
-        with pytest.raises(
-            SeedreamValidationError, match="仅允许服务器配置的工作区目录"
-        ) as exc_info:
+        with pytest.raises(SeedreamValidationError, match="路径不在读取范围内") as exc_info:
             await prepare_image_input(str(outside))
-        assert "允许的根:" not in exc_info.value.message
         assert str(tmp_path.resolve()) not in exc_info.value.message
     finally:
         outside.unlink(missing_ok=True)
@@ -101,41 +93,55 @@ async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
 async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """会话 Roots 边界下界内不存在的路径仍走诊断分支：报文件不存在而非越界。
+    """读权限内不存在的路径仍走诊断分支：报文件不存在而非越界。"""
+    del tmp_path
+    _save_root(workspace_root)
 
-    失败原因与相似路径建议回显调用方授权的根下信息，不受回退遮蔽约束。
-    """
-    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
-    try:
-        with pytest.raises(SeedreamValidationError) as exc_info:
-            await prepare_image_input("missing.png")
-        assert "路径超出允许的工作区目录范围" not in exc_info.value.message
-        assert "文件不存在" in exc_info.value.message
-        assert exc_info.value.field == "image"
-    finally:
-        _WORKSPACE_ROOTS_VAR.reset(token)
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("missing.png")
+    assert "路径不在读取范围内" not in exc_info.value.message
+    assert "文件不存在" in exc_info.value.message
+    assert exc_info.value.field == "image"
 
 
 async def test_prepare_image_input_in_bounds_diagnostics_masks_fallback_boundary(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """回退边界下界内定位失败的诊断分支不泄露服务器根绝对路径与相似路径建议。
+    """界内定位失败的诊断分支不泄露服务器绝对路径，相似路径建议为存储根相对形态。
 
-    根下放置名称相近的真实图片，确保遮蔽前建议分支确实可命中，测试不沦为空芯。
+    存储根内放置名称相近的真实图片，确保建议分支确实可命中，测试不沦为空芯。
     """
-    sibling = tmp_path / "missing_sibling.png"
+    del tmp_path
+    sibling = _save_root(workspace_root) / "missing_sibling.png"
     Image.new("RGB", (32, 32), color="white").save(sibling)
 
-    try:
-        with pytest.raises(SeedreamValidationError) as exc_info:
-            await prepare_image_input("missing_sib.png")
-        assert "路径超出允许的工作区目录范围" not in exc_info.value.message
-        assert "建议的相似路径" not in exc_info.value.message
-        assert str(tmp_path.resolve()) not in exc_info.value.message
-        assert "missing_sib.png" in exc_info.value.message
-        assert exc_info.value.field == "image"
-    finally:
-        sibling.unlink(missing_ok=True)
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("missing_sib.png")
+    assert "路径不在读取范围内" not in exc_info.value.message
+    assert str(workspace_root.resolve()) not in exc_info.value.message
+    assert "missing_sib.png" in exc_info.value.message
+    assert exc_info.value.field == "image"
+
+
+async def test_prepare_image_input_diagnostics_mask_workspace_root_outside_save_root(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """落在存储根外、工作区根内的未命中路径，诊断消息同样遮蔽工作区根。
+
+    旧实现只替换存储根前缀，``../`` 形态解析到工作区根下时解析后绝对路径
+    原样回显给调用方。
+    """
+    del tmp_path
+    _save_root(workspace_root)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("../missing.png")
+
+    message = exc_info.value.message
+    assert "路径不在读取范围内" not in message
+    assert "文件不存在" in message
+    assert str(workspace_root.resolve()) not in message
+    assert "<工作区根>" in message
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:
@@ -150,12 +156,13 @@ async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_pa
 async def test_prepare_image_input_read_failure_masks_fallback_boundary(
     workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """回退边界下本地文件打开失败的错误消息不泄露服务器侧绝对路径。
+    """本地文件打开失败的错误消息不泄露服务器侧绝对路径。
 
     OSError 原文嵌有解析后的绝对路径，遮蔽后仅回显系统错误语义与调用方输入
     原样串。
     """
-    locked = tmp_path / "locked.png"
+    del tmp_path
+    locked = _save_root(workspace_root) / "locked.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
 
     def _deny_open(path: Path) -> IO[bytes]:
@@ -169,7 +176,7 @@ async def test_prepare_image_input_read_failure_masks_fallback_boundary(
     message = exc_info.value.message
     # OSError 原文的 filename 经 repr 渲染，反斜杠以转义形态出现，两种形态都不
     # 得进入面向调用方的消息
-    resolved_root = str(tmp_path.resolve())
+    resolved_root = str(workspace_root.resolve())
     escaped_root = repr(resolved_root)[1:-1]
     assert resolved_root not in message
     assert escaped_root not in message
@@ -187,7 +194,8 @@ async def test_prepare_image_input_read_failure_profiles_as_validation_error(
     PermissionError 一类读取失败是本地输入问题；此前归入 api_error 档会给用户
     「请确认 API Key 和网络可用后重试」的误导建议。
     """
-    locked = tmp_path / "locked2.png"
+    del tmp_path
+    locked = _save_root(workspace_root) / "locked2.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
 
     def _deny_open(path: Path) -> IO[bytes]:
@@ -203,14 +211,12 @@ async def test_prepare_image_input_read_failure_profiles_as_validation_error(
     assert "API Key" not in profile.user_hint
 
 
-async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
+async def test_prepare_image_input_read_failure_masks_session_roots_boundary(
     workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """会话 Roots 边界下打开失败回显异常原文，解析后的绝对路径属调用方授权信息。
-
-    与越界、诊断两条定位失败路径的遮蔽口径一致：仅回退边界遮蔽路径。
-    """
-    locked = tmp_path / "locked.png"
+    """会话 Roots 边界下打开失败同样不回显异常原文路径，遮蔽口径统一。"""
+    del tmp_path
+    locked = _save_root(workspace_root) / "locked.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
 
     def _deny_open(path: Path) -> IO[bytes]:
@@ -222,8 +228,8 @@ async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
     try:
         with pytest.raises(SeedreamValidationError) as exc_info:
             await prepare_image_input("locked.png")
-        # OSError 原文的 filename 经 repr 渲染，以转义形态回显在消息中
-        assert repr(str((tmp_path / "locked.png").resolve())) in exc_info.value.message
+        assert str(locked.resolve()) not in exc_info.value.message
+        assert "Permission denied" in exc_info.value.message
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
 
@@ -353,7 +359,7 @@ async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
         def __exit__(self, *exc_info: object) -> None:
             return None
 
-    oversized = tmp_path / "oversized.png"
+    oversized = _save_root(workspace_root) / "oversized.png"
     Image.new("RGB", (16, 16), color="white").save(oversized)
     monkeypatch.setattr(image_input_module, "open_no_follow_read", lambda _path: _OversizedFile())
 
@@ -406,6 +412,6 @@ def test_validate_image_path_strips_surrounding_whitespace(reference: str) -> No
     与 validate_image_input 的入参口径对齐；此前前导空白使分类落入 local 分支，
     非本地引用被拼接为畸形文件名误报路径错误。
     """
-    is_valid, error, normalized = validate_image_path(reference, base_dir="/nonexistent")
+    is_valid, error, normalized = validate_image_path(reference)
 
     assert (is_valid, error, normalized) == (True, "", None)

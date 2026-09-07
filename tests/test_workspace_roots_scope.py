@@ -12,9 +12,9 @@ import seedream_mcp.utils.io.io_path as io_path_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import workspace_roots_resource
-from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamMCPError
-from seedream_mcp.tools.runners import run_browse_images
+from seedream_mcp.tools.core.browse import _FALLBACK_BOUNDARY_PLACEHOLDER
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
+from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_scope
 
 from _log_fakes import RecordingLogger
@@ -160,12 +160,13 @@ async def test_run_browse_images_uses_mcp_roots_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """浏览工具以 MCP Roots 为边界：界内可浏览，env 根目录被拒绝。"""
+    """浏览工具以 MCP Roots 为工作区：存储根内可浏览，env 根目录被拒绝。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
-    mcp_root.mkdir()
-    (mcp_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    save_root = mcp_root / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
 
@@ -188,7 +189,7 @@ async def test_client_prepare_image_input_prefers_mcp_roots_over_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """参考图预处理以 MCP Roots 为边界，env 根内文件不可读。"""
+    """参考图预处理以 MCP Roots 为读权限，MCP 根内绝对路径可读。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
@@ -201,7 +202,7 @@ async def test_client_prepare_image_input_prefers_mcp_roots_over_env(
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
     async with workspace_roots_scope(_FakeContext([mcp_root])):
-        prepared = await client._prepare_image_input("local.png")
+        prepared = await client._prepare_image_input(str(image_path))
 
     assert prepared.startswith("data:image/")
 
@@ -210,7 +211,7 @@ async def test_client_prepare_image_input_allows_second_mcp_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """多个 MCP Roots 依序解析相对路径，第二个根内的文件同样可读。"""
+    """多个 MCP Roots 全部进入读权限，第二个根内的绝对路径文件同样可读。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     first_root = tmp_path / "root_a"
@@ -225,35 +226,38 @@ async def test_client_prepare_image_input_allows_second_mcp_root(
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
     async with workspace_roots_scope(_FakeContext([first_root, second_root])):
-        prepared = await client._prepare_image_input("target.png")
+        prepared = await client._prepare_image_input(str(image_path))
 
     assert prepared.startswith("data:image/")
 
 
-async def test_run_browse_images_denies_when_mcp_roots_empty(
+async def test_run_browse_images_falls_back_when_mcp_roots_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """客户端授权空 Roots 列表时浏览被拒绝，不回退 env 根放宽边界。"""
+    """空 Roots 声明等同未声明，浏览回退环境配置根的存储根。"""
     env_root = tmp_path / "env"
-    env_root.mkdir()
-    (env_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    save_root = env_root / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
         BrowseImagesInput(directory=".", recursive=False),
         workspace_roots=_roots_result([]),
     )
-    assert result.is_error is True
+    assert result.is_error is False
     assert isinstance(result.structured_content, dict)
-    assert result.structured_content["workspace_roots"] == []
+    assert result.structured_content["count"] == 1
+    # 空声明等同未声明，工作区回显按环境回退形态以占位符替代。
+    assert result.structured_content["workspace_roots"] == [_FALLBACK_BOUNDARY_PLACEHOLDER]
 
 
-async def test_client_prepare_image_input_denies_when_mcp_roots_empty(
+async def test_client_prepare_image_input_falls_back_when_mcp_roots_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """客户端授权空 Roots 列表时参考图读取被拒绝，不回退 env 根。"""
+    """空 Roots 声明等同未声明，参考图读取回退环境配置根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     image_path = env_root / "local.png"
@@ -263,42 +267,41 @@ async def test_client_prepare_image_input_denies_when_mcp_roots_empty(
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
     async with workspace_roots_scope(_FakeContext([])):
-        with pytest.raises(SeedreamConfigError, match="未授权任何工作区目录"):
-            await client._prepare_image_input("local.png")
+        prepared = await client._prepare_image_input(str(image_path))
+
+    assert prepared.startswith("data:image/")
 
 
-async def test_run_browse_images_relative_directory_resolves_all_roots(
+async def test_run_browse_images_relative_directory_resolves_against_save_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """相对目录在全部 Roots 下解析，命中第二个根内的嵌套目录。"""
+    """相对目录以存储根为基准解析，命中存储根内的嵌套目录。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
-    first_root = tmp_path / "root_a"
-    first_root.mkdir()
-    second_root = tmp_path / "root_b"
-    second_root.mkdir()
-    nested_dir = second_root / "assets"
-    nested_dir.mkdir()
-    (nested_dir / "from_second.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    mcp_root = tmp_path / "mcp"
+    save_root = mcp_root / ".seedream" / "images"
+    nested_dir = save_root / "assets"
+    nested_dir.mkdir(parents=True)
+    (nested_dir / "from_save_root.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
         BrowseImagesInput(directory="assets", recursive=False),
-        workspace_roots=_roots_result([first_root, second_root]),
+        workspace_roots=_roots_result([mcp_root]),
     )
 
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["count"] == 1
-    assert Path(result.structured_content["images"][0]["path"]) == Path("assets/from_second.png")
+    assert Path(result.structured_content["images"][0]["path"]) == Path("assets/from_save_root.png")
 
 
-async def test_run_browse_images_rejects_parent_escape_relative_path(
+async def test_run_browse_images_rejects_absolute_path_outside_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """.. 相对路径穿越出全部 Roots 时以结构化错误拒绝。"""
+    """绝对路径目录落在读权限（工作区 ∪ 存储根）之外时以结构化错误拒绝。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     first_root = tmp_path / "root_a"
@@ -308,7 +311,7 @@ async def test_run_browse_images_rejects_parent_escape_relative_path(
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
-        BrowseImagesInput(directory="..", recursive=False),
+        BrowseImagesInput(directory=str(tmp_path), recursive=False),
         ctx=_FakeContext([first_root, second_root]),
     )
 
@@ -331,16 +334,15 @@ async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
         assert get_workspace_root() == env_root.resolve()
 
 
-async def test_workspace_roots_scope_fails_closed_on_no_back_channel_without_env_root(
+async def test_workspace_roots_scope_falls_back_to_home_without_env_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无反向通道且无环境变量根时 fail-closed 抛错，不放宽边界到进程 CWD。"""
+    """无反向通道且无环境变量根时回退用户主目录，不放宽到进程 CWD。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
-    monkeypatch.setattr(io_path_module, "_env_workspace_root_provider", lambda: None)
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
 
-    with pytest.raises(SeedreamMCPError, match="SEEDREAM_WORKSPACE_ROOT"):
-        async with workspace_roots_scope(_NoBackChannelContext()):
-            raise AssertionError("无反向通道且无环境变量根时不得进入作用域")
+    async with workspace_roots_scope(_NoBackChannelContext()):
+        assert get_workspace_root() == Path.home().resolve()
 
 
 async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with_error_log(
@@ -379,20 +381,15 @@ async def test_workspace_roots_scope_errors_and_falls_back_on_generic_error(
     assert capture.warnings == []
 
 
-async def test_workspace_roots_scope_fails_closed_on_transient_error_without_env_root(
+async def test_workspace_roots_scope_transient_error_falls_back_to_home(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 瞬时失败且无环境变量根时与无反向通道同判定 fail-closed。
-
-    瞬时失败回退环境变量边界而未配置根时会放宽到进程 CWD，与 NoBackChannelError
-    分支同一风险形态，不得因失败可重试而放宽边界。
-    """
+    """roots/list 瞬时失败且无环境变量根时回退用户主目录，不放宽到进程 CWD。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
-    monkeypatch.setattr(io_path_module, "_env_workspace_root_provider", lambda: None)
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
 
-    with pytest.raises(SeedreamMCPError, match="SEEDREAM_WORKSPACE_ROOT"):
-        async with workspace_roots_scope(_TimeoutContext()):
-            raise AssertionError("瞬时失败且无环境变量根时不得进入作用域")
+    async with workspace_roots_scope(_TimeoutContext()):
+        assert get_workspace_root() == Path.home().resolve()
 
 
 async def test_workspace_roots_scope_transient_error_falls_back_to_env_root_with_error_log(
@@ -461,10 +458,11 @@ async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 失败时浏览回退 env 根，仍可浏览界内图片。"""
+    """roots/list 失败时浏览回退 env 根的存储根，仍可浏览界内图片。"""
     env_root = tmp_path / "env"
-    env_root.mkdir()
-    (env_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    save_root = env_root / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
@@ -491,7 +489,7 @@ async def test_client_prepare_image_input_falls_back_to_env_when_list_roots_fail
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
     async with workspace_roots_scope(_FailingContext()):
-        prepared = await client._prepare_image_input("local.png")
+        prepared = await client._prepare_image_input(str(image_path))
 
     assert prepared.startswith("data:image/")
 

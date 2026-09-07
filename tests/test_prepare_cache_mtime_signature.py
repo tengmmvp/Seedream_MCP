@@ -16,6 +16,7 @@ async def test_prepare_image_input_invalidates_cache_when_local_file_size_change
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """本地文件 size 变化后 (mtime, size) 签名失效，第二次调用重新走底层 prepare。"""
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
     config = SeedreamConfig(api_key="test_key", max_retries=1)
     client = SeedreamClient(config)
     roots_key = (str(tmp_path),)

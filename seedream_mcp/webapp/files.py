@@ -14,12 +14,10 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
-from ..config import get_active_config
-from ..tools.core._helpers import resolve_default_base_dir
-from ..utils.core.errors import SeedreamValidationError
+from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS
 from ..utils.images.image_thumbnail import build_thumbnail_bytes_limited
-from ..utils.io.io_path import is_within_resolved, normalize_path
+from ..utils.io.io_path import is_within_resolved, normalize_path, resolve_save_root
 from . import _shared
 
 
@@ -62,15 +60,14 @@ async def _resolve_request_path(request: Request) -> Path | Response:
     Returns:
         落在保存根内的物理路径；解析失败时为对应的 400/404 错误响应。
     """
-    config = get_active_config()
     rel = request.query_params.get("path", "")
 
     def _resolve() -> Path:
-        return resolve_web_relative_path(rel, resolve_default_base_dir(config))
+        return resolve_web_relative_path(rel, resolve_save_root())
 
     try:
         return await asyncio.to_thread(_resolve)
-    except SeedreamValidationError as exc:
+    except SeedreamConfigError as exc:
         return _shared.save_root_unavailable(exc)
     except ValueError as exc:
         return _shared.error_json("invalid_path", str(exc), 400)

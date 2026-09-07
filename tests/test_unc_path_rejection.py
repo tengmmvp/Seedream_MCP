@@ -162,6 +162,25 @@ def test_normalize_path_rejects_drive_relative_path(base_dir: str | None) -> Non
         normalize_path("C:foo.png", base_dir)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="有根无盘符仅 Windows 有 root 无 drive 语义")
+@pytest.mark.parametrize("base_dir", [None, str(Path.cwd())])
+@pytest.mark.parametrize("bad", ["/out", "/a/b", "\\out"])
+def test_normalize_path_rejects_rooted_no_drive_path(bad: str, base_dir: str | None) -> None:
+    """Windows 有根无盘符路径 /out 有 root 无 drive，与驱动器相对同口径拒绝。
+
+    该形态 is_absolute 判为 False 走相对分支，但 pathlib 拼接锚定重置会丢弃
+    base_dir 落到所在盘盘根，静默写出基础目录之外。
+    """
+    with pytest.raises(ValueError, match="有根无盘符"):
+        normalize_path(bad, base_dir)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 上 /out 即合法绝对路径")
+def test_normalize_path_posix_treats_rooted_as_absolute() -> None:
+    """POSIX 上有 root 无 drive 即普通绝对路径，不受 Windows 拒绝分支影响。"""
+    assert normalize_path("/tmp/x.png") == Path("/tmp/x.png").resolve()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对路径仅 Windows 有 drive 语义")
 def test_normalize_path_accepts_drive_absolute_path(tmp_path: Path) -> None:
     """带根分隔符的驱动器绝对路径 C:\\foo 不受驱动器相对拒绝影响。"""
@@ -272,24 +291,25 @@ def test_resolve_local_image_candidate_skips_unc_without_resolve(
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
-    assert resolve_local_image_candidate("\\\\attacker\\share\\x.png", [tmp_path]) is None
-    assert resolve_local_image_candidate("//attacker/share/x.png", [tmp_path]) is None
+    assert resolve_local_image_candidate("\\\\attacker\\share\\x.png") is None
+    assert resolve_local_image_candidate("//attacker/share/x.png") is None
 
 
 def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """UNC 根下相对路径拼接出的候选在 resolve 前被逐候选守卫拦截。
+    """UNC 形态输入不进入 resolve，直接交诊断分支处理。
 
-    输入级检查只覆盖 UNC 直接输入；UNC 根拼出的候选同样以 UNC 前缀开头，resolve
-    会触发 SMB 认证。断言 UNC 候选未进入 resolve，合法路径的 resolve 不误报。
+    输入级检查覆盖 UNC 直接输入；UNC 路径的 resolve 会触发 SMB 认证。断言 UNC
+    输入未进入 resolve，合法路径的 resolve 不误报。
     """
     from seedream_mcp.utils.images.image_input import _resolves_outside_workspace
+    from seedream_mcp.utils.io.io_path import get_read_context
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
+    _, save_root, read_scope = get_read_context()
 
-    unc_root = Path("\\\\attacker\\share")
-    assert _resolves_outside_workspace("relative/x.png", [unc_root]) is True
+    assert _resolves_outside_workspace("\\\\attacker\\share\\x.png", save_root, read_scope) is False
 
 
 def test_validate_image_input_rejects_unc_before_resolve(
@@ -316,9 +336,7 @@ def test_validate_image_input_rejects_unc_before_resolve(
 @pytest.mark.skipif(
     sys.platform != "win32", reason="冒号分量拒绝仅 win32 生效，POSIX 冒号是合法文件名字符"
 )
-def test_resolve_local_image_candidate_rejects_ads_colon_reference(
-    tmp_path: Path,
-) -> None:
+def test_resolve_local_image_candidate_rejects_ads_colon_reference() -> None:
     """候选定位入口对 ADS 形态输入直接抛校验错误，先于候选构造与 stat。
 
     名字形态即可触发拒绝，无需构造真实 NTFS 流。
@@ -327,7 +345,7 @@ def test_resolve_local_image_candidate_rejects_ads_colon_reference(
     from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
 
     with pytest.raises(SeedreamValidationError, match="备用数据流") as exc_info:
-        resolve_local_image_candidate("photo.jpg:ads.png", [tmp_path.resolve()])
+        resolve_local_image_candidate("photo.jpg:ads.png")
 
     assert exc_info.value.field == "image"
     assert exc_info.value.value == "photo.jpg:ads.png"

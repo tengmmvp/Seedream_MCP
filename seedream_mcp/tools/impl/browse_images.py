@@ -26,10 +26,10 @@ async def handle_browse_images(
     params: BrowseImagesInput,
     ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
-    """处理图片浏览请求，扫描工作区内指定目录的图片并分页返回。
+    """处理图片浏览请求，扫描读权限（工作区 ∪ 存储根）内指定目录的图片并分页返回。
 
-    仅允许访问工作区 Roots 授权的目录；未预期异常降级为结构化错误返回，不向
-    调用方抛出。
+    无会话 Roots 声明时工作位置经声明链回退；未预期异常降级为结构化错误返回，
+    不向调用方抛出。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。

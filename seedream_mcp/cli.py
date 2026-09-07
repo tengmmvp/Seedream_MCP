@@ -159,7 +159,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="streamable-http 启用无状态模式，默认关闭。仅影响 2025 规范的有会话 legacy "
         "客户端链路，2026-07-28 客户端本就无会话；开启后 legacy 会话失去反向通道，"
         "MCP Roots 不可读，本地文件访问边界回退 SEEDREAM_WORKSPACE_ROOT，未配置时"
-        "相关工具直接失败",
+        "经声明链保底用户主目录",
     )
     web_group = parser.add_mutually_exclusive_group()
     web_group.add_argument(

@@ -1,4 +1,4 @@
-"""Web 操作台图库浏览 API 测试：保存根边界、相对路径输出与分页。"""
+"""Web 操作台图库浏览 API 测试：读权限边界、相对路径输出与分页。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ async def _post_browse(app: Any, body: dict[str, Any]) -> httpx.Response:
 async def test_browse_lists_images_with_relative_paths(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """保存根内图片以相对路径返回，不出现盘符绝对路径，边界回显字段被剥除。"""
+    """存储根内图片以相对路径返回，不出现盘符绝对路径，边界回显字段被剥除。"""
     save_root = write_workspace_config(tmp_path)
     day_dir = save_root / "2026-08-20" / "text_to_image"
     day_dir.mkdir(parents=True)
@@ -96,32 +96,53 @@ async def test_browse_internal_error_returns_500_json(
     assert response.json()["error"] == "internal_error"
 
 
-async def test_browse_rejects_directory_escaping_save_root(
+async def test_browse_rejects_directory_outside_save_root(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """directory 上跳越出保存根被端点拒绝，回退链边界宽于保存根不放大浏览范围。"""
-    save_root = write_workspace_config(tmp_path)
+    """读权限（工作区）内、存储根外的目录在端点拒绝：Web 文件端点仅服务存储根。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"directory": str(tmp_path)})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "invalid_directory"
+    assert "保存根" in body["error_description"]
+
+
+async def test_browse_rejects_directory_outside_read_scope(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """读权限之外的绝对路径目录同样在端点以 400 拒绝，不进入核心扫描。"""
+    write_workspace_config(tmp_path)
+    outside = tmp_path.parent / "seedream-browse-outside"
+    outside.mkdir(exist_ok=True)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"directory": str(outside)})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_directory"
+
+
+async def test_browse_rejects_parent_escape_relative_directory(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
+) -> None:
+    """相对 ``..`` 穿越解析出存储根的请求目录被端点拒绝，不回显服务器路径。"""
+    write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_browse(app, {"directory": ".."})
 
     assert response.status_code == 400
-    body = response.json()
-    assert body["error"] == "invalid_request"
-    assert "保存根" in body["error_description"]
-    assert str(save_root) not in response.text
+    assert response.json()["error"] == "invalid_directory"
 
 
-async def test_browse_rejects_unc_directory_before_any_filesystem_access(
-    tmp_path: Path,
-    clean_web_routes: None,
-    reset_http_app_state: None,
+async def test_browse_rejects_unc_directory_as_clean_400(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """UNC 形态 directory 在 resolve 前被拒，不触发 SMB 连接或裸异常。
-
-    字符串级拒绝的消息明确点名 UNC 与 SMB；若拒绝失效改为真实连接，
-    错误形态退化为 OSError 包装文本，断言随之失败。
-    """
+    """UNC 形态 directory 在 browse 核心 resolve 前被拒，端点回统一 400。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -129,27 +150,27 @@ async def test_browse_rejects_unc_directory_before_any_filesystem_access(
 
     assert response.status_code == 400
     body = response.json()
-    assert body["error"] == "invalid_request"
-    assert "UNC" in body["error_description"] or "SMB" in body["error_description"]
+    assert body["error"]["type"] == "browse_failed"
+    assert "UNC" in body["error"]["message"]
 
 
 async def test_browse_rejects_null_byte_directory_as_clean_400(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """空字节 directory 映射为统一 400，不以裸 ValueError 逃出端点。"""
+    """空字节 directory 在 browse 核心被输入级拒绝，端点回统一 400。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_browse(app, {"directory": "a\u0000b"})
 
     assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
+    assert response.json()["error"]["type"] == "browse_failed"
 
 
 async def test_browse_echoes_original_directory_not_absolute_save_root(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """成功响应的 directory 回显用户原始输入，绝对保存根路径不出端点。"""
+    """成功响应的 directory 回显用户原始输入，绝对存储根路径不出端点。"""
     save_root = write_workspace_config(tmp_path)
     day_dir = save_root / "2026-08-21"
     day_dir.mkdir()
@@ -163,17 +184,16 @@ async def test_browse_echoes_original_directory_not_absolute_save_root(
     assert str(save_root) not in response.text
 
 
-async def test_browse_reports_save_root_outside_workspace_boundary(
-    tmp_path: Path,
-    clean_web_routes: None,
-    reset_http_app_state: None,
+async def test_browse_serves_explicit_save_root_outside_workspace(
+    tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """显式保存根越出工作区边界时报配置指引，不产生误导性目录越界错误。"""
+    """显式存储根独立于工作区时图库正常浏览，读权限包含存储根自身。"""
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
     outside_root = tmp_path / "elsewhere"
-    outside_root.mkdir()
-    (outside_root / "a.png").write_bytes(make_png_bytes())
+    day_dir = outside_root / "2026-08-22"
+    day_dir.mkdir(parents=True)
+    (day_dir / "a.png").write_bytes(make_png_bytes())
     set_active_config(
         SeedreamConfig(
             api_key="test_key",
@@ -184,50 +204,35 @@ async def test_browse_reports_save_root_outside_workspace_boundary(
     (tmp_path / "ws").mkdir()
     app = build_web_app()
 
-    response = await _post_browse(app, {})
+    response = await _post_browse(app, {"show_details": True})
 
-    assert response.status_code == 400
-    body = response.json()
-    assert body["error"] == "save_root_outside_workspace"
-    assert "SEEDREAM_WORKSPACE_ROOT" in body["error_description"]
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["images"][0]["path"] == "2026-08-22/a.png"
 
 
 async def test_browse_save_root_unavailable_returns_400(
-    clean_web_routes: None, reset_http_app_state: None
-) -> None:
-    """保存根不可解析时回 400 save_root_unavailable，携带配置指引文案。"""
-    import seedream_mcp.utils.io.io_path as io_path_module
-
-    app = build_web_app()
-    token = io_path_module._WORKSPACE_ROOTS_VAR.set([])
-    try:
-        response = await _post_browse(app, {"show_details": True})
-    finally:
-        io_path_module._WORKSPACE_ROOTS_VAR.reset(token)
-
-    assert response.status_code == 400
-    payload = response.json()
-    assert payload["error"] == "save_root_unavailable"
-    assert "SEEDREAM_WORKSPACE_ROOT" in payload["error_description"]
-
-
-async def test_browse_rejects_resolved_directory_exceeding_length_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """resolved 绝对路径超出 directory 长度上界时回 400，不绕过输入契约。
+    """显式存储声明无法解析时回 400 save_root_unavailable，携带配置指引文案。"""
+    import seedream_mcp.utils.io.io_path as io_path_module
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
-    model_copy(update=...) 跳过字段校验，长度上界经端点手工复核兜底。
-    """
-    from seedream_mcp.webapp import gallery as gallery_module
+    def _unresolvable(configured_dir: str) -> Path:
+        raise OSError("simulated unresolvable path")
 
     write_workspace_config(tmp_path)
-    monkeypatch.setattr(gallery_module, "DIRECTORY_MAX_LENGTH", 8)
+    set_active_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
     app = build_web_app()
 
     response = await _post_browse(app, {"show_details": True})
 
     assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
+    payload = response.json()
+    assert payload["error"] == "save_root_unavailable"
+    assert "SEEDREAM_WORKSPACE_ROOT" in payload["error_description"]

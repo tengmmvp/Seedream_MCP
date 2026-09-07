@@ -1,8 +1,8 @@
 """图片浏览工具的核心执行流水线。
 
-工作区边界读取、请求目录解析、越界过滤扫描、分页配额与 structuredContent 装配；
-不经 ``execute_generation_handler`` 生成流水线，由 impl 处理器薄壳委托调用，未预期
-异常不在本模块捕获，统一由外层兜底降级。
+读权限求值（工作区 ∪ 存储根）、请求目录解析、越界过滤扫描、分页配额与
+structuredContent 装配；不经 ``execute_generation_handler`` 生成流水线，由 impl
+处理器薄壳委托调用，未预期异常不在本模块捕获，统一由外层兜底降级。
 """
 
 from __future__ import annotations
@@ -20,17 +20,17 @@ from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import (
     find_images_in_directory,
+    get_read_context,
     get_relative_path,
     get_workspace_roots,
     is_boundary_from_session_roots,
     is_within_resolved,
     normalize_path,
-    resolve_workspace_roots,
+    save_root_relative,
 )
 from ...utils.io.io_scan import cached_find_images_in_directory
 from ._helpers import (
     PROGRESS_COMPLETE,
-    PROGRESS_SCAN_SPAN,
     PROGRESS_SCAN_START,
     safe_report_progress,
 )
@@ -42,8 +42,8 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-# 回退边界占位回显：边界来自 env/CWD 回退而非会话 Roots 声明时，不向调用方回显
-# 服务器本地路径，结构化回显字段以本占位符替代，文本消息改用不含路径的文案。
+# 回退边界占位回显：边界来自环境变量或主目录回退而非会话 Roots 声明时，不向调用方
+# 回显服务器本地路径，结构化回显字段以本占位符替代，文本消息改用不含路径的文案。
 _FALLBACK_BOUNDARY_PLACEHOLDER = "<工作区根（服务器配置）>"
 
 
@@ -181,7 +181,16 @@ def _build_browse_structured_result(
     """
     if is_boundary_from_session_roots():
         workspace_root_values = [str(root) for root in state.workspace_roots]
-        resolved_directory_values = [str(item) for item in state.resolved_directories]
+        # 解析目录逐项判定是否落在会话 Roots 内：默认浏览解析到服务器配置的存储根，
+        # 显式存储声明可位于 Roots 之外，越出客户端授权空间的部分以占位符回显。
+        resolved_directory_values = [
+            (
+                str(item)
+                if any(is_within_resolved(item, root) for root in state.workspace_roots)
+                else _FALLBACK_BOUNDARY_PLACEHOLDER
+            )
+            for item in state.resolved_directories
+        ]
     else:
         workspace_root_values = [_FALLBACK_BOUNDARY_PLACEHOLDER] if state.workspace_roots else []
         resolved_directory_values = (
@@ -244,14 +253,14 @@ def _scan_and_filter_directory(
     max_depth: int,
     format_filter: list[str] | None,
     remaining: int,
-    resolved_roots: list[Path],
+    read_scope: list[Path],
     seen_images: set[Path],
     unreadable_dirs: list[Path],
 ) -> list[tuple[Path, Path]]:
     """扫描单个目录并做越界判定与去重，返回新增的 (原始路径, resolved 路径) 列表。
 
     同步执行，由调用方经 ``asyncio.to_thread`` 在线程内调用。图片的 resolve 结果由扫描
-    缓存共享；越界复核与去重不随缓存固化，每次按当前工作区根重新执行。剔除项不占分页
+    缓存共享；越界复核与去重不随缓存固化，每次按当前读权限重新执行。剔除项不占分页
     配额：扫描命中上限且配额未填满时，按剔除计数扩大 scan_limit 补扫，直至填满配额、
     扫到目录末尾或无剔除项。
 
@@ -261,10 +270,11 @@ def _scan_and_filter_directory(
         max_depth: 递归扫描的最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         remaining: 本目录新增条数的配额上限。
-        resolved_roots: 已 resolve 的工作区根列表，越界判定基准。
-        seen_images: 跨目录共享的已见原始路径集合，就地更新。
-        unreadable_dirs: 跨目录共享的不可读目录收集列表，就地更新，供空结果分支区分
-            目录不可读与目录内无图片。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储根），越界判定基准。
+        seen_images: 已见原始路径集合，就地更新，兜底扫描缓存前缀扩展轮次间的
+            竞态错位重复。
+        unreadable_dirs: 不可读目录收集列表，就地更新，供空结果分支区分目录
+            不可读与目录内无图片。
 
     Returns:
         新增 (原始路径, resolved 路径) 元组列表，长度不超过 remaining。
@@ -290,8 +300,8 @@ def _scan_and_filter_directory(
         while consumed < len(matched_image_pairs):
             image_path, image_resolved = matched_image_pairs[consumed]
             consumed += 1
-            # resolve 结果来自扫描缓存；根已 resolve，直接比较。
-            if not any(is_within_resolved(image_resolved, root) for root in resolved_roots):
+            # resolve 结果来自扫描缓存；权限目录已 resolve，直接比较。
+            if not any(is_within_resolved(image_resolved, scope) for scope in read_scope):
                 logger.warning("检测到越界图片路径，已忽略: {}", image_path)
                 dropped += 1
                 continue
@@ -313,37 +323,44 @@ def _build_display_entries(
     *,
     images: list[Path],
     image_resolved_map: dict[Path, Path],
-    resolved_roots: list[Path],
+    save_root: Path,
+    scan_base: Path,
     show_details: bool,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """组装展示文本与结构化图片条目。
+    """组装展示文本与结构化图片条目，条目路径按边界取可直接使用的形态。
 
     文件系统相关计算集中在本函数同步执行，由调用方经 ``asyncio.to_thread`` 在线程内
-    调用，避免网络挂载目录的 stat 阻塞事件循环。越界判定单一权威在扫描层，本函数
-    不再复核，仅取首个包含根作相对化基准。
+    调用，避免网络挂载目录的 stat 阻塞事件循环。存储根内条目为存储根相对，与
+    image 参数的相对解析基准一致，可直接回流。存储根外条目按边界分派：会话 Roots
+    声明下回显绝对路径（所列目录本就是客户端声明的授权空间，可直接回流）；回退
+    边界下相对本次扫描目录展示，不泄露服务器路径，调用方拼接所浏览目录前缀后
+    作为绝对路径使用。
 
     Args:
         images: 当前页的图片原始路径列表，已经扫描层越界过滤与去重。
         image_resolved_map: 原始路径到 resolved 路径的映射，由扫描阶段填充。
-        resolved_roots: 已 resolve 的工作区根列表，供选取相对化基准。
+        save_root: 已 resolve 的存储根，存储根内条目的相对化基准。
+        scan_base: 本次扫描的已解析目录，回退边界下存储根外条目的相对化基准。
         show_details: 是否附带大小与修改时间详情。
 
     Returns:
         (展示文本行列表，结构化图片条目列表)，文本行不含「图片列表:」标题头。
     """
+    session_boundary = is_boundary_from_session_roots()
     lines: list[str] = []
     structured_images: list[dict[str, Any]] = []
     for idx, img in enumerate(images, 1):
         img_resolved = image_resolved_map[img]
-        # 扫描层已按同一 resolved_roots 完成越界过滤，未命中仅为根列表在扫描后发生
-        # 变化的极端兜底，回退首根并交由 get_relative_path 退化为绝对路径展示。
-        display_base = next(
-            (root for root in resolved_roots if is_within_resolved(img_resolved, root)),
-            resolved_roots[0],
-        )
         # 文件名来自服务器文件系统，经净化后才进入文本与结构化两条通道，与生成
-        # 通道的净化口径一致。
-        display_path = sanitize_data_text(get_relative_path(img_resolved, str(display_base)))
+        # 通道的净化口径一致；相对路径归一正斜杠，跨平台口径一致。
+        relative = save_root_relative(img_resolved, save_root)
+        if relative is None:
+            if session_boundary:
+                # 绝对路径归一正斜杠，与存储根相对条目同口径，混排页分隔符一致。
+                relative = str(img_resolved).replace("\\", "/")
+            else:
+                relative = get_relative_path(img_resolved, str(scan_base)).replace("\\", "/")
+        display_path = sanitize_data_text(relative)
         detail_text, details = _format_file_info(display_path, img_resolved, show_details)
         lines.append(f"{idx}. {detail_text}")
         entry: dict[str, Any] = {"index": idx, "path": display_path}
@@ -411,64 +428,52 @@ async def build_browse_fallback_result(
 
 async def _resolve_browse_directories(
     directory: str,
-) -> tuple[list[Path], list[Path], list[Path], str | None]:
-    """目录解析阶段：读取工作区根并解析请求目录，供越界判定与扫描取用。"""
+) -> tuple[list[Path], Path, list[Path], Path | None, str | None]:
+    """目录解析阶段：求值读权限与存储根并解析请求目录，供越界判定与扫描取用。
 
-    # 工作区根读取与请求目录的 resolve/normalize 可能阻塞网络挂载目录，整体下沉
-    # 线程；会话 Roots 时边界为 ContextVar 直读，下沉无额外开销。后续以已 resolve
-    # 的根直接比较；structuredContent 仍回显原始 workspace_roots。
-    def _read_roots_and_resolve_dirs() -> tuple[list[Path], list[Path], list[Path], str | None]:
-        """读取工作区根并解析请求目录，返回根列表、resolved 根、目录列表与错误消息。"""
-        workspace_roots = get_workspace_roots()
-        resolved_root_list = resolve_workspace_roots(workspace_roots)
-        resolved_dir_list: list[Path] = []
-        if Path(directory).is_absolute():
-            try:
-                absolute_dir = normalize_path(directory)
-            except ValueError as exc:
-                # 异常消息内含用户输入路径，经净化后才进入错误通道。
-                return (
-                    workspace_roots,
-                    resolved_root_list,
-                    [],
-                    sanitize_error_text(f"目录路径无效: {exc}"),
-                )
-            if not any(is_within_resolved(absolute_dir, base) for base in resolved_root_list):
-                return workspace_roots, resolved_root_list, [], None
-            resolved_dir_list.append(absolute_dir)
-        else:
-            for root in resolved_root_list:
-                try:
-                    candidate = normalize_path(directory, str(root))
-                except ValueError as exc:
-                    # 规范化失败由 UNC、驱动器相对、非法字符等路径自身缺陷决定，与
-                    # 拼接的根无关，与绝对分支同口径返回「目录路径无效」；路径合法但
-                    # 全部越界落到下方的超出范围分支。异常消息内含用户输入路径，
-                    # 经净化后进入错误通道。
-                    return (
-                        workspace_roots,
-                        resolved_root_list,
-                        [],
-                        sanitize_error_text(f"目录路径无效: {exc}"),
-                    )
-                if not is_within_resolved(candidate, root):
-                    continue
-                if candidate not in resolved_dir_list:
-                    resolved_dir_list.append(candidate)
-        return workspace_roots, resolved_root_list, resolved_dir_list, None
+    解析成功返回单个已 resolve 目录；路径无效携带错误消息，越界返回 None。
+    """
 
-    return await asyncio.to_thread(_read_roots_and_resolve_dirs)
+    # 读权限求值与请求目录的 resolve/normalize 可能阻塞网络挂载目录，整体下沉
+    # 线程；会话 Roots 时工作区为 ContextVar 直读，下沉无额外开销。后续以已
+    # resolve 的目录直接比较；structuredContent 仍回显原始 workspace_roots。
+    def _read_scope_and_resolve_dir() -> (
+        tuple[list[Path], Path, list[Path], Path | None, str | None]
+    ):
+        """求值工作区、存储根与读权限并解析请求目录，返回五元组。
+
+        三类位置经 get_read_context 单点求值共享，消除本函数内对存储根与工作区
+        的重复解析。
+        """
+        workspace_roots, save_root, read_scope = get_read_context()
+        try:
+            # 相对路径以存储根为基准；默认目录 "." 即存储根本身。
+            resolved_dir = normalize_path(directory, str(save_root))
+        except ValueError as exc:
+            # 异常消息内含用户输入路径，经净化后才进入错误通道。
+            return (
+                workspace_roots,
+                save_root,
+                read_scope,
+                None,
+                sanitize_error_text(f"目录路径无效: {exc}"),
+            )
+        if not any(is_within_resolved(resolved_dir, scope) for scope in read_scope):
+            return workspace_roots, save_root, read_scope, None, None
+        return workspace_roots, save_root, read_scope, resolved_dir, None
+
+    return await asyncio.to_thread(_read_scope_and_resolve_dir)
 
 
 async def _scan_browse_entries(
     *,
     ctx: Context[Any, Any] | None,
     state: _BrowseRequestState,
-    resolved_directories: list[Path],
-    resolved_roots: list[Path],
+    resolved_dir: Path,
+    read_scope: list[Path],
     format_filter_exhausted: bool,
 ) -> tuple[list[Path], dict[Path, Path], list[Path]]:
-    """扫描阶段：逐目录扫描并合并越界过滤与去重后的图片条目，上报扫描进度。"""
+    """扫描阶段：扫描请求目录并合并越界过滤与去重后的图片条目，上报扫描进度。"""
     # scan_limit 多取一张用于判定 has_more；越界与重复项的剔除及补扫见
     # _scan_and_filter_directory。format_filter_exhausted 时跳过扫描与进度上报，
     # 由空结果分支统一返回。
@@ -478,33 +483,22 @@ async def _scan_browse_entries(
     unreadable_dirs: list[Path] = []
     if not format_filter_exhausted:
         await safe_report_progress(ctx, progress=PROGRESS_SCAN_START, message="开始扫描图片目录")
+        # seen_images 兜底单目录内缓存前缀扩展的竞态错位重复。
         seen_images: set[Path] = set()
-        total_dirs = len(resolved_directories)
-        for dir_index, resolved_dir in enumerate(resolved_directories, start=1):
-            if len(all_images) >= scan_limit:
-                break
-            remaining = scan_limit - len(all_images)
-            new_entries = await asyncio.to_thread(
-                _scan_and_filter_directory,
-                resolved_dir=resolved_dir,
-                recursive=state.recursive,
-                max_depth=state.max_depth,
-                format_filter=state.format_filter,
-                remaining=remaining,
-                resolved_roots=resolved_roots,
-                seen_images=seen_images,
-                unreadable_dirs=unreadable_dirs,
-            )
-            for image_path, image_resolved in new_entries:
-                all_images.append(image_path)
-                image_resolved_map[image_path] = image_resolved
-            # 多目录按已扫目录占比上报进度；上报须留在事件循环，不能在线程内调用 ctx。
-            if total_dirs > 1:
-                await safe_report_progress(
-                    ctx,
-                    progress=PROGRESS_SCAN_START + PROGRESS_SCAN_SPAN * dir_index / total_dirs,
-                    message=f"已扫描 {dir_index}/{total_dirs} 个目录，找到 {len(all_images)} 张图片",
-                )
+        new_entries = await asyncio.to_thread(
+            _scan_and_filter_directory,
+            resolved_dir=resolved_dir,
+            recursive=state.recursive,
+            max_depth=state.max_depth,
+            format_filter=state.format_filter,
+            remaining=scan_limit,
+            read_scope=read_scope,
+            seen_images=seen_images,
+            unreadable_dirs=unreadable_dirs,
+        )
+        for image_path, image_resolved in new_entries:
+            all_images.append(image_path)
+            image_resolved_map[image_path] = image_resolved
     return all_images, image_resolved_map, unreadable_dirs
 
 
@@ -561,8 +555,19 @@ async def _build_empty_browse_result(
     if unreadable_dirs:
         unique_unreadable = list(dict.fromkeys(unreadable_dirs))
         if is_boundary_from_session_roots():
-            # 目录路径来自服务器文件系统，逐项净化后才拼入用户可见消息。
-            dirs_text = ", ".join(sanitize_data_text(str(item)) for item in unique_unreadable)
+            # 落在会话 Roots 内的目录是客户端授权空间可回显；Roots 外的服务器目录
+            # （如显式存储根位于 Roots 之外时的子目录）不回显路径。
+            session_roots = get_workspace_roots()
+            named = [
+                str(item)
+                for item in unique_unreadable
+                if any(is_within_resolved(item, root) for root in session_roots)
+            ]
+            parts = [", ".join(sanitize_data_text(item) for item in named)] if named else []
+            hidden = len(unique_unreadable) - len(named)
+            if hidden:
+                parts.append(f"另有 {hidden} 个目录不回显路径")
+            dirs_text = "，".join(parts)
         else:
             # 回退边界不回显路径，仅按数量提示，明细进日志。
             dirs_text = f"{len(unique_unreadable)} 个目录（回退边界场景不回显路径）"
@@ -589,7 +594,8 @@ async def _build_browse_success_result(
     state: _BrowseRequestState,
     images: list[Path],
     image_resolved_map: dict[Path, Path],
-    resolved_roots: list[Path],
+    save_root: Path,
+    scan_base: Path,
     has_more: bool,
     next_offset: int | None,
     total_count: int | None,
@@ -599,7 +605,8 @@ async def _build_browse_success_result(
         _build_display_entries,
         images=images,
         image_resolved_map=image_resolved_map,
-        resolved_roots=resolved_roots,
+        save_root=save_root,
+        scan_base=scan_base,
         show_details=state.show_details,
     )
     lines = ["图片列表:"] + display_lines
@@ -631,11 +638,11 @@ async def execute_browse_request(
     *,
     resolved_directories: list[Path],
 ) -> CallToolResult:
-    """执行图片浏览主逻辑：读取边界、解析目录、扫描分页并装配工具结果。
+    """执行图片浏览主逻辑：求值读权限、解析目录、扫描分页并装配工具结果。
 
-    仅允许访问工作区 Roots 授权的目录；扫描结果经扫描缓存加速翻页，切片多取一张
-    以判定 has_more。未预期异常向上抛出，由 impl 外层 ``handle_browse_images`` 兜底
-    降级。
+    目录解析以存储根为基准，判定面向读权限（工作区 ∪ 存储根）；扫描结果经扫描
+    缓存加速翻页，切片多取一张以判定 has_more。未预期异常向上抛出，由 impl 外层
+    ``handle_browse_images`` 兜底降级。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
@@ -650,7 +657,7 @@ async def execute_browse_request(
     raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
     directory = params.directory if params.directory is not None else "."
 
-    workspace_roots, resolved_roots, resolved_dir_list, dir_error = (
+    workspace_roots, save_root, read_scope, resolved_dir, dir_error = (
         await _resolve_browse_directories(directory)
     )
 
@@ -661,26 +668,19 @@ async def execute_browse_request(
         format_filter=raw_format_filter,
     )
 
-    if not workspace_roots:
-        message = "当前 MCP 会话未授权任何工作区目录，无法浏览本地文件。"
-        return _build_browse_error(state=state, message=message)
-
     if dir_error is not None:
         return _build_browse_error(state=state, message=dir_error)
-    resolved_directories.extend(resolved_dir_list)
-
-    if not resolved_directories:
-        # 回退边界下不回显允许根清单，避免暴露服务器环境结构。
-        if is_boundary_from_session_roots():
-            allowed_roots = ", ".join(str(root) for root in workspace_roots)
-            message = f"目录超出允许范围。仅允许浏览工作区目录: {allowed_roots}"
-        else:
-            message = "目录超出允许范围。仅允许浏览服务器配置的工作区目录。"
+    if resolved_dir is None:
+        message = (
+            "目录不在读取范围内；可通过客户端工作区（MCP Roots）、"
+            "SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR 授权该目录"
+        )
         return _build_browse_error(state=state, message=message)
+    resolved_directories.append(resolved_dir)
 
     logger.info(
-        "浏览图片: dirs={}, recursive={}, max_depth={}, limit={}",
-        resolved_directories,
+        "浏览图片: dir={}, recursive={}, max_depth={}, limit={}",
+        resolved_dir,
         state.recursive,
         state.max_depth,
         state.limit,
@@ -689,8 +689,8 @@ async def execute_browse_request(
     all_images, image_resolved_map, unreadable_dirs = await _scan_browse_entries(
         ctx=ctx,
         state=state,
-        resolved_directories=resolved_directories,
-        resolved_roots=resolved_roots,
+        resolved_dir=resolved_dir,
+        read_scope=read_scope,
         format_filter_exhausted=format_filter_exhausted,
     )
 
@@ -714,7 +714,8 @@ async def execute_browse_request(
         state=state,
         images=images,
         image_resolved_map=image_resolved_map,
-        resolved_roots=resolved_roots,
+        save_root=save_root,
+        scan_base=resolved_dir,
         has_more=has_more,
         next_offset=next_offset,
         total_count=total_count,

@@ -291,7 +291,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - `prompt` (選用) - 圖像修改要求或風格轉換指令，建議不超過 300 個漢字或 600 個英文單字；僅圖層拆分場景可缺省，由模型自動識別拆分意圖
 - `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 5.0 Pro / 4.0 支援
-- `image` (必要) - 輸入圖像，支援圖像 URL、本地檔案路徑或 Base64 圖片資料
+- `image` (必要) - 輸入圖像，支援圖像 URL、本地檔案路徑或 Base64 圖片資料；相對路徑以儲存根（圖片儲存目錄）為基準
 - `layer_decomposition` (選用) - 是否開啟圖層拆分，僅 5.0 Pro 支援；開啟後將單張輸入圖拆解為 1 張底圖與最多 16 個帶透明通道的 PNG 圖層，圖層條目額外回傳 `z_index`、`name`、`description`、`bounding_box` 欄位；`output_format` 僅控制底圖格式，圖層恆為 PNG
 - `background` (選用) - 透明通道，`transparent` 生成透明背景圖（需輸入單張帶透明通道的圖片，與 `output_format=jpeg` 互斥）或 `opaque` 生成常規圖，僅 5.0 Pro 支援
 - `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容；圖層拆分場景僅支援檔位與 `auto`（按輸入圖自適應，未指定尺寸時的預設值）
@@ -313,7 +313,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "name": "image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": ".seedream/images/2026-08-15/image_to_image/portrait.jpeg"
+    "image": "2026-08-15/image_to_image/portrait.jpeg"
   }
 }
 ```
@@ -329,7 +329,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - `prompt` (必要) - 圖像融合要求或風格指令，建議不超過 300 個漢字或 600 個英文單字
 - `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 5.0 Pro / 4.0 支援
-- `image` (必要) - 輸入圖像（2-14 張；5.0 Pro 最多 10 張），每張支援圖像 URL、本地檔案路徑或 Base64 圖片資料
+- `image` (必要) - 輸入圖像（2-14 張；5.0 Pro 最多 10 張），每張支援圖像 URL、本地檔案路徑或 Base64 圖片資料；相對路徑以儲存根為基準
 - `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
@@ -350,8 +350,8 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      ".seedream/images/2026-08-15/multi_image_fusion/person_a.jpeg",
-      ".seedream/images/2026-08-15/multi_image_fusion/person_b.jpeg"
+      "2026-08-15/multi_image_fusion/person_a.jpeg",
+      "2026-08-15/multi_image_fusion/person_b.jpeg"
     ]
   }
 }
@@ -368,7 +368,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - `prompt` (必要) - 圖像生成的文字提示詞，應明確指明生成數量與內容，建議不超過 300 個漢字或 600 個英文單字
 - `optimize_prompt_options` (選用) - 提示詞最佳化選項，支援 mode: "standard" 或 "fast"，fast 僅 5.0 Pro / 4.0 支援
-- `image` (選用) - 參考圖像（最多 14 張，且參考圖數量與 max_images 之和不超過 15），每張支援圖像 URL、本地檔案路徑或 Base64 圖片資料
+- `image` (選用) - 參考圖像（最多 14 張，且參考圖數量與 max_images 之和不超過 15），每張支援圖像 URL、本地檔案路徑或 Base64 圖片資料；相對路徑以儲存根為基準
 - `size` (選用) - 圖像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<寬>x<高>` 像素值，預設使用設定檔值，需與所選模型相容
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `max_images` (選用) - 最大生成圖像數量，範圍 1-15，預設 15；提供參考圖時預設自動扣減為 15 減參考圖數量
@@ -402,7 +402,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **參數：**
 
-- `directory` (選用) - 要瀏覽的目錄路徑，預設瀏覽工作區根目錄（MCP Roots 授權的首個根；無 Roots 時回退 `SEEDREAM_WORKSPACE_ROOT` 設定的本地工作區根，均未設定時為行程目前工作目錄）
+- `directory` (選用) - 要瀏覽的目錄路徑，預設瀏覽存儲根（圖片保存目錄）；相對路徑以存儲根為基準，絕對路徑須在讀取範圍內（工作區 ∪ 存儲根）。存儲根內條目為存儲根相對路徑；存儲根外條目在用戶端宣告工作區 Roots 時為絕對路徑，否則為所瀏覽目錄的相對路徑（拼接所瀏覽目錄前綴後使用）
 - `recursive` (選用) - 是否遞迴搜尋子目錄，預設`true`
 - `max_depth` (選用) - 最大搜尋深度，範圍 1-10，預設 3
 - `limit` (選用) - 回傳的最大檔案數量，範圍 1-200，預設 50
@@ -548,7 +548,7 @@ LOG_FILE=                                   # 日誌檔案路徑（預設 .seedr
 
 # 自動儲存
 SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=                # 圖片儲存根目錄（預設 <工作區根>/.seedream/images，工作區根取 MCP Roots 首項或 SEEDREAM_WORKSPACE_ROOT）
+SEEDREAM_AUTO_SAVE_BASE_DIR=                # 圖片存儲根目錄（顯式設定直接生效並自動進入讀取範圍；預設 <基座>/.seedream/images，基座取 MCP Roots 首項、SEEDREAM_WORKSPACE_ROOT 或使用者主目錄）
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒），上限 720
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下載失敗最大重試次數（0 表示不重試）
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 單張圖片大小上限（位元組，預設 50MB）；另兼作流式單事件截斷閾值與回應體讀取上限的推導基準
@@ -561,7 +561,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 儲存目錄總位元組上限�
 SEEDREAM_PREVIEW_ENABLED=true                 # 生成結果附帶已儲存圖片的縮圖（對話內直接預覽，依賴自動儲存；預設開啟）
 
 # 工作區與傳輸
-SEEDREAM_WORKSPACE_ROOT=                    # 本地開發時檔案讀寫邊界回退目錄（MCP Roots 優先）
+SEEDREAM_WORKSPACE_ROOT=                    # 無 MCP Roots 時的工作位置宣告（進入讀取範圍並作為存儲根的派生基座；無任何宣告時保底使用者主目錄）
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鑑權權杖（非回環繫結必須設定，否則拒絕啟動；另需 TLS 或 --insecure-allow-non-tls 豁免）
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 請求內文上限（位元組，≥1MB，預設 64MB；單圖 data URI 約 40MB，兼顧多圖融合）
 SEEDREAM_WEB_ENABLED=false                  # Web 操作台開關（--web/--no-web 覆蓋；僅 streamable-http 生效，開啟後瀏覽器可存取 /web 頁面與歷史圖庫，預設關閉）
@@ -580,8 +580,8 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 串流回應每次讀取區�
 
 ### 部署注意事項
 
-- **儲存目錄由服務管理**：自動儲存的按天清理與總量配額會刪除儲存目錄內**所有**符合圖片副檔名的過期檔案與空目錄，不區分是否由本服務生成。請勿將 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向個人相簿等含重要圖片的目錄。
-- **多租戶 streamable-http 部署建議顯式設定 `SEEDREAM_WORKSPACE_ROOT`**：MCP Roots 讀取失敗時檔案存取邊界會回退到該環境變數（未設定時為行程工作目錄）。
+- **儲存目錄由服務管理**：自動儲存的按天清理與總量配額會刪除儲存目錄內**所有**符合圖片副檔名的過期檔案與空目錄，不區分是否由本服務生成。請勿將 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向個人相簿等含重要圖片的目錄。經 `save_path` 儲存到儲存根之外的檔案不參與自動清理與總量配額，由呼叫方自行管理。
+- **多租戶 streamable-http 部署建議顯式設定 `SEEDREAM_WORKSPACE_ROOT`**：工作位置按 MCP Roots > 該環境變數 > 使用者主目錄順位取值，顯式宣告可使讀取範圍與存儲根落點確定。
 - **未認證請求的體積限制**：未攜帶有效權杖的 chunked 請求不讀 body 即回傳 401，其體積限制依賴 uvicorn 層或前置反向代理；公網暴露部署請在代理層設定請求體上限。
 - **Linux 宿主掛載目錄屬主**：容器以 uid 1000 的非 root 使用者執行，Linux 宿主上 compose 掛載的 `./.seedream` 目錄需對該使用者可寫（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影響。
 

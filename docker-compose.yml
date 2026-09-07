@@ -51,8 +51,8 @@ services:
       # 响应体读取总量上限（字节），留空按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推导。
       - SEEDREAM_RESPONSE_BODY_LIMIT=${SEEDREAM_RESPONSE_BODY_LIMIT:-}
       # 工作区与传输
-      # 本地文件访问回退根目录，留空回退进程工作目录；MCP Roots 声明优先。
-      - SEEDREAM_WORKSPACE_ROOT=${SEEDREAM_WORKSPACE_ROOT:-}
+      # 工作位置声明（读取范围成员与存储根派生基座），默认 /app 使挂载目录进入读取范围。
+      - SEEDREAM_WORKSPACE_ROOT=${SEEDREAM_WORKSPACE_ROOT:-/app}
       # streamable-http 请求体上限（字节），不低于 1MB。
       - SEEDREAM_HTTP_MAX_BODY_SIZE=${SEEDREAM_HTTP_MAX_BODY_SIZE:-67108864}
       # Web 操作台开关，开启后浏览器直用生成与图库页面；默认关闭，stdio 不受影响。

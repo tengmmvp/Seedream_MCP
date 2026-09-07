@@ -292,8 +292,8 @@ class AutoSaveManager:
         Args:
             base_dir: 基础保存目录。
             cleanup_base_dir: 清理与节流的根目录，None 时与 base_dir 一致；save_path
-                使 base_dir 指向子目录时传入配置默认保存根，按天清理与总量配额仍
-                覆盖整个默认根，不被 per-request 子目录碎片化。
+                使 base_dir 指向部署级存储根之外时必须传入该存储根——save_path 目录
+                可能同时存放其他文件，不属服务专有，清理与配额不得作用其上。
             download_timeout: 下载超时时间，仅自建下载管理器时生效。
             max_retries: 最大重试次数，仅自建下载管理器时生效。
             max_file_size: 最大文件大小，本实例自持；自建下载管理器时同时作为其上限。

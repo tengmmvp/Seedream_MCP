@@ -11,15 +11,15 @@ import asyncio
 import base64
 from pathlib import Path
 
-from ..core.errors import SeedreamConfigError, SeedreamMCPError, SeedreamValidationError
+from ..core.errors import SeedreamMCPError, SeedreamValidationError
 from ..core.formats import MIME_BY_EXTENSION, format_file_too_large, infer_extension_from_bytes
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
+    get_read_context,
     is_unc_path,
-    get_workspace_roots,
-    is_boundary_from_session_roots,
-    resolve_workspace_roots,
+    mask_scope_paths,
+    save_root_relative,
     suggest_similar_paths,
 )
 from .image_validation import (
@@ -52,7 +52,6 @@ async def prepare_image_input(image: str) -> str:
     Raises:
         SeedreamValidationError: 输入格式无效、路径越界、界内定位失败或本地文件
             读取失败等本地预处理失败；本阶段不触网，不参与 client 的 API 重试。
-        SeedreamConfigError: 当前会话未授权任何工作区目录。
     """
     try:
         normalized = image.strip()
@@ -73,27 +72,24 @@ async def prepare_image_input(image: str) -> str:
         raise SeedreamValidationError(f"图像处理失败: {e}") from e
 
 
-def _resolves_outside_workspace(normalized: str, resolved_roots: list[Path]) -> bool:
-    """判断输入路径解析后的物理位置是否落在全部工作区根之外。
+def _resolves_outside_workspace(normalized: str, save_root: Path, read_scope: list[Path]) -> bool:
+    """判断输入路径解析后的物理位置是否落在读权限之外。
 
     候选管线与 resolve_local_image_candidate 共用 iter_local_candidates，任一
-    候选命中任一根即界内。UNC 路径不 resolve 以免触发 SMB 连接，UNC 输入直接
-    返回 False 交诊断分支处理。
+    候选命中读权限任一目录即界内。UNC 路径不 resolve 以免触发 SMB 连接，UNC
+    输入直接返回 False 交诊断分支处理。
     """
     if is_unc_path(normalized):
         return False
-    return not any(iter_local_candidates(normalized, resolved_roots))
+    return not any(iter_local_candidates(normalized, save_root, read_scope))
 
 
 def _format_local_read_error(exc: OSError, normalized: str) -> str:
-    """按边界来源构建本地文件读取失败的错误文案，遮蔽服务器侧绝对路径。
+    """构建本地文件读取失败的错误文案，不回显服务器侧绝对路径。
 
-    会话 Roots 边界下异常原文直接回显；回退边界下异常的 str 与 filename 均可能
-    嵌有服务器侧绝对路径，不得拼接原文，仅回显系统错误语义与调用方输入的原样
-    字符串。系统错误语义取 strerror，缺失时回退 errno 数值。
+    异常的 str 与 filename 均可能嵌有服务器侧绝对路径，仅回显系统错误语义与
+    调用方输入的原样字符串。系统错误语义取 strerror，缺失时回退 errno 数值。
     """
-    if is_boundary_from_session_roots():
-        return f"读取图像文件失败: {exc}"
     if exc.strerror:
         reason = exc.strerror
     elif exc.errno is not None:
@@ -107,62 +103,41 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     """校验本地图片路径并读取编码为 Base64 Data URI。
 
     候选定位委托 resolve_local_image_candidate，与 ImagePreparer 的缓存签名共用
-    同一选择规则，锁定同一文件。越界抛携带允许根列表的错误；界内定位失败经
-    validate_image_path 做诊断性校验，取具体失败原因并附相似路径建议。各失败均属
-    参数校验语义而非 API 调用失败，归 SeedreamValidationError；错误文案按边界来源
-    遮蔽服务器根路径。需在工作线程中调用。
+    同一选择规则，锁定同一文件。(存储根, 读权限) 经 get_read_context 在函数顶
+    部单点求值，各分支共享，消除一次失败请求内的重复解析。越界抛携带配置指引
+    的错误；界内定位失败经 validate_image_path 做诊断性校验，取具体失败原因并附
+    存储根内的相似路径建议。各失败均属参数校验语义而非 API 调用失败，归
+    SeedreamValidationError；错误文案不回显服务器侧路径。需在工作线程中调用。
     """
-    workspace_roots = get_workspace_roots()
-    if not workspace_roots:
-        # 无任何可用根属会话与服务器配置问题，归 config_error 档。
-        raise SeedreamConfigError("当前 MCP 会话未授权任何工作区目录，无法读取本地图片。")
-
-    resolved_roots = resolve_workspace_roots(workspace_roots)
-
-    found = resolve_local_image_candidate(normalized, resolved_roots)
+    _, save_root, read_scope = get_read_context()
+    found = resolve_local_image_candidate(normalized, save_root=save_root, read_scope=read_scope)
     if found is None:
-        if _resolves_outside_workspace(normalized, resolved_roots):
-            # 回退边界下不回显服务器环境根路径；仅会话 Roots 边界回显允许的根供
-            # 调用方自纠。
-            if not is_boundary_from_session_roots():
-                raise SeedreamValidationError(
-                    "路径超出允许的工作区目录范围，仅允许服务器配置的工作区目录",
-                    field="image",
-                    value=normalized,
-                )
-            allowed_roots = ", ".join(str(root) for root in workspace_roots)
+        if _resolves_outside_workspace(normalized, save_root, read_scope):
             raise SeedreamValidationError(
-                f"路径超出允许的工作区目录范围，允许的根: {allowed_roots}",
+                "路径不在读取范围内；可通过客户端工作区（MCP Roots）、"
+                "SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR 授权该目录",
                 field="image",
                 value=normalized,
             )
-        # 诊断性校验仅用于取各根的具体失败原因拼入错误文案，不影响候选一致性；
-        # 其文案与相似路径建议含服务器侧绝对路径，回退边界下与越界分支同口径遮蔽。
-        if not is_boundary_from_session_roots():
-            raise SeedreamValidationError(
-                f"图像路径校验失败: {normalized}", field="image", value=normalized
-            )
-        validation_errors: list[str] = []
-        for root in workspace_roots:
-            _, error_msg, _ = validate_image_path(
-                normalized, base_dir=str(root), skip_dimensions=True
-            )
-            if error_msg:
-                validation_errors.append(error_msg)
-
-        error_text = "图像路径校验失败"
-        if validation_errors:
-            error_text = "；".join(dict.fromkeys(validation_errors))
-
-        suggestions = suggest_similar_paths(
-            original,
-            search_dirs=[str(root) for root in workspace_roots],
-        )
+        # 诊断错误消息含解析后的绝对路径，读权限成员逐项替换为占位符后回显，存储根
+        # 外的工作区根路径同样遮蔽；建议限定在存储根内扫描并转为存储根相对形态，
+        # 均不泄露服务器路径。
+        _, error_msg, _ = validate_image_path(normalized, skip_dimensions=True)
+        error_text = mask_scope_paths(error_msg or "图像路径校验失败", save_root, read_scope)
+        suggestions = suggest_similar_paths(original, search_dirs=[str(save_root)])
         suggestion_text = ""
         if suggestions:
-            suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
-                f"  • {s}" for s in suggestions[:3]
-            )
+            relative_suggestions = [
+                relative
+                for relative in (
+                    save_root_relative(suggestion, save_root) for suggestion in suggestions[:3]
+                )
+                if relative is not None
+            ]
+            if relative_suggestions:
+                suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(
+                    f"  • {s}" for s in relative_suggestions
+                )
         raise SeedreamValidationError(
             f"{error_text}{suggestion_text}", field="image", value=normalized
         )

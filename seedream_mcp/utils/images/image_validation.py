@@ -31,12 +31,12 @@ from ..core.validators import MAX_IMAGE_RATIO, MIN_IMAGE_RATIO
 from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
-    is_unc_path,
+    get_read_scope,
     has_windows_colon_component,
-    get_workspace_root,
+    is_unc_path,
     is_within_resolved,
     normalize_path,
-    resolve_env_workspace_root,
+    resolve_save_root,
 )
 from .image_ref import classify_image_reference
 
@@ -105,16 +105,16 @@ MIN_IMAGE_EDGE = 15
 
 
 def _get_validation_base_dir() -> Path:
-    """本地文件校验的基础目录，委托 io_path.resolve_env_workspace_root 保持单一来源。"""
-    return resolve_env_workspace_root()
+    """本地文件校验的基础目录，取存储根，与参考图读取链的解析基准一致。"""
+    return resolve_save_root()
 
 
 def _resolve_local_image_path(file_path: str) -> Path:
-    """解析本地图片路径，相对路径基于校验基础目录解析，绝对路径保持原样。
+    """解析本地图片路径，相对路径以存储根为基准，绝对路径保持原样。
 
     不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的定位口径
-    一致，展开会使实际读取目标脱离已判定的工作区边界。UNC 路径在 resolve 前抛
-    ValueError 拒绝，避免 Windows 下 resolve 触发 SMB 认证。
+    一致。UNC 路径在 resolve 前抛 ValueError 拒绝，避免 Windows 下 resolve 触发
+    SMB 认证。
 
     Raises:
         ValueError: 路径为 UNC 形式。
@@ -161,24 +161,25 @@ def image_candidate_stat(path: Path) -> os.stat_result | None:
     return st
 
 
-def iter_local_candidates(image: str, resolved_roots: list[Path]) -> Iterator[Path]:
-    """按输入路径与已 resolve 的工作区根列表迭代界内候选的物理路径。
+def iter_local_candidates(
+    image: str, base_dir: str | Path, read_scope: list[Path]
+) -> Iterator[Path]:
+    """迭代落在读权限内的候选物理路径。
 
-    绝对路径直接作为候选，相对路径按根序逐一拼接；候选 resolve 一次后经
-    is_within_resolved 与各根比较，拦截 ``..`` 与符号链接越界，仅产出落在任一
-    根内的 resolve 后物理路径。UNC 前缀的候选不 resolve，避免在 Windows 触发
-    SMB 认证。候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
+    绝对路径直接作为候选，相对路径以 base_dir（存储根）拼接；候选 resolve 一次
+    后与读权限集合逐项比较，拦截 ``..`` 与符号链接逃逸，仅产出落在任一范围内的
+    resolve 后物理路径。UNC 前缀的候选不 resolve，避免在 Windows 触发 SMB 认证。
+    候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        resolved_roots: 已 resolve 的工作区根列表。
+        base_dir: 相对路径的解析基准，为存储根。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储根）。
 
     Yields:
-        resolve 后落在任一工作区根内的候选物理路径，按候选构造顺序产出。
+        resolve 后落在读权限内的候选物理路径。
     """
-    candidates = (
-        [Path(image)] if os.path.isabs(image) else [base / image for base in resolved_roots]
-    )
+    candidates = [Path(image)] if os.path.isabs(image) else [Path(base_dir) / image]
     for candidate in candidates:
         # UNC 根拼接出的候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
         if is_unc_path(str(candidate)):
@@ -187,22 +188,28 @@ def iter_local_candidates(image: str, resolved_roots: list[Path]) -> Iterator[Pa
             resolved_candidate = candidate.resolve()
         except (OSError, ValueError):
             continue
-        if any(is_within_resolved(resolved_candidate, base) for base in resolved_roots):
+        if any(is_within_resolved(resolved_candidate, base) for base in read_scope):
             yield resolved_candidate
 
 
 def resolve_local_image_candidate(
-    image: str, resolved_roots: list[Path]
+    image: str,
+    *,
+    save_root: Path | None = None,
+    read_scope: list[Path] | None = None,
 ) -> tuple[Path, os.stat_result] | None:
-    """定位可读取的候选图片文件，候选管线由 iter_local_candidates 统一提供。
+    """定位可读取的候选图片文件：相对路径以存储根为基准，判定面向读权限集合。
 
     界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
     (resolve 后物理路径, stat)，未命中返回 None。ImagePreparer 的缓存签名与
     image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件。
+    save_root 与 read_scope 未提供时按当前请求现取；调用方在一次请求内多次
+    定位时传入 get_read_context 的共享结果，消除重复求值。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        resolved_roots: 已 resolve 的工作区根列表。
+        save_root: 已 resolve 的存储根，相对路径的解析基准。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储根）。
 
     Returns:
         首个命中候选的 (物理路径, stat)；无命中时为 None。
@@ -232,7 +239,11 @@ def resolve_local_image_candidate(
             field="image",
             value=image,
         )
-    for resolved_candidate in iter_local_candidates(image, resolved_roots):
+    if save_root is None:
+        save_root = resolve_save_root()
+    if read_scope is None:
+        read_scope = get_read_scope()
+    for resolved_candidate in iter_local_candidates(image, save_root, read_scope):
         st = image_candidate_stat(resolved_candidate)
         if st is not None:
             return resolved_candidate, st
@@ -465,19 +476,15 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     return _validate_file_path(image, skip_dimensions=skip_dimensions)
 
 
-def validate_image_path(
-    path: str, base_dir: str | None = None, skip_dimensions: bool = False
-) -> tuple[bool, str, Path | None]:
-    """验证图片文件路径，强制其位于工作区边界内并符合图片规则。
+def validate_image_path(path: str, skip_dimensions: bool = False) -> tuple[bool, str, Path | None]:
+    """验证图片文件路径，强制其位于读权限内并符合图片规则。
 
-    HTTP(S) URL 与 Data URI 为非本地引用，无工作区边界可言，视为有效但标准化路径
+    HTTP(S) URL 与 Data URI 为非本地引用，无读取范围可言，视为有效但标准化路径
     恒为 None；Data URI 的内容校验由 validate_image_input 承担。调用方须同时检查
     有效位与路径是否为 None，不可仅凭有效位判定为本地路径。
 
     Args:
         path: 图片文件路径；HTTP(S) URL 与 Data URI 有效但路径返回 None。
-        base_dir: 工作区基础目录，用于越界校验；None 时回退首个工作区根，多根工作区
-            仅校验首个根，完整多根校验须由调用方遍历各根分别调用。
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
@@ -489,13 +496,10 @@ def validate_image_path(
         if kind in ("url", "data_uri"):
             return True, "", None
 
-        if base_dir is None:
-            base_dir = str(get_workspace_root())
-        normalized_path = normalize_path(path, base_dir)
-        base_path = Path(base_dir).resolve()
-        # normalized_path 与 base_path 均 resolve 完成，直接比较避免重复解析。
-        if not is_within_resolved(normalized_path, base_path):
-            return False, "路径超出允许的工作区目录范围", normalized_path
+        normalized_path = normalize_path(path, str(resolve_save_root()))
+        # 越界判定面向读权限集合（工作区 ∪ 存储根），与候选定位同口径。
+        if not any(is_within_resolved(normalized_path, scope) for scope in get_read_scope()):
+            return False, "路径不在读取范围内", normalized_path
 
         try:
             validated_path = validate_image_input(

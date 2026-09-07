@@ -10,15 +10,30 @@ import asyncio
 import hashlib
 from collections import OrderedDict
 from collections.abc import Sequence
+from pathlib import Path
 
 from .image_input import prepare_image_input
 from .image_ref import classify_image_reference
 from .image_validation import resolve_local_image_candidate
 from ..core.inflight import InflightEntry
-from ..io.io_path import get_workspace_roots, resolve_workspace_roots
+from ..io.io_path import get_read_scope, resolve_save_root
 
-# 预处理缓存键：(image 字符串, workspace_roots 字符串元组, 本地文件 mtime+size 签名)
+# 预处理缓存键：(image 字符串, 读权限字符串元组, 本地文件 mtime+size 签名)；URL
+# 与 Data URI 的归一化结果是输入的纯函数，读权限隔离元组恒为空。
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
+
+# 批内共享的读取上下文：(存储根, 读权限列表)，供缓存键隔离与签名定位一次求值。
+ReadContext = tuple[Path, list[Path]]
+
+
+def _current_read_context() -> tuple[tuple[str, ...], Path, list[Path]]:
+    """一次求值 (读权限字符串元组, 存储根, 读权限列表)，供本地输入共享。
+
+    含首次 resolve 的文件系统调用，调用方在工作线程执行。
+    """
+    scope = get_read_scope()
+    return tuple(str(r) for r in scope), resolve_save_root(), scope
+
 
 # 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环。
 _LARGE_IMAGE_THRESHOLD = 1024 * 1024
@@ -64,7 +79,7 @@ class _PrepareSemaphoreSlot:
 class ImagePreparer:
     """参考图预处理缓存管理器，LRU + single-flight 去重。
 
-    预处理结果按 (输入, workspace_roots, 本地文件签名) 缓存，本地文件纳入
+    预处理结果按 (输入, 读权限, 本地文件签名) 缓存，本地文件纳入
     mtime+size 防内容替换返回陈旧编码；同一键的并发 miss 复用同一在途 task。
     并发上限为实例级全局约束，跨批量调用共享；仅实际执行预处理的调用占用并发
     槽位，缓存命中与在途等待在槽外完成。
@@ -107,22 +122,25 @@ class ImagePreparer:
         return self._prepare_semaphore
 
     @staticmethod
-    def _local_file_signature(image: str, workspace_roots: tuple[str, ...]) -> tuple[float, int]:
+    def _local_file_signature(
+        image: str, save_root: Path | None = None, read_scope: list[Path] | None = None
+    ) -> tuple[float, int]:
         """计算图像输入的缓存签名。
 
         本地文件返回 (mtime, size)，内容替换后失效避免返回陈旧编码；URL、data URI
         与无法定位文件的输入返回 (0.0, 0)。候选定位与 image_input 的实际读取路径
-        共用 resolve_local_image_candidate，签名与读取锁定同一文件。
+        共用 resolve_local_image_candidate，签名与读取锁定同一文件；save_root 与
+        read_scope 未提供时现取，批内调用传入共享上下文消除逐图重复求值。
 
         残余风险：签名基于 mtime+size 而非内容哈希，同信任域内具备本地写权限者可在
-        替换内容后用 os.utime 还原签名命中陈旧缓存；Roots 授权目录内的主体视为同域，
+        替换内容后用 os.utime 还原签名命中陈旧缓存；读权限目录内的主体视为同域，
         不构成跨域越权。先 strip 再定位，与读取路径口径一致。
         """
         image = image.strip()
         if classify_image_reference(image) != "local":
             return (0.0, 0)
 
-        found = resolve_local_image_candidate(image, resolve_workspace_roots(workspace_roots))
+        found = resolve_local_image_candidate(image, save_root=save_root, read_scope=read_scope)
         if found is None:
             return (0.0, 0)
         _, st = found
@@ -141,11 +159,14 @@ class ImagePreparer:
         return "sha256:" + digest[:32]
 
     async def prepare_image_input(
-        self, image: str, _roots_key: tuple[str, ...] | None = None
+        self,
+        image: str,
+        _scope_key: tuple[str, ...] | None = None,
+        _read_context: ReadContext | None = None,
     ) -> str:
         """准备图像输入数据，将图像 URL、Data URI 或本地文件路径归一化为 API 所需格式。
 
-        结果按 (输入, workspace_roots, 本地文件签名) 缓存，以工作区隔离键避免跨租户
+        结果按 (输入, 读权限, 本地文件签名) 缓存，以读权限隔离键避免跨租户
         命中；同一键的并发 miss 复用同一在途 task（single-flight），缓存超限按 LRU
         淘汰。并发上限由实例级信号量约束，仅实际执行预处理的调用占用槽位，缓存命中
         与在途等待在槽外完成；创建者被取消而共享 task 仍在运行时，槽位释放责任转移
@@ -153,7 +174,10 @@ class ImagePreparer:
 
         Args:
             image: 图像输入字符串，三类来源的归一化语义与模块级函数一致。
-            _roots_key: 工作区隔离键；批量路径预计算共享，None 时按当前请求 Roots 现取。
+            _scope_key: 本地输入的读权限隔离键；批量路径预计算共享，None 时按当前
+                请求现取，非本地输入不消费该键。
+            _read_context: 本地输入的 (存储根, 读权限) 共享上下文；批量路径预计算
+                共享，None 时与隔离键一并现取。
 
         Returns:
             归一化后的图像输入，本地文件为 Base64 Data URI。
@@ -161,9 +185,10 @@ class ImagePreparer:
         Raises:
             SeedreamValidationError: 输入格式无效、路径越界、维度超限或图像内容
                 处理失败等调用方输入问题。
-            SeedreamConfigError: 会话未授权工作区目录且无环境回退根。
         """
-        cache_key, normalized_image = await self._resolve_cache_key(image, _roots_key)
+        cache_key, normalized_image = await self._resolve_cache_key(
+            image, _scope_key, _read_context
+        )
 
         cached = self._prepare_cache.get(cache_key)
         if cached is not None:
@@ -184,32 +209,45 @@ class ImagePreparer:
             slot.release()
 
     async def _resolve_cache_key(
-        self, image: str, _roots_key: tuple[str, ...] | None
+        self,
+        image: str,
+        _scope_key: tuple[str, ...] | None,
+        _read_context: ReadContext | None,
     ) -> tuple[PrepareCacheKey, str]:
         """计算图像输入的缓存键并返回 strip 后的输入，不持有并发槽位。
 
         缓存命中与在途等待路径不进入信号量，键计算须在槽外完成；本地文件签名含
-        同步 stat/resolve，大输入的摘要计算含 O(n) 哈希，均移至工作线程避免阻塞
-        事件循环。先 strip 再分类，与 _local_file_signature 口径一致，防止前导
-        空白使 URL 或 data URI 误判为本地路径。
+        同步 stat/resolve，读取上下文现取与大输入的摘要计算含 O(n) 哈希，均移至
+        工作线程避免阻塞事件循环。先 strip 再分类，与 _local_file_signature
+        口径一致，防止前导空白使 URL 或 data URI 误判为本地路径。读权限隔离键
+        仅本地输入求值：URL 与 Data URI 的归一化结果是输入的纯函数，隔离元组恒为
+        空，纯远端输入不因存储声明不可解析而在预处理阶段失败。
 
         Returns:
             (缓存键, strip 后输入) 二元组。
         """
-        if _roots_key is None:
-            _roots_key = tuple(str(r) for r in get_workspace_roots())
         image = image.strip()
         ref_kind = classify_image_reference(image)
         if ref_kind == "local":
-            signature = await asyncio.to_thread(self._local_file_signature, image, _roots_key)
+            if _scope_key is None or _read_context is None:
+                computed_key, save_root, scope = await asyncio.to_thread(_current_read_context)
+                if _scope_key is None:
+                    _scope_key = computed_key
+                if _read_context is None:
+                    _read_context = (save_root, scope)
+            signature = await asyncio.to_thread(
+                self._local_file_signature, image, _read_context[0], _read_context[1]
+            )
+            scope_key = _scope_key
             key_image = image
-        elif len(image) > _LARGE_IMAGE_THRESHOLD:
-            signature = (0.0, 0)
-            key_image = await asyncio.to_thread(self._data_uri_digest, image)
         else:
+            scope_key = ()
             signature = (0.0, 0)
-            key_image = image
-        cache_key: PrepareCacheKey = (key_image, _roots_key, signature)
+            if len(image) > _LARGE_IMAGE_THRESHOLD:
+                key_image = await asyncio.to_thread(self._data_uri_digest, image)
+            else:
+                key_image = image
+        cache_key: PrepareCacheKey = (key_image, scope_key, signature)
         return cache_key, image
 
     async def _prepare_image_input_locked(
@@ -296,8 +334,18 @@ class ImagePreparer:
         Raises:
             SeedreamMCPError: 任一图像预处理失败时抛出，与单图入口的异常语义一致。
         """
-        # 批内预计算一次工作区键，避免每图重复读取 ContextVar 与构造元组。
-        roots_key = tuple(str(r) for r in get_workspace_roots())
+        # 批内预计算一次读权限键与读取上下文，避免每图重复读取 ContextVar、构造
+        # 元组与逐图求值；仅存在本地输入时求值，纯远端批次不依赖存储声明的可解
+        # 析性。求值含首次 resolve 的文件系统调用，下沉工作线程。
+        stripped_images = [image.strip() for image in images]
+        if any(classify_image_reference(item) == "local" for item in stripped_images):
+            scope_key, save_root, scope = await asyncio.to_thread(_current_read_context)
+            read_context: ReadContext | None = (save_root, scope)
+        else:
+            scope_key = ()
+            read_context = None
 
-        tasks = [self.prepare_image_input(image, roots_key) for image in images]
+        tasks = [
+            self.prepare_image_input(image, scope_key, read_context) for image in stripped_images
+        ]
         return await asyncio.gather(*tasks)

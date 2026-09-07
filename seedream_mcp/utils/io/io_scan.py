@@ -5,7 +5,9 @@ browse_images 翻页共享，消除深翻页的重复文件系统扫描。条目
 resolved 路径) 对，扫描完成时 resolve 一次，深翻页命中免于逐文件重复 resolve。
 非递归扫描以目录 mtime 失效，捕获时已沉淀超 FAT 时间戳粒度窗口的条目 mtime 未变
 即新鲜，未沉淀条目叠加 TTL 上界兜底粗粒度时间戳；递归扫描改用 TTL 失效，接受短时
-陈旧换取翻页性能。扫描底层函数由调用方注入，本模块只负责缓存策略。
+陈旧换取翻页性能。扫描底层函数由调用方注入，本模块只负责缓存策略；未注入时延迟
+解析 io_path 的默认实现，组内依赖保持 io_path → io_scan 单向，本模块顶层不回导
+io_path。
 """
 
 from __future__ import annotations
@@ -17,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..core.logs import get_logger
-from .io_path import find_images_in_directory
 
 logger = get_logger()
 
@@ -204,7 +205,13 @@ def cached_find_images_in_directory(
         max_depth,
         tuple(format_filter) if format_filter else (),
     )
-    scan = scanner if scanner is not None else find_images_in_directory
+    if scanner is not None:
+        scan = scanner
+    else:
+        # 默认扫描器延迟解析，保持本模块顶层不依赖 io_path，组内依赖单向。
+        from .io_path import find_images_in_directory
+
+        scan = find_images_in_directory
     cached = _DIRECTORY_SCAN_CACHE.get(cache_key)
     if cached is not None and _is_scan_entry_fresh(cached, resolved_dir, recursive):
         # 命中刷新条目热度。本函数在工作线程执行，get 与 move_to_end 之间可被另一

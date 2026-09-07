@@ -352,8 +352,10 @@ async def test_prepare_rechecks_cache_after_semaphore_wait(
     await asyncio.sleep(0)
     assert len(preparer._prepare_inflight) == 0
 
-    # 等待窗口内同键先完成者写入缓存并清在途登记
-    preparer._prepare_cache[(image_data_uri, roots_key, (0.0, 0))] = "prepared:cached"
+    # 等待窗口内同键先完成者写入缓存并清在途登记；data URI 的读权限隔离元组恒为空，
+    # 传入的 roots_key 不参与非本地输入的键构成
+    del roots_key
+    preparer._prepare_cache[(image_data_uri, (), (0.0, 0))] = "prepared:cached"
 
     semaphore.release()
     assert await late == "prepared:cached"

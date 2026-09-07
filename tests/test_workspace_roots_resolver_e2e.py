@@ -48,8 +48,9 @@ async def test_resolver_applies_client_roots_boundary(
     声明根内可列出图片，声明的根之外即便环境变量根内有文件也拒绝访问。
     """
     declared_root = tmp_path / "declared"
-    declared_root.mkdir()
-    (declared_root / "inside.png").write_bytes(PNG_BYTES)
+    save_root = declared_root / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    (save_root / "inside.png").write_bytes(PNG_BYTES)
     env_root = tmp_path / "env"
     env_root.mkdir()
     (env_root / "outside.png").write_bytes(PNG_BYTES)
@@ -79,8 +80,9 @@ async def test_resolver_falls_back_when_roots_capability_not_declared(
     直接注入携带该值的配置等效表达。
     """
     env_root = tmp_path / "env"
-    env_root.mkdir()
-    (env_root / "fallback.png").write_bytes(PNG_BYTES)
+    save_root = env_root / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    (save_root / "fallback.png").write_bytes(PNG_BYTES)
     monkeypatch.setattr(
         config_module,
         "_active_config",
@@ -104,8 +106,9 @@ async def test_resolver_over_modern_negotiation(
     边界语义与 legacy 协商一致。
     """
     declared_root = tmp_path / "modern"
-    declared_root.mkdir()
-    (declared_root / "modern.png").write_bytes(PNG_BYTES)
+    save_root = declared_root / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    (save_root / "modern.png").write_bytes(PNG_BYTES)
 
     async with Client(server.mcp, list_roots_callback=_make_callback([declared_root])) as client:
         result = await _browse(client, ".")

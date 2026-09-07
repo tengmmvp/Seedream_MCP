@@ -27,7 +27,7 @@ from .io_file import (
     atomic_replace_from_fd_sync,
     has_reparse_attribute,
 )
-from .io_path import is_within_resolved
+from .io_path import is_within_resolved, resolve_save_root
 from .io_url import get_file_extension_from_url
 
 logger = get_logger()
@@ -94,18 +94,21 @@ class FileManager:
         """初始化文件管理器并确保基础目录存在。
 
         Args:
-            base_dir: 图片保存基础目录。默认为当前工作目录下的 .seedream/images 文件夹。
+            base_dir: 图片保存基础目录。默认为 io_path.resolve_save_root 求值的
+                存储根，与目录体系的单一求值权威一致。
 
         Raises:
             FileManagerError: 基础目录解析失败或指向已存在文件。
+            SeedreamValidationError: 默认存储根求值失败。
         """
-        raw_base = Path.cwd() / ".seedream" / "images" if base_dir is None else Path(base_dir)
+        raw_base = resolve_save_root() if base_dir is None else Path(base_dir)
         try:
             resolved = raw_base.resolve()
         except (OSError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
-        # 仅拒绝指向已存在文件的路径；目录越界防护不在本类职责内，由调用方
-        # tools/core/_helpers._resolve_base_dir 做包含校验。
+        # 仅拒绝指向已存在文件的路径；save_path 为调用级存储声明，位置不受限，
+        # UNC、空字节等路径形态由调用方 tools/core/_helpers 在 resolve 前拒绝，
+        # 本类不做边界断言。
         if resolved.exists() and not resolved.is_dir():
             raise FileManagerError(f"保存路径不是目录: {resolved}")
         base_dir = resolved

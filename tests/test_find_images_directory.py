@@ -381,7 +381,7 @@ def test_cached_find_images_settled_entry_survives_ttl_expiry(
     scan_module.reset_directory_scan_cache()
 
     scanned_dirs: list[str] = []
-    original_scan = scan_module.find_images_in_directory
+    original_scan = find_images_in_directory
 
     def counting_scan(**kwargs: Any) -> list[Path]:
         scanned_dirs.append(kwargs["directory"])
@@ -494,7 +494,7 @@ def test_cached_find_images_hot_directory_survives_cache_pressure(
         other_dirs.append(other)
 
     scanned_dirs: list[str] = []
-    original_scan = scan_module.find_images_in_directory
+    original_scan = find_images_in_directory
 
     def counting_scan(**kwargs: Any) -> list[Path]:
         scanned_dirs.append(kwargs["directory"])
@@ -538,7 +538,7 @@ def test_cached_find_images_ttl_rescan_overwrite_refreshes_lru_position(
         other_dirs.append(other)
 
     scanned_dirs: list[str] = []
-    original_scan = scan_module.find_images_in_directory
+    original_scan = find_images_in_directory
 
     def counting_scan(**kwargs: Any) -> list[Path]:
         scanned_dirs.append(kwargs["directory"])

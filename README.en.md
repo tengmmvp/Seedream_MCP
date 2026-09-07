@@ -291,7 +291,7 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 
 - `prompt` (optional) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words; may be omitted only in the layer decomposition scenario, where the model automatically identifies elements to split
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
-- `image` (required) - Input image; supports image URL, local file path, or Base64 image data
+- `image` (required) - Input image; supports image URL, local file path, or Base64 image data; relative paths resolve against the storage root (the image save directory)
 - `layer_decomposition` (optional) - Enable layer decomposition, only supported by 5.0 Pro; splits the single input image into 1 base image and up to 16 PNG layers with alpha channels; layer entries additionally return `z_index`, `name`, `description`, and `bounding_box` fields; `output_format` only controls the base image format — layers are always PNG
 - `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (requires a single input image with an alpha channel; mutually exclusive with `output_format=jpeg`) or `opaque` produces a regular image; only supported by 5.0 Pro
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model; the layer decomposition scenario only supports presets and `auto` (adapts to the input image, and is the default when no size is specified)
@@ -313,7 +313,7 @@ Generate a new image from an input image and a text prompt. This tool calls an e
   "name": "image_to_image",
   "arguments": {
     "prompt": "把这张人像照片转换为吉卜力动画风格",
-    "image": ".seedream/images/2026-08-15/image_to_image/portrait.jpeg"
+    "image": "2026-08-15/image_to_image/portrait.jpeg"
   }
 }
 ```
@@ -329,7 +329,7 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 
 - `prompt` (required) - Image fusion request or style instruction; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
-- `image` (required) - Input images (2-14; 5.0 Pro max 10); each supports image URL, local file path, or Base64 image data
+- `image` (required) - Input images (2-14; 5.0 Pro max 10); each supports image URL, local file path, or Base64 image data; relative paths resolve against the storage root
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
@@ -350,8 +350,8 @@ Fuse multiple images into a new image. This tool calls an external billed API an
   "arguments": {
     "prompt": "把两张人像融合为一张双人合影，影棚灯光",
     "image": [
-      ".seedream/images/2026-08-15/multi_image_fusion/person_a.jpeg",
-      ".seedream/images/2026-08-15/multi_image_fusion/person_b.jpeg"
+      "2026-08-15/multi_image_fusion/person_a.jpeg",
+      "2026-08-15/multi_image_fusion/person_b.jpeg"
     ]
   }
 }
@@ -368,7 +368,7 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 
 - `prompt` (required) - Text prompt for image generation; should clearly specify the quantity and content; recommended no more than 300 Chinese characters or 600 English words
 - `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
-- `image` (optional) - Reference images (up to 14, and the sum of reference images and max_images must not exceed 15); each supports image URL, local file path, or Base64 image data
+- `image` (optional) - Reference images (up to 14, and the sum of reference images and max_images must not exceed 15); each supports image URL, local file path, or Base64 image data; relative paths resolve against the storage root
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
@@ -402,7 +402,7 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 **Parameters:**
 
-- `directory` (optional) - Directory path to browse; defaults to the workspace root (the first root authorized by MCP Roots; falls back to the local workspace root configured via `SEEDREAM_WORKSPACE_ROOT` when no Roots are set, and to the process current working directory when neither is set)
+- `directory` (optional) - Directory path to browse; defaults to the storage root (the image save directory). Relative paths resolve against the storage root; absolute paths must fall within the read scope (workspace ∪ storage root). Entries inside the storage root are storage-root-relative paths; entries outside it are absolute paths when the client declares workspace Roots, otherwise relative to the browsed directory (prefix with the browsed directory before use)
 - `recursive` (optional) - Whether to search subdirectories recursively; default `true`
 - `max_depth` (optional) - Maximum search depth; range 1-10; default 3
 - `limit` (optional) - Maximum number of files to return; range 1-200; default 50
@@ -548,7 +548,7 @@ LOG_FILE=                                   # Log file path (default .seedream/l
 
 # Auto-save
 SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=                # Image save root directory (default <workspace root>/.seedream/images; workspace root is the first MCP Root or SEEDREAM_WORKSPACE_ROOT)
+SEEDREAM_AUTO_SAVE_BASE_DIR=                # Image storage root directory (explicit value takes effect directly and automatically enters the read scope; default <base>/.seedream/images, where base is the first MCP Root, SEEDREAM_WORKSPACE_ROOT, or the user home directory)
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds, max 720)
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # Max retries for failed downloads (0 disables retry)
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB); also the derivation base for the stream single-event truncate threshold and the response-body read limit
@@ -561,7 +561,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save dir
 SEEDREAM_PREVIEW_ENABLED=true                 # Attach thumbnail previews of saved images to generation results (requires auto-save; default on)
 
 # Workspace & transport
-SEEDREAM_WORKSPACE_ROOT=                    # Local-dev file I/O boundary fallback (MCP Roots take precedence)
+SEEDREAM_WORKSPACE_ROOT=                    # Workspace declaration when no MCP Roots exist (enters the read scope and serves as the storage root base; falls back to the user home directory when nothing is declared)
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (required for non-loopback binding, or the service refuses to start; TLS or the --insecure-allow-non-tls exemption is also required)
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
 SEEDREAM_WEB_ENABLED=false                  # Web console toggle (--web/--no-web overrides; streamable-http only, serves the /web UI and image gallery when enabled, off by default)
@@ -580,8 +580,8 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (
 
 ### Deployment Notes
 
-- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction delete **all** expired files with supported image extensions (and empty directories) inside the save directory, regardless of whether they were created by this server. Do not point `SEEDREAM_AUTO_SAVE_BASE_DIR` at directories holding important personal images.
-- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: if reading MCP Roots fails, the file access boundary falls back to this variable (or the process working directory when unset).
+- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction delete **all** expired files with supported image extensions (and empty directories) inside the save directory, regardless of whether they were created by this server. Do not point `SEEDREAM_AUTO_SAVE_BASE_DIR` at directories holding important personal images. Files saved outside the storage root via `save_path` are excluded from age-based cleanup and quota eviction and are managed by the caller.
+- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: the workspace resolves in the order MCP Roots > this variable > the user home directory; an explicit declaration makes both the read scope and the storage root location deterministic.
 - **Body size of unauthenticated requests**: unauthenticated chunked requests are rejected with 401 before their body is read; their size limiting relies on uvicorn or a fronting reverse proxy. Configure a request body limit at the proxy layer for public deployments.
 - **Ownership of the mounted directory on Linux hosts**: the container runs as a non-root user with uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user (`mkdir -p .seedream && chown 1000:1000 .seedream`); Docker Desktop is unaffected.
 
