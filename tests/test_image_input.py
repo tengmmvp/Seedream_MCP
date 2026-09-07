@@ -17,7 +17,7 @@ from seedream_mcp.utils.core.errors import (
     SeedreamValidationError,
     resolve_error_profile,
 )
-from seedream_mcp.utils.images import image_input as image_input_module
+from seedream_mcp.utils.images import image_validation as image_validation_module
 from seedream_mcp.utils.images.image_input import prepare_image_input
 from seedream_mcp.utils.images.image_validation import validate_image_path
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
@@ -161,7 +161,7 @@ async def test_prepare_image_input_read_failure_masks_fallback_boundary(
     def _deny_open(path: Path) -> IO[bytes]:
         raise PermissionError(13, "Permission denied", str(path))
 
-    monkeypatch.setattr(image_input_module, "open_no_follow_read", _deny_open)
+    monkeypatch.setattr(image_validation_module, "open_no_follow_read", _deny_open)
 
     with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input("locked.png")
@@ -194,7 +194,7 @@ async def test_prepare_image_input_read_failure_profiles_as_validation_error(
     def _deny_open(path: Path) -> IO[bytes]:
         raise PermissionError(13, "Permission denied", str(path))
 
-    monkeypatch.setattr(image_input_module, "open_no_follow_read", _deny_open)
+    monkeypatch.setattr(image_validation_module, "open_no_follow_read", _deny_open)
 
     with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input("locked2.png")
@@ -215,7 +215,7 @@ async def test_prepare_image_input_read_failure_masks_session_roots_boundary(
     def _deny_open(path: Path) -> IO[bytes]:
         raise PermissionError(13, "Permission denied", str(path))
 
-    monkeypatch.setattr(image_input_module, "open_no_follow_read", _deny_open)
+    monkeypatch.setattr(image_validation_module, "open_no_follow_read", _deny_open)
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
@@ -354,7 +354,9 @@ async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
 
     oversized = _save_root(workspace_root) / "oversized.png"
     Image.new("RGB", (16, 16), color="white").save(oversized)
-    monkeypatch.setattr(image_input_module, "open_no_follow_read", lambda _path: _OversizedFile())
+    monkeypatch.setattr(
+        image_validation_module, "open_no_follow_read", lambda _path: _OversizedFile()
+    )
 
     with pytest.raises(SeedreamValidationError, match="文件过大") as exc_info:
         await prepare_image_input("oversized.png")

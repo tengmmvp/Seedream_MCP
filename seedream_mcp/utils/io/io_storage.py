@@ -99,7 +99,7 @@ class FileManager:
 
         Raises:
             FileManagerError: 基础目录解析失败或指向已存在文件。
-            SeedreamValidationError: 默认存储区求值失败。
+            SeedreamConfigError: 默认存储区求值失败。
         """
         raw_base = resolve_save_root() if base_dir is None else Path(base_dir)
         try:

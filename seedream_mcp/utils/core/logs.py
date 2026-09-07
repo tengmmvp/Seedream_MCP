@@ -31,21 +31,27 @@ class InterceptHandler(logging.Handler):
 
         级别名经 loguru 级别表映射，未注册的级别名回退为数值级别；日志深度
         回溯至 logging 模块之外的原始调用帧，使记录的调用位置为真实调用者。
+        第三方库的畸形记录经 handleError 吞掉，异常不外泄进对方调用点。
         """
-        log_level: str | int
         try:
-            log_level = logger.level(record.levelname).name
-        except ValueError:
-            log_level = record.levelno
+            log_level: str | int
+            try:
+                log_level = logger.level(record.levelname).name
+            except ValueError:
+                log_level = record.levelno
 
-        # 向上跳过 emit 自身帧与 logging 模块内部的帧，定位真实调用者以计算日志深度。
-        frame: FrameType | None = logging.currentframe()
-        depth = 0
-        while frame is not None and (depth == 0 or frame.f_code.co_filename == logging.__file__):
-            depth += 1
-            frame = frame.f_back
+            # 向上跳过 emit 自身帧与 logging 模块内部的帧，定位真实调用者以计算日志深度。
+            frame: FrameType | None = logging.currentframe()
+            depth = 0
+            while frame is not None and (
+                depth == 0 or frame.f_code.co_filename == logging.__file__
+            ):
+                depth += 1
+                frame = frame.f_back
 
-        logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
+            logger.opt(depth=depth, exception=record.exc_info).log(log_level, record.getMessage())
+        except Exception:
+            self.handleError(record)
 
 
 # 字符类取 errors.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。

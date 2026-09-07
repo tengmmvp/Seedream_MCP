@@ -507,7 +507,7 @@ class DownloadManager:
         if not infos:
             raise DownloadError(f"域名解析结果为空: {host}")
 
-        resolved_ips: set[str] = set()
+        resolved_ips: list[str] = []
         for info in infos:
             resolved_ip = info[4][0]
             try:
@@ -517,12 +517,13 @@ class DownloadManager:
             reason = _public_ip_rejection_reason(ip_obj)
             if reason:
                 raise DownloadError(f"域名解析到不安全地址({reason}): {host} -> {resolved_ip}")
-            resolved_ips.add(resolved_ip)
+            resolved_ips.append(resolved_ip)
 
         if not resolved_ips:
             raise DownloadError(f"域名解析结果为空: {host}")
 
-        return tuple(sorted(resolved_ips))
+        # 保序去重，维持 getaddrinfo 的可达性序；字符串排序会把不可达 IPv6 排到首位。
+        return tuple(dict.fromkeys(resolved_ips))
 
     def _enforce_dns_cache_limit(self) -> None:
         """强制 DNS 缓存条目数不超过上限，防止长生命周期下多 host 缓存无界增长。

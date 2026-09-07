@@ -13,9 +13,8 @@ import os
 from pathlib import Path
 
 from ..core.errors import SeedreamMCPError, SeedreamValidationError
-from ..core.formats import MIME_BY_EXTENSION, format_file_too_large, infer_extension_from_bytes
+from ..core.formats import MIME_BY_EXTENSION, infer_extension_from_bytes
 from ..core.logs import get_logger
-from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
     get_read_context,
     is_unc_path,
@@ -24,11 +23,8 @@ from ..io.io_path import (
     suggest_similar_paths,
 )
 from .image_validation import (
-    MAX_IMAGE_FILE_SIZE,
-    UNIDENTIFIED_IMAGE_MESSAGE,
-    decode_and_validate_dimensions,
-    is_unidentified_image_error,
     iter_local_candidates,
+    read_and_decode_local_image,
     resolve_local_image_candidate,
     validate_image_input,
     validate_image_path,
@@ -154,40 +150,14 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     validated_path, _ = found
 
-    # O_NOFOLLOW 拒绝最终分量的符号链接。
-    # 内存峰值：读取字节、b64 编码与 data URI 拼接约为单图的 5.5×，并发 5 × 30MB 上限
-    # 下瞬态约 800MB，不受 LRU 缓存字节上限约束。
-    try:
-        with open_no_follow_read(validated_path) as f:
-            # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存。
-            image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
-    except OSError as e:
-        raise SeedreamValidationError(
-            _format_local_read_error(e, normalized), field="image", value=normalized
-        ) from e
-    if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
-        # value 携带调用方输入原样串，不含服务器侧绝对路径。
-        raise SeedreamValidationError(
-            format_file_too_large(len(image_bytes), MAX_IMAGE_FILE_SIZE),
-            field="image",
-            value=normalized,
-        )
-    # 维度校验复用已读字节；PIL 惰性导入的解码器加载成本落在工作线程而非事件循环。
-    from PIL import Image
-
-    try:
-        decode_and_validate_dimensions(image_bytes, normalized)
-    except SeedreamValidationError:
-        raise
-    except (ValueError, OSError, Image.DecompressionBombError) as e:
-        # OSError 覆盖 PIL.UnidentifiedImageError；内容不可识别时用固定文案，避免
-        # 异常原文中的 BytesIO 对象地址进入用户消息。
-        message = (
-            UNIDENTIFIED_IMAGE_MESSAGE
-            if is_unidentified_image_error(e)
-            else f"图像维度解析失败: {str(e)}"
-        )
-        raise SeedreamValidationError(message, field="image", value=normalized) from e
+    # 读取、限额复核与维度校验经共享辅助，与校验链同一安全语义。内存峰值：读取
+    # 字节、b64 编码与 data URI 拼接约为单图的 5.5×，并发 5 × 30MB 上限下瞬态约
+    # 800MB；PIL 解码成本落在工作线程而非事件循环。
+    image_bytes = read_and_decode_local_image(
+        validated_path,
+        field_value=normalized,
+        format_read_error=lambda exc: _format_local_read_error(exc, normalized),
+    )
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     # MIME 以字节签名为准、扩展名回退：扩展名可伪造，与 auto_save 保存路径同口径。
     # 两来源的扩展名均为映射键，直取使键缺失以 KeyError 显式暴露而非静默回落。

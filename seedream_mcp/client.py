@@ -134,6 +134,23 @@ class SharedRequestPlan:
         self.validated_common_params = None
         self._build_error = None
 
+    async def get_or_validate(
+        self,
+        inputs: tuple[Any, ...],
+        validator: Callable[[], Awaitable[ValidatedCommonParams]],
+    ) -> ValidatedCommonParams:
+        """返回公共参数校验缓存：输入快照一致时复用，否则锁内单飞校验。"""
+        cached = self.validated_common_params
+        if cached is not None and cached[0] == inputs:
+            return cached[1]
+        async with self._lock:
+            cached = self.validated_common_params
+            if cached is None or cached[0] != inputs:
+                validated = await validator()
+                self.validated_common_params = (inputs, validated)
+                return validated
+            return cached[1]
+
 
 # 当前批次的共享计划绑定，None 表示未绑定，直连调用走独立构建与序列化路径。
 _ACTIVE_REQUEST_PLAN: ContextVar[SharedRequestPlan | None] = ContextVar(
@@ -721,27 +738,26 @@ class SeedreamClient:
             tools,
             layer_decomposition,
         )
+
+        async def _validate() -> ValidatedCommonParams:
+            return await asyncio.to_thread(
+                validate_common_generation_params,
+                prompt=prompt,
+                optimize_prompt_options=optimize_prompt_options,
+                size=resolved_size,
+                watermark=resolved_watermark,
+                response_format=response_format,
+                output_format=output_format,
+                stream=stream,
+                tools=tools,
+                model_id=self.config.model_id,
+                layer_decomposition=layer_decomposition,
+            )
+
         plan = _ACTIVE_REQUEST_PLAN.get()
         if plan is not None:
-            cached = plan.validated_common_params
-            if cached is not None and cached[0] == inputs:
-                return cached[1]
-        validated = await asyncio.to_thread(
-            validate_common_generation_params,
-            prompt=prompt,
-            optimize_prompt_options=optimize_prompt_options,
-            size=resolved_size,
-            watermark=resolved_watermark,
-            response_format=response_format,
-            output_format=output_format,
-            stream=stream,
-            tools=tools,
-            model_id=self.config.model_id,
-            layer_decomposition=layer_decomposition,
-        )
-        if plan is not None:
-            plan.validated_common_params = (inputs, validated)
-        return validated
+            return await plan.get_or_validate(inputs, _validate)
+        return await _validate()
 
     async def prevalidate_common_generation_params(
         self,
@@ -1159,8 +1175,8 @@ class SeedreamClient:
     async def _error_data_from_body(raw_body: bytes) -> dict[str, Any]:
         """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。
 
-        响应体超过 _ERROR_JSON_PARSE_LIMIT 时不做完整 dict 解析，直接降级为
-        message 形态，避免大字典长期驻留异常对象；解码文本经 handle_api_error
+        超过 _ERROR_JSON_PARSE_LIMIT 时不做 dict 解析，降级文本同样按字节截断
+        至该上限，两类形态驻留异常对象的数据规模一致；文本经 handle_api_error
         截断后才进入异常 message。
         """
         parsed: Any = None
@@ -1173,7 +1189,11 @@ class SeedreamClient:
             return parsed
 
         def _decode_as_message() -> dict[str, Any]:
-            return {"message": raw_body.decode("utf-8", errors="ignore")}
+            truncated = len(raw_body) > _ERROR_JSON_PARSE_LIMIT
+            text = raw_body[:_ERROR_JSON_PARSE_LIMIT].decode("utf-8", errors="ignore")
+            if truncated:
+                text += f"...(截断，原文 {len(raw_body)} 字节)"
+            return {"message": text}
 
         return await asyncio.to_thread(_decode_as_message)
 

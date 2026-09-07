@@ -22,30 +22,10 @@ from _download_fakes import (
     _TimeoutThenSuccessSession,
     _patch_download_network,
 )
+from _inflight_fakes import _patch_unretrieved_callback
 
 # 合法 JPEG 魔法字节，供扩展名等价类用例的字节签名嗅探。
 _JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 24
-
-
-def _patch_unretrieved_callback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> "list[asyncio.Task[Any]]":
-    """把 inflight.log_unretrieved_task_exception 替换为记录 task 并检索异常的替身。
-
-    替身经模块属性遮蔽即生效，检索异常避免 "Task exception was never retrieved"
-    告警。返回已触发回调的 task 列表，供断言登记时序。
-    """
-    from seedream_mcp.utils.core import inflight
-
-    fired: "list[asyncio.Task[Any]]" = []
-
-    def record(task: "asyncio.Task[Any]") -> None:
-        fired.append(task)
-        if not task.cancelled():
-            task.exception()
-
-    monkeypatch.setattr(inflight, "log_unretrieved_task_exception", record)
-    return fired
 
 
 class _BlockingFakeLoop:
@@ -72,7 +52,25 @@ async def test_resolve_public_ips_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch
     second = await manager._resolve_public_ips("example.com")
 
     assert fake_loop.calls == 1
-    assert first == second == ("1.1.1.1", "8.8.8.8")
+    assert first == second == ("8.8.8.8", "1.1.1.1")
+
+
+async def test_resolve_public_ips_preserves_getaddrinfo_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """解析结果保持 getaddrinfo 返回序去重，不做字符串排序。
+
+    字符串排序会把 IPv6 排到首位，不可达时每次连接先付一次连接超时。
+    """
+    fake_loop = _FakeLoop(ips=["93.184.216.34", "2a00:1450:4001:81b::200e", "93.184.216.34"])
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+
+    manager = DownloadManager(dns_cache_ttl=60)
+
+    assert await manager._resolve_public_ips("dual.example.com") == (
+        "93.184.216.34",
+        "2a00:1450:4001:81b::200e",
+    )
 
 
 async def test_resolve_public_ips_dedups_inflight_resolutions(

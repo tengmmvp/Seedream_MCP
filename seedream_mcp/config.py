@@ -265,7 +265,7 @@ class SeedreamConfig:
         object.__setattr__(self, "log_level", self.log_level.upper())
 
     def _validate_auto_save_bounds(self) -> None:
-        """校验自动保存各数值字段的下界与下载停滞超时的上界。"""
+        """校验自动保存各数值字段的下界与下载停滞超时的上界，总量上限显式 0 归一为 None。"""
         if self.auto_save_download_timeout <= 0:
             raise SeedreamConfigError(
                 "auto_save_download_timeout必须大于0"
@@ -294,6 +294,10 @@ class SeedreamConfig:
             raise SeedreamConfigError(
                 f"auto_save_cleanup_days不能小于0{_env_var_suffix('auto_save_cleanup_days')}"
             )
+        if self.auto_save_max_total_bytes == 0 and not isinstance(
+            self.auto_save_max_total_bytes, bool
+        ):
+            object.__setattr__(self, "auto_save_max_total_bytes", None)
         if self.auto_save_max_total_bytes is not None and self.auto_save_max_total_bytes <= 0:
             raise SeedreamConfigError(
                 "auto_save_max_total_bytes必须大于0"
@@ -610,9 +614,9 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     if default_env_path.is_file():
         merged_values.update(_load_single_env_file(default_env_path))
 
-    if runtime_env_path.is_file():
+    if runtime_env_path.is_file() and runtime_env_path != default_env_path:
         merged_values.update(_load_single_env_file(runtime_env_path))
-        if default_env_path.is_file() and runtime_env_path != default_env_path:
+        if default_env_path.is_file():
             from .utils.core.logs import get_logger
 
             get_logger().warning(
@@ -754,24 +758,20 @@ def _pick_optional_int(
     return _parse_int_with_env_hint(raw, field_name)
 
 
-def _pick_optional_int_zero_as_none(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
-) -> int | None:
-    """按 _pick_optional_int 取值，显式 0 归一为 None 表示不限制。
-
-    负数等非法值原样返回，由 validate 的下界校验拒绝。
-    """
-    value = _pick_optional_int(overrides, field_name, env_key, env_values)
-    if value == 0:
-        return None
-    return value
+def _parse_bool_with_env_hint(value: object, field_name: str) -> bool:
+    """parse_bool 的字段级包装，解析失败的消息附带该字段环境变量名提示。"""
+    try:
+        return parse_bool(value)
+    except SeedreamConfigError as exc:
+        raise SeedreamConfigError(f"{exc.message}{_env_var_suffix(field_name)}") from exc
 
 
 def _pick_bool(
     overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
 ) -> bool:
-    return parse_bool(
-        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
+    return _parse_bool_with_env_hint(
+        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key]),
+        field_name,
     )
 
 
@@ -802,7 +802,7 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "auto_save_max_concurrent": (_pick_int, None),
     "auto_save_date_folder": (_pick_bool, None),
     "auto_save_cleanup_days": (_pick_int, None),
-    "auto_save_max_total_bytes": (_pick_optional_int_zero_as_none, None),
+    "auto_save_max_total_bytes": (_pick_optional_int, None),
     "auto_save_fsync": (_pick_bool, None),
     "stream_buffer_max_size": (_pick_int, None),
     "stream_chunk_size": (_pick_int, None),

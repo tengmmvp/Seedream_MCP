@@ -491,14 +491,19 @@ def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
 
 
 def is_unc_path(path_str: str) -> bool:
-    """判断是否为 Windows UNC 路径，即以 \\\\ 或 // 开头的路径。
+    """判断是否为 Windows UNC 路径，前两个分隔符字符为斜杠或反斜杠的组合。
 
-    UNC 路径的 resolve 在 Windows 会触发 SMB 认证，须在 resolve 前拦截，
-    避免越界校验尚未拒绝时凭据已向远端泄露。io_path 内部与 images 组的
-    候选守卫共用本公共判定，保持单一规则。
+    混合形态仅在 win32 判为 UNC，POSIX 反斜杠是合法文件名字符；统一分隔符
+    形态各平台一致拒绝。UNC 的 resolve 在 Windows 触发 SMB 认证，须在
+    resolve 前拦截。io_path 与 images 组的候选守卫共用本判定。
     """
     stripped = path_str.lstrip()
-    return stripped.startswith("\\\\") or stripped.startswith("//")
+    if len(stripped) < 2:
+        return False
+    first, second = stripped[0], stripped[1]
+    if first not in "\\/" or second not in "\\/":
+        return False
+    return first == second or sys.platform == "win32"
 
 
 def has_windows_colon_component(path: str) -> bool:
@@ -653,9 +658,8 @@ def find_images_in_directory(
         return images
 
     if is_unc_path(directory):
-        # 与 normalize_path 等 resolve 站点同口径在 resolve 前拦截；告警不回显原始
-        # 路径全文，与项目脱敏口径一致。
-        logger.warning("拒绝 UNC 形式的目录扫描入参，返回空结果")
+        # 与 normalize_path 等 resolve 站点同口径在 resolve 前拦截。
+        logger.warning("拒绝 UNC 形式的目录扫描入参，返回空结果: {}", directory)
         return images
 
     try:
@@ -763,7 +767,7 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
             # UNC 形式的搜索目录在 resolve 前跳过，与 find_images_in_directory 的
             # 入参拦截同口径，避免建议扫描触发 SMB 连接。
             if is_unc_path(search_dir):
-                logger.warning("拒绝 UNC 形式的建议搜索目录，跳过该目录")
+                logger.warning("拒绝 UNC 形式的建议搜索目录，跳过该目录: {}", search_dir)
                 continue
             resolved_dir = Path(search_dir).resolve()
             matched_pairs = cached_find_images_in_directory(

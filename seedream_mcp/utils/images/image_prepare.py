@@ -346,6 +346,15 @@ class ImagePreparer:
             read_context = None
 
         tasks = [
-            self.prepare_image_input(image, scope_key, read_context) for image in stripped_images
+            asyncio.ensure_future(self.prepare_image_input(image, scope_key, read_context))
+            for image in stripped_images
         ]
-        return await asyncio.gather(*tasks)
+        try:
+            return await asyncio.gather(*tasks)
+        except Exception:
+            # 首个失败即取消未完成的兄弟任务，快速让出并发额度；已完成任务的缓存
+            # 仍有效。调用方取消由 gather 自带传播，不经本分支。
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise

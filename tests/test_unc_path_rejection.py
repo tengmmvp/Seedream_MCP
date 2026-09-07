@@ -2,7 +2,9 @@
 
 Windows UNC 路径的 resolve 会触发 SMB 认证，须在 resolve 前拦截。覆盖
 is_unc_path、is_within_resolved、normalize_path、_file_uri_to_path 的拒绝语义，
-以及 normalize_path 对 Windows 驱动器相对路径的同口径拒绝。
+以及 normalize_path 对 Windows 驱动器相对路径的同口径拒绝。pathlib 与
+normpath 在 win32 把 ``/\\host\\share`` 等混合分隔符形态归一为 UNC，混合
+形态的判定与拦截仅 win32 生效，POSIX 反斜杠是合法文件名字符。
 """
 
 import sys
@@ -48,8 +50,22 @@ def _patch_resolve_exploding_only_on_unc(monkeypatch: pytest.MonkeyPatch) -> Non
     ],
 )
 def test_is_unc_path_detects_unc(path: str) -> None:
-    """反斜杠与正斜杠形态的 UNC 路径均被识别。"""
+    """统一分隔符形态的 UNC 路径各平台均被识别。"""
     assert is_unc_path(path) is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="混合分隔符 UNC 语义仅 win32 生效")
+@pytest.mark.parametrize("path", ["\\/host\\share", "/\\host/share"])
+def test_is_unc_path_detects_mixed_separator_unc(path: str) -> None:
+    """win32 下混合分隔符形态同样被识别为 UNC。"""
+    assert is_unc_path(path) is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 反斜杠是合法文件名字符")
+def test_is_unc_path_posix_treats_mixed_separator_as_legal() -> None:
+    """POSIX 下混合分隔符开头是普通合法路径，不判为 UNC。"""
+    assert is_unc_path("/\\backup/img.png") is False
+    assert is_unc_path("\\/backup/img.png") is False
 
 
 def test_is_unc_path_strips_leading_whitespace() -> None:
@@ -295,6 +311,44 @@ def test_resolve_local_image_candidate_skips_unc_without_resolve(
     assert resolve_local_image_candidate("//attacker/share/x.png") is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="混合分隔符 UNC 语义仅 win32 生效")
+def test_resolve_local_image_candidate_rejects_mixed_unc_without_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """win32 下混合分隔符 UNC 输入在 resolve 前被拦截，不触发 SMB 连接。"""
+    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+
+    _patch_resolve_exploding_only_on_unc(monkeypatch)
+
+    assert resolve_local_image_candidate("\\/attacker\\share\\x.png") is None
+    assert resolve_local_image_candidate("/\\attacker/share/x.png") is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="混合分隔符 UNC 语义仅 win32 生效")
+def test_find_images_directory_rejects_mixed_separator_unc_without_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """win32 下混合分隔符 UNC 目录扫描入参在 resolve 前被拦截，返回空结果。"""
+    from seedream_mcp.utils.io.io_path import find_images_in_directory
+
+    _patch_resolve_exploding_only_on_unc(monkeypatch)
+
+    assert find_images_in_directory("\\/attacker\\share") == []
+    assert find_images_in_directory("/\\attacker/share") == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="混合分隔符 UNC 语义仅 win32 生效")
+def test_suggest_similar_paths_rejects_mixed_separator_unc_without_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """win32 下混合分隔符 UNC 建议搜索目录在 resolve 前被跳过，不产生建议。"""
+    from seedream_mcp.utils.io.io_path import suggest_similar_paths
+
+    _patch_resolve_exploding_only_on_unc(monkeypatch)
+
+    assert suggest_similar_paths("x.png", ["\\/attacker\\share", "/\\attacker/share"]) == []
+
+
 def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -367,7 +421,7 @@ async def test_prepare_image_input_rejects_ads_colon_reference_before_read(
     from PIL import Image
 
     from seedream_mcp.utils.core.errors import SeedreamValidationError
-    from seedream_mcp.utils.images import image_input as image_input_module
+    from seedream_mcp.utils.images import image_validation as image_validation_module
     from seedream_mcp.utils.images.image_input import prepare_image_input
 
     host = tmp_path / "photo.jpg"
@@ -376,7 +430,7 @@ async def test_prepare_image_input_rejects_ads_colon_reference_before_read(
     def _explode_read(path: Path) -> IO[bytes]:
         raise AssertionError("ADS 形态参考图不得进入文件读取")
 
-    monkeypatch.setattr(image_input_module, "open_no_follow_read", _explode_read)
+    monkeypatch.setattr(image_validation_module, "open_no_follow_read", _explode_read)
 
     with pytest.raises(SeedreamValidationError, match="拒绝参考图路径分量含冒号") as exc_info:
         await prepare_image_input("photo.jpg:ads.png")

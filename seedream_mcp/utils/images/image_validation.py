@@ -14,7 +14,7 @@ import io
 import os
 import stat
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 from ..core.errors import SeedreamValidationError
@@ -85,6 +85,29 @@ def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None
         _validate_image_dimensions(img.size[0], img.size[1], value_label)
 
 
+def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> None:
+    """解码校验维度并把 PIL 原生异常统一包装为固定文案的校验错误。
+
+    本地文件与 Data URI 两条路径共用的异常包装单一来源。
+
+    Raises:
+        SeedreamValidationError: 维度约束不满足或解码失败。
+    """
+    from PIL import Image
+
+    try:
+        decode_and_validate_dimensions(image_bytes, field_value)
+    except SeedreamValidationError:
+        raise
+    except (ValueError, OSError, Image.DecompressionBombError) as exc:
+        message = (
+            UNIDENTIFIED_IMAGE_MESSAGE
+            if is_unidentified_image_error(exc)
+            else f"图像维度解析失败: {str(exc)}"
+        )
+        raise SeedreamValidationError(message, field="image", value=field_value) from exc
+
+
 # 无法识别图像内容的固定错误文案。UnidentifiedImageError 的 str 嵌有 BytesIO
 # 对象的内存地址，直接拼入用户可见消息会把服务器侧对象地址带给调用方。
 UNIDENTIFIED_IMAGE_MESSAGE = "无法识别的图像内容"
@@ -95,6 +118,47 @@ def is_unidentified_image_error(exc: BaseException) -> bool:
     from PIL import Image
 
     return isinstance(exc, Image.UnidentifiedImageError)
+
+
+def read_and_decode_local_image(
+    path: Path,
+    *,
+    field_value: str,
+    format_read_error: Callable[[OSError], str],
+) -> bytes:
+    """O_NOFOLLOW 读取本地图像字节并做限额复核与维度校验，供校验与读取两条路径复用。
+
+    读取失败的文案由调用方经 format_read_error 生成；超限、维度与解码失败用两
+    条路径一致的固定文案，UnidentifiedImageError 用固定文案避免对象地址进入用户
+    消息。返回读取的字节供调用方编码复用。
+
+    Args:
+        path: 已通过候选定位的本地文件路径。
+        field_value: 出现在错误信息中的调用方输入标识。
+        format_read_error: 读取阶段 OSError 的文案生成函数。
+
+    Returns:
+        读取并通过限额复核的完整图像字节。
+
+    Raises:
+        SeedreamValidationError: 读取失败、超出大小上限或维度与解码校验失败。
+    """
+    try:
+        with open_no_follow_read(path) as f:
+            # 限制读取量并复核，防校验与读取间文件被替换为超大文件撑爆内存。
+            image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
+    except OSError as exc:
+        raise SeedreamValidationError(
+            format_read_error(exc), field="image", value=field_value
+        ) from exc
+    if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
+        raise SeedreamValidationError(
+            format_file_too_large(len(image_bytes), MAX_IMAGE_FILE_SIZE),
+            field="image",
+            value=field_value,
+        )
+    decode_and_validate_image_bytes(image_bytes, field_value)
+    return image_bytes
 
 
 # 输入图像文件大小上限，本地文件与 Data URI 两条校验路径共用。
@@ -326,35 +390,12 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
             )
 
         if not skip_dimensions:
-            from PIL import Image
-
-            # 经 open_no_follow_read 读取后交共享解码校验，拒绝最终分量符号链接，
-            # 与 image_input 的读取保持同一安全语义。
-            try:
-                with open_no_follow_read(path) as f:
-                    # 限制读取量并复核，防 stat 与 read 间文件被替换为超大文件撑爆内存。
-                    image_bytes = f.read(MAX_IMAGE_FILE_SIZE + 1)
-                if len(image_bytes) > MAX_IMAGE_FILE_SIZE:
-                    raise SeedreamValidationError(
-                        format_file_too_large(len(image_bytes), MAX_IMAGE_FILE_SIZE),
-                        field="image",
-                        value=file_path,
-                    )
-                decode_and_validate_dimensions(image_bytes, file_path)
-            except OSError as exc:
-                # UnidentifiedImageError 属 OSError 子类；不可识别时用固定文案。
-                message = (
-                    UNIDENTIFIED_IMAGE_MESSAGE
-                    if is_unidentified_image_error(exc)
-                    else f"无法读取文件: {path} -> {exc}"
-                )
-                raise SeedreamValidationError(message, field="image", value=file_path) from exc
-            except (ValueError, Image.DecompressionBombError) as e:
-                raise SeedreamValidationError(
-                    f"图像维度解析失败: {str(e)}",
-                    field="image",
-                    value=file_path,
-                ) from e
+            # 读取与解码校验经共享辅助，与 image_input 的读取链同一安全语义。
+            read_and_decode_local_image(
+                path,
+                field_value=file_path,
+                format_read_error=lambda exc: f"无法读取文件: {path} -> {exc}",
+            )
 
         return str(path.absolute())
 
@@ -428,18 +469,7 @@ def _validate_data_uri(data_uri: str) -> str:
                 value=data_uri,
             )
 
-        from PIL import Image
-
-        try:
-            decode_and_validate_dimensions(raw, data_uri)
-        except (OSError, ValueError, Image.DecompressionBombError) as e:
-            # 内容不可识别时改用固定文案。
-            message = (
-                UNIDENTIFIED_IMAGE_MESSAGE
-                if is_unidentified_image_error(e)
-                else f"图像维度解析失败: {str(e)}"
-            )
-            raise SeedreamValidationError(message, field="image", value=data_uri) from e
+        decode_and_validate_image_bytes(raw, data_uri)
 
         return f"data:image/{canonical_fmt};base64,{b64}"
 
@@ -465,7 +495,9 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     Raises:
         SeedreamValidationError: 图像输入格式无效或不可访问时抛出。
     """
-    if not image or not isinstance(image, str):
+    if not isinstance(image, str):
+        raise SeedreamValidationError("图像输入必须是字符串", field="image", value=image)
+    if not image:
         raise SeedreamValidationError("图像路径不能为空", field="image", value=image)
 
     image = image.strip()

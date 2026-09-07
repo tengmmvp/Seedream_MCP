@@ -906,12 +906,13 @@ def test_build_config_rejects_negative_max_total_bytes(
         build_config_from_sources(env_file=str(env_file))
 
 
-def test_seedream_config_rejects_programmatic_zero_max_total_bytes() -> None:
-    """程序构造直接传 0 不经 env 哨兵归一，仍由 validate 下界校验拒绝。"""
+def test_seedream_config_normalizes_programmatic_zero_max_total_bytes() -> None:
+    """程序构造直接传 0 与 env 哨兵同口径归一为 None，显式关闭总量上限。"""
     from seedream_mcp.config import SeedreamConfig
 
-    with pytest.raises(SeedreamConfigError, match="auto_save_max_total_bytes"):
-        SeedreamConfig(api_key="k", auto_save_max_total_bytes=0)
+    config = SeedreamConfig(api_key="k", auto_save_max_total_bytes=0)
+
+    assert config.auto_save_max_total_bytes is None
 
 
 # ==================== SEEDREAM_REQUEST_STATE_KEYS requestState 密钥环 ====================
@@ -1064,3 +1065,28 @@ def test_to_dict_masks_request_state_secret_keys() -> None:
     dumped = config.to_dict()
 
     assert dumped["request_state_secret_keys"] == "***"
+
+
+def test_build_config_concurrent_builds_succeed_and_agree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发多次构建经 _config_build_lock 串行化，全部成功且结果一致。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from seedream_mcp.config import SeedreamConfig
+
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.5\n")
+
+    def build() -> SeedreamConfig:
+        return build_config_from_sources(env_file=str(env_file))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        configs = list(executor.map(lambda _: build(), range(16)))
+
+    first = configs[0]
+    assert first.api_key == "file_key"
+    assert first.model_id == "doubao-seedream-4-5-251128"
+    assert all(config == first for config in configs)

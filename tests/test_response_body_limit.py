@@ -143,7 +143,7 @@ async def test_error_body_json_parse_offloaded_to_thread(
 
 
 async def test_non_json_error_body_message_truncated(no_sleep: None) -> None:
-    """非 JSON 错误体降级为 message 后截断至 8KB，异常 message 总长度受限。"""
+    """非 JSON 错误体降级为 message 后截断至 64KB，异常 message 总长度受限。"""
     config = SeedreamConfig(api_key="k", max_retries=3)
     body = b"y" * (2 * 1024 * 1024)  # 低于 4MB 读体上限的非 JSON 文本
 
@@ -158,8 +158,10 @@ async def test_non_json_error_body_message_truncated(no_sleep: None) -> None:
             await client._call_api("text_to_image", {"prompt": "p"})
 
         message = exc_info.value.message
-        assert "<truncated:2097152 chars>" in message
         assert len(message) < 10 * 1024
+        degraded = exc_info.value.response_data["message"]
+        assert "截断，原文 2097152 字节" in degraded
+        assert len(degraded) < 70 * 1024
 
 
 async def test_response_body_limit_explicit_config_overrides_derivation(no_sleep: None) -> None:
