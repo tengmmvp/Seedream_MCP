@@ -14,10 +14,10 @@ from .config import (
     DEFAULT_HTTP_HOST,
     DEFAULT_HTTP_PORT,
     LEGAL_LOG_LEVELS,
-    MODEL_ALIASES,
     SeedreamConfig,
     build_config_from_sources,
 )
+from .utils.model.model_capabilities import MODEL_ALIASES
 from .version import __version__
 
 

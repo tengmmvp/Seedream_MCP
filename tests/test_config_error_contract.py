@@ -62,6 +62,40 @@ def test_read_env_values_wraps_non_utf8_as_config_error(tmp_path: Path) -> None:
     assert str(env_file) in excinfo.value.message
 
 
+def test_read_env_values_wraps_path_preparation_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """~ 开头 env_file 的 expanduser 抛 RuntimeError（HOME 剥离容器）时包装为配置错误。
+
+    RuntimeError 不在 cli_main 捕获范围内，路径准备未包装时以裸 traceback 崩溃。
+    """
+
+    def _no_home(path: Path) -> Path:
+        raise RuntimeError("Could not resolve home directory")
+
+    monkeypatch.setattr(Path, "expanduser", _no_home)
+
+    with pytest.raises(SeedreamConfigError, match="配置文件不可读") as excinfo:
+        _read_env_values("~/config.env")
+
+    assert "~" in excinfo.value.message
+
+
+def test_read_env_values_wraps_deleted_cwd_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """工作目录被删导致定位 CWD .env 抛 FileNotFoundError 时包装为配置错误。
+
+    未包装时 FileNotFoundError 沿配置构建上抛，越过 cli_main 的优雅错误路径。
+    """
+
+    def _deleted_cwd() -> str:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(config_module.os, "getcwd", _deleted_cwd)
+
+    with pytest.raises(SeedreamConfigError, match="配置文件不可读"):
+        _read_env_values(None)
+
+
 def test_deprecated_model_error_message_derives_from_token_set() -> None:
     """弃用模型错误提示的下线清单从 DEPRECATED_MODEL_TOKENS 派生。
 

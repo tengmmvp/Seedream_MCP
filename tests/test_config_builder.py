@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import seedream_mcp.config as config_module
+from _log_fakes import capture_loguru_messages
 from seedream_mcp.config import build_config_from_sources
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 
@@ -356,38 +357,30 @@ def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
     SDK 的 host:* 通配仅匹配带端口的 Host 头，无端口 Host 会被 421 拒绝，
     构建期告警提示补配裸 host；告警不构成拒绝。
     """
-    from loguru import logger as loguru_logger
-
     monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(
         env_file, "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=api.example.com:*\n"
     )
 
-    records: list[object] = []
-    handler_id = loguru_logger.add(lambda message: records.append(message), level="WARNING")
-    try:
+    records: list[str] = []
+    with capture_loguru_messages(records):
         config = build_config_from_sources(env_file=str(env_file))
-    finally:
-        loguru_logger.remove(handler_id)
 
     assert config.http_allowed_hosts == ("api.example.com:*",)
-    assert any("api.example.com" in str(record) for record in records)
+    assert any("api.example.com" in record for record in records)
 
     paired_env_file = tmp_path / "paired.env"
     _write_env_file(
         paired_env_file,
         "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=api.example.com,api.example.com:*\n",
     )
-    quiet_records: list[object] = []
-    handler_id = loguru_logger.add(lambda message: quiet_records.append(message), level="WARNING")
-    try:
+    quiet_records: list[str] = []
+    with capture_loguru_messages(quiet_records):
         paired_config = build_config_from_sources(env_file=str(paired_env_file))
-    finally:
-        loguru_logger.remove(handler_id)
 
     assert paired_config.http_allowed_hosts == ("api.example.com", "api.example.com:*")
-    assert not any("http_allowed_hosts" in str(record) for record in quiet_records)
+    assert not any("http_allowed_hosts" in record for record in quiet_records)
 
 
 def test_to_dict_masks_sensitive_fields() -> None:
@@ -408,6 +401,17 @@ def test_workspace_root_non_directory_rejected(tmp_path: Path) -> None:
     file_path.write_text("x", encoding="utf-8")
     with pytest.raises(SeedreamConfigError, match="workspace_root"):
         SeedreamConfig(api_key="k", workspace_root=str(file_path))
+
+
+@pytest.mark.parametrize("unc_dir", ["//nas/pics", "\\\\nas\\pics"])
+def test_auto_save_base_dir_unc_rejected_at_build(unc_dir: str) -> None:
+    """显式存储区配置 UNC 路径在构建期拒绝，启动即报配置错误而非运行期逐次降级。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="UNC") as excinfo:
+        SeedreamConfig(api_key="k", auto_save_base_dir=unc_dir)
+
+    assert "SEEDREAM_AUTO_SAVE_BASE_DIR" in excinfo.value.message
 
 
 def test_build_config_none_overrides_fall_through_to_defaults(

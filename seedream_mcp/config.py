@@ -18,14 +18,17 @@ from dotenv import dotenv_values
 
 from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, _is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
+from .utils.core.logs import get_logger
 from .utils.io.io_path import (
     clear_resolved_env_root_cache,
+    is_unc_path,
     register_env_save_base_dir_provider,
     register_env_workspace_root_provider,
 )
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
 from .utils.core.validators import parse_bool, validate_size_for_model
 
+# 项目根 .env 层仅源码检出部署存在，pip 安装部署该层空转，CWD .env 层仍生效。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 LEGAL_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -42,6 +45,8 @@ _HTTP_MAX_BODY_SIZE_FLOOR = 1024 * 1024
 _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS = 720
 # requestState 密钥环单钥的字节数下限，与 SDK RequestStateSecurity 的密钥强度要求一致。
 _REQUEST_STATE_KEY_MIN_BYTES = 32
+# SSE 读取块的下限字节数：流首 UTF-8 BOM 为 3 字节且按读取块整体判定剥离，不可跨块。
+_STREAM_CHUNK_SIZE_MIN_BYTES = 3
 # 密钥环错误消息提示的密钥生成命令，生成一个解码后恰为 32 字节的十六进制密钥。
 _REQUEST_STATE_KEYGEN_COMMAND = 'python -c "import secrets; print(secrets.token_hex(32))"'
 _ENV_METADATA_KEY = "env"
@@ -196,13 +201,14 @@ class SeedreamConfig:
     def _validate_api_endpoint(self) -> None:
         """校验 base_url 的 scheme、主机名与 http 明文豁免。"""
         # RFC 3986 规定 scheme 大小写不敏感，HTTPS:// 等大写形态经 urlparse 取小写后判定。
-        base_url_scheme = urlparse(self.base_url).scheme.lower() if self.base_url else ""
+        parsed_base_url = urlparse(self.base_url)
+        base_url_scheme = parsed_base_url.scheme.lower()
         if not self.base_url or base_url_scheme not in ("http", "https"):
             raise SeedreamConfigError(
                 f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
             )
         # netloc 缺失的畸形 URL 在构造期拒绝，避免运行期才以网络错误档失败。
-        if not urlparse(self.base_url).netloc.strip():
+        if not parsed_base_url.netloc.strip():
             raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
         if base_url_scheme == "http":
             if not self.allow_http_base_url:
@@ -210,8 +216,6 @@ class SeedreamConfig:
                     "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝；"
                     "仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
                 )
-            from .utils.core.logs import get_logger
-
             get_logger().warning(
                 "ARK_BASE_URL 使用 http:// 且已豁免，API 密钥将在网络上明文传输，"
                 "仅限自建可信内网端点使用"
@@ -221,6 +225,7 @@ class SeedreamConfig:
         """校验 model_id 并展开别名为完整 Model ID。"""
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError(f"model_id不能为空{_env_var_suffix('model_id')}")
+        # 展开后统一为小写，下线 token 子串检查随之为大小写不敏感。
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
             aliases = "/".join(MODEL_ALIASES)
@@ -311,9 +316,11 @@ class SeedreamConfig:
             raise SeedreamConfigError(
                 f"stream_buffer_max_size必须大于0{_env_var_suffix('stream_buffer_max_size')}"
             )
-        if self.stream_chunk_size <= 0:
+        if self.stream_chunk_size < _STREAM_CHUNK_SIZE_MIN_BYTES:
             raise SeedreamConfigError(
-                f"stream_chunk_size必须大于0{_env_var_suffix('stream_chunk_size')}"
+                f"stream_chunk_size不能低于{_STREAM_CHUNK_SIZE_MIN_BYTES}字节"
+                "（流首 UTF-8 BOM 为 3 字节，不可跨读取块剥离）"
+                f"{_env_var_suffix('stream_chunk_size')}"
             )
         if self.stream_chunk_size > self.stream_buffer_max_size:
             raise SeedreamConfigError(
@@ -343,8 +350,14 @@ class SeedreamConfig:
             )
 
     def _validate_dir_fields(self) -> None:
-        """校验各目录型字段指向有效目录。"""
+        """校验各目录型字段指向有效目录，存储区声明拒绝 UNC 形态。"""
         if self.auto_save_base_dir:
+            # UNC 存储区的 resolve 会触发 SMB 认证，构建期响亮失败而非运行期逐次降级。
+            if is_unc_path(self.auto_save_base_dir):
+                raise SeedreamConfigError(
+                    f"auto_save_base_dir不支持UNC路径: {self.auto_save_base_dir}"
+                    f"{_env_var_suffix('auto_save_base_dir')}"
+                )
             self._validate_dir_field(self.auto_save_base_dir, "auto_save_base_dir")
 
         if self.workspace_root:
@@ -391,8 +404,6 @@ class SeedreamConfig:
 
         uncovered = wildcard_hosts - bare_hosts
         if uncovered:
-            from .utils.core.logs import get_logger
-
             get_logger().warning(
                 "http_allowed_hosts 中 {} 仅列出端口通配形态而未列裸 host，"
                 "无端口 Host 头的请求不匹配通配条目会被 SDK 以 421 拒绝，"
@@ -557,8 +568,8 @@ ENV_DEFAULTS: dict[str, str] = {
 
 
 def normalize_model_selector(value: object) -> str:
-    """规范化模型选择器：友好别名映射为完整 Model ID，未命中原样返回。"""
-    normalized = str(value).strip()
+    """规范化模型选择器：忽略大小写将友好别名映射为完整 Model ID，未命中返回小写原值。"""
+    normalized = str(value).strip().lower()
     return MODEL_ALIASES.get(normalized, normalized)
 
 
@@ -602,15 +613,22 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
             raise SeedreamConfigError(f"配置文件编码错误: {path} 需为 UTF-8 编码 -> {exc}") from exc
         return {k: str(v) for k, v in values.items() if v is not None}
 
+    def _prepare_env_path(raw: str | Path) -> Path:
+        # 路径准备与读取同口径包装：被删 CWD 抛 OSError，HOME 剥离容器对 ~ 抛 RuntimeError。
+        try:
+            return Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            raise SeedreamConfigError(f"配置文件不可读: {raw} -> {exc}") from exc
+
     if env_file:
-        env_path = Path(env_file).expanduser().resolve()
+        env_path = _prepare_env_path(env_file)
         if not env_path.is_file():
             raise SeedreamConfigError(f"配置文件不存在: {env_path}")
         return _load_single_env_file(env_path)
 
     merged_values: dict[str, str] = {}
-    default_env_path = DEFAULT_ENV_FILE.expanduser().resolve()
-    runtime_env_path = (Path.cwd() / ".env").expanduser().resolve()
+    default_env_path = _prepare_env_path(DEFAULT_ENV_FILE)
+    runtime_env_path = _prepare_env_path(".env")
 
     if default_env_path.is_file():
         merged_values.update(_load_single_env_file(default_env_path))
@@ -618,8 +636,6 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     if runtime_env_path.is_file() and runtime_env_path != default_env_path:
         merged_values.update(_load_single_env_file(runtime_env_path))
         if default_env_path.is_file():
-            from .utils.core.logs import get_logger
-
             get_logger().warning(
                 "当前工作目录 .env（{}）覆盖了项目根 .env（{}）的配置值；"
                 "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
@@ -857,7 +873,9 @@ def _build_config_from_sources_unlocked(
         )
     ).strip()
     if not api_key:
-        raise SeedreamConfigError("未找到ARK_API_KEY环境变量或配置文件值。")
+        raise SeedreamConfigError(
+            "未找到ARK_API_KEY环境变量或配置文件值，也可通过 --api-key 参数提供。"
+        )
 
     config_kwargs: dict[str, Any] = {"api_key": api_key}
     for field_name, env_key in _FIELD_ENV_MAP.items():
