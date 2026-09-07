@@ -291,7 +291,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - `prompt` (可选) - 图像修改要求或风格转换指令，建议不超过 300 个汉字或 600 个英文单词；仅图层拆分场景可缺省，由模型自动识别拆分意图
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"，fast 仅 5.0 Pro / 4.0 支持
-- `image` (必需) - 输入图像，支持图像 URL、本地文件路径或 Base64 图片数据；相对路径以图片保存目录为基准
+- `image` (必需) - 输入图像，支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
 - `layer_decomposition` (可选) - 是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，图层条目额外返回 `z_index`、`name`、`description`、`bounding_box` 字段；`output_format` 仅控制底图格式，图层始终为 PNG
 - `background` (可选) - 透明通道，`transparent` 生成透明背景图（需输入单张带透明通道的图片，与 `output_format=jpeg` 互斥）或 `opaque` 生成常规图，仅 5.0 Pro 支持
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容；图层拆分场景仅支持档位与 `auto`（按输入图自适应，未指定尺寸时的默认值）
@@ -329,7 +329,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - `prompt` (必需) - 图像融合要求或风格指令，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"，fast 仅 5.0 Pro / 4.0 支持
-- `image` (必需) - 输入图像（2-14 张；5.0 Pro 最多 10 张），每张支持图像 URL、本地文件路径或 Base64 图片数据；相对路径以图片保存目录为基准
+- `image` (必需) - 输入图像（2-14 张；5.0 Pro 最多 10 张），每张支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
@@ -368,7 +368,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - `prompt` (必需) - 图像生成的文本提示词，应明确指明生成数量和内容，建议不超过 300 个汉字或 600 个英文单词
 - `optimize_prompt_options` (可选) - 提示词优化选项，支持 mode: "standard" 或 "fast"，fast 仅 5.0 Pro / 4.0 支持
-- `image` (可选) - 参考图像（最多 14 张，且参考图数量与 max_images 之和不超过 15），每张支持图像 URL、本地文件路径或 Base64 图片数据；相对路径以图片保存目录为基准
+- `image` (可选) - 参考图像（最多 14 张，且参考图数量与 max_images 之和不超过 15），每张支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
 - `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `max_images` (可选) - 最大生成图像数量，范围 1-15，默认 15；提供参考图时默认自动扣减为 15 减参考图数量
@@ -402,7 +402,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 **参数：**
 
-- `directory` (可选) - 要浏览的目录路径，默认浏览图片保存目录；相对路径以图片保存目录为基准，绝对路径须在读取范围内（工作区 ∪ 图片保存目录）。保存目录内条目为保存目录相对路径；保存目录外条目在客户端声明工作区 Roots 时为绝对路径，否则为所浏览目录的相对路径（拼接所浏览目录前缀后使用）
+- `directory` (可选) - 要浏览的目录路径，默认浏览图片保存目录；相对路径仅限图片保存目录内，绝对路径须在读取范围内。返回的条目为绝对路径，可直接作为参考图路径
 - `recursive` (可选) - 是否递归搜索子目录，默认`true`
 - `max_depth` (可选) - 最大搜索深度，范围 1-10，默认 3
 - `limit` (可选) - 返回的最大文件数量，范围 1-200，默认 50
@@ -427,7 +427,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 | 资源 URI                                               | 说明                                                                                                                 |
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `seedream://workspace/roots`                           | 客户端授权的 MCP 工作区 Roots；未授权时为空，避免暴露服务器本地目录                                                  |
+| `seedream://workspace/roots`                           | 当前生效的工作区根：客户端授权的 MCP Roots，未声明时回退环境配置的工作目录                                           |
 | `seedream://server/info`                               | 服务器名称、版本与当前生效配置摘要（模型、默认尺寸、自动保存开关，共五项字段）                                       |
 | `seedream://models/info`                               | 各模型别名与能力声明：支持的尺寸档位、像素范围、像素倍数、参考图上限、输出格式/工具/流式等能力，供客户端按需选择模型 |
 | `skill://seedream-image-generation/SKILL.md`           | Agent Skill 主文件：图像生成指南入口，正文含工具速查、模型差异与参数规则                                             |
