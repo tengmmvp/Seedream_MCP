@@ -162,7 +162,7 @@ def parse_sse_segment(
         RecursionError,
     ) as exc:
         if log is not None:
-            log.error("SSE事件解析失败: {}", str(exc))
+            log.warning("SSE事件解析失败: {}", str(exc))
             log.debug("SSE事件原始段长度: {} bytes", len(raw_segment))
         return None
 
@@ -424,14 +424,19 @@ async def _consume_sse_chunks(
     frames: _SSEFrameBuffer,
     collector: _SSEItemCollector,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
-) -> int:
-    """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件限额截断。"""
+) -> tuple[int, bool]:
+    """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件限额截断。
+
+    Returns:
+        (超限丢弃的事件数, 是否因总时长预算超限提前终止)。
+    """
     processed_bytes = 0
     last_progress_log_bytes = 0
     # 超限丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件因体积超限被丢弃」。
     truncated_events = 0
     # 流首 BOM 剥离标记：BOM 仅可能出现在流首，只对首个到达的非空块生效一次。
     stripped_bom = False
+    deadline_exceeded = False
 
     async for chunk in response.aiter_bytes(chunk_size):
         if not chunk:
@@ -446,9 +451,17 @@ async def _consume_sse_chunks(
                 if not chunk:
                     continue
 
-        # 总时长预算：逐块检查截止时间，封顶整个解析阶段；超限关闭响应抛超时错误，
-        # 由 client 侧并入既有超时重试路径。
+        # 总时长预算：逐块检查截止时间，封顶整个解析阶段；检查点在 extend 之前，
+        # 已收完整事件即确定性产出，超限保留为部分结果，零产出才并入超时重试。
         if deadline is not None and time.monotonic() > deadline:
+            if collector.items:
+                log.warning(
+                    "SSE 响应流超过总时长预算，保留已收 {} 条结果提前终止",
+                    len(collector.items),
+                )
+                await _close_stream_response(response)
+                deadline_exceeded = True
+                break
             log.warning("SSE 响应流超过总时长预算，终止解析")
             await _close_stream_response(response)
             raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
@@ -503,7 +516,7 @@ async def _consume_sse_chunks(
             )
             truncated_events += 1
 
-    return truncated_events
+    return truncated_events, deadline_exceeded
 
 
 async def _resolve_sse_trailing_segment(
@@ -535,13 +548,16 @@ async def _resolve_sse_trailing_segment(
     if trailing_len > 0 and _has_lost_data_payload(tail):
         # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
         # 标记 partial。
-        log.debug("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
+        log.warning("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
         return 1
     return 0
 
 
 def _finalize_sse_status(
-    status: str | None, items: list[dict[str, Any]], truncated_events: int
+    status: str | None,
+    items: list[dict[str, Any]],
+    truncated_events: int,
+    deadline_exceeded: bool = False,
 ) -> str | None:
     """状态汇总阶段：按部分失败与事件截断把完成状态收敛为 partial。"""
     # data 项含 error 即存在部分失败时标记 status=partial，与非流式
@@ -551,8 +567,8 @@ def _finalize_sse_status(
     ):
         status = "partial"
 
-    # 单个事件超限被丢弃时结果不完整，标记 partial 通知调用方存在数据丢失。
-    if truncated_events > 0 and status in (None, "completed"):
+    # 单个事件超限被丢弃或超时提前终止时结果不完整，标记 partial 通知调用方。
+    if (truncated_events > 0 or deadline_exceeded) and status in (None, "completed"):
         status = "partial"
     return status
 
@@ -587,15 +603,17 @@ async def parse_sse_response(
         log: loguru logger 实例，用于记录进度与告警。
         deadline: 解析全程的 time.monotonic 截止时间，None 表示不施加。读取超时按
             单次读操作计时，持续滴流时永不触发，截止时间逐块封顶整个解析阶段；
-            超限时关闭响应并抛 asyncio.TimeoutError，由 client 并入超时重试。
+            超时时关闭响应：尚无已解析条目则抛 asyncio.TimeoutError 交由 client
+            并入超时重试，已有条目则保留部分结果返回。
 
     Returns:
-        包含 success/data/usage/status/tools 的统一结果字典。
+        包含 success/data/usage/status/tools 的统一结果字典；deadline 截止且已有
+        条目时另含 deadline_exceeded=True 与 status=partial。
 
     Raises:
         SeedreamAPIError: 响应流累计接收字节超过 total_bytes_limit，或上游返回请求级
             错误事件。
-        asyncio.TimeoutError: 提供 deadline 且解析中途超过截止时间。
+        asyncio.TimeoutError: 提供 deadline 且超过截止时间时流中尚无已解析条目。
     """
     usage: dict[str, Any] = {}
     status: str | None = None
@@ -627,7 +645,7 @@ async def parse_sse_response(
     frames = _SSEFrameBuffer()
     collector = _SSEItemCollector(total_bytes_limit)
 
-    truncated_events = await _consume_sse_chunks(
+    truncated_events, deadline_exceeded = await _consume_sse_chunks(
         response,
         model_id=model_id,
         chunk_size=chunk_size,
@@ -651,7 +669,10 @@ async def parse_sse_response(
             apply_completed=apply_completed,
         )
 
-    status = _finalize_sse_status(status, collector.items, truncated_events)
+    # completed 已到即结果完整，超时仅终止了尾部连接保持，不标记部分结果
+    if deadline_exceeded and status == "completed":
+        deadline_exceeded = False
+    status = _finalize_sse_status(status, collector.items, truncated_events, deadline_exceeded)
 
     return {
         "success": True,
@@ -660,4 +681,5 @@ async def parse_sse_response(
         "status": status,
         "tools": tools,
         "truncated_events": truncated_events,
+        "deadline_exceeded": deadline_exceeded,
     }

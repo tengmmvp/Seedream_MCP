@@ -56,18 +56,44 @@ _BACKOFF_EXPONENT_CAP = 6
 # 错误响应体独立读取上限。
 _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 
-# SSE 事件信封余量。
-_SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
-
-# base64 最坏膨胀系数：n 字节数据经编码最长为 4*ceil(n/3) 字符，SSE 事件截断阈值
-# 由 4*ceil(n/3)+信封余量推导。
-_B64_WORST_CASE_NUMERATOR = 4
-
 # 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象。
 _ERROR_JSON_PARSE_LIMIT = 64 * 1024
 
 # 响应体累计超过该阈值时 join 移交工作线程执行。
 _JOIN_OFFLOAD_THRESHOLD = 8 * 1024 * 1024
+
+# _call_api 跨尝试累计预算按单次 api_timeout 的倍数推导，把重试风暴下单请求的
+# 最长占用约束在单次封顶的小常数倍内。
+_API_RETRY_BUDGET_FACTOR = 2
+
+
+def _first_error_detail(error: dict[str, Any]) -> str:
+    """拼接错误字典的 code 与 message 为一句摘要并限长。"""
+    detail = " ".join(
+        str(part)
+        for part in (error.get("code"), error.get("message"))
+        if isinstance(part, str) and part
+    )
+    return detail[:200]
+
+
+def _outcome_error_note(response: dict[str, Any]) -> str:
+    """提取软失败或部分失败的一句原因，结局日志仅凭自身可定位问题。"""
+    error = response.get("error")
+    if isinstance(error, dict):
+        detail = _first_error_detail(error)
+        if detail:
+            return detail
+    failed_items = [
+        item
+        for item in response.get("data") or []
+        if isinstance(item, dict) and isinstance(item.get("error"), dict)
+    ]
+    if failed_items:
+        detail = _first_error_detail(failed_items[0]["error"])
+        suffix = f": {detail}" if detail else ""
+        return f"{len(failed_items)} 项失败{suffix}"
+    return "无错误详情"
 
 
 class SharedRequestPlan:
@@ -552,7 +578,9 @@ class SeedreamClient:
                 stream=stream,
                 tools=tools,
                 validated_opts=validated_opts,
-                extra={"image": image_data_list, "sequential_image_generation": "disabled"},
+                # sequential_image_generation 不显式传值：官方口径该参数仅部分模型
+                # 支持，服务端缺省即 disabled，全模型恒传会向能力表外模型发参。
+                extra={"image": image_data_list},
             )
 
         try:
@@ -881,9 +909,7 @@ class SeedreamClient:
             raise SeedreamValidationError(
                 f"{field_name} 参数不能为空字符串", field=field_name, value=image
             )
-        ensure_utf8_encodable(
-            normalized, f"{field_name} 参数包含无法编码的字符（如未配对的代理字符）", field_name
-        )
+        ensure_utf8_encodable(normalized, f"{field_name} 参数包含无法编码的字符", field_name)
         return normalized
 
     @staticmethod
@@ -1123,6 +1149,12 @@ class SeedreamClient:
         """错误路径读体上限：取响应体总量上限与 4MB 独立上限的较小值。"""
         return min(self._response_body_byte_limit(), _ERROR_BODY_BYTE_LIMIT)
 
+    def _sse_event_truncate_threshold(self) -> int:
+        """单个 SSE 事件的截断阈值，显式配置优先，未配置时取推导下界。"""
+        if self.config.sse_event_max_size is not None:
+            return self.config.sse_event_max_size
+        return self.config.derived_sse_event_max_size()
+
     async def _read_response_body_capped(
         self,
         response: httpx.Response,
@@ -1144,6 +1176,11 @@ class SeedreamClient:
         """
         if max_bytes is None:
             max_bytes = self._response_body_byte_limit()
+        retry_after = (
+            self._retry_after_or_none(status_code, response.headers)
+            if status_code is not None
+            else None
+        )
         content_length = response.headers.get("content-length")
         if content_length:
             try:
@@ -1155,6 +1192,7 @@ class SeedreamClient:
                     f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
                     f"超过上限 {max_bytes} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
                     status_code=status_code,
+                    retry_after=retry_after,
                 )
         chunks: list[bytes] = []
         received = 0
@@ -1169,6 +1207,7 @@ class SeedreamClient:
                     f"响应体过大: 已读取 {received} 字节，超过上限 {max_bytes} 字节，"
                     f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
                     status_code=status_code,
+                    retry_after=retry_after,
                 )
             chunks.append(chunk)
         if received > _JOIN_OFFLOAD_THRESHOLD:
@@ -1197,6 +1236,8 @@ class SeedreamClient:
             text = raw_body[:_ERROR_JSON_PARSE_LIMIT].decode("utf-8", errors="ignore")
             if truncated:
                 text += f"...(截断，原文 {len(raw_body)} 字节)"
+            if not text:
+                return {"message": "响应体为空"}
             return {"message": text}
 
         return await asyncio.to_thread(_decode_as_message)
@@ -1208,12 +1249,21 @@ class SeedreamClient:
         if response.status_code == 200:
             return
 
-        raw_body = await self._read_response_body_capped(
-            response,
-            max_bytes=self._error_body_byte_limit(),
-            status_code=response.status_code,
-            deadline=deadline,
-        )
+        try:
+            raw_body = await self._read_response_body_capped(
+                response,
+                max_bytes=self._error_body_byte_limit(),
+                status_code=response.status_code,
+                deadline=deadline,
+            )
+        except (asyncio.TimeoutError, httpx.ReadTimeout) as exc:
+            # 已收到错误状态码后读体超时：按状态码归约为 API 错误交由可重试判定，
+            # Retry-After 一并保留。
+            raise SeedreamAPIError(
+                f"读取错误响应体超时（状态码 {response.status_code}）: {exc}",
+                status_code=response.status_code,
+                retry_after=self._retry_after_or_none(response.status_code, response.headers),
+            ) from exc
         error_data = await self._error_data_from_body(raw_body)
         self._raise_api_error_for(response.status_code, response.headers, error_data)
 
@@ -1258,11 +1308,7 @@ class SeedreamClient:
                     model_id=self.config.model_id,
                     chunk_size=self.config.stream_chunk_size,
                     buffer_max_size=self.config.stream_buffer_max_size,
-                    event_truncate_threshold=max(
-                        self.config.stream_buffer_max_size,
-                        _B64_WORST_CASE_NUMERATOR * ((self.config.auto_save_max_file_size + 2) // 3)
-                        + _SSE_EVENT_ENVELOPE_MARGIN,
-                    ),
+                    event_truncate_threshold=self._sse_event_truncate_threshold(),
                     total_bytes_limit=self._response_body_byte_limit(),
                     log=self.logger,
                     deadline=deadline,
@@ -1270,6 +1316,9 @@ class SeedreamClient:
                 truncated_events = sse_result.pop("truncated_events", 0)
                 if isinstance(truncated_events, int) and truncated_events > 0:
                     sse_result["truncated_events"] = truncated_events
+                deadline_exceeded = sse_result.pop("deadline_exceeded", False)
+                if deadline_exceeded is True:
+                    sse_result["deadline_exceeded"] = True
                 return sse_result
 
             return await self._parse_json_success_response(response, deadline=deadline)
@@ -1319,7 +1368,16 @@ class SeedreamClient:
         total_attempts = max(1, self.config.max_retries + 1)
 
         is_stream = bool(request_data.get("stream"))
+        total_budget = float(self.config.api_timeout) * _API_RETRY_BUDGET_FACTOR
+        total_budget_deadline = time.monotonic() + total_budget
+        last_error: BaseException | None = None
         for attempt in range(total_attempts):
+            if attempt > 0 and time.monotonic() > total_budget_deadline:
+                detail = f"，最后错误: {last_error}" if last_error is not None else ""
+                raise SeedreamTimeoutError(
+                    f"{endpoint} API 调用跨尝试累计超过总预算 {total_budget:.0f} 秒，"
+                    f"提前终止重试{detail}"
+                ) from last_error
             pending_retry_after: float | None = None
             try:
                 self._log_request_attempt(
@@ -1345,6 +1403,7 @@ class SeedreamClient:
                     request_timeout=request_timeout,
                 )
             except SeedreamAPIError as exc:
+                last_error = exc
                 if exc.status_code is None:
                     self.logger.warning(
                         "{} API 调用失败 (无 HTTP 状态码，不再重试): {}",
@@ -1373,6 +1432,7 @@ class SeedreamClient:
                 if attempt == total_attempts - 1:
                     raise
             except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
+                last_error = exc
                 # httpx 读取超时与读体总时长预算超限同语义处置：均可重试，重试耗尽后
                 # 归一为 SeedreamTimeoutError。超时时结果未知，即使发生在收到 200 之后
                 # 也重试；200 加确定坏体属已知失败结果，立即上抛避免对非幂等生成 API
@@ -1385,8 +1445,14 @@ class SeedreamClient:
                     str(exc),
                 )
                 if attempt == total_attempts - 1:
-                    raise SeedreamTimeoutError(f"{endpoint} API 调用超时") from exc
+                    detail = str(exc)
+                    raise SeedreamTimeoutError(
+                        f"{endpoint} API 调用超时: {detail}"
+                        if detail
+                        else f"{endpoint} API 调用超时"
+                    ) from exc
             except httpx.RequestError as exc:
+                last_error = exc
                 self.logger.warning(
                     "{} 网络错误 (尝试 {}/{}): {}",
                     endpoint,
@@ -1409,21 +1475,28 @@ class SeedreamClient:
             # 等待时延按 ±20% 抖动：同一批次并行的多条请求收到相同 Retry-After
             # 或走相同指数退避时，抖动拉开重试相位，避免同步群聚再击上游。
             # Retry-After 为服务端明示的等待下限，负向抖动夹取回名义值，正向抖动
-            # 仍可放大至 1.2 倍，重试不早于服务端要求发起。
+            # 仍可放大至 1.2 倍，重试不早于服务端要求发起。等待不超过剩余总预算。
             if attempt < total_attempts - 1:
+                remaining_budget = max(total_budget_deadline - time.monotonic(), 0.0)
                 if pending_retry_after is not None:
                     await asyncio.sleep(
-                        max(
-                            pending_retry_after,
-                            pending_retry_after * (1 + random.uniform(-0.2, 0.2)),
+                        min(
+                            max(
+                                pending_retry_after,
+                                pending_retry_after * (1 + random.uniform(-0.2, 0.2)),
+                            ),
+                            remaining_budget,
                         )
                     )
                 else:
                     capped_exponent = 2 ** min(attempt, _BACKOFF_EXPONENT_CAP)
                     await asyncio.sleep(
                         min(
-                            float(capped_exponent) * (1 + random.uniform(-0.2, 0.2)),
-                            _MAX_BACKOFF_SECONDS,
+                            min(
+                                float(capped_exponent) * (1 + random.uniform(-0.2, 0.2)),
+                                _MAX_BACKOFF_SECONDS,
+                            ),
+                            remaining_budget,
                         )
                     )
 
@@ -1457,9 +1530,9 @@ class SeedreamClient:
         _finalize_generation_error 承担。
         """
         if not response.get("success"):
-            self.logger.error("{}任务失败", task_label)
+            self.logger.error("{}任务失败: {}", task_label, _outcome_error_note(response))
         elif response.get("status") == "partial":
-            self.logger.warning("{}任务部分完成", task_label)
+            self.logger.warning("{}任务部分完成: {}", task_label, _outcome_error_note(response))
         else:
             self.logger.info("{}任务完成", task_label)
 

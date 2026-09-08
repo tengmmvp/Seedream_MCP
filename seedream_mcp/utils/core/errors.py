@@ -169,7 +169,7 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
         "余额不足",
         "请检查账户余额与配额。",
         "payment_required",
-        base_message="余额不足",
+        base_message="账户余额不足或配额已耗尽",
     ),
     403: _ErrorProfile(
         "API调用失败",
@@ -199,7 +199,7 @@ _HTTP_STATUS_PROFILES: dict[int, _ErrorProfile] = {
         "请求频率超限",
         "请稍后重试。",
         "rate_limited",
-        base_message="请求频率超限，请稍后重试",
+        base_message="上游返回限流",
     ),
 }
 

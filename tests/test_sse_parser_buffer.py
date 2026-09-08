@@ -27,13 +27,17 @@ if TYPE_CHECKING:
 
 
 class _CapturingLog(_FakeLog):
-    """捕获 debug 调用参数的日志替身，供进度与未知事件日志断言使用。"""
+    """捕获 debug 与 warning 调用参数的日志替身，供进度与事件丢弃日志断言使用。"""
 
     def __init__(self) -> None:
         self.debug_calls: list[tuple[object, ...]] = []
+        self.warning_calls: list[tuple[object, ...]] = []
 
     def debug(self, *a: Any, **k: Any) -> None:
         self.debug_calls.append(a)
+
+    def warning(self, *a: Any, **k: Any) -> None:
+        self.warning_calls.append(a)
 
 
 def _sse_response(chunks: list[bytes]) -> httpx.Response:
@@ -47,13 +51,14 @@ def _log() -> Logger:
 
 
 async def test_parse_sse_response_collects_events_and_completed() -> None:
-    """完整流解析出 data 事件、completed 状态与 usage。"""
+    """完整流解析出 data 事件、completed 状态与 usage，chunk_size 原样传抵读取入口。"""
     chunks = [
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
         b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
     ]
+    response = _FakeSSEResponse(chunks)
     result = await parse_sse_response(
-        _sse_response(chunks),
+        cast(httpx.Response, response),
         model_id="m",
         chunk_size=64,
         buffer_max_size=4096,
@@ -61,6 +66,7 @@ async def test_parse_sse_response_collects_events_and_completed() -> None:
         total_bytes_limit=64 * 1024,
         log=_log(),
     )
+    assert response.observed_chunk_size == 64
     assert result["success"] is True
     assert len(result["data"]) == 1
     assert result["data"][0]["url"] == "http://x/1.png"
@@ -494,7 +500,7 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
 async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
     """流末尾不完整事件解析失败时计入 truncated_events，不再静默丢失。
 
-    与超阈值丢弃同口径标记 partial 并记录 debug 日志，残留段之前的完整事件不受影响。
+    与超阈值丢弃同口径标记 partial 并记录 warning 日志，残留段之前的完整事件不受影响。
     """
     log = _CapturingLog()
     chunks = [
@@ -514,8 +520,8 @@ async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
     assert len(result["data"]) == 1
     assert result["truncated_events"] == 1
     assert result["status"] == "partial"
-    drop_logs = [call for call in log.debug_calls if "流末尾" in str(call)]
-    assert drop_logs, "流末尾丢弃事件须记录 debug 日志"
+    drop_logs = [call for call in log.warning_calls if "流末尾" in str(call)]
+    assert drop_logs, "流末尾丢弃事件须记录 warning 日志"
 
 
 async def test_parse_sse_response_counts_deeply_nested_trailing_event() -> None:
@@ -742,6 +748,47 @@ async def test_parse_sse_response_terminates_on_deadline() -> None:
     # 预算耗尽后关闭响应并停止读取。
     assert closed == 1
     assert consumed < 200
+
+
+async def test_parse_sse_response_deadline_keeps_collected_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """预算耗尽时已收完整事件是确定性产出，保留为部分结果且不再抛超时。"""
+    calls = {"count": 0}
+
+    def _advancing_monotonic() -> float:
+        calls["count"] += 1
+        return 0.0 if calls["count"] == 1 else 100.0
+
+    monkeypatch.setattr(sse_parser_module.time, "monotonic", _advancing_monotonic)
+    first = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+    second = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2.png"}\n\n'
+    consumed = 0
+
+    class _CountingResponse(_FakeSSEResponse):
+        async def aiter_bytes(self, chunk_size: int) -> AsyncIterator[bytes]:
+            nonlocal consumed
+            del chunk_size
+            for c in self._chunks:
+                consumed += 1
+                yield c
+
+    result = await parse_sse_response(
+        cast(httpx.Response, _CountingResponse([first, second])),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_log(),
+        deadline=50.0,
+    )
+
+    assert result["deadline_exceeded"] is True
+    assert result["status"] == "partial"
+    # 超时检查先于次块入缓冲，产出为首块的确定性事件
+    assert [item["url"] for item in result["data"]] == ["http://x/1.png"]
+    assert consumed == 2
 
 
 def _resp_with_content_type(content_type: str) -> httpx.Response:

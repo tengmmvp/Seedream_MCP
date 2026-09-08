@@ -317,6 +317,43 @@ async def test_stream_json_over_limit_error_not_wrapped_as_parse_failure(no_slee
         assert exc_info.value.status_code is None
 
 
+async def test_success_body_join_offloaded_to_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+) -> None:
+    """成功响应体累计超过阈值时 b"".join 移交工作线程执行。
+
+    回归到事件循环内 join 时大响应体的合并阻塞调度；spy 透传真实 to_thread，
+    仅记录 join 是否经过该入口。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    join_offloaded = False
+    real_to_thread = asyncio.to_thread
+
+    async def _spy_to_thread(func: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal join_offloaded
+        # b"".join 每次求值产生新的绑定方法对象，按名称识别 join 调用
+        if getattr(func, "__name__", None) == "join":
+            join_offloaded = True
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _spy_to_thread)
+
+    # 9MB 成功 JSON 体超过 8MB join 卸载阈值，低于默认总量上限
+    payload = b'{"x":"' + b"a" * (9 * 1024 * 1024) + b'"}'
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=payload, headers={"content-type": "application/json"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert join_offloaded, "超过阈值的大响应体 join 未移交工作线程"
+    assert result["success"] is True
+
+
 async def _delay_outside_patched_sleep(seconds: float) -> None:
     """经 wait_for 超时实现延迟，绕开 no_sleep fixture 对 asyncio.sleep 的屏蔽。
 

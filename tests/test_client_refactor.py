@@ -24,6 +24,7 @@ from seedream_mcp.utils.core.errors import (
 )
 from seedream_mcp.utils.images import image_validation as image_validation_module
 
+from _client_fakes import _install_mock_transport
 from _log_fakes import RecordingLogger
 
 
@@ -84,7 +85,7 @@ async def _client_with_mock_transport(
 ) -> AsyncIterator[SeedreamClient]:
     """构建内部 httpx 客户端挂 MockTransport 的 SeedreamClient，退出时关闭连接。"""
     client = SeedreamClient(_build_config())
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await _install_mock_transport(client, handler)
     try:
         yield client
     finally:
@@ -374,16 +375,24 @@ async def _drive_reference_prepare_with_limited_concurrency(
 
     active_count = 0
     max_active_count = 0
+    arrival_count = 0
+    release = asyncio.Event()
     captured_request: dict[str, Any] = {}
 
     async def fake_prepare_image_input(
         image: str, _roots_key: Any = None, _slot: Any = None
     ) -> str:
-        nonlocal active_count, max_active_count
+        nonlocal active_count, max_active_count, arrival_count
         active_count += 1
         max_active_count = max(max_active_count, active_count)
-        await asyncio.sleep(0.01)
-        active_count -= 1
+        # 会合式放行：在途任务数到达并发上限即放行，不依赖 sleep 时序。
+        arrival_count += 1
+        if arrival_count == client._image_preparer._prepare_concurrency:
+            release.set()
+        try:
+            await asyncio.wait_for(release.wait(), timeout=5)
+        finally:
+            active_count -= 1
         return f"prepared:{image}"
 
     async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
@@ -699,11 +708,20 @@ async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
         await client.text_to_image(prompt="test", size="2K", stream=True)
 
 
-async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("build_config", "label"),
+    [(_build_pro_config, "pro"), (_build_config, "default")],
+)
+async def test_multi_image_fusion_omits_sequential_image_generation(
+    monkeypatch: pytest.MonkeyPatch, build_config: Any, label: str
 ) -> None:
-    """5.0 Pro 不支持组图，多图融合强制 sequential_image_generation=disabled 保持单图输出。"""
-    client = SeedreamClient(_build_pro_config())
+    """多图融合不传 sequential_image_generation，依赖服务端缺省 disabled。
+
+    官方口径该参数仅部分模型支持，全模型恒传会向能力表外模型发参；Pro 与默认
+    模型两条分支同守护。
+    """
+    del label
+    client = SeedreamClient(build_config())
     captured_request: dict[str, Any] = {}
 
     async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
@@ -719,32 +737,8 @@ async def test_multi_image_fusion_passes_disabled_for_seedream_50_pro(
 
     await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
 
-    assert captured_request["sequential_image_generation"] == "disabled"
-
-
-async def test_multi_image_fusion_disables_sequential_for_sequential_capable_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """支持组图的默认模型在多图融合中同样恒传 disabled。"""
-    client = SeedreamClient(_build_config())
-    captured_request: dict[str, Any] = {}
-
-    async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
-        return [f"prepared:{item}" for item in images]
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
-
-    await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
-
-    # 默认模型本身支持组图，但多图融合对全部模型恒传 disabled 保持单图输出；
-    # 与 Pro 用例分别守护「不支持组图的模型」与「支持组图的模型」两条分支
-    assert captured_request["sequential_image_generation"] == "disabled"
+    assert "sequential_image_generation" not in captured_request
+    assert captured_request["image"] == ["prepared:image-1", "prepared:image-2"]
 
 
 async def test_multi_image_fusion_rejects_more_than_10_images_for_pro() -> None:
@@ -1170,6 +1164,8 @@ async def test_multi_image_fusion_logs_error_on_soft_failure_response(
     await client.multi_image_fusion(prompt="p", image=["i1", "i2"], size="2K")
 
     assert any("多图融合任务失败" in message for message in fake_logger.errors)
+    # 失败结局日志携带顶层 error 的码与消息，仅凭日志可定位原因
+    assert any("E boom" in message for message in fake_logger.errors)
     assert not any("多图融合任务完成" in message for message in fake_logger.info_messages)
 
 
@@ -1194,6 +1190,8 @@ async def test_sequential_generation_logs_warning_on_partial_response(
     await client.sequential_generation(prompt="p", max_images=2, size="2K")
 
     assert any("组图输出任务部分完成" in message for message in fake_logger.warnings)
+    # 部分完成结局日志携带失败项计数与首条原因
+    assert any("1 项失败: E blocked" in message for message in fake_logger.warnings)
     assert not any("组图输出任务完成" in message for message in fake_logger.info_messages)
     assert fake_logger.errors == []
 

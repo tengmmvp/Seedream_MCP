@@ -98,7 +98,7 @@ def test_classify_unknown_error() -> None:
         (401, "API密钥无效或已过期"),
         (403, "访问被拒绝"),
         (404, "API端点不存在"),
-        (429, "请求频率超限"),
+        (429, "上游返回限流"),
         (500, "服务器内部错误"),
         (503, "服务器内部错误"),
     ],
@@ -342,30 +342,22 @@ def test_resolve_failure_guidance_unknown_code_falls_back_to_generic() -> None:
     assert _resolve_failure_guidance(ValueError("x")) == "请根据错误信息排查后重试。"
 
 
-@pytest.mark.parametrize(
-    "status,expected",
-    [
-        (400, "请核对请求参数。"),
-        (401, "请确认 API Key 和网络可用后重试。"),
-        (402, "请检查账户余额与配额。"),
-        (404, "请确认 API 端点配置。"),
-        (429, "请稍后重试。"),
-    ],
-)
-def test_resolve_failure_guidance_prefers_status_over_error_code(
-    status: int, expected: str
-) -> None:
-    """携带状态码的 API 错误按状态级建议表取值，400/404 不落到凭据与网络指引。"""
+@pytest.mark.parametrize("status", [400, 404, 500])
+def test_resolve_failure_guidance_api_error_uses_generic(status: int) -> None:
+    """api_error 无论状态码均回退通用建议，成因多样不做定向指引。
+
+    JSON 解析失败、响应体过大等无状态码形态曾被引导查 API Key 与网络，与实际
+    原因无关。
+    """
     guidance = _resolve_failure_guidance(SeedreamAPIError("boom", status_code=status))
-    assert guidance == expected
-    if status in (400, 404):
-        assert "API Key" not in guidance
+    assert guidance == "请根据错误信息排查后重试。"
+    assert "API Key" not in guidance
 
 
-def test_resolve_failure_guidance_api_error_without_status_falls_back_to_error_code() -> None:
-    """无状态码的 API 错误按错误码兜底，api_error 走凭据与网络指引。"""
+def test_resolve_failure_guidance_api_error_without_status_falls_back_to_generic() -> None:
+    """无状态码的 API 错误同样回退通用建议。"""
     guidance = _resolve_failure_guidance(SeedreamAPIError("unspecified failure"))
-    assert guidance == "请确认 API Key 和网络可用后重试。"
+    assert guidance == "请根据错误信息排查后重试。"
 
 
 def test_failure_guidance_table_covers_all_profile_error_codes() -> None:

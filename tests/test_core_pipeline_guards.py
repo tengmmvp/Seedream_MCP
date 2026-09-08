@@ -31,6 +31,7 @@ from seedream_mcp.utils.core.errors import (
     SeedreamValidationError,
 )
 
+from _client_fakes import _install_mock_transport
 from _generation_fixtures import make_generation_context
 
 
@@ -224,13 +225,13 @@ def test_sanitize_image_errors_clean_nested_containers_untouched() -> None:
 # ==================== SSE 请求级错误重试契约 ====================
 
 
-def _client_with_mock_transport(
+async def _client_with_mock_transport(
     handler: Callable[[httpx.Request], httpx.Response],
 ) -> SeedreamClient:
     """构造挂载 MockTransport 的客户端，上游响应由 handler 生成，调用方负责 close。"""
     config = SeedreamConfig(api_key="k", max_retries=2)
     client = SeedreamClient(config)
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await _install_mock_transport(client, handler)
     return client
 
 
@@ -252,7 +253,7 @@ async def test_sse_request_level_error_event_not_retried(no_sleep: None) -> None
             content=b'data: {"error":{"code":"InvalidParameter","message":"bad param"}}\n\n',
         )
 
-    client = _client_with_mock_transport(_handler)
+    client = await _client_with_mock_transport(_handler)
     try:
         with pytest.raises(SeedreamAPIError) as excinfo:
             await client._call_api("text_to_image", {"prompt": "p", "stream": True})
@@ -272,7 +273,7 @@ async def test_http_400_api_error_not_retried(no_sleep: None) -> None:
         upstream_calls += 1
         return httpx.Response(400, json={"error": {"code": "InvalidParameter"}})
 
-    client = _client_with_mock_transport(_handler)
+    client = await _client_with_mock_transport(_handler)
     try:
         with pytest.raises(SeedreamAPIError) as excinfo:
             await client._call_api("text_to_image", {"prompt": "p"})

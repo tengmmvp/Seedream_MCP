@@ -29,24 +29,25 @@ class _FakeLog:
 
 
 class _FakeSSEResponse:
-    """按预设分块序列产出字节的伪流式响应，忽略 chunk_size。"""
+    """按预设分块序列产出字节的伪流式响应，记录 aiter_bytes 收到的 chunk_size。"""
 
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
+        self.observed_chunk_size: int | None = None
 
     async def aiter_bytes(self, chunk_size: int) -> AsyncIterator[bytes]:
-        del chunk_size
+        self.observed_chunk_size = chunk_size
         for chunk in self._chunks:
             yield chunk
 
 
 async def _install_mock_transport(client: SeedreamClient, handler: Callable[[Any], Any]) -> None:
-    """关闭内部 httpx 客户端并替换为 MockTransport 驱动的实例。
+    """替换内部 httpx 客户端为 MockTransport 驱动的实例，已有客户端先关闭。
 
     Args:
         client: 待替换内部 httpx 客户端的 SeedreamClient。
         handler: MockTransport 的请求处理函数。
     """
-    assert client._client is not None
-    await client._client.aclose()
+    if client._client is not None:
+        await client._client.aclose()
     client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))

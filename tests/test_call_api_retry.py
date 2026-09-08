@@ -577,7 +577,7 @@ async def test_stream_429_uses_retry_after_for_backoff(
     async with SeedreamClient(config) as client:
         await _install_mock_transport(client, _handler)
 
-        with pytest.raises(SeedreamAPIError, match="请求频率超限") as exc_info:
+        with pytest.raises(SeedreamAPIError, match="上游返回限流") as exc_info:
             await client._call_api("text_to_image", {"prompt": "p", "stream": True})
 
         assert exc_info.value.status_code == 429
@@ -606,3 +606,79 @@ async def test_stream_3xx_not_retried(no_sleep: None) -> None:
 
         assert exc_info.value.status_code == 302
         assert attempts == 1
+
+
+async def test_call_api_exponential_backoff_sequence_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """指数退避取值契约：抖动归零后为 2^n，超指数封顶后按 60 秒截断。"""
+    config = SeedreamConfig(api_key="k", max_retries=9)
+    sleeps: list[float] = []
+
+    async def _capture_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", _capture_sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 0.0)
+    calls = 0
+
+    async with SeedreamClient(config) as client:
+
+        async def fake_send(
+            *,
+            client: httpx.AsyncClient,
+            url: str,
+            request_body: bytes,
+            request_timeout: httpx.Timeout,
+        ) -> dict[str, Any]:
+            nonlocal calls
+            del client, url, request_body, request_timeout
+            calls += 1
+            raise SeedreamAPIError("boom", status_code=500)
+
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        with pytest.raises(SeedreamAPIError):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert calls == 10
+    # attempt 0..8 的间隔：2^0..2^5 原值，2^6 起 min(2^6*1, 60) 封顶 60
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0]
+
+
+async def test_call_api_retry_budget_terminates_before_exhausting_attempts(
+    monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """跨尝试累计超过 api_timeout×2 总预算时提前终止重试，不逐次耗尽配置次数。"""
+    import time
+
+    config = SeedreamConfig(api_key="k", max_retries=9, api_timeout=1)
+    calls = 0
+
+    async def fake_send(
+        *,
+        client: httpx.AsyncClient,
+        url: str,
+        request_body: bytes,
+        request_timeout: httpx.Timeout,
+    ) -> dict[str, Any]:
+        nonlocal calls
+        del client, url, request_body, request_timeout
+        calls += 1
+        raise httpx.ReadTimeout("read timed out")
+
+    # 假时钟每次调用前进 1 秒：预算 2 秒允许第二次尝试发出，第三次尝试入口耗尽
+    fake_now = 10.0
+
+    def _advance_monotonic() -> float:
+        nonlocal fake_now
+        fake_now += 1.0
+        return fake_now
+
+    monkeypatch.setattr(time, "monotonic", _advance_monotonic)
+
+    async with SeedreamClient(config) as client:
+        monkeypatch.setattr(client, "_send_standard_request", fake_send)
+        with pytest.raises(SeedreamTimeoutError, match="总预算"):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert calls == 2
