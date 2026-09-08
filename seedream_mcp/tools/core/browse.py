@@ -1,6 +1,6 @@
 """图片浏览工具的核心执行流水线。
 
-读权限求值（工作区 ∪ 存储区）、请求目录解析、越界过滤扫描、分页配额与
+读权限求值（工作区 ∪ 图片目录）、请求目录解析、越界过滤扫描、分页配额与
 structuredContent 装配；不经 ``execute_generation_handler`` 生成流水线，由 impl
 处理器薄壳委托调用，未预期异常不在本模块捕获，统一由外层兜底降级。
 """
@@ -29,6 +29,7 @@ from ...utils.io.io_path import (
     get_workspace_roots,
     is_within_resolved,
     normalize_path,
+    read_scope_denial_message,
 )
 from ...utils.io.io_scan import cached_find_images_in_directory
 from ._helpers import (
@@ -267,7 +268,7 @@ def _scan_and_filter_directory(
         max_depth: 递归扫描的最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         remaining: 本目录新增条数的配额上限。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区），越界判定基准。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 图片目录），越界判定基准。
         seen_images: 已见原始路径集合，就地更新，兜底扫描缓存前缀扩展轮次间的
             竞态错位重复。
         unreadable_dirs: 不可读目录收集列表，就地更新，供空结果分支区分目录
@@ -424,7 +425,7 @@ async def _resolve_browse_directories(
 ) -> tuple[list[Path], list[Path], Path | None, str | None]:
     """目录解析阶段：求值读权限并解析请求目录，供越界判定与扫描取用。
 
-    绝对目录判读权限，相对目录仅限存储区内。解析成功返回单个已 resolve 目录；
+    绝对目录判读权限，相对目录仅限图片目录内。解析成功返回单个已 resolve 目录；
     路径无效与相对越界携带错误消息，绝对越界返回 None。
     """
 
@@ -432,19 +433,19 @@ async def _resolve_browse_directories(
     # 线程；会话 Roots 时工作区为 ContextVar 直读，下沉无额外开销。后续以已
     # resolve 的目录直接比较；structuredContent 仍回显原始 workspace_roots。
     def _read_scope_and_resolve_dir() -> tuple[list[Path], list[Path], Path | None, str | None]:
-        """求值工作区、存储区与读权限并解析请求目录，返回四元组。
+        """求值工作区、图片目录与读权限并解析请求目录，返回四元组。
 
-        三类位置经 get_read_context 单点求值共享，消除本函数内对存储区与工作区
+        三类位置经 get_read_context 单点求值共享，消除本函数内对图片目录与工作区
         的重复解析。
         """
-        workspace_roots, save_root, read_scope = get_read_context()
+        workspace_roots, images_root, read_scope = get_read_context()
         try:
-            # 相对路径以存储区为基准；默认目录 "." 即存储区本身。
-            resolved_dir = normalize_path(directory, str(save_root))
+            # 相对路径以图片目录为基准；默认目录 "." 即图片目录本身。
+            resolved_dir = normalize_path(directory, str(images_root))
         except ValueError as exc:
             # 异常消息内含用户输入路径，经净化后才进入错误通道。
             return workspace_roots, read_scope, None, sanitize_error_text(f"目录路径无效: {exc}")
-        if not os.path.isabs(directory) and not is_within_resolved(resolved_dir, save_root):
+        if not os.path.isabs(directory) and not is_within_resolved(resolved_dir, images_root):
             return (
                 workspace_roots,
                 read_scope,
@@ -640,7 +641,7 @@ async def execute_browse_request(
 ) -> CallToolResult:
     """执行图片浏览主逻辑：求值读权限、解析目录、扫描分页并装配工具结果。
 
-    目录解析以存储区为基准，判定面向读权限（工作区 ∪ 存储区）；扫描结果经扫描
+    目录解析以图片目录为基准，判定面向读权限（工作区 ∪ 图片目录）；扫描结果经扫描
     缓存加速翻页，切片多取一张以判定 has_more。未预期异常向上抛出，由 impl 外层
     ``handle_browse_images`` 兜底降级。
 
@@ -672,10 +673,7 @@ async def execute_browse_request(
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return _build_browse_error(state=state, message=dir_error)
     if resolved_dir is None:
-        message = (
-            "目录不在读取范围内；可通过客户端工作区（MCP Roots）、"
-            "SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR 授权该目录"
-        )
+        message = read_scope_denial_message("目录")
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return _build_browse_error(state=state, message=message)
     resolved_directories.append(resolved_dir)

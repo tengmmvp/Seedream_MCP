@@ -23,6 +23,7 @@ from ..io.io_path import (
     is_unc_path,
     is_within_resolved,
     normalize_path,
+    read_scope_denial_message,
     suggest_similar_paths,
 )
 from .image_validation import (
@@ -86,7 +87,9 @@ async def prepare_image_input(image: str) -> str:
         raise SeedreamValidationError(f"图像处理失败: {e}") from e
 
 
-def _resolves_outside_read_scope(normalized: str, save_root: Path, read_scope: list[Path]) -> bool:
+def _resolves_outside_read_scope(
+    normalized: str, images_root: Path, read_scope: list[Path]
+) -> bool:
     """判断输入路径解析后的物理位置是否落在读权限之外。
 
     候选管线与 resolve_local_image_candidate 共用 iter_local_candidates，任一
@@ -95,21 +98,21 @@ def _resolves_outside_read_scope(normalized: str, save_root: Path, read_scope: l
     """
     if is_unc_path(normalized):
         return False
-    return not any(iter_local_candidates(normalized, save_root, read_scope))
+    return not any(iter_local_candidates(normalized, images_root, read_scope))
 
 
-def _relative_breaks_save_root(normalized: str, save_root: Path) -> bool:
-    """判断相对输入解析后是否越出存储区，相对路径仅限存储区内。
+def _relative_breaks_images_root(normalized: str, images_root: Path) -> bool:
+    """判断相对输入解析后是否越出图片目录，相对路径仅限图片目录内。
 
     非法路径形态交后续分支处理，此处返回 False 不抢报。
     """
     if os.path.isabs(normalized):
         return False
     try:
-        resolved = normalize_path(normalized, str(save_root))
+        resolved = normalize_path(normalized, str(images_root))
     except (OSError, ValueError):
         return False
-    return not is_within_resolved(resolved, save_root)
+    return not is_within_resolved(resolved, images_root)
 
 
 def _format_local_read_error(exc: OSError, normalized: str) -> str:
@@ -133,35 +136,34 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     候选定位委托 resolve_local_image_candidate，与 ImagePreparer 的缓存签名共用
     同一选择规则，锁定同一文件；调用方已完成定位时经 local_candidate_ctx 传入，
-    读取复用同一候选不再二次定位。(存储区, 读权限) 经 get_read_context 在函数顶
+    读取复用同一候选不再二次定位。(图片目录, 读权限) 经 get_read_context 在函数顶
     部单点求值，各分支共享，消除一次失败请求内的重复解析。越界抛携带配置指引
     的错误；界内定位失败经 validate_image_path 做诊断性校验，取具体失败原因并附
-    存储区内的相似路径建议。各失败均属参数校验语义而非 API 调用失败，归
+    图片目录内的相似路径建议。各失败均属参数校验语义而非 API 调用失败，归
     SeedreamValidationError。需在工作线程中调用。
     """
     found = local_candidate_ctx.get()
     if found is None:
-        _, save_root, read_scope = get_read_context()
+        _, images_root, read_scope = get_read_context()
         found = resolve_local_image_candidate(
-            normalized, save_root=save_root, read_scope=read_scope
+            normalized, images_root=images_root, read_scope=read_scope
         )
         if found is None:
-            if _relative_breaks_save_root(normalized, save_root):
+            if _relative_breaks_images_root(normalized, images_root):
                 raise SeedreamValidationError(
                     "相对路径仅限图片保存目录内，其他位置请使用绝对路径",
                     field="image",
                     value=normalized,
                 )
-            if _resolves_outside_read_scope(normalized, save_root, read_scope):
+            if _resolves_outside_read_scope(normalized, images_root, read_scope):
                 raise SeedreamValidationError(
-                    "路径不在读取范围内；可通过客户端工作区（MCP Roots）、"
-                    "SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR 授权该目录",
+                    read_scope_denial_message("路径"),
                     field="image",
                     value=normalized,
                 )
             _, error_msg, _ = validate_image_path(normalized, skip_dimensions=True)
             error_text = error_msg or "图像路径校验失败"
-            suggestions = suggest_similar_paths(original, search_dirs=[str(save_root)])
+            suggestions = suggest_similar_paths(original, search_dirs=[str(images_root)])
             suggestion_text = ""
             if suggestions:
                 suggestion_text = "\n\n建议的相似路径:\n" + "\n".join(

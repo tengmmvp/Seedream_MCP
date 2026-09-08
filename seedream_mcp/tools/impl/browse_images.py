@@ -26,9 +26,9 @@ async def handle_browse_images(
     params: BrowseImagesInput,
     ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
-    """处理图片浏览请求，扫描读权限（工作区 ∪ 存储区）内指定目录的图片并分页返回。
+    """处理图片浏览请求，扫描读权限（工作区 ∪ 图片目录）内指定目录的图片并分页返回。
 
-    无会话 Roots 声明时工作位置经声明链回退；未预期异常降级为结构化错误返回，
+    无会话 Roots 声明时工作根目录经声明链回退；未预期异常降级为结构化错误返回，
     不向调用方抛出。
 
     Args:

@@ -18,7 +18,7 @@ from ...utils.io.io_save import AutoSaveManager, AutoSaveResult
 from ...utils.io.io_download import DownloadManager
 from ...utils.core.logs import get_logger
 from ._helpers import _resolve_base_dir
-from ...utils.io.io_path import resolve_save_root
+from ...utils.io.io_path import resolve_images_root
 from .results import extract_images, is_saveable_image
 
 logger = get_logger()
@@ -99,19 +99,19 @@ async def _auto_save(
     """
 
     def _resolve_and_build() -> AutoSaveManager:
-        # 清理与配额边界恒为部署级存储区：save_path 指定的目录可能同时存放其他
+        # 清理与配额边界恒为部署级图片目录：save_path 指定的目录可能同时存放其他
         # 文件，不属服务专有，把按天清理与配额驱逐扩展到该处会误删非本服务文件；
         # save_path 仅决定本次写入位置。
         base_dir = _resolve_base_dir(save_path)
         try:
-            cleanup_base_dir: Path | None = resolve_save_root()
+            cleanup_base_dir: Path | None = resolve_images_root()
         except SeedreamConfigError as exc:
-            # 相对与缺省 save_path 的写入目录派生自存储区，其不可解析已在
+            # 相对与缺省 save_path 的写入目录派生自图片目录，其不可解析已在
             # _resolve_base_dir 内先行抛出，此分支仅在绝对 save_path 下可达。
-            # 绝对 save_path 不依赖基准，写入不受部署级存储声明可解析性阻塞；
+            # 绝对 save_path 不依赖基准，写入不受部署级数据根目录可解析性阻塞；
             # 清理边界不可用时清理整体关闭，写入目录可能存放非本服务文件，
             # .part 清扫与空目录回收不区分来源，不得作用于该目录。
-            logger.warning("存储区不可解析，本次保存关闭自动清理: {}", exc.message)
+            logger.warning("图片目录不可解析，本次保存关闭自动清理: {}", exc.message)
             cleanup_base_dir = None
         return _build_auto_save_manager(config, base_dir, cleanup_base_dir, download_manager)
 
@@ -170,7 +170,7 @@ async def auto_save_from_urls(
 
     Raises:
         SeedreamValidationError: save_path 路径无效。
-        SeedreamConfigError: 存储区配置无法解析，经 resolve_save_root 抛出。
+        SeedreamConfigError: 图片目录配置无法解析，经 resolve_images_root 抛出。
     """
     return await _auto_save(
         result=result,
@@ -208,7 +208,7 @@ async def auto_save_from_base64(
 
     Raises:
         SeedreamValidationError: save_path 路径无效。
-        SeedreamConfigError: 存储区配置无法解析，经 resolve_save_root 抛出。
+        SeedreamConfigError: 图片目录配置无法解析，经 resolve_images_root 抛出。
     """
     return await _auto_save(
         result=result,

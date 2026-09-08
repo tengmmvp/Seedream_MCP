@@ -37,7 +37,7 @@ from ..io.io_path import (
     is_unc_path,
     is_within_resolved,
     normalize_path,
-    resolve_save_root,
+    resolve_images_root,
 )
 from .image_ref import classify_image_reference
 
@@ -176,12 +176,12 @@ def read_and_decode_local_image(
 
 
 def _get_validation_base_dir() -> Path:
-    """本地文件校验的基础目录，取存储区，与参考图读取链的解析基准一致。"""
-    return resolve_save_root()
+    """本地文件校验的基目录，取图片目录，与参考图读取链的解析基准一致。"""
+    return resolve_images_root()
 
 
 def _resolve_local_image_path(file_path: str) -> Path:
-    """解析本地图片路径，相对路径以存储区为基准，绝对路径保持原样。
+    """解析本地图片路径，相对路径以图片目录为基准，绝对路径保持原样。
 
     不做 ~ 前缀展开，与 resolve_local_image_candidate、normalize_path 的定位口径
     一致。UNC 路径在 resolve 前抛 ValueError 拒绝，避免 Windows 下 resolve 触发
@@ -235,17 +235,17 @@ def image_candidate_stat(path: Path) -> os.stat_result | None:
 def iter_local_candidates(
     image: str, base_dir: str | Path, read_scope: list[Path]
 ) -> Iterator[Path]:
-    """迭代界内的候选物理路径：绝对路径判读权限，相对路径仅限存储区内。
+    """迭代界内的候选物理路径：绝对路径判读权限，相对路径仅限图片目录内。
 
-    绝对路径直接作为候选，相对路径以 base_dir（存储区）拼接；候选 resolve 一次
-    后按形态判定：绝对候选与读权限集合逐项比较，相对候选须落在存储区之内，
+    绝对路径直接作为候选，相对路径以 base_dir（图片目录）拼接；候选 resolve 一次
+    后按形态判定：绝对候选与读权限集合逐项比较，相对候选须落在图片目录之内，
     ``..`` 与符号链接逃逸同样被拦截。UNC 前缀的候选不 resolve，避免在 Windows
     触发 SMB 认证。候选定位与越界判定两条路径共用本迭代器，保证判定口径一致。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        base_dir: 相对路径的解析基准与边界，为存储区。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区）。
+        base_dir: 相对路径的解析基准与边界，为图片目录。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 图片目录）。
 
     Yields:
         resolve 后落在对应边界内的候选物理路径。
@@ -270,21 +270,21 @@ def iter_local_candidates(
 def resolve_local_image_candidate(
     image: str,
     *,
-    save_root: Path | None = None,
+    images_root: Path | None = None,
     read_scope: list[Path] | None = None,
 ) -> LocalImageCandidate | None:
-    """定位可读取的候选图片文件：绝对路径判读权限，相对路径仅限存储区内。
+    """定位可读取的候选图片文件：绝对路径判读权限，相对路径仅限图片目录内。
 
     界内候选逐一做 image_candidate_stat 资格检查，返回首个命中的
     (resolve 后物理路径, stat)，未命中返回 None。ImagePreparer 的缓存签名与
     image_input 的读取路径共用此定位，保证签名与实际读取锁定同一文件。
-    save_root 与 read_scope 未提供时按当前请求现取；调用方在一次请求内多次
+    images_root 与 read_scope 未提供时按当前请求现取；调用方在一次请求内多次
     定位时传入 get_read_context 的共享结果，消除重复求值。
 
     Args:
         image: 输入路径字符串，可为绝对或相对路径。
-        save_root: 已 resolve 的存储区，相对路径的解析基准。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 存储区）。
+        images_root: 已 resolve 的图片目录，相对路径的解析基准。
+        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 图片目录）。
 
     Returns:
         首个命中候选的 (物理路径, stat)；无命中时为 None。
@@ -314,11 +314,11 @@ def resolve_local_image_candidate(
             field="image",
             value=image,
         )
-    if save_root is None:
-        save_root = resolve_save_root()
+    if images_root is None:
+        images_root = resolve_images_root()
     if read_scope is None:
         read_scope = get_read_scope()
-    for resolved_candidate in iter_local_candidates(image, save_root, read_scope):
+    for resolved_candidate in iter_local_candidates(image, images_root, read_scope):
         st = image_candidate_stat(resolved_candidate)
         if st is not None:
             return resolved_candidate, st
@@ -349,7 +349,7 @@ def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
 def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     """验证本地文件路径的存在性、文件类型、扩展名与大小，默认还校验图像维度。
 
-    工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基础目录取自环境配置，
+    工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基目录取自环境配置，
     与 MCP Roots 来源不同，函数内不做边界断言以免误拒 Roots 授权的合法路径。维度
     读取经 open_no_follow_read 打开最终分量；path 已由 _resolve_local_image_path
     resolve 跟随符号链接，O_NOFOLLOW 仅防 resolve 与 open 之间的 TOCTOU 窗口，
@@ -536,8 +536,8 @@ def validate_image_path(path: str, skip_dimensions: bool = False) -> tuple[bool,
         if kind in ("url", "data_uri"):
             return True, "", None
 
-        normalized_path = normalize_path(path, str(resolve_save_root()))
-        # 越界判定面向读权限集合（工作区 ∪ 存储区），与候选定位同口径。
+        normalized_path = normalize_path(path, str(resolve_images_root()))
+        # 越界判定面向读权限集合（工作区 ∪ 图片目录），与候选定位同口径。
         if not any(is_within_resolved(normalized_path, scope) for scope in get_read_scope()):
             return False, "路径不在读取范围内", normalized_path
 

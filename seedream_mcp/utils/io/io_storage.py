@@ -2,7 +2,7 @@
 
 负责按日期与工具名组织保存路径、净化文件名、用内容哈希做去重，以及按保留天数
 清理旧文件。落盘写入与旧文件遍历均通过 io_file 防符号链接，避免经由符号链接逃逸
-出基础目录。字节签名嗅探扩展名由 core.formats 统一提供，调用方直接使用模块函数。
+出保存目录。字节签名嗅探扩展名由 core.formats 统一提供，调用方直接使用模块函数。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .io_file import (
     atomic_replace_from_fd_sync,
     has_reparse_attribute,
 )
-from .io_path import is_unc_path, is_windows_reserved_name, is_within_resolved, resolve_save_root
+from .io_path import is_unc_path, is_windows_reserved_name, is_within_resolved, resolve_images_root
 from .io_url import get_file_extension_from_url
 
 logger = get_logger()
@@ -59,21 +59,21 @@ class FileManager:
     """图片保存路径生成、字节写入与旧文件清理的统一入口。
 
     Attributes:
-        base_dir: 图片保存基础目录，已 resolve 的绝对路径。
+        base_dir: 图片保存目录，已 resolve 的绝对路径。
     """
 
     def __init__(self, base_dir: Path | None = None):
-        """初始化文件管理器并确保基础目录存在。
+        """初始化文件管理器并确保保存目录存在。
 
         Args:
-            base_dir: 图片保存基础目录。默认为 io_path.resolve_save_root 求值的
-                存储区，与目录体系的单一求值权威一致。
+            base_dir: 图片保存目录。默认为 io_path.resolve_images_root 求值的
+                图片目录，与目录体系的单一求值权威一致。
 
         Raises:
-            FileManagerError: 基础目录为 UNC 形式、解析失败或指向已存在文件。
-            SeedreamConfigError: 默认存储区求值失败。
+            FileManagerError: 保存目录为 UNC 形式、解析失败或指向已存在文件。
+            SeedreamConfigError: 默认图片目录求值失败。
         """
-        raw_base = resolve_save_root() if base_dir is None else Path(base_dir)
+        raw_base = resolve_images_root() if base_dir is None else Path(base_dir)
         # UNC 的 resolve 会触发 SMB 认证，直连构造入口与调用方同口径在 resolve 前拒绝。
         if is_unc_path(str(raw_base)):
             raise FileManagerError(f"拒绝 UNC 路径以避免触发 SMB 连接: {raw_base}")
@@ -81,7 +81,7 @@ class FileManager:
             resolved = raw_base.resolve()
         except (OSError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
-        # 仅拒绝指向已存在文件的路径；save_path 为调用级存储声明，位置不受限，
+        # 仅拒绝指向已存在文件的路径；save_path 为调用级保存声明，位置不受限，
         # 空字节等其余路径形态由调用方 tools/core/_helpers 在 resolve 前拒绝。
         if resolved.exists() and not resolved.is_dir():
             raise FileManagerError(f"保存路径不是目录: {resolved}")
@@ -108,29 +108,29 @@ class FileManager:
             raise FileManagerError(f"创建目录失败: {path} -> {e}") from e
 
     def validate_path(self, path: Path) -> bool:
-        """验证路径是否在基础目录范围内。
+        """验证路径是否在保存目录范围内。
 
         复用 io_path.is_within_resolved 做 resolve 后的包含判定，可拦截包含 ``..``
-        或经由符号链接指向基础目录之外的路径。
+        或经由符号链接指向保存目录之外的路径。
 
         Args:
             path: 要验证的路径。
 
         Returns:
-            路径在基础目录范围内返回 True，否则返回 False。
+            路径在保存目录范围内返回 True，否则返回 False。
         """
         try:
             abs_path = path.resolve()
             if is_within_resolved(abs_path, self.base_dir):
                 return True
-            logger.warning("路径不在基础目录内: {}", abs_path)
+            logger.warning("路径不在保存目录内: {}", abs_path)
             return False
         except Exception as e:
             logger.warning("路径验证失败: {} -> {}", path, e)
             return False
 
     def _resolved_within_base(self, resolved_path: Path) -> bool:
-        """判断已 resolve 的路径是否位于基础目录内，直接比较，不再 resolve。
+        """判断已 resolve 的路径是否位于保存目录内，直接比较，不再 resolve。
 
         委托 io_path.is_within_resolved 保持包含判定的单一实现，供
         run_cleanup_policies 等热路径复用，避免对已 resolve 路径重复解析。
@@ -250,7 +250,7 @@ class FileManager:
     def get_organized_path(
         self, filename: str, subfolder: str | None = None, date_folder: bool = True
     ) -> Path:
-        """在基础目录下按日期与子目录组织文件路径。
+        """在保存目录下按日期与子目录组织文件路径。
 
         Args:
             filename: 文件名。
@@ -295,7 +295,7 @@ class FileManager:
             保存路径。
 
         Raises:
-            FileManagerError: 生成的保存路径越出基础目录。
+            FileManagerError: 生成的保存路径越出保存目录。
         """
         if custom_name:
             base_name = custom_name
@@ -335,7 +335,7 @@ class FileManager:
             保存路径。
 
         Raises:
-            FileManagerError: 生成的保存路径越出基础目录。
+            FileManagerError: 生成的保存路径越出保存目录。
         """
         if extension not in SUPPORTED_IMAGE_EXTENSIONS:
             extension = DEFAULT_IMAGE_EXTENSION
@@ -352,7 +352,7 @@ class FileManager:
             date_folder: 是否按日期创建一级子目录。
 
         Raises:
-            FileManagerError: 生成的保存路径越出基础目录。
+            FileManagerError: 生成的保存路径越出保存目录。
         """
         save_path = self.get_organized_path(filename, tool_name, date_folder=date_folder)
         if not self.validate_path(save_path):
@@ -411,13 +411,13 @@ class FileManager:
             raise FileManagerError(f"写入文件失败: {file_path} -> {e}") from e
 
     def relative_to_base(self, file_path: Path) -> str:
-        """获取文件相对于基础目录的路径。
+        """获取文件相对于保存目录的路径。
 
         Args:
             file_path: 文件路径。
 
         Returns:
-            相对路径字符串；不在基础目录内则返回绝对路径。
+            相对路径字符串；不在保存目录内则返回绝对路径。
         """
         try:
             return str(file_path.relative_to(self.base_dir))
@@ -587,7 +587,7 @@ class FileManager:
     def _collect_all_files(
         self, errors: list[str]
     ) -> tuple[list[tuple[Path, int, float]], list[tuple[Path, int, float]], list[Path]]:
-        """递归遍历基础目录，收集图片文件、.part 遗留候选与待评估的空目录候选。
+        """递归遍历保存目录，收集图片文件、.part 遗留候选与待评估的空目录候选。
 
         以 os.scandir 递归下降，目录与文件条目各经一次 ``entry.stat(follow_symlinks=
         False)`` 同时取得符号链接与 reparse 判定、常规文件校验及 size/mtime，替代
@@ -644,7 +644,7 @@ class FileManager:
                         logger.warning("路径验证失败: {} -> {}", entry_path, e)
                         continue
                     if not self._resolved_within_base(dir_resolved):
-                        logger.warning("路径不在基础目录内: {}", dir_resolved)
+                        logger.warning("路径不在保存目录内: {}", dir_resolved)
                         continue
                     directories.append(entry_path)
                     _scan_directory(entry_path)
@@ -684,7 +684,7 @@ class FileManager:
             logger.warning("路径验证失败: {} -> {}", self.base_dir, e)
             return all_files, part_files, directories
         if not self._resolved_within_base(root_resolved):
-            logger.warning("路径不在基础目录内: {}", root_resolved)
+            logger.warning("路径不在保存目录内: {}", root_resolved)
             return all_files, part_files, directories
         _scan_directory(self.base_dir)
         return all_files, part_files, directories

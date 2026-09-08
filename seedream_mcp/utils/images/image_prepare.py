@@ -17,23 +17,23 @@ from .image_input import local_candidate_scope, prepare_image_input
 from .image_ref import classify_image_reference
 from .image_validation import LocalImageCandidate, resolve_local_image_candidate
 from ..core.inflight import InflightEntry
-from ..io.io_path import get_read_scope, resolve_save_root
+from ..io.io_path import get_read_scope, resolve_images_root
 
 # 预处理缓存键：(image 字符串, 读权限字符串元组, 本地文件 mtime+size 签名)；URL
 # 与 Data URI 的归一化结果是输入的纯函数，读权限隔离元组恒为空。
 PrepareCacheKey = tuple[str, tuple[str, ...], tuple[float, int]]
 
-# 批内共享的读取上下文：(存储区, 读权限列表)，供缓存键隔离与签名定位一次求值。
+# 批内共享的读取上下文：(图片目录, 读权限列表)，供缓存键隔离与签名定位一次求值。
 ReadContext = tuple[Path, list[Path]]
 
 
 def _current_read_context() -> tuple[tuple[str, ...], Path, list[Path]]:
-    """一次求值 (读权限字符串元组, 存储区, 读权限列表)，供本地输入共享。
+    """一次求值 (读权限字符串元组, 图片目录, 读权限列表)，供本地输入共享。
 
     含首次 resolve 的文件系统调用，调用方在工作线程执行。
     """
     scope = get_read_scope()
-    return tuple(str(r) for r in scope), resolve_save_root(), scope
+    return tuple(str(r) for r in scope), resolve_images_root(), scope
 
 
 # 超过此长度的非本地输入改用摘要键，避免大 data URI 的 O(n) 哈希与比较阻塞事件循环。
@@ -124,13 +124,13 @@ class ImagePreparer:
 
     @staticmethod
     def _local_candidate(
-        image: str, save_root: Path | None = None, read_scope: list[Path] | None = None
+        image: str, images_root: Path | None = None, read_scope: list[Path] | None = None
     ) -> LocalImageCandidate | None:
         """定位本地输入的候选文件，返回 (resolve 后物理路径, stat)。
 
         URL、data URI 与无法定位文件的输入返回 None，缓存签名由调用方从 stat
         派生。候选定位与 image_input 的读取路径共用 resolve_local_image_candidate，
-        签名与读取锁定同一文件；save_root 与 read_scope 未提供时现取，批内调用传入
+        签名与读取锁定同一文件；images_root 与 read_scope 未提供时现取，批内调用传入
         共享上下文消除逐图重复求值。
 
         残余风险：签名基于 mtime+size 而非内容哈希，同信任域内具备本地写权限者可在
@@ -141,7 +141,7 @@ class ImagePreparer:
         if classify_image_reference(image) != "local":
             return None
 
-        return resolve_local_image_candidate(image, save_root=save_root, read_scope=read_scope)
+        return resolve_local_image_candidate(image, images_root=images_root, read_scope=read_scope)
 
     @staticmethod
     def _data_uri_digest(image: str) -> str:
@@ -175,7 +175,7 @@ class ImagePreparer:
             image: 图像输入字符串，三类来源的归一化语义与模块级函数一致。
             scope_key: 本地输入的读权限隔离键；仅内部批量路径预计算共享传入，
                 None 时按当前请求现取，非本地输入不消费该键。
-            read_context: 本地输入的 (存储区, 读权限) 共享上下文；仅内部批量路径
+            read_context: 本地输入的 (图片目录, 读权限) 共享上下文；仅内部批量路径
                 预计算共享传入，None 时与隔离键一并现取。
 
         Returns:
@@ -223,7 +223,7 @@ class ImagePreparer:
         工作线程避免阻塞事件循环。先 strip 再分类，与 _local_candidate 口径
         一致，防止前导空白使 URL 或 data URI 误判为本地路径。读权限隔离键
         仅本地输入求值：URL 与 Data URI 的归一化结果是输入的纯函数，隔离元组恒为
-        空，纯远端输入不因存储声明不可解析而在预处理阶段失败。
+        空，纯远端输入不因数据根目录声明不可解析而在预处理阶段失败。
 
         Returns:
             (缓存键, strip 后输入, 本地候选) 三元组，非本地与未定位到文件的输入
@@ -235,11 +235,11 @@ class ImagePreparer:
         signature: tuple[float, int]
         if ref_kind == "local":
             if scope_key is None or read_context is None:
-                computed_key, save_root, scope = await asyncio.to_thread(_current_read_context)
+                computed_key, images_root, scope = await asyncio.to_thread(_current_read_context)
                 if scope_key is None:
                     scope_key = computed_key
                 if read_context is None:
-                    read_context = (save_root, scope)
+                    read_context = (images_root, scope)
             candidate = await asyncio.to_thread(
                 self._local_candidate, image, read_context[0], read_context[1]
             )
@@ -344,12 +344,12 @@ class ImagePreparer:
             SeedreamMCPError: 任一图像预处理失败时抛出，与单图入口的异常语义一致。
         """
         # 批内预计算一次读权限键与读取上下文，避免每图重复读取 ContextVar、构造
-        # 元组与逐图求值；仅存在本地输入时求值，纯远端批次不依赖存储声明的可解
+        # 元组与逐图求值；仅存在本地输入时求值，纯远端批次不依赖数据根目录声明的可解
         # 析性。求值含首次 resolve 的文件系统调用，下沉工作线程。
         stripped_images = [image.strip() for image in images]
         if any(classify_image_reference(item) == "local" for item in stripped_images):
-            scope_key, save_root, scope = await asyncio.to_thread(_current_read_context)
-            read_context: ReadContext | None = (save_root, scope)
+            scope_key, images_root, scope = await asyncio.to_thread(_current_read_context)
+            read_context: ReadContext | None = (images_root, scope)
         else:
             scope_key = ()
             read_context = None

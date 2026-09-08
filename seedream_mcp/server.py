@@ -150,7 +150,9 @@ from .utils.core.validators import (
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
 from .utils.io.io_path import (
+    drain_pending_start_messages,
     get_workspace_roots,
+    resolve_log_file_path,
     session_declares_roots_capability,
     workspace_roots_scope,
     workspace_roots_scope_from_result,
@@ -665,10 +667,10 @@ async def browse_images(
     workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
     ctx: Context[Any, Any] = None,  # type: ignore[assignment]
 ) -> Annotated[CallToolResult, BrowseImagesStructuredOutput]:
-    """本地图片浏览：列出读权限（工作区 ∪ 存储区）内的图片文件。
+    """本地图片浏览：列出读权限（工作区 ∪ 图片目录）内的图片文件。
 
     适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
-    递归、分页、按格式过滤。默认浏览存储区；返回的条目为绝对路径，可直接填入
+    递归、分页、按格式过滤。默认浏览图片目录；返回的条目为绝对路径，可直接填入
     参考图参数。
     """
     return await _run_tool_pipeline(
@@ -972,19 +974,6 @@ def style_oil_painting_prompt(
 # ==================== 主入口函数 ====================
 
 
-def _default_log_file(config: SeedreamConfig) -> str | None:
-    """推导默认日志文件路径：跟随启动期可知的数据基础目录声明。
-
-    基础目录取显式存储声明或工作位置声明，日志与其余数据并列于
-    <基础目录>/.seedream；两者均未声明时返回 None，由 setup_logging 以进程
-    工作目录兜底。
-    """
-    base = config.auto_save_base_dir or config.workspace_root
-    if not base:
-        return None
-    return str(Path(base).expanduser() / ".seedream" / "logs" / "seedream_mcp.log")
-
-
 def cli_main() -> int:
     """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
 
@@ -1009,17 +998,23 @@ def cli_main() -> int:
 
     # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后
     # 降级为 stderr 输出与退出码 1；不经 format_error_for_user，以免未知错误标签
-    # 误导排查并回显绝对路径。日志文件未显式配置时跟随数据基础目录声明。
-    log_file = config.log_file or _default_log_file(config)
+    # 误导排查并回显绝对路径。日志文件路径由 io_path 单点求值，回退链整体不可
+    # 解析时同此降级退出。
     try:
         setup_logging(
             config.log_level,
-            log_file,
+            str(resolve_log_file_path()),
             force_standard_logging=True,
+            rotation_mb=config.log_rotation_size,
+            retention_days=config.log_retention_days,
         )
+    except SeedreamConfigError as exc:
+        print(f"日志目录推导失败: {exc.message}", file=sys.stderr)
+        return 1
     except OSError:
         print("日志系统初始化失败（请检查日志目录权限或磁盘空间）", file=sys.stderr)
         return 1
+    drain_pending_start_messages()
     drain_pending_build_warnings()
     logger.info(
         "Seedream MCP 启动: {} (version {})",
@@ -1036,7 +1031,7 @@ def cli_main() -> int:
             error = _validate_http_security(args, auth_token, _LOOPBACK_HOSTS)
         if error is not None:
             logger.error(error)
-            # 退出路径的 stderr 兜底：LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见
+            # 退出路径的 stderr 兜底：SEEDREAM_LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见
             print(error, file=sys.stderr)
             return 1
         if transport == "streamable-http":

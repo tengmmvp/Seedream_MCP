@@ -34,9 +34,9 @@ THUMBNAIL_MAX_EDGE = 768
 THUMBNAIL_JPEG_QUALITY = 80
 THUMBNAIL_MIME_TYPE = "image/jpeg"
 
-# 缩略图落盘缓存：与存储区并列位于 <基础目录>/.seedream/thumbs，按源图
+# 缩略图落盘缓存：与图片目录并列位于 <数据根目录>/.seedream/thumbs，按源图
 # (路径, mtime, size) 寻址，命中免除重复解码；缓存文件名不带图片扩展名，不进入
-# 目录扫描与存储区清理配额的视野；累计字节超上界按最旧驱逐，写失败静默降级为
+# 目录扫描与图片目录清理配额的视野；累计字节超上界按最旧驱逐，写失败静默降级为
 # 每次现生成。
 THUMBNAIL_CACHE_DIR_NAME = "thumbs"
 THUMBNAIL_CACHE_MAX_TOTAL_BYTES = 256 * 1024 * 1024
@@ -147,9 +147,9 @@ async def build_thumbnail_bytes_limited(image_path: Path) -> bytes | None:
         return await asyncio.to_thread(build_thumbnail_bytes, image_path)
 
 
-def thumbnail_cache_root(save_root: Path) -> Path:
-    """返回与存储区并列的缩略图缓存目录（<基础目录>/.seedream/thumbs）。"""
-    return save_root.parent / THUMBNAIL_CACHE_DIR_NAME
+def thumbnail_cache_root(images_root: Path) -> Path:
+    """返回与图片目录并列的缩略图缓存目录（<数据根目录>/.seedream/thumbs）。"""
+    return images_root.parent / THUMBNAIL_CACHE_DIR_NAME
 
 
 def _thumb_key(image_path: Path, mtime_ns: int, size: int) -> str:
@@ -231,7 +231,7 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
         logger.info("缩略图缓存超限，按最旧驱逐 {} 个文件", evicted)
 
 
-async def cached_thumbnail_bytes(image_path: Path, save_root: Path) -> bytes | None:
+async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes | None:
     """带落盘缓存的缩略图获取：命中直接读文件，未命中限流解码后写缓存。
 
     缓存键取进入解码前的一次源图 stat，解码期间源图被替换时旧键写入的缩略图
@@ -239,12 +239,12 @@ async def cached_thumbnail_bytes(image_path: Path, save_root: Path) -> bytes | N
 
     Args:
         image_path: 已保存图片的文件路径。
-        save_root: 已 resolve 的存储区目录，缓存目录与其并列。
+        images_root: 已 resolve 的图片目录，缓存目录与其并列。
 
     Returns:
         JPEG 缩略图字节；无法生成时为 None。
     """
-    thumbs_root = thumbnail_cache_root(save_root)
+    thumbs_root = thumbnail_cache_root(images_root)
     stat = await asyncio.to_thread(_source_stat, image_path)
     if stat is None:
         return None
@@ -260,17 +260,17 @@ async def cached_thumbnail_bytes(image_path: Path, save_root: Path) -> bytes | N
 
 
 async def build_preview_contents(
-    image_paths: list[Path], save_root: Path | None = None
+    image_paths: list[Path], images_root: Path | None = None
 ) -> list[ImageContent]:
     """限流并发为已保存图片生成 ImageContent 预览列表。
 
     PIL 解码与缩放为同步 CPU 操作，逐张经缓存路径下放工作线程并由
-    PREVIEW_DECODE_CONCURRENCY 信号量限流；传入存储区时经落盘缓存免除重复解码，
+    PREVIEW_DECODE_CONCURRENCY 信号量限流；传入图片目录时经落盘缓存免除重复解码，
     生成失败的路径跳过，返回列表仅含成功项且与输入顺序一致。空输入返回空列表。
 
     Args:
         image_paths: 自动保存成功的图片文件路径列表。
-        save_root: 已 resolve 的存储区目录，None 时每次现生成不走缓存。
+        images_root: 已 resolve 的图片目录，None 时每次现生成不走缓存。
 
     Returns:
         与成功路径一一对应的 ImageContent 列表。
@@ -278,9 +278,9 @@ async def build_preview_contents(
     if not image_paths:
         return []
 
-    if save_root is not None:
+    if images_root is not None:
         thumbnails = await asyncio.gather(
-            *(cached_thumbnail_bytes(path, save_root) for path in image_paths)
+            *(cached_thumbnail_bytes(path, images_root) for path in image_paths)
         )
     else:
         thumbnails = await asyncio.gather(

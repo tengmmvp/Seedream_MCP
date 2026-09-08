@@ -1,9 +1,10 @@
 """Seedream MCP 路径处理工具：目录体系的位置求值与读权限判定。
 
-位置求值按 docs/development/directory-system.md：基础目录 = 显式存储声明 >
-基准，基准 = MCP Roots 首项 > SEEDREAM_WORKSPACE_ROOT > 进程启动目录 >
-用户主目录；存储区恒为 ``<基础目录>/.seedream/images``。
-读权限 = 工作区声明集合 ∪ 存储区。
+位置求值按 docs/development/directory-system.md：数据根目录 =
+SEEDREAM_DATA_ROOT > 工作根目录；工作根目录 = MCP Roots 首项 >
+SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录；图片目录恒为
+``<数据根目录>/.seedream/images``。
+读权限 = 工作区 ∪ 图片目录。
 提供路径规范化、越界判定原语，拦截包含 ``..`` 或经由符号链接指向权限范围
 之外的路径。roots 取回有三种形态：工具链经 server 层 Resolve 依赖注入
 （SEP-2577 非废弃形态）、资源处理器在 2026-07-28 及以后的会话上经
@@ -44,7 +45,7 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
 )
 
 # roots/list 请求的显式短超时：不设超时将依赖会话层读超时，慢客户端或半开连接会把
-# 工具调用拖到分钟级；超时按读取失败处理，工作位置经声明链回退。
+# 工具调用拖到分钟级；超时按读取失败处理，工作根目录经声明链回退。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
 
 # 目录扫描的总条目预算：单次 find_images_in_directory 调用检视的不同条目（含非
@@ -97,7 +98,7 @@ def is_windows_reserved_name(name: str) -> bool:
     return normalized_stem.upper() in WINDOWS_RESERVED_NAMES
 
 
-# 已 resolve 保底基准的进程级缓存：首次探测结果复用到进程结束，消除回退边界下
+# 已 resolve 回退根的进程级缓存：首次探测结果复用到进程结束，消除回退边界下
 # 每次位置求值的重复探测。
 _fallback_root: Path | None = None
 
@@ -107,13 +108,13 @@ _fallback_root: Path | None = None
 # 重试。活动配置变更时经 clear_resolved_env_root_cache 显式失效。
 _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 
-# 已 resolve 自动保存基础目录的进程级缓存，缓存口径与回退根一致，供 tools 层的
-# 保存目录解析复用。键两类：显式配置分支为 "explicit:"+配置原始字符串，默认分支
-# 为 "default:"+工作区根字符串，前缀隔离两类键防撞车；默认分支的键含客户端可控
+# 已 resolve 数据根目录与图片目录的进程级缓存，缓存口径与回退根一致。键三类：
+# "data-root:"+数据根目录声明、"explicit-images:"+数据根目录声明、
+# "default-images:"+工作根目录字符串，前缀隔离防撞车；默认分支的键含客户端可控
 # 的 roots 字符串，按 LRU 限容防轮换 roots 的无界增长。活动配置变更时随
 # clear_resolved_env_root_cache 一并失效。
-_RESOLVED_SAVE_BASE_DIR_CACHE: OrderedDict[str, Path] = OrderedDict()
-_SAVE_BASE_DIR_CACHE_MAX_ENTRIES = 64
+_RESOLVED_DATA_ROOT_CACHE: OrderedDict[str, Path] = OrderedDict()
+_DATA_ROOT_CACHE_MAX_ENTRIES = 64
 
 # 位置声明提供者：由 config 模块加载时注入，返回活动配置的原始字符串，未配置
 # 返回 None；依赖方向为 config 向下注入，本模块不向上 import。两个声明各占一槽，
@@ -122,7 +123,21 @@ _SAVE_BASE_DIR_CACHE_MAX_ENTRIES = 64
 EnvValueProvider = Callable[[], str | None]
 
 _WORKSPACE_ROOT_ENV = "SEEDREAM_WORKSPACE_ROOT"
-_SAVE_BASE_DIR_ENV = "SEEDREAM_AUTO_SAVE_BASE_DIR"
+_DATA_ROOT_ENV = "SEEDREAM_DATA_ROOT"
+
+# 读取范围授权指引的环境变量尾段，浏览与参考图读取的用户可见提示及 Web 端配置
+# 指引共用，env 改名时单点维护。
+READ_SCOPE_AUTH_ENV_HINT = f"{_WORKSPACE_ROOT_ENV} 或 {_DATA_ROOT_ENV}"
+
+
+def read_scope_denial_message(noun: str) -> str:
+    """构造越出读取范围的拒绝消息，noun 取目录或路径。"""
+    return (
+        f"{noun}不在读取范围内；可通过客户端工作区（MCP Roots）、"
+        f"{READ_SCOPE_AUTH_ENV_HINT} 授权该{noun}"
+    )
+
+
 _env_value_providers: dict[str, EnvValueProvider] = {}
 
 
@@ -147,89 +162,95 @@ def register_env_workspace_root_provider(provider: EnvValueProvider) -> None:
     _env_value_providers[_WORKSPACE_ROOT_ENV] = provider
 
 
-def register_env_save_base_dir_provider(provider: EnvValueProvider) -> None:
-    """注册存储区提供者，config 侧在模块加载时注入取值入口。
+def register_data_root_provider(provider: EnvValueProvider) -> None:
+    """注册数据根目录提供者，config 侧在模块加载时注入取值入口。
 
     Args:
-        provider: 返回活动配置的 auto_save_base_dir 原始字符串，未配置返回 None。
+        provider: 返回活动配置的 data_root 原始字符串，未配置返回 None。
     """
-    _env_value_providers[_SAVE_BASE_DIR_ENV] = provider
+    _env_value_providers[_DATA_ROOT_ENV] = provider
 
 
 def clear_resolved_env_root_cache() -> None:
-    """清空已 resolve 配置路径与保底基准的进程级缓存。
+    """清空已 resolve 配置路径与回退根的进程级缓存。
 
-    覆盖回退工作区根、自动保存基础目录与保底基准三处缓存。活动配置变更时由
+    覆盖回退工作区根、数据根目录与回退根三处缓存。活动配置变更时由
     config 侧调用，测试隔离经 conftest 复位协议调用，使后续访问按新配置与
     当前环境重新解析。
     """
     global _fallback_root
     _RESOLVED_ENV_ROOT_CACHE.clear()
-    _RESOLVED_SAVE_BASE_DIR_CACHE.clear()
+    _RESOLVED_DATA_ROOT_CACHE.clear()
     _fallback_root = None
 
 
 def _resolve_with_cache(cache_key: str, resolver: Callable[[], Path]) -> Path:
     """按键缓存 resolve 结果，命中移到链尾保持真 LRU，超容逐出最旧条目。"""
-    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(cache_key)
+    cached_dir = _RESOLVED_DATA_ROOT_CACHE.get(cache_key)
     if cached_dir is not None:
-        _RESOLVED_SAVE_BASE_DIR_CACHE.move_to_end(cache_key)
+        _RESOLVED_DATA_ROOT_CACHE.move_to_end(cache_key)
         return cached_dir
     resolved_dir = resolver()
-    _RESOLVED_SAVE_BASE_DIR_CACHE[cache_key] = resolved_dir
-    while len(_RESOLVED_SAVE_BASE_DIR_CACHE) > _SAVE_BASE_DIR_CACHE_MAX_ENTRIES:
-        _RESOLVED_SAVE_BASE_DIR_CACHE.popitem(last=False)
+    _RESOLVED_DATA_ROOT_CACHE[cache_key] = resolved_dir
+    while len(_RESOLVED_DATA_ROOT_CACHE) > _DATA_ROOT_CACHE_MAX_ENTRIES:
+        _RESOLVED_DATA_ROOT_CACHE.popitem(last=False)
     return resolved_dir
 
 
-def resolve_cached_save_base_dir(configured_dir: str) -> Path:
-    """解析已显式配置的自动保存基础目录，按 "explicit:"+配置串做进程级缓存。
+def resolve_cached_data_root(configured_dir: str) -> Path:
+    """解析已显式配置的数据根目录，按 "data-root:"+配置串做进程级缓存。
 
     缓存口径与回退工作区根一致，随 clear_resolved_env_root_cache 一并失效。
 
     Args:
-        configured_dir: 配置的自动保存基础目录原始字符串。
+        configured_dir: 配置的数据根目录原始字符串。
 
     Returns:
-        resolve 后的保存基础目录。
+        resolve 后的数据根目录。
     """
     expanded_dir = Path(configured_dir).expanduser()
     if not expanded_dir.is_absolute():
         return expanded_dir.resolve()
-    return _resolve_with_cache(f"explicit:{configured_dir}", lambda: expanded_dir.resolve())
+    return _resolve_with_cache(f"data-root:{configured_dir}", lambda: expanded_dir.resolve())
 
 
-def resolve_cached_default_save_base_dir(workspace_root: Path) -> Path:
-    """解析工作区根下的默认保存目录，按 "default:"+工作区根字符串做进程级缓存。
+def resolve_cached_default_images_root(workspace_root: Path) -> Path:
+    """解析工作根目录下的默认图片目录，按 "default-images:"+工作根目录字符串做进程级缓存。
 
-    与显式配置分支共用 _RESOLVED_SAVE_BASE_DIR_CACHE，随
+    与显式配置分支共用 _RESOLVED_DATA_ROOT_CACHE，随
     clear_resolved_env_root_cache 一并失效。
 
     Args:
-        workspace_root: 已 resolve 的工作区根目录。
+        workspace_root: 已 resolve 的工作根目录。
 
     Returns:
         resolve 后的 workspace_root/.seedream/images。
     """
     return _resolve_with_cache(
-        f"default:{workspace_root}",
+        f"default-images:{workspace_root}",
         lambda: (workspace_root / ".seedream" / "images").resolve(),
     )
 
 
-def resolve_cached_explicit_save_root(configured_dir: str) -> Path:
-    """解析显式声明的存储区整条路径并按 "explicit-root:"+配置串做进程级缓存。
+def resolve_cached_explicit_images_root(configured_dir: str) -> Path:
+    """解析显式声明的图片目录整条路径，绝对声明按 "explicit-images:"+配置串做进程级缓存。
+
+    相对声明不缓存，与 resolve_cached_data_root 的缓存口径一致，按调用时的
+    进程位置重新解析。
 
     Args:
-        configured_dir: 配置的自动保存基础目录原始字符串。
+        configured_dir: 配置的数据根目录原始字符串。
 
     Returns:
-        resolve 后的 <基础目录>/.seedream/images；.seedream 为符号链接时
+        resolve 后的 <数据根目录>/.seedream/images；.seedream 为符号链接时
         尾部 resolve 使结果与其指向一致。
     """
+    expanded_dir = Path(configured_dir).expanduser()
+    if not expanded_dir.is_absolute():
+        return (expanded_dir / ".seedream" / "images").resolve()
     return _resolve_with_cache(
-        f"explicit-root:{configured_dir}",
-        lambda: (resolve_cached_save_base_dir(configured_dir) / ".seedream" / "images").resolve(),
+        f"explicit-images:{configured_dir}",
+        lambda: (resolve_cached_data_root(configured_dir) / ".seedream" / "images").resolve(),
     )
 
 
@@ -257,7 +278,7 @@ def _resolve_configured_root() -> Path | None:
 
 
 def _resolve_home_root() -> Path:
-    """解析用户主目录，供保底链的最终回退。
+    """解析用户主目录，供回退链的最终回退。
 
     Returns:
         已 resolve 的用户主目录。
@@ -271,7 +292,7 @@ def _resolve_home_root() -> Path:
         return Path.home().resolve()
     except (RuntimeError, OSError) as exc:
         raise SeedreamConfigError(
-            "无法确定用户主目录，请配置 SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR",
+            f"无法确定用户主目录，请配置 {READ_SCOPE_AUTH_ENV_HINT}",
         ) from exc
 
 
@@ -285,7 +306,7 @@ def _usable_cwd_root() -> Path | None:
     except OSError:
         return None
     if is_unc_path(str(cwd)):
-        logger.debug("进程启动目录为 UNC 形态，不作为保底基准")
+        logger.debug("进程启动目录为 UNC 形态，不作为回退根")
         return None
     try:
         fd, probe_name = tempfile.mkstemp(prefix=".seedream-probe-", dir=cwd)
@@ -305,13 +326,28 @@ def _usable_cwd_root() -> Path | None:
         return None
 
 
-def _resolve_fallback_root() -> Path:
-    """解析无任何声明时的保底基准：进程启动目录可写时采用，否则回退用户主目录。
+# 启动期消息缓冲：日志目录求值可能早于日志系统初始化，回退提示先进队列，由
+# drain_pending_start_messages 在 setup_logging 之后冲刷，不经 loguru 导入期
+# 默认 sink 输出。
+_pending_start_messages: list[tuple[str, str]] = []
 
-    成功结果进程级缓存。
+
+def drain_pending_start_messages() -> None:
+    """输出并清空启动期缓冲的回退提示。"""
+    pending = _pending_start_messages[:]
+    _pending_start_messages.clear()
+    for level, message in pending:
+        logger.log(level, message)
+
+
+def _resolve_fallback_root() -> Path:
+    """解析无任何声明时的回退根：进程启动目录可写时采用，否则回退用户主目录。
+
+    成功结果进程级缓存。回退提示进启动缓冲队列，不经 loguru 导入期默认
+    sink 输出。
 
     Returns:
-        已 resolve 的保底基准目录。
+        已 resolve 的回退根目录。
 
     Raises:
         SeedreamConfigError: 进程启动目录与用户主目录均不可用，携带配置指引归
@@ -324,25 +360,27 @@ def _resolve_fallback_root() -> Path:
     if cwd_root is not None:
         root = cwd_root
         message = (
-            "未声明 MCP Roots 且未配置 SEEDREAM_WORKSPACE_ROOT，工作位置保底为"
-            "进程启动目录 {}，默认存储区为 {}"
+            "未声明 MCP Roots 且未配置 SEEDREAM_WORKSPACE_ROOT，工作根目录回退为"
+            "进程启动目录 {}，默认图片目录为 {}"
         )
     else:
         root = _resolve_home_root()
-        message = "进程启动目录不可用作保底，工作位置回退为用户主目录 {}，默认存储区为 {}"
+        message = "进程启动目录不可用作回退根，工作根目录回退为用户主目录 {}，默认图片目录为 {}"
     _fallback_root = root
-    logger.info(message, root, root / ".seedream" / "images")
+    _pending_start_messages.append(
+        ("INFO", message.format(str(root), str(root / ".seedream" / "images")))
+    )
     return root
 
 
 def resolve_env_workspace_root() -> Path:
-    """解析环境回退的工作位置：已配置根，无配置时走保底链。
+    """解析环境回退的工作根目录：已配置根，无配置时走回退链。
 
-    无任何工作类声明时落进程启动目录，不可写回退用户主目录；首次保底记录
-    一次日志提示默认存储位置。
+    无任何声明时落进程启动目录，不可写回退用户主目录；首次回退记录
+    一次日志提示默认数据位置。
 
     Returns:
-        已 resolve 的工作位置基准目录；无任何配置时为保底链结果。
+        已 resolve 的工作根目录；无任何配置时为回退链结果。
 
     Raises:
         SeedreamConfigError: 无配置且工作目录与用户主目录均不可用。
@@ -353,68 +391,89 @@ def resolve_env_workspace_root() -> Path:
     return _resolve_fallback_root()
 
 
-def resolve_save_root() -> Path:
-    """求值存储区：基础目录恒为显式存储声明或工作基准，存储区统一派生自
-    <基础目录>/.seedream/images。
+def resolve_log_file_path() -> Path:
+    """求值日志文件路径，启动期单点实现。
 
-    显式声明与基准派生两分支的 resolve 结果分别经进程级缓存，配置写入路径
-    统一使缓存失效。
+    顺位为 SEEDREAM_DATA_ROOT > SEEDREAM_WORKSPACE_ROOT > 回退链，不读取
+    会话级 MCP Roots。无任何声明时的回退提示进启动缓冲队列，由
+    drain_pending_start_messages 在日志系统就绪后输出。
 
     Returns:
-        resolve 后的存储区目录。
+        日志文件完整路径。
 
     Raises:
-        SeedreamConfigError: 显式存储声明为 UNC 形态或无法解析（路径非法或超长），
-            或基准声明链不可解析，均属部署配置缺陷归配置错误档案。
+        SeedreamConfigError: 声明值非法或回退链整体不可解析。
     """
-    configured = _configured_env_value(_SAVE_BASE_DIR_ENV)
+    configured_data_root = _configured_env_value(_DATA_ROOT_ENV)
+    if configured_data_root:
+        base = resolve_cached_data_root(configured_data_root)
+    else:
+        base = resolve_env_workspace_root()
+    return base / ".seedream" / "logs" / "seedream_mcp.log"
+
+
+def resolve_images_root() -> Path:
+    """求值图片目录：数据根目录恒为显式声明或工作根目录，图片目录统一派生自
+    <数据根目录>/.seedream/images。
+
+    显式声明与工作根目录派生两分支的 resolve 结果分别经进程级缓存，配置写入
+    路径统一使缓存失效。
+
+    Returns:
+        resolve 后的图片目录。
+
+    Raises:
+        SeedreamConfigError: 数据根目录声明为 UNC 形态或无法解析（路径非法或
+            超长），或工作根目录声明链不可解析，均属部署配置缺陷归配置错误档案。
+    """
+    configured = _configured_env_value(_DATA_ROOT_ENV)
     if configured:
         # UNC 的 resolve 会触发 SMB 认证，入口在 resolve 前对原始声明值拒绝。
         if is_unc_path(configured):
-            raise SeedreamConfigError(f"存储区配置不支持 UNC 路径: {configured}")
+            raise SeedreamConfigError(f"数据根目录配置不支持 UNC 路径: {configured}")
         try:
-            # 显式配置目录与默认基准同为基础目录，存储区统一派生自其 .seedream 子目录。
-            return resolve_cached_explicit_save_root(configured)
+            # 显式声明与工作根目录同为数据根目录，图片目录统一派生自其 .seedream 子目录。
+            return resolve_cached_explicit_images_root(configured)
         except (OSError, RuntimeError, ValueError) as exc:
             # 异常原文嵌 expanduser 展开后的服务器绝对路径，仅进日志；用户消息只
             # 回显其自行配置的原始值。
-            logger.error("存储区配置无法解析 '{}': {}", configured, exc)
-            raise SeedreamConfigError(f"存储区配置无法解析: {configured}") from exc
-    return resolve_cached_default_save_base_dir(get_workspace_root())
+            logger.error("数据根目录配置无法解析 '{}': {}", configured, exc)
+            raise SeedreamConfigError(f"数据根目录配置无法解析: {configured}") from exc
+    return resolve_cached_default_images_root(get_workspace_root())
 
 
 def get_read_context() -> tuple[list[Path], Path, list[Path]]:
-    """一次求值 (工作区声明集合, 存储区, 读权限)，供读取链各消费方共享单次结果。
+    """一次求值 (工作区声明集合, 图片目录, 读权限)，供读取链各消费方共享单次结果。
 
     工作区声明链不可解析（无 Roots 与环境根且主目录不可解析）时工作区为空、
-    读权限退化为仅存储区并记录，显式存储声明可用即不整体失败；存储区自身
-    不可解析时照常上抛。
+    读权限退化为仅图片目录并记录，显式数据根目录声明可用即不整体失败；图片
+    目录自身不可解析时照常上抛。
     """
-    save_root = resolve_save_root()
+    images_root = resolve_images_root()
     try:
         workspace_roots = get_workspace_roots()
     except SeedreamConfigError as exc:
-        logger.error("工作位置声明链不可解析，读权限退化为仅存储区: {}", exc.message)
+        logger.error("工作根目录声明链不可解析，读权限退化为仅图片目录: {}", exc.message)
         workspace_roots = []
     scope = list(workspace_roots)
-    if save_root not in scope:
-        scope.append(save_root)
-    return workspace_roots, save_root, scope
+    if images_root not in scope:
+        scope.append(images_root)
+    return workspace_roots, images_root, scope
 
 
 def get_read_scope() -> list[Path]:
-    """读权限集合 = 工作区声明集合 ∪ 存储区，求值细节见 get_read_context。"""
+    """读权限集合 = 工作区声明集合 ∪ 图片目录，求值细节见 get_read_context。"""
     return get_read_context()[2]
 
 
 def get_workspace_roots() -> list[Path]:
-    """获取当前请求生效的工作位置声明集合。
+    """获取当前请求生效的工作根目录声明集合。
 
     会话声明的非空 Roots 为工作区；空声明等同未声明，回退环境配置根或用户
     主目录。
 
     Returns:
-        当前请求生效的工作位置目录列表。
+        当前请求生效的工作根目录列表。
     """
     roots_from_context = _WORKSPACE_ROOTS_VAR.get()
     if roots_from_context:
@@ -423,7 +482,7 @@ def get_workspace_roots() -> list[Path]:
 
 
 def get_workspace_root() -> Path:
-    """获取当前请求的基准：Roots 首项或环境回退根，多 Roots 时取首项。
+    """获取当前请求的工作根目录：Roots 首项或环境回退根，多 Roots 时取首项。
 
     Raises:
         ValueError: 防御分支，回退链恒产出非空集合，正常不触发。
@@ -489,8 +548,8 @@ def session_declares_roots_capability(session: Any) -> bool:
 
 
 def _log_roots_read_failure(exc: Exception, reason: str) -> None:
-    """记录 roots 读取失败，本次工作位置经声明链回退。"""
-    logger.error("{}: {}，本次请求的工作位置经声明链回退", reason, exc)
+    """记录 roots 读取失败，本次工作根目录经声明链回退。"""
+    logger.error("{}: {}，本次请求的工作根目录经声明链回退", reason, exc)
 
 
 def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | None]:
@@ -503,7 +562,7 @@ def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | N
     if resolved_roots:
         logger.debug("已应用 MCP Roots 工作区: {}", resolved_roots)
     else:
-        logger.debug("MCP Roots 为空，等同未声明，工作位置经声明链回退")
+        logger.debug("MCP Roots 为空，等同未声明，工作根目录经声明链回退")
     return token
 
 
@@ -597,16 +656,16 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
 
 
 def is_within_resolved(path_resolved: Path, base_resolved: Path) -> bool:
-    """判断已 resolve 的路径是否位于已 resolve 的基础目录内。
+    """判断已 resolve 的路径是否位于已 resolve 的基目录内。
 
     直接做 relative_to 比较，不再重复 resolve。供循环场景复用以避免重复解析。
 
     Args:
         path_resolved: 已 resolve 的待判定路径。
-        base_resolved: 已 resolve 的基础目录。
+        base_resolved: 已 resolve 的基目录。
 
     Returns:
-        路径等于基础目录或位于其内返回 True，否则返回 False。
+        路径等于基目录或位于其内返回 True，否则返回 False。
     """
     try:
         path_resolved.relative_to(base_resolved)
@@ -663,7 +722,7 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
 
     Args:
         path: 输入路径，可为相对或绝对。
-        base_dir: 基础目录，用于解析相对路径。
+        base_dir: 基目录，用于解析相对路径。
 
     Raises:
         ValueError: 路径为 UNC 形式、Windows 驱动器相对形式、Windows 路径分量含冒号、
@@ -684,14 +743,14 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         # 驱动器相对路径有 drive 无 root，pathlib 拼接对该形态会丢弃 base_dir 落到
         # 该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；POSIX 无 drive 恒不触发。
         if path_obj.drive and not path_obj.root:
-            raise ValueError(f"拒绝驱动器相对路径以避免绕过基础目录解析: {path}")
+            raise ValueError(f"拒绝驱动器相对路径以避免绕过基目录解析: {path}")
 
         # 有根无盘符形态有 root 无 drive，is_absolute 判为 False 会被当相对路径拼
-        # 基准，但 pathlib 拼接对该形态锚定重置、静默写出基准所在盘的盘根之外，
+        # 基目录，但 pathlib 拼接对该形态锚定重置、静默写出基目录所在盘的盘根之外，
         # 与驱动器相对同口径在 resolve 前拒绝；POSIX 无 drive，该形态即合法绝对
         # 路径，恒不触发。
         if sys.platform == "win32" and path_obj.root and not path_obj.drive:
-            raise ValueError(f"拒绝有根无盘符路径以避免绕过基础目录解析: {path}")
+            raise ValueError(f"拒绝有根无盘符路径以避免绕过基目录解析: {path}")
 
         # Win32 命名空间打开文件时剥离最终分量尾部的点与空格，先做同口径名称归一，
         # 已验证路径字符串才与实际打开的文件名一致；仅名称级归一，不改变越界判定。
@@ -732,18 +791,18 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         raise ValueError(f"无效的路径格式: {path}") from e
 
 
-def save_root_relative(path: str | Path, save_root: Path) -> str | None:
-    """返回路径的存储区相对正斜杠形态，供 Web 端点改写条目路径共用。
+def images_root_relative(path: str | Path, images_root: Path) -> str | None:
+    """返回路径相对图片目录的正斜杠形态，供 Web 端点改写条目路径共用。
 
     Args:
         path: 待相对化的路径。
-        save_root: 已 resolve 的存储区。
+        images_root: 已 resolve 的图片目录。
 
     Returns:
-        正斜杠相对路径字符串；路径落在存储区外时为 None。
+        正斜杠相对路径字符串；路径落在图片目录外时为 None。
     """
     try:
-        return Path(path).relative_to(save_root).as_posix()
+        return Path(path).relative_to(images_root).as_posix()
     except ValueError:
         return None
 

@@ -81,23 +81,28 @@ async def web_root_redirect(_request: Request) -> Response:
 
 
 async def web_config_info(_request: Request) -> Response:
-    """返回前端所需的模型能力、默认值与存储区可用性。
+    """返回前端所需的模型能力、默认值与图片目录可用性。
 
-    存储区解析经 _shared.resolve_web_save_root 与 gallery、generate 域同契约；
+    图片目录解析经 _shared.resolve_web_images_root 与 gallery、generate 域同契约；
     仅回传可用性布尔，不向浏览器泄露服务器绝对路径；不可用时前端在图库区
     给出配置指引。响应附 cache-control: no-store，兼作鉴权探测端点的状态
     不落代理缓存。
     """
     config = get_active_config()
-    resolved = await _shared.resolve_web_save_root()
-    save_root_available = not isinstance(resolved, JSONResponse)
+    resolved = await _shared.resolve_web_images_root()
+    images_root_available = not isinstance(resolved, JSONResponse)
     return JSONResponse(
         {
             "server_version": __version__,
             "model_id": config.model_id,
             "default_size": config.default_size,
             "models": _models_payload(),
-            "save_root_available": save_root_available,
+            "images_root_available": images_root_available,
+            "images_root_hint": (
+                ""
+                if images_root_available
+                else f"未配置数据根目录（{_shared.READ_SCOPE_AUTH_ENV_HINT}）"
+            ),
             "auto_save_enabled": config.auto_save_enabled,
             "preview_enabled": config.preview_enabled,
         },

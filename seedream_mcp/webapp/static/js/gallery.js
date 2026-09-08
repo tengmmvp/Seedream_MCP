@@ -55,13 +55,12 @@ export async function refreshGallery() {
 async function refreshGalleryForSeq(seq) {
   // 配置未就绪时不渲染任何空态结论，由 main 的补刷在 config-info 落地后重进。
   if (!state.configInfo) return;
-  if (!state.configInfo.save_root_available) {
+  if (!state.configInfo.images_root_available) {
     state.gallery.offset = 0;
     state.gallery.hasMore = false;
     state.gallery.items = [];
     $("gallery-grid").innerHTML = "";
-    $("gallery-empty").textContent =
-      "未配置存储区目录（SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR）";
+    $("gallery-empty").textContent = state.configInfo.images_root_hint || "";
     $("gallery-empty").classList.remove("hidden");
     resetGalleryPager();
     return;
@@ -241,13 +240,13 @@ function releaseLightboxUrl() {
 }
 
 /**
- * 回填参考图：config-info 不再下发存储区绝对路径，前端无从拼本地路径，改用
+ * 回填参考图：config-info 不再下发图片目录绝对路径，前端无从拼本地路径，改用
  * 灯箱已持有的 blob 转 data URI 作为参考图值。文生图工具自动切到图生图，
  * hash 变化由浏览器原生 hashchange 事件驱动视图切换。
  */
 export async function useLightboxAsReference() {
   const blob = currentLightboxBlob;
-  if (!blob || !state.configInfo || !state.configInfo.save_root_available)
+  if (!blob || !state.configInfo || !state.configInfo.images_root_available)
     return;
   if (state.tool === "text-to-image") {
     document.querySelector('[data-tool="image-to-image"]').click();

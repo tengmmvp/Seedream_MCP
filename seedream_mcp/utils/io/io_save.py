@@ -292,7 +292,7 @@ class AutoSaveManager:
         Args:
             base_dir: 基础保存目录。
             cleanup_base_dir: 清理与节流的根目录，None 表示清理整体关闭；save_path
-                使 base_dir 指向部署级存储区之外时必须传入该存储区——save_path 目录
+                使 base_dir 指向部署级图片目录之外时必须传入该图片目录——save_path 目录
                 可能同时存放其他文件，不属服务专有，清理与配额不得作用其上。
             download_timeout: 下载超时时间，仅自建下载管理器时生效。
             max_retries: 最大重试次数，仅自建下载管理器时生效。

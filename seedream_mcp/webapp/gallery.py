@@ -1,8 +1,8 @@
-"""Web 操作台图库浏览端点：存储区边界校验后透传 browse 工具并收敛前端消费形态。
+"""Web 操作台图库浏览端点：图片目录边界校验后透传 browse 工具并收敛前端消费形态。
 
-与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务存储区内文件，图库
-浏览同样以存储区为界，解析出存储区的请求目录在端点拒绝。browse 条目为绝对
-路径，Web 层改写为存储区相对形态供前端直接拼接为图片端点参数；
+与 MCP 会话共用同一求值链与读权限判定；Web 文件端点仅服务图片目录内文件，图库
+浏览同样以图片目录为界，解析出图片目录的请求目录在端点拒绝。browse 条目为绝对
+路径，Web 层改写为图片目录相对形态供前端直接拼接为图片端点参数；
 workspace_roots 与 resolved_directories 回显字段 Web 前端不消费，返回浏览器
 前剥除。
 """
@@ -23,7 +23,7 @@ from ..utils.core.logs import get_logger
 from ..utils.io.io_path import (
     is_within_resolved,
     normalize_path,
-    save_root_relative,
+    images_root_relative,
 )
 from . import _shared
 
@@ -33,10 +33,10 @@ logger = get_logger()
 _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 
 
-def _converge_for_web(structured: dict[str, object], save_root: Path) -> None:
-    """剥除 Web 前端不消费的边界字段，条目 path 改写为存储区相对形态。
+def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
+    """剥除 Web 前端不消费的边界字段，条目 path 改写为图片目录相对形态。
 
-    Web 文件端点以存储区相对路径服务文件，前端拼接依赖相对形态；存储区外
+    Web 文件端点以图片目录相对路径服务文件，前端拼接依赖相对形态；图片目录外
     条目删除 path 键，与 generate 端 _rewrite_item_path 同契约。相对化为纯
     词法计算，不触达文件系统。
     """
@@ -50,22 +50,22 @@ def _converge_for_web(structured: dict[str, object], save_root: Path) -> None:
             continue
         path = item.get("path")
         if isinstance(path, str):
-            relative = save_root_relative(path, save_root)
+            relative = images_root_relative(path, images_root)
             if relative is not None:
                 item["path"] = relative
             else:
                 del item["path"]
 
 
-async def _directory_outside_save_root(directory: str, save_root: Path) -> bool:
-    """解析请求目录并判定是否落在存储区外；形态非法交 browse 核心报具体原因。"""
+async def _directory_outside_images_root(directory: str, images_root: Path) -> bool:
+    """解析请求目录并判定是否落在图片目录外；形态非法交 browse 核心报具体原因。"""
 
     def _outside() -> bool:
         try:
-            resolved = normalize_path(directory, str(save_root))
+            resolved = normalize_path(directory, str(images_root))
         except ValueError:
             return False
-        return not is_within_resolved(resolved, save_root)
+        return not is_within_resolved(resolved, images_root)
 
     return await asyncio.to_thread(_outside)
 
@@ -85,13 +85,13 @@ async def web_browse(request: Request) -> Response:
             "invalid_request", f"参数校验失败: {exc.errors()[0].get('msg')}", 400
         )
 
-    save_root = await _shared.resolve_web_save_root()
-    if isinstance(save_root, JSONResponse):
-        return save_root
+    images_root = await _shared.resolve_web_images_root()
+    if isinstance(images_root, JSONResponse):
+        return images_root
     directory = params.effective_directory
-    if await _directory_outside_save_root(directory, save_root):
+    if await _directory_outside_images_root(directory, images_root):
         return _shared.error_json(
-            "invalid_directory", "目录不在存储区内，Web 图库仅浏览存储区目录", 400
+            "invalid_directory", "目录不在图片目录内，Web 图库仅浏览图片目录", 400
         )
     try:
         result = await run_browse_images(params, ctx=None)
@@ -100,7 +100,7 @@ async def web_browse(request: Request) -> Response:
         return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)
     structured = result.structured_content if result.structured_content is not None else {}
     if isinstance(structured, dict):
-        _converge_for_web(structured, save_root)
+        _converge_for_web(structured, images_root)
     # browse 错误均为目录形态与越界类客户端错误，统一 400。
     status = 400 if result.is_error else 200
     return JSONResponse(structured, status_code=status)

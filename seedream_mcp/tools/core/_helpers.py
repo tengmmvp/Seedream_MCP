@@ -18,7 +18,7 @@ from ...utils.core.errors import (
     sanitize_error_text,
 )
 from ...utils.core.logs import get_logger
-from ...utils.io.io_path import normalize_path, resolve_save_root
+from ...utils.io.io_path import normalize_path, resolve_images_root
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
@@ -146,19 +146,19 @@ def _extract_parallel_request_error(
 
 
 def _resolve_base_dir(save_path: str | None) -> Path:
-    """解析本次调用的写入目录：save_path 声明优先，否则取部署级存储区。
+    """解析本次调用的写入目录：save_path 声明优先，否则取部署级图片目录。
 
-    save_path 为调用级存储声明，位置不受限；相对路径以部署级存储区为基准，
-    绝对形态不依赖基准、存储声明不可解析时不受阻；UNC、空字节、冒号分量等
+    save_path 为调用级保存声明，位置不受限；相对路径以部署级图片目录为基准，
+    绝对形态不依赖基准、数据根目录声明不可解析时不受阻；UNC、空字节、冒号分量等
     形态经 normalize_path 在 resolve 前拒绝。
 
     Raises:
         SeedreamValidationError: save_path 路径无效。
-        SeedreamConfigError: 部署级存储声明不可解析，经 resolve_save_root 穿透。
+        SeedreamConfigError: 部署级数据根目录不可解析，经 resolve_images_root 穿透。
     """
     if not save_path:
-        return resolve_save_root()
-    base = None if Path(save_path).is_absolute() else str(resolve_save_root())
+        return resolve_images_root()
+    base = None if Path(save_path).is_absolute() else str(resolve_images_root())
     try:
         return normalize_path(save_path, base)
     except ValueError as exc:
@@ -175,7 +175,7 @@ def prevalidate_save_path(save_path: str | None) -> None:
 
     Raises:
         SeedreamValidationError: save_path 路径无效。
-        SeedreamConfigError: 存储区配置无法解析，经 resolve_save_root 抛出。
+        SeedreamConfigError: 图片目录配置无法解析，经 resolve_images_root 抛出。
     """
     if not save_path:
         return

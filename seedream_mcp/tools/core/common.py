@@ -21,7 +21,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from ...client import SeedreamClient
 from ...config import SeedreamConfig
 from ...utils.images.image_thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
-from ...utils.io.io_path import resolve_save_root
+from ...utils.io.io_path import resolve_images_root
 from ...utils.io.io_save import AutoSaveResult
 from ...utils.core.errors import (
     SeedreamConfigError,
@@ -303,10 +303,10 @@ async def _build_generation_preview(
             )
             saved_paths = saved_paths[:PREVIEW_MAX_IMAGES]
         try:
-            save_root = await asyncio.to_thread(resolve_save_root)
+            images_root = await asyncio.to_thread(resolve_images_root)
         except SeedreamConfigError:
-            save_root = None
-        preview_contents = await build_preview_contents(saved_paths, save_root)
+            images_root = None
+        preview_contents = await build_preview_contents(saved_paths, images_root)
     return response_text, preview_contents
 
 

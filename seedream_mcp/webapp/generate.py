@@ -3,8 +3,8 @@
 请求体由 schemas.py 的 *Input 模型校验，字段与 MCP 工具同源，响应为工具的
 structured_content 字典；生成链路不伪造会话 Roots，文件边界由 runner 内的
 环境变量回退链处理，与客户端未声明 roots capability 的 MCP 会话同构。data
-与 auto_save.results 条目的 local_path 改写为存储区相对形态并附 web_path
-供前端拼接图片端点，越出存储区的删除该键（Web 文件端点仅服务存储区内文件）；
+与 auto_save.results 条目的 local_path 改写为图片目录相对形态并附 web_path
+供前端拼接图片端点，越出图片目录的删除该键（Web 文件端点仅服务图片目录内文件）；
 markdown_ref 前端不消费，整体删除；错误文本原样透传。共享 client 经 context
 替身借用，鉴权由外层 Bearer 中间件承担；端点仅消费 structuredContent，预览
 装配关闭，请求体解析与响应体序列化下沉工作线程执行。
@@ -38,7 +38,7 @@ from ..tools.runners import (
 )
 from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from ..utils.core.logs import get_logger
-from ..utils.io.io_path import save_root_relative
+from ..utils.io.io_path import images_root_relative
 from . import _shared
 from .context import build_web_request_context
 
@@ -61,12 +61,12 @@ class _GenerationRunner(Protocol[_RunnerInputT]):
     ) -> CallToolResult: ...
 
 
-def _rewrite_item_path(item: dict[str, object], save_root: Path) -> None:
+def _rewrite_item_path(item: dict[str, object], images_root: Path) -> None:
     """改写单个结果条目的路径字段，产出前端可消费的 web_path 相对形态。
 
-    落在存储区内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
-    越出存储区（save_path 指定的存储区外目的地）或路径解析失败的条目删除
-    local_path 键，Web 文件端点仅服务存储区内文件。markdown_ref 前端不消费，
+    落在图片目录内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
+    越出图片目录（save_path 指定的图片目录外目的地）或路径解析失败的条目删除
+    local_path 键，Web 文件端点仅服务图片目录内文件。markdown_ref 前端不消费，
     无条件删除。条目缺 local_path、值空串或非字符串时仅删 markdown_ref，其余
     内容不改动。
     """
@@ -75,7 +75,7 @@ def _rewrite_item_path(item: dict[str, object], save_root: Path) -> None:
     if not isinstance(local_path, str) or not local_path:
         return
     try:
-        web_path = save_root_relative(Path(local_path).resolve(), save_root)
+        web_path = images_root_relative(Path(local_path).resolve(), images_root)
     except (OSError, ValueError):
         del item["local_path"]
         return
@@ -86,23 +86,23 @@ def _rewrite_item_path(item: dict[str, object], save_root: Path) -> None:
     item["local_path"] = web_path
 
 
-def augment_generation_payload(structured: dict[str, object], save_root: Path) -> None:
+def augment_generation_payload(structured: dict[str, object], images_root: Path) -> None:
     """改写 data 与 auto_save.results 条目的路径字段并附 web_path。
 
-    供前端拼接图片端点；save_path 越出存储区时其条目同样经 _rewrite_item_path
+    供前端拼接图片端点；save_path 越出图片目录时其条目同样经 _rewrite_item_path
     收敛为 Web 文件端点可服务的形态。
     """
     data = structured.get("data")
     if isinstance(data, list):
         for item in data:
             if isinstance(item, dict):
-                _rewrite_item_path(item, save_root)
+                _rewrite_item_path(item, images_root)
     auto_save = structured.get("auto_save")
     results = auto_save.get("results") if isinstance(auto_save, dict) else None
     if isinstance(results, list):
         for item in results:
             if isinstance(item, dict):
-                _rewrite_item_path(item, save_root)
+                _rewrite_item_path(item, images_root)
 
 
 async def _run_web_generation(
@@ -141,9 +141,9 @@ async def _run_web_generation(
     # 不伪造会话 Roots 传入 runner：Web 请求无客户端声明可用，UNC 工作区根也
     # 在 file URI 转换层丢失。边界交由 runner 内的环境变量回退链处理，与客户
     # 端未声明 roots 的会话同构。
-    save_root = await _shared.resolve_web_save_root()
-    if isinstance(save_root, JSONResponse):
-        return save_root
+    images_root = await _shared.resolve_web_images_root()
+    if isinstance(images_root, JSONResponse):
+        return images_root
     try:
         result = await runner(params, config, ctx, include_previews=False)
     except (SeedreamValidationError, SeedreamConfigError) as exc:
@@ -158,7 +158,7 @@ async def _run_web_generation(
     if not isinstance(structured, dict):
         structured = {}
 
-    await asyncio.to_thread(augment_generation_payload, structured, save_root)
+    await asyncio.to_thread(augment_generation_payload, structured, images_root)
 
     status = 200 if not result.is_error else _shared.generation_status(structured)
     payload = await asyncio.to_thread(

@@ -1,6 +1,6 @@
 """Web 操作台各域 handler 共享的响应辅助与错误码映射。
 
-本模块只放跨域复用的纯辅助：统一错误 JSON 形态、存储区解析契约、生成错误
+本模块只放跨域复用的纯辅助：统一错误 JSON 形态、图片目录解析契约、生成错误
 类型到 HTTP 状态码的映射与文件端点的缓存头。域内专有逻辑不落此处，避免
 演化为杂物箱。
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 from starlette.responses import JSONResponse
 
 from ..utils.core.errors import SeedreamConfigError
-from ..utils.io.io_path import resolve_save_root
+from ..utils.io.io_path import READ_SCOPE_AUTH_ENV_HINT, resolve_images_root
 
 GENERATION_ERROR_STATUS: dict[str, int] = {
     "validation_error": 400,
@@ -36,23 +36,22 @@ def error_json(error: str, description: str, status: int) -> JSONResponse:
     return JSONResponse({"error": error, "error_description": description}, status_code=status)
 
 
-def save_root_unavailable(exc: Exception) -> JSONResponse:
-    """把存储区解析失败包装为携带配置指引的 400 响应。"""
+def images_root_unavailable(exc: Exception) -> JSONResponse:
+    """把图片目录解析失败包装为携带配置指引的 400 响应。"""
     message = getattr(exc, "message", None) or str(exc)
     return error_json(
-        "save_root_unavailable",
-        f"无法确定存储区目录: {message}；可配置 SEEDREAM_AUTO_SAVE_BASE_DIR"
-        " 或 SEEDREAM_WORKSPACE_ROOT",
+        "images_root_unavailable",
+        f"无法确定图片目录: {message}；可配置 {READ_SCOPE_AUTH_ENV_HINT}",
         400,
     )
 
 
-async def resolve_web_save_root() -> Path | JSONResponse:
-    """解析存储区，含文件系统的解析下沉工作线程；不可解析时返回 400 响应。"""
+async def resolve_web_images_root() -> Path | JSONResponse:
+    """解析图片目录，含文件系统的解析下沉工作线程；不可解析时返回 400 响应。"""
     try:
-        return await asyncio.to_thread(resolve_save_root)
+        return await asyncio.to_thread(resolve_images_root)
     except SeedreamConfigError as exc:
-        return save_root_unavailable(exc)
+        return images_root_unavailable(exc)
 
 
 def generation_status(structured: dict[str, object]) -> int:
