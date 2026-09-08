@@ -364,9 +364,13 @@ def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
         env_file, "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=api.example.com:*\n"
     )
 
+    from seedream_mcp.config import drain_pending_build_warnings
+
     records: list[str] = []
     with capture_loguru_messages(records):
         config = build_config_from_sources(env_file=str(env_file))
+        # 构建期告警收集后置输出，drain 在日志系统就绪后放行
+        drain_pending_build_warnings()
 
     assert config.http_allowed_hosts == ("api.example.com:*",)
     assert any("api.example.com" in record for record in records)
@@ -379,6 +383,7 @@ def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
     quiet_records: list[str] = []
     with capture_loguru_messages(quiet_records):
         paired_config = build_config_from_sources(env_file=str(paired_env_file))
+        drain_pending_build_warnings()
 
     assert paired_config.http_allowed_hosts == ("api.example.com", "api.example.com:*")
     assert not any("http_allowed_hosts" in record for record in quiet_records)
@@ -561,12 +566,39 @@ def test_seedream_config_rejects_chunk_size_greater_than_buffer() -> None:
         SeedreamConfig(api_key="k", stream_chunk_size=2048, stream_buffer_max_size=1024)
 
 
+def test_seedream_config_rejects_sse_event_size_below_derived_floor() -> None:
+    """sse_event_max_size 低于单图 base64 最坏展开推导值时拒绝，防止合法图片事件被截断。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    # 12MB 高于默认缓冲区 10MB 但远低于 50MB 单图的最坏展开约 66.7MB
+    with pytest.raises(
+        SeedreamConfigError, match="sse_event_max_size不能低于单图 base64 最坏展开推导值"
+    ):
+        SeedreamConfig(api_key="k", sse_event_max_size=12 * 1024 * 1024)
+
+
+def test_seedream_config_accepts_sse_event_size_above_derived_floor() -> None:
+    """sse_event_max_size 不低于推导值时接受，显式配置仅用于调大阈值。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", sse_event_max_size=128 * 1024 * 1024)
+    assert config.sse_event_max_size == 128 * 1024 * 1024
+
+
 def test_seedream_config_accepts_zero_cleanup_days() -> None:
     """cleanup_days 下界含 0，表示不清理，不得被当成负数拒绝。"""
     from seedream_mcp.config import SeedreamConfig
 
     config = SeedreamConfig(api_key="k", auto_save_cleanup_days=0)
     assert config.auto_save_cleanup_days == 0
+
+
+def test_seedream_config_accepts_zero_max_retries() -> None:
+    """max_retries 下界含 0，表示不重试，计费非幂等接口可关闭重试。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", max_retries=0)
+    assert config.max_retries == 0
 
 
 @pytest.mark.parametrize(
@@ -581,7 +613,6 @@ def test_seedream_config_accepts_zero_cleanup_days() -> None:
         ({"timeout": -1}, "timeout"),
         ({"api_timeout": 0}, "api_timeout"),
         ({"api_timeout": -10}, "api_timeout"),
-        ({"max_retries": 0}, "max_retries"),
         ({"max_retries": -1}, "max_retries"),
         ({"log_level": "VERBOSE"}, "log_level"),
         ({"auto_save_max_retries": -1}, "auto_save_max_retries"),
@@ -737,7 +768,7 @@ def test_build_config_rejects_base_url_without_netloc(
     [
         ({"timeout": 0}, "SEEDREAM_TIMEOUT"),
         ({"api_timeout": -1}, "SEEDREAM_API_TIMEOUT"),
-        ({"max_retries": 0}, "SEEDREAM_MAX_RETRIES"),
+        ({"max_retries": -1}, "SEEDREAM_MAX_RETRIES"),
         ({"log_level": "VERBOSE"}, "LOG_LEVEL"),
         ({"auto_save_download_timeout": 0}, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"),
         ({"stream_chunk_size": 0}, "SEEDREAM_STREAM_CHUNK_SIZE"),

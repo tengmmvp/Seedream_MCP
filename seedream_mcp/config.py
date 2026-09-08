@@ -19,6 +19,7 @@ from dotenv import dotenv_values
 from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, _is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.core.logs import get_logger
+from .utils.core.validators import INT_TEXT_PATTERN, parse_bool, validate_size_for_model
 from .utils.io.io_path import (
     clear_resolved_env_root_cache,
     is_unc_path,
@@ -26,7 +27,25 @@ from .utils.io.io_path import (
     register_env_workspace_root_provider,
 )
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
-from .utils.core.validators import parse_bool, validate_size_for_model
+
+# 构建期告警先收集、经 drain_pending_build_warnings 后置输出：配置构建早于
+# setup_logging，即时输出会随日志系统重建被移出文件通道。元素为 (级别, 消息)，
+# 级别取 loguru 注册名，部署风险类告警用 ERROR，高日志级别部署下不被过滤。
+_pending_build_warnings: list[tuple[str, str]] = []
+
+
+def drain_pending_build_warnings() -> None:
+    """输出并清空构建期收集的告警。
+
+    server 在日志系统就绪后调用；不经 server 入口的嵌入式调用方需自行调用本函数，
+    否则收集中的告警不输出。
+    """
+    global _pending_build_warnings
+    pending, _pending_build_warnings = _pending_build_warnings, []
+    logger = get_logger()
+    for level, message in pending:
+        logger.log(level, message)
+
 
 # 项目根 .env 层仅源码检出部署存在，pip 安装部署该层空转，CWD .env 层仍生效。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +66,10 @@ _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS = 720
 _REQUEST_STATE_KEY_MIN_BYTES = 32
 # SSE 读取块的下限字节数：流首 UTF-8 BOM 为 3 字节且按读取块整体判定剥离，不可跨块。
 _STREAM_CHUNK_SIZE_MIN_BYTES = 3
+# SSE 单事件阈值的推导常量：base64 最坏膨胀系数与事件信封余量，n 字节图片经
+# 编码最长 4*ceil(n/3) 字符，叠加 data 前缀等信封开销。
+_B64_WORST_CASE_NUMERATOR = 4
+_SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
 # 密钥环错误消息提示的密钥生成命令，生成一个解码后恰为 32 字节的十六进制密钥。
 _REQUEST_STATE_KEYGEN_COMMAND = 'python -c "import secrets; print(secrets.token_hex(32))"'
 _ENV_METADATA_KEY = "env"
@@ -92,6 +115,8 @@ class SeedreamConfig:
             一致性有要求时开启。
         stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
         stream_chunk_size: SSE 流式响应读取块大小字节数。
+        sse_event_max_size: 单个 SSE 事件的截断阈值字节数；None 时按缓冲区上限与
+            单图 base64 最坏展开二者的较大值推导。
         response_body_limit: 上游响应体读取总量上限字节数，三条读取路径共用；None 时
             按 auto_save_max_file_size × 20 推导。
         image_prepare_concurrency: 参考图预处理并发上限。
@@ -144,6 +169,7 @@ class SeedreamConfig:
 
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
     stream_chunk_size: int = _env_field(1024 * 1024, "SEEDREAM_STREAM_CHUNK_SIZE")
+    sse_event_max_size: int | None = _env_field(None, "SEEDREAM_SSE_EVENT_MAX_SIZE")
 
     response_body_limit: int | None = _env_field(None, "SEEDREAM_RESPONSE_BODY_LIMIT")
 
@@ -193,6 +219,7 @@ class SeedreamConfig:
         """校验 api_key 非空且非默认占位符。"""
         if not self.api_key or self.api_key.strip() == "":
             raise SeedreamConfigError(f"API密钥不能为空{_env_var_suffix('api_key')}")
+        _ensure_field_utf8_encodable(self.api_key, "api_key")
         if self.api_key == "your_api_key_here":
             raise SeedreamConfigError(
                 f"请设置有效的API密钥，不能使用默认占位符{_env_var_suffix('api_key')}"
@@ -202,6 +229,7 @@ class SeedreamConfig:
         """校验 base_url 的 scheme、主机名与 http 明文豁免。"""
         # RFC 3986 规定 scheme 大小写不敏感，HTTPS:// 等大写形态经 urlparse 取小写后判定。
         parsed_base_url = urlparse(self.base_url)
+        _ensure_field_utf8_encodable(self.base_url, "base_url")
         base_url_scheme = parsed_base_url.scheme.lower()
         if not self.base_url or base_url_scheme not in ("http", "https"):
             raise SeedreamConfigError(
@@ -210,21 +238,29 @@ class SeedreamConfig:
         # netloc 缺失的畸形 URL 在构造期拒绝，避免运行期才以网络错误档失败。
         if not parsed_base_url.netloc.strip():
             raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
+        if parsed_base_url.query or parsed_base_url.fragment:
+            raise SeedreamConfigError(
+                f"base_url不能包含查询参数或片段{_env_var_suffix('base_url')}"
+            )
         if base_url_scheme == "http":
             if not self.allow_http_base_url:
                 raise SeedreamConfigError(
                     "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝；"
                     "仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
                 )
-            get_logger().warning(
-                "ARK_BASE_URL 使用 http:// 且已豁免，API 密钥将在网络上明文传输，"
-                "仅限自建可信内网端点使用"
+            _pending_build_warnings.append(
+                (
+                    "ERROR",
+                    "ARK_BASE_URL 使用 http:// 且已豁免，API 密钥将在网络上明文传输，"
+                    "仅限自建可信内网端点使用",
+                )
             )
 
     def _validate_model_selection(self) -> None:
         """校验 model_id 并展开别名为完整 Model ID。"""
         if not self.model_id or self.model_id.strip() == "":
             raise SeedreamConfigError(f"model_id不能为空{_env_var_suffix('model_id')}")
+        _ensure_field_utf8_encodable(self.model_id, "model_id")
         # 展开后统一为小写，下线 token 子串检查随之为大小写不敏感。
         object.__setattr__(self, "model_id", normalize_model_selector(self.model_id))
         if any(token in self.model_id for token in DEPRECATED_MODEL_TOKENS):
@@ -258,8 +294,8 @@ class SeedreamConfig:
             raise SeedreamConfigError(f"timeout必须大于0{_env_var_suffix('timeout')}")
         if self.api_timeout <= 0:
             raise SeedreamConfigError(f"api_timeout必须大于0{_env_var_suffix('api_timeout')}")
-        if self.max_retries < 1:
-            raise SeedreamConfigError(f"max_retries不能小于1{_env_var_suffix('max_retries')}")
+        if self.max_retries < 0:
+            raise SeedreamConfigError(f"max_retries不能为负数{_env_var_suffix('max_retries')}")
 
     def _validate_log_level(self) -> None:
         """校验 log_level 合法并规范化为大写。"""
@@ -327,10 +363,29 @@ class SeedreamConfig:
                 "stream_chunk_size不能大于stream_buffer_max_size"
                 f"{_env_var_suffix('stream_chunk_size', 'stream_buffer_max_size')}"
             )
+        if (
+            self.sse_event_max_size is not None
+            and self.sse_event_max_size < self.derived_sse_event_max_size()
+        ):
+            raise SeedreamConfigError(
+                "sse_event_max_size不能低于单图 base64 最坏展开推导值，过小会截断合法图片事件"
+                f"{_env_var_suffix('sse_event_max_size')}"
+            )
         if self.response_body_limit is not None and self.response_body_limit <= 0:
             raise SeedreamConfigError(
                 f"response_body_limit必须大于0{_env_var_suffix('response_body_limit')}"
             )
+
+    def derived_sse_event_max_size(self) -> int:
+        """单事件阈值的推导下界：缓冲区上限与单图 base64 最坏展开二者的较大值。
+
+        低于该下界的阈值会整段截断合法图片事件，显式配置仅允许在推导值之上调大。
+        """
+        return max(
+            self.stream_buffer_max_size,
+            _B64_WORST_CASE_NUMERATOR * ((self.auto_save_max_file_size + 2) // 3)
+            + _SSE_EVENT_ENVELOPE_MARGIN,
+        )
 
     def _validate_prepare_cache_bounds(self) -> None:
         """校验图像预处理并发与预处理缓存容量下界。"""
@@ -404,11 +459,14 @@ class SeedreamConfig:
 
         uncovered = wildcard_hosts - bare_hosts
         if uncovered:
-            get_logger().warning(
-                "http_allowed_hosts 中 {} 仅列出端口通配形态而未列裸 host，"
-                "无端口 Host 头的请求不匹配通配条目会被 SDK 以 421 拒绝，"
-                "建议同时列出裸 host 形态",
-                ", ".join(sorted(uncovered)),
+            _pending_build_warnings.append(
+                (
+                    "ERROR",
+                    f"http_allowed_hosts 中 {', '.join(sorted(uncovered))} "
+                    "仅列出端口通配形态而未列裸 host，"
+                    "无端口 Host 头的请求不匹配通配条目会被 SDK 以 421 拒绝，"
+                    "建议同时列出裸 host 形态",
+                )
             )
 
     def _validate_request_state_keys(self) -> None:
@@ -509,6 +567,16 @@ def _env_var_suffix(*field_names: str) -> str:
     return f"（环境变量 {'/'.join(env_names)}）"
 
 
+def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
+    """校验配置字符串可编码为 UTF-8，孤立代理字符在构造期即拒绝。"""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SeedreamConfigError(
+            f"{field_name}包含无法编码的字符{_env_var_suffix(field_name)}"
+        ) from exc
+
+
 def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     """拆分 Host 允许列表条目为 host 与端口后缀，无法识别的形态返回 None。
 
@@ -590,9 +658,12 @@ def parse_int(value: object) -> int:
     if not normalized:
         raise SeedreamConfigError(f"无法解析整数值: {value}")
 
+    if not INT_TEXT_PATTERN.fullmatch(normalized):
+        raise SeedreamConfigError(f"无法解析整数值: {value}")
     try:
         return int(normalized)
     except ValueError as exc:
+        # 超长数字串超出解释器转换上限时同样归一为配置错误
         raise SeedreamConfigError(f"无法解析整数值: {value}") from exc
 
 
@@ -636,11 +707,13 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
     if runtime_env_path.is_file() and runtime_env_path != default_env_path:
         merged_values.update(_load_single_env_file(runtime_env_path))
         if default_env_path.is_file():
-            get_logger().warning(
-                "当前工作目录 .env（{}）覆盖了项目根 .env（{}）的配置值；"
-                "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
-                runtime_env_path,
-                default_env_path,
+            _pending_build_warnings.append(
+                (
+                    "ERROR",
+                    f"当前工作目录 .env（{runtime_env_path}）覆盖了项目根 .env"
+                    f"（{default_env_path}）的配置值；"
+                    "进程工作目录不受控时其中的 .env 可能注入非预期配置，请确认启动目录可信",
+                )
             )
 
     return merged_values
@@ -823,6 +896,7 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "auto_save_fsync": (_pick_bool, None),
     "stream_buffer_max_size": (_pick_int, None),
     "stream_chunk_size": (_pick_int, None),
+    "sse_event_max_size": (_pick_optional_int, None),
     "response_body_limit": (_pick_optional_int, None),
     "image_prepare_concurrency": (_pick_int, None),
     "prepare_cache_max": (_pick_int, None),
@@ -835,6 +909,11 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "http_allowed_hosts": (_pick_optional_str_tuple, None),
     "request_state_secret_keys": (_pick_request_state_key_bytes, None),
 }
+
+# 合法的 overrides 键集合：字段名、CLI 简称别名与 api_key，未知键在构建期告警。
+_KNOWN_OVERRIDE_KEYS = frozenset(
+    {"api_key", *_FIELD_PICKERS} | {alias for _, alias in _FIELD_PICKERS.values() if alias}
+)
 
 
 def build_config_from_sources(
@@ -860,7 +939,29 @@ def _build_config_from_sources_unlocked(
     env_file: str | None = None,
 ) -> SeedreamConfig:
     """构建配置对象但自身不加锁，由 :func:`build_config_from_sources` 持锁调用。"""
+    pending_mark = len(_pending_build_warnings)
+    try:
+        return _build_config_unlocked_body(overrides, env_file)
+    except BaseException:
+        # 构建失败的告警不外泄给下一次成功构建的 drain
+        del _pending_build_warnings[pending_mark:]
+        raise
+
+
+def _build_config_unlocked_body(
+    overrides: Mapping[str, object] | None,
+    env_file: str | None,
+) -> SeedreamConfig:
+    """构建配置对象的主体，告警回滚由调用方负责。"""
     override_values = dict(overrides or {})
+    unknown_keys = sorted(set(override_values) - _KNOWN_OVERRIDE_KEYS)
+    if unknown_keys:
+        _pending_build_warnings.append(
+            (
+                "WARNING",
+                f"配置覆盖包含未知键，已忽略: {', '.join(unknown_keys)}",
+            )
+        )
     env_values = _read_env_values(env_file)
 
     api_key = str(
