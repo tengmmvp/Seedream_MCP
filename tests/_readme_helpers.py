@@ -7,15 +7,11 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BASE_README = "README.md"
-
-# 环境变量配置块的定位锚点，全文仅该 bash 块存在 SEEDREAM_MODEL_ID 赋值行。
-_ENV_BLOCK_ANCHOR = re.compile(r"^\s*SEEDREAM_MODEL_ID=")
 
 
 @dataclass(frozen=True)
@@ -87,27 +83,3 @@ def _lang_blocks(name: str, lang: str) -> list[CodeBlock]:
         该语言的围栏块列表，按出现顺序排列。
     """
     return [block for block in _fenced_blocks(_read_readme(name)) if block.lang == lang]
-
-
-def _env_block(name: str) -> CodeBlock:
-    """定位环境变量配置 bash 块，锚点为 SEEDREAM_MODEL_ID 赋值行。
-
-    Args:
-        name: README 文件名。
-
-    Returns:
-        唯一命中锚点的 bash 围栏块。
-
-    Raises:
-        AssertionError: 含锚点赋值行的 bash 块不唯一。
-    """
-    candidates = [
-        block
-        for block in _lang_blocks(name, "bash")
-        if any(_ENV_BLOCK_ANCHOR.match(line) for line in block.lines)
-    ]
-    assert len(candidates) == 1, (
-        f"{name} 环境变量配置块定位失败，含 SEEDREAM_MODEL_ID 赋值行的 bash 块"
-        f"应唯一命中，实际命中 {len(candidates)} 个"
-    )
-    return candidates[0]

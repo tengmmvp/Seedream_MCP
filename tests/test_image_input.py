@@ -1,6 +1,6 @@
 """image_input 预处理测试：URL 与 Data URI 主干、本地文件读取与读权限校验。
 
-相对路径以存储区为基准，绝对路径判定面向读权限（工作区 ∪ 存储区）；读取失败与
+相对路径以图片目录为基准，绝对路径判定面向读权限（工作区 ∪ 图片目录）；读取失败与
 诊断消息统一回显解析后的绝对路径。
 """
 
@@ -25,8 +25,8 @@ from seedream_mcp.utils.images.image_validation import validate_image_path
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
-def _save_root(ws: Path) -> Path:
-    """返回 ws 派生的存储区并确保存在，相对路径测试文件统一放存储区内。"""
+def _images_root(ws: Path) -> Path:
+    """返回 ws 派生的图片目录并确保存在，相对路径测试文件统一放图片目录内。"""
     root = ws / ".seedream" / "images"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -98,7 +98,7 @@ async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
 ) -> None:
     """读权限内不存在的路径仍走诊断分支：报文件不存在而非越界。"""
     del tmp_path
-    _save_root(workspace_root)
+    _images_root(workspace_root)
 
     with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input("missing.png")
@@ -112,24 +112,24 @@ async def test_prepare_image_input_in_bounds_diagnostics_echo_real_paths(
 ) -> None:
     """界内定位失败的诊断消息携带解析后的真实绝对路径。"""
     del tmp_path
-    save_root = _save_root(workspace_root)
+    images_root = _images_root(workspace_root)
 
     with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input("missing_sib.png")
     assert "路径不在读取范围内" not in exc_info.value.message
-    assert str((save_root / "missing_sib.png").resolve()) in exc_info.value.message
+    assert str((images_root / "missing_sib.png").resolve()) in exc_info.value.message
     assert exc_info.value.field == "image"
 
 
-async def test_prepare_image_input_rejects_relative_escape_outside_save_root(
+async def test_prepare_image_input_rejects_relative_escape_outside_images_root(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """相对路径经 ``..`` 解析到存储区之外时拒绝，即便目标仍在工作区内。
+    """相对路径经 ``..`` 解析到图片目录之外时拒绝，即便目标仍在工作区内。
 
-    相对路径仅限存储区内，工作区内的其他位置须使用绝对路径访问。
+    相对路径仅限图片目录内，工作区内的其他位置须使用绝对路径访问。
     """
     del tmp_path
-    _save_root(workspace_root)
+    _images_root(workspace_root)
 
     with pytest.raises(SeedreamValidationError) as exc_info:
         await prepare_image_input("../missing.png")
@@ -158,7 +158,7 @@ async def test_prepare_image_input_read_failure_echoes_resolved_path(
     语义，调用方输入以 value 字段保留。
     """
     del tmp_path
-    locked = _save_root(workspace_root) / "locked.png"
+    locked = _images_root(workspace_root) / "locked.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
 
     def _deny_open(path: Path) -> IO[bytes]:
@@ -186,7 +186,7 @@ async def test_prepare_image_input_read_failure_profiles_as_validation_error(
     「请确认 API Key 和网络可用后重试」的误导建议。
     """
     del tmp_path
-    locked = _save_root(workspace_root) / "locked2.png"
+    locked = _images_root(workspace_root) / "locked2.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
 
     def _deny_open(path: Path) -> IO[bytes]:
@@ -207,7 +207,7 @@ async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
 ) -> None:
     """会话 Roots 边界下打开失败同样回显解析后路径，回显口径统一。"""
     del tmp_path
-    locked = _save_root(workspace_root) / "locked.png"
+    locked = _images_root(workspace_root) / "locked.png"
     Image.new("RGB", (32, 32), color="white").save(locked)
 
     def _deny_open(path: Path) -> IO[bytes]:
@@ -350,7 +350,7 @@ async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
         def __exit__(self, *exc_info: object) -> None:
             return None
 
-    oversized = _save_root(workspace_root) / "oversized.png"
+    oversized = _images_root(workspace_root) / "oversized.png"
     Image.new("RGB", (16, 16), color="white").save(oversized)
     monkeypatch.setattr(
         image_validation_module, "open_no_follow_read", lambda _path: _OversizedFile()

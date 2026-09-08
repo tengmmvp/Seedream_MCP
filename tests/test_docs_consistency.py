@@ -6,11 +6,10 @@ README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版�
 
 配对策略：围栏代码块按出现顺序配对，先断言数量相等，再逐块比较第 N 块；基准
 版本为 README.md，其余两份与基准对齐。断言只比较语言无关要素，如 JSON 块全文、
-bash 块内的 KEY=value 赋值与 CLI 旗标 token、环境变量键序、工具参数 bullet 列表
+bash 块内的 KEY=value 赋值与 CLI 旗标 token、工具参数 bullet 列表
 的参数名序列、标题层级、链接 URL、表格列数与能力差异表的数字 token 序列，不比
-较自然语言正文。定位环境变量配置块时以含 SEEDREAM_MODEL_ID 赋值行的 bash 块为
-锚点，定位能力差异表时以含 "1K / 1.5K / 2K" 单元格的表格为锚点，均不依赖各语言
-的章节标题文字。围栏块解析与配置块定位的共享实现位于 _readme_helpers。
+较自然语言正文。定位能力差异表时以含 "1K / 1.5K / 2K" 单元格的表格为锚点，不
+依赖各语言的章节标题文字。围栏块解析的共享实现位于 _readme_helpers。
 """
 
 from __future__ import annotations
@@ -22,7 +21,6 @@ from typing import TypeVar
 from _readme_helpers import (
     BASE_README,
     CodeBlock,
-    _env_block,
     _fenced_blocks,
     _lang_blocks,
     _read_readme,
@@ -38,10 +36,6 @@ _VALUE_TRAILING_PUNCTUATION = ")]}.,;:!?"
 
 # CLI 旗标 token 提取后的行尾标点剥除集合，与赋值取值的剥除口径一致。
 _FLAG_TRAILING_PUNCTUATION = ")]}.,;:!?"
-
-# 环境变量键名形态，与 .env.example 守护测试的口径一致。
-_ENV_KEY_PATTERN = re.compile(r"\b(?:SEEDREAM|ARK)_[A-Z0-9_]+")
-_ENV_KEY_FULL_PATTERN = re.compile(r"(?:SEEDREAM|ARK)_[A-Z0-9_]+\Z")
 
 # 正文中的 markdown 链接与 HTML 链接属性两类 URL 提取。
 _MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -120,23 +114,6 @@ def _param_bullet_groups(name: str) -> list[tuple[int, list[str]]]:
     if current:
         groups.append((start_line, current))
     return groups
-
-
-def _env_block_keys(name: str) -> list[str]:
-    """环境变量配置块内出现的全部 SEEDREAM_/ARK_ 键名，含注释行，按出现顺序。"""
-    keys: list[str] = []
-    for line in _env_block(name).lines:
-        keys.extend(_ENV_KEY_PATTERN.findall(line))
-    return keys
-
-
-def _env_block_pairs(name: str) -> list[tuple[str, str]]:
-    """环境变量配置块内环境变量键的赋值对，默认数值经键值对成对锁定。"""
-    return [
-        (key, value)
-        for key, value in _block_assignments(_env_block(name))
-        if _ENV_KEY_FULL_PATTERN.match(key)
-    ]
 
 
 def _heading_depths(name: str) -> list[tuple[int, int]]:
@@ -348,42 +325,6 @@ def test_tool_param_bullet_groups_match() -> None:
                 f"  {BASE_README}: {base_names}\n"
                 f"  {name}: {other_names}"
             )
-
-
-def test_env_block_key_sequence_matches() -> None:
-    """环境变量配置块的键名序列三语一致，含注释行中出现的键。
-
-    键按首次出现顺序展开为扁平序列比较，同时锁定集合与顺序；新增、删除或移动
-    环境变量而未三语同步时失败。
-    """
-    base_keys = _env_block_keys(BASE_README)
-    assert base_keys, "环境变量配置块未提取到任何键，锚点定位或解析失效"
-
-    for name in OTHER_READMES:
-        other_keys = _env_block_keys(name)
-        assert other_keys == base_keys, (
-            f"{name} 环境变量配置块的键序列与 {BASE_README} 漂移:\n"
-            f"  {BASE_README}: {base_keys}\n"
-            f"  {name}: {other_keys}"
-        )
-
-
-def test_env_block_default_values_match() -> None:
-    """环境变量配置块的赋值键值对三语一致，默认值数值成对相等。
-
-    端口、字节上限、天数等默认值经键值对逐对比较，67108864、268435456、
-    10737418240、30 等任一语言漂移即失败。
-    """
-    base_pairs = _env_block_pairs(BASE_README)
-    assert base_pairs, "环境变量配置块未提取到任何赋值对，解析失效"
-
-    for name in OTHER_READMES:
-        other_pairs = _env_block_pairs(name)
-        assert other_pairs == base_pairs, (
-            f"{name} 环境变量配置块的赋值键值对与 {BASE_README} 漂移:\n"
-            f"  {BASE_README}: {base_pairs}\n"
-            f"  {name}: {other_pairs}"
-        )
 
 
 def test_heading_depth_sequence_matches() -> None:

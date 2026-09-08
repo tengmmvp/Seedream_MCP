@@ -625,13 +625,13 @@ def test_input_schema_rejects_non_bool_auto_save() -> None:
 # ==================== save_path 生成前预检 ====================
 
 
-def test_prevalidate_save_path_accepts_path_outside_save_root(
+def test_prevalidate_save_path_accepts_path_outside_images_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """save_path 为调用级存储声明，指向存储区之外的位置预检放行。"""
-    base = tmp_path / "save_root"
+    """save_path 为调用级保存声明，指向图片目录之外的位置预检放行。"""
+    base = tmp_path / "images_root"
     base.mkdir()
-    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(base))
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(base))
     config = _build_config()
 
     prevalidate_save_path("../../outside")
@@ -651,10 +651,10 @@ def test_prevalidate_save_path_rejects_invalid_format() -> None:
 def test_prevalidate_save_path_accepts_relative_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """相对 save_path 以存储区为基准预检放行，上下文照常携带原始值。"""
-    base = tmp_path / "save_root"
+    """相对 save_path 以图片目录为基准预检放行，上下文照常携带原始值。"""
+    base = tmp_path / "images_root"
     base.mkdir()
-    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(base))
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(base))
     config = _build_config()
 
     prevalidate_save_path("sub/dir")
@@ -673,10 +673,10 @@ def test_prevalidate_save_path_skips_without_save_path() -> None:
     assert context.save_path is None
 
 
-async def test_execute_generation_handler_maps_unresolvable_save_root_to_config_error(
+async def test_execute_generation_handler_maps_unresolvable_images_root_to_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """存储声明不可解析属部署配置缺陷，MCP 通道归约 config_error 而非参数错误。"""
+    """数据根目录声明不可解析属部署配置缺陷，MCP 通道归约 config_error 而非参数错误。"""
     from unittest.mock import MagicMock
 
     from seedream_mcp.tools.core.common import ToolMetadata, execute_generation_handler
@@ -685,8 +685,8 @@ async def test_execute_generation_handler_maps_unresolvable_save_root_to_config_
     def _runtime_error(configured_dir: str) -> Path:
         raise RuntimeError("Could not resolve home directory")
 
-    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", "~/pics")
-    monkeypatch.setattr(io_path, "resolve_cached_save_base_dir", _runtime_error)
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", "~/pics")
+    monkeypatch.setattr(io_path, "resolve_cached_data_root", _runtime_error)
 
     async def fake_executor(client: object, context: object) -> dict[str, Any]:
         raise AssertionError("预检失败后不应分发计费请求")

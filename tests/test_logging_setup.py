@@ -229,6 +229,37 @@ def test_setup_logging_default_file_lands_under_seedream_logs(
     assert "probe default path" in _real_file_logging.read_text(encoding="utf-8")
 
 
+def test_setup_logging_file_sink_applies_rotation_and_retention_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """文件 sink 的轮转与保留值按参数构造，缺省为 5 MB / 7 天。"""
+    fake = RecordingLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+    log_file = str(tmp_path / "seedream.log")
+
+    setup_logging(
+        log_level="INFO",
+        log_file=log_file,
+        enable_console=False,
+        enable_file=True,
+        rotation_mb=3,
+        retention_days=2,
+    )
+    explicit = fake.add_kwargs[-1]
+    assert explicit["rotation"] == "3 MB"
+    assert explicit["retention"] == "2 days"
+
+    setup_logging(
+        log_level="INFO",
+        log_file=log_file,
+        enable_console=False,
+        enable_file=True,
+    )
+    default = fake.add_kwargs[-1]
+    assert default["rotation"] == "5 MB"
+    assert default["retention"] == "7 days"
+
+
 def test_intercept_handler_locates_real_caller_frame(
     _real_file_logging: Path,
 ) -> None:

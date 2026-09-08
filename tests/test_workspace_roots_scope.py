@@ -164,13 +164,13 @@ async def test_run_browse_images_uses_mcp_roots_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """浏览工具以 MCP Roots 为工作区：存储区内可浏览，env 根目录被拒绝。"""
+    """浏览工具以 MCP Roots 为工作区：图片目录内可浏览，env 根目录被拒绝。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
-    save_root = mcp_root / ".seedream" / "images"
-    save_root.mkdir(parents=True)
-    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    images_root = mcp_root / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
 
@@ -239,11 +239,11 @@ async def test_run_browse_images_falls_back_when_mcp_roots_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """空 Roots 声明等同未声明，浏览回退环境配置根的存储区。"""
+    """空 Roots 声明等同未声明，浏览回退环境配置根的图片目录。"""
     env_root = tmp_path / "env"
-    save_root = env_root / ".seedream" / "images"
-    save_root.mkdir(parents=True)
-    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    images_root = env_root / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
@@ -278,18 +278,18 @@ async def test_client_prepare_image_input_falls_back_when_mcp_roots_empty(
     assert prepared.startswith("data:image/")
 
 
-async def test_run_browse_images_relative_directory_resolves_against_save_root(
+async def test_run_browse_images_relative_directory_resolves_against_images_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """相对目录以存储区为基准解析，命中存储区内的嵌套目录。"""
+    """相对目录以图片目录为基准解析，命中图片目录内的嵌套目录。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     mcp_root = tmp_path / "mcp"
-    save_root = mcp_root / ".seedream" / "images"
-    nested_dir = save_root / "assets"
+    images_root = mcp_root / ".seedream" / "images"
+    nested_dir = images_root / "assets"
     nested_dir.mkdir(parents=True)
-    (nested_dir / "from_save_root.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (nested_dir / "from_images_root.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(
@@ -300,7 +300,7 @@ async def test_run_browse_images_relative_directory_resolves_against_save_root(
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["count"] == 1
-    entry_path = (nested_dir / "from_save_root.png").resolve().as_posix()
+    entry_path = (nested_dir / "from_images_root.png").resolve().as_posix()
     assert result.structured_content["images"][0]["path"] == entry_path
 
 
@@ -308,7 +308,7 @@ async def test_run_browse_images_rejects_absolute_path_outside_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """绝对路径目录落在读权限（工作区 ∪ 存储区）之外时以结构化错误拒绝。"""
+    """绝对路径目录落在读权限（工作区 ∪ 图片目录）之外时以结构化错误拒绝。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     first_root = tmp_path / "root_a"
@@ -345,7 +345,7 @@ async def test_workspace_roots_scope_falls_back_to_cwd_without_env_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无反向通道且无环境变量根时回退保底基准（进程启动目录）。"""
+    """无反向通道且无环境变量根时回退根（进程启动目录）。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
     monkeypatch.chdir(tmp_path)
@@ -394,7 +394,7 @@ async def test_workspace_roots_scope_transient_error_falls_back_to_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 瞬时失败且无环境变量根时回退保底基准（进程启动目录）。"""
+    """roots/list 瞬时失败且无环境变量根时回退根（进程启动目录）。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
     monkeypatch.chdir(tmp_path)
@@ -469,11 +469,11 @@ async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 失败时浏览回退 env 根的存储区，仍可浏览界内图片。"""
+    """roots/list 失败时浏览回退 env 根的图片目录，仍可浏览界内图片。"""
     env_root = tmp_path / "env"
-    save_root = env_root / ".seedream" / "images"
-    save_root.mkdir(parents=True)
-    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    images_root = env_root / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     result = await run_browse_images(

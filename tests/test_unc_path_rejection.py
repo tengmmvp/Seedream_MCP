@@ -172,7 +172,7 @@ def test_normalize_path_rejects_drive_relative_path(base_dir: str | None) -> Non
     """Windows 驱动器相对路径 C:foo 有 drive 无 root，与 UNC 同口径拒绝。
 
     pathlib 的 / 拼接对该形态会丢弃 base_dir，resolve 落到该盘进程 CWD，静默绕开
-    指定的基础目录。
+    指定的基目录。
     """
     with pytest.raises(ValueError, match="驱动器相对"):
         normalize_path("C:foo.png", base_dir)
@@ -185,7 +185,7 @@ def test_normalize_path_rejects_rooted_no_drive_path(bad: str, base_dir: str | N
     """Windows 有根无盘符路径 /out 有 root 无 drive，与驱动器相对同口径拒绝。
 
     该形态 is_absolute 判为 False 走相对分支，但 pathlib 拼接锚定重置会丢弃
-    base_dir 落到所在盘盘根，静默写出基础目录之外。
+    base_dir 落到所在盘盘根，静默写出基目录之外。
     """
     with pytest.raises(ValueError, match="有根无盘符"):
         normalize_path(bad, base_dir)
@@ -336,27 +336,27 @@ def test_file_uri_to_path_rejects_malformed_uri() -> None:
     assert _file_uri_to_path("file://") is None
 
 
-# ==================== 存储区声明的 UNC 拒绝 ====================
+# ==================== 图片目录声明的 UNC 拒绝 ====================
 
 
 @pytest.mark.parametrize("unc_dir", ["//nas/pics", "\\\\nas\\pics"])
-def test_resolve_save_root_rejects_unc_declaration_before_resolve(
+def test_resolve_images_root_rejects_unc_declaration_before_resolve(
     unc_dir: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """显式存储声明的 UNC 形态在 resolve 前被拒，抛配置错误且不触发 SMB 连接。
+    """显式数据根目录的 UNC 形态在 resolve 前被拒，抛配置错误且不触发 SMB 连接。
 
     FileManager 的入口守卫在 resolve 之后才可能触达 base_dir=None 的求值结果，
-    存储区求值入口补齐 resolve 前拦截，保护全部消费方。
+    图片目录求值入口补齐 resolve 前拦截，保护全部消费方。
     """
     from seedream_mcp.utils.core.errors import SeedreamConfigError
     from seedream_mcp.utils.io import io_path as io_path_module
 
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
-    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", unc_dir)
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", unc_dir)
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
     with pytest.raises(SeedreamConfigError, match="UNC"):
-        io_path_module.resolve_save_root()
+        io_path_module.resolve_images_root()
 
 
 def test_resolve_local_image_candidate_skips_unc_without_resolve(
@@ -425,10 +425,10 @@ def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
     from seedream_mcp.utils.io.io_path import get_read_context
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
-    _, save_root, read_scope = get_read_context()
+    _, images_root, read_scope = get_read_context()
 
     assert (
-        _resolves_outside_read_scope("\\\\attacker\\share\\x.png", save_root, read_scope) is False
+        _resolves_outside_read_scope("\\\\attacker\\share\\x.png", images_root, read_scope) is False
     )
 
 

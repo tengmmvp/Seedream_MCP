@@ -167,7 +167,7 @@ async def test_root_redirects_to_web_index(
 async def test_config_info_reachable_when_registered(
     tmp_path: Path, clean_web_routes: None, reset_http_app_state: None
 ) -> None:
-    """注册并构建后 config-info 返回模型信息与存储区可用性布尔。"""
+    """注册并构建后 config-info 返回模型信息与图片目录可用性布尔。"""
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -180,8 +180,8 @@ async def test_config_info_reachable_when_registered(
     payload = response.json()
     assert payload["models"]
     assert all("allowed_presets" in model for model in payload["models"])
-    assert payload["save_root_available"] is True
-    assert "save_root" not in payload
+    assert payload["images_root_available"] is True
+    assert "images_root" not in payload
 
 
 async def test_config_info_response_is_not_cacheable(
@@ -200,13 +200,13 @@ async def test_config_info_response_is_not_cacheable(
     assert response.headers["cache-control"] == "no-store"
 
 
-async def test_config_info_reports_save_root_unavailable(
+async def test_config_info_reports_images_root_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储区不可解析时回 False，且不出现任何路径字段。"""
+    """图片目录不可解析时回 False，且不出现任何路径字段。"""
     import seedream_mcp.utils.io.io_path as io_path_module
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
@@ -214,8 +214,8 @@ async def test_config_info_reports_save_root_unavailable(
         del configured_dir
         raise OSError("simulated unresolvable path")
 
-    set_active_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
+    set_active_config(SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
     app = build_web_app()
 
     async with httpx.AsyncClient(
@@ -225,5 +225,5 @@ async def test_config_info_reports_save_root_unavailable(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["save_root_available"] is False
-    assert "save_root" not in payload
+    assert payload["images_root_available"] is False
+    assert "images_root" not in payload

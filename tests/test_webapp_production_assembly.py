@@ -40,7 +40,7 @@ async def test_production_app_serves_web_console(
     assert index_response.status_code == 200
     assert index_response.headers["content-type"].startswith("text/html")
     assert api_response.status_code == 200
-    assert api_response.json()["save_root_available"] is True
+    assert api_response.json()["images_root_available"] is True
     assert static_response.status_code == 200
     assert html_direct_response.status_code == 404
     assert missing_response.status_code == 404

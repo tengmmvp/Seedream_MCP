@@ -280,7 +280,7 @@ async def test_single_request_progress_full_sequence_with_auto_save(
     config = SeedreamConfig(
         api_key="test_key",
         max_retries=1,
-        auto_save_base_dir=str(tmp_path),
+        data_root=str(tmp_path),
         preview_enabled=False,
     )
     ctx = RecordingProgressContext()
@@ -333,9 +333,9 @@ async def test_context_failure_progress_jumps_directly_to_complete(
 
     monkeypatch.setattr(SeedreamClient, "text_to_image", unexpected_call)
 
-    base = tmp_path / "save_root"
+    base = tmp_path / "images_root"
     base.mkdir()
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+    config = SeedreamConfig(api_key="test_key", data_root=str(base))
     ctx = RecordingProgressContext()
     result = await handle_text_to_image(
         TextToImageInput(prompt="test", save_path="a\x00b"), config, cast(Context, ctx)

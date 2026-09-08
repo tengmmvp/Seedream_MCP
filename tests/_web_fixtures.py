@@ -77,11 +77,11 @@ def build_web_app(
 
 
 def write_workspace_config(tmp_path: Path) -> Path:
-    """以 tmp 为工作区根注入活动配置并创建存储区目录，返回存储区路径。"""
-    save_root = tmp_path / ".seedream" / "images"
-    save_root.mkdir(parents=True)
+    """以 tmp 为工作区根注入活动配置并创建图片目录，返回图片目录路径。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
     set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path)))
-    return save_root
+    return images_root
 
 
 def prepare_static_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:

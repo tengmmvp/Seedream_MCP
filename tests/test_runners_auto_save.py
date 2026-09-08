@@ -90,7 +90,7 @@ async def test_run_text_to_image_includes_auto_save_field(
     _patch_client_success(monkeypatch)
     _patch_save_success(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     set_active_config(config)
     params = TextToImageInput(prompt="a cat")
 
@@ -108,10 +108,10 @@ async def test_run_text_to_image_includes_auto_save_field(
     assert data[0]["local_path"] == "/saved/generated.png"
 
 
-async def test_run_text_to_image_absolute_save_path_survives_unresolvable_save_root(
+async def test_run_text_to_image_absolute_save_path_survives_unresolvable_images_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """绝对 save_path 下存储声明不可解析时落盘不受阻，清理边界降级不阻塞保存。
+    """绝对 save_path 下数据根目录声明不可解析时落盘不受阻，清理边界降级不阻塞保存。
 
     预检与写入目录解析均不依赖基准；清理根解析失败时清理整体关闭，写入目录
     可能存放非本服务文件，任何清理动作不得作用于该目录。
@@ -121,11 +121,11 @@ async def test_run_text_to_image_absolute_save_path_survives_unresolvable_save_r
     def _unresolvable(configured_dir: str) -> Path:
         raise OSError("simulated unresolvable path")
 
-    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
     _patch_client_success(monkeypatch)
     _patch_save_success(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics"))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics"))
     set_active_config(config)
     export_dir = tmp_path / "export"
     params = TextToImageInput(prompt="a cat", save_path=str(export_dir))
@@ -189,7 +189,7 @@ async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfill
         fake_save_multiple_base64,
     )
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     set_active_config(config)
     params = TextToImageInput(prompt="a cat", response_format=ResponseFormat.B64_JSON)
 
@@ -231,7 +231,7 @@ async def test_run_text_to_image_degrades_when_auto_save_fails(
     _patch_client_success(monkeypatch)
     _patch_save_failure(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     set_active_config(config)
     params = TextToImageInput(prompt="a cat")
 
@@ -263,9 +263,9 @@ async def test_run_text_to_image_rejects_invalid_save_path_before_api_call(
 
     monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image)
 
-    base = tmp_path / "save_root"
+    base = tmp_path / "images_root"
     base.mkdir()
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base))
+    config = SeedreamConfig(api_key="test_key", data_root=str(base))
     set_active_config(config)
     params = TextToImageInput(prompt="a cat", save_path="a\x00b")
 
@@ -289,7 +289,7 @@ async def test_run_image_to_image_dispatches_via_composition_root(
     calls = _patch_client_method(monkeypatch, "image_to_image")
     _patch_save_success(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     set_active_config(config)
     params = ImageToImageInput(prompt="edit", image="https://example.com/ref.png")
 
@@ -312,7 +312,7 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
     calls = _patch_client_method(monkeypatch, "multi_image_fusion")
     _patch_save_success(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     set_active_config(config)
     params = MultiImageFusionInput(
         prompt="fuse",
@@ -338,7 +338,7 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
     calls = _patch_client_method(monkeypatch, "sequential_generation")
     _patch_save_success(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     set_active_config(config)
     params = SequentialGenerationInput(prompt="sequence", max_images=2)
 
@@ -351,10 +351,10 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
     assert structured["data"][0]["url"] == GENERATED_URL
 
 
-async def test_auto_save_cleanup_boundary_stays_at_deployment_save_root(
+async def test_auto_save_cleanup_boundary_stays_at_deployment_images_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """save_path 指向部署级存储区之外时，清理与配额边界仍恒为部署级存储区。
+    """save_path 指向部署级图片目录之外时，清理与配额边界仍恒为部署级图片目录。
 
     save_path 目录可能同时存放其他文件，不属服务专有，把按天清理与配额驱逐
     扩展到该处会误删非本服务文件；save_path 仅决定本次写入位置。

@@ -97,8 +97,8 @@ async def test_generate_returns_structured_payload_with_web_path(
     reset_http_app_state: None,
 ) -> None:
     """成功结果的 data 条目附 web_path 且 local_path 改写为同一相对形态。"""
-    save_root = write_workspace_config(tmp_path)
-    local_path = save_root / "2026-08-20" / "text_to_image" / "a.png"
+    images_root = write_workspace_config(tmp_path)
+    local_path = images_root / "2026-08-20" / "text_to_image" / "a.png"
     local_path.parent.mkdir(parents=True)
     local_path.write_bytes(b"png")
     _install_runner(
@@ -120,13 +120,13 @@ async def test_generate_returns_structured_payload_with_web_path(
     assert entry["local_path"] == "2026-08-20/text_to_image/a.png"
 
 
-async def test_generate_skips_web_path_outside_save_root(
+async def test_generate_skips_web_path_outside_images_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储区之外的条目删除 local_path 键且不附 web_path，绝对路径不出端点。"""
+    """图片目录之外的条目删除 local_path 键且不附 web_path，绝对路径不出端点。"""
     write_workspace_config(tmp_path)
     outside = tmp_path / "elsewhere.png"
     outside.write_bytes(b"png")
@@ -153,8 +153,8 @@ async def test_generate_save_path_outside_drops_local_path_keys(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """save_path 越出存储区时，data 与 auto_save.results 条目的 local_path 与
-    markdown_ref 键删除，Web 文件端点无法服务存储区外文件。"""
+    """save_path 越出图片目录时，data 与 auto_save.results 条目的 local_path 与
+    markdown_ref 键删除，Web 文件端点无法服务图片目录外文件。"""
     write_workspace_config(tmp_path)
     destination = tmp_path / "tmp-export" / "batch"
     destination.mkdir(parents=True)
@@ -204,15 +204,15 @@ async def test_generate_save_path_outside_drops_local_path_keys(
     assert "markdown_ref" not in result_entry
 
 
-async def test_generate_rewrites_auto_save_results_local_path_inside_save_root(
+async def test_generate_rewrites_auto_save_results_local_path_inside_images_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储区内的 auto_save.results 条目同样附 web_path 相对形态，与 data 条目同口径。"""
-    save_root = write_workspace_config(tmp_path)
-    local_path = save_root / "2026-08-20" / "text_to_image" / "a.png"
+    """图片目录内的 auto_save.results 条目同样附 web_path 相对形态，与 data 条目同口径。"""
+    images_root = write_workspace_config(tmp_path)
+    local_path = images_root / "2026-08-20" / "text_to_image" / "a.png"
     local_path.parent.mkdir(parents=True)
     local_path.write_bytes(b"png")
     _install_runner(
@@ -244,9 +244,9 @@ async def test_generate_multi_image_fusion_returns_structured_payload_with_web_p
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """融合端点复用 run_multi_image_fusion，存储区内条目附 web_path。"""
-    save_root = write_workspace_config(tmp_path)
-    local_path = save_root / "2026-08-20" / "multi_image_fusion" / "a.png"
+    """融合端点复用 run_multi_image_fusion，图片目录内条目附 web_path。"""
+    images_root = write_workspace_config(tmp_path)
+    local_path = images_root / "2026-08-20" / "multi_image_fusion" / "a.png"
     local_path.parent.mkdir(parents=True)
     local_path.write_bytes(b"png")
     _install_runner(
@@ -435,14 +435,14 @@ async def test_generate_runner_validation_error_echoes_message(
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """runner 校验错误消息原样返回，携带存储区路径。"""
-    save_root = write_workspace_config(tmp_path)
+    """runner 校验错误消息原样返回，携带图片目录路径。"""
+    images_root = write_workspace_config(tmp_path)
 
     monkeypatch.setattr(
         generate_module,
         "run_text_to_image",
         _make_fake_runner(
-            error=SeedreamValidationError(f"保存路径须位于 {save_root} 之内", field="save_path")
+            error=SeedreamValidationError(f"保存路径须位于 {images_root} 之内", field="save_path")
         ),
     )
     app = build_web_app()
@@ -451,7 +451,7 @@ async def test_generate_runner_validation_error_echoes_message(
 
     assert response.status_code == 400
     description = response.json()["error_description"]
-    assert str(save_root) in description
+    assert str(images_root) in description
 
 
 async def test_generate_runner_unexpected_error_returns_500(
@@ -532,7 +532,7 @@ async def test_generate_runner_receives_no_forged_workspace_roots(
     """端点不向 runner 伪造会话 Roots，文件边界走环境变量回退链。
 
     伪造 Roots 有两重回归：UNC 工作区根经 file URI 转换层丢失使回退边界失效、
-    本地路径错误回显分支解锁泄露服务器路径；存储区作边界还会造成保存目录
+    本地路径错误回显分支解锁泄露服务器路径；图片目录作边界还会造成保存目录
     双重嵌套。
     """
     write_workspace_config(tmp_path)
@@ -553,13 +553,13 @@ async def test_generate_runner_receives_no_forged_workspace_roots(
     assert [call["workspace_roots"] for call in captured] == [None]
 
 
-async def test_generate_rejects_when_save_root_unresolvable(
+async def test_generate_rejects_when_images_root_unresolvable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储区不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
+    """图片目录不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
     import seedream_mcp.utils.io.io_path as io_path_module
 
     def _unresolvable(configured_dir: str) -> Any:
@@ -567,16 +567,16 @@ async def test_generate_rejects_when_save_root_unresolvable(
         raise OSError("simulated unresolvable path")
 
     write_workspace_config(tmp_path)
-    set_active_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
+    set_active_config(SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
     assert response.status_code == 400
     body = response.json()
-    assert body["error"] == "save_root_unavailable"
-    assert "SEEDREAM_AUTO_SAVE_BASE_DIR" in body["error_description"]
+    assert body["error"] == "images_root_unavailable"
+    assert "SEEDREAM_DATA_ROOT" in body["error_description"]
 
 
 async def test_generate_error_channels_carry_messages_verbatim(
@@ -586,7 +586,7 @@ async def test_generate_error_channels_carry_messages_verbatim(
     reset_http_app_state: None,
 ) -> None:
     """auto_save.results[].error、data[].error 嵌套 message 与顶层 error.message 原样透传。"""
-    save_root = write_workspace_config(tmp_path)
+    images_root = write_workspace_config(tmp_path)
     _install_runner(
         monkeypatch,
         "run_text_to_image",
@@ -594,11 +594,11 @@ async def test_generate_error_channels_carry_messages_verbatim(
             "tool": "text_to_image",
             "success": False,
             "data": [
-                {"url": "https://x/a.png", "error": {"message": f"下载失败于 {save_root}\\a.png"}}
+                {"url": "https://x/a.png", "error": {"message": f"下载失败于 {images_root}\\a.png"}}
             ],
-            "error": {"type": "generation_failed", "message": f"保存到 {save_root} 失败"},
+            "error": {"type": "generation_failed", "message": f"保存到 {images_root} 失败"},
             "auto_save": {
-                "results": [{"success": False, "error": f"写入 {save_root}\\b.png 被拒绝"}]
+                "results": [{"success": False, "error": f"写入 {images_root}\\b.png 被拒绝"}]
             },
         },
         is_error=True,
@@ -609,9 +609,9 @@ async def test_generate_error_channels_carry_messages_verbatim(
 
     assert response.status_code == 502
     payload = response.json()
-    assert payload["error"]["message"] == f"保存到 {save_root} 失败"
-    assert payload["data"][0]["error"]["message"] == f"下载失败于 {save_root}\\a.png"
-    assert payload["auto_save"]["results"][0]["error"] == f"写入 {save_root}\\b.png 被拒绝"
+    assert payload["error"]["message"] == f"保存到 {images_root} 失败"
+    assert payload["data"][0]["error"]["message"] == f"下载失败于 {images_root}\\a.png"
+    assert payload["auto_save"]["results"][0]["error"] == f"写入 {images_root}\\b.png 被拒绝"
 
 
 async def test_generate_endpoint_requires_token(

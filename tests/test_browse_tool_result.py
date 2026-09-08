@@ -1,8 +1,8 @@
 """browse_images 工具结构化结果、分页元数据与读权限拒绝测试。
 
 多数用例直连 handle_browse_images，工作区经 workspace_root fixture 注入的
-SEEDREAM_WORKSPACE_ROOT 回退取得，存储区为工作区派生的 .seedream/images，测试
-图片统一放存储区内；走完整 MCPServer 调用链的用例以 _NoRootsContext 提供无会话
+SEEDREAM_WORKSPACE_ROOT 回退取得，图片目录为工作区派生的 .seedream/images，测试
+图片统一放图片目录内；走完整 MCPServer 调用链的用例以 _NoRootsContext 提供无会话
 的替身上下文。需要越界目录或越界文件的用例将工作区与越界路径同置于 tmp_path
 之下，不污染共享 basetemp。
 """
@@ -28,8 +28,8 @@ from seedream_mcp.tools.impl.browse_images import handle_browse_images
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
-def _seed_save_root(ws: Path) -> Path:
-    """返回 ws 派生的存储区并确保存在，测试图片统一放存储区内。"""
+def _seed_images_root(ws: Path) -> Path:
+    """返回 ws 派生的图片目录并确保存在，测试图片统一放图片目录内。"""
     root = ws / ".seedream" / "images"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -37,7 +37,7 @@ def _seed_save_root(ws: Path) -> Path:
 
 async def test_browse_images_returns_structured_success(workspace_root: Path) -> None:
     """正常浏览返回 completed 结构化结果与文本内容。"""
-    (_seed_save_root(workspace_root) / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (_seed_images_root(workspace_root) / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
@@ -190,9 +190,9 @@ async def test_browse_images_fallback_error_preserves_format_filter(
 
 async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
     """分页元数据正确：has_more 时 total_count 为 None，末页给出精确总数。"""
-    save_root = _seed_save_root(workspace_root)
+    images_root = _seed_images_root(workspace_root)
     for name in ("a.png", "b.png", "c.png"):
-        (save_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
@@ -223,9 +223,9 @@ async def test_browse_images_offset_beyond_end_signals_tool_error(
     文本与结构化错误两条通道均携带实际总数与有效区间，模型修正 offset 后即可
     重试成功。
     """
-    save_root = _seed_save_root(workspace_root)
+    images_root = _seed_images_root(workspace_root)
     for name in ("a.png", "b.png", "c.png"):
-        (save_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=4)
@@ -248,12 +248,12 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     """深翻页命中扫描缓存时不重复 resolve 图片文件。
 
     (原始, resolved) 对随首次扫描缓存；深页命中完整缓存时免于 O(offset) 次逐文件
-    resolve，仅剩存储区与请求目录的目录级 resolve。统计第二次浏览期间 .png 的
+    resolve，仅剩图片目录与请求目录的目录级 resolve。统计第二次浏览期间 .png 的
     resolve 调用数并断言为零。
     """
-    save_root = _seed_save_root(workspace_root)
+    images_root = _seed_images_root(workspace_root)
     for i in range(5):
-        (save_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (images_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     # 首页 scan_limit = 0+5+1 = 6 > 5，扫到目录末尾缓存完整的 (原始, resolved) 对列表
     page1 = await handle_browse_images(
@@ -331,9 +331,9 @@ async def test_browse_images_offset_error_signal_visible_to_client(
     经 mcp.call_tool 走完 inputSchema 校验与结果透传，返回的 CallToolResult 携带
     isError 与稳定的结构化错误标记，客户端 UI 无需解析文本即可判定失败。
     """
-    save_root = _seed_save_root(workspace_root)
+    images_root = _seed_images_root(workspace_root)
     for name in ("a.png", "b.png"):
-        (save_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await mcp.call_tool(
         "browse_images",
@@ -368,9 +368,9 @@ async def test_browse_images_full_page_appends_pagination_hint(workspace_root: P
 
     has_more 时未扫完全量，total_count 为 None，引导行省略总数仅给出当前页区间。
     """
-    save_root = _seed_save_root(workspace_root)
+    images_root = _seed_images_root(workspace_root)
     for name in ("a.png", "b.png", "c.png"):
-        (save_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
@@ -400,8 +400,8 @@ async def test_browse_images_fallback_preserves_resolved_directories(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(browse_core_module, "_build_display_entries", _exploding_display_entries)
-    save_root = _seed_save_root(workspace_root)
-    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    images_root = _seed_images_root(workspace_root)
+    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
     try:
@@ -412,7 +412,7 @@ async def test_browse_images_fallback_preserves_resolved_directories(
     assert result.is_error is True
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["resolved_directories"] == [
-        str(save_root.resolve()).replace("\\", "/")
+        str(images_root.resolve()).replace("\\", "/")
     ]
 
 
@@ -448,8 +448,8 @@ async def test_browse_images_fallback_boundary_echoes_real_paths_on_success(
     workspace_root: Path,
 ) -> None:
     """无会话 Roots 的成功浏览回显真实边界与绝对路径条目，与 Roots 会话同形态。"""
-    save_root = _seed_save_root(workspace_root)
-    (save_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    images_root = _seed_images_root(workspace_root)
+    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 
@@ -457,8 +457,8 @@ async def test_browse_images_fallback_boundary_echoes_real_paths_on_success(
     sc = result.structured_content
     assert isinstance(sc, dict)
     assert sc["workspace_roots"] == [str(workspace_root.resolve()).replace("\\", "/")]
-    assert sc["resolved_directories"] == [str(save_root.resolve()).replace("\\", "/")]
-    assert sc["images"][0]["path"] == (save_root / "demo.png").resolve().as_posix()
+    assert sc["resolved_directories"] == [str(images_root.resolve()).replace("\\", "/")]
+    assert sc["images"][0]["path"] == (images_root / "demo.png").resolve().as_posix()
 
 
 async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
@@ -472,7 +472,7 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     """
     import seedream_mcp.utils.io.io_path as path_module
 
-    save_root = _seed_save_root(workspace_root)
+    images_root = _seed_images_root(workspace_root)
 
     def _raise_permission(path: object) -> NoReturn:
         raise PermissionError("denied")
@@ -486,7 +486,7 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     assert result.structured_content["status"] == "empty"
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "目录不可读或无图片文件" in text
-    assert str(save_root.resolve()).replace("\\", "/") in text
+    assert str(images_root.resolve()).replace("\\", "/") in text
 
 
 async def test_browse_images_empty_message_sanitizes_unreadable_dir_paths(
@@ -547,9 +547,9 @@ async def test_browse_images_truncated_empty_result_marks_incompleteness(
     """
     import seedream_mcp.utils.io.io_path as path_module
 
-    save_root = _seed_save_root(workspace_root)
+    images_root = _seed_images_root(workspace_root)
     for i in range(8):
-        (save_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (images_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     monkeypatch.setattr(path_module, "_SCAN_ENTRY_BUDGET", 5)
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
@@ -573,11 +573,11 @@ async def test_browse_images_truncated_partial_page_marks_incompleteness(
     """截断前已收集的部分页携带标记，total_count 不以低报的精确值声称完备。"""
     import seedream_mcp.utils.io.io_path as path_module
 
-    save_root = _seed_save_root(workspace_root)
-    early = save_root / "a"
+    images_root = _seed_images_root(workspace_root)
+    early = images_root / "a"
     early.mkdir()
     (early / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    late = save_root / "b"
+    late = images_root / "b"
     late.mkdir()
     for i in range(20):
         (late / f"note_{i:02d}.txt").write_bytes(b"x")
@@ -629,7 +629,7 @@ def test_build_display_entries_keeps_file_name_verbatim(
     workspace_root: Path,
 ) -> None:
     """含凭据样式片段的文件名原样进入文本与结构化两条通道，保证按条目回流可命中。"""
-    image = _seed_save_root(workspace_root) / "img api_key=secret.png"
+    image = _seed_images_root(workspace_root) / "img api_key=secret.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     lines, entries = browse_core_module._build_display_entries(
@@ -679,11 +679,11 @@ def test_build_display_entries_flattens_unicode_line_separator(tmp_path: Path) -
     assert lines == [f"1. {tmp_path.as_posix()}/a b.png"]
 
 
-async def test_browse_images_directory_outside_save_root_lists_absolute_entries(
+async def test_browse_images_directory_outside_images_root_lists_absolute_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """回退边界下浏览存储区外目录，条目为绝对路径，与 Roots 会话同形态。"""
+    """回退边界下浏览图片目录外目录，条目为绝对路径，与 Roots 会话同形态。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     photos = workspace / "photos"
@@ -699,10 +699,10 @@ async def test_browse_images_directory_outside_save_root_lists_absolute_entries(
     assert images[0]["path"] == (photos / "cat.png").resolve().as_posix()
 
 
-async def test_browse_images_outside_save_root_lists_absolute_under_session_roots(
+async def test_browse_images_outside_images_root_lists_absolute_under_session_roots(
     tmp_path: Path,
 ) -> None:
-    """会话 Roots 边界下存储区外条目为绝对路径，可直接回流 image 参数。
+    """会话 Roots 边界下图片目录外条目为绝对路径，可直接回流 image 参数。
 
     与回退边界用例共同锁定条目形态不随会话边界漂移。
     """
@@ -906,11 +906,11 @@ async def test_browse_images_invalid_relative_directory_reports_invalid_path(
     assert "目录超出允许范围" not in text
 
 
-async def test_browse_images_rejects_relative_escape_outside_save_root(
+async def test_browse_images_rejects_relative_escape_outside_images_root(
     workspace_root: Path,
 ) -> None:
-    """相对目录经 ``..`` 解析到存储区之外时拒绝，即便目标仍在工作区内。"""
-    _seed_save_root(workspace_root)
+    """相对目录经 ``..`` 解析到图片目录之外时拒绝，即便目标仍在工作区内。"""
+    _seed_images_root(workspace_root)
 
     result = await handle_browse_images(BrowseImagesInput(directory="../..", recursive=False))
 
@@ -921,27 +921,27 @@ async def test_browse_images_rejects_relative_escape_outside_save_root(
     assert "相对路径仅限图片保存目录内" in text
 
 
-async def test_browse_session_roots_echoes_save_root_outside_roots(
+async def test_browse_session_roots_echoes_images_root_outside_roots(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """会话 Roots 下显式存储区位于 Roots 之外时，解析目录与条目仍回显真实路径。
+    """会话 Roots 下显式图片目录位于 Roots 之外时，解析目录与条目仍回显真实路径。
 
-    默认浏览解析到服务器配置的存储区，读权限判定已覆盖越界防护，回显不做遮蔽。
+    默认浏览解析到服务器配置的图片目录，读权限判定已覆盖越界防护，回显不做遮蔽。
     """
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
     workspace = tmp_path / "proj"
     workspace.mkdir()
     outside_root = tmp_path / "private-pics"
-    save_root = outside_root / ".seedream" / "images"
-    (save_root / "2026-09-06").mkdir(parents=True)
-    (save_root / "2026-09-06" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    images_root = outside_root / ".seedream" / "images"
+    (images_root / "2026-09-06").mkdir(parents=True)
+    (images_root / "2026-09-06" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     set_active_config(
         SeedreamConfig(
             api_key="test_key",
             workspace_root=str(workspace),
-            auto_save_base_dir=str(outside_root),
+            data_root=str(outside_root),
         )
     )
     token = _WORKSPACE_ROOTS_VAR.set((workspace,))
@@ -953,6 +953,6 @@ async def test_browse_session_roots_echoes_save_root_outside_roots(
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     resolved = result.structured_content["resolved_directories"]
-    assert resolved == [str(save_root.resolve()).replace("\\", "/")]
-    entry_path = (save_root / "2026-09-06" / "a.png").resolve().as_posix()
+    assert resolved == [str(images_root.resolve()).replace("\\", "/")]
+    entry_path = (images_root / "2026-09-06" / "a.png").resolve().as_posix()
     assert result.structured_content["images"][0]["path"] == entry_path

@@ -10,6 +10,7 @@ import pytest
 
 import seedream_mcp.utils.io.io_path as io_path_module
 from _log_fakes import capture_loguru_messages
+from seedream_mcp.config import SeedreamConfig, set_active_config
 
 
 def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
@@ -180,7 +181,7 @@ def test_fallback_all_unavailable_raises_config_error_with_guidance(
 def test_fallback_prefers_writable_cwd_without_touching_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """保底基准取可写的进程启动目录，主目录不参与求值，探测不留目录副作用。"""
+    """回退根取可写的进程启动目录，主目录不参与求值，探测不留目录副作用。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
     monkeypatch.setattr(io_path_module, "_fallback_root", None)
@@ -190,17 +191,21 @@ def test_fallback_prefers_writable_cwd_without_touching_home(
         raise AssertionError("工作目录可写时保底不应触达主目录")
 
     monkeypatch.setattr(Path, "home", _fail_home)
-    records: list[str] = []
-    with capture_loguru_messages(records, level="INFO"):
-        assert io_path_module.resolve_env_workspace_root() == tmp_path.resolve()
+    assert io_path_module.resolve_env_workspace_root() == tmp_path.resolve()
 
     # 临时探测文件用后即删，目录零残留
     assert list(tmp_path.iterdir()) == []
-    assert any("工作位置保底为进程启动目录" in record for record in records)
+    # 回退提示进启动缓冲队列而非即时输出，drain 后经日志通道落地
+    pending = [message for _, message in io_path_module._pending_start_messages]
+    assert any("工作根目录回退为进程启动目录" in message for message in pending)
+    records: list[str] = []
+    with capture_loguru_messages(records, level="INFO"):
+        io_path_module.drain_pending_start_messages()
+    assert any("工作根目录回退为进程启动目录" in record for record in records)
 
 
 def test_usable_cwd_root_rejects_unc_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
-    """UNC 形态的进程启动目录不作为保底基准，不触发探测与路径解析。"""
+    """UNC 形态的进程启动目录不作为回退根，不触发探测与路径解析。"""
 
     def _unc_cwd() -> Path:
         return Path("//server/share")
@@ -217,7 +222,7 @@ def test_usable_cwd_root_rejects_unc_cwd(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_usable_cwd_root_returns_none_when_resolve_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """写探测通过但 resolve 失败时启动目录不可用作保底基准，返回 None。"""
+    """写探测通过但 resolve 失败时启动目录不可用作回退根，返回 None。"""
 
     def _tmp_cwd() -> Path:
         return tmp_path
@@ -311,19 +316,19 @@ def test_find_images_rejects_unc_directory_before_resolve(
     assert any("拒绝 UNC 形式的目录扫描入参" in message for message in warnings)
 
 
-def test_read_context_degrades_to_save_root_when_home_unresolvable(
+def test_read_context_degrades_to_images_root_when_home_unresolvable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """保底链整体不可用且显式存储声明可用时，读权限退化为仅存储区不整体失败。
+    """回退链整体不可用且显式数据根目录可用时，读权限退化为仅图片目录不整体失败。
 
-    显式 BASE_DIR 在场时基准链不参与存储区求值，工作区链的失败不应拖垮
+    数据根目录声明在场时回退链不参与图片目录求值，工作区链的失败不应拖垮
     读取与浏览。
     """
     from seedream_mcp.utils.core.errors import SeedreamConfigError
 
-    save_root = tmp_path / "pics"
-    save_root.mkdir()
-    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(save_root))
+    images_root = tmp_path / "pics"
+    images_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(images_root))
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
     monkeypatch.setattr(io_path_module, "_fallback_root", None)
@@ -340,41 +345,41 @@ def test_read_context_degrades_to_save_root_when_home_unresolvable(
     # 工作区链单点仍如实报配置指引
     with pytest.raises(SeedreamConfigError, match="SEEDREAM_WORKSPACE_ROOT"):
         io_path_module.get_workspace_roots()
-    # 读权限退化为仅存储区，存储区派生自显式声明的 .seedream/images
-    assert io_path_module.get_read_scope() == [(save_root / ".seedream" / "images").resolve()]
+    # 读权限退化为仅图片目录，图片目录派生自显式声明的 .seedream/images
+    assert io_path_module.get_read_scope() == [(images_root / ".seedream" / "images").resolve()]
 
 
-def test_resolve_save_root_wraps_runtime_error_with_configured_value(
+def test_resolve_images_root_wraps_runtime_error_with_configured_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """显式存储声明的 expanduser RuntimeError 也归一为配置错误，消息不嵌展开路径。
+    """显式数据根目录的 expanduser RuntimeError 也归一为配置错误，消息不嵌展开路径。
 
     用户消息只回显其自行配置的原始值，异常原文留在日志。
     """
     from seedream_mcp.utils.core.errors import SeedreamConfigError
 
-    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", "~/pics")
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", "~/pics")
 
     def _runtime_error(configured_dir: str) -> Path:
         raise RuntimeError(r"Could not resolve home directory for ~/pics -> C:\Users\srv\pics")
 
-    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _runtime_error)
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _runtime_error)
 
     with pytest.raises(SeedreamConfigError) as exc_info:
-        io_path_module.resolve_save_root()
+        io_path_module.resolve_images_root()
 
     message = exc_info.value.message
-    assert message == "存储区配置无法解析: ~/pics"
+    assert message == "数据根目录配置无法解析: ~/pics"
     assert "C:" not in message and "Users" not in message
 
 
 def test_clear_resolved_env_root_cache_resets_fallback_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """保底基准缓存随配置路径缓存一并复位。
+    """回退根缓存随配置路径缓存一并复位。
 
     隔离用例经 monkeypatch 改写保底解析后，复位协议使后续用例重新解析，
-    不再读到先前用例缓存的陈旧基准。
+    不再读到先前用例缓存的陈旧回退根。
     """
     monkeypatch.setattr(io_path_module, "_fallback_root", Path("D:/stale"))
 
@@ -389,3 +394,44 @@ def test_suggest_similar_paths_skips_unc_search_dirs(tmp_path: Path, unc_dir: st
     (tmp_path / "a_portrait.png").write_bytes(b"x")
 
     assert io_path_module.suggest_similar_paths("portrait", search_dirs=[unc_dir]) == []
+
+
+def _use_active_config(config: SeedreamConfig) -> None:
+    """把 config 设为活动配置，conftest 的配置重置基线负责还原。"""
+    set_active_config(config)
+
+
+def test_resolve_log_file_path_follows_data_root_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """日志文件路径取数据根目录声明，声明优先于工作根目录声明。"""
+    del monkeypatch
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _use_active_config(
+        SeedreamConfig(api_key="test_key", data_root=str(data_root), workspace_root=str(workspace))
+    )
+
+    result = io_path_module.resolve_log_file_path()
+
+    assert result == data_root.resolve() / ".seedream" / "logs" / "seedream_mcp.log"
+
+
+def test_resolve_log_file_path_falls_back_to_workspace_then_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """数据根目录声明缺席时取工作根目录声明，两者皆缺时经回退链落进程启动目录。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _use_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)))
+    assert io_path_module.resolve_log_file_path() == (
+        workspace.resolve() / ".seedream" / "logs" / "seedream_mcp.log"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    _use_active_config(SeedreamConfig(api_key="test_key"))
+    assert io_path_module.resolve_log_file_path() == (
+        tmp_path.resolve() / ".seedream" / "logs" / "seedream_mcp.log"
+    )

@@ -166,7 +166,7 @@ async def test_generation_result_carries_preview_after_text(
 
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
     set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
@@ -223,7 +223,7 @@ async def test_generation_result_truncates_preview_beyond_limit(
 
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
     set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
@@ -247,12 +247,12 @@ async def test_generation_result_truncates_preview_beyond_limit(
 # ==================== 缩略图落盘缓存 ====================
 
 
-def test_thumbnail_cache_root_parallel_to_save_root(tmp_path: Path) -> None:
-    """缓存目录与存储区并列于 .seedream 下，驱逐清理不作用到存储区内部。"""
+def test_thumbnail_cache_root_parallel_to_images_root(tmp_path: Path) -> None:
+    """缓存目录与图片目录并列于 .seedream 下，驱逐清理不作用到图片目录内部。"""
     from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
 
-    save_root = tmp_path / ".seedream" / "images"
-    assert thumbnail_module.thumbnail_cache_root(save_root) == tmp_path / ".seedream" / "thumbs"
+    images_root = tmp_path / ".seedream" / "images"
+    assert thumbnail_module.thumbnail_cache_root(images_root) == tmp_path / ".seedream" / "thumbs"
 
 
 async def test_cached_thumbnail_hits_disk_cache_without_redecode(
@@ -262,8 +262,8 @@ async def test_cached_thumbnail_hits_disk_cache_without_redecode(
     from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (1200, 800))
-    save_root = tmp_path / ".seedream" / "images"
-    save_root.mkdir(parents=True)
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
     decode_calls = {"count": 0}
     original_build = thumbnail_module.build_thumbnail_bytes
 
@@ -273,12 +273,12 @@ async def test_cached_thumbnail_hits_disk_cache_without_redecode(
 
     monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _counting_build)
 
-    first = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
-    second = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+    first = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
+    second = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
 
     assert first is not None and second == first
     assert decode_calls["count"] == 1
-    assert thumbnail_module.thumbnail_cache_root(save_root).is_dir()
+    assert thumbnail_module.thumbnail_cache_root(images_root).is_dir()
 
 
 async def test_cached_thumbnail_invalidates_on_source_change(tmp_path: Path) -> None:
@@ -286,12 +286,12 @@ async def test_cached_thumbnail_invalidates_on_source_change(tmp_path: Path) -> 
     from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (900, 600))
-    save_root = tmp_path / ".seedream" / "images"
-    save_root.mkdir(parents=True)
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
 
-    first = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+    first = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
     _write_png(image, (1400, 900))
-    second = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+    second = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
 
     assert first is not None and second is not None
     assert second != first
@@ -302,13 +302,13 @@ async def test_cached_thumbnail_survives_unwritable_cache_dir(tmp_path: Path) ->
     from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
 
     image = _write_png(tmp_path / "src.png", (800, 600))
-    save_root = tmp_path / ".seedream" / "images"
-    save_root.mkdir(parents=True)
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
     # 同名占位文件使缓存目录创建失败，走真实降级路径
     (tmp_path / ".seedream" / "thumbs").write_text("occupied", encoding="utf-8")
 
-    first = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
-    second = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+    first = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
+    second = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
 
     assert first is not None and second == first
 
@@ -354,7 +354,7 @@ async def test_generation_result_preview_disabled_keeps_text_only(
 
     config = SeedreamConfig(
         api_key="test_key",
-        auto_save_base_dir=str(tmp_path),
+        data_root=str(tmp_path),
         preview_enabled=False,
     )
     set_active_config(config)
@@ -380,7 +380,7 @@ async def test_generation_result_no_preview_when_save_fails(
 
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
     set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
@@ -406,7 +406,7 @@ async def test_generation_result_no_preview_when_generation_fails(
 
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
     # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
     set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)

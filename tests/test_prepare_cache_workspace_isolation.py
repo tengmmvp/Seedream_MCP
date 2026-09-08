@@ -145,7 +145,7 @@ async def test_prepare_large_data_uri_with_surrogate_raises_validation_error() -
 async def test_prepare_remote_inputs_skip_read_scope_evaluation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """纯 URL 批次不读权限现取，显式存储声明不可解析时照常完成预处理。
+    """纯 URL 批次不读权限现取，显式数据根目录不可解析时照常完成预处理。
 
     读权限求值先于输入分类执行时，不触本地文件系统的 URL 参考图会被无关的
     存储配置缺陷整体阻断。
@@ -156,8 +156,8 @@ async def test_prepare_remote_inputs_skip_read_scope_evaluation(
         del configured_dir
         raise OSError("simulated unresolvable path")
 
-    monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(Path("/configured-save-root")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(Path("/configured-save-root")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
 
     url = "https://cdn.example.com/x.png"
     preparer = ImagePreparer(

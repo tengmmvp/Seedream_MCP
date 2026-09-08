@@ -54,6 +54,25 @@ def test_build_config_priority_prefers_system_env_over_env_file(
     assert config.api_key == "env_key"
 
 
+def test_build_config_reads_seedream_log_level_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """日志级别经 SEEDREAM_LOG_LEVEL 读取，裸 LOG_LEVEL 不参与构建。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.setenv("SEEDREAM_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.log_level == "DEBUG"
+
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL")
+    fallback = build_config_from_sources(env_file=str(env_file))
+
+    assert fallback.log_level == "INFO"
+
+
 def test_build_config_resolves_seedream_50_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -410,14 +429,14 @@ def test_workspace_root_non_directory_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("unc_dir", ["//nas/pics", "\\\\nas\\pics"])
-def test_auto_save_base_dir_unc_rejected_at_build(unc_dir: str) -> None:
-    """显式存储区配置 UNC 路径在构建期拒绝，启动即报配置错误而非运行期逐次降级。"""
+def test_data_root_unc_rejected_at_build(unc_dir: str) -> None:
+    """数据根目录声明 UNC 路径在构建期拒绝，启动即报配置错误而非运行期逐次降级。"""
     from seedream_mcp.config import SeedreamConfig
 
     with pytest.raises(SeedreamConfigError, match="UNC") as excinfo:
-        SeedreamConfig(api_key="k", auto_save_base_dir=unc_dir)
+        SeedreamConfig(api_key="k", data_root=unc_dir)
 
-    assert "SEEDREAM_AUTO_SAVE_BASE_DIR" in excinfo.value.message
+    assert "SEEDREAM_DATA_ROOT" in excinfo.value.message
 
 
 def test_build_config_none_overrides_fall_through_to_defaults(
@@ -769,7 +788,7 @@ def test_build_config_rejects_base_url_without_netloc(
         ({"timeout": 0}, "SEEDREAM_TIMEOUT"),
         ({"api_timeout": -1}, "SEEDREAM_API_TIMEOUT"),
         ({"max_retries": -1}, "SEEDREAM_MAX_RETRIES"),
-        ({"log_level": "VERBOSE"}, "LOG_LEVEL"),
+        ({"log_level": "VERBOSE"}, "SEEDREAM_LOG_LEVEL"),
         ({"auto_save_download_timeout": 0}, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"),
         ({"stream_chunk_size": 0}, "SEEDREAM_STREAM_CHUNK_SIZE"),
         ({"prepare_cache_max": 0}, "SEEDREAM_PREPARE_CACHE_MAX"),

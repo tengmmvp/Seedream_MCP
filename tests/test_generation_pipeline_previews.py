@@ -28,8 +28,8 @@ def _patch_preview_spy(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """以计数 spy 顶替 common 门面内的 build_preview_contents，记录每次调用的张数。"""
     calls: list[int] = []
 
-    async def _counting_spy(paths: Any, save_root: Any = None) -> list[ImageContent]:
-        del save_root
+    async def _counting_spy(paths: Any, images_root: Any = None) -> list[ImageContent]:
+        del images_root
         calls.append(len(paths))
         return []
 
@@ -44,7 +44,7 @@ async def test_runner_include_previews_false_skips_preview_assembly(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
 
     result = await run_text_to_image(
         TextToImageInput(prompt="a cat"), config, include_previews=False
@@ -66,7 +66,7 @@ async def test_preview_scope_resets_after_runner_call(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
 
     await run_text_to_image(TextToImageInput(prompt="a cat"), config, include_previews=False)
     await run_text_to_image(TextToImageInput(prompt="a cat"), config)
@@ -81,7 +81,7 @@ async def test_execute_handler_skips_preview_when_scope_disabled(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
-    config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
 
     async def _executor(client: Any, context: Any) -> dict[str, Any]:
         del client, context

@@ -21,8 +21,8 @@ async def _get(app: Any, path: str) -> httpx.Response:
 @pytest.fixture
 def web_app_with_image(tmp_path: Path, clean_web_routes: None, reset_http_app_state: None) -> Any:
     """带一张真实 PNG 的 Web 传输栈。"""
-    save_root = write_workspace_config(tmp_path)
-    day_dir = save_root / "2026-08-20" / "text_to_image"
+    images_root = write_workspace_config(tmp_path)
+    day_dir = images_root / "2026-08-20" / "text_to_image"
     day_dir.mkdir(parents=True)
     (day_dir / "a.png").write_bytes(make_png_bytes())
     app = build_web_app()
@@ -103,8 +103,8 @@ async def test_thumbnail_goes_through_cache_wrapper(
 
     calls: list[Path] = []
 
-    async def _fake_cached(image_path: Path, save_root: Path) -> bytes | None:
-        del save_root
+    async def _fake_cached(image_path: Path, images_root: Path) -> bytes | None:
+        del images_root
         calls.append(image_path)
         return b"\xff\xd8\xffminimal"
 
@@ -181,8 +181,8 @@ async def test_thumbnail_build_failure_returns_404(
     """缩略图解码返回 None 时回 404 统一 JSON，而非 500 或空响应。"""
     from seedream_mcp.webapp import files as files_module
 
-    async def _none(image_path: Path, save_root: Path) -> bytes | None:
-        del image_path, save_root
+    async def _none(image_path: Path, images_root: Path) -> bytes | None:
+        del image_path, images_root
         return None
 
     monkeypatch.setattr(files_module, "cached_thumbnail_bytes", _none)
@@ -198,14 +198,14 @@ async def test_thumbnail_build_failure_returns_404(
 
 
 @pytest.mark.parametrize("endpoint", ["thumbnail", "image"])
-async def test_file_endpoints_save_root_unavailable_returns_400(
+async def test_file_endpoints_images_root_unavailable_returns_400(
     endpoint: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """存储区不可解析时缩略图与原图端点均回 400 save_root_unavailable。"""
+    """图片目录不可解析时缩略图与原图端点均回 400 images_root_unavailable。"""
     import seedream_mcp.utils.io.io_path as io_path_module
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
@@ -213,11 +213,11 @@ async def test_file_endpoints_save_root_unavailable_returns_400(
         del configured_dir
         raise OSError("simulated unresolvable path")
 
-    set_active_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path / "pics")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_save_base_dir", _unresolvable)
+    set_active_config(SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
     app = build_web_app()
 
     response = await _get(app, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.png")
 
     assert response.status_code == 400
-    assert response.json()["error"] == "save_root_unavailable"
+    assert response.json()["error"] == "images_root_unavailable"
