@@ -3,7 +3,7 @@
 路径安全为四重校验：空/绝对/含冒号（盘符与 ADS）/上跳段拒绝、扩展名白名单、
 normalize_path 与 is_within_resolved 的边界比较、is_file 存在性；违规 400、
 未命中 404。存储区解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
-下沉至工作线程；缩略图解码经 build_thumbnail_bytes_limited 受进程级信号量限流。
+下沉至工作线程；缩略图经落盘缓存免除重复解码，未命中解码受进程级信号量限流。
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from starlette.responses import FileResponse, Response
 
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS
-from ..utils.images.image_thumbnail import build_thumbnail_bytes_limited
+from ..utils.images.image_thumbnail import cached_thumbnail_bytes
 from ..utils.io.io_path import is_within_resolved, normalize_path, resolve_save_root
 from . import _shared
 
@@ -54,16 +54,17 @@ def resolve_web_relative_path(rel: str, save_root: Path) -> Path:
     return resolved
 
 
-async def _resolve_request_path(request: Request) -> Path | Response:
+async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Response:
     """在工作线程完成存储区解析与请求路径校验，错误按原状态码映射。
 
     Returns:
-        落在存储区内的物理路径；解析失败时为对应的 400/404 错误响应。
+        (落在存储区内的物理路径, 存储区目录)；解析失败时为对应的 400/404 错误响应。
     """
     rel = request.query_params.get("path", "")
 
-    def _resolve() -> Path:
-        return resolve_web_relative_path(rel, resolve_save_root())
+    def _resolve() -> tuple[Path, Path]:
+        save_root = resolve_save_root()
+        return resolve_web_relative_path(rel, save_root), save_root
 
     try:
         return await asyncio.to_thread(_resolve)
@@ -76,12 +77,13 @@ async def _resolve_request_path(request: Request) -> Path | Response:
 
 
 async def web_thumbnail(request: Request) -> Response:
-    """缩略图端点：长边不超过 768 像素的 JPEG，生成失败或未命中返回 404。"""
+    """缩略图端点：长边不超过 768 像素的 JPEG，经落盘缓存，失败返回 404。"""
     resolved = await _resolve_request_path(request)
     if isinstance(resolved, Response):
         return resolved
+    image_path, save_root = resolved
 
-    data = await build_thumbnail_bytes_limited(resolved)
+    data = await cached_thumbnail_bytes(image_path, save_root)
     if data is None:
         return _shared.error_json("not_found", "缩略图生成失败", 404)
     return Response(content=data, media_type="image/jpeg", headers=_shared.PRIVATE_CACHE_HEADER)
@@ -92,9 +94,10 @@ async def web_image(request: Request) -> Response:
     resolved = await _resolve_request_path(request)
     if isinstance(resolved, Response):
         return resolved
+    image_path, _ = resolved
 
     return FileResponse(
-        resolved,
-        media_type=MIME_BY_EXTENSION.get(resolved.suffix.lower(), "application/octet-stream"),
+        image_path,
+        media_type=MIME_BY_EXTENSION.get(image_path.suffix.lower(), "application/octet-stream"),
         headers=_shared.PRIVATE_CACHE_HEADER,
     )

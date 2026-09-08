@@ -303,12 +303,17 @@ function normalizePayloadError(payload, response) {
   return { type: error || "error", message: `HTTP ${response.status}` };
 }
 
+// 结果图装载并发上限：固定 4 个取图任务持续消费队列，无批次屏障。
+const RESULT_IMAGE_CONCURRENCY = 4;
+
 // 结果渲染：web_path 优先走本服务鉴权图片端点，blob 装载使令牌只进请求头
 // 不进 URL；外链 url 走裸 fetch 防令牌外送，失败回退 img.src 直连，跨域
-// img 标签不受 CORS 限制。单张失败只降级该卡片显示占位错误，不中断整批渲染。
+// img 标签不受 CORS 限制。卡片先全部落地再分批装载，单张失败只降级该卡片
+// 显示占位错误，不中断整批渲染。
 async function renderResults(payload) {
   const grid = $("result-grid");
   const items = Array.isArray(payload.data) ? payload.data : [];
+  const pending = [];
   for (const item of items) {
     const card = document.createElement("div");
     card.className = "result-card";
@@ -322,19 +327,28 @@ async function renderResults(payload) {
       img.addEventListener("error", () => img.classList.remove("developing"));
       card.insertBefore(img, card.firstChild);
       grid.appendChild(card);
-      try {
-        await loadResultImage(img, item);
-      } catch (error) {
-        console.error("结果图片加载失败:", error);
-        img.classList.remove("developing");
-        appendCardError(card, "图片加载失败");
-      }
+      pending.push({ card, img, item });
     } else {
       grid.appendChild(card);
     }
   }
   if (!items.length)
     grid.appendChild(document.createTextNode("本次没有返回图片。"));
+
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(RESULT_IMAGE_CONCURRENCY, pending.length) }, async () => {
+    while (cursor < pending.length) {
+      const entry = pending[cursor++];
+      try {
+        await loadResultImage(entry.img, entry.item);
+      } catch (error) {
+        console.error("结果图片加载失败:", error);
+        entry.img.classList.remove("developing");
+        appendCardError(entry.card, "图片加载失败");
+      }
+    }
+  });
+  await Promise.all(workers);
 
   const meta = $("result-meta");
   const metaLines = [];

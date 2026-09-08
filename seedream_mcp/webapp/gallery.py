@@ -101,5 +101,6 @@ async def web_browse(request: Request) -> Response:
     structured = result.structured_content if result.structured_content is not None else {}
     if isinstance(structured, dict):
         _converge_for_web(structured, save_root)
-    status = 200 if not result.is_error else 400
+    # browse 错误均为目录形态与越界类客户端错误，统一 400。
+    status = 400 if result.is_error else 200
     return JSONResponse(structured, status_code=status)

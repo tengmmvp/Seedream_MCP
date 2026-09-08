@@ -23,8 +23,12 @@ GENERATION_ERROR_STATUS: dict[str, int] = {
     "config_error": 503,
 }
 
-# 缩略图与原图响应允许浏览器私有缓存：已保存图片内容不再变化。
-PRIVATE_CACHE_HEADER = {"cache-control": "private, max-age=3600"}
+# 缩略图与原图响应允许浏览器私有缓存：已保存图片内容不再变化；nosniff 阻断
+# 旧浏览器把图片字节嗅探为其他类型。
+PRIVATE_CACHE_HEADER = {
+    "cache-control": "private, max-age=3600",
+    "x-content-type-options": "nosniff",
+}
 
 
 def error_json(error: str, description: str, status: int) -> JSONResponse:

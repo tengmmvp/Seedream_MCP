@@ -105,7 +105,8 @@ class _BearerTokenAuthMiddleware:
 
     exempt_exact 与 exempt_prefixes 声明免鉴权路径：Web 操作台的静态页面组
     使用，浏览器原生导航无法携带 Authorization 头。API 路径不得进入豁免表；
-    路径含 ``..`` 时一律不豁免，与路由层穿越防护构成纵深。
+    路径含 ``..`` 时一律不豁免，与路由层穿越防护构成纵深。exact 匹配忽略尾
+    斜杠差异，使 /web 与 /web/ 的豁免判定一致。
     """
 
     def __init__(
@@ -117,7 +118,7 @@ class _BearerTokenAuthMiddleware:
     ) -> None:
         self.app = app
         self._expected = expected_token.encode("utf-8")
-        self._exempt_exact = exempt_exact
+        self._exempt_exact = frozenset(entry.rstrip("/") or "/" for entry in exempt_exact)
         self._exempt_prefixes = exempt_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -141,7 +142,8 @@ class _BearerTokenAuthMiddleware:
         path = scope.get("path", "")
         if ".." in path:
             return False
-        return path in self._exempt_exact or any(
+        normalized = path.rstrip("/") or "/"
+        return normalized in self._exempt_exact or any(
             path.startswith(prefix) for prefix in self._exempt_prefixes
         )
 

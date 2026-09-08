@@ -33,13 +33,15 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # 服务端渲染的静态页面（入口页与 404 页）统一携带的安全响应头：CSP 把脚本与
 # 数据加载收敛到同源，图片另放开 blob/data/https 供生成结果与预览展示，外链
 # 图片经 fetch 转 blob 装载需放开 connect-src 的 https，内联样式为页面内嵌
-# <style> 保留，base-uri 与 form-action 不回退 default-src 须单独声明，
-# frame-ancestors 拒绝跨站 iframe 嵌入；nosniff 阻断 MIME 嗅探。
+# <style> 保留，object-src 禁插件内容，base-uri 与 form-action 不回退
+# default-src 须单独声明，frame-ancestors 拒绝跨站 iframe 嵌入；nosniff 阻断
+# MIME 嗅探。
 PAGE_SECURITY_HEADERS: dict[str, str] = {
     "content-security-policy": (
         "default-src 'self'; "
         "connect-src 'self' https:; "
         "script-src 'self'; "
+        "object-src 'none'; "
         "img-src 'self' blob: data: https:; "
         "style-src 'self' 'unsafe-inline'; "
         "base-uri 'self'; "
