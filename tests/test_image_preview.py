@@ -164,9 +164,11 @@ async def test_generation_result_carries_preview_after_text(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
 
-    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
+    set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -219,9 +221,11 @@ async def test_generation_result_truncates_preview_beyond_limit(
 
     monkeypatch.setattr(io_save.AutoSaveManager, "save_image", fake_save_image)
 
-    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
+    set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -240,6 +244,105 @@ async def test_generation_result_truncates_preview_beyond_limit(
     assert all(entry.get("local_path") for entry in structured["data"])
 
 
+# ==================== 缩略图落盘缓存 ====================
+
+
+def test_thumbnail_cache_root_parallel_to_save_root(tmp_path: Path) -> None:
+    """缓存目录与存储区并列于 .seedream 下，驱逐清理不作用到存储区内部。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    save_root = tmp_path / ".seedream" / "images"
+    assert thumbnail_module.thumbnail_cache_root(save_root) == tmp_path / ".seedream" / "thumbs"
+
+
+async def test_cached_thumbnail_hits_disk_cache_without_redecode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """第二次取图命中落盘缓存，不再触发解码。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (1200, 800))
+    save_root = tmp_path / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    decode_calls = {"count": 0}
+    original_build = thumbnail_module.build_thumbnail_bytes
+
+    def _counting_build(path: Path) -> bytes | None:
+        decode_calls["count"] += 1
+        return original_build(path)
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _counting_build)
+
+    first = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+    second = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+
+    assert first is not None and second == first
+    assert decode_calls["count"] == 1
+    assert thumbnail_module.thumbnail_cache_root(save_root).is_dir()
+
+
+async def test_cached_thumbnail_invalidates_on_source_change(tmp_path: Path) -> None:
+    """源图 (mtime, size) 变化后缓存键失效，重新生成。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (900, 600))
+    save_root = tmp_path / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+
+    first = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+    _write_png(image, (1400, 900))
+    second = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+
+    assert first is not None and second is not None
+    assert second != first
+
+
+async def test_cached_thumbnail_survives_unwritable_cache_dir(tmp_path: Path) -> None:
+    """缓存目录不可写时静默降级为每次现生成，取图结果不受影响。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (800, 600))
+    save_root = tmp_path / ".seedream" / "images"
+    save_root.mkdir(parents=True)
+    # 同名占位文件使缓存目录创建失败，走真实降级路径
+    (tmp_path / ".seedream" / "thumbs").write_text("occupied", encoding="utf-8")
+
+    first = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+    second = await thumbnail_module.cached_thumbnail_bytes(image, save_root)
+
+    assert first is not None and second == first
+
+
+def test_thumbnail_sweep_evicts_oldest_beyond_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """累计字节超上界时按最旧驱逐至一半，最新文件保留。"""
+    import os
+
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    thumbs_root = tmp_path / "thumbs"
+    thumbs_root.mkdir()
+    monkeypatch.setattr(thumbnail_module, "_thumb_sweep_after", 0.0)
+    monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1000)
+    oldest = thumbs_root / "oldest.jpg"
+    middle = thumbs_root / "middle.jpg"
+    newest = thumbs_root / "newest.jpg"
+    oldest.write_bytes(b"x" * 600)
+    middle.write_bytes(b"y" * 300)
+    newest.write_bytes(b"z" * 300)
+    os.utime(oldest, (1000.0, 1000.0))
+    os.utime(middle, (2000.0, 2000.0))
+    os.utime(newest, (3000.0, 3000.0))
+
+    thumbnail_module._maybe_sweep_thumbnails(thumbs_root)
+
+    # 总量 1200 超上界 1000，驱逐目标 500：删最旧 600 后 600 仍超，再删 300 后停止
+    assert not oldest.exists()
+    assert not middle.exists()
+    assert newest.exists()
+
+
 async def test_generation_result_preview_disabled_keeps_text_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -247,13 +350,14 @@ async def test_generation_result_preview_disabled_keeps_text_only(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
 
-    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
     config = SeedreamConfig(
         api_key="test_key",
         auto_save_base_dir=str(tmp_path),
         preview_enabled=False,
     )
+    set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -274,9 +378,11 @@ async def test_generation_result_no_preview_when_save_fails(
 
     monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", failing_save_multiple)
 
-    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
+    set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -298,9 +404,11 @@ async def test_generation_result_no_preview_when_generation_fails(
 
     monkeypatch.setattr(SeedreamClient, "text_to_image", fake_failed)
 
-    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.config import SeedreamConfig, set_active_config
 
     config = SeedreamConfig(api_key="test_key", auto_save_base_dir=str(tmp_path))
+    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
+    set_active_config(config)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is True

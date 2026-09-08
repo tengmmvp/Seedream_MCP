@@ -95,19 +95,20 @@ async def test_file_endpoints_reject_colon_ads_paths(web_app_with_image: Any) ->
         assert response.json()["error"] == "invalid_path"
 
 
-async def test_thumbnail_goes_through_decode_limited_wrapper(
+async def test_thumbnail_goes_through_cache_wrapper(
     web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """缩略图端点经 build_thumbnail_bytes_limited 解码，接入进程级限流信号量。"""
+    """缩略图端点经 cached_thumbnail_bytes 取图，命中落盘缓存或限流解码。"""
     from seedream_mcp.webapp import files as files_module
 
     calls: list[Path] = []
 
-    async def _fake_limited(image_path: Path) -> bytes | None:
+    async def _fake_cached(image_path: Path, save_root: Path) -> bytes | None:
+        del save_root
         calls.append(image_path)
         return b"\xff\xd8\xffminimal"
 
-    monkeypatch.setattr(files_module, "build_thumbnail_bytes_limited", _fake_limited)
+    monkeypatch.setattr(files_module, "cached_thumbnail_bytes", _fake_cached)
 
     response = await _get(
         web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
@@ -180,11 +181,11 @@ async def test_thumbnail_build_failure_returns_404(
     """缩略图解码返回 None 时回 404 统一 JSON，而非 500 或空响应。"""
     from seedream_mcp.webapp import files as files_module
 
-    async def _none(image_path: Path) -> bytes | None:
-        del image_path
+    async def _none(image_path: Path, save_root: Path) -> bytes | None:
+        del image_path, save_root
         return None
 
-    monkeypatch.setattr(files_module, "build_thumbnail_bytes_limited", _none)
+    monkeypatch.setattr(files_module, "cached_thumbnail_bytes", _none)
 
     response = await _get(
         web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"

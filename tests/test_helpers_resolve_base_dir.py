@@ -29,12 +29,12 @@ def _use_config(config: SeedreamConfig, monkeypatch: pytest.MonkeyPatch) -> None
 def test_resolve_base_dir_returns_save_root_when_save_path_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未提供 save_path 时返回存储区（显式存储声明直接生效）。"""
+    """未提供 save_path 时返回存储区，显式声明目录同为基础目录派生 .seedream/images。"""
     base = tmp_path / "save_root"
     base.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base)), monkeypatch)
 
-    assert _resolve_base_dir(None) == base.resolve()
+    assert _resolve_base_dir(None) == (base / ".seedream" / "images").resolve()
 
 
 def test_resolve_base_dir_resolves_relative_save_path_against_save_root(
@@ -45,7 +45,7 @@ def test_resolve_base_dir_resolves_relative_save_path_against_save_root(
     base.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base)), monkeypatch)
 
-    assert _resolve_base_dir("sub/dir") == (base / "sub" / "dir").resolve()
+    assert _resolve_base_dir("sub/dir") == (base / ".seedream" / "images" / "sub" / "dir").resolve()
 
 
 def test_resolve_base_dir_accepts_save_path_outside_save_root(
@@ -59,7 +59,7 @@ def test_resolve_base_dir_accepts_save_path_outside_save_root(
     _use_config(SeedreamConfig(api_key="test_key", auto_save_base_dir=str(base)), monkeypatch)
 
     assert _resolve_base_dir(str(elsewhere)) == elsewhere.resolve()
-    assert _resolve_base_dir("../../outside") == (base / "../../outside").resolve()
+    assert _resolve_base_dir("../../outside") == (base / "outside").resolve()
 
 
 def test_resolve_base_dir_rejects_invalid_save_path_form(
@@ -107,14 +107,15 @@ def test_resolve_save_root_caches_resolved_config(
     monkeypatch.setattr(Path, "resolve", counting_resolve)
 
     first = resolve_save_root()
-    assert resolve_calls == 1
+    # 基础目录与 .seedream 尾部各一次 resolve，整条路径进缓存
+    assert resolve_calls == 2
     again = resolve_save_root()
-    assert resolve_calls == 1
+    assert resolve_calls == 2
     assert again == first
 
     clear_resolved_env_root_cache()
     resolve_save_root()
-    assert resolve_calls == 2
+    assert resolve_calls == 4
 
 
 def test_resolve_save_root_caches_workspace_default(

@@ -57,6 +57,7 @@ from .cli import (
 from .config import (
     LIFESPAN_KEY_CONFIG,
     SeedreamConfig,
+    drain_pending_build_warnings,
     get_active_config,
     set_active_config,
 )
@@ -296,7 +297,7 @@ def _validation_error_result(
     structuredContent 的错误结果，与流水线错误形态并存使按 structuredContent 消费
     的客户端须处理缺席分支。此处统一为流水线同款错误结果，error.type 固定
     validation_error，structuredContent 由各工具的构造回调按声明的 outputSchema
-    组装，SDK 的输出校验才能放行。
+    组装；SDK 对 is_error 结果跳过输出校验，组装仅保证与流水线错误形态一致。
     """
     message = _validation_error_message(exc)
     return CallToolResult(
@@ -347,6 +348,12 @@ async def _run_tool_pipeline(
     try:
         params = model_cls(**_filter_unset_params(kwargs))
     except ValidationError as exc:
+        # include_input=False：被拒的输入值可能是一段超长图片串，原文不进日志
+        logger.warning(
+            "工具 {} 参数校验失败: {}",
+            tool_name,
+            exc.errors(include_url=False, include_input=False),
+        )
         return _validation_error_result(tool_name, exc, build_structured)
     if config is None:
         return await runner(params, ctx=ctx, workspace_roots=workspace_roots)
@@ -965,6 +972,19 @@ def style_oil_painting_prompt(
 # ==================== 主入口函数 ====================
 
 
+def _default_log_file(config: SeedreamConfig) -> str | None:
+    """推导默认日志文件路径：跟随启动期可知的数据基础目录声明。
+
+    基础目录取显式存储声明或工作位置声明，日志与其余数据并列于
+    <基础目录>/.seedream；两者均未声明时返回 None，由 setup_logging 以进程
+    工作目录兜底。
+    """
+    base = config.auto_save_base_dir or config.workspace_root
+    if not base:
+        return None
+    return str(Path(base).expanduser() / ".seedream" / "logs" / "seedream_mcp.log")
+
+
 def cli_main() -> int:
     """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
 
@@ -989,16 +1009,18 @@ def cli_main() -> int:
 
     # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后
     # 降级为 stderr 输出与退出码 1；不经 format_error_for_user，以免未知错误标签
-    # 误导排查并回显绝对路径。
+    # 误导排查并回显绝对路径。日志文件未显式配置时跟随数据基础目录声明。
+    log_file = config.log_file or _default_log_file(config)
     try:
         setup_logging(
             config.log_level,
-            config.log_file,
+            log_file,
             force_standard_logging=True,
         )
     except OSError:
         print("日志系统初始化失败（请检查日志目录权限或磁盘空间）", file=sys.stderr)
         return 1
+    drain_pending_build_warnings()
     logger.info(
         "Seedream MCP 启动: {} (version {})",
         SERVER_NAME,

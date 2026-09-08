@@ -34,3 +34,31 @@ def test_cli_main_exits_gracefully_when_logging_setup_raises_oserror(
     assert exit_code == 1
     stderr = capsys.readouterr().err
     assert "日志系统初始化失败" in stderr
+
+
+@pytest.mark.parametrize(
+    "auto_save_base_dir,workspace_root,expected_root",
+    [
+        ("E:/data", None, "E:/data"),
+        ("E:/data", "D:/ws", "E:/data"),
+        (None, "D:/ws", "D:/ws"),
+        (None, None, None),
+    ],
+    ids=["explicit-save-dir", "explicit-wins", "workspace-root", "fallback"],
+)
+def test_default_log_file_follows_data_root_declaration(
+    auto_save_base_dir: str | None, workspace_root: str | None, expected_root: str | None
+) -> None:
+    """日志文件未显式配置时跟随数据基础目录声明，无声明时交由 setup_logging 兜底。"""
+    from pathlib import Path
+
+    config = config_module.SeedreamConfig(
+        api_key="k",
+        auto_save_base_dir=auto_save_base_dir,
+        workspace_root=workspace_root,
+    )
+    result = server_module._default_log_file(config)
+    if expected_root is None:
+        assert result is None
+    else:
+        assert result == str(Path(expected_root) / ".seedream" / "logs" / "seedream_mcp.log")

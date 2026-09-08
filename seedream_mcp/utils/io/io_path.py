@@ -1,8 +1,8 @@
 """Seedream MCP 路径处理工具：目录体系的位置求值与读权限判定。
 
-位置求值按 docs/development/directory-system.md：存储区 = 显式存储声明 >
-基准派生 ``<基准>/.seedream/images``；基准 = MCP Roots 首项 >
-SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录。
+位置求值按 docs/development/directory-system.md：基础目录 = 显式存储声明 >
+基准，基准 = MCP Roots 首项 > SEEDREAM_WORKSPACE_ROOT > 进程启动目录 >
+用户主目录；存储区恒为 ``<基础目录>/.seedream/images``。
 读权限 = 工作区声明集合 ∪ 存储区。
 提供路径规范化、越界判定原语，拦截包含 ``..`` 或经由符号链接指向权限范围
 之外的路径。roots 取回有三种形态：工具链经 server 层 Resolve 依赖注入
@@ -19,6 +19,7 @@ import heapq
 import os
 import sys
 import tempfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -108,9 +109,11 @@ _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 
 # 已 resolve 自动保存基础目录的进程级缓存，缓存口径与回退根一致，供 tools 层的
 # 保存目录解析复用。键两类：显式配置分支为 "explicit:"+配置原始字符串，默认分支
-# 为 "default:"+工作区根字符串，前缀隔离两类键防撞车。活动配置变更时随
+# 为 "default:"+工作区根字符串，前缀隔离两类键防撞车；默认分支的键含客户端可控
+# 的 roots 字符串，按 LRU 限容防轮换 roots 的无界增长。活动配置变更时随
 # clear_resolved_env_root_cache 一并失效。
-_RESOLVED_SAVE_BASE_DIR_CACHE: dict[str, Path] = {}
+_RESOLVED_SAVE_BASE_DIR_CACHE: OrderedDict[str, Path] = OrderedDict()
+_SAVE_BASE_DIR_CACHE_MAX_ENTRIES = 64
 
 # 位置声明提供者：由 config 模块加载时注入，返回活动配置的原始字符串，未配置
 # 返回 None；依赖方向为 config 向下注入，本模块不向上 import。两个声明各占一槽，
@@ -166,6 +169,19 @@ def clear_resolved_env_root_cache() -> None:
     _fallback_root = None
 
 
+def _resolve_with_cache(cache_key: str, resolver: Callable[[], Path]) -> Path:
+    """按键缓存 resolve 结果，命中移到链尾保持真 LRU，超容逐出最旧条目。"""
+    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(cache_key)
+    if cached_dir is not None:
+        _RESOLVED_SAVE_BASE_DIR_CACHE.move_to_end(cache_key)
+        return cached_dir
+    resolved_dir = resolver()
+    _RESOLVED_SAVE_BASE_DIR_CACHE[cache_key] = resolved_dir
+    while len(_RESOLVED_SAVE_BASE_DIR_CACHE) > _SAVE_BASE_DIR_CACHE_MAX_ENTRIES:
+        _RESOLVED_SAVE_BASE_DIR_CACHE.popitem(last=False)
+    return resolved_dir
+
+
 def resolve_cached_save_base_dir(configured_dir: str) -> Path:
     """解析已显式配置的自动保存基础目录，按 "explicit:"+配置串做进程级缓存。
 
@@ -180,13 +196,7 @@ def resolve_cached_save_base_dir(configured_dir: str) -> Path:
     expanded_dir = Path(configured_dir).expanduser()
     if not expanded_dir.is_absolute():
         return expanded_dir.resolve()
-    cache_key = f"explicit:{configured_dir}"
-    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(cache_key)
-    if cached_dir is not None:
-        return cached_dir
-    resolved_dir = expanded_dir.resolve()
-    _RESOLVED_SAVE_BASE_DIR_CACHE[cache_key] = resolved_dir
-    return resolved_dir
+    return _resolve_with_cache(f"explicit:{configured_dir}", lambda: expanded_dir.resolve())
 
 
 def resolve_cached_default_save_base_dir(workspace_root: Path) -> Path:
@@ -201,13 +211,26 @@ def resolve_cached_default_save_base_dir(workspace_root: Path) -> Path:
     Returns:
         resolve 后的 workspace_root/.seedream/images。
     """
-    cache_key = f"default:{workspace_root}"
-    cached_dir = _RESOLVED_SAVE_BASE_DIR_CACHE.get(cache_key)
-    if cached_dir is not None:
-        return cached_dir
-    resolved_dir = (workspace_root / ".seedream" / "images").resolve()
-    _RESOLVED_SAVE_BASE_DIR_CACHE[cache_key] = resolved_dir
-    return resolved_dir
+    return _resolve_with_cache(
+        f"default:{workspace_root}",
+        lambda: (workspace_root / ".seedream" / "images").resolve(),
+    )
+
+
+def resolve_cached_explicit_save_root(configured_dir: str) -> Path:
+    """解析显式声明的存储区整条路径并按 "explicit-root:"+配置串做进程级缓存。
+
+    Args:
+        configured_dir: 配置的自动保存基础目录原始字符串。
+
+    Returns:
+        resolve 后的 <基础目录>/.seedream/images；.seedream 为符号链接时
+        尾部 resolve 使结果与其指向一致。
+    """
+    return _resolve_with_cache(
+        f"explicit-root:{configured_dir}",
+        lambda: (resolve_cached_save_base_dir(configured_dir) / ".seedream" / "images").resolve(),
+    )
 
 
 def _resolve_configured_root() -> Path | None:
@@ -331,7 +354,8 @@ def resolve_env_workspace_root() -> Path:
 
 
 def resolve_save_root() -> Path:
-    """求值存储区：显式存储声明直接生效，否则由基准派生。
+    """求值存储区：基础目录恒为显式存储声明或工作基准，存储区统一派生自
+    <基础目录>/.seedream/images。
 
     显式声明与基准派生两分支的 resolve 结果分别经进程级缓存，配置写入路径
     统一使缓存失效。
@@ -349,7 +373,8 @@ def resolve_save_root() -> Path:
         if is_unc_path(configured):
             raise SeedreamConfigError(f"存储区配置不支持 UNC 路径: {configured}")
         try:
-            return resolve_cached_save_base_dir(configured)
+            # 显式配置目录与默认基准同为基础目录，存储区统一派生自其 .seedream 子目录。
+            return resolve_cached_explicit_save_root(configured)
         except (OSError, RuntimeError, ValueError) as exc:
             # 异常原文嵌 expanduser 展开后的服务器绝对路径，仅进日志；用户消息只
             # 回显其自行配置的原始值。
@@ -805,7 +830,9 @@ def find_images_in_directory(
                 with os.scandir(path) as it:
                     if target_count >= 0:
                         entries = heapq.nsmallest(
-                            prefix_len, it, key=lambda entry: os.path.normcase(entry.path)
+                            prefix_len,
+                            it,
+                            key=lambda entry: os.path.normcase(entry.path),
                         )
                     else:
                         entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
@@ -815,8 +842,8 @@ def find_images_in_directory(
                     unreadable_dirs.append(path)
                 return False
 
-            # 条目预算在物化后按本趟新增条目累计：重扫趟只计超出已消费前缀的部分，
-            # 倍增摊销不翻倍计数；超限丢弃本批并终止整个遍历。
+            # 条目预算按物化量累计：前缀重扫趟只按新增段计费，目录条目数可超预算
+            # 而分页不中断；超限丢弃本批并终止遍历。
             scanned_entries += max(len(entries) - consumed, 0)
             if scanned_entries > _SCAN_ENTRY_BUDGET:
                 logger.warning(
@@ -957,7 +984,13 @@ def _file_uri_to_path(uri: str) -> Path | None:
     if is_unc_path(path_part):
         return None
 
+    candidate = Path(path_part)
+    # 冒号分量（NTFS ADS）与保留设备名与 normalize_path 同口径拒绝，畸形形态
+    # 不成为工作区 root。
+    if has_windows_colon_component(candidate.name) or is_windows_reserved_name(candidate.name):
+        return None
+
     try:
-        return Path(path_part).expanduser().resolve()
+        return candidate.expanduser().resolve()
     except Exception:
         return None

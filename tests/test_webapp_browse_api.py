@@ -191,7 +191,7 @@ async def test_browse_serves_explicit_save_root_outside_workspace(
     from seedream_mcp.config import SeedreamConfig, set_active_config
 
     outside_root = tmp_path / "elsewhere"
-    day_dir = outside_root / "2026-08-22"
+    day_dir = outside_root / ".seedream" / "images" / "2026-08-22"
     day_dir.mkdir(parents=True)
     (day_dir / "a.png").write_bytes(make_png_bytes())
     set_active_config(

@@ -539,15 +539,15 @@ SEEDREAM_DEFAULT_WATERMARK=false
 # 超时
 SEEDREAM_TIMEOUT=60                         # 连接建立/写入/连接池获取超时（秒）
 SEEDREAM_API_TIMEOUT=600                    # API 调用读取与总超时（秒）
-SEEDREAM_MAX_RETRIES=3                      # API 调用最大重试次数（429/5xx、超时与网络错误重试，4xx 不重试）
+SEEDREAM_MAX_RETRIES=3                      # API 调用最大重试次数（0 表示不重试，计费非幂等接口可关闭；429/5xx、超时与网络错误重试，4xx 不重试）
 
 # 日志
 LOG_LEVEL=INFO                              # 日志级别（DEBUG / INFO / WARNING / ERROR / CRITICAL）
-LOG_FILE=                                   # 日志文件路径（默认 .seedream/logs/seedream_mcp.log，相对进程工作目录解析）
+LOG_FILE=                                   # 日志文件路径（默认跟随数据基础目录声明，落 <基础目录>/.seedream/logs/seedream_mcp.log；未声明时相对进程工作目录解析）
 
 # 自动保存
 SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=                # 图片存储区目录（显式配置直接生效并自动进入读取范围；默认 <基准>/.seedream/images，基准取 MCP Roots 首项、SEEDREAM_WORKSPACE_ROOT、进程启动目录或用户主目录）
+SEEDREAM_AUTO_SAVE_BASE_DIR=                # 数据基础目录（图片收在其 .seedream/images 子目录，缩略图缓存与日志并列于同一 .seedream 内；默认基础目录取基准：MCP Roots 首项、SEEDREAM_WORKSPACE_ROOT、进程启动目录或用户主目录）
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 单张图片下载超时（秒），上限 720
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下载失败最大重试次数（0 表示不重试）
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 单张图片大小上限（字节，默认 50MB）；另兼作流式单事件截断阈值与响应体读取上限的推导基准
@@ -575,12 +575,14 @@ SEEDREAM_PREPARE_CACHE_MAX_BYTES=268435456    # 参考图预处理缓存累计�
 # 流式处理
 SEEDREAM_STREAM_BUFFER_MAX_SIZE=10485760      # SSE 流式响应缓冲区前缀回收阈值（默认 10MB）
 SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 流式响应每次读取块大小（默认 1MB）
+SEEDREAM_SSE_EVENT_MAX_SIZE=                  # 单个 SSE 事件截断阈值（不设则按缓冲区与单图 base64 最坏展开推导，显式配置仅用于调大）
 ```
 
 ### 部署注意事项
 
-- **保存目录归服务管理**：自动保存的按天清理与总量配额会删除保存目录内**所有**符合图片扩展名的过期文件与空目录，不区分是否由本服务生成。请勿将 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向个人相册等含重要图片的目录。经 `save_path` 保存到存储区之外的文件不参与自动清理与总量配额，由调用方自行管理。
+- **保存目录归服务管理**：自动保存的按天清理与总量配额作用于 `<基础目录>/.seedream/images`（服务自建目录）内的**所有**符合图片扩展名的过期文件与空目录，基础目录的其余内容不受影响。经 `save_path` 保存到存储区之外的文件不参与自动清理与总量配额，由调用方自行管理。
 - **多租户 streamable-http 部署建议显式设置 `SEEDREAM_WORKSPACE_ROOT`**：工作位置按 MCP Roots > 该环境变量 > 进程启动目录 > 用户主目录顺位取值，显式声明可使读取范围与存储区落点确定。
+- **有状态 streamable-http 会话依赖客户端正确断开**：默认有状态模式下的会话在客户端发送 DELETE 或进程退出时回收，客户端异常退出且不发 DELETE 时会话驻留；大量短连客户端的部署建议 `--stateless`。
 - **未认证请求的体积限制**：未携带有效令牌的 chunked 请求不读 body 即返回 401，其体积限制依赖 uvicorn 层或前置反向代理；公网暴露部署请在代理层配置请求体上限。
 - **Linux 宿主挂载目录属主**：容器以 uid 1000 的非 root 用户运行，Linux 宿主上 compose 挂载的 `./.seedream` 目录需对该用户可写（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影响。
 - **出站连接不走系统代理**：API 调用与图片下载的出站 HTTP 客户端固定忽略 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 等系统代理环境变量，防止代理截获 API Key 或绕过下载安全校验；企业代理环境需保证主机直连公网，或经网络层透明代理转发。

@@ -8,6 +8,8 @@ SEEDREAM_WORKSPACE_ROOT 回退取得，存储区为工作区派生的 .seedream/
 """
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NoReturn, cast
@@ -847,13 +849,15 @@ async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(
     复核被剔除且不占配额。Windows 符号链接创建权限不足时按既有先例 skip，
     剔除占额语义由注入扫描器的用例稳定覆盖。
     """
-    target = workspace_root.parent / "outside_browse_symlink_target.png"
+    # 越界目标置于共享 basetemp 之外的独占临时目录
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-browse-outside-"))
+    target = outside_dir / "target.png"
     target.write_bytes(b"\x89PNG\r\n\x1a\n")
     link = workspace_root / "0_link.png"
     try:
         os.symlink(target, link)
     except (OSError, AttributeError):
-        target.unlink(missing_ok=True)
+        shutil.rmtree(outside_dir, ignore_errors=True)
         pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
 
     try:
@@ -879,7 +883,7 @@ async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(
         text2 = "".join(getattr(content, "text", "") for content in page2.content)
         assert "img_2.png" in text2
     finally:
-        target.unlink(missing_ok=True)
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 # ==================== 相对目录路径无效的区分消息 ====================
@@ -930,8 +934,9 @@ async def test_browse_session_roots_echoes_save_root_outside_roots(
     workspace = tmp_path / "proj"
     workspace.mkdir()
     outside_root = tmp_path / "private-pics"
-    (outside_root / "2026-09-06").mkdir(parents=True)
-    (outside_root / "2026-09-06" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    save_root = outside_root / ".seedream" / "images"
+    (save_root / "2026-09-06").mkdir(parents=True)
+    (save_root / "2026-09-06" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     set_active_config(
         SeedreamConfig(
             api_key="test_key",
@@ -948,6 +953,6 @@ async def test_browse_session_roots_echoes_save_root_outside_roots(
     assert result.is_error is False
     assert isinstance(result.structured_content, dict)
     resolved = result.structured_content["resolved_directories"]
-    assert resolved == [str(outside_root.resolve()).replace("\\", "/")]
-    entry_path = (outside_root / "2026-09-06" / "a.png").resolve().as_posix()
+    assert resolved == [str(save_root.resolve()).replace("\\", "/")]
+    entry_path = (save_root / "2026-09-06" / "a.png").resolve().as_posix()
     assert result.structured_content["images"][0]["path"] == entry_path

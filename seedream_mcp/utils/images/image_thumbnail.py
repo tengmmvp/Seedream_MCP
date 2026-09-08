@@ -11,6 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import os
+import threading
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +22,7 @@ from typing import TYPE_CHECKING
 from mcp.types import ImageContent
 
 from ..core.logs import get_logger
+from ..io.io_file import atomic_replace_from_fd_sync
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -28,6 +33,16 @@ logger = get_logger()
 THUMBNAIL_MAX_EDGE = 768
 THUMBNAIL_JPEG_QUALITY = 80
 THUMBNAIL_MIME_TYPE = "image/jpeg"
+
+# 缩略图落盘缓存：与存储区并列位于 <基础目录>/.seedream/thumbs，按源图
+# (路径, mtime, size) 寻址，命中免除重复解码；缓存文件名不带图片扩展名，不进入
+# 目录扫描与存储区清理配额的视野；累计字节超上界按最旧驱逐，写失败静默降级为
+# 每次现生成。
+THUMBNAIL_CACHE_DIR_NAME = "thumbs"
+THUMBNAIL_CACHE_MAX_TOTAL_BYTES = 256 * 1024 * 1024
+_THUMB_SWEEP_INTERVAL_SECONDS = 60.0
+_thumb_sweep_after = 0.0
+_thumb_sweep_lock = threading.Lock()
 
 # 预览张数上限：组图与并行的合法组合可达 150 张，全量内嵌会使单条 CallToolResult
 # 膨胀至数 MB 以上。
@@ -132,15 +147,130 @@ async def build_thumbnail_bytes_limited(image_path: Path) -> bytes | None:
         return await asyncio.to_thread(build_thumbnail_bytes, image_path)
 
 
-async def build_preview_contents(image_paths: list[Path]) -> list[ImageContent]:
+def thumbnail_cache_root(save_root: Path) -> Path:
+    """返回与存储区并列的缩略图缓存目录（<基础目录>/.seedream/thumbs）。"""
+    return save_root.parent / THUMBNAIL_CACHE_DIR_NAME
+
+
+def _thumb_key(image_path: Path, mtime_ns: int, size: int) -> str:
+    digest = hashlib.blake2b(
+        f"{image_path}|{mtime_ns}|{size}".encode("utf-8", "backslashreplace"),
+        digest_size=16,
+    ).hexdigest()
+    return f"{digest}.thumb"
+
+
+def _source_stat(image_path: Path) -> os.stat_result | None:
+    try:
+        return image_path.stat()
+    except OSError:
+        return None
+
+
+def _read_bytes_safely(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _store_thumbnail(thumb: Path, thumbs_root: Path, data: bytes) -> None:
+    try:
+        thumbs_root.mkdir(parents=True, exist_ok=True)
+
+        def _write(fd: int) -> None:
+            with os.fdopen(fd, "wb", closefd=False) as handle:
+                handle.write(data)
+
+        atomic_replace_from_fd_sync(thumb, _write, suffix=".thumb-tmp")
+    except OSError:
+        # 缓存写失败降级为每次现生成
+        return
+    _maybe_sweep_thumbnails(thumbs_root)
+
+
+def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
+    global _thumb_sweep_after
+    if time.time() < _thumb_sweep_after:
+        return
+    if not _thumb_sweep_lock.acquire(blocking=False):
+        return
+    try:
+        if time.time() < _thumb_sweep_after:
+            return
+        entries: list[tuple[float, int, Path]] = []
+        try:
+            for entry in thumbs_root.iterdir():
+                try:
+                    info = entry.stat()
+                except OSError:
+                    # 并发替换中的临时条目此刻消失属正常，跳过继续收集
+                    continue
+                entries.append((info.st_mtime, info.st_size, entry))
+        except OSError:
+            return
+        # 门在完整收集成功后才推进，中途异常下个窗口可重试
+        _thumb_sweep_after = time.time() + _THUMB_SWEEP_INTERVAL_SECONDS
+    finally:
+        _thumb_sweep_lock.release()
+    total = sum(size for _, size, _ in entries)
+    if total <= THUMBNAIL_CACHE_MAX_TOTAL_BYTES:
+        return
+    target = THUMBNAIL_CACHE_MAX_TOTAL_BYTES // 2
+    evicted = 0
+    for _, size, entry in sorted(entries):
+        if total <= target:
+            break
+        try:
+            entry.unlink()
+            total -= size
+            evicted += 1
+        except OSError:
+            continue
+    if evicted:
+        logger.info("缩略图缓存超限，按最旧驱逐 {} 个文件", evicted)
+
+
+async def cached_thumbnail_bytes(image_path: Path, save_root: Path) -> bytes | None:
+    """带落盘缓存的缩略图获取：命中直接读文件，未命中限流解码后写缓存。
+
+    缓存键取进入解码前的一次源图 stat，解码期间源图被替换时旧键写入的缩略图
+    随旧图失效，新图的键未命中重新生成。
+
+    Args:
+        image_path: 已保存图片的文件路径。
+        save_root: 已 resolve 的存储区目录，缓存目录与其并列。
+
+    Returns:
+        JPEG 缩略图字节；无法生成时为 None。
+    """
+    thumbs_root = thumbnail_cache_root(save_root)
+    stat = await asyncio.to_thread(_source_stat, image_path)
+    if stat is None:
+        return None
+    thumb = thumbs_root / _thumb_key(image_path, stat.st_mtime_ns, stat.st_size)
+    # 空字节条目视为未命中，重新生成覆盖写损坏缓存
+    cached = await asyncio.to_thread(_read_bytes_safely, thumb)
+    if cached:
+        return cached
+    generated = await build_thumbnail_bytes_limited(image_path)
+    if generated is not None:
+        await asyncio.to_thread(_store_thumbnail, thumb, thumbs_root, generated)
+    return generated
+
+
+async def build_preview_contents(
+    image_paths: list[Path], save_root: Path | None = None
+) -> list[ImageContent]:
     """限流并发为已保存图片生成 ImageContent 预览列表。
 
-    PIL 解码与缩放为同步 CPU 操作，逐张经 build_thumbnail_bytes_limited 下放
-    工作线程并由 PREVIEW_DECODE_CONCURRENCY 信号量限流；生成失败的路径跳过，
-    返回列表仅含成功项且与输入顺序一致。空输入返回空列表。
+    PIL 解码与缩放为同步 CPU 操作，逐张经缓存路径下放工作线程并由
+    PREVIEW_DECODE_CONCURRENCY 信号量限流；传入存储区时经落盘缓存免除重复解码，
+    生成失败的路径跳过，返回列表仅含成功项且与输入顺序一致。空输入返回空列表。
 
     Args:
         image_paths: 自动保存成功的图片文件路径列表。
+        save_root: 已 resolve 的存储区目录，None 时每次现生成不走缓存。
 
     Returns:
         与成功路径一一对应的 ImageContent 列表。
@@ -148,9 +278,14 @@ async def build_preview_contents(image_paths: list[Path]) -> list[ImageContent]:
     if not image_paths:
         return []
 
-    thumbnails = await asyncio.gather(
-        *(build_thumbnail_bytes_limited(path) for path in image_paths)
-    )
+    if save_root is not None:
+        thumbnails = await asyncio.gather(
+            *(cached_thumbnail_bytes(path, save_root) for path in image_paths)
+        )
+    else:
+        thumbnails = await asyncio.gather(
+            *(build_thumbnail_bytes_limited(path) for path in image_paths)
+        )
     contents: list[ImageContent] = []
     for thumbnail in thumbnails:
         if thumbnail is None:

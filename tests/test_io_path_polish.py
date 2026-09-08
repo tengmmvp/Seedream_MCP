@@ -214,6 +214,26 @@ def test_usable_cwd_root_rejects_unc_cwd(monkeypatch: pytest.MonkeyPatch) -> Non
     assert io_path_module._usable_cwd_root() is None
 
 
+def test_usable_cwd_root_returns_none_when_resolve_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写探测通过但 resolve 失败时启动目录不可用作保底基准，返回 None。"""
+
+    def _tmp_cwd() -> Path:
+        return tmp_path
+
+    def _fail_resolve(self: Path) -> Path:
+        del self
+        raise OSError("resolve failed")
+
+    monkeypatch.setattr(Path, "cwd", _tmp_cwd)
+    monkeypatch.setattr(Path, "resolve", _fail_resolve)
+
+    assert io_path_module._usable_cwd_root() is None
+    # 临时探测文件用后即删，目录零残留
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_fallback_caches_home_when_cwd_not_writable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -320,8 +340,8 @@ def test_read_context_degrades_to_save_root_when_home_unresolvable(
     # 工作区链单点仍如实报配置指引
     with pytest.raises(SeedreamConfigError, match="SEEDREAM_WORKSPACE_ROOT"):
         io_path_module.get_workspace_roots()
-    # 读权限退化为仅存储区
-    assert io_path_module.get_read_scope() == [save_root.resolve()]
+    # 读权限退化为仅存储区，存储区派生自显式声明的 .seedream/images
+    assert io_path_module.get_read_scope() == [(save_root / ".seedream" / "images").resolve()]
 
 
 def test_resolve_save_root_wraps_runtime_error_with_configured_value(
