@@ -93,6 +93,30 @@ async def test_download_429_exhausts_retries_as_retryable_error(
     assert not save_path.exists()
 
 
+async def test_download_linear_backoff_sequence_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """线性退避取值契约：抖动归零后为 retry_delay*(attempt+1) 的递增序列。"""
+    import seedream_mcp.utils.io.io_download as download_module
+
+    manager = DownloadManager(max_retries=3)
+    session = _FakeSession([_FakeResponse(status=429, headers={"content-type": "text/plain"})])
+    _patch_download_network(monkeypatch, manager, session)
+    sleeps: list[float] = []
+
+    async def _capture_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", _capture_sleep)
+    monkeypatch.setattr(download_module.random, "uniform", lambda low, high: 0.0)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(RetryableDownloadError):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert sleeps == [1.0, 2.0, 3.0]
+
+
 async def test_download_404_is_terminal_single_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:

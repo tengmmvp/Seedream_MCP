@@ -136,7 +136,9 @@ def aggregate_parallel_generation_results(
             merged_data.append(normalized_image)
 
     failed_requests = request_count - success_requests
-    if failed_requests == 0 and partial_requests == 0:
+    # request_count 为 0 的空批次无产出，与零成功同归 failed，避免 success=False 而
+    # status=completed 的自相矛盾形态。
+    if failed_requests == 0 and partial_requests == 0 and request_count > 0:
         status = "completed"
     elif success_requests > 0:
         status = "partial"
@@ -624,6 +626,11 @@ def _extract_truncated_events(result: dict[str, Any]) -> int | None:
     return value
 
 
+def _extract_deadline_exceeded(result: dict[str, Any]) -> bool | None:
+    """提取 SSE 流超时提前终止标记，仅接受真值布尔，其余形态视为无该信息。"""
+    return True if result.get("deadline_exceeded") is True else None
+
+
 def format_generation_response(
     title: str,
     result: dict[str, Any],
@@ -688,6 +695,11 @@ def format_generation_response(
             parts.pop()
         parts.append(f"因单事件体积超限丢弃 {truncated_events} 个事件")
 
+    if _extract_deadline_exceeded(result):
+        if parts and parts[-1] == "":
+            parts.pop()
+        parts.append("响应流超过总时长预算，已保留提前终止前收到的结果")
+
     return "\n".join(parts)
 
 
@@ -750,6 +762,10 @@ def _build_generation_structured_result(
     truncated_events = _extract_truncated_events(result)
     if truncated_events is not None:
         payload["truncated_events"] = truncated_events
+
+    deadline_exceeded = _extract_deadline_exceeded(result)
+    if deadline_exceeded is not None:
+        payload["deadline_exceeded"] = deadline_exceeded
 
     if context.enable_auto_save:
         payload["auto_save"] = {

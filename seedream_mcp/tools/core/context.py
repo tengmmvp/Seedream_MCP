@@ -14,6 +14,7 @@ from ...config import SeedreamConfig
 from ...utils.core.errors import SeedreamValidationError
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
+    ensure_utf8_encodable,
     validate_background,
     validate_generation_tools,
     validate_layer_decomposition,
@@ -86,6 +87,8 @@ def build_generation_context(
     """
     # 数量上限依赖 model_id，5.0 Pro 为 10、其余为 14；须与尺寸/流式等能力校验同层
     # 在此执行，避免进度上报「参数校验完成」后才在请求执行器内报错。
+    if params.prompt is not None:
+        ensure_utf8_encodable(params.prompt, "提示词包含无法编码的字符", "prompt")
     images = getattr(params, "image", None)
     if isinstance(images, list):
         max_reference = get_max_reference_images(config.model_id)

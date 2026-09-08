@@ -145,10 +145,12 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 
     # 同一 base_dir 的两个实例共享节流
-    manager_a = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
-    manager_b = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
-    monkeypatch.setattr(manager_a.file_manager, "run_cleanup_policies", fake_run_cleanup)
-    monkeypatch.setattr(manager_b.file_manager, "run_cleanup_policies", fake_run_cleanup)
+    manager_a = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    manager_b = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    assert manager_a._cleanup_file_manager is not None
+    assert manager_b._cleanup_file_manager is not None
+    monkeypatch.setattr(manager_a._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
+    monkeypatch.setattr(manager_b._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
 
     await manager_a._maybe_cleanup()
     await manager_b._maybe_cleanup()  # 同 base_dir，被节流
@@ -159,8 +161,9 @@ async def test_maybe_cleanup_throttle_shared_per_base_dir(
     # 不同 base_dir 独立节流
     other_dir = tmp_path / "other"
     other_dir.mkdir()
-    manager_c = AutoSaveManager(base_dir=other_dir, cleanup_days=30)
-    monkeypatch.setattr(manager_c.file_manager, "run_cleanup_policies", fake_run_cleanup)
+    manager_c = AutoSaveManager(base_dir=other_dir, cleanup_base_dir=other_dir, cleanup_days=30)
+    assert manager_c._cleanup_file_manager is not None
+    monkeypatch.setattr(manager_c._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
     await manager_c._maybe_cleanup()
     await auto_save_module.drain_background_cleanup_tasks()
     assert cleanup_calls == [30, 30]
@@ -194,8 +197,9 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     for i in range(15):
         auto_save_module._cleanup_last_run[f"old-{i}"] = stale
 
-    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
-    monkeypatch.setattr(manager.file_manager, "run_cleanup_policies", fake_run_cleanup)
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
+    assert manager._cleanup_file_manager is not None
+    monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup)
     await manager._maybe_cleanup()
     await auto_save_module.drain_background_cleanup_tasks()
     assert cleanup_calls == [30]
@@ -204,8 +208,11 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     # 时间戳随最近使用序保留。
     other_dir = tmp_path / "other"
     other_dir.mkdir()
-    manager_other = AutoSaveManager(base_dir=other_dir, cleanup_days=30)
-    monkeypatch.setattr(manager_other.file_manager, "run_cleanup_policies", fake_run_cleanup)
+    manager_other = AutoSaveManager(base_dir=other_dir, cleanup_base_dir=other_dir, cleanup_days=30)
+    assert manager_other._cleanup_file_manager is not None
+    monkeypatch.setattr(
+        manager_other._cleanup_file_manager, "run_cleanup_policies", fake_run_cleanup
+    )
     await manager_other._maybe_cleanup()
     await auto_save_module.drain_background_cleanup_tasks()
     assert cleanup_calls == [30, 30]
@@ -237,7 +244,9 @@ async def test_maybe_cleanup_sweeps_orphan_part_with_cleanup_disabled(
     fresh_part = tmp_path / "tmpdef456.png.part"
     fresh_part.write_bytes(b"y" * 10)
 
-    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0, max_total_bytes=None)
+    manager = AutoSaveManager(
+        base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=0, max_total_bytes=None
+    )
     try:
         await manager._maybe_cleanup()
         await auto_save_module.drain_background_cleanup_tasks()
@@ -267,9 +276,10 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
         calls.append(days)
         raise RuntimeError("persistent cleanup failure")
 
-    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
     try:
-        monkeypatch.setattr(manager.file_manager, "run_cleanup_policies", failing_cleanup)
+        assert manager._cleanup_file_manager is not None
+        monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
 
         # 首次清理失败：异常被吞，写入短退避时间戳
         await manager._maybe_cleanup()
@@ -307,7 +317,7 @@ async def test_close_does_not_wait_for_background_cleanup(
     auto_save_module.reset_cleanup_state()
     release = asyncio.Event()
     started = asyncio.Event()
-    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=30)
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
 
     async def held_cleanup(base_key: str) -> None:
         started.set()

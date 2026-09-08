@@ -259,14 +259,14 @@ async def _run_save_with_degradation(
     try:
         return await operation()
     except known_errors as e:
-        logger.error("{}失败: {}{}", log_label, log_context, e)
+        logger.warning("{}失败: {}{}", log_label, log_context, e)
         return AutoSaveResult(success=False, original_url=original_url, error=str(e))
     except OSError as e:
         # 磁盘满、只读文件系统、权限等文件系统故障归为一类，避免可诊断错误落入未知兜底。
-        logger.error("{}文件系统错误: {}{}", log_label, log_context, e)
+        logger.warning("{}文件系统错误: {}{}", log_label, log_context, e)
         return AutoSaveResult(success=False, original_url=original_url, error=f"文件系统错误: {e}")
     except Exception as e:
-        logger.error("{}未知错误: {}{}", log_label, log_context, e)
+        logger.opt(exception=True).error("{}未知错误: {}{}", log_label, log_context, e)
         return AutoSaveResult(success=False, original_url=original_url, error=f"未知错误: {e}")
 
 
@@ -291,7 +291,7 @@ class AutoSaveManager:
 
         Args:
             base_dir: 基础保存目录。
-            cleanup_base_dir: 清理与节流的根目录，None 时与 base_dir 一致；save_path
+            cleanup_base_dir: 清理与节流的根目录，None 表示清理整体关闭；save_path
                 使 base_dir 指向部署级存储区之外时必须传入该存储区——save_path 目录
                 可能同时存放其他文件，不属服务专有，清理与配额不得作用其上。
             download_timeout: 下载超时时间，仅自建下载管理器时生效。
@@ -306,10 +306,11 @@ class AutoSaveManager:
                 落盘与经下载管理器落盘两条路径。
         """
         self.file_manager = FileManager(base_dir)
-        if cleanup_base_dir is None:
-            self._cleanup_file_manager = self.file_manager
-        else:
-            self._cleanup_file_manager = FileManager(cleanup_base_dir)
+        # 清理边界不可用时清理整体关闭：写入目录可能同时存放其他文件，.part 清扫
+        # 与空目录回收不区分文件来源，作用于该目录会误删非本服务内容。
+        self._cleanup_file_manager: FileManager | None = (
+            FileManager(cleanup_base_dir) if cleanup_base_dir is not None else None
+        )
         self.max_file_size = max_file_size
         if download_manager is not None:
             self.download_manager = download_manager
@@ -346,11 +347,14 @@ class AutoSaveManager:
     async def _maybe_cleanup(self) -> None:
         """按清理根目录节流触发清理，每个清理根在最短间隔内仅执行一次。
 
-        清理入口不设开关短路：.part 孤儿清扫须在 auto-save 启用时无条件可达，两项
-        清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐仍按
-        各自开关门控。节流时间戳仅清理成功后保留，失败改写为短退避时间戳；锁内
-        完成检查与占位，并发请求不会同时进入清理。
+        清理入口不受清理策略开关影响：.part 孤儿清扫在 auto-save 启用时始终执行，
+        两项清理策略均显式关闭的部署下遗留临时文件同样被回收；按天清理与配额驱逐
+        仍按各自开关门控。清理边界不可用（_cleanup_file_manager 为 None）时整体
+        跳过。节流时间戳仅清理成功后保留，失败改写为短退避时间戳；锁内完成检查
+        与占位，并发请求不会同时进入清理。
         """
+        if self._cleanup_file_manager is None:
+            return
         cleanup_key = str(self._cleanup_file_manager.base_dir)
         now = time.time()
         async with _cleanup_lock:
@@ -375,6 +379,8 @@ class AutoSaveManager:
         失败同样写退避时间戳：目录可能仍超限，下次保存应按退避秒数重试而非等待
         完整节流间隔。
         """
+        if self._cleanup_file_manager is None:
+            return
         try:
             outcome = await asyncio.to_thread(
                 self._cleanup_file_manager.run_cleanup_policies,

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from ...client import SeedreamClient
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
-from ...utils.core.errors import format_error_for_user
+from ...utils.core.errors import SeedreamMCPError, format_error_for_user
 from ._helpers import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
@@ -65,12 +65,20 @@ async def _execute_parallel_generation_requests(
                 request_results[request_index - 1] = await request_executor(client, context)
             except Exception as exc:
                 request_errors[request_index] = exc
-                module_logger.warning(
-                    "并行请求 {}/{} 失败: {}",
-                    request_index,
-                    context.request_count,
-                    format_error_for_user(exc),
-                )
+                if isinstance(exc, SeedreamMCPError):
+                    module_logger.warning(
+                        "并行请求 {}/{} 失败: {}",
+                        request_index,
+                        context.request_count,
+                        format_error_for_user(exc),
+                    )
+                else:
+                    # 非预期异常不再上抛，带堆栈记录与单发路径口径一致
+                    module_logger.opt(exception=True).warning(
+                        "并行请求 {}/{} 出现非预期异常",
+                        request_index,
+                        context.request_count,
+                    )
             finally:
                 # 自增与快照之间无 await，不会被其他协程抢占。
                 completed_requests += 1

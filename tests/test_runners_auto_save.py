@@ -113,8 +113,8 @@ async def test_run_text_to_image_absolute_save_path_survives_unresolvable_save_r
 ) -> None:
     """绝对 save_path 下存储声明不可解析时落盘不受阻，清理边界降级不阻塞保存。
 
-    预检与写入目录解析均不依赖基准；清理根解析失败经配置副本关闭按天清理与
-    配额驱逐，仅保留写入目录内的 .part 孤儿清扫。
+    预检与写入目录解析均不依赖基准；清理根解析失败时清理整体关闭，写入目录
+    可能存放非本服务文件，任何清理动作不得作用于该目录。
     """
     import seedream_mcp.utils.io.io_path as io_path_module
 

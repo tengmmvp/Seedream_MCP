@@ -21,8 +21,14 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from ...client import SeedreamClient
 from ...config import SeedreamConfig
 from ...utils.images.image_thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
+from ...utils.io.io_path import resolve_save_root
 from ...utils.io.io_save import AutoSaveResult
-from ...utils.core.errors import format_error_for_user, resolve_error_profile
+from ...utils.core.errors import (
+    SeedreamConfigError,
+    SeedreamMCPError,
+    format_error_for_user,
+    resolve_error_profile,
+)
 from ._helpers import (  # noqa: F401
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
@@ -229,7 +235,7 @@ async def _auto_save_generation_images(
             await safe_report_progress(ctx, progress=PROGRESS_AUTOSAVE_DONE, message="自动保存完成")
         except Exception as exc:
             auto_save_error = format_error_for_user(exc)
-            module_logger.warning("自动保存失败，已降级跳过: {}", auto_save_error)
+            module_logger.error("自动保存阶段失败，已降级跳过: {}", auto_save_error)
     return result, images, auto_save_results, saveable_indices, auto_save_error
 
 
@@ -296,7 +302,11 @@ async def _build_generation_preview(
                 f"仅附前 {PREVIEW_MAX_IMAGES} 张缩略图预览）"
             )
             saved_paths = saved_paths[:PREVIEW_MAX_IMAGES]
-        preview_contents = await build_preview_contents(saved_paths)
+        try:
+            save_root = await asyncio.to_thread(resolve_save_root)
+        except SeedreamConfigError:
+            save_root = None
+        preview_contents = await build_preview_contents(saved_paths, save_root)
     return response_text, preview_contents
 
 
@@ -394,7 +404,13 @@ async def execute_generation_handler(
             is_error=is_generation_failed,
         )
     except Exception as exc:
-        module_logger.exception("{}处理失败", metadata.failure_prefix)
+        # 已归约的业务异常无堆栈噪音，非预期异常带堆栈与并行路径口径一致
+        if isinstance(exc, SeedreamMCPError):
+            module_logger.warning(
+                "{}处理失败: {}", metadata.failure_prefix, format_error_for_user(exc)
+            )
+        else:
+            module_logger.opt(exception=True).error("{}处理失败", metadata.failure_prefix)
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
         # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。

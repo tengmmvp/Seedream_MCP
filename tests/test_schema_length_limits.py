@@ -11,7 +11,13 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-from seedream_mcp.tools.core.schemas import BrowseImagesInput, ImageToImageInput, TextToImageInput
+from seedream_mcp.tools.core.schemas import (
+    BrowseImagesInput,
+    ImageToImageInput,
+    MultiImageFusionInput,
+    SequentialGenerationInput,
+    TextToImageInput,
+)
 
 
 def test_prompt_accepts_max_length_boundary() -> None:
@@ -102,3 +108,38 @@ def test_single_image_rejects_whitespace_only_string() -> None:
     """单图输入仅含空白的 image 同样在 schema 级被拒绝。"""
     with pytest.raises(ValidationError, match="image 不能为空字符串"):
         ImageToImageInput.model_validate({"prompt": "x", "image": "   "})
+
+
+def test_single_image_rejects_oversized_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """单图输入超过防御上限的 image 在 schema 级被拒绝，不付全量拷贝成本。"""
+    from seedream_mcp.tools.core import schemas as schemas_module
+
+    monkeypatch.setattr(schemas_module, "MAX_IMAGE_INPUT_CHARS", 100)
+    with pytest.raises(ValidationError, match="超过防御上限"):
+        ImageToImageInput.model_validate({"prompt": "x", "image": "a" * 101})
+
+
+def test_multi_image_rejects_oversized_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    """多图输入逐项超过防御上限时在 schema 级被拒绝。"""
+    from seedream_mcp.tools.core import schemas as schemas_module
+
+    monkeypatch.setattr(schemas_module, "MAX_IMAGE_INPUT_CHARS", 100)
+    with pytest.raises(ValidationError, match="超过防御上限"):
+        MultiImageFusionInput.model_validate(
+            {"prompt": "x", "image": ["https://e/a.png", "a" * 101]}
+        )
+
+
+def test_sequential_image_rejects_oversized_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    """组图参考图逐项超过防御上限时在 schema 级被拒绝，与其余带图工具同界。"""
+    from seedream_mcp.tools.core import schemas as schemas_module
+
+    monkeypatch.setattr(schemas_module, "MAX_IMAGE_INPUT_CHARS", 100)
+    with pytest.raises(ValidationError, match="超过防御上限"):
+        SequentialGenerationInput.model_validate({"prompt": "x", "image": "a" * 101})
+
+
+def test_sequential_image_rejects_blank_item() -> None:
+    """组图参考图的空白条目在 schema 级被拒绝。"""
+    with pytest.raises(ValidationError, match="必须是非空字符串"):
+        SequentialGenerationInput.model_validate({"prompt": "x", "image": ["   "]})

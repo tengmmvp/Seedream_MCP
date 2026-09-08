@@ -56,6 +56,8 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
         auto_save: 自动保存摘要，未启用时仅含 enabled 键。
         truncated_events: SSE 解析因单事件体积超限丢弃的事件数，未发生丢弃时为
             None。
+        deadline_exceeded: SSE 流因总时长预算超限提前终止且保留了已收结果，未
+            发生时为 None。
     """
 
     prompt: str | None = None
@@ -74,6 +76,7 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     batch: dict[str, Any] | None = None
     auto_save: dict[str, Any] | None = None
     truncated_events: int | None = None
+    deadline_exceeded: bool | None = None
 
 
 class BrowseImagesStructuredOutput(_BaseStructuredOutput):

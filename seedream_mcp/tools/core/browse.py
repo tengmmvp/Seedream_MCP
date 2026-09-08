@@ -296,12 +296,13 @@ def _scan_and_filter_directory(
         # 返回量达到 scan_limit 说明可能仍有后续条目，否则已扫到末尾。
         scan_hit_limit = len(matched_image_pairs) >= scan_limit
         dropped = 0
+        out_of_scope: list[Path] = []
         while consumed < len(matched_image_pairs):
             image_path, image_resolved = matched_image_pairs[consumed]
             consumed += 1
             # resolve 结果来自扫描缓存；权限目录已 resolve，直接比较。
             if not any(is_within_resolved(image_resolved, scope) for scope in read_scope):
-                logger.warning("检测到越界图片路径，已忽略: {}", image_path)
+                out_of_scope.append(image_path)
                 dropped += 1
                 continue
             if image_path in seen_images:
@@ -311,6 +312,9 @@ def _scan_and_filter_directory(
             new_entries.append((image_path, image_resolved))
             if len(new_entries) >= remaining:
                 break
+        if out_of_scope:
+            # 聚合单条告警，防大目录翻页时越界项逐条刷屏
+            logger.warning("检测到越界图片路径 {} 条，已忽略", len(out_of_scope))
         if not scan_hit_limit or len(new_entries) >= remaining or dropped == 0:
             return new_entries
         # 按剔除计数扩大 scan_limit 补扫，使剔除项不占本页配额；同目录扫描返回稳定
@@ -399,7 +403,9 @@ async def build_browse_fallback_result(
     """
     try:
         fallback_roots = await asyncio.to_thread(get_workspace_roots)
-    except Exception:
+    except Exception as exc:
+        # 兜底分支的回显字段降级原因可追溯
+        logger.warning("浏览兜底分支重读工作区根失败，按无工作区处理: {}", exc)
         fallback_roots = []
     fallback_filter, _ = _normalize_format_filter(params.format_filter)
     return _build_browse_error(

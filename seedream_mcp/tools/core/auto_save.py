@@ -8,7 +8,7 @@ lifespan 注入传入。
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -103,19 +103,17 @@ async def _auto_save(
         # 文件，不属服务专有，把按天清理与配额驱逐扩展到该处会误删非本服务文件；
         # save_path 仅决定本次写入位置。
         base_dir = _resolve_base_dir(save_path)
-        build_config = config
         try:
             cleanup_base_dir: Path | None = resolve_save_root()
         except SeedreamConfigError as exc:
             # 相对与缺省 save_path 的写入目录派生自存储区，其不可解析已在
             # _resolve_base_dir 内先行抛出，此分支仅在绝对 save_path 下可达。
             # 绝对 save_path 不依赖基准，写入不受部署级存储声明可解析性阻塞；
-            # 清理边界不可用时按天清理与配额驱逐经配置副本显式关闭，仅保留
-            # .part 孤儿清扫并退化为作用于写入目录，只回收本服务自建临时文件。
-            logger.warning("存储区不可解析，本次保存关闭按天清理与配额驱逐: {}", exc.message)
+            # 清理边界不可用时清理整体关闭，写入目录可能存放非本服务文件，
+            # .part 清扫与空目录回收不区分来源，不得作用于该目录。
+            logger.warning("存储区不可解析，本次保存关闭自动清理: {}", exc.message)
             cleanup_base_dir = None
-            build_config = replace(config, auto_save_cleanup_days=0, auto_save_max_total_bytes=None)
-        return _build_auto_save_manager(build_config, base_dir, cleanup_base_dir, download_manager)
+        return _build_auto_save_manager(config, base_dir, cleanup_base_dir, download_manager)
 
     if images is None:
         images = extract_images(result)

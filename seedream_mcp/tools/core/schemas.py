@@ -13,6 +13,7 @@ from typing import Annotated, ClassVar, Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ...utils.core.errors import SeedreamValidationError
+from ...utils.images.image_validation import MAX_IMAGE_FILE_SIZE
 from ...utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
@@ -106,11 +107,13 @@ SEQUENTIAL_IMAGE_DESCRIPTION = (
     "例如：https://example.com/a.png 或 2026-08-15/sequential_generation/b.jpeg。"
 )
 LAYER_DECOMPOSITION_DESCRIPTION = (
-    "是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图"
+    "是否开启图层拆分，仅 5.0 Pro 支持（Endpoint ID 部署的未识别模型不校验此开关）；"
+    "开启后将单张输入图拆解为 1 张底图"
     "与最多 16 个带透明通道的 PNG 图层，可配合 prompt 指定拆分意图。"
 )
 BACKGROUND_DESCRIPTION = (
-    "图片透明通道，仅 5.0 Pro 图生图支持；transparent 生成透明背景图"
+    "图片透明通道，仅 5.0 Pro 图生图支持（Endpoint ID 部署的未识别模型不校验此开关）；"
+    "transparent 生成透明背景图"
     "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
 )
 SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。"
@@ -237,6 +240,22 @@ class _PromptAndOptimizeInput(BaseModel):
     )
 
 
+# image 输入的字符数防御界：合法单图 base64 约 4/3 倍文件大小，取两倍文件上限
+# 留余量，仅拦截异常超大载荷，stdio 传输无请求体上限时避免拒绝前先付全量拷贝。
+MAX_IMAGE_INPUT_CHARS = MAX_IMAGE_FILE_SIZE * 2
+
+
+def _reject_blank_or_oversized_image_items(items: list[str]) -> None:
+    """逐项拒绝空白与超防御界的图片字符串，三个带图工具的输入模型共用。"""
+    for item in items:
+        if not item.strip():
+            raise ValueError("image 不能为空字符串")
+        if len(item) > MAX_IMAGE_INPUT_CHARS:
+            raise ValueError(
+                f"image 输入长度 {len(item)} 超过防御上限 {MAX_IMAGE_INPUT_CHARS} 字符"
+            )
+
+
 class _SingleImageInput(BaseModel):
     """单图输入参数。"""
 
@@ -247,11 +266,10 @@ class _SingleImageInput(BaseModel):
 
     @field_validator("image")
     @classmethod
-    def reject_blank_image(cls, value: str) -> str:
-        """拒绝空白字符串，使其在 schema 层即报错，而非放行到 client 归一化层后
-        退化为 isError 工具结果。"""
-        if not value.strip():
-            raise ValueError("image 不能为空字符串")
+    def reject_blank_or_oversized_image(cls, value: str) -> str:
+        """拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
+        client 归一化层后退化为 isError 工具结果。"""
+        _reject_blank_or_oversized_image_items([value])
         return value
 
 
@@ -267,11 +285,10 @@ class _MultiImageInput(BaseModel):
 
     @field_validator("image")
     @classmethod
-    def reject_blank_items(cls, value: list[str]) -> list[str]:
-        """逐项拒绝空白字符串，使其在 schema 层即报错，而非放行到 client 归一化层
-        后退化为 isError 工具结果。"""
-        if any(not item.strip() for item in value):
-            raise ValueError("image 列表中的每一项都必须是非空字符串")
+    def reject_blank_or_oversized_items(cls, value: list[str]) -> list[str]:
+        """逐项拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
+        client 归一化层后退化为 isError 工具结果。"""
+        _reject_blank_or_oversized_image_items(value)
         return value
 
 
@@ -286,6 +303,16 @@ class _SequentialImageInput(BaseModel):
         default=None,
         description=SEQUENTIAL_IMAGE_DESCRIPTION,
     )
+
+    @field_validator("image")
+    @classmethod
+    def reject_blank_or_oversized_items(cls, value: list[str] | None) -> list[str] | None:
+        """逐项拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
+        client 归一化层后退化为 isError 工具结果。"""
+        if value is None:
+            return None
+        _reject_blank_or_oversized_image_items(value)
+        return value
 
 
 class _LayerDecompositionInput(BaseModel):

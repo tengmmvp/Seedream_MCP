@@ -1,5 +1,6 @@
 """AutoSaveManager 批量并发的部分失败聚合与清理范围测试。"""
 
+import asyncio
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -313,3 +314,45 @@ async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
     await auto_save_module.drain_background_cleanup_tasks()
 
     assert cleanup_calls == [30]
+
+
+async def test_batch_save_concurrency_capped_by_max_concurrent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """批量保存并发峰值恰为 max_concurrent：信号量放行同时形成并发并封顶。"""
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, max_concurrent=2)
+    active = 0
+    peak = 0
+    second_arrived = asyncio.Event()
+
+    async def fake_save_image(
+        url: str,
+        prompt: str | None = None,
+        tool_name: str = "seedream",
+        custom_name: str | None = None,
+        alt_text: str | None = None,
+    ) -> Any:
+        nonlocal active, peak
+        del prompt, tool_name, custom_name, alt_text
+        active += 1
+        peak = max(peak, active)
+        if active == 2:
+            second_arrived.set()
+        else:
+            # 等第二张进入形成并发；超时保底防死锁
+            try:
+                await asyncio.wait_for(second_arrived.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+        await asyncio.sleep(0)
+        active -= 1
+        return AutoSaveResult(
+            success=True, original_url=url, local_path=str(tmp_path / "p.png"), markdown_ref="r"
+        )
+
+    monkeypatch.setattr(manager, "save_image", fake_save_image)
+    images = [{"url": f"https://example.com/{idx}.png"} for idx in range(10)]
+    results = await manager.save_multiple_images(images, "text_to_image")
+
+    assert len(results) == 10
+    assert peak == 2

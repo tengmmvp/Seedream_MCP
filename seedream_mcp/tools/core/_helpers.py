@@ -96,8 +96,8 @@ def _classify_generation_error_type(exc: Exception) -> str:
 # 凭据与连接类错误的共用排查建议。
 _NETWORK_CREDENTIAL_GUIDANCE = "请确认 API Key 和网络可用后重试。"
 
-# generation_failed 为兜底档案码，无更具体指引，有意不进入下方查表；守护测试据此放行。
-_FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES = frozenset({"generation_failed"})
+# generation_failed 为兜底档案码、api_error 成因多样，均无定向指引，不进入下方查表。
+_FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES = frozenset({"generation_failed", "api_error"})
 
 _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
     "validation_error": "请根据错误信息调整对应参数取值。",
@@ -106,31 +106,14 @@ _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
     "payment_required": "请检查账户余额与配额。",
     "config_error": "请检查服务端配置后重试。",
     "auth_error": _NETWORK_CREDENTIAL_GUIDANCE,
-    "api_error": _NETWORK_CREDENTIAL_GUIDANCE,
     "network_error": _NETWORK_CREDENTIAL_GUIDANCE,
     "timeout_error": _NETWORK_CREDENTIAL_GUIDANCE,
 }
 _DEFAULT_FAILURE_GUIDANCE = "请根据错误信息排查后重试。"
 
-# HTTP 状态码级排查建议：多个业务失败状态归约到同一 api_error 错误码，按状态码
-# 区分建议；未列举状态回退错误码查表。
-_FAILURE_GUIDANCE_BY_STATUS: dict[int, str] = {
-    400: "请核对请求参数。",
-    401: _NETWORK_CREDENTIAL_GUIDANCE,
-    402: "请检查账户余额与配额。",
-    404: "请确认 API 端点配置。",
-    429: "请稍后重试。",
-}
-
 
 def _resolve_failure_guidance(exc: Exception) -> str:
-    """选择失败排查建议：优先按 status_code 查状态级表，其次按错误码查表，均未命中
-    回退通用建议。"""
-    status_code = getattr(exc, "status_code", None)
-    if isinstance(status_code, int):
-        status_guidance = _FAILURE_GUIDANCE_BY_STATUS.get(status_code)
-        if status_guidance is not None:
-            return status_guidance
+    """按归约档案错误码选择失败排查建议，未命中回退通用建议。"""
     error_code = resolve_error_profile(exc).error_code
     return _FAILURE_GUIDANCE_BY_ERROR_CODE.get(error_code, _DEFAULT_FAILURE_GUIDANCE)
 

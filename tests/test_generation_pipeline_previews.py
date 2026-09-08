@@ -28,7 +28,8 @@ def _patch_preview_spy(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """以计数 spy 顶替 common 门面内的 build_preview_contents，记录每次调用的张数。"""
     calls: list[int] = []
 
-    async def _counting_spy(paths: Any) -> list[ImageContent]:
+    async def _counting_spy(paths: Any, save_root: Any = None) -> list[ImageContent]:
+        del save_root
         calls.append(len(paths))
         return []
 
