@@ -50,10 +50,13 @@ jobs:
         run: uv run black --check seedream_mcp tests
 
       - name: 🔎 Run mypy
-        run: uv run mypy seedream_mcp
+        run: uv run mypy
 
       - name: 🔬 Run flake8
         run: uv run flake8 seedream_mcp tests
+
+      - name: 🧠 Check spelling
+        run: npx --yes cspell@9 lint --no-progress "seedream_mcp/**" "tests/**" "*.md" "*.toml" ".env.example"
 
       - name: 🧫 Quick validation
         run: |
@@ -85,6 +88,10 @@ jobs:
               'seedream_mcp/webapp/static/404.html',
               'seedream_mcp/webapp/static/css/style.css',
               'seedream_mcp/webapp/static/js/main.js',
+              'seedream_mcp/webapp/static/js/api.js',
+              'seedream_mcp/webapp/static/js/gallery.js',
+              'seedream_mcp/webapp/static/js/generate.js',
+              'seedream_mcp/webapp/static/js/refs.js',
               'seedream_mcp/webapp/static/assets/bg-letter.svg',
               'seedream_mcp/skills/seedream-image-generation/SKILL.md',
           ]

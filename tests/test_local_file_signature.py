@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -44,12 +46,16 @@ def test_nonexistent_relative_path_returns_none(save_root: Path) -> None:
     assert ImagePreparer._local_candidate("nope.png") is None
 
 
-def test_absolute_path_outside_scope_returns_none(tmp_path: Path, save_root: Path) -> None:
+def test_absolute_path_outside_scope_returns_none(save_root: Path) -> None:
     """绝对路径在读权限（工作区 ∪ 存储区）之外时返回 None，避免越界文件成为存在性 oracle。"""
     del save_root
-    outside = tmp_path.parent / "signature-outside.png"
-    outside.write_bytes(_PNG_BYTES)
-    assert ImagePreparer._local_candidate(str(outside)) is None
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-signature-outside-"))
+    try:
+        outside = outside_dir / "outside.png"
+        outside.write_bytes(_PNG_BYTES)
+        assert ImagePreparer._local_candidate(str(outside)) is None
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 def test_directory_named_as_image_returns_none(save_root: Path) -> None:
@@ -104,17 +110,18 @@ def test_final_component_symlink_follows_target_within_scope(save_root: Path) ->
     sys.platform == "win32" or not hasattr(os, "symlink"),
     reason="符号链接需 POSIX 与创建权限",
 )
-def test_final_component_symlink_escaping_scope_returns_none(
-    tmp_path: Path, save_root: Path
-) -> None:
+def test_final_component_symlink_escaping_scope_returns_none(save_root: Path) -> None:
     """指向读权限外的符号链接经 resolve 后越界，返回 None 不泄露目标文件信息。"""
-    del tmp_path
-    outside = save_root.parent.parent.parent / "signature-escape.png"
-    outside.write_bytes(_PNG_BYTES)
-    link = save_root / "link.png"
-    os.symlink(outside, link)
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-signature-outside-"))
+    try:
+        outside = outside_dir / "escape.png"
+        outside.write_bytes(_PNG_BYTES)
+        link = save_root / "link.png"
+        os.symlink(outside, link)
 
-    assert ImagePreparer._local_candidate("link.png") is None
+        assert ImagePreparer._local_candidate("link.png") is None
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 async def test_prepare_local_input_localizes_candidate_once(

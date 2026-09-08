@@ -75,8 +75,11 @@ path = "seedream_mcp/version.py"
 [tool.hatch.build.targets.sdist]
 include = [
     "/seedream_mcp",
+    "/tests",
     "/pyproject.toml",
     "/README.md",
+    "/README.en.md",
+    "/README.zh-TW.md",
     "/LICENSE"
 ]
 

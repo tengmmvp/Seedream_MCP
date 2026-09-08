@@ -153,6 +153,7 @@ def clean_web_routes() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
+    from seedream_mcp import config as config_module
     from seedream_mcp.server import _reset_lifespan_state
     from seedream_mcp.utils.images import image_validation as image_validation_module
     from seedream_mcp.utils.io.io_path import clear_resolved_env_root_cache
@@ -171,6 +172,8 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     _reset_lifespan_state()
     # io_path 回退根 resolve 缓存与上述复位项同属复位协议，在此直接登记
     clear_resolved_env_root_cache()
+    # 构建期告警收集为模块级可变列表，清空防止上轮构建的告警泄漏进 drain 断言
+    config_module._pending_build_warnings.clear()
     yield
     if pil_image_module is not None:
         pil_image_module.MAX_IMAGE_PIXELS = max_pixels_before

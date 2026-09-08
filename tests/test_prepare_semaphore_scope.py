@@ -25,14 +25,22 @@ async def test_concurrent_parallel_calls_share_instance_semaphore(
     current = 0
     peak = 0
     call_count = 0
+    arrival = 0
+    release = asyncio.Event()
 
     async def fake_prepare(image: str) -> str:
-        nonlocal current, peak, call_count
+        nonlocal current, peak, call_count, arrival
         call_count += 1
         current += 1
         peak = max(peak, current)
-        await asyncio.sleep(0.02)
-        current -= 1
+        # 会合式放行：在途任务数到达并发上限即放行，不依赖 sleep 时序。
+        arrival += 1
+        if arrival == limit:
+            release.set()
+        try:
+            await asyncio.wait_for(release.wait(), timeout=5)
+        finally:
+            current -= 1
         return f"prepared:{image}"
 
     # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
@@ -64,13 +72,21 @@ async def test_concurrent_single_image_calls_share_instance_semaphore(
 
     current = 0
     peak = 0
+    arrival = 0
+    release = asyncio.Event()
 
     async def fake_prepare(image: str) -> str:
-        nonlocal current, peak
+        nonlocal current, peak, arrival
         current += 1
         peak = max(peak, current)
-        await asyncio.sleep(0.02)
-        current -= 1
+        # 会合式放行：在途任务数到达并发上限即放行，不依赖 sleep 时序。
+        arrival += 1
+        if arrival == limit:
+            release.set()
+        try:
+            await asyncio.wait_for(release.wait(), timeout=5)
+        finally:
+            current -= 1
         return f"prepared:{image}"
 
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)

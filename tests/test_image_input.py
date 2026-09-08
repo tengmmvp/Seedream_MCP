@@ -7,6 +7,8 @@
 import base64
 import io
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import IO
 
@@ -38,14 +40,15 @@ async def test_prepare_image_input_rejects_symlink_escape(
     目标位于权限内时 resolve 后为常规文件、O_NOFOLLOW 打开不抛错，测试将沦为
     空芯。以会话 Roots 声明工作区，目标置于其外。
     """
-    # 目标文件位于工作区 tmp_path 之外；resolve 跟随符号链接后路径越界被拒
-    target = tmp_path.parent / "symlink_escape_target.png"
+    # 越界目标置于共享 basetemp 之外的独占临时目录；resolve 跟随符号链接后越界被拒
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-escape-outside-"))
+    target = outside_dir / "target.png"
     Image.new("RGB", (32, 32), color="white").save(target)
     link = tmp_path / "link.png"
     try:
         os.symlink(target, link)
     except OSError:
-        target.unlink(missing_ok=True)
+        shutil.rmtree(outside_dir, ignore_errors=True)
         pytest.skip("当前环境不支持创建符号链接")
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
@@ -54,7 +57,7 @@ async def test_prepare_image_input_rejects_symlink_escape(
             await prepare_image_input(str(link))
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
-        target.unlink(missing_ok=True)
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 async def test_prepare_image_input_out_of_bounds_error_carries_config_guidance(

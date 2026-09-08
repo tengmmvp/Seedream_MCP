@@ -185,8 +185,8 @@ def setup_logging(
     logging.getLogger("httpcore2").setLevel(logging.WARNING)
 
     logger.info("日志系统初始化完成，级别: {}", level)
-    if enable_file and log_file:
-        logger.info("日志文件: {}", log_file)
+    if enable_file:
+        logger.info("日志文件: {}", log_path.resolve())
 
 
 def get_logger() -> Logger:

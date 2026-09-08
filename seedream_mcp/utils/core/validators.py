@@ -4,8 +4,8 @@
 文件大小、宽高比、输出格式、提示词长度、组图总数与并行参数等。
 
 设计要点：
-- 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、倍数约束、输出
-  格式、联网工具、流式输出、参考图上限、组图支持等，统一委托 model_capabilities
+- 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、输出格式、联网
+  工具、流式输出、参考图上限、组图支持等，统一委托 model_capabilities
   的能力声明判定，新增模型只需扩展能力表而无需改动校验代码。
 - 布尔字符串解析 parse_bool 与宽高比上下限常量由本模块单一持有，config 的
   _pick_bool 与 image_validation 的维度校验均为消费方。
@@ -35,8 +35,9 @@ VALID_BACKGROUND_MODES = frozenset({"transparent", "opaque"})
 # 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
 FALSE_BOOL_STRINGS = frozenset({"false", "0", "no", "off"})
-# 整数字面量的严格语法：可选正负号加十进制数字。
-_INT_TEXT_PATTERN = re.compile(r"[+-]?\d+")
+# 整数字面量的严格语法：可选正负号加 ASCII 十进制数字，全角数字与下划线分隔
+# 等 int() 宽松写法一律拒绝。
+INT_TEXT_PATTERN = re.compile(r"[+-]?[0-9]+")
 # 图像宽高比上下限，输入参考图与输出尺寸校验共用；image_validation 由此导入，维持单一来源。
 MIN_IMAGE_RATIO = 1 / 16
 MAX_IMAGE_RATIO = 16
@@ -100,7 +101,7 @@ def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_va
     else:
         try:
             # 字符串仅接受可选正负号加纯数字，int() 接受的下划线分隔等宽松写法在此拒绝。
-            if isinstance(value, str) and not _INT_TEXT_PATTERN.fullmatch(value.strip()):
+            if isinstance(value, str) and not INT_TEXT_PATTERN.fullmatch(value.strip()):
                 raise ValueError
             validated_value = int(value)
         except (ValueError, TypeError, OverflowError):
@@ -188,7 +189,7 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
     if not prompt:
         raise SeedreamValidationError("提示词不能为空", field="prompt", value=prompt)
 
-    ensure_utf8_encodable(prompt, "提示词包含无法编码的字符（如未配对的代理字符）", "prompt")
+    ensure_utf8_encodable(prompt, "提示词包含无法编码的字符", "prompt")
 
     # 短文本粗筛：长度不超过中文阈值时两项计数必然在限内，跳过正则扫描避免物化
     # 大列表。计数扫描为全量 O(n)，超长提示词的扫描成本由调用侧

@@ -892,7 +892,12 @@ class DownloadManager:
 
             except asyncio.TimeoutError as e:
                 last_error = DownloadError(f"下载超时: {e}")
-                logger.warning("下载超时 (尝试 {}): {}", attempt + 1, sanitize_url(url))
+                logger.warning(
+                    "下载超时 (尝试 {}): {} ({})",
+                    attempt + 1,
+                    sanitize_url(url),
+                    e,
+                )
 
             except aiohttp.ClientError as e:
                 # InvalidUrlClientError 是 URL 语法层面的永久错误，重试无意义，直接终态抛出；

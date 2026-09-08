@@ -34,12 +34,17 @@ def sanitize_url(url: str) -> str:
             result = f"{parsed.scheme}:<redacted>"
         else:
             # 重建不含 userinfo 的 netloc；hostname 对 IPv6 字面量剥离方括号，需补回
-            # 以保持 host 与端口边界。
+            # 以保持 host 与端口边界。端口非法不整体降级，丢弃端口保留 scheme/host
+            # 供日志定位目标主机。
             if ":" in host:
                 host = f"[{host}]"
             netloc = host
-            if parsed.port is not None:
-                netloc = f"{netloc}:{parsed.port}"
+            try:
+                port = parsed.port
+            except ValueError:
+                port = None
+            if port is not None:
+                netloc = f"{netloc}:{port}"
             if parsed.query:
                 result = f"{parsed.scheme}://{netloc}{parsed.path}?<query-redacted>"
             else:

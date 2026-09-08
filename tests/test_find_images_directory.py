@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -199,22 +201,24 @@ def test_find_images_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
     entry.is_dir(follow_symlinks=False) 拒绝下降符号链接目录；误跟随会把 base 外
     图片纳入结果，构成边界逃逸，与 browse_images 的工作区边界保证冲突。
     """
-    # base 之外的外部目录放置一张图片
-    outside_dir = tmp_path.parent / "outside_find_symlink_target"
-    outside_dir.mkdir(exist_ok=True)
-    (outside_dir / "outside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-
-    # base 内放一张真实图片，证明扫描确实执行而非整体被跳过
-    (tmp_path / "inside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-
-    # base 内创建指向外部目录的符号链接目录
-    link_dir = tmp_path / "link_dir"
+    # 越界目标置于共享 basetemp 之外的独占临时目录，内放一张图片
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-find-outside-"))
     try:
-        os.symlink(str(outside_dir), str(link_dir), target_is_directory=True)
-    except (OSError, AttributeError):
-        pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
+        (outside_dir / "outside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    result = find_images_in_directory(str(tmp_path), recursive=True)
+        # base 内放一张真实图片，证明扫描确实执行而非整体被跳过
+        (tmp_path / "inside.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        # base 内创建指向外部目录的符号链接目录
+        link_dir = tmp_path / "link_dir"
+        try:
+            os.symlink(str(outside_dir), str(link_dir), target_is_directory=True)
+        except (OSError, AttributeError):
+            pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
+
+        result = find_images_in_directory(str(tmp_path), recursive=True)
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
     result_names = {p.name for p in result}
     # 真实图片正常返回，证明扫描确实执行
@@ -653,7 +657,7 @@ def test_cached_find_images_truncated_scan_not_cached_as_complete(
     assert truncated == [tmp_path.resolve()]
     entry = next(iter(scan_module._DIRECTORY_SCAN_CACHE.values()))
     assert entry.complete is False
-    assert entry.truncated_dir == tmp_path.resolve()
+    assert entry.truncated_dirs == [tmp_path.resolve()]
 
     # 预算恢复后同目录扫描不命中 complete 短路，重扫取回全量
     monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 100)

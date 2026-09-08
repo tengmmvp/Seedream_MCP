@@ -62,8 +62,8 @@ class _DirectoryScanCacheEntry:
             末尾，恒不标记 complete，确保后续更大扫描可重新尝试。
         unreadable_dirs: 本次扫描中因权限或系统错误无法读取的目录列表，随条目缓存，
             缓存命中时同样透传给调用方。
-        truncated_dir: 本次扫描因条目预算截断时记录的截断目录，未截断为 None；
-            缓存命中时回放给调用方。
+        truncated_dirs: 本次扫描因条目预算截断时记录的截断目录列表，未截断为空；
+            缓存命中时全量回放给调用方。
     """
 
     mtime_ns: int | None
@@ -72,7 +72,7 @@ class _DirectoryScanCacheEntry:
     images: list[tuple[Path, Path]]
     complete: bool
     unreadable_dirs: list[Path]
-    truncated_dir: Path | None
+    truncated_dirs: list[Path]
 
 
 def reset_directory_scan_cache() -> None:
@@ -132,7 +132,7 @@ def _store_scan_entry(
     images: list[tuple[Path, Path]],
     complete: bool,
     unreadable_dirs: list[Path],
-    truncated_dir: Path | None,
+    truncated_dirs: list[Path],
 ) -> None:
     """写入扫描缓存，覆写已存在键时刷新 LRU 位，条目数超限时驱逐最近最少使用条目。"""
     if len(images) > _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN:
@@ -163,7 +163,7 @@ def _store_scan_entry(
         images=images,
         complete=complete,
         unreadable_dirs=unreadable_dirs,
-        truncated_dir=truncated_dir,
+        truncated_dirs=truncated_dirs,
     )
 
 
@@ -235,8 +235,8 @@ def cached_find_images_in_directory(
         if cached.complete or len(cached.images) >= scan_limit:
             if unreadable_dirs is not None:
                 unreadable_dirs.extend(cached.unreadable_dirs)
-            if truncated_dirs is not None and cached.truncated_dir is not None:
-                truncated_dirs.append(cached.truncated_dir)
+            if truncated_dirs is not None and cached.truncated_dirs:
+                truncated_dirs.extend(cached.truncated_dirs)
             return cached.images[:]
         # 扩展量不受单条目列表上限约束：该上限只决定 _store_scan_entry 是否写入
         # 缓存，若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为
@@ -274,7 +274,7 @@ def cached_find_images_in_directory(
             images=images,
             complete=complete,
             unreadable_dirs=list(scan_unreadable),
-            truncated_dir=scan_truncated[0] if scan_truncated else None,
+            truncated_dirs=list(scan_truncated),
         )
     if unreadable_dirs is not None:
         unreadable_dirs.extend(scan_unreadable)

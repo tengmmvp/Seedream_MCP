@@ -5,7 +5,9 @@
 """
 
 import os
+import shutil
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -91,23 +93,26 @@ def test_run_cleanup_age_skips_symlink_pointing_outside(tmp_path: Path) -> None:
     """符号链接指向 base_dir 之外时，清理不得删除其目标，防止越权删除。"""
     manager = FileManager(base_dir=tmp_path)
 
-    outside_dir = tmp_path.parent / "outside_target"
-    outside_dir.mkdir(exist_ok=True)
-    target = outside_dir / "target.png"
-    target.write_bytes(b"target")
-    old_time = (datetime.now() - timedelta(days=40)).timestamp()
-    os.utime(target, (old_time, old_time))
-
-    link = tmp_path / "link.png"
+    # 越界目标置于共享 basetemp 之外的独占临时目录
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-cleanup-outside-"))
     try:
-        os.symlink(target, link)
-    except OSError:
-        pytest.skip("当前环境不支持创建符号链接")
+        target = outside_dir / "target.png"
+        target.write_bytes(b"target")
+        old_time = (datetime.now() - timedelta(days=40)).timestamp()
+        os.utime(target, (old_time, old_time))
 
-    manager.run_cleanup_policies(days=30, max_total_bytes=None)
+        link = tmp_path / "link.png"
+        try:
+            os.symlink(target, link)
+        except OSError:
+            pytest.skip("当前环境不支持创建符号链接")
 
-    # 符号链接自身可能被跳过；但其指向的外部目标必须不被删除
-    assert target.exists()
+        manager.run_cleanup_policies(days=30, max_total_bytes=None)
+
+        # 符号链接自身可能被跳过；但其指向的外部目标必须不被删除
+        assert target.exists()
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 def test_run_cleanup_age_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
@@ -117,28 +122,29 @@ def test_run_cleanup_age_does_not_descend_into_symlink_dir(tmp_path: Path) -> No
     """
     manager = FileManager(base_dir=tmp_path)
 
-    # 在 base_dir 之外的外部目录放置一个过期 marker 文件
-    outside_dir = tmp_path.parent / "outside_symlink_dir_target"
-    outside_dir.mkdir(exist_ok=True)
-    marker = outside_dir / "marker.png"
-    marker.write_bytes(b"marker-content")
-    old_time = (datetime.now() - timedelta(days=40)).timestamp()
-    os.utime(marker, (old_time, old_time))
-
-    # base_dir 内创建指向外部目录的符号链接目录
-    link_dir = tmp_path / "link_dir"
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-cleanup-outside-"))
     try:
-        os.symlink(str(outside_dir), str(link_dir), target_is_directory=True)
-    except (OSError, AttributeError):
-        pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
+        marker = outside_dir / "marker.png"
+        marker.write_bytes(b"marker-content")
+        old_time = (datetime.now() - timedelta(days=40)).timestamp()
+        os.utime(marker, (old_time, old_time))
 
-    result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
+        # base_dir 内创建指向外部目录的符号链接目录
+        link_dir = tmp_path / "link_dir"
+        try:
+            os.symlink(str(outside_dir), str(link_dir), target_is_directory=True)
+        except (OSError, AttributeError):
+            pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
 
-    # marker 已过期，若清理下降进入符号链接目录则会被删除；
-    # 其仍存在即证明清理未对外部条目下降遍历
-    assert marker.exists()
-    assert marker.read_bytes() == b"marker-content"
-    assert result["deleted_files"] == 0
+        result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
+
+        # marker 已过期，若清理下降进入符号链接目录则会被删除；
+        # 其仍存在即证明清理未对外部条目下降遍历
+        assert marker.exists()
+        assert marker.read_bytes() == b"marker-content"
+        assert result["deleted_files"] == 0
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 def test_run_cleanup_quota_evicts_oldest_until_under_limit(tmp_path: Path) -> None:
