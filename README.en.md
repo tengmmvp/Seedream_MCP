@@ -511,7 +511,7 @@ uv run python -m seedream_mcp.server --api-key your_key
 
 ## ⚙️ Environment Variables
 
-Main configuration options (see `.env.example` for details):
+All configuration options, defaults and descriptions live in **[.env.example](.env.example)**; copy it to `.env` and adjust as needed.
 
 Configuration priority: MCP client explicit config (CLI args) > runtime system environment variables > `.env` file > defaults.
 
@@ -521,67 +521,11 @@ Configuration priority: MCP client explicit config (CLI args) > runtime system e
 - When `--config-file` is not specified: files are merged in the order "project-root `.env` -> current-working-directory `.env`", with the latter overriding the former.
 - `.env` values are **not injected** into the process environment; they are only resolved by the above priority and written to the config object, avoiding global state pollution. System environment variables take precedence over the `.env` file.
 
-```bash
-# Required
-ARK_API_KEY=your_api_key_here
-
-# API endpoint security
-ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # API base URL, defaults to the Volcengine Beijing endpoint; must be https, http sends the API key in plaintext and is rejected by default, only trusted self-hosted intranet endpoints can be exempted via SEEDREAM_ALLOW_HTTP_BASE_URL
-SEEDREAM_ALLOW_HTTP_BASE_URL=false                      # Exempt an http:// ARK_BASE_URL (plaintext rejected by default; set true only for trusted self-hosted intranet endpoints)
-
-# Model config
-SEEDREAM_MODEL_ID=doubao-seedream-5.0                   # Accepts a model alias / full Model ID / Endpoint ID (ep-...)
-
-# Defaults
-SEEDREAM_DEFAULT_SIZE=2K
-SEEDREAM_DEFAULT_WATERMARK=false
-
-# Timeouts
-SEEDREAM_TIMEOUT=60                         # Connection/write/pool-acquire timeout (seconds)
-SEEDREAM_API_TIMEOUT=600                    # API call read & total timeout (seconds)
-SEEDREAM_MAX_RETRIES=3                      # Max retries for API calls (0 disables retry for the billed non-idempotent API; retries 429/5xx, timeouts, network errors; no retry on 4xx)
-
-# Logging
-LOG_LEVEL=INFO                              # Log level (DEBUG / INFO / WARNING / ERROR / CRITICAL)
-LOG_FILE=                                   # Log file path (default follows the data base directory declaration into <base directory>/.seedream/logs/seedream_mcp.log; without a declaration, resolved relative to the process working directory)
-
-# Auto-save
-SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=                # Data base directory (images go to its .seedream/images subdirectory, with the thumbnail cache and logs alongside inside the same .seedream; default base directory is the workspace base: first MCP Root, SEEDREAM_WORKSPACE_ROOT, process working directory, or user home directory)
-SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds, max 720)
-SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # Max retries for failed downloads (0 disables retry)
-SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB); also the derivation base for the stream single-event truncate threshold and the response-body read limit
-SEEDREAM_RESPONSE_BODY_LIMIT=               # Total upstream response-body read limit (bytes; derived as SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 when unset, shared by non-stream/stream JSON and SSE)
-SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # Max concurrent downloads
-SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
-SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
-SEEDREAM_AUTO_SAVE_FSYNC=false               # fsync before finalizing writes: improves crash consistency at a slight throughput cost, off by default
-SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save directory (default 10GB; oldest evicted first when exceeded)
-SEEDREAM_PREVIEW_ENABLED=true                 # Attach thumbnail previews of saved images to generation results (requires auto-save; default on)
-
-# Workspace & transport
-SEEDREAM_WORKSPACE_ROOT=                    # Workspace declaration when no MCP Roots exist (enters the read scope and serves as the storage root base; falls back to the process working directory when nothing is declared, then the user home directory)
-SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (required for non-loopback binding, or the service refuses to start; TLS or the --insecure-allow-non-tls exemption is also required)
-SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
-SEEDREAM_WEB_ENABLED=false                  # Web console toggle (--web/--no-web overrides; streamable-http only, serves the /web UI and image gallery when enabled, off by default)
-SEEDREAM_HTTP_ALLOWED_HOSTS=                # Comma-separated Host allowlist for direct non-loopback exposure (supports host:port and trailing :*); empty disables the SDK inner Host check (suitable behind a reverse proxy)
-SEEDREAM_REQUEST_STATE_KEYS=               # Shared requestState key ring for multi-replica HTTP deployments, comma-separated hex with each key decoding to at least 32 bytes; empty keeps the SDK default per-process ephemeral key and single-process deployments can omit it; in multi-replica deployments, clients connecting with protocol revisions earlier than 2026-07-28 carry sessions and require sticky routing to a single replica, while 2026-07-28 clients are sessionless and any replica can answer
-
-# Client performance
-SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
-SEEDREAM_PREPARE_CACHE_MAX=32
-SEEDREAM_PREPARE_CACHE_MAX_BYTES=268435456    # Reference image prepare cache total byte cap (default 256MB)
-
-# Streaming
-SEEDREAM_STREAM_BUFFER_MAX_SIZE=10485760      # SSE stream buffer prefix reclaim threshold (default 10MB)
-SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (default 1MB)
-SEEDREAM_SSE_EVENT_MAX_SIZE=                  # Per-event SSE truncation threshold (unset derives from buffer size and worst-case single-image base64; explicit values only enlarge it)
-```
-
 ### Deployment Notes
 
-- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction act on **all** expired files with supported image extensions (and empty directories) inside `<base directory>/.seedream/images` (a server-created directory); the rest of the base directory is untouched. Files saved outside the storage root via `save_path` are excluded from age-based cleanup and quota eviction and are managed by the caller.
-- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: the workspace resolves in the order MCP Roots > this variable > the process working directory > the user home directory; an explicit declaration makes both the read scope and the storage root location deterministic.
+- **Renamed environment variables from older versions**: `SEEDREAM_AUTO_SAVE_BASE_DIR` becomes `SEEDREAM_DATA_ROOT` (the value stays the parent directory of `.seedream`), `LOG_LEVEL` becomes `SEEDREAM_LOG_LEVEL`, and `LOG_FILE` is removed (logs follow the data root into `.seedream/logs`); the old names are no longer read, so update them when upgrading. Log rotation and retention defaults change to 5 MB / 7 days (previously 10 MB / 30 days); the first rotation after upgrading purges expired old archives.
+- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction act on **all** expired files with supported image extensions (and empty directories) inside `<data root>/.seedream/images` (a server-created directory); the rest of the data root is untouched. Files saved outside the image directory via `save_path` are excluded from age-based cleanup and quota eviction and are managed by the caller.
+- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: the workspace root resolves in the order MCP Roots > this variable > the process working directory > the user home directory; an explicit declaration makes both the read scope and the image-directory location deterministic.
 - **Stateful streamable-http sessions rely on clients disconnecting properly**: in the default stateful mode a session is reclaimed when the client sends DELETE or the process exits; sessions linger if a client crashes without DELETE. Deployments with many short-lived clients should use `--stateless`.
 - **Body size of unauthenticated requests**: unauthenticated chunked requests are rejected with 401 before their body is read; their size limiting relies on uvicorn or a fronting reverse proxy. Configure a request body limit at the proxy layer for public deployments.
 - **Ownership of the mounted directory on Linux hosts**: the container runs as a non-root user with uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user (`mkdir -p .seedream && chown 1000:1000 .seedream`); Docker Desktop is unaffected.

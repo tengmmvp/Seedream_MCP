@@ -43,4 +43,4 @@
 
 - `seedream://server/info`：服务器版本、当前模型、默认尺寸、自动保存开关
 - `seedream://models/info`：全部模型别名与能力声明（档位、像素区间、参考图上限、能力开关）
-- 日志文件：`<数据基础目录>/.seedream/logs/seedream_mcp.log`（基础目录声明取 `SEEDREAM_AUTO_SAVE_BASE_DIR` > `SEEDREAM_WORKSPACE_ROOT`，均未声明时为进程工作目录），保留 30 天，错误日志含完整堆栈
+- 日志文件：`<数据根目录>/.seedream/logs/seedream_mcp.log`（取 `SEEDREAM_DATA_ROOT` > `SEEDREAM_WORKSPACE_ROOT`，均未声明时经回退链落进程启动目录或用户主目录，不跟随 MCP Roots），默认按 5MB 轮转、保留 7 天（`SEEDREAM_LOG_ROTATION_SIZE` 与 `SEEDREAM_LOG_RETENTION_DAYS` 配置），错误日志含完整堆栈

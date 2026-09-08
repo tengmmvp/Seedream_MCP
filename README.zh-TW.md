@@ -511,7 +511,7 @@ uv run python -m seedream_mcp.server --api-key your_key
 
 ## ⚙️ 環境變數設定
 
-主要設定項（詳見 `.env.example`）：
+全部設定項、預設值與說明見 **[.env.example](.env.example)**，複製為 `.env` 後按需修改。
 
 設定優先順序：MCP 用戶端明確設定（命令列參數） > 執行階段系統環境變數 > `.env` 檔案 > 預設值。
 
@@ -521,67 +521,11 @@ uv run python -m seedream_mcp.server --api-key your_key
 - 未指定 `--config-file` 時：按「專案根 `.env` -> 目前工作目錄 `.env`」順序合併，後者覆寫前者。
 - `.env` 的值**不會注入**行程環境變數，僅按上述優先順序解析後寫入設定物件，避免污染全域狀態；系統環境變數優先於 `.env` 檔案。
 
-```bash
-# 必要設定
-ARK_API_KEY=your_api_key_here
-
-# API 端點安全
-ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3   # API 基礎 URL，預設火山引擎北京端點；須 https，http 會使 API Key 明文傳輸而被預設拒絕，僅自建可信內網端點可經 SEEDREAM_ALLOW_HTTP_BASE_URL 豁免
-SEEDREAM_ALLOW_HTTP_BASE_URL=false                      # 豁免 http:// 的 ARK_BASE_URL（預設拒絕明文傳輸；僅自建可信內網端點設 true）
-
-# 模型設定
-SEEDREAM_MODEL_ID=doubao-seedream-5.0                   # 模型別名 / 完整 Model ID / Endpoint ID（ep- 開頭）皆可
-
-# 預設值
-SEEDREAM_DEFAULT_SIZE=2K
-SEEDREAM_DEFAULT_WATERMARK=false
-
-# 逾時
-SEEDREAM_TIMEOUT=60                         # 連線建立/寫入/連線池取得逾時（秒）
-SEEDREAM_API_TIMEOUT=600                    # API 呼叫讀取與總逾時（秒）
-SEEDREAM_MAX_RETRIES=3                      # API 呼叫最大重試次數（0 表示不重試，計費非冪等介面可關閉；429/5xx、逾時與網路錯誤重試，4xx 不重試）
-
-# 日誌
-LOG_LEVEL=INFO                              # 日誌級別（DEBUG / INFO / WARNING / ERROR / CRITICAL）
-LOG_FILE=                                   # 日誌檔案路徑（預設跟隨資料基礎目錄宣告，落 <基礎目錄>/.seedream/logs/seedream_mcp.log；未宣告時相對行程工作目錄解析）
-
-# 自動儲存
-SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=                # 資料基礎目錄（圖片收在其 .seedream/images 子目錄，縮圖快取與日誌並列於同一 .seedream 內；預設基礎目錄取基準：MCP Roots 首項、SEEDREAM_WORKSPACE_ROOT、程序啟動目錄或使用者主目錄）
-SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 單張圖片下載逾時（秒），上限 720
-SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下載失敗最大重試次數（0 表示不重試）
-SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 單張圖片大小上限（位元組，預設 50MB）；另兼作流式單事件截斷閾值與回應體讀取上限的推導基準
-SEEDREAM_RESPONSE_BODY_LIMIT=               # 上游回應體讀取總量上限（位元組；不設則按 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE×20 推導，非流式/流式 JSON 與 SSE 共用）
-SEEDREAM_AUTO_SAVE_MAX_CONCURRENT=5         # 最大並行下載數
-SEEDREAM_AUTO_SAVE_DATE_FOLDER=true
-SEEDREAM_AUTO_SAVE_CLEANUP_DAYS=30
-SEEDREAM_AUTO_SAVE_FSYNC=false               # 落盤前 fsync：開啟提升崩潰一致性、略降寫入吞吐，預設關閉
-SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 儲存目錄總位元組上限（預設 10GB；超限按最舊檔案優先逐出）
-SEEDREAM_PREVIEW_ENABLED=true                 # 生成結果附帶已儲存圖片的縮圖（對話內直接預覽，依賴自動儲存；預設開啟）
-
-# 工作區與傳輸
-SEEDREAM_WORKSPACE_ROOT=                    # 無 MCP Roots 時的工作位置宣告（進入讀取範圍並作為儲存區的派生基準；無任何宣告時保底程序啟動目錄，不可寫回退使用者主目錄）
-SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鑑權權杖（非回環繫結必須設定，否則拒絕啟動；另需 TLS 或 --insecure-allow-non-tls 豁免）
-SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 請求內文上限（位元組，≥1MB，預設 64MB；單圖 data URI 約 40MB，兼顧多圖融合）
-SEEDREAM_WEB_ENABLED=false                  # Web 操作台開關（--web/--no-web 覆蓋；僅 streamable-http 生效，開啟後瀏覽器可存取 /web 頁面與歷史圖庫，預設關閉）
-SEEDREAM_HTTP_ALLOWED_HOSTS=                # 非回環直連部署的 Host 頭允許清單，逗號分隔，支援 host:port 與尾部 :* 萬用（如 mcp.example.com,mcp.example.com:*）；留空則整體關閉 SDK 內層 Host 校驗，適用反向代理場景
-SEEDREAM_REQUEST_STATE_KEYS=               # 多副本 HTTP 部署共享的 requestState 金鑰環，逗號分隔十六進位，每鍵解碼後不少於 32 位元組；留空保持 SDK 預設行程臨時金鑰，單行程部署可省略；多副本部署下，按 2026-07-28 之前規範修訂連線的用戶端帶工作階段，需黏性路由固定到同一實例，2026-07-28 修訂的用戶端無工作階段，任意副本均可回應
-
-# 用戶端效能
-SEEDREAM_IMAGE_PREPARE_CONCURRENCY=5
-SEEDREAM_PREPARE_CACHE_MAX=32
-SEEDREAM_PREPARE_CACHE_MAX_BYTES=268435456    # 參考圖前置處理快取累計位元組上限（預設 256MB）
-
-# 串流處理
-SEEDREAM_STREAM_BUFFER_MAX_SIZE=10485760      # SSE 串流回應緩衝區前綴回收閾值（預設 10MB）
-SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 串流回應每次讀取區塊大小（預設 1MB）
-SEEDREAM_SSE_EVENT_MAX_SIZE=                  # 單一 SSE 事件截斷閾值（未設則按緩衝區與單圖 base64 最壞展開推導，顯式配置僅用於調大）
-```
-
 ### 部署注意事項
 
-- **儲存目錄由服務管理**：自動儲存的按天清理與總量配額作用於 `<基礎目錄>/.seedream/images`（服務自建目錄）內**所有**符合圖片副檔名的過期檔案與空目錄，基礎目錄的其餘內容不受影響。經 `save_path` 儲存到儲存區之外的檔案不參與自動清理與總量配額，由呼叫方自行管理。
-- **多租戶 streamable-http 部署建議顯式設定 `SEEDREAM_WORKSPACE_ROOT`**：工作位置按 MCP Roots > 該環境變數 > 程序啟動目錄 > 使用者主目錄順位取值，顯式宣告可使讀取範圍與儲存區落點確定。
+- **舊版本環境變數改名**：`SEEDREAM_AUTO_SAVE_BASE_DIR` 改為 `SEEDREAM_DATA_ROOT`（值仍為 `.seedream` 的父目錄）、`LOG_LEVEL` 改為 `SEEDREAM_LOG_LEVEL`，`LOG_FILE` 已刪除（日誌隨資料根目錄落於 `.seedream/logs`）；舊名不再讀取，升級部署請同步改名。日誌預設輪轉與保留改為 5MB / 7 天（舊預設 10MB / 30 天），升級後首次輪轉會清理超期舊歸檔。
+- **儲存目錄由服務管理**：自動儲存的按天清理與總量配額作用於 `<資料根目錄>/.seedream/images`（服務自建目錄）內**所有**符合圖片副檔名的過期檔案與空目錄，資料根目錄的其餘內容不受影響。經 `save_path` 儲存到圖片目錄之外的檔案不參與自動清理與總量配額，由呼叫方自行管理。
+- **多租戶 streamable-http 部署建議顯式設定 `SEEDREAM_WORKSPACE_ROOT`**：工作根目錄按 MCP Roots > 該環境變數 > 程序啟動目錄 > 使用者主目錄順位取值，顯式宣告可使讀取範圍與圖片目錄落點確定。
 - **有狀態 streamable-http 會話依賴客戶端正確斷開**：預設有狀態模式下的會話在客戶端傳送 DELETE 或程序結束時回收，客戶端異常退出且不傳送 DELETE 時會話駐留；大量短連客戶端的部署建議 `--stateless`。
 - **未認證請求的體積限制**：未攜帶有效權杖的 chunked 請求不讀 body 即回傳 401，其體積限制依賴 uvicorn 層或前置反向代理；公網暴露部署請在代理層設定請求體上限。
 - **Linux 宿主掛載目錄屬主**：容器以 uid 1000 的非 root 使用者執行，Linux 宿主上 compose 掛載的 `./.seedream` 目錄需對該使用者可寫（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影響。
