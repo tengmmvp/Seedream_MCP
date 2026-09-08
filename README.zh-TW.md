@@ -41,7 +41,7 @@
 
 ### 1. 前置準備
 
-安裝 [uv](https://docs.astral.sh/uv/)（包含 `uvx` 指令）：
+安裝 [uv](https://docs.astral.sh/uv/)，安裝後即可直接使用 `uvx` 指令：
 
 ```bash
 # macOS / Linux
@@ -71,14 +71,16 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 # 下載 docker-compose.yml
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
-# 選用：建立 .env（參考 .env.example）供 compose 唯讀掛載，替代下行環境變數前置
-# 未建立 .env 時 Docker 會自動建立同名目錄導致掛載異常，需先 touch .env 或刪除 compose 中的該掛載
+# 選用：參照 .env.example 建立 .env 供 compose 唯讀掛載，免去下行命令的環境變數前置
+# 未建立 .env 時 Docker 會自動建出同名目錄充當掛載來源導致掛載異常，請先 touch .env 或移除 compose 中的掛載行
 
 # 啟動服務
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
-服務以 streamable-http 傳輸監聽容器內 `8000` 連接埠，宿主機連接埠由 `SEEDREAM_HTTP_PORT` 控制（預設 8000），MCP 端點路徑為 `/mcp`。連接埠映射預設僅綁定回環位址 `127.0.0.1`，需從其他裝置直連時把 docker-compose.yml 中的連接埠映射改為 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主機網卡位址。連接埠映射改為 `0.0.0.0` 即把服務暴露給網路，此時 `SEEDREAM_HTTP_AUTH_TOKEN` 會以明文 HTTP 過網傳輸；必須將服務置於 TLS 反向代理之後，或透過 `SEEDREAM_EXTRA_CLI_ARGS` 向容器提供 TLS 憑證參數，禁止在無 TLS 的狀態下對外暴露。用戶端接入設定（以 Claude Desktop 為例，其他支援 streamable-http 的用戶端同理）：
+服務以 streamable-http 傳輸監聽容器內 `8000` 連接埠，MCP 端點路徑為 `/mcp`；宿主機映射連接埠由 `SEEDREAM_HTTP_PORT` 控制，預設 8000。連接埠映射預設僅綁定回環位址 `127.0.0.1`，需從其他裝置直連時，把 docker-compose.yml 改為 `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` 或指定宿主機網卡位址。映射一旦改為 `0.0.0.0`，服務即暴露給網路，`SEEDREAM_HTTP_AUTH_TOKEN` 會以明文 HTTP 在網路上傳輸；此時必須將服務置於 TLS 反向代理之後，或經 `SEEDREAM_EXTRA_CLI_ARGS` 向容器提供 TLS 憑證參數，無 TLS 禁止對外暴露。
+
+用戶端接入設定以 Claude Desktop 為例，其他支援 streamable-http 的用戶端同理：
 
 ```json
 {
@@ -98,7 +100,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 
 ## 🔧 用戶端設定
 
-> 推薦透過 `env` 注入 `ARK_API_KEY`，避免把金鑰寫進 `args`（命令列參數會出現在行程清單中，存在洩漏風險）。
+> 推薦透過 `env` 注入 `ARK_API_KEY`，避免把金鑰寫進 `args`：命令列參數會出現在行程清單中，存在洩漏風險。
 
 ### Claude Desktop
 
@@ -119,7 +121,9 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 <details>
 <summary><b>其他用戶端設定</b>（Claude Code · Cursor · Cline）</summary>
 
-### Claude Code（命令列一鍵註冊）
+### Claude Code
+
+一條命令完成註冊：
 
 ```bash
 claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
@@ -523,13 +527,11 @@ uv run python -m seedream_mcp.server --api-key your_key
 
 ### 部署注意事項
 
-- **舊版本環境變數改名**：`SEEDREAM_AUTO_SAVE_BASE_DIR` 改為 `SEEDREAM_DATA_ROOT`（值仍為 `.seedream` 的父目錄）、`LOG_LEVEL` 改為 `SEEDREAM_LOG_LEVEL`，`LOG_FILE` 已刪除（日誌隨資料根目錄落於 `.seedream/logs`）；舊名不再讀取，升級部署請同步改名。日誌預設輪轉與保留改為 5MB / 7 天（舊預設 10MB / 30 天），升級後首次輪轉會清理超期舊歸檔。
-- **儲存目錄由服務管理**：自動儲存的按天清理與總量配額作用於 `<資料根目錄>/.seedream/images`（服務自建目錄）內**所有**符合圖片副檔名的過期檔案與空目錄，資料根目錄的其餘內容不受影響。經 `save_path` 儲存到圖片目錄之外的檔案不參與自動清理與總量配額，由呼叫方自行管理。
-- **多租戶 streamable-http 部署建議顯式設定 `SEEDREAM_WORKSPACE_ROOT`**：工作根目錄按 MCP Roots > 該環境變數 > 程序啟動目錄 > 使用者主目錄順位取值，顯式宣告可使讀取範圍與圖片目錄落點確定。
-- **有狀態 streamable-http 會話依賴客戶端正確斷開**：預設有狀態模式下的會話在客戶端傳送 DELETE 或程序結束時回收，客戶端異常退出且不傳送 DELETE 時會話駐留；大量短連客戶端的部署建議 `--stateless`。
-- **未認證請求的體積限制**：未攜帶有效權杖的 chunked 請求不讀 body 即回傳 401，其體積限制依賴 uvicorn 層或前置反向代理；公網暴露部署請在代理層設定請求體上限。
-- **Linux 宿主掛載目錄屬主**：容器以 uid 1000 的非 root 使用者執行，Linux 宿主上 compose 掛載的 `./.seedream` 目錄需對該使用者可寫（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影響。
-- **出站連線不走系統代理**：API 呼叫與圖片下載的出站 HTTP 用戶端固定忽略 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 等系統代理環境變數，防止代理截獲 API Key 或繞過下載安全校驗；企業代理環境需確保主機直連網際網路，或由網路層透明代理轉送。
+- **儲存目錄由服務管理**：按天清理與總量配額只作用於圖片目錄 `<資料根目錄>/.seedream/images`，目錄內**所有**過期的圖片檔案與空目錄都會被刪除，不看檔案來源；經 `save_path` 儲存到其他目錄的檔案不受管理。
+- **多用戶端部署建議顯式設定 `SEEDREAM_DATA_ROOT`**：資料根目錄預設跟隨用戶端宣告的 MCP Roots 變化，不同用戶端的圖片會散落在各自目錄；顯式宣告後所有工作階段共用同一落點，讀取範圍與資料位置隨之確定。
+- **有狀態會話依賴用戶端正確斷開**：streamable-http 會話在用戶端傳送 DELETE 或程序結束時回收，用戶端異常退出時會話駐留；大量短連用戶端的部署建議改用 `--stateless`。
+- **Linux 宿主掛載目錄屬主**：容器以 uid 1000 執行，compose 掛載的 `./.seedream` 目錄需對該使用者可寫：`mkdir -p .seedream && chown 1000:1000 .seedream`；Docker Desktop 不受影響。
+- **出站連線不走系統代理**：API 呼叫與圖片下載固定忽略 `HTTP_PROXY` 等系統代理環境變數；企業代理環境需保證主機直連網際網路，或經網路層透明代理轉送。
 
 ## 👥 貢獻者
 

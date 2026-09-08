@@ -41,7 +41,7 @@
 
 ### 1. Prerequisites
 
-Install [uv](https://docs.astral.sh/uv/) (includes the `uvx` command):
+Install [uv](https://docs.astral.sh/uv/); the `uvx` command is available afterwards:
 
 ```bash
 # macOS / Linux
@@ -71,14 +71,16 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 # Download docker-compose.yml
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
-# Optional: create .env (see .env.example) for the read-only compose mount, instead of prefixing env vars below
-# Without .env, Docker auto-creates a same-named directory and breaks the mount; run "touch .env" first or remove that mount from the compose file
+# Optional: create .env from .env.example for the read-only compose mount, replacing the env-var prefix below
+# Without .env, Docker creates a same-named directory as the mount source and breaks it; run "touch .env" first or drop that mount from the compose file
 
 # Start the service
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
 
-The service listens on container port `8000` via the streamable-http transport; the host port is controlled by `SEEDREAM_HTTP_PORT` (default 8000), and the MCP endpoint path is `/mcp`. The port mapping binds to the loopback address `127.0.0.1` by default; to allow direct connections from other machines, change the port mapping in docker-compose.yml to `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` or a specific host interface address. Changing the port mapping to `0.0.0.0` exposes the service to the network, in which case `SEEDREAM_HTTP_AUTH_TOKEN` travels over plaintext HTTP; the deployment must sit behind a TLS reverse proxy, or provide TLS certificate arguments to the container via `SEEDREAM_EXTRA_CLI_ARGS`. Never expose the service without TLS. Client configuration (Claude Desktop shown; other streamable-http clients are analogous):
+The service listens on container port `8000` via the streamable-http transport and serves the MCP endpoint at `/mcp`; `SEEDREAM_HTTP_PORT` controls the host-side mapping, defaulting to 8000. The mapping binds to the loopback address `127.0.0.1` by default; for direct connections from other machines, change it in docker-compose.yml to `0.0.0.0:${SEEDREAM_HTTP_PORT:-8000}:8000` or a specific host interface address. Once the mapping becomes `0.0.0.0`, the service is exposed to the network and `SEEDREAM_HTTP_AUTH_TOKEN` travels over plaintext HTTP; the deployment must then sit behind a TLS reverse proxy, or receive TLS certificate arguments in the container via `SEEDREAM_EXTRA_CLI_ARGS`. Never expose the service without TLS.
+
+Client configuration below uses Claude Desktop as the example; other streamable-http clients are analogous:
 
 ```json
 {
@@ -98,7 +100,7 @@ The service listens on container port `8000` via the streamable-http transport; 
 
 ## 🔧 Client Configuration
 
-> It is recommended to inject `ARK_API_KEY` via `env` rather than writing it into `args` (command-line arguments appear in the process list and pose a leakage risk).
+> It is recommended to inject `ARK_API_KEY` via `env` rather than writing it into `args`: command-line arguments appear in the process list and pose a leakage risk.
 
 ### Claude Desktop
 
@@ -119,7 +121,9 @@ Edit `claude_desktop_config.json`:
 <details>
 <summary><b>Other client configurations</b> (Claude Code · Cursor · Cline)</summary>
 
-### Claude Code (one-line registration)
+### Claude Code
+
+Register with a single command:
 
 ```bash
 claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
@@ -523,13 +527,11 @@ Configuration priority: MCP client explicit config (CLI args) > runtime system e
 
 ### Deployment Notes
 
-- **Renamed environment variables from older versions**: `SEEDREAM_AUTO_SAVE_BASE_DIR` becomes `SEEDREAM_DATA_ROOT` (the value stays the parent directory of `.seedream`), `LOG_LEVEL` becomes `SEEDREAM_LOG_LEVEL`, and `LOG_FILE` is removed (logs follow the data root into `.seedream/logs`); the old names are no longer read, so update them when upgrading. Log rotation and retention defaults change to 5 MB / 7 days (previously 10 MB / 30 days); the first rotation after upgrading purges expired old archives.
-- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction act on **all** expired files with supported image extensions (and empty directories) inside `<data root>/.seedream/images` (a server-created directory); the rest of the data root is untouched. Files saved outside the image directory via `save_path` are excluded from age-based cleanup and quota eviction and are managed by the caller.
-- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: the workspace root resolves in the order MCP Roots > this variable > the process working directory > the user home directory; an explicit declaration makes both the read scope and the image-directory location deterministic.
-- **Stateful streamable-http sessions rely on clients disconnecting properly**: in the default stateful mode a session is reclaimed when the client sends DELETE or the process exits; sessions linger if a client crashes without DELETE. Deployments with many short-lived clients should use `--stateless`.
-- **Body size of unauthenticated requests**: unauthenticated chunked requests are rejected with 401 before their body is read; their size limiting relies on uvicorn or a fronting reverse proxy. Configure a request body limit at the proxy layer for public deployments.
-- **Ownership of the mounted directory on Linux hosts**: the container runs as a non-root user with uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user (`mkdir -p .seedream && chown 1000:1000 .seedream`); Docker Desktop is unaffected.
-- **Outbound connections ignore system proxies**: the outbound HTTP clients for API calls and image downloads ignore system proxy environment variables (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`, etc.) by design, preventing a proxy from intercepting the API key or bypassing download security checks; in corporate proxy environments, ensure the host has direct internet access or is served by a transparent network-layer proxy.
+- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction act only on the image directory `<data root>/.seedream/images`, deleting **all** expired image files and empty directories there regardless of origin; files saved elsewhere via `save_path` are not managed.
+- **Set `SEEDREAM_DATA_ROOT` explicitly for multi-client deployments**: by default the data root follows the MCP Roots declared by each client, so images from different clients scatter across their own directories; an explicit declaration gives every session the same location and makes the read scope deterministic.
+- **Stateful sessions rely on clients disconnecting properly**: streamable-http sessions are reclaimed when the client sends DELETE or the process exits, and linger if a client crashes; deployments with many short-lived clients should use `--stateless`.
+- **Ownership of the mounted directory on Linux hosts**: the container runs as uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user: `mkdir -p .seedream && chown 1000:1000 .seedream`; Docker Desktop is unaffected.
+- **Outbound connections ignore system proxies**: API calls and image downloads ignore `HTTP_PROXY` and related environment variables; in corporate proxy environments the host needs direct internet access or a transparent network-layer proxy.
 
 ## 👥 Contributors
 
