@@ -18,12 +18,16 @@ from dotenv import dotenv_values
 
 from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, _is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
-from .utils.core.logs import get_logger
+from .utils.core.logs import (
+    DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_LOG_ROTATION_SIZE_MB,
+    get_logger,
+)
 from .utils.core.validators import INT_TEXT_PATTERN, parse_bool, validate_size_for_model
 from .utils.io.io_path import (
     clear_resolved_env_root_cache,
     is_unc_path,
-    register_env_save_base_dir_provider,
+    register_data_root_provider,
     register_env_workspace_root_provider,
 )
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
@@ -100,9 +104,11 @@ class SeedreamConfig:
         api_timeout: API 调用超时秒数。
         max_retries: API 调用最大重试次数。
         log_level: 日志级别，构造校验时统一为大写。
-        log_file: 日志文件路径，未设置时使用日志系统默认路径。
+        log_rotation_size: 日志文件轮转大小 MB，超过即轮转压缩。
+        log_retention_days: 轮转日志的保留天数，超期自动清理。
         auto_save_enabled: 是否启用生成图片的自动保存。
-        auto_save_base_dir: 自动存储区目录，未设置时回退工作区 .seedream/images 目录。
+        data_root: 数据根目录，图片、缩略图缓存与日志收在其 .seedream 子目录；
+            未设置时取工作根目录。
         auto_save_download_timeout: 自动保存下载超时秒数，上界 720 秒。
         auto_save_max_retries: 自动保存下载最大重试次数。
         auto_save_max_file_size: 自动保存单文件大小上限字节数。
@@ -149,11 +155,12 @@ class SeedreamConfig:
     api_timeout: int = _env_field(600, "SEEDREAM_API_TIMEOUT")
     max_retries: int = _env_field(3, "SEEDREAM_MAX_RETRIES")
 
-    log_level: str = _env_field("INFO", "LOG_LEVEL")
-    log_file: str | None = _env_field(None, "LOG_FILE")
+    log_level: str = _env_field("INFO", "SEEDREAM_LOG_LEVEL")
+    log_rotation_size: int = _env_field(DEFAULT_LOG_ROTATION_SIZE_MB, "SEEDREAM_LOG_ROTATION_SIZE")
+    log_retention_days: int = _env_field(DEFAULT_LOG_RETENTION_DAYS, "SEEDREAM_LOG_RETENTION_DAYS")
 
     auto_save_enabled: bool = _env_field(True, "SEEDREAM_AUTO_SAVE_ENABLED")
-    auto_save_base_dir: str | None = _env_field(None, "SEEDREAM_AUTO_SAVE_BASE_DIR")
+    data_root: str | None = _env_field(None, "SEEDREAM_DATA_ROOT")
     auto_save_download_timeout: int = _env_field(30, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT")
     auto_save_max_retries: int = _env_field(3, "SEEDREAM_AUTO_SAVE_MAX_RETRIES")
     auto_save_max_file_size: int = _env_field(
@@ -207,7 +214,7 @@ class SeedreamConfig:
         self._validate_model_selection()
         self._validate_default_size()
         self._validate_client_timeouts()
-        self._validate_log_level()
+        self._validate_log_settings()
         self._validate_auto_save_bounds()
         self._validate_streaming_bounds()
         self._validate_prepare_cache_bounds()
@@ -297,14 +304,22 @@ class SeedreamConfig:
         if self.max_retries < 0:
             raise SeedreamConfigError(f"max_retries不能为负数{_env_var_suffix('max_retries')}")
 
-    def _validate_log_level(self) -> None:
-        """校验 log_level 合法并规范化为大写。"""
+    def _validate_log_settings(self) -> None:
+        """校验日志三项：级别合法并规范化为大写，轮转与保留为正数。"""
         if self.log_level.upper() not in LEGAL_LOG_LEVELS:
             raise SeedreamConfigError(
                 f"log_level必须是以下值之一: {list(LEGAL_LOG_LEVELS)}"
                 f"{_env_var_suffix('log_level')}"
             )
         object.__setattr__(self, "log_level", self.log_level.upper())
+        if self.log_rotation_size <= 0:
+            raise SeedreamConfigError(
+                f"log_rotation_size必须大于0{_env_var_suffix('log_rotation_size')}"
+            )
+        if self.log_retention_days <= 0:
+            raise SeedreamConfigError(
+                f"log_retention_days必须大于0{_env_var_suffix('log_retention_days')}"
+            )
 
     def _validate_auto_save_bounds(self) -> None:
         """校验自动保存各数值字段的下界与下载停滞超时的上界，总量上限显式 0 归一为 None。"""
@@ -405,15 +420,14 @@ class SeedreamConfig:
             )
 
     def _validate_dir_fields(self) -> None:
-        """校验各目录型字段指向有效目录，存储区声明拒绝 UNC 形态。"""
-        if self.auto_save_base_dir:
-            # UNC 存储区的 resolve 会触发 SMB 认证，构建期响亮失败而非运行期逐次降级。
-            if is_unc_path(self.auto_save_base_dir):
+        """校验各目录型字段指向有效目录，数据根目录声明拒绝 UNC 形态。"""
+        if self.data_root:
+            # UNC 数据根目录的 resolve 会触发 SMB 认证，构建期响亮失败而非运行期逐次降级。
+            if is_unc_path(self.data_root):
                 raise SeedreamConfigError(
-                    f"auto_save_base_dir不支持UNC路径: {self.auto_save_base_dir}"
-                    f"{_env_var_suffix('auto_save_base_dir')}"
+                    f"data_root不支持UNC路径: {self.data_root}" f"{_env_var_suffix('data_root')}"
                 )
-            self._validate_dir_field(self.auto_save_base_dir, "auto_save_base_dir")
+            self._validate_dir_field(self.data_root, "data_root")
 
         if self.workspace_root:
             self._validate_dir_field(self.workspace_root, "workspace_root")
@@ -883,9 +897,10 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "api_timeout": (_pick_int, None),
     "max_retries": (_pick_int, None),
     "log_level": (_pick_str, None),
-    "log_file": (_pick_optional_str, None),
+    "log_rotation_size": (_pick_int, None),
+    "log_retention_days": (_pick_int, None),
     "auto_save_enabled": (_pick_bool, None),
-    "auto_save_base_dir": (_pick_optional_str, None),
+    "data_root": (_pick_optional_str, None),
     "auto_save_download_timeout": (_pick_int, None),
     "auto_save_max_retries": (_pick_int, None),
     "auto_save_max_file_size": (_pick_int, None),
@@ -1064,6 +1079,4 @@ def _make_env_location_provider(attr: str, env_name: str) -> Callable[[], str | 
 register_env_workspace_root_provider(
     _make_env_location_provider("workspace_root", "SEEDREAM_WORKSPACE_ROOT")
 )
-register_env_save_base_dir_provider(
-    _make_env_location_provider("auto_save_base_dir", "SEEDREAM_AUTO_SAVE_BASE_DIR")
-)
+register_data_root_provider(_make_env_location_provider("data_root", "SEEDREAM_DATA_ROOT"))

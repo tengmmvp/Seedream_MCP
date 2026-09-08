@@ -1,9 +1,10 @@
 """Seedream MCP 日志配置模块。
 
-基于 loguru 初始化日志系统，配置控制台与文件双通道输出。文件日志按 10 MB 轮换、
-保留 30 天并压缩归档。通过 InterceptHandler 将标准库 logging 调用重定向至 loguru，
-统一第三方库与项目内部的日志通道。全局 patcher 在每条日志格式化前剥离消息与异常
-文本的控制字符，防文件名、上游错误体等经日志注入伪造日志行。
+基于 loguru 初始化日志系统，配置控制台与文件双通道输出。文件日志按配置的大小
+轮换、保留天数超期清理并压缩归档。通过 InterceptHandler 将标准库 logging 调用
+重定向至 loguru，统一第三方库与项目内部的日志通道。全局 patcher 在每条日志
+格式化前剥离消息与异常文本的控制字符，防文件名、上游错误体等经日志注入伪造
+日志行。
 """
 
 from __future__ import annotations
@@ -57,6 +58,11 @@ class InterceptHandler(logging.Handler):
 # 字符类取 errors.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
 _LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 
+# 日志轮转与保留的产品默认值单一来源，config 的 _env_field 默认与本模块签名默认
+# 共同引用，防两处漂移。
+DEFAULT_LOG_ROTATION_SIZE_MB = 5
+DEFAULT_LOG_RETENTION_DAYS = 7
+
 
 def _strip_message_control_chars(record: Any) -> None:
     """剥离日志消息与异常消息的控制字符，防日志注入。
@@ -100,21 +106,25 @@ def setup_logging(
     enable_console: bool = True,
     enable_file: bool = True,
     force_standard_logging: bool = False,
+    rotation_mb: int = DEFAULT_LOG_ROTATION_SIZE_MB,
+    retention_days: int = DEFAULT_LOG_RETENTION_DAYS,
 ) -> None:
     """设置日志配置。
 
     未显式传入 log_file 时，默认路径 ``.seedream/logs/seedream_mcp.log`` 相对进程
-    工作目录解析；不同启动方式的 CWD 可能不同，如需固定位置请传入绝对路径或经
-    LOG_FILE 环境变量配置。
+    工作目录解析；生产入口传入按数据根目录推导的路径。
 
     Args:
         log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
         log_file: 日志文件路径；None 时默认 ``.seedream/logs/seedream_mcp.log``
             相对进程工作目录解析。
         enable_console: 是否启用控制台通道，输出至 stderr。
-        enable_file: 是否启用文件通道，按 10 MB 轮换、保留 30 天并压缩归档。
+        enable_file: 是否启用文件通道，按 rotation_mb 轮换、保留 retention_days
+            并压缩归档。
         force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
             logger 已有 handler 时标准库日志不被拦截，输出 warning 提示。
+        rotation_mb: 单个日志文件的大小上限 MB，超过即轮转。
+        retention_days: 轮转日志的保留天数，超期自动清理。
     """
     logger.remove()
     logger.configure(patcher=_strip_message_control_chars)
@@ -151,8 +161,8 @@ def setup_logging(
             format=(
                 "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | " "{name}:{function}:{line} - {message}"
             ),
-            rotation="10 MB",
-            retention="30 days",
+            rotation=f"{rotation_mb} MB",
+            retention=f"{retention_days} days",
             compression="zip",
             backtrace=True,
             diagnose=False,
