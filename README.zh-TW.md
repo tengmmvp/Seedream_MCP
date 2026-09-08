@@ -180,37 +180,37 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 ## ⚙️ 啟動參數
 
 ```bash
-# 驗證與設定來源
---api-key TEXT                                     # API 金鑰（選用，推薦使用環境變數 ARK_API_KEY）
---config-file TEXT                                 # 自訂 .env 設定檔路徑
+# 設定來源
+--config-file TEXT                                 # .env 設定檔路徑；指定後不再讀取專案根與目前目錄的 .env
 
-# 模型與生成
+# 必要設定
+--api-key TEXT                                     # API 金鑰（推薦使用環境變數 ARK_API_KEY；命令列傳入會留在行程清單與 shell 歷史中）
+
+# 模型與端點
 --model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
-                                                 # 模型選擇 (預設: doubao-seedream-5.0)
---default-size [1K|1.5K|2K|3K|4K|<寬>x<高>]        # 圖像尺寸 (預設: 2K，需與所選模型相容)
+                                                 # 模型選擇；完整 Model ID 或 Endpoint ID 經 SEEDREAM_MODEL_ID 傳入 (預設: doubao-seedream-5.0)
+--default-size [1K|1.5K|2K|3K|4K|<寬>x<高>]        # 預設生成尺寸，需與所選模型相容 (預設: 2K)
 --watermark                                        # 啟用浮水印
 --no-watermark                                     # 關閉浮水印
-
-# 連線與傳輸
---base-url TEXT                                    # API 基礎 URL（預設按設定或內建預設值；須 https，http 需設 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
---transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
---host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址必須設定 --auth-token 與 TLS（或 --insecure-allow-non-tls 豁免），否則拒絕啟動)
---port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000)
---stateless                                        # streamable-http 無狀態模式，僅作用於帶交握工作階段的舊規範修訂用戶端鏈路，代價是失去反向通道 (預設關閉)
---web                                              # 開啟 Web 操作台，瀏覽器存取 /web 直接使用 (預設關閉，僅 streamable-http 生效)
---no-web                                           # 關閉 Web 操作台，覆蓋 SEEDREAM_WEB_ENABLED 的開啟設定
-
-# 安全
---auth-token TEXT                                  # Bearer 鑑權權杖（非回環繫結必須設定，也可用 SEEDREAM_HTTP_AUTH_TOKEN）
---ssl-certfile TEXT                                # TLS 憑證檔案（非回環繫結必須設定，防權杖明文傳輸，啟用後最低協定版本 TLS 1.2；受信任反向代理終結 TLS 時可用 --insecure-allow-non-tls 豁免）
---ssl-keyfile TEXT                                 # TLS 私鑰檔案，與 --ssl-certfile 搭配
---insecure-allow-non-tls                           # 明確允許非回環明文執行（僅受信任反向代理終結 TLS 場景）
+--base-url TEXT                                    # 模型 API 端點 URL（須 https，http 需設 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
 
 # 日誌
---log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日誌層級
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日誌層級 (預設: INFO)
+
+# 傳輸與 Web
+--transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
+--host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址必須設定鑑權權杖與 TLS，否則拒絕啟動)
+--port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000，範圍 1-65535)
+--auth-token TEXT                                  # Bearer 鑑權權杖 (非回環繫結必須設定；推薦使用 SEEDREAM_HTTP_AUTH_TOKEN)
+--ssl-certfile TEXT                                # TLS 憑證檔案 (非回環繫結必須設定，與 --ssl-keyfile 成對)
+--ssl-keyfile TEXT                                 # TLS 私鑰檔案 (與 --ssl-certfile 成對)
+--insecure-allow-non-tls                           # 允許非回環明文執行 (僅受信任反向代理終結 TLS 場景)
+--stateless                                        # 無狀態模式，僅影響帶交握工作階段的舊規範修訂用戶端，代價是失去反向通道 (預設關閉)
+--web                                              # 開啟 Web 操作台，瀏覽器存取 /web 直接使用 (預設關閉；未傳入時按 SEEDREAM_WEB_ENABLED 解析)
+--no-web                                           # 關閉 Web 操作台，覆蓋 SEEDREAM_WEB_ENABLED 的開啟設定
 ```
 
-> **安全提示**：`localhost` 不被視為回環位址（其解析依賴 hosts/DNS，可能被污染指向非回環），繫結它同樣要求設定 Bearer 鑑權權杖與 TLS，未設定則服務拒絕啟動；如需回環免鑑權語義，請改繫結 `127.0.0.1` 或 `::1`。非回環繫結同樣必須設定 Bearer 權杖與 TLS。生產與容器部署應透過環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞密鑰，而非 CLI `--api-key` / `--auth-token`（命令列參數會暴露在行程清單與 shell 歷史記錄中）；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
+> **安全提示**：`localhost` 不被視為回環位址（其解析依賴 hosts/DNS，可能被污染指向非回環位址），繫結它與繫結其他非回環位址的要求相同：必須設定 Bearer 鑑權權杖與 TLS，未設定則拒絕啟動；如需免鑑權使用回環位址，請改繫結 `127.0.0.1` 或 `::1`。生產與容器部署的金鑰應經環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞，而非 CLI `--api-key` / `--auth-token`——命令列參數會留在行程清單與 shell 歷史記錄中；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
 
 ### 使用範例
 

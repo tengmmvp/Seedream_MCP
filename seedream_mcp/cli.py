@@ -77,29 +77,31 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
 
-    # API 认证配置
-    parser.add_argument(
-        "--api-key",
-        help="火山引擎 API 密钥；建议优先用 ARK_API_KEY 环境变量，命令行传入会出现在进程列表与 shell 历史中",
-    )
+    # 配置来源
     parser.add_argument(
         "--config-file",
-        help="可选的 .env 配置文件路径，替换默认 .env 加载（指定后不再读取项目根/当前目录的 .env）",
+        help=".env 配置文件路径；指定后不再读取项目根与当前目录的 .env",
     )
 
-    # 模型与生成配置
+    # 必需配置
+    parser.add_argument(
+        "--api-key",
+        help="火山引擎 API 密钥；推荐经 ARK_API_KEY 环境变量提供，命令行传入会留在进程列表与 shell 历史中",
+    )
+
+    # 模型与端点
     parser.add_argument(
         "--model",
         choices=list(MODEL_ALIASES.keys()),
         default=None,
-        help="模型别名（默认按配置或内置默认值）；完整 Model ID 或 Endpoint ID 需经"
-        "环境变量 SEEDREAM_MODEL_ID 传入",
+        help="模型别名；完整 Model ID 或 Endpoint ID 经 SEEDREAM_MODEL_ID 环境变量传入；"
+        "未传入时按配置解析",
     )
     parser.add_argument(
         "--default-size",
         type=str,
         default=None,
-        help='默认生成尺寸（支持 1K/1.5K/2K/3K/4K 或 "<宽>x<高>"，默认按配置或内置默认值）',
+        help='默认生成尺寸，支持 1K/1.5K/2K/3K/4K 或 "<宽>x<高>"；未传入时按配置解析',
     )
     watermark_group = parser.add_mutually_exclusive_group()
     watermark_group.add_argument(
@@ -107,59 +109,76 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         dest="watermark",
         action="store_true",
         default=None,
-        help="启用默认水印（未传入时按配置或内置默认值）",
+        help="启用默认水印；未传入时按配置解析",
     )
     watermark_group.add_argument(
         "--no-watermark",
         dest="watermark",
         action="store_false",
-        help="关闭默认水印（未传入时按配置或内置默认值）",
+        help="关闭默认水印；未传入时按配置解析",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="模型 API 端点 URL；未传入时按配置解析",
     )
 
-    # 日志配置
+    # 日志
     parser.add_argument(
         "--log-level",
         type=_log_level_type,
         choices=list(LEGAL_LOG_LEVELS),
         default=None,
-        help="日志级别（默认按配置或内置默认值）",
+        help="日志级别；未传入时按配置解析",
     )
 
-    # 网络配置
-    parser.add_argument(
-        "--base-url",
-        default=None,
-        help="API 基础 URL（默认按配置或内置默认值）",
-    )
-
-    # 传输层配置
+    # 传输与 Web
     parser.add_argument(
         "--transport",
         choices=["stdio", "streamable-http"],
         default="stdio",
-        help="MCP 传输方式（默认 stdio）",
+        help="MCP 传输方式，默认 stdio",
     )
     parser.add_argument(
         "--host",
         default=DEFAULT_HTTP_HOST,
-        help="streamable-http 监听地址，默认 127.0.0.1，仅 streamable-http 生效；"
-        "绑定 127.0.0.1/::1 以外地址（含 localhost）必须配置 --auth-token 与 TLS，"
-        "否则拒绝启动",
+        help="streamable-http 监听地址，默认 127.0.0.1；绑定非回环地址必须配置鉴权令牌与"
+        " TLS，否则拒绝启动",
     )
     parser.add_argument(
         "--port",
         type=_port_type,
         default=DEFAULT_HTTP_PORT,
-        help="streamable-http 监听端口（默认 8000，仅 streamable-http 生效，范围 1-65535）",
+        help="streamable-http 监听端口，默认 8000，范围 1-65535",
+    )
+    parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="streamable-http 的 Bearer 鉴权令牌；推荐经 SEEDREAM_HTTP_AUTH_TOKEN 环境变量"
+        "提供，绑定非回环地址时必须配置",
+    )
+    parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="TLS 证书文件路径，与 --ssl-keyfile 成对提供；绑定非回环地址时必须配置",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="TLS 私钥文件路径，与 --ssl-certfile 成对提供",
+    )
+    parser.add_argument(
+        "--insecure-allow-non-tls",
+        action="store_true",
+        default=False,
+        help="允许非回环地址以明文运行 streamable-http，仅用于受信反向代理终结 TLS 的场景",
     )
     parser.add_argument(
         "--stateless",
         action="store_true",
         default=False,
-        help="streamable-http 启用无状态模式，默认关闭。仅影响 2025 规范的有会话 legacy "
-        "客户端链路，2026-07-28 客户端本就无会话；开启后 legacy 会话失去反向通道，"
-        "MCP Roots 不可读，本地文件访问边界回退 SEEDREAM_WORKSPACE_ROOT，未配置时"
-        "经声明链回退进程启动目录，不可写回退用户主目录",
+        help="streamable-http 无状态模式，仅影响带握手会话的旧规范修订客户端，代价是失去"
+        "反向通道；默认关闭",
     )
     web_group = parser.add_mutually_exclusive_group()
     web_group.add_argument(
@@ -167,38 +186,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         dest="web",
         action="store_true",
         default=None,
-        help="开启 Web 操作台，浏览器访问 http://<host>:<port>/web 直接使用（未传入时按"
-        " SEEDREAM_WEB_ENABLED 配置，默认关闭；仅 streamable-http 生效）",
+        help="开启 Web 操作台，浏览器经 /web 路径直接使用；未传入时按 SEEDREAM_WEB_ENABLED"
+        " 解析，默认关闭",
     )
     web_group.add_argument(
         "--no-web",
         dest="web",
         action="store_false",
-        help="关闭 Web 操作台，覆盖 SEEDREAM_WEB_ENABLED 的开启设置（仅 streamable-http 生效）",
-    )
-    parser.add_argument(
-        "--auth-token",
-        default=None,
-        help="streamable-http 的 Bearer 鉴权令牌；建议优先用 SEEDREAM_HTTP_AUTH_TOKEN "
-        "环境变量，命令行传入会出现在进程列表与 shell 历史中；绑定非回环地址时必须配置，"
-        "否则拒绝启动",
-    )
-    parser.add_argument(
-        "--ssl-certfile",
-        default=None,
-        help="streamable-http 的 TLS 证书文件路径，绑定非回环地址时必须配置以防令牌明文传输；"
-        "受信反向代理终结 TLS 时可用 --insecure-allow-non-tls 豁免",
-    )
-    parser.add_argument(
-        "--ssl-keyfile",
-        default=None,
-        help="streamable-http 的 TLS 私钥文件路径，与 --ssl-certfile 配合使用",
-    )
-    parser.add_argument(
-        "--insecure-allow-non-tls",
-        action="store_true",
-        default=False,
-        help="显式允许非回环地址以明文运行 streamable-http，仅用于受信反向代理终结 TLS 的场景",
+        help="关闭 Web 操作台，覆盖 SEEDREAM_WEB_ENABLED 的开启设置",
     )
 
     return parser

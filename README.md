@@ -180,37 +180,37 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 ## ⚙️ 启动参数
 
 ```bash
-# 认证与配置来源
---api-key TEXT                                     # API 密钥（可选，推荐用环境变量 ARK_API_KEY）
---config-file TEXT                                 # 自定义 .env 配置文件路径
+# 配置来源
+--config-file TEXT                                 # .env 配置文件路径；指定后不再读取项目根与当前目录的 .env
 
-# 模型与生成
+# 必需配置
+--api-key TEXT                                     # API 密钥（推荐用环境变量 ARK_API_KEY；命令行传入会留在进程列表与 shell 历史中）
+
+# 模型与端点
 --model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
-                                                 # 模型选择 (默认: doubao-seedream-5.0)
---default-size [1K|1.5K|2K|3K|4K|<宽>x<高>]        # 图像尺寸 (默认: 2K，需与所选模型兼容)
+                                                 # 模型选择；完整 Model ID 或 Endpoint ID 经 SEEDREAM_MODEL_ID 传入 (默认: doubao-seedream-5.0)
+--default-size [1K|1.5K|2K|3K|4K|<宽>x<高>]        # 默认生成尺寸，需与所选模型兼容 (默认: 2K)
 --watermark                                        # 启用水印
 --no-watermark                                     # 关闭水印
-
-# 连接与传输
---base-url TEXT                                    # API 基础 URL（默认按配置或内置默认值；须 https，http 需设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
---transport [stdio|streamable-http]                # MCP 传输方式 (默认: stdio)
---host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址必须配置 --auth-token 与 TLS（或 --insecure-allow-non-tls 豁免），否则拒绝启动)
---port INTEGER                                     # streamable-http 监听端口 (默认: 8000)
---stateless                                        # streamable-http 无状态模式，仅作用于带握手会话的旧规范修订客户端链路，代价是失去反向通道 (默认关闭)
---web                                              # 开启 Web 操作台，浏览器访问 /web 直接使用 (默认关闭，仅 streamable-http 生效)
---no-web                                           # 关闭 Web 操作台，覆盖 SEEDREAM_WEB_ENABLED 的开启设置
-
-# 安全
---auth-token TEXT                                  # Bearer 鉴权令牌（非回环绑定必须配置，也可用 SEEDREAM_HTTP_AUTH_TOKEN）
---ssl-certfile TEXT                                # TLS 证书文件（非回环绑定必须配置，防令牌明文传输，启用后最低协议版本 TLS 1.2；受信反向代理终结 TLS 时可用 --insecure-allow-non-tls 豁免）
---ssl-keyfile TEXT                                 # TLS 私钥文件，与 --ssl-certfile 配合
---insecure-allow-non-tls                           # 显式允许非回环明文运行（仅受信反向代理终结 TLS 场景）
+--base-url TEXT                                    # 模型 API 端点 URL（须 https，http 需设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
 
 # 日志
---log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日志级别 (默认: INFO)
+
+# 传输与 Web
+--transport [stdio|streamable-http]                # MCP 传输方式 (默认: stdio)
+--host TEXT                                        # streamable-http 监听地址 (默认: 127.0.0.1；绑定非回环地址必须配置鉴权令牌与 TLS，否则拒绝启动)
+--port INTEGER                                     # streamable-http 监听端口 (默认: 8000，范围 1-65535)
+--auth-token TEXT                                  # Bearer 鉴权令牌 (非回环绑定必须配置；推荐用 SEEDREAM_HTTP_AUTH_TOKEN)
+--ssl-certfile TEXT                                # TLS 证书文件 (非回环绑定必须配置，与 --ssl-keyfile 成对)
+--ssl-keyfile TEXT                                 # TLS 私钥文件 (与 --ssl-certfile 成对)
+--insecure-allow-non-tls                           # 允许非回环明文运行 (仅受信反向代理终结 TLS 场景)
+--stateless                                        # 无状态模式，仅影响带握手会话的旧规范修订客户端，代价是失去反向通道 (默认关闭)
+--web                                              # 开启 Web 操作台，浏览器访问 /web 直接使用 (默认关闭；未传入时按 SEEDREAM_WEB_ENABLED 解析)
+--no-web                                           # 关闭 Web 操作台，覆盖 SEEDREAM_WEB_ENABLED 的开启设置
 ```
 
-> **安全提示**：`localhost` 不被视为回环地址（其解析依赖 hosts/DNS，可能被污染指向非回环），绑定它同样要求配置 Bearer 鉴权令牌与 TLS，未配置则服务拒绝启动；如需回环免鉴权语义，请改绑 `127.0.0.1` 或 `::1`。非回环绑定同样必须配置 Bearer 令牌与 TLS。生产与容器部署应通过环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递密钥，而非 CLI `--api-key` / `--auth-token`（命令行参数会暴露在进程列表与 shell 历史记录中）；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。Web 操作台不改变上述传输层安全要求：开启后新增的 API 面全部强制令牌，免鉴权的仅限无数据的静态页面骨架。
+> **安全提示**：`localhost` 不被视为回环地址（其解析依赖 hosts/DNS，可能被污染指向非回环地址），绑定它与绑定其他非回环地址的要求相同：必须配置 Bearer 鉴权令牌与 TLS，未配置则拒绝启动；如需免鉴权使用回环地址，请改绑 `127.0.0.1` 或 `::1`。生产与容器部署的密钥应经环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递，而非 CLI `--api-key` / `--auth-token`——命令行参数会留在进程列表与 shell 历史记录中；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。Web 操作台不改变上述传输层安全要求：开启后新增的 API 面全部强制令牌，免鉴权的仅限无数据的静态页面骨架。
 
 ### 使用示例
 

@@ -180,37 +180,37 @@ Access control: the page itself opens without a token; its API calls require one
 ## ⚙️ CLI Options
 
 ```bash
-# Authentication & configuration source
---api-key TEXT                                     # API key (optional; ARK_API_KEY env var recommended)
---config-file TEXT                                 # Custom .env config file path
+# Configuration source
+--config-file TEXT                                 # .env config file path; when given, the .env files in the project root and current directory are no longer read
 
-# Model & generation
+# Required
+--api-key TEXT                                     # API key (ARK_API_KEY env var recommended; a CLI value stays in the process list and shell history)
+
+# Model & endpoint
 --model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
-                                                   # Model selection (default: doubao-seedream-5.0)
---default-size [1K|1.5K|2K|3K|4K|<width>x<height>] # Image size (default: 2K; must be compatible with the model)
+                                                   # Model selection; full Model IDs or Endpoint IDs go through SEEDREAM_MODEL_ID (default: doubao-seedream-5.0)
+--default-size [1K|1.5K|2K|3K|4K|<width>x<height>] # Default image size, must be compatible with the model (default: 2K)
 --watermark                                        # Enable watermark
 --no-watermark                                     # Disable watermark
-
-# Connection & transport
---base-url TEXT                                    # API base URL (default per config or built-in default; must be https, http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
---transport [stdio|streamable-http]                # MCP transport (default: stdio)
---host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address requires --auth-token along with TLS (or the --insecure-allow-non-tls exemption), and the service refuses to start without them)
---port INTEGER                                     # streamable-http listen port (default: 8000)
---stateless                                        # streamable-http stateless mode, only affects the sessionful legacy-revision client path at the cost of the back channel (default off)
---web                                              # Enable the web console served at /web (default off; streamable-http only)
---no-web                                           # Disable the web console, overriding an enabled SEEDREAM_WEB_ENABLED
-
-# Security
---auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; alternatively use SEEDREAM_HTTP_AUTH_TOKEN)
---ssl-certfile TEXT                                # TLS certificate file (required for non-loopback binding to prevent plaintext token transmission, minimum protocol version TLS 1.2 once enabled; use --insecure-allow-non-tls when a trusted reverse proxy terminates TLS)
---ssl-keyfile TEXT                                 # TLS private key file, used together with --ssl-certfile
---insecure-allow-non-tls                           # Explicitly allow non-loopback plaintext operation (only for trusted reverse proxy TLS-terminating scenarios)
+--base-url TEXT                                    # Model API endpoint URL (must be https; http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
 
 # Logging
---log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level (default: INFO)
+
+# Transport & Web
+--transport [stdio|streamable-http]                # MCP transport (default: stdio)
+--host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address requires an auth token and TLS, otherwise the service refuses to start)
+--port INTEGER                                     # streamable-http listen port (default: 8000, range 1-65535)
+--auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; SEEDREAM_HTTP_AUTH_TOKEN recommended)
+--ssl-certfile TEXT                                # TLS certificate file (required for non-loopback binding, paired with --ssl-keyfile)
+--ssl-keyfile TEXT                                 # TLS private key file (paired with --ssl-certfile)
+--insecure-allow-non-tls                           # Allow non-loopback plaintext operation (only for trusted reverse proxy TLS-terminating scenarios)
+--stateless                                        # Stateless mode, only affects the sessionful legacy-revision clients at the cost of the back channel (default off)
+--web                                              # Enable the web console served at /web (default off; resolves via SEEDREAM_WEB_ENABLED when unset)
+--no-web                                           # Disable the web console, overriding an enabled SEEDREAM_WEB_ENABLED
 ```
 
-> **Security note**: `localhost` is not treated as a loopback address (its resolution depends on hosts/DNS and may be poisoned to a non-loopback address). Binding to it likewise requires a Bearer auth token and TLS, and the service refuses to start without them; for loopback semantics without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback bindings must likewise configure a Bearer token and TLS. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which are exposed in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
+> **Security note**: `localhost` is not treated as a loopback address (its resolution depends on hosts/DNS and may be poisoned to a non-loopback address), so binding to it carries the same requirements as any other non-loopback address: a Bearer auth token and TLS must be configured, and the service refuses to start without them; to use loopback without auth, bind to `127.0.0.1` or `::1` instead. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which stay in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
 
 ### Usage Examples
 
