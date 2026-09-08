@@ -232,22 +232,19 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 Different models support different capabilities and parameter ranges. Please note this when selecting a model:
 
-| Capability / Parameter                       | 5.0 Pro        | 5.0 / 5.0 Lite | 4.5       | 4.0          |
-| -------------------------------------------- | -------------- | -------------- | --------- | ------------ |
-| Text-to-Image / Image-to-Image / Multi-Image | ✅             | ✅             | ✅        | ✅           |
-| Sequential Generation                        | ❌             | ✅             | ✅        | ✅           |
-| Web Search                                   | ❌             | ✅             | ❌        | ❌           |
-| Streaming Output                             | ❌             | ✅             | ✅        | ✅           |
-| Output Format (png/jpeg)                     | ✅             | ✅             | ❌        | ❌           |
-| Layer Decomposition                          | ✅             | ❌             | ❌        | ❌           |
-| Transparent Background                       | ✅             | ❌             | ❌        | ❌           |
-| Resolution Presets                           | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K   | 1K / 2K / 4K |
-| Default Size (MCP)                           | 2048x2048      | 2048x2048      | 2048x2048 | 2048x2048    |
-| Max Reference Images                         | 10             | 14             | 14        | 14           |
+| Capability / Parameter                       | 5.0 Pro        | 5.0 / 5.0 Lite | 4.5     | 4.0          |
+| -------------------------------------------- | -------------- | -------------- | ------- | ------------ |
+| Text-to-Image / Image-to-Image / Multi-Image | ✅             | ✅             | ✅      | ✅           |
+| Sequential Generation                        | ❌             | ✅             | ✅      | ✅           |
+| Web Search                                   | ❌             | ✅             | ❌      | ❌           |
+| Streaming Output                             | ❌             | ✅             | ✅      | ✅           |
+| Output Format (png/jpeg)                     | ✅             | ✅             | ❌      | ❌           |
+| Layer Decomposition                          | ✅             | ❌             | ❌      | ❌           |
+| Transparent Background                       | ✅             | ❌             | ❌      | ❌           |
+| Resolution Presets                           | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K | 1K / 2K / 4K |
+| Max Reference Images                         | 10             | 14             | 14      | 14           |
 
-> **Default Size (MCP)**: The "Default Size (MCP)" row reflects the runtime resolved value of MCP's unified `default_size=2K` setting (corresponding to `2048x2048`), independent of each model's native default.
-
-> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported (default `2048x2048`), the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
+> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported with default preset `2K`, the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
 
 ## 🛠️ Available Tools
 
