@@ -2,7 +2,8 @@
 
 位置求值按 docs/development/directory-system.md：存储区 = 显式存储声明 >
 基准派生 ``<基准>/.seedream/images``；基准 = MCP Roots 首项 >
-SEEDREAM_WORKSPACE_ROOT > 用户主目录。读权限 = 工作区声明集合 ∪ 存储区。
+SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录。
+读权限 = 工作区声明集合 ∪ 存储区。
 提供路径规范化、越界判定原语，拦截包含 ``..`` 或经由符号链接指向权限范围
 之外的路径。roots 取回有三种形态：工具链经 server 层 Resolve 依赖注入
 （SEP-2577 非废弃形态）、资源处理器在 2026-07-28 及以后的会话上经
@@ -17,6 +18,7 @@ import asyncio
 import heapq
 import os
 import sys
+import tempfile
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -94,11 +96,9 @@ def is_windows_reserved_name(name: str) -> bool:
     return normalized_stem.upper() in WINDOWS_RESERVED_NAMES
 
 
-# 回退主目录日志只记录一次；无 Roots 时本解析随每次文件访问触发，逐次记录会淹没日志。
-_home_fallback_logged = False
-# 已 resolve 回退主目录的进程级缓存：主目录在进程生命周期内不变，缓存消除回退
-# 边界下每次位置求值的重复文件系统调用。
-_home_fallback_root: Path | None = None
+# 已 resolve 保底基准的进程级缓存：首次探测结果复用到进程结束，消除回退边界下
+# 每次位置求值的重复探测。
+_fallback_root: Path | None = None
 
 # 已 resolve 回退根的进程级缓存，键为配置原始字符串，消除回退边界下每次文件访问的
 # 重复 expanduser/resolve 文件系统调用。仅缓存 expanduser 后为绝对路径的配置值：
@@ -154,17 +154,16 @@ def register_env_save_base_dir_provider(provider: EnvValueProvider) -> None:
 
 
 def clear_resolved_env_root_cache() -> None:
-    """清空已 resolve 配置路径与回退主目录的进程级缓存。
+    """清空已 resolve 配置路径与保底基准的进程级缓存。
 
-    覆盖回退工作区根、自动保存基础目录与回退主目录三处缓存及回退日志标记。活动
-    配置变更时由 config 侧调用，测试隔离经 conftest 复位协议调用，使后续访问按
-    新配置与当前环境重新解析。
+    覆盖回退工作区根、自动保存基础目录与保底基准三处缓存。活动配置变更时由
+    config 侧调用，测试隔离经 conftest 复位协议调用，使后续访问按新配置与
+    当前环境重新解析。
     """
-    global _home_fallback_root, _home_fallback_logged
+    global _fallback_root
     _RESOLVED_ENV_ROOT_CACHE.clear()
     _RESOLVED_SAVE_BASE_DIR_CACHE.clear()
-    _home_fallback_root = None
-    _home_fallback_logged = False
+    _fallback_root = None
 
 
 def resolve_cached_save_base_dir(configured_dir: str) -> Path:
@@ -234,8 +233,8 @@ def _resolve_configured_root() -> Path | None:
     return resolved_root
 
 
-def _resolve_home_fallback_root() -> Path:
-    """解析保底的用户主目录，成功结果进程级缓存。
+def _resolve_home_root() -> Path:
+    """解析用户主目录，供保底链的最终回退。
 
     Returns:
         已 resolve 的用户主目录。
@@ -245,42 +244,90 @@ def _resolve_home_fallback_root() -> Path:
             任意 UID），属部署环境缺陷而非调用方参数错误，携带配置指引归配置
             错误档案。
     """
-    global _home_fallback_root, _home_fallback_logged
-    if _home_fallback_root is not None:
-        return _home_fallback_root
     try:
-        home = Path.home().resolve()
+        return Path.home().resolve()
     except (RuntimeError, OSError) as exc:
         raise SeedreamConfigError(
             "无法确定用户主目录，请配置 SEEDREAM_WORKSPACE_ROOT 或 SEEDREAM_AUTO_SAVE_BASE_DIR",
         ) from exc
-    _home_fallback_root = home
-    if not _home_fallback_logged:
-        _home_fallback_logged = True
-        logger.info(
-            "未声明 MCP Roots 且未配置 SEEDREAM_WORKSPACE_ROOT，工作位置保底为用户"
-            "主目录 {}，默认存储区为 {}",
-            home,
-            home / ".seedream" / "images",
+
+
+def _usable_cwd_root() -> Path | None:
+    """返回可写的进程启动目录；UNC 形态或不可写返回 None。
+
+    可写性以创建并删除临时探测文件实测，不在目录留下副作用。
+    """
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        return None
+    if is_unc_path(str(cwd)):
+        logger.debug("进程启动目录为 UNC 形态，不作为保底基准")
+        return None
+    try:
+        fd, probe_name = tempfile.mkstemp(prefix=".seedream-probe-", dir=cwd)
+    except OSError:
+        return None
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(probe_name)
+    except OSError:
+        pass
+    try:
+        return cwd.resolve()
+    except OSError:
+        return None
+
+
+def _resolve_fallback_root() -> Path:
+    """解析无任何声明时的保底基准：进程启动目录可写时采用，否则回退用户主目录。
+
+    成功结果进程级缓存。
+
+    Returns:
+        已 resolve 的保底基准目录。
+
+    Raises:
+        SeedreamConfigError: 进程启动目录与用户主目录均不可用，携带配置指引归
+            配置错误档案。
+    """
+    global _fallback_root
+    if _fallback_root is not None:
+        return _fallback_root
+    cwd_root = _usable_cwd_root()
+    if cwd_root is not None:
+        root = cwd_root
+        message = (
+            "未声明 MCP Roots 且未配置 SEEDREAM_WORKSPACE_ROOT，工作位置保底为"
+            "进程启动目录 {}，默认存储区为 {}"
         )
-    return home
+    else:
+        root = _resolve_home_root()
+        message = "进程启动目录不可用作保底，工作位置回退为用户主目录 {}，默认存储区为 {}"
+    _fallback_root = root
+    logger.info(message, root, root / ".seedream" / "images")
+    return root
 
 
 def resolve_env_workspace_root() -> Path:
-    """解析环境回退的工作位置：已配置根，无配置时保底用户主目录。
+    """解析环境回退的工作位置：已配置根，无配置时走保底链。
 
-    无任何工作类声明时落用户主目录，首次回退记录一次日志提示默认存储位置。
+    无任何工作类声明时落进程启动目录，不可写回退用户主目录；首次保底记录
+    一次日志提示默认存储位置。
 
     Returns:
-        已 resolve 的工作位置基准目录；无任何配置时为用户主目录。
+        已 resolve 的工作位置基准目录；无任何配置时为保底链结果。
 
     Raises:
-        SeedreamConfigError: 无配置且用户主目录不可解析。
+        SeedreamConfigError: 无配置且工作目录与用户主目录均不可用。
     """
     resolved_root = _resolve_configured_root()
     if resolved_root is not None:
         return resolved_root
-    return _resolve_home_fallback_root()
+    return _resolve_fallback_root()
 
 
 def resolve_save_root() -> Path:
@@ -417,8 +464,8 @@ def session_declares_roots_capability(session: Any) -> bool:
 
 
 def _log_roots_read_failure(exc: Exception, reason: str) -> None:
-    """记录 roots 读取失败，工作位置经声明链回退（配置根或用户主目录）。"""
-    logger.error("{}: {}；本次请求的工作位置经声明链回退", reason, exc)
+    """记录 roots 读取失败，本次工作位置经声明链回退。"""
+    logger.error("{}: {}，本次请求的工作位置经声明链回退", reason, exc)
 
 
 def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | None]:
@@ -460,7 +507,7 @@ async def workspace_roots_scope_from_result(
         resolved_roots = await asyncio.to_thread(_roots_result_to_paths, roots_result)
         token = _apply_roots_token(resolved_roots)
     else:
-        logger.debug("客户端未声明 roots capability，未发起 roots 取回，回退环境变量边界")
+        logger.debug("客户端未声明 roots capability，跳过 roots 取回，回退环境变量边界")
 
     try:
         yield resolved_roots
@@ -500,7 +547,7 @@ async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
     list_roots = getattr(session, "list_roots", None) if session is not None else None
     roots_supported = session is not None and callable(list_roots)
     if roots_supported and not session_declares_roots_capability(session):
-        logger.debug("客户端未声明 roots capability，跳过 roots/list，回退环境变量边界")
+        logger.debug("客户端未声明 roots capability，跳过 roots 取回，回退环境变量边界")
         roots_supported = False
 
     if roots_supported:

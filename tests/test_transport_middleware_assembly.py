@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 from starlette.types import Message, Receive, Send
 
+from _log_fakes import capture_loguru_messages
 import seedream_mcp.transport as transport_module
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.transport import (
@@ -415,9 +416,9 @@ async def test_origin_guard_fetch_site_rejection_matrix(
 @pytest.mark.parametrize(
     ("host", "auth_enabled", "expected_fragment", "absent_fragment"),
     [
-        ("127.0.0.1", True, "已启用 Bearer 鉴权", "未启用"),
-        ("127.0.0.1", False, "未启用应用层认证", "已启用 Bearer 鉴权"),
-        ("0.0.0.0", True, "已启用 Bearer 鉴权", "未启用"),
+        ("127.0.0.1", True, "已启用 Bearer 鉴权", "未启用鉴权"),
+        ("127.0.0.1", False, "未启用鉴权", "已启用 Bearer 鉴权"),
+        ("0.0.0.0", True, "已启用 Bearer 鉴权", "未启用鉴权"),
         ("0.0.0.0", False, "未启用鉴权", "已启用 Bearer 鉴权"),
     ],
 )
@@ -426,37 +427,42 @@ def test_warn_remote_exposure_reports_truthful_auth_state(
     auth_enabled: bool,
     expected_fragment: str,
     absent_fragment: str,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """告警文案与传入的鉴权状态一致，任何调用路径不得输出相反状态。
 
-    非回环且未启用时若沿用已启用文案，运维会误判暴露面已受保护。
+    非回环且未启用时若沿用已启用文案，运维会误判暴露面已受保护。告警只保留
+    鉴权风险一句话，Web 防线细节由中间件装配的 INFO 承担。
     """
-    _warn_remote_exposure(host, auth_enabled)
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        _warn_remote_exposure(host, auth_enabled)
 
-    output = capsys.readouterr().err
+    output = "".join(records)
     assert expected_fragment in output
     assert absent_fragment not in output
+    assert "Web 操作台" not in output
 
 
-def test_warn_remote_exposure_appends_web_notice_when_enabled(
-    capsys: pytest.CaptureFixture[str],
+def test_attach_web_notice_logged_via_info_per_token_state(
+    active_config: None,
 ) -> None:
-    """web_enabled 时告警按鉴权状态分支追加 Web 说明，默认形态不出现该文案。"""
-    _warn_remote_exposure("127.0.0.1", True)
-    assert "Web 操作台已开启" not in capsys.readouterr().err
+    """Web 防线说明由中间件装配的 INFO 按令牌状态分别陈述，不进入启动警告。"""
+    records: list[str] = []
+    with capture_loguru_messages(records, level="INFO"):
+        _attach_streamable_http_middleware(
+            _FakeStarletteApp(), "127.0.0.1", "secret", web_enabled=True
+        )
 
-    _warn_remote_exposure("127.0.0.1", True, web_enabled=True)
-
-    token_output = capsys.readouterr().err
-    assert "Web 操作台已开启" in token_output
-    assert "/web/api 接口仍要求 Bearer 令牌" in token_output
+    token_output = "".join(records)
+    assert "Web 操作台已开启：静态页面免鉴权，/web/api 接口要求 Bearer 令牌" in token_output
     assert "未配置令牌" not in token_output
 
-    _warn_remote_exposure("127.0.0.1", False, web_enabled=True)
+    without_token_records: list[str] = []
+    with capture_loguru_messages(without_token_records, level="INFO"):
+        _attach_streamable_http_middleware(_FakeStarletteApp(), "127.0.0.1", "", web_enabled=True)
 
-    no_token_output = capsys.readouterr().err
-    assert "Web 操作台已开启且未配置令牌" in no_token_output
-    assert "跨源与跨站请求（含兄弟子域图片嵌入）将被拒绝" in no_token_output
-    assert "建议配置 --auth-token" in no_token_output
-    assert "仍要求 Bearer 令牌" not in no_token_output
+    without_token_output = "".join(without_token_records)
+    assert "Web 操作台未配置令牌，已启用 /web/api 同源 Origin 与跨站 Sec-Fetch 校验" in (
+        without_token_output
+    )
+    assert "要求 Bearer 令牌" not in without_token_output

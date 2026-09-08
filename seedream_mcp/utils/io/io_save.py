@@ -266,7 +266,7 @@ async def _run_save_with_degradation(
         logger.error("{}文件系统错误: {}{}", log_label, log_context, e)
         return AutoSaveResult(success=False, original_url=original_url, error=f"文件系统错误: {e}")
     except Exception as e:
-        logger.error("{}出现未知错误: {}{}", log_label, log_context, e)
+        logger.error("{}未知错误: {}{}", log_label, log_context, e)
         return AutoSaveResult(success=False, original_url=original_url, error=f"未知错误: {e}")
 
 

@@ -188,5 +188,5 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     suffix = inferred_extension or validated_path.suffix.lower()
     mime_type = MIME_BY_EXTENSION[suffix]
 
-    logger.info("成功处理图片文件: {} ({} bytes)", validated_path, len(image_bytes))
+    logger.info("成功处理图片文件: {} ({} 字节)", validated_path, len(image_bytes))
     return f"data:{mime_type};base64,{image_b64}"

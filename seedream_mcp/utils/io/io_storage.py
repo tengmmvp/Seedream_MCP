@@ -501,8 +501,8 @@ class FileManager:
             # 目录项。
             self._prune_empty_dirs(directories)
         except Exception as e:
-            errors.append(f"清理过程出错: {e}")
-            logger.error("清理过程出错: {}", e)
+            errors.append(f"清理过程失败: {e}")
+            logger.error("清理过程失败: {}", e)
         return {"deleted_files": deleted_files, "deleted_size": deleted_size, "errors": errors}
 
     @staticmethod

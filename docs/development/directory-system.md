@@ -2,7 +2,7 @@
 
 ## 一、核心概念
 
-- **工作区**：当前生效的工作位置声明集合（全部 Roots，或 `SEEDREAM_WORKSPACE_ROOT`，或用户主目录），读权限的构成单位。
+- **工作区**：当前生效的工作位置声明集合（全部 Roots，或 `SEEDREAM_WORKSPACE_ROOT`，或进程启动目录，或用户主目录），读权限的构成单位。
 - **基准**：工作区中承担派生职责的代表目录，多 Roots 时取首项。
 - **存储区**：默认保存位置与管理边界所在的目录，取 `SEEDREAM_AUTO_SAVE_BASE_DIR`，未配置时由基准派生 `<基准>/.seedream/images`。
 
@@ -40,6 +40,7 @@
 
 基准 = MCP Roots 首项
      > SEEDREAM_WORKSPACE_ROOT
+     > 进程启动目录
      > 用户主目录
 ```
 
@@ -67,7 +68,7 @@ save_path 是本次调用的临时保存目录：用户可自定义，路径合�
 
 路径输入规范：空字节、UNC 形态、冒号分量（NTFS ADS）、驱动器相对与有根无盘符形态在权限判定之前拒绝。
 
-兜底提示：无任何工作类声明时落到用户主目录，首次求值时记录一次存储区位置。
+**兜底提示**：无任何工作类声明时落到进程启动目录，不可写则回退用户主目录；首次求值时记录一次存储区位置。
 
 ## 四、场景矩阵
 
@@ -81,8 +82,8 @@ save_path 是本次调用的临时保存目录：用户可自定义，路径合�
 | ✓     | ✗                | ✗          | Roots 首项     | Roots 派生          | Roots（全部）             |
 | ✗     | ✓                | ✓          | WORKSPACE_ROOT | BASE_DIR            | WORKSPACE_ROOT ∪ BASE_DIR |
 | ✗     | ✓                | ✗          | WORKSPACE_ROOT | WORKSPACE_ROOT 派生 | WORKSPACE_ROOT            |
-| ✗     | ✗                | ✓          | 用户主目录     | BASE_DIR            | 主目录 ∪ BASE_DIR         |
-| ✗     | ✗                | ✗          | 用户主目录     | 主目录派生          | 主目录                    |
+| ✗     | ✗                | ✓          | 进程启动目录   | BASE_DIR            | 启动目录 ∪ BASE_DIR       |
+| ✗     | ✗                | ✗          | 进程启动目录   | 启动目录派生        | 启动目录                  |
 
 ## 五、演进约束
 

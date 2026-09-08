@@ -341,15 +341,17 @@ async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
         assert get_workspace_root() == env_root.resolve()
 
 
-async def test_workspace_roots_scope_falls_back_to_home_without_env_root(
+async def test_workspace_roots_scope_falls_back_to_cwd_without_env_root(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无反向通道且无环境变量根时回退用户主目录，不放宽到进程 CWD。"""
+    """无反向通道且无环境变量根时回退保底基准（进程启动目录）。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.chdir(tmp_path)
 
     async with workspace_roots_scope(_NoBackChannelContext()):
-        assert get_workspace_root() == Path.home().resolve()
+        assert get_workspace_root() == tmp_path.resolve()
 
 
 async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with_error_log(
@@ -388,15 +390,17 @@ async def test_workspace_roots_scope_errors_and_falls_back_on_generic_error(
     assert capture.warnings == []
 
 
-async def test_workspace_roots_scope_transient_error_falls_back_to_home(
+async def test_workspace_roots_scope_transient_error_falls_back_to_cwd(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 瞬时失败且无环境变量根时回退用户主目录，不放宽到进程 CWD。"""
+    """roots/list 瞬时失败且无环境变量根时回退保底基准（进程启动目录）。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.chdir(tmp_path)
 
     async with workspace_roots_scope(_TimeoutContext()):
-        assert get_workspace_root() == Path.home().resolve()
+        assert get_workspace_root() == tmp_path.resolve()
 
 
 async def test_workspace_roots_scope_transient_error_falls_back_to_env_root_with_error_log(

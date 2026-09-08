@@ -1014,14 +1014,11 @@ def cli_main() -> int:
             error = _validate_http_security(args, auth_token, _LOOPBACK_HOSTS)
         if error is not None:
             logger.error(error)
+            # 退出路径的 stderr 兜底：LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见
             print(error, file=sys.stderr)
             return 1
         if transport == "streamable-http":
-            _warn_remote_exposure(
-                args.host,
-                auth_enabled=bool(auth_token),
-                web_enabled=config.web_enabled,
-            )
+            _warn_remote_exposure(args.host, auth_enabled=bool(auth_token))
             _run_streamable_http(
                 args.host,
                 args.port,

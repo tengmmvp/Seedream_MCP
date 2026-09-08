@@ -547,7 +547,7 @@ LOG_FILE=                                   # 日志文件路径（默认 .seedr
 
 # 自动保存
 SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=                # 图片存储区目录（显式配置直接生效并自动进入读取范围；默认 <基准>/.seedream/images，基准取 MCP Roots 首项、SEEDREAM_WORKSPACE_ROOT 或用户主目录）
+SEEDREAM_AUTO_SAVE_BASE_DIR=                # 图片存储区目录（显式配置直接生效并自动进入读取范围；默认 <基准>/.seedream/images，基准取 MCP Roots 首项、SEEDREAM_WORKSPACE_ROOT、进程启动目录或用户主目录）
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # 单张图片下载超时（秒），上限 720
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # 下载失败最大重试次数（0 表示不重试）
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # 单张图片大小上限（字节，默认 50MB）；另兼作流式单事件截断阈值与响应体读取上限的推导基准
@@ -560,7 +560,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # 保存目录总字节上限（�
 SEEDREAM_PREVIEW_ENABLED=true                 # 生成结果附带已保存图片的缩略图（对话内直接预览，依赖自动保存；默认开启）
 
 # 工作区与传输
-SEEDREAM_WORKSPACE_ROOT=                    # 无 MCP Roots 时的工作位置声明（进入读取范围并作为存储区的派生基准；无任何声明时保底用户主目录）
+SEEDREAM_WORKSPACE_ROOT=                    # 无 MCP Roots 时的工作位置声明（进入读取范围并作为存储区的派生基准；无任何声明时保底进程启动目录，不可写回退用户主目录）
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer 鉴权令牌（非回环绑定必须配置，否则拒绝启动；另需 TLS 或 --insecure-allow-non-tls 豁免）
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http 请求体上限（字节，≥1MB，默认 64MB；单图 data URI 约 40MB，兼顾多图融合）
 SEEDREAM_WEB_ENABLED=false                  # Web 操作台开关（--web/--no-web 覆盖；仅 streamable-http 生效，开启后浏览器可访问 /web 页面与历史图库，默认关闭）
@@ -580,7 +580,7 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE 流式响应每次读取块�
 ### 部署注意事项
 
 - **保存目录归服务管理**：自动保存的按天清理与总量配额会删除保存目录内**所有**符合图片扩展名的过期文件与空目录，不区分是否由本服务生成。请勿将 `SEEDREAM_AUTO_SAVE_BASE_DIR` 指向个人相册等含重要图片的目录。经 `save_path` 保存到存储区之外的文件不参与自动清理与总量配额，由调用方自行管理。
-- **多租户 streamable-http 部署建议显式设置 `SEEDREAM_WORKSPACE_ROOT`**：工作位置按 MCP Roots > 该环境变量 > 用户主目录顺位取值，显式声明可使读取范围与存储区落点确定。
+- **多租户 streamable-http 部署建议显式设置 `SEEDREAM_WORKSPACE_ROOT`**：工作位置按 MCP Roots > 该环境变量 > 进程启动目录 > 用户主目录顺位取值，显式声明可使读取范围与存储区落点确定。
 - **未认证请求的体积限制**：未携带有效令牌的 chunked 请求不读 body 即返回 401，其体积限制依赖 uvicorn 层或前置反向代理；公网暴露部署请在代理层配置请求体上限。
 - **Linux 宿主挂载目录属主**：容器以 uid 1000 的非 root 用户运行，Linux 宿主上 compose 挂载的 `./.seedream` 目录需对该用户可写（`mkdir -p .seedream && chown 1000:1000 .seedream`）；Docker Desktop 不受影响。
 - **出站连接不走系统代理**：API 调用与图片下载的出站 HTTP 客户端固定忽略 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` 等系统代理环境变量，防止代理截获 API Key 或绕过下载安全校验；企业代理环境需保证主机直连公网，或经网络层透明代理转发。

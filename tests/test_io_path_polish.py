@@ -154,32 +154,79 @@ def test_register_env_workspace_root_provider_replaces_previous() -> None:
         io_path_module._env_value_providers.update(original)
 
 
-def test_home_fallback_unresolvable_raises_config_error_with_guidance(
+def test_fallback_all_unavailable_raises_config_error_with_guidance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """主目录不可解析属部署环境缺陷，报携带配置指引的配置错误而非 RuntimeError 逃出。"""
+    """工作目录与主目录均不可用属部署环境缺陷，报携带配置指引的配置错误而非 RuntimeError 逃出。"""
     from seedream_mcp.utils.core.errors import SeedreamConfigError
 
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
-    monkeypatch.setattr(io_path_module, "_home_fallback_root", None)
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+
+    def _no_cwd() -> Path:
+        raise FileNotFoundError("cwd deleted")
 
     def _no_home() -> Path:
         raise RuntimeError("Could not resolve home directory")
 
+    monkeypatch.setattr(Path, "cwd", _no_cwd)
     monkeypatch.setattr(Path, "home", _no_home)
 
     with pytest.raises(SeedreamConfigError, match="SEEDREAM_WORKSPACE_ROOT"):
         io_path_module.resolve_env_workspace_root()
 
 
-def test_home_fallback_root_cached_across_calls(
+def test_fallback_prefers_writable_cwd_without_touching_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """主目录兜底成功解析后进程级缓存，重复求值不再触达 Path.home。"""
+    """保底基准取可写的进程启动目录，主目录不参与求值，探测不留目录副作用。"""
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
-    monkeypatch.setattr(io_path_module, "_home_fallback_root", None)
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+    monkeypatch.chdir(tmp_path)
+
+    def _fail_home() -> Path:
+        raise AssertionError("工作目录可写时保底不应触达主目录")
+
+    monkeypatch.setattr(Path, "home", _fail_home)
+    records: list[str] = []
+    with capture_loguru_messages(records, level="INFO"):
+        assert io_path_module.resolve_env_workspace_root() == tmp_path.resolve()
+
+    # 临时探测文件用后即删，目录零残留
+    assert list(tmp_path.iterdir()) == []
+    assert any("工作位置保底为进程启动目录" in record for record in records)
+
+
+def test_usable_cwd_root_rejects_unc_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UNC 形态的进程启动目录不作为保底基准，不触发探测与路径解析。"""
+
+    def _unc_cwd() -> Path:
+        return Path("//server/share")
+
+    def _explode_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        raise AssertionError("UNC 形态的启动目录不得进入写探测")
+
+    monkeypatch.setattr(Path, "cwd", _unc_cwd)
+    monkeypatch.setattr(io_path_module.tempfile, "mkstemp", _explode_mkstemp)
+
+    assert io_path_module._usable_cwd_root() is None
+
+
+def test_fallback_caches_home_when_cwd_not_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """工作目录写探测失败回退主目录，回退结果进程级缓存，重复求值不再触达 Path.home。"""
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+    monkeypatch.chdir(tmp_path)
+
+    def _denied(*args: object, **kwargs: object) -> tuple[int, str]:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(io_path_module.tempfile, "mkstemp", _denied)
     home = tmp_path / "home"
     home.mkdir()
     calls = {"count": 0}
@@ -247,7 +294,7 @@ def test_find_images_rejects_unc_directory_before_resolve(
 def test_read_context_degrades_to_save_root_when_home_unresolvable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """主目录不可解析且显式存储声明可用时，读权限退化为仅存储区不整体失败。
+    """保底链整体不可用且显式存储声明可用时，读权限退化为仅存储区不整体失败。
 
     显式 BASE_DIR 在场时基准链不参与存储区求值，工作区链的失败不应拖垮
     读取与浏览。
@@ -259,11 +306,15 @@ def test_read_context_degrades_to_save_root_when_home_unresolvable(
     monkeypatch.setenv("SEEDREAM_AUTO_SAVE_BASE_DIR", str(save_root))
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
-    monkeypatch.setattr(io_path_module, "_home_fallback_root", None)
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+
+    def _no_cwd() -> Path:
+        raise FileNotFoundError("cwd deleted")
 
     def _no_home() -> Path:
         raise RuntimeError("Could not resolve home directory")
 
+    monkeypatch.setattr(Path, "cwd", _no_cwd)
     monkeypatch.setattr(Path, "home", _no_home)
 
     # 工作区链单点仍如实报配置指引
@@ -297,21 +348,19 @@ def test_resolve_save_root_wraps_runtime_error_with_configured_value(
     assert "C:" not in message and "Users" not in message
 
 
-def test_clear_resolved_env_root_cache_resets_home_fallback(
+def test_clear_resolved_env_root_cache_resets_fallback_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """回退主目录缓存与回退日志标记随配置路径缓存一并复位。
+    """保底基准缓存随配置路径缓存一并复位。
 
-    隔离用例经 monkeypatch 改写主目录解析后，复位协议使后续用例重新解析，
-    不再读到先前用例缓存的陈旧主目录。
+    隔离用例经 monkeypatch 改写保底解析后，复位协议使后续用例重新解析，
+    不再读到先前用例缓存的陈旧基准。
     """
-    monkeypatch.setattr(io_path_module, "_home_fallback_root", Path("D:/stale"))
-    monkeypatch.setattr(io_path_module, "_home_fallback_logged", True)
+    monkeypatch.setattr(io_path_module, "_fallback_root", Path("D:/stale"))
 
     io_path_module.clear_resolved_env_root_cache()
 
-    assert io_path_module._home_fallback_root is None
-    assert io_path_module._home_fallback_logged is False
+    assert io_path_module._fallback_root is None
 
 
 @pytest.mark.parametrize("unc_dir", [r"\\nas\pics", "//nas/pics"])

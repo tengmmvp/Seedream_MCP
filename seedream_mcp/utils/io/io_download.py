@@ -924,7 +924,7 @@ class DownloadManager:
                 # 编程 bug 等非可重试意外错误直接抛出不浪费退避等待；调用方 auto_save
                 # 仍有兜底 except Exception 负责降级返回原始 URL。
                 logger.opt(exception=True).warning(
-                    "下载出现非预期错误，不再重试 (尝试 {}): {}",
+                    "下载非预期错误，不再重试 (尝试 {}): {}",
                     attempt + 1,
                     e,
                 )

@@ -1347,7 +1347,7 @@ class SeedreamClient:
             except SeedreamAPIError as exc:
                 if exc.status_code is None:
                     self.logger.warning(
-                        "{} API 调用失败（无 HTTP 状态码，不再重试）: {}",
+                        "{} API 调用失败 (无 HTTP 状态码，不再重试): {}",
                         endpoint,
                         exc.message,
                     )
@@ -1355,7 +1355,7 @@ class SeedreamClient:
                 status_code = exc.status_code
                 if not self._is_retryable_status(status_code):
                     self.logger.warning(
-                        "{} API 调用失败（状态码={}），不再重试: {}",
+                        "{} API 调用失败 (状态码={}, 不再重试): {}",
                         endpoint,
                         status_code,
                         exc.message,
@@ -1398,7 +1398,7 @@ class SeedreamClient:
                     raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(exc)}") from exc
             except Exception as exc:
                 self.logger.warning(
-                    "{} API 调用出现非预期错误，不再重试 (尝试 {}/{}): {}",
+                    "{} API 调用非预期错误，不再重试 (尝试 {}/{}): {}",
                     endpoint,
                     attempt + 1,
                     total_attempts,

@@ -13,7 +13,6 @@ import asyncio
 import hmac
 import json
 import ssl
-import sys
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
@@ -467,6 +466,7 @@ def _attach_streamable_http_middleware(
                 exempt_exact=WEB_EXEMPT_EXACT_PATHS,
                 exempt_prefixes=WEB_EXEMPT_PATH_PREFIXES,
             )
+            logger.info("Web 操作台已开启：静态页面免鉴权，/web/api 接口要求 Bearer 令牌")
         else:
             app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
@@ -526,43 +526,26 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     return TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
 
-def _warn_remote_exposure(host: str, auth_enabled: bool, web_enabled: bool = False) -> None:
-    """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致，同时写日志与 stderr。"""
+def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
+    """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致。"""
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
             message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"
         else:
             message = (
-                "streamable-http 未启用应用层认证，仅限本机信任环境使用；"
-                "如需远程访问，请使用 --auth-token 配置鉴权或经反向代理增加鉴权。"
+                "streamable-http 未启用鉴权，仅限本机信任环境使用；远程访问请配置 --auth-token。"
             )
     elif auth_enabled:
         message = (
-            f"streamable-http 绑定到 {host}（非回环地址）并已启用 Bearer 鉴权；"
+            f"streamable-http 绑定到 {host}（非回环地址）且已启用 Bearer 鉴权，"
             "请确认网络隔离与令牌妥善保管。"
         )
     else:
         message = (
-            f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险；"
-            "请使用 --auth-token 配置鉴权。"
+            f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险，"
+            "请配置 --auth-token。"
         )
-    if web_enabled:
-        # Web 附加句与实际防线一致：有令牌时 API 由 Bearer 把守；无令牌时由
-        # Origin 守卫与 Sec-Fetch 跨站校验限制为同源访问，文案不得陈述不存在
-        # 的防线。
-        if auth_enabled:
-            message += (
-                "Web 操作台已开启：/web 与 /web/static 静态页面免鉴权，"
-                "全部 /web/api 接口仍要求 Bearer 令牌。"
-            )
-        else:
-            message += (
-                "Web 操作台已开启且未配置令牌：/web/api 仅允许同源浏览器与本地进程访问，"
-                "跨源与跨站请求（含兄弟子域图片嵌入）将被拒绝，建议配置 --auth-token。"
-            )
     logger.warning(message)
-    # 控制台输出走 stderr，与 server.py 的运行告警一致，避免污染 stdio 传输的 stdout。
-    print(message, file=sys.stderr)
 
 
 async def _drain_pending_tasks() -> None:

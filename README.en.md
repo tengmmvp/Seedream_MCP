@@ -547,7 +547,7 @@ LOG_FILE=                                   # Log file path (default .seedream/l
 
 # Auto-save
 SEEDREAM_AUTO_SAVE_ENABLED=true
-SEEDREAM_AUTO_SAVE_BASE_DIR=                # Image storage root directory (explicit value takes effect directly and automatically enters the read scope; default <base>/.seedream/images, where base is the first MCP Root, SEEDREAM_WORKSPACE_ROOT, or the user home directory)
+SEEDREAM_AUTO_SAVE_BASE_DIR=                # Image storage root directory (explicit value takes effect directly and automatically enters the read scope; default <base>/.seedream/images, where base is the first MCP Root, SEEDREAM_WORKSPACE_ROOT, the process working directory, or the user home directory)
 SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT=30      # Per-image download timeout (seconds, max 720)
 SEEDREAM_AUTO_SAVE_MAX_RETRIES=3            # Max retries for failed downloads (0 disables retry)
 SEEDREAM_AUTO_SAVE_MAX_FILE_SIZE=52428800   # Max file size per image (bytes, default 50MB); also the derivation base for the stream single-event truncate threshold and the response-body read limit
@@ -560,7 +560,7 @@ SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=10737418240 # Total byte cap for the save dir
 SEEDREAM_PREVIEW_ENABLED=true                 # Attach thumbnail previews of saved images to generation results (requires auto-save; default on)
 
 # Workspace & transport
-SEEDREAM_WORKSPACE_ROOT=                    # Workspace declaration when no MCP Roots exist (enters the read scope and serves as the storage root base; falls back to the user home directory when nothing is declared)
+SEEDREAM_WORKSPACE_ROOT=                    # Workspace declaration when no MCP Roots exist (enters the read scope and serves as the storage root base; falls back to the process working directory when nothing is declared, then the user home directory)
 SEEDREAM_HTTP_AUTH_TOKEN=                   # streamable-http Bearer auth token (required for non-loopback binding, or the service refuses to start; TLS or the --insecure-allow-non-tls exemption is also required)
 SEEDREAM_HTTP_MAX_BODY_SIZE=67108864        # streamable-http request body size limit (bytes, ≥1MB, default 64MB; a single data-URI image is ~40MB, 64MB covers multi-image fusion)
 SEEDREAM_WEB_ENABLED=false                  # Web console toggle (--web/--no-web overrides; streamable-http only, serves the /web UI and image gallery when enabled, off by default)
@@ -580,7 +580,7 @@ SEEDREAM_STREAM_CHUNK_SIZE=1048576            # SSE stream per-read chunk size (
 ### Deployment Notes
 
 - **The save directory is managed by the server**: age-based cleanup and total-size quota eviction delete **all** expired files with supported image extensions (and empty directories) inside the save directory, regardless of whether they were created by this server. Do not point `SEEDREAM_AUTO_SAVE_BASE_DIR` at directories holding important personal images. Files saved outside the storage root via `save_path` are excluded from age-based cleanup and quota eviction and are managed by the caller.
-- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: the workspace resolves in the order MCP Roots > this variable > the user home directory; an explicit declaration makes both the read scope and the storage root location deterministic.
+- **Set `SEEDREAM_WORKSPACE_ROOT` explicitly for multi-tenant streamable-http deployments**: the workspace resolves in the order MCP Roots > this variable > the process working directory > the user home directory; an explicit declaration makes both the read scope and the storage root location deterministic.
 - **Body size of unauthenticated requests**: unauthenticated chunked requests are rejected with 401 before their body is read; their size limiting relies on uvicorn or a fronting reverse proxy. Configure a request body limit at the proxy layer for public deployments.
 - **Ownership of the mounted directory on Linux hosts**: the container runs as a non-root user with uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user (`mkdir -p .seedream && chown 1000:1000 .seedream`); Docker Desktop is unaffected.
 - **Outbound connections ignore system proxies**: the outbound HTTP clients for API calls and image downloads ignore system proxy environment variables (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`, etc.) by design, preventing a proxy from intercepting the API key or bypassing download security checks; in corporate proxy environments, ensure the host has direct internet access or is served by a transparent network-layer proxy.
