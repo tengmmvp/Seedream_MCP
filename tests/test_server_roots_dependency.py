@@ -10,7 +10,7 @@ from mcp.server.mcpserver.resolve import ListRoots
 
 from seedream_mcp.server import _workspace_roots_dependency
 
-from test_workspace_roots_scope import _CapabilityDeclaringSession
+from _roots_session_fakes import CapabilityDeclaringSession as _CapabilityDeclaringSession
 
 
 class _DependencyContext:

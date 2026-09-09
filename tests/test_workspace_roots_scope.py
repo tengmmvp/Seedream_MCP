@@ -7,9 +7,8 @@ from typing import Any, cast
 import pytest
 from mcp.server.mcpserver import Context
 from mcp.shared.exceptions import NoBackChannelError
-from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult, Root
+from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult
 from PIL import Image
-from pydantic import FileUrl
 
 import seedream_mcp.utils.io.io_path as io_path_module
 from seedream_mcp.client import SeedreamClient
@@ -20,41 +19,11 @@ from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_scope
 
 from _log_fakes import RecordingLogger
-
-
-class _FakeSession:
-    """以固定根目录应答 list_roots 的会话替身。"""
-
-    def __init__(self, roots: list[Path]) -> None:
-        self._roots = roots
-
-    async def list_roots(self) -> ListRootsResult:
-        return _roots_result(self._roots)
-
-
-def _roots_result(roots: list[Path]) -> ListRootsResult:
-    """构造工具链 resolver 注入形态的 roots 结果。"""
-    return ListRootsResult(
-        roots=[Root(uri=cast(FileUrl, root.as_uri()), name=root.name) for root in roots]
-    )
-
-
-class _CapabilityDeclaringSession(_FakeSession):
-    """带 capability 探测的会话替身：check_client_capability 返回固定声明结果。"""
-
-    def __init__(self, roots: list[Path], declared: bool) -> None:
-        super().__init__(roots)
-        self.declared = declared
-        self.capability_probes = 0
-        self.list_roots_calls = 0
-
-    def check_client_capability(self, capability: object) -> bool:
-        self.capability_probes += 1
-        return self.declared
-
-    async def list_roots(self) -> ListRootsResult:
-        self.list_roots_calls += 1
-        return await super().list_roots()
+from _roots_session_fakes import (
+    CapabilityDeclaringSession as _CapabilityDeclaringSession,
+)
+from _roots_session_fakes import FakeSession as _FakeSession
+from _roots_session_fakes import roots_result as _roots_result
 
 
 class _SpyContext:

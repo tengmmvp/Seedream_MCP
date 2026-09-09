@@ -6,7 +6,6 @@
 
 import os
 import shutil
-import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -88,9 +87,12 @@ def test_run_cleanup_age_keeps_non_empty_subdir(tmp_path: Path) -> None:
     assert sub.exists()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows 创建符号链接需管理员权限")
 def test_run_cleanup_age_skips_symlink_pointing_outside(tmp_path: Path) -> None:
-    """符号链接指向 base_dir 之外时，清理不得删除其目标，防止越权删除。"""
+    """符号链接指向 base_dir 之外时，清理不得删除其目标，防止越权删除。
+
+    创建能力经函数内 os.symlink 的 OSError 运行时探测跳过，开发者模式下的
+    Windows 也可执行。
+    """
     manager = FileManager(base_dir=tmp_path)
 
     # 越界目标置于共享 basetemp 之外的独占临时目录
@@ -106,7 +108,6 @@ def test_run_cleanup_age_skips_symlink_pointing_outside(tmp_path: Path) -> None:
             os.symlink(target, link)
         except OSError:
             pytest.skip("当前环境不支持创建符号链接")
-
         manager.run_cleanup_policies(days=30, max_total_bytes=None)
 
         # 符号链接自身可能被跳过；但其指向的外部目标必须不被删除
@@ -225,10 +226,12 @@ def test_run_cleanup_policies_quota_excludes_age_deleted_files(tmp_path: Path) -
     now = datetime.now()
     expired = tmp_path / "expired.png"
     expired.write_bytes(b"x" * 100)
-    os.utime(expired, ((now - timedelta(days=40)).timestamp(),) * 2)
+    expired_t = (now - timedelta(days=40)).timestamp()
+    os.utime(expired, (expired_t, expired_t))
     keep = tmp_path / "keep.png"
     keep.write_bytes(b"x" * 100)
-    os.utime(keep, ((now - timedelta(days=1)).timestamp(),) * 2)
+    keep_t = (now - timedelta(days=1)).timestamp()
+    os.utime(keep, (keep_t, keep_t))
 
     # 按天删除 expired；剩余 keep 100B，配额 200 不超，不再驱逐
     result = manager.run_cleanup_policies(days=30, max_total_bytes=200)
@@ -247,7 +250,8 @@ def test_run_cleanup_policies_skips_age_when_days_below_one(tmp_path: Path) -> N
     now = datetime.now()
     old_file = tmp_path / "old.png"
     old_file.write_bytes(b"x" * 100)
-    os.utime(old_file, ((now - timedelta(days=40)).timestamp(),) * 2)
+    old_t = (now - timedelta(days=40)).timestamp()
+    os.utime(old_file, (old_t, old_t))
 
     # days=0 跳过按天清理：old_file 虽过期仍保留；配额 50 须驱逐它
     result = manager.run_cleanup_policies(days=0, max_total_bytes=50)
@@ -264,7 +268,8 @@ def test_run_cleanup_policies_skips_quota_when_none(tmp_path: Path) -> None:
     now = datetime.now()
     expired = tmp_path / "expired.png"
     expired.write_bytes(b"x" * 100)
-    os.utime(expired, ((now - timedelta(days=40)).timestamp(),) * 2)
+    expired_t = (now - timedelta(days=40)).timestamp()
+    os.utime(expired, (expired_t, expired_t))
 
     result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
 

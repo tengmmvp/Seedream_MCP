@@ -52,10 +52,12 @@ def _example_env_keys() -> set[str]:
 def _config_read_env_keys() -> set[str]:
     """config 配置构建实际读取的全部环境变量键。
 
-    _FIELD_ENV_MAP 覆盖经 _pick_config_value 读取的字段键；api_key 为必填字段无
-    env metadata，由 _build_config_from_sources 显式读取 ARK_API_KEY，单独并入。
+    _FIELD_ENV_MAP 覆盖经 _pick_config_value 读取的字段键；无 env metadata 的
+    必填与显式读取键从 _NON_METADATA_FIELD_ENV 派生，新增字段自动纳入对账。
     """
-    return set(config_module._FIELD_ENV_MAP.values()) | {"ARK_API_KEY"}
+    return set(config_module._FIELD_ENV_MAP.values()) | set(
+        config_module._NON_METADATA_FIELD_ENV.values()
+    )
 
 
 def _desktop_sample_env_keys() -> set[str]:
