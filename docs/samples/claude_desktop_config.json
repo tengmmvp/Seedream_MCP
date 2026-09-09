@@ -10,7 +10,6 @@
         "SEEDREAM_MODEL_ID": "doubao-seedream-5.0",
         "SEEDREAM_DEFAULT_SIZE": "2K",
 
-        "SEEDREAM_DATA_ROOT": ".",
         "SEEDREAM_LOG_LEVEL": "INFO",
 
         "SEEDREAM_AUTO_SAVE_ENABLED": "true",

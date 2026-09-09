@@ -94,6 +94,8 @@ jobs:
               'seedream_mcp/webapp/static/js/refs.js',
               'seedream_mcp/webapp/static/assets/bg-letter.svg',
               'seedream_mcp/skills/seedream-image-generation/SKILL.md',
+              'seedream_mcp/skills/seedream-image-generation/references/workflows.md',
+              'seedream_mcp/skills/seedream-image-generation/references/troubleshooting.md',
           ]
           missing = [asset for asset in required if asset not in names]
           if missing:
