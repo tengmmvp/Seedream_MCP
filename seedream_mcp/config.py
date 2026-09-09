@@ -65,6 +65,9 @@ DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8000
 # http_max_body_size 的构建期下限；过小的上限连常规 MCP JSON 载荷都无法容纳。
 _HTTP_MAX_BODY_SIZE_FLOOR = 1024 * 1024
+# http_auth_token 的最短字符数：compare_digest 无法弥补低熵令牌的可猜测性。
+# CLI --auth-token 同口径校验（cli.py），公开供其导入。
+HTTP_AUTH_TOKEN_MIN_LENGTH = 16
 # auto_save_download_timeout 的上界秒数：下载总预算按停滞超时的 120 倍推导，
 # 720 秒恰等于 .part 临时文件 24 小时清扫宽限；超过后预算反超宽限，在途慢下载
 # 的临时文件会被并发清扫删除。
@@ -135,7 +138,8 @@ class SeedreamConfig:
         preview_enabled: 是否在生成工具结果中附带已保存图片的缩略图预览，长边不超过
             768 像素；关闭后仅返回文本与 structuredContent。
         workspace_root: 无 MCP Roots 时本地文件访问边界的回退目录。
-        http_auth_token: streamable-http 传输的 Bearer 鉴权令牌。
+        http_auth_token: streamable-http 传输的 Bearer 鉴权令牌；配置时长度不得
+            少于 HTTP_AUTH_TOKEN_MIN_LENGTH 字符。
         http_max_body_size: streamable-http 请求体大小上限字节数，默认 64MB。
         web_enabled: 是否在 streamable-http 传输上开启 Web 操作台，默认关闭；开启后
             同一进程提供 /web 网页与 /web/api 接口，stdio 传输不受影响。
@@ -454,7 +458,12 @@ class SeedreamConfig:
             self._validate_dir_field(self.workspace_root, "workspace_root")
 
     def _validate_http_fields(self) -> None:
-        """校验 streamable-http 请求体下限与 Host 允许列表。"""
+        """校验 streamable-http 鉴权令牌强度、请求体下限与 Host 允许列表。"""
+        if self.http_auth_token and len(self.http_auth_token) < HTTP_AUTH_TOKEN_MIN_LENGTH:
+            raise SeedreamConfigError(
+                f"http_auth_token 长度不得少于 {HTTP_AUTH_TOKEN_MIN_LENGTH} 字符"
+                f"{_env_var_suffix('http_auth_token')}"
+            )
         if self.http_max_body_size < _HTTP_MAX_BODY_SIZE_FLOOR:
             raise SeedreamConfigError(
                 f"http_max_body_size 不能低于 1MB（{_HTTP_MAX_BODY_SIZE_FLOOR} 字节）"
@@ -638,7 +647,9 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
         return host, suffix
     if suffix.startswith(":"):
         port_text = suffix[1:]
-        if port_text.isascii() and port_text.isdigit():
+        # SDK 的 Host 校验为精确串比较，前导零端口虽数值合法但与客户端规范化
+        # 形态不匹配，按无效条目拒绝。
+        if port_text.isascii() and port_text.isdigit() and not port_text.startswith("0"):
             port = int(port_text)
             if 1 <= port <= 65535:
                 return host, suffix
@@ -680,10 +691,10 @@ def parse_int(value: object) -> int:
     """将值解析为整数。
 
     Raises:
-        SeedreamConfigError: 值为空或无法解析为整数。
+        SeedreamConfigError: 值为空、布尔或无法解析为整数。
     """
     if isinstance(value, bool):
-        return int(value)
+        raise SeedreamConfigError(f"无法解析整数值: {value!r}")
     if isinstance(value, int):
         return value
     if value is None:
@@ -829,28 +840,23 @@ def _pick_request_state_key_bytes(
 ) -> tuple[bytes, ...] | None:
     """按优先级取值后按逗号拆分并逐条 hex 解码为密钥字节，空值归 None。
 
-    解码失败的错误消息给出格式要求与生成命令提示，不回显密钥内容；解码后
-    单钥字节数下限与重复键由 validate 校验。
+    条目归一复用 _pick_optional_str_tuple，序号按有效条目计数；解码失败的
+    错误消息给出格式要求与生成命令提示，不回显密钥内容；解码后单键字节数
+    下限与重复键由 validate 校验。
 
     Raises:
         SeedreamConfigError: 任一条目无法以十六进制解码。
     """
-    raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
-    if raw is None:
-        return None
-    normalized = str(raw).strip()
-    if not normalized:
+    entries = _pick_optional_str_tuple(overrides, field_name, env_key, env_values)
+    if entries is None:
         return None
     material: list[bytes] = []
-    for index, entry in enumerate(normalized.split(",")):
-        entry = entry.strip()
-        if not entry:
-            continue
+    for effective_index, entry in enumerate(entries, start=1):
         try:
             material.append(bytes.fromhex(entry))
         except ValueError as exc:
             raise SeedreamConfigError(
-                f"request_state_secret_keys 第 {index} 个条目不是合法的十六进制密钥，"
+                f"request_state_secret_keys 第 {effective_index} 个条目不是合法的十六进制密钥，"
                 f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
                 f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
                 f"{_env_var_suffix(field_name)}"

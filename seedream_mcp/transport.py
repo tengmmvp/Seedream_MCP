@@ -36,12 +36,16 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 _DNS_REBINDING_PROTECTED_HOSTS = _LOOPBACK_HOSTS | {"localhost"}
 
 # 回环绑定下 SDK 防护的 Host/Origin 白名单，端口通配，与
-# _LoopbackHostGuardMiddleware 的容忍集合语义对齐。
+# _LoopbackHostGuardMiddleware 的容忍集合语义对齐；Origin 兼含 https 形态，
+# 覆盖 --ssl-certfile 的回环 TLS 部署。
 _LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
 _LOOPBACK_ALLOWED_ORIGINS = (
     "http://127.0.0.1:*",
     "http://localhost:*",
     "http://[::1]:*",
+    "https://127.0.0.1:*",
+    "https://localhost:*",
+    "https://[::1]:*",
 )
 
 # 残余任务回收的最长等待秒数，超时即放弃等待交由循环关闭收尾；同时作为 uvicorn 优雅关停超时。
@@ -498,8 +502,13 @@ def _tls12_ssl_context_factory(
 
 
 def _resolve_http_auth_token(args: argparse.Namespace) -> str:
-    """解析 streamable-http 鉴权令牌：CLI 参数优先，其次活动配置。"""
-    token = args.auth_token or get_active_config().http_auth_token
+    """解析 streamable-http 鉴权令牌：CLI 参数优先，其次活动配置。
+
+    CLI 令牌 strip 后为空（纯空白）视为未提供，穿透到活动配置，与配置侧
+    「空白视为未设置」的语义一致。
+    """
+    cli_token = (args.auth_token or "").strip()
+    token = cli_token or get_active_config().http_auth_token
     return (token or "").strip()
 
 
@@ -566,6 +575,8 @@ def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
 
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
     """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致。"""
+    # localhost 的解析依赖 hosts/DNS 可被污染指向非回环地址，告警按非回环口径表述。
+    host_note = "按非回环地址要求校验" if host == "localhost" else "非回环地址"
     if host in _LOOPBACK_HOSTS:
         if auth_enabled:
             message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"
@@ -575,12 +586,12 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
             )
     elif auth_enabled:
         message = (
-            f"streamable-http 绑定到 {host}（非回环地址）且已启用 Bearer 鉴权，"
+            f"streamable-http 绑定到 {host}（{host_note}）且已启用 Bearer 鉴权，"
             "请确认网络隔离与令牌妥善保管。"
         )
     else:
         message = (
-            f"streamable-http 绑定到 {host}（非回环地址）且未启用鉴权，存在未授权访问风险，"
+            f"streamable-http 绑定到 {host}（{host_note}）且未启用鉴权，存在未授权访问风险，"
             "请配置 --auth-token。"
         )
     logger.warning(message)

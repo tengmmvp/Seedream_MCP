@@ -160,7 +160,10 @@ _BINARY_CONTENT_TYPES = frozenset(
 # 此处前置显式判断以给出精确拒绝原因，并对 is_global 实现差异保持纵深防御。
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 # 可封装内网 IPv4 的 IPv6 段：NAT64、IPv4-mapped、IPv4-compatible。
+# 64:ff9b:1::/48 为 NAT64 本地段，IANA 注册为非全球可达，但 Python <3.12.4 的
+# is_global 对其误报 True，故与 CGNAT 同口径显式前置拒绝。
 _NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+_NAT64_LOCAL_NETWORK = ipaddress.ip_network("64:ff9b:1::/48")
 _IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
 _IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")
 _SITE_LOCAL_NETWORK = ipaddress.ip_network("fec0::/10")
@@ -189,6 +192,8 @@ def _public_ip_rejection_reason(
     """
     if ip_obj.version == 4 and ip_obj in _CGNAT_NETWORK:
         return "CGNAT地址(100.64.0.0/10)"
+    if ip_obj.version == 6 and ip_obj in _NAT64_LOCAL_NETWORK:
+        return "NAT64本地段(64:ff9b:1::/48)"
     if ip_obj.is_multicast:
         return "组播地址"
     if ip_obj.version == 6 and ip_obj in _SITE_LOCAL_NETWORK:

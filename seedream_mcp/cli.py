@@ -13,6 +13,7 @@ from typing import Literal, cast
 from .config import (
     DEFAULT_HTTP_HOST,
     DEFAULT_HTTP_PORT,
+    HTTP_AUTH_TOKEN_MIN_LENGTH,
     LEGAL_LOG_LEVELS,
     SeedreamConfig,
     build_config_from_sources,
@@ -207,7 +208,8 @@ def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable
 def _validate_transport_args(args: argparse.Namespace) -> str | None:
     """校验传输相关 CLI 参数组合，返回错误消息；参数合法时返回 None。
 
-    仅 streamable-http 需要校验：TLS 证书与私钥必须成对提供或同时省略。
+    仅 streamable-http 需要校验：TLS 证书与私钥必须成对提供或同时省略；
+    --auth-token 显式提供时校验最短长度，与配置侧同口径。
     """
     if args.transport != "streamable-http":
         return None
@@ -215,6 +217,12 @@ def _validate_transport_args(args: argparse.Namespace) -> str | None:
         return (
             "配置错误：--ssl-certfile 与 --ssl-keyfile 必须同时提供或同时省略，"
             "仅提供其一无法建立 TLS。"
+        )
+    cli_token = (args.auth_token or "").strip()
+    if cli_token and len(cli_token) < HTTP_AUTH_TOKEN_MIN_LENGTH:
+        return (
+            f"安全错误：--auth-token 长度不得少于 {HTTP_AUTH_TOKEN_MIN_LENGTH} 字符，"
+            "低熵令牌可被在线穷举，建议用 openssl rand -hex 32 生成。"
         )
     return None
 

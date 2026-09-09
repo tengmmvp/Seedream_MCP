@@ -223,7 +223,7 @@ def test_cli_main_refuses_non_loopback_http_without_tls(
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
-    args.auth_token = "s3cret"
+    args.auth_token = "cli-secret-0123456789"
     args.ssl_certfile = None
     args.insecure_allow_non_tls = False
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
@@ -239,7 +239,7 @@ def test_cli_main_allows_non_loopback_http_with_tls(
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
-    args.auth_token = "s3cret"
+    args.auth_token = "cli-secret-0123456789"
     args.ssl_certfile = "/fake/cert.pem"
     args.ssl_keyfile = "/fake/key.pem"
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
@@ -274,7 +274,7 @@ def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
-    args.auth_token = "s3cret"
+    args.auth_token = "cli-secret-0123456789"
     args.insecure_allow_non_tls = True
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
     monkeypatch.setattr(server, "_run_streamable_http", lambda *a, **k: None)
@@ -317,6 +317,28 @@ def test_validate_transport_args_skips_stdio_transport() -> None:
     args.ssl_certfile = "c.pem"
     args.ssl_keyfile = None
     assert server._validate_transport_args(args) is None
+
+
+def test_validate_transport_args_rejects_short_cli_auth_token() -> None:
+    """--auth-token 显式提供且短于 16 字符时拒绝，CLI 路径与配置侧同口径。"""
+    args = _make_cli_args("streamable-http")
+    args.auth_token = "short-token"
+
+    message = server._validate_transport_args(args)
+
+    assert message is not None
+    assert "--auth-token 长度不得少于 16 字符" in message
+
+
+def test_validate_transport_args_accepts_long_or_blank_cli_auth_token() -> None:
+    """达到最短长度的令牌放行；纯空白视为未提供穿透配置侧校验。"""
+    long_enough = _make_cli_args("streamable-http")
+    long_enough.auth_token = "cli-token-0123456789"
+    assert server._validate_transport_args(long_enough) is None
+
+    blank = _make_cli_args("streamable-http")
+    blank.auth_token = "   "
+    assert server._validate_transport_args(blank) is None
 
 
 def test_cli_main_config_error_returns_exit_code_one(
@@ -569,7 +591,7 @@ def test_cli_main_non_loopback_auth_token_from_active_config(
     args.host = "0.0.0.0"
     args.auth_token = None
     args.insecure_allow_non_tls = True
-    config = SeedreamConfig(api_key="test_key", http_auth_token="env-token")
+    config = SeedreamConfig(api_key="test_key", http_auth_token="env-token-0123456789")
     _stub_cli(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
@@ -587,7 +609,7 @@ def test_cli_main_non_loopback_auth_token_from_active_config(
     monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
 
     assert server.cli_main() == 0
-    assert captured["auth_token"] == "env-token"
+    assert captured["auth_token"] == "env-token-0123456789"
 
 
 def test_cli_main_cli_auth_token_overrides_config_token(
@@ -597,9 +619,9 @@ def test_cli_main_cli_auth_token_overrides_config_token(
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     args = _make_cli_args("streamable-http")
     args.host = "0.0.0.0"
-    args.auth_token = "cli-token"
+    args.auth_token = "cli-token-0123456789"
     args.insecure_allow_non_tls = True
-    config = SeedreamConfig(api_key="test_key", http_auth_token="env-token")
+    config = SeedreamConfig(api_key="test_key", http_auth_token="env-token-0123456789")
     _stub_cli(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
@@ -617,7 +639,7 @@ def test_cli_main_cli_auth_token_overrides_config_token(
     monkeypatch.setattr(server, "_run_streamable_http", _fake_http_run)
 
     assert server.cli_main() == 0
-    assert captured["auth_token"] == "cli-token"
+    assert captured["auth_token"] == "cli-token-0123456789"
 
 
 # ==================== 绑定地址同步 SDK 内层防护 ====================

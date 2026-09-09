@@ -12,9 +12,12 @@ from collections.abc import Collection
 import pytest
 
 import seedream_mcp.server as server
+from seedream_mcp.transport import _LOOPBACK_HOSTS as _PRODUCED_LOOPBACK_HOSTS
 
-# 与 transport._LOOPBACK_HOSTS 取值一致的回环地址集合，作为校验函数的注入输入。
-_LOOPBACK_HOSTS: Collection[str] = {"127.0.0.1", "::1"}
+# 注入输入直接取生产常量，避免手抄副本静默漂移；显式锁定成员防常量被意外
+# 放宽（如把可被 DNS 污染的 localhost 误加入免鉴权集合）。
+assert _PRODUCED_LOOPBACK_HOSTS == {"127.0.0.1", "::1"}
+_LOOPBACK_HOSTS: Collection[str] = _PRODUCED_LOOPBACK_HOSTS
 
 
 def _make_http_args(

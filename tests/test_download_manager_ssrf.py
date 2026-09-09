@@ -143,6 +143,12 @@ def test_public_ip_rejection_rejects_nat64_embedded_private() -> None:
     assert _public_ip_rejection_reason(ip) is not None
 
 
+def test_public_ip_rejection_rejects_nat64_local_network() -> None:
+    """NAT64 本地段 64:ff9b:1::/48 须拒绝，Python <3.12.4 的 is_global 对其误报。"""
+    ip = ipaddress.ip_address("64:ff9b:1::1")
+    assert _public_ip_rejection_reason(ip) is not None
+
+
 def test_public_ip_rejection_rejects_ipv4_compat_embedded_private() -> None:
     """IPv4-compatible 段内嵌私有 IPv4 须拒绝。"""
     ip = ipaddress.ip_address("::192.168.0.1")

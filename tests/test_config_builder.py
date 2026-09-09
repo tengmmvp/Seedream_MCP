@@ -244,10 +244,12 @@ def test_build_config_loads_http_auth_token_from_env_file(
     """SEEDREAM_HTTP_AUTH_TOKEN 经 .env 配置链加载。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
     monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
-    _write_env_file(tmp_path / ".env", "ARK_API_KEY=k\nSEEDREAM_HTTP_AUTH_TOKEN=token123\n")
+    _write_env_file(
+        tmp_path / ".env", "ARK_API_KEY=k\nSEEDREAM_HTTP_AUTH_TOKEN=token1234567890abcd\n"
+    )
     monkeypatch.chdir(tmp_path)
     config = build_config_from_sources()
-    assert config.http_auth_token == "token123"
+    assert config.http_auth_token == "token1234567890abcd"
 
 
 # ==================== SEEDREAM_HTTP_ALLOWED_HOSTS Host 允许列表 ====================
@@ -412,7 +414,7 @@ def test_to_dict_masks_sensitive_fields() -> None:
     """to_dict 对 api_key 与 http_auth_token 脱敏。"""
     from seedream_mcp.config import SeedreamConfig
 
-    config = SeedreamConfig(api_key="k", http_auth_token="secret")
+    config = SeedreamConfig(api_key="k", http_auth_token="secret-token-123456")
     dumped = config.to_dict()
     assert dumped["api_key"] == "***"
     assert dumped["http_auth_token"] == "***"
@@ -464,6 +466,17 @@ def test_generate_concurrency_lower_bound_enforced() -> None:
 
     with pytest.raises(SeedreamConfigError, match="generate_concurrency"):
         SeedreamConfig(api_key="k", generate_concurrency=0)
+
+
+def test_http_auth_token_min_length_enforced() -> None:
+    """鉴权令牌配置时长度不足 16 字符在构建期拒绝，低熵令牌不进生产部署。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="http_auth_token"):
+        SeedreamConfig(api_key="k", http_auth_token="short")
+    # 未配置不受限，16 字符恰好放行。
+    assert SeedreamConfig(api_key="k", http_auth_token=None).http_auth_token is None
+    assert SeedreamConfig(api_key="k", http_auth_token="a" * 16).http_auth_token == "a" * 16
 
 
 def test_generate_concurrency_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
