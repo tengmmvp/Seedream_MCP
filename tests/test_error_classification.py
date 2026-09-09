@@ -15,7 +15,7 @@ from mcp.types import TextContent
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._helpers import (
     _FAILURE_GUIDANCE_BY_ERROR_CODE,
-    _FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES,
+    _FAILURE_GUIDANCE_DEFAULT_CODES,
     _resolve_failure_guidance,
 )
 from seedream_mcp.tools.core.common import (
@@ -317,24 +317,26 @@ def test_handle_api_error_5xx_user_hint_mentions_retry_later() -> None:
 # ==================== 失败排查建议按错误类型选择 ====================
 
 
-def test_resolve_failure_guidance_validation_error_avoids_api_key() -> None:
-    """参数类错误的排查建议引导调整参数，不出现 API Key 与网络指引。"""
-    guidance = _resolve_failure_guidance(SeedreamValidationError("bad size"))
-    assert guidance == "请根据错误信息调整对应参数取值。"
-    assert "API Key" not in guidance
+def test_resolve_failure_guidance_hint_profiles_fall_back_to_generic() -> None:
+    """自带 user_hint 的档案不走查表：直调回退通用建议，用户文案由 hint 承担。
 
-
-def test_resolve_failure_guidance_network_error_keeps_credential_hint() -> None:
-    """网络类错误的排查建议保留凭据与网络指引。"""
-    guidance = _resolve_failure_guidance(SeedreamNetworkError("conn refused"))
-    assert "API Key" in guidance
-    assert "网络" in guidance
-
-
-def test_resolve_failure_guidance_timeout_and_auth_keep_credential_hint() -> None:
-    """超时与认证类错误同样保留凭据与网络指引。"""
-    assert "API Key" in _resolve_failure_guidance(SeedreamTimeoutError("t"))
-    assert "API Key" in _resolve_failure_guidance(SeedreamAPIError("unauthorized", status_code=401))
+    common 层对带 hint 档案跳过查表直接用 hint（全链路行为由
+    test_handler_failure_text_*_uses_profile_hint_only 锁定），查表对这些码
+    不再提供文案。
+    """
+    assert (
+        _resolve_failure_guidance(SeedreamValidationError("bad size"))
+        == "请根据错误信息排查后重试。"
+    )
+    assert (
+        _resolve_failure_guidance(SeedreamNetworkError("conn refused"))
+        == "请根据错误信息排查后重试。"
+    )
+    assert _resolve_failure_guidance(SeedreamTimeoutError("t")) == "请根据错误信息排查后重试。"
+    assert (
+        _resolve_failure_guidance(SeedreamAPIError("unauthorized", status_code=401))
+        == "请根据错误信息排查后重试。"
+    )
 
 
 def test_resolve_failure_guidance_unknown_code_falls_back_to_generic() -> None:
@@ -360,23 +362,25 @@ def test_resolve_failure_guidance_api_error_without_status_falls_back_to_generic
     assert guidance == "请根据错误信息排查后重试。"
 
 
-def test_failure_guidance_table_covers_all_profile_error_codes() -> None:
-    """归约档案的全部错误码均可经查表解析或显式登记为默认建议，双向锁定。
+def test_failure_guidance_table_covers_hintless_profile_error_codes() -> None:
+    """无 user_hint 的档案错误码均登记在查表或显式默认集，带 hint 的不走表。
 
-    档案错误码全集须与 _FAILURE_GUIDANCE_BY_ERROR_CODE 的键及默认登记集一致：
-    新增档案未同步维护查表或查表残留废弃码均在此失败。
+    带 hint 档案由 common 层直接采用 hint，表中登记即双源漂移；新增无 hint
+    档案未登记或登记集残留均在此失败。
     """
-    profile_codes = {profile.error_code for profile in errors_module._HTTP_STATUS_PROFILES.values()}
-    profile_codes |= {profile.error_code for _, profile in errors_module._EXCEPTION_PROFILES}
-    profile_codes |= {
-        errors_module._HTTP_5XX_PROFILE.error_code,
-        errors_module._HTTP_DEFAULT_PROFILE.error_code,
-        errors_module._GENERIC_MCP_PROFILE.error_code,
-        errors_module._UNKNOWN_PROFILE.error_code,
-    }
-    assert profile_codes == (
-        set(_FAILURE_GUIDANCE_BY_ERROR_CODE) | set(_FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES)
-    )
+    profiles = list(errors_module._HTTP_STATUS_PROFILES.values())
+    profiles += [profile for _, profile in errors_module._EXCEPTION_PROFILES]
+    profiles += [
+        errors_module._HTTP_5XX_PROFILE,
+        errors_module._HTTP_DEFAULT_PROFILE,
+        errors_module._GENERIC_MCP_PROFILE,
+        errors_module._UNKNOWN_PROFILE,
+    ]
+    hinted = {profile.error_code for profile in profiles if profile.user_hint}
+    hintless = {profile.error_code for profile in profiles if not profile.user_hint}
+
+    assert not (hinted & set(_FAILURE_GUIDANCE_BY_ERROR_CODE))
+    assert hintless == (set(_FAILURE_GUIDANCE_BY_ERROR_CODE) | _FAILURE_GUIDANCE_DEFAULT_CODES)
 
 
 async def _run_failing_handler(exc: Exception) -> str:

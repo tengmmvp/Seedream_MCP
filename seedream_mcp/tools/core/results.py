@@ -417,8 +417,8 @@ def _sanitize_image_errors(
     url、local_path/markdown_ref 与未知键走 sanitize_data_text 保留完整可用性；非
     字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。仅净化后内容变化
     的项做浅拷贝，其余项保持原对象引用，传入列表不被修改。净化非幂等，重复净化会使
-    超长片段的截断标记叠加，调用方须保证同一列表仅净化一次。SSE 失败事件已在
-    io_sse 源头净化，此处覆盖非 SSE 路径。aggregated 为真时，携带本侧占位标记的
+    超长片段的截断标记叠加，全部图片项（含 SSE 失败事件）经此处统一净化一次，
+    io_sse 源头不做净化。aggregated 为真时，携带本侧占位标记的
     并行失败占位项整体跳过净化并剔除标记键；伪造 sentinel type 的上游透传项不
     携带标记，照常净化。
     """

@@ -436,19 +436,27 @@ def test_sanitize_error_text_redacts_and_truncates() -> None:
     assert "api_key: ***" in kept_prefix
 
 
-def test_format_sse_failed_event_sanitizes_error_message() -> None:
-    """SSE 失败事件的 error.message 经统一脱敏，被劫持中间层回显的凭据不进图片项。"""
+def test_format_sse_failed_event_keeps_raw_message_for_outlet_sanitization() -> None:
+    """SSE 失败事件源头不净化 message，由 results 出口统一净化一次。
+
+    源头先净化会使超长消息在出口被二次截断叠加标记；出口对凭据的剥离由
+    本用例一并锁定。
+    """
+    from seedream_mcp.tools.core.results import _sanitize_image_errors
     from seedream_mcp.utils.io.io_sse import format_sse_failed_event
 
+    raw_message = "upstream echo Authorization: Bearer sk-123"
     event = {
-        "error": {"code": "E", "message": "upstream echo Authorization: Bearer sk-123"},
+        "error": {"code": "E", "message": raw_message},
         "image_index": 0,
     }
 
     item = format_sse_failed_event(event, "model-x")
+    assert item["error"]["message"] == raw_message
 
-    assert "sk-123" not in str(item)
-    assert "***" in item["error"]["message"]
+    sanitized = _sanitize_image_errors([item])
+    assert "sk-123" not in str(sanitized)
+    assert "***" in sanitized[0]["error"]["message"]
 
 
 def test_sanitize_image_errors_redacts_per_image_error_message() -> None:

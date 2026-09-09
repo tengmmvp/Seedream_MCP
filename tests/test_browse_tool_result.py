@@ -149,8 +149,9 @@ async def test_browse_images_empty_format_filter_skips_scan(
     """空列表 format_filter 与「全部后缀不受支持」语义一致：跳过扫描并以工具错误返回。
 
     此前空列表因 falsy 判断直接退化为不过滤的全量扫描，与全不支持分支行为不一致。
+    图片目录内放一张图作金丝雀：误触发全量扫描时该目录非空，结果形态随之可辨。
     """
-    (workspace_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (_seed_images_root(workspace_root) / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     def _fail_find(*args: object, **kwargs: object) -> NoReturn:
         raise AssertionError("无有效后缀时不应触发目录扫描")
@@ -854,7 +855,8 @@ async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(
     outside_dir = Path(tempfile.mkdtemp(prefix="seedream-browse-outside-"))
     target = outside_dir / "target.png"
     target.write_bytes(b"\x89PNG\r\n\x1a\n")
-    link = workspace_root / "0_link.png"
+    images_root = _seed_images_root(workspace_root)
+    link = images_root / "0_link.png"
     try:
         os.symlink(target, link)
     except (OSError, AttributeError):
@@ -863,7 +865,7 @@ async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(
 
     try:
         for i in range(3):
-            (workspace_root / f"img_{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            (images_root / f"img_{i}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
         page1 = await handle_browse_images(
             BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)

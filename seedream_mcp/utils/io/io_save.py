@@ -63,16 +63,27 @@ def reset_cleanup_state() -> None:
     _cleanup_tasks = set()
 
 
+# 退出清理等待后台清理任务的上限秒数：超时后放弃等待保退出路径可达，任务经
+# shield 不被取消，继续在后台完成清理与退避记录。
+_DRAIN_TIMEOUT_SECONDS = 10.0
+
+
 async def drain_background_cleanup_tasks() -> None:
-    """等待在途的后台清理任务全部完成，供进程级退出清理调用。
+    """限时等待在途的后台清理任务完成，供进程级退出清理调用。
 
     请求路径的 close 不等待清理以免阻塞返回路径；stdio 经 lifespan teardown、
     streamable-http 经退出清理间接调用本函数。任务失败已在任务内写入失败退避
     时间戳并记录日志，此处仅等待不重试；等待期间新 spawn 的任务交由下次调用
-    或进程退出兜底。
+    或进程退出兜底。超限放弃等待但不取消任务，清理在后台继续完成。
     """
     if _cleanup_tasks:
-        await asyncio.gather(*list(_cleanup_tasks), return_exceptions=True)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.gather(*list(_cleanup_tasks), return_exceptions=True)),
+                timeout=_DRAIN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("后台清理任务 {} 秒内未完成，退出路径放弃等待", _DRAIN_TIMEOUT_SECONDS)
 
 
 class AutoSaveError(SeedreamMCPError):

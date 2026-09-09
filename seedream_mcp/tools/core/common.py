@@ -36,7 +36,6 @@ from ._helpers import (  # noqa: F401
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
     PROGRESS_RECEIVED,
-    PROGRESS_SCAN_START,
     PROGRESS_VALIDATED,
     _classify_generation_error_type,
     _is_generation_failed,
@@ -391,23 +390,6 @@ async def execute_generation_handler(
             sanitized_images=sanitized_images,
             saveable_indices=saveable_indices,
         )
-
-        preview_contents: list[ImageContent] = []
-        if _preview_enabled.get():
-            response_text, preview_contents = await _build_generation_preview(
-                config=config,
-                is_generation_failed=is_generation_failed,
-                auto_save_results=auto_save_results,
-                module_logger=module_logger,
-                response_text=response_text,
-            )
-
-        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
-        return CallToolResult(
-            content=[TextContent(type="text", text=response_text), *preview_contents],
-            structured_content=structured_result,
-            is_error=is_generation_failed,
-        )
     except Exception as exc:
         # 已归约的业务异常无堆栈噪音，非预期异常带堆栈与并行路径口径一致
         if isinstance(exc, SeedreamMCPError):
@@ -435,3 +417,25 @@ async def execute_generation_handler(
             ),
             is_error=True,
         )
+
+    # 预览为尽力补充：意外失败降级为纯文本，不把已成功的结果翻转为失败。
+    preview_contents: list[ImageContent] = []
+    if _preview_enabled.get():
+        try:
+            response_text, preview_contents = await _build_generation_preview(
+                config=config,
+                is_generation_failed=is_generation_failed,
+                auto_save_results=auto_save_results,
+                module_logger=module_logger,
+                response_text=response_text,
+            )
+        except Exception:
+            module_logger.opt(exception=True).warning("预览装配失败，降级为纯文本结果")
+
+    final_result = CallToolResult(
+        content=[TextContent(type="text", text=response_text), *preview_contents],
+        structured_content=structured_result,
+        is_error=is_generation_failed,
+    )
+    await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
+    return final_result

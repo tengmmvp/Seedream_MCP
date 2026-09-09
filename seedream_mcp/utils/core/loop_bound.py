@@ -20,9 +20,14 @@ def loop_bound_semaphore(limit: int, *, key: str) -> asyncio.Semaphore:
     """返回绑定当前事件循环的进程级信号量，循环更替或限值变化时重建。
 
     Args:
-        limit: 信号量并发上限。
+        limit: 信号量并发上限，须不小于 1。
         key: 调用点标识，区分不同用途的缓存条目。
+
+    Raises:
+        ValueError: limit 小于 1（Semaphore(0) 会永久阻塞，尽早暴露配置错误）。
     """
+    if limit < 1:
+        raise ValueError(f"信号量并发上限须不小于 1: {limit}")
     loop = asyncio.get_running_loop()
     cached = _last_semaphore.get(key)
     if cached is not None and cached[0] is loop and cached[1] == limit:

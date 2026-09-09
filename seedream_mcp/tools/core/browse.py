@@ -576,8 +576,7 @@ async def _build_empty_browse_result(
         message = "未找到图片文件，请确认目录或过滤条件。"
     if truncated:
         message = f"{message}（{_SCAN_TRUNCATION_MARKER}）"
-    await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
-    return CallToolResult(
+    result = CallToolResult(
         content=[TextContent(type="text", text=message)],
         structured_content=_build_browse_structured_result(
             state,
@@ -588,6 +587,8 @@ async def _build_empty_browse_result(
         ),
         is_error=False,
     )
+    await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
+    return result
 
 
 async def _build_browse_success_result(
@@ -617,9 +618,7 @@ async def _build_browse_success_result(
     if truncated:
         lines.append(f"（{_SCAN_TRUNCATION_MARKER}）")
 
-    await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
-
-    return CallToolResult(
+    result = CallToolResult(
         content=[TextContent(type="text", text="\n".join(lines))],
         structured_content=_build_browse_structured_result(
             state,
@@ -631,6 +630,8 @@ async def _build_browse_success_result(
         ),
         is_error=False,
     )
+    await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
+    return result
 
 
 async def execute_browse_request(

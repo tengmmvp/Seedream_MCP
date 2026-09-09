@@ -123,7 +123,8 @@ def setup_logging(
         enable_file: 是否启用文件通道，按 rotation_mb 轮换、保留 retention_days
             并压缩归档。
         force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
-            logger 已有 handler 时标准库日志不被拦截，输出 warning 提示。
+            logger 已有 handler 时标准库日志不被拦截，输出 warning 提示，已有
+            handler 均为本桥接器（重复初始化）时不告警。
         rotation_mb: 单个日志文件的大小上限 MB，超过即轮转。
         retention_days: 轮转日志的保留天数，超期自动清理。
     """
@@ -171,11 +172,13 @@ def setup_logging(
         )
 
     # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru；root
-    # logger 已有 handler 且未强制接管时 basicConfig 整体 no-op，标准库日志绕过
-    # 桥接与控制字符防护，输出 warning 提示部署方处置。
-    if not force_standard_logging and logging.getLogger().hasHandlers():
+    # logger 已有 handler 且未强制接管时 basicConfig 整体 no-op。已有 handler 均为
+    # 本桥接器（重复初始化）时不告警，混入外来 handler 时输出 warning 提示部署方处置。
+    existing_handlers = logging.getLogger().handlers
+    bridged = all(isinstance(handler, InterceptHandler) for handler in existing_handlers)
+    if not force_standard_logging and existing_handlers and not bridged:
         logger.warning(
-            "标准库 root logger 已有 handler 且 force_standard_logging=False，"
+            "标准库 root logger 已有非本桥接器的 handler 且 force_standard_logging=False，"
             "标准库日志未被 loguru 拦截，也不经控制字符防护"
         )
     logging.basicConfig(

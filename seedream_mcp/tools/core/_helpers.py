@@ -93,21 +93,12 @@ def _classify_generation_error_type(exc: Exception) -> str:
     return resolve_error_profile(exc).error_code
 
 
-# 凭据与连接类错误的共用排查建议。
-_NETWORK_CREDENTIAL_GUIDANCE = "请确认 API Key 和网络可用后重试。"
-
-# generation_failed 为兜底档案码、api_error 成因多样，均无定向指引，不进入下方查表。
-_FAILURE_GUIDANCE_INTENTIONAL_DEFAULT_CODES = frozenset({"generation_failed", "api_error"})
+# 带 user_hint 的档案由 common 层直接采用 hint，查表仅覆盖无 hint 的档案；
+# 兜底码 generation_failed 与成因多样的 api_error 无定向指引，均走默认建议。
+_FAILURE_GUIDANCE_DEFAULT_CODES = frozenset({"generation_failed", "api_error"})
 
 _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
-    "validation_error": "请根据错误信息调整对应参数取值。",
-    "payload_too_large": "请根据错误信息调整对应参数取值。",
-    "rate_limited": "请稍后重试。",
-    "payment_required": "请检查账户余额与配额。",
     "config_error": "请检查服务端配置后重试。",
-    "auth_error": _NETWORK_CREDENTIAL_GUIDANCE,
-    "network_error": _NETWORK_CREDENTIAL_GUIDANCE,
-    "timeout_error": _NETWORK_CREDENTIAL_GUIDANCE,
 }
 _DEFAULT_FAILURE_GUIDANCE = "请根据错误信息排查后重试。"
 

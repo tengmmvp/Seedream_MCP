@@ -140,6 +140,7 @@ async def _auto_save(
 
     # manager 构造含同步文件系统调用，经 to_thread 避免阻塞事件循环。
     auto_save_manager = await asyncio.to_thread(_resolve_and_build)
+    # 经类属性解析保持迟绑定（类方法补丁可命中），显式注解保证类型检查。
     save_method: BatchSaveMethod = getattr(AutoSaveManager, spec.save_method_name)
     # async with 确保 save 阶段任意异常均释放 manager 自建的下载连接池。
     async with auto_save_manager:

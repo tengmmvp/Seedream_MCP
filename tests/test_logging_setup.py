@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 from collections import namedtuple
 from collections.abc import Generator
 from pathlib import Path
@@ -186,6 +187,41 @@ def test_setup_logging_no_warning_when_root_has_no_handlers(
     assert fake.warnings == []
 
 
+def test_setup_logging_no_warning_when_all_root_handlers_are_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """root handlers 全为本桥接器（重复初始化）时不告警，重复启动无噪音。"""
+    from seedream_mcp.utils.core.logs import InterceptHandler
+
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [InterceptHandler()])
+    monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
+    fake = RecordingLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+
+    setup_logging(log_level="INFO", enable_console=False, enable_file=False)
+
+    assert fake.warnings == []
+
+
+def test_setup_logging_warns_when_mixed_root_handlers_contain_foreign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """root handlers 混入外来 handler（桥接器与 NullHandler 并存）时仍告警。"""
+    from seedream_mcp.utils.core.logs import InterceptHandler
+
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [InterceptHandler(), logging.NullHandler()])
+    monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
+    fake = RecordingLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+
+    setup_logging(log_level="INFO", enable_console=False, enable_file=False)
+
+    assert len(fake.warnings) == 1
+    assert "未被 loguru 拦截" in fake.warnings[0]
+
+
 # ==================== 文件日志默认路径与桥接帧定位 ====================
 
 
@@ -211,7 +247,9 @@ def _real_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Gener
         )
         yield tmp_path / ".seedream" / "logs" / "seedream_mcp.log"
     finally:
+        # 清空本用例安装的 sink 后恢复默认 stderr sink，不污染后续用例输出。
         logger.remove()
+        logger.add(sys.stderr)
         logger.configure(patcher=None)
         root.handlers = root_handlers
         root.setLevel(root_level)

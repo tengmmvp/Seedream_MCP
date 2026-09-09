@@ -26,6 +26,9 @@ async def test_generation_tools_output_schema_covers_core_fields() -> None:
     """生成类工具 outputSchema 覆盖数据与统计核心字段。"""
     tools = await mcp.list_tools()
     generation_tools = {tool.name: tool for tool in tools if tool.name != "browse_images"}
+    # 全部工具失注册时 next 立即失败，不给空洞通过的机会。
+    first = next(iter(generation_tools.values()), None)
+    assert first is not None, "未找到生成类工具"
 
     for name, tool in generation_tools.items():
         schema = tool.output_schema

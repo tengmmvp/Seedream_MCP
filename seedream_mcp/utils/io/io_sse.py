@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..core.errors import (
     SeedreamAPIError,
-    sanitize_error_text,
     truncate_upstream_message_fragment,
 )
 
@@ -66,22 +65,22 @@ def format_sse_success_event(event: dict[str, Any], model_id: str) -> dict[str, 
 def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, Any]:
     """将 SSE 失败事件转换为统一图片项结构。
 
-    error.message 为上游自由文本，经 sanitize_error_text 剥离敏感片段与控制字符并
-    截断后再进入图片项，防止被劫持的中间层借 per-image 错误回显凭据直达用户可见输出。
+    error.message 原样保留，净化由 results 出口的单一净化步骤统一执行——
+    此处先净化会使超长消息在出口被二次截断，叠加截断标记。
 
     Args:
         event: SSE 失败事件的 JSON 对象。
         model_id: 模型标识，事件缺失 model 字段时填充缺省值。
 
     Returns:
-        统一图片项结构的字典，含净化后的 error 字段。
+        统一图片项结构的字典。
     """
     raw_error = event.get("error")
     error = raw_error if isinstance(raw_error, dict) else {}
     return {
         "error": {
             "code": error.get("code"),
-            "message": sanitize_error_text(error.get("message")),
+            "message": error.get("message"),
         },
         "image_index": event.get("image_index"),
         "model": event.get("model", model_id),
@@ -366,7 +365,7 @@ def _classify_sse_event(
         err = event["error"]
         if items:
             # 已有产出时保留已计费的部分结果，与非流式部分成功口径一致；错误经
-            # format_sse_failed_event 成型净化，不覆盖先到的 usage 与 status。
+            # format_sse_failed_event 构造失败项，不覆盖先到的 usage 与 status。
             items.append(format_sse_failed_event({"error": err}, model_id))
             return False, None, None
         raw_code = err.get("code")
@@ -385,6 +384,9 @@ def _classify_sse_event(
         items.append(format_sse_failed_event(event, model_id))
     elif event_type == "image_generation.completed":
         return True, event.get("usage", {}) or {}, event.get("tools")
+    elif event_type == "image_generation.partial_image":
+        # 渐进帧事件：中间帧不产出结果项，最终图仍由后续事件给出。
+        log.debug("忽略 SSE 渐进帧事件: 段长 {} 字节", segment_len)
     else:
         log.debug(
             "忽略未知类型的 SSE 事件: type={!r}, 段长 {} 字节",

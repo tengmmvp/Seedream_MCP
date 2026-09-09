@@ -78,7 +78,7 @@ def _parse_pixel_size(size: str) -> tuple[int, int] | None:
     return int(matched.group(1)), int(matched.group(2))
 
 
-def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:
+def _coerce_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:
     """将任意输入校验并转换为 [min_value, max_value] 内的整数。
 
     非法值抛出 SeedreamValidationError。
@@ -398,9 +398,9 @@ def validate_stream(stream: bool, model_id: str) -> bool:
 def validate_max_images(max_images: Any) -> int:
     """验证最大图像数量参数，确保为 1-15 内的整数。
 
-    委托 _coerce_positive_int_in_range 完成校验，与其他整数参数共享统一的错误格式。
+    委托 _coerce_int_in_range 完成校验，与其他整数参数共享统一的错误格式。
     """
-    return _coerce_positive_int_in_range(max_images, "max_images", 1, MAX_SEQUENTIAL_TOTAL_IMAGES)
+    return _coerce_int_in_range(max_images, "max_images", 1, MAX_SEQUENTIAL_TOTAL_IMAGES)
 
 
 # ==================== 尺寸验证函数 ====================
@@ -554,7 +554,8 @@ def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> boo
 
     图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，仅
     5.0 Pro 支持，未知模型放行由能力表统一判定；单张参考图输入的前提由
-    image_to_image 工具的输入形态保证。None 视为未启用返回 False。
+    image_to_image 工具的输入形态保证。输入图的格式与像素下限约束由上游
+    校验，本地不做前置检查。None 视为未启用返回 False。
 
     Raises:
         SeedreamValidationError: layer_decomposition 非布尔，或为真而模型不支持
@@ -697,14 +698,14 @@ def validate_parallel_generation_options(
             区间、parallelism 大于 request_count，或 stream 为真而 request_count
             大于 1 时抛出。
     """
-    validated_request_count = _coerce_positive_int_in_range(
+    validated_request_count = _coerce_int_in_range(
         request_count, "request_count", 1, max_request_count
     )
 
     if parallelism is None:
         validated_parallelism = min(validated_request_count, max_request_count)
     else:
-        validated_parallelism = _coerce_positive_int_in_range(
+        validated_parallelism = _coerce_int_in_range(
             parallelism, "parallelism", 1, max_request_count
         )
 

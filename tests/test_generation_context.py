@@ -599,7 +599,6 @@ def test_build_generation_context_auto_save_none_equals_omitted() -> None:
 
     assert ctx_explicit_none.enable_auto_save is True
     assert ctx_omitted.enable_auto_save is True
-    assert ctx_explicit_none.enable_auto_save == ctx_omitted.enable_auto_save
 
 
 def test_build_generation_context_auto_save_none_passes_through_disabled_config() -> None:

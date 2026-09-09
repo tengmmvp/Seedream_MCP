@@ -127,7 +127,10 @@ SIZE_WITH_LAYER_DESCRIPTION = (
     "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
 )
 WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
-MAX_IMAGES_DESCRIPTION = f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}。"
+MAX_IMAGES_DESCRIPTION = (
+    f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}；"
+    "未提供时按参考图数量推导为 15 减参考图张数，参考图数量与其之和不得超过 15。"
+)
 RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_json 返回 base64 数据。"
 OUTPUT_FORMAT_DESCRIPTION = "输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。"
 STREAM_DESCRIPTION = "是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。"

@@ -12,7 +12,7 @@ import pytest
 from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from seedream_mcp.utils.core.validators import (
     MAX_SEQUENTIAL_TOTAL_IMAGES,
-    _coerce_positive_int_in_range,
+    _coerce_int_in_range,
     parse_bool,
     validate_background,
     validate_max_images,
@@ -192,113 +192,113 @@ def test_validate_max_images_above_max() -> None:
         validate_max_images(MAX_SEQUENTIAL_TOTAL_IMAGES + 1)
 
 
-# ==================== _coerce_positive_int_in_range ====================
+# ==================== _coerce_int_in_range ====================
 
 
 def test_coerce_int_in_range() -> None:
     """区间内 int 原值返回。"""
-    assert _coerce_positive_int_in_range(5, "f", 1, 10) == 5
+    assert _coerce_int_in_range(5, "f", 1, 10) == 5
 
 
 def test_coerce_integer_float() -> None:
     """整数浮点转换为 int。"""
-    assert _coerce_positive_int_in_range(5.0, "f", 1, 10) == 5
+    assert _coerce_int_in_range(5.0, "f", 1, 10) == 5
 
 
 def test_coerce_non_integer_float_rejected() -> None:
     """非整数浮点拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(5.5, "f", 1, 10)
+        _coerce_int_in_range(5.5, "f", 1, 10)
 
 
 @pytest.mark.parametrize("value", [Decimal("2.9"), Fraction(5, 2)])
 def test_coerce_non_integer_rational_rejected(value: Decimal | Fraction) -> None:
     """Decimal 与 Fraction 的非整数值拒绝，与 float 分支同规则，不静默截断。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(value, "f", 1, 10)
+        _coerce_int_in_range(value, "f", 1, 10)
 
 
 def test_coerce_integer_decimal_accepted() -> None:
     """整数值的 Decimal 允许转换为 int。"""
-    assert _coerce_positive_int_in_range(Decimal("2"), "f", 1, 10) == 2
+    assert _coerce_int_in_range(Decimal("2"), "f", 1, 10) == 2
 
 
 @pytest.mark.parametrize("value", [Decimal("Infinity"), Decimal("-Infinity")])
 def test_coerce_infinite_decimal_rejected(value: Decimal) -> None:
     """Decimal 无穷经 int() 抛 OverflowError，转译为参数校验错误不外逃。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(value, "f", 1, 10)
+        _coerce_int_in_range(value, "f", 1, 10)
 
 
 def test_coerce_bool_rejected() -> None:
     """bool 是 int 子类但须被拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(True, "f", 1, 10)
+        _coerce_int_in_range(True, "f", 1, 10)
 
 
 def test_coerce_false_bool_rejected() -> None:
     """False 同 True 一样被拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(False, "f", 1, 10)
+        _coerce_int_in_range(False, "f", 1, 10)
 
 
 def test_coerce_string_int() -> None:
     """整数字符串转换为 int。"""
-    assert _coerce_positive_int_in_range("3", "f", 1, 10) == 3
+    assert _coerce_int_in_range("3", "f", 1, 10) == 3
 
 
 @pytest.mark.parametrize("value", ["1_5", "+-5", "5x", "0x10", "1."])
 def test_coerce_lenient_int_syntax_strings_rejected(value: str) -> None:
     """int() 宽松语法（下划线分隔、符号并置、非纯数字）的字符串拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(value, "f", 1, 10)
+        _coerce_int_in_range(value, "f", 1, 10)
 
 
 @pytest.mark.parametrize("value,expected", [(" 5 ", 5), ("+5", 5), ("-3", -3)])
 def test_coerce_string_with_sign_or_padding_accepted(value: str, expected: int) -> None:
     """可选正负号与首尾空白的纯数字字符串仍接受。"""
-    assert _coerce_positive_int_in_range(value, "f", -10, 10) == expected
+    assert _coerce_int_in_range(value, "f", -10, 10) == expected
 
 
 @pytest.mark.parametrize("value", ["", "   ", "+", "-", "+-"])
 def test_coerce_empty_or_sign_only_strings_rejected(value: str) -> None:
     """空串与仅符号串拒绝。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(value, "f", 1, 10)
+        _coerce_int_in_range(value, "f", 1, 10)
 
 
 def test_coerce_invalid_string() -> None:
     """无法解析的字符串抛整数校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range("abc", "f", 1, 10)
+        _coerce_int_in_range("abc", "f", 1, 10)
 
 
 def test_coerce_none_rejected() -> None:
     """None 抛整数校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须是整数"):
-        _coerce_positive_int_in_range(None, "f", 1, 10)
+        _coerce_int_in_range(None, "f", 1, 10)
 
 
 def test_coerce_below_min() -> None:
     """低于区间下界抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须在"):
-        _coerce_positive_int_in_range(0, "f", 1, 10)
+        _coerce_int_in_range(0, "f", 1, 10)
 
 
 def test_coerce_above_max() -> None:
     """高于区间上界抛校验错误。"""
     with pytest.raises(SeedreamValidationError, match="必须在"):
-        _coerce_positive_int_in_range(11, "f", 1, 10)
+        _coerce_int_in_range(11, "f", 1, 10)
 
 
 def test_coerce_boundary_min() -> None:
     """区间下界值接受。"""
-    assert _coerce_positive_int_in_range(1, "f", 1, 10) == 1
+    assert _coerce_int_in_range(1, "f", 1, 10) == 1
 
 
 def test_coerce_boundary_max() -> None:
     """区间上界值接受。"""
-    assert _coerce_positive_int_in_range(10, "f", 1, 10) == 10
+    assert _coerce_int_in_range(10, "f", 1, 10) == 10
 
 
 # ==================== validate_parallel_generation_options ====================
