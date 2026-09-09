@@ -13,7 +13,6 @@ markdown_ref 前端不消费，整体删除；错误文本原样透传。共享 
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 from typing import Protocol, TypeVar, cast
 
@@ -119,6 +118,7 @@ async def _run_web_generation(
     images_root = await _shared.resolve_web_images_root()
     if isinstance(images_root, JSONResponse):
         return images_root
+    # runner 契约保证不抛，异常已归约为 is_error 结果，兜底仅防流水线全捕回归
     try:
         result = await runner(params, config, ctx, include_previews=False)
     except (SeedreamValidationError, SeedreamConfigError) as exc:
@@ -136,14 +136,7 @@ async def _run_web_generation(
     await asyncio.to_thread(augment_generation_payload, structured, images_root)
 
     status = 200 if not result.is_error else _shared.generation_status(structured)
-    payload = await asyncio.to_thread(
-        json.dumps,
-        structured,
-        ensure_ascii=False,
-        allow_nan=False,
-        indent=None,
-        separators=(",", ":"),
-    )
+    payload = await asyncio.to_thread(_shared.dump_strict_json, structured)
     return Response(content=payload, media_type="application/json", status_code=status)
 
 

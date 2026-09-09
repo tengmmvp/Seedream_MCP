@@ -109,6 +109,24 @@ def generation_status(structured: dict[str, object]) -> int:
     return GENERATION_ERROR_STATUS.get(error_type, 502)
 
 
+def browse_status(structured: dict[str, object]) -> int:
+    """图库结构化结果的错误类型映射，validation_error 归 400 其余归 500。"""
+    return 400 if structured_error_type(structured) == "validation_error" else 500
+
+
+def dump_strict_json(structured: dict[str, object]) -> str:
+    """以严格 JSON 序列化结构化结果。
+
+    非有限浮点已在流水线用量净化处归零，此处 allow_nan=False 仅作漏网哨兵。
+    """
+    return json.dumps(
+        structured,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+
+
 def converge_path_entry(
     item: dict[str, object], key: str, images_root: Path, *, resolve: bool = False
 ) -> None:

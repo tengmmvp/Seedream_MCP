@@ -82,17 +82,16 @@ async def web_browse(request: Request) -> Response:
         return _shared.error_json(
             "invalid_directory", "目录不在图片目录内，Web 图库仅浏览图片目录", 400
         )
+    # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归
     try:
         result = await run_browse_images(params, ctx=None)
     except Exception:
         logger.exception("Web 图库浏览请求执行异常")
         return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)
     structured = result.structured_content if result.structured_content is not None else {}
-    if isinstance(structured, dict):
-        _converge_for_web(structured, images_root)
-    if not result.is_error:
-        return JSONResponse(structured, status_code=200)
-    # validation_error 为模型可自纠的参数错误归 400，扫描失败等服务端故障归 500。
-    error_type = _shared.structured_error_type(structured) if isinstance(structured, dict) else None
-    status = 400 if error_type == "validation_error" else 500
-    return JSONResponse(structured, status_code=status)
+    if not isinstance(structured, dict):
+        structured = {}
+    _converge_for_web(structured, images_root)
+    status = 200 if not result.is_error else _shared.browse_status(structured)
+    payload = await asyncio.to_thread(_shared.dump_strict_json, structured)
+    return Response(content=payload, media_type="application/json", status_code=status)

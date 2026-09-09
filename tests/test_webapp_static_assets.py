@@ -56,3 +56,15 @@ def test_url_reference_goes_through_add_reference() -> None:
     assert 'addReference("url", url)' in main_js
     assert "state.refs.push" not in main_js
     assert "addReference" in refs_js
+
+
+def test_generate_and_gallery_consume_web_path_contract() -> None:
+    """generate.js 与 gallery.js 消费 web_path 字段并经 /web/api/image 取原图。
+
+    服务端改字段名或前端重构错位使任一字面量消失时在此失败，防止静默退化为
+    仅展示远端 url。
+    """
+    for name in ("generate.js", "gallery.js"):
+        source = (STATIC_DIR / _JS_DIR / name).read_text(encoding="utf-8")
+        assert "web_path" in source, f"{name} 不再消费 web_path 字段"
+        assert "/web/api/image" in source, f"{name} 不再请求 /web/api/image 端点"

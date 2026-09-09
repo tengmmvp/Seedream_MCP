@@ -267,7 +267,11 @@ export async function submitGenerate(event) {
   event.preventDefault();
   const config = toolConfig(state.tool);
   const prompt = $("prompt").value.trim();
-  if (!prompt && !config.promptOptional) {
+  // 空提示词仅图生图勾选图层拆分时被后端接受，判定与提示文案口径一致。
+  const layerChecked =
+    !$("layer-field").classList.contains("collapsed") &&
+    $("layer-decomposition").checked;
+  if (!prompt && !(config.promptOptional && layerChecked)) {
     setStatus("failed", "请填写提示词。");
     return;
   }
@@ -294,10 +298,18 @@ export async function submitGenerate(event) {
   $("result-grid").innerHTML = "";
 
   try {
+    // 上限 20 分钟覆盖真实生成的最坏量级；服务端总预算含重试与排队，到点中止时
+    // 服务端可能仍在执行，超时分支如实提示去图库核对而非直接重试。旧浏览器无
+    // AbortSignal.timeout 时不设超时，退化为无上限等待。
+    const timeoutSignal =
+      typeof AbortSignal.timeout === "function"
+        ? AbortSignal.timeout(1200000)
+        : undefined;
     const response = await apiFetch(`/web/api/generate/${state.tool}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildRequestBody()),
+      signal: timeoutSignal,
     });
     const payload = await response.json();
     if (response.ok) {
@@ -315,6 +327,13 @@ export async function submitGenerate(event) {
       showResultError({
         type: "bad_response",
         message: "响应不是有效的 JSON，服务可能异常，请稍后重试。",
+      });
+    } else if (error.name === "TimeoutError") {
+      setStatus("failed", "生成耗时异常。");
+      showResultError({
+        type: "timeout",
+        message:
+          "本次生成已超过 20 分钟，请求已中止。服务端可能仍在后台执行，请稍后到图库查看结果，勿立即重试以免重复生成。",
       });
     } else {
       setStatus("failed", "请求失败。");
