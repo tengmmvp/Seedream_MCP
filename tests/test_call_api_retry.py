@@ -521,7 +521,7 @@ async def test_standard_request_rejects_chunked_body_over_limit(
 
 
 async def test_stream_5xx_retries_with_status_code(no_sleep: None) -> None:
-    """流式 5xx 经 _raise_for_stream_response_status 装配状态码，按重试次数耗尽失败。
+    """流式 5xx 经 _raise_for_response_status 装配状态码，按重试次数耗尽失败。
 
     流式参数化用例整体替换 _send_stream_request，未触达非 200 的读体限额、状态码
     装配与错误分类；本组用例以 MockTransport 让真实流式发送路径发出请求并收到

@@ -28,6 +28,7 @@ from .utils.core.errors import (
     format_error_for_user,
     handle_api_error,
     parse_retry_after,
+    sanitize_error_text,
 )
 from .utils.core.logs import get_logger
 from .utils.model.model_capabilities import get_max_reference_images
@@ -65,13 +66,14 @@ _API_RETRY_BUDGET_FACTOR = 2
 
 
 def _first_error_detail(error: dict[str, Any]) -> str:
-    """拼接错误字典的 code 与 message 为一句摘要并限长。"""
+    """拼接错误字典的 code 与 message 为一句脱敏摘要并限长。"""
     detail = " ".join(
         str(part)
         for part in (error.get("code"), error.get("message"))
         if isinstance(part, str) and part
     )
-    return detail[:200]
+    # 上游错误体可回显凭据形态，日志出口与用户可见出口同口径脱敏。
+    return sanitize_error_text(detail, limit=200)
 
 
 def _outcome_error_note(response: dict[str, Any]) -> str:
@@ -110,6 +112,7 @@ class SharedRequestPlan:
         self._lock = asyncio.Lock()
         self.request_data: dict[str, Any] | None = None
         self.body: bytes | None = None
+        self._body_key: str | None = None
         self.validated_common_params: tuple[tuple[Any, ...], ValidatedCommonParams] | None = None
         self._build_key: str | None = None
         self._build_error: tuple[str, Exception] | None = None
@@ -146,24 +149,28 @@ class SharedRequestPlan:
 
     async def get_or_serialize(
         self,
+        key: str,
         request_data: dict[str, Any],
         serializer: Callable[[dict[str, Any]], bytes],
     ) -> bytes:
-        """返回共享 body：首个到者序列化一次，其余复用同一 bytes 对象。
+        """返回共享 body：同键首个到者序列化一次，其余复用同一 bytes 对象。
 
-        request_data 须为 ``get_or_build`` 返回的同一共享 dict。
+        request_data 须为 ``get_or_build`` 返回的同一共享 dict；body 归属键与
+        当前键不一致时重新序列化，防止交错复用错发。
         """
-        if self.body is not None:
+        if self.body is not None and self._body_key == key:
             return self.body
         async with self._lock:
-            if self.body is None:
+            if self.body is None or self._body_key != key:
                 self.body = await asyncio.to_thread(serializer, request_data)
+                self._body_key = key
             return cast(bytes, self.body)
 
     def release(self) -> None:
         """清除共享引用，避免 body 滞留至批次之后的阶段。"""
         self.request_data = None
         self.body = None
+        self._body_key = None
         self.validated_common_params = None
         self._build_key = None
         self._build_error = None
@@ -516,7 +523,7 @@ class SeedreamClient:
         self,
         prompt: str | None = None,
         optimize_prompt_options: dict[str, Any] | None = None,
-        image: list[str] | None = None,
+        image: Sequence[str] | None = None,
         size: str | None = None,
         watermark: bool | None = None,
         response_format: str = "url",
@@ -1253,7 +1260,7 @@ class SeedreamClient:
 
         return await asyncio.to_thread(_decode_as_message)
 
-    async def _raise_for_stream_response_status(
+    async def _raise_for_response_status(
         self, response: httpx.Response, *, deadline: float | None = None
     ) -> None:
         """将非 200 状态码转换为统一 API 异常，流式与非流式发送路径共用。"""
@@ -1314,7 +1321,7 @@ class SeedreamClient:
             "POST", url, content=request_body, timeout=request_timeout
         ) as response:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
-            await self._raise_for_stream_response_status(response, deadline=deadline)
+            await self._raise_for_response_status(response, deadline=deadline)
 
             if is_sse_response(response):
                 sse_result = await parse_sse_response(
@@ -1356,7 +1363,7 @@ class SeedreamClient:
         response = await client.send(request, stream=True)
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
-            await self._raise_for_stream_response_status(response, deadline=deadline)
+            await self._raise_for_response_status(response, deadline=deadline)
             return await self._parse_json_success_response(response, deadline=deadline)
         finally:
             await response.aclose()
@@ -1378,7 +1385,10 @@ class SeedreamClient:
         if plan is None:
             request_body = await asyncio.to_thread(self._serialize_request, request_data)
         else:
-            request_body = await plan.get_or_serialize(request_data, self._serialize_request)
+            # endpoint 即方法键，与 get_or_build 的键同源，序列化体随键失效。
+            request_body = await plan.get_or_serialize(
+                endpoint, request_data, self._serialize_request
+            )
         total_attempts = max(1, self.config.max_retries + 1)
 
         is_stream = bool(request_data.get("stream"))
