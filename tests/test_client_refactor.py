@@ -999,7 +999,9 @@ async def test_stream_request_non_dict_json_payload_raises_format_error(
 
 async def test_error_data_from_body_oversized_body_degrades_to_message() -> None:
     """超过 _ERROR_JSON_PARSE_LIMIT 的错误体不做完整 dict 解析，降级为 message 形态。"""
-    oversized = json.dumps({"error": {"code": "E", "message": "x" * (70 * 1024)}}).encode("utf-8")
+    oversized = bytearray(
+        json.dumps({"error": {"code": "E", "message": "x" * (70 * 1024)}}).encode("utf-8")
+    )
 
     data = await SeedreamClient._error_data_from_body(oversized)
 

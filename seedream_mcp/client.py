@@ -59,9 +59,6 @@ _ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
 # 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象。
 _ERROR_JSON_PARSE_LIMIT = 64 * 1024
 
-# 响应体累计超过该阈值时 join 移交工作线程执行。
-_JOIN_OFFLOAD_THRESHOLD = 8 * 1024 * 1024
-
 # _call_api 跨尝试累计预算按单次 api_timeout 的倍数推导，把重试风暴下单请求的
 # 最长占用约束在单次封顶的小常数倍内。
 _API_RETRY_BUDGET_FACTOR = 2
@@ -114,27 +111,36 @@ class SharedRequestPlan:
         self.request_data: dict[str, Any] | None = None
         self.body: bytes | None = None
         self.validated_common_params: tuple[tuple[Any, ...], ValidatedCommonParams] | None = None
-        self._build_error: Exception | None = None
+        self._build_key: str | None = None
+        self._build_error: tuple[str, Exception] | None = None
 
     async def get_or_build(
-        self, builder: Callable[[], Awaitable[dict[str, Any]]]
+        self,
+        key: str,
+        builder: Callable[[], Awaitable[dict[str, Any]]],
     ) -> dict[str, Any]:
-        """返回共享 request_data：首个到者执行 builder 构建，其余复用同一 dict。
+        """返回共享 request_data：同键首个到者执行 builder 构建，其余复用。
 
-        builder 在锁内执行；构建抛出时缓存首个异常并重放给后到者。批内输入相同，
-        重试构建只会重复读盘与解码等全量副作用，故重放同一异常对象。失败缓存随
-        release 清空，下一批次重新构建。
+        key 为调用点标识，同一计划内键不匹配即重建，防止跨方法复用时静默
+        错发前一方法的请求体。builder 在锁内执行；构建抛出时缓存首个异常并
+        重放给同键后到者。批内输入相同，重试构建只会重复读盘与解码等全量
+        副作用，故重放同一异常对象。失败缓存随 release 清空，下一批次重新
+        构建。
         """
-        if self.request_data is not None:
+        if self.request_data is not None and self._build_key == key:
             return self.request_data
         async with self._lock:
-            if self.request_data is None:
-                if self._build_error is not None:
-                    raise self._build_error
+            if self.request_data is None or self._build_key != key:
+                if self._build_error is not None and self._build_error[0] == key:
+                    raise self._build_error[1]
                 try:
                     self.request_data = await builder()
+                    self._build_key = key
+                    self._build_error = None
+                    # 键切换重建后旧 body 与新 request_data 不再对应，一并失效。
+                    self.body = None
                 except Exception as exc:
-                    self._build_error = exc
+                    self._build_error = (key, exc)
                     raise
             return cast(dict[str, Any], self.request_data)
 
@@ -159,6 +165,7 @@ class SharedRequestPlan:
         self.request_data = None
         self.body = None
         self.validated_common_params = None
+        self._build_key = None
         self._build_error = None
 
     async def get_or_validate(
@@ -202,12 +209,13 @@ def shared_request_plan_scope() -> Iterator[SharedRequestPlan]:
 
 async def _build_request_data(
     plan: SharedRequestPlan | None,
+    key: str,
     builder: Callable[[], Awaitable[dict[str, Any]]],
 ) -> dict[str, Any]:
     """按共享计划构建 request_data：无计划直接构建，有计划经单飞复用同批结果。"""
     if plan is None:
         return await builder()
-    return await plan.get_or_build(builder)
+    return await plan.get_or_build(key, builder)
 
 
 def _has_valid_image_items(data: Any) -> bool:
@@ -381,7 +389,9 @@ class SeedreamClient:
             )
 
         try:
-            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
+            request_data = await _build_request_data(
+                _ACTIVE_REQUEST_PLAN.get(), "text_to_image", _build_request
+            )
 
             response = await self._call_api("text_to_image", request_data)
 
@@ -490,7 +500,9 @@ class SeedreamClient:
             )
 
         try:
-            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
+            request_data = await _build_request_data(
+                _ACTIVE_REQUEST_PLAN.get(), "image_to_image", _build_request
+            )
 
             response = await self._call_api("image_to_image", request_data)
 
@@ -584,7 +596,9 @@ class SeedreamClient:
             )
 
         try:
-            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
+            request_data = await _build_request_data(
+                _ACTIVE_REQUEST_PLAN.get(), "multi_image_fusion", _build_request
+            )
 
             response = await self._call_api("multi_image_fusion", request_data)
 
@@ -721,7 +735,9 @@ class SeedreamClient:
             )
 
         try:
-            request_data = await _build_request_data(_ACTIVE_REQUEST_PLAN.get(), _build_request)
+            request_data = await _build_request_data(
+                _ACTIVE_REQUEST_PLAN.get(), "sequential_generation", _build_request
+            )
 
             response = await self._call_api("sequential_generation", request_data)
 
@@ -1116,13 +1132,9 @@ class SeedreamClient:
         """将请求体序列化为 UTF-8 bytes，供调用方在工作线程预编码后直接发送。
 
         关闭 ensure_ascii，中文等非 ASCII 字符以 UTF-8 原样输出，不被 ASCII 转义
-        序列膨胀。
+        序列膨胀。dumps 到 encode 单链产出，无中间缓冲的二次拷贝。
         """
-        encoder = json.JSONEncoder(ensure_ascii=False)
-        buffer = bytearray()
-        for chunk in encoder.iterencode(request_data):
-            buffer += chunk.encode("utf-8")
-        return bytes(buffer)
+        return json.dumps(request_data, ensure_ascii=False).encode("utf-8")
 
     def _raise_api_error_for(
         self,
@@ -1162,13 +1174,16 @@ class SeedreamClient:
         max_bytes: int | None = None,
         status_code: int | None = None,
         deadline: float | None = None,
-    ) -> bytes:
+    ) -> bytearray:
         """流式读取响应体并施加总量与总时长上限，超限抛出对应异常。
 
         max_bytes 缺省时取 _response_body_byte_limit，错误路径传入更小的独立上限。
         status_code 由错误路径传入，使超限异常沿用 429/5xx 可重试、4xx 立即失败的
         既有分类；成功路径不传，超限保持无状态码的立即失败。deadline 为
         time.monotonic 截止时间，逐块检查封顶整个读体阶段。响应的关闭由调用方负责。
+        返回 bytearray 单份缓冲，json.loads 与解码可直接消费，避免 join 或
+        bytes 转换的峰值双驻留；增量拼接的 realloc 拷贝在事件循环线程执行，
+        以单份驻留优先于卸载拷贝。
 
         Raises:
             SeedreamAPIError: 响应体超过 max_bytes，status_code 非空时携带该状态码。
@@ -1194,28 +1209,24 @@ class SeedreamClient:
                     status_code=status_code,
                     retry_after=retry_after,
                 )
-        chunks: list[bytes] = []
-        received = 0
+        buffer = bytearray()
         async for chunk in response.aiter_bytes():
             if not chunk:
                 continue
             if deadline is not None and time.monotonic() > deadline:
-                raise asyncio.TimeoutError(f"响应体读取超过总时长预算: 已读取 {received} 字节")
-            received += len(chunk)
-            if received > max_bytes:
+                raise asyncio.TimeoutError(f"响应体读取超过总时长预算: 已读取 {len(buffer)} 字节")
+            buffer += chunk
+            if len(buffer) > max_bytes:
                 raise SeedreamAPIError(
-                    f"响应体过大: 已读取 {received} 字节，超过上限 {max_bytes} 字节，"
+                    f"响应体过大: 已读取 {len(buffer)} 字节，超过上限 {max_bytes} 字节，"
                     f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
                     status_code=status_code,
                     retry_after=retry_after,
                 )
-            chunks.append(chunk)
-        if received > _JOIN_OFFLOAD_THRESHOLD:
-            return await asyncio.to_thread(b"".join, chunks)
-        return b"".join(chunks)
+        return buffer
 
     @staticmethod
-    async def _error_data_from_body(raw_body: bytes) -> dict[str, Any]:
+    async def _error_data_from_body(raw_body: bytearray) -> dict[str, Any]:
         """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。
 
         超过 _ERROR_JSON_PARSE_LIMIT 时不做 dict 解析，降级文本同样按字节截断
@@ -1280,6 +1291,9 @@ class SeedreamClient:
             payload = await asyncio.to_thread(json.loads, raw_body)
         except Exception as exc:
             raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
+        finally:
+            # 解析完成后立即释放原始缓冲，避免与 b64 解码产物双驻留。
+            del raw_body
         return self._build_api_result(self._require_dict_payload(payload))
 
     async def _send_stream_request(

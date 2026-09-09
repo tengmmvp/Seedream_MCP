@@ -199,7 +199,7 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
         raise builder_failure
 
     outcomes = await asyncio.gather(
-        *(plan.get_or_build(failing_builder) for _ in range(3)),
+        *(plan.get_or_build("text_to_image", failing_builder) for _ in range(3)),
         return_exceptions=True,
     )
 
@@ -210,13 +210,13 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
     # 计划未写入失败产物
     assert plan.request_data is None
 
-    # 计划存续期内后到的构建请求同样被缓存异常短路
+    # 计划存续期内后到的同键构建请求同样被缓存异常短路
     async def working_builder() -> dict[str, Any]:
         return {"model": "m"}
 
     replayed: BaseException | None = None
     try:
-        await plan.get_or_build(working_builder)
+        await plan.get_or_build("text_to_image", working_builder)
     except Exception as exc:
         replayed = exc
 
@@ -226,10 +226,28 @@ async def test_shared_plan_builder_failure_cached_and_replayed() -> None:
     # 失败缓存随 release 清空，同一计划重新构建并成功写入
     plan.release()
 
-    built = await plan.get_or_build(working_builder)
+    built = await plan.get_or_build("text_to_image", working_builder)
 
     assert built == {"model": "m"}
     assert plan.request_data == {"model": "m"}
+
+
+async def test_shared_plan_rebuilds_when_key_changes() -> None:
+    """同一计划内键不匹配即重建，防止跨方法复用错发前一方法的请求体。"""
+    plan = SharedRequestPlan()
+
+    async def builder_a() -> dict[str, Any]:
+        return {"model": "a"}
+
+    async def builder_b() -> dict[str, Any]:
+        return {"model": "b"}
+
+    built_a = await plan.get_or_build("text_to_image", builder_a)
+    built_b = await plan.get_or_build("image_to_image", builder_b)
+
+    assert built_a == {"model": "a"}
+    assert built_b == {"model": "b"}
+    assert plan.request_data == {"model": "b"}
 
 
 async def test_prevalidate_failure_matches_single_request_first_failure(
