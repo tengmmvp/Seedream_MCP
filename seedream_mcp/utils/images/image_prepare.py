@@ -106,20 +106,23 @@ class ImagePreparer:
         self._prepare_inflight: dict[PrepareCacheKey, InflightEntry[str]] = {}
         self._prepare_concurrency = prepare_concurrency
         # asyncio.Semaphore 首次使用时绑定事件循环，跨循环复用会报错，持循环身份
-        # 守卫按需重建。
+        # 守卫按需重建并同步清空在途登记。
         self._prepare_semaphore: asyncio.Semaphore | None = None
         self._prepare_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
     def _get_prepare_semaphore(self) -> asyncio.Semaphore:
-        """返回绑定当前事件循环的实例级预处理信号量，循环变化时重建。
+        """返回绑定当前事件循环的预处理信号量，循环更替时重建并清空在途登记。
 
-        检查与重建之间无 await 点，同一事件循环内不存在竞态；preparer 跨事件循环
-        依次复用时按新循环重建，语义等价于新实例。
+        旧循环登记的在途 task 绑定旧循环且永不完成，死条目会使新循环的同键等待
+        永久挂起，随重建一并清空，同键调用按 miss 重新执行。检查与重建之间无
+        await 点，同一事件循环内不存在竞态；preparer 跨事件循环依次复用时按新
+        循环重建，语义等价于新实例。
         """
         loop = asyncio.get_running_loop()
         if self._prepare_semaphore is None or self._prepare_semaphore_loop is not loop:
             self._prepare_semaphore = asyncio.Semaphore(max(1, self._prepare_concurrency))
             self._prepare_semaphore_loop = loop
+            self._prepare_inflight.clear()
         return self._prepare_semaphore
 
     @staticmethod
@@ -185,6 +188,8 @@ class ImagePreparer:
             SeedreamValidationError: 输入格式无效、路径越界、维度超限或图像内容
                 处理失败等调用方输入问题。
         """
+        # 循环更替检测先于在途检查执行，旧循环遗留的死条目不再拦截同键调用。
+        self._get_prepare_semaphore()
         cache_key, normalized_image, candidate = await self._resolve_cache_key(
             image, scope_key, read_context
         )

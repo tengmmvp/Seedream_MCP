@@ -262,3 +262,64 @@ def test_instance_semaphore_rebuilds_across_event_loops() -> None:
     first = asyncio.run(_run_once())
     second = asyncio.run(_run_once())
     assert first == second == batch
+
+
+def test_stale_inflight_entries_cleared_on_event_loop_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """旧循环登记的在途条目在新循环上不拦截同键调用，按 miss 重新执行完成。
+
+    旧循环的共享 task 绑定旧循环且随其关闭永不完成，残留死条目会使新循环的
+    同键等待永久挂起；wait_for 超时把挂起转为失败而非拖垮测试。创建者取消后
+    等待收尾使协程正常终结，旧循环仅遗留共享 task；关闭时以空异常处理器抑制
+    未完成 task 的销毁告警。
+    """
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    preparer = client._image_preparer
+    image_url = "https://example.com/ref.png"
+    roots_key = ("test-roots",)
+
+    async def hanging_prepare(image: str) -> str:
+        del image
+        await asyncio.Event().wait()
+        return "prepared:never"
+
+    monkeypatch.setattr(image_prepare, "prepare_image_input", hanging_prepare)
+
+    old_loop = asyncio.new_event_loop()
+    old_loop.set_exception_handler(lambda loop, context: None)
+    try:
+
+        async def register_stale_entry() -> None:
+            creator = asyncio.ensure_future(
+                preparer.prepare_image_input(image_url, scope_key=roots_key)
+            )
+            while not preparer._prepare_inflight:
+                await asyncio.sleep(0)
+            # 取消并等待收尾：共享 task 经 shield 不受连带取消，继续挂在旧循环上。
+            creator.cancel()
+            try:
+                await creator
+            except asyncio.CancelledError:
+                pass
+
+        old_loop.run_until_complete(register_stale_entry())
+    finally:
+        old_loop.close()
+
+    assert len(preparer._prepare_inflight) == 1
+
+    async def succeeding_prepare(image: str) -> str:
+        del image
+        return "prepared:fresh"
+
+    monkeypatch.setattr(image_prepare, "prepare_image_input", succeeding_prepare)
+
+    async def rerun_on_new_loop() -> str:
+        return await asyncio.wait_for(
+            preparer.prepare_image_input(image_url, scope_key=roots_key), timeout=2
+        )
+
+    assert asyncio.run(rerun_on_new_loop()) == "prepared:fresh"
+    assert len(preparer._prepare_inflight) == 0

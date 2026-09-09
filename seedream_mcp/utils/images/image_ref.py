@@ -24,8 +24,10 @@ def require_image_str(image: object) -> str:
 def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
     """判定图像输入来源类型，scheme 大小写不敏感。
 
-    仅取前 16 字符小写判定，避免对大 base64 data URI 做全量拷贝。最长 scheme
-    前缀 ``https://`` 与 ``data:image/`` 均不超过 12 字符，16 字符窗口足够覆盖。
+    http(s) 前缀不论斜杠数归入 url，单斜杠手误由统一 URL 校验给出精确报错，
+    不落本地分支误报文件错误。仅取前 16 字符小写判定，避免对大 base64 data
+    URI 做全量拷贝。最长 scheme 前缀 ``https://`` 与 ``data:image/`` 均不超过
+    12 字符，16 字符窗口足够覆盖。
 
     Args:
         image: 图像输入字符串，调用方应先 strip 首尾空白。
@@ -34,7 +36,7 @@ def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
         输入来源类型："url"、"data_uri"、"local" 三者之一。
     """
     prefix = image[:16].lower()
-    if prefix.startswith(("http://", "https://")):
+    if prefix.startswith(("http:", "https:")):
         return "url"
     if prefix.startswith("data:image/"):
         return "data_uri"

@@ -26,7 +26,6 @@ from ..core.formats import (
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
     ensure_image_decoders_ready,
-    format_file_size_mb,
     format_file_too_large,
     parse_data_uri,
 )
@@ -284,10 +283,10 @@ def resolve_local_image_candidate(
     # 的 UNC 在 POSIX 上非绝对路径，先拼后查会丢失 UNC 前缀。
     if is_unc_path(image):
         return None
-    # classify 仅特判 http(s) 与 data，file:// 等其余 scheme 形态落入本地分支；
-    # 先按形态给出诊断，不落入冒号分量拒绝被误报为 NTFS 备用数据流。单字母
-    # 前缀仅 win32 按盘符放行（C://x 为冗余斜杠的合法路径），其余平台与空前缀
-    # 均按不支持的 scheme 拒绝，不落本地分支产出误导性「文件不存在」。
+    # classify 将 http(s)（不论斜杠数）与 data 归为非本地，file:// 等其余 scheme
+    # 形态落入本地分支；先按形态给出诊断，不落入冒号分量拒绝被误报为 NTFS 备用
+    # 数据流。单字母前缀仅 win32 按盘符放行（C://x 为冗余斜杠的合法路径），其余
+    # 平台与空前缀均按不支持的 scheme 拒绝，不落本地分支产出误导性「文件不存在」。
     if "://" in image:
         scheme = image.partition("://")[0]
         if not (len(scheme) == 1 and sys.platform == "win32"):
@@ -439,11 +438,12 @@ def _validate_data_uri(data_uri: str) -> str:
         # 官方要求格式小写；标准 MIME 子类型经 formats 单一映射派生，jpg 随之归一为 jpeg。
         canonical_fmt = MIME_BY_EXTENSION[f".{fmt}"].split("/", 1)[1]
 
-        # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大。
-        if len(b64) > MAX_IMAGE_FILE_SIZE * 4 // 3 + 16:
+        # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大；
+        # 尾部 = 填充不计入数据，估算恰等于上限时不误拒。
+        estimated_bytes = len(b64) // 4 * 3 - b64.count("=")
+        if estimated_bytes > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"数据过大: base64 长度 {len(b64)}，"
-                f"最大支持{format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+                format_file_too_large(estimated_bytes, MAX_IMAGE_FILE_SIZE, label="数据"),
                 field="image",
                 value=data_uri,
             )
@@ -458,8 +458,7 @@ def _validate_data_uri(data_uri: str) -> str:
         size_bytes = len(raw)
         if size_bytes > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
-                f"数据过大: {format_file_size_mb(size_bytes)}，"
-                f"最大支持{format_file_size_mb(MAX_IMAGE_FILE_SIZE)}",
+                format_file_too_large(size_bytes, MAX_IMAGE_FILE_SIZE, label="数据"),
                 field="image",
                 value=data_uri,
             )

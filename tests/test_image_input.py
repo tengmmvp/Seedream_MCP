@@ -8,6 +8,7 @@ import base64
 import io
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import IO
@@ -75,6 +76,8 @@ async def test_prepare_image_input_out_of_bounds_error_carries_config_guidance(
         with pytest.raises(SeedreamValidationError, match="路径不在读取范围内") as exc_info:
             await prepare_image_input(str(outside))
         assert "SEEDREAM_WORKSPACE_ROOT" in exc_info.value.message
+        assert "驱动器相对" not in exc_info.value.message
+        assert "空字节" not in exc_info.value.message
         assert exc_info.value.field == "image"
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
@@ -143,6 +146,54 @@ async def test_prepare_image_input_rejects_relative_escape_outside_images_root(
     assert "相对路径仅限图片保存目录内" in message
     assert "绝对路径" in message
     assert exc_info.value.field == "image"
+
+
+async def test_prepare_image_input_single_slash_url_typo_reports_url_error() -> None:
+    """单斜杠 URL 手误归入 url 分类，报 URL 格式错误而非误导的本地路径错误。
+
+    此前该形态落入本地分支，win32 下被误报为 NTFS 备用数据流形态。
+    """
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("https:/example.com/a.png")
+
+    message = exc_info.value.message
+    assert "无效的URL格式" in message
+    assert "备用数据流" not in message
+    assert "文件不存在" not in message
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对形态仅 win32 被拒绝")
+async def test_prepare_image_input_drive_relative_form_surfaces_rejection_reason(
+    workspace_root: Path,
+) -> None:
+    """驱动器相对形态透出 normalize_path 的拒绝原因，不误报为可授权的越界。
+
+    盘符取与工作区所在盘相异的字母：异盘拼接丢弃图片目录锚定而不产生候选，
+    旧口径在该形态上误报越界；授权工作区无法修复形态非法的输入。
+    """
+    _images_root(workspace_root)
+    foreign_drive = "D" if workspace_root.drive[:1].upper() != "D" else "C"
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input(f"{foreign_drive}:photo.png")
+
+    message = exc_info.value.message
+    assert "驱动器相对" in message
+    assert "不在读取范围内" not in message
+
+
+async def test_prepare_image_input_null_byte_form_surfaces_rejection_reason(
+    workspace_root: Path,
+) -> None:
+    """含空字节的形态透出精确拒绝原因，不落入越界授权指引。"""
+    _images_root(workspace_root)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("bad\x00name.png")
+
+    message = exc_info.value.message
+    assert "空字节" in message
+    assert "不在读取范围内" not in message
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:

@@ -132,6 +132,42 @@ def test_decode_raises_decompression_bomb_error_when_limit_lowered(
         decode_and_validate_dimensions(_png_bytes(200, 200), "bomb.png")
 
 
+def _forged_header_png(width: int, height: int) -> bytes:
+    """真实 1x1 PNG 改写 IHDR 宽高为给定值并重算 CRC，头尺寸可任意放大。"""
+    import struct
+    import zlib
+
+    forged = bytearray(_png_bytes(1, 1))
+    forged[16:29] = struct.pack(">II5B", width, height, 8, 2, 0, 0, 0)
+    forged[29:33] = struct.pack(">I", zlib.crc32(bytes(forged[12:29])) & 0xFFFFFFFF)
+    return bytes(forged)
+
+
+def test_pil_threshold_warns_in_band_and_errors_at_double() -> None:
+    """formats 注入阈值后 PIL 在 36M..72M 区间仅告警，超过 2 倍才抛解压炸弹错误。
+
+    36M 硬约束由 _validate_image_dimensions 的显式检查承担，不依赖 PIL 的
+    异常路径。
+    """
+    import warnings
+
+    from seedream_mcp.utils.core.formats import ensure_image_decoders_ready
+
+    ensure_image_decoders_ready()
+
+    band = _forged_header_png(6_100, 6_100)  # 37.21M 像素，介于 36M 与 2 倍之间
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with Image.open(io.BytesIO(band)):
+            pass
+    assert any(issubclass(item.category, Image.DecompressionBombWarning) for item in caught)
+
+    double = _forged_header_png(8_500, 8_500)  # 72.25M 像素，超过 2 倍阈值
+    with pytest.raises(Image.DecompressionBombError):
+        with Image.open(io.BytesIO(double)):
+            pass
+
+
 def test_decode_rejects_truncated_png_bytes() -> None:
     """头合法但像素数据截断的 PNG 经 verify 在本地被拒，不再放行到上游报错。
 

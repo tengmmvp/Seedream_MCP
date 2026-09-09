@@ -19,6 +19,11 @@ from seedream_mcp.utils.images.image_ref import classify_image_reference
         ("HTTP://example.com/x.png", "url"),
         ("HTTPS://example.com/x.png", "url"),
         ("HtTpS://example.com/x.png", "url"),
+        # URL：单斜杠与三斜杠手误同样归入 url，交统一 URL 校验报精确错误
+        ("http:/example.com/x.png", "url"),
+        ("https:/example.com/x.png", "url"),
+        ("HTTPS:/example.com/x.png", "url"),
+        ("http:///example.com/x.png", "url"),
         # Data URI：前缀大小写不敏感
         ("data:image/png;base64,iVBORw0KGgo=", "data_uri"),
         ("Data:image/png;base64,iVBORw0KGgo=", "data_uri"),

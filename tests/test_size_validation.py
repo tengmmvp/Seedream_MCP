@@ -188,10 +188,19 @@ def test_validate_size_for_model_rejects_seedream_50_pro_oversized_pixel() -> No
 def test_validate_image_input_rejects_oversized_data_uri_before_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """巨型 base64 在解码前按文本长度估算拒绝，避免先解码触发内存放大。"""
-    import seedream_mcp.utils.images.image_validation as image_validation_module
+    """巨型 base64 在解码前按换算的估算字节数拒绝，避免先解码触发内存放大。
 
-    monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", 1024)
-    huge_b64 = "A" * (1024 * 4 // 3 + 100)
-    with pytest.raises(SeedreamValidationError, match="数据过大"):
+    文案经 format_file_too_large 单一收口，不把 base64 字符数与字节上限并排展示。
+    """
+    import seedream_mcp.utils.images.image_validation as image_validation_module
+    from seedream_mcp.utils.core.formats import format_file_too_large
+
+    max_size = 1024 * 1024
+    monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", max_size)
+    huge_b64 = "A" * 2_000_000
+    with pytest.raises(SeedreamValidationError, match="数据过大") as exc_info:
         image_validation_module.validate_image_input(f"data:image/png;base64,{huge_b64}")
+
+    estimated_bytes = 2_000_000 * 3 // 4
+    assert exc_info.value.message == format_file_too_large(estimated_bytes, max_size, label="数据")
+    assert "base64 长度" not in exc_info.value.message
