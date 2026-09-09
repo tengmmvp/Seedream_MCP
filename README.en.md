@@ -37,6 +37,33 @@
 
 ---
 
+## 📑 Contents
+
+<table align="center">
+  <tr>
+    <td><a href="#-quick-start">⚡ Quick Start</a></td>
+    <td><a href="#-client-configuration">🔧 Client Configuration</a></td>
+    <td><a href="#️-web-console">🖥️ Web Console</a></td>
+    <td><a href="#️-cli-options">⚙️ CLI Options</a></td>
+  </tr>
+  <tr>
+    <td><a href="#-model-capability-differences">📐 Model Capability Differences</a></td>
+    <td><a href="#️-available-tools">🛠️ Available Tools</a></td>
+    <td><a href="#-available-resources">📦 Available Resources</a></td>
+    <td><a href="#-agent-skills">🧠 Agent Skills</a></td>
+  </tr>
+  <tr>
+    <td><a href="#-style-presets">🎭 Style Presets</a></td>
+    <td><a href="#-faq">❓ FAQ</a></td>
+    <td><a href="#-local-development">🧪 Local Development</a></td>
+    <td><a href="#️-environment-variables">⚙️ Environment Variables</a></td>
+  </tr>
+  <tr>
+    <td><a href="#-contributors">👥 Contributors</a></td>
+    <td><a href="#-license">📄 License</a></td>
+  </tr>
+</table>
+
 ## ⚡ Quick Start
 
 ### 1. Prerequisites
@@ -208,6 +235,7 @@ Access control: the page itself opens without a token; its API calls require one
 --stateless                                        # Stateless mode, only affects the sessionful legacy-revision clients at the cost of the back channel (default off)
 --web                                              # Enable the web console served at /web (default off; resolves via SEEDREAM_WEB_ENABLED when unset)
 --no-web                                           # Disable the web console, overriding an enabled SEEDREAM_WEB_ENABLED
+--version                                          # Print the version and exit
 ```
 
 > **Security note**: `localhost` is not treated as a loopback address (its resolution depends on hosts/DNS and may be poisoned to a non-loopback address) and must follow the non-loopback requirements: a Bearer auth token and TLS must be configured, and the service refuses to start without them; to use loopback without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback binds validate the Host and Origin headers against the bind address by default to prevent DNS rebinding; wildcard binds (`0.0.0.0`/`::`) cannot predict the access address, leave validation off by default, and require `SEEDREAM_HTTP_ALLOWED_HOSTS` to enable it. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which stay in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
@@ -232,17 +260,78 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 Different models support different capabilities and parameter ranges. Please note this when selecting a model:
 
-| Capability / Parameter                       | 5.0 Pro        | 5.0 / 5.0 Lite | 4.5     | 4.0          |
-| -------------------------------------------- | -------------- | -------------- | ------- | ------------ |
-| Text-to-Image / Image-to-Image / Multi-Image | ✅             | ✅             | ✅      | ✅           |
-| Sequential Generation                        | ❌             | ✅             | ✅      | ✅           |
-| Web Search                                   | ❌             | ✅             | ❌      | ❌           |
-| Streaming Output                             | ❌             | ✅             | ✅      | ✅           |
-| Output Format (png/jpeg)                     | ✅             | ✅             | ❌      | ❌           |
-| Layer Decomposition                          | ✅             | ❌             | ❌      | ❌           |
-| Transparent Background                       | ✅             | ❌             | ❌      | ❌           |
-| Resolution Presets                           | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K | 1K / 2K / 4K |
-| Max Reference Images                         | 10             | 14             | 14      | 14           |
+<table align="center">
+  <tr>
+    <th style="text-align: center">Capability / Parameter</th>
+    <th style="text-align: center">5.0 Pro</th>
+    <th style="text-align: center">5.0 / 5.0 Lite</th>
+    <th style="text-align: center">4.5</th>
+    <th style="text-align: center">4.0</th>
+  </tr>
+  <tr>
+    <td>Text-to-Image / Image-to-Image / Multi-Image</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+  </tr>
+  <tr>
+    <td>Sequential Generation</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+  </tr>
+  <tr>
+    <td>Web Search</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>Streaming Output</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+  </tr>
+  <tr>
+    <td>Output Format (png/jpeg)</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>Layer Decomposition</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>Transparent Background</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>Resolution Presets</td>
+    <td style="text-align: center">1K / 1.5K / 2K</td>
+    <td style="text-align: center">2K / 3K / 4K</td>
+    <td style="text-align: center">2K / 4K</td>
+    <td style="text-align: center">1K / 2K / 4K</td>
+  </tr>
+  <tr>
+    <td>Max Reference Images</td>
+    <td style="text-align: center">10</td>
+    <td style="text-align: center">14</td>
+    <td style="text-align: center">14</td>
+    <td style="text-align: center">14</td>
+  </tr>
+</table>
 
 > **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported with default preset `2K`, the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
 
@@ -425,13 +514,32 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 Beyond tools, the server exposes the following MCP resources for clients to read runtime information:
 
-| Resource URI                                           | Description                                                                                                                                                                      |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seedream://workspace/roots`                           | Currently effective workspace roots: MCP Roots authorized by the client, falling back to the environment-configured working directory when none are declared                     |
-| `seedream://server/info`                               | Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)                                                    |
-| `seedream://models/info`                               | Per-model aliases and capability declarations: supported size presets, pixel ranges, reference image limits, output format/tools/streaming, etc., to help clients choose a model |
-| `skill://seedream-image-generation/SKILL.md`           | Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model differences, and parameter rules                                              |
-| `skill://seedream-image-generation/references/{+path}` | Agent Skill reference file template: multi-step workflows and troubleshooting, loaded on demand                                                                                  |
+<table align="center">
+  <tr>
+    <th style="text-align: center">Resource URI</th>
+    <th style="text-align: center">Description</th>
+  </tr>
+  <tr>
+    <td><code>seedream://workspace/roots</code></td>
+    <td>Currently effective workspace roots: MCP Roots authorized by the client, falling back to the environment-configured working directory when none are declared</td>
+  </tr>
+  <tr>
+    <td><code>seedream://server/info</code></td>
+    <td>Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)</td>
+  </tr>
+  <tr>
+    <td><code>seedream://models/info</code></td>
+    <td>Per-model aliases and capability declarations: supported size presets, pixel ranges, reference image limits, output format/tools/streaming, etc., to help clients choose a model</td>
+  </tr>
+  <tr>
+    <td><code>skill://seedream-image-generation/SKILL.md</code></td>
+    <td>Agent Skill main file: entry point of the image-generation guide, covering tool cheat sheet, model differences, and parameter rules</td>
+  </tr>
+  <tr>
+    <td><code>skill://seedream-image-generation/references/{+path}</code></td>
+    <td>Agent Skill reference file template: multi-step workflows and troubleshooting, loaded on demand</td>
+  </tr>
+</table>
 
 ## 🧠 Agent Skills
 
@@ -446,22 +554,56 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 
 The skill directory contains:
 
-| File                            | Content                                                                                                             |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `SKILL.md`                      | Main generation guide: tool cheat sheet, model differences, prompt writing, parameter rules                         |
-| `references/workflows.md`       | Multi-step workflows: end-to-end comic creation, layer decomposition and recomposition, style-consistency iteration |
-| `references/troubleshooting.md` | Troubleshooting: error-code remedies, common failure modes, input and quota constraints                             |
+<table align="center">
+  <tr>
+    <th style="text-align: center">File</th>
+    <th style="text-align: center">Content</th>
+  </tr>
+  <tr>
+    <td><code>SKILL.md</code></td>
+    <td>Main generation guide: tool cheat sheet, model differences, prompt writing, parameter rules</td>
+  </tr>
+  <tr>
+    <td><code>references/workflows.md</code></td>
+    <td>Multi-step workflows: end-to-end comic creation, layer decomposition and recomposition, style-consistency iteration</td>
+  </tr>
+  <tr>
+    <td><code>references/troubleshooting.md</code></td>
+    <td>Troubleshooting: error-code remedies, common failure modes, input and quota constraints</td>
+  </tr>
+</table>
 
 ## 🎭 Style Presets
 
 The server provides the following MCP prompt templates to generate text-to-image prompts for a given style in one click; use the `subject` parameter to set the scene subject:
 
-| Prompt name                   | Style                                                     | Default subject                       |
-| ----------------------------- | --------------------------------------------------------- | ------------------------------------- |
-| `seedream_style_anime`        | Japanese anime style, cel shading, vivid saturated colors | A girl standing under cherry blossoms |
-| `seedream_style_realistic`    | Realistic photography, high-detail, natural lighting      | City night view                       |
-| `seedream_style_watercolor`   | Watercolor style, soft blending, translucent colors       | Mountain cabin                        |
-| `seedream_style_oil_painting` | Oil painting style, thick brushstrokes, rich layers       | Seaside sunset                        |
+<table align="center">
+  <tr>
+    <th style="text-align: center">Prompt name</th>
+    <th style="text-align: center">Style</th>
+    <th style="text-align: center">Default subject</th>
+  </tr>
+  <tr>
+    <td><code>seedream_style_anime</code></td>
+    <td>Japanese anime style, cel shading, vivid saturated colors</td>
+    <td>A girl standing under cherry blossoms</td>
+  </tr>
+  <tr>
+    <td><code>seedream_style_realistic</code></td>
+    <td>Realistic photography, high-detail, natural lighting</td>
+    <td>City night view</td>
+  </tr>
+  <tr>
+    <td><code>seedream_style_watercolor</code></td>
+    <td>Watercolor style, soft blending, translucent colors</td>
+    <td>Mountain cabin</td>
+  </tr>
+  <tr>
+    <td><code>seedream_style_oil_painting</code></td>
+    <td>Oil painting style, thick brushstrokes, rich layers</td>
+    <td>Seaside sunset</td>
+  </tr>
+</table>
 
 ## ❓ FAQ
 

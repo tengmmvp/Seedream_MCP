@@ -37,8 +37,8 @@ async def test_server_info_resource_reports_config_summary(
 ) -> None:
     """server/info 输出固定字段集，取值来自活动配置。
 
-    SDK 2.0 起静态资源无请求上下文，资源直接读活动配置；app_lifespan 进入时
-    取的就是活动配置对象，注入活动配置等效于原 lifespan 注入路径。
+    SDK 2.0 静态资源不支持 Context 注入，资源读活动配置是唯一可行口径；
+    app_lifespan 进入时取的就是活动配置对象，注入活动配置等效于 lifespan 路径。
     """
     config = _test_config()
     monkeypatch.setattr(config_module, "_active_config", config)

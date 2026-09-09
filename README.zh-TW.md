@@ -37,6 +37,33 @@
 
 ---
 
+## 📑 目錄
+
+<table align="center">
+  <tr>
+    <td><a href="#-快速安裝">⚡ 快速安裝</a></td>
+    <td><a href="#-用戶端設定">🔧 用戶端設定</a></td>
+    <td><a href="#️-web-操作台">🖥️ Web 操作台</a></td>
+    <td><a href="#️-啟動參數">⚙️ 啟動參數</a></td>
+  </tr>
+  <tr>
+    <td><a href="#-模型能力差異">📐 模型能力差異</a></td>
+    <td><a href="#️-可用工具">🛠️ 可用工具</a></td>
+    <td><a href="#-可用資源">📦 可用資源</a></td>
+    <td><a href="#-agent-skills">🧠 Agent Skills</a></td>
+  </tr>
+  <tr>
+    <td><a href="#-風格預設">🎭 風格預設</a></td>
+    <td><a href="#-常見問題">❓ 常見問題</a></td>
+    <td><a href="#-本地開發">🧪 本地開發</a></td>
+    <td><a href="#️-環境變數設定">⚙️ 環境變數設定</a></td>
+  </tr>
+  <tr>
+    <td><a href="#-貢獻者">👥 貢獻者</a></td>
+    <td><a href="#-授權條款">📄 授權條款</a></td>
+  </tr>
+</table>
+
 ## ⚡ 快速安裝
 
 ### 1. 前置準備
@@ -208,6 +235,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 --stateless                                        # 無狀態模式，僅影響帶交握工作階段的舊規範修訂用戶端，代價是失去反向通道 (預設關閉)
 --web                                              # 開啟 Web 操作台，瀏覽器存取 /web 直接使用 (預設關閉；未傳入時按 SEEDREAM_WEB_ENABLED 解析)
 --no-web                                           # 關閉 Web 操作台，覆蓋 SEEDREAM_WEB_ENABLED 的開啟設定
+--version                                          # 印出版本號並退出
 ```
 
 > **安全提示**：`localhost` 不被視為回環位址（其解析依賴 hosts/DNS，可能被污染指向非回環位址），須按非回環位址要求設定 Bearer 鑑權權杖與 TLS，未設定則拒絕啟動；如需免鑑權使用回環位址，請改繫結 `127.0.0.1` 或 `::1`。非回環繫結預設按該位址校驗 Host 與 Origin 標頭以防 DNS rebinding；萬用繫結（`0.0.0.0`/`::`）無法預知存取位址，校驗預設關閉，需設定 `SEEDREAM_HTTP_ALLOWED_HOSTS` 啟用。生產與容器部署的金鑰應經環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞，而非 CLI `--api-key` / `--auth-token`——命令列參數會留在行程清單與 shell 歷史記錄中；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
@@ -232,17 +260,78 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 各模型支援的能力與參數範圍不同，選擇模型時請留意：
 
-| 能力 / 參數                | 5.0 Pro        | 5.0 / 5.0 Lite | 4.5     | 4.0          |
-| -------------------------- | -------------- | -------------- | ------- | ------------ |
-| 文生圖 / 圖生圖 / 多圖生圖 | ✅             | ✅             | ✅      | ✅           |
-| 組圖生成                   | ❌             | ✅             | ✅      | ✅           |
-| 連網搜尋                   | ❌             | ✅             | ❌      | ❌           |
-| 串流輸出                   | ❌             | ✅             | ✅      | ✅           |
-| 輸出格式（png/jpeg）       | ✅             | ✅             | ❌      | ❌           |
-| 圖層拆分                   | ✅             | ❌             | ❌      | ❌           |
-| 透明背景                   | ✅             | ❌             | ❌      | ❌           |
-| 解析度選項                 | 1K / 1.5K / 2K | 2K / 3K / 4K   | 2K / 4K | 1K / 2K / 4K |
-| 參考圖上限                 | 10 張          | 14 張          | 14 張   | 14 張        |
+<table align="center">
+  <tr>
+    <th style="text-align: center">能力 / 參數</th>
+    <th style="text-align: center">5.0 Pro</th>
+    <th style="text-align: center">5.0 / 5.0 Lite</th>
+    <th style="text-align: center">4.5</th>
+    <th style="text-align: center">4.0</th>
+  </tr>
+  <tr>
+    <td>文生圖 / 圖生圖 / 多圖生圖</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+  </tr>
+  <tr>
+    <td>組圖生成</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+  </tr>
+  <tr>
+    <td>連網搜尋</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>串流輸出</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+  </tr>
+  <tr>
+    <td>輸出格式（png/jpeg）</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>圖層拆分</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>透明背景</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>解析度選項</td>
+    <td style="text-align: center">1K / 1.5K / 2K</td>
+    <td style="text-align: center">2K / 3K / 4K</td>
+    <td style="text-align: center">2K / 4K</td>
+    <td style="text-align: center">1K / 2K / 4K</td>
+  </tr>
+  <tr>
+    <td>參考圖上限</td>
+    <td style="text-align: center">10 張</td>
+    <td style="text-align: center">14 張</td>
+    <td style="text-align: center">14 張</td>
+    <td style="text-align: center">14 張</td>
+  </tr>
+</table>
 
 > **提示**：預設模型為 **doubao-seedream-5.0**（與 5.0 Lite 等價），開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/1.5K/2K`，預設檔位 `2K`，多圖生圖參考圖上限降為 10 張，另獨享圖層拆分與透明背景能力。
 
@@ -425,13 +514,32 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 除工具外，伺服器還公開以下 MCP 資源供用戶端讀取執行時資訊：
 
-| 資源 URI                                               | 說明                                                                                                       |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `seedream://workspace/roots`                           | 當前生效的工作區根：用戶端授權的 MCP Roots，未宣告時回退環境配置的工作目錄                                 |
-| `seedream://server/info`                               | 伺服器名稱、版本與目前生效設定摘要（模型、預設尺寸、自動儲存開關，共五項欄位）                             |
-| `seedream://models/info`                               | 各模型別名與能力宣告：支援的尺寸檔位、像素範圍、參考圖上限、輸出格式/工具/串流等能力，供用戶端按需選擇模型 |
-| `skill://seedream-image-generation/SKILL.md`           | Agent Skill 主檔案：圖像生成指南入口，內文含工具速查、模型差異與參數規則                                   |
-| `skill://seedream-image-generation/references/{+path}` | Agent Skill 參考檔案範本：多步工作流與故障排查，按需讀取                                                   |
+<table align="center">
+  <tr>
+    <th style="text-align: center">資源 URI</th>
+    <th style="text-align: center">說明</th>
+  </tr>
+  <tr>
+    <td><code>seedream://workspace/roots</code></td>
+    <td>當前生效的工作區根：用戶端授權的 MCP Roots，未宣告時回退環境配置的工作目錄</td>
+  </tr>
+  <tr>
+    <td><code>seedream://server/info</code></td>
+    <td>伺服器名稱、版本與目前生效設定摘要（模型、預設尺寸、自動儲存開關，共五項欄位）</td>
+  </tr>
+  <tr>
+    <td><code>seedream://models/info</code></td>
+    <td>各模型別名與能力宣告：支援的尺寸檔位、像素範圍、參考圖上限、輸出格式/工具/串流等能力，供用戶端按需選擇模型</td>
+  </tr>
+  <tr>
+    <td><code>skill://seedream-image-generation/SKILL.md</code></td>
+    <td>Agent Skill 主檔案：圖像生成指南入口，內文含工具速查、模型差異與參數規則</td>
+  </tr>
+  <tr>
+    <td><code>skill://seedream-image-generation/references/{+path}</code></td>
+    <td>Agent Skill 參考檔案範本：多步工作流與故障排查，按需讀取</td>
+  </tr>
+</table>
 
 ## 🧠 Agent Skills
 
@@ -446,22 +554,56 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 
 技能目錄包含以下檔案：
 
-| 檔案                            | 內容                                                       |
-| ------------------------------- | ---------------------------------------------------------- |
-| `SKILL.md`                      | 生成指南主檔案：工具速查、模型差異、提示詞寫法、參數規則   |
-| `references/workflows.md`       | 多步工作流：連環畫端到端、圖層拆分與再合成、風格一致性迭代 |
-| `references/troubleshooting.md` | 故障排查：錯誤碼對策、常見失敗模式、輸入與配額限制         |
+<table align="center">
+  <tr>
+    <th style="text-align: center">檔案</th>
+    <th style="text-align: center">內容</th>
+  </tr>
+  <tr>
+    <td><code>SKILL.md</code></td>
+    <td>生成指南主檔案：工具速查、模型差異、提示詞寫法、參數規則</td>
+  </tr>
+  <tr>
+    <td><code>references/workflows.md</code></td>
+    <td>多步工作流：連環畫端到端、圖層拆分與再合成、風格一致性迭代</td>
+  </tr>
+  <tr>
+    <td><code>references/troubleshooting.md</code></td>
+    <td>故障排查：錯誤碼對策、常見失敗模式、輸入與配額限制</td>
+  </tr>
+</table>
 
 ## 🎭 風格預設
 
 伺服器內建以下 MCP 提示詞範本，一鍵產生指定風格的文生圖 prompt，可透過 `subject` 參數指定畫面主題：
 
-| Prompt 名稱                   | 風格                                   | 預設主題             |
-| ----------------------------- | -------------------------------------- | -------------------- |
-| `seedream_style_anime`        | 日系動漫風格，賽璐珞上色，鮮豔飽和色彩 | 一個女孩站在櫻花樹下 |
-| `seedream_style_realistic`    | 寫實攝影風格，高畫質細節，自然光影     | 城市夜景             |
-| `seedream_style_watercolor`   | 水彩畫風格，柔和暈染，通透色彩         | 山間小屋             |
-| `seedream_style_oil_painting` | 油畫風格，厚重筆觸，豐富層次           | 海邊夕陽             |
+<table align="center">
+  <tr>
+    <th style="text-align: center">Prompt 名稱</th>
+    <th style="text-align: center">風格</th>
+    <th style="text-align: center">預設主題</th>
+  </tr>
+  <tr>
+    <td><code>seedream_style_anime</code></td>
+    <td>日系動漫風格，賽璐珞上色，鮮豔飽和色彩</td>
+    <td>一個女孩站在櫻花樹下</td>
+  </tr>
+  <tr>
+    <td><code>seedream_style_realistic</code></td>
+    <td>寫實攝影風格，高畫質細節，自然光影</td>
+    <td>城市夜景</td>
+  </tr>
+  <tr>
+    <td><code>seedream_style_watercolor</code></td>
+    <td>水彩畫風格，柔和暈染，通透色彩</td>
+    <td>山間小屋</td>
+  </tr>
+  <tr>
+    <td><code>seedream_style_oil_painting</code></td>
+    <td>油畫風格，厚重筆觸，豐富層次</td>
+    <td>海邊夕陽</td>
+  </tr>
+</table>
 
 ## ❓ 常見問題
 

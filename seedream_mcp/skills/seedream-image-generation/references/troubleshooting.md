@@ -26,6 +26,7 @@
   - 4.5/4.0 传 `output_format` → 去掉该参数
   - 4.5 传 `optimize_prompt_options.mode=fast` → 改为 `standard` 或去掉该参数
   - 非 5.0 Pro 调 `layer_decomposition`/`background` → 由部署方将服务器切换到 5.0 Pro
+  - 上游报错提示透明通道不支持 → 换带透明通道的 png 输入或去掉 `background` 参数
 - **413 请求体过大**：Base64 传图体积膨胀明显。对策：压缩或缩小图片后重传；有公网可达地址时改用 URL
 - **组图张数报错**：约束是"参考图数量 + 生成数量 ≤ 15"，对全部组图模型生效，调低 `max_images` 或减少参考图
 - **生成成功但未找到保存文件**：确认 `auto_save` 未被显式关闭；按保存路径规则查找（见 SKILL.md"图片的保存与复用"）
