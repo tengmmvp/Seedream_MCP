@@ -24,6 +24,7 @@ from ..core.formats import (
     MIME_BY_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
+    ensure_image_decoders_ready,
     format_file_size_mb,
     format_file_too_large,
     parse_data_uri,
@@ -56,27 +57,6 @@ MIN_IMAGE_EDGE = 15
 
 # 本地候选定位结果：(resolve 后物理路径, stat)，缓存签名计算与读取链共用同一候选。
 LocalImageCandidate = tuple[Path, os.stat_result]
-
-# HEIC/HEIF 解码器惰性注册，首次校验图片时按需执行。check-then-set 非线程安全，
-# 但 register_heif_opener 与 MAX_IMAGE_PIXELS 赋值均幂等，并发重复注册无功能影响。
-_heif_opener_registered = False
-
-
-def ensure_image_decoders_ready() -> None:
-    """注册 HEIC/HEIF 解码器并配置 PIL 解压炸弹防护，仅首次调用时执行。
-
-    PIL 与 pillow_heif 延迟导入，避免模块导入期加载图像库产生全局副作用。
-    """
-    global _heif_opener_registered
-    if _heif_opener_registered:
-        return
-    from PIL import Image
-    from pillow_heif import register_heif_opener
-
-    # 进程级覆写 PIL 解压炸弹阈值，宿主进程内所有 PIL 打开操作随之以 36M 为上限。
-    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
-    register_heif_opener()
-    _heif_opener_registered = True
 
 
 def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None:
@@ -118,7 +98,9 @@ def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> Non
         decode_and_validate_dimensions(image_bytes, field_value)
     except SeedreamValidationError:
         raise
-    except (ValueError, OSError, Image.DecompressionBombError) as exc:
+    except (ValueError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
+        # SyntaxError：Pillow 的 PNG 插件对损坏 chunk 抛原生 SyntaxError，归一为
+        # 校验错误，保留 field/value 元数据。
         message = (
             UNIDENTIFIED_IMAGE_MESSAGE
             if is_unidentified_image_error(exc)
@@ -253,6 +235,10 @@ def iter_local_candidates(
     is_absolute = os.path.isabs(image)
     candidates = [Path(image)] if is_absolute else [Path(base_dir) / image]
     for candidate in candidates:
+        # 驱动器相对形态（C:foo）pathlib 拼接会丢弃 base_dir 锚定到该盘进程 CWD，
+        # 与 normalize_path 同口径跳过该形态，消除两条链路的判定分叉。
+        if candidate.drive and not candidate.root:
+            continue
         # UNC 根拼接出的候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
         if is_unc_path(str(candidate)):
             continue
@@ -406,7 +392,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 
         return str(path.absolute())
 
-    except (OSError, ValueError, RuntimeError) as e:
+    except (OSError, ValueError, RuntimeError, SyntaxError) as e:
         raise SeedreamValidationError(
             f"文件路径验证失败: {str(e)}", field="image", value=file_path
         ) from e
@@ -477,7 +463,7 @@ def _validate_data_uri(data_uri: str) -> str:
 
         return f"data:image/{canonical_fmt};base64,{b64}"
 
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, SyntaxError) as e:
         raise SeedreamValidationError(
             f"Data URI 验证失败: {str(e)}", field="image", value=data_uri
         ) from e

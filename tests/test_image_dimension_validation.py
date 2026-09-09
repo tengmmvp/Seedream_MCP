@@ -14,8 +14,8 @@ import pytest
 from PIL import Image
 from PIL.Image import UnidentifiedImageError
 
+from seedream_mcp.utils.core import formats
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.images import image_validation
 from seedream_mcp.utils.images.image_validation import (
     MAX_IMAGE_PIXELS,
     MIN_IMAGE_EDGE,
@@ -51,7 +51,7 @@ def _lower_pil_pixel_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     同时固定注册哨兵为已注册，防止 ensure_image_decoders_ready 在解码前用
     模块常量 3600 万覆盖已调低的阈值。
     """
-    monkeypatch.setattr(image_validation, "_heif_opener_registered", True)
+    monkeypatch.setattr(formats, "_decoders_ready", True)
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10000)
 
 

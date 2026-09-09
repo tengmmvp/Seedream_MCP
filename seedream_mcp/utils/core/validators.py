@@ -18,7 +18,11 @@ from typing import Any, NamedTuple
 
 from .errors import SeedreamConfigError, SeedreamValidationError
 from .logs import get_logger
-from ..model.model_capabilities import get_max_reference_images, get_model_capabilities
+from ..model.model_capabilities import (
+    get_max_reference_images,
+    get_model_capabilities,
+    preset_numeric_sort_key as _preset_numeric_sort_key,
+)
 
 logger = get_logger()
 
@@ -72,18 +76,6 @@ def _parse_pixel_size(size: str) -> tuple[int, int] | None:
     if matched is None:
         return None
     return int(matched.group(1)), int(matched.group(2))
-
-
-def _preset_numeric_sort_key(preset: str) -> tuple[float, str]:
-    """尺寸档位的排序键：按数值前缀升序，其次按字典序保证稳定。
-
-    字典序会把 1.5K 排在 1K 之前，与档位的数值视觉顺序相反；数值前缀无法解析的
-    档位排在末尾，不阻断排序。
-    """
-    try:
-        return (float(preset.removesuffix("K")), preset)
-    except ValueError:
-        return (float("inf"), preset)
 
 
 def _coerce_positive_int_in_range(value: Any, field: str, min_value: int, max_value: int) -> int:

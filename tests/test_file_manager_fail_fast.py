@@ -1,7 +1,8 @@
-"""FileManager 快速失败与保存路径扩展名收敛测试。
+"""FileManager 快速失败、进程级缓存与保存路径扩展名收敛测试。
 
-构造阶段拒绝非法 base_dir；save_bytes 覆盖符号链接替换不写穿、原子落盘不留
-临时文件、冲突改名与失败清理。
+构造阶段拒绝非法 base_dir；get_file_manager 按原始 base_dir 复用实例并按 LRU
+驱逐；save_bytes 覆盖符号链接替换不写穿、原子落盘不留临时文件、冲突改名与
+失败清理。
 """
 
 import os
@@ -54,6 +55,31 @@ def test_file_manager_rejects_unc_base_dir_before_resolve(
         FileManager(base_dir=Path("//host/share"))
     with pytest.raises(FileManagerError, match="UNC"):
         FileManager(base_dir=Path(r"\\host\share"))
+
+
+def test_get_file_manager_caches_by_base_dir_and_evicts_lru(tmp_path: Path) -> None:
+    """同 base_dir 复用同一实例，超出条目上限按最旧驱逐。"""
+    from seedream_mcp.utils.io.io_storage import (
+        _FILE_MANAGER_CACHE_MAX_ENTRIES,
+        _file_manager_cache,
+        get_file_manager,
+    )
+
+    _file_manager_cache.clear()
+    try:
+        first = get_file_manager(tmp_path)
+        assert get_file_manager(tmp_path) is first
+
+        for idx in range(_FILE_MANAGER_CACHE_MAX_ENTRIES):
+            get_file_manager(tmp_path / f"dir{idx}")
+
+        assert len(_file_manager_cache) == _FILE_MANAGER_CACHE_MAX_ENTRIES
+        # 首个条目最旧被驱逐，最近插入的仍在缓存。
+        assert tmp_path not in _file_manager_cache
+        recent = tmp_path / f"dir{_FILE_MANAGER_CACHE_MAX_ENTRIES - 1}"
+        assert recent in _file_manager_cache
+    finally:
+        _file_manager_cache.clear()
 
 
 def test_file_manager_accepts_valid_base_dir(tmp_path: Path) -> None:

@@ -357,12 +357,18 @@ def _classify_sse_event(
         (completed, usage, tools) — completed 为 True 时 usage/tools 有效。
 
     Raises:
-        SeedreamAPIError: 事件为请求级错误时抛出，status_code 固定为 400。
+        SeedreamAPIError: 事件为请求级错误且尚无任何产出条目时抛出，status_code
+            固定为 400；已有产出条目时保留部分结果，不抛出。
     """
     event_type = event.get("type")
     # 请求级错误事件：无 type 且顶层含 error 键。本质为 4xx，标记 status_code=400 使上层判定不可重试。
     if event_type is None and isinstance(event.get("error"), dict):
         err = event["error"]
+        if items:
+            # 已有产出时保留已计费的部分结果，与非流式部分成功口径一致；错误经
+            # format_sse_failed_event 成型净化，不覆盖先到的 usage 与 status。
+            items.append(format_sse_failed_event({"error": err}, model_id))
+            return False, None, None
         raw_code = err.get("code")
         raise SeedreamAPIError(
             # message 经与 handle_api_error 相同的截断辅助处理，超大错误体不随异常

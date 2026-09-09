@@ -32,7 +32,7 @@ from mcp.shared.exceptions import NoBackChannelError
 from mcp.types import ListRootsResult
 
 from ..core.errors import SeedreamConfigError
-from ..core.formats import SUPPORTED_IMAGE_EXTENSIONS
+from ..core.formats import DATA_DIR_NAME, SUPPORTED_IMAGE_EXTENSIONS
 from ..core.logs import get_logger
 from .io_file import has_reparse_attribute
 from .io_scan import cached_find_images_in_directory
@@ -48,8 +48,10 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
 # 工具调用拖到分钟级；超时按读取失败处理，工作根目录经声明链回退。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
 
-# 目录扫描的总条目预算：单次 find_images_in_directory 调用检视的不同条目（含非
-# 图片，重扫趟只计新增）累计超过该值即停止遍历，防止超大目录无界膨胀扫描耗时。
+# 目录扫描的物化条目预算：单次 find_images_in_directory 调用物化的条目（含非
+# 图片，重扫趟只计新增物化段）累计超过该值即停止遍历，约束递归广度与前缀物化量；
+# heapq.nsmallest 选前缀须消费整个目录迭代器，单目录单趟枚举不在此预算内，由
+# io_scan 的 mtime+TTL 缓存缓解重复扫描。
 _SCAN_ENTRY_BUDGET = 20000
 
 # Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件，
@@ -228,7 +230,7 @@ def resolve_cached_default_images_root(workspace_root: Path) -> Path:
     """
     return _resolve_with_cache(
         f"default-images:{workspace_root}",
-        lambda: (workspace_root / ".seedream" / "images").resolve(),
+        lambda: (workspace_root / DATA_DIR_NAME / "images").resolve(),
     )
 
 
@@ -247,21 +249,26 @@ def resolve_cached_explicit_images_root(configured_dir: str) -> Path:
     """
     expanded_dir = Path(configured_dir).expanduser()
     if not expanded_dir.is_absolute():
-        return (expanded_dir / ".seedream" / "images").resolve()
+        return (expanded_dir / DATA_DIR_NAME / "images").resolve()
     return _resolve_with_cache(
         f"explicit-images:{configured_dir}",
-        lambda: (resolve_cached_data_root(configured_dir) / ".seedream" / "images").resolve(),
+        lambda: (resolve_cached_data_root(configured_dir) / DATA_DIR_NAME / "images").resolve(),
     )
 
 
 def _resolve_configured_root() -> Path | None:
     """解析已配置的工作区根目录，未配置或解析失败返回 None。
 
-    供 resolve_env_workspace_root 的声明链兜底取配置根。
+    供 resolve_env_workspace_root 的声明链兜底取配置根。UNC 声明与
+    resolve_images_root 同口径在 resolve 前拒绝。
+
+    Raises:
+        SeedreamConfigError: 工作区根目录声明为 UNC 形态。
     """
     configured_root = _configured_env_value(_WORKSPACE_ROOT_ENV)
     if not configured_root:
         return None
+    reject_unc_declaration(configured_root, label="工作区根目录")
     try:
         expanded_root = Path(configured_root).expanduser()
         cacheable = expanded_root.is_absolute()
@@ -368,7 +375,7 @@ def _resolve_fallback_root() -> Path:
         message = "进程启动目录不可用作回退根，工作根目录回退为用户主目录 {}，默认图片目录为 {}"
     _fallback_root = root
     _pending_start_messages.append(
-        ("INFO", message.format(str(root), str(root / ".seedream" / "images")))
+        ("INFO", message.format(str(root), str(root / DATA_DIR_NAME / "images")))
     )
     return root
 
@@ -406,10 +413,11 @@ def resolve_log_file_path() -> Path:
     """
     configured_data_root = _configured_env_value(_DATA_ROOT_ENV)
     if configured_data_root:
+        reject_unc_declaration(configured_data_root, label="数据根目录")
         base = resolve_cached_data_root(configured_data_root)
     else:
         base = resolve_env_workspace_root()
-    return base / ".seedream" / "logs" / "seedream_mcp.log"
+    return base / DATA_DIR_NAME / "logs" / "seedream_mcp.log"
 
 
 def resolve_images_root() -> Path:
@@ -428,9 +436,7 @@ def resolve_images_root() -> Path:
     """
     configured = _configured_env_value(_DATA_ROOT_ENV)
     if configured:
-        # UNC 的 resolve 会触发 SMB 认证，入口在 resolve 前对原始声明值拒绝。
-        if is_unc_path(configured):
-            raise SeedreamConfigError(f"数据根目录配置不支持 UNC 路径: {configured}")
+        reject_unc_declaration(configured, label="数据根目录")
         try:
             # 显式声明与工作根目录同为数据根目录，图片目录统一派生自其 .seedream 子目录。
             return resolve_cached_explicit_images_root(configured)
@@ -690,6 +696,21 @@ def is_unc_path(path_str: str) -> bool:
     return first == second or sys.platform == "win32"
 
 
+def reject_unc_declaration(value: str, *, label: str, env_hint: str = "") -> None:
+    """目录声明为 UNC 形态时抛配置错误，各声明入口在 resolve 前统一拒绝。
+
+    Args:
+        value: 原始声明值。
+        label: 错误消息中的目录称呼。
+        env_hint: 追加到错误消息的环境变量提示后缀，可为空串。
+
+    Raises:
+        SeedreamConfigError: 声明值为 UNC 形态。
+    """
+    if is_unc_path(value):
+        raise SeedreamConfigError(f"{label}不支持 UNC 路径: {value}{env_hint}")
+
+
 def has_windows_colon_component(path: str) -> bool:
     """判断 win32 下路径是否存在含冒号的分量，即 NTFS 备用数据流形态。
 
@@ -821,9 +842,10 @@ def find_images_in_directory(
     安全前置条件：本函数不做工作区越界校验，调用方必须先确认 directory 位于允许
     的工作区根之内。UNC 形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回
     空列表并记录告警。
-    单次调用检视的条目数（含非图片）受 _SCAN_ENTRY_BUDGET 预算封顶，重扫趟只计
-    新增条目使倍增摊销不翻倍计数，超限丢弃当批、终止遍历并返回已收集结果，截断
-    的目录追加至 truncated_dirs 供调用方感知结果不完整。
+    单次调用物化的条目数（含非图片）受 _SCAN_ENTRY_BUDGET 预算封顶，重扫趟只计
+    新增物化段使倍增摊销不翻倍计数，超限丢弃当批、终止遍历并返回已收集结果，截断
+    的目录追加至 truncated_dirs 供调用方感知结果不完整；heapq.nsmallest 选前缀须
+    消费整个目录迭代器，单目录单趟枚举不在此预算内。
     单个目录的条目列表按需物化：limit 场景只物化排序前缀，非图片条目占位致结果
     不足且目录未扫尽时倍增前缀重扫，无 limit 时一次物化全量有序列表；limit 亦使
     跨目录递归提前终止，重复扫描的成本由 io_scan 的 mtime 加 TTL 缓存缓解。
@@ -1044,9 +1066,12 @@ def _file_uri_to_path(uri: str) -> Path | None:
         return None
 
     candidate = Path(path_part)
-    # 冒号分量（NTFS ADS）与保留设备名与 normalize_path 同口径拒绝，畸形形态
-    # 不成为工作区 root。
-    if has_windows_colon_component(candidate.name) or is_windows_reserved_name(candidate.name):
+    # 两类冒号畸形按完整路径判定：整路径为盘符相对形态（c:ads 的 c: 被解析为盘符、
+    # 裸文件名判定漏拒）与含冒号的普通分量（NTFS ADS）；保留设备名与 normalize_path
+    # 同口径拒绝，畸形形态不成为工作区 root。
+    if (candidate.drive and not candidate.root) or has_windows_colon_component(str(candidate)):
+        return None
+    if is_windows_reserved_name(candidate.name):
         return None
 
     try:

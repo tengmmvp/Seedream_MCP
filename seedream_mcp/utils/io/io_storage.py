@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -724,3 +725,24 @@ class FileManager:
                     logger.info("删除空目录: {}", dir_path)
             except Exception as e:
                 logger.warning("删除目录失败: {} -> {}", dir_path, e)
+
+
+# FileManager 进程级缓存：构造含 resolve/exist/mkdir 文件系统调用，按 base_dir
+# 原始值（调用方均传已解析的绝对路径）复用避免每次保存重复探测；LRU 上限封顶
+# 多会话 roots 下的条目增长，竞态下最坏重复构造一次。
+_FILE_MANAGER_CACHE_MAX_ENTRIES = 16
+_file_manager_cache: "OrderedDict[Path, FileManager]" = OrderedDict()
+
+
+def get_file_manager(base_dir: Path | None = None) -> "FileManager":
+    """按 base_dir 取进程级缓存的 FileManager，未命中时构造并缓存，LRU 驱逐最旧。"""
+    cache_key = resolve_images_root() if base_dir is None else Path(base_dir)
+    cached = _file_manager_cache.get(cache_key)
+    if cached is not None:
+        _file_manager_cache.move_to_end(cache_key)
+        return cached
+    manager = FileManager(base_dir)
+    _file_manager_cache[cache_key] = manager
+    while len(_file_manager_cache) > _FILE_MANAGER_CACHE_MAX_ENTRIES:
+        _file_manager_cache.popitem(last=False)
+    return manager

@@ -155,16 +155,16 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
     from seedream_mcp import config as config_module
     from seedream_mcp.server import _reset_lifespan_state
-    from seedream_mcp.utils.images import image_validation as image_validation_module
+    from seedream_mcp.utils.core import formats as formats_module
     from seedream_mcp.utils.io.io_path import clear_resolved_env_root_cache
 
-    # PIL 已导入时快照解压炸弹阈值，收尾恢复：HEIC 注册分支经 Image.MAX_IMAGE_PIXELS
+    # PIL 已导入时快照解压炸弹阈值，收尾恢复：解码器初始化经 Image.MAX_IMAGE_PIXELS
     # 做进程级覆写且不自行恢复；未导入时不快照，避免复位本身触发 PIL 的惰性导入。
     pil_image_module: Any = sys.modules.get("PIL.Image")
     max_pixels_before = pil_image_module.MAX_IMAGE_PIXELS if pil_image_module is not None else None
 
-    # HEIC 解码器注册标志为模块全局，重置以隔离注册时序相关用例
-    monkeypatch.setattr(image_validation_module, "_heif_opener_registered", False)
+    # 解码器就绪标志为模块全局，重置以隔离初始化时序相关用例
+    monkeypatch.setattr(formats_module, "_decoders_ready", False)
     # lifespan 共享单例、活动配置、全局配置懒加载缓存、asyncio.Lock、自动保存清理状态
     # 与目录扫描缓存等模块级可变状态统一经复位协议重建到干净态，避免跨事件循环复用
     # 与跨用例缓存污染；SDK 2.0 起传输配置直传 streamable_http_app 构造，settings

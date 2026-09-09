@@ -69,6 +69,9 @@ _FORMAT_EQUIVALENT_EXTENSIONS: tuple[frozenset[str], ...] = (
     frozenset({".heif", ".heic"}),
 )
 
+# 字节签名校验失败的统一拒绝文案，流内即时判定与流末兜底两处共用。
+_SIGNATURE_REJECTION_MESSAGE = "下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造"
+
 
 def _extensions_in_same_format(first: str, second: str) -> bool:
     """判断两个扩展名是否属于同一格式等价类，比较前归一化小写。"""
@@ -690,9 +693,6 @@ class DownloadManager:
             if cl_value > self.max_file_size:
                 raise DownloadError(f"文件过大: {cl_value} 字节")
 
-        # 目录创建卸载到线程池；exist_ok=True 下重复创建无副作用，保留作防御性兜底。
-        await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
-
         total_size = 0
         head_bytes = b""
         final_save_path = save_path
@@ -712,15 +712,21 @@ class DownloadManager:
                     # 长度下界的最大值，保证 is_known_image_bytes 对全部格式可判定。
                     if len(head_bytes) < SNIFF_HEAD_BYTES_FLOOR:
                         head_bytes += chunk[: SNIFF_HEAD_BYTES_FLOOR - len(head_bytes)]
+                        # 签名集满即判定，伪造 Content-Type 的响应在首个 chunk 后被拒，
+                        # 不再白耗后续带宽与磁盘写入。
+                        if len(head_bytes) >= SNIFF_HEAD_BYTES_FLOOR and not is_known_image_bytes(
+                            head_bytes
+                        ):
+                            raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
                     write_buffer += chunk
                     if len(write_buffer) >= _WRITE_BATCH_BYTES:
                         await f.write(write_buffer)
                         write_buffer.clear()
                 if write_buffer:
                     await f.write(write_buffer)
-            # 字节层校验：防止 Content-Type 伪造使非图片或可执行内容落盘。
+            # 字节层校验：小于嗅探窗口的响应体在流结束时兜底判定。
             if not is_known_image_bytes(head_bytes):
-                raise DownloadError("下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造")
+                raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
             sniffed = infer_extension_from_bytes(head_bytes)
             if sniffed != save_path.suffix.lower() and not _extensions_in_same_format(
                 sniffed, save_path.suffix
@@ -861,6 +867,10 @@ class DownloadManager:
 
         for attempt in range(self.max_retries + 1):
             try:
+                # 防御性兜底：父目录可能在退避等待或并发清理期间被删除，每趟尝试前
+                # 确保存在；在 try 内使其 OSError 按下方分支归一（权限/只读盘终态，
+                # 其余重试）。
+                await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
                 logger.info(
                     "开始下载图片 (尝试 {}/{}): {}",
                     attempt + 1,

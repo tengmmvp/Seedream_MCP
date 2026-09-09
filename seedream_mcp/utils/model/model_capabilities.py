@@ -192,6 +192,18 @@ def get_max_reference_images(model_id: str) -> int:
     return get_model_capabilities(model_id).max_reference_images
 
 
+def preset_numeric_sort_key(preset: str) -> tuple[float, str]:
+    """尺寸档位的排序键：按数值前缀升序，其次按字典序保证稳定。
+
+    字典序会把 1.5K 排在 1K 之前，与档位的数值视觉顺序相反；数值前缀无法解析的
+    档位排在末尾，不阻断排序。载荷展示与校验报错文案共用本键，两处口径一致。
+    """
+    try:
+        return (float(preset.removesuffix("K")), preset)
+    except ValueError:
+        return (float("inf"), preset)
+
+
 def model_payloads() -> list[dict[str, object]]:
     """按 MODEL_ALIASES 顺序产出各模型的能力展示载荷，供资源与 Web 清单共用。
 
@@ -203,6 +215,6 @@ def model_payloads() -> list[dict[str, object]]:
         capabilities = asdict(get_model_capabilities(model_id))
         presets = capabilities.get("allowed_presets")
         if isinstance(presets, (set, frozenset, list)):
-            capabilities["allowed_presets"] = sorted(presets)
+            capabilities["allowed_presets"] = sorted(presets, key=preset_numeric_sort_key)
         payloads.append({"alias": alias, "model_id": model_id, **capabilities})
     return payloads

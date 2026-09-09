@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from .errors import CONTROL_CHARS_PATTERN
+from .formats import DATA_DIR_NAME
 
 if TYPE_CHECKING:
     # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入。
@@ -148,7 +149,7 @@ def setup_logging(
 
     if enable_file:
         if log_file is None:
-            log_dir = Path(".seedream") / "logs"
+            log_dir = Path(DATA_DIR_NAME) / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / "seedream_mcp.log"
         else:

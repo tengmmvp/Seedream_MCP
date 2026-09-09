@@ -94,7 +94,7 @@ async def test_parse_sse_response_preserves_complete_events_before_truncation() 
 
 
 async def test_parse_sse_response_raises_on_request_level_error() -> None:
-    """请求级错误事件抛 SeedreamAPIError，携带上游 message。"""
+    """零产出时请求级错误事件抛 SeedreamAPIError，携带上游 message。"""
     chunks = [b'data: {"error":{"message":"bad request","code":"x"}}\n\n']
     with pytest.raises(SeedreamAPIError, match="bad request"):
         await parse_sse_response(
@@ -106,6 +106,27 @@ async def test_parse_sse_response_raises_on_request_level_error() -> None:
             total_bytes_limit=64 * 1024,
             log=_log(),
         )
+
+
+async def test_parse_sse_request_level_error_keeps_collected_items() -> None:
+    """已有产出后到达的请求级错误保留部分结果，与非流式部分成功口径一致。"""
+    chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
+        b'data: {"error":{"message":"late failure","code":"x"}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _sse_response(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_log(),
+    )
+    urls = [item["url"] for item in result["data"] if "url" in item]
+    assert urls == ["http://x/1.png"]
+    assert any("error" in item for item in result["data"])
+    assert result["status"] == "partial"
 
 
 async def test_parse_sse_request_level_error_code_narrowed_to_string() -> None:

@@ -18,6 +18,9 @@ DEFAULT_IMAGE_EXTENSION = ".jpeg"
 # 参考图与下载两入口的像素上限单一来源。
 MAX_IMAGE_PIXELS = 36_000_000
 
+# 数据目录名：<数据根目录>/DATA_DIR_NAME 下并列 images/thumbs/logs，整体删除即清理。
+DATA_DIR_NAME = ".seedream"
+
 # 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in
 # 成员判断。
 SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (
@@ -132,6 +135,28 @@ def is_known_image_bytes(content: bytes) -> bool:
 def format_file_size_mb(size_bytes: int) -> str:
     """将字节数格式化为 MB 字符串，保留一位小数，供校验与保存模块共享。"""
     return f"{size_bytes / 1024 / 1024:.1f}MB"
+
+
+# PIL 解码器就绪标志，images 与 io 两组的解码前置共用。
+_decoders_ready = False
+
+
+def ensure_image_decoders_ready() -> None:
+    """设置 PIL 解压炸弹阈值并注册 HEIF 解码器，进程级仅首次执行。
+
+    PIL 与 pillow_heif 延迟导入，避免模块导入期加载图像库产生全局副作用；
+    check-then-set 非线程安全，但两项操作均幂等，并发重复执行无功能影响。
+    """
+    global _decoders_ready
+    if _decoders_ready:
+        return
+    from PIL import Image
+    from pillow_heif import register_heif_opener
+
+    # 进程级覆写 PIL 解压炸弹阈值，宿主进程内所有 PIL 打开操作随之以 36M 为上限。
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    register_heif_opener()
+    _decoders_ready = True
 
 
 def format_file_too_large(size_bytes: int, max_size: int, label: str = "文件") -> str:
