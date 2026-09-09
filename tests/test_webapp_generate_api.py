@@ -373,6 +373,11 @@ async def test_generate_invalid_json_returns_400(
         ("payload_too_large", 400),
         ("rate_limited", 429),
         ("payment_required", 402),
+        ("auth_error", 503),
+        ("config_error", 503),
+        ("network_error", 502),
+        ("api_error", 502),
+        ("timeout_error", 504),
         ("generation_failed", 502),
     ],
 )

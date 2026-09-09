@@ -77,7 +77,11 @@ async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Respons
 
 
 async def web_thumbnail(request: Request) -> Response:
-    """缩略图端点：长边不超过 768 像素的 JPEG，经落盘缓存，失败返回 404。"""
+    """缩略图端点：长边不超过 768 像素的 JPEG，经落盘缓存。
+
+    解码失败与文件不存在分档：文件缺失 404，存在但无法生成缩略图（损坏或
+    像素超限）422，监控与排障可按状态码区分。
+    """
     resolved = await _resolve_request_path(request)
     if isinstance(resolved, Response):
         return resolved
@@ -85,7 +89,7 @@ async def web_thumbnail(request: Request) -> Response:
 
     data = await cached_thumbnail_bytes(image_path, images_root)
     if data is None:
-        return _shared.error_json("not_found", "缩略图生成失败", 404)
+        return _shared.error_json("thumbnail_failed", "缩略图生成失败", 422)
     return Response(content=data, media_type="image/jpeg", headers=_shared.PRIVATE_CACHE_HEADER)
 
 

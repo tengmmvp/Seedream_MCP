@@ -6,7 +6,7 @@
 
 "use strict";
 
-import { $, clearInlineError, showInlineError, state } from "./api.js";
+import { $, clearInlineError, currentModel, showInlineError, state } from "./api.js";
 
 const SINGLE_REF_LIMIT = 1;
 const FUSION_REF_MIN = 2;
@@ -21,12 +21,9 @@ const UPLOAD_TOTAL_LIMIT_CHARS = 45 * 1024 * 1024;
  * @returns {Object} 形如 {refs, min, max, promptOptional} 的配置。
  */
 export function toolConfig(tool) {
-  const current = state.configInfo
-    ? (state.configInfo.models || []).find(
-        (m) => m.model_id === state.configInfo.model_id,
-      )
-    : null;
-  const refLimit = current ? current.max_reference_images : 10;
+  const current = currentModel();
+  // 未知模型（Endpoint ID 部署）回退默认上限 14，与后端 unknown 家族放行同源。
+  const refLimit = current ? current.max_reference_images : 14;
   if (tool === "image-to-image")
     return {
       refs: true,
@@ -80,7 +77,8 @@ export function renderReferences(enterIndex = -1) {
     } else {
       const label = document.createElement("span");
       label.className = "ref-path mono";
-      label.textContent = ref.value.slice(0, 18) + "…";
+      label.textContent =
+        ref.value.length > 18 ? ref.value.slice(0, 18) + "…" : ref.value;
       item.appendChild(label);
     }
     list.appendChild(item);
@@ -94,6 +92,11 @@ function dataUriTotalChars() {
     (sum, ref) => (ref.kind === "data_uri" ? sum + ref.value.length : sum),
     0,
   );
+}
+
+/** 追加 nextChars 字符后是否仍在 data URI 累计上限内。 */
+export function withinUploadBudget(nextChars) {
+  return dataUriTotalChars() + nextChars <= UPLOAD_TOTAL_LIMIT_CHARS;
 }
 
 // 参考图区行内错误提示：拒绝原因落在表单内，替代阻塞式弹窗。
@@ -120,10 +123,12 @@ export function addReference(kind, value, preview) {
     showRefError(`该工具最多 ${config.max} 张参考图`);
     return false;
   }
-  if (
-    kind === "data_uri" &&
-    dataUriTotalChars() + value.length > UPLOAD_TOTAL_LIMIT_CHARS
-  ) {
+  // URL 来源前置校验 scheme，非 http(s) 开头的输入在入列前拦下。
+  if (kind === "url" && !/^https?:\/\//i.test(value)) {
+    showRefError("图片 URL 须以 http:// 或 https:// 开头");
+    return false;
+  }
+  if (kind === "data_uri" && !withinUploadBudget(value.length)) {
     showRefError("参考图总量超过 45MB 上限，请改用图片 URL");
     return false;
   }
@@ -143,6 +148,7 @@ export function handleFiles(files) {
     const reader = new FileReader();
     reader.onload = () =>
       addReference("data_uri", reader.result, reader.result);
+    reader.onerror = () => showRefError(`文件读取失败: ${file.name}`);
     reader.readAsDataURL(file);
   }
 }

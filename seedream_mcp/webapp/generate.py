@@ -101,24 +101,15 @@ async def _run_web_generation(
     请求体解析与响应体序列化是随参考图体积线性增长的同步 CPU 工作，下沉
     工作线程避免阻塞事件循环。
     """
-    try:
-        body_bytes = await request.body()
-        body = await asyncio.to_thread(json.loads, body_bytes)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return _shared.error_json("invalid_json", f"请求体不是合法 JSON: {exc}", 400)
-    if not isinstance(body, dict):
-        return _shared.error_json("invalid_request", "请求体须为 JSON 对象", 400)
+    body, parse_error = await _shared.parse_json_object_body(request)
+    if parse_error is not None:
+        return parse_error
 
     try:
-        params = model_cls.model_validate(body)
+        # 参数校验对含大体积参考图的请求体是线性 CPU 工作，与解析同批下沉。
+        params = await asyncio.to_thread(model_cls.model_validate, body)
     except ValidationError as exc:
-        first = exc.errors()[0]
-        field = ".".join(str(part) for part in first.get("loc", ()))
-        return _shared.error_json(
-            "invalid_request",
-            f"参数校验失败: {field or first.get('type')} {first.get('msg')}",
-            400,
-        )
+        return _shared.validation_error_json(exc)
 
     config = get_active_config()
     ctx = cast("Context | None", build_web_request_context())

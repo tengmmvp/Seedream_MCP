@@ -136,7 +136,8 @@ def mount_web_static(app: Any) -> None:
     for route in getattr(app, "routes", []):
         if isinstance(route, Mount) and route.path == WEB_STATIC_MOUNT_PATH:
             return
-    # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
+    # STATIC_DIR 经模块属性访问而非导入期绑定；注意挂载点在构造时固化目录
+    # 字符串，运行期替换目录只对页面端点生效，静态挂载保持挂载时的目录。
     if not constants.STATIC_DIR.is_dir():
         logger.error("Web 静态资源目录不存在，跳过挂载: {}", constants.STATIC_DIR)
         return

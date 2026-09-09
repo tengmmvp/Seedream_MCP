@@ -10,7 +10,6 @@ workspace_roots 与 resolved_directories 回显字段 Web 前端不消费，返�
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -62,19 +61,18 @@ async def _directory_outside_images_root(directory: str, images_root: Path) -> b
 
 
 async def web_browse(request: Request) -> Response:
-    """图库浏览端点，请求体经 BrowseImagesInput 校验后透传 browse 工具。"""
+    """图库浏览端点，请求体经 BrowseImagesInput 校验后透传 browse 工具。
+
+    请求体解析与参数校验是同步 CPU 工作，与生成端点同口径下沉工作线程，
+    避免超大 JSON 阻塞事件循环。
+    """
+    body, parse_error = await _shared.parse_json_object_body(request)
+    if parse_error is not None:
+        return parse_error
     try:
-        body = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return _shared.error_json("invalid_json", "请求体不是合法 JSON", 400)
-    if not isinstance(body, dict):
-        return _shared.error_json("invalid_request", "请求体须为 JSON 对象", 400)
-    try:
-        params = BrowseImagesInput.model_validate(body)
+        params = await asyncio.to_thread(BrowseImagesInput.model_validate, body)
     except ValidationError as exc:
-        return _shared.error_json(
-            "invalid_request", f"参数校验失败: {exc.errors()[0].get('msg')}", 400
-        )
+        return _shared.validation_error_json(exc)
 
     images_root = await _shared.resolve_web_images_root()
     if isinstance(images_root, JSONResponse):

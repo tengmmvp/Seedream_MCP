@@ -8,13 +8,15 @@
 import {
   $,
   apiFetch,
+  currentModel,
   fetchBlobUrl,
   fetchExternalBlobUrl,
   revokeObjectUrls,
+  setActiveTool,
   showInlineError,
   state,
 } from "./api.js";
-import { renderReferences, toolConfig } from "./refs.js";
+import { renderReferences, toolConfig, withinUploadBudget } from "./refs.js";
 import { openLightbox } from "./gallery.js";
 
 /**
@@ -28,12 +30,14 @@ export async function loadConfigInfo() {
   const info = await response.json();
   state.configInfo = info;
 
-  const current = (info.models || []).find((m) => m.model_id === info.model_id);
+  const current = currentModel();
   $("server-meta").textContent = current
     ? `${current.display_name} · ${info.default_size} 默认`
     : info.model_id;
 
   const sizeSelect = $("size");
+  // 令牌重输等场景二次加载时保持「自定义」选中，用户已填的宽高不失效。
+  const wasCustom = sizeSelect.value === "custom";
   sizeSelect.innerHTML = "";
   const presets = current ? current.allowed_presets : ["2K", "3K", "4K"];
   for (const preset of presets) {
@@ -47,6 +51,7 @@ export async function loadConfigInfo() {
   custom.value = "custom";
   custom.textContent = "自定义";
   sizeSelect.appendChild(custom);
+  if (wasCustom) sizeSelect.value = "custom";
 
   // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源。
   const formatSelect = $("format-filter");
@@ -68,6 +73,17 @@ export async function loadConfigInfo() {
   if (current && !current.supports_output_format)
     outputFormatField.classList.add("collapsed");
 
+  // 服务端全局关闭自动保存时禁用复选框并标注，UI 与实际行为一致。
+  const autoSave = $("auto-save");
+  if (info.auto_save_enabled === false) {
+    autoSave.disabled = true;
+    autoSave.checked = false;
+    $("auto-save-note").classList.remove("hidden");
+  } else {
+    autoSave.disabled = false;
+    $("auto-save-note").classList.add("hidden");
+  }
+
   updateToolAvailability();
 }
 
@@ -77,18 +93,13 @@ export async function loadConfigInfo() {
  */
 export function applyToolUI() {
   const config = toolConfig(state.tool);
-  const current = state.configInfo
-    ? (state.configInfo.models || []).find(
-        (m) => m.model_id === state.configInfo.model_id,
-      )
-    : null;
+  const current = currentModel();
   // 未知模型（Endpoint ID 部署）无能力条目时回退为允许，与 unknown 家族放行一致。
   const layerAllowed =
     state.tool === "image-to-image" &&
     (current ? current.supports_layer_decomposition : true);
 
   $("reference-section").classList.toggle("collapsed", !config.refs);
-  $("prompt-label").textContent = "提示词";
   // 提示词留空仅图层拆分场景被后端接受，说明只在开关真实可用时提及。
   $("prompt-hint").textContent =
     config.promptOptional && layerAllowed
@@ -101,7 +112,18 @@ export function applyToolUI() {
   const layerField = $("layer-field");
   layerField.classList.toggle("collapsed", !layerAllowed);
   if (!layerAllowed) $("layer-decomposition").checked = false;
-  while (state.refs.length > config.max) state.refs.pop();
+  // 上限收缩时参考图暂存而非丢弃，切回支持的工具按上限自动恢复原顺序；
+  // 恢复与入列同受 data URI 累计上限约束，超限项留在暂存不丢。
+  while (state.refs.length > config.max) {
+    state.parkedRefs.push(state.refs.pop());
+  }
+  while (state.parkedRefs.length > 0 && state.refs.length < config.max) {
+    const next = state.parkedRefs[state.parkedRefs.length - 1];
+    if (next.kind === "data_uri" && !withinUploadBudget(next.value.length)) {
+      break;
+    }
+    state.refs.push(state.parkedRefs.pop());
+  }
   renderReferences();
 }
 
@@ -110,11 +132,7 @@ export function applyToolUI() {
  * 回落文生图。
  */
 export function updateToolAvailability() {
-  const current = state.configInfo
-    ? (state.configInfo.models || []).find(
-        (m) => m.model_id === state.configInfo.model_id,
-      )
-    : null;
+  const current = currentModel();
   const sequentialAllowed = current
     ? current.supports_sequential_generation
     : true;
@@ -124,10 +142,7 @@ export function updateToolAvailability() {
   sequentialTab.disabled = !sequentialAllowed;
   sequentialTab.title = sequentialAllowed ? "" : "当前模型不支持组图生成";
   if (state.tool === "sequential-generation" && !sequentialAllowed) {
-    state.tool = "text-to-image";
-    document.querySelectorAll("#tool-tabs button").forEach((b) => {
-      b.classList.toggle("active", b.dataset.tool === "text-to-image");
-    });
+    setActiveTool("text-to-image");
     applyToolUI();
   }
 }
@@ -368,9 +383,14 @@ async function renderResults(payload) {
       try {
         await loadResultImage(entry.img, entry.item);
       } catch (error) {
-        console.error("结果图片加载失败:", error);
         entry.img.classList.remove("developing");
-        appendCardError(entry.card, "图片加载失败");
+        if (error.message === "unauthorized") {
+          // 401 已弹令牌门；卡片标注重试方式，不误报为加载失败。
+          appendCardError(entry.card, "令牌已过期，重新输入后请再次生成");
+        } else {
+          console.error("结果图片加载失败:", error);
+          appendCardError(entry.card, "图片加载失败");
+        }
       }
     }
   });
@@ -383,10 +403,14 @@ async function renderResults(payload) {
     metaLines.push(`用量：completion ${usage.completion_tokens}`);
   }
   if (payload.auto_save && Array.isArray(payload.auto_save.results)) {
-    const savedCount = payload.auto_save.results.filter(
-      (r) => r && r.success !== false,
-    ).length;
-    metaLines.push(`已保存 ${savedCount} 张`);
+    const results = payload.auto_save.results;
+    const savedCount = results.filter((r) => r && r.success !== false).length;
+    // 部分失败时展示 N/总数，用户可察觉有保存失败的条目。
+    metaLines.push(
+      savedCount === results.length
+        ? `已保存 ${savedCount} 张`
+        : `已保存 ${savedCount}/${results.length} 张`,
+    );
   }
   if (metaLines.length) {
     meta.textContent = metaLines.join("\n");

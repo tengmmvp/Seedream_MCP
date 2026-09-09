@@ -175,10 +175,10 @@ async def test_file_endpoints_empty_path_returns_400(web_app_with_image: Any) ->
     assert response.status_code == 400
 
 
-async def test_thumbnail_build_failure_returns_404(
+async def test_thumbnail_build_failure_returns_422(
     web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """缩略图解码返回 None 时回 404 统一 JSON，而非 500 或空响应。"""
+    """缩略图解码返回 None 时回 422，与文件不存在的 404 分档供排障区分。"""
     from seedream_mcp.webapp import files as files_module
 
     async def _none(image_path: Path, images_root: Path) -> bytes | None:
@@ -191,9 +191,9 @@ async def test_thumbnail_build_failure_returns_404(
         web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
     )
 
-    assert response.status_code == 404
+    assert response.status_code == 422
     payload = response.json()
-    assert payload["error"] == "not_found"
+    assert payload["error"] == "thumbnail_failed"
     assert payload["error_description"] == "缩略图生成失败"
 
 

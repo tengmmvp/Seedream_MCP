@@ -8,8 +8,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+from typing import Any
 
+from pydantic import ValidationError
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ..utils.core.errors import SeedreamConfigError
@@ -24,7 +28,11 @@ GENERATION_ERROR_STATUS: dict[str, int] = {
     "payload_too_large": 400,
     "rate_limited": 429,
     "payment_required": 402,
+    "auth_error": 503,
     "config_error": 503,
+    "network_error": 502,
+    "api_error": 502,
+    "timeout_error": 504,
 }
 
 # 缩略图与原图响应允许浏览器私有缓存：已保存图片内容不再变化；nosniff 阻断
@@ -38,6 +46,31 @@ PRIVATE_CACHE_HEADER = {
 def error_json(error: str, description: str, status: int) -> JSONResponse:
     """构造与传输层中间件同形态的错误 JSON 响应。"""
     return JSONResponse({"error": error, "error_description": description}, status_code=status)
+
+
+async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSONResponse | None]:
+    """解析请求体为 JSON 对象，解析失败或形态不符时返回错误响应。
+
+    解析随参考图体积线性增长，下沉工作线程；生成与图库端点共用同一口径。
+    """
+    try:
+        body = await asyncio.to_thread(json.loads, await request.body())
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {}, error_json("invalid_json", f"请求体不是合法 JSON: {exc}", 400)
+    if not isinstance(body, dict):
+        return {}, error_json("invalid_request", "请求体须为 JSON 对象", 400)
+    return body, None
+
+
+def validation_error_json(exc: ValidationError) -> JSONResponse:
+    """把 pydantic 校验失败格式化为统一的首个错误描述响应。"""
+    first = exc.errors()[0]
+    field = ".".join(str(part) for part in first.get("loc", ()))
+    return error_json(
+        "invalid_request",
+        f"参数校验失败: {field or first.get('type')} {first.get('msg')}",
+        400,
+    )
 
 
 def images_root_unavailable(exc: Exception) -> JSONResponse:

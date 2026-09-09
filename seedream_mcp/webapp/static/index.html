@@ -50,20 +50,32 @@
               <button
                 type="button"
                 role="tab"
+                aria-selected="true"
                 data-tool="text-to-image"
                 class="active"
               >
                 文生图
               </button>
-              <button type="button" role="tab" data-tool="image-to-image">
+              <button
+                type="button"
+                role="tab"
+                aria-selected="false"
+                data-tool="image-to-image"
+              >
                 图生图
               </button>
-              <button type="button" role="tab" data-tool="multi-image-fusion">
+              <button
+                type="button"
+                role="tab"
+                aria-selected="false"
+                data-tool="multi-image-fusion"
+              >
                 多图融合
               </button>
               <button
                 type="button"
                 role="tab"
+                aria-selected="false"
                 data-tool="sequential-generation"
               >
                 组图
@@ -83,8 +95,7 @@
             <div id="reference-section" class="collapse collapsed">
               <div class="collapse-inner">
                 <label class="field-label"
-                  >参考图
-                  <span class="label-note" id="ref-count-note"></span
+                  >参考图 <span class="label-note" id="ref-count-note"></span
                 ></label>
                 <div id="reference-list" class="reference-list"></div>
                 <div class="ref-add-row">
@@ -161,10 +172,7 @@
               </div>
               <div class="field field-checkbox">
                 <div class="checkbox-row">
-                  <div
-                    class="collapse collapse-x collapsed"
-                    id="layer-field"
-                  >
+                  <div class="collapse collapse-x collapsed" id="layer-field">
                     <div class="collapse-inner">
                       <label class="checkbox-label"
                         ><input
@@ -215,6 +223,8 @@
                       id="auto-save"
                       checked
                     />自动保存</label
+                  ><span class="field-hint hidden" id="auto-save-note"
+                    >服务端已关闭自动保存</span
                   >
                 </div>
                 <div class="field field-wide">

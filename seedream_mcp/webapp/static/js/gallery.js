@@ -6,7 +6,7 @@
 "use strict";
 
 import { $, apiFetch, clearInlineError, fetchBlobUrl, revokeObjectUrls, showInlineError, state } from "./api.js";
-import { addReference } from "./refs.js";
+import { addReference, toolConfig } from "./refs.js";
 
 /** 图库单页条数。 */
 export const GALLERY_PAGE_SIZE = 60;
@@ -31,9 +31,11 @@ function resetGalleryPager() {
   $("gallery-next").disabled = true;
 }
 
-// 图库区错误提示：浏览失败时落空态文案位，替代静默返回。
+// 图库区错误提示：落视图顶部的专用错误节点（空态文案位在满页时位于首屏外）；
+// 失败同时复位翻页器，避免旧可用态把用户引向空页。
 function showGalleryError(message) {
-  showInlineError($("gallery-empty"), message);
+  showInlineError($("gallery-error"), message);
+  resetGalleryPager();
 }
 
 /**
@@ -43,6 +45,10 @@ function showGalleryError(message) {
 export async function refreshGallery() {
   const seq = ++requestSeq;
   $("gallery-refresh").classList.add("busy");
+  // 请求期间禁用翻页按钮，防止响应返回前连点叠加 offset 跳页；成功路径按
+  // 新状态恢复，失败路径由 resetGalleryPager 维持禁用。
+  $("gallery-prev").disabled = true;
+  $("gallery-next").disabled = true;
   try {
     await refreshGalleryForSeq(seq);
   } finally {
@@ -158,7 +164,11 @@ async function refreshGalleryForSeq(seq) {
   $("gallery-page").textContent = count
     ? `${state.gallery.offset + 1} – ${state.gallery.offset + count}`
     : "0";
-  $("gallery-count").textContent = state.gallery.hasMore ? "（还有更多）" : "";
+  $("gallery-count").textContent = state.gallery.hasMore
+    ? "（还有更多）"
+    : typeof payload.total_count === "number"
+      ? `（共 ${payload.total_count} 张）`
+      : "";
   $("gallery-prev").disabled = state.gallery.offset === 0;
   $("gallery-next").disabled = !state.gallery.hasMore;
 }
@@ -208,6 +218,12 @@ export async function openLightbox(item, errorEl = $("gallery-error")) {
   img.addEventListener("load", () => img.classList.add("loaded"), {
     once: true,
   });
+  // error 用属性赋值覆盖上一张的残留监听，连续打开多张损坏图不累积。
+  img.onerror = () => {
+    // 损坏图片无 load 事件，须显式收场否则灯箱永久空白。
+    img.classList.remove("loaded");
+    showInlineError($("lightbox-error"), "图片无法解码，文件可能已损坏。");
+  };
   img.src = currentLightboxUrl;
 }
 
@@ -258,13 +274,25 @@ export async function useLightboxAsReference() {
     return;
   if (state.tool === "text-to-image") {
     document.querySelector('[data-tool="image-to-image"]').click();
+    // 切工具时恢复的旧参考图可能占满唯一槽位，让位给用户显式选择的灯箱图，
+    // 被顶出的仍回暂存不丢。
+    while (
+      state.refs.length > 0 &&
+      state.refs.length >= toolConfig("image-to-image").max
+    ) {
+      state.parkedRefs.push(state.refs.pop());
+    }
   }
   try {
     const dataUri = await blobToDataUri(blob);
-    addReference("data_uri", dataUri, dataUri);
+    // 拒绝（数量或体积超限）时停留灯箱不跳转，具体原因已落生成台提示位。
+    if (!addReference("data_uri", dataUri, dataUri)) {
+      showInlineError($("lightbox-error"), "参考图未添加，详情见生成台提示。");
+      return;
+    }
   } catch {
     // 回填失败提示落在灯箱栏内，替代阻塞式弹窗。
-    showInlineError($("lightbox-error"), "回填参考图失败，请改用上传或图片 URL。");
+    showInlineError($("lightbox-error"), "回填参考图失败，请改用上传方式。");
     return;
   }
   closeLightbox();

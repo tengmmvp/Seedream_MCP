@@ -4,7 +4,14 @@
 
 "use strict";
 
-import { $, hideTokenGate, state, TOKEN_STORAGE_KEY } from "./api.js";
+import {
+  $,
+  clearStoredToken,
+  hideTokenGate,
+  setActiveTool,
+  state,
+  writeStoredToken,
+} from "./api.js";
 import { applyToolUI, loadConfigInfo, submitGenerate } from "./generate.js";
 import {
   closeLightbox,
@@ -16,6 +23,15 @@ import { addReference, handleFiles } from "./refs.js";
 
 function currentView() {
   return location.hash === "#/gallery" ? "gallery" : "generate";
+}
+
+// 令牌补齐与首次启动共用的初始化序列：配置就绪后进入工作台并补刷图库。
+async function bootstrapAfterAuth() {
+  await loadConfigInfo();
+  hideTokenGate();
+  applyToolUI();
+  // 直达 #/gallery 时首刷在 config-info 就绪前空转，配置就绪后补刷。
+  if (currentView() === "gallery") refreshGallery();
 }
 
 /** 按 hash 切换生成台与图库视图，进入图库时触发刷新。 */
@@ -32,12 +48,22 @@ export function applyRoute() {
 function bindEvents() {
   $("tool-tabs").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-tool]");
-    if (!button) return;
-    state.tool = button.dataset.tool;
-    document.querySelectorAll("#tool-tabs button").forEach((b) => {
-      b.classList.toggle("active", b === button);
-    });
+    if (!button || button.disabled) return;
+    setActiveTool(button.dataset.tool);
     applyToolUI();
+  });
+  // tablist 方向键导航：左右键在未禁用的工具间移动。
+  $("tool-tabs").addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const buttons = [...document.querySelectorAll("#tool-tabs button")];
+    const enabled = buttons.filter((b) => !b.disabled);
+    if (enabled.length < 2) return;
+    const index = enabled.indexOf(document.activeElement);
+    if (index === -1) return;
+    const delta = event.key === "ArrowRight" ? 1 : -1;
+    const next = enabled[(index + delta + enabled.length) % enabled.length];
+    next.focus();
+    next.click();
   });
 
   $("ref-upload").addEventListener("click", () => $("ref-file").click());
@@ -52,6 +78,13 @@ function bindEvents() {
       if (addReference("url", url)) {
         $("ref-url").value = "";
       }
+    }
+  });
+  // URL 输入框内回车执行「添加」，不触发表单隐式提交。
+  $("ref-url").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      $("ref-add-url").click();
     }
   });
   $("size").addEventListener("change", () => {
@@ -100,14 +133,10 @@ function bindEvents() {
     const token = $("token-input").value.trim();
     if (!token) return;
     state.token = token;
-    sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+    writeStoredToken(token);
     try {
-      await loadConfigInfo();
-      hideTokenGate();
+      await bootstrapAfterAuth();
       $("token-error").classList.add("hidden");
-      applyToolUI();
-      // 直达 #/gallery 时首刷在 config-info 就绪前空转，令牌补齐后补刷。
-      if (currentView() === "gallery") refreshGallery();
     } catch (error) {
       $("token-error").classList.remove("hidden");
       if (error.message === "unauthorized") {
@@ -117,7 +146,7 @@ function bindEvents() {
         console.error(error);
       }
       state.token = "";
-      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+      clearStoredToken();
     }
   });
   $("token-input").addEventListener("keydown", (event) => {
@@ -131,14 +160,10 @@ async function main() {
   bindEvents();
   applyRoute();
   try {
-    await loadConfigInfo();
-    hideTokenGate();
-    applyToolUI();
-    // 直达 #/gallery 时首刷在 config-info 就绪前空转，配置就绪后补刷。
-    if (currentView() === "gallery") refreshGallery();
+    await bootstrapAfterAuth();
   } catch (error) {
     if (error.message !== "unauthorized") {
-      $("server-meta").textContent = "配置加载失败";
+      $("server-meta").textContent = "配置加载失败，请刷新页面重试";
     }
   }
 }

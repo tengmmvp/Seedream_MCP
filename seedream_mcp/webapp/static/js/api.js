@@ -6,7 +6,35 @@
 "use strict";
 
 /** sessionStorage 中 Bearer 令牌的存储键。 */
-export const TOKEN_STORAGE_KEY = "seedream_web_token";
+const TOKEN_STORAGE_KEY = "seedream_web_token";
+
+// 阻断型存储环境（Safari「阻止所有 Cookie」等）下 sessionStorage 访问抛
+// SecurityError，读写统一吞异常降级：令牌仅存于页面会话内存，刷新后重输。
+function readStoredToken() {
+  try {
+    return sessionStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** 把令牌写入 sessionStorage，存储不可用时静默降级为仅内存持有。 */
+export function writeStoredToken(token) {
+  try {
+    sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+  } catch {
+    /* 存储不可用，令牌仍可用但不跨刷新 */
+  }
+}
+
+/** 清除 sessionStorage 中的令牌，存储不可用时无操作。 */
+export function clearStoredToken() {
+  try {
+    sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    /* 同 writeStoredToken 的降级 */
+  }
+}
 
 /**
  * 前端唯一的全局可变状态；令牌经 sessionStorage 暂存于当前浏览器会话，不跨
@@ -16,16 +44,19 @@ export const TOKEN_STORAGE_KEY = "seedream_web_token";
  * @property {Object|null} configInfo - config-info 响应，启动时加载。
  * @property {string} tool - 当前工具标识。
  * @property {Array<Object>} refs - 参考图列表，元素形如 {kind, value, preview}。
+ * @property {Array<Object>} parkedRefs - 因目标工具上限收缩而暂存的参考图，
+ *   切回支持的工具时按上限自动恢复。
  * @property {Object<string, Array<string>>} objectUrls - 对象 URL 按域分池
  *   登记，键为 generate 与 gallery；revokeObjectUrls 按池回收，图库翻页不
  *   波及生成台。
  * @property {Object} gallery - 图库分页状态，形如 {offset, hasMore, items}。
  */
 export const state = {
-  token: sessionStorage.getItem(TOKEN_STORAGE_KEY) || "",
+  token: readStoredToken() || "",
   configInfo: null,
   tool: "text-to-image",
   refs: [],
+  parkedRefs: [],
   objectUrls: { generate: [], gallery: [] },
   gallery: { offset: 0, hasMore: false, items: [] },
 };
@@ -37,6 +68,25 @@ export const state = {
  * @returns {HTMLElement|null} 对应 DOM 元素。
  */
 export const $ = (id) => document.getElementById(id);
+
+/** 当前模型在 config-info 模型清单中的能力条目，未知模型返回 null。 */
+export function currentModel() {
+  if (!state.configInfo) return null;
+  return (
+    (state.configInfo.models || []).find(
+      (m) => m.model_id === state.configInfo.model_id,
+    ) || null
+  );
+}
+
+/** 切换活动工具并同步 tab 高亮，工具切换与能力回落共用。 */
+export function setActiveTool(tool) {
+  state.tool = tool;
+  document.querySelectorAll("#tool-tabs button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tool === tool);
+    b.setAttribute("aria-selected", String(b.dataset.tool === tool));
+  });
+}
 
 /**
  * 行内错误提示的统一形态：写文本并显示节点。
@@ -79,7 +129,11 @@ export function revokeObjectUrls(pool) {
  * @throws {Error} 401 时弹出令牌门并以 "unauthorized" 上抛。
  */
 export async function apiFetch(path, options = {}) {
-  const headers = Object.assign({}, options.headers || {});
+  // Headers 实例经 Object.assign 复制不到其条目，先归一为普通对象再合并令牌。
+  const headers =
+    options.headers instanceof Headers
+      ? Object.fromEntries(options.headers.entries())
+      : Object.assign({}, options.headers || {});
   if (state.token) headers["Authorization"] = `Bearer ${state.token}`;
   const response = await fetch(path, Object.assign({}, options, { headers }));
   if (response.status === 401) {
@@ -117,7 +171,8 @@ export async function fetchBlobUrl(path, pool) {
  */
 export async function fetchExternalBlobUrl(url, pool) {
   try {
-    const response = await fetch(url);
+    // 超时防上游停滞挂死调用方的批量等待；失败按既有回退直连 src。
+    const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
     if (!response.ok) return null;
     const objectUrl = URL.createObjectURL(await response.blob());
     state.objectUrls[pool].push(objectUrl);
