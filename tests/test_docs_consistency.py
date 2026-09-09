@@ -425,3 +425,31 @@ def test_capability_table_number_tokens_match() -> None:
                 f"  {BASE_README}: {base_row_tokens}\n"
                 f"  {name}: {other_row_tokens}"
             )
+
+
+def _row_bool_tokens(raw: str) -> list[str]:
+    """提取表格行内 ✅/❌ 符号的出现序列。"""
+    return re.findall(r"[✅❌]", raw)
+
+
+def test_capability_table_bool_cells_match() -> None:
+    """能力差异表布尔单元格（✅/❌）三语逐行一致。
+
+    布尔行无数字 token 可比，单独翻转任一语言的 ✅/❌ 不触发其他守护，按行
+    提取布尔符号序列互等锁定。
+    """
+    base_rows = _capability_table(BASE_README)
+    base_bools = [_row_bool_tokens(raw) for _, raw in base_rows]
+    assert any(base_bools), "能力差异表未提取到布尔符号，定位或解析失效"
+
+    for name in OTHER_READMES:
+        other_rows = _capability_table(name)
+        assert len(other_rows) == len(base_rows), (
+            f"{name} 能力差异表为 {len(other_rows)} 行，{BASE_README} 为 "
+            f"{len(base_rows)} 行，存在单语增删的表格行"
+        )
+        for (base_lineno, base_raw), (other_lineno, other_raw) in zip(base_rows, other_rows):
+            assert _row_bool_tokens(other_raw) == _row_bool_tokens(base_raw), (
+                f"{name} 第 {other_lineno} 行「{other_raw.strip()}」的布尔符号序列与 "
+                f"{BASE_README} 第 {base_lineno} 行「{base_raw.strip()}」漂移"
+            )

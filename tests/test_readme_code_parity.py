@@ -63,12 +63,11 @@ _CAPABILITY_BOOL_ROWS = {
 }
 
 # 数值能力行的标签关键字，行内取值与能力表派生值对账。
-_CAPABILITY_NUMBER_ROW_LABELS = ("分辨率档位", "参考图上限", "自定义尺寸倍数")
+_CAPABILITY_NUMBER_ROW_LABELS = ("分辨率档位", "参考图上限")
 
 # 不参与对账的能力表行及理由。
 _CAPABILITY_EXEMPT_ROWS = {
     "文生图": "全家族支持的基础生成能力，能力表无对应声明字段",
-    "MCP 默认尺寸": "default_size=2K 档位经上游 API 解析的像素值，代码内无档位到像素映射",
 }
 
 
