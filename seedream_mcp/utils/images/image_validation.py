@@ -13,6 +13,7 @@ import base64
 import io
 import os
 import stat
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -284,13 +285,17 @@ def resolve_local_image_candidate(
     if is_unc_path(image):
         return None
     # classify 仅特判 http(s) 与 data，file:// 等其余 scheme 形态落入本地分支；
-    # 先按形态给出诊断，不落入冒号分量拒绝被误报为 NTFS 备用数据流。
+    # 先按形态给出诊断，不落入冒号分量拒绝被误报为 NTFS 备用数据流。单字母
+    # 前缀仅 win32 按盘符放行（C://x 为冗余斜杠的合法路径），其余平台与空前缀
+    # 均按不支持的 scheme 拒绝，不落本地分支产出误导性「文件不存在」。
     if "://" in image:
-        raise SeedreamValidationError(
-            f"仅支持图像 URL（http/https）、Data URI 或本地路径: {image}",
-            field="image",
-            value=image,
-        )
+        scheme = image.partition("://")[0]
+        if not (len(scheme) == 1 and sys.platform == "win32"):
+            raise SeedreamValidationError(
+                f"仅支持图像 URL（http/https）、Data URI 或本地路径: {image}",
+                field="image",
+                value=image,
+            )
     # 分量含冒号是 NTFS 备用数据流形态，流名不参与越界判定，界内文件名携带流
     # 后缀时读取命中的是同文件的另一数据流；判定与 normalize_path 共用单一来源，
     # 参考图链与浏览、保存链拒绝口径一致。

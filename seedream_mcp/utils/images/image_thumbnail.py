@@ -43,6 +43,9 @@ THUMBNAIL_MIME_TYPE = "image/jpeg"
 THUMBNAIL_CACHE_DIR_NAME = "thumbs"
 THUMBNAIL_CACHE_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 _THUMB_SWEEP_INTERVAL_SECONDS = 60.0
+# 落盘骨架 .thumb-tmp 的清扫宽限秒数：写入秒级完成，超宽限期仍存在的是进程
+# 中断遗留的孤儿，照常纳入驱逐。
+_THUMB_TMP_GRACE_SECONDS = 600.0
 _thumb_sweep_after = 0.0
 _thumb_sweep_lock = threading.Lock()
 
@@ -93,7 +96,7 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
     # PIL 惰性导入，首载含解码器注册，落点在工作线程而非事件循环。
     from PIL import Image, ImageOps
 
-    from .image_validation import ensure_image_decoders_ready
+    from ..core.formats import ensure_image_decoders_ready
 
     ensure_image_decoders_ready()
 
@@ -122,11 +125,17 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
             # draft 只缩减解码分辨率，不改写 EXIF 元数据，方向判定在其后仍然可靠。
             # 274 为 EXIF Orientation 标签编号。
             oriented = ImageOps.exif_transpose(image) if image.getexif().get(274, 1) != 1 else image
-            flattened = _flatten_to_rgb(oriented)
-            flattened.thumbnail(
+            # P/1 模式下 PIL 对 resize 强制 NEAREST（忽略 resample 参数），先转
+            # RGB(A) 保 LANCZOS；转换只发生在调色板与双值图，不影响大图的
+            # 先缩放后合成路径。
+            if oriented.mode in ("P", "1"):
+                oriented = oriented.convert("RGBA" if "transparency" in oriented.info else "RGB")
+            # 先缩放、后合成白底：带 alpha 的大图在全分辨率合成单张峰值达数百 MB。
+            oriented.thumbnail(
                 (THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE),
                 Image.Resampling.LANCZOS,
             )
+            flattened = _flatten_to_rgb(oriented)
             buffer = BytesIO()
             flattened.save(buffer, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY)
             return buffer.getvalue()
@@ -203,6 +212,7 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
         if time.time() < _thumb_sweep_after:
             return
         entries: list[tuple[float, int, Path]] = []
+        now = time.time()
         try:
             for entry in thumbs_root.iterdir():
                 try:
@@ -210,6 +220,11 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
                 except OSError:
                     # 并发替换中的临时条目此刻消失属正常，跳过继续收集
                     continue
+                if entry.name.endswith(".thumb-tmp"):
+                    # 在途写入的落盘骨架被 unlink 会使写入方原子替换失败，
+                    # 宽限期内跳过。
+                    if now - info.st_mtime < _THUMB_TMP_GRACE_SECONDS:
+                        continue
                 entries.append((info.st_mtime, info.st_size, entry))
         except OSError:
             return

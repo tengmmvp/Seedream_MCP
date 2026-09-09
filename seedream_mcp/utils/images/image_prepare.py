@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .image_input import local_candidate_scope, prepare_image_input
-from .image_ref import classify_image_reference
+from .image_ref import classify_image_reference, require_image_str
 from .image_validation import LocalImageCandidate, resolve_local_image_candidate
 from ..core.inflight import InflightEntry
 from ..io.io_path import get_read_scope, resolve_images_root
@@ -229,7 +229,7 @@ class ImagePreparer:
             (缓存键, strip 后输入, 本地候选) 三元组，非本地与未定位到文件的输入
             候选为 None。
         """
-        image = image.strip()
+        image = require_image_str(image).strip()
         ref_kind = classify_image_reference(image)
         candidate: LocalImageCandidate | None = None
         signature: tuple[float, int]
@@ -345,7 +345,10 @@ class ImagePreparer:
         """
         # 批内预计算一次读权限键与读取上下文，避免每图重复读取 ContextVar、构造
         # 元组与逐图求值；仅存在本地输入时求值，纯远端批次不依赖数据根目录声明的可解
-        # 析性。求值含首次 resolve 的文件系统调用，下沉工作线程。
+        # 析性。求值含首次 resolve 的文件系统调用，下沉工作线程。非 str 元素与
+        # 单图入口同口径归校验错误。
+        for image in images:
+            require_image_str(image)
         stripped_images = [image.strip() for image in images]
         if any(classify_image_reference(item) == "local" for item in stripped_images):
             scope_key, images_root, scope = await asyncio.to_thread(_current_read_context)

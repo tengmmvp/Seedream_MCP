@@ -64,7 +64,10 @@ async def test_prepare_image_input_out_of_bounds_error_carries_config_guidance(
     workspace_root: Path, tmp_path: Path
 ) -> None:
     """绝对路径落在读权限之外时抛校验错误，消息携带配置项指引供纠错。"""
-    outside = tmp_path.parent / "outside_workspace_image.png"
+    del tmp_path
+    # 越界目标置于独占临时目录：既在会话 Roots 工作区外，也不落入共享 basetemp。
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-oob-outside-"))
+    outside = outside_dir / "outside_workspace_image.png"
     Image.new("RGB", (32, 32), color="white").save(outside)
 
     token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
@@ -75,14 +78,16 @@ async def test_prepare_image_input_out_of_bounds_error_carries_config_guidance(
         assert exc_info.value.field == "image"
     finally:
         _WORKSPACE_ROOTS_VAR.reset(token)
-        outside.unlink(missing_ok=True)
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
     workspace_root: Path, tmp_path: Path
 ) -> None:
     """无会话 Roots 的回退工作区下，越界消息不回显服务器环境路径。"""
-    outside = tmp_path.parent / "outside_workspace_masked.png"
+    # 越界目标置于独占临时目录，在回退工作区（tmp_path）之外。
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-oob-outside-"))
+    outside = outside_dir / "outside_workspace_masked.png"
     Image.new("RGB", (32, 32), color="white").save(outside)
 
     try:
@@ -90,7 +95,7 @@ async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
             await prepare_image_input(str(outside))
         assert str(tmp_path.resolve()) not in exc_info.value.message
     finally:
-        outside.unlink(missing_ok=True)
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(

@@ -563,3 +563,36 @@ async def test_prepare_image_input_rejects_non_http_scheme_with_form_diagnosis(
         await prepare_image_input("file:///C:/users/me/ref.png")
 
     assert exc_info.value.field == "image"
+
+
+async def test_prepare_image_input_posix_single_letter_scheme_rejected(
+    workspace_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX 下单字母 scheme（u://x）按不支持的 URI 拒绝，不落本地分支。
+
+    落入本地分支会以图片目录拼接出伪造路径，误报「文件不存在」而非拒绝
+    输入形态。
+    """
+    from seedream_mcp.utils.core.errors import SeedreamValidationError
+    from seedream_mcp.utils.images.image_input import prepare_image_input
+
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    with pytest.raises(SeedreamValidationError, match="仅支持图像 URL"):
+        await prepare_image_input("u://cdn/img.png")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="盘符路径语义仅 win32 存在")
+async def test_prepare_image_input_windows_single_letter_scheme_treated_as_drive(
+    workspace_root: Path,
+) -> None:
+    """win32 下单字母 scheme 前缀按盘符放行，不当 URI 拒绝。
+
+    C://x 为冗余斜杠的合法盘符路径；盘符根目录在读权限之外，越界拒绝即为
+    未走 scheme 分支的证据。
+    """
+    from seedream_mcp.utils.core.errors import SeedreamValidationError
+    from seedream_mcp.utils.images.image_input import prepare_image_input
+
+    with pytest.raises(SeedreamValidationError, match="路径不在读取范围内"):
+        await prepare_image_input("C://users/me/ref.png")

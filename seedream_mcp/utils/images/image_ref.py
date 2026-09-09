@@ -8,6 +8,18 @@ from __future__ import annotations
 
 from typing import Literal
 
+from ..core.errors import SeedreamValidationError
+
+
+def require_image_str(image: object) -> str:
+    """非字符串图像输入归一为校验错误，不落入兜底异常暴露 Python 内部信息。
+
+    单图与批量预处理的全部入口共用，保证守卫深度与错误文案一致。
+    """
+    if not isinstance(image, str):
+        raise SeedreamValidationError("图像输入必须是字符串", field="image", value=None)
+    return image
+
 
 def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
     """判定图像输入来源类型，scheme 大小写不敏感。

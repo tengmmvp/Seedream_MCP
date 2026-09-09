@@ -34,7 +34,7 @@ from .image_validation import (
     validate_image_input,
     validate_image_path,
 )
-from .image_ref import classify_image_reference
+from .image_ref import classify_image_reference, require_image_str
 
 logger = get_logger()
 
@@ -73,7 +73,7 @@ async def prepare_image_input(image: str) -> str:
             读取失败等本地预处理失败；本阶段不触网，不参与 client 的 API 重试。
     """
     try:
-        normalized = image.strip()
+        normalized = require_image_str(image).strip()
 
         kind = classify_image_reference(normalized)
         if kind != "local":

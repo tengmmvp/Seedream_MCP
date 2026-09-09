@@ -343,6 +343,34 @@ def test_thumbnail_sweep_evicts_oldest_beyond_cap(
     assert newest.exists()
 
 
+def test_thumbnail_sweep_distinguishes_orphan_and_fresh_thumb_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """.thumb-tmp 按宽限期分治：在途写入的骨架跳过，超期孤儿纳入驱逐。"""
+    import os
+    import time
+
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    thumbs_root = tmp_path / "thumbs"
+    thumbs_root.mkdir()
+    monkeypatch.setattr(thumbnail_module, "_thumb_sweep_after", 0.0)
+    monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1)
+    grace = thumbnail_module._THUMB_TMP_GRACE_SECONDS
+    now = time.time()
+    fresh_tmp = thumbs_root / "tmpabc.thumb-tmp"
+    orphan_tmp = thumbs_root / "tmpdef.thumb-tmp"
+    fresh_tmp.write_bytes(b"a" * 100)
+    orphan_tmp.write_bytes(b"b" * 100)
+    os.utime(fresh_tmp, (now, now))
+    os.utime(orphan_tmp, (now - grace - 3600.0, now - grace - 3600.0))
+
+    thumbnail_module._maybe_sweep_thumbnails(thumbs_root)
+
+    assert fresh_tmp.exists()
+    assert not orphan_tmp.exists()
+
+
 async def test_generation_result_preview_disabled_keeps_text_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
