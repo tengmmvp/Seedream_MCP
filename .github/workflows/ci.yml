@@ -41,16 +41,17 @@ jobs:
         run: uv sync --locked
 
       - name: 🎨 Check formatting
-        run: uv run black --check seedream_mcp tests
+        run: uv run black --check seedream_mcp tests scripts
 
       - name: 🔬 Run flake8
-        run: uv run flake8 seedream_mcp tests
+        run: uv run flake8 seedream_mcp tests scripts
 
       - name: 🔎 Run mypy
         run: uv run mypy
 
       - name: 🔤 Check spelling
-        run: npx --yes cspell@9 lint --no-progress "seedream_mcp/**" "tests/**" "*.md" "*.toml" ".env.example"
+        # 仅检查代码与配置，文档不校验，作用域见 cspell.json
+        run: npx --yes cspell@9 lint --no-progress
 
   test:
     name: 🧪 Test (py${{ matrix.python-version }}, ${{ matrix.os }})
@@ -83,7 +84,13 @@ jobs:
         run: uv sync --locked
 
       - name: ✅ Run tests
-        run: uv run pytest -q --cov=seedream_mcp --cov-report=term --cov-fail-under=90
+        run: uv run pytest -q --cov=seedream_mcp --cov-report=term
+
+      # 总量下限 90 由 pyproject [tool.coverage.report] fail_under 判定，此处补单文件下限。
+      - name: 📏 Check per-file coverage floors
+        run: |
+          uv run python -m coverage json -o coverage.json
+          uv run python scripts/check_coverage_floors.py
 
   docker:
     name: 🐳 Docker Build

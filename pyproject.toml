@@ -80,11 +80,26 @@ include = [
     "/README.md",
     "/README.en.md",
     "/README.zh-TW.md",
-    "/LICENSE"
+    "/LICENSE",
+    "/.env.example",
+    "/docker-compose.yml",
+    "/docs/samples"
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["seedream_mcp"]
+
+[tool.coverage.run]
+# python -m 入口垫片仅转调 cli_main，不计入覆盖统计。
+omit = ["seedream_mcp/__main__.py"]
+
+[tool.coverage.report]
+# 覆盖率总量门禁，pytest --cov 结束时按此值判定退出码。
+fail_under = 90
+
+[tool.coverage_floors]
+# 单文件语句覆盖率下限，按当前最低文件留 3pp 余量。
+line_coverage_min = 80
 
 [tool.black]
 line-length = 100
@@ -106,10 +121,11 @@ extend-exclude = '''
 
 [tool.mypy]
 python_version = "3.12"
-# 默认检查范围：包源码与全部测试。
+# 默认检查范围：包源码、全部测试与维护脚本。
 files = [
     "seedream_mcp",
     "tests",
+    "scripts",
 ]
 warn_return_any = true
 warn_unused_configs = true
