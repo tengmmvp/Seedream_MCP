@@ -527,6 +527,17 @@ async def _consume_sse_chunks(
     return truncated_events, deadline_exceeded
 
 
+def _parse_tail_with_lost_flag(
+    tail: bytes | bytearray, log: Logger
+) -> tuple[dict[str, Any] | None, bool]:
+    """解析流末尾残留段并判定其 data 负载是否丢失，供线程卸载与同步路径共用。
+
+    残留段可解析为完整事件时短路，不再做丢失负载扫描。
+    """
+    event = parse_sse_segment(tail, log)
+    return event, event is None and _has_lost_data_payload(tail)
+
+
 async def _resolve_sse_trailing_segment(
     frames: _SSEFrameBuffer,
     collector: _SSEItemCollector,
@@ -538,22 +549,24 @@ async def _resolve_sse_trailing_segment(
     """流末尾残留处理阶段：解析残留事件，数据负载丢失时计入截断计数。
 
     尾部只切出一份副本，解析与丢失判定共用同一字节；尾部可接近单事件截断阈值
-    量级，多轮全量拷贝会叠加瞬时内存峰值。超卸载阈值的解析移交工作线程，与
-    drain 路径的大事件卸载同口径。
+    量级，多轮全量拷贝会叠加瞬时内存峰值。超卸载阈值的解析与丢失判定合并移交
+    工作线程，与 drain 路径的大事件卸载同口径。
     """
     frames.close_pending_cr()
     tail = frames.tail_bytes()
     trailing_len = len(tail)
     if trailing_len > _SSE_OFFLOAD_THRESHOLD:
-        trailing_event = await asyncio.to_thread(parse_sse_segment, tail, log)
+        trailing_event, lost_payload = await asyncio.to_thread(
+            _parse_tail_with_lost_flag, tail, log
+        )
     else:
-        trailing_event = parse_sse_segment(tail, log)
+        trailing_event, lost_payload = _parse_tail_with_lost_flag(tail, log)
     if trailing_event is not None:
         apply_completed(
             *_classify_sse_event(trailing_event, model_id, collector.items, log, trailing_len)
         )
         return 0
-    if trailing_len > 0 and _has_lost_data_payload(tail):
+    if trailing_len > 0 and lost_payload:
         # 残留段含 data 负载但解析失败，与超阈值丢事件同口径计数，使 status
         # 标记 partial。
         log.warning("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)

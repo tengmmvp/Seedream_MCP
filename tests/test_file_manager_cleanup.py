@@ -4,8 +4,10 @@
 跟随、仅删图片扩展名等边界。全部用例在 tmp_path 临时目录构造文件。
 """
 
+import inspect
 import os
 import shutil
+import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,6 +15,21 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.utils.io.io_storage import FileManager
+
+# 深树层数上限与 Windows MAX_PATH 预算：每层目录消耗 3 字符以内，预算收缩仍保底 30 层。
+_DEEP_TREE_MAX_DEPTH = 100
+_DEEP_TREE_MIN_DEPTH = 30
+_WINDOWS_PATH_BUDGET = 259
+
+
+def _deep_tree_depth(base: Path) -> int:
+    """树深按 Windows MAX_PATH 剩余预算收缩，POSIX 取固定深度。"""
+    if sys.platform != "win32":
+        return _DEEP_TREE_MAX_DEPTH
+    return max(
+        _DEEP_TREE_MIN_DEPTH,
+        min(_DEEP_TREE_MAX_DEPTH, (_WINDOWS_PATH_BUDGET - len(str(base))) // 3),
+    )
 
 
 def test_validate_path_accepts_inside_base(tmp_path: Path) -> None:
@@ -344,6 +361,37 @@ def test_generate_markdown_reference_encodes_spaces_and_parens(tmp_path: Path) -
 
     assert "my%20pic%20%281%29_a1b2c3d4.png" in markdown_ref
     assert " " not in markdown_ref.split("(", 1)[1]
+
+
+def test_run_cleanup_cleans_files_at_arbitrary_depth(
+    tmp_path: Path,
+) -> None:
+    """迭代扫描无递归深度限制，超深目录树内的过期文件同样进入清理视野。
+
+    树深超过钳低后的递归余量，递归式扫描实现在此必爆 RecursionError，守护
+    扫描保持迭代形态不随深度回退。
+    """
+    depth = _deep_tree_depth(tmp_path)
+    deep = tmp_path
+    for _ in range(depth):
+        deep = deep / "d"
+    deep.mkdir(parents=True)
+    old_deep_image = deep / "deep.png"
+    old_deep_image.write_bytes(b"x" * 10)
+    deep_time = (datetime.now() - timedelta(days=40)).timestamp()
+    os.utime(old_deep_image, (deep_time, deep_time))
+
+    manager = FileManager(base_dir=tmp_path)
+    recursion_limit = sys.getrecursionlimit()
+    try:
+        # 递归余量压到树深一半以下，迭代实现不新增递归深度不受影响。
+        sys.setrecursionlimit(len(inspect.stack()) + depth // 2)
+        result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
+    finally:
+        sys.setrecursionlimit(recursion_limit)
+
+    assert result["errors"] == []
+    assert not old_deep_image.exists()
 
 
 def test_generate_markdown_reference_encodes_hash_and_percent(tmp_path: Path) -> None:

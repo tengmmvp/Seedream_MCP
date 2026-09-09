@@ -696,6 +696,89 @@ def test_cached_find_images_replays_truncation_signal_on_cache_hit(
     assert hit_truncated == [sub_b.resolve()]
 
 
+def test_cached_find_images_isolates_injected_scanners(tmp_path: Path) -> None:
+    """注入不同 scanner 的扫描互不命中对方缓存条目。
+
+    键并入 scanner 身份前，后到的 scanner 会命中先到者的缓存而不再被调用，替身
+    扫描结果串染调用方。
+    """
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+
+    scanned_by: list[str] = []
+    original_scan = find_images_in_directory
+
+    def scanner_one(**kwargs: Any) -> list[Path]:
+        scanned_by.append("one")
+        return original_scan(**kwargs)
+
+    def scanner_two(**kwargs: Any) -> list[Path]:
+        scanned_by.append("two")
+        return original_scan(**kwargs)
+
+    _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10, scanner=scanner_one)
+    _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10, scanner=scanner_two)
+
+    assert scanned_by == ["one", "two"]
+
+
+def test_cached_find_images_unreadable_signal_not_duplicated_across_rounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一收集列表跨扫描与缓存回放多轮传递时不可读目录去重，不重复累计。
+
+    scan_limit=1 使首条目未扫完，第二轮更大 scan_limit 触发重扫、第三轮命中
+    回放，两条路径各自会把不可读目录再度交给收集列表。
+    """
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    original_scandir = path_utils_module.os.scandir
+
+    def _raise_for_sub(path: Any) -> Any:
+        if Path(path).name == "sub":
+            raise PermissionError("denied")
+        return original_scandir(path)
+
+    monkeypatch.setattr(path_utils_module.os, "scandir", _raise_for_sub)
+    scan_module.reset_directory_scan_cache()
+
+    unreadable: list[Path] = []
+    first = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=1, unreadable_dirs=unreadable)
+    rescan = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=5, unreadable_dirs=unreadable)
+    replay = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=1, unreadable_dirs=unreadable)
+
+    assert [raw.name for raw, _resolved in first] == ["a.png"]
+    assert rescan == first
+    assert replay == first
+    assert unreadable == [sub.resolve()]
+
+
+def test_cached_find_images_truncation_signal_not_duplicated_across_rounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """截断信号在缓存命中的回放轮间去重合并，同列表恒无重复条目。"""
+    sub_a = tmp_path / "a"
+    sub_a.mkdir()
+    (sub_a / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    sub_b = tmp_path / "b"
+    sub_b.mkdir()
+    for i in range(20):
+        (sub_b / f"note_{i:02d}.txt").write_bytes(b"x")
+    monkeypatch.setattr(path_utils_module, "_SCAN_ENTRY_BUDGET", 15)
+    scan_module.reset_directory_scan_cache()
+
+    truncated: list[Path] = []
+    first = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=10, truncated_dirs=truncated)
+    hit = _scan(tmp_path, recursive=True, max_depth=3, scan_limit=1, truncated_dirs=truncated)
+
+    assert [raw.name for raw, _resolved in first] == ["x.png"]
+    assert [raw.name for raw, _resolved in hit] == ["x.png"]
+    assert truncated == [sub_b.resolve()]
+
+
 @pytest.mark.skipif(
     sys.platform != "win32",
     reason="目录分支的 reparse 剔除带 win32 短路，POSIX 上不经过替身判定",

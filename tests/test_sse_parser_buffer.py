@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -443,6 +444,40 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
     assert len(result["data"]) == 1
     assert len(offload_sizes) == 1
     assert offload_sizes[0] > 64 * 1024
+
+
+async def test_parse_sse_response_offloads_large_tail_lost_payload_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超阈值流末尾的丢失负载判定随解析一并卸载工作线程，不在事件循环上扫描。
+
+    丢失判定对大尾部做全量按行扫描，留在事件循环上会与大尾部解析的卸载目的
+    相悖；以判定调用所在线程 id 断言其已离开主线程。
+    """
+    main_thread = threading.get_ident()
+    scan_thread_ids: list[int] = []
+    real_has_lost = sse_parser_module._has_lost_data_payload
+
+    def _tracking_has_lost(tail: Any) -> bool:
+        scan_thread_ids.append(threading.get_ident())
+        return real_has_lost(tail)
+
+    monkeypatch.setattr(sse_parser_module, "_has_lost_data_payload", _tracking_has_lost)
+
+    big_tail = b"data: " + b"x" * 70000
+    result = await parse_sse_response(
+        _sse_response([big_tail]),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=256 * 1024,
+        event_truncate_threshold=256 * 1024,
+        total_bytes_limit=256 * 1024,
+        log=_log(),
+    )
+
+    assert result["truncated_events"] == 1
+    assert scan_thread_ids, "丢失负载判定须被执行"
+    assert all(tid != main_thread for tid in scan_thread_ids), "判定不得留在事件循环线程"
 
 
 async def test_parse_sse_response_empty_stream_returns_none_status() -> None:

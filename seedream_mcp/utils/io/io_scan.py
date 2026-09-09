@@ -1,13 +1,13 @@
 """目录图片扫描的进程级缓存。
 
-以 (目录路径, recursive, max_depth, 格式过滤元组) 为键缓存有序扫描结果，供
-browse_images 翻页共享，消除深翻页的重复文件系统扫描。条目存储 (原始路径,
-resolved 路径) 对，扫描完成时 resolve 一次，深翻页命中免于逐文件重复 resolve。
-非递归扫描以目录 mtime 失效，捕获时已沉淀超 FAT 时间戳粒度窗口的条目 mtime 未变
-即新鲜，未沉淀条目叠加 TTL 上界兜底粗粒度时间戳；递归扫描改用 TTL 失效，接受短时
-陈旧换取翻页性能。扫描底层函数由调用方注入，本模块只负责缓存策略；未注入时延迟
-解析 io_path 的默认实现，组内依赖保持 io_path → io_scan 单向，本模块顶层不回导
-io_path。
+以 (目录路径, recursive, max_depth, 格式过滤元组, 扫描函数) 为键缓存有序扫描
+结果，供 browse_images 翻页共享，消除深翻页的重复文件系统扫描。条目存储 (原始
+路径, resolved 路径) 对，扫描完成时 resolve 一次，深翻页命中免于逐文件重复
+resolve。非递归扫描以目录 mtime 失效，捕获时已沉淀超 FAT 时间戳粒度窗口的条目
+mtime 未变即新鲜，未沉淀条目叠加 TTL 上界兜底粗粒度时间戳；递归扫描改用 TTL
+失效，接受短时陈旧换取翻页性能。扫描底层函数由调用方注入，本模块只负责缓存
+策略；未注入时延迟解析 io_path 的默认实现，组内依赖保持 io_path → io_scan
+单向，本模块顶层不回导 io_path。
 """
 
 from __future__ import annotations
@@ -24,13 +24,12 @@ logger = get_logger()
 
 
 # 进程级目录图片列表缓存。键不含 scan_limit：同目录同扫描配置的不同翻页共享一份
-# 有序列表，命中返回浅拷贝供调用方切片。条目按 LRU 管理，命中与覆写均刷新热度，
-# 超限驱逐最久未使用目录。跨线程并发下 get 与 move_to_end、迭代与 pop 等复合操作
-# 不保证原子，竞态由各操作点内联捕获化解，最坏情况为缓存击穿即多请求各扫一次再
-# 覆写，仅影响性能。
-_DIRECTORY_SCAN_CACHE: OrderedDict[
-    tuple[str, bool, int, tuple[str, ...]], _DirectoryScanCacheEntry
-] = OrderedDict()
+# 有序列表，命中返回浅拷贝供调用方切片；键并入 scanner 身份，注入不同扫描实现的
+# 调用不共享条目。条目按 LRU 管理，命中与覆写均刷新热度，超限驱逐最久未使用目录。
+# 跨线程并发下 get 与 move_to_end、迭代与 pop 等复合操作不保证原子，竞态由各操作
+# 点内联捕获化解，最坏情况为缓存击穿即多请求各扫一次再覆写，仅影响性能。
+_ScanCacheKey = tuple[str, bool, int, tuple[str, ...], Callable[..., list[Path]]]
+_DIRECTORY_SCAN_CACHE: OrderedDict[_ScanCacheKey, _DirectoryScanCacheEntry] = OrderedDict()
 _DIRECTORY_SCAN_CACHE_MAX_ENTRIES = 64
 # 单条目图片列表长度上限：超过的大目录不缓存全量列表，回退每页扫描，避免无界内存占用。
 _DIRECTORY_SCAN_CACHE_MAX_LIST_LEN = 10000
@@ -124,8 +123,22 @@ def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
     return pairs
 
 
+def _extend_unique(target: list[Path], additions: list[Path]) -> None:
+    """把新增目录并入收集列表，已存在条目不追加。
+
+    同一收集列表在补扫多轮间重复传入时，扫描与缓存回放会产生重复信号，去重合并
+    使调用方拿到的列表恒无重复。
+    """
+    known = set(target)
+    for item in additions:
+        if item in known:
+            continue
+        known.add(item)
+        target.append(item)
+
+
 def _store_scan_entry(
-    cache_key: tuple[str, bool, int, tuple[str, ...]],
+    cache_key: _ScanCacheKey,
     *,
     mtime_ns: int | None,
     settled: bool,
@@ -180,13 +193,13 @@ def cached_find_images_in_directory(
 ) -> list[tuple[Path, Path]]:
     """扫描目录图片并经进程级缓存翻页共享有序结果，支持前缀增量扩展。
 
-    缓存键不含 scan_limit，同目录同配置的不同翻页共享一份有序列表。命中且条目
-    完整或前缀不少于 scan_limit 时返回浅拷贝；命中但前缀不足时按几何倍率扩展
-    scan_limit 重扫并扩展缓存，扫描到目录末尾即标记 complete，后续任意
-    scan_limit 均不再扫描。条目预算截断的扫描未到目录末尾，不按 complete 缓存，
-    后续更大扫描可重新尝试。scanner 可注入，默认
+    缓存键不含 scan_limit，同目录同配置的不同翻页共享一份有序列表；键并入 scanner
+    身份，注入不同扫描实现的调用不共享条目。命中且条目完整或前缀不少于 scan_limit
+    时返回浅拷贝；命中但前缀不足时按几何倍率扩展 scan_limit 重扫并扩展缓存，扫描到
+    目录末尾即标记 complete，后续任意 scan_limit 均不再扫描。条目预算截断的扫描未
+    到目录末尾，不按 complete 缓存，后续更大扫描可重新尝试。scanner 可注入，默认
     io_path.find_images_in_directory。两个出口均返回独立副本，调用方原地修改
-    不会篡改缓存；不可读目录与截断信号随条目缓存并经对应收集列表透传。
+    不会篡改缓存；不可读目录与截断信号随条目缓存并经对应收集列表去重透传。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -209,12 +222,6 @@ def cached_find_images_in_directory(
     Raises:
         OSError: 底层扫描函数抛出时原样透传，缓存层不吞不包装。
     """
-    cache_key = (
-        str(resolved_dir),
-        recursive,
-        max_depth,
-        tuple(format_filter) if format_filter else (),
-    )
     if scanner is not None:
         scan = scanner
     else:
@@ -222,6 +229,13 @@ def cached_find_images_in_directory(
         from .io_path import find_images_in_directory
 
         scan = find_images_in_directory
+    cache_key = (
+        str(resolved_dir),
+        recursive,
+        max_depth,
+        tuple(format_filter) if format_filter else (),
+        scan,
+    )
     cached = _DIRECTORY_SCAN_CACHE.get(cache_key)
     if cached is not None and _is_scan_entry_fresh(cached, resolved_dir, recursive):
         # 命中刷新条目热度。本函数在工作线程执行，get 与 move_to_end 之间可被另一
@@ -234,9 +248,9 @@ def cached_find_images_in_directory(
         # 切片返回独立副本，调用方原地修改不会篡改缓存。
         if cached.complete or len(cached.images) >= scan_limit:
             if unreadable_dirs is not None:
-                unreadable_dirs.extend(cached.unreadable_dirs)
+                _extend_unique(unreadable_dirs, cached.unreadable_dirs)
             if truncated_dirs is not None and cached.truncated_dirs:
-                truncated_dirs.extend(cached.truncated_dirs)
+                _extend_unique(truncated_dirs, cached.truncated_dirs)
             return cached.images[:]
         # 扩展量不受单条目列表上限约束：该上限只决定 _store_scan_entry 是否写入
         # 缓存，若同时截断实际扫描量，超过上限的大目录深翻页会得到短页并被误判为
@@ -277,8 +291,8 @@ def cached_find_images_in_directory(
             truncated_dirs=list(scan_truncated),
         )
     if unreadable_dirs is not None:
-        unreadable_dirs.extend(scan_unreadable)
+        _extend_unique(unreadable_dirs, scan_unreadable)
     if truncated_dirs is not None:
-        truncated_dirs.extend(scan_truncated)
+        _extend_unique(truncated_dirs, scan_truncated)
     # 切片返回独立副本。
     return images[:]

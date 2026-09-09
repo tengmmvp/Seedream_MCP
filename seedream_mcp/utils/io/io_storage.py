@@ -616,67 +616,71 @@ class FileManager:
         part_files: list[tuple[Path, int, float]] = []
         directories: list[Path] = []
 
-        def _scan_directory(directory: Path) -> None:
-            try:
-                with os.scandir(directory) as iterator:
-                    entries = list(iterator)
-            except OSError as e:
-                # 目录不可读仅记录警告：计入 errors 会使清理持续判失败而反复退避重试。
-                logger.warning("扫描目录失败: {} -> {}", directory, e)
-                return
-            for entry in entries:
-                entry_path = Path(entry.path)
-                if entry.is_dir(follow_symlinks=False):
-                    # 单次 no-follow stat 同时判定符号链接与 reparse 属性；条目
-                    # 消失属正常轮替，跳过不下降。
-                    try:
-                        dir_stat = entry.stat(follow_symlinks=False)
-                    except OSError as e:
-                        logger.warning("获取目录信息失败: {} -> {}", entry_path, e)
-                        continue
-                    if stat.S_ISLNK(dir_stat.st_mode):
-                        continue
-                    if has_reparse_attribute(dir_stat):
-                        logger.warning("跳过 reparse point 目录: {}", entry_path)
-                        continue
-                    try:
-                        dir_resolved = entry_path.resolve()
-                    except Exception as e:
-                        logger.warning("路径验证失败: {} -> {}", entry_path, e)
-                        continue
-                    if not self._resolved_within_base(dir_resolved):
-                        logger.warning("路径不在保存目录内: {}", dir_resolved)
-                        continue
-                    directories.append(entry_path)
-                    _scan_directory(entry_path)
-                    continue
-                # 仅收集受支持图片与 .part 临时文件，跳过其他类型避免误删用户数据。
-                is_image = entry_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
-                if not is_image and not entry.name.endswith(".part"):
-                    continue
+        def _scan_directory(root: Path) -> None:
+            # 显式栈迭代下降，任意深度不触发递归上限，深层文件不漏出清理视野
+            pending: list[Path] = [root]
+            while pending:
+                directory = pending.pop()
                 try:
-                    entry_stat = entry.stat(follow_symlinks=False)
+                    with os.scandir(directory) as iterator:
+                        entries = list(iterator)
                 except OSError as e:
-                    if not is_image:
-                        # .part 条目被原子重命名消失属正常轮替，不计错误以免回滚节流。
+                    # 目录不可读仅记录警告：计入 errors 会使清理持续判失败而反复退避重试。
+                    logger.warning("扫描目录失败: {} -> {}", directory, e)
+                    continue
+                for entry in entries:
+                    entry_path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        # 单次 no-follow stat 同时判定符号链接与 reparse 属性；条目
+                        # 消失属正常轮替，跳过不下降。
+                        try:
+                            dir_stat = entry.stat(follow_symlinks=False)
+                        except OSError as e:
+                            logger.warning("获取目录信息失败: {} -> {}", entry_path, e)
+                            continue
+                        if stat.S_ISLNK(dir_stat.st_mode):
+                            continue
+                        if has_reparse_attribute(dir_stat):
+                            logger.warning("跳过 reparse point 目录: {}", entry_path)
+                            continue
+                        try:
+                            dir_resolved = entry_path.resolve()
+                        except Exception as e:
+                            logger.warning("路径验证失败: {} -> {}", entry_path, e)
+                            continue
+                        if not self._resolved_within_base(dir_resolved):
+                            logger.warning("路径不在保存目录内: {}", dir_resolved)
+                            continue
+                        directories.append(entry_path)
+                        pending.append(entry_path)
                         continue
-                    errors.append(f"获取文件信息失败 {entry_path}: {e}")
-                    logger.warning("获取文件信息失败: {} -> {}", entry_path, e)
-                    continue
-                # 符号链接与 reparse 文件目标可能在 base_dir 之外，no-follow stat 不
-                # 跟随，命中即跳过；FIFO、套接字等非常规文件同样不纳入清理。
-                if stat.S_ISLNK(entry_stat.st_mode):
-                    continue
-                if has_reparse_attribute(entry_stat):
-                    logger.warning("跳过 reparse point 文件: {}", entry_path)
-                    continue
-                if not stat.S_ISREG(entry_stat.st_mode):
-                    continue
-                collected = (entry_path, entry_stat.st_size, entry_stat.st_mtime)
-                if is_image:
-                    all_files.append(collected)
-                else:
-                    part_files.append(collected)
+                    # 仅收集受支持图片与 .part 临时文件，跳过其他类型避免误删用户数据。
+                    is_image = entry_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+                    if not is_image and not entry.name.endswith(".part"):
+                        continue
+                    try:
+                        entry_stat = entry.stat(follow_symlinks=False)
+                    except OSError as e:
+                        if not is_image:
+                            # .part 条目被原子重命名消失属正常轮替，不计错误以免回滚节流。
+                            continue
+                        errors.append(f"获取文件信息失败 {entry_path}: {e}")
+                        logger.warning("获取文件信息失败: {} -> {}", entry_path, e)
+                        continue
+                    # 符号链接与 reparse 文件目标可能在 base_dir 之外，no-follow stat 不
+                    # 跟随，命中即跳过；FIFO、套接字等非常规文件同样不纳入清理。
+                    if stat.S_ISLNK(entry_stat.st_mode):
+                        continue
+                    if has_reparse_attribute(entry_stat):
+                        logger.warning("跳过 reparse point 文件: {}", entry_path)
+                        continue
+                    if not stat.S_ISREG(entry_stat.st_mode):
+                        continue
+                    collected = (entry_path, entry_stat.st_size, entry_stat.st_mtime)
+                    if is_image:
+                        all_files.append(collected)
+                    else:
+                        part_files.append(collected)
 
         # 扫描根复核真实位置后下降，防止 base_dir 自身被替换为指向外部的符号链接。
         try:
