@@ -527,7 +527,7 @@ _SENSITIVE_KEY_SUBSTRINGS = (
 )
 
 # 敏感关键词的段集合与键名切分模式：集合由关键词清单派生保持单一来源，四种分隔
-# 符经预编译字符类一次切分，供 _is_sensitive_key 热路径成员判断使用。
+# 符经预编译字符类一次切分，供 is_sensitive_key 热路径成员判断使用。
 _SENSITIVE_KEY_KEYWORD_SET = frozenset(_SENSITIVE_KEY_KEYWORDS)
 _KEY_SEGMENT_SPLIT_PATTERN = re.compile(r"[_\- .]")
 
@@ -540,7 +540,7 @@ _BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
 _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS = frozenset({"key", "auth"})
 
 # key/auth 受限复合分支的前缀族：带分隔符的 X_key/X_auth 仅在前缀属于本族时命中，
-# 口径差异见 _is_sensitive_key。封闭字面交替，回溯保持线性。
+# 口径差异见 is_sensitive_key。封闭字面交替，回溯保持线性。
 _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
     "access",
     "ssh",
@@ -563,7 +563,7 @@ _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
 _SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[._-][^\W_.-]+)*"
 
 # 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。分支由关键词
-# 清单与前缀族派生，两路径口径以 _is_sensitive_key 为单点。键命中要求紧跟分隔符
+# 清单与前缀族派生，两路径口径以 is_sensitive_key 为单点。键命中要求紧跟分隔符
 # 与值，max_tokens 等普通词形不受影响；新增敏感词只需扩展清单或前缀族。各分支为
 # 字面交替，失败回溯随总长线性。
 _SENSITIVE_KEYVALUE_KEYS = (
@@ -756,7 +756,7 @@ def sanitize_data_text(value: _SanitizedValue, limit: int = _DATA_OUTPUT_LIMIT) 
     return sanitize_error_text(value, limit=limit)
 
 
-def _is_sensitive_key(key: Any) -> bool:
+def is_sensitive_key(key: Any) -> bool:
     """判断键名是否命中敏感关键词。
 
     高确信度词子串匹配覆盖连字符、无分隔与 camelCase 变体；其余关键词按分隔符

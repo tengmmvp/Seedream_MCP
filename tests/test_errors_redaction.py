@@ -786,15 +786,15 @@ def test_is_sensitive_key_matches_privatekey_and_sshkey() -> None:
 
     与 apikey 策略统一。
     """
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
-    assert _is_sensitive_key("privatekey") is True
-    assert _is_sensitive_key("sshkey") is True
-    assert _is_sensitive_key("my-privatekey") is True
-    assert _is_sensitive_key("x_sshkey") is True
+    assert is_sensitive_key("privatekey") is True
+    assert is_sensitive_key("sshkey") is True
+    assert is_sensitive_key("my-privatekey") is True
+    assert is_sensitive_key("x_sshkey") is True
     # 边界匹配的防误伤语义保留：monkey、keyboard 不因含 key 字面命中
-    assert _is_sensitive_key("monkey") is False
-    assert _is_sensitive_key("keyboard") is False
+    assert is_sensitive_key("monkey") is False
+    assert is_sensitive_key("keyboard") is False
 
 
 # ==================== camelCase 敏感键双路径覆盖 ====================
@@ -813,17 +813,17 @@ def test_sanitize_error_text_strips_camelcase_sensitive_keyvalues() -> None:
 
 def test_is_sensitive_key_matches_camelcase_sensitive_compounds() -> None:
     """camelCase 复合键归一化小写后命中高确信子串清单，dict 键路径与自由文本同覆盖。"""
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
-    assert _is_sensitive_key("secretKey") is True
-    assert _is_sensitive_key("accessKey") is True
-    assert _is_sensitive_key("sessionKey") is True
-    assert _is_sensitive_key("authKey") is True
-    assert _is_sensitive_key("my-accessKey") is True
+    assert is_sensitive_key("secretKey") is True
+    assert is_sensitive_key("accessKey") is True
+    assert is_sensitive_key("sessionKey") is True
+    assert is_sensitive_key("authKey") is True
+    assert is_sensitive_key("my-accessKey") is True
     # 对照组：普通词键不因含 key/auth 字面命中
-    assert _is_sensitive_key("monkey") is False
-    assert _is_sensitive_key("keyboard") is False
-    assert _is_sensitive_key("author") is False
+    assert is_sensitive_key("monkey") is False
+    assert is_sensitive_key("keyboard") is False
+    assert is_sensitive_key("author") is False
 
 
 def test_is_sensitive_key_matches_camelcase_token_secret_compounds() -> None:
@@ -831,7 +831,7 @@ def test_is_sensitive_key_matches_camelcase_token_secret_compounds() -> None:
 
     refreshToken、clientSecret 一类无分隔复合词此前 dict 键路径不命中，补齐后一致。
     """
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
     for key in (
         "refreshToken",
@@ -844,10 +844,10 @@ def test_is_sensitive_key_matches_camelcase_token_secret_compounds() -> None:
         "signingSecret",
         "appSecret",
     ):
-        assert _is_sensitive_key(key) is True
+        assert is_sensitive_key(key) is True
     # 对照组：普通词键不因含 token/secret 字面命中
-    assert _is_sensitive_key("tokenCount") is False
-    assert _is_sensitive_key("secretive") is False
+    assert is_sensitive_key("tokenCount") is False
+    assert is_sensitive_key("secretive") is False
 
 
 # ==================== 空格复合词 API Key ====================
@@ -874,14 +874,14 @@ def test_sanitize_error_text_api_key_space_form_no_overmatch() -> None:
 
 def test_is_sensitive_key_matches_space_separated_compound() -> None:
     """空格作为键名边界分隔符与自由文本复合分支同规则："api key" 键名命中。"""
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
-    assert _is_sensitive_key("api key") is True
-    assert _is_sensitive_key("my api key") is True
+    assert is_sensitive_key("api key") is True
+    assert is_sensitive_key("my api key") is True
     # 对照组：X-Api-Key 仍命中，普通复合词不误吞
-    assert _is_sensitive_key("X-Api-Key") is True
-    assert _is_sensitive_key("rapid api keyboard") is False
-    assert _is_sensitive_key("monkey") is False
+    assert is_sensitive_key("X-Api-Key") is True
+    assert is_sensitive_key("rapid api keyboard") is False
+    assert is_sensitive_key("monkey") is False
 
 
 # ==================== 复合键中段关键词命中 ====================
@@ -889,17 +889,17 @@ def test_is_sensitive_key_matches_space_separated_compound() -> None:
 
 def test_is_sensitive_key_matches_mid_segment_keyword_forms() -> None:
     """复合键中段的敏感关键词段同样命中，与 docstring 声明及自由文本未锚定口径一致。"""
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
-    assert _is_sensitive_key("user.session_id") is True
-    assert _is_sensitive_key("a.session_id.b") is True
-    assert _is_sensitive_key("request_session_id") is True
-    assert _is_sensitive_key("request-session-id") is True
-    assert _is_sensitive_key("user auth scope") is True
+    assert is_sensitive_key("user.session_id") is True
+    assert is_sensitive_key("a.session_id.b") is True
+    assert is_sensitive_key("request_session_id") is True
+    assert is_sensitive_key("request-session-id") is True
+    assert is_sensitive_key("user auth scope") is True
     # 对照组：无敏感段的普通复合键不命中，关键词不吞并整词段的相邻字符
-    assert _is_sensitive_key("user.profile.id") is False
-    assert _is_sensitive_key("request-id") is False
-    assert _is_sensitive_key("sessions") is False
+    assert is_sensitive_key("user.profile.id") is False
+    assert is_sensitive_key("request-id") is False
+    assert is_sensitive_key("sessions") is False
 
 
 def test_keyvalue_key_branches_derive_from_keyword_lists() -> None:
@@ -1022,9 +1022,9 @@ def test_sanitize_error_text_strips_dotted_sensitive_keyvalues() -> None:
 
 def test_dotted_sensitive_key_redacts_consistently_across_channels() -> None:
     """session.id 在 dict 键与自由文本两条通道同判敏感，口径一致。"""
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
-    assert _is_sensitive_key("session.id") is True
+    assert is_sensitive_key("session.id") is True
     assert sanitize_error_text("session.id=abc") == "session.id=***"
 
 
@@ -1100,19 +1100,19 @@ def test_compound_key_hit_verdicts_align_across_dict_and_free_text_paths() -> No
 
     两侧判定不一致时失败，防止前缀族分支与段匹配口径漂移。
     """
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
     for key in _CONSISTENT_SENSITIVE_COMPOUND_KEYS:
-        assert _is_sensitive_key(key) is True, key
+        assert is_sensitive_key(key) is True, key
         assert sanitize_error_text(f"{key}=cred-value") == f"{key}=***", key
 
 
 def test_compound_key_plain_verdicts_align_across_dict_and_free_text_paths() -> None:
     """对抗性一致性锁定：普通词形在两条路径同判不敏感，复合分支不误吞。"""
-    from seedream_mcp.utils.core.errors import _is_sensitive_key
+    from seedream_mcp.utils.core.errors import is_sensitive_key
 
     for key in _CONSISTENT_PLAIN_COMPOUND_KEYS:
-        assert _is_sensitive_key(key) is False, key
+        assert is_sensitive_key(key) is False, key
         assert sanitize_error_text(f"{key}=cred-value") == f"{key}=cred-value", key
 
 

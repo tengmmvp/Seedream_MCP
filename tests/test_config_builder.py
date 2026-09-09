@@ -410,6 +410,19 @@ def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
     assert not any("http_allowed_hosts" in record for record in quiet_records)
 
 
+def test_direct_construction_build_warnings_stay_on_instance() -> None:
+    """直接构造产生的构建期告警留在实例，不混入全局 drain 队列。"""
+    from seedream_mcp.config import SeedreamConfig, _pending_build_warnings
+
+    before = list(_pending_build_warnings)
+    config = SeedreamConfig(
+        api_key="k", base_url="http://10.0.0.1/api/v3", allow_http_base_url=True
+    )
+
+    assert config._build_warnings, "http 明文豁免应产生实例告警"
+    assert _pending_build_warnings == before
+
+
 def test_to_dict_masks_sensitive_fields() -> None:
     """to_dict 对 api_key 与 http_auth_token 脱敏。"""
     from seedream_mcp.config import SeedreamConfig
@@ -579,14 +592,17 @@ def test_build_config_rejects_prepare_cache_max_below_one(
 
 
 def test_field_env_map_covers_all_optional_config_fields() -> None:
-    """_FIELD_ENV_MAP 须覆盖除 api_key 外的全部配置字段。
+    """_FIELD_ENV_MAP 须覆盖除 api_key 外的全部可配置字段。
 
     新增配置字段若遗漏登记，会在首次构建配置取默认值时抛 KeyError。本测试守护该同步点。
+    init=False 的内部字段不进构造签名，不属于可配置字段。
     """
     from dataclasses import fields as dataclass_fields
 
     optional_field_names = {
-        f.name for f in dataclass_fields(config_module.SeedreamConfig) if f.name != "api_key"
+        f.name
+        for f in dataclass_fields(config_module.SeedreamConfig)
+        if f.init and f.name != "api_key"
     }
     assert set(config_module._FIELD_ENV_MAP) == optional_field_names
 

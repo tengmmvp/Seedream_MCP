@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
-from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, _is_sensitive_key
+from .utils.core.errors import SeedreamConfigError, SeedreamValidationError, is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.core.logs import (
     DEFAULT_LOG_RETENTION_DAYS,
@@ -206,6 +206,10 @@ class SeedreamConfig:
     request_state_secret_keys: tuple[bytes, ...] | None = _env_field(
         None, "SEEDREAM_REQUEST_STATE_KEYS"
     )
+    # validate 收集的构建期告警；builder 路径汇入全局经 drain 输出，直接构造留在实例
+    _build_warnings: list[tuple[str, str]] = field(
+        init=False, repr=False, compare=False, default_factory=list
+    )
 
     def __post_init__(self) -> None:
         self.validate()
@@ -265,7 +269,7 @@ class SeedreamConfig:
                     "base_url 使用 http:// 会使 API 密钥在网络上明文传输，默认拒绝；"
                     "仅自建可信内网端点可设 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免"
                 )
-            _pending_build_warnings.append(
+            self._build_warnings.append(
                 (
                     "ERROR",
                     "ARK_BASE_URL 使用 http:// 且已豁免，API 密钥将在网络上明文传输，"
@@ -503,7 +507,7 @@ class SeedreamConfig:
 
         uncovered = wildcard_hosts - bare_hosts
         if uncovered:
-            _pending_build_warnings.append(
+            self._build_warnings.append(
                 (
                     "ERROR",
                     f"http_allowed_hosts 中 {', '.join(sorted(uncovered))} "
@@ -567,11 +571,16 @@ class SeedreamConfig:
         return build_config_from_sources(env_file=env_file)
 
     def to_dict(self) -> dict[str, Any]:
-        """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。"""
+        """导出为字典，名称命中敏感关键词的字段以 "***" 脱敏。
+
+        init=False 的内部字段不属于配置面，不导出。
+        """
         result: dict[str, Any] = {}
         for config_field in fields(self):
+            if not config_field.init:
+                continue
             value = getattr(self, config_field.name)
-            if _is_sensitive_key(config_field.name):
+            if is_sensitive_key(config_field.name):
                 result[config_field.name] = "***" if value is not None else None
             else:
                 result[config_field.name] = value
@@ -1031,7 +1040,9 @@ def _build_config_unlocked_body(
         config_kwargs[field_name] = picker(
             override_values, override_key or field_name, env_key, env_values
         )
-    return SeedreamConfig(**config_kwargs)
+    config = SeedreamConfig(**config_kwargs)
+    _pending_build_warnings.extend(config._build_warnings)
+    return config
 
 
 # 配置构建串行化锁：保护 .env 读取与配置构建，避免并发构建竞态。
