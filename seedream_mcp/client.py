@@ -852,8 +852,8 @@ class SeedreamClient:
     def _build_http_timeout(self) -> httpx.Timeout:
         """构建并缓存统一超时策略：timeout 管连接、写入与连接池获取，api_timeout 管读取。
 
-        httpx 的 read 超时按单次读操作计时而非累计时长，慢滴流响应的总时长约束
-        由发送路径的截止时间预算补足。
+        httpx 的 read 超时按单次读操作计时而非累计时长，响应头就绪与读体阶段由
+        发送路径的截止时间预算统一封顶。
         """
         if self._timeout is None:
             base_timeout = float(self.config.timeout)
@@ -1303,6 +1303,28 @@ class SeedreamClient:
             del raw_body
         return self._build_api_result(self._require_dict_payload(payload))
 
+    async def _send_with_header_deadline(
+        self, client: httpx.AsyncClient, request: httpx.Request, timeout_seconds: float
+    ) -> httpx.Response:
+        """在截止时间内发送请求并等待响应头就绪。
+
+        超时与响应就绪同 tick 竞态时采用已就绪的响应，读体仍受调用方 deadline
+        约束；到点仍未就绪才按超时上抛由 _call_api 重试。
+        """
+        response_holder: list[httpx.Response] = []
+
+        async def _send_streaming() -> httpx.Response:
+            sent = await client.send(request, stream=True)
+            response_holder.append(sent)
+            return sent
+
+        try:
+            return await asyncio.wait_for(_send_streaming(), timeout=timeout_seconds)
+        except TimeoutError:
+            if not response_holder:
+                raise
+            return response_holder[0]
+
     async def _send_stream_request(
         self,
         *,
@@ -1313,13 +1335,14 @@ class SeedreamClient:
     ) -> dict[str, Any]:
         """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。
 
-        每次尝试按 config.api_timeout 记录总时长截止时间，封顶 SSE 解析与流式读体；
-        超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
+        每次尝试按 config.api_timeout 记录总时长截止时间，封顶响应头就绪、SSE 解析
+        与流式读体；超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
         """
-        deadline = time.monotonic() + float(self.config.api_timeout)
-        async with client.stream(
-            "POST", url, content=request_body, timeout=request_timeout
-        ) as response:
+        api_timeout = float(self.config.api_timeout)
+        deadline = time.monotonic() + api_timeout
+        request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
+        response = await self._send_with_header_deadline(client, request, api_timeout)
+        try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
             await self._raise_for_response_status(response, deadline=deadline)
 
@@ -1343,6 +1366,8 @@ class SeedreamClient:
                 return sse_result
 
             return await self._parse_json_success_response(response, deadline=deadline)
+        finally:
+            await response.aclose()
 
     async def _send_standard_request(
         self,
@@ -1355,12 +1380,13 @@ class SeedreamClient:
         """发送非流式请求，将 JSON 响应解析为统一结果结构。
 
         以流式发送实施总量限额，避免 client.post 先全量缓冲使 Content-Length 预检
-        失效。每次尝试按 config.api_timeout 记录总时长截止时间并约束读体；超限抛
-        asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
+        失效。每次尝试按 config.api_timeout 记录总时长截止时间，约束响应头就绪与
+        读体；超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
         """
-        deadline = time.monotonic() + float(self.config.api_timeout)
+        api_timeout = float(self.config.api_timeout)
+        deadline = time.monotonic() + api_timeout
         request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
-        response = await client.send(request, stream=True)
+        response = await self._send_with_header_deadline(client, request, api_timeout)
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
             await self._raise_for_response_status(response, deadline=deadline)

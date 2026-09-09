@@ -409,6 +409,51 @@ async def test_standard_slow_drip_json_over_total_budget_times_out(no_sleep: Non
     assert attempts == config.max_retries + 1
 
 
+async def test_stream_header_stall_over_api_timeout_times_out(no_sleep: None) -> None:
+    """流式路径响应头就绪慢于 api_timeout 时按超时重试，耗尽归一为超时异常。
+
+    头部就绪阶段只受 httpx 单次 read 超时保护，由发送路径的截止时间预算封顶。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=1, api_timeout=1)
+    attempts = 0
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        nonlocal attempts
+        attempts += 1
+        await _delay_outside_patched_sleep(1.5)
+        return httpx.Response(200, content=b"{}", headers={"content-type": "application/json"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
+            await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+    assert attempts == config.max_retries + 1
+
+
+async def test_standard_header_stall_over_api_timeout_times_out(no_sleep: None) -> None:
+    """非流式路径响应头就绪慢于 api_timeout 时同样按超时重试。"""
+    config = SeedreamConfig(api_key="k", max_retries=1, api_timeout=1)
+    attempts = 0
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        nonlocal attempts
+        attempts += 1
+        await _delay_outside_patched_sleep(1.5)
+        return httpx.Response(200, content=b"{}", headers={"content-type": "application/json"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert attempts == config.max_retries + 1
+
+
 # ==================== 超大错误体的状态码重试语义 ====================
 
 
