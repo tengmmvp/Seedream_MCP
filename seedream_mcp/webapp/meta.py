@@ -14,6 +14,7 @@ from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Re
 
 from ..config import get_active_config
 from ..utils.core.errors import CONTROL_CHARS_PATTERN
+from ..utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from ..utils.model.model_capabilities import model_payloads
 from ..version import __version__
 from . import _shared, constants
@@ -97,6 +98,7 @@ async def web_config_info(_request: Request) -> Response:
             "model_id": config.model_id,
             "default_size": config.default_size,
             "models": _models_payload(),
+            "supported_extensions": list(SUPPORTED_IMAGE_EXTENSIONS_ORDERED),
             "images_root_available": images_root_available,
             "images_root_hint": (
                 ""

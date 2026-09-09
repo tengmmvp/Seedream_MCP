@@ -48,6 +48,22 @@ export async function loadConfigInfo() {
   custom.textContent = "自定义";
   sizeSelect.appendChild(custom);
 
+  // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源。
+  const formatSelect = $("format-filter");
+  if (formatSelect && Array.isArray(info.supported_extensions)) {
+    formatSelect.innerHTML = "";
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "全部";
+    formatSelect.appendChild(all);
+    for (const ext of info.supported_extensions) {
+      const option = document.createElement("option");
+      option.value = ext;
+      option.textContent = ext.replace(".", "").toUpperCase();
+      formatSelect.appendChild(option);
+    }
+  }
+
   const outputFormatField = $("output-format").closest(".field");
   if (current && !current.supports_output_format)
     outputFormatField.classList.add("collapsed");
@@ -66,18 +82,18 @@ export function applyToolUI() {
         (m) => m.model_id === state.configInfo.model_id,
       )
     : null;
+  // 未知模型（Endpoint ID 部署）无能力条目时回退为允许，与 unknown 家族放行一致。
   const layerAllowed =
     state.tool === "image-to-image" &&
-    current &&
-    current.supports_layer_decomposition;
+    (current ? current.supports_layer_decomposition : true);
 
   $("reference-section").classList.toggle("collapsed", !config.refs);
   $("prompt-label").textContent = "提示词";
-  $("prompt-hint").textContent = config.promptOptional
-    ? layerAllowed
-      ? "启用图层拆分或纯改图时可留空；建议不超过 300 字。"
-      : "纯改图时可留空；建议不超过 300 字。"
-    : "建议不超过 300 字。";
+  // 提示词留空仅图层拆分场景被后端接受，说明只在开关真实可用时提及。
+  $("prompt-hint").textContent =
+    config.promptOptional && layerAllowed
+      ? "启用图层拆分时可留空；建议不超过 300 字。"
+      : "建议不超过 300 字。";
   $("max-images-field").classList.toggle(
     "collapsed",
     state.tool !== "sequential-generation",
@@ -123,7 +139,9 @@ export function updateToolAvailability() {
  */
 export function buildRequestBody() {
   const config = toolConfig(state.tool);
-  const body = { prompt: $("prompt").value.trim() };
+  // 空提示词整体省略键：后端仅接受键缺省形态，空串会被 min_length 拒绝。
+  const promptText = $("prompt").value.trim();
+  const body = promptText ? { prompt: promptText } : {};
 
   if (config.refs && state.refs.length > 0) {
     const values = state.refs.map((ref) => ref.value);
@@ -242,6 +260,14 @@ export async function submitGenerate(event) {
     setStatus("failed", `该工具至少需要 ${config.min} 张参考图。`);
     return;
   }
+  if ($("size").value === "custom") {
+    const width = Number($("size-width").value);
+    const height = Number($("size-height").value);
+    if (!width || !height) {
+      setStatus("failed", "自定义尺寸需同时填写宽与高。");
+      return;
+    }
+  }
 
   const button = $("generate-btn");
   button.disabled = true;
@@ -357,7 +383,10 @@ async function renderResults(payload) {
     metaLines.push(`用量：completion ${usage.completion_tokens}`);
   }
   if (payload.auto_save && Array.isArray(payload.auto_save.results)) {
-    metaLines.push(`已保存 ${payload.auto_save.results.length} 张`);
+    const savedCount = payload.auto_save.results.filter(
+      (r) => r && r.success !== false,
+    ).length;
+    metaLines.push(`已保存 ${savedCount} 张`);
   }
   if (metaLines.length) {
     meta.textContent = metaLines.join("\n");
@@ -376,7 +405,8 @@ async function loadResultImage(img, item) {
     if (!blobUrl) throw new Error("image endpoint 请求失败");
     img.src = blobUrl;
     img.classList.add("zoomable");
-    img.addEventListener("click", () => openLightbox(item));
+    // 失败提示落生成视图的错误节点，图库侧节点在此视图不可见。
+    img.addEventListener("click", () => openLightbox(item, $("result-error")));
     return;
   }
   const objectUrl = await fetchExternalBlobUrl(item.url, "generate");

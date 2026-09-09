@@ -38,7 +38,6 @@ from ..tools.runners import (
 )
 from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from ..utils.core.logs import get_logger
-from ..utils.io.io_path import images_root_relative
 from . import _shared
 from .context import build_web_request_context
 
@@ -64,26 +63,11 @@ class _GenerationRunner(Protocol[_RunnerInputT]):
 def _rewrite_item_path(item: dict[str, object], images_root: Path) -> None:
     """改写单个结果条目的路径字段，产出前端可消费的 web_path 相对形态。
 
-    落在图片目录内的条目附 web_path 相对路径且 local_path 替换为同一相对形态；
-    越出图片目录（save_path 指定的图片目录外目的地）或路径解析失败的条目删除
-    local_path 键，Web 文件端点仅服务图片目录内文件。markdown_ref 前端不消费，
-    无条件删除。条目缺 local_path、值空串或非字符串时仅删 markdown_ref，其余
-    内容不改动。
+    相对化与越界删除经 _shared.converge_path_entry 单点维护；markdown_ref 前端
+    不消费，无条件删除。
     """
     item.pop("markdown_ref", None)
-    local_path = item.get("local_path")
-    if not isinstance(local_path, str) or not local_path:
-        return
-    try:
-        web_path = images_root_relative(Path(local_path).resolve(), images_root)
-    except (OSError, ValueError):
-        del item["local_path"]
-        return
-    if web_path is None:
-        del item["local_path"]
-        return
-    item["web_path"] = web_path
-    item["local_path"] = web_path
+    _shared.converge_path_entry(item, "local_path", images_root, resolve=True)
 
 
 def augment_generation_payload(structured: dict[str, object], images_root: Path) -> None:

@@ -13,7 +13,11 @@ from pathlib import Path
 from starlette.responses import JSONResponse
 
 from ..utils.core.errors import SeedreamConfigError
-from ..utils.io.io_path import READ_SCOPE_AUTH_ENV_HINT, resolve_images_root
+from ..utils.io.io_path import (
+    READ_SCOPE_AUTH_ENV_HINT,
+    images_root_relative,
+    resolve_images_root,
+)
 
 GENERATION_ERROR_STATUS: dict[str, int] = {
     "validation_error": 400,
@@ -54,11 +58,46 @@ async def resolve_web_images_root() -> Path | JSONResponse:
         return images_root_unavailable(exc)
 
 
-def generation_status(structured: dict[str, object]) -> int:
-    """按结构化结果的错误类型映射 HTTP 状态码。"""
+def structured_error_type(structured: dict[str, object]) -> str | None:
+    """提取结构化结果的 error.type，缺失或形态不符返回 None。"""
     error = structured.get("error")
     if isinstance(error, dict):
         error_type = error.get("type")
         if isinstance(error_type, str):
-            return GENERATION_ERROR_STATUS.get(error_type, 502)
-    return 502
+            return error_type
+    return None
+
+
+def generation_status(structured: dict[str, object]) -> int:
+    """按结构化结果的错误类型映射 HTTP 状态码。"""
+    error_type = structured_error_type(structured)
+    if error_type is None:
+        return 502
+    return GENERATION_ERROR_STATUS.get(error_type, 502)
+
+
+def converge_path_entry(
+    item: dict[str, object], key: str, images_root: Path, *, resolve: bool = False
+) -> None:
+    """把条目的路径键改写为图片目录相对形态并附 web_path，越界删除该键。
+
+    resolve 为 True 时先解析为物理路径再相对化（输入为任意本地路径）；False 时
+    输入须已是 resolve 后的绝对路径，做纯词法相对化。generate 与 gallery 的
+    条目收敛共用，改写规则单点维护。
+    """
+    value = item.get(key)
+    if not isinstance(value, str) or not value:
+        return
+    path = Path(value)
+    if resolve:
+        try:
+            path = path.resolve()
+        except (OSError, ValueError):
+            del item[key]
+            return
+    relative = images_root_relative(path, images_root)
+    if relative is None:
+        del item[key]
+        return
+    item["web_path"] = relative
+    item[key] = relative

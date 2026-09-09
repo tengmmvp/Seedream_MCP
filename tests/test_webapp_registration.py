@@ -182,6 +182,10 @@ async def test_config_info_reachable_when_registered(
     assert all("allowed_presets" in model for model in payload["models"])
     assert payload["images_root_available"] is True
     assert "images_root" not in payload
+    # 格式过滤器选项的单一来源，缺失会使前端退化到仅"全部"。
+    from seedream_mcp.utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
+
+    assert payload["supported_extensions"] == list(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)
 
 
 async def test_config_info_response_is_not_cacheable(

@@ -91,6 +91,8 @@ async function refreshGalleryForSeq(seq) {
   }
   const payload = await response.json();
   if (seq !== requestSeq) return;
+  // 新一页装载成功，清除上一轮遗留的加载失败提示。
+  clearInlineError($("gallery-error"));
   // 页码一律以响应回显的 offset 为准，避免竞态期间本地偏移已被改写。
   if (typeof payload.offset === "number") {
     state.gallery.offset = payload.offset;
@@ -166,8 +168,10 @@ async function refreshGalleryForSeq(seq) {
  * 先开空框再被图片撑开造成的尺寸突变；序号守卫丢弃过期响应。
  *
  * @param {Object} item - 目标条目，仅使用 web_path 字段。
+ * @param {HTMLElement} [errorEl=$("gallery-error")] - 失败提示落点，须在调用方
+ *   当前可见的视图内；生成台复用本函数时传生成视图的错误节点。
  */
-export async function openLightbox(item) {
+export async function openLightbox(item, errorEl = $("gallery-error")) {
   if (!item || !item.web_path) return;
   const seq = ++lightboxSeq;
   releaseLightboxUrl();
@@ -176,12 +180,15 @@ export async function openLightbox(item) {
     response = await apiFetch(
       `/web/api/image?path=${encodeURIComponent(item.web_path)}`,
     );
-  } catch {
+  } catch (error) {
     // 401 已弹令牌门；其余网络异常不开灯箱，缩略图仍在，可再次点击重试。
+    if (error.message === "unauthorized") return;
+    showInlineError(errorEl, "原图加载失败，请重试。");
     return;
   }
   if (!response.ok) {
     console.error("原图加载失败:", item.web_path);
+    showInlineError(errorEl, "原图加载失败，图片可能已被清理。");
     return;
   }
   const blob = await response.blob();
@@ -190,6 +197,7 @@ export async function openLightbox(item) {
   currentLightboxBlob = blob;
   currentLightboxUrl = URL.createObjectURL(blob);
   $("lightbox-caption").textContent = item.web_path;
+  clearInlineError(errorEl);
   clearInlineError($("lightbox-error"));
   const lightbox = $("lightbox");
   lightbox.classList.remove("hidden");

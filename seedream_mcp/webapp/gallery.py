@@ -23,7 +23,6 @@ from ..utils.core.logs import get_logger
 from ..utils.io.io_path import (
     is_within_resolved,
     normalize_path,
-    images_root_relative,
 )
 from . import _shared
 
@@ -36,9 +35,8 @@ _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
     """剥除 Web 前端不消费的边界字段，条目 path 改写为图片目录相对形态。
 
-    Web 文件端点以图片目录相对路径服务文件，前端拼接依赖相对形态；图片目录外
-    条目删除 path 键，与 generate 端 _rewrite_item_path 同契约。相对化为纯
-    词法计算，不触达文件系统。
+    条目改写经 _shared.converge_path_entry 与 generate 端单点维护；browse 条目
+    已是 resolve 后的绝对路径，走纯词法相对化。
     """
     for key in _ROOTS_ECHO_KEYS:
         structured.pop(key, None)
@@ -46,15 +44,8 @@ def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
     if not isinstance(images, list):
         return
     for item in images:
-        if not isinstance(item, dict):
-            continue
-        path = item.get("path")
-        if isinstance(path, str):
-            relative = images_root_relative(path, images_root)
-            if relative is not None:
-                item["path"] = relative
-            else:
-                del item["path"]
+        if isinstance(item, dict):
+            _shared.converge_path_entry(item, "path", images_root)
 
 
 async def _directory_outside_images_root(directory: str, images_root: Path) -> bool:
@@ -101,6 +92,9 @@ async def web_browse(request: Request) -> Response:
     structured = result.structured_content if result.structured_content is not None else {}
     if isinstance(structured, dict):
         _converge_for_web(structured, images_root)
-    # browse 错误均为目录形态与越界类客户端错误，统一 400。
-    status = 400 if result.is_error else 200
+    if not result.is_error:
+        return JSONResponse(structured, status_code=200)
+    # validation_error 为模型可自纠的参数错误归 400，扫描失败等服务端故障归 500。
+    error_type = _shared.structured_error_type(structured) if isinstance(structured, dict) else None
+    status = 400 if error_type == "validation_error" else 500
     return JSONResponse(structured, status_code=status)
