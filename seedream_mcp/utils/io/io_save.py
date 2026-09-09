@@ -133,7 +133,8 @@ def _pixel_limit_rejection(path: Path) -> str | None:
         # 头声明像素超过 2 倍上限时 PIL 在打开阶段即抛错，具体尺寸不可得，仍按
         # 像素超限口径拒绝，交由外层删除已落盘文件并降级。
         return f"图像像素超过保存上限 {MAX_IMAGE_PIXELS}，已删除落盘文件并放弃保存"
-    except (UnidentifiedImageError, OSError, SyntaxError):
+    # 畸形头在部分 PIL 插件抛 ValueError，捕获集与 image_validation 的解码包装同口径。
+    except (UnidentifiedImageError, ValueError, OSError, SyntaxError):
         return None
     if width * height > MAX_IMAGE_PIXELS:
         return (

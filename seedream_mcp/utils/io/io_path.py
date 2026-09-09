@@ -1037,7 +1037,7 @@ def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None
 
 
 def _file_uri_to_path(uri: str) -> Path | None:
-    """将 file:// URI 转换为本地路径，拒绝 UNC 形式以避免触发 SMB 连接。"""
+    """将 file:// URI 转换为本地路径，畸形形态与 normalize_path 同口径拒绝。"""
     try:
         parsed = urlparse(uri)
     except Exception:
@@ -1066,6 +1066,10 @@ def _file_uri_to_path(uri: str) -> Path | None:
         return None
 
     candidate = Path(path_part)
+    # 有根无盘符形态在 win32 锚定当前盘根而非可判定的绝对位置，与 normalize_path
+    # 同口径拒绝；POSIX 无 drive 概念，绝对路径恒放行。
+    if sys.platform == "win32" and candidate.root and not candidate.drive:
+        return None
     # 两类冒号畸形按完整路径判定：整路径为盘符相对形态（c:ads 的 c: 被解析为盘符、
     # 裸文件名判定漏拒）与含冒号的普通分量（NTFS ADS）；保留设备名与 normalize_path
     # 同口径拒绝，畸形形态不成为工作区 root。

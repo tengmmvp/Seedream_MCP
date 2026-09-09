@@ -9,7 +9,10 @@ UNC 主机是否抛错，非确定故不断言；SMB 防护由拒绝非 localhos
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from seedream_mcp.utils.io.io_path import _file_uri_to_path
 
@@ -20,14 +23,25 @@ def test_file_uri_to_path_rejects_non_localhost_host() -> None:
     assert _file_uri_to_path("file://server/share/path.png") is None
 
 
-def test_file_uri_to_path_accepts_absolute_local_path() -> None:
-    """file:///abs/path.png 放行为本地 Path，转换结果跨平台一致。"""
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="win32 为有根无盘符形态拒绝，POSIX 绝对路径恒放行"
+)
+def test_file_uri_to_path_accepts_absolute_local_path_on_posix() -> None:
+    """file:///abs/path.png 在 POSIX 放行为本地 Path。"""
     resolved = _file_uri_to_path("file:///abs/path.png")
 
     assert resolved is not None
     assert isinstance(resolved, Path)
     assert "abs" in resolved.parts
     assert "path.png" in resolved.parts
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="有根无盘符拒绝仅 win32 生效，POSIX 绝对路径恒放行"
+)
+def test_file_uri_to_path_rejects_rooted_without_drive_on_windows() -> None:
+    """win32 上有根无盘符形态（file:///foo）拒绝，与 normalize_path 口径一致。"""
+    assert _file_uri_to_path("file:///foo/bar.png") is None
 
 
 def test_file_uri_to_path_rejects_non_file_scheme() -> None:

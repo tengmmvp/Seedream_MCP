@@ -241,6 +241,29 @@ async def test_save_image_rejects_pixels_between_limit_and_double(
     await manager.close()
 
 
+def test_pixel_limit_rejection_treats_value_error_header_as_unidentified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """畸形头在 PIL 插件抛 ValueError 时按无法识别处置返回 None，不引入新失败面。
+
+    捕获集与 image_validation 的解码包装同口径：ValueError 逃出会使保存降级链路
+    收到未知错误而非既有的「交由保存链路处置」。
+    """
+    from PIL import Image as PilImage
+
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"not an image")
+
+    def _raise_value_error(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise ValueError("cannot parse header")
+
+    monkeypatch.setattr(PilImage, "open", _raise_value_error)
+
+    assert auto_save_module._pixel_limit_rejection(broken) is None
+
+
 def test_pixel_limit_rejection_cold_path_initializes_decoders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

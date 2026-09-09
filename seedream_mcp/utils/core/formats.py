@@ -153,7 +153,7 @@ def ensure_image_decoders_ready() -> None:
     from PIL import Image
     from pillow_heif import register_heif_opener
 
-    # 进程级覆写 PIL 解压炸弹阈值，宿主进程内所有 PIL 打开操作随之以 36M 为上限。
+    # 覆写后 PIL 在 36M 告警、72M 报错，36M 硬约束由各解码路径的显式检查承担。
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     register_heif_opener()
     _decoders_ready = True
