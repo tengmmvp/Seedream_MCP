@@ -1,7 +1,8 @@
 """生成请求的并行执行与 lifespan 共享资源获取。
 
 单次请求直接调用 request_executor；request_count > 1 时按 parallelism 信号量限流并发，
-按完成数上报进度。共享的 SeedreamClient 与 DownloadManager 优先从 lifespan 上下文获取，
+按完成数上报进度，进度经单一后台任务串行发送，慢客户端的发送背压不落入批次关键路径。
+共享的 SeedreamClient 与 DownloadManager 优先从 lifespan 上下文获取，
 无 lifespan 场景由调用方回退新建。
 """
 
@@ -9,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from ...client import SeedreamClient
+from ...client import SeedreamClient, shared_request_plan_scope
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER, SeedreamConfig
 from ...utils.core.errors import SeedreamMCPError, format_error_for_user
 from ...utils.core.loop_bound import loop_bound_semaphore
+from ...utils.io.io_download import DownloadManager
 from ._helpers import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
@@ -27,12 +30,14 @@ from .results import aggregate_parallel_generation_results
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
-    from ...utils.io.io_download import DownloadManager
     from loguru import Logger
 
 
 # lifespan 共享资源取值的泛型辅助，三处资源探测共用。
 _T = TypeVar("_T")
+
+# 批次尾部排空进度发送的有界等待，超时后取消发送任务、放弃剩余进度
+_PROGRESS_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 async def _execute_parallel_generation_requests(
@@ -49,19 +54,27 @@ async def _execute_parallel_generation_requests(
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
 
     每个请求独立捕获异常并记入 request_errors，不中断其余请求；批内各请求另经
-    进程级准入信号量约束全进程在途数。
+    进程级准入信号量约束全进程在途数。进度经 FIFO 队列交单一后台任务按完成顺序
+    串行发送，progress 严格递增；批次尾部有界排空，病态慢客户端至多拖住一个
+    排空超时。
     """
     semaphore = asyncio.Semaphore(context.parallelism)
     admission = loop_bound_semaphore(config.generate_concurrency, key="generate_admission")
     request_results: list[dict[str, Any] | None] = [None] * context.request_count
     request_errors: dict[int, Exception] = {}
     completed_requests = 0
-    # 进度上报序列化锁：快照与发送之间隔着 await，并发完成可能交错发出回退进度，
-    # 违反 progress 严格递增要求；锁内仅发送，发送顺序与完成顺序一致。
-    progress_report_lock = asyncio.Lock()
+    report_queue: asyncio.Queue[tuple[float, str] | None] = asyncio.Queue()
+
+    async def _send_progress_reports() -> None:
+        while True:
+            item = await report_queue.get()
+            if item is None:
+                return
+            progress, message = item
+            await safe_report_progress(ctx, progress=progress, message=message)
 
     async def _run_single_request(request_index: int) -> None:
-        """在信号量槽内执行单次请求并记录结果或异常，槽外上报进度。"""
+        """在信号量槽内执行单次请求并记录结果或异常，槽外入队进度。"""
         nonlocal completed_requests
         async with semaphore:
             await _yield_for_cancellation()
@@ -85,26 +98,33 @@ async def _execute_parallel_generation_requests(
                         context.request_count,
                     )
             finally:
-                # 自增与快照之间无 await，不会被其他协程抢占。
+                # 自增与入队之间无 await，完成顺序即入队顺序，发送端无需再排序。
                 completed_requests += 1
-                progress_snapshot = PROGRESS_GENERATION_START + (
-                    PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START
-                ) * (completed_requests / context.request_count)
-                message_snapshot = f"并行请求进度 {completed_requests}/{context.request_count}"
-        # 上报移出信号量槽，慢客户端背压不拖延槽位释放。
-        async with progress_report_lock:
-            await safe_report_progress(
-                ctx,
-                progress=progress_snapshot,
-                message=message_snapshot,
-            )
+                report_queue.put_nowait(
+                    (
+                        PROGRESS_GENERATION_START
+                        + (PROGRESS_GENERATION_DONE - PROGRESS_GENERATION_START)
+                        * (completed_requests / context.request_count),
+                        f"并行请求进度 {completed_requests}/{context.request_count}",
+                    )
+                )
 
-    await asyncio.gather(
-        *[
-            _run_single_request(request_index)
-            for request_index in range(1, context.request_count + 1)
-        ]
-    )
+    sender = asyncio.create_task(_send_progress_reports())
+    try:
+        await asyncio.gather(
+            *[
+                _run_single_request(request_index)
+                for request_index in range(1, context.request_count + 1)
+            ]
+        )
+        report_queue.put_nowait(None)
+        # 排空失败仅放弃剩余进度，收割统一由 finally 承担
+        with suppress(TimeoutError):
+            await asyncio.wait_for(sender, timeout=_PROGRESS_DRAIN_TIMEOUT_SECONDS)
+    finally:
+        sender.cancel()
+        with suppress(asyncio.CancelledError):
+            await sender
 
     return aggregate_parallel_generation_results(
         request_results=request_results,
@@ -147,8 +167,6 @@ def _try_get_shared_download_manager(
 ) -> DownloadManager | None:
     """从 lifespan 上下文获取共享 DownloadManager，跨请求复用 aiohttp 连接池，
     无则返回 None。"""
-    from ...utils.io.io_download import DownloadManager
-
     return get_lifespan_resource(ctx, LIFESPAN_KEY_DOWNLOAD_MANAGER, DownloadManager)
 
 
@@ -176,8 +194,6 @@ async def _run_generation_requests(
         config: 当前生效配置，提供生成准入限值。
         ctx: MCP 上下文，用于进度上报，可为 None。
     """
-    from ...client import shared_request_plan_scope
-
     with shared_request_plan_scope():
         # 批内公共参数相同，分发前校验一次；失败在分发前上抛，与单请求路径口径
         # 一致，不进入逐请求错误聚合。

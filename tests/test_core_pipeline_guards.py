@@ -189,6 +189,25 @@ def test_sanitize_usage_list_root_and_values_sanitized() -> None:
     assert sanitized == ["a  b", {"note": "Bearer ***"}, 3]
 
 
+def test_sanitize_usage_zeroes_non_finite_floats() -> None:
+    """非有限浮点在源头归零，MCP 与 Web 两条 JSON 输出面取值一致。"""
+    sanitized = _sanitize_usage(
+        {
+            "completion_tokens": float("nan"),
+            "prompt_tokens": float("inf"),
+            "tool_usage": {"web_search": float("-inf")},
+            "generated_images": 3,
+        }
+    )
+
+    assert sanitized == {
+        "completion_tokens": 0.0,
+        "prompt_tokens": 0.0,
+        "tool_usage": {"web_search": 0.0},
+        "generated_images": 3,
+    }
+
+
 def test_sanitize_image_errors_unknown_nested_containers_sanitized() -> None:
     """未知键值为嵌套容器时递归净化，深处的凭据片段与 CRLF 不进入 structuredContent。"""
     images = [

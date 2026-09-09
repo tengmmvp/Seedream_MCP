@@ -22,6 +22,7 @@ from seedream_mcp.tools.core.schemas import (
     ImageToImageInput,
     OptimizePromptOptions,
     OutputFormat,
+    SequentialGenerationInput,
     TextToImageInput,
 )
 from seedream_mcp.utils.io.io_save import AutoSaveResult
@@ -44,6 +45,26 @@ def test_build_generation_context_uses_default_size_when_omitted() -> None:
     assert context.size == "2K"
     assert context.request_count == 1
     assert context.parallelism == 1
+
+
+def test_schema_validator_resolves_default_parallelism() -> None:
+    """缺省 parallelism 由 schema 校验器掐尖为生效值，context 直接消费。"""
+    config = _build_config()
+    params = TextToImageInput(prompt="test", request_count=3)
+
+    assert params.parallelism == 3
+    context = build_generation_context(params, config)
+    assert context.parallelism == 3
+
+
+def test_build_generation_context_rejects_sequential_for_pro_model() -> None:
+    """5.0 Pro 组图先报能力根因，不落入围率数量的误导性上限错误。"""
+    config = _build_pro_config()
+
+    with pytest.raises(SeedreamValidationError, match="不支持组图生成"):
+        build_generation_context(
+            SequentialGenerationInput(prompt="test", image=["a.png"], max_images=4), config
+        )
 
 
 def _build_pro_config() -> SeedreamConfig:

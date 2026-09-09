@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -283,6 +284,9 @@ def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> A
                     pending.extend((sanitized, i, sub) for i, sub in enumerate(item))
         elif isinstance(item, str):
             sanitized = sanitize_string(item)
+        elif isinstance(item, float):
+            # 非有限浮点归零，上游异常用量值不进任何 JSON 输出面
+            sanitized = item if math.isfinite(item) else 0.0
         else:
             sanitized = item
         target[key] = sanitized
@@ -290,7 +294,7 @@ def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> A
 
 
 def _sanitize_usage(usage: Any) -> Any:
-    """净化 usage：数值保持原值，字符串值与嵌套容器逐层净化防 CRLF 与凭据注入。"""
+    """净化 usage：非有限数值归零，字符串值与嵌套容器逐层净化防 CRLF 与凭据注入。"""
     return _sanitize_value_tree(usage, sanitize_error_text)
 
 

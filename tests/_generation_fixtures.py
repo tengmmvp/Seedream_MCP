@@ -4,7 +4,8 @@ make_generation_context 供 test_results_output_guards、test_core_pipeline_guar
 与 test_parallel_cancellation 复用同一份 15 字段默认构造，差异字段经 **overrides
 覆盖，字段增删时只改本工厂。_patch_client_success 与 _patch_save_real_file 供
 test_generation_pipeline_previews 与 test_image_preview 复用文生图成功与单图
-真实落盘的 mock 装配。
+真实落盘的 mock 装配。_patch_client_method_spy 供 handler 透传测试复用按方法名
+安装的调用参数记录替身。
 """
 
 from __future__ import annotations
@@ -49,6 +50,21 @@ def make_generation_context(**overrides: Any) -> GenerationExecutionContext:
     }
     defaults.update(overrides)
     return GenerationExecutionContext(**defaults)
+
+
+def _patch_client_method_spy(
+    monkeypatch: pytest.MonkeyPatch, method_name: str
+) -> list[dict[str, Any]]:
+    """monkeypatch 指定 SeedreamClient 方法为记录调用参数并返回成功的替身。"""
+    calls: list[dict[str, Any]] = []
+
+    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self
+        calls.append(kwargs)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
+    return calls
 
 
 def _patch_client_success(monkeypatch: pytest.MonkeyPatch) -> None:

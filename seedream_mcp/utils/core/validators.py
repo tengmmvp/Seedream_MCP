@@ -680,6 +680,13 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict[str, A
     return {"mode": mode}
 
 
+def resolve_default_parallelism(
+    request_count: int, max_request_count: int = MAX_PARALLEL_REQUEST_COUNT
+) -> int:
+    """未显式指定 parallelism 时的缺省并行度。"""
+    return min(request_count, max_request_count)
+
+
 def validate_parallel_generation_options(
     *,
     request_count: Any,
@@ -703,7 +710,9 @@ def validate_parallel_generation_options(
     )
 
     if parallelism is None:
-        validated_parallelism = min(validated_request_count, max_request_count)
+        validated_parallelism = resolve_default_parallelism(
+            validated_request_count, max_request_count
+        )
     else:
         validated_parallelism = _coerce_int_in_range(
             parallelism, "parallelism", 1, max_request_count

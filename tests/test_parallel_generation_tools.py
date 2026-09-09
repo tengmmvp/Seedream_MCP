@@ -494,3 +494,87 @@ def test_aggregate_parallel_generation_results_deep_merges_usage() -> None:
     # bool 与 str 标量被跳过，不出现在聚合 usage 中
     assert "cached" not in usage
     assert "model" not in usage
+
+
+class _SlowProgressContext:
+    """每次上报延迟后记录，模拟慢客户端的发送背压。"""
+
+    def __init__(self, delay: float, stall_threshold: float | None = None) -> None:
+        self._delay = delay
+        self._stall_threshold = stall_threshold
+        self.calls: list[float] = []
+
+    @property
+    def request_context(self) -> Any:
+        raise AttributeError("测试替身不提供请求上下文")
+
+    async def report_progress(self, *, progress: float, total: float, message: str) -> None:
+        await asyncio.sleep(self._delay)
+        self.calls.append(progress)
+        if self._stall_threshold is not None and progress >= self._stall_threshold:
+            await asyncio.sleep(3600)
+
+
+async def test_parallel_progress_order_preserved_with_slow_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """慢客户端发送背压下，进度仍按完成顺序严格递增送达。"""
+    _patch_generation_success(monkeypatch)
+    config = _build_config()
+    ctx = _SlowProgressContext(delay=0.02)
+
+    result = await handle_text_to_image(
+        TextToImageInput(prompt="test", request_count=4, parallelism=2),
+        config,
+        cast(Any, ctx),
+    )
+
+    assert result.is_error is not True
+    # 序列含流水线里程碑与批次进度，整体仍须严格递增
+    values = ctx.calls
+    assert len(values) >= 4
+    assert all(a < b for a, b in zip(values, values[1:]))
+
+
+async def test_parallel_batch_survives_stalled_progress_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """批次进度发送永久停滞时，批次在排空超时后取消发送并正常返回结果。
+
+    单元级直调并行执行器：handler 尾部的 PROGRESS_COMPLETE 上报在关键路径上
+    属既有行为，不在本用例的守护范围。
+    """
+    import seedream_mcp.tools.core.parallel as parallel_module
+    from seedream_mcp.tools.core.common import build_generation_context
+
+    monkeypatch.setattr(parallel_module, "_PROGRESS_DRAIN_TIMEOUT_SECONDS", 0.05)
+
+    async def _executor(client: Any, context: Any) -> dict[str, Any]:
+        await asyncio.sleep(0.01)
+        return _success_result("https://example.com/1.png")
+
+    class _QuietLogger:
+        def warning(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+
+        def opt(self, *args: Any, **kwargs: Any) -> "_QuietLogger":
+            del args, kwargs
+            return self
+
+    config = _build_config()
+    context = build_generation_context(
+        TextToImageInput(prompt="test", request_count=3, parallelism=2), config
+    )
+    ctx = _SlowProgressContext(delay=0, stall_threshold=30)
+
+    result = await parallel_module._execute_parallel_generation_requests(
+        client=cast(SeedreamClient, None),
+        context=context,
+        config=config,
+        request_executor=_executor,
+        module_logger=cast(Any, _QuietLogger()),
+        ctx=cast(Any, ctx),
+    )
+
+    assert result["success"] is True
+    assert ctx.calls and ctx.calls[-1] >= 30

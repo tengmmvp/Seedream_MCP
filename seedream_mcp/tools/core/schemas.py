@@ -413,13 +413,14 @@ class _ResponseAndExecutionInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_parallel_options(self) -> "_ResponseAndExecutionInput":
-        """校验并行执行参数组合。
+        """校验并行执行参数组合并把缺省 parallelism 掐尖为生效值。
 
         校验器随字段声明置于本基类，混入方漏字段时在首次实例化即抛 AttributeError
-        暴露遗漏。
+        暴露遗漏。缺省推导公式在 validate_parallel_generation_options 单点维护，
+        context 直接消费生效值。
         """
         try:
-            validate_parallel_generation_options(
+            _, parallelism = validate_parallel_generation_options(
                 request_count=self.request_count,
                 parallelism=self.parallelism,
                 stream=self.stream,
@@ -427,6 +428,7 @@ class _ResponseAndExecutionInput(BaseModel):
             )
         except SeedreamValidationError as exc:
             raise ValueError(exc.message) from exc
+        object.__setattr__(self, "parallelism", parallelism)
         return self
 
 
