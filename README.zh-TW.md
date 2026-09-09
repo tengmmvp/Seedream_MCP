@@ -28,8 +28,8 @@
 <summary>本專案由 智譜 GLM Coding Plan 提供支援</summary>
 
 <div align="center">
-  <a href="https://www.bigmodel.cn/glm-coding?ic=GDEQEW52AC">
-    <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/zhipu-glm-coding-plan.png" alt="Powered by 智譜 GLM Coding Plan · 智譜編碼套餐" />
+  <a href="https://www.bigmodel.cn/invite?icode=DGfqlMKwV%2BAThYQ7VC85PnHEaazDlIZGj9HxftzTbt4%3D">
+    <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/zhipu-glm-coding-plan-26-9-9.png" alt="Powered by 智譜 GLM Coding Plan · 智譜編碼套餐" />
   </a>
 </div>
 
