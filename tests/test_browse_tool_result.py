@@ -82,7 +82,8 @@ async def test_browse_directory_error_branches_report_terminal_progress(
 ) -> None:
     """目录无效与目录越界两个早退分支上报 100% 失败终态，与其余错误分支一致。
 
-    两分支非模型可自纠的参数错误，error.type 保持 browse_failed。
+    目录形态非法为调用方可自纠的参数错误归 validation_error；越界分支保持
+    browse_failed。
     """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -97,7 +98,7 @@ async def test_browse_directory_error_branches_report_terminal_progress(
     assert invalid_result.is_error is True
     assert invalid_ctx.calls[-1][0] == 100.0
     assert invalid_ctx.calls[-1][2] == "浏览图片处理失败"
-    assert invalid_result.structured_content["error"]["type"] == "browse_failed"
+    assert invalid_result.structured_content["error"]["type"] == "validation_error"
 
     out_of_scope_ctx = RecordingProgressContext()
     out_of_scope_result = await handle_browse_images(

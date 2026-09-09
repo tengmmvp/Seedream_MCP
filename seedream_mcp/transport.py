@@ -506,12 +506,13 @@ def _resolve_http_auth_token(args: argparse.Namespace) -> str:
 def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     """按实际绑定地址派生 SDK 内层 DNS rebinding 防护配置。
 
-    回环与 localhost 绑定启用防护并按回环白名单放行；非回环绑定默认整体关闭，
-    活动配置了 SEEDREAM_HTTP_ALLOWED_HOSTS 时改为启用并按该列表放行，条目支持
-    host、host:port 与尾部 :* 端口通配，Host 不在列表的请求由 SDK 以 421 拒绝。
-    该路径不设置 allowed_origins，携带 Origin 头的浏览器客户端会被 SDK 以 403
-    拒绝；本传输面向非浏览器 MCP 客户端，需浏览器接入应经反向代理剥离 Origin
-    头或另行评估。
+    回环与 localhost 绑定启用防护并按回环白名单放行；非回环的具体地址绑定默认
+    按绑定地址启用 Host/Origin 白名单（Origin 校验为规范 MUST），活动配置了
+    SEEDREAM_HTTP_ALLOWED_HOSTS 时改为按该列表放行，条目支持 host、host:port 与
+    尾部 :* 端口通配，该分支不设置 allowed_origins，携带 Origin 头的浏览器请求
+    由 SDK 以 403 拒绝。通配地址绑定（0.0.0.0/::）下实际访问地址不可预知，默认
+    不启用并输出告警。列表外的 Host 由 SDK 以 421、Origin 以 403 拒绝；不携带
+    Origin 的非浏览器 MCP 客户端不受影响。
     """
     if host in _DNS_REBINDING_PROTECTED_HOSTS:
         return TransportSecuritySettings(
@@ -525,7 +526,42 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
             enable_dns_rebinding_protection=True,
             allowed_hosts=list(allowed_hosts),
         )
-    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    default_allowlist = _bind_address_allowlist(host)
+    if default_allowlist is None:
+        logger.warning(
+            "streamable-http 绑定通配地址 {}，Host/Origin 校验默认关闭，"
+            "请配置 SEEDREAM_HTTP_ALLOWED_HOSTS 启用校验",
+            host,
+        )
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=default_allowlist[0],
+        allowed_origins=default_allowlist[1],
+    )
+
+
+_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "::"})
+
+
+def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
+    """由非回环绑定地址推导 Host/Origin 默认白名单，通配绑定返回 None。
+
+    IPv6 字面量按 Host/Origin 头的方括号形态生成；Origin 同时覆盖 http 与
+    https 两种 scheme 的有端口与无端口形态。
+    """
+    stripped = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    if stripped in _WILDCARD_BIND_HOSTS:
+        return None
+    literal = f"[{stripped}]" if ":" in stripped else stripped
+    allowed_hosts = [literal, f"{literal}:*"]
+    allowed_origins = [
+        f"http://{literal}",
+        f"http://{literal}:*",
+        f"https://{literal}",
+        f"https://{literal}:*",
+    ]
+    return allowed_hosts, allowed_origins
 
 
 def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
@@ -584,8 +620,9 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     """
     from .resources import mcp
 
+    config = get_active_config()
     transport_security = _transport_security_for_host(host)
-    max_body_size = get_active_config().http_max_body_size
+    max_body_size = config.http_max_body_size
     if web_enabled:
         from .webapp import register_web_routes
 
@@ -598,10 +635,16 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     )
     if host not in _DNS_REBINDING_PROTECTED_HOSTS:
         if transport_security.enable_dns_rebinding_protection:
-            logger.info(
-                "非回环绑定 {} 已启用 SDK Host 校验，按 SEEDREAM_HTTP_ALLOWED_HOSTS 白名单放行",
-                host,
-            )
+            if config.http_allowed_hosts:
+                logger.info(
+                    "非回环绑定 {} 已启用 SDK Host 校验，按 SEEDREAM_HTTP_ALLOWED_HOSTS 白名单放行",
+                    host,
+                )
+            else:
+                logger.info(
+                    "非回环绑定 {} 已启用 SDK Host/Origin 校验，按绑定地址派生白名单放行",
+                    host,
+                )
         else:
             logger.info(
                 "非回环绑定 {} 已关闭 SDK 内层 Host 白名单，鉴权与 TLS 由本项目中间件承担",

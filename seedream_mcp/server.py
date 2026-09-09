@@ -163,12 +163,10 @@ from .utils.model.model_capabilities import (
 )
 
 # resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 与
-# rebind_request_state_security 为本模块直接使用，其余供 tests 与既有 import 路径
-# 经 server 模块访问。
+# rebind_request_state_security 为本模块直接使用，其余供 tests 经 server 模块访问。
 from .resources import (  # noqa: F401
     SERVER_NAME,
     SERVER_VERSION,
-    _cleanup_shared_resources,
     _reset_lifespan_state,
     _sync_cleanup,
     app_lifespan,
@@ -179,7 +177,6 @@ from .resources import (  # noqa: F401
 # ASGI 中间件类重导出，供 tests 经 server 模块访问。
 from .transport import (  # noqa: F401
     _BearerTokenAuthMiddleware,
-    _HealthCheckMiddleware,
     _LimitRequestBodyMiddleware,
 )
 
@@ -367,15 +364,39 @@ def _workspace_roots_dependency(
 ) -> ListRootsResult | ListRoots | None:
     """五个工具共用的 roots 依赖解析器，SEP-2577 非废弃形态。
 
-    会话已声明 roots capability 时返回 ListRoots()，SDK 在工具调用前取回客户端
-    roots 并注入工具参数；否则返回 None 不发起取回，工具链经
-    workspace_roots_scope_from_result 回退环境变量边界。resolver 参数对模型不可见，
-    不进入 inputSchema。
+    会话已声明 roots capability 且反向通道可用时返回 ListRoots()，SDK 在工具
+    调用前取回客户端 roots 并注入工具参数；未声明或反向通道不可用（无状态
+    传输等取回必失败）时返回 None 不发起取回，工具链经
+    workspace_roots_scope_from_result 回退环境变量边界。resolver 参数对模型
+    不可见，不进入 inputSchema。
     """
     session = _session_or_none(ctx)
     if session is None or not session_declares_roots_capability(session):
         return None
+    if not _roots_back_channel_available(ctx, session):
+        return None
     return ListRoots()
+
+
+def _modern_revision_negotiated(ctx: Context) -> bool:
+    """协商版本不低于 2026-07-28 时返回 True，协议版本缺失按旧修订处理。"""
+    version = getattr(ctx, "protocol_version", None)
+    return isinstance(version, str) and is_version_at_least(version, _MODERN_PROTOCOL_VERSION)
+
+
+def _roots_back_channel_available(ctx: Context, session: Any) -> bool:
+    """判定 roots 取回通道可用：现代修订走多轮取回，旧修订需反向通道。
+
+    协商版本不低于 2026-07-28 时 resolver 的取回经 InputRequiredResult 多轮形态，
+    不依赖反向通道；旧修订经 roots/list 直连，无状态传输等无反向通道场景返回
+    False 以跳过必失败的取回，旧版 SDK 与测试替身无该属性时保守视为可用。
+    """
+    if _modern_revision_negotiated(ctx):
+        return True
+    try:
+        return bool(session.can_send_request)
+    except AttributeError:
+        return True
 
 
 def _session_or_none(ctx: Context) -> Any:
@@ -758,11 +779,7 @@ def _resource_roots_via_input_required(ctx: Context) -> bool:
     session = _session_or_none(ctx)
     if session is None or not session_declares_roots_capability(session):
         return False
-    # protocol_version 经 getattr 容错读取，测试替身缺省时按旧修订回退。
-    version = getattr(ctx, "protocol_version", None)
-    if not isinstance(version, str):
-        return False
-    return is_version_at_least(version, _MODERN_PROTOCOL_VERSION)
+    return _modern_revision_negotiated(ctx)
 
 
 def _workspace_roots_or_empty() -> list[Path]:

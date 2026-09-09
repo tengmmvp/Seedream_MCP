@@ -75,10 +75,10 @@ def aggregate_parallel_generation_results(
 ) -> dict[str, Any]:
     """聚合并行请求结果为统一响应结构。
 
-    合并各成功请求的图片与用量，失败请求记入 batch.errors；status 按 completed/
-    partial/failed 三态推导，任一成功请求自身为 partial 时批次至多为 partial。全部
-    失败时以首个失败异常分类错误码，无异常的软失败结果透传上游 error.code，与单发
-    路径的错误码契约一致。
+    合并各请求的图片与用量（软失败请求的用量同样计入，失败请求上游也可能计量），
+    失败请求记入 batch.errors；status 按 completed/partial/failed 三态推导，任一
+    成功请求自身为 partial 时批次至多为 partial。全部失败时以首个失败异常分类
+    错误码，无异常的软失败结果透传上游 error.code，与单发路径的错误码契约一致。
 
     Args:
         request_results: 各请求结果列表，失败或异常时对应位置为 None。
@@ -100,6 +100,12 @@ def aggregate_parallel_generation_results(
             request_exc = request_errors.get(request_index)
             error_message = _extract_parallel_request_error(result, request_exc)
             error_items.append({"request_index": request_index, "message": error_message})
+            # 软失败请求的用量照常合并：失败请求上游也可能计量，计费核对不因批次
+            # 聚合漏计。
+            usage = result.get("usage") if result else None
+            if isinstance(usage, dict):
+                for key, value in usage.items():
+                    _add_usage_value(merged_usage, key, value)
             # 占位项 error 与 build_error_dict 同契约：type 取异常归约码，软失败结果
             # 无异常时维持 generation_failed 兜底档。
             merged_data.append(

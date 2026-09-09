@@ -230,3 +230,47 @@ async def test_skill_reference_rejects_path_traversal(
                 "skill://seedream-image-generation/references/..%2F..%2Fserver.py"
             )
     assert excinfo.value.code == -32602
+
+
+def test_troubleshooting_numeric_claims_match_code_constants() -> None:
+    """troubleshooting 与 SKILL.md 的数值声明与代码常量对账，漂移即失败。"""
+    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.utils.core.formats import MAX_IMAGE_PIXELS
+    from seedream_mcp.utils.core.logs import (
+        DEFAULT_LOG_RETENTION_DAYS,
+        DEFAULT_LOG_ROTATION_SIZE_MB,
+    )
+    from seedream_mcp.utils.images.image_thumbnail import (
+        PREVIEW_MAX_IMAGES,
+        THUMBNAIL_MAX_EDGE,
+    )
+    from seedream_mcp.utils.images.image_validation import (
+        MAX_IMAGE_FILE_SIZE,
+        MIN_IMAGE_EDGE,
+    )
+
+    troubleshooting = (_SKILL_REFERENCES_DIR / "troubleshooting.md").read_text(encoding="utf-8")
+    manifest = _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
+    defaults = SeedreamConfig(api_key="k")
+    # 可选字段的默认为真实 int（10GB 配额），None 分支只存在于显式关闭配置。
+    assert defaults.auto_save_max_total_bytes is not None
+    max_total_gb = defaults.auto_save_max_total_bytes // (1024**3)
+
+    expected_troubleshooting_claims = (
+        f"{MIN_IMAGE_EDGE * MIN_IMAGE_EDGE} 像素 ~ {MAX_IMAGE_PIXELS // 10000} 万像素",
+        f"每边至少 {MIN_IMAGE_EDGE} px",
+        f"不超过 {MAX_IMAGE_FILE_SIZE // (1024 * 1024)} MB",
+        f"长边 ≤{THUMBNAIL_MAX_EDGE}px",
+        f"最多 {PREVIEW_MAX_IMAGES} 张",
+        f"{defaults.auto_save_cleanup_days} 天自动清理、总量 " f"{max_total_gb}GB 上限",
+        f"{DEFAULT_LOG_ROTATION_SIZE_MB}MB 轮转、保留 {DEFAULT_LOG_RETENTION_DAYS} 天",
+    )
+    for claim in expected_troubleshooting_claims:
+        assert claim in troubleshooting, f"troubleshooting.md 缺少数值声明: {claim}"
+
+    manifest_claims = (
+        f"{defaults.auto_save_cleanup_days} 天",
+        f"{max_total_gb}GB",
+    )
+    for claim in manifest_claims:
+        assert claim in manifest, f"SKILL.md 缺少数值声明: {claim}"

@@ -671,7 +671,8 @@ async def execute_browse_request(
 
     if dir_error is not None:
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-        return _build_browse_error(state=state, message=dir_error)
+        # 目录形态非法（UNC、空字节等）为调用方可自纠的参数错误。
+        return _build_browse_error(state=state, message=dir_error, error_type="validation_error")
     if resolved_dir is None:
         message = read_scope_denial_message("目录")
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")

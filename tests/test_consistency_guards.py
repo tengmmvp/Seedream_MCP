@@ -15,11 +15,20 @@ from pathlib import Path
 import pytest
 
 import seedream_mcp
-from seedream_mcp.tools.core.schemas import BackgroundMode, GenerationToolType, ResponseFormat
+from seedream_mcp.tools.core.schemas import (
+    BackgroundMode,
+    GenerationToolType,
+    OptimizePromptOptions,
+    OutputFormat,
+    ResponseFormat,
+)
 from seedream_mcp.utils.core.validators import (
     VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
+    VALID_OPTIMIZE_MODES,
+    VALID_OUTPUT_FORMATS,
     VALID_RESPONSE_FORMATS,
+    VALID_SIZE_PRESETS,
 )
 
 
@@ -36,6 +45,31 @@ def test_generation_tool_type_enum_matches_validator_whitelist() -> None:
 def test_background_mode_enum_matches_validator_whitelist() -> None:
     """BackgroundMode 枚举取值与 VALID_BACKGROUND_MODES 一致，新增取值须两侧同步。"""
     assert {item.value for item in BackgroundMode} == set(VALID_BACKGROUND_MODES)
+
+
+def test_output_format_enum_matches_validator_whitelist() -> None:
+    """OutputFormat 枚举取值与 VALID_OUTPUT_FORMATS 一致，新增格式须两侧同步。"""
+    assert {item.value for item in OutputFormat} == set(VALID_OUTPUT_FORMATS)
+
+
+def test_optimize_mode_literal_matches_validator_whitelist() -> None:
+    """OptimizePromptOptions.mode 的 Literal 取值与 VALID_OPTIMIZE_MODES 一致。"""
+    from typing import get_args
+
+    mode_annotation = OptimizePromptOptions.model_fields["mode"].annotation
+    literal_values = {value for value in get_args(mode_annotation) if isinstance(value, str)}
+
+    assert literal_values == set(VALID_OPTIMIZE_MODES)
+
+
+def test_unknown_family_presets_match_validator_whitelist() -> None:
+    """unknown 家族的档位全集与 VALID_SIZE_PRESETS 一致，新增档位须两侧同步。"""
+    from seedream_mcp.utils.model.model_capabilities import (
+        MODEL_CAPABILITIES,
+        MODEL_FAMILY_UNKNOWN,
+    )
+
+    assert set(MODEL_CAPABILITIES[MODEL_FAMILY_UNKNOWN].allowed_presets) == set(VALID_SIZE_PRESETS)
 
 
 async def test_mcp_registered_tool_names_match_impl_metadata() -> None:

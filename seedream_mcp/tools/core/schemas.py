@@ -14,7 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ...utils.core.errors import SeedreamValidationError
 from ...utils.images.image_validation import MAX_IMAGE_FILE_SIZE
-from ...utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+from ...utils.model.model_capabilities import (
+    SEEDREAM_50PRO_MAX_REFERENCE_IMAGES,
+    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+)
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
@@ -95,7 +98,8 @@ SINGLE_IMAGE_DESCRIPTION = (
     "例如：https://example.com/a.png 或 2026-08-15/image_to_image/b.jpeg。"
 )
 MULTI_IMAGE_DESCRIPTION = (
-    f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张（5.0 Pro 最多 10 张），"
+    f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
+    f"（5.0 Pro 最多 {SEEDREAM_50PRO_MAX_REFERENCE_IMAGES} 张），"
     f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
     "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
     "例如：https://example.com/a.png 或 2026-08-15/multi_image_fusion/b.jpeg。"
@@ -155,7 +159,7 @@ LIMIT_DESCRIPTION = "返回的最大文件数量（1-200）。"
 OFFSET_DESCRIPTION = "分页偏移量（从第几张开始返回，0-100000），默认 0；配合 limit 翻页。"
 FORMAT_FILTER_DESCRIPTION = (
     "需要过滤的图片后缀列表，如 ['.jpeg', '.png']；仅保留受支持的后缀。"
-    "空列表或全部后缀不受支持时视为无有效后缀：跳过扫描返回空结果并回显原始输入。"
+    "空列表或全部后缀不受支持时跳过扫描并返回校验错误，支持的后缀见错误信息。"
 )
 SHOW_DETAILS_DESCRIPTION = "是否展示文件大小、修改时间等详细信息。"
 

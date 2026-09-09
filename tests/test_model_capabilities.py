@@ -20,6 +20,7 @@ from seedream_mcp.utils.model.model_capabilities import (
     _resolve_model_family,
     get_model_capabilities,
     model_payloads,
+    preset_numeric_sort_key,
 )
 
 
@@ -98,21 +99,23 @@ def test_model_payloads_entries_match_alias_table() -> None:
 
 
 def test_model_payloads_allowed_presets_are_sorted_lists() -> None:
-    """allowed_presets 归一为有序列表，能力表的 frozenset 形态不进入载荷。"""
+    """allowed_presets 归一为数值序列表，能力表的 frozenset 形态不进入载荷。"""
     payloads = model_payloads()
 
     for entry in payloads:
         presets = entry["allowed_presets"]
         assert isinstance(presets, list), entry["alias"]
-        assert presets == sorted(presets), entry["alias"]
+        assert presets == sorted(presets, key=preset_numeric_sort_key), entry["alias"]
     by_alias = {entry["alias"]: entry for entry in payloads}
-    assert by_alias["doubao-seedream-5.0-pro"]["allowed_presets"] == ["1.5K", "1K", "2K"]
+    assert by_alias["doubao-seedream-5.0-pro"]["allowed_presets"] == ["1K", "1.5K", "2K"]
     assert by_alias["doubao-seedream-4.5"]["allowed_presets"] == ["2K", "4K"]
 
 
 def test_model_payloads_capability_values_match_asdict() -> None:
-    """条目能力取值与 asdict 全等，仅 allowed_presets 归一为有序列表。"""
+    """条目能力取值与 asdict 全等，仅 allowed_presets 归一为数值序列表。"""
     for entry in model_payloads():
         expected = asdict(get_model_capabilities(cast(str, entry["model_id"])))
-        expected["allowed_presets"] = sorted(expected["allowed_presets"])
+        expected["allowed_presets"] = sorted(
+            expected["allowed_presets"], key=preset_numeric_sort_key
+        )
         assert {key: entry[key] for key in expected} == expected, entry["alias"]

@@ -22,6 +22,8 @@ from seedream_mcp.transport import (
     _LoopbackHostGuardMiddleware,
     _WebOriginGuardMiddleware,
     _attach_streamable_http_middleware,
+    _bind_address_allowlist,
+    _transport_security_for_host,
     _warn_remote_exposure,
 )
 
@@ -466,3 +468,76 @@ def test_attach_web_notice_logged_via_info_per_token_state(
         without_token_output
     )
     assert "要求 Bearer 令牌" not in without_token_output
+
+
+def test_bind_address_allowlist_covers_host_and_origin_forms() -> None:
+    """绑定地址推导的默认白名单覆盖 Host 与 Origin 头的实际可达形态。"""
+    allowlist = _bind_address_allowlist("192.168.1.5")
+    assert allowlist is not None
+    hosts, origins = allowlist
+
+    assert hosts == ["192.168.1.5", "192.168.1.5:*"]
+    assert origins == [
+        "http://192.168.1.5",
+        "http://192.168.1.5:*",
+        "https://192.168.1.5",
+        "https://192.168.1.5:*",
+    ]
+
+    ipv6_allowlist = _bind_address_allowlist("fe80::1")
+    assert ipv6_allowlist is not None
+    ipv6_hosts, ipv6_origins = ipv6_allowlist
+    assert ipv6_hosts == ["[fe80::1]", "[fe80::1]:*"]
+    assert "http://[fe80::1]:*" in ipv6_origins
+
+
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "[::]"])
+def test_bind_address_allowlist_rejects_wildcard_binds(wildcard: str) -> None:
+    """通配绑定下实际访问地址不可预知，无法推导白名单，返回 None 保持关闭。"""
+    assert _bind_address_allowlist(wildcard) is None
+
+
+def test_transport_security_defaults_to_bind_address_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未配置允许列表时，具体地址绑定默认启用 SDK Host/Origin 校验（规范 MUST）。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+
+    settings = _transport_security_for_host("192.168.1.5")
+
+    assert settings.enable_dns_rebinding_protection is True
+    assert settings.allowed_hosts == ["192.168.1.5", "192.168.1.5:*"]
+    assert "http://192.168.1.5:*" in settings.allowed_origins
+
+
+def test_transport_security_wildcard_bind_stays_off_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """通配绑定未配置允许列表时保持校验关闭，并输出配置指引告警。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    records: list[str] = []
+
+    with capture_loguru_messages(records):
+        settings = _transport_security_for_host("0.0.0.0")
+
+    assert settings.enable_dns_rebinding_protection is False
+    output = "".join(records)
+    assert "SEEDREAM_HTTP_ALLOWED_HOSTS" in output
+
+
+def test_transport_security_explicit_hosts_keep_browser_403_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式配置允许列表时按列表放行且不设 Origin 白名单，维持既有取舍。"""
+    config = SeedreamConfig(
+        api_key="test_key", http_allowed_hosts=("mcp.example.com", "mcp.example.com:*")
+    )
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+
+    settings = _transport_security_for_host("0.0.0.0")
+
+    assert settings.enable_dns_rebinding_protection is True
+    assert settings.allowed_hosts == ["mcp.example.com", "mcp.example.com:*"]
+    assert settings.allowed_origins == []

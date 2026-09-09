@@ -289,6 +289,9 @@ def handle_api_error(
 
     error_code: str | None = None
     if isinstance(response_data, dict):
+        # error 键可用形态未拼出 message 时回退查顶层 message，畸形 error 值
+        # （非 dict 非 str）不使顶层描述被跳过。
+        detail_message_extracted = False
         if "error" in response_data:
             error_detail = response_data["error"]
             if isinstance(error_detail, dict):
@@ -300,11 +303,13 @@ def handle_api_error(
                         f"{error_message}: "
                         f"{truncate_upstream_message_fragment(error_detail['message'])}"
                     )
+                    detail_message_extracted = True
             elif isinstance(error_detail, str):
                 error_message = (
                     f"{error_message}: {truncate_upstream_message_fragment(error_detail)}"
                 )
-        elif "message" in response_data:
+                detail_message_extracted = True
+        if not detail_message_extracted and "message" in response_data:
             error_message = (
                 f"{error_message}: "
                 f"{truncate_upstream_message_fragment(response_data['message'])}"

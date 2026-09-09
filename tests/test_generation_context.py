@@ -493,8 +493,12 @@ def test_aggregate_parallel_generation_results_uses_result_error_when_success_fa
     """success=False 的软失败结果按其 error 载荷聚合，无异常时维持兜底档。"""
     result = aggregate_parallel_generation_results(
         request_results=[
-            {"success": False, "error": "鉴权失败"},
-            {"success": False, "error": {"message": "请求频率超限"}},
+            {
+                "success": False,
+                "error": "鉴权失败",
+                "usage": {"generated_images": 1, "total_tokens": 5},
+            },
+            {"success": False, "error": {"message": "请求频率超限"}, "usage": {"total_tokens": 3}},
         ],
         request_errors={},
     )
@@ -510,6 +514,9 @@ def test_aggregate_parallel_generation_results_uses_result_error_when_success_fa
     assert result["data"][1]["error"]["type"] == "generation_failed"
     assert result["batch"]["errors"][0]["message"] == "鉴权失败"
     assert "请求频率超限" in result["batch"]["errors"][1]["message"]
+    # 失败请求上游也可能计量，软失败项的 usage 照常并入合并。
+    assert result["usage"]["generated_images"] == 1
+    assert result["usage"]["total_tokens"] == 8
 
 
 def test_format_generation_response_reports_parallel_failure_details() -> None:

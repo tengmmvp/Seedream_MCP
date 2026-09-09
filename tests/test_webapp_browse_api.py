@@ -150,7 +150,7 @@ async def test_browse_rejects_unc_directory_as_clean_400(
 
     assert response.status_code == 400
     body = response.json()
-    assert body["error"]["type"] == "browse_failed"
+    assert body["error"]["type"] == "validation_error"
     assert "UNC" in body["error"]["message"]
 
 
@@ -164,7 +164,7 @@ async def test_browse_rejects_null_byte_directory_as_clean_400(
     response = await _post_browse(app, {"directory": "a\u0000b"})
 
     assert response.status_code == 400
-    assert response.json()["error"]["type"] == "browse_failed"
+    assert response.json()["error"]["type"] == "validation_error"
 
 
 async def test_browse_echoes_original_directory_not_absolute_images_root(

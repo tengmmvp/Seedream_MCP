@@ -631,10 +631,10 @@ def _inject_transport_config(monkeypatch: pytest.MonkeyPatch, config: SeedreamCo
 def test_transport_security_derivation_follows_bind_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """transport_security 按绑定地址派生：非回环默认关闭 SDK Host 白名单，回环保留白名单。
+    """transport_security 按绑定地址派生：通配绑定默认关闭 SDK Host 白名单，回环保留白名单。
 
-    未配置允许列表时非回环绑定必须整体关闭，否则全部 /mcp 请求会被 SDK 内层
-    以 421 拒绝。
+    未配置允许列表时通配绑定无法预知访问地址必须保持关闭；具体地址绑定的
+    派生白名单行为由 test_transport_middleware_assembly 锁定。
     """
     _inject_transport_config(monkeypatch, SeedreamConfig(api_key="test_key"))
 
