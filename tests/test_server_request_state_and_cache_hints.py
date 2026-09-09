@@ -130,6 +130,23 @@ def test_rebind_request_state_security_updates_boundary(
     boundary._security = before
 
 
+def test_rebind_request_state_security_keeps_default_audience_fallback() -> None:
+    """策略未声明 audience 时重绑回退 server name，与 SDK 构造器语义一致。
+
+    直接落 None 会使滚动重启拒解封重启前封签的 requestState（aud 声明漂移），
+    并停止绑定服务身份。
+    """
+    boundary = _singleton_boundary()
+    before_security = boundary._security
+    before_audience = boundary._audience
+
+    assert resources_module.rebind_request_state_security((b"\x03" * 32,)) is True
+
+    assert boundary._audience == resources_module.SERVER_NAME
+    boundary._security = before_security
+    boundary._audience = before_audience
+
+
 def test_rebind_request_state_security_skips_when_boundary_missing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -328,8 +328,9 @@ def rebind_request_state_security(
     到达它，故由启动路径在活动配置就绪后调用本函数；source 传密钥环字节时构造
     密钥环策略，传 None 时重绑回 SDK 进程临时密钥，也可直接传入现成策略对象。
     经 SDK provisional 属性 mcp.middleware 定位 RequestStateBoundary 并直写私有
-    _security；_audience 构造期自旧策略预计算、不随 _security 替换自动更新，策略
-    声明 audience 时一并同步。探测失败时记录错误并返回 False，不阻断启动；source
+    _security；_audience 构造期自旧策略预计算、不随 _security 替换自动更新，按
+    构造器语义（声明值优先，回退 server name）一并重算。探测失败时记录错误并
+    返回 False，不阻断启动；source
     非空时探测失败另向 stderr 输出多副本解封退化告警。属 SDK 升级适配点，SDK
     提供公开替换入口后应切换。
 
@@ -364,7 +365,8 @@ def rebind_request_state_security(
     else:
         policy = RequestStateSecurity.ephemeral()
     boundary._security = policy
-    # _audience 是构造期从旧 policy 预计算的封签取值来源，不随 _security 替换自动更新。
-    if policy.audience is not None:
-        boundary._audience = policy.audience
+    # _audience 是构造期从旧 policy 预计算的封签取值来源，不随 _security 替换
+    # 自动更新；回退值与 SDK 构造器同源（MCPServer 以 server name 作 default_audience），
+    # 直接落 None 会使滚动重启拒解封旧 state 并停止绑定服务身份。
+    boundary._audience = policy.audience if policy.audience is not None else SERVER_NAME
     return True

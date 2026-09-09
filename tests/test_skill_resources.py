@@ -155,6 +155,29 @@ async def test_skill_manifest_readable_over_wire(reset_lifespan_singletons: None
     assert _single_text_content(result) == _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
 
 
+async def test_skill_manifest_wire_read_runs_off_event_loop_thread(
+    reset_lifespan_singletons: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """经注册链读取 SKILL.md 时文件 I/O 在工作线程执行。
+
+    锁定注册目标为带 to_thread 下沉的缓存实现：装饰器挂回同步直读函数时，
+    线上路径在事件循环做磁盘 I/O，本用例失败。
+    """
+    monkeypatch.setattr(server, "_skill_manifest_payload", None)
+    original = server._read_skill_manifest
+    seen_threads: list[int] = []
+
+    def spy() -> str:
+        seen_threads.append(threading.get_ident())
+        return original()
+
+    monkeypatch.setattr(server, "_read_skill_manifest", spy)
+    async with Client(server.mcp) as client:
+        await client.read_resource(_MANIFEST_URI)
+
+    assert seen_threads and seen_threads[0] != threading.get_ident()
+
+
 @pytest.mark.parametrize("uri", sorted(_REFERENCE_TEMPLATE_URIS))
 async def test_skill_reference_readable_over_wire(
     reset_lifespan_singletons: None, uri: str

@@ -892,16 +892,16 @@ _SKILL_DESCRIPTION = (
 _skill_manifest_payload: str | None = None
 
 
-@mcp.resource(
-    "skill://seedream-image-generation/SKILL.md",
-    mime_type="text/markdown",
-    description=_SKILL_DESCRIPTION,
-)
 def _read_skill_manifest() -> str:
     """读取 SKILL.md 主文件，含 read_text 同步文件系统调用。"""
     return _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
 
 
+@mcp.resource(
+    "skill://seedream-image-generation/SKILL.md",
+    mime_type="text/markdown",
+    description=_SKILL_DESCRIPTION,
+)
 async def skill_manifest_resource() -> str:
     """Agent Skill 主文件，图像生成指南入口，正文即渐进式披露的第二层。"""
     global _skill_manifest_payload
