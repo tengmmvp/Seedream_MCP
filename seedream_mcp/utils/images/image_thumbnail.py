@@ -21,7 +21,9 @@ from typing import TYPE_CHECKING
 
 from mcp.types import ImageContent
 
+from ..core.formats import MAX_IMAGE_PIXELS
 from ..core.logs import get_logger
+from ..core.loop_bound import loop_bound_semaphore
 from ..io.io_file import atomic_replace_from_fd_sync
 
 if TYPE_CHECKING:
@@ -51,20 +53,10 @@ PREVIEW_MAX_IMAGES = 10
 # 预览解码并发上限：4K 单张解码为 RGB 约占 50MB 内存，全量并发时瞬态可达 GB 级。
 PREVIEW_DECODE_CONCURRENCY = 3
 
-# 进程级解码限流信号量：并发上限约束覆盖全部调用而非单次调用；信号量绑定首次
-# 使用时的事件循环，跨循环按需重建。
-_decode_semaphore: asyncio.Semaphore | None = None
-_decode_semaphore_loop: asyncio.AbstractEventLoop | None = None
-
 
 def _get_decode_semaphore() -> asyncio.Semaphore:
     """返回绑定当前事件循环的进程级解码限流信号量，事件循环更替时重建。"""
-    global _decode_semaphore, _decode_semaphore_loop
-    loop = asyncio.get_running_loop()
-    if _decode_semaphore is None or _decode_semaphore_loop is not loop:
-        _decode_semaphore = asyncio.Semaphore(PREVIEW_DECODE_CONCURRENCY)
-        _decode_semaphore_loop = loop
-    return _decode_semaphore
+    return loop_bound_semaphore(PREVIEW_DECODE_CONCURRENCY, key="preview_decode")
 
 
 def _flatten_to_rgb(image: Image.Image) -> Image.Image:
@@ -107,6 +99,18 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
 
     try:
         with Image.open(image_path) as image:
+            # 显式头尺寸校验：PIL 全局阈值仅对 2 倍上限以上的声明抛错，1 至 2 倍
+            # 区间只告警，本路径与参考图校验同口径显式拒绝，不依赖落盘侧防线。
+            width, height = image.size
+            if width * height > MAX_IMAGE_PIXELS:
+                logger.warning(
+                    "缩略图源图像素 {}x{} 超过上限 {}，跳过: {}",
+                    width,
+                    height,
+                    MAX_IMAGE_PIXELS,
+                    image_path.name,
+                )
+                return None
             # JPEG 先请求 draft 缩尺解码：解码器按请求尺寸缩减采样，只解码必要分辨率
             # 的像素，解码量下降约 4 至 16 倍；请求尺寸取上限的两倍，为后续缩放保留
             # 质量余量。draft 须在像素数据加载前调用才生效，对非 JPEG 格式为无害空

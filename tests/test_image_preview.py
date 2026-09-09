@@ -236,7 +236,7 @@ async def test_generation_result_truncates_preview_beyond_limit(
         content.text for content in result.content if isinstance(content, TextContent)
     )
     assert f"共已保存 {total} 张" in response_text
-    assert f"仅附前 {PREVIEW_MAX_IMAGES} 张缩略图预览" in response_text
+    assert f"附 {PREVIEW_MAX_IMAGES} 张缩略图预览" in response_text
     # 截断只作用于预览，structuredContent.data 仍包含全部保存条目。
     structured = result.structured_content
     assert isinstance(structured, dict)

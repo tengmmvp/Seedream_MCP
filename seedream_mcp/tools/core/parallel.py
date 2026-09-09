@@ -12,8 +12,9 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ...client import SeedreamClient
-from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
+from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER, SeedreamConfig
 from ...utils.core.errors import SeedreamMCPError, format_error_for_user
+from ...utils.core.loop_bound import loop_bound_semaphore
 from ._helpers import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
@@ -38,6 +39,7 @@ async def _execute_parallel_generation_requests(
     *,
     client: "SeedreamClient",
     context: GenerationExecutionContext,
+    config: SeedreamConfig,
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
     ],
@@ -46,9 +48,11 @@ async def _execute_parallel_generation_requests(
 ) -> dict[str, Any]:
     """按 parallelism 信号量限流并发执行多次生成请求，完成后聚合结果。
 
-    每个请求独立捕获异常并记入 request_errors，不中断其余请求。
+    每个请求独立捕获异常并记入 request_errors，不中断其余请求；批内各请求另经
+    进程级准入信号量约束全进程在途数。
     """
     semaphore = asyncio.Semaphore(context.parallelism)
+    admission = loop_bound_semaphore(config.generate_concurrency, key="generate_admission")
     request_results: list[dict[str, Any] | None] = [None] * context.request_count
     request_errors: dict[int, Exception] = {}
     completed_requests = 0
@@ -62,7 +66,8 @@ async def _execute_parallel_generation_requests(
         async with semaphore:
             await _yield_for_cancellation()
             try:
-                request_results[request_index - 1] = await request_executor(client, context)
+                async with admission:
+                    request_results[request_index - 1] = await request_executor(client, context)
             except Exception as exc:
                 request_errors[request_index] = exc
                 if isinstance(exc, SeedreamMCPError):
@@ -151,6 +156,7 @@ async def _run_generation_requests(
     *,
     client: "SeedreamClient",
     context: GenerationExecutionContext,
+    config: SeedreamConfig,
     ctx: Context[Any, Any] | None,
     request_executor: Callable[
         ["SeedreamClient", GenerationExecutionContext], Awaitable[dict[str, Any]]
@@ -159,12 +165,15 @@ async def _run_generation_requests(
 ) -> dict[str, Any]:
     """在给定客户端上执行单次或并行生成请求并返回结果。
 
-    request_count 为 1 时直接调用 request_executor，否则并行执行。批次执行期间绑定
-    共享请求计划，client 侧对同批请求只构建一次 request_data、只序列化一次 body；
-    公共参数校验同样提升为批次级，分发前校验一次并经计划缓存复用。
+    request_count 为 1 时直接调用 request_executor，否则并行执行。每个 API 请求
+    （含批次内的并行请求）经 generate_concurrency 准入信号量约束在途数。批次
+    执行期间绑定共享请求计划，client 侧对同批请求只构建一次 request_data、
+    只序列化一次 body；公共参数校验同样提升为批次级，分发前校验一次并经计划
+    缓存复用。
 
     Args:
         request_executor: 执行单次生成请求的回调，由各 impl 提供 client 调用差异。
+        config: 当前生效配置，提供生成准入限值。
         ctx: MCP 上下文，用于进度上报，可为 None。
     """
     from ...client import shared_request_plan_scope
@@ -188,7 +197,8 @@ async def _run_generation_requests(
                 ctx, progress=PROGRESS_GENERATION_START, message="开始调用图像生成接口"
             )
             await _yield_for_cancellation()
-            result = await request_executor(client, context)
+            async with loop_bound_semaphore(config.generate_concurrency, key="generate_admission"):
+                result = await request_executor(client, context)
             await safe_report_progress(
                 ctx, progress=PROGRESS_GENERATION_DONE, message="图像生成完成"
             )
@@ -202,6 +212,7 @@ async def _run_generation_requests(
         result = await _execute_parallel_generation_requests(
             client=client,
             context=context,
+            config=config,
             request_executor=request_executor,
             module_logger=module_logger,
             ctx=ctx,

@@ -21,40 +21,19 @@ from ..core.formats import (
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
     MAX_IMAGE_PIXELS,
+    ensure_image_decoders_ready,
     format_file_too_large,
     infer_extension_from_bytes,
     is_known_image_bytes,
     parse_data_uri,
 )
 from ..core.logs import get_logger
+from ..core.loop_bound import loop_bound_semaphore
 from .io_download import DownloadManager, DownloadError
 from .io_url import sanitize_url
-from .io_storage import FileManager, FileManagerError
+from .io_storage import FileManager, FileManagerError, get_file_manager
 
 logger = get_logger()
-
-# PIL 解码器就绪标志。image_validation 的 ensure_image_decoders_ready 属 images 组，
-# io 组不得反向依赖，故在此以同口径本地化：惰性设置解压炸弹阈值并注册 HEIF 解码器。
-# check-then-set 非线程安全，但两项操作均幂等，并发重复执行无功能影响。
-_decoders_ready = False
-
-
-def _ensure_decoders_ready() -> None:
-    """设置 PIL 解压炸弹阈值并注册 HEIF 解码器，仅首次调用时执行。
-
-    PIL 与 pillow_heif 延迟导入，避免模块导入期加载图像库产生全局副作用。
-    """
-    global _decoders_ready
-    if _decoders_ready:
-        return
-    from PIL import Image
-    from pillow_heif import register_heif_opener
-
-    # 进程级覆写 PIL 解压炸弹阈值，头声明像素超过 2 倍 36M 的图片在打开阶段即被
-    # PIL 抛 DecompressionBombError，1 至 2 倍区间仍由显式头尺寸校验兜底。
-    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
-    register_heif_opener()
-    _decoders_ready = True
 
 
 # 自动清理的最短间隔，避免每次批量保存都触发全量目录扫描。
@@ -135,7 +114,7 @@ def _pixel_limit_rejection(path: Path) -> str | None:
     # DecompressionBombError 为 Exception 直接子类，须单独显式捕获。
     from PIL import Image, UnidentifiedImageError
 
-    _ensure_decoders_ready()
+    ensure_image_decoders_ready()
     try:
         with Image.open(path) as image:
             width, height = image.size
@@ -143,7 +122,7 @@ def _pixel_limit_rejection(path: Path) -> str | None:
         # 头声明像素超过 2 倍上限时 PIL 在打开阶段即抛错，具体尺寸不可得，仍按
         # 像素超限口径拒绝，交由外层删除已落盘文件并降级。
         return f"图像像素超过保存上限 {MAX_IMAGE_PIXELS}，已删除落盘文件并放弃保存"
-    except (UnidentifiedImageError, OSError):
+    except (UnidentifiedImageError, OSError, SyntaxError):
         return None
     if width * height > MAX_IMAGE_PIXELS:
         return (
@@ -305,11 +284,11 @@ class AutoSaveManager:
             fsync: 落盘是否在写入后、原子替换前执行 os.fsync，透传至 save_bytes 字节
                 落盘与经下载管理器落盘两条路径。
         """
-        self.file_manager = FileManager(base_dir)
+        self.file_manager = get_file_manager(base_dir)
         # 清理边界不可用时清理整体关闭：写入目录可能同时存放其他文件，.part 清扫
         # 与空目录回收不区分文件来源，作用于该目录会误删非本服务内容。
         self._cleanup_file_manager: FileManager | None = (
-            FileManager(cleanup_base_dir) if cleanup_base_dir is not None else None
+            get_file_manager(cleanup_base_dir) if cleanup_base_dir is not None else None
         )
         self.max_file_size = max_file_size
         if download_manager is not None:
@@ -317,7 +296,10 @@ class AutoSaveManager:
             self._owns_download_manager = False
         else:
             self.download_manager = DownloadManager(
-                timeout=download_timeout, max_retries=max_retries, max_file_size=max_file_size
+                timeout=download_timeout,
+                max_retries=max_retries,
+                max_file_size=max_file_size,
+                connection_limit=max_concurrent,
             )
             self._owns_download_manager = True
         self.max_concurrent = max_concurrent
@@ -637,23 +619,21 @@ class AutoSaveManager:
     ) -> list[AutoSaveResult]:
         """并发执行保存任务并归集结果。
 
-        限制并发、将异常归一化为失败结果、统计成功数并触发节流清理；fallback_url_key
-        指定 url 分支从 image_data 取原始标识的键，None 时固定为 "base64"。入参为
-        协程工厂而非协程对象，批量被整体取消时仍在排队的任务不遗留未 await 的协程，
-        避免 GC 阶段的 RuntimeWarning 噪音。
+        每任务经 max_concurrent 信号量限流（url 下载与 base64 落盘共用同一上限），
+        跨并发批次的保存任务共享同一信号量。将异常归一化为失败结果、统计成功数
+        并触发节流清理；fallback_url_key 指定 url 分支从 image_data 取原始标识
+        的键，None 时固定为 "base64"。入参为协程工厂而非协程对象，批量被整体
+        取消时仍在排队的任务不遗留未 await 的协程，避免 GC 阶段的 RuntimeWarning
+        噪音。
         """
-        # semaphore 保持局部构造：AutoSaveManager 按调用新建且每个实例至多执行一次
-        # 批量保存，提升为实例属性不会带来复用收益。
-        semaphore = asyncio.Semaphore(self.max_concurrent)
+        semaphore = loop_bound_semaphore(self.max_concurrent, key="save_batch")
 
-        async def save_with_semaphore(
-            factory: Callable[[], Awaitable[AutoSaveResult]],
-        ) -> AutoSaveResult:
+        async def _run_in_slot(factory: Callable[[], Awaitable[AutoSaveResult]]) -> AutoSaveResult:
             async with semaphore:
                 return await factory()
 
         results = await asyncio.gather(
-            *[save_with_semaphore(factory) for factory in factories], return_exceptions=True
+            *[_run_in_slot(factory) for factory in factories], return_exceptions=True
         )
 
         processed_results: list[AutoSaveResult] = []

@@ -439,6 +439,53 @@ def test_data_root_unc_rejected_at_build(unc_dir: str) -> None:
     assert "SEEDREAM_DATA_ROOT" in excinfo.value.message
 
 
+@pytest.mark.parametrize("unc_dir", ["//nas/pics", "\\\\nas\\pics"])
+def test_workspace_root_unc_rejected_at_build(unc_dir: str) -> None:
+    """工作区根目录声明 UNC 路径在构建期拒绝，与 data_root 同口径。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="UNC") as excinfo:
+        SeedreamConfig(api_key="k", workspace_root=unc_dir)
+
+    assert "SEEDREAM_WORKSPACE_ROOT" in excinfo.value.message
+
+
+def test_client_timeout_overflow_rejected_as_config_error() -> None:
+    """超大超时整数在构建期按配置错误拒绝，不延迟到客户端初始化才失败。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="api_timeout"):
+        SeedreamConfig(api_key="k", api_timeout=10**5000)
+
+
+def test_generate_concurrency_lower_bound_enforced() -> None:
+    """生成并发准入下限为 1。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="generate_concurrency"):
+        SeedreamConfig(api_key="k", generate_concurrency=0)
+
+
+def test_generate_concurrency_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SEEDREAM_GENERATE_CONCURRENCY 环境变量取值生效。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    monkeypatch.setenv("ARK_API_KEY", "k")
+    monkeypatch.setenv("SEEDREAM_GENERATE_CONCURRENCY", "5")
+    config = SeedreamConfig.from_env()
+    assert config.generate_concurrency == 5
+
+
+def test_http_allowed_hosts_sequence_override_splits_entries() -> None:
+    """序列形态的 override 按元素取值，不经 str() 拼成畸形条目。"""
+    from seedream_mcp.config import build_config_from_sources
+
+    config = build_config_from_sources(
+        overrides={"http_allowed_hosts": ("api.example.com", "b.example.com")}
+    )
+    assert config.http_allowed_hosts == ("api.example.com", "b.example.com")
+
+
 def test_build_config_none_overrides_fall_through_to_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

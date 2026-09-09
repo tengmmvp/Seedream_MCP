@@ -169,6 +169,7 @@ async def _dispatch_generation_requests(
         return await _run_generation_requests(
             client=shared_client,
             context=context,
+            config=config,
             ctx=ctx,
             request_executor=request_executor,
             module_logger=module_logger,
@@ -177,6 +178,7 @@ async def _dispatch_generation_requests(
         return await _run_generation_requests(
             client=client,
             context=context,
+            config=config,
             ctx=ctx,
             request_executor=request_executor,
             module_logger=module_logger,
@@ -297,16 +299,19 @@ async def _build_generation_preview(
                 PREVIEW_MAX_IMAGES,
                 PREVIEW_MAX_IMAGES,
             )
-            response_text += (
-                f"\n（共已保存 {len(saved_paths)} 张，"
-                f"仅附前 {PREVIEW_MAX_IMAGES} 张缩略图预览）"
-            )
             saved_paths = saved_paths[:PREVIEW_MAX_IMAGES]
         try:
             images_root = await asyncio.to_thread(resolve_images_root)
         except SeedreamConfigError:
             images_root = None
         preview_contents = await build_preview_contents(saved_paths, images_root)
+        # 附注按实际生成的预览数量补写：缩略图生成失败会被静默跳过，按上限声称
+        # 已附会使文本与实际载荷不符。
+        saved_count = sum(1 for r in auto_save_results if r.success)
+        if preview_contents and saved_count > len(preview_contents):
+            response_text += (
+                f"\n（共已保存 {saved_count} 张，附 {len(preview_contents)} 张缩略图预览）"
+            )
     return response_text, preview_contents
 
 
@@ -323,10 +328,10 @@ async def execute_generation_handler(
 ) -> CallToolResult:
     """执行生成类工具的统一处理流水线，返回 MCP 结构化工具结果。
 
-    按 request_count 单次或并行调用客户端，按 response_format 自动保存，随后净化
-    图片数据并格式化文本与 structuredContent，预览开启且存在成功保存图片时追加缩略图
-    ImageContent。任意阶段抛出的异常均降级为 ``is_error=True`` 的结果，不向调用方
-    抛出。
+    分发单次或并行的生成请求，按 response_format 自动保存，净化图片数据并
+    格式化文本与 structuredContent，预览开启且存在成功保存图片时追加缩略图
+    ImageContent。任意阶段抛出的异常均降级为 ``is_error=True`` 的结果，不向
+    调用方抛出。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。

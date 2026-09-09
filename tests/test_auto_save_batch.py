@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 from PIL import Image
 
+from seedream_mcp.utils.core import formats as formats_module
+from seedream_mcp.utils.io import io_save as auto_save_module
 from seedream_mcp.utils.io.io_save import (
     AutoSaveManager,
     AutoSaveResult,
@@ -74,8 +76,6 @@ async def test_maybe_cleanup_age_covers_default_root_beyond_request_base_dir(
     tmp_path: Path,
 ) -> None:
     """save_path 使保存目录指向子目录时，按天清理仍覆盖默认根下的历史目录。"""
-    from seedream_mcp.utils.io import io_save as auto_save_module
-
     default_root = tmp_path / "images"
     request_dir = default_root / "custom"
     request_dir.mkdir(parents=True)
@@ -98,8 +98,6 @@ async def test_maybe_cleanup_age_covers_default_root_beyond_request_base_dir(
 
 async def test_maybe_cleanup_quota_enforced_across_default_root(tmp_path: Path) -> None:
     """总量配额按默认根整体计算，跨请求子目录驱逐默认根下的最旧文件。"""
-    from seedream_mcp.utils.io import io_save as auto_save_module
-
     default_root = tmp_path / "images"
     request_dir = default_root / "custom"
     request_dir.mkdir(parents=True)
@@ -172,15 +170,13 @@ async def test_save_image_rejects_decompression_bomb_error(
     住，异常击穿保存降级链路成为未知错误且落盘文件不被清理。9000x9000=81M 超过
     2x36M，打开阶段即抛错，具体尺寸不可得，错误文案不含宽高形态。
     """
-    from seedream_mcp.utils.io import io_save as auto_save_module
-
     bomb = _oversized_header_png(9_000, 9_000)
     target = tmp_path / "bomb_error.png"
     target.write_bytes(bomb)
 
     # 复位就绪标志强制走冷路径，本次调用内 MAX_IMAGE_PIXELS 被置为 36M，81M 头
     # 像素在打开阶段触发 DecompressionBombError 而非显式头尺寸校验分支。
-    monkeypatch.setattr(auto_save_module, "_decoders_ready", False)
+    monkeypatch.setattr(formats_module, "_decoders_ready", False)
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
 
@@ -250,8 +246,8 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
 ) -> None:
     """冷路径调用时设置解压炸弹阈值并注册 HEIF 解码器，再次调用不重复初始化。
 
-    io 组不反向依赖 images 组的注册入口，初始化在 io_save 内同口径惰性执行；以
-    注册计数 spy 断言调用与幂等，不构造真实 HEIF 载荷。
+    初始化由 formats 的共享入口持有，io_save 与 image_validation 同口径消费；
+    以注册计数 spy 断言调用与幂等，不构造真实 HEIF 载荷。
     """
     import io
 
@@ -259,7 +255,6 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
     from PIL import Image as PilImage
 
     from seedream_mcp.utils.core.formats import MAX_IMAGE_PIXELS
-    from seedream_mcp.utils.io import io_save as auto_save_module
 
     tiny = tmp_path / "tiny.png"
     buffer = io.BytesIO()
@@ -272,7 +267,7 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
         del kwargs
         register_calls.append(1)
 
-    monkeypatch.setattr(auto_save_module, "_decoders_ready", False)
+    monkeypatch.setattr(formats_module, "_decoders_ready", False)
     monkeypatch.setattr(pillow_heif, "register_heif_opener", counting_register)
     # 预置 PIL 默认阈值，与 36M 区分：冷路径断言才能证明阈值确被写入，不被
     # 先前用例残留的 36M 假绿。
@@ -290,8 +285,6 @@ async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """同一默认根下不同请求子目录共享节流，清理仅触发一次。"""
-    from seedream_mcp.utils.io import io_save as auto_save_module
-
     default_root = tmp_path / "images"
     request_a = default_root / "a"
     request_b = default_root / "b"
@@ -319,11 +312,13 @@ async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
 async def test_batch_save_concurrency_capped_by_max_concurrent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """批量保存并发峰值恰为 max_concurrent：信号量放行同时形成并发并封顶。"""
+    """批量保存经 max_concurrent 信号量限流，自建下载管理器连接上限取同一值。"""
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, max_concurrent=2)
+
+    assert manager.download_manager._connection_limit == 2
+
     active = 0
     peak = 0
-    second_arrived = asyncio.Event()
 
     async def fake_save_image(
         url: str,
@@ -336,14 +331,6 @@ async def test_batch_save_concurrency_capped_by_max_concurrent(
         del prompt, tool_name, custom_name, alt_text
         active += 1
         peak = max(peak, active)
-        if active == 2:
-            second_arrived.set()
-        else:
-            # 等第二张进入形成并发；超时保底防死锁
-            try:
-                await asyncio.wait_for(second_arrived.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
         await asyncio.sleep(0)
         active -= 1
         return AutoSaveResult(
@@ -355,4 +342,5 @@ async def test_batch_save_concurrency_capped_by_max_concurrent(
     results = await manager.save_multiple_images(images, "text_to_image")
 
     assert len(results) == 10
+    # 批量任务经信号量限流，在途保存数不超过 max_concurrent
     assert peak == 2

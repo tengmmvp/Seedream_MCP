@@ -26,9 +26,9 @@ from .utils.core.logs import (
 from .utils.core.validators import INT_TEXT_PATTERN, parse_bool, validate_size_for_model
 from .utils.io.io_path import (
     clear_resolved_env_root_cache,
-    is_unc_path,
     register_data_root_provider,
     register_env_workspace_root_provider,
+    reject_unc_declaration,
 )
 from .utils.model.model_capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
 
@@ -42,10 +42,13 @@ def drain_pending_build_warnings() -> None:
     """输出并清空构建期收集的告警。
 
     server 在日志系统就绪后调用；不经 server 入口的嵌入式调用方需自行调用本函数，
-    否则收集中的告警不输出。
+    否则收集中的告警不输出。交换持 _config_build_lock，避免与并发构建的
+    append 竞态丢失告警。
     """
     global _pending_build_warnings
-    pending, _pending_build_warnings = _pending_build_warnings, []
+    with _config_build_lock:
+        pending = _pending_build_warnings
+        _pending_build_warnings = []
     logger = get_logger()
     for level, message in pending:
         logger.log(level, message)
@@ -103,6 +106,7 @@ class SeedreamConfig:
         timeout: 通用超时秒数。
         api_timeout: API 调用超时秒数。
         max_retries: API 调用最大重试次数。
+        generate_concurrency: 进程级生成并发准入上限，约束同时在途的生成 API 请求数。
         log_level: 日志级别，构造校验时统一为大写。
         log_rotation_size: 日志文件轮转大小 MB，超过即轮转压缩。
         log_retention_days: 轮转日志的保留天数，超期自动清理。
@@ -136,8 +140,9 @@ class SeedreamConfig:
         web_enabled: 是否在 streamable-http 传输上开启 Web 操作台，默认关闭；开启后
             同一进程提供 /web 网页与 /web/api 接口，stdio 传输不受影响。
         http_allowed_hosts: 非回环绑定的 Host 头允许列表，条目支持 host、host:port
-            与尾部 :* 端口通配；None 表示整体关闭 SDK 内层 Host 校验。仅经
-            SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，CLI 不暴露参数。
+            与尾部 :* 端口通配；None 时具体地址绑定按绑定地址派生白名单启用校验，
+            通配绑定保持关闭。仅经 SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，
+            CLI 不暴露参数。
         request_state_secret_keys: requestState 密钥环，多副本 HTTP 部署共享的
             十六进制密钥列表，首键密封、全键解封支持零停机轮换；None 表示不启用，
             保持 SDK 默认的进程临时密钥。仅经 SEEDREAM_REQUEST_STATE_KEYS
@@ -148,12 +153,13 @@ class SeedreamConfig:
 
     base_url: str = _env_field("https://ark.cn-beijing.volces.com/api/v3", "ARK_BASE_URL")
     allow_http_base_url: bool = _env_field(False, "SEEDREAM_ALLOW_HTTP_BASE_URL")
-    model_id: str = _env_field("doubao-seedream-5-0-260128", "SEEDREAM_MODEL_ID")
+    model_id: str = _env_field(MODEL_ALIASES["doubao-seedream-5.0"], "SEEDREAM_MODEL_ID")
     default_size: str = _env_field("2K", "SEEDREAM_DEFAULT_SIZE")
     default_watermark: bool = _env_field(False, "SEEDREAM_DEFAULT_WATERMARK")
     timeout: int = _env_field(60, "SEEDREAM_TIMEOUT")
     api_timeout: int = _env_field(600, "SEEDREAM_API_TIMEOUT")
     max_retries: int = _env_field(3, "SEEDREAM_MAX_RETRIES")
+    generate_concurrency: int = _env_field(3, "SEEDREAM_GENERATE_CONCURRENCY")
 
     log_level: str = _env_field("INFO", "SEEDREAM_LOG_LEVEL")
     log_rotation_size: int = _env_field(DEFAULT_LOG_ROTATION_SIZE_MB, "SEEDREAM_LOG_ROTATION_SIZE")
@@ -296,11 +302,22 @@ class SeedreamConfig:
             ) from exc
 
     def _validate_client_timeouts(self) -> None:
-        """校验通用超时、API 超时与 API 重试次数下界。"""
-        if self.timeout <= 0:
-            raise SeedreamConfigError(f"timeout必须大于0{_env_var_suffix('timeout')}")
-        if self.api_timeout <= 0:
-            raise SeedreamConfigError(f"api_timeout必须大于0{_env_var_suffix('api_timeout')}")
+        """校验通用超时、API 超时与 API 重试次数下界及 float 可转换性。"""
+        for field_name in ("timeout", "api_timeout"):
+            value = getattr(self, field_name)
+            if value <= 0:
+                raise SeedreamConfigError(f"{field_name}必须大于0{_env_var_suffix(field_name)}")
+            try:
+                float(value)
+            except OverflowError as exc:
+                # 原值回显会触发 int 字符串转换位数上限，仅报字段名。
+                raise SeedreamConfigError(
+                    f"{field_name}超出 float 可表示范围{_env_var_suffix(field_name)}"
+                ) from exc
+        if self.generate_concurrency < 1:
+            raise SeedreamConfigError(
+                f"generate_concurrency必须不小于1{_env_var_suffix('generate_concurrency')}"
+            )
         if self.max_retries < 0:
             raise SeedreamConfigError(f"max_retries不能为负数{_env_var_suffix('max_retries')}")
 
@@ -420,16 +437,20 @@ class SeedreamConfig:
             )
 
     def _validate_dir_fields(self) -> None:
-        """校验各目录型字段指向有效目录，数据根目录声明拒绝 UNC 形态。"""
+        """校验各目录型字段指向有效目录，目录声明拒绝 UNC 形态。"""
         if self.data_root:
             # UNC 数据根目录的 resolve 会触发 SMB 认证，构建期响亮失败而非运行期逐次降级。
-            if is_unc_path(self.data_root):
-                raise SeedreamConfigError(
-                    f"data_root不支持UNC路径: {self.data_root}" f"{_env_var_suffix('data_root')}"
-                )
+            reject_unc_declaration(
+                self.data_root, label="数据根目录", env_hint=_env_var_suffix("data_root")
+            )
             self._validate_dir_field(self.data_root, "data_root")
 
         if self.workspace_root:
+            reject_unc_declaration(
+                self.workspace_root,
+                label="工作区根目录",
+                env_hint=_env_var_suffix("workspace_root"),
+            )
             self._validate_dir_field(self.workspace_root, "workspace_root")
 
     def _validate_http_fields(self) -> None:
@@ -786,15 +807,19 @@ def _pick_optional_str_tuple(
 ) -> tuple[str, ...] | None:
     """按优先级取值后按逗号拆分为去空白条目元组，空值归 None 表示未配置。
 
-    逐项 strip 并丢弃空条目，全部条目为空时同样归 None。
+    逐项 strip 并丢弃空条目，全部条目为空时同样归 None。序列形态的 override
+    按元素取值，不经 str() 把整个容器拼成畸形条目。
     """
     raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None:
         return None
-    normalized = str(raw).strip()
-    if not normalized:
-        return None
-    entries = [entry.strip() for entry in normalized.split(",")]
+    if isinstance(raw, (list, tuple)):
+        entries = [str(entry).strip() for entry in raw]
+    else:
+        normalized = str(raw).strip()
+        if not normalized:
+            return None
+        entries = [entry.strip() for entry in normalized.split(",")]
     valid_entries = [entry for entry in entries if entry]
     return tuple(valid_entries) or None
 
@@ -896,6 +921,7 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "timeout": (_pick_int, None),
     "api_timeout": (_pick_int, None),
     "max_retries": (_pick_int, None),
+    "generate_concurrency": (_pick_int, None),
     "log_level": (_pick_str, None),
     "log_rotation_size": (_pick_int, None),
     "log_retention_days": (_pick_int, None),
