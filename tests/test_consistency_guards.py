@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import seedream_mcp
+from _generation_fixtures import make_generation_context
 from seedream_mcp.tools.core.schemas import (
     BackgroundMode,
     GenerationToolType,
@@ -95,6 +96,32 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
     declared.add("browse_images")
 
     assert declared == registered
+
+
+def test_start_log_placeholders_match_builder_arity() -> None:
+    """各 ToolMetadata 的开始日志模板 {} 占位个数与 builder 参数个数一致。
+
+    双源字面量分布两处，loguru 惰性格式化使错位只在落日志时打错误不抛异常，
+    故按个数锁定并实际执行一次格式化兜底。
+    """
+    from seedream_mcp.tools.impl._common import (
+        IMAGE_TO_IMAGE,
+        MULTI_IMAGE_FUSION,
+        SEQUENTIAL_GENERATION,
+        TEXT_TO_IMAGE,
+    )
+
+    # sequential 的 max_images 取非 None 值，覆盖 builder 读取的全部上下文字段
+    context = make_generation_context(prompt="生成提示词", max_images=4)
+
+    for metadata in (TEXT_TO_IMAGE, IMAGE_TO_IMAGE, MULTI_IMAGE_FUSION, SEQUENTIAL_GENERATION):
+        values = metadata.start_log_values_builder(context)
+        placeholders = metadata.start_log_message.count("{}")
+        assert len(values) == placeholders, (
+            f"{metadata.tool_name} 开始日志模板 {placeholders} 个占位 != "
+            f"builder {len(values)} 个参数"
+        )
+        metadata.start_log_message.format(*values)
 
 
 def test_loguru_calls_never_pass_exc_info_keyword() -> None:

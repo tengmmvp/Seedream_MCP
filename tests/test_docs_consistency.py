@@ -24,6 +24,7 @@ from _readme_helpers import (
     _fenced_blocks,
     _lang_blocks,
     _read_readme,
+    readme_html_tables,
 )
 
 OTHER_READMES = ("README.en.md", "README.zh-TW.md")
@@ -127,20 +128,22 @@ def _heading_depths(name: str) -> list[tuple[int, int]]:
 
 
 def _link_urls(name: str) -> set[str]:
-    """正文链接 URL 集合，markdown 链接与 HTML href/src 都计入。"""
+    """正文链接 URL 集合，markdown 链接与 HTML href/src 都计入。
+
+    页内锚点为语言内导航，各语不同，不计入集合。
+    """
     urls: set[str] = set()
     for _, raw in _prose_lines(name):
-        urls.update(_MARKDOWN_LINK_PATTERN.findall(raw))
-        urls.update(_HTML_LINK_PATTERN.findall(raw))
+        urls.update(url for url in _MARKDOWN_LINK_PATTERN.findall(raw) if not url.startswith("#"))
+        urls.update(url for url in _HTML_LINK_PATTERN.findall(raw) if not url.startswith("#"))
     return urls
 
 
 def _table_columns(name: str) -> list[tuple[int, int]]:
-    """正文表格行的行号与列数序列，列数按行内竖线数减一计算。"""
+    """正文表格行的行号与列数序列，列数按伪行竖线数减一计算。"""
     columns: list[tuple[int, int]] = []
-    for lineno, raw in _prose_lines(name):
-        if raw.lstrip().startswith("|"):
-            columns.append((lineno, raw.count("|") - 1))
+    for rows in readme_html_tables(name):
+        columns.extend((lineno, raw.count("|") - 1) for lineno, raw in rows)
     return columns
 
 
@@ -158,26 +161,11 @@ def _row_cells(raw: str) -> list[str]:
     return [cell.strip() for cell in inner.split("|")]
 
 
-def _tables(name: str) -> list[list[tuple[int, str]]]:
-    """把正文表格行按连续行分组为表，每表为带 1 基行号的行序列。"""
-    tables: list[list[tuple[int, str]]] = []
-    current: list[tuple[int, str]] = []
-    for entry in _prose_lines(name):
-        if entry[1].lstrip().startswith("|"):
-            current.append(entry)
-        elif current:
-            tables.append(current)
-            current = []
-    if current:
-        tables.append(current)
-    return tables
-
-
 def _capability_table(name: str) -> list[tuple[int, str]]:
     """定位能力差异表，锚点为含 "1K / 1.5K / 2K" 单元格的唯一表格。"""
     candidates = [
         rows
-        for rows in _tables(name)
+        for rows in readme_html_tables(name)
         if any(_CAPABILITY_TABLE_CELL_ANCHOR in _row_cells(raw) for _, raw in rows)
     ]
     assert len(candidates) == 1, (

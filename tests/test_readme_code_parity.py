@@ -3,18 +3,25 @@
 三语 README 之间的互等由 test_docs_consistency 锁定，本文件补上「文档对代码」
 这一侧：工具参数 bullet 清单与 tools.core.schemas 输入模型的字段集全等，模型
 能力差异表的档位/倍数/布尔/参考图上限与 MODEL_CAPABILITIES 派生值一致，风格
-预设表与 server.py 的 @mcp.prompt 注册名单一致。以 README.md（简中版）为基准，
-代码新增参数或改能力而文档未同步时在此变红，不再依赖三语互对的假绿。
+预设表与 server.py 的 @mcp.prompt 注册名单一致，启动参数旗标与 cli.py 解析器、
+可用资源 URI 与服务器注册集合、日期目录示例路径与 io_storage 布局亦逐项对账。
+以 README.md（简中版）为基准，代码新增参数或改能力而文档未同步时在此变红，
+不再依赖三语互对的假绿。
 """
 
 from __future__ import annotations
 
+import argparse
 import re
+from datetime import datetime
 from pathlib import Path
 
-import seedream_mcp
-from _readme_helpers import BASE_README, _fenced_blocks, _read_readme
 from pydantic import BaseModel
+
+import seedream_mcp
+from _readme_helpers import BASE_README, _fenced_blocks, _read_readme, readme_html_tables
+from seedream_mcp.cli import _build_arg_parser
+from seedream_mcp.server import mcp
 from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
@@ -22,6 +29,7 @@ from seedream_mcp.tools.core.schemas import (
     SequentialGenerationInput,
     TextToImageInput,
 )
+from seedream_mcp.utils.io.io_storage import FileManager
 from seedream_mcp.utils.model.model_capabilities import MODEL_CAPABILITIES
 
 # 工具名到输入模型的映射，镜像 server.py 平铺签名组装各工具时使用的输入模型。
@@ -42,6 +50,15 @@ _PARAM_BULLET_PATTERN = re.compile(r"^- `([A-Za-z_][A-Za-z0-9_]*)`")
 # server.py 注册装饰器形态，工具与风格预设的注册名单都取源码装饰器为单一依据。
 _TOOL_DECORATOR_PATTERN = re.compile(r'@mcp\.tool\(\s*name="([a-z_]+)"')
 _PROMPT_DECORATOR_PATTERN = re.compile(r'@mcp\.prompt\(\s*name="([^"]+)"')
+
+# CLI 旗标 token：双连字符后接字母开头的字母数字连字符串。
+_CLI_FLAG_PATTERN = re.compile(r"--[a-zA-Z][a-zA-Z0-9-]*")
+
+# 资源模板 URI 尾部的 RFC 6570 可选查询参数（如 {?verbose}），README 以省略形态记录基准 URI。
+_QUERY_TEMPLATE_SUFFIX_PATTERN = re.compile(r"\{\?[a-zA-Z][a-zA-Z0-9_]*\}$")
+
+# 日期目录示例路径形态：单层日期目录 + 工具子目录 + 文件名。
+_DATE_FOLDER_PATH_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}/[a-z_]+/[\w.-]+")
 
 # 能力差异表定位锚点：分辨率档位行的 "1K / 1.5K / 2K" 单元格全文唯一。
 _CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
@@ -130,18 +147,8 @@ def _row_cells(raw: str) -> list[str]:
 
 
 def _tables(name: str) -> list[list[str]]:
-    """把正文表格行按连续行分组为表，每表为行文本序列。"""
-    tables: list[list[str]] = []
-    current: list[str] = []
-    for raw in _prose_lines(name):
-        if raw.lstrip().startswith("|"):
-            current.append(raw)
-        elif current:
-            tables.append(current)
-            current = []
-    if current:
-        tables.append(current)
-    return tables
+    """提取正文 HTML 表格，每表为伪行文本序列，行号版共享实现见 _readme_helpers。"""
+    return [[raw for _, raw in rows] for rows in readme_html_tables(name)]
 
 
 def _capability_table(name: str) -> list[str]:
@@ -168,19 +175,56 @@ def _capability_row(name: str, label_keyword: str) -> list[str]:
 
 
 def _style_prompt_names(name: str) -> set[str]:
-    """提取风格预设章节表格首列的反引号 Prompt 名称集合。"""
-    in_section = False
+    """提取风格预设章节表格首列 code 标签内的 Prompt 名称集合。"""
     names: set[str] = set()
-    for raw in _read_readme(name).splitlines():
-        if raw.startswith("#"):
-            in_section = "风格预设" in raw
-            continue
-        if not in_section:
-            continue
-        match = re.match(r"^\|\s*`([a-z_]+)`", raw)
+    for raw in _section_lines(name, "风格预设"):
+        match = re.search(r"<td>\s*<code>([a-z_]+)</code>\s*</td>", raw)
         if match is not None:
             names.add(match.group(1))
     return names
+
+
+def _section_lines(name: str, title_keyword: str) -> list[str]:
+    """返回二级标题章节内的行，含其下小节，直到下一个二级标题。"""
+    in_section = False
+    lines: list[str] = []
+    for raw in _read_readme(name).splitlines():
+        if raw.startswith("## "):
+            in_section = title_keyword in raw
+            continue
+        if in_section:
+            lines.append(raw)
+    return lines
+
+
+def _parser_long_flags() -> set[str]:
+    """收集 _build_arg_parser 注册的全部长式旗标，argparse 自动注入的 --help 不入对账。"""
+    return {
+        option
+        for action in _build_arg_parser()._actions
+        if not isinstance(action, argparse._HelpAction)
+        for option in action.option_strings
+        if option.startswith("--")
+    }
+
+
+def _readme_resource_uris(name: str) -> set[str]:
+    """提取可用资源章节表格首列 code 标签内的 URI 集合。"""
+    uris: set[str] = set()
+    for raw in _section_lines(name, "可用资源"):
+        match = re.search(r"<td>\s*<code>([^<]+)</code>\s*</td>", raw)
+        if match is not None:
+            uris.add(match.group(1))
+    return uris
+
+
+async def _registered_resource_uris() -> set[str]:
+    """取服务器注册的资源与模板 URI 集合，可选查询参数后缀按省略形态归一。"""
+    resources = await mcp.list_resources()
+    templates = await mcp.list_resource_templates()
+    uris = {str(resource.uri) for resource in resources}
+    uris |= {str(template.uri_template) for template in templates}
+    return {_QUERY_TEMPLATE_SUFFIX_PATTERN.sub("", uri) for uri in uris}
 
 
 def test_tool_param_bullets_exactly_match_input_model_fields() -> None:
@@ -277,3 +321,43 @@ def test_style_preset_table_matches_registered_prompts() -> None:
         f"  仅文档有: {sorted(documented - registered)}\n"
         f"  仅注册有: {sorted(registered - documented)}"
     )
+
+
+def test_cli_flags_match_readme_startup_section() -> None:
+    """cli.py 注册的全部长式旗标（--web/--no-web 等别名均计入）与 README 启动参数节全等。"""
+    documented = set(_CLI_FLAG_PATTERN.findall("\n".join(_section_lines(BASE_README, "启动参数"))))
+    registered = _parser_long_flags()
+    assert documented == registered, (
+        f"README 启动参数旗标与 cli.py 注册旗标漂移:\n"
+        f"  仅文档有: {sorted(documented - registered)}\n"
+        f"  仅注册有: {sorted(registered - documented)}"
+    )
+
+
+async def test_resource_uris_match_readme_resources_section() -> None:
+    """服务器注册的资源/模板 URI 集合与 README 可用资源表全等。"""
+    documented = _readme_resource_uris(BASE_README)
+    registered = await _registered_resource_uris()
+    assert documented == registered, (
+        f"README 可用资源表与注册资源 URI 漂移:\n"
+        f"  仅文档有: {sorted(documented - registered)}\n"
+        f"  仅注册有: {sorted(registered - documented)}"
+    )
+
+
+def test_readme_example_paths_match_date_folder_layout(tmp_path: Path) -> None:
+    """README 示例相对路径与 io_storage 的 %Y-%m-%d 单层日期目录布局一致。"""
+    manager = FileManager(base_dir=tmp_path)
+    organized = manager.get_organized_path("portrait.jpeg", subfolder="image_to_image")
+
+    parts = organized.relative_to(manager.base_dir).parts
+    assert len(parts) == 3, f"日期目录布局应为单层日期 + 工具子目录 + 文件名: {parts}"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[0])
+    datetime.strptime(parts[0], "%Y-%m-%d")
+
+    documented = set(re.findall(r"\d{4}-\d{2}-\d{2}/[A-Za-z0-9_./-]+", _read_readme(BASE_README)))
+    assert documented, "README 未解析到日期目录形态的示例路径，匹配规则可能已失配"
+    for path_text in sorted(documented):
+        assert _DATE_FOLDER_PATH_PATTERN.fullmatch(
+            path_text
+        ), f"示例路径 {path_text} 不符合单层日期目录布局"
