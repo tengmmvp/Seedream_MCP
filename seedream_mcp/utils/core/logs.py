@@ -123,8 +123,8 @@ def setup_logging(
         enable_file: 是否启用文件通道，按 rotation_mb 轮换、保留 retention_days
             并压缩归档。
         force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
-            logger 已有 handler 时标准库日志不被拦截，输出 warning 提示，已有
-            handler 均为本桥接器（重复初始化）时不告警。
+            logger 已有外来 handler 时标准库日志不被拦截、第三方噪音压制不执行，
+            输出 warning 提示，已有 handler 均为本桥接器（重复初始化）时不告警。
         rotation_mb: 单个日志文件的大小上限 MB，超过即轮转。
         retention_days: 轮转日志的保留天数，超期自动清理。
     """
@@ -173,13 +173,15 @@ def setup_logging(
 
     # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru；root
     # logger 已有 handler 且未强制接管时 basicConfig 整体 no-op。已有 handler 均为
-    # 本桥接器（重复初始化）时不告警，混入外来 handler 时输出 warning 提示部署方处置。
+    # 本桥接器（重复初始化）时拦截已在位，与首次安装同享噪音压制。
     existing_handlers = logging.getLogger().handlers
     bridged = all(isinstance(handler, InterceptHandler) for handler in existing_handlers)
-    if not force_standard_logging and existing_handlers and not bridged:
+    interception_installed = force_standard_logging or not existing_handlers or bridged
+    if not interception_installed:
         logger.warning(
             "标准库 root logger 已有非本桥接器的 handler 且 force_standard_logging=False，"
-            "标准库日志未被 loguru 拦截，也不经控制字符防护"
+            "标准库日志未被 loguru 拦截，也不经控制字符防护；"
+            "函数入口的 logger.remove 已清除宿主先前配置的 loguru sink"
         )
     logging.basicConfig(
         handlers=[InterceptHandler()],
@@ -189,14 +191,10 @@ def setup_logging(
 
     # 压制第三方库的 DEBUG/INFO 噪音：httpx 每次 API 调用、httpcore 每个连接均输出
     # INFO 日志，桥接后全量进入会淹没项目业务日志；httpx2/httpcore2 为 mcp SDK v2
-    # 的 HTTP 客户端日志源，一并压制。
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("aiohttp").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("httpx2").setLevel(logging.WARNING)
-    logging.getLogger("httpcore2").setLevel(logging.WARNING)
+    # 的 HTTP 客户端日志源，一并压制。拦截未安装时不执行，宿主自行配置的级别不被改写。
+    if interception_installed:
+        for name in ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore", "httpx2", "httpcore2"):
+            logging.getLogger(name).setLevel(logging.WARNING)
 
     logger.info("日志系统初始化完成，级别: {}", level)
     if enable_file:

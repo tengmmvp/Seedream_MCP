@@ -99,10 +99,12 @@ def test_setup_logging_suppresses_third_party_info_noise(
 
     每请求一条的 httpx INFO 与每连接一条的 httpcore INFO 不再淹没业务日志，
     httpx2/httpcore2 为 mcp SDK v2 的 HTTP 客户端日志源，同样压制。
-    basicConfig 以替身接管避免改写 root handlers；压制前先归零各级别再断言被
-    重设为 WARNING，防止先前用例的残留使断言空转；退出前恢复原级别。
+    basicConfig 以替身接管避免改写 root handlers，root 清空 handler 使拦截
+    处于安装态；压制前先归零各级别再断言被重设为 WARNING，防止先前用例的
+    残留使断言空转；退出前恢复原级别。
     """
     monkeypatch.setattr(logging, "basicConfig", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
     names = ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore", "httpx2", "httpcore2")
     levels_before = {name: logging.getLogger(name).level for name in names}
     try:
@@ -118,6 +120,31 @@ def test_setup_logging_suppresses_third_party_info_noise(
             logging.getLogger(name).setLevel(level)
 
 
+def test_setup_logging_skips_noise_suppression_when_interception_not_installed(
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
+) -> None:
+    """root 已有外来 handler 且未强制接管时不动第三方 logger 级别。
+
+    拦截未安装时压制会改写宿主进程自行配置的 stdlib logger 级别，须随拦截
+    一并跳过；压制前先归零各级别，未跳过时 NOTSET 断言即失败。
+    """
+    monkeypatch.setattr(logging.getLogger(), "handlers", [logging.NullHandler()])
+    monkeypatch.setattr(logging, "basicConfig", lambda *args, **kwargs: None)
+    names = ("urllib3", "aiohttp", "asyncio", "httpx", "httpcore", "httpx2", "httpcore2")
+    levels_before = {name: logging.getLogger(name).level for name in names}
+    try:
+        for name in names:
+            logging.getLogger(name).setLevel(logging.NOTSET)
+
+        setup_logging(log_level="INFO", enable_console=False, enable_file=False)
+
+        for name in names:
+            assert logging.getLogger(name).level == logging.NOTSET
+    finally:
+        for name, level in levels_before.items():
+            logging.getLogger(name).setLevel(level)
+
+
 # ==================== root 已有 handler 且未强制接管时的告警 ====================
 
 
@@ -126,7 +153,8 @@ def test_setup_logging_warns_when_root_handlers_block_bridge(
 ) -> None:
     """root logger 已有 handler 且未强制接管时输出 warning，提示标准库日志未被拦截。
 
-    basicConfig 整体 no-op，标准库日志绕过桥接与控制字符防护；force 仍透传 False。
+    basicConfig 整体 no-op，标准库日志绕过桥接与控制字符防护；告警同时如实
+    说明入口 logger.remove 已清除宿主的 loguru sink；force 仍透传 False。
     """
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [logging.NullHandler()])
@@ -149,6 +177,7 @@ def test_setup_logging_warns_when_root_handlers_block_bridge(
 
     assert len(fake.warnings) == 1
     assert "未被 loguru 拦截" in fake.warnings[0]
+    assert "logger.remove" in fake.warnings[0]
     assert captured_kwargs["force"] is False
 
 
