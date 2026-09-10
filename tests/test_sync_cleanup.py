@@ -1,6 +1,6 @@
-"""resources._sync_cleanup 进程级清理测试。
+"""resources.sync_cleanup 进程级清理测试。
 
-_sync_cleanup 是 cli_main finally 的同步清理入口：提取并清空活动与退役资源后
+sync_cleanup 是 cli_main finally 的同步清理入口：提取并清空活动与退役资源后
 asyncio.run 关闭。覆盖正常清理、RuntimeError 与意外异常被吞、无资源 no-op 与
 退役资源兜底关闭。
 """
@@ -23,7 +23,7 @@ class _Closeable:
 
 
 class _FakeResource:
-    """活动资源桩：仅提供 _sync_cleanup 关闭路径所需的 client 与 download_manager。"""
+    """活动资源桩：仅提供 sync_cleanup 关闭路径所需的 client 与 download_manager。"""
 
     def __init__(self, client: object, download_manager: object) -> None:
         self.client = client
@@ -36,7 +36,7 @@ def test_sync_cleanup_closes_shared_resources(monkeypatch: pytest.MonkeyPatch) -
     download_manager = _Closeable()
     monkeypatch.setattr(resources, "_active_resource", _FakeResource(client, download_manager))
 
-    resources._sync_cleanup()
+    resources.sync_cleanup()
 
     assert client.closed is True
     assert download_manager.closed is True
@@ -60,7 +60,7 @@ def test_sync_cleanup_swallows_runtime_error(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(asyncio, "run", _raising_run)
 
     # 不应抛出。
-    resources._sync_cleanup()
+    resources.sync_cleanup()
 
     # 引用在 asyncio.run 前已清空。
     assert resources._active_resource is None
@@ -80,7 +80,7 @@ def test_sync_cleanup_swallows_unexpected_exception(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(asyncio, "run", _raising_run)
 
     # 不应抛出。
-    resources._sync_cleanup()
+    resources.sync_cleanup()
 
     assert resources._active_resource is None
 
@@ -89,7 +89,7 @@ def test_sync_cleanup_noop_when_no_shared_resources(monkeypatch: pytest.MonkeyPa
     """无活动资源时清理为 no-op，不抛出、asyncio.run 正常执行空关闭。"""
     monkeypatch.setattr(resources, "_active_resource", None)
 
-    resources._sync_cleanup()
+    resources.sync_cleanup()
 
     assert resources._active_resource is None
 
@@ -111,7 +111,7 @@ def test_sync_cleanup_closes_retired_resources(monkeypatch: pytest.MonkeyPatch) 
         ],
     )
 
-    resources._sync_cleanup()
+    resources.sync_cleanup()
 
     assert retired_client_a.closed and retired_manager_a.closed
     assert retired_client_b.closed and retired_manager_b.closed

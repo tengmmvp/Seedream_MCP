@@ -22,7 +22,7 @@ from .utils.model.model_capabilities import MODEL_ALIASES
 from .version import __version__
 
 
-def _build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
+def build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:
     """从命令行参数构建服务器配置对象。
 
     Raises:
@@ -59,7 +59,7 @@ def _port_type(value: str) -> int:
     return port
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
+def build_arg_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器，定义全部命令行选项。"""
     parser = argparse.ArgumentParser(
         description="Seedream MCP 服务器 - AI 图像生成工具",
@@ -200,12 +200,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable-http"]:
+def build_run_options(args: argparse.Namespace) -> Literal["stdio", "streamable-http"]:
     """构建 MCP 运行传输方式，仅支持 stdio 与 streamable-http。"""
     return cast(Literal["stdio", "streamable-http"], args.transport)
 
 
-def _validate_transport_args(args: argparse.Namespace) -> str | None:
+def validate_transport_args(args: argparse.Namespace) -> str | None:
     """校验传输相关 CLI 参数组合，返回错误消息；参数合法时返回 None。
 
     仅 streamable-http 需要校验：TLS 证书与私钥必须成对提供或同时省略；
@@ -227,7 +227,7 @@ def _validate_transport_args(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _validate_http_security(
+def validate_http_security(
     args: argparse.Namespace,
     auth_token: str,
 ) -> str | None:

@@ -19,21 +19,21 @@ from seedream_mcp.config import MODEL_ALIASES, SeedreamConfig
 
 def test_build_arg_parser_rejects_deprecated_sse_transport() -> None:
     """SSE 传输已被弃用并移除，--transport=sse 应解析失败。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["--transport", "sse"])
 
 
 def test_build_arg_parser_no_longer_exposes_mount_path() -> None:
     """--mount-path 参数已随 SSE 传输一并移除。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["--mount-path", "/mcp"])
 
 
 def test_build_arg_parser_supports_seedream_50_model_choice() -> None:
     """--model 接受 seedream 5.0 别名。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     args = parser.parse_args(["--model", "doubao-seedream-5.0"])
 
     assert args.model == "doubao-seedream-5.0"
@@ -41,7 +41,7 @@ def test_build_arg_parser_supports_seedream_50_model_choice() -> None:
 
 def test_build_arg_parser_supports_all_model_aliases() -> None:
     """CLI --model choices 应覆盖全部 MODEL_ALIASES，避免新增模型时遗漏 choices 同步。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     for alias in MODEL_ALIASES:
         args = parser.parse_args(["--model", alias])
         assert args.model == alias
@@ -49,7 +49,7 @@ def test_build_arg_parser_supports_all_model_aliases() -> None:
 
 def test_build_arg_parser_supports_auth_token() -> None:
     """--auth-token 用于 streamable-http 鉴权。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     args = parser.parse_args(["--auth-token", "s3cret"])
 
     assert args.auth_token == "s3cret"
@@ -58,7 +58,7 @@ def test_build_arg_parser_supports_auth_token() -> None:
 @pytest.mark.parametrize("level", ["debug", "Debug", "DEBUG"])
 def test_build_arg_parser_log_level_case_insensitive(level: str) -> None:
     """--log-level 经 type 预处理转大写，小写/混合大小写均接受，与 env/.env 行为一致。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     args = parser.parse_args(["--log-level", level])
 
     assert args.log_level == "DEBUG"
@@ -66,7 +66,7 @@ def test_build_arg_parser_log_level_case_insensitive(level: str) -> None:
 
 def test_build_arg_parser_supports_tls_options() -> None:
     """--ssl-certfile 与 --ssl-keyfile 可解析，默认不豁免非 TLS。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     args = parser.parse_args(["--ssl-certfile", "c.pem", "--ssl-keyfile", "k.pem"])
 
     assert args.ssl_certfile == "c.pem"
@@ -92,14 +92,6 @@ def test_tls12_ssl_context_factory_enforces_minimum_version() -> None:
     assert captured == {"called": True}
     assert result is base
     assert result.minimum_version == ssl.TLSVersion.TLSv1_2
-
-
-@pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
-def test_build_run_options_returns_transport(transport: str) -> None:
-    """stdio 与 streamable-http 均解析为合法 run 选项。"""
-    args = Namespace(transport=transport)
-
-    assert cli._build_run_options(args) == transport
 
 
 def _make_cli_args(transport: str) -> Namespace:
@@ -128,10 +120,10 @@ def _stub_cli(monkeypatch: pytest.MonkeyPatch, args: Namespace, config: Seedream
         def parse_args(self) -> Namespace:
             return args
 
-    monkeypatch.setattr(bootstrap_module, "_build_arg_parser", lambda: _FakeParser())
-    monkeypatch.setattr(bootstrap_module, "_build_config_from_args", lambda _args: config)
+    monkeypatch.setattr(bootstrap_module, "build_arg_parser", lambda: _FakeParser())
+    monkeypatch.setattr(bootstrap_module, "build_config_from_args", lambda _args: config)
     monkeypatch.setattr(bootstrap_module, "setup_logging", lambda *a, **k: None)
-    monkeypatch.setattr(bootstrap_module, "_warn_remote_exposure", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap_module, "warn_remote_exposure", lambda *a, **k: None)
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
@@ -164,7 +156,7 @@ def test_cli_main_dispatches_to_correct_runner(
         }
 
     monkeypatch.setattr(server.mcp, "run", _fake_run)
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", _fake_http_run)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", _fake_http_run)
 
     result = server.cli_main()
 
@@ -180,7 +172,7 @@ def test_cli_main_dispatches_to_correct_runner(
 def test_cli_main_forwards_web_enabled_to_http_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--web 经 _build_config_from_args 进 config.web_enabled 后转发到 http runner。"""
+    """--web 经 build_config_from_args 进 config.web_enabled 后转发到 http runner。"""
     args = _make_cli_args("streamable-http")
     args.web = True
     config = SeedreamConfig(api_key="test_key", web_enabled=True)
@@ -198,7 +190,7 @@ def test_cli_main_forwards_web_enabled_to_http_runner(
     ):
         captured["web_enabled"] = web_enabled
 
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", _fake_http_run)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", _fake_http_run)
 
     assert server.cli_main() == 0
     assert captured["web_enabled"] is True
@@ -213,7 +205,7 @@ def test_cli_main_refuses_non_loopback_http_without_auth_token(
     args.host = "0.0.0.0"
     args.auth_token = None
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
 
     assert server.cli_main() == 1
 
@@ -229,7 +221,7 @@ def test_cli_main_refuses_non_loopback_http_without_tls(
     args.ssl_certfile = None
     args.insecure_allow_non_tls = False
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
 
     assert server.cli_main() == 1
 
@@ -263,7 +255,7 @@ def test_cli_main_allows_non_loopback_http_with_tls(
             "ssl_certfile": ssl_certfile,
         }
 
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", _fake_http_run)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", _fake_http_run)
 
     assert server.cli_main() == 0
     assert captured["http"]["ssl_certfile"] == "/fake/cert.pem"
@@ -279,7 +271,7 @@ def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(
     args.auth_token = "cli-secret-0123456789"
     args.insecure_allow_non_tls = True
     _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
 
     assert server.cli_main() == 0
 
@@ -296,7 +288,7 @@ def test_validate_transport_args_rejects_unpaired_tls_cert_and_key(
     args.ssl_certfile = certfile
     args.ssl_keyfile = keyfile
 
-    message = cli._validate_transport_args(args)
+    message = cli.validate_transport_args(args)
 
     assert message is not None
     assert "--ssl-certfile 与 --ssl-keyfile 必须同时提供或同时省略" in message
@@ -307,10 +299,10 @@ def test_validate_transport_args_accepts_paired_tls_options() -> None:
     paired = _make_cli_args("streamable-http")
     paired.ssl_certfile = "c.pem"
     paired.ssl_keyfile = "k.pem"
-    assert cli._validate_transport_args(paired) is None
+    assert cli.validate_transport_args(paired) is None
 
     both_absent = _make_cli_args("streamable-http")
-    assert cli._validate_transport_args(both_absent) is None
+    assert cli.validate_transport_args(both_absent) is None
 
 
 def test_validate_transport_args_skips_stdio_transport() -> None:
@@ -318,7 +310,7 @@ def test_validate_transport_args_skips_stdio_transport() -> None:
     args = _make_cli_args("stdio")
     args.ssl_certfile = "c.pem"
     args.ssl_keyfile = None
-    assert cli._validate_transport_args(args) is None
+    assert cli.validate_transport_args(args) is None
 
 
 def test_validate_transport_args_rejects_short_cli_auth_token() -> None:
@@ -326,7 +318,7 @@ def test_validate_transport_args_rejects_short_cli_auth_token() -> None:
     args = _make_cli_args("streamable-http")
     args.auth_token = "short-token"
 
-    message = cli._validate_transport_args(args)
+    message = cli.validate_transport_args(args)
 
     assert message is not None
     assert "--auth-token 长度不得少于 16 字符" in message
@@ -336,11 +328,11 @@ def test_validate_transport_args_accepts_long_or_blank_cli_auth_token() -> None:
     """达到最短长度的令牌放行；纯空白视为未提供穿透配置侧校验。"""
     long_enough = _make_cli_args("streamable-http")
     long_enough.auth_token = "cli-token-0123456789"
-    assert cli._validate_transport_args(long_enough) is None
+    assert cli.validate_transport_args(long_enough) is None
 
     blank = _make_cli_args("streamable-http")
     blank.auth_token = "   "
-    assert cli._validate_transport_args(blank) is None
+    assert cli.validate_transport_args(blank) is None
 
 
 def test_cli_main_config_error_returns_exit_code_one(
@@ -358,8 +350,8 @@ def test_cli_main_config_error_returns_exit_code_one(
     def _raise_config_error(_args: Namespace) -> SeedreamConfig:
         raise SeedreamConfigError("bad config")
 
-    monkeypatch.setattr(bootstrap_module, "_build_arg_parser", lambda: _FakeParser())
-    monkeypatch.setattr(bootstrap_module, "_build_config_from_args", _raise_config_error)
+    monkeypatch.setattr(bootstrap_module, "build_arg_parser", lambda: _FakeParser())
+    monkeypatch.setattr(bootstrap_module, "build_config_from_args", _raise_config_error)
     monkeypatch.setattr(bootstrap_module, "setup_logging", lambda *a, **k: None)
 
     assert server.cli_main() == 1
@@ -608,7 +600,7 @@ def test_cli_main_non_loopback_auth_token_from_active_config(
     ):
         captured["auth_token"] = auth_token
 
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", _fake_http_run)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", _fake_http_run)
 
     assert server.cli_main() == 0
     assert captured["auth_token"] == "env-token-0123456789"
@@ -638,7 +630,7 @@ def test_cli_main_cli_auth_token_overrides_config_token(
     ):
         captured["auth_token"] = auth_token
 
-    monkeypatch.setattr(bootstrap_module, "_run_streamable_http", _fake_http_run)
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", _fake_http_run)
 
     assert server.cli_main() == 0
     assert captured["auth_token"] == "cli-token-0123456789"

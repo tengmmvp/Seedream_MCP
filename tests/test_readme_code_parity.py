@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 import seedream_mcp
 from _readme_helpers import BASE_README, _fenced_blocks, _read_readme, readme_html_tables
-from seedream_mcp.cli import _build_arg_parser
+from seedream_mcp.cli import build_arg_parser
 from seedream_mcp.server import mcp
 from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
@@ -63,8 +63,9 @@ _DATE_FOLDER_PATH_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}/[a-z_]+/[\w.-]+")
 # 能力差异表定位锚点：分辨率档位行的 "1K / 1.5K / 2K" 单元格全文唯一。
 _CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
 
-# 能力差异表数据列对应的模型家族，顺序镜像表头列序。
-_CAPABILITY_COLUMN_FAMILIES = ("5.0-pro", "5.0-lite", "4.5", "4.0")
+# 能力差异表数据列对应的模型家族，按能力表键序派生并排除 unknown 回退家族，
+# 新增家族未加列或列数漂移由行级列数断言报警。
+_CAPABILITY_COLUMN_FAMILIES = tuple(family for family in MODEL_CAPABILITIES if family != "unknown")
 
 # 尺寸档位 token：形如 1K / 1.5K 的数字（可带小数）加大写 K。
 _PRESET_TOKEN_PATTERN = re.compile(r"\d+(?:\.\d+)?K")
@@ -77,6 +78,7 @@ _CAPABILITY_BOOL_ROWS = {
     "输出格式": "supports_output_format",
     "图层拆分": "supports_layer_decomposition",
     "透明背景": "supports_background",
+    "提示词优化 fast": "supports_fast_optimize_prompt",
 }
 
 # 数值能力行的标签关键字，行内取值与能力表派生值对账。
@@ -166,10 +168,14 @@ def _capability_table(name: str) -> list[str]:
 
 
 def _capability_row(name: str, label_keyword: str) -> list[str]:
-    """按行首标签关键字定位能力差异表行，返回其单元格序列。"""
+    """按行首标签关键字定位能力差异表行，返回其单元格序列并断言列数与家族数一致。"""
     for raw in _capability_table(name):
         cells = _row_cells(raw)
         if cells and label_keyword in cells[0]:
+            assert len(cells) - 1 == len(_CAPABILITY_COLUMN_FAMILIES), (
+                f"{name} 能力差异表 {label_keyword} 行数据列 {len(cells) - 1} 个 != "
+                f"家族 {len(_CAPABILITY_COLUMN_FAMILIES)} 个，能力表新增家族须同步加列"
+            )
             return cells
     raise AssertionError(f"能力差异表未找到行首含 {label_keyword!r} 的行")
 
@@ -198,10 +204,10 @@ def _section_lines(name: str, title_keyword: str) -> list[str]:
 
 
 def _parser_long_flags() -> set[str]:
-    """收集 _build_arg_parser 注册的全部长式旗标，argparse 自动注入的 --help 不入对账。"""
+    """收集 build_arg_parser 注册的全部长式旗标，argparse 自动注入的 --help 不入对账。"""
     return {
         option
-        for action in _build_arg_parser()._actions
+        for action in build_arg_parser()._actions
         if not isinstance(action, argparse._HelpAction)
         for option in action.option_strings
         if option.startswith("--")

@@ -219,7 +219,7 @@ async def _cleanup_shared_resources(*, idle_only: bool = False) -> None:
         await _close_resource(active)
 
 
-def _sync_cleanup() -> None:
+def sync_cleanup() -> None:
     """同步入口的进程级兜底清理，覆盖异常退出未触发常规清理的情形。
 
     先提取并清空全局引用，避免后续清理抛错使引用滞留。关闭在新事件循环上尽力而为：
@@ -264,13 +264,17 @@ def _reset_lifespan_state() -> None:
     config_module._global_config = None
     config_module._BUILD_WARNINGS.clear()
     _shared_init_lock = asyncio.Lock()
+    from .utils.images.image_thumbnail import reset_thumb_sweep_gate
     from .utils.io.io_path import clear_resolved_env_root_cache
     from .utils.io.io_save import reset_cleanup_state
     from .utils.io.io_scan import reset_directory_scan_cache
+    from .utils.io.io_storage import reset_file_manager_cache
 
     clear_resolved_env_root_cache()
     reset_cleanup_state()
     reset_directory_scan_cache()
+    reset_file_manager_cache()
+    reset_thumb_sweep_gate()
 
 
 # ==================== 服务器构造 ====================
@@ -332,6 +336,21 @@ def _warn_rebind_failure_on_stderr(configured: bool) -> None:
     )
 
 
+def locate_request_state_boundary() -> RequestStateBoundary | None:
+    """返回单例 middleware 链中的 requestState boundary，探测失败返回 None。
+
+    rebind 与测试侧的 boundary 定位共用本单点，SDK 私有路径变更时只改此处。
+    """
+    return next(
+        (
+            middleware
+            for middleware in getattr(mcp, "middleware", None) or ()
+            if isinstance(middleware, RequestStateBoundary)
+        ),
+        None,
+    )
+
+
 def rebind_request_state_security(
     source: tuple[bytes, ...] | RequestStateSecurity | None,
 ) -> bool:
@@ -350,20 +369,14 @@ def rebind_request_state_security(
     Args:
         source: 密钥环字节、现成 RequestStateSecurity 策略或 None（未配置）。
     """
-    try:
-        middleware_chain = mcp.middleware
-    except AttributeError:
+    if not hasattr(mcp, "middleware"):
         logger.error(
             "SDK 公开属性 mcp.middleware 不可用，requestState 密钥环重绑被跳过，"
             "单例保持导入期形态；多副本部署的密钥共享可能失效"
         )
         _warn_rebind_failure_on_stderr(bool(source))
         return False
-    boundary = None
-    for middleware in middleware_chain:
-        if isinstance(middleware, RequestStateBoundary):
-            boundary = middleware
-            break
+    boundary = locate_request_state_boundary()
     if boundary is None or not hasattr(boundary, "_security"):
         logger.error(
             "SDK 私有路径中未找到 RequestStateBoundary，requestState 密钥环"

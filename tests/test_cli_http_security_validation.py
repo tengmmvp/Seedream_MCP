@@ -36,7 +36,7 @@ def _make_http_args(
 
 def test_validate_http_security_requires_token_for_non_loopback() -> None:
     """非回环绑定缺少鉴权令牌时返回原文错误消息，锁定文案不漂移。"""
-    message = cli._validate_http_security(_make_http_args(), "")
+    message = cli.validate_http_security(_make_http_args(), "")
 
     assert message == (
         "安全错误：streamable-http 绑定到非回环地址 0.0.0.0 必须配置鉴权令牌，"
@@ -47,7 +47,7 @@ def test_validate_http_security_requires_token_for_non_loopback() -> None:
 def test_validate_http_security_requires_tls_for_non_loopback() -> None:
     """非回环绑定携带令牌但无 TLS 且未显式豁免时返回原文错误消息。"""
     args = _make_http_args()
-    message = cli._validate_http_security(args, "s3cret")
+    message = cli.validate_http_security(args, "s3cret")
 
     assert message == (
         "安全错误：streamable-http 绑定到非回环地址 0.0.0.0 必须配置 TLS，"
@@ -60,14 +60,14 @@ def test_validate_http_security_accepts_non_loopback_with_tls() -> None:
     """非回环绑定携带令牌与 TLS 证书时校验通过。"""
     args = _make_http_args(ssl_certfile="/fake/cert.pem", ssl_keyfile="/fake/key.pem")
 
-    assert cli._validate_http_security(args, "s3cret") is None
+    assert cli.validate_http_security(args, "s3cret") is None
 
 
 def test_validate_http_security_accepts_explicit_non_tls_opt_in() -> None:
     """非回环绑定携带令牌并显式豁免 TLS 时校验通过，适用于反代终结 TLS 场景。"""
     args = _make_http_args(insecure_allow_non_tls=True)
 
-    assert cli._validate_http_security(args, "s3cret") is None
+    assert cli.validate_http_security(args, "s3cret") is None
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
@@ -75,11 +75,11 @@ def test_validate_http_security_exempts_loopback_hosts(host: str) -> None:
     """回环绑定豁免鉴权与 TLS 强制，无令牌无 TLS 也校验通过。"""
     args = _make_http_args(host=host)
 
-    assert cli._validate_http_security(args, "") is None
+    assert cli.validate_http_security(args, "") is None
 
 
 def test_validate_http_security_skips_stdio_transport() -> None:
     """stdio 传输不涉及 HTTP 绑定安全，非回环 host 与空令牌也不构成错误。"""
     args = _make_http_args(transport="stdio")
 
-    assert cli._validate_http_security(args, "") is None
+    assert cli.validate_http_security(args, "") is None

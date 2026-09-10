@@ -5,24 +5,24 @@ from __future__ import annotations
 import sys
 
 from .cli import (
-    _build_arg_parser,
-    _build_config_from_args,
-    _build_run_options,
-    _validate_http_security,
-    _validate_transport_args,
+    build_arg_parser,
+    build_config_from_args,
+    build_run_options,
+    validate_http_security,
+    validate_transport_args,
 )
 from .config import drain_pending_build_warnings, set_active_config
 from .resources import (
     SERVER_NAME,
     SERVER_VERSION,
-    _sync_cleanup,
+    sync_cleanup,
     mcp,
     rebind_request_state_security,
 )
 from .transport import (
-    _resolve_http_auth_token,
-    _run_streamable_http,
-    _warn_remote_exposure,
+    resolve_http_auth_token,
+    run_streamable_http,
+    warn_remote_exposure,
 )
 from .utils.core.errors import SeedreamConfigError, format_error_for_user
 from .utils.core.logs import get_logger, setup_logging
@@ -37,11 +37,11 @@ def cli_main() -> int:
     Returns:
         进程退出码，0 为正常退出，1 为配置错误或运行异常。
     """
-    parser = _build_arg_parser()
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     try:
-        config = _build_config_from_args(args)
+        config = build_config_from_args(args)
     except SeedreamConfigError as exc:
         print(f"配置错误: {exc.message}", file=sys.stderr)
         return 1
@@ -80,20 +80,20 @@ def cli_main() -> int:
     )
 
     try:
-        transport = _build_run_options(args)
+        transport = build_run_options(args)
         auth_token = ""
-        error = _validate_transport_args(args)
+        error = validate_transport_args(args)
         if error is None and transport == "streamable-http":
-            auth_token = _resolve_http_auth_token(args)
-            error = _validate_http_security(args, auth_token)
+            auth_token = resolve_http_auth_token(args)
+            error = validate_http_security(args, auth_token)
         if error is not None:
             logger.error(error)
             # 退出路径的 stderr 兜底：SEEDREAM_LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见
             print(error, file=sys.stderr)
             return 1
         if transport == "streamable-http":
-            _warn_remote_exposure(args.host, auth_enabled=bool(auth_token))
-            _run_streamable_http(
+            warn_remote_exposure(args.host, auth_enabled=bool(auth_token))
+            run_streamable_http(
                 args.host,
                 args.port,
                 auth_token,
@@ -112,6 +112,6 @@ def cli_main() -> int:
         print(f"服务器运行失败: {format_error_for_user(exc)}", file=sys.stderr)
         return 1
     finally:
-        _sync_cleanup()
+        sync_cleanup()
 
     return 0

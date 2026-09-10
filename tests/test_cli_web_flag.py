@@ -21,14 +21,14 @@ def _write_env_file(path: Path, content: str) -> None:
 
 def test_web_flag_group_rejects_both_forms_together() -> None:
     """--web 与 --no-web 同给时互斥组报错退出。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["--web", "--no-web"])
 
 
 def test_web_flag_defaults_to_none() -> None:
     """未传旗标时 args.web 为 None，表示不覆盖 env 配置。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
 
     args = parser.parse_args([])
 
@@ -41,7 +41,7 @@ def test_web_flag_defaults_to_none() -> None:
 )
 def test_web_flag_parses_both_forms(argv: list[str], expected: bool) -> None:
     """--web 解析为 True、--no-web 解析为 False。"""
-    parser = cli._build_arg_parser()
+    parser = cli.build_arg_parser()
 
     args = parser.parse_args(argv)
 
@@ -71,7 +71,7 @@ def test_web_enabled_via_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 def _make_cli_args(web: bool | None, config_file: str | None) -> Namespace:
-    """构造 _build_config_from_args 读取的全部 CLI 字段，未测字段取 None。"""
+    """构造 build_config_from_args 读取的全部 CLI 字段，未测字段取 None。"""
     return Namespace(
         api_key=None,
         base_url=None,
@@ -92,7 +92,7 @@ def test_cli_no_web_overrides_env_file_true(
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_WEB_ENABLED=true\n")
 
-    config = cli._build_config_from_args(_make_cli_args(web=False, config_file=str(env_file)))
+    config = cli.build_config_from_args(_make_cli_args(web=False, config_file=str(env_file)))
 
     assert config.web_enabled is False
 
@@ -103,6 +103,6 @@ def test_cli_web_overrides_env_file_false(tmp_path: Path, monkeypatch: pytest.Mo
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_WEB_ENABLED=false\n")
 
-    config = cli._build_config_from_args(_make_cli_args(web=True, config_file=str(env_file)))
+    config = cli.build_config_from_args(_make_cli_args(web=True, config_file=str(env_file)))
 
     assert config.web_enabled is True
