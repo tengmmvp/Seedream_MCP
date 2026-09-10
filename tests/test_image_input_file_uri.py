@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from seedream_mcp.utils.io.io_path import _file_uri_to_path
+from seedream_mcp.utils.io.io_roots import _file_uri_to_path
 
 
 def test_file_uri_to_path_rejects_non_localhost_host() -> None:

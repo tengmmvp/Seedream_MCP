@@ -11,18 +11,24 @@ from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult
 from PIL import Image
 
 import seedream_mcp.utils.io.io_path as io_path_module
+import seedream_mcp.utils.io.io_roots as io_roots_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import workspace_roots_resource
 from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.tools.runners import run_browse_images
-from seedream_mcp.utils.io.io_path import get_workspace_root, workspace_roots_scope
+from seedream_mcp.utils.io.io_path import get_workspace_root
+from seedream_mcp.utils.io.io_roots import (
+    read_session_roots_result,
+    workspace_roots_scope_from_result,
+)
 
 from _log_fakes import RecordingLogger
 from _roots_session_fakes import (
     CapabilityDeclaringSession as _CapabilityDeclaringSession,
 )
 from _roots_session_fakes import FakeSession as _FakeSession
+from _roots_session_fakes import ProbingErrorSession as _ProbingErrorSession
 from _roots_session_fakes import roots_result as _roots_result
 
 
@@ -109,7 +115,7 @@ async def test_workspace_roots_scope_prioritizes_mcp_roots_over_env(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     assert get_workspace_root() == env_root.resolve()
 
-    async with workspace_roots_scope(_FakeContext([mcp_root])):
+    async with workspace_roots_scope_from_result(_roots_result([mcp_root])):
         assert get_workspace_root() == mcp_root.resolve()
 
     assert get_workspace_root() == env_root.resolve()
@@ -174,7 +180,7 @@ async def test_client_prepare_image_input_prefers_mcp_roots_over_env(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
-    async with workspace_roots_scope(_FakeContext([mcp_root])):
+    async with workspace_roots_scope_from_result(_roots_result([mcp_root])):
         prepared = await client._prepare_image_input(str(image_path))
 
     assert prepared.startswith("data:image/")
@@ -198,7 +204,7 @@ async def test_client_prepare_image_input_allows_second_mcp_root(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
-    async with workspace_roots_scope(_FakeContext([first_root, second_root])):
+    async with workspace_roots_scope_from_result(_roots_result([first_root, second_root])):
         prepared = await client._prepare_image_input(str(image_path))
 
     assert prepared.startswith("data:image/")
@@ -241,7 +247,7 @@ async def test_client_prepare_image_input_falls_back_when_mcp_roots_empty(
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
-    async with workspace_roots_scope(_FakeContext([])):
+    async with workspace_roots_scope_from_result(_roots_result([])):
         prepared = await client._prepare_image_input(str(image_path))
 
     assert prepared.startswith("data:image/")
@@ -296,21 +302,23 @@ async def test_run_browse_images_rejects_absolute_path_outside_roots(
     assert result.structured_content["status"] == "failed"
 
 
-async def test_workspace_roots_scope_falls_back_to_env_when_list_roots_fails(
+async def test_read_session_roots_result_falls_back_to_env_when_list_roots_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 失败时回退环境变量根。"""
+    """roots/list 失败时取回返回 None，回退环境变量根。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
 
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
 
-    async with workspace_roots_scope(_FailingContext()):
+    roots_result = await read_session_roots_result(_FailingContext())
+    assert roots_result is None
+    async with workspace_roots_scope_from_result(roots_result):
         assert get_workspace_root() == env_root.resolve()
 
 
-async def test_workspace_roots_scope_falls_back_to_cwd_without_env_root(
+async def test_read_session_roots_result_falls_back_to_cwd_without_env_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,47 +327,68 @@ async def test_workspace_roots_scope_falls_back_to_cwd_without_env_root(
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
     monkeypatch.chdir(tmp_path)
 
-    async with workspace_roots_scope(_NoBackChannelContext()):
+    roots_result = await read_session_roots_result(_NoBackChannelContext())
+    assert roots_result is None
+    async with workspace_roots_scope_from_result(roots_result):
         assert get_workspace_root() == tmp_path.resolve()
 
 
-async def test_workspace_roots_scope_no_back_channel_falls_back_to_env_root_with_error_log(
+async def test_read_session_roots_result_no_back_channel_logs_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """无反向通道但已配置环境变量根时回退该根，且日志提级为 error 而非 warning。"""
+    """无反向通道时取回返回 None，日志提级为 error 而非 warning。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     capture = RecordingLogger()
-    monkeypatch.setattr(io_path_module, "logger", capture)
+    monkeypatch.setattr(io_roots_module, "logger", capture)
 
-    async with workspace_roots_scope(_NoBackChannelContext()):
-        assert get_workspace_root() == env_root.resolve()
+    roots_result = await read_session_roots_result(_NoBackChannelContext())
 
+    assert roots_result is None
     assert any("反向通道" in message for message in capture.errors)
     assert capture.warnings == []
 
 
-async def test_workspace_roots_scope_errors_and_falls_back_on_generic_error(
+async def test_read_session_roots_result_generic_error_logs_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NoBackChannelError 之外的普通异常在已配置环境变量根时回退该根，日志提级为 error。"""
+    """NoBackChannelError 之外的普通异常返回 None，日志提级为 error。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     capture = RecordingLogger()
-    monkeypatch.setattr(io_path_module, "logger", capture)
+    monkeypatch.setattr(io_roots_module, "logger", capture)
 
-    async with workspace_roots_scope(_MalformedResponseContext()):
-        assert get_workspace_root() == env_root.resolve()
+    roots_result = await read_session_roots_result(_MalformedResponseContext())
 
+    assert roots_result is None
     assert any("读取 MCP Roots 失败" in message for message in capture.errors)
     assert capture.warnings == []
 
 
-async def test_workspace_roots_scope_transient_error_falls_back_to_cwd(
+async def test_read_session_roots_result_capability_probe_error_still_fetches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """capability 探测抛异常时按已声明尝试取回，不静默降级。"""
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+
+    session = _ProbingErrorSession([mcp_root])
+
+    roots_result = await read_session_roots_result(_SpyContext(session))
+    assert roots_result is not None
+    async with workspace_roots_scope_from_result(roots_result):
+        assert get_workspace_root() == mcp_root.resolve()
+
+
+async def test_read_session_roots_result_transient_error_falls_back_to_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -368,29 +397,31 @@ async def test_workspace_roots_scope_transient_error_falls_back_to_cwd(
     monkeypatch.setattr(io_path_module, "_env_value_providers", {})
     monkeypatch.chdir(tmp_path)
 
-    async with workspace_roots_scope(_TimeoutContext()):
+    roots_result = await read_session_roots_result(_TimeoutContext())
+    assert roots_result is None
+    async with workspace_roots_scope_from_result(roots_result):
         assert get_workspace_root() == tmp_path.resolve()
 
 
-async def test_workspace_roots_scope_transient_error_falls_back_to_env_root_with_error_log(
+async def test_read_session_roots_result_transient_error_logs_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 瞬时失败但已配置环境变量根时回退该显式边界，日志提级为 error。"""
+    """roots/list 瞬时失败时返回 None，日志提级为 error。"""
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     capture = RecordingLogger()
-    monkeypatch.setattr(io_path_module, "logger", capture)
+    monkeypatch.setattr(io_roots_module, "logger", capture)
 
-    async with workspace_roots_scope(_TimeoutContext()):
-        assert get_workspace_root() == env_root.resolve()
+    roots_result = await read_session_roots_result(_TimeoutContext())
 
+    assert roots_result is None
     assert any("读取 MCP Roots 失败" in message for message in capture.errors)
     assert capture.warnings == []
 
 
-async def test_workspace_roots_scope_skips_list_roots_without_capability(
+async def test_read_session_roots_result_skips_list_roots_without_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,13 +440,15 @@ async def test_workspace_roots_scope_skips_list_roots_without_capability(
 
     session.list_roots = _explode_list_roots  # type: ignore[method-assign]
 
-    async with workspace_roots_scope(_SpyContext(session)):
+    roots_result = await read_session_roots_result(_SpyContext(session))
+
+    assert roots_result is None
+    assert session.capability_probes == 1
+    async with workspace_roots_scope_from_result(roots_result):
         assert get_workspace_root() == env_root.resolve()
 
-    assert session.capability_probes == 1
 
-
-async def test_workspace_roots_scope_calls_list_roots_when_capability_declared(
+async def test_read_session_roots_result_calls_list_roots_when_capability_declared(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -428,7 +461,9 @@ async def test_workspace_roots_scope_calls_list_roots_when_capability_declared(
 
     session = _CapabilityDeclaringSession([mcp_root], declared=True)
 
-    async with workspace_roots_scope(_SpyContext(session)):
+    roots_result = await read_session_roots_result(_SpyContext(session))
+    assert roots_result is not None
+    async with workspace_roots_scope_from_result(roots_result):
         assert get_workspace_root() == mcp_root.resolve()
 
     assert session.capability_probes == 1
@@ -468,7 +503,9 @@ async def test_client_prepare_image_input_falls_back_to_env_when_list_roots_fail
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     client = SeedreamClient(SeedreamConfig(api_key="test_key"))
 
-    async with workspace_roots_scope(_FailingContext()):
+    async with workspace_roots_scope_from_result(
+        await read_session_roots_result(_FailingContext())
+    ):
         prepared = await client._prepare_image_input(str(image_path))
 
     assert prepared.startswith("data:image/")
@@ -530,7 +567,11 @@ async def test_workspace_roots_resource_list_roots_failure_falls_back_to_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """roots/list 失败回退 env 边界时资源回显环境回退根。"""
+    """roots/list 失败回退 env 边界时资源回显环境回退根，不带降级标记。
+
+    取回失败时 capability 探测可能误报已声明，标记 fallback 会断言客户端
+    声明过且未生效。
+    """
     env_root = tmp_path / "env"
     env_root.mkdir()
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
@@ -539,6 +580,42 @@ async def test_workspace_roots_resource_list_roots_failure_falls_back_to_env(
     data = json.loads(cast(str, result))
 
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
+    assert "fallback" not in data
+
+
+class _FixedResultSession:
+    """list_roots 返回固定结果的会话替身。"""
+
+    def __init__(self, result: ListRootsResult) -> None:
+        self._result = result
+
+    async def list_roots(self) -> ListRootsResult:
+        return self._result
+
+
+async def test_workspace_roots_resource_legacy_unconvertible_marks_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """旧修订声明非空 roots 但全部不可转换时按降级渲染，与多轮形态同标 fallback。"""
+    from mcp.types import Root
+    from pydantic import FileUrl
+
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    unconvertible = ListRootsResult(
+        roots=[Root(uri=cast(Any, FileUrl("file://server/share")), name="share")]
+    )
+
+    result = await workspace_roots_resource(
+        cast("Context[Any, Any]", _SpyContext(_FixedResultSession(unconvertible)))
+    )
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
+    assert data["fallback"] is True
 
 
 class _ModernProtocolContext:
@@ -609,19 +686,25 @@ async def test_workspace_roots_resource_modern_session_retry_round_reports_roots
     assert ctx.session.list_roots_calls == 0
 
 
-async def test_workspace_roots_resource_modern_session_malformed_response_asks_again(
+async def test_workspace_roots_resource_modern_session_malformed_response_falls_back(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """重试轮应答形态异常时再次返回 InputRequiredResult，不落到直连或环境回退。"""
+    """重试轮应答形态异常时丢弃该轮应答并回退环境根，避免重发空转到回合上限。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
     mcp_root = tmp_path / "mcp"
     mcp_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
     ctx = _ModernProtocolContext([mcp_root], responses={"roots": "not-a-roots-result"})
 
     result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
 
-    assert isinstance(result, InputRequiredResult)
-    requests = cast("dict[str, object]", result.input_requests)
-    assert set(requests) == {"roots"}
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
+    # 输出附降级标记，客户端可感知本工作区为环境回退而非其声明值。
+    assert data["fallback"] is True
     assert ctx.session.list_roots_calls == 0
 
 
@@ -660,6 +743,31 @@ async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
     data = json.loads(result)
     assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
     assert ctx.session.list_roots_calls == 1
+
+
+async def test_workspace_roots_resource_declared_but_unconvertible_marks_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """声明的 roots 全部不可转换为本地路径时按降级渲染，附 fallback 标记。"""
+    from mcp.types import Root
+    from pydantic import FileUrl
+
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    # UNC 形态的 file URI 被 _file_uri_to_path 拒绝，声明的根全部无法落地。
+    unconvertible = ListRootsResult(
+        roots=[Root(uri=cast(Any, FileUrl("file://server/share")), name="share")]
+    )
+    ctx = _ModernProtocolContext([], responses={"roots": unconvertible})
+
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
+    assert data["fallback"] is True
 
 
 async def test_workspace_roots_resource_modern_round_empty_roots_falls_back_to_env(

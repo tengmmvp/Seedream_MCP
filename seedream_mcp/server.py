@@ -2,9 +2,9 @@
 
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，风格预设
 Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源。MCPServer 实例与
-共享资源生命周期由 resources 模块持有，本模块导入 mcp 完成注册并重导出
-resources/transport 符号保持既有导入面；启动编排经 bootstrap 再导出 cli_main
-维持 entry point 与 python -m 入口。
+共享资源生命周期由 resources 模块持有，本模块导入 mcp 完成注册并再导出
+resources 的公共符号；启动编排经 bootstrap 再导出 cli_main 维持 entry point
+与 python -m 入口。
 
 outputSchema 声明契约：五个工具函数的返回类型注解为
 ``Annotated[CallToolResult, ...StructuredOutput]``，SDK 据注解元数据生成
@@ -133,10 +133,10 @@ from .utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
-from .utils.io.io_path import (
-    get_workspace_roots,
+from .utils.io.io_path import get_workspace_roots
+from .utils.io.io_roots import (
+    read_session_roots_result,
     session_declares_roots_capability,
-    workspace_roots_scope,
     workspace_roots_scope_from_result,
 )
 from .utils.model.model_capabilities import (
@@ -144,20 +144,13 @@ from .utils.model.model_capabilities import (
     model_payloads,
 )
 
-# resources 符号重导出：mcp 与 SERVER_NAME/SERVER_VERSION 为本模块直接使用，其余
-# 供 tests 经 server 模块访问。
+# resources 符号重导出：mcp 与 SERVER_NAME/SERVER_VERSION 为本模块直接使用，
+# app_lifespan 随 mcp 一并再导出供调用方经 server 入口访问。
 from .resources import (  # noqa: F401
     SERVER_NAME,
     SERVER_VERSION,
-    _reset_lifespan_state,
     app_lifespan,
     mcp,
-)
-
-# ASGI 中间件类重导出，供 tests 经 server 模块访问。
-from .transport import (  # noqa: F401
-    _BearerTokenAuthMiddleware,
-    _LimitRequestBodyMiddleware,
 )
 
 # 启动编排拆至 bootstrap，再导出 cli_main 维持 entry point 与 python -m 入口。
@@ -777,16 +770,29 @@ def _workspace_roots_or_empty() -> list[Path]:
         return []
 
 
-def _render_workspace_roots_payload(roots: list[Path], verbose: bool) -> str:
-    """渲染 roots 资源的 JSON 输出。
+async def _rendered_workspace_roots(verbose: bool, *, fallback: bool = False) -> str:
+    """取当前生效工作区根并渲染 JSON 输出，多轮各出口共用。
 
     roots 元素经 _file_uri_to_path 或 resolve_env_workspace_root 产出，均为已
-    resolve 的物理路径；verbose 的 resolved 字段直接复用该值，不再二次 resolve。
+    resolve 的物理路径，verbose 的 resolved 字段直接复用；fallback 为真时附
+    降级标记，向客户端声明本输出为环境回退而非客户端声明的工作区。
     """
+    roots = await asyncio.to_thread(_workspace_roots_or_empty)
     payload: dict[str, Any] = {"roots": [str(root).replace("\\", "/") for root in roots]}
     if verbose:
         payload["resolved"] = [str(root) for root in roots]
+    if fallback:
+        payload["fallback"] = True
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _roots_degraded(roots_result: Any, applied_roots: list[Path]) -> bool:
+    """降级标记单点：声明了非空 roots 但无一可应用即降级；空声明等同未声明不标。
+
+    取回失败（结果为 None）不标记：capability 探测异常时按已声明尝试，取回
+    失败未必代表客户端真的声明过，标记会误报。
+    """
+    return bool(getattr(roots_result, "roots", [])) and not applied_roots
 
 
 @mcp.resource("seedream://workspace/roots{?verbose}", mime_type="application/json")
@@ -801,17 +807,29 @@ async def workspace_roots_resource(
     """
     if _resource_roots_via_input_required(ctx):
         responses = ctx.input_responses or {}
-        roots_result = responses.get(_ROOTS_INPUT_REQUEST_KEY)
-        if not isinstance(roots_result, ListRootsResult):
+        if _ROOTS_INPUT_REQUEST_KEY not in responses:
             return InputRequiredResult(
                 input_requests={_ROOTS_INPUT_REQUEST_KEY: ListRootsRequest()}
             )
-        async with workspace_roots_scope_from_result(roots_result):
-            roots = await asyncio.to_thread(_workspace_roots_or_empty)
-        return _render_workspace_roots_payload(roots, verbose)
-    async with workspace_roots_scope(ctx):
-        roots = await asyncio.to_thread(_workspace_roots_or_empty)
-    return _render_workspace_roots_payload(roots, verbose)
+        roots_result = responses.get(_ROOTS_INPUT_REQUEST_KEY)
+        if isinstance(roots_result, ListRootsResult):
+            async with workspace_roots_scope_from_result(roots_result) as applied_roots:
+                return await _rendered_workspace_roots(
+                    verbose, fallback=_roots_degraded(roots_result, applied_roots)
+                )
+        # 应答形态不符即丢弃并回退环境根，不重发请求空转到回合上限；边界收窄
+        # 属完整性事件，按 error 记录。
+        logger.error(
+            "roots 多轮应答形态不符（收到 {}），丢弃后回退环境变量边界",
+            type(roots_result).__name__,
+        )
+        return await _rendered_workspace_roots(verbose, fallback=True)
+    # 旧修订：roots/list 直连取回后与多轮形态共用结果应用与降级标记。
+    roots_result = await read_session_roots_result(ctx)
+    async with workspace_roots_scope_from_result(roots_result) as applied_roots:
+        return await _rendered_workspace_roots(
+            verbose, fallback=_roots_degraded(roots_result, applied_roots)
+        )
 
 
 @mcp.resource("seedream://server/info", mime_type="application/json")

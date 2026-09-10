@@ -46,3 +46,13 @@ class CapabilityDeclaringSession(FakeSession):
     async def list_roots(self) -> ListRootsResult:
         self.list_roots_calls += 1
         return await super().list_roots()
+
+
+class ProbingErrorSession(CapabilityDeclaringSession):
+    """capability 探测即抛异常的会话替身。"""
+
+    def __init__(self, roots: list[Path]) -> None:
+        super().__init__(roots, declared=True)
+
+    def check_client_capability(self, capability: object) -> bool:
+        raise RuntimeError("capability probe broken")

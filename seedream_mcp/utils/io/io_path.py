@@ -6,30 +6,21 @@ SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录；图片目录恒
 ``<数据根目录>/.seedream/images``。
 读权限 = 工作区 ∪ 图片目录。
 提供路径规范化、越界判定原语，拦截包含 ``..`` 或经由符号链接指向权限范围
-之外的路径。roots 取回有三种形态：工具链经 server 层 Resolve 依赖注入
-（SEP-2577 非废弃形态）、资源处理器在 2026-07-28 及以后的会话上经
-InputRequiredResult 多轮取回，均由 workspace_roots_scope_from_result 应用；
-旧修订会话保留 workspace_roots_scope 的 roots/list 直连。
+之外的路径。MCP Roots 的会话取回与应用位于同组 io_roots 模块，工作区状态经
+本模块的上下文变量共享，置位与复位走 apply_workspace_roots/reset_workspace_roots。
 """
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 import tempfile
 import threading
 import time
 from collections import OrderedDict
-from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
-from urllib.parse import urlparse
-from urllib.request import url2pathname
-
-from mcp.shared.exceptions import NoBackChannelError
-from mcp.types import ListRootsResult
+from typing import Callable
 
 from ..core.errors import SeedreamConfigError
 from ..core.formats import DATA_DIR_NAME
@@ -42,9 +33,16 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
     default=None,
 )
 
-# roots/list 请求的显式短超时：不设超时将依赖会话层读超时，慢客户端或半开连接会把
-# 工具调用拖到分钟级；超时按读取失败处理，工作根目录经声明链回退。
-_ROOTS_LIST_TIMEOUT_SECONDS = 5.0
+
+def apply_workspace_roots(roots: tuple[Path, ...]) -> Token[tuple[Path, ...] | None]:
+    """置位当前请求的工作区根集合，返回复位 token；写入口供 io_roots 专用。"""
+    return _WORKSPACE_ROOTS_VAR.set(roots)
+
+
+def reset_workspace_roots(token: Token[tuple[Path, ...] | None]) -> None:
+    """按 apply_workspace_roots 返回的 token 复位工作区根集合。"""
+    _WORKSPACE_ROOTS_VAR.reset(token)
+
 
 # Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件，
 # normalize_path 的拒绝与 io_storage 的文件名净化经 is_windows_reserved_name 共用。
@@ -529,165 +527,6 @@ def get_workspace_root() -> Path:
     return workspace_roots[0]
 
 
-async def _resolve_workspace_roots_from_context(ctx: Any) -> list[Path]:
-    """从 MCP 上下文读取客户端 Roots 并转换为本地路径列表。"""
-    if ctx is None:
-        return []
-
-    session = getattr(ctx, "session", None)
-    list_roots = getattr(session, "list_roots", None)
-    if session is None or not callable(list_roots):
-        return []
-
-    roots_result = await asyncio.wait_for(list_roots(), timeout=_ROOTS_LIST_TIMEOUT_SECONDS)
-    return await asyncio.to_thread(_roots_result_to_paths, roots_result)
-
-
-def _roots_result_to_paths(roots_result: Any) -> list[Path]:
-    """将 ListRootsResult 转换为去重后的本地路径列表。
-
-    各 Root 的 file:// URI 转为本地路径，UNC 形式被 _file_uri_to_path 拒绝以避免
-    触发 SMB 连接，不可解析或重复的条目跳过。会话直连与 resolver 注入两条取回
-    路径共用本转换。
-    """
-    resolved_roots: list[Path] = []
-    for root in getattr(roots_result, "roots", []):
-        uri_value = getattr(root, "uri", None)
-        if uri_value is None:
-            continue
-        resolved_path = _file_uri_to_path(str(uri_value))
-        if resolved_path is None:
-            continue
-        if resolved_path in resolved_roots:
-            continue
-        resolved_roots.append(resolved_path)
-
-    return resolved_roots
-
-
-def session_declares_roots_capability(session: Any) -> bool:
-    """判断会话对端客户端是否声明了 roots capability。
-
-    据此可跳过必然失败的 roots 取回线上往返；check_client_capability 不可达或探测
-    异常时保守视为已声明，保持旧版 SDK 与测试替身下的原有行为。
-    """
-    check_capability = getattr(session, "check_client_capability", None)
-    if not callable(check_capability):
-        return True
-    try:
-        from mcp.types import ClientCapabilities, RootsCapability
-
-        declared = check_capability(ClientCapabilities(roots=RootsCapability()))
-    except Exception:
-        return True
-    return bool(declared)
-
-
-def _log_roots_read_failure(exc: Exception, reason: str) -> None:
-    """记录 roots 读取失败，本次工作根目录经声明链回退。"""
-    logger.error("{}: {}，本次请求的工作根目录经声明链回退", reason, exc)
-
-
-def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | None]:
-    """将已解析的 Roots 置位到请求上下文变量并记录边界日志，返回复位用 token。
-
-    workspace_roots_scope_from_result 与 workspace_roots_scope 的置位收尾共用，
-    日志语义两侧一致：非空 Roots 记录已应用工作区，空 Roots 等同未声明。
-    """
-    token = _WORKSPACE_ROOTS_VAR.set(tuple(resolved_roots))
-    if resolved_roots:
-        logger.debug("已应用 MCP Roots 工作区: {}", resolved_roots)
-    else:
-        logger.debug("MCP Roots 为空，等同未声明，工作根目录经声明链回退")
-    return token
-
-
-@asynccontextmanager
-async def workspace_roots_scope_from_result(
-    roots_result: ListRootsResult | None,
-) -> AsyncIterator[list[Path]]:
-    """在当前请求作用域内应用经工具 resolver 注入的 MCP Roots。
-
-    SEP-2577 非废弃形态：工具链不经 ctx.session.list_roots 直连，由 server 工具
-    签名的 Resolve 依赖按协商版本取回后注入本函数消费。roots_result 为 None 表示
-    客户端未声明 roots capability，此处不设置边界、下游回退环境变量根；取回失败
-    由 SDK 在调用层报错而非在此降级，不放宽文件访问边界。file URI 转 Path 的
-    resolve 属同步文件系统调用，下沉工作线程执行，与 browse 链路的目录预解析
-    同一口径。
-
-    Args:
-        roots_result: 依赖解析器注入的客户端 roots 结果；未声明能力时为 None。
-
-    Yields:
-        当前请求解析出的工作区根目录列表；未声明能力时为空列表。
-    """
-    token: Token[tuple[Path, ...] | None] | None = None
-    resolved_roots: list[Path] = []
-    if roots_result is not None:
-        resolved_roots = await asyncio.to_thread(_roots_result_to_paths, roots_result)
-        token = _apply_roots_token(resolved_roots)
-    else:
-        logger.debug("客户端未声明 roots capability，跳过 roots 取回，回退环境变量边界")
-
-    try:
-        yield resolved_roots
-    finally:
-        if token is not None:
-            _WORKSPACE_ROOTS_VAR.reset(token)
-
-
-@asynccontextmanager
-async def workspace_roots_scope(ctx: Any) -> AsyncIterator[list[Path]]:
-    """在当前请求作用域内绑定 MCP Roots，退出时自动恢复。
-
-    资源处理器在旧修订会话上的取回入口：新修订会话改由 server 层经
-    InputRequiredResult 多轮取回后走 workspace_roots_scope_from_result，本函数
-    承接旧修订会话的 ctx.session.list_roots 直连（SEP-2577 废弃但为旧修订上
-    唯一途径）。客户端 Roots 设置到上下文变量作为该请求的工作区；未声明
-    roots capability 时跳过 roots/list 往返；读取失败仅记录，工作位置经声明链
-    回退。
-
-    Args:
-        ctx: MCP 请求上下文，经其 session 读取客户端 Roots。
-
-    Yields:
-        当前请求解析出的工作区根目录列表；客户端不支持 Roots 时为空列表。
-    """
-    token: Token[tuple[Path, ...] | None] | None = None
-    resolved_roots: list[Path] = []
-
-    # 无请求上下文的 Context 其 session 属性抛 ValueError，须显式捕获以维持
-    # 「回退环境变量边界」的承诺；ctx 为 None 的直调场景按无会话处理。
-    session = None
-    if ctx is not None:
-        try:
-            session = ctx.session
-        except ValueError:
-            session = None
-    list_roots = getattr(session, "list_roots", None) if session is not None else None
-    roots_supported = session is not None and callable(list_roots)
-    if roots_supported and not session_declares_roots_capability(session):
-        logger.debug("客户端未声明 roots capability，跳过 roots 取回，回退环境变量边界")
-        roots_supported = False
-
-    if roots_supported:
-        try:
-            resolved_roots = await _resolve_workspace_roots_from_context(ctx)
-        except NoBackChannelError as exc:
-            # 协议能力缺失而非瞬时失败，重试不会好转，提级为 error。
-            _log_roots_read_failure(exc, "协议会话无反向通道，无法读取 MCP Roots")
-        except Exception as exc:
-            _log_roots_read_failure(exc, "读取 MCP Roots 失败")
-        else:
-            token = _apply_roots_token(resolved_roots)
-
-    try:
-        yield resolved_roots
-    finally:
-        if token is not None:
-            _WORKSPACE_ROOTS_VAR.reset(token)
-
-
 # ==================== 路径验证和规范化 ====================
 
 
@@ -855,55 +694,4 @@ def images_root_relative(path: str | Path, images_root: Path) -> str | None:
     try:
         return Path(path).relative_to(images_root).as_posix()
     except ValueError:
-        return None
-
-
-# ==================== file URI 转换 ====================
-
-
-def _file_uri_to_path(uri: str) -> Path | None:
-    """将 file:// URI 转换为本地路径，畸形形态与 normalize_path 同口径拒绝。"""
-    try:
-        parsed = urlparse(uri)
-    except Exception:
-        return None
-
-    if (parsed.scheme or "").lower() != "file":
-        return None
-
-    try:
-        path_part = url2pathname(parsed.path or "")
-    except Exception:
-        # Python 3.14 起 url2pathname 对非 localhost authority 的 file URI 直接抛
-        # URLError，POSIX 上的 //server/share 形态同样如此，语义同为拒绝，归一为
-        # None。
-        return None
-    netloc = parsed.netloc or ""
-    if netloc and netloc.lower() != "localhost":
-        # 拒绝 UNC 路径如 file://host/share，避免 Windows 下触发 SMB 连接泄露凭据。
-        return None
-
-    if not path_part:
-        return None
-
-    # file://localhost//server/share 等 netloc 合法但 path 为 UNC 形式，resolve 会触发 SMB。
-    if is_unc_path(path_part):
-        return None
-
-    candidate = Path(path_part)
-    # 有根无盘符形态在 win32 锚定当前盘根而非可判定的绝对位置，与 normalize_path
-    # 同口径拒绝；POSIX 无 drive 概念，绝对路径恒放行。
-    if sys.platform == "win32" and candidate.root and not candidate.drive:
-        return None
-    # 两类冒号畸形按完整路径判定：整路径为盘符相对形态（c:ads 的 c: 被解析为盘符、
-    # 裸文件名判定漏拒）与含冒号的普通分量（NTFS ADS）；保留设备名与 normalize_path
-    # 同口径拒绝，畸形形态不成为工作区 root。
-    if (candidate.drive and not candidate.root) or has_windows_colon_component(str(candidate)):
-        return None
-    if is_windows_reserved_name(candidate.name):
-        return None
-
-    try:
-        return candidate.expanduser().resolve()
-    except Exception:
         return None

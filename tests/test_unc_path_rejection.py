@@ -13,11 +13,11 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.utils.io.io_path import (
-    _file_uri_to_path,
     is_unc_path,
     is_within_resolved,
     normalize_path,
 )
+from seedream_mcp.utils.io.io_roots import _file_uri_to_path
 
 
 def _patch_resolve_exploding_only_on_unc(monkeypatch: pytest.MonkeyPatch) -> None:
