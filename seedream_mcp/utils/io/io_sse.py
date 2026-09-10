@@ -10,7 +10,7 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from ..core.errors import SeedreamAPIError
@@ -417,6 +417,35 @@ async def _drain_sse_complete_events(
             break
 
 
+# 等块取值哨兵：流正常结束与截止时间到达，与字节块区分。
+STREAM_ENDED = object()
+STREAM_DEADLINE_HIT = object()
+
+
+async def next_stream_chunk(
+    iterator: AsyncIterator[bytes], deadline: float | None
+) -> bytes | object:
+    """取下一读取块，等待期间持续受截止时间约束。
+
+    重组分块与慢速上游的下一块间隔可长于事件间隔，等块本身限时使总时长预算
+    可中断；截止到达返回 STREAM_DEADLINE_HIT，流结束返回 STREAM_ENDED。到点后
+    已就绪的流结束或缓冲块优先于超时判定，防止已完成的响应被误判超时、
+    触发非幂等生成请求的重复计费重试。
+    """
+    if deadline is None:
+        try:
+            return await iterator.__anext__()
+        except StopAsyncIteration:
+            return STREAM_ENDED
+    try:
+        async with asyncio.timeout_at(deadline):
+            return await iterator.__anext__()
+    except StopAsyncIteration:
+        return STREAM_ENDED
+    except TimeoutError:
+        return STREAM_DEADLINE_HIT
+
+
 async def _consume_sse_chunks(
     response: httpx.Response,
     *,
@@ -444,7 +473,26 @@ async def _consume_sse_chunks(
     stripped_bom = False
     deadline_exceeded = False
 
-    async for chunk in response.aiter_bytes(chunk_size):
+    chunk_iterator = response.aiter_bytes(chunk_size)
+    while True:
+        outcome = await next_stream_chunk(chunk_iterator, deadline)
+        if outcome is STREAM_ENDED:
+            break
+        if outcome is STREAM_DEADLINE_HIT:
+            # 总时长预算在等块期间到达：已收完整事件即确定性产出，超限保留为
+            # 部分结果，零产出才并入超时重试。
+            if collector.items:
+                log.warning(
+                    "SSE 响应流超过总时长预算，保留已收 {} 条结果提前终止",
+                    len(collector.items),
+                )
+                await _close_stream_response(response)
+                deadline_exceeded = True
+                break
+            log.warning("SSE 响应流超过总时长预算，终止解析")
+            await _close_stream_response(response)
+            raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
+        chunk = cast(bytes, outcome)
         if not chunk:
             continue
 

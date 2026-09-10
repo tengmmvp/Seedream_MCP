@@ -549,7 +549,7 @@ async def test_parse_sse_response_counts_truncated_events() -> None:
         total_bytes_limit=64 * 1024,
         log=_log(),
     )
-    assert truncated_result["truncated_events"] >= 1
+    assert truncated_result["truncated_events"] == 1
     assert truncated_result["status"] == "partial"
 
 
@@ -742,7 +742,7 @@ async def test_parse_sse_response_terminates_on_item_count_limit() -> None:
     # 终止解析后停止读取：实际消费块数远小于供给。
     assert consumed < total_chunks
     # 与单事件截断同口径计数并标记 partial。
-    assert result["truncated_events"] >= 1
+    assert result["truncated_events"] == 1
     assert result["status"] == "partial"
 
 
@@ -810,11 +810,10 @@ async def test_parse_sse_response_deadline_keeps_collected_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """预算耗尽时已收完整事件是确定性产出，保留为部分结果且不再抛超时。"""
-    calls = {"count": 0}
 
     def _advancing_monotonic() -> float:
-        calls["count"] += 1
-        return 0.0 if calls["count"] == 1 else 100.0
+        # 首块消费前时间在预算内，次块到达时已超限，超时检查先于其入缓冲。
+        return 0.0 if consumed <= 1 else 100.0
 
     monkeypatch.setattr(sse_parser_module.time, "monotonic", _advancing_monotonic)
     first = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
@@ -880,3 +879,28 @@ def test_is_sse_response_rejects_prefixed_lookalike_media_type() -> None:
 def test_is_sse_response_rejects_missing_content_type() -> None:
     """缺省 content-type 头时返回 False，交由调用方走非流式解析。"""
     assert is_sse_response(cast(httpx.Response, SimpleNamespace(headers={}))) is False
+
+
+async def test_next_stream_chunk_prefers_ready_eof_over_expired_deadline() -> None:
+    """已就绪的流结束优先于超时判定，防止已完成的响应被误判超时触发重试。"""
+
+    async def _single_chunk() -> AsyncIterator[bytes]:
+        yield b"data"
+
+    iterator = _single_chunk().__aiter__()
+    await anext(iterator)
+
+    outcome = await sse_parser_module.next_stream_chunk(iterator, time.monotonic() - 1)
+    assert outcome is sse_parser_module.STREAM_ENDED
+
+
+async def test_next_stream_chunk_reports_deadline_on_pending_wait() -> None:
+    """无就绪数据且截止已过时如实报超时。"""
+
+    async def _slow() -> AsyncIterator[bytes]:
+        await asyncio.sleep(0.3)
+        yield b"late"
+
+    iterator = _slow().__aiter__()
+    outcome = await sse_parser_module.next_stream_chunk(iterator, time.monotonic() - 0.1)
+    assert outcome is sse_parser_module.STREAM_DEADLINE_HIT
