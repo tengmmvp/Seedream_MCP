@@ -11,7 +11,6 @@ import base64
 import re
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
@@ -32,7 +31,7 @@ from ..core.logs import get_logger
 from ..core.loop_bound import loop_bound_semaphore
 from .io_download import DownloadManager, DownloadError
 from .io_url import sanitize_url
-from .io_storage import FileManager, FileManagerError, get_file_manager
+from .io_storage import FileManager, FileManagerError, current_save_time, get_file_manager
 
 logger = get_logger()
 
@@ -468,7 +467,7 @@ class AutoSaveManager:
 
             metadata = _build_save_metadata(
                 tool_name=tool_name,
-                save_time=datetime.now(timezone.utc).isoformat(),
+                save_time=current_save_time(),
                 file_size=download_result.get("file_size", 0),
                 content_type=download_result.get("content_type", ""),
                 attempts=download_result.get("attempts", 1),

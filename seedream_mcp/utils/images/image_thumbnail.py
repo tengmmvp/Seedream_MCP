@@ -264,14 +264,21 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
         JPEG 缩略图字节；无法生成时为 None。
     """
     thumbs_root = thumbnail_cache_root(images_root)
-    stat = await asyncio.to_thread(_source_stat, image_path)
-    if stat is None:
-        return None
-    thumb = thumbs_root / _thumb_key(image_path, stat.st_mtime_ns, stat.st_size)
-    # 空字节条目视为未命中，重新生成覆盖写损坏缓存
-    cached = await asyncio.to_thread(_read_bytes_safely, thumb)
+
+    def _stat_and_read() -> tuple[bytes | None, Path | None]:
+        stat = _source_stat(image_path)
+        if stat is None:
+            return None, None
+        thumb = thumbs_root / _thumb_key(image_path, stat.st_mtime_ns, stat.st_size)
+        # 空字节条目视为未命中，重新生成覆盖写损坏缓存
+        return _read_bytes_safely(thumb), thumb
+
+    cached, thumb = await asyncio.to_thread(_stat_and_read)
     if cached:
         return cached
+    # stat 失败即源图缺失，短路返回，不占解码信号量。
+    if thumb is None:
+        return None
     generated = await build_thumbnail_bytes_limited(image_path)
     if generated is not None:
         await asyncio.to_thread(_store_thumbnail, thumb, thumbs_root, generated)

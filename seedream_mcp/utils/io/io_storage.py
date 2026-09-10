@@ -14,7 +14,7 @@ import re
 import stat
 import uuid
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,12 @@ from .io_path import is_unc_path, is_windows_reserved_name, is_within_resolved, 
 from .io_url import get_file_extension_from_url
 
 logger = get_logger()
+
+
+def current_save_time() -> str:
+    """保存记录的统一时间基准：本地时间带时区偏移，与文件名、日期子目录一致。"""
+    return datetime.now().astimezone().isoformat()
+
 
 # 文件名长度上限，避免超出常见文件系统目录项长度限制。
 _MAX_FILENAME_LENGTH = 200
@@ -406,7 +412,7 @@ class FileManager:
             return {
                 "file_path": str(final_path),
                 "file_size": len(data),
-                "save_time": datetime.now(timezone.utc).isoformat(),
+                "save_time": current_save_time(),
             }
         except OSError as e:
             raise FileManagerError(f"写入文件失败: {file_path} -> {e}") from e
@@ -484,9 +490,7 @@ class FileManager:
                 deleted_size += age_deleted_size
                 if deleted_names:
                     deleted_set = set(deleted_names)
-                    remaining_files = [
-                        item for item in all_files if str(item[0]) not in deleted_set
-                    ]
+                    remaining_files = [item for item in all_files if item[0] not in deleted_set]
             if max_total_bytes is not None:
                 quota_deleted, quota_deleted_size = self._enforce_quota_from_scan(
                     remaining_files, max_total_bytes, errors
@@ -539,8 +543,8 @@ class FileManager:
         all_files: list[tuple[Path, int, float]],
         days: int,
         errors: list[str],
-    ) -> tuple[list[str], int]:
-        """对已扫描文件按保留天数删除过期项，返回已删路径名列表与释放字节数。
+    ) -> tuple[list[Path], int]:
+        """对已扫描文件按保留天数删除过期项，返回已删路径列表与释放字节数。
 
         cutoff 以 epoch 秒比较 st_mtime，规避本地时区与夏令时跳变导致的清理边界漂移。
         """
@@ -697,18 +701,18 @@ class FileManager:
     @staticmethod
     def _delete_expired_files(
         expired_files: list[tuple[Path, int, float]], errors: list[str]
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[Path], int]:
         """删除收集到的过期文件，返回已删路径列表与累计释放字节数。
 
         stat 与 unlink 拆分到收集与删除两阶段：stat 失败已在收集阶段记录，此处仅
         处理 unlink 失败，错误累积到共享的 errors 列表以保持错误消息一致。
         """
-        deleted_files: list[str] = []
+        deleted_files: list[Path] = []
         deleted_size = 0
         for file_path, size, _mtime in expired_files:
             try:
                 file_path.unlink()
-                deleted_files.append(str(file_path))
+                deleted_files.append(file_path)
                 deleted_size += size
                 logger.info("删除旧文件: {}", file_path)
             except Exception as e:
