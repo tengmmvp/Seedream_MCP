@@ -17,7 +17,7 @@ from ...utils.core.errors import SeedreamConfigError
 from ...utils.io.io_save import AutoSaveManager, AutoSaveResult
 from ...utils.io.io_download import DownloadManager
 from ...utils.core.logs import get_logger
-from ._helpers import _resolve_base_dir
+from ._shared import _resolve_base_dir
 from ...utils.io.io_path import resolve_images_root
 from .results import extract_images, is_saveable_image
 

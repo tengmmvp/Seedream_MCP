@@ -80,7 +80,7 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
     模块，靠本断言锁定一致。
     """
     from seedream_mcp.resources import mcp
-    from seedream_mcp.tools.impl._common import (
+    from seedream_mcp.tools.impl._shared import (
         IMAGE_TO_IMAGE,
         MULTI_IMAGE_FUSION,
         SEQUENTIAL_GENERATION,
@@ -104,7 +104,7 @@ def test_start_log_placeholders_match_builder_arity() -> None:
     双源字面量分布两处，loguru 惰性格式化使错位只在落日志时打错误不抛异常，
     故按个数锁定并实际执行一次格式化兜底。
     """
-    from seedream_mcp.tools.impl._common import (
+    from seedream_mcp.tools.impl._shared import (
         IMAGE_TO_IMAGE,
         MULTI_IMAGE_FUSION,
         SEQUENTIAL_GENERATION,
@@ -143,12 +143,40 @@ def test_loguru_calls_never_pass_exc_info_keyword() -> None:
     assert offenders == []
 
 
+def test_context_probe_keys_match_schema_fields() -> None:
+    """context 的工具特有字段探测键须为某输入模型的真字段，改名漂移即失败。"""
+    from seedream_mcp.tools.core import context as context_module
+    from seedream_mcp.tools.core.schemas import (
+        ImageToImageInput,
+        MultiImageFusionInput,
+        SequentialGenerationInput,
+        TextToImageInput,
+    )
+
+    source = Path(context_module.__file__).read_text(encoding="utf-8")
+    probed = set(re.findall(r'(?:getattr|hasattr)\(params, "([a-z_]+)"', source))
+    assert probed, "context 未解析到字段探测点，探测形态可能已变"
+
+    declared: set[str] = set()
+    for model in (
+        TextToImageInput,
+        ImageToImageInput,
+        MultiImageFusionInput,
+        SequentialGenerationInput,
+    ):
+        declared |= set(model.model_fields)
+
+    assert (
+        not probed - declared
+    ), f"context 探测键不在任何输入模型字段中: {sorted(probed - declared)}"
+
+
 # ==================== 零覆盖小面 ====================
 
 
 def test_suggest_similar_paths_finds_close_names(tmp_path: Path) -> None:
     """相似路径建议按目标文件名子串匹配，无参调用返回空列表不扫描 CWD。"""
-    from seedream_mcp.utils.io.io_path import suggest_similar_paths
+    from seedream_mcp.utils.io.io_scan import suggest_similar_paths
 
     (tmp_path / "portrait.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (tmp_path / "other.jpg").write_bytes(b"\x89PNG\r\n\x1a\n")

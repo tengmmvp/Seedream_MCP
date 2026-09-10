@@ -15,6 +15,7 @@ from ...utils.core.errors import SeedreamValidationError
 from ...utils.core.validators import (
     ensure_utf8_encodable,
     resolve_default_parallelism,
+    resolve_effective_generation_defaults,
     validate_background,
     validate_generation_tools,
     validate_layer_decomposition,
@@ -117,16 +118,14 @@ def build_generation_context(
     layer_decomposition = validate_layer_decomposition(
         getattr(params, "layer_decomposition", None), config.model_id
     )
-    # 图层拆分场景缺省尺寸为 auto，按输入图自适应，不取 config.default_size。
-    if layer_decomposition and params.size is None:
-        size = "auto"
-    else:
-        size = validate_size_for_model(
-            params.size if params.size is not None else config.default_size,
-            config.model_id,
-            layer_decomposition=layer_decomposition,
-        )
-    watermark = config.default_watermark if params.watermark is None else params.watermark
+    size, watermark = resolve_effective_generation_defaults(
+        size=params.size,
+        watermark=params.watermark,
+        default_size=config.default_size,
+        default_watermark=config.default_watermark,
+        layer_decomposition=layer_decomposition,
+    )
+    size = validate_size_for_model(size, config.model_id, layer_decomposition=layer_decomposition)
     output_format = (
         validate_output_format(params.output_format.value, config.model_id)
         if params.output_format is not None

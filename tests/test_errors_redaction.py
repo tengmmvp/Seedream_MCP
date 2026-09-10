@@ -1,4 +1,4 @@
-"""errors.py 敏感数据脱敏与值截断的契约测试。
+"""sanitizers 敏感数据脱敏与值截断的契约测试。
 
 覆盖 sanitize_error_text/sanitize_data_text 的自由文本脱敏、_sanitize_output_string
 的 Bearer 与 URL userinfo 剥离、_truncate_value_for_output 的截断，以及
@@ -13,13 +13,15 @@ import tracemalloc
 from typing import Any
 
 from seedream_mcp.utils.core.errors import (
-    CONTROL_CHARS_PATTERN,
     SeedreamAPIError,
     SeedreamValidationError,
-    _sanitize_output_string,
-    _truncate_value_for_output,
     format_error_for_user,
     handle_api_error,
+)
+from seedream_mcp.utils.core.sanitizers import (
+    CONTROL_CHARS_PATTERN,
+    _sanitize_output_string,
+    _truncate_value_for_output,
     sanitize_data_text,
     sanitize_error_text,
 )
@@ -442,7 +444,7 @@ def test_format_sse_failed_event_keeps_raw_message_for_outlet_sanitization() -> 
     源头先净化会使超长消息在出口被二次截断叠加标记；出口对凭据的剥离由
     本用例一并锁定。
     """
-    from seedream_mcp.tools.core.results import _sanitize_image_errors
+    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
     from seedream_mcp.utils.io.io_sse import format_sse_failed_event
 
     raw_message = "upstream echo Authorization: Bearer sk-123"
@@ -461,7 +463,7 @@ def test_format_sse_failed_event_keeps_raw_message_for_outlet_sanitization() -> 
 
 def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
     """非 SSE 路径的 per-image error.message 净化后返回新列表，传入列表与条目不被修改。"""
-    from seedream_mcp.tools.core.results import _sanitize_image_errors
+    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
 
     images: list[dict[str, Any]] = [
         {"url": "https://a/1.png"},
@@ -478,6 +480,25 @@ def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
     assert sanitized is not images
     assert sanitized[0] is images[0]
     assert original_dirty_item["error"]["message"] == "api_key: sk-leaked"
+
+
+def test_sanitize_image_errors_nulls_non_string_b64_payload() -> None:
+    """b64_json 非字符串置 None，其余字段的非有限浮点归零，不穿透严格 JSON 出口。"""
+    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
+
+    sanitized = _sanitize_image_errors(
+        [
+            {"url": "https://a/1.png", "b64_json": float("nan")},
+            {"b64_json": "aGVsbG8="},
+            {"size": float("nan"), "model": float("inf"), "custom": float("nan")},
+        ]
+    )
+
+    assert sanitized[0]["b64_json"] is None
+    assert sanitized[1]["b64_json"] == "aGVsbG8="
+    assert sanitized[2]["size"] == 0.0
+    assert sanitized[2]["model"] == 0.0
+    assert sanitized[2]["custom"] == 0.0
 
 
 # ==================== 数据字段净化不截断：sanitize_data_text ====================
@@ -744,15 +765,15 @@ def test_handle_api_error_strips_newline_separator_after_json_normalization() ->
 
 
 def test_control_chars_pattern_flattens_c0_del_and_nel() -> None:
-    """控制字符类统一覆盖 C0、DEL 与 NEL，errors 与 logs 两模块共用同一常量。"""
-    from seedream_mcp.utils.core import errors as errors_module
+    """控制字符类统一覆盖 C0、DEL 与 NEL，sanitizers 与 logs 两模块共用同一常量。"""
     from seedream_mcp.utils.core import logs as logs_module
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
 
-    assert errors_module.CONTROL_CHARS_PATTERN is logs_module._LOG_MESSAGE_CONTROL_CHARS
+    assert sanitizers_module.CONTROL_CHARS_PATTERN is logs_module._LOG_MESSAGE_CONTROL_CHARS
     for ch in ("\x00", "\x08", "\x0b", "\x0c", "\r", "\n", "\x1f", "\x7f", "\x85"):
-        assert errors_module.CONTROL_CHARS_PATTERN.sub(" ", f"a{ch}b") == "a b"
+        assert sanitizers_module.CONTROL_CHARS_PATTERN.sub(" ", f"a{ch}b") == "a b"
     # 可打印字符不受影响
-    assert errors_module.CONTROL_CHARS_PATTERN.sub(" ", "a b中") == "a b中"
+    assert sanitizers_module.CONTROL_CHARS_PATTERN.sub(" ", "a b中") == "a b中"
 
 
 def test_control_chars_pattern_flattens_line_paragraph_separators() -> None:
@@ -786,7 +807,7 @@ def test_is_sensitive_key_matches_privatekey_and_sshkey() -> None:
 
     与 apikey 策略统一。
     """
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     assert is_sensitive_key("privatekey") is True
     assert is_sensitive_key("sshkey") is True
@@ -813,7 +834,7 @@ def test_sanitize_error_text_strips_camelcase_sensitive_keyvalues() -> None:
 
 def test_is_sensitive_key_matches_camelcase_sensitive_compounds() -> None:
     """camelCase 复合键归一化小写后命中高确信子串清单，dict 键路径与自由文本同覆盖。"""
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     assert is_sensitive_key("secretKey") is True
     assert is_sensitive_key("accessKey") is True
@@ -831,7 +852,7 @@ def test_is_sensitive_key_matches_camelcase_token_secret_compounds() -> None:
 
     refreshToken、clientSecret 一类无分隔复合词此前 dict 键路径不命中，补齐后一致。
     """
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     for key in (
         "refreshToken",
@@ -874,7 +895,7 @@ def test_sanitize_error_text_api_key_space_form_no_overmatch() -> None:
 
 def test_is_sensitive_key_matches_space_separated_compound() -> None:
     """空格作为键名边界分隔符与自由文本复合分支同规则："api key" 键名命中。"""
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     assert is_sensitive_key("api key") is True
     assert is_sensitive_key("my api key") is True
@@ -889,7 +910,7 @@ def test_is_sensitive_key_matches_space_separated_compound() -> None:
 
 def test_is_sensitive_key_matches_mid_segment_keyword_forms() -> None:
     """复合键中段的敏感关键词段同样命中，与 docstring 声明及自由文本未锚定口径一致。"""
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     assert is_sensitive_key("user.session_id") is True
     assert is_sensitive_key("a.session_id.b") is True
@@ -904,7 +925,7 @@ def test_is_sensitive_key_matches_mid_segment_keyword_forms() -> None:
 
 def test_keyvalue_key_branches_derive_from_keyword_lists() -> None:
     """自由文本键名交替组由两清单派生，新增敏感词不会遗漏同步到自由文本通道。"""
-    from seedream_mcp.utils.core.errors import (
+    from seedream_mcp.utils.core.sanitizers import (
         _SENSITIVE_KEY_KEYWORDS,
         _SENSITIVE_KEY_SUBSTRINGS,
         _SENSITIVE_KEYVALUE_KEYS,
@@ -1022,7 +1043,7 @@ def test_sanitize_error_text_strips_dotted_sensitive_keyvalues() -> None:
 
 def test_dotted_sensitive_key_redacts_consistently_across_channels() -> None:
     """session.id 在 dict 键与自由文本两条通道同判敏感，口径一致。"""
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     assert is_sensitive_key("session.id") is True
     assert sanitize_error_text("session.id=abc") == "session.id=***"
@@ -1100,7 +1121,7 @@ def test_compound_key_hit_verdicts_align_across_dict_and_free_text_paths() -> No
 
     两侧判定不一致时失败，防止前缀族分支与段匹配口径漂移。
     """
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     for key in _CONSISTENT_SENSITIVE_COMPOUND_KEYS:
         assert is_sensitive_key(key) is True, key
@@ -1109,7 +1130,7 @@ def test_compound_key_hit_verdicts_align_across_dict_and_free_text_paths() -> No
 
 def test_compound_key_plain_verdicts_align_across_dict_and_free_text_paths() -> None:
     """对抗性一致性锁定：普通词形在两条路径同判不敏感，复合分支不误吞。"""
-    from seedream_mcp.utils.core.errors import is_sensitive_key
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
 
     for key in _CONSISTENT_PLAIN_COMPOUND_KEYS:
         assert is_sensitive_key(key) is False, key

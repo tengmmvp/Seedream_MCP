@@ -16,7 +16,7 @@ from ...utils.core.logs import get_logger
 
 from ..core.common import execute_generation_handler
 from ..core.schemas import TextToImageInput
-from ._common import TEXT_TO_IMAGE
+from ._shared import TEXT_TO_IMAGE
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context

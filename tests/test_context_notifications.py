@@ -52,7 +52,7 @@ def test_deprecated_ctx_log_push_channel_removed() -> None:
     SDK 2.0 按 SEP-2577 对四个方法标注 MCPDeprecationWarning，推送需请求级
     opt-in 默认不送达；重新封装会使全量测试重现弃用告警并依赖已弃用的送达语义。
     """
-    import seedream_mcp.tools.core._helpers as helpers_module
+    import seedream_mcp.tools.core._shared as helpers_module
 
     for name in ("_safe_ctx_log", "_VALID_LOG_LEVELS"):
         assert not hasattr(helpers_module, name), name

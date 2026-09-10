@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from seedream_mcp.tools.core._helpers import _is_generation_failed
+from seedream_mcp.tools.core._shared import _is_generation_failed
 
 
 def test_status_failed_marks_generation_failed_even_when_success_true() -> None:

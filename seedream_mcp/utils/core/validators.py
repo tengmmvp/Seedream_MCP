@@ -687,6 +687,27 @@ def resolve_default_parallelism(
     return min(request_count, max_request_count)
 
 
+def resolve_effective_generation_defaults(
+    *,
+    size: str | None,
+    watermark: bool | None,
+    default_size: str,
+    default_watermark: bool,
+    layer_decomposition: bool = False,
+) -> tuple[str, bool]:
+    """合成生成参数的生效缺省，工具上下文与 client 公共校验共用。
+
+    图层拆分场景缺省尺寸按输入图自适应取 auto，其余缺省尺寸取配置默认值；
+    水印缺省取配置默认值。
+    """
+    if layer_decomposition and size is None:
+        resolved_size = "auto"
+    else:
+        resolved_size = size if size is not None else default_size
+    resolved_watermark = default_watermark if watermark is None else watermark
+    return resolved_size, resolved_watermark
+
+
 def validate_parallel_generation_options(
     *,
     request_count: Any,

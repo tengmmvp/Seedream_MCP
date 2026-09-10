@@ -15,7 +15,7 @@ from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
 from ..core.common import execute_generation_handler
 from ..core.schemas import MultiImageFusionInput
-from ._common import MULTI_IMAGE_FUSION
+from ._shared import MULTI_IMAGE_FUSION
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context

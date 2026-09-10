@@ -469,10 +469,10 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
 ) -> None:
     """扫描目录不可读时空结果文案区分「目录不可读」与「无图片文件」。
 
-    经 monkeypatch 使 os.scandir 抛 PermissionError，驱动 io_path 扫描、io_scan
+    经 monkeypatch 使 os.scandir 抛 PermissionError，驱动 io_scan 扫描与
     缓存透传与 browse 空结果分支的完整链路；不可读目录为已 resolve 的请求目录。
     """
-    import seedream_mcp.utils.io.io_path as path_module
+    import seedream_mcp.utils.io.io_scan as path_module
 
     images_root = _seed_images_root(workspace_root)
 
@@ -547,7 +547,7 @@ async def test_browse_images_truncated_empty_result_marks_incompleteness(
     截断静默时空页会误报「未找到图片文件」且 total_count=0，模型无从得知目录
     可能仍有图片。
     """
-    import seedream_mcp.utils.io.io_path as path_module
+    import seedream_mcp.utils.io.io_scan as path_module
 
     images_root = _seed_images_root(workspace_root)
     for i in range(8):
@@ -573,7 +573,7 @@ async def test_browse_images_truncated_partial_page_marks_incompleteness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """截断前已收集的部分页携带标记，total_count 不以低报的精确值声称完备。"""
-    import seedream_mcp.utils.io.io_path as path_module
+    import seedream_mcp.utils.io.io_scan as path_module
 
     images_root = _seed_images_root(workspace_root)
     early = images_root / "a"

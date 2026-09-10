@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult, TextContent
 
-from ...utils.core.errors import (
+from ...utils.core.sanitizers import (
     CONTROL_CHARS_PATTERN,
     sanitize_data_text,
     sanitize_error_text,
@@ -24,15 +24,14 @@ from ...utils.core.errors import (
 from ...utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import (
-    find_images_in_directory,
     get_read_context,
     get_workspace_roots,
     is_within_resolved,
     normalize_path,
     read_scope_denial_message,
 )
-from ...utils.io.io_scan import cached_find_images_in_directory
-from ._helpers import (
+from ...utils.io.io_scan import cached_find_images_in_directory, find_images_in_directory
+from ._shared import (
     PROGRESS_COMPLETE,
     PROGRESS_SCAN_START,
     safe_report_progress,

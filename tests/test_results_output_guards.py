@@ -10,7 +10,7 @@ import dataclasses
 from typing import Any
 
 from seedream_mcp.tools.core import results as results_module
-from seedream_mcp.tools.core._helpers import _extract_parallel_request_error
+from seedream_mcp.tools.core._shared import _extract_parallel_request_error
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
     _sanitize_image_errors,

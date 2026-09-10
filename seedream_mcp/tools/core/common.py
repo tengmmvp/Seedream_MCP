@@ -1,6 +1,6 @@
 """生成类工具通用处理门面。
 
-内部按职责拆分到 _helpers/context/results/auto_save/parallel/outputs/schemas
+内部按职责拆分到 _shared/context/results/auto_save/parallel/outputs/schemas
 子模块，本模块聚合公共符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
 ``execute_generation_handler`` 是四类生成工具的统一处理流水线，各阶段职责与异常降级
 契约见该函数 docstring。
@@ -29,12 +29,10 @@ from ...utils.core.errors import (
     format_error_for_user,
     resolve_error_profile,
 )
-from ._helpers import (  # noqa: F401
+from ._shared import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,
-    PROGRESS_GENERATION_DONE,
-    PROGRESS_GENERATION_START,
     PROGRESS_RECEIVED,
     PROGRESS_VALIDATED,
     _classify_generation_error_type,
@@ -53,7 +51,7 @@ from .parallel import (
     _try_get_shared_download_manager,
     get_lifespan_resource,
 )
-from .results import (  # noqa: F401
+from .results import (
     _build_generation_structured_result,
     _is_aggregated_result,
     _sanitize_image_errors,
@@ -378,8 +376,10 @@ async def execute_generation_handler(
         )
 
         # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
-        # 净化非幂等，重复净化会使超长片段的截断标记叠加。
-        sanitized_images = _sanitize_image_errors(images, aggregated=_is_aggregated_result(result))
+        # 净化非幂等，重复净化会使超长片段的截断标记叠加。大批量净化下沉工作线程。
+        sanitized_images = await asyncio.to_thread(
+            _sanitize_image_errors, images, aggregated=_is_aggregated_result(result)
+        )
 
         response_text, structured_result = _format_generation_outputs(
             metadata=metadata,

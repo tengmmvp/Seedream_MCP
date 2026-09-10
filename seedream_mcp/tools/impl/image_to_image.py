@@ -15,7 +15,7 @@ from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
 from ..core.common import execute_generation_handler
 from ..core.schemas import ImageToImageInput
-from ._common import IMAGE_TO_IMAGE
+from ._shared import IMAGE_TO_IMAGE
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context

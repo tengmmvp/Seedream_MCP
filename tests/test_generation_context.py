@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._helpers import prevalidate_save_path
+from seedream_mcp.tools.core._shared import prevalidate_save_path
 from seedream_mcp.tools.core.common import (
     GenerationExecutionContext,
     aggregate_parallel_generation_results,

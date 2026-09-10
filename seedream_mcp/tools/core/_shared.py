@@ -15,8 +15,8 @@ from ...utils.core.errors import (
     SeedreamValidationError,
     format_error_for_user,
     resolve_error_profile,
-    sanitize_error_text,
 )
+from ...utils.core.sanitizers import sanitize_error_text
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import normalize_path, resolve_images_root
 
