@@ -11,18 +11,73 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 from loguru import logger
 
-from .errors import CONTROL_CHARS_PATTERN
+from .sanitizers import CONTROL_CHARS_PATTERN
 from .formats import DATA_DIR_NAME
 
 if TYPE_CHECKING:
     # loguru 顶层运行时仅导出 logger 实例，Logger 类只在随包存根中声明，类型检查期导入。
     from loguru import Logger
+
+
+class EarlyMessageBuffer:
+    """早于日志初始化的消息缓冲，冲刷与回滚由内部锁串行化。
+
+    config 构建告警与 io_path 目录回退提示共用同一机制，drain 在 setup_logging
+    之后由 server 调用。
+    """
+
+    def __init__(self) -> None:
+        self._messages: list[tuple[str, str]] = []
+        self._lock = threading.Lock()
+
+    def append(self, level: str, message: str) -> None:
+        """缓冲一条消息。"""
+        with self._lock:
+            self._messages.append((level, message))
+
+    def extend(self, messages: Iterable[tuple[str, str]]) -> None:
+        """缓冲多条消息。"""
+        with self._lock:
+            self._messages.extend(messages)
+
+    def mark(self) -> int:
+        """当前长度作为回滚锚点。"""
+        with self._lock:
+            return len(self._messages)
+
+    def rollback(self, mark: int) -> None:
+        """丢弃锚点之后缓冲的消息。"""
+        with self._lock:
+            del self._messages[mark:]
+
+    def snapshot(self) -> list[tuple[str, str]]:
+        """当前缓冲内容的浅拷贝。"""
+        with self._lock:
+            return list(self._messages)
+
+    def clear(self) -> None:
+        """清空缓冲，供测试隔离复位。"""
+        with self._lock:
+            self._messages.clear()
+
+    def take_all(self) -> list[tuple[str, str]]:
+        """原子取走缓冲的全部消息，供调用方在任意锁外输出。"""
+        with self._lock:
+            pending = self._messages
+            self._messages = []
+            return pending
+
+    def drain(self) -> None:
+        """输出并清空缓冲的全部消息。"""
+        for level, message in self.take_all():
+            logger.log(level, message)
 
 
 class InterceptHandler(logging.Handler):
@@ -56,7 +111,7 @@ class InterceptHandler(logging.Handler):
             self.handleError(record)
 
 
-# 字符类取 errors.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
+# 字符类取 sanitizers.CONTROL_CHARS_PATTERN 单一来源，与错误文本脱敏通道保持同一口径。
 _LOG_MESSAGE_CONTROL_CHARS = CONTROL_CHARS_PATTERN
 
 # 日志轮转与保留的产品默认值单一来源，config 的 _env_field 默认与本模块签名默认

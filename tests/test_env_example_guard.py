@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-import seedream_mcp.config as config_module
+import seedream_mcp._config_sources as config_sources
 
 # 环境变量键形态：前缀限定 SEEDREAM_/ARK_，键名由大写字母、数字、下划线组成。
 # 形如「- SEEDREAM_ 服务行为」的前缀目录行后接空白，不构成完整键，不会被命中。
@@ -35,7 +35,7 @@ _README_CONFIG_HEADINGS = {
 
 def _repo_root() -> Path:
     """返回仓库根目录，即 config 包所在目录的上一级。"""
-    return Path(config_module.__file__).resolve().parent.parent
+    return Path(config_sources.__file__).resolve().parent.parent
 
 
 def _example_path() -> Path:
@@ -55,8 +55,8 @@ def _config_read_env_keys() -> set[str]:
     _FIELD_ENV_MAP 覆盖经 _pick_config_value 读取的字段键；无 env metadata 的
     必填与显式读取键从 _NON_METADATA_FIELD_ENV 派生，新增字段自动纳入对账。
     """
-    return set(config_module._FIELD_ENV_MAP.values()) | set(
-        config_module._NON_METADATA_FIELD_ENV.values()
+    return set(config_sources._FIELD_ENV_MAP.values()) | set(
+        config_sources._NON_METADATA_FIELD_ENV.values()
     )
 
 
@@ -175,11 +175,11 @@ def test_compose_env_defaults_match_config_defaults() -> None:
     for key, raw_compose_default in _compose_env_entries().items():
         if key in _COMPOSE_DEFAULT_OVERRIDES or key == "ARK_API_KEY":
             continue
-        if key not in config_module.ENV_DEFAULTS:
+        if key not in config_sources.ENV_DEFAULTS:
             continue
         # compose 的空回退与 config 可选字段的空串默认同为未配置形态，归一比对。
         compose_default: str | None = raw_compose_default or None
-        config_default: str | None = config_module.ENV_DEFAULTS[key] or None
+        config_default: str | None = config_sources.ENV_DEFAULTS[key] or None
         if compose_default != config_default:
             mismatches.append(f"{key}: compose={compose_default!r} config={config_default!r}")
 

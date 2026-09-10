@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 import seedream_mcp.cli as cli
-import seedream_mcp.server as server
 from seedream_mcp.config import build_config_from_sources
 
 
@@ -22,14 +21,14 @@ def _write_env_file(path: Path, content: str) -> None:
 
 def test_web_flag_group_rejects_both_forms_together() -> None:
     """--web 与 --no-web 同给时互斥组报错退出。"""
-    parser = server._build_arg_parser()
+    parser = cli._build_arg_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["--web", "--no-web"])
 
 
 def test_web_flag_defaults_to_none() -> None:
     """未传旗标时 args.web 为 None，表示不覆盖 env 配置。"""
-    parser = server._build_arg_parser()
+    parser = cli._build_arg_parser()
 
     args = parser.parse_args([])
 
@@ -42,7 +41,7 @@ def test_web_flag_defaults_to_none() -> None:
 )
 def test_web_flag_parses_both_forms(argv: list[str], expected: bool) -> None:
     """--web 解析为 True、--no-web 解析为 False。"""
-    parser = server._build_arg_parser()
+    parser = cli._build_arg_parser()
 
     args = parser.parse_args(argv)
 

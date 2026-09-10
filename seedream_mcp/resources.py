@@ -242,7 +242,8 @@ def _reset_lifespan_state() -> None:
 
     重建 _shared_init_lock 避免跨事件循环复用旧锁；_global_config 一并复位避免
     跨用例残留，赋值经函数内延迟 import 取当前 config 模块对象，测试重载模块后
-    不会清错目标。
+    不会清错目标。io_path 的 resolve 缓存与 config 的构建告警缓冲同属复位协议，
+    一并在此收口；conftest 仅补充测试域专属状态。
     """
     global _shared_init_lock, _active_resource
     _active_resource = None
@@ -251,28 +252,30 @@ def _reset_lifespan_state() -> None:
     from . import config as config_module
 
     config_module._global_config = None
+    config_module._BUILD_WARNINGS.clear()
     _shared_init_lock = asyncio.Lock()
-    # io_save 的清理节流状态与 io_scan 的目录扫描缓存同步复位。
+    from .utils.io.io_path import clear_resolved_env_root_cache
     from .utils.io.io_save import reset_cleanup_state
     from .utils.io.io_scan import reset_directory_scan_cache
 
+    clear_resolved_env_root_cache()
     reset_cleanup_state()
     reset_directory_scan_cache()
 
 
 # ==================== 服务器构造 ====================
 
-# 静态列表面的客户端缓存提示时长。纳入的键均为 import 期固定的静态声明，可安全
-# 声明新鲜度；resources/read、server/info、workspace/roots 随会话与活动配置变化，
-# 不纳入。
+# 静态列表面的客户端缓存提示时长与共享作用域。纳入的键均为 import 期固定的
+# 静态声明，对所有调用者一致，按规范指引声明 public 供共享缓存复用；
+# resources/read、server/info、workspace/roots 随会话与活动配置变化，不纳入。
 _STATIC_LIST_CACHE_TTL_MS = 60_000
 
 _STATIC_LIST_CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
-    "tools/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
-    "prompts/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
-    "resources/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
-    "resources/templates/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
-    "server/discover": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS),
+    "tools/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "prompts/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "resources/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "resources/templates/list": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
+    "server/discover": CacheHint(ttl_ms=_STATIC_LIST_CACHE_TTL_MS, scope="public"),
 }
 
 

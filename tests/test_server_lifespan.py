@@ -386,7 +386,7 @@ class _FakeLifespanCtx:
 async def test_try_get_shared_client_returns_lifespan_instance() -> None:
     """_try_get_shared_client / _try_get_shared_download_manager 返回注入的实例。"""
     from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.tools.core.common import (
+    from seedream_mcp.tools.core.parallel import (
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )
@@ -409,7 +409,7 @@ async def test_try_get_shared_client_returns_lifespan_instance() -> None:
 
 def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
     """ctx 为 None、lifespan 非 dict、值类型不匹配时均返回 None。"""
-    from seedream_mcp.tools.core.common import (
+    from seedream_mcp.tools.core.parallel import (
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )

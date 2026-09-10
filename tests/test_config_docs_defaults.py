@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-import seedream_mcp.config as config_module
+import seedream_mcp._config_sources as config_sources
 
 # .env.example 注释行的「默认：」标注形态，冒号兼容全角。
 _EXAMPLE_DEFAULT_PATTERN = re.compile(r"^#\s*默认[:：]\s*(.+)$")
@@ -49,7 +49,7 @@ def test_env_example_default_annotations_match_config() -> None:
     漂移。模型选择器两侧经别名展开后比较，文档允许写别名而代码存完整 Model ID。
     """
     annotations = _example_default_annotations()
-    all_keys = set(config_module.ENV_DEFAULTS) | {"ARK_API_KEY"}
+    all_keys = set(config_sources.ENV_DEFAULTS) | {"ARK_API_KEY"}
     exempt = set(_EXAMPLE_EXEMPT)
     missing = [key for key in sorted(all_keys - exempt) if key not in annotations]
     assert not missing, f".env.example 缺少默认值标注且未列入豁免清单: {missing}"
@@ -57,10 +57,10 @@ def test_env_example_default_annotations_match_config() -> None:
     drift: list[str] = []
     for env_key in sorted(all_keys - exempt):
         documented = _parse_documented_value(annotations[env_key])
-        expected = config_module.ENV_DEFAULTS[env_key]
+        expected = config_sources.ENV_DEFAULTS[env_key]
         if env_key == "SEEDREAM_MODEL_ID":
-            documented = config_module.normalize_model_selector(documented)
-            expected = config_module.normalize_model_selector(expected)
+            documented = config_sources.normalize_model_selector(documented)
+            expected = config_sources.normalize_model_selector(expected)
         if documented != expected:
             drift.append(f"{env_key}: 文档 {documented!r} != 代码 {expected!r}")
     assert not drift, ".env.example 默认值标注与代码默认值漂移:\n" + "\n".join(drift)
@@ -72,7 +72,7 @@ def _example_default_annotations() -> dict[str, str]:
     标注行须位于赋值行上方连续的注释块内，空白行与赋值行都会结束当前块的归集；
     连续多条标注行时取最后一条。
     """
-    example_text = config_module.PROJECT_ROOT.joinpath(".env.example").read_text(encoding="utf-8")
+    example_text = config_sources.PROJECT_ROOT.joinpath(".env.example").read_text(encoding="utf-8")
     annotations: dict[str, str] = {}
     pending: str | None = None
     for raw in example_text.splitlines():

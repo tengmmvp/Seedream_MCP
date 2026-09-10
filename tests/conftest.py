@@ -153,10 +153,8 @@ def clean_web_routes() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
-    from seedream_mcp import config as config_module
     from seedream_mcp.server import _reset_lifespan_state
     from seedream_mcp.utils.core import formats as formats_module
-    from seedream_mcp.utils.io.io_path import clear_resolved_env_root_cache
 
     # PIL 已导入时快照解压炸弹阈值，收尾恢复：解码器初始化经 Image.MAX_IMAGE_PIXELS
     # 做进程级覆写且不自行恢复；未导入时不快照，避免复位本身触发 PIL 的惰性导入。
@@ -165,15 +163,10 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     # 解码器就绪标志为模块全局，重置以隔离初始化时序相关用例
     monkeypatch.setattr(formats_module, "_decoders_ready", False)
-    # lifespan 共享单例、活动配置、全局配置懒加载缓存、asyncio.Lock、自动保存清理状态
-    # 与目录扫描缓存等模块级可变状态统一经复位协议重建到干净态，避免跨事件循环复用
-    # 与跨用例缓存污染；SDK 2.0 起传输配置直传 streamable_http_app 构造，settings
-    # 不再持有 stateless_http 等传输字段，无需复位；复位清单见 _reset_lifespan_state
+    # lifespan 共享单例、活动配置、全局配置懒加载缓存、asyncio.Lock、自动保存清理
+    # 状态、目录扫描缓存、io_path resolve 缓存与构建告警缓冲等模块级可变状态统一
+    # 经复位协议重建到干净态；复位清单见 _reset_lifespan_state
     _reset_lifespan_state()
-    # io_path 回退根 resolve 缓存与上述复位项同属复位协议，在此直接登记
-    clear_resolved_env_root_cache()
-    # 构建期告警收集为模块级可变列表，清空防止上轮构建的告警泄漏进 drain 断言
-    config_module._pending_build_warnings.clear()
     yield
     if pil_image_module is not None:
         pil_image_module.MAX_IMAGE_PIXELS = max_pixels_before

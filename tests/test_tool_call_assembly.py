@@ -15,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
 import seedream_mcp.server as server
-from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools.core.schemas import (
     BackgroundMode,
@@ -72,9 +72,9 @@ def spy_run_handlers(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]
     ):
         monkeypatch.setattr(server, name, _spy_generation)
     monkeypatch.setattr(server, "run_browse_images", _spy_browse)
-    server.set_active_config(SeedreamConfig(api_key="test_key"))
+    set_active_config(SeedreamConfig(api_key="test_key"))
     yield captured
-    server.set_active_config(None)
+    set_active_config(None)
 
 
 async def test_flat_arguments_assemble_into_input_model(

@@ -11,8 +11,8 @@ import sys
 
 import pytest
 
+from seedream_mcp import bootstrap as bootstrap_module
 from seedream_mcp import config as config_module
-from seedream_mcp import server as server_module
 
 
 def test_cli_main_exits_gracefully_when_logging_setup_raises_oserror(
@@ -28,9 +28,9 @@ def test_cli_main_exits_gracefully_when_logging_setup_raises_oserror(
     def _raise_oserror(*args: object, **kwargs: object) -> None:
         raise OSError("cannot create log directory")
 
-    monkeypatch.setattr(server_module, "setup_logging", _raise_oserror)
+    monkeypatch.setattr(bootstrap_module, "setup_logging", _raise_oserror)
 
-    exit_code = server_module.cli_main()
+    exit_code = bootstrap_module.cli_main()
 
     assert exit_code == 1
     stderr = capsys.readouterr().err

@@ -21,6 +21,7 @@ import pytest
 
 import seedream_mcp.resources as resources
 import seedream_mcp.server as server
+import seedream_mcp.transport as transport_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.transport import _attach_streamable_http_middleware, _transport_security_for_host
@@ -452,7 +453,7 @@ async def _start_smoke_server_and_wait(
 
     def _serve() -> None:
         try:
-            server._run_streamable_http("127.0.0.1", port, "")
+            transport_module._run_streamable_http("127.0.0.1", port, "")
         except BaseException as exc:
             thread_errors.append(exc)
 

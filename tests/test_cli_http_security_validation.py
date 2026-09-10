@@ -7,17 +7,15 @@ cli_main 的集成路径由 test_server_transport_options 覆盖，本文件锁�
 from __future__ import annotations
 
 from argparse import Namespace
-from collections.abc import Collection
 
 import pytest
 
-import seedream_mcp.server as server
-from seedream_mcp.transport import _LOOPBACK_HOSTS as _PRODUCED_LOOPBACK_HOSTS
+import seedream_mcp.cli as cli
+from seedream_mcp.transport import is_loopback_bind_host
 
-# 注入输入直接取生产常量，避免手抄副本静默漂移；显式锁定成员防常量被意外
-# 放宽（如把可被 DNS 污染的 localhost 误加入免鉴权集合）。
-assert _PRODUCED_LOOPBACK_HOSTS == {"127.0.0.1", "::1"}
-_LOOPBACK_HOSTS: Collection[str] = _PRODUCED_LOOPBACK_HOSTS
+# 锁定回环判定成员，防 localhost 被误加入免鉴权集合。
+assert is_loopback_bind_host("127.0.0.1") and is_loopback_bind_host("::1")
+assert not is_loopback_bind_host("localhost") and not is_loopback_bind_host("0.0.0.0")
 
 
 def _make_http_args(
@@ -38,7 +36,7 @@ def _make_http_args(
 
 def test_validate_http_security_requires_token_for_non_loopback() -> None:
     """非回环绑定缺少鉴权令牌时返回原文错误消息，锁定文案不漂移。"""
-    message = server._validate_http_security(_make_http_args(), "", _LOOPBACK_HOSTS)
+    message = cli._validate_http_security(_make_http_args(), "")
 
     assert message == (
         "安全错误：streamable-http 绑定到非回环地址 0.0.0.0 必须配置鉴权令牌，"
@@ -49,7 +47,7 @@ def test_validate_http_security_requires_token_for_non_loopback() -> None:
 def test_validate_http_security_requires_tls_for_non_loopback() -> None:
     """非回环绑定携带令牌但无 TLS 且未显式豁免时返回原文错误消息。"""
     args = _make_http_args()
-    message = server._validate_http_security(args, "s3cret", _LOOPBACK_HOSTS)
+    message = cli._validate_http_security(args, "s3cret")
 
     assert message == (
         "安全错误：streamable-http 绑定到非回环地址 0.0.0.0 必须配置 TLS，"
@@ -62,14 +60,14 @@ def test_validate_http_security_accepts_non_loopback_with_tls() -> None:
     """非回环绑定携带令牌与 TLS 证书时校验通过。"""
     args = _make_http_args(ssl_certfile="/fake/cert.pem", ssl_keyfile="/fake/key.pem")
 
-    assert server._validate_http_security(args, "s3cret", _LOOPBACK_HOSTS) is None
+    assert cli._validate_http_security(args, "s3cret") is None
 
 
 def test_validate_http_security_accepts_explicit_non_tls_opt_in() -> None:
     """非回环绑定携带令牌并显式豁免 TLS 时校验通过，适用于反代终结 TLS 场景。"""
     args = _make_http_args(insecure_allow_non_tls=True)
 
-    assert server._validate_http_security(args, "s3cret", _LOOPBACK_HOSTS) is None
+    assert cli._validate_http_security(args, "s3cret") is None
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
@@ -77,11 +75,11 @@ def test_validate_http_security_exempts_loopback_hosts(host: str) -> None:
     """回环绑定豁免鉴权与 TLS 强制，无令牌无 TLS 也校验通过。"""
     args = _make_http_args(host=host)
 
-    assert server._validate_http_security(args, "", _LOOPBACK_HOSTS) is None
+    assert cli._validate_http_security(args, "") is None
 
 
 def test_validate_http_security_skips_stdio_transport() -> None:
     """stdio 传输不涉及 HTTP 绑定安全，非回环 host 与空令牌也不构成错误。"""
     args = _make_http_args(transport="stdio")
 
-    assert server._validate_http_security(args, "", _LOOPBACK_HOSTS) is None
+    assert cli._validate_http_security(args, "") is None

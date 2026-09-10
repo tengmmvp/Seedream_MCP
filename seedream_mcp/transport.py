@@ -31,6 +31,12 @@ logger = get_logger()
 # 不含 "localhost"：其解析依赖 hosts/DNS，污染时可指向非回环地址。
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
 
+
+def is_loopback_bind_host(host: str) -> bool:
+    """判定绑定地址是否为字面量回环地址，cli 安全校验与本模块中间件共用。"""
+    return host in _LOOPBACK_HOSTS
+
+
 # 绑定即启用 SDK 内层 DNS rebinding 防护的地址集合，比 _LOOPBACK_HOSTS 多含
 # "localhost"，与 streamable_http_app 的默认防护集合一致。
 _DNS_REBINDING_PROTECTED_HOSTS = _LOOPBACK_HOSTS | {"localhost"}
@@ -485,7 +491,7 @@ def _attach_streamable_http_middleware(
         max_body_size = get_active_config().http_max_body_size
     app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=max_body_size)
     app.add_middleware(_HealthCheckMiddleware)
-    if host in _LOOPBACK_HOSTS:
+    if is_loopback_bind_host(host):
         app.add_middleware(_LoopbackHostGuardMiddleware)
 
 
@@ -577,7 +583,7 @@ def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
     """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致。"""
     # localhost 的解析依赖 hosts/DNS 可被污染指向非回环地址，告警按非回环口径表述。
     host_note = "按非回环地址要求校验" if host == "localhost" else "非回环地址"
-    if host in _LOOPBACK_HOSTS:
+    if is_loopback_bind_host(host):
         if auth_enabled:
             message = "streamable-http 已启用 Bearer 鉴权，本机访问需在 Authorization 头携带令牌。"
         else:

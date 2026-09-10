@@ -15,11 +15,12 @@ from pathlib import Path
 
 import pytest
 
+from seedream_mcp import _config_sources as config_sources
 from seedream_mcp import config as config_module
+from seedream_mcp._config_sources import _read_env_values
 from seedream_mcp.config import (
     DEPRECATED_MODEL_TOKENS,
     SeedreamConfig,
-    _read_env_values,
 )
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 from seedream_mcp.utils.io import io_path as io_path_module
@@ -39,7 +40,7 @@ def test_read_env_values_wraps_os_error_as_config_error(
     def _raise_permission(path: object) -> dict[str, str]:
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr(config_module, "dotenv_values", _raise_permission)
+    monkeypatch.setattr(config_sources, "dotenv_values", _raise_permission)
 
     with pytest.raises(SeedreamConfigError) as excinfo:
         _read_env_values(str(env_file))

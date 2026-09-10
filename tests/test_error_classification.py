@@ -13,7 +13,7 @@ import pytest
 from mcp.types import TextContent
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._helpers import (
+from seedream_mcp.tools.core._shared import (
     _FAILURE_GUIDANCE_BY_ERROR_CODE,
     _FAILURE_GUIDANCE_DEFAULT_CODES,
     _resolve_failure_guidance,

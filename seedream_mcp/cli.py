@@ -7,7 +7,6 @@ SeedreamConfig。
 from __future__ import annotations
 
 import argparse
-from collections.abc import Collection
 from typing import Literal, cast
 
 from .config import (
@@ -18,6 +17,7 @@ from .config import (
     SeedreamConfig,
     build_config_from_sources,
 )
+from .transport import is_loopback_bind_host
 from .utils.model.model_capabilities import MODEL_ALIASES
 from .version import __version__
 
@@ -156,7 +156,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help="streamable-http 的 Bearer 鉴权令牌；推荐经 SEEDREAM_HTTP_AUTH_TOKEN 环境变量"
-        "提供，绑定非回环地址时必须配置",
+        "提供，命令行传入会留在进程列表与 shell 历史中；绑定非回环地址时必须配置",
     )
     parser.add_argument(
         "--ssl-certfile",
@@ -230,15 +230,14 @@ def _validate_transport_args(args: argparse.Namespace) -> str | None:
 def _validate_http_security(
     args: argparse.Namespace,
     auth_token: str,
-    loopback_hosts: Collection[str],
 ) -> str | None:
     """校验 streamable-http 绑定安全性，返回错误消息；安全组合时返回 None。
 
     非回环绑定必须配置鉴权令牌，携带令牌后还须配置 TLS 或显式豁免，避免未授权
-    访问与 Bearer 令牌明文传输。auth_token 为解析后的最终令牌，回环地址集合由
-    调用方传入，本模块不依赖传输层私有符号。仅 streamable-http 需要校验。
+    访问与 Bearer 令牌明文传输。auth_token 为解析后的最终令牌，回环判定经
+    transport 的公共函数。仅 streamable-http 需要校验。
     """
-    if args.transport != "streamable-http" or args.host in loopback_hosts:
+    if args.transport != "streamable-http" or is_loopback_bind_host(args.host):
         return None
     if not auth_token:
         return (

@@ -1,10 +1,10 @@
 """Seedream MCP 服务器主模块。
 
 注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，风格预设
-Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源，并承担配置注入、
-cli_main 入口与传输分派。MCPServer 实例与共享资源生命周期由 resources 模块持有，
-本模块导入 mcp 完成注册并重导出 resources/cli/transport 符号，保持既有导入面与
-tests 访问路径不变。
+Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源。MCPServer 实例与
+共享资源生命周期由 resources 模块持有，本模块导入 mcp 完成注册并重导出
+resources/transport 符号保持既有导入面；启动编排经 bootstrap 再导出 cli_main
+维持 entry point 与 python -m 入口。
 
 outputSchema 声明契约：五个工具函数的返回类型注解为
 ``Annotated[CallToolResult, ...StructuredOutput]``，SDK 据注解元数据生成
@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any
@@ -47,19 +46,10 @@ from mcp.types import (
 from mcp.types.version import is_version_at_least
 from pydantic import BaseModel, Field, ValidationError
 
-from .cli import (
-    _build_arg_parser,
-    _build_config_from_args,
-    _build_run_options,
-    _validate_http_security,
-    _validate_transport_args,
-)
 from .config import (
     LIFESPAN_KEY_CONFIG,
     SeedreamConfig,
-    drain_pending_build_warnings,
     get_active_config,
-    set_active_config,
 )
 from .tools import (
     BrowseImagesInput,
@@ -137,22 +127,14 @@ from .tools.core.outputs import (
     build_error_dict,
     build_error_structured,
 )
-from .transport import (
-    _LOOPBACK_HOSTS,
-    _resolve_http_auth_token,
-    _run_streamable_http,
-    _warn_remote_exposure,
-)
-from .utils.core.errors import SeedreamConfigError, format_error_for_user
-from .utils.core.logs import get_logger, setup_logging
+from .utils.core.errors import SeedreamConfigError
+from .utils.core.logs import get_logger
 from .utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
 from .utils.io.io_path import (
-    drain_pending_start_messages,
     get_workspace_roots,
-    resolve_log_file_path,
     session_declares_roots_capability,
     workspace_roots_scope,
     workspace_roots_scope_from_result,
@@ -162,16 +144,14 @@ from .utils.model.model_capabilities import (
     model_payloads,
 )
 
-# resources 符号重导出：mcp、SERVER_NAME、SERVER_VERSION、_sync_cleanup 与
-# rebind_request_state_security 为本模块直接使用，其余供 tests 经 server 模块访问。
+# resources 符号重导出：mcp 与 SERVER_NAME/SERVER_VERSION 为本模块直接使用，其余
+# 供 tests 经 server 模块访问。
 from .resources import (  # noqa: F401
     SERVER_NAME,
     SERVER_VERSION,
     _reset_lifespan_state,
-    _sync_cleanup,
     app_lifespan,
     mcp,
-    rebind_request_state_security,
 )
 
 # ASGI 中间件类重导出，供 tests 经 server 模块访问。
@@ -179,6 +159,9 @@ from .transport import (  # noqa: F401
     _BearerTokenAuthMiddleware,
     _LimitRequestBodyMiddleware,
 )
+
+# 启动编排拆至 bootstrap，再导出 cli_main 维持 entry point 与 python -m 入口。
+from .bootstrap import cli_main
 
 # ==================== 工具注解常量 ====================
 
@@ -986,95 +969,6 @@ def style_oil_painting_prompt(
 ) -> str:
     """生成油画风格图片的提示词模板，可作为文生图 prompt 使用。"""
     return _build_style_prompt(subject, "油画风格，厚重笔触，丰富层次，经典光影，艺术质感")
-
-
-# ==================== 主入口函数 ====================
-
-
-def cli_main() -> int:
-    """执行命令行主流程：解析参数、构建配置、初始化日志并按传输方式启动服务器。
-
-    Returns:
-        进程退出码，0 为正常退出，1 为配置错误或运行异常。
-    """
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-
-    try:
-        config = _build_config_from_args(args)
-    except SeedreamConfigError as exc:
-        print(f"配置错误: {exc.message}", file=sys.stderr)
-        return 1
-
-    # 注入活动配置，server 与 io_path 经 get_active_config 共用此实例。
-    set_active_config(config)
-
-    # 按最终活动配置重绑导入期固化的密钥环，使 --config-file 携带的密钥生效；
-    # 探测失败时 rebind 返回 False 不阻断启动。
-    rebind_request_state_security(config.request_state_secret_keys)
-
-    # setup_logging 的目录创建等 I/O 在只读容器或受限账号下可能抛 OSError，捕获后
-    # 降级为 stderr 输出与退出码 1；不经 format_error_for_user，以免未知错误标签
-    # 误导排查并回显绝对路径。日志文件路径由 io_path 单点求值，回退链整体不可
-    # 解析时同此降级退出。
-    try:
-        setup_logging(
-            config.log_level,
-            str(resolve_log_file_path()),
-            force_standard_logging=True,
-            rotation_mb=config.log_rotation_size,
-            retention_days=config.log_retention_days,
-        )
-    except SeedreamConfigError as exc:
-        print(f"日志目录推导失败: {exc.message}", file=sys.stderr)
-        return 1
-    except OSError:
-        print("日志系统初始化失败（请检查日志目录权限或磁盘空间）", file=sys.stderr)
-        return 1
-    drain_pending_start_messages()
-    drain_pending_build_warnings()
-    logger.info(
-        "Seedream MCP 启动: {} (version {})",
-        SERVER_NAME,
-        SERVER_VERSION,
-    )
-
-    try:
-        transport = _build_run_options(args)
-        auth_token = ""
-        error = _validate_transport_args(args)
-        if error is None and transport == "streamable-http":
-            auth_token = _resolve_http_auth_token(args)
-            error = _validate_http_security(args, auth_token, _LOOPBACK_HOSTS)
-        if error is not None:
-            logger.error(error)
-            # 退出路径的 stderr 兜底：SEEDREAM_LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见
-            print(error, file=sys.stderr)
-            return 1
-        if transport == "streamable-http":
-            _warn_remote_exposure(args.host, auth_enabled=bool(auth_token))
-            _run_streamable_http(
-                args.host,
-                args.port,
-                auth_token,
-                ssl_certfile=args.ssl_certfile,
-                ssl_keyfile=args.ssl_keyfile,
-                stateless=args.stateless,
-                web_enabled=config.web_enabled,
-            )
-        else:
-            mcp.run(transport=transport)
-    except KeyboardInterrupt:
-        logger.info("收到中断信号，正在退出。")
-        return 0
-    except Exception as exc:
-        logger.exception("服务器运行异常")
-        print(f"服务器运行失败: {format_error_for_user(exc)}", file=sys.stderr)
-        return 1
-    finally:
-        _sync_cleanup()
-
-    return 0
 
 
 # ==================== 模块执行入口 ====================

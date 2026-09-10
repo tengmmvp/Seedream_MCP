@@ -92,7 +92,7 @@ def test_create_mcp_server_constructs_in_both_key_forms(
 
 
 def test_static_list_cache_hints_cover_only_static_faces() -> None:
-    """缓存提示仅覆盖五个静态面并保持默认 private 作用域，resources/read 不在内。"""
+    """缓存提示仅覆盖五个静态面并声明 public 作用域，resources/read 不在内。"""
     hints = resources_module._STATIC_LIST_CACHE_HINTS
 
     assert set(hints) == {
@@ -103,7 +103,7 @@ def test_static_list_cache_hints_cover_only_static_faces() -> None:
         "server/discover",
     }
     assert all(hint.ttl_ms == resources_module._STATIC_LIST_CACHE_TTL_MS for hint in hints.values())
-    assert all(hint.scope == "private" for hint in hints.values())
+    assert all(hint.scope == "public" for hint in hints.values())
 
 
 def _singleton_boundary() -> RequestStateBoundary:

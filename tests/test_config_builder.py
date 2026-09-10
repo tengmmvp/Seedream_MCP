@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+import seedream_mcp._config_sources as config_sources
 import seedream_mcp.config as config_module
 from _log_fakes import capture_loguru_messages
 from seedream_mcp.config import build_config_from_sources
@@ -112,17 +113,22 @@ def test_build_config_raises_when_explicit_env_file_missing(tmp_path: Path) -> N
 def test_build_config_reads_cwd_env_when_env_file_not_provided(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未显式指定 env 文件时读取工作目录下的 .env。"""
+    """未显式指定 env 文件时读取工作目录下的 .env，并提示该隐式加载。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
     monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
-    monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
 
     _write_env_file(
         tmp_path / ".env", "ARK_API_KEY=cwd_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n"
     )
 
-    config = build_config_from_sources()
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources()
+        config_module.drain_pending_build_warnings()
+
+    assert any("已加载当前工作目录 .env" in record for record in records)
 
     assert config.api_key == "cwd_key"
     assert config.model_id == "doubao-seedream-4-0-250828"
@@ -139,7 +145,7 @@ def test_build_config_falls_back_to_default_env_when_cwd_env_missing(
 
     default_env = tmp_path / "default.env"
     _write_env_file(default_env, "ARK_API_KEY=default_key\n")
-    monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", default_env)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
 
     config = build_config_from_sources()
 
@@ -159,7 +165,7 @@ def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
 
     default_env = tmp_path / "default.env"
     _write_env_file(default_env, "ARK_API_KEY=default_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.5\n")
-    monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", default_env)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
 
     _write_env_file(runtime_dir / ".env", "SEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
 
@@ -181,7 +187,7 @@ def test_build_config_does_not_inject_dotenv_to_os_environ(
     monkeypatch.chdir(runtime_dir)
     monkeypatch.delenv("ARK_API_KEY", raising=False)
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
-    monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
 
     _write_env_file(
         runtime_dir / ".env",
@@ -243,7 +249,7 @@ def test_build_config_loads_http_auth_token_from_env_file(
 ) -> None:
     """SEEDREAM_HTTP_AUTH_TOKEN 经 .env 配置链加载。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    monkeypatch.setattr(config_module, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
     _write_env_file(
         tmp_path / ".env", "ARK_API_KEY=k\nSEEDREAM_HTTP_AUTH_TOKEN=token1234567890abcd\n"
     )
@@ -412,15 +418,15 @@ def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
 
 def test_direct_construction_build_warnings_stay_on_instance() -> None:
     """直接构造产生的构建期告警留在实例，不混入全局 drain 队列。"""
-    from seedream_mcp.config import SeedreamConfig, _pending_build_warnings
+    from seedream_mcp.config import SeedreamConfig, _BUILD_WARNINGS
 
-    before = list(_pending_build_warnings)
+    before = _BUILD_WARNINGS.snapshot()
     config = SeedreamConfig(
         api_key="k", base_url="http://10.0.0.1/api/v3", allow_http_base_url=True
     )
 
     assert config._build_warnings, "http 明文豁免应产生实例告警"
-    assert _pending_build_warnings == before
+    assert _BUILD_WARNINGS.snapshot() == before
 
 
 def test_to_dict_masks_sensitive_fields() -> None:
