@@ -14,7 +14,6 @@ from seedream_mcp.tools.core._shared import _extract_parallel_request_error
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
     _sanitize_image_errors,
-    aggregate_parallel_generation_results,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
@@ -567,9 +566,9 @@ def test_pipeline_single_sanitization_shared_by_both_outlets() -> None:
     assert message.count("<truncated:") == 1
     assert "错误信息:" in text
     assert "<truncated:" in text
-    # 已净化文本再次进入净化会二次截断，对照证明上方结果来自单次净化。
+    # 净化幂等：已净化文本再次进入净化恒等，不叠加截断标记。
     re_sanitized = _sanitize_image_errors([{"error": {"message": message}}])
-    assert re_sanitized[0]["error"]["message"] != message
+    assert re_sanitized[0]["error"]["message"] == message
 
 
 def test_independent_structured_call_sanitizes_internally() -> None:
@@ -599,13 +598,12 @@ def test_sanitize_image_errors_does_not_mutate_input_list() -> None:
     assert sanitized[0]["size"] == "2K  FAKE"
 
 
-def test_aggregated_failure_message_not_resanitized_in_both_outlets() -> None:
-    """聚合格式结果的失败消息已在源头净化：两出口直接渲染，截断标记不叠加。
+def test_aggregated_failure_message_survives_repeated_sanitization_in_both_outlets() -> None:
+    """聚合格式结果的失败消息为净化产物：两出口重复净化恒等，截断标记不叠加。
 
-    消息总长超过截断上限且已携带截断标记，出口若重复净化会再次截断叠加第二个
-    标记。
+    消息总长恰为截断上限且携带截断标记，净化幂等使出口可无条件净化。
     """
-    truncated_message = "<truncated:600 chars> " + "x" * 500
+    truncated_message = "<truncated:600 chars> " + "x" * 475 + "..."
     result = {
         "success": False,
         "status": "failed",
@@ -636,10 +634,9 @@ def test_aggregated_failure_message_not_resanitized_in_both_outlets() -> None:
 
 
 def test_forged_request_failed_sentinel_sanitized_in_single_request_path() -> None:
-    """单请求路径伪造占位 sentinel type 不获得豁免：error 照常净化。
+    """单请求路径伪造占位 sentinel type 不逃脱净化：凭据与 CRLF 照常剥离。
 
-    豁免以聚合来源加内部标记双因子判定，上游透传的 data 项无法借伪造
-    sentinel type 免除净化。
+    占位项宽限按 type 判定，伪造 sentinel 至多换得宽截断。
     """
     result = {
         "success": True,
@@ -668,9 +665,9 @@ def test_forged_request_failed_sentinel_sanitized_in_single_request_path() -> No
     assert message == "boom  Authorization: ***"
 
 
-def test_aggregated_placeholder_exempt_and_marker_stripped() -> None:
-    """聚合占位项凭内部标记豁免二次净化，标记键不进入 structuredContent。"""
-    truncated_message = "<truncated:600 chars> " + "x" * 500
+def test_aggregated_placeholder_message_survives_sanitization() -> None:
+    """聚合占位项携带的已净化消息经出口净化恒等保留，截断标记不叠加。"""
+    truncated_message = "<truncated:600 chars> " + "x" * 475 + "..."
     result = {
         "success": False,
         "status": "failed",
@@ -678,7 +675,6 @@ def test_aggregated_placeholder_exempt_and_marker_stripped() -> None:
         "data": [
             {
                 "type": "image_generation.request_failed",
-                results_module._PLACEHOLDER_MARKER: True,
                 "request_index": 1,
                 "error": {"type": "api_error", "message": truncated_message},
             }
@@ -699,36 +695,67 @@ def test_aggregated_placeholder_exempt_and_marker_stripped() -> None:
         auto_save_error=None,
     )
 
-    item = structured["data"][0]
-    assert results_module._PLACEHOLDER_MARKER not in item
-    assert item["error"]["message"] == truncated_message
+    assert structured["data"][0]["error"]["message"] == truncated_message
 
 
-def test_aggregate_strips_injected_placeholder_marker_from_upstream_items() -> None:
-    """聚合复制上游图片项时剔除其携带的占位标记键，伪造标记不获得豁免。"""
-    aggregated = aggregate_parallel_generation_results(
-        request_results=[
-            {
-                "success": True,
-                "status": "completed",
-                "usage": {},
-                "data": [
-                    {
-                        "url": "https://example.com/a.png",
-                        results_module._PLACEHOLDER_MARKER: True,
-                        "error": {"message": "x\r\napi_key=leaked"},
-                    }
-                ],
-            }
-        ],
-        request_errors={},
+def test_top_level_and_image_error_ladder_share_single_sanitizer() -> None:
+    """顶层 error 与图片项 error 经同一净化阶梯：非字符串 code 归一化后净化，口径一致。"""
+    error_payload = {"code": {"nested": "c" * 600}, "message": "boom\r\nBearer sk-1"}
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result={"success": False, "status": "failed", "error": error_payload},
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
     )
 
-    merged = aggregated["data"][0]
-    assert merged["url"] == "https://example.com/a.png"
-    assert results_module._PLACEHOLDER_MARKER not in merged
-    sanitized = _sanitize_image_errors([merged], aggregated=True)
-    assert "leaked" not in sanitized[0]["error"]["message"]
+    top_code = structured["error"]["code"]
+    entry = _sanitize_image_errors([{"error": dict(error_payload)}])[0]["error"]
+    assert top_code == entry["code"]
+    assert isinstance(top_code, str)
+    assert top_code.count("<truncated:") == 1
+
+
+def test_aggregated_assembled_messages_keep_recovery_guidance() -> None:
+    """聚合格式的本侧组装消息超错误通道上限时走宽限净化，恢复指引不被截断。
+
+    聚合顶层摘要与占位项 message 为 format_error_for_user 组装产物，可超错误
+    通道 500 字符上限。
+    """
+    guidance = "API调用失败: " + "z" * 620 + " 请检查您的API密钥是否正确"
+    result = {
+        "success": False,
+        "status": "failed",
+        "error": {"type": "api_error", "message": guidance},
+        "data": [
+            {
+                "type": "image_generation.request_failed",
+                "request_index": 1,
+                "error": {"type": "api_error", "message": guidance},
+            }
+        ],
+        "batch": {
+            "request_count": 1,
+            "success_requests": 0,
+            "failed_requests": 1,
+            "errors": [{"request_index": 1, "message": guidance}],
+        },
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert f"图片生成失败: {guidance}" in text
+    assert f"  请求 1: {guidance}" in text
+    assert structured["error"]["message"] == guidance
+    assert structured["data"][0]["error"]["message"] == guidance
 
 
 # ==================== usage 字段净化 ====================

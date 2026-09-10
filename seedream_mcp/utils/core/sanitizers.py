@@ -36,8 +36,36 @@ def normalize_message_text(value: Any) -> str:
     return value if isinstance(value, str) else _normalize_non_str_message(value)
 
 
+# 截断标记的头部长度模式，补偿截断前剥离旧标记保持产物单标记。
+_TRUNCATION_MARKER_PREFIX = re.compile(r"^<truncated:\d+ chars> ")
+
+
+def _truncate_text_with_marker(text: str, limit: int, *, reported_length: int | None = None) -> str:
+    """截断文本并标注长度，产物总长不超过 limit。
+
+    总长受控使截断产物再次进入截断时不再超限；limit 连标记加省略号都装不下时
+    退化为纯截断，不产出残缺标记。reported_length 覆盖标记申报的长度，供
+    补偿截断沿用原始输入的长度申报。
+    """
+    length = len(text) if reported_length is None else reported_length
+    marker = f"<truncated:{length} chars> "
+    if limit <= len(marker) + len("..."):
+        return text[:limit]
+    keep = limit - len(marker) - len("...")
+    return f"{marker}{text[:keep]}..."
+
+
+def _retruncate_with_single_marker(text: str, limit: int, reported_length: int) -> str:
+    """剥离旧截断标记后按申报长度重拼单标记截断，补偿脱敏膨胀。
+
+    错误文本与 URL 数据两条通道的补偿共用，产物恒单标记。
+    """
+    stripped = _TRUNCATION_MARKER_PREFIX.sub("", text, count=1)
+    return _truncate_text_with_marker(stripped, limit, reported_length=reported_length)
+
+
 def truncate_upstream_message_fragment(value: Any) -> str:
-    """归一化并截断上游错误 message 片段至 8KB，超长时保留前缀并标注原长度。
+    """归一化并截断上游错误 message 片段至 8KB 内，超长时保留前缀并标注原长度。
 
     handle_api_error 拼入上游 error/message 字段前统一经本函数处理，防止 dict 形态
     经 repr 插值绕过键值脱敏、超大错误体随异常进入日志；io_sse 的请求级错误事件
@@ -45,7 +73,7 @@ def truncate_upstream_message_fragment(value: Any) -> str:
     """
     text = normalize_message_text(value)
     if len(text) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
-        return f"<truncated:{len(text)} chars> {text[:_UPSTREAM_MESSAGE_FRAGMENT_LIMIT]}..."
+        return _truncate_text_with_marker(text, _UPSTREAM_MESSAGE_FRAGMENT_LIMIT)
     return text
 
 
@@ -130,7 +158,7 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
     if isinstance(value, str):
         if len(value) <= limit:
             return value
-        return f"<truncated:{len(value)} chars> {value[:limit]}..."
+        return _truncate_text_with_marker(value, limit)
     if isinstance(value, (dict, list)):
         if len(value) > _CONTAINER_REPR_ELEMENT_LIMIT:
             return _container_summary(value)
@@ -363,16 +391,21 @@ def sanitize_error_text(
 
     先截断使脱敏正则的工作长度受 limit 约束，是对抗超长构造输入的纵深兜底；丢弃
     段凭据随截断消失，保留段凭据被脱敏剥离，截断点落在键名中间时值已一并丢弃，
-    两个方向都不残留。异常路径外的结果数据出口——SSE 失败事件、响应 data 项的
-    error 字段、并行聚合消息、自动保存 error——统一经本函数收敛为同一防护口径。
-    非字符串原样返回。
+    两个方向都不残留。脱敏把短值替换为 *** 可能使产物超过 limit，剥旧标记重拼
+    单标记补偿一轮即收敛：补偿截断后的文本已脱敏，再脱敏恒等；异常路径外的
+    结果数据出口——SSE 失败事件、响应 data 项的 error 字段、并行聚合消息、
+    自动保存 error——统一经本函数收敛为同一防护口径。非字符串原样返回。
     """
     if not isinstance(message, str):
         return message
-    return cast(
-        "_SanitizedValue",
-        _sanitize_output_string(_truncate_value_for_output(message, limit=limit)),
-    )
+    sanitized = _sanitize_output_string(_truncate_value_for_output(message, limit=limit))
+    if len(sanitized) > limit:
+        sanitized = _sanitize_output_string(
+            _retruncate_with_single_marker(sanitized, limit, len(message))
+        )
+    if len(sanitized) > limit:
+        sanitized = sanitized[:limit]
+    return cast("_SanitizedValue", sanitized)
 
 
 # 数据字段序列化的防御性长度上限：URL 等数据字段不施加错误文本的 500 字符截断，
@@ -389,12 +422,15 @@ def _sanitize_url_data_text(value: str, limit: int) -> str:
 
     查询参数是 URL 的组成部分而非凭据回显，键值裸值脱敏会把签名 URL 的查询串整体
     替换为 *** 使数据不可用；userinfo 与 Bearer 形态的凭据不受豁免影响，仍在此
-    路径剥离。
+    路径剥离。Bearer 短令牌替换为 *** 的膨胀与错误文本通道同口径补偿截断。
     """
     truncated = cast("str", _truncate_value_for_output(value, limit=limit))
     redacted = CONTROL_CHARS_PATTERN.sub(" ", truncated)
     redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
-    return _URL_USERINFO_PATTERN.sub(r"\1", redacted)
+    redacted = _URL_USERINFO_PATTERN.sub(r"\1", redacted)
+    if len(redacted) > limit:
+        redacted = _retruncate_with_single_marker(redacted, limit, len(value))
+    return redacted
 
 
 def sanitize_data_text(value: _SanitizedValue, limit: int = _DATA_OUTPUT_LIMIT) -> _SanitizedValue:
@@ -404,7 +440,8 @@ def sanitize_data_text(value: _SanitizedValue, limit: int = _DATA_OUTPUT_LIMIT) 
     URL 不可用，故仅以 16KB 防御上限兜底。以 http(s):// 开头、strip 首尾后不含
     空白的纯 URL 走 _sanitize_url_data_text 轻量路径，不应用键值脱敏；URL 前缀但
     含空白或控制字符的混合文本与非 URL 文本仍走 sanitize_error_text 全套脱敏，
-    凭据不借 URL 形态逃逸。非字符串原样返回。
+    凭据不借 URL 形态逃逸。超限 URL 的截断产物不再以 http(s):// 开头，再净化按
+    错误文本通道口径收敛（产物已不可用，仅长度与形态变化）。非字符串原样返回。
     """
     if not isinstance(value, str):
         return value

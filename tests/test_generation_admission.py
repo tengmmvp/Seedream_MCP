@@ -1,18 +1,15 @@
-"""生成并发准入测试：请求级信号量约束同时在途的生成 API 请求数。"""
+"""生成并发准入测试：_call_api 层信号量约束同时在途的生成 API 请求数。"""
 
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 
+import pytest
+
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core.context import GenerationExecutionContext
-from seedream_mcp.tools.core.parallel import _run_generation_requests
-from seedream_mcp.utils.core.logs import get_logger
 from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
-
-from _generation_fixtures import make_generation_context
 
 
 def test_generation_admission_default_limit() -> None:
@@ -55,34 +52,30 @@ async def test_loop_bound_semaphore_rebuilds_on_limit_change() -> None:
         await task
 
 
-async def test_generation_admission_caps_batch_inflight_requests() -> None:
-    """批次内并行请求各占一个准入名额，在途 API 请求数不超过配置限值。"""
+async def test_generation_admission_caps_inflight_api_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_call_api 层的准入信号量约束同时在途的生成 API 请求数，超限排队。"""
     config = SeedreamConfig(api_key="k", generate_concurrency=2)
     client = SeedreamClient(config)
-    context = make_generation_context(
-        prompt="p",
-        request_count=6,
-        parallelism=6,
-        enable_auto_save=False,
-    )
     active = 0
     peak = 0
 
-    async def executor(_client: SeedreamClient, _ctx: GenerationExecutionContext) -> dict[str, Any]:
+    async def fake_send(**_kwargs: Any) -> dict[str, Any]:
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
         await asyncio.sleep(0.02)
         active -= 1
-        return {"success": True, "data": [], "usage": {}, "status": "completed"}
+        return {"success": True}
 
-    await _run_generation_requests(
-        client=client,
-        context=context,
-        config=config,
-        ctx=None,
-        request_executor=executor,
-        module_logger=get_logger(),
-    )
+    async def noop() -> None:
+        return None
+
+    monkeypatch.setattr(client, "_ensure_client", noop)
+    monkeypatch.setattr(client, "_get_http_client", lambda: None)
+    monkeypatch.setattr(client, "_send_standard_request", fake_send)
+
+    await asyncio.gather(*(client._call_api("t2i", {"prompt": "p"}) for _ in range(6)))
 
     assert peak == 2

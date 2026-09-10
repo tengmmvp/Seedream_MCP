@@ -53,7 +53,6 @@ from .parallel import (
 )
 from .results import (
     _build_generation_structured_result,
-    _is_aggregated_result,
     _sanitize_image_errors,
     aggregate_parallel_generation_results,
     extract_images,
@@ -166,7 +165,6 @@ async def _dispatch_generation_requests(
         return await _run_generation_requests(
             client=shared_client,
             context=context,
-            config=config,
             ctx=ctx,
             request_executor=request_executor,
             module_logger=module_logger,
@@ -175,7 +173,6 @@ async def _dispatch_generation_requests(
         return await _run_generation_requests(
             client=client,
             context=context,
-            config=config,
             ctx=ctx,
             request_executor=request_executor,
             module_logger=module_logger,
@@ -376,10 +373,8 @@ async def execute_generation_handler(
         )
 
         # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
-        # 净化非幂等，重复净化会使超长片段的截断标记叠加。大批量净化下沉工作线程。
-        sanitized_images = await asyncio.to_thread(
-            _sanitize_image_errors, images, aggregated=_is_aggregated_result(result)
-        )
+        # 净化幂等，下游意外重复净化恒等无害。大批量净化下沉工作线程。
+        sanitized_images = await asyncio.to_thread(_sanitize_image_errors, images)
 
         response_text, structured_result = _format_generation_outputs(
             metadata=metadata,

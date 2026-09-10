@@ -7,6 +7,8 @@ from collections.abc import Callable
 from typing import Any
 
 from ...utils.core.sanitizers import (
+    _DATA_OUTPUT_LIMIT,
+    _MESSAGE_OUTPUT_LIMIT,
     normalize_message_text,
     sanitize_data_text,
     sanitize_error_text,
@@ -98,37 +100,45 @@ def _sanitize_unknown_value(value: Any) -> Any:
     return _sanitize_value_tree(value, sanitize_data_text)
 
 
-def _sanitize_image_error_entry(error: Any) -> dict[str, Any]:
+def sanitize_error_dict(
+    error: dict[str, Any], *, message_limit: int = _MESSAGE_OUTPUT_LIMIT
+) -> dict[str, Any]:
+    """净化错误 dict 的各分量，返回净化后的新 dict，供全部错误出口共用。
+
+    message 与 code 先归一化再过错误文本通道，其余键过容器净化，凭据与 CRLF
+    不借旁路键穿透；message_limit 覆盖 message 的截断上限，供本侧组装的长文案
+    （含恢复指引的聚合消息）改用防御性宽上限，脱敏口径不变。
+    """
+    sanitized_error = dict(error)
+    message = error.get("message")
+    if message is not None:
+        sanitized_error["message"] = sanitize_error_text(
+            normalize_message_text(message), limit=message_limit
+        )
+    code = error.get("code")
+    if code is not None:
+        sanitized_error["code"] = sanitize_error_text(normalize_message_text(code))
+    for key, value in error.items():
+        if key in ("message", "code"):
+            continue
+        sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
+        if sanitized_value != value:
+            sanitized_error[key] = sanitized_value
+    return sanitized_error
+
+
+def _sanitize_image_error_entry(
+    error: Any, *, message_limit: int = _MESSAGE_OUTPUT_LIMIT
+) -> dict[str, Any]:
     """净化图片项的 error 字段，返回需回写的更新项。
 
-    dict 形态净化 message 与 code 两个自由文本分量；非 dict 形态整体经容器净化，
-    凭据与 CRLF 不借形态绕过。
+    dict 形态经 sanitize_error_dict 单点净化；非 dict 形态整体经容器净化，
+    凭据与 CRLF 不借形态绕过。message_limit 的语义见 sanitize_error_dict。
     """
     updates: dict[str, Any] = {}
     if isinstance(error, dict):
-        sanitized_error = dict(error)
-        changed = False
-        message = error.get("message")
-        if message is not None:
-            sanitized_message = sanitize_error_text(normalize_message_text(message))
-            if sanitized_message != message:
-                sanitized_error["message"] = sanitized_message
-                changed = True
-        code = error.get("code")
-        if code is not None:
-            sanitized_code = sanitize_error_text(normalize_message_text(code))
-            if sanitized_code != code:
-                sanitized_error["code"] = sanitized_code
-                changed = True
-        # message/code 以外的键同样过净化管线，凭据与 CRLF 不借旁路键穿透。
-        for key, value in error.items():
-            if key in ("message", "code"):
-                continue
-            sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
-            if sanitized_value != value:
-                sanitized_error[key] = sanitized_value
-                changed = True
-        if changed:
+        sanitized_error = sanitize_error_dict(error, message_limit=message_limit)
+        if sanitized_error != error:
             updates["error"] = sanitized_error
     elif error is not None:
         sanitized_non_dict = _sanitize_value_tree(error, sanitize_error_text)
@@ -181,39 +191,33 @@ def _sanitize_unknown_fields(image: dict[str, Any]) -> dict[str, Any]:
 # 并行批次失败占位项的 type 标识；其 error.message 已在聚合源头净化。
 _REQUEST_FAILED_TYPE = "image_generation.request_failed"
 
-# 占位项的内部标记键：error 净化豁免仅在聚合结果内对携带该标记的条目生效，
-# 上游透传的 data 项即使伪造 sentinel type 也无法获得豁免。聚合复制上游项时剔除
-# 该键防注入，净化出口剔除该键使其不进入 structuredContent。
-_PLACEHOLDER_MARKER = "__seedream_request_failed__"
+
+def message_limit_for(trusted_message: bool) -> int:
+    """消息净化上限单点：本侧组装产物走防御性宽限，上游自由文本走错误通道上限。
+
+    结果聚合与图片项净化共用本判定，宽限策略调整只改此处。
+    """
+    return _DATA_OUTPUT_LIMIT if trusted_message else _MESSAGE_OUTPUT_LIMIT
 
 
-def _sanitize_image_errors(
-    images: list[dict[str, Any]], *, aggregated: bool = False
-) -> list[dict[str, Any]]:
+def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """净化图片项内上游可回显自由内容的字段，返回净化后的列表。
 
     error 与 size/output_format/model/type 等短标识走 sanitize_error_text 截断语义；
     url、local_path/markdown_ref 与未知键走 sanitize_data_text 保留完整可用性；非
-    字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。仅净化后内容变化
-    的项做浅拷贝，其余项保持原对象引用，传入列表不被修改。净化非幂等，重复净化会使
-    超长片段的截断标记叠加，全部图片项（含 SSE 失败事件）经此处统一净化一次，
-    io_sse 源头不做净化。aggregated 为真时，携带本侧占位标记的
-    并行失败占位项整体跳过净化并剔除标记键；伪造 sentinel type 的上游透传项不
-    携带标记，照常净化。
+    字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。占位项（type 为
+    请求失败标识）的 error message 为本侧组装产物（含恢复指引），改用防御性宽
+    上限；上游伪造该 type 的可利用面为宽截断，与数据通道的 16KB 上限同量级，
+    脱敏口径不变。仅净化后内容变化的项做浅拷贝，其余项保持原对象引用，传入
+    列表不被修改。限内内容重复净化恒等；超长 URL 的截断产物再净化会按错误
+    文本通道口径收敛（产物已不可用，仅长度与形态变化）。全部图片项（含 SSE
+    失败事件）经此处统一净化，io_sse 源头不做净化。
     """
     sanitized_images = images
     for index, image in enumerate(images):
         updates: dict[str, Any] = {}
-        # 占位项豁免以聚合来源加内部标记双因子判定：全部字段均为本侧生成的常量、
-        # 序号与聚合源头已净化的消息，整体跳过净化，出口仅剔除标记键。
-        if aggregated and image.get(_PLACEHOLDER_MARKER) is True:
-            if sanitized_images is images:
-                sanitized_images = list(images)
-            sanitized_images[index] = {
-                key: value for key, value in image.items() if key != _PLACEHOLDER_MARKER
-            }
-            continue
-        updates.update(_sanitize_image_error_entry(image.get("error")))
+        message_limit = message_limit_for(image.get("type") == _REQUEST_FAILED_TYPE)
+        updates.update(_sanitize_image_error_entry(image.get("error"), message_limit=message_limit))
         # b64_json 合法形态为 str 载荷原样保留，非字符串的畸形取值置 None。
         b64_value = image.get("b64_json")
         if b64_value is not None and not isinstance(b64_value, str):

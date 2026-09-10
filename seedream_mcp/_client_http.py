@@ -16,6 +16,7 @@ import httpx
 
 from .config import SeedreamConfig
 from .request_plan import _ACTIVE_REQUEST_PLAN
+from .utils.core.loop_bound import loop_bound_semaphore
 from .utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
@@ -548,10 +549,20 @@ class _ClientHTTPMixin:
     async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         """调用 Seedream API。
 
-        按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误
-        类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；超时与网络
-        错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的 Seedream 异常。
+        进程级生成准入约束同时在途的生成 API 请求数，覆盖 MCP 工具与 Web 生成
+        入口；准入在请求构建完成后获取，构建期不占进程级并发容量，重试期间保持
+        占槽。按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时
+        按错误类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；
+        超时与网络错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的
+        Seedream 异常。
         """
+        async with loop_bound_semaphore(self.config.generate_concurrency, key="generate_admission"):
+            return await self._call_api_admitted(endpoint, request_data)
+
+    async def _call_api_admitted(
+        self, endpoint: str, request_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """准入槽内执行 API 调用，分发与重试语义见 _call_api。"""
         await self._ensure_client()
         client = self._get_http_client()
 

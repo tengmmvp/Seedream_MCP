@@ -14,11 +14,11 @@ from ...utils.core.sanitizers import (
 )
 from ...utils.io.io_save import AutoSaveResult
 from ._sanitize import (
-    _PLACEHOLDER_MARKER,
     _REQUEST_FAILED_TYPE,
     _sanitize_image_errors,
     _sanitize_usage,
-    _sanitize_value_tree,
+    message_limit_for,
+    sanitize_error_dict,
 )
 from ._shared import (
     _add_usage_value,
@@ -116,7 +116,6 @@ def aggregate_parallel_generation_results(
             merged_data.append(
                 {
                     "type": _REQUEST_FAILED_TYPE,
-                    _PLACEHOLDER_MARKER: True,
                     "request_index": request_index,
                     "error": {
                         "type": (
@@ -141,8 +140,6 @@ def aggregate_parallel_generation_results(
         images = extract_images(result)
         for image in images:
             normalized_image = image.copy()
-            # 剔除上游可能携带的占位标记键，使豁免判定只对本侧写入的标记生效。
-            normalized_image.pop(_PLACEHOLDER_MARKER, None)
             normalized_image["request_index"] = request_index
             merged_data.append(normalized_image)
 
@@ -248,27 +245,41 @@ def _is_aggregated_result(result: dict[str, Any]) -> bool:
     """判定结果是否由并行聚合格式产出。
 
     batch 键仅由 aggregate_parallel_generation_results 写入，client 的单请求归一化
-    不透传该键；聚合格式的 error 与 batch.errors 的 message 已在聚合源头净化，出口
-    侧据此跳过二次净化，避免超长片段的截断标记叠加。
+    不透传该键；聚合格式的 error 与 batch.errors 的 message 为本侧组装产物
+    （format_error_for_user 逐段净化后拼装，含恢复指引，可超错误通道上限），
+    出口侧据此改用防御性宽上限净化。
     """
     return isinstance(result.get("batch"), dict)
+
+
+def _aggregated_message_limit(result: dict[str, Any]) -> int:
+    """消息净化上限：聚合组装产物走防御性宽限，判定单点见 message_limit_for。"""
+    return message_limit_for(_is_aggregated_result(result))
 
 
 def _format_failure_section(result: dict[str, Any]) -> str:
     """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。
 
-    单请求路径的 error 为上游自由内容，一律经净化与归一化输出：dict 形态优先按
+    error 为上游自由内容，一律经净化与归一化输出：dict 形态优先按
     message/msg/detail/error/code 阶梯提取，未命中时归一化 message 分量；空值回落
-    未知错误，字面量 None 与字典 repr 不进入用户可见文本。聚合格式结果的错误消息
-    已在源头净化，直接渲染不重复净化。
+    未知错误，字面量 None 与字典 repr 不进入用户可见文本。聚合格式的消息为本侧
+    组装产物（含恢复指引），净化改用防御性宽上限防截断指引；脱敏口径两档一致。
     """
+    aggregated = _is_aggregated_result(result)
+    message_limit = message_limit_for(aggregated)
+
     # 空值归入未知错误，与结构化出口口径一致。
     raw_error = result.get("error") or "未知错误"
     if isinstance(raw_error, dict):
-        if _is_aggregated_result(result):
-            # 聚合出口的 message 已在源头净化，重复净化会使截断标记叠加。
+        if aggregated:
+            # 聚合 error 为本侧组装的 {type, message} 结构，直取 message 走宽限
+            # 净化；五级阶梯服务于上游未知结构，其内部固定错误通道上限。
             message = raw_error.get("message")
-            error_text = message if isinstance(message, str) and message else "未知错误"
+            error_text = (
+                sanitize_error_text(message, limit=message_limit)
+                if isinstance(message, str) and message
+                else "未知错误"
+            )
         else:
             # dict 形态优先复用五级提取阶梯，与并行聚合的错误提取同口径。
             ladder_text = _normalize_error_message(raw_error)
@@ -296,9 +307,11 @@ def _format_failure_section(result: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         request_index = item.get("request_index")
-        # 聚合写入的 message 已在源头净化，非 str 形态仅归一化渲染。
         message = item.get("message", "请求失败")
-        error_message = message if isinstance(message, str) else normalize_message_text(message)
+        error_message = sanitize_error_text(
+            message if isinstance(message, str) else normalize_message_text(message),
+            limit=message_limit,
+        )
         if request_index is None:
             parts.append(f"  {error_message}")
         else:
@@ -445,8 +458,8 @@ def format_generation_response(
 
     Args:
         auto_save_error: 自动保存错误信息，存在时表示已降级跳过。
-        images: 预提取且已净化的图片列表，None 时内部提取并净化；已净化的列表重复
-            净化会使截断标记叠加，调用方不得重复传入净化前的列表。
+        images: 预提取且已净化的图片列表，None 时内部提取并净化；净化幂等，
+            重复传入已净化列表不改变结果。
         saveable_indices: 可保存图片在归一化列表中的原始索引，与 auto_save_results
             按位置对位；None 时自动保存段落回退保存序号。
 
@@ -457,9 +470,7 @@ def format_generation_response(
         return _format_failure_section(result)
 
     if images is None:
-        images = _sanitize_image_errors(
-            extract_images(result), aggregated=_is_aggregated_result(result)
-        )
+        images = _sanitize_image_errors(extract_images(result))
     usage = result.get("usage", {})
 
     parts: list[str] = [title, f"尺寸: {size}", ""]
@@ -516,20 +527,16 @@ def _build_generation_structured_result(
     绑定；成功与失败同构。
 
     Args:
-        images: 预提取且已净化的图片列表，None 时内部提取并净化；已净化的列表重复
-            净化会使截断标记叠加，调用方不得重复传入净化前的列表。
+        images: 预提取且已净化的图片列表，None 时内部提取并净化；净化幂等，
+            重复传入已净化列表不改变结果。
 
     Returns:
         structuredContent 字典，成功路径排除 error 键。
     """
     # b64_json 为用户显式请求的图像载荷，有意不做截断。流水线传入的 images 已
-    # 净化，直接消费；独立调用未传时在此完成首次净化。
+    # 净化且净化幂等，直接消费；独立调用未传时在此完成首次净化。
     sanitized_images = (
-        images
-        if images is not None
-        else _sanitize_image_errors(
-            extract_images(result), aggregated=_is_aggregated_result(result)
-        )
+        images if images is not None else _sanitize_image_errors(extract_images(result))
     )
     # status 为上游自由文本，同口径净化；非 str 归 None，畸形形态不使构造抛校验异常。
     raw_status = result.get("status")
@@ -568,7 +575,7 @@ def _build_generation_structured_result(
     if context.enable_auto_save:
         payload["auto_save"] = {
             "enabled": True,
-            # 已由 format_error_for_user 在源头净化，二次净化会叠加截断标记。
+            # 已由 format_error_for_user 在源头净化，净化幂等，无需二次处理。
             "error": auto_save_error,
             "results": [r.to_dict() for r in auto_save_results] if auto_save_results else [],
         }
@@ -580,24 +587,10 @@ def _build_generation_structured_result(
         # 空值回落未知错误，与文本通道口径一致。
         raw_error = result.get("error") or "未知错误"
         if isinstance(raw_error, dict):
-            sanitized_error = dict(raw_error)
-            # 聚合出口的 message 已在源头净化，重复净化会使截断标记叠加，跳过；
-            # 单请求路径的 message 为上游自由内容，可为任意 JSON 形态，非字符串先
-            # 归一化为文本再净化。
-            if "message" in sanitized_error and not _is_aggregated_result(result):
-                sanitized_error["message"] = sanitize_error_text(
-                    normalize_message_text(sanitized_error["message"])
-                )
-            # code 为上游自由文本，两种来源下均净化。
-            if isinstance(sanitized_error.get("code"), str):
-                sanitized_error["code"] = sanitize_error_text(sanitized_error["code"])
-            # message/code 以外的键过容器净化，与图片项 error 分量同口径。
-            for key, value in raw_error.items():
-                if key in ("message", "code"):
-                    continue
-                sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
-                if sanitized_value != value:
-                    sanitized_error[key] = sanitized_value
+            # 聚合来源的 message 为本侧组装产物（含恢复指引），走防御性宽上限。
+            sanitized_error = sanitize_error_dict(
+                raw_error, message_limit=_aggregated_message_limit(result)
+            )
             # 上游透传错误不含 type 键时兜底补齐，与 build_error_dict 的错误结构对齐。
             sanitized_error.setdefault("type", "generation_failed")
             payload["error"] = sanitized_error

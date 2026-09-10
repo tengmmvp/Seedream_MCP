@@ -570,7 +570,6 @@ async def test_parallel_batch_survives_stalled_progress_client(
     result = await parallel_module._execute_parallel_generation_requests(
         client=cast(SeedreamClient, None),
         context=context,
-        config=config,
         request_executor=_executor,
         module_logger=cast(Any, _QuietLogger()),
         ctx=cast(Any, ctx),

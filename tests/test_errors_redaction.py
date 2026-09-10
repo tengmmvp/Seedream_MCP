@@ -24,6 +24,7 @@ from seedream_mcp.utils.core.sanitizers import (
     _truncate_value_for_output,
     sanitize_data_text,
     sanitize_error_text,
+    truncate_upstream_message_fragment,
 )
 
 # ==================== Bearer 令牌剥离管线：_sanitize_output_string ====================
@@ -65,12 +66,58 @@ def test_truncate_value_returns_short_string_unchanged() -> None:
 
 
 def test_truncate_value_truncates_long_string_with_marker() -> None:
-    """超长字符串截断并附截断标记。"""
+    """超长字符串截断并附截断标记，产物总长不超过上限。"""
     long_value = "x" * 300
 
     truncated = _truncate_value_for_output(long_value, limit=200)
 
-    assert truncated == "<truncated:300 chars> " + "x" * 200 + "..."
+    assert truncated == "<truncated:300 chars> " + "x" * 175 + "..."
+    assert len(truncated) <= 200
+
+
+def test_sanitize_error_text_idempotent() -> None:
+    """净化幂等：截断与脱敏产物重复净化恒等，截断标记不叠加。"""
+    message = "y" * 800 + " api_key=leaked\r\nBearer sk-1"
+
+    once = sanitize_error_text(message)
+    twice = sanitize_error_text(once)
+
+    assert len(once) <= 500
+    assert once.count("<truncated:") == 1
+    assert "leaked" not in once
+    assert twice == once
+
+
+def test_sanitize_error_text_idempotent_when_redaction_expands() -> None:
+    """脱敏短值膨胀（替换为 ***）不破坏幂等：补偿截断后产物稳定，标记恒单个。"""
+    # Bearer 单字符令牌每处替换为 *** 膨胀 2 字符，恰在 limit 的截断产物膨胀后
+    # 触发补偿截断。
+    message = "filler " * 60 + "Bearer a " * 10 + "y" * 200
+
+    once = sanitize_error_text(message)
+    twice = sanitize_error_text(once)
+
+    assert len(once) <= 500
+    assert once.count("<truncated:") == 1
+    assert "Bearer ***" in once
+    assert "Bearer a" not in once
+    assert twice == once
+
+
+def test_sanitize_error_text_tiny_limit_degrades_to_plain_cut() -> None:
+    """limit 装不下标记加省略号时退化为纯截断，不产出残缺标记。"""
+    result = sanitize_error_text("k" * 50, limit=10)
+
+    assert result == "k" * 10
+    assert "<truncated" not in result
+
+
+def test_truncate_upstream_message_fragment_idempotent() -> None:
+    """8KB 片段截断产物重复截断恒等，标记不叠加。"""
+    fragment = truncate_upstream_message_fragment("z" * 9000)
+
+    assert len(fragment) <= 8 * 1024
+    assert truncate_upstream_message_fragment(fragment) == fragment
 
 
 def test_truncate_value_summarizes_oversized_dict() -> None:
@@ -137,7 +184,7 @@ def test_validation_error_truncates_long_value_at_construction() -> None:
     """
     error = SeedreamValidationError("参数无效", field="image", value="x" * 300)
 
-    assert error.value == "<truncated:300 chars> " + "x" * 200 + "..."
+    assert error.value == "<truncated:300 chars> " + "x" * 175 + "..."
     assert SeedreamValidationError("m", value="abc").value == "abc"
     assert SeedreamValidationError("m").value is None
 
@@ -221,7 +268,7 @@ def test_format_error_for_user_truncates_overlong_error_code() -> None:
     rendered = format_error_for_user(err)
 
     assert "<truncated:900 chars>" in rendered
-    assert rendered.count("C") == 500
+    assert rendered.count("C") == 475
 
 
 def test_format_error_for_user_strips_crlf_in_message() -> None:

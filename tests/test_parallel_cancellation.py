@@ -57,7 +57,6 @@ async def test_parallel_batch_cancellation_propagates_to_inflight_requests() -> 
         _run_generation_requests(
             client=client,
             context=context,
-            config=config,
             ctx=None,
             request_executor=executor,
             module_logger=get_logger(),
