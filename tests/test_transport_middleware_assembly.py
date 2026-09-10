@@ -17,6 +17,7 @@ from _log_fakes import capture_loguru_messages
 import seedream_mcp.transport as transport_module
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.transport import (
+    _AppHostGuardMiddleware,
     _BearerTokenAuthMiddleware,
     _ErrorBoundaryMiddleware,
     _HealthCheckMiddleware,
@@ -26,7 +27,8 @@ from seedream_mcp.transport import (
     _attach_streamable_http_middleware,
     _bind_address_allowlist,
     _transport_security_for_host,
-    _warn_remote_exposure,
+    _web_app_host_allowlist,
+    warn_remote_exposure,
 )
 
 
@@ -306,6 +308,116 @@ def test_attach_passes_api_prefix_to_origin_guard(active_config: None) -> None:
         ref.kwargs for ref in app.user_middleware if ref.cls is _WebOriginGuardMiddleware
     )
     assert guard_kwargs.get("api_prefix") == f"{WEB_API_PREFIX}/"
+
+
+# ==================== 全 app Host 守卫 ====================
+
+
+async def _run_app_host_guard(
+    entries: tuple[str, ...], host: bytes | None
+) -> tuple[list[object], list[Message]]:
+    reached: list[object] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        reached.append(scope.get("path"))
+
+    guard = _AppHostGuardMiddleware(downstream, allowed_hosts=entries)
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    headers = [] if host is None else [(b"host", host)]
+    await guard({"type": "http", "path": "/web", "headers": headers}, cast(Receive, None), send)
+    return reached, sent
+
+
+@pytest.mark.parametrize(
+    ("entries", "host", "permitted"),
+    [
+        (("api.example.com",), b"api.example.com", True),
+        (("api.example.com",), b"api.example.com:8000", False),
+        (("api.example.com:8443",), b"api.example.com:8443", True),
+        (("api.example.com:8443",), b"api.example.com:9000", False),
+        (("api.example.com:*",), b"api.example.com:8000", True),
+        (("api.example.com:*",), b"api.example.com", False),
+        (("[::1]:*",), b"[::1]:8000", True),
+        (("api.example.com",), b"evil.example.com", False),
+        (("api.example.com",), None, False),
+    ],
+)
+async def test_app_host_guard_matches_sdk_entry_semantics(
+    entries: tuple[str, ...], host: bytes | None, permitted: bool
+) -> None:
+    """条目匹配与 SDK 同语义：裸 host 无端口、精确端口全值、通配端口任带端口。"""
+    reached, sent = await _run_app_host_guard(entries, host)
+
+    if permitted:
+        assert reached == ["/web"]
+        assert sent == []
+    else:
+        assert reached == []
+        assert sent[0]["status"] == 403
+
+
+def test_attach_assembles_app_host_guard_for_web_on_non_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置 hosts 时 web 守卫与 SDK 内层同语义按列表放行，回环三形态恒并入。"""
+    config = SeedreamConfig(api_key="test_key", http_allowed_hosts=("proxy.example.com",))
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "10.0.0.5", "secret", web_enabled=True)
+
+    guard = next(ref for ref in app.user_middleware if ref.cls is _AppHostGuardMiddleware)
+    assert guard.kwargs["allowed_hosts"] == (
+        "127.0.0.1:*",
+        "localhost:*",
+        "[::1]:*",
+        "proxy.example.com",
+    )
+    assert app.attached_classes()[0] is _AppHostGuardMiddleware
+
+
+def test_app_host_guard_config_replaces_derived_bind_entries() -> None:
+    """配置 hosts 后绑定地址派生条目不再放行，堵明文直连地址绕过白名单。"""
+    allowlist = _web_app_host_allowlist("10.0.0.5", ("proxy.example.com",))
+
+    assert "10.0.0.5" not in allowlist and "10.0.0.5:*" not in allowlist
+    assert allowlist == ("127.0.0.1:*", "localhost:*", "[::1]:*", "proxy.example.com")
+
+
+def test_app_host_guard_derives_loopback_forms_for_localhost_bind() -> None:
+    """localhost 绑定派生回环三形态，IP 直连回环地址的 Host 不被 web 守卫拒绝。"""
+    assert _web_app_host_allowlist("localhost", ()) == (
+        "127.0.0.1:*",
+        "localhost:*",
+        "[::1]:*",
+    )
+
+
+def test_attach_omits_app_host_guard_without_derivable_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """通配绑定派生不出条目且未配置 hosts 时不装配，启动告警已提示配置。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "0.0.0.0", "secret", web_enabled=True)
+
+    assert _AppHostGuardMiddleware not in app.attached_classes()
+
+
+def test_attach_omits_app_host_guard_on_loopback(active_config: None) -> None:
+    """回环绑定由 LoopbackHostGuard 覆盖全 app，不叠加 Host 守卫。"""
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret", web_enabled=True)
+
+    assert _AppHostGuardMiddleware not in app.attached_classes()
+    assert _LoopbackHostGuardMiddleware in app.attached_classes()
 
 
 # ==================== 异常边界中间件 ====================
@@ -608,7 +720,7 @@ def test_warn_remote_exposure_reports_truthful_auth_state(
     """
     records: list[str] = []
     with capture_loguru_messages(records):
-        _warn_remote_exposure(host, auth_enabled)
+        warn_remote_exposure(host, auth_enabled)
 
     output = "".join(records)
     assert expected_fragment in output

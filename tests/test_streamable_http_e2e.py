@@ -94,7 +94,7 @@ def _build_app(
     json_response: bool = False,
     host: str = "127.0.0.1",
 ) -> Any:
-    """按生产 _run_streamable_http 的装配路径构建传输栈。
+    """按生产 run_streamable_http 的装配路径构建传输栈。
 
     中间件经 transport._attach_streamable_http_middleware 复用生产装配且顺序同源，
     transport_security 按绑定地址派生后与其余传输参数直传 streamable_http_app；
@@ -453,7 +453,7 @@ async def _start_smoke_server_and_wait(
 
     def _serve() -> None:
         try:
-            transport_module._run_streamable_http("127.0.0.1", port, "")
+            transport_module.run_streamable_http("127.0.0.1", port, "")
         except BaseException as exc:
             thread_errors.append(exc)
 
@@ -476,7 +476,7 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
 ) -> None:
     """生产启动器真端口冒烟：默认 SSE 模式完成工具列表后优雅关闭无异常无挂起。
 
-    _run_streamable_http 在后台线程以真实 uvicorn 监听随机端口，全链走生产代码；
+    run_streamable_http 在后台线程以真实 uvicorn 监听随机端口，全链走生产代码；
     端口被抢等监听未就绪时收尾线程并换端口重试一次，两次失败才判失败。断言
     serverInfo.version 为项目版本号，置 should_exit 后以 30 秒上限 join 线程
     防关闭链挂死。
@@ -528,5 +528,5 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
             created.should_exit = True
         thread.join(timeout=30.0)
 
-    assert not thread.is_alive(), "_run_streamable_http 优雅关闭链挂起"
+    assert not thread.is_alive(), "run_streamable_http 优雅关闭链挂起"
     assert thread_errors == []

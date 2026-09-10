@@ -48,6 +48,20 @@ def test_bearer_path_exempt_rejects_traversal(path: str) -> None:
     assert middleware._path_exempt({"path": path}) is False
 
 
+def test_bearer_path_exempt_ignores_trailing_slash() -> None:
+    """豁免 exact 匹配忽略尾斜杠差异，表项与请求路径归一后比对。"""
+    middleware = _BearerTokenAuthMiddleware(
+        app=None,  # type: ignore[arg-type]
+        expected_token="secret",
+        exempt_exact=frozenset({"/web/", "/"}),
+        exempt_prefixes=("/web/static/",),
+    )
+
+    assert middleware._path_exempt({"path": "/web/"}) is True
+    assert middleware._path_exempt({"path": "/web"}) is True
+    assert middleware._path_exempt({"path": "/web/api/"}) is False
+
+
 async def test_static_pages_exempt_and_api_requires_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -146,7 +160,7 @@ def test_mount_web_static_is_idempotent(tmp_path: Path, monkeypatch: pytest.Monk
     from seedream_mcp.webapp import constants as web_constants
     from seedream_mcp.webapp import routes as routes_module
 
-    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    prepare_static_dir(monkeypatch, tmp_path)
     app: Any = type("_App", (), {"routes": []})()
 
     routes_module.mount_web_static(app)
@@ -161,4 +175,3 @@ def test_mount_web_static_is_idempotent(tmp_path: Path, monkeypatch: pytest.Monk
     empty_app: Any = type("_App", (), {"routes": []})()
     routes_module.mount_web_static(empty_app)
     assert empty_app.routes == []
-    assert static_dir.is_dir()

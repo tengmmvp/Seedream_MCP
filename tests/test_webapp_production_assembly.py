@@ -3,7 +3,7 @@
 直接调用 transport 的生产装配函数 _build_streamable_app 构建真实 app（构造
 transport_security -> 注册 Web 路由 -> streamable_http_app -> 挂载静态资源 ->
 装配中间件），经 httpx.ASGITransport 验证 Web 面路由、真实静态资源、Origin
-守卫行为与默认关闭形态；_run_streamable_http 仅承担 uvicorn serve 与退出清理，
+守卫行为与默认关闭形态；run_streamable_http 仅承担 uvicorn serve 与退出清理，
 装配正确性以本文件的生产同路径锁定。
 """
 

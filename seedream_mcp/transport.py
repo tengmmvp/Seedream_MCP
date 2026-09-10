@@ -22,6 +22,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from ._config_sources import _decompose_allowed_host_entry
 from .config import get_active_config
 from .utils.core.logs import get_logger
 
@@ -399,6 +400,56 @@ class _ErrorBoundaryMiddleware:
             await _send_asgi_json(send, 500, body)
 
 
+class _AppHostGuardMiddleware:
+    """Web 开启且非回环绑定时对全 app 校验 Host 头的允许列表中间件。
+
+    SDK 内层 Host/Origin 校验只覆盖 /mcp 端点，Web 静态面经 Bearer 豁免表免鉴权，
+    无 Host 校验纵深；本层对全 app 兜底，允许列表经 _web_app_host_allowlist 求值。
+    条目匹配与 SDK 同语义：裸 host 匹配无端口 Host、host:port 精确匹配、host
+    通配端口条目匹配任意端口；无 Host 头与未命中按 403 拒绝，websocket 以 1008
+    关闭。
+    """
+
+    def __init__(self, app: ASGIApp, allowed_hosts: tuple[str, ...]) -> None:
+        self.app = app
+        bare: list[str] = []
+        exact: list[str] = []
+        wildcard: list[str] = []
+        for entry in allowed_hosts:
+            decomposed = _decompose_allowed_host_entry(entry)
+            if decomposed is None:
+                continue
+            host_part, port_part = decomposed
+            if port_part == "":
+                bare.append(host_part)
+            elif port_part == ":*":
+                wildcard.append(host_part)
+            else:
+                exact.append(f"{host_part}{port_part}")
+        self._bare_hosts = frozenset(value.encode("ascii") for value in bare)
+        self._exact_hosts = frozenset(value.encode("ascii") for value in exact)
+        self._wildcard_hosts = frozenset(value.encode("ascii") for value in wildcard)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        scope_type = scope.get("type")
+        if scope_type in ("http", "websocket"):
+            host = _header_value(scope, b"host")
+            if host is None or not self._host_permitted(host):
+                if scope_type == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await _send_forbidden(send, "invalid_host", "Host not allowed")
+                return
+        await self.app(scope, receive, send)
+
+    def _host_permitted(self, host: bytes) -> bool:
+        """按 SDK 三形态语义判定 Host 头值：裸 host、精确端口、端口通配。"""
+        if host in self._bare_hosts or host in self._exact_hosts:
+            return True
+        stripped = _LoopbackHostGuardMiddleware._strip_port(host)
+        return host != stripped and stripped in self._wildcard_hosts
+
+
 class _WebOriginGuardMiddleware:
     """无令牌 Web 部署下 /web/api 前缀请求的同源 Origin 与跨站加载校验中间件。
 
@@ -488,10 +539,28 @@ _STREAMABLE_HTTP_MIDDLEWARE_CLASSES = (
     _BearerTokenAuthMiddleware,
     _LimitRequestBodyMiddleware,
     _LoopbackHostGuardMiddleware,
+    _AppHostGuardMiddleware,
     _WebOriginGuardMiddleware,
     _HealthCheckMiddleware,
     _ErrorBoundaryMiddleware,
 )
+
+
+def _web_app_host_allowlist(host: str, config_hosts: tuple[str, ...]) -> tuple[str, ...]:
+    """Web 全 app Host 允许列表：hosts 配置优先，未配置时按绑定地址派生。
+
+    配置存在时与 SDK 内层同语义按配置列表放行，回环三形态恒并入：回环访问者
+    即本机无远程暴露面，本机探活与 localhost 绑定的 IP 直连访问不受列表约束。
+    未配置时按绑定地址派生，localhost 绑定按回环三形态与 SDK 内层一致；通配
+    绑定派生不出条目，返回空元组使 Host 校验层不装配，启动告警已提示配置
+    SEEDREAM_HTTP_ALLOWED_HOSTS。
+    """
+    if config_hosts:
+        return tuple(dict.fromkeys([*_LOOPBACK_ALLOWED_HOSTS, *config_hosts]))
+    if host in _DNS_REBINDING_PROTECTED_HOSTS:
+        return _LOOPBACK_ALLOWED_HOSTS
+    derived = _bind_address_allowlist(host)
+    return tuple(derived[0]) if derived is not None else ()
 
 
 def _middleware_attached(app: Any) -> bool:
@@ -517,12 +586,12 @@ def _attach_streamable_http_middleware(
     中间件传入 Web 静态页面的免鉴权路径表，API 路径始终要求令牌。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    LoopbackHostGuard -> CORS（配置 http_allowed_origins 时）-> HealthCheck ->
-    LimitRequestBody -> ErrorBoundary（配置 origins 时）-> 鉴权层 -> app，鉴权层为
-    Bearer（配置令牌时）或 Web Origin 守卫（web_enabled 且无令牌时，仅守 /web/api
-    前缀）；LoopbackHostGuard 仅回环绑定时装配：超长请求在鉴权前被 413 早拒且
-    错误体经 CORS 层可被跨源客户端读取，健康探针同样经 CORS 层携带放行头，探针
-    免令牌，回环绑定时 rebinding 请求先于健康检查被拒。
+    HostGuard（回环绑定为 LoopbackHostGuard，web 开启的非回环绑定为 AppHostGuard）
+    -> CORS（配置 http_allowed_origins 时）-> HealthCheck -> LimitRequestBody ->
+    ErrorBoundary（配置 origins 时）-> 鉴权层 -> app，鉴权层为 Bearer（配置令牌时）
+    或 Web Origin 守卫（web_enabled 且无令牌时，仅守 /web/api 前缀）；超长请求在
+    鉴权前被 413 早拒且错误体经 CORS 层可被跨源客户端读取，健康探针同样经 CORS
+    层携带放行头，探针免令牌，rebinding 请求先于健康检查被拒。
     """
     if _middleware_attached(app):
         logger.warning("streamable-http 中间件已装配，跳过重复装配以避免中间件栈叠加")
@@ -572,6 +641,10 @@ def _attach_streamable_http_middleware(
         logger.info("streamable-http 已启用 CORS，放行 origin: {}", ", ".join(allowed_origins))
     if is_loopback_bind_host(host):
         app.add_middleware(_LoopbackHostGuardMiddleware)
+    elif web_enabled:
+        allowlist = _web_app_host_allowlist(host, get_active_config().http_allowed_hosts or ())
+        if allowlist:
+            app.add_middleware(_AppHostGuardMiddleware, allowed_hosts=allowlist)
 
 
 # ==================== streamable-http 传输配置 ====================
@@ -586,7 +659,7 @@ def _tls12_ssl_context_factory(
     return context
 
 
-def _resolve_http_auth_token(args: argparse.Namespace) -> str:
+def resolve_http_auth_token(args: argparse.Namespace) -> str:
     """解析 streamable-http 鉴权令牌：CLI 参数优先，其次活动配置。
 
     CLI 令牌 strip 后为空（纯空白）视为未提供，穿透到活动配置，与配置侧
@@ -658,7 +731,7 @@ def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
     return allowed_hosts, allowed_origins
 
 
-def _warn_remote_exposure(host: str, auth_enabled: bool) -> None:
+def warn_remote_exposure(host: str, auth_enabled: bool) -> None:
     """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致。"""
     # localhost 的解析依赖 hosts/DNS 可被污染指向非回环地址，告警按非回环口径表述。
     host_note = "按非回环地址要求校验" if host == "localhost" else "非回环地址"
@@ -711,7 +784,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     静态挂载则在 app 构造后向活体路由表追加。仅使用 MCPServer 公开接口
     streamable_http_app() 获取 ASGI 应用；max_request_body_size 显式传入活动配置的
     http_max_body_size，SDK 默认 4MiB 远低于本项目 base64 图片输入的 64MB 上限，
-    该上限同时供 SDK 内层与本项目中间件两层消费。_run_streamable_http 与生产装配
+    该上限同时供 SDK 内层与本项目中间件两层消费。run_streamable_http 与生产装配
     测试共用本函数构建同源栈。
     """
     from .resources import mcp
@@ -762,7 +835,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     return app
 
 
-def _run_streamable_http(
+def run_streamable_http(
     host: str,
     port: int,
     auth_token: str,
