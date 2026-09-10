@@ -297,6 +297,38 @@ async def test_cached_thumbnail_invalidates_on_source_change(tmp_path: Path) -> 
     assert second != first
 
 
+async def test_cached_thumbnail_empty_entry_treated_as_miss_and_regenerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0 字节缓存条目视为未命中：重新解码并以非空缩略图覆盖损坏缓存。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (1000, 700))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    decode_calls = {"count": 0}
+    original_build = thumbnail_module.build_thumbnail_bytes
+
+    def _counting_build(path: Path) -> bytes | None:
+        decode_calls["count"] += 1
+        return original_build(path)
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _counting_build)
+
+    stat = image.stat()
+    thumb = thumbnail_module.thumbnail_cache_root(images_root) / thumbnail_module._thumb_key(
+        image, stat.st_mtime_ns, stat.st_size
+    )
+    thumb.parent.mkdir(parents=True, exist_ok=True)
+    thumb.write_bytes(b"")
+
+    result = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
+
+    assert result is not None and result != b""
+    assert decode_calls["count"] == 1
+    assert thumb.read_bytes() == result
+
+
 async def test_cached_thumbnail_survives_unwritable_cache_dir(tmp_path: Path) -> None:
     """缓存目录不可写时静默降级为每次现生成，取图结果不受影响。"""
     from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
@@ -323,7 +355,6 @@ def test_thumbnail_sweep_evicts_oldest_beyond_cap(
 
     thumbs_root = tmp_path / "thumbs"
     thumbs_root.mkdir()
-    monkeypatch.setattr(thumbnail_module, "_thumb_sweep_after", 0.0)
     monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1000)
     oldest = thumbs_root / "oldest.jpg"
     middle = thumbs_root / "middle.jpg"
@@ -354,7 +385,6 @@ def test_thumbnail_sweep_distinguishes_orphan_and_fresh_thumb_tmp(
 
     thumbs_root = tmp_path / "thumbs"
     thumbs_root.mkdir()
-    monkeypatch.setattr(thumbnail_module, "_thumb_sweep_after", 0.0)
     monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1)
     grace = thumbnail_module._THUMB_TMP_GRACE_SECONDS
     now = time.time()

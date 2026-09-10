@@ -65,21 +65,17 @@ def test_get_file_manager_caches_by_base_dir_and_evicts_lru(tmp_path: Path) -> N
         get_file_manager,
     )
 
-    _file_manager_cache.clear()
-    try:
-        first = get_file_manager(tmp_path)
-        assert get_file_manager(tmp_path) is first
+    first = get_file_manager(tmp_path)
+    assert get_file_manager(tmp_path) is first
 
-        for idx in range(_FILE_MANAGER_CACHE_MAX_ENTRIES):
-            get_file_manager(tmp_path / f"dir{idx}")
+    for idx in range(_FILE_MANAGER_CACHE_MAX_ENTRIES):
+        get_file_manager(tmp_path / f"dir{idx}")
 
-        assert len(_file_manager_cache) == _FILE_MANAGER_CACHE_MAX_ENTRIES
-        # 首个条目最旧被驱逐，最近插入的仍在缓存。
-        assert tmp_path not in _file_manager_cache
-        recent = tmp_path / f"dir{_FILE_MANAGER_CACHE_MAX_ENTRIES - 1}"
-        assert recent in _file_manager_cache
-    finally:
-        _file_manager_cache.clear()
+    assert len(_file_manager_cache) == _FILE_MANAGER_CACHE_MAX_ENTRIES
+    # 首个条目最旧被驱逐，最近插入的仍在缓存。
+    assert tmp_path not in _file_manager_cache
+    recent = tmp_path / f"dir{_FILE_MANAGER_CACHE_MAX_ENTRIES - 1}"
+    assert recent in _file_manager_cache
 
 
 def test_file_manager_accepts_valid_base_dir(tmp_path: Path) -> None:

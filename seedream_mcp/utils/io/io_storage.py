@@ -754,3 +754,8 @@ def get_file_manager(base_dir: Path | None = None) -> "FileManager":
     while len(_file_manager_cache) > _FILE_MANAGER_CACHE_MAX_ENTRIES:
         _file_manager_cache.popitem(last=False)
     return manager
+
+
+def reset_file_manager_cache() -> None:
+    """清空 FileManager 进程级缓存，仅供测试隔离调用。"""
+    _file_manager_cache.clear()

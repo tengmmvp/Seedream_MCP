@@ -250,6 +250,12 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
         logger.info("缩略图缓存超限，按最旧驱逐 {} 个文件", evicted)
 
 
+def reset_thumb_sweep_gate() -> None:
+    """复位缩略图清理节流门，仅供测试隔离调用。"""
+    global _thumb_sweep_after
+    _thumb_sweep_after = 0.0
+
+
 async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes | None:
     """带落盘缓存的缩略图获取：命中直接读文件，未命中限流解码后写缓存。
 

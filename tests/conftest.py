@@ -153,13 +153,19 @@ def clean_web_routes() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
-    from seedream_mcp.resources import _reset_lifespan_state
+    from seedream_mcp.resources import _reset_lifespan_state, locate_request_state_boundary
     from seedream_mcp.utils.core import formats as formats_module
 
     # PIL 已导入时快照解压炸弹阈值，收尾恢复：解码器初始化经 Image.MAX_IMAGE_PIXELS
     # 做进程级覆写且不自行恢复；未导入时不快照，避免复位本身触发 PIL 的惰性导入。
     pil_image_module: Any = sys.modules.get("PIL.Image")
     max_pixels_before = pil_image_module.MAX_IMAGE_PIXELS if pil_image_module is not None else None
+
+    # requestState 密钥环经 CLI 启动路径重绑直写 SDK 私有 boundary，快照恢复隔离
+    # 触发过重绑的用例；boundary 不在中间件链时不动作。
+    boundary = locate_request_state_boundary()
+    boundary_security: Any = getattr(boundary, "_security", None)
+    boundary_audience: Any = getattr(boundary, "_audience", None)
 
     # 解码器就绪标志为模块全局，重置以隔离初始化时序相关用例
     monkeypatch.setattr(formats_module, "_decoders_ready", False)
@@ -168,5 +174,8 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # 经复位协议重建到干净态；复位清单见 _reset_lifespan_state
     _reset_lifespan_state()
     yield
+    if boundary is not None:
+        boundary._security = boundary_security
+        boundary._audience = boundary_audience
     if pil_image_module is not None:
         pil_image_module.MAX_IMAGE_PIXELS = max_pixels_before
