@@ -600,15 +600,9 @@ def test_rebind_request_state_security_syncs_declared_audience() -> None:
         for middleware in resources.mcp.middleware
         if isinstance(middleware, RequestStateBoundary)
     )
-    before_security = boundary._security
-    before_audience = boundary._audience
     policy = RequestStateSecurity(keys=(b"\x01" * 32,), audience="seedream-rebind")
 
-    try:
-        assert resources.rebind_request_state_security(policy) is True
+    assert resources.rebind_request_state_security(policy) is True
 
-        assert boundary._security is policy
-        assert boundary._audience == "seedream-rebind"
-    finally:
-        boundary._security = before_security
-        boundary._audience = before_audience
+    assert boundary._security is policy
+    assert boundary._audience == "seedream-rebind"

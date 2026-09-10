@@ -357,7 +357,7 @@ def test_build_config_accepts_all_valid_http_allowed_hosts_forms(
         ("[2001:db8::1", "host、host:port、host:\\*"),
         ("api.example.com:0", "host、host:port、host:\\*"),
         ("api.example.com:99999", "host、host:port、host:\\*"),
-        ("api.example.com:８０", "host、host:port、host:\\*"),
+        ("api.example.com:８０", "ASCII"),
         ("api.example.com.", "host、host:port、host:\\*"),
         (".api.example.com", "host、host:port、host:\\*"),
     ],

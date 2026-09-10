@@ -15,7 +15,6 @@ from mcp.server.request_state import RequestStateBoundary
 
 import seedream_mcp.resources as resources_module
 from seedream_mcp import config as config_module
-from seedream_mcp.utils.core.errors import SeedreamConfigError
 
 
 def test_active_request_state_keys_reads_active_config(
@@ -23,8 +22,9 @@ def test_active_request_state_keys_reads_active_config(
 ) -> None:
     """活动配置就绪时返回其密钥环字段。"""
     keys = (b"\x01" * 32,)
+    monkeypatch.setattr(config_module, "_active_config", None)
     monkeypatch.setattr(
-        config_module, "get_active_config", lambda: SimpleNamespace(request_state_secret_keys=keys)
+        config_module, "_global_config", SimpleNamespace(request_state_secret_keys=keys)
     )
 
     assert config_module.active_request_state_keys() == keys
@@ -34,26 +34,66 @@ def test_active_request_state_keys_none_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """活动配置未配置密钥环时返回 None。"""
+    monkeypatch.setattr(config_module, "_active_config", None)
     monkeypatch.setattr(
-        config_module, "get_active_config", lambda: SimpleNamespace(request_state_secret_keys=None)
+        config_module, "_global_config", SimpleNamespace(request_state_secret_keys=None)
     )
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+
+    assert config_module.active_request_state_keys() is None
+
+
+def test_active_request_state_keys_import_time_reads_env_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置未构建的导入期仅读系统环境变量，不触发完整配置构建。"""
+
+    def _fail_build() -> None:
+        raise AssertionError("导入期取密钥环不得构建完整配置")
+
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setattr(config_module, "get_global_config", _fail_build)
+    monkeypatch.setattr(config_module, "SeedreamConfig", _fail_build)
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+
+    assert config_module.active_request_state_keys() is None
+
+    key_hex = "ab" * 32
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", key_hex)
+    before_warnings = config_module._BUILD_WARNINGS.snapshot()
+    assert config_module.active_request_state_keys() == (bytes.fromhex(key_hex),)
+    # 导入期取值不写构建告警缓冲，drain 输出与启动期声明的配置来源一致。
+    assert config_module._BUILD_WARNINGS.snapshot() == before_warnings
+
+
+def test_active_request_state_keys_import_time_bad_hex_falls_back_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """导入期先行取值解码失败按未配置处理，配置错误由启动路径报告。"""
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", "zz" * 32)
 
     assert config_module.active_request_state_keys() is None
 
 
 @pytest.mark.parametrize(
-    "error",
-    [SeedreamConfigError("缺 API 密钥"), OSError("配置文件不可读")],
+    "raw",
+    ["abcd", "ab" * 32 + ",abcd", ("cd" * 32) + "," + ("cd" * 32)],
+    ids=["short", "short-after-valid", "duplicate"],
 )
-def test_active_request_state_keys_falls_back_to_none_on_config_failure(
-    monkeypatch: pytest.MonkeyPatch, error: Exception
+def test_active_request_state_keys_import_time_invalid_ring_falls_back_to_none(
+    monkeypatch: pytest.MonkeyPatch, raw: str
 ) -> None:
-    """配置构建失败或读取抛 OSError 时返回 None，模块导入不因缺配置而炸。"""
+    """导入期先行取值做与配置构建同口径的强度与重复校验，不合法按未配置处理。
 
-    def _raise() -> None:
-        raise error
-
-    monkeypatch.setattr(config_module, "get_active_config", _raise)
+    短密钥或重复密钥若原样喂给 SDK，requestState 策略构造会在导入期抛
+    ValueError 使进程崩溃，而非以配置错误形态由启动路径报告。
+    """
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", raw)
 
     assert config_module.active_request_state_keys() is None
 
@@ -108,9 +148,9 @@ def test_static_list_cache_hints_cover_only_static_faces() -> None:
 
 def _singleton_boundary() -> RequestStateBoundary:
     """返回单例 middleware 中的 requestState boundary，供重绑用例定位。"""
-    return next(
-        mw for mw in resources_module.mcp.middleware if isinstance(mw, RequestStateBoundary)
-    )
+    boundary = resources_module.locate_request_state_boundary()
+    assert boundary is not None
+    return boundary
 
 
 @pytest.mark.parametrize("keys", [None, (b"\x02" * 32,)])
@@ -127,7 +167,6 @@ def test_rebind_request_state_security_updates_boundary(
     assert after is not before
     if keys:
         assert isinstance(after, RequestStateSecurity)
-    boundary._security = before
 
 
 def test_rebind_request_state_security_keeps_default_audience_fallback() -> None:
@@ -137,14 +176,10 @@ def test_rebind_request_state_security_keeps_default_audience_fallback() -> None
     并停止绑定服务身份。
     """
     boundary = _singleton_boundary()
-    before_security = boundary._security
-    before_audience = boundary._audience
 
     assert resources_module.rebind_request_state_security((b"\x03" * 32,)) is True
 
     assert boundary._audience == resources_module.SERVER_NAME
-    boundary._security = before_security
-    boundary._audience = before_audience
 
 
 def test_rebind_request_state_security_skips_when_boundary_missing(

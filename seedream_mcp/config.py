@@ -495,6 +495,13 @@ class SeedreamConfig:
                     f"http_allowed_hosts 条目不得包含 scheme 或斜杠: {entry}"
                     f"{_env_var_suffix('http_allowed_hosts')}"
                 )
+            # Host 头按 RFC 为 ASCII，IDN 主机以 punycode 传输，非 ASCII 条目永不
+            # 匹配真实 Host 头。
+            if not entry.isascii():
+                raise SeedreamConfigError(
+                    f"http_allowed_hosts 条目须为 ASCII 字符: {entry}"
+                    f"{_env_var_suffix('http_allowed_hosts')}"
+                )
             decomposed = _decompose_allowed_host_entry(entry)
             if decomposed is None:
                 raise SeedreamConfigError(
@@ -813,20 +820,33 @@ def set_active_config(config: SeedreamConfig | None) -> None:
 
 
 def active_request_state_keys() -> tuple[bytes, ...] | None:
-    """向 resources 提供 requestState 密钥环的活动配置取值。
+    """向 resources 提供 requestState 密钥环的活动取值。
 
-    活动配置就绪时返回其 request_state_secret_keys；配置构建失败或读取抛
-    OSError 时返回 None，保持 SDK 默认的进程临时密钥，模块导入不因缺配置而
-    中断，真正的配置错误由启动路径报告。
+    活动配置已就绪时返回其密钥环；导入期配置未构建，仅按系统环境变量先行
+    取密钥环，.env 中的值由启动路径构建后经 rebind 校正；不构建完整配置，
+    构建告警缓冲不为其写入，drain 输出与启动期声明的配置来源一致。先行取值
+    解码失败或未过强度与重复校验时按未配置处理，真正的配置错误由启动路径
+    报告。
 
     Returns:
         解码后的密钥字节元组，未配置时为 None。
     """
-    try:
-        config = get_active_config()
-    except (SeedreamConfigError, OSError):
+    config = _active_config if _active_config is not None else _global_config
+    if config is not None:
+        return config.request_state_secret_keys
+    raw = os.getenv("SEEDREAM_REQUEST_STATE_KEYS")
+    if not raw or not raw.strip():
         return None
-    return config.request_state_secret_keys
+    entries = tuple(entry.strip() for entry in raw.split(",") if entry.strip())
+    try:
+        keys = tuple(bytes.fromhex(entry) for entry in entries)
+    except ValueError:
+        return None
+    # 与配置构建同口径的强度与重复校验，不合法值按未配置处理，避免喂给 SDK
+    # 在导入期崩溃。
+    if any(len(key) < _REQUEST_STATE_KEY_MIN_BYTES for key in keys) or len(set(keys)) != len(keys):
+        return None
+    return keys or None
 
 
 def _make_env_location_provider(attr: str, env_name: str) -> Callable[[], str | None]:

@@ -16,13 +16,13 @@ def test_config_accepts_endpoint_id() -> None:
 def test_default_model_id_matches_alias_table() -> None:
     """config 默认模型为 5.0 别名展开的完整 Model ID，防别名表重指后漂移。
 
-    默认值经 MODEL_ALIASES 派生为单一来源，此处锁定别名表项保持完整 ID
-    形态（doubao-seedream-5-0 前缀），防止别名表被改指回别名自身使默认值
-    不再是可直接请求的 Model ID。
+    默认值经 MODEL_ALIASES 派生为单一来源，此处以硬编码完整 ID 锁定具体取值，
+    防止别名表被改指回别名自身使默认值不再是可直接请求的 Model ID；默认模型
+    升级时应有意更新此处的锁定值。
     """
     config = SeedreamConfig(api_key="k")
-    assert config.model_id == MODEL_ALIASES["doubao-seedream-5.0"]
-    assert MODEL_ALIASES["doubao-seedream-5.0"].startswith("doubao-seedream-5-0")
+    assert config.model_id == "doubao-seedream-5-0-260128"
+    assert MODEL_ALIASES["doubao-seedream-5.0"] == config.model_id
 
 
 def test_config_rejects_deprecated_seedream_3_0() -> None:
