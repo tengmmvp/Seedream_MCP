@@ -1,11 +1,9 @@
 """生成侧测试共享工厂与 monkeypatch 辅助。
 
-make_generation_context 供 test_results_output_guards、test_core_pipeline_guards
-与 test_parallel_cancellation 复用同一份 15 字段默认构造，差异字段经 **overrides
-覆盖，字段增删时只改本工厂。_patch_client_success 与 _patch_save_real_file 供
-test_generation_pipeline_previews 与 test_image_preview 复用文生图成功与单图
-真实落盘的 mock 装配。_patch_client_method_spy 供 handler 透传测试复用按方法名
-安装的调用参数记录替身。
+make_generation_context 提供生成上下文的默认构造，差异字段经 **overrides 覆盖，
+字段增删时只改本工厂；_patch_client_success 与 _patch_save_real_file 复用文生图
+成功与单图真实落盘的 mock 装配；_patch_client_method_spy 复用按方法名安装的
+调用参数记录替身。
 """
 
 from __future__ import annotations

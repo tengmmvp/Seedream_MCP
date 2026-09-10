@@ -148,3 +148,57 @@ async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
     assert resources._active_resource is None
     assert shared_client._client is None
     assert shared_download_manager._session is None
+
+
+async def test_new_config_session_during_drain_closes_zero_refcount_resource_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """drain 让出期间以不同 config 进入的第二会话使引用已归零的旧资源立即关闭。
+
+    会话 1 的 teardown 挂起在 drain 处，期间 config 变更的第二会话重建资源并退役
+    旧槽位；旧资源 refcount 已为 0，退役即关闭而非进入退役追踪列表。
+    """
+    from seedream_mcp.utils.io import io_save
+
+    drain_entered = asyncio.Event()
+    drain_release = asyncio.Event()
+
+    async def hanging_drain() -> None:
+        drain_entered.set()
+        await drain_release.wait()
+
+    monkeypatch.setattr(io_save, "drain_background_cleanup_tasks", hanging_drain)
+    _activate_config(monkeypatch, SeedreamConfig(api_key="key_a"))
+
+    first_lifespan = server.app_lifespan(server.mcp)
+    first_state = await first_lifespan.__aenter__()
+    old_client = first_state["client"]
+    old_download_manager = first_state["download_manager"]
+
+    teardown = asyncio.ensure_future(first_lifespan.__aexit__(None, None, None))
+    await drain_entered.wait()
+
+    _activate_config(monkeypatch, SeedreamConfig(api_key="key_b"))
+    second_lifespan = server.app_lifespan(server.mcp)
+    second_state = await second_lifespan.__aenter__()
+    new_client = second_state["client"]
+
+    assert new_client is not old_client
+    # 旧资源引用已归零，退役路径立即关闭，不滞留退役追踪
+    assert resources._retired_resources == []
+    assert old_client._client is None
+    assert old_download_manager._session is None
+
+    drain_release.set()
+    await teardown
+
+    # teardown 的清理在 drain 后复检引用，第二会话在途使新资源保持可用
+    active = resources._active_resource
+    assert active is not None
+    assert active.client is new_client
+    assert new_client._client is not None
+
+    await second_lifespan.__aexit__(None, None, None)
+    assert resources._active_resource is None
+    assert new_client._client is None

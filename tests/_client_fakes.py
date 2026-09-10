@@ -1,9 +1,8 @@
 """SeedreamClient 与 SSE 解析测试共享的替身与注入辅助。
 
-供 test_call_api_retry、test_response_body_limit、test_usage_shape_guards 与
-test_sse_parser_buffer 复用，避免多处逐行重复定义 _FakeLog/_FakeSSEResponse 与
-MockTransport 注入逻辑造成语义漂移。伪 SSE 响应按 aiohttp/httpx 公开接口的
-最小子集模拟分块字节流。
+需要伪造 API 响应分块流或注入 MockTransport 的测试经此复用 _FakeLog/
+_FakeSSEResponse 与注入逻辑，避免逐行重复定义造成语义漂移。伪 SSE 响应按
+aiohttp/httpx 公开接口的最小子集模拟分块字节流。
 """
 
 from __future__ import annotations

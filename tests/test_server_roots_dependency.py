@@ -72,7 +72,20 @@ def test_resolver_treats_missing_probe_as_available() -> None:
     assert isinstance(result, ListRoots)
 
 
+class _DetachedContext:
+    """session 属性在脱离请求上下文访问时抛 ValueError 的替身。"""
+
+    @property
+    def session(self) -> Any:
+        raise ValueError("Attempted to access request context in a detached context.")
+
+
 @pytest.mark.parametrize("session", [None, _declaring_session(declared=False)])
 def test_resolver_declines_without_capability_or_session(session: object | None) -> None:
     """无会话或未声明 roots capability 时维持既有 None 行为。"""
     assert _workspace_roots_dependency(cast(Any, _DependencyContext(session))) is None
+
+
+def test_resolver_treats_detached_session_value_error_as_no_session() -> None:
+    """脱离请求上下文访问 session 抛 ValueError 时按无会话处置返回 None。"""
+    assert _workspace_roots_dependency(cast(Any, _DetachedContext())) is None

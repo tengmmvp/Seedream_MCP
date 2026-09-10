@@ -332,6 +332,40 @@ async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
     assert cleanup_calls == [30]
 
 
+async def test_batch_save_propagates_non_cancelled_base_exception(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """批量任务抛非 CancelledError 的 BaseException 时向上传播，不降级为失败结果。
+
+    SystemExit/KeyboardInterrupt 会使事件循环直接中止而非回到 gather 结果，
+    以自定义 BaseException 子类确定性驱动归集后的重抛分支。
+    """
+
+    class _ProcessSignal(BaseException):
+        pass
+
+    async def raising_save(
+        url: str,
+        prompt: str | None = None,
+        tool_name: str = "seedream",
+        custom_name: str | None = None,
+        alt_text: str | None = None,
+    ) -> AutoSaveResult:
+        del url, prompt, tool_name, custom_name, alt_text
+        raise _ProcessSignal()
+
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
+    monkeypatch.setattr(manager, "save_image", raising_save)
+
+    try:
+        with pytest.raises(_ProcessSignal):
+            await manager.save_multiple_images(
+                [{"url": "https://x/1.png", "prompt": "p"}], tool_name="t"
+            )
+    finally:
+        await manager.close()
+
+
 async def test_batch_save_concurrency_capped_by_max_concurrent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -363,6 +397,9 @@ async def test_batch_save_concurrency_capped_by_max_concurrent(
     monkeypatch.setattr(manager, "save_image", fake_save_image)
     images = [{"url": f"https://example.com/{idx}.png"} for idx in range(10)]
     results = await manager.save_multiple_images(images, "text_to_image")
+
+    await drain_background_cleanup_tasks()
+    await manager.close()
 
     assert len(results) == 10
     # 批量任务经信号量限流，在途保存数不超过 max_concurrent

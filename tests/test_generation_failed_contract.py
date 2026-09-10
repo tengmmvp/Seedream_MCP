@@ -21,8 +21,9 @@ def test_status_completed_with_success_true_not_failed() -> None:
 
 
 def test_success_false_marks_failed_regardless_of_status() -> None:
-    """success=False 视为失败，无论 status 是否存在。"""
+    """success=False 视为失败，无论 status 是否存在或与之冲突。"""
     assert _is_generation_failed({"success": False}) is True
+    assert _is_generation_failed({"success": False, "status": "completed"}) is True
 
 
 def test_success_true_without_status_not_failed() -> None:

@@ -175,10 +175,9 @@ def test_resolve_images_root_cache_keys_isolate_explicit_and_default(
     default_dir = resolve_images_root()
     assert default_dir == (workspace / ".seedream" / "images").resolve()
 
-    # 同一字符串两分支并存：显式分支以显式配置串为键，与前缀化的默认键互不覆盖。
+    # 同一字符串两分支并存：显式分支以显式配置串为键，写入后不覆盖前缀化的默认键。
     _DATA_ROOT_RESOLVE_CACHE[f"explicit-images:{workspace}"] = workspace.resolve()
     assert _DATA_ROOT_RESOLVE_CACHE[f"default-images:{workspace.resolve()}"] == default_dir
-    assert _DATA_ROOT_RESOLVE_CACHE[f"explicit-images:{workspace}"] == workspace.resolve()
 
 
 def test_resolve_base_dir_absolute_save_path_skips_unresolvable_images_root(

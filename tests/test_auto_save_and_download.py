@@ -103,6 +103,28 @@ async def test_save_image_returns_failure_on_download_error(
         await manager.close()
 
 
+async def test_save_image_degrades_on_static_url_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """静态校验拒绝的 URL 在保存层降级为失败结果，不发起下载。"""
+    manager = AutoSaveManager(base_dir=tmp_path)
+    try:
+
+        async def fail_fast_download(*args: object, **kwargs: object) -> dict[str, Any]:
+            del args, kwargs
+            raise AssertionError("静态拒绝的 URL 不应进入下载")
+
+        monkeypatch.setattr(manager.download_manager, "download_image", fail_fast_download)
+
+        result = await manager.save_image("ftp://example.com/x.png", prompt="p")
+
+        assert result.success is False
+        assert "无效的URL" in (result.error or "")
+        assert result.original_url == "ftp://example.com/x.png"
+    finally:
+        await manager.close()
+
+
 async def test_save_image_reports_sniffed_final_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
 ) -> None:

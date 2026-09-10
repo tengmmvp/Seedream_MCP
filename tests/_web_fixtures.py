@@ -1,6 +1,6 @@
 """Web 操作台测试共享辅助：生产装配序构建与图片样本。
 
-build_web_app 镜像 transport._run_streamable_http 的装配序（register ->
+build_web_app 镜像 transport.run_streamable_http 的装配序（register ->
 streamable_http_app -> mount -> attach），保证测试栈与生产栈同源；路由状态隔离
 fixture 见 conftest 的 clean_web_routes。
 """

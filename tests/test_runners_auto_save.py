@@ -124,6 +124,14 @@ async def test_run_text_to_image_absolute_save_path_survives_unresolvable_images
     monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
     _patch_client_success(monkeypatch)
     _patch_save_success(monkeypatch)
+    captured_init: dict[str, Any] = {}
+    real_init = io_save.AutoSaveManager.__init__
+
+    def _capture_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        captured_init.update(kwargs)
+        real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(io_save.AutoSaveManager, "__init__", _capture_init)
 
     config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics"))
     set_active_config(config)
@@ -138,6 +146,7 @@ async def test_run_text_to_image_absolute_save_path_survives_unresolvable_images
     save_results = structured["auto_save"]["results"]
     assert len(save_results) == 1
     assert save_results[0]["success"] is True
+    assert captured_init["cleanup_base_dir"] is None
 
 
 async def test_run_text_to_image_b64_json_auto_save_branch_collects_and_backfills(

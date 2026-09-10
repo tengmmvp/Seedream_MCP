@@ -74,6 +74,31 @@ async def test_preview_scope_resets_after_runner_call(
     assert calls == [1]
 
 
+async def test_preview_assembly_failure_degrades_to_text_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缩略图构建抛异常时降级为纯文本结果，已成功的生成与保存信息不翻转为失败。"""
+    _patch_client_success(monkeypatch)
+    _patch_save_real_file(monkeypatch, tmp_path)
+
+    async def _exploding_preview(paths: Any, images_root: Any = None) -> list[ImageContent]:
+        del images_root
+        raise RuntimeError("thumbnail decode failed")
+
+    monkeypatch.setattr(common_module, "build_preview_contents", _exploding_preview)
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+
+    result = await run_text_to_image(TextToImageInput(prompt="a cat"), config)
+
+    assert result.is_error is False
+    assert not any(isinstance(content, ImageContent) for content in result.content)
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    assert structured["success"] is True
+    assert structured["data"][0]["local_path"].endswith("saved.png")
+    assert structured["auto_save"]["results"][0]["local_path"].endswith("saved.png")
+
+
 async def test_execute_handler_skips_preview_when_scope_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

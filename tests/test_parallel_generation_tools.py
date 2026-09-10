@@ -430,6 +430,17 @@ def test_add_usage_value_deepcopies_dict_when_existing_is_non_dict() -> None:
     assert usage["count"]["tool_usage"]["web_search"] == 1
 
 
+def test_add_usage_value_resets_non_numeric_existing_before_accumulating() -> None:
+    """同键既有值为非数值标量（含 bool）时先归零再累加，脏数据被覆盖。"""
+    usage: dict[str, Any] = {"total_tokens": "many", "output_tokens": True}
+
+    _add_usage_value(usage, "total_tokens", 5)
+    _add_usage_value(usage, "output_tokens", 3)
+
+    assert usage["total_tokens"] == 5
+    assert usage["output_tokens"] == 3
+
+
 def test_aggregate_all_failed_requests_reuse_exception_error_code() -> None:
     """并行全失败时 error.type 取代表异常的归约错误码，与单发路径契约一致。"""
     aggregated = aggregate_parallel_generation_results(

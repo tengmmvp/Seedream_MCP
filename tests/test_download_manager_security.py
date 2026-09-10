@@ -561,6 +561,37 @@ async def test_download_image_keeps_headers_on_same_origin_redirect(
     assert session.captured_headers[1] == _CUSTOM_HEADERS
 
 
+async def test_download_image_cross_origin_header_strip_sticks_across_hop_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A→B→A 三跳链：跨源剥离后的安全头在跳回原源 A 时不再恢复定制头。"""
+    from seedream_mcp.utils.io.io_download import _strip_custom_headers_for_cross_origin
+
+    manager = DownloadManager()
+    session = _HeaderCaptureSession(
+        [
+            _FakeResponse(302, {"location": "https://cdn.example.net/img.png"}),
+            _FakeResponse(302, {"location": "https://example.com/img.png"}),
+            _FakeResponse(200, {"content-type": "image/png"}, content_chunks=[_PNG_BYTES]),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image(
+        "https://example.com/img.png", save_path, headers=dict(_CUSTOM_HEADERS)
+    )
+
+    assert result["success"] is True
+    assert len(session.captured_headers) == 3
+    # 起始请求发往原主机 A，定制头原样保留
+    assert session.captured_headers[0] == _CUSTOM_HEADERS
+    stripped = _strip_custom_headers_for_cross_origin(_CUSTOM_HEADERS)
+    # 第二跳跨源到 B 剥离定制头，第三跳跳回 A 仍保持剥离形态
+    assert session.captured_headers[1] == stripped
+    assert session.captured_headers[2] == stripped
+
+
 def test_url_origin_treats_default_port_as_same_origin() -> None:
     """显式默认端口与省略端口判定同源；scheme 与 host 差异判定跨源。"""
     from seedream_mcp.utils.io.io_download import _url_origin

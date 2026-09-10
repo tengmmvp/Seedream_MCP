@@ -9,8 +9,15 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+import pytest
+
+from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core import results as results_module
-from seedream_mcp.tools.core._shared import _extract_parallel_request_error
+from seedream_mcp.tools.core._shared import (
+    _extract_parallel_request_error,
+    _normalize_error_message,
+)
+from seedream_mcp.tools.core.auto_save import auto_save_from_urls
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
     _sanitize_image_errors,
@@ -18,6 +25,7 @@ from seedream_mcp.tools.core.results import (
     format_generation_response,
     update_result_with_auto_save,
 )
+from seedream_mcp.utils.core.errors import SeedreamAPIError
 from seedream_mcp.utils.io.io_save import AutoSaveResult
 
 from _generation_fixtures import make_generation_context
@@ -114,6 +122,45 @@ def test_auto_save_section_falls_back_to_save_ordinal_without_indices() -> None:
     )
 
     assert "图片 1: 保存失败 - 下载失败" in text
+
+
+async def test_auto_save_without_saveable_images_renders_empty_notice() -> None:
+    """仅含失败占位项时收集阶段返回空，文本与结构化通道均体现未生成可保存图片。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [
+            {
+                "type": "image_generation.request_failed",
+                "request_index": 1,
+                "error": {"type": "generation_failed", "message": "boom"},
+            }
+        ],
+    }
+
+    save_results, saveable_indices = await auto_save_from_urls(
+        result,
+        "test",
+        SeedreamConfig(api_key="test_key"),
+        None,
+        None,
+        "text_to_image",
+    )
+    text = format_generation_response(
+        "文生图任务完成", result, "2K", save_results, auto_save_enabled=True
+    )
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=save_results,
+        auto_save_error=None,
+    )
+
+    assert save_results == []
+    assert saveable_indices == []
+    assert text.endswith("自动保存: 已开启但未生成可保存的图片\n")
+    assert structured["auto_save"] == {"enabled": True, "error": None, "results": []}
 
 
 # ==================== 上游 URL 脱敏 ====================
@@ -534,6 +581,29 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
         auto_save_error=None,
     )
     assert structured["truncated_events"] is None
+
+
+def test_deadline_exceeded_surfaced_in_both_channels() -> None:
+    """result 含 deadline_exceeded=True 时文本与结构化通道均体现流超时提前终止。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": {"generated_images": 1},
+        "deadline_exceeded": True,
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert text.endswith("响应流超过总时长预算，已保留提前终止前收到的结果")
+    assert structured["deadline_exceeded"] is True
 
 
 # ==================== 双重净化收敛 ====================
@@ -1185,6 +1255,39 @@ def test_parallel_error_code_fallback_branch_is_sanitized() -> None:
     assert "leak" not in message
 
 
+@pytest.mark.parametrize(
+    ("error_payload", "expected"),
+    [
+        ({"msg": "阶梯msg"}, "阶梯msg"),
+        ({"detail": "阶梯detail"}, "阶梯detail"),
+        ({"message": "  ", "detail": "空白message回落detail"}, "空白message回落detail"),
+    ],
+)
+def test_normalize_error_message_ladder_falls_through_to_msg_and_detail(
+    error_payload: dict[str, Any], expected: str
+) -> None:
+    """message 缺失或为空白时按 msg/detail 阶梯键提取错误文本。"""
+    assert _normalize_error_message(error_payload) == expected
+
+
+def test_extract_parallel_request_error_nested_data_and_fallbacks() -> None:
+    """嵌套 data.error 与列表项错误优先提取，无错误载荷时回退异常文案与兜底文案。"""
+    nested = _extract_parallel_request_error({"data": {"error": {"message": "嵌套失败"}}}, None)
+    assert nested == "嵌套失败"
+
+    listed = _extract_parallel_request_error(
+        {"data": ["junk", {}, {"error": {"msg": "列表项失败"}}]}, None
+    )
+    assert listed == "列表项失败"
+
+    fallback = _extract_parallel_request_error(
+        {"data": []}, SeedreamAPIError("认证失败", status_code=401)
+    )
+    assert "认证失败" in fallback
+
+    assert _extract_parallel_request_error(None, None) == "请求失败"
+
+
 def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> None:
     """深嵌套 {"data": ...} 链经迭代下钻提取，不因 RecursionError 使成功生成翻错。
 
@@ -1345,11 +1448,20 @@ def test_b64_json_non_sized_form_renders_absent_without_error() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
 
     assert "  URL: https://example.com/a.png" in text
     assert "  Base64 数据: 无" in text
     # 可计长度形态保持字符数输出。
     assert "  Base64 数据: 4 字符" in text
+    # 结构化通道同步把非字符串畸形取值置 None。
+    assert structured["data"][0]["b64_json"] is None
 
 
 # ==================== error 键空值回落 ====================

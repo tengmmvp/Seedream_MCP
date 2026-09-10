@@ -61,7 +61,8 @@ def test_run_cleanup_age_removes_expired_and_keeps_recent(tmp_path: Path) -> Non
 
     assert not old_file.exists()
     assert new_file.exists()
-    assert result["deleted_files"] >= 1
+    assert result["deleted_files"] == 1
+    assert result["deleted_size"] == 3
 
 
 def test_run_cleanup_age_accumulates_deleted_size_and_prunes_empty_dirs(
@@ -201,6 +202,35 @@ def test_run_cleanup_quota_noop_when_under_limit(tmp_path: Path) -> None:
     assert result["deleted_files"] == 0
     assert result["deleted_size"] == 0
     assert f.exists()
+
+
+def test_run_cleanup_quota_counts_zero_byte_files_in_candidate_window(
+    tmp_path: Path,
+) -> None:
+    """最旧候选为 0 字节文件时窗口计入其数量：与次旧非零文件一并驱逐方达配额。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    now = datetime.now()
+    zero = tmp_path / "zero.png"
+    zero.write_bytes(b"")
+    zero_t = (now - timedelta(days=10)).timestamp()
+    os.utime(zero, (zero_t, zero_t))
+    middle = tmp_path / "middle.png"
+    middle.write_bytes(b"x" * 100)
+    middle_t = (now - timedelta(days=5)).timestamp()
+    os.utime(middle, (middle_t, middle_t))
+    newest = tmp_path / "newest.png"
+    newest.write_bytes(b"x" * 100)
+
+    # 总量 200 超上限 199：0 字节项不减少总量，窗口不含其数量时会提前耗尽而配额未达
+    result = manager.run_cleanup_policies(days=0, max_total_bytes=199)
+
+    assert result["deleted_files"] == 2
+    assert result["deleted_size"] == 100
+    assert result["errors"] == []
+    assert not zero.exists()
+    assert not middle.exists()
+    assert newest.exists()
 
 
 def test_run_cleanup_policies_runs_age_then_quota_in_single_scan(

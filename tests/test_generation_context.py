@@ -1,5 +1,6 @@
 """生成执行上下文构建、并行结果聚合、响应格式化与 save_path 预检测试。"""
 
+import copy
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, cast
@@ -361,6 +362,63 @@ def test_update_result_with_auto_save_aligns_with_saveable_images_only() -> None
     assert success_item["markdown_ref"] == "![ok](images/ok.png)"
 
 
+def _two_url_result() -> dict[str, Any]:
+    """构造两张可保存图片的归一化结果，供索引不对齐场景复用。"""
+    return {
+        "success": True,
+        "data": [
+            {"url": "https://example.com/1.png"},
+            {"url": "https://example.com/2.png"},
+        ],
+    }
+
+
+def _saved(path: str) -> AutoSaveResult:
+    """构造指向指定路径的成功保存结果。"""
+    return AutoSaveResult(
+        success=True,
+        original_url="https://example.com/x.png",
+        local_path=path,
+        markdown_ref=f"![x]({path})",
+    )
+
+
+def test_update_result_with_auto_save_breaks_on_misaligned_indices() -> None:
+    """保存结果与索引列表的三种不对齐形态均在越界守卫处截断回填，原 result 不被修改。"""
+    # 索引列表短于保存结果：i=1 越过 len(saveable_indices) 截断，i=0 正常回填。
+    result = _two_url_result()
+    snapshot = copy.deepcopy(result)
+    updated = update_result_with_auto_save(
+        result, [_saved("images/1.png"), _saved("images/2.png")], [0]
+    )
+
+    assert updated["data"][0]["local_path"] == "images/1.png"
+    assert "local_path" not in updated["data"][1]
+    assert result == snapshot
+
+    # 索引超出图片数：idx=2 越界截断，前一项已回填。
+    result = _two_url_result()
+    snapshot = copy.deepcopy(result)
+    updated = update_result_with_auto_save(
+        result, [_saved("images/1.png"), _saved("images/2.png")], [0, 2]
+    )
+
+    assert updated["data"][0]["local_path"] == "images/1.png"
+    assert "local_path" not in updated["data"][1]
+    assert result == snapshot
+
+    # 首个索引即越界：无任何回填发生。
+    result = _two_url_result()
+    snapshot = copy.deepcopy(result)
+    updated = update_result_with_auto_save(result, [_saved("images/1.png")], [5])
+
+    assert updated["data"] == [
+        {"url": "https://example.com/1.png"},
+        {"url": "https://example.com/2.png"},
+    ]
+    assert result == snapshot
+
+
 def test_aggregate_parallel_generation_results_merges_data_usage_and_failures() -> None:
     """并行结果聚合合并 data、usage 与批次统计，异常请求落为占位项。"""
     request_results = [
@@ -472,6 +530,44 @@ def test_aggregate_all_failed_result_dicts_without_code_keep_fallback() -> None:
 
     assert result["error"]["type"] == "generation_failed"
     assert "code" not in result["error"]
+
+
+def test_aggregate_all_failed_over_three_truncates_error_preview() -> None:
+    """全失败请求超过三个时错误预览仅保留前三条，其余以计数收尾。"""
+    request_results: list[dict[str, Any] | None] = [
+        {"success": False, "status": "failed", "data": [], "error": {"message": f"失败{i}"}}
+        for i in range(1, 6)
+    ]
+
+    result = aggregate_parallel_generation_results(
+        request_results=request_results, request_errors={}
+    )
+
+    assert result["batch"]["failed_requests"] == 5
+    assert result["error"]["message"] == (
+        "并行请求全部失败。请求1: 失败1；请求2: 失败2；请求3: 失败3；其余 2 个请求也失败"
+    )
+
+
+def test_aggregate_all_failed_exception_outranks_soft_failure_code() -> None:
+    """代表异常与携带 code 的软失败结果并存时，错误码取异常归约档而非上游 code。"""
+    result = aggregate_parallel_generation_results(
+        request_results=[
+            {
+                "success": False,
+                "status": "failed",
+                "data": [],
+                "error": {"code": "UpstreamCode", "message": "软失败"},
+            },
+            None,
+        ],
+        request_errors={2: SeedreamAPIError("认证失败", status_code=401)},
+    )
+
+    assert result["error"]["type"] == "auth_error"
+    assert "code" not in result["error"]
+    assert "请求1: 软失败" in result["error"]["message"]
+    assert "认证失败" in result["error"]["message"]
 
 
 def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> None:
@@ -588,6 +684,29 @@ def test_format_failure_section_extracts_message_from_dict_error() -> None:
     # 失败首行不应出现字典 repr 的花括号
     assert "{" not in failure_line
     assert "}" not in failure_line
+
+
+def test_format_failure_section_renders_missing_index_and_non_str_message() -> None:
+    """batch.errors 缺 request_index 的条目无序号前缀，非 str message 归一化渲染。"""
+    text = format_generation_response(
+        title="文生图任务完成",
+        result={
+            "success": False,
+            "status": "failed",
+            "error": "并行请求全部失败",
+            "batch": {
+                "errors": [
+                    {"message": {"code": "E-1"}},
+                    {"request_index": 2, "message": 42},
+                    "not-a-dict",
+                ],
+            },
+        },
+        size="2K",
+    )
+    lines = text.splitlines()
+    assert '  {"code": "E-1"}' in lines
+    assert "  请求 2: 42" in lines
 
 
 def test_format_generation_response_shows_input_images_for_pro_usage() -> None:

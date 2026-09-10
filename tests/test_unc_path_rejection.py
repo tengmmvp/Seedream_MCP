@@ -540,7 +540,10 @@ async def test_prepare_image_input_posix_reads_colon_named_reference(
 
     from seedream_mcp.utils.images.image_input import prepare_image_input
 
-    colon_named = tmp_path / "photo.jpg:ads.png"
+    # 相对路径候选仅锚定图片目录，文件须落在其中而非工作区根。
+    images_dir = tmp_path / ".seedream" / "images"
+    images_dir.mkdir(parents=True)
+    colon_named = images_dir / "photo.jpg:ads.png"
     Image.new("RGB", (32, 32), color="white").save(colon_named, format="PNG")
 
     result = await prepare_image_input("photo.jpg:ads.png")
