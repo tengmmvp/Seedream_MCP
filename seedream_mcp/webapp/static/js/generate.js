@@ -36,8 +36,8 @@ export async function loadConfigInfo() {
     : info.model_id;
 
   const sizeSelect = $("size");
-  // 令牌重输等场景二次加载时保持「自定义」选中，用户已填的宽高不失效。
-  const wasCustom = sizeSelect.value === "custom";
+  // 令牌重输等场景二次加载时保留先前选择：自定义保持，档位在新列表中仍存在则恢复。
+  const previous = sizeSelect.value;
   sizeSelect.innerHTML = "";
   const presets = current ? current.allowed_presets : ["2K", "3K", "4K"];
   for (const preset of presets) {
@@ -51,7 +51,9 @@ export async function loadConfigInfo() {
   custom.value = "custom";
   custom.textContent = "自定义";
   sizeSelect.appendChild(custom);
-  if (wasCustom) sizeSelect.value = "custom";
+  if (previous === "custom" || presets.includes(previous)) {
+    sizeSelect.value = previous;
+  }
 
   // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源。
   const formatSelect = $("format-filter");
@@ -177,6 +179,7 @@ export function buildRequestBody() {
   if ($("watermark").checked) body.watermark = true;
 
   if (state.tool === "sequential-generation") {
+    // 留空省略键，由后端按参考图数量推导。
     body.max_images = Number($("max-images").value) || undefined;
   }
   if (
@@ -313,8 +316,14 @@ export async function submitGenerate(event) {
     });
     const payload = await response.json();
     if (response.ok) {
-      await renderResults(payload);
-      setStatus("done", "完成。");
+      const { failedCount, total } = await renderResults(payload);
+      if (failedCount === total && total > 0) {
+        setStatus("failed", "生成失败，全部请求未成功，原因见卡片。");
+      } else if (failedCount) {
+        setStatus("failed", `部分完成：${total - failedCount}/${total} 成功，失败原因见卡片。`);
+      } else {
+        setStatus("done", "完成。");
+      }
     } else {
       setStatus("failed", "生成失败。");
       showResultError(normalizePayloadError(payload, response));
@@ -374,9 +383,18 @@ async function renderResults(payload) {
   const grid = $("result-grid");
   const items = Array.isArray(payload.data) ? payload.data : [];
   const pending = [];
+  let failedCount = 0;
   for (const item of items) {
     const card = document.createElement("div");
     card.className = "result-card";
+    // 批次内失败占位项展示原因。
+    if (item.type === "image_generation.request_failed") {
+      failedCount += 1;
+      const reason = item.error && item.error.message ? item.error.message : "未知错误";
+      appendCardError(card, `该请求失败：${reason}`);
+      grid.appendChild(card);
+      continue;
+    }
     appendCardInfo(card, item);
     if (item.web_path || item.url) {
       const img = document.createElement("img");
@@ -418,8 +436,12 @@ async function renderResults(payload) {
   const meta = $("result-meta");
   const metaLines = [];
   const usage = payload.usage;
-  if (usage && usage.completion_tokens != null) {
-    metaLines.push(`用量：completion ${usage.completion_tokens}`);
+  // usage 键名对齐官方 API 的 output_tokens/total_tokens。
+  if (usage && Number.isFinite(usage.output_tokens)) {
+    metaLines.push(`用量：输出 ${usage.output_tokens} tokens`);
+  }
+  if (usage && Number.isFinite(usage.total_tokens)) {
+    metaLines.push(`总计 ${usage.total_tokens} tokens`);
   }
   if (payload.auto_save && Array.isArray(payload.auto_save.results)) {
     const results = payload.auto_save.results;
@@ -435,6 +457,7 @@ async function renderResults(payload) {
     meta.textContent = metaLines.join("\n");
     meta.classList.remove("hidden");
   }
+  return { failedCount, total: items.length };
 }
 
 // 单张结果图装载：仅 web_path 条目可进灯箱并带 zoomable 光标；url-only 条目

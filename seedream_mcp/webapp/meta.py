@@ -13,7 +13,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from ..config import get_active_config
-from ..utils.core.errors import CONTROL_CHARS_PATTERN
+from ..utils.core.sanitizers import CONTROL_CHARS_PATTERN
 from ..utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from ..utils.model.model_capabilities import model_payloads
 from ..version import __version__
@@ -60,8 +60,10 @@ async def web_not_found(request: Request) -> Response:
         trimmed = path.rstrip("/")
         normalized = unquote(trimmed).replace("\\", "/")
         if trimmed and not normalized.startswith("//"):
-            # 控制字符进 Location 头会在协议层触发 500，剔除后重定向
-            return RedirectResponse(CONTROL_CHARS_PATTERN.sub("", trimmed), status_code=307)
+            # 查询串原样回填；控制字符进 Location 头触发协议层 500，剔除后重定向
+            query = request.url.query
+            target = trimmed + (f"?{query}" if query else "")
+            return RedirectResponse(CONTROL_CHARS_PATTERN.sub("", target), status_code=307)
     if path == WEB_API_PREFIX or path.startswith(WEB_API_PREFIX + "/"):
         return _shared.error_json("not_found", "接口不存在", 404)
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。

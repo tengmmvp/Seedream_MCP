@@ -5,7 +5,7 @@ core 流水线经鸭子类型探测取共享资源，两处探测点为本替身
 - ``core/parallel.py`` 的 get_lifespan_resource：经 ``ctx.request_context.
   lifespan_context`` 字典取 LIFESPAN_KEY_CLIENT / LIFESPAN_KEY_DOWNLOAD_MANAGER，
   取值路径上的属性缺失等异常捕获后回退 None；
-- ``core/_helpers.py`` 的 safe_report_progress：调用 ``ctx.report_progress``，
+- ``core/_shared.py`` 的 safe_report_progress：调用 ``ctx.report_progress``，
   失败静默，故替身提供 no-op 实现即可。
 
 Web 请求没有 MCP 会话上下文，共享资源单例在堂时本模块构造等价替身，使生成

@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.io.io_path import (
@@ -125,6 +125,12 @@ def dump_strict_json(structured: dict[str, object]) -> str:
         allow_nan=False,
         separators=(",", ":"),
     )
+
+
+async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
+    """以严格 JSON 构造结构化结果响应，序列化下沉工作线程。"""
+    payload = await asyncio.to_thread(dump_strict_json, structured)
+    return Response(content=payload, media_type="application/json", status_code=status)
 
 
 def converge_path_entry(

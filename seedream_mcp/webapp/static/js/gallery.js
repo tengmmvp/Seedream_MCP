@@ -95,7 +95,14 @@ async function refreshGalleryForSeq(seq) {
     if (seq === requestSeq) showGalleryError("图库加载失败，请稍后重试。");
     return;
   }
-  const payload = await response.json();
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    // 响应体非 JSON 或中途截断，按网络失败同口径提示。
+    if (seq === requestSeq) showGalleryError("图库响应异常，请稍后重试。");
+    return;
+  }
   if (seq !== requestSeq) return;
   // 新一页装载成功，清除上一轮遗留的加载失败提示。
   clearInlineError($("gallery-error"));
@@ -142,23 +149,34 @@ async function refreshGalleryForSeq(seq) {
     entry.img.alt = "缩略图不可用";
   };
 
-  for (let i = 0; i < pending.length; i += THUMBNAIL_BATCH_SIZE) {
-    if (seq !== requestSeq) return;
-    await Promise.all(
-      pending.slice(i, i + THUMBNAIL_BATCH_SIZE).map(async (entry) => {
+  // 固定 worker 消费队列，序号逐项守卫，过期请求的 blob URL 就地释放。
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(THUMBNAIL_BATCH_SIZE, pending.length) },
+    async () => {
+      while (cursor < pending.length) {
+        if (seq !== requestSeq) return;
+        const entry = pending[cursor++];
         try {
           const blobUrl = await fetchBlobUrl(
             `/web/api/thumbnail?path=${encodeURIComponent(entry.path)}`,
             "gallery",
           );
+          if (seq !== requestSeq) {
+            if (blobUrl) URL.revokeObjectURL(blobUrl);
+            return;
+          }
           if (blobUrl) entry.img.src = blobUrl;
           else markUnavailable(entry);
         } catch {
           markUnavailable(entry);
         }
-      }),
-    );
-  }
+      }
+    },
+  );
+  await Promise.all(workers);
+  // 过期请求不执行收尾：翻页器写回按新请求的状态由其自身完成。
+  if (seq !== requestSeq) return;
 
   const count = state.gallery.items.length;
   $("gallery-page").textContent = count
@@ -193,15 +211,24 @@ export async function openLightbox(item, errorEl = $("gallery-error")) {
   } catch (error) {
     // 401 已弹令牌门；其余网络异常不开灯箱，缩略图仍在，可再次点击重试。
     if (error.message === "unauthorized") return;
+    if (seq !== lightboxSeq) return;
     showInlineError(errorEl, "原图加载失败，请重试。");
     return;
   }
   if (!response.ok) {
     console.error("原图加载失败:", item.web_path);
+    if (seq !== lightboxSeq) return;
     showInlineError(errorEl, "原图加载失败，图片可能已被清理。");
     return;
   }
-  const blob = await response.blob();
+  let blob = null;
+  try {
+    blob = await response.blob();
+  } catch {
+    if (seq !== lightboxSeq) return;
+    showInlineError(errorEl, "原图加载失败，请重试。");
+    return;
+  }
   // 序号已变：新图已打开或灯箱已关闭，本次结果整包丢弃。
   if (seq !== lightboxSeq) return;
   currentLightboxBlob = blob;

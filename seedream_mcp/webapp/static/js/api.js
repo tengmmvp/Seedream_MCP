@@ -72,6 +72,8 @@ export const $ = (id) => document.getElementById(id);
 /** 当前模型在 config-info 模型清单中的能力条目，未知模型返回 null。 */
 export function currentModel() {
   if (!state.configInfo) return null;
+  // config.model_id 已归一为完整 ID，lite 与 5.0 家族共享同一 ID 与能力字段，
+  // 按 model_id 匹配即可。
   return (
     (state.configInfo.models || []).find(
       (m) => m.model_id === state.configInfo.model_id,

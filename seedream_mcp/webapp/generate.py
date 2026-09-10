@@ -136,8 +136,7 @@ async def _run_web_generation(
     await asyncio.to_thread(augment_generation_payload, structured, images_root)
 
     status = 200 if not result.is_error else _shared.generation_status(structured)
-    payload = await asyncio.to_thread(_shared.dump_strict_json, structured)
-    return Response(content=payload, media_type="application/json", status_code=status)
+    return await _shared.respond_structured_json(structured, status)
 
 
 async def web_generate_text_to_image(request: Request) -> Response:
