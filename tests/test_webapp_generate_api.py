@@ -26,6 +26,7 @@ from seedream_mcp.config import (
     set_active_config,
 )
 from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.webapp import _shared as webapp_shared
 from seedream_mcp.webapp import generate as generate_module
 from seedream_mcp.webapp.context import build_web_request_context
 
@@ -364,6 +365,30 @@ async def test_generate_invalid_json_returns_400(
 
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_json"
+
+
+async def test_generate_non_object_json_body_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """JSON 数组等非对象请求体映射 400 invalid_request。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.post(
+            "/web/api/generate/text-to-image",
+            content=b"[1, 2]",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"] == "invalid_request"
+    assert payload["error_description"] == "请求体须为 JSON 对象"
 
 
 @pytest.mark.parametrize(
@@ -715,6 +740,29 @@ def test_augment_generation_payload_tolerates_resolve_oserror(
     generate_module.augment_generation_payload(structured, tmp_path)
 
     assert structured == {"data": [{"keep": 1}], "success": True}
+
+
+def test_generation_status_falls_back_to_502_without_str_error_type() -> None:
+    """error.type 缺失或非字符串时状态码回落 502，命中形态时按映射表取值。"""
+    assert webapp_shared.structured_error_type({"success": False}) is None
+    assert webapp_shared.structured_error_type({"error": {"type": 42}}) is None
+    assert (
+        webapp_shared.structured_error_type({"error": {"type": "timeout_error"}}) == "timeout_error"
+    )
+
+    assert webapp_shared.generation_status({"success": False}) == 502
+    assert webapp_shared.generation_status({"error": {"type": "timeout_error"}}) == 504
+
+
+def test_converge_path_entry_deletes_key_when_resolve_fails(tmp_path: Path) -> None:
+    """resolve 阶段抛 OSError/ValueError 的路径删除条目键，不附 web_path。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    item: dict[str, object] = {"local_path": "bad\x00name.png", "keep": 1}
+
+    webapp_shared.converge_path_entry(item, "local_path", images_root, resolve=True)
+
+    assert item == {"keep": 1}
 
 
 def _make_stub_resource() -> SimpleNamespace:

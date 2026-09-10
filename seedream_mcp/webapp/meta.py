@@ -147,5 +147,5 @@ async def web_config_info(_request: Request) -> Response:
             "auto_save_enabled": config.auto_save_enabled,
             "preview_enabled": config.preview_enabled,
         },
-        headers={"cache-control": "no-store"},
+        headers=_shared.WEB_JSON_HEADERS,
     )

@@ -494,15 +494,15 @@ async function renderResults(payload) {
   return { failedCount, total: items.length };
 }
 
-// 单张结果图装载：仅 web_path 条目可进灯箱并带 zoomable 光标；url-only 条目
-// 无本地路径，不可回填也不响应点击。
+// 单张结果图装载：卡片走缩略图端点与图库网格同口径，原图由灯箱按需加载；
+// 仅 web_path 条目可进灯箱并带 zoomable 光标，url-only 条目不可回填也不响应点击。
 async function loadResultImage(img, item) {
   if (item.web_path) {
     const blobUrl = await fetchBlobUrl(
-      `/web/api/image?path=${encodeURIComponent(item.web_path)}`,
+      `/web/api/thumbnail?path=${encodeURIComponent(item.web_path)}`,
       "generate",
     );
-    if (!blobUrl) throw new Error("image endpoint 请求失败");
+    if (!blobUrl) throw new Error("thumbnail endpoint 请求失败");
     img.src = blobUrl;
     img.classList.add("zoomable");
     // 失败提示落生成视图的错误节点，图库侧节点在此视图不可见。

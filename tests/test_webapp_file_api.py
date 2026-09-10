@@ -158,7 +158,8 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
 
     assert all(response.status_code == 200 for response in responses)
     assert calls == len(paths)
-    assert peak <= image_thumbnail_module.PREVIEW_DECODE_CONCURRENCY
+    # 上界验证限流生效，下界验证并发真实发生，串行执行不会触到信号量语义。
+    assert 2 <= peak <= image_thumbnail_module.PREVIEW_DECODE_CONCURRENCY
 
 
 async def test_file_endpoints_reject_non_image_extension(web_app_with_image: Any) -> None:

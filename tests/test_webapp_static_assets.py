@@ -8,7 +8,18 @@ from __future__ import annotations
 
 import re
 
-from seedream_mcp.webapp.constants import STATIC_DIR
+from seedream_mcp.webapp.constants import (
+    STATIC_DIR,
+    WEB_API_BROWSE,
+    WEB_API_CONFIG_INFO,
+    WEB_API_GENERATE_IMAGE_TO_IMAGE,
+    WEB_API_GENERATE_MULTI_IMAGE_FUSION,
+    WEB_API_GENERATE_SEQUENTIAL_GENERATION,
+    WEB_API_GENERATE_TEXT_TO_IMAGE,
+    WEB_API_IMAGE,
+    WEB_API_PREFIX,
+    WEB_API_THUMBNAIL,
+)
 
 _JS_DIR = "js"
 _JS_MODULES = ("api.js", "generate.js", "gallery.js", "main.js", "refs.js")
@@ -28,6 +39,36 @@ def test_index_referenced_static_assets_exist() -> None:
     assert referenced, "入口页未解析到任何静态资源引用，匹配规则可能已失配"
     for rel in referenced:
         assert (STATIC_DIR / rel).is_file(), f"静态资源缺失: {rel}"
+
+
+def test_frontend_api_literals_stay_within_registered_routes() -> None:
+    """前端 JS/HTML 的 /web/api 字面量与 data-tool 值落在后端注册路径集合内。
+
+    后端改路由常量而前端字面量未同步时，拼写漂移在此失败而非运行期 404。
+    """
+    registered = {
+        WEB_API_CONFIG_INFO,
+        WEB_API_BROWSE,
+        WEB_API_THUMBNAIL,
+        WEB_API_IMAGE,
+        WEB_API_GENERATE_TEXT_TO_IMAGE,
+        WEB_API_GENERATE_IMAGE_TO_IMAGE,
+        WEB_API_GENERATE_MULTI_IMAGE_FUSION,
+        WEB_API_GENERATE_SEQUENTIAL_GENERATION,
+    }
+    api_pattern = re.compile(r"/web/api/[a-z-]+")
+    sources = [STATIC_DIR / "index.html", *(STATIC_DIR / _JS_DIR / name for name in _JS_MODULES)]
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        for literal in set(api_pattern.findall(text)):
+            if literal == f"{WEB_API_PREFIX}/generate":
+                # 生成端点前缀与 data-tool 值拼接，具体 slug 由下方另行校验。
+                continue
+            assert literal in registered, f"{path.name} 引用未注册路径: {literal}"
+        for slug in set(re.findall(r'data-tool="([a-z-]+)"', text)):
+            assert (
+                f"{WEB_API_PREFIX}/generate/{slug}" in registered
+            ), f"{path.name} 的 data-tool 值无对应生成端点: {slug}"
 
 
 def test_frontend_js_modules_exist() -> None:
@@ -59,12 +100,15 @@ def test_url_reference_goes_through_add_reference() -> None:
 
 
 def test_generate_and_gallery_consume_web_path_contract() -> None:
-    """generate.js 与 gallery.js 消费 web_path 字段并经 /web/api/image 取原图。
+    """generate.js 与 gallery.js 消费 web_path 字段并经图片端点取图。
 
-    服务端改字段名或前端重构错位使任一字面量消失时在此失败，防止静默退化为
-    仅展示远端 url。
+    卡片网格走 /web/api/thumbnail 缩略图，原图经灯箱的 /web/api/image 按需
+    加载；服务端改字段名或前端重构错位使任一字面量消失时在此失败，防止静默
+    退化为仅展示远端 url。
     """
     for name in ("generate.js", "gallery.js"):
         source = (STATIC_DIR / _JS_DIR / name).read_text(encoding="utf-8")
         assert "web_path" in source, f"{name} 不再消费 web_path 字段"
-        assert "/web/api/image" in source, f"{name} 不再请求 /web/api/image 端点"
+        assert "/web/api/thumbnail" in source, f"{name} 不再请求 /web/api/thumbnail 端点"
+    gallery_js = (STATIC_DIR / _JS_DIR / "gallery.js").read_text(encoding="utf-8")
+    assert "/web/api/image" in gallery_js, "gallery.js 灯箱不再请求 /web/api/image 端点"

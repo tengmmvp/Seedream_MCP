@@ -43,9 +43,18 @@ PRIVATE_CACHE_HEADER = {
 }
 
 
+# /web/api 全部 JSON 响应的公共安全头：no-store 防代理缓存动态状态，nosniff
+# 封堵旧浏览器 MIME 嗅探反射面。
+WEB_JSON_HEADERS = {"cache-control": "no-store", "x-content-type-options": "nosniff"}
+
+
 def error_json(error: str, description: str, status: int) -> JSONResponse:
     """构造与传输层中间件同形态的错误 JSON 响应。"""
-    return JSONResponse({"error": error, "error_description": description}, status_code=status)
+    return JSONResponse(
+        {"error": error, "error_description": description},
+        status_code=status,
+        headers=WEB_JSON_HEADERS,
+    )
 
 
 async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSONResponse | None]:
@@ -130,7 +139,12 @@ def dump_strict_json(structured: dict[str, object]) -> str:
 async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
     """以严格 JSON 构造结构化结果响应，序列化下沉工作线程。"""
     payload = await asyncio.to_thread(dump_strict_json, structured)
-    return Response(content=payload, media_type="application/json", status_code=status)
+    return Response(
+        content=payload,
+        media_type="application/json",
+        status_code=status,
+        headers=WEB_JSON_HEADERS,
+    )
 
 
 def converge_path_entry(
