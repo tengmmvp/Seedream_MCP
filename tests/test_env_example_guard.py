@@ -248,3 +248,17 @@ def test_example_size_preset_comments_match_capability_table() -> None:
             MODEL_CAPABILITIES[family].allowed_presets,
             key=lambda p: float(p.removesuffix("K")),
         ), f"档位注释与能力表不一致: {comment_line}"
+
+
+def test_compose_image_tag_major_minor_matches_version() -> None:
+    """compose 镜像标签的 major.minor 与包版本一致，发版漏更标签在此报警。"""
+    from seedream_mcp.version import __version__
+
+    compose = (_repo_root() / "docker-compose.yml").read_text(encoding="utf-8")
+    match = re.search(r"image:\s*ghcr\.io/tengmmvp/seedream_mcp:(\d+\.\d+)", compose)
+    assert match is not None, "docker-compose.yml 未找到 seedream_mcp 镜像标签"
+    major_minor = ".".join(__version__.split(".")[:2])
+    assert match.group(1) == major_minor, (
+        f"compose 镜像标签 {match.group(1)} 与版本 {__version__} 的 major.minor 漂移，"
+        "发版须同步更新标签"
+    )

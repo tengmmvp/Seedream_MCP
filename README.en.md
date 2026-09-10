@@ -238,7 +238,7 @@ Access control: the page itself opens without a token; its API calls require one
 --version                                          # Print the version and exit
 ```
 
-> **Security note**: `localhost` is not treated as a loopback address and must follow the non-loopback requirements: a Bearer auth token and TLS must be configured, and the service refuses to start without them; to use loopback without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback binds validate the Host and Origin headers against the bind address by default to prevent DNS rebinding; wildcard binds (`0.0.0.0`/`::`) cannot predict the access address, leave validation off by default, and require `SEEDREAM_HTTP_ALLOWED_HOSTS` to enable it. Cross-origin browser clients connecting to `/mcp` (e.g. web-based clients) additionally require `SEEDREAM_HTTP_ALLOWED_ORIGINS`; once configured, cross-origin preflight requests are answered automatically and listed origins are allowed. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which stay in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
+> **Security note**: `localhost` is not treated as a loopback address and must follow the non-loopback requirements: a Bearer auth token and TLS must be configured, and the service refuses to start without them; to use loopback without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback binds validate the Host and Origin headers against the bind address by default to prevent DNS rebinding; wildcard binds (`0.0.0.0`/`::`) cannot predict the access address, leave validation off by default, and require `SEEDREAM_HTTP_ALLOWED_HOSTS` to enable it. Cross-origin browser clients connecting to `/mcp` (e.g. web-based clients) additionally require `SEEDREAM_HTTP_ALLOWED_ORIGINS`; once configured, cross-origin preflight requests are answered automatically and listed origins are allowed. Public pages in the allowlist are also exempted from the browser's private-network-access restriction and can reach locally bound services directly. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which stay in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
 
 ### Usage Examples
 
@@ -316,6 +316,13 @@ Different models support different capabilities and parameter ranges. Please not
     <td style="text-align: center">❌</td>
     <td style="text-align: center">❌</td>
     <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>Prompt Optimization fast</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
   </tr>
   <tr>
     <td>Resolution Presets</td>

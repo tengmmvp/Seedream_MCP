@@ -238,7 +238,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 --version                                          # 打印版本号并退出
 ```
 
-> **安全提示**：`localhost` 不被视为回环地址，须按非回环地址要求配置 Bearer 鉴权令牌与 TLS，未配置则拒绝启动；如需免鉴权使用回环地址，请改绑 `127.0.0.1` 或 `::1`。非回环绑定默认按该地址校验 Host 与 Origin 头以防 DNS rebinding；通配绑定（`0.0.0.0`/`::`）无法预知访问地址，校验默认关闭，需配置 `SEEDREAM_HTTP_ALLOWED_HOSTS` 启用。跨源浏览器客户端接入 `/mcp`（如网页版客户端）另需配置 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，配置后自动应答跨源预检并放行列表内来源。生产与容器部署的密钥应经环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递，而非 CLI `--api-key` / `--auth-token`——命令行参数会留在进程列表与 shell 历史记录中；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。Web 操作台不改变上述传输层安全要求：开启后新增的 API 面全部强制令牌，免鉴权的仅限无数据的静态页面骨架。
+> **安全提示**：`localhost` 不被视为回环地址，须按非回环地址要求配置 Bearer 鉴权令牌与 TLS，未配置则拒绝启动；如需免鉴权使用回环地址，请改绑 `127.0.0.1` 或 `::1`。非回环绑定默认按该地址校验 Host 与 Origin 头以防 DNS rebinding；通配绑定（`0.0.0.0`/`::`）无法预知访问地址，校验默认关闭，需配置 `SEEDREAM_HTTP_ALLOWED_HOSTS` 启用。跨源浏览器客户端接入 `/mcp`（如网页版客户端）另需配置 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，配置后自动应答跨源预检并放行列表内来源；放行列表内的公网页面同时豁免浏览器的专用网络访问限制，可直接访问本地绑定的服务。生产与容器部署的密钥应经环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递，而非 CLI `--api-key` / `--auth-token`——命令行参数会留在进程列表与 shell 历史记录中；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。Web 操作台不改变上述传输层安全要求：开启后新增的 API 面全部强制令牌，免鉴权的仅限无数据的静态页面骨架。
 
 ### 使用示例
 
@@ -316,6 +316,13 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
     <td style="text-align: center">❌</td>
     <td style="text-align: center">❌</td>
     <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>提示词优化 fast</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
   </tr>
   <tr>
     <td>分辨率档位</td>

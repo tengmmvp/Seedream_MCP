@@ -238,7 +238,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 --version                                          # 印出版本號並退出
 ```
 
-> **安全提示**：`localhost` 不被視為回環位址，須按非回環位址要求設定 Bearer 鑑權權杖與 TLS，未設定則拒絕啟動；如需免鑑權使用回環位址，請改繫結 `127.0.0.1` 或 `::1`。非回環繫結預設按該位址校驗 Host 與 Origin 標頭以防 DNS rebinding；萬用繫結（`0.0.0.0`/`::`）無法預知存取位址，校驗預設關閉，需設定 `SEEDREAM_HTTP_ALLOWED_HOSTS` 啟用。跨源瀏覽器用戶端接入 `/mcp`（如網頁版用戶端）另需設定 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，設定後自動應答跨源預檢並放行清單內來源。生產與容器部署的金鑰應經環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞，而非 CLI `--api-key` / `--auth-token`——命令列參數會留在行程清單與 shell 歷史記錄中；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
+> **安全提示**：`localhost` 不被視為回環位址，須按非回環位址要求設定 Bearer 鑑權權杖與 TLS，未設定則拒絕啟動；如需免鑑權使用回環位址，請改繫結 `127.0.0.1` 或 `::1`。非回環繫結預設按該位址校驗 Host 與 Origin 標頭以防 DNS rebinding；萬用繫結（`0.0.0.0`/`::`）無法預知存取位址，校驗預設關閉，需設定 `SEEDREAM_HTTP_ALLOWED_HOSTS` 啟用。跨源瀏覽器用戶端接入 `/mcp`（如網頁版用戶端）另需設定 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，設定後自動應答跨源預檢並放行清單內來源；放行清單內的公網頁面同時豁免瀏覽器的私有網路存取限制，可直接存取本地繫結的服務。生產與容器部署的金鑰應經環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞，而非 CLI `--api-key` / `--auth-token`——命令列參數會留在行程清單與 shell 歷史記錄中；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
 
 ### 使用範例
 
@@ -316,6 +316,13 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
     <td style="text-align: center">❌</td>
     <td style="text-align: center">❌</td>
     <td style="text-align: center">❌</td>
+  </tr>
+  <tr>
+    <td>提示詞優化 fast</td>
+    <td style="text-align: center">✅</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">❌</td>
+    <td style="text-align: center">✅</td>
   </tr>
   <tr>
     <td>解析度選項</td>
