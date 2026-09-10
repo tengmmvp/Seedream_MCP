@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._helpers import (
+from seedream_mcp.tools.core._shared import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,

@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from seedream_mcp.client import SeedreamClient, SharedRequestPlan
+from seedream_mcp.client import SeedreamClient
+from seedream_mcp.request_plan import SharedRequestPlan
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image

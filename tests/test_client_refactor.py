@@ -28,6 +28,42 @@ from _client_fakes import _install_mock_transport
 from _log_fakes import RecordingLogger
 
 
+async def test_validate_common_generation_params_synthesizes_defaults() -> None:
+    """缺省合成走 resolve_effective_generation_defaults 单源：图层拆分缺省 size
+    为 auto、水印缺省取配置默认，与工具上下文构建共享同一规则。"""
+    config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0-pro", default_watermark=True)
+    client = SeedreamClient(config)
+
+    layered = await client._validate_common_generation_params(
+        prompt=None,
+        optimize_prompt_options=None,
+        size=None,
+        watermark=None,
+        response_format="url",
+        output_format=None,
+        stream=False,
+        tools=None,
+        layer_decomposition=True,
+    )
+
+    assert layered.size == "auto"
+    assert layered.watermark is True
+
+    plain = await client._validate_common_generation_params(
+        prompt="p",
+        optimize_prompt_options=None,
+        size=None,
+        watermark=None,
+        response_format="url",
+        output_format=None,
+        stream=False,
+        tools=None,
+    )
+
+    assert plain.size == config.default_size
+    assert plain.watermark is config.default_watermark
+
+
 def test_build_common_request_assembles_shared_params() -> None:
     """_build_common_request 组装四方法共享参数；None 字段省略，extra 并入。"""
     config = SeedreamConfig(api_key="k", model_id="doubao-seedream-5-0-260128")

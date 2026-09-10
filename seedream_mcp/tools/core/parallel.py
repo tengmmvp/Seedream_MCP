@@ -13,12 +13,13 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from ...client import SeedreamClient, shared_request_plan_scope
+from ...client import SeedreamClient
+from ...request_plan import shared_request_plan_scope
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER, SeedreamConfig
 from ...utils.core.errors import SeedreamMCPError, format_error_for_user
 from ...utils.core.loop_bound import loop_bound_semaphore
 from ...utils.io.io_download import DownloadManager
-from ._helpers import (
+from ._shared import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
     _yield_for_cancellation,

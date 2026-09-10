@@ -16,10 +16,10 @@ from typing import Any
 import httpx
 import pytest
 
-import seedream_mcp.client as client_module
+import seedream_mcp._client_http as client_module
+from seedream_mcp._client_http import _ERROR_BODY_BYTE_LIMIT as _ERROR_BODY_CAP
+from seedream_mcp._client_http import _ERROR_JSON_PARSE_LIMIT
 from seedream_mcp.client import SeedreamClient
-from seedream_mcp.client import _ERROR_BODY_BYTE_LIMIT as _ERROR_BODY_CAP
-from seedream_mcp.client import _ERROR_JSON_PARSE_LIMIT
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamTimeoutError
 

@@ -1,0 +1,770 @@
+"""SeedreamClient 的 HTTP 传输与响应归一化机械：发送、重试、限额读取与错误归约。
+
+以 ``_ClientHTTPMixin`` 形态并入 SeedreamClient，实例属性 config、logger、
+_client、_client_lock 与 _timeout 由 SeedreamClient.__init__ 提供。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import random
+import time
+from typing import TYPE_CHECKING, Any
+
+import httpx
+
+from .config import SeedreamConfig
+from .request_plan import _ACTIVE_REQUEST_PLAN
+from .utils.core.errors import (
+    SeedreamAPIError,
+    SeedreamConfigError,
+    SeedreamMCPError,
+    SeedreamNetworkError,
+    SeedreamTimeoutError,
+    format_error_for_user,
+    handle_api_error,
+    parse_retry_after,
+)
+from .utils.core.sanitizers import sanitize_error_text
+from .utils.images.image_ref import classify_image_reference
+from .utils.io.io_sse import escalate_partial_status, is_sse_response, parse_sse_response
+
+if TYPE_CHECKING:
+    from loguru import Logger
+
+# 指数退避单次等待上限。
+_MAX_BACKOFF_SECONDS = 60
+
+# 指数退避的指数封顶：2^6=64 已超 _MAX_BACKOFF_SECONDS，封顶不改变等待语义，
+# 仅避免病态大的 max_retries 配置下 float(2**1024) 抛 OverflowError。
+_BACKOFF_EXPONENT_CAP = 6
+
+# 错误响应体独立读取上限。
+_ERROR_BODY_BYTE_LIMIT = 4 * 1024 * 1024
+
+# 错误体完整 JSON 解析的输入上限，超限不做 dict 解析以避免大字典驻留异常对象。
+_ERROR_JSON_PARSE_LIMIT = 64 * 1024
+
+# _call_api 跨尝试累计预算按单次 api_timeout 的倍数推导，把重试风暴下单请求的
+# 最长占用约束在单次封顶的小常数倍内。
+_API_RETRY_BUDGET_FACTOR = 2
+
+
+def _first_error_detail(error: dict[str, Any]) -> str:
+    """拼接错误字典的 code 与 message 为一句脱敏摘要并限长。"""
+    detail = " ".join(
+        str(part)
+        for part in (error.get("code"), error.get("message"))
+        if isinstance(part, str) and part
+    )
+    # 上游错误体可回显凭据形态，日志出口与用户可见出口同口径脱敏。
+    return sanitize_error_text(detail, limit=200)
+
+
+def _outcome_error_note(response: dict[str, Any]) -> str:
+    """提取软失败或部分失败的一句原因，结局日志仅凭自身可定位问题。"""
+    error = response.get("error")
+    if isinstance(error, dict):
+        detail = _first_error_detail(error)
+        if detail:
+            return detail
+    failed_items = [
+        item
+        for item in response.get("data") or []
+        if isinstance(item, dict) and isinstance(item.get("error"), dict)
+    ]
+    if failed_items:
+        detail = _first_error_detail(failed_items[0]["error"])
+        suffix = f": {detail}" if detail else ""
+        return f"{len(failed_items)} 项失败{suffix}"
+    return "无错误详情"
+
+
+def _has_valid_image_items(data: Any) -> bool:
+    """判定 200 响应的 data 字段是否含至少一个非错误图片条目。
+
+    list 形态取不含 error 键的 dict 条目，dict 形态本身计为一个条目，None 与
+    标量形态无图片。
+    """
+    if isinstance(data, list):
+        return any(isinstance(item, dict) and "error" not in item for item in data)
+    if isinstance(data, dict):
+        return "error" not in data
+    return False
+
+
+class _ClientHTTPMixin:
+    """HTTP 传输与响应归一化方法集，属性由 SeedreamClient 提供。"""
+
+    config: SeedreamConfig
+    logger: Logger
+    _client: httpx.AsyncClient | None
+    _client_lock: asyncio.Lock
+    _timeout: httpx.Timeout | None
+
+    def _build_http_timeout(self) -> httpx.Timeout:
+        """构建并缓存统一超时策略：timeout 管连接、写入与连接池获取，api_timeout 管读取。
+
+        httpx 的 read 超时按单次读操作计时而非累计时长，响应头就绪与读体阶段由
+        发送路径的截止时间预算统一封顶。
+        """
+        if self._timeout is None:
+            base_timeout = float(self.config.timeout)
+            api_timeout = float(self.config.api_timeout)
+            self._timeout = httpx.Timeout(
+                timeout=api_timeout,
+                connect=base_timeout,
+                read=api_timeout,
+                write=base_timeout,
+                pool=base_timeout,
+            )
+        return self._timeout
+
+    async def _ensure_client(self) -> None:
+        """确保 HTTP 客户端已创建，首次创建经双检锁串行化。
+
+        Raises:
+            SeedreamConfigError: API 密钥为空。
+            SeedreamAPIError: 客户端创建失败。
+        """
+        if self._client is None:
+            async with self._client_lock:
+                if self._client is None:
+                    try:
+                        headers = self._get_headers()
+
+                        self._client = httpx.AsyncClient(
+                            timeout=self._build_http_timeout(),
+                            headers=headers,
+                            trust_env=False,
+                        )
+                        self.logger.debug("HTTP 客户端创建成功")
+
+                    except SeedreamConfigError:
+                        self.logger.error("HTTP 客户端创建失败: API 密钥为空")
+                        raise
+                    except Exception as e:
+                        self.logger.error("HTTP 客户端创建失败: {}", e)
+                        raise SeedreamAPIError(f"HTTP 客户端初始化失败: {str(e)}") from e
+
+    def _get_headers(self) -> dict[str, str]:
+        """构建带 Bearer 认证与 JSON Content-Type 的请求头。
+
+        Raises:
+            SeedreamConfigError: API 密钥为空。
+        """
+        if not self.config.api_key:
+            raise SeedreamConfigError("API 密钥为空，请检查环境变量 ARK_API_KEY")
+
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        self.logger.debug("生成请求头: Authorization=Bearer ***")
+        return headers
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """获取已初始化的 HTTP 客户端实例。
+
+        Raises:
+            SeedreamAPIError: HTTP 客户端尚未初始化。
+        """
+        if self._client is None:
+            raise SeedreamAPIError("HTTP 客户端未正确初始化")
+        return self._client
+
+    def _build_generation_url(self) -> str:
+        """拼接图像生成端点 URL，归一化 base_url 尾部斜杠避免拼出双斜杠路径。"""
+        return f"{self.config.base_url.rstrip('/')}/images/generations"
+
+    def _log_request_attempt(
+        self,
+        *,
+        endpoint: str,
+        attempt: int,
+        total_attempts: int,
+        url: str,
+        safe_request_data: dict[str, Any],
+    ) -> None:
+        """输出单次 API 调用尝试的调试日志，请求体须传入已脱敏副本。"""
+        self.logger.debug(
+            "{} API 调用尝试 {}/{}",
+            endpoint,
+            attempt + 1,
+            total_attempts,
+        )
+        self.logger.debug("请求 URL: {}", url)
+        self.logger.debug("请求数据(脱敏): {}", safe_request_data)
+
+    @staticmethod
+    def _require_dict_payload(payload: Any) -> dict[str, Any]:
+        """校验 200 响应的 JSON 体为对象形态，非 dict 时抛出明确的格式错误。"""
+        if not isinstance(payload, dict):
+            # null 体映射为 JSON 术语，其余形态用类型名表述。
+            received = "null" if payload is None else type(payload).__name__
+            raise SeedreamAPIError(f"响应格式错误: 期望 JSON 对象，实际收到 {received}")
+        return payload
+
+    def _build_api_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """统一归一化 API 返回结果结构。
+
+        success 仅代表收到 200 响应；body 级的部分失败或空数据由 status 与 data
+        共同表达，调用方应同时检查 status。status 透传上游声明，非字符串归一为
+        None，原值为 completed 或缺省且 data 含错误条目时升格 partial。顶层 error
+        为非空 dict 时始终透传 error 键：data 无有效图片属请求级失败，success 置
+        False、status 置 failed；data 含有效图片则维持 success=True 并保留 error
+        键，供调用方诊断上游部分错误。
+        """
+        data = payload.get("data")
+        if isinstance(data, list):
+            data_count = len(data)
+        elif data is None:
+            data_count = 0
+        else:
+            data_count = 1
+
+        status = payload.get("status")
+        if status is not None and not isinstance(status, str):
+            self.logger.debug(
+                "API 响应 status 字段非 str（{}），已收敛为 None",
+                type(status).__name__,
+            )
+            status = None
+        status = escalate_partial_status(status, data if isinstance(data, list) else None)
+
+        self.logger.debug(
+            "解析 JSON 成功: status={}, data_count={}",
+            status,
+            data_count,
+        )
+        usage = payload.get("usage", {})
+        if not isinstance(usage, dict):
+            self.logger.debug(
+                "API 响应 usage 字段非 dict（{}），已收敛为空 dict",
+                type(usage).__name__,
+            )
+            usage = {}
+
+        raw_top_error = payload.get("error")
+        top_error = raw_top_error if isinstance(raw_top_error, dict) and raw_top_error else None
+        if top_error is not None and not _has_valid_image_items(data):
+            self.logger.warning(
+                "200 响应携带顶层 error 且无有效图片，标记为请求级失败: code={}",
+                top_error.get("code"),
+            )
+            return {
+                "success": False,
+                "data": data or [],
+                "usage": usage,
+                "status": "failed",
+                "error": top_error,
+                "tools": payload.get("tools"),
+            }
+        result: dict[str, Any] = {
+            "success": True,
+            "data": data or [],
+            "usage": usage,
+            "status": status,
+            "tools": payload.get("tools"),
+        }
+        if top_error is not None:
+            result["error"] = top_error
+        return result
+
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        """判定状态码是否可重试，429 与 5xx 可重试，其余不可。"""
+        return status_code == 429 or status_code >= 500
+
+    @staticmethod
+    def _retry_after_or_none(status_code: int, headers: Any) -> float | None:
+        """对可重试状态码解析 Retry-After，其余返回 None。"""
+        if _ClientHTTPMixin._is_retryable_status(status_code):
+            return parse_retry_after(headers)
+        return None
+
+    @staticmethod
+    def _serialize_request(request_data: dict[str, Any]) -> bytes:
+        """将请求体序列化为 UTF-8 bytes，供调用方在工作线程预编码后直接发送。
+
+        关闭 ensure_ascii，中文等非 ASCII 字符以 UTF-8 原样输出，不被 ASCII 转义
+        序列膨胀。dumps 到 encode 单链产出，无中间缓冲的二次拷贝。
+        """
+        return json.dumps(request_data, ensure_ascii=False).encode("utf-8")
+
+    def _raise_api_error_for(
+        self,
+        status_code: int,
+        headers: Any,
+        error_data: dict[str, Any],
+    ) -> None:
+        """按状态码与错误体装配并抛出统一 API 异常，标准与流式路径共用。"""
+        retry_after = self._retry_after_or_none(status_code, headers)
+        raise handle_api_error(status_code, error_data, retry_after=retry_after)
+
+    def _response_body_byte_limit(self) -> int:
+        """上游响应体读取总量上限，非流式 JSON、流式 JSON 与 SSE 三条路径共用。
+
+        显式配置 response_body_limit 时直接生效；未配置时按
+        auto_save_max_file_size × 20 推导，覆盖组图 15 张 b64_json 图片的最坏
+        合法响应体。
+        """
+        if self.config.response_body_limit is not None:
+            return self.config.response_body_limit
+        return self.config.auto_save_max_file_size * 20
+
+    def _error_body_byte_limit(self) -> int:
+        """错误路径读体上限：取响应体总量上限与 4MB 独立上限的较小值。"""
+        return min(self._response_body_byte_limit(), _ERROR_BODY_BYTE_LIMIT)
+
+    def _sse_event_truncate_threshold(self) -> int:
+        """单个 SSE 事件的截断阈值，显式配置优先，未配置时取推导下界。"""
+        if self.config.sse_event_max_size is not None:
+            return self.config.sse_event_max_size
+        return self.config.derived_sse_event_max_size()
+
+    async def _read_response_body_capped(
+        self,
+        response: httpx.Response,
+        *,
+        max_bytes: int | None = None,
+        status_code: int | None = None,
+        deadline: float | None = None,
+    ) -> bytearray:
+        """流式读取响应体并施加总量与总时长上限，超限抛出对应异常。
+
+        max_bytes 缺省时取 _response_body_byte_limit，错误路径传入更小的独立上限。
+        status_code 由错误路径传入，使超限异常沿用 429/5xx 可重试、4xx 立即失败的
+        既有分类；成功路径不传，超限保持无状态码的立即失败。deadline 为
+        time.monotonic 截止时间，逐块检查封顶整个读体阶段。响应的关闭由调用方负责。
+        返回 bytearray 单份缓冲，json.loads 与解码可直接消费，避免 join 或
+        bytes 转换的峰值双驻留；增量拼接的 realloc 拷贝在事件循环线程执行，
+        以单份驻留优先于卸载拷贝。
+
+        Raises:
+            SeedreamAPIError: 响应体超过 max_bytes，status_code 非空时携带该状态码。
+            asyncio.TimeoutError: 提供 deadline 且读体中途超过截止时间。
+        """
+        if max_bytes is None:
+            max_bytes = self._response_body_byte_limit()
+        retry_after = (
+            self._retry_after_or_none(status_code, response.headers)
+            if status_code is not None
+            else None
+        )
+        content_length = response.headers.get("content-length")
+        if content_length:
+            try:
+                declared_bytes = int(content_length)
+            except ValueError:
+                declared_bytes = -1
+            if declared_bytes > max_bytes:
+                raise SeedreamAPIError(
+                    f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
+                    f"超过上限 {max_bytes} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
+                    status_code=status_code,
+                    retry_after=retry_after,
+                )
+        buffer = bytearray()
+        async for chunk in response.aiter_bytes():
+            if not chunk:
+                continue
+            if deadline is not None and time.monotonic() > deadline:
+                raise asyncio.TimeoutError(f"响应体读取超过总时长预算: 已读取 {len(buffer)} 字节")
+            buffer += chunk
+            if len(buffer) > max_bytes:
+                raise SeedreamAPIError(
+                    f"响应体过大: 已读取 {len(buffer)} 字节，超过上限 {max_bytes} 字节，"
+                    f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
+                    status_code=status_code,
+                    retry_after=retry_after,
+                )
+        return buffer
+
+    @staticmethod
+    async def _error_data_from_body(raw_body: bytearray) -> dict[str, Any]:
+        """将错误响应体归约为 handle_api_error 可消费的字典，非对象 JSON 体降级为 message。
+
+        超过 _ERROR_JSON_PARSE_LIMIT 时不做 dict 解析，降级文本同样按字节截断
+        至该上限，两类形态驻留异常对象的数据规模一致；文本经 handle_api_error
+        截断后才进入异常 message。
+        """
+        parsed: Any = None
+        if len(raw_body) <= _ERROR_JSON_PARSE_LIMIT:
+            try:
+                parsed = await asyncio.to_thread(json.loads, raw_body)
+            except Exception:
+                parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+
+        def _decode_as_message() -> dict[str, Any]:
+            truncated = len(raw_body) > _ERROR_JSON_PARSE_LIMIT
+            text = raw_body[:_ERROR_JSON_PARSE_LIMIT].decode("utf-8", errors="ignore")
+            if truncated:
+                text += f"...(截断，原文 {len(raw_body)} 字节)"
+            if not text:
+                return {"message": "响应体为空"}
+            return {"message": text}
+
+        return await asyncio.to_thread(_decode_as_message)
+
+    async def _raise_for_response_status(
+        self, response: httpx.Response, *, deadline: float | None = None
+    ) -> None:
+        """将非 200 状态码转换为统一 API 异常，流式与非流式发送路径共用。"""
+        if response.status_code == 200:
+            return
+
+        try:
+            raw_body = await self._read_response_body_capped(
+                response,
+                max_bytes=self._error_body_byte_limit(),
+                status_code=response.status_code,
+                deadline=deadline,
+            )
+        except (asyncio.TimeoutError, httpx.ReadTimeout) as exc:
+            # 已收到错误状态码后读体超时：按状态码归约为 API 错误交由可重试判定，
+            # Retry-After 一并保留。
+            raise SeedreamAPIError(
+                f"读取错误响应体超时（状态码 {response.status_code}）: {exc}",
+                status_code=response.status_code,
+                retry_after=self._retry_after_or_none(response.status_code, response.headers),
+            ) from exc
+        error_data = await self._error_data_from_body(raw_body)
+        self._raise_api_error_for(response.status_code, response.headers, error_data)
+
+    async def _parse_json_success_response(
+        self, response: httpx.Response, *, deadline: float | None
+    ) -> dict[str, Any]:
+        """读取 200 响应体并解析 JSON，归一化为统一结果结构。
+
+        读体超限与超时异常原样上抛；JSON 解析失败包装为无状态码的
+        SeedreamAPIError，按不可重试处置。
+        """
+        raw_body = await self._read_response_body_capped(response, deadline=deadline)
+        try:
+            payload = await asyncio.to_thread(json.loads, raw_body)
+        except Exception as exc:
+            raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
+        finally:
+            # 解析完成后立即释放原始缓冲，避免与 b64 解码产物双驻留。
+            del raw_body
+        return self._build_api_result(self._require_dict_payload(payload))
+
+    async def _send_with_header_deadline(
+        self, client: httpx.AsyncClient, request: httpx.Request, timeout_seconds: float
+    ) -> httpx.Response:
+        """在截止时间内发送请求并等待响应头就绪。
+
+        超时与响应就绪同 tick 竞态时采用已就绪的响应，读体仍受调用方 deadline
+        约束；到点仍未就绪才按超时上抛由 _call_api 重试。
+        """
+        response_holder: list[httpx.Response] = []
+
+        async def _send_streaming() -> httpx.Response:
+            sent = await client.send(request, stream=True)
+            response_holder.append(sent)
+            return sent
+
+        try:
+            return await asyncio.wait_for(_send_streaming(), timeout=timeout_seconds)
+        except TimeoutError:
+            if not response_holder:
+                raise
+            return response_holder[0]
+
+    async def _send_stream_request(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        url: str,
+        request_body: bytes,
+        request_timeout: httpx.Timeout,
+    ) -> dict[str, Any]:
+        """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。
+
+        每次尝试按 config.api_timeout 记录总时长截止时间，封顶响应头就绪、SSE 解析
+        与流式读体；超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
+        """
+        api_timeout = float(self.config.api_timeout)
+        deadline = time.monotonic() + api_timeout
+        request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
+        response = await self._send_with_header_deadline(client, request, api_timeout)
+        try:
+            self.logger.debug("收到响应: 状态码={}", response.status_code)
+            await self._raise_for_response_status(response, deadline=deadline)
+
+            if is_sse_response(response):
+                sse_result = await parse_sse_response(
+                    response,
+                    model_id=self.config.model_id,
+                    chunk_size=self.config.stream_chunk_size,
+                    buffer_max_size=self.config.stream_buffer_max_size,
+                    event_truncate_threshold=self._sse_event_truncate_threshold(),
+                    total_bytes_limit=self._response_body_byte_limit(),
+                    log=self.logger,
+                    deadline=deadline,
+                )
+                truncated_events = sse_result.pop("truncated_events", 0)
+                if isinstance(truncated_events, int) and truncated_events > 0:
+                    sse_result["truncated_events"] = truncated_events
+                deadline_exceeded = sse_result.pop("deadline_exceeded", False)
+                if deadline_exceeded is True:
+                    sse_result["deadline_exceeded"] = True
+                return sse_result
+
+            return await self._parse_json_success_response(response, deadline=deadline)
+        finally:
+            await response.aclose()
+
+    async def _send_standard_request(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        url: str,
+        request_body: bytes,
+        request_timeout: httpx.Timeout,
+    ) -> dict[str, Any]:
+        """发送非流式请求，将 JSON 响应解析为统一结果结构。
+
+        以流式发送实施总量限额，避免 client.post 先全量缓冲使 Content-Length 预检
+        失效。每次尝试按 config.api_timeout 记录总时长截止时间，约束响应头就绪与
+        读体；超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
+        """
+        api_timeout = float(self.config.api_timeout)
+        deadline = time.monotonic() + api_timeout
+        request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
+        response = await self._send_with_header_deadline(client, request, api_timeout)
+        try:
+            self.logger.debug("收到响应: 状态码={}", response.status_code)
+            await self._raise_for_response_status(response, deadline=deadline)
+            return await self._parse_json_success_response(response, deadline=deadline)
+        finally:
+            await response.aclose()
+
+    async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        """调用 Seedream API。
+
+        按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时按错误
+        类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；超时与网络
+        错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的 Seedream 异常。
+        """
+        await self._ensure_client()
+        client = self._get_http_client()
+
+        url = self._build_generation_url()
+        safe_request_data = self._sanitize_request_for_logging(request_data)
+        request_timeout = self._build_http_timeout()
+        plan = _ACTIVE_REQUEST_PLAN.get()
+        if plan is None:
+            request_body = await asyncio.to_thread(self._serialize_request, request_data)
+        else:
+            # endpoint 即方法键，与 get_or_build 的键同源，序列化体随键失效。
+            request_body = await plan.get_or_serialize(
+                endpoint, request_data, self._serialize_request
+            )
+        total_attempts = max(1, self.config.max_retries + 1)
+
+        is_stream = bool(request_data.get("stream"))
+        total_budget = float(self.config.api_timeout) * _API_RETRY_BUDGET_FACTOR
+        total_budget_deadline = time.monotonic() + total_budget
+        last_error: BaseException | None = None
+        for attempt in range(total_attempts):
+            if attempt > 0 and time.monotonic() > total_budget_deadline:
+                detail = f"，最后错误: {last_error}" if last_error is not None else ""
+                raise SeedreamTimeoutError(
+                    f"{endpoint} API 调用跨尝试累计超过总预算 {total_budget:.0f} 秒，"
+                    f"提前终止重试{detail}"
+                ) from last_error
+            pending_retry_after: float | None = None
+            try:
+                self._log_request_attempt(
+                    endpoint=endpoint,
+                    attempt=attempt,
+                    total_attempts=total_attempts,
+                    url=url,
+                    safe_request_data=safe_request_data,
+                )
+
+                if is_stream:
+                    return await self._send_stream_request(
+                        client=client,
+                        url=url,
+                        request_body=request_body,
+                        request_timeout=request_timeout,
+                    )
+
+                return await self._send_standard_request(
+                    client=client,
+                    url=url,
+                    request_body=request_body,
+                    request_timeout=request_timeout,
+                )
+            except SeedreamAPIError as exc:
+                last_error = exc
+                if exc.status_code is None:
+                    self.logger.warning(
+                        "{} API 调用失败 (无 HTTP 状态码，不再重试): {}",
+                        endpoint,
+                        exc.message,
+                    )
+                    raise
+                status_code = exc.status_code
+                if not self._is_retryable_status(status_code):
+                    self.logger.warning(
+                        "{} API 调用失败 (状态码={}, 不再重试): {}",
+                        endpoint,
+                        status_code,
+                        exc.message,
+                    )
+                    raise
+
+                self.logger.warning(
+                    "{} API 调用失败 (尝试 {}/{}): {}",
+                    endpoint,
+                    attempt + 1,
+                    total_attempts,
+                    exc.message,
+                )
+                pending_retry_after = exc.retry_after
+                if attempt == total_attempts - 1:
+                    raise
+            except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
+                last_error = exc
+                # httpx 读取超时与读体总时长预算超限同语义处置：均可重试，重试耗尽后
+                # 归一为 SeedreamTimeoutError。超时时结果未知，即使发生在收到 200 之后
+                # 也重试；200 加确定坏体属已知失败结果，立即上抛避免对非幂等生成 API
+                # 重复请求导致重复计费。
+                self.logger.warning(
+                    "{} API 调用超时 (尝试 {}/{}): {}",
+                    endpoint,
+                    attempt + 1,
+                    total_attempts,
+                    str(exc),
+                )
+                if attempt == total_attempts - 1:
+                    detail = str(exc)
+                    raise SeedreamTimeoutError(
+                        f"{endpoint} API 调用超时: {detail}"
+                        if detail
+                        else f"{endpoint} API 调用超时"
+                    ) from exc
+            except httpx.RequestError as exc:
+                last_error = exc
+                self.logger.warning(
+                    "{} 网络错误 (尝试 {}/{}): {}",
+                    endpoint,
+                    attempt + 1,
+                    total_attempts,
+                    str(exc),
+                )
+                if attempt == total_attempts - 1:
+                    raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(exc)}") from exc
+            except Exception as exc:
+                self.logger.warning(
+                    "{} API 调用非预期错误，不再重试 (尝试 {}/{}): {}",
+                    endpoint,
+                    attempt + 1,
+                    total_attempts,
+                    str(exc),
+                )
+                raise
+
+            # 等待时延按 ±20% 抖动：同一批次并行的多条请求收到相同 Retry-After
+            # 或走相同指数退避时，抖动拉开重试相位，避免同步群聚再击上游。
+            # Retry-After 为服务端明示的等待下限，负向抖动夹取回名义值，正向抖动
+            # 仍可放大至 1.2 倍，重试不早于服务端要求发起。等待不超过剩余总预算。
+            if attempt < total_attempts - 1:
+                remaining_budget = max(total_budget_deadline - time.monotonic(), 0.0)
+                if pending_retry_after is not None:
+                    await asyncio.sleep(
+                        min(
+                            max(
+                                pending_retry_after,
+                                pending_retry_after * (1 + random.uniform(-0.2, 0.2)),
+                            ),
+                            remaining_budget,
+                        )
+                    )
+                else:
+                    capped_exponent = 2 ** min(attempt, _BACKOFF_EXPONENT_CAP)
+                    await asyncio.sleep(
+                        min(
+                            min(
+                                float(capped_exponent) * (1 + random.uniform(-0.2, 0.2)),
+                                _MAX_BACKOFF_SECONDS,
+                            ),
+                            remaining_budget,
+                        )
+                    )
+
+        raise SeedreamAPIError(f"{endpoint} API 调用意外结束")
+
+    @staticmethod
+    def _summarize_image_field(image_value: Any) -> Any:
+        """将 image 字段归约为可安全记录的摘要，避免 URL、data URI 与路径明文进入日志。"""
+        if isinstance(image_value, list):
+            return {
+                "type": "list",
+                "count": len(image_value),
+                "samples": [
+                    _ClientHTTPMixin._summarize_image_field(item) for item in image_value[:3]
+                ],
+                "truncated": len(image_value) > 3,
+            }
+
+        if not isinstance(image_value, str):
+            return f"<{type(image_value).__name__}>"
+
+        kind = classify_image_reference(image_value)
+        if kind == "url":
+            return "<image_url>"
+        if kind == "data_uri":
+            return f"<data_uri:{len(image_value)} chars>"
+        return "<local_image_path>"
+
+    def _sanitize_request_for_logging(self, request_data: dict[str, Any]) -> dict[str, Any]:
+        """对请求体做日志脱敏：浅拷贝后替换 prompt 与 image 字段，其余原样引用。"""
+        safe_data = dict(request_data)
+        prompt = safe_data.get("prompt")
+        if prompt is not None:
+            prompt_length = len(prompt) if isinstance(prompt, str) else 0
+            safe_data["prompt"] = f"<redacted:{prompt_length} chars>"
+        image = safe_data.get("image")
+        if image is not None:
+            safe_data["image"] = self._summarize_image_field(image)
+        return safe_data
+
+    def _normalize_api_error(self, error: Exception) -> Exception:
+        """归一化 API 错误：Seedream 错误体系内的异常原样返回，其余包装为 SeedreamAPIError。
+
+        仅做兜底包装；按状态码装配异常由 handle_api_error 承担。
+        """
+        if isinstance(error, SeedreamMCPError):
+            return error
+
+        wrapped = SeedreamAPIError(f"API 调用失败: {error}")
+        wrapped.__cause__ = error
+        return wrapped
+
+    def _log_task_outcome(self, task_label: str, response: dict[str, Any]) -> None:
+        """按统一结果结构记录任务结局日志，四生成方法在 _call_api 正常返回后共用。
+
+        success 仅代表收到 200 响应，软失败与部分失败以结果结构表达而非异常，
+        失败与部分失败不得落「任务完成」日志；抛异常路径的失败日志由
+        _finalize_generation_error 承担。
+        """
+        if not response.get("success"):
+            self.logger.error("{}任务失败: {}", task_label, _outcome_error_note(response))
+        elif response.get("status") == "partial":
+            self.logger.warning("{}任务部分完成: {}", task_label, _outcome_error_note(response))
+        else:
+            self.logger.info("{}任务完成", task_label)
+
+    def _finalize_generation_error(self, task_label: str, error: Exception) -> Exception:
+        """记录任务失败日志并返回归一化异常，供四生成方法 except 分支复用。"""
+        self.logger.error("{}任务失败: {}", task_label, format_error_for_user(error))
+        return self._normalize_api_error(error)
