@@ -344,6 +344,13 @@ def test_resolve_failure_guidance_unknown_code_falls_back_to_generic() -> None:
     assert _resolve_failure_guidance(ValueError("x")) == "请根据错误信息排查后重试。"
 
 
+def test_resolve_failure_guidance_config_error_directs_to_server_config() -> None:
+    """config_error 查表命中定向指引，指向服务端配置而非通用排查。"""
+    assert (
+        _resolve_failure_guidance(SeedreamConfigError("missing key")) == "请检查服务端配置后重试。"
+    )
+
+
 @pytest.mark.parametrize("status", [400, 404, 500])
 def test_resolve_failure_guidance_api_error_uses_generic(status: int) -> None:
     """api_error 无论状态码均回退通用建议，成因多样不做定向指引。

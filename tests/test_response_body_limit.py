@@ -340,20 +340,28 @@ async def test_success_body_large_json_parses_from_bytearray(
 
 
 async def _delay_outside_patched_sleep(seconds: float) -> None:
-    """经 wait_for 超时实现延迟，绕开 no_sleep fixture 对 asyncio.sleep 的屏蔽。
+    """经未打补丁的定时器实现真实延迟，绕开 no_sleep fixture 对 asyncio.sleep 的屏蔽。
 
     慢滴流要求块间存在真实时间间隔，重试退避又须被 no_sleep 跳过，两种等待
-    不能共用同一个 asyncio.sleep 入口。
+    不能共用同一个 asyncio.sleep 入口。等待方被取消后定时器仍会触发，set 前查
+    完成态避免 InvalidStateError 噪音。
     """
     loop = asyncio.get_running_loop()
-    await asyncio.wait_for(loop.create_future(), timeout=seconds)
+    future = loop.create_future()
+
+    def _finish(target: asyncio.Future[None]) -> None:
+        if not target.done():
+            target.set_result(None)
+
+    loop.call_later(seconds, _finish, future)
+    await future
 
 
 async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: None) -> None:
-    """SSE 慢滴流触发总时长预算并按超时重试，耗尽后归一为 SeedreamTimeoutError。
+    """SSE 慢滴流零产出触发总时长预算并按超时重试，耗尽后归一为超时异常。
 
-    每块间隔 0.3 秒小于单次读超时，由 api_timeout=1 秒的总时长预算在约 1.2 秒处
-    命中；旧行为无总时长约束，该流将被完整消费。
+    首块即延迟超过总预算，流全程零完整事件，等块限时在约 1 秒处命中总时长
+    预算；无该约束时读取会无限等下去。
     """
     config = SeedreamConfig(api_key="k", max_retries=1, api_timeout=1)
     attempts = 0
@@ -363,6 +371,7 @@ async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: N
         attempts += 1
 
         async def _stream() -> AsyncIterator[bytes]:
+            await _delay_outside_patched_sleep(1.2)
             yield b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
             while True:
                 await _delay_outside_patched_sleep(0.3)
@@ -381,6 +390,48 @@ async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: N
 
     # 首次超时被重试而非立即上抛，重试耗尽后归一为超时异常
     assert attempts == config.max_retries + 1
+
+
+async def test_sse_slow_drip_with_partial_results_terminates_gracefully(
+    no_sleep: None,
+) -> None:
+    """SSE 慢滴流已产出部分结果时按预算优雅终止，不重试不抛错。
+
+    首块为超过读取重组块大小的完整大事件，立即产出一条结果；后续块间隔超过
+    剩余预算，等块限时命中后保留已收结果并携带 deadline_exceeded 返回；已计费
+    结果不得因超时重试。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=1, api_timeout=1)
+    attempts = 0
+    # 首块凑满一个读取重组块：完整小事件随块立即产出，垫脚为未完成事件开头，
+    # 终结符滞留重组缓冲不影响已产出事件。
+    chunk = 1024 * 1024
+    first_event = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
+    head = first_event + b'data: {"padding":"' + b"x" * (chunk - len(first_event) - 18)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield head
+            while True:
+                await _delay_outside_patched_sleep(0.6)
+                yield (
+                    b'data: {"type":"image_generation.partial_succeeded",'
+                    b'"url":"http://x/2.png"}\n\n'
+                )
+
+        return httpx.Response(200, content=_stream(), headers={"content-type": "text/event-stream"})
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        result = await client._call_api("text_to_image", {"prompt": "p", "stream": True})
+
+    assert attempts == 1
+    assert result["deadline_exceeded"] is True
+    assert result["data"][0]["url"] == "http://x/1.png"
 
 
 async def test_standard_slow_drip_json_over_total_budget_times_out(no_sleep: None) -> None:
@@ -452,6 +503,86 @@ async def test_standard_header_stall_over_api_timeout_times_out(no_sleep: None) 
             await client._call_api("text_to_image", {"prompt": "p"})
 
     assert attempts == config.max_retries + 1
+
+
+async def test_send_with_header_deadline_prefers_ready_response_on_timeout_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """截止时间到点与响应头就绪同刻竞态时采用已就绪响应，不按超时上抛。
+
+    发送协程在响应入 holder 后无等待挂起点，真实 wait_for 无法确定性复现该
+    交错，以完成发送后仍判到期的替身锁定竞态分支的取值方向。
+    """
+    config = SeedreamConfig(api_key="k")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=b"{}", headers={"content-type": "application/json"})
+
+    async def _racing_wait_for(coro: Any, timeout: Any = None) -> Any:
+        del timeout
+        await coro
+        # 发送已完成、响应已就绪的同一 tick 上到达期判定
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", _racing_wait_for)
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+        raw_client = client._client
+        assert raw_client is not None
+        request = raw_client.build_request("POST", "https://example.com")
+        response = await client._send_with_header_deadline(raw_client, request, 1.0)
+        try:
+            assert response.status_code == 200
+        finally:
+            await response.aclose()
+
+
+async def test_malformed_content_length_degrades_to_streamed_read(no_sleep: None) -> None:
+    """Content-Length 声明非数值时跳过预检，按流式累计读取并正常解析成功体。"""
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    body = json.dumps({"data": [], "usage": {}, "status": "completed"}).encode()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, headers={"content-length": "abc"}, content=body)
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert result["success"] is True
+
+
+async def test_error_body_read_timeout_reduced_with_status_and_retry_after() -> None:
+    """错误状态码下读体超时归约为携带状态码与 Retry-After 的 API 错误。
+
+    经 MockTransport 取得真实流式 429 响应后以已过期的 deadline 直调读体路径，
+    首块到达即命中截止判定。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=0)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(429, headers={"retry-after": "3"}, content=b"x" * 32)
+
+    async with SeedreamClient(config) as client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as raw:
+            request = raw.build_request("POST", "https://example.com")
+            response = await raw.send(request, stream=True)
+            try:
+                with pytest.raises(
+                    SeedreamAPIError, match="读取错误响应体超时（状态码 429）"
+                ) as exc_info:
+                    await client._raise_for_response_status(
+                        response, deadline=time.monotonic() - 1.0
+                    )
+            finally:
+                await response.aclose()
+
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.retry_after == 3.0
 
 
 # ==================== 超大错误体的状态码重试语义 ====================

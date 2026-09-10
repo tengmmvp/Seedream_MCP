@@ -10,7 +10,8 @@ import asyncio
 import json
 import random
 import time
-from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -27,9 +28,19 @@ from .utils.core.errors import (
     handle_api_error,
     parse_retry_after,
 )
-from .utils.core.sanitizers import sanitize_error_text
+from .utils.core.sanitizers import (
+    UPSTREAM_MESSAGE_FRAGMENT_LIMIT,
+    sanitize_error_text,
+)
 from .utils.images.image_ref import classify_image_reference
-from .utils.io.io_sse import escalate_partial_status, is_sse_response, parse_sse_response
+from .utils.io.io_sse import (
+    STREAM_DEADLINE_HIT,
+    STREAM_ENDED,
+    escalate_partial_status,
+    is_sse_response,
+    next_stream_chunk,
+    parse_sse_response,
+)
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -50,6 +61,10 @@ _ERROR_JSON_PARSE_LIMIT = 64 * 1024
 # _call_api 跨尝试累计预算按单次 api_timeout 的倍数推导，把重试风暴下单请求的
 # 最长占用约束在单次封顶的小常数倍内。
 _API_RETRY_BUDGET_FACTOR = 2
+
+# 未显式配置 response_body_limit 时按 auto_save_max_file_size 的倍数推导，覆盖
+# 组图 15 张 b64_json 图片的最坏合法响应体。
+_RESPONSE_BODY_LIMIT_FACTOR = 20
 
 
 def _first_error_detail(error: dict[str, Any]) -> str:
@@ -187,9 +202,9 @@ class _ClientHTTPMixin:
         attempt: int,
         total_attempts: int,
         url: str,
-        safe_request_data: dict[str, Any],
+        request_data: dict[str, Any],
     ) -> None:
-        """输出单次 API 调用尝试的调试日志，请求体须传入已脱敏副本。"""
+        """输出单次 API 调用尝试的调试日志，脱敏副本经 opt(lazy=True) 推迟构建。"""
         self.logger.debug(
             "{} API 调用尝试 {}/{}",
             endpoint,
@@ -197,7 +212,10 @@ class _ClientHTTPMixin:
             total_attempts,
         )
         self.logger.debug("请求 URL: {}", url)
-        self.logger.debug("请求数据(脱敏): {}", safe_request_data)
+        self.logger.opt(lazy=True).debug(
+            "请求数据: {}",
+            lambda: self._sanitize_request_for_logging(request_data),
+        )
 
     @staticmethod
     def _require_dict_payload(payload: Any) -> dict[str, Any]:
@@ -309,12 +327,11 @@ class _ClientHTTPMixin:
         """上游响应体读取总量上限，非流式 JSON、流式 JSON 与 SSE 三条路径共用。
 
         显式配置 response_body_limit 时直接生效；未配置时按
-        auto_save_max_file_size × 20 推导，覆盖组图 15 张 b64_json 图片的最坏
-        合法响应体。
+        auto_save_max_file_size × _RESPONSE_BODY_LIMIT_FACTOR 推导。
         """
         if self.config.response_body_limit is not None:
             return self.config.response_body_limit
-        return self.config.auto_save_max_file_size * 20
+        return self.config.auto_save_max_file_size * _RESPONSE_BODY_LIMIT_FACTOR
 
     def _error_body_byte_limit(self) -> int:
         """错误路径读体上限：取响应体总量上限与 4MB 独立上限的较小值。"""
@@ -369,7 +386,14 @@ class _ClientHTTPMixin:
                     retry_after=retry_after,
                 )
         buffer = bytearray()
-        async for chunk in response.aiter_bytes():
+        chunk_iterator = response.aiter_bytes()
+        while True:
+            outcome = await next_stream_chunk(chunk_iterator, deadline)
+            if outcome is STREAM_ENDED:
+                break
+            if outcome is STREAM_DEADLINE_HIT:
+                raise asyncio.TimeoutError(f"响应体读取超过总时长预算: 已读取 {len(buffer)} 字节")
+            chunk = cast("bytes", outcome)
             if not chunk:
                 continue
             if deadline is not None and time.monotonic() > deadline:
@@ -438,7 +462,7 @@ class _ClientHTTPMixin:
         self._raise_api_error_for(response.status_code, response.headers, error_data)
 
     async def _parse_json_success_response(
-        self, response: httpx.Response, *, deadline: float | None
+        self, response: httpx.Response, deadline: float | None
     ) -> dict[str, Any]:
         """读取 200 响应体并解析 JSON，归一化为统一结果结构。
 
@@ -477,59 +501,16 @@ class _ClientHTTPMixin:
                 raise
             return response_holder[0]
 
-    async def _send_stream_request(
+    async def _send_request(
         self,
         *,
         client: httpx.AsyncClient,
         url: str,
         request_body: bytes,
         request_timeout: httpx.Timeout,
+        handle_response: Callable[[httpx.Response, float], Awaitable[dict[str, Any]]],
     ) -> dict[str, Any]:
-        """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。
-
-        每次尝试按 config.api_timeout 记录总时长截止时间，封顶响应头就绪、SSE 解析
-        与流式读体；超限抛 asyncio.TimeoutError，由 _call_api 的超时重试分支处置。
-        """
-        api_timeout = float(self.config.api_timeout)
-        deadline = time.monotonic() + api_timeout
-        request = client.build_request("POST", url, content=request_body, timeout=request_timeout)
-        response = await self._send_with_header_deadline(client, request, api_timeout)
-        try:
-            self.logger.debug("收到响应: 状态码={}", response.status_code)
-            await self._raise_for_response_status(response, deadline=deadline)
-
-            if is_sse_response(response):
-                sse_result = await parse_sse_response(
-                    response,
-                    model_id=self.config.model_id,
-                    chunk_size=self.config.stream_chunk_size,
-                    buffer_max_size=self.config.stream_buffer_max_size,
-                    event_truncate_threshold=self._sse_event_truncate_threshold(),
-                    total_bytes_limit=self._response_body_byte_limit(),
-                    log=self.logger,
-                    deadline=deadline,
-                )
-                truncated_events = sse_result.pop("truncated_events", 0)
-                if isinstance(truncated_events, int) and truncated_events > 0:
-                    sse_result["truncated_events"] = truncated_events
-                deadline_exceeded = sse_result.pop("deadline_exceeded", False)
-                if deadline_exceeded is True:
-                    sse_result["deadline_exceeded"] = True
-                return sse_result
-
-            return await self._parse_json_success_response(response, deadline=deadline)
-        finally:
-            await response.aclose()
-
-    async def _send_standard_request(
-        self,
-        *,
-        client: httpx.AsyncClient,
-        url: str,
-        request_body: bytes,
-        request_timeout: httpx.Timeout,
-    ) -> dict[str, Any]:
-        """发送非流式请求，将 JSON 响应解析为统一结果结构。
+        """发送请求、检查状态码并委托回调解析响应，两条发送路径共用。
 
         以流式发送实施总量限额，避免 client.post 先全量缓冲使 Content-Length 预检
         失效。每次尝试按 config.api_timeout 记录总时长截止时间，约束响应头就绪与
@@ -542,9 +523,68 @@ class _ClientHTTPMixin:
         try:
             self.logger.debug("收到响应: 状态码={}", response.status_code)
             await self._raise_for_response_status(response, deadline=deadline)
-            return await self._parse_json_success_response(response, deadline=deadline)
+            return await handle_response(response, deadline)
         finally:
             await response.aclose()
+
+    async def _handle_stream_response(
+        self, response: httpx.Response, deadline: float
+    ) -> dict[str, Any]:
+        """把流式请求的 200 响应解析为统一结果结构，SSE 优先、JSON 兜底。"""
+        if not is_sse_response(response):
+            return await self._parse_json_success_response(response, deadline)
+
+        sse_result = await parse_sse_response(
+            response,
+            model_id=self.config.model_id,
+            chunk_size=self.config.stream_chunk_size,
+            buffer_max_size=self.config.stream_buffer_max_size,
+            event_truncate_threshold=self._sse_event_truncate_threshold(),
+            total_bytes_limit=self._response_body_byte_limit(),
+            log=self.logger,
+            deadline=deadline,
+        )
+        truncated_events = sse_result.pop("truncated_events", 0)
+        if isinstance(truncated_events, int) and truncated_events > 0:
+            sse_result["truncated_events"] = truncated_events
+        deadline_exceeded = sse_result.pop("deadline_exceeded", False)
+        if deadline_exceeded is True:
+            sse_result["deadline_exceeded"] = True
+        return sse_result
+
+    async def _send_stream_request(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        url: str,
+        request_body: bytes,
+        request_timeout: httpx.Timeout,
+    ) -> dict[str, Any]:
+        """发送流式请求，将 SSE 或 JSON 响应解析为统一结果结构。"""
+        return await self._send_request(
+            client=client,
+            url=url,
+            request_body=request_body,
+            request_timeout=request_timeout,
+            handle_response=self._handle_stream_response,
+        )
+
+    async def _send_standard_request(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        url: str,
+        request_body: bytes,
+        request_timeout: httpx.Timeout,
+    ) -> dict[str, Any]:
+        """发送非流式请求，将 JSON 响应解析为统一结果结构。"""
+        return await self._send_request(
+            client=client,
+            url=url,
+            request_body=request_body,
+            request_timeout=request_timeout,
+            handle_response=self._parse_json_success_response,
+        )
 
     async def _call_api(self, endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
         """调用 Seedream API。
@@ -567,7 +607,6 @@ class _ClientHTTPMixin:
         client = self._get_http_client()
 
         url = self._build_generation_url()
-        safe_request_data = self._sanitize_request_for_logging(request_data)
         request_timeout = self._build_http_timeout()
         plan = _ACTIVE_REQUEST_PLAN.get()
         if plan is None:
@@ -597,7 +636,7 @@ class _ClientHTTPMixin:
                     attempt=attempt,
                     total_attempts=total_attempts,
                     url=url,
-                    safe_request_data=safe_request_data,
+                    request_data=request_data,
                 )
 
                 if is_stream:
@@ -620,7 +659,7 @@ class _ClientHTTPMixin:
                     self.logger.warning(
                         "{} API 调用失败 (无 HTTP 状态码，不再重试): {}",
                         endpoint,
-                        exc.message,
+                        sanitize_error_text(exc.message, limit=UPSTREAM_MESSAGE_FRAGMENT_LIMIT),
                     )
                     raise
                 status_code = exc.status_code
@@ -629,7 +668,7 @@ class _ClientHTTPMixin:
                         "{} API 调用失败 (状态码={}, 不再重试): {}",
                         endpoint,
                         status_code,
-                        exc.message,
+                        sanitize_error_text(exc.message, limit=UPSTREAM_MESSAGE_FRAGMENT_LIMIT),
                     )
                     raise
 
@@ -638,7 +677,7 @@ class _ClientHTTPMixin:
                     endpoint,
                     attempt + 1,
                     total_attempts,
-                    exc.message,
+                    sanitize_error_text(exc.message, limit=UPSTREAM_MESSAGE_FRAGMENT_LIMIT),
                 )
                 pending_retry_after = exc.retry_after
                 if attempt == total_attempts - 1:

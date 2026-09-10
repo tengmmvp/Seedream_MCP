@@ -6,8 +6,9 @@ import json
 import re
 from typing import Any, TypeVar, cast
 
-# 上游错误 message 片段拼入异常文案前的截断上限，防止超大错误体形成巨型日志行。
-_UPSTREAM_MESSAGE_FRAGMENT_LIMIT = 8 * 1024
+# 上游错误 message 片段拼入异常文案前的截断上限，防止超大错误体形成巨型日志行；
+# 重试日志脱敏时复用为宽截断上限，日志保留原文便于排障。
+UPSTREAM_MESSAGE_FRAGMENT_LIMIT = 8 * 1024
 
 
 def _normalize_non_str_message(value: Any) -> str:
@@ -72,15 +73,16 @@ def truncate_upstream_message_fragment(value: Any) -> str:
     message 拼装共用本函数。
     """
     text = normalize_message_text(value)
-    if len(text) > _UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
-        return _truncate_text_with_marker(text, _UPSTREAM_MESSAGE_FRAGMENT_LIMIT)
+    if len(text) > UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
+        return _truncate_text_with_marker(text, UPSTREAM_MESSAGE_FRAGMENT_LIMIT)
     return text
 
 
 # _truncate_value_for_output 的默认截断上限。
 _VALUE_OUTPUT_LIMIT = 200
 # 错误消息序列化时的长度上限：避免上游回显的长片段进入用户可见输出或结构化响应。
-_MESSAGE_OUTPUT_LIMIT = 500
+# 与 DATA_OUTPUT_LIMIT 一并为跨模块共享的净化调参契约。
+MESSAGE_OUTPUT_LIMIT = 500
 # dict/list 元素数超过此值即跳过长度估计直接给摘要，超大容器不进入逐元素遍历。
 _CONTAINER_REPR_ELEMENT_LIMIT = 50
 # 容器嵌套深度上限：超过后长度估计返回 None，截断走类型占位符，与 RecursionError
@@ -376,7 +378,7 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     return cast("_SanitizedValue", _URL_USERINFO_PATTERN.sub(r"\1", redacted))
 
 
-def _sanitize_message_for_output(value: Any, limit: int = _MESSAGE_OUTPUT_LIMIT) -> str:
+def _sanitize_message_for_output(value: Any, limit: int = MESSAGE_OUTPUT_LIMIT) -> str:
     """对异常 message 先截断再剥离敏感片段，供 format_error_for_user 输出净化。
 
     非字符串先归一化为文本再进管线，dict 形态不借 str/repr 穿透。
@@ -385,7 +387,7 @@ def _sanitize_message_for_output(value: Any, limit: int = _MESSAGE_OUTPUT_LIMIT)
 
 
 def sanitize_error_text(
-    message: _SanitizedValue, limit: int = _MESSAGE_OUTPUT_LIMIT
+    message: _SanitizedValue, limit: int = MESSAGE_OUTPUT_LIMIT
 ) -> _SanitizedValue:
     """对上游错误文本先截断再剥离敏感片段与控制字符，供全部用户可见输出路径共用。
 
@@ -410,7 +412,7 @@ def sanitize_error_text(
 
 # 数据字段序列化的防御性长度上限：URL 等数据字段不施加错误文本的 500 字符截断，
 # 仅防异常超长数据撑爆输出。
-_DATA_OUTPUT_LIMIT = 16 * 1024
+DATA_OUTPUT_LIMIT = 16 * 1024
 
 # 纯 URL 数据字段判定：以 http(s):// 开头且不含任何空白字符的值视为 URL 本体。
 _URL_DATA_PREFIX_PATTERN = re.compile(r"https?://", re.IGNORECASE)
@@ -433,7 +435,7 @@ def _sanitize_url_data_text(value: str, limit: int) -> str:
     return redacted
 
 
-def sanitize_data_text(value: _SanitizedValue, limit: int = _DATA_OUTPUT_LIMIT) -> _SanitizedValue:
+def sanitize_data_text(value: _SanitizedValue, limit: int = DATA_OUTPUT_LIMIT) -> _SanitizedValue:
     """对数据字段文本剥离敏感片段与控制字符，仅保留防御性大上限截断。
 
     url/original_url 等数据字段的取值是返回结果的一部分，500 字符级截断会使签名

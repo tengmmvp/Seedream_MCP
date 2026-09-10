@@ -7,8 +7,8 @@ from collections.abc import Callable
 from typing import Any
 
 from ...utils.core.sanitizers import (
-    _DATA_OUTPUT_LIMIT,
-    _MESSAGE_OUTPUT_LIMIT,
+    DATA_OUTPUT_LIMIT,
+    MESSAGE_OUTPUT_LIMIT,
     normalize_message_text,
     sanitize_data_text,
     sanitize_error_text,
@@ -101,7 +101,7 @@ def _sanitize_unknown_value(value: Any) -> Any:
 
 
 def sanitize_error_dict(
-    error: dict[str, Any], *, message_limit: int = _MESSAGE_OUTPUT_LIMIT
+    error: dict[str, Any], *, message_limit: int = MESSAGE_OUTPUT_LIMIT
 ) -> dict[str, Any]:
     """净化错误 dict 的各分量，返回净化后的新 dict，供全部错误出口共用。
 
@@ -128,7 +128,7 @@ def sanitize_error_dict(
 
 
 def _sanitize_image_error_entry(
-    error: Any, *, message_limit: int = _MESSAGE_OUTPUT_LIMIT
+    error: Any, *, message_limit: int = MESSAGE_OUTPUT_LIMIT
 ) -> dict[str, Any]:
     """净化图片项的 error 字段，返回需回写的更新项。
 
@@ -197,7 +197,7 @@ def message_limit_for(trusted_message: bool) -> int:
 
     结果聚合与图片项净化共用本判定，宽限策略调整只改此处。
     """
-    return _DATA_OUTPUT_LIMIT if trusted_message else _MESSAGE_OUTPUT_LIMIT
+    return DATA_OUTPUT_LIMIT if trusted_message else MESSAGE_OUTPUT_LIMIT
 
 
 def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]:
