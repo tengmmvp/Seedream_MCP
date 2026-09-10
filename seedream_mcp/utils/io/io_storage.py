@@ -83,7 +83,7 @@ class FileManager:
         except (OSError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
         # 仅拒绝指向已存在文件的路径；save_path 为调用级保存声明，位置不受限，
-        # 空字节等其余路径形态由调用方 tools/core/_helpers 在 resolve 前拒绝。
+        # 空字节等其余路径形态由调用方 tools/core/_shared 在 resolve 前拒绝。
         if resolved.exists() and not resolved.is_dir():
             raise FileManagerError(f"保存路径不是目录: {resolved}")
         base_dir = resolved

@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
-from ..core.errors import SeedreamMCPError, sanitize_data_text, sanitize_error_text
+from ..core.errors import SeedreamMCPError
+from ..core.sanitizers import sanitize_data_text, sanitize_error_text
 from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
     DEFAULT_MAX_FILE_SIZE,

@@ -24,8 +24,8 @@ from ..io.io_path import (
     is_within_resolved,
     normalize_path,
     read_scope_denial_message,
-    suggest_similar_paths,
 )
+from ..io.io_scan import suggest_similar_paths
 from .image_validation import (
     LocalImageCandidate,
     iter_local_candidates,
@@ -155,7 +155,7 @@ def _prepare_local_image(normalized: str, original: str) -> str:
                     field="image",
                     value=normalized,
                 )
-            _, error_msg, _ = validate_image_path(normalized, skip_dimensions=True)
+            error_msg = validate_image_path(normalized, skip_dimensions=True)
             error_text = error_msg or "图像路径校验失败"
             suggestions = suggest_similar_paths(original, search_dirs=[str(images_root)])
             suggestion_text = ""

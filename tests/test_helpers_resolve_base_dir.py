@@ -11,10 +11,10 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.tools.core._helpers import _resolve_base_dir
+from seedream_mcp.tools.core._shared import _resolve_base_dir
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.io.io_path import (
-    _RESOLVED_DATA_ROOT_CACHE,
+    _DATA_ROOT_RESOLVE_CACHE,
     clear_resolved_env_root_cache,
     resolve_images_root,
 )
@@ -153,12 +153,12 @@ def test_resolve_images_root_cache_invalidated_by_active_config_change(
     _use_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace_a)), monkeypatch)
     first = resolve_images_root()
     assert first == (workspace_a / ".seedream" / "images").resolve()
-    assert f"default-images:{workspace_a.resolve()}" in _RESOLVED_DATA_ROOT_CACHE
+    assert f"default-images:{workspace_a.resolve()}" in _DATA_ROOT_RESOLVE_CACHE
 
     workspace_b = tmp_path / "ws_b"
     workspace_b.mkdir()
     set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace_b)))
-    assert _RESOLVED_DATA_ROOT_CACHE == {}
+    assert not _DATA_ROOT_RESOLVE_CACHE
 
     second = resolve_images_root()
     assert second == (workspace_b / ".seedream" / "images").resolve()
@@ -176,9 +176,9 @@ def test_resolve_images_root_cache_keys_isolate_explicit_and_default(
     assert default_dir == (workspace / ".seedream" / "images").resolve()
 
     # 同一字符串两分支并存：显式分支以显式配置串为键，与前缀化的默认键互不覆盖。
-    _RESOLVED_DATA_ROOT_CACHE[f"explicit-images:{workspace}"] = workspace.resolve()
-    assert _RESOLVED_DATA_ROOT_CACHE[f"default-images:{workspace.resolve()}"] == default_dir
-    assert _RESOLVED_DATA_ROOT_CACHE[f"explicit-images:{workspace}"] == workspace.resolve()
+    _DATA_ROOT_RESOLVE_CACHE[f"explicit-images:{workspace}"] = workspace.resolve()
+    assert _DATA_ROOT_RESOLVE_CACHE[f"default-images:{workspace.resolve()}"] == default_dir
+    assert _DATA_ROOT_RESOLVE_CACHE[f"explicit-images:{workspace}"] == workspace.resolve()
 
 
 def test_resolve_base_dir_absolute_save_path_skips_unresolvable_images_root(
@@ -189,7 +189,7 @@ def test_resolve_base_dir_absolute_save_path_skips_unresolvable_images_root(
     与纯远端参考图不依赖数据根目录声明可解析性的解耦原则同口径。
     """
     import seedream_mcp.utils.io.io_path as io_path_module
-    from seedream_mcp.tools.core._helpers import prevalidate_save_path, _resolve_base_dir
+    from seedream_mcp.tools.core._shared import prevalidate_save_path, _resolve_base_dir
 
     monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(tmp_path / "pics"))
 

@@ -290,14 +290,12 @@ def test_validate_image_input_wraps_non_image_data_uri_as_unidentified() -> None
     ["https://example.com/x.png", "data:image/png;base64,iVBORw0KGgo="],
 )
 def test_validate_image_path_short_circuits_non_local_references(reference: str) -> None:
-    """URL 与 Data URI 同口径短路：视为有效引用且路径为 None，不当本地路径处理。
+    """URL 与 Data URI 同口径短路：视为有效引用，不当本地路径处理。
 
     Data URI 此前落入本地路径分支，被拼接为畸形文件名后误报不存在；其内容校验
     由 validate_image_input 承担。
     """
-    is_valid, error, normalized = validate_image_path(reference)
-
-    assert (is_valid, error, normalized) == (True, "", None)
+    assert validate_image_path(reference) is None
 
 
 def test_validate_image_path_none_base_dir_falls_back_and_enforces_scope(
@@ -312,16 +310,11 @@ def test_validate_image_path_none_base_dir_falls_back_and_enforces_scope(
     images_root.mkdir(parents=True)
     set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)))
 
-    # 图片目录内真实小图：返回有效，证明图片目录基准解析正常放行合法路径。
+    # 图片目录内真实小图：无错误即图片目录基准正常放行。
     img = images_root / "ok.png"
     Image.new("RGB", (32, 32), color=(0, 0, 255)).save(img)
-    is_valid, err, normalized = validate_image_path(str(img))
-    assert is_valid is True
-    assert err == ""
-    assert normalized is not None
+    assert validate_image_path(str(img)) is None
 
-    # 读权限外路径：工作区与图片目录均不包含，判无效并指向配置指引。
+    # 读权限外路径：工作区与图片目录均不包含，返回越界错误。
     escape = tmp_path / "escape.png"
-    is_valid_escape, err_escape, _ = validate_image_path(str(escape))
-    assert is_valid_escape is False
-    assert "路径不在读取范围内" in err_escape
+    assert "路径不在读取范围内" in (validate_image_path(str(escape)) or "")

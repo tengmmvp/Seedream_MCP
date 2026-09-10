@@ -13,10 +13,8 @@ import time
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from ..core.errors import (
-    SeedreamAPIError,
-    truncate_upstream_message_fragment,
-)
+from ..core.errors import SeedreamAPIError
+from ..core.sanitizers import truncate_upstream_message_fragment
 
 if TYPE_CHECKING:
     # 注解经 __future__ 字符串化不在运行时求值，httpx 与 Logger 仅类型检查期导入。
@@ -574,6 +572,15 @@ async def _resolve_sse_trailing_segment(
     return 0
 
 
+def escalate_partial_status(status: str | None, data: list[Any] | None) -> str | None:
+    """data 含错误条目且状态呈完成态时升格 partial，流式与非流式共用。"""
+    if status not in (None, "completed"):
+        return status
+    if data and any(isinstance(item, dict) and "error" in item for item in data):
+        return "partial"
+    return status
+
+
 def _finalize_sse_status(
     status: str | None,
     items: list[dict[str, Any]],
@@ -581,12 +588,7 @@ def _finalize_sse_status(
     deadline_exceeded: bool = False,
 ) -> str | None:
     """状态汇总阶段：按部分失败与事件截断把完成状态收敛为 partial。"""
-    # data 项含 error 即存在部分失败时标记 status=partial，与非流式
-    # _build_api_result 口径一致，避免误导下游对结果完整性的判断。
-    if status in (None, "completed") and any(
-        isinstance(item, dict) and "error" in item for item in items
-    ):
-        status = "partial"
+    status = escalate_partial_status(status, items)
 
     # 单个事件超限被丢弃或超时提前终止时结果不完整，标记 partial 通知调用方。
     if (truncated_events > 0 or deadline_exceeded) and status in (None, "completed"):

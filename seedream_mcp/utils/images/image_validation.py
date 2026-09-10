@@ -506,39 +506,36 @@ def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     return _validate_file_path(image, skip_dimensions=skip_dimensions)
 
 
-def validate_image_path(path: str, skip_dimensions: bool = False) -> tuple[bool, str, Path | None]:
-    """验证图片文件路径，强制其位于读权限内并符合图片规则。
+def validate_image_path(path: str, skip_dimensions: bool = False) -> str | None:
+    """诊断图片路径的校验失败原因，有效或非本地引用返回 None。
 
-    HTTP(S) URL 与 Data URI 为非本地引用，无读取范围可言，视为有效但标准化路径
-    恒为 None；Data URI 的内容校验由 validate_image_input 承担。调用方须同时检查
-    有效位与路径是否为 None，不可仅凭有效位判定为本地路径。
+    HTTP(S) URL 与 Data URI 为非本地引用，无读取范围可言，恒无错误；Data URI
+    的内容校验由 validate_image_input 承担。
 
     Args:
-        path: 图片文件路径；HTTP(S) URL 与 Data URI 有效但路径返回 None。
+        path: 图片文件路径；HTTP(S) URL 与 Data URI 恒无错误。
         skip_dimensions: 是否跳过图片像素维度校验。
 
     Returns:
-        三元组 (是否有效, 错误信息, 标准化路径)。
+        错误消息；有效时为 None。
     """
     try:
         path = path.strip()
         kind = classify_image_reference(path)
         if kind in ("url", "data_uri"):
-            return True, "", None
+            return None
 
         normalized_path = normalize_path(path, str(resolve_images_root()))
         # 越界判定面向读权限集合（工作区 ∪ 图片目录），与候选定位同口径。
         if not any(is_within_resolved(normalized_path, scope) for scope in get_read_scope()):
-            return False, "路径不在读取范围内", normalized_path
+            return "路径不在读取范围内"
 
         try:
-            validated_path = validate_image_input(
-                str(normalized_path), skip_dimensions=skip_dimensions
-            )
-            return True, "", Path(validated_path)
+            validate_image_input(str(normalized_path), skip_dimensions=skip_dimensions)
+            return None
         except SeedreamValidationError as e:
-            return False, e.message, normalized_path
+            return e.message
 
     except Exception as e:
         logger.error("路径验证失败 {}: {}", path, e)
-        return False, f"路径验证错误: {str(e)}", None
+        return f"路径验证错误: {str(e)}"

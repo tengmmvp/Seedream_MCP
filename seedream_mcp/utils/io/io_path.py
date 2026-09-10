@@ -9,17 +9,17 @@ SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录；图片目录恒
 之外的路径。roots 取回有三种形态：工具链经 server 层 Resolve 依赖注入
 （SEP-2577 非废弃形态）、资源处理器在 2026-07-28 及以后的会话上经
 InputRequiredResult 多轮取回，均由 workspace_roots_scope_from_result 应用；
-旧修订会话保留 workspace_roots_scope 的 roots/list 直连。另提供目录图片
-查找与拼写相近路径建议。
+旧修订会话保留 workspace_roots_scope 的 roots/list 直连。
 """
 
 from __future__ import annotations
 
 import asyncio
-import heapq
 import os
 import sys
 import tempfile
+import threading
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
@@ -32,10 +32,8 @@ from mcp.shared.exceptions import NoBackChannelError
 from mcp.types import ListRootsResult
 
 from ..core.errors import SeedreamConfigError
-from ..core.formats import DATA_DIR_NAME, SUPPORTED_IMAGE_EXTENSIONS
-from ..core.logs import get_logger
-from .io_file import has_reparse_attribute
-from .io_scan import cached_find_images_in_directory
+from ..core.formats import DATA_DIR_NAME
+from ..core.logs import EarlyMessageBuffer, get_logger
 
 logger = get_logger()
 
@@ -47,12 +45,6 @@ _WORKSPACE_ROOTS_VAR: ContextVar[tuple[Path, ...] | None] = ContextVar(
 # roots/list 请求的显式短超时：不设超时将依赖会话层读超时，慢客户端或半开连接会把
 # 工具调用拖到分钟级；超时按读取失败处理，工作根目录经声明链回退。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
-
-# 目录扫描的物化条目预算：单次 find_images_in_directory 调用物化的条目（含非
-# 图片，重扫趟只计新增物化段）累计超过该值即停止遍历，约束递归广度与前缀物化量；
-# heapq.nsmallest 选前缀须消费整个目录迭代器，单目录单趟枚举不在此预算内，由
-# io_scan 的 mtime+TTL 缓存缓解重复扫描。
-_SCAN_ENTRY_BUDGET = 20000
 
 # Windows 保留设备名清单：CON/NUL/COM1 等作最终分量时被解释为设备而非文件，
 # normalize_path 的拒绝与 io_storage 的文件名净化经 is_windows_reserved_name 共用。
@@ -115,8 +107,59 @@ _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 # "default-images:"+工作根目录字符串，前缀隔离防撞车；默认分支的键含客户端可控
 # 的 roots 字符串，按 LRU 限容防轮换 roots 的无界增长。活动配置变更时随
 # clear_resolved_env_root_cache 一并失效。
-_RESOLVED_DATA_ROOT_CACHE: OrderedDict[str, Path] = OrderedDict()
 _DATA_ROOT_CACHE_MAX_ENTRIES = 64
+
+
+class ResolveResultCache:
+    """带锁与可选 TTL 的 resolve 结果 LRU 缓存，配置根与扫描条目共用骨架。
+
+    映射协议面向测试的预热与断言；TTL 为 None 时条目仅经 clear 与容量驱逐失效。
+    """
+
+    def __init__(self, max_entries: int, ttl_seconds: float | None = None) -> None:
+        self._entries: OrderedDict[str, tuple[Path, float]] = OrderedDict()
+        self._max_entries = max_entries
+        self._ttl_seconds = ttl_seconds
+        self._lock = threading.Lock()
+
+    def get_or_resolve(self, cache_key: str, resolver: Callable[[], Path]) -> Path:
+        """命中且未过期返回缓存值，否则执行 resolver 并写入。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        with self._lock:
+            hit = self._entries.get(cache_key)
+            if hit is not None:
+                resolved, captured_at = hit
+                if self._ttl_seconds is None or now - captured_at < self._ttl_seconds:
+                    self._entries.move_to_end(cache_key)
+                    return resolved
+                del self._entries[cache_key]
+        resolved = resolver()
+        with self._lock:
+            self._entries[cache_key] = (resolved, now)
+            self._entries.move_to_end(cache_key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+        return resolved
+
+    def clear(self) -> None:
+        """清空全部条目。"""
+        with self._lock:
+            self._entries.clear()
+
+    def __contains__(self, cache_key: object) -> bool:
+        return cache_key in self._entries
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __getitem__(self, cache_key: str) -> Path:
+        return self._entries[cache_key][0]
+
+    def __setitem__(self, cache_key: str, resolved: Path) -> None:
+        self._entries[cache_key] = (resolved, time.monotonic())
+
+
+_DATA_ROOT_RESOLVE_CACHE = ResolveResultCache(_DATA_ROOT_CACHE_MAX_ENTRIES)
 
 # 位置声明提供者：由 config 模块加载时注入，返回活动配置的原始字符串，未配置
 # 返回 None；依赖方向为 config 向下注入，本模块不向上 import。两个声明各占一槽，
@@ -182,21 +225,13 @@ def clear_resolved_env_root_cache() -> None:
     """
     global _fallback_root
     _RESOLVED_ENV_ROOT_CACHE.clear()
-    _RESOLVED_DATA_ROOT_CACHE.clear()
+    _DATA_ROOT_RESOLVE_CACHE.clear()
     _fallback_root = None
 
 
 def _resolve_with_cache(cache_key: str, resolver: Callable[[], Path]) -> Path:
     """按键缓存 resolve 结果，命中移到链尾保持真 LRU，超容逐出最旧条目。"""
-    cached_dir = _RESOLVED_DATA_ROOT_CACHE.get(cache_key)
-    if cached_dir is not None:
-        _RESOLVED_DATA_ROOT_CACHE.move_to_end(cache_key)
-        return cached_dir
-    resolved_dir = resolver()
-    _RESOLVED_DATA_ROOT_CACHE[cache_key] = resolved_dir
-    while len(_RESOLVED_DATA_ROOT_CACHE) > _DATA_ROOT_CACHE_MAX_ENTRIES:
-        _RESOLVED_DATA_ROOT_CACHE.popitem(last=False)
-    return resolved_dir
+    return _DATA_ROOT_RESOLVE_CACHE.get_or_resolve(cache_key, resolver)
 
 
 def resolve_cached_data_root(configured_dir: str) -> Path:
@@ -219,7 +254,7 @@ def resolve_cached_data_root(configured_dir: str) -> Path:
 def resolve_cached_default_images_root(workspace_root: Path) -> Path:
     """解析工作根目录下的默认图片目录，按 "default-images:"+工作根目录字符串做进程级缓存。
 
-    与显式配置分支共用 _RESOLVED_DATA_ROOT_CACHE，随
+    与显式配置分支共用 _DATA_ROOT_RESOLVE_CACHE，随
     clear_resolved_env_root_cache 一并失效。
 
     Args:
@@ -336,15 +371,12 @@ def _usable_cwd_root() -> Path | None:
 # 启动期消息缓冲：日志目录求值可能早于日志系统初始化，回退提示先进队列，由
 # drain_pending_start_messages 在 setup_logging 之后冲刷，不经 loguru 导入期
 # 默认 sink 输出。
-_pending_start_messages: list[tuple[str, str]] = []
+_START_MESSAGES = EarlyMessageBuffer()
 
 
 def drain_pending_start_messages() -> None:
     """输出并清空启动期缓冲的回退提示。"""
-    pending = _pending_start_messages[:]
-    _pending_start_messages.clear()
-    for level, message in pending:
-        logger.log(level, message)
+    _START_MESSAGES.drain()
 
 
 def _resolve_fallback_root() -> Path:
@@ -374,9 +406,7 @@ def _resolve_fallback_root() -> Path:
         root = _resolve_home_root()
         message = "进程启动目录不可用作回退根，工作根目录回退为用户主目录 {}，默认图片目录为 {}"
     _fallback_root = root
-    _pending_start_messages.append(
-        ("INFO", message.format(str(root), str(root / DATA_DIR_NAME / "images")))
-    )
+    _START_MESSAGES.append("INFO", message.format(str(root), str(root / DATA_DIR_NAME / "images")))
     return root
 
 
@@ -826,211 +856,6 @@ def images_root_relative(path: str | Path, images_root: Path) -> str | None:
         return Path(path).relative_to(images_root).as_posix()
     except ValueError:
         return None
-
-
-def find_images_in_directory(
-    directory: str,
-    recursive: bool = True,
-    max_depth: int = 3,
-    extensions: list[str] | None = None,
-    limit: int | None = None,
-    unreadable_dirs: list[Path] | None = None,
-    truncated_dirs: list[Path] | None = None,
-) -> list[Path]:
-    """在目录中查找图片文件。
-
-    安全前置条件：本函数不做工作区越界校验，调用方必须先确认 directory 位于允许
-    的工作区根之内。UNC 形式的入参与 normalize_path 同口径在 resolve 前拒绝，返回
-    空列表并记录告警。
-    单次调用物化的条目数（含非图片）受 _SCAN_ENTRY_BUDGET 预算封顶，重扫趟只计
-    新增物化段使倍增摊销不翻倍计数，超限丢弃当批、终止遍历并返回已收集结果，截断
-    的目录追加至 truncated_dirs 供调用方感知结果不完整；heapq.nsmallest 选前缀须
-    消费整个目录迭代器，单目录单趟枚举不在此预算内。
-    单个目录的条目列表按需物化：limit 场景只物化排序前缀，非图片条目占位致结果
-    不足且目录未扫尽时倍增前缀重扫，无 limit 时一次物化全量有序列表；limit 亦使
-    跨目录递归提前终止，重复扫描的成本由 io_scan 的 mtime 加 TTL 缓存缓解。
-
-    Args:
-        directory: 搜索目录。
-        recursive: 是否递归搜索。
-        max_depth: 最大搜索深度。
-        extensions: 指定的文件扩展名列表。
-        limit: 返回数量上限，<=0 时返回空列表；扫描按 normcase 稳定顺序，凑够即提前停止。
-        unreadable_dirs: 可选收集列表，不可读目录追加至此供调用方区分「目录不可读」
-            与「目录内无图片」；未提供时仅记日志跳过。
-        truncated_dirs: 可选收集列表，扫描因条目预算截断时追加截断目录，供调用方
-            区分「扫完全量」与「截断的部分结果」。
-
-    Returns:
-        找到的图片文件路径列表。目录不存在或预检失败时返回空列表。
-
-    Raises:
-        OSError: 扫描中途的文件系统错误向上传播，供调用方区分「扫完」与「中途
-            出错」；单个目录不可读经 unreadable_dirs 收集后跳过，不视为失败。
-    """
-    images: list[Path] = []
-
-    if limit is not None and limit <= 0:
-        return images
-
-    if is_unc_path(directory):
-        # 与 normalize_path 等 resolve 站点同口径在 resolve 前拦截。
-        logger.warning("拒绝 UNC 形式的目录扫描入参，返回空结果: {}", directory)
-        return images
-
-    try:
-        dir_path = Path(directory).resolve()
-
-        if not dir_path.exists() or not dir_path.is_dir():
-            logger.warning("目录不存在或不是目录: {}", directory)
-            return images
-    except Exception as e:
-        logger.error("搜索图片文件失败 {}: {}", directory, e)
-        return images
-
-    target_extensions = set(extensions) if extensions else SUPPORTED_IMAGE_EXTENSIONS
-    target_extensions = {ext.lower() for ext in target_extensions}
-
-    # 无上限时记为 -1 表示收集全部。
-    target_count = limit if limit is not None else -1
-
-    scanned_entries = 0
-
-    def scan_directory(path: Path, current_depth: int = 0) -> bool:
-        """按 normcase 稳定顺序深度优先扫描；凑够 target_count 或条目超预算即返回 True 终止。"""
-        nonlocal scanned_entries
-        if current_depth > max_depth:
-            return False
-
-        # 排序前缀按需扩展：heapq.nsmallest 与 sorted 前缀同序，物化量与前缀长度
-        # 成正比而非目录全量；无 limit 时一次全量排序。
-        prefix_len = target_count
-        consumed = 0
-        while True:
-            try:
-                with os.scandir(path) as it:
-                    if target_count >= 0:
-                        entries = heapq.nsmallest(
-                            prefix_len,
-                            it,
-                            key=lambda entry: os.path.normcase(entry.path),
-                        )
-                    else:
-                        entries = sorted(it, key=lambda entry: os.path.normcase(entry.path))
-            except OSError as e:
-                logger.warning("无法访问目录 {}: {}", path, e)
-                if unreadable_dirs is not None:
-                    unreadable_dirs.append(path)
-                return False
-
-            # 条目预算按物化量累计：前缀重扫趟只按新增段计费，目录条目数可超预算
-            # 而分页不中断；超限丢弃本批并终止遍历。
-            scanned_entries += max(len(entries) - consumed, 0)
-            if scanned_entries > _SCAN_ENTRY_BUDGET:
-                logger.warning(
-                    "目录扫描条目数超过预算 {}，停止遍历并返回已收集结果: {}",
-                    _SCAN_ENTRY_BUDGET,
-                    path,
-                )
-                if truncated_dirs is not None:
-                    truncated_dirs.append(path)
-                return True
-
-            for entry in entries[consumed:]:
-                entry_path = Path(entry.path)
-                # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历。
-                if (
-                    entry.is_file(follow_symlinks=False)
-                    and entry_path.suffix.lower() in target_extensions
-                ):
-                    # OneDrive 占位文件等 reparse 非 symlink，is_file 不拒绝，与目录分支
-                    # 同规则剔除；复用遍历条目的 lstat 结果判定，不付逐文件二次 lstat，
-                    # 后缀命中后才判定，非图片条目不付 stat 开销。reparse 判定仅
-                    # Windows 有意义，POSIX 上短路跳过 stat 求值。
-                    if sys.platform == "win32" and has_reparse_attribute(
-                        entry.stat(follow_symlinks=False)
-                    ):
-                        logger.warning("跳过 reparse point 文件: {}", entry_path)
-                        continue
-                    images.append(entry_path)
-                    if target_count >= 0 and len(images) >= target_count:
-                        return True
-                elif (
-                    entry.is_dir(follow_symlinks=False) and recursive and current_depth < max_depth
-                ):
-                    # junction 等 reparse 非 symlink，is_dir 不拒绝，与文件分支同口径
-                    # 复用遍历条目的 no-follow stat 判定；POSIX 上短路跳过 stat 求值。
-                    if sys.platform == "win32" and has_reparse_attribute(
-                        entry.stat(follow_symlinks=False)
-                    ):
-                        logger.warning("跳过 reparse point 目录: {}", entry_path)
-                        continue
-                    if scan_directory(entry_path, current_depth + 1):
-                        return True
-
-            if target_count < 0 or len(entries) < prefix_len:
-                # 无 limit 或返回条目少于前缀长度即目录已扫尽，不存在可扩展前缀。
-                return False
-            consumed = prefix_len
-            prefix_len *= 2
-
-    scan_directory(dir_path)
-
-    return images
-
-
-def suggest_similar_paths(target_path: str, search_dirs: list[str] | None = None) -> list[str]:
-    """在搜索目录下建议与目标路径拼写相近的图片路径，供路径校验失败时纠错。
-
-    扫描经 io_scan 的 mtime/TTL 缓存，重复的校验失败不重复全量扫描目录。
-
-    Args:
-        target_path: 目标路径。
-        search_dirs: 搜索目录列表；未提供时返回空列表，强制调用方显式指定边界，
-            避免公开导出后以 CWD 为界泄露本地图片文件名。
-
-    Returns:
-        相似路径建议列表（resolve 后路径），最多 5 条。目标文件名归一为空串时
-        不产生建议，避免空串子串匹配误报。
-    """
-    suggestions: list[str] = []
-
-    try:
-        target_name = Path(target_path).name.lower()
-        if not target_name:
-            return suggestions
-        search_directories = search_dirs or []
-
-        for search_dir in search_directories:
-            # UNC 形式的搜索目录在 resolve 前跳过，与 find_images_in_directory 的
-            # 入参拦截同口径，避免建议扫描触发 SMB 连接。
-            if is_unc_path(search_dir):
-                logger.warning("拒绝 UNC 形式的建议搜索目录，跳过该目录: {}", search_dir)
-                continue
-            resolved_dir = Path(search_dir).resolve()
-            matched_pairs = cached_find_images_in_directory(
-                resolved_dir=resolved_dir,
-                recursive=True,
-                max_depth=2,
-                format_filter=None,
-                scan_limit=500,
-                scanner=find_images_in_directory,
-            )
-
-            for _, resolved in matched_pairs:
-                if target_name in resolved.name.lower():
-                    suggestions.append(str(resolved))
-
-                if len(suggestions) >= 5:
-                    break
-
-            if len(suggestions) >= 5:
-                break
-
-    except Exception as e:
-        logger.error("生成路径建议失败: {}", e)
-
-    return suggestions
 
 
 # ==================== file URI 转换 ====================

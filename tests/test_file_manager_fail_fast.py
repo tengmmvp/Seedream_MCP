@@ -37,7 +37,7 @@ def test_file_manager_rejects_unc_base_dir_before_resolve(
 ) -> None:
     """UNC 形式的 base_dir 在 resolve 前被拒绝，直连构造不触发 SMB 连接。
 
-    调用方 tools/core/_helpers 已有拒绝，本入口拦直连构造作为防御纵深；断言 UNC
+    调用方 tools/core/_shared 已有拒绝，本入口拦直连构造作为防御纵深；断言 UNC
     未进入 resolve 而非仅断言抛错，防止回归为先解析后拒绝。
     """
     from seedream_mcp.utils.io.io_path import is_unc_path

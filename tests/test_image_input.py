@@ -461,6 +461,4 @@ def test_validate_image_path_strips_surrounding_whitespace(reference: str) -> No
     与 validate_image_input 的入参口径对齐；此前前导空白使分类落入 local 分支，
     非本地引用被拼接为畸形文件名误报路径错误。
     """
-    is_valid, error, normalized = validate_image_path(reference)
-
-    assert (is_valid, error, normalized) == (True, "", None)
+    assert validate_image_path(reference) is None

@@ -393,7 +393,7 @@ def test_find_images_directory_rejects_mixed_separator_unc_without_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """win32 下混合分隔符 UNC 目录扫描入参在 resolve 前被拦截，返回空结果。"""
-    from seedream_mcp.utils.io.io_path import find_images_in_directory
+    from seedream_mcp.utils.io.io_scan import find_images_in_directory
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
@@ -406,7 +406,7 @@ def test_suggest_similar_paths_rejects_mixed_separator_unc_without_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """win32 下混合分隔符 UNC 建议搜索目录在 resolve 前被跳过，不产生建议。"""
-    from seedream_mcp.utils.io.io_path import suggest_similar_paths
+    from seedream_mcp.utils.io.io_scan import suggest_similar_paths
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 

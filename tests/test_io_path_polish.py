@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import seedream_mcp.utils.io.io_path as io_path_module
+import seedream_mcp.utils.io.io_scan as io_scan_module
 from _log_fakes import capture_loguru_messages
 from seedream_mcp.config import SeedreamConfig, set_active_config
 
@@ -24,10 +25,10 @@ def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
         (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
 
     for bare_target in ("", ".", "..", "/"):
-        assert io_path_module.suggest_similar_paths(bare_target, search_dirs=[str(tmp_path)]) == []
+        assert io_scan_module.suggest_similar_paths(bare_target, search_dirs=[str(tmp_path)]) == []
 
     # 对照：非空目标名仍按子串匹配给出建议
-    assert io_path_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)]) == [
+    assert io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)]) == [
         str(tmp_path / "a.png")
     ]
 
@@ -196,7 +197,7 @@ def test_fallback_prefers_writable_cwd_without_touching_home(
     # 临时探测文件用后即删，目录零残留
     assert list(tmp_path.iterdir()) == []
     # 回退提示进启动缓冲队列而非即时输出，drain 后经日志通道落地
-    pending = [message for _, message in io_path_module._pending_start_messages]
+    pending = [message for _, message in io_path_module._START_MESSAGES.snapshot()]
     assert any("工作根目录回退为进程启动目录" in message for message in pending)
     records: list[str] = []
     with capture_loguru_messages(records, level="INFO"):
@@ -279,16 +280,16 @@ def test_suggest_similar_paths_reuses_scan_cache(
     """
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     calls = {"count": 0}
-    original_scan = io_path_module.find_images_in_directory
+    original_scan = io_scan_module.find_images_in_directory
 
     def _counting_scan(*args: object, **kwargs: object) -> list[Path]:
         calls["count"] += 1
         return original_scan(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(io_path_module, "find_images_in_directory", _counting_scan)
+    monkeypatch.setattr(io_scan_module, "find_images_in_directory", _counting_scan)
 
-    first = io_path_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])
-    second = io_path_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])
+    first = io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])
+    second = io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])
 
     assert first == second == [str((tmp_path / "a.png").resolve())]
     assert calls["count"] == 1
@@ -310,8 +311,8 @@ def test_find_images_rejects_unc_directory_before_resolve(
 
     warnings: list[str] = []
     with capture_loguru_messages(warnings):
-        assert io_path_module.find_images_in_directory("//server/share", recursive=False) == []
-        assert io_path_module.find_images_in_directory("\\\\server\\share", recursive=True) == []
+        assert io_scan_module.find_images_in_directory("//server/share", recursive=False) == []
+        assert io_scan_module.find_images_in_directory("\\\\server\\share", recursive=True) == []
 
     assert any("拒绝 UNC 形式的目录扫描入参" in message for message in warnings)
 
@@ -393,7 +394,7 @@ def test_suggest_similar_paths_skips_unc_search_dirs(tmp_path: Path, unc_dir: st
     """UNC 形态的搜索目录在 resolve 前跳过，不触发 SMB 连接，返回空建议。"""
     (tmp_path / "a_portrait.png").write_bytes(b"x")
 
-    assert io_path_module.suggest_similar_paths("portrait", search_dirs=[unc_dir]) == []
+    assert io_scan_module.suggest_similar_paths("portrait", search_dirs=[unc_dir]) == []
 
 
 def _use_active_config(config: SeedreamConfig) -> None:
