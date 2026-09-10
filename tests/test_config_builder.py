@@ -416,6 +416,80 @@ def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
     assert not any("http_allowed_hosts" in record for record in quiet_records)
 
 
+# ==================== SEEDREAM_HTTP_ALLOWED_ORIGINS Origin 允许列表 ====================
+
+
+def test_build_config_loads_http_allowed_origins_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_HTTP_ALLOWED_ORIGINS 按逗号拆分为条目元组，精确 origin 原样保留。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_ORIGINS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_ORIGINS=https://app.example.com,http://localhost:5173\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_origins == ("https://app.example.com", "http://localhost:5173")
+
+
+def test_build_config_blank_http_allowed_origins_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空串与全空条目归 None，等价于未配置。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_ORIGINS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_ORIGINS= , \n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_origins is None
+
+
+@pytest.mark.parametrize(
+    "raw_value, match",
+    [
+        ("app.example.com", "http://"),
+        ("ftp://app.example.com", "http://"),
+        ("https://app.example.com/path", "路径"),
+        ("https://app.example.com:*", "通配"),
+        ("https://", "主机为空"),
+        ("https://*.example.com", "通配"),
+        ("https://app.example.com:abc", "端口须为数字"),
+        ("https://app.example.com?q=1", "query"),
+        ("https://app.example.com#frag", "query"),
+        ("https://user@app.example.com", "userinfo"),
+        ("https://app.example.com.", "尾点"),
+        ("https://APP.example.com", "小写"),
+        ("https://app.example.com:", "端口为空"),
+        ("https://app.example.com:0", "不得为 0"),
+        ("https://app.example.com\\evil", "反斜杠"),
+        ("https://app.example.com:443", "默认端口"),
+        ("http://app.example.com:80", "默认端口"),
+        ("http://app.example.com:080", "前导零"),
+        ("https://[::1", "形态无效"),
+        ("https://@app.example.com", "userinfo"),
+        ("https://应用.公司.cn", "ASCII"),
+    ],
+)
+def test_build_config_rejects_malformed_http_allowed_origins_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str, match: str
+) -> None:
+    """缺 scheme、非 http(s) scheme、含路径或端口通配的条目构建期拒绝。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_ORIGINS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_ORIGINS={raw_value}\n")
+
+    with pytest.raises(SeedreamConfigError, match=match) as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert raw_value in excinfo.value.message
+    assert "环境变量 SEEDREAM_HTTP_ALLOWED_ORIGINS" in excinfo.value.message
+
+
 def test_direct_construction_build_warnings_stay_on_instance() -> None:
     """直接构造产生的构建期告警留在实例，不混入全局 drain 队列。"""
     from seedream_mcp.config import SeedreamConfig, _BUILD_WARNINGS
