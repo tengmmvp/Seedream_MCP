@@ -75,10 +75,14 @@ _CAPABILITY_BOOL_ROWS = {
     "组图生成": "supports_sequential_generation",
     "联网搜索": "supports_tools",
     "流式输出": "supports_stream",
-    "输出格式": "supports_output_format",
     "图层拆分": "supports_layer_decomposition",
     "透明背景": "supports_background",
-    "提示词优化 fast": "supports_fast_optimize_prompt",
+}
+
+# 值行的标签关键字到 (能力声明字段, 支持态取值, 不支持态取值) 映射。
+_CAPABILITY_VALUE_ROWS = {
+    "输出格式": ("supports_output_format", "png, jpeg", "jpeg"),
+    "提示词优化模式": ("supports_fast_optimize_prompt", "标准模式, 极速模式", "标准模式"),
 }
 
 # 数值能力行的标签关键字，行内取值与能力表派生值对账。
@@ -288,24 +292,47 @@ def test_capability_table_reference_image_limits_match() -> None:
 
 
 def test_capability_table_boolean_rows_match_capabilities() -> None:
-    """能力差异表布尔行的 ✅/❌ 与对应能力声明字段一致。"""
+    """能力差异表布尔行的 ✓ 与 ✗/暂不支持 标记与对应能力声明字段一致。"""
     for label_keyword, attribute in _CAPABILITY_BOOL_ROWS.items():
         cells = _capability_row(BASE_README, label_keyword)
         for family, cell in zip(_CAPABILITY_COLUMN_FAMILIES, cells[1:]):
-            marked_supported = "✅" in cell
-            marked_unsupported = "❌" in cell
+            marked_supported = "✓" in cell
+            marked_unsupported = "✗" in cell or "暂不支持" in cell
             assert (
                 marked_supported != marked_unsupported
-            ), f"{label_keyword} 行 {family} 列应恰含一个 ✅/❌ 标记: {cell!r}"
+            ), f"{label_keyword} 行 {family} 列应恰含一个 ✓/✗/暂不支持 标记: {cell!r}"
             assert marked_supported == getattr(MODEL_CAPABILITIES[family], attribute), (
                 f"{label_keyword} 行 {family} 列文档 {marked_supported} != 代码 "
                 f"{getattr(MODEL_CAPABILITIES[family], attribute)}"
             )
 
 
+def test_capability_table_value_rows_match_capabilities() -> None:
+    """能力差异表值行的各列取值与对应能力声明字段派生值一致。"""
+    for label_keyword, (
+        attribute,
+        supported_text,
+        unsupported_text,
+    ) in _CAPABILITY_VALUE_ROWS.items():
+        cells = _capability_row(BASE_README, label_keyword)
+        for family, cell in zip(_CAPABILITY_COLUMN_FAMILIES, cells[1:]):
+            expected = (
+                supported_text
+                if getattr(MODEL_CAPABILITIES[family], attribute)
+                else unsupported_text
+            )
+            assert (
+                cell.strip() == expected
+            ), f"{label_keyword} 行 {family} 列文档 {cell!r} != 代码派生 {expected!r}"
+
+
 def test_capability_table_rows_are_triaged() -> None:
     """能力差异表每行都须纳入对账或豁免，新增行未归类即失败。"""
-    checked = set(_CAPABILITY_BOOL_ROWS) | set(_CAPABILITY_NUMBER_ROW_LABELS)
+    checked = (
+        set(_CAPABILITY_BOOL_ROWS)
+        | set(_CAPABILITY_VALUE_ROWS)
+        | set(_CAPABILITY_NUMBER_ROW_LABELS)
+    )
     known = checked | set(_CAPABILITY_EXEMPT_ROWS)
     untriaged: list[str] = []
     # 首行为表头，不入对账；纯短横线行为列对齐分隔行，同样跳过。

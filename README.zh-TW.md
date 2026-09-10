@@ -44,21 +44,22 @@
     <td><a href="#-快速安裝">⚡ 快速安裝</a></td>
     <td><a href="#-用戶端設定">🔧 用戶端設定</a></td>
     <td><a href="#️-web-操作台">🖥️ Web 操作台</a></td>
-    <td><a href="#️-啟動參數">⚙️ 啟動參數</a></td>
+    <td><a href="#️-可用工具">🛠️ 可用工具</a></td>
   </tr>
   <tr>
-    <td><a href="#-模型能力差異">📐 模型能力差異</a></td>
-    <td><a href="#️-可用工具">🛠️ 可用工具</a></td>
+    <td><a href="#-模型能力">📐 模型能力</a></td>
+    <td><a href="#-模型價格">💰 模型價格</a></td>
     <td><a href="#-可用資源">📦 可用資源</a></td>
     <td><a href="#-agent-skills">🧠 Agent Skills</a></td>
   </tr>
   <tr>
     <td><a href="#-風格預設">🎭 風格預設</a></td>
+    <td><a href="#️-啟動參數">⚙️ 啟動參數</a></td>
+    <td><a href="#-環境變數設定">🔑 環境變數設定</a></td>
     <td><a href="#-常見問題">❓ 常見問題</a></td>
-    <td><a href="#-本地開發">🧪 本地開發</a></td>
-    <td><a href="#️-環境變數設定">⚙️ 環境變數設定</a></td>
   </tr>
   <tr>
+    <td><a href="#-本地開發">🧪 本地開發</a></td>
     <td><a href="#-貢獻者">👥 貢獻者</a></td>
     <td><a href="#-授權條款">📄 授權條款</a></td>
   </tr>
@@ -203,144 +204,6 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 ```
 
 鑑權方式：網頁本身無需權杖即可開啟；網頁的功能介面在部署設定了權杖時需要驗證——在頁面中輸入後權杖僅存於目前分頁的工作階段，關閉分頁即失效，下次使用需重新輸入，不會出現在網址中。僅本機使用且未設定權杖時，全程無需輸入任何東西，介面也只接受來自本頁面與本機程式的請求。
-
-## ⚙️ 啟動參數
-
-```bash
-# 設定來源
---config-file TEXT                                 # .env 設定檔路徑；指定後不再讀取專案根與目前目錄的 .env
-
-# 必要設定
---api-key TEXT                                     # API 金鑰（推薦使用環境變數 ARK_API_KEY；命令列傳入會留在行程清單與 shell 歷史中）
-
-# 模型與端點
---model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
-                                                 # 模型選擇；完整 Model ID 或 Endpoint ID 經 SEEDREAM_MODEL_ID 傳入 (預設: doubao-seedream-5.0)
---default-size [1K|1.5K|2K|3K|4K|<寬>x<高>]        # 預設生成尺寸，需與所選模型相容 (預設: 2K)
---watermark                                        # 啟用浮水印
---no-watermark                                     # 關閉浮水印
---base-url TEXT                                    # 模型 API 端點 URL（須 https，http 需設 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
-
-# 日誌
---log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日誌層級 (預設: INFO)
-
-# 傳輸與 Web
---transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
---host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址必須設定鑑權權杖與 TLS，否則拒絕啟動)
---port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000，範圍 1-65535)
---auth-token TEXT                                  # Bearer 鑑權權杖 (非回環繫結必須設定；推薦使用 SEEDREAM_HTTP_AUTH_TOKEN)
---ssl-certfile TEXT                                # TLS 憑證檔案 (非回環繫結必須設定，與 --ssl-keyfile 成對)
---ssl-keyfile TEXT                                 # TLS 私鑰檔案 (與 --ssl-certfile 成對)
---insecure-allow-non-tls                           # 允許非回環明文執行 (僅受信任反向代理終結 TLS 場景)
---stateless                                        # 無狀態模式，僅影響帶交握工作階段的舊規範修訂用戶端，代價是失去反向通道 (預設關閉)
---web                                              # 開啟 Web 操作台，瀏覽器存取 /web 直接使用 (預設關閉；未傳入時按 SEEDREAM_WEB_ENABLED 解析)
---no-web                                           # 關閉 Web 操作台，覆蓋 SEEDREAM_WEB_ENABLED 的開啟設定
---version                                          # 印出版本號並退出
-```
-
-> **安全提示**：`localhost` 不被視為回環位址，須按非回環位址要求設定 Bearer 鑑權權杖與 TLS，未設定則拒絕啟動；如需免鑑權使用回環位址，請改繫結 `127.0.0.1` 或 `::1`。非回環繫結預設按該位址校驗 Host 與 Origin 標頭以防 DNS rebinding；萬用繫結（`0.0.0.0`/`::`）無法預知存取位址，校驗預設關閉，需設定 `SEEDREAM_HTTP_ALLOWED_HOSTS` 啟用。跨源瀏覽器用戶端接入 `/mcp`（如網頁版用戶端）另需設定 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，設定後自動應答跨源預檢並放行清單內來源；放行清單內的公網頁面同時豁免瀏覽器的私有網路存取限制，可直接存取本地繫結的服務。生產與容器部署的金鑰應經環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞，而非 CLI `--api-key` / `--auth-token`——命令列參數會留在行程清單與 shell 歷史記錄中；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
-
-### 使用範例
-
-```bash
-# 基本使用
-ARK_API_KEY=your_key uvx seedream-image-mcp
-
-# 使用自訂設定檔
-ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
-
-# 切換其他模型（如 4.0 / 4.5）並指定尺寸與除錯模式
-ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
-
-# 高精度生圖（5.0 Pro；注意：不支援組圖 / 連網搜尋 / 串流輸出，尺寸僅 1K/1.5K/2K）
-ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
-```
-
-## 📐 模型能力差異
-
-各模型支援的能力與參數範圍不同，選擇模型時請留意：
-
-<table align="center">
-  <tr>
-    <th style="text-align: center">能力 / 參數</th>
-    <th style="text-align: center">5.0 Pro</th>
-    <th style="text-align: center">5.0 / 5.0 Lite</th>
-    <th style="text-align: center">4.5</th>
-    <th style="text-align: center">4.0</th>
-  </tr>
-  <tr>
-    <td>文生圖 / 圖生圖 / 多圖生圖</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>組圖生成</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>連網搜尋</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>串流輸出</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>輸出格式（png/jpeg）</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>圖層拆分</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>透明背景</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>提示詞優化 fast</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>解析度選項</td>
-    <td style="text-align: center">1K / 1.5K / 2K</td>
-    <td style="text-align: center">2K / 3K / 4K</td>
-    <td style="text-align: center">2K / 4K</td>
-    <td style="text-align: center">1K / 2K / 4K</td>
-  </tr>
-  <tr>
-    <td>參考圖上限</td>
-    <td style="text-align: center">10 張</td>
-    <td style="text-align: center">14 張</td>
-    <td style="text-align: center">14 張</td>
-    <td style="text-align: center">14 張</td>
-  </tr>
-</table>
-
-> **提示**：預設模型為 **doubao-seedream-5.0**（與 5.0 Lite 等價），開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/1.5K/2K`，預設檔位 `2K`，多圖生圖參考圖上限降為 10 張，另獨享圖層拆分與透明背景能力。
 
 ## 🛠️ 可用工具
 
@@ -517,6 +380,126 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 </details>
 
+## 📐 模型能力
+
+各模型支援的能力與參數範圍不同，選擇模型時請留意：
+
+<table align="center">
+  <tr>
+    <th style="text-align: center">對比維度</th>
+    <th style="text-align: center">5.0 Pro</th>
+    <th style="text-align: center">5.0 / 5.0 Lite</th>
+    <th style="text-align: center">4.5</th>
+    <th style="text-align: center">4.0</th>
+  </tr>
+  <tr>
+    <td>文生圖 / 圖生圖 / 多圖生圖</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+  </tr>
+  <tr>
+    <td>組圖生成</td>
+    <td style="text-align: center">暫不支援</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+  </tr>
+  <tr>
+    <td>連網搜尋</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>串流輸出</td>
+    <td style="text-align: center">暫不支援</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+  </tr>
+  <tr>
+    <td>輸出格式</td>
+    <td style="text-align: center">png, jpeg</td>
+    <td style="text-align: center">png, jpeg</td>
+    <td style="text-align: center">jpeg</td>
+    <td style="text-align: center">jpeg</td>
+  </tr>
+  <tr>
+    <td>圖層拆分</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>透明背景</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>提示詞優化模式</td>
+    <td style="text-align: center">標準模式, 極速模式</td>
+    <td style="text-align: center">標準模式</td>
+    <td style="text-align: center">標準模式</td>
+    <td style="text-align: center">標準模式, 極速模式</td>
+  </tr>
+  <tr>
+    <td>解析度選項</td>
+    <td style="text-align: center">1K / 1.5K / 2K</td>
+    <td style="text-align: center">2K / 3K / 4K</td>
+    <td style="text-align: center">2K / 4K</td>
+    <td style="text-align: center">1K / 2K / 4K</td>
+  </tr>
+  <tr>
+    <td>參考圖上限</td>
+    <td style="text-align: center">10 張</td>
+    <td style="text-align: center">14 張</td>
+    <td style="text-align: center">14 張</td>
+    <td style="text-align: center">14 張</td>
+  </tr>
+</table>
+
+> **提示**：預設模型為 **doubao-seedream-5.0**（與 5.0 Lite 等價），開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/1.5K/2K`，預設檔位 `2K`，多圖生圖參考圖上限降為 10 張，另獨享圖層拆分與透明背景能力。
+
+## 💰 模型價格
+
+各模型按張計費，單價如下：
+
+<table align="center">
+  <tr>
+    <th style="text-align: center">模型</th>
+    <th style="text-align: center">輸入圖單價（元/張）</th>
+    <th style="text-align: center">輸出圖單價（元/張）</th>
+  </tr>
+  <tr>
+    <td>5.0 Pro</td>
+    <td style="text-align: center">首張免費，第 2 張起 0.02</td>
+    <td style="text-align: center">單圖生成：1.5K 及以下 0.30，1.5K 以上 0.60<br>圖層拆分：1.5K 及以下 0.15，1.5K 以上 0.30</td>
+  </tr>
+  <tr>
+    <td>5.0 / 5.0 Lite</td>
+    <td style="text-align: center">免費</td>
+    <td style="text-align: center">0.22</td>
+  </tr>
+  <tr>
+    <td>4.5</td>
+    <td style="text-align: center">免費</td>
+    <td style="text-align: center">0.25</td>
+  </tr>
+  <tr>
+    <td>4.0</td>
+    <td style="text-align: center">免費</td>
+    <td style="text-align: center">0.20</td>
+  </tr>
+</table>
+
+> **計費說明**：因審核等原因未成功輸出的圖片不計費；組圖按實際生成的圖片數量計費；5.0 Pro 圖層拆分按每個圖層實際像素檔位單獨計費，像素檔以 261 萬像素（約 1.5K）劃界。本文價格為參考刊例，完整計費邏輯與最新單價以 [火山方舟模型服務計費說明](https://docs.volcengine.com/docs/82379/1544681) 為準。
+
 ## 📦 可用資源
 
 除工具外，伺服器還公開以下 MCP 資源供用戶端讀取執行時資訊：
@@ -612,6 +595,78 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
   </tr>
 </table>
 
+## ⚙️ 啟動參數
+
+```bash
+# 設定來源
+--config-file TEXT                                 # .env 設定檔路徑；指定後不再讀取專案根與目前目錄的 .env
+
+# 必要設定
+--api-key TEXT                                     # API 金鑰（推薦使用環境變數 ARK_API_KEY；命令列傳入會留在行程清單與 shell 歷史中）
+
+# 模型與端點
+--model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
+                                                 # 模型選擇；完整 Model ID 或 Endpoint ID 經 SEEDREAM_MODEL_ID 傳入 (預設: doubao-seedream-5.0)
+--default-size [1K|1.5K|2K|3K|4K|<寬>x<高>]        # 預設生成尺寸，需與所選模型相容 (預設: 2K)
+--watermark                                        # 啟用浮水印
+--no-watermark                                     # 關閉浮水印
+--base-url TEXT                                    # 模型 API 端點 URL（須 https，http 需設 SEEDREAM_ALLOW_HTTP_BASE_URL=true 豁免）
+
+# 日誌
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # 日誌層級 (預設: INFO)
+
+# 傳輸與 Web
+--transport [stdio|streamable-http]                # MCP 傳輸方式 (預設: stdio)
+--host TEXT                                        # streamable-http 監聽位址 (預設: 127.0.0.1；繫結非回環位址必須設定鑑權權杖與 TLS，否則拒絕啟動)
+--port INTEGER                                     # streamable-http 監聽連接埠 (預設: 8000，範圍 1-65535)
+--auth-token TEXT                                  # Bearer 鑑權權杖 (非回環繫結必須設定；推薦使用 SEEDREAM_HTTP_AUTH_TOKEN)
+--ssl-certfile TEXT                                # TLS 憑證檔案 (非回環繫結必須設定，與 --ssl-keyfile 成對)
+--ssl-keyfile TEXT                                 # TLS 私鑰檔案 (與 --ssl-certfile 成對)
+--insecure-allow-non-tls                           # 允許非回環明文執行 (僅受信任反向代理終結 TLS 場景)
+--stateless                                        # 無狀態模式，僅影響帶交握工作階段的舊規範修訂用戶端，代價是失去反向通道 (預設關閉)
+--web                                              # 開啟 Web 操作台，瀏覽器存取 /web 直接使用 (預設關閉；未傳入時按 SEEDREAM_WEB_ENABLED 解析)
+--no-web                                           # 關閉 Web 操作台，覆蓋 SEEDREAM_WEB_ENABLED 的開啟設定
+--version                                          # 印出版本號並退出
+```
+
+> **安全提示**：`localhost` 不被視為回環位址，須按非回環位址要求設定 Bearer 鑑權權杖與 TLS，未設定則拒絕啟動；如需免鑑權使用回環位址，請改繫結 `127.0.0.1` 或 `::1`。非回環繫結預設按該位址校驗 Host 與 Origin 標頭以防 DNS rebinding；萬用繫結（`0.0.0.0`/`::`）無法預知存取位址，校驗預設關閉，需設定 `SEEDREAM_HTTP_ALLOWED_HOSTS` 啟用。跨源瀏覽器用戶端接入 `/mcp`（如網頁版用戶端）另需設定 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，設定後自動應答跨源預檢並放行清單內來源；放行清單內的公網頁面同時豁免瀏覽器的私有網路存取限制，可直接存取本地繫結的服務。生產與容器部署的金鑰應經環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞，而非 CLI `--api-key` / `--auth-token`——命令列參數會留在行程清單與 shell 歷史記錄中；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
+
+### 使用範例
+
+```bash
+# 基本使用
+ARK_API_KEY=your_key uvx seedream-image-mcp
+
+# 使用自訂設定檔
+ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
+
+# 切換其他模型（如 4.0 / 4.5）並指定尺寸與除錯模式
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
+
+# 高精度生圖（5.0 Pro；注意：不支援組圖 / 連網搜尋 / 串流輸出，尺寸僅 1K/1.5K/2K）
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
+```
+
+## 🔑 環境變數設定
+
+全部設定項、預設值與說明見 **[.env.example](.env.example)**，複製為 `.env` 後按需修改。
+
+設定優先順序：MCP 用戶端明確設定（命令列參數） > 執行階段系統環境變數 > `.env` 檔案 > 預設值。
+
+`.env` 載入規則：
+
+- 使用 `--config-file` 時：僅載入指定檔案。
+- 未指定 `--config-file` 時：按「專案根 `.env` -> 目前工作目錄 `.env`」順序合併，後者覆寫前者。
+- `.env` 的值**不會注入**行程環境變數，僅按上述優先順序解析後寫入設定物件，避免污染全域狀態；系統環境變數優先於 `.env` 檔案。
+
+### 部署注意事項
+
+- **儲存目錄由服務管理**：按天清理與總量配額只作用於圖片目錄 `<資料根目錄>/.seedream/images`，目錄內**所有**過期的圖片檔案與空目錄都會被刪除，不看檔案來源；經 `save_path` 儲存到其他目錄的檔案不受管理。
+- **多用戶端部署建議顯式設定 `SEEDREAM_DATA_ROOT`**：資料根目錄預設跟隨用戶端宣告的 MCP Roots 變化，不同用戶端的圖片會散落在各自目錄；顯式宣告後所有工作階段共用同一落點，讀取範圍與資料位置隨之確定。
+- **有狀態會話依賴用戶端正確斷開**：streamable-http 會話在用戶端傳送 DELETE 或程序結束時回收，用戶端異常退出時會話駐留；大量短連用戶端的部署建議改用 `--stateless`。
+- **Linux 宿主掛載目錄屬主**：容器以 uid 1000 執行，compose 掛載的 `./.seedream` 目錄需對該使用者可寫：`mkdir -p .seedream && chown 1000:1000 .seedream`；Docker Desktop 不受影響。
+- **出站連線不走系統代理**：API 呼叫與圖片下載固定忽略 `HTTP_PROXY` 等系統代理環境變數；企業代理環境需保證主機直連網際網路，或經網路層透明代理轉送。
+
 ## ❓ 常見問題
 
 **Q: 找不到 uvx 指令？**
@@ -658,26 +713,6 @@ uv run python -m seedream_mcp.server
 # 或直接使用 API 金鑰啟動
 uv run python -m seedream_mcp.server --api-key your_key
 ```
-
-## ⚙️ 環境變數設定
-
-全部設定項、預設值與說明見 **[.env.example](.env.example)**，複製為 `.env` 後按需修改。
-
-設定優先順序：MCP 用戶端明確設定（命令列參數） > 執行階段系統環境變數 > `.env` 檔案 > 預設值。
-
-`.env` 載入規則：
-
-- 使用 `--config-file` 時：僅載入指定檔案。
-- 未指定 `--config-file` 時：按「專案根 `.env` -> 目前工作目錄 `.env`」順序合併，後者覆寫前者。
-- `.env` 的值**不會注入**行程環境變數，僅按上述優先順序解析後寫入設定物件，避免污染全域狀態；系統環境變數優先於 `.env` 檔案。
-
-### 部署注意事項
-
-- **儲存目錄由服務管理**：按天清理與總量配額只作用於圖片目錄 `<資料根目錄>/.seedream/images`，目錄內**所有**過期的圖片檔案與空目錄都會被刪除，不看檔案來源；經 `save_path` 儲存到其他目錄的檔案不受管理。
-- **多用戶端部署建議顯式設定 `SEEDREAM_DATA_ROOT`**：資料根目錄預設跟隨用戶端宣告的 MCP Roots 變化，不同用戶端的圖片會散落在各自目錄；顯式宣告後所有工作階段共用同一落點，讀取範圍與資料位置隨之確定。
-- **有狀態會話依賴用戶端正確斷開**：streamable-http 會話在用戶端傳送 DELETE 或程序結束時回收，用戶端異常退出時會話駐留；大量短連用戶端的部署建議改用 `--stateless`。
-- **Linux 宿主掛載目錄屬主**：容器以 uid 1000 執行，compose 掛載的 `./.seedream` 目錄需對該使用者可寫：`mkdir -p .seedream && chown 1000:1000 .seedream`；Docker Desktop 不受影響。
-- **出站連線不走系統代理**：API 呼叫與圖片下載固定忽略 `HTTP_PROXY` 等系統代理環境變數；企業代理環境需保證主機直連網際網路，或經網路層透明代理轉送。
 
 ## 👥 貢獻者
 

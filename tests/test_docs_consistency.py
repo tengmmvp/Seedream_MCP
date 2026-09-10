@@ -415,15 +415,18 @@ def test_capability_table_number_tokens_match() -> None:
             )
 
 
+_NOT_SUPPORTED_PATTERN = re.compile(r"暂不支持|Not yet supported|暫不支援")
+
+
 def _row_bool_tokens(raw: str) -> list[str]:
-    """提取表格行内 ✅/❌ 符号的出现序列。"""
-    return re.findall(r"[✅❌]", raw)
+    """提取表格行内 ✓/✗ 标记的出现序列，三语的暂不支持表述归一为 ✗。"""
+    return re.findall(r"[✓✗]", _NOT_SUPPORTED_PATTERN.sub("✗", raw))
 
 
 def test_capability_table_bool_cells_match() -> None:
-    """能力差异表布尔单元格（✅/❌）三语逐行一致。
+    """能力差异表布尔单元格（✓/✗）三语逐行一致。
 
-    布尔行无数字 token 可比，单独翻转任一语言的 ✅/❌ 不触发其他守护，按行
+    布尔行无数字 token 可比，单独翻转任一语言的标记不触发其他守护，按行
     提取布尔符号序列互等锁定。
     """
     base_rows = _capability_table(BASE_README)

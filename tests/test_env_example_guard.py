@@ -27,9 +27,9 @@ _BASE_README = "README.md"
 
 # README 环境变量配置节的标题锚点，三语各一条。
 _README_CONFIG_HEADINGS = {
-    "README.md": "## ⚙️ 环境变量配置",
-    "README.en.md": "## ⚙️ Environment Variables",
-    "README.zh-TW.md": "## ⚙️ 環境變數設定",
+    "README.md": "## 🔑 环境变量配置",
+    "README.en.md": "## 🔑 Environment Variables",
+    "README.zh-TW.md": "## 🔑 環境變數設定",
 }
 
 

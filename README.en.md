@@ -44,21 +44,22 @@
     <td><a href="#-quick-start">⚡ Quick Start</a></td>
     <td><a href="#-client-configuration">🔧 Client Configuration</a></td>
     <td><a href="#️-web-console">🖥️ Web Console</a></td>
-    <td><a href="#️-cli-options">⚙️ CLI Options</a></td>
+    <td><a href="#️-available-tools">🛠️ Available Tools</a></td>
   </tr>
   <tr>
-    <td><a href="#-model-capability-differences">📐 Model Capability Differences</a></td>
-    <td><a href="#️-available-tools">🛠️ Available Tools</a></td>
+    <td><a href="#-model-capabilities">📐 Model Capabilities</a></td>
+    <td><a href="#-model-pricing">💰 Model Pricing</a></td>
     <td><a href="#-available-resources">📦 Available Resources</a></td>
     <td><a href="#-agent-skills">🧠 Agent Skills</a></td>
   </tr>
   <tr>
     <td><a href="#-style-presets">🎭 Style Presets</a></td>
+    <td><a href="#️-cli-options">⚙️ CLI Options</a></td>
+    <td><a href="#-environment-variables">🔑 Environment Variables</a></td>
     <td><a href="#-faq">❓ FAQ</a></td>
-    <td><a href="#-local-development">🧪 Local Development</a></td>
-    <td><a href="#️-environment-variables">⚙️ Environment Variables</a></td>
   </tr>
   <tr>
+    <td><a href="#-local-development">🧪 Local Development</a></td>
     <td><a href="#-contributors">👥 Contributors</a></td>
     <td><a href="#-license">📄 License</a></td>
   </tr>
@@ -203,144 +204,6 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 ```
 
 Access control: the page itself opens without a token; its API calls require one only when the deployment is configured with a token — the token you enter lives only in the current tab's session, expires when the tab closes, and never appears in URLs. For local-only use without a token, nothing is ever asked, and the API accepts requests only from this page and local programs.
-
-## ⚙️ CLI Options
-
-```bash
-# Configuration source
---config-file TEXT                                 # .env config file path; when given, the .env files in the project root and current directory are no longer read
-
-# Required
---api-key TEXT                                     # API key (ARK_API_KEY env var recommended; a CLI value stays in the process list and shell history)
-
-# Model & endpoint
---model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
-                                                   # Model selection; full Model IDs or Endpoint IDs go through SEEDREAM_MODEL_ID (default: doubao-seedream-5.0)
---default-size [1K|1.5K|2K|3K|4K|<width>x<height>] # Default image size, must be compatible with the model (default: 2K)
---watermark                                        # Enable watermark
---no-watermark                                     # Disable watermark
---base-url TEXT                                    # Model API endpoint URL (must be https; http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
-
-# Logging
---log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level (default: INFO)
-
-# Transport & Web
---transport [stdio|streamable-http]                # MCP transport (default: stdio)
---host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address requires an auth token and TLS, otherwise the service refuses to start)
---port INTEGER                                     # streamable-http listen port (default: 8000, range 1-65535)
---auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; SEEDREAM_HTTP_AUTH_TOKEN recommended)
---ssl-certfile TEXT                                # TLS certificate file (required for non-loopback binding, paired with --ssl-keyfile)
---ssl-keyfile TEXT                                 # TLS private key file (paired with --ssl-certfile)
---insecure-allow-non-tls                           # Allow non-loopback plaintext operation (only for trusted reverse proxy TLS-terminating scenarios)
---stateless                                        # Stateless mode, only affects the sessionful legacy-revision clients at the cost of the back channel (default off)
---web                                              # Enable the web console served at /web (default off; resolves via SEEDREAM_WEB_ENABLED when unset)
---no-web                                           # Disable the web console, overriding an enabled SEEDREAM_WEB_ENABLED
---version                                          # Print the version and exit
-```
-
-> **Security note**: `localhost` is not treated as a loopback address and must follow the non-loopback requirements: a Bearer auth token and TLS must be configured, and the service refuses to start without them; to use loopback without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback binds validate the Host and Origin headers against the bind address by default to prevent DNS rebinding; wildcard binds (`0.0.0.0`/`::`) cannot predict the access address, leave validation off by default, and require `SEEDREAM_HTTP_ALLOWED_HOSTS` to enable it. Cross-origin browser clients connecting to `/mcp` (e.g. web-based clients) additionally require `SEEDREAM_HTTP_ALLOWED_ORIGINS`; once configured, cross-origin preflight requests are answered automatically and listed origins are allowed. Public pages in the allowlist are also exempted from the browser's private-network-access restriction and can reach locally bound services directly. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which stay in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
-
-### Usage Examples
-
-```bash
-# Basic usage
-ARK_API_KEY=your_key uvx seedream-image-mcp
-
-# Use a custom config file
-ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
-
-# Switch to other models (e.g. 4.0 / 4.5) with a custom size and debug mode
-ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
-
-# High-precision image generation (5.0 Pro; note: sequential generation / web search / streaming output not supported; sizes 1K/1.5K/2K only)
-ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
-```
-
-## 📐 Model Capability Differences
-
-Different models support different capabilities and parameter ranges. Please note this when selecting a model:
-
-<table align="center">
-  <tr>
-    <th style="text-align: center">Capability / Parameter</th>
-    <th style="text-align: center">5.0 Pro</th>
-    <th style="text-align: center">5.0 / 5.0 Lite</th>
-    <th style="text-align: center">4.5</th>
-    <th style="text-align: center">4.0</th>
-  </tr>
-  <tr>
-    <td>Text-to-Image / Image-to-Image / Multi-Image</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>Sequential Generation</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>Web Search</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>Streaming Output</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>Output Format (png/jpeg)</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>Layer Decomposition</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>Transparent Background</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-  </tr>
-  <tr>
-    <td>Prompt Optimization fast</td>
-    <td style="text-align: center">✅</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">❌</td>
-    <td style="text-align: center">✅</td>
-  </tr>
-  <tr>
-    <td>Resolution Presets</td>
-    <td style="text-align: center">1K / 1.5K / 2K</td>
-    <td style="text-align: center">2K / 3K / 4K</td>
-    <td style="text-align: center">2K / 4K</td>
-    <td style="text-align: center">1K / 2K / 4K</td>
-  </tr>
-  <tr>
-    <td>Max Reference Images</td>
-    <td style="text-align: center">10</td>
-    <td style="text-align: center">14</td>
-    <td style="text-align: center">14</td>
-    <td style="text-align: center">14</td>
-  </tr>
-</table>
-
-> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported with default preset `2K`, the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
 
 ## 🛠️ Available Tools
 
@@ -517,6 +380,126 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 </details>
 
+## 📐 Model Capabilities
+
+Different models support different capabilities and parameter ranges. Please note this when selecting a model:
+
+<table align="center">
+  <tr>
+    <th style="text-align: center">Dimension</th>
+    <th style="text-align: center">5.0 Pro</th>
+    <th style="text-align: center">5.0 / 5.0 Lite</th>
+    <th style="text-align: center">4.5</th>
+    <th style="text-align: center">4.0</th>
+  </tr>
+  <tr>
+    <td>Text-to-Image / Image-to-Image / Multi-Image</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+  </tr>
+  <tr>
+    <td>Sequential Generation</td>
+    <td style="text-align: center">Not yet supported</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+  </tr>
+  <tr>
+    <td>Web Search</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>Streaming Output</td>
+    <td style="text-align: center">Not yet supported</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
+  </tr>
+  <tr>
+    <td>Output Format</td>
+    <td style="text-align: center">png, jpeg</td>
+    <td style="text-align: center">png, jpeg</td>
+    <td style="text-align: center">jpeg</td>
+    <td style="text-align: center">jpeg</td>
+  </tr>
+  <tr>
+    <td>Layer Decomposition</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>Transparent Background</td>
+    <td style="text-align: center">✓</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
+  </tr>
+  <tr>
+    <td>Prompt Optimization Modes</td>
+    <td style="text-align: center">standard, fast</td>
+    <td style="text-align: center">standard</td>
+    <td style="text-align: center">standard</td>
+    <td style="text-align: center">standard, fast</td>
+  </tr>
+  <tr>
+    <td>Resolution Presets</td>
+    <td style="text-align: center">1K / 1.5K / 2K</td>
+    <td style="text-align: center">2K / 3K / 4K</td>
+    <td style="text-align: center">2K / 4K</td>
+    <td style="text-align: center">1K / 2K / 4K</td>
+  </tr>
+  <tr>
+    <td>Max Reference Images</td>
+    <td style="text-align: center">10</td>
+    <td style="text-align: center">14</td>
+    <td style="text-align: center">14</td>
+    <td style="text-align: center">14</td>
+  </tr>
+</table>
+
+> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported with default preset `2K`, the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
+
+## 💰 Model Pricing
+
+All models are billed per image:
+
+<table align="center">
+  <tr>
+    <th style="text-align: center">Model</th>
+    <th style="text-align: center">Input Image (¥/image)</th>
+    <th style="text-align: center">Output (¥/image)</th>
+  </tr>
+  <tr>
+    <td>5.0 Pro</td>
+    <td style="text-align: center">1st free, 0.02 from the 2nd</td>
+    <td style="text-align: center">Single image: 0.30 at 1.5K and below, 0.60 above 1.5K<br>Layer decomposition: 0.15 at 1.5K and below, 0.30 above 1.5K</td>
+  </tr>
+  <tr>
+    <td>5.0 / 5.0 Lite</td>
+    <td style="text-align: center">Free</td>
+    <td style="text-align: center">0.22</td>
+  </tr>
+  <tr>
+    <td>4.5</td>
+    <td style="text-align: center">Free</td>
+    <td style="text-align: center">0.25</td>
+  </tr>
+  <tr>
+    <td>4.0</td>
+    <td style="text-align: center">Free</td>
+    <td style="text-align: center">0.20</td>
+  </tr>
+</table>
+
+> **Billing notes**: Images that fail to generate (e.g. due to moderation) are not billed; image sets are billed by the number of images actually generated; Seedream 5.0 Pro layer decomposition is billed per layer at its actual pixel tier, with tiers split at 2.61 megapixels (roughly 1.5K). Prices here are for reference only — see the [Volcengine Ark billing guide](https://docs.volcengine.com/docs/82379/1544681) for the full billing logic and the latest prices.
+
 ## 📦 Available Resources
 
 Beyond tools, the server exposes the following MCP resources for clients to read runtime information:
@@ -612,6 +595,78 @@ The server provides the following MCP prompt templates to generate text-to-image
   </tr>
 </table>
 
+## ⚙️ CLI Options
+
+```bash
+# Configuration source
+--config-file TEXT                                 # .env config file path; when given, the .env files in the project root and current directory are no longer read
+
+# Required
+--api-key TEXT                                     # API key (ARK_API_KEY env var recommended; a CLI value stays in the process list and shell history)
+
+# Model & endpoint
+--model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
+                                                   # Model selection; full Model IDs or Endpoint IDs go through SEEDREAM_MODEL_ID (default: doubao-seedream-5.0)
+--default-size [1K|1.5K|2K|3K|4K|<width>x<height>] # Default image size, must be compatible with the model (default: 2K)
+--watermark                                        # Enable watermark
+--no-watermark                                     # Disable watermark
+--base-url TEXT                                    # Model API endpoint URL (must be https; http requires SEEDREAM_ALLOW_HTTP_BASE_URL=true)
+
+# Logging
+--log-level [DEBUG|INFO|WARNING|ERROR|CRITICAL]    # Log level (default: INFO)
+
+# Transport & Web
+--transport [stdio|streamable-http]                # MCP transport (default: stdio)
+--host TEXT                                        # streamable-http listen address (default: 127.0.0.1; binding to a non-loopback address requires an auth token and TLS, otherwise the service refuses to start)
+--port INTEGER                                     # streamable-http listen port (default: 8000, range 1-65535)
+--auth-token TEXT                                  # Bearer auth token (required for non-loopback binding; SEEDREAM_HTTP_AUTH_TOKEN recommended)
+--ssl-certfile TEXT                                # TLS certificate file (required for non-loopback binding, paired with --ssl-keyfile)
+--ssl-keyfile TEXT                                 # TLS private key file (paired with --ssl-certfile)
+--insecure-allow-non-tls                           # Allow non-loopback plaintext operation (only for trusted reverse proxy TLS-terminating scenarios)
+--stateless                                        # Stateless mode, only affects the sessionful legacy-revision clients at the cost of the back channel (default off)
+--web                                              # Enable the web console served at /web (default off; resolves via SEEDREAM_WEB_ENABLED when unset)
+--no-web                                           # Disable the web console, overriding an enabled SEEDREAM_WEB_ENABLED
+--version                                          # Print the version and exit
+```
+
+> **Security note**: `localhost` is not treated as a loopback address and must follow the non-loopback requirements: a Bearer auth token and TLS must be configured, and the service refuses to start without them; to use loopback without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback binds validate the Host and Origin headers against the bind address by default to prevent DNS rebinding; wildcard binds (`0.0.0.0`/`::`) cannot predict the access address, leave validation off by default, and require `SEEDREAM_HTTP_ALLOWED_HOSTS` to enable it. Cross-origin browser clients connecting to `/mcp` (e.g. web-based clients) additionally require `SEEDREAM_HTTP_ALLOWED_ORIGINS`; once configured, cross-origin preflight requests are answered automatically and listed origins are allowed. Public pages in the allowlist are also exempted from the browser's private-network-access restriction and can reach locally bound services directly. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which stay in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
+
+### Usage Examples
+
+```bash
+# Basic usage
+ARK_API_KEY=your_key uvx seedream-image-mcp
+
+# Use a custom config file
+ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
+
+# Switch to other models (e.g. 4.0 / 4.5) with a custom size and debug mode
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
+
+# High-precision image generation (5.0 Pro; note: sequential generation / web search / streaming output not supported; sizes 1K/1.5K/2K only)
+ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
+```
+
+## 🔑 Environment Variables
+
+All configuration options, defaults and descriptions live in **[.env.example](.env.example)**; copy it to `.env` and adjust as needed.
+
+Configuration priority: MCP client explicit config (CLI args) > runtime system environment variables > `.env` file > defaults.
+
+`.env` loading rules:
+
+- When `--config-file` is used: only the specified file is loaded.
+- When `--config-file` is not specified: files are merged in the order "project-root `.env` -> current-working-directory `.env`", with the latter overriding the former.
+- `.env` values are **not injected** into the process environment; they are only resolved by the above priority and written to the config object, avoiding global state pollution. System environment variables take precedence over the `.env` file.
+
+### Deployment Notes
+
+- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction act only on the image directory `<data root>/.seedream/images`, deleting **all** expired image files and empty directories there regardless of origin; files saved elsewhere via `save_path` are not managed.
+- **Set `SEEDREAM_DATA_ROOT` explicitly for multi-client deployments**: by default the data root follows the MCP Roots declared by each client, so images from different clients scatter across their own directories; an explicit declaration gives every session the same location and makes the read scope deterministic.
+- **Stateful sessions rely on clients disconnecting properly**: streamable-http sessions are reclaimed when the client sends DELETE or the process exits, and linger if a client crashes; deployments with many short-lived clients should use `--stateless`.
+- **Ownership of the mounted directory on Linux hosts**: the container runs as uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user: `mkdir -p .seedream && chown 1000:1000 .seedream`; Docker Desktop is unaffected.
+- **Outbound connections ignore system proxies**: API calls and image downloads ignore `HTTP_PROXY` and related environment variables; in corporate proxy environments the host needs direct internet access or a transparent network-layer proxy.
+
 ## ❓ FAQ
 
 **Q: `uvx` command not found?**
@@ -658,26 +713,6 @@ uv run python -m seedream_mcp.server
 # Or start directly with an API key
 uv run python -m seedream_mcp.server --api-key your_key
 ```
-
-## ⚙️ Environment Variables
-
-All configuration options, defaults and descriptions live in **[.env.example](.env.example)**; copy it to `.env` and adjust as needed.
-
-Configuration priority: MCP client explicit config (CLI args) > runtime system environment variables > `.env` file > defaults.
-
-`.env` loading rules:
-
-- When `--config-file` is used: only the specified file is loaded.
-- When `--config-file` is not specified: files are merged in the order "project-root `.env` -> current-working-directory `.env`", with the latter overriding the former.
-- `.env` values are **not injected** into the process environment; they are only resolved by the above priority and written to the config object, avoiding global state pollution. System environment variables take precedence over the `.env` file.
-
-### Deployment Notes
-
-- **The save directory is managed by the server**: age-based cleanup and total-size quota eviction act only on the image directory `<data root>/.seedream/images`, deleting **all** expired image files and empty directories there regardless of origin; files saved elsewhere via `save_path` are not managed.
-- **Set `SEEDREAM_DATA_ROOT` explicitly for multi-client deployments**: by default the data root follows the MCP Roots declared by each client, so images from different clients scatter across their own directories; an explicit declaration gives every session the same location and makes the read scope deterministic.
-- **Stateful sessions rely on clients disconnecting properly**: streamable-http sessions are reclaimed when the client sends DELETE or the process exits, and linger if a client crashes; deployments with many short-lived clients should use `--stateless`.
-- **Ownership of the mounted directory on Linux hosts**: the container runs as uid 1000, so the `./.seedream` directory mounted by compose must be writable by that user: `mkdir -p .seedream && chown 1000:1000 .seedream`; Docker Desktop is unaffected.
-- **Outbound connections ignore system proxies**: API calls and image downloads ignore `HTTP_PROXY` and related environment variables; in corporate proxy environments the host needs direct internet access or a transparent network-layer proxy.
 
 ## 👥 Contributors
 
