@@ -143,6 +143,10 @@ class SeedreamConfig:
             与尾部 :* 端口通配；None 时具体地址绑定按绑定地址派生白名单启用校验，
             通配绑定保持关闭。仅经 SEEDREAM_HTTP_ALLOWED_HOSTS 环境变量解析，
             CLI 不暴露参数。
+        http_allowed_origins: 跨源浏览器客户端的 Origin 允许列表，条目为精确
+            origin（scheme://host[:port]，不支持端口通配）；配置后 /mcp 挂 CORS
+            层应答预检并向 SDK 内层校验放行列表内 Origin。仅经
+            SEEDREAM_HTTP_ALLOWED_ORIGINS 环境变量解析，CLI 不暴露参数。
         request_state_secret_keys: requestState 密钥环，多副本 HTTP 部署共享的
             十六进制密钥列表，首键密封、全键解封支持零停机轮换；None 表示不启用，
             保持 SDK 默认的进程临时密钥。仅经 SEEDREAM_REQUEST_STATE_KEYS
@@ -199,6 +203,7 @@ class SeedreamConfig:
     http_max_body_size: int = _env_field(64 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
     web_enabled: bool = _env_field(False, "SEEDREAM_WEB_ENABLED")
     http_allowed_hosts: tuple[str, ...] | None = _env_field(None, "SEEDREAM_HTTP_ALLOWED_HOSTS")
+    http_allowed_origins: tuple[str, ...] | None = _env_field(None, "SEEDREAM_HTTP_ALLOWED_ORIGINS")
     request_state_secret_keys: tuple[bytes, ...] | None = _env_field(
         None, "SEEDREAM_REQUEST_STATE_KEYS"
     )
@@ -470,6 +475,7 @@ class SeedreamConfig:
                 f"{_env_var_suffix('http_max_body_size')}"
             )
         self._validate_http_allowed_hosts()
+        self._validate_http_allowed_origins()
 
     def _validate_http_allowed_hosts(self) -> None:
         """校验 http_allowed_hosts 条目形态，端口通配未配套裸 host 时告警。
@@ -512,6 +518,110 @@ class SeedreamConfig:
                     "建议同时列出裸 host 形态",
                 )
             )
+
+    def _validate_http_allowed_origins(self) -> None:
+        """校验 http_allowed_origins 条目形态。
+
+        Raises:
+            SeedreamConfigError: 条目缺 scheme、含路径、URL 形态无效、含
+                query/fragment/userinfo（含空 userinfo）、主机为空或带尾点、含通配、
+                含大写、含非 ASCII 字符或端口非数字。
+        """
+        origins = self.http_allowed_origins
+        if origins is None:
+            return
+        for entry in origins:
+            if not entry.startswith(("http://", "https://")):
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目须以 http:// 或 https:// 开头: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # Origin 头无路径成分，写出路径即配置错误。
+            if "/" in entry.split("://", 1)[1]:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目不得包含路径: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 匹配为字面精确比较，死配置构建期拒绝：空主机、通配、query、
+            # fragment、userinfo 与尾点主机都永不匹配真实 Origin 头。
+            try:
+                parsed = urlparse(entry)
+            except ValueError as exc:
+                # 括号畸形 IPv6 等形态使 urlparse 抛 ValueError，统一归为配置错误。
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目 URL 形态无效: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                ) from exc
+            # 空 userinfo（user@ 清理残留）的 username 为空串，按 is not None 判定。
+            if parsed.query or parsed.fragment or parsed.username is not None:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目不得包含 query、fragment 或 userinfo: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            hostname = parsed.hostname or ""
+            if not hostname or hostname != hostname.rstrip("."):
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目主机为空或带尾点: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 反斜杠不是任何 Origin 头的合法字符。
+            if "\\" in entry:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目不得包含反斜杠: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 空端口（尾随冒号被 urlparse 归一为 None）永不匹配真实 Origin 头。
+            if parsed.netloc.endswith(":"):
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目端口为空: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            if "*" in entry:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目不支持通配，请写出精确 origin: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # CORS 与 SDK 内层为大小写敏感比较，浏览器 Origin 恒为小写，大写条目
+            # 在部分层永不命中，构建期拒绝。
+            if entry != entry.lower():
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目须全小写: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 浏览器把非 ASCII 主机序列化为 ASCII 形态发送，非 ASCII 条目永不匹配
+            # 真实 Origin 头。
+            if not entry.isascii():
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目须为 ASCII 字符: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            try:
+                port = parsed.port
+            except ValueError:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目端口须为数字: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            if port == 0:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目端口不得为 0: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 浏览器 Origin 序列化省略默认端口，默认端口与前导零端口条目永不
+            # 匹配真实头。
+            host_part = parsed.netloc.rsplit("]", 1)[-1]
+            port_text = host_part.rsplit(":", 1)[-1] if ":" in host_part else ""
+            if port_text and port_text != str(port):
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目端口不得含前导零: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            scheme = parsed.scheme.lower()
+            if (scheme, port) in (("https", 443), ("http", 80)):
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目不得写出默认端口，请省略: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
 
     def _validate_request_state_keys(self) -> None:
         """校验 requestState 密钥环的单钥字节数下限与重复键。

@@ -428,6 +428,7 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "http_max_body_size": (_pick_int, None),
     "web_enabled": (_pick_bool, "web"),
     "http_allowed_hosts": (_pick_optional_str_tuple, None),
+    "http_allowed_origins": (_pick_optional_str_tuple, None),
     "request_state_secret_keys": (_pick_request_state_key_bytes, None),
 }
 

@@ -13,7 +13,7 @@ from typing import cast
 import pytest
 from starlette.types import Message, Receive, Send
 
-import seedream_mcp.server as server
+import seedream_mcp.transport as transport
 from seedream_mcp.config import build_config_from_sources
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 
@@ -30,7 +30,7 @@ async def test_request_body_limit_rejects_oversized_content_length() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("超限请求不应进入下游应用")
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {
         "type": "http",
         "headers": [(b"content-length", str(_LIMIT + 1).encode("ascii"))],
@@ -56,7 +56,7 @@ async def test_request_body_limit_allows_within_limit() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {
         "type": "http",
         "headers": [(b"content-length", b"1048576")],  # 1MB
@@ -73,7 +73,7 @@ async def test_request_body_limit_boundary_equal_to_limit_passes() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {
         "type": "http",
         "headers": [(b"content-length", str(_LIMIT).encode("ascii"))],
@@ -90,7 +90,7 @@ async def test_request_body_limit_missing_content_length_passes() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {"type": "http", "headers": []}
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
@@ -104,7 +104,7 @@ async def test_request_body_limit_passes_lifespan_scope() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {"type": "lifespan", "headers": []}
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
@@ -118,7 +118,7 @@ async def test_request_body_limit_passes_websocket_scope() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, _LIMIT)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, _LIMIT)
     scope = {"type": "websocket", "headers": []}
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
@@ -154,7 +154,7 @@ async def test_request_body_limit_rejects_oversized_chunked_body() -> None:
             if msg["type"] == "http.request" and not msg.get("more_body", False):
                 break
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     await middleware(scope, receive, send)
 
@@ -189,7 +189,7 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
             if msg["type"] == "http.request" and not msg.get("more_body", False):
                 break
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     await middleware(scope, receive, cast(Send, None))
 
@@ -228,7 +228,7 @@ async def test_request_body_limit_skips_413_when_downstream_already_responded() 
                 break
         await send({"type": "http.response.body", "body": b"partial"})
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     await middleware(scope, receive, send)
 
@@ -272,7 +272,7 @@ async def test_request_body_limit_sends_413_when_downstream_output_never_forward
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"partial"})
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     await middleware(scope, receive, send)
 
@@ -311,7 +311,7 @@ async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunk
             if msg["type"] == "http.request" and not msg.get("more_body", False):
                 break
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": [(b"content-length", b"abc")]}
     await middleware(scope, receive, send)
 
@@ -348,7 +348,7 @@ async def test_request_body_limit_non_numeric_content_length_within_limit_passes
             if msg["type"] == "http.request" and not msg.get("more_body", False):
                 break
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": [(b"content-length", b"abc")]}
     await middleware(scope, receive, cast(Send, None))
 
@@ -383,7 +383,7 @@ async def test_request_body_limit_swallows_downstream_exception_after_truncation
                 break
         raise RuntimeError("downstream rejected truncated request")
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     await middleware(scope, receive, send)
 
@@ -413,7 +413,7 @@ async def test_request_body_limit_reraises_downstream_exception_within_limit() -
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise RuntimeError("downstream boom")
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     with pytest.raises(RuntimeError, match="downstream boom"):
         await middleware(scope, receive, cast(Send, None))
@@ -450,9 +450,8 @@ async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
             if msg["type"] == "http.request" and not msg.get("more_body", False):
                 break
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
-    # 旧行为：收尾 413 在 try 之外，send 失败原样冒泡。
     await middleware(scope, receive, send)
 
 
@@ -494,7 +493,7 @@ async def test_request_body_limit_truncation_keeps_disconnect_watch_yielding() -
         # 断连送达时 413 已在超限判定点直发，不待本 app 收尾补发
         assert any(m.get("type") == "http.response.start" and m.get("status") == 413 for m in sent)
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     await asyncio.wait_for(middleware(scope, receive, send), timeout=5.0)
 
@@ -534,7 +533,7 @@ async def test_request_body_limit_sends_413_while_client_stalls_after_overflow()
         while (await receive()).get("type") != "http.disconnect":
             pass
 
-    middleware = server._LimitRequestBodyMiddleware(downstream, small_limit)
+    middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
     task = asyncio.create_task(middleware(scope, receive, send))
 

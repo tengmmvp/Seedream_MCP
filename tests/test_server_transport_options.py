@@ -402,7 +402,7 @@ async def test_bearer_auth_middleware_accepts_valid_token() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer s3cret")]}
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
@@ -419,7 +419,7 @@ async def test_bearer_auth_middleware_rejects_invalid_token() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("无效令牌不应进入下游应用")
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer wrong")]}
     await middleware(scope, cast(Receive, None), send)
 
@@ -436,7 +436,7 @@ async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("鉴权失败不应进入下游应用")
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer wrong")]}
     await middleware(scope, cast(Receive, None), send)
 
@@ -461,7 +461,7 @@ async def test_bearer_auth_middleware_rejects_missing_header() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("缺少 Authorization 头不应进入下游应用")
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": []}
     await middleware(scope, cast(Receive, None), send)
 
@@ -475,7 +475,7 @@ async def test_bearer_auth_middleware_accepts_case_insensitive_scheme() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"bearer s3cret")]}
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
@@ -492,7 +492,7 @@ async def test_bearer_auth_middleware_rejects_non_bearer_scheme() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("非 Bearer 方案不应进入下游应用")
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Basic czNjcmV0")]}
     await middleware(scope, cast(Receive, None), send)
 
@@ -506,7 +506,7 @@ async def test_bearer_auth_middleware_strips_token_whitespace() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "http", "headers": [(b"authorization", b"Bearer  s3cret ")]}
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
@@ -523,7 +523,7 @@ async def test_bearer_auth_middleware_decides_on_first_authorization_header() ->
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("重复头场景不应进入下游应用")
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {
         "type": "http",
         "headers": [
@@ -553,7 +553,7 @@ async def test_bearer_auth_middleware_passes_lifespan_scope() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "lifespan", "headers": []}
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
@@ -570,7 +570,7 @@ async def test_bearer_auth_middleware_rejects_websocket_scope() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("websocket 不应进入下游")
 
-    middleware = server._BearerTokenAuthMiddleware(downstream, "s3cret")
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
     scope = {"type": "websocket", "headers": []}
     await middleware(scope, cast(Receive, None), send)
 

@@ -98,6 +98,47 @@ async def test_api_open_when_no_token_configured(
     assert api_response.status_code == 200
 
 
+async def test_configured_origin_allows_cross_origin_web_api_without_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """无令牌部署下配置放行列表内的跨源 /web/api 请求放行，列表外仍 403。
+
+    配置的 origins 为显式信任声明，与 CORS 层放行口径一致，预检应答可达的来源
+    真实请求同样可达。
+    """
+    from seedream_mcp.config import SeedreamConfig, set_active_config
+
+    prepare_static_dir(monkeypatch, tmp_path)
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_allowed_origins=("https://app.example.com",),
+        )
+    )
+    app = build_web_app(auth_token="")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        allowed = await client.get(
+            "/web/api/config-info",
+            headers={"host": "127.0.0.1", "origin": "https://app.example.com"},
+        )
+        denied = await client.get(
+            "/web/api/config-info",
+            headers={"host": "127.0.0.1", "origin": "https://evil.example"},
+        )
+
+    assert allowed.status_code == 200
+    assert denied.status_code == 403
+
+
 def test_mount_web_static_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """重复挂载不叠加 Mount 条目，目录缺失时跳过不抛异常。"""
     from starlette.routing import Mount

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
+from starlette.middleware.cors import CORSMiddleware
 from starlette.types import Message, Receive, Send
 
 from _log_fakes import capture_loguru_messages
@@ -17,6 +18,7 @@ import seedream_mcp.transport as transport_module
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.transport import (
     _BearerTokenAuthMiddleware,
+    _ErrorBoundaryMiddleware,
     _HealthCheckMiddleware,
     _LimitRequestBodyMiddleware,
     _LoopbackHostGuardMiddleware,
@@ -90,18 +92,129 @@ def test_attach_skips_auth_and_host_guard_for_remote_without_token(
     assert app.attached_classes() == [_HealthCheckMiddleware, _LimitRequestBodyMiddleware]
 
 
+def test_attach_assembles_cors_when_origins_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置 http_allowed_origins 时装配 CORS 层，位于鉴权层之外应答预检。
+
+    健康检查与异常边界同在 CORS 之内：探针与内层 500 的响应体经 CORS 层携带
+    放行头，跨源浏览器客户端可读。
+    """
+    config = SeedreamConfig(
+        api_key="test_key",
+        http_allowed_hosts=("mcp.example.com",),
+        http_allowed_origins=("https://app.example.com",),
+    )
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "0.0.0.0", "secret")
+
+    assert app.attached_classes() == [
+        CORSMiddleware,
+        _HealthCheckMiddleware,
+        _LimitRequestBodyMiddleware,
+        _ErrorBoundaryMiddleware,
+        _BearerTokenAuthMiddleware,
+    ]
+    cors_kwargs = next(ref.kwargs for ref in app.user_middleware if ref.cls is CORSMiddleware)
+    assert cors_kwargs["allow_origins"] == ["https://app.example.com"]
+    assert cors_kwargs["allow_headers"] == ["*"]
+    assert cors_kwargs["expose_headers"] == ["Mcp-Session-Id"]
+    assert cors_kwargs["allow_private_network"] is True
+
+
+def test_attach_without_origins_omits_error_boundary(active_config: None) -> None:
+    """未配置 origins 时不装配异常边界，异常交服务器层默认 500 处理。"""
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
+
+    assert _ErrorBoundaryMiddleware not in app.attached_classes()
+
+
+def test_attach_without_origins_skips_cors(active_config: None) -> None:
+    """未配置 http_allowed_origins 时不装配 CORS 层。"""
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
+
+    assert CORSMiddleware not in app.attached_classes()
+
+
+def test_transport_security_passes_allowed_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配置 hosts 时 allowed_origins 一并透传给 SDK 内层 Origin 校验。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        http_allowed_hosts=("mcp.example.com",),
+        http_allowed_origins=("https://app.example.com",),
+    )
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+
+    security = _transport_security_for_host("0.0.0.0")
+
+    assert security.allowed_hosts == ["mcp.example.com"]
+    assert security.allowed_origins == ["https://app.example.com"]
+
+
+def test_transport_security_merges_origins_into_loopback_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回环绑定分支并入配置 origins，预检放行的来源在内层校验同样放行。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        http_allowed_origins=("https://app.example.com",),
+    )
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+
+    security = _transport_security_for_host("127.0.0.1")
+
+    assert "https://app.example.com" in security.allowed_origins
+    assert all(
+        loopback in security.allowed_origins
+        for loopback in transport_module._LOOPBACK_ALLOWED_ORIGINS
+    )
+
+
+def test_transport_security_merges_origins_into_bind_address_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """具体地址默认分支并入配置 origins，不配 hosts 也可跨源接入。"""
+    config = SeedreamConfig(
+        api_key="test_key",
+        http_allowed_origins=("https://app.example.com",),
+    )
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+
+    security = _transport_security_for_host("10.0.0.5")
+
+    literal = "10.0.0.5"
+    expected = [
+        f"http://{literal}",
+        f"http://{literal}:*",
+        f"https://{literal}",
+        f"https://{literal}:*",
+        "https://app.example.com",
+    ]
+    assert security.allowed_origins == expected
+
+
 def test_attach_explicit_max_body_size_skips_config_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """显式传入 max_body_size 时不读取活动配置，生产路径取值一次直接复用。"""
+    """显式传入 max_body_size 与 allowed_origins 时不读取活动配置，取值一次复用。"""
 
     def _fail_read() -> SeedreamConfig:
-        raise AssertionError("显式传入 max_body_size 时不应读取活动配置")
+        raise AssertionError("显式传入参数时不应读取活动配置")
 
     monkeypatch.setattr(transport_module, "get_active_config", _fail_read)
     app = _FakeStarletteApp()
 
-    _attach_streamable_http_middleware(app, "127.0.0.1", "", max_body_size=1048576)
+    _attach_streamable_http_middleware(
+        app, "127.0.0.1", "", max_body_size=1048576, allowed_origins=()
+    )
 
     assert app.attached_classes() == [
         _LoopbackHostGuardMiddleware,
@@ -193,6 +306,64 @@ def test_attach_passes_api_prefix_to_origin_guard(active_config: None) -> None:
         ref.kwargs for ref in app.user_middleware if ref.cls is _WebOriginGuardMiddleware
     )
     assert guard_kwargs.get("api_prefix") == f"{WEB_API_PREFIX}/"
+
+
+# ==================== 异常边界中间件 ====================
+
+
+async def test_error_boundary_converts_inner_exception_to_500() -> None:
+    """内层未捕获异常在响应未开始时转 500 JSON，状态与响应体跨源可读。"""
+
+    async def explode(scope: Any, receive: Any, send: Any) -> None:
+        raise RuntimeError("boom")
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    middleware = _ErrorBoundaryMiddleware(explode)
+    await middleware({"type": "http", "path": "/mcp"}, cast(Receive, None), send)
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 500
+    assert b"internal_error" in sent[1]["body"]
+
+
+async def test_error_boundary_reraises_after_response_started() -> None:
+    """响应已开始后内层异常无法补发 500，重新上抛交服务器断连。"""
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"partial"})
+        raise RuntimeError("mid-stream failure")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    middleware = _ErrorBoundaryMiddleware(downstream)
+    with pytest.raises(RuntimeError, match="mid-stream failure"):
+        await middleware({"type": "http", "path": "/mcp"}, cast(Receive, None), send)
+
+    # 已发出的部分响应原样透传，未追加 500。
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+
+
+async def test_error_boundary_passes_non_http_scope_through() -> None:
+    """lifespan 等非 http 流量直接透传，不经异常边界包装。"""
+    reached: list[object] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        reached.append(scope.get("type"))
+
+    middleware = _ErrorBoundaryMiddleware(downstream)
+    await middleware({"type": "lifespan"}, cast(Receive, None), cast(Send, None))
+
+    assert reached == ["lifespan"]
 
 
 # ==================== 健康检查中间件 ====================

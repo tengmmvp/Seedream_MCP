@@ -62,6 +62,8 @@ services:
       - SEEDREAM_HTTP_MAX_BODY_SIZE=${SEEDREAM_HTTP_MAX_BODY_SIZE:-67108864}
       # 非回环绑定的 Host 头允许列表（逗号分隔），留空整体关闭 Host 校验。
       - SEEDREAM_HTTP_ALLOWED_HOSTS=${SEEDREAM_HTTP_ALLOWED_HOSTS:-}
+      # 跨源浏览器客户端的 Origin 允许列表（逗号分隔），留空不装配 CORS 层。
+      - SEEDREAM_HTTP_ALLOWED_ORIGINS=${SEEDREAM_HTTP_ALLOWED_ORIGINS:-}
       # Web 操作台开关，开启后浏览器直用生成与图库页面；默认关闭，stdio 不受影响。
       - SEEDREAM_WEB_ENABLED=${SEEDREAM_WEB_ENABLED:-false}
       # requestState 多副本共享密钥环，留空保持进程内临时密钥，单进程无需配置。

@@ -1,9 +1,10 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
-包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护与 Web 操作台同源 Origin
-与跨站 Sec-Fetch 校验五个 ASGI 中间件，以及 streamable-http 监听与 TLS 配置。中间件经 Starlette
-add_middleware 装配到 MCPServer 的 streamable_http_app 外层，按装配逆序执行。MCPServer
-实例 mcp 与共享资源清理函数在调用时从 resources 模块延迟导入，传输层不依赖 server 模块。
+包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护、Web 操作台同源 Origin
+与跨站 Sec-Fetch 校验及内层异常边界六个 ASGI 中间件，以及 streamable-http 监听与 TLS
+配置。中间件经 Starlette add_middleware 装配到 MCPServer 的 streamable_http_app 外层，
+按装配逆序执行。MCPServer 实例 mcp 与共享资源清理函数在调用时从 resources 模块延迟
+导入，传输层不依赖 server 模块。
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import get_active_config
@@ -362,6 +364,41 @@ class _LoopbackHostGuardMiddleware:
         return host if idx == -1 else host[:idx]
 
 
+class _ErrorBoundaryMiddleware:
+    """内层未捕获异常转 500 响应的边界中间件。
+
+    仅配置 CORS 时装配：异常冒泡到服务器层的 500 不经 CORS 携带放行头，跨源
+    浏览器只能看到不可读的网络错误；本层位于 CORS 之内补发 500 使错误状态与
+    响应体可读。响应已开始后无法补发，异常重新上抛交服务器断连。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        response_started = False
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:
+            logger.opt(exception=True).error("streamable-http 请求处理未捕获异常")
+            if response_started:
+                raise
+            body = json.dumps(
+                {"error": "internal_error", "error_description": "Internal server error"}
+            ).encode("utf-8")
+            await _send_asgi_json(send, 500, body)
+
+
 class _WebOriginGuardMiddleware:
     """无令牌 Web 部署下 /web/api 前缀请求的同源 Origin 与跨站加载校验中间件。
 
@@ -369,31 +406,49 @@ class _WebOriginGuardMiddleware:
     本层。无 Origin 头放行，覆盖 curl 等非浏览器客户端与本地进程；携带 Origin
     的请求取其经 urlsplit 解析出的 netloc 与 Host 头全值做忽略大小写的字符串
     相等比对，端口参与比对：同源页面的 Origin 与请求 Host 恒为同一 host:port，
-    域名不同、端口不一致、Origin 为 null 与 Host 缺失均按跨源 403 拒绝。Origin
-    守卫覆盖不了不带 Origin 头的跨站 img/no-cors 加载，GET 与 HEAD 请求另按
-    浏览器管控不可伪造的 Sec-Fetch-Site 头拒绝 same-site 与 cross-site 形态：
-    same-site 覆盖同注册域兄弟子域的图片嵌入，HEAD 覆盖 no-cors 探测；
-    same-origin、none 与无该头的旧客户端放行。仅守 API 前缀，静态页面本身无
-    敏感数据不做校验。
+    域名不同、端口不一致、Origin 为 null 与 Host 缺失均按跨源 403 拒绝；配置的
+    SEEDREAM_HTTP_ALLOWED_ORIGINS 条目为显式信任声明，命中的 Origin 同样放行
+    且不查跨站标记，与 CORS 层放行口径一致。Origin 守卫覆盖不了不带 Origin 头
+    的跨站 img/no-cors 加载，GET 与 HEAD 请求另按浏览器管控不可伪造的
+    Sec-Fetch-Site 头拒绝 same-site 与 cross-site 形态：same-site 覆盖同注册域
+    兄弟子域的图片嵌入，HEAD 覆盖 no-cors 探测；same-origin、none 与无该头的
+    旧客户端放行。仅守 API 前缀，静态页面本身无敏感数据不做校验。
     """
 
     # 拒绝的 Sec-Fetch-Site 取值集合；same-origin 与 none 是合法流量不在其列。
     _REJECTED_FETCH_SITES = frozenset({b"same-site", b"cross-site"})
 
-    def __init__(self, app: ASGIApp, api_prefix: str) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        api_prefix: str,
+        allowed_origins: tuple[str, ...] = (),
+    ) -> None:
         self.app = app
         self._api_prefix = api_prefix
+        self._allowed_origins = frozenset(allowed_origins)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") == "http" and scope.get("path", "").startswith(self._api_prefix):
             origin = _header_value(scope, b"origin")
-            if origin is not None and not self._same_origin(scope, origin):
+            origin_allowed = origin is not None and self._origin_permitted(scope, origin)
+            if origin is not None and not origin_allowed:
                 await _send_forbidden(send, "invalid_origin", "Cross-origin request rejected")
                 return
-            if self._cross_site_fetch(scope):
+            if not origin_allowed and self._cross_site_fetch(scope):
                 await _send_forbidden(send, "cross_site_fetch", "Cross-site request rejected")
                 return
         await self.app(scope, receive, send)
+
+    def _origin_permitted(self, scope: Scope, origin: bytes) -> bool:
+        """判定 Origin 同源或命中配置放行列表。
+
+        与 CORS 层及 SDK 内层同为大小写敏感精确比较，三层共用一条规则；配置
+        条目经构建期校验恒为小写，浏览器 Origin 亦恒为小写。
+        """
+        if self._same_origin(scope, origin):
+            return True
+        return origin.decode("latin-1") in self._allowed_origins
 
     @staticmethod
     def _same_origin(scope: Scope, origin: bytes) -> bool:
@@ -435,6 +490,7 @@ _STREAMABLE_HTTP_MIDDLEWARE_CLASSES = (
     _LoopbackHostGuardMiddleware,
     _WebOriginGuardMiddleware,
     _HealthCheckMiddleware,
+    _ErrorBoundaryMiddleware,
 )
 
 
@@ -452,22 +508,27 @@ def _attach_streamable_http_middleware(
     auth_token: str,
     max_body_size: int | None = None,
     web_enabled: bool = False,
+    allowed_origins: tuple[str, ...] | None = None,
 ) -> None:
     """向 streamable-http app 装配中间件栈，重复装配时跳过以保证幂等。
 
-    max_body_size 未显式传入时回退读取活动配置；生产调用方已取过该配置时显式
-    传入，避免同一配置重复解析。web_enabled 开启时向 Bearer 中间件传入 Web
-    静态页面的免鉴权路径表，API 路径始终要求令牌。
+    max_body_size 与 allowed_origins 未显式传入时回退读取活动配置；生产调用方
+    已取过该配置时显式传入，避免同一配置重复解析。web_enabled 开启时向 Bearer
+    中间件传入 Web 静态页面的免鉴权路径表，API 路径始终要求令牌。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
-    LoopbackHostGuard -> HealthCheck -> LimitRequestBody -> 鉴权层 -> app，鉴权层
-    为 Bearer（配置令牌时）或 Web Origin 守卫（web_enabled 且无令牌时，仅守
-    /web/api 前缀）；LoopbackHostGuard 仅回环绑定时装配：超长请求在鉴权前被
-    413 早拒，探针免令牌，回环绑定时 rebinding 请求先于健康检查被拒。
+    LoopbackHostGuard -> CORS（配置 http_allowed_origins 时）-> HealthCheck ->
+    LimitRequestBody -> ErrorBoundary（配置 origins 时）-> 鉴权层 -> app，鉴权层为
+    Bearer（配置令牌时）或 Web Origin 守卫（web_enabled 且无令牌时，仅守 /web/api
+    前缀）；LoopbackHostGuard 仅回环绑定时装配：超长请求在鉴权前被 413 早拒且
+    错误体经 CORS 层可被跨源客户端读取，健康探针同样经 CORS 层携带放行头，探针
+    免令牌，回环绑定时 rebinding 请求先于健康检查被拒。
     """
     if _middleware_attached(app):
         logger.warning("streamable-http 中间件已装配，跳过重复装配以避免中间件栈叠加")
         return
+    if allowed_origins is None:
+        allowed_origins = get_active_config().http_allowed_origins or ()
     if auth_token:
         if web_enabled:
             from .webapp.constants import WEB_EXEMPT_EXACT_PATHS, WEB_EXEMPT_PATH_PREFIXES
@@ -485,12 +546,30 @@ def _attach_streamable_http_middleware(
     elif web_enabled:
         from .webapp.constants import WEB_API_PREFIX
 
-        app.add_middleware(_WebOriginGuardMiddleware, api_prefix=f"{WEB_API_PREFIX}/")
+        app.add_middleware(
+            _WebOriginGuardMiddleware,
+            api_prefix=f"{WEB_API_PREFIX}/",
+            allowed_origins=allowed_origins,
+        )
         logger.info("Web 操作台未配置令牌，已启用 /web/api 同源 Origin 与跨站 Sec-Fetch 校验")
     if max_body_size is None:
         max_body_size = get_active_config().http_max_body_size
+    if allowed_origins:
+        app.add_middleware(_ErrorBoundaryMiddleware)
     app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=max_body_size)
     app.add_middleware(_HealthCheckMiddleware)
+    if allowed_origins:
+        # CORS 层位于健康检查、请求体上限与鉴权层之外，预检直达应答，三类错误
+        # 响应携带放行头。
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(allowed_origins),
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],  # 供客户端读取会话 id 续连
+            allow_private_network=True,  # PNA 预检放行，公网页面可达本地绑定
+        )
+        logger.info("streamable-http 已启用 CORS，放行 origin: {}", ", ".join(allowed_origins))
     if is_loopback_bind_host(host):
         app.add_middleware(_LoopbackHostGuardMiddleware)
 
@@ -524,35 +603,35 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     回环与 localhost 绑定启用防护并按回环白名单放行；非回环的具体地址绑定默认
     按绑定地址启用 Host/Origin 白名单（Origin 校验为规范 MUST），活动配置了
     SEEDREAM_HTTP_ALLOWED_HOSTS 时改为按该列表放行，条目支持 host、host:port 与
-    尾部 :* 端口通配，该分支不设置 allowed_origins，携带 Origin 头的浏览器请求
-    由 SDK 以 403 拒绝。通配地址绑定（0.0.0.0/::）下实际访问地址不可预知，默认
-    不启用并输出告警。列表外的 Host 由 SDK 以 421、Origin 以 403 拒绝；不携带
-    Origin 的非浏览器 MCP 客户端不受影响。
+    尾部 :* 端口通配。配置 SEEDREAM_HTTP_ALLOWED_ORIGINS 时统一并入各分支的
+    Origin 白名单（合并收尾单点完成），与 CORS 层同列表放行，预检应答与真实请求
+    判定一致。通配地址绑定（0.0.0.0/::）下实际访问地址不可预知，默认不启用并
+    输出告警。列表外的 Host 由 SDK 以 421、Origin 以 403 拒绝；不携带 Origin
+    的非浏览器 MCP 客户端不受影响。
     """
+    config = get_active_config()
+    base_hosts: list[str]
+    base_origins: list[str]
     if host in _DNS_REBINDING_PROTECTED_HOSTS:
-        return TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=list(_LOOPBACK_ALLOWED_HOSTS),
-            allowed_origins=list(_LOOPBACK_ALLOWED_ORIGINS),
-        )
-    allowed_hosts = get_active_config().http_allowed_hosts
-    if allowed_hosts:
-        return TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=list(allowed_hosts),
-        )
-    default_allowlist = _bind_address_allowlist(host)
-    if default_allowlist is None:
-        logger.warning(
-            "streamable-http 绑定通配地址 {}，Host/Origin 校验默认关闭，"
-            "请配置 SEEDREAM_HTTP_ALLOWED_HOSTS 启用校验",
-            host,
-        )
-        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        base_hosts = list(_LOOPBACK_ALLOWED_HOSTS)
+        base_origins = list(_LOOPBACK_ALLOWED_ORIGINS)
+    elif config.http_allowed_hosts:
+        base_hosts = list(config.http_allowed_hosts)
+        base_origins = []
+    else:
+        default_allowlist = _bind_address_allowlist(host)
+        if default_allowlist is None:
+            logger.warning(
+                "streamable-http 绑定通配地址 {}，Host/Origin 校验默认关闭，"
+                "请配置 SEEDREAM_HTTP_ALLOWED_HOSTS 启用校验",
+                host,
+            )
+            return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        base_hosts, base_origins = default_allowlist
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=default_allowlist[0],
-        allowed_origins=default_allowlist[1],
+        allowed_hosts=base_hosts,
+        allowed_origins=[*base_origins, *(config.http_allowed_origins or [])],
     )
 
 
@@ -640,6 +719,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     config = get_active_config()
     transport_security = _transport_security_for_host(host)
     max_body_size = config.http_max_body_size
+    allowed_origins = config.http_allowed_origins
     if web_enabled:
         from .webapp import register_web_routes
 
@@ -672,7 +752,12 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
 
         mount_web_static(app)
     _attach_streamable_http_middleware(
-        app, host, auth_token, max_body_size=max_body_size, web_enabled=web_enabled
+        app,
+        host,
+        auth_token,
+        max_body_size=max_body_size,
+        web_enabled=web_enabled,
+        allowed_origins=allowed_origins,
     )
     return app
 
