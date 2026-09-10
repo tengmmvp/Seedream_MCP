@@ -346,7 +346,7 @@ def test_reset_lifespan_state_clears_global_config() -> None:
     from seedream_mcp import config as current_config_module
 
     current_config_module._global_config = SeedreamConfig(api_key="stale_key")
-    server._reset_lifespan_state()
+    resources._reset_lifespan_state()
     assert current_config_module._global_config is None
 
 
@@ -561,7 +561,7 @@ def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
 
     assert not hasattr(results_module, "_last_sanitized_images")
     assert not hasattr(results_module, "reset_last_sanitized_images")
-    server._reset_lifespan_state()
+    resources._reset_lifespan_state()
 
 
 # ==================== 平铺 inputSchema 收紧版本守护 ====================

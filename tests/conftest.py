@@ -90,7 +90,7 @@ async def _lifespan_state_guard(
 
     if clear_session_manager:
         _clear_session_manager()
-    server._reset_lifespan_state()
+    resources._reset_lifespan_state()
     if inject_config:
         monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="test_key"))
     try:
@@ -105,7 +105,7 @@ async def _lifespan_state_guard(
         for retired in list(resources._retired_resources):
             await retired.client.close()
             await retired.download_manager.close()
-        server._reset_lifespan_state()
+        resources._reset_lifespan_state()
 
 
 @pytest.fixture
@@ -153,7 +153,7 @@ def clean_web_routes() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
-    from seedream_mcp.server import _reset_lifespan_state
+    from seedream_mcp.resources import _reset_lifespan_state
     from seedream_mcp.utils.core import formats as formats_module
 
     # PIL 已导入时快照解压炸弹阈值，收尾恢复：解码器初始化经 Image.MAX_IMAGE_PIXELS

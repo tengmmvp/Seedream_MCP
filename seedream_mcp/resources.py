@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
 
 from mcp.server.caching import CacheHint, CacheableMethod
 from mcp.server.mcpserver import MCPServer, RequestStateSecurity
@@ -44,6 +44,16 @@ SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生
 # ==================== MCP 服务器实例与共享资源状态 ====================
 
 logger = get_logger()
+
+
+class BorrowedSharedHandles(Protocol):
+    """借用方可见的共享句柄面：仅取 client 与 download_manager 使用。"""
+
+    @property
+    def client(self) -> "SeedreamClient": ...
+
+    @property
+    def download_manager(self) -> "DownloadManager": ...
 
 
 class _SharedResource:
@@ -134,7 +144,7 @@ def _has_inflight_references() -> bool:
     return (active is not None and active.refcount > 0) or bool(_retired_resources)
 
 
-def borrow_shared_handles() -> "_SharedResource | None":
+def borrow_shared_handles() -> "BorrowedSharedHandles | None":
     """返回当前活动的共享资源对象，供 webapp 上下文替身借用共享句柄。
 
     无活动资源时返回 None，调用方按资源不在场回退自建路径。借用限于单次请求内
