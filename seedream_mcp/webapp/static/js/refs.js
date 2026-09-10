@@ -10,9 +10,26 @@ import { $, clearInlineError, currentModel, showInlineError, state } from "./api
 
 const SINGLE_REF_LIMIT = 1;
 const FUSION_REF_MIN = 2;
-// data URI 有 4/3 膨胀，累计 45MB 字符给服务端 64MB 请求体上限留余量，
-// 防多图融合多张上传触发 413。
-const UPLOAD_TOTAL_LIMIT_CHARS = 45 * 1024 * 1024;
+// config-info 未加载时的回退默认：上限 14 与 unknown 家族一致，预算 45MB 为
+// 64MB 请求体上限的推导值；加载后以服务端下发值为单一来源。
+const DEFAULT_UPLOAD_BUDGET_CHARS = 45 * 1024 * 1024;
+const DEFAULT_UNKNOWN_REF_LIMIT = 14;
+
+// data URI 累计字符预算，来自服务端按请求体上限的推导。
+function uploadBudgetChars() {
+  const fromServer = state.configInfo && state.configInfo.upload_budget_chars;
+  return typeof fromServer === "number" && fromServer > 0
+    ? fromServer
+    : DEFAULT_UPLOAD_BUDGET_CHARS;
+}
+
+// 未知模型（Endpoint ID 部署）的参考图上限，来自服务端 unknown 家族能力声明。
+function unknownRefLimit() {
+  const fromServer = state.configInfo && state.configInfo.unknown_max_reference_images;
+  return typeof fromServer === "number" && fromServer > 0
+    ? fromServer
+    : DEFAULT_UNKNOWN_REF_LIMIT;
+}
 
 /**
  * 声明各工具的参考图数量区间与提示词必填性；上限随当前模型能力收缩。
@@ -22,8 +39,9 @@ const UPLOAD_TOTAL_LIMIT_CHARS = 45 * 1024 * 1024;
  */
 export function toolConfig(tool) {
   const current = currentModel();
-  // 未知模型（Endpoint ID 部署）回退默认上限 14，与后端 unknown 家族放行同源。
-  const refLimit = current ? current.max_reference_images : 14;
+  const refLimit = current
+    ? current.max_reference_images
+    : unknownRefLimit();
   if (tool === "image-to-image")
     return {
       refs: true,
@@ -96,7 +114,7 @@ function dataUriTotalChars() {
 
 /** 追加 nextChars 字符后是否仍在 data URI 累计上限内。 */
 export function withinUploadBudget(nextChars) {
-  return dataUriTotalChars() + nextChars <= UPLOAD_TOTAL_LIMIT_CHARS;
+  return dataUriTotalChars() + nextChars <= uploadBudgetChars();
 }
 
 // 参考图区行内错误提示：拒绝原因落在表单内，替代阻塞式弹窗。
@@ -115,40 +133,73 @@ function clearRefError() {
  * @param {string} kind - 来源类型，取 data_uri 或 url。
  * @param {string} value - 参考图值，data URI 或图片 URL。
  * @param {string|null} [preview] - 预览地址。
- * @returns {boolean} 成功入列返回 true，被拒绝返回 false。
+ * @returns {string|null} 成功入列返回 null，被拒绝返回拒绝原因。
  */
 export function addReference(kind, value, preview) {
   const config = toolConfig(state.tool);
   if (state.refs.length >= config.max) {
-    showRefError(`该工具最多 ${config.max} 张参考图`);
-    return false;
+    const reason = `该工具最多 ${config.max} 张参考图`;
+    showRefError(reason);
+    return reason;
   }
   // URL 来源前置校验 scheme，非 http(s) 开头的输入在入列前拦下。
   if (kind === "url" && !/^https?:\/\//i.test(value)) {
-    showRefError("图片 URL 须以 http:// 或 https:// 开头");
-    return false;
+    const reason = "图片 URL 须以 http:// 或 https:// 开头";
+    showRefError(reason);
+    return reason;
   }
   if (kind === "data_uri" && !withinUploadBudget(value.length)) {
-    showRefError("参考图总量超过 45MB 上限，请改用图片 URL");
-    return false;
+    const mb = Math.floor(uploadBudgetChars() / (1024 * 1024));
+    const reason = `参考图总量超过 ${mb}MB 上限，请改用图片 URL`;
+    showRefError(reason);
+    return reason;
   }
   clearRefError();
   state.refs.push({ kind, value, preview: preview || null });
   renderReferences(state.refs.length - 1);
-  return true;
+  return null;
 }
 
 /**
  * 逐个读取文件为 data URI 并加入参考图。
  *
+ * 读取前按类型与体积前置拦截，避免大文件白付全量读取；精确判定由
+ * addReference 兜底，拒绝原因聚合为一条提示。
+ *
  * @param {FileList} files - 待读取的文件列表。
  */
-export function handleFiles(files) {
+export async function handleFiles(files) {
+  const rejected = [];
+  let batchChars = dataUriTotalChars();
+  const reads = [];
   for (const file of files) {
-    const reader = new FileReader();
-    reader.onload = () =>
-      addReference("data_uri", reader.result, reader.result);
-    reader.onerror = () => showRefError(`文件读取失败: ${file.name}`);
-    reader.readAsDataURL(file);
+    if (file.type && !file.type.startsWith("image/")) {
+      rejected.push(`${file.name}（非图片）`);
+      continue;
+    }
+    // data URI 有 4/3 膨胀，加 64 字节头与填充余量。
+    const projected = Math.ceil((file.size * 4) / 3) + 64;
+    if (batchChars + projected > uploadBudgetChars()) {
+      rejected.push(`${file.name}（超出参考图总量上限）`);
+      continue;
+    }
+    batchChars += projected;
+    reads.push(
+      new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const reason = addReference("data_uri", reader.result, reader.result);
+          if (reason) rejected.push(`${file.name}（${reason}）`);
+          resolve(undefined);
+        };
+        reader.onerror = () => {
+          rejected.push(`文件读取失败: ${file.name}`);
+          resolve(undefined);
+        };
+        reader.readAsDataURL(file);
+      }),
+    );
   }
+  await Promise.all(reads);
+  if (rejected.length) showRefError(`未添加：${rejected.join("、")}`);
 }

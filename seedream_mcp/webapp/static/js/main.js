@@ -75,7 +75,7 @@ function bindEvents() {
     const url = $("ref-url").value.trim();
     if (url) {
       // addReference 拒绝时保留输入，用户刚粘贴的 URL 不被抹掉。
-      if (addReference("url", url)) {
+      if (addReference("url", url) === null) {
         $("ref-url").value = "";
       }
     }
@@ -141,12 +141,13 @@ function bindEvents() {
       $("token-error").classList.remove("hidden");
       if (error.message === "unauthorized") {
         $("token-error").textContent = "令牌无效，请重试。";
+        state.token = "";
+        clearStoredToken();
       } else {
+        // 瞬时失败（网络抖动、5xx）保留令牌，输入框未清空可直接重试。
         $("token-error").textContent = "服务器异常，请重试";
         console.error(error);
       }
-      state.token = "";
-      clearStoredToken();
     }
   });
   $("token-input").addEventListener("keydown", (event) => {

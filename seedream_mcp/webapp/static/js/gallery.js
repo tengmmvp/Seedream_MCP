@@ -5,7 +5,17 @@
 
 "use strict";
 
-import { $, apiFetch, clearInlineError, fetchBlobUrl, revokeObjectUrls, showInlineError, state } from "./api.js";
+import {
+  $,
+  apiFetch,
+  clearInlineError,
+  fetchBlobUrl,
+  normalizePayloadError,
+  parseJsonLoose,
+  revokeObjectUrls,
+  showInlineError,
+  state,
+} from "./api.js";
 import { addReference, toolConfig } from "./refs.js";
 
 /** 图库单页条数。 */
@@ -59,8 +69,13 @@ export async function refreshGallery() {
 
 // 请求主体：seq 为本次请求序号，过期响应在内部各检查点丢弃。
 async function refreshGalleryForSeq(seq) {
-  // 配置未就绪时不渲染任何空态结论，由 main 的补刷在 config-info 落地后重进。
-  if (!state.configInfo) return;
+  // 配置未就绪时提示刷新并复位翻页器，main 的补刷在 config-info 落地后重进。
+  if (!state.configInfo) {
+    $("gallery-empty").textContent = "配置未加载，请刷新页面重试。";
+    $("gallery-empty").classList.remove("hidden");
+    resetGalleryPager();
+    return;
+  }
   if (!state.configInfo.images_root_available) {
     state.gallery.offset = 0;
     state.gallery.hasMore = false;
@@ -92,13 +107,16 @@ async function refreshGalleryForSeq(seq) {
     return;
   }
   if (!response.ok) {
-    if (seq === requestSeq) showGalleryError("图库加载失败，请稍后重试。");
+    if (seq !== requestSeq) return;
+    // 结构化错误优先展示后端消息：offset 越界等可指导用户刷新，未知形态回退
+    // HTTP 状态码文案。
+    const payload = await parseJsonLoose(response);
+    if (seq !== requestSeq) return;
+    showGalleryError(`图库加载失败：${normalizePayloadError(payload, response).message}`);
     return;
   }
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch {
+  const payload = await parseJsonLoose(response);
+  if (payload === null) {
     // 响应体非 JSON 或中途截断，按网络失败同口径提示。
     if (seq === requestSeq) showGalleryError("图库响应异常，请稍后重试。");
     return;
@@ -313,7 +331,7 @@ export async function useLightboxAsReference() {
   try {
     const dataUri = await blobToDataUri(blob);
     // 拒绝（数量或体积超限）时停留灯箱不跳转，具体原因已落生成台提示位。
-    if (!addReference("data_uri", dataUri, dataUri)) {
+    if (addReference("data_uri", dataUri, dataUri) !== null) {
       showInlineError($("lightbox-error"), "参考图未添加，详情见生成台提示。");
       return;
     }

@@ -40,7 +40,16 @@ async def test_production_app_serves_web_console(
     assert index_response.status_code == 200
     assert index_response.headers["content-type"].startswith("text/html")
     assert api_response.status_code == 200
-    assert api_response.json()["images_root_available"] is True
+    info = api_response.json()
+    assert info["images_root_available"] is True
+    # 前端派生所需的字段齐备：未知模型档位与参考图上限与后端 unknown 家族同源，
+    # 数值上限与后端常量同源，上传预算与请求体上限同源，水印默认值与配置同源。
+    assert info["fallback_presets"] == ["1K", "1.5K", "2K", "3K", "4K"]
+    assert info["unknown_max_reference_images"] == 14
+    assert info["upload_budget_chars"] == 45 * 1024 * 1024
+    assert info["max_request_count"] == 10
+    assert info["max_images"] == 15
+    assert info["default_watermark"] is False
     assert static_response.status_code == 200
     assert html_direct_response.status_code == 404
     assert missing_response.status_code == 404

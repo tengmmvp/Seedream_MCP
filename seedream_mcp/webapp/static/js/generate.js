@@ -11,6 +11,7 @@ import {
   currentModel,
   fetchBlobUrl,
   fetchExternalBlobUrl,
+  normalizePayloadError,
   revokeObjectUrls,
   setActiveTool,
   showInlineError,
@@ -39,7 +40,12 @@ export async function loadConfigInfo() {
   // 令牌重输等场景二次加载时保留先前选择：自定义保持，档位在新列表中仍存在则恢复。
   const previous = sizeSelect.value;
   sizeSelect.innerHTML = "";
-  const presets = current ? current.allowed_presets : ["2K", "3K", "4K"];
+  // 未知模型（Endpoint ID 部署）回退档位取 unknown 家族声明，与后端放行同源。
+  const presets = current
+    ? current.allowed_presets
+    : Array.isArray(info.fallback_presets)
+      ? info.fallback_presets
+      : [];
   for (const preset of presets) {
     const option = document.createElement("option");
     option.value = preset;
@@ -55,9 +61,11 @@ export async function loadConfigInfo() {
     sizeSelect.value = previous;
   }
 
-  // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源。
+  // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源；先前选择在新列表
+  // 中仍存在则恢复，恢复失败回「全部」并同步重置图库偏移，页码与过滤语义不错位。
   const formatSelect = $("format-filter");
   if (formatSelect && Array.isArray(info.supported_extensions)) {
+    const previousFormat = formatSelect.value;
     formatSelect.innerHTML = "";
     const all = document.createElement("option");
     all.value = "";
@@ -69,11 +77,34 @@ export async function loadConfigInfo() {
       option.textContent = ext.replace(".", "").toUpperCase();
       formatSelect.appendChild(option);
     }
+    if (previousFormat && info.supported_extensions.includes(previousFormat)) {
+      formatSelect.value = previousFormat;
+    } else if (previousFormat) {
+      state.gallery.offset = 0;
+    }
   }
 
-  const outputFormatField = $("output-format").closest(".field");
-  if (current && !current.supports_output_format)
-    outputFormatField.classList.add("collapsed");
+  // 数量上限与参考图文件类型从 config-info 派生，与后端约束单一来源。
+  if (Number.isFinite(info.max_request_count))
+    $("request-count").max = String(info.max_request_count);
+  if (Number.isFinite(info.max_images))
+    $("max-images").max = String(info.max_images);
+  if (Array.isArray(info.supported_extensions))
+    $("ref-file").accept = info.supported_extensions.join(",");
+
+  // 输出格式字段随模型能力显隐，未知模型按 unknown 家族放行，二次加载能力翻转
+  // 可双向切换。
+  $("output-format")
+    .closest(".field")
+    .classList.toggle("collapsed", current ? !current.supports_output_format : false);
+
+  // 勾选框初始态反映服务器默认，此后保留用户选择：令牌重输会再次加载配置，
+  // 重置勾选态会使静默回退变为显式传值的实际生效。
+  const watermarkBox = $("watermark");
+  if (!watermarkBox.dataset.initialized) {
+    watermarkBox.checked = info.default_watermark === true;
+    watermarkBox.dataset.initialized = "1";
+  }
 
   // 服务端全局关闭自动保存时禁用复选框并标注，UI 与实际行为一致。
   const autoSave = $("auto-save");
@@ -176,7 +207,7 @@ export function buildRequestBody() {
 
   const requestCount = Number($("request-count").value);
   if (requestCount > 1) body.request_count = requestCount;
-  if ($("watermark").checked) body.watermark = true;
+  body.watermark = $("watermark").checked;
 
   if (state.tool === "sequential-generation") {
     // 留空省略键，由后端按参考图数量推导。
@@ -245,13 +276,23 @@ export function setStatus(kind, text) {
 }
 
 // 渲染点阵：按容器尺寸铺点，点亮延迟随行列递增，形成左上到右下扫过的
-// 对角波。须在容器可见后调用，隐藏态取不到宽度。
+// 对角波。行列均封顶防宽高视口铺出上千个并发动画节点。须在容器可见后调用，
+// 隐藏态取不到宽度。
+const RENDER_DOTS_MAX_COLS = 48;
+const RENDER_DOTS_MAX_ROWS = 24;
+
 function buildRenderDots() {
   const container = $("render-dots");
   container.innerHTML = "";
   const gap = 22;
-  const cols = Math.max(8, Math.floor((container.clientWidth || 600) / gap));
-  const rows = Math.max(12, Math.floor((container.clientHeight || 320) / gap));
+  const cols = Math.min(
+    RENDER_DOTS_MAX_COLS,
+    Math.max(8, Math.floor((container.clientWidth || 600) / gap)),
+  );
+  const rows = Math.min(
+    RENDER_DOTS_MAX_ROWS,
+    Math.max(12, Math.floor((container.clientHeight || 320) / gap)),
+  );
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const dot = document.createElement("i");
@@ -361,17 +402,6 @@ function showResultError(error) {
   showInlineError($("result-error"), `[${error.type || "error"}] ${error.message || ""}`);
 }
 
-// 失败载荷归一：error.message、error_description、状态码三级回退，未知响应
-// 形态也给出可读信息。
-function normalizePayloadError(payload, response) {
-  const error = payload && payload.error;
-  if (error && typeof error === "object" && error.message) return error;
-  if (payload && typeof payload.error_description === "string") {
-    return { type: error || "error", message: payload.error_description };
-  }
-  return { type: error || "error", message: `HTTP ${response.status}` };
-}
-
 // 结果图装载并发上限：固定 4 个取图任务持续消费队列，无批次屏障。
 const RESULT_IMAGE_CONCURRENCY = 4;
 
@@ -443,7 +473,11 @@ async function renderResults(payload) {
   if (usage && Number.isFinite(usage.total_tokens)) {
     metaLines.push(`总计 ${usage.total_tokens} tokens`);
   }
-  if (payload.auto_save && Array.isArray(payload.auto_save.results)) {
+  // 保存阶段整体降级（磁盘满、目录不可写）时 results 为空，仅展示原因，不误报
+  // 「已保存 0 张」；图片 URL 过期后不可再取回，用户需据此手动补救。
+  if (payload.auto_save && payload.auto_save.error) {
+    metaLines.push(`自动保存失败：${payload.auto_save.error}`);
+  } else if (payload.auto_save && Array.isArray(payload.auto_save.results)) {
     const results = payload.auto_save.results;
     const savedCount = results.filter((r) => r && r.success !== false).length;
     // 部分失败时展示 N/总数，用户可察觉有保存失败的条目。

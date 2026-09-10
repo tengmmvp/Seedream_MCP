@@ -7,7 +7,7 @@ config-info 是前端的启动面：模型能力与尺寸档位同源 model_capa
 
 from __future__ import annotations
 
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -15,13 +15,36 @@ from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Re
 from ..config import get_active_config
 from ..utils.core.sanitizers import CONTROL_CHARS_PATTERN
 from ..utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
-from ..utils.model.model_capabilities import model_payloads
+from ..utils.core.validators import (
+    MAX_PARALLEL_REQUEST_COUNT,
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
+)
+from ..utils.model.model_capabilities import (
+    MODEL_FAMILY_UNKNOWN,
+    get_model_capabilities,
+    model_payloads,
+    preset_numeric_sort_key,
+)
 from ..version import __version__
 from . import _shared, constants
 from .constants import PAGE_SECURITY_HEADERS, WEB_API_PREFIX, WEB_INDEX_PATH
 
 # 模型能力清单缓存：能力表为进程级静态数据，首次构建后跨请求复用。
 _MODELS_PAYLOAD: list[dict[str, object]] | None = None
+
+# 上传预算推导扣除的 JSON 信封与提示词等其余字段余量。
+_UPLOAD_BUDGET_ENVELOPE_MARGIN = 3 * 1024 * 1024
+
+
+def _upload_budget_chars(max_body_size: int) -> int:
+    """按请求体上限推导 data URI 参考图的累计字符预算，供前端预检单一来源。"""
+    return max(max_body_size * 3 // 4 - _UPLOAD_BUDGET_ENVELOPE_MARGIN, 0)
+
+
+def _fallback_presets() -> list[str]:
+    """未知模型回退档位：取 unknown 家族的能力声明，与后端放行口径同源。"""
+    presets = get_model_capabilities(MODEL_FAMILY_UNKNOWN).allowed_presets
+    return sorted(presets, key=preset_numeric_sort_key)
 
 
 def _models_payload() -> list[dict[str, object]]:
@@ -60,10 +83,15 @@ async def web_not_found(request: Request) -> Response:
         trimmed = path.rstrip("/")
         normalized = unquote(trimmed).replace("\\", "/")
         if trimmed and not normalized.startswith("//"):
-            # 查询串原样回填；控制字符进 Location 头触发协议层 500，剔除后重定向
+            # 查询串原样回填；控制字符进 Location 头触发协议层 500，剔除后重定向；
+            # 非 ASCII 字符百分号编码使 Location 头恒可编码，浏览器跟随时按
+            # 归一化规则解码。
             query = request.url.query
-            target = trimmed + (f"?{query}" if query else "")
-            return RedirectResponse(CONTROL_CHARS_PATTERN.sub("", target), status_code=307)
+            target = CONTROL_CHARS_PATTERN.sub("", trimmed + (f"?{query}" if query else ""))
+            location = "".join(
+                char if ord(char) < 128 else quote(char, encoding="utf-8") for char in target
+            )
+            return RedirectResponse(location, status_code=307)
     if path == WEB_API_PREFIX or path.startswith(WEB_API_PREFIX + "/"):
         return _shared.error_json("not_found", "接口不存在", 404)
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
@@ -88,8 +116,9 @@ async def web_config_info(_request: Request) -> Response:
 
     图片目录解析经 _shared.resolve_web_images_root 与 gallery、generate 域同契约；
     仅回传可用性布尔，不向浏览器泄露服务器绝对路径；不可用时前端在图库区
-    给出配置指引。响应附 cache-control: no-store，兼作鉴权探测端点的状态
-    不落代理缓存。
+    给出配置指引。unknown_max_reference_images 与 upload_budget_chars 使前端的
+    未知模型参考图上限和上传预算预检与后端配置单一来源。响应附
+    cache-control: no-store，兼作鉴权探测端点的状态不落代理缓存。
     """
     config = get_active_config()
     resolved = await _shared.resolve_web_images_root()
@@ -99,8 +128,16 @@ async def web_config_info(_request: Request) -> Response:
             "server_version": __version__,
             "model_id": config.model_id,
             "default_size": config.default_size,
+            "default_watermark": config.default_watermark,
             "models": _models_payload(),
+            "fallback_presets": _fallback_presets(),
+            "unknown_max_reference_images": get_model_capabilities(
+                MODEL_FAMILY_UNKNOWN
+            ).max_reference_images,
+            "upload_budget_chars": _upload_budget_chars(config.http_max_body_size),
             "supported_extensions": list(SUPPORTED_IMAGE_EXTENSIONS_ORDERED),
+            "max_request_count": MAX_PARALLEL_REQUEST_COUNT,
+            "max_images": MAX_SEQUENTIAL_TOTAL_IMAGES,
             "images_root_available": images_root_available,
             "images_root_hint": (
                 ""

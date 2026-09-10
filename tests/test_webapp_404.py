@@ -213,6 +213,41 @@ async def test_decoded_backslash_path_not_redirected(
     assert response.status_code == 404
 
 
+async def test_non_ascii_tail_slash_path_redirects_percent_encoded(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """含非 ASCII 字符（中文路径）的尾斜杠请求 307 到百分号编码形态。
+
+    Location 头须可 latin-1 编码，非 ASCII 字符经 UTF-8 百分号编码后浏览器按
+    归一化规则解码跟随，重定向便利对全部输入成立。
+    """
+    from urllib.parse import quote
+
+    from starlette.requests import Request
+
+    from seedream_mcp.webapp import meta as meta_module
+
+    prepare_static_dir(monkeypatch, tmp_path)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/图库/",
+        "raw_path": "/图库/".encode("utf-8"),
+        "query_string": b"",
+        "headers": [],
+    }
+
+    response = await meta_module.web_not_found(Request(scope))
+
+    assert response.status_code == 307
+    expected = "".join(
+        char if ord(char) < 128 else quote(char, encoding="utf-8") for char in "/图库"
+    )
+    assert response.headers["location"] == expected
+    response.headers["location"].encode("latin-1")
+
+
 async def test_static_mount_denies_html_direct_access(
     tmp_path: Path,
     monkeypatch: Any,

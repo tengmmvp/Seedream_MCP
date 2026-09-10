@@ -194,3 +194,34 @@ export function showTokenGate() {
 export function hideTokenGate() {
   $("token-gate").classList.add("hidden");
 }
+
+/**
+ * 失败载荷归一：error.message、error_description、状态码三级回退，未知响应
+ * 形态也给出可读信息。生成与图库端点共用。
+ *
+ * @param {Object|null} payload - 已解析的响应体，可为 null。
+ * @param {Response} response - 原始响应。
+ * @returns {Object} 形如 {type, message} 的错误对象。
+ */
+export function normalizePayloadError(payload, response) {
+  const error = payload && payload.error;
+  if (error && typeof error === "object" && error.message) return error;
+  if (payload && typeof payload.error_description === "string") {
+    return { type: error || "error", message: payload.error_description };
+  }
+  return { type: error || "error", message: `HTTP ${response.status}` };
+}
+
+/**
+ * 宽松解析响应体为 JSON：非 JSON 或中途截断返回 null，不抛异常。
+ *
+ * @param {Response} response - 原始响应。
+ * @returns {Promise<Object|null>} 解析结果，失败为 null。
+ */
+export async function parseJsonLoose(response) {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
