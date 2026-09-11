@@ -388,8 +388,6 @@ async def test_download_image_stops_retry_when_total_budget_exhausted(
     每次读时钟即前进超过预算的伪时钟驱动：首次尝试失败后累计已超预算，
     尝试次数为 1 而非 max_retries + 1。
     """
-    import seedream_mcp.utils.io.io_download as download_module
-
     manager = DownloadManager()
     session = _FakeSession([_FakeResponse(500, {})])
     _patch_download_network(monkeypatch, manager, session)
@@ -402,7 +400,7 @@ async def test_download_image_stops_retry_when_total_budget_exhausted(
         clock_now[0] += 7200.0
         return value
 
-    monkeypatch.setattr(download_module.time, "monotonic", _advancing_time)
+    monkeypatch.setattr(time, "monotonic", _advancing_time)
 
     save_path = tmp_path / "out.png"
     with pytest.raises(DownloadError):
@@ -426,7 +424,7 @@ class _SlowHopClockSession:
         self._clock_now = clock_now
         self._hop_seconds = hop_seconds
 
-    def get(self, url: str, **kwargs: object) -> object:  # type: ignore[no-untyped-def]
+    def get(self, url: str, **kwargs: object) -> object:
         del url
         assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
         self._clock_now[0] += self._hop_seconds
@@ -442,8 +440,6 @@ async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhaus
 
     首跳后累计已满预算，跟随下一跳前即按超时分类截停，总占用恰为一个预算窗口。
     """
-    import seedream_mcp.utils.io.io_download as download_module
-
     manager = DownloadManager()
     redirects = [_FakeResponse(302, {"location": f"https://example.com/r{i}"}) for i in range(4)]
     budget = 10.0
@@ -451,7 +447,7 @@ async def test_download_image_redirect_chain_stops_when_cumulative_budget_exhaus
     session = _SlowHopClockSession(redirects, clock_now, hop_seconds=budget)
     _patch_download_network(monkeypatch, manager, session)
     monkeypatch.setattr(manager, "_download_total_budget", lambda: budget)
-    monkeypatch.setattr(download_module.time, "monotonic", lambda: clock_now[0])
+    monkeypatch.setattr(time, "monotonic", lambda: clock_now[0])
 
     save_path = tmp_path / "out.png"
     with pytest.raises(DownloadError, match="下载超时.*重定向链累计耗时"):

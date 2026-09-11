@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -215,7 +216,7 @@ def test_usable_cwd_root_rejects_unc_cwd(monkeypatch: pytest.MonkeyPatch) -> Non
         raise AssertionError("UNC 形态的启动目录不得进入写探测")
 
     monkeypatch.setattr(Path, "cwd", _unc_cwd)
-    monkeypatch.setattr(io_path_module.tempfile, "mkstemp", _explode_mkstemp)
+    monkeypatch.setattr(tempfile, "mkstemp", _explode_mkstemp)
 
     assert io_path_module._usable_cwd_root() is None
 
@@ -240,6 +241,29 @@ def test_usable_cwd_root_returns_none_when_resolve_fails(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_usable_cwd_root_unlink_failure_warns_but_stays_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """探测文件清理失败记录 warning 暴露残留，不影响启动目录的可写判定。"""
+    import os
+
+    def _fail_unlink(path: object) -> None:
+        raise OSError("unlink denied")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(os, "unlink", _fail_unlink)
+
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        assert io_path_module._usable_cwd_root() == tmp_path.resolve()
+
+    assert any("清理探测文件失败" in message for message in warnings)
+    # unlink 失败后探测文件残留于目录，以残留暴露清理失败
+    leftover = list(tmp_path.iterdir())
+    assert len(leftover) == 1
+    assert leftover[0].name.startswith(".seedream-probe-")
+
+
 def test_fallback_caches_home_when_cwd_not_writable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -252,7 +276,7 @@ def test_fallback_caches_home_when_cwd_not_writable(
     def _denied(*args: object, **kwargs: object) -> tuple[int, str]:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(io_path_module.tempfile, "mkstemp", _denied)
+    monkeypatch.setattr(tempfile, "mkstemp", _denied)
     home = tmp_path / "home"
     home.mkdir()
     calls = {"count": 0}

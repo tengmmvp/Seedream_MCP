@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Awaitable, Callable, Iterator, cast
+from typing import Any, Awaitable, Callable, Iterator
 
 from .utils.core.validators import ValidatedCommonParams
 
@@ -64,7 +64,7 @@ class SharedRequestPlan:
                 except Exception as exc:
                     self._build_error = (key, exc)
                     raise
-            return cast(dict[str, Any], self.request_data)
+            return self.request_data
 
     async def get_or_serialize(
         self,
@@ -83,7 +83,7 @@ class SharedRequestPlan:
             if self.body is None or self._body_key != key:
                 self.body = await asyncio.to_thread(serializer, request_data)
                 self._body_key = key
-            return cast(bytes, self.body)
+            return self.body
 
     def release(self) -> None:
         """清除共享引用，避免 body 滞留至批次之后的阶段。"""

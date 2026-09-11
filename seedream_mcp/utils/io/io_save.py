@@ -568,6 +568,10 @@ class AutoSaveManager:
             def _prepare_and_save() -> tuple[dict[str, Any], str | None]:
                 mime, payload, _ = parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
+                # payload 为 parse_data_uri 对大 base64 串的整份拷贝，解码完成即释放，
+                # 写盘期间仅并存 b64 原文与解码字节两份，约为 b64 文本的 1.75 倍，
+                # 5 并发 × 50MB 上限下瞬态约 580MB。
+                del payload
                 save_path = self.file_manager.create_save_path_from_extension(
                     prompt=prompt or "",
                     extension=extension,

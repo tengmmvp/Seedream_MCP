@@ -4,6 +4,7 @@ open_no_follow_read 覆盖平台 O_NOFOLLOW、monkeypatch 模拟不支持时的 
 与正常读取三种场景。Windows 创建符号链接需特权或开发者模式，相关用例以探测结果 skip。
 """
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -192,6 +193,92 @@ async def test_atomic_replace_from_fd_replace_failure_cleans_temp(tmp_path: Path
     # 目录占用保留，临时文件经失败路径清理无残留
     assert final.is_dir()
     assert list(tmp_path.iterdir()) == [final]
+
+
+async def test_atomic_replace_from_fd_failure_cleanup_runs_off_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """失败路径的临时文件清理经线程池执行，unlink 不阻塞事件循环。"""
+    import threading
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+
+    main_thread = threading.get_ident()
+    cleanup_thread_ids: list[int] = []
+    real_cleanup = io_file_module._cleanup_temp_file
+
+    def _tracking_cleanup(temp_path: Path) -> None:
+        cleanup_thread_ids.append(threading.get_ident())
+        real_cleanup(temp_path)
+
+    monkeypatch.setattr(io_file_module, "_cleanup_temp_file", _tracking_cleanup)
+
+    final = tmp_path / "out.bin"
+
+    async def bad_writer(fd: int) -> None:
+        raise OSError("write boom")
+
+    with pytest.raises(OSError, match="write boom"):
+        await atomic_replace_from_fd(final, bad_writer, suffix=".part")
+
+    assert list(tmp_path.iterdir()) == []
+    assert cleanup_thread_ids, "失败清理须被执行"
+    assert all(tid != main_thread for tid in cleanup_thread_ids), "清理 unlink 不得留在事件循环线程"
+
+
+async def test_atomic_replace_from_fd_cleanup_survives_second_level_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """二级取消不打断 finally 清理：排队中的 unlink 仍执行，.part 无残留。
+
+    writer 被取消进入失败清理后再收到外层取消，模拟下载任务取消后外层再取消；
+    清理 await 以挂起的 to_thread 替身建模已提交未开始（线程池排队）的窗口，
+    无 shield 时该窗口内的取消会丢弃清理工作。
+    """
+    import threading
+    from typing import Any
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+
+    real_to_thread = asyncio.to_thread
+    real_cleanup = io_file_module._cleanup_temp_file
+    cleanup_pending = asyncio.Event()
+    cleanup_gate = asyncio.Event()
+    cleanup_done = threading.Event()
+
+    def gated_cleanup(temp_path: Path) -> None:
+        real_cleanup(temp_path)
+        cleanup_done.set()
+
+    async def gated_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        if func is not gated_cleanup:
+            return await real_to_thread(func, *args, **kwargs)
+        cleanup_pending.set()
+        await cleanup_gate.wait()
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(io_file_module, "_cleanup_temp_file", gated_cleanup)
+    monkeypatch.setattr(asyncio, "to_thread", gated_to_thread)
+
+    final = tmp_path / "out.bin"
+    started = asyncio.Event()
+
+    async def hanging_writer(fd: int) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.ensure_future(atomic_replace_from_fd(final, hanging_writer, suffix=".part"))
+    await started.wait()
+    task.cancel()
+    await cleanup_pending.wait()
+    # 清理 await 已提交未开始时注入二级取消，shield 使其只命中外层等待
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    cleanup_gate.set()
+    assert await real_to_thread(cleanup_done.wait, 5.0), "二级取消后清理仍须执行"
+    assert list(tmp_path.iterdir()) == []
 
 
 async def test_atomic_replace_from_fd_fsync_enabled_calls_os_fsync_once(

@@ -418,14 +418,14 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
     卸载任务为 _slice_parse_segment(buffer, start, end, log)，段体积即 end - start。
     """
     offload_sizes: list[int] = []
-    real_to_thread = sse_parser_module.asyncio.to_thread
+    real_to_thread = asyncio.to_thread
 
     async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
         if func is sse_parser_module._slice_parse_segment and len(args) == 4:
             offload_sizes.append(int(args[2]) - int(args[1]))
         return await real_to_thread(func, *args, **kwargs)
 
-    monkeypatch.setattr(sse_parser_module.asyncio, "to_thread", spy)
+    monkeypatch.setattr(asyncio, "to_thread", spy)
 
     big_event = json.dumps({"type": "image_generation.partial_succeeded", "b64_json": "A" * 70000})
     chunks = [
@@ -478,6 +478,88 @@ async def test_parse_sse_response_offloads_large_tail_lost_payload_scan(
     assert result["truncated_events"] == 1
     assert scan_thread_ids, "丢失负载判定须被执行"
     assert all(tid != main_thread for tid in scan_thread_ids), "判定不得留在事件循环线程"
+
+
+async def test_parse_sse_response_offloads_large_tail_slicing_to_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超阈值流末尾的尾部切片随解析与丢失判定一并卸载工作线程。
+
+    尾部切片是一次整段 memcpy，留在事件循环与大事件卸载目的相悖；以切片调用
+    所在线程 id 断言其已离开主线程。
+    """
+    main_thread = threading.get_ident()
+    slice_thread_ids: list[int] = []
+    real_slice = sse_parser_module._slice_parse_tail
+
+    def _tracking_slice(buffer: Any, start: int, log: Any) -> Any:
+        slice_thread_ids.append(threading.get_ident())
+        return real_slice(buffer, start, log)
+
+    monkeypatch.setattr(sse_parser_module, "_slice_parse_tail", _tracking_slice)
+
+    big_tail = b"data: " + b"x" * 70000
+    result = await parse_sse_response(
+        _sse_response([big_tail]),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=256 * 1024,
+        event_truncate_threshold=256 * 1024,
+        total_bytes_limit=256 * 1024,
+        log=_log(),
+    )
+
+    assert result["truncated_events"] == 1
+    assert slice_thread_ids, "大尾部切片须卸载线程"
+    assert all(tid != main_thread for tid in slice_thread_ids), "尾部切片不得留在事件循环线程"
+
+
+async def test_parse_sse_response_small_tail_stays_synchronous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """小尾部保持同步快路径，不为小切片付线程调度开销。"""
+    offloaded: list[object] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
+        if func is sse_parser_module._slice_parse_tail:
+            offloaded.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+
+    chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
+        # 小残留段：含 data 负载但解析失败，计入截断。
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2',
+    ]
+    result = await parse_sse_response(
+        _sse_response(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_log(),
+    )
+
+    assert result["truncated_events"] == 1
+    assert not offloaded, "小尾部不得卸载线程"
+
+
+async def test_frame_buffer_parse_tail_returns_length_of_sliced_tail() -> None:
+    """parse_tail 返回的尾部长度由切出的尾部本体推导，与解析共用同一份字节。"""
+    frames = sse_parser_module._SSEFrameBuffer()
+    complete = b'data: {"type":"image_generation.completed"}\n\n'
+    trailing = b'data: {"type":"image_generation.partial_succeeded"'
+    frames.extend(complete + trailing)
+    for _start, _end in frames.drain():
+        pass
+
+    event, _lost, tail_length = await frames.parse_tail(_log())
+
+    assert event is None
+    assert tail_length == len(trailing)
 
 
 async def test_parse_sse_response_empty_stream_returns_none_status() -> None:
@@ -578,6 +660,8 @@ async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
     assert result["status"] == "partial"
     drop_logs = [call for call in log.warning_calls if "流末尾" in str(call)]
     assert drop_logs, "流末尾丢弃事件须记录 warning 日志"
+    # 丢弃字节数取残留段本体长度，非另路推导的缓冲差值。
+    assert str(len(chunks[1])) in str(drop_logs[0])
 
 
 async def test_parse_sse_response_counts_deeply_nested_trailing_event() -> None:
@@ -815,7 +899,7 @@ async def test_parse_sse_response_deadline_keeps_collected_results(
         # 首块消费前时间在预算内，次块到达时已超限，超时检查先于其入缓冲。
         return 0.0 if consumed <= 1 else 100.0
 
-    monkeypatch.setattr(sse_parser_module.time, "monotonic", _advancing_monotonic)
+    monkeypatch.setattr(time, "monotonic", _advancing_monotonic)
     first = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n'
     second = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/2.png"}\n\n'
     consumed = 0

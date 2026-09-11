@@ -352,14 +352,16 @@ def _usable_cwd_root() -> Path | None:
         fd, probe_name = tempfile.mkstemp(prefix=".seedream-probe-", dir=cwd)
     except OSError:
         return None
+    # 清理失败不影响可写判定，记录 warning 暴露残留而非静默吞掉，与 io_file 的
+    # 临时文件清理同口径。
     try:
         os.close(fd)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.warning("关闭探测文件失败: {} -> {}", probe_name, exc)
     try:
         os.unlink(probe_name)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.warning("清理探测文件失败: {} -> {}", probe_name, exc)
     try:
         return cwd.resolve()
     except OSError:
@@ -605,6 +607,36 @@ def has_windows_colon_component(path: str) -> bool:
     return False
 
 
+def is_drive_relative(path: Path) -> bool:
+    """判断路径是否为盘符相对形态（C:foo）：有 drive 无 root。
+
+    pathlib 拼接对该形态会丢弃基目录锚定到该盘进程 CWD；POSIX 无 drive 恒返回
+    False。normalize_path、file URI 转换与参考图候选定位共用本判定。
+
+    Args:
+        path: 待判定的路径对象。
+
+    Returns:
+        盘符相对形态返回 True；其余形态（含 POSIX 全部输入）返回 False。
+    """
+    return bool(path.drive) and not path.root
+
+
+def is_windows_rooted_without_drive(path: Path) -> bool:
+    """判断 win32 下路径是否有根无盘符（/foo），POSIX 该形态为合法绝对路径恒 False。
+
+    pathlib 拼接对该形态锚定重置，会静默写出基目录所在盘的盘根之外。normalize_path、
+    file URI 转换与参考图候选定位共用本判定，保持三处拒绝口径一致。
+
+    Args:
+        path: 待判定的路径对象。
+
+    Returns:
+        win32 下有 root 无 drive 返回 True；非 win32 平台或其余形态返回 False。
+    """
+    return sys.platform == "win32" and bool(path.root) and not path.drive
+
+
 def normalize_path(path: str, base_dir: str | None = None) -> Path:
     """标准化文件路径为绝对 Path 对象。
 
@@ -631,15 +663,16 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
 
         # 驱动器相对路径有 drive 无 root，pathlib 拼接对该形态会丢弃 base_dir 落到
-        # 该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；POSIX 无 drive 恒不触发。
-        if path_obj.drive and not path_obj.root:
+        # 该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；判定经 is_drive_relative
+        # 与 file URI 转换、参考图候选定位共用单一来源。
+        if is_drive_relative(path_obj):
             raise ValueError(f"拒绝驱动器相对路径以避免绕过基目录解析: {path}")
 
         # 有根无盘符形态有 root 无 drive，is_absolute 判为 False 会被当相对路径拼
         # 基目录，但 pathlib 拼接对该形态锚定重置、静默写出基目录所在盘的盘根之外，
-        # 与驱动器相对同口径在 resolve 前拒绝；POSIX 无 drive，该形态即合法绝对
-        # 路径，恒不触发。
-        if sys.platform == "win32" and path_obj.root and not path_obj.drive:
+        # 与驱动器相对同口径在 resolve 前拒绝；判定经 is_windows_rooted_without_drive
+        # 共用单一来源，POSIX 该形态即合法绝对路径恒不触发。
+        if is_windows_rooted_without_drive(path_obj):
             raise ValueError(f"拒绝有根无盘符路径以避免绕过基目录解析: {path}")
 
         # Win32 命名空间打开文件时剥离最终分量尾部的点与空格，先做同口径名称归一，

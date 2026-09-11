@@ -131,6 +131,43 @@ def test_build_thumbnail_bytes_png_without_exif_unchanged(tmp_path: Path) -> Non
         assert decoded.size == (120, 90)
 
 
+def test_build_thumbnail_bytes_rejects_symlink_source(tmp_path: Path) -> None:
+    """符号链接源图经 O_NOFOLLOW 读取拒绝，不跟随解码，统一归一为 None。"""
+    import os
+
+    target = _write_png(tmp_path / "target.png", (200, 150))
+    link = tmp_path / "link.png"
+    try:
+        os.symlink(target, link)
+    except (OSError, AttributeError):
+        pytest.skip("当前进程无法创建符号链接，Windows 需开发者模式或管理员权限")
+
+    assert build_thumbnail_bytes(link) is None
+    assert target.exists()
+
+
+def test_build_thumbnail_bytes_decodes_from_file_object_not_full_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解码直接消费打开的文件对象，不把源图整读为全量内存字节串。"""
+    from PIL import Image as pil_image_module
+
+    source = _write_png(tmp_path / "stream.png", (300, 200))
+    opened_fps: list[Any] = []
+    real_open = pil_image_module.open
+
+    def _capturing_open(fp: Any, *args: Any, **kwargs: Any) -> Any:
+        opened_fps.append(fp)
+        return real_open(fp, *args, **kwargs)
+
+    monkeypatch.setattr(pil_image_module, "open", _capturing_open)
+
+    assert build_thumbnail_bytes(source) is not None
+    assert len(opened_fps) == 1
+    assert not isinstance(opened_fps[0], BytesIO)
+    assert hasattr(opened_fps[0], "fileno")
+
+
 async def test_build_preview_contents_preserves_order_and_skips_failures(
     tmp_path: Path,
 ) -> None:

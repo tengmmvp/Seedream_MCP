@@ -185,15 +185,13 @@ def test_save_bytes_cleans_random_temp_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """replace 失败时随机名临时文件被 finally 清理，目录内不留残留。"""
-    from seedream_mcp.utils.io import io_storage as fm_module
-
     manager = FileManager(base_dir=tmp_path)
     path = tmp_path / "out.png"
 
     def _raise_on_replace(_src: object, _dst: object) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr(fm_module.os, "replace", _raise_on_replace)
+    monkeypatch.setattr(os, "replace", _raise_on_replace)
 
     with pytest.raises(FileManagerError, match="写入文件失败"):
         manager.save_bytes(path, b"data")

@@ -55,6 +55,10 @@ _MAX_UNIQUE_BASE_LENGTH = 120
 # 写入的临时文件恒新于宽限值不被并发清理击杀，合法下载总预算为小时级，低于宽限。
 _PART_SWEEP_GRACE_SECONDS = 24 * 3600
 
+# 清理遍历的条目告警阈值：按天与配额策略需要全量收集，不设预算截断，超阈记一条
+# warning 暴露异常规模的保存目录，量级对齐 io_scan 的扫描条目预算。
+_CLEANUP_ENTRY_WARN_THRESHOLD = 20000
+
 
 class FileManagerError(SeedreamMCPError):
     """文件管理相关操作失败。"""
@@ -696,6 +700,12 @@ class FileManager:
             logger.warning("路径不在保存目录内: {}", root_resolved)
             return all_files, part_files, directories
         _scan_directory(self.base_dir)
+        if len(all_files) > _CLEANUP_ENTRY_WARN_THRESHOLD:
+            logger.warning(
+                "清理扫描图片条目数 {} 超过阈值 {}，保存目录规模异常增长",
+                len(all_files),
+                _CLEANUP_ENTRY_WARN_THRESHOLD,
+            )
         return all_files, part_files, directories
 
     @staticmethod

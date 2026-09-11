@@ -108,14 +108,12 @@ async def test_prepare_base64_payload_decoded_exceeds_limit(
     标准 base64 下 estimated_size >= decoded_size，估算守卫通常先行触发；
     此处 monkeypatch b64decode 返回超限字节，覆盖解码后大小检查的独立分支。
     """
-    import seedream_mcp.utils.io.io_save as auto_save_module
-
     mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=1000, cleanup_days=0)
     try:
         real_png_header = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
         payload = base64.b64encode(real_png_header).decode()
         oversized = b"\x89PNG\r\n\x1a\n" + b"\x00" * 2000  # 超过 1000
-        monkeypatch.setattr(auto_save_module.base64, "b64decode", lambda *a, **k: oversized)
+        monkeypatch.setattr(base64, "b64decode", lambda *a, **k: oversized)
         with pytest.raises(AutoSaveError, match="解码后数据过大"):
             mgr._prepare_base64_payload(payload, None)
     finally:

@@ -35,8 +35,10 @@ from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
     get_read_scope,
     has_windows_colon_component,
+    is_drive_relative,
     is_unc_path,
     is_within_resolved,
+    is_windows_rooted_without_drive,
     normalize_path,
     resolve_images_root,
 )
@@ -111,9 +113,9 @@ def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> Non
 
 def is_unidentified_image_error(exc: BaseException) -> bool:
     """判断异常是否为 PIL.UnidentifiedImageError，供各解码失败包装分支共用。"""
-    from PIL import Image
+    from PIL import UnidentifiedImageError
 
-    return isinstance(exc, Image.UnidentifiedImageError)
+    return isinstance(exc, UnidentifiedImageError)
 
 
 def read_and_decode_local_image(
@@ -233,11 +235,18 @@ def iter_local_candidates(
         resolve 后落在对应边界内的候选物理路径。
     """
     is_absolute = os.path.isabs(image)
-    candidates = [Path(image)] if is_absolute else [Path(base_dir) / image]
+    raw_path = Path(image)
+    # win32 有根无盘符形态（/foo）的 pathlib 拼接锚定重置会丢弃 base_dir 落到所在
+    # 盘盘根，按输入形态前置跳过；判定经 is_windows_rooted_without_drive 与
+    # normalize_path 共用单一来源，POSIX 该形态即合法绝对路径。
+    if is_windows_rooted_without_drive(raw_path):
+        return
+    candidates = [raw_path] if is_absolute else [Path(base_dir) / image]
     for candidate in candidates:
         # 驱动器相对形态（C:foo）pathlib 拼接会丢弃 base_dir 锚定到该盘进程 CWD，
-        # 与 normalize_path 同口径跳过该形态，消除两条链路的判定分叉。
-        if candidate.drive and not candidate.root:
+        # 判定经 is_drive_relative 与 normalize_path 共用单一来源，消除两条链路的
+        # 判定分叉。
+        if is_drive_relative(candidate):
             continue
         # UNC 根拼接出的候选仍以 UNC 前缀开头，resolve 会触发 SMB 连接，跳过。
         if is_unc_path(str(candidate)):
@@ -301,6 +310,13 @@ def resolve_local_image_candidate(
     if has_windows_colon_component(image):
         raise SeedreamValidationError(
             f"拒绝参考图路径分量含冒号以避免访问 NTFS 备用数据流: {image}",
+            field="image",
+            value=image,
+        )
+    # 有根无盘符形态在候选定位入口显式拒绝，避免退化为含糊的找不到文件。
+    if is_windows_rooted_without_drive(Path(image)):
+        raise SeedreamValidationError(
+            f"拒绝有根无盘符路径以避免绕过基目录解析: {image}",
             field="image",
             value=image,
         )

@@ -19,6 +19,7 @@ import pytest
 
 import seedream_mcp.utils.io.io_scan as scan_module
 from _log_fakes import capture_loguru_messages
+from seedream_mcp.utils.io.io_file import has_reparse_attribute
 from seedream_mcp.utils.io.io_scan import cached_find_images_in_directory, find_images_in_directory
 
 
@@ -56,8 +57,8 @@ def _scan(
 def _advance_past_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
     """把 io_scan 的 time.monotonic 推进到 TTL 之外，模拟缓存过期。"""
     ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
-    base = scan_module.time.monotonic()
-    monkeypatch.setattr(scan_module.time, "monotonic", lambda: base + ttl + 1)
+    base = time.monotonic()
+    monkeypatch.setattr(time, "monotonic", lambda: base + ttl + 1)
 
 
 def test_limit_returns_sorted_prefix_not_creation_order(tmp_path: Path) -> None:
@@ -104,13 +105,13 @@ def test_recursive_limit_one_skips_later_subtrees(
     (sub_b / "b1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     scanned: list[str] = []
-    original_scandir = scan_module.os.scandir
+    original_scandir = os.scandir
 
     def _spy(path: Any) -> Any:
         scanned.append(str(path))
         return original_scandir(path)
 
-    monkeypatch.setattr(scan_module.os, "scandir", _spy)
+    monkeypatch.setattr(os, "scandir", _spy)
 
     result = find_images_in_directory(str(tmp_path), recursive=True, max_depth=3, limit=1)
 
@@ -152,13 +153,13 @@ def test_non_positive_limit_returns_empty_without_scan(
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     scanned: list[str] = []
-    original_scandir = scan_module.os.scandir
+    original_scandir = os.scandir
 
     def _spy(path: Any) -> Any:
         scanned.append(str(path))
         return original_scandir(path)
 
-    monkeypatch.setattr(scan_module.os, "scandir", _spy)
+    monkeypatch.setattr(os, "scandir", _spy)
 
     assert find_images_in_directory(str(tmp_path), recursive=False, limit=0) == []
     assert find_images_in_directory(str(tmp_path), recursive=False, limit=-3) == []
@@ -255,7 +256,7 @@ def test_find_images_swallows_permission_error(
     def _raise_permission(path: Any) -> Any:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(scan_module.os, "scandir", _raise_permission)
+    monkeypatch.setattr(os, "scandir", _raise_permission)
 
     assert find_images_in_directory(str(tmp_path), recursive=False) == []
 
@@ -269,7 +270,7 @@ def test_find_images_collects_unreadable_dirs(
     def _raise_permission(path: Any) -> Any:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(scan_module.os, "scandir", _raise_permission)
+    monkeypatch.setattr(os, "scandir", _raise_permission)
 
     collected: list[Path] = []
     result = find_images_in_directory(str(tmp_path), recursive=False, unreadable_dirs=collected)
@@ -287,7 +288,7 @@ def test_cached_find_images_replays_unreadable_dirs_on_cache_hit(
     def _raise_permission(path: Any) -> Any:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(scan_module.os, "scandir", _raise_permission)
+    monkeypatch.setattr(os, "scandir", _raise_permission)
     scan_module.reset_directory_scan_cache()
 
     first_collected: list[Path] = []
@@ -732,14 +733,14 @@ def test_cached_find_images_unreadable_signal_not_duplicated_across_rounds(
     sub = tmp_path / "sub"
     sub.mkdir()
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    original_scandir = scan_module.os.scandir
+    original_scandir = os.scandir
 
     def _raise_for_sub(path: Any) -> Any:
         if Path(path).name == "sub":
             raise PermissionError("denied")
         return original_scandir(path)
 
-    monkeypatch.setattr(scan_module.os, "scandir", _raise_for_sub)
+    monkeypatch.setattr(os, "scandir", _raise_for_sub)
     scan_module.reset_directory_scan_cache()
 
     unreadable: list[Path] = []
@@ -797,7 +798,7 @@ def test_find_images_does_not_descend_into_reparse_point(
     marker_ns = 1_600_000_000_000_000_000
     os.utime(junction_dir, ns=(marker_ns, marker_ns))
 
-    real_has_reparse = scan_module.has_reparse_attribute
+    real_has_reparse = has_reparse_attribute
     monkeypatch.setattr(
         scan_module,
         "has_reparse_attribute",
@@ -832,7 +833,7 @@ def test_find_images_excludes_reparse_point_file(
     placeholder.write_bytes(placeholder_bytes)
     (tmp_path / "real.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    real_has_reparse = scan_module.has_reparse_attribute
+    real_has_reparse = has_reparse_attribute
     monkeypatch.setattr(
         scan_module,
         "has_reparse_attribute",
@@ -901,13 +902,13 @@ def _patch_scandir_with_exploding_entry(
     不得调用 monkeypatch.undo，否则会连 autouse fixture 的补丁一并回退。
     """
 
-    original_scandir: Callable[..., Any] = scan_module.os.scandir
+    original_scandir: Callable[..., Any] = os.scandir
 
     def _fake_scandir(path: Any) -> Any:
         del path
         return contextlib.nullcontext(iter([_ExplodingEntry(str(tmp_path / "boom.png"))]))
 
-    monkeypatch.setattr(scan_module.os, "scandir", _fake_scandir)
+    monkeypatch.setattr(os, "scandir", _fake_scandir)
     return original_scandir
 
 
@@ -942,7 +943,7 @@ def test_cached_find_images_mid_scan_error_not_cached_as_complete(
 
     assert scan_module._DIRECTORY_SCAN_CACHE == {}
 
-    monkeypatch.setattr(scan_module.os, "scandir", original_scandir)
+    monkeypatch.setattr(os, "scandir", original_scandir)
     # 瞬时错误恢复后重扫可得完整结果，证明错误未被固化为缓存
     recovered = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10)
     assert [raw.name for raw, _resolved in recovered] == ["a.png"]

@@ -148,6 +148,7 @@ class _ClientHTTPMixin:
             async with self._client_lock:
                 if self._client is None:
                     try:
+                        # Bearer 头随客户端创建一次性固化，密钥热轮换接入时须失效 _client 重建。
                         headers = self._get_headers()
 
                         self._client = httpx.AsyncClient(
@@ -804,13 +805,17 @@ class _ClientHTTPMixin:
         """按统一结果结构记录任务结局日志，四生成方法在 _call_api 正常返回后共用。
 
         success 仅代表收到 200 响应，软失败与部分失败以结果结构表达而非异常，
-        失败与部分失败不得落「任务完成」日志；抛异常路径的失败日志由
-        _finalize_generation_error 承担。
+        失败与部分失败不得落「任务完成」日志，成功但携带顶层 error 的结果同样
+        降级 warning；抛异常路径的失败日志由 _finalize_generation_error 承担。
         """
         if not response.get("success"):
             self.logger.error("{}任务失败: {}", task_label, _outcome_error_note(response))
         elif response.get("status") == "partial":
             self.logger.warning("{}任务部分完成: {}", task_label, _outcome_error_note(response))
+        elif response.get("error"):
+            self.logger.warning(
+                "{}任务完成但携带错误: {}", task_label, _outcome_error_note(response)
+            )
         else:
             self.logger.info("{}任务完成", task_label)
 

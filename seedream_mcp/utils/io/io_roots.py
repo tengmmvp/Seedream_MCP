@@ -10,7 +10,6 @@ io_roots → io_path 单向，工作区状态经 io_path 的公共访问器置�
 from __future__ import annotations
 
 import asyncio
-import sys
 from contextlib import asynccontextmanager
 from contextvars import Token
 from pathlib import Path
@@ -25,8 +24,10 @@ from ..core.logs import get_logger
 from .io_path import (
     apply_workspace_roots,
     has_windows_colon_component,
+    is_drive_relative,
     is_unc_path,
     is_windows_reserved_name,
+    is_windows_rooted_without_drive,
     reset_workspace_roots,
 )
 
@@ -199,13 +200,14 @@ def _file_uri_to_path(uri: str) -> Path | None:
 
     candidate = Path(path_part)
     # 有根无盘符形态在 win32 锚定当前盘根而非可判定的绝对位置，与 normalize_path
-    # 同口径拒绝；POSIX 无 drive 概念，绝对路径恒放行。
-    if sys.platform == "win32" and candidate.root and not candidate.drive:
+    # 同口径拒绝；判定经 is_windows_rooted_without_drive 共用单一来源，POSIX 无
+    # drive 概念，绝对路径恒放行。
+    if is_windows_rooted_without_drive(candidate):
         return None
-    # 两类冒号畸形按完整路径判定：整路径为盘符相对形态（c:ads 的 c: 被解析为盘符、
-    # 裸文件名判定漏拒）与含冒号的普通分量（NTFS ADS）；保留设备名与 normalize_path
-    # 同口径拒绝，畸形形态不成为工作区 root。
-    if (candidate.drive and not candidate.root) or has_windows_colon_component(str(candidate)):
+    # win32 的 nturl2path 已把 /c:ads 先行转为 c:\ads，盘符相对形态经转换不可达，
+    # 该分支仅为与 normalize_path 的拒绝口径对齐保留；含冒号的普通分量（NTFS ADS）
+    # 仍按完整路径判定拒绝，畸形形态不成为工作区 root。
+    if is_drive_relative(candidate) or has_windows_colon_component(str(candidate)):
         return None
     if is_windows_reserved_name(candidate.name):
         return None

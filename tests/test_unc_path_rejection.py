@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.utils.io.io_path import (
+    is_drive_relative,
     is_unc_path,
     is_within_resolved,
+    is_windows_rooted_without_drive,
     normalize_path,
 )
 from seedream_mcp.utils.io.io_roots import _file_uri_to_path
@@ -119,6 +121,50 @@ def test_is_within_resolved_accepts_one_of_multiple_bases(tmp_path: Path) -> Non
     f = (base_b / "file.png").resolve()
     assert is_within_resolved(f, base_a.resolve()) is False
     assert is_within_resolved(f, base_b.resolve()) is True
+
+
+# ==================== 盘符相对与有根无盘符共享判定 ====================
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="盘符相对形态仅 Windows 有 drive 语义")
+def test_is_drive_relative_classifies_windows_forms() -> None:
+    """C:foo 命中，盘符绝对、有根无盘符与纯相对形态不命中。"""
+    assert is_drive_relative(Path("C:foo.png")) is True
+    assert is_drive_relative(Path("C:/foo.png")) is False
+    assert is_drive_relative(Path("/foo.png")) is False
+    assert is_drive_relative(Path("foo.png")) is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 无 drive 语义，冒号为普通文件名字符")
+def test_is_drive_relative_posix_returns_false() -> None:
+    """POSIX 无 drive 概念，含冒号输入也是普通相对路径，恒不命中。"""
+    assert is_drive_relative(Path("C:foo.png")) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="有根无盘符仅 Windows 有 root 无 drive 语义")
+def test_is_windows_rooted_without_drive_classifies_windows_forms() -> None:
+    """/foo 命中，盘符绝对、盘符相对与纯相对形态不命中。"""
+    assert is_windows_rooted_without_drive(Path("/foo.png")) is True
+    assert is_windows_rooted_without_drive(Path("\\foo.png")) is True
+    assert is_windows_rooted_without_drive(Path("C:/foo.png")) is False
+    assert is_windows_rooted_without_drive(Path("C:foo.png")) is False
+    assert is_windows_rooted_without_drive(Path("foo.png")) is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 有根无盘符即合法绝对路径")
+def test_is_windows_rooted_without_drive_posix_returns_false() -> None:
+    """POSIX 上 /foo 为合法绝对路径，谓词恒 False。"""
+    assert is_windows_rooted_without_drive(Path("/foo.png")) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="有根无盘符仅 Windows 有 root 无 drive 语义")
+def test_resolve_local_image_candidate_rejects_rooted_no_drive_with_message() -> None:
+    """参考图候选解析入口对有根无盘符形态抛明确拒绝而非含糊的找不到文件。"""
+    from seedream_mcp.utils.core.errors import SeedreamValidationError
+    from seedream_mcp.utils.images.image_validation import resolve_local_image_candidate
+
+    with pytest.raises(SeedreamValidationError, match="拒绝有根无盘符路径"):
+        resolve_local_image_candidate("/some_dir/cat.png")
 
 
 # ==================== normalize_path ====================

@@ -6,6 +6,7 @@ image_input、io_storage 等模块共享，避免多处重复定义。
 
 from __future__ import annotations
 
+import base64
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -169,6 +170,12 @@ def format_file_too_large(size_bytes: int, max_size: int, label: str = "文件")
         f"{label}过大: {format_file_size_mb(size_bytes)}，"
         f"最大支持{format_file_size_mb(max_size)}"
     )
+
+
+def encode_data_uri(media_type: str, payload: bytes) -> str:
+    """把字节负载编码为 base64 data URI，与 parse_data_uri 共守同一语法。"""
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
 
 
 def parse_data_uri(data: Any) -> tuple[str | None, Any, bool]:

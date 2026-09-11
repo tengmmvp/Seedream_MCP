@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -16,7 +15,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from ..core.errors import SeedreamMCPError, SeedreamValidationError
-from ..core.formats import MIME_BY_EXTENSION, infer_extension_from_bytes
+from ..core.formats import MIME_BY_EXTENSION, encode_data_uri, infer_extension_from_bytes
 from ..core.logs import get_logger
 from ..io.io_path import (
     get_read_context,
@@ -177,7 +176,6 @@ def _prepare_local_image(normalized: str, original: str) -> str:
         field_value=normalized,
         format_read_error=lambda exc: _format_local_read_error(exc, normalized),
     )
-    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     # MIME 以字节签名为准、扩展名回退：扩展名可伪造，与 auto_save 保存路径同口径。
     # 两来源的扩展名均为映射键，直取使键缺失以 KeyError 显式暴露而非静默回落。
     inferred_extension = infer_extension_from_bytes(image_bytes, default="")
@@ -185,4 +183,4 @@ def _prepare_local_image(normalized: str, original: str) -> str:
     mime_type = MIME_BY_EXTENSION[suffix]
 
     logger.info("成功处理图片文件: {} ({} 字节)", validated_path, len(image_bytes))
-    return f"data:{mime_type};base64,{image_b64}"
+    return encode_data_uri(mime_type, image_bytes)

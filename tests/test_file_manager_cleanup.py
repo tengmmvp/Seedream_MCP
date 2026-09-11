@@ -444,3 +444,24 @@ def test_generate_markdown_reference_encodes_hash_and_percent(tmp_path: Path) ->
     target_part = markdown_ref.split("(", 1)[1]
     assert "#" not in target_part
     assert target_part.count("%") == target_part.count("%2")
+
+
+def test_collect_all_files_warns_when_entries_exceed_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """清理扫描的图片条目数超过告警阈值时记录含条数与阈值的 warning，收集行为不变。"""
+    import seedream_mcp.utils.io.io_storage as io_storage_module
+
+    from _log_fakes import capture_loguru_messages
+
+    monkeypatch.setattr(io_storage_module, "_CLEANUP_ENTRY_WARN_THRESHOLD", 2)
+    for name in ("a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"x")
+
+    manager = FileManager(base_dir=tmp_path)
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        all_files, _part_files, _directories = manager._collect_all_files([])
+
+    assert len(all_files) == 3
+    assert any("超过阈值 2" in message for message in warnings)

@@ -115,8 +115,8 @@ async def atomic_replace_from_fd(
 
     统一 io_storage 与 io_download 的落盘协议：``open_temp_fd`` 在 ``final_path``
     同目录创建随机名临时文件规避符号链接 TOCTOU，``writer`` 接收 fd 异步写入，完成
-    后经线程池执行 ``os.replace`` 原子替换，失败路径清理临时文件；mkstemp 与
-    replace 经 ``asyncio.to_thread`` 卸载，避免阻塞事件循环。writer 须以
+    后经线程池执行 ``os.replace`` 原子替换，失败路径清理临时文件；mkstemp、
+    replace 与失败清理经 ``asyncio.to_thread`` 卸载，避免阻塞事件循环。writer 须以
     ``closefd=False`` 包装 fd 使本函数独占关闭权，避免双重关闭与 fd 复用误关他者，
     抛出的异常原样上抛由调用方分类。writer 返回 None 时替换到 ``final_path``；
     返回 Path 时以该路径为最终目标，供写入后才能确定路径的场景使用，须与
@@ -149,7 +149,8 @@ async def atomic_replace_from_fd(
         replaced = True
     finally:
         if not replaced:
-            _cleanup_temp_file(temp_path)
+            # shield：二级取消只打断外层等待，排队中的清理仍执行，避免 .part 残留
+            await asyncio.shield(asyncio.to_thread(_cleanup_temp_file, temp_path))
     return temp_path
 
 

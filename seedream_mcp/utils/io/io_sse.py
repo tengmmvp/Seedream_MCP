@@ -294,9 +294,11 @@ class _SSEFrameBuffer:
             self._buffer += b"\n"
             self._pending_cr = False
 
-    def tail_bytes(self) -> bytearray:
-        """返回未消费尾部的副本，供残留段解析与数据丢失判定共用。"""
-        return self._buffer[self._offset :]
+    async def parse_tail(self, log: Logger) -> tuple[dict[str, Any] | None, bool, int]:
+        """切出未消费尾部并解析、判定丢失与返回尾部字节长度，超阈值卸载工作线程。"""
+        if len(self._buffer) - self._offset > _SSE_OFFLOAD_THRESHOLD:
+            return await asyncio.to_thread(_slice_parse_tail, self._buffer, self._offset, log)
+        return _parse_tail_with_lost_flag(self._buffer[self._offset :], log)
 
 
 class _SSEItemCollector:
@@ -575,13 +577,25 @@ async def _consume_sse_chunks(
 
 def _parse_tail_with_lost_flag(
     tail: bytes | bytearray, log: Logger
-) -> tuple[dict[str, Any] | None, bool]:
-    """解析流末尾残留段并判定其 data 负载是否丢失，供线程卸载与同步路径共用。
+) -> tuple[dict[str, Any] | None, bool, int]:
+    """解析流末尾残留段、判定 data 负载是否丢失并返回尾部字节长度。
 
-    残留段可解析为完整事件时短路，不再做丢失负载扫描。
+    残留段可解析为完整事件时短路，不再做丢失负载扫描；长度由切出的尾部本体
+    推导，调用方与解析共用同一份字节。
     """
     event = parse_sse_segment(tail, log)
-    return event, event is None and _has_lost_data_payload(tail)
+    return event, event is None and _has_lost_data_payload(tail), len(tail)
+
+
+def _slice_parse_tail(
+    buffer: bytearray, start: int, log: Logger
+) -> tuple[dict[str, Any] | None, bool, int]:
+    """在工作线程内切出未消费尾部并解析、判定丢失与返回长度。
+
+    尾部切片是一次整段 memcpy，量级可达单事件截断阈值，与解析、丢失判定一并
+    下沉线程，与 drain 路径的大事件卸载同口径。
+    """
+    return _parse_tail_with_lost_flag(buffer[start:], log)
 
 
 async def _resolve_sse_trailing_segment(
@@ -595,18 +609,10 @@ async def _resolve_sse_trailing_segment(
     """流末尾残留处理阶段：解析残留事件，数据负载丢失时计入截断计数。
 
     尾部只切出一份副本，解析与丢失判定共用同一字节；尾部可接近单事件截断阈值
-    量级，多轮全量拷贝会叠加瞬时内存峰值。超卸载阈值的解析与丢失判定合并移交
-    工作线程，与 drain 路径的大事件卸载同口径。
+    量级，多轮全量拷贝会叠加瞬时内存峰值。
     """
     frames.close_pending_cr()
-    tail = frames.tail_bytes()
-    trailing_len = len(tail)
-    if trailing_len > _SSE_OFFLOAD_THRESHOLD:
-        trailing_event, lost_payload = await asyncio.to_thread(
-            _parse_tail_with_lost_flag, tail, log
-        )
-    else:
-        trailing_event, lost_payload = _parse_tail_with_lost_flag(tail, log)
+    trailing_event, lost_payload, trailing_len = await frames.parse_tail(log)
     if trailing_event is not None:
         apply_completed(
             *_classify_sse_event(trailing_event, model_id, collector.items, log, trailing_len)
