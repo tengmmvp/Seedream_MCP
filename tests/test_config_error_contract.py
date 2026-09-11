@@ -11,6 +11,7 @@ provider 上抛；下载停滞超时超过 720 秒会使下载总预算反超 .p
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -18,12 +19,10 @@ import pytest
 from seedream_mcp import _config_sources as config_sources
 from seedream_mcp import config as config_module
 from seedream_mcp._config_sources import _read_env_values
-from seedream_mcp.config import (
-    DEPRECATED_MODEL_TOKENS,
-    SeedreamConfig,
-)
+from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 from seedream_mcp.utils.io import io_path as io_path_module
+from seedream_mcp.utils.model.model_capabilities import DEPRECATED_MODEL_TOKENS
 
 
 def test_read_env_values_wraps_os_error_as_config_error(
@@ -37,7 +36,7 @@ def test_read_env_values_wraps_os_error_as_config_error(
     env_file = tmp_path / "locked.env"
     env_file.write_text("ARK_API_KEY=test_key\n", encoding="utf-8")
 
-    def _raise_permission(path: object) -> dict[str, str]:
+    def _raise_permission(path: object, **kwargs: object) -> dict[str, str]:
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(config_sources, "dotenv_values", _raise_permission)
@@ -91,7 +90,7 @@ def test_read_env_values_wraps_deleted_cwd_error(monkeypatch: pytest.MonkeyPatch
     def _deleted_cwd() -> str:
         raise FileNotFoundError(2, "No such file or directory")
 
-    monkeypatch.setattr(config_module.os, "getcwd", _deleted_cwd)
+    monkeypatch.setattr(os, "getcwd", _deleted_cwd)
 
     with pytest.raises(SeedreamConfigError, match="配置文件不可读"):
         _read_env_values(None)

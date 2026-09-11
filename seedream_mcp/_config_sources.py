@@ -92,6 +92,17 @@ def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
         ) from exc
 
 
+def _bracket_ipv6_literal(entry: str) -> str | None:
+    """方括号 host 条目返回内部 IPv6 字面量，非方括号或未闭合形态返回 None。
+
+    与 _decompose_allowed_host_entry 的方括号语法同居本模块，形态演化同点维护。
+    """
+    if not entry.startswith("["):
+        return None
+    end = entry.find("]")
+    return entry[1:end] if end > 1 else None
+
+
 def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     """拆分 Host 允许列表条目为 host 与端口后缀，无法识别的形态返回 None。
 
@@ -99,11 +110,11 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     或不含冒号与通配符、首尾无点号的非空主机名。
     """
     if entry.startswith("["):
-        end = entry.find("]")
-        # end <= 1 覆盖未闭合与空内容两种畸形方括号形态。
-        if end <= 1:
+        # 畸形方括号形态直接拒绝。
+        literal = _bracket_ipv6_literal(entry)
+        if literal is None:
             return None
-        host, suffix = entry[: end + 1], entry[end + 1 :]
+        host, suffix = f"[{literal}]", entry[len(literal) + 2 :]
     else:
         idx = entry.rfind(":")
         host, suffix = (entry, "") if idx == -1 else (entry[:idx], entry[idx:])
@@ -191,7 +202,8 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
 
     def _load_single_env_file(path: Path) -> dict[str, str]:
         try:
-            values = dotenv_values(path)
+            # utf-8-sig 剥离可能存在的 BOM，无 BOM 文件行为与 utf-8 一致。
+            values = dotenv_values(path, encoding="utf-8-sig")
         except OSError as exc:
             # 读取失败统一包装为含路径与原因的配置错误，经 cli_main 优雅错误路径输出。
             raise SeedreamConfigError(f"配置文件不可读: {path} -> {exc}") from exc

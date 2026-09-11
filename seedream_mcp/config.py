@@ -8,6 +8,7 @@ _config_sources 模块。
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import threading
 from dataclasses import dataclass, field, fields
@@ -16,8 +17,10 @@ from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 from ._config_sources import (
-    _BUILD_WARNINGS,
+    # as 同名形态为显式再导出，resources 的复位协议经 config 模块属性访问。
+    _BUILD_WARNINGS as _BUILD_WARNINGS,
     _FIELD_ENV_MAP,
+    _bracket_ipv6_literal,
     _FIELD_PICKERS,
     _KNOWN_OVERRIDE_KEYS,
     _REQUEST_STATE_KEYGEN_COMMAND,
@@ -481,7 +484,9 @@ class SeedreamConfig:
         """校验 http_allowed_hosts 条目形态，端口通配未配套裸 host 时告警。
 
         Raises:
-            SeedreamConfigError: 条目含 scheme/斜杠、非尾部通配或端口非数字。
+            SeedreamConfigError: 条目含 scheme/斜杠、含大写、非尾部通配、端口
+                非数字，或方括号内容为非法、带 zone-id，或既非压缩规范形也非
+                IPv4 映射 dotted 形的 IPv6 字面量。
         """
         hosts = self.http_allowed_hosts
         if hosts is None:
@@ -502,6 +507,12 @@ class SeedreamConfig:
                     f"http_allowed_hosts 条目须为 ASCII 字符: {entry}"
                     f"{_env_var_suffix('http_allowed_hosts')}"
                 )
+            # Host 头传输恒为小写，SDK 校验为字节级精确比较，大写条目永不匹配。
+            if entry != entry.lower():
+                raise SeedreamConfigError(
+                    f"http_allowed_hosts 条目须全小写: {entry}"
+                    f"{_env_var_suffix('http_allowed_hosts')}"
+                )
             decomposed = _decompose_allowed_host_entry(entry)
             if decomposed is None:
                 raise SeedreamConfigError(
@@ -509,6 +520,39 @@ class SeedreamConfig:
                     f"{_env_var_suffix('http_allowed_hosts')}"
                 )
             host_part, port_part = decomposed
+            # 方括号条目按 IPv6 字面量校验，畸形内容运行期永不匹配真实 Host 头。
+            literal = _bracket_ipv6_literal(host_part)
+            if literal is not None:
+                # Host 头按 RFC 6874 须以 %25 编码 zone-id，裸 % 条目永不匹配。
+                if "%" in literal:
+                    raise SeedreamConfigError(
+                        f"http_allowed_hosts 方括号条目不得携带 zone-id: {entry}"
+                        f"{_env_var_suffix('http_allowed_hosts')}"
+                    )
+                try:
+                    address = ipaddress.IPv6Address(literal)
+                except ValueError as exc:
+                    raise SeedreamConfigError(
+                        f"http_allowed_hosts 方括号条目须为合法 IPv6 字面量: {entry}"
+                        f"{_env_var_suffix('http_allowed_hosts')}"
+                    ) from exc
+                # 真实 Host 头只携带压缩规范形；IPv4 映射地址客户端发送 dotted 形
+                # （Host: [::ffff:192.0.2.1]:port），两种形态均放行。
+                ipv4_mapped = address.ipv4_mapped
+                accepted = [address.compressed]
+                if ipv4_mapped is not None:
+                    accepted.append(f"::ffff:{ipv4_mapped}")
+                if literal not in accepted:
+                    suggested = (
+                        f"[::ffff:{ipv4_mapped}]"
+                        if ipv4_mapped is not None
+                        else f"[{address.compressed}]"
+                    )
+                    raise SeedreamConfigError(
+                        f"http_allowed_hosts 方括号条目须为压缩规范形或 IPv4 映射 dotted 形，"
+                        f"应写 {suggested} 而非 {entry}"
+                        f"{_env_var_suffix('http_allowed_hosts')}"
+                    )
             if port_part == "":
                 bare_hosts.add(host_part)
             elif port_part == ":*":

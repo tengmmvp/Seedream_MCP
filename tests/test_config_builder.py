@@ -244,6 +244,23 @@ def test_build_config_does_not_write_back_to_os_environ(
     assert config.model_id == "doubao-seedream-4-0-250828"
 
 
+@pytest.mark.parametrize("with_bom", [False, True], ids=["without-bom", "with-bom"])
+def test_build_config_env_file_bom_does_not_pollute_first_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_bom: bool
+) -> None:
+    """带 BOM 的 .env 首键正常解析，无 BOM 文件行为不变。"""
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    env_file = tmp_path / "config.env"
+    data = b"ARK_API_KEY=file_key\n"
+    if with_bom:
+        data = b"\xef\xbb\xbf" + data
+    env_file.write_bytes(data)
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.api_key == "file_key"
+
+
 def test_build_config_loads_http_auth_token_from_env_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -360,12 +377,22 @@ def test_build_config_accepts_all_valid_http_allowed_hosts_forms(
         ("api.example.com:８０", "ASCII"),
         ("api.example.com.", "host、host:port、host:\\*"),
         (".api.example.com", "host、host:port、host:\\*"),
+        ("MCP.example.com", "须全小写"),
+        ("api.example.COM:8443", "须全小写"),
+        ("[2001:DB8::1]:8080", "须全小写"),
+        ("[not-an-ip]:80", "IPv6"),
+        ("[no-ip]", "IPv6"),
+        ("[fe80::1%eth0]:8000", "zone-id"),
+        ("[2001:0db8::1]", "压缩规范形"),
+        ("[::ffff:0:0:192.0.2.1]", "压缩规范形"),
+        ("[0:0:0:0:0:ffff:192.0.2.1]", "压缩规范形"),
+        ("[64:ff9b::192.0.2.1]", "压缩规范形"),
     ],
 )
 def test_build_config_rejects_malformed_http_allowed_hosts_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str, match: str
 ) -> None:
-    """含 scheme/斜杠、非尾部通配、端口非数字或超范围、首尾点号的条目构建期拒绝。"""
+    """含 scheme/斜杠、大写、非尾部通配、端口非数字或超范围、首尾点号、畸形方括号或 IPv6 带 zone-id 与非压缩规范形的条目构建期拒绝。"""
     monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")
@@ -375,6 +402,40 @@ def test_build_config_rejects_malformed_http_allowed_hosts_entries(
 
     assert raw_value in excinfo.value.message
     assert "环境变量 SEEDREAM_HTTP_ALLOWED_HOSTS" in excinfo.value.message
+
+
+def test_build_config_accepts_ipv6_allowed_host_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合法 IPv6 方括号条目的裸 host、精确端口与端口通配形态均放行。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_HOSTS=[::1]:8000,[2001:db8::1],[2001:db8::1]:*\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == ("[::1]:8000", "[2001:db8::1]", "[2001:db8::1]:*")
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    ["[::ffff:192.0.2.1]:8443", "[::ffff:c000:201]"],
+)
+def test_build_config_accepts_ipv4_mapped_ipv6_allowed_host_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    """IPv4 映射地址的 dotted 形与压缩形条目均放行，客户端对该类地址发送 dotted 形 Host。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == (raw_value,)
 
 
 def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
@@ -684,7 +745,7 @@ def test_field_env_map_covers_all_optional_config_fields() -> None:
         for f in dataclass_fields(config_module.SeedreamConfig)
         if f.init and f.name != "api_key"
     }
-    assert set(config_module._FIELD_ENV_MAP) == optional_field_names
+    assert set(config_sources._FIELD_ENV_MAP) == optional_field_names
 
 
 def test_build_config_missing_picker_registration_fails_loudly(
@@ -697,7 +758,7 @@ def test_build_config_missing_picker_registration_fails_loudly(
     monkeypatch.delenv("ARK_API_KEY", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")
-    monkeypatch.delitem(config_module._FIELD_PICKERS, "timeout")
+    monkeypatch.delitem(config_sources._FIELD_PICKERS, "timeout")
 
     with pytest.raises(KeyError):
         build_config_from_sources(env_file=str(env_file))
