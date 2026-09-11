@@ -8,6 +8,7 @@ import asyncio
 from typing import Any, cast
 
 import pytest
+from mcp.client import Client
 from mcp.server.mcpserver import Context
 
 from seedream_mcp import config as config_module
@@ -606,3 +607,21 @@ def test_rebind_request_state_security_syncs_declared_audience() -> None:
 
     assert boundary._security is policy
     assert boundary._audience == "seedream-rebind"
+
+
+# ==================== initialize serverInfo 元数据 ====================
+
+
+async def test_initialize_reports_server_title_and_description(
+    reset_lifespan_singletons: None,
+) -> None:
+    """initialize 握手的 serverInfo 携带 resources 常量声明的 title 与 description。
+
+    重构移除 MCPServer(title=, description=) 传参时 initialize 结果静默丢失元数据，
+    客户端展示名与简介随之退化。
+    """
+    async with Client(server.mcp, mode="legacy") as client:
+        server_info = client.server_info
+        assert server_info is not None
+        assert server_info.title == resources.SERVER_TITLE
+        assert server_info.description == resources.SERVER_DESCRIPTION

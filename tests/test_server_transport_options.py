@@ -14,7 +14,8 @@ import seedream_mcp.bootstrap as bootstrap_module
 import seedream_mcp.cli as cli
 import seedream_mcp.server as server
 import seedream_mcp.transport as transport_module
-from seedream_mcp.config import MODEL_ALIASES, SeedreamConfig
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
 
 
 def test_build_arg_parser_rejects_deprecated_sse_transport() -> None:

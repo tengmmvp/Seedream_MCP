@@ -12,19 +12,20 @@ from importlib import import_module
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    # as 同名形态为 PEP 484 显式再导出，供 mypy 识别 __getattr__ 延迟加载的导出面。
     from .core.schemas import (  # noqa: F401
-        BrowseImagesInput,
-        ImageToImageInput,
-        MultiImageFusionInput,
-        SequentialGenerationInput,
-        TextToImageInput,
+        BrowseImagesInput as BrowseImagesInput,
+        ImageToImageInput as ImageToImageInput,
+        MultiImageFusionInput as MultiImageFusionInput,
+        SequentialGenerationInput as SequentialGenerationInput,
+        TextToImageInput as TextToImageInput,
     )
     from .runners import (  # noqa: F401
-        run_browse_images,
-        run_image_to_image,
-        run_multi_image_fusion,
-        run_sequential_generation,
-        run_text_to_image,
+        run_browse_images as run_browse_images,
+        run_image_to_image as run_image_to_image,
+        run_multi_image_fusion as run_multi_image_fusion,
+        run_sequential_generation as run_sequential_generation,
+        run_text_to_image as run_text_to_image,
     )
 
 # 延迟加载映射：导出名 -> (子模块相对名，子模块内属性名)

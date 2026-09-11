@@ -39,6 +39,10 @@ SERVER_NAME = "seedream_mcp"
 
 SERVER_VERSION = __version__
 
+SERVER_TITLE = "Seedream Image MCP"
+
+SERVER_DESCRIPTION = "基于火山引擎 Seedream API 的 MCP 图像生成服务器。"
+
 SERVER_INSTRUCTIONS = "Seedream 图像生成工具，支持文生图、图文生图、多图融合、组图输出与图片浏览。"
 
 # ==================== MCP 服务器实例与共享资源状态 ====================
@@ -305,6 +309,8 @@ def _create_mcp_server() -> MCPServer:
     """构造进程级 MCPServer 实例，静态列表面附缓存提示并按配置启用密钥环。"""
     return MCPServer(
         SERVER_NAME,
+        title=SERVER_TITLE,
+        description=SERVER_DESCRIPTION,
         instructions=SERVER_INSTRUCTIONS,
         version=SERVER_VERSION,
         lifespan=app_lifespan,

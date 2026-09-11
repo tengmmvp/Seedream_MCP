@@ -8,7 +8,7 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any, TYPE_CHECKING
 
-from .version import __version__  # noqa: F401
+from .version import __version__ as __version__  # noqa: F401
 
 __author__ = "TengMMVP"
 __email__ = "tengmmvp@gmail.com"

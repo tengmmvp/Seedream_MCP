@@ -22,10 +22,16 @@ from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
     MultiImageFusionInput,
+    OUTPUT_FORMAT_DESCRIPTION,
+    STREAM_DESCRIPTION,
     SequentialGenerationInput,
     TextToImageInput,
+    TOOLS_DESCRIPTION,
 )
-from seedream_mcp.utils.model.model_capabilities import SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+from seedream_mcp.utils.model.model_capabilities import (
+    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    supported_family_display_names,
+)
 
 # MCP 注册工具名到输入模型的映射，平铺 inputSchema 等价性断言的数据源。
 _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
@@ -133,6 +139,16 @@ def test_browse_images_parameter_order() -> None:
 
 
 # ==================== 平铺 inputSchema 与模型 schema 等价性 ====================
+
+
+async def test_tool_registration_independent_of_collection_order() -> None:
+    """单文件独立运行时共享 mcp 单例上五工具均已注册。
+
+    工具注册发生在 seedream_mcp.server 导入期，由 tests/conftest.py 顶层导入兜底；
+    移除该导入时本用例单独运行即失败。
+    """
+    tools = await mcp.list_tools()
+    assert {tool.name for tool in tools} == set(_TOOL_INPUT_MODELS)
 
 
 async def test_flat_input_schema_property_order_matches_model_fields() -> None:
@@ -458,3 +474,20 @@ async def test_generation_tool_rejects_oversized_tools_list() -> None:
         await mcp.call_tool("text_to_image", {"prompt": "a cat", "tools": entries})
     with pytest.raises(ValidationError):
         TextToImageInput(prompt="a cat", tools=entries)
+
+
+# ==================== 能力相关描述随能力表派生 ====================
+
+# 能力相关参数描述常量到其家族清单来源能力字段的映射。
+_CAPABILITY_DESCRIPTION_SOURCES = {
+    "supports_output_format": OUTPUT_FORMAT_DESCRIPTION,
+    "supports_stream": STREAM_DESCRIPTION,
+    "supports_tools": TOOLS_DESCRIPTION,
+}
+
+
+@pytest.mark.parametrize("capability", sorted(_CAPABILITY_DESCRIPTION_SOURCES))
+def test_capability_descriptions_enumerate_table_families(capability: str) -> None:
+    """能力相关参数描述含能力表声明支持的全部家族展示名，硬编码漂移时变红。"""
+    description = _CAPABILITY_DESCRIPTION_SOURCES[capability]
+    assert supported_family_display_names(capability) in description
