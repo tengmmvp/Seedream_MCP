@@ -287,7 +287,7 @@ def test_build_generation_context_rejects_output_format_for_seedream_45() -> Non
         default_size="2K",
     )
 
-    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 系列"):
+    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
         build_generation_context(
             TextToImageInput(prompt="test", output_format=cast(OutputFormat, "png")), config
         )

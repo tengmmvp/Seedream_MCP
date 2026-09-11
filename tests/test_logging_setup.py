@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import sys
 from collections import namedtuple
 from collections.abc import Generator
 from pathlib import Path
@@ -20,7 +19,7 @@ from seedream_mcp.utils.core.logs import (
     setup_logging,
 )
 
-from _log_fakes import RecordingLogger
+from _log_fakes import RecordingLogger, preserved_loguru_globals
 
 # 模拟 loguru record["exception"] 的 RecordException 结构，含 type、value、traceback 三元组
 _RecordException = namedtuple("_RecordException", "type value traceback")
@@ -256,17 +255,9 @@ def test_setup_logging_warns_when_mixed_root_handlers_contain_foreign(
 
 @pytest.fixture
 def _real_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path]:
-    """在 tmp 工作目录以真实 loguru 初始化文件日志，返回默认日志文件路径。
-
-    结束时移除全局 sink、重置 patcher 并恢复 root handlers 与 root 级别，不泄漏
-    全局状态；basicConfig(force=True) 会把 root 级别设为 0，仅恢复 handlers 会
-    残留该覆写。
-    """
+    """在 tmp 工作目录以真实 loguru 初始化文件日志，返回默认日志文件路径。"""
     monkeypatch.chdir(tmp_path)
-    root = logging.getLogger()
-    root_handlers = list(root.handlers)
-    root_level = root.level
-    try:
+    with preserved_loguru_globals():
         # force=True 重装 root handlers 使桥接生效，缺省值在 root 已有 handler 时不安装
         setup_logging(
             log_level="INFO",
@@ -275,13 +266,6 @@ def _real_file_logging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Gener
             force_standard_logging=True,
         )
         yield tmp_path / ".seedream" / "logs" / "seedream_mcp.log"
-    finally:
-        # 清空本用例安装的 sink 后恢复默认 stderr sink，不污染后续用例输出。
-        logger.remove()
-        logger.add(sys.stderr)
-        logger.configure(patcher=None)
-        root.handlers = root_handlers
-        root.setLevel(root_level)
 
 
 def test_setup_logging_default_file_lands_under_seedream_logs(

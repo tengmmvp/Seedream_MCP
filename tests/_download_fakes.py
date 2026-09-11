@@ -167,7 +167,7 @@ class _RaisingThenSuccessSession:
         self._success = success_response
         self.call_count = 0
 
-    def get(self, url: str, **kwargs: object) -> _FakeResponse:  # type: ignore[no-untyped-def]
+    def get(self, url: str, **kwargs: object) -> _FakeResponse:
         del url
         assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
         self.call_count += 1
@@ -190,7 +190,7 @@ class _TimeoutThenSuccessSession:
         self._success = success_response
         self.call_count = 0
 
-    def get(self, url: str, **kwargs: object) -> _FakeResponse:  # type: ignore[no-untyped-def]
+    def get(self, url: str, **kwargs: object) -> _FakeResponse:
         del url
         assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
         self.call_count += 1

@@ -472,14 +472,12 @@ async def test_browse_images_empty_result_distinguishes_unreadable_dirs(
     经 monkeypatch 使 os.scandir 抛 PermissionError，驱动 io_scan 扫描与
     缓存透传与 browse 空结果分支的完整链路；不可读目录为已 resolve 的请求目录。
     """
-    import seedream_mcp.utils.io.io_scan as path_module
-
     images_root = _seed_images_root(workspace_root)
 
     def _raise_permission(path: object) -> NoReturn:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(path_module.os, "scandir", _raise_permission)
+    monkeypatch.setattr(os, "scandir", _raise_permission)
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
 

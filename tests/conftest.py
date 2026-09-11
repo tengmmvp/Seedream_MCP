@@ -3,6 +3,7 @@
 提供基础配置与工作区根目录 fixture，供需要 SeedreamConfig 或工作区隔离的测试复用，
 避免各测试重复构造；需要差异化字段时直接以构造 kwargs 覆盖或用 dataclasses.replace。
 lifespan 复位类 fixture 经 _lifespan_state_guard 参数化收敛，各测试文件不再自持副本。
+顶层导入 seedream_mcp.server 完成工具注册，任意子集运行不依赖收集顺序。
 """
 
 from __future__ import annotations
@@ -10,12 +11,13 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import seedream_mcp.server  # noqa: F401  工具注册发生在 server 导入期
 from seedream_mcp.config import SeedreamConfig
 
 
@@ -93,6 +95,12 @@ async def _lifespan_state_guard(
     resources._reset_lifespan_state()
     if inject_config:
         monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="test_key"))
+
+    async def _close_quietly(resource: Any) -> None:
+        """单个资源关闭失败不阻断后续关闭与复位。"""
+        with suppress(Exception):
+            await resource.close()
+
     try:
         yield
     finally:
@@ -100,11 +108,11 @@ async def _lifespan_state_guard(
             _clear_session_manager()
         active = resources._active_resource
         if active is not None:
-            await active.client.close()
-            await active.download_manager.close()
+            await _close_quietly(active.client)
+            await _close_quietly(active.download_manager)
         for retired in list(resources._retired_resources):
-            await retired.client.close()
-            await retired.download_manager.close()
+            await _close_quietly(retired.client)
+            await _close_quietly(retired.download_manager)
         resources._reset_lifespan_state()
 
 

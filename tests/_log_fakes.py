@@ -7,10 +7,14 @@ opt(lazy=True) 的 callable 实参在记录时求值，若不求值，lambda 对
 格式化字符串，会掩盖 _summarize_prompt 等求值路径未运行的回归。
 capture_loguru_messages 捕获进程级真实 loguru logger 的指定级别消息，供
 config_builder、find_images_directory 与 io_path_polish 等断言服务端告警。
+preserved_loguru_globals 放行块内对进程级 loguru sink 与 root logging 全局的
+改写、退出时恢复，供 test_logging_setup 与 test_cli_log_init_failure 复用。
 """
 
 from __future__ import annotations
 
+import logging
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -78,4 +82,39 @@ def capture_loguru_messages(records: list[str], level: str = "WARNING") -> Itera
     try:
         yield
     finally:
-        get_logger().remove(handler_id)
+        try:
+            get_logger().remove(handler_id)
+        except ValueError:
+            # sink 已被块内 blanket remove 拆除时无物可移
+            pass
+
+
+@contextmanager
+def preserved_loguru_globals() -> Iterator[None]:
+    """放行块内对进程级日志全局的改写，退出时恢复到进入前状态。
+
+    loguru sink 的构造参数不可由 id 取回，且 setup_logging 自身会拆除既有
+    sink，故退出时 loguru 重建为默认 stderr 单 sink 而非逐一复原；root 与
+    stdlib 具名 logger 的级别逐名恢复，块内新实例化者重置为 NOTSET。
+    """
+    root = logging.getLogger()
+    root_handlers = list(root.handlers)
+    root_level = root.level
+    saved_levels = {
+        name: logging.getLogger(name).level for name in list(logging.root.manager.loggerDict)
+    }
+    try:
+        yield
+    finally:
+        # complete 先落盘在途消息再拆除本用例安装的 sink。
+        logger = get_logger()
+        logger.complete()
+        logger.remove()
+        logger.add(sys.stderr)
+        # configure 对 patcher=None 不生效，以空 patcher 中和块内设置的 patcher。
+        logger.configure(patcher=lambda record: None)
+        root.handlers = root_handlers
+        root.setLevel(root_level)
+        for name in list(logging.root.manager.loggerDict):
+            named = logging.getLogger(name)
+            named.setLevel(saved_levels.get(name, logging.NOTSET))

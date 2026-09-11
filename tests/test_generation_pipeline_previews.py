@@ -17,7 +17,7 @@ from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core import common as common_module
 from seedream_mcp.tools.core.common import execute_generation_handler, preview_inclusion_scope
 from seedream_mcp.tools.core.schemas import TextToImageInput
-from seedream_mcp.tools.impl.text_to_image import TEXT_TO_IMAGE
+from seedream_mcp.tools.impl._shared import TEXT_TO_IMAGE
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.core.logs import get_logger
 

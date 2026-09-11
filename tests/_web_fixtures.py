@@ -1,16 +1,20 @@
-"""Web 操作台测试共享辅助：生产装配序构建与图片样本。
+"""Web 操作台测试共享辅助：生产装配序构建、ASGI 请求与图片样本。
 
 build_web_app 镜像 transport.run_streamable_http 的装配序（register ->
-streamable_http_app -> mount -> attach），保证测试栈与生产栈同源；路由状态隔离
-fixture 见 conftest 的 clean_web_routes。
+streamable_http_app -> mount -> attach），保证测试栈与生产栈同源；web_asgi_client
+与 web_get 供各 webapp 测试文件发起回环 ASGI 请求；路由状态隔离 fixture 见
+conftest 的 clean_web_routes。
 """
 
 from __future__ import annotations
 
 import io
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 import seedream_mcp.server as server
@@ -74,6 +78,21 @@ def build_web_app(
         app, host, auth_token, max_body_size=_MAX_BODY, web_enabled=web_enabled
     )
     return app
+
+
+@asynccontextmanager
+async def web_asgi_client(app: Any) -> AsyncIterator[httpx.AsyncClient]:
+    """以回环地址直连 Web 传输栈构建一次性 ASGI httpx 客户端。"""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        yield client
+
+
+async def web_get(app: Any, path: str) -> httpx.Response:
+    """GET 一次 Web 应用路由并返回响应。"""
+    async with web_asgi_client(app) as client:
+        return await client.get(path)
 
 
 def write_workspace_config(tmp_path: Path) -> Path:
