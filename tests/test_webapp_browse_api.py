@@ -8,13 +8,11 @@ from typing import Any
 import httpx
 import pytest
 
-from _web_fixtures import build_web_app, make_png_bytes, write_workspace_config
+from _web_fixtures import build_web_app, make_png_bytes, web_asgi_client, write_workspace_config
 
 
 async def _post_browse(app: Any, body: dict[str, Any]) -> httpx.Response:
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         return await client.post("/web/api/browse", json=body)
 
 

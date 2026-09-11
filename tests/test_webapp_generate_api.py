@@ -18,7 +18,7 @@ import pytest
 from mcp.types import CallToolResult
 
 import seedream_mcp.resources as resources_module
-from _web_fixtures import build_web_app, write_workspace_config
+from _web_fixtures import build_web_app, web_asgi_client, write_workspace_config
 from seedream_mcp.config import (
     LIFESPAN_KEY_CLIENT,
     LIFESPAN_KEY_DOWNLOAD_MANAGER,
@@ -85,10 +85,16 @@ def _install_runner(
 
 
 async def _post_json(app: Any, path: str, body: dict[str, Any]) -> httpx.Response:
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         return await client.post(path, json=body)
+
+
+async def _post_raw(app: Any, path: str, content: bytes) -> httpx.Response:
+    """以 application/json 原始请求体 POST 一次，供畸形 JSON 解析分支使用。"""
+    async with web_asgi_client(app) as client:
+        return await client.post(
+            path, content=content, headers={"content-type": "application/json"}
+        )
 
 
 async def test_generate_returns_structured_payload_with_web_path(
@@ -354,14 +360,22 @@ async def test_generate_invalid_json_returns_400(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
-        response = await client.post(
-            "/web/api/generate/text-to-image",
-            content=b"not-json",
-            headers={"content-type": "application/json"},
-        )
+    response = await _post_raw(app, "/web/api/generate/text-to-image", b"not-json")
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+
+
+async def test_generate_deeply_nested_json_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """深嵌套 JSON 触发的 RecursionError 与解析失败同归 400 invalid_json。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_raw(app, "/web/api/generate/text-to-image", b"[" * 5000)
 
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_json"
@@ -376,14 +390,7 @@ async def test_generate_non_object_json_body_returns_400(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
-        response = await client.post(
-            "/web/api/generate/text-to-image",
-            content=b"[1, 2]",
-            headers={"content-type": "application/json"},
-        )
+    response = await _post_raw(app, "/web/api/generate/text-to-image", b"[1, 2]")
 
     assert response.status_code == 400
     payload = response.json()
@@ -828,9 +835,7 @@ async def test_generate_concurrent_requests_share_active_resource_client(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         responses = await asyncio.gather(
             *(
                 client.post("/web/api/generate/text-to-image", json={"prompt": f"一只猫{i}"})

@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse, Response
 
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.io.io_path import (
-    READ_SCOPE_AUTH_ENV_HINT,
+    READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
     resolve_images_root,
 )
@@ -64,7 +64,8 @@ async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSON
     """
     try:
         body = await asyncio.to_thread(json.loads, await request.body())
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    # 深嵌套 JSON 触发解析器递归上限抛 RecursionError，与解析失败同归 400。
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         return {}, error_json("invalid_json", f"请求体不是合法 JSON: {exc}", 400)
     if not isinstance(body, dict):
         return {}, error_json("invalid_request", "请求体须为 JSON 对象", 400)

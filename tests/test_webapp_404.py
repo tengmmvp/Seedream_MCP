@@ -9,16 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import httpx
-
-from _web_fixtures import build_web_app, prepare_static_dir, write_workspace_config
-
-
-async def _get(app: Any, path: str) -> httpx.Response:
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
-        return await client.get(path)
+from _web_fixtures import (
+    build_web_app,
+    prepare_static_dir,
+    web_asgi_client,
+    web_get,
+    write_workspace_config,
+)
 
 
 async def test_unknown_path_returns_styled_html_404(
@@ -32,7 +29,7 @@ async def test_unknown_path_returns_styled_html_404(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    response = await _get(app, "/random/nowhere")
+    response = await web_get(app, "/random/nowhere")
 
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("text/html")
@@ -50,7 +47,7 @@ async def test_unknown_api_path_returns_json_404(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    response = await _get(app, "/web/api/nonexistent")
+    response = await web_get(app, "/web/api/nonexistent")
 
     assert response.status_code == 404
     assert response.json()["error"] == "not_found"
@@ -67,7 +64,7 @@ async def test_api_prefix_without_trailing_slash_returns_json_404(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    response = await _get(app, "/web/api")
+    response = await web_get(app, "/web/api")
 
     assert response.status_code == 404
     assert response.json()["error"] == "not_found"
@@ -84,9 +81,9 @@ async def test_fallback_does_not_swallow_static_or_known_routes(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    static_response = await _get(app, "/web/static/app.js")
-    index_response = await _get(app, "/web")
-    root_response = await _get(app, "/")
+    static_response = await web_get(app, "/web/static/app.js")
+    index_response = await web_get(app, "/web")
+    root_response = await web_get(app, "/")
 
     assert static_response.status_code == 200
     assert index_response.status_code == 200
@@ -102,7 +99,7 @@ async def test_web_disabled_keeps_default_plain_404(
     write_workspace_config(tmp_path)
     app = build_web_app(web_enabled=False)
 
-    response = await _get(app, "/random/nowhere")
+    response = await web_get(app, "/random/nowhere")
 
     assert response.status_code == 404
     assert not response.headers.get("content-type", "").startswith("text/html")
@@ -119,9 +116,7 @@ async def test_trailing_slash_redirects_to_trimmed_path(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         mcp_response = await client.get("/mcp/", follow_redirects=False)
         web_response = await client.get("/web/", follow_redirects=False)
         unknown_final = await client.get("/unknown/", follow_redirects=True)
@@ -147,9 +142,7 @@ async def test_protocol_relative_path_not_redirected(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         response = await client.get("http://127.0.0.1//evil.com/", follow_redirects=False)
 
     assert response.status_code == 404
@@ -171,9 +164,7 @@ async def test_backslash_protocol_relative_path_not_redirected(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         backslash_response = await client.get(
             "http://127.0.0.1/\\evil.com/", follow_redirects=False
         )
@@ -265,9 +256,9 @@ async def test_static_mount_denies_html_direct_access(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    html_response = await _get(app, "/web/static/index.html")
-    html_upper_response = await _get(app, "/web/static/index.HTML")
-    script_response = await _get(app, "/web/static/app.js")
+    html_response = await web_get(app, "/web/static/index.html")
+    html_upper_response = await web_get(app, "/web/static/index.HTML")
+    script_response = await web_get(app, "/web/static/app.js")
 
     assert html_response.status_code == 404
     assert html_upper_response.status_code == 404
@@ -289,9 +280,9 @@ async def test_static_mount_denies_html_trailing_punctuation_variants(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    trailing_slash = await _get(app, "/web/static/index.html/")
-    trailing_dot = await _get(app, "/web/static/index.html.")
-    trailing_space = await _get(app, "/web/static/index.html%20")
+    trailing_slash = await web_get(app, "/web/static/index.html/")
+    trailing_dot = await web_get(app, "/web/static/index.html.")
+    trailing_space = await web_get(app, "/web/static/index.html%20")
 
     assert trailing_slash.status_code == 404
     assert trailing_dot.status_code == 404
@@ -329,7 +320,7 @@ async def test_static_mount_denies_html_short_name_variant(
 
     monkeypatch.setattr(_GuardedStaticFiles, "lookup_path", short_name_lookup)
 
-    response = await _get(app, "/web/static/index~1.htm")
+    response = await web_get(app, "/web/static/index~1.htm")
 
     assert intercepted
     assert response.status_code == 404
@@ -346,8 +337,8 @@ async def test_page_responses_carry_security_headers(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    index_response = await _get(app, "/web")
-    missing_response = await _get(app, "/random/nowhere")
+    index_response = await web_get(app, "/web")
+    missing_response = await web_get(app, "/random/nowhere")
 
     for response in (index_response, missing_response):
         assert "default-src 'self'" in response.headers["content-security-policy"]
@@ -372,8 +363,8 @@ async def test_missing_pages_fall_back_to_plain_text(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    index_response = await _get(app, "/web")
-    missing_response = await _get(app, "/random/nowhere")
+    index_response = await web_get(app, "/web")
+    missing_response = await web_get(app, "/random/nowhere")
 
     assert index_response.status_code == 200
     assert index_response.headers["content-type"].startswith("text/plain")
@@ -393,7 +384,7 @@ async def test_static_direct_output_carries_security_headers(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    script_response = await _get(app, "/web/static/app.js")
+    script_response = await web_get(app, "/web/static/app.js")
 
     assert script_response.status_code == 200
     assert script_response.headers["x-content-type-options"] == "nosniff"

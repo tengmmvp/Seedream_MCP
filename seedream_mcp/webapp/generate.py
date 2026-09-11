@@ -7,7 +7,9 @@ structured_content 字典；生成链路不伪造会话 Roots，文件边界由 
 供前端拼接图片端点，越出图片目录的删除该键（Web 文件端点仅服务图片目录内文件）；
 markdown_ref 前端不消费，整体删除；错误文本原样透传。共享 client 经 context
 替身借用，鉴权由外层 Bearer 中间件承担；端点仅消费 structuredContent，预览
-装配关闭，请求体解析与响应体序列化下沉工作线程执行。
+装配关闭，请求体解析与响应体序列化下沉工作线程执行。与 MCP 工具不同，图片
+目录不可用时端点预检即回 400 images_root_unavailable：Web 展示闭环依赖
+web_path，不存在工具侧 auto_save 降级后的纯 URL 成功形态。
 """
 
 from __future__ import annotations

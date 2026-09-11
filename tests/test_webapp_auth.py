@@ -9,10 +9,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 
-from _web_fixtures import build_web_app, prepare_static_dir, write_workspace_config
+from _web_fixtures import (
+    build_web_app,
+    prepare_static_dir,
+    web_asgi_client,
+    write_workspace_config,
+)
 from seedream_mcp.transport import _BearerTokenAuthMiddleware
 
 
@@ -73,9 +77,7 @@ async def test_static_pages_exempt_and_api_requires_token(
     write_workspace_config(tmp_path)
     app = build_web_app(auth_token="secret")
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         index_response = await client.get("/web")
         static_response = await client.get("/web/static/app.js")
         unauthorized = await client.get("/web/api/config-info")
@@ -102,9 +104,7 @@ async def test_api_open_when_no_token_configured(
     write_workspace_config(tmp_path)
     app = build_web_app(auth_token="")
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         index_response = await client.get("/web")
         api_response = await client.get("/web/api/config-info")
 
@@ -137,9 +137,7 @@ async def test_configured_origin_allows_cross_origin_web_api_without_token(
     )
     app = build_web_app(auth_token="")
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         allowed = await client.get(
             "/web/api/config-info",
             headers={"host": "127.0.0.1", "origin": "https://app.example.com"},

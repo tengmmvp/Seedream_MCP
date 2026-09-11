@@ -1,13 +1,17 @@
 """Web 操作台静态资源存在性守护：打包漏文件在测试期即暴露。
 
 wheel 与 sdist 的打包清单由 CI 侧断言另行锁定，本文件守护源码树形态：
-入口页、404 页、五个前端 JS 模块齐备，且入口页引用的静态相对路径全部可解析。
+入口页、404 页、五个前端 JS 模块齐备，且入口页引用的静态相对路径全部可解析；
+静态直出响应头的缓存口径亦在此守护。
 """
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
+from typing import Any
 
+from _web_fixtures import build_web_app, prepare_static_dir, web_get, write_workspace_config
 from seedream_mcp.webapp.constants import (
     STATIC_DIR,
     WEB_API_BROWSE,
@@ -112,3 +116,20 @@ def test_generate_and_gallery_consume_web_path_contract() -> None:
         assert "/web/api/thumbnail" in source, f"{name} 不再请求 /web/api/thumbnail 端点"
     gallery_js = (STATIC_DIR / _JS_DIR / "gallery.js").read_text(encoding="utf-8")
     assert "/web/api/image" in gallery_js, "gallery.js 灯箱不再请求 /web/api/image 端点"
+
+
+async def test_static_direct_output_requires_revalidation(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """静态直出携带 no-cache 逐次回源验证，包升级后不服务陈旧 JS。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await web_get(app, "/web/static/app.js")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"

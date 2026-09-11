@@ -10,17 +10,9 @@ transport_security -> 注册 Web 路由 -> streamable_http_app -> 挂载静态�
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-import httpx
-
-from _web_fixtures import write_workspace_config
+from _web_fixtures import web_asgi_client, write_workspace_config
 from seedream_mcp.transport import _build_streamable_app
-
-
-def _make_client(app: Any) -> httpx.AsyncClient:
-    """以生产 app 构建回环 ASGI 测试客户端。"""
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 async def test_production_app_serves_web_console(
@@ -30,7 +22,7 @@ async def test_production_app_serves_web_console(
     write_workspace_config(tmp_path)
     app = _build_streamable_app("127.0.0.1", False, "", True)
 
-    async with _make_client(app) as client:
+    async with web_asgi_client(app) as client:
         index_response = await client.get("/web")
         api_response = await client.get("/web/api/config-info")
         static_response = await client.get("/web/static/js/main.js")
@@ -62,7 +54,7 @@ async def test_production_app_without_web_returns_404(
     write_workspace_config(tmp_path)
     app = _build_streamable_app("127.0.0.1", False, "", False)
 
-    async with _make_client(app) as client:
+    async with web_asgi_client(app) as client:
         index_response = await client.get("/web")
         api_response = await client.get("/web/api/config-info")
 
@@ -77,7 +69,7 @@ async def test_origin_guard_allows_same_origin_and_rejects_cross_origin(
     write_workspace_config(tmp_path)
     app = _build_streamable_app("127.0.0.1", False, "", True)
 
-    async with _make_client(app) as client:
+    async with web_asgi_client(app) as client:
         same_origin = await client.get(
             "/web/api/config-info",
             headers={"host": "127.0.0.1:8000", "origin": "http://127.0.0.1:8000"},
@@ -112,7 +104,7 @@ async def test_fetch_metadata_guard_rejects_cross_site_fetch(
     write_workspace_config(tmp_path)
     app = _build_streamable_app("127.0.0.1", False, "", True)
 
-    async with _make_client(app) as client:
+    async with web_asgi_client(app) as client:
         cross_site = await client.get(
             "/web/api/config-info", headers={"sec-fetch-site": "cross-site"}
         )
@@ -143,7 +135,7 @@ async def test_origin_guard_not_assembled_when_token_configured(
     write_workspace_config(tmp_path)
     app = _build_streamable_app("127.0.0.1", False, "s3cret", True)
 
-    async with _make_client(app) as client:
+    async with web_asgi_client(app) as client:
         cross_without_token = await client.get(
             "/web/api/config-info",
             headers={"host": "127.0.0.1:8000", "origin": "http://evil.example"},

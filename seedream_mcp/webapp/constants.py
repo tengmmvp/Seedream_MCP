@@ -53,8 +53,9 @@ PAGE_SECURITY_HEADERS: dict[str, str] = {
 
 # 静态直出响应统一携带的安全响应头：/web/static/ 整体免鉴权且目录可运行期
 # 替换，CSP 收敛脚本来源并禁插件与跨站嵌入，阻断 svg 直出构成的同源脚本面；
-# nosniff 阻断 MIME 嗅探。
+# nosniff 阻断 MIME 嗅探；cache-control 要求逐次回源验证，包升级后无陈旧窗口。
 STATIC_SECURITY_HEADERS: dict[str, str] = {
+    "cache-control": "no-cache",
     "content-security-policy": (
         "default-src 'self'; " "script-src 'self'; " "object-src 'none'; " "frame-ancestors 'self'"
     ),

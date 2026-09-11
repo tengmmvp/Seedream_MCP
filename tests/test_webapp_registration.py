@@ -10,12 +10,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
 import pytest
 
 from _web_fixtures import (
     EXPECTED_WEB_PATHS,
     build_web_app,
+    web_asgi_client,
+    web_get,
     write_workspace_config,
 )
 
@@ -136,9 +137,7 @@ async def test_web_endpoints_absent_when_not_registered(
     write_workspace_config(tmp_path)
     app = build_web_app(web_enabled=False)
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         root_response = await client.get("/")
         index_response = await client.get("/web")
         api_response = await client.get("/web/api/config-info")
@@ -155,9 +154,7 @@ async def test_root_redirects_to_web_index(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
+    async with web_asgi_client(app) as client:
         response = await client.get("/", follow_redirects=False)
 
     assert response.status_code == 307
@@ -171,10 +168,7 @@ async def test_config_info_reachable_when_registered(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
-        response = await client.get("/web/api/config-info")
+    response = await web_get(app, "/web/api/config-info")
 
     assert response.status_code == 200
     payload = response.json()
@@ -195,10 +189,7 @@ async def test_config_info_response_is_not_cacheable(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
-        response = await client.get("/web/api/config-info")
+    response = await web_get(app, "/web/api/config-info")
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
@@ -222,10 +213,7 @@ async def test_config_info_reports_images_root_unavailable(
     monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
     app = build_web_app()
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
-    ) as client:
-        response = await client.get("/web/api/config-info")
+    response = await web_get(app, "/web/api/config-info")
 
     assert response.status_code == 200
     payload = response.json()

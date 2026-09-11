@@ -260,10 +260,8 @@ export async function openLightbox(item, errorEl = $("gallery-error")) {
   lightbox.classList.add("open");
   const img = $("lightbox-img");
   img.classList.remove("loaded");
-  img.addEventListener("load", () => img.classList.add("loaded"), {
-    once: true,
-  });
-  // error 用属性赋值覆盖上一张的残留监听，连续打开多张损坏图不累积。
+  // load 与 error 均用属性赋值覆盖上一张的残留监听，连续打开不累积。
+  img.onload = () => img.classList.add("loaded");
   img.onerror = () => {
     // 损坏图片无 load 事件，须显式收场否则灯箱永久空白。
     img.classList.remove("loaded");
