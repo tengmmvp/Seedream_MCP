@@ -20,11 +20,11 @@ from seedream_mcp.tools.core._shared import (
 from seedream_mcp.tools.core.auto_save import auto_save_from_urls
 from seedream_mcp.tools.core.results import (
     _build_generation_structured_result,
-    _sanitize_image_errors,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
 )
+from seedream_mcp.tools.core._sanitize import _sanitize_image_errors, sanitize_error_dict
 from seedream_mcp.utils.core.errors import SeedreamAPIError
 from seedream_mcp.utils.io.io_save import AutoSaveResult
 
@@ -863,6 +863,51 @@ def test_structured_usage_string_values_sanitized() -> None:
     assert "\n" not in str(usage)
 
 
+def test_structured_usage_dict_keys_control_chars_flattened() -> None:
+    """usage 的 dict 键含控制字符时压平为空格进入 structuredContent，值不丢。"""
+    soh = chr(0x1)
+    rlo = chr(0x202E)
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": {f"out{soh}put_tokens": 100, f"no{rlo}te": 7, "label": "x"},
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    usage = structured["usage"]
+    assert usage["out put_tokens"] == 100
+    assert usage["no te"] == 7
+    assert usage["label"] == "x"
+
+
+def test_structured_usage_nested_collision_suffix_matches_top_level_order() -> None:
+    """嵌套 dict 与顶层同键对的压平碰撞分配一致：首键占净名，后键挂 dup。"""
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": {"meta": {"a\tb": 1, "a\nb": 2}},
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    assert structured["usage"]["meta"] == {"a b": 1, "a b<dup>": 2}
+
+
 def test_usage_text_renders_numeric_values_only() -> None:
     """文本统计仅渲染数值取值：字符串值经插值会把换行注入文本通道。"""
     result = {
@@ -997,6 +1042,70 @@ def test_structured_data_unknown_string_keys_sanitized() -> None:
     assert "hi" in note
     # 非字符串未知值不属字符串净化范围，原样保留。
     assert item["custom_count"] == 7
+
+
+# ==================== 图片项与 error dict 原始键控制字符压平 ====================
+
+
+def test_structured_data_item_and_error_keys_control_chars_flattened() -> None:
+    """图片项与 error dict 的原始键含控制字符时压平为空格进入 structuredContent，值不丢。"""
+    soh = chr(0x1)
+    lf, cr = chr(0x0A), chr(0x0D)
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [
+            {
+                "url": "https://example.com/a.png",
+                f"bad{lf}key": "kept-value",
+                f"ev{cr}il": 7,
+                f"ex{soh}tra": "api_key=leaked",
+                "error": {
+                    "message": "boom",
+                    f"de{lf}tail": "clean",
+                    f"side{cr}way": 9,
+                },
+            }
+        ],
+    }
+
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result=result,
+        context=make_generation_context(),
+        auto_save_results=[],
+        auto_save_error=None,
+    )
+
+    item = structured["data"][0]
+    # 值未变化的原始键在图片项入口压平
+    assert item["bad key"] == "kept-value"
+    assert item["ev il"] == 7
+    # 未知键值照常脱敏
+    assert item["ex tra"] == "api_key=***"
+    # error dict 键在拷贝入口压平
+    error = item["error"]
+    assert error["message"] == "boom"
+    assert error["de tail"] == "clean"
+    assert error["side way"] == 9
+
+
+def test_sanitize_error_dict_flatten_collision_keeps_both_entries() -> None:
+    """error dict 压平后键碰撞的后来者以 <dup> 后缀保留，条目不覆盖不丢弃。"""
+    sanitized = sanitize_error_dict({"a\tb": 1, "a\nb": 2})
+
+    assert sanitized == {"a b": 1, "a b<dup>": 2}
+
+
+def test_unknown_value_flatten_collision_keeps_both_entries() -> None:
+    """未知键值内嵌 dict 的压平键碰撞同样两值均在、键可区分。"""
+    images = [{"meta": {"a\tb": 1, "a\nb": 2}}]
+
+    sanitized = _sanitize_image_errors(images)
+
+    meta = sanitized[0]["meta"]
+    assert set(meta) == {"a b", "a b<dup>"}
+    assert sorted(meta.values()) == [1, 2]
 
 
 # ==================== 净化协调与模块状态移除 ====================

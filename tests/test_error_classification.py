@@ -16,11 +16,11 @@ from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core._shared import (
     _FAILURE_GUIDANCE_BY_ERROR_CODE,
     _FAILURE_GUIDANCE_DEFAULT_CODES,
+    _classify_generation_error_type,
     _resolve_failure_guidance,
 )
 from seedream_mcp.tools.core.common import (
     ToolMetadata,
-    _classify_generation_error_type,
     execute_generation_handler,
 )
 from seedream_mcp.tools.core.schemas import TextToImageInput

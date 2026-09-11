@@ -7,6 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ...utils.core.sanitizers import (
+    CONTROL_CHARS_PATTERN,
     DATA_OUTPUT_LIMIT,
     MESSAGE_OUTPUT_LIMIT,
     normalize_message_text,
@@ -24,8 +25,32 @@ def _sanitize_leaf(item: Any, sanitize_string: Callable[[Any], Any]) -> Any:
     return item
 
 
+def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
+    """压平键的控制字符，与已占用键碰撞时附加 <dup> 后缀直到空闲，条目不覆盖不丢弃。
+
+    非字符串键无控制字符语义，原样参与判重。
+    """
+    if isinstance(key, str):
+        key = CONTROL_CHARS_PATTERN.sub(" ", key)
+    while key in taken:
+        key = f"{key}<dup>"
+    return key
+
+
+def _flatten_mapping_keys(mapping: dict[Any, Any]) -> dict[Any, Any]:
+    """压平全部键名并保留首个净名，干净映射原样返回保持引用。"""
+    # 前置探测避免干净映射的抛弃式 dict 构建；无控制字符的键不压平也不会碰撞。
+    if not any(isinstance(key, str) and CONTROL_CHARS_PATTERN.search(key) for key in mapping):
+        return mapping
+    flattened: dict[Any, Any] = {}
+    for key, value in mapping.items():
+        flattened[_unique_flat_key(flattened, key)] = value
+    return flattened
+
+
 def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> Any:
-    """以显式栈迭代净化任意嵌套的 dict/list 树，字符串值经 sanitize_string 处理。
+    """以显式栈迭代净化任意嵌套的 dict/list 树，字符串值经 sanitize_string 处理，
+    dict 键压平控制字符，压平碰撞以 <dup> 后缀保留。
 
     迭代遍历使深嵌套不触发解释器递归上限；循环引用以 <truncated:cyclic> 占位终止
     展开。usage 净化与未知键净化共用本核心，仅字符串净化函数不同。
@@ -40,9 +65,13 @@ def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> A
     ancestors: set[int] = set()
     # 子树完成哨兵：与写入任务同为三元组，写入位置携带待移出的容器 id。
     subtree_done = object()
-    # 待写入任务栈：目标容器 + 写入位置 + 待净化值。
+    # 待写入任务栈：目标容器 + 写入位置 + 待净化值。dict 键在容器展开时经
+    # _flatten_mapping_keys 压平，写入点直接落键。
     pending: list[tuple[Any, Any, Any]] = (
-        [(sanitized_root, key, item) for key, item in value.items()]
+        [
+            (sanitized_root, key, item)
+            for key, item in reversed(_flatten_mapping_keys(value).items())
+        ]
         if isinstance(value, dict)
         else [(sanitized_root, index, item) for index, item in enumerate(value)]
     )
@@ -61,7 +90,10 @@ def _sanitize_value_tree(value: Any, sanitize_string: Callable[[Any], Any]) -> A
                 # 哨兵先于子任务入栈，LIFO 使容器恰在其子树处理期间位于祖先集合。
                 pending.append((subtree_done, id(item), None))
                 if isinstance(item, dict):
-                    pending.extend((sanitized, k, sub) for k, sub in item.items())
+                    pending.extend(
+                        (sanitized, sub_key, sub)
+                        for sub_key, sub in reversed(_flatten_mapping_keys(item).items())
+                    )
                 else:
                     pending.extend((sanitized, i, sub) for i, sub in enumerate(item))
         else:
@@ -105,25 +137,22 @@ def sanitize_error_dict(
 ) -> dict[str, Any]:
     """净化错误 dict 的各分量，返回净化后的新 dict，供全部错误出口共用。
 
-    message 与 code 先归一化再过错误文本通道，其余键过容器净化，凭据与 CRLF
-    不借旁路键穿透；message_limit 覆盖 message 的截断上限，供本侧组装的长文案
-    （含恢复指引的聚合消息）改用防御性宽上限，脱敏口径不变。
+    键名在拷贝入口压平控制字符（碰撞以 <dup> 后缀保留），message 与 code 归一化
+    后过错误文本通道，其余键值经容器净化，凭据与 CRLF 不借旁路键穿透；
+    message_limit 覆盖 message 的截断上限，供本侧组装的长文案（含恢复指引的
+    聚合消息）改用防御性宽上限，脱敏口径不变。
     """
-    sanitized_error = dict(error)
-    message = error.get("message")
-    if message is not None:
-        sanitized_error["message"] = sanitize_error_text(
-            normalize_message_text(message), limit=message_limit
-        )
-    code = error.get("code")
-    if code is not None:
-        sanitized_error["code"] = sanitize_error_text(normalize_message_text(code))
+    sanitized_error: dict[str, Any] = {}
     for key, value in error.items():
-        if key in ("message", "code"):
-            continue
-        sanitized_value = _sanitize_value_tree(value, sanitize_error_text)
-        if sanitized_value != value:
-            sanitized_error[key] = sanitized_value
+        flat_key = _unique_flat_key(sanitized_error, key)
+        if key == "message" and value is not None:
+            sanitized_error[flat_key] = sanitize_error_text(
+                normalize_message_text(value), limit=message_limit
+            )
+        elif key == "code" and value is not None:
+            sanitized_error[flat_key] = sanitize_error_text(normalize_message_text(value))
+        else:
+            sanitized_error[flat_key] = _sanitize_value_tree(value, sanitize_error_text)
     return sanitized_error
 
 
@@ -177,7 +206,7 @@ def _sanitize_index_fields(image: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sanitize_unknown_fields(image: dict[str, Any]) -> dict[str, Any]:
-    """净化不在已知键清单内的字段，返回需回写的更新项。"""
+    """净化不在已知键清单内的字段，返回需回写的更新项，键已在入口压平。"""
     updates: dict[str, Any] = {}
     for key, value in image.items():
         if key in _KNOWN_IMAGE_KEYS:
@@ -205,35 +234,41 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
 
     error 与 size/output_format/model/type 等短标识走 sanitize_error_text 截断语义；
     url、local_path/markdown_ref 与未知键走 sanitize_data_text 保留完整可用性；非
-    字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。占位项（type 为
-    请求失败标识）的 error message 为本侧组装产物（含恢复指引），改用防御性宽
-    上限；上游伪造该 type 的可利用面为宽截断，与数据通道的 16KB 上限同量级，
-    脱敏口径不变。仅净化后内容变化的项做浅拷贝，其余项保持原对象引用，传入
-    列表不被修改。限内内容重复净化恒等；超长 URL 的截断产物再净化会按错误
-    文本通道口径收敛（产物已不可用，仅长度与形态变化）。全部图片项（含 SSE
-    失败事件）经此处统一净化，io_sse 源头不做净化。
+    字符串形态经 _sanitize_value_tree 逐层净化，int 序号保持原值。图片项键名在
+    入口压平控制字符（碰撞以 <dup> 后缀保留），合并时原始脏键不再以原值反杀
+    净化值。占位项（type 为请求失败标识）的 error message 为本侧组装产物（含
+    恢复指引），改用防御性宽上限；上游伪造该 type 的可利用面为宽截断，与数据
+    通道的 16KB 上限同量级，脱敏口径不变。仅键名或净化后内容变化的项做浅拷贝，
+    其余项保持原对象引用，传入列表不被修改。限内内容重复净化恒等；超长 URL
+    的截断产物再净化会按错误文本通道口径收敛（产物已不可用，仅长度与形态变
+    化）。全部图片项（含 SSE 失败事件）经此处统一净化，io_sse 源头不做净化。
     """
     sanitized_images = images
     for index, image in enumerate(images):
+        flat_image = _flatten_mapping_keys(image)
         updates: dict[str, Any] = {}
-        message_limit = message_limit_for(image.get("type") == _REQUEST_FAILED_TYPE)
-        updates.update(_sanitize_image_error_entry(image.get("error"), message_limit=message_limit))
+        message_limit = message_limit_for(flat_image.get("type") == _REQUEST_FAILED_TYPE)
+        updates.update(
+            _sanitize_image_error_entry(flat_image.get("error"), message_limit=message_limit)
+        )
         # b64_json 合法形态为 str 载荷原样保留，非字符串的畸形取值置 None。
-        b64_value = image.get("b64_json")
+        b64_value = flat_image.get("b64_json")
         if b64_value is not None and not isinstance(b64_value, str):
             updates["b64_json"] = None
         updates.update(
             _sanitize_fields_with(
-                image, ("size", "output_format", "model", "type"), sanitize_error_text
+                flat_image, ("size", "output_format", "model", "type"), sanitize_error_text
             )
         )
-        updates.update(_sanitize_index_fields(image))
+        updates.update(_sanitize_index_fields(flat_image))
         updates.update(
-            _sanitize_fields_with(image, ("url", "local_path", "markdown_ref"), sanitize_data_text)
+            _sanitize_fields_with(
+                flat_image, ("url", "local_path", "markdown_ref"), sanitize_data_text
+            )
         )
-        updates.update(_sanitize_unknown_fields(image))
-        if updates:
+        updates.update(_sanitize_unknown_fields(flat_image))
+        if updates or flat_image is not image:
             if sanitized_images is images:
                 sanitized_images = list(images)
-            sanitized_images[index] = {**image, **updates}
+            sanitized_images[index] = {**flat_image, **updates}
     return sanitized_images

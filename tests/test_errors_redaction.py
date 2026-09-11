@@ -46,10 +46,86 @@ def test_bearer_pipeline_preserves_surrounding_text() -> None:
     assert _sanitize_output_string("auth: Bearer s3cret done") == "auth: ***"
 
 
+def test_bearer_pipeline_redacts_colon_separated_forms() -> None:
+    """空白与半/全角冒号分隔的令牌均剥离，无分隔连写词不误伤。"""
+    assert _sanitize_output_string("Bearer: abc") == "Bearer: ***"
+    assert _sanitize_output_string("Bearer:abc") == "Bearer:***"
+    assert _sanitize_output_string("Bearer：abc") == "Bearer：***"
+    assert _sanitize_output_string("Bearer： abc") == "Bearer： ***"
+    assert _sanitize_output_string("Bearerabc") == "Bearerabc"
+    assert _sanitize_output_string("Bearerealm error") == "Bearerealm error"
+
+
 def test_bearer_pipeline_passes_through_non_strings() -> None:
     """非字符串输入原样返回。"""
     assert _sanitize_output_string(123) == 123
     assert _sanitize_output_string(None) is None
+
+
+def test_bearer_pattern_skips_url_path_and_word_internal_forms() -> None:
+    """URL 路径含 bearer 冒号段与词内 bearer 冒号形态不误伤，独立 token 位置仍脱敏。"""
+    url = "https://cdn.example.com/images/bearer:abc123/report.png"
+    assert sanitize_data_text(url) == url
+    assert sanitize_error_text("wheelbearer:abc") == "wheelbearer:abc"
+
+    assert _sanitize_output_string("Bearer abc") == "Bearer ***"
+    assert _sanitize_output_string("Bearer: abc") == "Bearer: ***"
+    assert _sanitize_output_string("Bearer:abc") == "Bearer:***"
+    assert _sanitize_output_string("Bearer：abc") == "Bearer：***"
+
+
+def test_bearer_pattern_redacts_compact_prefixed_echoes() -> None:
+    """紧凑前缀回显的 Bearer 令牌照常剥离；冒号形态对 ./@- 等前置的豁免属 URL 结构保护。"""
+    assert _sanitize_output_string("echo:Bearer sk-abc123") == "echo:Bearer ***"
+    assert _sanitize_output_string("a.Bearer tok1") == "a.Bearer ***"
+    assert _sanitize_output_string("a-Bearer tok2") == "a-Bearer ***"
+    assert _sanitize_output_string("认证头:Bearer sk-123") == "认证头:Bearer ***"
+    assert _sanitize_output_string("header1:Bearer:sk-123") == "header1:Bearer:***"
+    assert _sanitize_output_string("认证头:Bearer:sk-123") == "认证头:Bearer:***"
+    # 点号前置的冒号形态落在冒号分支的 URL 字符豁免内，按 URL 保护保留
+    assert _sanitize_output_string("a.Bearer:sk-123") == "a.Bearer:sk-123"
+
+
+def test_bearer_pattern_redacts_cjk_adjacent_echoes() -> None:
+    """CJK 邻接的 Bearer 回显照常剥离：前置断言只排除 ASCII 词字符。"""
+    assert _sanitize_output_string("鉴权失败Bearer eyJhbGciOiJIUzI1NiJ9.sig") == (
+        "鉴权失败Bearer ***"
+    )
+    assert _sanitize_output_string("鉴权失败Bearer:eyJhbGciOiJIUzI1NiJ9") == ("鉴权失败Bearer:***")
+    # ASCII 词内形态仍防
+    assert _sanitize_output_string("v2Bearer tok") == "v2Bearer tok"
+
+
+def test_bearer_colon_branch_stops_at_url_delimiters_in_error_text() -> None:
+    """冒号分支令牌到 URL 结构定界符即止，错误文本中内嵌的 URL 不被吞结构。
+
+    等号前置的 bearer 冒号段按 URL 查询值豁免，逗号前置段脱敏且定界符之后
+    的结构完整保留。
+    """
+    url_list = "https://e.com/dl?ids=bearer:1,bearer:2&next=bearer:3"
+    assert _sanitize_output_string(url_list) == (
+        "https://e.com/dl?ids=bearer:1,bearer:***&next=bearer:3"
+    )
+
+
+def test_bearer_pattern_keeps_url_query_and_path_bearer_segments() -> None:
+    """纯 URL 数据通道不做冒号形态 Bearer 剥离：任意定界符后的 bearer 冒号段均原样保留。"""
+    query_url = "https://example.com/get?auth=bearer:tok123&x=1"
+    assert sanitize_data_text(query_url) == query_url
+    path_url = "https://cdn.example.com/images/bearer:abc/x.png"
+    assert sanitize_data_text(path_url) == path_url
+    delimited_url = "https://e.com/dl?ids=bearer:1,bearer:2&next=bearer:3;t=bearer:4"
+    assert sanitize_data_text(delimited_url) == delimited_url
+    # URL 内合法出现的 Bearer 字样不含空白，空白分支不可能命中，原样保留
+    encoded_bearer_url = "https://example.com/get?auth=Bearer%20sk-tok&x=1"
+    assert sanitize_data_text(encoded_bearer_url) == encoded_bearer_url
+
+
+def test_sanitize_data_text_redacts_bearer_formed_by_flattened_control_chars() -> None:
+    """控制字符分隔的 Bearer 令牌被压平拼出空白，仅空白分支补跑剥离，令牌不残留。"""
+    url = "https://e.com/a?x=Bearer\x01sk-123"
+
+    assert sanitize_data_text(url) == "https://e.com/a?x=Bearer ***"
 
 
 # ==================== _truncate_value_for_output ====================
@@ -457,6 +533,22 @@ def test_sanitize_error_text_keeps_userinfo_free_url() -> None:
     assert sanitize_error_text(url) == url
 
 
+def test_sanitize_error_text_strips_userinfo_with_control_chars_in_password() -> None:
+    """密码含控制字符的 userinfo 在压平前剥离，压平产生的空格不遮断凭据匹配。"""
+    rlo = chr(0x202E)
+    redacted = sanitize_error_text(f"failed https://user:pa{rlo}ss@example.com/a.png")
+
+    assert redacted == "failed https://example.com/a.png"
+
+
+def test_sanitize_data_text_strips_userinfo_with_control_chars_in_password() -> None:
+    """纯 URL 通道的 userinfo 同样先于压平剥离，凭据不借压平空格逃逸。"""
+    rlo = chr(0x202E)
+    url = f"https://user:pa{rlo}ss@example.com/a.png?token=abc"
+
+    assert sanitize_data_text(url) == "https://example.com/a.png?token=abc"
+
+
 # ==================== 全角分隔符绕过与结果数据路径净化 ====================
 
 
@@ -546,6 +638,21 @@ def test_sanitize_image_errors_nulls_non_string_b64_payload() -> None:
     assert sanitized[2]["size"] == 0.0
     assert sanitized[2]["model"] == 0.0
     assert sanitized[2]["custom"] == 0.0
+
+
+def test_sanitize_image_errors_dirty_key_value_does_not_override_sanitized_value() -> None:
+    """合并压平键碰撞时原始脏值不反杀净化值：键在入口压平，凭据不穿透。"""
+    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
+
+    images: list[dict[str, Any]] = [{"a b": 1, "a\nb": "api_key=SECRET"}]
+
+    sanitized = _sanitize_image_errors(images)
+
+    assert "SECRET" not in str(sanitized)
+    assert sanitized[0]["a b"] == 1
+    assert sanitized[0]["a b<dup>"] == "api_key=***"
+    # 传入条目不被就地修改。
+    assert images[0] == {"a b": 1, "a\nb": "api_key=SECRET"}
 
 
 # ==================== 数据字段净化不截断：sanitize_data_text ====================
@@ -676,7 +783,7 @@ def test_api_error_deeply_nested_message_does_not_raise_recursion_error() -> Non
     for _ in range(100_000):
         deep = [deep]
 
-    err = SeedreamAPIError(message=deep)  # type: ignore[arg-type]
+    err = SeedreamAPIError(message=deep)
 
     rendered = format_error_for_user(err)
     assert isinstance(rendered, str)
@@ -832,6 +939,27 @@ def test_control_chars_pattern_flattens_line_paragraph_separators() -> None:
     assert sanitize_error_text(f"first{line_sep}FAKE{para_sep}apikey=leaked") == (
         "first FAKE apikey=***"
     )
+
+
+def test_control_chars_pattern_flattens_bidi_and_isolate_controls() -> None:
+    """双向文本与隔离控制符压平为空格，不借显示方向反转伪造输出内容。"""
+    rlo = chr(0x202E)
+    lri = chr(0x2066)
+
+    assert CONTROL_CHARS_PATTERN.sub(" ", f"a{rlo}b{lri}c") == "a b c"
+    assert sanitize_error_text(f"evil{rlo}apikey=leaked") == "evil apikey=***"
+
+
+def test_control_chars_pattern_flattens_bidi_marks() -> None:
+    """LRM/RLM/ALM 与 RLO 同口径压平为空格，不借方向标记做同类显示欺骗。"""
+    lrm = chr(0x200E)
+    rlm = chr(0x200F)
+    alm = chr(0x061C)
+
+    assert CONTROL_CHARS_PATTERN.sub(" ", f"a{lrm}b") == "a b"
+    assert CONTROL_CHARS_PATTERN.sub(" ", f"a{rlm}b") == "a b"
+    assert CONTROL_CHARS_PATTERN.sub(" ", f"a{alm}b") == "a b"
+    assert sanitize_error_text(f"evil{rlm}apikey=leaked") == "evil apikey=***"
 
 
 # ==================== 自由文本键名与 dict 键策略单一来源 ====================
@@ -1109,6 +1237,34 @@ def test_sanitize_error_text_blocks_zero_width_key_variants() -> None:
     assert sanitize_error_text(f"session{zwnj}.id=abc") == "session.id=***"
     assert sanitize_error_text(f"token{soft_hyphen}=SECRET") == "token=***"
     assert sanitize_error_text(f"{bom}token=SECRET") == "token=***"
+
+
+def test_sanitize_error_text_blocks_zwj_and_word_joiner_key_variants() -> None:
+    """ZWJ 与 U+2060 词连接符插入键名时先移除再匹配，键还原后照常脱敏。"""
+    zwj = chr(0x200D)
+    word_joiner = chr(0x2060)
+    assert sanitize_error_text(f"api{zwj}key: sk-xxx") == "apikey: ***"
+    assert sanitize_error_text(f"token{word_joiner}_id=SECRET") == "token_id=***"
+
+
+def test_sanitize_error_text_strips_zwj_adjacent_to_ascii_key_or_separator() -> None:
+    """ZWJ 混入键名与分隔符之间仍视为键名伪装剥离，凭据不借 ZWJ 移位逃逸。"""
+    zwj = chr(0x200D)
+    assert sanitize_error_text(f"api{zwj}key: sk-1") == "apikey: ***"
+    assert sanitize_error_text(f"api_key{zwj}=SECRET") == "api_key=***"
+
+
+def test_sanitize_error_text_preserves_emoji_zwj_sequences() -> None:
+    """错误文本含合法 emoji ZWJ 序列时原样保留，零宽剥离不拆散家庭 emoji。"""
+    zwj = chr(0x200D)
+    man, woman, girl = (chr(cp) for cp in (0x1F468, 0x1F469, 0x1F467))
+    family = man + zwj + woman + zwj + girl
+    message = f"渲染失败 {family} 请重试"
+
+    sanitized = sanitize_error_text(message)
+
+    assert sanitized == message
+    assert sanitized.count(zwj) == 2
 
 
 def test_sanitize_error_text_blocks_fullwidth_quote_separator() -> None:

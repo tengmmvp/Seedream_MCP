@@ -221,7 +221,20 @@ _KEY_SEGMENT_SPLIT_PATTERN = re.compile(r"[_\- .]")
 
 
 # Bearer 鉴权头令牌模式：上游错误体回显鉴权头时据此剥离令牌，防止其进入结构化输出。
-_BEARER_TOKEN_PATTERN = re.compile(r"(Bearer\s+)\S+", re.IGNORECASE)
+# 两分支前置仅排除 ASCII 词字符，防 v2Bearer 一类词内形态，CJK 邻接的回显照常命中；
+# 冒号分支前置另排除 URL 常见字符（含 =），?auth=bearer:tok 一类 URL 段不误伤，其
+# 令牌到 URL 结构定界符即止不吞后续；URL 数据通道不复用双分支形态，仅取空白分支。
+_BEARER_WHITESPACE_BRANCH = r"(?<![A-Za-z0-9_])(Bearer\s+)\S+"
+
+_BEARER_TOKEN_PATTERN = re.compile(
+    _BEARER_WHITESPACE_BRANCH + r"|(?<![A-Za-z0-9_/.=@\-])(Bearer[:：]\s*)[^,;&#?()\s]+",
+    re.IGNORECASE,
+)
+
+# 仅空白分支：URL 数据通道压平控制字符产生的空格会拼出 Bearer 令牌回显，压平后
+# 补跑本分支；冒号形态在该通道只剩误伤，不剥离。
+_BEARER_WHITESPACE_PATTERN = re.compile(_BEARER_WHITESPACE_BRANCH, re.IGNORECASE)
+
 
 # 不参与交替组直接派生的短词：key 单独出现特异性不足，仅保留受限复合分支覆盖
 # 敏感形态；auth 由 (?<!\w) 左侧断言与键后分隔符要求排除误吞后经独立分支覆盖。
@@ -341,14 +354,19 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     + r")\S+)*"
 )
 
-# 控制字符模式：C0 控制字符、DEL、NEL（U+0085）与行/段分隔符（U+2028/U+2029）
-# 逐字符压平为空格，防止经日志与结构化输出注入伪造行，替换为空格保留词边界。
+# 控制字符与双向文本/隔离控制符逐字符压平为空格，防止经日志与结构化输出
+# 注入伪造行或反转显示方向，替换为空格保留词边界。
 # logs 的日志消息 patcher 共用本常量，两模块的控制字符口径单一来源。
-CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
+CONTROL_CHARS_PATTERN = re.compile(
+    r"[\x00-\x1f\x7f\x85\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
+)
 
-# 零宽不可见字符：ZWSP、ZWNJ、BOM 与软连字符。键值匹配前整体移除以还原真实键名，
-# 替换为空串而非空格，避免把键名切成两段导致脱敏失效。
-_INVISIBLE_CHARS_PATTERN = re.compile(r"[\u200b\u200c\ufeff\u00ad]")
+# 零宽不可见字符：ZWSP、ZWNJ、U+2060-2064、BOM 与软连字符整体移除以还原真实键名，
+# 替换为空串而非空格，避免把键名切成两段导致脱敏失效；ZWJ 仅在邻接 ASCII 字符时
+# 视为键名伪装移除，两侧均为非 ASCII 的 emoji 序列原样保留。
+_INVISIBLE_CHARS_PATTERN = re.compile(
+    r"[\u200b\u200c\u2060-\u2064\ufeff\u00ad]|(?<=[\x00-\x7f])\u200d|\u200d(?=[\x00-\x7f])"
+)
 
 # URL userinfo 剥离模式：http(s) URL 携带 user:pass@ 凭据时剥去 userinfo，防止
 # 原值回显把凭据送进结构化输出与用户可见文本。密码含 @ 时贪婪匹配取区间内最后
@@ -364,18 +382,18 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     """对字符串值剥离零宽字符、敏感键值裸值、Bearer 令牌与 URL userinfo，非字符串原样返回。
 
     message 与 details/value/response_data 等输出字段共用此净化，防护口径一致。
-    处理次序：零宽字符先行移除以还原真实键名，键值匹配在控制字符压平前后各执行
-    一次，分别覆盖真实换行分隔形态与转义产物等其余形态，末尾剥 Bearer 令牌与
-    URL userinfo。
+    处理次序：零宽字符先行移除以还原真实键名，userinfo 在控制字符压平前剥离——
+    压平产生的空格会打断 userinfo 匹配使凭据逃逸；键值匹配在压平前后各执行一次，
+    分别覆盖真实换行分隔形态与转义产物等其余形态，末尾剥 Bearer 令牌。
     """
     if not isinstance(value, str):
         return value
     redacted = _INVISIBLE_CHARS_PATTERN.sub("", value)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
+    redacted = _URL_USERINFO_PATTERN.sub(r"\1", redacted)
     redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
-    redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
-    return cast("_SanitizedValue", _URL_USERINFO_PATTERN.sub(r"\1", redacted))
+    return cast("_SanitizedValue", _BEARER_TOKEN_PATTERN.sub(r"\1\2***", redacted))
 
 
 def _sanitize_message_for_output(value: Any, limit: int = MESSAGE_OUTPUT_LIMIT) -> str:
@@ -420,16 +438,17 @@ _WHITESPACE_PATTERN = re.compile(r"\s")
 
 
 def _sanitize_url_data_text(value: str, limit: int) -> str:
-    """纯 URL 数据字段的轻量净化：截断后仅剥离控制字符、Bearer 令牌与 userinfo。
+    """纯 URL 数据字段的轻量净化：截断后剥离 userinfo、控制字符与空白态 Bearer 令牌。
 
     查询参数是 URL 的组成部分而非凭据回显，键值裸值脱敏会把签名 URL 的查询串整体
-    替换为 *** 使数据不可用；userinfo 与 Bearer 形态的凭据不受豁免影响，仍在此
-    路径剥离。Bearer 短令牌替换为 *** 的膨胀与错误文本通道同口径补偿截断。
+    替换为 *** 使数据不可用；userinfo 在控制字符压平前剥离，压平产生的空格会打断
+    userinfo 匹配使凭据逃逸；压平拼出的 Bearer 令牌回显由仅空白分支剥离，冒号形态
+    只剩误伤、不在此剥离。
     """
     truncated = cast("str", _truncate_value_for_output(value, limit=limit))
-    redacted = CONTROL_CHARS_PATTERN.sub(" ", truncated)
-    redacted = _BEARER_TOKEN_PATTERN.sub(r"\1***", redacted)
-    redacted = _URL_USERINFO_PATTERN.sub(r"\1", redacted)
+    redacted = _URL_USERINFO_PATTERN.sub(r"\1", truncated)
+    redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
+    redacted = _BEARER_WHITESPACE_PATTERN.sub(r"\1***", redacted)
     if len(redacted) > limit:
         redacted = _retruncate_with_single_marker(redacted, limit, len(value))
     return redacted
