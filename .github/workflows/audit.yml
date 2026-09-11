@@ -1,0 +1,34 @@
+# 依赖漏洞审计：周频扫描 uv.lock 全量依赖链的已知 CVE，与 dependabot 版本升级互补。
+# dependabot 只提升级 PR，本流水线在 CVE 披露与 PR 合并之间提供主动告警。
+name: 🛡️ Dependency Audit
+
+on:
+  schedule:
+    - cron: "17 18 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: 🔍 pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: ⚡ Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: 📜 Export locked requirements
+        # 审计对象为第三方依赖，不导出项目自身与哈希
+        run: uv export --locked --no-emit-project --no-hashes --format requirements-txt -o requirements.txt
+
+      - name: 🚨 Audit dependencies for known CVEs
+        run: uvx pip-audit@2.10.1 -r requirements.txt

@@ -54,6 +54,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=7.0",
+    "pytest-timeout>=2.3.0",
     "black>=23.0.0",
     "flake8>=6.0.0",
     "mypy>=1.0.0",
@@ -127,13 +128,7 @@ files = [
     "tests",
     "scripts",
 ]
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_any_generics = true
-check_untyped_defs = true
-no_implicit_optional = true
-strict_equality = true
+strict = true
 
 [[tool.mypy.overrides]]
 module = "aiofiles.*"
@@ -147,4 +142,6 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = "test_*.py"
+# 挂起保护：超时 dump 线程栈定位卡点；300s 留足慢测余量，仅捕挂死。
+timeout = 300
 markers = ["slow: 真实端口与线程的端到端冒烟"]

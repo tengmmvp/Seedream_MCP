@@ -63,7 +63,7 @@ jobs:
 
       - name: 🧠 Check spelling
         # 仅检查代码与配置，文档不校验，作用域见 cspell.json
-        run: npx --yes cspell@9 lint --no-progress
+        run: npx --yes cspell@9.8.0 lint --no-progress
 
       - name: 🧫 Quick validation
         run: |
@@ -148,16 +148,26 @@ jobs:
       - name: 📥 Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # 取最近一个非当前 tag 作对比基线，首个版本无前序时回退 main 分支。
+      - name: 📜 Resolve previous tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" \
+            -q '[.[].tag_name] | map(select(. != "${GITHUB_REF_NAME}")) | first // empty' \
+            2>/dev/null || true)
+          echo "PREVIOUS_TAG=${prev:-main}" >> "$GITHUB_ENV"
+
       - name: 🏷️ Create Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body: |
-            ## 🚀 Seedream MCP ${{ github.ref_name }}
+            ## ✨ Seedream MCP ${{ github.ref_name }}
 
-            ### ✨ 新特性
-            请查看 [GitHub Commits](https://github.com/tengmmvp/Seedream_MCP/commits)
+            ### 📝 更新内容
+            [查看自上一版本以来的全部提交](https://github.com/tengmmvp/Seedream_MCP/compare/${{ env.PREVIOUS_TAG }}...${{ github.ref_name }})
 
             ### 🛠️ 安装方式
 

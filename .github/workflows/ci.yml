@@ -51,7 +51,7 @@ jobs:
 
       - name: 🔤 Check spelling
         # 仅检查代码与配置，文档不校验，作用域见 cspell.json
-        run: npx --yes cspell@9 lint --no-progress
+        run: npx --yes cspell@9.8.0 lint --no-progress
 
   test:
     name: 🧪 Test (py${{ matrix.python-version }}, ${{ matrix.os }})
