@@ -61,13 +61,13 @@ def test_tools_accepted_for_lite() -> None:
 
 def test_tools_rejected_for_pro() -> None:
     """Pro 拒绝联网搜索工具。"""
-    with pytest.raises(SeedreamValidationError, match="不支持联网搜索"):
+    with pytest.raises(SeedreamValidationError, match="支持 tools"):
         validate_generation_tools([{"type": "web_search"}], PRO)
 
 
 def test_tools_rejected_for_45() -> None:
     """4.5 拒绝联网搜索工具。"""
-    with pytest.raises(SeedreamValidationError, match="不支持联网搜索"):
+    with pytest.raises(SeedreamValidationError, match="支持 tools"):
         validate_generation_tools([{"type": "web_search"}], MODEL_45)
 
 
@@ -86,13 +86,13 @@ def test_output_format_accepted_for_lite() -> None:
 
 def test_output_format_rejected_for_45() -> None:
     """4.5 拒绝 output_format 参数。"""
-    with pytest.raises(SeedreamValidationError, match="5.0 系列"):
+    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
         validate_output_format("png", MODEL_45)
 
 
 def test_output_format_rejected_for_40() -> None:
     """4.0 拒绝 output_format 参数。"""
-    with pytest.raises(SeedreamValidationError, match="5.0 系列"):
+    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
         validate_output_format("png", MODEL_40)
 
 

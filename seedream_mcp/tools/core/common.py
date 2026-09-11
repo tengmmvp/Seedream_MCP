@@ -45,6 +45,7 @@ from ._shared import (
 from .auto_save import auto_save_from_base64, auto_save_from_urls
 from .context import GenerationExecutionContext, build_generation_context
 from .outputs import build_error_structured
+from ._sanitize import _sanitize_image_errors
 from .parallel import (
     _run_generation_requests,
     _try_get_shared_client,
@@ -53,7 +54,6 @@ from .parallel import (
 )
 from .results import (
     _build_generation_structured_result,
-    _sanitize_image_errors,
     aggregate_parallel_generation_results,
     extract_images,
     format_generation_response,
@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 # 门面对外导出的公共符号，私有辅助经各自定义模块显式导入。
 __all__ = [
     "GenerationExecutionContext",
+    "PROGRESS_COMPLETE",
     "ToolMetadata",
     "aggregate_parallel_generation_results",
     "auto_save_from_base64",

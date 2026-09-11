@@ -192,6 +192,18 @@ def get_max_reference_images(model_id: str) -> int:
     return get_model_capabilities(model_id).max_reference_images
 
 
+def supported_family_display_names(capability: str) -> str:
+    """返回能力表声明该布尔能力为真的各家族展示名，以顿号拼接供文案直用。
+
+    unknown 为 Endpoint ID 的兜底声明而非真实家族，不进入文案枚举。
+    """
+    return "、".join(
+        caps.display_name
+        for family, caps in MODEL_CAPABILITIES.items()
+        if family != MODEL_FAMILY_UNKNOWN and getattr(caps, capability)
+    )
+
+
 def preset_numeric_sort_key(preset: str) -> tuple[float, str]:
     """尺寸档位的排序键：按数值前缀升序，其次按字典序保证稳定。
 

@@ -22,6 +22,7 @@ from ..model.model_capabilities import (
     get_max_reference_images,
     get_model_capabilities,
     preset_numeric_sort_key as _preset_numeric_sort_key,
+    supported_family_display_names,
 )
 
 logger = get_logger()
@@ -254,8 +255,7 @@ def validate_response_format(response_format: str) -> str:
 def validate_output_format(output_format: Any, model_id: str) -> str | None:
     """验证图像输出文件格式并检查模型兼容性。
 
-    仅支持 jpeg/png；output_format 由 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）
-    支持，4.5/4.0 不支持，未知模型放行由能力表统一判定。输入为 None 时返回 None。
+    仅支持 jpeg/png；模型兼容性由能力表统一判定，未知模型放行。输入为 None 时返回 None。
 
     Raises:
         SeedreamValidationError: output_format 非字符串、为空、取值不在 jpeg/png
@@ -288,7 +288,7 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
 
     if not get_model_capabilities(model_id).supports_output_format:
         raise SeedreamValidationError(
-            "仅 doubao-seedream-5.0 系列（5.0 Pro/5.0 Lite）模型支持 output_format",
+            f"仅 {supported_family_display_names('supports_output_format')} 模型支持 output_format",
             field="output_format",
             value=output_format,
         )
@@ -299,9 +299,8 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
 def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]] | None:
     """验证生成工具配置并检查模型兼容性。
 
-    每项为仅含 type 字段的对象，type 仅支持 web_search；联网搜索由
-    doubao-seedream-5.0 / 5.0-lite 系列支持，5.0 Pro/4.5/4.0 不支持，未知模型
-    放行由能力表统一判定。输入为 None 时返回 None。
+    每项为仅含 type 字段的对象，type 仅支持 web_search；模型兼容性由能力表统一
+    判定，未知模型放行。输入为 None 时返回 None。
 
     Raises:
         SeedreamValidationError: tools 非数组、模型不支持联网工具、数组项非对象、
@@ -323,8 +322,7 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
 
     if not get_model_capabilities(model_id).supports_tools:
         raise SeedreamValidationError(
-            "仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持 tools"
-            "（5.0 Pro/4.5/4.0 不支持联网搜索）",
+            f"仅 {supported_family_display_names('supports_tools')} 支持 tools",
             field="tools",
             value=tools,
         )

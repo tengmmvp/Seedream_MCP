@@ -8,8 +8,8 @@ from typing import cast
 
 import pytest
 
-from seedream_mcp.config import MODEL_ALIASES
 from seedream_mcp.utils.model.model_capabilities import (
+    MODEL_ALIASES,
     MODEL_CAPABILITIES,
     MODEL_FAMILY_40,
     MODEL_FAMILY_45,
@@ -21,6 +21,7 @@ from seedream_mcp.utils.model.model_capabilities import (
     get_model_capabilities,
     model_payloads,
     preset_numeric_sort_key,
+    supported_family_display_names,
 )
 
 
@@ -119,3 +120,11 @@ def test_model_payloads_capability_values_match_asdict() -> None:
             expected["allowed_presets"], key=preset_numeric_sort_key
         )
         assert {key: entry[key] for key in expected} == expected, entry["alias"]
+
+
+def test_supported_family_display_names_returns_joined_string() -> None:
+    """支持家族展示名以顿号拼接返回，文案消费方无需再 join。"""
+    assert supported_family_display_names("supports_output_format") == (
+        "doubao-seedream-5.0-pro、doubao-seedream-5.0"
+    )
+    assert supported_family_display_names("supports_tools") == "doubao-seedream-5.0"

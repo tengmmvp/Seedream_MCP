@@ -17,6 +17,7 @@ from ...utils.images.image_validation import MAX_IMAGE_FILE_SIZE
 from ...utils.model.model_capabilities import (
     SEEDREAM_50PRO_MAX_REFERENCE_IMAGES,
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+    supported_family_display_names,
 )
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
@@ -132,10 +133,15 @@ MAX_IMAGES_DESCRIPTION = (
     "未提供时按参考图数量推导为 15 减参考图张数，参考图数量与其之和不得超过 15。"
 )
 RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_json 返回 base64 数据。"
-OUTPUT_FORMAT_DESCRIPTION = "输出图片格式，仅 5.0 系列（Pro/标准/Lite）支持 jpeg 或 png。"
-STREAM_DESCRIPTION = "是否启用流式输出；开启后将以事件流返回生成进度（5.0 Pro 不支持）。"
+# 能力相关描述的家族清单自能力表派生，能力表调整时描述随动，与校验报错文案同源。
+OUTPUT_FORMAT_DESCRIPTION = f"输出图片格式，仅 {supported_family_display_names('supports_output_format')} 支持 jpeg 或 png。"
+STREAM_DESCRIPTION = (
+    f"是否启用流式输出；开启后将以事件流返回生成进度"
+    f"（仅 {supported_family_display_names('supports_stream')} 支持）。"
+)
 TOOLS_DESCRIPTION = (
-    "模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持联网搜索（web_search）。"
+    f"模型工具配置，仅 {supported_family_display_names('supports_tools')} 支持联网搜索"
+    "（web_search）。"
 )
 REQUEST_COUNT_DESCRIPTION = "同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。"
 REQUEST_COUNT_SEQUENTIAL_DESCRIPTION = (

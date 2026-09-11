@@ -4,6 +4,7 @@
 不触发网络或文件 I/O，直接验证各分支的返回值与抛错语义。
 """
 
+from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
 
@@ -15,8 +16,10 @@ from seedream_mcp.utils.core.validators import (
     _coerce_int_in_range,
     parse_bool,
     validate_background,
+    validate_generation_tools,
     validate_max_images,
     validate_optimize_prompt_options,
+    validate_output_format,
     validate_parallel_generation_options,
     validate_response_format,
     validate_watermark,
@@ -451,3 +454,48 @@ def test_size_both_bounds_message_keeps_range_form(monkeypatch: pytest.MonkeyPat
     )
     with pytest.raises(SeedreamValidationError, match=r"总像素需在 \[1000, 2000\] 范围内"):
         validators_module.validate_size_for_model("80x80", "any-model")
+
+
+# ==================== 能力报错文案派生 ====================
+
+
+def test_output_format_error_message_enumerates_supporting_families() -> None:
+    """output_format 拒绝文案包含能力表声明支持的全部家族展示名。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_output_format("png", "doubao-seedream-4-5-251128")
+
+    message = exc_info.value.message
+    assert "doubao-seedream-5.0-pro、doubao-seedream-5.0" in message
+    assert "模型支持 output_format" in message
+
+
+def test_tools_error_message_enumerates_supporting_families() -> None:
+    """tools 拒绝文案包含能力表声明支持的全部家族展示名。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_generation_tools([{"type": "web_search"}], "doubao-seedream-4-5-251128")
+
+    assert "仅 doubao-seedream-5.0 支持 tools" in exc_info.value.message
+
+
+def test_capability_error_messages_follow_capability_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """报错文案的家族枚举随能力表派生，翻转声明后文案同步增删家族名。"""
+    import seedream_mcp.utils.model.model_capabilities as model_capabilities_module
+
+    table = dict(model_capabilities_module.MODEL_CAPABILITIES)
+    table[model_capabilities_module.MODEL_FAMILY_45] = replace(
+        table[model_capabilities_module.MODEL_FAMILY_45], supports_output_format=True
+    )
+    table[model_capabilities_module.MODEL_FAMILY_40] = replace(
+        table[model_capabilities_module.MODEL_FAMILY_40], supports_tools=True
+    )
+    monkeypatch.setattr(model_capabilities_module, "MODEL_CAPABILITIES", table)
+
+    with pytest.raises(SeedreamValidationError) as output_format_info:
+        validate_output_format("png", "doubao-seedream-4-0-250828")
+    assert "doubao-seedream-4.5" in output_format_info.value.message
+
+    with pytest.raises(SeedreamValidationError) as tools_info:
+        validate_generation_tools([{"type": "web_search"}], "doubao-seedream-5-0-pro-260628")
+    assert "doubao-seedream-4.0" in tools_info.value.message

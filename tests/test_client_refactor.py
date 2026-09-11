@@ -335,7 +335,7 @@ async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_ca
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
-    with pytest.raises(SeedreamValidationError, match="仅 doubao-seedream-5.0 系列"):
+    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
         await client.text_to_image(prompt="test", size="2K", output_format="png")
 
     assert api_called is False
@@ -560,7 +560,7 @@ def test_normalize_image_sequence_rejects_non_list_input() -> None:
     """image 传入非列表形态时抛出参数校验错误。"""
     with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
         SeedreamClient._normalize_image_sequence(
-            images="not-a-list",  # type: ignore[arg-type]
+            images="not-a-list",
             min_count=1,
             max_count=2,
             field_name="image",
@@ -1083,9 +1083,10 @@ async def test_empty_api_key_maps_to_config_error_profile() -> None:
 def _install_validate_common_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """在 client 模块命名空间替换 validate_common_generation_params 为计数替身，返回记录调用次数的字典。"""
     import seedream_mcp.client as client_module
+    from seedream_mcp.utils.core.validators import validate_common_generation_params
 
     calls = {"validate": 0}
-    original = client_module.validate_common_generation_params
+    original = validate_common_generation_params
 
     def _spy(**kwargs: Any) -> Any:
         calls["validate"] += 1
@@ -1234,6 +1235,34 @@ async def test_sequential_generation_logs_warning_on_partial_response(
     assert fake_logger.errors == []
 
 
+async def test_text_to_image_logs_warning_when_success_carries_top_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """success=True 但携带顶层 error 键的结果降级 warning，不再落纯完成日志。"""
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        del endpoint, request_data
+        return {
+            "success": True,
+            "data": [{"url": "https://example.com/1.png"}],
+            "usage": {},
+            "status": "completed",
+            "error": {"code": "PartialWarn", "message": "quota near limit"},
+        }
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    await client.text_to_image(prompt="p", size="2K")
+
+    assert any("文生图任务完成但携带错误" in message for message in fake_logger.warnings)
+    # 结局日志附顶层 error 的码与消息，仅凭日志可定位原因
+    assert any("PartialWarn quota near limit" in message for message in fake_logger.warnings)
+    assert not any("文生图任务完成" in message for message in fake_logger.info_messages)
+    assert fake_logger.errors == []
+
+
 def test_public_generation_methods_keep_prompt_first() -> None:
     """四个公开生成方法的 prompt 恒居首参，锁定外部位置调用方的参数含义。"""
     import inspect
@@ -1248,3 +1277,24 @@ def test_public_generation_methods_keep_prompt_first() -> None:
     ):
         parameter_names = list(inspect.signature(method).parameters)
         assert parameter_names[1] == "prompt"
+
+
+def test_generation_method_docstrings_follow_capability_table() -> None:
+    """四个生成方法 docstring 的家族清单含能力表派生的全部支持家族展示名。"""
+    from seedream_mcp.utils.model.model_capabilities import supported_family_display_names
+
+    for method in (
+        SeedreamClient.text_to_image,
+        SeedreamClient.image_to_image,
+        SeedreamClient.multi_image_fusion,
+        SeedreamClient.sequential_generation,
+    ):
+        docstring = method.__doc__ or ""
+        assert (
+            supported_family_display_names("supports_output_format") in docstring
+        ), method.__name__
+        assert supported_family_display_names("supports_stream") in docstring, method.__name__
+        assert supported_family_display_names("supports_tools") in docstring, method.__name__
+    assert supported_family_display_names("supports_sequential_generation") in (
+        SeedreamClient.sequential_generation.__doc__ or ""
+    )

@@ -8,6 +8,7 @@
 
 import asyncio
 import hashlib
+import re
 import types
 from typing import Any, Sequence
 
@@ -18,7 +19,10 @@ from .config import SeedreamConfig, get_active_config
 from .request_plan import _ACTIVE_REQUEST_PLAN, _build_request_data
 from .utils.core.errors import SeedreamValidationError
 from .utils.core.logs import get_logger
-from .utils.model.model_capabilities import get_max_reference_images
+from .utils.model.model_capabilities import (
+    get_max_reference_images,
+    supported_family_display_names,
+)
 from .utils.core.validators import (
     ValidatedCommonParams,
     ensure_utf8_encodable,
@@ -32,6 +36,26 @@ from .utils.core.validators import (
     validate_sequential_image_limit,
 )
 from .utils.images.image_prepare import ImagePreparer
+
+# 生成方法 docstring 的家族清单自能力表派生，与 tools/core/schemas 描述同源；
+# docstring 为字符串字面量（f-string 不能成为 __doc__），派生值经下方回填替换进入。
+_FAMILY_HINT_PLACEHOLDERS = {
+    "{output_format_families}": supported_family_display_names("supports_output_format"),
+    "{stream_families}": supported_family_display_names("supports_stream"),
+    "{tools_families}": supported_family_display_names("supports_tools"),
+    "{sequential_families}": supported_family_display_names("supports_sequential_generation"),
+}
+
+
+def _fill_family_hints(docstring: str) -> str:
+    """把家族清单占位符替换为能力表派生值。"""
+    for placeholder, families in _FAMILY_HINT_PLACEHOLDERS.items():
+        docstring = docstring.replace(placeholder, families)
+    return docstring
+
+
+# docstring 中家族占位符的嗅探形态：花括号内含 famil 词段的任意键名。
+_FAMILY_PLACEHOLDER_PATTERN = re.compile(r"\{[A-Za-z0-9_]*famil[A-Za-z0-9_]*\}")
 
 
 class SeedreamClient(_ClientHTTPMixin):
@@ -139,9 +163,9 @@ class SeedreamClient(_ClientHTTPMixin):
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
+            tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -235,9 +259,9 @@ class SeedreamClient(_ClientHTTPMixin):
                 取 "auto"，其余场景未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
+            tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -337,9 +361,9 @@ class SeedreamClient(_ClientHTTPMixin):
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
+            tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -426,7 +450,7 @@ class SeedreamClient(_ClientHTTPMixin):
     ) -> dict[str, Any]:
         """生成漫画分镜、品牌视觉等一组内容关联的图片。
 
-        仅 5.0/5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持组图。支持文生组图、单图生
+        仅 {sequential_families} 支持组图。支持文生组图、单图生
         组图与多图生组图三种输入模式。
 
         Args:
@@ -439,9 +463,9 @@ class SeedreamClient(_ClientHTTPMixin):
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             max_images: 最大生成图像数量，范围为 1-15；未传入时无参考图默认 15，有参考图时自动扣减以满足总量上限。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
-            output_format: 输出图片格式，仅 5.0 系列 Pro/Lite 支持 "jpeg" 或 "png"。
-            stream: 是否使用流式传输，默认为 False；5.0 Pro 不支持。
-            tools: 模型工具配置，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持，如 [{"type": "web_search"}]。
+            output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。
+            stream: 是否使用流式传输，默认为 False；仅 {stream_families} 支持。
+            tools: 模型工具配置，仅 {tools_families} 支持，如 [{"type": "web_search"}]。
 
         Returns:
             包含生成结果的字典，包括图像数据、使用信息和状态等。
@@ -717,3 +741,18 @@ class SeedreamClient(_ClientHTTPMixin):
     async def _prepare_images_in_parallel(self, images: Sequence[str]) -> list[str]:
         """受限并发预处理多张图片，委托 ImagePreparer。"""
         return await self._image_preparer.prepare_images_in_parallel(images)
+
+
+# 类体后统一回填 docstring 的家族清单占位符，漏配占位符键在导入期抛错暴露。
+for _member in vars(SeedreamClient).values():
+    if (
+        callable(_member)
+        and _member.__doc__
+        and _FAMILY_PLACEHOLDER_PATTERN.search(_member.__doc__)
+    ):
+        _member.__doc__ = _fill_family_hints(_member.__doc__)
+        leftover = _FAMILY_PLACEHOLDER_PATTERN.search(_member.__doc__ or "")
+        if leftover is not None:
+            raise RuntimeError(
+                f"{_member.__name__} docstring 残留未识别的家族占位符 {leftover.group(0)}"
+            )
