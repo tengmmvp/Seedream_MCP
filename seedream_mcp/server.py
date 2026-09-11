@@ -37,6 +37,7 @@ from mcp.server.mcpserver.resolve import ListRoots, Resolve
 from mcp.shared.path_security import PathEscapeError, safe_join
 from mcp.types import (
     CallToolResult,
+    Icon,
     InputRequiredResult,
     ListRootsRequest,
     ListRootsResult,
@@ -46,6 +47,7 @@ from mcp.types import (
 from mcp.types.version import is_version_at_least
 from pydantic import BaseModel, Field, ValidationError
 
+from ._icons import tool_icon_src
 from .config import (
     LIFESPAN_KEY_CONFIG,
     SeedreamConfig,
@@ -145,16 +147,17 @@ from .utils.model.model_capabilities import (
 )
 
 # resources 符号重导出：mcp 与 SERVER_NAME/SERVER_VERSION 为本模块直接使用，
-# app_lifespan 随 mcp 一并再导出供调用方经 server 入口访问。
+# app_lifespan 随 mcp 一并再导出供调用方经 server 入口访问；as 同名形态为
+# PEP 484 显式再导出。
 from .resources import (  # noqa: F401
-    SERVER_NAME,
-    SERVER_VERSION,
-    app_lifespan,
-    mcp,
+    SERVER_NAME as SERVER_NAME,
+    SERVER_VERSION as SERVER_VERSION,
+    app_lifespan as app_lifespan,
+    mcp as mcp,
 )
 
 # 启动编排拆至 bootstrap，再导出 cli_main 维持 entry point 与 python -m 入口。
-from .bootstrap import cli_main
+from .bootstrap import cli_main as cli_main
 
 # ==================== 工具注解常量 ====================
 
@@ -171,6 +174,11 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
     read_only_hint=True,
     open_world_hint=False,
 )
+
+
+def _tool_icons(tool_name: str) -> list[Icon]:
+    return [Icon(src=tool_icon_src(tool_name), mime_type="image/svg+xml", sizes=["any"])]
+
 
 logger = get_logger()
 
@@ -394,6 +402,7 @@ def _session_or_none(ctx: Context) -> Any:
     name="text_to_image",
     title="Seedream 文生图",
     annotations=GENERATION_TOOL_ANNOTATIONS,
+    icons=_tool_icons("text_to_image"),
 )
 async def text_to_image(
     prompt: str = Field(
@@ -439,6 +448,7 @@ async def text_to_image(
     name="image_to_image",
     title="Seedream 图文生图",
     annotations=GENERATION_TOOL_ANNOTATIONS,
+    icons=_tool_icons("image_to_image"),
 )
 async def image_to_image(
     prompt: str | None = Field(
@@ -501,6 +511,7 @@ async def image_to_image(
     name="multi_image_fusion",
     title="Seedream 多图融合",
     annotations=GENERATION_TOOL_ANNOTATIONS,
+    icons=_tool_icons("multi_image_fusion"),
 )
 async def multi_image_fusion(
     prompt: str = Field(
@@ -552,6 +563,7 @@ async def multi_image_fusion(
     name="sequential_generation",
     title="Seedream 组图输出",
     annotations=GENERATION_TOOL_ANNOTATIONS,
+    icons=_tool_icons("sequential_generation"),
 )
 async def sequential_generation(
     prompt: str = Field(
@@ -620,6 +632,7 @@ async def sequential_generation(
     name="browse_images",
     title="Seedream 图片浏览",
     annotations=BROWSE_TOOL_ANNOTATIONS,
+    icons=_tool_icons("browse_images"),
 )
 async def browse_images(
     directory: str | None = Field(
