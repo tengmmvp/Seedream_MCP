@@ -951,8 +951,17 @@ async def skill_reference_resource(path: str) -> str:
 # 风格预设固定前缀，指引模型调用文生图工具并指明 prompt 参数来源。
 _STYLE_PROMPT_PREFIX = "请使用 text_to_image 工具生成图片，将以下内容作为 prompt 参数：\n"
 
-# 四个风格 prompt 的 subject 参数共享注解，单一来源防描述漂移。
-_STYLE_SUBJECT_ANNOTATION = Annotated[str, Field(description="生成图片的主题描述")]
+# 四个风格 prompt 的 subject 参数共享注解，单一来源防描述漂移；长度与非空
+# 口径和工具参数侧的 prompt 约束一致。
+_STYLE_SUBJECT_ANNOTATION = Annotated[
+    str,
+    Field(
+        min_length=PROMPT_MIN_LENGTH,
+        max_length=PROMPT_MAX_LENGTH,
+        pattern=_NON_BLANK_PATTERN,
+        description="生成图片的主题描述",
+    ),
+]
 
 
 def _build_style_prompt(subject: str, style_suffix: str) -> str:

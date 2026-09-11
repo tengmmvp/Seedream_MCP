@@ -234,3 +234,26 @@ async def test_browse_images_root_unavailable_returns_400(
     payload = response.json()
     assert payload["error"] == "images_root_unavailable"
     assert "SEEDREAM_WORKSPACE_ROOT" in payload["error_description"]
+
+
+def test_converge_for_web_drops_outside_entries(tmp_path: Path) -> None:
+    """越界条目整条剔除并递减 total_count，界内条目保留 web_path 改写。"""
+    from seedream_mcp.webapp.gallery import _converge_for_web
+
+    images_root = tmp_path / "images"
+    structured: dict[str, Any] = {
+        "workspace_roots": [],
+        "resolved_directories": [],
+        "total_count": 2,
+        "images": [
+            {"path": str(images_root / "a.png")},
+            {"path": str(tmp_path / "outside.png")},
+        ],
+    }
+
+    _converge_for_web(structured, images_root)
+
+    assert "workspace_roots" not in structured
+    assert "resolved_directories" not in structured
+    assert structured["total_count"] == 1
+    assert [item["web_path"] for item in structured["images"]] == ["a.png"]

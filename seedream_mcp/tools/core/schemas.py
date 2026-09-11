@@ -130,7 +130,8 @@ SIZE_WITH_LAYER_DESCRIPTION = (
 WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
 MAX_IMAGES_DESCRIPTION = (
     f"本次请求允许生成的最大图片数量，范围 1-{MAX_SEQUENTIAL_TOTAL_IMAGES}；"
-    "未提供时按参考图数量推导为 15 减参考图张数，参考图数量与其之和不得超过 15。"
+    f"未提供时按参考图数量推导为 {MAX_SEQUENTIAL_TOTAL_IMAGES} 减参考图张数，"
+    f"参考图数量与其之和不得超过 {MAX_SEQUENTIAL_TOTAL_IMAGES}。"
 )
 RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_json 返回 base64 数据。"
 # 能力相关描述的家族清单自能力表派生，能力表调整时描述随动，与校验报错文案同源。

@@ -242,7 +242,10 @@ class SeedreamConfig:
 
     def _validate_api_credentials(self) -> None:
         """校验 api_key 非空且非默认占位符。"""
-        if not self.api_key or self.api_key.strip() == "":
+        # 与 model_id 等字段同口径回写 strip，避免空白密钥产出畸形 Bearer 头。
+        stripped = (self.api_key or "").strip()
+        object.__setattr__(self, "api_key", stripped)
+        if not self.api_key:
             raise SeedreamConfigError(f"API密钥不能为空{_env_var_suffix('api_key')}")
         _ensure_field_utf8_encodable(self.api_key, "api_key")
         if self.api_key == "your_api_key_here":

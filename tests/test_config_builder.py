@@ -1035,6 +1035,22 @@ def test_seedream_config_empty_api_key_error_mentions_env_var() -> None:
         SeedreamConfig(api_key=" ")
 
 
+def test_seedream_config_strips_api_key_whitespace() -> None:
+    """带首尾空白的 api_key 在构造期规范化，不产出畸形 Bearer 头。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key=" key ")
+    assert config.api_key == "key"
+
+
+def test_seedream_config_none_api_key_raises_config_error() -> None:
+    """api_key 为 None 时抛配置错误并附环境变量指引，不裸 AttributeError。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_API_KEY"):
+        SeedreamConfig(api_key=None)  # type: ignore[arg-type]
+
+
 def test_seedream_config_chunk_size_error_mentions_both_env_vars() -> None:
     """跨字段约束的校验消息同时附带两个字段的环境变量名。"""
     from seedream_mcp.config import SeedreamConfig

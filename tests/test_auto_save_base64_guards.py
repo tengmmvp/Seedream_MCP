@@ -263,6 +263,26 @@ async def test_run_batch_save_base64_fallback_key(manager: AutoSaveManager) -> N
     assert "decode fail" in (results[0].error or "")
 
 
+async def test_run_batch_save_none_url_falls_back_to_unknown(
+    manager: AutoSaveManager,
+) -> None:
+    """url 键值为 None 或非 str 时异常结果的 original_url 兜底为 unknown，恒为 str。"""
+
+    async def failing_task() -> AutoSaveResult:
+        raise RuntimeError("boom")
+
+    results = await manager._run_batch_save(
+        [failing_task, failing_task],
+        [{"url": None}, {"url": 123}],
+        fallback_url_key="url",
+        log_label="test",
+    )
+    assert len(results) == 2
+    for result in results:
+        assert result.success is False
+        assert result.original_url == "unknown"
+
+
 async def test_run_batch_save_passes_through_success_results(
     manager: AutoSaveManager,
 ) -> None:

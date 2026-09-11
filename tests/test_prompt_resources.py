@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import pytest
 from mcp.client import Client
+from mcp.shared.exceptions import MCPError
 from mcp.types import GetPromptResult, TextContent
 
 import seedream_mcp.server as server
+from seedream_mcp.tools.core.schemas import PROMPT_MAX_LENGTH
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
 
@@ -89,3 +91,21 @@ async def test_style_prompt_renders_custom_subject(
     text = _single_user_text(result)
     assert text.startswith(f"{server._STYLE_PROMPT_PREFIX}{subject}，")
     assert _STYLE_PROMPTS[name] in text
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "",
+        "   ",
+        pytest.param("x" * (PROMPT_MAX_LENGTH + 1), id="overlong"),
+    ],
+)
+@pytest.mark.parametrize("name", sorted(_STYLE_PROMPTS))
+async def test_style_prompt_rejects_blank_subject(
+    reset_lifespan_singletons: None, name: str, subject: str
+) -> None:
+    """空串、纯空白与超长主题在渲染前被参数校验拒绝，不产出必失败的模板。"""
+    async with Client(server.mcp) as client:
+        with pytest.raises(MCPError, match="Internal server error"):
+            await client.get_prompt(name, arguments={"subject": subject})

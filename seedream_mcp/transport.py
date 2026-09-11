@@ -1,10 +1,10 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
-包含请求体大小限制、Bearer 鉴权、健康检查、回环 Host 头防护、Web 操作台同源 Origin
-与跨站 Sec-Fetch 校验及内层异常边界六个 ASGI 中间件，以及 streamable-http 监听与 TLS
-配置。中间件经 Starlette add_middleware 装配到 MCPServer 的 streamable_http_app 外层，
-按装配逆序执行。MCPServer 实例 mcp 与共享资源清理函数在调用时从 resources 模块延迟
-导入，传输层不依赖 server 模块。
+包含请求体大小限制、Bearer 鉴权、健康检查、回环与非回环 Host 头防护、Web 操作台
+同源 Origin 与跨站 Sec-Fetch 校验及内层异常边界七个 ASGI 中间件，以及 streamable-http
+监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 MCPServer 的
+streamable_http_app 外层，按装配逆序执行。MCPServer 实例 mcp 与共享资源清理函数在
+调用时从 resources 模块延迟导入，传输层不依赖 server 模块。
 """
 
 from __future__ import annotations

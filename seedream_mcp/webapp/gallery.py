@@ -34,17 +34,25 @@ _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
     """剥除 Web 前端不消费的边界字段，条目 path 改写为图片目录相对形态。
 
-    条目改写经 _shared.converge_path_entry 与 generate 端单点维护；browse 条目
-    已是 resolve 后的绝对路径，走纯词法相对化。
+    越界条目删除 path 键后整条剔除并递减 total_count，前端不消费不可服务的
+    条目；改写经 _shared.converge_path_entry 与 generate 端单点维护。
     """
     for key in _ROOTS_ECHO_KEYS:
         structured.pop(key, None)
     images = structured.get("images")
     if not isinstance(images, list):
         return
+    kept: list[object] = []
     for item in images:
         if isinstance(item, dict):
             _shared.converge_path_entry(item, "path", images_root)
+            if item.get("web_path"):
+                kept.append(item)
+    if len(kept) != len(images):
+        total = structured.get("total_count")
+        if isinstance(total, int):
+            structured["total_count"] = total - (len(images) - len(kept))
+        structured["images"] = kept
 
 
 async def _directory_outside_images_root(directory: str, images_root: Path) -> bool:

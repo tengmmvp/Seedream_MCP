@@ -129,6 +129,7 @@ async function refreshGalleryForSeq(seq) {
     state.gallery.offset = payload.offset;
   }
   state.gallery.hasMore = Boolean(payload.has_more);
+  // 越界条目已在服务端剔除，前端条目均带 web_path。
   state.gallery.items = payload.images || [];
 
   // 只回收图库缩略图池，生成台结果图的 blob URL 不受翻页与刷新波及。

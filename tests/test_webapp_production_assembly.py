@@ -13,6 +13,14 @@ from pathlib import Path
 
 from _web_fixtures import web_asgi_client, write_workspace_config
 from seedream_mcp.transport import _build_streamable_app
+from seedream_mcp.webapp.meta import _upload_budget_chars
+
+
+def test_upload_budget_derivation_floors_at_zero() -> None:
+    """请求体上限不高于 4MiB 时预算推导为 0，0 为下发前端的有效预算值。"""
+    assert _upload_budget_chars(4 * 1024 * 1024) == 0
+    assert _upload_budget_chars(1024 * 1024) == 0
+    assert _upload_budget_chars(64 * 1024 * 1024) == 45 * 1024 * 1024
 
 
 async def test_production_app_serves_web_console(

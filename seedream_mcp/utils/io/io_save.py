@@ -261,6 +261,12 @@ async def _run_save_with_degradation(
         return AutoSaveResult(success=False, original_url=original_url, error=f"未知错误: {e}")
 
 
+def _entry_url(data: dict[str, Any]) -> str:
+    """取条目 url 并收敛为 str，缺失与非 str 形态按空串处理。"""
+    value = data.get("url")
+    return value if isinstance(value, str) else ""
+
+
 class AutoSaveManager:
     """自动保存管理器，协调并发下载、文件写入与节流清理。"""
 
@@ -658,9 +664,12 @@ class AutoSaveManager:
             if isinstance(result, asyncio.CancelledError):
                 raise result
             if isinstance(result, Exception):
-                fallback = (
-                    image_data[i].get(fallback_url_key, "unknown") if fallback_url_key else "base64"
-                )
+                if fallback_url_key:
+                    raw_value = image_data[i].get(fallback_url_key)
+                    # 非 str 或空值兜底 unknown，original_url 恒为 str。
+                    fallback = raw_value if isinstance(raw_value, str) and raw_value else "unknown"
+                else:
+                    fallback = "base64"
                 processed_results.append(
                     AutoSaveResult(success=False, original_url=fallback, error=str(result))
                 )
@@ -692,7 +701,7 @@ class AutoSaveManager:
         # 默认参数绑定当前项：闭包晚绑定会使全部工厂引用同一循环变量。
         factories = [
             lambda data=data: self.save_image(
-                url=data.get("url", ""),
+                url=_entry_url(data),
                 prompt=data.get("prompt", ""),
                 tool_name=tool_name,
                 custom_name=data.get("custom_name"),

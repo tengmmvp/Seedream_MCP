@@ -44,10 +44,12 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
    __version__ = "1.2.7"
    ```
 
+   升级 **minor 或 major** 时，还须同步更新 [docker-compose.yml](docker-compose.yml) 的镜像标签为新 `major.minor`。
+
 2. **提交并打 tag**（在 main 分支上进行）：
 
    ```bash
-   git add seedream_mcp/version.py
+   git add seedream_mcp/version.py docker-compose.yml
    git commit -m "chore(release): bump version to v1.2.7"
    git tag v1.2.7
    git push origin main      # 推送提交（用户手动）

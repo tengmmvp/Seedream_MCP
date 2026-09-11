@@ -15,10 +15,15 @@ const FUSION_REF_MIN = 2;
 const DEFAULT_UPLOAD_BUDGET_CHARS = 45 * 1024 * 1024;
 const DEFAULT_UNKNOWN_REF_LIMIT = 14;
 
-// data URI 累计字符预算，来自服务端按请求体上限的推导。
+// 预算为 0 时部署无法接受任何 data URI 上传。
+const ZERO_BUDGET_REASON =
+  "当前部署请求体上限过低，无法上传参考图，请改用图片 URL";
+
+// data URI 累计字符预算，来自服务端按请求体上限的推导；0 为有效预算，
+// 表示该上限容纳不下任何 data URI。
 function uploadBudgetChars() {
   const fromServer = state.configInfo && state.configInfo.upload_budget_chars;
-  return typeof fromServer === "number" && fromServer > 0
+  return Number.isFinite(fromServer) && fromServer >= 0
     ? fromServer
     : DEFAULT_UPLOAD_BUDGET_CHARS;
 }
@@ -149,8 +154,16 @@ export function addReference(kind, value, preview) {
     return reason;
   }
   if (kind === "data_uri" && !withinUploadBudget(value.length)) {
-    const mb = Math.floor(uploadBudgetChars() / (1024 * 1024));
-    const reason = `参考图总量超过 ${mb}MB 上限，请改用图片 URL`;
+    const budget = uploadBudgetChars();
+    if (budget <= 0) {
+      showRefError(ZERO_BUDGET_REASON);
+      return ZERO_BUDGET_REASON;
+    }
+    const budgetText =
+      budget >= 1024 * 1024
+        ? `${Math.floor(budget / (1024 * 1024))}MB`
+        : `${Math.floor(budget / 1024)}KB`;
+    const reason = `参考图总量超过 ${budgetText} 上限，请改用图片 URL`;
     showRefError(reason);
     return reason;
   }
@@ -161,7 +174,7 @@ export function addReference(kind, value, preview) {
 }
 
 /**
- * 逐个读取文件为 data URI 并加入参考图。
+ * 并行读取文件为 data URI，按选择顺序加入参考图以稳定「图N」编号。
  *
  * 读取前按类型与体积前置拦截，避免大文件白付全量读取；精确判定由
  * addReference 兜底，拒绝原因聚合为一条提示。
@@ -169,6 +182,10 @@ export function addReference(kind, value, preview) {
  * @param {FileList} files - 待读取的文件列表。
  */
 export async function handleFiles(files) {
+  if (uploadBudgetChars() <= 0) {
+    showRefError(ZERO_BUDGET_REASON);
+    return;
+  }
   const rejected = [];
   let batchChars = dataUriTotalChars();
   const reads = [];
@@ -187,19 +204,20 @@ export async function handleFiles(files) {
     reads.push(
       new Promise((resolve) => {
         const reader = new FileReader();
-        reader.onload = () => {
-          const reason = addReference("data_uri", reader.result, reader.result);
-          if (reason) rejected.push(`${file.name}（${reason}）`);
-          resolve(undefined);
-        };
+        reader.onload = () =>
+          resolve({ name: file.name, value: reader.result });
         reader.onerror = () => {
           rejected.push(`文件读取失败: ${file.name}`);
-          resolve(undefined);
+          resolve(null);
         };
         reader.readAsDataURL(file);
       }),
     );
   }
-  await Promise.all(reads);
+  for (const entry of await Promise.all(reads)) {
+    if (entry === null) continue;
+    const reason = addReference("data_uri", entry.value, entry.value);
+    if (reason) rejected.push(`${entry.name}（${reason}）`);
+  }
   if (rejected.length) showRefError(`未添加：${rejected.join("、")}`);
 }
