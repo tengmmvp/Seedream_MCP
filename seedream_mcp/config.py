@@ -256,13 +256,16 @@ class SeedreamConfig:
     def _validate_api_endpoint(self) -> None:
         """校验 base_url 的 scheme、主机名与 http 明文豁免。"""
         # RFC 3986 规定 scheme 大小写不敏感，HTTPS:// 等大写形态经 urlparse 取小写后判定。
-        parsed_base_url = urlparse(self.base_url)
+        invalid_url_message = f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
+        try:
+            parsed_base_url = urlparse(self.base_url)
+        except ValueError as exc:
+            # 括号畸形 IPv6 等形态使 urlparse 抛 ValueError，统一归为配置错误。
+            raise SeedreamConfigError(invalid_url_message) from exc
         _ensure_field_utf8_encodable(self.base_url, "base_url")
         base_url_scheme = parsed_base_url.scheme.lower()
         if not self.base_url or base_url_scheme not in ("http", "https"):
-            raise SeedreamConfigError(
-                f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
-            )
+            raise SeedreamConfigError(invalid_url_message)
         # netloc 缺失的畸形 URL 在构造期拒绝，避免运行期才以网络错误档失败。
         if not parsed_base_url.netloc.strip():
             raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
@@ -687,7 +690,7 @@ class SeedreamConfig:
         if keys is None:
             return
         seen: set[bytes] = set()
-        for index, key in enumerate(keys):
+        for index, key in enumerate(keys, start=1):
             if len(key) < _REQUEST_STATE_KEY_MIN_BYTES:
                 raise SeedreamConfigError(
                     f"request_state_secret_keys 第 {index} 个密钥解码后仅 {len(key)} 字节，"

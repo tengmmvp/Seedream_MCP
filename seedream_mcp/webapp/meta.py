@@ -60,7 +60,11 @@ async def web_index(_request: Request) -> Response:
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
     page = constants.STATIC_DIR / "index.html"
     if not page.is_file():
-        return Response("Web 操作台页面缺失，请检查安装完整性。", media_type="text/plain")
+        return Response(
+            "Web 操作台页面缺失，请检查安装完整性。",
+            media_type="text/plain",
+            headers=PAGE_SECURITY_HEADERS,
+        )
     return FileResponse(
         page,
         media_type="text/html",
@@ -97,7 +101,12 @@ async def web_not_found(request: Request) -> Response:
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
     page = constants.STATIC_DIR / "404.html"
     if not page.is_file():
-        return Response("404 Not Found", status_code=404, media_type="text/plain")
+        return Response(
+            "404 Not Found",
+            status_code=404,
+            media_type="text/plain",
+            headers=PAGE_SECURITY_HEADERS,
+        )
     return FileResponse(
         page,
         status_code=404,

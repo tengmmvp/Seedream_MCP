@@ -59,6 +59,19 @@ export async function loadConfigInfo() {
   sizeSelect.appendChild(custom);
   if (previous === "custom" || presets.includes(previous)) {
     sizeSelect.value = previous;
+  } else {
+    const match = /^(\d+)[xX](\d+)$/.exec(info.default_size || "");
+    if (presets.includes(info.default_size)) {
+      sizeSelect.value = info.default_size;
+    } else if (match) {
+      $("size-width").value = match[1];
+      $("size-height").value = match[2];
+      sizeSelect.value = "custom";
+    }
+    $("custom-size-field").classList.toggle(
+      "collapsed",
+      sizeSelect.value !== "custom",
+    );
   }
 
   // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源；先前选择在新列表

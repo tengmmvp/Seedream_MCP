@@ -1051,6 +1051,14 @@ def test_seedream_config_none_api_key_raises_config_error() -> None:
         SeedreamConfig(api_key=None)  # type: ignore[arg-type]
 
 
+def test_seedream_config_malformed_base_url_raises_config_error() -> None:
+    """括号畸形 IPv6 等 base_url 形态归约为配置错误并附环境变量提示。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="http://[::1")
+
+
 def test_seedream_config_chunk_size_error_mentions_both_env_vars() -> None:
     """跨字段约束的校验消息同时附带两个字段的环境变量名。"""
     from seedream_mcp.config import SeedreamConfig
@@ -1315,6 +1323,7 @@ def test_build_config_rejects_short_request_state_key(
         build_config_from_sources(env_file=str(env_file))
 
     assert "secrets.token_hex(32)" in excinfo.value.message
+    assert "第 1 个密钥" in excinfo.value.message
 
 
 def test_build_config_rejects_duplicate_request_state_keys(

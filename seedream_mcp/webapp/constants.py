@@ -35,7 +35,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 # 图片经 fetch 转 blob 装载需放开 connect-src 的 https，内联样式为页面内嵌
 # <style> 保留，object-src 禁插件内容，base-uri 与 form-action 不回退
 # default-src 须单独声明，frame-ancestors 拒绝跨站 iframe 嵌入；nosniff 阻断
-# MIME 嗅探。
+# MIME 嗅探；cache-control 要求逐次回源验证，包升级后无陈旧窗口，与静态直出同口径。
 PAGE_SECURITY_HEADERS: dict[str, str] = {
     "content-security-policy": (
         "default-src 'self'; "
@@ -48,6 +48,7 @@ PAGE_SECURITY_HEADERS: dict[str, str] = {
         "form-action 'self'; "
         "frame-ancestors 'self'"
     ),
+    "cache-control": "no-cache",
     "x-content-type-options": "nosniff",
 }
 

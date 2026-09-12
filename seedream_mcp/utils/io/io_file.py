@@ -99,7 +99,7 @@ def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Pat
         suffix: 临时文件名后缀，默认 ``.part``。
 
     Returns:
-        ``(fd, temp_path)`` 二元组，``fd`` 已以只写独占方式打开。
+        ``(fd, temp_path)`` 二元组，``fd`` 已以读写独占方式打开。
     """
     fd, name = tempfile.mkstemp(dir=str(dir_path), suffix=suffix)
     return fd, Path(name)
