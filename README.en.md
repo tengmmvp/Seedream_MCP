@@ -8,6 +8,8 @@
   <a href="./README.en.md">English</a>
 </p>
 
+<p align="center"><b>An MCP tool based on the Volcengine Seedream APIs for AI image generation.</b></p>
+
 <div align="center">
   <img src="https://img.shields.io/github/v/release/tengmmvp/Seedream_MCP?display_name=tag&sort=semver&label=Release&style=for-the-badge&color=4C51BF" alt="Version"/>
   <img src="https://img.shields.io/pypi/v/seedream-image-mcp?label=PyPI&style=for-the-badge&color=F37720" alt="PyPI"/>
@@ -18,8 +20,6 @@
   </a>
   <br><br>
   <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/seedream-image-mcp.jpeg" alt="Seedream MCP" width="100%"/>
-  <br><br>
-  <b>An MCP tool based on the Volcengine Seedream APIs for AI image generation.</b>
 </div>
 
 ---
