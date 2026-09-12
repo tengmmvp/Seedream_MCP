@@ -267,6 +267,12 @@ def _entry_url(data: dict[str, Any]) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _entry_b64_json(data: dict[str, Any]) -> str:
+    """取条目 b64_json 并收敛为 str，缺失与非 str 形态按空串处理。"""
+    value = data.get("b64_json")
+    return value if isinstance(value, str) else ""
+
+
 class AutoSaveManager:
     """自动保存管理器，协调并发下载、文件写入与节流清理。"""
 
@@ -728,7 +734,7 @@ class AutoSaveManager:
         logger.info("开始批量保存 {} 个 Base64 图片", len(image_data))
         factories = [
             lambda data=data: self.save_base64_image(
-                b64_data=data.get("b64_json", ""),
+                b64_data=_entry_b64_json(data),
                 prompt=data.get("prompt", ""),
                 tool_name=tool_name,
                 custom_name=data.get("custom_name"),

@@ -17,7 +17,7 @@
     <img src="https://img.shields.io/badge/Ask_Zread-_.svg?style=for-the-badge&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff" alt="Ask Zread"/>
   </a>
   <br><br>
-  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/doubao-seedream-5-0-pro.jpeg" alt="Seedream MCP" width="670"/>
+  <img src="https://raw.githubusercontent.com/tengmmvp/img2code/main/img/seedream-image-mcp.jpeg" alt="Seedream MCP" width="100%"/>
   <br><br>
   <b>基于火山引擎 Seedream API 的 AI 图像生成 MCP 工具。</b>
 </div>
@@ -253,7 +253,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `image` (必需) - 输入图像，支持图像 URL、本地文件路径或 Base64 图片数据；本地文件路径须在读取范围内，其中相对路径仅限图片保存目录内
 - `layer_decomposition` (可选) - 是否开启图层拆分，仅 5.0 Pro 支持；开启后将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，图层条目额外返回 `z_index`、`name`、`description`、`bounding_box` 字段；`output_format` 仅控制底图格式，图层始终为 PNG
 - `background` (可选) - 透明通道，`transparent` 生成透明背景图（需输入单张带透明通道的图片，与 `output_format=jpeg` 互斥）或 `opaque` 生成常规图，仅 5.0 Pro 支持
-- `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容；图层拆分场景仅支持档位与 `auto`（按输入图自适应，未指定尺寸时的默认值）
+- `size` (可选) - 图像尺寸：`1K`、`1.5K`、`2K`、`3K`、`4K` 或 `<宽>x<高>` 像素值，默认使用配置文件值，需与所选模型兼容；图层拆分场景仅支持 `1K`、`1.5K`、`2K` 档位或 `auto`（按输入图自适应，未指定尺寸时的默认值）
 - `watermark` (可选) - 是否添加水印，默认使用配置文件值（默认 false）
 - `response_format` (可选) - 响应格式：`url`或`b64_json`，默认`url`
 - `output_format` (可选) - 输出文件格式，仅 5.0 系列（Pro/标准/Lite）支持 `jpeg` 或 `png`，默认不指定，由 API 按模型默认处理

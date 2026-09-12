@@ -44,7 +44,7 @@
 
 把一张图拆成可编辑的透明图层，再按需重组：
 
-1. **拆分**：`image_to_image`，`layer_decomposition=true`（需服务器已配置为 5.0 Pro）。`size` 仅接受档位或 `auto`；需要透明底图时配 `background="transparent"`，此时需输入 png 等带透明通道的单张图片
+1. **拆分**：`image_to_image`，`layer_decomposition=true`（需服务器已配置为 5.0 Pro）。`size` 仅接受 `1K/1.5K/2K` 档位或 `auto`；需要透明底图时配 `background="transparent"`，此时需输入 png 等带透明通道的单张图片
 2. **结果结构**：1 张底图 + 至多 16 张透明 PNG 图层，每张图层带 `z_index`、`name`、`description`、`bounding_box` 元数据，图层始终为 PNG
 3. **再合成路径**：
    - 替换/修改某元素：把目标图层 PNG 作为 `image` 参数再过一次 `image_to_image`

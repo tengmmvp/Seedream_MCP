@@ -331,6 +331,20 @@ async def test_save_multiple_base64_images_end_to_end(
     assert results[1].original_url == "base64"
 
 
+async def test_save_multiple_base64_images_non_str_payload_degrades(
+    manager: AutoSaveManager,
+) -> None:
+    """b64_json 为非 str 形态时收敛为空串，降级为业务错误而非未知错误。"""
+    image_data = [{"b64_json": 123, "prompt": "bad"}]
+
+    results = await manager.save_multiple_base64_images(image_data, tool_name="t2i")
+
+    assert len(results) == 1
+    assert results[0].success is False
+    assert "空的Base64数据" in (results[0].error or "")
+    assert results[0].original_url == "base64"
+
+
 # ==================== to_dict 净化与 markdown alt 兜底 ====================
 
 

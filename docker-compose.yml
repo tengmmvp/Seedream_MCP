@@ -1,7 +1,7 @@
 services:
   seedream-mcp:
     # 固定 major.minor 标签，随稳定版补丁自动跟进，升级 minor 或 major 时手动修改；
-    # 预发布版本会同样产出该标签，引用 rc 需改用精确版本号。
+    # 预发布 tag 不产出该标签，引用 rc 须用精确版本号标签。
     image: ghcr.io/tengmmvp/seedream_mcp:3.0
     container_name: seedream-mcp-server
     # 末位参数默认豁免容器内非回环绑定的 TLS 门禁；对外暴露时以证书参数替换，如

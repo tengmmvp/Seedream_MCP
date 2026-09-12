@@ -255,8 +255,9 @@ class SeedreamClient(_ClientHTTPMixin):
                 transparent 需输入单张带透明通道的图片，且与 output_format="jpeg"
                 互斥。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或
-                "<宽>x<高>" 像素值；图层拆分场景仅支持档位与 "auto"，且未传入时默认
-                取 "auto"，其余场景未传入时默认取配置 default_size。
+                "<宽>x<高>" 像素值；图层拆分场景仅支持 "1K"、"1.5K"、"2K" 档位与
+                "auto"，且未传入时默认取 "auto"，其余场景未传入时默认取配置
+                default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
             output_format: 输出图片格式，仅 {output_format_families} 支持 "jpeg" 或 "png"。

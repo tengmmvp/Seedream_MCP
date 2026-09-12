@@ -124,7 +124,7 @@ BACKGROUND_DESCRIPTION = (
 SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。"
 SIZE_WITH_LAYER_DESCRIPTION = (
     "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；"
-    "图层拆分场景仅支持档位与 auto，未提供时默认 auto；"
+    "图层拆分场景仅支持 1K/1.5K/2K 档位或 auto，未提供时默认 auto；"
     "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
 )
 WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
