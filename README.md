@@ -663,7 +663,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - **保存目录由服务管理**：按天清理与总量配额只作用于图片目录 `<数据根目录>/.seedream/images`，目录内**所有**过期的图片文件与空目录都会被删除，不看文件来源；经 `save_path` 保存到其他目录的文件不受管理。
 - **多客户端部署建议显式设置 `SEEDREAM_DATA_ROOT`**：数据根目录默认跟随客户端声明的 MCP Roots 变化，不同客户端的图片会散落在各自目录；显式声明后所有会话共用同一落点，读取范围与数据位置随之确定。
-- **有状态会话依赖客户端正确断开**：streamable-http 会话在客户端发送 DELETE 或进程退出时回收，客户端异常退出时会话驻留；大量短连客户端的部署建议改用 `--stateless`。
+- **有状态会话依赖客户端正确断开**：旧版协议客户端的 streamable-http 会话在客户端发送 DELETE 或进程退出时回收，客户端异常退出时会话驻留；大量短连客户端的部署建议改用 `--stateless`，新版协议客户端无会话、不受此影响。
 - **Linux 宿主挂载目录属主**：容器以 uid 1000 运行，compose 挂载的 `./.seedream` 目录需对该用户可写：`mkdir -p .seedream && chown 1000:1000 .seedream`；Docker Desktop 不受影响。
 - **出站连接不走系统代理**：API 调用与图片下载固定忽略 `HTTP_PROXY` 等系统代理环境变量；企业代理环境需保证主机直连公网，或经网络层透明代理转发。
 

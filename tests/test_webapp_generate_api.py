@@ -18,6 +18,7 @@ import pytest
 from mcp.types import CallToolResult
 
 import seedream_mcp.resources as resources_module
+import seedream_mcp.utils.core.errors as errors_module
 from _web_fixtures import build_web_app, web_asgi_client, write_workspace_config
 from seedream_mcp.config import (
     LIFESPAN_KEY_CLIENT,
@@ -440,6 +441,26 @@ async def test_generate_maps_error_type_to_status(
 
     assert response.status_code == expected_status
     assert response.json()["error"]["type"] == error_type
+
+
+def test_generation_error_status_covers_profile_error_codes() -> None:
+    """状态码映射表覆盖除显式走默认外的全部档案错误码。
+
+    新增档案错误码未登记映射时在此失败，防其静默回落 502；generation_failed
+    有意走默认回退，为唯一豁免。
+    """
+    profiles = list(errors_module._HTTP_STATUS_PROFILES.values())
+    profiles += [profile for _, profile in errors_module._EXCEPTION_PROFILES]
+    profiles += [
+        errors_module._HTTP_5XX_PROFILE,
+        errors_module._HTTP_DEFAULT_PROFILE,
+        errors_module._GENERIC_MCP_PROFILE,
+        errors_module._UNKNOWN_PROFILE,
+    ]
+
+    assert set(_responses.GENERATION_ERROR_STATUS) == {
+        profile.error_code for profile in profiles
+    } - {"generation_failed"}
 
 
 async def test_generate_runner_validation_error_returns_400(

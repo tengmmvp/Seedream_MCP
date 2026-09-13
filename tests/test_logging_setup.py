@@ -15,6 +15,7 @@ from seedream_mcp.utils.core.inflight import (
     log_unretrieved_task_exception,
 )
 from seedream_mcp.utils.core.logs import (
+    EarlyMessageBuffer,
     _strip_message_control_chars,
     setup_logging,
 )
@@ -361,6 +362,23 @@ def test_intercept_handler_locates_real_caller_frame(
     assert "via stdlib bridge" in content
     assert "logging:callHandlers" not in content
     assert "test_logging_setup:" in content
+
+
+# ==================== EarlyMessageBuffer 去重语义 ====================
+
+
+def test_append_once_dedupes_by_content_within_window() -> None:
+    """append_once 按级别加消息整体去重，窗口在取走后复位。"""
+    buffer = EarlyMessageBuffer()
+
+    buffer.append_once("WARNING", "回退提示")
+    buffer.append_once("WARNING", "回退提示")
+    buffer.append_once("ERROR", "回退提示")
+    assert buffer.snapshot() == [("WARNING", "回退提示"), ("ERROR", "回退提示")]
+
+    assert buffer.take_all() == [("WARNING", "回退提示"), ("ERROR", "回退提示")]
+    buffer.append_once("WARNING", "回退提示")
+    assert buffer.snapshot() == [("WARNING", "回退提示")]
 
 
 # ==================== 控制字符 patcher ====================

@@ -188,10 +188,18 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     max_pixels_before = pil_image_module.MAX_IMAGE_PIXELS if pil_image_module is not None else None
 
     # requestState 密钥环经 CLI 启动路径重绑直写 SDK 私有 boundary，快照恢复隔离
-    # 触发过重绑的用例；boundary 不在中间件链时不动作。
+    # 触发过重绑的用例；boundary 不在中间件链时不动作，私有属性缺失时告警跳过。
     boundary = locate_request_state_boundary()
-    boundary_security: Any = getattr(boundary, "_security", None)
-    boundary_audience: Any = getattr(boundary, "_audience", None)
+    boundary_keys_present = boundary is not None and all(
+        hasattr(boundary, attr) for attr in ("_security", "_audience")
+    )
+    if boundary is not None and not boundary_keys_present:
+        _warn_sdk_private_path_missing(
+            "boundary._security/_audience",
+            "requestState 密钥环快照恢复被跳过，触发过重绑的用例可能相互污染",
+        )
+    boundary_security: Any = getattr(boundary, "_security", None) if boundary_keys_present else None
+    boundary_audience: Any = getattr(boundary, "_audience", None) if boundary_keys_present else None
 
     # 解码器就绪标志为模块全局，重置以隔离初始化时序相关用例
     monkeypatch.setattr(formats_module, "_decoders_ready", False)
@@ -200,7 +208,7 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # 经复位协议重建到干净态；复位清单见 _reset_lifespan_state
     _reset_lifespan_state()
     yield
-    if boundary is not None:
+    if boundary is not None and boundary_keys_present:
         boundary._security = boundary_security
         boundary._audience = boundary_audience
     if pil_image_module is not None:

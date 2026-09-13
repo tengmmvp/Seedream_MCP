@@ -421,11 +421,12 @@ async def test_download_image_stops_retry_when_total_budget_exhausted(
         clock_now[0] += 7200.0
         return value
 
-    monkeypatch.setattr(time, "monotonic", _advancing_time)
-
     save_path = tmp_path / "out.png"
-    with pytest.raises(DownloadError):
-        await manager.download_image("https://example.com/img.png", save_path)
+    # 伪时钟经 context 限定在调用窗口，避免污染事件循环时钟触发假 join 超时告警。
+    with monkeypatch.context() as m:
+        m.setattr(time, "monotonic", _advancing_time)
+        with pytest.raises(DownloadError):
+            await manager.download_image("https://example.com/img.png", save_path)
 
     assert not save_path.exists()
     assert session._idx == 1, "预算耗尽后应停止重试，仅执行首次尝试"

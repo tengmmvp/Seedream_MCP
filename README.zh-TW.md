@@ -663,7 +663,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 
 - **儲存目錄由服務管理**：按天清理與總量配額只作用於圖片目錄 `<資料根目錄>/.seedream/images`，目錄內**所有**過期的圖片檔案與空目錄都會被刪除，不看檔案來源；經 `save_path` 儲存到其他目錄的檔案不受管理。
 - **多用戶端部署建議顯式設定 `SEEDREAM_DATA_ROOT`**：資料根目錄預設跟隨用戶端宣告的 MCP Roots 變化，不同用戶端的圖片會散落在各自目錄；顯式宣告後所有工作階段共用同一落點，讀取範圍與資料位置隨之確定。
-- **有狀態會話依賴用戶端正確斷開**：streamable-http 會話在用戶端傳送 DELETE 或程序結束時回收，用戶端異常退出時會話駐留；大量短連用戶端的部署建議改用 `--stateless`。
+- **有狀態會話依賴用戶端正確斷開**：舊規範修訂用戶端的 streamable-http 會話在用戶端傳送 DELETE 或程序結束時回收，用戶端異常退出時會話駐留；大量短連用戶端的部署建議改用 `--stateless`，新規範修訂用戶端無會話、不受此影響。
 - **Linux 宿主掛載目錄屬主**：容器以 uid 1000 執行，compose 掛載的 `./.seedream` 目錄需對該使用者可寫：`mkdir -p .seedream && chown 1000:1000 .seedream`；Docker Desktop 不受影響。
 - **出站連線不走系統代理**：API 呼叫與圖片下載固定忽略 `HTTP_PROXY` 等系統代理環境變數；企業代理環境需保證主機直連網際網路，或經網路層透明代理轉送。
 
