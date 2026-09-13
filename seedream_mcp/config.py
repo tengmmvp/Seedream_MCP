@@ -548,6 +548,10 @@ class SeedreamConfig:
                 accepted = [address.compressed]
                 if ipv4_mapped is not None:
                     accepted.append(f"::ffff:{ipv4_mapped}")
+                    # compressed 对 v4 映射地址的输出随 Python 版本在 dotted 与
+                    # hex 展开形间翻转，hex 形显式并入，放行集与版本无关。
+                    mapped_int = int(ipv4_mapped)
+                    accepted.append(f"::ffff:{mapped_int >> 16:x}:{mapped_int & 0xFFFF:x}")
                 if literal not in accepted:
                     suggested = (
                         f"[::ffff:{ipv4_mapped}]"
