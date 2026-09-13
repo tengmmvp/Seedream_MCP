@@ -52,7 +52,7 @@ def test_deprecated_ctx_log_push_channel_removed() -> None:
     SDK 2.0 按 SEP-2577 对四个方法标注 MCPDeprecationWarning，推送需请求级
     opt-in 默认不送达；重新封装会使全量测试重现弃用告警并依赖已弃用的送达语义。
     """
-    import seedream_mcp.tools.core._shared as helpers_module
+    import seedream_mcp.tools.core._pipeline as helpers_module
 
     for name in ("_safe_ctx_log", "_VALID_LOG_LEVELS"):
         assert not hasattr(helpers_module, name), name
@@ -116,8 +116,8 @@ async def test_tool_annotations_locked_to_current_hints() -> None:
 
 
 async def test_resources_registered() -> None:
-    """注册 MCP 资源：workspace roots 以模板注册，SDK 2.0 起 Context 仅注入模板资源；
-    server info 与 models info 为静态资源。"""
+    """注册 MCP 资源：workspace roots 以模板注册（SDK 静态资源不支持 Context
+    注入，Roots 取回必需）；server info 与 models info 为静态资源。"""
     resources = await mcp.list_resources()
     uris = {str(resource.uri) for resource in resources}
 

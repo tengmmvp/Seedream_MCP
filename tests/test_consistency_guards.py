@@ -23,6 +23,12 @@ from seedream_mcp.tools.core.schemas import (
     OutputFormat,
     ResponseFormat,
 )
+from seedream_mcp.tools.impl._metadata import (
+    IMAGE_TO_IMAGE,
+    MULTI_IMAGE_FUSION,
+    SEQUENTIAL_GENERATION,
+    TEXT_TO_IMAGE,
+)
 from seedream_mcp.utils.core.validators import (
     VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
@@ -30,6 +36,14 @@ from seedream_mcp.utils.core.validators import (
     VALID_OUTPUT_FORMATS,
     VALID_RESPONSE_FORMATS,
     VALID_SIZE_PRESETS,
+)
+
+# 生成工具元数据元组：三个守护测试共用，新增生成工具漏更任一测试即失败。
+_GENERATION_TOOL_METADATA = (
+    TEXT_TO_IMAGE,
+    IMAGE_TO_IMAGE,
+    MULTI_IMAGE_FUSION,
+    SEQUENTIAL_GENERATION,
 )
 
 
@@ -80,19 +94,10 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
     模块，靠本断言锁定一致。
     """
     from seedream_mcp.resources import mcp
-    from seedream_mcp.tools.impl._shared import (
-        IMAGE_TO_IMAGE,
-        MULTI_IMAGE_FUSION,
-        SEQUENTIAL_GENERATION,
-        TEXT_TO_IMAGE,
-    )
 
     tools = await mcp.list_tools()
     registered = {tool.name for tool in tools}
-    declared = {
-        metadata.tool_name
-        for metadata in (TEXT_TO_IMAGE, IMAGE_TO_IMAGE, MULTI_IMAGE_FUSION, SEQUENTIAL_GENERATION)
-    }
+    declared = {metadata.tool_name for metadata in _GENERATION_TOOL_METADATA}
     declared.add("browse_images")
 
     assert declared == registered
@@ -104,17 +109,10 @@ def test_start_log_placeholders_match_builder_arity() -> None:
     双源字面量分布两处，loguru 惰性格式化使错位只在落日志时打错误不抛异常，
     故按个数锁定并实际执行一次格式化兜底。
     """
-    from seedream_mcp.tools.impl._shared import (
-        IMAGE_TO_IMAGE,
-        MULTI_IMAGE_FUSION,
-        SEQUENTIAL_GENERATION,
-        TEXT_TO_IMAGE,
-    )
-
     # sequential 的 max_images 取非 None 值，覆盖 builder 读取的全部上下文字段
     context = make_generation_context(prompt="生成提示词", max_images=4)
 
-    for metadata in (TEXT_TO_IMAGE, IMAGE_TO_IMAGE, MULTI_IMAGE_FUSION, SEQUENTIAL_GENERATION):
+    for metadata in _GENERATION_TOOL_METADATA:
         values = metadata.start_log_values_builder(context)
         placeholders = metadata.start_log_message.count("{}")
         assert len(values) == placeholders, (
@@ -159,6 +157,17 @@ def test_security_marked_logs_are_warning_level() -> None:
                 offenders.append(f"{relative}: {match.group(0)}")
 
     assert offenders == []
+
+
+def test_style_prompt_prefix_names_registered_tools() -> None:
+    """风格预设文案点名的工具存在于 impl 元数据，工具改名时文案须同步。"""
+    from seedream_mcp.server import _STYLE_PROMPT_PREFIX
+
+    declared = {metadata.tool_name for metadata in _GENERATION_TOOL_METADATA}
+    named = set(re.findall(r"([a-z][a-z_]+) 工具", _STYLE_PROMPT_PREFIX))
+
+    assert named, "文案未解析到工具名点名，形态可能已变"
+    assert named <= declared, f"文案点名了未注册的工具: {sorted(named - declared)}"
 
 
 def test_context_probe_keys_match_schema_fields() -> None:

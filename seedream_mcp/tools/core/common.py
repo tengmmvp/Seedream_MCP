@@ -1,6 +1,6 @@
 """生成类工具通用处理门面。
 
-内部按职责拆分到 _shared/context/results/auto_save/parallel/outputs/schemas
+内部按职责拆分到 _pipeline/context/results/auto_save/parallel/outputs/schemas
 子模块，本模块聚合公共符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
 ``execute_generation_handler`` 是四类生成工具的统一处理流水线，各阶段职责与异常降级
 契约见该函数 docstring。
@@ -29,7 +29,7 @@ from ...utils.core.errors import (
     format_error_for_user,
     resolve_error_profile,
 )
-from ._shared import (
+from ._pipeline import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,

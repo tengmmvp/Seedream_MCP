@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.tools.core._shared import _resolve_base_dir
+from seedream_mcp.tools.core._pipeline import _resolve_base_dir
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.io.io_path import (
     _DATA_ROOT_RESOLVE_CACHE,
@@ -188,7 +188,7 @@ def test_resolve_base_dir_absolute_save_path_skips_unresolvable_images_root(
     与纯远端参考图不依赖数据根目录声明可解析性的解耦原则同口径。
     """
     import seedream_mcp.utils.io.io_path as io_path_module
-    from seedream_mcp.tools.core._shared import prevalidate_save_path, _resolve_base_dir
+    from seedream_mcp.tools.core._pipeline import prevalidate_save_path, _resolve_base_dir
 
     monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(tmp_path / "pics"))
 

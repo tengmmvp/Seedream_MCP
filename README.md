@@ -511,23 +511,23 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
   </tr>
   <tr>
     <td><code>seedream://workspace/roots</code></td>
-    <td>当前生效的工作区根：客户端授权的 MCP Roots，未声明时回退环境配置的工作目录</td>
+    <td>当前生效的工作区根：客户端授权的 MCP Roots，未声明时回退环境配置的工作目录。为参数化资源，部分客户端的资源列表不直接展示，按 URI 读取即可。</td>
   </tr>
   <tr>
     <td><code>seedream://server/info</code></td>
-    <td>服务器名称、版本与当前生效配置摘要（模型、默认尺寸、自动保存开关，共五项字段）</td>
+    <td>服务器名称、版本与当前生效配置摘要。</td>
   </tr>
   <tr>
     <td><code>seedream://models/info</code></td>
-    <td>各模型别名与能力声明：支持的尺寸档位、像素范围、参考图上限、输出格式/工具/流式等能力，供客户端按需选择模型</td>
+    <td>各模型别名与能力声明：支持的尺寸档位、像素范围、参考图上限、输出格式/工具/流式等能力，供客户端按需选择模型。</td>
   </tr>
   <tr>
     <td><code>skill://seedream-image-generation/SKILL.md</code></td>
-    <td>Agent Skill 主文件：图像生成指南入口，正文含工具速查、模型差异与参数规则</td>
+    <td>Agent Skill 主文件：图像生成指南入口，正文含工具速查、模型差异与参数规则。</td>
   </tr>
   <tr>
     <td><code>skill://seedream-image-generation/references/{+path}</code></td>
-    <td>Agent Skill 参考文件模板：多步工作流与故障排查，按需读取</td>
+    <td>Agent Skill 参考文件模板：多步工作流与故障排查，按需读取。</td>
   </tr>
 </table>
 

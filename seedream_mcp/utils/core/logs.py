@@ -43,6 +43,12 @@ class EarlyMessageBuffer:
         with self._lock:
             self._messages.append((level, message))
 
+    def append_once(self, level: str, message: str) -> None:
+        """缓冲一条消息，同内容在缓冲窗口内去重。"""
+        with self._lock:
+            if (level, message) not in self._messages:
+                self._messages.append((level, message))
+
     def extend(self, messages: Iterable[tuple[str, str]]) -> None:
         """缓冲多条消息。"""
         with self._lock:
@@ -195,7 +201,10 @@ def setup_logging(
     """设置日志配置。
 
     未显式传入 log_file 时，默认路径 ``.seedream/logs/seedream_mcp.log`` 相对进程
-    工作目录解析；生产入口传入按数据根目录推导的路径。
+    工作目录解析；生产入口传入按数据根目录推导的路径。两通道均内联写入，不开
+    enqueue：写入串行由 loguru handler 内置锁承担，免去队列序列化成本与队列
+    管道满时的永久回压；轮转压缩与慢 stderr 消费者的内联停顿为有界代价，属
+    知情取舍。
 
     Args:
         log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
@@ -232,7 +241,6 @@ def setup_logging(
             colorize=None,
             backtrace=True,
             diagnose=False,
-            enqueue=True,
         )
 
     if enable_file:
@@ -256,7 +264,6 @@ def setup_logging(
             compression="zip",
             backtrace=True,
             diagnose=False,
-            enqueue=True,
         )
 
     # 安装 InterceptHandler，将标准库 logging 的全部调用重定向至 loguru；root

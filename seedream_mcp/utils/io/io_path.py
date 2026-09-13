@@ -231,6 +231,8 @@ def clear_resolved_env_root_cache() -> None:
     _RESOLVED_ENV_ROOT_CACHE.clear()
     _DATA_ROOT_RESOLVE_CACHE.clear()
     _fallback_root = None
+    # 配置变化后缓存的回退提示一并作废，防陈旧提示混入下次 drain。
+    _START_MESSAGES.clear()
 
 
 def _resolve_with_cache(cache_key: str, resolver: Callable[[], Path]) -> Path:
@@ -381,7 +383,11 @@ _START_MESSAGES = EarlyMessageBuffer()
 
 
 def drain_pending_start_messages() -> None:
-    """输出并清空启动期缓冲的回退提示。"""
+    """输出并清空启动期缓冲的回退提示。
+
+    server 启动后调用；嵌入式调用方需自行调用。回退提示同内容在缓冲窗口内
+    去重，drain 后再次发生回退会重新提示。
+    """
     _START_MESSAGES.drain()
 
 
@@ -412,7 +418,9 @@ def _resolve_fallback_root() -> Path:
         root = _resolve_home_root()
         message = "进程启动目录不可用作回退根，工作根目录回退为用户主目录 {}，默认图片目录为 {}"
     _fallback_root = root
-    _START_MESSAGES.append("INFO", message.format(str(root), str(root / DATA_DIR_NAME / "images")))
+    _START_MESSAGES.append_once(
+        "INFO", message.format(str(root), str(root / DATA_DIR_NAME / "images"))
+    )
     return root
 
 

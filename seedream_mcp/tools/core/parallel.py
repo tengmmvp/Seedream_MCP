@@ -18,7 +18,7 @@ from ...request_plan import shared_request_plan_scope
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
 from ...utils.core.errors import SeedreamMCPError, format_error_for_user
 from ...utils.io.io_download import DownloadManager
-from ._shared import (
+from ._pipeline import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
     _yield_for_cancellation,

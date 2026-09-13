@@ -28,6 +28,17 @@ from _client_fakes import _install_mock_transport
 from _log_fakes import RecordingLogger
 
 
+def _capture_call_api(captured: dict[str, Any]) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """构造捕获请求数据并返回成功空载荷的 _call_api 替身。"""
+
+    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        del endpoint
+        captured.update(request_data)
+        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+
+    return fake_call_api
+
+
 async def test_validate_common_generation_params_synthesizes_defaults() -> None:
     """缺省合成走 resolve_effective_generation_defaults 单源：图层拆分缺省 size
     为 auto、水印缺省取配置默认，与工具上下文构建共享同一规则。"""
@@ -179,13 +190,7 @@ async def test_generation_methods_synthesize_defaults_from_config(
     config = SeedreamConfig(api_key="test_key", max_retries=1, default_size="4K")
     client = SeedreamClient(config)
     captured: dict[str, Any] = {}
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured))
 
     # 设置 default_size="4K" 后不传 size 应得 4K，watermark 不传时恒为 False
     await client.text_to_image(prompt="test")
@@ -195,13 +200,7 @@ async def test_generation_methods_synthesize_defaults_from_config(
     # 未改配置的默认实例回落 default_size=2K
     default_client = SeedreamClient(_build_config())
     default_captured: dict[str, Any] = {}
-
-    async def fake_call_api_default(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        default_captured.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(default_client, "_call_api", fake_call_api_default)
+    monkeypatch.setattr(default_client, "_call_api", _capture_call_api(default_captured))
     await default_client.text_to_image(prompt="test")
     assert default_captured["size"] == "2K"
     assert default_captured["watermark"] is False
@@ -221,18 +220,40 @@ async def test_image_to_image_resolves_relative_path_from_images_root(
 
     client = SeedreamClient(_build_config())
     captured_request: dict[str, Any] = {}
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
     await client.image_to_image(prompt="test", image="ref.png", size="2K")
 
     assert isinstance(captured_request["image"], str)
     assert captured_request["image"].startswith("data:image/png;base64,")
+
+
+async def test_image_to_image_payload_carries_layer_and_background(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5.0 Pro 的图层拆分与透明背景进入 API 请求载荷，不止校验层放行。"""
+    workspace = tmp_path / "workspace"
+    images_root = workspace / ".seedream" / "images"
+    image_file = images_root / "ref.png"
+    image_file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), color=(255, 0, 0)).save(image_file)
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+
+    client = SeedreamClient(
+        SeedreamConfig(api_key="k", model_id="doubao-seedream-5.0-pro", max_retries=1)
+    )
+    captured_request: dict[str, Any] = {}
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
+
+    await client.image_to_image(
+        prompt="test",
+        image="ref.png",
+        layer_decomposition=True,
+        background="transparent",
+    )
+
+    assert captured_request["layer_decomposition"] is True
+    assert captured_request["background"] == "transparent"
 
 
 async def test_text_to_image_includes_seedream_50_output_format_and_tools(

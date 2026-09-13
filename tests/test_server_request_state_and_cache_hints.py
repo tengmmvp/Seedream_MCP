@@ -210,3 +210,10 @@ def test_rebind_request_state_security_survives_missing_public_attribute(
     assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
 
     assert "退化为进程临时密钥" in capsys.readouterr().err
+
+
+def test_conftest_session_manager_private_path_still_exists() -> None:
+    """conftest 会话隔离探测的私有路径存在，SDK 升级改名时先转红而非静默 no-op。"""
+    lowlevel_server = getattr(resources_module.mcp, "_lowlevel_server", None)
+    assert lowlevel_server is not None
+    assert hasattr(lowlevel_server, "_session_manager")

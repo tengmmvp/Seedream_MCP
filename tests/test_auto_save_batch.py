@@ -332,6 +332,84 @@ async def test_maybe_cleanup_throttle_shared_across_request_subdirs(
     assert cleanup_calls == [30]
 
 
+async def test_cleanup_partial_failure_writes_backoff_timestamp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """清理返回 errors 时写入短退避时间戳，下次保存按退避秒数重试。"""
+    import time
+
+    default_root = tmp_path / "images"
+    default_root.mkdir()
+
+    def failing_cleanup(days: int, max_total_bytes: int | None) -> dict[str, Any]:
+        del days, max_total_bytes
+        return {"deleted_files": 0, "deleted_size": 0, "errors": ["删除文件失败 x"]}
+
+    manager = AutoSaveManager(
+        base_dir=default_root / "a", cleanup_base_dir=default_root, cleanup_days=30
+    )
+    monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
+    auto_save_module._cleanup_last_run.clear()
+
+    await manager._maybe_cleanup()
+    await auto_save_module.drain_background_cleanup_tasks()
+
+    assert len(auto_save_module._cleanup_last_run) == 1
+    gap = time.time() - next(iter(auto_save_module._cleanup_last_run.values()))
+    interval = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
+    backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
+    assert interval - backoff - 5 <= gap <= interval
+
+
+async def test_run_cleanup_in_background_skips_without_file_manager(tmp_path: Path) -> None:
+    """清理边界不可用时后台任务直接返回，不抛错不记退避。"""
+    manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=None)
+
+    await manager._run_cleanup_in_background("cleanup-key")
+
+    assert "cleanup-key" not in auto_save_module._cleanup_last_run
+
+
+async def test_drain_background_cleanup_warns_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """清理任务超时未完成时 drain 放弃等待并告警，任务不被取消。"""
+    from _log_fakes import capture_loguru_messages
+
+    monkeypatch.setattr(auto_save_module, "_DRAIN_TIMEOUT_SECONDS", 0.05)
+
+    release = asyncio.Event()
+
+    async def _stuck_cleanup() -> None:
+        await release.wait()
+
+    stuck = asyncio.ensure_future(_stuck_cleanup())
+    auto_save_module._cleanup_tasks.add(stuck)
+    records: list[str] = []
+
+    try:
+        with capture_loguru_messages(records):
+            await drain_background_cleanup_tasks()
+
+        assert any("放弃等待" in message for message in records)
+        assert not stuck.cancelled()
+    finally:
+        release.set()
+        await stuck
+        auto_save_module._cleanup_tasks.discard(stuck)
+
+
+def test_auto_save_result_to_dict_includes_metadata() -> None:
+    """携带 metadata 的保存结果序列化包含原样 metadata 字段。"""
+    result = AutoSaveResult(
+        success=True,
+        original_url="https://example.com/a.png",
+        metadata={"model": "doubao-seedream-5.0-pro"},
+    )
+
+    assert result.to_dict()["metadata"] == {"model": "doubao-seedream-5.0-pro"}
+
+
 async def test_batch_save_propagates_non_cancelled_base_exception(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

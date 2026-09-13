@@ -16,7 +16,7 @@ from ...utils.core.logs import get_logger
 
 from ..core.common import execute_generation_handler
 from ..core.schemas import SequentialGenerationInput
-from ._shared import SEQUENTIAL_GENERATION
+from ._metadata import SEQUENTIAL_GENERATION
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context

@@ -1,8 +1,9 @@
 """按级别记录格式化消息的 loguru logger 测试替身与真实日志的捕获器。
 
 RecordingLogger 供 test_client_refactor、test_logging_setup、
-test_workspace_roots_scope、test_validation_prompt、test_tighten_schema_runtime_probe
-与 test_prepare_cache_single_flight 复用，替代各文件自持的近实现替身。
+test_parallel_generation_tools、test_workspace_roots_scope、test_validation_prompt、
+test_tighten_schema_runtime_probe 与 test_prepare_cache_single_flight 复用，
+替代各文件自持的近实现替身。
 opt(lazy=True) 的 callable 实参在记录时求值，若不求值，lambda 对象本身进入
 格式化字符串，会掩盖 _summarize_prompt 等求值路径未运行的回归。
 capture_loguru_messages 捕获进程级真实 loguru logger 的指定级别消息，供
@@ -61,18 +62,20 @@ class RecordingLogger:
         evaluated = tuple(arg() if callable(arg) else arg for arg in args)
         bucket.append(message.format(*evaluated) if evaluated else message)
 
-    def info(self, message: str, *args: Any) -> None:
+    def info(self, message: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
         self._record(self.info_messages, message, args)
 
-    def warning(self, message: str, *args: Any) -> None:
+    def warning(self, message: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
         self._record(self.warnings, message, args)
 
     def error(self, message: str, *args: Any, **kwargs: Any) -> None:
         del kwargs
         self._record(self.errors, message, args)
 
-    def debug(self, message: str, *args: Any) -> None:
-        del message, args
+    def debug(self, message: str, *args: Any, **kwargs: Any) -> None:
+        del message, args, kwargs
 
 
 @contextmanager
@@ -106,9 +109,7 @@ def preserved_loguru_globals() -> Iterator[None]:
     try:
         yield
     finally:
-        # complete 先落盘在途消息再拆除本用例安装的 sink。
         logger = get_logger()
-        logger.complete()
         logger.remove()
         logger.add(sys.stderr)
         # configure 对 patcher=None 不生效，以空 patcher 中和块内设置的 patcher。

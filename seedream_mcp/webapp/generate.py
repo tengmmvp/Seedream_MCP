@@ -39,7 +39,7 @@ from ..tools.runners import (
 )
 from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from ..utils.core.logs import get_logger
-from . import _shared
+from . import _responses
 from .context import build_web_request_context
 
 logger = get_logger()
@@ -64,11 +64,11 @@ class _GenerationRunner(Protocol[_RunnerInputT]):
 def _rewrite_item_path(item: dict[str, object], images_root: Path) -> None:
     """改写单个结果条目的路径字段，产出前端可消费的 web_path 相对形态。
 
-    相对化与越界删除经 _shared.converge_path_entry 单点维护；markdown_ref 前端
+    相对化与越界删除经 _responses.converge_path_entry 单点维护；markdown_ref 前端
     不消费，无条件删除。
     """
     item.pop("markdown_ref", None)
-    _shared.converge_path_entry(item, "local_path", images_root, resolve=True)
+    _responses.converge_path_entry(item, "local_path", images_root, resolve=True)
 
 
 def augment_generation_payload(structured: dict[str, object], images_root: Path) -> None:
@@ -102,7 +102,7 @@ async def _run_web_generation(
     请求体解析与响应体序列化是随参考图体积线性增长的同步 CPU 工作，下沉
     工作线程避免阻塞事件循环。
     """
-    body, parse_error = await _shared.parse_json_object_body(request)
+    body, parse_error = await _responses.parse_json_object_body(request)
     if parse_error is not None:
         return parse_error
 
@@ -110,14 +110,14 @@ async def _run_web_generation(
         # 参数校验对含大体积参考图的请求体是线性 CPU 工作，与解析同批下沉。
         params = await asyncio.to_thread(model_cls.model_validate, body)
     except ValidationError as exc:
-        return _shared.validation_error_json(exc)
+        return _responses.validation_error_json(exc)
 
     config = get_active_config()
     ctx = cast("Context | None", build_web_request_context())
     # 不伪造会话 Roots 传入 runner：Web 请求无客户端声明可用，UNC 工作区根也
     # 在 file URI 转换层丢失。边界交由 runner 内的环境变量回退链处理，与客户
     # 端未声明 roots 的会话同构。
-    images_root = await _shared.resolve_web_images_root()
+    images_root = await _responses.resolve_web_images_root()
     if isinstance(images_root, JSONResponse):
         return images_root
     # runner 契约保证不抛，异常已归约为 is_error 结果，兜底仅防流水线全捕回归
@@ -125,11 +125,11 @@ async def _run_web_generation(
         result = await runner(params, config, ctx, include_previews=False)
     except (SeedreamValidationError, SeedreamConfigError) as exc:
         if isinstance(exc, SeedreamConfigError):
-            return _shared.error_json("config_error", exc.message, 503)
-        return _shared.error_json("validation_error", exc.message, 400)
+            return _responses.error_json("config_error", exc.message, 503)
+        return _responses.error_json("validation_error", exc.message, 400)
     except Exception:
         logger.exception("Web 生成请求执行异常")
-        return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)
+        return _responses.error_json("internal_error", "服务器内部错误，详情见日志", 500)
 
     structured = result.structured_content if result.structured_content is not None else {}
     if not isinstance(structured, dict):
@@ -137,8 +137,8 @@ async def _run_web_generation(
 
     await asyncio.to_thread(augment_generation_payload, structured, images_root)
 
-    status = 200 if not result.is_error else _shared.generation_status(structured)
-    return await _shared.respond_structured_json(structured, status)
+    status = 200 if not result.is_error else _responses.generation_status(structured)
+    return await _responses.respond_structured_json(structured, status)
 
 
 async def web_generate_text_to_image(request: Request) -> Response:

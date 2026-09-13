@@ -335,6 +335,60 @@ async def test_prepare_rechecks_cache_after_semaphore_wait(
     assert len(preparer._prepare_inflight) == 0
 
 
+async def test_prepare_rechecks_inflight_after_semaphore_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """获取信号量后的在途复查：等待窗口内他人已登记同键时归还槽位转为等待者。
+
+    获槽者若不复查在途注册表，会重复执行全量读盘与编码；命中在途须先归还
+    槽位，并发满载的准入不被后到等待者虚占。
+    """
+    from seedream_mcp.utils.core.inflight import InflightEntry
+
+    config = SeedreamConfig(api_key="test_key", max_retries=1)
+    client = SeedreamClient(config)
+    preparer = client._image_preparer
+
+    call_count = 0
+    gate = asyncio.Event()
+
+    async def gated_prepare(image: str) -> str:
+        nonlocal call_count
+        del image
+        call_count += 1
+        await gate.wait()
+        return "prepared:once"
+
+    monkeypatch.setattr(image_prepare, "prepare_image_input", gated_prepare)
+
+    # 预置实例级信号量为单槽并由本测试持槽，构造后到者在 acquire 上排队的窗口。
+    semaphore = asyncio.Semaphore(1)
+    preparer._prepare_semaphore = semaphore
+    preparer._prepare_semaphore_loop = asyncio.get_running_loop()
+    await semaphore.acquire()
+
+    image_data_uri = "data:image/png;base64,aGVsbG8="
+    late = asyncio.ensure_future(preparer.prepare_image_input(image_data_uri))
+    await asyncio.sleep(0)
+    assert len(preparer._prepare_inflight) == 0
+
+    # 等待窗口内他人登记同键在途条目，缓存保持未写。
+    cache_key = (image_data_uri, (), (0.0, 0))
+    inflight_task = asyncio.ensure_future(preparer._prepare_and_cache(image_data_uri, cache_key))
+    preparer._prepare_inflight[cache_key] = InflightEntry(inflight_task)
+    await asyncio.sleep(0)
+
+    semaphore.release()
+    gate.set()
+    assert await late == "prepared:once"
+    await inflight_task
+    # 底层预处理只执行一次，late 作为纯等待者复用在途结果
+    assert call_count == 1
+    # late 的槽位已归还，单槽信号量不被虚占
+    assert not semaphore.locked()
+    assert len(preparer._prepare_inflight) == 0
+
+
 async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

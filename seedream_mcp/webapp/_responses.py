@@ -20,6 +20,7 @@ from ..utils.core.errors import SeedreamConfigError
 from ..utils.io.io_path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
+    normalize_path,
     resolve_images_root,
 )
 
@@ -160,13 +161,15 @@ def converge_path_entry(
     value = item.get(key)
     if not isinstance(value, str) or not value:
         return
-    path = Path(value)
     if resolve:
         try:
-            path = path.resolve()
-        except (OSError, ValueError):
+            # normalize_path 携带 UNC/NUL/ADS 等全套预拒绝，异常归一为 ValueError。
+            path = normalize_path(value)
+        except ValueError:
             del item[key]
             return
+    else:
+        path = Path(value)
     relative = images_root_relative(path, images_root)
     if relative is None:
         del item[key]

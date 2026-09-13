@@ -19,7 +19,7 @@ from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS
 from ..utils.images.image_thumbnail import cached_thumbnail_bytes
 from ..utils.io.io_path import is_within_resolved, normalize_path, resolve_images_root
-from . import _shared
+from . import _responses
 
 
 def resolve_web_relative_path(rel: str, images_root: Path) -> Path:
@@ -57,7 +57,7 @@ def resolve_web_relative_path(rel: str, images_root: Path) -> Path:
 
 def _image_not_found() -> Response:
     """图片缺失的统一 404 响应。"""
-    return _shared.error_json("not_found", "图片不存在", 404)
+    return _responses.error_json("not_found", "图片不存在", 404)
 
 
 async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Response:
@@ -75,9 +75,9 @@ async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Respons
     try:
         return await asyncio.to_thread(_resolve)
     except SeedreamConfigError as exc:
-        return _shared.images_root_unavailable(exc)
+        return _responses.images_root_unavailable(exc)
     except ValueError as exc:
-        return _shared.error_json("invalid_path", str(exc), 400)
+        return _responses.error_json("invalid_path", str(exc), 400)
     except FileNotFoundError:
         return _image_not_found()
 
@@ -102,8 +102,8 @@ async def web_thumbnail(request: Request) -> Response:
         # stat 瞬时失败不谎报缺失，随生成失败归 422。
         data = None
     if data is None:
-        return _shared.error_json("thumbnail_failed", "缩略图生成失败", 422)
-    return Response(content=data, media_type="image/jpeg", headers=_shared.PRIVATE_CACHE_HEADER)
+        return _responses.error_json("thumbnail_failed", "缩略图生成失败", 422)
+    return Response(content=data, media_type="image/jpeg", headers=_responses.PRIVATE_CACHE_HEADER)
 
 
 async def web_image(request: Request) -> Response:
@@ -125,5 +125,5 @@ async def web_image(request: Request) -> Response:
         image_path,
         stat_result=stat_result,
         media_type=MIME_BY_EXTENSION.get(image_path.suffix.lower(), "application/octet-stream"),
-        headers=_shared.PRIVATE_CACHE_HEADER,
+        headers=_responses.PRIVATE_CACHE_HEADER,
     )

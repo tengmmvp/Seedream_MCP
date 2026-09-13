@@ -26,7 +26,7 @@ from ..utils.model.model_capabilities import (
     preset_numeric_sort_key,
 )
 from ..version import __version__
-from . import _shared, constants
+from . import _responses, constants
 from .constants import PAGE_SECURITY_HEADERS, WEB_API_PREFIX, WEB_INDEX_PATH
 
 # 模型能力清单缓存：能力表为进程级静态数据，首次构建后跨请求复用。
@@ -97,7 +97,7 @@ async def web_not_found(request: Request) -> Response:
             )
             return RedirectResponse(location, status_code=307)
     if path == WEB_API_PREFIX or path.startswith(WEB_API_PREFIX + "/"):
-        return _shared.error_json("not_found", "接口不存在", 404)
+        return _responses.error_json("not_found", "接口不存在", 404)
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
     page = constants.STATIC_DIR / "404.html"
     if not page.is_file():
@@ -123,14 +123,14 @@ async def web_root_redirect(_request: Request) -> Response:
 async def web_config_info(_request: Request) -> Response:
     """返回前端所需的模型能力、默认值与图片目录可用性。
 
-    图片目录解析经 _shared.resolve_web_images_root 与 gallery、generate 域同契约；
+    图片目录解析经 _responses.resolve_web_images_root 与 gallery、generate 域同契约；
     仅回传可用性布尔，不向浏览器泄露服务器绝对路径；不可用时前端在图库区
     给出配置指引。unknown_max_reference_images 与 upload_budget_chars 使前端的
     未知模型参考图上限和上传预算预检与后端配置单一来源。响应附
     cache-control: no-store，兼作鉴权探测端点的状态不落代理缓存。
     """
     config = get_active_config()
-    resolved = await _shared.resolve_web_images_root()
+    resolved = await _responses.resolve_web_images_root()
     images_root_available = not isinstance(resolved, JSONResponse)
     return JSONResponse(
         {
@@ -151,10 +151,10 @@ async def web_config_info(_request: Request) -> Response:
             "images_root_hint": (
                 ""
                 if images_root_available
-                else f"未配置数据根目录（{_shared.READ_SCOPE_AUTH_ENV_HINT}）"
+                else f"未配置数据根目录（{_responses.READ_SCOPE_AUTH_ENV_HINT}）"
             ),
             "auto_save_enabled": config.auto_save_enabled,
             "preview_enabled": config.preview_enabled,
         },
-        headers=_shared.WEB_JSON_HEADERS,
+        headers=_responses.WEB_JSON_HEADERS,
     )

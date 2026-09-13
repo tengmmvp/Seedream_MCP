@@ -47,7 +47,7 @@ from mcp.types import (
 from mcp.types.version import is_version_at_least
 from pydantic import BaseModel, Field, ValidationError
 
-from ._icons import tool_icon_src
+from ._icons import TOOL_PNG_SIZE, tool_icon_png_src, tool_icon_src
 from .config import (
     LIFESPAN_KEY_CONFIG,
     SeedreamConfig,
@@ -177,7 +177,11 @@ BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
 
 
 def _tool_icons(tool_name: str) -> list[Icon]:
-    return [Icon(src=tool_icon_src(tool_name), mime_type="image/svg+xml", sizes=["any"])]
+    # PNG 为客户端 MUST 支持集，SVG 为 SHOULD 集，双格式覆盖全部客户端。
+    return [
+        Icon(src=tool_icon_png_src(tool_name), mime_type="image/png", sizes=[TOOL_PNG_SIZE]),
+        Icon(src=tool_icon_src(tool_name), mime_type="image/svg+xml", sizes=["any"]),
+    ]
 
 
 logger = get_logger()
@@ -808,7 +812,12 @@ def _roots_degraded(roots_result: Any, applied_roots: list[Path]) -> bool:
     return bool(getattr(roots_result, "roots", [])) and not applied_roots
 
 
-@mcp.resource("seedream://workspace/roots{?verbose}", mime_type="application/json")
+@mcp.resource(
+    "seedream://workspace/roots{?verbose}",
+    name="workspace_roots",
+    title="工作区根目录",
+    mime_type="application/json",
+)
 async def workspace_roots_resource(
     ctx: Context, verbose: bool = False
 ) -> str | InputRequiredResult:
@@ -845,7 +854,12 @@ async def workspace_roots_resource(
         )
 
 
-@mcp.resource("seedream://server/info", mime_type="application/json")
+@mcp.resource(
+    "seedream://server/info",
+    name="server_info",
+    title="服务器信息",
+    mime_type="application/json",
+)
 async def server_info_resource() -> str:
     """服务器版本与当前生效配置摘要。"""
     config = get_active_config()
@@ -867,7 +881,12 @@ async def server_info_resource() -> str:
 _models_info_payload: str | None = None
 
 
-@mcp.resource("seedream://models/info", mime_type="application/json")
+@mcp.resource(
+    "seedream://models/info",
+    name="models_info",
+    title="模型能力清单",
+    mime_type="application/json",
+)
 async def models_info_resource() -> str:
     """各模型别名与能力声明，供客户端按尺寸档位、工具、流式等选择合适模型。"""
     global _models_info_payload
@@ -912,7 +931,9 @@ def _read_skill_manifest() -> str:
 
 
 @mcp.resource(
-    "skill://seedream-image-generation/SKILL.md",
+    f"skill://{_SKILL_NAME}/SKILL.md",
+    name="skill_manifest",
+    title="Seedream 图像生成技能主文件",
     mime_type="text/markdown",
     description=_SKILL_DESCRIPTION,
 )
@@ -936,7 +957,9 @@ def _read_skill_reference(path: str) -> str:
 
 
 @mcp.resource(
-    "skill://seedream-image-generation/references/{+path}",
+    f"skill://{_SKILL_NAME}/references/{{+path}}",
+    name="skill_reference",
+    title="Seedream 图像生成技能参考文件",
     mime_type="text/markdown",
     description="Agent Skill 参考文件：多步工作流与故障排查，按需读取。",
 )

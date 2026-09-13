@@ -23,7 +23,7 @@ from ..utils.io.io_path import (
     is_within_resolved,
     normalize_path,
 )
-from . import _shared
+from . import _responses
 
 logger = get_logger()
 
@@ -34,7 +34,7 @@ _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
     """剥除 Web 前端不消费的边界字段，条目 path 改写为图片目录相对形态。
 
-    越界条目已在扫描源头经 bounds_scope 剔除。改写经 _shared.converge_path_entry
+    越界条目已在扫描源头经 bounds_scope 剔除。改写经 _responses.converge_path_entry
     与 generate 端单点维护。
     """
     for key in _ROOTS_ECHO_KEYS:
@@ -44,7 +44,7 @@ def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
         return
     for item in images:
         if isinstance(item, dict):
-            _shared.converge_path_entry(item, "path", images_root)
+            _responses.converge_path_entry(item, "path", images_root)
 
 
 async def _directory_outside_images_root(directory: str, images_root: Path) -> bool:
@@ -66,20 +66,20 @@ async def web_browse(request: Request) -> Response:
     请求体解析与参数校验是同步 CPU 工作，与生成端点同口径下沉工作线程，
     避免超大 JSON 阻塞事件循环。
     """
-    body, parse_error = await _shared.parse_json_object_body(request)
+    body, parse_error = await _responses.parse_json_object_body(request)
     if parse_error is not None:
         return parse_error
     try:
         params = await asyncio.to_thread(BrowseImagesInput.model_validate, body)
     except ValidationError as exc:
-        return _shared.validation_error_json(exc)
+        return _responses.validation_error_json(exc)
 
-    images_root = await _shared.resolve_web_images_root()
+    images_root = await _responses.resolve_web_images_root()
     if isinstance(images_root, JSONResponse):
         return images_root
     directory = params.effective_directory
     if await _directory_outside_images_root(directory, images_root):
-        return _shared.error_json(
+        return _responses.error_json(
             "invalid_directory", "目录不在图片目录内，Web 图库仅浏览图片目录", 400
         )
     # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归；
@@ -88,10 +88,10 @@ async def web_browse(request: Request) -> Response:
         result = await run_browse_images(params, ctx=None, bounds_scope=[images_root])
     except Exception:
         logger.exception("Web 图库浏览请求执行异常")
-        return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)
+        return _responses.error_json("internal_error", "服务器内部错误，详情见日志", 500)
     structured = result.structured_content if result.structured_content is not None else {}
     if not isinstance(structured, dict):
         structured = {}
     _converge_for_web(structured, images_root)
-    status = 200 if not result.is_error else _shared.browse_status(structured)
-    return await _shared.respond_structured_json(structured, status)
+    status = 200 if not result.is_error else _responses.browse_status(structured)
+    return await _responses.respond_structured_json(structured, status)

@@ -56,6 +56,27 @@ async def test_resolve_public_ips_uses_ttl_cache(monkeypatch: pytest.MonkeyPatch
     assert first == second == ("8.8.8.8", "1.1.1.1")
 
 
+async def test_resolve_public_ips_evicts_expired_cache_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缓存条目过 TTL 后被逐出并重新解析，过期结果不返还。"""
+    fake_loop = _FakeLoop(ips=["93.184.216.34"])
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+
+    manager = DownloadManager(dns_cache_ttl=60)
+    # expires_at 以 time.monotonic 为基准，构造已过期条目与代码同基准
+    manager._dns_cache["example.com"] = (time.monotonic() - 1.0, ("198.51.100.7",))
+
+    ips = await manager._resolve_public_ips("example.com")
+
+    assert ips == ("93.184.216.34",)
+    # 过期条目未命中缓存，触发一次重新解析并以新结果重写
+    assert fake_loop.calls == 1
+    expires_at, cached = manager._dns_cache["example.com"]
+    assert cached == ("93.184.216.34",)
+    assert expires_at > time.monotonic()
+
+
 async def test_resolve_public_ips_preserves_getaddrinfo_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -627,6 +648,31 @@ def test_enforce_dns_cache_limit_evicts_expired_then_oldest() -> None:
         assert host not in manager._dns_cache
     for host in live_hosts[5:]:
         assert host in manager._dns_cache
+
+
+async def test_resolve_and_cache_enforces_hard_limit_after_cache_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """解析回写使缓存超上限且无过期条目可清时，流程内按最旧 expires_at 强制驱逐。"""
+    fake_loop = _FakeLoop(ips=["93.184.216.34"])
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: fake_loop)
+
+    manager = DownloadManager(dns_cache_ttl=3600)
+    # 预置满额且全部新鲜的条目：过期清理无法降容，只能强制驱逐最旧条目
+    now = time.monotonic()
+    for index in range(_DNS_CACHE_MAX_SIZE):
+        manager._dns_cache[f"live{index}.example.com"] = (
+            now + 60.0 + index,
+            ("203.0.113.2",),
+        )
+
+    await manager._resolve_and_cache("fresh.example.com")
+
+    # 上限为硬限制，回写后超限即驱逐回上限内
+    assert len(manager._dns_cache) == _DNS_CACHE_MAX_SIZE
+    assert "live0.example.com" not in manager._dns_cache
+    assert "live1.example.com" in manager._dns_cache
+    assert "fresh.example.com" in manager._dns_cache
 
 
 # ---- 扩展名等价类：同格式别名不改名，跨格式仍修正 ----

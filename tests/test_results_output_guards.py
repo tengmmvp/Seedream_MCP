@@ -13,7 +13,7 @@ import pytest
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core import results as results_module
-from seedream_mcp.tools.core._shared import (
+from seedream_mcp.tools.core._pipeline import (
     _extract_parallel_request_error,
     _normalize_error_message,
 )

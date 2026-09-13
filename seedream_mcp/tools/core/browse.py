@@ -31,7 +31,7 @@ from ...utils.io.io_path import (
     read_scope_denial_message,
 )
 from ...utils.io.io_scan import cached_find_images_in_directory, find_images_in_directory
-from ._shared import (
+from ._pipeline import (
     PROGRESS_COMPLETE,
     PROGRESS_SCAN_START,
     safe_report_progress,

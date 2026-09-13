@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._shared import (
+from seedream_mcp.tools.core._pipeline import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,
@@ -588,3 +588,32 @@ async def test_parallel_batch_survives_stalled_progress_client(
 
     assert result["success"] is True
     assert ctx.calls and ctx.calls[-1] >= 30
+
+
+async def test_parallel_batch_aggregates_unexpected_exception() -> None:
+    """批次内单请求抛非 SeedreamMCPError 时带堆栈记录并聚合为失败，不外泄。"""
+    import seedream_mcp.tools.core.parallel as parallel_module
+    from seedream_mcp.tools.core.common import build_generation_context
+    from _log_fakes import RecordingLogger
+
+    async def _executor(client: Any, context: Any) -> dict[str, Any]:
+        del client, context
+        raise RuntimeError("boom-unexpected")
+
+    config = _build_config()
+    context = build_generation_context(
+        TextToImageInput(prompt="test", request_count=2, parallelism=2), config
+    )
+    logger = RecordingLogger()
+
+    result = await parallel_module._execute_parallel_generation_requests(
+        client=cast(SeedreamClient, None),
+        context=context,
+        request_executor=_executor,
+        module_logger=cast(Any, logger),
+        ctx=None,
+    )
+
+    assert result["success"] is False
+    assert any("非预期异常" in message for message in logger.warnings)
+    assert any(kwargs.get("exception") is not None for kwargs in logger.opt_kwargs)

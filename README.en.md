@@ -511,11 +511,11 @@ Beyond tools, the server exposes the following MCP resources for clients to read
   </tr>
   <tr>
     <td><code>seedream://workspace/roots</code></td>
-    <td>Currently effective workspace roots: MCP Roots authorized by the client, falling back to the environment-configured working directory when none are declared</td>
+    <td>Currently effective workspace roots: MCP Roots authorized by the client, falling back to the environment-configured working directory when none are declared. This is a parameterized resource that some clients do not list directly; reading it by URI works.</td>
   </tr>
   <tr>
     <td><code>seedream://server/info</code></td>
-    <td>Server name, version, and a summary of the active configuration (model, default size, auto-save toggle; five fields in total)</td>
+    <td>Server name, version, and a summary of the active configuration</td>
   </tr>
   <tr>
     <td><code>seedream://models/info</code></td>

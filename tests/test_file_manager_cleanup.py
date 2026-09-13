@@ -45,6 +45,44 @@ def test_validate_path_rejects_outside_base(tmp_path: Path) -> None:
     assert manager.validate_path(outside) is False
 
 
+def test_collect_all_files_skips_junction_outside_base(tmp_path: Path) -> None:
+    """base 内指向界外的 NTFS junction 不下降：界外图片不混入收集，也不被清理误删。"""
+    if sys.platform != "win32":
+        pytest.skip("NTFS junction 为 Windows 特有形态")
+
+    import _winapi
+
+    outside = tmp_path.parent / "junction-outside"
+    outside.mkdir()
+    outside_file = outside / "outside.png"
+    outside_file.write_bytes(b"outside")
+
+    base = tmp_path / "base"
+    base.mkdir()
+    inside_file = base / "inside.png"
+    inside_file.write_bytes(b"inside")
+    old_time = (datetime.now() - timedelta(days=41)).timestamp()
+    os.utime(inside_file, (old_time, old_time))
+
+    # junction 可由普通用户创建，reparse 判定剔除其下降；非 NTFS 卷不支持时跳过
+    try:
+        _winapi.CreateJunction(str(outside), str(base / "link"))
+    except OSError as exc:
+        pytest.skip(f"临时卷不支持 junction: {exc}")
+
+    manager = FileManager(base_dir=base)
+    errors: list[str] = []
+    all_files, _, directories = manager._collect_all_files(errors)
+
+    assert [entry[0].name for entry in all_files] == ["inside.png"]
+    assert all("link" not in str(directory) for directory in directories)
+    assert errors == []
+
+    manager.run_cleanup_policies(days=40, max_total_bytes=None)
+    assert not inside_file.exists()
+    assert outside_file.exists()
+
+
 def test_run_cleanup_age_removes_expired_and_keeps_recent(tmp_path: Path) -> None:
     """按天清理删除过期文件，保留未过期文件。"""
     manager = FileManager(base_dir=tmp_path)

@@ -53,7 +53,7 @@ _thumb_sweep_lock = threading.Lock()
 # 膨胀至数 MB 以上。
 PREVIEW_MAX_IMAGES = 10
 
-# 预览解码并发上限：4K 单张解码为 RGB 约占 50MB 内存，全量并发时瞬态可达 GB 级。
+# 预览解码并发上限：像素上限 36MP 的单张解码最坏逾百 MB，并发 3 封顶瞬态。
 PREVIEW_DECODE_CONCURRENCY = 3
 
 

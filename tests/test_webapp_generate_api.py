@@ -26,7 +26,7 @@ from seedream_mcp.config import (
     set_active_config,
 )
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.webapp import _shared as webapp_shared
+from seedream_mcp.webapp import _responses
 from seedream_mcp.webapp import generate as generate_module
 from seedream_mcp.webapp.context import build_web_request_context
 
@@ -729,36 +729,14 @@ def test_augment_generation_payload_skips_non_string_local_path(tmp_path: Path) 
     assert structured["data"] == [{"local_path": 123, "keep": "v"}, {"local_path": None, "keep": 2}]
 
 
-def test_augment_generation_payload_tolerates_resolve_oserror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """条目路径解析抛 OSError 时删除 local_path 键，其余键与顶层键不被改写。"""
-
-    class _ExplodingPath:
-        def __init__(self, _raw: object) -> None:
-            pass
-
-        def resolve(self) -> "_ExplodingPath":
-            raise OSError("illegal path")
-
-    monkeypatch.setattr(generate_module, "Path", _ExplodingPath)
-    structured = {"data": [{"local_path": "x.png", "keep": 1}], "success": True}
-
-    generate_module.augment_generation_payload(structured, tmp_path)
-
-    assert structured == {"data": [{"keep": 1}], "success": True}
-
-
 def test_generation_status_falls_back_to_502_without_str_error_type() -> None:
     """error.type 缺失或非字符串时状态码回落 502，命中形态时按映射表取值。"""
-    assert webapp_shared.structured_error_type({"success": False}) is None
-    assert webapp_shared.structured_error_type({"error": {"type": 42}}) is None
-    assert (
-        webapp_shared.structured_error_type({"error": {"type": "timeout_error"}}) == "timeout_error"
-    )
+    assert _responses.structured_error_type({"success": False}) is None
+    assert _responses.structured_error_type({"error": {"type": 42}}) is None
+    assert _responses.structured_error_type({"error": {"type": "timeout_error"}}) == "timeout_error"
 
-    assert webapp_shared.generation_status({"success": False}) == 502
-    assert webapp_shared.generation_status({"error": {"type": "timeout_error"}}) == 504
+    assert _responses.generation_status({"success": False}) == 502
+    assert _responses.generation_status({"error": {"type": "timeout_error"}}) == 504
 
 
 def test_converge_path_entry_deletes_key_when_resolve_fails(tmp_path: Path) -> None:
@@ -767,7 +745,7 @@ def test_converge_path_entry_deletes_key_when_resolve_fails(tmp_path: Path) -> N
     images_root.mkdir(parents=True)
     item: dict[str, object] = {"local_path": "bad\x00name.png", "keep": 1}
 
-    webapp_shared.converge_path_entry(item, "local_path", images_root, resolve=True)
+    _responses.converge_path_entry(item, "local_path", images_root, resolve=True)
 
     assert item == {"keep": 1}
 

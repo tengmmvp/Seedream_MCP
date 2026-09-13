@@ -20,7 +20,7 @@ from ._sanitize import (
     message_limit_for,
     sanitize_error_dict,
 )
-from ._shared import (
+from ._pipeline import (
     _add_usage_value,
     _classify_generation_error_type,
     _extract_parallel_request_error,

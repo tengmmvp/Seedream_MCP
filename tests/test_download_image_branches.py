@@ -11,6 +11,7 @@ import os
 import random
 import socket
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ import aiofiles
 import aiohttp
 import pytest
 
+from seedream_mcp.utils.core.formats import SNIFF_HEAD_BYTES_FLOOR
 from seedream_mcp.utils.io.io_download import (
     DownloadError,
     DownloadManager,
@@ -222,21 +224,31 @@ async def test_download_image_does_not_retry_generic_exception(
     assert not save_path.exists()
 
 
-async def test_download_image_does_not_retry_on_disk_quota_exceeded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+@pytest.mark.parametrize(
+    ("exc", "match"),
+    [
+        pytest.param(OSError(errno.EDQUOT, "disk quota exceeded"), "文件系统永久错误", id="edquot"),
+        pytest.param(
+            PermissionError(errno.EACCES, "Permission denied"), "权限拒绝，不可重试", id="eacces"
+        ),
+    ],
+)
+async def test_download_image_does_not_retry_on_permanent_fs_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    exc: OSError,
+    match: str,
 ) -> None:
-    """EDQUOT 磁盘配额超限属永久性错误，立即抛出 DownloadError 不重试。"""
+    """配额超限与权限拒绝均需人工介入，单次尝试即终态不进入退避重试。"""
     manager = DownloadManager()
-    session = _RaisingThenSuccessSession(
-        OSError(errno.EDQUOT, "disk quota exceeded"), _png_success_response()
-    )
+    session = _RaisingThenSuccessSession(exc, _png_success_response())
     _patch_download_network(monkeypatch, manager, session)
 
     save_path = tmp_path / "out.png"
-    with pytest.raises(DownloadError, match="文件系统永久错误"):
+    with pytest.raises(DownloadError, match=match):
         await manager.download_image("https://example.com/img.png", save_path)
 
-    # 配额超限需管理员介入，重试无意义，单次尝试即终态
     assert session.call_count == 1
     assert not save_path.exists()
 
@@ -376,6 +388,89 @@ async def test_download_wsa_try_again_is_retryable(
     assert not save_path.exists()
 
 
+async def test_download_dns_resolution_timeout_is_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """getaddrinfo 超出解析时限时按下载超时分类，纳入退避重试而非单次终态。"""
+
+    async def _hanging_getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
+        del host, port, kwargs
+        await asyncio.Event().wait()
+
+    _patch_loop_getaddrinfo(monkeypatch, _hanging_getaddrinfo)
+
+    # timeout=0 时 wait_for 在协程首步执行前即取消，解析计数改挂在入口处
+    manager = DownloadManager(timeout=0)
+    resolve_calls: list[int] = []
+    real_resolve = manager._resolve_public_ips
+
+    async def _counting_resolve(host: str) -> tuple[str, ...]:
+        resolve_calls.append(1)
+        return await real_resolve(host)
+
+    monkeypatch.setattr(manager, "_resolve_public_ips", _counting_resolve)
+
+    save_path = tmp_path / "out.png"
+    # 经上下文管理器进入使真实会话在断言后确定关闭，避免依赖 GC 兜底
+    async with manager:
+        with pytest.raises(DownloadError, match="下载超时"):
+            await manager.download_image("https://example.com/img.png", save_path)
+
+    # 解析超时未写缓存，每次尝试都重新解析
+    assert len(resolve_calls) == manager.max_retries + 1
+    assert not save_path.exists()
+
+
+class _TruthfulBarrenInfos:
+    """bool 为真而迭代为空的病态解析结果，驱动空 resolved_ips 的兜底分支。"""
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(())
+
+
+@pytest.mark.parametrize(
+    ("resolution", "match"),
+    [
+        pytest.param([], "域名解析结果为空", id="empty"),
+        pytest.param(
+            [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("not-an-ip", 0))],
+            "域名解析返回非法IP",
+            id="illegal-ip",
+        ),
+        pytest.param(_TruthfulBarrenInfos(), "域名解析结果为空", id="barren-infos"),
+    ],
+)
+async def test_download_dns_malformed_resolution_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    resolution: Any,
+    match: str,
+) -> None:
+    """畸形解析结果按终态拒绝，单次尝试即上抛且不退避。"""
+    resolve_calls: list[int] = []
+
+    async def _getaddrinfo(host: str, port: int, **kwargs: object) -> Any:
+        del host, port, kwargs
+        resolve_calls.append(1)
+        return resolution
+
+    _patch_loop_getaddrinfo(monkeypatch, _getaddrinfo)
+
+    save_path = tmp_path / "out.png"
+    async with DownloadManager() as manager:
+        with pytest.raises(DownloadError, match=match) as excinfo:
+            await manager.download_image("https://example.com/img.png", save_path)
+
+    # 终态错误且非可重试子类，单次尝试即上抛，未触发退避重试
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert len(resolve_calls) == 1
+    assert not save_path.exists()
+
+
 # ==================== _download_response_to_temp 内部分支 ====================
 
 
@@ -483,6 +578,39 @@ async def test_download_response_rejects_byte_signature_mismatch(tmp_path: Path)
 
     # 签名校验失败发生在 replace 之前，最终文件不应落盘
     assert not (tmp_path / "out.png").exists()
+
+
+async def test_download_response_rejects_signature_mismatch_in_first_chunk(
+    tmp_path: Path,
+) -> None:
+    """首块字节即填满嗅探窗口且非图片签名时流内即时拒绝，不消费后续分块。"""
+    manager = DownloadManager()
+    # 首块达 64 字节嗅探窗口下界，伪造 Content-Type 的响应在首块后即被拒
+    forged_head = b"<html>" + b"x" * (SNIFF_HEAD_BYTES_FLOOR - len(b"<html>"))
+    trailing_chunk = b"y" * 16
+    response = _FakeResponse(
+        headers={
+            "content-type": "image/png",
+            "content-length": str(len(forged_head) + len(trailing_chunk)),
+        },
+        content_chunks=[forged_head, trailing_chunk],
+    )
+    temp_suffix = ".png.part"
+
+    with pytest.raises(DownloadError, match="字节签名"):
+        await manager._download_response_to_temp(
+            response,  # type: ignore[arg-type]
+            tmp_path / "out.png",
+            temp_suffix,
+            "image/png",
+            0,
+            time.monotonic(),
+        )
+
+    # 流内即时拒绝仅消费首块，第二块未被读取，不再占用后续带宽与磁盘写入
+    assert response.content._chunk_idx == 1
+    assert not (tmp_path / "out.png").exists()
+    assert not list(tmp_path.glob("*.part"))
 
 
 async def test_download_response_closes_fd_when_aiofiles_open_fails(

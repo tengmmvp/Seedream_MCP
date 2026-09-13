@@ -21,6 +21,13 @@ import seedream_mcp.server  # noqa: F401  工具注册发生在 server 导入期
 from seedream_mcp.config import SeedreamConfig
 
 
+def _warn_sdk_private_path_missing(path: str, impact: str) -> None:
+    """SDK 私有路径缺失的统一告警，conftest 内各私有适配点共用。"""
+    from seedream_mcp.utils.core.logs import get_logger
+
+    get_logger().warning("SDK 私有路径 {} 已变更，{}，请适配新版 MCP SDK。", path, impact)
+
+
 @pytest.fixture
 def seedream_config() -> SeedreamConfig:
     """基础测试配置，api_key 固定为 test_key。
@@ -32,13 +39,17 @@ def seedream_config() -> SeedreamConfig:
 
 @pytest.fixture
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """屏蔽 asyncio.sleep，避免重试退避测试因真实等待而变慢。
+    """屏蔽 asyncio.sleep 的真实等待，避免重试退避测试变慢。
 
-    需要观察退避时长的测试不应使用此 fixture，改为自行捕获 sleep 参数。
+    零延迟调用仍真实让出，保持 sleep(0) 的协作调度与取消传播语义；正延迟
+    立即返回。需要观察退避时长的测试不应使用此 fixture，改为自行捕获 sleep 参数。
     """
+    real_sleep = asyncio.sleep
 
-    async def _sleep(*args: object, **kwargs: object) -> None:
+    async def _sleep(delay: object, *args: object, **kwargs: object) -> None:
         del args, kwargs
+        if delay == 0:
+            await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", _sleep)
 
@@ -71,7 +82,6 @@ async def _lifespan_state_guard(
     import seedream_mcp.resources as resources
     import seedream_mcp.server as server
     from seedream_mcp import config as config_module
-    from seedream_mcp.utils.core.logs import get_logger
 
     def _clear_session_manager() -> None:
         """清空 SDK 会话管理器引用，私有路径缺失时告警并跳过，不阻断测试。
@@ -82,10 +92,9 @@ async def _lifespan_state_guard(
         """
         lowlevel_server = getattr(server.mcp, "_lowlevel_server", None)
         if lowlevel_server is None or not hasattr(lowlevel_server, "_session_manager"):
-            get_logger().warning(
-                "SDK 私有路径 mcp._lowlevel_server._session_manager 已变更，"
-                "会话管理器引用清空被跳过，streamable-http 跨用例隔离可能失效，"
-                "请适配新版 MCP SDK。"
+            _warn_sdk_private_path_missing(
+                "mcp._lowlevel_server._session_manager",
+                "会话管理器引用清空被跳过，streamable-http 跨用例隔离可能失效",
             )
             return
         lowlevel_server._session_manager = None
@@ -143,15 +152,24 @@ def clean_web_routes() -> Iterator[None]:
 
     autouse 使未注册形态的用例不受其他用例注册过的 Web 路由污染；显式声明
     该 fixture 的用例参数仅为表意，无额外效果。守卫按实例身份登记，恢复时把
-    当前实例按快照时的登记形态写回。
+    当前实例按快照时的登记形态写回。私有路径缺失时告警并跳过，告警经
+    _warn_sdk_private_path_missing 单点。
     """
     from seedream_mcp.resources import mcp
     from seedream_mcp.webapp import routes as web_routes_module
 
-    saved_routes = list(mcp._custom_starlette_routes)
+    custom_routes = getattr(mcp, "_custom_starlette_routes", None)
+    if custom_routes is None:
+        _warn_sdk_private_path_missing(
+            "mcp._custom_starlette_routes",
+            "Web 路由快照恢复被跳过，跨用例 Web 注册隔离可能失效",
+        )
+        yield
+        return
+    saved_routes = list(custom_routes)
     was_registered = mcp in web_routes_module._registered_servers
     yield
-    mcp._custom_starlette_routes[:] = saved_routes
+    custom_routes[:] = saved_routes
     if was_registered:
         web_routes_module._registered_servers.add(mcp)
     else:

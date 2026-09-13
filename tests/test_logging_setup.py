@@ -82,7 +82,6 @@ def test_security_marked_warning_bypasses_level_filter(tmp_path: Path) -> None:
         setup_logging("ERROR", str(log_file), enable_console=False, force_standard_logging=True)
         logger.bind(security=True).warning("security-visible")
         logger.warning("routine-hidden")
-        logger.complete()
 
     content = log_file.read_text(encoding="utf-8")
     assert "security-visible" in content
@@ -317,8 +316,6 @@ def test_setup_logging_default_file_lands_under_seedream_logs(
     """未显式传入 log_file 时，日志文件落在进程工作目录的 .seedream/logs 下。"""
     logger.info("probe default path")
 
-    logger.complete()
-
     assert _real_file_logging.is_file()
     assert "probe default path" in _real_file_logging.read_text(encoding="utf-8")
 
@@ -359,8 +356,6 @@ def test_intercept_handler_locates_real_caller_frame(
 ) -> None:
     """标准库桥接日志的调用位置是真实调用方模块，而非 logging 内部帧。"""
     logging.getLogger("bridge.probe").warning("via stdlib bridge")
-
-    logger.complete()
 
     content = _real_file_logging.read_text(encoding="utf-8")
     assert "via stdlib bridge" in content

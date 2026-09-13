@@ -1391,3 +1391,20 @@ def test_build_config_concurrent_builds_succeed_and_agree(
     assert first.api_key == "file_key"
     assert first.model_id == "doubao-seedream-4-5-251128"
     assert all(config == first for config in configs)
+
+
+def test_failed_build_rolls_back_pending_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """构建失败期间收集的告警随回滚清空，不外泄给下一次成功构建的 drain。"""
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        with pytest.raises(SeedreamConfigError):
+            build_config_from_sources(
+                overrides={"definitely_unknown_key": 1, "log_level": "VERBOSE"}
+            )
+        build_config_from_sources(overrides={"api_key": "k"})
+        config_module.drain_pending_build_warnings()
+
+    assert not any("definitely_unknown_key" in message for message in records)

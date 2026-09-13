@@ -72,15 +72,19 @@ def test_unknown_attribute_raises_attribute_error() -> None:
         getattr(seedream_mcp, "definitely_not_an_export")
 
 
-def test_import_server_does_not_eager_load_pil() -> None:
-    """导入 seedream_mcp.server 不得触发 PIL 加载。
+def test_import_server_does_not_eager_load_pil_or_webapp() -> None:
+    """导入 seedream_mcp.server 不得触发 PIL 与 webapp 加载。
 
-    PIL 首次导入含解码器注册，图像模块一律函数内惰性导入，使成本落在工作线程。
+    PIL 首次导入含解码器注册，图像模块一律函数内惰性导入，使成本落在工作
+    线程；webapp 仅在 streamable-http 且开启 Web 操作台时由 transport 懒导入，
+    模块级引用会拖累 stdio 部署的启动与内存。
     """
     _run_in_subprocess(
         "import sys, seedream_mcp.server; "
         "loaded = [m for m in sys.modules if m == 'PIL' or m.startswith('PIL.')]; "
-        "assert not loaded, f'PIL eagerly imported: {loaded}'"
+        "assert not loaded, f'PIL eagerly imported: {loaded}'; "
+        "loaded = [m for m in sys.modules if m.startswith('seedream_mcp.webapp')]; "
+        "assert not loaded, f'webapp eagerly imported: {loaded}'"
     )
 
 

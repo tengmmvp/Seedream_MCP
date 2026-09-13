@@ -59,7 +59,9 @@ _SCAN_PREFIX_GROWTH_FACTOR = 2
 # raw→resolved 的进程级复用缓存，TTL 过期重扫免逐文件重复 resolve；缓存值同时
 # 供回显与读权限判定消费，符号链接改向的陈旧窗口由 TTL 封顶在扫描条目陈旧窗口
 # 的两倍。骨架与配置根缓存共用 io_path 的 ResolveResultCache。
-_SCAN_RESOLVE_CACHE = ResolveResultCache(8192, ttl_seconds=60.0)
+# 扫描 resolve 复用缓存的进程级条目上限：派生自扫描缓存单目录上限，恒容纳
+# 一个最大可缓存目录的全量条目。
+_SCAN_RESOLVE_CACHE = ResolveResultCache(_DIRECTORY_SCAN_CACHE_MAX_LIST_LEN, ttl_seconds=60.0)
 
 
 @dataclass
