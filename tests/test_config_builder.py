@@ -648,7 +648,10 @@ def test_http_allowed_hosts_sequence_override_splits_entries() -> None:
     from seedream_mcp.config import build_config_from_sources
 
     config = build_config_from_sources(
-        overrides={"http_allowed_hosts": ("api.example.com", "b.example.com")}
+        overrides={
+            "api_key": "test_key",
+            "http_allowed_hosts": ("api.example.com", "b.example.com"),
+        }
     )
     assert config.http_allowed_hosts == ("api.example.com", "b.example.com")
 
