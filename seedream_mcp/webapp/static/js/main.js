@@ -12,7 +12,13 @@ import {
   state,
   writeStoredToken,
 } from "./api.js";
-import { applyToolUI, loadConfigInfo, submitGenerate } from "./generate.js";
+import {
+  applyToolUI,
+  loadConfigInfo,
+  submitGenerate,
+  syncCustomSizeField,
+  syncLayerDecompositionSize,
+} from "./generate.js";
 import {
   closeLightbox,
   GALLERY_PAGE_SIZE,
@@ -87,12 +93,9 @@ function bindEvents() {
       $("ref-add-url").click();
     }
   });
-  $("size").addEventListener("change", () => {
-    $("custom-size-field").classList.toggle(
-      "collapsed",
-      $("size").value !== "custom",
-    );
-  });
+  $("size").addEventListener("change", syncCustomSizeField);
+  // 图层拆分勾选态切换尺寸选项集：拆分仅档位与 auto，取消勾选恢复进入前选择。
+  $("layer-decomposition").addEventListener("change", syncLayerDecompositionSize);
   $("generate-form").addEventListener("submit", submitGenerate);
 
   $("gallery-refresh").addEventListener("click", () => {

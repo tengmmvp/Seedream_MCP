@@ -24,6 +24,7 @@ from seedream_mcp.utils.images.image_thumbnail import (
     THUMBNAIL_MAX_EDGE,
     build_preview_contents,
     build_thumbnail_bytes,
+    cached_thumbnail_bytes,
 )
 from seedream_mcp.utils.io import io_save
 
@@ -47,6 +48,41 @@ def _write_jpeg(path: Path, size: tuple[int, int], orientation: int | None = Non
     else:
         image.save(path, format="JPEG")
     return path
+
+
+async def test_cached_thumbnail_bytes_raises_for_missing_source(tmp_path: Path) -> None:
+    """源图缺失时抛 FileNotFoundError，与生成失败的 None 分档。"""
+    with pytest.raises(FileNotFoundError):
+        await cached_thumbnail_bytes(tmp_path / "missing.png", tmp_path)
+
+
+async def test_build_preview_contents_skips_missing_source(tmp_path: Path) -> None:
+    """保存后预览装配前源图被删时跳过该张，FileNotFoundError 不外泄到工具调用。"""
+    image = _write_png(tmp_path / "gone.png", (64, 64))
+    image.unlink()
+
+    contents = await build_preview_contents([image], tmp_path)
+
+    assert contents == []
+
+
+async def test_build_preview_contents_skips_transient_stat_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """源图 stat 瞬时失败上抛 OSError 时跳过该张，不外泄到工具调用。"""
+    from seedream_mcp.utils.images import image_thumbnail
+
+    image = _write_png(tmp_path / "locked.png", (64, 64))
+
+    async def _denied(image_path: Path, images_root: Path) -> bytes | None:
+        del images_root
+        raise PermissionError(image_path)
+
+    monkeypatch.setattr(image_thumbnail, "cached_thumbnail_bytes", _denied)
+
+    contents = await build_preview_contents([image], tmp_path)
+
+    assert contents == []
 
 
 def test_build_thumbnail_bytes_downsamples_large_image(tmp_path: Path) -> None:
@@ -85,12 +121,13 @@ def test_build_thumbnail_bytes_flattens_alpha_onto_white(tmp_path: Path) -> None
 
 
 def test_build_thumbnail_bytes_returns_none_for_invalid_input(tmp_path: Path) -> None:
-    """损坏数据与不存在的路径统一归一为 None。"""
+    """损坏数据归一为 None，源图缺失上抛 FileNotFoundError 分档。"""
     corrupt = tmp_path / "corrupt.png"
     corrupt.write_bytes(b"not an image at all")
 
     assert build_thumbnail_bytes(corrupt) is None
-    assert build_thumbnail_bytes(tmp_path / "missing.png") is None
+    with pytest.raises(FileNotFoundError):
+        build_thumbnail_bytes(tmp_path / "missing.png")
 
 
 def test_build_thumbnail_bytes_applies_exif_orientation_after_draft(tmp_path: Path) -> None:

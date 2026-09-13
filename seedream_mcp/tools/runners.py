@@ -10,6 +10,7 @@ impl 处理器签名不感知该开关。
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TypeVar
 
 from mcp.server.mcpserver import Context
@@ -111,7 +112,16 @@ async def run_browse_images(
     params: BrowseImagesInput,
     ctx: Context | None = None,
     workspace_roots: ListRootsResult | None = None,
+    *,
+    bounds_scope: list[Path] | None = None,
 ) -> CallToolResult:
-    """注入工作区边界后委托 ``handle_browse_images`` 处理图片浏览请求。"""
+    """注入工作区边界后委托 ``handle_browse_images`` 处理图片浏览请求。
+
+    Args:
+        params: 经 pydantic 校验的工具输入模型。
+        ctx: MCP 上下文，用于进度上报，可为 None。
+        workspace_roots: 会话 Roots 声明，None 时保持当前工作区状态。
+        bounds_scope: 条目过滤的替代界，应窄于读权限，None 时按读权限过滤。
+    """
     async with workspace_roots_scope_from_result(workspace_roots):
-        return await handle_browse_images(params, ctx=ctx)
+        return await handle_browse_images(params, ctx=ctx, bounds_scope=bounds_scope)

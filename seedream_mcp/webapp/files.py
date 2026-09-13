@@ -9,6 +9,7 @@ normalize_path 与 is_within_resolved 的边界比较、is_file 存在性；违�
 from __future__ import annotations
 
 import asyncio
+import stat
 from pathlib import Path
 
 from starlette.requests import Request
@@ -54,6 +55,11 @@ def resolve_web_relative_path(rel: str, images_root: Path) -> Path:
     return resolved
 
 
+def _image_not_found() -> Response:
+    """图片缺失的统一 404 响应。"""
+    return _shared.error_json("not_found", "图片不存在", 404)
+
+
 async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Response:
     """在工作线程完成图片目录解析与请求路径校验，错误按原状态码映射。
 
@@ -73,21 +79,28 @@ async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Respons
     except ValueError as exc:
         return _shared.error_json("invalid_path", str(exc), 400)
     except FileNotFoundError:
-        return _shared.error_json("not_found", "图片不存在", 404)
+        return _image_not_found()
 
 
 async def web_thumbnail(request: Request) -> Response:
     """缩略图端点：长边不超过 768 像素的 JPEG，经落盘缓存。
 
-    解码失败与文件不存在分档：文件缺失 404，存在但无法生成缩略图（损坏或
-    像素超限）422，监控与排障可按状态码区分。
+    解码失败与文件不存在分档：文件缺失 404，存在但无法生成缩略图（损坏、
+    像素超限或读取瞬时失败）422，监控与排障可按状态码区分。
     """
     resolved = await _resolve_request_path(request)
     if isinstance(resolved, Response):
         return resolved
     image_path, images_root = resolved
 
-    data = await cached_thumbnail_bytes(image_path, images_root)
+    try:
+        data = await cached_thumbnail_bytes(image_path, images_root)
+    except FileNotFoundError:
+        # 缩略图链路中源图被后台清理删除，按缺失口径归 404。
+        return _image_not_found()
+    except OSError:
+        # stat 瞬时失败不谎报缺失，随生成失败归 422。
+        data = None
     if data is None:
         return _shared.error_json("thumbnail_failed", "缩略图生成失败", 422)
     return Response(content=data, media_type="image/jpeg", headers=_shared.PRIVATE_CACHE_HEADER)
@@ -100,8 +113,17 @@ async def web_image(request: Request) -> Response:
         return resolved
     image_path, _ = resolved
 
+    # stat 结果复用为响应头依据，同时把解析后、发送前的删除按缺失口径归 404；
+    # 常规文件校验补齐 FileResponse 传入 stat_result 后跳过的同款防御。
+    try:
+        stat_result = await asyncio.to_thread(image_path.stat)
+    except FileNotFoundError:
+        return _image_not_found()
+    if not stat.S_ISREG(stat_result.st_mode):
+        return _image_not_found()
     return FileResponse(
         image_path,
+        stat_result=stat_result,
         media_type=MIME_BY_EXTENSION.get(image_path.suffix.lower(), "application/octet-stream"),
         headers=_shared.PRIVATE_CACHE_HEADER,
     )

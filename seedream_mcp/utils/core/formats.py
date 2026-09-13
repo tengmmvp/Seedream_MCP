@@ -52,10 +52,10 @@ MIME_BY_EXTENSION: Mapping[str, str] = MappingProxyType(
     }
 )
 
-# 新增扩展名漏更 MIME 表时在导入期暴露，而非等到运行期 KeyError。
-assert (
-    SUPPORTED_IMAGE_EXTENSIONS <= MIME_BY_EXTENSION.keys()
-), "SUPPORTED_IMAGE_EXTENSIONS 存在未登记 MIME_BY_EXTENSION 的扩展名"
+# 新增扩展名漏更 MIME 表时在导入期暴露；显式抛错而非 assert，防 python -O
+# 剥离后守护失效。
+if _missing_mime := SUPPORTED_IMAGE_EXTENSIONS - MIME_BY_EXTENSION.keys():
+    raise RuntimeError(f"MIME_BY_EXTENSION 缺少扩展名映射: {sorted(_missing_mime)}")
 
 # MIME 类型到扩展名映射，用于 Data URI 解码后推断扩展名，由 MIME_BY_EXTENSION
 # 反转派生，同样取只读视图。.jpg 与 .jpeg 同映射 image/jpeg，反转的多键冲突经

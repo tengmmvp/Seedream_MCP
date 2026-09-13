@@ -46,6 +46,7 @@ export function clearStoredToken() {
  * @property {Array<Object>} refs - 参考图列表，元素形如 {kind, value, preview}。
  * @property {Array<Object>} parkedRefs - 因目标工具上限收缩而暂存的参考图，
  *   切回支持的工具时按上限自动恢复。
+ * @property {string|null} sizePreLayer - 进入图层拆分前记住的尺寸选择，离开时恢复。
  * @property {Object<string, Array<string>>} objectUrls - 对象 URL 按域分池
  *   登记，键为 generate 与 gallery；revokeObjectUrls 按池回收，图库翻页不
  *   波及生成台。
@@ -57,6 +58,7 @@ export const state = {
   tool: "text-to-image",
   refs: [],
   parkedRefs: [],
+  sizePreLayer: null,
   objectUrls: { generate: [], gallery: [] },
   gallery: { offset: 0, hasMore: false, items: [] },
 };
@@ -162,6 +164,18 @@ export async function fetchBlobUrl(path, pool) {
   return url;
 }
 
+/** AbortSignal.timeout 不可用时经 AbortController 定时中止，全浏览器兜底。 */
+export function timeoutSignal(ms) {
+  if (typeof AbortSignal.timeout === "function") return AbortSignal.timeout(ms);
+  const controller = new AbortController();
+  // 中止理由置为 TimeoutError，支持 reason 的浏览器按名分类。
+  setTimeout(
+    () => controller.abort(new DOMException("signal timed out", "TimeoutError")),
+    ms,
+  );
+  return controller.signal;
+}
+
 /**
  * 外链图片走裸 fetch：不携带 Authorization，避免令牌外送到上游 CDN；对象 URL
  * 登记入指定池后统一回收。
@@ -173,8 +187,8 @@ export async function fetchBlobUrl(path, pool) {
  */
 export async function fetchExternalBlobUrl(url, pool) {
   try {
-    // 超时防上游停滞挂死调用方的批量等待；失败按既有回退直连 src。
-    const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    // 超时防上游停滞挂死；失败按既有回退直连 src。
+    const response = await fetch(url, { signal: timeoutSignal(30000) });
     if (!response.ok) return null;
     const objectUrl = URL.createObjectURL(await response.blob());
     state.objectUrls[pool].push(objectUrl);

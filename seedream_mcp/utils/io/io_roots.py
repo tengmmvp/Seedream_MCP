@@ -10,6 +10,7 @@ io_roots → io_path 单向，工作区状态经 io_path 的公共访问器置�
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from contextvars import Token
 from pathlib import Path
@@ -23,6 +24,7 @@ from mcp.types import ListRootsResult
 from ..core.logs import get_logger
 from .io_path import (
     apply_workspace_roots,
+    has_null_byte,
     has_windows_colon_component,
     is_drive_relative,
     is_unc_path,
@@ -197,6 +199,9 @@ def _file_uri_to_path(uri: str) -> Path | None:
     # file://localhost//server/share 等 netloc 合法但 path 为 UNC 形式，resolve 会触发 SMB。
     if is_unc_path(path_part):
         return None
+    # 与 normalize_path 同口径显式拒绝空字节：Py3.13+ 的 resolve 不再对其抛错。
+    if has_null_byte(path_part):
+        return None
 
     candidate = Path(path_part)
     # 有根无盘符形态在 win32 锚定当前盘根而非可判定的绝对位置，与 normalize_path
@@ -209,7 +214,8 @@ def _file_uri_to_path(uri: str) -> Path | None:
     # 仍按完整路径判定拒绝，畸形形态不成为工作区 root。
     if is_drive_relative(candidate) or has_windows_colon_component(str(candidate)):
         return None
-    if is_windows_reserved_name(candidate.name):
+    # 保留设备名拒绝仅 win32 生效，POSIX 上 con 等为合法目录名。
+    if sys.platform == "win32" and is_windows_reserved_name(candidate.name):
         return None
 
     try:

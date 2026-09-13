@@ -16,6 +16,7 @@ import {
   setActiveTool,
   showInlineError,
   state,
+  timeoutSignal,
 } from "./api.js";
 import { renderReferences, toolConfig, withinUploadBudget } from "./refs.js";
 import { openLightbox } from "./gallery.js";
@@ -36,43 +37,7 @@ export async function loadConfigInfo() {
     ? `${current.display_name} · ${info.default_size} 默认`
     : info.model_id;
 
-  const sizeSelect = $("size");
-  // 令牌重输等场景二次加载时保留先前选择：自定义保持，档位在新列表中仍存在则恢复。
-  const previous = sizeSelect.value;
-  sizeSelect.innerHTML = "";
-  // 未知模型（Endpoint ID 部署）回退档位取 unknown 家族声明，与后端放行同源。
-  const presets = current
-    ? current.allowed_presets
-    : Array.isArray(info.fallback_presets)
-      ? info.fallback_presets
-      : [];
-  for (const preset of presets) {
-    const option = document.createElement("option");
-    option.value = preset;
-    option.textContent =
-      preset === info.default_size ? `${preset}（默认）` : preset;
-    sizeSelect.appendChild(option);
-  }
-  const custom = document.createElement("option");
-  custom.value = "custom";
-  custom.textContent = "自定义";
-  sizeSelect.appendChild(custom);
-  if (previous === "custom" || presets.includes(previous)) {
-    sizeSelect.value = previous;
-  } else {
-    const match = /^(\d+)[xX](\d+)$/.exec(info.default_size || "");
-    if (presets.includes(info.default_size)) {
-      sizeSelect.value = info.default_size;
-    } else if (match) {
-      $("size-width").value = match[1];
-      $("size-height").value = match[2];
-      sizeSelect.value = "custom";
-    }
-    $("custom-size-field").classList.toggle(
-      "collapsed",
-      sizeSelect.value !== "custom",
-    );
-  }
+  renderSizeOptions();
 
   // 格式过滤器选项从 config-info 派生，与后端支持清单单一来源；先前选择在新列表
   // 中仍存在则恢复，恢复失败回「全部」并同步重置图库偏移，页码与过滤语义不错位。
@@ -133,6 +98,91 @@ export async function loadConfigInfo() {
   updateToolAvailability();
 }
 
+/** 图层拆分开关可见且勾选时生效；选项集、请求标志与提示词校验三处共用。 */
+function layerDecompositionActive() {
+  return (
+    !$("layer-field").classList.contains("collapsed") &&
+    $("layer-decomposition").checked
+  );
+}
+
+/** 自定义尺寸输入区随尺寸选择折叠。 */
+export function syncCustomSizeField() {
+  $("custom-size-field").classList.toggle(
+    "collapsed",
+    $("size").value !== "custom",
+  );
+}
+
+/**
+ * 重建尺寸下拉：图层拆分勾选时仅档位与 auto，其余为档位与自定义像素；先前
+ * 选择在新列表中仍存在则保留。preferred 为离开图层态时的记忆值，免去默认
+ * 预填对自定义宽高的覆写。
+ */
+function renderSizeOptions(preferred) {
+  const info = state.configInfo;
+  if (!info) return;
+  const sizeSelect = $("size");
+  const previous = preferred ?? sizeSelect.value;
+  const layerMode = layerDecompositionActive();
+  sizeSelect.innerHTML = "";
+  // 未知模型（Endpoint ID 部署）回退档位取 unknown 家族声明，与后端放行同源。
+  const current = currentModel();
+  const presets = current
+    ? current.allowed_presets
+    : Array.isArray(info.fallback_presets)
+      ? info.fallback_presets
+      : [];
+  for (const preset of presets) {
+    const option = document.createElement("option");
+    option.value = preset;
+    option.textContent =
+      !layerMode && preset === info.default_size
+        ? `${preset}（默认）`
+        : preset;
+    sizeSelect.appendChild(option);
+  }
+  if (layerMode) {
+    const auto = document.createElement("option");
+    auto.value = "auto";
+    auto.textContent = "auto（自适应，默认）";
+    sizeSelect.appendChild(auto);
+    sizeSelect.value = presets.includes(previous) ? previous : "auto";
+  } else {
+    const custom = document.createElement("option");
+    custom.value = "custom";
+    custom.textContent = "自定义";
+    sizeSelect.appendChild(custom);
+    if (previous === "custom" || presets.includes(previous)) {
+      sizeSelect.value = previous;
+    } else {
+      const match = /^(\d+)[xX](\d+)$/.exec(info.default_size || "");
+      if (presets.includes(info.default_size)) {
+        sizeSelect.value = info.default_size;
+      } else if (match) {
+        $("size-width").value = match[1];
+        $("size-height").value = match[2];
+        sizeSelect.value = "custom";
+      }
+    }
+  }
+  syncCustomSizeField();
+}
+
+/**
+ * 图层拆分勾选态变化时同步尺寸选择：勾选瞬间记住当前值，取消勾选时以记忆值
+ * 渲染并清除；渲染与记忆都由勾选翻转的确定时机驱动，图层态内的中间选择不污染。
+ */
+export function syncLayerDecompositionSize() {
+  if ($("layer-decomposition").checked) {
+    state.sizePreLayer = $("size").value;
+    renderSizeOptions();
+    return;
+  }
+  renderSizeOptions(state.sizePreLayer);
+  state.sizePreLayer = null;
+}
+
 /**
  * 当前模型能力下各表单区的显隐与提示词必填态；提示词可留空的说明只在对应
  * 能力真实可用时提及，避免误导用户寻找不存在的开关。
@@ -157,7 +207,10 @@ export function applyToolUI() {
   );
   const layerField = $("layer-field");
   layerField.classList.toggle("collapsed", !layerAllowed);
-  if (!layerAllowed) $("layer-decomposition").checked = false;
+  if (!layerAllowed && $("layer-decomposition").checked) {
+    $("layer-decomposition").checked = false;
+    syncLayerDecompositionSize();
+  }
   // 上限收缩时参考图暂存而非丢弃，切回支持的工具按上限自动恢复原顺序；
   // 恢复与入列同受 data URI 累计上限约束，超限项留在暂存不丢。
   while (state.refs.length > config.max) {
@@ -226,10 +279,7 @@ export function buildRequestBody() {
     // 留空省略键，由后端按参考图数量推导。
     body.max_images = Number($("max-images").value) || undefined;
   }
-  if (
-    !$("layer-field").classList.contains("collapsed") &&
-    $("layer-decomposition").checked
-  ) {
+  if (layerDecompositionActive()) {
     body.layer_decomposition = true;
   }
 
@@ -325,9 +375,7 @@ export async function submitGenerate(event) {
   const config = toolConfig(state.tool);
   const prompt = $("prompt").value.trim();
   // 空提示词仅图生图勾选图层拆分时被后端接受，判定与提示文案口径一致。
-  const layerChecked =
-    !$("layer-field").classList.contains("collapsed") &&
-    $("layer-decomposition").checked;
+  const layerChecked = layerDecompositionActive();
   if (!prompt && !(config.promptOptional && layerChecked)) {
     setStatus("failed", "请填写提示词。");
     return;
@@ -356,17 +404,12 @@ export async function submitGenerate(event) {
 
   try {
     // 上限 20 分钟覆盖真实生成的最坏量级；服务端总预算含重试与排队，到点中止时
-    // 服务端可能仍在执行，超时分支如实提示去图库核对而非直接重试。旧浏览器无
-    // AbortSignal.timeout 时不设超时，退化为无上限等待。
-    const timeoutSignal =
-      typeof AbortSignal.timeout === "function"
-        ? AbortSignal.timeout(1200000)
-        : undefined;
+    // 服务端可能仍在执行，超时分支如实提示去图库核对而非直接重试。
     const response = await apiFetch(`/web/api/generate/${state.tool}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildRequestBody()),
-      signal: timeoutSignal,
+      signal: timeoutSignal(1200000),
     });
     const payload = await response.json();
     if (response.ok) {
@@ -391,7 +434,9 @@ export async function submitGenerate(event) {
         type: "bad_response",
         message: "响应不是有效的 JSON，服务可能异常，请稍后重试。",
       });
-    } else if (error.name === "TimeoutError") {
+    // AbortError 在无手动中止的代码里仅来自超时兜底与浏览器层中止，统一按
+    // 超时引导：误劝勿重试的代价小于丢失引导诱发重复生成。
+    } else if (error.name === "TimeoutError" || error.name === "AbortError") {
       setStatus("failed", "生成耗时异常。");
       showResultError({
         type: "timeout",

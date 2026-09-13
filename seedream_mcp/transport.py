@@ -694,7 +694,8 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     else:
         default_allowlist = _bind_address_allowlist(host)
         if default_allowlist is None:
-            logger.warning(
+            # security 标记的 WARNING 告警不受配置级别过滤，见 logs 的 sink 过滤。
+            logger.bind(security=True).warning(
                 "streamable-http 绑定通配地址 {}，Host/Origin 校验默认关闭，"
                 "请配置 SEEDREAM_HTTP_ALLOWED_HOSTS 启用校验",
                 host,
@@ -732,7 +733,10 @@ def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
 
 
 def warn_remote_exposure(host: str, auth_enabled: bool) -> None:
-    """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致。"""
+    """按绑定地址与鉴权状态输出风险告警，内容须与生效配置一致。
+
+    security 标记使 WARNING 告警免受配置级别过滤，见 logs 的 sink 过滤。
+    """
     # localhost 的解析依赖 hosts/DNS 可被污染指向非回环地址，告警按非回环口径表述。
     host_note = "按非回环地址要求校验" if host == "localhost" else "非回环地址"
     if is_loopback_bind_host(host):
@@ -752,7 +756,7 @@ def warn_remote_exposure(host: str, auth_enabled: bool) -> None:
             f"streamable-http 绑定到 {host}（{host_note}）且未启用鉴权，存在未授权访问风险，"
             "请配置 --auth-token。"
         )
-    logger.warning(message)
+    logger.bind(security=True).warning(message)
 
 
 async def _drain_pending_tasks() -> None:

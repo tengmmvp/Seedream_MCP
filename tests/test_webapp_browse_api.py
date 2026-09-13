@@ -80,8 +80,8 @@ async def test_browse_internal_error_returns_500_json(
     """run_browse_images 抛出未归类异常时兜底为 500 统一 JSON 而非裸异常。"""
     from seedream_mcp.webapp import gallery as gallery_module
 
-    async def _explode(params: Any, ctx: Any = None, workspace_roots: Any = None) -> Any:
-        del params, ctx, workspace_roots
+    async def _explode(params: Any, ctx: Any = None, **kwargs: Any) -> Any:
+        del params, ctx, kwargs
         raise RuntimeError("boom")
 
     monkeypatch.setattr(gallery_module, "run_browse_images", _explode)
@@ -236,14 +236,15 @@ async def test_browse_images_root_unavailable_returns_400(
     assert "SEEDREAM_WORKSPACE_ROOT" in payload["error_description"]
 
 
-def test_converge_for_web_drops_outside_entries(tmp_path: Path) -> None:
-    """越界条目整条剔除并递减 total_count，界内条目保留 web_path 改写。"""
+def test_converge_for_web_rewrites_paths_without_dropping(tmp_path: Path) -> None:
+    """条目 path 改写为图片目录相对形态；越界剔除在扫描源头完成，此处不删条目。"""
     from seedream_mcp.webapp.gallery import _converge_for_web
 
     images_root = tmp_path / "images"
     structured: dict[str, Any] = {
         "workspace_roots": [],
         "resolved_directories": [],
+        "count": 2,
         "total_count": 2,
         "images": [
             {"path": str(images_root / "a.png")},
@@ -255,5 +256,40 @@ def test_converge_for_web_drops_outside_entries(tmp_path: Path) -> None:
 
     assert "workspace_roots" not in structured
     assert "resolved_directories" not in structured
-    assert structured["total_count"] == 1
-    assert [item["web_path"] for item in structured["images"]] == ["a.png"]
+    assert structured["count"] == 2
+    assert len(structured["images"]) == 2
+    assert structured["images"][0]["web_path"] == "a.png"
+    assert "web_path" not in structured["images"][1]
+
+
+async def test_web_browse_filters_outside_entries_at_source(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """越界条目经 bounds_scope 在扫描源头剔除，响应不出现界外路径与计数虚高。"""
+    import seedream_mcp.tools.core.browse as browse_module
+    from seedream_mcp.utils.io.io_scan import find_images_in_directory
+
+    images_root = write_workspace_config(tmp_path)
+    day_dir = images_root / "2026-08-20" / "text_to_image"
+    day_dir.mkdir(parents=True)
+    (day_dir / "a.png").write_bytes(make_png_bytes())
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(make_png_bytes())
+    real_scanner = find_images_in_directory
+
+    def _scanner(directory: str, **kwargs: Any) -> list[Path]:
+        found = real_scanner(directory, **kwargs)
+        return found + [outside] if found else found
+
+    monkeypatch.setattr(browse_module, "find_images_in_directory", _scanner)
+    app = build_web_app()
+
+    response = await _post_browse(app, {})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert [item["web_path"] for item in payload["images"]] == ["2026-08-20/text_to_image/a.png"]

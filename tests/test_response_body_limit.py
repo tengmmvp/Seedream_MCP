@@ -50,7 +50,8 @@ async def test_error_body_over_independent_cap_rejected(no_sleep: None) -> None:
 
         assert "已读取" in exc_info.value.message
         assert str(_ERROR_BODY_CAP) in exc_info.value.message
-        assert "SEEDREAM_RESPONSE_BODY_LIMIT" in exc_info.value.message
+        # 错误路径上限被 4MB 钳制，环境变量调大不生效，消息不提示调整。
+        assert "SEEDREAM_RESPONSE_BODY_LIMIT" not in exc_info.value.message
 
 
 async def test_error_body_declared_length_over_independent_cap(no_sleep: None) -> None:
@@ -75,6 +76,30 @@ async def test_error_body_declared_length_over_independent_cap(no_sleep: None) -
             await client._call_api("text_to_image", {"prompt": "p"})
 
         assert str(_ERROR_BODY_CAP) in exc_info.value.message
+
+
+async def test_error_body_hint_kept_when_explicit_limit_below_cap(
+    no_sleep: None,
+) -> None:
+    """显式总量上限低于 4MB 时错误路径生效上限即环境变量，提示保留。"""
+    config = SeedreamConfig(api_key="k", max_retries=3, response_body_limit=2 * 1024 * 1024)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            500,
+            headers={"content-length": str(3 * 1024 * 1024)},
+            content=b"{}",
+        )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="响应体过大") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        assert str(2 * 1024 * 1024) in exc_info.value.message
+        assert "SEEDREAM_RESPONSE_BODY_LIMIT" in exc_info.value.message
 
 
 async def test_error_body_json_parse_offloaded_to_thread(

@@ -34,6 +34,7 @@ from .utils.core.sanitizers import (
 )
 from .utils.images.image_ref import classify_image_reference
 from .utils.io.io_sse import (
+    RESPONSE_BODY_LIMIT_HINT,
     STREAM_DEADLINE_HIT,
     STREAM_ENDED,
     escalate_partial_status,
@@ -334,9 +335,16 @@ class _ClientHTTPMixin:
             return self.config.response_body_limit
         return self.config.auto_save_max_file_size * _RESPONSE_BODY_LIMIT_FACTOR
 
-    def _error_body_byte_limit(self) -> int:
-        """错误路径读体上限：取响应体总量上限与 4MB 独立上限的较小值。"""
-        return min(self._response_body_byte_limit(), _ERROR_BODY_BYTE_LIMIT)
+    def _error_body_limit(self) -> tuple[int, bool]:
+        """错误路径读体上限与超限消息是否提示环境变量调整。
+
+        生效上限取响应体总量上限与 4MB 独立上限的较小值；总量上限更低时调整
+        环境变量才有效，两者由同一次比较产出。
+        """
+        total_limit = self._response_body_byte_limit()
+        if total_limit < _ERROR_BODY_BYTE_LIMIT:
+            return total_limit, True
+        return _ERROR_BODY_BYTE_LIMIT, False
 
     def _sse_event_truncate_threshold(self) -> int:
         """单个 SSE 事件的截断阈值，显式配置优先，未配置时取推导下界。"""
@@ -351,13 +359,15 @@ class _ClientHTTPMixin:
         max_bytes: int | None = None,
         status_code: int | None = None,
         deadline: float | None = None,
+        limit_adjustable: bool = True,
     ) -> bytearray:
         """流式读取响应体并施加总量与总时长上限，超限抛出对应异常。
 
         max_bytes 缺省时取 _response_body_byte_limit，错误路径传入更小的独立上限。
         status_code 由错误路径传入，使超限异常沿用 429/5xx 可重试、4xx 立即失败的
         既有分类；成功路径不传，超限保持无状态码的立即失败。deadline 为
-        time.monotonic 截止时间，逐块检查封顶整个读体阶段。响应的关闭由调用方负责。
+        time.monotonic 截止时间，逐块检查封顶整个读体阶段。limit_adjustable 控制
+        超限消息是否提示环境变量调整。响应的关闭由调用方负责。
         返回 bytearray 单份缓冲，json.loads 与解码可直接消费，避免 join 或
         bytes 转换的峰值双驻留；增量拼接的 realloc 拷贝在事件循环线程执行，
         以单份驻留优先于卸载拷贝。
@@ -368,6 +378,8 @@ class _ClientHTTPMixin:
         """
         if max_bytes is None:
             max_bytes = self._response_body_byte_limit()
+        # 可调性由调用方声明，钳制决策与生效上限同处一方。
+        adjust_hint = RESPONSE_BODY_LIMIT_HINT if limit_adjustable else ""
         retry_after = (
             self._retry_after_or_none(status_code, response.headers)
             if status_code is not None
@@ -382,7 +394,7 @@ class _ClientHTTPMixin:
             if declared_bytes > max_bytes:
                 raise SeedreamAPIError(
                     f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
-                    f"超过上限 {max_bytes} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
+                    f"超过上限 {max_bytes} 字节{adjust_hint}",
                     status_code=status_code,
                     retry_after=retry_after,
                 )
@@ -402,8 +414,8 @@ class _ClientHTTPMixin:
             buffer += chunk
             if len(buffer) > max_bytes:
                 raise SeedreamAPIError(
-                    f"响应体过大: 已读取 {len(buffer)} 字节，超过上限 {max_bytes} 字节，"
-                    f"可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整",
+                    f"响应体过大: 已读取 {len(buffer)} 字节，超过上限 {max_bytes} 字节"
+                    f"{adjust_hint}",
                     status_code=status_code,
                     retry_after=retry_after,
                 )
@@ -445,11 +457,13 @@ class _ClientHTTPMixin:
             return
 
         try:
+            error_limit, limit_adjustable = self._error_body_limit()
             raw_body = await self._read_response_body_capped(
                 response,
-                max_bytes=self._error_body_byte_limit(),
+                max_bytes=error_limit,
                 status_code=response.status_code,
                 deadline=deadline,
+                limit_adjustable=limit_adjustable,
             )
         except (asyncio.TimeoutError, httpx.ReadTimeout) as exc:
             # 已收到错误状态码后读体超时：按状态码归约为 API 错误交由可重试判定，

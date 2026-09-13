@@ -2,8 +2,8 @@
 
 锁定三组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
 MCP 注册工具名与 impl ToolMetadata 工具名、路径相似建议与 CLI 端口解析的边界行为；
-另含 loguru exc_info 关键字的全源码静态守护。新增取值或改名时两侧须同步，本文件
-在各处失败即暴露漂移。
+另含 loguru exc_info 关键字与 security 标记级别的全源码静态守护。新增取值或改名时
+两侧须同步，本文件在各处失败即暴露漂移。
 """
 
 from __future__ import annotations
@@ -139,6 +139,24 @@ def test_loguru_calls_never_pass_exc_info_keyword() -> None:
         source_text = source_path.read_text(encoding="utf-8")
         if re.search(r"\bexc_info\s*=", source_text):
             offenders.append(relative)
+
+    assert offenders == []
+
+
+def test_security_marked_logs_are_warning_level() -> None:
+    """security 标记的日志调用均为 warning，低于该级别的标记会被 sink 级别门丢弃。
+
+    级别门取配置与 WARNING 的较小值，_sink_filter 的放行仅对过门记录生效。
+    """
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    pattern = re.compile(r"\.bind\(security=True\)\s*\.\s*(\w+)\(")
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        source_text = source_path.read_text(encoding="utf-8")
+        for match in pattern.finditer(source_text):
+            if match.group(1) != "warning":
+                relative = source_path.relative_to(package_root).as_posix()
+                offenders.append(f"{relative}: {match.group(0)}")
 
     assert offenders == []
 

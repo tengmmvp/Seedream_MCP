@@ -34,6 +34,7 @@ from ..core.logs import get_logger
 from ..io.io_file import open_no_follow_read
 from ..io.io_path import (
     get_read_scope,
+    has_null_byte,
     has_windows_colon_component,
     is_drive_relative,
     is_unc_path,
@@ -310,6 +311,14 @@ def resolve_local_image_candidate(
     if has_windows_colon_component(image):
         raise SeedreamValidationError(
             f"拒绝参考图路径分量含冒号以避免访问 NTFS 备用数据流: {image}",
+            field="image",
+            value=image,
+        )
+    # 空字节在候选构造前显式拒绝：stat 对其抛 ValueError 而非 OSError，会穿透
+    # 候选资格检查归为未知错误；判定与 normalize_path 共用单一来源。
+    if has_null_byte(image):
+        raise SeedreamValidationError(
+            f"路径含空字节: {image}",
             field="image",
             value=image,
         )

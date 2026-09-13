@@ -198,6 +198,73 @@ async def test_thumbnail_build_failure_returns_422(
     assert payload["error_description"] == "缩略图生成失败"
 
 
+async def test_thumbnail_source_missing_mid_request_returns_404(
+    web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解析通过后源图被后台清理删除时按缺失口径回 404，不误报生成失败。"""
+    from seedream_mcp.webapp import files as files_module
+
+    async def _missing(image_path: Path, images_root: Path) -> bytes | None:
+        del images_root
+        raise FileNotFoundError(image_path)
+
+    monkeypatch.setattr(files_module, "cached_thumbnail_bytes", _missing)
+
+    response = await web_get(
+        web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
+    )
+
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"] == "not_found"
+
+
+async def test_thumbnail_transient_stat_failure_returns_422(
+    web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """源图存在但 stat 瞬时失败（权限、共享冲突）不谎报缺失，按生成失败归 422。"""
+    from seedream_mcp.webapp import files as files_module
+
+    async def _denied(image_path: Path, images_root: Path) -> bytes | None:
+        del images_root
+        raise PermissionError(image_path)
+
+    monkeypatch.setattr(files_module, "cached_thumbnail_bytes", _denied)
+
+    response = await web_get(
+        web_app_with_image, "/web/api/thumbnail?path=2026-08-20/text_to_image/a.png"
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"] == "thumbnail_failed"
+
+
+async def test_image_endpoint_source_vanished_before_send_returns_404(
+    web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """解析通过后、发送前源图消失时按缺失口径回 404，不落 FileResponse 发送失败。"""
+    from seedream_mcp.webapp import files as files_module
+
+    real_resolve = files_module.resolve_web_relative_path
+
+    def _resolve_then_unlink(rel: str, images_root: Path) -> Path:
+        # resolve 的存在性检查通过后删除源文件，注入发送前的消失窗口。
+        resolved = real_resolve(rel, images_root)
+        resolved.unlink()
+        return resolved
+
+    monkeypatch.setattr(files_module, "resolve_web_relative_path", _resolve_then_unlink)
+
+    response = await web_get(
+        web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
+    )
+
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"] == "not_found"
+
+
 @pytest.mark.parametrize("endpoint", ["thumbnail", "image"])
 async def test_file_endpoints_images_root_unavailable_returns_400(
     endpoint: str,

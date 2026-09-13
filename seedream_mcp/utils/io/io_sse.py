@@ -173,6 +173,9 @@ _SSE_OFFLOAD_THRESHOLD = 64 * 1024
 # chunk_size 取值漂移。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 
+# 响应体超限消息的环境变量调整提示，_client_http 的同文案共用单一来源。
+RESPONSE_BODY_LIMIT_HINT = "，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
+
 # 单条解析产物的内存开销估计：事件 dict 本体、键字符串与内层 dict 等解析产物实测
 # 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 字节总量限额」
 # 从同一限额派生，口径对准解析产物内存：对抗性 64 字节量级的最小合法事件滴流撑满
@@ -534,7 +537,7 @@ async def _consume_sse_chunks(
             await _close_stream_response(response)
             raise SeedreamAPIError(
                 f"SSE 响应流总量超限: 已接收 {processed_bytes} 字节，"
-                f"超过上限 {total_bytes_limit} 字节，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
+                f"超过上限 {total_bytes_limit} 字节{RESPONSE_BODY_LIMIT_HINT}"
             )
 
         if processed_bytes - last_progress_log_bytes >= _SSE_PROGRESS_LOG_INTERVAL_BYTES:

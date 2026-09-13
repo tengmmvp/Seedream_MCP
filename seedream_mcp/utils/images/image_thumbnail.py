@@ -84,14 +84,16 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
     """读取图片文件并生成 JPEG 缩略图字节。
 
     经 PIL thumbnail 缩放，保持纵横比且只缩小不放大，小于上限的原图按原尺寸
-    编码。文件不存在、数据损坏、解码超限等任何异常统一归一为 None，跳过策略
-    由调用方决定。
+    编码。数据损坏、解码超限等生成失败统一归一为 None，跳过策略由调用方决定。
 
     Args:
         image_path: 已保存图片的文件路径。
 
     Returns:
         JPEG 缩略图字节；无法生成时为 None。
+
+    Raises:
+        FileNotFoundError: 源图缺失，与生成失败分档供调用方映射。
     """
     # PIL 惰性导入，首载含解码器注册，落点在工作线程而非事件循环。
     from PIL import Image, ImageOps
@@ -141,6 +143,9 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
             buffer = BytesIO()
             flattened.save(buffer, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY)
             return buffer.getvalue()
+    except FileNotFoundError:
+        # 源图缺失上抛与生成失败分档，避免误记生成失败日志。
+        raise
     except Exception as e:
         logger.warning("缩略图生成失败，跳过该张预览: {} -> {}", image_path.name, e)
         return None
@@ -173,13 +178,6 @@ def _thumb_key(image_path: Path, mtime_ns: int, size: int) -> str:
         digest_size=16,
     ).hexdigest()
     return f"{digest}.thumb"
-
-
-def _source_stat(image_path: Path) -> os.stat_result | None:
-    try:
-        return image_path.stat()
-    except OSError:
-        return None
 
 
 def _read_bytes_safely(path: Path) -> bytes | None:
@@ -269,14 +267,16 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
         images_root: 已 resolve 的图片目录，缓存目录与其并列。
 
     Returns:
-        JPEG 缩略图字节；无法生成时为 None。
+        JPEG 缩略图字节；损坏或像素超限等生成失败时为 None。
+
+    Raises:
+        FileNotFoundError: 源图缺失，与生成失败分档供调用方映射。
+        OSError: 源图 stat 瞬时失败（权限、共享冲突），不与缺失混淆。
     """
     thumbs_root = thumbnail_cache_root(images_root)
 
-    def _stat_and_read() -> tuple[bytes | None, Path | None]:
-        stat = _source_stat(image_path)
-        if stat is None:
-            return None, None
+    def _stat_and_read() -> tuple[bytes | None, Path]:
+        stat = image_path.stat()
         thumb = thumbs_root / _thumb_key(image_path, stat.st_mtime_ns, stat.st_size)
         # 空字节条目视为未命中，重新生成覆盖写损坏缓存
         return _read_bytes_safely(thumb), thumb
@@ -284,9 +284,6 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
     cached, thumb = await asyncio.to_thread(_stat_and_read)
     if cached:
         return cached
-    # stat 失败即源图缺失，短路返回，不占解码信号量。
-    if thumb is None:
-        return None
     generated = await build_thumbnail_bytes_limited(image_path)
     if generated is not None:
         await asyncio.to_thread(_store_thumbnail, thumb, thumbs_root, generated)
@@ -300,7 +297,8 @@ async def build_preview_contents(
 
     PIL 解码与缩放为同步 CPU 操作，逐张经缓存路径下放工作线程并由
     PREVIEW_DECODE_CONCURRENCY 信号量限流；传入图片目录时经落盘缓存免除重复解码，
-    生成失败的路径跳过，返回列表仅含成功项且与输入顺序一致。空输入返回空列表。
+    生成失败或源图缺失的路径跳过，返回列表仅含成功项且与输入顺序一致。空输入
+    返回空列表。
 
     Args:
         image_paths: 自动保存成功的图片文件路径列表。
@@ -312,14 +310,16 @@ async def build_preview_contents(
     if not image_paths:
         return []
 
-    if images_root is not None:
-        thumbnails = await asyncio.gather(
-            *(cached_thumbnail_bytes(path, images_root) for path in image_paths)
-        )
-    else:
-        thumbnails = await asyncio.gather(
-            *(build_thumbnail_bytes_limited(path) for path in image_paths)
-        )
+    async def _or_none(path: Path) -> bytes | None:
+        try:
+            if images_root is not None:
+                return await cached_thumbnail_bytes(path, images_root)
+            return await build_thumbnail_bytes_limited(path)
+        except OSError:
+            # 源图缺失或 stat 瞬时失败均跳过该张。
+            return None
+
+    thumbnails = await asyncio.gather(*(_or_none(path) for path in image_paths))
     contents: list[ImageContent] = []
     for thumbnail in thumbnails:
         if thumbnail is None:

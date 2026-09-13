@@ -153,9 +153,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          prev=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" \
-            -q '[.[].tag_name] | map(select(. != "${GITHUB_REF_NAME}")) | first // empty' \
-            2>/dev/null || true)
+          prev=$( (gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" 2>/dev/null || true) \
+            | jq -r --arg current "${GITHUB_REF_NAME}" \
+              '[.[].tag_name | select(. != null)] | map(select(. != $current)) | first // empty')
           echo "PREVIOUS_TAG=${prev:-main}" >> "$GITHUB_ENV"
 
       - name: 🏷️ Create Release

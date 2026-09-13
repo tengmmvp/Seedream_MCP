@@ -40,6 +40,7 @@ from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.core.logs import (
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_LOG_ROTATION_SIZE_MB,
+    LEGAL_LOG_LEVELS,
     get_logger,
 )
 from .utils.core.validators import validate_size_for_model
@@ -66,7 +67,6 @@ def drain_pending_build_warnings() -> None:
         logger.log(level, message)
 
 
-LEGAL_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 LIFESPAN_KEY_CONFIG = "config"
 LIFESPAN_KEY_CLIENT = "client"
 LIFESPAN_KEY_DOWNLOAD_MANAGER = "download_manager"

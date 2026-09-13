@@ -13,11 +13,11 @@ from .config import (
     DEFAULT_HTTP_HOST,
     DEFAULT_HTTP_PORT,
     HTTP_AUTH_TOKEN_MIN_LENGTH,
-    LEGAL_LOG_LEVELS,
     SeedreamConfig,
     build_config_from_sources,
 )
 from .transport import is_loopback_bind_host
+from .utils.core.logs import LEGAL_LOG_LEVELS
 from .utils.model.model_capabilities import MODEL_ALIASES
 from .version import __version__
 

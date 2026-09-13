@@ -267,7 +267,8 @@ def _scan_and_filter_directory(
         max_depth: 递归扫描的最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         remaining: 本目录新增条数的配额上限。
-        read_scope: 已 resolve 的读权限目录列表（工作区 ∪ 图片目录），越界判定基准。
+        read_scope: 已 resolve 的条目过滤界，为读权限（工作区 ∪ 图片目录）或
+            调用方传入的替代界。
         seen_images: 已见原始路径集合，就地更新，兜底扫描缓存前缀扩展轮次间的
             竞态错位重复。
         unreadable_dirs: 不可读目录收集列表，就地更新，供空结果分支区分目录
@@ -638,6 +639,7 @@ async def execute_browse_request(
     ctx: Context[Any, Any] | None,
     *,
     resolved_directories: list[Path],
+    bounds_scope: list[Path] | None = None,
 ) -> CallToolResult:
     """执行图片浏览主逻辑：求值读权限、解析目录、扫描分页并装配工具结果。
 
@@ -650,6 +652,9 @@ async def execute_browse_request(
         ctx: MCP 上下文，用于进度上报，可为 None。
         resolved_directories: 外层创建的共享列表，解析结果逐步填充，供成功与兜底
             分支读取。
+        bounds_scope: 条目过滤的替代界，应窄于读权限，None 时按读权限
+            （工作区 ∪ 图片目录）过滤；Web 图库传入图片目录使越界条目在
+            扫描源头剔除。
 
     Returns:
         浏览工具结果，目录无效、越界与模型可自纠的参数错误为 is_error=True，目录
@@ -691,7 +696,7 @@ async def execute_browse_request(
         ctx=ctx,
         state=state,
         resolved_dir=resolved_dir,
-        read_scope=read_scope,
+        read_scope=bounds_scope if bounds_scope is not None else read_scope,
         format_filter_exhausted=format_filter_exhausted,
     )
 

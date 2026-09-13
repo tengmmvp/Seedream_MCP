@@ -34,25 +34,17 @@ _ROOTS_ECHO_KEYS = ("workspace_roots", "resolved_directories")
 def _converge_for_web(structured: dict[str, object], images_root: Path) -> None:
     """剥除 Web 前端不消费的边界字段，条目 path 改写为图片目录相对形态。
 
-    越界条目删除 path 键后整条剔除并递减 total_count，前端不消费不可服务的
-    条目；改写经 _shared.converge_path_entry 与 generate 端单点维护。
+    越界条目已在扫描源头经 bounds_scope 剔除。改写经 _shared.converge_path_entry
+    与 generate 端单点维护。
     """
     for key in _ROOTS_ECHO_KEYS:
         structured.pop(key, None)
     images = structured.get("images")
     if not isinstance(images, list):
         return
-    kept: list[object] = []
     for item in images:
         if isinstance(item, dict):
             _shared.converge_path_entry(item, "path", images_root)
-            if item.get("web_path"):
-                kept.append(item)
-    if len(kept) != len(images):
-        total = structured.get("total_count")
-        if isinstance(total, int):
-            structured["total_count"] = total - (len(images) - len(kept))
-        structured["images"] = kept
 
 
 async def _directory_outside_images_root(directory: str, images_root: Path) -> bool:
@@ -90,9 +82,10 @@ async def web_browse(request: Request) -> Response:
         return _shared.error_json(
             "invalid_directory", "目录不在图片目录内，Web 图库仅浏览图片目录", 400
         )
-    # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归
+    # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归；
+    # 条目过滤以图片目录为界在扫描源头剔除，与 Web 文件端点服务范围一致。
     try:
-        result = await run_browse_images(params, ctx=None)
+        result = await run_browse_images(params, ctx=None, bounds_scope=[images_root])
     except Exception:
         logger.exception("Web 图库浏览请求执行异常")
         return _shared.error_json("internal_error", "服务器内部错误，详情见日志", 500)

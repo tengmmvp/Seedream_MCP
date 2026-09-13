@@ -25,6 +25,8 @@ logger = get_logger()
 async def handle_browse_images(
     params: BrowseImagesInput,
     ctx: Context[Any, Any] | None = None,
+    *,
+    bounds_scope: list[Path] | None = None,
 ) -> CallToolResult:
     """处理图片浏览请求，扫描读权限（工作区 ∪ 图片目录）内指定目录的图片并分页返回。
 
@@ -34,6 +36,8 @@ async def handle_browse_images(
     Args:
         params: 经 pydantic 校验的工具输入模型。
         ctx: MCP 上下文，用于进度上报，可为 None。
+        bounds_scope: 条目过滤的替代界，None 时按读权限过滤；透传给
+            execute_browse_request。
 
     Returns:
         浏览工具结果，失败时 isError 为 True。
@@ -41,7 +45,9 @@ async def handle_browse_images(
     # 已解析目录列表在外层创建、core 流水线填充：异常兜底分支经同一引用回显已解析目录。
     resolved_directories: list[Path] = []
     try:
-        return await execute_browse_request(params, ctx, resolved_directories=resolved_directories)
+        return await execute_browse_request(
+            params, ctx, resolved_directories=resolved_directories, bounds_scope=bounds_scope
+        )
     except Exception as exc:
         logger.exception("浏览图片处理失败")
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")

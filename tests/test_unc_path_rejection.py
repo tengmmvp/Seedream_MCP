@@ -382,6 +382,28 @@ def test_file_uri_to_path_rejects_malformed_uri() -> None:
     assert _file_uri_to_path("file://") is None
 
 
+def test_file_uri_to_path_rejects_null_byte() -> None:
+    """含空字节的 file URI 与 normalize_path 同口径拒绝，跨 Python 版本一致。"""
+    assert _file_uri_to_path("file:///c:/x%00y") is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="保留设备名拒绝仅 win32 生效")
+@pytest.mark.parametrize("final_component", ["CON", "con.png", "nul.jpg"])
+def test_file_uri_to_path_rejects_windows_reserved_final_component(
+    tmp_path: Path, final_component: str
+) -> None:
+    """保留设备名作末段的 file URI 拒绝为工作区根候选。"""
+    assert _file_uri_to_path((tmp_path / final_component).as_uri()) is None
+
+
+def test_file_uri_to_path_posix_accepts_reserved_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POSIX 上 con 为合法目录名，不按 Windows 保留名拒绝。"""
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert _file_uri_to_path("file:///tmp/con") is not None
+
+
 # ==================== 图片目录声明的 UNC 拒绝 ====================
 
 

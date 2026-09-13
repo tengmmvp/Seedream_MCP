@@ -171,7 +171,8 @@ class FileManager:
 
         # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，命中时在
         # 首个点前追加下划线；词干归一判定经 is_windows_reserved_name 与
-        # normalize_path 单一来源。
+        # normalize_path 单一来源。写侧全平台规避：数据目录迁移到 Windows 后
+        # 此类名字不可读，POSIX 上多一个下划线无实际代价。
         if is_windows_reserved_name(filename):
             parts = filename.split(".", 1)
             parts[0] += "_"

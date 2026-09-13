@@ -75,6 +75,49 @@ def test_setup_logging_respects_force_standard_logging_true(
     assert captured_kwargs["force"] is True
 
 
+def test_security_marked_warning_bypasses_level_filter(tmp_path: Path) -> None:
+    """security 标记的 WARNING 免级别过滤，常规 WARNING 按配置过滤。"""
+    log_file = tmp_path / "log"
+    with preserved_loguru_globals():
+        setup_logging("ERROR", str(log_file), enable_console=False, force_standard_logging=True)
+        logger.bind(security=True).warning("security-visible")
+        logger.warning("routine-hidden")
+        logger.complete()
+
+    content = log_file.read_text(encoding="utf-8")
+    assert "security-visible" in content
+    assert "routine-hidden" not in content
+
+
+def test_sink_level_gate_keeps_security_warning_reachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sink 级别门取配置与 WARNING 的较小者，低级别记录在记录构造前丢弃。
+
+    级别门不高于 WARNING 保证 security 告警可过门，普通记录仍由 filter 按
+    配置级别过滤。
+    """
+    fake = RecordingLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+
+    setup_logging(
+        log_level="ERROR",
+        log_file=str(tmp_path / "log"),
+        enable_console=True,
+        enable_file=True,
+    )
+
+    assert [kwargs["level"] for kwargs in fake.add_kwargs] == [30, 30]
+
+
+def test_setup_logging_rejects_unknown_level_name(
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: None
+) -> None:
+    """未知级别名抛 ValueError，与 loguru 原生 level= 参数同口径。"""
+    with pytest.raises(ValueError):
+        setup_logging(log_level="VERBOSE")
+
+
 def test_console_sink_colorize_follows_tty_autodetection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

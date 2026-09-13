@@ -78,7 +78,8 @@ def is_windows_reserved_name(name: str) -> bool:
     """判断文件名是否命中 Windows 保留设备名。
 
     Windows 解析前剥离前导点与首尾空格并取首个点前词干，CON.txt、con. 与 .CON
-    同样命中；normalize_path 的拒绝与 io_storage 的文件名净化共用本判定。
+    同样命中；normalize_path 与 io_roots 的读侧拒绝、io_storage 的文件名净化
+    共用本判定。
 
     Args:
         name: 待判定的文件名。
@@ -88,6 +89,11 @@ def is_windows_reserved_name(name: str) -> bool:
     """
     normalized_stem = name.lstrip(". ").split(".", 1)[0].strip(". ")
     return normalized_stem.upper() in WINDOWS_RESERVED_NAMES
+
+
+def has_null_byte(path: str) -> bool:
+    """空字节在任何文件系统都不是合法路径分量。"""
+    return "\x00" in path
 
 
 # 已 resolve 回退根的进程级缓存：首次探测结果复用到进程结束，消除回退边界下
@@ -651,10 +657,9 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
             最终分量为 Windows 保留设备名或路径无效时抛出。
     """
     try:
-        # 空字节在任何文件系统都不是合法路径分量。Python 3.13 起 Windows 的
-        # resolve 对含空字节路径不再抛 ValueError 而是原样返回，此前依赖隐式异常
-        # 拒绝的口径随之失效，改为入口显式拒绝保证跨版本行为一致。
-        if "\x00" in path:
+        # Python 3.13 起 resolve 对空字节不再抛 ValueError，改入口显式拒绝保证
+        # 跨版本行为一致；判定经 has_null_byte 与 file URI 转换共用单一来源。
+        if has_null_byte(path):
             raise ValueError(f"路径含空字节: {path}")
         path_obj = Path(path)
 

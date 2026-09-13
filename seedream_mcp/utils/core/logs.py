@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any, Iterable
@@ -156,6 +157,32 @@ def _strip_exception_control_chars(record: Any) -> None:
         value.args = cleaned
 
 
+# 级别名到严重度序号的映射；不查 loguru 注册表，测试替换 logger 后仍可用。
+_LEVEL_SEVERITY = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+# 合法级别名单一来源，config 校验与 CLI choices 引用，防与序号映射键集漂移。
+LEGAL_LOG_LEVELS: tuple[str, ...] = tuple(_LEVEL_SEVERITY)
+
+
+def _floor_severity(floor: str) -> int:
+    """级别名转严重度序号；未知级别名抛 ValueError，与原生 level= 参数同口径。"""
+    try:
+        return _LEVEL_SEVERITY[floor]
+    except KeyError:
+        raise ValueError(f"未知日志级别: {floor}") from None
+
+
+def _sink_filter(floor: str) -> Callable[[Any], bool]:
+    """按配置级别过滤并放行 security 标记的安全告警。"""
+    severity = _floor_severity(floor)
+
+    def _filter(record: Any) -> bool:
+        if record["extra"].get("security"):
+            return True
+        return bool(record["level"].no >= severity)
+
+    return _filter
+
+
 def setup_logging(
     log_level: str = "INFO",
     log_file: str | None = None,
@@ -174,7 +201,8 @@ def setup_logging(
         log_level: 日志级别，取 DEBUG、INFO、WARNING、ERROR 或 CRITICAL。
         log_file: 日志文件路径；None 时默认 ``.seedream/logs/seedream_mcp.log``
             相对进程工作目录解析。
-        enable_console: 是否启用控制台通道，输出至 stderr。
+        enable_console: 是否启用控制台通道，输出至 stderr；security 标记的
+            WARNING 告警不受配置级别过滤。
         enable_file: 是否启用文件通道，按 rotation_mb 轮换、保留 retention_days
             并压缩归档。
         force_standard_logging: 是否强制接管标准库 logging 配置；未强制且 root
@@ -187,11 +215,15 @@ def setup_logging(
     logger.configure(patcher=_strip_message_control_chars)
 
     level = log_level.upper()
+    # sink 级别门取配置与 WARNING 的较小者：security 告警均为 WARNING，先经
+    # handler 级别门丢弃低级别记录，filter 再按配置级别过滤普通记录。
+    sink_level = min(_floor_severity(level), _LEVEL_SEVERITY["WARNING"])
 
     if enable_console:
         logger.add(
             sys.stderr,
-            level=level,
+            level=sink_level,
+            filter=_sink_filter(level),
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
             "<level>{level: <8}</level> | "
             "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
@@ -214,7 +246,8 @@ def setup_logging(
 
         logger.add(
             str(log_path),
-            level=level,
+            level=sink_level,
+            filter=_sink_filter(level),
             format=(
                 "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | " "{name}:{function}:{line} - {message}"
             ),
