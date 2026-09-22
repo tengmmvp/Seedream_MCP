@@ -304,8 +304,10 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
         monkeypatch.setattr(manager._cleanup_file_manager, "run_cleanup_policies", failing_cleanup)
 
         # 首次清理失败：异常被吞，写入短退避时间戳
+        t_before = time_module.time()
         await manager._maybe_cleanup()
         await auto_save_module.drain_background_cleanup_tasks()
+        t_after = time_module.time()
         assert calls == [30]
 
         # 紧接着的第二次调用被退避时间戳节流，不再立即重试
@@ -313,15 +315,13 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
         await auto_save_module.drain_background_cleanup_tasks()
         assert calls == [30]
 
-        # 退避时间戳形态为 now - interval + backoff：距下次可重试还需约退避秒数，
-        # 用例执行耗时可忽略，余量按退避值减 1 秒容差断言
+        # 退避时间戳形态为 now - interval + backoff，以首次清理前后的时钟窗口锁定
+        # 写入公式，断言不依赖用例执行速度
+        interval = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
+        backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
         base_key = str(manager.file_manager.base_dir)
         stored = auto_save_module._cleanup_last_run[base_key]
-        remaining_wait = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS - (
-            time_module.time() - stored
-        )
-        assert remaining_wait >= auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS - 1
-        assert remaining_wait < auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
+        assert t_before - interval + backoff <= stored <= t_after - interval + backoff
     finally:
         await manager.close()
 
