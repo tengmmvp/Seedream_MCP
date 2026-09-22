@@ -177,6 +177,19 @@ def clean_web_routes() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_host_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认 .env 两层来源重定向到空目录，宿主配置不串入测试。
+
+    显式测试 .env 语义的用例自行传 env_file 或覆盖 DEFAULT_ENV_FILE，
+    后打补丁生效于本隔离之上。
+    """
+    from seedream_mcp import _config_sources
+
+    monkeypatch.setattr(_config_sources, "DEFAULT_ENV_FILE", tmp_path / "absent.env")
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
     from seedream_mcp.resources import _reset_lifespan_state, locate_request_state_boundary

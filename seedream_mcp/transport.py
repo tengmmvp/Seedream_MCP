@@ -443,11 +443,15 @@ class _AppHostGuardMiddleware:
         await self.app(scope, receive, send)
 
     def _host_permitted(self, host: bytes) -> bool:
-        """按 SDK 三形态语义判定 Host 头值：裸 host、精确端口、端口通配。"""
+        """按 SDK 三形态语义判定 Host 头值：裸 host、精确端口、端口通配。
+
+        通配条目要求剥离后的主机部分后紧跟冒号，与 SDK 的
+        startswith(base_host + ":") 同形，方括号主机后的非端口后缀不获放行。
+        """
         if host in self._bare_hosts or host in self._exact_hosts:
             return True
         stripped = _LoopbackHostGuardMiddleware._strip_port(host)
-        return host != stripped and stripped in self._wildcard_hosts
+        return host.startswith(stripped + b":") and stripped in self._wildcard_hosts
 
 
 class _WebOriginGuardMiddleware:

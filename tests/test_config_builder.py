@@ -17,6 +17,16 @@ def _write_env_file(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def test_suite_isolates_default_env_sources() -> None:
+    """conftest 隔离下默认构建读不到宿主 .env，数据根串扰类缺口在此转红。"""
+    assert not Path(config_sources.DEFAULT_ENV_FILE).is_file()
+    assert not Path(".env").is_file()
+
+    config = build_config_from_sources(overrides={"api_key": "test_key"})
+
+    assert config.data_root is None
+
+
 def test_build_config_priority_prefers_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

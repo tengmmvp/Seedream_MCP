@@ -285,6 +285,8 @@ def _validation_error_result(
     的客户端须处理缺席分支。此处统一为流水线同款错误结果，error.type 固定
     validation_error，structuredContent 由各工具的构造回调按声明的 outputSchema
     组装；SDK 对 is_error 结果跳过输出校验，组装仅保证与流水线错误形态一致。
+    单字段约束失败经 SDK 参数模型先行拒绝、错误结果不带 structuredContent，
+    两形态并存为既定契约。
     """
     message = _validation_error_message(exc)
     return CallToolResult(

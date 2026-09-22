@@ -49,9 +49,6 @@ def test_cli_main_rebind_failure_log_reaches_file_channel(
     """密钥环重绑失败的 ERROR 落入日志文件：重绑在 setup_logging 之后执行。"""
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
-    # 数据根须显式钉住：宿主 .env 的 SEEDREAM_DATA_ROOT 优先于工作根声明，
-    # 未隔离时日志落宿主数据根而非本用例的 tmp。
-    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["seedream-image-mcp"])
     # 活动配置是模块级状态，先记录原值再交由 monkeypatch 在用例结束后恢复
     monkeypatch.setattr(config_module, "_active_config", config_module._active_config)

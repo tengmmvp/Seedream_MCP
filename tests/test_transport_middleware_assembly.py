@@ -342,6 +342,8 @@ async def _run_app_host_guard(
         (("api.example.com:*",), b"api.example.com:8000", True),
         (("api.example.com:*",), b"api.example.com", False),
         (("[::1]:*",), b"[::1]:8000", True),
+        (("[::1]:*",), b"[::1]..", False),
+        (("[::ffff:192.0.2.1]:*",), b"[::ffff:192.0.2.1]:8443", True),
         (("api.example.com",), b"evil.example.com", False),
         (("api.example.com",), None, False),
     ],
