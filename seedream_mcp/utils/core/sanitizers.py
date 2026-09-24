@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from bisect import bisect_right
+from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
 # 上游错误 message 片段拼入异常文案前的截断上限，防止超大错误体形成巨型日志行；
@@ -101,24 +103,38 @@ def _container_summary(value: Any) -> str:
     return f"<truncated:list, {len(value)} items>"
 
 
-def _estimate_container_output_length(value: Any, limit: int) -> int | None:
-    """迭代估计 dict/list 的输出长度，供截断判长使用，不物化完整 repr。
+def estimate_output_length(
+    value: Any,
+    limit: int,
+    *,
+    value_leaf_cost: Callable[[Any, Any], int | None] | None = None,
+) -> int | None:
+    """迭代估计 dict/list 的输出长度，不物化完整 repr，供截断判长与镜像卸载分流共用。
 
     str/bytes 键与元素按 len 加单元素标点开销计入，嵌套容器求和，其余元素按固定
-    小常数计入；total 超过 limit 即提前返回，超限后的精确值无意义。显式栈配 id
-    判重终止循环引用展开，嵌套深度超过 _CONTAINER_REPR_DEPTH_LIMIT 返回 None，
-    由调用方以类型占位符兜底。
+    小常数计入；value_leaf_cost 改写叶子值的计量，接收所在键与值本身、返回该值的
+    文本长度，None 走默认计量，键不经钩子、恒按默认计量；total 超过 limit 即提前
+    返回，超限后的精确值无意义。显式栈配 id 判重终止循环引用展开，嵌套深度超过
+    _CONTAINER_REPR_DEPTH_LIMIT 返回 None，由调用方以类型占位符兜底。
     """
     total = 0
     seen: set[int] = {id(value)}
     pending: list[tuple[Any, int]] = [(value, 1)]
 
-    def leaf_length(item: Any) -> int:
+    def default_leaf_length(item: Any) -> int:
         if isinstance(item, (str, bytes)):
             return len(item) + _CONTAINER_ELEMENT_OVERHEAD
         return _CONTAINER_LEAF_LENGTH_ESTIMATE
 
-    def account_item(item: Any, depth: int) -> None:
+    def value_leaf_length(key: Any, item: Any) -> int:
+        if value_leaf_cost is None:
+            return default_leaf_length(item)
+        length = value_leaf_cost(key, item)
+        if length is None:
+            return default_leaf_length(item)
+        return length + _CONTAINER_ELEMENT_OVERHEAD
+
+    def account_item(key: Any, item: Any, depth: int) -> None:
         nonlocal total
         if isinstance(item, (dict, list)):
             if id(item) in seen:
@@ -127,7 +143,7 @@ def _estimate_container_output_length(value: Any, limit: int) -> int | None:
             seen.add(id(item))
             pending.append((item, depth + 1))
             return
-        total += leaf_length(item)
+        total += value_leaf_length(key, item)
 
     while pending:
         node, depth = pending.pop()
@@ -135,13 +151,13 @@ def _estimate_container_output_length(value: Any, limit: int) -> int | None:
             return None
         if isinstance(node, dict):
             for key, item in node.items():
-                total += leaf_length(key)
-                account_item(item, depth)
+                total += default_leaf_length(key)
+                account_item(key, item, depth)
                 if total > limit:
                     return total
         else:
             for item in node:
-                account_item(item, depth)
+                account_item(None, item, depth)
                 if total > limit:
                     return total
     return total
@@ -164,7 +180,7 @@ def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> 
     if isinstance(value, (dict, list)):
         if len(value) > _CONTAINER_REPR_ELEMENT_LIMIT:
             return _container_summary(value)
-        estimated = _estimate_container_output_length(value, limit=limit)
+        estimated = estimate_output_length(value, limit=limit)
         if estimated is None:
             return f"<{type(value).__name__}>"
         if estimated <= limit:
@@ -354,6 +370,35 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
     + r")\S+)*"
 )
 
+
+def _redact_fold_disguised_keyvalues(text: str) -> str:
+    """对全折叠伪装键的键值形态掩码值，键名与分隔符保留原文。
+
+    re.IGNORECASE 的简单折叠不把 ß 计作 ss，paßword 一类伪装键躲过原文匹配；
+    纯 ASCII 文本直接返回，含非 ASCII 的文本先扫 casefold 产物上的触发词，命中
+    才在折叠文本上定位键值形态，值区间经逐字符折叠偏移表映射回原文替换。
+    """
+    if text.isascii():
+        return text
+    folded_parts = [ch.casefold() for ch in text]
+    folded = "".join(folded_parts)
+    if _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(folded) is None:
+        return text
+    offsets: list[int] = []
+    position = 0
+    for part in folded_parts:
+        offsets.append(position)
+        position += len(part)
+    spans: list[tuple[int, int]] = []
+    for match in _SENSITIVE_KEYVALUE_PATTERN.finditer(folded):
+        start = bisect_right(offsets, match.end(2)) - 1
+        end = bisect_right(offsets, match.end() - 1)
+        spans.append((start, end))
+    for start, end in reversed(spans):
+        text = text[:start] + "***" + text[end:]
+    return text
+
+
 # 控制字符与双向文本/隔离控制符逐字符压平为空格，防止经日志与结构化输出
 # 注入伪造行或反转显示方向，替换为空格保留词边界。
 # logs 的日志消息 patcher 共用本常量，两模块的控制字符口径单一来源。
@@ -384,15 +429,18 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     message 与 details/value/response_data 等输出字段共用此净化，防护口径一致。
     处理次序：零宽字符先行移除以还原真实键名，userinfo 在控制字符压平前剥离——
     压平产生的空格会打断 userinfo 匹配使凭据逃逸；键值匹配在压平前后各执行一次，
-    分别覆盖真实换行分隔形态与转义产物等其余形态，末尾剥 Bearer 令牌。
+    分别覆盖真实换行分隔形态与转义产物等其余形态，两轮之后各补一次全折叠伪装键
+    的懒二次掩码，末尾剥 Bearer 令牌。
     """
     if not isinstance(value, str):
         return value
     redacted = _INVISIBLE_CHARS_PATTERN.sub("", value)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
+    redacted = _redact_fold_disguised_keyvalues(redacted)
     redacted = _URL_USERINFO_PATTERN.sub(r"\1", redacted)
     redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
+    redacted = _redact_fold_disguised_keyvalues(redacted)
     return cast("_SanitizedValue", _BEARER_TOKEN_PATTERN.sub(r"\1\2***", redacted))
 
 
@@ -436,6 +484,45 @@ DATA_OUTPUT_LIMIT = 16 * 1024
 _URL_DATA_PREFIX_PATTERN = re.compile(r"https?://", re.IGNORECASE)
 _WHITESPACE_PATTERN = re.compile(r"\s")
 
+# 恒等快路触发词：由敏感键两清单与 Bearer 分支词派生，注册表加词自动进入预检集，
+# 键值交替组的各复合分支均内嵌清单词字面段，超集由构造保证；命中即回退完整净化。
+_IDENTITY_PRECHECK_TRIGGER_WORDS = frozenset(
+    (*_SENSITIVE_KEY_KEYWORDS, *_SENSITIVE_KEY_SUBSTRINGS, "bearer")
+)
+
+# 预检触发词联合正则：与主净化共用 re.IGNORECASE 折叠语义，casefold 对 ı、İ 的
+# 处理与正则引擎分歧会放行被主净化改写的字符串，预检恒以本正则扫描；词表恒为
+# ASCII 小写，对 casefold 产物做懒二次扫描时 IGNORECASE 不引入额外命中。词表按
+# re.escape 连接并在模块级编译一次。
+_IDENTITY_PRECHECK_TRIGGER_PATTERN = re.compile(
+    "|".join(re.escape(word) for word in sorted(_IDENTITY_PRECHECK_TRIGGER_WORDS)),
+    re.IGNORECASE,
+)
+
+
+def _data_text_needs_full_sanitize(value: str, limit: int) -> bool:
+    """数据通道恒等快路的单一决策表：任一改写标记命中即需完整净化，全未命中恒等放行。
+
+    超限长度、不可打印字符、首尾空白、可能携带 userinfo 的 URL 形态与触发词构成
+    全部改写形态的保守超集，误判方向只损失性能不弱化净化；快扫未命中且文本含
+    非 ASCII 时对 casefold 产物再扫一遍，封堵 ß 一类全折叠伪装键。纯 ASCII 的
+    casefold 只翻大小写，(?i) 对 ASCII 字符集等价于大小写折叠，快扫已覆盖折叠
+    形态，不为纯 ASCII 文本付 casefold 分配。
+    """
+    if len(value) > limit:
+        return True
+    if not value.isprintable():
+        return True
+    if value[:1].isspace() or value[-1:].isspace():
+        return True
+    if "://" in value and "@" in value:
+        return True
+    if _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(value) is not None:
+        return True
+    if value.isascii():
+        return False
+    return _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(value.casefold()) is not None
+
 
 def _sanitize_url_data_text(value: str, limit: int) -> str:
     """纯 URL 数据字段的轻量净化：截断后剥离 userinfo、控制字符与空白态 Bearer 令牌。
@@ -457,19 +544,25 @@ def _sanitize_url_data_text(value: str, limit: int) -> str:
 def sanitize_data_text(value: _SanitizedValue, limit: int = DATA_OUTPUT_LIMIT) -> _SanitizedValue:
     """对数据字段文本剥离敏感片段与控制字符，仅保留防御性大上限截断。
 
+    字符串先经恒等快路决策表放行干净文本，任一改写标记命中才进入净化管线。
     url/original_url 等数据字段的取值是返回结果的一部分，500 字符级截断会使签名
     URL 不可用，故仅以 16KB 防御上限兜底。以 http(s):// 开头、strip 首尾后不含
     空白的纯 URL 走 _sanitize_url_data_text 轻量路径，不应用键值脱敏；URL 前缀但
-    含空白或控制字符的混合文本与非 URL 文本仍走 sanitize_error_text 全套脱敏，
-    凭据不借 URL 形态逃逸。超限 URL 的截断产物不再以 http(s):// 开头，再净化按
-    错误文本通道口径收敛（产物已不可用，仅长度与形态变化）。非字符串原样返回。
+    含空白或控制字符的混合文本与非 URL 文本命中改写标记即走 sanitize_error_text
+    全套脱敏，凭据不借 URL 形态逃逸。超限 URL 的截断产物不再以 http(s):// 开头，
+    产物已不可用，再净化不再回到 URL 轻量路径。非字符串原样返回。
     """
     if not isinstance(value, str):
         return value
-    stripped = value.strip()
-    if _URL_DATA_PREFIX_PATTERN.match(stripped) and _WHITESPACE_PATTERN.search(stripped) is None:
-        return cast("_SanitizedValue", _sanitize_url_data_text(stripped, limit=limit))
-    return sanitize_error_text(value, limit=limit)
+    if _data_text_needs_full_sanitize(value, limit):
+        stripped = value.strip()
+        if (
+            _URL_DATA_PREFIX_PATTERN.match(stripped)
+            and _WHITESPACE_PATTERN.search(stripped) is None
+        ):
+            return cast("_SanitizedValue", _sanitize_url_data_text(stripped, limit=limit))
+        return sanitize_error_text(value, limit=limit)
+    return value
 
 
 def is_sensitive_key(key: Any) -> bool:

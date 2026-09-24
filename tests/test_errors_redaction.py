@@ -8,9 +8,12 @@ format_error_for_user 与 handle_api_error 的用户可见出口净化，确保�
 
 from __future__ import annotations
 
+import re
 import time
 import tracemalloc
 from typing import Any
+
+import pytest
 
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
@@ -1113,6 +1116,30 @@ def test_keyvalue_key_branches_derive_from_keyword_lists() -> None:
         assert word in _SENSITIVE_KEYVALUE_KEYS
 
 
+def test_identity_precheck_trigger_words_derive_from_keyword_registry() -> None:
+    """构造性守护：预检触发集由敏感键两清单加 bearer 派生并编译进同词表联合正则。
+
+    注册表加词自动进入预检集与扫描正则；词条全小写是 is_sensitive_key 的小写
+    比较与折叠匹配一致的形态前提，混入大写词条在段匹配路径静默失配。
+    """
+    from seedream_mcp.utils.core.sanitizers import (
+        _IDENTITY_PRECHECK_TRIGGER_PATTERN,
+        _IDENTITY_PRECHECK_TRIGGER_WORDS,
+        _SENSITIVE_KEY_KEYWORDS,
+        _SENSITIVE_KEY_SUBSTRINGS,
+    )
+
+    assert frozenset(_IDENTITY_PRECHECK_TRIGGER_WORDS) == {
+        *_SENSITIVE_KEY_KEYWORDS,
+        *_SENSITIVE_KEY_SUBSTRINGS,
+        "bearer",
+    }
+    assert _IDENTITY_PRECHECK_TRIGGER_PATTERN.flags & re.IGNORECASE
+    for word in _IDENTITY_PRECHECK_TRIGGER_WORDS:
+        assert word == word.lower(), word
+        assert _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(word) is not None, word
+
+
 def test_sanitize_error_text_preserves_suffix_word_forms() -> None:
     """后缀形态的普通词不受派生分支影响：续段要求以分隔符开头，max_tokens 保留。"""
     assert sanitize_error_text("max_tokens: 4096 exceeded") == "max_tokens: 4096 exceeded"
@@ -1382,3 +1409,349 @@ def test_sanitize_data_text_compound_branches_stay_fast() -> None:
     redacted_auth = sanitize_data_text(auth_chain)
     assert time.perf_counter() - start < 2.0
     assert redacted_auth == auth_chain
+
+
+# ==================== 恒等快路：sanitize_data_text 的原对象返回与改写 ====================
+
+
+def test_sanitize_data_text_returns_clean_strings_as_is() -> None:
+    """干净文本原对象返回：路径、中文、无 userinfo 的 URL 与定长边界值均恒等放行。"""
+    clean_values = [
+        "",
+        "D:/workspace/project/.seedream/images/2026-09-23/img_0001.png",
+        "D:/工作区/项目/图片 目录/生成图 001.png",
+        "https://example.com/x.png",
+        "https://example.com/x.png?Expires=1&Version=2",
+        "workspace summary line",
+        "生成完成的普通文本 001",
+        "x" * 16_384,
+    ]
+    for value in clean_values:
+        assert sanitize_data_text(value) is value, value
+
+
+def test_sanitize_data_text_rewrites_marker_carrying_values() -> None:
+    """携带改写点的文本一律返回新对象：不可打印字符、凭据键值、userinfo URL、超限与首尾空白。"""
+    zwsp = chr(0x200B)
+    rewritten_values = [
+        "line1\nline2",
+        f"del{chr(0x7F)}char",
+        f"zero{zwsp}width",
+        f"bidi{chr(0x61C)}mark",
+        f"lre{chr(0x202A)}mark",
+        "api_key=secret123",
+        "X-Api-Key: abc123",
+        "Authorization: Bearer abc.def.ghi",
+        "bearer abc",
+        "password: hunter2",
+        "auth: something",
+        "session-token: v",
+        "sıgnature=opensesame99",
+        "SİGNATURE=opensesame99",
+        f"api {chr(0x212A)}ey: SECRET123",
+        "https://user:pass@example.com/x.png",
+        " https://example.com/x.png",
+        "https://example.com/x.png ",
+        "x" * 16_385,
+    ]
+    for value in rewritten_values:
+        assert sanitize_data_text(value) is not value, repr(value)
+
+
+def test_sanitize_data_text_keeps_flagged_but_clean_values_as_is() -> None:
+    """触发词命中但无改写点的形态原对象返回，决策表保守超集只损失性能不改写干净文本。"""
+    for value in ("hotel_key: val", "Key: value", f"{chr(0x17F)}ecret value"):
+        assert sanitize_data_text(value) is value, repr(value)
+
+
+# 差分语料的共用构件：零宽空格与字面反斜杠 u 形态的冒号分隔样本。
+_ZWSP = chr(0x200B)
+_ESCAPED_COLON = "\\u003a"
+
+# 覆盖敏感键族各字面分支、Bearer、userinfo、截断与不可见字符的差分语料：
+# 干净与改写形态混合经真实入口分流，恒等返回计数守护快路不被决策表收紧抹掉；
+# 不可见字符经 chr 或转义序列构造，源文本不内嵌字面控制字符。
+_IDENTITY_DIFFERENTIAL_CORPUS = (
+    "",
+    "D:/workspace/project/.seedream/images/img_0001.png",
+    "D:/工作区/图片 目录/生成图 001.png",
+    "https://example.com/x.png",
+    "https://example.com/x.png?Expires=1&Signature=abc",
+    " https://example.com/x.png",
+    "https://example.com/x.png ",
+    "https://user:pass@example.com/x.png",
+    "https://example.com/a@b.png",
+    "HTTP://EXAMPLE.COM/X.PNG",
+    "api_key=secret123",
+    "X-Api-Key: abc123",
+    "authorization: Basic dXNlcjpwYXNz",
+    "Authorization: Bearer abc.def.ghi",
+    "Bearer abc.def.ghi",
+    "bearer abc",
+    "Bearer:abc",
+    "Bearer：abc",
+    "password: hunter2",
+    "user.password = p@ss",
+    "SESSIONID=vvv cookie",
+    "auth: something",
+    "x_auth: v",
+    "access_key: SECRET123",
+    "hotel_key: val",
+    "usersession_id: val",
+    "monkey keyboard house",
+    "normal text with spaces and 中文 与 emoji",
+    "line1\nline2",
+    "line1\r\nline2",
+    "tab\ttext",
+    "nul\x00byte",
+    f"del{chr(0x7F)}char",
+    f"nel{chr(0x85)}char",
+    f"zero{_ZWSP}width",
+    f"soft{chr(0xAD)}hyphen",
+    f"bidi{chr(0x61C)}mark",
+    f"tail{chr(0x200F)}mark",
+    f"tail{chr(0x200E)}mark",
+    f"lre{chr(0x202A)}mark",
+    f"rlo{chr(0x202E)}mark",
+    f"pop{chr(0x202C)}mark",
+    f"lri{chr(0x2066)}mark",
+    f"pdi{chr(0x2069)}mark",
+    f"word{chr(0x2060)}joiner",
+    f"bom{chr(0xFEFF)}mark",
+    f"group{chr(0x1C)}sep",
+    f"group{chr(0x1D)}sep",
+    f"group{chr(0x1E)}sep",
+    f"group{chr(0x1F)}sep",
+    f"zwsp{_ZWSP}tail",
+    f"zwnj{chr(0x200C)}tail",
+    f"zwj{chr(0x200D)}ascii",
+    f"X{chr(0x200D)}zwj",
+    "x" * 20_000,
+    "x" * 16_384,
+    "x" * 16_385,
+    f"{chr(0x17F)}ecret value",
+    "Key: value",
+    "SECret: v",
+    "json web token note",
+    "signature: abc",
+    "nonce 123",
+    "saml response",
+    "jwt=v",
+    "assertion=xyz",
+    "credential: c",
+    "passwd: p",
+    "apikey abc",
+    "my-apikey: v",
+    "privatekey: v",
+    "cookie: a=b; c=d",
+    "SESSION: v",
+    "session-token: v",
+    "refresh_token: v",
+    "app_secret: v",
+    "client-secret: v",
+    "gpg key: v",
+    "public key fingerprint",
+    "encryption_key: v",
+    "user.key: v",
+    "secret.key: v",
+    "ssh-auth: v",
+    "auth\x1f: v",
+    "token\nvalue",
+    "token: value",
+    "token：value",
+    "token﹕value",
+    "token＝value",
+    '"token" "value"',
+    "token" + _ESCAPED_COLON + "value",
+    "トークン無関係の日本語",
+    "apiKey: v",
+    "apiKeyCamel: v",
+    "database-password: v",
+    "my.password.here: v",
+    "a:b c=d",
+    "plain:sentence:with:colons",
+    "not a url http example.com",
+    "http example.com path",
+    "://",
+    "@",
+    "a@b.com",
+    "user@example.com said http://x.com",
+    f"apikey{chr(0x212B)}: v",
+    f"saml key with {chr(0x212A)}",
+    f"key{chr(0x17F)}old form",
+    "sıgnature=opensesame99",
+    "SİGNATURE=opensesame99",
+    "paßword: hunter2",
+    "ſeßion: v",
+    "aßertion=xyz",
+)
+
+
+def test_sanitize_data_text_identity_branch_stays_populated_over_corpus() -> None:
+    """差分守护：混合语料经真实入口仍有足量样本恒等返回，恒等快路不被决策表收紧抹掉。"""
+    passed = 0
+    for value in _IDENTITY_DIFFERENTIAL_CORPUS:
+        if sanitize_data_text(value) is value:
+            passed += 1
+    # 语料含足量干净样本，恒等分支确实被执行。
+    assert passed >= 10
+
+
+def test_sanitize_data_text_precheck_clean_implies_full_pipeline_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """差分守护：预检判净的语料在完整管线下仍恒等返回，预检与管线改写条件漂移时失败。
+
+    语料按决策表各维度取净侧样本：纯 ASCII 与非 ASCII 可打印文本、纯 URL、URL 前缀
+    混合文本、@ 无 scheme 形态、无敏感键的冒号分隔与限长边界值；先以真实决策表断言
+    判净锁定语料归属，再强制走完整管线断言原对象返回。
+    """
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+    from seedream_mcp.utils.core.sanitizers import DATA_OUTPUT_LIMIT
+
+    corpus = (
+        "",
+        "workspace summary line",
+        "plain:sentence:with:colons",
+        "not a url http example.com",
+        "生成完成的普通文本 001",
+        "D:/工作区/图片 目录/生成图 001.png",
+        "user@example.com said http x",
+        "https://example.com/x.png",
+        "https://example.com/x.png?Expires=1&Version=2",
+        "HTTP://EXAMPLE.COM/X.PNG",
+        "ftp://example.com/x.png",
+        "https://example.com/a.png 已完成",
+        "https://example.com/a.png and tail text",
+        "https://cdn.example.com/obj/" + "a" * 16_300,
+        "x" * 16_384,
+    )
+    precheck = sanitizers_module._data_text_needs_full_sanitize
+    for value in corpus:
+        assert precheck(value, DATA_OUTPUT_LIMIT) is False, repr(value)
+
+    # 预检强制恒判需净化驱动完整管线执行，防预检与管线改写条件漂移后凭据原样放行。
+    def _force_full_sanitize(value: str, limit: int) -> bool:
+        return True
+
+    monkeypatch.setattr(sanitizers_module, "_data_text_needs_full_sanitize", _force_full_sanitize)
+
+    for value in corpus:
+        assert sanitize_data_text(value) is value, repr(value)
+
+
+def test_sanitize_data_text_rewrites_turkic_i_fold_family() -> None:
+    """土耳其 i 家族形态的键值被同引擎改写，凭据不借折叠分歧原样返回。"""
+    for key in ("sıgnature", "SİGNATURE", "sİgnature", "Sıgnature"):
+        value = f"{key}=opensesame99"
+        sanitized = sanitize_data_text(value)
+        assert sanitized is not value, value
+        assert "opensesame99" not in sanitized, sanitized
+
+
+# ==================== 全折叠伪装键与预检分支等价 ====================
+
+
+def test_identity_precheck_ascii_branch_matches_casefold_reference_and_folded_scan() -> None:
+    """等价守护：纯 ASCII 语料的预检判定与 casefold 逐词子串参照及折叠二次扫描同判。
+
+    ASCII 的 casefold 只翻大小写、(?i) 对 ASCII 字符集等价于大小写折叠，三条
+    计算在同批语料上逐值一致；非 ASCII 孪生样本仅追加折叠恒等的字符，判定不因
+    扫描分支不同而漂移。
+    """
+    from seedream_mcp.utils.core.sanitizers import (
+        DATA_OUTPUT_LIMIT,
+        _IDENTITY_PRECHECK_TRIGGER_PATTERN,
+        _IDENTITY_PRECHECK_TRIGGER_WORDS,
+        _data_text_needs_full_sanitize,
+    )
+
+    corpus = (
+        "",
+        "workspace summary line",
+        "TOKEN=1",
+        "api_key=secret",
+        "X-Api-Key: abc123",
+        "Authorization: Basic dXNlcjpwYXNz",
+        "bearer abc",
+        "SECRET: v",
+        "my-apikey: v",
+        "ClientSecret=v",
+        "privatekey: v",
+        "PASSWD: p",
+        "monkey keyboard",
+        "hotel_key: val",
+        "Key: value",
+        "json web token note",
+        "nonce 123",
+        "jwt=v",
+    )
+    for value in corpus:
+        assert value.isascii(), value
+        expected = any(word in value.casefold() for word in _IDENTITY_PRECHECK_TRIGGER_WORDS)
+        assert (_IDENTITY_PRECHECK_TRIGGER_PATTERN.search(value) is not None) is expected
+        assert _data_text_needs_full_sanitize(value, DATA_OUTPUT_LIMIT) is expected, value
+
+        twin = value + "é"
+        assert not twin.isascii(), twin
+        assert _data_text_needs_full_sanitize(twin, DATA_OUTPUT_LIMIT) is expected, twin
+
+
+def test_sanitize_data_text_rewrites_full_fold_disguise_key_family() -> None:
+    """ß 一类全折叠伪装键被改写：预检判需净化，管线掩码值且保留原键名拼写。
+
+    re.IGNORECASE 的简单折叠不把 ß 计作 ss，快扫与原文键值匹配双双漏检，
+    懒二次折叠扫描补齐；多词值整体吸收，产物重复净化恒等。
+    """
+    from seedream_mcp.utils.core.sanitizers import _data_text_needs_full_sanitize
+    from seedream_mcp.utils.core.sanitizers import DATA_OUTPUT_LIMIT
+
+    long_s = chr(0x17F)
+    samples = (
+        ("paßword: hunter2", "paßword: ***", "hunter2"),
+        ("paßword=opensesame99", "paßword=***", "opensesame99"),
+        ("ſeßion: v1 v2", "ſeßion: ***", "v2"),
+        ("aßertion=xyz", "aßertion=***", "xyz"),
+        (f"pa{long_s}{long_s}word: tok-1", f"pa{long_s}{long_s}word: ***", "tok-1"),
+    )
+    for text, expected, credential in samples:
+        assert _data_text_needs_full_sanitize(text, DATA_OUTPUT_LIMIT) is True, text
+        sanitized = sanitize_data_text(text)
+        assert sanitized == expected, text
+        assert credential not in sanitized, sanitized
+        assert sanitize_data_text(sanitized) == sanitized, sanitized
+
+    assert sanitize_error_text("upstream echo paßword: hunter2") == "upstream echo paßword: ***"
+
+
+def test_handle_api_error_strips_fold_disguised_credentials_in_user_output() -> None:
+    """上游错误体携带 ß 伪装键的凭据在用户可见输出被掩码，键名保留原文拼写。"""
+    resp = {"error": {"code": "E", "message": {"detail": "paßword: sk-live-9f8e7d"}}}
+    err = handle_api_error(400, resp)
+
+    user_text = format_error_for_user(err)
+
+    assert "sk-live-9f8e7d" not in user_text
+    assert "paßword: ***" in user_text
+
+
+def test_sanitize_data_text_preserves_normal_german_sharp_s_text() -> None:
+    """德语正常 ß 文本恒等通过：非键场景不触发折叠二次扫描的改写。"""
+    from seedream_mcp.utils.core.sanitizers import _data_text_needs_full_sanitize
+    from seedream_mcp.utils.core.sanitizers import DATA_OUTPUT_LIMIT
+
+    sharp_s = chr(0xDF)
+    for value in (
+        f"die gro{sharp_s}e Map",
+        f"Fu{sharp_s}ball am Mai",
+        f"https://example.com/pa{sharp_s}e.png",
+    ):
+        assert _data_text_needs_full_sanitize(value, DATA_OUTPUT_LIMIT) is False, value
+        assert sanitize_data_text(value) is value, value
+
+    # 折叠快扫命中但无键值形态的文本不被改写。
+    prose = "ſeßion paßword aßertion"
+    assert sanitize_data_text(prose) is prose
+
+    # 正常 ß 词与明文敏感键共存：ß 词保留，敏感键照常掩码。
+    assert sanitize_data_text(f"die gro{sharp_s}e token=abc") == f"die gro{sharp_s}e token=***"
