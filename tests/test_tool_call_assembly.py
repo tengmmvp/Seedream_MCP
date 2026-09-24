@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -312,7 +313,7 @@ async def test_cross_field_validation_error_carries_structured_content(
 
     prompt 缺省且未开图层拆分时输入模型构造抛 ValidationError，不得冒泡为无
     structuredContent 的协议层错误；错误形态与流水线失败分支一致，error.type
-    为 validation_error。
+    为 validation_error；content 在摘要后回传与 structuredContent 等值的 JSON 块。
     """
     result = await mcp.call_tool("image_to_image", {"image": "https://example.com/ref.png"})
 
@@ -323,6 +324,10 @@ async def test_cross_field_validation_error_carries_structured_content(
     assert structured["success"] is False
     assert structured["error"]["type"] == "validation_error"
     assert "prompt 不能为空" in structured["error"]["message"]
+    text_blocks = [content for content in result.content if isinstance(content, TextContent)]
+    assert len(text_blocks) == 2
+    assert "prompt 不能为空" in text_blocks[0].text
+    assert json.loads(text_blocks[1].text) == structured
     # 失败发生在输入模型构造阶段，间谍处理器未被触达。
     assert "params" not in spy_run_handlers
 

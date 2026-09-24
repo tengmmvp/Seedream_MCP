@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult
 
 from ...utils.core.sanitizers import (
     CONTROL_CHARS_PATTERN,
@@ -36,7 +36,11 @@ from ._pipeline import (
     PROGRESS_SCAN_START,
     safe_report_progress,
 )
-from .outputs import BrowseImagesStructuredOutput, build_error_dict
+from .outputs import (
+    BrowseImagesStructuredOutput,
+    build_error_dict,
+    build_structured_tool_result,
+)
 from .schemas import BrowseImagesInput
 
 if TYPE_CHECKING:
@@ -210,7 +214,7 @@ def _build_browse_structured_result(
     return output.model_dump()
 
 
-def _build_browse_error(
+async def _build_browse_error(
     *,
     state: _BrowseRequestState,
     message: str,
@@ -230,16 +234,13 @@ def _build_browse_error(
     Returns:
         is_error=True 的工具结果。
     """
-    return CallToolResult(
-        content=[TextContent(type="text", text=message)],
-        structured_content=_build_browse_structured_result(
-            state,
-            status="failed",
-            success=False,
-            error=build_error_dict(error_type, message),
-        ),
-        is_error=True,
+    structured = _build_browse_structured_result(
+        state,
+        status="failed",
+        success=False,
+        error=build_error_dict(error_type, message),
     )
+    return await build_structured_tool_result(message, structured, is_error=True)
 
 
 def _scan_and_filter_directory(
@@ -409,7 +410,7 @@ async def build_browse_fallback_result(
         logger.warning("浏览兜底分支重读工作区根失败，按无工作区处理: {}", exc)
         fallback_roots = []
     fallback_filter, _ = _normalize_format_filter(params.format_filter)
-    return _build_browse_error(
+    return await _build_browse_error(
         state=_BrowseRequestState.from_params(
             params,
             workspace_roots=fallback_roots,
@@ -553,7 +554,9 @@ async def _build_empty_browse_result(
             # 空列表无格式可回显，改用不含空位的文案，避免残缺语义。
             message = f"未指定任何受支持的图片格式，支持: {supported_list}。"
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-        return _build_browse_error(state=state, message=message, error_type="validation_error")
+        return await _build_browse_error(
+            state=state, message=message, error_type="validation_error"
+        )
     if total_count:
         # 消息携带总数与有效区间，模型修正 offset 后即可重试。
         message = (
@@ -561,7 +564,9 @@ async def _build_empty_browse_result(
             f"请使用 0 <= offset < {total_count}。"
         )
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-        return _build_browse_error(state=state, message=message, error_type="validation_error")
+        return await _build_browse_error(
+            state=state, message=message, error_type="validation_error"
+        )
     if unreadable_dirs:
         unique_unreadable = list(dict.fromkeys(unreadable_dirs))
         logger.info("不可读目录明细: {}", [str(item) for item in unique_unreadable])
@@ -576,17 +581,14 @@ async def _build_empty_browse_result(
         message = "未找到图片文件，请确认目录或过滤条件。"
     if truncated:
         message = f"{message}（{_SCAN_TRUNCATION_MARKER}）"
-    result = CallToolResult(
-        content=[TextContent(type="text", text=message)],
-        structured_content=_build_browse_structured_result(
-            state,
-            status="empty",
-            total_count=total_count,
-            has_more=has_more,
-            next_offset=next_offset,
-        ),
-        is_error=False,
+    structured = _build_browse_structured_result(
+        state,
+        status="empty",
+        total_count=total_count,
+        has_more=has_more,
+        next_offset=next_offset,
     )
+    result = await build_structured_tool_result(message, structured, is_error=False)
     await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
     return result
 
@@ -618,18 +620,15 @@ async def _build_browse_success_result(
     if truncated:
         lines.append(f"（{_SCAN_TRUNCATION_MARKER}）")
 
-    result = CallToolResult(
-        content=[TextContent(type="text", text="\n".join(lines))],
-        structured_content=_build_browse_structured_result(
-            state,
-            status="completed",
-            images=structured_images,
-            total_count=total_count,
-            has_more=has_more,
-            next_offset=next_offset,
-        ),
-        is_error=False,
+    structured = _build_browse_structured_result(
+        state,
+        status="completed",
+        images=structured_images,
+        total_count=total_count,
+        has_more=has_more,
+        next_offset=next_offset,
     )
+    result = await build_structured_tool_result("\n".join(lines), structured, is_error=False)
     await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="扫描完成")
     return result
 
@@ -677,11 +676,13 @@ async def execute_browse_request(
     if dir_error is not None:
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         # 目录形态非法（UNC、空字节等）为调用方可自纠的参数错误。
-        return _build_browse_error(state=state, message=dir_error, error_type="validation_error")
+        return await _build_browse_error(
+            state=state, message=dir_error, error_type="validation_error"
+        )
     if resolved_dir is None:
         message = read_scope_denial_message("目录")
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
-        return _build_browse_error(state=state, message=message)
+        return await _build_browse_error(state=state, message=message)
     resolved_directories.append(resolved_dir)
 
     logger.info(

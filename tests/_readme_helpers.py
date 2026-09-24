@@ -1,8 +1,8 @@
-"""三语 README 围栏块定位与读取的共享辅助。
+"""三语 README 围栏块、正文行与 HTML 表格解析的共享辅助。
 
-供 test_docs_consistency、test_env_example_guard 与 test_readme_code_parity 复用，
-避免多处重复实现围栏解析、HTML 表格解析与配置块锚点定位造成漂移。围栏解析以
-行首三反引号开合切换状态，不依赖各语言的章节标题文字。
+供 test_docs_consistency 与 test_readme_code_parity 复用，避免围栏解析、正文行
+提取、表格解析与能力差异表定位在多处重复实现造成漂移。围栏解析以行首三反引
+号开合切换状态，不依赖各语言的章节标题文字。
 """
 
 from __future__ import annotations
@@ -73,8 +73,17 @@ def _fenced_blocks(text: str) -> list[CodeBlock]:
     return blocks
 
 
+def _fenced_line_numbers(text: str) -> set[int]:
+    """围栏块占用的行号集合，区间含起始围栏行、块内正文行与闭合围栏行。"""
+    return {
+        lineno
+        for block in _fenced_blocks(text)
+        for lineno in range(block.line, block.line + len(block.lines) + 2)
+    }
+
+
 def _lang_blocks(name: str, lang: str) -> list[CodeBlock]:
-    """读取指定 README 并返回给定语言的全部围栏块。
+    """读取指定 README 并返回给定语言的全部围栏代码块。
 
     Args:
         name: README 文件名。
@@ -84,6 +93,17 @@ def _lang_blocks(name: str, lang: str) -> list[CodeBlock]:
         该语言的围栏块列表，按出现顺序排列。
     """
     return [block for block in _fenced_blocks(_read_readme(name)) if block.lang == lang]
+
+
+def _prose_lines(name: str) -> list[tuple[int, str]]:
+    """返回不在任何围栏代码块内的正文行，带 1 基行号。"""
+    text = _read_readme(name)
+    fenced = _fenced_line_numbers(text)
+    return [
+        (lineno, raw)
+        for lineno, raw in enumerate(text.splitlines(), start=1)
+        if lineno not in fenced
+    ]
 
 
 # HTML 表格解析的标签形态，单元格内联标签剥除后以竖线拼接伪行
@@ -100,11 +120,7 @@ def readme_html_tables(name: str) -> list[list[tuple[int, str]]]:
     代码块内的表格样本不计入。
     """
     text = _read_readme(name)
-    fenced_lines = {
-        lineno
-        for block in _fenced_blocks(text)
-        for lineno in range(block.line, block.line + len(block.lines) + 2)
-    }
+    fenced_lines = _fenced_line_numbers(text)
     tables: list[list[tuple[int, str]]] = []
     for block_match in _TABLE_PATTERN.finditer(text):
         if text.count("\n", 0, block_match.start()) + 1 in fenced_lines:
@@ -121,3 +137,28 @@ def readme_html_tables(name: str) -> list[list[tuple[int, str]]]:
         if rows:
             tables.append(rows)
     return tables
+
+
+def _row_cells(raw: str) -> list[str]:
+    """拆分表格行为单元格序列，剥除首尾竖线与单元格两侧空白。"""
+    stripped = raw.strip()
+    inner = stripped[1:-1] if stripped.startswith("|") else stripped
+    return [cell.strip() for cell in inner.split("|")]
+
+
+# 能力差异表定位锚点，分辨率档位行的 "1K / 1.5K / 2K" 单元格为语言无关内容，全文唯一。
+_CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
+
+
+def _capability_table(name: str) -> list[tuple[int, str]]:
+    """定位能力差异表，锚点为含 "1K / 1.5K / 2K" 单元格的唯一表格。"""
+    candidates = [
+        rows
+        for rows in readme_html_tables(name)
+        if any(_CAPABILITY_TABLE_CELL_ANCHOR in _row_cells(raw) for _, raw in rows)
+    ]
+    assert len(candidates) == 1, (
+        f"{name} 能力差异表定位失败，含 {_CAPABILITY_TABLE_CELL_ANCHOR} 单元格的表格"
+        f"应唯一命中，实际命中 {len(candidates)} 个"
+    )
+    return candidates[0]

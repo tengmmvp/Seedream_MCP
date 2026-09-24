@@ -9,6 +9,7 @@ import pytest
 import seedream_mcp._config_sources as config_sources
 import seedream_mcp.config as config_module
 from _log_fakes import capture_loguru_messages
+from conftest import _scrub_host_prefixed_env
 from seedream_mcp.config import build_config_from_sources
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 
@@ -18,9 +19,26 @@ def _write_env_file(path: Path, content: str) -> None:
 
 
 def test_suite_isolates_default_env_sources() -> None:
-    """conftest 隔离下默认构建读不到宿主 .env，数据根串扰类缺口在此转红。"""
+    """conftest 隔离 .env 与进程环境两来源，默认构建读不到宿主配置，串扰类缺口在此转红。"""
     assert not Path(config_sources.DEFAULT_ENV_FILE).is_file()
     assert not Path(".env").is_file()
+
+    config = build_config_from_sources(overrides={"api_key": "test_key"})
+
+    assert config.data_root is None
+
+
+def test_suite_isolates_prefixed_host_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """前缀键清洗只动 SEEDREAM_/ARK_ 键，清洗后默认构建读不到宿主数据根。"""
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", "C:\\host_root")
+    monkeypatch.setenv("ARK_API_KEY", "host_key")
+    monkeypatch.setenv("UNRELATED_HOST_VAR", "keep_me")
+
+    _scrub_host_prefixed_env(monkeypatch)
+
+    assert os.getenv("SEEDREAM_DATA_ROOT") is None
+    assert os.getenv("ARK_API_KEY") is None
+    assert os.getenv("UNRELATED_HOST_VAR") == "keep_me"
 
     config = build_config_from_sources(overrides={"api_key": "test_key"})
 

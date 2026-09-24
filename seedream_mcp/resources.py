@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Protocol
 from mcp.server.caching import CacheHint, CacheableMethod
 from mcp.server.mcpserver import MCPServer, RequestStateSecurity
 from mcp.server.request_state import RequestStateBoundary
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS
 
 from .config import (
     LIFESPAN_KEY_CLIENT,
@@ -26,10 +28,14 @@ from .config import (
     get_active_config,
     set_active_config,
 )
+from .utils.core.executors import shutdown_cpu_offload_executor
 from .utils.core.logs import get_logger
 from .version import __version__
 
 if TYPE_CHECKING:
+    from mcp.server.mcpserver import Context
+    from mcp.types import GetPromptResult, InputRequiredResult
+
     from .client import SeedreamClient
     from .utils.io.io_download import DownloadManager
 
@@ -204,7 +210,8 @@ async def _cleanup_shared_resources(*, idle_only: bool = False) -> None:
     先经 drain_background_cleanup_tasks 等待自动保存的节流清理任务收尾再关闭资源。
     idle_only 为 True 时以在途引用门控：drain 等待期间出现新引用即放弃本次清理，
     交由最后一个在途引用的 teardown 重新触发；为 False 时无条件关闭，供进程退出
-    兜底。
+    兜底。CPU 卸载线程池为进程级资源，idle 退役不关闭，仅在无条件路径关闭，
+    退出不等队列。
     """
     global _active_resource
     from .utils.io.io_save import drain_background_cleanup_tasks
@@ -221,6 +228,8 @@ async def _cleanup_shared_resources(*, idle_only: bool = False) -> None:
         await _close_resource(resource)
     if active is not None:
         await _close_resource(active)
+    if not idle_only:
+        shutdown_cpu_offload_executor()
 
 
 def sync_cleanup() -> None:
@@ -228,6 +237,7 @@ def sync_cleanup() -> None:
 
     先提取并清空全局引用，避免后续清理抛错使引用滞留。关闭在新事件循环上尽力而为：
     httpx/aiohttp 传输绑定原循环，跨循环 aclose 常无效，残余连接交由进程退出回收。
+    CPU 卸载线程池一并关闭，退出不等队列。
     """
     global _active_resource
     retired = list(_retired_resources)
@@ -249,6 +259,7 @@ def sync_cleanup() -> None:
         pass
     except Exception as exc:
         logger.warning("同步清理共享资源失败: {}", exc)
+    shutdown_cpu_offload_executor()
 
 
 def _reset_lifespan_state() -> None:
@@ -256,8 +267,9 @@ def _reset_lifespan_state() -> None:
 
     重建 _shared_init_lock 避免跨事件循环复用旧锁；_global_config 一并复位避免
     跨用例残留，赋值经函数内延迟 import 取当前 config 模块对象，测试重载模块后
-    不会清错目标。io_path 的 resolve 缓存与 config 的构建告警缓冲同属复位协议，
-    一并在此收口；conftest 仅补充测试域专属状态。
+    不会清错目标。CPU 卸载池随活动配置派生池深，关闭后待按需重建。io_path 的
+    resolve 缓存与 config 的构建告警缓冲同属复位协议，一并在此收口；conftest 仅
+    补充测试域专属状态。
     """
     global _shared_init_lock, _active_resource
     _active_resource = None
@@ -268,6 +280,7 @@ def _reset_lifespan_state() -> None:
     config_module._global_config = None
     config_module._BUILD_WARNINGS.clear()
     _shared_init_lock = asyncio.Lock()
+    shutdown_cpu_offload_executor()
     from .utils.images.image_thumbnail import reset_thumb_sweep_gate
     from .utils.io.io_path import clear_resolved_env_root_cache
     from .utils.io.io_save import reset_cleanup_state
@@ -305,9 +318,28 @@ def _build_request_state_security() -> RequestStateSecurity | None:
     return RequestStateSecurity(keys=keys)
 
 
+class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
+    """MCPServer 子类，未知名 prompts/get 在名称查找点抛 -32602。
+
+    SDK 2.2.0 对未知名抛裸 ValueError，线缆错误码归约为 -32603 或 0，规范
+    要求 -32602；已知名的渲染与参数校验错误经 super() 原样放行。线缆级行为
+    由 test_unknown_prompt_get_returns_invalid_params 守护。
+    """
+
+    async def get_prompt(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        context: Context[dict[str, Any], Any] | None = None,
+    ) -> GetPromptResult | InputRequiredResult:
+        if self._prompt_manager.get_prompt(name) is None:
+            raise MCPError(INVALID_PARAMS, f"Unknown prompt: {name}")
+        return await super().get_prompt(name, arguments, context)
+
+
 def _create_mcp_server() -> MCPServer:
     """构造进程级 MCPServer 实例，静态列表面附缓存提示并按配置启用密钥环。"""
-    return MCPServer(
+    return _SeedreamMCPServer(
         SERVER_NAME,
         title=SERVER_TITLE,
         description=SERVER_DESCRIPTION,

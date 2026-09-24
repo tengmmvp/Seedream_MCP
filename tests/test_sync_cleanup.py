@@ -1,8 +1,8 @@
 """resources.sync_cleanup 进程级清理测试。
 
 sync_cleanup 是 cli_main finally 的同步清理入口：提取并清空活动与退役资源后
-asyncio.run 关闭。覆盖正常清理、RuntimeError 与意外异常被吞、无资源 no-op 与
-退役资源兜底关闭。
+asyncio.run 关闭，并一并关闭 CPU 卸载线程池。覆盖正常清理、RuntimeError 与
+意外异常被吞、无资源 no-op 与退役资源兜底关闭。
 """
 
 import asyncio
@@ -116,3 +116,37 @@ def test_sync_cleanup_closes_retired_resources(monkeypatch: pytest.MonkeyPatch) 
     assert retired_client_a.closed and retired_manager_a.closed
     assert retired_client_b.closed and retired_manager_b.closed
     assert resources._retired_resources == []
+
+
+async def test_sync_cleanup_cancels_queued_cpu_offload_pool_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sync_cleanup 关闭 CPU 卸载池，池上排队任务取消为专用异常。"""
+    from _cpu_offload_spy import saturate_cpu_offload_pool
+    from seedream_mcp.utils.core.executors import (
+        CpuOffloadPoolClosedError,
+        cpu_offload_executor,
+        run_in_cpu_pool,
+    )
+
+    monkeypatch.setattr(resources, "_active_resource", None)
+
+    def _closing_run(coro: object) -> None:
+        # 关闭未 await 的协程，避免 RuntimeWarning。
+        coro.close()  # type: ignore[attr-defined]
+        raise RuntimeError("asyncio.run() cannot be called from a running event loop")
+
+    async with saturate_cpu_offload_pool() as saturated:
+        queued = asyncio.ensure_future(run_in_cpu_pool(lambda: "queued"))
+        await saturated.wait_queued()
+        monkeypatch.setattr(asyncio, "run", _closing_run)
+
+        resources.sync_cleanup()
+
+        with pytest.raises(CpuOffloadPoolClosedError):
+            await queued
+
+    assert cpu_offload_executor() is not saturated.executor
+    assert await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5) == [None] * len(
+        saturated.tasks
+    )

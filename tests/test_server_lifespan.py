@@ -192,6 +192,71 @@ async def test_cleanup_shared_resources_unconditional_closes_inflight(
     assert resources._retired_resources == []
 
 
+async def test_app_lifespan_teardown_keeps_cpu_offload_executor(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """lifespan 退出的 idle 清理不关闭进程级 CPU 卸载池，池上提交照常执行。"""
+    from seedream_mcp.utils.core.executors import cpu_offload_executor, run_in_cpu_pool
+
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    executor = cpu_offload_executor()
+
+    async with server.app_lifespan(server.mcp):
+        pass
+
+    assert cpu_offload_executor() is executor
+    assert await run_in_cpu_pool(lambda: "ok") == "ok"
+
+
+async def test_cleanup_shared_resources_unconditional_cancels_queued_pool_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进程退出兜底清理关闭 CPU 卸载池，池上排队任务取消为专用异常。"""
+    from _cpu_offload_spy import saturate_cpu_offload_pool
+    from seedream_mcp.utils.core.executors import (
+        CpuOffloadPoolClosedError,
+        cpu_offload_executor,
+        run_in_cpu_pool,
+    )
+
+    monkeypatch.setattr(resources, "_active_resource", None)
+
+    async with saturate_cpu_offload_pool() as saturated:
+        queued = asyncio.ensure_future(run_in_cpu_pool(lambda: "queued"))
+        await saturated.wait_queued()
+
+        await resources._cleanup_shared_resources(idle_only=False)
+
+        with pytest.raises(CpuOffloadPoolClosedError):
+            await queued
+
+    assert cpu_offload_executor() is not saturated.executor
+    assert await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5) == [None] * len(
+        saturated.tasks
+    )
+
+
+async def test_cleanup_shared_resources_idle_abort_keeps_resource_and_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """idle 清理在 drain 等待后见在途引用即放弃，活动资源与 CPU 卸载池均不动。"""
+    from seedream_mcp.utils.core.executors import cpu_offload_executor
+
+    class _InflightResource:
+        refcount = 1
+
+    inflight: Any = _InflightResource()
+    monkeypatch.setattr(resources, "_active_resource", inflight)
+    executor = cpu_offload_executor()
+
+    await resources._cleanup_shared_resources(idle_only=True)
+
+    assert resources._active_resource is inflight
+    assert cpu_offload_executor() is executor
+
+
 async def test_build_active_resource_closes_client_when_manager_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

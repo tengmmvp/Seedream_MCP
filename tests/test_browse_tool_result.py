@@ -736,11 +736,13 @@ async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
     result = await handle_browse_images(BrowseImagesInput(directory=directory))
 
     assert result.is_error is True
+    # 摘要与 JSON 镜像两条文本通道均不得携带敏感样本，镜像经数据通道净化掩码。
     text = "".join(getattr(content, "text", "") for content in result.content)
-    assert "目录路径无效" in text
     assert "secret" not in text
+    summary = cast(TextContent, result.content[0]).text
+    assert "目录路径无效" in summary
     # 截断保留前 500 字符并附带截断标注，上限按标注开销放宽。
-    assert len(text) <= 540
+    assert len(summary) <= 540
     assert isinstance(result.structured_content, dict)
     structured_message = result.structured_content["error"]["message"]
     assert "secret" not in structured_message
@@ -760,6 +762,7 @@ async def test_browse_images_unsupported_format_message_sanitized(
     assert result.is_error is True
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["status"] == "failed"
+    # 摘要与 JSON 镜像两条文本通道均不得携带敏感样本，镜像经数据通道净化掩码。
     text = "".join(getattr(content, "text", "") for content in result.content)
     assert "均不在支持列表" in text
     assert "secret" not in text

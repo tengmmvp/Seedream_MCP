@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from mcp.types import ImageContent
+from mcp.types import ImageContent, TextContent
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core import common as common_module
+from seedream_mcp.tools.core import outputs as outputs_module
 from seedream_mcp.tools.core.common import execute_generation_handler, preview_inclusion_scope
+from seedream_mcp.tools.core.outputs import build_structured_tool_result
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl._metadata import TEXT_TO_IMAGE
 from seedream_mcp.tools.runners import run_text_to_image
@@ -129,3 +131,26 @@ async def test_execute_handler_skips_preview_when_scope_disabled(
 
     assert result.is_error is False
     assert calls == []
+
+
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_build_structured_tool_result_degrades_when_mirror_build_fails(
+    monkeypatch: pytest.MonkeyPatch, is_error: bool
+) -> None:
+    """镜像构建失败时构造器降级为摘要加尾部块，is_error 取值保持不变。"""
+
+    def _boom(structured: dict[str, Any]) -> Any:
+        del structured
+        raise RecursionError("mirror too deep")
+
+    monkeypatch.setattr(outputs_module, "build_structured_json_text", _boom)
+    trailing = [ImageContent(type="image", data="aGk=", mime_type="image/png")]
+    structured = {"tool": "text_to_image", "success": not is_error}
+
+    result = await build_structured_tool_result(
+        "摘要文本", structured, is_error=is_error, trailing=trailing
+    )
+
+    assert result.is_error is is_error
+    assert result.content == [TextContent(type="text", text="摘要文本"), *trailing]
+    assert result.structured_content == structured

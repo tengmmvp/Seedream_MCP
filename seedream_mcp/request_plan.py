@@ -2,7 +2,7 @@
 
 经 ``shared_request_plan_scope`` 绑定到当前上下文后由 client 的生成方法与
 ``_call_api`` 读取，批次结束随作用域退出释放；未绑定的直连调用走独立构建
-与序列化路径。
+与序列化路径，两条路径的出站序列化统一经 ``serialize_request_body`` 派发。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Iterator
 
+from .utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD, run_in_cpu_pool
 from .utils.core.validators import ValidatedCommonParams
 
 
@@ -81,7 +82,7 @@ class SharedRequestPlan:
             return self.body
         async with self._lock:
             if self.body is None or self._body_key != key:
-                self.body = await asyncio.to_thread(serializer, request_data)
+                self.body = await serialize_request_body(serializer, request_data)
                 self._body_key = key
             return self.body
 
@@ -131,6 +132,36 @@ def shared_request_plan_scope() -> Iterator[SharedRequestPlan]:
     finally:
         _ACTIVE_REQUEST_PLAN.reset(token)
         plan.release()
+
+
+# 标量叶的序列化输出规模估计：布尔与数字序列化只产出数个字符，按固定值计入。
+_SCALAR_LEAF_ESTIMATED_BYTES = 8
+
+
+def _estimate_serialized_bytes(value: Any) -> int:
+    """求和字符串叶长度与标量叶固定开销，作为序列化输出规模的廉价估计。"""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(_estimate_serialized_bytes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_estimate_serialized_bytes(item) for item in value)
+    return _SCALAR_LEAF_ESTIMATED_BYTES
+
+
+async def serialize_request_body(
+    serializer: Callable[[dict[str, Any]], bytes],
+    request_data: dict[str, Any],
+) -> bytes:
+    """出站请求体序列化的单一派发点，共享计划与直连两条路径共用。
+
+    多 MB base64 参考图载荷的序列化经 CPU 卸载专用池执行，不与默认执行器的
+    延迟敏感短任务同池排队。序列化前无现成字节长度，以载荷字符串叶总长的廉价
+    估计对照下沉阈值，低于阈值同步执行省线程往返。
+    """
+    if _estimate_serialized_bytes(request_data) > CPU_OFFLOAD_SIZE_THRESHOLD:
+        return await run_in_cpu_pool(serializer, request_data)
+    return serializer(request_data)
 
 
 async def _build_request_data(

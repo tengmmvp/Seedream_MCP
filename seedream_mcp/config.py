@@ -31,12 +31,14 @@ from ._config_sources import (
     _env_var_suffix,
     _pick_config_value,
     _read_env_values,
+    env_family_prefixes,
     init_env_registry,
     normalize_model_selector,
 )
 from .utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from .utils.core.sanitizers import is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
+from .utils.core.executors import register_cpu_offload_depth_provider
 from .utils.core.logs import (
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_LOG_ROTATION_SIZE_MB,
@@ -762,6 +764,9 @@ class SeedreamConfig:
 # 从配置类反射派生字段环境变量映射与默认值表，取值机械经此读取。
 init_env_registry(SeedreamConfig)
 
+# 环境族前缀从已初始化的注册表派生导出，配置新增环境族时消费方自动跟随。
+ENV_FAMILY_PREFIXES: tuple[str, ...] = env_family_prefixes()
+
 
 def build_config_from_sources(
     overrides: Mapping[str, object] | None = None,
@@ -925,3 +930,16 @@ register_env_workspace_root_provider(
     _make_env_location_provider("workspace_root", "SEEDREAM_WORKSPACE_ROOT")
 )
 register_data_root_provider(_make_env_location_provider("data_root", "SEEDREAM_DATA_ROOT"))
+
+
+def _active_generate_concurrency() -> int | None:
+    """CPU 卸载池深提供者：返回活动配置的生成并发，配置不可构建时返回 None。"""
+    try:
+        return get_active_config().generate_concurrency
+    except (SeedreamConfigError, OSError):
+        # 配置构建失败不阻断池创建，回退交由 executors 侧兜底。
+        return None
+
+
+# CPU 卸载池深经提供者取活动配置的生成并发，utils/core 不反向依赖本模块。
+register_cpu_offload_depth_provider(_active_generate_concurrency)

@@ -2,13 +2,14 @@
 
 锁定三组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
 MCP 注册工具名与 impl ToolMetadata 工具名、路径相似建议与 CLI 端口解析的边界行为；
-另含 loguru exc_info 关键字与 security 标记级别的全源码静态守护。新增取值或改名时
-两侧须同步，本文件在各处失败即暴露漂移。
+另含 loguru exc_info 关键字、security 标记级别与环境变量键清洗前缀的全源码静态
+守护。新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 
 import seedream_mcp
 from _generation_fixtures import make_generation_context
+from conftest import HOST_ENV_SCRUB_PREFIXES
 from seedream_mcp.tools.core.schemas import (
     BackgroundMode,
     GenerationToolType,
@@ -45,6 +47,65 @@ _GENERATION_TOOL_METADATA = (
     MULTI_IMAGE_FUSION,
     SEQUENTIAL_GENERATION,
 )
+
+# 环境键读取豁免只收真实旁路：静态键收录键原文，动态键站点解不出静态文本、收录
+# 模块相对路径加调用原文。
+_ENV_KEY_READ_EXEMPTIONS = frozenset(
+    {
+        "config.py:os.getenv(env_name)",
+        "_config_sources.py:os.getenv(env_key)",
+        "utils/io/io_path.py:os.getenv(env_var)",
+    }
+)
+
+
+def _static_key_text(node: ast.AST) -> tuple[str, bool]:
+    """取键实参的静态文本与是否整体静态，首个动态部分截断后续文本。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value, True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left_text, left_static = _static_key_text(node.left)
+        right_text, right_static = _static_key_text(node.right)
+        if not left_static:
+            return left_text, False
+        return left_text + right_text, right_static
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                return "".join(parts), False
+            parts.append(value.value)
+        return "".join(parts), True
+    return "", False
+
+
+def _is_env_key_read(func: ast.AST) -> bool:
+    """判定被调函数是否 os.getenv 或 os.environ.get，含 from os import 的裸名拼写。"""
+    if isinstance(func, ast.Name):
+        return func.id == "getenv"
+    if not isinstance(func, ast.Attribute):
+        return False
+    if func.attr == "getenv":
+        return True
+    return (
+        func.attr == "get"
+        and isinstance(func.value, ast.Attribute)
+        and func.value.attr == "environ"
+    )
+
+
+def _env_key_read_sites(source: str) -> list[tuple[str, str]]:
+    """提取源码内全部环境键读取站点，返回 (调用原文, 键静态前缀)。"""
+    sites: list[tuple[str, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not _is_env_key_read(node.func):
+            continue
+        if node.args:
+            prefix, _fully_static = _static_key_text(node.args[0])
+        else:
+            prefix = ""
+        sites.append((ast.unparse(node), prefix))
+    return sites
 
 
 def test_response_format_enum_matches_validator_whitelist() -> None:
@@ -157,6 +218,55 @@ def test_security_marked_logs_are_warning_level() -> None:
                 offenders.append(f"{relative}: {match.group(0)}")
 
     assert offenders == []
+
+
+def test_env_key_reads_covered_by_host_scrub_prefixes() -> None:
+    """getenv 系调用的键静态前缀落在 conftest 清洗前缀内，动态键站点须登记豁免。"""
+    package_root = Path(seedream_mcp.__file__).resolve().parent
+    offenders: list[str] = []
+    for source_path in sorted(package_root.rglob("*.py")):
+        relative = source_path.relative_to(package_root).as_posix()
+        for render, prefix in _env_key_read_sites(source_path.read_text(encoding="utf-8")):
+            if prefix.startswith(HOST_ENV_SCRUB_PREFIXES):
+                continue
+            if prefix in _ENV_KEY_READ_EXEMPTIONS:
+                continue
+            if f"{relative}:{render}" in _ENV_KEY_READ_EXEMPTIONS:
+                continue
+            offenders.append(f"{relative}: {render}")
+
+    assert offenders == [], (
+        "环境变量键读取不在 conftest 清洗前缀内，须同步 HOST_ENV_SCRUB_PREFIXES 或登记豁免: "
+        f"{offenders}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected_prefix"),
+    [
+        ('import os\nos.getenv("SEEDREAM_A")', "SEEDREAM_A"),
+        ("import os\nos.getenv('ARK_B')", "ARK_B"),
+        ('import os\nos.getenv(f"SEEDREAM_{name}")', "SEEDREAM_"),
+        ('import os\nos.getenv("SEEDREAM_" + name)', "SEEDREAM_"),
+        ("from os import getenv\ngetenv('SEEDREAM_C')", "SEEDREAM_C"),
+        ("import os\nos.environ.get('ARK_D', '')", "ARK_D"),
+        ("import os\nos.getenv(name)", ""),
+    ],
+)
+def test_env_key_site_extraction_covers_quote_and_composition_forms(
+    source: str, expected_prefix: str
+) -> None:
+    """键提取对引号拼写与 f-string/拼接形态不敏感，纯动态键解出空前缀。"""
+    sites = _env_key_read_sites(source)
+
+    assert [prefix for _render, prefix in sites] == [expected_prefix]
+
+
+def test_env_key_site_extraction_ignores_unrelated_get_calls() -> None:
+    """非 environ 接收者的 .get 调用不进入环境键扫描结果。"""
+    source = "values = {'SEEDREAM_X': '1'}\nitem = values.get('SEEDREAM_X')\nsession.get()"
+
+    assert _env_key_read_sites(source) == []
 
 
 def test_style_prompt_prefix_names_registered_tools() -> None:

@@ -9,7 +9,8 @@ README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版�
 bash 块内的 KEY=value 赋值与 CLI 旗标 token、工具参数 bullet 列表
 的参数名序列、标题层级、链接 URL、表格列数与能力差异表的数字 token 序列，不比
 较自然语言正文。定位能力差异表时以含 "1K / 1.5K / 2K" 单元格的表格为锚点，不
-依赖各语言的章节标题文字。围栏块解析的共享实现位于 _readme_helpers。
+依赖各语言的章节标题文字。围栏解析、正文行提取与能力差异表定位的共享实现位于
+_readme_helpers。
 """
 
 from __future__ import annotations
@@ -21,9 +22,10 @@ from typing import TypeVar
 from _readme_helpers import (
     BASE_README,
     CodeBlock,
-    _fenced_blocks,
+    _capability_table,
     _lang_blocks,
-    _read_readme,
+    _prose_lines,
+    _row_cells,
     readme_html_tables,
 )
 
@@ -49,25 +51,6 @@ _HEADING_PATTERN = re.compile(r"^(#{1,6})(?=\s)")
 _PARAM_BULLET_PATTERN = re.compile(r"^- `([A-Za-z_][A-Za-z0-9_]*)`")
 
 _T = TypeVar("_T")
-
-
-def _prose_lines(name: str) -> list[tuple[int, str]]:
-    """返回不在任何围栏代码块内的正文行，带 1 基行号。
-
-    排除行区间由 _readme_helpers 的围栏解析结果推导，围栏开合判定单一来源；
-    每块区间覆盖起始围栏行、块内正文行与闭合围栏行。
-    """
-    text = _read_readme(name)
-    fenced = {
-        lineno
-        for block in _fenced_blocks(text)
-        for lineno in range(block.line, block.line + len(block.lines) + 2)
-    }
-    return [
-        (lineno, raw)
-        for lineno, raw in enumerate(text.splitlines(), start=1)
-        if lineno not in fenced
-    ]
 
 
 def _block_assignments(block: CodeBlock) -> list[tuple[str, str]]:
@@ -147,32 +130,8 @@ def _table_columns(name: str) -> list[tuple[int, int]]:
     return columns
 
 
-# 能力差异表定位锚点，分辨率档位行的 "1K / 1.5K / 2K" 单元格为语言无关内容，全文唯一。
-_CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
-
 # 单元格内数字 token 提取，尺寸档位、像素值与参考图上限等取值均为数字。
 _NUMBER_TOKEN_PATTERN = re.compile(r"\d+")
-
-
-def _row_cells(raw: str) -> list[str]:
-    """拆分表格行为单元格序列，剥除首尾竖线与单元格两侧空白。"""
-    stripped = raw.strip()
-    inner = stripped[1:-1] if stripped.startswith("|") else stripped
-    return [cell.strip() for cell in inner.split("|")]
-
-
-def _capability_table(name: str) -> list[tuple[int, str]]:
-    """定位能力差异表，锚点为含 "1K / 1.5K / 2K" 单元格的唯一表格。"""
-    candidates = [
-        rows
-        for rows in readme_html_tables(name)
-        if any(_CAPABILITY_TABLE_CELL_ANCHOR in _row_cells(raw) for _, raw in rows)
-    ]
-    assert len(candidates) == 1, (
-        f"{name} 能力差异表定位失败，含 {_CAPABILITY_TABLE_CELL_ANCHOR} 单元格的表格"
-        f"应唯一命中，实际命中 {len(candidates)} 个"
-    )
-    return candidates[0]
 
 
 def _row_number_tokens(raw: str) -> list[str]:

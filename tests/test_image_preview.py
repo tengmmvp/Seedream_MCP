@@ -28,6 +28,7 @@ from seedream_mcp.utils.images.image_thumbnail import (
 )
 from seedream_mcp.utils.io import io_save
 
+from _cpu_offload_spy import CpuOffloadSpy
 from _generation_fixtures import _patch_client_success, _patch_save_real_file
 
 
@@ -203,6 +204,23 @@ def test_build_thumbnail_bytes_decodes_from_file_object_not_full_copy(
     assert len(opened_fps) == 1
     assert not isinstance(opened_fps[0], BytesIO)
     assert hasattr(opened_fps[0], "fileno")
+
+
+async def test_build_thumbnail_bytes_limited_runs_in_cpu_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缩略图解码经专用线程池执行，不与默认执行器短任务同池排队。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "decode.png", (300, 200))
+    spy = CpuOffloadSpy(thumbnail_module.build_thumbnail_bytes)
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", spy)
+
+    thumbnail = await thumbnail_module.build_thumbnail_bytes_limited(image)
+
+    assert thumbnail is not None
+    spy.assert_ran_in_cpu_pool()
 
 
 async def test_build_preview_contents_preserves_order_and_skips_failures(

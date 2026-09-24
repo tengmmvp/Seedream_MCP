@@ -66,6 +66,16 @@ def init_env_registry(config_cls: type) -> None:
     )
 
 
+def env_family_prefixes() -> tuple[str, ...]:
+    """从字段环境名注册表派生环境族前缀，按字母排序。
+
+    族前缀取环境名首段连同下划线，新字段登记环境名后自动进入派生结果，
+    消费方无需维护第二份清单。
+    """
+    names = (*_NON_METADATA_FIELD_ENV.values(), *_FIELD_ENV_MAP.values())
+    return tuple(sorted({name.partition("_")[0] + "_" for name in names}))
+
+
 def _env_var_suffix(*field_names: str) -> str:
     """反查字段对应的环境变量名，生成校验错误消息的变量名提示后缀。
 

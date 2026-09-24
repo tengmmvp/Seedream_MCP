@@ -19,7 +19,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 import seedream_mcp
-from _readme_helpers import BASE_README, _fenced_blocks, _read_readme, readme_html_tables
+from _readme_helpers import BASE_README, _capability_table, _prose_lines, _read_readme, _row_cells
 from seedream_mcp.cli import build_arg_parser
 from seedream_mcp.server import mcp
 from seedream_mcp.tools.core.schemas import (
@@ -60,9 +60,6 @@ _QUERY_TEMPLATE_SUFFIX_PATTERN = re.compile(r"\{\?[a-zA-Z][a-zA-Z0-9_]*\}$")
 # 日期目录示例路径形态：单层日期目录 + 工具子目录 + 文件名。
 _DATE_FOLDER_PATH_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}/[a-z_]+/[\w.-]+")
 
-# 能力差异表定位锚点：分辨率档位行的 "1K / 1.5K / 2K" 单元格全文唯一。
-_CAPABILITY_TABLE_CELL_ANCHOR = "1K / 1.5K / 2K"
-
 # 能力差异表数据列对应的模型家族，按能力表键序派生并排除 unknown 回退家族，
 # 新增家族未加列或列数漂移由行级列数断言报警。
 _CAPABILITY_COLUMN_FAMILIES = tuple(family for family in MODEL_CAPABILITIES if family != "unknown")
@@ -100,17 +97,6 @@ def _server_source() -> str:
     return server_path.read_text(encoding="utf-8")
 
 
-def _prose_lines(name: str) -> list[str]:
-    """返回不在任何围栏代码块内的正文行。"""
-    text = _read_readme(name)
-    fenced = {
-        lineno
-        for block in _fenced_blocks(text)
-        for lineno in range(block.line, block.line + len(block.lines) + 2)
-    }
-    return [raw for lineno, raw in enumerate(text.splitlines(), start=1) if lineno not in fenced]
-
-
 def _tool_param_bullets(name: str) -> dict[str, list[str]]:
     """把各工具参数 bullet 组关联到其上方最近的工具小节标题。
 
@@ -130,7 +116,7 @@ def _tool_param_bullets(name: str) -> dict[str, list[str]]:
         bullets[current_tool] = group
         group = []
 
-    for raw in _prose_lines(name):
+    for _, raw in _prose_lines(name):
         summary = _TOOL_SUMMARY_PATTERN.search(raw)
         if summary is not None:
             _flush()
@@ -145,35 +131,9 @@ def _tool_param_bullets(name: str) -> dict[str, list[str]]:
     return bullets
 
 
-def _row_cells(raw: str) -> list[str]:
-    """拆分表格行为单元格序列，剥除首尾竖线与单元格两侧空白。"""
-    stripped = raw.strip()
-    inner = stripped[1:-1] if stripped.startswith("|") else stripped
-    return [cell.strip() for cell in inner.split("|")]
-
-
-def _tables(name: str) -> list[list[str]]:
-    """提取正文 HTML 表格，每表为伪行文本序列，行号版共享实现见 _readme_helpers。"""
-    return [[raw for _, raw in rows] for rows in readme_html_tables(name)]
-
-
-def _capability_table(name: str) -> list[str]:
-    """定位模型能力差异表，锚点为含 "1K / 1.5K / 2K" 单元格的唯一表格。"""
-    candidates = [
-        rows
-        for rows in _tables(name)
-        if any(_CAPABILITY_TABLE_CELL_ANCHOR in _row_cells(raw) for raw in rows)
-    ]
-    assert len(candidates) == 1, (
-        f"{name} 能力差异表定位失败，含 {_CAPABILITY_TABLE_CELL_ANCHOR} 单元格的表格"
-        f"应唯一命中，实际命中 {len(candidates)} 个"
-    )
-    return candidates[0]
-
-
 def _capability_row(name: str, label_keyword: str) -> list[str]:
     """按行首标签关键字定位能力差异表行，返回其单元格序列并断言列数与家族数一致。"""
-    for raw in _capability_table(name):
+    for _, raw in _capability_table(name):
         cells = _row_cells(raw)
         if cells and label_keyword in cells[0]:
             assert len(cells) - 1 == len(_CAPABILITY_COLUMN_FAMILIES), (
@@ -336,7 +296,7 @@ def test_capability_table_rows_are_triaged() -> None:
     known = checked | set(_CAPABILITY_EXEMPT_ROWS)
     untriaged: list[str] = []
     # 首行为表头，不入对账；纯短横线行为列对齐分隔行，同样跳过。
-    for raw in _capability_table(BASE_README)[1:]:
+    for _, raw in _capability_table(BASE_README)[1:]:
         label = _row_cells(raw)[0]
         if set(label) <= set("-: "):
             continue

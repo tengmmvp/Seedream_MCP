@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import CallToolResult, ImageContent
 
 from ...client import SeedreamClient
 from ...config import SeedreamConfig
@@ -44,7 +44,7 @@ from ._pipeline import (
 )
 from .auto_save import auto_save_from_base64, auto_save_from_urls
 from .context import GenerationExecutionContext, build_generation_context
-from .outputs import build_error_structured
+from .outputs import build_error_structured, build_structured_tool_result
 from ._sanitize import _sanitize_image_errors
 from .parallel import (
     _run_generation_requests,
@@ -337,8 +337,8 @@ async def execute_generation_handler(
         ctx: MCP 上下文，用于进度上报，可为 None。
 
     Returns:
-        工具结果，成功时含文本摘要与 structuredContent 及可选缩略图，失败时 isError
-        为 True。
+        工具结果，content 含文本摘要、structuredContent 的 JSON 回传块与可选缩略图，
+        失败时 isError 为 True。
     """
     try:
         context = await _prepare_generation_context(
@@ -404,15 +404,12 @@ async def execute_generation_handler(
                 f"{metadata.failure_prefix}失败：{user_facing_error}\n"
                 f"{_resolve_failure_guidance(exc)}"
             )
-        return CallToolResult(
-            content=[TextContent(type="text", text=error_message)],
-            structured_content=build_error_structured(
-                metadata.tool_name,
-                _classify_generation_error_type(exc),
-                user_facing_error,
-            ),
-            is_error=True,
+        error_structured = build_error_structured(
+            metadata.tool_name,
+            _classify_generation_error_type(exc),
+            user_facing_error,
         )
+        return await build_structured_tool_result(error_message, error_structured, is_error=True)
 
     # 预览为尽力补充：意外失败降级为纯文本，不把已成功的结果翻转为失败。
     preview_contents: list[ImageContent] = []
@@ -428,10 +425,11 @@ async def execute_generation_handler(
         except Exception:
             module_logger.opt(exception=True).warning("预览装配失败，降级为纯文本结果")
 
-    final_result = CallToolResult(
-        content=[TextContent(type="text", text=response_text), *preview_contents],
-        structured_content=structured_result,
+    final_result = await build_structured_tool_result(
+        response_text,
+        structured_result,
         is_error=is_generation_failed,
+        trailing=preview_contents,
     )
     await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
     return final_result

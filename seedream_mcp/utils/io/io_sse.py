@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from ..core.errors import SeedreamAPIError
+from ..core.executors import CPU_OFFLOAD_SIZE_THRESHOLD, run_in_cpu_pool
 from ..core.sanitizers import truncate_upstream_message_fragment
 
 if TYPE_CHECKING:
@@ -164,11 +165,6 @@ def parse_sse_segment(
         return None
 
 
-# 大事件卸载阈值：超过此大小的 segment 的「切片 + json.loads」整体改到工作线程执行，
-# 避免 stream + b64_json 多 MB 事件在事件循环中产生 memcpy 与解析阻塞；小事件保持
-# 同步处理以省去线程调度开销。
-_SSE_OFFLOAD_THRESHOLD = 64 * 1024
-
 # 处理进度 debug 日志的最小字节间隔：累计字节每跨过该值输出一次，记录频次不随
 # chunk_size 取值漂移。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
@@ -197,7 +193,7 @@ _UTF8_BOM = b"\xef\xbb\xbf"
 def _slice_parse_segment(
     buffer: bytearray, start: int, end: int, log: Logger
 ) -> dict[str, Any] | None:
-    """在工作线程内切出 buffer[start:end] 事件段并解析。
+    """在专用 CPU 池线程内切出 buffer[start:end] 事件段并解析。
 
     bytearray 切片是一次 memcpy，单事件上限约 event_truncate_threshold 量级，
     与 json.loads 一并下沉线程，避免两者在事件循环上叠加阻塞。
@@ -267,9 +263,13 @@ class _SSEFrameBuffer:
             yield seg_start, sep
 
     async def parse_segment(self, start: int, end: int, log: Logger) -> dict[str, Any] | None:
-        """切出闭开区间内的事件段并解析，大段把切片与解析一并卸载到工作线程。"""
-        if end - start > _SSE_OFFLOAD_THRESHOLD:
-            return await asyncio.to_thread(_slice_parse_segment, self._buffer, start, end, log)
+        """切出闭开区间内的事件段并解析，大段把切片与解析一并卸载到专用 CPU 池。
+
+        stream + b64_json 的多 MB 事件在事件循环上产生 memcpy 与解析阻塞，超过
+        卸载阈值即下沉；小段保持同步处理省线程调度开销。
+        """
+        if end - start > CPU_OFFLOAD_SIZE_THRESHOLD:
+            return await run_in_cpu_pool(_slice_parse_segment, self._buffer, start, end, log)
         return parse_sse_segment(self._buffer[start:end], log)
 
     def recycle(self, threshold: int) -> None:
@@ -298,9 +298,9 @@ class _SSEFrameBuffer:
             self._pending_cr = False
 
     async def parse_tail(self, log: Logger) -> tuple[dict[str, Any] | None, bool, int]:
-        """切出未消费尾部并解析、判定丢失与返回尾部字节长度，超阈值卸载工作线程。"""
-        if len(self._buffer) - self._offset > _SSE_OFFLOAD_THRESHOLD:
-            return await asyncio.to_thread(_slice_parse_tail, self._buffer, self._offset, log)
+        """切出未消费尾部并解析、判定丢失与返回尾部字节长度，超阈值卸载专用 CPU 池。"""
+        if len(self._buffer) - self._offset > CPU_OFFLOAD_SIZE_THRESHOLD:
+            return await run_in_cpu_pool(_slice_parse_tail, self._buffer, self._offset, log)
         return _parse_tail_with_lost_flag(self._buffer[self._offset :], log)
 
 
@@ -593,7 +593,7 @@ def _parse_tail_with_lost_flag(
 def _slice_parse_tail(
     buffer: bytearray, start: int, log: Logger
 ) -> tuple[dict[str, Any] | None, bool, int]:
-    """在工作线程内切出未消费尾部并解析、判定丢失与返回长度。
+    """在专用 CPU 池线程内切出未消费尾部并解析、判定丢失与返回长度。
 
     尾部切片是一次整段 memcpy，量级可达单事件截断阈值，与解析、丢失判定一并
     下沉线程，与 drain 路径的大事件卸载同口径。

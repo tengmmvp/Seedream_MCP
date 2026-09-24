@@ -9,6 +9,7 @@ lifespan 复位类 fixture 经 _lifespan_state_guard 参数化收敛，各测试
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, suppress
@@ -18,7 +19,7 @@ from typing import Any
 import pytest
 
 import seedream_mcp.server  # noqa: F401  工具注册发生在 server 导入期
-from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.config import ENV_FAMILY_PREFIXES, SeedreamConfig
 
 
 def _warn_sdk_private_path_missing(path: str, impact: str) -> None:
@@ -176,17 +177,29 @@ def clean_web_routes() -> Iterator[None]:
         web_routes_module._registered_servers.discard(mcp)
 
 
-@pytest.fixture(autouse=True)
-def _isolate_host_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """默认 .env 两层来源重定向到空目录，宿主配置不串入测试。
+# 宿主环境变量清洗前缀，从配置层环境名注册表派生，包内环境键扫描守护以此为断言基准。
+HOST_ENV_SCRUB_PREFIXES: tuple[str, ...] = ENV_FAMILY_PREFIXES
 
-    显式测试 .env 语义的用例自行传 env_file 或覆盖 DEFAULT_ENV_FILE，
-    后打补丁生效于本隔离之上。
+
+def _scrub_host_prefixed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """动态枚举并清洗 HOST_ENV_SCRUB_PREFIXES 前缀命中的宿主环境变量。"""
+    for name in list(os.environ):
+        if name.startswith(HOST_ENV_SCRUB_PREFIXES):
+            monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_env_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离宿主配置来源：.env 两层来源重定向到空目录，清洗前缀命中的宿主环境变量。
+
+    显式测试 .env 或环境变量语义的用例自行传 env_file、覆盖 DEFAULT_ENV_FILE
+    或 monkeypatch.setenv，后打补丁生效于本隔离之上。
     """
     from seedream_mcp import _config_sources
 
     monkeypatch.setattr(_config_sources, "DEFAULT_ENV_FILE", tmp_path / "absent.env")
     monkeypatch.chdir(tmp_path)
+    _scrub_host_prefixed_env(monkeypatch)
 
 
 @pytest.fixture(autouse=True)

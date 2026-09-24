@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from mcp.types import ImageContent
 
+from ..core.executors import CPU_OFFLOAD_DECODE_SLOTS, run_in_cpu_pool
 from ..core.formats import MAX_IMAGE_PIXELS
 from ..core.logs import get_logger
 from ..core.loop_bound import loop_bound_semaphore
@@ -53,13 +54,10 @@ _thumb_sweep_lock = threading.Lock()
 # 膨胀至数 MB 以上。
 PREVIEW_MAX_IMAGES = 10
 
-# 预览解码并发上限：像素上限 36MP 的单张解码最坏逾百 MB，并发 3 封顶瞬态。
-PREVIEW_DECODE_CONCURRENCY = 3
-
 
 def _get_decode_semaphore() -> asyncio.Semaphore:
     """返回绑定当前事件循环的进程级解码限流信号量，事件循环更替时重建。"""
-    return loop_bound_semaphore(PREVIEW_DECODE_CONCURRENCY, key="preview_decode")
+    return loop_bound_semaphore(CPU_OFFLOAD_DECODE_SLOTS, key="preview_decode")
 
 
 def _flatten_to_rgb(image: Image.Image) -> Image.Image:
@@ -164,7 +162,7 @@ async def build_thumbnail_bytes_limited(image_path: Path) -> bytes | None:
         JPEG 缩略图字节；无法生成时为 None。
     """
     async with _get_decode_semaphore():
-        return await asyncio.to_thread(build_thumbnail_bytes, image_path)
+        return await run_in_cpu_pool(build_thumbnail_bytes, image_path)
 
 
 def thumbnail_cache_root(images_root: Path) -> Path:
@@ -295,10 +293,9 @@ async def build_preview_contents(
 ) -> list[ImageContent]:
     """限流并发为已保存图片生成 ImageContent 预览列表。
 
-    PIL 解码与缩放为同步 CPU 操作，逐张经缓存路径下放工作线程并由
-    PREVIEW_DECODE_CONCURRENCY 信号量限流；传入图片目录时经落盘缓存免除重复解码，
-    生成失败或源图缺失的路径跳过，返回列表仅含成功项且与输入顺序一致。空输入
-    返回空列表。
+    PIL 解码与缩放为同步 CPU 操作，逐张经缓存路径下放工作线程并由预览解码并发
+    信号量限流；传入图片目录时经落盘缓存免除重复解码，生成失败或源图缺失的
+    路径跳过，返回列表仅含成功项且与输入顺序一致。空输入返回空列表。
 
     Args:
         image_paths: 自动保存成功的图片文件路径列表。

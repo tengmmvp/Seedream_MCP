@@ -1,4 +1,4 @@
-"""SSE 流式解析的缓冲区上限保护与事件聚合测试。"""
+"""SSE 流式解析的缓冲区上限保护与事件聚合测试，含关池窗口的大事件解析取消归因。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,11 @@ import pytest
 
 import seedream_mcp.utils.io.io_sse as sse_parser_module
 from seedream_mcp.utils.core.errors import SeedreamAPIError
+from seedream_mcp.utils.core.executors import (
+    CPU_OFFLOAD_SIZE_THRESHOLD,
+    CpuOffloadPoolClosedError,
+    shutdown_cpu_offload_executor,
+)
 from seedream_mcp.utils.io.io_sse import (
     is_sse_response,
     parse_sse_response,
@@ -22,6 +27,7 @@ from seedream_mcp.utils.io.io_sse import (
 )
 
 from _client_fakes import _FakeLog, _FakeSSEResponse
+from _cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
 
 if TYPE_CHECKING:
     from loguru import Logger
@@ -410,22 +416,17 @@ async def test_parse_sse_response_reassembles_event_across_chunks() -> None:
     assert result["usage"]["generated_images"] == 2
 
 
-async def test_parse_sse_response_offloads_large_segment_to_thread(
+async def test_parse_sse_response_offloads_large_segment_to_cpu_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """超 64KB 的大事件把切片与 json.loads 卸载到工作线程，小事件保持同步。
+    """超卸载阈值的大事件把切片与 json.loads 卸载到专用 CPU 池，小事件保持同步。
 
-    卸载任务为 _slice_parse_segment(buffer, start, end, log)，段体积即 end - start。
+    卸载任务为 _slice_parse_segment(buffer, start, end, log)，段体积即 end - start；
+    以执行线程名锁定卸载走专用池而非默认执行器，与请求体解析路径同池。
     """
-    offload_sizes: list[int] = []
-    real_to_thread = asyncio.to_thread
+    spy = CpuOffloadSpy(sse_parser_module._slice_parse_segment)
 
-    async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
-        if func is sse_parser_module._slice_parse_segment and len(args) == 4:
-            offload_sizes.append(int(args[2]) - int(args[1]))
-        return await real_to_thread(func, *args, **kwargs)
-
-    monkeypatch.setattr(asyncio, "to_thread", spy)
+    monkeypatch.setattr(sse_parser_module, "_slice_parse_segment", spy)
 
     big_event = json.dumps({"type": "image_generation.partial_succeeded", "b64_json": "A" * 70000})
     chunks = [
@@ -442,8 +443,10 @@ async def test_parse_sse_response_offloads_large_segment_to_thread(
         log=_log(),
     )
     assert len(result["data"]) == 1
-    assert len(offload_sizes) == 1
-    assert offload_sizes[0] > 64 * 1024
+    assert len(spy.calls) == 1
+    _buffer, segment_start, segment_end, _segment_log = spy.calls[0]
+    assert segment_end - segment_start > CPU_OFFLOAD_SIZE_THRESHOLD
+    spy.assert_ran_in_cpu_pool()
 
 
 async def test_parse_sse_response_offloads_large_tail_lost_payload_scan(
@@ -519,14 +522,13 @@ async def test_parse_sse_response_small_tail_stays_synchronous(
 ) -> None:
     """小尾部保持同步快路径，不为小切片付线程调度开销。"""
     offloaded: list[object] = []
-    real_to_thread = asyncio.to_thread
+    real_slice_tail = sse_parser_module._slice_parse_tail
 
-    async def spy(func: Any, *args: Any, **kwargs: Any) -> Any:
-        if func is sse_parser_module._slice_parse_tail:
-            offloaded.append(func)
-        return await real_to_thread(func, *args, **kwargs)
+    def _tracking_tail(buffer: Any, start: int, log: Any) -> Any:
+        offloaded.append(buffer)
+        return real_slice_tail(buffer, start, log)
 
-    monkeypatch.setattr(asyncio, "to_thread", spy)
+    monkeypatch.setattr(sse_parser_module, "_slice_parse_tail", _tracking_tail)
 
     chunks = [
         b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
@@ -988,3 +990,33 @@ async def test_next_stream_chunk_reports_deadline_on_pending_wait() -> None:
     iterator = _slow().__aiter__()
     outcome = await sse_parser_module.next_stream_chunk(iterator, time.monotonic() - 0.1)
     assert outcome is sse_parser_module.STREAM_DEADLINE_HIT
+
+
+async def test_parse_sse_response_pool_closed_propagates_raw_pool_error() -> None:
+    """关池窗口取消大事件解析时，解析器原样抛池关闭专用异常，不包装为解析失败。"""
+    big_event = json.dumps({"type": "image_generation.partial_succeeded", "b64_json": "A" * 70000})
+    chunks = [("data: " + big_event + "\n\n").encode()]
+
+    async with saturate_cpu_offload_pool() as saturated:
+        task = asyncio.ensure_future(
+            parse_sse_response(
+                _sse_response(chunks),
+                model_id="m",
+                chunk_size=64,
+                buffer_max_size=256 * 1024,
+                event_truncate_threshold=256 * 1024,
+                total_bytes_limit=256 * 1024,
+                log=_log(),
+            )
+        )
+        await saturated.wait_queued()
+        shutdown_cpu_offload_executor()
+
+        caught: BaseException | None = None
+        try:
+            await task
+        except BaseException as exc:
+            caught = exc
+
+    assert isinstance(caught, CpuOffloadPoolClosedError)
+    await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)

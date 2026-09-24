@@ -28,7 +28,7 @@ from ._pipeline import (
     _normalize_error_message,
 )
 from .context import GenerationExecutionContext
-from .outputs import GenerationStructuredOutput, build_error_dict
+from .outputs import GenerationStructuredOutput, build_error_dict, format_base64_placeholder
 
 # 嵌套 data 下钻深度上限，仅兜底受损上游注入的环状或超深结构，超限归一为空。
 _MAX_NESTED_DATA_DEPTH = 10_000
@@ -355,7 +355,7 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
         b64_data = image.get("b64_json")
         # 不可计长度形态会使 len 抛 TypeError，仅对可计长度形态输出字符数。
         if b64_data and isinstance(b64_data, (str, bytes, list, dict, tuple)):
-            parts.append(f"  Base64 数据: {len(b64_data)} 字符")
+            parts.append(f"  {format_base64_placeholder(len(b64_data))}")
         else:
             parts.append("  Base64 数据: 无")
     parts.append("")

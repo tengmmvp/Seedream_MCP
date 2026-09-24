@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 
 from .config import SeedreamConfig
-from .request_plan import _ACTIVE_REQUEST_PLAN
+from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
+from .utils.core.executors import (
+    CPU_OFFLOAD_SIZE_THRESHOLD,
+    CpuOffloadPoolClosedError,
+    run_in_cpu_pool,
+)
 from .utils.core.loop_bound import loop_bound_semaphore
 from .utils.core.errors import (
     SeedreamAPIError,
@@ -481,12 +486,19 @@ class _ClientHTTPMixin:
     ) -> dict[str, Any]:
         """读取 200 响应体并解析 JSON，归一化为统一结果结构。
 
-        读体超限与超时异常原样上抛；JSON 解析失败包装为无状态码的
-        SeedreamAPIError，按不可重试处置。
+        读体超限与超时异常原样上抛；CPU 卸载池关闭属服务退出窗口，同样原样
+        上抛；JSON 解析失败包装为无状态码的 SeedreamAPIError，按不可重试处置。
         """
         raw_body = await self._read_response_body_capped(response, deadline=deadline)
         try:
-            payload = await asyncio.to_thread(json.loads, raw_body)
+            # 阈值之下的解析微秒级完成，线程往返成本高于收益，同步执行。
+            if len(raw_body) > CPU_OFFLOAD_SIZE_THRESHOLD:
+                payload = await run_in_cpu_pool(json.loads, raw_body)
+            else:
+                payload = json.loads(raw_body)
+        except CpuOffloadPoolClosedError:
+            # 池关闭属服务退出窗口而非响应体缺陷，原样上抛交由调用链按服务关闭处置。
+            raise
         except Exception as exc:
             raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
         finally:
@@ -609,10 +621,16 @@ class _ClientHTTPMixin:
         占槽。按 request_data 是否含 stream 标志分发到流式或非流式发送路径。失败时
         按错误类型分类：非 200 响应中仅 429 与 5xx 可重试，其余状态码立即抛出；
         超时与网络错误按指数退避或服务端 Retry-After 重试，次数用尽后抛出对应的
-        Seedream 异常。
+        Seedream 异常。CPU 卸载池关闭属服务退出窗口，归一为不可重试的服务关闭
+        错误。
         """
         async with loop_bound_semaphore(self.config.generate_concurrency, key="generate_admission"):
-            return await self._call_api_admitted(endpoint, request_data)
+            try:
+                return await self._call_api_admitted(endpoint, request_data)
+            except CpuOffloadPoolClosedError as exc:
+                # 池关闭只发生在退出清理窗口，属服务正在关闭而非请求或上游失败，不重试。
+                self.logger.warning("{} API 调用因服务正在关闭中止: {}", endpoint, exc)
+                raise SeedreamMCPError(f"服务正在关闭，{endpoint} API 调用已中止") from exc
 
     async def _call_api_admitted(
         self, endpoint: str, request_data: dict[str, Any]
@@ -625,7 +643,7 @@ class _ClientHTTPMixin:
         request_timeout = self._build_http_timeout()
         plan = _ACTIVE_REQUEST_PLAN.get()
         if plan is None:
-            request_body = await asyncio.to_thread(self._serialize_request, request_data)
+            request_body = await serialize_request_body(self._serialize_request, request_data)
         else:
             # endpoint 即方法键，与 get_or_build 的键同源，序列化体随键失效。
             request_body = await plan.get_or_serialize(

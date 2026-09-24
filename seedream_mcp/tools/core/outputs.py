@@ -2,14 +2,29 @@
 
 作为 outputSchema 的单一来源：MCPServer 依据本模块模型生成各工具的 structuredContent
 schema，runtime 输出也须经模型构造后 model_dump，使声明与实际输出绑定、不漂移。
-build_error_dict 与 build_error_structured 收敛各错误分支的错误结构。
+build_error_dict 与 build_error_structured 收敛各错误分支的错误结构；
+build_structured_json_text 将 structuredContent 序列化为紧凑 JSON 的 TextContent，
+字符串值继承摘要通道净化、二进制载荷替换为长度占位；
+dump_compact_strict_json 是紧凑严格 JSON 的单一序列化原语，Web 控制台的结构化
+JSON 同源委托；
+build_structured_tool_result 把镜像块回传进 content 数组，是「摘要+镜像（+尾部块）」
+结果组装的单一构造点。
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from typing import Any
 
+from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import BaseModel, ConfigDict
+
+from ...utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD, run_in_cpu_pool
+from ...utils.core.logs import get_logger
+from ...utils.core.sanitizers import estimate_output_length, sanitize_data_text
+
+logger = get_logger()
 
 
 class _BaseStructuredOutput(BaseModel):
@@ -155,3 +170,130 @@ def build_error_structured(
         status=status,
         error=build_error_dict(error_type, message),
     ).model_dump()
+
+
+# 镜像中以长度占位替换的二进制载荷键。
+_BINARY_PAYLOAD_KEYS = frozenset({"b64_json"})
+
+
+def format_base64_placeholder(length: int) -> str:
+    """返回 b64 载荷的长度占位文案，镜像与文本摘要两通道共用同一措辞。"""
+    return f"Base64 数据: {length} 字符"
+
+
+def _mirror_string(key: Any, value: str) -> str:
+    """镜像字符串值：载荷键取长度占位，其余经数据通道净化，干净文本由净化入口的恒等快路直接透传。"""
+    if key in _BINARY_PAYLOAD_KEYS:
+        return format_base64_placeholder(len(value))
+    return sanitize_data_text(value)
+
+
+def _mirror_node(key: Any, value: Any) -> Any:
+    """重建镜像视图：字符串值占位或净化，容器无条件新建。
+
+    极端深树触发 RecursionError，由组装点降级为无镜像结果；键序随遍历保持
+    与原树一致，原树不被修改。
+    """
+    if isinstance(value, dict):
+        return {sub_key: _mirror_node(sub_key, item) for sub_key, item in value.items()}
+    if isinstance(value, list):
+        return [_mirror_node(None, item) for item in value]
+    if isinstance(value, str):
+        return _mirror_string(key, value)
+    return value
+
+
+def dump_compact_strict_json(value: Any) -> str:
+    """紧凑严格 JSON 序列化：非 ASCII 原文输出、分隔符省空白、非有限浮点抛 ValueError。
+
+    模型可见镜像与 Web 控制台结构化 JSON 共用本函数，序列化形态单源不漂移。
+    """
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+def build_structured_json_text(structured: dict[str, Any]) -> TextContent:
+    """将 structuredContent 序列化为紧凑 JSON 的 TextContent，字符串值净化、二进制载荷换长度占位。
+
+    规范建议返回 structuredContent 的工具同时在 content 中回传序列化 JSON，
+    仅消费 content 的客户端也能取得完整结构化结果；紧凑分隔符省 token。镜像的
+    全部字符串值继承摘要通道的数据净化口径（敏感键值掩码、控制字符压平与防御性
+    截断），未经出口净化的回显字段不借镜像进入模型可见通道；b64_json 字符串
+    载荷以「Base64 数据: N 字符」占位，与文本摘要口径一致且不限阈值，防镜像
+    把完整 base64 复制进模型上下文；structuredContent 字段本身不受影响。非有限
+    浮点使序列化按严格 JSON 抛 ValueError，由组装点降级为无镜像结果，镜像块
+    不产出裸 NaN/Infinity。
+
+    Args:
+        structured: 工具结果的 structuredContent 字典。
+
+    Returns:
+        承载序列化 JSON 的文本内容块。
+    """
+    mirror = _mirror_node(None, structured)
+    return TextContent(
+        type="text",
+        text=dump_compact_strict_json(mirror),
+    )
+
+
+def _mirror_value_leaf_cost(key: Any, value: Any) -> int | None:
+    """镜像估算的叶子计量钩子：二进制载荷键的字符串按占位长度计量，其余返回 None 走默认。"""
+    if isinstance(value, str) and key in _BINARY_PAYLOAD_KEYS:
+        return len(format_base64_placeholder(len(value)))
+    return None
+
+
+def _mirror_build_should_offload(structured: dict[str, Any]) -> bool:
+    """判定镜像构建是否下沉专用 CPU 池：镜像载荷估算达到卸载阈值或嵌套超深时为真。
+
+    估算口径对准镜像实际处理的对象，value_leaf_cost 钩子使二进制载荷字符串按
+    占位长度计量；达到阈值时树遍历、净化与序列化整体下沉，避免大载荷阻塞事件
+    循环；小载荷内联构建免线程往返与池槽位占用。
+    """
+    estimated = estimate_output_length(
+        structured,
+        limit=CPU_OFFLOAD_SIZE_THRESHOLD,
+        value_leaf_cost=_mirror_value_leaf_cost,
+    )
+    return estimated is None or estimated >= CPU_OFFLOAD_SIZE_THRESHOLD
+
+
+async def build_structured_tool_result(
+    message: str,
+    structured: dict[str, Any],
+    *,
+    is_error: bool,
+    trailing: Sequence[ContentBlock] = (),
+) -> CallToolResult:
+    """组装携带 structuredContent 的工具结果，content 为「摘要 + JSON 镜像 + 尾部块」。
+
+    规范建议返回 structuredContent 的工具同时在 content 中回传序列化 JSON；本函数是
+    该不变量的单一组装点，全部工具出口共用，尾部块承载缩略图预览等内容。载荷尺寸
+    估算达到卸载阈值时镜像构建的树遍历、净化与序列化下沉专用 CPU 线程池执行，
+    小载荷内联构建免线程往返；两条路径失败时同样降级为无镜像结果并记录告警，
+    is_error 取值保持不变。
+
+    Args:
+        message: 用户可见的摘要文本，作为首个文本块。
+        structured: 工具结果的 structuredContent 字典。
+        is_error: 工具结果的错误标记。
+        trailing: 追加在 JSON 镜像块之后的内容块。
+
+    Returns:
+        组装完成的工具结果。
+    """
+    blocks: list[ContentBlock] = [TextContent(type="text", text=message)]
+    try:
+        if _mirror_build_should_offload(structured):
+            mirror = await run_in_cpu_pool(build_structured_json_text, structured)
+        else:
+            mirror = build_structured_json_text(structured)
+    except Exception:
+        logger.opt(exception=True).warning("结构化镜像构建失败，降级为无镜像结果")
+    else:
+        blocks.append(mirror)
+    return CallToolResult(
+        content=[*blocks, *trailing],
+        structured_content=structured,
+        is_error=is_error,
+    )

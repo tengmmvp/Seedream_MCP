@@ -12,8 +12,10 @@ from typing import Any
 
 import pytest
 
+from _cpu_offload_spy import CpuOffloadSpy
+
 from seedream_mcp.client import SeedreamClient
-from seedream_mcp.request_plan import SharedRequestPlan
+from seedream_mcp.request_plan import SharedRequestPlan, shared_request_plan_scope
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
@@ -183,6 +185,64 @@ async def test_direct_client_call_without_plan_serializes_independently(
     assert serialize_calls["serialize"] == 1
     assert build_calls["build"] == 1
     assert len(sent_bodies) == 1
+
+
+def _install_serialize_thread_spy(monkeypatch: pytest.MonkeyPatch) -> CpuOffloadSpy:
+    """在类上包装 _serialize_request 为线程名记录 spy，返回 spy 实例。"""
+    spy = CpuOffloadSpy(SeedreamClient._serialize_request)
+    monkeypatch.setattr(SeedreamClient, "_serialize_request", staticmethod(spy))
+    return spy
+
+
+async def test_direct_path_large_body_serialization_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """直连路径的大载荷出站序列化落 CPU 卸载专用池线程。"""
+    spy = _install_serialize_thread_spy(monkeypatch)
+    sent_bodies: list[bytes] = []
+    _install_send_capture(monkeypatch, sent_bodies)
+
+    large_payload = {"prompt": "A" * (4 * 1024 * 1024)}
+    async with SeedreamClient(_build_config()) as client:
+        result = await client._call_api("text_to_image", large_payload)
+
+    assert result["success"] is True
+    assert len(sent_bodies) == 1
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_shared_plan_large_body_serialization_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """共享计划路径的大载荷出站序列化同样落 CPU 卸载专用池线程。"""
+    spy = _install_serialize_thread_spy(monkeypatch)
+    sent_bodies: list[bytes] = []
+    _install_send_capture(monkeypatch, sent_bodies)
+
+    large_payload = {"prompt": "B" * (4 * 1024 * 1024)}
+    async with SeedreamClient(_build_config()) as client:
+        with shared_request_plan_scope():
+            result = await client._call_api("text_to_image", large_payload)
+
+    assert result["success"] is True
+    assert len(sent_bodies) == 1
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_direct_path_small_body_serialization_runs_outside_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低于下沉阈值的出站序列化在调用线程同步完成，不付线程往返开销。"""
+    spy = _install_serialize_thread_spy(monkeypatch)
+    sent_bodies: list[bytes] = []
+    _install_send_capture(monkeypatch, sent_bodies)
+
+    async with SeedreamClient(_build_config()) as client:
+        result = await client._call_api("text_to_image", {"prompt": "small"})
+
+    assert result["success"] is True
+    assert len(sent_bodies) == 1
+    spy.assert_ran_outside_cpu_pool()
 
 
 # ==================== 共享计划失败路径 ====================
