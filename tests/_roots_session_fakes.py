@@ -6,8 +6,9 @@ test_workspace_roots_scope 与 test_server_roots_dependency 共用，避免测�
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from mcp.types import ListRootsResult, Root
 from pydantic import FileUrl
@@ -21,12 +22,44 @@ def roots_result(roots: list[Path]) -> ListRootsResult:
 
 
 class FakeSession:
-    """以固定根目录应答 list_roots 的会话替身。"""
+    """按 SDK 契约经 send_request 应答 roots/list 的会话替身，记录调用参数。"""
 
     def __init__(self, roots: list[Path]) -> None:
         self._roots = roots
+        self.send_request_calls: list[dict[str, Any]] = []
 
-    async def list_roots(self) -> ListRootsResult:
+    def _record_send_request(
+        self,
+        request: Any,
+        request_read_timeout_seconds: float | None,
+        metadata: Any,
+    ) -> None:
+        """记录一次 send_request 的调用参数，供调用形态断言消费。"""
+        self.send_request_calls.append(
+            {
+                "request": request,
+                "request_read_timeout_seconds": request_read_timeout_seconds,
+                "metadata": metadata,
+            }
+        )
+
+    async def send_request(
+        self,
+        request: Any,
+        result_type: Any,
+        request_read_timeout_seconds: float | None = None,
+        metadata: Any = None,
+        progress_callback: Any = None,
+    ) -> ListRootsResult:
+        del result_type, progress_callback
+        self._record_send_request(request, request_read_timeout_seconds, metadata)
+        return await self._conclude_send_request(request_read_timeout_seconds)
+
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        """send_request 记录参数后的结局，子类覆写注入返回/抛错/悬挂形态。"""
+        del request_read_timeout_seconds
         return roots_result(self._roots)
 
 
@@ -37,15 +70,10 @@ class CapabilityDeclaringSession(FakeSession):
         super().__init__(roots)
         self.declared = declared
         self.capability_probes = 0
-        self.list_roots_calls = 0
 
     def check_client_capability(self, capability: object) -> bool:
         self.capability_probes += 1
         return self.declared
-
-    async def list_roots(self) -> ListRootsResult:
-        self.list_roots_calls += 1
-        return await super().list_roots()
 
 
 class ProbingErrorSession(CapabilityDeclaringSession):
@@ -56,3 +84,32 @@ class ProbingErrorSession(CapabilityDeclaringSession):
 
     def check_client_capability(self, capability: object) -> bool:
         raise RuntimeError("capability probe broken")
+
+
+class FailingSession(CapabilityDeclaringSession):
+    """声明 roots 且反向通道可用的会话替身：send_request 记录参数后抛 RuntimeError。"""
+
+    def __init__(self) -> None:
+        super().__init__([Path("/workspace")], declared=True)
+        self.can_send_request = True
+
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        del request_read_timeout_seconds
+        raise RuntimeError("send_request failed")
+
+
+class HangingSession(CapabilityDeclaringSession):
+    """声明 roots 且反向通道可用的会话替身：send_request 永不完成，出站写被流控暂停，读超时无从起算。"""
+
+    def __init__(self) -> None:
+        super().__init__([Path("/workspace")], declared=True)
+        self.can_send_request = True
+
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        del request_read_timeout_seconds
+        await asyncio.sleep(3600)
+        raise AssertionError("悬挂的 send_request 不应被等到")

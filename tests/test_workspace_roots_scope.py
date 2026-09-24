@@ -1,11 +1,13 @@
 """工作区 Roots 作用域测试：MCP Roots 优先于 env，list_roots 失败回退 env。"""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import NoBackChannelError
 from mcp.types import InputRequiredResult, ListRootsRequest, ListRootsResult
 from PIL import Image
@@ -19,6 +21,7 @@ from seedream_mcp.tools.core.schemas import BrowseImagesInput
 from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.utils.io.io_path import get_workspace_root
 from seedream_mcp.utils.io.io_roots import (
+    read_session_roots_or_raise,
     read_session_roots_result,
     workspace_roots_scope_from_result,
 )
@@ -27,7 +30,9 @@ from _log_fakes import RecordingLogger
 from _roots_session_fakes import (
     CapabilityDeclaringSession as _CapabilityDeclaringSession,
 )
+from _roots_session_fakes import FailingSession as _FailingSession
 from _roots_session_fakes import FakeSession as _FakeSession
+from _roots_session_fakes import HangingSession as _HangingSession
 from _roots_session_fakes import ProbingErrorSession as _ProbingErrorSession
 from _roots_session_fakes import roots_result as _roots_result
 
@@ -46,24 +51,23 @@ class _FakeContext:
         self.session = _FakeSession(roots)
 
 
-class _FailingSession:
-    """list_roots 抛 RuntimeError 的会话替身。"""
-
-    async def list_roots(self) -> ListRootsResult:
-        raise RuntimeError("list_roots failed")
-
-
 class _FailingContext:
-    """组合 list_roots 失败会话的上下文替身。"""
+    """组合 send_request 失败会话的上下文替身。"""
 
     def __init__(self) -> None:
         self.session = _FailingSession()
 
 
-class _NoBackChannelSession:
-    """list_roots 抛 NoBackChannelError，模拟无服务端反向通道的 2026 协议会话。"""
+class _NoBackChannelSession(_FakeSession):
+    """send_request 抛 NoBackChannelError，模拟无服务端反向通道的 2026 协议会话。"""
 
-    async def list_roots(self) -> ListRootsResult:
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        del request_read_timeout_seconds
         raise NoBackChannelError("roots/list")
 
 
@@ -74,10 +78,16 @@ class _NoBackChannelContext:
         self.session = _NoBackChannelSession()
 
 
-class _MalformedResponseSession:
-    """list_roots 抛普通 ValueError，代表瞬时失败或替身异常。"""
+class _MalformedResponseSession(_FakeSession):
+    """send_request 抛普通 ValueError，代表瞬时失败或替身异常。"""
 
-    async def list_roots(self) -> ListRootsResult:
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        del request_read_timeout_seconds
         raise ValueError("malformed roots payload")
 
 
@@ -88,10 +98,16 @@ class _MalformedResponseContext:
         self.session = _MalformedResponseSession()
 
 
-class _TimeoutSession:
-    """list_roots 抛 TimeoutError 的会话替身，模拟 roots/list 瞬时超时。"""
+class _TimeoutSession(_FakeSession):
+    """send_request 抛 TimeoutError 的会话替身，模拟 roots/list 瞬时超时。"""
 
-    async def list_roots(self) -> ListRootsResult:
+    def __init__(self) -> None:
+        super().__init__([])
+
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        del request_read_timeout_seconds
         raise TimeoutError("roots/list timed out")
 
 
@@ -100,6 +116,13 @@ class _TimeoutContext:
 
     def __init__(self) -> None:
         self.session = _TimeoutSession()
+
+
+class _NoSendRequestMethodSession:
+    """声明 roots capability 但无 send_request 方法的会话替身。"""
+
+    def check_client_capability(self, capability: object) -> bool:
+        return True
 
 
 async def test_workspace_roots_scope_prioritizes_mcp_roots_over_env(
@@ -348,6 +371,7 @@ async def test_read_session_roots_result_no_back_channel_logs_error(
 
     assert roots_result is None
     assert any("反向通道" in message for message in capture.errors)
+    assert capture.opt_kwargs == [{"exception": True}]
     assert capture.warnings == []
 
 
@@ -366,6 +390,7 @@ async def test_read_session_roots_result_generic_error_logs_error(
 
     assert roots_result is None
     assert any("读取 MCP Roots 失败" in message for message in capture.errors)
+    assert capture.opt_kwargs == [{"exception": True}]
     assert capture.warnings == []
 
 
@@ -421,6 +446,19 @@ async def test_read_session_roots_result_transient_error_logs_error(
     assert capture.warnings == []
 
 
+async def test_read_session_roots_result_times_out_when_send_request_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """出站写悬挂时资源路径经整体超时上界降级返回 None，不无限挂起。"""
+    monkeypatch.setattr(io_roots_module, "_ROOTS_LIST_TIMEOUT_SECONDS", 0.1)
+
+    roots_result = await asyncio.wait_for(
+        read_session_roots_result(_SpyContext(_HangingSession())), timeout=5.0
+    )
+
+    assert roots_result is None
+
+
 async def test_read_session_roots_result_skips_list_roots_without_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -435,10 +473,11 @@ async def test_read_session_roots_result_skips_list_roots_without_capability(
 
     session = _CapabilityDeclaringSession([], declared=False)
 
-    async def _explode_list_roots() -> ListRootsResult:
+    async def _explode_send_request(*args: object, **kwargs: object) -> ListRootsResult:
+        del args, kwargs
         raise AssertionError("未声明 roots capability 时不得发起 roots/list")
 
-    session.list_roots = _explode_list_roots  # type: ignore[method-assign]
+    session.send_request = _explode_send_request  # type: ignore[method-assign]
 
     roots_result = await read_session_roots_result(_SpyContext(session))
 
@@ -467,6 +506,33 @@ async def test_read_session_roots_result_calls_list_roots_when_capability_declar
         assert get_workspace_root() == mcp_root.resolve()
 
     assert session.capability_probes == 1
+
+
+async def test_read_session_roots_or_raise_rejects_session_without_send_request() -> None:
+    """会话无可调用 send_request 时取回原语经 ToolError 报错而非裸 AttributeError。"""
+    with pytest.raises(ToolError, match="send_request"):
+        await read_session_roots_or_raise(None, _NoSendRequestMethodSession())
+
+
+async def test_read_session_roots_result_degrades_when_send_request_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """会话无可调用 send_request 时资源路径降级返回 None 并记录读取失败日志。"""
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+
+    roots_result = await read_session_roots_result(_SpyContext(_NoSendRequestMethodSession()))
+
+    assert roots_result is None
+    assert any("读取 MCP Roots 失败" in message for message in capture.errors)
+    assert capture.opt_kwargs == [{"exception": True}]
+    assert capture.warnings == []
+
+
+async def test_read_session_roots_or_raise_reports_no_back_channel_as_fetch_failure() -> None:
+    """无反向通道会话在工具路径同样经 ToolError 报读取失败，两路径共用同一原语。"""
+    with pytest.raises(ToolError, match="读取 MCP Roots 失败"):
+        await read_session_roots_or_raise(None, _NoBackChannelSession())
 
 
 async def test_run_browse_images_falls_back_to_env_when_list_roots_fails(
@@ -583,13 +649,17 @@ async def test_workspace_roots_resource_list_roots_failure_falls_back_to_env(
     assert "fallback" not in data
 
 
-class _FixedResultSession:
-    """list_roots 返回固定结果的会话替身。"""
+class _FixedResultSession(_FakeSession):
+    """send_request 返回固定结果的会话替身。"""
 
     def __init__(self, result: ListRootsResult) -> None:
+        super().__init__([])
         self._result = result
 
-    async def list_roots(self) -> ListRootsResult:
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        del request_read_timeout_seconds
         return self._result
 
 
@@ -661,7 +731,7 @@ async def test_workspace_roots_resource_modern_session_first_round_requests_inpu
     assert set(requests) == {"roots"}
     assert isinstance(requests["roots"], ListRootsRequest)
     # 首轮不得退回 roots/list 直连：多轮形态下直连在该版本会话上必然失败。
-    assert ctx.session.list_roots_calls == 0
+    assert len(ctx.session.send_request_calls) == 0
 
 
 async def test_workspace_roots_resource_modern_session_retry_round_reports_roots(
@@ -683,7 +753,7 @@ async def test_workspace_roots_resource_modern_session_retry_round_reports_roots
     assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
     assert str(env_root.resolve()).replace("\\", "/") not in data["roots"]
     # 应答已就位时不发起多轮请求，也不经直连取回。
-    assert ctx.session.list_roots_calls == 0
+    assert len(ctx.session.send_request_calls) == 0
 
 
 async def test_workspace_roots_resource_modern_session_malformed_response_falls_back(
@@ -705,7 +775,7 @@ async def test_workspace_roots_resource_modern_session_malformed_response_falls_
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
     # 输出附降级标记，客户端可感知本工作区为环境回退而非其声明值。
     assert data["fallback"] is True
-    assert ctx.session.list_roots_calls == 0
+    assert len(ctx.session.send_request_calls) == 0
 
 
 async def test_workspace_roots_resource_modern_session_capability_missing_falls_back(
@@ -742,7 +812,7 @@ async def test_workspace_roots_resource_versionless_context_keeps_direct_fetch(
     assert isinstance(result, str)
     data = json.loads(result)
     assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
-    assert ctx.session.list_roots_calls == 1
+    assert len(ctx.session.send_request_calls) == 1
 
 
 async def test_workspace_roots_resource_declared_but_unconvertible_marks_fallback(
@@ -803,7 +873,7 @@ async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(
     assert isinstance(result, str)
     data = json.loads(result)
     assert data["roots"] == [str(mcp_root.resolve()).replace("\\", "/")]
-    assert ctx.session.list_roots_calls == 1
+    assert len(ctx.session.send_request_calls) == 1
 
 
 class _NoSessionContext:

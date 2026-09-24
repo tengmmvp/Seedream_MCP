@@ -10,7 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from mcp.server.mcpserver import RequestStateSecurity
+from mcp.server.mcpserver import MCPServer, RequestStateSecurity
 from mcp.server.request_state import RequestStateBoundary
 
 import seedream_mcp.resources as resources_module
@@ -205,7 +205,8 @@ def test_rebind_request_state_security_survives_missing_public_attribute(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """公开属性 mcp.middleware 缺失时告警返回 False，探测失败不阻断启动。"""
-    monkeypatch.delattr(type(resources_module.mcp), "middleware")
+    # middleware 定义于 SDK 基类，删基类属性使子类单例的继承链上缺席。
+    monkeypatch.delattr(MCPServer, "middleware")
 
     assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
 

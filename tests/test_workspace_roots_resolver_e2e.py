@@ -7,15 +7,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
 from mcp.client import Client, ClientRequestContext
-from mcp.types import CallToolResult, ListRootsResult, Root
+from mcp.types import CallToolResult, ListRootsResult, Root, TextContent
 from pydantic import FileUrl
 
 import seedream_mcp.server as server
+import seedream_mcp.utils.io.io_roots as io_roots_module
 from seedream_mcp import config as config_module
 from seedream_mcp.config import SeedreamConfig
 
@@ -119,3 +121,30 @@ async def test_resolver_over_modern_negotiation(
         structured = result.structured_content
         assert isinstance(structured, dict)
         assert structured["count"] == 1
+
+
+async def test_resolver_times_out_over_legacy_wire_when_client_never_answers(
+    reset_lifespan_singletons: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """legacy 协商加永不应答的 roots callback 时，工具调用超时内以错误结果返回。
+
+    resolver 直连取回替代 SDK 对旧修订会话的无超时等待，超时经 is_error 结果
+    呈现给客户端而非无限挂起。
+    """
+    monkeypatch.setattr(io_roots_module, "_ROOTS_LIST_TIMEOUT_SECONDS", 0.2)
+
+    async def silent_callback(context: ClientRequestContext) -> ListRootsResult:
+        del context
+        await asyncio.sleep(3600)
+        raise AssertionError("不应答的回调不应被等到")
+
+    async with Client(server.mcp, mode="legacy", list_roots_callback=silent_callback) as client:
+        result = await asyncio.wait_for(
+            client.call_tool("browse_images", {"directory": ".", "recursive": False}),
+            timeout=10.0,
+        )
+
+    assert result.is_error is True
+    texts = [item.text for item in result.content if isinstance(item, TextContent)]
+    assert any("读取 MCP Roots 超时" in text for text in texts)

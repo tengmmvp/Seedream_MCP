@@ -41,10 +41,8 @@ from mcp.types import (
     InputRequiredResult,
     ListRootsRequest,
     ListRootsResult,
-    TextContent,
     ToolAnnotations,
 )
-from mcp.types.version import is_version_at_least
 from pydantic import BaseModel, Field, ValidationError
 
 from ._icons import TOOL_PNG_SIZE, tool_icon_png_src, tool_icon_src
@@ -128,6 +126,7 @@ from .tools.core.outputs import (
     GenerationStructuredOutput,
     build_error_dict,
     build_error_structured,
+    build_structured_tool_result,
 )
 from .utils.core.errors import SeedreamConfigError
 from .utils.core.logs import get_logger
@@ -137,8 +136,14 @@ from .utils.core.validators import (
 )
 from .utils.io.io_path import get_workspace_roots
 from .utils.io.io_roots import (
+    modern_revision_negotiated,
+    read_session_roots_or_raise,
     read_session_roots_result,
+    resource_roots_via_input_required,
+    roots_back_channel_available,
+    roots_degraded,
     session_declares_roots_capability,
+    session_or_none,
     workspace_roots_scope_from_result,
 )
 from .utils.model.model_capabilities import (
@@ -244,7 +249,7 @@ def _pipeline_kwargs(frame_locals: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _config_from_context(ctx: Context[Any, Any]) -> SeedreamConfig:
+def _config_from_context(ctx: Context[Any, Any] | None) -> SeedreamConfig:
     """从 MCP 请求上下文获取 lifespan 注入的配置，无法获取时回退全局配置并记录告警。"""
     config = get_lifespan_resource(ctx, LIFESPAN_KEY_CONFIG, SeedreamConfig)
     if config is not None:
@@ -273,7 +278,7 @@ def _validation_error_message(exc: ValidationError) -> str:
     return "；".join(parts)
 
 
-def _validation_error_result(
+async def _validation_error_result(
     tool_name: str,
     exc: ValidationError,
     build_structured: Callable[[str, str], dict[str, Any]],
@@ -289,11 +294,8 @@ def _validation_error_result(
     两形态并存为既定契约。
     """
     message = _validation_error_message(exc)
-    return CallToolResult(
-        content=[TextContent(type="text", text=message)],
-        structured_content=build_structured(tool_name, message),
-        is_error=True,
-    )
+    structured = build_structured(tool_name, message)
+    return await build_structured_tool_result(message, structured, is_error=True)
 
 
 def _generation_validation_structured(tool_name: str, message: str) -> dict[str, Any]:
@@ -343,62 +345,36 @@ async def _run_tool_pipeline(
             tool_name,
             exc.errors(include_url=False, include_input=False),
         )
-        return _validation_error_result(tool_name, exc, build_structured)
+        return await _validation_error_result(tool_name, exc, build_structured)
     if config is None:
         return await runner(params, ctx=ctx, workspace_roots=workspace_roots)
     return await runner(params, config=config, ctx=ctx, workspace_roots=workspace_roots)
 
 
-def _workspace_roots_dependency(
-    ctx: Context = None,  # type: ignore[assignment]
+async def _workspace_roots_dependency(
+    ctx: Context[Any, Any] | None = None,
 ) -> ListRootsResult | ListRoots | None:
     """五个工具共用的 roots 依赖解析器，SEP-2577 非废弃形态。
 
-    会话已声明 roots capability 且反向通道可用时返回 ListRoots()，SDK 在工具
-    调用前取回客户端 roots 并注入工具参数；未声明或反向通道不可用（无状态
-    传输等取回必失败）时返回 None 不发起取回，工具链经
-    workspace_roots_scope_from_result 回退环境变量边界。resolver 参数对模型
+    现代修订（2026-07-28 及以后）返回 ListRoots()，SDK 在工具调用前经
+    InputRequiredResult 多轮取回客户端 roots 并注入工具参数；旧修订由 resolver
+    以短超时直连取回，超时或失败经 ToolError 报错不降级。未声明能力，或旧修订
+    反向通道不可用时返回 None 不发起取回；无状态传输等形态下取回必失败。工具链
+    经 workspace_roots_scope_from_result 回退环境变量边界。resolver 参数对模型
     不可见，不进入 inputSchema。
     """
-    session = _session_or_none(ctx)
+    session = session_or_none(ctx)
     if session is None or not session_declares_roots_capability(session):
         return None
-    if not _roots_back_channel_available(ctx, session):
+    if modern_revision_negotiated(ctx):
+        return ListRoots()
+    if not roots_back_channel_available(session):
         return None
-    return ListRoots()
+    return await read_session_roots_or_raise(ctx, session)
 
 
-def _modern_revision_negotiated(ctx: Context) -> bool:
-    """协商版本不低于 2026-07-28 时返回 True，协议版本缺失按旧修订处理。"""
-    version = getattr(ctx, "protocol_version", None)
-    return isinstance(version, str) and is_version_at_least(version, _MODERN_PROTOCOL_VERSION)
-
-
-def _roots_back_channel_available(ctx: Context, session: Any) -> bool:
-    """判定 roots 取回通道可用：现代修订走多轮取回，旧修订需反向通道。
-
-    协商版本不低于 2026-07-28 时 resolver 的取回经 InputRequiredResult 多轮形态，
-    不依赖反向通道；旧修订经 roots/list 直连，无状态传输等无反向通道场景返回
-    False 以跳过必失败的取回，旧版 SDK 与测试替身无该属性时保守视为可用。
-    """
-    if _modern_revision_negotiated(ctx):
-        return True
-    try:
-        return bool(session.can_send_request)
-    except AttributeError:
-        return True
-
-
-def _session_or_none(ctx: Context) -> Any:
-    """返回会话对象，脱离请求上下文或无会话时返回 None。
-
-    SDK 在脱离请求上下文访问 ctx.session 时抛 ValueError，此处统一捕获，
-    两个 roots 取回入口共用本判定。
-    """
-    try:
-        return ctx.session
-    except ValueError:
-        return None
+# 五工具签名共用的 roots 解析注解，漏写一处即静默回退环境根。
+_ROOTS_DEPENDENCY = Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)]
 
 
 # ==================== MCP 工具函数定义 ====================
@@ -429,8 +405,8 @@ async def text_to_image(
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
-    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
-    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
+    workspace_roots: _ROOTS_DEPENDENCY = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """文生图：根据文字指令生成单张图片。
 
@@ -491,8 +467,8 @@ async def image_to_image(
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
-    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
-    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
+    workspace_roots: _ROOTS_DEPENDENCY = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """图文生图：基于已有图片进行编辑。
 
@@ -543,8 +519,8 @@ async def multi_image_fusion(
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
-    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
-    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
+    workspace_roots: _ROOTS_DEPENDENCY = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """多图融合：融合多张参考图片的特征生成新图片。
 
@@ -612,8 +588,8 @@ async def sequential_generation(
     auto_save: bool | None = _AUTO_SAVE_FIELD,
     save_path: str | None = _SAVE_PATH_FIELD,
     custom_name: str | None = _CUSTOM_NAME_FIELD,
-    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
-    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
+    workspace_roots: _ROOTS_DEPENDENCY = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """组图输出：一次生成多张内容关联的图片。
 
@@ -680,8 +656,8 @@ async def browse_images(
         default=BrowseImagesInput.DEFAULT_SHOW_DETAILS,
         description=SHOW_DETAILS_DESCRIPTION,
     ),
-    workspace_roots: Annotated[ListRootsResult | None, Resolve(_workspace_roots_dependency)] = None,
-    ctx: Context[Any, Any] = None,  # type: ignore[assignment]
+    workspace_roots: _ROOTS_DEPENDENCY = None,
+    ctx: Context[Any, Any] | None = None,
 ) -> Annotated[CallToolResult, BrowseImagesStructuredOutput]:
     """本地图片浏览：列出读权限（工作区 ∪ 图片目录）内的图片文件。
 
@@ -760,22 +736,6 @@ _tighten_flat_tool_schemas()
 # ctx.input_responses 以同键取回。
 _ROOTS_INPUT_REQUEST_KEY = "roots"
 
-# roots 经 InputRequiredResult 取回所需的最低协商版本：旧修订会话无法序列化该
-# 结果类型，客户端会收到 -32603，故仅 2026-07-28 及以后走多轮形态。
-_MODERN_PROTOCOL_VERSION = "2026-07-28"
-
-
-def _resource_roots_via_input_required(ctx: Context) -> bool:
-    """判定资源处理器是否应经 InputRequiredResult 多轮形态取回 roots。
-
-    会话可访问、已声明 roots capability 且协商版本不低于 2026-07-28 时返回
-    True；否则返回 False，由调用方走 roots/list 直连或环境变量回退。
-    """
-    session = _session_or_none(ctx)
-    if session is None or not session_declares_roots_capability(session):
-        return False
-    return _modern_revision_negotiated(ctx)
-
 
 def _workspace_roots_or_empty() -> list[Path]:
     """读取当前生效的工作区根，回退链不可解析时降级空列表并记录日志。
@@ -805,15 +765,6 @@ async def _rendered_workspace_roots(verbose: bool, *, fallback: bool = False) ->
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _roots_degraded(roots_result: Any, applied_roots: list[Path]) -> bool:
-    """降级标记单点：声明了非空 roots 但无一可应用即降级；空声明等同未声明不标。
-
-    取回失败（结果为 None）不标记：capability 探测异常时按已声明尝试，取回
-    失败未必代表客户端真的声明过，标记会误报。
-    """
-    return bool(getattr(roots_result, "roots", [])) and not applied_roots
-
-
 @mcp.resource(
     "seedream://workspace/roots{?verbose}",
     name="workspace_roots",
@@ -829,7 +780,7 @@ async def workspace_roots_resource(
     verbose 附各根的 resolve 后物理路径。客户端按原 URI seedream://workspace/roots
     读取仍匹配，query 参数可省略。
     """
-    if _resource_roots_via_input_required(ctx):
+    if resource_roots_via_input_required(ctx):
         responses = ctx.input_responses or {}
         if _ROOTS_INPUT_REQUEST_KEY not in responses:
             return InputRequiredResult(
@@ -839,7 +790,7 @@ async def workspace_roots_resource(
         if isinstance(roots_result, ListRootsResult):
             async with workspace_roots_scope_from_result(roots_result) as applied_roots:
                 return await _rendered_workspace_roots(
-                    verbose, fallback=_roots_degraded(roots_result, applied_roots)
+                    verbose, fallback=roots_degraded(roots_result, applied_roots)
                 )
         # 应答形态不符即丢弃并回退环境根，不重发请求空转到回合上限；边界收窄
         # 属完整性事件，按 error 记录。
@@ -852,7 +803,7 @@ async def workspace_roots_resource(
     roots_result = await read_session_roots_result(ctx)
     async with workspace_roots_scope_from_result(roots_result) as applied_roots:
         return await _rendered_workspace_roots(
-            verbose, fallback=_roots_degraded(roots_result, applied_roots)
+            verbose, fallback=roots_degraded(roots_result, applied_roots)
         )
 
 

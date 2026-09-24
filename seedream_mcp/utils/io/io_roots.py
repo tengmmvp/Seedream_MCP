@@ -1,11 +1,4 @@
-"""MCP Roots 会话取回：能力探测、roots/list 直连与 resolver 注入应用。
-
-roots 取回有两种形态：工具链经 server 层 Resolve 依赖注入（SEP-2577 非废弃
-形态）与资源处理器在 2026-07-28 及以后的会话上经 InputRequiredResult 多轮取回，
-结果均由 workspace_roots_scope_from_result 应用；旧修订会话的资源处理器经
-read_session_roots_result 的 roots/list 直连取回后共用同一应用。组内依赖
-io_roots → io_path 单向，工作区状态经 io_path 的公共访问器置位。
-"""
+"""MCP Roots 会话取回：协商判定、能力探测、roots/list 直连与注入应用。"""
 
 from __future__ import annotations
 
@@ -18,8 +11,11 @@ from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from mcp.shared.exceptions import NoBackChannelError
-from mcp.types import ListRootsResult
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.shared.exceptions import MCPError, NoBackChannelError
+from mcp.shared.message import ServerMessageMetadata
+from mcp.types import REQUEST_TIMEOUT, ListRootsRequest, ListRootsResult
+from mcp.types.version import is_version_at_least
 
 from ..core.logs import get_logger
 from .io_path import (
@@ -35,9 +31,42 @@ from .io_path import (
 
 logger = get_logger()
 
-# roots/list 请求的显式短超时：不设超时将依赖会话层读超时，慢客户端或半开连接会把
-# 工具调用拖到分钟级；超时按读取失败处理，工作根目录经声明链回退。
+# roots/list 取回的整体超时上界：SDK 读超时在出站写完成后才起算，流控暂停的
+# 写会让请求无限挂起。
 _ROOTS_LIST_TIMEOUT_SECONDS = 5.0
+
+# roots 经 InputRequiredResult 多轮取回所需的最低协商版本：旧修订会话无法序列化
+# 该结果类型，客户端会收到 -32603。
+_MODERN_PROTOCOL_VERSION = "2026-07-28"
+
+
+def session_or_none(ctx: Any) -> Any:
+    """返回会话对象，脱离请求上下文或无会话时返回 None。
+
+    SDK 在脱离请求上下文访问 ctx.session 时抛 ValueError，此处统一捕获。
+    """
+    try:
+        return ctx.session
+    except ValueError:
+        return None
+
+
+def modern_revision_negotiated(ctx: Any) -> bool:
+    """协商版本不低于 2026-07-28 时返回 True，协议版本缺失按旧修订处理。"""
+    version = getattr(ctx, "protocol_version", None)
+    return isinstance(version, str) and is_version_at_least(version, _MODERN_PROTOCOL_VERSION)
+
+
+def roots_back_channel_available(session: Any) -> bool:
+    """判定旧修订会话的反向通道可用性，供 roots/list 直连取回前探测。
+
+    无状态传输等无反向通道场景返回 False 以跳过必失败的取回，旧版 SDK 与
+    测试替身无该属性时保守视为可用。
+    """
+    try:
+        return bool(session.can_send_request)
+    except AttributeError:
+        return True
 
 
 def session_declares_roots_capability(session: Any) -> bool:
@@ -60,8 +89,8 @@ def session_declares_roots_capability(session: Any) -> bool:
 
 
 def _log_roots_read_failure(exc: Exception, reason: str) -> None:
-    """记录 roots 读取失败，本次工作根目录经声明链回退。"""
-    logger.error("{}: {}，本次请求的工作根目录经声明链回退", reason, exc)
+    """记录 roots 读取失败及其堆栈，本次工作根目录经声明链回退。"""
+    logger.opt(exception=True).error("{}: {}，本次请求的工作根目录经声明链回退", reason, exc)
 
 
 def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | None]:
@@ -79,37 +108,93 @@ def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | N
 
 
 async def read_session_roots_result(ctx: Any) -> ListRootsResult | None:
-    """旧修订会话经 roots/list 直连读取客户端 roots 结果。
-
-    无请求上下文（session 属性抛 ValueError）、ctx 为 None、session 无可用
-    list_roots 或未声明 roots capability 时返回 None 不发起取回；NoBackChannelError
-    与其余取回异常记录后同样返回 None，工作区边界交由调用方回退声明链。显式
-    短超时防慢客户端拖住请求。
-    """
+    """旧修订资源路径的 roots 直连取回，无会话、未声明能力或取回失败时降级返回 None。"""
     if ctx is None:
         return None
-
-    # 无请求上下文的 Context 其 session 属性抛 ValueError，须显式捕获以维持
-    # 「回退环境变量边界」的承诺。
-    session: Any
-    try:
-        session = ctx.session
-    except ValueError:
-        return None
-    list_roots: Any = getattr(session, "list_roots", None)
-    if not callable(list_roots):
+    session = session_or_none(ctx)
+    if session is None:
         return None
     if not session_declares_roots_capability(session):
         logger.debug("客户端未声明 roots capability，跳过 roots 取回，回退环境变量边界")
         return None
     try:
-        return await asyncio.wait_for(list_roots(), timeout=_ROOTS_LIST_TIMEOUT_SECONDS)
+        return await _request_session_roots(ctx, session)
     except NoBackChannelError as exc:
         # 协议能力缺失而非瞬时失败，重试不会好转，提级为 error。
         _log_roots_read_failure(exc, "协议会话无反向通道，无法读取 MCP Roots")
     except Exception as exc:
         _log_roots_read_failure(exc, "读取 MCP Roots 失败")
     return None
+
+
+def _request_id_or_none(ctx: Any) -> str | None:
+    """返回当前请求 id，脱离请求上下文或替身无该属性时返回 None。"""
+    try:
+        request_id: str | None = ctx.request_id
+        return request_id
+    except (AttributeError, ValueError):
+        return None
+
+
+def _is_roots_read_timeout(exc: BaseException) -> bool:
+    """判定取回异常是否超时形态：直连 TimeoutError 或 SDK 读超时的 REQUEST_TIMEOUT。"""
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, MCPError) and exc.code == REQUEST_TIMEOUT
+
+
+async def _request_session_roots(ctx: Any, session: Any) -> ListRootsResult:
+    """roots/list 直连取回私有核心，异常保留原始类型由两条路径分别归类。"""
+    send_request: Any = getattr(session, "send_request", None)
+    if not callable(send_request):
+        raise AttributeError("会话无 send_request 方法，无法读取 MCP Roots")
+    # related_request_id 使请求经请求方自己的流送达，SSE 无常驻 GET 流时
+    # 连接级 outbound 会被直接丢弃。
+    metadata: ServerMessageMetadata | None = None
+    request_id = _request_id_or_none(ctx)
+    if request_id is not None:
+        metadata = ServerMessageMetadata(related_request_id=request_id)
+    # 整体上界覆盖 SDK 读超时不计的出站写阶段，request_read_timeout_seconds 留作内层再设防。
+    return await asyncio.wait_for(
+        send_request(
+            ListRootsRequest(),
+            ListRootsResult,
+            request_read_timeout_seconds=_ROOTS_LIST_TIMEOUT_SECONDS,
+            metadata=metadata,
+        ),
+        timeout=_ROOTS_LIST_TIMEOUT_SECONDS,
+    )
+
+
+async def read_session_roots_or_raise(ctx: Any, session: Any) -> ListRootsResult:
+    """旧修订会话经 roots/list 直连取回客户端 roots，送达走请求自身通道，无通道、超时或失败时抛 ToolError。"""
+    try:
+        return await _request_session_roots(ctx, session)
+    except Exception as exc:
+        if _is_roots_read_timeout(exc):
+            raise ToolError(f"读取 MCP Roots 超时（{_ROOTS_LIST_TIMEOUT_SECONDS:g} 秒）") from exc
+        raise ToolError(f"读取 MCP Roots 失败: {exc}") from exc
+
+
+def resource_roots_via_input_required(ctx: Any) -> bool:
+    """判定资源处理器是否应经 InputRequiredResult 多轮形态取回 roots。
+
+    会话可访问、已声明 roots capability 且协商版本不低于 2026-07-28 时返回
+    True，否则返回 False。
+    """
+    session = session_or_none(ctx)
+    if session is None or not session_declares_roots_capability(session):
+        return False
+    return modern_revision_negotiated(ctx)
+
+
+def roots_degraded(roots_result: Any, applied_roots: list[Path]) -> bool:
+    """降级标记单点：声明了非空 roots 但无一可应用即降级；空声明等同未声明不标。
+
+    结果为 None 视为取回失败，不标记：capability 探测异常时按已声明尝试，
+    取回失败未必代表客户端真的声明过，标记会误报。
+    """
+    return bool(getattr(roots_result, "roots", [])) and not applied_roots
 
 
 def _roots_result_to_paths(roots_result: Any) -> list[Path]:
@@ -143,7 +228,7 @@ async def workspace_roots_scope_from_result(
     SEP-2577 非废弃形态：工具链不经 ctx.session.list_roots 直连，由 server 工具
     签名的 Resolve 依赖按协商版本取回后注入本函数消费。roots_result 为 None 表示
     客户端未声明 roots capability，此处不设置边界、下游回退环境变量根；取回失败
-    由 SDK 在调用层报错而非在此降级，不放宽文件访问边界。file URI 转 Path 的
+    在调用层报错而非在此降级，不放宽文件访问边界。file URI 转 Path 的
     resolve 属同步文件系统调用，下沉工作线程执行，与 browse 链路的目录预解析
     同一口径。
 
