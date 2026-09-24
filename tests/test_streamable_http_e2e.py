@@ -4,9 +4,9 @@
 与 CallToolResult 返回，SDK 内层 DNS rebinding 防护按绑定地址重配，以及真端口
 uvicorn 生产启动器冒烟。
 
-httpx.ASGITransport 不驱动 ASGI lifespan，触达 MCP 应用的用例以自建
-_LifespanManager 显式运行 session_manager 生命周期；401/413 由中间件在应用前
-短路，不依赖 lifespan。
+httpx.ASGITransport 不驱动 ASGI lifespan，触达 MCP 应用的用例以共享
+_asgi_fakes._LifespanManager 显式运行 session_manager 生命周期；401/413 由中间件
+在应用前短路，不依赖 lifespan。
 """
 
 import asyncio
@@ -14,102 +14,21 @@ import json
 import socket
 import threading
 import time
-from typing import Any, MutableMapping
+from typing import Any
 
 import httpx
 import pytest
 
 import seedream_mcp.resources as resources
-import seedream_mcp.server as server
 import seedream_mcp.transport as transport_module
 from seedream_mcp.client import SeedreamClient
-from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.transport import _attach_streamable_http_middleware, _transport_security_for_host
+from seedream_mcp.transport import _transport_security_for_host
 from seedream_mcp.utils.core.errors import SeedreamValidationError
+
+from _asgi_fakes import _LifespanManager, build_transport_app
 
 # MCPServer streamable-http 默认 MCP 端点路径。
 _MCP_PATH = "/mcp"
-# 生产请求体上限默认值，与 SeedreamConfig.http_max_body_size 默认一致。
-_MAX_BODY = 64 * 1024 * 1024
-
-
-class _LifespanManager:
-    """最小 ASGI lifespan 驱动器，等价替代未引入的 asgi_lifespan。
-
-    发送 lifespan.startup/shutdown 并等待 complete，使 Starlette 运行
-    session_manager 建立请求处理任务组；failed 消息转译为 RuntimeError，用例立即
-    失败而非在等待 complete 事件上无限挂起。
-    """
-
-    def __init__(self, app: Any) -> None:
-        self._app = app
-        self._error: BaseException | None = None
-
-    def _fail(self, message: MutableMapping[str, Any]) -> None:
-        detail = message.get("message", "")
-        self._error = RuntimeError(f"ASGI lifespan 失败: {detail}")
-        self._startup_complete.set()
-        self._shutdown_complete.set()
-
-    async def __aenter__(self) -> "_LifespanManager":
-        self._startup_complete = asyncio.Event()
-        self._shutdown_complete = asyncio.Event()
-        self._queue: "asyncio.Queue[MutableMapping[str, Any]]" = asyncio.Queue()
-
-        async def receive() -> MutableMapping[str, Any]:
-            return await self._queue.get()
-
-        async def send(message: MutableMapping[str, Any]) -> None:
-            msg_type = message["type"]
-            if msg_type == "lifespan.startup.complete":
-                self._startup_complete.set()
-            elif msg_type == "lifespan.startup.failed":
-                self._fail(message)
-            elif msg_type == "lifespan.shutdown.complete":
-                self._shutdown_complete.set()
-            elif msg_type == "lifespan.shutdown.failed":
-                self._fail(message)
-
-        self._task = asyncio.ensure_future(self._app({"type": "lifespan"}, receive, send))
-        await self._queue.put({"type": "lifespan.startup"})
-        await self._startup_complete.wait()
-        if self._error is not None:
-            await self._task
-            raise self._error
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        await self._queue.put({"type": "lifespan.shutdown"})
-        await self._shutdown_complete.wait()
-        await self._task
-        if self._error is not None:
-            raise self._error
-
-
-def _build_app(
-    auth_token: str,
-    *,
-    body_limit: int = _MAX_BODY,
-    stateless: bool = False,
-    json_response: bool = False,
-    host: str = "127.0.0.1",
-) -> Any:
-    """按生产 run_streamable_http 的装配路径构建传输栈。
-
-    中间件经 transport._attach_streamable_http_middleware 复用生产装配且顺序同源，
-    transport_security 按绑定地址派生后与其余传输参数直传 streamable_http_app；
-    请求体上限经活动配置注入，配置合法下限 1MB，超限用例以 1MB 配 1MB+1 触发。
-    """
-    set_active_config(SeedreamConfig(api_key="test_key", http_max_body_size=body_limit))
-    app = server.mcp.streamable_http_app(
-        host=host,
-        stateless_http=stateless,
-        json_response=json_response,
-        transport_security=_transport_security_for_host(host),
-        max_request_body_size=body_limit,
-    )
-    _attach_streamable_http_middleware(app, host, auth_token)
-    return app
 
 
 def _mcp_request(method: str, request_id: int = 1) -> bytes:
@@ -139,7 +58,7 @@ async def test_e2e_valid_token_tools_list_returns_200(reset_http_app_state: None
     stateless 模式下 ServerSession 以 Initialized 态启动，tools/list 无需先发 initialize。
     json_response=True 使响应为确定性 JSON 200，避免 SSE 流在 ASGITransport 下的不确定性。
     """
-    app = _build_app("s3cret", stateless=True, json_response=True)
+    app = build_transport_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
@@ -168,8 +87,8 @@ async def test_e2e_valid_token_tools_list_returns_200(reset_http_app_state: None
 
 
 async def test_e2e_missing_bearer_token_returns_401(reset_http_app_state: None) -> None:
-    """无 Authorization 头由 Bearer 中间件最外层短路返回 401，不触达应用。"""
-    app = _build_app("s3cret")
+    """无 Authorization 头由 Bearer 中间件最外层短路返回 401 裸质询，不触达应用。"""
+    app = build_transport_app("s3cret")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
         response = await client.post(
@@ -179,12 +98,14 @@ async def test_e2e_missing_bearer_token_returns_401(reset_http_app_state: None) 
         )
 
     assert response.status_code == 401
-    assert response.json()["error"] == "invalid_token"
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["error"] == "missing_token"
+    assert response.json()["error_description"] == "Authentication required"
 
 
 async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) -> None:
-    """错误 Bearer 令牌经 hmac.compare_digest 判定不匹配，返回 401。"""
-    app = _build_app("s3cret")
+    """错误 Bearer 令牌经 hmac.compare_digest 判定不匹配，返回 401 并附 invalid_token 质询。"""
+    app = build_transport_app("s3cret")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
         response = await client.post(
@@ -197,6 +118,9 @@ async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) ->
         )
 
     assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+    assert response.json()["error"] == "invalid_token"
+    assert response.json()["error_description"] == "Invalid or expired token"
 
 
 async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> None:
@@ -205,7 +129,7 @@ async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> Non
     上限取配置合法下限 1MB 并以 1MB+1 请求体走全栈；单值与配置解析由
     test_request_body_limit 覆盖。
     """
-    app = _build_app("s3cret", body_limit=1024 * 1024)
+    app = build_transport_app("s3cret", body_limit=1024 * 1024)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
         response = await client.post(
@@ -219,11 +143,12 @@ async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> Non
 
     assert response.status_code == 413
     assert response.json()["error"] == "request_too_large"
+    assert response.json()["error_description"] == "Request body exceeds limit"
 
 
 async def test_e2e_health_check_returns_200_without_token(reset_http_app_state: None) -> None:
     """GET /health 由最外层健康检查中间件短路返回 200，无需 Bearer 令牌。"""
-    app = _build_app("s3cret")
+    app = build_transport_app("s3cret")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
         response = await client.get("/health")
@@ -254,7 +179,7 @@ async def test_e2e_tools_call_flat_params_success(
         }
 
     monkeypatch.setattr(SeedreamClient, "text_to_image", fake_text_to_image)
-    app = _build_app("s3cret", stateless=True, json_response=True)
+    app = build_transport_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
@@ -312,7 +237,7 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
         raise SeedreamValidationError("提示词不能为空", field="prompt", value="")
 
     monkeypatch.setattr(SeedreamClient, "text_to_image", failing_text_to_image)
-    app = _build_app("s3cret", stateless=True, json_response=True)
+    app = build_transport_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
@@ -371,7 +296,7 @@ async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
     host 参数未按实际绑定地址派生时，非回环部署的全部 /mcp 请求都会被 SDK 内层
     以 421 拒绝。
     """
-    app = _build_app("s3cret", stateless=True, json_response=True, host="0.0.0.0")
+    app = build_transport_app("s3cret", stateless=True, json_response=True, host="0.0.0.0")
 
     response = await _post_mcp_with_host(app, "mcp.example.com")
 
@@ -388,12 +313,13 @@ async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlis
 
     分层断言同时锁定 SDK 内层白名单仍按回环绑定配置，自定义守卫失效时内层仍兜底。
     """
-    app = _build_app("s3cret", stateless=True, json_response=True, host="127.0.0.1")
+    app = build_transport_app("s3cret", stateless=True, json_response=True, host="127.0.0.1")
 
     response = await _post_mcp_with_host(app, "mcp.example.com")
 
     assert response.status_code == 403
     assert response.json()["error"] == "invalid_host"
+    assert response.json()["error_description"] == "Host not allowed"
     security = _transport_security_for_host("127.0.0.1")
     assert security.enable_dns_rebinding_protection is True
     assert "127.0.0.1:*" in security.allowed_hosts
@@ -408,7 +334,7 @@ async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
     全部 Host 头防线。第二个 app 经 streamable_http_app 无条件新建会话管理器，两次
     lifespan 进入各运行一次。
     """
-    app = _build_app("s3cret", stateless=True, json_response=True, host="localhost")
+    app = build_transport_app("s3cret", stateless=True, json_response=True, host="localhost")
 
     allowed = await _post_mcp_with_host(app, "localhost:8000")
     assert allowed.status_code == 200
@@ -416,7 +342,7 @@ async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(
     assert body["jsonrpc"] == "2.0"
     assert "error" not in body
 
-    app = _build_app("s3cret", stateless=True, json_response=True, host="localhost")
+    app = build_transport_app("s3cret", stateless=True, json_response=True, host="localhost")
     rejected = await _post_mcp_with_host(app, "mcp.example.com")
     assert rejected.status_code == 421
 

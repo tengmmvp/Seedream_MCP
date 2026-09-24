@@ -1,25 +1,26 @@
 """Web 操作台测试共享辅助：生产装配序构建、ASGI 请求与图片样本。
 
-build_web_app 镜像 transport.run_streamable_http 的装配序（register ->
-streamable_http_app -> mount -> attach），保证测试栈与生产栈同源；web_asgi_client
-与 web_get 供各 webapp 测试文件发起回环 ASGI 请求；路由状态隔离 fixture 见
-conftest 的 clean_web_routes。
+build_web_app 经 _asgi_fakes 的共享装配核心按生产装配序（register ->
+streamable_http_app -> mount -> attach）构建传输栈，保证测试栈与生产栈同源；
+web_asgi_client 与 web_get 供各 webapp 测试文件发起回环 ASGI 请求；
+drive_asgi_messages 直驱响应对象收集全部 ASGI 消息，asgi_start_headers 与
+asgi_body_bytes 自消息列取值，供绕过传输栈直调响应对象的用例共享；路由状态
+隔离 fixture 见 conftest 的 clean_web_routes。
 """
 
 from __future__ import annotations
 
 import io
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 
-import seedream_mcp.server as server
+from _asgi_fakes import _MAX_BODY, _assemble_streamable_http_app
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.transport import _attach_streamable_http_middleware, _transport_security_for_host
 from seedream_mcp.webapp.constants import (
     WEB_API_BROWSE,
     WEB_API_CONFIG_INFO,
@@ -32,8 +33,6 @@ from seedream_mcp.webapp.constants import (
     WEB_INDEX_PATH,
     WEB_ROOT_PATH,
 )
-
-_MAX_BODY = 64 * 1024 * 1024
 
 # Web 端点路径全集：与 routes.register_web_routes 的注册表双向对齐，注册断言
 # 按相等校验。新增端点须同步本清单，漏登记或漏注册都会使测试变红。
@@ -59,25 +58,17 @@ def build_web_app(
     host: str = "127.0.0.1",
     web_enabled: bool = True,
 ) -> Any:
-    """按生产装配序构建带 Web 路由的 streamable-http 传输栈。"""
-    if web_enabled:
-        from seedream_mcp.webapp import register_web_routes
+    """按生产装配序构建带 Web 路由的 streamable-http 传输栈。
 
-        register_web_routes()
-    app = server.mcp.streamable_http_app(
+    装配经 _asgi_fakes._assemble_streamable_http_app 单点完成，web_enabled 驱动
+    Web 路由注册与静态挂载，请求体上限固定生产默认并显式传入中间件。
+    """
+    return _assemble_streamable_http_app(
+        auth_token,
         host=host,
-        stateless_http=False,
-        transport_security=_transport_security_for_host(host),
-        max_request_body_size=_MAX_BODY,
+        web_enabled=web_enabled,
+        attach_max_body_size=_MAX_BODY,
     )
-    if web_enabled:
-        from seedream_mcp.webapp import mount_web_static
-
-        mount_web_static(app)
-    _attach_streamable_http_middleware(
-        app, host, auth_token, max_body_size=_MAX_BODY, web_enabled=web_enabled
-    )
-    return app
 
 
 @asynccontextmanager
@@ -93,6 +84,43 @@ async def web_get(app: Any, path: str) -> httpx.Response:
     """GET 一次 Web 应用路由并返回响应。"""
     async with web_asgi_client(app) as client:
         return await client.get(path)
+
+
+async def drive_asgi_messages(
+    response: Any,
+    scope: Mapping[str, object],
+    messages: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    """以空请求体 receive 与消息收集 send 直驱 ASGI 响应对象，回传全部消息。
+
+    传入 messages 时同步收集到该列表，响应中途抛错时调用方仍持有已收消息。
+    """
+    collected = messages if messages is not None else []
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        collected.append(message)
+
+    await response(scope, receive, send)
+    return collected
+
+
+def asgi_start_headers(messages: list[dict[str, object]]) -> dict[str, str]:
+    """取起始行消息并回传小写响应头映射。"""
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    raw_headers = cast("list[tuple[bytes, bytes]]", start["headers"])
+    return {key.decode().lower(): value.decode() for key, value in raw_headers}
+
+
+def asgi_body_bytes(messages: list[dict[str, object]]) -> bytes:
+    """拼接全部响应 body 分块。"""
+    return b"".join(
+        cast("bytes", message["body"])
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
 
 
 def write_workspace_config(tmp_path: Path) -> Path:
