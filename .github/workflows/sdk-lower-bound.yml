@@ -1,0 +1,41 @@
+# SDK 下界验证：pyproject 承诺的 mcp 下界与 lock 只测最新版之间存在空档，本工作流降级到下界跑全量测试。
+# paths 限定代码、依赖与工作流文件变更触发，文档类改动不跑下界全量；公共步骤位于 reusable-checks.yml。
+name: 🧱 SDK Lower Bound
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "seedream_mcp/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/sdk-lower-bound.yml"
+      - ".github/workflows/reusable-checks.yml"
+  push:
+    branches: [main]
+    paths:
+      - "seedream_mcp/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/sdk-lower-bound.yml"
+      - ".github/workflows/reusable-checks.yml"
+
+concurrency:
+  # 键取 ref 取消同组在途运行；前缀独立于 ci.yml，避免同次推送的两条流水线互杀。
+  group: sdk-lower-bound-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sdk-lower-bound:
+    name: 🧱 SDK lower bound
+    uses: ./.github/workflows/reusable-checks.yml
+    with:
+      python-versions: '["3.12"]'
+      timeout-minutes: 20
+      run-tests: true
+      mcp-pin-version: "2.0.0"

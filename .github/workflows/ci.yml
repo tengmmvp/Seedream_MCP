@@ -1,5 +1,5 @@
-# 持续集成：PR 与分支推送时运行格式校验、Lint、类型检查、单测与 Docker 构建验证，作为合入门禁。
-# 发布流水线见 release.yml，由 v* 标签触发。
+# 持续集成：合入 main 的 PR 与 main 推送时运行格式校验、Lint、类型检查、单测与 Docker 构建验证，作为合入门禁。
+# 静态检查与单测的公共步骤位于 reusable-checks.yml；发布流水线见 release.yml；SDK 下界验证见 sdk-lower-bound.yml。
 # 第三方 action 一律以 commit SHA 固定引用，行尾注释标注对应的版本号。
 name: 🔍 CI
 
@@ -10,6 +10,7 @@ on:
     branches: [main]
 
 concurrency:
+  # 键取 ref：push 与 PR 的 ref 天然异组，域分离后无同提交双跑。
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
@@ -19,78 +20,22 @@ permissions:
 jobs:
   lint:
     name: 🧹 Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: 🐍 Set up Python 3.12
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - name: ⚡ Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: 📦 Install dependencies
-        run: uv sync --locked
-
-      - name: 🎨 Check formatting
-        run: uv run black --check seedream_mcp tests scripts
-
-      - name: 🔬 Run flake8
-        run: uv run flake8 seedream_mcp tests scripts
-
-      - name: 🔎 Run mypy
-        run: uv run mypy
-
-      - name: 🔤 Check spelling
-        # 仅检查代码与配置，文档不校验，作用域见 cspell.json
-        run: npx --yes cspell@9.8.0 lint --no-progress
+    uses: ./.github/workflows/reusable-checks.yml
+    with:
+      python-versions: '["3.12"]'
+      timeout-minutes: 10
+      static-checks: true
 
   test:
-    name: 🧪 Test (py${{ matrix.python-version }}, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
+    name: 🧪 Test
+    uses: ./.github/workflows/reusable-checks.yml
+    with:
+      # Windows 验证 O_NOFOLLOW 兜底与 reparse point 剔除等平台专属安全路径，
+      # macOS 覆盖 POSIX 路径处理，与 OS Independent 声明对齐。
+      oses: '["ubuntu-latest", "windows-latest", "macos-latest"]'
+      python-versions: '["3.12", "3.13", "3.14"]'
       fail-fast: false
-      matrix:
-        # Windows 验证 O_NOFOLLOW 兜底与 reparse point 剔除等平台专属安全路径，
-        # macOS 覆盖 POSIX 路径处理，与 OS Independent 声明对齐。
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.12", "3.13", "3.14"]
-
-    steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: 🐍 Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: ⚡ Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: 📦 Install dependencies
-        run: uv sync --locked
-
-      - name: ✅ Run tests
-        run: uv run pytest -q --cov=seedream_mcp --cov-report=term
-
-      # 总量下限 90 由 pyproject [tool.coverage.report] fail_under 判定，此处补单文件下限。
-      - name: 📏 Check per-file coverage floors
-        run: |
-          uv run python -m coverage json -o coverage.json
-          uv run python scripts/check_coverage_floors.py
+      run-tests: true
 
   docker:
     name: 🐳 Docker Build

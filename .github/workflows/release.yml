@@ -1,5 +1,5 @@
 # 发布流水线：测试 → 发布 PyPI → 创建 GitHub Release；Docker 镜像并行推送至 GHCR。
-# 由 v* 标签触发；另支持手动触发，手动时仅运行测试作业。
+# 由 v* 标签触发；另支持手动触发，手动时仅运行检查作业，不执行发布。
 # 第三方 action 一律以 commit SHA 固定引用，行尾注释标注对应的版本号或分支。
 name: 🚀 Release
 
@@ -14,108 +14,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 测试作业：在全部声明支持的 Python 版本上跑单测、静态检查与构建验证，作为后续发布的门禁。
-  test:
-    name: 🧪 Test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+  # 静态检查与构建验证仅跑单个 3.12 格避免随矩阵三遍重复；mypy 另以 --python-version 补验 3.13 与 3.14，拦截新版解释器特有的类型回归。
+  static-and-package:
+    name: 🔍 Static & Package
+    uses: ./.github/workflows/reusable-checks.yml
     permissions:
       contents: read
+    with:
+      python-versions: '["3.12"]'
+      extra-mypy-python-versions: '["3.13", "3.14"]'
+      timeout-minutes: 15
+      static-checks: true
+      package-checks: true
 
-    steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: 🐍 Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: ⚡ Install uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: 📦 Install dependencies
-        run: uv sync --locked
-
-      - name: ✅ Run tests
-        run: uv run pytest -q --cov=seedream_mcp --cov-report=term
-
-      # 总量下限 90 由 pyproject [tool.coverage.report] fail_under 判定，此处补单文件下限。
-      - name: 📏 Check per-file coverage floors
-        run: |
-          uv run python -m coverage json -o coverage.json
-          uv run python scripts/check_coverage_floors.py
-
-      - name: 🎨 Check formatting
-        run: uv run black --check seedream_mcp tests scripts
-
-      - name: 🔎 Run mypy
-        run: uv run mypy
-
-      - name: 🔬 Run flake8
-        run: uv run flake8 seedream_mcp tests scripts
-
-      - name: 🧠 Check spelling
-        # 仅检查代码与配置，文档不校验，作用域见 cspell.json
-        run: npx --yes cspell@9.8.0 lint --no-progress
-
-      - name: 🧫 Quick validation
-        run: |
-          uv run python -c "
-          from seedream_mcp import __version__
-          from seedream_mcp.config import SeedreamConfig
-          from seedream_mcp.server import mcp, cli_main
-          from seedream_mcp.client import SeedreamClient
-          from seedream_mcp.tools import TextToImageInput, ImageToImageInput
-          print('✅ 核心模块导入测试通过')
-          print(f'📦 版本: {__version__}')
-          print('Package validation successful')
-          "
-
-      - name: 🧱 Check package build
-        run: uv build --wheel
-
-      - name: 🧩 Assert wheel assets
-        run: |
-          uv run python -c "
-          import glob, sys, zipfile
-          wheels = sorted(glob.glob('dist/*.whl'))
-          if not wheels:
-              sys.exit('dist/ 下未找到 wheel')
-          with zipfile.ZipFile(wheels[-1]) as zf:
-              names = set(zf.namelist())
-          required = [
-              'seedream_mcp/webapp/static/index.html',
-              'seedream_mcp/webapp/static/404.html',
-              'seedream_mcp/webapp/static/css/style.css',
-              'seedream_mcp/webapp/static/js/main.js',
-              'seedream_mcp/webapp/static/js/api.js',
-              'seedream_mcp/webapp/static/js/gallery.js',
-              'seedream_mcp/webapp/static/js/generate.js',
-              'seedream_mcp/webapp/static/js/refs.js',
-              'seedream_mcp/webapp/static/assets/bg-letter.svg',
-              'seedream_mcp/skills/seedream-image-generation/SKILL.md',
-              'seedream_mcp/skills/seedream-image-generation/references/workflows.md',
-              'seedream_mcp/skills/seedream-image-generation/references/troubleshooting.md',
-          ]
-          missing = [asset for asset in required if asset not in names]
-          if missing:
-              sys.exit(f'wheel 缺少资产: {missing}')
-          print('✅ wheel 资产断言通过')
-          "
+  # 测试作业：在全部声明支持的 Python 版本上跑单测，作为后续发布的门禁。
+  test:
+    name: 🧪 Test
+    uses: ./.github/workflows/reusable-checks.yml
+    permissions:
+      contents: read
+    with:
+      python-versions: '["3.12", "3.13", "3.14"]'
+      timeout-minutes: 15
+      run-tests: true
 
   # 发布到 PyPI：基于 OIDC Trusted Publishing，用短期令牌替代长期 API token。
   pypi-release:
     name: 📤 Publish to PyPI
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: test
+    needs: [test, static-and-package]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     permissions:
       id-token: write # Trusted Publishing 必需：颁发 OIDC 令牌。
@@ -139,7 +67,7 @@ jobs:
     name: 🔖 Build and Release
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: [test, pypi-release]
+    needs: [test, static-and-package, pypi-release]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
@@ -212,7 +140,7 @@ jobs:
     name: 🐳 Docker Release
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: test
+    needs: [test, static-and-package]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read # 检出源码构建镜像。

@@ -1,0 +1,202 @@
+# 可复用检查套件：承载 ci.yml、release.yml 与 sdk-lower-bound.yml 的公共门禁步骤，调用方经 inputs 选择步骤组并传入 matrix。
+# 第三方 action 一律以 commit SHA 固定引用，行尾注释标注对应的版本号。
+name: 🧪 Reusable Checks
+
+on:
+  workflow_call:
+    inputs:
+      python-versions:
+        description: Python 版本矩阵，JSON 数组字符串
+        required: true
+        type: string
+      oses:
+        description: OS 矩阵，JSON 数组字符串
+        required: false
+        type: string
+        default: '["ubuntu-latest"]'
+      fail-fast:
+        description: 矩阵首个失败即取消其余分支
+        required: false
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: 单个矩阵分支的超时分钟数
+        required: false
+        type: number
+        default: 20
+      static-checks:
+        description: black/flake8/mypy/cspell 与 JS 语法检查
+        required: false
+        type: boolean
+        default: false
+      extra-mypy-python-versions:
+        description: static-checks 组内额外跑的 mypy --python-version 目标版本，JSON 数组字符串
+        required: false
+        type: string
+        default: "[]"
+      run-tests:
+        description: pytest 单测；无 mcp 降级时附带覆盖率与单文件下限
+        required: false
+        type: boolean
+        default: false
+      mcp-pin-version:
+        description: 非空时降级 mcp 到该版本，run-tests 步骤组在降级环境跑全量测试
+        required: false
+        type: string
+        default: ""
+      package-checks:
+        description: 导入冒烟、wheel 构建与资产断言
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: 🔍 Checks (py${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: ${{ inputs.fail-fast }}
+      matrix:
+        os: ${{ fromJSON(inputs.oses) }}
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+
+    steps:
+      - name: 🚫 Assert step group selected
+        if: ${{ !inputs.static-checks && !inputs.run-tests && !inputs.package-checks }}
+        run: |
+          echo "必须启用 static-checks / run-tests / package-checks 至少之一" >&2
+          exit 1
+
+      - name: 📥 Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 🐍 Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: ⚡ Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: 📦 Install dependencies
+        if: ${{ inputs.mcp-pin-version == '' }}
+        run: uv sync --locked
+
+      - name: 📦 Install dependencies without locked mcp
+        if: ${{ inputs.mcp-pin-version != '' }}
+        # 跳过锁版本 mcp，由 pin 步骤安装目标版本，避免装两次
+        run: uv sync --locked --no-install-package mcp
+
+      - name: 🧱 Pin mcp to ${{ inputs.mcp-pin-version }}
+        if: ${{ inputs.mcp-pin-version != '' }}
+        # uv run 一律带 --no-sync，默认重同步会把降级 mcp 升回锁版本
+        run: |
+          uv pip install mcp==${{ inputs.mcp-pin-version }}
+          uv run --no-sync python -c "import importlib.metadata as md; assert md.version('mcp') == '${{ inputs.mcp-pin-version }}', md.version('mcp')"
+
+      - name: 🎨 Check formatting
+        if: ${{ inputs.static-checks }}
+        run: uv run --no-sync black --check seedream_mcp tests scripts
+
+      - name: 🔬 Run flake8
+        if: ${{ inputs.static-checks }}
+        run: uv run --no-sync flake8 seedream_mcp tests scripts
+
+      - name: 🔎 Run mypy
+        if: ${{ inputs.static-checks }}
+        run: uv run --no-sync mypy
+
+      - name: 🔬 Run mypy for extra Python versions
+        if: ${{ inputs.static-checks && inputs.extra-mypy-python-versions != '[]' }}
+        # 命令行 --python-version 覆盖 pyproject 的 python_version，在同一格内模拟目标解释器的类型视角
+        shell: bash
+        run: |
+          for ver in ${{ join(fromJSON(inputs.extra-mypy-python-versions), ' ') }}; do
+            echo "mypy --python-version ${ver}"
+            uv run --no-sync mypy --python-version "${ver}"
+          done
+
+      - name: 🔤 Check spelling
+        if: ${{ inputs.static-checks }}
+        # 仅检查代码与配置，文档不校验，作用域见 cspell.json
+        run: npx --yes cspell@9.8.0 lint --no-progress
+
+      - name: 🟨 Check JS syntax
+        if: ${{ inputs.static-checks }}
+        shell: bash
+        # node --check 对 .js 是否按 ESM 解析随 Node 版本而定，经 stdin 配 --input-type=module 固定校验
+        run: |
+          for f in seedream_mcp/webapp/static/js/*.js; do
+            echo "check $f"
+            node --input-type=module --check < "$f"
+          done
+
+      - name: ✅ Run tests
+        if: ${{ inputs.run-tests && inputs.mcp-pin-version == '' }}
+        run: uv run --no-sync pytest -q --cov=seedream_mcp --cov-report=term
+
+      - name: ✅ Run tests at pinned mcp
+        if: ${{ inputs.run-tests && inputs.mcp-pin-version != '' }}
+        run: uv run --no-sync pytest -q
+
+      # 总量下限 90 由 pyproject [tool.coverage.report] fail_under 判定，此处补单文件下限。
+      - name: 📏 Check per-file coverage floors
+        if: ${{ inputs.run-tests && inputs.mcp-pin-version == '' }}
+        run: |
+          uv run --no-sync python -m coverage json -o coverage.json
+          uv run --no-sync python scripts/check_coverage_floors.py
+
+      - name: 🧫 Quick validation
+        if: ${{ inputs.package-checks }}
+        run: |
+          uv run --no-sync python -c "
+          from seedream_mcp import __version__
+          from seedream_mcp.config import SeedreamConfig
+          from seedream_mcp.server import mcp, cli_main
+          from seedream_mcp.client import SeedreamClient
+          from seedream_mcp.tools import TextToImageInput, ImageToImageInput
+          print('✅ 核心模块导入测试通过')
+          print(f'📦 版本: {__version__}')
+          print('Package validation successful')
+          "
+
+      - name: 🧱 Check package build
+        if: ${{ inputs.package-checks }}
+        run: uv build --wheel
+
+      - name: 🧩 Assert wheel assets
+        if: ${{ inputs.package-checks }}
+        run: |
+          uv run --no-sync python -c "
+          import glob, sys, zipfile
+          wheels = sorted(glob.glob('dist/*.whl'))
+          if not wheels:
+              sys.exit('dist/ 下未找到 wheel')
+          with zipfile.ZipFile(wheels[-1]) as zf:
+              names = set(zf.namelist())
+          required = [
+              'seedream_mcp/webapp/static/index.html',
+              'seedream_mcp/webapp/static/404.html',
+              'seedream_mcp/webapp/static/css/style.css',
+              'seedream_mcp/webapp/static/js/main.js',
+              'seedream_mcp/webapp/static/js/api.js',
+              'seedream_mcp/webapp/static/js/gallery.js',
+              'seedream_mcp/webapp/static/js/generate.js',
+              'seedream_mcp/webapp/static/js/refs.js',
+              'seedream_mcp/webapp/static/assets/bg-letter.svg',
+              'seedream_mcp/skills/seedream-image-generation/SKILL.md',
+              'seedream_mcp/skills/seedream-image-generation/references/workflows.md',
+              'seedream_mcp/skills/seedream-image-generation/references/troubleshooting.md',
+          ]
+          missing = [asset for asset in required if asset not in names]
+          if missing:
+              sys.exit(f'wheel 缺少资产: {missing}')
+          print('✅ wheel 资产断言通过')
+          "
