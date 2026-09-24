@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 from argparse import Namespace
 from typing import Any, cast
 
@@ -420,7 +421,7 @@ async def test_bearer_auth_middleware_rejects_invalid_token() -> None:
 
 
 async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
-    """401 响应须含 www-authenticate 头与 invalid_token 错误体，符合 RFC 6750。"""
+    """错误 Bearer 令牌的 401 质询附 invalid_token，错误体同步该码，符合 RFC 6750。"""
     sent: list[dict[str, Any]] = []
 
     async def send(message):  # type: ignore[no-untyped-def]
@@ -440,8 +441,54 @@ async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
     assert headers[b"www-authenticate"] == b'Bearer error="invalid_token"'
     assert headers[b"content-type"] == b"application/json"
     assert body_msg["type"] == "http.response.body"
-    body = body_msg["body"].decode("utf-8")
-    assert "invalid_token" in body
+    body = json.loads(body_msg["body"])
+    assert body["error"] == "invalid_token"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [],
+        [(b"authorization", b"Basic czNjcmV0")],
+        [(b"authorization", b"Bearer")],
+        [(b"authorization", b"Bearer ")],
+        [(b"authorization", b"Bearer   ")],
+    ],
+    ids=[
+        "missing-header",
+        "non-bearer-scheme",
+        "bearer-without-space",
+        "blank-bearer-token",
+        "whitespace-only-bearer-token",
+    ],
+)
+async def test_bearer_auth_middleware_bare_challenge_without_credentials(
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    """缺失 Authorization 头、非 Bearer 方案与空白 Bearer 令牌的 401 回裸质询，不附 error 码。
+
+    RFC 6750 §3.1 要求请求未携带 Bearer 凭据时质询不带 error 属性；空白令牌
+    视为未携带，无空格的裸 Bearer 方案不匹配前缀同归此形态。
+    """
+    sent: list[dict[str, Any]] = []
+
+    async def send(message):  # type: ignore[no-untyped-def]
+        sent.append(message)
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("未携带 Bearer 凭据的请求不应进入下游应用")
+
+    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
+    scope = {"type": "http", "headers": headers}
+    await middleware(scope, cast(Receive, None), send)
+
+    start, body_msg = sent[0], sent[1]
+    assert start["type"] == "http.response.start"
+    assert start["status"] == 401
+    assert dict(start["headers"])[b"www-authenticate"] == b"Bearer"
+    body = json.loads(body_msg["body"])
+    assert body["error"] == "missing_token"
+    assert body["error_description"] == "Authentication required"
 
 
 async def test_bearer_auth_middleware_rejects_missing_header() -> None:

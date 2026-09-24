@@ -341,17 +341,20 @@ async def _run_app_host_guard(
         (("api.example.com:8443",), b"api.example.com:9000", False),
         (("api.example.com:*",), b"api.example.com:8000", True),
         (("api.example.com:*",), b"api.example.com", False),
+        (("api.example.com:*",), b"api.example.com:9001:9002", False),
+        (("api.example.com:*",), b"API.EXAMPLE.COM:8000", False),
         (("[::1]:*",), b"[::1]:8000", True),
         (("[::1]:*",), b"[::1]..", False),
         (("[::ffff:192.0.2.1]:*",), b"[::ffff:192.0.2.1]:8443", True),
         (("api.example.com",), b"evil.example.com", False),
+        (("api.example.com",), b"API.EXAMPLE.COM", False),
         (("api.example.com",), None, False),
     ],
 )
-async def test_app_host_guard_matches_sdk_entry_semantics(
+async def test_app_host_guard_entry_matching_semantics(
     entries: tuple[str, ...], host: bytes | None, permitted: bool
 ) -> None:
-    """条目匹配与 SDK 同语义：裸 host 无端口、精确端口全值、通配端口任带端口。"""
+    """裸 host、精确端口与端口通配三形态匹配与 SDK 同语义；多冒号 Host 剥离末端口后不等通配基值，拒绝。"""
     reached, sent = await _run_app_host_guard(entries, host)
 
     if permitted:
@@ -427,6 +430,7 @@ def test_attach_omits_app_host_guard_on_loopback(active_config: None) -> None:
 
 async def test_error_boundary_converts_inner_exception_to_500() -> None:
     """内层未捕获异常在响应未开始时转 500 JSON，状态与响应体跨源可读。"""
+    import json
 
     async def explode(scope: Any, receive: Any, send: Any) -> None:
         raise RuntimeError("boom")
@@ -441,7 +445,9 @@ async def test_error_boundary_converts_inner_exception_to_500() -> None:
 
     assert sent[0]["type"] == "http.response.start"
     assert sent[0]["status"] == 500
-    assert b"internal_error" in sent[1]["body"]
+    payload = json.loads(sent[1]["body"])
+    assert payload["error"] == "internal_error"
+    assert payload["error_description"] == "Internal server error"
 
 
 async def test_error_boundary_reraises_after_response_started() -> None:
@@ -799,7 +805,7 @@ def test_transport_security_defaults_to_bind_address_allowlist(
 def test_transport_security_wildcard_bind_stays_off_with_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """通配绑定未配置允许列表时保持校验关闭，并输出配置指引告警。"""
+    """通配绑定未配置允许列表时保持校验关闭，告警声明防护由 Bearer 鉴权承担并指引配置。"""
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
     records: list[str] = []
@@ -810,6 +816,7 @@ def test_transport_security_wildcard_bind_stays_off_with_warning(
     assert settings.enable_dns_rebinding_protection is False
     output = "".join(records)
     assert "SEEDREAM_HTTP_ALLOWED_HOSTS" in output
+    assert "Bearer" in output
 
 
 def test_transport_security_explicit_hosts_keep_browser_403_semantics(

@@ -8,6 +8,8 @@
   <a href="./README.en.md">English</a>
 </p>
 
+<h3 align="center"><code>uvx seedream-image-mcp</code></h3>
+
 <p align="center"><b>基于火山引擎 Seedream API 的 AI 图像生成 MCP 工具。</b></p>
 
 <div align="center">
@@ -629,7 +631,7 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 --version                                          # 打印版本号并退出
 ```
 
-> **安全提示**：`localhost` 不被视为回环地址，须按非回环地址要求配置 Bearer 鉴权令牌与 TLS，未配置则拒绝启动；如需免鉴权使用回环地址，请改绑 `127.0.0.1` 或 `::1`。非回环绑定默认按该地址校验 Host 与 Origin 头以防 DNS rebinding；通配绑定（`0.0.0.0`/`::`）无法预知访问地址，校验默认关闭，需配置 `SEEDREAM_HTTP_ALLOWED_HOSTS` 启用。跨源浏览器客户端接入 `/mcp`（如网页版客户端）另需配置 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，配置后自动应答跨源预检并放行列表内来源；放行列表内的公网页面同时豁免浏览器的专用网络访问限制，可直接访问本地绑定的服务。生产与容器部署的密钥应经环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递，而非 CLI `--api-key` / `--auth-token`——命令行参数会留在进程列表与 shell 历史记录中；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。Web 操作台不改变上述传输层安全要求：开启后新增的 API 面全部强制令牌，免鉴权的仅限无数据的静态页面骨架。
+> **安全提示**：`localhost` 不被视为回环地址，须按非回环地址要求配置 Bearer 鉴权令牌与 TLS，未配置则拒绝启动；如需免鉴权使用回环地址，请改绑 `127.0.0.1` 或 `::1`。非回环绑定默认按该地址校验 Host 与 Origin 头以防 DNS rebinding；通配绑定（`0.0.0.0`/`::`）无法预知访问地址，校验默认关闭，等效防护由强制 Bearer 鉴权承担，配置 `SEEDREAM_HTTP_ALLOWED_HOSTS` 可启用校验。跨源浏览器客户端接入 `/mcp`（如网页版客户端）另需配置 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，配置后自动应答跨源预检并放行列表内来源；放行列表内的公网页面同时豁免浏览器的专用网络访问限制，可直接访问本地绑定的服务。生产与容器部署的密钥应经环境变量（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）传递，而非 CLI `--api-key` / `--auth-token`——命令行参数会留在进程列表与 shell 历史记录中；多用户主机上 streamable-http 即使绑定回环地址，也建议配置鉴权令牌。Web 操作台不改变上述传输层安全要求：开启后新增的 API 面全部强制令牌，免鉴权的仅限无数据的静态页面骨架。
 
 ### 使用示例
 

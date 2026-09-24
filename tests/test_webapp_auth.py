@@ -89,7 +89,8 @@ async def test_static_pages_exempt_and_api_requires_token(
     assert index_response.headers["content-type"].startswith("text/html")
     assert static_response.status_code == 200
     assert unauthorized.status_code == 401
-    assert unauthorized.json()["error"] == "invalid_token"
+    assert unauthorized.headers["www-authenticate"] == "Bearer"
+    assert unauthorized.json()["error"] == "missing_token"
     assert authorized.status_code == 200
 
 

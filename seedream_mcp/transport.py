@@ -99,10 +99,16 @@ def _header_value(scope: Scope, name: bytes) -> bytes | None:
     return None
 
 
+def _error_body(error: str, description: str) -> bytes:
+    """构造携带 error 与 error_description 两键的错误响应体字节串，各错误发送点共用。"""
+    return json.dumps({"error": error, "error_description": description}).encode("utf-8")
+
+
 async def _send_forbidden(send: Send, error: str, description: str) -> None:
     """发送 403 JSON 拒绝响应并附 connection: close，Host 与 Origin 守卫共用。"""
-    body = json.dumps({"error": error, "error_description": description}).encode("utf-8")
-    await _send_asgi_json(send, 403, body, extra_headers=((b"connection", b"close"),))
+    await _send_asgi_json(
+        send, 403, _error_body(error, description), extra_headers=((b"connection", b"close"),)
+    )
 
 
 # ==================== ASGI 中间件 ====================
@@ -144,11 +150,12 @@ class _BearerTokenAuthMiddleware:
                 await send({"type": "websocket.close", "code": 1008})
             return
 
-        if self._path_exempt(scope) or self._request_authorized(scope):
+        token = self._bearer_token(scope)
+        if self._path_exempt(scope) or self._request_authorized(token):
             await self.app(scope, receive, send)
             return
 
-        await self._send_unauthorized(send)
+        await self._send_unauthorized(send, token is not None)
 
     def _path_exempt(self, scope: Scope) -> bool:
         """判定请求路径是否命中免鉴权表，含上跳段的路径拒绝豁免。"""
@@ -160,25 +167,38 @@ class _BearerTokenAuthMiddleware:
             path.startswith(prefix) for prefix in self._exempt_prefixes
         )
 
-    def _request_authorized(self, scope: Scope) -> bool:
-        """判定请求是否携带匹配的 Bearer 令牌，非 Bearer 授权方案同样拒绝。"""
+    def _bearer_token(self, scope: Scope) -> bytes | None:
+        """提取 Authorization 头中的 Bearer 令牌，头缺失、非 Bearer 方案或空白令牌均视为未携带。"""
         value = _header_value(scope, b"authorization")
-        if value is None:
-            return False
-        if value[:7].lower() != b"bearer ":
-            return False
-        return hmac.compare_digest(value[7:].strip(), self._expected)
+        if value is None or value[:7].lower() != b"bearer ":
+            return None
+        # strip 后空白令牌同未携带凭据，归 None 使质询不带 error 码（RFC 6750 §3.1）。
+        return value[7:].strip() or None
 
-    async def _send_unauthorized(self, send: Send) -> None:
-        body = json.dumps(
-            {"error": "invalid_token", "error_description": "Authentication required"}
-        ).encode("utf-8")
+    def _request_authorized(self, token: bytes | None) -> bool:
+        """判定提取的 Bearer 令牌是否匹配期望值，未携带的 None 同样拒绝。"""
+        return token is not None and hmac.compare_digest(token, self._expected)
+
+    async def _send_unauthorized(self, send: Send, bearer_scheme: bool) -> None:
+        """发送 401 质询，形态按 RFC 6750 §3.1 区分。
+
+        请求未携带 Bearer 凭据时质询不附 error 码，携带令牌且不匹配才用
+        invalid_token，响应体错误码与质询形态同步。
+        """
+        if bearer_scheme:
+            challenge = b'Bearer error="invalid_token"'
+            error = "invalid_token"
+            description = "Invalid or expired token"
+        else:
+            challenge = b"Bearer"
+            error = "missing_token"
+            description = "Authentication required"
         await _send_asgi_json(
             send,
             401,
-            body,
+            _error_body(error, description),
             extra_headers=(
-                (b"www-authenticate", b'Bearer error="invalid_token"'),
+                (b"www-authenticate", challenge),
                 (b"connection", b"close"),
             ),
         )
@@ -293,10 +313,12 @@ class _LimitRequestBodyMiddleware:
                 logger.debug("请求体超限后补发 413 失败，连接可能已关闭")
 
     async def _send_too_large(self, send: Send) -> None:
-        body = json.dumps(
-            {"error": "request_too_large", "error_description": "Request body exceeds limit"}
-        ).encode("utf-8")
-        await _send_asgi_json(send, 413, body, extra_headers=((b"connection", b"close"),))
+        await _send_asgi_json(
+            send,
+            413,
+            _error_body("request_too_large", "Request body exceeds limit"),
+            extra_headers=((b"connection", b"close"),),
+        )
 
 
 class _HealthCheckMiddleware:
@@ -394,10 +416,7 @@ class _ErrorBoundaryMiddleware:
             logger.opt(exception=True).error("streamable-http 请求处理未捕获异常")
             if response_started:
                 raise
-            body = json.dumps(
-                {"error": "internal_error", "error_description": "Internal server error"}
-            ).encode("utf-8")
-            await _send_asgi_json(send, 500, body)
+            await _send_asgi_json(send, 500, _error_body("internal_error", "Internal server error"))
 
 
 class _AppHostGuardMiddleware:
@@ -405,9 +424,10 @@ class _AppHostGuardMiddleware:
 
     SDK 内层 Host/Origin 校验只覆盖 /mcp 端点，Web 静态面经 Bearer 豁免表免鉴权，
     无 Host 校验纵深；本层对全 app 兜底，允许列表经 _web_app_host_allowlist 求值。
-    条目匹配与 SDK 同语义：裸 host 匹配无端口 Host、host:port 精确匹配、host
-    通配端口条目匹配任意端口；无 Host 头与未命中按 403 拒绝，websocket 以 1008
-    关闭。
+    裸 host 匹配无端口 Host、host:port 精确匹配、host 通配端口条目匹配任意端口，
+    三形态与 SDK 同语义；多冒号 Host 如 api.example.com:8000:9000 本层拒绝而 SDK
+    纯前缀匹配放行，属有意的 fail-closed 分歧。无 Host 头与未命中按 403 拒绝，
+    websocket 以 1008 关闭。
     """
 
     def __init__(self, app: ASGIApp, allowed_hosts: tuple[str, ...]) -> None:
@@ -443,10 +463,11 @@ class _AppHostGuardMiddleware:
         await self.app(scope, receive, send)
 
     def _host_permitted(self, host: bytes) -> bool:
-        """按 SDK 三形态语义判定 Host 头值：裸 host、精确端口、端口通配。
+        """按裸 host、精确端口、端口通配三形态判定 Host 头值。
 
-        通配条目要求剥离后的主机部分后紧跟冒号，与 SDK 的
-        startswith(base_host + ":") 同形，方括号主机后的非端口后缀不获放行。
+        通配条目以剥离末端口后的主机部分比对基值：多冒号 Host 剥离后仍含内层
+        端口，不等基值而拒绝，比 SDK 的纯前缀 startswith(base_host + ":") 放行
+        更严，属有意的 fail-closed 分歧；其余形态与 SDK 语义一致。
         """
         if host in self._bare_hosts or host in self._exact_hosts:
             return True
@@ -683,8 +704,8 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     尾部 :* 端口通配。配置 SEEDREAM_HTTP_ALLOWED_ORIGINS 时统一并入各分支的
     Origin 白名单（合并收尾单点完成），与 CORS 层同列表放行，预检应答与真实请求
     判定一致。通配地址绑定（0.0.0.0/::）下实际访问地址不可预知，默认不启用并
-    输出告警。列表外的 Host 由 SDK 以 421、Origin 以 403 拒绝；不携带 Origin
-    的非浏览器 MCP 客户端不受影响。
+    输出告警，防护由强制 Bearer 鉴权承担。列表外的 Host 由 SDK 以 421、Origin
+    以 403 拒绝；不携带 Origin 的非浏览器 MCP 客户端不受影响。
     """
     config = get_active_config()
     base_hosts: list[str]
@@ -700,8 +721,8 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
         if default_allowlist is None:
             # security 标记的 WARNING 告警不受配置级别过滤，见 logs 的 sink 过滤。
             logger.bind(security=True).warning(
-                "streamable-http 绑定通配地址 {}，Host/Origin 校验默认关闭，"
-                "请配置 SEEDREAM_HTTP_ALLOWED_HOSTS 启用校验",
+                "streamable-http 绑定通配地址 {}，Host/Origin 校验关闭，防护由强制 Bearer 鉴权承担，"
+                "配置 SEEDREAM_HTTP_ALLOWED_HOSTS 可恢复校验",
                 host,
             )
             return TransportSecuritySettings(enable_dns_rebinding_protection=False)
