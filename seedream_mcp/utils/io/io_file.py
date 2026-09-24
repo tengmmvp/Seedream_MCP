@@ -137,8 +137,8 @@ def open_regular_read(path: PathLike) -> tuple[IO[bytes], os.stat_result] | None
 
     Returns:
         ``(handle, stat_result)`` 二元组；打开成功但非常规文件时为 None，
-        句柄已关闭；打开阶段 PermissionError 经路径 stat 判定为目录或非常规
-        文件时同样归 None。
+        句柄已关闭；打开阶段目录形态异常（Windows PermissionError、POSIX
+        IsADirectoryError）经路径 stat 判定为目录或非常规文件时同样归 None。
 
     Raises:
         SymlinkRejectedError: 最终路径分量为符号链接或打开期间被换链。
@@ -147,9 +147,9 @@ def open_regular_read(path: PathLike) -> tuple[IO[bytes], os.stat_result] | None
     """
     try:
         handle = open_no_follow_read(path, extra_open_flags=_NONBLOCKING_OPEN_FLAGS)
-    except PermissionError:
-        # Windows 对目录的 open 报 EACCES；路径 stat 仅作形态分类，stat 失败
-        # 或仍为常规文件时原 PermissionError 传播。
+    except (PermissionError, IsADirectoryError):
+        # Windows 对目录的 open 报 EACCES、POSIX 报 EISDIR；路径 stat 仅作形态
+        # 分类，stat 失败或仍为常规文件时原异常传播。
         try:
             mode: int | None = os.stat(path).st_mode
         except OSError:
