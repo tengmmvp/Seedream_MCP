@@ -1,9 +1,9 @@
 """OS 级文件打开工具：O_NOFOLLOW 防符号链接与原子落盘骨架。
 
-提供 open_no_follow_read、open_temp_fd、atomic_replace_from_fd 与同步变体
-atomic_replace_from_fd_sync，另有 has_reparse_attribute 判定 NTFS junction 等
-非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的清理遍历使用。
-共享函数抛 OSError，由调用方按各自异常类型包装。
+提供 open_no_follow_read、open_regular_read、open_temp_fd、atomic_replace_from_fd
+与同步变体 atomic_replace_from_fd_sync，另有 has_reparse_attribute 判定 NTFS
+junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的
+清理遍历使用。共享函数抛 OSError，由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
 父目录在校验与打开之间被替换为指向工作区外的符号链接时读取会逃逸出工作区，该攻击
@@ -14,6 +14,7 @@ atomic_replace_from_fd_sync，另有 has_reparse_attribute 判定 NTFS junction 
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import stat
 import sys
@@ -23,6 +24,19 @@ from pathlib import Path
 from typing import IO
 
 PathLike = str | Path
+
+# POSIX 打开阶段携带非阻塞与无控制终端标志：FIFO 或终端路径的阻塞 open 会钉死工作线程。
+_NONBLOCKING_OPEN_FLAGS = (
+    getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0) if sys.platform != "win32" else 0
+)
+
+
+class SymlinkRejectedError(OSError):
+    """最终分量为符号链接或打开期间被换链的拒绝，errno 对齐 ELOOP。
+
+    子类化 OSError 使既有 except OSError 调用方不受影响，需要区分拒绝语义的
+    调用方按本类型归档。
+    """
 
 
 def _cleanup_temp_file(temp_path: Path) -> None:
@@ -51,11 +65,12 @@ def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
         action: 操作描述，用于错误消息。
 
     Raises:
-        OSError: 最终分量为符号链接，或校验与打开之间最终分量被替换为符号链接。
+        SymlinkRejectedError: 最终分量为符号链接，或校验与打开之间最终分量被替换。
+        OSError: 其他打开或 stat 失败。
     """
     pre_st = os.lstat(path_str)
     if stat.S_ISLNK(pre_st.st_mode):
-        raise OSError(f"拒绝{action}符号链接: {path_str}")
+        raise SymlinkRejectedError(errno.ELOOP, f"拒绝{action}符号链接", path_str)
     fd = os.open(path_str, flags)
     try:
         post_st = os.fstat(fd)
@@ -64,11 +79,11 @@ def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
         raise
     if post_st.st_ino != pre_st.st_ino or post_st.st_dev != pre_st.st_dev:
         os.close(fd)
-        raise OSError(f"打开期间最终分量被替换，拒绝{action}: {path_str}")
+        raise SymlinkRejectedError(errno.ELOOP, f"打开期间最终分量被替换，拒绝{action}", path_str)
     return fd
 
 
-def open_no_follow_read(path: PathLike) -> IO[bytes]:
+def open_no_follow_read(path: PathLike, *, extra_open_flags: int = 0) -> IO[bytes]:
     """以 O_RDONLY | O_NOFOLLOW 打开文件，返回二进制只读文件对象。
 
     最终路径分量若为符号链接则拒绝：支持 O_NOFOLLOW 的平台由内核在 open 时原子
@@ -76,15 +91,82 @@ def open_no_follow_read(path: PathLike) -> IO[bytes]:
 
     Args:
         path: 目标文件路径，最终路径分量不得为符号链接。
+        extra_open_flags: 追加到 os.open 的标志位，默认 0 不改变行为。
 
     Raises:
-        OSError: 最终路径分量为符号链接、打开期间最终分量被替换，或其他打开失败。
+        SymlinkRejectedError: 最终路径分量为符号链接或打开期间被换链。
+        OSError: 其他打开失败。
     """
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     if no_follow:
-        return os.fdopen(os.open(str(path), os.O_RDONLY | no_follow), "rb")
-    fd = _open_no_follow_fallback(str(path), os.O_RDONLY, action="读取")
+        try:
+            fd = os.open(str(path), os.O_RDONLY | no_follow | extra_open_flags)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise SymlinkRejectedError(errno.ELOOP, "拒绝读取符号链接", str(path)) from exc
+            raise
+        return os.fdopen(fd, "rb")
+    fd = _open_no_follow_fallback(str(path), os.O_RDONLY | extra_open_flags, action="读取")
     return os.fdopen(fd, "rb")
+
+
+def _clear_nonblock_flag(handle: IO[bytes]) -> None:
+    """清除句柄的 O_NONBLOCK，交出前恢复常规文件的阻塞读语义。"""
+    if sys.platform == "win32":
+        return
+    nonblock = _NONBLOCKING_OPEN_FLAGS & getattr(os, "O_NONBLOCK", 0)
+    if not nonblock:
+        return
+    import fcntl
+
+    fd = handle.fileno()
+    current = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, current & ~nonblock)
+
+
+def open_regular_read(path: PathLike) -> tuple[IO[bytes], os.stat_result] | None:
+    """以 no-follow 语义打开常规文件，返回只读句柄与其 fstat 结果。
+
+    webapp 页面与原图直出的共享打开序列：打开后立即取句柄 fstat，响应头与
+    读出内容恒描述同一打开的 inode，消除 stat 与发送期按路径重开之间文件
+    被替换的竞态窗口。POSIX 打开阶段携带非阻塞防护标志防特殊文件路径阻塞
+    打开，fstat 验明常规文件后清除 O_NONBLOCK 再交出句柄。
+
+    Args:
+        path: 目标文件路径，最终路径分量不得为符号链接。
+
+    Returns:
+        ``(handle, stat_result)`` 二元组；打开成功但非常规文件时为 None，
+        句柄已关闭；打开阶段 PermissionError 经路径 stat 判定为目录或非常规
+        文件时同样归 None。
+
+    Raises:
+        SymlinkRejectedError: 最终路径分量为符号链接或打开期间被换链。
+        OSError: 其他打开或 fstat 失败；fstat 失败先关句柄再抛。常规文件的
+            PermissionError 原样传播，保留权限类失败的诊断信号。
+    """
+    try:
+        handle = open_no_follow_read(path, extra_open_flags=_NONBLOCKING_OPEN_FLAGS)
+    except PermissionError:
+        # Windows 对目录的 open 报 EACCES；路径 stat 仅作形态分类，stat 失败
+        # 或仍为常规文件时原 PermissionError 传播。
+        try:
+            mode: int | None = os.stat(path).st_mode
+        except OSError:
+            mode = None
+        if mode is not None and not stat.S_ISREG(mode):
+            return None
+        raise
+    try:
+        stat_result = os.fstat(handle.fileno())
+    except OSError:
+        handle.close()
+        raise
+    if not stat.S_ISREG(stat_result.st_mode):
+        handle.close()
+        return None
+    _clear_nonblock_flag(handle)
+    return handle, stat_result
 
 
 def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Path]:

@@ -6,16 +6,35 @@
 
 from __future__ import annotations
 
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from _web_fixtures import (
+    asgi_body_bytes,
+    asgi_start_headers,
     build_web_app,
+    drive_asgi_messages,
     prepare_static_dir,
     web_asgi_client,
     web_get,
     write_workspace_config,
 )
+
+
+def _page_scope(path: str) -> dict[str, object]:
+    """构造直调 webapp handler 的最小 GET 页面 ASGI scope。"""
+    return {
+        "type": "http",
+        "method": "GET",
+        "path": path,
+        "raw_path": path.encode("utf-8"),
+        "query_string": b"",
+        "headers": [],
+    }
 
 
 async def test_unknown_path_returns_styled_html_404(
@@ -190,14 +209,7 @@ async def test_decoded_backslash_path_not_redirected(
     from seedream_mcp.webapp import meta as meta_module
 
     prepare_static_dir(monkeypatch, tmp_path)
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/\\evil.com/",
-        "raw_path": b"/\\evil.com/",
-        "query_string": b"",
-        "headers": [],
-    }
+    scope = _page_scope("/\\evil.com/")
 
     response = await meta_module.web_not_found(Request(scope))
 
@@ -220,14 +232,7 @@ async def test_non_ascii_tail_slash_path_redirects_percent_encoded(
     from seedream_mcp.webapp import meta as meta_module
 
     prepare_static_dir(monkeypatch, tmp_path)
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/图库/",
-        "raw_path": "/图库/".encode("utf-8"),
-        "query_string": b"",
-        "headers": [],
-    }
+    scope = _page_scope("/图库/")
 
     response = await meta_module.web_not_found(Request(scope))
 
@@ -355,6 +360,8 @@ async def test_missing_pages_fall_back_to_plain_text(
     reset_http_app_state: None,
 ) -> None:
     """静态页文件缺失时入口页降级纯文本 200、404 页降级纯文本 404，不落 500。"""
+    from _log_fakes import capture_loguru_messages
+
     from seedream_mcp.webapp import constants as web_constants
 
     empty_dir = tmp_path / "empty-static"
@@ -363,14 +370,450 @@ async def test_missing_pages_fall_back_to_plain_text(
     write_workspace_config(tmp_path)
     app = build_web_app()
 
-    index_response = await web_get(app, "/web")
-    missing_response = await web_get(app, "/random/nowhere")
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        index_response = await web_get(app, "/web")
+        missing_response = await web_get(app, "/random/nowhere")
 
     assert index_response.status_code == 200
     assert index_response.headers["content-type"].startswith("text/plain")
     assert "页面缺失" in index_response.text
     assert missing_response.status_code == 404
     assert missing_response.headers["content-type"].startswith("text/plain")
+    # 一次降级请求一条告警，缺失原因分类落档供排障定位。
+    missing_warnings = [entry for entry in warnings if "静态页" in entry and "缺失" in entry]
+    assert len(missing_warnings) == 2
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "path", "expected_status"),
+    [
+        ("web_index", "/web", 200),
+        ("web_not_found", "/random/nowhere", 404),
+    ],
+    ids=["index", "not-found"],
+)
+async def test_page_existence_check_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: Any,
+    handler_name: str,
+    path: str,
+    expected_status: int,
+) -> None:
+    """存在性检查经工作线程执行，不在事件循环上同步触碰文件系统。"""
+    import threading
+    from typing import IO
+
+    from starlette.requests import Request
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+    from seedream_mcp.utils.io.io_file import open_no_follow_read as original_open
+    from seedream_mcp.webapp import meta as meta_module
+
+    prepare_static_dir(monkeypatch, tmp_path)
+    loop_thread = threading.get_ident()
+    check_threads: list[int] = []
+
+    def _recording_open(page: Path, **_kwargs: object) -> IO[bytes]:
+        check_threads.append(threading.get_ident())
+        return original_open(page)
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _recording_open)
+    scope = _page_scope(path)
+
+    response = await getattr(meta_module, handler_name)(Request(scope))
+
+    assert response.status_code == expected_status
+    assert check_threads
+    assert all(ident != loop_thread for ident in check_threads)
+
+
+async def test_page_existence_checked_on_every_request(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """存在性检查不缓存：每次请求都重新打开页面并派发工作线程，补装与删除即时生效。"""
+    import asyncio
+    from typing import IO
+
+    from starlette.requests import Request
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+    from seedream_mcp.utils.io.io_file import open_no_follow_read as original_open
+    from seedream_mcp.webapp import meta as meta_module
+
+    prepare_static_dir(monkeypatch, tmp_path)
+    open_calls: list[Path] = []
+    thread_dispatches: list[object] = []
+    original_to_thread = asyncio.to_thread
+
+    def _counting_open(page: Path, **_kwargs: object) -> IO[bytes]:
+        open_calls.append(page)
+        return original_open(page)
+
+    async def _counting_to_thread(func: object, /, *args: object, **kwargs: object) -> object:
+        thread_dispatches.append(func)
+        return await original_to_thread(func, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _counting_open)
+    monkeypatch.setattr(asyncio, "to_thread", _counting_to_thread)
+    scope = _page_scope("/web")
+
+    first = await meta_module.web_index(Request(scope))
+    second = await meta_module.web_index(Request(scope))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(open_calls) == 2
+    assert len(thread_dispatches) == 2
+
+
+async def test_static_page_existence_recovers_immediately_when_installed(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """首次缺失后页面补装：下一次请求立即恢复页面服务。"""
+    from starlette.requests import Request
+
+    from seedream_mcp.webapp import constants as web_constants
+    from seedream_mcp.webapp import meta as meta_module
+
+    empty_dir = tmp_path / "empty-static"
+    empty_dir.mkdir()
+    monkeypatch.setattr(web_constants, "STATIC_DIR", empty_dir)
+    scope = _page_scope("/web")
+
+    missing = await meta_module.web_index(Request(scope))
+    page = empty_dir / "index.html"
+    page.write_text("<!doctype html><title>web</title>", encoding="utf-8")
+    recovered = await meta_module.web_index(Request(scope))
+
+    assert missing.headers["content-type"].startswith("text/plain")
+    assert "页面缺失" in bytes(missing.body).decode("utf-8")
+    assert recovered.status_code == 200
+    assert recovered.headers["content-type"].startswith("text/html")
+    assert recovered.headers["content-length"] == str(page.stat().st_size)
+
+
+async def _drive_page_response(
+    response: Any, scope: Mapping[str, object]
+) -> tuple[dict[str, str], bytes]:
+    """直驱页面响应对象并回传小写响应头映射与 body 字节。"""
+    messages = await drive_asgi_messages(response, scope)
+    return asgi_start_headers(messages), asgi_body_bytes(messages)
+
+
+async def test_static_page_existence_degrades_immediately_when_deleted(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """首次存在后页面被删：下一次请求立即回到优雅降级文本。"""
+    from starlette.requests import Request
+
+    from seedream_mcp.webapp import meta as meta_module
+
+    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    scope = _page_scope("/web")
+
+    served = await meta_module.web_index(Request(scope))
+    served_headers, served_body = await _drive_page_response(served, scope)
+    # 发送完结释放句柄后删除页面，注入两次请求之间的消失窗口。
+    (static_dir / "index.html").unlink()
+    degraded = await meta_module.web_index(Request(scope))
+
+    assert served_headers["content-type"].startswith("text/html")
+    assert served_body
+    assert degraded.status_code == 200
+    assert degraded.headers["content-type"].startswith("text/plain")
+    assert "页面缺失" in bytes(degraded.body).decode("utf-8")
+
+
+async def test_static_page_symlink_degrades_to_plain_text_and_warns(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """页面以符号链接形态安装时降级纯文本且告警携带符号链接原因。
+
+    Windows 无 O_NOFOLLOW，拒绝经 io_file 的 lstat/S_ISLNK 兜底路径产生；
+    POSIX 等价路径为内核 O_NOFOLLOW 原子拒绝，同为 SymlinkRejectedError 分类。
+    无法创建符号链接的环境跳过，由 monkeypatch 形态用例保底覆盖。
+    """
+    from starlette.requests import Request
+
+    from _log_fakes import capture_loguru_messages
+    from seedream_mcp.webapp import meta as meta_module
+
+    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    page = static_dir / "index.html"
+    target = tmp_path / "elsewhere.html"
+    target.write_text("<!doctype html><title>elsewhere</title>", encoding="utf-8")
+    page.unlink()
+    try:
+        page.symlink_to(target)
+    except (OSError, AttributeError):
+        pytest.skip("当前进程无法创建符号链接，Windows 需开发者模式或管理员权限")
+
+    scope = _page_scope("/web")
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        response = await meta_module.web_index(Request(scope))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    # 符号链接页面存在，降级文案归打开失败档，不误称缺失。
+    assert "无法读取" in bytes(response.body).decode("utf-8")
+    assert "页面缺失" not in bytes(response.body).decode("utf-8")
+    matched = [entry for entry in warnings if "静态页" in entry and "符号链接拒绝" in entry]
+    assert len(matched) == 1
+    assert "index.html" in matched[0]
+
+
+async def test_static_page_symlink_rejection_degrades_and_warns(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """打开点拒绝符号链接时降级纯文本且恰好告警一条，不依赖创建符号链接的特权。"""
+    import errno
+    from typing import IO
+
+    from starlette.requests import Request
+
+    from _log_fakes import capture_loguru_messages
+    import seedream_mcp.utils.io.io_file as io_file_module
+    from seedream_mcp.utils.io.io_file import SymlinkRejectedError
+    from seedream_mcp.webapp import meta as meta_module
+
+    prepare_static_dir(monkeypatch, tmp_path)
+
+    def _rejected(path: object, **_kwargs: object) -> IO[bytes]:
+        raise SymlinkRejectedError(errno.ELOOP, "拒绝读取符号链接", str(path))
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _rejected)
+
+    scope = _page_scope("/web")
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        response = await meta_module.web_index(Request(scope))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    # 页面文件存在，降级文案归打开失败档，不误称缺失。
+    assert "无法读取" in bytes(response.body).decode("utf-8")
+    assert "页面缺失" not in bytes(response.body).decode("utf-8")
+    matched = [entry for entry in warnings if "静态页" in entry and "符号链接拒绝" in entry]
+    assert len(matched) == 1
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "path", "expected_status", "expected_body"),
+    [
+        ("web_index", "/web", 200, "Web 操作台页面无法读取，详情请查看服务端日志。"),
+        ("web_not_found", "/random/nowhere", 404, "404 Not Found"),
+    ],
+    ids=["index", "not-found"],
+)
+async def test_static_page_transient_io_error_uses_open_failure_text(
+    tmp_path: Path,
+    monkeypatch: Any,
+    handler_name: str,
+    path: str,
+    expected_status: int,
+    expected_body: str,
+) -> None:
+    """页面存在但打开抛瞬时 IO 错误时，入口页降级文案指向日志且不误称缺失与引导重装。
+
+    404 页的兜底文案只陈述 404 结果，不携带页面状态断言，打开失败降级共用同文案。
+    """
+    import errno
+    from typing import IO
+
+    from starlette.requests import Request
+
+    from _log_fakes import capture_loguru_messages
+    import seedream_mcp.utils.io.io_file as io_file_module
+    from seedream_mcp.webapp import meta as meta_module
+
+    prepare_static_dir(monkeypatch, tmp_path)
+
+    def _io_error(target: object, **_kwargs: object) -> IO[bytes]:
+        raise OSError(errno.EIO, "simulated EIO", str(target))
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _io_error)
+
+    scope = _page_scope(path)
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        response = await getattr(meta_module, handler_name)(Request(scope))
+
+    assert response.status_code == expected_status
+    assert response.headers["content-type"].startswith("text/plain")
+    assert bytes(response.body).decode("utf-8") == expected_body
+    # errno 细节落告警日志，降级文案指向该日志。
+    matched = [entry for entry in warnings if "静态页" in entry and "IO 错误" in entry]
+    assert len(matched) == 1
+
+
+async def test_static_page_unreadable_regular_file_returns_500(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """常规文件不可读归 500 诊断响应，不误并入页面缺失降级。"""
+    import errno
+    import json
+    from typing import IO
+
+    from starlette.requests import Request
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+    from seedream_mcp.webapp import meta as meta_module
+
+    prepare_static_dir(monkeypatch, tmp_path)
+
+    def _denied(target: object, **_kwargs: object) -> IO[bytes]:
+        raise PermissionError(errno.EACCES, "simulated EACCES", str(target))
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _denied)
+
+    response = await meta_module.web_index(Request(_page_scope("/web")))
+
+    assert response.status_code == 500
+    payload = json.loads(bytes(response.body))
+    assert payload["error"] == "page_open_failed"
+    assert "页面缺失" not in bytes(response.body).decode("utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 权限位仅 POSIX 生效")
+async def test_static_page_mode_zero_file_returns_500(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """POSIX mode 000 的页面文件不可读，按打开失败归 500 而非缺失降级。"""
+    import os
+
+    from starlette.requests import Request
+
+    from seedream_mcp.webapp import meta as meta_module
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root 不受权限位约束")
+    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    page = static_dir / "index.html"
+    page.chmod(0o000)
+    try:
+        response = await meta_module.web_index(Request(_page_scope("/web")))
+    finally:
+        page.chmod(0o644)
+
+    assert response.status_code == 500
+    assert "页面缺失" not in bytes(response.body).decode("utf-8")
+
+
+async def test_static_page_degrade_warning_deduped_per_page_and_reason(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """同一页面的同因降级进程内只告警一条，持续探测不无限刷日志。"""
+    from starlette.requests import Request
+
+    from _log_fakes import capture_loguru_messages
+    from seedream_mcp.webapp import constants as web_constants
+    from seedream_mcp.webapp import meta as meta_module
+
+    empty_dir = tmp_path / "empty-static"
+    empty_dir.mkdir()
+    monkeypatch.setattr(web_constants, "STATIC_DIR", empty_dir)
+
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        first = await meta_module.web_index(Request(_page_scope("/web")))
+        second = await meta_module.web_index(Request(_page_scope("/web")))
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    matched = [entry for entry in warnings if "静态页" in entry and "缺失" in entry]
+    assert len(matched) == 1
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "page_name", "path", "expected_status"),
+    [
+        ("web_index", "index.html", "/web", 200),
+        ("web_not_found", "404.html", "/random/nowhere", 404),
+    ],
+    ids=["index", "not-found"],
+)
+async def test_page_replaced_during_open_window_serves_stat_consistent_response(
+    tmp_path: Path,
+    monkeypatch: Any,
+    handler_name: str,
+    page_name: str,
+    path: str,
+    expected_status: int,
+) -> None:
+    """打开时刻捕获的快照与发送内容恒一致，窗口内页面被替换不产生长短错配。
+
+    打开点经替身取走旧快照句柄、页面路径已换为不同长度的新内容，模拟打开后
+    发送前的替换窗口；响应的 content-length 与 body 必须同描述打开时刻的
+    快照，替换后的请求拿到新文件的完整一致响应。
+    """
+    from typing import IO
+
+    from starlette.requests import Request
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+    from seedream_mcp.utils.io.io_file import open_no_follow_read as original_open
+    from seedream_mcp.webapp import meta as meta_module
+
+    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    old_payload = (static_dir / page_name).read_bytes()
+    snapshot = tmp_path / "old-page-snapshot.html"
+    snapshot.write_bytes(old_payload)
+    new_payload = "<!doctype html><p>replacement page content</p>\n".encode() * 8
+    assert len(new_payload) != len(old_payload)
+    (static_dir / page_name).write_bytes(new_payload)
+
+    def _open_snapshot(page: Path, **_kwargs: object) -> IO[bytes]:
+        del page
+        return open(snapshot, "rb")
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _open_snapshot)
+    scope = _page_scope(path)
+
+    replaced_window = await getattr(meta_module, handler_name)(Request(scope))
+    assert replaced_window.status_code == expected_status
+    headers, body = await _drive_page_response(replaced_window, scope)
+    assert int(headers["content-length"]) == len(old_payload)
+    assert body == old_payload
+
+    # 仅恢复打开函数，保留静态目录顶替：路径上的新内容成为后续请求的读源。
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", original_open)
+    followup = await getattr(meta_module, handler_name)(Request(scope))
+    followup_headers, followup_body = await _drive_page_response(followup, scope)
+    assert followup_headers["content-type"].startswith("text/html")
+    assert int(followup_headers["content-length"]) == len(followup_body) == len(new_payload)
+    assert followup_body == new_payload
+
+
+async def test_page_deleted_between_requests_degrades_without_500(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """端到端驱动完整发送路径：页面被删后的下一次请求降级纯文本，不出现 500。"""
+    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    served = await web_get(app, "/web")
+    (static_dir / "index.html").unlink()
+    degraded = await web_get(app, "/web")
+
+    assert served.status_code == 200
+    assert served.text.startswith("<!doctype html>")
+    assert degraded.status_code == 200
+    assert degraded.headers["content-type"].startswith("text/plain")
+    assert "页面缺失" in degraded.text
 
 
 async def test_static_direct_output_carries_security_headers(

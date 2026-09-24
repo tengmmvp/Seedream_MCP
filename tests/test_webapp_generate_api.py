@@ -8,6 +8,7 @@ runner 经对象式 monkeypatch 替换，覆盖成功、校验失败与错误类
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
@@ -16,9 +17,11 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from mcp.types import CallToolResult
+from starlette.requests import Request
 
 import seedream_mcp.resources as resources_module
 import seedream_mcp.utils.core.errors as errors_module
+from _cpu_offload_spy import CpuOffloadSpy
 from _web_fixtures import build_web_app, web_asgi_client, write_workspace_config
 from seedream_mcp.config import (
     LIFESPAN_KEY_CLIENT,
@@ -27,6 +30,7 @@ from seedream_mcp.config import (
     set_active_config,
 )
 from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.webapp import _responses
 from seedream_mcp.webapp import generate as generate_module
 from seedream_mcp.webapp.context import build_web_request_context
@@ -397,6 +401,76 @@ async def test_generate_non_object_json_body_returns_400(
     payload = response.json()
     assert payload["error"] == "invalid_request"
     assert payload["error_description"] == "请求体须为 JSON 对象"
+
+
+async def test_parse_json_object_body_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超阈值请求体的 JSON 解析经专用 CPU 池执行，不与默认执行器短任务同池排队。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    large_body = (
+        '{"prompt": "a cat", "pad": "' + "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1) + '"}'
+    ).encode("utf-8")
+
+    async def _receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": large_body, "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive=_receive)
+    body, error = await _responses.parse_json_object_body(request)
+
+    assert error is None
+    assert body["prompt"] == "a cat"
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_parse_json_object_body_small_runs_outside_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低于下沉阈值的请求体在事件循环线程同步解析，不付线程往返开销。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    async def _receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b'{"prompt": "a cat"}', "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive=_receive)
+    body, error = await _responses.parse_json_object_body(request)
+
+    assert error is None
+    assert body == {"prompt": "a cat"}
+    spy.assert_ran_outside_cpu_pool()
+
+
+async def test_parse_json_object_body_pool_closed_returns_service_unavailable() -> None:
+    """CPU 卸载池关闭取消大请求体的排队解析时回 500，不误诊为 invalid_json。"""
+    from _cpu_offload_spy import saturate_cpu_offload_pool
+    from seedream_mcp.utils.core.executors import shutdown_cpu_offload_executor
+
+    large_body = (
+        '{"prompt": "a cat", "pad": "' + "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1) + '"}'
+    ).encode("utf-8")
+
+    async def _receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": large_body, "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive=_receive)
+
+    async with saturate_cpu_offload_pool() as saturated:
+        parse = asyncio.ensure_future(_responses.parse_json_object_body(request))
+        await saturated.wait_queued()
+        shutdown_cpu_offload_executor()
+        body, error = await parse
+
+    await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
+
+    assert body == {}
+    assert error is not None
+    assert error.status_code == 500
+    assert json.loads(bytes(error.body))["error"] == "service_unavailable"
 
 
 @pytest.mark.parametrize(

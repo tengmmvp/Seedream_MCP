@@ -7,10 +7,16 @@ config-info 是前端的启动面：模型能力与尺寸档位同源 model_capa
 
 from __future__ import annotations
 
+import asyncio
+import os
+from enum import Enum, auto
+from pathlib import Path
+from typing import IO, NamedTuple
 from urllib.parse import quote, unquote
 
+from loguru import logger
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from ..config import get_active_config
 from ..utils.core.sanitizers import CONTROL_CHARS_PATTERN
@@ -19,6 +25,7 @@ from ..utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
+from ..utils.io.io_file import SymlinkRejectedError, open_regular_read
 from ..utils.model.model_capabilities import (
     MODEL_FAMILY_UNKNOWN,
     get_model_capabilities,
@@ -27,6 +34,7 @@ from ..utils.model.model_capabilities import (
 )
 from ..version import __version__
 from . import _responses, constants
+from ._responses import _NoFollowFileResponse
 from .constants import PAGE_SECURITY_HEADERS, WEB_API_PREFIX, WEB_INDEX_PATH
 
 # 模型能力清单缓存：能力表为进程级静态数据，首次构建后跨请求复用。
@@ -55,20 +63,126 @@ def _models_payload() -> list[dict[str, object]]:
     return _MODELS_PAYLOAD
 
 
-async def web_index(_request: Request) -> Response:
-    """返回 Web 操作台入口页，附 CSP 与 nosniff 安全头；页面缺失时降级纯文本。"""
-    # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
-    page = constants.STATIC_DIR / "index.html"
-    if not page.is_file():
+class _StaticPageFailureKind(Enum):
+    """静态页打开失败的分类，降级分流按成员判定。"""
+
+    MISSING = auto()
+    SYMLINK_REJECTED = auto()
+    NON_REGULAR = auto()
+    IO_ERROR = auto()
+
+
+class _StaticPageOpenFailure(NamedTuple):
+    """静态页打开失败的类型化结果，kind 与 errno 构成与展示短语解耦的失败身份。"""
+
+    kind: _StaticPageFailureKind
+    errno: int | None = None
+
+    @property
+    def missing(self) -> bool:
+        """真缺失层级标记，降级文案按它分流。"""
+        return self.kind is _StaticPageFailureKind.MISSING
+
+    @property
+    def reason(self) -> str:
+        """降级告警的原因短语，改写不影响分流与去重。"""
+        if self.kind is _StaticPageFailureKind.MISSING:
+            return "缺失"
+        if self.kind is _StaticPageFailureKind.SYMLINK_REJECTED:
+            return "符号链接拒绝"
+        if self.kind is _StaticPageFailureKind.NON_REGULAR:
+            return "非常规文件"
+        return f"IO 错误 errno={self.errno}"
+
+
+# 已告警的静态页降级 (页面, 失败身份) 组合：进程内每组合只告警一条，抑制持续探测刷屏。
+_WARNED_STATIC_PAGE_FAILURES: set[tuple[Path, _StaticPageOpenFailure]] = set()
+
+
+def _static_page_failure(exc: OSError) -> _StaticPageOpenFailure:
+    """把静态页打开异常归类为类型化失败，供降级分流与告警去重。"""
+    if isinstance(exc, SymlinkRejectedError):
+        return _StaticPageOpenFailure(_StaticPageFailureKind.SYMLINK_REJECTED)
+    if isinstance(exc, FileNotFoundError):
+        return _StaticPageOpenFailure(_StaticPageFailureKind.MISSING)
+    return _StaticPageOpenFailure(_StaticPageFailureKind.IO_ERROR, exc.errno)
+
+
+def _warn_static_page_degraded(page: Path, failure: _StaticPageOpenFailure) -> None:
+    """静态页降级按 (页面, 失败身份) 组合进程内只告警一条。"""
+    key = (page, failure)
+    if key in _WARNED_STATIC_PAGE_FAILURES:
+        return
+    _WARNED_STATIC_PAGE_FAILURES.add(key)
+    logger.warning("静态页 {} 不可用，降级纯文本响应：{}", page, failure.reason)
+
+
+def _open_static_page(page: Path) -> tuple[IO[bytes], os.stat_result] | _StaticPageOpenFailure:
+    """打开静态页常规文件并取 fstat，可降级失败返回类型化失败。
+
+    常规文件的 PermissionError 原样上抛，由调用方归 500 诊断响应；其余打开
+    失败与非常规形态按类型化失败交调用方降级。
+    """
+    try:
+        opened = open_regular_read(page)
+    except PermissionError:
+        raise
+    except OSError as exc:
+        return _static_page_failure(exc)
+    if opened is None:
+        return _StaticPageOpenFailure(_StaticPageFailureKind.NON_REGULAR)
+    return opened
+
+
+async def _serve_static_page(
+    page: Path,
+    *,
+    fallback_text: str,
+    status_code: int,
+    unavailable_text: str | None = None,
+) -> Response:
+    """打开静态页构造携带安全头的直出响应，页面不可用降级纯文本，不可读归 500 诊断。
+
+    打开下沉工作线程，降级告警按页面与失败身份去重；status_code 同时作用于降级
+    文本与页面直出；真缺失降级回 fallback_text，打开失败类降级回
+    unavailable_text，未提供时两类共用 fallback_text。
+    """
+    try:
+        opened = await asyncio.to_thread(_open_static_page, page)
+    except PermissionError as exc:
+        # 与 files 图片打开失败同口径：不可读归 500 诊断响应，不并入降级文案。
+        return _responses.error_json("page_open_failed", f"页面打开失败: {exc}", 500)
+    if isinstance(opened, _StaticPageOpenFailure):
+        _warn_static_page_degraded(page, opened)
+        if opened.missing or unavailable_text is None:
+            text = fallback_text
+        else:
+            text = unavailable_text
         return Response(
-            "Web 操作台页面缺失，请检查安装完整性。",
+            text,
+            status_code=status_code,
             media_type="text/plain",
             headers=PAGE_SECURITY_HEADERS,
         )
-    return FileResponse(
-        page,
+    handle, page_stat = opened
+    return _NoFollowFileResponse(
+        handle,
+        page_stat,
         media_type="text/html",
         headers=PAGE_SECURITY_HEADERS,
+        status_code=status_code,
+    )
+
+
+async def web_index(_request: Request) -> Response:
+    """返回 Web 操作台入口页，附 CSP 与 nosniff 安全头；真缺失与打开失败分别降级纯文本，不可读回 500。"""
+    # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
+    page = constants.STATIC_DIR / "index.html"
+    return await _serve_static_page(
+        page,
+        fallback_text="Web 操作台页面缺失，请检查安装完整性。",
+        unavailable_text="Web 操作台页面无法读取，详情请查看服务端日志。",
+        status_code=200,
     )
 
 
@@ -80,7 +194,7 @@ async def web_not_found(request: Request) -> Response:
     scheme 路径中的反斜杠归一为斜杠，去尾斜杠后以斜杠或字面反斜杠开头的形态
     会解析成协议相对的外域目标；判定前先做百分号解码与反斜杠归一，归一形以
     // 开头即不重定向，落入后续 404 分支。API 前缀回统一 JSON 错误，其余路径
-    回附安全头的风格化 404 页，页面文件缺失时降级纯文本避免 500。
+    回附安全头的风格化 404 页，页面不可用时降级纯文本，不可读回 500 诊断。
     """
     path = request.url.path
     if path != "/" and path.endswith("/"):
@@ -100,19 +214,8 @@ async def web_not_found(request: Request) -> Response:
         return _responses.error_json("not_found", "接口不存在", 404)
     # STATIC_DIR 经模块属性访问而非导入期绑定，目录指向可在运行期整体替换。
     page = constants.STATIC_DIR / "404.html"
-    if not page.is_file():
-        return Response(
-            "404 Not Found",
-            status_code=404,
-            media_type="text/plain",
-            headers=PAGE_SECURITY_HEADERS,
-        )
-    return FileResponse(
-        page,
-        status_code=404,
-        media_type="text/html",
-        headers=PAGE_SECURITY_HEADERS,
-    )
+    # 兜底文案只陈述 404 结果，不携带页面状态断言，两类降级原因共用不分档。
+    return await _serve_static_page(page, fallback_text="404 Not Found", status_code=404)
 
 
 async def web_root_redirect(_request: Request) -> Response:

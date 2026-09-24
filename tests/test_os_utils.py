@@ -1,4 +1,5 @@
-"""io_file 守护测试：open_no_follow_read 的符号链接拒绝与 atomic_replace 原子落盘骨架。
+"""io_file 守护测试：open_no_follow_read 的符号链接拒绝、open_regular_read 的常规
+文件打开序列与 atomic_replace 原子落盘骨架。
 
 open_no_follow_read 覆盖平台 O_NOFOLLOW、monkeypatch 模拟不支持时的 is_symlink 兜底
 与正常读取三种场景。Windows 创建符号链接需特权或开发者模式，相关用例以探测结果 skip。
@@ -6,14 +7,18 @@ open_no_follow_read 覆盖平台 O_NOFOLLOW、monkeypatch 模拟不支持时的 
 
 import asyncio
 import os
+import stat
+import sys
 from pathlib import Path
 
 import pytest
 
 from seedream_mcp.utils.io.io_file import (
+    SymlinkRejectedError,
     atomic_replace_from_fd,
     atomic_replace_from_fd_sync,
     open_no_follow_read,
+    open_regular_read,
 )
 
 from _os_fakes import _install_fsync_counter
@@ -58,12 +63,12 @@ def test_open_no_follow_read_returns_file_content(tmp_path: Path) -> None:
 
 
 def test_open_no_follow_read_rejects_symlink_when_supported(tmp_path: Path) -> None:
-    """平台支持 O_NOFOLLOW 时，最终分量为符号链接的路径读取被拒绝。"""
+    """平台支持 O_NOFOLLOW 时，符号链接读取以 SymlinkRejectedError 拒绝。"""
     if not getattr(os, "O_NOFOLLOW", 0):
         pytest.skip("当前平台不支持 O_NOFOLLOW")
     link = _make_symlink(tmp_path, "read_native")
 
-    with pytest.raises(OSError):
+    with pytest.raises(SymlinkRejectedError):
         open_no_follow_read(link)
 
 
@@ -75,8 +80,9 @@ def test_open_no_follow_read_fallback_rejects_symlink_without_no_follow(
 
     # 强制 no_follow 取值为 0，触发 lstat/S_ISLNK 兜底分支
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
-    with pytest.raises(OSError, match="拒绝读取符号链接"):
+    with pytest.raises(OSError, match="拒绝读取符号链接") as exc_info:
         open_no_follow_read(link)
+    assert isinstance(exc_info.value, SymlinkRejectedError)
 
 
 def test_open_no_follow_fallback_allows_normal_file(
@@ -125,8 +131,170 @@ def test_open_no_follow_fallback_rejects_fstat_toctou_mismatch(
 
     monkeypatch.setattr(os, "fstat", _fake_fstat)
 
-    with pytest.raises(OSError, match="被替换"):
+    with pytest.raises(SymlinkRejectedError, match="被替换"):
         open_no_follow_read(path)
+
+
+# ==================== open_regular_read 常规文件打开序列 ====================
+
+
+def test_open_regular_read_returns_handle_and_stat(tmp_path: Path) -> None:
+    """常规文件：返回可读句柄与其 fstat 结果，stat 与句柄描述同一 inode。"""
+    path = tmp_path / "page.html"
+    path.write_bytes(b"<html></html>")
+
+    opened = open_regular_read(path)
+
+    assert opened is not None
+    handle, stat_result = opened
+    try:
+        assert handle.read() == b"<html></html>"
+        assert stat.S_ISREG(stat_result.st_mode)
+        assert stat_result.st_size == len(b"<html></html>")
+    finally:
+        handle.close()
+
+
+def test_open_regular_read_non_regular_file_returns_none_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非常规文件（字符设备等）：返回 None 且句柄已关闭，交调用方按缺失口径路由。"""
+    import seedream_mcp.utils.io.io_file as io_file_module
+
+    device = os.fdopen(os.open(os.devnull, os.O_RDONLY), "rb")
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: device)
+
+    assert open_regular_read(tmp_path / "any.bin") is None
+    assert device.closed
+
+
+def test_open_regular_read_directory_named_like_image_returns_none(tmp_path: Path) -> None:
+    """目录路径归 None：POSIX 由句柄 fstat 判定，Windows 的 EACCES 经路径 stat 分类。"""
+    directory = tmp_path / "图片(evil.png)"
+    directory.mkdir()
+
+    assert open_regular_read(directory) is None
+
+
+def test_open_regular_read_permission_error_on_regular_file_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """常规文件的 PermissionError 原样上抛，不被目录分类误吞为缺失。"""
+    import errno
+    from typing import IO
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+
+    path = tmp_path / "plain.bin"
+    path.write_bytes(b"data")
+
+    def _denied(target: object, **_kwargs: object) -> IO[bytes]:
+        raise PermissionError(errno.EACCES, "simulated EACCES", str(target))
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _denied)
+
+    with pytest.raises(PermissionError):
+        open_regular_read(path)
+
+
+def test_open_regular_read_permission_error_stat_failure_keeps_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """分类用 stat 失败时上抛的仍是原 PermissionError，不泄漏 stat 自身的 OSError。"""
+    import errno
+    from typing import IO
+
+    import seedream_mcp.utils.io.io_file as io_file_module
+
+    def _denied(target: object, **_kwargs: object) -> IO[bytes]:
+        raise PermissionError(errno.EACCES, "simulated EACCES", str(target))
+
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", _denied)
+
+    with pytest.raises(PermissionError):
+        open_regular_read(tmp_path / "missing.bin")
+
+
+def test_open_regular_read_fstat_failure_closes_handle_and_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fstat 抛错：句柄先关闭再原样上抛 OSError，不依赖 GC 释放 fd。"""
+    import seedream_mcp.utils.io.io_file as io_file_module
+
+    path = tmp_path / "plain.bin"
+    path.write_bytes(b"data")
+    handle = open(path, "rb")
+    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: handle)
+
+    def _failing_fstat(fd: int) -> os.stat_result:
+        del fd
+        raise OSError("simulated ESTALE")
+
+    monkeypatch.setattr(os, "fstat", _failing_fstat)
+
+    with pytest.raises(OSError, match="simulated ESTALE"):
+        open_regular_read(path)
+    assert handle.closed
+
+
+def test_open_regular_read_symlink_rejection_propagates(tmp_path: Path) -> None:
+    """符号链接拒绝原样上抛，由调用方按各自口径路由。"""
+    link = _make_symlink(tmp_path, "regular_read")
+
+    with pytest.raises(SymlinkRejectedError):
+        open_regular_read(link)
+
+
+def test_open_regular_read_missing_file_propagates_oserror(tmp_path: Path) -> None:
+    """缺失路径的 OSError 原样上抛，不吞不换。"""
+    with pytest.raises(FileNotFoundError):
+        open_regular_read(tmp_path / "missing.bin")
+
+
+def test_open_regular_read_open_flags_carry_nonblocking_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POSIX 打开阶段携带 O_NONBLOCK|O_NOCTTY 防特殊文件路径阻塞 open 钉死工作线程，验明常规文件后清除非阻塞位。"""
+    from typing import Any
+
+    path = tmp_path / "page.html"
+    path.write_bytes(b"<html></html>")
+    captured: list[int] = []
+    real_open = os.open
+
+    def _capturing_open(name: str, flags: int, *args: Any, **kwargs: Any) -> int:
+        captured.append(flags)
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _capturing_open)
+    opened = open_regular_read(path)
+
+    assert opened is not None
+    handle, _stat_result = opened
+    try:
+        if sys.platform != "win32":
+            assert captured == [os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY]
+            import fcntl
+
+            served_flags = fcntl.fcntl(handle.fileno(), fcntl.F_GETFL)
+            assert not served_flags & os.O_NONBLOCK
+        else:
+            # Windows 无两类标志，兜底路径按原 O_RDONLY 形态打开。
+            assert captured == [os.O_RDONLY]
+        assert handle.read() == b"<html></html>"
+    finally:
+        handle.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.mkfifo 仅 POSIX 提供")
+def test_open_regular_read_fifo_returns_none_without_blocking(tmp_path: Path) -> None:
+    """FIFO 路径经非阻塞打开进 fstat 判定后归 None，不无限阻塞工作线程。"""
+    if sys.platform == "win32":
+        pytest.skip("os.mkfifo 仅 POSIX 提供")
+    fifo = tmp_path / "fifo-page.html"
+    os.mkfifo(fifo)
+
+    assert open_regular_read(fifo) is None
 
 
 # ==================== atomic_replace_from_fd 原子落盘骨架 ====================

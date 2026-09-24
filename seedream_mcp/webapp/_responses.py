@@ -1,22 +1,32 @@
 """Web 操作台各域 handler 共享的响应辅助与错误码映射。
 
 本模块只放跨域复用的纯辅助：统一错误 JSON 形态、图片目录解析契约、生成错误
-类型到 HTTP 状态码的映射与文件端点的缓存头。域内专有逻辑不落此处，避免
-演化为杂物箱。
+类型到 HTTP 状态码的映射、文件端点的缓存头与 no-follow 文件响应形态。域内
+专有逻辑不落此处，避免演化为杂物箱。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
+from loguru import logger
 from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, MalformedRangeHeader, Response
+from starlette.types import Message, Receive, Scope, Send
 
+from ..tools.core.outputs import dump_compact_strict_json
 from ..utils.core.errors import SeedreamConfigError
+from ..utils.core.executors import (
+    CPU_OFFLOAD_SIZE_THRESHOLD,
+    CpuOffloadPoolClosedError,
+    run_in_cpu_pool,
+)
 from ..utils.io.io_path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
@@ -59,12 +69,22 @@ def error_json(error: str, description: str, status: int) -> JSONResponse:
 
 
 async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSONResponse | None]:
-    """解析请求体为 JSON 对象，解析失败或形态不符时返回错误响应。
+    """解析请求体为 JSON 对象，解析失败或形态不符时返回 400 错误响应。
 
-    解析随参考图体积线性增长，下沉工作线程；生成与图库端点共用同一口径。
+    解析成本随参考图体积线性增长，超过下沉尺寸阈值的卸载长时 CPU 专用池，低于
+    阈值同步执行；池关闭取消排队解析时返回 500 服务不可用响应，生成与图库端点
+    共用同一口径。
     """
     try:
-        body = await asyncio.to_thread(json.loads, await request.body())
+        raw_body = await request.body()
+        # 阈值之下的解析微秒级完成，线程往返成本高于收益，同步执行。
+        if len(raw_body) > CPU_OFFLOAD_SIZE_THRESHOLD:
+            body = await run_in_cpu_pool(json.loads, raw_body)
+        else:
+            body = json.loads(raw_body)
+    except CpuOffloadPoolClosedError:
+        # 池关闭属退出清理与服务并发的窗口，是服务端不可用而非请求体缺陷。
+        return {}, error_json("service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500)
     # 深嵌套 JSON 触发解析器递归上限抛 RecursionError，与解析失败同归 400。
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         return {}, error_json("invalid_json", f"请求体不是合法 JSON: {exc}", 400)
@@ -126,16 +146,11 @@ def browse_status(structured: dict[str, object]) -> int:
 
 
 def dump_strict_json(structured: dict[str, object]) -> str:
-    """以严格 JSON 序列化结构化结果。
+    """以严格 JSON 序列化结构化结果，序列化形态与工具镜像共用同一原语。
 
-    非有限浮点已在流水线用量净化处归零，此处 allow_nan=False 仅作漏网哨兵。
+    非有限浮点已在流水线用量净化处归零，严格拒绝仅作漏网哨兵。
     """
-    return json.dumps(
-        structured,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    )
+    return dump_compact_strict_json(structured)
 
 
 async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
@@ -176,3 +191,105 @@ def converge_path_entry(
         return
     item["web_path"] = relative
     item[key] = relative
+
+
+class _TruncatedSourceError(RuntimeError):
+    """多区间响应中读源被截断时主动断开连接的中止信号。"""
+
+
+def _abort_on_empty_chunk(send: Send) -> Send:
+    """包装多区间发送：零长分块意味着读源截断，抛中止信号断开连接。"""
+
+    async def _send(message: Message) -> None:
+        if (
+            message["type"] == "http.response.body"
+            and message.get("more_body")
+            and not message.get("body")
+        ):
+            raise _TruncatedSourceError("multipart 区间读到零字节，读源已截断")
+        await send(message)
+
+    return _send
+
+
+class _DupAtOpenFd:
+    """上游 open 时刻才生产复制品 fd 的整数替身，交出即归上游文件对象独占关闭。"""
+
+    def __init__(self, fd: int) -> None:
+        self._source_fd = fd
+        self._duplicate: int | None = None
+
+    def __index__(self) -> int:
+        # open() 对 fd 槽做多次整数转换，复制品只生产一次。
+        if self._duplicate is None:
+            self._duplicate = os.dup(self._source_fd)
+        return self._duplicate
+
+
+class _NoFollowFileResponse(FileResponse):
+    """以预开 no-follow 句柄为读源的 FileResponse，读取与应答语义单源于上游。
+
+    分叉仅四处：chunk_size 加大、pathsend 禁用、倒置区间加严 400、多区间读源
+    截断改断连。读取走上游 open 时刻才生产的复制品 fd，其开关归上游发送循环的
+    async with，正常与异常路径均由其 finally 关闭；原句柄为响应独占，__call__
+    收尾同步兜底关闭，句柄对象自身的 closed 幂等簿记使关闭无双重释放与号码误回收。
+    """
+
+    chunk_size = 512 * 1024
+
+    def __init__(
+        self,
+        handle: IO[bytes],
+        stat_result: os.stat_result,
+        *,
+        media_type: str,
+        headers: Mapping[str, str] | None = None,
+        status_code: int = 200,
+    ) -> None:
+        super().__init__(
+            _DupAtOpenFd(handle.fileno()),  # type: ignore[arg-type]
+            status_code=status_code,
+            headers=headers,
+            media_type=media_type,
+            stat_result=stat_result,
+        )
+        self._handle = handle
+
+    @classmethod
+    def _parse_ranges(cls, range_: str, file_size: int) -> list[tuple[int, int]]:
+        ranges = super()._parse_ranges(range_, file_size)
+        # 倒置区间经 merge 折叠后无法检出，校验须落在原始区间上；起点越界的留给上游 416。
+        if any(0 <= start < file_size and start >= end for start, end in ranges):
+            raise MalformedRangeHeader("Range header: start must be less than end")
+        return ranges
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # 同步关闭无 await，收尾不可被取消，已定结局不被改写。
+            self._close_handle()
+
+    def _close_handle(self) -> None:
+        """原句柄关闭兜底，失败仅记录不改写已送达的响应结局。"""
+        if self._handle.closed:
+            return
+        try:
+            self._handle.close()
+        except Exception:
+            logger.opt(exception=True).warning("预开句柄关闭失败，不影响已送达的响应")
+
+    async def _handle_simple(self, send: Send, send_header_only: bool, send_pathsend: bool) -> None:
+        # pathsend 把文件按路径移交服务器重开，绕过预开句柄，一律不参与。
+        await super()._handle_simple(send, send_header_only, False)
+
+    async def _handle_multiple_ranges(
+        self,
+        send: Send,
+        ranges: list[tuple[int, int]],
+        file_size: int,
+        send_header_only: bool,
+    ) -> None:
+        await super()._handle_multiple_ranges(
+            _abort_on_empty_chunk(send), ranges, file_size, send_header_only
+        )
