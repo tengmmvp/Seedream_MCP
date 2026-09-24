@@ -10,7 +10,8 @@ import asyncio
 import hashlib
 import re
 import types
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import httpx
 
@@ -500,22 +501,10 @@ class SeedreamClient(_ClientHTTPMixin):
             tools=tools,
         )
 
-        reference_images = None
+        reference_images: list[str] | None = None
         if image is not None:
-            if isinstance(image, str):
-                reference_images = [image]
-            elif isinstance(image, (list, tuple)):
-                reference_images = list(image)
-            else:
-                raise SeedreamValidationError(
-                    "image 参数必须是字符串或字符串列表",
-                    field="image",
-                    value=image,
-                )
-
-        if reference_images is not None:
             reference_images = self._normalize_image_sequence(
-                reference_images,
+                image,
                 min_count=1,
                 max_count=get_max_reference_images(self.config.model_id),
                 field_name="image",
@@ -698,22 +687,24 @@ class SeedreamClient(_ClientHTTPMixin):
 
     @staticmethod
     def _normalize_image_sequence(
-        images: Sequence[str] | None,
+        images: str | Sequence[str] | None,
         *,
         min_count: int,
         max_count: int,
         field_name: str,
     ) -> list[str]:
-        """校验并规范化图片列表输入，逐项规范化并按 min_count 与 max_count 校验数量。"""
-        if not isinstance(images, (list, tuple)):
+        """校验并规范化图片序列输入，str 视作单元素列表，逐项规范化并按 min_count 与 max_count 校验数量。"""
+        if not isinstance(images, (str, list, tuple)):
             raise SeedreamValidationError(
                 f"{field_name} 参数必须是字符串列表",
                 field=field_name,
                 value=images,
             )
 
+        image_items: Sequence[str] = [images] if isinstance(images, str) else images
+
         normalized_images: list[str] = []
-        for index, image in enumerate(images, start=1):
+        for index, image in enumerate(image_items, start=1):
             element_field = f"{field_name}[{index}]"
             normalized_images.append(
                 SeedreamClient._normalize_single_image(image, field_name=element_field)

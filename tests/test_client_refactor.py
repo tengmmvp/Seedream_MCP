@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import asyncio
 import json
+from collections import UserString, deque
+from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, overload
 
 import httpx
 import pytest
@@ -22,9 +24,15 @@ from seedream_mcp.utils.core.errors import (
     SeedreamValidationError,
     resolve_error_profile,
 )
+from seedream_mcp.utils.core.executors import (
+    CPU_OFFLOAD_SIZE_THRESHOLD,
+    CpuOffloadPoolClosedError,
+    shutdown_cpu_offload_executor,
+)
 from seedream_mcp.utils.images import image_validation as image_validation_module
 
 from _client_fakes import _install_mock_transport
+from _cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
 from _log_fakes import RecordingLogger
 
 
@@ -335,6 +343,60 @@ async def test_call_api_parses_non_stream_response() -> None:
     assert result["data"][0]["url"] == "https://example.com/1.png"
 
 
+async def test_call_api_success_body_parse_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超阈值 200 响应体的 JSON 解析经专用线程池执行，不与默认池短任务同池排队。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    oversized_url = "https://example.com/1.png?pad=" + "a" * CPU_OFFLOAD_SIZE_THRESHOLD
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"url": oversized_url}],
+                "usage": {"generated_images": 1},
+                "status": "succeeded",
+            },
+        )
+
+    async with _client_with_mock_transport(handler) as client:
+        result = await client._call_api("text_to_image", {"prompt": "hello"})
+
+    assert result["success"] is True
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_call_api_small_body_parse_runs_outside_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低于下沉阈值的 200 响应体在事件循环线程同步解析，不付线程往返开销。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"url": "https://example.com/1.png"}],
+                "usage": {"generated_images": 1},
+                "status": "succeeded",
+            },
+        )
+
+    async with _client_with_mock_transport(handler) as client:
+        result = await client._call_api("text_to_image", {"prompt": "hello"})
+
+    assert result["success"] is True
+    spy.assert_ran_outside_cpu_pool()
+
+
 async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -577,15 +639,125 @@ async def test_sequential_generation_without_max_images_uses_reference_aware_def
     assert captured_request["sequential_image_generation_options"]["max_images"] == 14
 
 
-def test_normalize_image_sequence_rejects_non_list_input() -> None:
-    """image 传入非列表形态时抛出参数校验错误。"""
-    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
+def test_normalize_image_sequence_unwraps_str_input() -> None:
+    """str 输入视作单元素列表，结果与显式单元素列表一致。"""
+    normalized = SeedreamClient._normalize_image_sequence(
+        images="http://example.com/a.png",
+        min_count=1,
+        max_count=2,
+        field_name="image",
+    )
+
+    assert normalized == ["http://example.com/a.png"]
+
+
+class _StrSequence(Sequence[str]):
+    """委托内部列表承载元素的 Sequence 子类，代表 list/tuple 之外的序列形态。"""
+
+    def __init__(self, items: Iterable[str]) -> None:
+        self._items = list(items)
+
+    @overload
+    def __getitem__(self, index: int) -> str: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[str]: ...
+
+    def __getitem__(self, index: int | slice) -> str | Sequence[str]:
+        return self._items[index]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+def _deque_of(items: list[str]) -> Sequence[str]:
+    return deque(items)
+
+
+def _custom_of(items: list[str]) -> Sequence[str]:
+    return _StrSequence(items)
+
+
+@pytest.mark.parametrize(
+    "sequence_factory",
+    [_deque_of, _custom_of],
+    ids=["deque", "custom-sequence"],
+)
+def test_normalize_image_sequence_rejects_non_list_sequence(
+    sequence_factory: Callable[[list[str]], Sequence[str]],
+) -> None:
+    """deque 与自定义 Sequence 不属接受的容器形态，按容器级消息整体拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
         SeedreamClient._normalize_image_sequence(
-            images="not-a-list",
+            images=sequence_factory(["http://example.com/a.png", "http://example.com/b.png"]),
             min_count=1,
             max_count=2,
             field_name="image",
         )
+
+    assert "image[" not in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    [b"http://example.com/a.png", bytearray(b"http://example.com/a.png"), 123],
+    ids=["bytes", "bytearray", "int"],
+)
+def test_normalize_image_sequence_rejects_bytes_like_and_non_sequence(
+    invalid_input: Any,
+) -> None:
+    """bytes 形态与 int 等非列表形态仍拒绝，异常消息停在容器级不逐元素漂移。"""
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
+        SeedreamClient._normalize_image_sequence(
+            images=invalid_input,
+            min_count=1,
+            max_count=2,
+            field_name="image",
+        )
+
+
+def test_normalize_image_sequence_rejects_user_string() -> None:
+    """UserString 属 str-like Sequence，按容器级消息拒绝，不产生逐元素消息。"""
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
+        SeedreamClient._normalize_image_sequence(
+            images=UserString("http://example.com/a.png"),  # type: ignore[arg-type]
+            min_count=1,
+            max_count=2,
+            field_name="image",
+        )
+
+    assert "image[" not in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    [range(3), memoryview(b"http://example.com/a.png")],
+    ids=["range", "memoryview"],
+)
+def test_normalize_image_sequence_rejects_int_sequence_forms(invalid_input: Any) -> None:
+    """range 与 memoryview 迭代成 int 序列，按容器级消息拒绝，不产生逐元素消息。"""
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
+        SeedreamClient._normalize_image_sequence(
+            images=invalid_input,
+            min_count=1,
+            max_count=2,
+            field_name="image",
+        )
+
+    assert "image[" not in excinfo.value.message
+
+
+def test_normalize_image_sequence_rejects_non_str_element_in_sequence() -> None:
+    """列表内混入非字符串元素时逐项定位拒绝，下标 1-based。"""
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        SeedreamClient._normalize_image_sequence(
+            images=["http://example.com/a.png", 123],  # type: ignore[list-item]
+            min_count=1,
+            max_count=2,
+            field_name="image",
+        )
+
+    assert excinfo.value.message == "image[2] 参数必须是字符串"
 
 
 def test_normalize_single_image_rejects_unencodable_surrogate() -> None:
@@ -728,17 +900,135 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
     assert api_called is False
 
 
+async def _invoke_multi_image_fusion(client: SeedreamClient, image: Sequence[str]) -> None:
+    await client.multi_image_fusion(prompt="test", image=image, size="2K")
+
+
+async def _invoke_sequential_generation(client: SeedreamClient, image: Sequence[str]) -> None:
+    await client.sequential_generation(prompt="test", image=image, size="2K")
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [_invoke_multi_image_fusion, _invoke_sequential_generation],
+    ids=["multi-image-fusion", "sequential-generation"],
+)
+@pytest.mark.parametrize(
+    "sequence_factory",
+    [_deque_of, _custom_of],
+    ids=["deque", "custom-sequence"],
+)
+async def test_generation_entries_reject_non_list_sequence(
+    sequence_factory: Callable[[list[str]], Sequence[str]],
+    invoke: Callable[[SeedreamClient, Sequence[str]], Awaitable[None]],
+) -> None:
+    """多图融合与组图入口对 list/tuple 之外的序列形态报同一容器级错误。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
+        await invoke(client, sequence_factory(["image-1", "image-2"]))
+
+    assert "image[" not in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [_invoke_multi_image_fusion, _invoke_sequential_generation],
+    ids=["multi-image-fusion", "sequential-generation"],
+)
+async def test_generation_entries_report_same_item_error_for_mixed_list(
+    invoke: Callable[[SeedreamClient, Sequence[str]], Awaitable[None]],
+) -> None:
+    """image 列表混入非字符串元素时两入口报同一逐项定位消息，错误分类单源。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        await invoke(client, ["a.png", 123])  # type: ignore[list-item]
+
+    assert excinfo.value.message == "image[2] 参数必须是字符串"
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [_invoke_multi_image_fusion, _invoke_sequential_generation],
+    ids=["multi-image-fusion", "sequential-generation"],
+)
+async def test_generation_entries_report_same_container_error_for_non_container(
+    invoke: Callable[[SeedreamClient, Sequence[str]], Awaitable[None]],
+) -> None:
+    """image 传入非容器形态时两入口报同一容器级消息。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError) as excinfo:
+        await invoke(client, 123)  # type: ignore[arg-type]
+
+    assert excinfo.value.message == "image 参数必须是字符串列表"
+
+
 async def test_sequential_generation_invalid_image_type_raises_validation_error() -> None:
     """image 传入非字符串形态时抛出参数校验错误。"""
     client = SeedreamClient(_build_config())
 
-    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串或字符串列表"):
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
         await client.sequential_generation(
             prompt="test",
             max_images=2,
             image=123,  # type: ignore[arg-type]
             size="2K",
         )
+
+
+@pytest.mark.parametrize(
+    "image_value",
+    [b"http://example.com/a.png", bytearray(b"http://example.com/a.png")],
+    ids=["bytes", "bytearray"],
+)
+async def test_sequential_generation_rejects_bytes_like_image(image_value: Any) -> None:
+    """bytes 形态属 Sequence 但迭代成 int 序列，按容器级消息拒绝。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表"):
+        await client.sequential_generation(
+            prompt="test",
+            max_images=2,
+            image=image_value,
+            size="2K",
+        )
+
+
+async def test_sequential_generation_rejects_user_string_image() -> None:
+    """UserString 形态的 image 与列表入口一致，按容器级消息拒绝，不逐字符拆分。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
+        await client.sequential_generation(
+            prompt="test",
+            max_images=2,
+            image=UserString("http://example.com/a.png"),  # type: ignore[arg-type]
+            size="2K",
+        )
+
+    assert "image[" not in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    "image_value",
+    [range(3), memoryview(b"http://example.com/a.png")],
+    ids=["range", "memoryview"],
+)
+async def test_sequential_generation_rejects_int_sequence_image(image_value: Any) -> None:
+    """range 与 memoryview 迭代成 int 序列，与 bytes 形态同按容器级消息拒绝。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError, match="image 参数必须是字符串列表") as excinfo:
+        await client.sequential_generation(
+            prompt="test",
+            max_images=2,
+            image=image_value,
+            size="2K",
+        )
+
+    assert "image[" not in excinfo.value.message
 
 
 def _build_pro_config() -> SeedreamConfig:
@@ -1319,3 +1609,125 @@ def test_generation_method_docstrings_follow_capability_table() -> None:
     assert supported_family_display_names("supports_sequential_generation") in (
         SeedreamClient.sequential_generation.__doc__ or ""
     )
+
+
+# ==================== 池关闭窗口的服务关闭错误呈现 ====================
+
+
+async def _await_task_capturing(task: "asyncio.Task[dict[str, Any]]") -> BaseException | None:
+    """等待任务完成并捕获异常，供关池窗口用例断言调用方实际收到的错误形态。"""
+    try:
+        await task
+    except BaseException as exc:
+        return exc
+    return None
+
+
+def _assert_shutdown_error_shape(caught: BaseException | None) -> None:
+    """断言关池错误呈现服务关闭事实，不伪装成 JSON 解析失败或 API 错误。"""
+    assert isinstance(caught, SeedreamMCPError)
+    assert not isinstance(caught, SeedreamAPIError)
+    assert "服务正在关闭" in caught.message
+    assert "JSON 解析失败" not in caught.message
+    assert "API 调用失败" not in caught.message
+    assert "线程池" not in caught.message
+    assert isinstance(caught.__cause__, CpuOffloadPoolClosedError)
+
+
+async def test_call_api_pool_closed_during_serialization_reports_shutdown() -> None:
+    """饱和池上排队的大载荷序列化被关池取消时，调用方收到服务关闭错误且不再重试。"""
+    handler_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal handler_calls
+        del request
+        handler_calls += 1
+        return httpx.Response(200, json={"data": [], "usage": {}, "status": "completed"})
+
+    oversized_prompt = "p" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)
+
+    async with _client_with_mock_transport(handler) as client:
+        async with saturate_cpu_offload_pool() as saturated:
+            task = asyncio.ensure_future(
+                client._call_api("text_to_image", {"prompt": oversized_prompt})
+            )
+            await saturated.wait_queued()
+            shutdown_cpu_offload_executor()
+
+            caught = await _await_task_capturing(task)
+        await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
+
+    _assert_shutdown_error_shape(caught)
+    # 序列化在发送前被取消，上游不收到任何请求。
+    assert handler_calls == 0
+
+
+async def test_call_api_pool_closed_during_json_parse_reports_shutdown() -> None:
+    """大响应体的池内 JSON 解析在关池窗口被取消时，错误呈现服务正在关闭而非解析失败。"""
+    handler_entered = asyncio.Event()
+    response_gate = asyncio.Event()
+    handler_calls = 0
+    oversized_url = "https://example.com/1.png?pad=" + "a" * CPU_OFFLOAD_SIZE_THRESHOLD
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal handler_calls
+        del request
+        handler_calls += 1
+        handler_entered.set()
+        await response_gate.wait()
+        return httpx.Response(
+            200,
+            json={"data": [{"url": oversized_url}], "status": "completed"},
+        )
+
+    async with _client_with_mock_transport(handler) as client:
+        task = asyncio.ensure_future(client._call_api("text_to_image", {"prompt": "p"}))
+        await asyncio.wait_for(handler_entered.wait(), timeout=5)
+        async with saturate_cpu_offload_pool() as saturated:
+            response_gate.set()
+            await saturated.wait_queued()
+            shutdown_cpu_offload_executor()
+
+            caught = await _await_task_capturing(task)
+        await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
+
+    _assert_shutdown_error_shape(caught)
+    # 服务关闭属退出窗口，失败请求不进入重试。
+    assert handler_calls == 1
+
+
+async def test_call_api_pool_closed_during_sse_parse_reports_shutdown() -> None:
+    """SSE 大事件解析在关池窗口被取消时，错误同样呈现服务正在关闭而非 API 调用失败。"""
+    big_event = json.dumps({"type": "image_generation.partial_succeeded", "b64_json": "A" * 70000})
+    sse_payload = (
+        "data: " + big_event + "\n\n"
+    ).encode() + b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n'
+    handler_entered = asyncio.Event()
+    response_gate = asyncio.Event()
+    handler_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal handler_calls
+        del request
+        handler_calls += 1
+        handler_entered.set()
+        await response_gate.wait()
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=sse_payload
+        )
+
+    async with _client_with_mock_transport(handler) as client:
+        task = asyncio.ensure_future(
+            client._call_api("text_to_image", {"prompt": "p", "stream": True})
+        )
+        await asyncio.wait_for(handler_entered.wait(), timeout=5)
+        async with saturate_cpu_offload_pool() as saturated:
+            response_gate.set()
+            await saturated.wait_queued()
+            shutdown_cpu_offload_executor()
+
+            caught = await _await_task_capturing(task)
+        await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
+
+    _assert_shutdown_error_shape(caught)
+    assert handler_calls == 1
