@@ -1031,8 +1031,10 @@ async def test_image_response_sticky_cancel_storm_settles_and_closes_handle(
     _patch_stream_source(monkeypatch, cast("IO[bytes]", handle))
 
     async def receive() -> dict[str, object]:
-        # 断连通知等在途读就位后送达，锁定取消恰好击中阻塞读。
+        # 断连通知等在途读就位后送达，锁定取消恰好击中阻塞读；送达前的窗口
+        # 内读仍阻塞在工作线程，事件循环必须保持可调度（心跳可推进）。
         await asyncio.to_thread(handle.read_entered.wait, 10)
+        await asyncio.sleep(0.1)
         return {"type": "http.disconnect"}
 
     sent: list[str] = []
