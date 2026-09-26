@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 from starlette.types import Message, Receive, Send
 
+from _log_fakes import capture_loguru_messages
 import seedream_mcp.transport as transport
 from seedream_mcp.config import build_config_from_sources
 from seedream_mcp.utils.core.errors import SeedreamConfigError
@@ -197,7 +198,7 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
 
 
 async def test_request_body_limit_skips_413_when_downstream_already_responded() -> None:
-    """下游先发 response.start 再触发超限时不得补发第二个 response.start。
+    """下游先发 response.start 再触发超限时不得补发第二个 response.start，仅记告警。
 
     模拟下游已开始响应才读到超限 body 的形态，连接异常交由服务器协议层处理。
     """
@@ -230,20 +231,22 @@ async def test_request_body_limit_skips_413_when_downstream_already_responded() 
 
     middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
-    await middleware(scope, receive, send)
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        await middleware(scope, receive, send)
 
     starts = [m for m in sent if m.get("type") == "http.response.start"]
     assert len(starts) == 1
     assert starts[0]["status"] == 200
+    assert any("跳过补发 413" in record for record in records)
 
 
 async def test_request_body_limit_sends_413_when_downstream_output_never_forwarded() -> None:
-    """下游读到截断终帧后才发响应的流式超限主路径须补发 413。
+    """下游输出全部晚于超限判定的流式主路径在判定点直发 413。
 
     无 Content-Length 分帧超限且下游输出全部发生在超限判定之后时，输出被
-    send_wrapper 全部吞掉、从未触达真实客户端，补发 413 是客户端收到的唯一
-    响应；若以“下游发出过 response.start”为跳过条件，客户端只能收到服务器
-    兜底 500。
+    send_wrapper 全部吞掉、从未触达真实客户端，判定点直发的 413 是客户端
+    收到的唯一响应，收尾不记已转发告警。
     """
     small_limit = 1024
     sent: list[Message] = []
@@ -274,13 +277,16 @@ async def test_request_body_limit_sends_413_when_downstream_output_never_forward
 
     middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)
     scope = {"type": "http", "headers": []}
-    await middleware(scope, receive, send)
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        await middleware(scope, receive, send)
 
     starts = [m for m in sent if m.get("type") == "http.response.start"]
     assert len(starts) == 1
     assert starts[0]["status"] == 413
     body_msg = next(m for m in sent if m.get("type") == "http.response.body")
     assert json.loads(body_msg["body"].decode("utf-8"))["error"] == "request_too_large"
+    assert not any("跳过补发 413" in record for record in records)
 
 
 async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunked() -> None:
@@ -315,7 +321,7 @@ async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunk
     scope = {"type": "http", "headers": [(b"content-length", b"abc")]}
     await middleware(scope, receive, send)
 
-    # 畸形头未触发早拒，请求确实进入了下游，拦截由字节累计路径完成
+    # 畸形头未触发早拒，请求确实进入了下游，拦截由字节累计路径完成。
     assert received == {"called": True}
     starts = [m for m in sent if m.get("type") == "http.response.start"]
     assert len(starts) == 1
@@ -419,10 +425,10 @@ async def test_request_body_limit_reraises_downstream_exception_within_limit() -
         await middleware(scope, receive, cast(Send, None))
 
 
-async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
-    """下游正常返回后的收尾 413 补发失败被吞掉，不向应用层冒泡。
+async def test_request_body_limit_swallows_send_failure_on_direct_413() -> None:
+    """判定点直发 413 的 send 失败被吞掉，不向应用层冒泡。
 
-    客户端发送超限 body 后立即断开时，收尾 413 的 send 对死连接抛异常。
+    客户端发送超限 body 后立即断开时，直发 413 的 send 对死连接抛异常。
     """
     small_limit = 1024
     messages = [
@@ -444,7 +450,7 @@ async def test_request_body_limit_swallows_send_failure_on_final_413() -> None:
         raise RuntimeError("client disconnected")
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
-        # 下游读到截断的空终帧后正常返回，走到中间件的收尾 413 分支。
+        # 下游读到截断的空终帧后正常返回。
         while True:
             msg = await receive()
             if msg["type"] == "http.request" and not msg.get("more_body", False):
@@ -490,7 +496,7 @@ async def test_request_body_limit_truncation_keeps_disconnect_watch_yielding() -
         assert first["body"] == prefix
         watcher = asyncio.create_task(watch_disconnect(receive))
         await watcher
-        # 断连送达时 413 已在超限判定点直发，不待本 app 收尾补发
+        # 断连送达时 413 已在超限判定点直发，不待本 app 收尾补发。
         assert any(m.get("type") == "http.response.start" and m.get("status") == 413 for m in sent)
 
     middleware = transport._LimitRequestBodyMiddleware(downstream, small_limit)

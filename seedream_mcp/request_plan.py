@@ -12,7 +12,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Iterator
 
-from .utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD, run_in_cpu_pool
+from .utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
+from .utils.core.sanitizers import utf8_value_leaf_length
 from .utils.core.validators import ValidatedCommonParams
 
 
@@ -134,21 +135,6 @@ def shared_request_plan_scope() -> Iterator[SharedRequestPlan]:
         plan.release()
 
 
-# 标量叶的序列化输出规模估计：布尔与数字序列化只产出数个字符，按固定值计入。
-_SCALAR_LEAF_ESTIMATED_BYTES = 8
-
-
-def _estimate_serialized_bytes(value: Any) -> int:
-    """求和字符串叶长度与标量叶固定开销，作为序列化输出规模的廉价估计。"""
-    if isinstance(value, str):
-        return len(value)
-    if isinstance(value, dict):
-        return sum(_estimate_serialized_bytes(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
-        return sum(_estimate_serialized_bytes(item) for item in value)
-    return _SCALAR_LEAF_ESTIMATED_BYTES
-
-
 async def serialize_request_body(
     serializer: Callable[[dict[str, Any]], bytes],
     request_data: dict[str, Any],
@@ -156,10 +142,11 @@ async def serialize_request_body(
     """出站请求体序列化的单一派发点，共享计划与直连两条路径共用。
 
     多 MB base64 参考图载荷的序列化经 CPU 卸载专用池执行，不与默认执行器的
-    延迟敏感短任务同池排队。序列化前无现成字节长度，以载荷字符串叶总长的廉价
-    估计对照下沉阈值，低于阈值同步执行省线程往返。
+    延迟敏感短任务同池排队。序列化前无现成字节长度，以 UTF-8 字节口径的载荷
+    规模估计对照下沉阈值，与镜像构建门控同口径，CJK 文本不因字符计数偏小而
+    漏卸载；低于阈值同步执行省线程往返。
     """
-    if _estimate_serialized_bytes(request_data) > CPU_OFFLOAD_SIZE_THRESHOLD:
+    if should_offload_to_cpu_pool(request_data, value_leaf_cost=utf8_value_leaf_length):
         return await run_in_cpu_pool(serializer, request_data)
     return serializer(request_data)
 

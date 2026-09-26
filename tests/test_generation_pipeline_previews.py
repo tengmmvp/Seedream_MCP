@@ -61,6 +61,39 @@ async def test_runner_include_previews_false_skips_preview_assembly(
     assert structured["data"][0]["local_path"].endswith("saved.png")
 
 
+async def test_execute_handler_partial_string_error_result_stays_non_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """字符串 error 条目的 partial 结果不翻 isError，失败判定经 errors 单源谓词。"""
+    _patch_client_success(monkeypatch)
+    _patch_save_real_file(monkeypatch, tmp_path)
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+
+    async def _executor(client: Any, context: Any) -> dict[str, Any]:
+        del client, context
+        return {
+            "success": True,
+            "data": [{"url": "https://example.com/generated.png", "error": "boom"}],
+            "usage": {"generated_images": 1},
+            "status": "partial",
+        }
+
+    result = await execute_generation_handler(
+        params=TextToImageInput(prompt="a cat"),
+        config=config,
+        metadata=TEXT_TO_IMAGE,
+        module_logger=get_logger(),
+        request_executor=_executor,
+        ctx=None,
+    )
+
+    assert result.is_error is False
+    structured = result.structured_content
+    assert isinstance(structured, dict)
+    assert structured["success"] is True
+    assert structured["status"] == "partial"
+
+
 async def test_preview_scope_resets_after_runner_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

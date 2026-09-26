@@ -86,6 +86,27 @@ class ProbingErrorSession(CapabilityDeclaringSession):
         raise RuntimeError("capability probe broken")
 
 
+class BackChannelSession(CapabilityDeclaringSession):
+    """带固定反向通道探测结果的会话替身。"""
+
+    def __init__(self, roots: list[Path], can_send_request: bool) -> None:
+        super().__init__(roots, declared=True)
+        self.can_send_request = can_send_request
+
+
+class BackChannelUnavailableSession(BackChannelSession):
+    """声明 roots capability 但反向通道不可用的会话替身，send_request 一经发起即失败。"""
+
+    def __init__(self, roots: list[Path]) -> None:
+        super().__init__(roots, False)
+
+    async def _conclude_send_request(
+        self, request_read_timeout_seconds: float | None
+    ) -> ListRootsResult:
+        del request_read_timeout_seconds
+        raise AssertionError("反向通道不可用时不得发起 roots/list")
+
+
 class FailingSession(CapabilityDeclaringSession):
     """声明 roots 且反向通道可用的会话替身：send_request 记录参数后抛 RuntimeError。"""
 

@@ -108,7 +108,7 @@ def _apply_roots_token(resolved_roots: list[Path]) -> Token[tuple[Path, ...] | N
 
 
 async def read_session_roots_result(ctx: Any) -> ListRootsResult | None:
-    """旧修订资源路径的 roots 直连取回，无会话、未声明能力或取回失败时降级返回 None。"""
+    """旧修订资源路径的 roots 直连取回，无会话、未声明能力、无反向通道或取回失败时降级返回 None。"""
     if ctx is None:
         return None
     session = session_or_none(ctx)
@@ -116,6 +116,9 @@ async def read_session_roots_result(ctx: Any) -> ListRootsResult | None:
         return None
     if not session_declares_roots_capability(session):
         logger.debug("客户端未声明 roots capability，跳过 roots 取回，回退环境变量边界")
+        return None
+    if not roots_back_channel_available(session):
+        logger.debug("会话无反向通道，跳过 roots 取回，回退环境变量边界")
         return None
     try:
         return await _request_session_roots(ctx, session)

@@ -39,6 +39,7 @@ from ..tools.runners import (
 )
 from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from ..utils.core.logs import get_logger
+from ..utils.io.io_stream import data_items
 from . import _responses
 from .context import build_web_request_context
 
@@ -75,13 +76,12 @@ def augment_generation_payload(structured: dict[str, object], images_root: Path)
     """改写 data 与 auto_save.results 条目的路径字段并附 web_path。
 
     供前端拼接图片端点；save_path 越出图片目录时其条目同样经 _rewrite_item_path
-    收敛为 Web 文件端点可服务的形态。
+    收敛为 Web 文件端点可服务的形态。data 的条目形态经 data_items 归一，dict
+    形态计单条目不漏收敛。
     """
-    data = structured.get("data")
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                _rewrite_item_path(item, images_root)
+    for item in data_items(structured.get("data")):
+        if isinstance(item, dict):
+            _rewrite_item_path(item, images_root)
     auto_save = structured.get("auto_save")
     results = auto_save.get("results") if isinstance(auto_save, dict) else None
     if isinstance(results, list):
@@ -99,8 +99,8 @@ async def _run_web_generation(
 
     请求体经 pydantic 输入模型校验，响应体为工具的结构化结果字典；失败结果
     按 error.type 映射状态码，响应体保持完整结构化结果供前端展示错误详情。
-    请求体解析与响应体序列化是随参考图体积线性增长的同步 CPU 工作，下沉
-    工作线程避免阻塞事件循环。
+    请求体解析达到下沉尺寸阈值时卸载专用 CPU 池，低于阈值同步执行；响应体
+    序列化无条件下沉专用 CPU 池。
     """
     body, parse_error = await _responses.parse_json_object_body(request)
     if parse_error is not None:

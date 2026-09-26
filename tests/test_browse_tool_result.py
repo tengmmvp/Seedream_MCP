@@ -10,21 +10,24 @@ SEEDREAM_WORKSPACE_ROOT 回退取得，图片目录为工作区派生的 .seedre
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn, cast
+from typing import Any, NamedTuple, NoReturn, cast
 
 import pytest
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
+from _log_fakes import RecordingLogger, capture_loguru_messages
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools import BrowseImagesInput
 from seedream_mcp.tools.core import browse as browse_core_module
 from seedream_mcp.tools.impl import browse_images as browse_images_module
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
+from seedream_mcp.utils.core.errors import SeedreamConfigError
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
@@ -33,6 +36,38 @@ def _seed_images_root(ws: Path) -> Path:
     root = ws / ".seedream" / "images"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+class _RescanSeeding(NamedTuple):
+    """补扫用例的工作区目录与按文件名索引的图片路径表。"""
+
+    workspace: Path
+    images: dict[str, Path]
+
+
+def _seed_rescan_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    outside_names: Sequence[str],
+    workspace_names: Sequence[str],
+) -> _RescanSeeding:
+    """在 tmp_path 下创建工作区与越界目录，按名写入图片并注入工作区环境变量。
+
+    images 以去后缀文件名为键索引两侧图片路径。
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+    images: dict[str, Path] = {}
+    for directory, names in ((outside_dir, outside_names), (workspace, workspace_names)):
+        for name in names:
+            path = directory / f"{name}.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n")
+            images[name] = path
+    return _RescanSeeding(workspace=workspace, images=images)
 
 
 async def test_browse_images_returns_structured_success(workspace_root: Path) -> None:
@@ -188,6 +223,48 @@ async def test_browse_images_fallback_error_preserves_format_filter(
     assert result.is_error is True
     assert isinstance(result.structured_content, dict)
     assert result.structured_content["format_filter"] == [".png"]
+
+
+async def test_browse_images_fallback_logs_business_error_without_traceback(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已归约业务异常兜底时记 warning 无堆栈，与生成流水线的两级日志口径一致。"""
+
+    async def _config_error_request(params: object, ctx: object, **kwargs: object) -> NoReturn:
+        raise SeedreamConfigError("数据根目录不可用")
+
+    monkeypatch.setattr(browse_images_module, "execute_browse_request", _config_error_request)
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(browse_images_module, "logger", fake_logger)
+
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
+
+    assert result.is_error is True
+    assert any("浏览图片处理失败" in message for message in fake_logger.warnings)
+    assert fake_logger.errors == []
+    assert not any(kwargs.get("exception") for kwargs in fake_logger.opt_kwargs)
+
+
+async def test_browse_images_fallback_logs_unexpected_error_with_traceback(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非预期异常兜底时仍记 error 级并附堆栈。"""
+
+    async def _exploding_request(params: object, ctx: object, **kwargs: object) -> NoReturn:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(browse_images_module, "execute_browse_request", _exploding_request)
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(browse_images_module, "logger", fake_logger)
+
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
+
+    assert result.is_error is True
+    assert any("浏览图片处理失败" in message for message in fake_logger.errors)
+    assert {"exception": True} in fake_logger.opt_kwargs
+    assert fake_logger.warnings == []
 
 
 async def test_browse_images_pagination_metadata(workspace_root: Path) -> None:
@@ -841,6 +918,137 @@ async def test_browse_images_dropped_entries_do_not_consume_page_quota(
     assert sc2["next_offset"] is None
     text2 = "".join(getattr(content, "text", "") for content in page2.content)
     assert "img_2.png" in text2
+
+
+async def test_browse_images_out_of_scope_warning_aggregates_across_rescan_rounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """越界告警覆盖整个补扫过程：多轮补扫聚合为单条含累计总量的告警。
+
+    聚合若只覆盖单轮，越界条目多的目录单次调用会产生 O(轮数) 条同类告警，
+    违背防刷屏意图；补扫轮次由注入扫描器返回越界条目居首的有序列表稳定复现。
+    """
+    outside_names = [f"out_{i}" for i in range(6)]
+    workspace_names = [f"img_{i}" for i in range(3)]
+    seeding = _seed_rescan_layout(
+        tmp_path, monkeypatch, outside_names=outside_names, workspace_names=workspace_names
+    )
+    scan_order = [seeding.images[name] for name in outside_names + workspace_names]
+
+    def _fake_scan(**kwargs: object) -> list[Path]:
+        limit = kwargs["limit"]
+        assert isinstance(limit, int)
+        return scan_order[:limit]
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        result = await handle_browse_images(
+            BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+        )
+
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["count"] == 2
+    out_of_scope_warnings = [w for w in warnings if "越界图片路径" in w]
+    assert len(out_of_scope_warnings) == 1
+    assert "越界图片路径 6 条" in out_of_scope_warnings[0]
+
+
+async def test_browse_images_out_of_scope_warning_survives_scan_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """补扫轮抛异常时已累计的越界计数仍落日志，保住翻不出图的排障线索。"""
+
+    outside_names = [f"out_{i}" for i in range(6)]
+    workspace_names = [f"img_{i}" for i in range(3)]
+    seeding = _seed_rescan_layout(
+        tmp_path, monkeypatch, outside_names=outside_names, workspace_names=workspace_names
+    )
+    scan_order = [seeding.images[name] for name in outside_names + workspace_names]
+    calls = {"count": 0}
+
+    def _fake_scan(**kwargs: object) -> list[Path]:
+        limit = kwargs["limit"]
+        assert isinstance(limit, int)
+        if calls["count"] == 0:
+            calls["count"] += 1
+            return scan_order[:limit]
+        raise OSError("scan exploded mid-rescan")
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        result = await handle_browse_images(
+            BrowseImagesInput(directory=".", recursive=False, limit=2, offset=0)
+        )
+
+    assert result.is_error is True
+    out_of_scope_warnings = [w for w in warnings if "越界图片路径" in w]
+    assert len(out_of_scope_warnings) == 1
+    assert "越界图片路径 3 条" in out_of_scope_warnings[0]
+
+
+@pytest.mark.parametrize(
+    ("scan_rounds", "remaining", "expected"),
+    [
+        pytest.param([["a", "c"], ["a", "b", "c", "d"]], 2, ["c", "b"], id="late-entry"),
+        pytest.param(
+            [["a", "b", "c"], ["a", "bb", "c", "d"]],
+            3,
+            ["b", "c", "bb"],
+            id="net-zero-mutation",
+        ),
+    ],
+)
+def test_scan_and_filter_directory_rescan_replay_collects_drifted_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scan_rounds: list[list[str]],
+    remaining: int,
+    expected: list[str],
+) -> None:
+    """补扫重放按路径标识跳过已消费条目，后轮补现与净零位移的新条目仍收进配额。
+
+    resolve 失败的条目不进缓存、limit 扩张触发全新扫描，补扫轮结果可能相对前轮
+    插行缩行；重放自列表头访问，插在已消费前缀之前的新条目不漏，净零位移为已
+    消费条目被删、新条目插于原位。各轮首条 a 越界驱动补扫，scan_rounds 以文件
+    名声明逐轮返回，expected 锁定收录次序。
+    """
+    referenced = {name for round_names in scan_rounds for name in round_names}
+    seeding = _seed_rescan_layout(
+        tmp_path,
+        monkeypatch,
+        outside_names=["a"],
+        workspace_names=sorted(referenced - {"a"}),
+    )
+    rounds: list[list[Path]] = [
+        [seeding.images[name] for name in round_names] for round_names in scan_rounds
+    ]
+
+    def _fake_scan(**kwargs: object) -> list[Path]:
+        assert rounds, "补扫轮数超出预期"
+        return rounds.pop(0)
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_scan)
+
+    entries = browse_core_module._scan_and_filter_directory(
+        resolved_dir=seeding.workspace.resolve(),
+        recursive=False,
+        max_depth=3,
+        format_filter=None,
+        remaining=remaining,
+        read_scope=[seeding.workspace.resolve()],
+        unreadable_dirs=[],
+        truncated_dirs=[],
+    )
+
+    assert rounds == []
+    assert [raw for raw, _ in entries] == [seeding.images[name] for name in expected]
 
 
 async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(

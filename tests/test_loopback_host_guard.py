@@ -1,6 +1,6 @@
 """_LoopbackHostGuardMiddleware 的 Host 头校验测试，守护回环绑定下的 DNS rebinding 防线。
 
-覆盖 http 与 websocket 的回环放行、外部 Host 拒绝与 Host 缺失 fail-closed。
+覆盖 http 与 websocket 的回环放行、外部 Host 拒绝、Host 缺失 fail-closed 与装配守卫集内容锁定。
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from starlette.types import Message
 
+import seedream_mcp.transport as transport_module
 from seedream_mcp.transport import _LoopbackHostGuardMiddleware
 
 
@@ -100,6 +101,34 @@ async def test_guard_rejects_non_loopback_hosts(host: bytes) -> None:
 
     assert inner.called_scopes == []
     assert sink.status() == 403
+
+
+async def test_guard_custom_allowed_hosts_cover_equivalent_spelling() -> None:
+    """等价写法绑定并入的字面量白名单按该写法访问放行，未知 Host 仍拒。"""
+    inner = _InnerApp()
+    sink = _MessageSink()
+    allowed = _LoopbackHostGuardMiddleware._ALLOWED_HOSTS | {b"127.0.0.2"}
+    guard = _LoopbackHostGuardMiddleware(inner, allowed_hosts=allowed)
+
+    await guard(_http_scope([(b"host", b"127.0.0.2:8000")]), _noop_receive, sink)
+    await guard(_http_scope([(b"host", b"evil.example.com")]), _noop_receive, sink)
+
+    assert len(inner.called_scopes) == 1
+    assert sink.status() == 403
+
+
+def test_loopback_bind_guard_hosts_cover_protected_bare_forms() -> None:
+    """回环绑定装配的 Host 守卫 bytes 集为三受保护地址的无端口形态，漏并任一即误拒本机访问。"""
+    assert transport_module._loopback_bind_guard_hosts("127.0.0.1") == frozenset(
+        {b"127.0.0.1", b"[::1]", b"localhost"}
+    )
+
+
+def test_loopback_bind_guard_hosts_merge_equivalent_spelling_literal() -> None:
+    """等价写法绑定把自身字面量并入守卫集，漏并即该写法的本机访问被误拒。"""
+    assert transport_module._loopback_bind_guard_hosts("127.0.0.2") == frozenset(
+        {b"127.0.0.1", b"[::1]", b"localhost", b"127.0.0.2"}
+    )
 
 
 @pytest.mark.parametrize("host", [b"LOCALHOST", b"LOCALHOST:8000", b"EVIL.EXAMPLE.COM"])

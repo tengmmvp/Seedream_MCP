@@ -20,9 +20,9 @@ from typing import Any
 from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import BaseModel, ConfigDict
 
-from ...utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD, run_in_cpu_pool
+from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
 from ...utils.core.logs import get_logger
-from ...utils.core.sanitizers import estimate_output_length, sanitize_data_text
+from ...utils.core.sanitizers import sanitize_data_text, utf8_value_leaf_length
 
 logger = get_logger()
 
@@ -69,7 +69,7 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
         usage: 用量统计字典，键由上游透传；5.0 Pro 另含 input_images 输入图片数。
         batch: 并行批次统计，单次请求时为 None。
         auto_save: 自动保存摘要，未启用时仅含 enabled 键。
-        truncated_events: SSE 解析因单事件体积超限丢弃的事件数，未发生丢弃时为
+        truncated_events: SSE 解析因超限或解析失败丢弃的事件数，未发生丢弃时为
             None。
         deadline_exceeded: SSE 流因总时长预算超限提前终止且保留了已收结果，未
             发生时为 None。
@@ -172,8 +172,8 @@ def build_error_structured(
     ).model_dump()
 
 
-# 镜像中以长度占位替换的二进制载荷键。
-_BINARY_PAYLOAD_KEYS = frozenset({"b64_json"})
+# 二进制载荷键集合，镜像占位替换与卸载门控的长度计量共用。
+BINARY_PAYLOAD_KEYS = frozenset({"b64_json"})
 
 
 def format_base64_placeholder(length: int) -> str:
@@ -183,7 +183,7 @@ def format_base64_placeholder(length: int) -> str:
 
 def _mirror_string(key: Any, value: str) -> str:
     """镜像字符串值：载荷键取长度占位，其余经数据通道净化，干净文本由净化入口的恒等快路直接透传。"""
-    if key in _BINARY_PAYLOAD_KEYS:
+    if key in BINARY_PAYLOAD_KEYS:
         return format_base64_placeholder(len(value))
     return sanitize_data_text(value)
 
@@ -236,26 +236,20 @@ def build_structured_json_text(structured: dict[str, Any]) -> TextContent:
     )
 
 
-def _mirror_value_leaf_cost(key: Any, value: Any) -> int | None:
-    """镜像估算的叶子计量钩子：二进制载荷键的字符串按占位长度计量，其余返回 None 走默认。"""
-    if isinstance(value, str) and key in _BINARY_PAYLOAD_KEYS:
-        return len(format_base64_placeholder(len(value)))
+def binary_placeholder_value_leaf_length(key: Any, value: Any, limit: int) -> int | None:
+    """二进制载荷键按占位长度、其余字符串经 UTF-8 字节钩子计量，非字符串返回 None 走默认计量，镜像构建门控使用。"""
+    if isinstance(value, str):
+        if key in BINARY_PAYLOAD_KEYS:
+            return len(format_base64_placeholder(len(value)))
+        return utf8_value_leaf_length(key, value, limit)
     return None
 
 
 def _mirror_build_should_offload(structured: dict[str, Any]) -> bool:
-    """判定镜像构建是否下沉专用 CPU 池：镜像载荷估算达到卸载阈值或嵌套超深时为真。
-
-    估算口径对准镜像实际处理的对象，value_leaf_cost 钩子使二进制载荷字符串按
-    占位长度计量；达到阈值时树遍历、净化与序列化整体下沉，避免大载荷阻塞事件
-    循环；小载荷内联构建免线程往返与池槽位占用。
-    """
-    estimated = estimate_output_length(
-        structured,
-        limit=CPU_OFFLOAD_SIZE_THRESHOLD,
-        value_leaf_cost=_mirror_value_leaf_cost,
+    """判定镜像构建是否下沉专用 CPU 池，委托池下沉判定单源并绑定镜像占位计量钩子。"""
+    return should_offload_to_cpu_pool(
+        structured, value_leaf_cost=binary_placeholder_value_leaf_length
     )
-    return estimated is None or estimated >= CPU_OFFLOAD_SIZE_THRESHOLD
 
 
 async def build_structured_tool_result(

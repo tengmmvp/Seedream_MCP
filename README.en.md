@@ -5,7 +5,7 @@
   ·
   <a href="./README.zh-TW.md">繁體中文</a>
   ·
-  <a href="./README.en.md">English</a>
+  <strong>English</strong>
 </p>
 
 <h3 align="center"><code>uvx seedream-image-mcp</code></h3>
@@ -104,6 +104,9 @@ curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-comp
 # Optional: create .env from .env.example for the read-only compose mount, replacing the env-var prefix below
 # Without .env, Docker creates a same-named directory as the mount source and breaks it; run "touch .env" first or drop that mount from the compose file
 
+# On Linux, create the data directory owned by uid 1000, Docker Desktop is unaffected
+mkdir -p .seedream && chown 1000:1000 .seedream
+
 # Start the service
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
@@ -130,6 +133,7 @@ Client configuration below uses Claude Desktop as the example; other streamable-
 
 ## 🔧 Client Configuration
 
+> [!WARNING]
 > It is recommended to inject `ARK_API_KEY` via `env` rather than writing it into `args`: command-line arguments appear in the process list and pose a leakage risk.
 
 ### Claude Desktop
@@ -193,6 +197,7 @@ Generic configuration (the `command` + `args` + `env` fields are the same as abo
 
 </details>
 
+> [!NOTE]
 > To specify a model/size, append it to `args`, e.g. `["seedream-image-mcp", "--model", "doubao-seedream-5.0"]`.
 
 Restart the corresponding client after configuration.
@@ -222,10 +227,10 @@ Generate an image from a text prompt. This tool calls an external billed API and
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported); when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
@@ -259,10 +264,10 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported); when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
@@ -295,10 +300,10 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported)
+- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported); when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
@@ -335,10 +340,10 @@ Generate multiple images in sequence; supports text-to-sequence, single-image-to
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
 - `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false`
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
 - `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, each producing a group of images; the number of images in each group is decided by the model based on the prompt, up to max_images; range 1-10; default 1
-- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; usually no need to set manually
+- `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
 - `save_path` (optional) - Custom save directory path
 - `custom_name` (optional) - Custom filename prefix
@@ -466,6 +471,7 @@ Different models support different capabilities and parameter ranges. Please not
   </tr>
 </table>
 
+> [!TIP]
 > **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported with default preset `2K`, the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
 
 ## 💰 Model Pricing
@@ -500,6 +506,7 @@ All models are billed per image:
   </tr>
 </table>
 
+> [!NOTE]
 > **Billing notes**: Images that fail to generate (e.g. due to moderation) are not billed; image sets are billed by the number of images actually generated; Seedream 5.0 Pro layer decomposition is billed per layer at its actual pixel tier, with tiers split at 2.61 megapixels (roughly 1.5K). Prices here are for reference only — see the [Volcengine Ark billing guide](https://docs.volcengine.com/docs/82379/1544681) for the full billing logic and the latest prices.
 
 ## 📦 Available Resources
@@ -631,6 +638,7 @@ The server provides the following MCP prompt templates to generate text-to-image
 --version                                          # Print the version and exit
 ```
 
+> [!IMPORTANT]
 > **Security note**: `localhost` is not treated as a loopback address and must follow the non-loopback requirements: a Bearer auth token and TLS must be configured, and the service refuses to start without them; to use loopback without auth, bind to `127.0.0.1` or `::1` instead. Non-loopback binds validate the Host and Origin headers against the bind address by default to prevent DNS rebinding; wildcard binds (`0.0.0.0`/`::`) cannot predict the access address, leave validation off by default with the mandatory Bearer authentication providing equivalent protection, and `SEEDREAM_HTTP_ALLOWED_HOSTS` enables validation. Cross-origin browser clients connecting to `/mcp` (e.g. web-based clients) additionally require `SEEDREAM_HTTP_ALLOWED_ORIGINS`; once configured, cross-origin preflight requests are answered automatically and listed origins are allowed. Public pages in the allowlist are also exempted from the browser's private-network-access restriction and can reach locally bound services directly. In production and container deployments, pass secrets via environment variables (`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`) instead of the CLI flags `--api-key` / `--auth-token`, which stay in the process list and shell history; on multi-user hosts, configure an auth token for streamable-http even when it binds to a loopback address. The web console does not relax any of the transport security requirements above: every new API surface it adds requires the token, and only the data-free static page skeleton is exempt.
 
 ### Usage Examples

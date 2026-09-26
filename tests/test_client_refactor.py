@@ -15,6 +15,11 @@ import httpx
 import pytest
 from PIL import Image
 
+from seedream_mcp._client_http import (
+    _first_error_detail,
+    _has_valid_image_items,
+    _outcome_error_note,
+)
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import (
@@ -23,6 +28,7 @@ from seedream_mcp.utils.core.errors import (
     SeedreamMCPError,
     SeedreamValidationError,
     resolve_error_profile,
+    response_reports_failure,
 )
 from seedream_mcp.utils.core.executors import (
     CPU_OFFLOAD_SIZE_THRESHOLD,
@@ -30,6 +36,7 @@ from seedream_mcp.utils.core.executors import (
     shutdown_cpu_offload_executor,
 )
 from seedream_mcp.utils.images import image_validation as image_validation_module
+from seedream_mcp.utils.io.io_stream import escalate_partial_status, item_has_image_payload
 
 from _client_fakes import _install_mock_transport
 from _cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
@@ -805,9 +812,12 @@ def test_build_api_result_marks_partial_when_completed_data_has_error() -> None:
 
 
 def test_build_api_result_marks_partial_when_status_missing_data_has_error() -> None:
-    """status 缺省且 data 含 error 项同样须标记 partial。"""
+    """status 缺省且 data 含 error 项同样须标记 partial。
+
+    error 值非 None 即计失败条目。
+    """
     client = SeedreamClient(_build_config())
-    result = client._build_api_result({"data": [{"error": "boom"}]})
+    result = client._build_api_result({"data": [{"error": {"code": "E", "message": "boom"}}]})
     assert result["status"] == "partial"
 
 
@@ -840,6 +850,69 @@ def test_build_api_result_non_str_status_with_error_data_marks_partial() -> None
     )
 
     assert result["status"] == "partial"
+
+
+def test_build_api_result_marks_partial_for_dict_data_with_error() -> None:
+    """dict 形态 data 含 error 键时计为单条目升格 partial，与 list 形态同口径。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"status": "completed", "data": {"error": {"code": "blocked", "message": "blocked"}}}
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "partial"
+
+
+def test_build_api_result_keeps_completed_for_dict_data_without_error() -> None:
+    """dict 形态 data 无 error 键时不误降级，status 保持 completed。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result({"status": "completed", "data": {"url": "http://x/1.png"}})
+
+    assert result["status"] == "completed"
+
+
+def test_build_api_result_keeps_completed_when_item_error_value_none() -> None:
+    """条目 error:null 显式声明无错误，不升格 partial。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"status": "completed", "data": [{"url": "http://x/1.png", "error": None}]}
+    )
+
+    assert result["status"] == "completed"
+
+
+def test_build_api_result_marks_request_failure_when_items_carry_no_payload() -> None:
+    """顶层 error 且条目无图像载荷时按请求级失败回显，成功形态不吞顶层错误。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"error": {"code": "X", "message": "m"}, "data": [{"error": None}]}
+    )
+
+    assert result["success"] is False
+    assert result["error"] == {"code": "X", "message": "m"}
+
+
+@pytest.mark.parametrize("error_value", ["boom", 42])
+def test_build_api_result_marks_partial_when_item_error_value_not_dict(
+    error_value: Any,
+) -> None:
+    """条目 error 值非 dict 时同样升格 partial，契约外错误形态不静默放行。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"status": "completed", "data": [{"url": "http://x/1.png", "error": error_value}]}
+    )
+
+    assert result["status"] == "partial"
+
+
+def test_build_api_result_keeps_completed_for_dict_data_with_null_error() -> None:
+    """dict 形态 data 的 error:null 不升格 partial，status 保持 completed。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"status": "completed", "data": {"url": "http://x/1.png", "error": None}}
+    )
+
+    assert result["status"] == "completed"
 
 
 async def test_image_to_image_invalid_data_uri_fails_before_api_call(
@@ -1485,6 +1558,24 @@ async def test_text_to_image_logs_info_completion_on_success(
     assert fake_logger.warnings == []
 
 
+def test_outcome_log_reports_completion_for_dict_data_with_null_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dict 形态 data 的 error:null 不升格 partial，结局日志落任务完成。"""
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+    result = client._build_api_result(
+        {"status": "completed", "data": {"url": "http://x/1.png", "error": None}}
+    )
+
+    client._log_task_outcome("文生图", result)
+
+    assert result["status"] == "completed"
+    assert not any("部分完成" in message for message in fake_logger.warnings)
+    assert any("文生图任务完成" in message for message in fake_logger.info_messages)
+
+
 async def test_multi_image_fusion_logs_error_on_soft_failure_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1572,6 +1663,91 @@ async def test_text_to_image_logs_warning_when_success_carries_top_error(
     assert any("PartialWarn quota near limit" in message for message in fake_logger.warnings)
     assert not any("文生图任务完成" in message for message in fake_logger.info_messages)
     assert fake_logger.errors == []
+
+
+async def test_text_to_image_logs_error_on_failed_status_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """success=True 但 status=failed 的软失败结果落 error 级任务失败日志。
+
+    该形态被下游 response_reports_failure 判为失败，结局日志不得谎报任务完成。
+    """
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
+        del endpoint, request_data
+        return {
+            "success": True,
+            "data": [{"error": {"code": "E", "message": "boom"}}],
+            "usage": {},
+            "status": "failed",
+        }
+
+    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    await client.text_to_image(prompt="p", size="2K")
+
+    assert any("文生图任务失败" in message for message in fake_logger.errors)
+    # 失败结局日志携带失败项计数与首条原因
+    assert any("1 项失败: E boom" in message for message in fake_logger.errors)
+    assert not any("文生图任务完成" in message for message in fake_logger.info_messages)
+
+
+async def test_text_to_image_string_error_item_escalates_to_partial_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """条目 error 为契约外字符串形态时经真实读体路径升格 partial，结局日志落 warning。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"url": "https://example.com/1.png", "error": "boom"}],
+                "status": "completed",
+            },
+        )
+
+    async with _client_with_mock_transport(handler) as client:
+        fake_logger = RecordingLogger()
+        monkeypatch.setattr(client, "logger", fake_logger)
+        result = await client.text_to_image(prompt="p", size="2K")
+
+    assert result["status"] == "partial"
+    assert any("文生图任务部分完成" in message for message in fake_logger.warnings)
+    # 非 dict 错误形态的详情提取不得抛错，计数与字符串详情照常进入日志。
+    assert any("1 项失败: boom" in message for message in fake_logger.warnings)
+    assert fake_logger.errors == []
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"success": True, "status": "completed"},
+        {"success": True, "status": "failed"},
+        {"success": True, "status": "partial"},
+        {"success": False, "status": "completed"},
+        {"success": False},
+        {"success": True},
+        {"status": "failed"},
+        {},
+    ],
+)
+def test_outcome_log_failure_matches_shared_predicate(
+    response: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """结局日志的失败分级与 response_reports_failure 单源判定一致。"""
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    client._log_task_outcome("文生图", response)
+
+    expected_failed = response_reports_failure(response)
+    assert bool(fake_logger.errors) is expected_failed
+    if expected_failed:
+        assert fake_logger.info_messages == []
 
 
 def test_public_generation_methods_keep_prompt_first() -> None:
@@ -1731,3 +1907,151 @@ async def test_call_api_pool_closed_during_sse_parse_reports_shutdown() -> None:
 
     _assert_shutdown_error_shape(caught)
     assert handler_calls == 1
+
+
+def test_outcome_error_note_extracts_dict_form_failure_detail() -> None:
+    """dict 形态 data 的失败详情与 list 条目同口径提取。"""
+    response = {
+        "success": True,
+        "status": "completed",
+        "data": {"url": "https://example.com/a.png", "error": {"code": "X", "message": "m"}},
+    }
+
+    assert _outcome_error_note(response) == "1 项失败: X m"
+
+
+@pytest.mark.parametrize(
+    ("data", "expect_partial", "expect_note", "expect_valid"),
+    [
+        ([{"url": "u"}, {"error": {"code": "E", "message": "m"}}], True, "1 项失败: E m", True),
+        ([{"error": {"code": "E", "message": "m"}}], True, "1 项失败: E m", False),
+        ({"url": "u", "error": {"code": "E", "message": "m"}}, True, "1 项失败: E m", False),
+        ([{"url": "u", "error": None}], False, "无错误详情", True),
+        ([{"error": None}], False, "无错误详情", False),
+        ([{"url": ""}], False, "无错误详情", False),
+        ([{"url": "u", "error": "boom"}], True, "1 项失败: boom", False),
+        ([{"url": "u", "error": {"code": "E", "message": " "}}], True, "1 项失败: E", False),
+        ([{"url": "u", "error": 42}], True, "1 项失败: 42", False),
+        ([{"url": "u", "error": 0}], True, "1 项失败: 0", False),
+        ([{"url": "u", "error": ["boom", "x"]}], True, "1 项失败: ['boom', 'x']", False),
+        ([{"url": "u", "error": ["p" * 300]}], True, "1 项失败: <truncated:list, 1 items>", False),
+        (
+            [{"url": "u", "error": {"code": "E", "message": 0}}],
+            True,
+            "1 项失败: E 0",
+            False,
+        ),
+        (
+            [{"url": "u", "error": {"code": "E", "message": ["m" * 300]}}],
+            True,
+            "1 项失败: E <truncated:list, 1 items>",
+            False,
+        ),
+        ({"url": "u"}, False, "无错误详情", True),
+        ("oops", False, "无错误详情", False),
+        (None, False, "无错误详情", False),
+    ],
+    ids=[
+        "list-mixed",
+        "list-error-only",
+        "dict-error",
+        "list-null-error",
+        "list-null-error-contentless",
+        "list-empty-url",
+        "list-string-error",
+        "list-ws-message",
+        "list-int-error",
+        "list-zero-error",
+        "list-small-container-error",
+        "list-oversize-container-error",
+        "list-zero-message-part",
+        "list-oversize-message-part",
+        "dict-plain",
+        "scalar",
+        "none",
+    ],
+)
+def test_data_shape_consumers_share_single_source(
+    data: Any, expect_partial: bool, expect_note: str, expect_valid: bool
+) -> None:
+    """升格判定、结局日志错误提取与有效图片判定共用 data_items 的形态归一。"""
+    expected_status = "partial" if expect_partial else "completed"
+
+    assert escalate_partial_status("completed", data) == expected_status
+    assert _outcome_error_note({"data": data}) == expect_note
+    assert _has_valid_image_items(data) is expect_valid
+
+
+def test_first_error_detail_bounds_container_render_without_full_str() -> None:
+    """超体量容器错误渲染为元素数摘要，完整 str/repr 物化不被触发，事件循环免 O(载荷) 拼接。"""
+    materializations: list[str] = []
+
+    class SentinelList(list[str]):
+        def __str__(self) -> str:
+            materializations.append("str")
+            return super().__str__()
+
+        def __repr__(self) -> str:
+            materializations.append("repr")
+            return super().__repr__()
+
+    oversize = SentinelList(["p" * 10000])
+    assert _first_error_detail(oversize) == "<truncated:list, 1 items>"
+
+    oversize_part = SentinelList(["m" * 10000])
+    detail = _first_error_detail({"code": "E", "message": oversize_part})
+
+    assert detail == "E <truncated:list, 1 items>"
+    assert materializations == []
+
+
+@pytest.mark.parametrize(
+    ("item", "expected"),
+    [
+        ({"url": "https://example.com/1.png"}, True),
+        ({"b64_json": "aGVsbG8="}, True),
+        ({"url": None, "b64_json": None}, False),
+        ({"url": "", "b64_json": ""}, False),
+        ({"error": {"code": "E"}}, False),
+        ("oops", False),
+        (None, False),
+    ],
+    ids=["url", "b64-json", "null-values", "empty-strings", "error-only", "scalar", "none"],
+)
+def test_item_has_image_payload_judges_non_empty_payload(item: Any, expected: bool) -> None:
+    """载荷存在判定单源于 io_stream，url 或 b64_json 任一非空即计，空取值与非 dict 形态计无载荷。"""
+    assert item_has_image_payload(item) is expected
+
+
+def test_has_valid_image_items_consumes_payload_predicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """有效图片判定的载荷判据消费 io_stream 单源谓词，不在 _client_http 内重造。"""
+    import seedream_mcp._client_http as client_http_module
+
+    monkeypatch.setattr(client_http_module, "item_has_image_payload", lambda item: False)
+
+    assert client_http_module._has_valid_image_items([{"url": "u"}]) is False
+
+
+@pytest.mark.parametrize(
+    ("data", "expected_count"),
+    [
+        ([{"url": "u"}, {"url": "v"}], 2),
+        ({"url": "u"}, 1),
+        ("oops", 0),
+        (None, 0),
+    ],
+    ids=["list", "dict", "scalar", "none"],
+)
+def test_build_api_result_data_count_follows_data_items(
+    data: Any, expected_count: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """data_count 经 data_items 推导，标量形态条目数归 0 与谓词口径一致。"""
+    client = SeedreamClient(_build_config())
+    fake_logger = RecordingLogger()
+    monkeypatch.setattr(client, "logger", fake_logger)
+
+    client._build_api_result({"status": "completed", "data": data})
+
+    assert any(f"data_count={expected_count}" in message for message in fake_logger.debug_messages)

@@ -1,15 +1,9 @@
 """structuredContent 的 JSON 文本回传守护测试。
 
-规范建议返回 structuredContent 的工具在 content 数组同时回传序列化 JSON；用例
-覆盖生成工具成功（含预览块序）与异常失败、浏览工具成功、空结果与失败出口，
-锁定追加块可经 json.loads 还原且净化无变化的干净内容与 structuredContent 等值；
-含凭据样式或超长的字符串值在镜像中经数据通道掩码或截断，b64_json 载荷替换为
-长度占位，structuredContent 字段本身均不受影响；镜像视图的 JSON 等值、键序与
-原树不可变由直连用例锁定；非有限浮点使严格序列化失败并降级为无镜像结果，
-不可见字符与 userinfo URL 的既有净化口径不被恒等快路绕过；镜像构建按载荷尺寸
-估算分流：达到卸载阈值下沉 seedream-cpu-offload 专用线程池、小载荷内联构建，
-b64_json 载荷按占位长度参与估算、普通长串仍按全长计量，两路径的降级语义一致，
-由 spy 用例与阈值边界用例锁定。
+规范建议返回 structuredContent 的工具在 content 数组同时回传序列化 JSON；镜像块
+与 structuredContent 经 json.loads 等值仅对净化无变化的干净内容成立，掩码、截断
+与 b64_json 长度占位只作用于镜像视图、原树不受影响；非有限浮点降级为无镜像结果；
+镜像构建按载荷尺寸估算分流专用 CPU 池或内联构建。
 """
 
 from __future__ import annotations
@@ -33,7 +27,7 @@ from seedream_mcp.tools.core.outputs import (
 )
 from seedream_mcp.tools.core.schemas import BrowseImagesInput, ResponseFormat, TextToImageInput
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
-from seedream_mcp.utils.core.sanitizers import estimate_output_length
+from seedream_mcp.utils.core.sanitizers import estimate_output_length, utf8_value_leaf_length
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.io import io_save
@@ -465,6 +459,26 @@ async def test_structured_tool_result_just_below_offload_threshold_builds_inline
     spy.assert_ran_outside_cpu_pool()
 
 
+def test_utf8_leaf_hook_early_exit_follows_caller_limit() -> None:
+    """UTF-8 计量钩子的免编码早退随调用方 limit 生效，不耦合全局阈值。"""
+    value = "字" * 100
+
+    assert utf8_value_leaf_length(None, value, 50) == 100
+    assert utf8_value_leaf_length(None, value, 101) == 300
+
+
+def test_estimate_output_length_passes_limit_to_leaf_cost_hook() -> None:
+    """叶子计量钩子收到调用方的 limit，免编码早退由同一上限驱动。"""
+    seen_limits: list[int] = []
+
+    def _hook(key: Any, value: Any, limit: int) -> int | None:
+        seen_limits.append(limit)
+        return None
+
+    assert estimate_output_length({"a": "b"}, 200, value_leaf_cost=_hook) is not None
+    assert seen_limits == [200]
+
+
 async def test_structured_tool_result_b64_payload_estimates_placeholder_inline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -544,7 +558,7 @@ async def test_structured_tool_result_b64_mixed_just_below_threshold_builds_inli
 
 
 def test_mirror_offload_estimator_delegates_to_shared_estimate() -> None:
-    """守护：镜像卸载估算复用通用估算器加占位钩子，遍历骨架不在本模块复制。"""
+    """镜像卸载估算复用通用估算器加占位钩子，遍历骨架不在本模块复制。"""
     import inspect
 
     source = inspect.getsource(outputs_module)

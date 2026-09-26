@@ -211,6 +211,23 @@ async def test_direct_path_large_body_serialization_runs_in_cpu_pool(
     spy.assert_ran_in_cpu_pool()
 
 
+async def test_direct_path_cjk_body_over_byte_threshold_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CJK 载荷按 UTF-8 字节口径判下沉：字符数低于阈值而字节数达阈值仍卸载。"""
+    spy = _install_serialize_thread_spy(monkeypatch)
+    sent_bodies: list[bytes] = []
+    _install_send_capture(monkeypatch, sent_bodies)
+
+    cjk_payload = {"prompt": "汉" * 40_000}
+    async with SeedreamClient(_build_config()) as client:
+        result = await client._call_api("text_to_image", cjk_payload)
+
+    assert result["success"] is True
+    assert len(sent_bodies) == 1
+    spy.assert_ran_in_cpu_pool()
+
+
 async def test_shared_plan_large_body_serialization_runs_in_cpu_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -212,7 +212,7 @@ class SeedreamConfig:
     request_state_secret_keys: tuple[bytes, ...] | None = _env_field(
         None, "SEEDREAM_REQUEST_STATE_KEYS"
     )
-    # validate 收集的构建期告警；builder 路径汇入全局经 drain 输出，直接构造留在实例
+    # validate 收集的构建期告警；builder 路径汇入全局经 drain 输出，直接构造留在实例。
     _build_warnings: list[tuple[str, str]] = field(
         init=False, repr=False, compare=False, default_factory=list
     )
@@ -695,22 +695,9 @@ class SeedreamConfig:
         keys = self.request_state_secret_keys
         if keys is None:
             return
-        seen: set[bytes] = set()
-        for index, key in enumerate(keys, start=1):
-            if len(key) < _REQUEST_STATE_KEY_MIN_BYTES:
-                raise SeedreamConfigError(
-                    f"request_state_secret_keys 第 {index} 个密钥解码后仅 {len(key)} 字节，"
-                    f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
-                    f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
-                    f"{_env_var_suffix('request_state_secret_keys')}"
-                )
-            if key in seen:
-                raise SeedreamConfigError(
-                    f"request_state_secret_keys 第 {index} 个密钥与在先密钥重复，"
-                    f"轮换环内同一密钥只需登记一次"
-                    f"{_env_var_suffix('request_state_secret_keys')}"
-                )
-            seen.add(key)
+        message = _first_invalid_request_state_key_message(keys)
+        if message is not None:
+            raise SeedreamConfigError(message)
 
     def _validate_dir_field(self, value: str, field_name: str) -> None:
         """校验给定路径指向有效目录，存在但非目录时抛 SeedreamConfigError。
@@ -795,7 +782,7 @@ def _build_config_from_sources_unlocked(
     try:
         return _build_config_unlocked_body(overrides, env_file)
     except BaseException:
-        # 构建失败的告警不外泄给下一次成功构建的 drain
+        # 构建失败的告警不外泄给下一次成功构建的 drain。
         _BUILD_WARNINGS.rollback(pending_mark)
         raise
 
@@ -878,6 +865,32 @@ def set_active_config(config: SeedreamConfig | None) -> None:
         clear_resolved_env_root_cache()
 
 
+def _first_invalid_request_state_key_message(
+    keys: tuple[bytes, ...],
+) -> str | None:
+    """返回密钥环内首个不合规键的报错消息，全部合规时为 None。
+
+    同键既短又重复时按短键计；导入期预检共用本判定，环规则单源维护。
+    """
+    seen: set[bytes] = set()
+    for index, key in enumerate(keys, start=1):
+        if len(key) < _REQUEST_STATE_KEY_MIN_BYTES:
+            return (
+                f"request_state_secret_keys 第 {index} 个密钥解码后仅 {len(key)} 字节，"
+                f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
+                f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
+                f"{_env_var_suffix('request_state_secret_keys')}"
+            )
+        if key in seen:
+            return (
+                f"request_state_secret_keys 第 {index} 个密钥与在先密钥重复，"
+                f"轮换环内同一密钥只需登记一次"
+                f"{_env_var_suffix('request_state_secret_keys')}"
+            )
+        seen.add(key)
+    return None
+
+
 def active_request_state_keys() -> tuple[bytes, ...] | None:
     """向 resources 提供 requestState 密钥环的活动取值。
 
@@ -901,9 +914,8 @@ def active_request_state_keys() -> tuple[bytes, ...] | None:
         keys = tuple(bytes.fromhex(entry) for entry in entries)
     except ValueError:
         return None
-    # 与配置构建同口径的强度与重复校验，不合法值按未配置处理，避免喂给 SDK
-    # 在导入期崩溃。
-    if any(len(key) < _REQUEST_STATE_KEY_MIN_BYTES for key in keys) or len(set(keys)) != len(keys):
+    # 环判定与配置构建共用同一谓词，不合法值按未配置处理，避免喂给 SDK 在导入期崩溃。
+    if _first_invalid_request_state_key_message(keys) is not None:
         return None
     return keys or None
 
@@ -932,14 +944,15 @@ register_env_workspace_root_provider(
 register_data_root_provider(_make_env_location_provider("data_root", "SEEDREAM_DATA_ROOT"))
 
 
-def _active_generate_concurrency() -> int | None:
-    """CPU 卸载池深提供者：返回活动配置的生成并发，配置不可构建时返回 None。"""
+def _active_pool_concurrency() -> tuple[int, int] | None:
+    """CPU 卸载池深提供者：返回活动配置的生成并发与图像预处理并发，配置不可构建时返回 None。"""
     try:
-        return get_active_config().generate_concurrency
+        config = get_active_config()
     except (SeedreamConfigError, OSError):
         # 配置构建失败不阻断池创建，回退交由 executors 侧兜底。
         return None
+    return config.generate_concurrency, config.image_prepare_concurrency
 
 
-# CPU 卸载池深经提供者取活动配置的生成并发，utils/core 不反向依赖本模块。
-register_cpu_offload_depth_provider(_active_generate_concurrency)
+# CPU 卸载池深经提供者取活动配置的生成并发与图像预处理并发，utils/core 不反向依赖本模块。
+register_cpu_offload_depth_provider(_active_pool_concurrency)

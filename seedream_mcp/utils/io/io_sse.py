@@ -10,12 +10,19 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
-from ..core.errors import SeedreamAPIError
-from ..core.executors import CPU_OFFLOAD_SIZE_THRESHOLD, run_in_cpu_pool
+from ..core.errors import SeedreamAPIError, has_message_value
+from ..core.executors import run_in_cpu_pool, should_offload_size
 from ..core.sanitizers import truncate_upstream_message_fragment
+from .io_stream import (
+    RESPONSE_BODY_LIMIT_HINT,
+    STREAM_DEADLINE_HIT,
+    STREAM_ENDED,
+    escalate_partial_status,
+    next_stream_chunk,
+)
 
 if TYPE_CHECKING:
     # 注解经 __future__ 字符串化不在运行时求值，httpx 与 Logger 仅类型检查期导入。
@@ -104,30 +111,28 @@ def _extract_data_field_values(raw_segment: bytes | bytearray) -> list[bytes | b
     return values
 
 
-def _has_lost_data_payload(tail: bytes | bytearray) -> bool:
-    """判断流末尾残留段是否携带实际丢失的 data 负载。
+def _has_lost_data_values(values: list[bytes | bytearray]) -> bool:
+    """判断候选 data 负载值中是否含非空且非 [DONE] 哨兵的实际负载。
 
-    空白行、注释行与 ``[DONE]`` 哨兵经 parse_sse_segment 同样返回 None，但均不构成
-    数据丢失；仅当残留段含非空且非哨兵的 data 负载时，解析失败才计为丢失事件。
+    空白行、注释行与 ``[DONE]`` 哨兵解析时同样返回 None，但均不构成数据丢失；
+    仅当存在非空且非哨兵的负载值时，解析失败才计为丢失事件。
     """
-    for value in _extract_data_field_values(tail):
+    for value in values:
         stripped = value.strip()
         if stripped and stripped != b"[DONE]":
             return True
     return False
 
 
-def parse_sse_segment(
-    segment: bytes | bytearray, log: Logger | None = None
-) -> dict[str, Any] | None:
-    """解析单个 SSE 事件段，返回事件对象。
+def _parse_sse_segment_payload(
+    segment: bytes | bytearray,
+) -> tuple[dict[str, Any] | None, str | None, bool, int]:
+    """解析单个事件段，返回事件对象、解析失败原因、丢失负载标记与剥离首尾空白后的段长度。
 
-    解析失败时记录日志并返回 None。负载全程按 bytes 处理并直接交给 json.loads，
+    失败原因为 None 表示无 data 负载、[DONE] 哨兵或解析成功；段长度供失败日志
+    记录事件规模；丢失负载标记仅在解析失败且存在非空非哨兵的 data 负载时为真，
+    按未 trim 原段的行匹配口径计算。负载全程按 bytes 处理并直接交给 json.loads，
     避免大事件场景下整段事件的 str decode 分配造成瞬时内存峰值。
-
-    Args:
-        segment: 单个 SSE 事件段的原始字节。
-        log: 解析失败时记录日志的 logger；None 时不记录。
     """
     start = 0
     end = len(segment)
@@ -137,19 +142,25 @@ def parse_sse_segment(
         end -= 1
     raw_segment = segment[start:end] if start > 0 or end < len(segment) else segment
     if not raw_segment:
-        return None
+        return None, None, False, 0
 
+    # 丢失判定对齐未 trim 原段的行匹配：段首缩进的 data: 行仅在 trim 后可见，
+    # 其值不计入丢失；trim 停在行首时该行本就可见，仍计入。
+    first_value_hidden = (
+        start > 0 and segment[start - 1 : start] != b"\n" and raw_segment.startswith(b"data:")
+    )
+    data_parts: list[bytes | bytearray] = []
     try:
         # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用。
         data_parts = _extract_data_field_values(raw_segment)
         payload = b"\n".join(data_parts) if data_parts else None
         # [DONE] 为流结束哨兵而非图片事件，直接丢弃。
         if not payload or payload == b"[DONE]":
-            return None
+            return None, None, False, len(raw_segment)
         parsed_payload = json.loads(payload)
         if not isinstance(parsed_payload, dict):
             raise ValueError("SSE 事件数据必须是对象")
-        return cast(dict[str, Any], parsed_payload)
+        return cast(dict[str, Any], parsed_payload), None, False, len(raw_segment)
     # 深嵌套负载在 json.loads 内抛 RecursionError，它是 RuntimeError 子类而非
     # ValueError，须显式列入才能按解析失败丢弃。
     except (
@@ -159,18 +170,19 @@ def parse_sse_segment(
         IndexError,
         RecursionError,
     ) as exc:
-        if log is not None:
-            log.warning("SSE事件解析失败: {}", str(exc))
-            log.debug("SSE事件原始段长度: {} bytes", len(raw_segment))
-        return None
+        lost_values = data_parts[1:] if first_value_hidden else data_parts
+        return None, str(exc), _has_lost_data_values(lost_values), len(raw_segment)
+
+
+def _log_segment_parse_failure(log: Logger, error: str, segment_len: int) -> None:
+    """以统一口径记录事件段解析失败告警与段长度 debug 日志。"""
+    log.warning("SSE事件解析失败: {}", error)
+    log.debug("SSE事件原始段长度: {} bytes", segment_len)
 
 
 # 处理进度 debug 日志的最小字节间隔：累计字节每跨过该值输出一次，记录频次不随
 # chunk_size 取值漂移。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
-
-# 响应体超限消息的环境变量调整提示，_client_http 的同文案共用单一来源。
-RESPONSE_BODY_LIMIT_HINT = "，可经 SEEDREAM_RESPONSE_BODY_LIMIT 调整"
 
 # 单条解析产物的内存开销估计：事件 dict 本体、键字符串与内层 dict 等解析产物实测
 # 约 350-450 字节，取 448 字节为保守常量。条目上限按「该值 × 条数 ≤ 字节总量限额」
@@ -190,15 +202,29 @@ _CR_LINE_ENDING_RE = re.compile(b"\r\n|\r")
 _UTF8_BOM = b"\xef\xbb\xbf"
 
 
+def _parse_segment_with_lost_flag(
+    segment: bytes | bytearray, log: Logger | None
+) -> tuple[dict[str, Any] | None, str | None, bool]:
+    """解析单个事件段并判定解析失败时是否丢失 data 负载，返回失败原因。
+
+    log 非 None 时解析失败记告警与段长 debug 日志（流末尾残留路径）；中段抽干
+    路径传 None，失败原因交由调用方合并进单条告警，同一坏事件不重复记。
+    """
+    event, error, lost_payload, raw_len = _parse_sse_segment_payload(segment)
+    if error is not None and log is not None:
+        _log_segment_parse_failure(log, error, raw_len)
+    return event, error, lost_payload
+
+
 def _slice_parse_segment(
-    buffer: bytearray, start: int, end: int, log: Logger
-) -> dict[str, Any] | None:
-    """在专用 CPU 池线程内切出 buffer[start:end] 事件段并解析。
+    buffer: bytearray, start: int, end: int
+) -> tuple[dict[str, Any] | None, str | None, bool]:
+    """在专用 CPU 池线程内切出 buffer[start:end] 事件段并解析、判定丢失负载。
 
     bytearray 切片是一次 memcpy，单事件上限约 event_truncate_threshold 量级，
-    与 json.loads 一并下沉线程，避免两者在事件循环上叠加阻塞。
+    与 json.loads 及丢失判定一并下沉线程，避免在事件循环上叠加阻塞。
     """
-    return parse_sse_segment(buffer[start:end], log)
+    return _parse_segment_with_lost_flag(buffer[start:end], None)
 
 
 class _SSEFrameBuffer:
@@ -262,15 +288,18 @@ class _SSEFrameBuffer:
             self._search_hint = 0
             yield seg_start, sep
 
-    async def parse_segment(self, start: int, end: int, log: Logger) -> dict[str, Any] | None:
-        """切出闭开区间内的事件段并解析，大段把切片与解析一并卸载到专用 CPU 池。
+    async def parse_segment(
+        self, start: int, end: int
+    ) -> tuple[dict[str, Any] | None, str | None, bool]:
+        """切出闭开区间内的事件段并解析、带回失败原因与丢失负载标记，大段下沉专用 CPU 池。
 
-        stream + b64_json 的多 MB 事件在事件循环上产生 memcpy 与解析阻塞，超过
-        卸载阈值即下沉；小段保持同步处理省线程调度开销。
+        stream + b64_json 的多 MB 事件在事件循环上产生 memcpy 与解析阻塞，达到
+        卸载阈值即下沉；小段保持同步处理省线程调度开销。解析失败不在段内记日志，
+        由调用方按所处流位置记单条告警。
         """
-        if end - start > CPU_OFFLOAD_SIZE_THRESHOLD:
-            return await run_in_cpu_pool(_slice_parse_segment, self._buffer, start, end, log)
-        return parse_sse_segment(self._buffer[start:end], log)
+        if should_offload_size(end - start):
+            return await run_in_cpu_pool(_slice_parse_segment, self._buffer, start, end)
+        return _parse_segment_with_lost_flag(self._buffer[start:end], None)
 
     def recycle(self, threshold: int) -> None:
         """已消费前缀达到 threshold 时批量回收，O(n) 回收均摊到至少 threshold 字节。"""
@@ -298,8 +327,8 @@ class _SSEFrameBuffer:
             self._pending_cr = False
 
     async def parse_tail(self, log: Logger) -> tuple[dict[str, Any] | None, bool, int]:
-        """切出未消费尾部并解析、判定丢失与返回尾部字节长度，超阈值卸载专用 CPU 池。"""
-        if len(self._buffer) - self._offset > CPU_OFFLOAD_SIZE_THRESHOLD:
+        """切出未消费尾部并解析、判定丢失与返回尾部字节长度，达阈值卸载专用 CPU 池。"""
+        if should_offload_size(len(self._buffer) - self._offset):
             return await run_in_cpu_pool(_slice_parse_tail, self._buffer, self._offset, log)
         return _parse_tail_with_lost_flag(self._buffer[self._offset :], log)
 
@@ -372,10 +401,13 @@ def _classify_sse_event(
             items.append(format_sse_failed_event({"error": err}, model_id))
             return False, None, None
         raw_code = err.get("code")
+        raw_message = err.get("message")
         raise SeedreamAPIError(
-            # message 经与 handle_api_error 相同的截断辅助处理，超大错误体不随异常
-            # 进入日志，非字符串形态归一化为文本。
-            message=truncate_upstream_message_fragment(err.get("message", "流式请求失败")),
+            # 缺失判定与 handle_api_error 共用 has_message_value，流式与非流式对
+            # 同一上游载荷的诊断同口径；其余形态经截断辅助归一化为文本。
+            message=truncate_upstream_message_fragment(
+                raw_message if has_message_value(raw_message) else "流式请求失败"
+            ),
             status_code=400,
             # 仅接受非空字符串错误码，与 errors.handle_api_error 同口径：上游数字码
             # 转字符串属臆测语义，其余类型置 None 丢弃。
@@ -406,49 +438,33 @@ async def _drain_sse_complete_events(
     model_id: str,
     log: Logger,
     apply_completed: Callable[[bool, Any, list[dict[str, Any]] | None], None],
-) -> None:
-    """事件解析阶段：抽干缓冲内全部完整事件段并分类处理，条目触顶时即时停止。"""
+) -> int:
+    """事件解析阶段：抽干缓冲内完整事件段并分类处理，条目触顶即停，返回丢失 data 负载的事件数。"""
     # 先抽干所有完整事件，避免后续缓冲截断时丢失已就绪事件；条目触顶即时停止
     # 解析本 chunk 剩余事件，上限以事件为粒度精确生效，关闭响应与截断计数由
     # 下方触顶块统一承担。
+    lost_events = 0
     for seg_start, seg_end in frames.drain():
-        event = await frames.parse_segment(seg_start, seg_end, log)
+        event, error, lost_payload = await frames.parse_segment(seg_start, seg_end)
         if event is None:
+            segment_len = seg_end - seg_start
+            if lost_payload:
+                # 单条告警合并失败原因与丢弃字节数，与流末尾残留同口径计数，缺图对调用方可见。
+                log.warning(
+                    "流中段事件解析失败且携带数据负载，丢弃 {} 字节: {}",
+                    segment_len,
+                    error,
+                )
+                lost_events += 1
+            elif error is not None:
+                _log_segment_parse_failure(log, error, segment_len)
             continue
         apply_completed(
             *_classify_sse_event(event, model_id, collector.items, log, seg_end - seg_start)
         )
         if collector.reached_cap():
             break
-
-
-# 等块取值哨兵：流正常结束与截止时间到达，与字节块区分。
-STREAM_ENDED = object()
-STREAM_DEADLINE_HIT = object()
-
-
-async def next_stream_chunk(
-    iterator: AsyncIterator[bytes], deadline: float | None
-) -> bytes | object:
-    """取下一读取块，等待期间持续受截止时间约束。
-
-    重组分块与慢速上游的下一块间隔可长于事件间隔，等块本身限时使总时长预算
-    可中断；截止到达返回 STREAM_DEADLINE_HIT，流结束返回 STREAM_ENDED。到点后
-    已就绪的流结束或缓冲块优先于超时判定，防止已完成的响应被误判超时、
-    触发非幂等生成请求的重复计费重试。
-    """
-    if deadline is None:
-        try:
-            return await iterator.__anext__()
-        except StopAsyncIteration:
-            return STREAM_ENDED
-    try:
-        async with asyncio.timeout_at(deadline):
-            return await iterator.__anext__()
-    except StopAsyncIteration:
-        return STREAM_ENDED
-    except TimeoutError:
-        return STREAM_DEADLINE_HIT
+    return lost_events
 
 
 async def _consume_sse_chunks(
@@ -468,11 +484,11 @@ async def _consume_sse_chunks(
     """分帧消费阶段：逐块读取响应流，执行事件解析与字节、条目、单事件限额截断。
 
     Returns:
-        (超限丢弃的事件数, 是否因总时长预算超限提前终止)。
+        (超限或解析失败丢弃的事件数, 是否因总时长预算超限提前终止)。
     """
     processed_bytes = 0
     last_progress_log_bytes = 0
-    # 超限丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件因体积超限被丢弃」。
+    # 超限或解析失败丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件被丢弃」。
     truncated_events = 0
     # 流首 BOM 剥离标记：BOM 仅可能出现在流首，只对首个到达的非空块生效一次。
     stripped_bom = False
@@ -544,7 +560,7 @@ async def _consume_sse_chunks(
             last_progress_log_bytes = processed_bytes
             log.debug("已处理 {} 字节数据", processed_bytes)
 
-        await _drain_sse_complete_events(
+        truncated_events += await _drain_sse_complete_events(
             frames, collector, model_id=model_id, log=log, apply_completed=apply_completed
         )
 
@@ -586,8 +602,8 @@ def _parse_tail_with_lost_flag(
     残留段可解析为完整事件时短路，不再做丢失负载扫描；长度由切出的尾部本体
     推导，调用方与解析共用同一份字节。
     """
-    event = parse_sse_segment(tail, log)
-    return event, event is None and _has_lost_data_payload(tail), len(tail)
+    event, _error, lost_payload = _parse_segment_with_lost_flag(tail, log)
+    return event, lost_payload, len(tail)
 
 
 def _slice_parse_tail(
@@ -627,15 +643,6 @@ async def _resolve_sse_trailing_segment(
         log.warning("流末尾不完整事件解析失败，丢弃 {} 字节", trailing_len)
         return 1
     return 0
-
-
-def escalate_partial_status(status: str | None, data: list[Any] | None) -> str | None:
-    """data 含错误条目且状态呈完成态时升格 partial，流式与非流式共用。"""
-    if status not in (None, "completed"):
-        return status
-    if data and any(isinstance(item, dict) and "error" in item for item in data):
-        return "partial"
-    return status
 
 
 def _finalize_sse_status(

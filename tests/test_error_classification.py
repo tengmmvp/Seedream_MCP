@@ -36,6 +36,19 @@ from seedream_mcp.utils.core.errors import (
     handle_api_error,
 )
 
+# ==================== has_message_value：缺失判定 ====================
+
+
+def test_has_message_value_treats_whitespace_only_as_missing() -> None:
+    """纯空白串与 None、空串同判缺失，流式与非流式的错误归约共用本判定。"""
+    assert errors_module.has_message_value(None) is False
+    assert errors_module.has_message_value("") is False
+    assert errors_module.has_message_value("   ") is False
+    assert errors_module.has_message_value("\t\n") is False
+    assert errors_module.has_message_value("x") is True
+    assert errors_module.has_message_value(0) is True
+
+
 # ==================== _classify_generation_error_type：8 分支 ====================
 
 
@@ -144,6 +157,42 @@ def test_handle_api_error_extracts_message_field() -> None:
     """响应体无 error 但含 message 字段时拼入文案。"""
     exc = handle_api_error(400, {"message": "msg only"})
     assert "msg only" in exc.message
+
+
+def test_handle_api_error_null_message_keeps_base_text() -> None:
+    """error.message 显式 null 时不拼出 ": None"，保留基础文案。"""
+    exc = handle_api_error(400, {"error": {"code": "X", "message": None}})
+    assert exc.message == "请求参数错误"
+
+
+def test_handle_api_error_empty_message_keeps_base_text() -> None:
+    """message 为空串时不拼出悬空冒号，保留基础文案。"""
+    exc = handle_api_error(400, {"message": ""})
+    assert exc.message == "请求参数错误"
+
+
+def test_handle_api_error_null_detail_message_falls_back_to_top_level() -> None:
+    """内层 message 为 null 时回退顶层可用 message。"""
+    exc = handle_api_error(400, {"error": {"code": "X", "message": None}, "message": "top msg"})
+    assert exc.message == "请求参数错误: top msg"
+
+
+def test_handle_api_error_empty_error_string_falls_back_to_top_level() -> None:
+    """error 为空串时不拼悬空冒号，回退查顶层 message。"""
+    exc = handle_api_error(400, {"error": "", "message": "top msg"})
+    assert exc.message == "请求参数错误: top msg"
+
+
+def test_handle_api_error_non_str_message_still_appended() -> None:
+    """非 str 非 None 的 message 形态经归一化拼入文案。"""
+    exc = handle_api_error(400, {"error": {"code": "X", "message": {"k": "v"}}})
+    assert exc.message == '请求参数错误: {"k": "v"}'
+
+
+def test_handle_api_error_falsy_message_still_appended() -> None:
+    """message 为 0 等 falsy 非 None 形态时仍归一化拼入，与流式路径同口径。"""
+    exc = handle_api_error(400, {"error": {"code": "X", "message": 0}})
+    assert exc.message == "请求参数错误: 0"
 
 
 def test_handle_api_error_preserves_retry_after() -> None:

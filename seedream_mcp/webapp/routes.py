@@ -11,18 +11,20 @@ gallery（图库浏览）、files（缩略图与原图）；新增端点时在�
 
 from __future__ import annotations
 
-import mimetypes
 import os
 import weakref
 from typing import Any
 
-from starlette.responses import Response
-from starlette.staticfiles import StaticFiles
+from starlette.datastructures import Headers
+from starlette.responses import FileResponse, Response
+from starlette.staticfiles import NotModifiedResponse, StaticFiles
 from starlette.types import Scope
 
 from ..utils.core.logs import get_logger
 from . import constants
 from .constants import (
+    STATIC_MIME_ALLOWLIST,
+    STATIC_PAGE_EXTENSIONS,
     STATIC_SECURITY_HEADERS,
     WEB_API_BROWSE,
     WEB_API_CONFIG_INFO,
@@ -39,25 +41,25 @@ from .constants import (
 
 logger = get_logger()
 
-# Windows 注册表把 .svg 的 MIME 污染成 image/svg，img 标签只认 image/svg+xml。
-mimetypes.add_type("image/svg+xml", ".svg")
-
 # 注册守卫登记表：按 MCPServer 实例身份弱引用登记已完成注册的对象，宿主或测试
 # 重造实例时守卫不误跳过新实例的注册。
 _registered_servers: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 
 class _GuardedStaticFiles(StaticFiles):
-    """封禁页面文件直达并为直出附安全头的静态资源应用。
+    """封禁页面文件直达、按封闭清单裁定静态 MIME 并为直出附安全头的静态资源应用。
 
     index 与 404 页须经 meta 域端点直出以携带 CSP 与 nosniff 安全头，StaticFiles
     直出会绕过该头，故页面文件在 GET/HEAD 服务路径上 404；其余方法到不了
-    file_response，由 Starlette 以 405 拒绝，同样不出页面内容。封禁判定在
-    file_response 按解析后的
-    物理路径后缀执行，.html、.htm 与 .xhtml 均封且大小写不敏感：Starlette lookup_path 以
-    realpath 定位文件，8.3 短名、大小写变体与尾随字符等别名族都解析到真实页面
-    文件，请求路径后缀判定覆盖不了这些形态。其余静态资源按原行为直出，并统一附
-    nosniff 与静态 CSP 阻断对 css/js/svg 的 MIME 嗅探与 svg 直出的同源脚本面。
+    file_response，由 Starlette 以 405 拒绝，同样不出页面内容。封禁与 MIME 判定
+    均按解析后的物理路径后缀执行，.html、.htm 与 .xhtml 均封且大小写不敏感：
+    Starlette lookup_path 以 realpath 定位文件，8.3 短名、大小写变体与尾随字符
+    等别名族都解析到真实页面文件，请求路径后缀判定覆盖不了这些形态。后缀不在
+    封闭清单内的资产同样 404，content-type 在构造响应时按清单登记值显式给定，
+    响应路径不触碰 mimetypes 猜型，Windows 注册表污染无从进入响应头；条件请求
+    分支沿用上游 is_not_modified 与 NotModifiedResponse，304 保持无 content-type
+    形态；静态直出统一附 nosniff 与静态 CSP 阻断对 css/js/svg 的 MIME 嗅探与
+    svg 直出的同源脚本面。
     """
 
     def file_response(
@@ -67,10 +69,25 @@ class _GuardedStaticFiles(StaticFiles):
         scope: Scope,
         status_code: int = 200,
     ) -> Response:
-        """物理路径以页面扩展名结尾时回 404，其余直出附安全头，304 分支同样覆盖。"""
-        if os.fspath(full_path).lower().endswith((".html", ".htm", ".xhtml")):
+        """物理路径以页面扩展或清单外扩展结尾时回 404，清单内扩展显式给定 MIME，304 分支仅附安全头。
+
+        页面封禁独立于 MIME 清单，防误登记页面扩展后复活。
+        """
+        lower_path = os.fspath(full_path).lower()
+        if lower_path.endswith(STATIC_PAGE_EXTENSIONS):
             return Response(status_code=404)
-        response = super().file_response(full_path, stat_result, scope, status_code)
+        media_type = STATIC_MIME_ALLOWLIST.get(os.path.splitext(lower_path)[1])
+        if media_type is None:
+            return Response(status_code=404)
+        # media_type 须在构造点显式给出，不经 super().file_response 以避开 guess_type 猜型。
+        response: Response = FileResponse(
+            full_path,
+            status_code=status_code,
+            stat_result=stat_result,
+            media_type=media_type,
+        )
+        if self.is_not_modified(response.headers, Headers(scope=scope)):
+            response = NotModifiedResponse(response.headers)
         for name, value in STATIC_SECURITY_HEADERS.items():
             response.headers[name] = value
         return response

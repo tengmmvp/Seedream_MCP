@@ -98,6 +98,53 @@ def test_active_request_state_keys_import_time_invalid_ring_falls_back_to_none(
     assert config_module.active_request_state_keys() is None
 
 
+@pytest.mark.parametrize(
+    "ring",
+    [
+        (b"\x01" * 32,),
+        (b"\x01" * 32, b"\x02" * 32),
+        (b"\x01" * 31,),
+        (b"\x01" * 32, b"\x02" * 31),
+        (b"\x01" * 32, b"\x01" * 32),
+        (b"\x01" * 31, b"\x01" * 31),
+    ],
+    ids=[
+        "valid-single",
+        "valid-multi",
+        "short-first",
+        "short-after-valid",
+        "duplicate",
+        "short-duplicate",
+    ],
+)
+def test_request_state_ring_rules_agree_between_validate_and_import_probe(
+    monkeypatch: pytest.MonkeyPatch, ring: tuple[bytes, ...]
+) -> None:
+    """validate 与导入期预检对同一密钥环的接受性一致，环规则漂移时在此转红。
+
+    环经 hex 编码写入环境变量驱动预检路径，与直接构造 SeedreamConfig 的校验
+    路径逐环比对；规则若只在单侧新增，另一侧静默放行即被本用例捕获。
+    """
+    from seedream_mcp.config import SeedreamConfig
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    accepted = True
+    try:
+        SeedreamConfig(api_key="k", request_state_secret_keys=ring)
+    except SeedreamConfigError:
+        accepted = False
+
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", ",".join(key.hex() for key in ring))
+
+    probed = config_module.active_request_state_keys()
+
+    assert accepted == (probed is not None)
+    if accepted:
+        assert probed == ring
+
+
 def test_build_request_state_security_returns_none_without_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

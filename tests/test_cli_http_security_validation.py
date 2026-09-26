@@ -13,9 +13,13 @@ import pytest
 import seedream_mcp.cli as cli
 from seedream_mcp.transport import is_loopback_bind_host
 
-# 锁定回环判定成员，防 localhost 被误加入免鉴权集合。
+# 锁定回环判定成员，防 localhost 被误加入免鉴权集合；方括号 [::1] 与裸形态
+# 同判回环，非回环与通配 IPv6 不因剥方括号被误收。
 assert is_loopback_bind_host("127.0.0.1") and is_loopback_bind_host("::1")
+assert is_loopback_bind_host("[::1]")
 assert not is_loopback_bind_host("localhost") and not is_loopback_bind_host("0.0.0.0")
+assert not is_loopback_bind_host("[fe80::1]") and not is_loopback_bind_host("[::]")
+assert not is_loopback_bind_host("::0") and not is_loopback_bind_host("0:0:0:0:0:0:0:0")
 
 
 def _make_http_args(
@@ -40,6 +44,19 @@ def test_validate_http_security_requires_token_for_non_loopback() -> None:
 
     assert message == (
         "安全错误：streamable-http 绑定到非回环地址 0.0.0.0 必须配置鉴权令牌，"
+        "请通过 --auth-token 或 SEEDREAM_HTTP_AUTH_TOKEN 提供，避免未授权访问。"
+    )
+
+
+@pytest.mark.parametrize("host", ["::0", "0:0:0:0:0:0:0:0"])
+def test_validate_http_security_treats_wildcard_equivalents_as_non_loopback(
+    host: str,
+) -> None:
+    """::0 与全零展开形态与 0.0.0.0 同按非回环强制令牌，不因通配等价拼写豁免校验。"""
+    message = cli.validate_http_security(_make_http_args(host=host), "")
+
+    assert message == (
+        f"安全错误：streamable-http 绑定到非回环地址 {host} 必须配置鉴权令牌，"
         "请通过 --auth-token 或 SEEDREAM_HTTP_AUTH_TOKEN 提供，避免未授权访问。"
     )
 
@@ -70,9 +87,9 @@ def test_validate_http_security_accepts_explicit_non_tls_opt_in() -> None:
     assert cli.validate_http_security(args, "s3cret") is None
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "[::1]"])
 def test_validate_http_security_exempts_loopback_hosts(host: str) -> None:
-    """回环绑定豁免鉴权与 TLS 强制，无令牌无 TLS 也校验通过。"""
+    """回环绑定豁免鉴权与 TLS 强制，无令牌无 TLS 也校验通过，方括号形态同豁免。"""
     args = _make_http_args(host=host)
 
     assert cli.validate_http_security(args, "") is None

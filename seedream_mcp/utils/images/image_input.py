@@ -15,6 +15,11 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from ..core.errors import SeedreamMCPError, SeedreamValidationError
+from ..core.executors import (
+    CpuOffloadPoolClosedError,
+    run_in_cpu_pool,
+    should_offload_size,
+)
 from ..core.formats import MIME_BY_EXTENSION, encode_data_uri, infer_extension_from_bytes
 from ..core.logs import get_logger
 from ..io.io_path import (
@@ -61,8 +66,8 @@ async def prepare_image_input(image: str) -> str:
     - Data URI：经格式与维度校验后将 media type 归一化为小写标准 MIME 返回。
     - 本地文件路径：读取并编码为 Base64 Data URI 返回。
 
-    URL 的 urlparse 全量解析与 Data URI 的 base64 解码均有阻塞事件循环的成本，
-    均下沉工作线程执行。
+    全部分支在事件循环外执行：URL 与阈值之下的 Data URI 校验走默认工作线程，
+    本地读取编码与达阈值 Data URI 校验属长时 CPU 任务，下沉专用池执行。
 
     Args:
         image: 图像输入字符串，可为 HTTP/HTTPS URL、Data URI 或本地文件路径。
@@ -70,17 +75,23 @@ async def prepare_image_input(image: str) -> str:
     Raises:
         SeedreamValidationError: 输入格式无效、路径越界、界内定位失败或本地文件
             读取失败等本地预处理失败；本阶段不触网，不参与 client 的 API 重试。
+        SeedreamMCPError: CPU 卸载池已关闭，服务正在退出。
     """
     try:
         normalized = require_image_str(image).strip()
 
         kind = classify_image_reference(normalized)
-        if kind != "local":
-            return await asyncio.to_thread(validate_image_input, normalized)
-
-        return await asyncio.to_thread(_prepare_local_image, normalized, image)
+        if kind == "local":
+            # 本地分支成本随文件内容放大且读取前不可知，恒下沉专用池。
+            return await run_in_cpu_pool(_prepare_local_image, normalized, image)
+        if kind == "data_uri" and should_offload_size(len(normalized)):
+            return await run_in_cpu_pool(validate_image_input, normalized)
+        return await asyncio.to_thread(validate_image_input, normalized)
     except SeedreamMCPError:
         raise
+    except CpuOffloadPoolClosedError as exc:
+        # 池关闭只发生在退出清理窗口，归服务关闭而非输入缺陷。
+        raise SeedreamMCPError("服务正在关闭，图像预处理已中止") from exc
     except Exception as e:
         # 兜底异常均来自本地预处理，归校验档。
         raise SeedreamValidationError(f"图像处理失败: {e}") from e

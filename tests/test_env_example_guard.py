@@ -14,6 +14,8 @@ from pathlib import Path
 
 import seedream_mcp._config_sources as config_sources
 
+from _docker_uid import chown_owner_pair
+
 # 环境变量键形态：前缀限定 SEEDREAM_/ARK_，键名由大写字母、数字、下划线组成。
 # 形如「- SEEDREAM_ 服务行为」的前缀目录行后接空白，不构成完整键，不会被命中。
 _ENV_KEY_PATTERN = re.compile(r"\b(?:SEEDREAM|ARK)_[A-Z0-9_]+")
@@ -262,3 +264,34 @@ def test_compose_image_tag_major_minor_matches_version() -> None:
         f"compose 镜像标签 {match.group(1)} 与版本 {__version__} 的 major.minor 漂移，"
         "发版须同步更新标签"
     )
+
+
+# ==================== 容器挂载属主契约 ====================
+
+# compose 挂载 ./.seedream 的行文本，作为属主注释的定位锚点。
+_COMPOSE_SEEDREAM_MOUNT = "- ./.seedream:/app/.seedream"
+
+
+def test_dockerfile_pins_seedream_uid() -> None:
+    """Dockerfile 以 useradd --uid 显式固定容器用户并建同名组，挂载属主契约的 uid 落值于此。"""
+    dockerfile = (_repo_root() / "Dockerfile").read_text(encoding="utf-8")
+    assert re.search(r"useradd --uid \d+ --user-group", dockerfile) is not None
+
+
+def test_compose_seedream_mount_documents_owner_preset() -> None:
+    """compose 的 .seedream 挂载行上方就地记载属主预置命令。
+
+    Linux 上的 Docker 以 root 属主自动创建缺失的挂载源，容器内 uid 不可写，
+    属主预置提示缺失时首跑即启动失败。
+    """
+    compose = (_repo_root() / "docker-compose.yml").read_text(encoding="utf-8")
+    lines = compose.splitlines()
+    mount_indexes = [i for i, line in enumerate(lines) if line.strip() == _COMPOSE_SEEDREAM_MOUNT]
+    assert len(mount_indexes) == 1, "docker-compose.yml 应恰有一条 .seedream 挂载"
+    comment_block: list[str] = []
+    for line in reversed(lines[: mount_indexes[0]]):
+        if not line.strip() or not line.lstrip().startswith("#"):
+            break
+        comment_block.append(line)
+    assert comment_block, ".seedream 挂载行上方缺少属主预置注释"
+    assert f"chown {chown_owner_pair()} .seedream" in "\n".join(comment_block)

@@ -3,7 +3,7 @@
 <p align="center">
   <a href="./README.md">简体中文</a>
   ·
-  <a href="./README.zh-TW.md">繁體中文</a>
+  <strong>繁體中文</strong>
   ·
   <a href="./README.en.md">English</a>
 </p>
@@ -104,6 +104,9 @@ curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-comp
 # 選用：參照 .env.example 建立 .env 供 compose 唯讀掛載，免去下行命令的環境變數前置
 # 未建立 .env 時 Docker 會自動建出同名目錄充當掛載來源導致掛載異常，請先 touch .env 或移除 compose 中的掛載行
 
+# Linux 需先建立屬主為 1000 的資料目錄，Docker Desktop 不受影響
+mkdir -p .seedream && chown 1000:1000 .seedream
+
 # 啟動服務
 ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
 ```
@@ -130,6 +133,7 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 
 ## 🔧 用戶端設定
 
+> [!WARNING]
 > 推薦透過 `env` 注入 `ARK_API_KEY`，避免把金鑰寫進 `args`：命令列參數會出現在行程清單中，存在洩漏風險。
 
 ### Claude Desktop
@@ -193,6 +197,7 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 
 </details>
 
+> [!NOTE]
 > 需要指定模型/尺寸時，附加到 `args`，例如 `["seedream-image-mcp", "--model", "doubao-seedream-5.0"]`。
 
 設定後重啟對應用戶端即可使用。
@@ -222,10 +227,10 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
-- `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
+- `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）；開啟時 `request_count` 須為 1
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一張圖，範圍 1-10，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，不得超過 `request_count`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞
@@ -259,10 +264,10 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
-- `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
+- `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）；開啟時 `request_count` 須為 1
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一張圖，範圍 1-10，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，不得超過 `request_count`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞
@@ -295,10 +300,10 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `watermark` (選用) - 是否新增浮水印，預設使用設定檔值（預設 false）
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
-- `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）
+- `stream` (選用) - 是否啟用串流輸出，預設`false`（5.0 Pro 不支援）；開啟時 `request_count` 須為 1
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一張圖，範圍 1-10，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，不得超過 `request_count`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞
@@ -335,10 +340,10 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 - `max_images` (選用) - 最大生成圖像數量，範圍 1-15，預設 15；提供參考圖時預設自動扣減為 15 減參考圖數量
 - `response_format` (選用) - 回應格式：`url`或`b64_json`，預設`url`
 - `output_format` (選用) - 輸出檔案格式，僅 5.0 系列（Pro/標準/Lite）支援 `jpeg` 或 `png`，預設不指定，由 API 按模型預設處理
-- `stream` (選用) - 是否啟用串流輸出，預設`false`
+- `stream` (選用) - 是否啟用串流輸出，預設`false`；開啟時 `request_count` 須為 1
 - `tools` (選用) - 模型工具設定，僅 `doubao-seedream-5.0` / `5.0-lite` 系列支援連網搜尋，例如 `[{"type":"web_search"}]`
 - `request_count` (選用) - 同一提示並行發起的獨立生成次數，每次各產出一組圖片，組內圖片數量由模型按提示詞決定，最多 `max_images` 張，範圍 1-10，預設 1
-- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，一般無需手動指定
+- `parallelism` (選用) - 並行度上限，範圍 1-10，預設 `min(request_count, 10)`，不得超過 `request_count`，一般無需手動指定
 - `auto_save` (選用) - 是否自動儲存到本地，預設使用全域設定（預設 true）
 - `save_path` (選用) - 自訂儲存目錄路徑
 - `custom_name` (選用) - 自訂檔名前置詞
@@ -466,6 +471,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
   </tr>
 </table>
 
+> [!TIP]
 > **提示**：預設模型為 **doubao-seedream-5.0**（與 5.0 Lite 等價），開箱即用全部能力。切換到 `doubao-seedream-5.0-pro` 後，組圖、連網搜尋、串流輸出不可用，尺寸僅支援 `1K/1.5K/2K`，預設檔位 `2K`，多圖生圖參考圖上限降為 10 張，另獨享圖層拆分與透明背景能力。
 
 ## 💰 模型價格
@@ -500,6 +506,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
   </tr>
 </table>
 
+> [!NOTE]
 > **計費說明**：因審核等原因未成功輸出的圖片不計費；組圖按實際生成的圖片數量計費；5.0 Pro 圖層拆分按每個圖層實際像素檔位單獨計費，像素檔以 261 萬像素（約 1.5K）劃界。本文價格為參考刊例，完整計費邏輯與最新單價以 [火山方舟模型服務計費說明](https://docs.volcengine.com/docs/82379/1544681) 為準。
 
 ## 📦 可用資源
@@ -631,6 +638,7 @@ python -c "import pathlib, shutil, seedream_mcp; src = pathlib.Path(seedream_mcp
 --version                                          # 印出版本號並退出
 ```
 
+> [!IMPORTANT]
 > **安全提示**：`localhost` 不被視為回環位址，須按非回環位址要求設定 Bearer 鑑權權杖與 TLS，未設定則拒絕啟動；如需免鑑權使用回環位址，請改繫結 `127.0.0.1` 或 `::1`。非回環繫結預設按該位址校驗 Host 與 Origin 標頭以防 DNS rebinding；萬用繫結（`0.0.0.0`/`::`）無法預知存取位址，校驗預設關閉，等效防護由強制 Bearer 鑑權承擔，設定 `SEEDREAM_HTTP_ALLOWED_HOSTS` 可啟用校驗。跨源瀏覽器用戶端接入 `/mcp`（如網頁版用戶端）另需設定 `SEEDREAM_HTTP_ALLOWED_ORIGINS`，設定後自動應答跨源預檢並放行清單內來源；放行清單內的公網頁面同時豁免瀏覽器的私有網路存取限制，可直接存取本地繫結的服務。生產與容器部署的金鑰應經環境變數（`ARK_API_KEY` / `SEEDREAM_HTTP_AUTH_TOKEN`）傳遞，而非 CLI `--api-key` / `--auth-token`——命令列參數會留在行程清單與 shell 歷史記錄中；多用戶主機上 streamable-http 即使繫結回環位址，也建議設定鑑權權杖。Web 操作台不改變上述傳輸層安全要求：開啟後新增的 API 面全部強制權杖，免鑑權的僅限無資料的靜態頁面骨架。
 
 ### 使用範例

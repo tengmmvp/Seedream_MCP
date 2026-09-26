@@ -2,7 +2,8 @@
 
 sync_cleanup 是 cli_main finally 的同步清理入口：提取并清空活动与退役资源后
 asyncio.run 关闭，并一并关闭 CPU 卸载线程池。覆盖正常清理、RuntimeError 与
-意外异常被吞、无资源 no-op 与退役资源兜底关闭。
+意外异常被吞、无资源 no-op 与退役资源兜底关闭，以及关闭体内被中断时池关闭
+仍执行。
 """
 
 import asyncio
@@ -116,6 +117,28 @@ def test_sync_cleanup_closes_retired_resources(monkeypatch: pytest.MonkeyPatch) 
     assert retired_client_a.closed and retired_manager_a.closed
     assert retired_client_b.closed and retired_manager_b.closed
     assert resources._retired_resources == []
+
+
+def test_sync_cleanup_closes_pool_when_close_body_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """asyncio.run 关闭体内被二次 Ctrl+C 打断时，CPU 卸载池关闭仍不被跳过。"""
+    from seedream_mcp.utils.core.executors import cpu_offload_executor
+
+    monkeypatch.setattr(resources, "_active_resource", None)
+
+    def _interrupting_run(coro: object) -> None:
+        # 关闭未 await 的协程，避免 RuntimeWarning。
+        coro.close()  # type: ignore[attr-defined]
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "run", _interrupting_run)
+
+    executor_before = cpu_offload_executor()
+    resources.sync_cleanup()
+
+    # 未 patch 的真实 shutdown 已执行：池被关闭后按需重建为新实例。
+    assert cpu_offload_executor() is not executor_before
 
 
 async def test_sync_cleanup_cancels_queued_cpu_offload_pool_work(

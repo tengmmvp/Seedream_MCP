@@ -335,22 +335,30 @@ async def test_submit_other_runtime_error_propagates_untouched(
     assert not isinstance(excinfo.value, CpuOffloadPoolClosedError)
 
 
-def test_pool_depth_follows_generate_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:
-    """池深经注册提供者随活动配置推导并封顶，低并发由下限兜底，已建池不重建。"""
+def test_pool_depth_follows_generate_and_prepare_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """池深经注册提供者随两类活动并发推导并封顶，低并发由下限兜底，已建池不重建。"""
     from seedream_mcp import config as config_module
     from seedream_mcp.config import SeedreamConfig
 
-    def _rebuild_depth(generate_concurrency: int) -> int:
-        config = SeedreamConfig(api_key="test_key", generate_concurrency=generate_concurrency)
+    def _rebuild_depth(generate_concurrency: int, image_prepare_concurrency: int = 5) -> int:
+        config = SeedreamConfig(
+            api_key="test_key",
+            generate_concurrency=generate_concurrency,
+            image_prepare_concurrency=image_prepare_concurrency,
+        )
         monkeypatch.setattr(config_module, "_active_config", config)
         shutdown_cpu_offload_executor()
         return cpu_offload_executor()._max_workers
 
-    # 生成并发 10 起越过下限线性放大，低于时由下限 12 兜底，29 起封顶 32。
+    # 生成并发 3 与 4 由下限 12 兜底，其后随默认预处理并发 5 与解码槽位线性放大，
+    # 24 起封顶 32；调低预处理并发同等缩小池深。
     assert _rebuild_depth(3) == 12
-    assert _rebuild_depth(9) == 12
-    assert _rebuild_depth(10) == 13
-    assert _rebuild_depth(16) == 19
+    assert _rebuild_depth(4) == 12
+    assert _rebuild_depth(5) == 13
+    assert _rebuild_depth(10) == 18
+    assert _rebuild_depth(10, image_prepare_concurrency=1) == 14
     assert _rebuild_depth(1024) == 32
 
     # 已建池不随启动后的配置变化重建，共享单池语义保持。
@@ -362,7 +370,7 @@ def test_pool_depth_follows_generate_concurrency(monkeypatch: pytest.MonkeyPatch
 
 
 def test_pool_depth_unregistered_provider_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """提供者未注册时不读活动配置，按默认生成并发回退推导，池照常可用。"""
+    """提供者未注册时不读活动配置，按默认并发回退推导，池照常可用。"""
     from seedream_mcp import config as config_module
     from seedream_mcp.config import SeedreamConfig
     from seedream_mcp.utils.core import executors as executors_module
@@ -375,12 +383,12 @@ def test_pool_depth_unregistered_provider_falls_back(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(executors_module, "_CPU_OFFLOAD_DEPTH_PROVIDER", None)
     shutdown_cpu_offload_executor()
 
-    # 活动配置的 16 不被读取，回退默认生成并发 3 加解码槽位后由下限兜底。
+    # 活动配置的 16 不被读取，回退默认生成并发 3 与预处理并发 5 加解码槽位后由下限兜底。
     assert cpu_offload_executor()._max_workers == 12
 
 
 def test_pool_depth_falls_back_when_config_build_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """活动配置不可构建时按默认生成并发回退推导，池可用性不随配置错误退化。"""
+    """活动配置不可构建时按默认并发回退推导，池可用性不随配置错误退化。"""
     from seedream_mcp import config as config_module
     from seedream_mcp.config import SeedreamConfig
     from seedream_mcp.utils.core.errors import SeedreamConfigError

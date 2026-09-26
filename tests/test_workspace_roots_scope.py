@@ -27,6 +27,7 @@ from seedream_mcp.utils.io.io_roots import (
 )
 
 from _log_fakes import RecordingLogger
+from _roots_session_fakes import BackChannelUnavailableSession as _BackChannelUnavailableSession
 from _roots_session_fakes import (
     CapabilityDeclaringSession as _CapabilityDeclaringSession,
 )
@@ -373,6 +374,25 @@ async def test_read_session_roots_result_no_back_channel_logs_error(
     assert any("反向通道" in message for message in capture.errors)
     assert capture.opt_kwargs == [{"exception": True}]
     assert capture.warnings == []
+
+
+async def test_read_session_roots_result_skips_fetch_when_back_channel_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """声明能力但反向通道不可用的旧修订会话跳过必失败的 roots/list，与工具路径对齐。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_roots_module, "logger", capture)
+
+    session = _BackChannelUnavailableSession([tmp_path / "mcp"])
+    roots_result = await read_session_roots_result(_SpyContext(session))
+
+    assert roots_result is None
+    assert session.capability_probes == 1
+    assert session.send_request_calls == []
+    assert capture.errors == []
 
 
 async def test_read_session_roots_result_generic_error_logs_error(

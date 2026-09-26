@@ -709,7 +709,41 @@ def test_transport_security_derivation_follows_bind_host(
     loopback = transport_module._transport_security_for_host("127.0.0.1")
     assert loopback is not None
     assert loopback.enable_dns_rebinding_protection is True
-    assert loopback.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    assert loopback.allowed_hosts == [
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "[::1]",
+        "[::1]:*",
+        "localhost",
+        "localhost:*",
+    ]
+
+
+def test_transport_security_loopback_spelling_merges_literal_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """等价写法回环绑定把字面量形态并入白名单，按该写法访问不被拒。"""
+    _inject_transport_config(monkeypatch, SeedreamConfig(api_key="test_key"))
+
+    security = transport_module._transport_security_for_host("[::01]")
+
+    assert security.enable_dns_rebinding_protection is True
+    assert "[::01]" in security.allowed_hosts
+    assert "[::01]:*" in security.allowed_hosts
+    assert "http://[::01]" in security.allowed_origins
+
+
+@pytest.mark.parametrize("wildcard", ["::0", "0:0:0:0:0:0:0:0"])
+def test_transport_security_wildcard_equivalent_forms_stay_off(
+    wildcard: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """::0 与全零展开形态与 0.0.0.0 同判通配，默认关闭 SDK 内层 Host 校验不派生条目。"""
+    _inject_transport_config(monkeypatch, SeedreamConfig(api_key="test_key"))
+
+    security = transport_module._transport_security_for_host(wildcard)
+
+    assert security.enable_dns_rebinding_protection is False
 
 
 def test_transport_security_non_loopback_with_allowed_hosts(
@@ -742,7 +776,14 @@ def test_transport_security_loopback_ignores_allowed_hosts(
     security = transport_module._transport_security_for_host("127.0.0.1")
 
     assert security.enable_dns_rebinding_protection is True
-    assert security.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    assert security.allowed_hosts == [
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "[::1]",
+        "[::1]:*",
+        "localhost",
+        "localhost:*",
+    ]
 
 
 # ==================== 残余任务回收 ====================

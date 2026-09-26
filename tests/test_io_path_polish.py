@@ -299,8 +299,8 @@ def test_suggest_similar_paths_reuses_scan_cache(
 ) -> None:
     """重复的校验失败命中 io_scan 扫描缓存，同目录不重复全量扫描。
 
-    suggest_similar_paths 显式注入 io_path.find_images_in_directory 为扫描器，
-    计数补丁挂在 io_path 命名空间即可覆盖注入点。
+    suggest_similar_paths 显式注入 io_scan.find_images_in_directory 为扫描器，
+    计数补丁挂在 io_scan 命名空间即可覆盖注入点。
     """
     (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     calls = {"count": 0}
@@ -374,6 +374,40 @@ def test_read_context_degrades_to_images_root_when_home_unresolvable(
     assert io_path_module.get_read_scope() == [(images_root / ".seedream" / "images").resolve()]
 
 
+def test_read_context_degrades_observably_when_declared_workspace_root_unresolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已声明工作区根目录解析失败时读权限可观测退化为仅图片目录，不静默漂移到回退链。"""
+    images_root = tmp_path / "pics"
+    images_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(images_root))
+    real_configured_value = io_path_module._configured_env_value
+
+    def _declared_broken_workspace(env_var: str) -> str | None:
+        if env_var == "SEEDREAM_WORKSPACE_ROOT":
+            return "/declared/broken/root"
+        return real_configured_value(env_var)
+
+    monkeypatch.setattr(io_path_module, "_configured_env_value", _declared_broken_workspace)
+    original_resolve = Path.resolve
+
+    def _fail_only_declared(self: Path, strict: bool = False) -> Path:
+        if "declared/broken/root" in str(self).replace("\\", "/"):
+            raise OSError("resolve failed")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _fail_only_declared)
+
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        workspace_roots, resolved_images, scope = io_path_module.get_read_context()
+
+    assert workspace_roots == []
+    assert scope == [resolved_images]
+    assert resolved_images == (images_root / ".seedream" / "images").resolve()
+    assert any("读权限退化为仅图片目录" in record for record in records)
+
+
 def test_resolve_images_root_wraps_runtime_error_with_configured_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -396,6 +430,61 @@ def test_resolve_images_root_wraps_runtime_error_with_configured_value(
     message = exc_info.value.message
     assert message == "数据根目录配置无法解析: ~/pics"
     assert "C:" not in message and "Users" not in message
+
+
+@pytest.mark.parametrize(
+    ("entry", "label", "configured", "cause_type"),
+    [
+        ("workspace_root", "工作区根目录", "/declared/root", OSError),
+        ("images_root", "数据根目录", "~/pics", RuntimeError),
+        ("log_file_path", "数据根目录", "~/pics", RuntimeError),
+    ],
+)
+def test_declaration_resolve_failure_shape_shared_by_entry_points(
+    entry: str,
+    label: str,
+    configured: str,
+    cause_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """三条求值链的声明解析失败共用同一形态：错误只回显配置原值，异常原文仅进日志并保留异常链。"""
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    if entry == "workspace_root":
+
+        def _workspace_only(env_var: str) -> str | None:
+            return configured if env_var == "SEEDREAM_WORKSPACE_ROOT" else None
+
+        monkeypatch.setattr(io_path_module, "_configured_env_value", _workspace_only)
+
+        def _fail_resolve(self: Path, strict: bool = False) -> Path:
+            del self, strict
+            raise OSError("resolve failed")
+
+        monkeypatch.setattr(Path, "resolve", _fail_resolve)
+        trigger = io_path_module.resolve_env_workspace_root
+    else:
+        monkeypatch.setenv("SEEDREAM_DATA_ROOT", configured)
+
+        def _runtime_error(configured_dir: str) -> Path:
+            del configured_dir
+            raise RuntimeError(r"Could not resolve home directory for ~/pics -> C:\Users\srv\pics")
+
+        monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _runtime_error)
+        trigger = (
+            io_path_module.resolve_images_root
+            if entry == "images_root"
+            else io_path_module.resolve_log_file_path
+        )
+
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        with pytest.raises(SeedreamConfigError) as exc_info:
+            trigger()
+
+    assert exc_info.value.message == f"{label}配置无法解析: {configured}"
+    assert isinstance(exc_info.value.__cause__, cause_type)
+    assert any(f"{label}配置无法解析 '{configured}': " in record for record in records)
 
 
 def test_clear_resolved_env_root_cache_resets_fallback_root(

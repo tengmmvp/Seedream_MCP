@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..core.browse import build_browse_fallback_result, execute_browse_request
-from ..core.common import PROGRESS_COMPLETE, safe_report_progress
+from ..core.common import PROGRESS_COMPLETE, log_tiered_failure, safe_report_progress
 from ..core.schemas import BrowseImagesInput
 from ...utils.core.errors import format_error_for_user
 from ...utils.core.logs import get_logger
@@ -49,7 +49,7 @@ async def handle_browse_images(
             params, ctx, resolved_directories=resolved_directories, bounds_scope=bounds_scope
         )
     except Exception as exc:
-        logger.exception("浏览图片处理失败")
+        log_tiered_failure(logger, exc, "浏览图片处理失败")
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
         return await build_browse_fallback_result(
             params, resolved_directories, format_error_for_user(exc)

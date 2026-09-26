@@ -121,6 +121,8 @@ jobs:
             #### Docker Compose 运行
             ```bash
             curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
+            # Linux 需为挂载目录预置属主，Docker Desktop 可省略此行
+            mkdir -p .seedream && chown 1000:1000 .seedream
             ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker compose up -d
             ```
 

@@ -3,7 +3,8 @@
 pydantic 在 core schema 层强制 max_length 约束，超长值在字段校验器运行前即被拒绝。
 覆盖 prompt 100000、save_path 1024、custom_name 255、browse directory 1024、
 browse format_filter 单项 16 与条目数 32 的接受与超长拒绝边界，以及单图 image 的
-空白拒绝边界，锁定 inputSchema 约束不被回归。统一使用 model_validate 构造输入。
+空白拒绝边界，锁定 inputSchema 约束与跨字段约束描述不被回归。统一使用
+model_validate 构造输入。
 """
 
 from typing import cast
@@ -15,7 +16,9 @@ from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
     MultiImageFusionInput,
+    PARALLELISM_DESCRIPTION,
     SequentialGenerationInput,
+    STREAM_DESCRIPTION,
     TextToImageInput,
 )
 
@@ -143,3 +146,9 @@ def test_sequential_image_rejects_blank_item() -> None:
     """组图参考图的空白条目在 schema 级被拒绝。"""
     with pytest.raises(ValidationError, match="必须是非空字符串"):
         SequentialGenerationInput.model_validate({"prompt": "x", "image": ["   "]})
+
+
+def test_parallel_descriptions_declare_cross_field_constraints() -> None:
+    """并行参数描述须声明运行时强制的跨字段约束，模型不应依赖失败调用习得。"""
+    assert "不得超过 request_count" in PARALLELISM_DESCRIPTION
+    assert "request_count 必须为 1" in STREAM_DESCRIPTION

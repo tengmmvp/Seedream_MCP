@@ -795,13 +795,30 @@ def test_build_web_request_context_returns_none_when_resource_absent(
     assert build_web_request_context() is None
 
 
-def test_augment_generation_payload_ignores_non_list_data(tmp_path: Path) -> None:
-    """data 非列表时整体跳过，原字典不被改写。"""
+def test_augment_generation_payload_ignores_scalar_data(tmp_path: Path) -> None:
+    """标量形态 data 无条目，整体跳过，原字典不被改写。"""
     structured = {"data": "not-a-list", "success": True}
 
     generate_module.augment_generation_payload(structured, tmp_path)
 
     assert structured == {"data": "not-a-list", "success": True}
+
+
+def test_augment_generation_payload_converges_dict_form_data(tmp_path: Path) -> None:
+    """dict 形态 data 计单条目，同样附 web_path 收敛。"""
+    local_path = tmp_path / "2026-08-20" / "text_to_image" / "a.png"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"png")
+    structured: dict[str, object] = {
+        "data": {"url": "https://x/a.png", "local_path": str(local_path)}
+    }
+
+    generate_module.augment_generation_payload(structured, tmp_path)
+
+    entry = structured["data"]
+    assert isinstance(entry, dict)
+    assert entry["web_path"] == "2026-08-20/text_to_image/a.png"
+    assert entry["local_path"] == "2026-08-20/text_to_image/a.png"
 
 
 def test_augment_generation_payload_skips_non_dict_items(tmp_path: Path) -> None:

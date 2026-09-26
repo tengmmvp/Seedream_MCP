@@ -16,12 +16,12 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from ...client import SeedreamClient
 from ...request_plan import shared_request_plan_scope
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
-from ...utils.core.errors import SeedreamMCPError, format_error_for_user
 from ...utils.io.io_download import DownloadManager
 from ._pipeline import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
     _yield_for_cancellation,
+    log_tiered_failure,
     safe_report_progress,
 )
 from .context import GenerationExecutionContext
@@ -80,20 +80,16 @@ async def _execute_parallel_generation_requests(
                 request_results[request_index - 1] = await request_executor(client, context)
             except Exception as exc:
                 request_errors[request_index] = exc
-                if isinstance(exc, SeedreamMCPError):
-                    module_logger.warning(
-                        "并行请求 {}/{} 失败: {}",
-                        request_index,
-                        context.request_count,
-                        format_error_for_user(exc),
-                    )
-                else:
-                    # 非预期异常不再上抛，带堆栈记录与单发路径口径一致
-                    module_logger.opt(exception=True).warning(
-                        "并行请求 {}/{} 出现非预期异常",
-                        request_index,
-                        context.request_count,
-                    )
+                # 单请求失败不中断整批，非预期异常降为 warning 记录
+                log_tiered_failure(
+                    module_logger,
+                    exc,
+                    "并行请求 {}/{} 失败",
+                    request_index,
+                    context.request_count,
+                    unexpected_template="并行请求 {}/{} 出现非预期异常",
+                    unexpected_level="warning",
+                )
             finally:
                 # 自增与入队之间无 await，完成顺序即入队顺序，发送端无需再排序。
                 completed_requests += 1

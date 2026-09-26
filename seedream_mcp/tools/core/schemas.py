@@ -138,7 +138,8 @@ RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_js
 OUTPUT_FORMAT_DESCRIPTION = f"输出图片格式，仅 {supported_family_display_names('supports_output_format')} 支持 jpeg 或 png。"
 STREAM_DESCRIPTION = (
     f"是否启用流式输出；开启后将以事件流返回生成进度"
-    f"（仅 {supported_family_display_names('supports_stream')} 支持）。"
+    f"（仅 {supported_family_display_names('supports_stream')} 支持），"
+    f"开启时 request_count 必须为 1。"
 )
 TOOLS_DESCRIPTION = (
     f"模型工具配置，仅 {supported_family_display_names('supports_tools')} 支持联网搜索"
@@ -150,7 +151,8 @@ REQUEST_COUNT_SEQUENTIAL_DESCRIPTION = (
     "按提示词决定，最多 max_images 张；适合一次获取多组独立的组图结果。"
 )
 PARALLELISM_DESCRIPTION = (
-    "并行度上限（1-10）；未提供时自动取 min(request_count, 10)，一般无需手动指定。"
+    "并行度上限（1-10），不得超过 request_count；"
+    "未提供时自动取 min(request_count, 10)，一般无需手动指定。"
 )
 AUTO_SAVE_DESCRIPTION = "是否自动保存到本地；未提供时遵循全局配置（默认开启）。"
 SAVE_PATH_DESCRIPTION = "自定义保存目录，未提供时使用自动保存配置的默认路径。"

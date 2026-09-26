@@ -18,9 +18,9 @@ import httpx
 from .config import SeedreamConfig
 from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
 from .utils.core.executors import (
-    CPU_OFFLOAD_SIZE_THRESHOLD,
     CpuOffloadPoolClosedError,
     run_in_cpu_pool,
+    should_offload_size,
 )
 from .utils.core.loop_bound import loop_bound_semaphore
 from .utils.core.errors import (
@@ -31,21 +31,26 @@ from .utils.core.errors import (
     SeedreamTimeoutError,
     format_error_for_user,
     handle_api_error,
+    has_message_value,
     parse_retry_after,
+    response_reports_failure,
 )
 from .utils.core.sanitizers import (
     UPSTREAM_MESSAGE_FRAGMENT_LIMIT,
+    _truncate_value_for_output,
     sanitize_error_text,
 )
 from .utils.images.image_ref import classify_image_reference
-from .utils.io.io_sse import (
+from .utils.io.io_sse import is_sse_response, parse_sse_response
+from .utils.io.io_stream import (
     RESPONSE_BODY_LIMIT_HINT,
     STREAM_DEADLINE_HIT,
     STREAM_ENDED,
+    data_items,
     escalate_partial_status,
-    is_sse_response,
+    item_has_image_payload,
+    item_reports_failure,
     next_stream_chunk,
-    parse_sse_response,
 )
 
 if TYPE_CHECKING:
@@ -73,12 +78,23 @@ _API_RETRY_BUDGET_FACTOR = 2
 _RESPONSE_BODY_LIMIT_FACTOR = 20
 
 
-def _first_error_detail(error: dict[str, Any]) -> str:
-    """拼接错误字典的 code 与 message 为一句脱敏摘要并限长。"""
+def _bounded_error_text(value: Any, limit: int) -> str:
+    """dict/list 判体量后渲染为限长文本，超限收敛为元素数摘要，不物化完整 repr；其余形态直接转字符串，限长由调用方施加。"""
+    if isinstance(value, (dict, list)):
+        bounded = _truncate_value_for_output(value, limit=limit)
+        # 体量判定通过的原容器才渲染完整 repr，估计上限保证物化长度有界。
+        return bounded if isinstance(bounded, str) else str(bounded)
+    return str(value)
+
+
+def _first_error_detail(error: Any) -> str:
+    """提取错误值的一句脱敏摘要并限长，非 dict 形态取有界字符串表示。"""
+    if not isinstance(error, dict):
+        return sanitize_error_text(_bounded_error_text(error, limit=200), limit=200)
     detail = " ".join(
-        str(part)
+        _bounded_error_text(part, limit=200)
         for part in (error.get("code"), error.get("message"))
-        if isinstance(part, str) and part
+        if has_message_value(part)
     )
     # 上游错误体可回显凭据形态，日志出口与用户可见出口同口径脱敏。
     return sanitize_error_text(detail, limit=200)
@@ -91,11 +107,8 @@ def _outcome_error_note(response: dict[str, Any]) -> str:
         detail = _first_error_detail(error)
         if detail:
             return detail
-    failed_items = [
-        item
-        for item in response.get("data") or []
-        if isinstance(item, dict) and isinstance(item.get("error"), dict)
-    ]
+    data = response.get("data")
+    failed_items = [item for item in data_items(data) if item_reports_failure(item)]
     if failed_items:
         detail = _first_error_detail(failed_items[0]["error"])
         suffix = f": {detail}" if detail else ""
@@ -104,16 +117,10 @@ def _outcome_error_note(response: dict[str, Any]) -> str:
 
 
 def _has_valid_image_items(data: Any) -> bool:
-    """判定 200 响应的 data 字段是否含至少一个非错误图片条目。
-
-    list 形态取不含 error 键的 dict 条目，dict 形态本身计为一个条目，None 与
-    标量形态无图片。
-    """
-    if isinstance(data, list):
-        return any(isinstance(item, dict) and "error" not in item for item in data)
-    if isinstance(data, dict):
-        return "error" not in data
-    return False
+    """判定 200 响应的 data 字段是否含至少一个有效图片条目。"""
+    return any(
+        not item_reports_failure(item) and item_has_image_payload(item) for item in data_items(data)
+    )
 
 
 class _ClientHTTPMixin:
@@ -244,12 +251,8 @@ class _ClientHTTPMixin:
         键，供调用方诊断上游部分错误。
         """
         data = payload.get("data")
-        if isinstance(data, list):
-            data_count = len(data)
-        elif data is None:
-            data_count = 0
-        else:
-            data_count = 1
+        # 标量形态 data 无可消费条目，条目计数与消费口径共用 data_items。
+        data_count = len(data_items(data))
 
         status = payload.get("status")
         if status is not None and not isinstance(status, str):
@@ -258,7 +261,7 @@ class _ClientHTTPMixin:
                 type(status).__name__,
             )
             status = None
-        status = escalate_partial_status(status, data if isinstance(data, list) else None)
+        status = escalate_partial_status(status, data)
 
         self.logger.debug(
             "解析 JSON 成功: status={}, data_count={}",
@@ -492,7 +495,7 @@ class _ClientHTTPMixin:
         raw_body = await self._read_response_body_capped(response, deadline=deadline)
         try:
             # 阈值之下的解析微秒级完成，线程往返成本高于收益，同步执行。
-            if len(raw_body) > CPU_OFFLOAD_SIZE_THRESHOLD:
+            if should_offload_size(len(raw_body)):
                 payload = await run_in_cpu_pool(json.loads, raw_body)
             else:
                 payload = json.loads(raw_body)
@@ -840,7 +843,8 @@ class _ClientHTTPMixin:
         失败与部分失败不得落「任务完成」日志，成功但携带顶层 error 的结果同样
         降级 warning；抛异常路径的失败日志由 _finalize_generation_error 承担。
         """
-        if not response.get("success"):
+        # 失败判定与用户可见 success 字段共用 response_reports_failure 单源。
+        if response_reports_failure(response):
             self.logger.error("{}任务失败: {}", task_label, _outcome_error_note(response))
         elif response.get("status") == "partial":
             self.logger.warning("{}任务部分完成: {}", task_label, _outcome_error_note(response))

@@ -107,15 +107,16 @@ def estimate_output_length(
     value: Any,
     limit: int,
     *,
-    value_leaf_cost: Callable[[Any, Any], int | None] | None = None,
+    value_leaf_cost: Callable[[Any, Any, int], int | None] | None = None,
 ) -> int | None:
     """迭代估计 dict/list 的输出长度，不物化完整 repr，供截断判长与镜像卸载分流共用。
 
-    str/bytes 键与元素按 len 加单元素标点开销计入，嵌套容器求和，其余元素按固定
-    小常数计入；value_leaf_cost 改写叶子值的计量，接收所在键与值本身、返回该值的
-    文本长度，None 走默认计量，键不经钩子、恒按默认计量；total 超过 limit 即提前
-    返回，超限后的精确值无意义。显式栈配 id 判重终止循环引用展开，嵌套深度超过
-    _CONTAINER_REPR_DEPTH_LIMIT 返回 None，由调用方以类型占位符兜底。
+    str/bytes 键与元素按 len 加单元素标点开销计入，嵌套容器逐个计入开销后展开
+    求和，其余元素按固定小常数计入；value_leaf_cost 改写叶子值的计量，接收所在
+    键、值本身与本函数的 limit、返回该值的文本长度，None 走默认计量，键不经钩子、
+    恒按默认计量；total 超过 limit 即提前返回，超限后的精确值无意义。显式栈配
+    id 判重终止循环引用展开，嵌套深度超过 _CONTAINER_REPR_DEPTH_LIMIT 返回 None，
+    由调用方以类型占位符兜底。
     """
     total = 0
     seen: set[int] = {id(value)}
@@ -129,7 +130,7 @@ def estimate_output_length(
     def value_leaf_length(key: Any, item: Any) -> int:
         if value_leaf_cost is None:
             return default_leaf_length(item)
-        length = value_leaf_cost(key, item)
+        length = value_leaf_cost(key, item, limit)
         if length is None:
             return default_leaf_length(item)
         return length + _CONTAINER_ELEMENT_OVERHEAD
@@ -141,6 +142,7 @@ def estimate_output_length(
                 total += _CONTAINER_LEAF_LENGTH_ESTIMATE
                 return
             seen.add(id(item))
+            total += _CONTAINER_ELEMENT_OVERHEAD
             pending.append((item, depth + 1))
             return
         total += value_leaf_length(key, item)
@@ -161,6 +163,17 @@ def estimate_output_length(
                 if total > limit:
                     return total
     return total
+
+
+def utf8_value_leaf_length(key: Any, value: Any, limit: int) -> int | None:
+    """str 叶子按 UTF-8 字节数计量，其余形态回退默认计量，供字节口径的卸载门控使用。"""
+    if isinstance(value, str):
+        # ASCII 字节数与字符数相等免编码；字符数已达 limit 时字节数只会更大，
+        # 超限后的精确值无意义。
+        if value.isascii() or len(value) >= limit:
+            return len(value)
+        return len(value.encode("utf-8", "surrogatepass"))
+    return None
 
 
 def _truncate_value_for_output(value: Any, limit: int = _VALUE_OUTPUT_LIMIT) -> Any:

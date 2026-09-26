@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
-from ..core.errors import SeedreamMCPError
+from ..core.errors import SeedreamMCPError, has_message_value
 from ..core.sanitizers import sanitize_data_text, sanitize_error_text
 from ..core.formats import (
     DEFAULT_IMAGE_EXTENSION,
@@ -95,6 +95,9 @@ class AutoSaveError(SeedreamMCPError):
 # Markdown 替代文本的长度上限：alt 只承担图片引用内的可访问性描述，超长文本放大
 # 输出体积且破坏可读性；完整提示词已在 structuredContent 顶层 prompt 字段存在。
 _MARKDOWN_ALT_MAX_LENGTH = 200
+
+# 估算复核与解码重试的空白剥离共用同一模式源，str 模式 \s 含 NBSP 等异形空白。
+_BASE64_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
 def _build_markdown_alt(alt_text: str | None) -> str:
@@ -514,25 +517,42 @@ class AutoSaveManager:
         strip/b64decode/sha256 均为 CPU 密集或全量遍历操作，集中于此供
         save_base64_image 经 asyncio.to_thread 调用。
         """
-        raw_payload = payload or ""
-        if not raw_payload or raw_payload.isspace():
+        # None 判定仅作类型收窄，缺失口径单源于 has_message_value。
+        if payload is None or not has_message_value(payload):
             raise AutoSaveError("空的Base64数据")
 
-        estimated_size = (len(raw_payload) * 3) // 4
+        # 朴素上界估算先行，空白只会缩小估算，入限载荷零额外扫描直达解码。
+        decode_input = payload
+        already_stripped = False
+        estimated_size = (len(payload) * 3) // 4
         if estimated_size > self.max_file_size:
-            raise AutoSaveError(
-                format_file_too_large(estimated_size, self.max_file_size, label="Base64数据")
+            # 超限时先零分配求和空白长度复核，折行与 NBSP 等异形空白不因开销被误拒。
+            stripped_len = len(payload) - sum(
+                match.end() - match.start()
+                for match in _BASE64_WHITESPACE_PATTERN.finditer(payload)
             )
+            estimated_size = (stripped_len * 3) // 4
+            if estimated_size > self.max_file_size:
+                raise AutoSaveError(
+                    format_file_too_large(estimated_size, self.max_file_size, label="Base64数据")
+                )
+            # 剥离后入限才物化剥离串，供解码复用免二次全量扫描。
+            decode_input = _BASE64_WHITESPACE_PATTERN.sub("", payload)
+            already_stripped = True
 
-        # 火山引擎 base64 通常不含空白，直传 validate=True 校验避免对大串做全量复制；
-        # 仅当含空白致校验失败时才清理后重试解码。
+        # 直传 validate=True 校验避免对大串做全量复制；含空白致校验失败时才剥离重试。
         try:
-            content_bytes = base64.b64decode(raw_payload, validate=True)
-        except Exception:
             try:
-                content_bytes = base64.b64decode(re.sub(r"\s+", "", raw_payload), validate=True)
-            except Exception as e:
-                raise AutoSaveError(f"Base64解码失败: {e}") from e
+                content_bytes = base64.b64decode(decode_input, validate=True)
+            except Exception:
+                # 剥离后仍失败即载荷本身损坏，不再对原文重复剥离。
+                if already_stripped:
+                    raise
+                content_bytes = base64.b64decode(
+                    _BASE64_WHITESPACE_PATTERN.sub("", payload), validate=True
+                )
+        except Exception as e:
+            raise AutoSaveError(f"Base64解码失败: {e}") from e
 
         if len(content_bytes) > self.max_file_size:
             raise AutoSaveError(

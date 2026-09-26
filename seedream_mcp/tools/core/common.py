@@ -25,9 +25,9 @@ from ...utils.io.io_path import resolve_images_root
 from ...utils.io.io_save import AutoSaveResult
 from ...utils.core.errors import (
     SeedreamConfigError,
-    SeedreamMCPError,
     format_error_for_user,
     resolve_error_profile,
+    response_reports_failure,
 )
 from ._pipeline import (
     PROGRESS_AUTOSAVE_DONE,
@@ -36,9 +36,9 @@ from ._pipeline import (
     PROGRESS_RECEIVED,
     PROGRESS_VALIDATED,
     _classify_generation_error_type,
-    _is_generation_failed,
     _resolve_failure_guidance,
     _yield_for_cancellation,
+    log_tiered_failure,
     prevalidate_save_path,
     safe_report_progress,
 )
@@ -80,6 +80,7 @@ __all__ = [
     "extract_images",
     "format_generation_response",
     "get_lifespan_resource",
+    "log_tiered_failure",
     "preview_inclusion_scope",
     "safe_report_progress",
     "update_result_with_auto_save",
@@ -357,7 +358,7 @@ async def execute_generation_handler(
             module_logger=module_logger,
         )
 
-        is_generation_failed = _is_generation_failed(result)
+        is_generation_failed = response_reports_failure(result)
         # 图片列表提取一次供自动保存与格式化阶段复用，避免重复提取。
         images = extract_images(result)
         result, images, auto_save_results, saveable_indices, auto_save_error = (
@@ -387,13 +388,7 @@ async def execute_generation_handler(
             saveable_indices=saveable_indices,
         )
     except Exception as exc:
-        # 已归约的业务异常无堆栈噪音，非预期异常带堆栈与并行路径口径一致
-        if isinstance(exc, SeedreamMCPError):
-            module_logger.warning(
-                "{}处理失败: {}", metadata.failure_prefix, format_error_for_user(exc)
-            )
-        else:
-            module_logger.opt(exception=True).error("{}处理失败", metadata.failure_prefix)
+        log_tiered_failure(module_logger, exc, "{}处理失败", metadata.failure_prefix)
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
         # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。

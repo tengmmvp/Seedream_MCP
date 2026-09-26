@@ -135,6 +135,14 @@ def parse_retry_after(headers: Mapping[str, str]) -> float | None:
     return None
 
 
+def response_reports_failure(result: dict[str, Any]) -> bool:
+    """生成结果结构的 success 为假值或 status 显式为 failed 时判定失败。
+
+    结局日志分级与工具输出的 success 字段共用本谓词，两处失败口径不漂移。
+    """
+    return not bool(result.get("success")) or result.get("status") == "failed"
+
+
 # HTTP 错误响应与异常类型的统一归约档案：状态码或异常类到展示标题、用户建议、
 # 结构化错误码的单点映射，handle_api_error、format_error_for_user 与
 # _classify_generation_error_type 共用，新增状态码或调整文案只需改这一处。
@@ -228,6 +236,13 @@ def _lookup_http_error_profile(status_code: int) -> _ErrorProfile:
     return _HTTP_DEFAULT_PROFILE
 
 
+def has_message_value(value: Any) -> bool:
+    """None、空串与纯空白串视为缺失，其余形态经归一化后参与错误文案拼接。"""
+    if isinstance(value, str):
+        return len(value) > 0 and not value.isspace()
+    return value is not None
+
+
 def handle_api_error(
     response_status: int,
     response_data: dict[str, Any],
@@ -260,22 +275,23 @@ def handle_api_error(
                 raw_code = error_detail.get("code")
                 # 仅接受非空字符串错误码，上游数字码不臆测转换，其余类型置 None 丢弃。
                 error_code = raw_code if isinstance(raw_code, str) and raw_code else None
-                if "message" in error_detail:
+                detail_message = error_detail.get("message")
+                if has_message_value(detail_message):
                     error_message = (
-                        f"{error_message}: "
-                        f"{truncate_upstream_message_fragment(error_detail['message'])}"
+                        f"{error_message}: {truncate_upstream_message_fragment(detail_message)}"
                     )
                     detail_message_extracted = True
-            elif isinstance(error_detail, str):
+            elif isinstance(error_detail, str) and has_message_value(error_detail):
                 error_message = (
                     f"{error_message}: {truncate_upstream_message_fragment(error_detail)}"
                 )
                 detail_message_extracted = True
-        if not detail_message_extracted and "message" in response_data:
-            error_message = (
-                f"{error_message}: "
-                f"{truncate_upstream_message_fragment(response_data['message'])}"
-            )
+        if not detail_message_extracted:
+            top_message = response_data.get("message")
+            if has_message_value(top_message):
+                error_message = (
+                    f"{error_message}: {truncate_upstream_message_fragment(top_message)}"
+                )
 
     return SeedreamAPIError(
         message=error_message,

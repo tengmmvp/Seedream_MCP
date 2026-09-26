@@ -29,8 +29,8 @@ RUN uv sync --locked --no-dev --no-editable
 # 使用项目虚拟环境作为运行时 Python
 ENV PATH="/app/.venv/bin:${PATH}"
 
-# 创建非 root 用户并准备目录
-RUN useradd --create-home --shell /bin/bash seedream \
+# 创建非 root 用户并准备目录；uid 1000 对齐 README 的 chown 1000:1000 挂载契约，编号被基础镜像占用时构建即报错。
+RUN useradd --uid 1000 --user-group --create-home --shell /bin/bash seedream \
     && mkdir -p /app/.seedream/images /app/.seedream/logs \
     && chown -R seedream:seedream /app
 

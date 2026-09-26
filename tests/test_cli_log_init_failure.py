@@ -3,7 +3,8 @@
 setup_logging 含目录创建等 I/O，在只读容器或受限账号下可能抛 OSError。cli_main
 捕获该异常并以退出码 1 结束，向 stderr 输出排查指引而不裸抛堆栈。日志文件路径
 的求值测试见 test_io_path_polish 的 resolve_log_file_path 用例；密钥环重绑在
-日志系统之后执行、失败 ERROR 落入文件通道的顺序亦在此守护。
+日志系统之后执行、失败 ERROR 落入文件通道的顺序亦在此守护；finally 清理段
+拦二次 Ctrl+C 的退出形态守护同在此文件。
 """
 
 from __future__ import annotations
@@ -63,3 +64,31 @@ def test_cli_main_rebind_failure_log_reaches_file_channel(
     log_file = tmp_path / ".seedream" / "logs" / "seedream_mcp.log"
     assert exit_code == 0
     assert "requestState 密钥环重绑" in log_file.read_text(encoding="utf-8")
+
+
+def test_cli_main_swallows_second_keyboard_interrupt_during_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """清理期间到达的二次 Ctrl+C 被 sync_cleanup 的池关闭防护拦截，在途退出码 0 不丢。"""
+    monkeypatch.setenv("ARK_API_KEY", "test-key")
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["seedream-image-mcp"])
+    # 活动配置是模块级状态，先记录原值再交由 monkeypatch 在用例结束后恢复
+    monkeypatch.setattr(config_module, "_active_config", config_module._active_config)
+
+    def _interrupting_run(transport: object) -> None:
+        raise KeyboardInterrupt
+
+    def _interrupting_shutdown() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(resources_module.mcp, "run", _interrupting_run)
+    monkeypatch.setattr(resources_module, "shutdown_cpu_offload_executor", _interrupting_shutdown)
+
+    with preserved_loguru_globals():
+        exit_code = bootstrap_module.cli_main()
+
+    assert exit_code == 0
+    log_file = tmp_path / ".seedream" / "logs" / "seedream_mcp.log"
+    assert "关闭 CPU 卸载线程池被中断" in log_file.read_text(encoding="utf-8")

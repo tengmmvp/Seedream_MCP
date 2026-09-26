@@ -63,6 +63,18 @@ STATIC_SECURITY_HEADERS: dict[str, str] = {
     "x-content-type-options": "nosniff",
 }
 
+# 静态直出的封闭 MIME 清单：登记值取规范 MIME，text/* 条目经 starlette 响应头
+# 机制追加 charset 后缀；清单外扩展在 routes 侧 404，静态服务因此不依赖
+# mimetypes 猜型与 Windows 注册表。
+STATIC_MIME_ALLOWLIST: dict[str, str] = {
+    ".js": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+}
+
+# 静态挂载封禁的页面扩展族：页面只经 meta 端点携带安全头直出，直达不出页面内容。
+STATIC_PAGE_EXTENSIONS: tuple[str, ...] = (".html", ".htm", ".xhtml")
+
 # 各 API 端点路径常量，routes 注册与测试断言共用单一来源。
 WEB_API_CONFIG_INFO = f"{WEB_API_PREFIX}/config-info"
 WEB_API_GENERATE_TEXT_TO_IMAGE = f"{WEB_API_PREFIX}/generate/text-to-image"

@@ -89,7 +89,7 @@ def cli_main() -> int:
             error = validate_http_security(args, auth_token)
         if error is not None:
             logger.error(error)
-            # 退出路径的 stderr 兜底：SEEDREAM_LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见
+            # 退出路径的 stderr 兜底：SEEDREAM_LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见。
             print(error, file=sys.stderr)
             return 1
         if transport == "streamable-http":
@@ -113,6 +113,7 @@ def cli_main() -> int:
         print(f"服务器运行失败: {format_error_for_user(exc)}", file=sys.stderr)
         return 1
     finally:
+        # 清理期间的中断由 sync_cleanup 内部拦 BaseException 兜住。
         sync_cleanup()
 
     return 0

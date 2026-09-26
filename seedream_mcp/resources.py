@@ -237,7 +237,8 @@ def sync_cleanup() -> None:
 
     先提取并清空全局引用，避免后续清理抛错使引用滞留。关闭在新事件循环上尽力而为：
     httpx/aiohttp 传输绑定原循环，跨循环 aclose 常无效，残余连接交由进程退出回收。
-    CPU 卸载线程池一并关闭，退出不等队列。
+    CPU 卸载线程池一并关闭，前置清理被中断也不跳过，退出不等队列。全程拦
+    BaseException，中断不得从兜底清理逃逸到任何调用方。
     """
     global _active_resource
     retired = list(_retired_resources)
@@ -259,7 +260,15 @@ def sync_cleanup() -> None:
         pass
     except Exception as exc:
         logger.warning("同步清理共享资源失败: {}", exc)
-    shutdown_cpu_offload_executor()
+    except BaseException as exc:
+        # 与 transport 的退出清理同口径：清理期间的中断只记告警，不替换在途返回值。
+        logger.warning("同步清理被中断: {}", exc)
+    finally:
+        # 池关闭独立拦 BaseException：前置清理被中断不得跳过本步。
+        try:
+            shutdown_cpu_offload_executor()
+        except BaseException as exc:
+            logger.warning("关闭 CPU 卸载线程池被中断: {}", exc)
 
 
 def _reset_lifespan_state() -> None:

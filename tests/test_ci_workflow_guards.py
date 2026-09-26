@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from _docker_uid import chown_owner_pair
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 
@@ -47,6 +49,13 @@ def _paths_filter_entries(text: str) -> list[list[str]]:
     ]
 
 
+def _step_block(text: str, step_name: str) -> str:
+    """切出指定名称的步骤块，止于下一个步骤声明行。"""
+    marker = f"- name: {step_name}"
+    start = text.index(marker) + len(marker)
+    return text[start:].split("\n      - name:", 1)[0]
+
+
 def test_ci_triggers_split_pr_and_main_push() -> None:
     """CI 由合入 main 的 PR 与 main 推送触发，功能分支经 PR 验证，放宽须显式修改此契约。"""
     ci = _workflow_text("ci.yml")
@@ -77,6 +86,16 @@ def test_release_triggers_unchanged() -> None:
     assert '- "v*"' in release
     assert "workflow_dispatch:" in release
     assert "pull_request:" not in release
+
+
+def test_release_compose_quick_start_prepares_mount_owner() -> None:
+    """Release 快速上手的 Compose 步骤含挂载属主预置命令，与 README 部署契约同源。
+
+    Linux 上的 Docker 以 root 属主自动创建缺失的挂载源，容器内 uid 不可写，
+    日志目录创建失败致启动退出，叠加 restart: unless-stopped 循环重启。
+    """
+    release = _workflow_text("release.yml")
+    assert f"mkdir -p .seedream && chown {chown_owner_pair()} .seedream" in release
 
 
 def test_ci_test_matrix_keeps_platform_coverage() -> None:
@@ -160,6 +179,22 @@ def test_js_syntax_check_covers_all_modules() -> None:
     assert "seedream_mcp/webapp/static/js/*.js" in reusable
     js_dir = _REPO_ROOT / "seedream_mcp" / "webapp" / "static" / "js"
     assert list(js_dir.glob("*.js")), "webapp 静态目录必须存在 JS 模块"
+
+
+def test_per_file_coverage_floor_step_exists_and_gated() -> None:
+    """单文件覆盖率下限步骤须绑定非降级跑测门，json 生成与脚本消费同步骤存在。
+
+    总量下限由 pyproject fail_under 兜底，单文件下限仅此步骤生效，静默移除
+    会使低覆盖文件无门禁合入。
+    """
+    reusable = _workflow_text("reusable-checks.yml")
+    assert reusable.count("scripts/check_coverage_floors.py") == 1
+    floors_step = _step_block(reusable, "📏 Check per-file coverage floors")
+    assert "if: ${{ inputs.run-tests && inputs.mcp-pin-version == '' }}" in floors_step
+    assert "python -m coverage json -o coverage.json" in floors_step
+    assert "scripts/check_coverage_floors.py" in floors_step
+    # json 生成的数据文件来自跑测步骤的同门 --cov，缺席时下限判定落在空数据上
+    assert "--cov=seedream_mcp" in _step_block(reusable, "✅ Run tests")
 
 
 def test_sdk_lower_bound_workflow_pins_pyproject_floor() -> None:

@@ -269,22 +269,27 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
     assert "提示词不能为空" in structured["error"]["message"]
 
 
-async def _post_mcp_with_host(app: Any, host_header: str) -> httpx.Response:
-    """以指定 Host 头经完整 ASGI 栈发起 tools/list 请求，返回响应。"""
+async def _post_mcp_with_host(
+    app: Any, host_header: str, origin_header: str | None = None
+) -> httpx.Response:
+    """以指定 Host 头与可选 Origin 头经完整 ASGI 栈发起 tools/list 请求。"""
     async with _LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://127.0.0.1:8000"
         ) as client:
+            headers = {
+                "host": host_header,
+                "authorization": "Bearer s3cret",
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            }
+            if origin_header is not None:
+                headers["origin"] = origin_header
             return await client.post(
                 _MCP_PATH,
                 content=_mcp_request("tools/list"),
-                headers={
-                    "host": host_header,
-                    "authorization": "Bearer s3cret",
-                    "content-type": "application/json",
-                    "accept": "application/json, text/event-stream",
-                },
+                headers=headers,
             )
 
 
@@ -323,6 +328,24 @@ async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlis
     security = _transport_security_for_host("127.0.0.1")
     assert security.enable_dns_rebinding_protection is True
     assert "127.0.0.1:*" in security.allowed_hosts
+
+
+async def test_e2e_loopback_bind_accepts_default_port_header_forms(
+    reset_http_app_state: None,
+) -> None:
+    """回环绑定下无端口 Host 与 Origin 头经外层守卫与 SDK 内层白名单双双放行。
+
+    --port 80/443 部署的客户端按 RFC 9110 省略端口，白名单缺裸形态时无端口
+    头被 SDK 内层 421/403 误拒。
+    """
+    app = build_transport_app("s3cret", stateless=True, json_response=True, host="127.0.0.1")
+
+    response = await _post_mcp_with_host(app, "127.0.0.1", "http://127.0.0.1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jsonrpc"] == "2.0"
+    assert "error" not in body
 
 
 async def test_e2e_localhost_bind_keeps_sdk_host_allowlist(

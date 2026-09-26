@@ -69,6 +69,8 @@ services:
       # requestState 多副本共享密钥环，留空保持进程内临时密钥，单进程无需配置。
       - SEEDREAM_REQUEST_STATE_KEYS=${SEEDREAM_REQUEST_STATE_KEYS:-}
     volumes:
+      # Linux 需先 mkdir -p .seedream && chown 1000:1000 .seedream；Docker Desktop 不受影响。
+      # Docker 以 root 属主自动创建缺失的挂载源，容器内 uid 1000 不可写。
       - ./.seedream:/app/.seedream
       # .env 需宿主机先创建为文件，否则 Docker 会生成同名目录导致挂载失败。
       - ./.env:/app/.env:ro

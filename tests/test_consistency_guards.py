@@ -39,6 +39,7 @@ from seedream_mcp.utils.core.validators import (
     VALID_RESPONSE_FORMATS,
     VALID_SIZE_PRESETS,
 )
+from seedream_mcp.utils.core import executors, sanitizers
 
 # 生成工具元数据元组：三个守护测试共用，新增生成工具漏更任一测试即失败。
 _GENERATION_TOOL_METADATA = (
@@ -79,6 +80,13 @@ def _static_key_text(node: ast.AST) -> tuple[str, bool]:
     return "", False
 
 
+def _is_environ_access(node: ast.AST) -> bool:
+    """判定节点是否 os.environ 或 from os import environ 的裸名拼写。"""
+    if isinstance(node, ast.Name):
+        return node.id == "environ"
+    return isinstance(node, ast.Attribute) and node.attr == "environ"
+
+
 def _is_env_key_read(func: ast.AST) -> bool:
     """判定被调函数是否 os.getenv 或 os.environ.get，含 from os import 的裸名拼写。"""
     if isinstance(func, ast.Name):
@@ -87,24 +95,22 @@ def _is_env_key_read(func: ast.AST) -> bool:
         return False
     if func.attr == "getenv":
         return True
-    return (
-        func.attr == "get"
-        and isinstance(func.value, ast.Attribute)
-        and func.value.attr == "environ"
-    )
+    return func.attr == "get" and _is_environ_access(func.value)
 
 
 def _env_key_read_sites(source: str) -> list[tuple[str, str]]:
-    """提取源码内全部环境键读取站点，返回 (调用原文, 键静态前缀)。"""
+    """提取源码内全部环境键读取站点，含下标读取形态，返回 (读取原文, 键静态前缀)。"""
     sites: list[tuple[str, str]] = []
     for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call) or not _is_env_key_read(node.func):
-            continue
-        if node.args:
-            prefix, _fully_static = _static_key_text(node.args[0])
-        else:
-            prefix = ""
-        sites.append((ast.unparse(node), prefix))
+        if isinstance(node, ast.Call) and _is_env_key_read(node.func):
+            if node.args:
+                prefix, _fully_static = _static_key_text(node.args[0])
+            else:
+                prefix = ""
+            sites.append((ast.unparse(node), prefix))
+        elif isinstance(node, ast.Subscript) and _is_environ_access(node.value):
+            prefix, _fully_static = _static_key_text(node.slice)
+            sites.append((ast.unparse(node), prefix))
     return sites
 
 
@@ -202,6 +208,12 @@ def test_loguru_calls_never_pass_exc_info_keyword() -> None:
     assert offenders == []
 
 
+def test_cpu_offload_threshold_single_definition_in_executors() -> None:
+    """卸载尺寸阈值单点定义于 executors，sanitizers 侧出现同名定义即归属漂移。"""
+    assert hasattr(executors, "CPU_OFFLOAD_SIZE_THRESHOLD")
+    assert not hasattr(sanitizers, "CPU_OFFLOAD_SIZE_THRESHOLD")
+
+
 def test_security_marked_logs_are_warning_level() -> None:
     """security 标记的日志调用均为 warning，低于该级别的标记会被 sink 级别门丢弃。
 
@@ -221,7 +233,7 @@ def test_security_marked_logs_are_warning_level() -> None:
 
 
 def test_env_key_reads_covered_by_host_scrub_prefixes() -> None:
-    """getenv 系调用的键静态前缀落在 conftest 清洗前缀内，动态键站点须登记豁免。"""
+    """环境变量键读取站点的键静态前缀落在 conftest 清洗前缀内，动态键站点须登记豁免。"""
     package_root = Path(seedream_mcp.__file__).resolve().parent
     offenders: list[str] = []
     for source_path in sorted(package_root.rglob("*.py")):
@@ -250,21 +262,30 @@ def test_env_key_reads_covered_by_host_scrub_prefixes() -> None:
         ('import os\nos.getenv("SEEDREAM_" + name)', "SEEDREAM_"),
         ("from os import getenv\ngetenv('SEEDREAM_C')", "SEEDREAM_C"),
         ("import os\nos.environ.get('ARK_D', '')", "ARK_D"),
+        ("from os import environ\nenviron.get('SEEDREAM_E')", "SEEDREAM_E"),
+        ("import os\nos.environ['ARK_F']", "ARK_F"),
+        ("from os import environ\nenviron['SEEDREAM_G']", "SEEDREAM_G"),
+        ("import os\nos.environ[name]", ""),
         ("import os\nos.getenv(name)", ""),
     ],
 )
 def test_env_key_site_extraction_covers_quote_and_composition_forms(
     source: str, expected_prefix: str
 ) -> None:
-    """键提取对引号拼写与 f-string/拼接形态不敏感，纯动态键解出空前缀。"""
+    """键提取对引号拼写、f-string/拼接与下标读取形态不敏感，纯动态键解出空前缀。"""
     sites = _env_key_read_sites(source)
 
     assert [prefix for _render, prefix in sites] == [expected_prefix]
 
 
-def test_env_key_site_extraction_ignores_unrelated_get_calls() -> None:
-    """非 environ 接收者的 .get 调用不进入环境键扫描结果。"""
-    source = "values = {'SEEDREAM_X': '1'}\nitem = values.get('SEEDREAM_X')\nsession.get()"
+def test_env_key_site_extraction_ignores_unrelated_reads() -> None:
+    """非 environ 接收者的 .get 调用与下标读取不进入环境键扫描结果。"""
+    source = (
+        "values = {'SEEDREAM_X': '1'}\n"
+        "item = values.get('SEEDREAM_X')\n"
+        "session.get()\n"
+        "entry = values['SEEDREAM_X']"
+    )
 
     assert _env_key_read_sites(source) == []
 

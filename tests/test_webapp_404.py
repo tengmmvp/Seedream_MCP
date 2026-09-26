@@ -254,8 +254,10 @@ async def test_static_mount_denies_html_direct_access(
 
     大写 .HTML 变体同样拒绝：Windows 文件系统大小写不敏感会命中页面文件，
     小写匹配放行即绕过封禁；大小写不敏感文件系统之外该形态本就无文件可命中。
-    封禁逻辑耦合 _GuardedStaticFiles 覆盖的 Starlette 内部方法 file_response
-    与 SDK 私有属性 mcp._custom_starlette_routes，升级时本组用例为适配检查点。
+    封禁逻辑耦合 _GuardedStaticFiles 覆盖的 Starlette 内部方法 file_response，
+    MIME 封闭清单在覆盖内直接构造 FileResponse 并复制上游条件分支（Headers、
+    is_not_modified 与 NotModifiedResponse），连同 SDK 私有属性
+    mcp._custom_starlette_routes，升级时本组用例为适配检查点。
     """
     prepare_static_dir(monkeypatch, tmp_path)
     write_workspace_config(tmp_path)
@@ -329,6 +331,28 @@ async def test_static_mount_denies_html_short_name_variant(
 
     assert intercepted
     assert response.status_code == 404
+
+
+async def test_static_mount_rejects_unregistered_extension(
+    tmp_path: Path,
+    monkeypatch: Any,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """封闭清单外的扩展一律 404，直出资产不经 mimetypes 猜型。
+
+    新增资产类型必须先在 constants 的 MIME 清单登记才会被服务。
+    """
+    static_dir = prepare_static_dir(monkeypatch, tmp_path)
+    (static_dir / "notes.txt").write_bytes(b"plain")
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    unregistered = await web_get(app, "/web/static/notes.txt")
+    registered = await web_get(app, "/web/static/app.js")
+
+    assert unregistered.status_code == 404
+    assert registered.status_code == 200
 
 
 async def test_page_responses_carry_security_headers(

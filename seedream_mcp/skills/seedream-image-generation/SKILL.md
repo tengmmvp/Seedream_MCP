@@ -54,7 +54,7 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 - `watermark`：默认不加水印
 - `optimize_prompt_options`：`standard` 或 `fast`；`fast` 仅 5.0 Pro 与 4.0 支持
 - `response_format`：默认 `url`；`output_format` 仅 5.0 系列支持 jpeg/png 选择
-- `stream`：5.0 Pro 不支持
+- `stream`：5.0 Pro 不支持；开启时 `request_count` 须为 1
 - `tools`：`[{"type": "web_search"}]` 开启联网搜索，仅 doubao-seedream-5.0 系列（5.0/5.0-lite）支持
 - `request_count`：1-10 张候选图；组图场景语义为"每次产出一组"
 - `max_images`（组图）：1-15，省略时自动取 15 减去参考图数量

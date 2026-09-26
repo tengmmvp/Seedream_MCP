@@ -1,9 +1,9 @@
 """按级别记录格式化消息的 loguru logger 测试替身与真实日志的捕获器。
 
-RecordingLogger 供 test_client_refactor、test_logging_setup、
-test_parallel_generation_tools、test_workspace_roots_scope、test_validation_prompt、
-test_tighten_schema_runtime_probe 与 test_prepare_cache_single_flight 复用，
-替代各文件自持的近实现替身。
+RecordingLogger 供 test_browse_tool_result、test_client_refactor、
+test_logging_setup、test_parallel_generation_tools、test_workspace_roots_scope、
+test_validation_prompt、test_tighten_schema_runtime_probe 与
+test_prepare_cache_single_flight 复用，替代各文件自持的近实现替身。
 opt(lazy=True) 的 callable 实参在记录时求值，若不求值，lambda 对象本身进入
 格式化字符串，会掩盖 _summarize_prompt 等求值路径未运行的回归。
 capture_loguru_messages 捕获进程级真实 loguru logger 的指定级别消息，供
@@ -27,6 +27,7 @@ class RecordingLogger:
     """按级别记录格式化消息的 loguru logger 替身。
 
     Attributes:
+        debug_messages: 格式化后的 debug 消息列表。
         info_messages: 完成 lazy 实参求值与模板格式化后的 info 消息列表。
         warnings: 格式化后的 warning 消息列表。
         errors: 格式化后的 error 消息列表。
@@ -35,6 +36,7 @@ class RecordingLogger:
     """
 
     def __init__(self) -> None:
+        self.debug_messages: list[str] = []
         self.info_messages: list[str] = []
         self.warnings: list[str] = []
         self.errors: list[str] = []
@@ -62,6 +64,10 @@ class RecordingLogger:
         evaluated = tuple(arg() if callable(arg) else arg for arg in args)
         bucket.append(message.format(*evaluated) if evaluated else message)
 
+    def debug(self, message: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
+        self._record(self.debug_messages, message, args)
+
     def info(self, message: str, *args: Any, **kwargs: Any) -> None:
         del kwargs
         self._record(self.info_messages, message, args)
@@ -73,9 +79,6 @@ class RecordingLogger:
     def error(self, message: str, *args: Any, **kwargs: Any) -> None:
         del kwargs
         self._record(self.errors, message, args)
-
-    def debug(self, message: str, *args: Any, **kwargs: Any) -> None:
-        del message, args, kwargs
 
 
 @contextmanager

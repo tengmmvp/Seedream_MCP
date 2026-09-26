@@ -297,32 +297,34 @@ def resolve_cached_explicit_images_root(configured_dir: str) -> Path:
     )
 
 
+def _resolve_configured_workspace_root(configured_root: str) -> Path:
+    """解析工作区根目录声明，绝对形态走进程级缓存，相对形态随进程位置现算。"""
+    expanded_root = Path(configured_root).expanduser()
+    cacheable = expanded_root.is_absolute()
+    if cacheable:
+        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root)
+        if cached_root is not None:
+            return cached_root
+    resolved_root = expanded_root.resolve()
+    if cacheable:
+        _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
+    return resolved_root
+
+
 def _resolve_configured_root() -> Path | None:
-    """解析已配置的工作区根目录，未配置或解析失败返回 None。
+    """解析已配置的工作区根目录，未配置返回 None，解析失败抛配置错误。
 
     供 resolve_env_workspace_root 的声明链兜底取配置根。UNC 声明与
     resolve_images_root 同口径在 resolve 前拒绝。
 
     Raises:
-        SeedreamConfigError: 工作区根目录声明为 UNC 形态。
+        SeedreamConfigError: 工作区根目录声明为 UNC 形态或无法解析。
     """
     configured_root = _configured_env_value(_WORKSPACE_ROOT_ENV)
     if not configured_root:
         return None
     reject_unc_declaration(configured_root, label="工作区根目录")
-    try:
-        expanded_root = Path(configured_root).expanduser()
-        cacheable = expanded_root.is_absolute()
-        cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root) if cacheable else None
-        if cached_root is not None:
-            return cached_root
-        resolved_root = expanded_root.resolve()
-    except Exception as e:
-        logger.warning("无效的工作区根目录配置 '{}': {}", configured_root, e)
-        return None
-    if cacheable:
-        _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
-    return resolved_root
+    return _resolve_declaration("工作区根目录", configured_root, _resolve_configured_workspace_root)
 
 
 def _resolve_home_root() -> Path:
@@ -434,12 +436,29 @@ def resolve_env_workspace_root() -> Path:
         已 resolve 的工作根目录；无任何配置时为回退链结果。
 
     Raises:
-        SeedreamConfigError: 无配置且工作目录与用户主目录均不可用。
+        SeedreamConfigError: 已配置根无法解析，或无配置且工作目录与用户主目录均不可用。
     """
     resolved_root = _resolve_configured_root()
     if resolved_root is not None:
         return resolved_root
     return _resolve_fallback_root()
+
+
+def _resolve_declaration(label: str, configured: str, resolve: Callable[[str], Path]) -> Path:
+    """执行目录声明的解析，解析失败归一为只回显配置原值的配置错误。
+
+    日志路径、图片目录与工作区根目录三条求值共用，保证错误通道分级与消息净化一致。
+
+    Raises:
+        SeedreamConfigError: 声明值解析失败（路径非法或超长）。
+    """
+    try:
+        return resolve(configured)
+    except (OSError, RuntimeError, ValueError) as exc:
+        # 异常原文嵌 expanduser 展开后的服务器绝对路径，仅进日志；用户消息只
+        # 回显其自行配置的原始值。
+        logger.error("{}配置无法解析 '{}': {}", label, configured, exc)
+        raise SeedreamConfigError(f"{label}配置无法解析: {configured}") from exc
 
 
 def resolve_log_file_path() -> Path:
@@ -453,12 +472,12 @@ def resolve_log_file_path() -> Path:
         日志文件完整路径。
 
     Raises:
-        SeedreamConfigError: 声明值非法或回退链整体不可解析。
+        SeedreamConfigError: 声明值非法或无法解析，或回退链整体不可解析。
     """
     configured_data_root = _configured_env_value(_DATA_ROOT_ENV)
     if configured_data_root:
         reject_unc_declaration(configured_data_root, label="数据根目录")
-        base = resolve_cached_data_root(configured_data_root)
+        base = _resolve_declaration("数据根目录", configured_data_root, resolve_cached_data_root)
     else:
         base = resolve_env_workspace_root()
     return base / DATA_DIR_NAME / "logs" / "seedream_mcp.log"
@@ -481,23 +500,16 @@ def resolve_images_root() -> Path:
     configured = _configured_env_value(_DATA_ROOT_ENV)
     if configured:
         reject_unc_declaration(configured, label="数据根目录")
-        try:
-            # 显式声明与工作根目录同为数据根目录，图片目录统一派生自其 .seedream 子目录。
-            return resolve_cached_explicit_images_root(configured)
-        except (OSError, RuntimeError, ValueError) as exc:
-            # 异常原文嵌 expanduser 展开后的服务器绝对路径，仅进日志；用户消息只
-            # 回显其自行配置的原始值。
-            logger.error("数据根目录配置无法解析 '{}': {}", configured, exc)
-            raise SeedreamConfigError(f"数据根目录配置无法解析: {configured}") from exc
+        # 显式声明与工作根目录同为数据根目录，图片目录统一派生自其 .seedream 子目录。
+        return _resolve_declaration("数据根目录", configured, resolve_cached_explicit_images_root)
     return resolve_cached_default_images_root(get_workspace_root())
 
 
 def get_read_context() -> tuple[list[Path], Path, list[Path]]:
     """一次求值 (工作区声明集合, 图片目录, 读权限)，供读取链各消费方共享单次结果。
 
-    工作区声明链不可解析（无 Roots 与环境根且主目录不可解析）时工作区为空、
-    读权限退化为仅图片目录并记录，显式数据根目录声明可用即不整体失败；图片
-    目录自身不可解析时照常上抛。
+    显式数据根目录可用时，工作区声明链不可解析仅使工作区为空、读权限退化为
+    仅图片目录并记录；未声明时同一坏根先行上抛，图片目录自身不可解析照常上抛。
     """
     images_root = resolve_images_root()
     try:
@@ -624,8 +636,9 @@ def has_windows_colon_component(path: str) -> bool:
 def is_drive_relative(path: Path) -> bool:
     """判断路径是否为盘符相对形态（C:foo）：有 drive 无 root。
 
-    pathlib 拼接对该形态会丢弃基目录锚定到该盘进程 CWD；POSIX 无 drive 恒返回
-    False。normalize_path、file URI 转换与参考图候选定位共用本判定。
+    基目录与输入异盘时 pathlib 拼接丢弃基目录、resolve 落到输入盘的进程 CWD；
+    POSIX 无 drive 恒返回 False。normalize_path、file URI 转换与参考图候选定位
+    共用本判定。
 
     Args:
         path: 待判定的路径对象。
@@ -639,7 +652,7 @@ def is_drive_relative(path: Path) -> bool:
 def is_windows_rooted_without_drive(path: Path) -> bool:
     """判断 win32 下路径是否有根无盘符（/foo），POSIX 该形态为合法绝对路径恒 False。
 
-    pathlib 拼接对该形态锚定重置，会静默写出基目录所在盘的盘根之外。normalize_path、
+    pathlib 拼接对该形态锚定重置为基目录所在盘的盘根，落点逃出基目录。normalize_path、
     file URI 转换与参考图候选定位共用本判定，保持三处拒绝口径一致。
 
     Args:
@@ -675,16 +688,17 @@ def normalize_path(path: str, base_dir: str | None = None) -> Path:
         if is_unc_path(str(path_obj)):
             raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {path}")
 
-        # 驱动器相对路径有 drive 无 root，pathlib 拼接对该形态会丢弃 base_dir 落到
-        # 该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；判定经 is_drive_relative
-        # 与 file URI 转换、参考图候选定位共用单一来源。
+        # 驱动器相对路径有 drive 无 root，base_dir 与其异盘时 pathlib 拼接丢弃
+        # base_dir、resolve 落到该盘进程 CWD，与 UNC 同口径在 resolve 前拒绝；
+        # 判定经 is_drive_relative 与 file URI 转换、参考图候选定位共用单一来源。
         if is_drive_relative(path_obj):
             raise ValueError(f"拒绝驱动器相对路径以避免绕过基目录解析: {path}")
 
         # 有根无盘符形态有 root 无 drive，is_absolute 判为 False 会被当相对路径拼
-        # 基目录，但 pathlib 拼接对该形态锚定重置、静默写出基目录所在盘的盘根之外，
-        # 与驱动器相对同口径在 resolve 前拒绝；判定经 is_windows_rooted_without_drive
-        # 共用单一来源，POSIX 该形态即合法绝对路径恒不触发。
+        # 基目录，但 pathlib 拼接对该形态锚定重置为基目录所在盘的盘根、落点逃出
+        # 基目录，与驱动器相对同口径在 resolve 前拒绝；判定经
+        # is_windows_rooted_without_drive 共用单一来源，POSIX 该形态即合法绝对
+        # 路径恒不触发。
         if is_windows_rooted_without_drive(path_obj):
             raise ValueError(f"拒绝有根无盘符路径以避免绕过基目录解析: {path}")
 

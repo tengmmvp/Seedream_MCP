@@ -7,12 +7,14 @@ AutoSaveResult.to_dict 的数据字段净化与 markdown alt 兜底。
 
 import asyncio
 import base64
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from seedream_mcp.utils.io import io_save
 from seedream_mcp.utils.io.io_save import (
     AutoSaveError,
     AutoSaveManager,
@@ -85,6 +87,130 @@ async def test_prepare_base64_payload_estimate_exceeds_limit(tmp_path: Path) -> 
             mgr._prepare_base64_payload("A" * 200, None)
     finally:
         await mgr.close()
+
+
+def _mime_folded(payload: str, line_length: int = 76) -> str:
+    """按 MIME 76 字符折行插入 CRLF，构造含空白开销的 base64 输入。"""
+    return "\r\n".join(
+        payload[index : index + line_length] for index in range(0, len(payload), line_length)
+    )
+
+
+class _CountingWhitespacePattern:
+    """替换模块级空白模式并计数触达，供零扫描与零物化的触达断言。"""
+
+    def __init__(self, real: re.Pattern[str]) -> None:
+        self._real = real
+        self.touches: int = 0
+        self.sub_calls: int = 0
+
+    def finditer(self, payload: str) -> Iterator[re.Match[str]]:
+        self.touches += 1
+        return self._real.finditer(payload)
+
+    def sub(self, repl: str, payload: str) -> str:
+        self.touches += 1
+        self.sub_calls += 1
+        return self._real.sub(repl, payload)
+
+
+async def test_prepare_base64_payload_estimate_ignores_folded_whitespace(
+    tmp_path: Path,
+) -> None:
+    """折行 base64 的估算按空白剥离后的长度计算，解码尺寸未超限的载荷放行。
+
+    max_file_size 取无空白形态的估算值，任何把 CRLF 计入估算的实现都会
+    误拒本输入。
+    """
+    png_bytes = _minimal_png_bytes()
+    clean_payload = base64.b64encode(png_bytes).decode()
+    limit = (len(clean_payload) * 3) // 4
+    mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=limit, cleanup_days=0)
+    try:
+        folded = _mime_folded(clean_payload)
+        content_bytes, extension, _ = mgr._prepare_base64_payload(folded, None)
+        assert content_bytes == png_bytes
+        assert extension == ".png"
+    finally:
+        await mgr.close()
+
+
+async def test_prepare_base64_payload_estimate_still_rejects_oversized_with_whitespace(
+    tmp_path: Path,
+) -> None:
+    """剥离空白后的估算仍超上限时照旧在解码前拒绝。"""
+    mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=100, cleanup_days=0)
+    try:
+        with pytest.raises(AutoSaveError, match="Base64数据过大"):
+            mgr._prepare_base64_payload(_mime_folded("A" * 200), None)
+    finally:
+        await mgr.close()
+
+
+async def test_prepare_base64_payload_oversized_after_strip_skips_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """剥离后仍超限的载荷在零分配复核处即拒绝，不调用 pattern.sub 物化剥离串。"""
+    mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=100, cleanup_days=0)
+    try:
+        spy = _CountingWhitespacePattern(io_save._BASE64_WHITESPACE_PATTERN)
+        monkeypatch.setattr(io_save, "_BASE64_WHITESPACE_PATTERN", spy)
+        with pytest.raises(AutoSaveError, match="Base64数据过大"):
+            mgr._prepare_base64_payload(_mime_folded("A" * 200), None)
+        assert spy.touches == 1
+        assert spy.sub_calls == 0
+    finally:
+        await mgr.close()
+
+
+async def test_prepare_base64_payload_estimate_counts_nbsp_at_boundary(
+    tmp_path: Path,
+) -> None:
+    """NBSP 紧贴估算边界时按空白剥离计数，可入限载荷不被误拒。
+
+    max_file_size 取无空白形态的估算值，任何把 NBSP 计入估算的实现都会在解码前
+    误拒。
+    """
+    png_bytes = _minimal_png_bytes()
+    clean_payload = base64.b64encode(png_bytes).decode()
+    dirty_payload = clean_payload[:5] + "\xa0" * 8 + clean_payload[5:]
+    limit = (len(clean_payload) * 3) // 4
+    mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=limit, cleanup_days=0)
+    try:
+        content_bytes, extension, _ = mgr._prepare_base64_payload(dirty_payload, None)
+        assert content_bytes == png_bytes
+        assert extension == ".png"
+    finally:
+        await mgr.close()
+
+
+async def test_prepare_base64_payload_estimate_rejects_nbsp_oversized(
+    tmp_path: Path,
+) -> None:
+    """NBSP 剥离后的估算仍超上限时照旧在解码前拒绝。"""
+    mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=100, cleanup_days=0)
+    try:
+        with pytest.raises(AutoSaveError, match="Base64数据过大"):
+            mgr._prepare_base64_payload("A" * 5 + "\xa0" * 8 + "A" * 195, None)
+    finally:
+        await mgr.close()
+
+
+def test_prepare_base64_payload_in_limit_skips_whitespace_scan(
+    manager: AutoSaveManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """朴素估算入限的干净载荷不做空白扫描，行为与结果和直连解码一致。"""
+    spy = _CountingWhitespacePattern(io_save._BASE64_WHITESPACE_PATTERN)
+    monkeypatch.setattr(io_save, "_BASE64_WHITESPACE_PATTERN", spy)
+
+    png_bytes = _minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+    content_bytes, _, _ = manager._prepare_base64_payload(payload, None)
+
+    assert content_bytes == png_bytes
+    assert spy.touches == 0
 
 
 def test_prepare_base64_payload_decode_failure(manager: AutoSaveManager) -> None:

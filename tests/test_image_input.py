@@ -16,10 +16,13 @@ from typing import IO
 import pytest
 from PIL import Image
 
+from _cpu_offload_spy import CpuOffloadSpy
 from seedream_mcp.utils.core.errors import (
     SeedreamValidationError,
     resolve_error_profile,
 )
+from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
+from seedream_mcp.utils.images import image_input as image_input_module
 from seedream_mcp.utils.images import image_validation as image_validation_module
 from seedream_mcp.utils.images.image_input import prepare_image_input
 from seedream_mcp.utils.images.image_validation import validate_image_path
@@ -41,7 +44,7 @@ async def test_prepare_image_input_rejects_symlink_escape(
     目标位于权限内时 resolve 后为常规文件、O_NOFOLLOW 打开不抛错，测试将沦为
     空芯。以会话 Roots 声明工作区，目标置于其外。
     """
-    # 越界目标置于共享 basetemp 之外的独占临时目录；resolve 跟随符号链接后越界被拒
+    # 越界目标置于共享 basetemp 之外的独占临时目录；resolve 跟随符号链接后越界被拒。
     outside_dir = Path(tempfile.mkdtemp(prefix="seedream-escape-outside-"))
     target = outside_dir / "target.png"
     Image.new("RGB", (32, 32), color="white").save(target)
@@ -432,6 +435,56 @@ async def test_prepare_image_input_mime_follows_byte_signature(
     result = await prepare_image_input(str(mismatched))
 
     assert result.startswith("data:image/png;base64,")
+
+
+# ---- 预处理池分派守护 ----
+
+
+async def test_prepare_image_input_local_read_runs_in_cpu_pool(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地读取编码在专用 CPU 池执行，不与默认执行器的延迟敏感短任务同池。"""
+    image_path = tmp_path / "local.png"
+    Image.new("RGB", (64, 64), color="black").save(image_path)
+
+    spy = CpuOffloadSpy(image_input_module._prepare_local_image)
+    monkeypatch.setattr(image_input_module, "_prepare_local_image", spy)
+
+    result = await prepare_image_input(str(image_path))
+
+    assert result.startswith("data:image/")
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_prepare_image_input_large_data_uri_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超过下沉阈值的 Data URI 校验在专用 CPU 池执行，长时解码不占默认池槽位。"""
+    spy = CpuOffloadSpy(lambda image: image)
+    monkeypatch.setattr(image_input_module, "validate_image_input", spy)
+
+    data_uri = "data:image/png;base64," + "A" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)
+
+    assert await prepare_image_input(data_uri) == data_uri
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_prepare_image_input_small_payloads_stay_outside_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """URL 与阈值之下的 Data URI 校验走默认工作线程，不占专用池槽位。"""
+    spy = CpuOffloadSpy(lambda image: image)
+    monkeypatch.setattr(image_input_module, "validate_image_input", spy)
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color="white").save(buffer, format="PNG")
+    small_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    await prepare_image_input("https://example.com/a.png")
+    await prepare_image_input(small_uri)
+
+    spy.assert_ran_outside_cpu_pool()
+    assert len(spy.calls) == 2
 
 
 def test_validate_image_input_keeps_home_prefix_literal(workspace_root: Path) -> None:

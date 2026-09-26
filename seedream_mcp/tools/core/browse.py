@@ -251,7 +251,6 @@ def _scan_and_filter_directory(
     format_filter: list[str] | None,
     remaining: int,
     read_scope: list[Path],
-    seen_images: set[Path],
     unreadable_dirs: list[Path],
     truncated_dirs: list[Path],
 ) -> list[tuple[Path, Path]]:
@@ -260,7 +259,8 @@ def _scan_and_filter_directory(
     同步执行，由调用方经 ``asyncio.to_thread`` 在线程内调用。图片的 resolve 结果由扫描
     缓存共享；越界复核与去重不随缓存固化，每次按当前读权限重新执行。剔除项不占分页
     配额：扫描命中上限且配额未填满时，按剔除计数扩大 scan_limit 补扫，直至填满配额、
-    扫到目录末尾或无剔除项。
+    扫到目录末尾或无剔除项。补扫轮从头重放并以已消费路径集合去重，插行缩行
+    不漏不重。
 
     Args:
         resolved_dir: 已 resolve 的待扫描目录。
@@ -270,8 +270,6 @@ def _scan_and_filter_directory(
         remaining: 本目录新增条数的配额上限。
         read_scope: 已 resolve 的条目过滤界，为读权限（工作区 ∪ 图片目录）或
             调用方传入的替代界。
-        seen_images: 已见原始路径集合，就地更新，兜底扫描缓存前缀扩展轮次间的
-            竞态错位重复。
         unreadable_dirs: 不可读目录收集列表，就地更新，供空结果分支区分目录
             不可读与目录内无图片。
         truncated_dirs: 截断目录收集列表，就地更新，供装配分支标记结果不完整。
@@ -281,47 +279,45 @@ def _scan_and_filter_directory(
     """
     new_entries: list[tuple[Path, Path]] = []
     scan_limit = remaining
-    # 续扫游标：已消费的条目数，补扫轮从该位置继续。
-    consumed = 0
-    while True:
-        # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
-        matched_image_pairs = cached_find_images_in_directory(
-            resolved_dir=resolved_dir,
-            recursive=recursive,
-            max_depth=max_depth,
-            format_filter=format_filter,
-            scan_limit=scan_limit,
-            scanner=find_images_in_directory,
-            unreadable_dirs=unreadable_dirs,
-            truncated_dirs=truncated_dirs,
-        )
-        # 返回量达到 scan_limit 说明可能仍有后续条目，否则已扫到末尾。
-        scan_hit_limit = len(matched_image_pairs) >= scan_limit
-        dropped = 0
-        out_of_scope: list[Path] = []
-        while consumed < len(matched_image_pairs):
-            image_path, image_resolved = matched_image_pairs[consumed]
-            consumed += 1
-            # resolve 结果来自扫描缓存；权限目录已 resolve，直接比较。
-            if not any(is_within_resolved(image_resolved, scope) for scope in read_scope):
-                out_of_scope.append(image_path)
-                dropped += 1
-                continue
-            if image_path in seen_images:
-                dropped += 1
-                continue
-            seen_images.add(image_path)
-            new_entries.append((image_path, image_resolved))
-            if len(new_entries) >= remaining:
-                break
-        if out_of_scope:
-            # 聚合单条告警，防大目录翻页时越界项逐条刷屏
-            logger.warning("检测到越界图片路径 {} 条，已忽略", len(out_of_scope))
-        if not scan_hit_limit or len(new_entries) >= remaining or dropped == 0:
-            return new_entries
-        # 按剔除计数扩大 scan_limit 补扫，使剔除项不占本页配额；同目录扫描返回稳定
-        # 前缀，consumed 游标不重复消费，竞态错位由 seen_images 去重兜底。
-        scan_limit = scan_limit + dropped
+    consumed_paths: set[Path] = set()
+    # 越界计数跨补扫轮累计，异常退出同样落日志。
+    out_of_scope_count = 0
+    try:
+        while True:
+            # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
+            matched_image_pairs = cached_find_images_in_directory(
+                resolved_dir=resolved_dir,
+                recursive=recursive,
+                max_depth=max_depth,
+                format_filter=format_filter,
+                scan_limit=scan_limit,
+                scanner=find_images_in_directory,
+                unreadable_dirs=unreadable_dirs,
+                truncated_dirs=truncated_dirs,
+            )
+            # 返回量达到 scan_limit 说明可能仍有后续条目，否则已扫到末尾。
+            scan_hit_limit = len(matched_image_pairs) >= scan_limit
+            dropped = 0
+            for image_path, image_resolved in matched_image_pairs:
+                if image_path in consumed_paths:
+                    continue
+                consumed_paths.add(image_path)
+                # resolve 结果来自扫描缓存；权限目录已 resolve，直接比较。
+                if not any(is_within_resolved(image_resolved, scope) for scope in read_scope):
+                    out_of_scope_count += 1
+                    dropped += 1
+                    continue
+                new_entries.append((image_path, image_resolved))
+                if len(new_entries) >= remaining:
+                    break
+            if not scan_hit_limit or len(new_entries) >= remaining or dropped == 0:
+                return new_entries
+            # 按剔除计数扩大 scan_limit 补扫，使剔除项不占本页配额。
+            scan_limit = scan_limit + dropped
+    finally:
+        # 单条聚合告警覆盖整个补扫过程，防大目录翻页时越界项逐条刷屏。
+        if out_of_scope_count:
+            logger.warning("检测到越界图片路径 {} 条，已忽略", out_of_scope_count)
 
 
 def _build_display_entries(
@@ -406,7 +402,7 @@ async def build_browse_fallback_result(
     try:
         fallback_roots = await asyncio.to_thread(get_workspace_roots)
     except Exception as exc:
-        # 兜底分支的回显字段降级原因可追溯
+        # 兜底分支的回显字段降级原因可追溯。
         logger.warning("浏览兜底分支重读工作区根失败，按无工作区处理: {}", exc)
         fallback_roots = []
     fallback_filter, _ = _normalize_format_filter(params.format_filter)
@@ -479,8 +475,6 @@ async def _scan_browse_entries(
     truncated_dirs: list[Path] = []
     if not format_filter_exhausted:
         await safe_report_progress(ctx, progress=PROGRESS_SCAN_START, message="开始扫描图片目录")
-        # seen_images 兜底单目录内缓存前缀扩展的竞态错位重复。
-        seen_images: set[Path] = set()
         new_entries = await asyncio.to_thread(
             _scan_and_filter_directory,
             resolved_dir=resolved_dir,
@@ -489,7 +483,6 @@ async def _scan_browse_entries(
             format_filter=state.format_filter,
             remaining=scan_limit,
             read_scope=read_scope,
-            seen_images=seen_images,
             unreadable_dirs=unreadable_dirs,
             truncated_dirs=truncated_dirs,
         )

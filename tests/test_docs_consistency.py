@@ -76,6 +76,14 @@ def _block_flag_tokens(block: CodeBlock) -> list[str]:
     return flags
 
 
+def _block_number_tokens(block: CodeBlock) -> list[str]:
+    """提取块内全部数字 token，按行序与行内出现顺序展开为扁平序列。"""
+    tokens: list[str] = []
+    for line in block.lines:
+        tokens.extend(_NUMBER_TOKEN_PATTERN.findall(line))
+    return tokens
+
+
 def _param_bullet_groups(name: str) -> list[tuple[int, list[str]]]:
     """把正文工具参数 bullet 行按连续行分组，每组的组首行号与参数名序列。
 
@@ -247,6 +255,35 @@ def test_bash_blocks_share_cli_flag_tokens_across_languages() -> None:
             )
 
 
+def test_bash_blocks_share_number_tokens_across_languages() -> None:
+    """三语全部 bash 代码块内数字 token 序列一致。
+
+    Docker 属主 uid 等部署关键数值以字面形式散落在命令行中，按块配对比较数字
+    序列，某语言单独改动数值时首个差异块的消息指明漂移的文件与块序。
+    """
+    base_blocks = _lang_blocks(BASE_README, "bash")
+    assert base_blocks, "README.md 应存在 bash 代码块，围栏解析失效或文档被清空"
+    assert any(
+        _block_number_tokens(block) for block in base_blocks
+    ), "bash 代码块未提取到任何数字 token，数字解析失效"
+
+    for name in OTHER_READMES:
+        other_blocks = _lang_blocks(name, "bash")
+        assert len(other_blocks) == len(base_blocks), (
+            f"{name} 的 bash 代码块数量为 {len(other_blocks)}，{BASE_README} 为 "
+            f"{len(base_blocks)}，存在单语增删的命令块"
+        )
+        for ordinal, (base, other) in enumerate(zip(base_blocks, other_blocks), start=1):
+            base_numbers = _block_number_tokens(base)
+            other_numbers = _block_number_tokens(other)
+            assert other_numbers == base_numbers, (
+                f"{name} 第 {other.line} 行起的第 {ordinal} 个 bash 块数字序列与 "
+                f"{BASE_README} 第 {base.line} 行起的同序块漂移:\n"
+                f"  {BASE_README}: {base_numbers}\n"
+                f"  {name}: {other_numbers}"
+            )
+
+
 def test_tool_param_bullet_groups_match() -> None:
     """各工具参数 bullet 列表的参数名序列三语一致。
 
@@ -302,21 +339,35 @@ def test_heading_depth_sequence_matches() -> None:
         )
 
 
+# 三份 README 文件名与语言切换栏的 ./{文件名} 互链集合，各 README 只链接其余两份。
+_ALL_README_NAMES = (BASE_README, *OTHER_READMES)
+_SWITCHER_LINKS = frozenset(f"./{name}" for name in _ALL_README_NAMES)
+
+
 def test_link_url_sets_match() -> None:
     """正文链接 URL 集合三语一致，markdown 链接与 HTML href/src 都计入。
 
-    代码块内的 URL 不参与比较；导航链接、徽章图与参考文档相对链接三语共享同
-    一份集合，单语增删链接即失败。
+    代码块内的 URL 不参与比较；语言切换栏不得链接自身且须恰好链接其余两份
+    README，任一 README 重新引入自链接即失败；切换栏之外的链接三语共享同一
+    份集合，单语增删链接即失败。
     """
-    base_urls = _link_urls(BASE_README)
-    assert base_urls, "未提取到任何链接，解析失效"
+    urls_by_name = {name: _link_urls(name) for name in _ALL_README_NAMES}
+    assert urls_by_name[BASE_README], "未提取到任何链接，解析失效"
 
+    for name, urls in urls_by_name.items():
+        assert f"./{name}" not in urls, f"{name} 的语言切换栏不得链接自身 ./{name}"
+        assert urls & _SWITCHER_LINKS == _SWITCHER_LINKS - {f"./{name}"}, (
+            f"{name} 的语言切换栏应恰好链接其余两份 README，实际为 "
+            f"{sorted(urls & _SWITCHER_LINKS)}"
+        )
+
+    base_shared = urls_by_name[BASE_README] - _SWITCHER_LINKS
     for name in OTHER_READMES:
-        other_urls = _link_urls(name)
-        assert other_urls == base_urls, (
+        other_shared = urls_by_name[name] - _SWITCHER_LINKS
+        assert other_shared == base_shared, (
             f"{name} 的链接 URL 集合与 {BASE_README} 漂移:\n"
-            f"  仅 {BASE_README} 有: {sorted(base_urls - other_urls)}\n"
-            f"  仅 {name} 有: {sorted(other_urls - base_urls)}"
+            f"  仅 {BASE_README} 有: {sorted(base_shared - other_shared)}\n"
+            f"  仅 {name} 有: {sorted(other_shared - base_shared)}"
         )
 
 

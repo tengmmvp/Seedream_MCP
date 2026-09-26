@@ -9,9 +9,10 @@ from __future__ import annotations
 import asyncio
 import copy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ...utils.core.errors import (
+    SeedreamMCPError,
     SeedreamValidationError,
     format_error_for_user,
     resolve_error_profile,
@@ -19,14 +20,17 @@ from ...utils.core.errors import (
 from ...utils.core.sanitizers import sanitize_error_text
 from ...utils.core.logs import get_logger
 from ...utils.io.io_path import normalize_path, resolve_images_root
+from ...utils.io.io_stream import data_items
 
 if TYPE_CHECKING:
+    from loguru import Logger
+
     from mcp.server.mcpserver import Context
 
 logger = get_logger()
 
 
-# 进度里程碑常量
+# 进度里程碑常量。
 PROGRESS_RECEIVED = 0.0
 PROGRESS_VALIDATED = 10.0
 PROGRESS_GENERATION_START = 20.0
@@ -61,11 +65,6 @@ def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
         logger.debug("用量键 {} 的既有值被标量值重置后累加", key)
         current = 0
     usage[key] = current + value
-
-
-def _is_generation_failed(result: dict[str, Any]) -> bool:
-    """判定生成结果是否失败，综合 HTTP 层 success 与显式 status==failed 两信号。"""
-    return not bool(result.get("success")) or result.get("status") == "failed"
 
 
 def _normalize_error_message(raw_error: Any) -> str | None:
@@ -109,6 +108,34 @@ def _resolve_failure_guidance(exc: Exception) -> str:
     return _FAILURE_GUIDANCE_BY_ERROR_CODE.get(error_code, _DEFAULT_FAILURE_GUIDANCE)
 
 
+def log_tiered_failure(
+    logger: Logger,
+    exc: Exception,
+    failure_template: str,
+    *template_args: Any,
+    unexpected_template: str | None = None,
+    unexpected_level: Literal["error", "warning"] = "error",
+) -> None:
+    """按两级策略记录失败：SeedreamMCPError 记 warning 不带堆栈，非预期异常带堆栈。
+
+    Args:
+        logger: 记录日志的 logger。
+        exc: 待归类的异常。
+        failure_template: 业务异常层的消息模板，格式化错误文案以 ": {}" 追加在尾部。
+        template_args: 消息模板的格式化参数。
+        unexpected_template: 非预期异常层的消息模板，缺省复用 failure_template。
+        unexpected_level: 非预期异常的记录级别。
+    """
+    if isinstance(exc, SeedreamMCPError):
+        logger.warning(failure_template + ": {}", *template_args, format_error_for_user(exc))
+        return
+    template = failure_template if unexpected_template is None else unexpected_template
+    if unexpected_level == "warning":
+        logger.opt(exception=True).warning(template, *template_args)
+    else:
+        logger.opt(exception=True).error(template, *template_args)
+
+
 def _extract_parallel_request_error(
     result: dict[str, Any] | None, fallback_exc: Exception | None
 ) -> str:
@@ -118,18 +145,12 @@ def _extract_parallel_request_error(
         if direct_error:
             return direct_error
 
-        data = result.get("data")
-        if isinstance(data, dict):
-            nested_error = _normalize_error_message(data.get("error"))
-            if nested_error:
-                return nested_error
-        elif isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                item_error = _normalize_error_message(item.get("error"))
-                if item_error:
-                    return item_error
+        for item in data_items(result.get("data")):
+            if not isinstance(item, dict):
+                continue
+            item_error = _normalize_error_message(item.get("error"))
+            if item_error:
+                return item_error
 
     if fallback_exc is not None:
         return format_error_for_user(fallback_exc)

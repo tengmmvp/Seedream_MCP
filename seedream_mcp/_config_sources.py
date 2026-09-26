@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 
 from dotenv import dotenv_values
 
-from .utils.core.errors import SeedreamConfigError
+from .utils.core.errors import SeedreamConfigError, has_message_value
 from .utils.core.logs import EarlyMessageBuffer
 from .utils.core.validators import INT_TEXT_PATTERN, parse_bool
 from .utils.model.model_capabilities import MODEL_ALIASES
@@ -262,10 +262,8 @@ def _read_env_values(env_file: str | None) -> dict[str, str]:
 
 
 def _value_is_set(value: object) -> bool:
-    """判定取值是否视为已设置：字符串 strip 后非空，其余类型仅排除 None。"""
-    if isinstance(value, str):
-        return bool(value.strip())
-    return value is not None
+    """判定取值是否视为已设置，缺失口径单源于 errors.has_message_value。"""
+    return has_message_value(value)
 
 
 def _pick_config_value(

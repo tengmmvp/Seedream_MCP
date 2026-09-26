@@ -26,8 +26,10 @@ from seedream_mcp.transport import (
     _WebOriginGuardMiddleware,
     _attach_streamable_http_middleware,
     _bind_address_allowlist,
+    _is_dns_rebinding_protected_host,
     _transport_security_for_host,
     _web_app_host_allowlist,
+    is_loopback_bind_host,
     warn_remote_exposure,
 )
 
@@ -178,6 +180,43 @@ def test_transport_security_merges_origins_into_loopback_allowlist(
         loopback in security.allowed_origins
         for loopback in transport_module._LOOPBACK_ALLOWED_ORIGINS
     )
+
+
+def test_transport_security_loopback_allowlist_covers_default_port_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回环白名单含裸 Host 与无端口 Origin，默认端口部署的无端口头不被 421/403 误拒。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    bare_hosts = {"127.0.0.1", "localhost", "[::1]"}
+    bare_origins = {
+        "http://127.0.0.1",
+        "http://localhost",
+        "http://[::1]",
+        "https://127.0.0.1",
+        "https://localhost",
+        "https://[::1]",
+    }
+
+    security = _transport_security_for_host("127.0.0.1")
+
+    assert bare_hosts <= set(security.allowed_hosts)
+    assert bare_origins <= set(security.allowed_origins)
+
+
+def test_transport_security_bracketed_ipv6_loopback_matches_bare_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[::1] 与 ::1 绑定同走回环分支，防护口径不因方括号拼写分叉。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+
+    bracketed = _transport_security_for_host("[::1]")
+    bare = _transport_security_for_host("::1")
+
+    assert bracketed.enable_dns_rebinding_protection == bare.enable_dns_rebinding_protection
+    assert bracketed.allowed_hosts == bare.allowed_hosts
+    assert bracketed.allowed_origins == bare.allowed_origins
 
 
 def test_transport_security_merges_origins_into_bind_address_allowlist(
@@ -368,7 +407,7 @@ async def test_app_host_guard_entry_matching_semantics(
 def test_attach_assembles_app_host_guard_for_web_on_non_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """配置 hosts 时 web 守卫与 SDK 内层同语义按列表放行，回环三形态恒并入。"""
+    """配置 hosts 时 web 守卫与 SDK 内层同语义按列表放行，回环三地址的裸与通配形态恒并入。"""
     config = SeedreamConfig(api_key="test_key", http_allowed_hosts=("proxy.example.com",))
     monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
     app = _FakeStarletteApp()
@@ -377,9 +416,12 @@ def test_attach_assembles_app_host_guard_for_web_on_non_loopback(
 
     guard = next(ref for ref in app.user_middleware if ref.cls is _AppHostGuardMiddleware)
     assert guard.kwargs["allowed_hosts"] == (
+        "127.0.0.1",
         "127.0.0.1:*",
-        "localhost:*",
+        "[::1]",
         "[::1]:*",
+        "localhost",
+        "localhost:*",
         "proxy.example.com",
     )
     assert app.attached_classes()[0] is _AppHostGuardMiddleware
@@ -390,15 +432,40 @@ def test_app_host_guard_config_replaces_derived_bind_entries() -> None:
     allowlist = _web_app_host_allowlist("10.0.0.5", ("proxy.example.com",))
 
     assert "10.0.0.5" not in allowlist and "10.0.0.5:*" not in allowlist
-    assert allowlist == ("127.0.0.1:*", "localhost:*", "[::1]:*", "proxy.example.com")
+    assert allowlist == (
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "[::1]",
+        "[::1]:*",
+        "localhost",
+        "localhost:*",
+        "proxy.example.com",
+    )
 
 
 def test_app_host_guard_derives_loopback_forms_for_localhost_bind() -> None:
-    """localhost 绑定派生回环三形态，IP 直连回环地址的 Host 不被 web 守卫拒绝。"""
+    """localhost 绑定派生回环三地址的裸与通配形态，IP 直连回环地址不被 web 守卫拒绝。"""
     assert _web_app_host_allowlist("localhost", ()) == (
+        "127.0.0.1",
         "127.0.0.1:*",
-        "localhost:*",
+        "[::1]",
         "[::1]:*",
+        "localhost",
+        "localhost:*",
+    )
+
+
+def test_app_host_guard_derived_allowlist_merges_loopback_forms() -> None:
+    """未配置 hosts 时具体非回环绑定的派生白名单并入回环基底，本机回环 Host 头访问不因未配置被拒。"""
+    assert _web_app_host_allowlist("10.0.0.5", ()) == (
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "[::1]",
+        "[::1]:*",
+        "localhost",
+        "localhost:*",
+        "10.0.0.5",
+        "10.0.0.5:*",
     )
 
 
@@ -782,10 +849,92 @@ def test_bind_address_allowlist_covers_host_and_origin_forms() -> None:
     assert "http://[fe80::1]:*" in ipv6_origins
 
 
-@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "[::]"])
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "::0", "0:0:0:0:0:0:0:0", "[::]"])
 def test_bind_address_allowlist_rejects_wildcard_binds(wildcard: str) -> None:
     """通配绑定下实际访问地址不可预知，无法推导白名单，返回 None 保持关闭。"""
     assert _bind_address_allowlist(wildcard) is None
+
+
+def test_bind_address_allowlist_equivalent_for_bracketed_and_bare_ipv6() -> None:
+    """方括号与裸 IPv6 绑定派生同一白名单，剥方括号口径与配置侧同源不分叉。"""
+    bracketed = _bind_address_allowlist("[::1]")
+    bare = _bind_address_allowlist("::1")
+
+    assert bracketed is not None
+    assert bare is not None
+    assert bracketed == bare
+    assert bare[0] == ["[::1]", "[::1]:*"]
+    assert "http://[::1]" in bare[1]
+
+
+def test_bracket_bind_host_judgement_treats_malformed_brackets_as_plain() -> None:
+    """未闭合、空方括号与带尾随内容的形态不剥离，按非回环的普通字符串参与判定。"""
+    assert is_loopback_bind_host("[::1]")
+    assert is_loopback_bind_host("::1")
+    assert not is_loopback_bind_host("[::1")
+    assert not is_loopback_bind_host("[]")
+    assert not is_loopback_bind_host("[::1]x")
+    assert not is_loopback_bind_host("[::1]:8000")
+    assert not is_loopback_bind_host("[::1]junk]")
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["::01", "0:0:0:0:0:0:0:1", "127.0.0.2", "[::01]", "[127.0.0.2]", "::ffff:127.0.0.1"],
+)
+def test_loopback_equivalent_spellings_classify_as_loopback(spelling: str) -> None:
+    """getaddrinfo 等价拼写经 IP 解析同判回环，字面量集合判定会误拒纯回环绑定的启动。"""
+    assert is_loopback_bind_host(spelling)
+
+
+@pytest.mark.parametrize("spelling", ["::2", "localhost"])
+def test_non_loopback_spellings_stay_non_loopback(spelling: str) -> None:
+    """非回环写法不因解析放宽误判，localhost 维持非回环。"""
+    assert not is_loopback_bind_host(spelling)
+
+
+@pytest.mark.parametrize(
+    ("host", "protected"),
+    [
+        ("localhost", True),
+        ("[localhost]", True),
+        ("127.0.0.1", True),
+        ("::1", True),
+        ("[::1]", True),
+        ("::ffff:127.0.0.1", True),
+        ("10.0.0.5", False),
+        ("mcp.example.com", False),
+    ],
+)
+def test_dns_rebinding_protection_host_classification(host: str, protected: bool) -> None:
+    """回环等价写法与 localhost（含方括号形态）判为 DNS rebinding 防护地址（_DNS_REBINDING_PROTECTED_HOSTS 集合成员），具体非回环地址与非 IP 主机名不属该集合。"""
+    assert _is_dns_rebinding_protected_host(host) is protected
+
+
+def test_loopback_guard_merges_equivalent_spelling_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """等价写法回环绑定把字面量并入守卫白名单，按该写法访问不被拒。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.2", "", web_enabled=False)
+
+    guard = next(ref for ref in app.user_middleware if ref.cls is _LoopbackHostGuardMiddleware)
+    assert b"127.0.0.2" in guard.kwargs["allowed_hosts"]
+    assert b"127.0.0.1" in guard.kwargs["allowed_hosts"]
+
+
+def test_loopback_allowlists_cover_port_wildcard_origin_forms() -> None:
+    """回环 Origin 白名单按三地址派生双 scheme 端口通配形态，漏派生即误拒。"""
+    expected_wildcard_origins = {
+        f"{scheme}://{literal}:*"
+        for literal in ("127.0.0.1", "localhost", "[::1]")
+        for scheme in ("http", "https")
+    }
+
+    assert expected_wildcard_origins <= set(transport_module._LOOPBACK_ALLOWED_ORIGINS)
 
 
 def test_transport_security_defaults_to_bind_address_allowlist(
@@ -817,6 +966,23 @@ def test_transport_security_wildcard_bind_stays_off_with_warning(
     output = "".join(records)
     assert "SEEDREAM_HTTP_ALLOWED_HOSTS" in output
     assert "Bearer" in output
+
+
+@pytest.mark.parametrize("wildcard", ["::0", "0:0:0:0:0:0:0:0"])
+def test_transport_security_equivalent_wildcard_forms_stay_off(
+    wildcard: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """::0 与全零展开形态与 0.0.0.0/:: 同判通配，不派生 Host 白名单并走关闭告警路径。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    records: list[str] = []
+
+    with capture_loguru_messages(records):
+        settings = _transport_security_for_host(wildcard)
+
+    assert settings.enable_dns_rebinding_protection is False
+    assert "SEEDREAM_HTTP_ALLOWED_HOSTS" in "".join(records)
 
 
 def test_transport_security_explicit_hosts_keep_browser_403_semantics(

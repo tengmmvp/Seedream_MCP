@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hmac
+import ipaddress
 import json
 import ssl
 from collections.abc import Callable
@@ -22,7 +23,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from ._config_sources import _decompose_allowed_host_entry
+from ._config_sources import _bracket_ipv6_literal, _decompose_allowed_host_entry
 from .config import get_active_config
 from .utils.core.logs import get_logger
 
@@ -30,32 +31,138 @@ logger = get_logger()
 
 # ==================== 传输层常量 ====================
 
-# streamable-http 可信回环地址集合：仅字面量回环地址免鉴权。
-# 不含 "localhost"：其解析依赖 hosts/DNS，污染时可指向非回环地址。
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1"}
+# 回环白名单与 Host 守卫的基底地址集合，与 streamable_http_app 的默认防护
+# 集合一致；localhost 解析依赖 hosts/DNS 可被污染，仅并入白名单不参与回环判定。
+_DNS_REBINDING_PROTECTED_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _strip_ipv6_brackets(host: str) -> str:
+    """剥离绑定地址的方括号，非方括号与带尾随内容的形态原样返回。
+
+    方括号语法与配置侧共用 _bracket_ipv6_literal，绑定地址不含端口，仅右方括号
+    收尾的纯方括号形态剥离，其余形态按原样参与回环与通配判定。
+    """
+    if not host.startswith("[") or host.find("]") != len(host) - 1:
+        return host
+    literal = _bracket_ipv6_literal(host)
+    return host if literal is None else literal
+
+
+def _is_loopback_address_literal(address: str) -> bool:
+    """按 IP 解析判定回环，127/8 与 ::1 的等价写法同判回环，非 IP 字面量为 False。
+
+    IPv4 映射形改判内嵌 IPv4：<3.12.4 的 IPv6Address.is_loopback 不识别映射回环。
+    """
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(parsed, ipaddress.IPv6Address):
+        mapped = parsed.ipv4_mapped
+        if mapped is not None:
+            return mapped.is_loopback
+    return parsed.is_loopback
 
 
 def is_loopback_bind_host(host: str) -> bool:
-    """判定绑定地址是否为字面量回环地址，cli 安全校验与本模块中间件共用。"""
-    return host in _LOOPBACK_HOSTS
+    """判定绑定地址是否为回环地址，方括号形态与等价拼写同判回环。
+
+    cli 安全校验与本模块中间件共用；getaddrinfo 把 ::01 一类等价写法解析到
+    回环，仅按字面量集合判定会把纯回环绑定按非回环口径强制令牌与 TLS。
+    """
+    return _is_loopback_address_literal(_strip_ipv6_brackets(host))
 
 
-# 绑定即启用 SDK 内层 DNS rebinding 防护的地址集合，比 _LOOPBACK_HOSTS 多含
-# "localhost"，与 streamable_http_app 的默认防护集合一致。
-_DNS_REBINDING_PROTECTED_HOSTS = _LOOPBACK_HOSTS | {"localhost"}
+def _is_dns_rebinding_protected_host(host: str) -> bool:
+    """判定绑定地址是否启用 SDK 内层 DNS rebinding 防护，回环等价写法与 localhost 同判。
 
-# 回环绑定下 SDK 防护的 Host/Origin 白名单，端口通配，与
-# _LoopbackHostGuardMiddleware 的容忍集合语义对齐；Origin 兼含 https 形态，
-# 覆盖 --ssl-certfile 的回环 TLS 部署。
-_LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
-_LOOPBACK_ALLOWED_ORIGINS = (
-    "http://127.0.0.1:*",
-    "http://localhost:*",
-    "http://[::1]:*",
-    "https://127.0.0.1:*",
-    "https://localhost:*",
-    "https://[::1]:*",
+    绑定判定有意不含 localhost，防护判定须包含它，剥括号口径覆盖 [localhost] 形态。
+    """
+    return _strip_ipv6_brackets(host) == "localhost" or is_loopback_bind_host(host)
+
+
+def _host_literal(address: str) -> str:
+    """地址字面量的 Host 头主机形态，IPv6 按头语法加方括号。"""
+    return f"[{address}]" if ":" in address else address
+
+
+def _address_allowlist_forms(address: str) -> tuple[list[str], list[str]]:
+    """由绑定地址字面量派生 Host/Origin 白名单条目，裸形态与端口通配成对。
+
+    IPv6 字面量按 Host/Origin 头的方括号形态生成；裸形态放行默认端口部署的
+    无端口头，Origin 同时覆盖 http 与 https 两种 scheme 的有端口与无端口形态。
+    """
+    literal = _host_literal(address)
+    allowed_hosts = [literal, f"{literal}:*"]
+    allowed_origins = [
+        f"http://{literal}",
+        f"http://{literal}:*",
+        f"https://{literal}",
+        f"https://{literal}:*",
+    ]
+    return allowed_hosts, allowed_origins
+
+
+def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
+    """由具体绑定地址推导 Host/Origin 默认白名单，通配绑定返回 None。
+
+    通配判定经 ipaddress 解析覆盖 0.0.0.0、::、::0、0:0:0:0:0:0:0:0 等字面写法，
+    非 IP 字面量按具体地址派生白名单。
+    """
+    stripped = _strip_ipv6_brackets(host)
+    try:
+        if ipaddress.ip_address(stripped).is_unspecified:
+            return None
+    except ValueError:
+        pass
+    return _address_allowlist_forms(stripped)
+
+
+def _loopback_allowlists() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """对 DNS rebinding 防护地址集逐地址经绑定地址派生 Host/Origin 白名单成对返回。
+
+    本机访问可经任一回环地址，缺一即误拒。
+    """
+    hosts: list[str] = []
+    origins: list[str] = []
+    # 排序使集合迭代有序，派生序列由测试锁定。
+    for address in sorted(_DNS_REBINDING_PROTECTED_HOSTS):
+        allowlist = _bind_address_allowlist(address)
+        if allowlist is None:
+            raise RuntimeError(f"回环地址 {address} 不应判为通配绑定")
+        hosts.extend(allowlist[0])
+        origins.extend(allowlist[1])
+    return tuple(hosts), tuple(origins)
+
+
+# 回环绑定 SDK 防护的 Host/Origin 白名单，Host 元组另供 Web 全 app 守卫共用。
+_LOOPBACK_ALLOWED_HOSTS, _LOOPBACK_ALLOWED_ORIGINS = _loopback_allowlists()
+
+
+def _loopback_bind_allowlists(host: str) -> tuple[list[str], list[str]]:
+    """绑定地址字面量并入回环基底的 Host/Origin 白名单，供 SDK 内层防护配置。"""
+    literal_forms = _bind_address_allowlist(host)
+    if literal_forms is None:
+        raise RuntimeError("DNS rebinding 防护地址不应判为通配绑定")
+    hosts = list(dict.fromkeys([*_LOOPBACK_ALLOWED_HOSTS, *literal_forms[0]]))
+    origins = list(dict.fromkeys([*_LOOPBACK_ALLOWED_ORIGINS, *literal_forms[1]]))
+    return hosts, origins
+
+
+# 回环绑定 Host 守卫的基底 bytes 集，由 DNS rebinding 防护地址集派生裸形态。
+# 容忍 "localhost" 与绑定判定排除它并不矛盾：绑定 localhost 在 hosts 污染下
+# 会实际暴露公网，须 fail-closed；rebinding 请求的 Host 恒为攻击者域名，
+# 无法借污染携带 Host: localhost 抵达本机。派生不含 "::1"：Host 头中 IPv6
+# 字面量必须带方括号，无方括号形态属畸形。
+_LOOPBACK_GUARD_HOSTS = frozenset(
+    _host_literal(address).encode("ascii") for address in _DNS_REBINDING_PROTECTED_HOSTS
 )
+
+
+def _loopback_bind_guard_hosts(host: str) -> frozenset[bytes]:
+    """回环绑定的 Host 守卫 bytes 集：受保护集并入绑定字面量，等价写法漏并即误拒本机访问。"""
+    return _LOOPBACK_GUARD_HOSTS | {_host_literal(_strip_ipv6_brackets(host)).encode("ascii")}
+
 
 # 残余任务回收的最长等待秒数，超时即放弃等待交由循环关闭收尾；同时作为 uvicorn 优雅关停超时。
 _DRAIN_PENDING_TIMEOUT_SECONDS = 5.0
@@ -241,12 +348,11 @@ class _LimitRequestBodyMiddleware:
 
         total_received = 0
         too_large = False
-        # sent_413 标记 413 已由本中间件直发，forwarded 标记下游输出已触达传输层。
-        sent_413 = False
+        # forwarded 标记下游输出已触达传输层。
         forwarded = False
 
         async def receive_wrapper() -> Message:
-            nonlocal total_received, too_large, sent_413
+            nonlocal total_received, too_large
             # 始终先等待真实 receive 再按需丢弃 body：同步合成帧会让下游断连
             # 轮询失去让出点、忙转冻结事件循环。
             message = await receive()
@@ -258,9 +364,7 @@ class _LimitRequestBodyMiddleware:
                     too_large = True
                     if not forwarded:
                         # 判定点即直发 413：客户端可能停发终帧，等下游收尾再发会把
-                        # 连接钉死在永远挂起的 app 上。先置位再发送：send 中途失败
-                        # 时协议状态不明，补发有双响应风险。
-                        sent_413 = True
+                        # 连接钉死在永远挂起的 app 上。
                         try:
                             await self._send_too_large(send)
                         except Exception:
@@ -282,35 +386,18 @@ class _LimitRequestBodyMiddleware:
             forwarded = True
             await send(message)
 
-        async def _finalize_too_large() -> None:
-            # 直发形态已出过 413，静默收尾即可；下游输出已真实转发过传输层时补发
-            # 才违反 ASGI 单响应约定，此时仅记日志；其余形态的下游输出从未触达
-            # 客户端，补发 413 是客户端收到的唯一响应。
-            if sent_413:
-                return
-            if forwarded:
-                logger.warning("请求体超限但下游响应已转发，跳过补发 413 以避免双响应")
-                return
-            await self._send_too_large(send)
-
         try:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
-            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉并交由
-            # _finalize_too_large 收尾，避免冒泡为 500。
+            # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉避免冒泡为 500。
             if too_large:
-                try:
-                    await _finalize_too_large()
-                except Exception:
-                    logger.debug("请求体超限后补发 413 失败，连接可能已关闭")
+                if forwarded:
+                    logger.warning("请求体超限但下游响应已转发，跳过补发 413 以避免双响应")
                 return
             raise
 
-        if too_large:
-            try:
-                await _finalize_too_large()
-            except Exception:
-                logger.debug("请求体超限后补发 413 失败，连接可能已关闭")
+        if too_large and forwarded:
+            logger.warning("请求体超限但下游响应已转发，跳过补发 413 以避免双响应")
 
     async def _send_too_large(self, send: Send) -> None:
         await _send_asgi_json(
@@ -353,14 +440,12 @@ class _LoopbackHostGuardMiddleware:
     websocket 均校验，websocket 以 1008 关闭；Host 头缺失按 403 拒绝。
     """
 
-    # 允许的 Host 头值，比较前已剥离端口。容忍 "localhost" 与绑定判定排除它并不
-    # 矛盾：绑定 localhost 在 hosts 污染下会实际暴露公网，须 fail-closed；rebinding
-    # 请求的 Host 恒为攻击者域名，无法借污染携带 Host: localhost 抵达本机。不含
-    # 裸 "::1"：Host 头中 IPv6 字面量必须带方括号，裸形态属畸形。
-    _ALLOWED_HOSTS = frozenset({b"127.0.0.1", b"localhost", b"[::1]"})
+    # 默认允许的 Host 头值，比较前已剥离端口；等价写法绑定在装配时并入其字面量。
+    _ALLOWED_HOSTS = _LOOPBACK_GUARD_HOSTS
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, allowed_hosts: frozenset[bytes] | None = None) -> None:
         self.app = app
+        self._allowed_hosts = self._ALLOWED_HOSTS if allowed_hosts is None else allowed_hosts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope.get("type")
@@ -368,7 +453,7 @@ class _LoopbackHostGuardMiddleware:
             host = _header_value(scope, b"host")
             # 与 SDK 内层 Host 校验同为大小写敏感精确比较：本层拒绝的大写回环
             # Host 在内层同样不匹配白名单，大写形态由此 403 拒绝。
-            if host is None or self._strip_port(host) not in self._ALLOWED_HOSTS:
+            if host is None or self._strip_port(host) not in self._allowed_hosts:
                 if scope_type == "websocket":
                     # websocket 无 HTTP 状态码可回，按鉴权中间件模式以 1008 关闭。
                     await send({"type": "websocket.close", "code": 1008})
@@ -574,18 +659,15 @@ _STREAMABLE_HTTP_MIDDLEWARE_CLASSES = (
 def _web_app_host_allowlist(host: str, config_hosts: tuple[str, ...]) -> tuple[str, ...]:
     """Web 全 app Host 允许列表：hosts 配置优先，未配置时按绑定地址派生。
 
-    配置存在时与 SDK 内层同语义按配置列表放行，回环三形态恒并入：回环访问者
-    即本机无远程暴露面，本机探活与 localhost 绑定的 IP 直连访问不受列表约束。
-    未配置时按绑定地址派生，localhost 绑定按回环三形态与 SDK 内层一致；通配
-    绑定派生不出条目，返回空元组使 Host 校验层不装配，启动告警已提示配置
-    SEEDREAM_HTTP_ALLOWED_HOSTS。
+    回环基础形态无条件并入各分支白名单：静态骨架无数据，/web/api 与 /mcp
+    另有鉴权与 SDK 内层校验把守。通配绑定派生不出条目，返回空元组使 Host
+    校验层不装配，启动告警已提示配置 SEEDREAM_HTTP_ALLOWED_HOSTS。
     """
     if config_hosts:
         return tuple(dict.fromkeys([*_LOOPBACK_ALLOWED_HOSTS, *config_hosts]))
-    if host in _DNS_REBINDING_PROTECTED_HOSTS:
-        return _LOOPBACK_ALLOWED_HOSTS
-    derived = _bind_address_allowlist(host)
-    return tuple(derived[0]) if derived is not None else ()
+    if _bind_address_allowlist(host) is None:
+        return ()
+    return tuple(_loopback_bind_allowlists(host)[0])
 
 
 def _middleware_attached(app: Any) -> bool:
@@ -665,7 +747,8 @@ def _attach_streamable_http_middleware(
         )
         logger.info("streamable-http 已启用 CORS，放行 origin: {}", ", ".join(allowed_origins))
     if is_loopback_bind_host(host):
-        app.add_middleware(_LoopbackHostGuardMiddleware)
+        guard_hosts = _loopback_bind_guard_hosts(host)
+        app.add_middleware(_LoopbackHostGuardMiddleware, allowed_hosts=guard_hosts)
     elif web_enabled:
         allowlist = _web_app_host_allowlist(host, get_active_config().http_allowed_hosts or ())
         if allowlist:
@@ -703,16 +786,15 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     SEEDREAM_HTTP_ALLOWED_HOSTS 时改为按该列表放行，条目支持 host、host:port 与
     尾部 :* 端口通配。配置 SEEDREAM_HTTP_ALLOWED_ORIGINS 时统一并入各分支的
     Origin 白名单（合并收尾单点完成），与 CORS 层同列表放行，预检应答与真实请求
-    判定一致。通配地址绑定（0.0.0.0/::）下实际访问地址不可预知，默认不启用并
+    判定一致。通配地址绑定（0.0.0.0/:: 及其等价写法）下实际访问地址不可预知，默认不启用并
     输出告警，防护由强制 Bearer 鉴权承担。列表外的 Host 由 SDK 以 421、Origin
     以 403 拒绝；不携带 Origin 的非浏览器 MCP 客户端不受影响。
     """
     config = get_active_config()
     base_hosts: list[str]
     base_origins: list[str]
-    if host in _DNS_REBINDING_PROTECTED_HOSTS:
-        base_hosts = list(_LOOPBACK_ALLOWED_HOSTS)
-        base_origins = list(_LOOPBACK_ALLOWED_ORIGINS)
+    if _is_dns_rebinding_protected_host(host):
+        base_hosts, base_origins = _loopback_bind_allowlists(host)
     elif config.http_allowed_hosts:
         base_hosts = list(config.http_allowed_hosts)
         base_origins = []
@@ -732,29 +814,6 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
         allowed_hosts=base_hosts,
         allowed_origins=[*base_origins, *(config.http_allowed_origins or [])],
     )
-
-
-_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "::"})
-
-
-def _bind_address_allowlist(host: str) -> tuple[list[str], list[str]] | None:
-    """由非回环绑定地址推导 Host/Origin 默认白名单，通配绑定返回 None。
-
-    IPv6 字面量按 Host/Origin 头的方括号形态生成；Origin 同时覆盖 http 与
-    https 两种 scheme 的有端口与无端口形态。
-    """
-    stripped = host[1:-1] if host.startswith("[") and host.endswith("]") else host
-    if stripped in _WILDCARD_BIND_HOSTS:
-        return None
-    literal = f"[{stripped}]" if ":" in stripped else stripped
-    allowed_hosts = [literal, f"{literal}:*"]
-    allowed_origins = [
-        f"http://{literal}",
-        f"http://{literal}:*",
-        f"https://{literal}",
-        f"https://{literal}:*",
-    ]
-    return allowed_hosts, allowed_origins
 
 
 def warn_remote_exposure(host: str, auth_enabled: bool) -> None:
@@ -832,7 +891,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
         transport_security=transport_security,
         max_request_body_size=max_body_size,
     )
-    if host not in _DNS_REBINDING_PROTECTED_HOSTS:
+    if not _is_dns_rebinding_protected_host(host):
         if transport_security.enable_dns_rebinding_protection:
             if config.http_allowed_hosts:
                 logger.info(

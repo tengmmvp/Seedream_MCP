@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...utils.core.errors import has_message_value, response_reports_failure
 from ...utils.core.sanitizers import (
     normalize_message_text,
     sanitize_error_text,
@@ -24,7 +25,6 @@ from ._pipeline import (
     _add_usage_value,
     _classify_generation_error_type,
     _extract_parallel_request_error,
-    _is_generation_failed,
     _normalize_error_message,
 )
 from .context import GenerationExecutionContext
@@ -101,7 +101,7 @@ def aggregate_parallel_generation_results(
     request_count = len(request_results)
 
     for request_index, result in enumerate(request_results, start=1):
-        if not result or _is_generation_failed(result):
+        if not result or response_reports_failure(result):
             request_exc = request_errors.get(request_index)
             error_message = _extract_parallel_request_error(result, request_exc)
             error_items.append({"request_index": request_index, "message": error_message})
@@ -328,28 +328,38 @@ def _render_sanitized_value(value: Any) -> str:
 def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
     """格式化单张图片的可读详情行。
 
-    入参已由调用方净化，直接消费；URL 存在时始终输出，local_path 存在时附加；
-    markdown_ref 可由本地路径推导，文本通道不单独成行。
+    入参已由调用方净化，直接消费；明细字段显式 null 整行省略，b64_json 键
+    存在即输出占位行，URL 存在时始终输出；markdown_ref 可由本地路径推导，
+    文本通道不单独成行。
     """
     parts = [f"图片 {index}:"]
-    if "request_index" in image:
+    if image.get("request_index") is not None:
         parts.append(f"  请求序号: {_render_sanitized_value(image['request_index'])}")
     error_info = image.get("error")
-    if isinstance(error_info, dict):
+    if error_info is not None:
         parts.append("  状态: 失败")
-        if error_info.get("code"):
-            parts.append(f"  错误码: {_render_sanitized_value(error_info['code'])}")
-        if error_info.get("message"):
-            parts.append(f"  错误信息: {_render_sanitized_value(error_info['message'])}")
+    if isinstance(error_info, dict):
+        # code 与 message 的空白串及空值按缺失处理，与非 dict 分支同口径。
+        error_code = error_info.get("code")
+        if has_message_value(error_code):
+            parts.append(f"  错误码: {_render_sanitized_value(error_code)}")
+        error_message = error_info.get("message")
+        if has_message_value(error_message):
+            parts.append(f"  错误信息: {_render_sanitized_value(error_message)}")
+    elif error_info is not None:
+        rendered_error = _render_sanitized_value(error_info)
+        # 空白串错误按缺失处理，与 handle_api_error 等错误通道同口径。
+        if has_message_value(rendered_error):
+            parts.append(f"  错误信息: {rendered_error}")
     if image.get("url"):
         parts.append(f"  URL: {_render_sanitized_value(image['url'])}")
-    if "size" in image:
+    if image.get("size") is not None:
         parts.append(f"  尺寸: {_render_sanitized_value(image['size'])}")
-    if "output_format" in image:
+    if image.get("output_format") is not None:
         parts.append(f"  输出格式: {_render_sanitized_value(image['output_format'])}")
-    if "image_index" in image:
+    if image.get("image_index") is not None:
         parts.append(f"  序号: {_render_sanitized_value(image['image_index'])}")
-    if "local_path" in image:
+    if image.get("local_path") is not None:
         parts.append(f"  本地路径: {_render_sanitized_value(image['local_path'])}")
     if "b64_json" in image:
         b64_data = image.get("b64_json")
@@ -430,7 +440,7 @@ def _format_usage_section(usage: dict[str, Any]) -> list[str]:
 
 
 def _extract_truncated_events(result: dict[str, Any]) -> int | None:
-    """提取 SSE 解析记录的超限丢弃事件数，仅接受正整数，其余形态视为无该信息。"""
+    """提取 SSE 解析记录的因超限或解析失败丢弃的事件数，仅接受正整数，其余形态视为无该信息。"""
     value = result.get("truncated_events")
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
@@ -466,7 +476,7 @@ def format_generation_response(
     Returns:
         格式化后的响应文本。
     """
-    if _is_generation_failed(result):
+    if response_reports_failure(result):
         return _format_failure_section(result)
 
     if images is None:
@@ -502,7 +512,7 @@ def format_generation_response(
         # usage 与自动保存段落自带收尾空行，追加提示行前去除一个，避免连续空行。
         if parts and parts[-1] == "":
             parts.pop()
-        parts.append(f"因单事件体积超限丢弃 {truncated_events} 个事件")
+        parts.append(f"因超限或解析失败丢弃 {truncated_events} 个事件")
 
     if _extract_deadline_exceeded(result):
         if parts and parts[-1] == "":
@@ -545,7 +555,7 @@ def _build_generation_structured_result(
     raw_batch = result.get("batch")
     payload: dict[str, Any] = {
         "tool": tool_name,
-        "success": not _is_generation_failed(result),
+        "success": not response_reports_failure(result),
         "status": sanitize_error_text(raw_status) if isinstance(raw_status, str) else None,
         "prompt": context.prompt,
         "size": context.size,
@@ -582,7 +592,7 @@ def _build_generation_structured_result(
     else:
         payload["auto_save"] = {"enabled": False}
 
-    failed = _is_generation_failed(result)
+    failed = response_reports_failure(result)
     if failed:
         # 空值回落未知错误，与文本通道口径一致。
         raw_error = result.get("error") or "未知错误"

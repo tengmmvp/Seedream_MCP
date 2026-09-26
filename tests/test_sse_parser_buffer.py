@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 import seedream_mcp.utils.io.io_sse as sse_parser_module
+import seedream_mcp.utils.io.io_stream as stream_module
 from seedream_mcp.utils.core.errors import SeedreamAPIError
 from seedream_mcp.utils.core.executors import (
     CPU_OFFLOAD_SIZE_THRESHOLD,
@@ -21,9 +22,9 @@ from seedream_mcp.utils.core.executors import (
     shutdown_cpu_offload_executor,
 )
 from seedream_mcp.utils.io.io_sse import (
+    _parse_segment_with_lost_flag,
     is_sse_response,
     parse_sse_response,
-    parse_sse_segment,
 )
 
 from _client_fakes import _FakeLog, _FakeSSEResponse
@@ -180,6 +181,52 @@ async def test_parse_sse_request_level_error_message_truncated_to_8kb() -> None:
     assert len(message) < 8 * 1024 + 100
 
 
+@pytest.mark.parametrize(
+    ("message_literal", "expected_fragment"),
+    [
+        (b"0", "0"),
+        (b"false", "False"),
+        (b"[]", "[]"),
+        (b"{}", "{}"),
+    ],
+)
+async def test_parse_sse_request_level_error_falsy_message_kept(
+    message_literal: bytes, expected_fragment: str
+) -> None:
+    """None 与空串外的 falsy message 归一化后携带，缺失判定与 handle_api_error 同口径。"""
+    chunks = [b'data: {"error":{"message":' + message_literal + b',"code":"x"}}\n\n']
+    with pytest.raises(SeedreamAPIError) as exc_info:
+        await parse_sse_response(
+            _sse_response(chunks),
+            model_id="m",
+            chunk_size=64,
+            buffer_max_size=4096,
+            event_truncate_threshold=4096,
+            total_bytes_limit=64 * 1024,
+            log=_log(),
+        )
+    assert expected_fragment in str(exc_info.value)
+    assert "流式请求失败" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("message_literal", [b'""', b"null"])
+async def test_parse_sse_request_level_error_missing_message_falls_back(
+    message_literal: bytes,
+) -> None:
+    """message 为 None、空串或纯空白串时回退占位文案。"""
+    chunks = [b'data: {"error":{"message":' + message_literal + b',"code":"x"}}\n\n']
+    with pytest.raises(SeedreamAPIError, match="流式请求失败"):
+        await parse_sse_response(
+            _sse_response(chunks),
+            model_id="m",
+            chunk_size=64,
+            buffer_max_size=4096,
+            event_truncate_threshold=4096,
+            total_bytes_limit=64 * 1024,
+            log=_log(),
+        )
+
+
 async def test_parse_sse_response_logs_unknown_event_type_with_segment_size() -> None:
     """未识别 type 的事件被丢弃并记录 debug 日志，携带事件 type 与段字节规模。"""
     log = _CapturingLog()
@@ -226,18 +273,18 @@ async def test_parse_sse_response_progress_log_by_threshold(
     assert len(progress_logs) >= 2
 
 
-def test_parse_sse_segment_joins_multiline_data_into_single_json() -> None:
+def test_parse_segment_with_lost_flag_joins_multiline_data_into_single_json() -> None:
     """SSE 单事件跨多行 data: 时以 \\n 拼接为完整 JSON，客户端拆行发送仍可还原。"""
     segment = (
         b'data: {"type": "image_generation.completed",\n' b'data: "usage": {"generated_images": 2}}'
     )
-    result = parse_sse_segment(segment, log=None)
-    assert result is not None
-    assert result["type"] == "image_generation.completed"
-    assert result["usage"]["generated_images"] == 2
+    event, _error, _lost = _parse_segment_with_lost_flag(segment, log=None)
+    assert event is not None
+    assert event["type"] == "image_generation.completed"
+    assert event["usage"]["generated_images"] == 2
 
 
-def test_parse_sse_segment_strips_single_leading_space_only() -> None:
+def test_parse_segment_with_lost_flag_strips_single_leading_space_only() -> None:
     """data: 字段仅剥离首个前导空格：data:x 与 data: x 语义一致，多余空白属负载。
 
     SSE 规范仅移除单个前导 U+0020，剩余空白由 JSON 解析容忍。
@@ -249,38 +296,69 @@ def test_parse_sse_segment_strips_single_leading_space_only() -> None:
         b"data:  " + completed,
         b"data: " + completed + b"  ",
     ):
-        result = parse_sse_segment(segment, log=None)
-        assert result is not None, f"形态 {segment!r} 应解析成功"
-        assert result["type"] == "image_generation.completed"
+        event, _error, _lost = _parse_segment_with_lost_flag(segment, log=None)
+        assert event is not None, f"形态 {segment!r} 应解析成功"
+        assert event["type"] == "image_generation.completed"
 
 
-def test_parse_sse_segment_done_marker_without_space_still_recognized() -> None:
+def test_parse_segment_with_lost_flag_done_marker_without_space_still_recognized() -> None:
     """data:[DONE] 无空格形态同样识别为流结束哨兵，不进入 JSON 解析。"""
-    assert parse_sse_segment(b"data: [DONE]", log=None) is None
-    assert parse_sse_segment(b"data:[DONE]", log=None) is None
+    assert _parse_segment_with_lost_flag(b"data: [DONE]", log=None) == (None, None, False)
+    assert _parse_segment_with_lost_flag(b"data:[DONE]", log=None) == (None, None, False)
 
 
-def test_parse_sse_segment_returns_none_for_done_marker() -> None:
-    """[DONE] 标记不返回事件对象。"""
-    assert parse_sse_segment(b"data: [DONE]", log=None) is None
+def test_parse_segment_with_lost_flag_returns_none_for_done_marker() -> None:
+    """[DONE] 标记不返回事件对象，也不计为丢失负载。"""
+    assert _parse_segment_with_lost_flag(b"data: [DONE]", log=None) == (None, None, False)
 
 
-def test_parse_sse_segment_skips_non_data_lines() -> None:
+def test_parse_segment_with_lost_flag_skips_non_data_lines() -> None:
     """event: / id: 等非 data 行被忽略，仅合并 data 行。"""
     segment = b"event: image_generation.completed\n" b'data: {"type":"image_generation.completed"}'
-    result = parse_sse_segment(segment, log=None)
-    assert result is not None
-    assert result["type"] == "image_generation.completed"
+    event, _error, _lost = _parse_segment_with_lost_flag(segment, log=None)
+    assert event is not None
+    assert event["type"] == "image_generation.completed"
 
 
-def test_parse_sse_segment_deeply_nested_payload_dropped_without_raising() -> None:
+def test_parse_segment_with_lost_flag_deeply_nested_payload_dropped_without_raising() -> None:
     """约 100KB 纯嵌套括号负载在 json.loads 内抛 RecursionError，按解析失败丢弃。
 
     RecursionError 是 RuntimeError 子类而非 ValueError，未显式列入 except 元组时
     会作为未分类异常逃出解析器，使流式请求整体失败且重试同样命中。
     """
     segment = b"data: " + b"[" * 50000 + b"]" * 50000
-    assert parse_sse_segment(segment, log=None) is None
+    event, _error, _lost = _parse_segment_with_lost_flag(segment, log=None)
+    assert event is None
+
+
+def test_parse_segment_with_lost_flag_indented_leading_data_line_not_lost() -> None:
+    """段首缩进的 data: 行仅在 trim 后参与解析，按未 trim 行匹配口径不构成丢失负载。
+
+    trim 停在行首时该行在原段本就可见，仍计丢失。
+    """
+    hidden = [
+        b"  data: broken",
+        b"\t data: broken",
+        b"\n  data: broken",
+        b"\rdata: broken",
+        b" \n  data: broken",
+    ]
+    for segment in hidden:
+        event, error, lost = _parse_segment_with_lost_flag(segment, log=None)
+        assert event is None and error is not None, f"形态 {segment!r} 应解析失败"
+        assert lost is False, f"形态 {segment!r} 段首缩进行不构成可见丢失负载"
+
+    visible = [
+        b"data: broken",
+        b"\ndata: broken",
+        b" \ndata: broken",
+        b"\r\ndata: broken",
+        b"  data: broken\ndata: broken2",
+    ]
+    for segment in visible:
+        event, error, lost = _parse_segment_with_lost_flag(segment, log=None)
+        assert event is None and error is not None, f"形态 {segment!r} 应解析失败"
+        assert lost is True, f"形态 {segment!r} 含可见非哨兵负载须计丢失"
 
 
 async def test_parse_sse_response_classifies_partial_failed_event() -> None:
@@ -421,7 +499,7 @@ async def test_parse_sse_response_offloads_large_segment_to_cpu_pool(
 ) -> None:
     """超卸载阈值的大事件把切片与 json.loads 卸载到专用 CPU 池，小事件保持同步。
 
-    卸载任务为 _slice_parse_segment(buffer, start, end, log)，段体积即 end - start；
+    卸载任务为 _slice_parse_segment(buffer, start, end)，段体积即 end - start；
     以执行线程名锁定卸载走专用池而非默认执行器，与请求体解析路径同池。
     """
     spy = CpuOffloadSpy(sse_parser_module._slice_parse_segment)
@@ -444,28 +522,28 @@ async def test_parse_sse_response_offloads_large_segment_to_cpu_pool(
     )
     assert len(result["data"]) == 1
     assert len(spy.calls) == 1
-    _buffer, segment_start, segment_end, _segment_log = spy.calls[0]
+    _buffer, segment_start, segment_end = spy.calls[0]
     assert segment_end - segment_start > CPU_OFFLOAD_SIZE_THRESHOLD
     spy.assert_ran_in_cpu_pool()
 
 
-async def test_parse_sse_response_offloads_large_tail_lost_payload_scan(
+async def test_parse_sse_response_offloads_large_tail_lost_payload_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """超阈值流末尾的丢失负载判定随解析一并卸载工作线程，不在事件循环上扫描。
+    """超阈值流末尾的丢失负载判定随解析一并卸载工作线程，不在事件循环上执行。
 
-    丢失判定对大尾部做全量按行扫描，留在事件循环上会与大尾部解析的卸载目的
-    相悖；以判定调用所在线程 id 断言其已离开主线程。
+    丢失判定在解析内基于已提取的 data 负载值计算，留在事件循环上会与大尾部
+    解析的卸载目的相悖；以判定所在线程 id 断言其已离开主线程。
     """
     main_thread = threading.get_ident()
-    scan_thread_ids: list[int] = []
-    real_has_lost = sse_parser_module._has_lost_data_payload
+    check_thread_ids: list[int] = []
+    real_has_lost = sse_parser_module._has_lost_data_values
 
-    def _tracking_has_lost(tail: Any) -> bool:
-        scan_thread_ids.append(threading.get_ident())
-        return real_has_lost(tail)
+    def _tracking_has_lost(values: Any) -> bool:
+        check_thread_ids.append(threading.get_ident())
+        return real_has_lost(values)
 
-    monkeypatch.setattr(sse_parser_module, "_has_lost_data_payload", _tracking_has_lost)
+    monkeypatch.setattr(sse_parser_module, "_has_lost_data_values", _tracking_has_lost)
 
     big_tail = b"data: " + b"x" * 70000
     result = await parse_sse_response(
@@ -479,8 +557,8 @@ async def test_parse_sse_response_offloads_large_tail_lost_payload_scan(
     )
 
     assert result["truncated_events"] == 1
-    assert scan_thread_ids, "丢失负载判定须被执行"
-    assert all(tid != main_thread for tid in scan_thread_ids), "判定不得留在事件循环线程"
+    assert check_thread_ids, "丢失负载判定须被执行"
+    assert all(tid != main_thread for tid in check_thread_ids), "判定不得留在事件循环线程"
 
 
 async def test_parse_sse_response_offloads_large_tail_slicing_to_thread(
@@ -664,6 +742,8 @@ async def test_parse_sse_response_counts_unparseable_trailing_event() -> None:
     assert drop_logs, "流末尾丢弃事件须记录 warning 日志"
     # 丢弃字节数取残留段本体长度，非另路推导的缓冲差值。
     assert str(len(chunks[1])) in str(drop_logs[0])
+    # 流末尾残留路径保持解析失败告警与丢弃计数告警各一条。
+    assert len(log.warning_calls) == 2
 
 
 async def test_parse_sse_response_counts_deeply_nested_trailing_event() -> None:
@@ -685,6 +765,134 @@ async def test_parse_sse_response_counts_deeply_nested_trailing_event() -> None:
     assert len(result["data"]) == 1
     assert result["truncated_events"] == 1
     assert result["status"] == "partial"
+
+
+async def test_parse_sse_response_counts_corrupt_midstream_event() -> None:
+    """流中段携带 data 负载但解析失败的完整事件计入截断计数，其后到达 completed 仍标记 partial。
+
+    与流末尾残留同口径判定丢失，缺图对调用方可见。
+    """
+    log = _CapturingLog()
+    corrupt = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/BROKEN}\n\n'
+    chunks = [
+        b'data: {"type":"image_generation.partial_succeeded","url":"http://x/1.png"}\n\n',
+        corrupt,
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":2}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _sse_response(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=cast("Logger", log),
+    )
+    assert [item["url"] for item in result["data"]] == ["http://x/1.png"]
+    assert result["truncated_events"] == 1
+    assert result["status"] == "partial"
+    drop_logs = [call for call in log.warning_calls if "流中段" in str(call)]
+    assert drop_logs, "流中段坏事件计数须记录 warning 日志"
+    # 丢弃字节数取事件段本体长度，段长不含事件分隔符 \n\n。
+    assert str(len(corrupt) - 2) in str(drop_logs[0])
+    # 单个损坏事件只产生一条 warning，解析失败原因与丢弃字节数合并在同条。
+    assert len(log.warning_calls) == 1
+    assert drop_logs[0][2], "合并告警须携带解析失败原因"
+
+
+async def test_parse_sse_response_corrupt_midstream_events_log_one_warning_each() -> None:
+    """多个流中段损坏事件各记恰好一条 warning，不与解析失败内层告警叠加刷屏。"""
+    log = _CapturingLog()
+    corrupt = b'data: {"type":"image_generation.partial_succeeded","url":"http://x/BROKEN}\n\n'
+    chunks = [
+        corrupt,
+        corrupt,
+        corrupt,
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _sse_response(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=cast("Logger", log),
+    )
+    assert result["truncated_events"] == 3
+    assert result["status"] == "partial"
+    # 三个损坏事件恰好三条 warning，每条都携带丢弃字节数。
+    assert len(log.warning_calls) == 3
+    assert all(
+        "流中段" in str(call) and str(len(corrupt) - 2) in str(call) for call in log.warning_calls
+    )
+
+
+async def test_parse_sse_response_parse_failure_without_payload_logs_single_warning() -> None:
+    """解析失败但无实际负载丢失的中段事件记恰好一条解析失败告警，不并入截断计数。
+
+    负载取多行空值拼接形态：单行空白会被段级剥离归空而静默丢弃，达不到本分支。
+    """
+    log = _CapturingLog()
+    chunks = [
+        b"data:\ndata:\n\n",
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _sse_response(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=cast("Logger", log),
+    )
+    assert result["status"] == "completed"
+    assert result["truncated_events"] == 0
+    assert len(log.warning_calls) == 1
+    assert "SSE事件解析失败" in str(log.warning_calls[0])
+
+
+async def test_parse_sse_response_counts_large_corrupt_midstream_event_offloaded() -> None:
+    """超卸载阈值的中段坏事件经专用 CPU 池解析，丢失判定与同步路径同口径计数。"""
+    chunks = [
+        b"data: " + b"x" * 70000 + b"\n\n",
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _sse_response(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=256 * 1024,
+        event_truncate_threshold=256 * 1024,
+        total_bytes_limit=256 * 1024,
+        log=_log(),
+    )
+    assert result["truncated_events"] == 1
+    assert result["status"] == "partial"
+
+
+async def test_parse_sse_response_midstream_sentinel_and_blank_not_counted() -> None:
+    """流中段 [DONE] 哨兵与纯空白段解析返回 None 但不构成数据丢失，不计截断。
+
+    误计会把其后到达 completed 的完整结果谎报为 partial。
+    """
+    chunks = [
+        b"data: [DONE]\n\n",
+        b"\n\n",
+        b'data: {"type":"image_generation.completed","usage":{"generated_images":1}}\n\n',
+    ]
+    result = await parse_sse_response(
+        _sse_response(chunks),
+        model_id="m",
+        chunk_size=64,
+        buffer_max_size=4096,
+        event_truncate_threshold=4096,
+        total_bytes_limit=64 * 1024,
+        log=_log(),
+    )
+    assert result["truncated_events"] == 0
+    assert result["status"] == "completed"
 
 
 async def test_parse_sse_response_done_sentinel_tail_not_counted_truncated() -> None:
@@ -976,8 +1184,8 @@ async def test_next_stream_chunk_prefers_ready_eof_over_expired_deadline() -> No
     iterator = _single_chunk().__aiter__()
     await anext(iterator)
 
-    outcome = await sse_parser_module.next_stream_chunk(iterator, time.monotonic() - 1)
-    assert outcome is sse_parser_module.STREAM_ENDED
+    outcome = await stream_module.next_stream_chunk(iterator, time.monotonic() - 1)
+    assert outcome is stream_module.STREAM_ENDED
 
 
 async def test_next_stream_chunk_reports_deadline_on_pending_wait() -> None:
@@ -988,8 +1196,40 @@ async def test_next_stream_chunk_reports_deadline_on_pending_wait() -> None:
         yield b"late"
 
     iterator = _slow().__aiter__()
-    outcome = await sse_parser_module.next_stream_chunk(iterator, time.monotonic() - 0.1)
-    assert outcome is sse_parser_module.STREAM_DEADLINE_HIT
+    outcome = await stream_module.next_stream_chunk(iterator, time.monotonic() - 0.1)
+    assert outcome is stream_module.STREAM_DEADLINE_HIT
+
+
+@pytest.mark.parametrize("status", [None, "completed"])
+def test_escalate_partial_status_dict_form_error_entry_escalates(status: str | None) -> None:
+    """dict 形态 data 含 error 键时计为单条目升格 partial，不静默谎报完成。
+
+    dict 迭代产键，未归一形态下 any 判定恒假，含错响应会被吞成完成态。
+    """
+    assert (
+        stream_module.escalate_partial_status(status, {"url": "u", "error": {"code": "x"}})
+        == "partial"
+    )
+
+
+def test_escalate_partial_status_dict_form_without_error_keeps_status() -> None:
+    """dict 形态 data 无 error 键时不升格，完成态与缺省态维持原状。"""
+    assert stream_module.escalate_partial_status("completed", {"url": "u"}) == "completed"
+    assert stream_module.escalate_partial_status(None, {}) is None
+
+
+@pytest.mark.parametrize("data", ["oops", 5, True, 0.5, None])
+def test_escalate_partial_status_scalar_and_none_have_no_entry(data: Any) -> None:
+    """标量与 None 无条目语义，真值标量不升格。"""
+    assert stream_module.escalate_partial_status("completed", data) == "completed"
+
+
+def test_escalate_partial_status_list_form_and_non_final_status_passthrough() -> None:
+    """list 形态含 error 条目时升格，非完成态状态原样透传不参与改写。"""
+    assert stream_module.escalate_partial_status(None, [{"url": "u"}, {"error": {}}]) == "partial"
+    assert stream_module.escalate_partial_status("failed", [{"error": {}}]) == "failed"
+    assert stream_module.escalate_partial_status("partial", None) == "partial"
+    assert stream_module.escalate_partial_status("completed", []) == "completed"
 
 
 async def test_parse_sse_response_pool_closed_propagates_raw_pool_error() -> None:

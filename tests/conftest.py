@@ -1,7 +1,5 @@
 """共享测试 fixture。
 
-提供基础配置与工作区根目录 fixture，供需要 SeedreamConfig 或工作区隔离的测试复用，
-避免各测试重复构造；需要差异化字段时直接以构造 kwargs 覆盖或用 dataclasses.replace。
 lifespan 复位类 fixture 经 _lifespan_state_guard 参数化收敛，各测试文件不再自持副本。
 顶层导入 seedream_mcp.server 完成工具注册，任意子集运行不依赖收集顺序。
 """
@@ -27,15 +25,6 @@ def _warn_sdk_private_path_missing(path: str, impact: str) -> None:
     from seedream_mcp.utils.core.logs import get_logger
 
     get_logger().warning("SDK 私有路径 {} 已变更，{}，请适配新版 MCP SDK。", path, impact)
-
-
-@pytest.fixture
-def seedream_config() -> SeedreamConfig:
-    """基础测试配置，api_key 固定为 test_key。
-
-    差异化字段以构造 kwargs 或 dataclasses.replace 覆盖。
-    """
-    return SeedreamConfig(api_key="test_key")
 
 
 @pytest.fixture

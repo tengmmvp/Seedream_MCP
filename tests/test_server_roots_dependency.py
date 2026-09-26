@@ -17,6 +17,8 @@ import seedream_mcp.utils.io.io_roots as io_roots_module
 from seedream_mcp.server import _workspace_roots_dependency
 from seedream_mcp.utils.io.io_roots import read_session_roots_or_raise
 
+from _roots_session_fakes import BackChannelSession as _BackChannelSession
+from _roots_session_fakes import BackChannelUnavailableSession as _BackChannelUnavailableSession
 from _roots_session_fakes import CapabilityDeclaringSession as _CapabilityDeclaringSession
 from _roots_session_fakes import FakeSession as _FakeSession
 from _roots_session_fakes import FailingSession as _FailingSession
@@ -39,21 +41,13 @@ class _DependencyContext:
             self.request_id = request_id
 
 
-class _BackChannelSession(_CapabilityDeclaringSession):
-    """带固定反向通道探测结果的会话替身。"""
-
-    def __init__(self, roots: list[Path], can_send_request: bool) -> None:
-        super().__init__(roots, declared=True)
-        self.can_send_request = can_send_request
-
-
 def _declaring_session(declared: bool = True) -> _CapabilityDeclaringSession:
     return _CapabilityDeclaringSession([Path("/workspace")], declared)
 
 
 async def test_resolver_uses_multi_round_over_modern_revision_without_back_channel() -> None:
     """2026-07-28 及以后的取回经 InputRequiredResult 多轮形态，不依赖反向通道。"""
-    session = _BackChannelSession([Path("/workspace")], False)
+    session = _BackChannelUnavailableSession([Path("/workspace")])
     ctx = _DependencyContext(session, protocol_version="2026-07-28")
 
     result = await _workspace_roots_dependency(cast(Any, ctx))
@@ -90,11 +84,12 @@ async def test_resolver_declines_when_back_channel_unavailable() -> None:
 
     此前该组合下 SDK 抛 NoBackChannelError 序列化为 -32600，五个工具全部不可用。
     """
-    session = _BackChannelSession([Path("/workspace")], False)
+    session = _BackChannelUnavailableSession([Path("/workspace")])
 
     result = await _workspace_roots_dependency(cast(Any, _DependencyContext(session)))
 
     assert result is None
+    assert session.send_request_calls == []
 
 
 async def test_resolver_treats_missing_probe_as_available(tmp_path: Path) -> None:

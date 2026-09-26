@@ -23,9 +23,9 @@ from starlette.types import Message, Receive, Scope, Send
 from ..tools.core.outputs import dump_compact_strict_json
 from ..utils.core.errors import SeedreamConfigError
 from ..utils.core.executors import (
-    CPU_OFFLOAD_SIZE_THRESHOLD,
     CpuOffloadPoolClosedError,
     run_in_cpu_pool,
+    should_offload_size,
 )
 from ..utils.io.io_path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
@@ -68,23 +68,30 @@ def error_json(error: str, description: str, status: int) -> JSONResponse:
     )
 
 
+def cpu_pool_closed_json() -> JSONResponse:
+    """CPU 卸载池关闭窗口的服务不可用响应，请求体解析与结构化序列化共用。
+
+    池关闭属退出清理与服务并发的窗口，是服务端不可用而非请求或结果缺陷。
+    """
+    return error_json("service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500)
+
+
 async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSONResponse | None]:
     """解析请求体为 JSON 对象，解析失败或形态不符时返回 400 错误响应。
 
-    解析成本随参考图体积线性增长，超过下沉尺寸阈值的卸载长时 CPU 专用池，低于
+    解析成本随参考图体积线性增长，达到下沉尺寸阈值的卸载长时 CPU 专用池，低于
     阈值同步执行；池关闭取消排队解析时返回 500 服务不可用响应，生成与图库端点
     共用同一口径。
     """
     try:
         raw_body = await request.body()
         # 阈值之下的解析微秒级完成，线程往返成本高于收益，同步执行。
-        if len(raw_body) > CPU_OFFLOAD_SIZE_THRESHOLD:
+        if should_offload_size(len(raw_body)):
             body = await run_in_cpu_pool(json.loads, raw_body)
         else:
             body = json.loads(raw_body)
     except CpuOffloadPoolClosedError:
-        # 池关闭属退出清理与服务并发的窗口，是服务端不可用而非请求体缺陷。
-        return {}, error_json("service_unavailable", "CPU 卸载线程池已关闭，服务不可用", 500)
+        return {}, cpu_pool_closed_json()
     # 深嵌套 JSON 触发解析器递归上限抛 RecursionError，与解析失败同归 400。
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         return {}, error_json("invalid_json", f"请求体不是合法 JSON: {exc}", 400)
@@ -154,8 +161,11 @@ def dump_strict_json(structured: dict[str, object]) -> str:
 
 
 async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
-    """以严格 JSON 构造结构化结果响应，序列化下沉工作线程。"""
-    payload = await asyncio.to_thread(dump_strict_json, structured)
+    """以严格 JSON 构造结构化结果响应，序列化无条件下沉专用 CPU 池。"""
+    try:
+        payload = await run_in_cpu_pool(dump_strict_json, structured)
+    except CpuOffloadPoolClosedError:
+        return cpu_pool_closed_json()
     return Response(
         content=payload,
         media_type="application/json",

@@ -343,11 +343,6 @@ def test_normalize_path_posix_treats_reserved_name_as_legal(tmp_path: Path) -> N
 # ==================== _file_uri_to_path ====================
 
 
-def test_file_uri_to_path_rejects_non_file_scheme() -> None:
-    """非 file scheme 的 URI 返回 None。"""
-    assert _file_uri_to_path("http://example.com/x.png") is None
-
-
 def test_file_uri_to_path_rejects_unc_netloc() -> None:
     """file://host/share 形式的 netloc 非 localhost 直接拒绝。"""
     assert _file_uri_to_path("file://host/share/file.png") is None

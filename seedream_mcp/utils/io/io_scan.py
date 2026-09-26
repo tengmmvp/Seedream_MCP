@@ -74,10 +74,11 @@ class _DirectoryScanCacheEntry:
             mtime 未变即永久新鲜；递归条目恒 False，仅按 TTL 失效。
         captured_at: 缓存写入时的单调时钟时间戳，供 TTL 失效判定。
         images: 有序 (原始路径, resolved 路径) 对列表，resolve 在扫描完成时执行一次并
-            随条目缓存，可能为目录末尾前的稳定前缀。
-        complete: images 是否已扫到目录末尾；False 时为稳定前缀，随更大 scan_limit
-            重扫扩展，回看与同范围重复请求直接命中。条目预算截断的扫描未到目录
-            末尾，恒不标记 complete，确保后续更大扫描可重新尝试。
+            随条目缓存，可能为目录末尾前的前缀。
+        complete: images 是否已扫到目录末尾；False 时随更大 scan_limit 重扫扩展，
+            resolve 结果变化可插行缩行，消费方不得依赖位置稳定；回看与同范围
+            重复请求直接命中。条目预算截断的扫描未到目录末尾，恒不标记
+            complete，确保后续更大扫描可重新尝试。
         unreadable_dirs: 本次扫描中因权限或系统错误无法读取的目录列表，随条目缓存，
             缓存命中时同样透传给调用方。
         truncated_dirs: 本次扫描因条目预算截断时记录的截断目录列表，未截断为空；

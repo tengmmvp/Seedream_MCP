@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.core import common as common_module
 from seedream_mcp.tools.core import results as results_module
 from seedream_mcp.tools.core._pipeline import (
     _extract_parallel_request_error,
@@ -25,7 +26,8 @@ from seedream_mcp.tools.core.results import (
     update_result_with_auto_save,
 )
 from seedream_mcp.tools.core._sanitize import _sanitize_image_errors, sanitize_error_dict
-from seedream_mcp.utils.core.errors import SeedreamAPIError
+from seedream_mcp.utils.core.errors import SeedreamAPIError, response_reports_failure
+from seedream_mcp.utils.core.sanitizers import _truncate_value_for_output
 from seedream_mcp.utils.io.io_save import AutoSaveResult
 
 from _generation_fixtures import make_generation_context
@@ -556,7 +558,9 @@ def test_truncated_events_surfaced_in_both_channels() -> None:
         auto_save_error=None,
     )
 
-    assert "因单事件体积超限丢弃 2 个事件" in text
+    assert "因超限或解析失败丢弃 2 个事件" in text
+    # 截断计数混计超限与解析失败两类成因，文案不得归因到单一成因。
+    assert "单事件体积超限" not in text
     assert structured["truncated_events"] == 2
 
 
@@ -612,8 +616,7 @@ def test_deadline_exceeded_surfaced_in_both_channels() -> None:
 def test_pipeline_single_sanitization_shared_by_both_outlets() -> None:
     """流水线净化一次并共用同一列表：两出口的截断标记均恰有一次。
 
-    重复净化非幂等，截断标记会逐次叠加、内容逐次缩水；已净化列表再入净化管线的
-    对照行为由末条断言证明。
+    限内净化产物再入净化管线恒等、截断标记不叠加，该对照行为由末条断言证明。
     """
     result = {
         "success": True,
@@ -639,6 +642,108 @@ def test_pipeline_single_sanitization_shared_by_both_outlets() -> None:
     # 净化幂等：已净化文本再次进入净化恒等，不叠加截断标记。
     re_sanitized = _sanitize_image_errors([{"error": {"message": message}}])
     assert re_sanitized[0]["error"]["message"] == message
+
+
+def test_format_generation_response_renders_non_dict_error_items() -> None:
+    """契约外字符串错误条目在文本通道输出失败行，不只在结构化通道可见。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png", "error": "boom"}],
+    }
+    images = _sanitize_image_errors(extract_images(result))
+
+    text = format_generation_response("文生图部分完成", result, "2K", images=images)
+
+    assert "  状态: 失败" in text
+    assert "boom" in text
+
+
+def test_format_generation_response_renders_falsy_error_message_line() -> None:
+    """falsy 非 None 错误值渲染错误信息行，与结局日志等通道口径一致。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png", "error": 0}],
+    }
+    images = _sanitize_image_errors(extract_images(result))
+
+    text = format_generation_response("文生图部分完成", result, "2K", images=images)
+
+    assert "  状态: 失败" in text
+    assert "  错误信息: 0" in text
+
+
+def test_format_generation_response_empty_string_error_omits_message_line() -> None:
+    """空串错误渲染状态行但省略空标签的消息行。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png", "error": ""}],
+    }
+    images = _sanitize_image_errors(extract_images(result))
+
+    text = format_generation_response("文生图部分完成", result, "2K", images=images)
+
+    assert "  状态: 失败" in text
+    assert "  错误信息:" not in text
+
+
+def test_format_generation_response_whitespace_error_omits_message_line() -> None:
+    """纯空白串错误按缺失处理，与 handle_api_error 等错误通道口径一致。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png", "error": "   "}],
+    }
+    images = _sanitize_image_errors(extract_images(result))
+
+    text = format_generation_response("文生图部分完成", result, "2K", images=images)
+
+    assert "  状态: 失败" in text
+    assert "  错误信息:" not in text
+
+
+def test_format_generation_response_renders_falsy_dict_error_message_line() -> None:
+    """dict 形态 falsy 非 None message 渲染错误信息行，与非 dict 分支口径一致。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"url": "https://example.com/a.png", "error": {"message": 0}}],
+    }
+    images = _sanitize_image_errors(extract_images(result))
+
+    text = format_generation_response("文生图部分完成", result, "2K", images=images)
+
+    assert "  状态: 失败" in text
+    assert "  错误信息: 0" in text
+
+
+def test_format_generation_response_whitespace_dict_error_omits_lines() -> None:
+    """dict 形态纯空白 code 与 message 按缺失处理，不渲染裸行。"""
+    result = {
+        "success": True,
+        "status": "partial",
+        "data": [{"error": {"code": " ", "message": " "}}],
+    }
+    images = _sanitize_image_errors(extract_images(result))
+
+    text = format_generation_response("文生图部分完成", result, "2K", images=images)
+
+    assert "  状态: 失败" in text
+    assert "  错误码:" not in text
+    assert "  错误信息:" not in text
+
+
+def test_truncate_value_for_output_container_estimate_boundaries_pinned() -> None:
+    """容器计量边界：34 个独立空 dict 折叠、33 个保留，同一引用 14 次折叠、13 次保留。"""
+    distinct_intact: list[dict[str, Any]] = [{} for _ in range(33)]
+    assert _truncate_value_for_output(distinct_intact) == distinct_intact
+    distinct_collapsed: list[dict[str, Any]] = [{} for _ in range(34)]
+    assert _truncate_value_for_output(distinct_collapsed) == "<truncated:list, 34 items>"
+    shared: dict[str, Any] = {}
+    assert _truncate_value_for_output([shared] * 13) == [shared] * 13
+    assert _truncate_value_for_output([shared] * 14) == "<truncated:list, 14 items>"
 
 
 def test_independent_structured_call_sanitizes_internally() -> None:
@@ -1078,12 +1183,12 @@ def test_structured_data_item_and_error_keys_control_chars_flattened() -> None:
     )
 
     item = structured["data"][0]
-    # 值未变化的原始键在图片项入口压平
+    # 值未变化的原始键在图片项入口压平。
     assert item["bad key"] == "kept-value"
     assert item["ev il"] == 7
-    # 未知键值照常脱敏
+    # 未知键值照常脱敏。
     assert item["ex tra"] == "api_key=***"
-    # error dict 键在拷贝入口压平
+    # error dict 键在拷贝入口压平。
     error = item["error"]
     assert error["message"] == "boom"
     assert error["de tail"] == "clean"
@@ -1397,6 +1502,21 @@ def test_extract_parallel_request_error_nested_data_and_fallbacks() -> None:
     assert _extract_parallel_request_error(None, None) == "请求失败"
 
 
+def test_extract_parallel_request_error_scalar_data_has_no_entries() -> None:
+    """标量形态 data 无条目可下钻，回退异常文案，条目口径与 data_items 一致。"""
+    message = _extract_parallel_request_error(
+        {"data": "oops"}, SeedreamAPIError("认证失败", status_code=401)
+    )
+
+    assert "认证失败" in message
+
+
+def test_generation_failure_predicate_single_source() -> None:
+    """工具层失败判定单源直连 errors.response_reports_failure，不另植分叉副本。"""
+    assert getattr(results_module, "response_reports_failure") is response_reports_failure
+    assert getattr(common_module, "response_reports_failure") is response_reports_failure
+
+
 def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> None:
     """深嵌套 {"data": ...} 链经迭代下钻提取，不因 RecursionError 使成功生成翻错。
 
@@ -1683,6 +1803,37 @@ def test_non_str_url_size_local_path_sanitized_in_both_channels() -> None:
     assert structured["data"][1]["url"] == "https://example.com/ok.png"
     assert structured["data"][1]["size"] == "2K"
     assert structured["data"][1]["local_path"] == 7
+
+
+def test_explicit_null_fields_omit_lines_instead_of_rendering_none() -> None:
+    """显式 null 的 size/output_format/image_index/request_index/local_path 整行省略。
+
+    字面量「本地路径: None」会诱导模型把 None 当路径读取，与失败通道空值回落
+    未知错误的口径一致。
+    """
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [
+            {
+                "url": "https://example.com/ok.png",
+                "size": None,
+                "output_format": None,
+                "image_index": None,
+                "request_index": None,
+                "local_path": None,
+            }
+        ],
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+
+    assert "URL: https://example.com/ok.png" in text
+    assert "None" not in text
+    assert not any(
+        line.startswith(("  尺寸: ", "  输出格式: ", "  序号: ", "  请求序号: ", "  本地路径: "))
+        for line in text.splitlines()
+    )
 
 
 # ==================== bool 序号形态 ====================

@@ -1372,6 +1372,65 @@ def test_build_config_rejects_duplicate_request_state_keys(
         build_config_from_sources(env_file=str(env_file))
 
 
+def test_request_state_key_error_message_matches_violation_reason() -> None:
+    """短密钥与重复密钥各渲染对应消息，不串入对方规则的说法。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError) as short_excinfo:
+        SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 32, b"\x02" * 31))
+
+    assert "32 字节" in short_excinfo.value.message
+    assert "第 2 个密钥" in short_excinfo.value.message
+    assert "重复" not in short_excinfo.value.message
+
+    with pytest.raises(SeedreamConfigError) as duplicate_excinfo:
+        SeedreamConfig(
+            api_key="k",
+            request_state_secret_keys=(b"\x01" * 32, b"\x02" * 32, b"\x01" * 32),
+        )
+
+    assert "重复" in duplicate_excinfo.value.message
+    assert "第 3 个密钥" in duplicate_excinfo.value.message
+    assert "字节" not in duplicate_excinfo.value.message
+
+
+def test_request_state_short_and_duplicate_key_renders_short_reason() -> None:
+    """短键与其后等值重复键并存时按首个违规的短键渲染，序号与字节数取自该键自身。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    with pytest.raises(SeedreamConfigError) as excinfo:
+        SeedreamConfig(
+            api_key="k",
+            request_state_secret_keys=(b"\x01" * 32, b"\x02" * 31, b"\x02" * 31),
+        )
+
+    assert "第 2 个密钥" in excinfo.value.message
+    assert "仅 31 字节" in excinfo.value.message
+    assert "重复" not in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    ("ring", "expected_fragment"),
+    [
+        ((b"\x01" * 31,), "第 1 个密钥解码后仅 31 字节"),
+        ((b"\x01" * 32, b"\x02" * 31), "第 2 个密钥解码后仅 31 字节"),
+        ((b"\x01" * 32, b"\x01" * 32), "第 2 个密钥与在先密钥重复"),
+        ((b"\x01" * 32, b"\x02" * 32), None),
+    ],
+    ids=["short-first", "short-after-valid", "duplicate", "valid-ring"],
+)
+def test_first_invalid_request_state_key_message_reports_first_violation(
+    ring: tuple[bytes, ...],
+    expected_fragment: str | None,
+) -> None:
+    """首个违规键的报错消息就地拼好返回，合法密钥环返回 None。"""
+    message = config_module._first_invalid_request_state_key_message(ring)
+    if expected_fragment is None:
+        assert message is None
+    else:
+        assert message is not None and expected_fragment in message
+
+
 def test_seedream_config_accepts_programmatic_request_state_key_ring() -> None:
     """程序构造直接传解码后的字节密钥，经 validate 下界校验后原样持有。"""
     from seedream_mcp.config import SeedreamConfig
@@ -1439,3 +1498,32 @@ def test_failed_build_rolls_back_pending_warnings(
         config_module.drain_pending_build_warnings()
 
     assert not any("definitely_unknown_key" in message for message in records)
+
+
+def test_pool_depth_provider_supplies_generate_and_prepare_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """池深提供者同时供给活动配置的生成并发与图像预处理并发。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    config = SeedreamConfig(api_key="k", generate_concurrency=7, image_prepare_concurrency=4)
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    assert config_module._active_pool_concurrency() == (7, 4)
+
+
+def test_pool_depth_provider_returns_none_when_config_build_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活动配置不可构建时提供者返回 None，池深回退交由 executors 侧兜底。"""
+    from seedream_mcp.config import SeedreamConfig
+
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+
+    def _raising_from_env() -> SeedreamConfig:
+        raise SeedreamConfigError("未找到ARK_API_KEY环境变量")
+
+    monkeypatch.setattr(SeedreamConfig, "from_env", _raising_from_env)
+
+    assert config_module._active_pool_concurrency() is None
