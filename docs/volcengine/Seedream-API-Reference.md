@@ -1,10 +1,10 @@
 `POST https://ark.cn-beijing.volces.com/api/v3/images/generations`
 
-本文介绍 Doubao Seedream 5.0 pro、Doubao Seedream 5.0 lite、Doubao Seedream 4.5 及 Doubao Seedream 4.0 图片生成模型的调用 API，包括输入输出参数、取值范围、注意事项等信息，供您使用接口时查阅字段含义。
+本文介绍 Doubao Seedream 5.0 pro、Doubao Seedream 5.0 flash、Doubao Seedream 5.0 lite、Doubao Seedream 4.5 及 Doubao Seedream 4.0 图片生成模型的调用 API，包括输入输出参数、取值范围、注意事项等信息，供您使用接口时查阅字段含义。
 
 **模型能力**
 
-- **Seedream 5.0 pro<mark><sup>new</sup></mark>**
+- **Seedream 5.0 pro<mark><sup>new</sup></mark>**、**Seedream 5.0 flash<mark><sup>new</sup></mark>**
   - 图层拆分：支持将单张图片拆解为底图（1 张）+ 多个图层输出（最多 16 个图层）。
 
   - 交互编辑：支持通过坐标、框选、箭头等多种方式指定编辑位置，精准编辑图片。
@@ -39,9 +39,9 @@
 
 ## 鉴权
 
-本接口支持鉴权方式如下，详情请参见 [Base URL 及鉴权](https://docs.volcengine.com/docs/82379/1298459)。
+本接口支持鉴权方式如下，详情请参见 [Base URL 及鉴权](https://ark.volcengine.com/region:cn-beijing/docs/ark/base-url-and-authentication)。
 
-- API Key 鉴权，请在 [API Key 管理](https://console.volcengine.com/ark/region:cn-beijing/apiKey) 页面，获取长效 API Key。
+- API Key 鉴权，请在 [API Key 管理](https://ark.volcengine.com/region:cn-beijing/apiKey) 页面，获取长效 API Key。
 
 ---
 
@@ -60,13 +60,13 @@
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
 - <div data-tips="true" data-tips-type="tip"><strong>提示词语言支持</strong>：所有模型均支持中英文提示词；</div>
-  - <div data-tips="true" data-tips-type="tip"><code>Seedream 5.0 pro</code> 额外支持俄语、阿拉伯语、菲律宾语、泰语、土耳其语、韩语、马来语、西班牙语、葡萄牙语、印尼语、法语、德语、越南语、日语。</div>
+  - <div data-tips="true" data-tips-type="tip"><code>Seedream 5.0 pro</code> / <code>Seedream 5.0 flash</code> 额外支持俄语、阿拉伯语、菲律宾语、泰语、土耳其语、韩语、马来语、西班牙语、葡萄牙语、印尼语、法语、德语、越南语、日语。</div>
 
 - <div data-tips="true" data-tips-type="tip"><strong>提示词字数建议</strong>：中文提示词不超过 300 字，英文提示词不超过 600 词。字数过多信息容易分散，模型可能因此忽略细节，只关注重点，造成图片缺失部分元素。</div>
 
 **图片生成场景 ** **`必选`**
 
-用于描述生成图像的内容，模型根据提示词生成对应图像。（查看提示词指南：[Seedream 4.0-5.0 提示词指南](https://docs.volcengine.com/docs/82379/1829186)）
+用于描述生成图像的内容，模型根据提示词生成对应图像。（查看提示词指南：[Seedream 4.0-5.0 提示词指南](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0-prompt-guide)）
 
 **图层拆分场景 ** **`可选`**
 
@@ -84,7 +84,7 @@
 
 **图片生成场景 ** **`可选`**
 
-Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 4.0 最多支持传入 14 张参考图。
+Seedream 5.0 pro / Seedream 5.0 flash 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 4.0 最多支持传入 14 张参考图。
 
 **单张图片传入要求**：
 
@@ -136,11 +136,13 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `Seedream 5.0 pro`
 
+- `Seedream 5.0 flash`
+
 **size** `string` | 图像尺寸
 
 指定生成图像的尺寸信息。对于不同模型和不同场景，参数的配置方式、可选分辨率、默认值、总像素取值范围、宽高比取值范围不同，请展开以下各模型对应说明查看。
 
-**Seedream 5.0 pro（图片生成场景）**
+**Seedream 5.0 pro / Seedream 5.0 flash（图片生成场景）**
 
 支持以下两种方式，不可混用：
 
@@ -151,7 +153,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="warning" data-tips-is-title="true">价格说明</div>
 
-<div data-tips="true" data-tips-type="warning"><code>1.5K</code> 与 <code>1K</code> 价格相同（详情参见 <a href="https://docs.volcengine.com/docs/82379/1544106#457edfd0">模型价格</a>），且图片生成效果更优。</div>
+<div data-tips="true" data-tips-type="warning"><code>1.5K</code> 与 <code>1K</code> 价格相同（详情参见 <a href="https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing#457edfd0">模型价格</a>），且图片生成效果更优。</div>
 
 - 方式 2：指定宽高像素值（`宽x高`）。
   - 总像素取值范围：[`1280x720`（921600）, `2048x2048x1.1025`（4624220）]
@@ -195,7 +197,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 |        | 2:3    | 1664x2496  |
 |        | 21:9   | 3136x1344  |
 
-**Seedream 5.0 pro（图层拆分场景）**
+**Seedream 5.0 pro / Seedream 5.0 flash（图层拆分场景）**
 
 仅支持通过指定分辨率档位的方式设置。输出图的分辨率规则如下：
 
@@ -211,7 +213,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 <div data-tips="true" data-tips-type="warning" data-tips-is-title="true">价格说明</div>
 
-<div data-tips="true" data-tips-type="warning"><code>1.5K</code> 与 <code>1K</code> 价格相同（详情参见 <a href="https://docs.volcengine.com/docs/82379/1544106#457edfd0">模型价格</a>）。</div>
+<div data-tips="true" data-tips-type="warning"><code>1.5K</code> 与 <code>1K</code> 价格相同（详情参见 <a href="https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing#457edfd0">模型价格</a>）。</div>
 
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">auto 适配规则</div>
 
@@ -409,11 +411,11 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `standard`：标准模式，生成内容的质量更高，耗时较长。
 
-- `fast`：快速模式，生成内容的耗时更短，效果略低于标准模式；Seedream 5.0 lite / 4.5 当前不支持。
+- `fast`：快速模式，生成内容的耗时更短，效果略低于标准模式；Seedream 5.0 flash / lite / 4.5 当前不支持。
 
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="tip">如您的业务对生成时延较为敏感，推荐使用 <code>fast</code> 模式以节省等待时间。</div>
+<div data-tips="true" data-tips-type="tip">如您的业务对生成时延较为敏感，推荐使用 Seedream 5.0 pro 的 <code>fast</code> 模式或使用 Seedream 5.0 flash 以获得更快的图片生成速度。</div>
 
 **output_format** `string` `默认值 jpeg` | 图像格式
 
@@ -430,6 +432,8 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 **模型支持**：
 
 - `Seedream 5.0 pro`
+
+- `Seedream 5.0 flash`
 
 - `Seedream 5.0 lite`
 
@@ -453,6 +457,8 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `Seedream 5.0 pro`
 
+- `Seedream 5.0 flash`
+
 **response_format** `string` `默认值 url` | 返回格式
 
 指定生成图像的返回格式。支持以下两种返回方式：
@@ -469,7 +475,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `disabled`：关闭组图功能，模型只会生成一张图。
 
-组图输出示例详见 [Seedream 图像创作教程 - 组图输出](https://docs.volcengine.com/docs/82379/1824121#ec79cfda)。
+组图输出示例详见 [Seedream 图像创作教程 - 组图输出](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#ec79cfda)。
 
 **模型支持**：
 
@@ -511,7 +517,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `true`：流式输出模式，即时返回每张图片输出的结果。在生成单图和组图的场景下，流式输出模式均生效。
 
-流式输出示例详见 [Seedream 图像创作教程 - 流式输出](https://docs.volcengine.com/docs/82379/1824121#e5bef0d7)。
+流式输出示例详见 [Seedream 图像创作教程 - 流式输出](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#e5bef0d7)。
 
 **模型支持**：
 
@@ -553,9 +559,9 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 **model** `string` `必选` | 模型 ID
 
-您需要调用的模型的 ID（Model ID），[开通模型服务](https://console.volcengine.com/ark/region:cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)，并 [查询 Model ID](https://docs.volcengine.com/docs/82379/1330310#9df4d9fd)。
+您需要调用的模型的 ID（Model ID），[开通模型服务](https://ark.volcengine.com/region:cn-beijing/openManagement?LLM=%7B%7D&OpenTokenDrawer=false)，并 [查询 Model ID](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list#9df4d9fd)。
 
-您也可通过 Endpoint ID 来调用模型，获得限流、计费类型（前付费 / 后付费）、运行状态查询、监控、安全等高级能力，可参考 [获取 Endpoint ID](https://docs.volcengine.com/docs/82379/1099522)。
+您也可通过 Endpoint ID 来调用模型，获得限流、计费类型（前付费 / 后付费）、运行状态查询、监控、安全等高级能力，可参考 [获取 Endpoint ID](https://ark.volcengine.com/region:cn-beijing/docs/ark/create-standard-inference-endpoint)。
 
 &nbsp;
 
@@ -617,6 +623,8 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `Seedream 5.0 pro`
 
+- `Seedream 5.0 flash`
+
 **图层拆分场景**
 
 **z_index<mark><sup>new</sup></mark>** `integer` | 图层叠放顺序
@@ -629,6 +637,8 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `Seedream 5.0 pro`
 
+- `Seedream 5.0 flash`
+
 **name<mark><sup>new</sup></mark>** `string` | 图层名称
 
 `data.name`
@@ -638,6 +648,8 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 **模型支持**：
 
 - `Seedream 5.0 pro`
+
+- `Seedream 5.0 flash`
 
 **description<mark><sup>new</sup></mark>** `string` | 图层描述
 
@@ -649,6 +661,8 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `Seedream 5.0 pro`
 
+- `Seedream 5.0 flash`
+
 **bounding_box<mark><sup>new</sup></mark>** `object` | 图层边界框
 
 `data.bounding_box`
@@ -659,11 +673,14 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - <div data-tips="true" data-tips-type="tip"><code>bounding_box</code> 表示图层在待拆分图中的相对位置与宽高比，等比缩放至输出底图坐标系后的坐标。</div>
   - <div data-tips="true" data-tips-type="tip">若需将图层还原到输出底图中，建议优先使用 <code>absolute</code> 坐标。</div>
+
   - <div data-tips="true" data-tips-type="tip">若需将图层还原到任意自定义的画布中，可使用 <code>normalized</code> 坐标。</div>
 
 **模型支持**：
 
 - `Seedream 5.0 pro`
+
+- `Seedream 5.0 flash`
 
 **absolute** `array` | 绝对坐标
 
@@ -749,7 +766,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 `data.error.code`
 
-错误码，请参见 [错误码](https://docs.volcengine.com/docs/82379/1299023)
+错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/ark/error-codes)
 
 **message** `string` | 错误消息
 
@@ -765,7 +782,7 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 `error.code`
 
-错误码，请参见 [错误码](https://docs.volcengine.com/docs/82379/1299023)
+错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/ark/error-codes)
 
 **message** `string` | 错误消息
 
@@ -815,6 +832,8 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 - `Seedream 5.0 pro`
 
+- `Seedream 5.0 flash`
+
 **output_tokens** `integer` | 输出 token 数
 
 `usage.output_tokens`
@@ -849,4 +868,4 @@ Seedream 5.0 pro 最多支持传入 10 张参考图；Seedream 5.0 lite / 4.5 / 
 
 ### 流式调用响应
 
-字段结构详见 [图片生成流式响应事件](https://docs.volcengine.com/docs/82379/1824137)。
+字段结构详见 [图片生成流式响应事件](https://ark.volcengine.com/region:cn-beijing/docs/ark/image-generation-streaming-responses)。

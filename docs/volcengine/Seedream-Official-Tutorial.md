@@ -1,24 +1,26 @@
-Doubao Seedream 系列模型原生支持文本、单图和多图输入，实现基于主体一致性的多图融合创作、图像编辑、组图生成等多样玩法，让图像创作更加自由可控。本文以 Doubao Seedream 5.0 lite（以下简称 Seedream 5.0 lite）为例介绍如何调用 [Image generation API](https://docs.volcengine.com/docs/82379/1541523) 进行图像创作。如需使用 Doubao Seedream 5.0 pro（以下简称 Seedream 5.0 pro）/ Doubao Seedream 4.5（以下简称 Seedream 4.5）/ Doubao Seedream 4.0（以下简称 Seedream 4.0）模型，将下文代码示例中的 model 字段替换为对应的 Model ID 即可。
+Doubao Seedream 系列模型原生支持文本、单图和多图输入，实现基于主体一致性的多图融合创作、图像编辑、组图生成等多样玩法，让图像创作更加自由可控。本文以 Doubao Seedream 5.0 lite（以下简称 Seedream 5.0 lite）为例介绍如何调用 [Image generation API](https://ark.volcengine.com/region:cn-beijing/docs/ark/image-generation-api) 进行图像创作。如需使用 Doubao Seedream 5.0 pro（以下简称 Seedream 5.0 pro）/ Doubao Seedream 4.5（以下简称 Seedream 4.5）/ Doubao Seedream 4.0（以下简称 Seedream 4.0）模型，将下文代码示例中的 model 字段替换为对应的 Model ID 即可。
 
 <div data-tips="true" data-tips-type="warning" data-tips-is-title="true">新模型上线</div>
 
-<div data-tips="true" data-tips-type="warning"><strong>Seedream 5.0 pro</strong> （Model ID: <code>doubao-seedream-5-0-pro-260628</code>）已上线，面向高精度图片编辑场景，提供更精准的位置与元素控制能力。 <strong>支持通过坐标、框选、箭头等多种方式指定编辑位置来精准编辑图片；支持将单张图片拆分为 1 张底图和最多 16 个独立图层；支持原生多语种生成</strong> 。详情参见：<a href="https://docs.volcengine.com/docs/82379/2582774">Doubao Seedream 5.0 pro 教程</a>。</div>
+<div data-tips="true" data-tips-type="warning">Seedream 5.0 flash（Model ID: <code>doubao-seedream-5-0-flash-260915</code>）已上线，支持通过坐标、框选、箭头等多种方式指定编辑位置来精准编辑图片；支持将单张图片拆分为 1 张底图和最多 16 个独立图层；支持原生多语种生成。</div>
+
+<div data-tips="true" data-tips-type="warning"><strong>Seedream 5.0 flash 生图速度更快、价格更低</strong>，适合对时延与成本敏感的业务场景。详情参见：<a href="https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-5-0-pro">Doubao Seedream 5.0 pro / flash 教程</a>。</div>
 
 <span id="2cf5cace"></span>
 
 # 模型效果
 
-更多效果示例见 [效果预览](https://console.volcengine.com/ark/region:cn-beijing/model/detail?Id=doubao-seedream-5-0)。
+更多效果示例见 [效果预览](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0)。
 
 &nbsp;
 
-| 场景                                                                                                        | 输入                                                                                                                                                                                                                                                                                                                                                                                                           | 输出                                                                                                                                    |
-| ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| 图层拆分<br><br>> Seedream 5.0 pro 支持将元素拆分为可独立编辑的图层，便于后续拖拽、缩放、重组等精细化编辑。 | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_layer_input.png) </span><br><br>> 将图片进行精确图层分离，需分离的文字坐标为 `<bbox>180 64 812 198</bbox>`、`<bbox>757 210 939 280</bbox>`、`<bbox>63 212 320 282</bbox>`、`<bbox>178 714 826 810</bbox>`、`<bbox>814 819 949 894</bbox>`、`<bbox>326 824 669 930</bbox>`；鹦鹉的坐标为 `<bbox>347 305 642 997</bbox>`。 | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_layer_output2.png) </span>                        |
-| 交互编辑<br><br>> Seedream 5.0 pro 支持通过标记指定编辑区域，模型识别标记范围并生成内容，自然融入原有场景。 | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_input2.png) </span><br><br>> 根据手绘草图对图像进行编辑。在左下角标记区域添加一叠真实的杂志或艺术画册，并在右侧标记区域添加一个带杯碟的陶瓷杯咖啡。移除所有草图线条。保持构图不变。                                                                                                                                      | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_output2.png) </span>                              |
-| 文生图 `联网搜索`<br><br>> Seedream 5.0 lite 模型可通过联网搜索功能，融合实时网络信息，提升生图时效性。     | 制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。 人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。                                                                                     | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/56e0e5cc24ff40559c9e934e5d744393~tplv-goo7wpa0wc-image.image) </span> |
-| 多参考图生图<br><br>> 输入多张参考图，融合它们的风格、元素等特征来生成新图像。                              | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/2198d4bef000400bbfea18025850ed82~tplv-goo7wpa0wc-image.image) </span><br><br>> 将图1的服装换为图2的服装                                                                                                                                                                                                                                      | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/db71316f709243ceb69a629cd48598ff~tplv-goo7wpa0wc-image.image) </span> |
-| 组图生成<br><br>> 基于用户输入的文字和图片，生成一组内容关联的图像                                          | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/a215e8241dd94f50901948790da121e1~tplv-goo7wpa0wc-image.image) </span><br><br>> 参考图1，生成四图片，图中人物分别带着墨镜，骑着摩托，带着帽子，拿着棒棒糖                                                                                                                                                                                     | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/NSogP0qtYEdrZRy-8fUUO.jpeg) </span>                               |
+| 场景                                                                                                                | 输入                                                                                                                                                                                                                                                                                                                                                                                                           | 输出                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 图层拆分<br><br>> Seedream 5.0 pro / flash 支持将元素拆分为可独立编辑的图层，便于后续拖拽、缩放、重组等精细化编辑。 | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_layer_input.png) </span><br><br>> 将图片进行精确图层分离，需分离的文字坐标为 `<bbox>180 64 812 198</bbox>`、`<bbox>757 210 939 280</bbox>`、`<bbox>63 212 320 282</bbox>`、`<bbox>178 714 826 810</bbox>`、`<bbox>814 819 949 894</bbox>`、`<bbox>326 824 669 930</bbox>`；鹦鹉的坐标为 `<bbox>347 305 642 997</bbox>`。 | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_layer_output2.png) </span>                        |
+| 交互编辑<br><br>> Seedream 5.0 pro / flash 支持通过标记指定编辑区域，模型识别标记范围并生成内容，自然融入原有场景。 | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_input2.png) </span><br><br>> 根据手绘草图对图像进行编辑。在左下角标记区域添加一叠真实的杂志或艺术画册，并在右侧标记区域添加一个带杯碟的陶瓷杯咖啡。移除所有草图线条。保持构图不变。                                                                                                                                      | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream_50_pro_output2.png) </span>                              |
+| 文生图 `联网搜索`<br><br>> Seedream 5.0 lite 模型可通过联网搜索功能，融合实时网络信息，提升生图时效性。             | 制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。 人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。                                                                                     | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/56e0e5cc24ff40559c9e934e5d744393~tplv-goo7wpa0wc-image.image) </span> |
+| 多参考图生图<br><br>> 输入多张参考图，融合它们的风格、元素等特征来生成新图像。                                      | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/2198d4bef000400bbfea18025850ed82~tplv-goo7wpa0wc-image.image) </span><br><br>> 将图1的服装换为图2的服装                                                                                                                                                                                                                                      | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/db71316f709243ceb69a629cd48598ff~tplv-goo7wpa0wc-image.image) </span> |
+| 组图生成<br><br>> 基于用户输入的文字和图片，生成一组内容关联的图像                                                  | <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/a215e8241dd94f50901948790da121e1~tplv-goo7wpa0wc-image.image) </span><br><br>> 参考图1，生成四图片，图中人物分别带着墨镜，骑着摩托，带着帽子，拿着棒棒糖                                                                                                                                                                                     | <span>![图片](https://ark-project.tos-cn-beijing.volces.com/doc_image/NSogP0qtYEdrZRy-8fUUO.jpeg) </span>                               |
 
 <span id="9278b81b"></span>
 
@@ -26,23 +28,23 @@ Doubao Seedream 系列模型原生支持文本、单图和多图输入，实现�
 
 以下为 Seedream 系列各版本模型的能力与参数对比，帮助您根据业务需求选择合适的模型。
 
-<span aceTableMode="list" aceTableWidth="1.5,2,3,3,3,3"></span>
-|模型名称 ||[Seedream 5.0 pro](https://console.volcengine.com/ark/region:cn-beijing/model/detail?Id=doubao-seedream-5-0-pro) |[Seedream 5.0 lite](https://console.volcengine.com/ark/region:cn-beijing/model/detail?Id=doubao-seedream-5-0) |[Seedream 4.5](https://console.volcengine.com/ark/region:cn-beijing/model/detail?Id=doubao-seedream-4-5) |[Seedream 4.0](https://console.volcengine.com/ark/region:cn-beijing/model/detail?Id=doubao-seedream-4-0) |
-|---|---|---|---|---|---|
-|模型 ID (Model ID) ||doubao\-seedream\-5\-0\-pro\-260628 |doubao\-seedream\-5\-0\-260128 (同时支持：doubao\-seedream\-5\-0\-lite\-260128) |doubao\-seedream\-4\-5\-251128 |doubao\-seedream\-4\-0\-250828 |
-|[文生图](https://docs.volcengine.com/docs/82379/1824121#9695d195) ||✓ |✓ |✓ |✓ |
-|[文生组图](https://docs.volcengine.com/docs/82379/1824121#ec79cfda) ||暂不支持 |✓ |✓ |✓ |
-|[单 / 多图生图](https://docs.volcengine.com/docs/82379/1824121#8bc49063) ||✓ |✓ |✓ |✓ |
-|[单 / 多图生组图](https://docs.volcengine.com/docs/82379/1824121#fc9f85e4) ||暂不支持 |✓ |✓ |✓ |
-|[交互编辑](https://docs.volcengine.com/docs/82379/1824121#interactive_edit) ||✓ |✗ |✗ |✗ |
-|[图层拆分](https://docs.volcengine.com/docs/82379/2582774#layer_decomposition) ||✓ |✗ |✗ |✗ |
-|[流式输出](https://docs.volcengine.com/docs/82379/1824121#e5bef0d7) ||暂不支持 |✓ |✓ |✓ |
-|[联网搜索](https://docs.volcengine.com/docs/82379/1824121#4e1745fa) ||暂不支持 |✓ |✗ |✗ |
-|模型参数 |分辨率 |1K, 1.5K, 2K |2K, 3K, 4K |2K, 4K |1K, 2K, 4K |
-||输出格式 |png, jpeg |png, jpeg |jpeg |jpeg |
-||提示词优化模式 |标准模式, 极速模式 |标准模式 |标准模式 |标准模式, 极速模式 |
-||生成数量 |支持生成单图/多个图层（1 张底图 + 16 张图层） |输入的参考图数量 + 最终生成的图片数量 ≤ 15张 | | |
-|限流 IPM（张 / 分钟） ||500 |500 |500 |500 |
+<span aceTableMode="list" aceTableWidth="1.5,2,3,3,3,3,3"></span>
+|模型名称 ||[Seedream 5.0 pro](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0-pro) |[Seedream 5.0 flash](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0-flash) |[Seedream 5.0 lite](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-5-0) |[Seedream 4.5](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-4-5) |[Seedream 4.0](https://ark.volcengine.com/region:cn-beijing/model/detail?Id=doubao-seedream-4-0) |
+|---|---|---|---|---|---|---|
+|模型 ID (Model ID) ||doubao\-seedream\-5\-0\-pro\-260628 |doubao\-seedream\-5\-0\-flash\-260915 |doubao\-seedream\-5\-0\-260128 (同时支持：doubao\-seedream\-5\-0\-lite\-260128) |doubao\-seedream\-4\-5\-251128 |doubao\-seedream\-4\-0\-250828 |
+|[文生图](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#9695d195) ||✓ |✓ |✓ |✓ |✓ |
+|[文生组图](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#ec79cfda) ||暂不支持 |暂不支持 |✓ |✓ |✓ |
+|[单 / 多图生图](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#8bc49063) ||✓ |✓ |✓ |✓ |✓ |
+|[单 / 多图生组图](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#fc9f85e4) ||暂不支持 |暂不支持 |✓ |✓ |✓ |
+|[交互编辑](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#interactive_edit) ||✓ |✓ |✗ |✗ |✗ |
+|[图层拆分](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-5-0-pro#layer_decomposition) ||✓ |✓ |✗ |✗ |✗ |
+|[流式输出](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#e5bef0d7) ||暂不支持 |暂不支持 |✓ |✓ |✓ |
+|[联网搜索](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0#4e1745fa) ||暂不支持 |暂不支持 |✓ |✗ |✗ |
+|模型参数 |分辨率 |1K, 1.5K, 2K |1K, 1.5K, 2K |2K, 3K, 4K |2K, 4K |1K, 2K, 4K |
+||输出格式 |png, jpeg |png, jpeg |png, jpeg |jpeg |jpeg |
+||提示词优化模式 |标准模式, 极速模式 |标准模式 |标准模式 |标准模式 |标准模式, 极速模式 |
+||生成数量 |支持生成单图/多个图层（1 张底图 + 16 张图层） |支持生成单图/多个图层（1 张底图 + 16 张图层） |输入的参考图数量 + 最终生成的图片数量 ≤ 15张 | | |
+|限流 IPM（张 / 分钟） ||500 |500 |500 |500 |500 |
 
 <span id="386b6ea2"></span>
 
@@ -68,7 +70,7 @@ Doubao Seedream 系列模型原生支持文本、单图和多图输入，实现�
 |充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。 |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/2ff811eb52bf47a6972bf3da0d5a99c9~tplv-goo7wpa0wc-image.image) </span> |
 
 <Tabs>
-<Tab zoneid="XYovKkQ7ta" title="Curl">
+<Tab zoneid="JY1Kyz0tYU" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -84,21 +86,21 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="zTWigZn0Jj" title="Python">
+<Tab zoneid="IPgArydhWF" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]' .
-from volcenginesdkarkruntime import Ark
+# Install SDK:  pip install arkruntime .
+from arkruntime import Ark
 
 client = Ark(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -116,14 +118,14 @@ print(imagesResponse.data[0].url)
 ```
 
 </Tab>
-<Tab zoneid="TbdCuEuOz4" title="Java">
+<Tab zoneid="LYcSjRwoRZ" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -134,28 +136,30 @@ import java.util.concurrent.TimeUnit;
 
 public class ImageGenerationsExample {
     public static void main(String[] args) {
-        // Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+        // Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
         String apiKey = System.getenv("ARK_API_KEY");
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                 .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
                 .prompt("充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。")
+
                 .size("2K")
-                .sequentialImageGeneration("disabled")
-                .outputFormat("png")
-                .responseFormat(ResponseFormat.Url)
+                .sequentialImageGeneration(SequentialImageGenerationMode.DISABLED)
+                .outputFormat(OutputFormat.PNG)
+                .responseFormat(ResponseFormat.URL)
                 .stream(false)
                 .watermark(false)
                 .build();
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
         System.out.println(imagesResponse.getData().get(0).getUrl());
 
         service.shutdownExecutor();
@@ -164,7 +168,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="vhCwOvavgo" title="Go">
+<Tab zoneid="YLsiLdiDSs" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -175,14 +179,13 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
     client := arkruntime.NewClientWithApiKey(
-        // Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+        // Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
         os.Getenv("ARK_API_KEY"),
         // The base URL for model invocation
         arkruntime.WithBaseUrl("https://ark.cn-beijing.volces.com/api/v3"),
@@ -191,13 +194,14 @@ func main() {
     outputFormat := model.OutputFormatPNG
 
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
        Model:          "doubao-seedream-5-0-lite-260128", // Replace with Model ID
-       Prompt:         "充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。",
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
+       Prompt:         model.NewOptString("充满活力的特写编辑肖像，模特眼神犀利，头戴雕塑感帽子，色彩拼接丰富，眼部焦点锐利，景深较浅，具有Vogue杂志封面的美学风格，采用中画幅拍摄，工作室灯光效果强烈。"),
+
+       Size:           model.NewOptString("2K"),
+       OutputFormat: model.NewOptOutputFormat(outputFormat),
+       ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+       Watermark:      model.NewOptBool(false),
     }
 
     imagesResponse, err := client.GenerateImages(ctx, generateReq)
@@ -206,12 +210,12 @@ func main() {
        return
     }
 
-    fmt.Printf("%s\n", *imagesResponse.Data[0].Url)
+    fmt.Printf("%s\n", imagesResponse.Data[0].URL.Or(""))
 }
 ```
 
 </Tab>
-<Tab zoneid="t7FgYbXkAU" title="OpenAI">
+<Tab zoneid="q2b9XR1gSi" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -221,7 +225,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -255,7 +259,7 @@ print(imagesResponse.data[0].url)
 |保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。 |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/816153e67d3c4478886276154d78b22e~tplv-goo7wpa0wc-image.image) </span> |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/579ed507e0aa4647be9f1890d23e638e~tplv-goo7wpa0wc-image.image) </span> |
 
 <Tabs>
-<Tab zoneid="i9rJNf1GBI" title="Curl">
+<Tab zoneid="F2zg7335cY" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -272,21 +276,21 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="bzM3s7kr7U" title="Python">
+<Tab zoneid="axRG071Rq1" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]'
-from volcenginesdkarkruntime import Ark
+# Install SDK:  pip install arkruntime
+from arkruntime import Ark
 
 client = Ark(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -305,14 +309,14 @@ print(imagesResponse.data[0].url)
 ```
 
 </Tab>
-<Tab zoneid="lQdKRYMnf5" title="Java">
+<Tab zoneid="NQBRdjZ4v6" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -327,25 +331,28 @@ public class ImageGenerationsExample {
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                 .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
                 .prompt("保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。")
-                .image("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_5_imageToimage.png")
+
+                .image(CreateImageGenerationRequestImage.ofString("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_5_imageToimage.png"))
+
                 .size("2K")
-                .sequentialImageGeneration("disabled")
-                .outputFormat("png")
-                .responseFormat(ResponseFormat.Url)
+                .sequentialImageGeneration(SequentialImageGenerationMode.DISABLED)
+                .outputFormat(OutputFormat.PNG)
+                .responseFormat(ResponseFormat.URL)
                 .stream(false)
                 .watermark(false)
                 .build();
 
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
         System.out.println(imagesResponse.getData().get(0).getUrl());
 
         service.shutdownExecutor();
@@ -354,7 +361,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="L1YWB58lzT" title="Go">
+<Tab zoneid="X0pWC8rt6S" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -365,9 +372,8 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
@@ -379,14 +385,16 @@ func main() {
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
        Model:          "doubao-seedream-5-0-lite-260128",
-       Prompt:         "保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。",
-       Image:          volcengine.String("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_5_imageToimage.png"),
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
+       Prompt:         model.NewOptString("保持模特姿势和液态服装的流动形状不变。将服装材质从银色金属改为完全透明的清水（或玻璃）。透过液态水流，可以看到模特的皮肤细节。光影从反射变为折射。"),
+
+       Image: model.NewOptCreateImageGenerationRequestImage(model.NewStringArrayCreateImageGenerationRequestImage([]string{"https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_5_imageToimage.png"})),
+
+       Size:           model.NewOptString("2K"),
+       OutputFormat: model.NewOptOutputFormat(outputFormat),
+       ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+       Watermark:      model.NewOptBool(false),
     }
 
     imagesResponse, err := client.GenerateImages(ctx, generateReq)
@@ -395,12 +403,12 @@ func main() {
        return
     }
 
-    fmt.Printf("%s\n", *imagesResponse.Data[0].Url)
+    fmt.Printf("%s\n", imagesResponse.Data[0].URL.Or(""))
 }
 ```
 
 </Tab>
-<Tab zoneid="e6Ltgqm2QD" title="OpenAI">
+<Tab zoneid="l28YEeamGI" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -410,7 +418,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -444,7 +452,7 @@ print(imagesResponse.data[0].url)
 |将图1的服装换为图2的服装 |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/4b4464161cf3463db6f9463b10939178~tplv-goo7wpa0wc-image.image) </span> |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/c23d1b0528a14cb08b684307eabdcc9b~tplv-goo7wpa0wc-image.image) </span> |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/db71316f709243ceb69a629cd48598ff~tplv-goo7wpa0wc-image.image) </span> |
 
 <Tabs>
-<Tab zoneid="EPe0sInmf4" title="Curl">
+<Tab zoneid="YnyQBvV5Lb" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -461,21 +469,21 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="TsBtCIWOVH" title="Python">
+<Tab zoneid="nVJelcMdSy" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]'
-from volcenginesdkarkruntime import Ark
+# Install SDK:  pip install arkruntime
+from arkruntime import Ark
 
 client = Ark(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 imagesResponse = client.images.generate(
@@ -493,14 +501,14 @@ print(imagesResponse.data[0].url)
 ```
 
 </Tab>
-<Tab zoneid="Qc6yqksB21" title="Java">
+<Tab zoneid="BbjjBHq42T" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -515,27 +523,29 @@ public class ImageGenerationsExample {
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                 .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
                 .prompt("将图1的服装换为图2的服装")
-                .image(Arrays.asList(
+
+                .image(CreateImageGenerationRequestImage.ofList(Arrays.asList(
                     "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimage_1.png",
                     "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_5_imagesToimage_2.png"
-                ))
+                )))
                 .size("2K")
-                .sequentialImageGeneration("disabled")
-                .outputFormat("png")
-                .responseFormat(ResponseFormat.Url)
+                .sequentialImageGeneration(SequentialImageGenerationMode.DISABLED)
+                .outputFormat(OutputFormat.PNG)
+                .responseFormat(ResponseFormat.URL)
                 .stream(false)
                 .watermark(false)
                 .build();
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
         System.out.println(imagesResponse.getData().get(0).getUrl());
 
         service.shutdownExecutor();
@@ -544,7 +554,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="SklAKFJgbp" title="Go">
+<Tab zoneid="xxTQ4r5zYk" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -555,9 +565,8 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
@@ -569,17 +578,20 @@ func main() {
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
        Model:          "doubao-seedream-5-0-lite-260128",
-       Prompt:         "将图1的服装换为图2的服装",
-       Image:         []string{
+       Prompt:         model.NewOptString("将图1的服装换为图2的服装"),
+
+       Image:         model.NewOptCreateImageGenerationRequestImage(model.NewStringArrayCreateImageGenerationRequestImage([]string{
            "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimage_1.png",
            "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_5_imagesToimage_2.png",
-       },
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
+
+
+       })),
+       Size:           model.NewOptString("2K"),
+       OutputFormat: model.NewOptOutputFormat(outputFormat),
+       ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+       Watermark:      model.NewOptBool(false),
     }
 
     imagesResponse, err := client.GenerateImages(ctx, generateReq)
@@ -588,12 +600,12 @@ func main() {
        return
     }
 
-    fmt.Printf("%s\n", *imagesResponse.Data[0].Url)
+    fmt.Printf("%s\n", imagesResponse.Data[0].URL.Or(""))
 }
 ```
 
 </Tab>
-<Tab zoneid="wpASQ1jcZs" title="OpenAI">
+<Tab zoneid="nstiHpWwvZ" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -603,7 +615,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -629,7 +641,7 @@ print(imagesResponse.data[0].url)
 
 ## 组图输出（多图输出）
 
-> Seedream 5.0 pro 不支持该能力。
+> Seedream 5.0 pro / flash 不支持该能力。
 
 支持通过一张或者多张图片和文字信息，生成漫画分镜、品牌视觉等一组内容关联的图片。
 
@@ -645,7 +657,7 @@ print(imagesResponse.data[0].url)
 |生成一组电影级科幻写实风的4张影视分镜：<br><br>场景1为宇航员在空间站维修飞船，空间站外部精密机械结构，深邃星空 + 银河背景，宇航员身穿细节完整的白色宇航服，手持专业维修工具，专注检修飞船外壳，中全景构图，侧逆光勾勒轮廓，冷色调科幻光影，空间站灯光点缀，失重环境，金属质感细腻，画面静谧严谨。<br><br>场景2为：突然遇到陨石带袭击，广角史诗镜头，大量大小不一的陨石高速袭来，陨石表面纹理清晰，带燃烧尾焰，动态模糊体现速度感，陨石带压迫感拉满，飞船与空间站在画面一侧，太空黑暗深邃，光影强烈对比，紧张灾难氛围，画面冲击力十足。<br><br>场景3为：宇航员紧急躲避，近景动态抓拍，宇航员失重状态下极速侧身躲避，肢体动作张力拉满，伸手抓握固定扶手，背景陨石飞掠而过，轻微镜头晃动增强临场感，宇航服褶皱、管线细节清晰，急促紧张，冷冽光影，主体突出不杂乱。<br><br>场景4为：受伤后惊险逃回飞船，中近景叙事镜头，宇航员宇航服带轻微破损划痕，略显狼狈却坚毅，踉跄冲向开启的飞船舱门，舱内暖光与太空冷光形成对比，背景陨石逐渐远去，惊险逃生氛围，细节真实，情绪饱满。 |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/e2f46207ee5e4c42b2cb988dced7cf82~tplv-goo7wpa0wc-image.image) </span> |
 
 <Tabs>
-<Tab zoneid="ClLyyytg8u" title="Curl">
+<Tab zoneid="P0JMYa5SyA" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -667,22 +679,22 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="YGAS7YROpD" title="Python">
+<Tab zoneid="rxwOgo9wvt" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]'
-from volcenginesdkarkruntime import Ark
-from volcenginesdkarkruntime.types.images.images import SequentialImageGenerationOptions
+# Install SDK:  pip install arkruntime
+from arkruntime import Ark
+from arkruntime.types.images import SequentialImageGenerationOptionsParam
 
 client = Ark(
     # The base URL for model invocation .
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -692,7 +704,7 @@ imagesResponse = client.images.generate(
     prompt="生成一组电影级科幻写实风的4张影视分镜：场景1为宇航员在空间站维修飞船，空间站外部精密机械结构，深邃星空 + 银河背景，宇航员身穿细节完整的白色宇航服，手持专业维修工具，专注检修飞船外壳，中全景构图，侧逆光勾勒轮廓，冷色调科幻光影，空间站灯光点缀，失重环境，金属质感细腻，画面静谧严谨。场景2为：突然遇到陨石带袭击，广角史诗镜头，大量大小不一的陨石高速袭来，陨石表面纹理清晰，带燃烧尾焰，动态模糊体现速度感，陨石带压迫感拉满，飞船与空间站在画面一侧，太空黑暗深邃，光影强烈对比，紧张灾难氛围，画面冲击力十足。场景3为：宇航员紧急躲避，近景动态抓拍，宇航员失重状态下极速侧身躲避，肢体动作张力拉满，伸手抓握固定扶手，背景陨石飞掠而过，轻微镜头晃动增强临场感，宇航服褶皱、管线细节清晰，急促紧张，冷冽光影，主体突出不杂乱。场景4为：受伤后惊险逃回飞船，中近景叙事镜头，宇航员宇航服带轻微破损划痕，略显狼狈却坚毅，踉跄冲向开启的飞船舱门，舱内暖光与太空冷光形成对比，背景陨石逐渐远去，惊险逃生氛围，细节真实，情绪饱满。",
     size="2K",
     sequential_image_generation="auto",
-    sequential_image_generation_options=SequentialImageGenerationOptions(max_images=4),
+    sequential_image_generation_options=SequentialImageGenerationOptionsParam(max_images=4),
     output_format="png",
     response_format="url",
     watermark=False
@@ -705,14 +717,14 @@ for image in imagesResponse.data:
 ```
 
 </Tab>
-<Tab zoneid="xS7KHdTqlX" title="Java">
+<Tab zoneid="HUKySjUEuD" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -727,26 +739,28 @@ public class ImageGenerationsExample {
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest.SequentialImageGenerationOptions sequentialImageGenerationOptions = new GenerateImagesRequest.SequentialImageGenerationOptions();
+        SequentialImageGenerationOptions sequentialImageGenerationOptions = new SequentialImageGenerationOptions();
         sequentialImageGenerationOptions.setMaxImages(4);
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                  .model("doubao-seedream-5-0-lite-260128")  // Replace with Model ID
                  .prompt("生成一组电影级科幻写实风的4张影视分镜：场景1为宇航员在空间站维修飞船，空间站外部精密机械结构，深邃星空 + 银河背景，宇航员身穿细节完整的白色宇航服，手持专业维修工具，专注检修飞船外壳，中全景构图，侧逆光勾勒轮廓，冷色调科幻光影，空间站灯光点缀，失重环境，金属质感细腻，画面静谧严谨。场景2为：突然遇到陨石带袭击，广角史诗镜头，大量大小不一的陨石高速袭来，陨石表面纹理清晰，带燃烧尾焰，动态模糊体现速度感，陨石带压迫感拉满，飞船与空间站在画面一侧，太空黑暗深邃，光影强烈对比，紧张灾难氛围，画面冲击力十足。场景3为：宇航员紧急躲避，近景动态抓拍，宇航员失重状态下极速侧身躲避，肢体动作张力拉满，伸手抓握固定扶手，背景陨石飞掠而过，轻微镜头晃动增强临场感，宇航服褶皱、管线细节清晰，急促紧张，冷冽光影，主体突出不杂乱。场景4为：受伤后惊险逃回飞船，中近景叙事镜头，宇航员宇航服带轻微破损划痕，略显狼狈却坚毅，踉跄冲向开启的飞船舱门，舱内暖光与太空冷光形成对比，背景陨石逐渐远去，惊险逃生氛围，细节真实，情绪饱满。")
+
                  .size("2K")
-                 .sequentialImageGeneration("auto")
+                 .sequentialImageGeneration(SequentialImageGenerationMode.AUTO)
                  .sequentialImageGenerationOptions(sequentialImageGenerationOptions)
-                 .outputFormat("png")
-                 .responseFormat(ResponseFormat.Url)
+                 .outputFormat(OutputFormat.PNG)
+                 .responseFormat(ResponseFormat.URL)
                  .stream(false)
                  .watermark(false)
                  .build();
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
         // Iterate through all image data
         if (imagesResponse != null && imagesResponse.getData() != null) {
             for (int i = 0; i < imagesResponse.getData().size(); i++) {
@@ -767,7 +781,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="o0RQpl5w4i" title="Go">
+<Tab zoneid="CM03Yy2bTT" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -778,9 +792,8 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
@@ -791,20 +804,21 @@ func main() {
     )
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
-    var sequentialImageGeneration model.SequentialImageGeneration = "auto"
+    var sequentialImageGeneration model.SequentialImageGenerationMode = "auto"
     maxImages := 4
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
        Model:          "doubao-seedream-5-0-lite-260128",
-       Prompt:         "生成一组电影级科幻写实风的4张影视分镜：场景1为宇航员在空间站维修飞船，空间站外部精密机械结构，深邃星空 + 银河背景，宇航员身穿细节完整的白色宇航服，手持专业维修工具，专注检修飞船外壳，中全景构图，侧逆光勾勒轮廓，冷色调科幻光影，空间站灯光点缀，失重环境，金属质感细腻，画面静谧严谨。场景2为：突然遇到陨石带袭击，广角史诗镜头，大量大小不一的陨石高速袭来，陨石表面纹理清晰，带燃烧尾焰，动态模糊体现速度感，陨石带压迫感拉满，飞船与空间站在画面一侧，太空黑暗深邃，光影强烈对比，紧张灾难氛围，画面冲击力十足。场景3为：宇航员紧急躲避，近景动态抓拍，宇航员失重状态下极速侧身躲避，肢体动作张力拉满，伸手抓握固定扶手，背景陨石飞掠而过，轻微镜头晃动增强临场感，宇航服褶皱、管线细节清晰，急促紧张，冷冽光影，主体突出不杂乱。场景4为：受伤后惊险逃回飞船，中近景叙事镜头，宇航员宇航服带轻微破损划痕，略显狼狈却坚毅，踉跄冲向开启的飞船舱门，舱内暖光与太空冷光形成对比，背景陨石逐渐远去，惊险逃生氛围，细节真实，情绪饱满。",
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
-       SequentialImageGeneration: &sequentialImageGeneration,
-       SequentialImageGenerationOptions: &model.SequentialImageGenerationOptions{
-          MaxImages: &maxImages,
-       },
+       Prompt:         model.NewOptString("生成一组电影级科幻写实风的4张影视分镜：场景1为宇航员在空间站维修飞船，空间站外部精密机械结构，深邃星空 + 银河背景，宇航员身穿细节完整的白色宇航服，手持专业维修工具，专注检修飞船外壳，中全景构图，侧逆光勾勒轮廓，冷色调科幻光影，空间站灯光点缀，失重环境，金属质感细腻，画面静谧严谨。场景2为：突然遇到陨石带袭击，广角史诗镜头，大量大小不一的陨石高速袭来，陨石表面纹理清晰，带燃烧尾焰，动态模糊体现速度感，陨石带压迫感拉满，飞船与空间站在画面一侧，太空黑暗深邃，光影强烈对比，紧张灾难氛围，画面冲击力十足。场景3为：宇航员紧急躲避，近景动态抓拍，宇航员失重状态下极速侧身躲避，肢体动作张力拉满，伸手抓握固定扶手，背景陨石飞掠而过，轻微镜头晃动增强临场感，宇航服褶皱、管线细节清晰，急促紧张，冷冽光影，主体突出不杂乱。场景4为：受伤后惊险逃回飞船，中近景叙事镜头，宇航员宇航服带轻微破损划痕，略显狼狈却坚毅，踉跄冲向开启的飞船舱门，舱内暖光与太空冷光形成对比，背景陨石逐渐远去，惊险逃生氛围，细节真实，情绪饱满。"),
+
+       Size:           model.NewOptString("2K"),
+       OutputFormat: model.NewOptOutputFormat(outputFormat),
+       ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+       Watermark:      model.NewOptBool(false),
+       SequentialImageGeneration: model.NewOptSequentialImageGenerationMode(sequentialImageGeneration),
+       SequentialImageGenerationOptions: model.NewOptSequentialImageGenerationOptions(model.SequentialImageGenerationOptions{
+          MaxImages: model.NewOptInt32(int32(maxImages)),
+       }),
     }
 
     resp, err := client.GenerateImages(ctx, generateReq)
@@ -813,8 +827,8 @@ func main() {
         return
     }
 
-    if resp.Error != nil {
-        fmt.Printf("API returned error: %s - %s\n", resp.Error.Code, resp.Error.Message)
+    if resp.Error.IsSet() {
+        fmt.Printf("API returned error: %s - %s\n", resp.Error.Value.Code, resp.Error.Value.Message)
         return
     }
 
@@ -822,18 +836,18 @@ func main() {
     fmt.Printf("Generated %d images:\n", len(resp.Data))
     for i, image := range resp.Data {
         var url string
-        if image.Url != nil {
-            url = *image.Url
+        if image.URL.IsSet() {
+            url = image.URL.Or("")
         } else {
             url = "N/A"
         }
-        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size, url)
+        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size.Or(""), url)
     }
 }
 ```
 
 </Tab>
-<Tab zoneid="JuohCHcu0h" title="OpenAI">
+<Tab zoneid="yDmj0c6bMY" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -843,7 +857,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation .
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -881,7 +895,7 @@ for image in imagesResponse.data:
 |参考这个LOGO，做一套户外运动品牌视觉设计，品牌名称为“GREEN”，包括包装袋、帽子、卡片、挂绳等。绿色视觉主色调，趣味、简约现代风格。 |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/c724450228a94a909580c0400fbf503b~tplv-goo7wpa0wc-image.image) </span> |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/acf7079c229a4029b4e25bc9c9697992~tplv-goo7wpa0wc-image.image) </span> |
 
 <Tabs>
-<Tab zoneid="Qt0f57Loo0" title="Curl">
+<Tab zoneid="xS63rJRS7H" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -904,33 +918,33 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="jL3QmZLDsR" title="Python">
+<Tab zoneid="hCb1Nu6vOX" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]' .
-from volcenginesdkarkruntime import Ark
-from volcenginesdkarkruntime.types.images.images import SequentialImageGenerationOptions
+# Install SDK:  pip install arkruntime .
+from arkruntime import Ark
+from arkruntime.types.images import SequentialImageGenerationOptionsParam
 
 client = Ark(
     # The base URL for model invocation .
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
 imagesResponse = client.images.generate(
     # Replace with Model ID .
     model="doubao-seedream-5-0-lite-260128",
-    prompt="参考这个LOGO，做一套户外运动品牌视觉设计，品牌名称为“GREEN"，包括包装袋、帽子、卡片、挂绳等。绿色视觉主色调，趣味、简约现代风格",
+    prompt="参考这个LOGO，做一套户外运动品牌视觉设计，品牌名称为“GREEN”，包括包装袋、帽子、卡片、挂绳等。绿色视觉主色调，趣味、简约现代风格",
     image="https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages.png",
     size="2K",
     sequential_image_generation="auto",
-    sequential_image_generation_options=SequentialImageGenerationOptions(max_images=4),
+    sequential_image_generation_options=SequentialImageGenerationOptionsParam(max_images=4),
     output_format="png",
     response_format="url",
     watermark=False
@@ -943,14 +957,14 @@ for image in imagesResponse.data:
 ```
 
 </Tab>
-<Tab zoneid="Boz73pk4Tc" title="Java">
+<Tab zoneid="S4FliH50iW" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -965,27 +979,30 @@ public class ImageGenerationsExample {
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest.SequentialImageGenerationOptions sequentialImageGenerationOptions = new GenerateImagesRequest.SequentialImageGenerationOptions();
+        SequentialImageGenerationOptions sequentialImageGenerationOptions = new SequentialImageGenerationOptions();
         sequentialImageGenerationOptions.setMaxImages(4);
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                  .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
-                 .prompt("参考这个LOGO，做一套户外运动品牌视觉设计，品牌名称为“GREEN"，包括包装袋、帽子、卡片、挂绳等。绿色视觉主色调，趣味、简约现代风格")
-                 .image("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages.png")
+                 .prompt("参考这个LOGO，做一套户外运动品牌视觉设计，品牌名称为“GREEN”，包括包装袋、帽子、卡片、挂绳等。绿色视觉主色调，趣味、简约现代风格")
+
+                 .image(CreateImageGenerationRequestImage.ofString("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages.png"))
+
                  .size("2K")
-                 .sequentialImageGeneration("auto")
+                 .sequentialImageGeneration(SequentialImageGenerationMode.AUTO)
                  .sequentialImageGenerationOptions(sequentialImageGenerationOptions)
-                 .outputFormat("png")
-                 .responseFormat(ResponseFormat.Url)
+                 .outputFormat(OutputFormat.PNG)
+                 .responseFormat(ResponseFormat.URL)
                  .stream(false)
                  .watermark(false)
                  .build();
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
         // Iterate through all image data
         if (imagesResponse != null && imagesResponse.getData() != null) {
             for (int i = 0; i < imagesResponse.getData().size(); i++) {
@@ -1006,7 +1023,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="I9Z2GtfFrQ" title="Go">
+<Tab zoneid="vj7blxoot1" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -1017,9 +1034,8 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
@@ -1030,21 +1046,23 @@ func main() {
     )
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
-    var sequentialImageGeneration model.SequentialImageGeneration = "auto"
+    var sequentialImageGeneration model.SequentialImageGenerationMode = "auto"
     maxImages := 4
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
        Model:          "doubao-seedream-5-0-lite-260128",
-       Prompt:         "参考这个LOGO，做一套户外运动品牌视觉设计，品牌名称为“GREEN"，包括包装袋、帽子、卡片、挂绳等。绿色视觉主色调，趣味、简约现代风格",
-       Image:          volcengine.String("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages.png"),
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
-       SequentialImageGeneration: &sequentialImageGeneration,
-       SequentialImageGenerationOptions: &model.SequentialImageGenerationOptions{
-          MaxImages: &maxImages,
-       },
+       Prompt:         model.NewOptString("参考这个LOGO，做一套户外运动品牌视觉设计，品牌名称为“GREEN”，包括包装袋、帽子、卡片、挂绳等。绿色视觉主色调，趣味、简约现代风格"),
+
+       Image: model.NewOptCreateImageGenerationRequestImage(model.NewStringArrayCreateImageGenerationRequestImage([]string{"https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages.png"})),
+
+       Size:           model.NewOptString("2K"),
+       OutputFormat: model.NewOptOutputFormat(outputFormat),
+       ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+       Watermark:      model.NewOptBool(false),
+       SequentialImageGeneration: model.NewOptSequentialImageGenerationMode(sequentialImageGeneration),
+       SequentialImageGenerationOptions: model.NewOptSequentialImageGenerationOptions(model.SequentialImageGenerationOptions{
+          MaxImages: model.NewOptInt32(int32(maxImages)),
+       }),
     }
 
     resp, err := client.GenerateImages(ctx, generateReq)
@@ -1053,8 +1071,8 @@ func main() {
         return
     }
 
-    if resp.Error != nil {
-        fmt.Printf("API returned error: %s - %s\n", resp.Error.Code, resp.Error.Message)
+    if resp.Error.IsSet() {
+        fmt.Printf("API returned error: %s - %s\n", resp.Error.Value.Code, resp.Error.Value.Message)
         return
     }
 
@@ -1062,20 +1080,20 @@ func main() {
     fmt.Printf("Generated %d images:\n", len(resp.Data))
     for i, image := range resp.Data {
         var url string
-        if image.Url != nil {
-            url = *image.Url
+        if image.URL.IsSet() {
+            url = image.URL.Or("")
         } else {
             url = "N/A"
         }
-        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size, url)
+        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size.Or(""), url)
     }
 }
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="dlgb7ECJls" title="OpenAI">
+<Tab zoneid="y1XCQbCPds" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -1085,7 +1103,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -1124,7 +1142,7 @@ for image in imagesResponse.data:
 |生成3张女孩和奶牛玩偶在游乐园开心地坐过山车的图片，涵盖早晨、中午、晚上 |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/77024d8e03f24862b066bfc385301120~tplv-goo7wpa0wc-image.image) </span> |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/2cbc5cf5a68d44899fc52f177fb9cf51~tplv-goo7wpa0wc-image.image) </span> |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/d5f8ffecd482410b8624689889f714cb~tplv-goo7wpa0wc-image.image) </span> |
 
 <Tabs>
-<Tab zoneid="SgrSUOMcBa" title="Curl">
+<Tab zoneid="KhJpNsfuoQ" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -1145,22 +1163,22 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="EGRAJTMzBn" title="Python">
+<Tab zoneid="RTv1O6FlKD" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]' .
-from volcenginesdkarkruntime import Ark
-from volcenginesdkarkruntime.types.images.images import SequentialImageGenerationOptions
+# Install SDK:  pip install arkruntime .
+from arkruntime import Ark
+from arkruntime.types.images import SequentialImageGenerationOptionsParam
 
 client = Ark(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -1171,7 +1189,7 @@ imagesResponse = client.images.generate(
     image=["https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimages_1.png", "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimages_2.png"],
     size="2K",
     sequential_image_generation="auto",
-    sequential_image_generation_options=SequentialImageGenerationOptions(max_images=3),
+    sequential_image_generation_options=SequentialImageGenerationOptionsParam(max_images=3),
     output_format="png",
     response_format="url",
     watermark=False
@@ -1184,14 +1202,14 @@ for image in imagesResponse.data:
 ```
 
 </Tab>
-<Tab zoneid="BEvdgmvOd2" title="Java">
+<Tab zoneid="ptlMHzXuo9" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -1206,31 +1224,33 @@ public class ImageGenerationsExample {
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest.SequentialImageGenerationOptions sequentialImageGenerationOptions = new GenerateImagesRequest.SequentialImageGenerationOptions();
+        SequentialImageGenerationOptions sequentialImageGenerationOptions = new SequentialImageGenerationOptions();
         sequentialImageGenerationOptions.setMaxImages(3);
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                  .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
                  .prompt("生成3张女孩和奶牛玩偶在游乐园开心地坐过山车的图片，涵盖早晨、中午、晚上")
-                 .image(Arrays.asList(
+
+                 .image(CreateImageGenerationRequestImage.ofList(Arrays.asList(
                      "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimages_1.png",
                      "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimages_2.png"
-                 ))
-                 .outputFormat("png")
+                 )))
+                 .outputFormat(OutputFormat.PNG)
                  .size("2K")
-                 .sequentialImageGeneration("auto")
+                 .sequentialImageGeneration(SequentialImageGenerationMode.AUTO)
                  .sequentialImageGenerationOptions(sequentialImageGenerationOptions)
 
-                 .responseFormat(ResponseFormat.Url)
+                 .responseFormat(ResponseFormat.URL)
                  .stream(false)
                  .watermark(false)
                  .build();
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
 
         // Iterate through all image data
         if (imagesResponse != null && imagesResponse.getData() != null) {
@@ -1252,7 +1272,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="gi8WoBVa9q" title="Go">
+<Tab zoneid="UgnFVszizZ" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -1263,9 +1283,8 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
@@ -1276,25 +1295,28 @@ func main() {
     )
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
-    var sequentialImageGeneration model.SequentialImageGeneration = "auto"
+    var sequentialImageGeneration model.SequentialImageGenerationMode = "auto"
     maxImages := 3
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
        Model:          "doubao-seedream-5-0-lite-260128",
-       Prompt:         "生成3张女孩和奶牛玩偶在游乐园开心地坐过山车的图片，涵盖早晨、中午、晚上",
-       Image:         []string{
+       Prompt:         model.NewOptString("生成3张女孩和奶牛玩偶在游乐园开心地坐过山车的图片，涵盖早晨、中午、晚上"),
+
+       Image:         model.NewOptCreateImageGenerationRequestImage(model.NewStringArrayCreateImageGenerationRequestImage([]string{
            "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimages_1.png",
            "https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imagesToimages_2.png",
-       },
 
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
-       SequentialImageGeneration: &sequentialImageGeneration,
-       SequentialImageGenerationOptions: &model.SequentialImageGenerationOptions{
-          MaxImages: &maxImages,
-       },
+
+       })),
+
+       Size:           model.NewOptString("2K"),
+       OutputFormat: model.NewOptOutputFormat(outputFormat),
+       ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+       Watermark:      model.NewOptBool(false),
+       SequentialImageGeneration: model.NewOptSequentialImageGenerationMode(sequentialImageGeneration),
+       SequentialImageGenerationOptions: model.NewOptSequentialImageGenerationOptions(model.SequentialImageGenerationOptions{
+          MaxImages: model.NewOptInt32(int32(maxImages)),
+       }),
     }
 
     resp, err := client.GenerateImages(ctx, generateReq)
@@ -1303,8 +1325,8 @@ func main() {
         return
     }
 
-    if resp.Error != nil {
-        fmt.Printf("API returned error: %s - %s\n", resp.Error.Code, resp.Error.Message)
+    if resp.Error.IsSet() {
+        fmt.Printf("API returned error: %s - %s\n", resp.Error.Value.Code, resp.Error.Value.Message)
         return
     }
 
@@ -1312,18 +1334,18 @@ func main() {
     fmt.Printf("Generated %d images:\n", len(resp.Data))
     for i, image := range resp.Data {
         var url string
-        if image.Url != nil {
-            url = *image.Url
+        if image.URL.IsSet() {
+            url = image.URL.Or("")
         } else {
             url = "N/A"
         }
-        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size, url)
+        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size.Or(""), url)
     }
 }
 ```
 
 </Tab>
-<Tab zoneid="NQ47rSaprQ" title="OpenAI">
+<Tab zoneid="lQs74p8FtH" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -1333,7 +1355,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -1366,7 +1388,7 @@ for image in imagesResponse.data:
 
 ## **提示词建议**
 
-- 建议用 **简洁连贯** 的自然语言写明 **主体 + 行为 + 环境** ，若对画面美学有要求，可用自然语言或短语补充 **风格** 、 **色彩** 、 **光影** 、 **构图** 等美学元素。详情可参见 [Seedream 4.0-5.0 提示词指南](https://docs.volcengine.com/docs/82379/1829186)。
+- 建议用**简洁连贯**的自然语言写明 **主体 + 行为 + 环境**，若对画面美学有要求，可用自然语言或短语补充 **风格**、**色彩**、**光影**、**构图** 等美学元素。详情可参见 [Seedream 4.0-5.0 提示词指南](https://ark.volcengine.com/region:cn-beijing/docs/ark/seedream-4-0-5-0-prompt-guide)。
 
 - 文本提示词（prompt）建议不超过300个汉字或600个英文单词。字数过多信息容易分散，模型可能因此忽略细节，只关注重点，造成图片缺失部分元素。
 
@@ -1378,13 +1400,13 @@ for image in imagesResponse.data:
 
 ## 联网搜索
 
-> Seedream 5.0 pro 不支持该能力。
+> Seedream 5.0 pro / flash 不支持该能力。
 
-Seedream 5.0 lite 支持调用联网搜索工具，通过配置 tools. **type** 参数为 `web_search` 即可开启联网搜索。
+Seedream 5.0 lite 支持调用联网搜索工具，通过配置 tools.**type** 参数为 `web_search` 即可开启联网搜索。
 
 - 开启联网搜索后，模型会根据用户的提示词自主判断是否搜索互联网内容（如商品、天气等），提升生成图片的时效性，但也会增加一定的时延。
 
-- 实际搜索次数可通过字段 usage.tool_usage. **web_search** 查询，如果为 **0** 表示未搜索。
+- 实际搜索次数可通过字段 usage.tool_usage.**web_search** 查询，如果为 **0** 表示未搜索。
 
 <span aceTableMode="list" aceTableWidth="4,2"></span>
 |提示词 |输出 |
@@ -1392,7 +1414,7 @@ Seedream 5.0 lite 支持调用联网搜索工具，通过配置 tools. **type** 
 |制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。 |<span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/56e0e5cc24ff40559c9e934e5d744393~tplv-goo7wpa0wc-image.image) </span> |
 
 <Tabs>
-<Tab zoneid="YtQzdDUcwe" title="Curl">
+<Tab zoneid="JFkLooL1Bq" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -1414,22 +1436,22 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="RYpryz5t9N" title="Python">
+<Tab zoneid="zdZsEJFZJG" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]' .
-from volcenginesdkarkruntime import Ark
-from volcenginesdkarkruntime.types.images.images import ContentGenerationTool
+# Install SDK:  pip install arkruntime .
+from arkruntime import Ark
+from arkruntime.types.images import ToolParam
 
 client = Ark(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -1440,7 +1462,7 @@ imagesResponse = client.images.generate(
     size="2048x2048",
     output_format="png",
     response_format="url",
-    tools=[ContentGenerationTool(type="web_search")],
+    tools=[ToolParam(type="web_search")],
     watermark=False,
 
 )
@@ -1449,14 +1471,14 @@ print(imagesResponse.data[0].url)
 ```
 
 </Tab>
-<Tab zoneid="jgzASBb4fa" title="Java">
+<Tab zoneid="ZQCx5B3hDj" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -1467,35 +1489,36 @@ import java.util.concurrent.TimeUnit;
 
 public class ImageGenerationsExample {
     public static void main(String[] args) {
-        // Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+        // Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
         String apiKey = System.getenv("ARK_API_KEY");
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
         // Create ContentGenerationTool
-        GenerateImagesRequest.ContentGenerationTool contentGenerationTool = new GenerateImagesRequest.ContentGenerationTool();
-        contentGenerationTool.setType("web_search");
+        Tool contentGenerationTool = new Tool();
+        contentGenerationTool.setType(ToolType.WEB_SEARCH);
 
         // Create list of tools
-        List<GenerateImagesRequest.ContentGenerationTool> tools = Arrays.asList(contentGenerationTool);
+        List<Tool> tools = Arrays.asList(contentGenerationTool);
 
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                 .model("doubao-seedream-5-0-lite-260128") // Replace with Model ID
                 .prompt("制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。")
                 .size("2048x2048")
-                .outputFormat("png")
-                .responseFormat("url")
+                .outputFormat(OutputFormat.PNG)
+                .responseFormat(ResponseFormat.URL)
                 .watermark(false)
                 .tools(tools)
                 .build();
 
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
         System.out.println(imagesResponse.getData().get(0).getUrl());
 
         service.shutdownExecutor();
@@ -1504,7 +1527,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="YK6KuBIWTp" title="Go">
+<Tab zoneid="WK3hHLN2v4" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -1515,14 +1538,13 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
     client := arkruntime.NewClientWithApiKey(
-        // Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+        // Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
         os.Getenv("ARK_API_KEY"),
         // The base URL for model invocation
         arkruntime.WithBaseUrl("https://ark.cn-beijing.volces.com/api/v3"),
@@ -1530,14 +1552,14 @@ func main() {
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
         Model:          "doubao-seedream-5-0-lite-260128", // Replace with Model ID
-        Prompt:         "制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。",
-        Size:           volcengine.String("2048x2048"),
-        OutputFormat:   &outputFormat,
-        ResponseFormat: volcengine.String("url"),
-        Watermark:      volcengine.Bool(false),
-        Tools: []*model.ContentGenerationTool{
+        Prompt:         model.NewOptString("制作一张上海未来5日的天气预报图，采用现代扁平化插画风格，清晰展示每日天气、温度和穿搭建议。 整体为横向排版，标题为“上海未来5日天气预报”，包含5个等宽的垂直卡片，从左到右依次排列。 整体风格为现代、干净、友好的扁平化矢量插画风格，线条清晰，色彩柔和。人物形象采用年轻男女的卡通插画，表情自然，姿态放松，服装细节清晰。"),
+        Size:           model.NewOptString("2048x2048"),
+        OutputFormat: model.NewOptOutputFormat(outputFormat),
+        ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+        Watermark:      model.NewOptBool(false),
+        Tools: []model.Tool{
             {
                 Type: model.ToolTypeWebSearch,
             },
@@ -1549,7 +1571,7 @@ func main() {
        return
     }
 
-    fmt.Printf("%s\n", *imagesResponse.Data[0].Url)
+    fmt.Printf("%s\n", imagesResponse.Data[0].URL.Or(""))
 }
 ```
 
@@ -1560,7 +1582,7 @@ func main() {
 
 ## 流式输出
 
-> Seedream 5.0 pro 不支持该能力。
+> Seedream 5.0 pro / flash 不支持该能力。
 
 模型支持流式图像生成，当生成完任一图片后即返回结果，让您能更快浏览到生成的图像，改善等待体验。
 
@@ -1569,7 +1591,7 @@ func main() {
 <span>![图片](https://p9-arcosite.byteimg.com/tos-cn-i-goo7wpa0wc/643230864ffc43a8a37ef775cd51ac30~tplv-goo7wpa0wc-image.image) </span>
 
 <Tabs>
-<Tab zoneid="ldtTLGbYEC" title="Curl">
+<Tab zoneid="t0bxPXI8cM" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -1591,22 +1613,22 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="Hvjao5nt32" title="Python">
+<Tab zoneid="k2AXIuiGfn" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
 import os
-# Install SDK:  pip install 'volcengine-python-sdk[ark]'
-from volcenginesdkarkruntime import Ark
-from volcenginesdkarkruntime.types.images.images import SequentialImageGenerationOptions
+# Install SDK:  pip install arkruntime
+from arkruntime import Ark
+from arkruntime.types.images import SequentialImageGenerationOptionsParam
 
 client = Ark(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -1618,7 +1640,7 @@ if __name__ == "__main__":
         image="https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages_1.png",
         size="2K",
         sequential_image_generation="auto",
-        sequential_image_generation_options=SequentialImageGenerationOptions(max_images=4),
+        sequential_image_generation_options=SequentialImageGenerationOptionsParam(max_images=4),
         output_format="png",
         response_format="url",
         stream=True,
@@ -1643,14 +1665,14 @@ if __name__ == "__main__":
 ```
 
 </Tab>
-<Tab zoneid="kmbjaLlrya" title="Java">
+<Tab zoneid="chIBBeyjHm" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -1665,23 +1687,26 @@ public class ImageGenerationsExample {
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest.SequentialImageGenerationOptions sequentialImageGenerationOptions = new GenerateImagesRequest.SequentialImageGenerationOptions();
+        SequentialImageGenerationOptions sequentialImageGenerationOptions = new SequentialImageGenerationOptions();
         sequentialImageGenerationOptions.setMaxImages(4);
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                  .model("doubao-seedream-5-0-lite-260128") //Replace with Model ID .
                  .prompt("参考图1，生成四图片，图中人物分别带着墨镜，骑着摩托，带着帽子，拿着棒棒糖")
-                 .image("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages_1.png")
+
+                 .image(CreateImageGenerationRequestImage.ofString("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages_1.png"))
+
                  .size("2K")
-                 .sequentialImageGeneration("auto")
+                 .sequentialImageGeneration(SequentialImageGenerationMode.AUTO)
                  .sequentialImageGenerationOptions(sequentialImageGenerationOptions)
-                 .outputFormat("png")
-                 .responseFormat(ResponseFormat.Url)
+                 .outputFormat(OutputFormat.PNG)
+                 .responseFormat(ResponseFormat.URL)
                  .stream(true)
                  .watermark(false)
                  .build();
@@ -1691,7 +1716,7 @@ public class ImageGenerationsExample {
                 .blockingForEach(
                         choice -> {
                             if (choice == null) return;
-                            if ("image_generation.partial_failed".equals(choice.getType())) {
+                            if (ImageGenerationStreamEventType.IMAGE_GENERATION_PARTIAL_FAILED.equals(choice.getType())) {
                                 if (choice.getError() != null) {
                                     System.err.println("Stream generate images error: " + choice.getError());
                                     if (choice.getError().getCode() != null && choice.getError().getCode().equals("InternalServiceError")) {
@@ -1699,12 +1724,12 @@ public class ImageGenerationsExample {
                                     }
                                 }
                             }
-                            else if ("image_generation.partial_succeeded".equals(choice.getType())) {
+                            else if (ImageGenerationStreamEventType.IMAGE_GENERATION_PARTIAL_SUCCEEDED.equals(choice.getType())) {
                                 if (choice.getError() == null && choice.getUrl() != null && !choice.getUrl().isEmpty()) {
                                     System.out.printf("recv.Size: %s, recv.Url: %s%n", choice.getSize(), choice.getUrl());
                                 }
                             }
-                            else if ("image_generation.completed".equals(choice.getType())) {
+                            else if (ImageGenerationStreamEventType.IMAGE_GENERATION_COMPLETED.equals(choice.getType())) {
                                 if (choice.getError() == null && choice.getUsage() != null) {
                                     System.out.println("recv.Usage: " + choice.getUsage().toString());
                                 }
@@ -1717,7 +1742,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="V8ORAdVq0L" title="Go">
+<Tab zoneid="ryuARDddWY" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -1730,9 +1755,8 @@ import (
     "os"
     "strings"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
@@ -1743,21 +1767,23 @@ func main() {
     )
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
-    var sequentialImageGeneration model.SequentialImageGeneration = "auto"
+    var sequentialImageGeneration model.SequentialImageGenerationMode = "auto"
     maxImages := 4
 
-    generateReq := model.GenerateImagesRequest{
+    generateReq := &model.CreateImageGenerationRequest{
        Model:          "doubao-seedream-5-0-lite-260128",
-       Prompt:         "参考图1，生成四图片，图中人物分别带着墨镜，骑着摩托，带着帽子，拿着棒棒糖",
-       Image:          volcengine.String("https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages_1.png"),
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
-       SequentialImageGeneration: &sequentialImageGeneration,
-       SequentialImageGenerationOptions: &model.SequentialImageGenerationOptions{
-          MaxImages: &maxImages,
-       },
+       Prompt:         model.NewOptString("参考图1，生成四图片，图中人物分别带着墨镜，骑着摩托，带着帽子，拿着棒棒糖"),
+
+       Image: model.NewOptCreateImageGenerationRequestImage(model.NewStringArrayCreateImageGenerationRequestImage([]string{"https://ark-project.tos-cn-beijing.volces.com/doc_image/seedream4_imageToimages_1.png"})),
+
+       Size:           model.NewOptString("2K"),
+       OutputFormat: model.NewOptOutputFormat(outputFormat),
+       ResponseFormat: model.NewOptResponseFormat(model.ResponseFormatURL),
+       Watermark:      model.NewOptBool(false),
+       SequentialImageGeneration: model.NewOptSequentialImageGenerationMode(sequentialImageGeneration),
+       SequentialImageGenerationOptions: model.NewOptSequentialImageGenerationOptions(model.SequentialImageGenerationOptions{
+          MaxImages: model.NewOptInt32(int32(maxImages)),
+       }),
     }
 
     stream, err := client.GenerateImagesStreaming(ctx, generateReq)
@@ -1775,20 +1801,20 @@ func main() {
           fmt.Printf("Stream generate images error: %v\n", err)
           break
        }
-       if recv.Type == "image_generation.partial_failed" {
+       if recv.Type == model.ImageGenerationStreamEventTypeImageGenerationPartialFailed {
           fmt.Printf("Stream generate images error: %v\n", recv.Error)
-          if strings.EqualFold(recv.Error.Code, "InternalServiceError") {
+          if strings.EqualFold(recv.Error.Value.Code, "InternalServiceError") {
              break
           }
        }
-       if recv.Type == "image_generation.partial_succeeded" {
-          if recv.Error == nil && recv.Url != nil {
-             fmt.Printf("recv.Size: %s, recv.Url: %s\n", recv.Size, *recv.Url)
+       if recv.Type == model.ImageGenerationStreamEventTypeImageGenerationPartialSucceeded {
+          if !recv.Error.IsSet() && recv.URL.IsSet() {
+             fmt.Printf("recv.Size: %s, recv.Url: %s\n", recv.Size.Or(""), recv.URL.Or(""))
           }
        }
-       if recv.Type == "image_generation.completed" {
-          if recv.Error == nil {
-             fmt.Printf("recv.Usage: %v\n", *recv.Usage)
+       if recv.Type == model.ImageGenerationStreamEventTypeImageGenerationCompleted {
+          if !recv.Error.IsSet() {
+             fmt.Printf("recv.Usage: %v\n", recv.Usage.Or(model.Usage{}))
           }
        }
     }
@@ -1796,7 +1822,7 @@ func main() {
 ```
 
 </Tab>
-<Tab zoneid="ONYzjmZAN5" title="OpenAI">
+<Tab zoneid="bewn5EFQFu" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -1806,7 +1832,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation .
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -1844,16 +1870,16 @@ if __name__ == "__main__":
 
 <span id="6b32fe21"></span>
 
-## 提示词优化控制
+## 提升图片生成速度配置
 
 通过设置 **optimize_prompt_options.mode** 参数，您可以在 `standard` 模式和 `fast` 模式之间进行选择，以根据自身对图片质量和生成速度的不同需求来优化提示词。
 
-- 为平衡生成速度与图像质量，Seedream 5.0 pro /4.0 支持将 **optimize_prompt_options.mode** 设置为 `fast` 模式以显著提升生成速度，但会在一定程度上牺牲图片质量。
+- 为平衡生成速度与图像质量，Seedream 5.0 pro、Seedream 4.0 支持将 **optimize_prompt_options.mode** 设置为 `fast` 模式以显著提升生成速度，但会在一定程度上牺牲图片质量。
 
-- Seedream 5.0 lite / 4.5 仅支持 `standard` 模式。
+- Seedream 5.0 flash / lite、Seedream 4.5 仅支持 `standard` 模式。
 
 <Tabs>
-<Tab zoneid="MWnyXXBhGH" title="Curl">
+<Tab zoneid="gXLWLgSmWx" title="Curl">
 <TabTitle>Curl</TabTitle>
 
 ```Bash
@@ -1878,10 +1904,10 @@ curl https://ark.cn-beijing.volces.com/api/v3/images/generations \
 }'
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
-<Tab zoneid="zm7YWaxCSb" title="Python">
+<Tab zoneid="JpquGQ493K" title="Python">
 <TabTitle>Python</TabTitle>
 
 ```Python
@@ -1894,7 +1920,7 @@ from volcenginesdkarkruntime.types.images.images import OptimizePromptOptions
 client = Ark(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -1918,14 +1944,14 @@ for image in imagesResponse.data:
 ```
 
 </Tab>
-<Tab zoneid="KXR8zIYSE1" title="Java">
+<Tab zoneid="p8XZ0koJlk" title="Java">
 <TabTitle>Java</TabTitle>
 
 ```Java
 package com.ark.sample;
 
 
-import com.volcengine.ark.runtime.model.images.generation.*;
+import com.volcengine.ark.runtime.models.images.*;
 import com.volcengine.ark.runtime.service.ArkService;
 import okhttp3.ConnectionPool;
 import okhttp3.Dispatcher;
@@ -1940,30 +1966,32 @@ public class ImageGenerationsExample {
         ConnectionPool connectionPool = new ConnectionPool(5, 1, TimeUnit.SECONDS);
         Dispatcher dispatcher = new Dispatcher();
         ArkService service = ArkService.builder()
-                .baseUrl("https://ark.cn-beijing.volces.com/api/v3") // The base URL for model invocation
+                .baseUrl("https://ark.cn-beijing.volces.com/api/v3")
+                // The base URL for model invocation
                 .dispatcher(dispatcher)
                 .connectionPool(connectionPool)
                 .apiKey(apiKey)
                 .build();
 
-        GenerateImagesRequest.SequentialImageGenerationOptions sequentialImageGenerationOptions = new GenerateImagesRequest.SequentialImageGenerationOptions();
+        SequentialImageGenerationOptions sequentialImageGenerationOptions = new SequentialImageGenerationOptions();
         sequentialImageGenerationOptions.setMaxImages(4);
-        GenerateImagesRequest.OptimizePromptOptions optimizePromptOptions = new GenerateImagesRequest.OptimizePromptOptions();
-        optimizePromptOptions.setMode("fast");
+        OptimizePromptOptions optimizePromptOptions = new OptimizePromptOptions();
+        optimizePromptOptions.setMode(OptimizePromptMode.STANDARD);
 
-        GenerateImagesRequest generateRequest = GenerateImagesRequest.builder()
+        CreateImageGenerationRequest generateRequest = CreateImageGenerationRequest.builder()
                  .model("doubao-seedream-4-0-250828")  //Replace with Model ID
                  .prompt("生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围")
+
                  .size("2K")
-                 .sequentialImageGeneration("auto")
+                 .sequentialImageGeneration(SequentialImageGenerationMode.AUTO)
                  .sequentialImageGenerationOptions(sequentialImageGenerationOptions)
                  .optimizePromptOptions(optimizePromptOptions)
-                 .outputFormat("png")
-                 .responseFormat(ResponseFormat.Url)
+                 .outputFormat(OutputFormat.PNG)
+                 .responseFormat(ResponseFormat.URL)
                  .stream(false)
                  .watermark(false)
                  .build();
-        ImagesResponse imagesResponse = service.generateImages(generateRequest);
+        ImageGenerationResponse imagesResponse = service.generateImages(generateRequest);
         // Iterate through all image data
         if (imagesResponse != null && imagesResponse.getData() != null) {
             for (int i = 0; i < imagesResponse.getData().size(); i++) {
@@ -1984,7 +2012,7 @@ public class ImageGenerationsExample {
 ```
 
 </Tab>
-<Tab zoneid="kgjZo8chtr" title="Go">
+<Tab zoneid="DnS7aJBOO1" title="Go">
 <TabTitle>Go</TabTitle>
 
 ```Go
@@ -1995,9 +2023,8 @@ import (
     "fmt"
     "os"
 
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime"
-    "github.com/volcengine/volcengine-go-sdk/service/arkruntime/model"
-    "github.com/volcengine/volcengine-go-sdk/volcengine"
+    "github.com/volcengine/ark-runtime-go/arkruntime"
+    model "github.com/volcengine/ark-runtime-go/arkruntime/model/images"
 )
 
 func main() {
@@ -2009,25 +2036,26 @@ func main() {
     ctx := context.Background()
     outputFormat := model.OutputFormatPNG
     var (
-    sequentialImageGeneration model.SequentialImageGeneration = "auto"
-    maxImages = 4
-    mode model.OptimizePromptMode = model.OptimizePromptModeFast
+        sequentialImageGeneration model.SequentialImageGenerationMode = "auto"
+        maxImages                                                     = 4
+        mode                      model.OptimizePromptMode            = model.OptimizePromptModeStandard
     )
 
-    generateReq := model.GenerateImagesRequest{
-       Model:          "doubao-seedream-4-0-250828",
-       Prompt:         "生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围",
-       Size:           volcengine.String("2K"),
-       OutputFormat:   &outputFormat,
-       ResponseFormat: volcengine.String("url"),
-       Watermark:      volcengine.Bool(false),
-       SequentialImageGeneration: &sequentialImageGeneration,
-       SequentialImageGenerationOptions: &model.SequentialImageGenerationOptions{
-          MaxImages: &maxImages,
-       },
-       OptimizePromptOptions: &model.OptimizePromptOptions{
-       Mode: &mode,
-       },
+    generateReq := &model.CreateImageGenerationRequest{
+        Model:  "doubao-seedream-4-0-250828",
+        Prompt: model.NewOptString("生成一组共4张连贯插画，核心为同一庭院一角的四季变迁，以统一风格展现四季独特色彩、元素与氛围"),
+
+        Size:                      model.NewOptString("2K"),
+        OutputFormat:              model.NewOptOutputFormat(outputFormat),
+        ResponseFormat:            model.NewOptResponseFormat(model.ResponseFormatURL),
+        Watermark:                 model.NewOptBool(false),
+        SequentialImageGeneration: model.NewOptSequentialImageGenerationMode(sequentialImageGeneration),
+        SequentialImageGenerationOptions: model.NewOptSequentialImageGenerationOptions(model.SequentialImageGenerationOptions{
+            MaxImages: model.NewOptInt32(int32(maxImages)),
+        }),
+        OptimizePromptOptions: model.NewOptOptimizePromptOptions(model.OptimizePromptOptions{
+            Mode: model.NewOptOptimizePromptMode(mode),
+        }),
     }
 
     resp, err := client.GenerateImages(ctx, generateReq)
@@ -2036,8 +2064,8 @@ func main() {
         return
     }
 
-    if resp.Error != nil {
-        fmt.Printf("API returned error: %s - %s\n", resp.Error.Code, resp.Error.Message)
+    if resp.Error.IsSet() {
+        fmt.Printf("API returned error: %s - %s\n", resp.Error.Value.Code, resp.Error.Value.Message)
         return
     }
 
@@ -2045,18 +2073,18 @@ func main() {
     fmt.Printf("Generated %d images:\n", len(resp.Data))
     for i, image := range resp.Data {
         var url string
-        if image.Url != nil {
-            url = *image.Url
+        if image.URL.IsSet() {
+            url = image.URL.Or("")
         } else {
             url = "N/A"
         }
-        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size, url)
+        fmt.Printf("Image %d: Size: %s, URL: %s\n", i+1, image.Size.Or(""), url)
     }
 }
 ```
 
 </Tab>
-<Tab zoneid="eepiCEsdf5" title="OpenAI">
+<Tab zoneid="SqD6qvTq6b" title="OpenAI">
 <TabTitle>OpenAI</TabTitle>
 
 ```Python
@@ -2066,7 +2094,7 @@ from openai import OpenAI
 client = OpenAI(
     # The base URL for model invocation
     base_url="https://ark.cn-beijing.volces.com/api/v3",
-    # Get API Key: https://console.volcengine.com/ark/region:cn-beijing/apikey
+    # Get API Key: https://ark.volcengine.com/region:cn-beijing/apikey
     api_key=os.getenv('ARK_API_KEY'),
 )
 
@@ -2092,7 +2120,7 @@ for image in imagesResponse.data:
     print(f"URL: {image.url}, Size: {image.size}")
 ```
 
-- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://docs.volcengine.com/docs/82379/1330310)。
+- 您可按需替换 Model ID。Model ID 查询见 [模型列表](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list)。
 
 </Tab>
 </Tabs>
@@ -2103,11 +2131,11 @@ for image in imagesResponse.data:
 
 您可以配置以下参数来控制图片输出规格：
 
-- **size** ：指定输出图像的尺寸大小。
+- **size**：指定输出图像的尺寸大小。
 
-- **response_format** ：指定生成图像的返回格式。
+- **response_format**：指定生成图像的返回格式。
 
-- **output_format** ：指定生成图像的文件格式。
+- **output_format**：指定生成图像的文件格式。
 
 - **watermark** ：指定是否为输出图片添加水印。
 
@@ -2165,9 +2193,9 @@ for image in imagesResponse.data:
 
 仅支持通过指定分辨率档位的方式设置。输出图的分辨率规则如下：
 
-- **底图** ：输出底图的分辨率和 `size` 指定的分辨率一致；输出底图和原待拆分图的宽高比一致。
+- **底图**：输出底图的分辨率和 `size` 指定的分辨率一致；输出底图和原待拆分图的宽高比一致。
 
-- **各图层** ：输出图层的分辨率和 `size` 指定的分辨率接近；每个输出图层和其在原图中的宽高比一致。
+- **各图层**：输出图层的分辨率和 `size` 指定的分辨率接近；每个输出图层和其在原图中的宽高比一致。
 
 `size` 的默认值与可选值：
 
@@ -2177,7 +2205,7 @@ for image in imagesResponse.data:
 
 <div data-tips="true" data-tips-type="warning" data-tips-is-title="true">价格说明</div>
 
-<div data-tips="true" data-tips-type="warning"><code>1.5K</code> 与 <code>1K</code> 价格相同（详情参见 <a href="https://docs.volcengine.com/docs/82379/1544106#457edfd0">模型价格</a><a href="https://docs.volcengine.com/get-started/model-pricing-bytedance-cloud.md">模型价格</a>）。</div>
+<div data-tips="true" data-tips-type="warning"><code>1.5K</code> 与 <code>1K</code> 价格相同（详情参见 <a href="https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing#457edfd0">模型价格</a>）。</div>
 
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">auto 适配规则</div>
 
@@ -2249,7 +2277,7 @@ Seedream 5.0 pro / 5.0 lite 可通过设置 **output_format** 参数，指定生
 
 **SDK 版本升级**
 
-为保证模型功能的正常使用，请务必升级至最新 SDK 版本。相关步骤可参考 [安装及升级 SDK](https://docs.volcengine.com/docs/82379/1541595)。
+为保证模型功能的正常使用，请务必升级至最新 SDK 版本。相关步骤可参考 [安装及升级 SDK](https://ark.volcengine.com/region:cn-beijing/docs/ark/install-and-upgrade-sdk)。
 
 **图片传入限制**
 
@@ -2273,11 +2301,11 @@ Seedream 5.0 pro / 5.0 lite 可通过设置 **output_format** 参数，指定生
 |宽高长度（px） |大于14 |— |
 |宽高比（宽/高） |[1/16, 16] |[1/16, 16] |
 |大小 |不超过 30 MB |不超过 30 MB |
-|传入张数 |Seedream 5.0 pro，最多 10 张；Seedream 5.0 lite / 4.5 / 4.0，最多 14 张 |仅支持单张图片 |
+|传入张数 |Seedream 5.0 pro / flash，最多 10 张；Seedream 5.0 lite / 4.5 / 4.0，最多 14 张 |仅支持单张图片 |
 
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="tip">总像素是对单张图宽度和高度的 <strong>像素乘积</strong> 限制，而不是对宽度或高度的单独值进行限制。</div>
+<div data-tips="true" data-tips-type="tip">总像素是对单张图宽度和高度的<strong>像素乘积</strong>限制，而不是对宽度或高度的单独值进行限制。</div>
 
 **保存时间**
 
@@ -2288,13 +2316,13 @@ Seedream 5.0 pro / 5.0 lite 可通过设置 **output_format** 参数，指定生
 - IPM 限流：账号下同模型（区分模型版本）每分钟生成图片数量上限。若超过该限制，生成图片时会报错。
   - 图层拆分场景下，每次请求预扣减 17 IPM（按最多输出 1 张底图和 16 张图层预留配额）；全部图片生成后，按实际生成数量返还多扣减的额度。
 
-- 不同模型的限制值不同，详见 [图片生成能力](https://docs.volcengine.com/docs/82379/1330310#9df4d9fd)。
+- 不同模型的限制值不同，详见 [图片生成能力](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-list#9df4d9fd)。
 
 <span id="cc254304"></span>
 
 # 附：故事书/连环画制作
 
-[火山方舟大模型体验中心](https://www.volcengine.com/experience/ark?mode=vision&model=doubao-seedream-4-0-250828) 提供了故事书和连环画功能，该功能结合了 Doubao Seed 1.6 模型和 Seedream 4.0 模型，可实现一句话生成动漫、连环画、故事书，满足用户多样化的创作需求。
+[火山方舟大模型体验中心](https://www.volcengine.com/experience/ark?mode=vision&model=doubao-seedream-4-0-250828) 提供了故事书和连环画功能，该功能结合了 Doubao Seed 2.1 Lite 模型和 Seedream 4.0 模型，可实现一句话生成动漫、连环画、故事书，满足用户多样化的创作需求。
 
 连环画的实现过程与故事书类似，本文以故事书为例，为您介绍生成故事书的工作流和技术实现步骤，方便您在本地快速复现。
 
@@ -2312,7 +2340,7 @@ Seedream 5.0 pro / 5.0 lite 可通过设置 **output_format** 参数，指定生
 
 ## 技术实现
 
-1. 根据用户提供的提示词和参考图，调用 doubao\-seed\-1.6 模型，进行故事创作 \> 故事分镜拆解 \> 生成分镜的文案和画面描述 \> 生成书名 \> 生成故事总结，并汇总成 JSON 格式输出。
+1. 根据用户提供的提示词和参考图，调用 doubao\-seed\-2.1\-lite 模型，进行故事创作 \> 故事分镜拆解 \> 生成分镜的文案和画面描述 \> 生成书名 \> 生成故事总结，并汇总成 JSON 格式输出。
 
    System Prompt 如下：
 

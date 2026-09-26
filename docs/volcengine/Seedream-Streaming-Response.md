@@ -2,7 +2,7 @@
 
 <div data-tips="true" data-tips-type="tip" data-tips-is-title="true">说明</div>
 
-<div data-tips="true" data-tips-type="tip">流式输出的示例代码及返回示例，详见 <a href="https://www.volcengine.com/docs/82379/2123275">流式输出</a> 教程。</div>
+<div data-tips="true" data-tips-type="tip">流式输出的示例代码及返回示例，详见 <a href="https://ark.volcengine.com/region:cn-beijing/docs/ark/streaming-output">流式输出</a> 教程。</div>
 
 <span id="error"></span>
 
@@ -20,7 +20,7 @@
 
 `error.error.code`
 
-错误码，请参见 [错误码](https://www.volcengine.com/docs/82379/1299023)
+错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/ark/error-codes)
 
 **message** `string` | 错误消息
 
@@ -61,7 +61,7 @@ error 响应示例
 
 `image_generation.completed.type`
 
-事件类型，取值固定为 `image_generation.completed`。
+取值固定为 `image_generation.completed`。
 
 **tools** `object[]` | 工具调用列表
 
@@ -95,15 +95,17 @@ error 响应示例
 
 模型成功生成的图片张数，不包含生成失败的图片。仅对成功生成图片按张数进行计费
 
-**input_images** `integer` | 输入图片数
+**input_images<mark><sup>new</sup></mark>** `integer` | 输入图片数
 
 `image_generation.completed.usage.input_images`
 
 输入模型的图片张数。
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 pro`
+
+- `Seedream 5.0 flash`
 
 **output_tokens** `integer` | 输出 token 数
 
@@ -117,7 +119,7 @@ error 响应示例
 
 使用工具的用量信息
 
-**模型支持** ：
+**模型支持**：
 
 - `Seedream 5.0 lite`
 
@@ -180,7 +182,7 @@ image_generation.completed 响应示例
 
 `image_generation.partial_failed.type`
 
-事件类型，取值固定为 `image_generation.partial_failed`。
+取值固定为 `image_generation.partial_failed`。
 
 **error** `object` | 错误信息
 
@@ -192,7 +194,7 @@ image_generation.completed 响应示例
 
 `image_generation.partial_failed.error.code`
 
-错误码，请参见 [错误码](https://www.volcengine.com/docs/82379/1299023)
+错误码，请参见 [错误码](https://ark.volcengine.com/region:cn-beijing/docs/ark/error-codes)
 
 **message** `string` | 错误消息
 
@@ -245,7 +247,7 @@ image_generation.partial_failed 响应示例
 
 `image_generation.partial_succeeded.type`
 
-事件类型，取值固定为 `image_generation.partial_succeeded`。
+取值固定为 `image_generation.partial_succeeded`。
 
 **b64_json** `string` | 图片 Base64 数据
 
@@ -263,13 +265,13 @@ image_generation.partial_failed 响应示例
 
 `image_generation.partial_succeeded.size`
 
-实际生成图像的尺寸，格式为 `<宽像素>x<高像素>`，例如 `2048x2048`。
+实际生成图像的尺寸，格式为 `<宽像素>x<高像素>`，如 `2048x2048`。
 
 **url** `string` | 图片 URL
 
 `image_generation.partial_succeeded.url`
 
-该张图片的下载链接，仅当请求参数 `response_format=url` 时返回。链接在生成后 **24 小时内有效** ，请及时下载或转存。
+该张图片的下载链接，仅当请求参数 `response_format=url` 时返回。链接在生成后 **24 小时内有效**，请及时下载或转存。
 
 image_generation.partial_succeeded 响应示例
 
