@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from typing import Any
 
+import pytest
 from mcp.types import CallToolResult, TextContent
 
 from seedream_mcp.config import SeedreamConfig
@@ -196,3 +198,28 @@ async def test_tool_call_returns_structured_snapshot(
     first_block = result.content[0]
     assert isinstance(first_block, TextContent)
     assert first_block.text.startswith("当前模型：")
+
+
+async def test_tool_call_returns_structured_error_on_unexpected_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """载荷组装未预期异常时降级为结构化错误结果，不向调用方抛出。"""
+    import seedream_mcp.tools.impl.get_model_info as impl_module
+
+    def _boom(config: Any) -> dict[str, Any]:
+        del config
+        raise RuntimeError("payload assembly exploded")
+
+    monkeypatch.setattr(impl_module, "build_model_info_payload", _boom)
+    result = await mcp.call_tool("get_model_info", {})
+    assert isinstance(result, CallToolResult)
+
+    assert result.is_error
+    structured = result.structured_content
+    assert structured is not None
+    assert structured["tool"] == "get_model_info"
+    assert structured["success"] is False
+    assert structured["status"] == "failed"
+    assert structured["error"]["type"] == "model_info_failed"
+    assert "payload assembly exploded" in structured["error"]["message"]
