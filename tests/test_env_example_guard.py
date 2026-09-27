@@ -14,7 +14,7 @@ from pathlib import Path
 
 import seedream_mcp._config_sources as config_sources
 
-from _docker_uid import chown_owner_pair
+from _docker_uid import chown_owner_pair, useradd_line
 
 # 环境变量键形态：前缀限定 SEEDREAM_/ARK_，键名由大写字母、数字、下划线组成。
 # 形如「- SEEDREAM_ 服务行为」的前缀目录行后接空白，不构成完整键，不会被命中。
@@ -274,8 +274,8 @@ _COMPOSE_SEEDREAM_MOUNT = "- ./.seedream:/app/.seedream"
 
 def test_dockerfile_pins_seedream_uid() -> None:
     """Dockerfile 以 useradd --uid 显式固定容器用户并建同名组，挂载属主契约的 uid 落值于此。"""
-    dockerfile = (_repo_root() / "Dockerfile").read_text(encoding="utf-8")
-    assert re.search(r"useradd --uid \d+ --user-group", dockerfile) is not None
+    # 声明行缺失或形态不齐在 _docker_uid 内断言失败，此处锁定建组旗标存在。
+    assert "--user-group" in useradd_line()
 
 
 def test_compose_seedream_mount_documents_owner_preset() -> None:

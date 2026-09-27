@@ -11,13 +11,26 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# useradd 属主声明行形态：--uid 固定 uid，--user-group 建同名组。
+_USERADD_DECLARATION_PATTERN = re.compile(r"useradd --uid (\d+) --user-group")
+
+
+def _match_useradd_declaration() -> re.Match[str]:
+    """匹配 Dockerfile 的 useradd 属主声明行，缺失即断言失败。"""
+    dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    declaration = _USERADD_DECLARATION_PATTERN.search(dockerfile)
+    assert declaration is not None, "Dockerfile 必须经 useradd --uid --user-group 显式声明容器用户"
+    return declaration
+
+
+def useradd_line() -> str:
+    """提取 Dockerfile 的 useradd 属主声明行文本。"""
+    return _match_useradd_declaration().group(0)
+
 
 def mount_uid() -> str:
     """提取 Dockerfile useradd --uid 声明的容器用户 uid。"""
-    dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    declaration = re.search(r"useradd --uid (\d+)", dockerfile)
-    assert declaration is not None, "Dockerfile 必须经 useradd --uid 显式声明容器用户"
-    return declaration.group(1)
+    return _match_useradd_declaration().group(1)
 
 
 def chown_owner_pair() -> str:

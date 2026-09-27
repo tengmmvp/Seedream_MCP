@@ -15,7 +15,7 @@ import hmac
 import ipaddress
 import json
 import ssl
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -139,12 +139,17 @@ def _loopback_allowlists() -> tuple[tuple[str, ...], tuple[str, ...]]:
 _LOOPBACK_ALLOWED_HOSTS, _LOOPBACK_ALLOWED_ORIGINS = _loopback_allowlists()
 
 
+def _merged_loopback_hosts(entries: Sequence[str]) -> tuple[str, ...]:
+    """回环基底 Host 白名单并入绑定字面量或配置列表，保序去重。"""
+    return tuple(dict.fromkeys([*_LOOPBACK_ALLOWED_HOSTS, *entries]))
+
+
 def _loopback_bind_allowlists(host: str) -> tuple[list[str], list[str]]:
     """绑定地址字面量并入回环基底的 Host/Origin 白名单，供 SDK 内层防护配置。"""
     literal_forms = _bind_address_allowlist(host)
     if literal_forms is None:
         raise RuntimeError("DNS rebinding 防护地址不应判为通配绑定")
-    hosts = list(dict.fromkeys([*_LOOPBACK_ALLOWED_HOSTS, *literal_forms[0]]))
+    hosts = list(_merged_loopback_hosts(literal_forms[0]))
     origins = list(dict.fromkeys([*_LOOPBACK_ALLOWED_ORIGINS, *literal_forms[1]]))
     return hosts, origins
 
@@ -390,11 +395,8 @@ class _LimitRequestBodyMiddleware:
             await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
             # 下游读到被截断的空终帧后可能抛异常；too_large 时吞掉避免冒泡为 500。
-            if too_large:
-                if forwarded:
-                    logger.warning("请求体超限但下游响应已转发，跳过补发 413 以避免双响应")
-                return
-            raise
+            if not too_large:
+                raise
 
         if too_large and forwarded:
             logger.warning("请求体超限但下游响应已转发，跳过补发 413 以避免双响应")
@@ -664,10 +666,11 @@ def _web_app_host_allowlist(host: str, config_hosts: tuple[str, ...]) -> tuple[s
     校验层不装配，启动告警已提示配置 SEEDREAM_HTTP_ALLOWED_HOSTS。
     """
     if config_hosts:
-        return tuple(dict.fromkeys([*_LOOPBACK_ALLOWED_HOSTS, *config_hosts]))
-    if _bind_address_allowlist(host) is None:
+        return _merged_loopback_hosts(config_hosts)
+    literal_forms = _bind_address_allowlist(host)
+    if literal_forms is None:
         return ()
-    return tuple(_loopback_bind_allowlists(host)[0])
+    return _merged_loopback_hosts(literal_forms[0])
 
 
 def _middleware_attached(app: Any) -> bool:

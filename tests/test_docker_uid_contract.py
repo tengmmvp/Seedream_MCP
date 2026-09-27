@@ -32,19 +32,13 @@ _CONTRACT_FILES = (
     ".github/workflows/release.yml",
 )
 
-# 每份契约文件的 uid 捕获数登记，站点增删或改形都须同步此表。
-_EXPECTED_CAPTURE_COUNTS: dict[str, int] = {
-    "Dockerfile": 4,
-    "README.md": 6,
-    "README.en.md": 6,
-    "README.zh-TW.md": 6,
-    "docker-compose.yml": 3,
-    ".github/workflows/release.yml": 2,
-}
-
 
 def test_docker_uid_contract_single_sourced_from_dockerfile() -> None:
-    """useradd 声明的 uid 是挂载属主契约唯一事实源，任一站点字面量漂移即失败。"""
+    """useradd 声明的 uid 是挂载属主契约唯一事实源，任一站点字面量漂移即失败。
+
+    只断言每份站点至少捕获一个 uid 字面量且全部等于声明值；计数在此登记
+    会误伤合法文档编辑。
+    """
     uid = mount_uid()
     for name in _CONTRACT_FILES:
         text = (_REPO_ROOT / name).read_text(encoding="utf-8")
@@ -54,8 +48,6 @@ def test_docker_uid_contract_single_sourced_from_dockerfile() -> None:
             for match in pattern.finditer(text)
             for number in match.groups()
         ]
-        expected = [uid] * _EXPECTED_CAPTURE_COUNTS[name]
-        assert captures == expected, (
-            f"{name} 的 uid 捕获序列 {captures} 应为 {expected}，"
-            "站点增删或书写形态变更须同步检出模式与登记"
-        )
+        assert captures and all(
+            number == uid for number in captures
+        ), f"{name} 的 uid 字面量 {captures} 应存在且全部为 {uid}"
