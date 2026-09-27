@@ -26,14 +26,13 @@ class _FakeTool:
 
 
 class _FakeToolManager:
-    """按名字返回同一工具替身的工具管理器。"""
+    """返回工具替身清单的工具管理器。"""
 
     def __init__(self, tool: _FakeTool | None) -> None:
         self._tool = tool
 
-    def get_tool(self, name: str) -> _FakeTool | None:
-        del name
-        return self._tool
+    def list_tools(self) -> list[_FakeTool]:
+        return [self._tool] if self._tool is not None else []
 
 
 def _install_fake_mcp(
@@ -59,6 +58,21 @@ def test_tighten_skips_silently_when_tool_manager_missing(
     assert "inputSchema 收紧被跳过" in capture.errors[0]
     assert "additionalProperties" in capture.errors[0]
     assert "守护测试将失败" in capture.errors[0]
+
+
+def test_tighten_skips_when_list_tools_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工具管理器缺少 list_tools 方法时记录一条错误并整体跳过，不抛异常。"""
+    capture = RecordingLogger()
+    monkeypatch.setattr(server, "logger", capture)
+    monkeypatch.setattr(server, "mcp", SimpleNamespace(_tool_manager=object()))
+
+    server._tighten_flat_tool_schemas()
+
+    assert len(capture.errors) == 1
+    assert "mcp._tool_manager.list_tools" in capture.errors[0]
+    assert "inputSchema 收紧被跳过" in capture.errors[0]
 
 
 def test_tighten_skips_when_tool_fn_metadata_missing(

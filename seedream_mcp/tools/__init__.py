@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     )
     from .runners import (  # noqa: F401
         run_browse_images as run_browse_images,
+        run_get_model_info as run_get_model_info,
         run_image_to_image as run_image_to_image,
         run_multi_image_fusion as run_multi_image_fusion,
         run_sequential_generation as run_sequential_generation,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 # 延迟加载映射：导出名 -> (子模块相对名，子模块内属性名)
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "run_browse_images": (".runners", "run_browse_images"),
+    "run_get_model_info": (".runners", "run_get_model_info"),
     "run_image_to_image": (".runners", "run_image_to_image"),
     "run_multi_image_fusion": (".runners", "run_multi_image_fusion"),
     "run_sequential_generation": (".runners", "run_sequential_generation"),

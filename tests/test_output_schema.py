@@ -6,6 +6,8 @@ outputSchema 由工具返回类型注解自动生成；运行时仍返回手动�
 
 from __future__ import annotations
 
+from _no_param_tools import NO_PARAM_TOOLS
+
 from seedream_mcp.server import mcp
 
 
@@ -25,7 +27,9 @@ async def test_all_tools_declare_output_schema() -> None:
 async def test_generation_tools_output_schema_covers_core_fields() -> None:
     """生成类工具 outputSchema 覆盖数据与统计核心字段。"""
     tools = await mcp.list_tools()
-    generation_tools = {tool.name: tool for tool in tools if tool.name != "browse_images"}
+    generation_tools = {
+        tool.name: tool for tool in tools if tool.name not in {"browse_images"} | NO_PARAM_TOOLS
+    }
     # 全部工具失注册时 next 立即失败，不给空洞通过的机会。
     first = next(iter(generation_tools.values()), None)
     assert first is not None, "未找到生成类工具"
@@ -36,6 +40,18 @@ async def test_generation_tools_output_schema_covers_core_fields() -> None:
         properties = schema["properties"]
         for field in ("data", "usage", "batch", "auto_save", "prompt", "size"):
             assert field in properties, f"{name} outputSchema 缺少 {field}"
+
+
+async def test_get_model_info_output_schema_covers_core_fields() -> None:
+    """模型信息工具 outputSchema 覆盖模型与能力字段。"""
+    tools = await mcp.list_tools()
+    info = next(tool for tool in tools if tool.name == "get_model_info")
+    schema = info.output_schema
+    assert schema is not None
+
+    properties = schema["properties"]
+    for field in ("model_id", "family", "display_name", "aliases", "capabilities"):
+        assert field in properties, f"get_model_info outputSchema 缺少 {field}"
 
 
 async def test_browse_tool_output_schema_covers_core_fields() -> None:

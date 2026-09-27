@@ -17,6 +17,7 @@ import pytest
 
 import seedream_mcp
 from _generation_fixtures import make_generation_context
+from _no_param_tools import NO_PARAM_TOOLS
 from conftest import HOST_ENV_SCRUB_PREFIXES
 from seedream_mcp.tools.core.schemas import (
     BackgroundMode,
@@ -155,7 +156,7 @@ def test_unknown_family_presets_match_validator_whitelist() -> None:
 
 
 async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
-    """server 注册的 MCP 工具名与 impl ToolMetadata 声明一致。
+    """server 注册的 MCP 工具名与 impl ToolMetadata、browse_images 字面量及无参工具名单的并集一致。
 
     任一侧改名会使 structuredContent.tool 与注册名静默错位，两侧字面量分布在不同
     模块，靠本断言锁定一致。
@@ -166,6 +167,7 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
     registered = {tool.name for tool in tools}
     declared = {metadata.tool_name for metadata in _GENERATION_TOOL_METADATA}
     declared.add("browse_images")
+    declared |= NO_PARAM_TOOLS
 
     assert declared == registered
 

@@ -1,4 +1,4 @@
-"""工具 icons 元数据契约：五工具各带 PNG 与 SVG 双 data URI 图标。"""
+"""工具 icons 元数据契约：六工具各带 PNG 与 SVG 双 data URI 图标。"""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ _EXPECTED_ICON_TOOLS = frozenset(
         "multi_image_fusion",
         "sequential_generation",
         "browse_images",
+        "get_model_info",
     }
 )
 

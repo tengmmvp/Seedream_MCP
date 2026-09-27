@@ -468,7 +468,7 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
             assert server_info is not None
             assert server_info.version == resources.SERVER_VERSION
             tools = await client.list_tools()
-            assert len(tools.tools) == 5
+            assert len(tools.tools) == 6
 
         assert created_servers, "uvicorn.Server 未按生产路径构造"
         created_servers[-1].should_exit = True

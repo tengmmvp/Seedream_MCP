@@ -1,17 +1,17 @@
 """Seedream MCP 服务器主模块。
 
-注册文生图、图生图、多图融合、组图生成、图片浏览五种 MCP 工具，风格预设
-Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源。MCPServer 实例与
-共享资源生命周期由 resources 模块持有，本模块导入 mcp 完成注册并再导出
+注册文生图、图生图、多图融合、组图生成、图片浏览、模型信息查询六种 MCP 工具，
+风格预设 Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源。MCPServer
+实例与共享资源生命周期由 resources 模块持有，本模块导入 mcp 完成注册并再导出
 resources 的公共符号；启动编排经 bootstrap 再导出 cli_main 维持 entry point
 与 python -m 入口。
 
-outputSchema 声明契约：五个工具函数的返回类型注解为
+outputSchema 声明契约：六个工具函数的返回类型注解为
 ``Annotated[CallToolResult, ...StructuredOutput]``，SDK 据注解元数据生成
 outputSchema 并校验 structuredContent，运行时返回的 CallToolResult 原样透传，
 两侧由 test_output_schema 与 test_output_schema_consistency 守护不漂移。
 
-inputSchema 平铺契约：五个工具函数以逐字段平铺参数声明而非单一 params 嵌套模型，
+inputSchema 平铺契约：五个带参工具以逐字段平铺参数声明而非单一 params 嵌套模型，
 FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inputSchema 收敛为
 一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.core.schemas
 的输入模型，描述与约束字面量经该模块的共享常量引用，四个生成工具语义相同参数的
@@ -20,7 +20,8 @@ Field 默认值共用模块级 FieldInfo 常量；非空语义经签名层
 推导参数字典，排除集为签名中不属于输入模型的参数名，签名是参数字典的单一来源；
 _run_tool_pipeline 过滤 None 字段组装输入模型并委托既有 run_* 处理器，未知键立即
 抛 TypeError，守护排除集配置错误。两侧等价性由 test_tool_parameter_order 断言
-锁定。
+锁定；inputSchema 的 additionalProperties 收紧覆盖含无参 get_model_info 在内的
+全部注册工具，防未知参数被静默忽略。
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ from .tools import (
     SequentialGenerationInput,
     TextToImageInput,
     run_browse_images,
+    run_get_model_info,
     run_image_to_image,
     run_multi_image_fusion,
     run_sequential_generation,
@@ -124,6 +126,7 @@ from .tools.core.schemas import (
 from .tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
+    GetModelInfoStructuredOutput,
     build_error_dict,
     build_error_structured,
     build_structured_tool_result,
@@ -173,9 +176,9 @@ GENERATION_TOOL_ANNOTATIONS = ToolAnnotations(
     open_world_hint=True,
 )
 
-# destructive_hint 与 idempotent_hint 仅对非只读工具构成有效声明，浏览工具只读
-# 故省略。
-BROWSE_TOOL_ANNOTATIONS = ToolAnnotations(
+# destructive_hint 与 idempotent_hint 仅对非只读工具构成有效声明，浏览与模型
+# 信息工具只读故省略。
+READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
     read_only_hint=True,
     open_world_hint=False,
 )
@@ -594,8 +597,8 @@ async def sequential_generation(
     """组图输出：一次生成多张内容关联的图片。
 
     适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：
-    「生成4格漫画，主角依次出现在4个场景」。注意 5.0 Pro 不支持组图，请改用
-    5.0/5.0 Lite/4.5/4.0。
+    「生成4格漫画，主角依次出现在4个场景」。
+    组图生成需当前模型支持。
     不适用：融合多张参考图特征改用 multi_image_fusion。
     """
     return await _run_tool_pipeline(
@@ -613,7 +616,7 @@ async def sequential_generation(
 @mcp.tool(
     name="browse_images",
     title="Seedream 图片浏览",
-    annotations=BROWSE_TOOL_ANNOTATIONS,
+    annotations=READ_ONLY_TOOL_ANNOTATIONS,
     icons=_tool_icons("browse_images"),
 )
 async def browse_images(
@@ -677,40 +680,50 @@ async def browse_images(
     )
 
 
-# ==================== 平铺 inputSchema 收紧 ====================
-
-_FLAT_SCHEMA_TOOL_NAMES = (
-    "text_to_image",
-    "image_to_image",
-    "multi_image_fusion",
-    "sequential_generation",
-    "browse_images",
+@mcp.tool(
+    name="get_model_info",
+    title="Seedream 模型信息",
+    annotations=READ_ONLY_TOOL_ANNOTATIONS,
+    icons=_tool_icons("get_model_info"),
 )
+async def get_model_info(
+    ctx: Context[Any, Any] | None = None,
+) -> Annotated[CallToolResult, GetModelInfoStructuredOutput]:
+    """查询当前配置模型的能力快照。
+
+    返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、
+    图层拆分、透明背景、尺寸档位与像素区间，以及 output_format、stream、
+    web_search、组图生成的支持情况。生成工具的模型相关参数是否可用以本工具结果
+    为准；不支持时生成工具会报错并附支持该能力的模型清单。模型由服务器配置
+    决定，更换模型请告知用户调整服务器配置。
+    """
+    return await run_get_model_info(_config_from_context(ctx))
+
+
+# ==================== inputSchema 收紧 ====================
 
 
 def _tighten_flat_tool_schemas() -> None:
-    """对五个平铺签名工具的 inputSchema 顶层补 additionalProperties: false。
+    """对全部注册工具的 inputSchema 顶层补 additionalProperties: false，含无参工具。
 
-    签名参数模型默认忽略未知键，拼错的参数名会被静默丢弃；本函数在注册后集中修补
-    inputSchema 顶层声明与参数模型两处，使客户端本地校验与服务端运行时都拒绝未知
-    键。于 import 期执行，先于任何 tools/list 与 tools/call 生效。依赖 SDK 私有
-    路径 ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，先探测属性
-    存在性，缺失时记录错误并跳过收紧，不抛异常不阻断启动；失效由
+    签名参数模型默认忽略未知键，拼错的参数名会被静默丢弃；本函数在注册后遍历
+    工具注册表集中修补 inputSchema 顶层声明与参数模型两处，使客户端本地校验与
+    服务端运行时都拒绝未知键，新注册工具自动覆盖，无需维护名单。于 import 期
+    执行，先于任何 tools/list 与 tools/call 生效。依赖 SDK 私有路径
+    ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，先探测属性存在性，
+    缺失时记录错误并跳过收紧，不抛异常不阻断启动；失效由
     test_flat_input_schema_forbids_additional_properties 兜底报警。SDK 升级 2.x
     minor 版本时需复核这两个私有路径仍存在，行为由守护测试锁定。
     """
     tool_manager = getattr(mcp, "_tool_manager", None)
-    if tool_manager is None:
+    list_tools = getattr(tool_manager, "list_tools", None)
+    if tool_manager is None or list_tools is None:
         logger.error(
-            "SDK 私有路径 mcp._tool_manager 已变更，inputSchema 收紧被跳过，"
+            "SDK 私有路径 mcp._tool_manager.list_tools 已变更，inputSchema 收紧被跳过，"
             "additionalProperties 契约守护测试将失败，请适配新版 MCP SDK。"
         )
         return
-    for name in _FLAT_SCHEMA_TOOL_NAMES:
-        tool = tool_manager.get_tool(name)
-        if tool is None:
-            logger.warning("未找到待收紧 inputSchema 的工具: {}", name)
-            continue
+    for tool in list_tools():
         if getattr(getattr(tool, "fn_metadata", None), "arg_model", None) is None:
             logger.error(
                 "SDK 私有路径 tool.fn_metadata.arg_model 已变更，inputSchema 收紧被跳过，"
@@ -869,9 +882,10 @@ _SKILL_DESCRIPTION = (
     "Seedream 图像生成 MCP 服务器的使用指南，覆盖文生图、图生图、多图融合、"
     "组图生成与图层拆分。当用户要求生成图片、画图、改图、换风格、融合多张图、"
     "制作连环画或故事书、拆分图层、生成透明背景，或需要调用 text_to_image、"
-    "image_to_image、multi_image_fusion、sequential_generation、browse_images 工具，"
-    "确认模型与尺寸档位，排查 401/402/403/413/429 报错，以及找回已保存的图片时"
-    "使用本技能。Use when generating or editing images via the Seedream MCP server."
+    "image_to_image、multi_image_fusion、sequential_generation、browse_images、"
+    "get_model_info 工具，确认当前模型能力与尺寸档位，排查 401/402/403/413/429 "
+    "报错，以及找回已保存的图片时使用本技能。Use when generating or editing "
+    "images via the Seedream MCP server."
 )
 
 # SKILL.md 载荷缓存：随包分发的静态文件进程内不变，首次读取后缓存。

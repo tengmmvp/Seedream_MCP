@@ -634,19 +634,19 @@ def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
 
 
 def test_tighten_flat_tool_schemas_private_surface_guard() -> None:
-    """五工具经 SDK 私有面全部命中并完成收紧，SDK 升级改动私有 API 时本测试转红。
+    """全部注册工具经 SDK 私有面命中并完成收紧，SDK 升级改动私有 API 时本测试转红。
 
-    依赖 mcp._tool_manager.get_tool 与 Tool.fn_metadata.arg_model 两个私有入口，
-    get_tool 未命中仅告警跳过，fail-open 会使封闭性静默缺失。
+    依赖 mcp._tool_manager.list_tools 与 Tool.fn_metadata.arg_model 两个私有入口，
+    任一探测失败使收紧提前中止，全量断言 additionalProperties 兜底报警；新注册
+    工具自动进入断言范围。
     """
-    assert len(server._FLAT_SCHEMA_TOOL_NAMES) == 5
+    tools = server.mcp._tool_manager.list_tools()
+    assert len(tools) >= 6
 
-    for name in server._FLAT_SCHEMA_TOOL_NAMES:
-        tool = server.mcp._tool_manager.get_tool(name)
-        assert tool is not None, f"SDK 私有面未命中工具: {name}"
-        assert tool.parameters.get("additionalProperties") is False, name
+    for tool in tools:
+        assert tool.parameters.get("additionalProperties") is False, tool.name
         arg_model = tool.fn_metadata.arg_model
-        assert arg_model.model_config.get("extra") == "forbid", name
+        assert arg_model.model_config.get("extra") == "forbid", tool.name
 
 
 # ==================== requestState 密钥环重绑 ====================

@@ -81,7 +81,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-Get your API key from the [Volcengine Console](https://console.volcengine.com/) and provide it via the `ARK_API_KEY` environment variable.
+Get your API key from the [Volcengine Console](https://ark.volcengine.com/region:cn-beijing/apiKey) and provide it via the `ARK_API_KEY` environment variable.
 
 ### 2. One-Command Launch
 
@@ -222,13 +222,13 @@ Generate an image from a text prompt. This tool calls an external billed API and
 **Parameters:**
 
 - `prompt` (required) - Text prompt for image generation; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported); when enabled, `request_count` must be 1
-- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
+- `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -256,16 +256,16 @@ Generate a new image from an input image and a text prompt. This tool calls an e
 **Parameters:**
 
 - `prompt` (optional) - Image editing request or style transfer instruction; recommended no more than 300 Chinese characters or 600 English words; may be omitted only in the layer decomposition scenario, where the model automatically identifies elements to split
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
 - `image` (required) - Input image; supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
-- `layer_decomposition` (optional) - Enable layer decomposition, only supported by 5.0 Pro; splits the single input image into 1 base image and up to 16 PNG layers with alpha channels; layer entries additionally return `z_index`, `name`, `description`, and `bounding_box` fields; `output_format` only controls the base image format — layers are always PNG
-- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (requires a single input image with an alpha channel; mutually exclusive with `output_format=jpeg`) or `opaque` produces a regular image; only supported by 5.0 Pro
+- `layer_decomposition` (optional) - Enable layer decomposition; splits the single input image into 1 base image and up to 16 PNG layers with alpha channels; layer entries additionally return `z_index`, `name`, `description`, and `bounding_box` fields; `output_format` only controls the base image format — layers are always PNG
+- `background` (optional) - Transparency mode: `transparent` produces a transparent-background image (requires a single input image with an alpha channel; mutually exclusive with `output_format=jpeg`) or `opaque` produces a regular image
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model; the layer decomposition scenario only supports the `1K`, `1.5K`, `2K` presets or `auto` (adapts to the input image, and is the default when no size is specified)
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported); when enabled, `request_count` must be 1
-- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
+- `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -294,14 +294,14 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 **Parameters:**
 
 - `prompt` (required) - Image fusion request or style instruction; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
-- `image` (required) - Input images (2-14; 5.0 Pro max 10); each supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
+- `image` (required) - Input images (2-14); each supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
-- `stream` (optional) - Whether to enable streaming output; default `false` (5.0 Pro not supported); when enabled, `request_count` must be 1
-- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
+- `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, one image each; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -328,20 +328,20 @@ Fuse multiple images into a new image. This tool calls an external billed API an
 <details>
 <summary><b>4. <code>sequential_generation</code></b> — Sequential Generation</summary>
 
-Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence (only the doubao-seedream-5.0 series (5.0/5.0-lite)/4.5/4.0 supported; 5.0 Pro does not support sequential generation). This tool calls an external billed API and produces files locally; it is not read-only.
+Generate multiple images in sequence; supports text-to-sequence, single-image-to-sequence, and multi-image-to-sequence. This tool calls an external billed API and produces files locally; it is not read-only.
 
 **Parameters:**
 
 - `prompt` (required) - Text prompt for image generation; should clearly specify the quantity and content; recommended no more than 300 Chinese characters or 600 English words
-- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"; `fast` is only supported by 5.0 Pro / 4.0
+- `optimize_prompt_options` (optional) - Prompt optimization options; supports mode: "standard" or "fast"
 - `image` (optional) - Reference images (up to 14, and the sum of reference images and max_images must not exceed 15); each supports image URL, local file path, or Base64 image data; local file paths must fall within the read scope, with relative paths limited to the image save directory
 - `size` (optional) - Image size: `1K`, `1.5K`, `2K`, `3K`, `4K` or `<width>x<height>` pixels; defaults to the config value; must be compatible with the selected model
 - `watermark` (optional) - Whether to add a watermark; defaults to the config value (default false)
 - `max_images` (optional) - Maximum number of images to generate; range 1-15; default 15, automatically reduced by the number of reference images when provided
 - `response_format` (optional) - Response format: `url` or `b64_json`; default `url`
-- `output_format` (optional) - Output file format; only the 5.0 series (Pro/Standard/Lite) supports `jpeg` or `png`; by default not specified and handled by the API per the model default
+- `output_format` (optional) - Output file format; `jpeg` or `png`; by default not specified and handled by the API per the model default
 - `stream` (optional) - Whether to enable streaming output; default `false`; when enabled, `request_count` must be 1
-- `tools` (optional) - Model tool config; only the `doubao-seedream-5.0` / `5.0-lite` series supports web search, e.g. `[{"type":"web_search"}]`
+- `tools` (optional) - Model tool config; e.g. `[{"type":"web_search"}]` enables web search
 - `request_count` (optional) - Number of independent generations launched in parallel for the same prompt, each producing a group of images; the number of images in each group is decided by the model based on the prompt, up to max_images; range 1-10; default 1
 - `parallelism` (optional) - Parallelism cap; range 1-10; default `min(request_count, 10)`; must not exceed `request_count`; usually no need to set manually
 - `auto_save` (optional) - Whether to auto-save locally; defaults to the global config (default true)
@@ -387,6 +387,30 @@ Browse image files in the workspace and get file paths for image generation. Thi
 
 </details>
 
+<details>
+<summary><b>6. <code>get_model_info</code></b> — Model Info</summary>
+
+Query a capability snapshot of the currently configured model to check parameter support before calling generation tools. This tool is read-only and does not access the network.
+
+**Return fields:**
+
+- `model_id` - Currently configured model ID
+- `display_name` - Family display name; `null` when the family is unrecognized
+- `aliases` - All available aliases of the current model
+- `family` - Model family; `unknown` for unrecognized models, whose capabilities fall back to allow-all
+- `capabilities` - Optimize prompt modes, reference image limit, layer decomposition, transparent background, size presets and pixel range, and support status of `output_format`, `stream`, `web_search`, `sequential_generation`
+
+**Call examples:**
+
+```json
+{
+  "name": "get_model_info",
+  "arguments": {}
+}
+```
+
+</details>
+
 ## 📐 Model Capabilities
 
 Different models support different capabilities and parameter ranges. Please note this when selecting a model:
@@ -396,6 +420,7 @@ Different models support different capabilities and parameter ranges. Please not
     <th style="text-align: center">Dimension</th>
     <th style="text-align: center">5.0 Pro</th>
     <th style="text-align: center">5.0 / 5.0 Lite</th>
+    <th style="text-align: center">5.0 Flash</th>
     <th style="text-align: center">4.5</th>
     <th style="text-align: center">4.0</th>
   </tr>
@@ -405,11 +430,13 @@ Different models support different capabilities and parameter ranges. Please not
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
+    <td style="text-align: center">✓</td>
   </tr>
   <tr>
     <td>Sequential Generation</td>
     <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">✓</td>
+    <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
   </tr>
@@ -419,16 +446,19 @@ Different models support different capabilities and parameter ranges. Please not
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
+    <td style="text-align: center">✗</td>
   </tr>
   <tr>
     <td>Streaming Output</td>
     <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">✓</td>
+    <td style="text-align: center">Not yet supported</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✓</td>
   </tr>
   <tr>
     <td>Output Format</td>
+    <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">png, jpeg</td>
     <td style="text-align: center">jpeg</td>
@@ -438,6 +468,7 @@ Different models support different capabilities and parameter ranges. Please not
     <td>Layer Decomposition</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
   </tr>
@@ -445,6 +476,7 @@ Different models support different capabilities and parameter ranges. Please not
     <td>Transparent Background</td>
     <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
+    <td style="text-align: center">✓</td>
     <td style="text-align: center">✗</td>
     <td style="text-align: center">✗</td>
   </tr>
@@ -453,12 +485,14 @@ Different models support different capabilities and parameter ranges. Please not
     <td style="text-align: center">standard, fast</td>
     <td style="text-align: center">standard</td>
     <td style="text-align: center">standard</td>
+    <td style="text-align: center">standard</td>
     <td style="text-align: center">standard, fast</td>
   </tr>
   <tr>
     <td>Resolution Presets</td>
     <td style="text-align: center">1K / 1.5K / 2K</td>
     <td style="text-align: center">2K / 3K / 4K</td>
+    <td style="text-align: center">1K / 1.5K / 2K</td>
     <td style="text-align: center">2K / 4K</td>
     <td style="text-align: center">1K / 2K / 4K</td>
   </tr>
@@ -466,13 +500,14 @@ Different models support different capabilities and parameter ranges. Please not
     <td>Max Reference Images</td>
     <td style="text-align: center">10</td>
     <td style="text-align: center">14</td>
+    <td style="text-align: center">10</td>
     <td style="text-align: center">14</td>
     <td style="text-align: center">14</td>
   </tr>
 </table>
 
 > [!TIP]
-> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), with all capabilities available out of the box. After switching to `doubao-seedream-5.0-pro`, sequential generation, web search, and streaming output are unavailable; only `1K/1.5K/2K` sizes are supported with default preset `2K`, the multi-image reference cap drops to 10, plus exclusive layer decomposition and transparent background support.
+> **Tip**: The default model is **doubao-seedream-5.0** (equivalent to 5.0 Lite), offering the broadest capability coverage out of the box. Layer decomposition and transparent background are only available on `doubao-seedream-5.0-pro` and `doubao-seedream-5.0-flash` — the former delivers the highest image quality, the latter is the fastest and cheapest. Switching to either of these models disables sequential generation, web search, and streaming output, limits sizes to `1K/1.5K/2K`, and caps reference images at 10.
 
 ## 💰 Model Pricing
 
@@ -495,6 +530,11 @@ All models are billed per image:
     <td style="text-align: center">0.22</td>
   </tr>
   <tr>
+    <td>5.0 Flash</td>
+    <td style="text-align: center">Free</td>
+    <td style="text-align: center">0.12</td>
+  </tr>
+  <tr>
     <td>4.5</td>
     <td style="text-align: center">Free</td>
     <td style="text-align: center">0.25</td>
@@ -507,7 +547,7 @@ All models are billed per image:
 </table>
 
 > [!NOTE]
-> **Billing notes**: Images that fail to generate (e.g. due to moderation) are not billed; image sets are billed by the number of images actually generated; Seedream 5.0 Pro layer decomposition is billed per layer at its actual pixel tier, with tiers split at 2.61 megapixels (roughly 1.5K). Prices here are for reference only — see the [Volcengine Ark billing guide](https://docs.volcengine.com/docs/82379/1544681) for the full billing logic and the latest prices.
+> **Billing notes**: Images that fail to generate (e.g. due to moderation) are not billed; image sets are billed by the number of images actually generated; Seedream 5.0 Pro layer decomposition is billed per layer at its actual pixel tier, with tiers split at 2.61 megapixels (roughly 1.5K). Prices here are for reference only — see the [Volcengine Ark pricing page](https://ark.volcengine.com/region:cn-beijing/docs/ark/model-pricing) for the full billing logic and the latest prices.
 
 ## 📦 Available Resources
 
@@ -614,7 +654,7 @@ The server provides the following MCP prompt templates to generate text-to-image
 --api-key TEXT                                     # API key (ARK_API_KEY env var recommended; a CLI value stays in the process list and shell history)
 
 # Model & endpoint
---model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-4.5|doubao-seedream-4.0]
+--model [doubao-seedream-5.0-pro|doubao-seedream-5.0|doubao-seedream-5.0-lite|doubao-seedream-5.0-flash|doubao-seedream-4.5|doubao-seedream-4.0]
                                                    # Model selection; full Model IDs or Endpoint IDs go through SEEDREAM_MODEL_ID (default: doubao-seedream-5.0)
 --default-size [1K|1.5K|2K|3K|4K|<width>x<height>] # Default image size, must be compatible with the model (default: 2K)
 --watermark                                        # Enable watermark
@@ -686,7 +726,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 **Q: How do I get an API key?**
-Visit the [Volcengine Console](https://console.volcengine.com/) to create a key.
+Visit the [Volcengine Console](https://ark.volcengine.com/region:cn-beijing/apiKey) to create a key.
 
 **Q: Docker service won't start?**
 Make sure the environment variable is set:

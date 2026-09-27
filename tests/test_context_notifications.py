@@ -62,7 +62,7 @@ def test_deprecated_ctx_log_push_channel_removed() -> None:
 
 
 async def test_tools_register_top_level_title() -> None:
-    """五工具注册顶层 title，对齐 MCP 规范的 Tool.title 字段。"""
+    """六工具注册顶层 title，对齐 MCP 规范的 Tool.title 字段。"""
     tools = await mcp.list_tools()
     titles = {tool.name: tool.title for tool in tools}
 
@@ -71,6 +71,7 @@ async def test_tools_register_top_level_title() -> None:
     assert titles["multi_image_fusion"] == "Seedream 多图融合"
     assert titles["sequential_generation"] == "Seedream 组图输出"
     assert titles["browse_images"] == "Seedream 图片浏览"
+    assert titles["get_model_info"] == "Seedream 模型信息"
 
 
 async def test_tool_titles_not_duplicated_in_annotations() -> None:
@@ -83,12 +84,12 @@ async def test_tool_titles_not_duplicated_in_annotations() -> None:
 
 
 async def test_tool_annotations_locked_to_current_hints() -> None:
-    """五工具 annotations 逐项锁定，防止行为提示被无意改动。
+    """六工具 annotations 逐项锁定，防止行为提示被无意改动。
 
-    生成类工具需联网调用 API，四个 hint 依次为 False/False/False/True；浏览类
-    只读本地文件，read_only 与 open_world 为 True/False。规范仅为非只读工具定义
-    destructive 与 idempotent hint，只读工具两者为 None。客户端据此决定确认
-    策略与并行调用方式。
+    生成类工具需联网调用 API，四个 hint 依次为 False/False/False/True；浏览与
+    模型信息工具只读本地数据，read_only 与 open_world 为 True/False。规范仅为
+    非只读工具定义 destructive 与 idempotent hint，只读工具两者为 None。客户端
+    据此决定确认策略与并行调用方式。
     """
     expected = {
         "text_to_image": (False, False, False, True),
@@ -96,6 +97,7 @@ async def test_tool_annotations_locked_to_current_hints() -> None:
         "multi_image_fusion": (False, False, False, True),
         "sequential_generation": (False, False, False, True),
         "browse_images": (True, None, None, False),
+        "get_model_info": (True, None, None, False),
     }
 
     tools = await mcp.list_tools()
