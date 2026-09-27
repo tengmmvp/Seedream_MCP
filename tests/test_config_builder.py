@@ -809,8 +809,6 @@ def test_build_config_missing_picker_registration_fails_loudly(
         ({"auto_save_max_concurrent": 0}, "auto_save_max_concurrent"),
         ({"auto_save_cleanup_days": -1}, "auto_save_cleanup_days"),
         ({"stream_buffer_max_size": 0}, "stream_buffer_max_size"),
-        ({"stream_chunk_size": 0}, "stream_chunk_size"),
-        ({"stream_chunk_size": -1}, "stream_chunk_size"),
     ],
 )
 def test_seedream_config_rejects_invalid_positive_or_non_negative_field(
@@ -821,16 +819,6 @@ def test_seedream_config_rejects_invalid_positive_or_non_negative_field(
 
     with pytest.raises(SeedreamConfigError, match=match):
         SeedreamConfig(api_key="k", **kwargs)
-
-
-def test_seedream_config_rejects_chunk_size_greater_than_buffer() -> None:
-    """stream_chunk_size 大于 stream_buffer_max_size 须被拒绝。"""
-    from seedream_mcp.config import SeedreamConfig
-
-    with pytest.raises(
-        SeedreamConfigError, match="stream_chunk_size不能大于stream_buffer_max_size"
-    ):
-        SeedreamConfig(api_key="k", stream_chunk_size=2048, stream_buffer_max_size=1024)
 
 
 def test_seedream_config_rejects_sse_event_size_below_derived_floor() -> None:
@@ -1038,7 +1026,6 @@ def test_build_config_rejects_base_url_without_netloc(
         ({"max_retries": -1}, "SEEDREAM_MAX_RETRIES"),
         ({"log_level": "VERBOSE"}, "SEEDREAM_LOG_LEVEL"),
         ({"auto_save_download_timeout": 0}, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"),
-        ({"stream_chunk_size": 0}, "SEEDREAM_STREAM_CHUNK_SIZE"),
         ({"prepare_cache_max": 0}, "SEEDREAM_PREPARE_CACHE_MAX"),
         ({"http_max_body_size": 1024}, "SEEDREAM_HTTP_MAX_BODY_SIZE"),
         ({"base_url": "ftp://bad.example.com"}, "ARK_BASE_URL"),
@@ -1088,17 +1075,6 @@ def test_seedream_config_malformed_base_url_raises_config_error() -> None:
 
     with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
         SeedreamConfig(api_key="k", base_url="http://[::1")
-
-
-def test_seedream_config_chunk_size_error_mentions_both_env_vars() -> None:
-    """跨字段约束的校验消息同时附带两个字段的环境变量名。"""
-    from seedream_mcp.config import SeedreamConfig
-
-    with pytest.raises(
-        SeedreamConfigError,
-        match="环境变量 SEEDREAM_STREAM_CHUNK_SIZE/SEEDREAM_STREAM_BUFFER_MAX_SIZE",
-    ):
-        SeedreamConfig(api_key="k", stream_chunk_size=2048, stream_buffer_max_size=1024)
 
 
 def test_build_config_unparsable_int_error_mentions_env_var(

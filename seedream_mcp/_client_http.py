@@ -567,7 +567,6 @@ class _ClientHTTPMixin:
         sse_result = await parse_sse_response(
             response,
             model_id=self.config.model_id,
-            chunk_size=self.config.stream_chunk_size,
             buffer_max_size=self.config.stream_buffer_max_size,
             event_truncate_threshold=self._sse_event_truncate_threshold(),
             total_bytes_limit=self._response_body_byte_limit(),

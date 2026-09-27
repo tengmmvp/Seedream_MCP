@@ -259,7 +259,6 @@ async def test_stream_event_at_exact_base64_bound_not_truncated(no_sleep: None) 
         api_key="k",
         max_retries=3,
         auto_save_max_file_size=n,
-        stream_chunk_size=64,
         stream_buffer_max_size=1024,
     )
 
@@ -294,7 +293,6 @@ async def test_stream_truncated_events_passed_through_in_payload(no_sleep: None)
         max_retries=3,
         auto_save_max_file_size=1024,
         stream_buffer_max_size=1024,
-        stream_chunk_size=64,
     )
 
     def _handler(request: httpx.Request) -> httpx.Response:

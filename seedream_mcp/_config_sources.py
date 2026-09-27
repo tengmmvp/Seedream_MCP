@@ -76,20 +76,15 @@ def env_family_prefixes() -> tuple[str, ...]:
     return tuple(sorted({name.partition("_")[0] + "_" for name in names}))
 
 
-def _env_var_suffix(*field_names: str) -> str:
+def _env_var_suffix(field_name: str) -> str:
     """反查字段对应的环境变量名，生成校验错误消息的变量名提示后缀。
 
-    跨字段约束可传入多个字段名，斜杠连接各自的变量名；无法反查的字段名跳过，
-    全部不可反查时返回空串。
+    无法反查的字段名返回空串。
     """
-    env_names: list[str] = []
-    for name in field_names:
-        env_name = _FIELD_ENV_MAP.get(name) or _NON_METADATA_FIELD_ENV.get(name)
-        if env_name:
-            env_names.append(env_name)
-    if not env_names:
+    env_name = _FIELD_ENV_MAP.get(field_name) or _NON_METADATA_FIELD_ENV.get(field_name)
+    if not env_name:
         return ""
-    return f"（环境变量 {'/'.join(env_names)}）"
+    return f"（环境变量 {env_name}）"
 
 
 def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
@@ -436,7 +431,6 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "auto_save_max_total_bytes": (_pick_optional_int, None),
     "auto_save_fsync": (_pick_bool, None),
     "stream_buffer_max_size": (_pick_int, None),
-    "stream_chunk_size": (_pick_int, None),
     "sse_event_max_size": (_pick_optional_int, None),
     "response_body_limit": (_pick_optional_int, None),
     "image_prepare_concurrency": (_pick_int, None),

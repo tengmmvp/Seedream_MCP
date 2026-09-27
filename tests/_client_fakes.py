@@ -28,14 +28,12 @@ class _FakeLog:
 
 
 class _FakeSSEResponse:
-    """按预设分块序列产出字节的伪流式响应，记录 aiter_bytes 收到的 chunk_size。"""
+    """按预设分块序列产出字节的伪流式响应。"""
 
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = chunks
-        self.observed_chunk_size: int | None = None
 
-    async def aiter_bytes(self, chunk_size: int) -> AsyncIterator[bytes]:
-        self.observed_chunk_size = chunk_size
+    async def aiter_bytes(self) -> AsyncIterator[bytes]:
         for chunk in self._chunks:
             yield chunk
 

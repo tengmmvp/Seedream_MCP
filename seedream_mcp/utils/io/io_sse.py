@@ -126,13 +126,13 @@ def _has_lost_data_values(values: list[bytes | bytearray]) -> bool:
 
 def _parse_sse_segment_payload(
     segment: bytes | bytearray,
-) -> tuple[dict[str, Any] | None, str | None, bool, int]:
-    """解析单个事件段，返回事件对象、解析失败原因、丢失负载标记与剥离首尾空白后的段长度。
+) -> tuple[dict[str, Any] | None, str | None, bool]:
+    """解析单个事件段，返回事件对象、解析失败原因与丢失负载标记。
 
-    失败原因为 None 表示无 data 负载、[DONE] 哨兵或解析成功；段长度供失败日志
-    记录事件规模；丢失负载标记仅在解析失败且存在非空非哨兵的 data 负载时为真，
-    按未 trim 原段的行匹配口径计算。负载全程按 bytes 处理并直接交给 json.loads，
-    避免大事件场景下整段事件的 str decode 分配造成瞬时内存峰值。
+    失败原因为 None 表示无 data 负载、[DONE] 哨兵或解析成功；丢失负载标记仅在
+    解析失败且存在非空非哨兵的 data 负载时为真，按未 trim 原段的行匹配口径计算。
+    负载全程按 bytes 处理并直接交给 json.loads，避免大事件场景下整段事件的
+    str decode 分配造成瞬时内存峰值。
     """
     start = 0
     end = len(segment)
@@ -142,7 +142,7 @@ def _parse_sse_segment_payload(
         end -= 1
     raw_segment = segment[start:end] if start > 0 or end < len(segment) else segment
     if not raw_segment:
-        return None, None, False, 0
+        return None, None, False
 
     # 丢失判定对齐未 trim 原段的行匹配：段首缩进的 data: 行仅在 trim 后可见，
     # 其值不计入丢失；trim 停在行首时该行本就可见，仍计入。
@@ -156,11 +156,11 @@ def _parse_sse_segment_payload(
         payload = b"\n".join(data_parts) if data_parts else None
         # [DONE] 为流结束哨兵而非图片事件，直接丢弃。
         if not payload or payload == b"[DONE]":
-            return None, None, False, len(raw_segment)
+            return None, None, False
         parsed_payload = json.loads(payload)
         if not isinstance(parsed_payload, dict):
             raise ValueError("SSE 事件数据必须是对象")
-        return cast(dict[str, Any], parsed_payload), None, False, len(raw_segment)
+        return cast(dict[str, Any], parsed_payload), None, False
     # 深嵌套负载在 json.loads 内抛 RecursionError，它是 RuntimeError 子类而非
     # ValueError，须显式列入才能按解析失败丢弃。
     except (
@@ -171,7 +171,7 @@ def _parse_sse_segment_payload(
         RecursionError,
     ) as exc:
         lost_values = data_parts[1:] if first_value_hidden else data_parts
-        return None, str(exc), _has_lost_data_values(lost_values), len(raw_segment)
+        return None, str(exc), _has_lost_data_values(lost_values)
 
 
 def _log_segment_parse_failure(log: Logger, error: str, segment_len: int) -> None:
@@ -181,7 +181,7 @@ def _log_segment_parse_failure(log: Logger, error: str, segment_len: int) -> Non
 
 
 # 处理进度 debug 日志的最小字节间隔：累计字节每跨过该值输出一次，记录频次不随
-# chunk_size 取值漂移。
+# 网络交付块粒度漂移。
 _SSE_PROGRESS_LOG_INTERVAL_BYTES = 16 * 1024 * 1024
 
 # 单条解析产物的内存开销估计：事件 dict 本体、键字符串与内层 dict 等解析产物实测
@@ -202,20 +202,6 @@ _CR_LINE_ENDING_RE = re.compile(b"\r\n|\r")
 _UTF8_BOM = b"\xef\xbb\xbf"
 
 
-def _parse_segment_with_lost_flag(
-    segment: bytes | bytearray, log: Logger | None
-) -> tuple[dict[str, Any] | None, str | None, bool]:
-    """解析单个事件段并判定解析失败时是否丢失 data 负载，返回失败原因。
-
-    log 非 None 时解析失败记告警与段长 debug 日志（流末尾残留路径）；中段抽干
-    路径传 None，失败原因交由调用方合并进单条告警，同一坏事件不重复记。
-    """
-    event, error, lost_payload, raw_len = _parse_sse_segment_payload(segment)
-    if error is not None and log is not None:
-        _log_segment_parse_failure(log, error, raw_len)
-    return event, error, lost_payload
-
-
 def _slice_parse_segment(
     buffer: bytearray, start: int, end: int
 ) -> tuple[dict[str, Any] | None, str | None, bool]:
@@ -224,14 +210,15 @@ def _slice_parse_segment(
     bytearray 切片是一次 memcpy，单事件上限约 event_truncate_threshold 量级，
     与 json.loads 及丢失判定一并下沉线程，避免在事件循环上叠加阻塞。
     """
-    return _parse_segment_with_lost_flag(buffer[start:end], None)
+    return _parse_sse_segment_payload(buffer[start:end])
 
 
 class _SSEFrameBuffer:
     """SSE 分帧缓冲：在增量到达的字节流上切分空行分隔的完整事件段。
 
-    集中持有缓冲、消费偏移、续扫提示与悬置 CR 四个分帧状态；行尾统一归一为换行符
-    以兼容 CRLF/CR，防止上游或中间代理改用 CRLF 时事件无法切分致整流丢失。
+    集中持有缓冲、消费偏移、续扫提示、悬置 CR 与流首 BOM 剥离标记五个分帧状态；
+    行尾统一归一为换行符以兼容 CRLF/CR，防止上游或中间代理改用 CRLF 时事件无法
+    切分致整流丢失。
     """
 
     def __init__(self) -> None:
@@ -246,6 +233,9 @@ class _SSEFrameBuffer:
         # 块尾孤立 \r 无法独立判定是 CRLF 前半还是单独 CR 行尾，悬置至与次块首字节
         # 拼接后判定，防止提前归一化拼出假 \n\n 分隔符拆丢多行 data 事件。
         self._pending_cr = False
+        # 流首 UTF-8 BOM 剥离标记：块粒度为网络交付，BOM 可能分块到达，判定在
+        # 缓冲拼接后跨块进行。
+        self._stripped_bom = False
 
     def extend(self, chunk: bytes) -> int:
         """归一化行尾后追加块到缓冲，返回追加前的原始块长度供字节总量计账。
@@ -265,6 +255,14 @@ class _SSEFrameBuffer:
                 self._pending_cr = True
             chunk = normalized
         self._buffer += chunk
+        if not self._stripped_bom and len(self._buffer) >= len(_UTF8_BOM):
+            # 流首 BOM 紧贴首个 data: 行时会使该行无法匹配字段名，整个首事件丢失；
+            # 追加后在缓冲头部判定并剥离；BOM 不含换行，命中剥离时必无已消费前缀。
+            self._stripped_bom = True
+            if self._buffer.startswith(_UTF8_BOM):
+                del self._buffer[: len(_UTF8_BOM)]
+                # 剥离使缓冲整体左移，续扫提示同步回退，跨块补全 BOM 时不残留旧起点。
+                self._search_hint = max(self._search_hint - len(_UTF8_BOM), 0)
         return raw_len
 
     def drain(self) -> Iterator[tuple[int, int]]:
@@ -299,7 +297,7 @@ class _SSEFrameBuffer:
         """
         if should_offload_size(end - start):
             return await run_in_cpu_pool(_slice_parse_segment, self._buffer, start, end)
-        return _parse_segment_with_lost_flag(self._buffer[start:end], None)
+        return _parse_sse_segment_payload(self._buffer[start:end])
 
     def recycle(self, threshold: int) -> None:
         """已消费前缀达到 threshold 时批量回收，O(n) 回收均摊到至少 threshold 字节。"""
@@ -471,7 +469,6 @@ async def _consume_sse_chunks(
     response: httpx.Response,
     *,
     model_id: str,
-    chunk_size: int,
     buffer_max_size: int,
     event_truncate_threshold: int,
     total_bytes_limit: int,
@@ -490,11 +487,13 @@ async def _consume_sse_chunks(
     last_progress_log_bytes = 0
     # 超限或解析失败丢弃的 SSE 事件计数，用于区分「图片部分失败」与「事件被丢弃」。
     truncated_events = 0
-    # 流首 BOM 剥离标记：BOM 仅可能出现在流首，只对首个到达的非空块生效一次。
-    stripped_bom = False
     deadline_exceeded = False
 
-    chunk_iterator = response.aiter_bytes(chunk_size)
+    # aiter_bytes 必须按网络交付的原始块产出：显式 chunk_size 会按该值重新分块，
+    # 凑不满一块的字节被扣留到 EOF，小流量 SSE 流因此失去增量性，且 deadline 分支
+    # 看不到滞留字节内的已交付事件而误判零产出并重试已计费的生成请求。分帧缓冲
+    # 本就处理任意块边界，内存由字节总量与条目上限约束。
+    chunk_iterator = response.aiter_bytes()
     while True:
         outcome = await next_stream_chunk(chunk_iterator, deadline)
         if outcome is STREAM_ENDED:
@@ -516,15 +515,6 @@ async def _consume_sse_chunks(
         chunk = cast(bytes, outcome)
         if not chunk:
             continue
-
-        # 流首 UTF-8 BOM 剥离：BOM 紧贴首个 data: 行时会使该行无法匹配 data: 字段名，
-        # 整个首事件丢失，故在进入行级处理前剥掉。
-        if not stripped_bom:
-            stripped_bom = True
-            if chunk.startswith(_UTF8_BOM):
-                chunk = chunk[len(_UTF8_BOM) :]
-                if not chunk:
-                    continue
 
         # 总时长预算：逐块检查截止时间，封顶整个解析阶段；检查点在 extend 之前，
         # 已收完整事件即确定性产出，超限保留为部分结果，零产出才并入超时重试。
@@ -600,9 +590,12 @@ def _parse_tail_with_lost_flag(
     """解析流末尾残留段、判定 data 负载是否丢失并返回尾部字节长度。
 
     残留段可解析为完整事件时短路，不再做丢失负载扫描；长度由切出的尾部本体
-    推导，调用方与解析共用同一份字节。
+    推导，调用方与解析共用同一份字节；失败日志的长度与流中段同口径取未裁剪
+    的原段长度。
     """
-    event, _error, lost_payload = _parse_segment_with_lost_flag(tail, log)
+    event, error, lost_payload = _parse_sse_segment_payload(tail)
+    if error is not None:
+        _log_segment_parse_failure(log, error, len(tail))
     return event, lost_payload, len(tail)
 
 
@@ -664,7 +657,6 @@ async def parse_sse_response(
     response: httpx.Response,
     *,
     model_id: str,
-    chunk_size: int,
     buffer_max_size: int,
     event_truncate_threshold: int,
     total_bytes_limit: int,
@@ -674,9 +666,8 @@ async def parse_sse_response(
     """增量解析 SSE 响应为统一的图片项列表与完成元信息。
 
     Args:
-        response: httpx 流式响应对象，按 ``chunk_size`` 分块读取。
+        response: httpx 流式响应对象，按网络交付的原始块读取。
         model_id: 模型标识，用于填充图片项 model 字段的缺省值。
-        chunk_size: 每次从流中读取的字节数。
         buffer_max_size: 已消费前缀的回收阈值，buffer 偏移达到此值时批量回收前缀以
             控制常驻内存。
         event_truncate_threshold: 单个未完成 SSE 事件的截断阈值，仅作防异常流无限
@@ -735,7 +726,6 @@ async def parse_sse_response(
     truncated_events, deadline_exceeded = await _consume_sse_chunks(
         response,
         model_id=model_id,
-        chunk_size=chunk_size,
         buffer_max_size=buffer_max_size,
         event_truncate_threshold=event_truncate_threshold,
         total_bytes_limit=total_bytes_limit,

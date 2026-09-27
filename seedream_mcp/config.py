@@ -83,10 +83,8 @@ HTTP_AUTH_TOKEN_MIN_LENGTH = 16
 # 720 秒恰等于 .part 临时文件 24 小时清扫宽限；超过后预算反超宽限，在途慢下载
 # 的临时文件会被并发清扫删除。
 _AUTO_SAVE_DOWNLOAD_TIMEOUT_MAX_SECONDS = 720
-# SSE 读取块的下限字节数：流首 UTF-8 BOM 为 3 字节且按读取块整体判定剥离，不可跨块。
-_STREAM_CHUNK_SIZE_MIN_BYTES = 3
 # SSE 单事件阈值的推导常量：base64 最坏膨胀系数与事件信封余量，n 字节图片经
-# 编码最长 4*ceil(n/3) 字符，叠加 data 前缀等信封开销。
+# 编码最长 4*ceil(n/3) 字符，叠加 data: 前缀等信封开销。
 _B64_WORST_CASE_NUMERATOR = 4
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
 
@@ -128,7 +126,6 @@ class SeedreamConfig:
         auto_save_fsync: 自动保存落盘是否在原子替换前执行 fsync，默认关闭；对崩溃
             一致性有要求时开启。
         stream_buffer_max_size: SSE 流式响应缓冲区上限字节数。
-        stream_chunk_size: SSE 流式响应读取块大小字节数。
         sse_event_max_size: 单个 SSE 事件的截断阈值字节数；None 时按缓冲区上限与
             单图 base64 最坏展开二者的较大值推导。
         response_body_limit: 上游响应体读取总量上限字节数，三条读取路径共用；None 时
@@ -190,7 +187,6 @@ class SeedreamConfig:
     auto_save_fsync: bool = _env_field(False, "SEEDREAM_AUTO_SAVE_FSYNC")
 
     stream_buffer_max_size: int = _env_field(10 * 1024 * 1024, "SEEDREAM_STREAM_BUFFER_MAX_SIZE")
-    stream_chunk_size: int = _env_field(1024 * 1024, "SEEDREAM_STREAM_CHUNK_SIZE")
     sse_event_max_size: int | None = _env_field(None, "SEEDREAM_SSE_EVENT_MAX_SIZE")
 
     response_body_limit: int | None = _env_field(None, "SEEDREAM_RESPONSE_BODY_LIMIT")
@@ -399,21 +395,10 @@ class SeedreamConfig:
             )
 
     def _validate_streaming_bounds(self) -> None:
-        """校验流式缓冲、读取块与响应体读取上限。"""
+        """校验流式缓冲与响应体读取上限。"""
         if self.stream_buffer_max_size <= 0:
             raise SeedreamConfigError(
                 f"stream_buffer_max_size必须大于0{_env_var_suffix('stream_buffer_max_size')}"
-            )
-        if self.stream_chunk_size < _STREAM_CHUNK_SIZE_MIN_BYTES:
-            raise SeedreamConfigError(
-                f"stream_chunk_size不能低于{_STREAM_CHUNK_SIZE_MIN_BYTES}字节"
-                "（流首 UTF-8 BOM 为 3 字节，不可跨读取块剥离）"
-                f"{_env_var_suffix('stream_chunk_size')}"
-            )
-        if self.stream_chunk_size > self.stream_buffer_max_size:
-            raise SeedreamConfigError(
-                "stream_chunk_size不能大于stream_buffer_max_size"
-                f"{_env_var_suffix('stream_chunk_size', 'stream_buffer_max_size')}"
             )
         if (
             self.sse_event_max_size is not None
