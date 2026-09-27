@@ -89,15 +89,17 @@ async def test_models_info_resource_reports_key_capability_values() -> None:
     by_alias = {entry["alias"]: entry for entry in data["models"]}
 
     pro = by_alias["doubao-seedream-5.0-pro"]
-    assert pro["max_reference_images"] == model_capabilities.SEEDREAM_50PRO_MAX_REFERENCE_IMAGES
+    assert (
+        pro["max_reference_images"] == model_capabilities.SEEDREAM_50PRO_FLASH_MAX_REFERENCE_IMAGES
+    )
     assert pro["allowed_presets"] == ["1K", "1.5K", "2K"]
     assert pro["supports_stream"] is False
     assert pro["supports_tools"] is False
     assert pro["supports_sequential_generation"] is False
     assert pro["supports_layer_decomposition"] is True
     assert pro["supports_background"] is True
-    assert pro["min_size_pixels"] == model_capabilities.SEEDREAM_50PRO_MIN_SIZE_PIXELS
-    assert pro["max_size_pixels"] == model_capabilities.SEEDREAM_50PRO_MAX_SIZE_PIXELS
+    assert pro["min_size_pixels"] == model_capabilities.SEEDREAM_50PRO_FLASH_MIN_SIZE_PIXELS
+    assert pro["max_size_pixels"] == model_capabilities.SEEDREAM_50PRO_FLASH_MAX_SIZE_PIXELS
 
     for alias in ("doubao-seedream-5.0", "doubao-seedream-5.0-lite"):
         entry = by_alias[alias]

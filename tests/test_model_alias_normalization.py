@@ -69,3 +69,9 @@ def test_alias_table_includes_seedream_50_lite() -> None:
     """回归守护：5.0-lite 别名映射到与 5.0 相同的 model_id。"""
     assert "doubao-seedream-5.0-lite" in MODEL_ALIASES
     assert MODEL_ALIASES["doubao-seedream-5.0-lite"] == "doubao-seedream-5-0-260128"
+
+
+def test_alias_table_includes_seedream_50_flash() -> None:
+    """回归守护：5.0-flash 别名映射到 Flash 专属 model_id。"""
+    assert "doubao-seedream-5.0-flash" in MODEL_ALIASES
+    assert MODEL_ALIASES["doubao-seedream-5.0-flash"] == "doubao-seedream-5-0-flash-260915"

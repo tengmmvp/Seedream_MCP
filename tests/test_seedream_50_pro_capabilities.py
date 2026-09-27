@@ -1,8 +1,8 @@
-"""Seedream 5.0 Pro 能力差异校验。
+"""Seedream 5.0 Pro / Flash 能力差异校验。
 
-5.0 Pro 的 Model ID 形如 doubao-seedream-5-0-pro-*，包含 "doubao-seedream-5-0"
-子串，历史上会被误判为 5.0 Lite。本模块回归其与 5.0 Lite 在工具、输出格式、参考图
-上限、提示词优化模式上的差异。
+5.0 Pro 与 5.0 Flash 的 Model ID 形如 doubao-seedream-5-0-pro-* / doubao-seedream-5-0-flash-*，
+包含 "doubao-seedream-5-0" 子串，历史上会被误判为 5.0 Lite。本模块回归其与
+5.0 Lite 的能力差异。
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from seedream_mcp.utils.model.model_capabilities import (
 
 PRO = "doubao-seedream-5-0-pro-260628"
 LITE = "doubao-seedream-5-0-260128"
+FLASH = "doubao-seedream-5-0-flash-260915"
 MODEL_45 = "doubao-seedream-4-5-251128"
 MODEL_40 = "doubao-seedream-4-0-250828"
 
@@ -51,6 +52,11 @@ def test_pro_alias_detected_as_pro() -> None:
     assert get_model_capabilities("doubao-seedream-5.0-pro").max_reference_images == 10
 
 
+def test_flash_model_detected_as_flash() -> None:
+    """Flash 完整标识按 Flash 家族解析，不误判为 Lite。"""
+    assert get_model_capabilities(FLASH).max_reference_images == 10
+
+
 # ==================== tools 联网搜索仅 5.0 Lite 支持 ====================
 
 
@@ -61,13 +67,19 @@ def test_tools_accepted_for_lite() -> None:
 
 def test_tools_rejected_for_pro() -> None:
     """Pro 拒绝联网搜索工具。"""
-    with pytest.raises(SeedreamValidationError, match="支持 tools"):
+    with pytest.raises(SeedreamValidationError, match="不支持联网搜索（tools）"):
         validate_generation_tools([{"type": "web_search"}], PRO)
+
+
+def test_tools_rejected_for_flash() -> None:
+    """Flash 拒绝联网搜索工具。"""
+    with pytest.raises(SeedreamValidationError, match="不支持联网搜索（tools）"):
+        validate_generation_tools([{"type": "web_search"}], FLASH)
 
 
 def test_tools_rejected_for_45() -> None:
     """4.5 拒绝联网搜索工具。"""
-    with pytest.raises(SeedreamValidationError, match="支持 tools"):
+    with pytest.raises(SeedreamValidationError, match="不支持联网搜索（tools）"):
         validate_generation_tools([{"type": "web_search"}], MODEL_45)
 
 
@@ -84,15 +96,20 @@ def test_output_format_accepted_for_lite() -> None:
     assert validate_output_format("jpeg", LITE) == "jpeg"
 
 
+def test_output_format_accepted_for_flash() -> None:
+    """Flash 接受 png 输出格式。"""
+    assert validate_output_format("png", FLASH) == "png"
+
+
 def test_output_format_rejected_for_45() -> None:
     """4.5 拒绝 output_format 参数。"""
-    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
+    with pytest.raises(SeedreamValidationError, match="不支持输出格式（output_format）"):
         validate_output_format("png", MODEL_45)
 
 
 def test_output_format_rejected_for_40() -> None:
     """4.0 拒绝 output_format 参数。"""
-    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
+    with pytest.raises(SeedreamValidationError, match="不支持输出格式（output_format）"):
         validate_output_format("png", MODEL_40)
 
 
@@ -109,6 +126,11 @@ def test_max_reference_images_lite_is_14() -> None:
     assert get_max_reference_images(LITE) == 14
 
 
+def test_max_reference_images_flash_is_10() -> None:
+    """Flash 参考图上限为 10。"""
+    assert get_max_reference_images(FLASH) == 10
+
+
 def test_max_reference_images_45_is_14() -> None:
     """4.5 参考图上限为 14。"""
     assert get_max_reference_images(MODEL_45) == 14
@@ -119,7 +141,7 @@ def test_max_reference_images_40_is_14() -> None:
     assert get_max_reference_images(MODEL_40) == 14
 
 
-# ==================== 提示词优化模式：Lite/4.5 仅 standard，Pro/4.0 支持 fast ====================
+# ==================== 提示词优化模式：Lite/Flash/4.5 仅 standard，Pro/4.0 支持 fast ====================
 
 
 def test_optimize_fast_accepted_for_pro() -> None:
@@ -129,8 +151,14 @@ def test_optimize_fast_accepted_for_pro() -> None:
 
 def test_optimize_fast_rejected_for_lite() -> None:
     """Lite 仅支持 standard，fast 拒绝。"""
-    with pytest.raises(SeedreamValidationError, match="standard"):
+    with pytest.raises(SeedreamValidationError, match="optimize_prompt_options.mode=fast"):
         validate_optimize_prompt_options({"mode": "fast"}, LITE)
+
+
+def test_optimize_fast_rejected_for_flash() -> None:
+    """Flash 与 Pro 唯一的能力差异：仅支持 standard，fast 拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="optimize_prompt_options.mode=fast"):
+        validate_optimize_prompt_options({"mode": "fast"}, FLASH)
 
 
 def test_optimize_fast_accepted_for_40() -> None:
@@ -143,7 +171,7 @@ def test_optimize_standard_accepted_for_pro() -> None:
     assert validate_optimize_prompt_options({"mode": "standard"}, PRO) == {"mode": "standard"}
 
 
-# ==================== 流式输出：5.0 Pro 不支持 ====================
+# ==================== 流式输出：5.0 Pro / Flash 不支持 ====================
 
 
 def test_stream_disabled_ok_for_pro() -> None:
@@ -153,13 +181,19 @@ def test_stream_disabled_ok_for_pro() -> None:
 
 def test_stream_enabled_rejected_for_pro() -> None:
     """Pro 开启流式被拒绝。"""
-    with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
+    with pytest.raises(SeedreamValidationError, match="不支持流式输出（stream）"):
         validate_stream(True, PRO)
 
 
 def test_stream_enabled_ok_for_lite() -> None:
     """Lite 开启流式接受。"""
     assert validate_stream(True, LITE) is True
+
+
+def test_stream_enabled_rejected_for_flash() -> None:
+    """Flash 开启流式被拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="不支持流式输出（stream）"):
+        validate_stream(True, FLASH)
 
 
 def test_stream_non_bool_rejected_for_supporting_model() -> None:
@@ -183,16 +217,17 @@ def test_tools_accepted_for_endpoint_id() -> None:
     ]
 
 
-# ==================== 组图生成：5.0 Pro 不支持 ====================
+# ==================== 组图生成：5.0 Pro / Flash 不支持 ====================
 
 
 def test_supports_sequential_generation_false_for_pro() -> None:
-    """Pro 的能力声明须关闭组图支持，驱动 client 层拒绝组图调用。"""
+    """Pro / Flash 的能力声明须关闭组图支持，驱动 client 层拒绝组图调用。"""
     assert get_model_capabilities(PRO).supports_sequential_generation is False
+    assert get_model_capabilities(FLASH).supports_sequential_generation is False
     assert get_model_capabilities(LITE).supports_sequential_generation is True
 
 
-# ==================== 图层拆分：仅 5.0 Pro 支持 ====================
+# ==================== 图层拆分：仅 5.0 Pro / Flash 支持 ====================
 
 
 def test_layer_decomposition_accepted_for_pro() -> None:
@@ -202,8 +237,13 @@ def test_layer_decomposition_accepted_for_pro() -> None:
 
 def test_layer_decomposition_rejected_for_lite() -> None:
     """Lite 拒绝图层拆分。"""
-    with pytest.raises(SeedreamValidationError, match="不支持 layer_decomposition"):
+    with pytest.raises(SeedreamValidationError, match="不支持图层拆分（layer_decomposition）"):
         validate_layer_decomposition(True, LITE)
+
+
+def test_layer_decomposition_accepted_for_flash() -> None:
+    """Flash 接受图层拆分。"""
+    assert validate_layer_decomposition(True, FLASH) is True
 
 
 def test_layer_decomposition_none_defaults_false() -> None:
@@ -289,12 +329,17 @@ def test_common_params_prompt_none_rejected_without_layer_decomposition() -> Non
         )
 
 
-# ==================== 透明通道 background：仅 5.0 Pro 支持 ====================
+# ==================== 透明通道 background：仅 5.0 Pro / Flash 支持 ====================
 
 
 def test_background_transparent_accepted_for_pro() -> None:
     """Pro 接受透明背景。"""
     assert validate_background("transparent", PRO) == "transparent"
+
+
+def test_background_transparent_accepted_for_flash() -> None:
+    """Flash 接受透明背景。"""
+    assert validate_background("transparent", FLASH) == "transparent"
 
 
 def test_background_opaque_accepted_for_pro() -> None:
@@ -304,7 +349,7 @@ def test_background_opaque_accepted_for_pro() -> None:
 
 def test_background_rejected_for_lite() -> None:
     """Lite 拒绝 background 参数。"""
-    with pytest.raises(SeedreamValidationError, match="不支持 background"):
+    with pytest.raises(SeedreamValidationError, match="不支持透明背景（background）"):
         validate_background("transparent", LITE)
 
 

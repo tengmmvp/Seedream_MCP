@@ -1,6 +1,6 @@
 """模型家族解析与能力表测试，锁定数据驱动重构的中心化逻辑。
 
-重点守护 5.0 Pro 须先于 5.0 Lite 解析的顺序，避免 Pro ID 含 "5-0" 子串被误判。
+重点守护 5.0 Pro / Flash 须先于 5.0 Lite 解析的顺序，避免含 "5-0" 子串的 ID 被误判。
 """
 
 from dataclasses import asdict
@@ -13,6 +13,7 @@ from seedream_mcp.utils.model.model_capabilities import (
     MODEL_CAPABILITIES,
     MODEL_FAMILY_40,
     MODEL_FAMILY_45,
+    MODEL_FAMILY_50_FLASH,
     MODEL_FAMILY_50_LITE,
     MODEL_FAMILY_50_PRO,
     MODEL_FAMILY_UNKNOWN,
@@ -37,10 +38,12 @@ def test_all_model_aliases_resolve_to_known_family() -> None:
         )
 
 
-def test_resolve_model_family_pro_before_lite() -> None:
-    """Pro 的 Model ID 含 5-0 子串仍须解析为 Pro 而非 Lite。"""
+def test_resolve_model_family_known_and_unknown_ids() -> None:
+    """Pro / Flash 的 Model ID 含 5-0 子串仍须解析为各自家族而非 Lite。"""
     assert _resolve_model_family("doubao-seedream-5-0-pro-260628") == MODEL_FAMILY_50_PRO
     assert _resolve_model_family("doubao-seedream-5.0-pro") == MODEL_FAMILY_50_PRO
+    assert _resolve_model_family("doubao-seedream-5-0-flash-260915") == MODEL_FAMILY_50_FLASH
+    assert _resolve_model_family("doubao-seedream-5.0-flash") == MODEL_FAMILY_50_FLASH
     assert _resolve_model_family("doubao-seedream-5-0-260128") == MODEL_FAMILY_50_LITE
     assert _resolve_model_family("doubao-seedream-5.0") == MODEL_FAMILY_50_LITE
     assert _resolve_model_family("doubao-seedream-4-5-251128") == MODEL_FAMILY_45
@@ -65,6 +68,22 @@ def test_get_model_capabilities_lite_profile() -> None:
     assert caps.supports_tools is True
     assert caps.supports_stream is True
     assert caps.max_reference_images == 14
+
+
+def test_get_model_capabilities_flash_profile() -> None:
+    """Flash 与 Pro 同档（图层拆分/透明背景/参考图 10/1K-2K 档），但不支持 fast 提示词优化。"""
+    caps = get_model_capabilities("doubao-seedream-5-0-flash-260915")
+    assert caps.supports_output_format is True
+    assert caps.supports_tools is False
+    assert caps.supports_stream is False
+    assert caps.supports_sequential_generation is False
+    assert caps.supports_fast_optimize_prompt is False
+    assert caps.supports_layer_decomposition is True
+    assert caps.supports_background is True
+    assert caps.max_reference_images == 10
+    assert caps.allowed_presets == frozenset({"1K", "1.5K", "2K"})
+    assert caps.min_size_pixels == 1280 * 720
+    assert caps.max_size_pixels == 4624220
 
 
 def test_get_model_capabilities_legacy_and_unknown_default_to_permissive() -> None:
@@ -125,6 +144,6 @@ def test_model_payloads_capability_values_match_asdict() -> None:
 def test_supported_family_display_names_returns_joined_string() -> None:
     """支持家族展示名以顿号拼接返回，文案消费方无需再 join。"""
     assert supported_family_display_names("supports_output_format") == (
-        "doubao-seedream-5.0-pro、doubao-seedream-5.0"
+        "doubao-seedream-5.0-pro、doubao-seedream-5.0、doubao-seedream-5.0-flash"
     )
     assert supported_family_display_names("supports_tools") == "doubao-seedream-5.0"

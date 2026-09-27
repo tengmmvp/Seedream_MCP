@@ -12,14 +12,14 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
 
-# 参考图上限常量：5.0 Pro 为 10，其余家族为 14，由能力表按家族引用。
-SEEDREAM_50PRO_MAX_REFERENCE_IMAGES = 10
+# 参考图上限常量：5.0 Pro / Flash 为 10，其余家族为 14，由能力表按家族引用。
+SEEDREAM_50PRO_FLASH_MAX_REFERENCE_IMAGES = 10
 SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES = 14
 
 # 各家族像素尺寸范围，供 validate_size_for_model 数据驱动校验。
-# 5.0 Pro 上限对应官方 2048x2048x1.1025（4624220）的像素乘积上限。
-SEEDREAM_50PRO_MIN_SIZE_PIXELS = 1280 * 720
-SEEDREAM_50PRO_MAX_SIZE_PIXELS = 4624220
+# 5.0 Pro / Flash 上限对应官方 2048x2048x1.1025（4624220）的像素乘积上限。
+SEEDREAM_50PRO_FLASH_MIN_SIZE_PIXELS = 1280 * 720
+SEEDREAM_50PRO_FLASH_MAX_SIZE_PIXELS = 4624220
 SEEDREAM_5X_MIN_SIZE_PIXELS = 2560 * 1440
 SEEDREAM_5X_MAX_SIZE_PIXELS = 4096 * 4096
 SEEDREAM_45_MIN_SIZE_PIXELS = 2560 * 1440
@@ -30,6 +30,7 @@ SEEDREAM_40_MAX_SIZE_PIXELS = 4096 * 4096
 # 模型家族规范名，作为家族解析的返回值与能力表的键。
 MODEL_FAMILY_50_PRO = "5.0-pro"
 MODEL_FAMILY_50_LITE = "5.0-lite"  # 5.0 与 5.0-lite 共用 Model ID，此家族代表两者。
+MODEL_FAMILY_50_FLASH = "5.0-flash"
 MODEL_FAMILY_45 = "4.5"
 MODEL_FAMILY_40 = "4.0"
 MODEL_FAMILY_UNKNOWN = "unknown"
@@ -39,40 +40,44 @@ MODEL_FAMILY_UNKNOWN = "unknown"
 class ModelCapabilities:
     """单个模型家族的能力声明，集中描述各模型支持的功能与限制。
 
+    字段序与 get_model_info 能力快照的调用流程一致。
+
     Attributes:
         family: 模型家族规范名。
         display_name: 面向用户输出的模型展示名，供错误消息引用。
-        supports_output_format: 是否支持 output_format 参数。
-        supports_tools: 是否支持联网搜索等生成工具。
-        supports_stream: 是否支持流式输出。
+        supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
         max_reference_images: 参考图数量上限。
+        supports_layer_decomposition: 是否支持 layer_decomposition 图层拆分。
+        supports_background: 是否支持 background 透明通道参数。
         allowed_presets: 允许的尺寸预设档位白名单。
         min_size_pixels: 像素总量的下限，None 表示该家族不约束像素区间。
         max_size_pixels: 像素总量的上限，None 表示该家族不约束像素区间。
-        supports_fast_optimize_prompt: 是否支持 optimize_prompt_options.mode=fast。
+        supports_output_format: 是否支持 output_format 参数。
+        supports_stream: 是否支持流式输出。
+        supports_tools: 是否支持联网搜索等生成工具。
         supports_sequential_generation: 是否支持组图生成。
-        supports_layer_decomposition: 是否支持 layer_decomposition 图层拆分。
-        supports_background: 是否支持 background 透明通道参数。
     """
 
     family: str
     display_name: str
-    supports_output_format: bool
-    supports_tools: bool
-    supports_stream: bool
+    supports_fast_optimize_prompt: bool
     max_reference_images: int
+    supports_layer_decomposition: bool
+    supports_background: bool
     allowed_presets: frozenset[str]
     min_size_pixels: int | None
     max_size_pixels: int | None
-    supports_fast_optimize_prompt: bool = True
-    supports_sequential_generation: bool = True
-    supports_layer_decomposition: bool = False
-    supports_background: bool = False
+    supports_output_format: bool
+    supports_stream: bool
+    supports_tools: bool
+    supports_sequential_generation: bool
 
 
-# 家族解析 token 表：顺序敏感，Pro 的 Model ID 含 Lite 的匹配子串，须先匹配 Pro。
+# 家族解析 token 表按匹配优先级排列，区别于下方能力表的档次展示序：Pro / Flash 的
+# Model ID 含 Lite 的匹配子串，Flash 行必须先于 Lite 行，否则 Flash 模型被误判。
 _MODEL_FAMILY_TOKENS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (MODEL_FAMILY_50_PRO, ("doubao-seedream-5-0-pro", "doubao-seedream-5.0-pro")),
+    (MODEL_FAMILY_50_FLASH, ("doubao-seedream-5-0-flash", "doubao-seedream-5.0-flash")),
     (MODEL_FAMILY_50_LITE, ("doubao-seedream-5-0", "doubao-seedream-5.0")),
     (MODEL_FAMILY_45, ("doubao-seedream-4-5", "doubao-seedream-4.5")),
     (MODEL_FAMILY_40, ("doubao-seedream-4-0", "doubao-seedream-4.0")),
@@ -86,6 +91,7 @@ MODEL_ALIASES: Mapping[str, str] = MappingProxyType(
         "doubao-seedream-5.0-pro": "doubao-seedream-5-0-pro-260628",
         "doubao-seedream-5.0": "doubao-seedream-5-0-260128",
         "doubao-seedream-5.0-lite": "doubao-seedream-5-0-260128",
+        "doubao-seedream-5.0-flash": "doubao-seedream-5-0-flash-260915",
         "doubao-seedream-4.5": "doubao-seedream-4-5-251128",
         "doubao-seedream-4.0": "doubao-seedream-4-0-250828",
     }
@@ -117,66 +123,92 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
         MODEL_FAMILY_50_PRO: ModelCapabilities(
             family=MODEL_FAMILY_50_PRO,
             display_name="doubao-seedream-5.0-pro",
-            supports_output_format=True,
-            supports_tools=False,
-            supports_stream=False,
-            max_reference_images=SEEDREAM_50PRO_MAX_REFERENCE_IMAGES,
-            allowed_presets=frozenset({"1K", "1.5K", "2K"}),
-            min_size_pixels=SEEDREAM_50PRO_MIN_SIZE_PIXELS,
-            max_size_pixels=SEEDREAM_50PRO_MAX_SIZE_PIXELS,
             supports_fast_optimize_prompt=True,
-            supports_sequential_generation=False,
+            max_reference_images=SEEDREAM_50PRO_FLASH_MAX_REFERENCE_IMAGES,
             supports_layer_decomposition=True,
             supports_background=True,
+            allowed_presets=frozenset({"1K", "1.5K", "2K"}),
+            min_size_pixels=SEEDREAM_50PRO_FLASH_MIN_SIZE_PIXELS,
+            max_size_pixels=SEEDREAM_50PRO_FLASH_MAX_SIZE_PIXELS,
+            supports_output_format=True,
+            supports_stream=False,
+            supports_tools=False,
+            supports_sequential_generation=False,
         ),
         MODEL_FAMILY_50_LITE: ModelCapabilities(
             family=MODEL_FAMILY_50_LITE,
             display_name="doubao-seedream-5.0",
-            supports_output_format=True,
-            supports_tools=True,
-            supports_stream=True,
+            supports_fast_optimize_prompt=False,
             max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            supports_layer_decomposition=False,
+            supports_background=False,
             allowed_presets=frozenset({"2K", "3K", "4K"}),
             min_size_pixels=SEEDREAM_5X_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_5X_MAX_SIZE_PIXELS,
+            supports_output_format=True,
+            supports_stream=True,
+            supports_tools=True,
+            supports_sequential_generation=True,
+        ),
+        MODEL_FAMILY_50_FLASH: ModelCapabilities(
+            family=MODEL_FAMILY_50_FLASH,
+            display_name="doubao-seedream-5.0-flash",
             supports_fast_optimize_prompt=False,
+            max_reference_images=SEEDREAM_50PRO_FLASH_MAX_REFERENCE_IMAGES,
+            supports_layer_decomposition=True,
+            supports_background=True,
+            allowed_presets=frozenset({"1K", "1.5K", "2K"}),
+            min_size_pixels=SEEDREAM_50PRO_FLASH_MIN_SIZE_PIXELS,
+            max_size_pixels=SEEDREAM_50PRO_FLASH_MAX_SIZE_PIXELS,
+            supports_output_format=True,
+            supports_stream=False,
+            supports_tools=False,
+            supports_sequential_generation=False,
         ),
         MODEL_FAMILY_45: ModelCapabilities(
             family=MODEL_FAMILY_45,
             display_name="doubao-seedream-4.5",
-            supports_output_format=False,
-            supports_tools=False,
-            supports_stream=True,
+            supports_fast_optimize_prompt=False,
             max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            supports_layer_decomposition=False,
+            supports_background=False,
             allowed_presets=frozenset({"2K", "4K"}),
             min_size_pixels=SEEDREAM_45_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_45_MAX_SIZE_PIXELS,
-            supports_fast_optimize_prompt=False,
+            supports_output_format=False,
+            supports_stream=True,
+            supports_tools=False,
+            supports_sequential_generation=True,
         ),
         MODEL_FAMILY_40: ModelCapabilities(
             family=MODEL_FAMILY_40,
             display_name="doubao-seedream-4.0",
-            supports_output_format=False,
-            supports_tools=False,
-            supports_stream=True,
+            supports_fast_optimize_prompt=True,
             max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            supports_layer_decomposition=False,
+            supports_background=False,
             allowed_presets=frozenset({"1K", "2K", "4K"}),
             min_size_pixels=SEEDREAM_40_MIN_SIZE_PIXELS,
             max_size_pixels=SEEDREAM_40_MAX_SIZE_PIXELS,
-            supports_fast_optimize_prompt=True,
+            supports_output_format=False,
+            supports_stream=True,
+            supports_tools=False,
+            supports_sequential_generation=True,
         ),
         MODEL_FAMILY_UNKNOWN: ModelCapabilities(
             family=MODEL_FAMILY_UNKNOWN,
             display_name="当前",
-            supports_output_format=True,
-            supports_tools=True,
-            supports_stream=True,
+            supports_fast_optimize_prompt=True,
             max_reference_images=SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
+            supports_layer_decomposition=True,
+            supports_background=True,
             allowed_presets=frozenset({"1K", "1.5K", "2K", "3K", "4K"}),
             min_size_pixels=None,
             max_size_pixels=None,
-            supports_layer_decomposition=True,
-            supports_background=True,
+            supports_output_format=True,
+            supports_stream=True,
+            supports_tools=True,
+            supports_sequential_generation=True,
         ),
     }
 )
@@ -202,6 +234,33 @@ def supported_family_display_names(capability: str) -> str:
         for family, caps in MODEL_CAPABILITIES.items()
         if family != MODEL_FAMILY_UNKNOWN and getattr(caps, capability)
     )
+
+
+def layer_decomposition_presets() -> frozenset[str]:
+    """返回支持图层拆分家族的尺寸档位并集，描述文案与档位校验同源派生。"""
+    presets: set[str] = set()
+    for family, caps in MODEL_CAPABILITIES.items():
+        if family != MODEL_FAMILY_UNKNOWN and caps.supports_layer_decomposition:
+            presets |= caps.allowed_presets
+    return frozenset(presets)
+
+
+def layer_decomposition_presets_text() -> str:
+    """返回图层拆分档位并集的斜杠拼接展示串，描述文案与 docstring 占位值共用。"""
+    return "/".join(sorted(layer_decomposition_presets(), key=preset_numeric_sort_key))
+
+
+def limited_reference_families_annotation() -> str:
+    """按上限分组枚举参考图上限低于默认值的家族，返回带括号注记，无受限家族时为空串。"""
+    groups: dict[int, list[str]] = {}
+    for family, caps in MODEL_CAPABILITIES.items():
+        if family == MODEL_FAMILY_UNKNOWN or caps.max_reference_images >= (
+            SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES
+        ):
+            continue
+        groups.setdefault(caps.max_reference_images, []).append(caps.display_name)
+    parts = [f"{'、'.join(names)} 最多 {limit} 张" for limit, names in groups.items()]
+    return f"（{'；'.join(parts)}）" if parts else ""
 
 
 def preset_numeric_sort_key(preset: str) -> tuple[float, str]:
