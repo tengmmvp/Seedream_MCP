@@ -425,7 +425,7 @@ async def test_text_to_image_rejects_output_format_for_seedream_45_before_api_ca
 
     monkeypatch.setattr(client, "_call_api", fake_call_api)
 
-    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
+    with pytest.raises(SeedreamValidationError, match="不支持输出格式（output_format）"):
         await client.text_to_image(prompt="test", size="2K", output_format="png")
 
     assert api_called is False
@@ -1116,7 +1116,7 @@ async def test_sequential_generation_rejects_seedream_50_pro() -> None:
     """5.0 Pro 不支持组图，调用即拒绝。"""
     client = SeedreamClient(_build_pro_config())
 
-    with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持组图"):
+    with pytest.raises(SeedreamValidationError, match="不支持组图生成（sequential_generation）"):
         await client.sequential_generation(prompt="test", max_images=3, size="2K")
 
 
@@ -1124,7 +1124,7 @@ async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
     """5.0 Pro 不支持流式输出，stream=True 即拒绝。"""
     client = SeedreamClient(_build_pro_config())
 
-    with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
+    with pytest.raises(SeedreamValidationError, match="不支持流式输出（stream）"):
         await client.text_to_image(prompt="test", size="2K", stream=True)
 
 

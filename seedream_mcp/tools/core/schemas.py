@@ -15,9 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from ...utils.core.errors import SeedreamValidationError
 from ...utils.images.image_validation import MAX_IMAGE_FILE_SIZE
 from ...utils.model.model_capabilities import (
-    SEEDREAM_50PRO_MAX_REFERENCE_IMAGES,
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-    supported_family_display_names,
+    layer_decomposition_presets_text,
 )
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
@@ -99,32 +98,32 @@ SINGLE_IMAGE_DESCRIPTION = (
     "例如：https://example.com/a.png 或 2026-08-15/image_to_image/b.jpeg。"
 )
 MULTI_IMAGE_DESCRIPTION = (
-    f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
-    f"（5.0 Pro 最多 {SEEDREAM_50PRO_MAX_REFERENCE_IMAGES} 张），"
-    f"每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+    f"输入图像，数量 2-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张，部分模型上限更低；"
+    "每张支持图像 URL、本地文件路径或 Base64 图片数据。"
     "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
     "例如：https://example.com/a.png 或 2026-08-15/multi_image_fusion/b.jpeg。"
 )
 SEQUENTIAL_IMAGE_DESCRIPTION = (
-    f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张"
-    "（5.0 Pro 不支持组图生成），每张支持图像 URL、本地文件路径或 Base64 图片数据。"
+    f"可选的参考图片，单张或多张，最多 {SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 张；"
+    "每张支持图像 URL、本地文件路径或 Base64 图片数据。"
     "本地文件路径须在读取范围内，越界会被拒绝。其中相对路径仅限图片保存目录内。"
     "例如：https://example.com/a.png 或 2026-08-15/sequential_generation/b.jpeg。"
 )
 LAYER_DECOMPOSITION_DESCRIPTION = (
-    "是否开启图层拆分，仅 5.0 Pro 支持（Endpoint ID 部署的未识别模型不校验此开关）；"
+    "是否开启图层拆分，需当前模型支持；"
     "开启后将单张输入图拆解为 1 张底图"
     "与最多 16 个带透明通道的 PNG 图层，可配合 prompt 指定拆分意图。"
 )
 BACKGROUND_DESCRIPTION = (
-    "图片透明通道，仅 5.0 Pro 图生图支持（Endpoint ID 部署的未识别模型不校验此开关）；"
+    "图片透明通道，需当前模型支持；"
     "transparent 生成透明背景图"
     "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
 )
 SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。"
 SIZE_WITH_LAYER_DESCRIPTION = (
     "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；"
-    "图层拆分场景仅支持 1K/1.5K/2K 档位或 auto，未提供时默认 auto；"
+    f"图层拆分场景仅支持 {layer_decomposition_presets_text()}"
+    " 档位或 auto，未提供时默认 auto；"
     "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
 )
 WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
@@ -134,17 +133,11 @@ MAX_IMAGES_DESCRIPTION = (
     f"参考图数量与其之和不得超过 {MAX_SEQUENTIAL_TOTAL_IMAGES}。"
 )
 RESPONSE_FORMAT_DESCRIPTION = "响应格式，url 返回可下载链接，b64_json 返回 base64 数据。"
-# 能力相关描述的家族清单自能力表派生，能力表调整时描述随动，与校验报错文案同源。
-OUTPUT_FORMAT_DESCRIPTION = f"输出图片格式，仅 {supported_family_display_names('supports_output_format')} 支持 jpeg 或 png。"
+OUTPUT_FORMAT_DESCRIPTION = "输出图片格式，可选 jpeg 或 png，需当前模型支持。"
 STREAM_DESCRIPTION = (
-    f"是否启用流式输出；开启后将以事件流返回生成进度"
-    f"（仅 {supported_family_display_names('supports_stream')} 支持），"
-    f"开启时 request_count 必须为 1。"
+    "是否启用流式输出，需当前模型支持；开启后将以事件流返回生成进度，且 request_count 必须为 1。"
 )
-TOOLS_DESCRIPTION = (
-    f"模型工具配置，仅 {supported_family_display_names('supports_tools')} 支持联网搜索"
-    "（web_search）。"
-)
+TOOLS_DESCRIPTION = "模型工具配置，目前仅支持联网搜索（web_search），需当前模型支持。"
 REQUEST_COUNT_DESCRIPTION = "同一提示并行发起的独立生成次数，每次各产出一张图；适合一次获取多张候选图，与组图工具的 max_images 无关。"
 REQUEST_COUNT_SEQUENTIAL_DESCRIPTION = (
     "同一提示并行发起的独立生成次数，每次各产出一组图片，组内图片数量由模型"
@@ -213,7 +206,7 @@ class OptimizePromptOptions(BaseModel):
 
     mode: Literal["standard", "fast"] = Field(
         default="standard",
-        description="提示词优化模式：standard 高质量（全模型），fast 优先速度（仅 5.0 Pro / 4.0 支持）。",
+        description="提示词优化模式：standard 高质量，fast 优先速度，fast 需当前模型支持。",
     )
 
     @field_validator("mode", mode="before")
@@ -332,8 +325,8 @@ class _SequentialImageInput(BaseModel):
 
 
 class _LayerDecompositionInput(BaseModel):
-    """图层拆分与透明通道参数，仅图文生图工具暴露，均仅 5.0 Pro 支持，能力门控在
-    context 构建与 client 重校验两处执行。"""
+    """图层拆分与透明通道参数，仅图文生图工具暴露，支持与否由能力表统一判定，
+    门控在 context 构建与 client 重校验两处执行。"""
 
     layer_decomposition: bool | None = Field(
         default=None,

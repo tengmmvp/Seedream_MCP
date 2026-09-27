@@ -21,7 +21,10 @@ from .request_plan import _ACTIVE_REQUEST_PLAN, _build_request_data
 from .utils.core.errors import SeedreamValidationError
 from .utils.core.logs import get_logger
 from .utils.model.model_capabilities import (
+    SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     get_max_reference_images,
+    layer_decomposition_presets_text,
+    limited_reference_families_annotation,
     supported_family_display_names,
 )
 from .utils.core.validators import (
@@ -38,25 +41,31 @@ from .utils.core.validators import (
 )
 from .utils.images.image_prepare import ImagePreparer
 
-# 生成方法 docstring 的家族清单自能力表派生，与 tools/core/schemas 描述同源；
+# 生成方法 docstring 的家族清单、图层档位与参考图上限自能力表派生；
 # docstring 为字符串字面量（f-string 不能成为 __doc__），派生值经下方回填替换进入。
-_FAMILY_HINT_PLACEHOLDERS = {
+_DOCSTRING_HINT_PLACEHOLDERS = {
     "{output_format_families}": supported_family_display_names("supports_output_format"),
     "{stream_families}": supported_family_display_names("supports_stream"),
     "{tools_families}": supported_family_display_names("supports_tools"),
     "{sequential_families}": supported_family_display_names("supports_sequential_generation"),
+    "{layer_families}": supported_family_display_names("supports_layer_decomposition"),
+    "{background_families}": supported_family_display_names("supports_background"),
+    "{reference_limit_annotation}": limited_reference_families_annotation(),
+    "{layer_presets}": layer_decomposition_presets_text(),
+    "{max_reference_images}": str(SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES),
 }
 
 
-def _fill_family_hints(docstring: str) -> str:
-    """把家族清单占位符替换为能力表派生值。"""
-    for placeholder, families in _FAMILY_HINT_PLACEHOLDERS.items():
-        docstring = docstring.replace(placeholder, families)
+def _fill_docstring_hints(docstring: str) -> str:
+    """把占位符替换为能力表派生值。"""
+    for placeholder, value in _DOCSTRING_HINT_PLACEHOLDERS.items():
+        docstring = docstring.replace(placeholder, value)
     return docstring
 
 
-# docstring 中家族占位符的嗅探形态：花括号内含 famil 词段的任意键名。
-_FAMILY_PLACEHOLDER_PATTERN = re.compile(r"\{[A-Za-z0-9_]*famil[A-Za-z0-9_]*\}")
+# 残留守卫的嗅探形态：任意纯词元花括号，词典全部键均命中；生成方法 docstring 的
+# 合法花括号仅 tools 示例（含引号与冒号，词元形态不匹配），回填后残留即报错。
+_PLACEHOLDER_RESIDUE_PATTERN = re.compile(r"\{[A-Za-z0-9_]+\}")
 
 
 class SeedreamClient(_ClientHTTPMixin):
@@ -250,13 +259,13 @@ class SeedreamClient(_ClientHTTPMixin):
                 缺省，由模型自动识别图片主要元素并拆分。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
             image: 输入图像的 URL、data URI（data:image/*;base64,...）或本地文件路径。
-            layer_decomposition: 是否开启图层拆分，仅 5.0 Pro 支持；开启后单张输入图
-                拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层。
-            background: 图片透明通道，"transparent" 或 "opaque"，仅 5.0 Pro 支持；
-                transparent 需输入单张带透明通道的图片，且与 output_format="jpeg"
-                互斥。
+            layer_decomposition: 是否开启图层拆分，仅 {layer_families} 支持；开启后单张
+                输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层。
+            background: 图片透明通道，"transparent" 或 "opaque"，仅 {background_families}
+                支持；transparent 需输入单张带透明通道的图片，且与
+                output_format="jpeg" 互斥。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或
-                "<宽>x<高>" 像素值；图层拆分场景仅支持 "1K"、"1.5K"、"2K" 档位与
+                "<宽>x<高>" 像素值；图层拆分场景仅支持 {layer_presets} 档位与
                 "auto"，且未传入时默认取 "auto"，其余场景未传入时默认取配置
                 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
@@ -359,7 +368,7 @@ class SeedreamClient(_ClientHTTPMixin):
             prompt: 文本提示词，描述要对输入图像进行的融合操作。
             optimize_prompt_options: 提示词优化选项，可选配置字典。
             image: 输入图像的 URL、data URI（data:image/*;base64,...）或本地文件路径
-                列表，数量范围为 2-14 张；5.0 Pro 最多 10 张。
+                列表，数量范围为 2-{max_reference_images} 张{reference_limit_annotation}。
             size: 图像尺寸，支持与当前模型兼容的 "1K"、"1.5K"、"2K"、"3K"、"4K" 或 "<宽>x<高>" 像素值，未传入时默认取配置 default_size。
             watermark: 是否添加水印，未传入时默认取配置 default_watermark。
             response_format: 响应格式，可选值为 "url" 或 "b64_json"，默认为 "url"。
@@ -735,15 +744,15 @@ class SeedreamClient(_ClientHTTPMixin):
         return await self._image_preparer.prepare_images_in_parallel(images)
 
 
-# 类体后统一回填 docstring 的家族清单占位符，漏配占位符键在导入期抛错暴露。
+# 类体后统一回填 docstring 占位符为能力表派生值。
 for _member in vars(SeedreamClient).values():
     if (
         callable(_member)
         and _member.__doc__
-        and _FAMILY_PLACEHOLDER_PATTERN.search(_member.__doc__)
+        and _PLACEHOLDER_RESIDUE_PATTERN.search(_member.__doc__)
     ):
-        _member.__doc__ = _fill_family_hints(_member.__doc__)
-        leftover = _FAMILY_PLACEHOLDER_PATTERN.search(_member.__doc__ or "")
+        _member.__doc__ = _fill_docstring_hints(_member.__doc__)
+        leftover = _PLACEHOLDER_RESIDUE_PATTERN.search(_member.__doc__ or "")
         if leftover is not None:
             raise RuntimeError(
                 f"{_member.__name__} docstring 残留未识别的家族占位符 {leftover.group(0)}"

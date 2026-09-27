@@ -181,6 +181,39 @@ def test_real_generation_builder_success_output_instantiates_schema() -> None:
     assert obj.data == [{"url": "https://example.com/1.png"}]
 
 
+def test_echo_payload_covers_output_model_echo_fields() -> None:
+    """成功路径回显字段的取值与上下文逐项相等，漏构造的新字段恒 None 即失败。
+
+    回显字段与结果区字段在模型与 payload 构造两处双列，extra=forbid 只拦反向
+    漂移，漏构造的新字段退化为 None，与上下文实际值不等在此暴露。
+    """
+    config = SeedreamConfig(api_key="k")
+    context = build_generation_context(TextToImageInput(prompt="a cat", size="2K"), config)
+    structured = _build_generation_structured_result(
+        tool_name="text_to_image",
+        result={"success": True, "status": "completed", "data": [], "usage": {}},
+        context=context,
+        auto_save_results=None,
+        auto_save_error=None,
+    )
+    # 非回显字段：基类元数据、由 result 组装的结果区与自动保存摘要，均非对生成参数的回显。
+    non_echo = {
+        "tool",
+        "success",
+        "status",
+        "error",
+        "data",
+        "usage",
+        "batch",
+        "auto_save",
+        "truncated_events",
+        "deadline_exceeded",
+    }
+    echo_fields = set(GenerationStructuredOutput.model_fields) - non_echo
+    for name in echo_fields:
+        assert structured[name] == getattr(context, name), name
+
+
 def test_real_generation_builder_failure_output_instantiates_schema() -> None:
     """失败路径的 builder 输出同样须能实例化 schema，覆盖 error 归一化分支。"""
     config = SeedreamConfig(api_key="k")

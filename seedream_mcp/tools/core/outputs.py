@@ -51,22 +51,26 @@ class _BaseStructuredOutput(BaseModel):
 class GenerationStructuredOutput(_BaseStructuredOutput):
     """生成类工具的结构化输出 schema，覆盖文生图、图文生图、多图融合与组图输出。
 
+    参数回显字段序与生成工具的输入参数序一致。
+
     Attributes:
         prompt: 生成提示词回显；图文生图的图层拆分场景可为 None。
+        optimize_prompt_options: 生效的提示词优化选项，未指定时为 None。
+        layer_decomposition: 是否开启图层拆分，非 False 取值仅出现在图文生图。
+        background: 透明通道取值，非 None 取值仅出现在图文生图显式指定时。
         size: 生效的生成尺寸。
+        watermark: 生效的水印开关。
+        max_images: 组图单次请求的生成数量上限，未显式传入时为按参考图数量推导的
+            生效值；非组图工具为 None。
         response_format: 响应格式，url 或 b64_json。
         output_format: 输出图片格式，未指定时为 None。
         stream: 是否启用流式输出。
         tools: 模型工具配置，未指定时为 None。
-        layer_decomposition: 是否开启图层拆分，非 False 取值仅出现在图文生图。
-        background: 透明通道取值，非 None 取值仅出现在图文生图显式指定时。
-        max_images: 组图单次请求的生成数量上限，未显式传入时为按参考图数量推导的
-            生效值；非组图工具为 None。
         request_count: 同一提示并行发起的独立生成次数。
         parallelism: 并行度上限。
         data: 图片条目列表，条目含 url 或 b64_json 及自动保存回填的本地路径信息；
             图层拆分场景条目另含 z_index、name、description、bounding_box 字段。
-        usage: 用量统计字典，键由上游透传；5.0 Pro 另含 input_images 输入图片数。
+        usage: 用量统计字典，键由上游透传；部分模型另含 input_images 输入图片数。
         batch: 并行批次统计，单次请求时为 None。
         auto_save: 自动保存摘要，未启用时仅含 enabled 键。
         truncated_events: SSE 解析因超限或解析失败丢弃的事件数，未发生丢弃时为
@@ -76,14 +80,16 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     """
 
     prompt: str | None = None
+    optimize_prompt_options: dict[str, Any] | None = None
+    layer_decomposition: bool | None = None
+    background: str | None = None
     size: str | None = None
+    watermark: bool | None = None
+    max_images: int | None = None
     response_format: str | None = None
     output_format: str | None = None
     stream: bool | None = None
     tools: list[dict[str, Any]] | None = None
-    layer_decomposition: bool | None = None
-    background: str | None = None
-    max_images: int | None = None
     request_count: int | None = None
     parallelism: int | None = None
     data: list[dict[str, Any]] | None = None
@@ -111,8 +117,8 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
         recursive: 是否递归查找子目录。
         max_depth: 递归查找的最大深度。
         limit: 单页返回的最大文件数量。
-        show_details: 图片条目是否包含文件大小与修改时间详情。
         format_filter: 生效的图片扩展名过滤列表，未提供时为 None。
+        show_details: 图片条目是否包含文件大小与修改时间详情。
     """
 
     directory: str | None = None
@@ -127,8 +133,29 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     recursive: bool | None = None
     max_depth: int | None = None
     limit: int | None = None
-    show_details: bool | None = None
     format_filter: list[str] | None = None
+    show_details: bool | None = None
+
+
+class GetModelInfoStructuredOutput(_BaseStructuredOutput):
+    """模型信息工具的结构化输出 schema。
+
+    Attributes:
+        model_id: 当前配置的模型标识，别名已在配置层归一为 Model ID。
+        display_name: 家族展示名，未识别家族为 None。
+        aliases: 归一到当前模型 ID 的全部友好别名。
+        family: 模型家族规范名，未识别家族为 unknown。
+        capabilities: 能力字段，按调用流程排序：optimize_prompt_modes、
+            max_reference_images、layer_decomposition、transparent_background、
+            size_presets、min_size_pixels、max_size_pixels、output_format、stream、
+            web_search、sequential_generation。
+    """
+
+    model_id: str | None = None
+    display_name: str | None = None
+    aliases: list[str] | None = None
+    family: str | None = None
+    capabilities: dict[str, Any] | None = None
 
 
 def build_error_dict(error_type: str, message: str) -> dict[str, Any]:
@@ -173,7 +200,7 @@ def build_error_structured(
 
 
 # 二进制载荷键集合，镜像占位替换与卸载门控的长度计量共用。
-BINARY_PAYLOAD_KEYS = frozenset({"b64_json"})
+_BINARY_PAYLOAD_KEYS = frozenset({"b64_json"})
 
 
 def format_base64_placeholder(length: int) -> str:
@@ -183,7 +210,7 @@ def format_base64_placeholder(length: int) -> str:
 
 def _mirror_string(key: Any, value: str) -> str:
     """镜像字符串值：载荷键取长度占位，其余经数据通道净化，干净文本由净化入口的恒等快路直接透传。"""
-    if key in BINARY_PAYLOAD_KEYS:
+    if key in _BINARY_PAYLOAD_KEYS:
         return format_base64_placeholder(len(value))
     return sanitize_data_text(value)
 
@@ -239,17 +266,10 @@ def build_structured_json_text(structured: dict[str, Any]) -> TextContent:
 def binary_placeholder_value_leaf_length(key: Any, value: Any, limit: int) -> int | None:
     """二进制载荷键按占位长度、其余字符串经 UTF-8 字节钩子计量，非字符串返回 None 走默认计量，镜像构建门控使用。"""
     if isinstance(value, str):
-        if key in BINARY_PAYLOAD_KEYS:
+        if key in _BINARY_PAYLOAD_KEYS:
             return len(format_base64_placeholder(len(value)))
         return utf8_value_leaf_length(key, value, limit)
     return None
-
-
-def _mirror_build_should_offload(structured: dict[str, Any]) -> bool:
-    """判定镜像构建是否下沉专用 CPU 池，委托池下沉判定单源并绑定镜像占位计量钩子。"""
-    return should_offload_to_cpu_pool(
-        structured, value_leaf_cost=binary_placeholder_value_leaf_length
-    )
 
 
 async def build_structured_tool_result(
@@ -278,7 +298,9 @@ async def build_structured_tool_result(
     """
     blocks: list[ContentBlock] = [TextContent(type="text", text=message)]
     try:
-        if _mirror_build_should_offload(structured):
+        if should_offload_to_cpu_pool(
+            structured, value_leaf_cost=binary_placeholder_value_leaf_length
+        ):
             mirror = await run_in_cpu_pool(build_structured_json_text, structured)
         else:
             mirror = build_structured_json_text(structured)

@@ -20,12 +20,10 @@
 ## 常见失败模式与对策
 
 - **引用的图片 URL 已失效**：API 返回的 URL 仅保留 24 小时。对策：改用本地保存路径（`browse_images` 定位），或重新生成
-- **尺寸档位被拒**：不同模型支持的档位与像素区间不同（如 5.0 Pro 档位更少）。对策：读 `seedream://models/info` 拿当前模型的 `allowed_presets`、`min/max_size_pixels` 后重新取值
-- **能力不支持**：
-  - 服务器配置为 5.0 Pro 时组图/联网搜索/流式不可用 → 由部署方将服务器切换到 5.0 系列
-  - 4.5/4.0 传 `output_format` → 去掉该参数
-  - 4.5 传 `optimize_prompt_options.mode=fast` → 改为 `standard` 或去掉该参数
-  - 非 5.0 Pro 调 `layer_decomposition`/`background` → 由部署方将服务器切换到 5.0 Pro
+- **尺寸档位被拒**：不同模型支持的档位与像素区间不同。对策：调 `get_model_info` 拿当前模型的 `size_presets` 与像素区间后重新取值
+- **能力不支持**：报错附当前模型、参数与支持的模型清单
+  - 需要被拒的能力（组图、联网搜索、流式、图层拆分、透明背景、fast 档等）→ 转告用户调整服务器配置
+  - 该能力非必需 → 去掉被拒参数后重试
   - 上游报错提示透明通道不支持 → 换带透明通道的 png 输入或去掉 `background` 参数
 - **413 请求体过大**：Base64 传图体积膨胀明显。对策：压缩或缩小图片后重传；有公网可达地址时改用 URL
 - **组图张数报错**：约束是"参考图数量 + 生成数量 ≤ 15"，对全部组图模型生效，调低 `max_images` 或减少参考图
@@ -36,13 +34,14 @@
 - 输入图单张不超过 30 MB；支持 jpeg/png/webp/bmp/tiff/gif/heic/heif（图层拆分场景仅 png/jpeg）
 - 生成场景输入图总像素 225 像素 ~ 3600 万像素（225 = 15×15 下限），宽高比 1/16 ~ 16；宽高每边至少 15 px
 - 图层拆分场景输入图总像素下限更高：512×512（262144 像素）~ 3600 万像素
-- 参考图上限：5.0 Pro 最多 10 张，其余模型最多 14 张
+- 参考图上限：调 `get_model_info` 查 `max_reference_images`
 - 结果预览：自动保存成功时附带缩略图（长边 ≤768px，最多 10 张），纯预览用途，引用请用保存路径
 - 保存目录 30 天自动清理、总量 10GB 上限（超限按最旧驱逐），重要图片提醒用户归档
 - 限流按"账号 + 模型"每分钟图片数计；图层拆分预扣 17 IPM
 
 ## 诊断信息
 
+- `get_model_info` 工具：当前配置模型的能力快照（档位、像素区间、参考图上限、参数开关）
 - `seedream://server/info`：服务器版本、当前模型、默认尺寸、自动保存开关
 - `seedream://models/info`：全部模型别名与能力声明（档位、像素区间、参考图上限、能力开关）
 - 日志文件：`<数据根目录>/.seedream/logs/seedream_mcp.log`（取 `SEEDREAM_DATA_ROOT` > `SEEDREAM_WORKSPACE_ROOT`，均未声明时经回退链落进程启动目录或用户主目录，不跟随 MCP Roots），默认按 5MB 轮转、保留 7 天（`SEEDREAM_LOG_ROTATION_SIZE` 与 `SEEDREAM_LOG_RETENTION_DAYS` 配置），错误日志含完整堆栈

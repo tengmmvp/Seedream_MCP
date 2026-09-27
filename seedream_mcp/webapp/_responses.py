@@ -26,7 +26,9 @@ from ..utils.core.executors import (
     CpuOffloadPoolClosedError,
     run_in_cpu_pool,
     should_offload_size,
+    should_offload_to_cpu_pool,
 )
+from ..utils.core.sanitizers import utf8_value_leaf_length
 from ..utils.io.io_path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
     images_root_relative,
@@ -161,9 +163,12 @@ def dump_strict_json(structured: dict[str, object]) -> str:
 
 
 async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
-    """以严格 JSON 构造结构化结果响应，序列化无条件下沉专用 CPU 池。"""
+    """以严格 JSON 构造结构化结果响应，载荷达阈值时序列化下沉专用 CPU 池。"""
     try:
-        payload = await run_in_cpu_pool(dump_strict_json, structured)
+        if should_offload_to_cpu_pool(structured, value_leaf_cost=utf8_value_leaf_length):
+            payload = await run_in_cpu_pool(dump_strict_json, structured)
+        else:
+            payload = dump_strict_json(structured)
     except CpuOffloadPoolClosedError:
         return cpu_pool_closed_json()
     return Response(

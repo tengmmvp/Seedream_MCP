@@ -35,7 +35,7 @@ VALID_OPTIMIZE_MODES = frozenset({"standard", "fast"})
 # 尺寸预设档位与输出格式白名单。
 VALID_SIZE_PRESETS = frozenset({"1K", "1.5K", "2K", "3K", "4K"})
 VALID_OUTPUT_FORMATS = frozenset({"jpeg", "png"})
-# 图片透明通道参数 background 的合法取值白名单，仅 5.0 Pro 图生图支持。
+# 图片透明通道参数 background 的合法取值白名单，支持的家族由能力表统一判定。
 VALID_BACKGROUND_MODES = frozenset({"transparent", "opaque"})
 # 布尔字符串解析的合法取值，parse_bool 据此判定真值与假值。
 TRUE_BOOL_STRINGS = frozenset({"true", "1", "yes", "on"})
@@ -287,9 +287,11 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
         )
 
     if not get_model_capabilities(model_id).supports_output_format:
-        raise SeedreamValidationError(
-            f"仅 {supported_family_display_names('supports_output_format')} 模型支持 output_format",
+        raise capability_gate_error(
             field="output_format",
+            model_id=model_id,
+            capability="supports_output_format",
+            param_desc="输出格式（output_format）",
             value=output_format,
         )
 
@@ -321,9 +323,11 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
         return None
 
     if not get_model_capabilities(model_id).supports_tools:
-        raise SeedreamValidationError(
-            f"仅 {supported_family_display_names('supports_tools')} 支持 tools",
+        raise capability_gate_error(
             field="tools",
+            model_id=model_id,
+            capability="supports_tools",
+            param_desc="联网搜索（tools）",
             value=tools,
         )
 
@@ -375,7 +379,7 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
 def validate_stream(stream: bool, model_id: str) -> bool:
     """验证流式输出参数与模型兼容性，原样返回 stream。
 
-    5.0 Pro 不支持流式输出，5.0 系列（5.0/5.0-lite 同一模型）/4.5/4.0 支持。
+    支持与否由能力表统一判定。
 
     Raises:
         SeedreamValidationError: stream 非布尔，或为真而模型不支持流式输出时抛出。
@@ -385,9 +389,11 @@ def validate_stream(stream: bool, model_id: str) -> bool:
 
     caps = get_model_capabilities(model_id)
     if stream and not caps.supports_stream:
-        raise SeedreamValidationError(
-            f"{caps.display_name} 不支持流式输出（stream），请改用支持流式的模型",
+        raise capability_gate_error(
             field="stream",
+            model_id=model_id,
+            capability="supports_stream",
+            param_desc="流式输出（stream）",
             value=stream,
         )
     return stream
@@ -488,9 +494,11 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
     if isinstance(token, str):
         if token == "auto":
             if not caps.supports_layer_decomposition:
-                raise SeedreamValidationError(
-                    f"{caps.display_name} 模型不支持图层拆分，size 不接受 auto",
+                raise capability_gate_error(
                     field="size",
+                    model_id=model_id,
+                    capability="supports_layer_decomposition",
+                    param_desc="图层拆分场景的 auto 尺寸（size）",
                     value=token,
                 )
             return token
@@ -547,11 +555,29 @@ def validate_size_for_model(size: str, model_id: str, *, layer_decomposition: bo
 # ==================== 高级验证函数 ====================
 
 
+def capability_gate_error(
+    *,
+    field: str,
+    model_id: str,
+    capability: str,
+    param_desc: str,
+    value: object = None,
+) -> SeedreamValidationError:
+    """构造能力门控报错：当前模型、参数、支持模型清单与配置变更指引。"""
+    return SeedreamValidationError(
+        f"当前模型 {model_id} 不支持{param_desc}，"
+        f"支持的模型：{supported_family_display_names(capability)}；"
+        "如需更换模型，请告知用户调整服务器配置",
+        field=field,
+        value=value,
+    )
+
+
 def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> bool:
     """验证图层拆分开关与模型的兼容性。
 
-    图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，仅
-    5.0 Pro 支持，未知模型放行由能力表统一判定；单张参考图输入的前提由
+    图层拆分将单张输入图拆解为 1 张底图与最多 16 个带透明通道的 PNG 图层，
+    支持与否与未知模型放行均由能力表统一判定；单张参考图输入的前提由
     image_to_image 工具的输入形态保证。输入图的格式与像素下限约束由上游
     校验，本地不做前置检查。None 视为未启用返回 False。
 
@@ -567,11 +593,14 @@ def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> boo
             field="layer_decomposition",
             value=layer_decomposition,
         )
-    caps = get_model_capabilities(model_id or "")
+    normalized_model_id = model_id or ""
+    caps = get_model_capabilities(normalized_model_id)
     if layer_decomposition and not caps.supports_layer_decomposition:
-        raise SeedreamValidationError(
-            f"{caps.display_name} 模型不支持 layer_decomposition 图层拆分",
+        raise capability_gate_error(
             field="layer_decomposition",
+            model_id=normalized_model_id,
+            capability="supports_layer_decomposition",
+            param_desc="图层拆分（layer_decomposition）",
             value=layer_decomposition,
         )
     return layer_decomposition
@@ -582,8 +611,8 @@ def validate_background(
 ) -> str | None:
     """验证图片透明通道参数与模型的兼容性。
 
-    background 控制是否生成带透明通道的图片，仅 5.0 Pro 图生图支持，未知模型
-    放行由能力表统一判定。输入图的格式约束由上游校验，此处做值域、模型门控与
+    background 控制是否生成带透明通道的图片，支持与否与未知模型放行均由能力表统一
+    判定。输入图的格式约束由上游校验，此处做值域、模型门控与
     output_format 互斥校验；透明背景输出为带 alpha 的 png，与 jpeg 互斥同时
     指定时报错。
 
@@ -605,11 +634,14 @@ def validate_background(
             field="background",
             value=background,
         )
-    caps = get_model_capabilities(model_id or "")
+    normalized_model_id = model_id or ""
+    caps = get_model_capabilities(normalized_model_id)
     if not caps.supports_background:
-        raise SeedreamValidationError(
-            f"{caps.display_name} 模型不支持 background 透明通道参数",
+        raise capability_gate_error(
             field="background",
+            model_id=normalized_model_id,
+            capability="supports_background",
+            param_desc="透明背景（background）",
             value=normalized,
         )
     if output_format is not None:
@@ -667,11 +699,14 @@ def validate_optimize_prompt_options(options: Any, model_id: str) -> dict[str, A
             value=mode,
         )
 
-    caps = get_model_capabilities(model_id or "")
+    normalized_model_id = model_id or ""
+    caps = get_model_capabilities(normalized_model_id)
     if not caps.supports_fast_optimize_prompt and mode != "standard":
-        raise SeedreamValidationError(
-            f"{caps.display_name} 当前仅支持 optimize_prompt_options.mode=standard",
+        raise capability_gate_error(
             field="optimize_prompt_options.mode",
+            model_id=normalized_model_id,
+            capability="supports_fast_optimize_prompt",
+            param_desc="提示词优化极速模式（optimize_prompt_options.mode=fast）",
             value=mode,
         )
 
@@ -757,7 +792,7 @@ def validate_parallel_generation_options(
 def validate_sequential_generation_support(model_id: str) -> None:
     """验证模型对组图生成的支持。
 
-    组图由 5.0/5.0 Lite/4.5/4.0 支持，5.0 Pro 不支持，由能力表统一判定。
+    支持与否由能力表统一判定。
 
     Args:
         model_id: 模型标识符。
@@ -767,9 +802,11 @@ def validate_sequential_generation_support(model_id: str) -> None:
     """
     caps = get_model_capabilities(model_id)
     if not caps.supports_sequential_generation:
-        raise SeedreamValidationError(
-            f"{caps.display_name} 不支持组图生成，请切换为支持组图的模型",
+        raise capability_gate_error(
             field="model",
+            model_id=model_id,
+            capability="supports_sequential_generation",
+            param_desc="组图生成（sequential_generation）",
             value=model_id,
         )
 
@@ -779,7 +816,7 @@ def validate_sequential_image_limit(
 ) -> None:
     """验证组图输出的总图片数量限制。
 
-    参考图数量不超过模型能力上限（5.0 Pro 为 10，其余家族为 14），且与生成数量
+    参考图数量不超过模型能力上限，且与生成数量
     之和不超过 15。model_id 缺省时按通用上限粗校验，供无模型上下文的 schema 层
     使用；精确校验由 client 层传入实际 model_id 完成。
 

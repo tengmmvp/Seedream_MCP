@@ -403,17 +403,21 @@ def test_validate_background_rejects_non_string_output_format_for_opaque() -> No
 
 
 def _make_caps(min_pixels: int | None, max_pixels: int | None) -> ModelCapabilities:
-    """构造仅像素上下限可变、其余字段取默认的测试能力声明。"""
+    """构造仅像素上下限可变、其余字段取固定值的测试能力声明。"""
     return ModelCapabilities(
         family="test-family",
         display_name="测试模型",
-        supports_output_format=True,
-        supports_tools=True,
-        supports_stream=True,
+        supports_fast_optimize_prompt=True,
         max_reference_images=14,
+        supports_layer_decomposition=False,
+        supports_background=False,
         allowed_presets=frozenset({"1K"}),
         min_size_pixels=min_pixels,
         max_size_pixels=max_pixels,
+        supports_output_format=True,
+        supports_stream=True,
+        supports_tools=True,
+        supports_sequential_generation=True,
     )
 
 
@@ -460,21 +464,25 @@ def test_size_both_bounds_message_keeps_range_form(monkeypatch: pytest.MonkeyPat
 
 
 def test_output_format_error_message_enumerates_supporting_families() -> None:
-    """output_format 拒绝文案包含能力表声明支持的全部家族展示名。"""
+    """output_format 拒绝文案含当前模型、参数名、支持家族清单与配置指引。"""
     with pytest.raises(SeedreamValidationError) as exc_info:
         validate_output_format("png", "doubao-seedream-4-5-251128")
 
     message = exc_info.value.message
-    assert "doubao-seedream-5.0-pro、doubao-seedream-5.0" in message
-    assert "模型支持 output_format" in message
+    assert "当前模型 doubao-seedream-4-5-251128 不支持输出格式（output_format）" in message
+    assert "doubao-seedream-5.0-pro、doubao-seedream-5.0、doubao-seedream-5.0-flash" in message
+    assert "如需更换模型，请告知用户调整服务器配置" in message
 
 
 def test_tools_error_message_enumerates_supporting_families() -> None:
-    """tools 拒绝文案包含能力表声明支持的全部家族展示名。"""
+    """tools 拒绝文案含当前模型、参数名、支持家族清单与配置指引。"""
     with pytest.raises(SeedreamValidationError) as exc_info:
         validate_generation_tools([{"type": "web_search"}], "doubao-seedream-4-5-251128")
 
-    assert "仅 doubao-seedream-5.0 支持 tools" in exc_info.value.message
+    message = exc_info.value.message
+    assert "当前模型 doubao-seedream-4-5-251128 不支持联网搜索（tools）" in message
+    assert "支持的模型：doubao-seedream-5.0；" in message
+    assert "如需更换模型，请告知用户调整服务器配置" in message
 
 
 def test_capability_error_messages_follow_capability_table(

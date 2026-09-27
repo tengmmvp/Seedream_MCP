@@ -169,8 +169,8 @@ def utf8_value_leaf_length(key: Any, value: Any, limit: int) -> int | None:
     """str 叶子按 UTF-8 字节数计量，其余形态回退默认计量，供字节口径的卸载门控使用。"""
     if isinstance(value, str):
         # ASCII 字节数与字符数相等免编码；字符数已达 limit 时字节数只会更大，
-        # 超限后的精确值无意义。
-        if value.isascii() or len(value) >= limit:
+        # 超限后的精确值无意义；长度判断 O(1) 先行，超限叶子免整串 ASCII 扫描。
+        if len(value) >= limit or value.isascii():
             return len(value)
         return len(value.encode("utf-8", "surrogatepass"))
     return None

@@ -137,8 +137,11 @@ def test_sync_cleanup_closes_pool_when_close_body_interrupted(
     executor_before = cpu_offload_executor()
     resources.sync_cleanup()
 
-    # 未 patch 的真实 shutdown 已执行：池被关闭后按需重建为新实例。
-    assert cpu_offload_executor() is not executor_before
+    # 未 patch 的真实 shutdown 已执行：池被关闭后按需重建为新实例；关闭重建池，
+    # 不向同进程后续用例泄漏打开的执行器。
+    rebuilt = cpu_offload_executor()
+    assert rebuilt is not executor_before
+    rebuilt.shutdown(wait=True)
 
 
 async def test_sync_cleanup_cancels_queued_cpu_offload_pool_work(

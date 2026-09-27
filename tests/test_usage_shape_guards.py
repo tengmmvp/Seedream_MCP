@@ -79,7 +79,6 @@ async def _parse_sse(chunks: list[bytes]) -> dict[str, Any]:
     return await parse_sse_response(
         cast(httpx.Response, _FakeSSEResponse(chunks)),
         model_id="m",
-        chunk_size=64,
         buffer_max_size=4096,
         event_truncate_threshold=4096,
         total_bytes_limit=64 * 1024,

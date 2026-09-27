@@ -338,19 +338,19 @@ def _format_image_item(index: int, image: dict[str, Any]) -> list[str]:
     error_info = image.get("error")
     if error_info is not None:
         parts.append("  状态: 失败")
-    if isinstance(error_info, dict):
-        # code 与 message 的空白串及空值按缺失处理，与非 dict 分支同口径。
-        error_code = error_info.get("code")
-        if has_message_value(error_code):
-            parts.append(f"  错误码: {_render_sanitized_value(error_code)}")
-        error_message = error_info.get("message")
-        if has_message_value(error_message):
-            parts.append(f"  错误信息: {_render_sanitized_value(error_message)}")
-    elif error_info is not None:
-        rendered_error = _render_sanitized_value(error_info)
-        # 空白串错误按缺失处理，与 handle_api_error 等错误通道同口径。
-        if has_message_value(rendered_error):
-            parts.append(f"  错误信息: {rendered_error}")
+        if isinstance(error_info, dict):
+            # code 与 message 的空白串及空值按缺失处理，与非 dict 分支同口径。
+            error_code = error_info.get("code")
+            if has_message_value(error_code):
+                parts.append(f"  错误码: {_render_sanitized_value(error_code)}")
+            error_message = error_info.get("message")
+            if has_message_value(error_message):
+                parts.append(f"  错误信息: {_render_sanitized_value(error_message)}")
+        else:
+            rendered_error = _render_sanitized_value(error_info)
+            # 空白串错误按缺失处理，与 handle_api_error 等错误通道同口径。
+            if has_message_value(rendered_error):
+                parts.append(f"  错误信息: {rendered_error}")
     if image.get("url"):
         parts.append(f"  URL: {_render_sanitized_value(image['url'])}")
     if image.get("size") is not None:
@@ -558,14 +558,16 @@ def _build_generation_structured_result(
         "success": not response_reports_failure(result),
         "status": sanitize_error_text(raw_status) if isinstance(raw_status, str) else None,
         "prompt": context.prompt,
+        "optimize_prompt_options": context.optimize_prompt_options,
+        "layer_decomposition": context.layer_decomposition,
+        "background": context.background,
         "size": context.size,
+        "watermark": context.watermark,
+        "max_images": context.max_images,
         "response_format": context.response_format,
         "output_format": context.output_format,
         "stream": context.stream,
         "tools": context.tools,
-        "layer_decomposition": context.layer_decomposition,
-        "background": context.background,
-        "max_images": context.max_images,
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         "data": sanitized_images,

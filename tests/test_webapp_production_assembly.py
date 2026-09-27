@@ -279,22 +279,28 @@ def _leaf_dense_payload() -> dict[str, object]:
 
 
 @pytest.mark.parametrize(
-    ("payload_factory", "expected_body"),
+    ("payload_factory", "expected_body", "expected_offload"),
     [
-        (lambda: {"ok": True, "items": [1, 2]}, b'{"ok":true,"items":[1,2]}'),
-        (lambda: {"payload": "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)}, None),
-        (_leaf_dense_payload, None),
-        (lambda: {"items": ["y" * 100] * 700}, None),
-        (lambda: _deep_nested_payload(_CONTAINER_REPR_DEPTH_LIMIT + 1), None),
+        (
+            lambda: {"ok": True, "items": [1, 2]},
+            b'{"ok":true,"items":[1,2]}',
+            False,
+        ),
+        (lambda: {"payload": "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)}, None, True),
+        (_leaf_dense_payload, None, False),
+        (lambda: {"items": ["y" * 100] * 700}, None, True),
+        (lambda: _deep_nested_payload(_CONTAINER_REPR_DEPTH_LIMIT + 1), None, True),
     ],
     ids=["small", "large", "leaf-dense", "accumulated-leaves", "deep-nesting"],
 )
-async def test_respond_structured_json_payload_shapes_run_in_cpu_pool(
+async def test_respond_structured_json_payload_shapes_offload_gating(
     monkeypatch: pytest.MonkeyPatch,
     payload_factory: Callable[[], dict[str, object]],
     expected_body: bytes | None,
+    expected_offload: bool,
 ) -> None:
-    """各形态载荷一律经专用 CPU 池序列化，序列化路径不随载荷形态分流事件循环。"""
+    """载荷形态经统一门控分流：长度估算达卸载阈值或不可估的下沉专用 CPU 池，
+    未达阈值的内联序列化；典型图库页的叶子总量未及 64KB 阈值，走内联。"""
     spy = CpuOffloadSpy(_responses.dump_strict_json)
     monkeypatch.setattr(_responses, "dump_strict_json", spy)
 
@@ -305,7 +311,10 @@ async def test_respond_structured_json_payload_shapes_run_in_cpu_pool(
     assert json.loads(bytes(response.body)) == structured
     if expected_body is not None:
         assert response.body == expected_body
-    spy.assert_ran_in_cpu_pool()
+    if expected_offload:
+        spy.assert_ran_in_cpu_pool()
+    else:
+        spy.assert_ran_outside_cpu_pool()
 
 
 async def test_respond_structured_json_pool_closed_returns_service_unavailable() -> None:

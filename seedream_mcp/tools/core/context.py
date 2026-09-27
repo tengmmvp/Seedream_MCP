@@ -44,7 +44,7 @@ class GenerationExecutionContext:
         output_format: 输出图片格式，未提供时为 None。
         stream: 是否启用流式输出。
         tools: 模型工具配置，未提供时为 None。
-        layer_decomposition: 是否开启图层拆分，仅 5.0 Pro 图生图可用。
+        layer_decomposition: 是否开启图层拆分，需当前模型支持。
         background: 透明通道取值，未指定时为 None。
         max_images: 组图单次请求的生成数量上限，未显式传入时为按参考图数量推导的
             生效值；非组图工具为 None。
@@ -90,7 +90,7 @@ def build_generation_context(
     # 组图能力根因先于参考图数量上限报出，避免误导性的「数量超限」修复指引
     if hasattr(params, "max_images"):
         validate_sequential_generation_support(config.model_id)
-    # 数量上限依赖 model_id，5.0 Pro 为 10、其余为 14；须与尺寸/流式等能力校验同层
+    # 数量上限依赖 model_id，由能力表统一判定；须与尺寸/流式等能力校验同层
     # 在此执行，避免进度上报「参数校验完成」后才在请求执行器内报错。
     if params.prompt is not None:
         ensure_utf8_encodable(params.prompt, "提示词包含无法编码的字符", "prompt")

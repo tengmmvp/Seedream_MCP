@@ -19,6 +19,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 import seedream_mcp
+from _no_param_tools import NO_PARAM_TOOLS
 from _readme_helpers import BASE_README, _capability_table, _prose_lines, _read_readme, _row_cells
 from seedream_mcp.cli import build_arg_parser
 from seedream_mcp.server import mcp
@@ -40,6 +41,8 @@ _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "sequential_generation": SequentialGenerationInput,
     "browse_images": BrowseImagesInput,
 }
+
+# 无输入参数的工具：README 小节列返回字段 bullet，不参与参数与输入模型字段集对账。
 
 # 工具小节标题形态：<summary><b>1. <code>tool_name</code></b> — …</summary>
 _TOOL_SUMMARY_PATTERN = re.compile(r"<b>\d+\.\s*<code>([a-z_]+)</code></b>")
@@ -204,8 +207,8 @@ def test_tool_param_bullets_exactly_match_input_model_fields() -> None:
     视为漂移，防止文档残留已删除的字段误导调用方。
     """
     bullets = _tool_param_bullets(BASE_README)
-    assert set(bullets) == set(_TOOL_INPUT_MODELS), (
-        f"README 工具小节 {sorted(bullets)} 与受守护输入模型的工具集 "
+    assert set(bullets) - NO_PARAM_TOOLS == set(_TOOL_INPUT_MODELS), (
+        f"README 工具小节 {sorted(set(bullets) - NO_PARAM_TOOLS)} 与受守护输入模型的工具集 "
         f"{sorted(_TOOL_INPUT_MODELS)} 不一致"
     )
     for tool_name, model in _TOOL_INPUT_MODELS.items():

@@ -17,6 +17,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, ValidationError
 from pydantic.fields import FieldInfo
 
+from _no_param_tools import NO_PARAM_TOOLS
+
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
@@ -29,8 +31,9 @@ from seedream_mcp.tools.core.schemas import (
     TOOLS_DESCRIPTION,
 )
 from seedream_mcp.utils.model.model_capabilities import (
+    MODEL_CAPABILITIES,
+    MODEL_FAMILY_UNKNOWN,
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
-    supported_family_display_names,
 )
 
 # MCP 注册工具名到输入模型的映射，平铺 inputSchema 等价性断言的数据源。
@@ -142,13 +145,14 @@ def test_browse_images_parameter_order() -> None:
 
 
 async def test_tool_registration_independent_of_collection_order() -> None:
-    """单文件独立运行时共享 mcp 单例上五工具均已注册。
+    """单文件独立运行时共享 mcp 单例上六工具均已注册。
 
     工具注册发生在 seedream_mcp.server 导入期，由 tests/conftest.py 顶层导入兜底；
-    移除该导入时本用例单独运行即失败。
+    移除该导入时本用例单独运行即失败。get_model_info 无输入模型，不参与平铺
+    inputSchema 等价性断言。
     """
     tools = await mcp.list_tools()
-    assert {tool.name for tool in tools} == set(_TOOL_INPUT_MODELS)
+    assert {tool.name for tool in tools} == set(_TOOL_INPUT_MODELS) | NO_PARAM_TOOLS
 
 
 async def test_flat_input_schema_property_order_matches_model_fields() -> None:
@@ -350,15 +354,16 @@ async def test_flat_schema_description_tokens_match_model_constraints() -> None:
 
 
 async def test_flat_input_schema_forbids_additional_properties() -> None:
-    """五工具 inputSchema 顶层 additionalProperties 恒为 False，声明平铺字段封闭集合。
+    """六工具 inputSchema 顶层 additionalProperties 恒为 False，声明平铺字段封闭集合。
 
     平铺签名使 MCPServer 生成的 schema 不再继承输入模型的 extra=forbid 声明；
-    server 注册期的 _tighten_flat_tool_schemas 负责补偿，本断言锁定补偿不缺失。
+    server 注册期的 _tighten_flat_tool_schemas 负责补偿，含无参的 get_model_info
+    在内，本断言锁定补偿不缺失。
     """
     tools = await mcp.list_tools()
     by_name = {tool.name: tool for tool in tools}
 
-    for name in _TOOL_INPUT_MODELS:
+    for name in [*_TOOL_INPUT_MODELS, *NO_PARAM_TOOLS]:
         schema = by_name[name].input_schema
         assert schema.get("additionalProperties") is False, name
 
@@ -382,19 +387,20 @@ async def test_flat_input_schema_forbids_additional_properties() -> None:
         ),
         ("sequential_generation", {"prompt": "a cat", "max_imagess": 4}),
         ("browse_images", {"directory": ".", "recursve": True}),
+        ("get_model_info", {"modell_id": "doubao-seedream-5.0-pro"}),
     ],
 )
 async def test_flat_tool_rejects_unknown_parameter_names(
     tool_name: str, typo_args: dict[str, Any]
 ) -> None:
-    """五工具的平铺签名在运行时拒绝拼错参数名，不被静默丢弃。
+    """六工具的平铺签名在运行时拒绝拼错参数名，不被静默丢弃。
 
     平铺参数模型默认忽略未知键，server 注册期替换为 extra=forbid 子类补偿，服务端
     与 inputSchema 本地校验同样拒绝。其余参数均取合法值，确保报错仅源于未知键。
     """
-    typo_key = next(
-        key for key in typo_args if key not in _TOOL_INPUT_MODELS[tool_name].model_fields
-    )
+    # get_model_info 无输入模型，任意传入键均为未知键。
+    known = _TOOL_INPUT_MODELS[tool_name].model_fields if tool_name in _TOOL_INPUT_MODELS else ()
+    typo_key = next(key for key in typo_args if key not in known)
     with pytest.raises(ToolError, match=typo_key):
         await mcp.call_tool(tool_name, typo_args)
 
@@ -476,9 +482,9 @@ async def test_generation_tool_rejects_oversized_tools_list() -> None:
         TextToImageInput(prompt="a cat", tools=entries)
 
 
-# ==================== 能力相关描述随能力表派生 ====================
+# ==================== 能力相关描述的静态提示契约 ====================
 
-# 能力相关参数描述常量到其家族清单来源能力字段的映射。
+# 能力字段到其参数描述常量的映射，静态提示契约用例的参数化数据源。
 _CAPABILITY_DESCRIPTION_SOURCES = {
     "supports_output_format": OUTPUT_FORMAT_DESCRIPTION,
     "supports_stream": STREAM_DESCRIPTION,
@@ -487,7 +493,15 @@ _CAPABILITY_DESCRIPTION_SOURCES = {
 
 
 @pytest.mark.parametrize("capability", sorted(_CAPABILITY_DESCRIPTION_SOURCES))
-def test_capability_descriptions_enumerate_table_families(capability: str) -> None:
-    """能力相关参数描述含能力表声明支持的全部家族展示名，硬编码漂移时变红。"""
+def test_capability_descriptions_use_static_hint_without_family_enumeration(
+    capability: str,
+) -> None:
+    """能力相关参数描述以静态提示声明模型门控，不枚举家族清单。
+
+    调用者无法行动于可变模型枚举，支持模型由 get_model_info 工具与校验报错提供。
+    """
     description = _CAPABILITY_DESCRIPTION_SOURCES[capability]
-    assert supported_family_display_names(capability) in description
+    assert "需当前模型支持" in description
+    for caps in MODEL_CAPABILITIES.values():
+        if caps.family != MODEL_FAMILY_UNKNOWN:
+            assert caps.display_name not in description

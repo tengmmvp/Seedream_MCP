@@ -17,7 +17,7 @@ async def test_handle_image_to_image_passes_layer_fields_to_client(
 ) -> None:
     """layer_decomposition/background/image 自 params 经 context 完整接线到 client 调用。"""
     calls = _patch_client_method_spy(monkeypatch, "image_to_image")
-    # 图层拆分与透明通道仅 5.0 Pro 支持，模型须随字段一并切换才能通过能力校验
+    # 图层拆分与透明通道仅 5.0 Pro / Flash 支持，模型须随字段一并切换才能通过能力校验
     config = SeedreamConfig(
         api_key="test_key", model_id="doubao-seedream-5.0-pro", auto_save_enabled=False
     )

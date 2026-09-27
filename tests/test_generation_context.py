@@ -110,7 +110,7 @@ def test_build_generation_context_layer_decomposition_rejected_for_lite() -> Non
     """lite 模型开启 layer_decomposition 即校验拒绝。"""
     config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-260128")
 
-    with pytest.raises(SeedreamValidationError, match="不支持 layer_decomposition"):
+    with pytest.raises(SeedreamValidationError, match="不支持图层拆分（layer_decomposition）"):
         build_generation_context(
             ImageToImageInput(
                 prompt="拆分图层", image="https://example.com/a.png", layer_decomposition=True
@@ -287,7 +287,7 @@ def test_build_generation_context_rejects_output_format_for_seedream_45() -> Non
         default_size="2K",
     )
 
-    with pytest.raises(SeedreamValidationError, match="模型支持 output_format"):
+    with pytest.raises(SeedreamValidationError, match="不支持输出格式（output_format）"):
         build_generation_context(
             TextToImageInput(prompt="test", output_format=cast(OutputFormat, "png")), config
         )
@@ -301,7 +301,7 @@ def test_build_generation_context_rejects_stream_for_seedream_50_pro() -> None:
         default_size="2K",
     )
 
-    with pytest.raises(SeedreamValidationError, match="5.0-pro 不支持流式输出"):
+    with pytest.raises(SeedreamValidationError, match="不支持流式输出（stream）"):
         build_generation_context(TextToImageInput(prompt="test", stream=True), config)
 
 
@@ -313,9 +313,7 @@ def test_build_generation_context_rejects_fast_optimize_mode_for_seedream_50() -
         default_size="2K",
     )
 
-    with pytest.raises(
-        SeedreamValidationError, match="仅支持 optimize_prompt_options.mode=standard"
-    ):
+    with pytest.raises(SeedreamValidationError, match="optimize_prompt_options.mode=fast"):
         build_generation_context(
             TextToImageInput(
                 prompt="test",
