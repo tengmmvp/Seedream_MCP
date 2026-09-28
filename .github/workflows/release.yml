@@ -80,13 +80,14 @@ jobs:
 
       # 取最近一个非当前 tag 作对比基线，首个版本无前序时回退 main 分支。
       - name: 📜 Resolve previous tag
+        id: prev_tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           prev=$( (gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=10" 2>/dev/null || true) \
             | jq -r --arg current "${GITHUB_REF_NAME}" \
               '[.[].tag_name | select(. != null)] | map(select(. != $current)) | first // empty')
-          echo "PREVIOUS_TAG=${prev:-main}" >> "$GITHUB_ENV"
+          echo "tag=${prev:-main}" >> "$GITHUB_OUTPUT"
 
       - name: 🏷️ Create Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -97,7 +98,7 @@ jobs:
             ## ✨ Seedream MCP ${{ github.ref_name }}
 
             ### 📝 更新内容
-            [查看自上一版本以来的全部提交](https://github.com/tengmmvp/Seedream_MCP/compare/${{ env.PREVIOUS_TAG }}...${{ github.ref_name }})
+            [查看自上一版本以来的全部提交](https://github.com/tengmmvp/Seedream_MCP/compare/${{ steps.prev_tag.outputs.tag }}...${{ github.ref_name }})
 
             ### 🛠️ 安装方式
 
