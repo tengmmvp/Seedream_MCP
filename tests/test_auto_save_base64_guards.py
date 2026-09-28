@@ -8,11 +8,11 @@ AutoSaveResult.to_dict 的数据字段净化与 markdown alt 兜底。
 import asyncio
 import base64
 import re
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
-from PIL import Image
 
 from seedream_mcp.utils.io import io_save
 from seedream_mcp.utils.io.io_save import (
@@ -20,31 +20,20 @@ from seedream_mcp.utils.io.io_save import (
     AutoSaveManager,
     AutoSaveResult,
     _build_markdown_alt,
-    drain_background_cleanup_tasks,
 )
+
+from _png_fixtures import forged_png_bytes
 
 
 @pytest.fixture
 def manager(tmp_path: Path) -> AutoSaveManager:
     """构造 cleanup_days=0 的 AutoSaveManager，本文件用例不依赖按天清理。
 
-    清理入口已不因清理开关短路，批量保存路径会触发后台 .part 清扫；本文件用例
-    直连 _prepare_base64_payload 与保存入口，清理相关断言由清理专项文件覆盖。
-    DownloadManager 的 aiohttp 会话惰性创建，_prepare_base64_payload 不触发会话分配，
-    因此 sync fixture 无需 close 即可安全释放。
+    本文件实例不设 cleanup_base_dir，不派生后台清理任务；清理相关断言由清理专项
+    文件覆盖。DownloadManager 的 aiohttp 会话惰性创建，_prepare_base64_payload
+    不触发会话分配，因此 sync fixture 无需 close 即可安全释放。
     """
     return AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
-
-
-@pytest.fixture(autouse=True)
-async def _drain_cleanup_tasks() -> AsyncIterator[None]:
-    """每个用例结束前等待在途后台清理任务完成，避免任务悬垂到用例事件循环之外。
-
-    清理入口不设开关短路后，经 _run_batch_save 的用例会派生真实的后台清扫任务；
-    drain 后断言与用例循环生命周期对齐，任务完成状态确定。
-    """
-    yield
-    await drain_background_cleanup_tasks()
 
 
 def _minimal_png_bytes() -> bytes:
@@ -305,18 +294,7 @@ async def test_save_base64_image_rejects_oversized_pixel_header(
     为巨额内存占用，b64 链路须与下载链路同一口径拒绝，original_url 保持 base64
     标识且不留残留文件。
     """
-    import io
-    import struct
-    import zlib
-
-    # 真实 1x1 PNG 改写 IHDR 宽高为 10000x10000 并重算 CRC：结构合法可被 PIL 识别，
-    # 头尺寸超限而文件本身只有几十字节，正是解压炸弹的字节形态。
-    buffer = io.BytesIO()
-    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
-    bomb = bytearray(buffer.getvalue())
-    bomb[16:29] = struct.pack(">II5B", 10_000, 10_000, 8, 2, 0, 0, 0)
-    bomb[29:33] = struct.pack(">I", zlib.crc32(bytes(bomb[12:29])) & 0xFFFFFFFF)
-    payload = base64.b64encode(bytes(bomb)).decode()
+    payload = base64.b64encode(forged_png_bytes(10_000, 10_000)).decode()
 
     result = await manager.save_base64_image(
         payload, prompt="p", custom_name="bomb", tool_name="t2i"
@@ -326,6 +304,38 @@ async def test_save_base64_image_rejects_oversized_pixel_header(
     assert result.original_url == "base64"
     assert "像素" in (result.error or "")
     assert not list(tmp_path.rglob("*.png"))
+
+
+async def test_save_base64_image_survives_parent_dir_recycled_between_steps(
+    manager: AutoSaveManager,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """路径生成后父目录被并发空目录回收时，写前重建父目录使落盘仍成功。
+
+    b64 数据无 URL 可回退，目录丢失即数据丢失；以建目录后即时删除模拟后台
+    清理与保存的竞态。
+    """
+    png_bytes = _minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+    real_create = manager.file_manager.create_save_path_from_extension
+
+    def _create_then_recycle(**kwargs: Any) -> Path:
+        save_path = real_create(**kwargs)
+        save_path.parent.rmdir()
+        return save_path
+
+    monkeypatch.setattr(
+        manager.file_manager, "create_save_path_from_extension", _create_then_recycle
+    )
+
+    result = await manager.save_base64_image(
+        payload, prompt="p", custom_name="race", tool_name="t2i"
+    )
+
+    assert result.success is True
+    assert result.local_path is not None
+    assert Path(result.local_path).read_bytes() == png_bytes
 
 
 # ==================== _run_batch_save 异常处理 ====================

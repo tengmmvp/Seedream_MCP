@@ -25,7 +25,7 @@ from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.images import image_input as image_input_module
 from seedream_mcp.utils.images import image_validation as image_validation_module
 from seedream_mcp.utils.images.image_input import prepare_image_input
-from seedream_mcp.utils.images.image_validation import validate_image_path
+from seedream_mcp.utils.images.image_validation import validate_image_input, validate_image_path
 from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
 
 
@@ -197,6 +197,26 @@ async def test_prepare_image_input_null_byte_form_surfaces_rejection_reason(
     message = exc_info.value.message
     assert "空字节" in message
     assert "不在读取范围内" not in message
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="锚定重置与冒号分量守卫仅 win32 生效")
+@pytest.mark.parametrize(
+    ("form", "reason"),
+    [
+        ("/escape.png", "有根无盘符"),
+        ("C:relative.png", "驱动器相对"),
+        ("photo.png:ads", "备用数据流"),
+    ],
+)
+def test_validate_image_input_rejects_forms_that_reset_anchor(form: str, reason: str) -> None:
+    """win32 锚定重置与备用数据流形态在路径解析入口拒绝，不静默逃逸基目录或读取备用数据流。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_image_input(form)
+
+    message = exc_info.value.message
+    assert reason in message
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == form
 
 
 async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:
@@ -396,21 +416,26 @@ async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
 ) -> None:
     """定位 stat 与读取之间文件被替换为超大内容时，读取量复核以文件过大拒绝。
 
-    读取阶段限制读取量为上限加一并复核，防 TOCTOU 窗口内的巨型文件撑爆内存。
+    读取阶段限制读取量为上限加一并复核，防 TOCTOU 窗口内的巨型文件撑爆内存；
+    假句柄仿真实打开的返回契约，fileno 指向真实落盘的常规文件。
     """
+    oversized = _images_root(workspace_root) / "oversized.png"
+    Image.new("RGB", (16, 16), color="white").save(oversized)
+    real_fd = os.open(str(oversized), os.O_RDONLY | getattr(os, "O_BINARY", 0))
 
     class _OversizedFile:
         def read(self, limit: int) -> bytes:
             return b"\x00" * limit
 
+        def fileno(self) -> int:
+            return real_fd
+
         def __enter__(self) -> "_OversizedFile":
             return self
 
         def __exit__(self, *exc_info: object) -> None:
-            return None
+            os.close(real_fd)
 
-    oversized = _images_root(workspace_root) / "oversized.png"
-    Image.new("RGB", (16, 16), color="white").save(oversized)
     monkeypatch.setattr(
         image_validation_module, "open_no_follow_read", lambda _path: _OversizedFile()
     )

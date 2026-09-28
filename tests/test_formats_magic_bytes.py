@@ -12,11 +12,13 @@ from types import MappingProxyType
 import pytest
 from PIL import Image
 
+from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.core.formats import (
     EXTENSION_BY_MIME,
     MIME_BY_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
+    format_file_too_large,
     infer_extension_from_bytes,
     is_known_image_bytes,
     parse_data_uri,
@@ -83,6 +85,26 @@ def test_parse_data_uri_non_data_input_returns_sentinel_triple() -> None:
     )
     assert parse_data_uri("data:image/png;base64") == (None, "data:image/png;base64", False)
     assert parse_data_uri(b"not-a-string") == (None, b"not-a-string", False)
+
+
+# ==================== 数据大小超限文案单一来源 ====================
+
+
+def test_validate_image_input_rejects_oversized_data_uri_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """巨型 base64 在解码前按换算的估算字节数拒绝，超限文案经 format_file_too_large 收口。"""
+    import seedream_mcp.utils.images.image_validation as image_validation_module
+
+    max_size = 1024 * 1024
+    monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", max_size)
+    huge_b64 = "A" * 2_000_000
+    with pytest.raises(SeedreamValidationError, match="数据过大") as exc_info:
+        image_validation_module.validate_image_input(f"data:image/png;base64,{huge_b64}")
+
+    estimated_bytes = 2_000_000 * 3 // 4
+    assert exc_info.value.message == format_file_too_large(estimated_bytes, max_size, label="数据")
+    assert "base64 长度" not in exc_info.value.message
 
 
 # ==================== BMP ====================

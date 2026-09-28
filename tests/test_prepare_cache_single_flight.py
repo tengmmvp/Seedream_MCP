@@ -8,10 +8,9 @@ import asyncio
 
 import pytest
 
-from seedream_mcp.client import SeedreamClient
-from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.images import image_prepare
 
+from _client_fakes import _make_client
 from _inflight_fakes import _patch_unretrieved_callback
 from _log_fakes import RecordingLogger
 
@@ -20,8 +19,7 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """同一 cache_key 的并发 miss 复用同一在途 task，底层仅调用一次。"""
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     # 显式传入 roots_key，使 cache_key 不依赖工作区根目录上下文
     roots_key = ("test-roots",)
 
@@ -59,8 +57,7 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     _prepare_inflight 由 task 完成时的 finally 清理，保护共享同一 task 的等待者
     不被连带取消。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     # 显式传入 roots_key，使 cache_key 不依赖工作区根目录上下文
     roots_key = ("test-roots",)
 
@@ -117,8 +114,7 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     等待者 await asyncio.shield(inflight)，取消仅作用于其自身的外层 await，
     底层 task 由完成时的 finally 清理在途登记。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     roots_key = ("test-roots",)
 
     call_count = 0
@@ -167,8 +163,7 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
 
     异常在缓存写入前抛出，_prepare_inflight 由 task 完成时的 finally 清空。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     roots_key = ("test-roots",)
 
     call_count = 0
@@ -217,8 +212,7 @@ async def test_prepare_failure_consumed_by_waiters_not_armed(
     """
     fired = _patch_unretrieved_callback(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     roots_key = ("test-roots",)
     inner_started = asyncio.Event()
 
@@ -256,8 +250,7 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
     """创建者被取消且无其他等待者时，inflight 失败经登记的回调检索且仅触发一次。"""
     fired = _patch_unretrieved_callback(monkeypatch)
 
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     roots_key = ("test-roots",)
     inner_started = asyncio.Event()
 
@@ -296,8 +289,7 @@ async def test_prepare_rechecks_cache_after_semaphore_wait(
     等待期间同键先完成者已写入缓存并清在途登记，获槽后若只查在途注册表会
     重复执行读盘与编码。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
     roots_key = ("test-roots",)
 
@@ -345,8 +337,7 @@ async def test_prepare_rechecks_inflight_after_semaphore_wait(
     """
     from seedream_mcp.utils.core.inflight import InflightEntry
 
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
 
     call_count = 0
@@ -402,8 +393,7 @@ async def test_waiter_cancel_then_creator_consumes_failure_no_fallback_log(
     capture = RecordingLogger()
     monkeypatch.setattr(inflight, "logger", capture)
 
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     roots_key = ("test-roots",)
     inner_started = asyncio.Event()
 
@@ -447,8 +437,7 @@ async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
     capture = RecordingLogger()
     monkeypatch.setattr(inflight, "logger", capture)
 
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     roots_key = ("test-roots",)
     inner_started = asyncio.Event()
 

@@ -2,7 +2,7 @@
 
 提供 open_no_follow_read、open_regular_read、open_temp_fd、atomic_replace_from_fd
 与同步变体 atomic_replace_from_fd_sync，另有 has_reparse_attribute 判定 NTFS
-junction 等非符号链接型 reparse point，供 io_path 的浏览扫描与 io_storage 的
+junction 等非符号链接型 reparse point，供 io_scan 的目录扫描与 io_storage 的
 清理遍历使用。共享函数抛 OSError，由调用方按各自异常类型包装。
 
 残余风险：O_NOFOLLOW 仅保护最终路径分量，不阻止内核 open 跟随中间目录的符号链接；
@@ -39,6 +39,14 @@ class SymlinkRejectedError(OSError):
     """
 
 
+class NonRegularFileError(OSError):
+    """打开成功但句柄不是常规文件的拒绝，errno 对齐 EINVAL。
+
+    FIFO 等特殊文件在非阻塞防护下可被打开，阻塞读取会钉死工作线程，形态拒绝
+    收敛在打开单点；子类化 OSError 使既有 except OSError 调用方不受影响。
+    """
+
+
 def _cleanup_temp_file(temp_path: Path) -> None:
     """清理临时文件，忽略不存在，清理失败记录警告以暴露残留。
 
@@ -53,11 +61,14 @@ def _cleanup_temp_file(temp_path: Path) -> None:
         get_logger().warning("清理临时文件失败: {} -> {}", temp_path, exc)
 
 
-def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
-    """在无 O_NOFOLLOW 的平台兜底打开文件，返回文件描述符。
+def _open_no_follow_fallback(
+    path_str: str, flags: int, *, action: str
+) -> tuple[int, os.stat_result]:
+    """在无 O_NOFOLLOW 的平台兜底打开文件，返回文件描述符与其 fstat 结果。
 
     lstat 取最终分量指纹，符号链接直接拒绝；open 后用 fstat 复核 fd 仍是同一对象，
-    期间被替换则 st_ino/st_dev 不一致，据此拒绝，闭合 TOCTOU 竞态。
+    期间被替换则 st_ino/st_dev 不一致，据此拒绝，闭合 TOCTOU 竞态。复核所用的
+    fstat 结果随 fd 返回，调用方不再对同一 fd 二次 fstat。
 
     Args:
         path_str: 目标路径字符串。
@@ -80,34 +91,7 @@ def _open_no_follow_fallback(path_str: str, flags: int, *, action: str) -> int:
     if post_st.st_ino != pre_st.st_ino or post_st.st_dev != pre_st.st_dev:
         os.close(fd)
         raise SymlinkRejectedError(errno.ELOOP, f"打开期间最终分量被替换，拒绝{action}", path_str)
-    return fd
-
-
-def open_no_follow_read(path: PathLike, *, extra_open_flags: int = 0) -> IO[bytes]:
-    """以 O_RDONLY | O_NOFOLLOW 打开文件，返回二进制只读文件对象。
-
-    最终路径分量若为符号链接则拒绝：支持 O_NOFOLLOW 的平台由内核在 open 时原子
-    拒绝，不支持平台退化为 lstat/fstat 同一性比对兜底。
-
-    Args:
-        path: 目标文件路径，最终路径分量不得为符号链接。
-        extra_open_flags: 追加到 os.open 的标志位，默认 0 不改变行为。
-
-    Raises:
-        SymlinkRejectedError: 最终路径分量为符号链接或打开期间被换链。
-        OSError: 其他打开失败。
-    """
-    no_follow = getattr(os, "O_NOFOLLOW", 0)
-    if no_follow:
-        try:
-            fd = os.open(str(path), os.O_RDONLY | no_follow | extra_open_flags)
-        except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.EMLINK):
-                raise SymlinkRejectedError(errno.ELOOP, "拒绝读取符号链接", str(path)) from exc
-            raise
-        return os.fdopen(fd, "rb")
-    fd = _open_no_follow_fallback(str(path), os.O_RDONLY | extra_open_flags, action="读取")
-    return os.fdopen(fd, "rb")
+    return fd, post_st
 
 
 def _clear_nonblock_flag(handle: IO[bytes]) -> None:
@@ -124,29 +108,90 @@ def _clear_nonblock_flag(handle: IO[bytes]) -> None:
     fcntl.fcntl(fd, fcntl.F_SETFL, current & ~nonblock)
 
 
-def open_regular_read(path: PathLike) -> tuple[IO[bytes], os.stat_result] | None:
-    """以 no-follow 语义打开常规文件，返回只读句柄与其 fstat 结果。
+def _open_no_follow_read_with_stat(path: PathLike) -> tuple[IO[bytes], os.stat_result]:
+    """以 O_RDONLY | O_NOFOLLOW 打开常规文件，返回二进制只读句柄与其 fstat 结果。
 
-    webapp 页面与原图直出的共享打开序列：打开后立即取句柄 fstat，响应头与
-    读出内容恒描述同一打开的 inode，消除 stat 与发送期按路径重开之间文件
-    被替换的竞态窗口。POSIX 打开阶段携带非阻塞防护标志防特殊文件路径阻塞
-    打开，fstat 验明常规文件后清除 O_NONBLOCK 再交出句柄。
+    最终路径分量若为符号链接则拒绝：支持 O_NOFOLLOW 的平台由内核在 open 时原子
+    拒绝，不支持平台退化为 lstat/fstat 同一性比对兜底。POSIX 打开阶段携带
+    非阻塞防护标志防特殊文件路径阻塞 open，交出句柄前清除。常规文件形态复核
+    与返回的 stat 结果取自同一 fd 的单次 fstat，目录与 FIFO 等特殊文件在打开
+    单点拒绝，读取不进入阻塞。
+
+    Args:
+        path: 目标文件路径，最终路径分量不得为符号链接。
+
+    Raises:
+        SymlinkRejectedError: 最终路径分量为符号链接或打开期间被换链。
+        NonRegularFileError: 打开成功但句柄不是常规文件。
+        OSError: 其他打开或 fstat 失败；失败时 fd 先关闭再抛，不泄漏。
+    """
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | no_follow | _NONBLOCKING_OPEN_FLAGS
+    if no_follow:
+        try:
+            fd = os.open(str(path), flags)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                raise SymlinkRejectedError(errno.ELOOP, "拒绝读取符号链接", str(path)) from exc
+            raise
+        try:
+            stat_result = os.fstat(fd)
+        except OSError:
+            os.close(fd)
+            raise
+    else:
+        fd, stat_result = _open_no_follow_fallback(str(path), flags, action="读取")
+    if not stat.S_ISREG(stat_result.st_mode):
+        os.close(fd)
+        raise NonRegularFileError(errno.EINVAL, "拒绝读取非常规文件", str(path))
+    handle = os.fdopen(fd, "rb")
+    _clear_nonblock_flag(handle)
+    return handle, stat_result
+
+
+def open_no_follow_read(path: PathLike) -> IO[bytes]:
+    """以 O_RDONLY | O_NOFOLLOW 打开常规文件，返回二进制只读文件对象。
+
+    符号链接、非常规文件形态与 FIFO 阻塞防护在打开单点拒绝，打开序列与
+    拒绝语义统一收在 _open_no_follow_read_with_stat。
+
+    Args:
+        path: 目标文件路径，最终路径分量不得为符号链接。
+
+    Raises:
+        SymlinkRejectedError: 最终路径分量为符号链接或打开期间被换链。
+        NonRegularFileError: 打开成功但句柄不是常规文件。
+        OSError: 其他打开失败。
+    """
+    handle, _stat_result = _open_no_follow_read_with_stat(path)
+    return handle
+
+
+def open_regular_read(path: PathLike) -> tuple[IO[bytes], os.stat_result] | None:
+    """以 no-follow 语义打开常规文件，返回只读句柄与其打开时刻的 fstat 结果。
+
+    webapp 页面与原图直出的共享打开序列：stat 结果取自打开序列内的单次
+    fstat，响应头与读出内容恒描述同一打开的 inode，消除 stat 与发送期按
+    路径重开之间文件被替换的竞态窗口。
 
     Args:
         path: 目标文件路径，最终路径分量不得为符号链接。
 
     Returns:
         ``(handle, stat_result)`` 二元组；打开成功但非常规文件时为 None，
-        句柄已关闭；打开阶段目录形态异常（Windows PermissionError、POSIX
+        fd 已关闭；打开阶段目录形态异常（Windows PermissionError、POSIX
         IsADirectoryError）经路径 stat 判定为目录或非常规文件时同样归 None。
 
     Raises:
         SymlinkRejectedError: 最终路径分量为符号链接或打开期间被换链。
-        OSError: 其他打开或 fstat 失败；fstat 失败先关句柄再抛。常规文件的
+        OSError: 其他打开或 fstat 失败；fstat 失败先关 fd 再抛。常规文件的
             PermissionError 原样传播，保留权限类失败的诊断信号。
     """
     try:
-        handle = open_no_follow_read(path, extra_open_flags=_NONBLOCKING_OPEN_FLAGS)
+        return _open_no_follow_read_with_stat(path)
+    except NonRegularFileError:
+        # POSIX 打开目录与特殊文件成功，形态拒绝已在打开单点给出。
+        return None
     except (PermissionError, IsADirectoryError):
         # Windows 对目录的 open 报 EACCES、POSIX 报 EISDIR；路径 stat 仅作形态
         # 分类，stat 失败或仍为常规文件时原异常传播。
@@ -157,16 +202,6 @@ def open_regular_read(path: PathLike) -> tuple[IO[bytes], os.stat_result] | None
         if mode is not None and not stat.S_ISREG(mode):
             return None
         raise
-    try:
-        stat_result = os.fstat(handle.fileno())
-    except OSError:
-        handle.close()
-        raise
-    if not stat.S_ISREG(stat_result.st_mode):
-        handle.close()
-        return None
-    _clear_nonblock_flag(handle)
-    return handle, stat_result
 
 
 def open_temp_fd(dir_path: PathLike, *, suffix: str = ".part") -> tuple[int, Path]:
@@ -192,8 +227,8 @@ async def atomic_replace_from_fd(
     writer: Callable[[int], Awaitable[Path | None]],
     suffix: str = ".part",
     fsync: bool = False,
-) -> Path:
-    """经随机名临时文件原子落盘，返回实际创建的随机临时路径。
+) -> None:
+    """经随机名临时文件原子落盘。
 
     统一 io_storage 与 io_download 的落盘协议：``open_temp_fd`` 在 ``final_path``
     同目录创建随机名临时文件规避符号链接 TOCTOU，``writer`` 接收 fd 异步写入，完成
@@ -210,9 +245,6 @@ async def atomic_replace_from_fd(
         suffix: 临时文件名后缀，用于可读性与调试定位。
         fsync: 替换前是否对 fd 执行 os.fsync。默认关闭；开启后大幅缩小但未消除
             rename 的持久化窗口，POSIX 上未 fsync 父目录时崩溃可能丢失 rename 本身。
-
-    Returns:
-        实际创建的随机名临时路径（替换成功后已重命名为最终路径）。
 
     Raises:
         OSError: 临时文件创建或原子替换失败；writer 抛出的异常原样上抛。
@@ -233,7 +265,6 @@ async def atomic_replace_from_fd(
         if not replaced:
             # shield：二级取消只打断外层等待，排队中的清理仍执行，避免 .part 残留
             await asyncio.shield(asyncio.to_thread(_cleanup_temp_file, temp_path))
-    return temp_path
 
 
 _FILE_ATTRIBUTE_REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
@@ -255,8 +286,8 @@ def atomic_replace_from_fd_sync(
     writer: Callable[[int], None],
     suffix: str = ".part",
     fsync: bool = False,
-) -> Path:
-    """经随机名临时文件同步原子落盘，返回实际创建的随机临时路径。
+) -> None:
+    """经随机名临时文件同步原子落盘。
 
     atomic_replace_from_fd 的同步版本，供 save_bytes 等同步公共接口复用，避免在
     事件循环内 asyncio.run 驱动异步骨架；调用方须处于可阻塞的同步上下文。writer
@@ -268,9 +299,6 @@ def atomic_replace_from_fd_sync(
         writer: 接收 fd 的同步写入回调，须以 closefd=False 包装 fd。
         suffix: 临时文件名后缀，用于可读性与调试定位。
         fsync: 替换前是否对 fd 执行 os.fsync，语义与 atomic_replace_from_fd 一致。
-
-    Returns:
-        实际创建的随机名临时路径（替换成功后已重命名为 final_path）。
 
     Raises:
         OSError: 临时文件创建或原子替换失败；writer 抛出的异常原样上抛。
@@ -289,4 +317,3 @@ def atomic_replace_from_fd_sync(
     finally:
         if not replaced:
             _cleanup_temp_file(temp_path)
-    return temp_path

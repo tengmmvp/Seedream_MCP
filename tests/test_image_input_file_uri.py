@@ -3,8 +3,8 @@
 将 MCP Roots 声明的 file:// URI 转为本地路径，拒绝非 localhost 主机的
 file://host/share，避免 Windows 下触发 SMB 连接泄露凭据。
 
-file://localhost//server/share 形式 UNC 的行为取决于 Path.resolve 对不可达
-UNC 主机是否抛错，非确定故不断言；SMB 防护由拒绝非 localhost netloc 保证。
+file://localhost//server/share 的 path 部分为 UNC 形态，resolve 前经
+is_unc_path 拒绝，行为跨平台确定；SMB 防护由 netloc 与 path 两层拒绝共同保证。
 """
 
 from __future__ import annotations
@@ -55,3 +55,8 @@ def test_file_uri_to_path_accepts_localhost_with_drive() -> None:
     resolved = _file_uri_to_path("file://localhost/C:/path.png")
 
     assert resolved is not None
+
+
+def test_file_uri_to_path_rejects_localhost_unc_path() -> None:
+    """file://localhost//server/share 的 path 部分为 UNC 形态，resolve 前拒绝。"""
+    assert _file_uri_to_path("file://localhost//server/share") is None

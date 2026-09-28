@@ -47,16 +47,6 @@ def test_parse_bool_none_returns_false() -> None:
     assert parse_bool(None) is False
 
 
-def test_deprecated_model_tokens_is_immutable_frozenset() -> None:
-    """已下线模型 token 清单为 frozenset，公共清单不可被原地变异。"""
-    from seedream_mcp.utils.model.model_capabilities import DEPRECATED_MODEL_TOKENS
-
-    assert isinstance(DEPRECATED_MODEL_TOKENS, frozenset)
-    assert "doubao-seedream-3-0" in DEPRECATED_MODEL_TOKENS
-    with pytest.raises(AttributeError):
-        DEPRECATED_MODEL_TOKENS.add("doubao-seedream-x")  # type: ignore[attr-defined]
-
-
 # ==================== validate_watermark ====================
 
 
@@ -507,3 +497,13 @@ def test_capability_error_messages_follow_capability_table(
     with pytest.raises(SeedreamValidationError) as tools_info:
         validate_generation_tools([{"type": "web_search"}], "doubao-seedream-5-0-pro-260628")
     assert "doubao-seedream-4.0" in tools_info.value.message
+
+
+def test_deprecated_model_tokens_is_immutable_frozenset() -> None:
+    """已下线模型 token 清单为 frozenset，公共清单不可被原地变异。"""
+    from seedream_mcp.utils.model.model_capabilities import DEPRECATED_MODEL_TOKENS
+
+    assert isinstance(DEPRECATED_MODEL_TOKENS, frozenset)
+    assert "doubao-seedream-3-0" in DEPRECATED_MODEL_TOKENS
+    with pytest.raises(AttributeError):
+        DEPRECATED_MODEL_TOKENS.add("doubao-seedream-x")  # type: ignore[attr-defined]

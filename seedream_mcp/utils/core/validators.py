@@ -1,7 +1,7 @@
 """Seedream MCP 参数校验模块。
 
 集中处理图像生成各工具的入参校验，覆盖尺寸、水印、像素维度、参考图数量、
-文件大小、宽高比、输出格式、提示词长度、组图总数与并行参数等。
+宽高比、输出格式、提示词长度、组图总数与并行参数等。
 
 设计要点：
 - 模型能力数据驱动校验：与模型相关的规则，含尺寸档位、像素区间、输出格式、联网
@@ -184,13 +184,13 @@ def validate_prompt(prompt: str, max_chinese_chars: int = 300, max_english_words
 
     ensure_utf8_encodable(prompt, "提示词包含无法编码的字符", "prompt")
 
-    # 短文本粗筛：长度不超过中文阈值时两项计数必然在限内，跳过正则扫描避免物化
-    # 大列表。计数扫描为全量 O(n)，超长提示词的扫描成本由调用侧
+    # 短文本粗筛：长度不超过两阈值较小者时两项计数必然在限内，跳过正则扫描。
+    # 计数扫描为全量 O(n)，超长提示词的扫描成本由调用侧
     # client._validate_common_generation_params 统一经工作线程执行，函数自身保持
     # 同步契约。
     chinese_count = 0
     english_word_count = 0
-    if len(prompt) > max_chinese_chars:
+    if len(prompt) > min(max_chinese_chars, max_english_words):
         # subn 以替换计数取代 findall 物化匹配列表，超长中文提示词下仅一次分配。
         chinese_count = CJK_CHAR_PATTERN.subn("", prompt)[1]
         english_word_count = ENGLISH_WORD_PATTERN.subn("", prompt)[1]

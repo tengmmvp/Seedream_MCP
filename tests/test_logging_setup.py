@@ -27,9 +27,11 @@ _RecordException = namedtuple("_RecordException", "type value traceback")
 
 
 @pytest.fixture
-def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> None:
-    """以替身替换 setup_logging 模块内的 loguru 全局，防止改写真实全局 handler。"""
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", RecordingLogger())
+def _isolate_loguru(monkeypatch: pytest.MonkeyPatch) -> RecordingLogger:
+    """替换 setup_logging 模块内的 loguru 全局并返回替身，防止改写真实全局 handler。"""
+    fake = RecordingLogger()
+    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
+    return fake
 
 
 def test_setup_logging_respects_force_standard_logging_false(
@@ -90,16 +92,13 @@ def test_security_marked_warning_bypasses_level_filter(tmp_path: Path) -> None:
 
 
 def test_sink_level_gate_keeps_security_warning_reachable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, _isolate_loguru: RecordingLogger
 ) -> None:
     """sink 级别门取配置与 WARNING 的较小者，低级别记录在记录构造前丢弃。
 
     级别门不高于 WARNING 保证 security 告警可过门，普通记录仍由 filter 按
     配置级别过滤。
     """
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
-
     setup_logging(
         log_level="ERROR",
         log_file=str(tmp_path / "log"),
@@ -107,7 +106,7 @@ def test_sink_level_gate_keeps_security_warning_reachable(
         enable_file=True,
     )
 
-    assert [kwargs["level"] for kwargs in fake.add_kwargs] == [30, 30]
+    assert [kwargs["level"] for kwargs in _isolate_loguru.add_kwargs] == [30, 30]
 
 
 def test_setup_logging_rejects_unknown_level_name(
@@ -119,19 +118,16 @@ def test_setup_logging_rejects_unknown_level_name(
 
 
 def test_console_sink_colorize_follows_tty_autodetection(
-    monkeypatch: pytest.MonkeyPatch,
+    _isolate_loguru: RecordingLogger,
 ) -> None:
     """控制台 sink 的 colorize 保持 None，由 loguru 按流是否 TTY 自动决定。
 
     强制 True 会使重定向到文件或管道的非终端 sink 输出 ANSI 转义序列，污染采集日志。
     """
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
-
     setup_logging(log_level="INFO", enable_console=True, enable_file=False)
 
-    assert len(fake.add_kwargs) == 1
-    assert fake.add_kwargs[0]["colorize"] is None
+    assert len(_isolate_loguru.add_kwargs) == 1
+    assert _isolate_loguru.add_kwargs[0]["colorize"] is None
 
 
 def test_setup_logging_suppresses_third_party_info_noise(
@@ -191,7 +187,7 @@ def test_setup_logging_skips_noise_suppression_when_interception_not_installed(
 
 
 def test_setup_logging_warns_when_root_handlers_block_bridge(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: RecordingLogger
 ) -> None:
     """root logger 已有 handler 且未强制接管时输出 warning，提示标准库日志未被拦截。
 
@@ -207,8 +203,6 @@ def test_setup_logging_warns_when_root_handlers_block_bridge(
         captured_kwargs.update(kwargs)
 
     monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(
         log_level="INFO",
@@ -217,21 +211,19 @@ def test_setup_logging_warns_when_root_handlers_block_bridge(
         force_standard_logging=False,
     )
 
-    assert len(fake.warnings) == 1
-    assert "未被 loguru 拦截" in fake.warnings[0]
-    assert "logger.remove" in fake.warnings[0]
+    assert len(_isolate_loguru.warnings) == 1
+    assert "未被 loguru 拦截" in _isolate_loguru.warnings[0]
+    assert "logger.remove" in _isolate_loguru.warnings[0]
     assert captured_kwargs["force"] is False
 
 
 def test_setup_logging_no_warning_when_force_takes_over(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: RecordingLogger
 ) -> None:
     """force=True 强制接管时 basicConfig 重装 root handlers，不输出告警。"""
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [logging.NullHandler()])
     monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(
         log_level="INFO",
@@ -240,26 +232,24 @@ def test_setup_logging_no_warning_when_force_takes_over(
         force_standard_logging=True,
     )
 
-    assert fake.warnings == []
+    assert _isolate_loguru.warnings == []
 
 
 def test_setup_logging_no_warning_when_root_has_no_handlers(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: RecordingLogger
 ) -> None:
     """root 无 handler 时 basicConfig 正常安装桥接器，无需告警。"""
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [])
     monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(log_level="INFO", enable_console=False, enable_file=False)
 
-    assert fake.warnings == []
+    assert _isolate_loguru.warnings == []
 
 
 def test_setup_logging_no_warning_when_all_root_handlers_are_bridge(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: RecordingLogger
 ) -> None:
     """root handlers 全为本桥接器（重复初始化）时不告警，重复启动无噪音。"""
     from seedream_mcp.utils.core.logs import InterceptHandler
@@ -267,16 +257,14 @@ def test_setup_logging_no_warning_when_all_root_handlers_are_bridge(
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [InterceptHandler()])
     monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(log_level="INFO", enable_console=False, enable_file=False)
 
-    assert fake.warnings == []
+    assert _isolate_loguru.warnings == []
 
 
 def test_setup_logging_warns_when_mixed_root_handlers_contain_foreign(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, _isolate_loguru: RecordingLogger
 ) -> None:
     """root handlers 混入外来 handler（桥接器与 NullHandler 并存）时仍告警。"""
     from seedream_mcp.utils.core.logs import InterceptHandler
@@ -284,13 +272,11 @@ def test_setup_logging_warns_when_mixed_root_handlers_contain_foreign(
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [InterceptHandler(), logging.NullHandler()])
     monkeypatch.setattr(logging, "basicConfig", lambda *a, **k: None)
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
 
     setup_logging(log_level="INFO", enable_console=False, enable_file=False)
 
-    assert len(fake.warnings) == 1
-    assert "未被 loguru 拦截" in fake.warnings[0]
+    assert len(_isolate_loguru.warnings) == 1
+    assert "未被 loguru 拦截" in _isolate_loguru.warnings[0]
 
 
 # ==================== 文件日志默认路径与桥接帧定位 ====================
@@ -322,11 +308,9 @@ def test_setup_logging_default_file_lands_under_seedream_logs(
 
 
 def test_setup_logging_file_sink_applies_rotation_and_retention_params(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, _isolate_loguru: RecordingLogger
 ) -> None:
     """文件 sink 的轮转与保留值按参数构造，缺省为 5 MB / 7 天。"""
-    fake = RecordingLogger()
-    monkeypatch.setattr("seedream_mcp.utils.core.logs.logger", fake)
     log_file = str(tmp_path / "seedream.log")
 
     setup_logging(
@@ -337,7 +321,7 @@ def test_setup_logging_file_sink_applies_rotation_and_retention_params(
         rotation_mb=3,
         retention_days=2,
     )
-    explicit = fake.add_kwargs[-1]
+    explicit = _isolate_loguru.add_kwargs[-1]
     assert explicit["rotation"] == "3 MB"
     assert explicit["retention"] == "2 days"
 
@@ -347,7 +331,7 @@ def test_setup_logging_file_sink_applies_rotation_and_retention_params(
         enable_console=False,
         enable_file=True,
     )
-    default = fake.add_kwargs[-1]
+    default = _isolate_loguru.add_kwargs[-1]
     assert default["rotation"] == "5 MB"
     assert default["retention"] == "7 days"
 
@@ -439,6 +423,53 @@ def test_patcher_handles_record_without_exception() -> None:
     _strip_message_control_chars(record)
 
     assert record["message"] == "plain"
+
+
+def test_patcher_skips_non_str_message(
+    _isolate_loguru: RecordingLogger,
+) -> None:
+    """非 str 消息跳过改写且不误告警，业务侧按原样落日志。"""
+    for message in (123, b"bytes", None):
+        record: dict[str, Any] = {"message": message}
+
+        _strip_message_control_chars(record)
+
+        assert record["message"] is message
+        assert _isolate_loguru.warnings == []
+
+
+def test_patcher_tolerates_missing_message_key() -> None:
+    """缺失 message 键的记录原样通过，不因取键失败外泄异常。"""
+    record: dict[str, Any] = {"exception": None}
+
+    _strip_message_control_chars(record)
+
+    assert "message" not in record
+
+
+def test_patcher_warns_when_exception_cleaning_fails(
+    _isolate_loguru: RecordingLogger,
+) -> None:
+    """异常清洗的意外失败不外泄不静默，记录按已清洗部分落日志并输出 warning。"""
+
+    class _PoisonArgs:
+        """args 属性读取即抛错，模拟异常对象自身的意外行为。"""
+
+        @property
+        def args(self) -> tuple[object, ...]:
+            raise RuntimeError("poison args")
+
+    record: dict[str, Any] = {
+        "message": "a\r\nb",
+        "exception": _RecordException(ValueError, _PoisonArgs(), None),
+    }
+
+    _strip_message_control_chars(record)
+
+    assert record["message"] == "a  b"
+    assert len(_isolate_loguru.warnings) == 1
+    assert "清洗失败" in _isolate_loguru.warnings[0]
+    assert "RuntimeError" in _isolate_loguru.warnings[0]
 
 
 # ==================== log_unretrieved_task_exception ====================
@@ -536,3 +567,70 @@ async def test_arm_unretrieved_exception_logging_silent_when_task_succeeds(
     await asyncio.sleep(0)
 
     assert capture.warnings == []
+
+
+async def test_arm_unretrieved_exception_logging_rearms_done_task() -> None:
+    """task 已 done 后的重复登记仍重排回调，复查窗口错过的孤儿失败不静默。"""
+    from asyncio import Task
+
+    async def failing() -> None:
+        raise RuntimeError("late orphan")
+
+    task = asyncio.get_running_loop().create_task(failing())
+    while not task.done():
+        await asyncio.sleep(0)
+
+    calls: list[Task[None]] = []
+
+    def counting_callback(done_task: Task[None]) -> None:
+        calls.append(done_task)
+
+    arm_unretrieved_exception_logging(task, counting_callback)
+    arm_unretrieved_exception_logging(task, counting_callback)
+    await asyncio.sleep(0)
+
+    assert calls == [task, task]
+
+
+async def test_inflight_entry_orphan_failure_logged_once_across_rearm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """InflightEntry 的同一孤儿失败经已完成 task 上的重复登记至多记录一次。
+
+    已 done task 的重复登记会重排回调复查，复查通过若无已记录标记，同一失败
+    会再次入日志。
+    """
+    from seedream_mcp.utils.core import inflight
+
+    capture = RecordingLogger()
+    monkeypatch.setattr(inflight, "logger", capture)
+
+    started = asyncio.Event()
+
+    async def failing() -> str:
+        started.set()
+        await asyncio.sleep(0.05)
+        raise RuntimeError("orphan failed")
+
+    task = asyncio.get_running_loop().create_task(failing())
+    entry = inflight.InflightEntry(task)
+
+    consumer = asyncio.ensure_future(entry.consume())
+    await started.wait()
+    consumer.cancel()
+    while not consumer.done():
+        await asyncio.sleep(0)
+
+    while not task.done():
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert capture.warnings == ["后台共享任务失败: orphan failed"]
+
+    # 已完成 task 的 consume 同步送达结果，此处直接模拟结果送达前被取消消费者的
+    # finally 登记路径。
+    entry.arm_orphan_logging()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # 重排的回调复查后跳过，同一失败不二次入日志
+    assert capture.warnings == ["后台共享任务失败: orphan failed"]

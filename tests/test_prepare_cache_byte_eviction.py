@@ -15,10 +15,11 @@ def _key(tag: str) -> tuple[str, tuple[str, ...], tuple[float, int]]:
 
 
 def _make_client(max_bytes: int, max_entries: int = 1000) -> SeedreamClient:
-    client = SeedreamClient(SeedreamConfig(api_key="k"))
-    client._image_preparer._prepare_cache_max_bytes = max_bytes
-    client._image_preparer._prepare_cache_max = max_entries
-    return client
+    return SeedreamClient(
+        SeedreamConfig(
+            api_key="k", prepare_cache_max=max_entries, prepare_cache_max_bytes=max_bytes
+        )
+    )
 
 
 def test_cache_evicts_lru_until_byte_budget_fits() -> None:

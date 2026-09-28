@@ -157,7 +157,8 @@ async def test_prepare_remote_inputs_skip_read_scope_evaluation(
         raise OSError("simulated unresolvable path")
 
     monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(Path("/configured-save-root")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
+    # 补丁落在实际解析入口，Windows 的无盘符声明不经 resolve_cached_data_root
+    monkeypatch.setattr(io_path_module, "resolve_cached_explicit_images_root", _unresolvable)
 
     url = "https://cdn.example.com/x.png"
     preparer = ImagePreparer(

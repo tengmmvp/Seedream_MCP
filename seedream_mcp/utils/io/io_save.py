@@ -10,7 +10,6 @@ import asyncio
 import base64
 import re
 import time
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
@@ -29,6 +28,7 @@ from ..core.formats import (
 )
 from ..core.logs import get_logger
 from ..core.loop_bound import loop_bound_semaphore
+from ..core.throttles import ThrottleRegistry
 from .io_download import DownloadManager, DownloadError
 from .io_url import sanitize_url
 from .io_storage import FileManager, FileManagerError, current_save_time, get_file_manager
@@ -42,9 +42,9 @@ _CLEANUP_MIN_INTERVAL_SECONDS = 3600
 # 于完整节流间隔的下限，高频保存下持续失败的清理不再每次调用都触发全目录扫描。
 _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS = 60
 # 按清理根目录记录最近清理时间，跨请求共享节流；不同清理根独立，互不抑制。
-# 用 OrderedDict 并设上限，避免异常多变的清理根使键无界增长耗尽内存。
+# 注册表设容量上限，避免异常多变的清理根使键无界增长耗尽内存。
 _CLEANUP_LAST_RUN_MAX_ENTRIES = 16
-_cleanup_last_run: OrderedDict[str, float] = OrderedDict()
+_cleanup_last_run: ThrottleRegistry[str] = ThrottleRegistry(_CLEANUP_LAST_RUN_MAX_ENTRIES)
 # 保护 _cleanup_last_run 的检查与写入，避免并发请求同时通过节流检查重复触发清理。
 _cleanup_lock = asyncio.Lock()
 # 在途的后台清理任务，供进程级退出清理 drain_background_cleanup_tasks 等待完成。
@@ -59,7 +59,7 @@ def reset_cleanup_state() -> None:
     """
     global _cleanup_lock, _cleanup_last_run, _cleanup_tasks
     _cleanup_lock = asyncio.Lock()
-    _cleanup_last_run = OrderedDict()
+    _cleanup_last_run = ThrottleRegistry(_CLEANUP_LAST_RUN_MAX_ENTRIES)
     _cleanup_tasks = set()
 
 
@@ -370,12 +370,7 @@ class AutoSaveManager:
             previous = _cleanup_last_run.get(cleanup_key, 0.0)
             if now - previous < _CLEANUP_MIN_INTERVAL_SECONDS:
                 return
-            # 写入后移到链尾保持真 LRU：对已有键赋值不移动位置，刚刷新的节流时间戳
-            # 若滞留链首会被容量驱逐，同目录下次保存会误判为从未节流而并发触发清理。
-            _cleanup_last_run[cleanup_key] = now
-            _cleanup_last_run.move_to_end(cleanup_key)
-            while len(_cleanup_last_run) > _CLEANUP_LAST_RUN_MAX_ENTRIES:
-                _cleanup_last_run.popitem(last=False)
+            _cleanup_last_run.set(cleanup_key, now)
         # 后台执行清理，不阻塞当前请求返回；失败写入短退避时间戳供下次重试。
         task = asyncio.create_task(self._run_cleanup_in_background(cleanup_key))
         _cleanup_tasks.add(task)
@@ -409,14 +404,15 @@ class AutoSaveManager:
         """清理失败后写入短退避时间戳，使失败重试有独立节流下限。
 
         时间戳取 now - interval + backoff 形态，下次调用须再等待退避秒数方可重试，
-        避免高频保存下持续失败的清理退化为每次保存都扫描目录；与 _maybe_cleanup
-        同步移到链尾，保持驱逐按最近使用序。
+        避免高频保存下持续失败的清理退化为每次保存都扫描目录。
         """
         async with _cleanup_lock:
-            _cleanup_last_run[cleanup_key] = (
-                time.time() - _CLEANUP_MIN_INTERVAL_SECONDS + _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
+            _cleanup_last_run.set(
+                cleanup_key,
+                time.time()
+                - _CLEANUP_MIN_INTERVAL_SECONDS
+                + _CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS,
             )
-            _cleanup_last_run.move_to_end(cleanup_key)
 
     def _extension_from_mime(self, mime: str | None) -> str:
         """根据 MIME 类型推断文件扩展名，未知类型回退默认图片扩展名。"""
@@ -600,9 +596,9 @@ class AutoSaveManager:
             def _prepare_and_save() -> tuple[dict[str, Any], str | None]:
                 mime, payload, _ = parse_data_uri(b64_data)
                 content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
-                # payload 为 parse_data_uri 对大 base64 串的整份拷贝，解码完成即释放，
-                # 写盘期间仅并存 b64 原文与解码字节两份，约为 b64 文本的 1.75 倍，
-                # 5 并发 × 50MB 上限下瞬态约 580MB。
+                # payload 为 parse_data_uri 对大 base64 串的整份拷贝，解码完成即释放；
+                # 峰值在解码瞬间，原文、拷贝与解码字节并存约为 b64 文本的 2.75 倍，
+                # 5 并发 × 50MB 上限下瞬态约 917MB。
                 del payload
                 save_path = self.file_manager.create_save_path_from_extension(
                     prompt=prompt or "",
@@ -612,9 +608,9 @@ class AutoSaveManager:
                     content_hash=content_hash,
                     date_folder=self.date_folder,
                 )
-                # save_path 由 create_save_path_from_extension 返回，父目录已确保存在，跳过重复 mkdir。
+                # 写前重建父目录，防后台空目录回收竞态使无 URL 可回退的解码数据丢失。
                 write_result = self.file_manager.save_bytes(
-                    save_path, content_bytes, ensure_parent=False, fsync=self.fsync
+                    save_path, content_bytes, fsync=self.fsync
                 )
                 return write_result, mime
 

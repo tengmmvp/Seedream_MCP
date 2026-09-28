@@ -2,7 +2,7 @@
 
 从自动保存落盘的图片生成工具结果携带的 ImageContent 预览：长边不超过
 THUMBNAIL_MAX_EDGE 像素的 JPEG，体积远小于原图，多图结果的协议消息不因预览显著
-膨胀。解码像素上限经 image_validation 的幂等注册无条件设置进程级 PIL
+膨胀。解码像素上限经 formats 的幂等注册无条件设置进程级 PIL
 MAX_IMAGE_PIXELS，不依赖调用方先经过参考图校验。单张生成失败安全跳过，不影响
 其余图片与工具结果本身。
 """
@@ -25,6 +25,7 @@ from ..core.executors import CPU_OFFLOAD_DECODE_SLOTS, run_in_cpu_pool
 from ..core.formats import MAX_IMAGE_PIXELS
 from ..core.logs import get_logger
 from ..core.loop_bound import loop_bound_semaphore
+from ..core.throttles import ThrottleRegistry
 from ..io.io_file import atomic_replace_from_fd_sync, open_no_follow_read
 
 if TYPE_CHECKING:
@@ -47,7 +48,10 @@ _THUMB_SWEEP_INTERVAL_SECONDS = 60.0
 # 落盘骨架 .thumb-tmp 的清扫宽限秒数：写入秒级完成，超宽限期仍存在的是进程
 # 中断遗留的孤儿，照常纳入驱逐。
 _THUMB_TMP_GRACE_SECONDS = 600.0
-_thumb_sweep_after = 0.0
+# 节流门键控的缓存根数上限，旋转 Roots 的长寿命进程持续换根时按 LRU 驱逐防无限增长。
+_THUMB_SWEEP_ROOTS_MAX = 16
+# 节流门按缓存根键控，多数据根并存时一处清扫不压制另一处的驱逐。
+_thumb_sweep_after: ThrottleRegistry[Path] = ThrottleRegistry(_THUMB_SWEEP_ROOTS_MAX)
 _thumb_sweep_lock = threading.Lock()
 
 # 预览张数上限：组图与并行的合法组合可达 150 张，全量内嵌会使单条 CallToolResult
@@ -102,7 +106,7 @@ def build_thumbnail_bytes(image_path: Path) -> bytes | None:
 
     try:
         # 文件对象直接交给 PIL 保持惰性流式解码，源图不整读为全量内存拷贝；
-        # 符号链接在打开时拒绝。
+        # 符号链接与 FIFO 等非常规文件在打开时拒绝。
         with open_no_follow_read(image_path) as f, Image.open(f) as image:
             # 显式头尺寸校验：PIL 全局阈值仅对 2 倍上限以上的声明抛错，1 至 2 倍
             # 区间只告警，本路径与参考图校验同口径显式拒绝，不依赖落盘侧防线。
@@ -201,13 +205,12 @@ def _store_thumbnail(thumb: Path, thumbs_root: Path, data: bytes) -> None:
 
 
 def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
-    global _thumb_sweep_after
-    if time.time() < _thumb_sweep_after:
+    if time.time() < _thumb_sweep_after.get(thumbs_root, 0.0):
         return
     if not _thumb_sweep_lock.acquire(blocking=False):
         return
     try:
-        if time.time() < _thumb_sweep_after:
+        if time.time() < _thumb_sweep_after.get(thumbs_root, 0.0):
             return
         entries: list[tuple[float, int, Path]] = []
         now = time.time()
@@ -227,7 +230,7 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
         except OSError:
             return
         # 门在完整收集成功后才推进，中途异常下个窗口可重试
-        _thumb_sweep_after = time.time() + _THUMB_SWEEP_INTERVAL_SECONDS
+        _thumb_sweep_after.set(thumbs_root, time.time() + _THUMB_SWEEP_INTERVAL_SECONDS)
     finally:
         _thumb_sweep_lock.release()
     total = sum(size for _, size, _ in entries)
@@ -249,9 +252,8 @@ def _maybe_sweep_thumbnails(thumbs_root: Path) -> None:
 
 
 def reset_thumb_sweep_gate() -> None:
-    """复位缩略图清理节流门，仅供测试隔离调用。"""
-    global _thumb_sweep_after
-    _thumb_sweep_after = 0.0
+    """复位全部缓存根的清理节流门，仅供测试隔离调用。"""
+    _thumb_sweep_after.clear()
 
 
 async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes | None:

@@ -1,7 +1,7 @@
 """图像输入校验：URL、本地文件路径与 Data URI 的格式与维度校验。
 
-涉及 I/O 的图像校验归本模块：本地文件经 O_NOFOLLOW 读取字节后交 PIL 解码校验
-维度，Data URI 经 base64 解码后同样校验；纯参数校验（尺寸、水印、prompt 等）与
+涉及 I/O 的图像校验归本模块：本地文件经 no-follow 打开并复核常规文件形态后读取
+字节，交 PIL 解码校验维度，Data URI 经 base64 解码后同样校验；纯参数校验（尺寸、水印、prompt 等）与
 宽高比常量归 validators，本模块从其导入共用。validate_image_path 组合工作区边界
 判定与统一规则校验。首次使用时进程级覆写 PIL.Image.MAX_IMAGE_PIXELS 为 36M，
 嵌入本包的宿主进程须感知该副作用。
@@ -125,11 +125,12 @@ def read_and_decode_local_image(
     field_value: str,
     format_read_error: Callable[[OSError], str],
 ) -> bytes:
-    """O_NOFOLLOW 读取本地图像字节并做限额复核与维度校验，供校验与读取两条路径复用。
+    """no-follow 读取本地图像字节并做形态复核、限额复核与维度校验，供校验与读取两条路径复用。
 
-    读取失败的文案由调用方经 format_read_error 生成；超限、维度与解码失败用两
-    条路径一致的固定文案，UnidentifiedImageError 用固定文案避免对象地址进入用户
-    消息。返回读取的字节供调用方编码复用。
+    非常规文件由 io_file.open_no_follow_read 在打开单点拒绝。读取失败的文案由
+    调用方经 format_read_error 生成；超限、维度与解码失败用两条路径一致的固定
+    文案，UnidentifiedImageError 用固定文案避免对象地址进入用户消息。返回读取
+    的字节供调用方编码复用。
 
     Args:
         path: 已通过候选定位的本地文件路径。
@@ -140,7 +141,8 @@ def read_and_decode_local_image(
         读取并通过限额复核的完整图像字节。
 
     Raises:
-        SeedreamValidationError: 读取失败、超出大小上限或维度与解码校验失败。
+        SeedreamValidationError: 读取失败、非常规文件、超出大小上限或维度与解码
+            校验失败。
     """
     try:
         with open_no_follow_read(path) as f:
@@ -173,11 +175,21 @@ def _resolve_local_image_path(file_path: str) -> Path:
     SMB 认证。
 
     Raises:
-        ValueError: 路径为 UNC 形式。
+        ValueError: 路径为 UNC 形式，或为盘符相对、win32 有根无盘符这类绕过
+            基目录解析的形态，或 win32 分量含冒号即 NTFS 备用数据流形态。
     """
     if is_unc_path(file_path):
         raise ValueError(f"拒绝 UNC 路径以避免触发 SMB 连接: {file_path}")
     raw_path = Path(file_path)
+    # 盘符相对与有根无盘符形态的 pathlib 拼接会丢弃基目录重设锚点，静默逃逸
+    # 图片目录；判定与 normalize_path 共用单一来源。
+    if is_drive_relative(raw_path):
+        raise ValueError(f"拒绝驱动器相对路径以避免绕过基目录解析: {file_path}")
+    if is_windows_rooted_without_drive(raw_path):
+        raise ValueError(f"拒绝有根无盘符路径以避免绕过基目录解析: {file_path}")
+    # 分量含冒号是 NTFS 备用数据流形态，读取会命中同文件的另一数据流。
+    if has_windows_colon_component(file_path):
+        raise ValueError(f"拒绝路径分量含冒号以避免访问 NTFS 备用数据流: {file_path}")
     if raw_path.is_absolute():
         return raw_path.resolve()
     return (_get_validation_base_dir() / raw_path).resolve()
@@ -254,7 +266,7 @@ def iter_local_candidates(
             continue
         try:
             resolved_candidate = candidate.resolve()
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             continue
         if is_absolute:
             if any(is_within_resolved(resolved_candidate, base) for base in read_scope):
@@ -286,8 +298,9 @@ def resolve_local_image_candidate(
         首个命中候选的 (物理路径, stat)；无命中时为 None。
 
     Raises:
-        SeedreamValidationError: win32 下输入路径分量含冒号，即 NTFS 备用数据流
-            形态时抛出，先于候选构造与文件读取。
+        SeedreamValidationError: 输入携带不支持的 scheme（win32 单字母盘符除外）、
+            win32 路径分量含冒号即 NTFS 备用数据流形态、路径含空字节或 win32
+            有根无盘符形态时抛出，均先于候选构造与文件读取。
     """
     # UNC 的 resolve 在 Windows 会触发 SMB 认证，须在候选构造前判定；反斜杠形态
     # 的 UNC 在 POSIX 上非绝对路径，先拼后查会丢失 UNC 前缀。
@@ -366,7 +379,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
 
     工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基目录取自环境配置，
     与 MCP Roots 来源不同，函数内不做边界断言以免误拒 Roots 授权的合法路径。维度
-    读取经 open_no_follow_read 打开最终分量；path 已由 _resolve_local_image_path
+    读取经 no-follow 打开最终分量并复核常规文件形态；path 已由 _resolve_local_image_path
     resolve 跟随符号链接，O_NOFOLLOW 仅防 resolve 与 open 之间的 TOCTOU 窗口，
     主要越界防御由调用方的边界 resolve 与比较提供。
 

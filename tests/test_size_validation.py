@@ -3,99 +3,103 @@
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.utils.core.errors import SeedreamConfigError
-from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from seedream_mcp.utils.core.validators import validate_size_for_model
+
+_MODEL_40 = "doubao-seedream-4-0-250828"
+_MODEL_45 = "doubao-seedream-4-5-251128"
+_MODEL_50 = "doubao-seedream-5-0-260128"
+_MODEL_50_PRO = "doubao-seedream-5-0-pro-260628"
 
 
 def test_validate_size_for_model_accepts_seedream_45_pixel_size() -> None:
     """4.5 模型的像素尺寸在区间内接受。"""
-    assert validate_size_for_model("2560x1440", "doubao-seedream-4-5-251128") == "2560x1440"
+    assert validate_size_for_model("2560x1440", _MODEL_45) == "2560x1440"
 
 
 def test_validate_size_for_model_accepts_seedream_50_3k_preset() -> None:
     """5.0 的 3K 档位接受。"""
-    assert validate_size_for_model("3K", "doubao-seedream-5-0-260128") == "3K"
+    assert validate_size_for_model("3K", _MODEL_50) == "3K"
 
 
 def test_validate_size_for_model_normalizes_uppercase_pixel_separator() -> None:
     """大写 X 分隔符归一化为小写后接受。"""
-    assert validate_size_for_model("2560X1440", "doubao-seedream-4-5-251128") == "2560x1440"
+    assert validate_size_for_model("2560X1440", _MODEL_45) == "2560x1440"
 
 
 def test_validate_size_for_model_accepts_seedream_50_4k_preset() -> None:
     """5.0 的 4K 档位接受。"""
-    assert validate_size_for_model("4K", "doubao-seedream-5-0-260128") == "4K"
+    assert validate_size_for_model("4K", _MODEL_50) == "4K"
 
 
 def test_validate_size_for_model_rejects_seedream_45_small_pixel_size() -> None:
     """4.5 的低于像素下限尺寸拒绝。"""
     with pytest.raises(SeedreamValidationError, match="总像素需在"):
-        validate_size_for_model("1500x1500", "doubao-seedream-4-5-251128")
+        validate_size_for_model("1500x1500", _MODEL_45)
 
 
 def test_validate_size_for_model_accepts_seedream_40_pixel_size() -> None:
     """4.0 的像素尺寸在区间内接受。"""
-    assert validate_size_for_model("1280x720", "doubao-seedream-4-0-250828") == "1280x720"
+    assert validate_size_for_model("1280x720", _MODEL_40) == "1280x720"
 
 
 def test_validate_size_for_model_rejects_seedream_40_small_pixel_size() -> None:
     """4.0 的低于像素下限尺寸拒绝。"""
     with pytest.raises(SeedreamValidationError, match="总像素需在"):
-        validate_size_for_model("800x800", "doubao-seedream-4-0-250828")
+        validate_size_for_model("800x800", _MODEL_40)
 
 
 def test_validate_size_for_model_rejects_seedream_50_oversized_pixel_size() -> None:
     """5.0 的超上限像素尺寸拒绝。"""
     with pytest.raises(SeedreamValidationError, match="doubao-seedream-5.0 模型下"):
-        validate_size_for_model("4097x4097", "doubao-seedream-5-0-260128")
+        validate_size_for_model("4097x4097", _MODEL_50)
 
 
 def test_validate_size_for_model_rejects_invalid_pixel_format() -> None:
     """非法尺寸格式拒绝。"""
     with pytest.raises(SeedreamValidationError, match="图像尺寸必须为"):
-        validate_size_for_model("abc", "doubao-seedream-4-5-251128")
+        validate_size_for_model("abc", _MODEL_45)
 
 
 def test_validate_size_for_model_leading_zero_pixels_report_range_error() -> None:
     """前导零与零宽高输入报范围类错误而非格式类错误。"""
     # 前导零像素串按数值 1x1 进入像素区间校验。
     with pytest.raises(SeedreamValidationError, match="总像素需在"):
-        validate_size_for_model("01x01", "doubao-seedream-4-5-251128")
+        validate_size_for_model("01x01", _MODEL_45)
     # 宽高为零的输入在宽高比计算前按数值拦截。
     with pytest.raises(SeedreamValidationError, match="必须为正整数"):
-        validate_size_for_model("00x00", "doubao-seedream-4-5-251128")
+        validate_size_for_model("00x00", _MODEL_45)
 
 
 def test_validate_size_rejects_extreme_aspect_ratio() -> None:
     """宽高比超上限的尺寸在像素路径被拒，适用于任意模型。"""
     with pytest.raises(SeedreamValidationError, match="宽高比"):
-        validate_size_for_model("200x10", "doubao-seedream-5-0-260128")
+        validate_size_for_model("200x10", _MODEL_50)
 
 
 def test_validate_size_lite_rejects_unsupported_preset() -> None:
     """5.0 Lite 不支持的档位拒绝。"""
     with pytest.raises(SeedreamValidationError, match="5.0 模型下仅支持"):
-        validate_size_for_model("1K", "doubao-seedream-5-0-260128")
+        validate_size_for_model("1K", _MODEL_50)
 
 
 def test_validate_size_45_rejects_unsupported_preset() -> None:
     """4.5 不支持的档位拒绝。"""
     with pytest.raises(SeedreamValidationError, match="4.5 模型下仅支持"):
-        validate_size_for_model("3K", "doubao-seedream-4-5-251128")
+        validate_size_for_model("3K", _MODEL_45)
 
 
 def test_validate_size_40_rejects_unsupported_preset() -> None:
     """4.0 不支持的档位拒绝。"""
     with pytest.raises(SeedreamValidationError, match="4.0 模型下仅支持"):
-        validate_size_for_model("3K", "doubao-seedream-4-0-250828")
+        validate_size_for_model("3K", _MODEL_40)
 
 
 def test_config_accepts_pixel_default_size() -> None:
     """像素形态 default_size 经配置校验接受。"""
     config = SeedreamConfig(
         api_key="test_key",
-        model_id="doubao-seedream-4-5-251128",
+        model_id=_MODEL_45,
         default_size="2560x1440",
     )
     assert config.default_size == "2560x1440"
@@ -109,7 +113,7 @@ def test_config_normalizes_seedream_50_alias_on_direct_init() -> None:
         default_size="3K",
     )
 
-    assert config.model_id == "doubao-seedream-5-0-260128"
+    assert config.model_id == _MODEL_50
     assert config.default_size == "3K"
 
 
@@ -118,7 +122,7 @@ def test_config_rejects_pixel_default_size_out_of_model_range() -> None:
     with pytest.raises(SeedreamConfigError, match="default_size无效"):
         SeedreamConfig(
             api_key="test_key",
-            model_id="doubao-seedream-4-5-251128",
+            model_id=_MODEL_45,
             default_size="100x100",
         )
 
@@ -128,12 +132,12 @@ def test_config_rejects_pixel_default_size_out_of_model_range() -> None:
 
 def test_validate_size_for_model_accepts_seedream_50_pro_1k_preset() -> None:
     """5.0 Pro 的 1K 档位接受。"""
-    assert validate_size_for_model("1K", "doubao-seedream-5-0-pro-260628") == "1K"
+    assert validate_size_for_model("1K", _MODEL_50_PRO) == "1K"
 
 
 def test_validate_size_for_model_accepts_seedream_50_pro_2k_preset() -> None:
     """5.0 Pro 的 2K 档位接受。"""
-    assert validate_size_for_model("2K", "doubao-seedream-5-0-pro-260628") == "2K"
+    assert validate_size_for_model("2K", _MODEL_50_PRO) == "2K"
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_3k_preset() -> None:
@@ -141,66 +145,45 @@ def test_validate_size_for_model_rejects_seedream_50_pro_3k_preset() -> None:
     # 关键回归：5.0 Pro 的 id 含 "doubao-seedream-5-0" 子串，误判为 5.0 Lite 时 3K 会通过；
     # 档位串接按数值序排列，1K 排在 1.5K 之前。
     with pytest.raises(SeedreamValidationError, match=r"仅支持 1K/1\.5K/2K"):
-        validate_size_for_model("3K", "doubao-seedream-5-0-pro-260628")
+        validate_size_for_model("3K", _MODEL_50_PRO)
 
 
 def test_validate_size_for_model_accepts_seedream_50_pro_1_5k_preset() -> None:
     """5.0 Pro 的 1.5K 档位接受。"""
-    assert validate_size_for_model("1.5K", "doubao-seedream-5-0-pro-260628") == "1.5K"
+    assert validate_size_for_model("1.5K", _MODEL_50_PRO) == "1.5K"
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_1_5k_for_lite() -> None:
     """5.0 Lite 不支持 1.5K 档位。"""
     with pytest.raises(SeedreamValidationError, match="仅支持 2K/3K/4K"):
-        validate_size_for_model("1.5K", "doubao-seedream-5-0-260128")
+        validate_size_for_model("1.5K", _MODEL_50)
 
 
 def test_validate_size_for_model_accepts_seedream_50_pro_upper_pixel_bound() -> None:
     """邻界像素值不超官方上限且宽高为 16 倍数时接受。"""
     # 官方像素上限 2048x2048x1.1025=4624220；邻界值 2048x2256=4620288 不超限。
-    assert validate_size_for_model("2048x2256", "doubao-seedream-5-0-pro-260628") == "2048x2256"
+    assert validate_size_for_model("2048x2256", _MODEL_50_PRO) == "2048x2256"
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_above_pixel_bound() -> None:
     """超出官方像素上限的尺寸拒绝。"""
     # 2080x2224=4625920 超出官方上限 4624220。
     with pytest.raises(SeedreamValidationError, match="5.0-pro 模型下"):
-        validate_size_for_model("2080x2224", "doubao-seedream-5-0-pro-260628")
+        validate_size_for_model("2080x2224", _MODEL_50_PRO)
 
 
 def test_validate_size_for_model_accepts_seedream_50_pro_pixel_size() -> None:
     """5.0 Pro 的像素尺寸在区间内接受。"""
-    assert validate_size_for_model("1024x1024", "doubao-seedream-5-0-pro-260628") == "1024x1024"
+    assert validate_size_for_model("1024x1024", _MODEL_50_PRO) == "1024x1024"
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_small_pixel() -> None:
     """5.0 Pro 的低于像素下限尺寸拒绝。"""
     with pytest.raises(SeedreamValidationError, match="5.0-pro 模型下"):
-        validate_size_for_model("512x512", "doubao-seedream-5-0-pro-260628")
+        validate_size_for_model("512x512", _MODEL_50_PRO)
 
 
 def test_validate_size_for_model_rejects_seedream_50_pro_oversized_pixel() -> None:
     """5.0 Pro 的超上限像素尺寸拒绝。"""
     with pytest.raises(SeedreamValidationError, match="5.0-pro 模型下"):
-        validate_size_for_model("2048x4096", "doubao-seedream-5-0-pro-260628")
-
-
-def test_validate_image_input_rejects_oversized_data_uri_before_decode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """巨型 base64 在解码前按换算的估算字节数拒绝，避免先解码触发内存放大。
-
-    文案经 format_file_too_large 单一收口，不把 base64 字符数与字节上限并排展示。
-    """
-    import seedream_mcp.utils.images.image_validation as image_validation_module
-    from seedream_mcp.utils.core.formats import format_file_too_large
-
-    max_size = 1024 * 1024
-    monkeypatch.setattr(image_validation_module, "MAX_IMAGE_FILE_SIZE", max_size)
-    huge_b64 = "A" * 2_000_000
-    with pytest.raises(SeedreamValidationError, match="数据过大") as exc_info:
-        image_validation_module.validate_image_input(f"data:image/png;base64,{huge_b64}")
-
-    estimated_bytes = 2_000_000 * 3 // 4
-    assert exc_info.value.message == format_file_too_large(estimated_bytes, max_size, label="数据")
-    assert "base64 长度" not in exc_info.value.message
+        validate_size_for_model("2048x4096", _MODEL_50_PRO)

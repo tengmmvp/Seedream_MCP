@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from _log_fakes import capture_loguru_messages
 from seedream_mcp.utils.io.io_path import (
     is_drive_relative,
     is_unc_path,
@@ -455,25 +456,39 @@ def test_resolve_local_image_candidate_rejects_mixed_unc_without_resolve(
 def test_find_images_directory_rejects_mixed_separator_unc_without_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """win32 下混合分隔符 UNC 目录扫描入参在 resolve 前被拦截，返回空结果。"""
+    """win32 下混合分隔符 UNC 目录扫描入参在 resolve 前被拦截，返回空结果。
+
+    被测函数的兜底 except 会吞掉爆炸守卫，拦截事实由跳过分支的告警文案锁定。
+    """
     from seedream_mcp.utils.io.io_scan import find_images_in_directory
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
-    assert find_images_in_directory("\\/attacker\\share") == []
-    assert find_images_in_directory("/\\attacker/share") == []
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        assert find_images_in_directory("\\/attacker\\share") == []
+        assert find_images_in_directory("/\\attacker/share") == []
+
+    assert any("拒绝 UNC 形式的目录扫描入参" in message for message in warnings)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="混合分隔符 UNC 语义仅 win32 生效")
 def test_suggest_similar_paths_rejects_mixed_separator_unc_without_resolve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """win32 下混合分隔符 UNC 建议搜索目录在 resolve 前被跳过，不产生建议。"""
+    """win32 下混合分隔符 UNC 建议搜索目录在 resolve 前被跳过，不产生建议。
+
+    被测函数的兜底 except 会吞掉爆炸守卫，拦截事实由跳过分支的告警文案锁定。
+    """
     from seedream_mcp.utils.io.io_scan import suggest_similar_paths
 
     _patch_resolve_exploding_only_on_unc(monkeypatch)
 
-    assert suggest_similar_paths("x.png", ["\\/attacker\\share", "/\\attacker/share"]) == []
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        assert suggest_similar_paths("x.png", ["\\/attacker\\share", "/\\attacker/share"]) == []
+
+    assert any("拒绝 UNC 形式的建议搜索目录" in message for message in warnings)
 
 
 def test_resolves_outside_workspace_skips_unc_candidates_without_resolve(
@@ -538,7 +553,7 @@ def test_resolve_local_image_candidate_rejects_ads_colon_reference() -> None:
     sys.platform != "win32", reason="冒号分量拒绝仅 win32 生效，POSIX 冒号是合法文件名字符"
 )
 async def test_prepare_image_input_rejects_ads_colon_reference_before_read(
-    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    workspace_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """参考图输入呈 ADS 流形态时在候选定位即拒绝，不进入文件读取。
 
@@ -547,14 +562,9 @@ async def test_prepare_image_input_rejects_ads_colon_reference_before_read(
     """
     from typing import IO
 
-    from PIL import Image
-
     from seedream_mcp.utils.core.errors import SeedreamValidationError
     from seedream_mcp.utils.images import image_validation as image_validation_module
     from seedream_mcp.utils.images.image_input import prepare_image_input
-
-    host = tmp_path / "photo.jpg"
-    Image.new("RGB", (32, 32), color="white").save(host, format="JPEG")
 
     def _explode_read(path: Path) -> IO[bytes]:
         raise AssertionError("ADS 形态参考图不得进入文件读取")

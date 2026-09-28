@@ -17,22 +17,7 @@ from seedream_mcp.utils.io.io_save import (
     drain_background_cleanup_tasks,
 )
 
-
-def _oversized_header_png(width: int, height: int) -> bytes:
-    """真实 1x1 PNG 改写 IHDR 宽高为给定值并重算 CRC，结构合法可被 PIL 识别。
-
-    头尺寸可任意放大而文件本身只有几十字节，正是解压炸弹的字节形态。
-    """
-    import io
-    import struct
-    import zlib
-
-    buffer = io.BytesIO()
-    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
-    forged = bytearray(buffer.getvalue())
-    forged[16:29] = struct.pack(">II5B", width, height, 8, 2, 0, 0, 0)
-    forged[29:33] = struct.pack(">I", zlib.crc32(bytes(forged[12:29])) & 0xFFFFFFFF)
-    return bytes(forged)
+from _png_fixtures import forged_png_bytes
 
 
 async def test_save_multiple_images_aggregates_partial_failure(
@@ -129,38 +114,6 @@ async def test_maybe_cleanup_quota_enforced_across_default_root(tmp_path: Path) 
         await manager.close()
 
 
-async def test_save_image_rejects_oversized_pixel_header(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """下载内容像素头超过 36M 上限时删除落盘文件并按保存失败降级保留 URL。"""
-    bomb = _oversized_header_png(10_000, 10_000)
-    target = tmp_path / "bomb.png"
-    target.write_bytes(bomb)
-
-    manager = AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
-
-    async def fake_download(url: str, save_path: Path, fsync: bool = False) -> dict[str, Any]:
-        return {
-            "success": True,
-            "file_path": str(target),
-            "file_size": len(bomb),
-            "download_time": 0.0,
-            "content_type": "image/png",
-            "attempts": 1,
-        }
-
-    monkeypatch.setattr(manager.download_manager, "download_image", fake_download)
-    monkeypatch.setattr(manager.download_manager, "validate_url", lambda url: True)
-
-    result = await manager.save_image("http://x/bomb.png", prompt="p")
-
-    assert result.success is False
-    assert not target.exists()
-    assert "像素" in (result.error or "")
-    await drain_background_cleanup_tasks()
-    await manager.close()
-
-
 async def test_save_image_rejects_decompression_bomb_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -170,7 +123,7 @@ async def test_save_image_rejects_decompression_bomb_error(
     住，异常击穿保存降级链路成为未知错误且落盘文件不被清理。9000x9000=81M 超过
     2x36M，打开阶段即抛错，具体尺寸不可得，错误文案不含宽高形态。
     """
-    bomb = _oversized_header_png(9_000, 9_000)
+    bomb = forged_png_bytes(9_000, 9_000)
     target = tmp_path / "bomb_error.png"
     target.write_bytes(bomb)
 
@@ -212,7 +165,7 @@ async def test_save_image_rejects_pixels_between_limit_and_double(
 
     PIL 在该区间仅告警不抛错，锁定显式校验分支独立可用，不依赖解压炸弹异常路径。
     """
-    bomb = _oversized_header_png(6_100, 6_100)  # 37.21M，介于 36M 与 72M 之间
+    bomb = forged_png_bytes(6_100, 6_100)  # 37.21M，介于 36M 与 72M 之间
     target = tmp_path / "band.png"
     target.write_bytes(bomb)
 
@@ -355,7 +308,9 @@ async def test_cleanup_partial_failure_writes_backoff_timestamp(
     await auto_save_module.drain_background_cleanup_tasks()
 
     assert len(auto_save_module._cleanup_last_run) == 1
-    gap = time.time() - next(iter(auto_save_module._cleanup_last_run.values()))
+    assert manager._cleanup_file_manager is not None
+    base_key = str(manager._cleanup_file_manager.base_dir)
+    gap = time.time() - auto_save_module._cleanup_last_run.get(base_key)
     interval = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
     backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
     assert interval - backoff - 5 <= gap <= interval

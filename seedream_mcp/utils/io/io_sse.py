@@ -95,20 +95,25 @@ def format_sse_failed_event(event: dict[str, Any], model_id: str) -> dict[str, A
     }
 
 
-def _extract_data_field_values(raw_segment: bytes | bytearray) -> list[bytes | bytearray]:
-    """按 SSE 规范提取段内全部 data: 字段值，多行值由调用方以换行拼接。
+def _data_value_bounds(segment: bytes | bytearray, start: int, end: int) -> list[tuple[int, int]]:
+    """按 SSE 规范计算段 [start, end) 内全部 data: 字段值的闭开区间。
 
     每行仅剥离字段名后的首个前导空格，其余空白属于负载本身；json.loads 对 JSON
     负载的前后空白天然容忍，单空格剥离已使 ``data: x`` 与 ``data:x`` 语义一致。
     """
-    values: list[bytes | bytearray] = []
-    for line in raw_segment.split(b"\n"):
-        if line.startswith(b"data:"):
-            value = line[5:]
-            if value.startswith(b" "):
-                value = value[1:]
-            values.append(value)
-    return values
+    bounds: list[tuple[int, int]] = []
+    line_start = start
+    while line_start < end:
+        line_end = segment.find(b"\n", line_start, end)
+        if line_end < 0:
+            line_end = end
+        if segment[line_start : line_start + 5] == b"data:":
+            value_start = line_start + 5
+            if value_start < line_end and segment[value_start] == 0x20:
+                value_start += 1
+            bounds.append((value_start, line_end))
+        line_start = line_end + 1
+    return bounds
 
 
 def _has_lost_data_values(values: list[bytes | bytearray]) -> bool:
@@ -131,8 +136,8 @@ def _parse_sse_segment_payload(
 
     失败原因为 None 表示无 data 负载、[DONE] 哨兵或解析成功；丢失负载标记仅在
     解析失败且存在非空非哨兵的 data 负载时为真，按未 trim 原段的行匹配口径计算。
-    负载全程按 bytes 处理并直接交给 json.loads，避免大事件场景下整段事件的
-    str decode 分配造成瞬时内存峰值。
+    负载以区间定位、单份切片直接交给 json.loads，避免 trim、逐行 split 与拼接对
+    同一大事件的多次全量拷贝。
     """
     start = 0
     end = len(segment)
@@ -140,20 +145,26 @@ def _parse_sse_segment_payload(
         start += 1
     while end > start and segment[end - 1] in b" \t\r\n":
         end -= 1
-    raw_segment = segment[start:end] if start > 0 or end < len(segment) else segment
-    if not raw_segment:
+    if start >= end:
         return None, None, False
 
     # 丢失判定对齐未 trim 原段的行匹配：段首缩进的 data: 行仅在 trim 后可见，
     # 其值不计入丢失；trim 停在行首时该行本就可见，仍计入。
     first_value_hidden = (
-        start > 0 and segment[start - 1 : start] != b"\n" and raw_segment.startswith(b"data:")
+        start > 0 and segment[start - 1] != 0x0A and segment[start : start + 5] == b"data:"
     )
-    data_parts: list[bytes | bytearray] = []
+    data_bounds: list[tuple[int, int]] = []
     try:
         # Seedream SSE 事件将 JSON 负载承载在 data: 字段中；按 SSE 规范多行 data: 以换行拼接为完整负载，event:/id: 字段本接口未使用。
-        data_parts = _extract_data_field_values(raw_segment)
-        payload = b"\n".join(data_parts) if data_parts else None
+        data_bounds = _data_value_bounds(segment, start, end)
+        if not data_bounds:
+            return None, None, False
+        payload: bytes | bytearray
+        if len(data_bounds) == 1:
+            value_start, value_end = data_bounds[0]
+            payload = segment[value_start:value_end]
+        else:
+            payload = b"\n".join(segment[a:b] for a, b in data_bounds)
         # [DONE] 为流结束哨兵而非图片事件，直接丢弃。
         if not payload or payload == b"[DONE]":
             return None, None, False
@@ -170,8 +181,8 @@ def _parse_sse_segment_payload(
         IndexError,
         RecursionError,
     ) as exc:
-        lost_values = data_parts[1:] if first_value_hidden else data_parts
-        return None, str(exc), _has_lost_data_values(lost_values)
+        lost_bounds = data_bounds[1:] if first_value_hidden else data_bounds
+        return None, str(exc), _has_lost_data_values([segment[a:b] for a, b in lost_bounds])
 
 
 def _log_segment_parse_failure(log: Logger, error: str, segment_len: int) -> None:
@@ -194,6 +205,12 @@ _SSE_ITEM_OVERHEAD_BYTES = 448
 # 解析条目数的绝对下限：组图单请求合法产出至多 15 张图片，总量限额极小的部署按
 # 单条产物开销推导会得到误伤合法批次的过小上限，绝对下限兜底。
 _SSE_MIN_ITEMS_LIMIT = 64
+
+
+def items_limit_for(total_bytes_limit: int) -> int:
+    """从响应体总量限额派生解析条目数硬上限，SSE 与成功 JSON 路径共用。"""
+    return max(total_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, _SSE_MIN_ITEMS_LIMIT)
+
 
 # CRLF/CR 行尾的单遍归一化模式：一次扫描同时匹配两种行尾，避免两次 replace 全块扫描。
 _CR_LINE_ENDING_RE = re.compile(b"\r\n|\r")
@@ -340,7 +357,7 @@ class _SSEItemCollector:
 
     def __init__(self, total_bytes_limit: int) -> None:
         self.items: list[dict[str, Any]] = []
-        self.max_items = max(total_bytes_limit // _SSE_ITEM_OVERHEAD_BYTES, _SSE_MIN_ITEMS_LIMIT)
+        self.max_items = items_limit_for(total_bytes_limit)
         self.capped = False
 
     def reached_cap(self) -> bool:
@@ -361,6 +378,24 @@ async def _close_stream_response(response: httpx.Response) -> None:
         await aclose()
     except Exception:
         pass
+
+
+async def _terminate_sse_stream_on_deadline(
+    response: httpx.Response,
+    items: list[dict[str, Any]],
+    log: Logger,
+) -> None:
+    """截止时间到达时关闭响应终止读取：已收完整事件是确定性产出、保留为部分结果，零产出抛超时并入重试。"""
+    if items:
+        log.warning(
+            "SSE 响应流超过总时长预算，保留已收 {} 条结果提前终止",
+            len(items),
+        )
+        await _close_stream_response(response)
+        return
+    log.warning("SSE 响应流超过总时长预算，终止解析")
+    await _close_stream_response(response)
+    raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
 
 
 def _classify_sse_event(
@@ -499,37 +534,18 @@ async def _consume_sse_chunks(
         if outcome is STREAM_ENDED:
             break
         if outcome is STREAM_DEADLINE_HIT:
-            # 总时长预算在等块期间到达：已收完整事件即确定性产出，超限保留为
-            # 部分结果，零产出才并入超时重试。
-            if collector.items:
-                log.warning(
-                    "SSE 响应流超过总时长预算，保留已收 {} 条结果提前终止",
-                    len(collector.items),
-                )
-                await _close_stream_response(response)
-                deadline_exceeded = True
-                break
-            log.warning("SSE 响应流超过总时长预算，终止解析")
-            await _close_stream_response(response)
-            raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
+            await _terminate_sse_stream_on_deadline(response, collector.items, log)
+            deadline_exceeded = True
+            break
         chunk = cast(bytes, outcome)
         if not chunk:
             continue
 
-        # 总时长预算：逐块检查截止时间，封顶整个解析阶段；检查点在 extend 之前，
-        # 已收完整事件即确定性产出，超限保留为部分结果，零产出才并入超时重试。
+        # 逐块检查截止时间封顶整个解析阶段，检查点在 extend 之前。
         if deadline is not None and time.monotonic() > deadline:
-            if collector.items:
-                log.warning(
-                    "SSE 响应流超过总时长预算，保留已收 {} 条结果提前终止",
-                    len(collector.items),
-                )
-                await _close_stream_response(response)
-                deadline_exceeded = True
-                break
-            log.warning("SSE 响应流超过总时长预算，终止解析")
-            await _close_stream_response(response)
-            raise asyncio.TimeoutError("SSE 响应流读取超过总时长预算")
+            await _terminate_sse_stream_on_deadline(response, collector.items, log)
+            deadline_exceeded = True
+            break
 
         processed_bytes += frames.extend(chunk)
 

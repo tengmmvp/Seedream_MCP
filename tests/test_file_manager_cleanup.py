@@ -404,6 +404,22 @@ def test_run_cleanup_sweeps_stale_part_files_only(tmp_path: Path) -> None:
     assert result["deleted_size"] == 100
 
 
+def test_run_cleanup_sweeps_stale_part_suffix_case_insensitive(tmp_path: Path) -> None:
+    """超龄大写 .PART 遗留同样被清扫，后缀判定与图片扩展名小写归一同口径。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    stale_time = (datetime.now() - timedelta(days=2)).timestamp()
+    upper_part = tmp_path / "tmpabc789.png.PART"
+    upper_part.write_bytes(b"x" * 40)
+    os.utime(upper_part, (stale_time, stale_time))
+
+    result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
+
+    assert not upper_part.exists()
+    assert result["deleted_files"] == 1
+    assert result["deleted_size"] == 40
+
+
 def test_run_cleanup_quota_only_config_prunes_empty_dirs(tmp_path: Path) -> None:
     """CLEANUP_DAYS=0 且仅配置总量配额时空目录同样回收，不随 days 门控累积。"""
     manager = FileManager(base_dir=tmp_path)
@@ -460,6 +476,25 @@ def test_run_cleanup_cleans_files_at_arbitrary_depth(
 
     assert result["errors"] == []
     assert not old_deep_image.exists()
+
+
+def test_generate_markdown_reference_keeps_absolute_fallback_without_dot_prefix(
+    tmp_path: Path,
+) -> None:
+    """base_dir 之外的绝对路径回退不加 ./ 前缀，引用目标保持可解析的绝对形态。"""
+    manager = FileManager(base_dir=tmp_path)
+
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-markdown-outside-"))
+    try:
+        image = outside_dir / "pic.png"
+        image.write_bytes(b"img")
+
+        markdown_ref = manager.generate_markdown_reference(image, alt_text="pic")
+
+        assert f"]({image.as_posix()})" in markdown_ref
+        assert "./" not in markdown_ref.split("(", 1)[1]
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
 
 
 def test_generate_markdown_reference_encodes_hash_and_percent(tmp_path: Path) -> None:

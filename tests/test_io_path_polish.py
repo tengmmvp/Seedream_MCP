@@ -12,6 +12,7 @@ import pytest
 import seedream_mcp.utils.io.io_path as io_path_module
 import seedream_mcp.utils.io.io_scan as io_scan_module
 from _log_fakes import capture_loguru_messages
+from _os_fakes import _install_counting_resolve
 from seedream_mcp.config import SeedreamConfig, set_active_config
 
 
@@ -48,14 +49,7 @@ def test_resolve_env_workspace_root_caches_resolved_result(
         io_path_module, "_configured_env_value", lambda env_var: configured["value"]
     )
 
-    resolve_calls: list[str] = []
-    original_resolve = Path.resolve
-
-    def _counting_resolve(self: Path, strict: bool = False) -> Path:
-        resolve_calls.append(str(self))
-        return original_resolve(self, strict=strict)
-
-    monkeypatch.setattr(Path, "resolve", _counting_resolve)
+    resolve_calls = _install_counting_resolve(monkeypatch)
     tracked = {str(first_root), str(second_root)}
 
     first = io_path_module.resolve_env_workspace_root()
@@ -107,14 +101,7 @@ def test_resolve_env_workspace_root_tilde_form_uses_cache(
     # 期望值在 resolve 被 monkeypatch 计数前捕获，避免断言自身的 resolve 混入计数
     expected = Path("~").expanduser().resolve()
     expanded_home = str(Path("~").expanduser())
-    resolve_calls: list[str] = []
-    original_resolve = Path.resolve
-
-    def _counting_resolve(self: Path, strict: bool = False) -> Path:
-        resolve_calls.append(str(self))
-        return original_resolve(self, strict=strict)
-
-    monkeypatch.setattr(Path, "resolve", _counting_resolve)
+    resolve_calls = _install_counting_resolve(monkeypatch)
 
     first = io_path_module.resolve_env_workspace_root()
     cached_again = io_path_module.resolve_env_workspace_root()
@@ -503,11 +490,23 @@ def test_clear_resolved_env_root_cache_resets_fallback_root(
 
 
 @pytest.mark.parametrize("unc_dir", [r"\\nas\pics", "//nas/pics"])
-def test_suggest_similar_paths_skips_unc_search_dirs(tmp_path: Path, unc_dir: str) -> None:
+def test_suggest_similar_paths_skips_unc_search_dirs(unc_dir: str) -> None:
     """UNC 形态的搜索目录在 resolve 前跳过，不触发 SMB 连接，返回空建议。"""
-    (tmp_path / "a_portrait.png").write_bytes(b"x")
-
     assert io_scan_module.suggest_similar_paths("portrait", search_dirs=[unc_dir]) == []
+
+
+def test_resolve_result_cache_protocol_respects_capacity() -> None:
+    """映射协议的写入走加锁路径并受容量上限约束，超容逐出最旧条目。"""
+    cache = io_path_module.ResolveResultCache(2)
+
+    cache["a"] = Path("/a")
+    cache["b"] = Path("/b")
+    cache["c"] = Path("/c")
+
+    assert len(cache) == 2
+    assert "a" not in cache
+    assert cache["b"] == Path("/b")
+    assert cache["c"] == Path("/c")
 
 
 def _use_active_config(config: SeedreamConfig) -> None:

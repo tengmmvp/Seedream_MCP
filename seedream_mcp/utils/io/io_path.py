@@ -25,6 +25,7 @@ from typing import Callable
 from ..core.errors import SeedreamConfigError
 from ..core.formats import DATA_DIR_NAME
 from ..core.logs import EarlyMessageBuffer, get_logger
+from ..core.throttles import store_bounded_entry
 
 logger = get_logger()
 
@@ -117,7 +118,8 @@ _DATA_ROOT_CACHE_MAX_ENTRIES = 64
 class ResolveResultCache:
     """带锁与可选 TTL 的 resolve 结果 LRU 缓存，配置根与扫描条目共用骨架。
 
-    映射协议面向测试的预热与断言；TTL 为 None 时条目仅经 clear 与容量驱逐失效。
+    映射协议供测试的预热与断言，同样经锁与容量上限约束；TTL 为 None 时条目
+    仅经 clear 与容量驱逐失效。
     """
 
     def __init__(self, max_entries: int, ttl_seconds: float | None = None) -> None:
@@ -139,10 +141,7 @@ class ResolveResultCache:
                 del self._entries[cache_key]
         resolved = resolver()
         with self._lock:
-            self._entries[cache_key] = (resolved, now)
-            self._entries.move_to_end(cache_key)
-            while len(self._entries) > self._max_entries:
-                self._entries.popitem(last=False)
+            self._store(cache_key, resolved, now)
         return resolved
 
     def clear(self) -> None:
@@ -150,17 +149,25 @@ class ResolveResultCache:
         with self._lock:
             self._entries.clear()
 
+    def _store(self, cache_key: str, resolved: Path, now: float) -> None:
+        """写入条目并刷新 LRU 位，超容逐出最旧条目；须在持锁下调用。"""
+        store_bounded_entry(self._entries, cache_key, (resolved, now), self._max_entries)
+
     def __contains__(self, cache_key: object) -> bool:
-        return cache_key in self._entries
+        with self._lock:
+            return cache_key in self._entries
 
     def __len__(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     def __getitem__(self, cache_key: str) -> Path:
-        return self._entries[cache_key][0]
+        with self._lock:
+            return self._entries[cache_key][0]
 
     def __setitem__(self, cache_key: str, resolved: Path) -> None:
-        self._entries[cache_key] = (resolved, time.monotonic())
+        with self._lock:
+            self._store(cache_key, resolved, time.monotonic())
 
 
 _DATA_ROOT_RESOLVE_CACHE = ResolveResultCache(_DATA_ROOT_CACHE_MAX_ENTRIES)
@@ -495,14 +502,21 @@ def resolve_images_root() -> Path:
 
     Raises:
         SeedreamConfigError: 数据根目录声明为 UNC 形态或无法解析（路径非法或
-            超长），或工作根目录声明链不可解析，均属部署配置缺陷归配置错误档案。
+            超长），或工作根目录声明链与默认派生图片目录无法解析，均属部署
+            配置缺陷归配置错误档案。
     """
     configured = _configured_env_value(_DATA_ROOT_ENV)
     if configured:
         reject_unc_declaration(configured, label="数据根目录")
         # 显式声明与工作根目录同为数据根目录，图片目录统一派生自其 .seedream 子目录。
         return _resolve_declaration("数据根目录", configured, resolve_cached_explicit_images_root)
-    return resolve_cached_default_images_root(get_workspace_root())
+    workspace_root = get_workspace_root()
+    try:
+        return resolve_cached_default_images_root(workspace_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        # 链接环等 resolve 失败与显式声明同口径归配置错误，异常原文仅进日志。
+        logger.error("工作区图片目录无法解析 '{}': {}", workspace_root, exc)
+        raise SeedreamConfigError(f"工作区图片目录无法解析: {workspace_root}") from exc
 
 
 def get_read_context() -> tuple[list[Path], Path, list[Path]]:

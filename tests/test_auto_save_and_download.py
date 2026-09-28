@@ -212,12 +212,11 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
         cleanup_calls.append(days)
         return {"deleted_files": 0, "deleted_size": 0, "errors": []}
 
-    # 预置 16 个已过期键占满容量上限，目标目录居链首；修复前写入不移动位置，
-    # 驱逐时恰为被逐出的链首键。
+    # 预置过期键占满容量上限，目标目录居链首，写入不移动位置时恰为被逐出的链首键。
     stale = time_module.time() - 7200
-    auto_save_module._cleanup_last_run[str(tmp_path)] = stale
-    for i in range(15):
-        auto_save_module._cleanup_last_run[f"old-{i}"] = stale
+    auto_save_module._cleanup_last_run.set(str(tmp_path), stale)
+    for i in range(auto_save_module._CLEANUP_LAST_RUN_MAX_ENTRIES - 1):
+        auto_save_module._cleanup_last_run.set(f"old-{i}", stale)
 
     manager = AutoSaveManager(base_dir=tmp_path, cleanup_base_dir=tmp_path, cleanup_days=30)
     assert manager._cleanup_file_manager is not None
@@ -226,7 +225,7 @@ async def test_maybe_cleanup_throttle_entry_survives_capacity_eviction(
     await auto_save_module.drain_background_cleanup_tasks()
     assert cleanup_calls == [30]
 
-    # 第 17 个键触发容量驱逐：被逐出的是最久未用的 old 键，目标目录的节流
+    # 超出容量上限的新键触发驱逐：被逐出的是最久未用的 old 键，目标目录的节流
     # 时间戳随最近使用序保留。
     other_dir = tmp_path / "other"
     other_dir.mkdir()
@@ -320,7 +319,7 @@ async def test_maybe_cleanup_failure_backoff_throttles_retry(
         interval = auto_save_module._CLEANUP_MIN_INTERVAL_SECONDS
         backoff = auto_save_module._CLEANUP_FAILURE_RETRY_BACKOFF_SECONDS
         base_key = str(manager.file_manager.base_dir)
-        stored = auto_save_module._cleanup_last_run[base_key]
+        stored = auto_save_module._cleanup_last_run.get(base_key)
         assert t_before - interval + backoff <= stored <= t_after - interval + backoff
     finally:
         await manager.close()

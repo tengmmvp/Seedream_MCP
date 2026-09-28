@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from bisect import bisect_right
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
@@ -269,7 +270,17 @@ _BEARER_WHITESPACE_PATTERN = re.compile(_BEARER_WHITESPACE_BRANCH, re.IGNORECASE
 # 敏感形态；auth 由 (?<!\w) 左侧断言与键后分隔符要求排除误吞后经独立分支覆盖。
 _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS = frozenset({"key", "auth"})
 
+# 不容忍复数形态的清单词：裸 token 复数会误吞 max_tokens 一类用量字段；清单词
+# 分支的复数词尾、锚定复数分支与 is_sensitive_key 的复数段判定均由本集合单点派生。
+_SENSITIVE_KEY_NON_PLURAL_KEYWORDS = frozenset({"token"})
+
+# 复数受限词的锚定复合前缀族：X_tokens 复合键仅在前缀属于本族时命中，dict 键
+# 路径的复数段判定共用本族。
+_SENSITIVE_KEY_PLURAL_COMPOUND_PREFIXES = ("access", "auth", "refresh", "session", "api")
+_SENSITIVE_KEY_PLURAL_COMPOUND_PREFIX_SET = frozenset(_SENSITIVE_KEY_PLURAL_COMPOUND_PREFIXES)
+
 # key/auth 受限复合分支的前缀族：带分隔符的 X_key/X_auth 仅在前缀属于本族时命中，
+# 键内分隔符另容忍控制字符字面转义形态，转义分隔经切入删除后影子里不再有锚定点。
 # 口径差异见 is_sensitive_key。封闭字面交替，回溯保持线性。
 _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
     "access",
@@ -292,30 +303,55 @@ _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES = (
 # 失败回溯随总长线性，避免嵌套量词的指数级回溯。
 _SENSITIVE_KEYVALUE_KEY_SUFFIX = r"(?:[._-][^\W_.-]+)*"
 
+# 控制字符字面转义族的共用交替：键名切入删除模式与复合前缀的键内分隔符共用，
+# 覆盖 json.dumps/repr 产出的 \b、\n、\r、\t、\f 字母短转义与 C0/DEL/NEL 的十六进制转义形态。
+_KEY_CONTROL_ESCAPE_ALT = (
+    r"(?:\\[bnrtf]" r"|\\u00(?:[01][0-9a-fA-F]|7[fF]|85)" r"|\\x(?:[01][0-9a-fA-F]|7[fF]|85))"
+)
+
 # 敏感键名交替组：keyvalue 裸值模式的键匹配与值吸收的停止前瞻共用。分支由关键词
 # 清单与前缀族派生，两路径口径以 is_sensitive_key 为单点。键命中要求紧跟分隔符
-# 与值，max_tokens 等普通词形不受影响；新增敏感词只需扩展清单或前缀族。各分支为
-# 字面交替，失败回溯随总长线性。
+# 与值，复数受限词的复数由族内复合分支与 (?<!\w) 锚定分支覆盖、两分支同样由
+# _SENSITIVE_KEY_NON_PLURAL_KEYWORDS 派生，max_tokens 一类下划线用量字段被
+# 左侧断言排除；新增敏感词只需扩展清单或前缀族。各分支为字面交替，失败回溯随
+# 总长线性。
 _SENSITIVE_KEYVALUE_KEYS = (
     "|".join(
-        keyword + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+        keyword
+        + ("" if keyword in _SENSITIVE_KEY_NON_PLURAL_KEYWORDS else "s?")
+        + _SENSITIVE_KEYVALUE_KEY_SUFFIX
         for keyword in (*_SENSITIVE_KEY_SUBSTRINGS, *_SENSITIVE_KEY_KEYWORDS)
         if keyword not in _SENSITIVE_KEYVALUE_AMBIGUOUS_KEYWORDS
     )
-    + r"|api[-_. ]?key"
+    + r"|api[-_. ]?keys?"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
-    + r"|(?:access|auth|refresh|session|api)[-_.]?token"
-    + _SENSITIVE_KEYVALUE_KEY_SUFFIX
-    + r"|(?:client|api|signing|app)[-_.]?secret"
+    + "".join(
+        r"|(?:"
+        + "|".join(_SENSITIVE_KEY_PLURAL_COMPOUND_PREFIXES)
+        + r")[-_. ]?"
+        + keyword
+        + "s?"
+        + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+        for keyword in sorted(_SENSITIVE_KEY_NON_PLURAL_KEYWORDS)
+    )
+    + r"|(?:client|api|signing|app)[-_. ]?secrets?"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
     + r"|(?:"
     + "|".join(_SENSITIVE_KEYVALUE_COMPOUND_PREFIXES)
-    + r")[-_. ]key"
+    + r")(?:[-_. ]|"
+    + _KEY_CONTROL_ESCAPE_ALT
+    + r")keys?"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
     + r"|(?:"
     + "|".join(prefix for prefix in _SENSITIVE_KEYVALUE_COMPOUND_PREFIXES if prefix != "auth")
-    + r")[-_. ]auth"
+    + r")(?:[-_. ]|"
+    + _KEY_CONTROL_ESCAPE_ALT
+    + r")auth"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+    + "".join(
+        r"|(?<!\w)" + keyword + "s" + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+        for keyword in sorted(_SENSITIVE_KEY_NON_PLURAL_KEYWORDS)
+    )
     + r"|(?<!\w)auth"
     + _SENSITIVE_KEYVALUE_KEY_SUFFIX
 )
@@ -338,7 +374,7 @@ _KEYVALUE_CONTROL_WHITESPACE_CLASS = r"[\t\n\r\x0b\x0c\x1c-\x1f\x85]"
 # 前瞻只在空白串尾命中。冒号等号族的可选反斜杠与各转义族共用首字符，各分支在
 # 首两字符上互斥，失败回溯随总长线性。
 _SENSITIVE_KEYVALUE_ALT = (
-    r"(?:\\[nrtf]"
+    r"(?:\\[bnrtf]"
     r"|\\u[0-9a-fA-F]{4}"
     r"|\\x[0-9a-fA-F]{2}"
     r"|\\?[:：﹕=＝]"
@@ -384,30 +420,134 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
 )
 
 
-def _redact_fold_disguised_keyvalues(text: str) -> str:
-    """对全折叠伪装键的键值形态掩码值，键名与分隔符保留原文。
+# 形近字母折叠表：与 ASCII 字母形近的西里尔、希腊与拉丁扩展字符 NFKC 不折叠，仅在
+# 键名匹配判定时归一；条目目标字母对齐敏感关键词字母表可达的范围，唯 U+0445→x
+# 一项目标 x 在范围外、恒不参与命中，不泛化到全字母表。
+_HOMOGLYPH_FOLD_TABLE = str.maketrans(
+    {
+        "\u0430": "a",
+        "\u0435": "e",
+        "\u043e": "o",
+        "\u0440": "p",
+        "\u0441": "c",
+        "\u0443": "y",
+        "\u0445": "x",
+        "\u0456": "i",
+        "\u0455": "s",
+        "\u0458": "j",
+        "\u043a": "k",
+        "\u0433": "r",
+        "\u04bb": "h",
+        "\u04cf": "l",
+        "\u0448": "w",
+        "\u0461": "w",
+        "\u051d": "w",
+        "\u04af": "y",
+        "\u0475": "v",
+        "\u0501": "d",
+        "\u04bd": "e",
+        "\u043c": "m",
+        "\u03b1": "a",
+        "\u03bf": "o",
+        "\u03c1": "p",
+        "\u03b9": "i",
+        "\u03ba": "k",
+        "\u03c3": "o",
+        "\u03ed": "o",
+        "\u03f1": "p",
+        "\u03f8": "p",
+        "\u03c5": "u",
+        "\u03bd": "v",
+        "\u03b3": "y",
+        "\u03f3": "j",
+        "\u0261": "g",
+    }
+)
 
-    re.IGNORECASE 的简单折叠不把 ß 计作 ss，paßword 一类伪装键躲过原文匹配；
-    纯 ASCII 文本直接返回，含非 ASCII 的文本先扫 casefold 产物上的触发词，命中
-    才在折叠文本上定位键值形态，值区间经逐字符折叠偏移表映射回原文替换。
+
+def _fold_key_disguise_text(text: str) -> str:
+    """NFKC、casefold 与形近字母折叠的复合归一，仅用于键名匹配判定。"""
+    return unicodedata.normalize("NFKC", text).casefold().translate(_HOMOGLYPH_FOLD_TABLE)
+
+
+# 键名切入删除模式：C0/DEL/NEL 及其字面转义形态，影子匹配前整体删除而非空格压平，
+# 防止切断关键词使凭据值存活；转义族与复合前缀键内分隔符共用单一来源。
+_KEY_DISGUISE_DELETION_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85]|" + _KEY_CONTROL_ESCAPE_ALT)
+
+# 仅删非空白控制字符的模式：空白控制符及其转义可充当键值分隔符，保留它们的影子
+# 使键值模式在切入删除丢失分隔时仍有锚定点。
+_NON_WHITESPACE_CONTROL_DELETION_PATTERN = re.compile(r"[\x00-\x08\x0e-\x1b\x7f]")
+
+
+def _folded_shadow_parts(
+    text: str, deletion_spans: list[tuple[int, int]]
+) -> tuple[str, list[int], list[int]]:
+    """删除区间外的字符逐个折叠拼接为影子，返回影子与影位到原位的映射表。"""
+    # ASCII 字符上 NFKC、casefold 与形近表折叠恒等于 lower，免逐字符全量归一。
+    folded_parts: list[str] = []
+    origins: list[int] = []
+    position = 0
+    # 末尾哨兵 (len, len) 使尾段与删除区间之间的段共享同一折叠循环。
+    for start, end in (*deletion_spans, (len(text), len(text))):
+        for index in range(position, start):
+            char = text[index]
+            folded_parts.append(char.lower() if char.isascii() else _fold_key_disguise_text(char))
+            origins.append(index)
+        position = end
+    offsets: list[int] = []
+    shadow_position = 0
+    for part in folded_parts:
+        offsets.append(shadow_position)
+        shadow_position += len(part)
+    return "".join(folded_parts), origins, offsets
+
+
+def _shadow_match_origin_span(
+    folded: str, origins: list[int], offsets: list[int], match: re.Match[str]
+) -> tuple[int, int]:
+    """把影子上命中的键值匹配区间映射回原文区间，两套删除计划共用。"""
+    return (
+        origins[bisect_right(offsets, match.end(2)) - 1],
+        origins[bisect_right(offsets, match.end() - 1) - 1] + 1,
+    )
+
+
+def _redact_disguised_keyvalues(text: str) -> str:
+    """键名伪装形态归一后在影子上匹配键值，值区间映射回原文掩码。
+
+    伪装形态覆盖词字符间切入的 C0/DEL/NEL 及其转义、全角/形近字母与 ß 一类全折叠
+    变体；折叠只用于匹配判定，键名与分隔符保留原文拼写。纯 ASCII 且无切入形态的
+    文本直接返回，其余对切入全删计划构建影子，以同一影子串做触发词预检——预检与
+    匹配器所见恒为同一字符串；未命中即原样返回，命中才按该计划匹配。切入全删的
+    影子会连空白分隔一并抹掉使键值模式失去锚定点，保留空白控制符的影子在两计划
+    不同时补扫，两计划的掩码区间合并后回写。
     """
-    if text.isascii():
+    full_spans = [match.span() for match in _KEY_DISGUISE_DELETION_PATTERN.finditer(text)]
+    if text.isascii() and not full_spans:
         return text
-    folded_parts = [ch.casefold() for ch in text]
-    folded = "".join(folded_parts)
+    folded, origins, offsets = _folded_shadow_parts(text, full_spans)
     if _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(folded) is None:
         return text
-    offsets: list[int] = []
-    position = 0
-    for part in folded_parts:
-        offsets.append(position)
-        position += len(part)
-    spans: list[tuple[int, int]] = []
-    for match in _SENSITIVE_KEYVALUE_PATTERN.finditer(folded):
-        start = bisect_right(offsets, match.end(2)) - 1
-        end = bisect_right(offsets, match.end() - 1)
-        spans.append((start, end))
-    for start, end in reversed(spans):
+    spans: list[tuple[int, int]] = [
+        _shadow_match_origin_span(folded, origins, offsets, match)
+        for match in _SENSITIVE_KEYVALUE_PATTERN.finditer(folded)
+    ]
+    separator_kept_spans = [
+        match.span() for match in _NON_WHITESPACE_CONTROL_DELETION_PATTERN.finditer(text)
+    ]
+    if full_spans != separator_kept_spans:
+        kept_folded, kept_origins, kept_offsets = _folded_shadow_parts(text, separator_kept_spans)
+        spans.extend(
+            _shadow_match_origin_span(kept_folded, kept_origins, kept_offsets, match)
+            for match in _SENSITIVE_KEYVALUE_PATTERN.finditer(kept_folded)
+        )
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    for start, end in reversed(merged):
         text = text[:start] + "***" + text[end:]
     return text
 
@@ -426,6 +566,16 @@ _INVISIBLE_CHARS_PATTERN = re.compile(
     r"[\u200b\u200c\u2060-\u2064\ufeff\u00ad]|(?<=[\x00-\x7f])\u200d|\u200d(?=[\x00-\x7f])"
 )
 
+# 未配对代理字符：str 可持有但 UTF-8 与 JSON 序列化均拒绝，输出前整体移除防已计费
+# 结果在协议出口翻为序列化失败。
+_SURROGATE_CHARS_PATTERN = re.compile(r"[\ud800-\udfff]")
+
+
+def strip_unpaired_surrogates(value: str) -> str:
+    """剥离未配对代理字符；代理均为非 ASCII，ASCII 文本免正则扫描原样返回。"""
+    return value if value.isascii() else _SURROGATE_CHARS_PATTERN.sub("", value)
+
+
 # URL userinfo 剥离模式：http(s) URL 携带 user:pass@ 凭据时剥去 userinfo，防止
 # 原值回显把凭据送进结构化输出与用户可见文本。密码含 @ 时贪婪匹配取区间内最后
 # 一个 @ 定边界，user:p@ss@example.com 剥净不残留；协议限定 http(s) 且要求词
@@ -437,23 +587,28 @@ _SanitizedValue = TypeVar("_SanitizedValue")
 
 
 def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
-    """对字符串值剥离零宽字符、敏感键值裸值、Bearer 令牌与 URL userinfo，非字符串原样返回。
+    """对字符串值剥离零宽与未配对代理字符、敏感键值裸值、Bearer 令牌与 URL userinfo。
 
-    message 与 details/value/response_data 等输出字段共用此净化，防护口径一致。
-    处理次序：零宽字符先行移除以还原真实键名，userinfo 在控制字符压平前剥离——
-    压平产生的空格会打断 userinfo 匹配使凭据逃逸；键值匹配在压平前后各执行一次，
-    分别覆盖真实换行分隔形态与转义产物等其余形态，两轮之后各补一次全折叠伪装键
-    的懒二次掩码，末尾剥 Bearer 令牌。
+    非字符串原样返回；message 与 value、error/status 等输出字段共用此净化，
+    防护口径一致。处理次序：零宽与代理字符先行移除以还原真实键名，userinfo 在控制
+    字符压平前剥离——压平产生的空格会打断 userinfo 匹配使凭据逃逸；键值匹配在压平
+    前执行一轮并补伪装键（切入删除与全角形近折叠）掩码，压平改写文本时再执行一轮
+    覆盖空格重拼形态，末尾剥 Bearer 令牌。
     """
     if not isinstance(value, str):
         return value
     redacted = _INVISIBLE_CHARS_PATTERN.sub("", value)
+    redacted = strip_unpaired_surrogates(redacted)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
-    redacted = _redact_fold_disguised_keyvalues(redacted)
+    redacted = _redact_disguised_keyvalues(redacted)
     redacted = _URL_USERINFO_PATTERN.sub(r"\1", redacted)
-    redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
-    redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
-    redacted = _redact_fold_disguised_keyvalues(redacted)
+    flattened = CONTROL_CHARS_PATTERN.sub(" ", redacted)
+    # 压平仅在改写文本时拼出新的分隔形态，恒等时第二轮对同一字符串可证 no-op。
+    if flattened != redacted:
+        redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", flattened)
+        redacted = _redact_disguised_keyvalues(redacted)
+    else:
+        redacted = flattened
     return cast("_SanitizedValue", _BEARER_TOKEN_PATTERN.sub(r"\1\2***", redacted))
 
 
@@ -513,14 +668,17 @@ _IDENTITY_PRECHECK_TRIGGER_PATTERN = re.compile(
 )
 
 
+# 键名切入转义族的探测模式：转义清单与键名切入删除模式共用单一来源。
+_KEY_CONTROL_ESCAPE_PATTERN = re.compile(_KEY_CONTROL_ESCAPE_ALT)
+
+
 def _data_text_needs_full_sanitize(value: str, limit: int) -> bool:
     """数据通道恒等快路的单一决策表：任一改写标记命中即需完整净化，全未命中恒等放行。
 
-    超限长度、不可打印字符、首尾空白、可能携带 userinfo 的 URL 形态与触发词构成
-    全部改写形态的保守超集，误判方向只损失性能不弱化净化；快扫未命中且文本含
-    非 ASCII 时对 casefold 产物再扫一遍，封堵 ß 一类全折叠伪装键。纯 ASCII 的
-    casefold 只翻大小写，(?i) 对 ASCII 字符集等价于大小写折叠，快扫已覆盖折叠
-    形态，不为纯 ASCII 文本付 casefold 分配。
+    超限长度、不可打印字符、首尾空白、可能携带 userinfo 的 URL 形态、控制字符字面转义切入族与触发词构成全部改写形态的保守超集，误判方向只损失性能不弱化净化，含反斜杠但不命中转义族的文本在完整管线下恒等；
+    快扫未命中且文本含非 ASCII 时对折叠产物再扫一遍，封堵 ß 全折叠、全角与
+    形近字母伪装键。纯 ASCII 的折叠只翻大小写，(?i) 对 ASCII 字符集等价于
+    大小写折叠，快扫已覆盖折叠形态，不为纯 ASCII 文本付折叠分配。
     """
     if len(value) > limit:
         return True
@@ -530,27 +688,32 @@ def _data_text_needs_full_sanitize(value: str, limit: int) -> bool:
         return True
     if "://" in value and "@" in value:
         return True
+    # isprintable 已排除真实控制字符，残余改写风险只剩键名切入转义族，族外反斜杠
+    # 在完整管线下恒等。
+    if "\\" in value and _KEY_CONTROL_ESCAPE_PATTERN.search(value) is not None:
+        return True
     if _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(value) is not None:
         return True
     if value.isascii():
         return False
-    return _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(value.casefold()) is not None
+    return _IDENTITY_PRECHECK_TRIGGER_PATTERN.search(_fold_key_disguise_text(value)) is not None
 
 
 def _sanitize_url_data_text(value: str, limit: int) -> str:
-    """纯 URL 数据字段的轻量净化：截断后剥离 userinfo、控制字符与空白态 Bearer 令牌。
+    """纯 URL 数据字段的轻量净化：剥离未配对代理并截断后，再剥离 userinfo、控制字符与空白态 Bearer 令牌。
 
     查询参数是 URL 的组成部分而非凭据回显，键值裸值脱敏会把签名 URL 的查询串整体
     替换为 *** 使数据不可用；userinfo 在控制字符压平前剥离，压平产生的空格会打断
     userinfo 匹配使凭据逃逸；压平拼出的 Bearer 令牌回显由仅空白分支剥离，冒号形态
     只剩误伤、不在此剥离。
     """
-    truncated = cast("str", _truncate_value_for_output(value, limit=limit))
+    stripped = strip_unpaired_surrogates(value)
+    truncated = cast("str", _truncate_value_for_output(stripped, limit=limit))
     redacted = _URL_USERINFO_PATTERN.sub(r"\1", truncated)
     redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
     redacted = _BEARER_WHITESPACE_PATTERN.sub(r"\1***", redacted)
     if len(redacted) > limit:
-        redacted = _retruncate_with_single_marker(redacted, limit, len(value))
+        redacted = _retruncate_with_single_marker(redacted, limit, len(stripped))
     return redacted
 
 
@@ -579,18 +742,40 @@ def sanitize_data_text(value: _SanitizedValue, limit: int = DATA_OUTPUT_LIMIT) -
 
 
 def is_sensitive_key(key: Any) -> bool:
-    """判断键名是否命中敏感关键词。
+    r"""判断键名是否命中敏感关键词。
 
-    高确信度词子串匹配覆盖连字符、无分隔与 camelCase 变体；其余关键词按分隔符
-    切分后段匹配，复合键中段同样命中，如 user.session_id 与 request-session-id，
-    短词 key 不误匹配 monkey、keyboard。本函数与自由文本路径的两路径口径在此单点
-    说明：带分隔符的 X_key/X_auth 复合键在前缀族内两路径一致命中；界外差异为无
-    分隔复合词 usersession_id 仅自由文本路径命中、族外前缀的 hotel_key 仅本路径
-    命中。
+    键名先做 NFKC、casefold 与形近字母折叠（仅用于匹配判定），高确信度词子串匹配
+    覆盖连字符、无分隔、camelCase 与全角变体；其余关键词按分隔符切分后段匹配，
+    段额外容忍复数形态（词尾去 s 后比对），复合键中段同样命中，如 user.session_id
+    与 request-session-id，短词 key 不误匹配 monkey、keyboard。复数受限词的复数段
+    仅在词首段或前段属于锚定复合前缀族时命中：max_tokens 一类用量字段不敏感，
+    tokens_per_second 的词首复数与自由文本 (?<!\w)tokens 加键名续段同判敏感，
+    refresh_tokens 与族内 X_tokens 分支同判敏感。本函数与自由文本路径的两路径
+    口径在此单点说明：带分隔符的 X_key/X_auth 复合键在前缀族内两路径一致命中；
+    界外差异为无分隔复合词 usersession_id 仅自由文本路径命中、族外前缀的
+    hotel_key 仅本路径命中、空格前缀的 invalid tokens 仅自由文本路径经左边界
+    断言命中。
     """
-    key_lower = str(key).lower()
+    key_folded = _fold_key_disguise_text(str(key))
     for substring in _SENSITIVE_KEY_SUBSTRINGS:
-        if substring in key_lower:
+        if substring in key_folded:
             return True
-    segments = frozenset(_KEY_SEGMENT_SPLIT_PATTERN.split(key_lower))
-    return not segments.isdisjoint(_SENSITIVE_KEY_KEYWORD_SET)
+    segments = _KEY_SEGMENT_SPLIT_PATTERN.split(key_folded)
+    for index, segment in enumerate(segments):
+        if segment in _SENSITIVE_KEY_KEYWORD_SET:
+            return True
+        if not segment.endswith("s"):
+            continue
+        singular = segment[:-1]
+        if singular not in _SENSITIVE_KEY_KEYWORD_SET:
+            continue
+        # 复数受限词的复数段对应自由文本的左边界锚定与族内复合分支，族外前缀
+        # （max_tokens 一类）不命中。
+        if (
+            singular in _SENSITIVE_KEY_NON_PLURAL_KEYWORDS
+            and index > 0
+            and segments[index - 1] not in _SENSITIVE_KEY_PLURAL_COMPOUND_PREFIX_SET
+        ):
+            continue
+        return True
+    return False

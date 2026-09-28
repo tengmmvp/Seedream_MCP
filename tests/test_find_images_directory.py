@@ -620,6 +620,54 @@ def test_find_images_prefix_rescan_budget_does_not_double_count(tmp_path: Path) 
     assert [p.name for p in result] == ["z_0.png", "z_1.png"]
 
 
+def test_scan_prefix_rescan_tolerates_concurrent_insert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """前缀倍增重扫的两趟间并发新增条目时不重复计入已物化条目、不漏采前移新条目。
+
+    第二趟前新增的 a.png 排序前移使旧前缀整体后移，按下标切片会重复采入
+    d.png 并漏采 a.png；按已处理路径去重后新条目单独入列。
+    """
+    for name in ("b.png", "c.txt", "d.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    original_scandir = os.scandir
+    scandir_calls = {"count": 0}
+
+    def _mutating_scandir(path: Any) -> Any:
+        scandir_calls["count"] += 1
+        if scandir_calls["count"] == 2:
+            (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _mutating_scandir)
+
+    result = find_images_in_directory(str(tmp_path), recursive=False, limit=3)
+
+    assert [p.name for p in result] == ["b.png", "d.png", "a.png"]
+    assert len(result) == len({str(p) for p in result})
+
+
+def test_scan_resolve_skips_symlink_loop_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """resolve 抛 RuntimeError 的符号链接环条目按逐条跳过口径剔除，其余条目不受影响。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "loop.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    scan_module.reset_directory_scan_cache()
+    original_resolve = Path.resolve
+
+    def _loop_only(self: Path, strict: bool = False) -> Path:
+        if self.name == "loop.png":
+            raise RuntimeError("Symlink loop from 'loop.png'")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _loop_only)
+
+    result = _scan(tmp_path, recursive=False, max_depth=1, scan_limit=10)
+
+    assert [raw.name for raw, _resolved in result] == ["a.png"]
+
+
 def test_find_images_records_truncated_dir_on_budget_hit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

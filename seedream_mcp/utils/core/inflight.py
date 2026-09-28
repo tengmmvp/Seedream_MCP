@@ -34,7 +34,7 @@ def log_unretrieved_task_exception(task: "asyncio.Task[Any]") -> None:
 
 
 # 已登记「未取回异常」检索回调的 task 集合。WeakSet 持弱引用，不延长 task 生命
-# 周期；创建者与等待者相继放弃同一 task 时仅登记一次。
+# 周期；同一在途 task 仅登记一次，已 done 的重复登记仍重排回调以复查孤儿前提。
 _UNRETRIEVED_ARMED_TASKS: "weakref.WeakSet[asyncio.Task[Any]]" = weakref.WeakSet()
 
 
@@ -52,7 +52,8 @@ def arm_unretrieved_exception_logging(
         callback: 触发时执行的回调，缺省为 log_unretrieved_task_exception；调用方
             持有消费者计数等附加上下文时可传自定义回调，在触发时复查登记前提。
     """
-    if task in _UNRETRIEVED_ARMED_TASKS:
+    # 已 done 的 task 此前回调可能已跑过且复查未成立，登记去重仅对在途 task 生效。
+    if not task.done() and task in _UNRETRIEVED_ARMED_TASKS:
         return
     _UNRETRIEVED_ARMED_TASKS.add(task)
     resolved_callback = callback if callback is not None else log_unretrieved_task_exception
@@ -69,16 +70,17 @@ class InflightEntry(Generic[_InflightResultT]):
     消费者经 consume 以 shield 等待共享 task：本调用被取消时仅取消自身 await，
     底层 task 继续运行保护其他等待者；结果或异常送达任一消费者即置位 observed，
     此后计数归零不再登记兜底日志；全部消费者放弃且结果未被消费时经
-    arm_orphan_logging 登记兜底日志回调。on_cancel 在取消异常向外传播前执行，
-    供创建者转移信号量槽位等清理责任。
+    arm_orphan_logging 登记兜底日志回调，同一孤儿失败至多记录一次。
+    on_cancel 在取消异常向外传播前执行，供创建者转移信号量槽位等清理责任。
     """
 
-    __slots__ = ("task", "consumers", "observed")
+    __slots__ = ("task", "consumers", "observed", "orphan_logged")
 
     def __init__(self, task: "asyncio.Task[_InflightResultT]") -> None:
         self.task = task
         self.consumers = 0
         self.observed = False
+        self.orphan_logged = False
 
     async def consume(self, on_cancel: Callable[[], None] | None = None) -> _InflightResultT:
         """以消费者身份等待共享 task，返回其结果或向调用方重放其异常。
@@ -109,12 +111,14 @@ class InflightEntry(Generic[_InflightResultT]):
         """最后一个潜在消费者放弃且结果未被消费时，登记兜底日志回调。
 
         回调触发时复查登记前提：登记后新消费者加入又放弃或消费的窗口内前提可能
-        已不成立，复查不成立即静默跳过，避免同一异常重复入日志。
+        已不成立，复查不成立即静默跳过；复查成立的重复触发经已记录标记去重，
+        同一孤儿失败至多入日志一次。
         """
 
         def _log_if_orphaned(task: "asyncio.Task[_InflightResultT]") -> None:
             # 触发时经模块全局名解析通用记录函数，保持调用方可替换该实现做测试观测。
-            if self.consumers == 0 and not self.observed:
+            if self.consumers == 0 and not self.observed and not self.orphan_logged:
+                self.orphan_logged = True
                 log_unretrieved_task_exception(task)
 
         if self.consumers > 0 or self.observed:

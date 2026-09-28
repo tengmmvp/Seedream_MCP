@@ -7,7 +7,7 @@ find_images_in_directory 为按 normcase 稳定顺序的深度优先遍历，条
 完成时 resolve 一次，深翻页命中免于逐文件重复 resolve。非递归扫描以目录
 mtime 失效，捕获时已沉淀超 FAT 时间戳粒度窗口的条目 mtime 未变即新鲜，未沉淀
 条目叠加 TTL 上界兜底粗粒度时间戳；递归扫描改用 TTL 失效，接受短时陈旧换取
-翻页性能。组内依赖 io_scan → io_path 单向。
+翻页性能。组内依赖 io_scan → io_path、io_scan → io_file 单向。
 """
 
 from __future__ import annotations
@@ -133,8 +133,8 @@ def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
     """将扫描结果的每个原始路径 resolve 一次，返回 (原始路径, resolved 路径) 对列表。
 
     resolve 是扫描链路中开销最大的逐文件调用，经进程级 TTL 缓存复用，TTL 过期
-    重扫免逐文件重复 resolve；网络挂载临时不可达等 resolve 失败的条目跳过不
-    缓存，待下次扫描重试。
+    重扫免逐文件重复 resolve；网络挂载临时不可达与符号链接环等 resolve 失败的
+    条目跳过不缓存，待下次扫描重试。
     """
     pairs: list[tuple[Path, Path]] = []
     for image_path in images:
@@ -145,7 +145,7 @@ def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
                     _SCAN_RESOLVE_CACHE.get_or_resolve(str(image_path), image_path.resolve),
                 )
             )
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             continue
     return pairs
 
@@ -341,7 +341,8 @@ def find_images_in_directory(
     的目录追加至 truncated_dirs 供调用方感知结果不完整；heapq.nsmallest 选前缀须
     消费整个目录迭代器，单目录单趟枚举不在此预算内。
     单个目录的条目列表按需物化：limit 场景只物化排序前缀，非图片条目占位致结果
-    不足且目录未扫尽时倍增前缀重扫，无 limit 时一次物化全量有序列表；limit 亦使
+    不足且目录未扫尽时倍增前缀重扫，重扫趟按已处理路径去重以容忍两趟间的目录
+    并发变更，无 limit 时一次物化全量有序列表；limit 亦使
     跨目录递归提前终止，重复扫描的成本由 mtime 加 TTL 缓存缓解。
 
     Args:
@@ -399,7 +400,7 @@ def find_images_in_directory(
         # 排序前缀按需扩展：heapq.nsmallest 与 sorted 前缀同序，物化量与前缀长度
         # 成正比而非目录全量；无 limit 时一次全量排序。
         prefix_len = target_count
-        consumed = 0
+        processed: set[str] = set()
         while True:
             try:
                 with os.scandir(path) as it:
@@ -417,9 +418,17 @@ def find_images_in_directory(
                     unreadable_dirs.append(path)
                 return False
 
-            # 条目预算按物化量累计：前缀重扫趟只按新增段计费，目录条目数可超预算
+            # 重扫趟按已处理路径取新增条目：两趟间目录并发变更使排序前缀漂移时，
+            # 已物化条目不重复入列、前移的新条目不漏采。
+            fresh_entries = []
+            for entry in entries:
+                if entry.path in processed:
+                    continue
+                processed.add(entry.path)
+                fresh_entries.append(entry)
+            # 条目预算按物化量累计：重扫趟只按新增条目计费，目录条目数可超预算
             # 而分页不中断；超限丢弃本批并终止遍历。
-            scanned_entries += max(len(entries) - consumed, 0)
+            scanned_entries += len(fresh_entries)
             if scanned_entries > _SCAN_ENTRY_BUDGET:
                 logger.warning(
                     "目录扫描条目数超过预算 {}，停止遍历并返回已收集结果: {}",
@@ -430,7 +439,7 @@ def find_images_in_directory(
                     truncated_dirs.append(path)
                 return True
 
-            for entry in entries[consumed:]:
+            for entry in fresh_entries:
                 entry_path = Path(entry.path)
                 # follow_symlinks=False：不跟随符号链接，避免符号链接环与经由符号链接越界遍历。
                 if (
@@ -465,7 +474,6 @@ def find_images_in_directory(
             if target_count < 0 or len(entries) < prefix_len:
                 # 无 limit 或返回条目少于前缀长度即目录已扫尽，不存在可扩展前缀。
                 return False
-            consumed = prefix_len
             prefix_len *= 2
 
     scan_directory(dir_path)

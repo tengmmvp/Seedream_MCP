@@ -35,6 +35,16 @@ def test_infer_extension_returns_heic_for_hevc_brand() -> None:
     assert infer_extension_from_bytes(_make_iso_bmff(b"hevc")) == ".heic"
 
 
+def test_infer_extension_returns_heic_for_heim_brand() -> None:
+    """heim brand 同样识别为 .heic。"""
+    assert infer_extension_from_bytes(_make_iso_bmff(b"heim")) == ".heic"
+
+
+def test_infer_extension_returns_heic_for_heis_brand() -> None:
+    """heis brand 同样识别为 .heic。"""
+    assert infer_extension_from_bytes(_make_iso_bmff(b"heis")) == ".heic"
+
+
 def test_infer_extension_returns_heif_for_mif1_brand() -> None:
     """mif1 brand 识别为 .heif 且通过真实性判定。"""
     content = _make_iso_bmff(b"mif1")

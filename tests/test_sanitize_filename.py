@@ -87,9 +87,7 @@ def test_generate_unique_filename_short_base_not_truncated(manager: FileManager)
     assert filename.startswith("cat_")
 
 
-def test_create_save_path_long_custom_name_stays_within_max_path(
-    manager: FileManager, tmp_path: Path
-) -> None:
+def test_create_save_path_long_custom_name_stays_within_max_path(manager: FileManager) -> None:
     """长 custom_name 生成的路径增量由日期目录、工具目录与预算内文件名封顶。
 
     旧行为：词干无预算时文件名必然超出 MAX_PATH 使自动保存失败。完整路径长度

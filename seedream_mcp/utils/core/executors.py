@@ -108,7 +108,7 @@ def shutdown_cpu_offload_executor() -> None:
 
 def _executor_retired(executor: ThreadPoolExecutor) -> bool:
     """判断执行器是否已关闭：全局单池已被替换，或实例自身已置关闭标志。"""
-    return _CPU_OFFLOAD_EXECUTOR is not executor or executor._shutdown
+    return _CPU_OFFLOAD_EXECUTOR is not executor or getattr(executor, "_shutdown", False)
 
 
 class CpuOffloadPoolClosedError(RuntimeError):
@@ -151,7 +151,7 @@ async def run_in_cpu_pool(func: Callable[..., T], /, *args: Any) -> T:
     except RuntimeError as exc:
         # submit 拒绝按实例关闭标志与解释器退出标志归因转换，不匹配消息文案，
         # 标准库改文案时裸 RuntimeError 不击穿调用方的按类型兜底。
-        if executor._shutdown or sys.is_finalizing():
+        if getattr(executor, "_shutdown", False) or sys.is_finalizing():
             raise CpuOffloadPoolClosedError("CPU 卸载线程池已关闭，任务提交被拒绝") from exc
         raise
     task = asyncio.current_task()

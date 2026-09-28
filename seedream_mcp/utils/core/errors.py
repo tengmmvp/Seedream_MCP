@@ -25,19 +25,16 @@ class SeedreamMCPError(Exception):
     Attributes:
         message: 人类可读的错误描述文本。
         error_code: 结构化错误码。
-        details: 附加上下文键值对。
     """
 
     def __init__(
         self,
         message: str,
         error_code: str | None = None,
-        details: dict[str, Any] | None = None,
     ):
         super().__init__(message)
         self.message = message
         self.error_code = error_code
-        self.details = details or {}
 
 
 class SeedreamConfigError(SeedreamMCPError):

@@ -24,6 +24,8 @@ from seedream_mcp.utils.images.image_validation import (
     validate_image_path,
 )
 
+from _png_fixtures import forged_png_bytes
+
 
 def _png_bytes(width: int, height: int) -> bytes:
     """生成指定宽高的内存 PNG 字节。"""
@@ -84,8 +86,8 @@ def test_ratio_rejects_1_to_17_and_17_to_1() -> None:
 def test_total_pixels_accepts_limit_and_limit_minus_one() -> None:
     """总像素恰为上限 3600 万与上限减一通过，超限被拒。
 
-    MAX_IMAGE_PIXELS 是参考图与下载两入口共用的口径基准。上限加一不存在满足
-    最短边与宽高比约束的整数宽高组合，以最小超限组合 6000x6001 断言拒绝。
+    MAX_IMAGE_PIXELS 是参考图与下载两入口共用的口径基准。上限加一仍存在满足
+    最短边与宽高比约束的组合（如 3617x9953），拒绝断言取代表性超限组合 6000x6001。
     """
     assert MAX_IMAGE_PIXELS == 36_000_000
     _validate_image_dimensions(6000, 6000, "limit.png")
@@ -131,17 +133,6 @@ def test_decode_raises_decompression_bomb_error_when_limit_lowered(
         decode_and_validate_dimensions(_png_bytes(200, 200), "bomb.png")
 
 
-def _forged_header_png(width: int, height: int) -> bytes:
-    """真实 1x1 PNG 改写 IHDR 宽高为给定值并重算 CRC，头尺寸可任意放大。"""
-    import struct
-    import zlib
-
-    forged = bytearray(_png_bytes(1, 1))
-    forged[16:29] = struct.pack(">II5B", width, height, 8, 2, 0, 0, 0)
-    forged[29:33] = struct.pack(">I", zlib.crc32(bytes(forged[12:29])) & 0xFFFFFFFF)
-    return bytes(forged)
-
-
 def test_pil_threshold_warns_in_band_and_errors_at_double() -> None:
     """formats 注入阈值后 PIL 在 36M..72M 区间仅告警，超过 2 倍才抛解压炸弹错误。
 
@@ -154,14 +145,14 @@ def test_pil_threshold_warns_in_band_and_errors_at_double() -> None:
 
     ensure_image_decoders_ready()
 
-    band = _forged_header_png(6_100, 6_100)  # 37.21M 像素，介于 36M 与 2 倍之间
+    band = forged_png_bytes(6_100, 6_100)  # 37.21M 像素，介于 36M 与 2 倍之间
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with Image.open(io.BytesIO(band)):
             pass
     assert any(issubclass(item.category, Image.DecompressionBombWarning) for item in caught)
 
-    double = _forged_header_png(8_500, 8_500)  # 72.25M 像素，超过 2 倍阈值
+    double = forged_png_bytes(8_500, 8_500)  # 72.25M 像素，超过 2 倍阈值
     with pytest.raises(Image.DecompressionBombError):
         with Image.open(io.BytesIO(double)):
             pass

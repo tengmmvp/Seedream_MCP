@@ -8,19 +8,18 @@ import asyncio
 
 import pytest
 
-from seedream_mcp.client import SeedreamClient
-from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.images import image_prepare
+
+from _client_fakes import _make_client
 
 
 async def test_concurrent_parallel_calls_share_instance_semaphore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """同一 preparer 上两个并发批量调用共享信号量，任意时刻并发 prepare 数不超过上限。"""
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
-    limit = config.image_prepare_concurrency
+    limit = client.config.image_prepare_concurrency
 
     current = 0
     peak = 0
@@ -65,10 +64,9 @@ async def test_concurrent_single_image_calls_share_instance_semaphore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """并发单图入口即 client 直连路径同样受实例级信号量约束，峰值并发不超过上限。"""
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
-    limit = config.image_prepare_concurrency
+    limit = client.config.image_prepare_concurrency
 
     current = 0
     peak = 0
@@ -108,10 +106,9 @@ async def test_waiters_do_not_occupy_semaphore_slots(
     等待路径曾与执行路径共用槽位，纯等待者即可占满槽位使吞吐塌缩；不占槽后，
     其他键的执行者仍可用满 limit 个槽位。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
-    limit = config.image_prepare_concurrency
+    limit = client.config.image_prepare_concurrency
 
     current = 0
     release = asyncio.Event()
@@ -169,10 +166,9 @@ async def test_cancelled_creators_do_not_break_concurrency_limit(
     创建者被取消时 shield 使共享 task 继续运行；若槽位随之释放，峰值并发随取消
     次数无界放大。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
-    limit = config.image_prepare_concurrency
+    limit = client.config.image_prepare_concurrency
 
     current = 0
     peak = 0
@@ -250,11 +246,12 @@ def test_instance_semaphore_rebuilds_across_event_loops() -> None:
     asyncio.Semaphore 首次使用绑定事件循环，跨循环复用抛 RuntimeError，须按循环
     身份重建；URL 输入的预处理无本地 I/O。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
     # 图片数超过上限一位，迫使信号量产生等待者
-    batch = [f"https://example.com/x{i}.png" for i in range(config.image_prepare_concurrency + 1)]
+    batch = [
+        f"https://example.com/x{i}.png" for i in range(client.config.image_prepare_concurrency + 1)
+    ]
 
     async def _run_once() -> list[str]:
         return await preparer.prepare_images_in_parallel(batch)
@@ -274,8 +271,7 @@ def test_stale_inflight_entries_cleared_on_event_loop_change(
     等待收尾使协程正常终结，旧循环仅遗留共享 task；关闭时以空异常处理器抑制
     未完成 task 的销毁告警。
     """
-    config = SeedreamConfig(api_key="test_key", max_retries=1)
-    client = SeedreamClient(config)
+    client = _make_client()
     preparer = client._image_preparer
     image_url = "https://example.com/ref.png"
     roots_key = ("test-roots",)

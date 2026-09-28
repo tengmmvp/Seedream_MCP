@@ -49,17 +49,15 @@ class CpuOffloadSpy:
 
 
 class SaturatedCpuOffloadPool:
-    """进程级专用池被占满期间的视图：阻塞任务、放行闸门与排队观察入口。"""
+    """进程级专用池被占满期间的视图：阻塞任务与排队观察入口。"""
 
     def __init__(
         self,
         executor: ThreadPoolExecutor,
         tasks: list[asyncio.Task[None]],
-        release: threading.Event,
     ) -> None:
         self.executor = executor
         self.tasks = tasks
-        self.release = release
 
     async def wait_queued(self, timeout: float = 5.0) -> None:
         """等待有提交在饱和池的队列排队，为池满窗口内的排队行为提供就位证据。"""
@@ -92,7 +90,7 @@ async def saturate_cpu_offload_pool() -> AsyncIterator[SaturatedCpuOffloadPool]:
     tasks = [asyncio.ensure_future(run_in_cpu_pool(_blocker)) for _ in range(pool_size)]
     try:
         assert await asyncio.to_thread(all_started.wait, 5), "专用池 worker 未全部占满"
-        yield SaturatedCpuOffloadPool(executor, tasks, release)
+        yield SaturatedCpuOffloadPool(executor, tasks)
     finally:
         # 就绪断言或用例体失败同样放行，专用池不因一次失败级联堵死后续用例。
         release.set()

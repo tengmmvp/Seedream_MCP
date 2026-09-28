@@ -134,12 +134,19 @@ def _strip_message_control_chars(record: Any) -> None:
     体中的 CR/LF 原样记录会在日志文件中伪造额外行。exc_info 的异常消息文本经
     _strip_exception_control_chars 同步清洗，traceback 帧源代码行来自本地文件不受
     影响。本层只压平控制字符，不剥离键值形态的凭据：日志通道有意保留异常原文便于
-    排障，键值脱敏由调用点承担。
+    排障，键值脱敏由调用点承担。非字符串消息跳过不改写；异常清洗的意外失败不外泄
+    进业务日志调用点，记录按已清洗部分落日志并输出 warning。
     """
-    message = record["message"]
-    if _LOG_MESSAGE_CONTROL_CHARS.search(message):
+    message = record.get("message")
+    if isinstance(message, str) and _LOG_MESSAGE_CONTROL_CHARS.search(message):
         record["message"] = _LOG_MESSAGE_CONTROL_CHARS.sub(" ", message)
-    _strip_exception_control_chars(record)
+    try:
+        _strip_exception_control_chars(record)
+    except Exception as exc:
+        # patcher 异常外泄会打进业务日志调用点；warning 使清洗失败可见。
+        logger.warning(
+            "日志异常消息控制字符清洗失败({})，记录按已清洗部分落日志", type(exc).__name__
+        )
 
 
 def _strip_exception_control_chars(record: Any) -> None:

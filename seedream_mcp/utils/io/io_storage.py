@@ -12,6 +12,7 @@ import heapq
 import os
 import re
 import stat
+import threading
 import uuid
 from collections import OrderedDict
 from datetime import datetime
@@ -24,6 +25,7 @@ from ..core.formats import (
     SUPPORTED_IMAGE_EXTENSIONS,
 )
 from ..core.logs import get_logger
+from ..core.throttles import store_bounded_entry
 from .io_file import (
     atomic_replace_from_fd_sync,
     has_reparse_attribute,
@@ -90,7 +92,7 @@ class FileManager:
             raise FileManagerError(f"拒绝 UNC 路径以避免触发 SMB 连接: {raw_base}")
         try:
             resolved = raw_base.resolve()
-        except (OSError, ValueError) as e:
+        except (OSError, RuntimeError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
         # 仅拒绝指向已存在文件的路径；save_path 为调用级保存声明，位置不受限，
         # 空字节等其余路径形态由调用方 tools/core/_pipeline 在 resolve 前拒绝。
@@ -376,7 +378,6 @@ class FileManager:
         file_path: Path,
         data: bytes,
         overwrite: bool = False,
-        ensure_parent: bool = True,
         fsync: bool = False,
     ) -> dict[str, Any]:
         """将字节数据写入文件，返回保存结果元数据。
@@ -389,7 +390,6 @@ class FileManager:
             file_path: 目标路径。
             data: 字节数据。
             overwrite: 是否覆盖已有文件。
-            ensure_parent: 是否确保父目录存在；调用方已建目录时可传 False 跳过重复 mkdir。
             fsync: 写入后、原子替换前是否对文件执行 os.fsync 刷入稳定存储。
 
         Returns:
@@ -399,8 +399,7 @@ class FileManager:
             FileManagerError: 目录创建或文件写入失败。
         """
         try:
-            if ensure_parent:
-                self.ensure_directory(file_path.parent)
+            self.ensure_directory(file_path.parent)
             final_path = file_path
             if final_path.exists() and not overwrite:
                 base = final_path.stem
@@ -450,6 +449,8 @@ class FileManager:
         # 被视为 fragment 起点，% 会被误解码。百分号必须最先编码，后编码会使其余
         # 编码产物中的百分号被二次编码。
         relative_path = self.relative_to_base(file_path)
+        # 绝对路径回退不加 ./ 前缀，避免拼出指向不存在的非法相对引用。
+        is_absolute = os.path.isabs(relative_path)
         markdown_path = relative_path.replace("\\", "/")
         markdown_path = (
             markdown_path.replace("%", "%25")
@@ -459,7 +460,7 @@ class FileManager:
             .replace(")", "%29")
         )
 
-        if not markdown_path.startswith("./"):
+        if not is_absolute and not markdown_path.startswith("./"):
             markdown_path = "./" + markdown_path
 
         if alt_text:
@@ -665,7 +666,7 @@ class FileManager:
                         continue
                     # 仅收集受支持图片与 .part 临时文件，跳过其他类型避免误删用户数据。
                     is_image = entry_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
-                    if not is_image and not entry.name.endswith(".part"):
+                    if not is_image and not entry.name.lower().endswith(".part"):
                         continue
                     try:
                         entry_stat = entry.stat(follow_symlinks=False)
@@ -748,25 +749,31 @@ class FileManager:
 
 # FileManager 进程级缓存：构造含 resolve/exist/mkdir 文件系统调用，按 base_dir
 # 原始值（调用方均传已解析的绝对路径）复用避免每次保存重复探测；LRU 上限封顶
-# 多会话 roots 下的条目增长，竞态下最坏重复构造一次。
+# 多会话 roots 下的条目增长。保存请求经 to_thread 构造 manager，缓存变更跨线程
+# 并发发生，get 与 move_to_end 之间键可能被驱逐，无锁会抛 KeyError 使保存失败；
+# 构造留在锁外，竞态下最坏重复构造一次。
 _FILE_MANAGER_CACHE_MAX_ENTRIES = 16
 _file_manager_cache: "OrderedDict[Path, FileManager]" = OrderedDict()
+_file_manager_cache_lock = threading.Lock()
 
 
 def get_file_manager(base_dir: Path | None = None) -> "FileManager":
     """按 base_dir 取进程级缓存的 FileManager，未命中时构造并缓存，LRU 驱逐最旧。"""
     cache_key = resolve_images_root() if base_dir is None else Path(base_dir)
-    cached = _file_manager_cache.get(cache_key)
-    if cached is not None:
-        _file_manager_cache.move_to_end(cache_key)
-        return cached
+    with _file_manager_cache_lock:
+        cached = _file_manager_cache.get(cache_key)
+        if cached is not None:
+            _file_manager_cache.move_to_end(cache_key)
+            return cached
     manager = FileManager(base_dir)
-    _file_manager_cache[cache_key] = manager
-    while len(_file_manager_cache) > _FILE_MANAGER_CACHE_MAX_ENTRIES:
-        _file_manager_cache.popitem(last=False)
+    with _file_manager_cache_lock:
+        store_bounded_entry(
+            _file_manager_cache, cache_key, manager, _FILE_MANAGER_CACHE_MAX_ENTRIES
+        )
     return manager
 
 
 def reset_file_manager_cache() -> None:
-    """清空 FileManager 进程级缓存，仅供测试隔离调用。"""
-    _file_manager_cache.clear()
+    """清空 FileManager 进程级缓存，经 resources 复位协议登记，供测试隔离调用。"""
+    with _file_manager_cache_lock:
+        _file_manager_cache.clear()

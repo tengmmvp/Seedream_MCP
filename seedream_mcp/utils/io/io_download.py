@@ -23,7 +23,7 @@ import random
 import socket
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import aiofiles
@@ -517,7 +517,8 @@ class DownloadManager:
 
         resolved_ips: list[str] = []
         for info in infos:
-            resolved_ip = info[4][0]
+            # sockaddr 首元素在主机名解析下恒为地址字符串；联合类型中的 int 首位仅来自 disable-ipv6 构建变体，常规构建运行时不出现。
+            resolved_ip = cast("str", info[4][0])
             try:
                 ip_obj = ipaddress.ip_address(resolved_ip)
             except ValueError as exc:

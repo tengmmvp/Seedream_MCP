@@ -2,16 +2,28 @@
 
 需要伪造 API 响应分块流或注入 MockTransport 的测试经此复用 _FakeLog/
 _FakeSSEResponse 与注入逻辑，避免逐行重复定义造成语义漂移。伪 SSE 响应按
-aiohttp/httpx 公开接口的最小子集模拟分块字节流。
+aiohttp/httpx 公开接口的最小子集模拟分块字节流；_parse_sse 以标准参数组合
+解析伪响应，调用方仅声明偏离默认值的参数；_make_client 复用最小测试配置的
+客户端构造。
 """
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, cast
 
 import httpx
 
 from seedream_mcp.client import SeedreamClient
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.utils.io.io_sse import parse_sse_response
+
+if TYPE_CHECKING:
+    from loguru import Logger
+
+
+def _make_client() -> SeedreamClient:
+    """以最小测试配置构造 SeedreamClient，prepare 系列测试的共享工厂。"""
+    return SeedreamClient(SeedreamConfig(api_key="test_key", max_retries=1))
 
 
 class _FakeLog:
@@ -48,3 +60,22 @@ async def _install_mock_transport(client: SeedreamClient, handler: Callable[[Any
     if client._client is not None:
         await client._client.aclose()
     client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def _parse_sse(
+    chunks: list[bytes],
+    *,
+    buffer_max_size: int = 4096,
+    event_truncate_threshold: int = 4096,
+    total_bytes_limit: int = 64 * 1024,
+    log: Logger | None = None,
+) -> dict[str, Any]:
+    """以标准参数组合解析伪 SSE 响应，调用方仅声明偏离默认值的参数。"""
+    return await parse_sse_response(
+        cast(httpx.Response, _FakeSSEResponse(chunks)),
+        model_id="m",
+        buffer_max_size=buffer_max_size,
+        event_truncate_threshold=event_truncate_threshold,
+        total_bytes_limit=total_bytes_limit,
+        log=cast("Logger", _FakeLog()) if log is None else log,
+    )

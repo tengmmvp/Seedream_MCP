@@ -195,9 +195,6 @@ def parse_data_uri(data: Any) -> tuple[str | None, Any, bool]:
         return None, data, False
     # header 形如 "data:image/png;base64"，去掉 scheme 前缀后取首个 ";" 前的媒体类型。
     body = header.split(":", 1)[1]
-    if ";" in body:
-        media_type = body.split(";", 1)[0] or None
-    else:
-        media_type = body or None
+    media_type = body.split(";", 1)[0] or None
     is_base64 = ";base64" in header.lower()
     return media_type, payload, is_base64
