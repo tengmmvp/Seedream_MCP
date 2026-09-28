@@ -192,10 +192,8 @@ def _build_browse_structured_result(
         "success": success,
         "status": status,
         "directory": state.directory,
-        "resolved_directories": [
-            str(item).replace("\\", "/") for item in state.resolved_directories
-        ],
-        "workspace_roots": [str(root).replace("\\", "/") for root in state.workspace_roots],
+        "resolved_directories": [item.as_posix() for item in state.resolved_directories],
+        "workspace_roots": [root.as_posix() for root in state.workspace_roots],
         "images": images if images is not None else [],
         "count": len(images) if images is not None else 0,
         "total_count": total_count,
@@ -268,8 +266,7 @@ def _scan_and_filter_directory(
         max_depth: 递归扫描的最大深度。
         format_filter: 图片扩展名白名单，None 表示全部支持的后缀。
         remaining: 本目录新增条数的配额上限。
-        read_scope: 已 resolve 的条目过滤界，为读权限（工作区 ∪ 图片目录）或
-            调用方传入的替代界。
+        read_scope: 已 resolve 的条目过滤界，为读权限或其与替代界的交集。
         unreadable_dirs: 不可读目录收集列表，就地更新，供空结果分支区分目录
             不可读与目录内无图片。
         truncated_dirs: 截断目录收集列表，就地更新，供装配分支标记结果不完整。
@@ -345,8 +342,8 @@ def _build_display_entries(
     structured_images: list[dict[str, Any]] = []
     for idx, img in enumerate(images, 1):
         img_resolved = image_resolved_map[img]
-        # 归一正斜杠，跨平台口径一致。
-        display_path = str(img_resolved).replace("\\", "/")
+        # as_posix 仅归一分隔符，POSIX 文件名中的字面反斜杠保持原样可回流。
+        display_path = img_resolved.as_posix()
         # 文本通道压平控制字符，防止含控制字符文件名伪造清单行；口径与 errors 的
         # 净化共用 CONTROL_CHARS_PATTERN；结构化路径保持原样供回流。
         text_path = CONTROL_CHARS_PATTERN.sub(" ", display_path)
@@ -379,6 +376,15 @@ def _normalize_format_filter(raw: list[str] | None) -> tuple[list[str] | None, b
     if supported_only:
         return supported_only, False
     return raw, True
+
+
+def _narrow_scope_to_bounds(read_scope: list[Path], bounds_scope: list[Path]) -> list[Path]:
+    """仅保留落在读权限内的替代界，未落入者整界剔除。"""
+    return [
+        bound
+        for bound in bounds_scope
+        if any(is_within_resolved(bound, scope) for scope in read_scope)
+    ]
 
 
 async def build_browse_fallback_result(
@@ -564,7 +570,7 @@ async def _build_empty_browse_result(
         unique_unreadable = list(dict.fromkeys(unreadable_dirs))
         logger.info("不可读目录明细: {}", [str(item) for item in unique_unreadable])
         listed = unique_unreadable[:_MAX_UNREADABLE_DIR_LISTING]
-        parts = [", ".join(sanitize_data_text(str(item).replace("\\", "/")) for item in listed)]
+        parts = [", ".join(sanitize_data_text(item.as_posix()) for item in listed)]
         hidden = len(unique_unreadable) - len(listed)
         if hidden:
             parts.append(f"另有 {hidden} 个目录")
@@ -644,15 +650,22 @@ async def execute_browse_request(
         ctx: MCP 上下文，用于进度上报，可为 None。
         resolved_directories: 外层创建的共享列表，解析结果逐步填充，供成功与兜底
             分支读取。
-        bounds_scope: 条目过滤的替代界，应窄于读权限，None 时按读权限
-            （工作区 ∪ 图片目录）过滤；Web 图库传入图片目录使越界条目在
+        bounds_scope: 条目过滤的替代界，与读权限求交后生效，空列表拒绝；None 时按
+            读权限（工作区 ∪ 图片目录）过滤；Web 图库传入图片目录使越界条目在
             扫描源头剔除。
 
     Returns:
         浏览工具结果，目录无效、越界与模型可自纠的参数错误为 is_error=True，目录
         不可读与无图片维持空结果语义。
+
+    Raises:
+        ValueError: bounds_scope 为空列表时。
     """
-    raw_format_filter, format_filter_exhausted = _normalize_format_filter(params.format_filter)
+    if bounds_scope is not None and not bounds_scope:
+        raise ValueError("bounds_scope 不能为空列表")
+    effective_format_filter, format_filter_exhausted = _normalize_format_filter(
+        params.format_filter
+    )
     directory = params.effective_directory
 
     workspace_roots, read_scope, resolved_dir, dir_error = await _resolve_browse_directories(
@@ -663,7 +676,7 @@ async def execute_browse_request(
         params,
         workspace_roots=workspace_roots,
         resolved_directories=resolved_directories,
-        format_filter=raw_format_filter,
+        format_filter=effective_format_filter,
     )
 
     if dir_error is not None:
@@ -686,11 +699,16 @@ async def execute_browse_request(
         state.limit,
     )
 
+    scan_scope = (
+        _narrow_scope_to_bounds(read_scope, bounds_scope)
+        if bounds_scope is not None
+        else read_scope
+    )
     all_images, image_resolved_map, unreadable_dirs, truncated_dirs = await _scan_browse_entries(
         ctx=ctx,
         state=state,
         resolved_dir=resolved_dir,
-        read_scope=bounds_scope if bounds_scope is not None else read_scope,
+        read_scope=scan_scope,
         format_filter_exhausted=format_filter_exhausted,
     )
 

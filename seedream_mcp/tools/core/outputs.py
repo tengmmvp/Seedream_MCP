@@ -18,11 +18,16 @@ from collections.abc import Sequence
 from typing import Any
 
 from mcp.types import CallToolResult, ContentBlock, TextContent
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
+from ._sanitize import _unique_flat_key
 from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
 from ...utils.core.logs import get_logger
-from ...utils.core.sanitizers import sanitize_data_text, utf8_value_leaf_length
+from ...utils.core.sanitizers import (
+    sanitize_data_text,
+    strip_unpaired_surrogates,
+    utf8_value_leaf_length,
+)
 
 logger = get_logger()
 
@@ -46,6 +51,17 @@ class _BaseStructuredOutput(BaseModel):
     success: bool
     status: str | None = None
     error: dict[str, Any] | None = None
+
+
+def _stringify_keys(mapping: dict[Any, Any]) -> dict[str, Any]:
+    """非字符串键字符串化，键压平与碰撞后缀委托 _unique_flat_key 单点；全字符串键原样返回。"""
+    if all(isinstance(key, str) for key in mapping):
+        return mapping
+    stringified: dict[str, Any] = {}
+    for key, value in mapping.items():
+        text_key = _unique_flat_key(stringified, key if isinstance(key, str) else str(key))
+        stringified[text_key] = value
+    return stringified
 
 
 class GenerationStructuredOutput(_BaseStructuredOutput):
@@ -98,6 +114,22 @@ class GenerationStructuredOutput(_BaseStructuredOutput):
     auto_save: dict[str, Any] | None = None
     truncated_events: int | None = None
     deadline_exceeded: bool | None = None
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def _stringify_data_item_keys(cls, value: Any) -> Any:
+        """图片条目的非字符串键在核心校验前字符串化，净化层保留的此类键不使构造抛错。"""
+        if not isinstance(value, list):
+            return value
+        return [_stringify_keys(item) if isinstance(item, dict) else item for item in value]
+
+    @field_validator("usage", "batch", "error", mode="before")
+    @classmethod
+    def _stringify_mapping_keys(cls, value: Any) -> Any:
+        """dict 字段的非字符串键在核心校验前字符串化，净化层保留的此类键不使构造抛错。"""
+        if not isinstance(value, dict):
+            return value
+        return _stringify_keys(value)
 
 
 class BrowseImagesStructuredOutput(_BaseStructuredOutput):
@@ -216,10 +248,11 @@ def _mirror_string(key: Any, value: str) -> str:
 
 
 def _mirror_node(key: Any, value: Any) -> Any:
-    """重建镜像视图：字符串值占位或净化，容器无条件新建。
+    """重建镜像视图：字符串值占位或净化，容器无条件新建，未知类型拒绝。
 
-    极端深树触发 RecursionError，由组装点降级为无镜像结果；键序随遍历保持
-    与原树一致，原树不被修改。
+    dict/list/str 与 JSON 标量之外的容器类型可能携带绕过净化与卸载门控的嵌套
+    字符串，一律拒绝，与极端深树的 RecursionError 同样由组装点降级为无镜像
+    结果；键序随遍历保持与原树一致，原树不被修改。
     """
     if isinstance(value, dict):
         return {sub_key: _mirror_node(sub_key, item) for sub_key, item in value.items()}
@@ -227,7 +260,9 @@ def _mirror_node(key: Any, value: Any) -> Any:
         return [_mirror_node(None, item) for item in value]
     if isinstance(value, str):
         return _mirror_string(key, value)
-    return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise ValueError(f"镜像不支持 {type(value).__name__} 类型的值")
 
 
 def dump_compact_strict_json(value: Any) -> str:
@@ -272,6 +307,72 @@ def binary_placeholder_value_leaf_length(key: Any, value: Any, limit: int) -> in
     return None
 
 
+def _strip_result_payload_surrogates(value: Any) -> Any:
+    """迭代剥离结构化载荷字符串与键的未配对代理，干净子树保持原引用。
+
+    显式栈后序遍历不消耗递归配额，极端深树不再使装配点抛 RecursionError；变更
+    子级记入所属容器的补丁表，补丁为空的子树返回原容器引用，仅含变更的分支
+    物化新容器。
+    """
+    if isinstance(value, str):
+        return strip_unpaired_surrogates(value)
+    if not isinstance(value, (dict, list)):
+        return value
+
+    # 容器帧为 (原容器, 补丁表) 二元组：list 补丁按下标存新值，dict 补丁按原始键存
+    # (剥离键, 新值)，空补丁表即整个容器未变更。
+    root_result: Any = value
+    stack: list[tuple[Any, Any, Any, Any]] = [(None, None, None, value)]
+    while stack:
+        parent, slot, write_key, node = stack.pop()
+        if isinstance(node, tuple):
+            original, patches = node
+            result: Any
+            if not patches:
+                result = original
+            elif isinstance(original, list):
+                result = list(original)
+                for index, new_value in patches.items():
+                    result[index] = new_value
+            else:
+                result = {}
+                for key, item in original.items():
+                    new_key, new_value = patches.get(key, (key, item))
+                    result[new_key] = new_value
+            if parent is None:
+                root_result = result
+            elif result is not original or write_key is not slot:
+                parent_original, parent_patches = parent
+                if isinstance(parent_original, dict):
+                    parent_patches[slot] = (write_key, result)
+                else:
+                    parent_patches[slot] = result
+            continue
+        frame: tuple[Any, dict[Any, Any]] = (node, {})
+        stack.append((parent, slot, write_key, frame))
+        patches = frame[1]
+        if isinstance(node, dict):
+            for key, item in node.items():
+                stripped_key = strip_unpaired_surrogates(key) if isinstance(key, str) else key
+                if isinstance(item, str):
+                    stripped_item = strip_unpaired_surrogates(item)
+                    if stripped_key is not key or stripped_item is not item:
+                        patches[key] = (stripped_key, stripped_item)
+                elif isinstance(item, (dict, list)):
+                    stack.append((frame, key, stripped_key, item))
+                elif stripped_key is not key:
+                    patches[key] = (stripped_key, item)
+        else:
+            for index, item in enumerate(node):
+                if isinstance(item, str):
+                    stripped_item = strip_unpaired_surrogates(item)
+                    if stripped_item is not item:
+                        patches[index] = stripped_item
+                elif isinstance(item, (dict, list)):
+                    stack.append((frame, index, index, item))
+    return root_result
+
+
 async def build_structured_tool_result(
     message: str,
     structured: dict[str, Any],
@@ -282,10 +383,11 @@ async def build_structured_tool_result(
     """组装携带 structuredContent 的工具结果，content 为「摘要 + JSON 镜像 + 尾部块」。
 
     规范建议返回 structuredContent 的工具同时在 content 中回传序列化 JSON；本函数是
-    该不变量的单一组装点，全部工具出口共用，尾部块承载缩略图预览等内容。载荷尺寸
-    估算达到卸载阈值时镜像构建的树遍历、净化与序列化下沉专用 CPU 线程池执行，
-    小载荷内联构建免线程往返；两条路径失败时同样降级为无镜像结果并记录告警，
-    is_error 取值保持不变。
+    该不变量的单一组装点，全部工具出口共用，尾部块承载缩略图预览等内容。摘要文本
+    与结构化载荷共享严格 JSON 出口，未配对代理在装配点统一剥离，含代理的文件名等
+    保留原文内容不再使整个响应翻为序列化失败。载荷尺寸估算达到卸载阈值时镜像构建
+    的树遍历、净化与序列化下沉专用 CPU 线程池执行，小载荷内联构建免线程往返；两条
+    路径失败时同样降级为无镜像结果并记录告警，is_error 取值保持不变。
 
     Args:
         message: 用户可见的摘要文本，作为首个文本块。
@@ -296,20 +398,22 @@ async def build_structured_tool_result(
     Returns:
         组装完成的工具结果。
     """
-    blocks: list[ContentBlock] = [TextContent(type="text", text=message)]
+    sanitized_message = strip_unpaired_surrogates(message)
+    sanitized_structured = _strip_result_payload_surrogates(structured)
+    blocks: list[ContentBlock] = [TextContent(type="text", text=sanitized_message)]
     try:
         if should_offload_to_cpu_pool(
-            structured, value_leaf_cost=binary_placeholder_value_leaf_length
+            sanitized_structured, value_leaf_cost=binary_placeholder_value_leaf_length
         ):
-            mirror = await run_in_cpu_pool(build_structured_json_text, structured)
+            mirror = await run_in_cpu_pool(build_structured_json_text, sanitized_structured)
         else:
-            mirror = build_structured_json_text(structured)
+            mirror = build_structured_json_text(sanitized_structured)
     except Exception:
         logger.opt(exception=True).warning("结构化镜像构建失败，降级为无镜像结果")
     else:
         blocks.append(mirror)
     return CallToolResult(
         content=[*blocks, *trailing],
-        structured_content=structured,
+        structured_content=sanitized_structured,
         is_error=is_error,
     )

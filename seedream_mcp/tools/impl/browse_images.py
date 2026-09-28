@@ -9,11 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ...utils.core.errors import format_error_for_user
+from ...utils.core.logs import get_logger
 from ..core.browse import build_browse_fallback_result, execute_browse_request
 from ..core.common import PROGRESS_COMPLETE, log_tiered_failure, safe_report_progress
 from ..core.schemas import BrowseImagesInput
-from ...utils.core.errors import format_error_for_user
-from ...utils.core.logs import get_logger
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
@@ -36,8 +36,8 @@ async def handle_browse_images(
     Args:
         params: 经 pydantic 校验的工具输入模型。
         ctx: MCP 上下文，用于进度上报，可为 None。
-        bounds_scope: 条目过滤的替代界，None 时按读权限过滤；透传给
-            execute_browse_request。
+        bounds_scope: 条目过滤的替代界，与读权限求交后生效，None 时按读权限过滤；
+            透传给 execute_browse_request。
 
     Returns:
         浏览工具结果，失败时 isError 为 True。

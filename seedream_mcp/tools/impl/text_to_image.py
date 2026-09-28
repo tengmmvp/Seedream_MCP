@@ -7,13 +7,12 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
-
 from ..core.common import execute_generation_handler
 from ..core.schemas import TextToImageInput
 from ._metadata import TEXT_TO_IMAGE

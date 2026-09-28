@@ -381,7 +381,10 @@ async def test_flat_input_schema_forbids_additional_properties() -> None:
             "multi_image_fusion",
             {
                 "prompt": "a cat",
-                "image": ["https://example.com/cat.png"],
+                "image": [
+                    "https://example.com/cat.png",
+                    "https://example.com/cat2.png",
+                ],
                 "responce_format": "url",
             },
         ),

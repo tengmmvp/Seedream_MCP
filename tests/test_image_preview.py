@@ -8,6 +8,8 @@ SEEDREAM_PREVIEW_ENABLED 解析。集成用例经 run_text_to_image 触发，moc
 from __future__ import annotations
 
 import base64
+import sys
+from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from PIL import Image
 from mcp.types import ImageContent, TextContent
 
 from seedream_mcp.client import SeedreamClient
+from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.images.image_thumbnail import (
@@ -30,6 +33,19 @@ from seedream_mcp.utils.io import io_save
 
 from _cpu_offload_spy import CpuOffloadSpy
 from _generation_fixtures import _patch_client_success, _patch_save_real_file
+from _png_fixtures import forged_png_bytes
+
+
+@pytest.fixture
+def active_generation_config(tmp_path: Path) -> Callable[..., SeedreamConfig]:
+    """构造生成配置并设为活动配置，预览缓存根经环境链取活动配置不落仓库目录。"""
+
+    def _make(**overrides: Any) -> SeedreamConfig:
+        config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), **overrides)
+        set_active_config(config)
+        return config
+
+    return _make
 
 
 def _write_png(path: Path, size: tuple[int, int], mode: str = "RGB") -> Path:
@@ -131,6 +147,19 @@ def test_build_thumbnail_bytes_returns_none_for_invalid_input(tmp_path: Path) ->
         build_thumbnail_bytes(tmp_path / "missing.png")
 
 
+def test_build_thumbnail_bytes_rejects_pixels_between_limit_and_double(
+    tmp_path: Path,
+) -> None:
+    """声明像素介于 36M 与两倍之间的源图被显式拒绝，不依赖 PIL 告警区间放行。"""
+    from seedream_mcp.utils.core.formats import ensure_image_decoders_ready
+
+    ensure_image_decoders_ready()
+    declared = tmp_path / "declared-big.png"
+    declared.write_bytes(forged_png_bytes(6_100, 6_100))
+
+    assert build_thumbnail_bytes(declared) is None
+
+
 def test_build_thumbnail_bytes_applies_exif_orientation_after_draft(tmp_path: Path) -> None:
     """JPEG 大图的方向标签在 draft 缩尺解码后仍被读取并正确转置。
 
@@ -182,6 +211,51 @@ def test_build_thumbnail_bytes_rejects_symlink_source(tmp_path: Path) -> None:
 
     assert build_thumbnail_bytes(link) is None
     assert target.exists()
+
+
+def test_build_thumbnail_bytes_rejects_non_regular_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIFO 等非常规源图在打开单点拒绝，归一为 None 不把工作线程钉死在阻塞读取。"""
+    import os
+    import stat
+
+    source = _write_png(tmp_path / "fifo.png", (64, 64))
+    real_fstat = os.fstat
+
+    def _fifo_fstat(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        return os.stat_result(
+            (
+                stat.S_IFIFO | 0o644,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                st.st_size,
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(os, "fstat", _fifo_fstat)
+
+    assert build_thumbnail_bytes(source) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.mkfifo 仅 POSIX 提供")
+def test_build_thumbnail_bytes_rejects_real_fifo_source(tmp_path: Path) -> None:
+    """真实 FIFO 源图在打开单点被拒，缩略图生成路径不阻塞在无写入端的读取。"""
+    import os
+
+    mkfifo = getattr(os, "mkfifo", None)
+    assert mkfifo is not None
+    fifo = tmp_path / "fifo.png"
+    mkfifo(fifo)
+
+    assert build_thumbnail_bytes(fifo) is None
 
 
 def test_build_thumbnail_bytes_decodes_from_file_object_not_full_copy(
@@ -250,17 +324,15 @@ async def test_build_preview_contents_empty_input_returns_empty() -> None:
 
 
 async def test_generation_result_carries_preview_after_text(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_generation_config: Callable[..., SeedreamConfig],
 ) -> None:
     """预览开启且保存成功时，content 为文本在前、缩略图在后的 ImageContent。"""
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
 
-    from seedream_mcp.config import SeedreamConfig, set_active_config
-
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
-    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
-    set_active_config(config)
+    config = active_generation_config(preview_enabled=True)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -278,7 +350,9 @@ async def test_generation_result_carries_preview_after_text(
 
 
 async def test_generation_result_truncates_preview_beyond_limit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_generation_config: Callable[..., SeedreamConfig],
 ) -> None:
     """保存张数超过预览上限时缩略图恰为上限张，文本含截断说明，结构化数据完整。"""
     total = PREVIEW_MAX_IMAGES + 2
@@ -313,11 +387,7 @@ async def test_generation_result_truncates_preview_beyond_limit(
 
     monkeypatch.setattr(io_save.AutoSaveManager, "save_image", fake_save_image)
 
-    from seedream_mcp.config import SeedreamConfig, set_active_config
-
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
-    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
-    set_active_config(config)
+    config = active_generation_config(preview_enabled=True)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -493,21 +563,58 @@ def test_thumbnail_sweep_distinguishes_orphan_and_fresh_thumb_tmp(
     assert not orphan_tmp.exists()
 
 
+def test_thumbnail_sweep_gate_is_keyed_by_cache_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """节流门按缓存根独立：一处的清扫窗口不压制另一处的驱逐。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1000)
+
+    for name in ("thumbs-a", "thumbs-b"):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "big.bin").write_bytes(b"x" * 2000)
+        thumbnail_module._maybe_sweep_thumbnails(root)
+
+    assert not (tmp_path / "thumbs-a" / "big.bin").exists()
+    assert not (tmp_path / "thumbs-b" / "big.bin").exists()
+
+
+def test_thumbnail_sweep_gate_caps_tracked_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """节流门键数超上限时按最近使用序驱逐，旋转 Roots 的长寿命进程不无限增长。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    monkeypatch.setattr(thumbnail_module, "THUMBNAIL_CACHE_MAX_TOTAL_BYTES", 1000)
+    thumbnail_module.reset_thumb_sweep_gate()
+    total = thumbnail_module._THUMB_SWEEP_ROOTS_MAX + 3
+    roots: list[Path] = []
+    for index in range(total):
+        root = tmp_path / f"thumbs-{index}"
+        root.mkdir()
+        (root / "big.bin").write_bytes(b"x" * 2000)
+        thumbnail_module._maybe_sweep_thumbnails(root)
+        roots.append(root)
+
+    assert len(thumbnail_module._thumb_sweep_after) == thumbnail_module._THUMB_SWEEP_ROOTS_MAX
+    for evicted in roots[:3]:
+        assert evicted not in thumbnail_module._thumb_sweep_after
+    for kept in roots[3:]:
+        assert kept in thumbnail_module._thumb_sweep_after
+
+
 async def test_generation_result_preview_disabled_keeps_text_only(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_generation_config: Callable[..., SeedreamConfig],
 ) -> None:
     """preview_enabled=False 时 content 仅含文本，行为与本功能引入前一致。"""
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
 
-    from seedream_mcp.config import SeedreamConfig, set_active_config
-
-    config = SeedreamConfig(
-        api_key="test_key",
-        data_root=str(tmp_path),
-        preview_enabled=False,
-    )
-    set_active_config(config)
+    config = active_generation_config(preview_enabled=False)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -515,7 +622,9 @@ async def test_generation_result_preview_disabled_keeps_text_only(
 
 
 async def test_generation_result_no_preview_when_save_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_generation_config: Callable[..., SeedreamConfig],
 ) -> None:
     """自动保存整体失败降级时无本地文件，content 不附带预览。"""
     _patch_client_success(monkeypatch)
@@ -528,11 +637,7 @@ async def test_generation_result_no_preview_when_save_fails(
 
     monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", failing_save_multiple)
 
-    from seedream_mcp.config import SeedreamConfig, set_active_config
-
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
-    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
-    set_active_config(config)
+    config = active_generation_config(preview_enabled=True)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is False
@@ -540,7 +645,9 @@ async def test_generation_result_no_preview_when_save_fails(
 
 
 async def test_generation_result_no_preview_when_generation_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    active_generation_config: Callable[..., SeedreamConfig],
 ) -> None:
     """生成失败时不进入自动保存与预览，content 仅错误文本。"""
 
@@ -554,11 +661,7 @@ async def test_generation_result_no_preview_when_generation_fails(
 
     monkeypatch.setattr(SeedreamClient, "text_to_image", fake_failed)
 
-    from seedream_mcp.config import SeedreamConfig, set_active_config
-
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
-    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录
-    set_active_config(config)
+    config = active_generation_config(preview_enabled=True)
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config, ctx=None)
 
     assert result.is_error is True
@@ -566,11 +669,15 @@ async def test_generation_result_no_preview_when_generation_fails(
 
 
 def test_preview_enabled_env_parsing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """SEEDREAM_PREVIEW_ENABLED 环境变量按 bool 语义解析进配置。"""
+    """SEEDREAM_PREVIEW_ENABLED 环境变量按 bool 语义解析进配置，未设置时默认关闭。"""
     from seedream_mcp.config import build_config_from_sources
 
     empty_env = tmp_path / "empty.env"
     empty_env.write_text("", encoding="utf-8")
+
+    monkeypatch.delenv("SEEDREAM_PREVIEW_ENABLED", raising=False)
+    config = build_config_from_sources(overrides={"api_key": "test_key"}, env_file=str(empty_env))
+    assert config.preview_enabled is False
 
     monkeypatch.setenv("SEEDREAM_PREVIEW_ENABLED", "false")
     config = build_config_from_sources(overrides={"api_key": "test_key"}, env_file=str(empty_env))

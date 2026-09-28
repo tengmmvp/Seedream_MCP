@@ -9,7 +9,7 @@ inputSchema 的单一来源。依赖方向为 core <- impl <- runners。
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # as 同名形态为 PEP 484 显式再导出，供 mypy 识别 __getattr__ 延迟加载的导出面。

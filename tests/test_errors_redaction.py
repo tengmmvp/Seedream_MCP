@@ -8,6 +8,7 @@ format_error_for_user 与 handle_api_error 的用户可见出口净化，确保�
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import tracemalloc
@@ -15,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
+from seedream_mcp.tools.core.outputs import build_structured_tool_result
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamValidationError,
@@ -586,7 +589,6 @@ def test_format_sse_failed_event_keeps_raw_message_for_outlet_sanitization() -> 
     源头先净化会使超长消息在出口被二次截断叠加标记；出口对凭据的剥离由
     本用例一并锁定。
     """
-    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
     from seedream_mcp.utils.io.io_sse import format_sse_failed_event
 
     raw_message = "upstream echo Authorization: Bearer sk-123"
@@ -605,8 +607,6 @@ def test_format_sse_failed_event_keeps_raw_message_for_outlet_sanitization() -> 
 
 def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
     """非 SSE 路径的 per-image error.message 净化后返回新列表，传入列表与条目不被修改。"""
-    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
-
     images: list[dict[str, Any]] = [
         {"url": "https://a/1.png"},
         {"error": {"code": "X", "message": "api_key: sk-leaked"}},
@@ -626,8 +626,6 @@ def test_sanitize_image_errors_redacts_per_image_error_message() -> None:
 
 def test_sanitize_image_errors_nulls_non_string_b64_payload() -> None:
     """b64_json 非字符串置 None，其余字段的非有限浮点归零，不穿透严格 JSON 出口。"""
-    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
-
     sanitized = _sanitize_image_errors(
         [
             {"url": "https://a/1.png", "b64_json": float("nan")},
@@ -645,8 +643,6 @@ def test_sanitize_image_errors_nulls_non_string_b64_payload() -> None:
 
 def test_sanitize_image_errors_dirty_key_value_does_not_override_sanitized_value() -> None:
     """合并压平键碰撞时原始脏值不反杀净化值：键在入口压平，凭据不穿透。"""
-    from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
-
     images: list[dict[str, Any]] = [{"a b": 1, "a\nb": "api_key=SECRET"}]
 
     sanitized = _sanitize_image_errors(images)
@@ -836,6 +832,98 @@ def test_sanitize_error_text_blocks_control_char_separator_bypass() -> None:
     assert sanitize_error_text("api_key:\x0cSECRET123") == "api_key: ***"
     assert sanitize_error_text("api_key:\x85SECRET123") == "api_key: ***"
     assert "SECRET123" not in sanitize_error_text("token\x0b=SECRET123")
+
+
+def test_sanitize_error_text_blocks_control_char_inside_keyword() -> None:
+    """词字符间切入的 C0/NEL/DEL 在影子匹配前删除，凭据不借关键词切分逃逸。"""
+    assert sanitize_error_text("to\x00ken=SECRET123") == "to ken=***"
+    for split_key in ("to\x0bken=SECRET", "to\x85ken=SECRET", "to\x7fken=SECRET"):
+        assert "SECRET" not in sanitize_error_text(split_key), repr(split_key)
+
+
+def test_sanitize_error_text_blocks_escaped_control_inside_keyword() -> None:
+    """json 与 repr 转义形态切入键名同样删除后命中，值被掩码。"""
+    assert sanitize_error_text("to\\u0000ken=SECRET") == "to\\u0000ken=***"
+    assert sanitize_error_text("to\\x0bken=SECRET") == "to\\x0bken=***"
+    assert sanitize_error_text("to\\nken=SECRET") == "to\\nken=***"
+    assert sanitize_data_text("to\\u0000ken=SECRET") == "to\\u0000ken=***"
+
+
+def test_sanitize_error_text_blocks_intrusion_key_with_whitespace_separator() -> None:
+    """切入字符打断键名且空白控制符独占分隔时凭据同样剥离。
+
+    切入全删的影子连 \\n/\\t 分隔一并删除后键值模式无分隔可锚定，压平轮仅剩
+    普通空格分隔同样不命中，值原样存活；保留空白分隔的影子补齐锚定点。
+    """
+    for sep in ("\n", "\t", "\x0b"):
+        redacted = sanitize_error_text(f"api\x00key{sep}sk-live-123")
+        assert "sk-live-123" not in redacted, repr(sep)
+        assert redacted == "api key ***", repr(sep)
+
+    assert sanitize_data_text("api\x00key\tsk-live-123") == "api key ***"
+
+
+def test_sanitize_error_text_blocks_intrusion_key_with_escape_separator() -> None:
+    """切入字符打断键名且字面转义分隔值时，保留转义的影子仍可锚定。"""
+    assert sanitize_error_text("api\x00key\\nsk-1") == "api key\\n***"
+
+
+def test_sanitize_error_text_blocks_escaped_separator_in_compound_prefix_key() -> None:
+    """复合前缀键的键内分隔符为字面转义形态时同样命中，值不残留。
+
+    转义分隔在切入全删的影子里被删成无分隔复合词、保留影子里无可锚定分隔符，
+    键值交替组对复合前缀分支直接容忍转义分隔形态封堵该缝隙。
+    """
+    assert sanitize_error_text("user\\nkey: sk-live-abcdef") == "user\\nkey: ***"
+    assert sanitize_error_text("gpg\\nkey: sk-1") == "gpg\\nkey: ***"
+    assert sanitize_error_text("client\\nauth: sk-1") == "client\\nauth: ***"
+    assert sanitize_error_text("user\\u000akey: sk-1") == "user\\u000akey: ***"
+    assert sanitize_error_text("user\\x0akey: sk-1") == "user\\x0akey: ***"
+    assert sanitize_data_text("user\\nkey=sk-live-abcdef") == "user\\nkey=***"
+
+
+def test_redact_disguised_precheck_ascii_lower_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """性能守护：无触发词文本按影子预检即返回，ASCII 字符走 lower 快路不进折叠函数。"""
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    calls: list[int] = []
+    real_fold = sanitizers_module._fold_key_disguise_text
+
+    def counting_fold(value: str) -> str:
+        calls.append(len(value))
+        return real_fold(value)
+
+    monkeypatch.setattr(sanitizers_module, "_fold_key_disguise_text", counting_fold)
+
+    path = "D:\\temp\\file.png"
+    assert sanitizers_module._redact_disguised_keyvalues(path) == path
+    # 删除点为 \t 与 \f 两处字面转义，纯 ASCII 影子逐字符走 lower 快路不进折叠函数
+    assert calls == []
+
+    calls.clear()
+    mixed = "D:\\temp\\图.png"
+    assert sanitizers_module._redact_disguised_keyvalues(mixed) == mixed
+    # 影子按字符折叠，仅非 ASCII 字符进入折叠函数
+    assert calls == [1]
+
+    calls.clear()
+    chinese = "图" * 384
+    assert sanitizers_module._redact_disguised_keyvalues(chinese) == chinese
+    assert calls == [1] * 384
+
+    calls.clear()
+    hit = "to\x00ken=SECRET"
+    assert sanitizers_module._redact_disguised_keyvalues(hit) == "to\x00ken=***"
+    # 纯 ASCII 命中形态的影子构建与匹配均走 lower 快路，不进折叠函数
+    assert calls == []
+
+    calls.clear()
+    hit_nonascii = "to\x00ken=SECRET中"
+    assert sanitizers_module._redact_disguised_keyvalues(hit_nonascii) == "to\x00ken=***"
+    # 仅非 ASCII 字符进入折叠函数，删除计划相同时不构建第二影子
+    assert calls == [1]
 
 
 def test_sanitize_error_text_blocks_file_separator_control_whitespace_bypass() -> None:
@@ -1098,22 +1186,99 @@ def test_is_sensitive_key_matches_mid_segment_keyword_forms() -> None:
     # 对照组：无敏感段的普通复合键不命中，关键词不吞并整词段的相邻字符
     assert is_sensitive_key("user.profile.id") is False
     assert is_sensitive_key("request-id") is False
-    assert is_sensitive_key("sessions") is False
+    assert is_sensitive_key("sections") is False
+
+
+def test_is_sensitive_key_matches_plural_keyword_forms() -> None:
+    """段匹配容忍复数形态，tokens/api_keys/passwords 一类键不穿透 dict 键路径。"""
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
+
+    for key in ("tokens", "api_keys", "refresh_tokens", "passwords", "secrets", "sessions"):
+        assert is_sensitive_key(key) is True, key
+    # 对照组：词尾 s 剥离不吞普通词
+    assert is_sensitive_key("sections") is False
+    assert is_sensitive_key("status") is False
+
+
+def test_is_sensitive_key_non_plural_keyword_plural_confined_to_boundaries() -> None:
+    """复数受限词 token 的复数段仅在词首或族内前缀后命中：用量字段回到不敏感。"""
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
+
+    for key in (
+        "max_tokens",
+        "total_tokens",
+        "prompt_tokens",
+        "output_tokens",
+        "completion_tokens",
+    ):
+        assert is_sensitive_key(key) is False, key
+    # 词首复数段对应自由文本 (?<!\w) 左边界加键名续段，tokens_per_second 两路径同判敏感
+    assert is_sensitive_key("tokens") is True
+    assert is_sensitive_key("tokens_per_second") is True
+    # 族内前缀后的复数段对应 (?:access|auth|refresh|session|api)[-_. ]?tokens? 分支
+    assert is_sensitive_key("access_tokens") is True
+    assert is_sensitive_key("refresh_tokens") is True
+    # 族外前缀后的复数段不敏感，与自由文本左边界断言对 max_tokens 的排除同口径
+    assert is_sensitive_key("invalid_tokens") is False
+
+
+def test_sanitize_error_text_strips_plural_keyvalue_forms() -> None:
+    """复数键名的裸值在自由文本通道同样剥离，token 复数因用量字段冲突除外。"""
+    assert sanitize_error_text("passwords=hunter2") == "passwords=***"
+    assert sanitize_error_text("secrets=xyz") == "secrets=***"
+    assert sanitize_error_text("api_keys=SECRET") == "api_keys=***"
+    assert sanitize_error_text("refresh_tokens=eyJx") == "refresh_tokens=***"
+    assert sanitize_error_text("client_secrets: v") == "client_secrets: ***"
+    # max_tokens 一类用量字段不受复数容忍影响
+    assert sanitize_error_text("max_tokens: 4096 exceeded") == "max_tokens: 4096 exceeded"
+
+
+def test_sanitize_error_text_strips_boundary_anchored_plural_tokens() -> None:
+    r"""tokens 复数经边界锚定分支命中裸键值，dict 键路径的词首与族内复合同口径。
+
+    下划线复合的用量字段不通过 (?<!\w) 左侧断言，max_tokens/total_tokens 保留；
+    空格前缀的 invalid tokens 仅自由文本路径经左边界断言命中。
+    """
+    assert sanitize_error_text("tokens: sk-xxx") == "tokens: ***"
+    assert sanitize_error_text("invalid tokens: sk-xxx") == "invalid tokens: ***"
+    assert sanitize_error_text("access tokens: sk-xxx") == "access tokens: ***"
+    assert sanitize_error_text("max_tokens: 4096 exceeded") == "max_tokens: 4096 exceeded"
+    assert sanitize_error_text("total_tokens: 100") == "total_tokens: 100"
 
 
 def test_keyvalue_key_branches_derive_from_keyword_lists() -> None:
-    """自由文本键名交替组由两清单派生，新增敏感词不会遗漏同步到自由文本通道。"""
+    """自由文本键名交替组由清单派生，新增敏感词与复数受限词自动同步到自由文本通道。"""
     from seedream_mcp.utils.core.sanitizers import (
         _SENSITIVE_KEY_KEYWORDS,
+        _SENSITIVE_KEY_NON_PLURAL_KEYWORDS,
+        _SENSITIVE_KEY_PLURAL_COMPOUND_PREFIXES,
         _SENSITIVE_KEY_SUBSTRINGS,
         _SENSITIVE_KEYVALUE_KEYS,
+        _SENSITIVE_KEYVALUE_KEY_SUFFIX,
     )
 
-    ambiguous = {"key", "auth"}
+    branches = _SENSITIVE_KEYVALUE_KEYS.split("|")
     for word in (*_SENSITIVE_KEY_SUBSTRINGS, *_SENSITIVE_KEY_KEYWORDS):
-        if word in ambiguous:
+        if word in {"key", "auth"}:
             continue
-        assert word in _SENSITIVE_KEYVALUE_KEYS
+        branch = (
+            word
+            + ("" if word in _SENSITIVE_KEY_NON_PLURAL_KEYWORDS else "s?")
+            + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+        )
+        assert branch in branches, word
+    for word in _SENSITIVE_KEY_NON_PLURAL_KEYWORDS:
+        # 复数受限词派生锚定复数分支与族内复合分支，交替组不再手写 tokens 专条
+        assert r"(?<!\w)" + word + "s" + _SENSITIVE_KEYVALUE_KEY_SUFFIX in branches, word
+        family_branch = (
+            "(?:"
+            + "|".join(_SENSITIVE_KEY_PLURAL_COMPOUND_PREFIXES)
+            + r")[-_. ]?"
+            + word
+            + "s?"
+            + _SENSITIVE_KEYVALUE_KEY_SUFFIX
+        )
+        assert family_branch in _SENSITIVE_KEYVALUE_KEYS, word
 
 
 def test_identity_precheck_trigger_words_derive_from_keyword_registry() -> None:
@@ -1162,6 +1327,18 @@ def test_sanitize_error_text_strips_literal_escape_separator_family() -> None:
     # 大写十六进制变体同样命中
     assert "sk-1" not in sanitize_error_text("api_key\\u000Bsk-1")
     assert "sk-1" not in sanitize_error_text("api_key\\x0Bsk-1")
+
+
+def test_sanitize_channels_mask_backspace_escape_separator_and_key_intrusion() -> None:
+    r"""json.dumps 把 U+0008 渲染为 \b 短转义，字面 \b 分隔与键名切入同样掩码。
+
+    键名切入经复合前缀分支的转义分隔符命中，分隔经键值交替组的转义族命中，
+    error 与 data 两通道值均收敛为 ***。
+    """
+    assert sanitize_error_text("api\\bkey: sk-SECRET") == "api\\bkey: ***"
+    assert sanitize_data_text("api\\bkey: sk-SECRET") == "api\\bkey: ***"
+    assert sanitize_error_text("token\\bsk-1") == "token\\b***"
+    assert sanitize_data_text("token\\bsk-1") == "token\\b***"
 
 
 def test_handle_api_error_strips_real_tab_cr_in_nested_message() -> None:
@@ -1298,6 +1475,158 @@ def test_sanitize_error_text_blocks_fullwidth_quote_separator() -> None:
     """全角引号 ＂ ＇ 作为分隔符引号组的变体命中，凭据不借全角引号逃逸。"""
     assert sanitize_error_text("api_key＂: sk-1") == "api_key＂: ***"
     assert sanitize_error_text("api_key＇: sk-1") == "api_key＇: ***"
+
+
+# ==================== 未配对代理与全角/同形字母伪装键 ====================
+
+
+def test_sanitize_channels_strip_unpaired_surrogates_for_utf8_output() -> None:
+    """未配对代理字符在错误文本与 URL 数据通道整体剥离，净化产物可 UTF-8 编码。"""
+    surrogate = "\ud800"
+    sanitized_values = (
+        _sanitize_output_string(f"a{surrogate}b"),
+        sanitize_error_text(f"echo https://e.com/x{surrogate}.png"),
+        sanitize_data_text(f"https://e.com/x{surrogate}.png?token=1"),
+    )
+    for sanitized in sanitized_values:
+        assert surrogate not in sanitized
+        sanitized.encode("utf-8")
+
+
+def test_sanitize_error_text_surrogate_inside_keyword_still_redacts() -> None:
+    """代理字符切入键名按删除处理，关键词还原后照常脱敏。"""
+    assert sanitize_error_text("to\ud800ken=SECRET") == "token=***"
+
+
+def test_sanitize_image_errors_strips_unpaired_surrogates_in_keys_and_values() -> None:
+    """图片项的键与值在本层剥离未配对代理，净化产物可序列化为严格 JSON。"""
+    surrogate = "\ud800"
+    images: list[dict[str, Any]] = [
+        {"url": f"https://e.com/x{surrogate}.png", f"cu{surrogate}stom": "v"},
+    ]
+
+    sanitized = _sanitize_image_errors(images)
+    dumped = json.dumps(sanitized, ensure_ascii=False)
+
+    assert surrogate not in dumped
+    dumped.encode("utf-8")
+
+
+async def test_b64_json_payload_surrogates_stripped_at_result_assembly() -> None:
+    """b64 载荷的未配对代理由结果组装点全载荷剥离，出口不翻为序列化失败。"""
+    surrogate = "\ud800"
+    structured: dict[str, Any] = {"data": [{"b64_json": f"aGVs{surrogate}bG8="}]}
+
+    result = await build_structured_tool_result("ok", structured, is_error=False)
+
+    assert isinstance(result.structured_content, dict)
+    payload = result.structured_content["data"][0]["b64_json"]
+    assert isinstance(payload, str)
+    assert surrogate not in payload
+    result.model_dump_json().encode("utf-8")
+
+
+def test_sanitize_channels_keep_multiline_ascii_summary_stable() -> None:
+    """多行 ASCII 摘要在两条通道都压平为单行空格，ASCII 门控不改变产物形态。"""
+    summary = "summary line1\nline2 counts: 3\nno credentials here"
+    flattened = "summary line1 line2 counts: 3 no credentials here"
+    assert sanitize_error_text(summary) == flattened
+    assert sanitize_data_text(summary) == flattened
+    # 纯 ASCII 干净文本经输出净化管线返回原对象
+    clean = "plain ascii summary without markers"
+    assert _sanitize_output_string(clean) is clean
+
+
+def test_is_sensitive_key_matches_fullwidth_and_homoglyph_keys() -> None:
+    """键名字符面 NFKC 与形近字母归一后匹配，全角与 Cyrillic/Greek 伪装键命中。"""
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
+
+    fullwidth_apikey = "".join(chr(cp) for cp in (0xFF41, 0xFF50, 0xFF49, 0xFF4B, 0xFF45, 0xFF59))
+    assert is_sensitive_key(fullwidth_apikey) is True
+    assert is_sensitive_key(f"api{chr(0xFF0D)}key") is True
+    assert is_sensitive_key(f"{chr(0x430)}uth") is True
+    assert is_sensitive_key(f"api{chr(0x43A)}ey") is True
+    assert is_sensitive_key(f"to{chr(0x3BA)}en") is True
+    assert is_sensitive_key(f"sec{chr(0x433)}et") is True
+
+
+def test_sanitize_error_text_blocks_fullwidth_and_homoglyph_key_variants() -> None:
+    """全角与形近字母伪装键的值被掩码，键名保留原文拼写保持可读。"""
+    fullwidth_apikey = "".join(chr(cp) for cp in (0xFF41, 0xFF50, 0xFF49, 0xFF4B, 0xFF45, 0xFF59))
+    assert sanitize_error_text(f"{fullwidth_apikey}=SECRET") == f"{fullwidth_apikey}=***"
+    assert sanitize_error_text(f"api{chr(0xFF0D)}key=SECRET") == f"api{chr(0xFF0D)}key=***"
+    assert sanitize_error_text(f"{chr(0x430)}uth=SECRET") == f"{chr(0x430)}uth=***"
+    cyrillic_k_apikey = f"api{chr(0x43A)}ey"
+    assert sanitize_error_text(f"{cyrillic_k_apikey}=SECRET") == f"{cyrillic_k_apikey}=***"
+    # 数据通道对伪装键文本不恒等放行
+    disguised = f"{chr(0x430)}uth=SECRET"
+    assert sanitize_data_text(disguised) != disguised
+    assert sanitize_data_text(f"{cyrillic_k_apikey}=SECRET") != f"{cyrillic_k_apikey}=SECRET"
+
+
+def test_homoglyph_fold_table_covers_keyword_alphabet_disguises() -> None:
+    """守护：敏感词按折叠表替换为形近字符后仍被识别，新词条自动纳入，折叠回归即失守。"""
+    from seedream_mcp.utils.core.sanitizers import (
+        _HOMOGLYPH_FOLD_TABLE,
+        _SENSITIVE_KEY_KEYWORDS,
+        _SENSITIVE_KEY_SUBSTRINGS,
+        is_sensitive_key,
+    )
+
+    disguise: dict[str, str] = {}
+    for cp, letter in _HOMOGLYPH_FOLD_TABLE.items():
+        disguise.setdefault(letter, chr(cp))
+    for word in (*_SENSITIVE_KEY_KEYWORDS, *_SENSITIVE_KEY_SUBSTRINGS):
+        disguised = "".join(disguise.get(char, char) for char in word)
+        assert is_sensitive_key(disguised) is True, (word, disguised)
+
+
+def test_homoglyph_fold_table_inventory_is_explicitly_locked() -> None:
+    """守护：折叠表键集与显式清单双向锁定，缺失条目无法借表内字符循环自证掩盖。"""
+    from seedream_mcp.utils.core.sanitizers import _HOMOGLYPH_FOLD_TABLE
+
+    expected_keys = frozenset(
+        (
+            0x0430,
+            0x0435,
+            0x043E,
+            0x0440,
+            0x0441,
+            0x0443,
+            0x0445,
+            0x0456,
+            0x0455,
+            0x0458,
+            0x043A,
+            0x0433,
+            0x04BB,
+            0x04CF,
+            0x0448,
+            0x0461,
+            0x051D,
+            0x04AF,
+            0x0475,
+            0x0501,
+            0x04BD,
+            0x043C,
+            0x03B1,
+            0x03BF,
+            0x03C1,
+            0x03B9,
+            0x03BA,
+            0x03C3,
+            0x03ED,
+            0x03F1,
+            0x03F8,
+            0x03C5,
+            0x03BD,
+            0x03B3,
+            0x03F3,
+            0x0261,
+        )
+    )
+    # maketrans 产物以码点整数为键，清单同口径比对。
+    assert set(_HOMOGLYPH_FOLD_TABLE) == expected_keys
 
 
 # ==================== key/auth 受限复合分支两路径一致性 ====================
@@ -1462,6 +1791,48 @@ def test_sanitize_data_text_keeps_flagged_but_clean_values_as_is() -> None:
     """触发词命中但无改写点的形态原对象返回，决策表保守超集只损失性能不改写干净文本。"""
     for value in ("hotel_key: val", "Key: value", f"{chr(0x17F)}ecret value"):
         assert sanitize_data_text(value) is value, repr(value)
+
+
+def test_sanitize_data_text_backslash_without_escape_family_stays_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """含反斜杠但不命中键名切入转义族的路径走快路原样放行，强制完整净化仍恒等。"""
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+    from seedream_mcp.utils.core.sanitizers import DATA_OUTPUT_LIMIT, _data_text_needs_full_sanitize
+
+    values = (
+        "D:\\images\\x.png",
+        "C:\\Users\\alice\\img.png",
+        "D:\\工作区\\图 片.png",
+        "a\\c\\d\\e",
+        "\\leading",
+        "backslash at end\\",
+        "https://e.com/x\\y.png",
+    )
+    for value in values:
+        assert _data_text_needs_full_sanitize(value, DATA_OUTPUT_LIMIT) is False, repr(value)
+        assert sanitize_data_text(value) is value, repr(value)
+
+    def _force_full_sanitize(value: str, limit: int) -> bool:
+        return True
+
+    monkeypatch.setattr(sanitizers_module, "_data_text_needs_full_sanitize", _force_full_sanitize)
+    for value in values:
+        # 强制完整管线下产物仍与原文一致，快路放行不依赖管线巧合
+        assert sanitize_data_text(value) == value, repr(value)
+
+
+def test_sanitize_data_text_escape_family_hits_still_route_full_sanitize() -> None:
+    """命中键名切入转义族或敏感触发词的转义文本仍走完整净化，凭据照常剥离。"""
+    assert sanitize_data_text("api_key\\nSECRET99") == "api_key\\n***"
+    assert sanitize_data_text("to\\u000bken=SECRET99") == "to\\u000bken=***"
+    assert sanitize_data_text(f"token{_ESCAPED_COLON}value") == f"token{_ESCAPED_COLON}***"
+    # 含 \n 字面转义的路径无凭据时完整净化恒等，与快路产物一致
+    path = "D:\\new\\folder\\log.txt"
+    assert sanitize_data_text(path) == path
+    # \b 短转义入族后含 \b 的路径同走完整净化，无凭据时仍恒等
+    backspace_path = "C:\\Users\\bob\\img.png"
+    assert sanitize_data_text(backspace_path) == backspace_path
 
 
 # 差分语料的共用构件：零宽空格与字面反斜杠 u 形态的冒号分隔样本。
@@ -1703,8 +2074,7 @@ def test_sanitize_data_text_rewrites_full_fold_disguise_key_family() -> None:
     re.IGNORECASE 的简单折叠不把 ß 计作 ss，快扫与原文键值匹配双双漏检，
     懒二次折叠扫描补齐；多词值整体吸收，产物重复净化恒等。
     """
-    from seedream_mcp.utils.core.sanitizers import _data_text_needs_full_sanitize
-    from seedream_mcp.utils.core.sanitizers import DATA_OUTPUT_LIMIT
+    from seedream_mcp.utils.core.sanitizers import DATA_OUTPUT_LIMIT, _data_text_needs_full_sanitize
 
     long_s = chr(0x17F)
     samples = (

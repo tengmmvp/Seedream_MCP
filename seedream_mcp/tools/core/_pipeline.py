@@ -102,9 +102,8 @@ _FAILURE_GUIDANCE_BY_ERROR_CODE: dict[str, str] = {
 _DEFAULT_FAILURE_GUIDANCE = "请根据错误信息排查后重试。"
 
 
-def _resolve_failure_guidance(exc: Exception) -> str:
+def _failure_guidance_for_code(error_code: str) -> str:
     """按归约档案错误码选择失败排查建议，未命中回退通用建议。"""
-    error_code = resolve_error_profile(exc).error_code
     return _FAILURE_GUIDANCE_BY_ERROR_CODE.get(error_code, _DEFAULT_FAILURE_GUIDANCE)
 
 

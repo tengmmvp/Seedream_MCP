@@ -2,7 +2,7 @@
 
 覆盖 _classify_generation_error_type 的 8 个分支、handle_api_error 的状态码阶梯文案
 与上游错误体提取、format_error_for_user 的 isinstance 分支与 message 截断、
-_resolve_failure_guidance 的查表与流水线降级文案拼接。guidance 拼接语义：归约
+_failure_guidance_for_code 的查表与流水线降级文案拼接。guidance 拼接语义：归约
 档案携带 user_hint 时该建议即最终建议，档案无建议时才以查表值补充。
 """
 
@@ -17,7 +17,7 @@ from seedream_mcp.tools.core._pipeline import (
     _FAILURE_GUIDANCE_BY_ERROR_CODE,
     _FAILURE_GUIDANCE_DEFAULT_CODES,
     _classify_generation_error_type,
-    _resolve_failure_guidance,
+    _failure_guidance_for_code,
 )
 from seedream_mcp.tools.core.common import (
     ToolMetadata,
@@ -366,55 +366,62 @@ def test_handle_api_error_5xx_user_hint_mentions_retry_later() -> None:
 # ==================== 失败排查建议按错误类型选择 ====================
 
 
-def test_resolve_failure_guidance_hint_profiles_fall_back_to_generic() -> None:
-    """自带 user_hint 的档案不走查表：直调回退通用建议，用户文案由 hint 承担。
+def test_failure_guidance_hint_profiles_fall_back_to_generic() -> None:
+    """自带 user_hint 的档案不走查表：查表回退通用建议，用户文案由 hint 承担。
 
     common 层对带 hint 档案跳过查表直接用 hint（全链路行为由
     test_handler_failure_text_*_uses_profile_hint_only 锁定），查表对这些码
     不再提供文案。
     """
-    assert (
-        _resolve_failure_guidance(SeedreamValidationError("bad size"))
-        == "请根据错误信息排查后重试。"
-    )
-    assert (
-        _resolve_failure_guidance(SeedreamNetworkError("conn refused"))
-        == "请根据错误信息排查后重试。"
-    )
-    assert _resolve_failure_guidance(SeedreamTimeoutError("t")) == "请根据错误信息排查后重试。"
-    assert (
-        _resolve_failure_guidance(SeedreamAPIError("unauthorized", status_code=401))
-        == "请根据错误信息排查后重试。"
-    )
+    for exc in (
+        SeedreamValidationError("bad size"),
+        SeedreamNetworkError("conn refused"),
+        SeedreamTimeoutError("t"),
+        SeedreamAPIError("unauthorized", status_code=401),
+    ):
+        assert (
+            _failure_guidance_for_code(_classify_generation_error_type(exc))
+            == "请根据错误信息排查后重试。"
+        )
 
 
-def test_resolve_failure_guidance_unknown_code_falls_back_to_generic() -> None:
+def test_failure_guidance_unknown_code_falls_back_to_generic() -> None:
     """未列举错误码回退到通用排查建议。"""
-    assert _resolve_failure_guidance(ValueError("x")) == "请根据错误信息排查后重试。"
+    assert (
+        _failure_guidance_for_code(_classify_generation_error_type(ValueError("x")))
+        == "请根据错误信息排查后重试。"
+    )
 
 
-def test_resolve_failure_guidance_config_error_directs_to_server_config() -> None:
+def test_failure_guidance_config_error_directs_to_server_config() -> None:
     """config_error 查表命中定向指引，指向服务端配置而非通用排查。"""
     assert (
-        _resolve_failure_guidance(SeedreamConfigError("missing key")) == "请检查服务端配置后重试。"
+        _failure_guidance_for_code(
+            _classify_generation_error_type(SeedreamConfigError("missing key"))
+        )
+        == "请检查服务端配置后重试。"
     )
 
 
 @pytest.mark.parametrize("status", [400, 404, 500])
-def test_resolve_failure_guidance_api_error_uses_generic(status: int) -> None:
+def test_failure_guidance_api_error_uses_generic(status: int) -> None:
     """api_error 无论状态码均回退通用建议，成因多样不做定向指引。
 
     JSON 解析失败、响应体过大等无状态码形态曾被引导查 API Key 与网络，与实际
     原因无关。
     """
-    guidance = _resolve_failure_guidance(SeedreamAPIError("boom", status_code=status))
+    guidance = _failure_guidance_for_code(
+        _classify_generation_error_type(SeedreamAPIError("boom", status_code=status))
+    )
     assert guidance == "请根据错误信息排查后重试。"
     assert "API Key" not in guidance
 
 
-def test_resolve_failure_guidance_api_error_without_status_falls_back_to_generic() -> None:
+def test_failure_guidance_api_error_without_status_falls_back_to_generic() -> None:
     """无状态码的 API 错误同样回退通用建议。"""
-    guidance = _resolve_failure_guidance(SeedreamAPIError("unspecified failure"))
+    guidance = _failure_guidance_for_code(
+        _classify_generation_error_type(SeedreamAPIError("unspecified failure"))
+    )
     assert guidance == "请根据错误信息排查后重试。"
 
 

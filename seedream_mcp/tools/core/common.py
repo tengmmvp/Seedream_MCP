@@ -35,8 +35,7 @@ from ._pipeline import (
     PROGRESS_COMPLETE,
     PROGRESS_RECEIVED,
     PROGRESS_VALIDATED,
-    _classify_generation_error_type,
-    _resolve_failure_guidance,
+    _failure_guidance_for_code,
     _yield_for_cancellation,
     log_tiered_failure,
     prevalidate_save_path,
@@ -45,7 +44,7 @@ from ._pipeline import (
 from .auto_save import auto_save_from_base64, auto_save_from_urls
 from .context import GenerationExecutionContext, build_generation_context
 from .outputs import build_error_structured, build_structured_tool_result
-from ._sanitize import _sanitize_image_errors
+from ._sanitize import _sanitize_image_errors, _sanitize_usage
 from .parallel import (
     _run_generation_requests,
     _try_get_shared_client,
@@ -248,6 +247,10 @@ def _format_generation_outputs(
     saveable_indices: list[int],
 ) -> tuple[str, dict[str, Any]]:
     """结果格式化阶段：生成响应文本与 structuredContent。"""
+    # usage 与图片列表同口径一次净化，文本与结构化两出口共用同一结果。
+    raw_usage = result.get("usage")
+    sanitized_usage = _sanitize_usage(raw_usage) if isinstance(raw_usage, dict) else {}
+
     response_text = format_generation_response(
         metadata.completion_title,
         result,
@@ -257,6 +260,7 @@ def _format_generation_outputs(
         auto_save_error=auto_save_error,
         images=sanitized_images,
         saveable_indices=saveable_indices,
+        usage=sanitized_usage,
     )
 
     structured_result = _build_generation_structured_result(
@@ -266,6 +270,7 @@ def _format_generation_outputs(
         auto_save_results=auto_save_results,
         auto_save_error=auto_save_error,
         images=sanitized_images,
+        usage=sanitized_usage,
     )
     return response_text, structured_result
 
@@ -391,17 +396,18 @@ async def execute_generation_handler(
         log_tiered_failure(module_logger, exc, "{}处理失败", metadata.failure_prefix)
         await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
         user_facing_error = format_error_for_user(exc)
+        profile = resolve_error_profile(exc)
         # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。
-        if resolve_error_profile(exc).user_hint:
+        if profile.user_hint:
             error_message = f"{metadata.failure_prefix}失败：{user_facing_error}"
         else:
             error_message = (
                 f"{metadata.failure_prefix}失败：{user_facing_error}\n"
-                f"{_resolve_failure_guidance(exc)}"
+                f"{_failure_guidance_for_code(profile.error_code)}"
             )
         error_structured = build_error_structured(
             metadata.tool_name,
-            _classify_generation_error_type(exc),
+            profile.error_code,
             user_facing_error,
         )
         return await build_structured_tool_result(error_message, error_structured, is_error=True)

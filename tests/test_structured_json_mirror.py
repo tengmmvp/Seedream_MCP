@@ -3,13 +3,15 @@
 规范建议返回 structuredContent 的工具在 content 数组同时回传序列化 JSON；镜像块
 与 structuredContent 经 json.loads 等值仅对净化无变化的干净内容成立，掩码、截断
 与 b64_json 长度占位只作用于镜像视图、原树不受影响；非有限浮点降级为无镜像结果；
-镜像构建按载荷尺寸估算分流专用 CPU 池或内联构建。
+镜像构建按载荷尺寸估算分流专用 CPU 池或内联构建；未配对代理在装配点迭代剥离，
+极端深树不消耗递归配额，干净子树保持原引用。
 """
 
 from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.tools.core import outputs as outputs_module
 from seedream_mcp.tools.core.outputs import (
     _mirror_node,
+    _strip_result_payload_surrogates,
     build_structured_json_text,
     build_structured_tool_result,
     format_base64_placeholder,
@@ -51,7 +54,7 @@ async def test_generation_success_appends_json_text_before_previews(
     """
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
     # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录。
     set_active_config(config)
 
@@ -61,6 +64,8 @@ async def test_generation_success_appends_json_text_before_previews(
     blocks = _text_blocks(result)
     assert len(blocks) == 2
     assert "文生图任务完成" in blocks[0].text
+    # 前置守护：预览开启且保存成功时 content 含至少一张预览，排序断言不真空转。
+    assert len(result.content) > 2
     # JSON 回传块位于摘要之后、预览 ImageContent 之前。
     assert all(isinstance(content, ImageContent) for content in result.content[2:])
     assert result.structured_content is not None
@@ -621,3 +626,101 @@ def test_mirror_strips_edge_whitespace_and_userinfo_on_url_forms() -> None:
     assert mirror["padded"] == "https://example.com/x.png"
     assert mirror["credentialed"] == "https://example.com/x.png"
     assert structured["padded"] == " https://example.com/x.png "
+
+
+# ==================== 代理剥离：迭代深度、恒等快路与写时复制 ====================
+
+
+def _wrap_in_list(value: Any) -> list[Any]:
+    return [value]
+
+
+def _wrap_in_dict(value: Any) -> dict[str, Any]:
+    return {"nested": value}
+
+
+@pytest.mark.parametrize("wrap", [_wrap_in_list, _wrap_in_dict], ids=["list", "dict"])
+@pytest.mark.parametrize(
+    ("leaf", "expected_leaf"),
+    [("deep-value", "deep-value"), ("deep\ud800-value", "deep-value")],
+    ids=["clean", "surrogate"],
+)
+async def test_deeply_nested_payload_assembles_result_without_recursion_error(
+    wrap: Callable[[Any], Any], leaf: str, expected_leaf: str
+) -> None:
+    """千层嵌套载荷经结果装配不抛 RecursionError，structuredContent 深处取值完整。
+
+    递归剥离实现在 985 层以上使 RecursionError 逃逸工具流水线，已计费结果整体
+    丢失；迭代实现不消耗递归配额。
+    """
+    deep: Any = leaf
+    for _ in range(1100):
+        deep = wrap(deep)
+    structured: dict[str, Any] = {"tool": "text_to_image", "success": True, "usage": deep}
+
+    result = await build_structured_tool_result("摘要文本", structured, is_error=False)
+
+    assert result.is_error is False
+    assert isinstance(result.content[0], TextContent)
+    assert result.content[0].text == "摘要文本"
+    assert result.structured_content is not None
+    current: Any = result.structured_content["usage"]
+    for _ in range(1100):
+        current = current[0] if isinstance(current, list) else current["nested"]
+    assert current == expected_leaf
+
+
+async def test_clean_payload_keeps_original_container_references() -> None:
+    """干净载荷恒等快路生效：根与嵌套子树保持原对象引用，不物化任何副本。"""
+    nested: dict[str, Any] = {"url": "https://example.com/a.png", "中文键": "干净文本"}
+    structured: dict[str, Any] = {
+        "tool": "text_to_image",
+        "success": True,
+        "data": [nested],
+        "usage": {"total_tokens": 10},
+    }
+
+    result = await build_structured_tool_result("摘要文本", structured, is_error=False)
+
+    assert result.structured_content is structured
+    assert result.structured_content["data"] is structured["data"]
+    assert result.structured_content["data"][0] is nested
+
+
+async def test_surrogate_payload_survives_strict_utf8_serialization() -> None:
+    """含代理载荷剥离后整体结果可经 pydantic JSON 序列化为 UTF-8 字节。"""
+    structured: dict[str, Any] = {
+        "tool": "text_to_image",
+        "success": True,
+        "prompt": "前缀\ud800后缀",
+        "data": [{"url": "https://example.com/a.png", "local_path": "bad\udfff名字.png"}],
+        "usage": {"note": "x\ud800y"},
+    }
+
+    result = await build_structured_tool_result("摘要\ud800文本", structured, is_error=False)
+
+    result.model_dump_json().encode("utf-8")
+    assert result.content[0] == TextContent(type="text", text="摘要文本")
+    assert result.structured_content["prompt"] == "前缀后缀"
+    assert result.structured_content["data"][0]["local_path"] == "bad名字.png"
+    assert result.structured_content["usage"]["note"] == "xy"
+
+
+def test_strip_payload_surrogates_materializes_only_changed_branches() -> None:
+    """变更分支物化新容器、干净兄弟子树保持原引用，原树不被修改。"""
+    clean_subtree: dict[str, Any] = {"url": "https://example.com/a.png", "note": "干净"}
+    payload: dict[str, Any] = {
+        "tool": "text_to_image",
+        "success": True,
+        "data": [clean_subtree, {"url": "https://example.com/b\ud800.png"}],
+        "prompt": "提示\ud800词",
+    }
+
+    stripped = _strip_result_payload_surrogates(payload)
+
+    assert stripped is not payload
+    assert stripped["data"] is not payload["data"]
+    assert stripped["data"][0] is clean_subtree
+    assert stripped["data"][1]["url"] == "https://example.com/b.png"
+    assert stripped["prompt"] == "提示词"
+    assert payload["prompt"] == "提示\ud800词"

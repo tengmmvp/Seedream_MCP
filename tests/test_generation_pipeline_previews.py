@@ -46,7 +46,7 @@ async def test_runner_include_previews_false_skips_preview_assembly(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
 
     result = await run_text_to_image(
         TextToImageInput(prompt="a cat"), config, include_previews=False
@@ -101,7 +101,7 @@ async def test_preview_scope_resets_after_runner_call(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
 
     await run_text_to_image(TextToImageInput(prompt="a cat"), config, include_previews=False)
     await run_text_to_image(TextToImageInput(prompt="a cat"), config)
@@ -121,7 +121,7 @@ async def test_preview_assembly_failure_degrades_to_text_result(
         raise RuntimeError("thumbnail decode failed")
 
     monkeypatch.setattr(common_module, "build_preview_contents", _exploding_preview)
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
 
     result = await run_text_to_image(TextToImageInput(prompt="a cat"), config)
 
@@ -141,7 +141,7 @@ async def test_execute_handler_skips_preview_when_scope_disabled(
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
-    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
 
     async def _executor(client: Any, context: Any) -> dict[str, Any]:
         del client, context

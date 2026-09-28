@@ -13,25 +13,38 @@ from ...utils.core.sanitizers import (
     normalize_message_text,
     sanitize_data_text,
     sanitize_error_text,
+    strip_unpaired_surrogates,
 )
+
+
+def normalize_non_finite_float(value: Any) -> Any:
+    """非有限 float 归 0.0，其余取值原样返回。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0.0
+    return value
 
 
 def _sanitize_leaf(item: Any, sanitize_string: Callable[[Any], Any]) -> Any:
     """叶子值净化：字符串经通道处理，非有限浮点归零，其余透传。"""
     if isinstance(item, str):
         return sanitize_string(item)
-    if isinstance(item, float):
-        return item if math.isfinite(item) else 0.0
-    return item
+    return normalize_non_finite_float(item)
+
+
+def _key_needs_flatten(key: Any) -> bool:
+    """字符串键含控制字符或未配对代理时返回 True；非字符串与干净键压平为恒等。"""
+    if not isinstance(key, str):
+        return False
+    return bool(CONTROL_CHARS_PATTERN.search(key) or strip_unpaired_surrogates(key) != key)
 
 
 def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
-    """压平键的控制字符，与已占用键碰撞时附加 <dup> 后缀直到空闲，条目不覆盖不丢弃。
+    """压平键的控制字符并剥离未配对代理，碰撞时附加 <dup> 后缀直到空闲，条目不覆盖不丢弃。
 
     非字符串键无控制字符语义，原样参与判重。
     """
-    if isinstance(key, str):
-        key = CONTROL_CHARS_PATTERN.sub(" ", key)
+    if _key_needs_flatten(key):
+        key = strip_unpaired_surrogates(CONTROL_CHARS_PATTERN.sub(" ", key))
     while key in taken:
         key = f"{key}<dup>"
     return key
@@ -39,8 +52,8 @@ def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
 
 def _flatten_mapping_keys(mapping: dict[Any, Any]) -> dict[Any, Any]:
     """压平全部键名并保留首个净名，干净映射原样返回保持引用。"""
-    # 前置探测避免干净映射的抛弃式 dict 构建；无控制字符的键不压平也不会碰撞。
-    if not any(isinstance(key, str) and CONTROL_CHARS_PATTERN.search(key) for key in mapping):
+    # 前置探测避免干净映射的抛弃式 dict 构建；无控制字符与代理字符的键不压平也不会碰撞。
+    if not any(_key_needs_flatten(key) for key in mapping):
         return mapping
     flattened: dict[Any, Any] = {}
     for key, value in mapping.items():
@@ -251,7 +264,8 @@ def _sanitize_image_errors(images: list[dict[str, Any]]) -> list[dict[str, Any]]
         updates.update(
             _sanitize_image_error_entry(flat_image.get("error"), message_limit=message_limit)
         )
-        # b64_json 合法形态为 str 载荷原样保留，非字符串的畸形取值置 None。
+        # b64_json 合法形态为 str 载荷原样保留，非字符串的畸形取值置 None；载荷内
+        # 未配对代理的剥离由结果组装点全载荷统一覆盖。
         b64_value = flat_image.get("b64_json")
         if b64_value is not None and not isinstance(b64_value, str):
             updates["b64_json"] = None

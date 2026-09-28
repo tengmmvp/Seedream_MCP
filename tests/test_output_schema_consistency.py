@@ -9,16 +9,28 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.common import extract_images
-from seedream_mcp.tools.core.context import build_generation_context
+from seedream_mcp.tools.core.context import GenerationExecutionContext, build_generation_context
 from seedream_mcp.tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
 )
 from seedream_mcp.tools.core.browse import _BrowseRequestState, _build_browse_structured_result
 from seedream_mcp.tools.core.results import _build_generation_structured_result
-from seedream_mcp.tools.core.schemas import BrowseImagesInput, TextToImageInput
+from seedream_mcp.tools.core.schemas import (
+    BackgroundMode,
+    BrowseImagesInput,
+    GenerationTool,
+    GenerationToolType,
+    ImageToImageInput,
+    OptimizePromptOptions,
+    OutputFormat,
+    SequentialGenerationInput,
+    TextToImageInput,
+)
 
 
 def test_generation_success_path_matches_schema() -> None:
@@ -81,6 +93,27 @@ def test_generation_failed_result_error_is_dict() -> None:
     obj = GenerationStructuredOutput(**structured)
     assert isinstance(obj.error, dict)
     assert obj.error["type"] == "generation_failed"
+
+
+def test_output_model_stringifies_non_string_dict_field_keys() -> None:
+    """模型自身字符串化 data/usage/batch/error 的非字符串键，任意构造路径无需调用方预处理。"""
+    data: list[dict[Any, Any]] = [{1: "x", "url": "https://example.com/a.png"}]
+    usage: dict[Any, Any] = {2: 3}
+    batch: dict[Any, Any] = {3: "b"}
+    error: dict[Any, Any] = {"1": "a", 1: "b"}
+    obj = GenerationStructuredOutput(
+        tool="text_to_image",
+        success=False,
+        data=data,
+        usage=usage,
+        batch=batch,
+        error=error,
+    )
+
+    assert obj.data == [{"1": "x", "url": "https://example.com/a.png"}]
+    assert obj.usage == {"2": 3}
+    assert obj.batch == {"3": "b"}
+    assert obj.error == {"1": "a", "1<dup>": "b"}
 
 
 def test_browse_success_path_matches_schema() -> None:
@@ -154,6 +187,11 @@ def test_extract_images_normalizes_null_and_non_dict_to_empty() -> None:
     assert extract_images({"data": "https://example.com/str"}) == []  # 标量无法表达图片
 
 
+def test_extract_images_nested_null_data_not_treated_as_image_entry() -> None:
+    """仅含 data:null 的嵌套字典是包裹形态而非图片条目，下钻后归空。"""
+    assert extract_images({"data": {"data": None}}) == []
+
+
 def test_real_generation_builder_success_output_instantiates_schema() -> None:
     """调用真实 _build_generation_structured_result 须能实例化输出 schema。
 
@@ -181,14 +219,51 @@ def test_real_generation_builder_success_output_instantiates_schema() -> None:
     assert obj.data == [{"url": "https://example.com/1.png"}]
 
 
-def test_echo_payload_covers_output_model_echo_fields() -> None:
+def _image_to_image_echo_context() -> GenerationExecutionContext:
+    """携带透明背景、输出格式、联网工具与提示词优化取值的图文生图上下文。"""
+    return build_generation_context(
+        ImageToImageInput(
+            prompt="a cat",
+            image="https://example.com/ref.png",
+            optimize_prompt_options=OptimizePromptOptions(mode="standard"),
+            output_format=OutputFormat.PNG,
+            background=BackgroundMode.TRANSPARENT,
+            tools=[GenerationTool(type=GenerationToolType.WEB_SEARCH)],
+        ),
+        # 未知家族模型放行全部能力，背景透明与联网工具得以在同一上下文并存。
+        SeedreamConfig(api_key="k", model_id="ep-echo-guard"),
+    )
+
+
+def _sequential_echo_context(max_images: int) -> GenerationExecutionContext:
+    """携带指定 max_images 生效值的组图上下文。"""
+    return build_generation_context(
+        SequentialGenerationInput(prompt="四格漫画", max_images=max_images),
+        SeedreamConfig(api_key="k"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("context", "non_none_fields"),
+    [
+        (
+            _image_to_image_echo_context(),
+            {"optimize_prompt_options", "background", "output_format", "tools"},
+        ),
+        (_sequential_echo_context(1), {"max_images"}),
+        (_sequential_echo_context(15), {"max_images"}),
+    ],
+    ids=["image_to_image", "sequential_min", "sequential_max"],
+)
+def test_echo_payload_covers_output_model_echo_fields(
+    context: GenerationExecutionContext, non_none_fields: set[str]
+) -> None:
     """成功路径回显字段的取值与上下文逐项相等，漏构造的新字段恒 None 即失败。
 
     回显字段与结果区字段在模型与 payload 构造两处双列，extra=forbid 只拦反向
-    漂移，漏构造的新字段退化为 None，与上下文实际值不等在此暴露。
+    漂移，漏构造的新字段退化为 None，与上下文实际值不等在此暴露；五个可选回显
+    字段经两类上下文全部取非 None 值，避免 None 与 None 的恒真比较。
     """
-    config = SeedreamConfig(api_key="k")
-    context = build_generation_context(TextToImageInput(prompt="a cat", size="2K"), config)
     structured = _build_generation_structured_result(
         tool_name="text_to_image",
         result={"success": True, "status": "completed", "data": [], "usage": {}},
@@ -212,6 +287,8 @@ def test_echo_payload_covers_output_model_echo_fields() -> None:
     echo_fields = set(GenerationStructuredOutput.model_fields) - non_echo
     for name in echo_fields:
         assert structured[name] == getattr(context, name), name
+    for name in non_none_fields:
+        assert getattr(context, name) is not None, name
 
 
 def test_real_generation_builder_failure_output_instantiates_schema() -> None:

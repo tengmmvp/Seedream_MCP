@@ -43,6 +43,19 @@ def _client_result() -> dict[str, Any]:
     }
 
 
+def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> list[dict[str, Any]]:
+    """按方法名安装记录调用参数并返回单图成功结果的替身，供分发计数与数据传递断言共用。"""
+    calls: list[dict[str, Any]] = []
+
+    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
+        del self
+        calls.append(kwargs)
+        return _client_result()
+
+    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
+    return calls
+
+
 def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_save_multiple(
         self: Any, images: list[dict[str, Any]], tool_name: str
@@ -68,19 +81,6 @@ def _patch_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("下载失败")
 
     monkeypatch.setattr(io_save.AutoSaveManager, "save_multiple_images", failing_save_multiple)
-
-
-def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> list[dict[str, Any]]:
-    """monkeypatch SeedreamClient 指定生成方法返回标准成功结果，记录每次调用的关键字参数。"""
-    calls: list[dict[str, Any]] = []
-
-    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
-        del self
-        calls.append(kwargs)
-        return _client_result()
-
-    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
-    return calls
 
 
 async def test_run_text_to_image_includes_auto_save_field(

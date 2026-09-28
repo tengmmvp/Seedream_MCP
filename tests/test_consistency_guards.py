@@ -50,8 +50,7 @@ _GENERATION_TOOL_METADATA = (
     SEQUENTIAL_GENERATION,
 )
 
-# 环境键读取豁免只收真实旁路：静态键收录键原文，动态键站点解不出静态文本、收录
-# 模块相对路径加调用原文。
+# 环境键读取豁免只收真实旁路：动态键站点解不出静态文本，收录模块相对路径加调用原文。
 _ENV_KEY_READ_EXEMPTIONS = frozenset(
     {
         "config.py:os.getenv(env_name)",
@@ -195,14 +194,12 @@ def test_loguru_calls_never_pass_exc_info_keyword() -> None:
     """全源码不出现 loguru 调用的 exc_info= 关键字，堆栈统一经 logger.exception。
 
     loguru 把未知关键字交 str.format 后丢弃，exc_info=True 的堆栈从不落日志；
-    logs.py 的标准库桥接以 logger.opt(exception=...) 转写，白名单豁免。
+    标准库桥接读取 record.exc_info 属性并以 exception= 转写，不含该关键字形态。
     """
     package_root = Path(seedream_mcp.__file__).resolve().parent
     offenders: list[str] = []
     for source_path in sorted(package_root.rglob("*.py")):
         relative = source_path.relative_to(package_root).as_posix()
-        if relative == "utils/core/logs.py":
-            continue
         source_text = source_path.read_text(encoding="utf-8")
         if re.search(r"\bexc_info\s*=", source_text):
             offenders.append(relative)
@@ -242,8 +239,6 @@ def test_env_key_reads_covered_by_host_scrub_prefixes() -> None:
         relative = source_path.relative_to(package_root).as_posix()
         for render, prefix in _env_key_read_sites(source_path.read_text(encoding="utf-8")):
             if prefix.startswith(HOST_ENV_SCRUB_PREFIXES):
-                continue
-            if prefix in _ENV_KEY_READ_EXEMPTIONS:
                 continue
             if f"{relative}:{render}" in _ENV_KEY_READ_EXEMPTIONS:
                 continue

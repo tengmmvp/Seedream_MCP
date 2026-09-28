@@ -13,7 +13,6 @@ from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
-
 from ..core.common import execute_generation_handler
 from ..core.schemas import SequentialGenerationInput
 from ._metadata import SEQUENTIAL_GENERATION

@@ -9,6 +9,7 @@ from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
+from _generation_fixtures import _patch_client_success
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
@@ -56,18 +57,6 @@ def _success_result(url: str) -> dict[str, Any]:
         "usage": {"generated_images": 1},
         "status": "completed",
     }
-
-
-def _patch_generation_success(
-    monkeypatch: pytest.MonkeyPatch, method_name: str = "text_to_image"
-) -> None:
-    """monkeypatch SeedreamClient 指定生成方法返回固定单图成功结果。"""
-
-    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
-        del self, kwargs
-        return _success_result("https://example.com/1.png")
-
-    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
 
 
 @pytest.mark.parametrize(
@@ -191,7 +180,7 @@ async def test_parallel_batch_progress_strictly_increasing(
     进度规范要求严格递增且不重复；收尾曾重报 70.0，与末请求完成的 70.0 相邻重复。
     """
 
-    _patch_generation_success(monkeypatch)
+    _patch_client_success(monkeypatch)
 
     ctx = RecordingProgressContext()
     result = await handle_text_to_image(
@@ -235,10 +224,10 @@ async def test_parallel_batch_progress_delivery_order_strictly_increasing(
 ) -> None:
     """慢客户端交错送达下，并行批次的进度通知仍按严格递增顺序到达。
 
-    进度按完成数快照计算、快照与发送间隔着 await，上报经批次级锁序列化。
+    进度在请求完成时入队，由单一后台发送任务按完成顺序串行送达。
     """
 
-    _patch_generation_success(monkeypatch)
+    _patch_client_success(monkeypatch)
 
     ctx = _ReorderingProgressContext()
     result = await handle_text_to_image(
@@ -259,7 +248,7 @@ async def test_single_request_progress_full_sequence_with_auto_save(
 ) -> None:
     """单请求成功路径在 auto_save 开启下的完整进度序列恰为七个里程碑且严格递增。"""
 
-    _patch_generation_success(monkeypatch)
+    _patch_client_success(monkeypatch)
 
     async def fake_save_multiple(
         self: Any, images: list[dict[str, Any]], tool_name: str
@@ -305,7 +294,7 @@ async def test_single_request_progress_without_auto_save_jumps_70_to_100(
 ) -> None:
     """auto_save 关闭时进度从生成完成直接跳到请求处理完成，序列仍严格递增。"""
 
-    _patch_generation_success(monkeypatch)
+    _patch_client_success(monkeypatch)
 
     ctx = RecordingProgressContext()
     result = await handle_text_to_image(
@@ -530,7 +519,7 @@ async def test_parallel_progress_order_preserved_with_slow_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """慢客户端发送背压下，进度仍按完成顺序严格递增送达。"""
-    _patch_generation_success(monkeypatch)
+    _patch_client_success(monkeypatch)
     config = _build_config()
     ctx = _SlowProgressContext(delay=0.02)
 

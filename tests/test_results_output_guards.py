@@ -26,6 +26,7 @@ from seedream_mcp.tools.core.results import (
     update_result_with_auto_save,
 )
 from seedream_mcp.tools.core._sanitize import _sanitize_image_errors, sanitize_error_dict
+from seedream_mcp.tools.core.outputs import _stringify_keys
 from seedream_mcp.utils.core.errors import SeedreamAPIError, response_reports_failure
 from seedream_mcp.utils.core.sanitizers import _truncate_value_for_output
 from seedream_mcp.utils.io.io_save import AutoSaveResult
@@ -68,6 +69,18 @@ def _save_result(success: bool) -> AutoSaveResult:
         markdown_ref="![ok](images/ok.png)" if success else None,
         error=None if success else "下载失败",
     )
+
+
+def _structured(result: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """固化默认参数的 _build_generation_structured_result 调用包装。"""
+    kwargs: dict[str, Any] = {
+        "tool_name": "text_to_image",
+        "context": make_generation_context(),
+        "auto_save_results": [],
+        "auto_save_error": None,
+    }
+    kwargs.update(overrides)
+    return _build_generation_structured_result(result=result, **kwargs)
 
 
 # ==================== 自动保存摘要与编号基准 ====================
@@ -151,13 +164,7 @@ async def test_auto_save_without_saveable_images_renders_empty_notice() -> None:
     text = format_generation_response(
         "文生图任务完成", result, "2K", save_results, auto_save_enabled=True
     )
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=save_results,
-        auto_save_error=None,
-    )
+    structured = _structured(result, auto_save_results=save_results)
 
     assert save_results == []
     assert saveable_indices == []
@@ -195,13 +202,7 @@ def test_structured_data_url_field_sanitized() -> None:
         "data": [{"url": _DIRTY_URL}],
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     url = structured["data"][0]["url"]
     assert isinstance(url, str)
@@ -226,13 +227,7 @@ def test_structured_data_non_dict_error_sanitized() -> None:
         ],
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     string_error = structured["data"][0]["error"]
     assert isinstance(string_error, str)
@@ -278,13 +273,7 @@ def test_long_signed_url_preserved_intact_after_sanitization() -> None:
 def test_long_url_with_credentials_still_stripped_without_truncation() -> None:
     """超长 URL 的 userinfo 凭据剥离仍生效，剥离后的 URL 完整保留。"""
     long_url = "https://AKID:" + "p" * 600 + "@mirror.example.com/a.png?sig=abc"
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={"success": True, "status": "completed", "data": [{"url": long_url}]},
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured({"success": True, "status": "completed", "data": [{"url": long_url}]})
 
     url = structured["data"][0]["url"]
     assert url == "https://mirror.example.com/a.png?sig=abc"
@@ -338,13 +327,7 @@ def test_image_item_free_fields_sanitized_in_text_output() -> None:
 
 def test_structured_data_free_fields_sanitized() -> None:
     """structuredContent.data 项的 size/output_format/model/type/error.code 净化。"""
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=_dirty_free_field_result(),
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(_dirty_free_field_result())
 
     item = structured["data"][0]
     assert item["size"] == "2K  FAKE-SIZE: injected"
@@ -550,13 +533,7 @@ def test_truncated_events_surfaced_in_both_channels() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "因超限或解析失败丢弃 2 个事件" in text
     # 截断计数混计超限与解析失败两类成因，文案不得归因到单一成因。
@@ -577,13 +554,7 @@ def test_truncated_events_absent_or_zero_not_rendered() -> None:
         text = format_generation_response("文生图任务完成", result, "2K")
         assert "丢弃" not in text
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={**base, "truncated_events": 0},
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured({**base, "truncated_events": 0})
     assert structured["truncated_events"] is None
 
 
@@ -598,13 +569,7 @@ def test_deadline_exceeded_surfaced_in_both_channels() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert text.endswith("响应流超过总时长预算，已保留提前终止前收到的结果")
     assert structured["deadline_exceeded"] is True
@@ -626,14 +591,7 @@ def test_pipeline_single_sanitization_shared_by_both_outlets() -> None:
     sanitized_images = _sanitize_image_errors(extract_images(result))
 
     text = format_generation_response("文生图任务完成", result, "2K", images=sanitized_images)
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-        images=sanitized_images,
-    )
+    structured = _structured(result, images=sanitized_images)
 
     message = structured["data"][0]["error"]["message"]
     assert message.count("<truncated:") == 1
@@ -750,13 +708,7 @@ def test_independent_structured_call_sanitizes_internally() -> None:
     """独立调用未传 images 时在结构化出口内部完成首次净化，截断标记恰一次。"""
     images = [{"error": {"code": "E", "message": "x" * 600}}]
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={"success": True, "status": "completed", "data": images},
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured({"success": True, "status": "completed", "data": images})
 
     assert structured["data"][0]["error"]["message"].count("<truncated:") == 1
 
@@ -792,13 +744,7 @@ def test_aggregated_failure_message_survives_repeated_sanitization_in_both_outle
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert f"图片生成失败: {truncated_message}" in text
     assert f"  请求 1: {truncated_message}" in text
@@ -825,13 +771,7 @@ def test_forged_request_failed_sentinel_sanitized_in_single_request_path() -> No
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "sk-forged" not in text
     assert "\r" not in text
@@ -862,13 +802,7 @@ def test_aggregated_placeholder_message_survives_sanitization() -> None:
         },
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert structured["data"][0]["error"]["message"] == truncated_message
 
@@ -877,13 +811,7 @@ def test_top_level_and_image_error_ladder_share_single_sanitizer() -> None:
     """顶层 error 与图片项 error 经同一净化阶梯：非字符串 code 归一化后净化，口径一致。"""
     error_payload = {"code": {"nested": "c" * 600}, "message": "boom\r\nBearer sk-1"}
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={"success": False, "status": "failed", "error": error_payload},
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured({"success": False, "status": "failed", "error": error_payload})
 
     top_code = structured["error"]["code"]
     entry = _sanitize_image_errors([{"error": dict(error_payload)}])[0]["error"]
@@ -919,13 +847,7 @@ def test_aggregated_assembled_messages_keep_recovery_guidance() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert f"图片生成失败: {guidance}" in text
     assert f"  请求 1: {guidance}" in text
@@ -950,13 +872,7 @@ def test_structured_usage_string_values_sanitized() -> None:
         },
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     usage = structured["usage"]
     assert usage["generated_images"] == 1
@@ -979,13 +895,7 @@ def test_structured_usage_dict_keys_control_chars_flattened() -> None:
         "usage": {f"out{soh}put_tokens": 100, f"no{rlo}te": 7, "label": "x"},
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     usage = structured["usage"]
     assert usage["out put_tokens"] == 100
@@ -1002,13 +912,7 @@ def test_structured_usage_nested_collision_suffix_matches_top_level_order() -> N
         "usage": {"meta": {"a\tb": 1, "a\nb": 2}},
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert structured["usage"]["meta"] == {"a b": 1, "a b<dup>": 2}
 
@@ -1029,6 +933,54 @@ def test_usage_text_renders_numeric_values_only() -> None:
     assert "输出 tokens" not in text
 
 
+def test_usage_text_renders_non_finite_floats_as_zero() -> None:
+    """文本统计对非有限浮点归零渲染，与结构化通道的净化口径一致。"""
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": {"output_tokens": float("nan"), "total_tokens": float("inf")},
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+
+    assert "nan" not in text
+    assert "inf" not in text
+    assert "输出 tokens: 0.0" in text
+    assert "总 tokens: 0.0" in text
+
+
+def test_usage_non_finite_floats_rendered_identically_across_channels() -> None:
+    """同一 usage 的 NaN/Inf 呈现两通道逐字一致：归一化单点在 _sanitize_usage。
+
+    文本行由结构化取值逐字渲染，任一侧另设归一化应用点即同值不同显。
+    """
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{"url": "https://example.com/a.png"}],
+        "usage": {
+            "input_images": float("nan"),
+            "output_tokens": float("inf"),
+            "total_tokens": float("-inf"),
+        },
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _structured(result)
+
+    labels = {
+        "input_images": "输入图片数",
+        "output_tokens": "输出 tokens",
+        "total_tokens": "总 tokens",
+    }
+    for key, label in labels.items():
+        assert structured["usage"][key] == 0.0
+        assert f"  {label}: {structured['usage'][key]}" in text
+    assert "nan" not in text
+    assert "inf" not in text
+
+
 # ==================== usage 净化遍历健壮性 ====================
 
 
@@ -1038,17 +990,13 @@ def test_structured_usage_deeply_nested_sanitized_without_recursion_error() -> N
     for _ in range(600):
         nested = {"nested": nested, "label": "x"}
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={
+    structured = _structured(
+        {
             "success": True,
             "status": "completed",
             "data": [{"url": "https://example.com/a.png"}],
             "usage": nested,
         },
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
     )
 
     usage = structured["usage"]
@@ -1065,17 +1013,13 @@ def test_structured_usage_cyclic_reference_terminated_with_placeholder() -> None
     cyclic: dict[str, Any] = {"note": "echo"}
     cyclic["self"] = cyclic
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={
+    structured = _structured(
+        {
             "success": True,
             "status": "completed",
             "data": [{"url": "https://example.com/a.png"}],
             "usage": cyclic,
         },
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
     )
 
     usage = structured["usage"]
@@ -1101,13 +1045,7 @@ def test_forged_local_path_and_markdown_ref_sanitized_in_both_channels() -> None
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "\r" not in text
     path_line = next(line for line in text.splitlines() if line.startswith("  本地路径: "))
@@ -1131,13 +1069,7 @@ def test_structured_data_unknown_string_keys_sanitized() -> None:
         ],
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     item = structured["data"][0]
     note = item["custom_note"]
@@ -1174,13 +1106,7 @@ def test_structured_data_item_and_error_keys_control_chars_flattened() -> None:
         ],
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     item = structured["data"][0]
     # 值未变化的原始键在图片项入口压平。
@@ -1213,6 +1139,51 @@ def test_unknown_value_flatten_collision_keeps_both_entries() -> None:
     assert sorted(meta.values()) == [1, 2]
 
 
+def test_key_probe_ascii_gate_keeps_non_ascii_clean_keys_on_fast_path() -> None:
+    """键探测的 isascii 门只豁免代理扫描：非 ASCII 净键不触发拷贝，代理键照常剥离。"""
+    surrogate = "\ud800"
+    images: list[dict[str, Any]] = [{"模型": "x"}, {f"bad{surrogate}key": 1}]
+
+    sanitized = _sanitize_image_errors(images)
+
+    assert sanitized[0] is images[0]
+    assert sanitized[1] is not images[1]
+    assert sanitized[1]["badkey"] == 1
+
+
+def test_structured_non_string_keys_stringified_by_output_model() -> None:
+    """净化层保留的非字符串键经输出模型字符串化，校验不抛错、条目不丢。"""
+    result = {
+        "success": True,
+        "status": "completed",
+        "data": [{1: "x", "url": "https://example.com/a.png"}],
+        "usage": {2: 3},
+    }
+
+    structured = _structured(result)
+
+    assert structured["data"][0]["1"] == "x"
+    assert structured["data"][0]["url"] == "https://example.com/a.png"
+    assert structured["usage"]["2"] == 3
+
+
+def test_structured_failure_non_string_error_keys_stringified_with_collision_suffix() -> None:
+    """error 的非字符串键同样字符串化，与既有键碰撞时挂后缀保留两值。"""
+    structured = _structured({"success": False, "status": "failed", "error": {"1": "a", 1: "b"}})
+
+    assert structured["error"]["1"] == "a"
+    assert structured["error"]["1<dup>"] == "b"
+    assert structured["error"]["message"] == "未知错误"
+
+
+def test_stringify_keys_delegates_flatten_and_collision_to_unique_flat_key() -> None:
+    """慢路的键压平与碰撞后缀与 _unique_flat_key 同约定，全字符串键原对象透传。"""
+    assert _stringify_keys({"1": "a", 1: "b"}) == {"1": "a", "1<dup>": "b"}
+    assert _stringify_keys({"a\tb": 1, 2: 3}) == {"a b": 1, "2": 3}
+    clean = {"k": "v"}
+    assert _stringify_keys(clean) is clean
+
+
 # ==================== 净化协调与模块状态移除 ====================
 
 
@@ -1239,13 +1210,7 @@ def test_failure_path_structured_outlet_sanitizes_images() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert structured["success"] is False
     assert "SECRET" not in text
@@ -1262,14 +1227,7 @@ def test_success_path_pipeline_sanitizes_each_outlet_content_once() -> None:
     sanitized_images = _sanitize_image_errors(extract_images(result))
 
     text = format_generation_response("文生图任务完成", result, "2K", images=sanitized_images)
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-        images=sanitized_images,
-    )
+    structured = _structured(result, images=sanitized_images)
 
     assert "URL: https://example.com/a.png" in text
     assert structured["data"][0]["url"] == "https://example.com/a.png"
@@ -1303,13 +1261,7 @@ def test_structured_failure_error_code_sanitized() -> None:
         "error": {"code": "E\r\nFAKE api_key=leaked", "message": "boom"},
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert structured["error"]["code"] == "E  FAKE api_key=***"
     assert "leaked" not in str(structured["error"])
@@ -1369,13 +1321,7 @@ def test_structured_failure_dict_message_normalized_and_sanitized() -> None:
         "error": {"code": "E", "message": {"authorization": "Bearer sk-struct-leaked"}},
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     message = structured["error"]["message"]
     assert isinstance(message, str)
@@ -1391,13 +1337,7 @@ def test_structured_failure_list_message_normalized_and_sanitized() -> None:
         "error": {"message": ["token=SK-LIST-STRUCT"]},
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     message = structured["error"]["message"]
     assert isinstance(message, str)
@@ -1413,13 +1353,7 @@ def test_structured_failure_non_dict_error_normalized_and_sanitized() -> None:
         "error": ["api_key=SK-NONDICT-STRUCT"],
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     rendered = str(structured["error"])
     assert "SK-NONDICT-STRUCT" not in rendered
@@ -1536,12 +1470,11 @@ def test_extract_images_handles_deeply_nested_data_without_recursion_error() -> 
 def test_structured_status_sanitized_and_max_images_surfaced() -> None:
     """status 上游原文经净化进入 structuredContent，max_images 生效值原样回显。"""
     context = dataclasses.replace(make_generation_context(), max_images=4)
-    structured = _build_generation_structured_result(
+    structured = _structured(
+        {"success": True, "status": "ok\r\ninjected", "data": [], "usage": {}},
         tool_name="sequential_generation",
-        result={"success": True, "status": "ok\r\ninjected", "data": [], "usage": {}},
         context=context,
         auto_save_results=None,
-        auto_save_error=None,
     )
 
     assert "\r" not in structured["status"]
@@ -1575,13 +1508,7 @@ def test_forged_string_request_and_image_index_sanitized_in_both_channels() -> N
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "\r" not in text
     assert "sk-idx-leaked" not in text
@@ -1616,13 +1543,7 @@ def test_per_image_dict_error_message_normalized_and_sanitized() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     message = structured["data"][0]["error"]["message"]
     assert isinstance(message, str)
@@ -1647,13 +1568,7 @@ def test_per_image_list_error_code_normalized_and_sanitized() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     code = structured["data"][0]["error"]["code"]
     assert isinstance(code, str)
@@ -1677,13 +1592,7 @@ def test_b64_json_non_sized_form_renders_absent_without_error() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "  URL: https://example.com/a.png" in text
     assert "  Base64 数据: 无" in text
@@ -1691,6 +1600,19 @@ def test_b64_json_non_sized_form_renders_absent_without_error() -> None:
     assert "  Base64 数据: 4 字符" in text
     # 结构化通道同步把非字符串畸形取值置 None。
     assert structured["data"][0]["b64_json"] is None
+
+
+def test_b64_json_surrogates_deferred_and_ascii_payload_untouched() -> None:
+    """b64 载荷的代理剥离由结果组装点承担，本层对含代理与纯 ASCII 大载荷均原对象透传。"""
+    surrogate = "\ud800"
+    images = [{"b64_json": f"aGVs{surrogate}bG8="}, {"b64_json": "A" * (1024 * 1024)}]
+
+    sanitized = _sanitize_image_errors(images)
+
+    assert sanitized[0] is images[0]
+    assert sanitized[0]["b64_json"] == f"aGVs{surrogate}bG8="
+    assert sanitized[1] is images[1]
+    assert sanitized[1]["b64_json"] is images[1]["b64_json"]
 
 
 # ==================== error 键空值回落 ====================
@@ -1710,19 +1632,40 @@ def test_structured_failure_none_error_value_falls_back_to_unknown() -> None:
     """结构化出口对 error=None 与文本通道同口径回落未知错误，message 不为字面 None。"""
     result = {"success": False, "status": "failed", "data": [], "error": None}
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
     text = format_generation_response("文生图任务完成", result, "2K")
 
     assert structured["error"]["message"] == "未知错误"
     assert "None" not in str(structured["error"])
     assert "图片生成失败: 未知错误" in text
     assert "None" not in text
+
+
+def test_failure_whitespace_error_string_falls_back_to_unknown() -> None:
+    """纯空白顶层错误串回落未知错误，两出口均不渲染空白失败文案。"""
+    result = {"success": False, "status": "failed", "data": [], "error": "   "}
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _structured(result)
+
+    assert "图片生成失败: 未知错误" in text
+    assert structured["error"]["message"] == "未知错误"
+
+
+@pytest.mark.parametrize("error_payload", [0, False, []])
+def test_failure_falsy_error_value_falls_back_to_unknown(error_payload: Any) -> None:
+    """假值标量与空容器的顶层错误回落未知错误，两出口不渲染裸值文案。"""
+    result = {"success": False, "status": "failed", "data": [], "error": error_payload}
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _structured(result)
+
+    assert "图片生成失败: 未知错误" in text
+    assert structured["error"]["type"] == "generation_failed"
+    assert structured["error"]["message"] == "未知错误"
+    rendered = str(error_payload)
+    assert rendered not in text
+    assert rendered not in str(structured["error"])
 
 
 # ==================== dict error 缺键与空 message 的阶梯提取 ====================
@@ -1746,6 +1689,78 @@ def test_failure_text_dict_error_none_message_falls_back_to_unknown() -> None:
 
     assert "图片生成失败: 未知错误" in text
     assert "None" not in text
+
+
+@pytest.mark.parametrize(
+    ("error_payload", "expected_message"),
+    [
+        ({"msg": "阶梯msg"}, "阶梯msg"),
+        ({"detail": "阶梯detail"}, "阶梯detail"),
+        ({"error": "阶梯error"}, "阶梯error"),
+        ({"code": "E-1"}, "E-1"),
+        ({"message": None}, "未知错误"),
+        ({"message": "   "}, "未知错误"),
+    ],
+)
+def test_structured_failure_dict_error_without_message_fills_from_ladder(
+    error_payload: dict[str, Any], expected_message: str
+) -> None:
+    """dict error 缺 message 或无有效文本时，结构化出口以阶梯产物补齐 message。
+
+    错误结构恒含 type 与 message 两键，与文本通道的阶梯提取同口径。
+    """
+    structured = _structured({"success": False, "status": "failed", "error": error_payload})
+
+    assert structured["error"]["type"] == "generation_failed"
+    assert isinstance(structured["error"]["message"], str)
+    assert structured["error"]["message"] == expected_message
+
+
+@pytest.mark.parametrize(
+    "error_payload",
+    [
+        {"message": "  boom  "},
+        {"message": "   ", "msg": "阶梯msg"},
+        {"message": None, "code": "E"},
+        {"code": "E", "message": {"authorization": "Bearer sk-consistency"}},
+    ],
+)
+def test_failure_dict_message_verdicts_match_across_channels(
+    error_payload: dict[str, Any],
+) -> None:
+    """同一 dict 失败载荷下文本与结构化通道的 message 判定结果一致。
+
+    回退链单点化之前两通道次序相反：文本通道阶梯优先，message 为 dict 且另有
+    code 等阶梯键时文本渲染阶梯产物、结构化渲染归一化 message 分量，各说各话。
+    """
+    result = {"success": False, "status": "failed", "data": [], "error": error_payload}
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _structured(result)
+
+    assert f"图片生成失败: {structured['error']['message']}" in text
+
+
+def test_failure_aggregated_invalid_message_verdicts_match_across_channels() -> None:
+    """聚合失败载荷 message 无有效文本时两通道同回落未知错误，不再各执一词。"""
+    result = {
+        "success": False,
+        "status": "failed",
+        "data": [],
+        "error": {"type": "api_error", "message": "   ", "code": "E"},
+        "batch": {
+            "request_count": 1,
+            "success_requests": 0,
+            "failed_requests": 1,
+            "errors": [{"request_index": 1, "message": "请求失败"}],
+        },
+    }
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _structured(result)
+
+    assert structured["error"]["message"] == "未知错误"
+    assert "图片生成失败: 未知错误" in text
 
 
 # ==================== 非 str 数据字段净化 ====================
@@ -1774,13 +1789,7 @@ def test_non_str_url_size_local_path_sanitized_in_both_channels() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     # 凭据与 CRLF 不进入文本通道，非 str 形态以归一化文本渲染。
     assert "sk-nonstr-leaked" not in text
@@ -1854,13 +1863,7 @@ def test_forged_bool_index_form_routed_through_sanitization_path() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "  请求序号: True" in text
     assert structured["data"][0]["request_index"] is True
@@ -1887,13 +1890,7 @@ def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "URL: https://example.com/a.png" in text
     assert "使用统计" not in text
@@ -1907,20 +1904,8 @@ def test_malformed_top_level_shapes_do_not_flip_billed_success() -> None:
 
 def test_malformed_status_shape_falls_back_to_none_in_structured_output() -> None:
     """非 str 的 status 归 None 后净化分支不触达，str 形态保持净化语义不变。"""
-    structured_int = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={"success": True, "status": 200, "data": []},
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
-    structured_str = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result={"success": True, "status": "ok\r\ninjected", "data": []},
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured_int = _structured({"success": True, "status": 200, "data": []})
+    structured_str = _structured({"success": True, "status": "ok\r\ninjected", "data": []})
 
     assert structured_int["status"] is None
     assert structured_str["status"] == "ok  injected"
@@ -1937,13 +1922,7 @@ def test_falsy_malformed_usage_batch_shapes_converge_quietly() -> None:
     }
 
     text = format_generation_response("文生图任务完成", result, "2K")
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "使用统计" not in text
     assert structured["usage"] == {}
@@ -1971,13 +1950,7 @@ def test_per_image_error_extra_keys_sanitized() -> None:
         ],
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     error = structured["data"][0]["error"]
     assert error["message"] == "ok"
@@ -1999,13 +1972,7 @@ def test_structured_failure_error_extra_keys_sanitized() -> None:
         },
     }
 
-    structured = _build_generation_structured_result(
-        tool_name="text_to_image",
-        result=result,
-        context=make_generation_context(),
-        auto_save_results=[],
-        auto_save_error=None,
-    )
+    structured = _structured(result)
 
     assert "sk-top-side-leaked" not in structured["error"]["param"]
     assert "api_key=***" in structured["error"]["param"]

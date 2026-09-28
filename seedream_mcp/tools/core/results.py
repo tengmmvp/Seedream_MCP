@@ -60,12 +60,11 @@ def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
             if isinstance(value, dict):
-                nested = value.get("data")
-                if nested is not None:
+                if "data" in value:
                     depth += 1
                     if depth > _MAX_NESTED_DATA_DEPTH:
                         return []
-                    value = nested
+                    value = value["data"]
                     continue
                 return [value]
             return []
@@ -252,46 +251,57 @@ def _is_aggregated_result(result: dict[str, Any]) -> bool:
     return isinstance(result.get("batch"), dict)
 
 
-def _aggregated_message_limit(result: dict[str, Any]) -> int:
-    """消息净化上限：聚合组装产物走防御性宽限，判定单点见 message_limit_for。"""
-    return message_limit_for(_is_aggregated_result(result))
+def _effective_raw_error(result: dict[str, Any]) -> Any:
+    """假值与纯空白串的错误载荷回落未知错误，文本与结构化出口共用同一缺失口径。"""
+    raw_error = result.get("error")
+    if not raw_error or not has_message_value(raw_error):
+        return "未知错误"
+    return raw_error
+
+
+def _failure_error_message(
+    raw_error: dict[str, Any], *, aggregated: bool, message_limit: int
+) -> str:
+    """dict 失败载荷的可读消息单次序回退链，文本与结构化两出口共用同一判定。
+
+    聚合格式为本侧组装的 {type, message} 结构，直取 message 按传入上限净化；上游
+    dict 优先取 message 分量归一净化（非 str 形态归一为文本），净化产物无有效文本
+    时走五级阶梯（其内部固定错误通道上限），阶梯未命中回落未知错误。
+    """
+    if aggregated:
+        message = raw_error.get("message")
+        if isinstance(message, str) and message.strip():
+            return sanitize_error_text(message, limit=message_limit)
+        return "未知错误"
+    message = raw_error.get("message")
+    sanitized = (
+        None
+        if message is None
+        else sanitize_error_text(normalize_message_text(message), limit=message_limit)
+    )
+    if sanitized is not None and sanitized.strip():
+        return sanitized
+    ladder_text = _normalize_error_message(raw_error)
+    return ladder_text if ladder_text is not None else "未知错误"
 
 
 def _format_failure_section(result: dict[str, Any]) -> str:
     """失败时格式化并行失败详情；无 batch 错误信息时仅返回失败概述。
 
-    error 为上游自由内容，一律经净化与归一化输出：dict 形态优先按
-    message/msg/detail/error/code 阶梯提取，未命中时归一化 message 分量；空值回落
-    未知错误，字面量 None 与字典 repr 不进入用户可见文本。聚合格式的消息为本侧
-    组装产物（含恢复指引），净化改用防御性宽上限防截断指引；脱敏口径两档一致。
+    error 为上游自由内容，一律经净化与归一化输出：dict 形态的 message 判定与
+    结构化出口共用 _failure_error_message 单次序回退链，非 dict 形态归一化净化；
+    空值与纯空白串回落未知错误，字面量 None 与字典 repr 不进入用户可见文本。
+    聚合格式的消息为本侧组装产物（含恢复指引），净化改用防御性宽上限防截断
+    指引；脱敏口径两档一致。
     """
     aggregated = _is_aggregated_result(result)
     message_limit = message_limit_for(aggregated)
 
-    # 空值归入未知错误，与结构化出口口径一致。
-    raw_error = result.get("error") or "未知错误"
+    raw_error = _effective_raw_error(result)
     if isinstance(raw_error, dict):
-        if aggregated:
-            # 聚合 error 为本侧组装的 {type, message} 结构，直取 message 走宽限
-            # 净化；五级阶梯服务于上游未知结构，其内部固定错误通道上限。
-            message = raw_error.get("message")
-            error_text = (
-                sanitize_error_text(message, limit=message_limit)
-                if isinstance(message, str) and message
-                else "未知错误"
-            )
-        else:
-            # dict 形态优先复用五级提取阶梯，与并行聚合的错误提取同口径。
-            ladder_text = _normalize_error_message(raw_error)
-            if ladder_text is None:
-                message = raw_error.get("message")
-                error_text = (
-                    sanitize_error_text(normalize_message_text(message))
-                    if message is not None
-                    else "未知错误"
-                )
-            else:
-                error_text = ladder_text
+        error_text = _failure_error_message(
+            raw_error, aggregated=aggregated, message_limit=message_limit
+        )
     else:
         error_text = sanitize_error_text(normalize_message_text(raw_error))
     failure_message = f"图片生成失败: {error_text}"
@@ -407,8 +417,9 @@ def _format_auto_save_section(
 def _format_usage_section(usage: dict[str, Any]) -> list[str]:
     """格式化使用统计，无可渲染条目时整段省略。
 
-    仅渲染数值取值，字符串值不插值以免带入换行与敏感片段；非 dict 形态自守归空，
-    畸形形态不使成功生成在格式化阶段翻错。
+    入参已由 _sanitize_usage 净化，非有限浮点与字符串注入在净化单点处理；仅渲染
+    数值取值，字符串值不插值以免带入换行与敏感片段；非 dict 形态自守归空，畸形
+    形态不使成功生成在格式化阶段翻错。
     """
     if not isinstance(usage, dict):
         return []
@@ -461,6 +472,7 @@ def format_generation_response(
     auto_save_error: str | None = None,
     images: list[dict[str, Any]] | None = None,
     saveable_indices: list[int] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> str:
     """格式化图片生成结果为可读文本。
 
@@ -472,6 +484,8 @@ def format_generation_response(
             重复传入已净化列表不改变结果。
         saveable_indices: 可保存图片在归一化列表中的原始索引，与 auto_save_results
             按位置对位；None 时自动保存段落回退保存序号。
+        usage: 预净化的用量字典，与结构化出口共用同一净化结果；None 时内部提取
+            并净化，非 dict 形态不渲染统计段。
 
     Returns:
         格式化后的响应文本。
@@ -481,7 +495,8 @@ def format_generation_response(
 
     if images is None:
         images = _sanitize_image_errors(extract_images(result))
-    usage = result.get("usage", {})
+    if usage is None:
+        usage = _sanitize_usage(result.get("usage"))
 
     parts: list[str] = [title, f"尺寸: {size}", ""]
 
@@ -530,6 +545,7 @@ def _build_generation_structured_result(
     auto_save_results: list[AutoSaveResult] | None,
     auto_save_error: str | None,
     images: list[dict[str, Any]] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """构建 MCP 工具结果的 structuredContent 字段。
 
@@ -539,6 +555,8 @@ def _build_generation_structured_result(
     Args:
         images: 预提取且已净化的图片列表，None 时内部提取并净化；净化幂等，
             重复传入已净化列表不改变结果。
+        usage: 预净化的用量字典，与文本出口共用同一净化结果；None 时内部提取
+            并净化。
 
     Returns:
         structuredContent 字典，成功路径排除 error 键。
@@ -548,14 +566,20 @@ def _build_generation_structured_result(
     sanitized_images = (
         images if images is not None else _sanitize_image_errors(extract_images(result))
     )
+    failed = response_reports_failure(result)
     # status 为上游自由文本，同口径净化；非 str 归 None，畸形形态不使构造抛校验异常。
     raw_status = result.get("status")
     # usage 与 batch 的非 dict 形态按声明 schema 收敛为空 dict 与 None。
     raw_usage = result.get("usage", {})
     raw_batch = result.get("batch")
+    sanitized_usage = (
+        usage
+        if usage is not None
+        else (_sanitize_usage(raw_usage) if isinstance(raw_usage, dict) else {})
+    )
     payload: dict[str, Any] = {
         "tool": tool_name,
-        "success": not response_reports_failure(result),
+        "success": not failed,
         "status": sanitize_error_text(raw_status) if isinstance(raw_status, str) else None,
         "prompt": context.prompt,
         "optimize_prompt_options": context.optimize_prompt_options,
@@ -571,8 +595,9 @@ def _build_generation_structured_result(
         "request_count": context.request_count,
         "parallelism": context.parallelism,
         "data": sanitized_images,
-        # usage 字符串值过净化管线防 CRLF 与凭据注入，数值保持原值供计费核对。
-        "usage": _sanitize_usage(raw_usage) if isinstance(raw_usage, dict) else {},
+        # usage 字符串过净化管线防 CRLF 与凭据注入、非有限浮点归零，文本通道共用
+        # 同一净化结果。
+        "usage": sanitized_usage,
         "batch": raw_batch if isinstance(raw_batch, dict) else None,
     }
 
@@ -594,17 +619,23 @@ def _build_generation_structured_result(
     else:
         payload["auto_save"] = {"enabled": False}
 
-    failed = response_reports_failure(result)
     if failed:
-        # 空值回落未知错误，与文本通道口径一致。
-        raw_error = result.get("error") or "未知错误"
+        aggregated = _is_aggregated_result(result)
+        message_limit = message_limit_for(aggregated)
+        raw_error = _effective_raw_error(result)
         if isinstance(raw_error, dict):
-            # 聚合来源的 message 为本侧组装产物（含恢复指引），走防御性宽上限。
+            # message 终值由回退链单次净化产出并与文本出口同判定；None 占位使
+            # sanitize_error_dict 跳过 message 分支，同一字符串不再二次过净化管线。
+            message = _failure_error_message(
+                raw_error, aggregated=aggregated, message_limit=message_limit
+            )
             sanitized_error = sanitize_error_dict(
-                raw_error, message_limit=_aggregated_message_limit(result)
+                {**raw_error, "message": None} if "message" in raw_error else raw_error,
+                message_limit=message_limit,
             )
             # 上游透传错误不含 type 键时兜底补齐，与 build_error_dict 的错误结构对齐。
             sanitized_error.setdefault("type", "generation_failed")
+            sanitized_error["message"] = message
             payload["error"] = sanitized_error
         else:
             payload["error"] = build_error_dict(

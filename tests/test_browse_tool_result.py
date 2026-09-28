@@ -11,7 +11,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, NamedTuple, NoReturn, cast
 
@@ -21,6 +21,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from _log_fakes import RecordingLogger, capture_loguru_messages
+from _os_fakes import _install_counting_resolve
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools import BrowseImagesInput
@@ -340,21 +341,14 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     )
     assert page1.structured_content["count"] == 5
 
-    resolved_paths: list[Path] = []
-    original_resolve = Path.resolve
-
-    def _counting_resolve(self: Path, strict: bool = False) -> Path:
-        resolved_paths.append(self)
-        return original_resolve(self, strict=strict)
-
-    monkeypatch.setattr(Path, "resolve", _counting_resolve)
+    resolve_calls = _install_counting_resolve(monkeypatch)
 
     # 深页 offset=4：scan_limit=4+1+1=6，命中完整缓存，不重扫也不逐文件 resolve
     page2 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=1, offset=4)
     )
     assert page2.structured_content["count"] == 1
-    image_resolves = [p for p in resolved_paths if p.suffix == ".png"]
+    image_resolves = [p for p in resolve_calls if p.endswith(".png")]
     assert image_resolves == [], "缓存命中的深页不应再对图片文件逐个 resolve"
 
 
@@ -473,8 +467,6 @@ async def test_browse_images_fallback_preserves_resolved_directories(
 ) -> None:
     """impl 在目录解析完成后抛未预期异常时，兜底 structuredContent 回显已解析目录。"""
 
-    from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
-
     def _exploding_display_entries(**kwargs: object) -> NoReturn:
         raise RuntimeError("boom")
 
@@ -575,8 +567,6 @@ async def test_browse_images_empty_message_sanitizes_unreadable_dir_paths(
     路径来自服务器文件系统，控制字符经净化压平、敏感键值脱敏，不原文进入
     用户可见文本。
     """
-    from seedream_mcp.utils.io.io_path import _WORKSPACE_ROOTS_VAR
-
     hostile = workspace_root / "dir\r\napi_key=leak"
 
     def _fake_find(*args: object, **kwargs: Any) -> list[Path]:
@@ -754,6 +744,57 @@ def test_build_display_entries_flattens_unicode_line_separator(tmp_path: Path) -
 
     assert entries[0]["path"] == image.as_posix()
     assert lines == [f"1. {tmp_path.as_posix()}/a b.png"]
+
+
+def test_build_display_entries_preserves_backslash_in_posix_filename() -> None:
+    """POSIX 含反斜杠文件名的条目路径仅归一分隔符，字面反斜杠保持原样可回流。"""
+    image = cast("Path", PurePosixPath("/tmp_dir/a\\b.png"))
+
+    lines, entries = browse_core_module._build_display_entries(
+        images=[image],
+        image_resolved_map={image: image},
+        show_details=False,
+    )
+
+    assert entries[0]["path"] == "/tmp_dir/a\\b.png"
+    assert lines == ["1. /tmp_dir/a\\b.png"]
+
+
+async def test_browse_images_surrogate_filename_does_not_break_serialization(
+    workspace_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """文件名携带未配对代理时浏览响应整体成功，不再翻为序列化失败。
+
+    NTFS 可存代理文件名，Linux 文件名字节经代理保留解码亦可产此类路径；代理在
+    结果装配点剥离后 path 可 UTF-8 编码，代理本就不可回流，回流语义不受影响。
+    """
+    images_root = _seed_images_root(workspace_root)
+    clean = images_root / "ok.png"
+    clean.write_bytes(b"\x89PNG\r\n\x1a\n")
+    surrogate = "\ud800"
+    dirty = images_root / f"bad{surrogate}.png"
+
+    def _fake_find(**kwargs: object) -> list[Path]:
+        return [dirty, clean]
+
+    monkeypatch.setattr(browse_core_module, "find_images_in_directory", _fake_find)
+
+    result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=False))
+
+    assert result.is_error is False
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    entries = sc["images"]
+    assert len(entries) == 2
+    dirty_entry = entries[0]
+    assert surrogate not in dirty_entry["path"]
+    dirty_entry["path"].encode("utf-8")
+    assert dirty_entry["path"].endswith("bad.png")
+    # 其余条目不受影响，保持原样可回流
+    assert entries[1]["path"] == clean.resolve().as_posix()
+    # 整个响应可经严格 JSON 序列化，含代理文件名不再抛 PydanticSerializationError
+    result.model_dump_json().encode("utf-8")
 
 
 async def test_browse_images_directory_outside_images_root_lists_absolute_entries(
@@ -1168,3 +1209,70 @@ async def test_browse_session_roots_echoes_images_root_outside_roots(
     assert resolved == [str(images_root.resolve()).replace("\\", "/")]
     entry_path = (images_root / "2026-09-06" / "a.png").resolve().as_posix()
     assert result.structured_content["images"][0]["path"] == entry_path
+
+
+# ==================== bounds_scope 与读权限求交 ====================
+
+
+async def test_browse_images_bounds_scope_wider_than_read_scope_dropped_entirely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超宽 bounds_scope 未落入读权限即整界剔除：界内图片也不返回，结果为空。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    images_root = workspace / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    inside_img = images_root / "inside.png"
+    inside_img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(workspace))
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False), bounds_scope=[tmp_path]
+    )
+
+    assert result.is_error is False
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["status"] == "empty"
+    assert sc["count"] == 0
+    assert sc["images"] == []
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "inside.png" not in text
+
+
+async def test_browse_images_bounds_scope_narrower_filters_at_source(
+    workspace_root: Path,
+) -> None:
+    """窄于读权限的 bounds_scope 在源头剔除界内但替代界外的条目。"""
+    images_root = _seed_images_root(workspace_root)
+    for name in ("keep.png", "drop.png"):
+        (images_root / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    subdir = images_root / "sub"
+    subdir.mkdir()
+    (subdir / "keep.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=True), bounds_scope=[subdir]
+    )
+
+    sc = result.structured_content
+    assert isinstance(sc, dict)
+    assert sc["count"] == 1
+    assert sc["images"][0]["path"] == (subdir / "keep.png").resolve().as_posix()
+
+
+async def test_browse_images_rejects_empty_bounds_scope(workspace_root: Path) -> None:
+    """空 bounds_scope 为编程错误：以工具错误结果拒绝，不静默清空结果。"""
+    images_root = _seed_images_root(workspace_root)
+    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = await handle_browse_images(
+        BrowseImagesInput(directory=".", recursive=False), bounds_scope=[]
+    )
+
+    assert result.is_error is True
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["status"] == "failed"
+    text = "".join(getattr(content, "text", "") for content in result.content)
+    assert "bounds_scope 不能为空列表" in text

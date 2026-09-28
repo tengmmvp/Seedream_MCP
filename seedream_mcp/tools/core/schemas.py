@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, ClassVar, Literal, Protocol, cast
+from typing import Annotated, Callable, ClassVar, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,6 +21,7 @@ from ...utils.model.model_capabilities import (
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
+    VALID_OPTIMIZE_MODES,
     resolve_sequential_max_images,
     validate_parallel_generation_options,
     validate_sequential_image_limit,
@@ -41,7 +42,7 @@ TOOLS_MAX_ITEMS = 8
 SAVE_PATH_MAX_LENGTH = 1024
 DIRECTORY_MAX_LENGTH = 1024
 
-# 文件名前缀长度上限对齐文件系统单文件名 255 字节的常见上限。
+# 文件名前缀长度上限按字符计数取 255，量级对齐文件系统单文件名的常见上限。
 CUSTOM_NAME_MAX_LENGTH = 255
 
 # 多图融合参考图最少两张为上游 API 限制。
@@ -196,6 +197,29 @@ class BackgroundMode(str, Enum):
     OPAQUE = "opaque"
 
 
+# 各枚举字段的合法值排序表，导入期一次计算，命中判定与错误文案共用。
+_RESPONSE_FORMAT_ALLOWED = sorted(str(member.value) for member in ResponseFormat)
+_OUTPUT_FORMAT_ALLOWED = sorted(str(member.value) for member in OutputFormat)
+_GENERATION_TOOL_TYPE_ALLOWED = sorted(str(member.value) for member in GenerationToolType)
+_BACKGROUND_MODE_ALLOWED = sorted(str(member.value) for member in BackgroundMode)
+_OPTIMIZE_PROMPT_MODE_ALLOWED = sorted(VALID_OPTIMIZE_MODES)
+
+
+def _enum_normalizer(allowed: list[str], label: str) -> Callable[[object], object]:
+    """按排序表生成 strip 与 lower 归一的 before-validator，非法值以中文文案拒绝。"""
+
+    @field_validator(label, mode="before")
+    def _normalize(value: object) -> object:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized not in allowed:
+                raise ValueError(f"{label} 仅支持 {allowed}")
+            return normalized
+        return value
+
+    return _normalize
+
+
 class OptimizePromptOptions(BaseModel):
     """提示词优化配置模型。
 
@@ -209,27 +233,20 @@ class OptimizePromptOptions(BaseModel):
         description="提示词优化模式：standard 高质量，fast 优先速度，fast 需当前模型支持。",
     )
 
-    @field_validator("mode", mode="before")
-    @classmethod
-    def normalize_mode(cls, value: object) -> object:
-        """strip 与 lower 归一，非法值以中文文案拒绝，合法值由 Literal 入 schema。"""
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized not in ("standard", "fast"):
-                raise ValueError("mode 仅支持 ['fast', 'standard']")
-            return normalized
-        return value
+    normalize_mode = _enum_normalizer(_OPTIMIZE_PROMPT_MODE_ALLOWED, "mode")
 
 
 class GenerationTool(BaseModel):
     """模型工具配置。"""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid")
 
     type: GenerationToolType = Field(
         ...,
         description="工具类型，目前仅支持 web_search。",
     )
+
+    normalize_type = _enum_normalizer(_GENERATION_TOOL_TYPE_ALLOWED, "type")
 
 
 class _PromptAndOptimizeInput(BaseModel):
@@ -315,12 +332,15 @@ class _SequentialImageInput(BaseModel):
 
     @field_validator("image")
     @classmethod
-    def reject_blank_or_oversized_items(cls, value: list[str] | None) -> list[str] | None:
+    def reject_blank_or_oversized_items(
+        cls, value: str | list[str] | None
+    ) -> str | list[str] | None:
         """逐项拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
         client 归一化层后退化为 isError 工具结果。"""
         if value is None:
             return None
-        _reject_blank_or_oversized_image_items(value)
+        items = [value] if isinstance(value, str) else value
+        _reject_blank_or_oversized_image_items(items)
         return value
 
 
@@ -336,6 +356,8 @@ class _LayerDecompositionInput(BaseModel):
         default=None,
         description=BACKGROUND_DESCRIPTION,
     )
+
+    normalize_background = _enum_normalizer(_BACKGROUND_MODE_ALLOWED, "background")
 
 
 class _SizeAndWatermarkInput(BaseModel):
@@ -412,6 +434,9 @@ class _ResponseAndExecutionInput(BaseModel):
         max_length=CUSTOM_NAME_MAX_LENGTH,
         description=CUSTOM_NAME_DESCRIPTION,
     )
+
+    normalize_response_format = _enum_normalizer(_RESPONSE_FORMAT_ALLOWED, "response_format")
+    normalize_output_format = _enum_normalizer(_OUTPUT_FORMAT_ALLOWED, "output_format")
 
     @model_validator(mode="after")
     def validate_parallel_options(self) -> "_ResponseAndExecutionInput":
@@ -673,12 +698,14 @@ class BrowseImagesInput(BaseModel):
     @field_validator("format_filter")
     @classmethod
     def normalize_suffixes(cls, value: list[str] | None) -> list[str] | None:
-        """后缀统一小写并补齐点前缀，None 时返回 None。"""
+        """后缀统一小写并补齐点前缀，空白条目拒绝，None 时返回 None。"""
         if value is None:
             return None
         normalized = []
         for suffix in value:
             cleaned = suffix.strip().lower()
+            if not cleaned:
+                raise ValueError("format_filter 条目不能为空白")
             if not cleaned.startswith("."):
                 cleaned = f".{cleaned}"
             normalized.append(cleaned)
