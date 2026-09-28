@@ -45,38 +45,47 @@
     <main>
       <section id="view-generate" class="view">
         <div class="generate-layout">
-          <form class="panel form-panel" id="generate-form" autocomplete="off">
-            <div class="tool-tabs" id="tool-tabs" role="tablist">
+          <form class="panel" id="generate-form" autocomplete="off">
+            <div
+              class="tool-tabs"
+              id="tool-tabs"
+              role="radiogroup"
+              aria-label="生成工具"
+            >
               <button
                 type="button"
-                role="tab"
-                aria-selected="true"
+                role="radio"
+                aria-checked="true"
                 data-tool="text-to-image"
                 class="active"
+                tabindex="0"
               >
                 文生图
               </button>
               <button
                 type="button"
-                role="tab"
-                aria-selected="false"
+                role="radio"
+                aria-checked="false"
                 data-tool="image-to-image"
+                tabindex="-1"
               >
                 图生图
               </button>
               <button
                 type="button"
-                role="tab"
-                aria-selected="false"
+                role="radio"
+                aria-checked="false"
                 data-tool="multi-image-fusion"
+                tabindex="-1"
               >
                 多图融合
               </button>
               <button
                 type="button"
-                role="tab"
-                aria-selected="false"
+                role="radio"
+                aria-checked="false"
                 data-tool="sequential-generation"
+                tabindex="-1"
               >
                 组图
               </button>
@@ -148,9 +157,7 @@
                 id="custom-size-field"
               >
                 <div class="collapse-inner">
-                  <label class="field-label" for="custom-size"
-                    >自定义宽高</label
-                  >
+                  <label class="field-label" for="size-width">自定义宽高</label>
                   <div class="custom-size-row">
                     <input
                       type="number"
@@ -253,7 +260,7 @@
             </button>
           </form>
 
-          <section class="panel result-panel">
+          <section class="panel">
             <div class="result-status" id="result-status">尚未生成</div>
             <div
               class="result-loading hidden"
@@ -326,7 +333,13 @@
       </section>
     </main>
 
-    <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true">
+    <div
+      class="lightbox hidden"
+      id="lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="图片预览"
+    >
       <div class="lightbox-inner">
         <img id="lightbox-img" class="developing" alt="预览" />
         <div class="lightbox-bar">

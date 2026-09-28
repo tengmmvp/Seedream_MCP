@@ -23,6 +23,7 @@ from _roots_session_fakes import CapabilityDeclaringSession as _CapabilityDeclar
 from _roots_session_fakes import FakeSession as _FakeSession
 from _roots_session_fakes import FailingSession as _FailingSession
 from _roots_session_fakes import HangingSession as _HangingSession
+from _roots_session_fakes import placeholder_root
 
 
 class _DependencyContext:
@@ -42,12 +43,12 @@ class _DependencyContext:
 
 
 def _declaring_session(declared: bool = True) -> _CapabilityDeclaringSession:
-    return _CapabilityDeclaringSession([Path("/workspace")], declared)
+    return _CapabilityDeclaringSession([placeholder_root()], declared)
 
 
 async def test_resolver_uses_multi_round_over_modern_revision_without_back_channel() -> None:
     """2026-07-28 及以后的取回经 InputRequiredResult 多轮形态，不依赖反向通道。"""
-    session = _BackChannelUnavailableSession([Path("/workspace")])
+    session = _BackChannelUnavailableSession([placeholder_root()])
     ctx = _DependencyContext(session, protocol_version="2026-07-28")
 
     result = await _workspace_roots_dependency(cast(Any, ctx))
@@ -73,7 +74,7 @@ async def test_resolver_fetches_directly_when_back_channel_available(tmp_path: P
     calls = session.send_request_calls
     assert len(calls) == 1
     assert isinstance(calls[0]["request"], ListRootsRequest)
-    assert calls[0]["request_read_timeout_seconds"] == 5
+    assert calls[0]["request_read_timeout_seconds"] == io_roots_module._ROOTS_LIST_TIMEOUT_SECONDS
     metadata = calls[0]["metadata"]
     assert metadata is not None
     assert metadata.related_request_id == "req-42"
@@ -84,7 +85,7 @@ async def test_resolver_declines_when_back_channel_unavailable() -> None:
 
     此前该组合下 SDK 抛 NoBackChannelError 序列化为 -32600，五个工具全部不可用。
     """
-    session = _BackChannelUnavailableSession([Path("/workspace")])
+    session = _BackChannelUnavailableSession([placeholder_root()])
 
     result = await _workspace_roots_dependency(cast(Any, _DependencyContext(session)))
 
@@ -121,14 +122,14 @@ async def test_resolver_omits_metadata_when_request_id_unavailable(tmp_path: Pat
 
     call = session.send_request_calls[0]
     assert call["metadata"] is None
-    assert call["request_read_timeout_seconds"] == 5
+    assert call["request_read_timeout_seconds"] == io_roots_module._ROOTS_LIST_TIMEOUT_SECONDS
 
 
 class _SilentSession(_CapabilityDeclaringSession):
     """声明 roots capability 但永不应答 roots/list 的会话替身。"""
 
     def __init__(self) -> None:
-        super().__init__([Path("/workspace")], declared=True)
+        super().__init__([placeholder_root()], declared=True)
         self.can_send_request = True
 
     async def _conclude_send_request(

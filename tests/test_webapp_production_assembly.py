@@ -23,16 +23,21 @@ from seedream_mcp.transport import _build_streamable_app
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.sanitizers import _CONTAINER_REPR_DEPTH_LIMIT
 from seedream_mcp.webapp import _responses
-from seedream_mcp.webapp.constants import STATIC_DIR, STATIC_MIME_ALLOWLIST, STATIC_PAGE_EXTENSIONS
+from seedream_mcp.webapp.constants import (
+    STATIC_DIR,
+    STATIC_MIME_ALLOWLIST,
+    STATIC_PAGE_EXTENSIONS,
+    STATIC_SECURITY_HEADERS,
+)
 from seedream_mcp.webapp.meta import _upload_budget_chars
 from test_package_lazy_import import _run_in_subprocess
 
 
 def test_upload_budget_derivation_floors_at_zero() -> None:
-    """请求体上限不高于 4MiB 时预算推导为 0，0 为下发前端的有效预算值。"""
-    assert _upload_budget_chars(4 * 1024 * 1024) == 0
+    """请求体上限不高于信封余量时预算推导为 0，0 为下发前端的有效预算值。"""
+    assert _upload_budget_chars(3 * 1024 * 1024) == 0
     assert _upload_budget_chars(1024 * 1024) == 0
-    assert _upload_budget_chars(64 * 1024 * 1024) == 45 * 1024 * 1024
+    assert _upload_budget_chars(64 * 1024 * 1024) == 61 * 1024 * 1024
 
 
 async def test_production_app_serves_web_console(
@@ -58,7 +63,7 @@ async def test_production_app_serves_web_console(
     # 数值上限与后端常量同源，上传预算与请求体上限同源，水印默认值与配置同源。
     assert info["fallback_presets"] == ["1K", "1.5K", "2K", "3K", "4K"]
     assert info["unknown_max_reference_images"] == 14
-    assert info["upload_budget_chars"] == 45 * 1024 * 1024
+    assert info["upload_budget_chars"] == 61 * 1024 * 1024
     assert info["max_request_count"] == 10
     assert info["max_images"] == 15
     assert info["default_watermark"] is False
@@ -243,6 +248,8 @@ async def test_production_app_static_not_modified_keeps_bare_304(
     assert first.status_code == 200
     assert refreshed.status_code == 304
     assert "content-type" not in refreshed.headers
+    for name, value in STATIC_SECURITY_HEADERS.items():
+        assert refreshed.headers[name] == value
 
 
 def test_importing_webapp_routes_keeps_global_mimetypes_registry_intact() -> None:

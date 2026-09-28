@@ -16,6 +16,7 @@ import pytest
 from PIL import Image
 
 from seedream_mcp._client_http import (
+    _ERROR_JSON_PARSE_LIMIT,
     _first_error_detail,
     _has_valid_image_items,
     _outcome_error_note,
@@ -283,13 +284,7 @@ async def test_text_to_image_includes_seedream_50_output_format_and_tools(
         )
     )
     captured_request: dict[str, Any] = {}
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
     await client.text_to_image(
         prompt="test",
@@ -314,13 +309,7 @@ async def test_text_to_image_normalizes_seedream_50_alias_before_request(
         )
     )
     captured_request: dict[str, Any] = {}
-
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
     await client.text_to_image(prompt="test", size="2K")
 
@@ -505,9 +494,7 @@ async def _drive_reference_prepare_with_limited_concurrency(
     release = asyncio.Event()
     captured_request: dict[str, Any] = {}
 
-    async def fake_prepare_image_input(
-        image: str, _roots_key: Any = None, _slot: Any = None
-    ) -> str:
+    async def fake_prepare_image_input(image: str, _cache_key: Any, _slot: Any) -> str:
         nonlocal active_count, max_active_count, arrival_count
         active_count += 1
         max_active_count = max(max_active_count, active_count)
@@ -521,15 +508,10 @@ async def _drive_reference_prepare_with_limited_concurrency(
             active_count -= 1
         return f"prepared:{image}"
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
     monkeypatch.setattr(
         client._image_preparer, "_prepare_image_input_locked", fake_prepare_image_input
     )
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
     await invoke(client)
     return max_active_count, captured_request, client._image_preparer._prepare_concurrency
 
@@ -569,13 +551,8 @@ async def test_multi_image_fusion_accepts_up_to_14_images(
     async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
         return [f"prepared:{item}" for item in images]
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
     monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
     await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
 
@@ -591,6 +568,14 @@ async def test_multi_image_fusion_rejects_more_than_14_images() -> None:
 
     with pytest.raises(SeedreamValidationError, match="image 数量不能超过 14"):
         await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
+
+
+async def test_multi_image_fusion_rejects_fewer_than_2_images() -> None:
+    """少于 2 张参考图在请求前拒绝。"""
+    client = SeedreamClient(_build_config())
+
+    with pytest.raises(SeedreamValidationError, match="image 数量不能少于 2"):
+        await client.multi_image_fusion(prompt="test", image=["only-one.png"], size="2K")
 
 
 async def test_sequential_generation_prepares_reference_images_with_limited_concurrency(
@@ -625,16 +610,11 @@ async def test_sequential_generation_without_max_images_uses_reference_aware_def
     client = SeedreamClient(_build_config())
     captured_request: dict[str, Any] = {}
 
-    async def fake_prepare_image_input(image: str, _roots_key: Any = None) -> str:
+    async def fake_prepare_image_input(image: str) -> str:
         return f"prepared:{image}"
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
     monkeypatch.setattr(client, "_prepare_image_input", fake_prepare_image_input)
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
     await client.sequential_generation(
         prompt="test",
@@ -974,11 +954,13 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
 
 
 async def _invoke_multi_image_fusion(client: SeedreamClient, image: Sequence[str]) -> None:
-    await client.multi_image_fusion(prompt="test", image=image, size="2K")
+    await client.multi_image_fusion(prompt="test", image=image, size="2K")  # type: ignore[arg-type]
 
 
 async def _invoke_sequential_generation(client: SeedreamClient, image: Sequence[str]) -> None:
-    await client.sequential_generation(prompt="test", image=image, size="2K")
+    await client.sequential_generation(
+        prompt="test", image=image, size="2K"  # type: ignore[arg-type]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1129,31 +1111,26 @@ async def test_text_to_image_rejects_stream_for_seedream_50_pro() -> None:
 
 
 @pytest.mark.parametrize(
-    ("build_config", "label"),
-    [(_build_pro_config, "pro"), (_build_config, "default")],
+    "build_config",
+    [_build_pro_config, _build_config],
+    ids=["pro", "default"],
 )
 async def test_multi_image_fusion_omits_sequential_image_generation(
-    monkeypatch: pytest.MonkeyPatch, build_config: Any, label: str
+    monkeypatch: pytest.MonkeyPatch, build_config: Any
 ) -> None:
     """多图融合不传 sequential_image_generation，依赖服务端缺省 disabled。
 
     官方口径该参数仅部分模型支持，全模型恒传会向能力表外模型发参；Pro 与默认
     模型两条分支同守护。
     """
-    del label
     client = SeedreamClient(build_config())
     captured_request: dict[str, Any] = {}
 
     async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
         return [f"prepared:{item}" for item in images]
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
     monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
     await client.multi_image_fusion(prompt="test", image=["image-1", "image-2"], size="2K")
 
@@ -1181,13 +1158,8 @@ async def test_multi_image_fusion_accepts_up_to_10_images_for_pro(
     async def fake_prepare_images_in_parallel(images: list[str]) -> list[str]:
         return [f"prepared:{item}" for item in images]
 
-    async def fake_call_api(endpoint: str, request_data: dict[str, Any]) -> dict[str, Any]:
-        del endpoint
-        captured_request.update(request_data)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
-
     monkeypatch.setattr(client, "_prepare_images_in_parallel", fake_prepare_images_in_parallel)
-    monkeypatch.setattr(client, "_call_api", fake_call_api)
+    monkeypatch.setattr(client, "_call_api", _capture_call_api(captured_request))
 
     await client.multi_image_fusion(prompt="test", image=input_images, size="2K")
 
@@ -1326,6 +1298,33 @@ def test_build_api_result_non_dict_top_level_error_keeps_success(error_value: An
     assert "error" not in result
 
 
+def test_build_api_result_passes_through_tools_on_success() -> None:
+    """非 SSE 路径 200 响应的顶层 tools 键透传进结果，与 SSE completed 事件同口径。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {
+            "status": "completed",
+            "data": [{"url": "http://x/1.png"}],
+            "tools": [{"type": "web_search"}],
+        }
+    )
+
+    assert result["success"] is True
+    assert result["tools"] == [{"type": "web_search"}]
+
+
+def test_build_api_result_passes_through_tools_on_request_failure() -> None:
+    """请求级失败分支同样透传顶层 tools 键，字段完整性不因失败丢失。"""
+    client = SeedreamClient(_build_config())
+    result = client._build_api_result(
+        {"error": {"code": "E", "message": "boom"}, "tools": [{"type": "web_search"}]}
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["tools"] == [{"type": "web_search"}]
+
+
 async def test_stream_request_non_sse_json_error_body_marks_failure() -> None:
     """stream=true 时上游以 200 加非 SSE JSON 错误体响应：结果为失败并透传错误码。
 
@@ -1420,7 +1419,9 @@ async def test_stream_request_non_dict_json_payload_raises_format_error(
 async def test_error_data_from_body_oversized_body_degrades_to_message() -> None:
     """超过 _ERROR_JSON_PARSE_LIMIT 的错误体不做完整 dict 解析，降级为 message 形态。"""
     oversized = bytearray(
-        json.dumps({"error": {"code": "E", "message": "x" * (70 * 1024)}}).encode("utf-8")
+        json.dumps({"error": {"code": "E", "message": "x" * (_ERROR_JSON_PARSE_LIMIT + 1)}}).encode(
+            "utf-8"
+        )
     )
 
     data = await SeedreamClient._error_data_from_body(oversized)

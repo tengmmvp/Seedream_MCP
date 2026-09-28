@@ -22,14 +22,14 @@ from starlette.requests import Request
 import seedream_mcp.resources as resources_module
 import seedream_mcp.utils.core.errors as errors_module
 from _cpu_offload_spy import CpuOffloadSpy
-from _web_fixtures import build_web_app, web_asgi_client, write_workspace_config
-from seedream_mcp.config import (
-    LIFESPAN_KEY_CLIENT,
-    LIFESPAN_KEY_DOWNLOAD_MANAGER,
-    SeedreamConfig,
-    set_active_config,
+from _web_fixtures import (
+    build_web_app,
+    make_images_root_unresolvable,
+    web_asgi_client,
+    write_workspace_config,
 )
-from seedream_mcp.utils.core.errors import SeedreamValidationError
+from seedream_mcp.config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
+from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.webapp import _responses
 from seedream_mcp.webapp import generate as generate_module
@@ -586,6 +586,29 @@ async def test_generate_runner_validation_error_echoes_message(
     assert str(images_root) in description
 
 
+async def test_generate_runner_config_error_returns_503(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """runner 抛 SeedreamConfigError 映射 503 config_error，携带原因。"""
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(error=SeedreamConfigError("数据根目录无法解析")),
+    )
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["error"] == "config_error"
+    assert "数据根目录无法解析" in payload["error_description"]
+
+
 async def test_generate_runner_unexpected_error_returns_500(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -692,15 +715,7 @@ async def test_generate_rejects_when_images_root_unresolvable(
     reset_http_app_state: None,
 ) -> None:
     """图片目录不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
-    import seedream_mcp.utils.io.io_path as io_path_module
-
-    def _unresolvable(configured_dir: str) -> Any:
-        del configured_dir
-        raise OSError("simulated unresolvable path")
-
-    write_workspace_config(tmp_path)
-    set_active_config(SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
+    make_images_root_unresolvable(monkeypatch, tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})

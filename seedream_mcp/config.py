@@ -89,6 +89,40 @@ _B64_WORST_CASE_NUMERATOR = 4
 _SSE_EVENT_ENVELOPE_MARGIN = 4 * 1024
 
 
+def _ipv6_host_literal_forms(literal: str) -> tuple[tuple[str, ...], str] | None:
+    """合法 IPv6 字面量返回可匹配真实 Host/Origin 头的形态元组与建议写法，非法返回 None。
+
+    真实头只携带压缩规范形，IPv4 映射地址的客户端另发 dotted 形；compressed 对
+    映射地址的输出随 Python 版本在 dotted 与 hex 展开形间翻转，两形均并入。
+    """
+    try:
+        address = ipaddress.IPv6Address(literal)
+    except ValueError:
+        return None
+    ipv4_mapped = address.ipv4_mapped
+    accepted = [address.compressed]
+    suggested = address.compressed
+    if ipv4_mapped is not None:
+        accepted.append(f"::ffff:{ipv4_mapped}")
+        mapped_int = int(ipv4_mapped)
+        accepted.append(f"::ffff:{mapped_int >> 16:x}:{mapped_int & 0xFFFF:x}")
+        suggested = f"::ffff:{ipv4_mapped}"
+    return tuple(accepted), suggested
+
+
+def _validate_ipv6_host_literal(literal: str, entry: str, label: str, env_key: str) -> None:
+    """非法或既非压缩规范形也非 IPv4 映射 dotted 形的 IPv6 字面量抛配置错误。"""
+    forms = _ipv6_host_literal_forms(literal)
+    if forms is None:
+        raise SeedreamConfigError(f"{label}须为合法 IPv6 字面量: {entry}{_env_var_suffix(env_key)}")
+    accepted_literals, suggested_literal = forms
+    if literal not in accepted_literals:
+        raise SeedreamConfigError(
+            f"{label}须为压缩规范形或 IPv4 映射 dotted 形，"
+            f"应写 [{suggested_literal}] 而非 {entry}{_env_var_suffix(env_key)}"
+        )
+
+
 @dataclass(frozen=True)
 class SeedreamConfig:
     """Seedream MCP 工具配置。
@@ -133,8 +167,9 @@ class SeedreamConfig:
         image_prepare_concurrency: 参考图预处理并发上限。
         prepare_cache_max: 参考图预处理结果 LRU 缓存的条目数上限。
         prepare_cache_max_bytes: 参考图预处理结果缓存的累计字节上限。
-        preview_enabled: 是否在生成工具结果中附带已保存图片的缩略图预览，长边不超过
-            768 像素；关闭后仅返回文本与 structuredContent。
+        preview_enabled: 是否在生成工具结果中附带已保存图片的缩略图预览，默认关闭；
+            客户端能将 ImageContent 送达模型视觉层时开启，长边不超过 768 像素；
+            依赖自动保存，关闭或保存失败时仅返回文本与 structuredContent。
         workspace_root: 无 MCP Roots 时本地文件访问边界的回退目录。
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌；配置时长度不得
             少于 HTTP_AUTH_TOKEN_MIN_LENGTH 字符。
@@ -197,7 +232,7 @@ class SeedreamConfig:
 
     prepare_cache_max_bytes: int = _env_field(256 * 1024 * 1024, "SEEDREAM_PREPARE_CACHE_MAX_BYTES")
 
-    preview_enabled: bool = _env_field(True, "SEEDREAM_PREVIEW_ENABLED")
+    preview_enabled: bool = _env_field(False, "SEEDREAM_PREVIEW_ENABLED")
 
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
@@ -267,6 +302,15 @@ class SeedreamConfig:
         # netloc 缺失的畸形 URL 在构造期拒绝，避免运行期才以网络错误档失败。
         if not parsed_base_url.netloc.strip():
             raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
+        # 非数字或越界端口在 .port 求值即抛 ValueError，归拢到配置构建期拒绝。
+        try:
+            base_url_port = parsed_base_url.port
+        except ValueError as exc:
+            raise SeedreamConfigError(
+                f"base_url端口无效: {exc}{_env_var_suffix('base_url')}"
+            ) from exc
+        if base_url_port == 0:
+            raise SeedreamConfigError(f"base_url端口不得为 0{_env_var_suffix('base_url')}")
         if parsed_base_url.query or parsed_base_url.fragment:
             raise SeedreamConfigError(
                 f"base_url不能包含查询参数或片段{_env_var_suffix('base_url')}"
@@ -301,8 +345,10 @@ class SeedreamConfig:
             )
 
     def _validate_default_size(self) -> None:
-        """校验 default_size 非空并按模型能力标准化。"""
-        if not isinstance(self.default_size, str) or not self.default_size.strip():
+        """校验 default_size 为非空字符串并按模型能力标准化。"""
+        if not isinstance(self.default_size, str):
+            raise SeedreamConfigError(f"default_size必须为字符串{_env_var_suffix('default_size')}")
+        if not self.default_size.strip():
             raise SeedreamConfigError(f"default_size不能为空{_env_var_suffix('default_size')}")
 
         normalized_default_size = self.default_size.strip()
@@ -522,34 +568,12 @@ class SeedreamConfig:
                         f"http_allowed_hosts 方括号条目不得携带 zone-id: {entry}"
                         f"{_env_var_suffix('http_allowed_hosts')}"
                     )
-                try:
-                    address = ipaddress.IPv6Address(literal)
-                except ValueError as exc:
-                    raise SeedreamConfigError(
-                        f"http_allowed_hosts 方括号条目须为合法 IPv6 字面量: {entry}"
-                        f"{_env_var_suffix('http_allowed_hosts')}"
-                    ) from exc
-                # 真实 Host 头只携带压缩规范形；IPv4 映射地址客户端发送 dotted 形
-                # （Host: [::ffff:192.0.2.1]:port），两种形态均放行。
-                ipv4_mapped = address.ipv4_mapped
-                accepted = [address.compressed]
-                if ipv4_mapped is not None:
-                    accepted.append(f"::ffff:{ipv4_mapped}")
-                    # compressed 对 v4 映射地址的输出随 Python 版本在 dotted 与
-                    # hex 展开形间翻转，hex 形显式并入，放行集与版本无关。
-                    mapped_int = int(ipv4_mapped)
-                    accepted.append(f"::ffff:{mapped_int >> 16:x}:{mapped_int & 0xFFFF:x}")
-                if literal not in accepted:
-                    suggested = (
-                        f"[::ffff:{ipv4_mapped}]"
-                        if ipv4_mapped is not None
-                        else f"[{address.compressed}]"
-                    )
-                    raise SeedreamConfigError(
-                        f"http_allowed_hosts 方括号条目须为压缩规范形或 IPv4 映射 dotted 形，"
-                        f"应写 {suggested} 而非 {entry}"
-                        f"{_env_var_suffix('http_allowed_hosts')}"
-                    )
+                _validate_ipv6_host_literal(
+                    literal,
+                    entry,
+                    "http_allowed_hosts 方括号条目",
+                    "http_allowed_hosts",
+                )
             if port_part == "":
                 bare_hosts.add(host_part)
             elif port_part == ":*":
@@ -572,8 +596,9 @@ class SeedreamConfig:
 
         Raises:
             SeedreamConfigError: 条目缺 scheme、含路径、URL 形态无效、含
-                query/fragment/userinfo（含空 userinfo）、主机为空或带尾点、含通配、
-                含大写、含非 ASCII 字符或端口非数字。
+                query/fragment/userinfo（含空 userinfo）、主机为空、带尾点、含
+                空标签、含百分号编码或 zone-id、非压缩规范形且非 IPv4 映射
+                dotted 形的 IPv6 主机、含通配、含大写、含非 ASCII 字符或端口非数字。
         """
         origins = self.http_allowed_origins
         if origins is None:
@@ -590,8 +615,9 @@ class SeedreamConfig:
                     f"http_allowed_origins 条目不得包含路径: {entry}"
                     f"{_env_var_suffix('http_allowed_origins')}"
                 )
-            # 匹配为字面精确比较，死配置构建期拒绝：空主机、通配、query、
-            # fragment、userinfo 与尾点主机都永不匹配真实 Origin 头。
+            # 匹配为字面精确比较，死配置构建期拒绝：空主机、空标签、百分号编码、
+            # 通配、query、fragment、userinfo、尾点与非压缩 IPv6 主机都永不匹配
+            # 真实 Origin 头。
             try:
                 parsed = urlparse(entry)
             except ValueError as exc:
@@ -611,6 +637,26 @@ class SeedreamConfig:
                 raise SeedreamConfigError(
                     f"http_allowed_origins 条目主机为空或带尾点: {entry}"
                     f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 前导点与连续点构成空标签主机，不是任何 Origin 头的合法序列化形态。
+            if hostname.startswith(".") or ".." in hostname:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目主机不得包含前导点或连续点: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 浏览器把百分号编码主机解码后发送，含 % 的条目永不匹配真实 Origin 头。
+            if "%" in hostname:
+                raise SeedreamConfigError(
+                    f"http_allowed_origins 条目主机不得包含百分号编码或 zone-id: {entry}"
+                    f"{_env_var_suffix('http_allowed_origins')}"
+                )
+            # 方括号 IPv6 主机与 hosts 侧同口径，浏览器 Origin 序列化恒为压缩规范形。
+            if ":" in hostname:
+                _validate_ipv6_host_literal(
+                    hostname,
+                    entry,
+                    "http_allowed_origins 条目主机",
+                    "http_allowed_origins",
                 )
             # 反斜杠不是任何 Origin 头的合法字符。
             if "\\" in entry:

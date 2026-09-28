@@ -260,6 +260,22 @@ def test_rebind_request_state_security_survives_missing_public_attribute(
     assert "退化为进程临时密钥" in capsys.readouterr().err
 
 
+def test_rebind_failure_silent_when_import_time_ring_matches_source(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """密钥环与导入期固化一致时重绑失败不输出 stderr 告警：单例已持正确密钥环。
+
+    系统环境变量来源的密钥环在导入期已进入单例，重绑失败不改变解封能力，
+    告警会误导部署者以为已退化。
+    """
+    monkeypatch.setattr(resources_module, "_IMPORT_TIME_REQUEST_STATE_KEYS", (b"\x01" * 32,))
+    monkeypatch.setattr(resources_module.mcp._lowlevel_server, "middleware", [], raising=False)
+
+    assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
+
+    assert capsys.readouterr().err == ""
+
+
 def test_conftest_session_manager_private_path_still_exists() -> None:
     """conftest 会话隔离探测的私有路径存在，SDK 升级改名时先转红而非静默 no-op。"""
     lowlevel_server = getattr(resources_module.mcp, "_lowlevel_server", None)

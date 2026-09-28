@@ -15,11 +15,15 @@ from _web_fixtures import (
     asgi_start_headers,
     build_web_app,
     drive_asgi_messages,
+    make_images_root_unresolvable,
     make_png_bytes,
     web_asgi_client,
     web_get,
     write_workspace_config,
 )
+
+# 文件端点参数化清单：路径校验矩阵对缩略图与原图对称覆盖。
+_FILE_ENDPOINTS = ("thumbnail", "image")
 
 
 @pytest.fixture
@@ -162,6 +166,7 @@ async def test_file_endpoints_missing_file_returns_404(web_app_with_image: Any) 
     assert missing_image.status_code == 404
 
 
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
 @pytest.mark.parametrize(
     "path",
     [
@@ -172,24 +177,29 @@ async def test_file_endpoints_missing_file_returns_404(web_app_with_image: Any) 
         "\\\\server\\share\\a.png",
     ],
 )
-async def test_file_endpoints_reject_traversal(web_app_with_image: Any, path: str) -> None:
+async def test_file_endpoints_reject_traversal(
+    web_app_with_image: Any, endpoint: str, path: str
+) -> None:
     """绝对路径与上跳段一律 400，不触达文件系统。"""
     from urllib.parse import quote
 
     encoded = quote(path, safe="")
-    response = await web_get(web_app_with_image, f"/web/api/thumbnail?path={encoded}")
+    response = await web_get(web_app_with_image, f"/web/api/{endpoint}?path={encoded}")
 
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_path"
 
 
-async def test_file_endpoints_reject_colon_ads_paths(web_app_with_image: Any) -> None:
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
+async def test_file_endpoints_reject_colon_ads_paths(
+    web_app_with_image: Any, endpoint: str
+) -> None:
     """路径任意位置含冒号一律 400，覆盖 Windows 盘符与 ADS 数据流形态。"""
     from urllib.parse import quote
 
     for path in ("sub\\file.png:.jpg", "file.png:$DATA", "2026-08-20/a:p/b.png"):
         encoded = quote(path, safe="")
-        response = await web_get(web_app_with_image, f"/web/api/image?path={encoded}")
+        response = await web_get(web_app_with_image, f"/web/api/{endpoint}?path={encoded}")
 
         assert response.status_code == 400
         assert response.json()["error"] == "invalid_path"
@@ -224,7 +234,6 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
 ) -> None:
     """并发缩略图请求的解码并发峰值不超过 CPU_OFFLOAD_DECODE_SLOTS。"""
     import asyncio
-    import time
 
     from seedream_mcp.utils.core.executors import CPU_OFFLOAD_DECODE_SLOTS
     from seedream_mcp.utils.images import image_thumbnail as image_thumbnail_module
@@ -236,6 +245,8 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
     active = 0
     peak = 0
     calls = 0
+    # barrier 迫使两路解码物理重叠后才放行，串行执行会在此超时失败而非侥幸通过。
+    pair_gate = threading.Barrier(2, timeout=10)
 
     def _fake_decode(image_path: Path) -> bytes | None:
         del image_path
@@ -243,7 +254,7 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
         calls += 1
         active += 1
         peak = max(peak, active)
-        time.sleep(0.05)
+        pair_gate.wait()
         active -= 1
         return b"\xff\xd8\xff"
 
@@ -257,24 +268,32 @@ async def test_thumbnail_decode_concurrency_capped_by_semaphore(
 
     assert all(response.status_code == 200 for response in responses)
     assert calls == len(paths)
-    # 上界验证限流生效，下界验证并发真实发生，串行执行不会触到信号量语义。
+    # 上界验证限流生效，下界由 barrier 的成对放行保证。
     assert 2 <= peak <= CPU_OFFLOAD_DECODE_SLOTS
 
 
-async def test_file_endpoints_reject_non_image_extension(web_app_with_image: Any) -> None:
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
+async def test_file_endpoints_reject_non_image_extension(
+    web_app_with_image: Any, endpoint: str
+) -> None:
     """非图片扩展名在白名单阶段拒绝。"""
     response = await web_get(
-        web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.txt"
+        web_app_with_image, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.txt"
     )
 
     assert response.status_code == 400
+    assert response.json()["error"] == "invalid_path"
 
 
-async def test_file_endpoints_empty_path_returns_400(web_app_with_image: Any) -> None:
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
+async def test_file_endpoints_empty_path_returns_400(
+    web_app_with_image: Any, endpoint: str
+) -> None:
     """空路径参数直接拒绝。"""
-    response = await web_get(web_app_with_image, "/web/api/thumbnail")
+    response = await web_get(web_app_with_image, f"/web/api/{endpoint}")
 
     assert response.status_code == 400
+    assert response.json()["error"] == "invalid_path"
 
 
 async def test_thumbnail_build_failure_returns_422(
@@ -456,16 +475,19 @@ async def test_image_endpoint_non_regular_handle_returns_404(
     web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """句柄打开成功但非常规文件（字符设备等）时按缺失口径归 404。"""
-    import os
-    from typing import IO
+    from seedream_mcp.webapp import files as files_module
 
-    import seedream_mcp.utils.io.io_file as io_file_module
+    real_resolve = files_module.resolve_web_relative_path
 
-    def _open_device(path: object, **_kwargs: object) -> IO[bytes]:
-        del path
-        return os.fdopen(os.open(os.devnull, os.O_RDONLY), "rb")
+    def _resolve_then_replace_with_device(rel: str, images_root: Path) -> Path:
+        # 存在性检查通过后把源图换为字符设备路径，注入打开成功但非常规的句柄。
+        resolved = real_resolve(rel, images_root)
+        resolved.unlink()
+        return Path(os.devnull)
 
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", _open_device)
+    monkeypatch.setattr(
+        files_module, "resolve_web_relative_path", _resolve_then_replace_with_device
+    )
 
     response = await web_get(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
@@ -476,7 +498,7 @@ async def test_image_endpoint_non_regular_handle_returns_404(
     assert payload["error"] == "not_found"
 
 
-@pytest.mark.parametrize("endpoint", ["thumbnail", "image"])
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
 async def test_file_endpoints_images_root_unavailable_returns_400(
     endpoint: str,
     tmp_path: Path,
@@ -485,15 +507,7 @@ async def test_file_endpoints_images_root_unavailable_returns_400(
     reset_http_app_state: None,
 ) -> None:
     """图片目录不可解析时缩略图与原图端点均回 400 images_root_unavailable。"""
-    import seedream_mcp.utils.io.io_path as io_path_module
-    from seedream_mcp.config import SeedreamConfig, set_active_config
-
-    def _unresolvable(configured_dir: str) -> Path:
-        del configured_dir
-        raise OSError("simulated unresolvable path")
-
-    set_active_config(SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
+    make_images_root_unresolvable(monkeypatch, tmp_path)
     app = build_web_app()
 
     response = await web_get(app, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/a.png")
@@ -533,7 +547,11 @@ async def test_image_head_returns_headers_without_reading_body(
     spy = _SpyHandle(
         open(tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png", "rb")
     )
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: spy)
+    monkeypatch.setattr(
+        io_file_module,
+        "_open_no_follow_read_with_stat",
+        lambda _path, **_kwargs: (spy, os.fstat(spy.fileno())),
+    )
 
     async with web_asgi_client(web_app_with_image) as client:
         response = await client.head("/web/api/image?path=2026-08-20/text_to_image/a.png")
@@ -741,7 +759,11 @@ async def test_image_stream_read_dispatch_uses_large_chunks(
     chunk = _NoFollowFileResponse.chunk_size
     image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + os.urandom(chunk * 2 + 12345))
     spy = _SpyHandle(open(image_path, "rb"))
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: spy)
+    monkeypatch.setattr(
+        io_file_module,
+        "_open_no_follow_read_with_stat",
+        lambda _path, **_kwargs: (spy, os.fstat(spy.fileno())),
+    )
     _patch_stream_source(monkeypatch, spy)
 
     response = await web_get(
@@ -801,7 +823,11 @@ async def test_image_range_error_responses_close_handle(
     spy = _SpyHandle(
         open(tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png", "rb")
     )
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: spy)
+    monkeypatch.setattr(
+        io_file_module,
+        "_open_no_follow_read_with_stat",
+        lambda _path, **_kwargs: (spy, os.fstat(spy.fileno())),
+    )
 
     async with web_asgi_client(web_app_with_image) as client:
         response = await client.get(
@@ -857,7 +883,7 @@ async def test_image_open_denied_returns_500(
         del path
         raise PermissionError("simulated EACCES")
 
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", _denied)
+    monkeypatch.setattr(io_file_module, "_open_no_follow_read_with_stat", _denied)
 
     response = await web_get(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
@@ -880,7 +906,7 @@ async def test_image_open_symlink_rejection_returns_404(
     def _rejected(path: object, **_kwargs: object) -> IO[bytes]:
         raise SymlinkRejectedError(errno.ELOOP, "拒绝读取符号链接", str(path))
 
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", _rejected)
+    monkeypatch.setattr(io_file_module, "_open_no_follow_read_with_stat", _rejected)
 
     response = await web_get(
         web_app_with_image, "/web/api/image?path=2026-08-20/text_to_image/a.png"
@@ -890,21 +916,30 @@ async def test_image_open_symlink_rejection_returns_404(
     assert response.json()["error"] == "not_found"
 
 
-async def test_image_fstat_failure_closes_handle_and_returns_500(
-    web_app_with_image: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_image_fstat_failure_closes_fd_and_returns_500(
+    web_app_with_image: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """fstat 抛错时句柄先行关闭再上抛，响应按 500 分档不谎报缺失。"""
-    import seedream_mcp.utils.io.io_file as io_file_module
+    """fstat 抛错时 fd 先关闭再上抛，响应按 500 分档不谎报缺失。"""
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = os.open
+    real_close = os.close
 
-    spy = _SpyHandle(
-        open(tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png", "rb")
-    )
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: spy)
+    def _recording_open(name: str, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(name, flags, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def _recording_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
 
     def _failing_fstat(fd: int) -> os.stat_result:
         del fd
         raise OSError("simulated ESTALE")
 
+    monkeypatch.setattr(os, "open", _recording_open)
+    monkeypatch.setattr(os, "close", _recording_close)
     monkeypatch.setattr(os, "fstat", _failing_fstat)
 
     response = await web_get(
@@ -913,7 +948,8 @@ async def test_image_fstat_failure_closes_handle_and_returns_500(
 
     assert response.status_code == 500
     assert response.json()["error"] == "image_open_failed"
-    assert spy.closed
+    assert opened
+    assert set(opened) <= set(closed)
 
 
 def _image_scope(
@@ -1160,7 +1196,11 @@ async def test_web_image_client_disconnect_stream_completes_and_closes_handle(
 
     image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
     spy = _SpyHandle(open(image_path, "rb"))
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: spy)
+    monkeypatch.setattr(
+        io_file_module,
+        "_open_no_follow_read_with_stat",
+        lambda _path, **_kwargs: (spy, os.fstat(spy.fileno())),
+    )
     _patch_stream_source(monkeypatch, spy)
 
     scope = _image_scope(
@@ -1199,7 +1239,11 @@ async def test_web_image_send_failure_surfaces_and_closes_handle(
 
     image_path = tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png"
     spy = _SpyHandle(open(image_path, "rb"))
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: spy)
+    monkeypatch.setattr(
+        io_file_module,
+        "_open_no_follow_read_with_stat",
+        lambda _path, **_kwargs: (spy, os.fstat(spy.fileno())),
+    )
     _patch_stream_source(monkeypatch, spy)
 
     scope = _image_scope(
@@ -1235,7 +1279,11 @@ async def test_image_head_close_failure_after_headers_keeps_response(
     spy = _CloseFailureSpyHandle(
         open(tmp_path / ".seedream" / "images" / "2026-08-20" / "text_to_image" / "a.png", "rb")
     )
-    monkeypatch.setattr(io_file_module, "open_no_follow_read", lambda _path, **_kwargs: spy)
+    monkeypatch.setattr(
+        io_file_module,
+        "_open_no_follow_read_with_stat",
+        lambda _path, **_kwargs: (spy, os.fstat(spy.fileno())),
+    )
 
     warnings: list[str] = []
     with capture_loguru_messages(warnings):

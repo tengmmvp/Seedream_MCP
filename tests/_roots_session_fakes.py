@@ -1,14 +1,10 @@
-"""roots 会话替身共享定义。
-
-test_workspace_roots_scope 与 test_server_roots_dependency 共用，避免测试
-模块间横向 import。
-"""
+"""roots 会话与回调替身共享定义，各 roots 测试模块共用避免横向 import。"""
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from mcp.types import ListRootsResult, Root
 from pydantic import FileUrl
@@ -17,8 +13,26 @@ from pydantic import FileUrl
 def roots_result(roots: list[Path]) -> ListRootsResult:
     """构造工具链 resolver 注入形态的 roots 结果。"""
     return ListRootsResult(
-        roots=[Root(uri=cast(FileUrl, root.as_uri()), name=root.name) for root in roots]
+        roots=[Root(uri=FileUrl(root.as_uri()), name=root.name) for root in roots]
     )
+
+
+def placeholder_root() -> Path:
+    """绝对形态的占位根；POSIX 字面量在 Windows 无盘符，as_uri 会抛 ValueError。"""
+    return Path.cwd() / "workspace"
+
+
+class RootsListCallback:
+    """按固定根目录应答 roots/list 的客户端回调替身，记录调用次数。"""
+
+    def __init__(self, roots: list[Path]) -> None:
+        self._result = roots_result(roots)
+        self.calls = 0
+
+    async def __call__(self, context: Any) -> ListRootsResult:
+        self.calls += 1
+        del context
+        return self._result
 
 
 class FakeSession:
@@ -111,7 +125,7 @@ class FailingSession(CapabilityDeclaringSession):
     """声明 roots 且反向通道可用的会话替身：send_request 记录参数后抛 RuntimeError。"""
 
     def __init__(self) -> None:
-        super().__init__([Path("/workspace")], declared=True)
+        super().__init__([placeholder_root()], declared=True)
         self.can_send_request = True
 
     async def _conclude_send_request(
@@ -125,7 +139,7 @@ class HangingSession(CapabilityDeclaringSession):
     """声明 roots 且反向通道可用的会话替身：send_request 永不完成，出站写被流控暂停，读超时无从起算。"""
 
     def __init__(self) -> None:
-        super().__init__([Path("/workspace")], declared=True)
+        super().__init__([placeholder_root()], declared=True)
         self.can_send_request = True
 
     async def _conclude_send_request(

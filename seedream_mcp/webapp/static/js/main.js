@@ -10,6 +10,7 @@ import {
   hideTokenGate,
   setActiveTool,
   state,
+  UNAUTHORIZED_MESSAGE,
   writeStoredToken,
 } from "./api.js";
 import {
@@ -41,7 +42,7 @@ async function bootstrapAfterAuth() {
 }
 
 /** 按 hash 切换生成台与图库视图，进入图库时触发刷新。 */
-export function applyRoute() {
+function applyRoute() {
   const view = currentView();
   $("view-generate").classList.toggle("hidden", view !== "generate");
   $("view-gallery").classList.toggle("hidden", view !== "gallery");
@@ -58,7 +59,7 @@ function bindEvents() {
     setActiveTool(button.dataset.tool);
     applyToolUI();
   });
-  // tablist 方向键导航：左右键在未禁用的工具间移动。
+  // 单选组方向键导航：左右键在未禁用的工具间移动。
   $("tool-tabs").addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     const buttons = [...document.querySelectorAll("#tool-tabs button")];
@@ -95,7 +96,10 @@ function bindEvents() {
   });
   $("size").addEventListener("change", syncCustomSizeField);
   // 图层拆分勾选态切换尺寸选项集：拆分仅档位与 auto，取消勾选恢复进入前选择。
-  $("layer-decomposition").addEventListener("change", syncLayerDecompositionSize);
+  $("layer-decomposition").addEventListener(
+    "change",
+    syncLayerDecompositionSize,
+  );
   $("generate-form").addEventListener("submit", submitGenerate);
 
   $("gallery-refresh").addEventListener("click", () => {
@@ -125,10 +129,25 @@ function bindEvents() {
     if (event.target === $("lightbox")) closeLightbox();
   });
   $("lightbox-use").addEventListener("click", useLightboxAsReference);
-  // 灯箱可见时 Escape 等价点击关闭。
+  // 灯箱可见时 Escape 关闭，Tab 循环留在灯箱内。
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !$("lightbox").classList.contains("hidden")) {
+    const lightbox = $("lightbox");
+    if (lightbox.classList.contains("hidden")) return;
+    if (event.key === "Escape") {
       closeLightbox();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const first = $("lightbox-use");
+    const last = $("lightbox-close");
+    const active = document.activeElement;
+    // Tab 环绕：焦点在两端之外按方向拉回，Shift+Tab 于首端或 Tab 于末端折向对端。
+    if (
+      (active !== first && active !== last) ||
+      (event.shiftKey ? active === first : active === last)
+    ) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
     }
   });
 
@@ -142,7 +161,7 @@ function bindEvents() {
       $("token-error").classList.add("hidden");
     } catch (error) {
       $("token-error").classList.remove("hidden");
-      if (error.message === "unauthorized") {
+      if (error.message === UNAUTHORIZED_MESSAGE) {
         $("token-error").textContent = "令牌无效，请重试。";
         state.token = "";
         clearStoredToken();
@@ -166,7 +185,7 @@ async function main() {
   try {
     await bootstrapAfterAuth();
   } catch (error) {
-    if (error.message !== "unauthorized") {
+    if (error.message !== UNAUTHORIZED_MESSAGE) {
       $("server-meta").textContent = "配置加载失败，请刷新页面重试";
     }
   }

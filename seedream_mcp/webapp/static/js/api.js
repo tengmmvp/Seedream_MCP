@@ -36,6 +36,12 @@ export function clearStoredToken() {
   }
 }
 
+/** 工具标识，与后端生成端点 slug 及页面 data-tool 标记一一对应。 */
+export const TOOL_TEXT_TO_IMAGE = "text-to-image";
+export const TOOL_IMAGE_TO_IMAGE = "image-to-image";
+export const TOOL_MULTI_IMAGE_FUSION = "multi-image-fusion";
+export const TOOL_SEQUENTIAL_GENERATION = "sequential-generation";
+
 /**
  * 前端唯一的全局可变状态；令牌经 sessionStorage 暂存于当前浏览器会话，不跨
  * 会话落盘持久化，其余字段随页面会话存亡。
@@ -55,7 +61,7 @@ export function clearStoredToken() {
 export const state = {
   token: readStoredToken() || "",
   configInfo: null,
-  tool: "text-to-image",
+  tool: TOOL_TEXT_TO_IMAGE,
   refs: [],
   parkedRefs: [],
   sizePreLayer: null,
@@ -83,12 +89,14 @@ export function currentModel() {
   );
 }
 
-/** 切换活动工具并同步 tab 高亮，工具切换与能力回落共用。 */
+/** 切换活动工具并同步高亮、选中态与焦点序，工具切换与能力回落共用。 */
 export function setActiveTool(tool) {
   state.tool = tool;
   document.querySelectorAll("#tool-tabs button").forEach((b) => {
-    b.classList.toggle("active", b.dataset.tool === tool);
-    b.setAttribute("aria-selected", String(b.dataset.tool === tool));
+    const selected = b.dataset.tool === tool;
+    b.classList.toggle("active", selected);
+    b.setAttribute("aria-checked", String(selected));
+    b.tabIndex = selected ? 0 : -1;
   });
 }
 
@@ -124,6 +132,9 @@ export function revokeObjectUrls(pool) {
   state.objectUrls[pool] = [];
 }
 
+/** 401 哨兵错误 message，抛出点与全部捕获点共用同一来源。 */
+export const UNAUTHORIZED_MESSAGE = "unauthorized";
+
 /**
  * 统一请求入口：自动携带令牌。
  *
@@ -142,7 +153,7 @@ export async function apiFetch(path, options = {}) {
   const response = await fetch(path, Object.assign({}, options, { headers }));
   if (response.status === 401) {
     showTokenGate();
-    throw new Error("unauthorized");
+    throw new Error(UNAUTHORIZED_MESSAGE);
   }
   return response;
 }
@@ -170,7 +181,8 @@ export function timeoutSignal(ms) {
   const controller = new AbortController();
   // 中止理由置为 TimeoutError，支持 reason 的浏览器按名分类。
   setTimeout(
-    () => controller.abort(new DOMException("signal timed out", "TimeoutError")),
+    () =>
+      controller.abort(new DOMException("signal timed out", "TimeoutError")),
     ms,
   );
   return controller.signal;

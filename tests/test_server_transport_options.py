@@ -174,7 +174,7 @@ def test_cli_main_dispatches_to_correct_runner(
 def test_cli_main_forwards_web_enabled_to_http_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--web 经 build_config_from_args 进 config.web_enabled 后转发到 http runner。"""
+    """config.web_enabled 经 cli_main 转发到 http runner 的 web_enabled 参数。"""
     args = _make_cli_args("streamable-http")
     args.web = True
     config = SeedreamConfig(api_key="test_key", web_enabled=True)
@@ -403,23 +403,6 @@ async def test_bearer_auth_middleware_accepts_valid_token() -> None:
     assert received == {"called": True}
 
 
-async def test_bearer_auth_middleware_rejects_invalid_token() -> None:
-    """令牌不符的请求被 401 拒绝，不进入下游应用。"""
-    sent: list[dict[str, Any]] = []
-
-    async def send(message):  # type: ignore[no-untyped-def]
-        sent.append(message)
-
-    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
-        raise AssertionError("无效令牌不应进入下游应用")
-
-    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
-    scope = {"type": "http", "headers": [(b"authorization", b"Bearer wrong")]}
-    await middleware(scope, cast(Receive, None), send)
-
-    assert sent[0]["status"] == 401
-
-
 async def test_bearer_auth_middleware_unauthorized_response_contract() -> None:
     """错误 Bearer 令牌的 401 质询附 invalid_token，错误体同步该码，符合 RFC 6750。"""
     sent: list[dict[str, Any]] = []
@@ -491,23 +474,6 @@ async def test_bearer_auth_middleware_bare_challenge_without_credentials(
     assert body["error_description"] == "Authentication required"
 
 
-async def test_bearer_auth_middleware_rejects_missing_header() -> None:
-    """缺少 Authorization 头的请求被 401 拒绝。"""
-    sent: list[dict[str, Any]] = []
-
-    async def send(message):  # type: ignore[no-untyped-def]
-        sent.append(message)
-
-    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
-        raise AssertionError("缺少 Authorization 头不应进入下游应用")
-
-    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
-    scope = {"type": "http", "headers": []}
-    await middleware(scope, cast(Receive, None), send)
-
-    assert sent[0]["status"] == 401
-
-
 async def test_bearer_auth_middleware_accepts_case_insensitive_scheme() -> None:
     """scheme 前缀大小写不敏感：小写 bearer 形态同样放行。"""
     received: dict[str, object] = {}
@@ -520,23 +486,6 @@ async def test_bearer_auth_middleware_accepts_case_insensitive_scheme() -> None:
     await middleware(scope, cast(Receive, None), cast(Send, None))
 
     assert received == {"called": True}
-
-
-async def test_bearer_auth_middleware_rejects_non_bearer_scheme() -> None:
-    """非 Bearer 授权方案直接拒绝，不回退比较令牌值。"""
-    sent: list[dict[str, Any]] = []
-
-    async def send(message):  # type: ignore[no-untyped-def]
-        sent.append(message)
-
-    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
-        raise AssertionError("非 Bearer 方案不应进入下游应用")
-
-    middleware = transport_module._BearerTokenAuthMiddleware(downstream, "s3cret")
-    scope = {"type": "http", "headers": [(b"authorization", b"Basic czNjcmV0")]}
-    await middleware(scope, cast(Receive, None), send)
-
-    assert sent[0]["status"] == 401
 
 
 async def test_bearer_auth_middleware_strips_token_whitespace() -> None:

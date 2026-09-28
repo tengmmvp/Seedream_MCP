@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from _os_fakes import _install_counting_resolve
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.tools.core._pipeline import _resolve_base_dir
 from seedream_mcp.utils.core.errors import SeedreamValidationError
@@ -95,27 +96,18 @@ def test_resolve_images_root_caches_resolved_config(
     base = tmp_path / "images_root"
     base.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", data_root=str(base)), monkeypatch)
-
-    resolve_calls = 0
-    real_resolve = Path.resolve
-
-    def counting_resolve(self: Path, *args: object, **kwargs: object) -> Path:
-        nonlocal resolve_calls
-        resolve_calls += 1
-        return real_resolve(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Path, "resolve", counting_resolve)
+    resolve_calls = _install_counting_resolve(monkeypatch)
 
     first = resolve_images_root()
     # 数据根目录与 .seedream 尾部各一次 resolve，整条路径进缓存
-    assert resolve_calls == 2
+    assert len(resolve_calls) == 2
     again = resolve_images_root()
-    assert resolve_calls == 2
+    assert len(resolve_calls) == 2
     assert again == first
 
     clear_resolved_env_root_cache()
     resolve_images_root()
-    assert resolve_calls == 4
+    assert len(resolve_calls) == 4
 
 
 def test_resolve_images_root_caches_workspace_default(
@@ -128,19 +120,10 @@ def test_resolve_images_root_caches_workspace_default(
 
     first = resolve_images_root()
     expected = (workspace / ".seedream" / "images").resolve()
-
-    resolve_calls = 0
-    real_resolve = Path.resolve
-
-    def counting_resolve(self: Path, *args: object, **kwargs: object) -> Path:
-        nonlocal resolve_calls
-        resolve_calls += 1
-        return real_resolve(self, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(Path, "resolve", counting_resolve)
+    resolve_calls = _install_counting_resolve(monkeypatch)
 
     again = resolve_images_root()
-    assert resolve_calls == 0
+    assert len(resolve_calls) == 0
     assert again == first == expected
 
 

@@ -112,7 +112,7 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     """拆分 Host 允许列表条目为 host 与端口后缀，无法识别的形态返回 None。
 
     端口后缀为空串、":<1-65535 的 ASCII 数字>" 或 ":*"；host 为方括号 IPv6 字面量
-    或不含冒号与通配符、首尾无点号的非空主机名。
+    或不含逗号、冒号与通配符、首尾无点号且无连续点号的非空主机名。
     """
     if entry.startswith("["):
         # 畸形方括号形态直接拒绝。
@@ -123,11 +123,13 @@ def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
     else:
         idx = entry.rfind(":")
         host, suffix = (entry, "") if idx == -1 else (entry[:idx], entry[idx:])
+        # 逗号与连续点不出现在真实 Host 头中，序列形态误拼的条目在此拒绝。
         if (
             not host
             or host.startswith(".")
             or host.endswith(".")
-            or any(ch in host for ch in (":", "*", "[", "]"))
+            or ".." in host
+            or any(ch in host for ch in (":", "*", "[", "]", ","))
         ):
             return None
     if suffix in ("", ":*"):

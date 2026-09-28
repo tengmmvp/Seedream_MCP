@@ -1,8 +1,9 @@
 """上游响应体读取限额域守护测试。
 
-覆盖错误体独立上限、错误体 JSON 线程卸载、message 截断、response_body_limit
-显式配置与推导、SSE 截断阈值上界与流式超限错误语义。网络层经 httpx.MockTransport
-模拟，不触达真实 API。
+覆盖错误体独立上限与状态码重试语义、错误体 JSON 线程卸载与 message 截断、
+response_body_limit 显式配置与推导、成功体 data 条目硬上限、SSE 截断阈值边界
+与计数透传、慢滴流与头部停滞的总预算超时、错误体读取超时与传输错误的状态码
+归约。网络层经 httpx.MockTransport 模拟，不触达真实 API。
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from seedream_mcp._client_http import _ERROR_JSON_PARSE_LIMIT
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamTimeoutError
+from seedream_mcp.utils.io.io_sse import items_limit_for
 
 from _client_fakes import _install_mock_transport
 
@@ -362,6 +364,67 @@ async def test_success_body_large_json_parses_from_bytearray(
     assert result["success"] is True
 
 
+async def test_success_json_data_items_over_cap_rejected(no_sleep: None) -> None:
+    """成功 JSON 体的 data 条目数超过按总量限额推导的上限时拒绝该响应。
+
+    大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目硬上限经
+    items_limit_for 同式推导；20480 派生 45 取绝对下限 64，65 项即触顶。无状态码
+    即不可重试，避免对非幂等生成 API 重复请求。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        del request
+        attempts += 1
+        return httpx.Response(
+            200,
+            content=json.dumps({"data": [0] * 65}).encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="响应条目数过多") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        assert exc_info.value.status_code is None
+        assert attempts == 1
+
+
+async def test_success_json_data_items_at_cap_accepted(no_sleep: None) -> None:
+    """data 条目数恰好等于推导上限时正常解析，边界不误伤。"""
+    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            content=json.dumps({"data": [0] * 64}).encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert result["success"] is True
+    assert len(result["data"]) == 64
+
+
+async def test_parsed_data_items_limit_uses_shared_items_limit_derivation() -> None:
+    """成功 JSON 条目上限经 io_sse.items_limit_for 单源推导，与 SSE 条目上限同式。
+
+    显式 response_body_limit 直供推导输入。
+    """
+    for total_limit in (100, 20480):
+        config = SeedreamConfig(api_key="k", response_body_limit=total_limit)
+        async with SeedreamClient(config) as client:
+            assert client._parsed_data_items_limit() == items_limit_for(total_limit)
+
+
 async def _delay_outside_patched_sleep(seconds: float) -> None:
     """经未打补丁的定时器实现真实延迟，绕开 no_sleep fixture 对 asyncio.sleep 的屏蔽。
 
@@ -606,6 +669,65 @@ async def test_error_body_read_timeout_reduced_with_status_and_retry_after() -> 
 
         assert exc_info.value.status_code == 429
         assert exc_info.value.retry_after == 3.0
+
+
+async def test_error_body_read_transport_error_keeps_4xx_status_no_retry(
+    no_sleep: None,
+) -> None:
+    """错误体读取遇非超时传输错误时按状态码归约，4xx 不并入网络错误重试。
+
+    生成 API 非幂等，确定 4xx 后按网络错误重试会重复发送请求并丢失状态码语义。
+    """
+    config = SeedreamConfig(api_key="k", max_retries=3)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        del request
+        attempts += 1
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield b"partial error body"
+            raise httpx.ReadError("peer reset")
+
+        return httpx.Response(400, content=_stream())
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="读取错误响应体失败（状态码 400）") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        assert exc_info.value.status_code == 400
+        assert attempts == 1
+
+
+async def test_error_body_read_transport_error_keeps_5xx_retry_semantics(
+    no_sleep: None,
+) -> None:
+    """错误体读取的传输错误保留 5xx 状态码，仍按可重试语义走完重试。"""
+    config = SeedreamConfig(api_key="k", max_retries=2)
+    attempts = 0
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        del request
+        attempts += 1
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield b"partial error body"
+            raise httpx.ReadError("peer reset")
+
+        return httpx.Response(500, content=_stream())
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+
+        with pytest.raises(SeedreamAPIError, match="读取错误响应体失败（状态码 500）") as exc_info:
+            await client._call_api("text_to_image", {"prompt": "p"})
+
+        assert exc_info.value.status_code == 500
+        assert attempts == config.max_retries + 1
 
 
 # ==================== 超大错误体的状态码重试语义 ====================

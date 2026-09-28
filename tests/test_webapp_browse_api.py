@@ -8,7 +8,13 @@ from typing import Any
 import httpx
 import pytest
 
-from _web_fixtures import build_web_app, make_png_bytes, web_asgi_client, write_workspace_config
+from _web_fixtures import (
+    build_web_app,
+    make_images_root_unresolvable,
+    make_png_bytes,
+    web_asgi_client,
+    write_workspace_config,
+)
 
 
 async def _post_browse(app: Any, body: dict[str, Any]) -> httpx.Response:
@@ -217,15 +223,7 @@ async def test_browse_images_root_unavailable_returns_400(
     reset_http_app_state: None,
 ) -> None:
     """显式数据根目录无法解析时回 400 images_root_unavailable，携带配置指引文案。"""
-    import seedream_mcp.utils.io.io_path as io_path_module
-    from seedream_mcp.config import SeedreamConfig, set_active_config
-
-    def _unresolvable(configured_dir: str) -> Path:
-        raise OSError("simulated unresolvable path")
-
-    write_workspace_config(tmp_path)
-    set_active_config(SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics")))
-    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
+    make_images_root_unresolvable(monkeypatch, tmp_path)
     app = build_web_app()
 
     response = await _post_browse(app, {"show_details": True})

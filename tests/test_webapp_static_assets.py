@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+
+import pytest
 
 from _web_fixtures import build_web_app, prepare_static_dir, web_get, write_workspace_config
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS_ORDERED
+from seedream_mcp.webapp.meta import _upload_budget_chars
 from seedream_mcp.webapp.constants import (
     STATIC_DIR,
     WEB_API_BROWSE,
@@ -118,9 +122,38 @@ def test_generate_and_gallery_consume_web_path_contract() -> None:
     assert "/web/api/image" in gallery_js, "gallery.js 灯箱不再请求 /web/api/image 端点"
 
 
+def test_refs_fallback_budget_matches_server_derivation() -> None:
+    """refs.js 回退预算常量与服务端按默认请求体上限的推导一致。"""
+    refs_js = (STATIC_DIR / _JS_DIR / "refs.js").read_text(encoding="utf-8")
+    match = re.search(r"DEFAULT_UPLOAD_BUDGET_CHARS = (\d+) \* 1024 \* 1024;", refs_js)
+    assert match, "refs.js 回退预算常量形态改变，守护需同步"
+    default_body = SeedreamConfig(api_key="guard-key").http_max_body_size
+    assert int(match.group(1)) * 1024 * 1024 == _upload_budget_chars(default_body)
+
+
+def test_upload_accept_matches_supported_mimes() -> None:
+    """上传 accept 类型列表与服务端支持格式的 MIME 集合一致。"""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    tag = re.search(r'<input[^>]*id="ref-file"[^>]*>', html)
+    assert tag, "入口页缺失 ref-file 上传输入"
+    accepted = re.search(r'accept="([^"]+)"', tag.group(0))
+    assert accepted, "上传输入缺失 accept 类型列表"
+    expected = {MIME_BY_EXTENSION[ext] for ext in SUPPORTED_IMAGE_EXTENSIONS_ORDERED}
+    assert set(accepted.group(1).split(",")) == expected
+
+
+def test_tool_slug_literals_confined_to_api_js() -> None:
+    """带引号工具 slug 字面量仅存于 api.js 常量定义处。"""
+    slugs = ("text-to-image", "image-to-image", "multi-image-fusion", "sequential-generation")
+    for name in ("generate.js", "gallery.js", "main.js", "refs.js"):
+        source = (STATIC_DIR / _JS_DIR / name).read_text(encoding="utf-8")
+        for slug in slugs:
+            assert f'"{slug}"' not in source, f"{name} 出现脱离常量定义的 slug 字面量: {slug}"
+
+
 async def test_static_direct_output_requires_revalidation(
     tmp_path: Path,
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:

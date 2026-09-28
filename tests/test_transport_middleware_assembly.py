@@ -123,6 +123,7 @@ def test_attach_assembles_cors_when_origins_configured(
     ]
     cors_kwargs = next(ref.kwargs for ref in app.user_middleware if ref.cls is CORSMiddleware)
     assert cors_kwargs["allow_origins"] == ["https://app.example.com"]
+    assert cors_kwargs["allow_methods"] == ["GET", "HEAD", "POST", "DELETE", "OPTIONS"]
     assert cors_kwargs["allow_headers"] == ["*"]
     assert cors_kwargs["expose_headers"] == ["Mcp-Session-Id"]
     assert cors_kwargs["allow_private_network"] is True
@@ -264,6 +265,35 @@ def test_attach_explicit_max_body_size_skips_config_read(
     ]
 
 
+def test_attach_web_host_guard_allowlist_comes_from_active_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """web 非回环装配的 Host 守卫白名单取自活动配置，其余参数显式传入不改变来源。"""
+    config = SeedreamConfig(api_key="test_key", http_allowed_hosts=("proxy.example.com",))
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(
+        app,
+        "10.0.0.5",
+        "secret",
+        max_body_size=1048576,
+        web_enabled=True,
+        allowed_origins=(),
+    )
+
+    guard = next(ref for ref in app.user_middleware if ref.cls is _AppHostGuardMiddleware)
+    assert guard.kwargs["allowed_hosts"] == (
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "[::1]",
+        "[::1]:*",
+        "localhost",
+        "localhost:*",
+        "proxy.example.com",
+    )
+
+
 def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None:
     """同一 app 实例二次装配跳过 add_middleware，中间件栈不叠加。
 
@@ -402,6 +432,45 @@ async def test_app_host_guard_entry_matching_semantics(
     else:
         assert reached == []
         assert sent[0]["status"] == 403
+
+
+async def _run_app_host_guard_websocket(
+    entries: tuple[str, ...], host: bytes
+) -> tuple[list[object], list[Message]]:
+    reached: list[object] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        reached.append(scope.get("type"))
+
+    guard = _AppHostGuardMiddleware(downstream, allowed_hosts=entries)
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await guard(
+        {"type": "websocket", "path": "/web", "headers": [(b"host", host)]},
+        cast(Receive, None),
+        send,
+    )
+    return reached, sent
+
+
+async def test_app_host_guard_closes_websocket_with_rejected_host() -> None:
+    """websocket 携带未放行 Host 以 1008 关闭，不进入内层应用。"""
+    reached, sent = await _run_app_host_guard_websocket(("api.example.com",), b"evil.example.com")
+
+    assert reached == []
+    assert sent[0]["type"] == "websocket.close"
+    assert sent[0]["code"] == 1008
+
+
+async def test_app_host_guard_allows_websocket_with_permitted_host() -> None:
+    """websocket 携带放行 Host 正常透传到内层应用。"""
+    reached, sent = await _run_app_host_guard_websocket(("api.example.com",), b"api.example.com")
+
+    assert reached == ["websocket"]
+    assert sent == []
 
 
 def test_attach_assembles_app_host_guard_for_web_on_non_loopback(
@@ -575,12 +644,14 @@ async def _run_health_check(method: str, path: str) -> tuple[list[object], list[
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
 async def test_health_check_short_circuits_probe_methods(method: str) -> None:
-    """GET 与 HEAD /health 均短路 200；HEAD 按探活语义返回空 body。"""
+    """GET 与 HEAD /health 均短路 200；HEAD 响应头与 GET 一致，仅省略内容。"""
     reached, sent = await _run_health_check(method, "/health")
 
     assert reached == []
     assert sent[0]["type"] == "http.response.start"
     assert sent[0]["status"] == 200
+    headers = dict(sent[0]["headers"])
+    assert headers[b"content-length"] == b"15"
     body_msg = sent[1]
     assert body_msg["type"] == "http.response.body"
     if method == "GET":
@@ -907,7 +978,7 @@ def test_non_loopback_spellings_stay_non_loopback(spelling: str) -> None:
     ],
 )
 def test_dns_rebinding_protection_host_classification(host: str, protected: bool) -> None:
-    """回环等价写法与 localhost（含方括号形态）判为 DNS rebinding 防护地址（_DNS_REBINDING_PROTECTED_HOSTS 集合成员），具体非回环地址与非 IP 主机名不属该集合。"""
+    """解析为回环或等于 localhost 即判 DNS rebinding 防护地址，方括号形态同口径；具体非回环地址与非 IP 主机名不属其列。"""
     assert _is_dns_rebinding_protected_host(host) is protected
 
 

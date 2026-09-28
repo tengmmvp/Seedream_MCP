@@ -21,6 +21,22 @@ from seedream_mcp.utils.core.errors import SeedreamConfigError
 _LIMIT = 64 * 1024 * 1024
 
 
+def _queued_receive(messages: list[Message], tail: Message | None = None) -> Receive:
+    """按序返回给定帧、耗尽后恒返回尾帧的 receive 工厂。"""
+    counter = {"i": 0}
+
+    async def receive() -> Message:
+        if counter["i"] < len(messages):
+            msg = messages[counter["i"]]
+            counter["i"] += 1
+            return msg
+        if tail is not None:
+            return tail
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return receive
+
+
 async def test_request_body_limit_rejects_oversized_content_length() -> None:
     """Content-Length 超上限时回 413，body 含 request_too_large。"""
     sent: list[Message] = []
@@ -133,18 +149,11 @@ async def test_request_body_limit_rejects_oversized_chunked_body() -> None:
     """
     small_limit = 1024
     sent: list[Message] = []
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def send(message: Message) -> None:
         sent.append(message)
@@ -170,18 +179,11 @@ async def test_request_body_limit_allows_chunked_body_within_limit() -> None:
     """无 Content-Length 的分块 body 累计未超限时正常放行下游。"""
     small_limit = 1024
     received: dict[str, object] = {}
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 400, "more_body": True},
         {"type": "http.request", "body": b"x" * 400, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
@@ -204,18 +206,11 @@ async def test_request_body_limit_skips_413_when_downstream_already_responded() 
     """
     small_limit = 1024
     sent: list[Message] = []
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def send(message: Message) -> None:
         sent.append(message)
@@ -250,18 +245,11 @@ async def test_request_body_limit_sends_413_when_downstream_output_never_forward
     """
     small_limit = 1024
     sent: list[Message] = []
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def send(message: Message) -> None:
         sent.append(message)
@@ -294,18 +282,11 @@ async def test_request_body_limit_non_numeric_content_length_falls_back_to_chunk
     small_limit = 1024
     sent: list[Message] = []
     received: dict[str, object] = {}
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def send(message: Message) -> None:
         sent.append(message)
@@ -334,18 +315,11 @@ async def test_request_body_limit_non_numeric_content_length_within_limit_passes
     """非数字 Content-Length 且实际字节未超限时放行下游，不因畸形头误拒。"""
     small_limit = 1024
     received: dict[str, object] = {}
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 400, "more_body": True},
         {"type": "http.request", "body": b"x" * 400, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         received["called"] = True
@@ -365,18 +339,11 @@ async def test_request_body_limit_swallows_downstream_exception_after_truncation
     """超限截断后下游读到空终帧抛异常时被吞掉，统一回 413 而非冒泡 500。"""
     small_limit = 1024
     sent: list[Message] = []
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def send(message: Message) -> None:
         sent.append(message)
@@ -403,18 +370,11 @@ async def test_request_body_limit_swallows_downstream_exception_after_truncation
 async def test_request_body_limit_reraises_downstream_exception_within_limit() -> None:
     """未超限时下游异常原样重抛，不吞掉非超限语义的失败。"""
     small_limit = 1024
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 400, "more_body": True},
         {"type": "http.request", "body": b"x" * 400, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise RuntimeError("downstream boom")
@@ -431,18 +391,11 @@ async def test_request_body_limit_swallows_send_failure_on_direct_413() -> None:
     客户端发送超限 body 后立即断开时，直发 413 的 send 对死连接抛异常。
     """
     small_limit = 1024
-    messages = [
+    messages: list[Message] = [
         {"type": "http.request", "body": b"x" * 600, "more_body": True},
         {"type": "http.request", "body": b"x" * 600, "more_body": False},
     ]
-    counter = {"i": 0}
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.request", "body": b"", "more_body": False}
+    receive = _queued_receive(messages)
 
     async def send(message: Message) -> None:
         # 模拟已断开的死连接：任何响应写入都失败。
@@ -474,15 +427,8 @@ async def test_request_body_limit_truncation_keeps_disconnect_watch_yielding() -
         {"type": "http.request", "body": b"x" * 4096, "more_body": True},
         {"type": "http.disconnect"},
     ]
-    counter = {"i": 0}
     sent: list[Message] = []
-
-    async def receive() -> Message:
-        if counter["i"] < len(messages):
-            msg = messages[counter["i"]]
-            counter["i"] += 1
-            return msg
-        return {"type": "http.disconnect"}
+    receive = _queued_receive(messages, {"type": "http.disconnect"})
 
     async def send(message: Message) -> None:
         sent.append(message)

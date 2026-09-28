@@ -89,10 +89,12 @@ async def test_guard_allows_loopback_hosts(host: bytes) -> None:
         b"192.168.1.5",
         b"[fe80::1]",
         b"sub.localhost.evil.com",
+        b"[::1]evil.com",
+        b"[::1]evil.com:8000",
     ],
 )
 async def test_guard_rejects_non_loopback_hosts(host: bytes) -> None:
-    """外部域名与私网 Host 头一律 403 拒绝，阻断 DNS rebinding 同源请求。"""
+    """外部域名与私网 Host 头一律 403 拒绝，方括号后尾随内容不得截断为回环主机。"""
     inner = _InnerApp()
     sink = _MessageSink()
     guard = _LoopbackHostGuardMiddleware(inner)

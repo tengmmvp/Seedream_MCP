@@ -6,15 +6,18 @@
   --linen: #e6e5e0;
   --hairline: #cdcdc9;
   --ink: #26251e;
-  --ink-secondary: #84847e;
-  --ink-tertiary: #7a7974;
+  --ink-secondary: #6f6e68;
+  --ink-tertiary: #67665f;
   --accent: #f54e00;
   --btn-primary-bg: #26251e;
   --btn-primary-fg: #f5f4ef;
+  --btn-primary-hover-bg: #3a392f;
   --btn-secondary-bg: #e6e5e0;
-  --success: #1f8a65;
-  --danger: #cf2d56;
+  --btn-secondary-hover-bg: #d9d8d2;
+  --success: #177a57;
+  --danger: #bb2350;
   --radius: 4px;
+  --radius-lg: 8px;
   --shadow: 0 1px 2px rgba(38, 37, 30, 0.06), 0 4px 12px rgba(38, 37, 30, 0.05);
   --font-ui: system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-serif: Georgia, "Times New Roman", "Songti SC", serif;
@@ -191,7 +194,7 @@ body {
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #3a392f;
+  background: var(--btn-primary-hover-bg);
 }
 
 .btn-secondary {
@@ -200,7 +203,7 @@ body {
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: #d9d8d2;
+  background: var(--btn-secondary-hover-bg);
 }
 
 .btn-ghost {
@@ -508,7 +511,6 @@ select:focus {
   height: 5px;
   border-radius: 50%;
   background: var(--ink-tertiary);
-  animation: dot-pulse 1.2s ease-in-out infinite;
 }
 
 .loading-dots i:nth-child(2) {
@@ -553,7 +555,6 @@ select:focus {
   height: 4px;
   border-radius: 50%;
   background: var(--ink-tertiary);
-  animation: dot-wave 2.8s ease-in-out infinite;
 }
 
 @keyframes dot-wave {
@@ -688,6 +689,10 @@ select:focus {
   display: block;
 }
 
+.gallery-item:focus-visible {
+  outline: 1px solid var(--ink-secondary);
+}
+
 .gallery-item figcaption {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -732,7 +737,7 @@ select:focus {
 .lightbox-inner {
   background: var(--card-bg);
   border: 1px solid var(--hairline);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
   max-width: min(1100px, 100%);
   max-height: calc(100vh - 48px);
@@ -784,7 +789,6 @@ select:focus {
 .collapse-inner {
   min-height: 0;
   overflow: hidden;
-  opacity: 1;
 }
 
 .collapse.collapsed .collapse-inner {
@@ -807,13 +811,11 @@ img.developing.loaded {
 img.developing.thumb-error {
   opacity: 1;
   transform: none;
-  background: repeating-linear-gradient(
-    45deg,
-    transparent,
-    transparent 6px,
-    rgba(127, 127, 127, 0.12) 6px,
-    rgba(127, 127, 127, 0.12) 12px
-  );
+  background: repeating-linear-gradient(45deg,
+      transparent,
+      transparent 6px,
+      rgba(127, 127, 127, 0.12) 6px,
+      rgba(127, 127, 127, 0.12) 12px);
 }
 
 /* 灯箱开合 */
@@ -858,6 +860,11 @@ img.developing.thumb-error {
     transition: opacity 160ms var(--motion-enter);
   }
 
+  /* 收起时可见性延迟到高度收缩完成，内容随盒渐隐不瞬隐。 */
+  .collapse.collapsed .collapse-inner {
+    transition: opacity 200ms var(--motion-enter), visibility 0s linear 200ms;
+  }
+
   img.developing {
     transition: opacity 240ms var(--motion-develop),
       transform 240ms var(--motion-develop);
@@ -870,6 +877,14 @@ img.developing.thumb-error {
 
   .result-card {
     animation: card-enter 180ms var(--motion-enter);
+  }
+
+  .loading-dots i {
+    animation: dot-pulse 1.2s ease-in-out infinite;
+  }
+
+  .render-dots i {
+    animation: dot-wave 2.8s ease-in-out infinite;
   }
 
   .lightbox {

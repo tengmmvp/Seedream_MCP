@@ -631,6 +631,8 @@ async def test_workspace_roots_resource_empty_roots_falls_back_to_env(
     data = json.loads(cast(str, result))
 
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
+    # 空声明等同未声明，不构成降级，输出不得携带 fallback 标记。
+    assert "fallback" not in data
 
 
 async def test_workspace_roots_resource_capability_missing_falls_back_to_env(
@@ -733,7 +735,6 @@ class _VersionlessModernContext(_ModernProtocolContext):
 
 async def test_workspace_roots_resource_modern_session_first_round_requests_input(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """2026 会话首轮返回 InputRequiredResult 携带 roots 请求，不经直连取回。
 
@@ -795,6 +796,23 @@ async def test_workspace_roots_resource_modern_session_malformed_response_falls_
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
     # 输出附降级标记，客户端可感知本工作区为环境回退而非其声明值。
     assert data["fallback"] is True
+    assert len(ctx.session.send_request_calls) == 0
+
+
+async def test_workspace_roots_resource_modern_round_wrong_response_key_requests_input_again(
+    tmp_path: Path,
+) -> None:
+    """重试轮应答键名不符时不消费该应答，重新以 roots 键发起多轮请求。"""
+    mcp_root = tmp_path / "mcp"
+    mcp_root.mkdir()
+    ctx = _ModernProtocolContext([], responses={"workspaces": _roots_result([mcp_root])})
+
+    result = await workspace_roots_resource(cast("Context[Any, Any]", ctx))
+
+    assert isinstance(result, InputRequiredResult)
+    requests = cast("dict[str, object]", result.input_requests)
+    assert set(requests) == {"roots"}
+    assert isinstance(requests["roots"], ListRootsRequest)
     assert len(ctx.session.send_request_calls) == 0
 
 
@@ -875,6 +893,8 @@ async def test_workspace_roots_resource_modern_round_empty_roots_falls_back_to_e
     assert isinstance(result, str)
     data = json.loads(result)
     assert data["roots"] == [str(env_root.resolve()).replace("\\", "/")]
+    # 空声明等同未声明，不构成降级，输出不得携带 fallback 标记。
+    assert "fallback" not in data
 
 
 async def test_workspace_roots_resource_legacy_version_keeps_direct_fetch(

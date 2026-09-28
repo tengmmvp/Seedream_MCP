@@ -181,14 +181,17 @@ async def _send_asgi_json(
     status: int,
     body: bytes,
     extra_headers: tuple[tuple[bytes, bytes], ...] = (),
+    content_length: int | None = None,
 ) -> None:
     """发送统一格式的 JSON ASGI 响应，content-type 固定为 application/json。
 
-    extra_headers 附加在标准头之后，供 www-authenticate 等响应头复用。
+    extra_headers 附加在标准头之后，供 www-authenticate 等响应头复用；
+    content_length 显式声明时覆盖按 body 推得的值，供 HEAD 对齐 GET 响应头。
     """
+    length = len(body) if content_length is None else content_length
     headers: list[tuple[bytes, bytes]] = [
         (b"content-type", b"application/json"),
-        (b"content-length", str(len(body)).encode("ascii")),
+        (b"content-length", str(length).encode("ascii")),
         # 鉴权失败、超限与健康探针响应禁止缓存，避免代理缓存敏感状态码响应。
         (b"cache-control", b"no-store"),
     ]
@@ -209,6 +212,23 @@ def _header_value(scope: Scope, name: bytes) -> bytes | None:
         if header_name == name:
             return value  # type: ignore[no-any-return]
     return None
+
+
+def _strip_host_port(host: bytes) -> bytes:
+    """剥离 Host 头值的端口部分，IPv6 字面量如 [::1]:8000 保留方括号主机部分。
+
+    右方括号后仅容空或冒号端口，其余尾随内容按原样返回以偏离白名单条目。
+    """
+    if host.startswith(b"["):
+        end = host.find(b"]")
+        if end == -1:
+            return host
+        remainder = host[end + 1 :]
+        if remainder and not remainder.startswith(b":"):
+            return host
+        return host[: end + 1]
+    idx = host.rfind(b":")
+    return host if idx == -1 else host[:idx]
 
 
 def _error_body(error: str, description: str) -> bytes:
@@ -414,8 +434,8 @@ class _HealthCheckMiddleware:
     """streamable-http 健康检查中间件，短路 GET 与 HEAD /health 返回进程存活状态。
 
     位于请求体限制与鉴权之外，探针无需令牌；回环绑定时位于 Host 校验之内，
-    rebinding 请求连探活也被拒。HEAD 按探活语义返回 200 空 body。仅做 liveness
-    判定，不探测上游 API。
+    rebinding 请求连探活也被拒。HEAD 返回与 GET 相同的响应头，仅省略内容。
+    仅做 liveness 判定，不探测上游 API。
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -427,9 +447,11 @@ class _HealthCheckMiddleware:
             and scope.get("method") in ("GET", "HEAD")
             and scope.get("path") == "/health"
         ):
-            method = scope.get("method")
-            body = b'{"status":"ok"}' if method == "GET" else b""
-            await _send_asgi_json(send, 200, body)
+            body = b'{"status":"ok"}'
+            if scope.get("method") == "HEAD":
+                await _send_asgi_json(send, 200, b"", content_length=len(body))
+            else:
+                await _send_asgi_json(send, 200, body)
             return
         await self.app(scope, receive, send)
 
@@ -455,7 +477,7 @@ class _LoopbackHostGuardMiddleware:
             host = _header_value(scope, b"host")
             # 与 SDK 内层 Host 校验同为大小写敏感精确比较：本层拒绝的大写回环
             # Host 在内层同样不匹配白名单，大写形态由此 403 拒绝。
-            if host is None or self._strip_port(host) not in self._allowed_hosts:
+            if host is None or _strip_host_port(host) not in self._allowed_hosts:
                 if scope_type == "websocket":
                     # websocket 无 HTTP 状态码可回，按鉴权中间件模式以 1008 关闭。
                     await send({"type": "websocket.close", "code": 1008})
@@ -463,15 +485,6 @@ class _LoopbackHostGuardMiddleware:
                     await _send_forbidden(send, "invalid_host", "Host not allowed")
                 return
         await self.app(scope, receive, send)
-
-    @staticmethod
-    def _strip_port(host: bytes) -> bytes:
-        """剥离 Host 头值的端口部分，IPv6 字面量如 [::1]:8000 保留方括号主机部分。"""
-        if host.startswith(b"["):
-            end = host.find(b"]")
-            return host[: end + 1] if end != -1 else host
-        idx = host.rfind(b":")
-        return host if idx == -1 else host[:idx]
 
 
 class _ErrorBoundaryMiddleware:
@@ -558,7 +571,7 @@ class _AppHostGuardMiddleware:
         """
         if host in self._bare_hosts or host in self._exact_hosts:
             return True
-        stripped = _LoopbackHostGuardMiddleware._strip_port(host)
+        stripped = _strip_host_port(host)
         return host.startswith(stripped + b":") and stripped in self._wildcard_hosts
 
 
@@ -692,8 +705,9 @@ def _attach_streamable_http_middleware(
     """向 streamable-http app 装配中间件栈，重复装配时跳过以保证幂等。
 
     max_body_size 与 allowed_origins 未显式传入时回退读取活动配置；生产调用方
-    已取过该配置时显式传入，避免同一配置重复解析。web_enabled 开启时向 Bearer
-    中间件传入 Web 静态页面的免鉴权路径表，API 路径始终要求令牌。
+    已取过该配置时显式传入，避免同一配置重复解析。
+    web_enabled 开启时向 Bearer 中间件传入 Web 静态页面的免鉴权路径表，API
+    路径始终要求令牌。
 
     Starlette add_middleware 经 insert(0) 使后添加者为更外层。装配目标执行序为
     HostGuard（回环绑定为 LoopbackHostGuard，web 开启的非回环绑定为 AppHostGuard）
@@ -743,7 +757,7 @@ def _attach_streamable_http_middleware(
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(allowed_origins),
-            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_methods=["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
             allow_headers=["*"],
             expose_headers=["Mcp-Session-Id"],  # 供客户端读取会话 id 续连
             allow_private_network=True,  # PNA 预检放行，公网页面可达本地绑定

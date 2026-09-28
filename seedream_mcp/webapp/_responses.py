@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import IO, Any
 
-from loguru import logger
 from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, MalformedRangeHeader, Response
@@ -28,6 +27,7 @@ from ..utils.core.executors import (
     should_offload_size,
     should_offload_to_cpu_pool,
 )
+from ..utils.core.logs import get_logger
 from ..utils.core.sanitizers import utf8_value_leaf_length
 from ..utils.io.io_path import (
     READ_SCOPE_AUTH_ENV_HINT as READ_SCOPE_AUTH_ENV_HINT,
@@ -35,6 +35,8 @@ from ..utils.io.io_path import (
     normalize_path,
     resolve_images_root,
 )
+
+logger = get_logger()
 
 GENERATION_ERROR_STATUS: dict[str, int] = {
     "validation_error": 400,

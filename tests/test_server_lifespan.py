@@ -365,6 +365,53 @@ async def test_app_lifespan_rebuilds_on_config_change(
     assert client_b.config is config_b
 
 
+async def test_app_lifespan_rebuild_survives_concurrent_teardown_in_retire_window(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """重建在退役旧资源的 await 窗口期间，并发 teardown 的 idle 清理不得回收新资源。
+
+    旧资源先退役再发布：会话 2 的重建挂在 _retire_resource 处时新资源尚未发布，
+    会话 1 的 teardown 只作用于旧资源；新资源发布点到进场登记之间无挂起点，
+    teardown 的 idle 清理观察不到零引用的新发布资源。
+    """
+    monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="key_a"))
+    first_lifespan = server.app_lifespan(server.mcp)
+    await first_lifespan.__aenter__()
+
+    monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="key_b"))
+    retire_entered = asyncio.Event()
+    retire_release = asyncio.Event()
+    real_retire = resources._retire_resource
+
+    async def gated_retire(resource: Any) -> None:
+        retire_entered.set()
+        await retire_release.wait()
+        await real_retire(resource)
+
+    monkeypatch.setattr(resources, "_retire_resource", gated_retire)
+
+    second_lifespan = server.app_lifespan(server.mcp)
+    entering = asyncio.ensure_future(second_lifespan.__aenter__())
+    await retire_entered.wait()
+
+    # 窗口内并发 teardown 释放并清理旧资源，尚未发布的新资源不受影响。
+    await first_lifespan.__aexit__(None, None, None)
+
+    retire_release.set()
+    state = await entering
+
+    active = resources._active_resource
+    assert active is not None
+    assert state["client"] is active.client
+    assert state["client"]._client is not None
+    assert active.refcount == 1
+
+    await second_lifespan.__aexit__(None, None, None)
+    assert resources._active_resource is None
+    assert state["client"]._client is None
+
+
 async def test_app_lifespan_applies_download_concurrency_limit(
     monkeypatch: pytest.MonkeyPatch,
     reset_lifespan_singletons: None,
@@ -420,11 +467,7 @@ def test_reset_lifespan_state_clears_global_config() -> None:
 
 
 class _FakeLifespanCtx:
-    """模拟 MCP Context，仅提供 lifespan_context 访问路径与 no-op 进度/日志方法。
-
-    execute_generation_handler 会调用 ctx.report_progress / ctx.info 等方法，
-    此处提供空实现使流水线不报错。
-    """
+    """模拟 MCP Context：提供 lifespan_context 访问路径与进度上报空实现。"""
 
     def __init__(self, lifespan_context: Any) -> None:
         class _FakeRequestContext:
@@ -434,18 +477,6 @@ class _FakeLifespanCtx:
         self.request_context.lifespan_context = lifespan_context
 
     async def report_progress(self, **kwargs: Any) -> None:
-        pass
-
-    async def info(self, message: str) -> None:
-        pass
-
-    async def debug(self, message: str) -> None:
-        pass
-
-    async def warning(self, message: str) -> None:
-        pass
-
-    async def error(self, message: str) -> None:
         pass
 
 

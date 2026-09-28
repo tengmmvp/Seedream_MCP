@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import IO, NamedTuple
 from urllib.parse import quote, unquote
 
-from loguru import logger
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from ..config import get_active_config
 from ..utils.core.sanitizers import CONTROL_CHARS_PATTERN
 from ..utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
+from ..utils.core.logs import get_logger
 from ..utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
@@ -37,6 +37,8 @@ from . import _responses, constants
 from ._responses import _NoFollowFileResponse
 from .constants import PAGE_SECURITY_HEADERS, WEB_API_PREFIX, WEB_INDEX_PATH
 
+logger = get_logger()
+
 # 模型能力清单缓存：能力表为进程级静态数据，首次构建后跨请求复用。
 _MODELS_PAYLOAD: list[dict[str, object]] | None = None
 
@@ -45,8 +47,8 @@ _UPLOAD_BUDGET_ENVELOPE_MARGIN = 3 * 1024 * 1024
 
 
 def _upload_budget_chars(max_body_size: int) -> int:
-    """按请求体上限推导 data URI 参考图的累计字符预算，供前端预检单一来源。"""
-    return max(max_body_size * 3 // 4 - _UPLOAD_BUDGET_ENVELOPE_MARGIN, 0)
+    """按请求体上限扣除信封余量推导 data URI 参考图的累计字符预算，字符与请求体字节一比一。"""
+    return max(max_body_size - _UPLOAD_BUDGET_ENVELOPE_MARGIN, 0)
 
 
 def _fallback_presets() -> list[str]:
@@ -192,20 +194,22 @@ async def web_not_found(request: Request) -> Response:
     兜底路由会吞掉 Starlette 的 redirect_slashes 语义，使 /mcp/、/web/ 落到
     404；此处按同语义重定向，路径每跳至少短一个字符故无循环。浏览器把特殊
     scheme 路径中的反斜杠归一为斜杠，去尾斜杠后以斜杠或字面反斜杠开头的形态
-    会解析成协议相对的外域目标；判定前先做百分号解码与反斜杠归一，归一形以
-    // 开头即不重定向，落入后续 404 分支。API 前缀回统一 JSON 错误，其余路径
-    回附安全头的风格化 404 页，页面不可用时降级纯文本，不可读回 500 诊断。
+    会解析成协议相对的外域目标；判定落在剔除控制字符后的最终形态上，先剔除
+    再百分号解码与反斜杠归一，归一形以 // 开头即不重定向，落入后续 404 分支。
+    API 前缀回统一 JSON 错误，其余路径回附安全头的风格化 404 页，页面不可用
+    时降级纯文本，不可读回 500 诊断。
     """
     path = request.url.path
     if path != "/" and path.endswith("/"):
         trimmed = path.rstrip("/")
-        normalized = unquote(trimmed).replace("\\", "/")
+        # 查询串原样回填；控制字符进 Location 头触发协议层 500，剔除后重定向；
+        # 非 ASCII 字符百分号编码使 Location 头恒可编码，浏览器跟随时按
+        # 归一化规则解码。
+        query = request.url.query
+        target = CONTROL_CHARS_PATTERN.sub("", trimmed + (f"?{query}" if query else ""))
+        # 守卫判最终形态：剔除控制字符可拼接出 // 前缀，判未剔除形态会被穿透成开放重定向。
+        normalized = unquote(target).replace("\\", "/")
         if trimmed and not normalized.startswith("//"):
-            # 查询串原样回填；控制字符进 Location 头触发协议层 500，剔除后重定向；
-            # 非 ASCII 字符百分号编码使 Location 头恒可编码，浏览器跟随时按
-            # 归一化规则解码。
-            query = request.url.query
-            target = CONTROL_CHARS_PATTERN.sub("", trimmed + (f"?{query}" if query else ""))
             location = "".join(
                 char if ord(char) < 128 else quote(char, encoding="utf-8") for char in target
             )

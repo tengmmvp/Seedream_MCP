@@ -17,6 +17,10 @@ import {
   showInlineError,
   state,
   timeoutSignal,
+  TOOL_IMAGE_TO_IMAGE,
+  TOOL_SEQUENTIAL_GENERATION,
+  TOOL_TEXT_TO_IMAGE,
+  UNAUTHORIZED_MESSAGE,
 } from "./api.js";
 import { renderReferences, toolConfig, withinUploadBudget } from "./refs.js";
 import { openLightbox } from "./gallery.js";
@@ -74,7 +78,10 @@ export async function loadConfigInfo() {
   // 可双向切换。
   $("output-format")
     .closest(".field")
-    .classList.toggle("collapsed", current ? !current.supports_output_format : false);
+    .classList.toggle(
+      "collapsed",
+      current ? !current.supports_output_format : false,
+    );
 
   // 勾选框初始态反映服务器默认，此后保留用户选择：令牌重输会再次加载配置，
   // 重置勾选态会使静默回退变为显式传值的实际生效。
@@ -137,9 +144,7 @@ function renderSizeOptions(preferred) {
     const option = document.createElement("option");
     option.value = preset;
     option.textContent =
-      !layerMode && preset === info.default_size
-        ? `${preset}（默认）`
-        : preset;
+      !layerMode && preset === info.default_size ? `${preset}（默认）` : preset;
     sizeSelect.appendChild(option);
   }
   if (layerMode) {
@@ -192,7 +197,7 @@ export function applyToolUI() {
   const current = currentModel();
   // 未知模型（Endpoint ID 部署）无能力条目时回退为允许，与 unknown 家族放行一致。
   const layerAllowed =
-    state.tool === "image-to-image" &&
+    state.tool === TOOL_IMAGE_TO_IMAGE &&
     (current ? current.supports_layer_decomposition : true);
 
   $("reference-section").classList.toggle("collapsed", !config.refs);
@@ -203,7 +208,7 @@ export function applyToolUI() {
       : "建议不超过 300 字。";
   $("max-images-field").classList.toggle(
     "collapsed",
-    state.tool !== "sequential-generation",
+    state.tool !== TOOL_SEQUENTIAL_GENERATION,
   );
   const layerField = $("layer-field");
   layerField.classList.toggle("collapsed", !layerAllowed);
@@ -236,12 +241,12 @@ export function updateToolAvailability() {
     ? current.supports_sequential_generation
     : true;
   const sequentialTab = document.querySelector(
-    '[data-tool="sequential-generation"]',
+    `[data-tool="${TOOL_SEQUENTIAL_GENERATION}"]`,
   );
   sequentialTab.disabled = !sequentialAllowed;
   sequentialTab.title = sequentialAllowed ? "" : "当前模型不支持组图生成";
-  if (state.tool === "sequential-generation" && !sequentialAllowed) {
-    setActiveTool("text-to-image");
+  if (state.tool === TOOL_SEQUENTIAL_GENERATION && !sequentialAllowed) {
+    setActiveTool(TOOL_TEXT_TO_IMAGE);
     applyToolUI();
   }
 }
@@ -259,7 +264,7 @@ export function buildRequestBody() {
 
   if (config.refs && state.refs.length > 0) {
     const values = state.refs.map((ref) => ref.value);
-    body.image = state.tool === "image-to-image" ? values[0] : values;
+    body.image = state.tool === TOOL_IMAGE_TO_IMAGE ? values[0] : values;
   }
 
   const sizeValue = $("size").value;
@@ -275,7 +280,7 @@ export function buildRequestBody() {
   if (requestCount > 1) body.request_count = requestCount;
   body.watermark = $("watermark").checked;
 
-  if (state.tool === "sequential-generation") {
+  if (state.tool === TOOL_SEQUENTIAL_GENERATION) {
     // 留空省略键，由后端按参考图数量推导。
     body.max_images = Number($("max-images").value) || undefined;
   }
@@ -417,7 +422,10 @@ export async function submitGenerate(event) {
       if (failedCount === total && total > 0) {
         setStatus("failed", "生成失败，全部请求未成功，原因见卡片。");
       } else if (failedCount) {
-        setStatus("failed", `部分完成：${total - failedCount}/${total} 成功，失败原因见卡片。`);
+        setStatus(
+          "failed",
+          `部分完成：${total - failedCount}/${total} 成功，失败原因见卡片。`,
+        );
       } else {
         setStatus("done", "完成。");
       }
@@ -426,7 +434,7 @@ export async function submitGenerate(event) {
       showResultError(normalizePayloadError(payload, response));
     }
   } catch (error) {
-    if (error.message === "unauthorized") {
+    if (error.message === UNAUTHORIZED_MESSAGE) {
       setStatus("failed", "需要重新输入令牌。");
     } else if (error instanceof SyntaxError) {
       setStatus("failed", "生成失败。");
@@ -434,8 +442,8 @@ export async function submitGenerate(event) {
         type: "bad_response",
         message: "响应不是有效的 JSON，服务可能异常，请稍后重试。",
       });
-    // AbortError 在无手动中止的代码里仅来自超时兜底与浏览器层中止，统一按
-    // 超时引导：误劝勿重试的代价小于丢失引导诱发重复生成。
+      // AbortError 在无手动中止的代码里仅来自超时兜底与浏览器层中止，统一按
+      // 超时引导：误劝勿重试的代价小于丢失引导诱发重复生成。
     } else if (error.name === "TimeoutError" || error.name === "AbortError") {
       setStatus("failed", "生成耗时异常。");
       showResultError({
@@ -457,7 +465,10 @@ export async function submitGenerate(event) {
 }
 
 function showResultError(error) {
-  showInlineError($("result-error"), `[${error.type || "error"}] ${error.message || ""}`);
+  showInlineError(
+    $("result-error"),
+    `[${error.type || "error"}] ${error.message || ""}`,
+  );
 }
 
 // 结果图装载并发上限：固定 4 个取图任务持续消费队列，无批次屏障。
@@ -478,7 +489,8 @@ async function renderResults(payload) {
     // 批次内失败占位项展示原因。
     if (item.type === "image_generation.request_failed") {
       failedCount += 1;
-      const reason = item.error && item.error.message ? item.error.message : "未知错误";
+      const reason =
+        item.error && item.error.message ? item.error.message : "未知错误";
       appendCardError(card, `该请求失败：${reason}`);
       grid.appendChild(card);
       continue;
@@ -502,23 +514,26 @@ async function renderResults(payload) {
     grid.appendChild(document.createTextNode("本次没有返回图片。"));
 
   let cursor = 0;
-  const workers = Array.from({ length: Math.min(RESULT_IMAGE_CONCURRENCY, pending.length) }, async () => {
-    while (cursor < pending.length) {
-      const entry = pending[cursor++];
-      try {
-        await loadResultImage(entry.img, entry.item);
-      } catch (error) {
-        entry.img.classList.remove("developing");
-        if (error.message === "unauthorized") {
-          // 401 已弹令牌门；卡片标注重试方式，不误报为加载失败。
-          appendCardError(entry.card, "令牌已过期，重新输入后请再次生成");
-        } else {
-          console.error("结果图片加载失败:", error);
-          appendCardError(entry.card, "图片加载失败");
+  const workers = Array.from(
+    { length: Math.min(RESULT_IMAGE_CONCURRENCY, pending.length) },
+    async () => {
+      while (cursor < pending.length) {
+        const entry = pending[cursor++];
+        try {
+          await loadResultImage(entry.img, entry.item);
+        } catch (error) {
+          entry.img.classList.remove("developing");
+          if (error.message === UNAUTHORIZED_MESSAGE) {
+            // 401 已弹令牌门；卡片标注重试方式，不误报为加载失败。
+            appendCardError(entry.card, "令牌已过期，重新输入后请再次生成");
+          } else {
+            console.error("结果图片加载失败:", error);
+            appendCardError(entry.card, "图片加载失败");
+          }
         }
       }
-    }
-  });
+    },
+  );
   await Promise.all(workers);
 
   const meta = $("result-meta");

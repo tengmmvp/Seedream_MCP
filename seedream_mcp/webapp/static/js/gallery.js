@@ -15,6 +15,9 @@ import {
   revokeObjectUrls,
   showInlineError,
   state,
+  TOOL_IMAGE_TO_IMAGE,
+  TOOL_TEXT_TO_IMAGE,
+  UNAUTHORIZED_MESSAGE,
 } from "./api.js";
 import { addReference, toolConfig } from "./refs.js";
 
@@ -33,6 +36,8 @@ let requestSeq = 0;
 let currentLightboxUrl = null;
 let currentLightboxBlob = null;
 let lightboxSeq = 0;
+// 灯箱打开前的焦点来源，关闭后归还。
+let lightboxReturnFocus = null;
 
 function resetGalleryPager() {
   $("gallery-page").textContent = "";
@@ -102,7 +107,7 @@ async function refreshGalleryForSeq(seq) {
     });
   } catch (error) {
     // 401 已弹令牌门，令牌补齐后由提交回调补刷；其余网络异常落图库错误提示。
-    if (error.message === "unauthorized") return;
+    if (error.message === UNAUTHORIZED_MESSAGE) return;
     if (seq === requestSeq) showGalleryError("图库加载失败，请稍后重试。");
     return;
   }
@@ -112,7 +117,9 @@ async function refreshGalleryForSeq(seq) {
     // HTTP 状态码文案。
     const payload = await parseJsonLoose(response);
     if (seq !== requestSeq) return;
-    showGalleryError(`图库加载失败：${normalizePayloadError(payload, response).message}`);
+    showGalleryError(
+      `图库加载失败：${normalizePayloadError(payload, response).message}`,
+    );
     return;
   }
   const payload = await parseJsonLoose(response);
@@ -136,11 +143,16 @@ async function refreshGalleryForSeq(seq) {
   revokeObjectUrls("gallery");
   const grid = $("gallery-grid");
   grid.innerHTML = "";
-  $("gallery-empty").textContent = "保存目录还没有图片。";
+  $("gallery-empty").textContent = format
+    ? "当前过滤条件下没有图片。"
+    : "保存目录还没有图片。";
   $("gallery-empty").classList.toggle("hidden", state.gallery.items.length > 0);
   const pending = state.gallery.items.map((item) => {
     const figure = document.createElement("figure");
     figure.className = "gallery-item";
+    figure.tabIndex = 0;
+    figure.setAttribute("role", "button");
+    figure.setAttribute("aria-label", `查看 ${item.path}`);
     const img = document.createElement("img");
     img.alt = item.path;
     img.classList.add("developing");
@@ -156,9 +168,14 @@ async function refreshGalleryForSeq(seq) {
     caption.textContent = `${item.path}${detail ? " — " + detail : ""}`;
     caption.title = item.path;
     figure.appendChild(caption);
-    figure.addEventListener("click", () =>
-      openLightbox({ web_path: item.path }),
-    );
+    // 图库条目键盘可达：Enter 与 Space 等价点击。
+    const activate = () => openLightbox({ web_path: item.path });
+    figure.addEventListener("click", activate);
+    figure.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      activate();
+    });
     grid.appendChild(figure);
     return { img, path: item.path };
   });
@@ -187,7 +204,9 @@ async function refreshGalleryForSeq(seq) {
           }
           if (blobUrl) entry.img.src = blobUrl;
           else markUnavailable(entry);
-        } catch {
+        } catch (error) {
+          // 401 已弹令牌门，不误标缩略图不可用。
+          if (error.message === UNAUTHORIZED_MESSAGE) return;
           markUnavailable(entry);
         }
       }
@@ -221,6 +240,7 @@ async function refreshGalleryForSeq(seq) {
 export async function openLightbox(item, errorEl = $("gallery-error")) {
   if (!item || !item.web_path) return;
   const seq = ++lightboxSeq;
+  lightboxReturnFocus = document.activeElement;
   releaseLightboxUrl();
   let response = null;
   try {
@@ -229,7 +249,7 @@ export async function openLightbox(item, errorEl = $("gallery-error")) {
     );
   } catch (error) {
     // 401 已弹令牌门；其余网络异常不开灯箱，缩略图仍在，可再次点击重试。
-    if (error.message === "unauthorized") return;
+    if (error.message === UNAUTHORIZED_MESSAGE) return;
     if (seq !== lightboxSeq) return;
     showInlineError(errorEl, "原图加载失败，请重试。");
     return;
@@ -259,6 +279,7 @@ export async function openLightbox(item, errorEl = $("gallery-error")) {
   lightbox.classList.remove("hidden");
   void lightbox.offsetWidth;
   lightbox.classList.add("open");
+  $("lightbox-close").focus();
   const img = $("lightbox-img");
   img.classList.remove("loaded");
   // load 与 error 均用属性赋值覆盖上一张的残留监听，连续打开不累积。
@@ -298,6 +319,11 @@ function finishLightboxClose() {
   const img = $("lightbox-img");
   img.removeAttribute("src");
   img.classList.remove("loaded");
+  // 归还打开前的焦点，目标已从文档移除时放弃。
+  if (lightboxReturnFocus) {
+    if (lightboxReturnFocus.isConnected) lightboxReturnFocus.focus();
+    lightboxReturnFocus = null;
+  }
 }
 
 function releaseLightboxUrl() {
@@ -316,13 +342,13 @@ export async function useLightboxAsReference() {
   const blob = currentLightboxBlob;
   if (!blob || !state.configInfo || !state.configInfo.images_root_available)
     return;
-  if (state.tool === "text-to-image") {
-    document.querySelector('[data-tool="image-to-image"]').click();
+  if (state.tool === TOOL_TEXT_TO_IMAGE) {
+    document.querySelector(`[data-tool="${TOOL_IMAGE_TO_IMAGE}"]`).click();
     // 切工具时恢复的旧参考图可能占满唯一槽位，让位给用户显式选择的灯箱图，
     // 被顶出的仍回暂存不丢。
     while (
       state.refs.length > 0 &&
-      state.refs.length >= toolConfig("image-to-image").max
+      state.refs.length >= toolConfig(TOOL_IMAGE_TO_IMAGE).max
     ) {
       state.parkedRefs.push(state.refs.pop());
     }

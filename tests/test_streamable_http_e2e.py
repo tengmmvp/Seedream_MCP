@@ -22,10 +22,12 @@ import pytest
 import seedream_mcp.resources as resources
 import seedream_mcp.transport as transport_module
 from seedream_mcp.client import SeedreamClient
+from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.transport import _transport_security_for_host
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
-from _asgi_fakes import _LifespanManager, build_transport_app
+from _asgi_fakes import _LifespanManager, _assemble_streamable_http_app, build_transport_app
+from _web_fixtures import web_asgi_client
 
 # MCPServer streamable-http 默认 MCP 端点路径。
 _MCP_PATH = "/mcp"
@@ -61,10 +63,7 @@ async def test_e2e_valid_token_tools_list_returns_200(reset_http_app_state: None
     app = build_transport_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://localhost:8000"
-        ) as client:
+        async with web_asgi_client(app) as client:
             response = await client.post(
                 _MCP_PATH,
                 content=_mcp_request("tools/list"),
@@ -89,8 +88,7 @@ async def test_e2e_valid_token_tools_list_returns_200(reset_http_app_state: None
 async def test_e2e_missing_bearer_token_returns_401(reset_http_app_state: None) -> None:
     """无 Authorization 头由 Bearer 中间件最外层短路返回 401 裸质询，不触达应用。"""
     app = build_transport_app("s3cret")
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+    async with web_asgi_client(app) as client:
         response = await client.post(
             _MCP_PATH,
             content=_mcp_request("tools/list"),
@@ -106,8 +104,7 @@ async def test_e2e_missing_bearer_token_returns_401(reset_http_app_state: None) 
 async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) -> None:
     """错误 Bearer 令牌经 hmac.compare_digest 判定不匹配，返回 401 并附 invalid_token 质询。"""
     app = build_transport_app("s3cret")
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+    async with web_asgi_client(app) as client:
         response = await client.post(
             _MCP_PATH,
             content=_mcp_request("tools/list"),
@@ -126,19 +123,15 @@ async def test_e2e_wrong_bearer_token_returns_401(reset_http_app_state: None) ->
 async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> None:
     """请求体超 Content-Length 上限由请求体中间件在鉴权前返回 413。
 
-    上限取配置合法下限 1MB 并以 1MB+1 请求体走全栈；单值与配置解析由
-    test_request_body_limit 覆盖。
+    不携带令牌仍回 413 而非 401，证明拦截位于鉴权层之外；上限取配置合法下限
+    1MB 并以 1MB+1 请求体走全栈，单值与配置解析由 test_request_body_limit 覆盖。
     """
     app = build_transport_app("s3cret", body_limit=1024 * 1024)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+    async with web_asgi_client(app) as client:
         response = await client.post(
             _MCP_PATH,
             content=b"x" * (1024 * 1024 + 1),
-            headers={
-                "authorization": "Bearer s3cret",
-                "content-type": "application/json",
-            },
+            headers={"content-type": "application/json"},
         )
 
     assert response.status_code == 413
@@ -149,8 +142,7 @@ async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> Non
 async def test_e2e_health_check_returns_200_without_token(reset_http_app_state: None) -> None:
     """GET /health 由最外层健康检查中间件短路返回 200，无需 Bearer 令牌。"""
     app = build_transport_app("s3cret")
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+    async with web_asgi_client(app) as client:
         response = await client.get("/health")
 
     assert response.status_code == 200
@@ -182,10 +174,7 @@ async def test_e2e_tools_call_flat_params_success(
     app = build_transport_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://localhost:8000"
-        ) as client:
+        async with web_asgi_client(app) as client:
             response = await client.post(
                 _MCP_PATH,
                 content=_tools_call_request(
@@ -240,10 +229,7 @@ async def test_e2e_tools_call_error_result_is_error_passthrough(
     app = build_transport_app("s3cret", stateless=True, json_response=True)
 
     async with _LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://localhost:8000"
-        ) as client:
+        async with web_asgi_client(app) as client:
             response = await client.post(
                 _MCP_PATH,
                 content=_tools_call_request(
@@ -274,10 +260,7 @@ async def _post_mcp_with_host(
 ) -> httpx.Response:
     """以指定 Host 头与可选 Origin 头经完整 ASGI 栈发起 tools/list 请求。"""
     async with _LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://127.0.0.1:8000"
-        ) as client:
+        async with web_asgi_client(app, "http://127.0.0.1:8000") as client:
             headers = {
                 "host": host_header,
                 "authorization": "Bearer s3cret",
@@ -296,10 +279,9 @@ async def _post_mcp_with_host(
 async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
     reset_http_app_state: None,
 ) -> None:
-    """非回环绑定按实际地址重配 SDK 内层 Host 校验，非白名单 Host 不再被 421 拒绝。
+    """通配绑定未配置 hosts 时 SDK 内层 Host 校验关闭，外部域名 Host 正常返回 200。
 
-    host 参数未按实际绑定地址派生时，非回环部署的全部 /mcp 请求都会被 SDK 内层
-    以 421 拒绝。
+    通配绑定派生不出白名单，防护由强制 Bearer 鉴权承担。
     """
     app = build_transport_app("s3cret", stateless=True, json_response=True, host="0.0.0.0")
 
@@ -309,6 +291,27 @@ async def test_e2e_non_loopback_bind_accepts_non_loopback_host(
     body = response.json()
     assert body["jsonrpc"] == "2.0"
     assert "error" not in body
+
+
+async def test_e2e_cors_preflight_answered_without_token(
+    reset_http_app_state: None,
+) -> None:
+    """配置允许 origin 时 OPTIONS 预检由 CORS 层在鉴权之外应答，免 Bearer 令牌。"""
+    config = SeedreamConfig(api_key="test_key", http_allowed_origins=("https://app.example.com",))
+    app = _assemble_streamable_http_app("s3cret", config=config)
+
+    async with web_asgi_client(app, "http://127.0.0.1:8000") as client:
+        response = await client.options(
+            _MCP_PATH,
+            headers={
+                "origin": "https://app.example.com",
+                "access-control-request-method": "POST",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://app.example.com"
+    assert "POST" in response.headers["access-control-allow-methods"]
 
 
 async def test_e2e_loopback_bind_guard_rejects_external_host_before_sdk_allowlist(
@@ -397,7 +400,8 @@ async def _start_smoke_server_and_wait(
 ) -> tuple[threading.Thread, bool]:
     """后台线程运行生产启动器并等待端口可连接，返回线程与是否就绪。
 
-    未就绪时线程句柄仍随返回值交回，供调用方收尾后换端口重试。
+    服务线程先于端口可连接退出时立即返回失败，不空耗等待时限；未就绪时线程
+    句柄仍随返回值交回，供调用方收尾后换端口重试。
     """
 
     def _serve() -> None:
@@ -414,9 +418,29 @@ async def _start_smoke_server_and_wait(
             with socket.create_connection(("127.0.0.1", port), timeout=0.25):
                 return thread, True
         except OSError:
-            if time.monotonic() > deadline:
+            if not thread.is_alive() or time.monotonic() > deadline:
                 return thread, False
             await asyncio.sleep(0.05)
+
+
+async def test_smoke_wait_fails_fast_when_server_thread_dies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """服务线程即刻致命失败时就绪等待立即返回失败，不空耗等待时限。"""
+
+    def _fatal(host: str, port: int, token: str) -> None:
+        raise RuntimeError("startup boom")
+
+    monkeypatch.setattr(transport_module, "run_streamable_http", _fatal)
+    thread_errors: list[BaseException] = []
+    started = time.monotonic()
+
+    thread, listening = await _start_smoke_server_and_wait(_pick_free_port(), thread_errors)
+
+    assert listening is False
+    assert not thread.is_alive()
+    assert len(thread_errors) == 1
+    assert time.monotonic() - started < 5.0
 
 
 @pytest.mark.slow

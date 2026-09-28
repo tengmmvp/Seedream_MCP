@@ -12,19 +12,15 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from mcp.client import Client, ClientRequestContext
-from mcp.types import (
-    ListRootsResult,
-    ReadResourceResult,
-    Root,
-    TextResourceContents,
-)
-from pydantic import FileUrl
+from mcp.client import Client
+from mcp.types import ReadResourceResult, TextResourceContents
 
 import seedream_mcp.utils.io.io_path as io_path_module
 
 import seedream_mcp.resources as resources
 import seedream_mcp.server as server
+
+from _roots_session_fakes import RootsListCallback
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
 
@@ -90,14 +86,9 @@ async def test_workspace_roots_resource_reports_client_roots(
     """
     declared_root = tmp_path / "workspace"
     declared_root.mkdir()
+    callback = RootsListCallback([declared_root])
 
-    async def roots_callback(context: ClientRequestContext) -> ListRootsResult:
-        del context
-        return ListRootsResult(
-            roots=[Root(uri=cast(FileUrl, declared_root.as_uri()), name="workspace")]
-        )
-
-    async with Client(server.mcp, mode="legacy", list_roots_callback=roots_callback) as client:
+    async with Client(server.mcp, mode="legacy", list_roots_callback=callback) as client:
         plain = await client.read_resource("seedream://workspace/roots")
         expected_display = str(declared_root.resolve()).replace("\\", "/")
         assert _single_text_payload(plain) == {"roots": [expected_display]}
@@ -120,17 +111,9 @@ async def test_workspace_roots_resource_modern_round_trip_reports_client_roots(
     """
     declared_root = tmp_path / "workspace"
     declared_root.mkdir()
-    callback_calls = 0
+    callback = RootsListCallback([declared_root])
 
-    async def roots_callback(context: ClientRequestContext) -> ListRootsResult:
-        nonlocal callback_calls
-        del context
-        callback_calls += 1
-        return ListRootsResult(
-            roots=[Root(uri=cast(FileUrl, declared_root.as_uri()), name="workspace")]
-        )
-
-    async with Client(server.mcp, list_roots_callback=roots_callback) as client:
+    async with Client(server.mcp, list_roots_callback=callback) as client:
         plain = await client.read_resource("seedream://workspace/roots")
         expected_display = str(declared_root.resolve()).replace("\\", "/")
         assert _single_text_payload(plain) == {"roots": [expected_display]}
@@ -141,4 +124,4 @@ async def test_workspace_roots_resource_modern_round_trip_reports_client_roots(
             "resolved": [str(declared_root.resolve())],
         }
 
-    assert callback_calls == 2
+    assert callback.calls == 2

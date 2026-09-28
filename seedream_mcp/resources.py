@@ -181,14 +181,13 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
         # 锁内二次判定，避免并发进入 lifespan 时重复构造共享资源。
         async with _shared_init_lock:
             if _active_resource is None or _active_resource.config is not config:
-                old = _active_resource
-                _active_resource = await _build_active_resource(config)
-                await _retire_resource(old)
-            resource = _active_resource
-            resource.refcount += 1
-    else:
-        resource = _active_resource
-        resource.refcount += 1
+                built = await _build_active_resource(config)
+                # 旧资源先退役再发布：发布点到进场登记之间无挂起点，零引用的
+                # 新发布资源不会暴露给并发 teardown 的 idle 清理。
+                await _retire_resource(_active_resource)
+                _active_resource = built
+    resource = _active_resource
+    resource.refcount += 1
     try:
         yield {
             LIFESPAN_KEY_CONFIG: resource.config,
@@ -360,6 +359,10 @@ def _create_mcp_server() -> MCPServer:
     )
 
 
+# 导入期默认环境源探测到的密钥环：单例已持该环时重绑失败不影响解封。
+_IMPORT_TIME_REQUEST_STATE_KEYS = active_request_state_keys()
+
+
 # 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 复用同一实例。
 # version 必须显式传入：SDK 2.0 起未传 version 的服务器在 initialize 结果的 serverInfo
 # 中报告空串而非 SDK 包版本。request_state_security 为 None 时 SDK 回退进程临时密钥；
@@ -369,12 +372,21 @@ def _create_mcp_server() -> MCPServer:
 mcp = _create_mcp_server()
 
 
-def _warn_rebind_failure_on_stderr(configured: bool) -> None:
-    """已配置密钥环而重绑失败时向 stderr 输出告警，只看控制台的部署者可见。
+def _warn_rebind_failure_on_stderr(
+    source: tuple[bytes, ...] | RequestStateSecurity | None,
+) -> None:
+    """重绑失败且单例未在导入期固化同密钥环时向 stderr 告警解封退化。
 
-    日志告警之外补 stderr 一行，多副本部署者不读日志文件时也能看到解封退化。
+    密钥环来自系统环境变量时导入期构造已固化到单例，重绑失败不影响解封，
+    不告警；.env 与 --config-file 来源的密钥到不了导入期构造，失败即退化
+    为进程临时密钥，只看控制台的部署者依赖这行 stderr。
     """
-    if not configured:
+    if not source:
+        return
+    if (
+        not isinstance(source, RequestStateSecurity)
+        and tuple(source) == _IMPORT_TIME_REQUEST_STATE_KEYS
+    ):
         return
     print(
         "requestState 密钥环重绑失败：多副本部署的 requestState 解封将失败，"
@@ -409,9 +421,9 @@ def rebind_request_state_security(
     经 SDK provisional 属性 mcp.middleware 定位 RequestStateBoundary 并直写私有
     _security；_audience 构造期自旧策略预计算、不随 _security 替换自动更新，按
     构造器语义（声明值优先，回退 server name）一并重算。探测失败时记录错误并
-    返回 False，不阻断启动；source
-    非空时探测失败另向 stderr 输出多副本解封退化告警。属 SDK 升级适配点，SDK
-    提供公开替换入口后应切换。
+    返回 False，不阻断启动；source 非空且单例未在导入期固化同密钥环时探测失败
+    另向 stderr 输出多副本解封退化告警。属 SDK 升级适配点，
+    SDK 提供公开替换入口后应切换。
 
     Args:
         source: 密钥环字节、现成 RequestStateSecurity 策略或 None（未配置）。
@@ -421,7 +433,7 @@ def rebind_request_state_security(
             "SDK 公开属性 mcp.middleware 不可用，requestState 密钥环重绑被跳过，"
             "单例保持导入期形态；多副本部署的密钥共享可能失效"
         )
-        _warn_rebind_failure_on_stderr(bool(source))
+        _warn_rebind_failure_on_stderr(source)
         return False
     boundary = locate_request_state_boundary()
     if boundary is None or not hasattr(boundary, "_security"):
@@ -429,7 +441,7 @@ def rebind_request_state_security(
             "SDK 私有路径中未找到 RequestStateBoundary，requestState 密钥环"
             "重绑被跳过，单例保持导入期形态；多副本部署的密钥共享可能失效"
         )
-        _warn_rebind_failure_on_stderr(bool(source))
+        _warn_rebind_failure_on_stderr(source)
         return False
     if isinstance(source, RequestStateSecurity):
         policy = source

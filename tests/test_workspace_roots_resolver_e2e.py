@@ -9,33 +9,21 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 import pytest
 from mcp.client import Client, ClientRequestContext
-from mcp.types import CallToolResult, ListRootsResult, Root, TextContent
-from pydantic import FileUrl
+from mcp.types import CallToolResult, ListRootsResult, TextContent
 
 import seedream_mcp.server as server
 import seedream_mcp.utils.io.io_roots as io_roots_module
 from seedream_mcp import config as config_module
 from seedream_mcp.config import SeedreamConfig
 
+from _roots_session_fakes import RootsListCallback
+
 PNG_BYTES = b"\x89PNG\r\n\x1a\n"
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
-
-
-def _make_callback(roots: list[Path]) -> Any:
-    """构造按指定根目录应答的 roots callback。"""
-
-    async def roots_callback(context: ClientRequestContext) -> ListRootsResult:
-        del context
-        return ListRootsResult(
-            roots=[Root(uri=FileUrl(root.as_uri()), name=root.name) for root in roots]
-        )
-
-    return roots_callback
 
 
 async def _browse(client: Client, directory: str) -> CallToolResult:
@@ -50,7 +38,8 @@ async def test_resolver_applies_client_roots_boundary(
 ) -> None:
     """legacy 协商加 roots callback 时，resolver 取回的根目录成为工具文件边界。
 
-    声明根内可列出图片，声明的根之外即便环境变量根内有文件也拒绝访问。
+    声明根内可列出图片，声明的根之外即便回退根内有文件也拒绝访问；回退根经
+    活动配置注入，同名环境变量会被 fixture 注入的活动配置屏蔽。
     """
     declared_root = tmp_path / "declared"
     images_root = declared_root / ".seedream" / "images"
@@ -59,10 +48,14 @@ async def test_resolver_applies_client_roots_boundary(
     env_root = tmp_path / "env"
     env_root.mkdir()
     (env_root / "outside.png").write_bytes(PNG_BYTES)
-    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(env_root))
+    monkeypatch.setattr(
+        config_module,
+        "_active_config",
+        SeedreamConfig(api_key="test_key", workspace_root=str(env_root)),
+    )
 
     async with Client(
-        server.mcp, mode="legacy", list_roots_callback=_make_callback([declared_root])
+        server.mcp, mode="legacy", list_roots_callback=RootsListCallback([declared_root])
     ) as client:
         allowed = await _browse(client, ".")
         assert allowed.is_error is False
@@ -115,7 +108,7 @@ async def test_resolver_over_modern_negotiation(
     images_root.mkdir(parents=True)
     (images_root / "modern.png").write_bytes(PNG_BYTES)
 
-    async with Client(server.mcp, list_roots_callback=_make_callback([declared_root])) as client:
+    async with Client(server.mcp, list_roots_callback=RootsListCallback([declared_root])) as client:
         result = await _browse(client, ".")
         assert result.is_error is False
         structured = result.structured_content

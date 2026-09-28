@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -150,27 +149,3 @@ async def test_configured_origin_allows_cross_origin_web_api_without_token(
 
     assert allowed.status_code == 200
     assert denied.status_code == 403
-
-
-def test_mount_web_static_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """重复挂载不叠加 Mount 条目，目录缺失时跳过不抛异常。"""
-    from starlette.routing import Mount
-
-    from seedream_mcp.webapp import constants as web_constants
-    from seedream_mcp.webapp import routes as routes_module
-
-    prepare_static_dir(monkeypatch, tmp_path)
-    app: Any = type("_App", (), {"routes": []})()
-
-    routes_module.mount_web_static(app)
-    routes_module.mount_web_static(app)
-
-    mounts = [r for r in app.routes if isinstance(r, Mount)]
-    assert len(mounts) == 1
-    assert mounts[0].path == "/web/static"
-
-    missing_dir = tmp_path / "missing"
-    monkeypatch.setattr(web_constants, "STATIC_DIR", missing_dir)
-    empty_app: Any = type("_App", (), {"routes": []})()
-    routes_module.mount_web_static(empty_app)
-    assert empty_app.routes == []

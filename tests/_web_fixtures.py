@@ -2,7 +2,7 @@
 
 build_web_app 经 _asgi_fakes 的共享装配核心按生产装配序（register ->
 streamable_http_app -> mount -> attach）构建传输栈，保证测试栈与生产栈同源；
-web_asgi_client 与 web_get 供各 webapp 测试文件发起回环 ASGI 请求；
+web_asgi_client 与 web_get 供 webapp 与传输 e2e 测试文件发起回环 ASGI 请求；
 drive_asgi_messages 直驱响应对象收集全部 ASGI 消息，asgi_start_headers 与
 asgi_body_bytes 自消息列取值，供绕过传输栈直调响应对象的用例共享；路由状态
 隔离 fixture 见 conftest 的 clean_web_routes。
@@ -72,10 +72,12 @@ def build_web_app(
 
 
 @asynccontextmanager
-async def web_asgi_client(app: Any) -> AsyncIterator[httpx.AsyncClient]:
-    """以回环地址直连 Web 传输栈构建一次性 ASGI httpx 客户端。"""
+async def web_asgi_client(
+    app: Any, base_url: str = "http://127.0.0.1"
+) -> AsyncIterator[httpx.AsyncClient]:
+    """构建一次性 ASGI httpx 客户端，base_url 默认回环地址。"""
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+        transport=httpx.ASGITransport(app=app), base_url=base_url
     ) as client:
         yield client
 
@@ -129,6 +131,18 @@ def write_workspace_config(tmp_path: Path) -> Path:
     images_root.mkdir(parents=True)
     set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path)))
     return images_root
+
+
+def make_images_root_unresolvable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """注入数据根目录不可解析的配置并顶替其解析。"""
+    import seedream_mcp.utils.io.io_path as io_path_module
+
+    def _unresolvable(configured_dir: str) -> Path:
+        del configured_dir
+        raise OSError("simulated unresolvable path")
+
+    set_active_config(SeedreamConfig(api_key="test_key", data_root=str(tmp_path / "pics")))
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _unresolvable)
 
 
 def prepare_static_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:

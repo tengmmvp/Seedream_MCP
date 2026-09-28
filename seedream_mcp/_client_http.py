@@ -41,7 +41,11 @@ from .utils.core.sanitizers import (
     sanitize_error_text,
 )
 from .utils.images.image_ref import classify_image_reference
-from .utils.io.io_sse import is_sse_response, parse_sse_response
+from .utils.io.io_sse import (
+    is_sse_response,
+    items_limit_for,
+    parse_sse_response,
+)
 from .utils.io.io_stream import (
     RESPONSE_BODY_LIMIT_HINT,
     STREAM_DEADLINE_HIT,
@@ -360,6 +364,10 @@ class _ClientHTTPMixin:
             return self.config.sse_event_max_size
         return self.config.derived_sse_event_max_size()
 
+    def _parsed_data_items_limit(self) -> int:
+        """成功 JSON 响应 data 条目数的硬上限，与 SSE 条目上限同口径从总量限额推导。"""
+        return items_limit_for(self._response_body_byte_limit())
+
     async def _read_response_body_capped(
         self,
         response: httpx.Response,
@@ -473,11 +481,16 @@ class _ClientHTTPMixin:
                 deadline=deadline,
                 limit_adjustable=limit_adjustable,
             )
-        except (asyncio.TimeoutError, httpx.ReadTimeout) as exc:
-            # 已收到错误状态码后读体超时：按状态码归约为 API 错误交由可重试判定，
-            # Retry-After 一并保留。
+        except (asyncio.TimeoutError, httpx.RequestError) as exc:
+            # 已收到错误状态码后读体失败：按状态码归约为 API 错误交由可重试判定并保留
+            # Retry-After，传输错误并入网络错误重试会丢失状态码语义。
+            reason = (
+                "读取错误响应体超时"
+                if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException))
+                else "读取错误响应体失败"
+            )
             raise SeedreamAPIError(
-                f"读取错误响应体超时（状态码 {response.status_code}）: {exc}",
+                f"{reason}（状态码 {response.status_code}）: {exc}",
                 status_code=response.status_code,
                 retry_after=self._retry_after_or_none(response.status_code, response.headers),
             ) from exc
@@ -490,7 +503,8 @@ class _ClientHTTPMixin:
         """读取 200 响应体并解析 JSON，归一化为统一结果结构。
 
         读体超限与超时异常原样上抛；CPU 卸载池关闭属服务退出窗口，同样原样
-        上抛；JSON 解析失败包装为无状态码的 SeedreamAPIError，按不可重试处置。
+        上抛；JSON 解析失败与 data 条目数超上限包装为无状态码的
+        SeedreamAPIError，按不可重试处置。
         """
         raw_body = await self._read_response_body_capped(response, deadline=deadline)
         try:
@@ -507,7 +521,15 @@ class _ClientHTTPMixin:
         finally:
             # 解析完成后立即释放原始缓冲，避免与 b64 解码产物双驻留。
             del raw_body
-        return self._build_api_result(self._require_dict_payload(payload))
+        payload_dict = self._require_dict_payload(payload)
+        # 大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目硬上限同口径拒绝。
+        data_count = len(data_items(payload_dict.get("data")))
+        max_data_items = self._parsed_data_items_limit()
+        if data_count > max_data_items:
+            raise SeedreamAPIError(
+                f"响应条目数过多: data 含 {data_count} 项，超过上限 {max_data_items} 项"
+            )
+        return self._build_api_result(payload_dict)
 
     async def _send_with_header_deadline(
         self, client: httpx.AsyncClient, request: httpx.Request, timeout_seconds: float
@@ -748,6 +770,9 @@ class _ClientHTTPMixin:
                 )
                 if attempt == total_attempts - 1:
                     raise SeedreamNetworkError(f"{endpoint} 网络连接失败: {str(exc)}") from exc
+            except CpuOffloadPoolClosedError:
+                # 池关闭属服务退出窗口，由 _call_api 归一为服务关闭错误，不落非预期错误告警。
+                raise
             except Exception as exc:
                 self.logger.warning(
                     "{} API 调用非预期错误，不再重试 (尝试 {}/{}): {}",

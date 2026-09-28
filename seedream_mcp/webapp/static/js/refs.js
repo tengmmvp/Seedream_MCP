@@ -6,13 +6,22 @@
 
 "use strict";
 
-import { $, clearInlineError, currentModel, showInlineError, state } from "./api.js";
+import {
+  $,
+  clearInlineError,
+  currentModel,
+  showInlineError,
+  state,
+  TOOL_IMAGE_TO_IMAGE,
+  TOOL_MULTI_IMAGE_FUSION,
+  TOOL_SEQUENTIAL_GENERATION,
+} from "./api.js";
 
 const SINGLE_REF_LIMIT = 1;
 const FUSION_REF_MIN = 2;
-// config-info 未加载时的回退默认：上限 14 与 unknown 家族一致，预算 45MB 为
-// 64MB 请求体上限的推导值；加载后以服务端下发值为单一来源。
-const DEFAULT_UPLOAD_BUDGET_CHARS = 45 * 1024 * 1024;
+// config-info 未加载时的回退默认：上限 14 与 unknown 家族一致，预算按默认
+// 请求体上限 64MiB 扣 3MiB 信封余量推导；加载后以服务端下发值为单一来源。
+const DEFAULT_UPLOAD_BUDGET_CHARS = 61 * 1024 * 1024;
 const DEFAULT_UNKNOWN_REF_LIMIT = 14;
 
 // 预算为 0 时部署无法接受任何 data URI 上传。
@@ -30,7 +39,8 @@ function uploadBudgetChars() {
 
 // 未知模型（Endpoint ID 部署）的参考图上限，来自服务端 unknown 家族能力声明。
 function unknownRefLimit() {
-  const fromServer = state.configInfo && state.configInfo.unknown_max_reference_images;
+  const fromServer =
+    state.configInfo && state.configInfo.unknown_max_reference_images;
   return typeof fromServer === "number" && fromServer > 0
     ? fromServer
     : DEFAULT_UNKNOWN_REF_LIMIT;
@@ -44,24 +54,22 @@ function unknownRefLimit() {
  */
 export function toolConfig(tool) {
   const current = currentModel();
-  const refLimit = current
-    ? current.max_reference_images
-    : unknownRefLimit();
-  if (tool === "image-to-image")
+  const refLimit = current ? current.max_reference_images : unknownRefLimit();
+  if (tool === TOOL_IMAGE_TO_IMAGE)
     return {
       refs: true,
       min: SINGLE_REF_LIMIT,
       max: SINGLE_REF_LIMIT,
       promptOptional: true,
     };
-  if (tool === "multi-image-fusion")
+  if (tool === TOOL_MULTI_IMAGE_FUSION)
     return {
       refs: true,
       min: FUSION_REF_MIN,
       max: refLimit,
       promptOptional: false,
     };
-  if (tool === "sequential-generation")
+  if (tool === TOOL_SEQUENTIAL_GENERATION)
     return { refs: true, min: 0, max: refLimit, promptOptional: false };
   return { refs: false, min: 0, max: 0, promptOptional: false };
 }
@@ -99,7 +107,7 @@ export function renderReferences(enterIndex = -1) {
       item.appendChild(img);
     } else {
       const label = document.createElement("span");
-      label.className = "ref-path mono";
+      label.className = "mono";
       label.textContent =
         ref.value.length > 18 ? ref.value.slice(0, 18) + "…" : ref.value;
       item.appendChild(label);
@@ -176,7 +184,7 @@ export function addReference(kind, value, preview) {
 /**
  * 并行读取文件为 data URI，按选择顺序加入参考图以稳定「图N」编号。
  *
- * 读取前按类型与体积前置拦截，避免大文件白付全量读取；精确判定由
+ * 读取前按数量、类型与体积前置拦截，避免超限文件白付全量读取；精确判定由
  * addReference 兜底，拒绝原因聚合为一条提示。
  *
  * @param {FileList} files - 待读取的文件列表。
@@ -186,10 +194,17 @@ export async function handleFiles(files) {
     showRefError(ZERO_BUDGET_REASON);
     return;
   }
+  const config = toolConfig(state.tool);
   const rejected = [];
+  // 数量超限的文件不进入读取，免付整份 data URI 转换。
+  const accepted = [...files];
+  const overflow = accepted.splice(Math.max(0, config.max - state.refs.length));
+  for (const file of overflow) {
+    rejected.push(`${file.name}（该工具最多 ${config.max} 张参考图）`);
+  }
   let batchChars = dataUriTotalChars();
   const reads = [];
-  for (const file of files) {
+  for (const file of accepted) {
     if (file.type && !file.type.startsWith("image/")) {
       rejected.push(`${file.name}（非图片）`);
       continue;
