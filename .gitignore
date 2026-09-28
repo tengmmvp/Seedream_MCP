@@ -123,7 +123,6 @@ celerybeat.pid
 *.sage.py
 
 # 虚拟环境
-.env
 .venv
 env/
 venv/
@@ -221,6 +220,7 @@ evaluations/
 # ================================
 
 # 本地配置
+.env
 config.local.py
 settings.local.py
 

@@ -101,8 +101,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 # Download docker-compose.yml
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
-# Optional: create .env from .env.example for the read-only compose mount, replacing the env-var prefix below
-# Without .env, Docker creates a same-named directory as the mount source and breaks it; run "touch .env" first or drop that mount from the compose file
+# Optional: create .env from .env.example; compose reads it automatically, replacing the env-var prefix below
 
 # On Linux, create the data directory owned by uid 1000, Docker Desktop is unaffected
 mkdir -p .seedream && chown 1000:1000 .seedream
@@ -693,7 +692,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
 # Switch to other models (e.g. 4.0 / 4.5) with a custom size and debug mode
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
 
-# High-precision image generation (5.0 Pro; note: sequential generation / web search / streaming output not supported; sizes 1K/1.5K/2K only)
+# High-precision image generation (5.0 Pro)
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 ```
 

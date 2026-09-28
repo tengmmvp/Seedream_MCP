@@ -20,7 +20,15 @@ from pydantic import BaseModel
 
 import seedream_mcp
 from _no_param_tools import NO_PARAM_TOOLS
-from _readme_helpers import BASE_README, _capability_table, _prose_lines, _read_readme, _row_cells
+from _readme_helpers import (
+    BASE_README,
+    _NUMBER_TOKEN_PATTERN,
+    _PARAM_BULLET_PATTERN,
+    _capability_table,
+    _prose_lines,
+    _read_readme,
+    _row_cells,
+)
 from seedream_mcp.cli import build_arg_parser
 from seedream_mcp.server import mcp
 from seedream_mcp.tools.core.schemas import (
@@ -46,9 +54,6 @@ _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
 
 # 工具小节标题形态：<summary><b>1. <code>tool_name</code></b> — …</summary>
 _TOOL_SUMMARY_PATTERN = re.compile(r"<b>\d+\.\s*<code>([a-z_]+)</code></b>")
-
-# 工具参数 bullet 行形态：行首反引号参数名，与三语互对测试的提取口径一致。
-_PARAM_BULLET_PATTERN = re.compile(r"^- `([A-Za-z_][A-Za-z0-9_]*)`")
 
 # server.py 注册装饰器形态，工具与风格预设的注册名单都取源码装饰器为单一依据。
 _TOOL_DECORATOR_PATTERN = re.compile(r'@mcp\.tool\(\s*name="([a-z_]+)"')
@@ -246,7 +251,7 @@ def test_capability_table_reference_image_limits_match() -> None:
     """能力差异表参考图上限行的各列数字与 max_reference_images 一致。"""
     cells = _capability_row(BASE_README, "参考图上限")
     for family, cell in zip(_CAPABILITY_COLUMN_FAMILIES, cells[1:]):
-        numbers = re.findall(r"\d+", cell)
+        numbers = _NUMBER_TOKEN_PATTERN.findall(cell)
         assert len(numbers) == 1, f"{family} 参考图上限单元格应恰含一个数字: {cell!r}"
         assert int(numbers[0]) == MODEL_CAPABILITIES[family].max_reference_images, (
             f"{family} 参考图上限文档 {numbers[0]} != 代码 "
@@ -298,11 +303,9 @@ def test_capability_table_rows_are_triaged() -> None:
     )
     known = checked | set(_CAPABILITY_EXEMPT_ROWS)
     untriaged: list[str] = []
-    # 首行为表头，不入对账；纯短横线行为列对齐分隔行，同样跳过。
+    # 首行为表头，不入对账。
     for _, raw in _capability_table(BASE_README)[1:]:
         label = _row_cells(raw)[0]
-        if set(label) <= set("-: "):
-            continue
         if not any(keyword in label for keyword in known):
             untriaged.append(label)
     assert not untriaged, f"能力差异表行未纳入对账或豁免: {untriaged}"

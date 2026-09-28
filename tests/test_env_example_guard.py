@@ -188,6 +188,18 @@ def test_compose_env_defaults_match_config_defaults() -> None:
     assert not mismatches, f"compose 默认值与 config 不一致: {mismatches}"
 
 
+def _example_model_id_comment_block() -> str:
+    """收集 .env.example 中 SEEDREAM_MODEL_ID 赋值行上方的连续注释块。"""
+    lines = _example_path().read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.startswith("SEEDREAM_MODEL_ID="):
+            start = index
+            while start > 0 and lines[start - 1].lstrip().startswith("#"):
+                start -= 1
+            return "\n".join(lines[start:index])
+    raise AssertionError(".env.example 缺少 SEEDREAM_MODEL_ID 赋值行")
+
+
 def test_example_model_alias_list_matches_model_aliases() -> None:
     """.env.example 的模型别名清单与 MODEL_ALIASES 键集一致，README CLI 块同源。
 
@@ -196,11 +208,9 @@ def test_example_model_alias_list_matches_model_aliases() -> None:
     """
     from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
 
-    example_text = _example_path().read_text(encoding="utf-8")
-    model_section = example_text.split("SEEDREAM_MODEL_ID=", 1)[0].rsplit(
-        "SEEDREAM_ALLOW_HTTP_BASE_URL", 1
-    )[-1]
-    section_aliases = set(re.findall(r"doubao-seedream-[0-9a-z.\-]+", model_section))
+    section_aliases = set(
+        re.findall(r"doubao-seedream-[0-9a-z.\-]+", _example_model_id_comment_block())
+    )
 
     assert section_aliases == set(MODEL_ALIASES), (
         f".env.example 别名清单与 MODEL_ALIASES 不一致: "
@@ -231,6 +241,7 @@ def test_example_size_preset_comments_match_capability_table() -> None:
         MODEL_CAPABILITIES,
         MODEL_FAMILY_40,
         MODEL_FAMILY_45,
+        MODEL_FAMILY_50_FLASH,
         MODEL_FAMILY_50_LITE,
         MODEL_FAMILY_50_PRO,
     )
@@ -238,6 +249,7 @@ def test_example_size_preset_comments_match_capability_table() -> None:
     expected_lines = {
         "# - Seedream 5.0 Pro：1K, 1.5K, 2K": MODEL_FAMILY_50_PRO,
         "# - Seedream 5.0 / 5.0 Lite：2K, 3K, 4K": MODEL_FAMILY_50_LITE,
+        "# - Seedream 5.0 Flash：1K, 1.5K, 2K": MODEL_FAMILY_50_FLASH,
         "# - Seedream 4.5：2K, 4K": MODEL_FAMILY_45,
         "# - Seedream 4.0：1K, 2K, 4K": MODEL_FAMILY_40,
     }

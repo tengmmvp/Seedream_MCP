@@ -9,8 +9,8 @@ README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版�
 bash 块内的 KEY=value 赋值与 CLI 旗标 token、工具参数 bullet 列表
 的参数名序列、标题层级、链接 URL、表格列数与能力差异表的数字 token 序列，不比
 较自然语言正文。定位能力差异表时以含 "1K / 1.5K / 2K" 单元格的表格为锚点，不
-依赖各语言的章节标题文字。围栏解析、正文行提取与能力差异表定位的共享实现位于
-_readme_helpers。
+依赖各语言的章节标题文字。围栏解析、正文行提取、能力差异表定位与参数 bullet、
+数字 token 两种提取形态的共享实现位于 _readme_helpers。
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from typing import TypeVar
 from _readme_helpers import (
     BASE_README,
     CodeBlock,
+    _NUMBER_TOKEN_PATTERN,
+    _PARAM_BULLET_PATTERN,
     _capability_table,
     _lang_blocks,
     _prose_lines,
@@ -46,9 +48,6 @@ _HTML_LINK_PATTERN = re.compile(r'(?:href|src)="([^"]+)"')
 
 # ATX 标题行，井号序列后须跟空白。
 _HEADING_PATTERN = re.compile(r"^(#{1,6})(?=\s)")
-
-# 工具参数 bullet 行形态：行首反引号包裹的参数名，参数名本身语言无关。
-_PARAM_BULLET_PATTERN = re.compile(r"^- `([A-Za-z_][A-Za-z0-9_]*)`")
 
 _T = TypeVar("_T")
 
@@ -136,10 +135,6 @@ def _table_columns(name: str) -> list[tuple[int, int]]:
     for rows in readme_html_tables(name):
         columns.extend((lineno, raw.count("|") - 1) for lineno, raw in rows)
     return columns
-
-
-# 单元格内数字 token 提取，尺寸档位、像素值与参考图上限等取值均为数字。
-_NUMBER_TOKEN_PATTERN = re.compile(r"\d+")
 
 
 def _row_number_tokens(raw: str) -> list[str]:

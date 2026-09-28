@@ -52,13 +52,13 @@ description: Seedream 图像生成 MCP 服务器的使用指南，覆盖文生�
 ## 关键参数规则
 
 - 模型：由服务器配置决定，单次调用不可切换；参数是否受当前模型支持先查 `get_model_info`，不支持时报错会附支持的模型清单，转告用户调整服务器配置
-- `size`：档位（`1K`/`1.5K`/`2K`/`3K`/`4K`）或 `宽x高` 像素；省略时使用服务器默认尺寸（未另行配置时为 `2K`）；图层拆分场景仅接受 `1K/1.5K/2K` 档位或 `auto`
+- `size`：档位（`1K`/`1.5K`/`2K`/`3K`/`4K`）或 `宽x高` 像素；省略时使用服务器默认尺寸（未另行配置时为 `2K`）；图层拆分场景仅接受 `1K/1.5K/2K` 档位或 `auto`，省略时默认 `auto`
 - `watermark`：默认不加水印
 - `optimize_prompt_options`：`standard` 或 `fast`，`fast` 需当前模型支持
 - `response_format`：默认 `url`；`output_format` 在 `jpeg`/`png` 中选择，需当前模型支持
 - `stream`：需当前模型支持；开启时 `request_count` 须为 1
 - `tools`：`[{"type": "web_search"}]` 开启联网搜索，需当前模型支持
-- `request_count`：1-10 张候选图；组图场景语义为"每次产出一组"
+- `request_count`：1-10 张候选图；组图场景语义为"每次产出一组"；图层拆分场景每次产出一组（1 张底图 + 多张图层）
 - `max_images`（组图）：1-15，省略时自动取 15 减去参考图数量
 - `layer_decomposition`（图层拆分）：输出 1 张底图 + 至多 16 张透明 PNG 图层，仅图生图，需当前模型支持
 - `auto_save`/`save_path`/`custom_name`：控制单次保存行为，见下节

@@ -3,13 +3,15 @@
 config 的 SeedreamConfig 字段默认值是默认值的单一数据源，经 ENV_DEFAULTS 以环境
 变量名为键导出；.env.example 注释的「默认：X」是唯一文档镜像。本文件把镜像与
 数据源的漂移变成测试强制：代码改默认值而文档未同步（或反向）立即变红。无法以
-机械规则解析的标注形态建立显式豁免清单并注明理由，新增键或新增标注未归类时
-同样失败。
+机械规则解析的键建立显式豁免清单并注明理由，豁免仅移出覆盖检查，豁免键一旦
+标注默认值仍参与取值对账。
 """
 
 from __future__ import annotations
 
 import re
+
+import pytest
 
 import seedream_mcp._config_sources as config_sources
 
@@ -22,7 +24,7 @@ _VALUE_BOUNDARY_PATTERN = re.compile(r"[（(，,；;。]")
 # 空值标注 token，对应字段默认 None（ENV_DEFAULTS 导出为空串）。
 _EMPTY_VALUE_TOKENS = frozenset({"空", "未设置"})
 
-# .env.example 侧无法机械对账的键及理由；新增键的标注缺解析规则时不允许静默落入此处。
+# .env.example 侧无法机械对账的键及理由。
 _EXAMPLE_EXEMPT: dict[str, str] = {
     "ARK_API_KEY": "必填字段无代码默认值，example 不标注默认",
     "SEEDREAM_DATA_ROOT": "无「默认：」标注行，回退行为在说明行描述，字段默认 None",
@@ -42,28 +44,42 @@ def _parse_documented_value(raw: str) -> str:
     return token
 
 
-def test_env_example_default_annotations_match_config() -> None:
-    """.env.example 各键「默认：」标注须与代码默认值一致。
-
-    未标注默认且未豁免的键为覆盖缺口；标注解析结果与 ENV_DEFAULTS 不同的键为
-    漂移。模型选择器两侧经别名展开后比较，文档允许写别名而代码存完整 Model ID。
-    """
-    annotations = _example_default_annotations()
-    all_keys = set(config_sources.ENV_DEFAULTS) | {"ARK_API_KEY"}
+def _assert_annotations_match_defaults(
+    annotations: dict[str, str], env_defaults: dict[str, str]
+) -> None:
+    """对账核心：未豁免键缺标注为覆盖缺口，已标注键取值与代码默认值不同为漂移。"""
+    all_keys = set(env_defaults) | {"ARK_API_KEY"}
     exempt = set(_EXAMPLE_EXEMPT)
     missing = [key for key in sorted(all_keys - exempt) if key not in annotations]
     assert not missing, f".env.example 缺少默认值标注且未列入豁免清单: {missing}"
 
     drift: list[str] = []
-    for env_key in sorted(all_keys - exempt):
+    for env_key in sorted(all_keys):
+        # 豁免键未标注时跳过对账，补标注后与普通键同口径参与。
+        if env_key in exempt and env_key not in annotations:
+            continue
         documented = _parse_documented_value(annotations[env_key])
-        expected = config_sources.ENV_DEFAULTS[env_key]
+        expected = env_defaults.get(env_key, "")
         if env_key == "SEEDREAM_MODEL_ID":
             documented = config_sources.normalize_model_selector(documented)
             expected = config_sources.normalize_model_selector(expected)
         if documented != expected:
             drift.append(f"{env_key}: 文档 {documented!r} != 代码 {expected!r}")
     assert not drift, ".env.example 默认值标注与代码默认值漂移:\n" + "\n".join(drift)
+
+
+def test_env_example_default_annotations_match_config() -> None:
+    """.env.example 各键「默认：」标注须与代码默认值一致。
+
+    模型选择器两侧经别名展开后比较，文档允许写别名而代码存完整 Model ID。
+    """
+    _assert_annotations_match_defaults(_example_default_annotations(), config_sources.ENV_DEFAULTS)
+
+
+def test_exempt_key_with_annotation_still_checked_for_drift() -> None:
+    """豁免键一旦标注默认值即参与取值对账。"""
+    with pytest.raises(AssertionError, match="SEEDREAM_DATA_ROOT"):
+        _assert_annotations_match_defaults({"SEEDREAM_DATA_ROOT": "42"}, {"SEEDREAM_DATA_ROOT": ""})
 
 
 def _example_default_annotations() -> dict[str, str]:

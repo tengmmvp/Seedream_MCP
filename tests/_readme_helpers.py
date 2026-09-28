@@ -106,6 +106,12 @@ def _prose_lines(name: str) -> list[tuple[int, str]]:
     ]
 
 
+# 工具参数 bullet 行形态：行首反引号包裹的参数名，参数名本身语言无关。
+_PARAM_BULLET_PATTERN = re.compile(r"^- `([A-Za-z_][A-Za-z0-9_]*)`")
+
+# 数字 token 提取，代码块与表格单元格的取值指纹共用。
+_NUMBER_TOKEN_PATTERN = re.compile(r"\d+")
+
 # HTML 表格解析的标签形态，单元格内联标签剥除后以竖线拼接伪行
 _TAG_PATTERN = re.compile(r"<[^>]+>")
 _TABLE_PATTERN = re.compile(r"<table[^>]*>.*?</table>", re.DOTALL)

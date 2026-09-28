@@ -101,8 +101,7 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --model doubao-seedream-5.0
 # 下载 docker-compose.yml
 curl -O https://raw.githubusercontent.com/tengmmvp/Seedream_MCP/main/docker-compose.yml
 
-# 可选：参照 .env.example 创建 .env 供 compose 只读挂载，免去下行命令的环境变量前置
-# 未创建 .env 时 Docker 会自动建出同名目录充当挂载源导致挂载异常，请先 touch .env 或移除 compose 中的挂载行
+# 可选：参照 .env.example 创建 .env，compose 自动读取其中变量，免去下行命令的环境变量前置
 
 # Linux 需先创建属主为 1000 的数据目录，Docker Desktop 不受影响
 mkdir -p .seedream && chown 1000:1000 .seedream
@@ -693,7 +692,7 @@ ARK_API_KEY=your_key uvx seedream-image-mcp --config-file ./my-config.env
 # 切换其他模型（如 4.0 / 4.5）并指定尺寸与调试模式
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-4.5 --default-size 4K --log-level DEBUG
 
-# 高精度生图（5.0 Pro；注意：不支持组图 / 联网搜索 / 流式输出，尺寸仅 1K/1.5K/2K）
+# 高精度生图（5.0 Pro）
 ARK_API_KEY=your_key uvx seedream-image-mcp --model doubao-seedream-5.0-pro
 ```
 

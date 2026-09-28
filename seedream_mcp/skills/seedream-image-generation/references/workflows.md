@@ -4,7 +4,7 @@
 
 ## 连环画 / 故事书端到端
 
-一句话主题生成整本图文并茂的连环画，分五步：
+一句话主题生成整本图文并茂的连环画，分四步：
 
 1. **故事创作与分镜拆解**。由 LLM（本对话的模型自身即可）按用户主题产出结构化分镜 JSON：`title`（书名）、`summary`（30 字内总结）、`scenes`（每镜文案，约 50 字）、`scenes_detail`（每镜画面描述）。核心约束：`scenes` 与 `scenes_detail` 必须 1:1 顺序绑定，分镜 5~10 个、不得超过 10 个，叙事遵循开端 → 发展 → 高潮 → 结局。可用的 System Prompt 模板（改编自火山引擎官方教程）：
 
@@ -62,5 +62,5 @@
 ## 与保存目录的闭环
 
 1. `browse_images` 按目录与分页翻找历史图（结果含 `total_count`、`has_more`、`next_offset`），拿到本地保存路径
-2. 保存路径直接作为 `image` 参数传入任一生成工具，无需上传
+2. 保存路径直接作为 `image` 参数传入带参考图的生成工具（`image_to_image`、`multi_image_fusion`、`sequential_generation`），无需上传
 3. API 返回的 URL 24 小时过期，任何跨会话引用都必须走保存路径
