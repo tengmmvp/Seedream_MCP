@@ -14,7 +14,7 @@ ENV PYTHONUNBUFFERED=1 \
     UV_NO_PROGRESS=1
 
 # 固定 uv 版本
-ARG UV_VERSION=0.9.18
+ARG UV_VERSION=0.12.19
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 # 先复制项目清单并只安装依赖，源码未变更时命中缓存层；README 与 LICENSE 为 hatchling

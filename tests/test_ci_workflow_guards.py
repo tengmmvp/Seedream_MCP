@@ -265,6 +265,18 @@ def test_sdk_lower_bound_workflow_filters_document_only_changes() -> None:
     assert "group: sdk-lower-bound-${{ github.ref }}" in lower
 
 
+def test_dockerignore_wildcards_intact() -> None:
+    """排除规则的关键条目在位，损坏形态在此拦截。"""
+    lines = [
+        line.strip()
+        for line in (_REPO_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    ]
+    for required in ("__pycache__", "*.pyc", "*.md", "*.log", ".coverage.*"):
+        assert required in lines, f"排除条目缺失或通配符损坏: {required}"
+    for corrupted in ("_.", "\\*", "**pycache**"):
+        assert not any(corrupted in line for line in lines), f"出现通配符损坏形态: {corrupted}"
+
+
 def test_ci_setup_actions_sha_single_sourced() -> None:
     """ci.yml 不内联公共 setup 动作 SHA，setup 引用单源收敛到可复用工作流。"""
     ci = _workflow_text("ci.yml")
@@ -272,3 +284,16 @@ def test_ci_setup_actions_sha_single_sourced() -> None:
     assert "astral-sh/setup-uv@" not in ci
     # docker 作业保留自身 checkout，其余 setup 步骤复用 reusable-checks.yml
     assert ci.count("actions/checkout@") == 1
+
+
+def test_setup_uv_version_pinned_to_dockerfile() -> None:
+    """全部 setup-uv 步骤钉版与 Dockerfile 的 UV_VERSION 一致，两处策略不得漂移。"""
+    dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    pin = re.search(r"^ARG UV_VERSION=([0-9][0-9A-Za-z.-]*)$", dockerfile, re.MULTILINE)
+    assert pin is not None, "Dockerfile 必须钉 UV_VERSION"
+    for name in ("reusable-checks.yml", "release.yml", "audit.yml"):
+        text = _workflow_text(name)
+        assert "astral-sh/setup-uv@" in text, f"{name} 应经 setup-uv 安装 uv"
+        assert (
+            f"version: {pin.group(1)}" in text
+        ), f"{name} 的 setup-uv 须钉 version: {pin.group(1)}，与 Dockerfile UV_VERSION 同源"
