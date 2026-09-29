@@ -97,6 +97,20 @@ def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
         ) from exc
 
 
+def _is_printable_ascii(value: str) -> bool:
+    """判定是否全为 0x21-0x7E 的可打印 ASCII，空白与控制字符判否。"""
+    return all(0x21 <= ord(ch) <= 0x7E for ch in value)
+
+
+def _http_auth_token_invalid_reason(token: str, min_length: int) -> str | None:
+    """返回鉴权令牌的失败类别（"length" 或 "charset"），合法返回 None；CLI 与配置侧共用。"""
+    if len(token) < min_length:
+        return "length"
+    if not _is_printable_ascii(token):
+        return "charset"
+    return None
+
+
 def _bracket_ipv6_literal(entry: str) -> str | None:
     """方括号 host 条目返回内部 IPv6 字面量，非方括号或未闭合形态返回 None。
 

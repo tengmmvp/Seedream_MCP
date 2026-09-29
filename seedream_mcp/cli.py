@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from typing import Literal, cast
 
+from ._config_sources import _http_auth_token_invalid_reason
 from .config import (
     DEFAULT_HTTP_HOST,
     DEFAULT_HTTP_PORT,
@@ -209,7 +210,7 @@ def validate_transport_args(args: argparse.Namespace) -> str | None:
     """校验传输相关 CLI 参数组合，返回错误消息；参数合法时返回 None。
 
     仅 streamable-http 需要校验：TLS 证书与私钥必须成对提供或同时省略；
-    --auth-token 显式提供时校验最短长度，与配置侧同口径。
+    --auth-token 显式提供时校验最短长度与可打印 ASCII 字符集，失败原因取自配置侧共用闸口。
     """
     if args.transport != "streamable-http":
         return None
@@ -219,11 +220,19 @@ def validate_transport_args(args: argparse.Namespace) -> str | None:
             "仅提供其一无法建立 TLS。"
         )
     cli_token = (args.auth_token or "").strip()
-    if cli_token and len(cli_token) < HTTP_AUTH_TOKEN_MIN_LENGTH:
-        return (
-            f"安全错误：--auth-token 长度不得少于 {HTTP_AUTH_TOKEN_MIN_LENGTH} 字符，"
-            "低熵令牌可被在线穷举，建议用 openssl rand -hex 32 生成。"
-        )
+    if cli_token:
+        invalid_reason = _http_auth_token_invalid_reason(cli_token, HTTP_AUTH_TOKEN_MIN_LENGTH)
+        if invalid_reason == "length":
+            return (
+                f"安全错误：--auth-token 长度不得少于 {HTTP_AUTH_TOKEN_MIN_LENGTH} 字符，"
+                "低熵令牌可被在线穷举，建议用 openssl rand -hex 32 生成。"
+            )
+        if invalid_reason == "charset":
+            return (
+                "安全错误：--auth-token 须为可打印ASCII字符，"
+                "含控制字符、空白或非 ASCII 字符的令牌与客户端编码口径不一致，"
+                "表现为永久 401 而非显式报错。"
+            )
     return None
 
 

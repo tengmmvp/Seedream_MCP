@@ -29,6 +29,8 @@ from ._config_sources import (
     _ensure_field_utf8_encodable,
     _env_field,
     _env_var_suffix,
+    _http_auth_token_invalid_reason,
+    _is_printable_ascii,
     _pick_config_value,
     _read_env_values,
     env_family_prefixes,
@@ -172,7 +174,7 @@ class SeedreamConfig:
             依赖自动保存，关闭或保存失败时仅返回文本与 structuredContent。
         workspace_root: 无 MCP Roots 时本地文件访问边界的回退目录。
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌；配置时长度不得
-            少于 HTTP_AUTH_TOKEN_MIN_LENGTH 字符。
+            少于 HTTP_AUTH_TOKEN_MIN_LENGTH 字符且须为可打印 ASCII。
         http_max_body_size: streamable-http 请求体大小上限字节数，默认 64MB。
         web_enabled: 是否在 streamable-http 传输上开启 Web 操作台，默认关闭；开启后
             同一进程提供 /web 网页与 /web/api 接口，stdio 传输不受影响。
@@ -274,20 +276,24 @@ class SeedreamConfig:
         self._validate_request_state_keys()
 
     def _validate_api_credentials(self) -> None:
-        """校验 api_key 非空且非默认占位符。"""
+        """校验 api_key 非空、非默认占位符且为可打印 ASCII。"""
         # 与 model_id 等字段同口径回写 strip，避免空白密钥产出畸形 Bearer 头。
         stripped = (self.api_key or "").strip()
         object.__setattr__(self, "api_key", stripped)
         if not self.api_key:
             raise SeedreamConfigError(f"API密钥不能为空{_env_var_suffix('api_key')}")
         _ensure_field_utf8_encodable(self.api_key, "api_key")
+        # 密钥含控制字符、空白或非 ASCII 字符必为无效输入，留到请求期只以头值
+        # 非法或编码失败等晦涩错误暴露。
+        if not _is_printable_ascii(self.api_key):
+            raise SeedreamConfigError(f"API密钥须为可打印ASCII字符{_env_var_suffix('api_key')}")
         if self.api_key == "your_api_key_here":
             raise SeedreamConfigError(
                 f"请设置有效的API密钥，不能使用默认占位符{_env_var_suffix('api_key')}"
             )
 
     def _validate_api_endpoint(self) -> None:
-        """校验 base_url 的 scheme、主机名与 http 明文豁免。"""
+        """校验 base_url 的 scheme、主机名、userinfo 与 http 明文豁免。"""
         # RFC 3986 规定 scheme 大小写不敏感，HTTPS:// 等大写形态经 urlparse 取小写后判定。
         invalid_url_message = f"base_url必须是有效的HTTP/HTTPS URL{_env_var_suffix('base_url')}"
         try:
@@ -314,6 +320,11 @@ class SeedreamConfig:
         if parsed_base_url.query or parsed_base_url.fragment:
             raise SeedreamConfigError(
                 f"base_url不能包含查询参数或片段{_env_var_suffix('base_url')}"
+            )
+        # userinfo 会被 httpx 转为 URL Basic 认证并静默覆盖 Bearer 密钥头。
+        if parsed_base_url.username is not None or parsed_base_url.password is not None:
+            raise SeedreamConfigError(
+                f"base_url不能包含用户名密码等 userinfo{_env_var_suffix('base_url')}"
             )
         if base_url_scheme == "http":
             if not self.allow_http_base_url:
@@ -505,11 +516,22 @@ class SeedreamConfig:
             self._validate_dir_field(self.workspace_root, "workspace_root")
 
     def _validate_http_fields(self) -> None:
-        """校验 streamable-http 鉴权令牌强度、请求体下限与 Host 允许列表。"""
-        if self.http_auth_token and len(self.http_auth_token) < HTTP_AUTH_TOKEN_MIN_LENGTH:
+        """校验 streamable-http 鉴权令牌长度与字符集、请求体下限与 Host 允许列表。"""
+        # 与 api_key 同口径回写 strip，直构路径的空白尾符不致误判为非法字符集。
+        object.__setattr__(self, "http_auth_token", (self.http_auth_token or "").strip() or None)
+        invalid_reason = (
+            _http_auth_token_invalid_reason(self.http_auth_token, HTTP_AUTH_TOKEN_MIN_LENGTH)
+            if self.http_auth_token
+            else None
+        )
+        if invalid_reason == "length":
             raise SeedreamConfigError(
                 f"http_auth_token 长度不得少于 {HTTP_AUTH_TOKEN_MIN_LENGTH} 字符"
                 f"{_env_var_suffix('http_auth_token')}"
+            )
+        if invalid_reason == "charset":
+            raise SeedreamConfigError(
+                "http_auth_token 须为可打印ASCII字符" f"{_env_var_suffix('http_auth_token')}"
             )
         if self.http_max_body_size < _HTTP_MAX_BODY_SIZE_FLOOR:
             raise SeedreamConfigError(

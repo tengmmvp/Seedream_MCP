@@ -681,6 +681,23 @@ def test_http_auth_token_min_length_enforced() -> None:
     assert SeedreamConfig(api_key="k", http_auth_token="a" * 16).http_auth_token == "a" * 16
 
 
+@pytest.mark.parametrize(
+    "invalid_token",
+    ["令牌token-12345678", "token 1234567890", "token1234567890\x7f"],
+)
+def test_http_auth_token_requires_printable_ascii(invalid_token: str) -> None:
+    """含非 ASCII、空白或控制字符的令牌构造期拒绝，避免部署后永久 401。"""
+    with pytest.raises(SeedreamConfigError, match="可打印ASCII"):
+        SeedreamConfig(api_key="k", http_auth_token=invalid_token)
+
+
+def test_http_auth_token_direct_construction_strips_trailing_whitespace() -> None:
+    """直构路径的空白尾符经 strip 回写后接受，与 env 构建路径同口径。"""
+    config = SeedreamConfig(api_key="k", http_auth_token="a" * 16 + "\n")
+    assert config.http_auth_token == "a" * 16
+    assert SeedreamConfig(api_key="k", http_auth_token="   ").http_auth_token is None
+
+
 def test_generate_concurrency_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """SEEDREAM_GENERATE_CONCURRENCY 环境变量取值生效。"""
     monkeypatch.setenv("ARK_API_KEY", "k")
@@ -1039,6 +1056,40 @@ def test_build_config_rejects_base_url_without_netloc(
         build_config_from_sources(env_file=str(env_file))
 
 
+# ==================== base_url userinfo 拒绝 ====================
+
+
+@pytest.mark.parametrize(
+    "invalid_base_url",
+    [
+        "https://user:pass@ark.example.com/api/v3",
+        "https://user@ark.example.com/api/v3",
+        "https://:pass@ark.example.com/api/v3",
+        "https://@ark.example.com/api/v3",
+    ],
+)
+def test_seedream_config_rejects_base_url_with_userinfo(invalid_base_url: str) -> None:
+    """携带 userinfo 的 base_url 在构造期拒绝，httpx 会以 Basic 认证覆盖 Bearer 密钥头。"""
+    with pytest.raises(SeedreamConfigError, match="userinfo") as excinfo:
+        SeedreamConfig(api_key="k", base_url=invalid_base_url)
+
+    assert "环境变量 ARK_BASE_URL" in excinfo.value.message
+
+
+def test_build_config_rejects_base_url_with_userinfo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_config_from_sources 构建路径同样经 validate 拒绝携带 userinfo 的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, "ARK_API_KEY=file_key\nARK_BASE_URL=https://user:pass@ark.example.com/api/v3\n"
+    )
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        build_config_from_sources(env_file=str(env_file))
+
+
 # ==================== 校验错误消息附带环境变量名 ====================
 
 
@@ -1077,6 +1128,30 @@ def test_seedream_config_strips_api_key_whitespace() -> None:
     """带首尾空白的 api_key 在构造期规范化，不产出畸形 Bearer 头。"""
     config = SeedreamConfig(api_key=" key ")
     assert config.api_key == "key"
+
+
+@pytest.mark.parametrize(
+    "invalid_api_key",
+    ["k\nx", "k\rx", "k\tx", "k\x7f", "中文Key", "k ey"],
+)
+def test_seedream_config_rejects_non_printable_ascii_in_api_key(invalid_api_key: str) -> None:
+    """含控制字符、空白或非 ASCII 的 api_key 在构造期拒绝，不延迟到请求期以晦涩错误失败。"""
+    with pytest.raises(SeedreamConfigError, match="可打印ASCII") as excinfo:
+        SeedreamConfig(api_key=invalid_api_key)
+
+    assert "环境变量 ARK_API_KEY" in excinfo.value.message
+
+
+def test_seedream_config_strips_trailing_newline_in_api_key() -> None:
+    """尾随换行按既有 strip 规范化，仅内嵌非法字符才拒绝。"""
+    config = SeedreamConfig(api_key="k\n")
+    assert config.api_key == "k"
+
+
+@pytest.mark.parametrize("valid_api_key", ["k", "ASCII-key_42-x"])
+def test_seedream_config_accepts_printable_ascii_api_keys(valid_api_key: str) -> None:
+    """可打印 ASCII 的正常键照常通过。"""
+    assert SeedreamConfig(api_key=valid_api_key).api_key == valid_api_key
 
 
 def test_seedream_config_none_api_key_raises_config_error() -> None:
