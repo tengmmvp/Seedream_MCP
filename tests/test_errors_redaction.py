@@ -885,7 +885,7 @@ def test_sanitize_error_text_blocks_escaped_separator_in_compound_prefix_key() -
 def test_redact_disguised_precheck_ascii_lower_fast_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """性能守护：无触发词文本按影子预检即返回，ASCII 字符走 lower 快路不进折叠函数。"""
+    """性能守护：无触发词文本按影子预检即返回，ASCII 走 lower 快路、非 ASCII 折叠记忆化。"""
     from seedream_mcp.utils.core import sanitizers as sanitizers_module
 
     calls: list[int] = []
@@ -896,6 +896,8 @@ def test_redact_disguised_precheck_ascii_lower_fast_path(
         return real_fold(value)
 
     monkeypatch.setattr(sanitizers_module, "_fold_key_disguise_text", counting_fold)
+    # 换入空缓存隔离既有记忆化条目，计数断言不随测试执行顺序漂移
+    monkeypatch.setattr(sanitizers_module, "_FOLD_CHAR_CACHE", {})
 
     path = "D:\\temp\\file.png"
     assert sanitizers_module._redact_disguised_keyvalues(path) == path
@@ -905,13 +907,14 @@ def test_redact_disguised_precheck_ascii_lower_fast_path(
     calls.clear()
     mixed = "D:\\temp\\图.png"
     assert sanitizers_module._redact_disguised_keyvalues(mixed) == mixed
-    # 影子按字符折叠，仅非 ASCII 字符进入折叠函数
+    # 影子按字符折叠，非 ASCII 字符仅在缓存未命中时进入折叠函数
     assert calls == [1]
 
     calls.clear()
     chinese = "图" * 384
     assert sanitizers_module._redact_disguised_keyvalues(chinese) == chinese
-    assert calls == [1] * 384
+    # 单字符折叠经缓存记忆化，重复字符不再进入折叠函数
+    assert calls == []
 
     calls.clear()
     hit = "to\x00ken=SECRET"
@@ -922,7 +925,7 @@ def test_redact_disguised_precheck_ascii_lower_fast_path(
     calls.clear()
     hit_nonascii = "to\x00ken=SECRET中"
     assert sanitizers_module._redact_disguised_keyvalues(hit_nonascii) == "to\x00ken=***"
-    # 仅非 ASCII 字符进入折叠函数，删除计划相同时不构建第二影子
+    # 缓存未命中的非 ASCII 字符进入折叠函数，删除计划相同时不构建第二影子
     assert calls == [1]
 
 
@@ -1579,6 +1582,18 @@ def test_homoglyph_fold_table_covers_keyword_alphabet_disguises() -> None:
     for word in (*_SENSITIVE_KEY_KEYWORDS, *_SENSITIVE_KEY_SUBSTRINGS):
         disguised = "".join(disguise.get(char, char) for char in word)
         assert is_sensitive_key(disguised) is True, (word, disguised)
+
+
+def test_homoglyph_fold_x_entry_masks_disguised_hex_escape_separator() -> None:
+    r"""守护：U+0445→x 条目承重于分隔符转义族，冒充 x 的转义分隔符仍掩码值。
+
+    x 不在关键词字母表内，该条目仅被键值分隔符的十六进制转义族依赖；删除条目时
+    伪装分隔符失效，凭据原样存活。
+    """
+    disguised = f"token\\{chr(0x445)}41sk-live-secret"
+    expected = f"token\\{chr(0x445)}41***"
+    assert sanitize_error_text(disguised) == expected
+    assert sanitize_data_text(disguised) == expected
 
 
 def test_homoglyph_fold_table_inventory_is_explicitly_locked() -> None:

@@ -421,8 +421,9 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
 
 
 # 形近字母折叠表：与 ASCII 字母形近的西里尔、希腊与拉丁扩展字符 NFKC 不折叠，仅在
-# 键名匹配判定时归一；条目目标字母对齐敏感关键词字母表可达的范围，唯 U+0445→x
-# 一项目标 x 在范围外、恒不参与命中，不泛化到全字母表。
+# 匹配判定时归一；条目目标字母对齐敏感关键词字母表可达的范围，不泛化到全字母表；
+# U+0445→x 另承重于键值分隔符转义族：西里尔同形字母冒充 x 的十六进制转义分隔符
+# 折叠后才被识别，删条目即漏凭据。
 _HOMOGLYPH_FOLD_TABLE = str.maketrans(
     {
         "\u0430": "a",
@@ -470,6 +471,19 @@ def _fold_key_disguise_text(text: str) -> str:
     return unicodedata.normalize("NFKC", text).casefold().translate(_HOMOGLYPH_FOLD_TABLE)
 
 
+# 单字符折叠缓存：折叠是纯函数，影子构建遇重复非 ASCII 字符免再归一。
+_FOLD_CHAR_CACHE: dict[str, str] = {}
+
+
+def _fold_shadow_char(char: str) -> str:
+    """单字符折叠的缓存包装，未命中才进入完整归一。"""
+    folded = _FOLD_CHAR_CACHE.get(char)
+    if folded is None:
+        folded = _fold_key_disguise_text(char)
+        _FOLD_CHAR_CACHE[char] = folded
+    return folded
+
+
 # 键名切入删除模式：C0/DEL/NEL 及其字面转义形态，影子匹配前整体删除而非空格压平，
 # 防止切断关键词使凭据值存活；转义族与复合前缀键内分隔符共用单一来源。
 _KEY_DISGUISE_DELETION_PATTERN = re.compile(r"[\x00-\x1f\x7f\x85]|" + _KEY_CONTROL_ESCAPE_ALT)
@@ -491,7 +505,7 @@ def _folded_shadow_parts(
     for start, end in (*deletion_spans, (len(text), len(text))):
         for index in range(position, start):
             char = text[index]
-            folded_parts.append(char.lower() if char.isascii() else _fold_key_disguise_text(char))
+            folded_parts.append(char.lower() if char.isascii() else _fold_shadow_char(char))
             origins.append(index)
         position = end
     offsets: list[int] = []
