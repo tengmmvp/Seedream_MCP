@@ -26,7 +26,7 @@ from seedream_mcp.utils.core.validators import (
 )
 from seedream_mcp.utils.model.model_capabilities import ModelCapabilities
 
-# 5.0 Pro 模型标识，background 透明通道参数仅该家族支持。
+# 5.0 Pro 模型标识，background 透明通道参数 5.0 Pro 与 5.0 Flash 家族均支持。
 _PRO_MODEL_ID = "doubao-seedream-5-0-pro-260628"
 
 # ==================== parse_bool ====================

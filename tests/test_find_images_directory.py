@@ -603,19 +603,22 @@ def test_find_images_budget_counts_non_image_entries(
     assert find_images_in_directory(str(tmp_path), recursive=False) == []
 
 
-def test_find_images_prefix_rescan_budget_does_not_double_count(tmp_path: Path) -> None:
-    """前缀倍增重扫的条目预算只计每趟新增，9999 非图片 + 2 图片不被预算误杀。
+def test_find_images_prefix_rescan_budget_does_not_double_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """前缀倍增重扫的条目预算只计每趟新增，16 非图片 + 2 图片不被预算误杀。
 
-    旧口径按趟累计全目录条目：第一趟计 10001、重扫趟再计 10001，累计 20002 超过
-    20000 预算，整批被丢弃返回 0 张图；按新增条目摊销后 10001 条目录不超预算，
-    limit=21 经倍增前缀扫到目录末尾取回全部 2 张图片。
+    预算随目录规模缩小后回归条件等价：旧口径按趟累计物化条目 9+18=27 超过 20 预算，
+    第二趟新增的 9 条含 2 张图片，整批被丢弃；按新增条目摊销后 9+9+0=18 不超预算，
+    limit=9 经倍增前缀扫到目录末尾取回全部 2 张图片。
     """
-    for i in range(9999):
-        (tmp_path / f"a_{i:04d}.txt").write_bytes(b"x")
+    for i in range(16):
+        (tmp_path / f"a_{i:02d}.txt").write_bytes(b"x")
     (tmp_path / "z_0.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (tmp_path / "z_1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(scan_module, "_SCAN_ENTRY_BUDGET", 20)
 
-    result = find_images_in_directory(str(tmp_path), recursive=False, limit=21)
+    result = find_images_in_directory(str(tmp_path), recursive=False, limit=9)
 
     assert [p.name for p in result] == ["z_0.png", "z_1.png"]
 

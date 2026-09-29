@@ -141,6 +141,9 @@ def format_file_size_mb(size_bytes: int) -> str:
 # PIL 解码器就绪标志，images 与 io 两组的解码前置共用。
 _decoders_ready = False
 
+# 首次覆写前留存的 PIL 默认解压阈值，测试隔离复位共用。
+_pil_pristine_max_image_pixels: int | None = None
+
 
 def ensure_image_decoders_ready() -> None:
     """设置 PIL 解压炸弹阈值并注册 HEIF 解码器，进程级仅首次执行。
@@ -148,13 +151,15 @@ def ensure_image_decoders_ready() -> None:
     PIL 与 pillow_heif 延迟导入，避免模块导入期加载图像库产生全局副作用；
     check-then-set 非线程安全，但两项操作均幂等，并发重复执行无功能影响。
     """
-    global _decoders_ready
+    global _decoders_ready, _pil_pristine_max_image_pixels
     if _decoders_ready:
         return
     from PIL import Image
     from pillow_heif import register_heif_opener
 
     # 覆写后 PIL 在 36M 告警、72M 报错，36M 硬约束由各解码路径的显式检查承担。
+    if _pil_pristine_max_image_pixels is None:
+        _pil_pristine_max_image_pixels = Image.MAX_IMAGE_PIXELS
     Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
     register_heif_opener()
     _decoders_ready = True

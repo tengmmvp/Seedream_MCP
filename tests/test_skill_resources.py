@@ -24,9 +24,12 @@ _SKILL_DIR = server._SKILLS_DIR / server._SKILL_NAME
 _SKILL_MANIFEST_PATH = server._SKILL_MANIFEST_PATH
 _SKILL_REFERENCES_DIR = server._SKILL_REFERENCES_DIR
 _MANIFEST_URI = "skill://seedream-image-generation/SKILL.md"
+# 从 references 目录动态派生，新增参考文档自动进入线上读取覆盖。
 _REFERENCE_TEMPLATE_URIS = {
-    "skill://seedream-image-generation/references/workflows.md",
-    "skill://seedream-image-generation/references/troubleshooting.md",
+    f"skill://seedream-image-generation/references/{relative.as_posix()}"
+    for relative in (
+        path.relative_to(_SKILL_REFERENCES_DIR) for path in _SKILL_REFERENCES_DIR.rglob("*.md")
+    )
 }
 # SKILL.md 正文行数上限：Agent Skills 渐进式披露建议正文 <5000 tokens，
 # 行数预算取 500 行为硬上限，日常目标 300 行以内。
@@ -183,7 +186,7 @@ async def test_skill_reference_readable_over_wire(
     reset_lifespan_singletons: None, uri: str
 ) -> None:
     """references 模板资源按具体 URI 读取，内容与磁盘文件全文一致。"""
-    relative = uri.rsplit("/", 1)[-1]
+    relative = uri.removeprefix("skill://seedream-image-generation/references/")
     async with Client(server.mcp) as client:
         result = await client.read_resource(uri)
     assert _single_text_content(result) == (_SKILL_REFERENCES_DIR / relative).read_text(
