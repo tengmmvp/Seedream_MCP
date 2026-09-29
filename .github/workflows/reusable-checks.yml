@@ -148,7 +148,7 @@ jobs:
         if: ${{ inputs.run-tests && inputs.mcp-pin-version != '' }}
         run: uv run --no-sync pytest -q
 
-      # 总量下限 90 由 pyproject [tool.coverage.report] fail_under 判定，此处补单文件下限。
+      # 总量下限 80 由 pyproject [tool.coverage.report] fail_under 判定，此处补单文件下限。
       - name: 📏 Check per-file coverage floors
         if: ${{ inputs.run-tests && inputs.mcp-pin-version == '' }}
         run: |

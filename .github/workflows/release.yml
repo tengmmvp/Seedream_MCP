@@ -135,8 +135,8 @@ jobs:
             3. 在 Claude Desktop / Cursor / VS Code 等 MCP 客户端中配置
 
           draft: false
-          # tag 含 alpha/beta/rc 时自动标记为预发布版本。
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          # 预发布 tag 仅限 -rc/-alpha/-beta 连字符形态（如 v1.2.3-rc.1），其余均正式版。
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
