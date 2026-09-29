@@ -165,6 +165,20 @@ async def test_prepare_image_input_single_slash_url_typo_reports_url_error() -> 
     assert "文件不存在" not in message
 
 
+async def test_prepare_image_input_non_image_data_uri_reports_data_uri_error() -> None:
+    """非图像 MIME 的 data URI 归入 data_uri 分类，报 Data URI 格式错误而非本地路径错误。
+
+    此前该形态落入本地分支，win32 下被误报为 NTFS 备用数据流形态。
+    """
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("data:text/plain;base64,aGVsbG8=")
+
+    message = exc_info.value.message
+    assert "Data URI" in message
+    assert "备用数据流" not in message
+    assert "文件不存在" not in message
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对形态仅 win32 被拒绝")
 async def test_prepare_image_input_drive_relative_form_surfaces_rejection_reason(
     workspace_root: Path,

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import ipaddress
 import random
@@ -54,9 +55,16 @@ _WRITE_BATCH_BYTES = 4 * 1024 * 1024
 # 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验。
 _MAX_REDIRECTS = 3
 
-# 非终态响应体的排空读取上限：连接须消费完响应体方可回池复用，重定向与 HTTP 错误
-# 的响应体通常很小，64KB 足以覆盖；残留更多时放弃复用，由连接关闭兜底。
+# 非终态响应体的排空读取上限：连接须消费完响应体方可回池复用，重定向、HTTP 错误
+# 与内容类型拒绝的响应体通常很小，64KB 足以覆盖；残留更多时放弃复用，由连接关闭兜底。
 _DRAIN_RESPONSE_BYTES = 65536
+
+
+async def _drain_response_quietly(response: aiohttp.ClientResponse) -> None:
+    """尽力排空响应体使连接回池，排空自身失败不影响调用方的错误语义。"""
+    with contextlib.suppress(Exception):
+        await response.content.read(_DRAIN_RESPONSE_BYTES)
+
 
 # 跨源重定向时保留的通用请求头：跳向不同源时鉴权或跟踪一类定制头被剥离，不原样
 # 发给重定向目标。
@@ -808,15 +816,13 @@ class DownloadManager:
                     # 一旦剥离后续跳回原源也不恢复定制头。
                     if _url_origin(next_url) != _url_origin(current_url):
                         current_headers = _strip_custom_headers_for_cross_origin(headers)
-                    # 排空本跳残留响应体，连接方可回池被下一跳复用，免于逐跳重建 TCP+TLS。
-                    await response.content.read(_DRAIN_RESPONSE_BYTES)
+                    await _drain_response_quietly(response)
                     redirect_count += 1
                     current_url = next_url
                     continue
 
                 if response.status != 200:
-                    # 排空错误响应体使连接回池，重试与后续下载复用连接，免于重建 TCP+TLS。
-                    await response.content.read(_DRAIN_RESPONSE_BYTES)
+                    await _drain_response_quietly(response)
                     # 5xx 与 408/429 多为瞬时故障或限流，纳入重试避免批量下载触发限流
                     # 后自动保存静默丢弃本地副本。
                     if response.status in (408, 429) or 500 <= response.status < 600:
@@ -825,6 +831,7 @@ class DownloadManager:
 
                 content_type = response.headers.get("content-type", "")
                 if not _is_image_compatible_content_type(content_type):
+                    await _drain_response_quietly(response)
                     raise DownloadError(f"响应内容类型非图片: {content_type.split(';')[0].strip()}")
 
                 return await self._download_response_to_temp(

@@ -380,10 +380,40 @@ async def test_download_image_rejects_html_content_type_single_attempt(
     """200 + text/html 驱动 download_image 主循环：终态 DownloadError、单次尝试、不落盘。
 
     HTML 错误页属语义明确的非图片响应，内容类型校验在写盘前拒绝；误入可重试分类
-    会徒增退避等待且最终仍不可能成功。
+    会徒增退避等待且最终仍不可能成功。拒绝前先排空错误页使连接回池复用。
     """
+    response = _FakeResponse(
+        status=200, headers={"content-type": "text/html"}, content_chunks=[b"<html>err</html>"]
+    )
     manager = DownloadManager()
-    session = _FakeSession([_FakeResponse(status=200, headers={"content-type": "text/html"})])
+    session = _FakeSession([response])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="响应内容类型非图片"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert session._idx == 1
+    assert response.content._chunk_idx == 1
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+class _ExplodingContent:
+    """read 即抛 RuntimeError 的伪响应体，驱动排空失败路径。"""
+
+    async def read(self, size: int = -1) -> bytes:
+        raise RuntimeError("connection reset")
+
+
+async def test_download_image_content_type_rejection_survives_drain_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """排空失败不影响终态拒绝：内容类型错误仍是 DownloadError 而非可重试网络错误。"""
+    response = _FakeResponse(status=200, headers={"content-type": "text/html"})
+    response.content = _ExplodingContent()  # type: ignore[assignment]
+    manager = DownloadManager()
+    session = _FakeSession([response])
     _patch_download_network(monkeypatch, manager, session)
 
     save_path = tmp_path / "out.png"
@@ -392,7 +422,24 @@ async def test_download_image_rejects_html_content_type_single_attempt(
 
     assert session._idx == 1
     assert not save_path.exists()
-    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_image_terminal_http_error_survives_drain_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_sleep: None
+) -> None:
+    """终态 HTTP 错误不被排空失败转化为可重试网络错误，单次尝试即失败。"""
+    response = _FakeResponse(status=404, headers={"content-type": "text/plain"})
+    response.content = _ExplodingContent()  # type: ignore[assignment]
+    manager = DownloadManager()
+    session = _FakeSession([response])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="HTTP错误: 404"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert session._idx == 1
+    assert not save_path.exists()
 
 
 def test_validate_url_wrapper_returns_false_for_ftp_scheme() -> None:

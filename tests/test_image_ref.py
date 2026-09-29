@@ -28,6 +28,18 @@ from seedream_mcp.utils.images.image_ref import classify_image_reference
         ("data:image/png;base64,iVBORw0KGgo=", "data_uri"),
         ("Data:image/png;base64,iVBORw0KGgo=", "data_uri"),
         ("DATA:IMAGE/png;base64,", "data_uri"),
+        # Data URI：非图像 MIME 同归 data_uri，交 Data URI 校验报精确错误
+        ("data:text/plain;base64,aGVsbG8=", "data_uri"),
+        ("data:application/pdf;base64,aGVsbG8=", "data_uri"),
+        # Data URI：带参数 MIME 的逗号越过前缀窗口，短窗扫描覆盖 MIME 头部不漏判
+        ("data:image/png;charset=utf-8;base64,iVBORw0KGgo=", "data_uri"),
+        ("data:image/vnd.microsoft.icon;base64,iVBORw0KGgo=", "data_uri"),
+        # Data URI：无逗号截断同归 data_uri，交 Data URI 校验报格式错误
+        ("data:image/png;base64", "data_uri"),
+        # data: 开头但头部非 MIME 形态：POSIX 本地文件名不误入 Data URI 分支
+        ("data:logo.png", "local"),
+        # 含逗号的本地文件名不因逗号存在误入 Data URI 分支
+        ("data:photo,v2.png", "local"),
         # 本地路径
         ("./images/x.png", "local"),
         ("/abs/path/x.png", "local"),
@@ -47,6 +59,8 @@ def test_classify_empty_and_whitespace_treated_as_local() -> None:
 
 
 def test_classify_only_checks_prefix_window() -> None:
-    """仅取前 16 字符判定，超长 base64 data URI 不做全量拷贝。"""
+    """仅拷贝前 16 字符前缀做 scheme 判定，逗号搜索与头部截断封顶 128 窗口，超长输入不做全量扫描。"""
     long_data_uri = "data:image/png;base64," + "A" * 100000
     assert classify_image_reference(long_data_uri) == "data_uri"
+    # 无逗号超长串的头部截断同样封顶，不做全量逗号搜索
+    assert classify_image_reference("data:" + "A" * 100000) == "local"
