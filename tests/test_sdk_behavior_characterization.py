@@ -1,10 +1,9 @@
 """SDK 行为特征化与项目侧补偿守护测试。
 
-六个用例：未知 prompt 名称经项目侧补偿归位 -32602 的线缆级与名称查找点
-两级，已知名渲染期真实失败不被改写为 Unknown prompt；缺失 name 的参数面
-校验错误不被补偿改写；未知工具走 isError 结果通道而非协议错误；纪元路由
-按请求头派生。后两类为 SDK 2.2.0 行为特征化，规范未定义或与其相悖，SDK
-升级行为漂移时测试变红，须复测线缆级语义。
+六个用例：未知 prompt 名称与未知工具经项目侧补偿归位 -32602 的线缆级，
+另覆盖未知名的名称查找点直调、已知名渲染期真实失败不被改写、缺失 name 的
+参数面校验错误不被补偿改写；纪元路由按请求头派生。末者为 SDK 2.2.0 行为
+特征化，规范未定义，SDK 升级行为漂移时测试变红，须复测线缆级语义。
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import (
     HEADER_MISMATCH,
     INVALID_PARAMS,
-    TextContent,
 )
 
 import seedream_mcp.server as server
@@ -123,14 +121,21 @@ async def test_malformed_prompt_get_keeps_invalid_params_shape(
     assert "Invalid request parameters" in body["error"]["message"]
 
 
-async def test_unknown_tool_call_returns_is_error_result(reset_lifespan_singletons: None) -> None:
-    """锁定 SDK 2.2.0 行为：未知工具走 isError 结果通道而非 -32602 协议错误，SDK 升级行为漂移时本测试变红。"""
-    async with Client(server.mcp) as client:
-        result = await client.call_tool("definitely_not_a_tool", {})
+@pytest.mark.parametrize("client_mode", ["auto", "legacy"])
+async def test_unknown_tool_call_returns_invalid_params(
+    reset_lifespan_singletons: None, client_mode: Literal["auto", "legacy"]
+) -> None:
+    """未知工具在两条分发路径上线缆级均为 -32602，守护项目侧补偿。
 
-    assert result.is_error is True
-    texts = [block.text for block in result.content if isinstance(block, TextContent)]
-    assert any("Unknown tool" in text for text in texts)
+    SDK 2.2.0 把未知工具 ToolError 归约为 isError 结果通道，未补偿时不抛
+    协议错误。
+    """
+    async with Client(server.mcp, mode=client_mode) as client:
+        with pytest.raises(MCPError) as exc_info:
+            await client.call_tool("definitely_not_a_tool", {})
+
+    assert exc_info.value.code == INVALID_PARAMS
+    assert "Unknown tool" in str(exc_info.value)
 
 
 def _tools_list_body(envelope_version: str) -> bytes:

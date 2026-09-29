@@ -18,6 +18,7 @@ from mcp.server.mcpserver import MCPServer, RequestStateSecurity
 from mcp.server.request_state import RequestStateBoundary
 from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
+from pydantic import ValidationError
 
 from .config import (
     LIFESPAN_KEY_CLIENT,
@@ -28,13 +29,14 @@ from .config import (
     get_active_config,
     set_active_config,
 )
+from .utils.core.errors import validation_error_user_message
 from .utils.core.executors import shutdown_cpu_offload_executor
 from .utils.core.logs import get_logger
 from .version import __version__
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
-    from mcp.types import GetPromptResult, InputRequiredResult
+    from mcp.types import CallToolResult, GetPromptResult, InputRequiredResult
 
     from .client import SeedreamClient
     from .utils.io.io_download import DownloadManager
@@ -326,12 +328,31 @@ def _build_request_state_security() -> RequestStateSecurity | None:
     return RequestStateSecurity(keys=keys)
 
 
-class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
-    """MCPServer 子类，未知名 prompts/get 在名称查找点抛 -32602。
+def _locate_validation_error(exc: BaseException) -> ValidationError | None:
+    """沿异常因果链查找 pydantic ValidationError。"""
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, ValidationError):
+            return current
+        current = current.__cause__
+    return None
 
-    SDK 2.2.0 对未知名抛裸 ValueError，线缆错误码归约为 -32603 或 0，规范
-    要求 -32602；已知名的渲染与参数校验错误经 super() 原样放行。线缆级行为
-    由 test_unknown_prompt_get_returns_invalid_params 守护。
+
+def _targets_argument(exc: ValidationError, declared: set[str]) -> bool:
+    """校验错误的首个 loc 段命中已声明参数名时属参数面失败。"""
+    loc = exc.errors()[0].get("loc", ())
+    first = str(loc[0]) if loc else ""
+    return first in declared
+
+
+class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
+    """MCPServer 子类，协议错误码补偿：未知名与未知工具在查找点抛 -32602，
+    已知名 prompt 的参数缺失、未知参数与参数值校验失败转为 -32602。
+
+    SDK 2.2.0 对未知名抛裸 ValueError、未知工具 ToolError 走 isError 结果
+    通道、prompt 参数面 ValidationError 折叠为 -32603 或 code=0，三者线缆级
+    均应为 -32602；渲染期其余异常与工具参数校验经 super() 维持 SDK 原语义。
+    线缆级行为由 test_sdk_behavior_characterization 与 test_prompt_resources 守护。
     """
 
     async def get_prompt(
@@ -340,9 +361,40 @@ class _SeedreamMCPServer(MCPServer[dict[str, Any]]):
         arguments: dict[str, Any] | None = None,
         context: Context[dict[str, Any], Any] | None = None,
     ) -> GetPromptResult | InputRequiredResult:
-        if self._prompt_manager.get_prompt(name) is None:
+        prompt = self._prompt_manager.get_prompt(name)
+        if prompt is None:
             raise MCPError(INVALID_PARAMS, f"Unknown prompt: {name}")
-        return await super().get_prompt(name, arguments, context)
+        declared = {argument.name for argument in prompt.arguments or []}
+        missing = sorted(
+            argument.name
+            for argument in prompt.arguments or []
+            if argument.required and argument.name not in (arguments or {})
+        )
+        if missing:
+            raise MCPError(INVALID_PARAMS, f"缺少必填参数: {', '.join(missing)}")
+        unknown = sorted(set(arguments or {}) - declared)
+        if unknown:
+            raise MCPError(INVALID_PARAMS, f"未知参数: {', '.join(unknown)}")
+        try:
+            return await super().get_prompt(name, arguments, context)
+        except ValueError as exc:
+            # 参数面 ValidationError 被 SDK 包装为 ValueError；首个 loc 段未命中已声明参数名的渲染期失败维持原语义放行。
+            validation_error = _locate_validation_error(exc)
+            if validation_error is None or not _targets_argument(validation_error, declared):
+                raise
+            raise MCPError(
+                INVALID_PARAMS, validation_error_user_message(validation_error)
+            ) from validation_error
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[dict[str, Any], Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        if self._tool_manager.get_tool(name) is None:
+            raise MCPError(INVALID_PARAMS, f"Unknown tool: {name}")
+        return await super().call_tool(name, arguments, context)
 
 
 def _create_mcp_server() -> MCPServer:

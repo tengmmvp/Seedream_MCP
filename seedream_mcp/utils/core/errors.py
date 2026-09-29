@@ -11,12 +11,21 @@ from email.utils import parsedate_to_datetime
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import ValidationError
+
 from .sanitizers import (
     _sanitize_message_for_output,
     _truncate_value_for_output,
     sanitize_error_text,
     truncate_upstream_message_fragment,
 )
+
+
+def validation_error_user_message(exc: ValidationError) -> str:
+    """取首条 pydantic 校验错误的字段与原因拼为可定位的用户消息。"""
+    first = exc.errors()[0]
+    field = ".".join(str(part) for part in first.get("loc", ()))
+    return f"参数校验失败: {field or first.get('type')} {first.get('msg')}"
 
 
 class SeedreamMCPError(Exception):

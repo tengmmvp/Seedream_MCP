@@ -1,17 +1,23 @@
-"""MCP 风格预设 Prompt 的注册与渲染测试。
+"""MCP 风格预设 Prompt 的注册、渲染与参数面错误码测试。
 
-注册形态经 server.mcp.list_prompts 断言；输出形态经 in-process Client 的
-get_prompt 渲染断言固定前缀、主题与风格后缀的拼接。
+注册形态经 server.mcp.list_prompts 断言；渲染与参数面错误（缺失、未知参数与
+值校验失败的 -32602 收敛）经 in-process Client 的 get_prompt 断言，
+_targets_argument 的转换口径另以单元用例锁定。
 """
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import pytest
 from mcp.client import Client
+from mcp.server.mcpserver.prompts.base import Prompt
 from mcp.shared.exceptions import MCPError
-from mcp.types import GetPromptResult, TextContent
+from mcp.types import GetPromptResult, INVALID_PARAMS, TextContent
+from pydantic import BaseModel, Field, ValidationError
 
 import seedream_mcp.server as server
+from seedream_mcp.resources import _targets_argument
 from seedream_mcp.tools.core.schemas import PROMPT_MAX_LENGTH
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
@@ -105,7 +111,101 @@ async def test_style_prompt_renders_custom_subject(
 async def test_style_prompt_rejects_blank_subject(
     reset_lifespan_singletons: None, name: str, subject: str
 ) -> None:
-    """空串、纯空白与超长主题在渲染前被参数校验拒绝，不产出必失败的模板。"""
+    """空串、纯空白与超长主题被参数校验拒绝为 -32602，消息定位到 subject。"""
     async with Client(server.mcp) as client:
-        with pytest.raises(MCPError, match="Internal server error"):
+        with pytest.raises(MCPError) as exc_info:
             await client.get_prompt(name, arguments={"subject": subject})
+
+    assert exc_info.value.code == INVALID_PARAMS
+    assert "subject" in str(exc_info.value)
+
+
+def _flag_prompt_fn(flag: str) -> str:
+    return f"flag={flag}"
+
+
+def _install_flag_prompt(name: str) -> str:
+    """安装声明必填 flag 参数的 prompt 并返回注册名。"""
+    prompt = Prompt.from_function(_flag_prompt_fn, name=name)
+    server.mcp.add_prompt(prompt)
+    return prompt.name
+
+
+async def test_missing_required_prompt_argument_returns_invalid_params(
+    reset_lifespan_singletons: None,
+) -> None:
+    """缺必填参数的 prompt 在预检点拒绝为 -32602，消息定位到缺失参数名。"""
+    name = _install_flag_prompt("pytest_missing_arg")
+    try:
+        async with Client(server.mcp) as client:
+            with pytest.raises(MCPError) as exc_info:
+                await client.get_prompt(name)
+    finally:
+        server.mcp.remove_prompt(name)
+
+    assert exc_info.value.code == INVALID_PARAMS
+    assert "缺少必填参数" in str(exc_info.value)
+    assert "flag" in str(exc_info.value)
+
+
+async def test_unknown_prompt_argument_returns_invalid_params(
+    reset_lifespan_singletons: None,
+) -> None:
+    """未知参数在预检点拒绝为 -32602，消息定位到多余参数名。"""
+    name = _install_flag_prompt("pytest_unknown_arg")
+    try:
+        async with Client(server.mcp) as client:
+            with pytest.raises(MCPError) as exc_info:
+                await client.get_prompt(name, arguments={"flag": "x", "bogus": "y"})
+    finally:
+        server.mcp.remove_prompt(name)
+
+    assert exc_info.value.code == INVALID_PARAMS
+    assert "未知参数" in str(exc_info.value)
+    assert "bogus" in str(exc_info.value)
+
+
+def _messages_arg_prompt(messages: Annotated[str, Field(min_length=2)]) -> str:
+    return f"messages={messages}"
+
+
+async def test_messages_named_argument_value_error_returns_invalid_params(
+    reset_lifespan_singletons: None,
+) -> None:
+    """参数名撞结果模型字段（messages）的值校验失败仍收敛 -32602，不误放 -32603。"""
+    prompt = Prompt.from_function(_messages_arg_prompt, name="pytest_messages_arg")
+    server.mcp.add_prompt(prompt)
+    try:
+        async with Client(server.mcp) as client:
+            with pytest.raises(MCPError) as exc_info:
+                await client.get_prompt(prompt.name, arguments={"messages": "x"})
+    finally:
+        server.mcp.remove_prompt(prompt.name)
+
+    assert exc_info.value.code == INVALID_PARAMS
+    assert "messages" in str(exc_info.value)
+
+
+class _SubjectModel(BaseModel):
+    subject: str = Field(min_length=2)
+
+
+class _MessagesModel(BaseModel):
+    messages: str = Field(min_length=2)
+
+
+def _short_value_error(model_cls: type[BaseModel], field_name: str) -> ValidationError:
+    """以过短字段值触发一次校验失败并返回其 ValidationError。"""
+    with pytest.raises(ValidationError) as exc_info:
+        model_cls(**{field_name: "x"})
+    return exc_info.value
+
+
+def test_targets_argument_narrows_conversion_scope() -> None:
+    """loc 首段命中已声明参数名的校验错误才转 -32602，参数名撞结果模型字段不例外。"""
+    subject_error = _short_value_error(_SubjectModel, "subject")
+    assert _targets_argument(subject_error, {"subject"}) is True
+    assert _targets_argument(subject_error, {"image"}) is False
+
+    messages_error = _short_value_error(_MessagesModel, "messages")
+    assert _targets_argument(messages_error, {"messages"}) is True
