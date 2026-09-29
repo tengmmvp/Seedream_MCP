@@ -15,7 +15,12 @@ from typing import Any, MutableMapping
 import seedream_mcp.server as server
 from mcp.types import CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.transport import _attach_streamable_http_middleware, _transport_security_for_host
+from seedream_mcp.transport import (
+    MCP_ENDPOINT_PATH,
+    _attach_streamable_http_middleware,
+    _register_well_known_mcp_route,
+    _transport_security_for_host,
+)
 
 # 生产请求体上限默认值，与 SeedreamConfig.http_max_body_size 默认一致。
 _MAX_BODY = 64 * 1024 * 1024
@@ -101,12 +106,14 @@ def _assemble_streamable_http_app(
     attach_max_body_size=None 由本核心持有；build_transport_app 额外安装 config 并
     转发 host、stateless、json_response 与 body_limit；build_web_app 显式传
     attach_max_body_size 并转发 host 与 web_enabled，config 与其余参数沿用核心默认。
-    config 非 None 时先安装为活动配置再派生 transport_security；attach_max_body_size
-    为 None 时中间件回退读取活动配置；web_enabled 驱动 Web 路由注册、静态挂载与
-    中间件参数，webapp 模块保持按需导入。
+    config 非 None 时先安装为活动配置再派生 transport_security；端点发现重定向路由
+    先于 streamable_http_app 注册；attach_max_body_size 为 None 时中间件回退读取
+    活动配置；web_enabled 驱动 Web 路由注册、静态挂载与中间件参数，webapp 模块
+    保持按需导入。
     """
     if config is not None:
         set_active_config(config)
+    _register_well_known_mcp_route()
     if web_enabled:
         from seedream_mcp.webapp import register_web_routes
 
@@ -114,6 +121,7 @@ def _assemble_streamable_http_app(
     app = server.mcp.streamable_http_app(
         host=host,
         stateless_http=stateless,
+        streamable_http_path=MCP_ENDPOINT_PATH,
         json_response=json_response,
         transport_security=_transport_security_for_host(host),
         max_request_body_size=body_limit,

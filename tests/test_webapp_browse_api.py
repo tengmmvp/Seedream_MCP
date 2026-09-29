@@ -186,6 +186,9 @@ async def test_browse_echoes_original_directory_not_absolute_images_root(
     assert response.status_code == 200
     assert response.json()["directory"] == "2026-08-21"
     assert str(images_root) not in response.text
+    assert images_root.as_posix() not in response.text
+    # JSON 编码把反斜杠双写，泄漏须按转义后形态检查。
+    assert str(images_root).replace("\\", "\\\\") not in response.text
 
 
 async def test_browse_serves_explicit_images_root_outside_workspace(

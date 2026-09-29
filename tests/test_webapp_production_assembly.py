@@ -1,8 +1,8 @@
 """Web 操作台生产装配守护测试。
 
 直接调用 transport 的生产装配函数 _build_streamable_app 构建真实 app（构造
-transport_security -> 注册 Web 路由 -> streamable_http_app -> 挂载静态资源 ->
-装配中间件），经 httpx.ASGITransport 验证 Web 面路由、真实静态资源、Origin
+transport_security -> 注册端点发现路由 -> 注册 Web 路由 -> streamable_http_app ->
+挂载静态资源 -> 装配中间件），经 httpx.ASGITransport 验证 Web 面路由、真实静态资源、Origin
 守卫行为与默认关闭形态；run_streamable_http 仅承担 uvicorn serve 与退出清理，
 装配正确性以本文件的生产同路径锁定。共享响应辅助的序列化下沉与路由模块的导入
 纯净性守护同驻本文件。
@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from _cpu_offload_spy import CpuOffloadSpy
+from _subprocess_helpers import _run_in_subprocess
 from _web_fixtures import web_asgi_client, write_workspace_config
 from seedream_mcp.transport import _build_streamable_app
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
@@ -30,7 +31,6 @@ from seedream_mcp.webapp.constants import (
     STATIC_SECURITY_HEADERS,
 )
 from seedream_mcp.webapp.meta import _upload_budget_chars
-from test_package_lazy_import import _run_in_subprocess
 
 
 def test_upload_budget_derivation_floors_at_zero() -> None:

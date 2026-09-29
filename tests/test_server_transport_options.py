@@ -8,6 +8,7 @@ import json
 from argparse import Namespace
 from typing import Any, cast
 
+import httpx
 import pytest
 from starlette.types import Receive, Send
 
@@ -228,6 +229,19 @@ def test_cli_main_refuses_non_loopback_http_without_tls(
     assert server.cli_main() == 1
 
 
+def test_cli_main_refuses_non_ascii_cli_auth_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--auth-token 含非 ASCII 字符时构建期拒绝启动，不待部署后表现为永久 401。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
+    args = _make_cli_args("streamable-http")
+    args.auth_token = "cli-令牌-0123456789"
+    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
+    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
+
+    assert server.cli_main() == 1
+
+
 def test_cli_main_allows_non_loopback_http_with_tls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -324,6 +338,17 @@ def test_validate_transport_args_rejects_short_cli_auth_token() -> None:
 
     assert message is not None
     assert "--auth-token 长度不得少于 16 字符" in message
+
+
+def test_validate_transport_args_rejects_non_ascii_cli_auth_token() -> None:
+    """--auth-token 含中文等非 ASCII 字符时拒绝，CLI 路径与配置侧同口径。"""
+    args = _make_cli_args("streamable-http")
+    args.auth_token = "cli-令牌-0123456789"
+
+    message = cli.validate_transport_args(args)
+
+    assert message is not None
+    assert "--auth-token 须为可打印ASCII字符" in message
 
 
 def test_validate_transport_args_accepts_long_or_blank_cli_auth_token() -> None:
@@ -780,3 +805,39 @@ async def test_drain_pending_tasks_gives_up_when_task_swallows_cancel(
     task.cancel()
     await asyncio.wait_for(task, timeout=5.0)
     assert task.done() and not task.cancelled()
+
+
+# ==================== MCP 端点发现 ====================
+
+
+async def test_well_known_mcp_redirects_to_endpoint(reset_http_app_state: None) -> None:
+    """GET /.well-known/mcp 回 303，Location 相对指向实际端点 /mcp。"""
+    app = transport_module._build_streamable_app("127.0.0.1", True, "", False)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.get("/.well-known/mcp")
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/mcp"
+
+
+@pytest.mark.parametrize("web_enabled", [False, True])
+async def test_well_known_mcp_exempt_from_bearer_token(
+    reset_http_app_state: None, web_enabled: bool
+) -> None:
+    """令牌部署下端点发现路径免鉴权回 303，未豁免端点仍拒绝无令牌请求。"""
+    app = transport_module._build_streamable_app(
+        "127.0.0.1", True, "secret-token-0123456789", web_enabled
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        discovery = await client.get("/.well-known/mcp")
+        mcp_endpoint = await client.get("/mcp")
+
+    assert discovery.status_code == 303
+    assert discovery.headers["location"] == "/mcp"
+    assert mcp_endpoint.status_code == 401

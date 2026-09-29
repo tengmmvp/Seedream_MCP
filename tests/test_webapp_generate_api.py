@@ -208,6 +208,11 @@ async def test_generate_save_path_outside_drops_local_path_keys(
     assert response.status_code == 200
     assert absolute not in response.text
     assert str(tmp_path) not in response.text
+    assert saved.as_posix() not in response.text
+    assert tmp_path.as_posix() not in response.text
+    # JSON 编码把反斜杠双写，泄漏须按转义后形态检查。
+    assert absolute.replace("\\", "\\\\") not in response.text
+    assert str(tmp_path).replace("\\", "\\\\") not in response.text
     payload = response.json()
     assert "local_path" not in payload["data"][0]
     assert "markdown_ref" not in payload["data"][0]
@@ -381,6 +386,22 @@ async def test_generate_deeply_nested_json_returns_400(
     app = build_web_app()
 
     response = await _post_raw(app, "/web/api/generate/text-to-image", b"[" * 5000)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+
+
+async def test_generate_oversized_integer_json_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """超长整数字面量抛非 JSONDecodeError 的裸 ValueError，同样归 400 invalid_json。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    body = ('{"a": ' + "1" * 5000 + "}").encode("utf-8")
+    response = await _post_raw(app, "/web/api/generate/text-to-image", body)
 
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_json"

@@ -23,6 +23,7 @@ WEB_API_PREFIX = "/web/api"
 
 # Bearer 中间件的静态页面豁免表：index 页与根路径重定向精确匹配、静态资源前缀
 # 匹配；重定向响应本身无数据，豁免后令牌部署下浏览器敲根路径可直接落页。
+# 端点发现路径由 transport 常量并入豁免，客户端免令牌完成发现。
 WEB_EXEMPT_EXACT_PATHS: frozenset[str] = frozenset({WEB_INDEX_PATH, WEB_ROOT_PATH})
 WEB_EXEMPT_PATH_PREFIXES: tuple[str, ...] = (WEB_STATIC_URL_PREFIX,)
 

@@ -32,7 +32,6 @@ from ..utils.model.model_capabilities import (
     model_payloads,
     preset_numeric_sort_key,
 )
-from ..version import __version__
 from . import _responses, constants
 from ._responses import _NoFollowFileResponse
 from .constants import PAGE_SECURITY_HEADERS, WEB_API_PREFIX, WEB_INDEX_PATH
@@ -241,7 +240,6 @@ async def web_config_info(_request: Request) -> Response:
     images_root_available = not isinstance(resolved, JSONResponse)
     return JSONResponse(
         {
-            "server_version": __version__,
             "model_id": config.model_id,
             "default_size": config.default_size,
             "default_watermark": config.default_watermark,
@@ -261,7 +259,6 @@ async def web_config_info(_request: Request) -> Response:
                 else f"未配置数据根目录（{_responses.READ_SCOPE_AUTH_ENV_HINT}）"
             ),
             "auto_save_enabled": config.auto_save_enabled,
-            "preview_enabled": config.preview_enabled,
         },
         headers=_responses.WEB_JSON_HEADERS,
     )

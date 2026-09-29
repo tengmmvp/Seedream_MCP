@@ -226,5 +226,12 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     if boundary is not None and boundary_keys_present:
         boundary._security = boundary_security
         boundary._audience = boundary_audience
-    if pil_image_module is not None:
-        pil_image_module.MAX_IMAGE_PIXELS = max_pixels_before
+    # 用例期间首次导入时解码器覆写可能已发生，按覆写前留存的默认值复位。
+    pil_module_now: Any = sys.modules.get("PIL.Image")
+    pil_restore = (
+        max_pixels_before
+        if pil_image_module is not None
+        else formats_module._pil_pristine_max_image_pixels
+    )
+    if pil_module_now is not None and pil_restore is not None:
+        pil_module_now.MAX_IMAGE_PIXELS = pil_restore

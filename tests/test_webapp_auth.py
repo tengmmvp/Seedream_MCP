@@ -1,7 +1,8 @@
-"""Web 操作台鉴权测试：静态页面豁免边界与 Bearer 上跳段守卫。
+"""Web 操作台鉴权测试：静态页面与端点发现的豁免边界及 Bearer 上跳段守卫。
 
-配置令牌时静态页面组免鉴权加载、全部 /web/api 强制令牌；无令牌部署全程开放。
-豁免判定的单元用例直接驱动中间件 _path_exempt，覆盖含 ``..`` 的路径拒绝豁免。
+配置令牌时静态页面组与端点发现路径免鉴权、全部 /web/api 强制令牌；无令牌
+部署全程开放。豁免判定的单元用例直接驱动中间件 _path_exempt，覆盖含 ``..`` 的
+路径拒绝豁免。
 """
 
 from __future__ import annotations
@@ -63,6 +64,25 @@ def test_bearer_path_exempt_ignores_trailing_slash() -> None:
     assert middleware._path_exempt({"path": "/web/"}) is True
     assert middleware._path_exempt({"path": "/web"}) is True
     assert middleware._path_exempt({"path": "/web/api/"}) is False
+
+
+def test_bearer_exempts_well_known_discovery_via_production_table() -> None:
+    """端点发现路径经 transport 常量并入豁免口径，web 开启的令牌部署下发现重定向免鉴权。"""
+    from seedream_mcp.transport import ALWAYS_EXEMPT_EXACT_PATHS
+    from seedream_mcp.webapp.constants import (
+        WEB_EXEMPT_EXACT_PATHS,
+        WEB_EXEMPT_PATH_PREFIXES,
+    )
+
+    middleware = _BearerTokenAuthMiddleware(
+        app=None,  # type: ignore[arg-type]
+        expected_token="secret",
+        exempt_exact=WEB_EXEMPT_EXACT_PATHS | ALWAYS_EXEMPT_EXACT_PATHS,
+        exempt_prefixes=WEB_EXEMPT_PATH_PREFIXES,
+    )
+
+    assert middleware._path_exempt({"path": "/.well-known/mcp"}) is True
+    assert middleware._path_exempt({"path": "/.well-known/mcp/"}) is True
 
 
 async def test_static_pages_exempt_and_api_requires_token(

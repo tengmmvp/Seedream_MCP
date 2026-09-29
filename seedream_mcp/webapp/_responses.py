@@ -20,7 +20,7 @@ from starlette.responses import FileResponse, JSONResponse, MalformedRangeHeader
 from starlette.types import Message, Receive, Scope, Send
 
 from ..tools.core.outputs import dump_compact_strict_json
-from ..utils.core.errors import SeedreamConfigError
+from ..utils.core.errors import SeedreamConfigError, validation_error_user_message
 from ..utils.core.executors import (
     CpuOffloadPoolClosedError,
     run_in_cpu_pool,
@@ -87,8 +87,8 @@ async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSON
     阈值同步执行；池关闭取消排队解析时返回 500 服务不可用响应，生成与图库端点
     共用同一口径。
     """
+    raw_body = await request.body()
     try:
-        raw_body = await request.body()
         # 阈值之下的解析微秒级完成，线程往返成本高于收益，同步执行。
         if should_offload_size(len(raw_body)):
             body = await run_in_cpu_pool(json.loads, raw_body)
@@ -96,8 +96,8 @@ async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSON
             body = json.loads(raw_body)
     except CpuOffloadPoolClosedError:
         return {}, cpu_pool_closed_json()
-    # 深嵌套 JSON 触发解析器递归上限抛 RecursionError，与解析失败同归 400。
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
+    # 深嵌套触发 RecursionError，超长整数字面量抛非 JSONDecodeError 的 ValueError，同归 400。
+    except (ValueError, RecursionError) as exc:
         return {}, error_json("invalid_json", f"请求体不是合法 JSON: {exc}", 400)
     if not isinstance(body, dict):
         return {}, error_json("invalid_request", "请求体须为 JSON 对象", 400)
@@ -106,13 +106,7 @@ async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSON
 
 def validation_error_json(exc: ValidationError) -> JSONResponse:
     """把 pydantic 校验失败格式化为统一的首个错误描述响应。"""
-    first = exc.errors()[0]
-    field = ".".join(str(part) for part in first.get("loc", ()))
-    return error_json(
-        "invalid_request",
-        f"参数校验失败: {field or first.get('type')} {first.get('msg')}",
-        400,
-    )
+    return error_json("invalid_request", validation_error_user_message(exc), 400)
 
 
 def images_root_unavailable(exc: Exception) -> JSONResponse:

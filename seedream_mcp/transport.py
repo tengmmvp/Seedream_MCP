@@ -1,10 +1,11 @@
 """streamable-http 传输层：ASGI 中间件与传输配置。
 
 包含请求体大小限制、Bearer 鉴权、健康检查、回环与非回环 Host 头防护、Web 操作台
-同源 Origin 与跨站 Sec-Fetch 校验及内层异常边界七个 ASGI 中间件，以及 streamable-http
-监听与 TLS 配置。中间件经 Starlette add_middleware 装配到 MCPServer 的
-streamable_http_app 外层，按装配逆序执行。MCPServer 实例 mcp 与共享资源清理函数在
-调用时从 resources 模块延迟导入，传输层不依赖 server 模块。
+同源 Origin 与跨站 Sec-Fetch 校验及内层异常边界七个 ASGI 中间件，/.well-known/mcp
+端点发现 303 重定向路由，以及 streamable-http 监听与 TLS 配置。中间件经 Starlette
+add_middleware 装配到 MCPServer 的 streamable_http_app 外层，按装配逆序执行。
+MCPServer 实例 mcp 与共享资源清理函数在调用时从 resources 模块延迟导入，传输层
+不依赖 server 模块。
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from urllib.parse import urlsplit
 
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import RedirectResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ._config_sources import _bracket_ipv6_literal, _decompose_allowed_host_entry
@@ -34,6 +37,13 @@ logger = get_logger()
 # 回环白名单与 Host 守卫的基底地址集合，与 streamable_http_app 的默认防护
 # 集合一致；localhost 解析依赖 hosts/DNS 可被污染，仅并入白名单不参与回环判定。
 _DNS_REBINDING_PROTECTED_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+# MCP 端点发现路径（RFC 8615 well-known URI）与实际端点路径；后者作为挂载路径传入 SDK。
+WELL_KNOWN_MCP_PATH = "/.well-known/mcp"
+MCP_ENDPOINT_PATH = "/mcp"
+
+# 令牌部署恒豁免的精确路径，该路径只回无敏感信息的重定向。
+ALWAYS_EXEMPT_EXACT_PATHS: frozenset[str] = frozenset({WELL_KNOWN_MCP_PATH})
 
 
 def _strip_ipv6_brackets(host: str) -> str:
@@ -255,9 +265,10 @@ class _BearerTokenAuthMiddleware:
     使用 hmac.compare_digest 做常数时间比较，避免时序侧信道泄露令牌。
 
     exempt_exact 与 exempt_prefixes 声明免鉴权路径：Web 操作台的静态页面组
-    使用，浏览器原生导航无法携带 Authorization 头。API 路径不得进入豁免表；
-    路径含 ``..`` 时一律不豁免，与路由层穿越防护构成纵深。exact 匹配忽略尾
-    斜杠差异，使 /web 与 /web/ 的豁免判定一致。
+    （浏览器原生导航无法携带 Authorization 头）与令牌部署恒豁免的端点发现
+    路径（只回无敏感信息的重定向）使用。API 路径不得进入豁免表；路径含
+    ``..`` 时一律不豁免，与路由层穿越防护构成纵深。exact 匹配忽略尾斜杠
+    差异，使 /web 与 /web/ 的豁免判定一致。
     """
 
     def __init__(
@@ -706,6 +717,7 @@ def _attach_streamable_http_middleware(
 
     max_body_size 与 allowed_origins 未显式传入时回退读取活动配置；生产调用方
     已取过该配置时显式传入，避免同一配置重复解析。
+    任何令牌部署均豁免端点发现重定向路径，客户端免令牌即可发现实际端点；
     web_enabled 开启时向 Bearer 中间件传入 Web 静态页面的免鉴权路径表，API
     路径始终要求令牌。
 
@@ -723,18 +735,21 @@ def _attach_streamable_http_middleware(
     if allowed_origins is None:
         allowed_origins = get_active_config().http_allowed_origins or ()
     if auth_token:
+        # 恒豁免集与空前缀表先就位，Web 静态豁免仅 web 开启时并入。
+        exempt_exact = ALWAYS_EXEMPT_EXACT_PATHS
+        exempt_prefixes: tuple[str, ...] = ()
         if web_enabled:
             from .webapp.constants import WEB_EXEMPT_EXACT_PATHS, WEB_EXEMPT_PATH_PREFIXES
 
-            app.add_middleware(
-                _BearerTokenAuthMiddleware,
-                expected_token=auth_token,
-                exempt_exact=WEB_EXEMPT_EXACT_PATHS,
-                exempt_prefixes=WEB_EXEMPT_PATH_PREFIXES,
-            )
+            exempt_exact |= WEB_EXEMPT_EXACT_PATHS
+            exempt_prefixes = WEB_EXEMPT_PATH_PREFIXES
             logger.info("Web 操作台已开启：静态页面免鉴权，/web/api 接口要求 Bearer 令牌")
-        else:
-            app.add_middleware(_BearerTokenAuthMiddleware, expected_token=auth_token)
+        app.add_middleware(
+            _BearerTokenAuthMiddleware,
+            expected_token=auth_token,
+            exempt_exact=exempt_exact,
+            exempt_prefixes=exempt_prefixes,
+        )
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
     elif web_enabled:
         from .webapp.constants import WEB_API_PREFIX
@@ -880,14 +895,31 @@ async def _drain_pending_tasks() -> None:
         )
 
 
+async def _well_known_mcp_redirect(request: Request) -> Response:
+    """端点发现路径的处理器，回 303 且 Location 相对指向实际端点。"""
+    return RedirectResponse(MCP_ENDPOINT_PATH, status_code=303)
+
+
+def _register_well_known_mcp_route() -> None:
+    """注册 RFC 8615 端点发现重定向路由，幂等且须先于 streamable_http_app 调用。"""
+    from .resources import mcp
+
+    for route in getattr(mcp, "_custom_starlette_routes", ()):
+        if getattr(route, "path", None) == WELL_KNOWN_MCP_PATH:
+            return
+    mcp.custom_route(WELL_KNOWN_MCP_PATH, methods=["GET"], include_in_schema=False)(
+        _well_known_mcp_redirect
+    )
+
+
 def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabled: bool) -> Any:
     """按生产装配序构造 streamable-http ASGI 应用并装配中间件，返回待 serve 的 app。
 
-    装配序为：构造 transport_security -> 注册 Web 路由（web）-> streamable_http_app
-    -> 挂载 Web 静态资源（web）-> 装配中间件。Web 路由注册必须先于
-    streamable_http_app：SDK 构造 app 时一次性拷贝自定义路由引用，事后追加不生效；
-    静态挂载则在 app 构造后向活体路由表追加。仅使用 MCPServer 公开接口
-    streamable_http_app() 获取 ASGI 应用；max_request_body_size 显式传入活动配置的
+    装配序为：构造 transport_security -> 注册端点发现重定向路由 -> web 开启时注册
+    Web 路由 -> streamable_http_app -> web 开启时挂载 Web 静态资源 -> 装配中间件。自定义
+    路由注册必须先于 streamable_http_app：SDK 构造 app 时一次性拷贝路由表引用，
+    事后追加不生效；静态挂载则在 app 构造后向活体路由表追加。仅使用 MCPServer 公开
+    接口 streamable_http_app() 获取 ASGI 应用；max_request_body_size 显式传入活动配置的
     http_max_body_size，SDK 默认 4MiB 远低于本项目 base64 图片输入的 64MB 上限，
     该上限同时供 SDK 内层与本项目中间件两层消费。run_streamable_http 与生产装配
     测试共用本函数构建同源栈。
@@ -898,6 +930,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     transport_security = _transport_security_for_host(host)
     max_body_size = config.http_max_body_size
     allowed_origins = config.http_allowed_origins
+    _register_well_known_mcp_route()
     if web_enabled:
         from .webapp import register_web_routes
 
@@ -905,6 +938,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     app = mcp.streamable_http_app(
         host=host,
         stateless_http=stateless,
+        streamable_http_path=MCP_ENDPOINT_PATH,
         transport_security=transport_security,
         max_request_body_size=max_body_size,
     )

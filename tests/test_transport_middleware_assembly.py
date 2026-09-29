@@ -311,7 +311,8 @@ def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None
 
 
 def test_attach_passes_web_exempt_paths_when_web_enabled(active_config: None) -> None:
-    """web_enabled 且配置令牌时 Bearer 装配携带 Web 静态页面豁免表。"""
+    """web_enabled 且配置令牌时 Bearer 装配携带 Web 静态页面豁免表并入恒豁免常量。"""
+    from seedream_mcp.transport import ALWAYS_EXEMPT_EXACT_PATHS
     from seedream_mcp.webapp.constants import (
         WEB_EXEMPT_EXACT_PATHS,
         WEB_EXEMPT_PATH_PREFIXES,
@@ -323,20 +324,22 @@ def test_attach_passes_web_exempt_paths_when_web_enabled(active_config: None) ->
 
     kwargs = app.bearer_kwargs()
     assert kwargs is not None
-    assert kwargs.get("exempt_exact") == WEB_EXEMPT_EXACT_PATHS
+    assert kwargs.get("exempt_exact") == WEB_EXEMPT_EXACT_PATHS | ALWAYS_EXEMPT_EXACT_PATHS
     assert kwargs.get("exempt_prefixes") == WEB_EXEMPT_PATH_PREFIXES
 
 
-def test_attach_omits_exempt_kwargs_when_web_disabled(active_config: None) -> None:
-    """web 关闭时 Bearer 装配不携带任何豁免参数，全部路径仍要求令牌。"""
+def test_attach_web_disabled_exempts_only_always_exempt_paths(active_config: None) -> None:
+    """web 关闭时 Bearer 豁免表恰为恒豁免常量，Web 页面路径不进入豁免参数。"""
+    from seedream_mcp.transport import ALWAYS_EXEMPT_EXACT_PATHS
+
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
 
     kwargs = app.bearer_kwargs()
     assert kwargs is not None
-    assert "exempt_exact" not in kwargs
-    assert "exempt_prefixes" not in kwargs
+    assert kwargs.get("exempt_exact") == ALWAYS_EXEMPT_EXACT_PATHS
+    assert not kwargs.get("exempt_prefixes")
 
 
 def test_attach_assembles_origin_guard_for_web_without_token(active_config: None) -> None:
