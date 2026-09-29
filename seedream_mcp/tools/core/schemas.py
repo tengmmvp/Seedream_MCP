@@ -21,7 +21,11 @@ from ...utils.model.model_capabilities import (
 from ...utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
+    VALID_BACKGROUND_MODES,
+    VALID_GENERATION_TOOL_TYPES,
     VALID_OPTIMIZE_MODES,
+    VALID_OUTPUT_FORMATS,
+    VALID_RESPONSE_FORMATS,
     resolve_sequential_max_images,
     validate_parallel_generation_options,
     validate_sequential_image_limit,
@@ -91,7 +95,9 @@ SEQUENTIAL_PROMPT_DESCRIPTION = (
 )
 
 # 生成工具共享字段的描述。
-OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION = "提示词优化配置，仅支持 standard 或 fast。"
+OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION = (
+    "提示词优化配置，仅支持 standard 或 fast，fast 需当前模型支持。"
+)
 SINGLE_IMAGE_DESCRIPTION = (
     "参考图片，支持图像 URL、本地文件路径或 Base64 图片数据。"
     "本地文件路径须在读取范围内，越界会被拒绝。"
@@ -120,12 +126,12 @@ BACKGROUND_DESCRIPTION = (
     "transparent 生成透明背景图"
     "（需输入单张带透明通道的图片），opaque 生成常规实体背景图。"
 )
-SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；未提供时使用全局默认值。例如：2K 或 1920x1080。"
+SIZE_DESCRIPTION = "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值，需当前模型支持；未提供时使用全局默认值。例如：2K 或 2048x2048。"
 SIZE_WITH_LAYER_DESCRIPTION = (
-    "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值；"
+    "生成图片尺寸，可选 1K/1.5K/2K/3K/4K 或 <宽>x<高> 像素值，需当前模型支持；"
     f"图层拆分场景仅支持 {layer_decomposition_presets_text()}"
     " 档位或 auto，未提供时默认 auto；"
-    "其余场景未提供时使用全局默认值。例如：2K 或 1920x1080。"
+    "其余场景未提供时使用全局默认值。例如：2K 或 2048x2048。"
 )
 WATERMARK_DESCRIPTION = "是否添加水印；未提供时沿用全局默认值（默认不添加）。"
 MAX_IMAGES_DESCRIPTION = (
@@ -197,11 +203,11 @@ class BackgroundMode(str, Enum):
     OPAQUE = "opaque"
 
 
-# 各枚举字段的合法值排序表，导入期一次计算，命中判定与错误文案共用。
-_RESPONSE_FORMAT_ALLOWED = sorted(str(member.value) for member in ResponseFormat)
-_OUTPUT_FORMAT_ALLOWED = sorted(str(member.value) for member in OutputFormat)
-_GENERATION_TOOL_TYPE_ALLOWED = sorted(str(member.value) for member in GenerationToolType)
-_BACKGROUND_MODE_ALLOWED = sorted(str(member.value) for member in BackgroundMode)
+# 各枚举字段的合法值排序表，从 validators 白名单单源派生，命中判定与错误文案共用。
+_RESPONSE_FORMAT_ALLOWED = sorted(VALID_RESPONSE_FORMATS)
+_OUTPUT_FORMAT_ALLOWED = sorted(VALID_OUTPUT_FORMATS)
+_GENERATION_TOOL_TYPE_ALLOWED = sorted(VALID_GENERATION_TOOL_TYPES)
+_BACKGROUND_MODE_ALLOWED = sorted(VALID_BACKGROUND_MODES)
 _OPTIMIZE_PROMPT_MODE_ALLOWED = sorted(VALID_OPTIMIZE_MODES)
 
 

@@ -53,6 +53,7 @@ from .parallel import (
 )
 from .results import (
     _build_generation_structured_result,
+    _failure_message_for_result,
     aggregate_parallel_generation_results,
     extract_images,
     format_generation_response,
@@ -250,6 +251,10 @@ def _format_generation_outputs(
     # usage 与图片列表同口径一次净化，文本与结构化两出口共用同一结果。
     raw_usage = result.get("usage")
     sanitized_usage = _sanitize_usage(raw_usage) if isinstance(raw_usage, dict) else {}
+    # 失败消息与 usage 同模式一次计算，两出口共用同一判定产物。
+    failure_message = (
+        _failure_message_for_result(result) if response_reports_failure(result) else None
+    )
 
     response_text = format_generation_response(
         metadata.completion_title,
@@ -261,6 +266,7 @@ def _format_generation_outputs(
         images=sanitized_images,
         saveable_indices=saveable_indices,
         usage=sanitized_usage,
+        failure_message=failure_message,
     )
 
     structured_result = _build_generation_structured_result(
@@ -271,6 +277,7 @@ def _format_generation_outputs(
         auto_save_error=auto_save_error,
         images=sanitized_images,
         usage=sanitized_usage,
+        failure_message=failure_message,
     )
     return response_text, structured_result
 

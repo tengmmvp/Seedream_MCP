@@ -312,7 +312,7 @@ def _strip_result_payload_surrogates(value: Any) -> Any:
 
     显式栈后序遍历不消耗递归配额，极端深树不再使装配点抛 RecursionError；变更
     子级记入所属容器的补丁表，补丁为空的子树返回原容器引用，仅含变更的分支
-    物化新容器。
+    物化新容器；剥离后折叠同名的键以 <dup> 后缀改名，条目不丢。
     """
     if isinstance(value, str):
         return strip_unpaired_surrogates(value)
@@ -338,6 +338,8 @@ def _strip_result_payload_surrogates(value: Any) -> Any:
                 result = {}
                 for key, item in original.items():
                     new_key, new_value = patches.get(key, (key, item))
+                    while new_key in result:
+                        new_key = f"{new_key}<dup>"
                     result[new_key] = new_value
             if parent is None:
                 root_result = result

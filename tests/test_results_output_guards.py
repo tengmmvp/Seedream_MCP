@@ -1314,11 +1314,15 @@ def test_failure_text_non_dict_error_normalized_and_sanitized() -> None:
 
 
 def test_structured_failure_dict_message_normalized_and_sanitized() -> None:
-    """结构化出口的非 str error.message 归一化为文本后脱敏，凭据不进入 structuredContent。"""
+    """结构化出口的非 str error.message 归一化为文本后脱敏，凭据不进入 structuredContent。
+
+    阶梯无兄弟键可提取时以归一化 message 兜底；有兄弟键时先取阶梯，见
+    test_failure_non_str_message_defers_to_ladder_across_channels。
+    """
     result = {
         "success": False,
         "status": "failed",
-        "error": {"code": "E", "message": {"authorization": "Bearer sk-struct-leaked"}},
+        "error": {"message": {"authorization": "Bearer sk-struct-leaked"}},
     }
 
     structured = _structured(result)
@@ -1739,6 +1743,45 @@ def test_failure_dict_message_verdicts_match_across_channels(
     structured = _structured(result)
 
     assert f"图片生成失败: {structured['error']['message']}" in text
+
+
+@pytest.mark.parametrize(
+    ("error_payload", "unexpected_fragment", "expected_message"),
+    [
+        (
+            {"message": 429, "detail": "RateLimited: too many requests"},
+            "429",
+            "RateLimited: too many requests",
+        ),
+        ({"message": {"reason": "quota"}, "code": "E-2"}, '"reason"', "E-2"),
+    ],
+)
+def test_failure_non_str_message_defers_to_ladder_across_channels(
+    error_payload: dict[str, Any], unexpected_fragment: str, expected_message: str
+) -> None:
+    """非 str message 不享受优先级：两通道渲染阶梯键产物而非归一化的 message 文本。"""
+    result = {"success": False, "status": "failed", "data": [], "error": error_payload}
+
+    text = format_generation_response("文生图任务完成", result, "2K")
+    structured = _structured(result)
+
+    assert structured["error"]["message"] == expected_message
+    assert f"图片生成失败: {expected_message}" in text
+    assert unexpected_fragment not in text
+
+
+def test_precomputed_failure_message_consumed_by_both_outlets() -> None:
+    """流水线预计算的失败消息经参数直达两出口，出口不再重复判定与净化。"""
+    result = {"success": False, "status": "failed", "data": [], "error": {"message": "boom"}}
+
+    text = format_generation_response(
+        "文生图任务完成", result, "2K", failure_message="预设失败消息"
+    )
+    structured = _structured(result, failure_message="预设失败消息")
+
+    assert "图片生成失败: 预设失败消息" in text
+    assert "boom" not in text
+    assert structured["error"]["message"] == "预设失败消息"
 
 
 def test_failure_aggregated_invalid_message_verdicts_match_across_channels() -> None:

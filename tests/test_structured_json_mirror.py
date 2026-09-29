@@ -724,3 +724,10 @@ def test_strip_payload_surrogates_materializes_only_changed_branches() -> None:
     assert stripped["data"][1]["url"] == "https://example.com/b.png"
     assert stripped["prompt"] == "提示词"
     assert payload["prompt"] == "提示\ud800词"
+
+
+def test_strip_payload_surrogates_key_collision_keeps_both_entries() -> None:
+    """剥离代理后折叠同名的两键以 <dup> 后缀改名保留，条目不覆盖不丢弃。"""
+    stripped = _strip_result_payload_surrogates({"a\ud800": 1, "a": 2})
+
+    assert stripped == {"a": 1, "a<dup>": 2}

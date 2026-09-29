@@ -414,8 +414,7 @@ async def text_to_image(
     """文生图：根据文字指令生成单张图片。
 
     适用：从零开始按文字描述创建图片。示例：生成「赛博朋克风格的城市夜景」。
-    不适用：需要基于已有图片修改时改用 image_to_image；需要一次生成多张
-    风格一致的图片时改用 sequential_generation。
+    不适用：需要基于已有图片修改时改用 image_to_image；需要一次生成多张风格一致的图片时改用 sequential_generation。
     """
     return await _run_tool_pipeline(
         "text_to_image",
@@ -475,10 +474,8 @@ async def image_to_image(
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """图文生图：基于已有图片进行编辑。
 
-    适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调
-    迁移、改变背景或视角尺寸等。示例：「把人物背景换成海滩」。
-    不适用：纯文字生图改用 text_to_image；融合多张图片特征改用
-    multi_image_fusion。
+    适用：在保留输入图片主体或构图的前提下做元素增删、风格转化、材质替换、色调迁移、改变背景或视角尺寸等。示例：「把人物背景换成海滩」。
+    不适用：纯文字生图改用 text_to_image；融合多张图片特征改用 multi_image_fusion。
     """
     return await _run_tool_pipeline(
         "image_to_image",
@@ -527,10 +524,8 @@ async def multi_image_fusion(
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """多图融合：融合多张参考图片的特征生成新图片。
 
-    适用：把多张图片的风格或元素合并到一张新图。示例：「将图1的服装换到图2的模特
-    身上」，需用「图1/图2」指代输入图片顺序。
-    不适用：仅编辑单张图片改用 image_to_image；生成一组连贯分镜改用
-    sequential_generation。
+    适用：把多张图片的风格或元素合并到一张新图。示例：「将图1的服装换到图2的模特身上」，需用「图1/图2」指代输入图片顺序。
+    不适用：仅编辑单张图片改用 image_to_image；生成一组连贯分镜改用 sequential_generation。
     """
     return await _run_tool_pipeline(
         "multi_image_fusion",
@@ -596,8 +591,7 @@ async def sequential_generation(
 ) -> Annotated[CallToolResult, GenerationStructuredOutput]:
     """组图输出：一次生成多张内容关联的图片。
 
-    适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：
-    「生成4格漫画，主角依次出现在4个场景」。
+    适用：漫画分镜、品牌视觉套图等需要一组风格一致、内容连贯图片的场景。示例：「生成4格漫画，主角依次出现在4个场景」。
     组图生成需当前模型支持。
     不适用：融合多张参考图特征改用 multi_image_fusion。
     """
@@ -664,9 +658,8 @@ async def browse_images(
 ) -> Annotated[CallToolResult, BrowseImagesStructuredOutput]:
     """本地图片浏览：列出读权限（工作区 ∪ 图片目录）内的图片文件。
 
-    适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持
-    递归、分页、按格式过滤。默认浏览图片目录；返回的条目为绝对路径，可直接填入
-    参考图参数。
+    适用：在调用生成工具前查看可用的参考图片，或确认已生成图片的保存情况。支持递归、分页、按格式过滤。
+    默认浏览图片目录；返回的条目为绝对路径，可直接填入参考图参数。
     """
     return await _run_tool_pipeline(
         "browse_images",
@@ -691,11 +684,10 @@ async def get_model_info(
 ) -> Annotated[CallToolResult, GetModelInfoStructuredOutput]:
     """查询当前配置模型的能力快照。
 
-    返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、
-    图层拆分、透明背景、尺寸档位与像素区间，以及 output_format、stream、
-    web_search、组图生成的支持情况。生成工具的模型相关参数是否可用以本工具结果
-    为准；不支持时生成工具会报错并附支持该能力的模型清单。模型由服务器配置
-    决定，更换模型请告知用户调整服务器配置。
+    返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、图层拆分、透明背景、尺寸档位与像素区间，
+    以及 output_format、stream、web_search、组图生成的支持情况。
+    生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。
+    模型由服务器配置决定，更换模型请告知用户调整服务器配置。
     """
     return await run_get_model_info(_config_from_context(ctx))
 

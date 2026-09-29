@@ -31,11 +31,11 @@ def _sanitize_leaf(item: Any, sanitize_string: Callable[[Any], Any]) -> Any:
     return normalize_non_finite_float(item)
 
 
-def _key_needs_flatten(key: Any) -> bool:
-    """字符串键含控制字符或未配对代理时返回 True；非字符串与干净键压平为恒等。"""
+def _flatten_key(key: Any) -> Any:
+    """压平单个键：控制字符换空格并剥离未配对代理，非字符串键与干净键原值返回。"""
     if not isinstance(key, str):
-        return False
-    return bool(CONTROL_CHARS_PATTERN.search(key) or strip_unpaired_surrogates(key) != key)
+        return key
+    return strip_unpaired_surrogates(CONTROL_CHARS_PATTERN.sub(" ", key))
 
 
 def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
@@ -43,8 +43,7 @@ def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
 
     非字符串键无控制字符语义，原样参与判重。
     """
-    if _key_needs_flatten(key):
-        key = strip_unpaired_surrogates(CONTROL_CHARS_PATTERN.sub(" ", key))
+    key = _flatten_key(key)
     while key in taken:
         key = f"{key}<dup>"
     return key
@@ -52,12 +51,20 @@ def _unique_flat_key(taken: dict[Any, Any], key: Any) -> Any:
 
 def _flatten_mapping_keys(mapping: dict[Any, Any]) -> dict[Any, Any]:
     """压平全部键名并保留首个净名，干净映射原样返回保持引用。"""
-    # 前置探测避免干净映射的抛弃式 dict 构建；无控制字符与代理字符的键不压平也不会碰撞。
-    if not any(_key_needs_flatten(key) for key in mapping):
+    # 探测即压平并缓存脏键结果，重建循环复用免重查；干净映射透传原对象免抛弃式构建。
+    flat_keys: dict[Any, Any] = {}
+    for key in mapping:
+        flat_key = _flatten_key(key)
+        if flat_key != key:
+            flat_keys[key] = flat_key
+    if not flat_keys:
         return mapping
     flattened: dict[Any, Any] = {}
     for key, value in mapping.items():
-        flattened[_unique_flat_key(flattened, key)] = value
+        new_key = flat_keys.get(key, key)
+        while new_key in flattened:
+            new_key = f"{new_key}<dup>"
+        flattened[new_key] = value
     return flattened
 
 

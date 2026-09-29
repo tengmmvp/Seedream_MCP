@@ -24,7 +24,10 @@ from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
     MultiImageFusionInput,
+    OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
     OUTPUT_FORMAT_DESCRIPTION,
+    SIZE_DESCRIPTION,
+    SIZE_WITH_LAYER_DESCRIPTION,
     STREAM_DESCRIPTION,
     SequentialGenerationInput,
     TextToImageInput,
@@ -487,8 +490,11 @@ async def test_generation_tool_rejects_oversized_tools_list() -> None:
 
 # ==================== 能力相关描述的静态提示契约 ====================
 
-# 能力字段到其参数描述常量的映射，静态提示契约用例的参数化数据源。
+# 能力到其门控参数描述常量的映射，静态提示契约用例的参数化数据源。
 _CAPABILITY_DESCRIPTION_SOURCES = {
+    "allowed_presets": SIZE_DESCRIPTION,
+    "allowed_presets_layered": SIZE_WITH_LAYER_DESCRIPTION,
+    "supports_fast_optimize_prompt": OPTIMIZE_PROMPT_OPTIONS_DESCRIPTION,
     "supports_output_format": OUTPUT_FORMAT_DESCRIPTION,
     "supports_stream": STREAM_DESCRIPTION,
     "supports_tools": TOOLS_DESCRIPTION,
