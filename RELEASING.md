@@ -71,7 +71,7 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
 ## 版本规则
 
 - 遵循 [SemVer](https://semver.org/)：`MAJOR.MINOR.PATCH`
-- 预发布：tag 含 `alpha` / `beta` / `rc`（如 `v1.3.0rc1`、`v1.3.0-beta1`）时 CI 自动标记为 prerelease；`uvx seedream-image-mcp` 默认仍拉取稳定版
+- 预发布：tag 仅限 `-rc` / `-alpha` / `-beta` 形态（如 `v1.3.0-rc.1`、`v1.3.0-beta1`）时 CI 自动标记为 prerelease；其余 tag 均为正式版，`uvx seedream-image-mcp` 默认仍拉取稳定版
 - **版本号一经发布不可覆盖**：PyPI 不允许重新上传同一版本。发版有误只能发更高版本号修正
 
 ## 故障排查

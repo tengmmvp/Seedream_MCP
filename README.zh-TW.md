@@ -135,6 +135,37 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 > [!WARNING]
 > 推薦透過 `env` 注入 `ARK_API_KEY`，避免把金鑰寫進 `args`：命令列參數會出現在行程清單中，存在洩漏風險。
 
+以下均為 stdio 本機行程形態，統一經 `uvx` 執行（見[快速安裝](#-快速安裝)）。
+
+### Zcode
+
+經 Zcode 設定中的 MCP 伺服器管理介面新增，或直接編輯使用者層級 `~/.zcode/cli/config.json`（工作區層級為 `<專案根>/.zcode/config.json`）：
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "seedream-image-mcp": {
+        "command": "uvx",
+        "args": ["seedream-image-mcp"],
+        "env": { "ARK_API_KEY": "your_api_key_here" }
+      }
+    }
+  }
+}
+```
+
+### Claude Code
+
+一條命令完成註冊：
+
+```bash
+claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
+```
+
+<details>
+<summary><b>其他用戶端設定</b>（Claude Desktop · Cline · Codex · OpenCode）</summary>
+
 ### Claude Desktop
 
 編輯 `claude_desktop_config.json`：
@@ -151,20 +182,9 @@ ARK_API_KEY=your_api_key_here SEEDREAM_HTTP_AUTH_TOKEN=your_token_here docker co
 }
 ```
 
-<details>
-<summary><b>其他用戶端設定</b>（Claude Code · Cursor · Cline）</summary>
+### Cline
 
-### Claude Code
-
-一條命令完成註冊：
-
-```bash
-claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
-```
-
-### Cursor
-
-在專案根目錄建立 `.cursor/mcp.json`：
+編輯 Cline 的 MCP 設定 JSON（CLI 為 `~/.cline/mcp.json`，IDE 擴充功能經「MCP Servers → Configure」開啟）。Cline 啟動的 MCP 行程取不到使用者環境變數，`ARK_API_KEY` 無法依賴環境變數注入，須經設定檔或命令列參數等其他方式傳入，本例經設定的 `env` 欄位：
 
 ```json
 {
@@ -178,9 +198,38 @@ claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx see
 }
 ```
 
-### Cline / 其他 stdio 用戶端
+### Codex
 
-通用設定（`command` + `args` + `env` 欄位同上）。Cline 編輯 `cline_mcp_settings.json`：
+編輯 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.seedream-image-mcp]
+command = "uvx"
+args = ["seedream-image-mcp"]
+
+[mcp_servers.seedream-image-mcp.env]
+ARK_API_KEY = "your_api_key_here"
+```
+
+### OpenCode
+
+編輯 `opencode.json`（全域為 `~/.config/opencode/opencode.json`，也可置於專案根目錄）：
+
+```json
+{
+  "mcp": {
+    "seedream-image-mcp": {
+      "type": "local",
+      "command": ["uvx", "seedream-image-mcp"],
+      "environment": { "ARK_API_KEY": "your_api_key_here" }
+    }
+  }
+}
+```
+
+### 其他用戶端
+
+凡支援 `mcpServers` 標準 stdio 結構（`command` + `args` + `env`）的用戶端，均可使用 Claude Desktop 同款設定。以 Cursor 為例，在專案根目錄建立 `.cursor/mcp.json`：
 
 ```json
 {

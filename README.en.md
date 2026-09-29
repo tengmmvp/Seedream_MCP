@@ -135,6 +135,37 @@ Client configuration below uses Claude Desktop as the example; other streamable-
 > [!WARNING]
 > It is recommended to inject `ARK_API_KEY` via `env` rather than writing it into `args`: command-line arguments appear in the process list and pose a leakage risk.
 
+All examples below run the server as a local stdio process via `uvx` (see [Quick Start](#-quick-start)).
+
+### Zcode
+
+Add the server via the MCP services management panel in Zcode settings, or edit the user-level `~/.zcode/cli/config.json` directly (workspace level: `<project root>/.zcode/config.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "seedream-image-mcp": {
+        "command": "uvx",
+        "args": ["seedream-image-mcp"],
+        "env": { "ARK_API_KEY": "your_api_key_here" }
+      }
+    }
+  }
+}
+```
+
+### Claude Code
+
+Register with a single command:
+
+```bash
+claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
+```
+
+<details>
+<summary><b>Other client configurations</b> (Claude Desktop · Cline · Codex · OpenCode)</summary>
+
 ### Claude Desktop
 
 Edit `claude_desktop_config.json`:
@@ -151,20 +182,9 @@ Edit `claude_desktop_config.json`:
 }
 ```
 
-<details>
-<summary><b>Other client configurations</b> (Claude Code · Cursor · Cline)</summary>
+### Cline
 
-### Claude Code
-
-Register with a single command:
-
-```bash
-claude mcp add seedream-image-mcp --env ARK_API_KEY=your_api_key_here -- uvx seedream-image-mcp
-```
-
-### Cursor
-
-Create `.cursor/mcp.json` in the project root:
+Edit the Cline MCP settings JSON (`~/.cline/mcp.json` for the CLI; in the IDE extension, open it via "MCP Servers → Configure"). The MCP process launched by Cline cannot read user environment variables, so `ARK_API_KEY` cannot rely on environment-variable injection — it must be passed in some other way, such as the config file or command-line arguments. This example uses the `env` field:
 
 ```json
 {
@@ -178,9 +198,38 @@ Create `.cursor/mcp.json` in the project root:
 }
 ```
 
-### Cline / Other stdio clients
+### Codex
 
-Generic configuration (the `command` + `args` + `env` fields are the same as above). For Cline, edit `cline_mcp_settings.json`:
+Edit `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.seedream-image-mcp]
+command = "uvx"
+args = ["seedream-image-mcp"]
+
+[mcp_servers.seedream-image-mcp.env]
+ARK_API_KEY = "your_api_key_here"
+```
+
+### OpenCode
+
+Edit `opencode.json` (global: `~/.config/opencode/opencode.json`; it can also live in the project root):
+
+```json
+{
+  "mcp": {
+    "seedream-image-mcp": {
+      "type": "local",
+      "command": ["uvx", "seedream-image-mcp"],
+      "environment": { "ARK_API_KEY": "your_api_key_here" }
+    }
+  }
+}
+```
+
+### Other Clients
+
+Any client that supports the standard `mcpServers` stdio structure (`command` + `args` + `env`) can reuse the Claude Desktop configuration. For example, create `.cursor/mcp.json` in the project root for Cursor:
 
 ```json
 {
