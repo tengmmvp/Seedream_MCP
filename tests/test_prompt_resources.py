@@ -2,7 +2,7 @@
 
 注册形态经 server.mcp.list_prompts 断言；渲染与参数面错误（缺失、未知参数与
 值校验失败的 -32602 收敛）经 in-process Client 的 get_prompt 断言，
-_targets_argument 的转换口径另以单元用例锁定。
+_targets_argument 与 _locate_validation_error 的口径另以单元用例锁定。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from mcp.types import GetPromptResult, INVALID_PARAMS, TextContent
 from pydantic import BaseModel, Field, ValidationError
 
 import seedream_mcp.server as server
-from seedream_mcp.resources import _targets_argument
+from seedream_mcp.resources import _locate_validation_error, _targets_argument
 from seedream_mcp.tools.core.schemas import PROMPT_MAX_LENGTH
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
@@ -209,3 +209,37 @@ def test_targets_argument_narrows_conversion_scope() -> None:
 
     messages_error = _short_value_error(_MessagesModel, "messages")
     assert _targets_argument(messages_error, {"messages"}) is True
+
+
+def test_locate_validation_error_follows_implicit_context_chain() -> None:
+    """无 raise-from 的旧版 SDK 包装经隐式链仍可定位 ValidationError。"""
+    inner = _short_value_error(_SubjectModel, "subject")
+    with pytest.raises(ValueError) as exc_info:
+        try:
+            raise inner
+        except ValidationError:
+            # 旧版 SDK 形态：捕获后裸抛 ValueError，无显式 raise-from。
+            raise ValueError(f"Error rendering prompt: {inner}")
+
+    assert _locate_validation_error(exc_info.value) is inner
+
+
+def test_locate_validation_error_stops_on_suppressed_context() -> None:
+    """from None 抑制的隐式链不跟随，定位返回 None。"""
+    inner = _short_value_error(_SubjectModel, "subject")
+    with pytest.raises(ValueError) as exc_info:
+        try:
+            raise inner
+        except ValidationError:
+            raise ValueError("Error rendering prompt") from None
+
+    assert _locate_validation_error(exc_info.value) is None
+
+
+def test_locate_validation_error_terminates_on_cyclic_context_chain() -> None:
+    """隐式链成环时遍历终止并返回 None。"""
+    first, second = ValueError("first"), ValueError("second")
+    first.__context__ = second
+    second.__context__ = first
+
+    assert _locate_validation_error(first) is None

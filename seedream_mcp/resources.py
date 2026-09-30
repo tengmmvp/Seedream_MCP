@@ -329,12 +329,22 @@ def _build_request_state_security() -> RequestStateSecurity | None:
 
 
 def _locate_validation_error(exc: BaseException) -> ValidationError | None:
-    """沿异常因果链查找 pydantic ValidationError。"""
+    """沿异常因果链查找 pydantic ValidationError，旧版 SDK 无 raise-from 时退隐式链。
+
+    被 ``from None`` 显式抑制的隐式链不跟随；隐式链可成环，按 id 防环。
+    """
     current: BaseException | None = exc
-    while current is not None:
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
         if isinstance(current, ValidationError):
             return current
-        current = current.__cause__
+        seen.add(id(current))
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
     return None
 
 
