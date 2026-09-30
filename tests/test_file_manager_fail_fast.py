@@ -6,11 +6,11 @@
 """
 
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
+from _os_fakes import _make_cycle_link
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 from seedream_mcp.utils.io.io_storage import FileManager, FileManagerError
@@ -35,48 +35,19 @@ def test_file_manager_rejects_unresolvable_base_dir() -> None:
         FileManager(base_dir=Path("\0invalid"))
 
 
-def _make_cycle_dir(parent: Path, name: str = "cycle") -> Path | None:
-    """构造互指链接环并返回环入口路径，resolve 必抛 RuntimeError。
-
-    Windows 经 NTFS junction 普通用户即可创建，POSIX 经符号链接；平台或卷不
-    支持时返回 None 由调用方跳过。
-    """
-    link = parent / name
-    partner = parent / f"{name}-partner"
-    try:
-        if sys.platform == "win32":
-            import _winapi
-
-            # junction 目标须先存在：先立实体中转再对调，双 junction 互指成环。
-            partner.mkdir()
-            _winapi.CreateJunction(str(partner), str(link))
-            partner.rmdir()
-            _winapi.CreateJunction(str(link), str(partner))
-        else:
-            os.symlink(str(partner), str(link))
-            os.symlink(str(link), str(partner))
-    except OSError:
-        return None
-    return link
-
-
 def test_file_manager_rejects_cycle_base_dir(tmp_path: Path) -> None:
-    """base_dir 链接成环时归一为 FileManagerError，不向调用方穿透裸 RuntimeError。"""
-    cycle = _make_cycle_dir(tmp_path)
-    if cycle is None:
-        pytest.skip("当前平台或卷无法构造链接环")
+    """base_dir 链接成环时环失败 OSError 在解析阶段归一为 FileManagerError，不穿透。"""
+    cycle = _make_cycle_link(tmp_path)
 
     with pytest.raises(FileManagerError, match="解析保存路径"):
         FileManager(base_dir=cycle)
 
 
 def test_file_manager_default_images_root_cycle_raises_config_error(tmp_path: Path) -> None:
-    """默认图片目录成环时归配置错误档案上抛，不穿透裸 RuntimeError。"""
+    """默认图片目录成环时环失败 OSError 归配置错误档案上抛，不向调用方穿透。"""
     workspace = tmp_path / "workspace"
     (workspace / ".seedream").mkdir(parents=True)
-    cycle = _make_cycle_dir(workspace / ".seedream", name="images")
-    if cycle is None:
-        pytest.skip("当前平台或卷无法构造链接环")
+    _make_cycle_link(workspace / ".seedream", name="images")
     set_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)))
 
     with pytest.raises(SeedreamConfigError, match="工作区图片目录无法解析"):

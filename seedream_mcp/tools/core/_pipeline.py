@@ -19,7 +19,7 @@ from ...utils.core.errors import (
 )
 from ...utils.core.sanitizers import sanitize_error_text
 from ...utils.core.logs import get_logger
-from ...utils.io.io_path import normalize_path, resolve_images_root
+from ...utils.io.io_path import normalize_path, resolve_images_root, resolve_rejecting_cycle
 from ...utils.io.io_stream import data_items
 
 if TYPE_CHECKING:
@@ -161,18 +161,21 @@ def _resolve_base_dir(save_path: str | None) -> Path:
 
     save_path 为调用级保存声明，位置不受限；相对路径以部署级图片目录为基准，
     绝对形态不依赖基准、数据根目录声明不可解析时不受阻；UNC、空字节、冒号分量等
-    形态经 normalize_path 在 resolve 前拒绝。
+    形态经 normalize_path 在 resolve 前拒绝；纯尾段环在 3.12 由 normalize_path
+    兜底转 ValueError 已拒绝，前缀环与 3.13+ 全环形态经 resolve_rejecting_cycle
+    复核拒绝。
 
     Raises:
-        SeedreamValidationError: save_path 路径无效。
+        SeedreamValidationError: save_path 路径无效或含链接环。
         SeedreamConfigError: 部署级数据根目录不可解析，经 resolve_images_root 穿透。
     """
     if not save_path:
         return resolve_images_root()
     base = None if Path(save_path).is_absolute() else str(resolve_images_root())
     try:
-        return normalize_path(save_path, base)
-    except ValueError as exc:
+        normalized = normalize_path(save_path, base)
+        return resolve_rejecting_cycle(normalized)
+    except (ValueError, OSError) as exc:
         raise SeedreamValidationError(
             f"保存路径无效: {exc}", field="save_path", value=save_path
         ) from exc

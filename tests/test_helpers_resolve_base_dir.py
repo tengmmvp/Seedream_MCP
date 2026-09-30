@@ -1,7 +1,7 @@
 """图片目录求值与 save_path 调用级声明的解析测试。
 
 resolve_images_root 按显式数据根目录 > 工作根目录派生求值，两级分支的缓存随配置写入失效；
-save_path 为调用级保存声明，位置不受限，相对形态以图片目录为基准，仅做输入清洗。
+save_path 为调用级保存声明，位置不受限，相对形态以图片目录为基准，输入清洗外复核链接环。
 """
 
 from __future__ import annotations
@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from _os_fakes import _install_counting_resolve
+from _os_fakes import _install_counting_realpath, _make_cycle_link, _make_dangling_link
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.tools.core._pipeline import _resolve_base_dir
+from seedream_mcp.tools.core._pipeline import _resolve_base_dir, prevalidate_save_path
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.io.io_path import (
     _DATA_ROOT_RESOLVE_CACHE,
@@ -75,6 +75,34 @@ def test_resolve_base_dir_rejects_invalid_save_path_form(
         _resolve_base_dir("\\\\host\\share\\img")
 
 
+def test_resolve_base_dir_rejects_save_path_link_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """穿环 save_path 在计费前预检即以 validation_error 拒绝，不留待保存阶段软失败。"""
+    base = tmp_path / "images_root"
+    base.mkdir()
+    _use_config(SeedreamConfig(api_key="test_key", data_root=str(base)), monkeypatch)
+    cycle = _make_cycle_link(tmp_path)
+
+    with pytest.raises(SeedreamValidationError, match="保存路径无效"):
+        prevalidate_save_path(str(cycle))
+    with pytest.raises(SeedreamValidationError, match="保存路径无效"):
+        _resolve_base_dir(str(cycle))
+
+
+def test_resolve_base_dir_tolerates_dangling_save_path_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """指向尚未创建目标的 save_path 链接照常放行，环复核不收紧尾段自建语义。"""
+    base = tmp_path / "images_root"
+    base.mkdir()
+    _use_config(SeedreamConfig(api_key="test_key", data_root=str(base)), monkeypatch)
+    link, missing = _make_dangling_link(tmp_path)
+
+    prevalidate_save_path(str(link))
+    assert _resolve_base_dir(str(link)) == missing.resolve()
+
+
 def test_resolve_images_root_derives_from_workspace_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -91,36 +119,38 @@ def test_resolve_images_root_caches_resolved_config(
 ) -> None:
     """显式数据根目录的 resolve 结果经进程级缓存，同一配置串仅首次触发 resolve。
 
-    缓存随 clear_resolved_env_root_cache 失效，失效后再次调用按配置重新解析。
+    首次求值恰三次 realpath：数据根目录一次，图片目录严格探测失败与非严格
+    回退各一次；缓存随 clear_resolved_env_root_cache 失效后整链重解析。
     """
     base = tmp_path / "images_root"
     base.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", data_root=str(base)), monkeypatch)
-    resolve_calls = _install_counting_resolve(monkeypatch)
+    resolve_calls = _install_counting_realpath(monkeypatch)
 
     first = resolve_images_root()
-    # 数据根目录与 .seedream 尾部各一次 resolve，整条路径进缓存
-    assert len(resolve_calls) == 2
+    assert len(resolve_calls) == 3
     again = resolve_images_root()
-    assert len(resolve_calls) == 2
+    # 二次调用不再触发解析，整条路径经缓存生效
     assert again == first
+    assert len(resolve_calls) == 3
 
     clear_resolved_env_root_cache()
     resolve_images_root()
-    assert len(resolve_calls) == 4
+    # 失效后按配置整链重新解析
+    assert len(resolve_calls) == 6
 
 
 def test_resolve_images_root_caches_workspace_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未配置数据根目录时默认图片目录经进程级缓存，二次调用整链零 resolve。"""
+    """未配置数据根目录时默认图片目录经进程级缓存，二次调用整链零解析。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)), monkeypatch)
 
     first = resolve_images_root()
     expected = (workspace / ".seedream" / "images").resolve()
-    resolve_calls = _install_counting_resolve(monkeypatch)
+    resolve_calls = _install_counting_realpath(monkeypatch)
 
     again = resolve_images_root()
     assert len(resolve_calls) == 0

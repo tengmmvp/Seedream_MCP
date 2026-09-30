@@ -30,7 +30,13 @@ from .io_file import (
     atomic_replace_from_fd_sync,
     has_reparse_attribute,
 )
-from .io_path import is_unc_path, is_windows_reserved_name, is_within_resolved, resolve_images_root
+from .io_path import (
+    is_unc_path,
+    is_windows_reserved_name,
+    is_within_resolved,
+    resolve_images_root,
+    resolve_rejecting_cycle,
+)
 from .io_url import get_file_extension_from_url
 
 logger = get_logger()
@@ -91,7 +97,7 @@ class FileManager:
         if is_unc_path(str(raw_base)):
             raise FileManagerError(f"拒绝 UNC 路径以避免触发 SMB 连接: {raw_base}")
         try:
-            resolved = raw_base.resolve()
+            resolved = resolve_rejecting_cycle(raw_base)
         except (OSError, RuntimeError, ValueError) as e:
             raise FileManagerError(f"解析保存路径时出错: {e}") from e
         # 仅拒绝指向已存在文件的路径；save_path 为调用级保存声明，位置不受限，

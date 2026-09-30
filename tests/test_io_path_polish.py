@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import tempfile
 from pathlib import Path
 
@@ -12,7 +14,7 @@ import pytest
 import seedream_mcp.utils.io.io_path as io_path_module
 import seedream_mcp.utils.io.io_scan as io_scan_module
 from _log_fakes import capture_loguru_messages
-from _os_fakes import _install_counting_resolve
+from _os_fakes import _install_counting_realpath, _make_cycle_link, _make_dangling_link
 from seedream_mcp.config import SeedreamConfig, set_active_config
 
 
@@ -49,13 +51,13 @@ def test_resolve_env_workspace_root_caches_resolved_result(
         io_path_module, "_configured_env_value", lambda env_var: configured["value"]
     )
 
-    resolve_calls = _install_counting_resolve(monkeypatch)
+    resolve_calls = _install_counting_realpath(monkeypatch)
     tracked = {str(first_root), str(second_root)}
 
     first = io_path_module.resolve_env_workspace_root()
     cached_again = io_path_module.resolve_env_workspace_root()
     assert first == cached_again == first_root
-    # 同配置两次解析仅触发一次该路径的 resolve，cwd 兜底分支未走
+    # 同配置两次解析仅触发一次该路径的解析，cwd 兜底分支未走
     assert [p for p in resolve_calls if p in tracked] == [str(first_root)]
 
     configured["value"] = str(second_root)
@@ -98,16 +100,16 @@ def test_resolve_env_workspace_root_tilde_form_uses_cache(
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
     monkeypatch.setattr(io_path_module, "_configured_env_value", lambda env_var: "~")
 
-    # 期望值在 resolve 被 monkeypatch 计数前捕获，避免断言自身的 resolve 混入计数
+    # 期望值在 realpath 被 monkeypatch 计数前捕获，避免断言自身的 resolve 混入计数
     expected = Path("~").expanduser().resolve()
     expanded_home = str(Path("~").expanduser())
-    resolve_calls = _install_counting_resolve(monkeypatch)
+    resolve_calls = _install_counting_realpath(monkeypatch)
 
     first = io_path_module.resolve_env_workspace_root()
     cached_again = io_path_module.resolve_env_workspace_root()
 
     assert first == cached_again == expected
-    assert resolve_calls.count(expanded_home) == 1, "~ 形态配置根的 resolve 应只执行一次"
+    assert resolve_calls.count(expanded_home) == 1, "~ 形态配置根的解析应只执行一次"
     assert "~" in io_path_module._RESOLVED_ENV_ROOT_CACHE
 
 
@@ -376,14 +378,15 @@ def test_read_context_degrades_observably_when_declared_workspace_root_unresolva
         return real_configured_value(env_var)
 
     monkeypatch.setattr(io_path_module, "_configured_env_value", _declared_broken_workspace)
-    original_resolve = Path.resolve
+    real_realpath = os.path.realpath
 
-    def _fail_only_declared(self: Path, strict: bool = False) -> Path:
-        if "declared/broken/root" in str(self).replace("\\", "/"):
-            raise OSError("resolve failed")
-        return original_resolve(self, strict=strict)
+    def _fail_only_declared(src: "str | os.PathLike[str]", *, strict: bool = False) -> str:
+        if strict and "declared/broken/root" in os.fspath(src).replace("\\", "/"):
+            # ELOOP 使 resolve_rejecting_cycle 如实上抛而非回退非严格 resolve。
+            raise OSError(errno.ELOOP, "resolve failed")
+        return real_realpath(src, strict=strict)
 
-    monkeypatch.setattr(Path, "resolve", _fail_only_declared)
+    monkeypatch.setattr(os.path, "realpath", _fail_only_declared)
 
     records: list[str] = []
     with capture_loguru_messages(records):
@@ -443,12 +446,15 @@ def test_declaration_resolve_failure_shape_shared_by_entry_points(
             return configured if env_var == "SEEDREAM_WORKSPACE_ROOT" else None
 
         monkeypatch.setattr(io_path_module, "_configured_env_value", _workspace_only)
+        real_realpath = os.path.realpath
 
-        def _fail_resolve(self: Path, strict: bool = False) -> Path:
-            del self, strict
-            raise OSError("resolve failed")
+        def _strict_only_eloop(src: "str | os.PathLike[str]", *, strict: bool = False) -> str:
+            if strict:
+                # ELOOP 使 resolve_rejecting_cycle 如实上抛而非回退非严格 resolve。
+                raise OSError(errno.ELOOP, "resolve failed")
+            return real_realpath(src, strict=strict)
 
-        monkeypatch.setattr(Path, "resolve", _fail_resolve)
+        monkeypatch.setattr(os.path, "realpath", _strict_only_eloop)
         trigger = io_path_module.resolve_env_workspace_root
     else:
         monkeypatch.setenv("SEEDREAM_DATA_ROOT", configured)
@@ -548,3 +554,46 @@ def test_resolve_log_file_path_falls_back_to_workspace_then_chain(
     assert io_path_module.resolve_log_file_path() == (
         tmp_path.resolve() / ".seedream" / "logs" / "seedream_mcp.log"
     )
+
+
+def test_resolve_rejecting_cycle_passes_normal_paths(tmp_path: Path) -> None:
+    """已存在目录与不存在路径经环复核助手正常返回，环复核不误伤常规求值。"""
+    existing = tmp_path / "d"
+    existing.mkdir()
+    assert io_path_module.resolve_rejecting_cycle(existing) == existing.resolve()
+
+    missing = tmp_path / "not-there"
+    assert io_path_module.resolve_rejecting_cycle(missing) == missing.resolve()
+
+
+def test_resolve_rejecting_cycle_rejects_link_cycle(tmp_path: Path) -> None:
+    """链接环经助手抛 OSError，交调用方归档拒绝。"""
+    cycle = _make_cycle_link(tmp_path)
+
+    with pytest.raises(OSError):
+        io_path_module.resolve_rejecting_cycle(cycle)
+
+
+def test_resolve_rejecting_cycle_tolerates_dangling_link(tmp_path: Path) -> None:
+    """悬空链接解析到目标路径交 mkdir 自建，不因目标尚未创建而拒绝。"""
+    link, missing = _make_dangling_link(tmp_path)
+
+    assert io_path_module.resolve_rejecting_cycle(link) == missing.resolve()
+
+
+@pytest.mark.parametrize("fallback_errno", [errno.ENOTDIR, errno.EACCES])
+def test_resolve_rejecting_cycle_falls_back_on_non_cycle_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback_errno: int
+) -> None:
+    """环以外的 strict realpath 失败回退非严格 resolve，保持旧容忍语义。"""
+    path = tmp_path / "missing"
+    real_realpath = os.path.realpath
+
+    def _strict_only_failure(src: "str | os.PathLike[str]", *, strict: bool = False) -> str:
+        if strict:
+            raise OSError(fallback_errno, "simulated strict failure")
+        return real_realpath(src, strict=strict)
+
+    monkeypatch.setattr(os.path, "realpath", _strict_only_failure)
+
+    assert io_path_module.resolve_rejecting_cycle(path) == path.resolve()

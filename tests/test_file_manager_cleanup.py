@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from _os_fakes import _make_dir_link
 from seedream_mcp.utils.io.io_storage import FileManager
 
 # 深树层数上限与 Windows MAX_PATH 预算：每层目录消耗 3 字符以内，预算收缩仍保底 30 层。
@@ -46,12 +47,7 @@ def test_validate_path_rejects_outside_base(tmp_path: Path) -> None:
 
 
 def test_collect_all_files_skips_junction_outside_base(tmp_path: Path) -> None:
-    """base 内指向界外的 NTFS junction 不下降：界外图片不混入收集，也不被清理误删。"""
-    if sys.platform != "win32":
-        pytest.skip("NTFS junction 为 Windows 特有形态")
-
-    import _winapi
-
+    """base 内指向界外的目录链接不下降：界外图片不混入收集，也不被清理误删。"""
     outside = tmp_path.parent / "junction-outside"
     outside.mkdir()
     outside_file = outside / "outside.png"
@@ -64,11 +60,7 @@ def test_collect_all_files_skips_junction_outside_base(tmp_path: Path) -> None:
     old_time = (datetime.now() - timedelta(days=41)).timestamp()
     os.utime(inside_file, (old_time, old_time))
 
-    # junction 可由普通用户创建，reparse 判定剔除其下降；非 NTFS 卷不支持时跳过
-    try:
-        _winapi.CreateJunction(str(outside), str(base / "link"))
-    except OSError as exc:
-        pytest.skip(f"临时卷不支持 junction: {exc}")
+    _make_dir_link(outside, base / "link")
 
     manager = FileManager(base_dir=base)
     errors: list[str] = []
@@ -173,7 +165,7 @@ def test_run_cleanup_age_skips_symlink_pointing_outside(tmp_path: Path) -> None:
 
 
 def test_run_cleanup_age_does_not_descend_into_symlink_dir(tmp_path: Path) -> None:
-    """符号链接目录指向 base_dir 之外时，清理不得下降进入该目录遍历外部条目。
+    """目录链接指向 base_dir 之外时，清理不得下降进入该目录遍历外部条目。
 
     误跟随会把外部过期文件删除，Windows 下还可能触发 SMB 出站认证。
     """
@@ -186,16 +178,12 @@ def test_run_cleanup_age_does_not_descend_into_symlink_dir(tmp_path: Path) -> No
         old_time = (datetime.now() - timedelta(days=40)).timestamp()
         os.utime(marker, (old_time, old_time))
 
-        # base_dir 内创建指向外部目录的符号链接目录
-        link_dir = tmp_path / "link_dir"
-        try:
-            os.symlink(str(outside_dir), str(link_dir), target_is_directory=True)
-        except (OSError, AttributeError):
-            pytest.skip("当前进程无法创建符号链接（Windows 可能需要开发者模式或管理员）")
+        # base_dir 内创建指向外部目录的目录链接
+        _make_dir_link(outside_dir, tmp_path / "link_dir")
 
         result = manager.run_cleanup_policies(days=30, max_total_bytes=None)
 
-        # marker 已过期，若清理下降进入符号链接目录则会被删除；
+        # marker 已过期，若清理下降进入目录链接则会被删除；
         # 其仍存在即证明清理未对外部条目下降遍历
         assert marker.exists()
         assert marker.read_bytes() == b"marker-content"

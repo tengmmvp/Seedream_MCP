@@ -21,7 +21,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import ValidationError
 
 from _log_fakes import RecordingLogger, capture_loguru_messages
-from _os_fakes import _install_counting_resolve
+from _os_fakes import _install_counting_realpath
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools import BrowseImagesInput
@@ -328,8 +328,8 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     """深翻页命中扫描缓存时不重复 resolve 图片文件。
 
     (原始, resolved) 对随首次扫描缓存；深页命中完整缓存时免于 O(offset) 次逐文件
-    resolve，仅剩图片目录与请求目录的目录级 resolve。统计第二次浏览期间 .png 的
-    resolve 调用数并断言为零。
+    resolve，仅剩图片目录与请求目录的目录级 resolve。Path.resolve 委托
+    os.path.realpath，计数后者即可覆盖，统计第二次浏览期间 .png 的调用数并断言为零。
     """
     images_root = _seed_images_root(workspace_root)
     for i in range(5):
@@ -341,15 +341,15 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     )
     assert page1.structured_content["count"] == 5
 
-    resolve_calls = _install_counting_resolve(monkeypatch)
+    realpath_calls = _install_counting_realpath(monkeypatch)
 
     # 深页 offset=4：scan_limit=4+1+1=6，命中完整缓存，不重扫也不逐文件 resolve
     page2 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=1, offset=4)
     )
     assert page2.structured_content["count"] == 1
-    image_resolves = [p for p in resolve_calls if p.endswith(".png")]
-    assert image_resolves == [], "缓存命中的深页不应再对图片文件逐个 resolve"
+    image_paths = [p for p in realpath_calls if p.endswith(".png")]
+    assert image_paths == [], "缓存命中的深页不应再对图片文件逐个 resolve"
 
 
 def test_browse_images_input_rejects_oversized_offset() -> None:
@@ -766,13 +766,14 @@ async def test_browse_images_surrogate_filename_does_not_break_serialization(
 ) -> None:
     """文件名携带未配对代理时浏览响应整体成功，不再翻为序列化失败。
 
-    NTFS 可存代理文件名，Linux 文件名字节经代理保留解码亦可产此类路径；代理在
-    结果装配点剥离后 path 可 UTF-8 编码，代理本就不可回流，回流语义不受影响。
+    NTFS 可存代理文件名，Linux 文件名字节经代理保留解码（surrogateescape）亦可
+    产此类路径；代理在结果装配点剥离后 path 可 UTF-8 编码，代理本就不可回流，
+    回流语义不受影响。
     """
     images_root = _seed_images_root(workspace_root)
     clean = images_root / "ok.png"
     clean.write_bytes(b"\x89PNG\r\n\x1a\n")
-    surrogate = "\ud800"
+    surrogate = "\udcff"
     dirty = images_root / f"bad{surrogate}.png"
 
     def _fake_find(**kwargs: object) -> list[Path]:

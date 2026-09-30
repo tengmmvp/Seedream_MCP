@@ -12,6 +12,7 @@ SEEDREAM_WORKSPACE_ROOT > 进程启动目录 > 用户主目录；图片目录恒
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 import tempfile
@@ -260,8 +261,26 @@ def resolve_cached_data_root(configured_dir: str) -> Path:
     """
     expanded_dir = Path(configured_dir).expanduser()
     if not expanded_dir.is_absolute():
-        return expanded_dir.resolve()
-    return _resolve_with_cache(f"data-root:{configured_dir}", lambda: expanded_dir.resolve())
+        return resolve_rejecting_cycle(expanded_dir)
+    return _resolve_with_cache(
+        f"data-root:{configured_dir}", lambda: resolve_rejecting_cycle(expanded_dir)
+    )
+
+
+def resolve_rejecting_cycle(path: Path) -> Path:
+    """单次严格 realpath 解析，仅不可解析的链接失败（ELOOP 或 Windows 1921）抛 OSError 交调用方归档。
+
+    该组错误码同时覆盖链接环与超过系统解析深度的合法深链（Windows 约 64 跳、
+    Linux 约 40 层），超深链与环同码不可区分、被同口径拒绝；其余 OSError（尾段
+    未创建、前缀非目录、权限等环境性错误）一律回退非严格 resolve 保持旧容忍
+    语义，resolve 自身失败自然传播。
+    """
+    try:
+        return Path(os.path.realpath(path, strict=True))
+    except OSError as e:
+        if e.errno == errno.ELOOP or getattr(e, "winerror", None) == 1921:
+            raise
+        return path.resolve()
 
 
 def resolve_cached_default_images_root(workspace_root: Path) -> Path:
@@ -278,7 +297,7 @@ def resolve_cached_default_images_root(workspace_root: Path) -> Path:
     """
     return _resolve_with_cache(
         f"default-images:{workspace_root}",
-        lambda: (workspace_root / DATA_DIR_NAME / "images").resolve(),
+        lambda: resolve_rejecting_cycle(workspace_root / DATA_DIR_NAME / "images"),
     )
 
 
@@ -297,10 +316,12 @@ def resolve_cached_explicit_images_root(configured_dir: str) -> Path:
     """
     expanded_dir = Path(configured_dir).expanduser()
     if not expanded_dir.is_absolute():
-        return (expanded_dir / DATA_DIR_NAME / "images").resolve()
+        return resolve_rejecting_cycle(expanded_dir / DATA_DIR_NAME / "images")
     return _resolve_with_cache(
         f"explicit-images:{configured_dir}",
-        lambda: (resolve_cached_data_root(configured_dir) / DATA_DIR_NAME / "images").resolve(),
+        lambda: resolve_rejecting_cycle(
+            resolve_cached_data_root(configured_dir) / DATA_DIR_NAME / "images"
+        ),
     )
 
 
@@ -312,7 +333,7 @@ def _resolve_configured_workspace_root(configured_root: str) -> Path:
         cached_root = _RESOLVED_ENV_ROOT_CACHE.get(configured_root)
         if cached_root is not None:
             return cached_root
-    resolved_root = expanded_root.resolve()
+    resolved_root = resolve_rejecting_cycle(expanded_root)
     if cacheable:
         _RESOLVED_ENV_ROOT_CACHE[configured_root] = resolved_root
     return resolved_root
