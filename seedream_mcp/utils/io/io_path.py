@@ -19,9 +19,10 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from contextvars import ContextVar, Token
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Generic, TypeVar
 
 from ..core.errors import SeedreamConfigError
 from ..core.formats import DATA_DIR_NAME
@@ -116,20 +117,23 @@ _RESOLVED_ENV_ROOT_CACHE: dict[str, Path] = {}
 _DATA_ROOT_CACHE_MAX_ENTRIES = 64
 
 
-class ResolveResultCache:
-    """带锁与可选 TTL 的 resolve 结果 LRU 缓存，配置根与扫描条目共用骨架。
+_CacheValueT = TypeVar("_CacheValueT")
+
+
+class ResolveResultCache(Generic[_CacheValueT]):
+    """带锁与可选 TTL 的 LRU 缓存，配置根、扫描条目、resolve 失败负缓存与打包资源解析目标共用骨架。
 
     映射协议供测试的预热与断言，同样经锁与容量上限约束；TTL 为 None 时条目
     仅经 clear 与容量驱逐失效。
     """
 
     def __init__(self, max_entries: int, ttl_seconds: float | None = None) -> None:
-        self._entries: OrderedDict[str, tuple[Path, float]] = OrderedDict()
+        self._entries: OrderedDict[str, tuple[_CacheValueT, float]] = OrderedDict()
         self._max_entries = max_entries
         self._ttl_seconds = ttl_seconds
         self._lock = threading.Lock()
 
-    def get_or_resolve(self, cache_key: str, resolver: Callable[[], Path]) -> Path:
+    def get_or_resolve(self, cache_key: str, resolver: Callable[[], _CacheValueT]) -> _CacheValueT:
         """命中且未过期返回缓存值，否则执行 resolver 并写入。"""
         now = time.monotonic() if self._ttl_seconds is not None else 0.0
         with self._lock:
@@ -142,17 +146,35 @@ class ResolveResultCache:
                 del self._entries[cache_key]
         resolved = resolver()
         with self._lock:
-            self._store(cache_key, resolved, now)
+            self._store(cache_key, resolved)
         return resolved
+
+    def fresh_keys(self) -> set[str]:
+        """单次锁定小节遍历缓存条目，返回未过 TTL 的键快照，不改变驱逐序。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        with self._lock:
+            return {
+                cache_key
+                for cache_key, (_, captured_at) in self._entries.items()
+                if self._ttl_seconds is None or now - captured_at < self._ttl_seconds
+            }
+
+    def update(self, pairs: Iterable[tuple[str, _CacheValueT]]) -> None:
+        """批量写入条目，共用单次时间戳与单个锁定小节，免逐键锁往返。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        with self._lock:
+            for cache_key, value in pairs:
+                store_bounded_entry(self._entries, cache_key, (value, now), self._max_entries)
 
     def clear(self) -> None:
         """清空全部条目。"""
         with self._lock:
             self._entries.clear()
 
-    def _store(self, cache_key: str, resolved: Path, now: float) -> None:
-        """写入条目并刷新 LRU 位，超容逐出最旧条目；须在持锁下调用。"""
-        store_bounded_entry(self._entries, cache_key, (resolved, now), self._max_entries)
+    def _store(self, cache_key: str, value: _CacheValueT) -> None:
+        """以写入时刻时间戳落条目、无 TTL 记 0，并刷新 LRU 位，超容逐出最旧条目；须在持锁下调用。"""
+        now = time.monotonic() if self._ttl_seconds is not None else 0.0
+        store_bounded_entry(self._entries, cache_key, (value, now), self._max_entries)
 
     def __contains__(self, cache_key: object) -> bool:
         with self._lock:
@@ -162,16 +184,16 @@ class ResolveResultCache:
         with self._lock:
             return len(self._entries)
 
-    def __getitem__(self, cache_key: str) -> Path:
+    def __getitem__(self, cache_key: str) -> _CacheValueT:
         with self._lock:
             return self._entries[cache_key][0]
 
-    def __setitem__(self, cache_key: str, resolved: Path) -> None:
+    def __setitem__(self, cache_key: str, value: _CacheValueT) -> None:
         with self._lock:
-            self._store(cache_key, resolved, time.monotonic())
+            self._store(cache_key, value)
 
 
-_DATA_ROOT_RESOLVE_CACHE = ResolveResultCache(_DATA_ROOT_CACHE_MAX_ENTRIES)
+_DATA_ROOT_RESOLVE_CACHE = ResolveResultCache[Path](_DATA_ROOT_CACHE_MAX_ENTRIES)
 
 # 位置声明提供者：由 config 模块加载时注入，返回活动配置的原始字符串，未配置
 # 返回 None；依赖方向为 config 向下注入，本模块不向上 import。两个声明各占一槽，

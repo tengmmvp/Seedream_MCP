@@ -52,7 +52,7 @@ def test_resolve_base_dir_resolves_relative_save_path_against_images_root(
 def test_resolve_base_dir_accepts_save_path_outside_images_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """save_path 为调用级保存声明，指向图片目录之外的绝对路径放行。"""
+    """save_path 为调用级保存声明，指向图片目录之外的绝对与相对形态均放行。"""
     base = tmp_path / "images_root"
     base.mkdir()
     elsewhere = tmp_path / "elsewhere"
@@ -106,7 +106,7 @@ def test_resolve_base_dir_tolerates_dangling_save_path_link(
 def test_resolve_images_root_derives_from_workspace_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未配置数据根目录时图片目录由工作根目录派生：<工作区根>/.seedream/images。"""
+    """未配置数据根目录时图片目录由工作根目录派生：<工作根目录>/.seedream/images。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _use_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)), monkeypatch)
@@ -119,8 +119,8 @@ def test_resolve_images_root_caches_resolved_config(
 ) -> None:
     """显式数据根目录的 resolve 结果经进程级缓存，同一配置串仅首次触发 resolve。
 
-    首次求值恰三次 realpath：数据根目录一次，图片目录严格探测失败与非严格
-    回退各一次；缓存随 clear_resolved_env_root_cache 失效后整链重解析。
+    首次求值恰三次 realpath：数据根目录一次，图片目录严格探测失败
+    与非严格回退各一次；缓存随 clear_resolved_env_root_cache 失效后整链重解析。
     """
     base = tmp_path / "images_root"
     base.mkdir()
@@ -130,13 +130,13 @@ def test_resolve_images_root_caches_resolved_config(
     first = resolve_images_root()
     assert len(resolve_calls) == 3
     again = resolve_images_root()
-    # 二次调用不再触发解析，整条路径经缓存生效
+    # 二次调用不再触发解析，整条路径经缓存生效。
     assert again == first
     assert len(resolve_calls) == 3
 
     clear_resolved_env_root_cache()
     resolve_images_root()
-    # 失效后按配置整链重新解析
+    # 失效后按配置整链重新解析。
     assert len(resolve_calls) == 6
 
 
@@ -196,10 +196,7 @@ def test_resolve_images_root_cache_keys_isolate_explicit_and_default(
 def test_resolve_base_dir_absolute_save_path_skips_unresolvable_images_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """绝对 save_path 不依赖基准，数据根目录声明不可解析时不被计费前预检拒绝。
-
-    与纯远端参考图不依赖数据根目录声明可解析性的解耦原则同口径。
-    """
+    """绝对 save_path 不依赖基准，数据根目录声明不可解析时不被计费前预检拒绝。"""
     import seedream_mcp.utils.io.io_path as io_path_module
     from seedream_mcp.tools.core._pipeline import prevalidate_save_path, _resolve_base_dir
 

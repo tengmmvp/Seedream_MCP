@@ -7,6 +7,7 @@ from __future__ import annotations
 import errno
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -503,7 +504,7 @@ def test_suggest_similar_paths_skips_unc_search_dirs(unc_dir: str) -> None:
 
 def test_resolve_result_cache_protocol_respects_capacity() -> None:
     """映射协议的写入走加锁路径并受容量上限约束，超容逐出最旧条目。"""
-    cache = io_path_module.ResolveResultCache(2)
+    cache = io_path_module.ResolveResultCache[Path](2)
 
     cache["a"] = Path("/a")
     cache["b"] = Path("/b")
@@ -513,6 +514,46 @@ def test_resolve_result_cache_protocol_respects_capacity() -> None:
     assert "a" not in cache
     assert cache["b"] == Path("/b")
     assert cache["c"] == Path("/c")
+
+
+def test_resolve_result_cache_ttl_counts_from_store_time() -> None:
+    """TTL 自写入时刻起算：慢速 resolver 的执行时长不预扣缓存寿命。
+
+    resolver 耗时超过 TTL 本身：以执行前时间戳为 captured_at 的实现会在写入时
+    即过期，下次访问重新解析；写入时刻起算的实现仍命中缓存。
+    """
+    cache = io_path_module.ResolveResultCache[Path](4, ttl_seconds=0.05)
+    calls: list[int] = []
+
+    def slow_resolver() -> Path:
+        calls.append(1)
+        time.sleep(0.15)
+        return Path("/resolved")
+
+    assert cache.get_or_resolve("key", slow_resolver) == Path("/resolved")
+    assert cache.get_or_resolve("key", slow_resolver) == Path("/resolved")
+    assert len(calls) == 1
+
+
+def test_resolve_result_cache_fresh_keys_filters_expired() -> None:
+    """fresh_keys 仅返回未过 TTL 的键，过期条目留存至容量逐出。"""
+    cache = io_path_module.ResolveResultCache[Path](4, ttl_seconds=0.05)
+    cache["stale"] = Path("/stale")
+    time.sleep(0.1)
+    cache["fresh"] = Path("/fresh")
+
+    assert cache.fresh_keys() == {"fresh"}
+    assert len(cache) == 2
+
+
+def test_resolve_result_cache_update_writes_batch_under_bound() -> None:
+    """update 批量写入受容量上限约束，无 TTL 缓存的 fresh_keys 返回全部键。"""
+    cache = io_path_module.ResolveResultCache[Path](3)
+    cache.update((f"key-{index}", Path(f"/{index}")) for index in range(4))
+
+    assert len(cache) == 3
+    assert cache["key-3"] == Path("/3")
+    assert cache.fresh_keys() == {"key-1", "key-2", "key-3"}
 
 
 def _use_active_config(config: SeedreamConfig) -> None:
