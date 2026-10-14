@@ -18,7 +18,6 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
-import aiofiles
 import aiohttp
 import pytest
 
@@ -31,6 +30,8 @@ from seedream_mcp.utils.io.io_download import (
     DownloadManager,
     RetryableDownloadError,
     _ResumeState,
+    _int_or_none,
+    _parse_content_range,
     _resume_validator,
 )
 
@@ -531,7 +532,8 @@ async def test_download_response_rejects_oversized_content_length(tmp_path: Path
 async def test_download_response_rejects_negative_content_length(tmp_path: Path) -> None:
     """content-length 为负值时抛出 DownloadError，不进入文件写入阶段。
 
-    int('-1') 合法但负值无意义，原本 -1 > max_file_size 为 False 会绕过预检查。
+    负号非 ASCII 数字形态，严格解析归 None 走畸形分支，原本 -1 > max_file_size
+    为 False 会绕过预检查。
     """
     manager = DownloadManager()
     response = _FakeResponse(headers={"content-type": "image/png", "content-length": "-1"})
@@ -543,6 +545,69 @@ async def test_download_response_rejects_negative_content_length(tmp_path: Path)
             response,
             tmp_path / "out.png",
             temp_suffix,
+            "image/png",
+            0,
+            time.monotonic(),
+        )
+
+    assert not list(tmp_path.glob("*.part"))
+
+
+# HTTP 整数头的非法形态：裸 int() 可解析但按 RFC 9110 语法非法、Unicode 数字
+# 绕过 isdigit，或空串一类平凡畸形；Content-Range 与 Content-Length 共用同一拒绝口径。
+_MALFORMED_HTTP_INTEGERS = [
+    pytest.param("+5", id="plus-sign"),
+    pytest.param(" 5", id="leading-space"),
+    pytest.param("1_0", id="underscore"),
+    pytest.param("", id="empty"),
+    pytest.param("１２３", id="fullwidth"),
+    pytest.param("١٢٣", id="arabic-indic"),
+]
+
+
+def test_int_or_none_accepts_pure_ascii_digits() -> None:
+    """纯 ASCII 十进制数字正常解析，前导零形态同样受理。"""
+    assert _int_or_none("0") == 0
+    assert _int_or_none("007") == 7
+    assert _int_or_none("123456789") == 123456789
+
+
+@pytest.mark.parametrize("value", _MALFORMED_HTTP_INTEGERS)
+def test_int_or_none_rejects_non_ascii_digit_forms(value: str) -> None:
+    """非纯 ASCII 十进制数字形态一律归 None，不经裸 int() 宽松解析。"""
+    assert _int_or_none(value) is None
+
+
+def test_int_or_none_normalizes_overlong_digit_run() -> None:
+    """超长数字串超出 int 字串转换上限，按畸形归一 None 不抛 ValueError。"""
+    assert _int_or_none("9" * 4301) is None
+
+
+@pytest.mark.parametrize("value", _MALFORMED_HTTP_INTEGERS)
+def test_parse_content_range_rejects_loose_integer_forms(value: str) -> None:
+    """畸形分量归 None 走既有畸形分支，不得解析出错误锚定的偏移或总长。"""
+    total_malformed = _parse_content_range(f"bytes 0-199/{value}")
+    end_malformed = _parse_content_range(f"bytes 0-{value}/1000")
+
+    assert total_malformed.total is None
+    assert end_malformed.end is None
+    # 起点分量的前置空白已被单元分隔的 split 规范化吞并，其余形态原样到达严格解析。
+    if not value[:1].isspace():
+        assert _parse_content_range(f"bytes {value}-199/1000").start is None
+
+
+@pytest.mark.parametrize("value", _MALFORMED_HTTP_INTEGERS)
+async def test_download_rejects_malformed_content_length(tmp_path: Path, value: str) -> None:
+    """携带畸形 content-length 的响应按终态拒绝，不进入文件写入阶段。"""
+    manager = DownloadManager()
+    response = _FakeResponse(headers={"content-type": "image/png", "content-length": value})
+
+    with pytest.raises(DownloadError, match="非法 content-length"):
+        await _single_trip_to_temp(
+            manager,
+            response,
+            tmp_path / "out.png",
+            ".png.part",
             "image/png",
             0,
             time.monotonic(),
@@ -689,10 +754,10 @@ async def test_download_signature_latch_resets_for_resumed_attempt(
     assert len(calls) == 3
 
 
-async def test_download_response_closes_fd_when_aiofiles_open_fails(
+async def test_download_response_closes_fd_when_part_open_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """aiofiles.open 包装 fd 失败时，落盘骨架在 finally 中 os.close 兜底，恰一次。"""
+    """落盘写入的 .part 打开失败时：异常上抛，续传 fd 由 dispose 关闭恰一次。"""
     manager = DownloadManager()
     response = _FakeResponse(
         headers={"content-type": "image/png", "content-length": str(len(_PNG_BYTES))},
@@ -700,27 +765,15 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
     )
     temp_suffix = ".png.part"
 
-    closed_fds: list[int] = []
-    real_os_close = os.close
+    closed = _install_close_counter(monkeypatch)
 
-    def _tracking_close(fd: int) -> None:
-        closed_fds.append(fd)
-        real_os_close(fd)
+    def _raising_open_write_fd(path: Path) -> int:
+        del path
+        raise OSError("part open boom")
 
-    class _RaisingAiofilesCtx:
-        async def __aenter__(self) -> None:
-            raise OSError("aiofiles open boom")
+    monkeypatch.setattr(io_download_module, "open_no_follow_write_fd", _raising_open_write_fd)
 
-        async def __aexit__(self, *args: object) -> None:
-            return None
-
-    def _raising_aiofiles_open(*args: object, **kwargs: object) -> Any:
-        return _RaisingAiofilesCtx()
-
-    monkeypatch.setattr(os, "close", _tracking_close)
-    monkeypatch.setattr(aiofiles, "open", _raising_aiofiles_open)
-
-    with pytest.raises(OSError, match="aiofiles open boom"):
+    with pytest.raises(OSError, match="part open boom"):
         await _single_trip_to_temp(
             manager,
             response,
@@ -731,8 +784,9 @@ async def test_download_response_closes_fd_when_aiofiles_open_fails(
             time.monotonic(),
         )
 
-    # finally 兜底已关闭 open_temp_fd 产出的 fd，避免泄漏
-    assert len(closed_fds) == 1
+    # 续传状态持有的 fd 经 dispose 关闭恰一次，写入线程内无 fd 可泄漏。
+    assert len(closed) == 1
+    assert not list(tmp_path.glob("*.part"))
 
 
 # ==================== 断点续传 ====================
@@ -1527,7 +1581,8 @@ async def test_download_decode_rewrite_locked_once_preserves_part_and_retries(
 
     def _locked_once_open_write_fd(path: Path) -> int:
         rewrite_calls["count"] += 1
-        if rewrite_calls["count"] == 1:
+        # 首次打开是首趟数据写入，持锁发生在第二次（解码回退写回）。
+        if rewrite_calls["count"] == 2:
             raise PermissionError(errno.EACCES, "simulated sharing violation")
         return real_open_write_fd(path)
 
@@ -1544,8 +1599,38 @@ async def test_download_decode_rewrite_locked_once_preserves_part_and_retries(
     assert result["file_size"] == len(_DECODE_BODY)
     assert save_path.read_bytes() == _DECODE_BODY
     # 持锁不毁数据：完成态保留不发网络请求，第二趟重解码后写回落盘。
-    assert rewrite_calls["count"] == 2
+    assert rewrite_calls["count"] == 3
     assert session._idx == 1
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_data_write_locked_once_retries_and_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """首趟数据写入遭瞬时持锁（PermissionError）：归可重试保留续传状态，重试后完整落盘。"""
+    real_open_write_fd = io_file.open_no_follow_write_fd
+    write_opens = {"count": 0}
+
+    def _locked_once_open_write_fd(path: Path) -> int:
+        write_opens["count"] += 1
+        if write_opens["count"] == 1:
+            raise PermissionError(errno.EACCES, "simulated sharing violation")
+        return real_open_write_fd(path)
+
+    monkeypatch.setattr(io_download_module, "open_no_follow_write_fd", _locked_once_open_write_fd)
+    manager = DownloadManager()
+    session = _FakeSession([_full_retry_response(_RESUME_ETAG), _full_retry_response(_RESUME_ETAG)])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 2
+    assert save_path.read_bytes() == _RESUME_BODY
+    # 删除该持锁分类会使 PermissionError 落"权限拒绝，不可重试"终态，attempts 断言即红。
+    assert write_opens["count"] == 2
+    assert session._idx == 2
     assert not list(tmp_path.glob("*.part"))
 
 
@@ -2286,7 +2371,8 @@ async def test_download_completed_retry_locked_reopen_preserves_part_and_retries
 
     def _locked_once_open_write_fd(path: Path) -> int:
         reopen_calls["count"] += 1
-        if reopen_calls["count"] == 1:
+        # 首次打开是首趟数据写入，持锁发生在第二次（完成态重开）。
+        if reopen_calls["count"] == 2:
             raise PermissionError(errno.EACCES, "simulated sharing violation")
         return real_open_write_fd(path)
 
@@ -2302,7 +2388,7 @@ async def test_download_completed_retry_locked_reopen_preserves_part_and_retries
     assert result["attempts"] == 3
     assert save_path.read_bytes() == _RESUME_BODY
     # 持锁不毁数据：完成态保留不发全量重下请求，第二次重开直接落盘。
-    assert reopen_calls["count"] == 2
+    assert reopen_calls["count"] == 3
     assert session._idx == 1
     assert not list(tmp_path.glob("*.part"))
 
@@ -2368,31 +2454,6 @@ async def test_download_finalize_persistent_permission_lock_exhausts_retries(
 # ==================== 部分写入：文件内容与已确认偏移严格同步 ====================
 
 
-class _PartialWriteFile:
-    """每次 write 仅落盘前半段并返回实际写入量，构造 os.write 部分写入。"""
-
-    def __init__(self, fd: int) -> None:
-        self._fd = fd
-
-    async def __aenter__(self) -> "_PartialWriteFile":
-        return self
-
-    async def __aexit__(self, *args: object) -> bool:
-        return False
-
-    async def truncate(self, size: int) -> None:
-        os.ftruncate(self._fd, size)
-
-    async def seek(self, pos: int) -> None:
-        os.lseek(self._fd, pos, os.SEEK_SET)
-
-    async def write(self, data: bytearray) -> int:
-        half = len(data) // 2
-        if half == 0:
-            return os.write(self._fd, bytes(data))
-        return os.write(self._fd, bytes(data[:half]))
-
-
 async def test_download_flush_partial_write_resubmits_remainder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2405,12 +2466,16 @@ async def test_download_flush_partial_write_resubmits_remainder(
     )
     session = _FakeSession([response])
     monkeypatch.setattr(io_download_module, "_WRITE_BATCH_BYTES", 64)
+    real_write = os.write
 
-    def _partial_open(fd: int, *args: object, **kwargs: object) -> _PartialWriteFile:
-        del args, kwargs
-        return _PartialWriteFile(fd)
+    def _half_write(fd: int, data: bytearray) -> int:
+        view = memoryview(data)
+        half = len(data) // 2
+        if half == 0:
+            return real_write(fd, view)
+        return real_write(fd, view[:half])
 
-    monkeypatch.setattr(aiofiles, "open", _partial_open)
+    monkeypatch.setattr(os, "write", _half_write)
 
     manager = DownloadManager()
     _patch_download_network(monkeypatch, manager, session)
@@ -2426,7 +2491,7 @@ async def test_download_flush_partial_write_resubmits_remainder(
 
 
 def _install_recording_truncate_align(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
-    """记录续传趟截断定位的系统调用次序，fdopen 探位一类的 lseek 不计入。"""
+    """记录 ftruncate 与 lseek 系统调用次序；数据写入线程的 lseek 混入记录，截断相关断言以 ftruncate 锚定。"""
     real_ftruncate = os.ftruncate
     real_lseek = os.lseek
 
@@ -2446,7 +2511,7 @@ def _install_recording_truncate_align(monkeypatch: pytest.MonkeyPatch, calls: li
 async def test_download_fresh_temp_file_skips_noop_truncate_seek(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """首趟新建空临时文件：截断定位为空操作，不派发执行器往返。"""
+    """首趟新建空临时文件：截断为空操作，不派发执行器往返。"""
     calls: list[str] = []
     _install_recording_truncate_align(monkeypatch, calls)
     manager = DownloadManager()
@@ -2458,13 +2523,13 @@ async def test_download_fresh_temp_file_skips_noop_truncate_seek(
 
     assert result["success"] is True
     assert save_path.read_bytes() == _PNG_BYTES
-    assert calls == []
+    assert "ftruncate" not in calls
 
 
 async def test_download_resume_trip_truncates_once_and_reuses_temp_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """重试趟 fd 已持有：单回调完成撕裂尾部截断与定位，临时文件全程仅创建一次。"""
+    """重试趟 fd 已持有：截断撕裂尾部恰一次，临时文件全程仅创建一次。"""
     calls: list[str] = []
     _install_recording_truncate_align(monkeypatch, calls)
     real_ensure_file = _ResumeState.ensure_file
@@ -2484,8 +2549,9 @@ async def test_download_resume_trip_truncates_once_and_reuses_temp_file(
 
     assert result["success"] is True
     assert save_path.read_bytes() == _RESUME_BODY
-    # 首趟新建空文件跳过空操作，仅续传趟各执行一次截断与定位。
-    assert calls == ["ftruncate", "lseek"]
+    # 首趟新建空文件跳过空操作，仅续传趟截断一次；两批写入各定位一次，截断回调不再定位。
+    assert calls.count("ftruncate") == 1
+    assert calls.count("lseek") == 2
     # 续传趟在事件循环内直接取已持有 fd，不再派发 ensure_file 线程往返。
     assert ensure_calls["count"] == 1
 
@@ -2568,9 +2634,10 @@ async def test_download_cancel_during_truncate_lands_before_fd_close(
 
     assert not save_path.exists()
     assert not list(tmp_path.glob("*.part"))
-    # dispose 关 fd 时在途截断已完整落定（含门控放行），二者不竞争。
-    assert len(closed) == 1
-    assert closed[0][1] == ["ftruncate_landed", "op_settled"]
+    # 首次关闭为中断趟数据写入线程的 fd 自闭；dispose 关续传 fd 时在途截断已
+    # 完整落定（含门控放行），二者不竞争。
+    assert len(closed) == 2
+    assert closed[-1][1] == ["ftruncate_landed", "op_settled"]
 
 
 async def test_download_repeated_cancel_during_truncate_still_lands_before_fd_close(
@@ -2617,9 +2684,75 @@ async def test_download_repeated_cancel_during_truncate_still_lands_before_fd_cl
 
     assert not save_path.exists()
     assert not list(tmp_path.glob("*.part"))
-    # 重复取消不令 dispose 抢先关 fd：在途截断完整落定后才关闭，无同号 fd 误伤。
+    # 重复取消不令 dispose 抢先关 fd：在途截断完整落定后才关闭，无同号 fd 误伤；
+    # 首次关闭为中断趟数据写入线程的 fd 自闭。
+    assert len(closed) == 2
+    assert closed[-1][1] == ["ftruncate_landed", "op_settled"]
+
+
+async def test_download_repeated_cancel_during_write_releases_and_op_closes_own_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """数据写入落定等待为有界档：重复取消放行任务退出，写入线程自闭 fd 不误伤。"""
+    manager = DownloadManager()
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    events: list[str] = []
+    release = threading.Event()
+    real_write = os.write
+
+    def _gated_write(fd: int, data: bytearray) -> int:
+        events.append("write_entered")
+        assert release.wait(5.0), "放行事件未触发"
+        count = real_write(fd, data)
+        events.append("op_settled")
+        return count
+
+    monkeypatch.setattr(os, "write", _gated_write)
+
+    real_open_write_fd = io_file.open_no_follow_write_fd
+    write_op_fds: list[int] = []
+
+    def _recording_open_write_fd(path: Path) -> int:
+        fd = real_open_write_fd(path)
+        write_op_fds.append(fd)
+        return fd
+
+    monkeypatch.setattr(io_download_module, "open_no_follow_write_fd", _recording_open_write_fd)
+    # 关闭时点附事件时序快照，锁定各 fd 关闭与门控时序的关系。
+    closed = _install_close_counter(monkeypatch, record=lambda fd: (fd, list(events)))
+
+    save_path = tmp_path / "out.png"
+    task = asyncio.ensure_future(manager.download_image("https://example.com/img.png", save_path))
+    for _ in range(200):
+        if "write_entered" in events:
+            break
+        await asyncio.sleep(0.01)
+    assert "write_entered" in events, "写入线程未进入执行"
+
+    task.cancel()  # 取消一：打断外层 shield 进入落定等待。
+    await asyncio.sleep(0.05)
+    task.cancel()  # 取消二：落定等待吸收首个取消继续等待。
+    await asyncio.sleep(0.05)
+    task.cancel()  # 取消三：有界档打断落定等待，放行不等挂起的写入。
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled(), "病态存储挂起不再钉死任务，并发槽得以释放"
+
+    # 取消放行即 dispose 关闭续传 fd，此刻写入仍挂起，二者分属不同 fd。
+    assert write_op_fds
     assert len(closed) == 1
-    assert closed[0][1] == ["ftruncate_landed", "op_settled"]
+    assert closed[0][0] != write_op_fds[0]
+
+    release.set()  # 写入在续传 fd 关闭后照常落地，线程内 fd 自闭完整落定。
+    for _ in range(200):
+        if len(closed) == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    assert closed[1] == (write_op_fds[0], ["write_entered", "op_settled"])
+    assert not save_path.exists()
 
 
 async def test_download_cancel_during_reopen_cleans_fd_and_part(
@@ -2635,9 +2768,14 @@ async def test_download_cancel_during_reopen_cleans_fd_and_part(
     reopened = threading.Event()
     release = threading.Event()
     opened_fds: list[int] = []
+    open_calls = {"count": 0}
     closed = _install_close_counter(monkeypatch)
 
     def _gated_open_write_fd(path: Path) -> int:
+        open_calls["count"] += 1
+        # 首次打开是首趟数据写入，门控只挂在完成态重开上。
+        if open_calls["count"] < 2:
+            return real_open_write_fd(path)
         fd = real_open_write_fd(path)
         opened_fds.append(fd)
         reopened.set()
@@ -2656,6 +2794,6 @@ async def test_download_cancel_during_reopen_cleans_fd_and_part(
 
     assert not save_path.exists()
     assert not list(tmp_path.glob("*.part"))
-    # 首趟终局关闭原 fd 一次，重开的 fd 经取消善后再关闭恰一次，无泄漏。
-    assert len(closed) == 2
+    # 首趟数据写入与终局各自闭一次，重开的 fd 经取消善后再关闭恰一次，无泄漏。
+    assert len(closed) == 3
     assert opened_fds and closed[-1] == opened_fds[0]

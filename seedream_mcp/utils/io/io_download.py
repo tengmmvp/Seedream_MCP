@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn, cast
 from urllib.parse import urljoin, urlparse
 
-import aiofiles
 import aiohttp
 from aiohttp.abc import AbstractResolver, ResolveResult
 
@@ -65,7 +64,7 @@ logger = get_logger()
 # 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数。
 _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 
-# 落盘批量写阈值：累积至该字节数才提交一次 aiofiles 写任务，减少执行器跳转次数。
+# 落盘批量写阈值：累积至该字节数才提交一次写入线程任务，减少执行器跳转次数。
 _WRITE_BATCH_BYTES = 4 * 1024 * 1024
 
 # 重定向上限：逐跳手动跟踪并限制跳数，防止经由重定向链绕过 SSRF 校验。
@@ -161,6 +160,21 @@ def _rewrite_part_file(path: Path, data: bytes | bytearray) -> None:
                 # 零进展写入若重试即空转：按 OSError 上抛，对齐 _flush_received 守护。
                 raise OSError("写入零字节")
             written += count
+    finally:
+        _close_fd_quietly(fd)
+
+
+def _append_part_bytes(path: Path, offset: int, data: bytearray) -> int:
+    """以 no-follow 纪律打开续传临时文件，按偏移写入 data 并返回写入字节数。
+
+    fd 的开关收在函数内部，落定等待可取有界档：重复取消放行后线程仍自闭 fd，
+    不与调用方关闭的续传 fd 竞争同号；os.write 的计数契约使部分写入可观测，
+    由调用方切片重提交。
+    """
+    fd = open_no_follow_write_fd(path)
+    try:
+        os.lseek(fd, offset, os.SEEK_SET)
+        return os.write(fd, data)
     finally:
         _close_fd_quietly(fd)
 
@@ -399,11 +413,19 @@ def _resume_validator(response: "aiohttp.ClientResponse") -> str | None:
 
 
 def _int_or_none(text: str) -> int | None:
-    """十进制解析失败归一为 None，Content-Range 三分量共用同一接受口径。"""
-    try:
-        return int(text)
-    except ValueError:
-        return None
+    """HTTP 整数头的严格解析：仅受理 ASCII 十进制数字，其余形态归一为 None。
+
+    裸 int() 会接受 '+5'、' 5'、'1_0' 与 Unicode 数字等非法形态；isascii 前置
+    防全角与阿拉伯-印度数字经 isdigit 绕过。Content-Range 三分量与 Content-Length
+    共用同一接受口径。
+    """
+    if text.isascii() and text.isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            # 超长数字串超出 int 字串转换上限，按畸形归一 None。
+            return None
+    return None
 
 
 class _ContentRange(NamedTuple):
@@ -1030,7 +1052,7 @@ class DownloadManager:
         Raises:
             DownloadError: Content-Length 与 Content-Range 总长预检、流式累计上限、
                 字节签名校验失败，或交付越过声明总长。
-            RetryableDownloadError: 响应体流收尾正常但未达声明总长或声明分片。
+            RetryableDownloadError: 响应体流收尾正常但未达声明总长或声明分片，或落盘写入遭瞬时持锁。
         """
         continuing = classification.continuing
         base_offset = resume.offset if continuing else 0
@@ -1043,13 +1065,11 @@ class DownloadManager:
         segment_expected: int | None = None
         content_length = response.headers.get("content-length")
         cl_value: int | None = None
-        if content_length:
-            try:
-                cl_value = int(content_length)
-            except (TypeError, ValueError) as exc:
-                raise DownloadError(f"非法 content-length: {content_length!r}") from exc
-            if cl_value < 0:
-                raise DownloadError(f"非法 content-length: {cl_value}")
+        if content_length is not None:
+            cl_value = _int_or_none(content_length)
+            if cl_value is None:
+                # 携带而非缺失的畸形整数按终态拒绝，宽松形态不得错误锚定总量。
+                raise DownloadError(f"非法 content-length: {content_length!r}")
             if not continuing:
                 if cl_value > self.max_file_size:
                     raise DownloadError(format_file_too_large_bytes(cl_value, self.max_file_size))
@@ -1088,8 +1108,9 @@ class DownloadManager:
                 asyncio.to_thread(resume.ensure_file, save_path.parent, temp_suffix),
                 absorb_all_cancels=True,
             )
-        # fd 已持有或刚由 ensure_file 赋值，必非 None，cast 仅收窄 Optional 类型。
+        # fd 与 path 已持有或刚由 ensure_file 赋值，必非 None，cast 仅收窄 Optional 类型。
         fd = cast(int, resume.fd)
+        part_path = cast(Path, resume.path)
         if not continuing:
             # 全量体由首趟、If-Range 失配或服务端不支持 Range 回退而来，
             # 作废已确认字节并刷新源校验器。
@@ -1099,92 +1120,94 @@ class DownloadManager:
         head_bytes = resume.head_bytes
         # 签名判定锁存为趟内局部：每趟恰评估一次，续传趟预填窗口亦重走。
         signature_verified = False
-        # closefd=False：aiofiles 退出时仅 flush 不关闭 fd，fd 由续传状态持有。
-        # buffering=0：单次 os.write 的计数契约使部分写入可观测，保证文件与 offset
-        # 严格同步。
-        async with aiofiles.open(fd, "wb", closefd=False, buffering=0) as f:
-            # 截断失败尝试的撕裂尾部并把写位置对齐已确认偏移，
-            # 单回调合并两次系统调用省一次执行器往返；执行器跳转守取消纪律，
-            # 落定等待吸收任意次取消，dispose 关 fd 前在途 op 已落定，
-            # 防 fd 复用后迟到截断误伤。新建空文件位置与长度均为 0，
-            # 截断定位是空操作，跳过执行器往返。
-            if not fresh_file:
+        # 截断失败尝试的撕裂尾部；执行器跳转守取消纪律，落定等待吸收任意次
+        # 取消，dispose 关 fd 前在途 op 已落定，防 fd 复用后迟到截断误伤。
+        # 新建空文件长度为 0，截断是空操作，跳过执行器往返。
+        if not fresh_file:
 
-                def _truncate_and_align() -> None:
-                    os.ftruncate(fd, resume.offset)
-                    os.lseek(fd, resume.offset, os.SEEK_SET)
+            def _truncate_torn_tail() -> None:
+                os.ftruncate(fd, resume.offset)
 
-                await await_settled_op(
-                    asyncio.to_thread(_truncate_and_align), absorb_all_cancels=True
+            await await_settled_op(asyncio.to_thread(_truncate_torn_tail), absorb_all_cancels=True)
+
+        # 批量累积写入：每次落盘提交一次执行器任务，逐 256KB chunk 跳转在批量
+        # 下载时占用执行器线程槽，累积至 _WRITE_BATCH_BYTES 再提交。
+        write_buffer = bytearray()
+
+        async def _flush_received() -> None:
+            while write_buffer:
+                try:
+                    # 有界档：写入线程自持 fd 开关，重复取消放行不与 fd 关闭竞争。
+                    written = await await_settled_op(
+                        asyncio.to_thread(
+                            _append_part_bytes, part_path, resume.offset, write_buffer
+                        )
+                    )
+                except PermissionError as exc:
+                    # 与终局重开同口径：杀软瞬时持锁归可重试，已确认偏移保留续传。
+                    raise RetryableDownloadError("落盘写入瞬时持锁，重试") from exc
+                if written == 0:
+                    # 零进展写入若重试即空转：按可重试错误上抛，文件与 offset 保持同步。
+                    raise OSError("写入零字节")
+                # 部分写入按实际写入量切片，未写部分留待重提交。
+                resume.offset += written
+                del write_buffer[:written]
+
+        async def _flush_best_effort() -> None:
+            # 失败路径尽力落盘已缓冲字节：二次失败不掩盖原始异常。
+            with contextlib.suppress(Exception):
+                await _flush_received()
+
+        def _raise_if_overshoot() -> None:
+            # 交付越过声明总长属对端违约，尾部字节不可信：与虚高总长同口径按终态
+            # 超限失败，断流与干净收流共用同一判定，恒定超长源不得每次重试
+            # 全量重下耗尽预算。
+            if expected_total is not None and resume.offset > expected_total:
+                raise DownloadError(
+                    format_file_too_large_bytes(resume.offset, expected_total, label="响应体")
                 )
 
-            # 批量累积写入：aiofiles 每次 write 提交一次执行器任务，逐 256KB chunk
-            # 跳转在批量下载时占用默认执行器线程槽，累积至 _WRITE_BATCH_BYTES 再落盘。
-            write_buffer = bytearray()
-
-            async def _flush_received() -> None:
-                while write_buffer:
-                    written = await await_settled_op(f.write(write_buffer), absorb_all_cancels=True)
-                    if written == 0:
-                        # 零进展写入若重试即空转：按可重试错误上抛，文件与 offset 保持同步。
-                        raise OSError("写入零字节")
-                    # 部分写入按实际写入量切片，未写部分留待重提交。
-                    resume.offset += written
-                    del write_buffer[:written]
-
-            async def _flush_best_effort() -> None:
-                # 失败路径尽力落盘已缓冲字节：二次失败不掩盖原始异常。
-                with contextlib.suppress(Exception):
-                    await _flush_received()
-
-            def _raise_if_overshoot() -> None:
-                # 交付越过声明总长属对端违约，尾部字节不可信：与虚高总长同口径按终态
-                # 超限失败，断流与干净收流共用同一判定，恒定超长源不得每次重试
-                # 全量重下耗尽预算。
-                if expected_total is not None and resume.offset > expected_total:
+        try:
+            async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
+                write_buffer += chunk
+                # 内存上限锚定已确认偏移加未刷盘缓冲，与实际占用量恒等。
+                if resume.offset + len(write_buffer) > self.max_file_size:
                     raise DownloadError(
-                        format_file_too_large_bytes(resume.offset, expected_total, label="响应体")
-                    )
-
-            try:
-                async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
-                    write_buffer += chunk
-                    # 内存上限锚定已确认偏移加未刷盘缓冲，与实际占用量恒等。
-                    if resume.offset + len(write_buffer) > self.max_file_size:
-                        raise DownloadError(
-                            format_file_too_large_bytes(
-                                resume.offset + len(write_buffer), self.max_file_size
-                            )
+                        format_file_too_large_bytes(
+                            resume.offset + len(write_buffer), self.max_file_size
                         )
-                    # 累计首部字节做签名校验，省一次 open+read；窗口取各格式最小
-                    # 长度下界的最大值，保证 is_known_image_bytes 对全部格式可判定；
-                    # 续传趟次的窗口取前趟留存，流末兜底校验复核。
-                    if len(head_bytes) < SNIFF_HEAD_BYTES_FLOOR:
-                        head_bytes += chunk[: SNIFF_HEAD_BYTES_FLOOR - len(head_bytes)]
-                        resume.head_bytes = head_bytes
-                    # 签名集满每趟锁存判定一次，防逐块重跑；
-                    # 伪造 Content-Type 的响应在首个 chunk 后被拒，
-                    # 不白耗后续带宽与磁盘；压缩容器头放行至终验，解码复核需全部字节。
-                    if not signature_verified and len(head_bytes) >= SNIFF_HEAD_BYTES_FLOOR:
-                        if not is_known_image_bytes(
-                            head_bytes
-                        ) and not _is_compression_container_head(head_bytes):
-                            raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
-                        signature_verified = True
-                    if len(write_buffer) >= _WRITE_BATCH_BYTES:
-                        await _flush_received()
-            except DownloadError as exc:
-                # 可重试失败把已接收字节落盘供重试续传，终态失败立即作废临时文件、
-                # 已缓冲字节不再白写；撕裂尾部由下一趟截断修正。
-                if isinstance(exc, RetryableDownloadError):
-                    await _flush_best_effort()
-                    _raise_if_overshoot()
-                raise
-            except Exception:
-                await _flush_best_effort()
-                _raise_if_overshoot()
-                raise
-            await _flush_received()
+                    )
+                # 累计首部字节做签名校验，省一次 open+read；窗口取各格式最小
+                # 长度下界的最大值，保证 is_known_image_bytes 对全部格式可判定；
+                # 续传趟次的窗口取前趟留存，流末兜底校验复核。
+                if len(head_bytes) < SNIFF_HEAD_BYTES_FLOOR:
+                    head_bytes += chunk[: SNIFF_HEAD_BYTES_FLOOR - len(head_bytes)]
+                    resume.head_bytes = head_bytes
+                # 签名集满每趟锁存判定一次，防逐块重跑；
+                # 伪造 Content-Type 的响应在首个 chunk 后被拒，
+                # 不白耗后续带宽与磁盘；压缩容器头放行至终验，解码复核需全部字节。
+                if not signature_verified and len(head_bytes) >= SNIFF_HEAD_BYTES_FLOOR:
+                    if not is_known_image_bytes(head_bytes) and not _is_compression_container_head(
+                        head_bytes
+                    ):
+                        raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
+                    signature_verified = True
+                if len(write_buffer) >= _WRITE_BATCH_BYTES:
+                    await _flush_received()
+        except RetryableDownloadError:
+            # 可重试失败把已接收字节落盘供重试续传，撕裂尾部由下一趟截断修正。
+            await _flush_best_effort()
+            _raise_if_overshoot()
+            raise
+        except DownloadError:
+            # 终态失败立即作废临时文件，已缓冲字节不再白写。
+            raise
+        except Exception:
+            # 断流等意外异常与可重试同口径落盘已收字节，供重试续传。
+            await _flush_best_effort()
+            _raise_if_overshoot()
+            raise
+        await _flush_received()
         if expected_total is not None and resume.offset < expected_total:
             # 区间上限代理一类短体响应流收尾正常但未达声明总长：按可重试上抛，
             # 已确认偏移供下一趟续传补齐。

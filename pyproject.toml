@@ -39,7 +39,6 @@ dependencies = [
     "pydantic>=2.12.0,<3",
     "httpx>=0.28.0,<1",
     "aiohttp>=3.11.0,<4",
-    "aiofiles>=24.1.0,<26",
     "python-dotenv>=1.0.0,<2",
     "loguru>=0.7.2,<1",
     "Pillow>=11.3.0,<13",
@@ -127,10 +126,6 @@ python_version = "3.12"
 # 默认检查范围：包源码、全部测试与维护脚本。
 files = ["seedream_mcp", "tests", "scripts"]
 strict = true
-
-[[tool.mypy.overrides]]
-module = "aiofiles.*"
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "pillow_heif.*"
