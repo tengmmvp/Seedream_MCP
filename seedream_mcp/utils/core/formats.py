@@ -217,7 +217,12 @@ BASE64_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 def _trailing_base64_padding(payload: str) -> int:
     """剥离尾部空白后统计连续 padding 字符数，供解码上界估算剔除。"""
-    # 两段 rstrip 均在 C 层完成，对抗性超长 padding 尾不退化为逐字符 Python 循环。
+    # 常规载荷的 padding 与折行尾空白均落在尾部 64 字符探测窗内，免整串拷贝。
+    tail = payload[-64:].rstrip()
+    body = tail.rstrip("=")
+    if body:
+        return len(tail) - len(body)
+    # 窗口被空白与等号耗尽时 run 可能越窗，回退全串两段 rstrip（均在 C 层完成）。
     stripped = payload.rstrip()
     return len(stripped) - len(stripped.rstrip("="))
 

@@ -213,7 +213,7 @@ def test_estimate_base64_decoded_size_refines_whitespace_when_naive_over() -> No
 
 
 def test_trailing_base64_padding_counts_full_trailing_run() -> None:
-    """尾部空白剥离后完整统计连续 '=' 串，不设扫描窗口。"""
+    """尾部空白剥离后完整统计连续 '=' 串，越窗 run 回退全串仍完整计数。"""
     from seedream_mcp.utils.core.formats import _trailing_base64_padding
 
     clean = base64.b64encode(b"x" * 301).decode()
@@ -243,6 +243,25 @@ def test_trailing_base64_padding_boundary_shapes() -> None:
     assert _trailing_base64_padding("\n" + "=" * 5) == 5
     # '=' 串中隔空白只计末段连续 run，与 rstrip 先剥尾部空白再数等号的口径一致。
     assert _trailing_base64_padding("QQ==\n=") == 1
+
+
+def test_trailing_base64_padding_probe_window_boundaries() -> None:
+    """64 字符尾部探测窗的边界形态：快路径计数精确，越窗 run 与越窗尾空白回退全串仍完整计数。"""
+    from seedream_mcp.utils.core.formats import _trailing_base64_padding
+
+    # 0/1/2/3 个等号、窗口内长 run 与无 padding 大载荷恒走尾部探测快路径。
+    assert _trailing_base64_padding("QUFB") == 0
+    assert _trailing_base64_padding("QUFB=") == 1
+    assert _trailing_base64_padding("QUFB==") == 2
+    assert _trailing_base64_padding("QUFB===") == 3
+    assert _trailing_base64_padding("Q" + "=" * 63) == 63
+    assert _trailing_base64_padding("A" * 10_000) == 0
+    # 窗口被空白与等号耗尽（纯等号串、越窗 run、等号加空白恰满窗口与越窗尾空白）回退全串完整计数。
+    assert _trailing_base64_padding("=" * 5) == 5
+    assert _trailing_base64_padding("=" * 64) == 64
+    assert _trailing_base64_padding("A" + "=" * 65) == 65
+    assert _trailing_base64_padding("==" + "\n" * 62) == 2
+    assert _trailing_base64_padding("QUFB==" + "\n" * 100) == 2
 
 
 def test_estimate_base64_decoded_size_stays_upper_bound_behind_trailing_whitespace() -> None:
