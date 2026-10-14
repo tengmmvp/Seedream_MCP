@@ -10,8 +10,10 @@
 4. 逐跳重定向校验：禁用自动重定向，每跳重新走完整校验；跳向不同源时剥离调用方
    定制请求头。
 
-其余关键设计：失败按递增延迟加随机抖动重试；先写不可预测随机名临时文件再
-``os.replace`` 原子替换；响应须经 Content-Type 与字节签名双重校验后方落盘。
+其余关键设计：失败按递增延迟加随机抖动重试，携带 Range/If-Range 断点续传，
+源变化或服务端不支持时退回全量重下；先写不可预测随机名临时文件再
+``os.replace`` 原子替换；响应须经 Content-Type 与字节签名双重校验后方落盘，
+压缩容器字节在终验处经解码回退复核后以解码字节落盘。
 """
 
 from __future__ import annotations
@@ -20,11 +22,13 @@ import asyncio
 import contextlib
 import errno
 import ipaddress
+import os
 import random
 import socket
 import time
+import zlib
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, NoReturn, cast
 from urllib.parse import urljoin, urlparse
 
 import aiofiles
@@ -33,15 +37,27 @@ from aiohttp.abc import AbstractResolver, ResolveResult
 
 from ...version import __version__
 from ..core.errors import SeedreamMCPError
+from ..core.executors import run_in_cpu_pool
 from ..core.formats import (
     DEFAULT_MAX_FILE_SIZE,
+    FORMAT_FAMILIES,
+    MIME_BY_EXTENSION,
     SNIFF_HEAD_BYTES_FLOOR,
+    format_file_too_large_bytes,
     infer_extension_from_bytes,
     is_known_image_bytes,
 )
-from ..core.inflight import InflightEntry
 from ..core.logs import get_logger
-from .io_file import atomic_replace_from_fd
+from ..core.loop_bound import LoopKeyedInflight
+from ..core.settle import await_settled_op
+from .io_file import (
+    _cleanup_temp_file,
+    _close_fd_quietly,
+    finalize_atomic_replace,
+    open_no_follow_read,
+    open_no_follow_write_fd,
+    open_temp_fd,
+)
 from .io_url import sanitize_url
 
 logger = get_logger()
@@ -67,18 +83,86 @@ async def _drain_response_quietly(response: aiohttp.ClientResponse) -> None:
 
 
 # 跨源重定向时保留的通用请求头：跳向不同源时鉴权或跟踪一类定制头被剥离，不原样
-# 发给重定向目标。
-_CROSS_ORIGIN_SAFE_REQUEST_HEADERS = frozenset({"user-agent", "accept"})
+# 发给重定向目标；Accept-Encoding 为 identity 钉死项，随跳保留。
+_CROSS_ORIGIN_SAFE_REQUEST_HEADERS = frozenset({"user-agent", "accept", "accept-encoding"})
 
-# 同一图片格式的等价扩展名类：.jpg 与 .jpeg、.heif 与 .heic 互为别名后缀。字节签名
-# 嗅探结果与 URL 派生扩展名同属一个等价类时视为同格式，不改写落盘文件名。
-_FORMAT_EQUIVALENT_EXTENSIONS: tuple[frozenset[str], ...] = (
-    frozenset({".jpg", ".jpeg"}),
-    frozenset({".heif", ".heic"}),
+# 同一图片格式的等价扩展名类，由 formats 格式家族表派生：多扩展名家族即等价类，
+# .jpg 与 .jpeg、.heif 与 .heic 互为别名后缀。字节签名嗅探结果与 URL 派生扩展名
+# 同属一个等价类时视为同格式，不改写落盘文件名。
+_FORMAT_EQUIVALENT_EXTENSIONS: tuple[frozenset[str], ...] = tuple(
+    frozenset(family_extensions)
+    for family_extensions in FORMAT_FAMILIES.values()
+    if len(family_extensions) > 1
 )
 
 # 字节签名校验失败的统一拒绝文案，流内即时判定与流末兜底两处共用。
 _SIGNATURE_REJECTION_MESSAGE = "下载内容字节签名非受支持图片格式，疑似 Content-Type 伪造"
+
+
+def _is_gzip_head(content: bytes) -> bool:
+    """判定字节头是否为 gzip 魔数（0x1f8b），供终验解码回退嗅探容器形态。"""
+    return content[:2] == b"\x1f\x8b"
+
+
+def _is_zlib_head(content: bytes) -> bool:
+    """判定字节头是否为 zlib 包装：首字节 0x78 且头两字节按大端为 31 的倍数。"""
+    return len(content) >= 2 and content[0] == 0x78 and int.from_bytes(content[:2], "big") % 31 == 0
+
+
+def _is_compression_container_head(content: bytes) -> bool:
+    """判定字节头是否为终验解码回退受理的压缩容器（gzip 或 zlib 包装 deflate）。"""
+    return _is_gzip_head(content) or _is_zlib_head(content)
+
+
+def _inflate_part_file_capped(path: Path, wbits: int, max_output: int) -> bytearray:
+    """分块流式读取临时文件解压并以 max_output 封顶解码输出，防解压炸弹。
+
+    压缩体不整段驻留内存，按 _DOWNLOAD_CHUNK_SIZE 逐块读取喂 decompressobj，
+    峰值收敛为约 1×解码输出加固定块缓冲。产出超限、输入尽而未收束、收束后
+    仍有残留输入（块内 unused_data/unconsumed_tail 与文件未读入字节）抛
+    ValueError，流损坏由 zlib 抛 zlib.error，调用方统一归为终态拒绝；
+    max_length 限额逐轮取回 unconsumed_tail，单轮产出有界。
+    """
+    decomp = zlib.decompressobj(wbits=wbits)
+    out = bytearray()
+    with open_no_follow_read(path) as handle:
+        while not decomp.eof:
+            chunk = handle.read(_DOWNLOAD_CHUNK_SIZE)
+            if not chunk:
+                # 输入已尽而流未收束：压缩流被截断。
+                raise ValueError("压缩流未完整收束")
+            pending: bytes = chunk
+            while pending:
+                produced = decomp.decompress(pending, _DOWNLOAD_CHUNK_SIZE)
+                out += produced
+                if len(out) > max_output:
+                    raise ValueError("解码输出超过上限")
+                if decomp.eof:
+                    # eof 即收束：跨 max_length 轮次收束时残留输入滞留 unconsumed_tail，
+                    # 循环内不再消费，残留判定统一移到循环外。
+                    break
+                pending = decomp.unconsumed_tail
+        if handle.read(1) or decomp.unused_data or decomp.unconsumed_tail:
+            raise ValueError("压缩流含残留尾部")
+    return out
+
+
+def _rewrite_part_file(path: Path, data: bytes | bytearray) -> None:
+    """以 no-follow 写打开续传临时文件并把 data 全量重写，供解码回退接管内容。"""
+    fd = open_no_follow_write_fd(path)
+    try:
+        os.ftruncate(fd, 0)
+        # memoryview 切片免复制，避免大缓冲部分写入时逐次整段拷贝。
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            count = os.write(fd, view[written:])
+            if count == 0:
+                # 零进展写入若重试即空转：按 OSError 上抛，对齐 _flush_received 守护。
+                raise OSError("写入零字节")
+            written += count
+    finally:
+        _close_fd_quietly(fd)
 
 
 def _extensions_in_same_format(first: str, second: str) -> bool:
@@ -300,6 +384,262 @@ class _PublicIpPinningResolver(AbstractResolver):
         pass
 
 
+def _resume_validator(response: "aiohttp.ClientResponse") -> str | None:
+    """取断点续传的源校验器：仅强 ETag 可用，无强 ETag 返回 None。
+
+    弱 ETag 禁作 If-Range 验证器（RFC 9110 §13.1.5）；Last-Modified 弱语义且仅
+    1 秒粒度（RFC 9110 §8.8.2），同秒重写的表示携同一值骗过 If-Range 取回新表示
+    的 206，旧前缀拼新后缀即静默坏图，故不作回退，续传请求退回全量重下，由 200
+    回退路径自愈。
+    """
+    etag = response.headers.get("etag")
+    if etag and not etag.startswith("W/"):
+        return etag
+    return None
+
+
+def _int_or_none(text: str) -> int | None:
+    """十进制解析失败归一为 None，Content-Range 三分量共用同一接受口径。"""
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+class _ContentRange(NamedTuple):
+    """Content-Range 单点解析结果载体：三分量各位置可缺，unsatisfied 表未满足形态。
+
+    unsatisfied 为真表示 ``bytes */*`` 的不可满足且总长未知声明，与畸形值可区分；
+    畸形分量对应位置为 None，总长为 ``*`` 未知形态同样为 None。
+    """
+
+    start: int | None = None
+    end: int | None = None
+    total: int | None = None
+    unsatisfied: bool = False
+
+
+def _parse_content_range(content_range: str | None) -> _ContentRange:
+    """解析 Content-Range 头的区间起点、区间终点与总长（``bytes 100-199/1234``）。
+
+    畸形分量对应位置返回 None，总长为 ``*`` 未知形态同样返回 None；区间 ``*``
+    的不可满足声明（``bytes */总长``）起点终点为 None，仅完整 ``bytes */*``
+    形态置 unsatisfied。
+    """
+    if not content_range:
+        return _ContentRange()
+    parts = content_range.strip().split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bytes":
+        return _ContentRange()
+    if parts[1] == "*/*":
+        return _ContentRange(unsatisfied=True)
+    range_text, _, total_text = parts[1].partition("/")
+    start_text, _, end_text = range_text.partition("-")
+    return _ContentRange(
+        _int_or_none(start_text),
+        _int_or_none(end_text),
+        _int_or_none(total_text),
+    )
+
+
+# 出站 Range/If-Range 恒由续传状态派生，调用方同名头在入口剥离。
+_RESERVED_RANGE_HEADERS = frozenset({"range", "if-range"})
+
+
+def _headers_request_range(headers: dict[str, str]) -> bool:
+    """判断请求头是否携带 Range：206/416 仅在出站请求带 Range 时并入续传语义。"""
+    return any(key.lower() == "range" for key in headers)
+
+
+class _ResumeState:
+    """断点续传状态：跨尝试复用的临时文件与已确认字节、嗅探窗口、源校验器。
+
+    offset 只计入已确认落盘的字节，失败尝试的撕裂尾部由下一趟打开时的截断修正；
+    已存字节覆盖嗅探窗口且持有校验器时才发起续传，否则退回全量重下。expected_total
+    记录声明总长（206 以 Content-Range 总长为准、总长未知时沿用上趟已知总长，200
+    由 Content-Length 声明，416 完成态由 ``bytes */总长`` 声明或 ``bytes */*``
+    补记已确认偏移）并跨尝试留存，参与短体与越界判定；offset 恰达总长即完成态，
+    200 无声明总长与开放式 206 的未知总量均以流正常收尾补记总长，短体与越界交付
+    均不判完成，完成态重试不再发请求，直接重走落盘终局。
+    """
+
+    __slots__ = (
+        "fd",
+        "path",
+        "offset",
+        "head_bytes",
+        "validator",
+        "expected_total",
+        "content_type",
+    )
+
+    def __init__(self) -> None:
+        self.fd: int | None = None
+        self.path: Path | None = None
+        self.offset = 0
+        self.head_bytes = b""
+        self.validator: str | None = None
+        self.expected_total: int | None = None
+        self.content_type = ""
+
+    def is_completed(self) -> bool:
+        """判断是否为完成态：已确认字节恰达已知总长，越界交付不判完成。"""
+        return self.expected_total is not None and self.offset == self.expected_total
+
+    def has_file(self) -> bool:
+        """已持有临时文件 fd 与路径时为真。"""
+        return self.fd is not None and self.path is not None
+
+    def ensure_file(self, directory: Path, suffix: str) -> bool:
+        """按需创建随机名临时文件，返回是否本次新建，重复调用幂等。"""
+        if self.has_file():
+            return False
+        self.fd, self.path = open_temp_fd(directory, suffix=suffix)
+        return True
+
+    def request_headers(self) -> dict[str, str]:
+        """返回续传请求头，未覆盖嗅探窗口或无校验器时返回空字典退回全量。"""
+        if self.validator is None or self.offset < SNIFF_HEAD_BYTES_FLOOR:
+            return {}
+        return {"Range": f"bytes={self.offset}-", "If-Range": self.validator}
+
+    def restart(self) -> None:
+        """作废已存部分字节，下一趟从零重下，嗅探窗口一并复位。"""
+        self.offset = 0
+        self.head_bytes = b""
+
+    async def invalidate_prefix_and_raise_retryable(
+        self, response: aiohttp.ClientResponse, message: str
+    ) -> NoReturn:
+        """排空响应体使连接回池，作废已存部分前缀并抛可重试错误，重试退回全量、
+        不再携带注定失败的同一 Range。
+        """
+        await _drain_response_quietly(response)
+        self.restart()
+        raise RetryableDownloadError(message)
+
+    async def dispose(self) -> None:
+        """关闭残留 fd 并删除未落成的临时文件，成功替换后为空操作。"""
+        if self.fd is not None:
+            fd, self.fd = self.fd, None
+            _close_fd_quietly(fd)
+        if self.path is not None:
+            path, self.path = self.path, None
+            # 取消安全等待清理线程落定后再放行取消，避免 .part 残留；清理失败经
+            # _cleanup_temp_file 告警降级，不顶替原始下载错误。
+            await await_settled_op(
+                asyncio.to_thread(_cleanup_temp_file, path), absorb_all_cancels=True
+            )
+
+
+class _RangeClassification(NamedTuple):
+    """终态响应的续传分类描述符：Content-Range 单点解析并经校验后的唯一载体。
+
+    continuing 为真表示 206 已核对区间与表示身份（ETag）为已存前缀的续传应答，
+    区间终点与总长随描述符下传落盘侧推导声明总长与分片长，区间起点恒等于已确认
+    偏移不再单独携带；
+    completed 为真表示 416 证明区间起点已达表示总长（``bytes */总长`` 恰等偏移
+    或总长未知的 ``bytes */*``），声明或补记总长随 range_total 携带由下载侧写
+    回、完整数据已在本地；全默认值即非续传形态。
+    """
+
+    continuing: bool = False
+    range_end: int | None = None
+    range_total: int | None = None
+    completed: bool = False
+
+
+async def _ensure_etag_matches_resume(
+    response: "aiohttp.ClientResponse", resume: _ResumeState
+) -> None:
+    """核验响应 ETag 与源校验器一致，不符时作废已存前缀退回全量重下。
+
+    206 续传应答与 416 完成态声明共用同一表示身份核验口径：携带而不符即表示
+    已变化，已确认前缀不得拼入新表示或判完成落盘；未携带时无法核验维持现状。
+    """
+    response_etag = response.headers.get("etag")
+    if response_etag is not None and response_etag != resume.validator:
+        await resume.invalidate_prefix_and_raise_retryable(
+            response,
+            f"续传响应ETag与源校验器不符: {response_etag!r}",
+        )
+
+
+async def _classify_range_response(
+    response: "aiohttp.ClientResponse",
+    resume: _ResumeState,
+    range_requested: bool,
+) -> _RangeClassification:
+    """单点分类终态响应的续传语义：解析一次 Content-Range、校验后返回描述符。
+
+    出站请求携带 Range 才把 206/416 解读为续传应答（出站 Range 单源，调用方
+    同名头已在入口剥离）：206 校验区间起点与已确认偏移一致且声明总长不倒退，
+    并核验响应 ETag 与源校验器一致（携带而不符即表示已变化；未携带时无法核验
+    维持现状），不符时作废已存前缀退回全量重下；416 解析 RFC 9110 §15.5.17
+    约定的 ``bytes */总长`` 声明，总长不小于已确认偏移时排空响应体，总长随
+    描述符下传由调用方写回续传状态，恰等于偏移判完成态，总长未知的
+    ``bytes */*`` 不可满足声明对开放式区间同样判完成，两完成态先经与 206
+    同口径的 ETag 核验，不符同样作废退回全量重下，大于偏移属对端违约按
+    终态失败，缺失声明或总长倒退作废已存前缀退回全量重下；未携带 Range 或
+    非 206/416 时返回非续传分类，由调用方按非 200 终态处理，未校验的 206
+    不进入落盘侧。
+
+    Raises:
+        DownloadError: 416 声明总长大于已确认偏移，区间按声明本可满足，重试
+            请求逐字节相同，首现即终态失败。
+        RetryableDownloadError: 206 缺失或畸形 Content-Range、区间与已确认偏移不符、
+            声明总长倒退、响应 ETag 与源校验器不符（206 与 416 完成态同口径），
+            或 416 声明缺失、畸形与倒退；均作废已存前缀退回全量。
+    """
+    if not range_requested or response.status not in (206, 416):
+        return _RangeClassification()
+    if response.status == 416:
+        declared = _parse_content_range(response.headers.get("content-range"))
+        declared_total = declared.total
+        if declared_total is not None and declared_total >= resume.offset:
+            # 声明总长不小于已确认偏移：排空响应体，总长随描述符下传，完成与违约终态共用。
+            await _drain_response_quietly(response)
+            if declared_total == resume.offset:
+                # 服务器证明全部字节已收讫；完成态同 206 口径核验表示身份，
+                # 已变化前缀不得判完成落盘。
+                await _ensure_etag_matches_resume(response, resume)
+                return _RangeClassification(completed=True, range_total=declared_total)
+            # 区间按声明本可满足，重试请求逐字节相同：对端违约首现即终态，不烧重试预算。
+            raise DownloadError(
+                f"HTTP错误: {response.status}，声明总长 {declared_total} 大于"
+                f"已确认偏移 {resume.offset}，区间应可满足"
+            )
+        if declared.unsatisfied:
+            # ``bytes */*`` 对开放式区间即起点已达表示总长：已确认字节即完整
+            # 数据，补记偏移为总长同样判完成；完成态同 206 口径核验表示身份。
+            await _drain_response_quietly(response)
+            await _ensure_etag_matches_resume(response, resume)
+            return _RangeClassification(completed=True, range_total=resume.offset)
+        # 缺失声明或声明总长倒退：已存前缀与当前表示不符，作废退回全量重下。
+        await resume.invalidate_prefix_and_raise_retryable(
+            response, f"HTTP错误: {response.status}，区间不可满足，退回全量重下"
+        )
+    content_range = _parse_content_range(response.headers.get("content-range"))
+    # Content-Range 缺失或畸形时无法定位分片起点。
+    if content_range.start is None:
+        await resume.invalidate_prefix_and_raise_retryable(
+            response,
+            "续传响应缺少有效 content-range: " f"{response.headers.get('content-range')!r}",
+        )
+    # 区间与已确认偏移不符或声明总长倒退：源侧视图与已存前缀已不一致。
+    if content_range.start != resume.offset or (
+        content_range.total is not None and content_range.total < resume.offset
+    ):
+        await resume.invalidate_prefix_and_raise_retryable(
+            response,
+            f"续传响应区间与已存偏移不符: {response.headers.get('content-range')!r}",
+        )
+    # 响应 ETag 与源校验器不符即表示已变化：无视 If-Range 的源站回新表示字节时，
+    # 新尾部不得拼接到旧前缀。
+    await _ensure_etag_matches_resume(response, resume)
+    return _RangeClassification(True, content_range.end, content_range.total)
+
+
 class DownloadManager:
     """异步图片下载管理器，内置 SSRF 四层防护与递增退避重试。"""
 
@@ -331,7 +671,7 @@ class DownloadManager:
         self._dns_cache_ttl = max(1, dns_cache_ttl)
         # DNS 缓存条目的 expires_at 以 time.monotonic 为基准，写入与过期比较须同基准。
         self._dns_cache: dict[str, tuple[float, tuple[str, ...]]] = {}
-        self._dns_inflight: dict[str, InflightEntry[tuple[str, ...]]] = {}
+        self._dns_inflight: LoopKeyedInflight[str, tuple[str, ...]] = LoopKeyedInflight()
         self._dns_cache_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
@@ -369,6 +709,8 @@ class DownloadManager:
                     connector = aiohttp.TCPConnector(**connector_kwargs)
                     # sock_connect/sock_read 仅约束连接建立与单次读取停滞，慢滴流响应
                     # 可无限拖住任务，故另以宽松总时长上限封顶整个下载。
+                    # auto_decompress=False：禁用透明解压使等量核算以传输字节执行，
+                    # 不把口径寄托在服务器遵守 identity 提示上。
                     self._session = aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(
                             total=self._download_total_budget(),
@@ -376,6 +718,7 @@ class DownloadManager:
                             sock_read=self.timeout,
                         ),
                         trust_env=False,
+                        auto_decompress=False,
                         cookie_jar=aiohttp.DummyCookieJar(),
                         connector=connector,
                     )
@@ -445,8 +788,8 @@ class DownloadManager:
         """解析域名并校验所有解析结果为公网 IP，属 SSRF 第二层防护。
 
         防 DNS rebinding：攻击者可在静态校验后把 DNS 切换到内网地址。结果带 TTL
-        缓存；同 host 并发下载经 InflightEntry 在途去重共享一次解析，取消传播隔离
-        与孤儿异常兜底由其统一承担。
+        缓存；同 host 并发下载经单飞注册表在途去重共享一次解析，取消传播隔离
+        与孤儿异常兜底由 InflightEntry 统一承担。
 
         Args:
             host: 待解析并校验的主机名。
@@ -466,29 +809,22 @@ class DownloadManager:
                 if expires_at > now:
                     return cached_ips
                 self._dns_cache.pop(host, None)
-            entry = self._dns_inflight.get(host)
-            if entry is None:
-                # 缓存与在途登记在同一锁区间内完成且中间无 await，不会交错创建重复 task。
-                entry = InflightEntry(asyncio.ensure_future(self._resolve_and_cache(host)))
-                self._dns_inflight[host] = entry
-        # 锁外以消费者身份等待共享 task，取消与孤儿异常兜底由 InflightEntry 统一处理。
-        return await entry.consume()
+        # 在途检查与登记之间无 await 点，锁外单飞不会交错创建重复解析 task。
+        return await self._dns_inflight.consume_shared(
+            host, lambda: asyncio.ensure_future(self._resolve_and_cache(host))
+        )
 
     async def _resolve_and_cache(self, host: str) -> tuple[str, ...]:
         """执行单次解析与公网校验并写入缓存，供 _resolve_public_ips 在途去重。
 
-        finally 清理在途 task，使后续缓存过期或失败后的请求可重新发起解析。
+        在途登记由创建方经完成回调按条目身份清理，失败后的后续请求重新发起解析。
         """
-        try:
-            ip_tuple = await self._resolve_public_ips_uncached(host)
-            async with self._dns_cache_lock:
-                self._dns_cache[host] = (time.monotonic() + self._dns_cache_ttl, ip_tuple)
-                if len(self._dns_cache) > _DNS_CACHE_MAX_SIZE:
-                    self._enforce_dns_cache_limit()
-            return ip_tuple
-        finally:
-            async with self._dns_cache_lock:
-                self._dns_inflight.pop(host, None)
+        ip_tuple = await self._resolve_public_ips_uncached(host)
+        async with self._dns_cache_lock:
+            self._dns_cache[host] = (time.monotonic() + self._dns_cache_ttl, ip_tuple)
+            if len(self._dns_cache) > _DNS_CACHE_MAX_SIZE:
+                self._enforce_dns_cache_limit()
+        return ip_tuple
 
     async def _resolve_public_ips_uncached(self, host: str) -> tuple[str, ...]:
         """执行单次 getaddrinfo 解析与公网校验，不做缓存与在途去重。
@@ -665,38 +1001,48 @@ class DownloadManager:
             raise DownloadError("重定向目标协议不允许降级到 https 之外")
         return next_url
 
-    async def _download_response_to_temp(
+    async def _stream_response_to_resume(
         self,
         response: "aiohttp.ClientResponse",
+        resume: _ResumeState,
         save_path: Path,
         temp_suffix: str,
         content_type: str,
         attempt: int,
         wall_start_time: float,
-        fsync: bool = False,
+        fsync: bool,
+        classification: _RangeClassification,
     ) -> dict[str, Any]:
-        """将 200 响应体流式下载到临时文件，经校验后原子替换，返回结果字典。
+        """把单趟响应体追加到续传临时文件，流末校验后原子替换，返回结果字典。
 
-        扩展名以实际字节签名为准：与 save_path 的 URL 派生扩展名不一致且不属同一
-        格式等价类时，落盘路径修正为嗅探扩展名。
-
-        Args:
-            response: 已确认状态 200 的响应对象。
-            save_path: 目标保存路径。
-            temp_suffix: 临时文件命名的可读性后缀，实际路径由落盘骨架随机生成。
-            content_type: 响应内容类型，原样进入结果字典。
-            attempt: 当前尝试序号，结果字典中 attempts 记为其加一。
-            wall_start_time: 挂钟基准起始时间。
-            fsync: 原子替换前是否对临时文件执行 os.fsync。
-
-        Returns:
-            含 success/file_path/file_size/download_time/content_type/attempts 的
-            结果字典。
+        续传语义以 classification 描述符为准（Content-Range 已由
+        _classify_range_response 单点解析校验）：206 在已确认偏移后续写，声明
+        总长以 Content-Range 为准，总长未知时沿用上趟已知总长；分片长以
+        Content-Range 区间为准、区间缺失时以 Content-Length 回退，总长未知时按
+        分片长校验实际接收。200 响应作废已确认字节从零重下并刷新源校验器。失败时
+        保留临时文件与已确认偏移供重试续传，撕裂尾部由下一趟截断修正。扩展名以
+        实际字节签名为准：与 save_path 的 URL 派生扩展名不一致且不属同一格式
+        等价类时，落盘路径修正为嗅探扩展名。流正常收尾且恰达声明总长即置完成
+        态，完成态重试不再发请求，直接重走落盘终局；短体按可重试上抛，越界交付
+        属对端违约按终态失败，断流趟在尽力落盘已收字节后同口径复核，无声明总长
+        的响应以流干净收尾补记总长判完成（出站区间恒开至表示尾）。
 
         Raises:
-            DownloadError: content-length 预检、流式累计上限或字节签名校验失败。
+            DownloadError: Content-Length 与 Content-Range 总长预检、流式累计上限、
+                字节签名校验失败，或交付越过声明总长。
+            RetryableDownloadError: 响应体流收尾正常但未达声明总长或声明分片。
         """
+        continuing = classification.continuing
+        base_offset = resume.offset if continuing else 0
+        resume.content_type = content_type
+        previous_total = resume.expected_total
+        # 声明总长在局部收敛为单值后一次写回：Content-Range 总长优先，续传无总长
+        # 声明时沿用上趟已知总长，200 由 Content-Length 声明。
+        expected_total: int | None = None
+        # 分片声明长度：206 实际接收量的校验基准。
+        segment_expected: int | None = None
         content_length = response.headers.get("content-length")
+        cl_value: int | None = None
         if content_length:
             try:
                 cl_value = int(content_length)
@@ -704,70 +1050,287 @@ class DownloadManager:
                 raise DownloadError(f"非法 content-length: {content_length!r}") from exc
             if cl_value < 0:
                 raise DownloadError(f"非法 content-length: {cl_value}")
-            if cl_value > self.max_file_size:
-                raise DownloadError(f"文件过大: {cl_value} 字节")
+            if not continuing:
+                if cl_value > self.max_file_size:
+                    raise DownloadError(format_file_too_large_bytes(cl_value, self.max_file_size))
+                expected_total = cl_value
+        if continuing:
+            range_end = classification.range_end
+            range_total = classification.range_total
+            # 声明总长以 Content-Range 为准：区间上限代理交付不足总长时，完成判定
+            # 仍锚定总长，短体不得判完成。
+            if range_total is not None:
+                # 覆盖前同口径执行上限校验：虚高总长不得绕过文件过大早拒。
+                if range_total > self.max_file_size:
+                    raise DownloadError(
+                        format_file_too_large_bytes(range_total, self.max_file_size)
+                    )
+                expected_total = range_total
+            elif previous_total is not None:
+                # 总长未知的续传应答沿用上趟已知总长：干净终止的短体不得因声明
+                # 缺失而判成功。
+                expected_total = previous_total
+            # 分片长单点赋值：区间明确时以区间为准，全量长度的违规 Content-Length
+            # 不参与推导；区间缺失或倒退时以 206 的分片体长度回退。
+            if range_end is not None and range_end >= resume.offset:
+                segment_expected = range_end - resume.offset + 1
+            elif cl_value is not None:
+                segment_expected = cl_value
+        resume.expected_total = expected_total
 
-        total_size = 0
-        head_bytes = b""
-        final_save_path = save_path
+        # ensure_file 在工作线程内完成 fd 与 .part 赋值，取消安全等待落定后即可
+        # 读取；
+        # 重试趟经与 ensure_file 幂等判定同源的 has_file 谓词跳过无 IO 的线程派发。
+        if resume.has_file():
+            fresh_file = False
+        else:
+            fresh_file = await await_settled_op(
+                asyncio.to_thread(resume.ensure_file, save_path.parent, temp_suffix),
+                absorb_all_cancels=True,
+            )
+        # fd 已持有或刚由 ensure_file 赋值，必非 None，cast 仅收窄 Optional 类型。
+        fd = cast(int, resume.fd)
+        if not continuing:
+            # 全量体由首趟、If-Range 失配或服务端不支持 Range 回退而来，
+            # 作废已确认字节并刷新源校验器。
+            resume.restart()
+            resume.validator = _resume_validator(response)
 
-        async def _writer(fd: int) -> Path | None:
-            nonlocal total_size, head_bytes, final_save_path
-            # closefd=False：aiofiles 退出时仅 flush 不关闭 fd，由骨架统一关闭，避免双重关闭。
-            async with aiofiles.open(fd, "wb", closefd=False) as f:
-                # 批量累积写入：aiofiles 每次 write 提交一次执行器任务，逐 256KB chunk
-                # 跳转在批量下载时占用默认执行器线程槽，累积至 _WRITE_BATCH_BYTES 再落盘。
-                write_buffer = bytearray()
+        head_bytes = resume.head_bytes
+        # 签名判定锁存为趟内局部：每趟恰评估一次，续传趟预填窗口亦重走。
+        signature_verified = False
+        # closefd=False：aiofiles 退出时仅 flush 不关闭 fd，fd 由续传状态持有。
+        # buffering=0：单次 os.write 的计数契约使部分写入可观测，保证文件与 offset
+        # 严格同步。
+        async with aiofiles.open(fd, "wb", closefd=False, buffering=0) as f:
+            # 截断失败尝试的撕裂尾部并把写位置对齐已确认偏移，
+            # 单回调合并两次系统调用省一次执行器往返；执行器跳转守取消纪律，
+            # 落定等待吸收任意次取消，dispose 关 fd 前在途 op 已落定，
+            # 防 fd 复用后迟到截断误伤。新建空文件位置与长度均为 0，
+            # 截断定位是空操作，跳过执行器往返。
+            if not fresh_file:
+
+                def _truncate_and_align() -> None:
+                    os.ftruncate(fd, resume.offset)
+                    os.lseek(fd, resume.offset, os.SEEK_SET)
+
+                await await_settled_op(
+                    asyncio.to_thread(_truncate_and_align), absorb_all_cancels=True
+                )
+
+            # 批量累积写入：aiofiles 每次 write 提交一次执行器任务，逐 256KB chunk
+            # 跳转在批量下载时占用默认执行器线程槽，累积至 _WRITE_BATCH_BYTES 再落盘。
+            write_buffer = bytearray()
+
+            async def _flush_received() -> None:
+                while write_buffer:
+                    written = await await_settled_op(f.write(write_buffer), absorb_all_cancels=True)
+                    if written == 0:
+                        # 零进展写入若重试即空转：按可重试错误上抛，文件与 offset 保持同步。
+                        raise OSError("写入零字节")
+                    # 部分写入按实际写入量切片，未写部分留待重提交。
+                    resume.offset += written
+                    del write_buffer[:written]
+
+            async def _flush_best_effort() -> None:
+                # 失败路径尽力落盘已缓冲字节：二次失败不掩盖原始异常。
+                with contextlib.suppress(Exception):
+                    await _flush_received()
+
+            def _raise_if_overshoot() -> None:
+                # 交付越过声明总长属对端违约，尾部字节不可信：与虚高总长同口径按终态
+                # 超限失败，断流与干净收流共用同一判定，恒定超长源不得每次重试
+                # 全量重下耗尽预算。
+                if expected_total is not None and resume.offset > expected_total:
+                    raise DownloadError(
+                        format_file_too_large_bytes(resume.offset, expected_total, label="响应体")
+                    )
+
+            try:
                 async for chunk in response.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
-                    total_size += len(chunk)
-                    if total_size > self.max_file_size:
-                        raise DownloadError(f"文件过大: {total_size} 字节")
+                    write_buffer += chunk
+                    # 内存上限锚定已确认偏移加未刷盘缓冲，与实际占用量恒等。
+                    if resume.offset + len(write_buffer) > self.max_file_size:
+                        raise DownloadError(
+                            format_file_too_large_bytes(
+                                resume.offset + len(write_buffer), self.max_file_size
+                            )
+                        )
                     # 累计首部字节做签名校验，省一次 open+read；窗口取各格式最小
-                    # 长度下界的最大值，保证 is_known_image_bytes 对全部格式可判定。
+                    # 长度下界的最大值，保证 is_known_image_bytes 对全部格式可判定；
+                    # 续传趟次的窗口取前趟留存，流末兜底校验复核。
                     if len(head_bytes) < SNIFF_HEAD_BYTES_FLOOR:
                         head_bytes += chunk[: SNIFF_HEAD_BYTES_FLOOR - len(head_bytes)]
-                        # 签名集满即判定，伪造 Content-Type 的响应在首个 chunk 后被拒，
-                        # 不再白耗后续带宽与磁盘写入。
-                        if len(head_bytes) >= SNIFF_HEAD_BYTES_FLOOR and not is_known_image_bytes(
+                        resume.head_bytes = head_bytes
+                    # 签名集满每趟锁存判定一次，防逐块重跑；
+                    # 伪造 Content-Type 的响应在首个 chunk 后被拒，
+                    # 不白耗后续带宽与磁盘；压缩容器头放行至终验，解码复核需全部字节。
+                    if not signature_verified and len(head_bytes) >= SNIFF_HEAD_BYTES_FLOOR:
+                        if not is_known_image_bytes(
                             head_bytes
-                        ):
+                        ) and not _is_compression_container_head(head_bytes):
                             raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
-                    write_buffer += chunk
+                        signature_verified = True
                     if len(write_buffer) >= _WRITE_BATCH_BYTES:
-                        await f.write(write_buffer)
-                        write_buffer.clear()
-                if write_buffer:
-                    await f.write(write_buffer)
-            # 字节层校验：小于嗅探窗口的响应体在流结束时兜底判定。
-            if not is_known_image_bytes(head_bytes):
-                raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
-            sniffed = infer_extension_from_bytes(head_bytes)
-            if sniffed != save_path.suffix.lower() and not _extensions_in_same_format(
-                sniffed, save_path.suffix
-            ):
-                final_save_path = save_path.with_suffix(sniffed)
-                return final_save_path
-            return None
+                        await _flush_received()
+            except DownloadError as exc:
+                # 可重试失败把已接收字节落盘供重试续传，终态失败立即作废临时文件、
+                # 已缓冲字节不再白写；撕裂尾部由下一趟截断修正。
+                if isinstance(exc, RetryableDownloadError):
+                    await _flush_best_effort()
+                    _raise_if_overshoot()
+                raise
+            except Exception:
+                await _flush_best_effort()
+                _raise_if_overshoot()
+                raise
+            await _flush_received()
+        if expected_total is not None and resume.offset < expected_total:
+            # 区间上限代理一类短体响应流收尾正常但未达声明总长：按可重试上抛，
+            # 已确认偏移供下一趟续传补齐。
+            raise RetryableDownloadError(f"响应体短于声明总量: {resume.offset}/{expected_total}")
+        _raise_if_overshoot()
+        if (
+            expected_total is None
+            and segment_expected is not None
+            and resume.offset - base_offset < segment_expected
+        ):
+            # 总长未知时分片长是唯一声明基准：实际接收短于分片按可重试短体上抛。
+            raise RetryableDownloadError(
+                f"响应体短于声明分片: {resume.offset - base_offset}/{segment_expected}"
+            )
+        if expected_total is None:
+            # 无声明总长（200 无 Content-Length 或开放式 206 的 ``*`` 总量）
+            # 以流干净收尾为完成点：出站区间恒开至表示尾，干净收尾即尾部已尽；
+            # 截断与连接中断仍经短体判定与异常路径走可重试。
+            resume.expected_total = resume.offset
+        return await self._finalize_completed_resume(
+            resume, save_path, attempt, wall_start_time, fsync
+        )
 
-        # 落盘协议由 io_file.atomic_replace_from_fd 统一提供，与 io_storage.save_bytes
-        # 复用同一骨架。
-        await atomic_replace_from_fd(save_path, _writer, suffix=temp_suffix, fsync=fsync)
+    async def _finalize_completed_resume(
+        self,
+        resume: _ResumeState,
+        save_path: Path,
+        attempt: int,
+        wall_start_time: float,
+        fsync: bool,
+    ) -> dict[str, Any]:
+        """完成态落盘终局：签名复核、路径修正与原子替换，返回结果字典。
+
+        首趟流正常收尾与完成态重试共用本终局。字节头非受支持图片时先经
+        _decode_compressed_resume 解码回退复核，解不出维持签名拒绝终态。上一趟
+        终局可能在替换前已关闭 fd，此处经 no-follow 纪律在工作线程重开临时文件
+        补做 fsync 与替换；重开发现临时文件已不存在时作废已确认字节，退回全量
+        重下自愈；重开与终局替换的瞬时持锁均保留完成态与数据，下一趟重试重走
+        终局。
+
+        Raises:
+            DownloadError: 字节签名校验失败（含解码回退不受理）或续传临时文件缺失。
+            RetryableDownloadError: 重开的临时文件已不存在（作废状态退回全量重下），
+                或重开、解码回退写回与终局替换遭瞬时持锁（保留状态，下一趟重试）。
+        """
+        path = resume.path
+        if path is None:
+            raise DownloadError("续传临时文件缺失，无法落盘")
+        # 字节层校验：小于嗅探窗口的响应体在流结束时兜底判定；压缩容器头由
+        # 解码回退在全部原始字节确认后解压复核。
+        if not is_known_image_bytes(resume.head_bytes):
+            if await self._decode_compressed_resume(resume) is None:
+                raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
+        head_bytes = resume.head_bytes
+        final_save_path = save_path
+        sniffed = infer_extension_from_bytes(head_bytes)
+        if sniffed != save_path.suffix.lower() and not _extensions_in_same_format(
+            sniffed, save_path.suffix
+        ):
+            final_save_path = save_path.with_suffix(sniffed)
+        fd = resume.fd
+        if fd is None:
+            try:
+                # 取消时已重开的 fd 就地关闭防泄漏，.part 清理归 resume.dispose()。
+                fd = await await_settled_op(
+                    asyncio.to_thread(open_no_follow_write_fd, path),
+                    dispose_on_cancel=_close_fd_quietly,
+                    absorb_all_cancels=True,
+                )
+            except FileNotFoundError as exc:
+                # .part 已不存在时重开不可恢复：作废完成态退回全量重下，而非空烧重试。
+                resume.restart()
+                raise RetryableDownloadError("续传临时文件已不存在，退回全量重下") from exc
+            except PermissionError as exc:
+                # .part 仍在但被杀毒等瞬时持锁：保留完成态与数据，下一趟直接重试重开。
+                raise RetryableDownloadError("续传临时文件瞬时持锁，重试重开") from exc
+        try:
+            await finalize_atomic_replace(fd, path, final_save_path, fsync=fsync)
+        except PermissionError as exc:
+            # fsync/replace 遭杀软等瞬时持锁与 .part 重开持锁同类：保留完成态与
+            # 数据，退避后重试重走终局。
+            raise RetryableDownloadError("终局落盘瞬时持锁，重试重走终局") from exc
+        finally:
+            resume.fd = None
+        # 替换已成，临时路径随之消亡；失败路径保留供重试重走终局。
+        resume.path = None
 
         download_time = time.time() - wall_start_time
         logger.info(
             "图片下载成功: {} ({} 字节, {:.2f}秒)",
             final_save_path,
-            total_size,
+            resume.offset,
             download_time,
         )
         return {
             "success": True,
             "file_path": str(final_save_path),
-            "file_size": total_size,
+            "file_size": resume.offset,
             "download_time": download_time,
-            "content_type": content_type,
+            "content_type": resume.content_type,
             "attempts": attempt + 1,
         }
+
+    async def _decode_compressed_resume(self, resume: _ResumeState) -> bytearray | None:
+        """终验解码回退：解压临时文件中的压缩体并接管续传状态，不受理返回 None。
+
+        无视 identity 强返 gzip 或 zlib 包装 deflate 的源站在此获得挽救：原始
+        字节已全部确认，解压经 CPU 池分块流式执行并以 max_file_size 封顶输出防
+        解压炸弹；解码异常、超限或解码字节仍非受支持图片返回 None，由调用方维持
+        签名拒绝终态。成功时临时文件重写为解码字节，head_bytes/offset/
+        expected_total/content_type 同步改写，扩展名与 MIME 以解码字节重新嗅探，
+        后续终局按普通完成态落盘。
+
+        Raises:
+            RetryableDownloadError: 解码回退写回临时文件遭瞬时持锁，保留原始状态，
+                下一趟重试重走解码与终局。
+        """
+        path = resume.path
+        if path is None or not _is_compression_container_head(resume.head_bytes):
+            return None
+        if _is_gzip_head(resume.head_bytes):
+            wbits = 16 + zlib.MAX_WBITS
+        else:
+            wbits = zlib.MAX_WBITS
+        try:
+            decoded = await run_in_cpu_pool(
+                _inflate_part_file_capped, path, wbits, self.max_file_size
+            )
+        except (ValueError, zlib.error):
+            return None
+        # 签名与扩展名嗅探仅依赖首部窗口：取头部切片免整段 bytes 复制。
+        head = bytes(decoded[:SNIFF_HEAD_BYTES_FLOOR])
+        if not is_known_image_bytes(head):
+            return None
+        try:
+            await await_settled_op(
+                asyncio.to_thread(_rewrite_part_file, path, decoded), absorb_all_cancels=True
+            )
+        except PermissionError as exc:
+            # 与终局重开持锁同口径：瞬时持锁保留原始状态，重试重走解码与终局。
+            raise RetryableDownloadError("解码回退写回瞬时持锁，重试") from exc
+        resume.head_bytes = head
+        resume.offset = len(decoded)
+        resume.expected_total = len(decoded)
+        resume.content_type = MIME_BY_EXTENSION[infer_extension_from_bytes(head)]
+        return decoded
 
     async def _attempt_download(
         self,
@@ -779,7 +1342,8 @@ class DownloadManager:
         attempt: int,
         start_time: float,
         wall_start_time: float,
-        fsync: bool = False,
+        fsync: bool,
+        resume: _ResumeState,
     ) -> dict[str, Any]:
         """执行单次下载尝试，含逐跳重定向循环，返回成功落盘结果字典。
 
@@ -789,7 +1353,8 @@ class DownloadManager:
         计窗，跟随下一跳前按起始时间累计校验，慢滴流重定向链不得把单次尝试拖至
         跳数倍封顶。跳向不同源时剥离调用方定制请求头，仅保留通用头。HTTP 5xx 抛
         RetryableDownloadError 由外层纳入退避重试，其余语义明确的终态错误原样上抛
-        不重试。
+        不重试。续传语义由 _classify_range_response 单点分类，分类描述符下传落盘侧；
+        跨源跳转剥离续传头即作废已存前缀，按非续传续行，全量重下成为唯一路径。
         """
         current_url = url
         current_headers = headers
@@ -815,13 +1380,28 @@ class DownloadManager:
                     # 跳向不同源时从调用方原始头重建安全头集合；同源跳转保持当前头不变，
                     # 一旦剥离后续跳回原源也不恢复定制头。
                     if _url_origin(next_url) != _url_origin(current_url):
+                        if _headers_request_range(current_headers):
+                            # 跨源剥离续传头后出站无 Range：作废已存前缀按非续传续行，
+                            # 他源 206 恰合偏移也不得与异源已存字节拼接。
+                            resume.restart()
                         current_headers = _strip_custom_headers_for_cross_origin(headers)
                     await _drain_response_quietly(response)
                     redirect_count += 1
                     current_url = next_url
                     continue
 
-                if response.status != 200:
+                classification = await _classify_range_response(
+                    response, resume, _headers_request_range(current_headers)
+                )
+                if classification.completed:
+                    # 416 声明总长恰达已确认偏移：声明总长自描述符写回续传状态，
+                    # 保住终局可重试失败后的完成态捷径；完整数据已确认，
+                    # 直接重走落盘终局。
+                    resume.expected_total = classification.range_total
+                    return await self._finalize_completed_resume(
+                        resume, save_path, attempt, wall_start_time, fsync
+                    )
+                if response.status != 200 and not classification.continuing:
                     await _drain_response_quietly(response)
                     # 5xx 与 408/429 多为瞬时故障或限流，纳入重试避免批量下载触发限流
                     # 后自动保存静默丢弃本地副本。
@@ -834,56 +1414,55 @@ class DownloadManager:
                     await _drain_response_quietly(response)
                     raise DownloadError(f"响应内容类型非图片: {content_type.split(';')[0].strip()}")
 
-                return await self._download_response_to_temp(
+                return await self._stream_response_to_resume(
                     response,
+                    resume,
                     save_path,
                     temp_suffix,
                     content_type,
                     attempt,
                     wall_start_time,
-                    fsync=fsync,
+                    fsync,
+                    classification,
                 )
 
-    async def download_image(
+    async def _download_with_retries(
         self,
         url: str,
         save_path: Path,
-        headers: dict[str, str] | None = None,
-        fsync: bool = False,
+        temp_suffix: str,
+        base_headers: dict[str, str],
+        start_time: float,
+        wall_start_time: float,
+        fsync: bool,
+        resume: _ResumeState,
     ) -> dict[str, Any]:
-        """异步下载图片。
+        """按线性退避重复下载尝试直至成功、终态失败或重试耗尽。
 
-        Args:
-            url: 图片 URL。
-            save_path: 保存路径，最终扩展名以字节签名嗅探结果为准。
-            headers: 请求头；None 时使用内置默认头。
-            fsync: 写入后、原子替换前是否对临时文件执行 os.fsync 刷入稳定存储。
-
-        Returns:
-            下载结果字典，含 file_path、file_size、download_time、content_type 与
-            attempts。
+        异常分类：可重试错误（HTTP 5xx/408/429、DNS 瞬时故障、瞬时 OSError、
+        网络类 ClientError）记录后落入退避重试；语义明确的终态错误、权限拒绝与
+        只读文件系统等永久错误、非下载语义的意外错误原样上抛不烧重试预算；跨
+        尝试累计预算耗尽即停止重试，防止重试按尝试数成倍放大单个保存任务的占用。
 
         Raises:
-            DownloadError: URL 校验、内容校验等终态失败或重试耗尽；文件系统永久
-                错误与无效 URL 同为终态。非下载语义的意外异常按原类型上抛。
+            DownloadError: 终态失败原样上抛，或重试耗尽后以最后一次可重试错误收尾。
         """
-        if headers is None:
-            headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
-
-        # 预算基准取单调钟：墙钟受系统对时回拨影响，会使累计预算判定失真；
-        # download_time 的人读挂钟度量另取 wall_start_time。
-        start_time = time.monotonic()
-        wall_start_time = time.time()
         last_error: DownloadError | None = None
-        # 临时文件的可读性后缀：原扩展名后追加 .part，实际路径由原子落盘骨架内 mkstemp 随机生成。
-        temp_suffix = (save_path.suffix or ".bin") + ".part"
-
+        attempts_made = 0
         for attempt in range(self.max_retries + 1):
+            attempts_made = attempt + 1
             try:
                 # 防御性兜底：父目录可能在退避等待或并发清理期间被删除，每趟尝试前
                 # 确保存在；在 try 内使其 OSError 按下方分支归一（权限/只读盘终态，
                 # 其余重试）。
                 await asyncio.to_thread(save_path.parent.mkdir, parents=True, exist_ok=True)
+                if resume.is_completed():
+                    # 完成态：响应体已全部确认落盘，重试不再发请求，
+                    # 直接重走落盘终局；200 与无总长声明的 416 会作废已完整前缀
+                    # 退回全量重下，空 206 更会把空文件归档顶替完整数据。
+                    return await self._finalize_completed_resume(
+                        resume, save_path, attempt, wall_start_time, fsync
+                    )
                 logger.info(
                     "开始下载图片 (尝试 {}/{}): {}",
                     attempt + 1,
@@ -892,16 +1471,19 @@ class DownloadManager:
                 )
 
                 session = await self._ensure_session()
+                resume_headers = resume.request_headers()
+                attempt_headers = {**base_headers, **resume_headers}
                 return await self._attempt_download(
                     session,
                     url,
-                    headers,
+                    attempt_headers,
                     save_path,
                     temp_suffix,
                     attempt,
                     start_time,
                     wall_start_time,
                     fsync=fsync,
+                    resume=resume,
                 )
 
             except RetryableDownloadError as e:
@@ -938,7 +1520,8 @@ class DownloadManager:
                 )
 
             except PermissionError as e:
-                # 权限拒绝属永久性错误，重试仅徒增延迟，直接终态抛出。
+                # 保存目录不可写等权限拒绝属永久性错误，重试仅徒增延迟，直接终态
+                # 抛出；终局瞬时持锁已在 _finalize_completed_resume 归为可重试。
                 raise DownloadError(f"权限拒绝，不可重试: {e}") from e
 
             except OSError as e:
@@ -960,8 +1543,8 @@ class DownloadManager:
 
             # 非末次尝试则按线性递增延迟加随机抖动退避后重试，抖动避免并发任务重试同步。
             if attempt < self.max_retries:
-                # 跨尝试累计预算耗尽即停止重试，防止重试按尝试数成倍放大单个保存
-                # 任务的占用；预算取值见 _download_total_budget。
+                # 跨尝试累计预算耗尽即停止重试，
+                # 防止重试按尝试数成倍放大单个保存任务的占用。
                 elapsed = time.monotonic() - start_time
                 if elapsed >= self._download_total_budget():
                     logger.warning(
@@ -973,8 +1556,77 @@ class DownloadManager:
                     break
                 await asyncio.sleep(self.retry_delay * (attempt + 1) + random.uniform(0, 1))
 
-        logger.error("图片下载失败，已重试 {} 次: {}", self.max_retries, sanitize_url(url))
+        logger.error("图片下载失败，已尝试 {} 次: {}", attempts_made, sanitize_url(url))
         raise last_error or DownloadError("下载失败")
+
+    async def download_image(
+        self,
+        url: str,
+        save_path: Path,
+        headers: dict[str, str] | None = None,
+        fsync: bool = False,
+    ) -> dict[str, Any]:
+        """异步下载图片。
+
+        重试携带 Range/If-Range 断点续传：响应携带强 ETag 且已存部分字节时
+        从已确认偏移续写，源变化或服务端不支持时退回全量重下；出站 Range 恒由
+        续传状态派生，调用方头中的同名键在入口剥离；出站请求恒钉死
+        Accept-Encoding 为 identity，等量核算的传输字节与声明总长保持同口径。
+
+        Args:
+            url: 图片 URL。
+            save_path: 保存路径，最终扩展名以字节签名嗅探结果为准。
+            headers: 请求头；None 时使用内置默认头。
+            fsync: 写入后、原子替换前是否对临时文件执行 os.fsync 刷入稳定存储。
+
+        Returns:
+            下载结果字典，含 file_path、file_size、download_time、content_type 与
+            attempts。
+
+        Raises:
+            DownloadError: URL 校验、内容校验等终态失败或重试耗尽；文件系统永久
+                错误与无效 URL 同为终态。非下载语义的意外异常按原类型上抛。
+        """
+        if headers is None:
+            headers = {"User-Agent": f"Seedream-MCP/{__version__}", "Accept": "image/*"}
+
+        # 预算基准取单调钟：墙钟受系统对时回拨影响，会使累计预算判定失真；
+        # download_time 的人读挂钟度量另取 wall_start_time。
+        start_time = time.monotonic()
+        wall_start_time = time.time()
+        # 临时文件的可读性后缀：原扩展名后追加 .part；续传临时文件跨尝试复用，
+        # 实际路径由 open_temp_fd 随机生成。
+        temp_suffix = (save_path.suffix or ".bin") + ".part"
+        # 调用方头中的 Range/If-Range 与续传出站单源冲突：入口一次剥离并告警，
+        # 重试各趟直接复用剥离结果。
+        stripped_caller_headers = [key for key in headers if key.lower() in _RESERVED_RANGE_HEADERS]
+        if stripped_caller_headers:
+            logger.warning(
+                "调用方头 {} 与断点续传出站 Range 单源冲突，已剥离", stripped_caller_headers
+            )
+        base_headers = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in _RESERVED_RANGE_HEADERS and key.lower() != "accept-encoding"
+        }
+        # 钉死 Accept-Encoding 为 identity：等量核算以传输字节对照声明总长，透明解压
+        # 会改写字节口径致短体或越界误判，调用方同名头一并覆盖。
+        base_headers["Accept-Encoding"] = "identity"
+        resume = _ResumeState()
+        try:
+            return await self._download_with_retries(
+                url,
+                save_path,
+                temp_suffix,
+                base_headers,
+                start_time,
+                wall_start_time,
+                fsync,
+                resume,
+            )
+        finally:
+            # 最终失败或取消后统一清理续传临时文件，成功路径已被原子替换，此处为空操作。
+            await resume.dispose()
 
     def validate_url(self, url: str) -> bool:
         """验证 URL 静态格式与主机安全性，不执行 DNS 解析。

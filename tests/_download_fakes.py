@@ -9,11 +9,18 @@ test_download_image_branches 与 test_auto_save_and_download 复用，避免多�
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, cast
 
+import aiohttp
 import pytest
 
-from seedream_mcp.utils.io.io_download import DownloadManager
+from seedream_mcp.utils.io.io_download import (
+    DownloadManager,
+    _RangeClassification,
+    _ResumeState,
+)
 
 # 合法 PNG 魔法字节，供成功路径与签名校验对照
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
@@ -136,20 +143,63 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """按序返回预设响应序列，超出后重复返回最后一个。"""
+    """按序返回预设响应序列，超出后重复返回最后一个。
 
-    def __init__(self, responses: list[_FakeResponse]) -> None:
+    Attributes:
+        captured_headers: 每次 get 收到的请求头副本，供 Range/If-Range、
+            Accept-Encoding 钉死与跨源请求头剥离断言。
+    """
+
+    def __init__(self, responses: Sequence[_FakeResponse]) -> None:
         self._responses = responses
         self._idx = 0
+        self.captured_headers: list[dict[str, str]] = []
 
     def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]
         del url
         # SSRF 防护：download_image 须显式传 allow_redirects=False 以逐跳手动校验，
         # 断言该参数防止退化为自动跟随重定向绕过安全校验
         assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
+        headers = cast("dict[str, str]", kwargs.get("headers") or {})
+        self.captured_headers.append(dict(headers))
         resp = self._responses[min(self._idx, len(self._responses) - 1)]
         self._idx += 1
         return resp
+
+
+class _InterruptedStreamContent:
+    """产出预设分块后抛 ClientPayloadError，模拟传输中断下的部分下载。"""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self._idx = 0
+
+    async def iter_chunked(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        while self._idx < len(self._chunks):
+            chunk = self._chunks[self._idx]
+            self._idx += 1
+            yield chunk
+        raise aiohttp.ClientPayloadError("connection dropped")
+
+    async def read(self, size: int = -1) -> bytes:
+        del size
+        return b""
+
+
+class _InterruptedResponse(_FakeResponse):
+    """中途断流的 200 响应，携带 ETag 供重试续传。"""
+
+    def __init__(self, chunks: list[bytes], etag: str, total: int) -> None:
+        super().__init__(
+            status=200,
+            headers={
+                "content-type": "image/png",
+                "etag": etag,
+                "content-length": str(total),
+            },
+        )
+        self.content = cast("_FakeStreamContent", _InterruptedStreamContent(chunks))
 
 
 class _RaisingThenSuccessSession:
@@ -230,3 +280,35 @@ def _png_success_response() -> _FakeResponse:
         headers={"content-type": "image/png", "content-length": str(len(_PNG_BYTES))},
         content_chunks=[_PNG_BYTES],
     )
+
+
+async def _single_trip_to_temp(
+    manager: DownloadManager,
+    response: Any,
+    save_path: Path,
+    temp_suffix: str,
+    content_type: str,
+    attempt: int,
+    wall_start_time: float,
+    *,
+    fsync: bool = False,
+) -> dict[str, Any]:
+    """单趟落盘便捷封装：独立续传状态走 _stream_response_to_resume，结束 dispose。
+
+    直连用例均为 200 响应，续传分类传非续传默认描述符。
+    """
+    resume = _ResumeState()
+    try:
+        return await manager._stream_response_to_resume(
+            response,
+            resume,
+            save_path,
+            temp_suffix,
+            content_type,
+            attempt,
+            wall_start_time,
+            fsync,
+            _RangeClassification(),
+        )
+    finally:
+        await resume.dispose()

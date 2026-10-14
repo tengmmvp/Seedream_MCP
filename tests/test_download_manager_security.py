@@ -19,11 +19,13 @@ from _download_fakes import (
     _FakeResponse,
     _FakeSession,
     _GatedFailingLoop,
+    _InterruptedResponse,
     _PNG_BYTES,
     _TimeoutThenSuccessSession,
     _patch_download_network,
 )
 from _inflight_fakes import _patch_unretrieved_callback
+from _log_fakes import RecordingLogger
 
 # 合法 JPEG 魔法字节，供扩展名等价类用例的字节签名嗅探。
 _JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 24
@@ -113,13 +115,13 @@ async def test_resolve_public_ips_dedups_inflight_resolutions(
 
     assert fake_loop.calls == 1
     # 在途 task 已登记且尚未完成，证明两任务共享同一在途解析
-    assert "example.com" in manager._dns_inflight
+    assert manager._dns_inflight.peek("example.com") is not None
     fake_loop.gate.set()
     r1, r2 = await asyncio.gather(t1, t2)
 
     assert r1 == r2 == ("8.8.8.8",)
     # task 完成后在途登记已清空，缓存已写入
-    assert manager._dns_inflight == {}
+    assert manager._dns_inflight.peek("example.com") is None
     assert "example.com" in manager._dns_cache
 
 
@@ -168,9 +170,9 @@ async def test_resolve_creator_cancel_arms_unretrieved_logging_once(
         await asyncio.sleep(0)
         if fake_loop.calls == 1:
             break
-    assert "example.com" in manager._dns_inflight
-
-    inflight = manager._dns_inflight["example.com"].task
+    entry = manager._dns_inflight.peek("example.com")
+    assert entry is not None
+    inflight = entry.task
     caller.cancel()
     fake_loop.gate.set()
 
@@ -200,9 +202,9 @@ async def test_resolve_cancel_with_surviving_waiter_not_armed(
     # 让出控制权使两任务均到达在途等待点
     for _ in range(20):
         await asyncio.sleep(0)
-        if "example.com" in manager._dns_inflight:
+        if manager._dns_inflight.peek("example.com") is not None:
             break
-    assert "example.com" in manager._dns_inflight
+    assert manager._dns_inflight.peek("example.com") is not None
 
     cancelled.cancel()
     fake_loop.gate.set()
@@ -432,6 +434,38 @@ async def test_download_image_stops_retry_when_total_budget_exhausted(
     assert session._idx == 1, "预算耗尽后应停止重试，仅执行首次尝试"
 
 
+async def test_budget_stop_failure_log_reports_actual_attempt_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """累计预算截停后的终态失败日志记录实际尝试数，而非 max_retries 上限。"""
+    from seedream_mcp.utils.io import io_download as io_download_module
+
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_download_module, "logger", capture)
+
+    manager = DownloadManager()
+    session = _FakeSession([_FakeResponse(500, {})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    clock_now = [1000.0]
+
+    def _advancing_time() -> float:
+        value = clock_now[0]
+        # 每次读时钟前进 7200 秒，首次尝试失败后累计即超预算。
+        clock_now[0] += 7200.0
+        return value
+
+    save_path = tmp_path / "out.png"
+    with monkeypatch.context() as m:
+        m.setattr(time, "monotonic", _advancing_time)
+        with pytest.raises(DownloadError):
+            await manager.download_image("https://example.com/img.png", save_path)
+
+    assert session._idx == 1
+    # 实际仅尝试 1 次，日志不得误报为 max_retries 上限。
+    assert capture.errors == ["图片下载失败，已尝试 1 次: https://example.com/img.png"]
+
+
 class _SlowHopClockSession:
     """每跳推进伪时钟一个完整预算窗口的重定向链会话，模拟慢滴流链。
 
@@ -499,24 +533,6 @@ async def test_download_image_retries_timeout_then_succeeds(
     assert session.call_count == 2
 
 
-class _HeaderCaptureSession:
-    """按序返回预设响应并捕获每次 get 的请求头，供重定向头剥离断言使用。"""
-
-    def __init__(self, responses: list[_FakeResponse]) -> None:
-        self._responses = list(responses)
-        self._idx = 0
-        self.captured_headers: list[dict[str, str]] = []
-
-    def get(self, url: str, **kwargs: object) -> object:
-        del url
-        assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
-        headers = cast("dict[str, str]", kwargs.get("headers") or {})
-        self.captured_headers.append(dict(headers))
-        resp = self._responses[min(self._idx, len(self._responses) - 1)]
-        self._idx += 1
-        return resp
-
-
 _CUSTOM_HEADERS = {
     "User-Agent": "Seedream-MCP/test",
     "Accept": "image/*",
@@ -524,13 +540,16 @@ _CUSTOM_HEADERS = {
     "X-Trace-Id": "trace-1",
 }
 
+# 出站请求恒叠加 Accept-Encoding: identity 钉死项，期望头为调用方头加该项。
+_PINNED_CUSTOM_HEADERS = {**_CUSTOM_HEADERS, "Accept-Encoding": "identity"}
+
 
 async def test_download_image_strips_custom_headers_on_cross_origin_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """重定向跳向不同源时剥离定制请求头，仅保留 User-Agent 与 Accept 等通用头。"""
     manager = DownloadManager()
-    session = _HeaderCaptureSession(
+    session = _FakeSession(
         [
             _FakeResponse(302, {"location": "https://cdn.example.net/img.png"}),
             _FakeResponse(200, {"content-type": "image/png"}, content_chunks=[_PNG_BYTES]),
@@ -545,14 +564,15 @@ async def test_download_image_strips_custom_headers_on_cross_origin_redirect(
 
     assert result["success"] is True
     assert len(session.captured_headers) == 2
-    # 起始请求发往原始主机，定制头原样保留
-    assert session.captured_headers[0] == _CUSTOM_HEADERS
-    # 跨源跳转剥离定制头，仅保留通用头
+    # 起始请求发往原始主机，定制头原样保留并叠加 identity 钉死项。
+    assert session.captured_headers[0] == _PINNED_CUSTOM_HEADERS
+    # 跨源跳转剥离定制头，仅保留通用头与 identity 钉死项。
     second_keys = {key.lower() for key in session.captured_headers[1]}
     assert "authorization" not in second_keys
     assert "x-trace-id" not in second_keys
     assert "user-agent" in second_keys
     assert "accept" in second_keys
+    assert session.captured_headers[1]["Accept-Encoding"] == "identity"
 
 
 async def test_download_image_keeps_headers_on_same_origin_redirect(
@@ -560,7 +580,7 @@ async def test_download_image_keeps_headers_on_same_origin_redirect(
 ) -> None:
     """同源重定向不剥离请求头，调用方定制头在原主机内保持原样。"""
     manager = DownloadManager()
-    session = _HeaderCaptureSession(
+    session = _FakeSession(
         [
             _FakeResponse(302, {"location": "https://example.com/img_final.png"}),
             _FakeResponse(200, {"content-type": "image/png"}, content_chunks=[_PNG_BYTES]),
@@ -575,8 +595,75 @@ async def test_download_image_keeps_headers_on_same_origin_redirect(
 
     assert result["success"] is True
     assert len(session.captured_headers) == 2
-    assert session.captured_headers[0] == _CUSTOM_HEADERS
-    assert session.captured_headers[1] == _CUSTOM_HEADERS
+    assert session.captured_headers[0] == _PINNED_CUSTOM_HEADERS
+    assert session.captured_headers[1] == _PINNED_CUSTOM_HEADERS
+
+
+async def test_download_image_strips_caller_range_headers_once_across_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """调用方 Range/If-Range 头入口一次剥离：重试各趟出站头干净，告警只记一条。"""
+    from seedream_mcp.utils.io import io_download as io_download_module
+
+    capture = RecordingLogger()
+    monkeypatch.setattr(io_download_module, "logger", capture)
+    manager = DownloadManager()
+    # _FakeSession 超出序列后重复最后一个响应，全部尝试均为 500 触发重试。
+    session = _FakeSession([_FakeResponse(500, {})])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError):
+        await manager.download_image(
+            "https://example.com/img.png",
+            save_path,
+            headers={
+                "User-Agent": "Seedream-MCP/test",
+                "Range": "bytes=0-99",
+                "If-Range": '"v1"',
+            },
+        )
+
+    assert session._idx == manager.max_retries + 1
+    # 每趟出站头都不含 Range/If-Range，其余调用方头保留。
+    for captured in session.captured_headers:
+        assert "Range" not in captured and "If-Range" not in captured
+        assert captured["User-Agent"] == "Seedream-MCP/test"
+    matched = [entry for entry in capture.warnings if "Range 单源冲突" in entry]
+    assert len(matched) == 1
+
+
+async def test_resumed_download_cross_origin_206_does_not_splice_foreign_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """续传请求被跨源 302 剥离 Range 后，他源恰合偏移的 206 不得拼接异源字节。"""
+    body = _PNG_BYTES + b"\x00" * (200 - len(_PNG_BYTES))
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            # 首趟在 100 字节处中断，留下带 ETag 的续传状态。
+            _InterruptedResponse([body[:100]], '"v1"', len(body)),
+            # 次趟携 Range/If-Range 请求被 302 跳向 CDN，跨源剥离续传头。
+            _FakeResponse(302, {"location": "https://cdn.example.net/img.png"}),
+            # CDN 回 206 且区间起点恰合已确认偏移，按非续传口径归档为终态失败。
+            _FakeResponse(
+                206,
+                {
+                    "content-type": "image/png",
+                    "content-range": f"bytes 100-{len(body) - 1}/{len(body)}",
+                },
+                content_chunks=[body[100:]],
+            ),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="206"):
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 拼接体不落盘。
+    assert not save_path.exists()
 
 
 async def test_download_image_cross_origin_header_strip_sticks_across_hop_back(
@@ -586,7 +673,7 @@ async def test_download_image_cross_origin_header_strip_sticks_across_hop_back(
     from seedream_mcp.utils.io.io_download import _strip_custom_headers_for_cross_origin
 
     manager = DownloadManager()
-    session = _HeaderCaptureSession(
+    session = _FakeSession(
         [
             _FakeResponse(302, {"location": "https://cdn.example.net/img.png"}),
             _FakeResponse(302, {"location": "https://example.com/img.png"}),
@@ -602,9 +689,12 @@ async def test_download_image_cross_origin_header_strip_sticks_across_hop_back(
 
     assert result["success"] is True
     assert len(session.captured_headers) == 3
-    # 起始请求发往原主机 A，定制头原样保留
-    assert session.captured_headers[0] == _CUSTOM_HEADERS
-    stripped = _strip_custom_headers_for_cross_origin(_CUSTOM_HEADERS)
+    # 起始请求发往原主机 A，定制头原样保留并叠加 identity 钉死项。
+    assert session.captured_headers[0] == _PINNED_CUSTOM_HEADERS
+    stripped = {
+        **_strip_custom_headers_for_cross_origin(_CUSTOM_HEADERS),
+        "Accept-Encoding": "identity",
+    }
     # 第二跳跨源到 B 剥离定制头，第三跳跳回 A 仍保持剥离形态
     assert session.captured_headers[1] == stripped
     assert session.captured_headers[2] == stripped
