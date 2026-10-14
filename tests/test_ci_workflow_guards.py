@@ -297,3 +297,27 @@ def test_setup_uv_version_pinned_to_dockerfile() -> None:
         assert (
             f"version: {pin.group(1)}" in text
         ), f"{name} 的 setup-uv 须钉 version: {pin.group(1)}，与 Dockerfile UV_VERSION 同源"
+
+
+# uses 行的 action 钉版引用形态：owner/action@40 位十六进制 SHA，本地复用工作流无 @ref 不计入。
+_ACTION_SHA_USE_PATTERN = re.compile(r"uses:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)@([0-9a-f]{40})")
+
+
+def test_action_sha_pins_single_sourced_across_workflows() -> None:
+    """同一 action 名跨全部工作流的 SHA 钉版唯一，升级漏改任一文件即失败。
+
+    checkout 在 ci/release/audit/reusable-checks 多处重复钉版、setup-uv 在
+    reusable-checks/release/audit 三处重复；部分 bump 时 merge gate
+    验证的动作版本与 release/audit 实际执行的版本分叉且无其他报警。
+    """
+    pins: dict[str, list[str]] = {}
+    for workflow in sorted(_WORKFLOWS_DIR.glob("*.yml")):
+        for action, sha in _ACTION_SHA_USE_PATTERN.findall(_workflow_text(workflow.name)):
+            pins.setdefault(action, []).append(sha)
+    assert pins, ".github/workflows 未解析到任何 SHA 钉版的 action 引用，解析失效"
+    # checkout 与 setup-uv 属跨文件重复钉版的 action，缺席说明扫描范围失真。
+    for action in ("actions/checkout", "astral-sh/setup-uv"):
+        assert action in pins, f"{action} 应以 SHA 钉版引用"
+        assert len(pins[action]) >= 2, f"{action} 的多处钉版是本守护的目标形态，实际仅一处"
+    drifted = {action: sorted(set(shas)) for action, shas in pins.items() if len(set(shas)) > 1}
+    assert not drifted, f"同一 action 存在多个不同 SHA 钉版，升级须全部工作流同步: {drifted}"

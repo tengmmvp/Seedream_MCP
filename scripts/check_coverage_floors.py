@@ -12,16 +12,22 @@ import tomllib
 from pathlib import Path
 
 
-def main() -> None:
+def main(repo_root: Path | None = None) -> None:
+    """校验 coverage.json 全部文件的覆盖率不低于 pyproject 声明的下限。
+
+    Args:
+        repo_root: 仓库根目录，取 pyproject.toml 与 coverage.json 的位置；
+            缺省为脚本所在目录上溯一级的仓库根，测试注入临时目录复用同一判定路径。
+    """
     # Windows 控制台默认代码页编不出中文输出，输出流重配置为 UTF-8。
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
-    repo_root = Path(__file__).resolve().parent.parent
-    floor = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+    root = Path(__file__).resolve().parent.parent if repo_root is None else repo_root
+    floor = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
         "coverage_floors"
     ]["file_coverage_min"]
-    measured = json.loads((repo_root / "coverage.json").read_text(encoding="utf-8"))["files"]
+    measured = json.loads((root / "coverage.json").read_text(encoding="utf-8"))["files"]
     if not measured:
         sys.exit("coverage.json 无测量数据")
     below = [

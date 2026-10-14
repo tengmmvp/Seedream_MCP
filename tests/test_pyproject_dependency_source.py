@@ -29,7 +29,12 @@ def test_build_backend_hatchling_pinned_to_locked_version() -> None:
     pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((repo_root / "uv.lock").read_text(encoding="utf-8"))
     locked = next(
-        package["version"] for package in lock["package"] if package["name"] == "hatchling"
+        (package["version"] for package in lock["package"] if package["name"] == "hatchling"),
+        None,
+    )
+    assert locked is not None, (
+        "uv.lock 未锁定 hatchling：dev 组的裸 hatchling 依赖是使其进入锁的承重条目，"
+        "支撑 build-system 钉版与本对账，不得当作无消费方残留删除"
     )
 
     assert pyproject["build-system"]["requires"] == [f"hatchling=={locked}"]

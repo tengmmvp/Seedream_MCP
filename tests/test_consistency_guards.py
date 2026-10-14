@@ -1,9 +1,10 @@
 """跨层一致性守护测试。
 
-锁定三组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
-MCP 注册工具名与 impl ToolMetadata 工具名、路径相似建议与 CLI 端口解析的边界行为；
-另含 loguru exc_info 关键字、security 标记级别与环境变量键清洗前缀的全源码静态
-守护。新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
+锁定四组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
+能力表参考图上限与组图总数上限、MCP 注册工具名与 impl ToolMetadata 工具名、
+路径相似建议与 CLI 端口解析的边界行为；另含 loguru exc_info 关键字、security
+标记级别与环境变量键清洗前缀的全源码静态守护。新增取值或改名时两侧须同步，
+本文件在各处失败即暴露漂移。
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from seedream_mcp.tools.impl._metadata import (
     TEXT_TO_IMAGE,
 )
 from seedream_mcp.utils.core.validators import (
+    MAX_SEQUENTIAL_TOTAL_IMAGES,
     VALID_BACKGROUND_MODES,
     VALID_GENERATION_TOOL_TYPES,
     VALID_OPTIMIZE_MODES,
@@ -152,6 +154,22 @@ def test_unknown_family_presets_match_validator_whitelist() -> None:
     )
 
     assert set(MODEL_CAPABILITIES[MODEL_FAMILY_UNKNOWN].allowed_presets) == set(VALID_SIZE_PRESETS)
+
+
+def test_family_reference_caps_fit_sequential_total_images() -> None:
+    """能力表各家族 max_reference_images ≤ 组图总数上限 - 1，不留生成位的家族使组图错误指引自相矛盾。"""
+    from seedream_mcp.utils.model.model_capabilities import MODEL_CAPABILITIES
+
+    offenders = [
+        f"{family}: {caps.max_reference_images}"
+        for family, caps in MODEL_CAPABILITIES.items()
+        if caps.max_reference_images > MAX_SEQUENTIAL_TOTAL_IMAGES - 1
+    ]
+
+    assert offenders == [], (
+        f"家族参考图上限须不超过 {MAX_SEQUENTIAL_TOTAL_IMAGES - 1}（总数上限 "
+        f"{MAX_SEQUENTIAL_TOTAL_IMAGES} 须留出至少一张生成位）: {offenders}"
+    )
 
 
 async def test_mcp_registered_tool_names_match_impl_metadata() -> None:

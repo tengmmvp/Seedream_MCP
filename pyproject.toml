@@ -57,6 +57,7 @@ dev = [
     "black>=23.0.0",
     "flake8>=6.0.0",
     "mypy>=1.0.0",
+    # 使 hatchling 进入 uv.lock，供 build-system 钉版与 lock 对账。
     "hatchling",
 ]
 
