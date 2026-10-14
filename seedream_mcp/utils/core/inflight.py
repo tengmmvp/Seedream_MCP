@@ -1,7 +1,8 @@
 """asyncio 共享后台任务的可观测性设施。
 
-InflightEntry 提供 single-flight 在途条目与孤儿异常登记判定，供 io_download 的
-DNS 在途解析与 image_prepare 的参考图预处理在途去重共用。消费者全部放弃且结果
+InflightEntry 提供 single-flight 在途条目与孤儿异常登记判定，经 loop_bound 的
+LoopKeyedInflight 供 io_download 的 DNS 在途解析、image_prepare 的参考图预处理
+与 image_thumbnail 的缩略图解码在途去重间接共用。消费者全部放弃且结果
 未被消费时，失败 task 经 arm_unretrieved_exception_logging 登记的兜底回调以
 warning 记录。
 """
@@ -74,7 +75,8 @@ class InflightEntry(Generic[_InflightResultT]):
     on_cancel 在取消异常向外传播前执行，供创建者转移信号量槽位等清理责任。
     """
 
-    __slots__ = ("task", "consumers", "observed", "orphan_logged")
+    # __weakref__ 槽使条目可被弱引用，供 loop_bound 注册表仅弱持在途条目。
+    __slots__ = ("task", "consumers", "observed", "orphan_logged", "__weakref__")
 
     def __init__(self, task: "asyncio.Task[_InflightResultT]") -> None:
         self.task = task

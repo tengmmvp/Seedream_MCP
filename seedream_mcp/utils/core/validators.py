@@ -19,6 +19,7 @@ from typing import Any, NamedTuple
 from .errors import SeedreamConfigError, SeedreamValidationError
 from .logs import get_logger
 from ..model.model_capabilities import (
+    capability_param_label,
     get_max_reference_images,
     get_model_capabilities,
     preset_numeric_sort_key as _preset_numeric_sort_key,
@@ -291,7 +292,6 @@ def validate_output_format(output_format: Any, model_id: str) -> str | None:
             field="output_format",
             model_id=model_id,
             capability="supports_output_format",
-            param_desc="输出格式（output_format）",
             value=output_format,
         )
 
@@ -327,7 +327,6 @@ def validate_generation_tools(tools: Any, model_id: str) -> list[dict[str, str]]
             field="tools",
             model_id=model_id,
             capability="supports_tools",
-            param_desc="联网搜索（tools）",
             value=tools,
         )
 
@@ -393,7 +392,6 @@ def validate_stream(stream: bool, model_id: str) -> bool:
             field="stream",
             model_id=model_id,
             capability="supports_stream",
-            param_desc="流式输出（stream）",
             value=stream,
         )
     return stream
@@ -560,10 +558,16 @@ def capability_gate_error(
     field: str,
     model_id: str,
     capability: str,
-    param_desc: str,
+    param_desc: str | None = None,
     value: object = None,
 ) -> SeedreamValidationError:
-    """构造能力门控报错：当前模型、参数、支持模型清单与配置变更指引。"""
+    """构造能力门控报错：当前模型、参数、支持模型清单与配置变更指引。
+
+    param_desc 缺省时按 capability 从 model_capabilities 的标签表取单源标签，仅
+    参数口径异于能力本身的调用方显式传入。
+    """
+    if param_desc is None:
+        param_desc = capability_param_label(capability)
     return SeedreamValidationError(
         f"当前模型 {model_id} 不支持{param_desc}，"
         f"支持的模型：{supported_family_display_names(capability)}；"
@@ -600,7 +604,6 @@ def validate_layer_decomposition(layer_decomposition: Any, model_id: str) -> boo
             field="layer_decomposition",
             model_id=normalized_model_id,
             capability="supports_layer_decomposition",
-            param_desc="图层拆分（layer_decomposition）",
             value=layer_decomposition,
         )
     return layer_decomposition
@@ -641,7 +644,6 @@ def validate_background(
             field="background",
             model_id=normalized_model_id,
             capability="supports_background",
-            param_desc="透明背景（background）",
             value=normalized,
         )
     if output_format is not None:
@@ -806,7 +808,6 @@ def validate_sequential_generation_support(model_id: str) -> None:
             field="model",
             model_id=model_id,
             capability="supports_sequential_generation",
-            param_desc="组图生成（sequential_generation）",
             value=model_id,
         )
 

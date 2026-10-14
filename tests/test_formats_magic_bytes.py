@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 from types import MappingProxyType
 
@@ -14,11 +15,17 @@ from PIL import Image
 
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.core.formats import (
+    EXTENSIONS_BY_PIL_FORMAT,
     EXTENSION_BY_MIME,
+    FORMAT_FAMILIES,
     MIME_BY_EXTENSION,
+    PIL_FORMATS_BY_FAMILY,
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
+    ensure_image_decoders_ready,
+    estimate_base64_decoded_size,
     format_file_too_large,
+    format_file_too_large_bytes,
     infer_extension_from_bytes,
     is_known_image_bytes,
     parse_data_uri,
@@ -66,6 +73,65 @@ def test_extension_by_mime_resolves_jpeg_conflict_to_canonical_extension() -> No
     assert ".jpg" not in set(EXTENSION_BY_MIME.values())
 
 
+# ==================== 格式家族表单一来源 ====================
+
+
+def test_format_families_expand_to_supported_extension_universe() -> None:
+    """家族表按族序展开即受支持扩展名全集，锁定展示顺序且族间互不重叠。"""
+    flattened = [
+        extension
+        for family_extensions in FORMAT_FAMILIES.values()
+        for extension in family_extensions
+    ]
+    assert flattened == [
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".bmp",
+        ".webp",
+        ".tiff",
+        ".heic",
+        ".heif",
+    ]
+    assert len(flattened) == len(set(flattened))
+    assert tuple(flattened) == SUPPORTED_IMAGE_EXTENSIONS_ORDERED
+    assert frozenset(flattened) == SUPPORTED_IMAGE_EXTENSIONS
+
+
+def test_pil_format_map_and_download_equivalences_derive_from_families() -> None:
+    """PIL 格式映射与下载侧等价类从家族表派生，回退为手写表漂移时在此报警。"""
+    from seedream_mcp.utils.io.io_download import _FORMAT_EQUIVALENT_EXTENSIONS
+
+    assert EXTENSIONS_BY_PIL_FORMAT == {
+        pil_format: frozenset(family_extensions)
+        for family, family_extensions in FORMAT_FAMILIES.items()
+        for pil_format in PIL_FORMATS_BY_FAMILY[family]
+    }
+    # MPO 为 JPEG 家族的多图形态别名，别名条目在单一来源锁定，不散落到消费方。
+    assert EXTENSIONS_BY_PIL_FORMAT["MPO"] == frozenset(FORMAT_FAMILIES["jpeg"])
+    assert frozenset().union(*EXTENSIONS_BY_PIL_FORMAT.values()) == SUPPORTED_IMAGE_EXTENSIONS
+    assert _FORMAT_EQUIVALENT_EXTENSIONS == tuple(
+        frozenset(family_extensions)
+        for family_extensions in FORMAT_FAMILIES.values()
+        if len(family_extensions) > 1
+    )
+
+
+def test_pil_format_names_are_registered_pil_formats() -> None:
+    """PIL 格式名逐条目对账 PIL 已注册插件的格式名，拼错或大小写错误必红。
+
+    家族名派生与手写 MPO 都不校验 PIL 注册表，
+    未注册的格式名使 EXTENSIONS_BY_PIL_FORMAT 派生出永不放行的键、整族图片在解码准入处静默不可用；
+    HEIF 经 pillow_heif 惰性注册，对账前先就绪解码器。
+    """
+    ensure_image_decoders_ready()
+    registered = set(Image.registered_extensions().values())
+    for pil_formats in PIL_FORMATS_BY_FAMILY.values():
+        for pil_format in pil_formats:
+            assert pil_format in registered
+
+
 # ==================== parse_data_uri ====================
 
 
@@ -74,6 +140,12 @@ def test_parse_data_uri_returns_base64_flag() -> None:
     assert parse_data_uri("data:image/png;base64,aGk=") == ("image/png", "aGk=", True)
     assert parse_data_uri("DATA:image/png;BASE64,aGk=") == ("image/png", "aGk=", True)
     assert parse_data_uri("data:image/png,aGk=") == ("image/png", "aGk=", False)
+
+
+@pytest.mark.parametrize("param_name", ["base64url", "base64xyz"])
+def test_parse_data_uri_base64_prefixed_param_names_not_flagged(param_name: str) -> None:
+    """以 base64 开头的非 base64 参数名不判为编码声明，is_base64 按参数名精确比较。"""
+    assert parse_data_uri(f"data:image/png;{param_name},aGk=") == ("image/png", "aGk=", False)
 
 
 def test_parse_data_uri_non_data_input_returns_sentinel_triple() -> None:
@@ -105,6 +177,88 @@ def test_validate_image_input_rejects_oversized_data_uri_before_decode(
     estimated_bytes = 2_000_000 * 3 // 4
     assert exc_info.value.message == format_file_too_large(estimated_bytes, max_size, label="数据")
     assert "base64 长度" not in exc_info.value.message
+
+
+def test_format_file_too_large_bytes_keeps_exact_byte_counts() -> None:
+    """字节口径超限文案保留精确字节数，亚 MB 值不因 MB 取整失真。"""
+    assert (
+        format_file_too_large_bytes(1000, 600, label="响应体")
+        == "响应体过大: 1000 字节，最大支持600 字节"
+    )
+
+
+# ==================== base64 解码尺寸估算单一来源 ====================
+
+
+@pytest.mark.parametrize("size", [3, 4, 5])
+def test_estimate_base64_decoded_size_equals_actual_decoded_bytes(size: int) -> None:
+    """合法 base64 的估算恰等于实际解码字节数，无 padding、单 = 与双 = 三档对齐。"""
+    payload = base64.b64encode(b"x" * size).decode()
+    assert estimate_base64_decoded_size(payload, limit=size) == size
+
+
+def test_estimate_base64_decoded_size_keeps_oversized_without_whitespace() -> None:
+    """无空白载荷剥离复核后估算不变，超限口径不放松。"""
+    assert estimate_base64_decoded_size("A" * 200, limit=100) == 150
+
+
+def test_estimate_base64_decoded_size_refines_whitespace_when_naive_over() -> None:
+    """朴素上界超限时剥离空白复核：折行与 NBSP 载荷按净长度估算，入限不误拒。"""
+    clean = base64.b64encode(b"x" * 300).decode()
+    folded = "\r\n".join(clean[index : index + 76] for index in range(0, len(clean), 76))
+    dirty = clean[:5] + "\xa0" * 8 + clean[5:]
+    assert estimate_base64_decoded_size(clean, limit=300) == 300
+    assert estimate_base64_decoded_size(folded, limit=300) == 300
+    assert estimate_base64_decoded_size(dirty, limit=300) == 300
+
+
+def test_trailing_base64_padding_counts_full_trailing_run() -> None:
+    """尾部空白剥离后完整统计连续 '=' 串，不设扫描窗口。"""
+    from seedream_mcp.utils.core.formats import _trailing_base64_padding
+
+    clean = base64.b64encode(b"x" * 301).decode()
+    assert clean.endswith("==")
+    assert _trailing_base64_padding(clean + "\n" * 100) == 2
+    assert _trailing_base64_padding("QUFB" + "=" * 100) == 100
+
+
+def test_trailing_base64_padding_distinguishes_whitespace_around_padding() -> None:
+    """padding 前空白属折行数据区、padding 后空白属尾部，两侧计数同为 2。"""
+    from seedream_mcp.utils.core.formats import _trailing_base64_padding
+
+    assert _trailing_base64_padding("QUFB\n==") == 2
+    assert _trailing_base64_padding("QUFB==" + "\n" * 63) == 2
+    assert _trailing_base64_padding("QUFB\n==" + "\n" * 63) == 2
+
+
+def test_trailing_base64_padding_boundary_shapes() -> None:
+    """无 padding、纯 padding、纯空白与空白隔断等边界形态计数与切片口径一致。"""
+    from seedream_mcp.utils.core.formats import _trailing_base64_padding
+
+    assert _trailing_base64_padding("") == 0
+    assert _trailing_base64_padding(" \n\t ") == 0
+    assert _trailing_base64_padding("QUFB") == 0
+    assert _trailing_base64_padding("QUFB\n") == 0
+    assert _trailing_base64_padding("=" * 5) == 5
+    assert _trailing_base64_padding("\n" + "=" * 5) == 5
+    # '=' 串中隔空白只计末段连续 run，与 rstrip 先剥尾部空白再数等号的口径一致。
+    assert _trailing_base64_padding("QQ==\n=") == 1
+
+
+def test_estimate_base64_decoded_size_stays_upper_bound_behind_trailing_whitespace() -> None:
+    """padding 后跟长尾部空白时仍被完整剔除，估算保持上界。"""
+    clean = base64.b64encode(b"x" * 301).decode()
+    assert clean.endswith("==")
+    exact = (len(clean) - 2) * 3 // 4
+    estimate = estimate_base64_decoded_size(clean + "\n" * 100, limit=300)
+    assert exact <= estimate <= exact + 2
+
+
+def test_estimate_base64_decoded_size_accepts_boundary_payload_with_hidden_padding() -> None:
+    """恰等于上限的载荷在尾部空白剥离后 padding 仍完整剔除时不误拒。"""
+    clean = base64.b64encode(b"x" * 301).decode()
+    assert clean.endswith("==")
+    assert estimate_base64_decoded_size(clean + "\n" * 100, limit=301) == 301
 
 
 # ==================== BMP ====================

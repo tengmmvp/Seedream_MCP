@@ -1,12 +1,14 @@
 """图像格式定义与推断。
 
-集中管理支持的图像扩展名、MIME 类型映射与基于文件头的格式推断，供 validation、
-image_input、io_storage 等模块共享，避免多处重复定义。
+集中管理格式家族表、受支持图像扩展名、MIME 类型映射、PIL 格式名映射、
+基于文件头的格式推断与 base64 解码尺寸估算，供 validation、image_input、
+io_download、io_save 等模块共享，避免多处重复定义。
 """
 
 from __future__ import annotations
 
 import base64
+import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -22,20 +24,47 @@ MAX_IMAGE_PIXELS = 36_000_000
 # 数据目录名：<数据根目录>/DATA_DIR_NAME 下并列 images/thumbs/logs，整体删除即清理。
 DATA_DIR_NAME = ".seedream"
 
-# 校验与浏览支持的图片扩展名，小写且含点号。有序版本供展示，frozenset 版本供 in
-# 成员判断。
-SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = (
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".bmp",
-    ".webp",
-    ".tiff",
-    ".heic",
-    ".heif",
+# 格式家族表：家族名 -> 族内扩展名（小写含点号，族序与族内序即展示序）。
+# 同族扩展名互为同格式别名（.jpg/.jpeg、.heic/.heif）；受支持白名单、下载侧
+# 等价类与 PIL 格式映射均从本表派生，是扩展名宇宙的单一来源。
+FORMAT_FAMILIES: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "jpeg": (".jpg", ".jpeg"),
+        "png": (".png",),
+        "gif": (".gif",),
+        "bmp": (".bmp",),
+        "webp": (".webp",),
+        "tiff": (".tiff",),
+        "heif": (".heic", ".heif"),
+    }
+)
+
+# 校验与浏览支持的图片扩展名，按家族表展开派生；有序版本供展示，frozenset 版本
+# 供 in 成员判断。
+SUPPORTED_IMAGE_EXTENSIONS_ORDERED: tuple[str, ...] = tuple(
+    extension for family_extensions in FORMAT_FAMILIES.values() for extension in family_extensions
 )
 SUPPORTED_IMAGE_EXTENSIONS: frozenset[str] = frozenset(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)
+
+# 家族 -> PIL 实际识别的格式名元组：按键集派生自家族表的 (家族名大写,)，
+# JPEG 家族另含多图形态别名 MPO，HEIF 家族 heic/heif 共用同一格式名；
+# 新增家族或别名不散落到消费方。
+PIL_FORMATS_BY_FAMILY: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        **{family: (family.upper(),) for family in FORMAT_FAMILIES},
+        "jpeg": ("JPEG", "MPO"),
+    }
+)
+
+# PIL 实际识别格式名 -> 族内扩展名集，由家族表与格式名表展开派生；键集合即
+# 解码放行的格式宇宙，弱魔数格式（PPM/XBM 等）不在键内。
+EXTENSIONS_BY_PIL_FORMAT: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        pil_format: frozenset(family_extensions)
+        for family, family_extensions in FORMAT_FAMILIES.items()
+        for pil_format in PIL_FORMATS_BY_FAMILY[family]
+    }
+)
 
 # 扩展名到 MIME 类型映射，用于本地文件转 Data URI，取只读视图防止公共映射被原地改写。
 MIME_BY_EXTENSION: Mapping[str, str] = MappingProxyType(
@@ -177,6 +206,39 @@ def format_file_too_large(size_bytes: int, max_size: int, label: str = "文件")
     )
 
 
+def format_file_too_large_bytes(size_bytes: int, max_size: int, label: str = "文件") -> str:
+    """构造纯字节口径的超限文案，字节级核算路径与 MB 口径在此并列收口。"""
+    return f"{label}过大: {size_bytes} 字节，最大支持{max_size} 字节"
+
+
+# base64 解码尺寸估算与解码前剥离共用的空白模式源，str 模式 \s 含 NBSP 等异形空白。
+BASE64_WHITESPACE_PATTERN = re.compile(r"\s+")
+
+
+def _trailing_base64_padding(payload: str) -> int:
+    """剥离尾部空白后统计连续 padding 字符数，供解码上界估算剔除。"""
+    # 两段 rstrip 均在 C 层完成，对抗性超长 padding 尾不退化为逐字符 Python 循环。
+    stripped = payload.rstrip()
+    return len(stripped) - len(stripped.rstrip("="))
+
+
+def estimate_base64_decoded_size(payload: str, limit: int) -> int:
+    """估算 base64 文本解码后的字节数上界，无空白合法载荷恰等于实际解码字节数。
+
+    尾部 padding 恒不计入：计入会把解码后恰在上限的载荷在预检误拒。limit 为
+    调用方的接受上限，朴素长度上界入限时免整串空白扫描直达校验，超限才零分配
+    剥离复核，折行与 NBSP 等异形空白不因开销被误拒。
+    """
+    padding = _trailing_base64_padding(payload)
+    estimated = ((len(payload) - padding) * 3) // 4
+    if estimated <= limit:
+        return estimated
+    stripped_length = len(payload) - sum(
+        match.end() - match.start() for match in BASE64_WHITESPACE_PATTERN.finditer(payload)
+    )
+    return ((stripped_length - padding) * 3) // 4
+
+
 def encode_data_uri(media_type: str, payload: bytes) -> str:
     """把字节负载编码为 base64 data URI，与 parse_data_uri 共守同一语法。"""
     encoded = base64.b64encode(payload).decode("ascii")
@@ -201,5 +263,6 @@ def parse_data_uri(data: Any) -> tuple[str | None, Any, bool]:
     # header 形如 "data:image/png;base64"，去掉 scheme 前缀后取首个 ";" 前的媒体类型。
     body = header.split(":", 1)[1]
     media_type = body.split(";", 1)[0] or None
-    is_base64 = ";base64" in header.lower()
+    # 参数名按分号切分后精确比较，base64url 等以 base64 开头的参数名不误判为编码声明。
+    is_base64 = any(param.strip() == "base64" for param in header.lower().split(";")[1:])
     return media_type, payload, is_base64

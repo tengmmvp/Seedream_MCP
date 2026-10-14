@@ -4,11 +4,12 @@
 """
 
 from dataclasses import asdict
-from typing import cast
+from typing import cast, get_type_hints
 
 import pytest
 
 from seedream_mcp.utils.model.model_capabilities import (
+    CAPABILITY_LABELS,
     MODEL_ALIASES,
     MODEL_CAPABILITIES,
     MODEL_FAMILY_40,
@@ -147,3 +148,33 @@ def test_supported_family_display_names_returns_joined_string() -> None:
         "doubao-seedream-5.0-pro、doubao-seedream-5.0、doubao-seedream-5.0-flash"
     )
     assert supported_family_display_names("supports_tools") == "doubao-seedream-5.0"
+
+
+def test_capability_labels_locked_verbatim() -> None:
+    """能力开关中文标签与载荷键逐字锁定，改动须同步审视快照文本与门控报错的对外文案。"""
+    assert [entry.label for entry in CAPABILITY_LABELS] == [
+        "图层拆分（layer_decomposition）",
+        "透明背景（background）",
+        "输出格式（output_format）",
+        "流式输出（stream）",
+        "联网搜索（tools）",
+        "组图生成（sequential_generation）",
+    ]
+    assert [entry.payload_key for entry in CAPABILITY_LABELS] == [
+        "layer_decomposition",
+        "transparent_background",
+        "output_format",
+        "stream",
+        "web_search",
+        "sequential_generation",
+    ]
+
+
+def test_capability_labels_map_unique_bool_capability_fields() -> None:
+    """标签表的 capability 字段与载荷键互异，capability 均为能力表布尔字段。"""
+    bool_fields = {name for name, tp in get_type_hints(ModelCapabilities).items() if tp is bool}
+    capabilities = [entry.capability for entry in CAPABILITY_LABELS]
+    assert len(set(capabilities)) == len(capabilities)
+    assert set(capabilities) <= bool_fields
+    payload_keys = [entry.payload_key for entry in CAPABILITY_LABELS]
+    assert len(set(payload_keys)) == len(payload_keys)

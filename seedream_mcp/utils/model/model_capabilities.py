@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
+from typing import NamedTuple
 
 # 参考图上限常量：5.0 Pro / Flash 为 10，其余家族为 14，由能力表按家族引用。
 SEEDREAM_50PRO_FLASH_MAX_REFERENCE_IMAGES = 10
@@ -212,6 +213,56 @@ MODEL_CAPABILITIES: Mapping[str, ModelCapabilities] = MappingProxyType(
         ),
     }
 )
+
+
+class CapabilityLabel(NamedTuple):
+    """布尔能力开关的中文标签条目，门控报错与能力快照文案的单一来源。
+
+    Attributes:
+        zh: 中文短语。
+        param: 标签括注，对齐工具参数名。
+        capability: ModelCapabilities 的布尔能力字段名。
+        payload_key: 能力快照的载荷键，透明背景与联网搜索两键与工具参数名不同。
+    """
+
+    zh: str
+    param: str
+    capability: str
+    payload_key: str
+
+    @property
+    def label(self) -> str:
+        """完整标签，形如「联网搜索（tools）」。"""
+        return f"{self.zh}（{self.param}）"
+
+
+# 能力开关的中文标签表，validators 的能力门控报错与 model_info 的能力快照标签序
+# 共用；序与 get_model_info 快照的 capabilities 字段序一致。
+CAPABILITY_LABELS: tuple[CapabilityLabel, ...] = (
+    CapabilityLabel(
+        "图层拆分", "layer_decomposition", "supports_layer_decomposition", "layer_decomposition"
+    ),
+    CapabilityLabel("透明背景", "background", "supports_background", "transparent_background"),
+    CapabilityLabel("输出格式", "output_format", "supports_output_format", "output_format"),
+    CapabilityLabel("流式输出", "stream", "supports_stream", "stream"),
+    CapabilityLabel("联网搜索", "tools", "supports_tools", "web_search"),
+    CapabilityLabel(
+        "组图生成",
+        "sequential_generation",
+        "supports_sequential_generation",
+        "sequential_generation",
+    ),
+)
+
+# capability 字段名到完整标签的只读索引，capability_param_label 的查找源。
+_CAPABILITY_LABEL_BY_FIELD: Mapping[str, str] = MappingProxyType(
+    {entry.capability: entry.label for entry in CAPABILITY_LABELS}
+)
+
+
+def capability_param_label(capability: str) -> str:
+    """按布尔能力字段名返回完整参数标签，未登记的字段名抛 KeyError 暴露笔误。"""
+    return _CAPABILITY_LABEL_BY_FIELD[capability]
 
 
 def get_model_capabilities(model_id: str) -> ModelCapabilities:

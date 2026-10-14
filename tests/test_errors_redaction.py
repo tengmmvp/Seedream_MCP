@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 import tracemalloc
 from typing import Any
@@ -555,6 +556,213 @@ def test_sanitize_data_text_strips_userinfo_with_control_chars_in_password() -> 
     assert sanitize_data_text(url) == "https://example.com/a.png?token=abc"
 
 
+def test_sanitize_error_text_strips_userinfo_with_control_chars_in_scheme() -> None:
+    """scheme 内切入控制/双向字符的 userinfo 在压平前剥离，凭据不借打断的 scheme 逃逸。"""
+    alm = chr(0x61C)
+    nul = chr(0)
+
+    bidi_redacted = sanitize_error_text(f"failed ht{alm}tps://user:pass@example.com/a.png")
+    control_redacted = sanitize_error_text(f"failed http{nul}{nul}://user:pass@example.com/a.png")
+
+    assert bidi_redacted == "failed ht tps://example.com/a.png"
+    assert control_redacted == "failed http  ://example.com/a.png"
+    assert "user:pass" not in bidi_redacted
+    assert "user:pass" not in control_redacted
+
+
+def test_sanitize_error_text_strips_userinfo_with_control_chars_in_separator() -> None:
+    """:// 分隔符内部切入控制字符的 userinfo 在压平前剥离，user:pass 不残留。"""
+    nul = chr(0)
+
+    colon_form = sanitize_error_text(f"failed http:{nul}//user:pass@example.com/a.png")
+    slash_form = sanitize_error_text(f"failed https:/{nul}/user:pass@example.com/a.png")
+
+    assert "user:pass" not in colon_form
+    assert "user:pass" not in slash_form
+    assert colon_form == "failed http: //example.com/a.png"
+    assert slash_form == "failed https:/ /example.com/a.png"
+    # 数据通道同口径：切入形态不可打印，经完整净化后凭据同样不残留。
+    assert "user:pass" not in sanitize_data_text(f"http:{nul}//user:pass@example.com/a.png")
+
+
+def test_sanitize_data_text_strips_userinfo_with_control_chars_in_scheme() -> None:
+    """数据通道的 scheme 切入形态经完整净化剥离 userinfo，user:pass 不残留。"""
+    rlo = chr(0x202E)
+    url = f"ht{rlo}tps://user:pass@example.com/x.png"
+
+    sanitized = sanitize_data_text(url)
+
+    assert "user:pass" not in sanitized
+    assert "example.com" in sanitized
+
+
+def test_sanitize_channels_strip_userinfo_with_whitespace_flatten_intrusions() -> None:
+    r"""userinfo 区间切入空白类压平字符的凭据仍剥净，产物与非侵入形态逐字一致。
+
+    空白类压平成员兼具 \s 身份，切入后打断尾段 [^\s/?#]+@ 的匹配，压平成空格
+    使凭据以 user: pass 形态残留；切入容忍段并入尾段吸收，双通道口径一致。
+    """
+    intrusions = (
+        "\x0b",
+        "\t",
+        "\n",
+        "\x0c",
+        "\r",
+        "\x1c",
+        "\x1d",
+        "\x1e",
+        "\x1f",
+        "\x85",
+        chr(0x2028),
+        chr(0x2029),
+    )
+    for intrusion in intrusions:
+        url = f"http://user:{intrusion}pass@example.com/a.png"
+        error_redacted = sanitize_error_text(f"failed {url}")
+        assert error_redacted == "failed http://example.com/a.png", repr(intrusion)
+        data_redacted = sanitize_data_text(url)
+        assert data_redacted == "http://example.com/a.png", repr(intrusion)
+
+    # 紧邻 @ 前同样剥净；用户名段内切入随段内冒号整段剥净，密码不借冒号前空白逃逸。
+    before_at = sanitize_error_text("failed http://user:pass\x0b@example.com/a.png")
+    assert before_at == "failed http://example.com/a.png"
+    for intrusion in intrusions:
+        username_url = f"http://us{intrusion}er:secret@example.com/a.png"
+        error_username = sanitize_error_text(f"failed {username_url}")
+        assert error_username == "failed http://example.com/a.png", repr(intrusion)
+        assert sanitize_data_text(username_url) == "http://example.com/a.png", repr(intrusion)
+
+
+def test_sanitize_error_text_userinfo_non_ws_intrusion_absorbs_before_colon() -> None:
+    r"""\x00 一类非空白切入不构成词元边界，冒号前同样整段剥净；空白切入随段内冒号剥净。
+
+    非空白压平成员真实文本不出现，切入即对抗形态，按 fail-closed 方向随 userinfo
+    剥离吞并；空白切入与冒号并存的段与换行伪装凭据不可区分，
+    主机被吞并优于凭据漏给日志；无冒号切入与普通空格同为词元边界，
+    URL 后接 user@host 文本不吞并主机。
+    """
+    assert sanitize_error_text("https://example.com\x00user:pass@host") == "https://host"
+    newline_form = sanitize_error_text("https://example.com\nuser:pass@host")
+    assert newline_form == "https://host"
+    space_form = sanitize_error_text("https://example.com user:pass@host")
+    assert space_form == "https://example.com user:pass@host"
+
+
+def test_sanitize_error_text_keeps_url_newline_before_non_credential_token() -> None:
+    r"""URL 后换行接无冒号 user@host 的普通文本不被跨行吸收，仅换行按压平规则改写。
+
+    空白切入仅段内含凭据冒号时吸收：无冒号 token 不具凭据语义，跨行吞并会破坏原文并捏造 URL。
+    """
+    text = "see http://docs\nalice@corp.com notified"
+    assert sanitize_error_text(text) == "see http://docs alice@corp.com notified"
+    crlf = "see https://docs\r\nbob@x.io text"
+    assert sanitize_error_text(crlf) == "see https://docs  bob@x.io text"
+
+
+def test_sanitize_error_text_keeps_url_host_before_whitespace_separated_at_token() -> None:
+    r"""无冒号 token 不吞并主机：跨行与同行锁定；含冒号形态按凭据 fail-closed 剥离。
+
+    空白切入与冒号并存的段与跨行伪装凭据形状不可区分，含冒号一律整段剥净，
+    oss.example.com 被吞并优于凭据漏给日志；无冒号 token 不具凭据语义，
+    跨段吸收会凭空拼出 backup.io 形态并把两行并成一行，主机原文保留。
+    """
+    assert (
+        sanitize_error_text("上传失败 https://oss.example.com\n账号:ops@backup.io 已过期")
+        == "上传失败 https://backup.io 已过期"
+    )
+    assert (
+        sanitize_error_text("上传失败 https://oss.example.com\nops@backup.io 已过期")
+        == "上传失败 https://oss.example.com ops@backup.io 已过期"
+    )
+    assert (
+        sanitize_error_text("上传失败 https://oss.example.com\t账号:ops@backup.io 已过期")
+        == "上传失败 https://backup.io 已过期"
+    )
+    assert (
+        sanitize_error_text("上传失败 https://oss.example.com\tops@backup.io 已过期")
+        == "上传失败 https://oss.example.com ops@backup.io 已过期"
+    )
+
+
+def test_sanitize_error_text_port_colon_before_whitespace_strips_as_credential() -> None:
+    r"""端口冒号先于空白切入时按凭据整段吸收：与跨行伪装凭据形状不可区分。
+
+    过量剥离方向的安全取舍：gw:8443 主机被吞并优于把换行伪装的凭据漏给日志。
+    """
+    assert sanitize_error_text("https://gw:8443\nops@corp.com x") == "https://corp.com x"
+
+
+def test_userinfo_strip_exhaustive_over_flatten_members_and_positions() -> None:
+    r"""穷举锁定：全部压平成员在规范 URL 全部插入位切入，吸收边界两侧各自守恒。
+
+    覆盖 scheme 间隙、:// 分隔符、userinfo 区间与 @ 前后的全部切入形态：
+    非空白成员与凭据冒号后的空白成员任一位置切入都不得使凭据残留；
+    冒号前的空白成员同样整段剥离，该分支断言放宽为主机存留。
+    """
+    canonical = "http://user:pass@example.com/a.png"
+    flatten_members = [
+        chr(code_point)
+        for code_point in range(0x3000)
+        if CONTROL_CHARS_PATTERN.fullmatch(chr(code_point))
+    ]
+    assert len(flatten_members) > 40
+    # 凭据冒号前区间：插入点 7-11 落进 userinfo 的 user 段。
+    pre_colon_positions = range(7, 12)
+    for intrusion in flatten_members:
+        for index in range(len(canonical) + 1):
+            mutated = canonical[:index] + intrusion + canonical[index:]
+            error_out = sanitize_error_text(f"failed {mutated}")
+            data_out = sanitize_data_text(mutated)
+            for out in (error_out, data_out):
+                if intrusion.isspace() and index in pre_colon_positions:
+                    assert "example.com" in out, (repr(intrusion), index, out)
+                    continue
+                assert "user" not in out, (repr(intrusion), index, out)
+                assert "pass" not in out, (repr(intrusion), index, out)
+
+
+def test_url_userinfo_whitespace_intrusion_class_locked_to_flatten_whitespace_members() -> None:
+    r"""守护：userinfo 空白切入类恒等于压平类的 isspace 成员子集且两分支互斥。
+
+    压平类扩容或空白成员漂移时双向失守；互斥性防交替分支在首字符上重叠，
+    重叠形态的失败回溯随串长指数膨胀。
+    """
+    from seedream_mcp.utils.core.sanitizers import _URL_USERINFO_WHITESPACE_INTRUSION_CLASS
+
+    ws_intrusion = re.compile(_URL_USERINFO_WHITESPACE_INTRUSION_CLASS)
+    # 压平类成员均低于 U+3000，扫描上界覆盖全集。
+    flatten_members = {
+        chr(code_point)
+        for code_point in range(0x3000)
+        if CONTROL_CHARS_PATTERN.fullmatch(chr(code_point))
+    }
+    actual = {chr(cp) for cp in range(0x3000) if ws_intrusion.fullmatch(chr(cp))}
+    assert actual == {char for char in flatten_members if char.isspace()}
+    assert len(actual) == 12
+    # 空白成员唯一命中交替第二支，非空白压平成员已被 [^\s/?#] 吸收，两支互斥。
+    for char in actual:
+        assert re.match(r"\s", char), repr(char)
+    for char in flatten_members - actual:
+        assert re.match(r"[^\s/?#]", char), repr(char)
+
+
+def test_url_userinfo_tail_stays_linear_on_hostile_intrusion_runs() -> None:
+    r"""性能守护：尾段互斥交替的失败回溯保持线性，对抗长串不发生灾难回溯。"""
+    from seedream_mcp.utils.core.sanitizers import _strip_url_userinfo
+
+    for hostile in (
+        "http://" + "\x00" * 15_000,
+        "http://" + "\x0b" * 15_000,
+        "http://" + "a\x00\x0b" * 5_000,
+        "http://user:" + "\x1c" * 15_000,
+        # 冒号连串无可达 @：双段夹冒号的结构性表达会在此形态上二次方回溯。
+        "http://" + "a:" * 7_500,
+    ):
+        start = time.perf_counter()
+        _strip_url_userinfo(hostile)
+        assert time.perf_counter() - start < 1.0, repr(hostile[:16])
+
+
 # ==================== 全角分隔符绕过与结果数据路径净化 ====================
 
 
@@ -1054,6 +1262,27 @@ def test_control_chars_pattern_flattens_bidi_marks() -> None:
     assert CONTROL_CHARS_PATTERN.sub(" ", f"a{rlm}b") == "a b"
     assert CONTROL_CHARS_PATTERN.sub(" ", f"a{alm}b") == "a b"
     assert sanitize_error_text(f"evil{rlm}apikey=leaked") == "evil apikey=***"
+
+
+def test_flatten_control_class_locked_to_derived_canonical_set() -> None:
+    """守护：压平类恒等于规范压平集的拼接产物，折叠剥离的双向/隔离控制族整体并入。
+
+    码点手工分列时新增或移动只进一侧，
+    伪装键折叠与输出压平对不可见字符的口径分歧会重新打开脱敏或日志注入缺口。
+    """
+    from seedream_mcp.utils.core.sanitizers import (
+        _BIDI_ISOLATE_CONTROL_CHARS,
+        _FLATTEN_CONTROL_CHARS,
+    )
+
+    scan_limit = max(map(ord, _FLATTEN_CONTROL_CHARS)) + 1
+    matched = {
+        chr(code_point)
+        for code_point in range(scan_limit)
+        if CONTROL_CHARS_PATTERN.fullmatch(chr(code_point))
+    }
+    assert matched == _FLATTEN_CONTROL_CHARS
+    assert _BIDI_ISOLATE_CONTROL_CHARS < _FLATTEN_CONTROL_CHARS
 
 
 # ==================== 自由文本键名与 dict 键策略单一来源 ====================
@@ -1567,6 +1796,52 @@ def test_sanitize_error_text_blocks_fullwidth_and_homoglyph_key_variants() -> No
     assert sanitize_data_text(f"{cyrillic_k_apikey}=SECRET") != f"{cyrillic_k_apikey}=SECRET"
 
 
+def test_sanitize_error_text_blocks_combining_mark_key_variants() -> None:
+    """组合音标切入键名时随折叠剥离，关键词还原后照常脱敏，键名保留原文拼写。"""
+    acute = chr(0x301)
+    stroke = chr(0x336)
+    visarga = chr(0x903)
+    assert sanitize_error_text(f"to{acute}ken=SECRET123") == f"to{acute}ken=***"
+    assert sanitize_error_text(f"to{stroke}ken=SECRET123") == f"to{stroke}ken=***"
+    assert sanitize_error_text(f"to{visarga}ken=SECRET123") == f"to{visarga}ken=***"
+    assert sanitize_error_text(f"api{acute}key: sk-1") == f"api{acute}key: ***"
+
+
+def test_sanitize_error_text_blocks_bidi_control_key_variants() -> None:
+    """双向/隔离控制符切入键名时随折叠剥离，压平后键名断开但凭据已掩码。"""
+    alm = chr(0x61C)
+    rlo = chr(0x202E)
+    lri = chr(0x2066)
+    assert sanitize_error_text(f"to{alm}ken=SECRET123") == "to ken=***"
+    assert sanitize_error_text(f"to{rlo}ken=SECRET123") == "to ken=***"
+    assert sanitize_error_text(f"to{lri}ken=SECRET123") == "to ken=***"
+    assert sanitize_error_text(f"api{alm}key: sk-1") == "api key: ***"
+
+
+def test_is_sensitive_key_matches_combining_mark_and_bidi_keys() -> None:
+    """组合音标与双向/隔离控制符切入的键名折叠剥离后照常命中，dict 键通道不再漏判。"""
+    from seedream_mcp.utils.core.sanitizers import is_sensitive_key
+
+    assert is_sensitive_key(f"to{chr(0x301)}ken") is True
+    # 已组合的变音字母经 NFKD 分解后同样剥离音标。
+    assert is_sensitive_key("tóken") is True
+    assert is_sensitive_key(f"to{chr(0x336)}ken") is True
+    assert is_sensitive_key(f"to{chr(0x903)}ken") is True
+    assert is_sensitive_key(f"to{chr(0x61C)}ken") is True
+    assert is_sensitive_key(f"api{chr(0x2066)}key") is True
+
+
+def test_sanitize_data_text_rewrites_combining_mark_and_bidi_disguise_keys() -> None:
+    """组合音标与双向控制伪装键均命中改写标记判需净化，数据通道凭据不原样返回。"""
+    from seedream_mcp.utils.core.sanitizers import DATA_OUTPUT_LIMIT, _data_text_needs_full_sanitize
+
+    stroke = chr(0x336)
+    alm = chr(0x61C)
+    for text in (f"to{stroke}ken=SECRET123", f"to{alm}ken=SECRET123"):
+        assert _data_text_needs_full_sanitize(text, DATA_OUTPUT_LIMIT) is True, repr(text)
+        assert "SECRET123" not in sanitize_data_text(text), repr(text)
+
+
 def test_homoglyph_fold_table_covers_keyword_alphabet_disguises() -> None:
     """守护：敏感词按折叠表替换为形近字符后仍被识别，新词条自动纳入，折叠回归即失守。"""
     from seedream_mcp.utils.core.sanitizers import (
@@ -1642,6 +1917,150 @@ def test_homoglyph_fold_table_inventory_is_explicitly_locked() -> None:
     )
     # maketrans 产物以码点整数为键，清单同口径比对。
     assert set(_HOMOGLYPH_FOLD_TABLE) == expected_keys
+
+
+def test_fold_translation_table_caches_strip_and_identity_results() -> None:
+    """守护：__missing__ 剥离类驻 None、identity 驻自身，重复折叠表不再增长。"""
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    table = sanitizers_module._FoldTranslationTable(sanitizers_module._HOMOGLYPH_FOLD_TABLE)
+    base = len(sanitizers_module._HOMOGLYPH_FOLD_TABLE)
+    identity_corpus = "".join(chr(0x4E00 + i) for i in range(3000))
+    text = f"a{chr(0x301)}b{chr(0x903)}c{chr(0x202E)}d" + identity_corpus
+
+    folded = text.translate(table)
+    # 折叠逐码点等价：Mn/Mc 与双向/隔离控制族剥离，identity 原样保留。
+    assert folded == "abcd" + identity_corpus
+    # 剥离类三条驻 None，ASCII 与 identity 码点驻自身；重复折叠不再增长。
+    cached = len(table)
+    assert cached == base + 3 + 4 + 3000
+    assert text.translate(table) == folded
+    assert len(table) == cached
+
+
+def test_fold_key_disguise_identity_cache_capped() -> None:
+    """守护：identity 驻表封顶于 _IDENTITY_CACHE_CAP，超限语料不再增长表。"""
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    table = sanitizers_module._FoldTranslationTable(sanitizers_module._ASCII_IDENTITY_TRANSLATION)
+    cap = sanitizers_module._IDENTITY_CACHE_CAP
+    corpus = "".join(chr(0x4E00 + index) for index in range(cap + 500))
+
+    assert corpus.translate(table) == corpus
+    assert len(table) == cap
+    assert corpus.translate(table) == corpus
+    assert len(table) == cap
+
+
+def test_fold_translation_table_ascii_seed_keeps_fold_output_identical() -> None:
+    """锁定：ASCII identity 种子驻表不改变折叠产物，共享表与无种子表逐码点一致。"""
+    import unicodedata
+
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    table = sanitizers_module._FOLD_TRANSLATION_TABLE
+    assert all(table[code_point] == chr(code_point) for code_point in range(128))
+    unseeded = sanitizers_module._FoldTranslationTable(sanitizers_module._HOMOGLYPH_FOLD_TABLE)
+
+    corpus = (
+        "".join(chr(code_point) for code_point in range(128))
+        + f"{chr(0x430)}pi{chr(0x43A)}ey to{chr(0x301)}ken{chr(0x202E)} Straße ＡＰＩ"
+        + "".join(chr(0x4E00 + index) for index in range(1000))
+    )
+    reference = unicodedata.normalize("NFKD", corpus).casefold().translate(unseeded)
+
+    assert sanitizers_module._fold_key_disguise_text(corpus) == reference
+
+
+def test_fold_key_disguise_text_matches_reference_across_categories() -> None:
+    """锁定：折叠对形近字母、Mn/Mc、双向控制、全角与 casefold 形态逐类等价参照实现。"""
+    import unicodedata
+
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    def reference_fold(text: str) -> str:
+        normalized = unicodedata.normalize("NFKD", text).casefold()
+        return "".join(
+            sanitizers_module._HOMOGLYPH_FOLD_TABLE.get(ord(char), char)
+            for char in normalized
+            if unicodedata.category(char) not in ("Mn", "Mc")
+            and char not in sanitizers_module._BIDI_ISOLATE_CONTROL_CHARS
+        )
+
+    samples = (
+        "Authorization: Bearer abc",
+        f"{chr(0x430)}pi{chr(0x43A)}ey",
+        f"to{chr(0x301)}ken",
+        f"to{chr(0x903)}ken",
+        f"to{chr(0x61C)}ken{chr(0x2066)}id",
+        "ＡＰＩ＿ＫＥＹ",
+        "Straße TOKEN",
+        "中文字符😀emoji",
+    )
+    for sample in samples:
+        assert sanitizers_module._fold_key_disguise_text(sample) == reference_fold(sample)
+
+
+def test_fold_intervention_pattern_superset_over_all_unicode_marks() -> None:
+    """守护：介入字符类覆盖全码空间 M 类码点，Unicode 升级新增漏块时报警重生成段表。"""
+    import unicodedata
+
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    # 漏判即 unicodedata 新增 M 类码位落在 _MARK_RANGES 之外，重生成段表补齐。
+    missed = [
+        code_point
+        for code_point in range(sys.maxunicode + 1)
+        if not 0xD800 <= code_point <= 0xDFFF
+        and unicodedata.category(chr(code_point))[0] == "M"
+        and sanitizers_module._FOLD_INTERVENTION_PATTERN.match(chr(code_point)) is None
+    ]
+    assert missed == []
+
+
+def test_fold_key_disguise_pure_cjk_skips_translate_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """锁定：纯 CJK 文本预扫未命中即返回，全程不触发 translate 表的 __missing__。"""
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    misses: list[int] = []
+    original = sanitizers_module._FoldTranslationTable.__missing__
+
+    def spy(self: Any, code_point: int) -> str | None:
+        misses.append(code_point)
+        return original(self, code_point)
+
+    monkeypatch.setattr(sanitizers_module._FoldTranslationTable, "__missing__", spy)
+    text = "纯中文。提示词、语料「引号」与《书名》" * 50
+    assert sanitizers_module._fold_key_disguise_text(text) == text
+    assert misses == []
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        "纯中文提示词与说明文本",
+        "mixed 中英 text 123",
+        "あいうえお漢字",
+        f"e{chr(0x301)}clair",
+        f"to{chr(0x301)}ken",
+        f"{chr(0x430)}dmin",
+        f"key{chr(0x202E)}name",
+        "İstanbul Straße",
+        "ＡＰＩ＿ＫＥＹ",
+    ],
+)
+def test_fold_key_disguise_fast_path_matches_direct_translate(sample: str) -> None:
+    """锁定：预扫分流不改折叠语义，快路与直接 translate 逐码点一致。"""
+    import unicodedata
+
+    from seedream_mcp.utils.core import sanitizers as sanitizers_module
+
+    folded = unicodedata.normalize("NFKD", sample).casefold()
+    assert sanitizers_module._fold_key_disguise_text(sample) == folded.translate(
+        sanitizers_module._FOLD_TRANSLATION_TABLE
+    )
 
 
 # ==================== key/auth 受限复合分支两路径一致性 ====================

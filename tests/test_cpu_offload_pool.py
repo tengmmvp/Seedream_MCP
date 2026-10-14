@@ -236,6 +236,21 @@ async def test_cancel_arriving_after_pool_closed_propagates_cancelled_error() ->
     )
 
 
+async def test_real_executor_shutdown_rejection_converts_to_pool_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实 ThreadPoolExecutor 关闭后的 submit 拒绝转换为专用异常，锁住 stdlib _shutdown 私有标志的归因路径。"""
+    from seedream_mcp.utils.core import executors as executors_module
+
+    real_executor = ThreadPoolExecutor(max_workers=1)
+    real_executor.shutdown(wait=False)
+    monkeypatch.setattr(executors_module, "cpu_offload_executor", lambda: real_executor)
+
+    # CPython 改名或移除 _shutdown 标志时归因失配，裸 RuntimeError 会在此击穿。
+    with pytest.raises(CpuOffloadPoolClosedError):
+        await run_in_cpu_pool(_double, 21)
+
+
 @pytest.mark.parametrize(
     "message",
     [

@@ -4,9 +4,11 @@
 不触发网络或文件 I/O，直接验证各分支的返回值与抛错语义。
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
+from typing import cast
 
 import pytest
 
@@ -16,18 +18,29 @@ from seedream_mcp.utils.core.validators import (
     _coerce_int_in_range,
     parse_bool,
     validate_background,
+    validate_common_generation_params,
     validate_generation_tools,
+    validate_layer_decomposition,
     validate_max_images,
     validate_optimize_prompt_options,
     validate_output_format,
     validate_parallel_generation_options,
+    validate_prompt,
     validate_response_format,
+    validate_size_for_model,
+    validate_stream,
     validate_watermark,
 )
-from seedream_mcp.utils.model.model_capabilities import ModelCapabilities
+from seedream_mcp.utils.model.model_capabilities import (
+    ModelCapabilities,
+    capability_param_label,
+)
 
 # 5.0 Pro 模型标识，background 透明通道参数 5.0 Pro 与 5.0 Flash 家族均支持。
 _PRO_MODEL_ID = "doubao-seedream-5-0-pro-260628"
+
+# 5.0（lite）模型标识，tools 条目级用例须家族声明 supports_tools 才能越过能力门。
+_LITE_MODEL_ID = "doubao-seedream-5-0-260128"
 
 # ==================== parse_bool ====================
 
@@ -459,7 +472,8 @@ def test_output_format_error_message_enumerates_supporting_families() -> None:
         validate_output_format("png", "doubao-seedream-4-5-251128")
 
     message = exc_info.value.message
-    assert "当前模型 doubao-seedream-4-5-251128 不支持输出格式（output_format）" in message
+    output_label = capability_param_label("supports_output_format")
+    assert f"当前模型 doubao-seedream-4-5-251128 不支持{output_label}" in message
     assert "doubao-seedream-5.0-pro、doubao-seedream-5.0、doubao-seedream-5.0-flash" in message
     assert "如需更换模型，请告知用户调整服务器配置" in message
 
@@ -470,7 +484,8 @@ def test_tools_error_message_enumerates_supporting_families() -> None:
         validate_generation_tools([{"type": "web_search"}], "doubao-seedream-4-5-251128")
 
     message = exc_info.value.message
-    assert "当前模型 doubao-seedream-4-5-251128 不支持联网搜索（tools）" in message
+    tools_label = capability_param_label("supports_tools")
+    assert f"当前模型 doubao-seedream-4-5-251128 不支持{tools_label}" in message
     assert "支持的模型：doubao-seedream-5.0；" in message
     assert "如需更换模型，请告知用户调整服务器配置" in message
 
@@ -507,3 +522,140 @@ def test_deprecated_model_tokens_is_immutable_frozenset() -> None:
     assert "doubao-seedream-3-0" in DEPRECATED_MODEL_TOKENS
     with pytest.raises(AttributeError):
         DEPRECATED_MODEL_TOKENS.add("doubao-seedream-x")  # type: ignore[attr-defined]
+
+
+# ==================== 类型守卫与空白拒绝分支表驱动 ====================
+
+
+def _invoke_common_generation_params(prompt: object) -> None:
+    """以其余公共参数合法取值调用 validate_common_generation_params，仅 prompt 可变。"""
+    validate_common_generation_params(
+        prompt=prompt,  # type: ignore[arg-type]
+        optimize_prompt_options=None,
+        size="2K",
+        watermark=True,
+        response_format="url",
+        output_format=None,
+        stream=False,
+        tools=None,
+        model_id=_PRO_MODEL_ID,
+    )
+
+
+# 检查顺序被重排成先 strip 后 isinstance 时，
+# AttributeError 会击穿本表而非以 SeedreamValidationError 静默漏过。
+@pytest.mark.parametrize(
+    ("invoke", "expected_field"),
+    [
+        pytest.param(lambda: validate_prompt(cast(str, 123)), "prompt", id="prompt-type"),
+        pytest.param(lambda: validate_prompt(""), "prompt", id="prompt-empty"),
+        pytest.param(lambda: validate_prompt("   "), "prompt", id="prompt-whitespace"),
+        pytest.param(lambda: validate_watermark(123), "watermark", id="watermark-type"),
+        pytest.param(lambda: validate_watermark("   "), "watermark", id="watermark-whitespace"),
+        pytest.param(
+            lambda: validate_response_format(cast(str, 123)),
+            "response_format",
+            id="response-format-type",
+        ),
+        pytest.param(
+            lambda: validate_response_format(""), "response_format", id="response-format-empty"
+        ),
+        pytest.param(
+            lambda: validate_output_format(123, _PRO_MODEL_ID),
+            "output_format",
+            id="output-format-type",
+        ),
+        pytest.param(
+            lambda: validate_output_format("   ", _PRO_MODEL_ID),
+            "output_format",
+            id="output-format-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_generation_tools("web_search", _PRO_MODEL_ID), "tools", id="tools-type"
+        ),
+        pytest.param(
+            lambda: validate_generation_tools([123], _LITE_MODEL_ID),
+            "tools[1]",
+            id="tools-item-type",
+        ),
+        pytest.param(
+            lambda: validate_generation_tools([{"type": 123}], _LITE_MODEL_ID),
+            "tools[1].type",
+            id="tools-item-type-value",
+        ),
+        pytest.param(
+            lambda: validate_generation_tools([{"type": "   "}], _LITE_MODEL_ID),
+            "tools[1].type",
+            id="tools-item-type-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_stream(cast(bool, "true"), _PRO_MODEL_ID), "stream", id="stream-type"
+        ),
+        pytest.param(lambda: validate_max_images([1]), "max_images", id="max-images-type"),
+        pytest.param(lambda: validate_max_images(""), "max_images", id="max-images-empty"),
+        pytest.param(
+            lambda: validate_size_for_model(cast(str, 123), _PRO_MODEL_ID), "size", id="size-type"
+        ),
+        pytest.param(
+            lambda: validate_size_for_model("   ", _PRO_MODEL_ID), "size", id="size-whitespace"
+        ),
+        pytest.param(
+            lambda: validate_layer_decomposition("true", _PRO_MODEL_ID),
+            "layer_decomposition",
+            id="layer-decomposition-type",
+        ),
+        pytest.param(
+            lambda: validate_background(123, _PRO_MODEL_ID), "background", id="background-type"
+        ),
+        pytest.param(
+            lambda: validate_background("   ", _PRO_MODEL_ID),
+            "background",
+            id="background-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_optimize_prompt_options("standard", _PRO_MODEL_ID),
+            "optimize_prompt_options",
+            id="optimize-options-type",
+        ),
+        pytest.param(
+            lambda: validate_optimize_prompt_options({"mode": 123}, _PRO_MODEL_ID),
+            "optimize_prompt_options.mode",
+            id="optimize-mode-type",
+        ),
+        pytest.param(
+            lambda: validate_optimize_prompt_options({"mode": "   "}, _PRO_MODEL_ID),
+            "optimize_prompt_options.mode",
+            id="optimize-mode-whitespace",
+        ),
+        pytest.param(
+            lambda: validate_parallel_generation_options(
+                request_count=object(), parallelism=None, stream=False
+            ),
+            "request_count",
+            id="parallel-request-count-type",
+        ),
+        pytest.param(
+            lambda: validate_parallel_generation_options(
+                request_count="", parallelism=None, stream=False
+            ),
+            "request_count",
+            id="parallel-request-count-empty",
+        ),
+        pytest.param(
+            lambda: _invoke_common_generation_params(123), "prompt", id="common-params-prompt-type"
+        ),
+        pytest.param(
+            lambda: _invoke_common_generation_params(None),
+            "prompt",
+            id="common-params-prompt-missing",
+        ),
+    ],
+)
+def test_public_validators_reject_unexpected_type_and_blank_with_field(
+    invoke: Callable[[], object], expected_field: str
+) -> None:
+    """公开 validate_* 的非预期类型与空白值一律抛 SeedreamValidationError 且 field 指向对应参数。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        invoke()
+
+    assert exc_info.value.field == expected_field

@@ -2,7 +2,8 @@
 
 大体量 json.loads 与 PIL 解码这类百毫秒至秒级任务，与默认执行器里的路径
 解析、mkdir 等延迟敏感短任务同池排队会放大短任务尾延迟；本模块为长任务
-提供专用线程池，进程内全部事件循环共用同一实例。
+提供专用线程池，进程内全部事件循环共用同一实例。load_json_bytes 为 JSON
+字节解析的阈值分派原语，Web 请求体与客户端响应解析共用。
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import json
 import sys
 import threading
 from collections.abc import Callable
@@ -168,3 +170,10 @@ async def run_in_cpu_pool(func: Callable[..., T], /, *args: Any) -> T:
         ):
             raise CpuOffloadPoolClosedError("CPU 卸载线程池已关闭，排队任务被取消") from None
         raise
+
+
+async def load_json_bytes(raw: bytes | bytearray) -> Any:
+    """JSON 字节解析的共享分派：达卸载阈值下沉长时 CPU 专用池，池关闭原样上抛 CpuOffloadPoolClosedError。"""
+    if should_offload_size(len(raw)):
+        return await run_in_cpu_pool(json.loads, raw)
+    return json.loads(raw)

@@ -6,7 +6,7 @@ import json
 import re
 import unicodedata
 from bisect import bisect_right
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, TypeVar, cast
 
 # 上游错误 message 片段拼入异常文案前的截断上限，防止超大错误体形成巨型日志行；
@@ -79,6 +79,22 @@ def truncate_upstream_message_fragment(value: Any) -> str:
     if len(text) > UPSTREAM_MESSAGE_FRAGMENT_LIMIT:
         return _truncate_text_with_marker(text, UPSTREAM_MESSAGE_FRAGMENT_LIMIT)
     return text
+
+
+def fit_utf8_bytes(data: bytes | bytearray, max_bytes: int) -> str:
+    """按 UTF-8 字节预算解码数据前缀，截断点落在多字节序列中间时丢弃残缺尾部。
+
+    错误体降级文本与文件名字节预算截断共用本机制，截断语义演进时两侧同步。
+    """
+    return data[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def fit_utf8_budget(text: str, max_bytes: int) -> str:
+    """按 UTF-8 字节预算返回文本，超预算时截断，截断点落在多字节序列中间时丢弃残缺尾部。"""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return fit_utf8_bytes(encoded, max_bytes)
 
 
 # _truncate_value_for_output 的默认截断上限。
@@ -420,7 +436,7 @@ _SENSITIVE_KEYVALUE_PATTERN = re.compile(
 )
 
 
-# 形近字母折叠表：与 ASCII 字母形近的西里尔、希腊与拉丁扩展字符 NFKC 不折叠，仅在
+# 形近字母折叠表：与 ASCII 字母形近的西里尔、希腊与拉丁扩展字符 NFKD 不折叠，仅在
 # 匹配判定时归一；条目目标字母对齐敏感关键词字母表可达的范围，不泛化到全字母表；
 # U+0445→x 另承重于键值分隔符转义族：西里尔同形字母冒充 x 的十六进制转义分隔符
 # 折叠后才被识别，删条目即漏凭据。
@@ -466,9 +482,114 @@ _HOMOGLYPH_FOLD_TABLE = str.maketrans(
 )
 
 
+# 双向/隔离控制族的规范码点集：折叠剥离与压平集的并入共用的单一来源；
+# U+2028/U+2029 属行/段分隔符而非双向控制，不入本族。
+_BIDI_ISOLATE_CONTROL_CHARS = frozenset(
+    chr(code_point)
+    for code_point in (
+        0x61C,
+        0x200E,
+        0x200F,
+        0x202A,
+        0x202B,
+        0x202C,
+        0x202D,
+        0x202E,
+        0x2066,
+        0x2067,
+        0x2068,
+        0x2069,
+    )
+)
+
+
+# 折叠翻译表：形近字母静态映射与组合音标、双向/隔离控制族剥离合一，未命中码点经
+# __missing__ 惰性判定；剥离类码点驻表缓存，上界为 Unicode 的 Mn/Mc 与
+# 双向/隔离控制族固定清单，合计两千余条、封闭不随语料增长；identity 码点驻表至
+# _IDENTITY_CACHE_CAP 后回落即时返回，预扫命中的文本慢路 translate
+# 复用已判码点免逐字符 Python 级判定，驻表总量有界。
+class _FoldTranslationTable(dict[int, "str | None"]):
+    """str.translate 表：命中码点返回折叠结果，None 剥离组合音标与双向/隔离控制族。"""
+
+    def __missing__(self, code_point: int) -> "str | None":
+        char = chr(code_point)
+        if unicodedata.category(char) in ("Mn", "Mc") or char in _BIDI_ISOLATE_CONTROL_CHARS:
+            self[code_point] = None
+            return None
+        if len(self) < _IDENTITY_CACHE_CAP:
+            self[code_point] = char
+        return char
+
+
+# identity 码点驻表上限：表内存上界约 1.6MB。
+_IDENTITY_CACHE_CAP = 16384
+
+
+# ASCII identity 种子：预驻 128 个固定码点，混合文本的 ASCII 部分命中即返回、
+# 免逐字符 Python 级 __missing__ 判定；固定集合，不随语料增长。
+_ASCII_IDENTITY_TRANSLATION = {code_point: chr(code_point) for code_point in range(128)}
+
+_FOLD_TRANSLATION_TABLE = _FoldTranslationTable(
+    {**_ASCII_IDENTITY_TRANSLATION, **_HOMOGLYPH_FOLD_TABLE}
+)
+
+# M 类码点（组合音标）段表：低频文字区按 256 码点块级超集收整块，CJK 符号与
+# 假名区、组合记号符号区两高频区按精确段，标点与假名主体不误入介入类；
+# 段表须为 __missing__ 按 unicodedata 判定的 Mn/Mc 全集的超集，漏判则预扫早退、
+# 组合标记折叠后存活；超集性由 test_fold_intervention_pattern_superset_over_all_unicode_marks
+# 全码空间扫描锁定，Unicode 升级后复检该测试、报警时重生成段表。
+_MARK_RANGES = (
+    (0x0300, 0x10FF),
+    (0x1300, 0x13FF),
+    (0x1700, 0x1DFF),
+    (0x20D0, 0x20F0),
+    (0x2C00, 0x2DFF),
+    (0x302A, 0x302F),
+    (0x3099, 0x309A),
+    (0xA600, 0xA6FF),
+    (0xA800, 0xABFF),
+    (0xFB00, 0xFBFF),
+    (0xFE00, 0xFEFF),
+    (0x10100, 0x103FF),
+    (0x10A00, 0x10AFF),
+    (0x10D00, 0x11AFF),
+    (0x11C00, 0x11FFF),
+    (0x13400, 0x134FF),
+    (0x16A00, 0x16BFF),
+    (0x16F00, 0x16FFF),
+    (0x1BC00, 0x1BCFF),
+    (0x1CF00, 0x1CFFF),
+    (0x1D100, 0x1D2FF),
+    (0x1DA00, 0x1DAFF),
+    (0x1E000, 0x1E2FF),
+    (0x1E400, 0x1E4FF),
+    (0x1E800, 0x1E9FF),
+    (0xE0100, 0xE01FF),
+)
+_MARK_CLASS = "".join(f"{chr(low)}-{chr(high)}" for low, high in _MARK_RANGES)
+
+# 折叠介入字符类：形近键、双向/隔离控制族与 M 类块级超集；预扫未命中则 translate 恒等，
+# 直接返回产物，免逐字符 Python 级 __missing__ 判定。
+_FOLD_INTERVENTION_PATTERN = re.compile(
+    "["
+    + _MARK_CLASS
+    + "".join(sorted(_BIDI_ISOLATE_CONTROL_CHARS))
+    + "".join(sorted(chr(code_point) for code_point in _HOMOGLYPH_FOLD_TABLE))
+    + "]"
+)
+
+
 def _fold_key_disguise_text(text: str) -> str:
-    """NFKC、casefold 与形近字母折叠的复合归一，仅用于键名匹配判定。"""
-    return unicodedata.normalize("NFKC", text).casefold().translate(_HOMOGLYPH_FOLD_TABLE)
+    """NFKD、casefold、组合音标与双向/隔离控制族剥离及形近字母折叠的复合归一，仅用于键名匹配判定。
+
+    组合音标按介入字符类预扫分流：NFKD 先行分解使已组合的变音字母同样剥离，
+    切入键名的音标不再切断关键词；未命中介入字符时 translate 恒等直接返回，
+    命中才经惰性缓存的 translate 表剥离与折叠。
+    """
+    folded = unicodedata.normalize("NFKD", text).casefold()
+    if _FOLD_INTERVENTION_PATTERN.search(folded) is None:
+        return folded
+    return folded.translate(_FOLD_TRANSLATION_TABLE)
 
 
 # 单字符折叠缓存：折叠是纯函数，影子构建遇重复非 ASCII 字符免再归一。
@@ -497,7 +618,7 @@ def _folded_shadow_parts(
     text: str, deletion_spans: list[tuple[int, int]]
 ) -> tuple[str, list[int], list[int]]:
     """删除区间外的字符逐个折叠拼接为影子，返回影子与影位到原位的映射表。"""
-    # ASCII 字符上 NFKC、casefold 与形近表折叠恒等于 lower，免逐字符全量归一。
+    # ASCII 字符上 NFKD、casefold 与形近表折叠恒等于 lower，免逐字符全量归一。
     folded_parts: list[str] = []
     origins: list[int] = []
     position = 0
@@ -529,12 +650,13 @@ def _shadow_match_origin_span(
 def _redact_disguised_keyvalues(text: str) -> str:
     """键名伪装形态归一后在影子上匹配键值，值区间映射回原文掩码。
 
-    伪装形态覆盖词字符间切入的 C0/DEL/NEL 及其转义、全角/形近字母与 ß 一类全折叠
-    变体；折叠只用于匹配判定，键名与分隔符保留原文拼写。纯 ASCII 且无切入形态的
-    文本直接返回，其余对切入全删计划构建影子，以同一影子串做触发词预检——预检与
-    匹配器所见恒为同一字符串；未命中即原样返回，命中才按该计划匹配。切入全删的
-    影子会连空白分隔一并抹掉使键值模式失去锚定点，保留空白控制符的影子在两计划
-    不同时补扫，两计划的掩码区间合并后回写。
+    伪装形态覆盖词字符间切入的 C0/DEL/NEL 及其转义、组合音标与双向/隔离控制符、
+    全角/形近字母与 ß 一类全折叠变体；折叠只用于匹配判定，
+    键名与分隔符保留原文拼写。纯 ASCII 且无切入形态的文本直接返回，
+    其余对切入全删计划构建影子，以同一影子串做触发词预检——预检与匹配器所见
+    恒为同一字符串；未命中即原样返回，命中才按该计划匹配。切入全删的影子会连
+    空白分隔一并抹掉使键值模式失去锚定点，保留空白控制符的影子在两计划不同时
+    补扫，两计划的掩码区间合并后回写。
     """
     full_spans = [match.span() for match in _KEY_DISGUISE_DELETION_PATTERN.finditer(text)]
     if text.isascii() and not full_spans:
@@ -566,12 +688,33 @@ def _redact_disguised_keyvalues(text: str) -> str:
     return text
 
 
+# 压平控制字符集：C0/DEL/NEL 与行/段分隔符并入双向/隔离控制族，
+# 压平类与 userinfo 空白切入类均由本集派生。
+_FLATTEN_CONTROL_CHARS = frozenset(
+    (
+        *map(chr, range(0x00, 0x20)),
+        "\x7f",
+        "\x85",
+        "\u2028",
+        "\u2029",
+        *_BIDI_ISOLATE_CONTROL_CHARS,
+    )
+)
+
+
+def _control_char_class(chars: Iterable[str]) -> str:
+    """码点集合升序拼接为正则字符类，re.escape 使成员增删不涉类元字符转义。"""
+    return "[" + "".join(re.escape(char) for char in sorted(chars)) + "]"
+
+
+# 控制字符与双向文本/隔离控制符的字符类源：压平模式与 URL userinfo 的 scheme
+# 与 :// 分隔符切入容忍段共用。
+_FLATTEN_CONTROL_CLASS = _control_char_class(_FLATTEN_CONTROL_CHARS)
+
 # 控制字符与双向文本/隔离控制符逐字符压平为空格，防止经日志与结构化输出
 # 注入伪造行或反转显示方向，替换为空格保留词边界。
 # logs 的日志消息 patcher 共用本常量，两模块的控制字符口径单一来源。
-CONTROL_CHARS_PATTERN = re.compile(
-    r"[\x00-\x1f\x7f\x85\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]"
-)
+CONTROL_CHARS_PATTERN = re.compile(_FLATTEN_CONTROL_CLASS)
 
 # 零宽不可见字符：ZWSP、ZWNJ、U+2060-2064、BOM 与软连字符整体移除以还原真实键名，
 # 替换为空串而非空格，避免把键名切成两段导致脱敏失效；ZWJ 仅在邻接 ASCII 字符时
@@ -590,11 +733,61 @@ def strip_unpaired_surrogates(value: str) -> str:
     return value if value.isascii() else _SURROGATE_CHARS_PATTERN.sub("", value)
 
 
+def is_printable_ascii(value: str) -> bool:
+    """判定是否全为 0x21-0x7E 的可打印 ASCII，空白与控制字符判否；绑定地址、鉴权令牌与 API 密钥的字符集闸口共用。"""
+    return all(0x21 <= ord(ch) <= 0x7E for ch in value)
+
+
 # URL userinfo 剥离模式：http(s) URL 携带 user:pass@ 凭据时剥去 userinfo，防止
 # 原值回显把凭据送进结构化输出与用户可见文本。密码含 @ 时贪婪匹配取区间内最后
 # 一个 @ 定边界，user:p@ss@example.com 剥净不残留；协议限定 http(s) 且要求词
-# 边界，不误伤 mailto:user@host。
-_URL_USERINFO_PATTERN = re.compile(r"(?i)\b((?:https?)://)[^\s/?#]+@")
+# 边界，不误伤 mailto:user@host。scheme 的 h/t/t/p/s 间与 :// 分隔符两处间隙
+# 均容忍压平类控制字符切入段：压平改写产生的空格会打断 scheme 与分隔符匹配，
+# 切入形态须在压平前命中剥离。userinfo 区间空白切入的取舍由 _strip_url_userinfo
+# 的回调判定。
+# userinfo 段保持整段贪婪，双段夹冒号的结构会在冒号连串上产生二次方回溯交叉。
+_URL_SCHEME_WITH_INTRUSIONS = (
+    "".join(letter + _FLATTEN_CONTROL_CLASS + "*" for letter in "http")
+    + "(?:s"
+    + _FLATTEN_CONTROL_CLASS
+    + "*)?"
+)
+_URL_SCHEME_SEPARATOR_WITH_INTRUSIONS = (
+    ":" + _FLATTEN_CONTROL_CLASS + r"*/" + _FLATTEN_CONTROL_CLASS + r"*/"
+)
+# userinfo 区间切入容忍的空白类压平成员（压平集中 isspace 为真者）：单独成类与
+# [^\s/?#] 互斥，每字符唯一命中一支、失败回溯保持线性；非空白压平成员已被
+# [^\s/?#] 吸收。
+_URL_USERINFO_WHITESPACE_INTRUSION_CLASS = _control_char_class(
+    char for char in _FLATTEN_CONTROL_CHARS if char.isspace()
+)
+_URL_USERINFO_PATTERN = re.compile(
+    r"(?i)\b("
+    + _URL_SCHEME_WITH_INTRUSIONS
+    + _URL_SCHEME_SEPARATOR_WITH_INTRUSIONS
+    + r")((?:[^\s/?#]|"
+    + _URL_USERINFO_WHITESPACE_INTRUSION_CLASS
+    + r")+)@"
+)
+_URL_USERINFO_WS_INTRUSION_RE = re.compile(_URL_USERINFO_WHITESPACE_INTRUSION_CLASS)
+
+
+def _strip_url_userinfo(text: str) -> str:
+    """剥离 URL userinfo 段，空白切入与段内冒号并存时整段剥净、无冒号段保留。
+
+    含冒号的切入段与换行伪装凭据形状不可区分，按 fail-closed 方向整段剥净，
+    用户名混入空白的密码不逃逸；无冒号的切入段不具凭据语义，URL 后换行或
+    空白接 user@host 文本保留原文不被跨段吞并。
+    """
+
+    def _replace(match: "re.Match[str]") -> str:
+        userinfo = match.group(2)
+        intrusion = _URL_USERINFO_WS_INTRUSION_RE.search(userinfo)
+        if intrusion is not None and ":" not in userinfo:
+            return match.group(0)
+        return match.group(1)
+
+    return _URL_USERINFO_PATTERN.sub(_replace, text)
 
 
 _SanitizedValue = TypeVar("_SanitizedValue")
@@ -606,8 +799,8 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     非字符串原样返回；message 与 value、error/status 等输出字段共用此净化，
     防护口径一致。处理次序：零宽与代理字符先行移除以还原真实键名，userinfo 在控制
     字符压平前剥离——压平产生的空格会打断 userinfo 匹配使凭据逃逸；键值匹配在压平
-    前执行一轮并补伪装键（切入删除与全角形近折叠）掩码，压平改写文本时再执行一轮
-    覆盖空格重拼形态，末尾剥 Bearer 令牌。
+    前执行一轮并补伪装键（切入删除与全角形近、组合音标与双向/隔离控制符剥离）掩码，
+    压平改写文本时再执行一轮覆盖空格重拼形态，末尾剥 Bearer 令牌。
     """
     if not isinstance(value, str):
         return value
@@ -615,7 +808,7 @@ def _sanitize_output_string(value: _SanitizedValue) -> _SanitizedValue:
     redacted = strip_unpaired_surrogates(redacted)
     redacted = _SENSITIVE_KEYVALUE_PATTERN.sub(r"\1\2***", redacted)
     redacted = _redact_disguised_keyvalues(redacted)
-    redacted = _URL_USERINFO_PATTERN.sub(r"\1", redacted)
+    redacted = _strip_url_userinfo(redacted)
     flattened = CONTROL_CHARS_PATTERN.sub(" ", redacted)
     # 压平仅在改写文本时拼出新的分隔形态，恒等时第二轮对同一字符串可证 no-op。
     if flattened != redacted:
@@ -690,8 +883,8 @@ def _data_text_needs_full_sanitize(value: str, limit: int) -> bool:
     """数据通道恒等快路的单一决策表：任一改写标记命中即需完整净化，全未命中恒等放行。
 
     超限长度、不可打印字符、首尾空白、可能携带 userinfo 的 URL 形态、控制字符字面转义切入族与触发词构成全部改写形态的保守超集，误判方向只损失性能不弱化净化，含反斜杠但不命中转义族的文本在完整管线下恒等；
-    快扫未命中且文本含非 ASCII 时对折叠产物再扫一遍，封堵 ß 全折叠、全角与
-    形近字母伪装键。纯 ASCII 的折叠只翻大小写，(?i) 对 ASCII 字符集等价于
+    快扫未命中且文本含非 ASCII 时对折叠产物再扫一遍，封堵 ß 全折叠、全角、
+    形近字母与组合音标伪装键。纯 ASCII 的折叠只翻大小写，(?i) 对 ASCII 字符集等价于
     大小写折叠，快扫已覆盖折叠形态，不为纯 ASCII 文本付折叠分配。
     """
     if len(value) > limit:
@@ -723,7 +916,7 @@ def _sanitize_url_data_text(value: str, limit: int) -> str:
     """
     stripped = strip_unpaired_surrogates(value)
     truncated = cast("str", _truncate_value_for_output(stripped, limit=limit))
-    redacted = _URL_USERINFO_PATTERN.sub(r"\1", truncated)
+    redacted = _strip_url_userinfo(truncated)
     redacted = CONTROL_CHARS_PATTERN.sub(" ", redacted)
     redacted = _BEARER_WHITESPACE_PATTERN.sub(r"\1***", redacted)
     if len(redacted) > limit:
@@ -758,7 +951,8 @@ def sanitize_data_text(value: _SanitizedValue, limit: int = DATA_OUTPUT_LIMIT) -
 def is_sensitive_key(key: Any) -> bool:
     r"""判断键名是否命中敏感关键词。
 
-    键名先做 NFKC、casefold 与形近字母折叠（仅用于匹配判定），高确信度词子串匹配
+    键名先做 NFKD、casefold、组合音标与双向/隔离控制族剥离及形近字母折叠
+    （仅用于匹配判定），高确信度词子串匹配
     覆盖连字符、无分隔、camelCase 与全角变体；其余关键词按分隔符切分后段匹配，
     段额外容忍复数形态（词尾去 s 后比对），复合键中段同样命中，如 user.session_id
     与 request-session-id，短词 key 不误匹配 monkey、keyboard。复数受限词的复数段
