@@ -6,21 +6,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
 from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
 from starlette.types import Message, Receive, Send
 
 from _log_fakes import capture_loguru_messages
 import seedream_mcp.transport as transport_module
+from seedream_mcp._host_syntax import bind_host_invalid_reason
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.transport import (
+    ALWAYS_EXEMPT_EXACT_PATHS,
     _AppHostGuardMiddleware,
     _BearerTokenAuthMiddleware,
+    _BODYLESS_METHODS,
+    _BodyReadPolicy,
+    _BodyReadPolicyChannel,
     _ErrorBoundaryMiddleware,
     _HealthCheckMiddleware,
+    _LargeBodyAdmissionMiddleware,
     _LimitRequestBodyMiddleware,
     _LoopbackHostGuardMiddleware,
     _WebOriginGuardMiddleware,
@@ -31,6 +43,11 @@ from seedream_mcp.transport import (
     _web_app_host_allowlist,
     is_loopback_bind_host,
     warn_remote_exposure,
+)
+from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
+from seedream_mcp.webapp.constants import (
+    WEB_EXEMPT_EXACT_PATHS,
+    WEB_EXEMPT_PATH_PREFIXES,
 )
 
 
@@ -70,30 +87,36 @@ def active_config(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_attach_assembles_full_stack_for_loopback_with_token(active_config: None) -> None:
-    """回环绑定且配置令牌时装配四层：Bearer、请求体上限、健康检查、Host 校验。"""
+    """回环绑定且配置令牌时装配五层：Bearer、请求体上限、健康检查、Host 校验与大请求体准入。"""
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
 
-    # add_middleware 经 insert(0) 使后添加者居前：Host 校验最外，先于健康检查拒掉
-    # rebinding 域名请求；健康检查居鉴权之外探针免令牌；Bearer 最内。
+    # add_middleware 经 insert(0) 使后添加者居前：Host 校验最外，先于健康检查
+    # 拒掉 rebinding 域名请求；健康检查居鉴权之外探针免令牌；Bearer 之内是准入闸，
+    # 未鉴权请求不占准入许可。
     assert app.attached_classes() == [
         _LoopbackHostGuardMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
         _BearerTokenAuthMiddleware,
+        _LargeBodyAdmissionMiddleware,
     ]
 
 
 def test_attach_skips_auth_and_host_guard_for_remote_without_token(
     active_config: None,
 ) -> None:
-    """非回环且无令牌时仅装配请求体上限与健康检查两层。"""
+    """非回环且无令牌时仅装配请求体上限、健康检查与大请求体准入三层。"""
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(app, "0.0.0.0", "")
 
-    assert app.attached_classes() == [_HealthCheckMiddleware, _LimitRequestBodyMiddleware]
+    assert app.attached_classes() == [
+        _HealthCheckMiddleware,
+        _LimitRequestBodyMiddleware,
+        _LargeBodyAdmissionMiddleware,
+    ]
 
 
 def test_attach_assembles_cors_when_origins_configured(
@@ -120,6 +143,7 @@ def test_attach_assembles_cors_when_origins_configured(
         _LimitRequestBodyMiddleware,
         _ErrorBoundaryMiddleware,
         _BearerTokenAuthMiddleware,
+        _LargeBodyAdmissionMiddleware,
     ]
     cors_kwargs = next(ref.kwargs for ref in app.user_middleware if ref.cls is CORSMiddleware)
     assert cors_kwargs["allow_origins"] == ["https://app.example.com"]
@@ -246,7 +270,7 @@ def test_transport_security_merges_origins_into_bind_address_allowlist(
 def test_attach_explicit_max_body_size_skips_config_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """显式传入 max_body_size 与 allowed_origins 时不读取活动配置，取值一次复用。"""
+    """取自配置的四个可选参数全部显式传入时不读取活动配置，生产调用方取值一次复用。"""
 
     def _fail_read() -> SeedreamConfig:
         raise AssertionError("显式传入参数时不应读取活动配置")
@@ -255,13 +279,42 @@ def test_attach_explicit_max_body_size_skips_config_read(
     app = _FakeStarletteApp()
 
     _attach_streamable_http_middleware(
-        app, "127.0.0.1", "", max_body_size=1048576, allowed_origins=()
+        app,
+        "127.0.0.1",
+        "",
+        max_body_size=1048576,
+        allowed_origins=(),
+        large_body_admission_concurrency=3,
+        body_read_timeout=120,
     )
 
     assert app.attached_classes() == [
         _LoopbackHostGuardMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
+        _LargeBodyAdmissionMiddleware,
+    ]
+
+
+def test_attach_fallback_reads_active_config_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """可选参数缺省回退只读取一次活动配置：四个可选参数共用同一配置对象。"""
+    reads = {"count": 0}
+
+    def _counting_config() -> SeedreamConfig:
+        reads["count"] += 1
+        return SeedreamConfig(api_key="test_key")
+
+    monkeypatch.setattr(transport_module, "get_active_config", _counting_config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "")
+
+    assert reads["count"] == 1
+    assert app.attached_classes() == [
+        _LoopbackHostGuardMiddleware,
+        _HealthCheckMiddleware,
+        _LimitRequestBodyMiddleware,
+        _LargeBodyAdmissionMiddleware,
     ]
 
 
@@ -349,12 +402,13 @@ def test_attach_assembles_origin_guard_for_web_without_token(active_config: None
     _attach_streamable_http_middleware(app, "127.0.0.1", "", web_enabled=True)
 
     # 守卫与 Bearer 同槽：add_middleware 后添加者居前，守卫先于请求体上限装配，
-    # 执行序依次为 LoopbackHostGuard、HealthCheck、LimitRequestBody、Guard。
+    # 执行序依次为 LoopbackHostGuard、HealthCheck、LimitRequestBody、Guard、准入闸。
     assert app.attached_classes() == [
         _LoopbackHostGuardMiddleware,
         _HealthCheckMiddleware,
         _LimitRequestBodyMiddleware,
         _WebOriginGuardMiddleware,
+        _LargeBodyAdmissionMiddleware,
     ]
 
 
@@ -1073,3 +1127,2099 @@ def test_transport_security_explicit_hosts_keep_browser_403_semantics(
     assert settings.enable_dns_rebinding_protection is True
     assert settings.allowed_hosts == ["mcp.example.com", "mcp.example.com:*"]
     assert settings.allowed_origins == []
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    ["", "服务器.本地", "127.0.0.1 ", "127.0.0.1\x01"],
+    ids=["empty", "non-ascii", "space", "control"],
+)
+def test_assembly_entries_reject_non_printable_ascii_host(
+    bad_host: str, active_config: None
+) -> None:
+    """嵌入式宿主直调传输配置与中间件装配入口时，空串与非可打印 ASCII 绑定地址以共用谓词文案抛配置错误。"""
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    reason = bind_host_invalid_reason(bad_host)
+    assert reason is not None
+    expected = f"streamable-http 绑定地址{reason}。"
+
+    with pytest.raises(SeedreamConfigError, match=re.escape(expected)):
+        _transport_security_for_host(bad_host)
+
+    with pytest.raises(SeedreamConfigError, match=re.escape(expected)):
+        _attach_streamable_http_middleware(_FakeStarletteApp(), bad_host, "")
+
+
+# ==================== 大请求体并发准入中间件 ====================
+
+
+def _admission_downstream(bodies: list[bytes]) -> Any:
+    """构造读体记录型下游替身，返回以 Request 语义消费请求体的 ASGI app。"""
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del send
+        bodies.append(await Request(scope, receive).body())
+
+    return downstream
+
+
+async def _silence_send(message: Message) -> None:
+    del message
+
+
+def _large_body_scope(
+    headers: list[tuple[bytes, bytes]], path: str = "", method: str = "POST"
+) -> dict[str, Any]:
+    return {"type": "http", "method": method, "path": path, "headers": headers}
+
+
+_LARGE_CL_HEADERS = [(b"content-length", str(5 * 1024 * 1024).encode("ascii"))]
+
+# 与生产 64MB 上限派生结果一致的准入阈值：4MB 档。
+_ADMISSION_THRESHOLD = 4 * 1024 * 1024
+
+
+class _SpySemaphore:
+    """包装真实信号量并记录 acquire/release 调用的测试替身，可选用事件序列记录相对顺序。"""
+
+    def __init__(self, inner: asyncio.Semaphore, events: list[str] | None = None) -> None:
+        self._inner = inner
+        self._events = events
+        self.acquire_calls = 0
+        self.release_calls = 0
+
+    async def acquire(self) -> None:
+        self.acquire_calls += 1
+        if self._events is not None:
+            self._events.append("acquire")
+        await self._inner.acquire()
+
+    def release(self) -> None:
+        self.release_calls += 1
+        if self._events is not None:
+            self._events.append("release")
+        self._inner.release()
+
+
+def _install_spy_gate(monkeypatch: pytest.MonkeyPatch, limit: int) -> _SpySemaphore:
+    """以记录调用的信号量替身替换准入闸工厂，返回替身实例。"""
+    spy = _SpySemaphore(asyncio.Semaphore(limit))
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", lambda limit, *, key: spy)
+    return spy
+
+
+def _admission_stack(
+    downstream: Any, concurrency: int, read_timeout: float, threshold: int
+) -> _LimitRequestBodyMiddleware:
+    """按生产装配序叠加外层读体计数与内层准入，两层经同一配对通道构造配对。"""
+    channel = _BodyReadPolicyChannel()
+    admission = _LargeBodyAdmissionMiddleware(
+        downstream, concurrency, read_timeout, threshold, channel
+    )
+    return _LimitRequestBodyMiddleware(admission, 64 * 1024 * 1024, channel)
+
+
+def _frame_recording_downstream(frames: list[Message]) -> Any:
+    """构造逐帧记录型下游替身，按接收序记录每个 receive 帧直至终帧。"""
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        while True:
+            message = await receive()
+            frames.append(message)
+            if message.get("type") != "http.request" or not message.get("more_body", False):
+                break
+
+    return downstream
+
+
+async def test_large_body_admission_small_request_skips_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """小申报请求不取准入许可：读体照常受窗口监督，receive 帧原样交下游。"""
+
+    def _forbidden(limit: int, *, key: str) -> Any:
+        raise AssertionError(f"小申报请求不应取准入许可: {key}")
+
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", _forbidden)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b'{"prompt": "a cat"}', "more_body": False}
+
+    await middleware(
+        _large_body_scope([(b"content-length", b"1024")]),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert bodies == [b'{"prompt": "a cat"}']
+
+
+async def test_large_body_admission_drives_downstream_in_child_task() -> None:
+    """监督请求的下游在子任务中执行：监督任务只做监督，与下游任务分离。"""
+    downstream_tasks: list[asyncio.Task[None] | None] = []
+    bodies: list[bytes] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del send
+        downstream_tasks.append(asyncio.current_task())
+        bodies.append(await Request(scope, receive).body())
+
+    middleware = _admission_stack(downstream, 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b'{"jsonrpc": "2.0"}', "more_body": False}
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([(b"content-length", b"18")]),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+    )
+    await request
+
+    assert downstream_tasks[0] is not None
+    assert downstream_tasks[0] is not request
+    assert bodies == [b'{"jsonrpc": "2.0"}']
+
+
+async def test_large_body_admission_watchdog_cancel_keeps_supervisor_accounting_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """看门狗超时只取消下游子任务：监督任务正常返回、取消计数归零，408 照发许可照还。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    downstream_finished = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive, send
+        try:
+            # 读体停滞：唯有看门狗能收尾。
+            await asyncio.Event().wait()
+        finally:
+            downstream_finished.set()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, None),
+            cast(Send, send),
+        )
+    )
+    await asyncio.wait_for(request, timeout=5)
+
+    # 子任务先于监督任务落定，监督任务未被取消也无残余取消计数。
+    assert downstream_finished.is_set()
+    assert not request.cancelled()
+    assert request.cancelling() == 0
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    assert spy.release_calls == 1
+
+
+# 令牌部署生产豁免表的镜像：从 transport 与 webapp 常量直接求值，生产侧调整时随动。
+_EXEMPT_EXACT_FOR_TEST = ALWAYS_EXEMPT_EXACT_PATHS | WEB_EXEMPT_EXACT_PATHS
+_EXEMPT_PREFIXES_FOR_TEST: tuple[str, ...] = WEB_EXEMPT_PATH_PREFIXES
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        *sorted(_EXEMPT_EXACT_FOR_TEST),
+        "/.well-known/mcp/",
+        *[f"{prefix}app.js" for prefix in _EXEMPT_PREFIXES_FOR_TEST],
+    ],
+)
+async def test_large_body_admission_exempt_path_get_without_declaration_skips_permit(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """免鉴权路径均为 GET/HEAD：无申报形态经无体方法免监督直通，不取准入许可。"""
+
+    def _forbidden(limit: int, *, key: str) -> Any:
+        raise AssertionError(f"免鉴权路径的 GET 不应取准入许可: {key}")
+
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", _forbidden)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    for method in ("GET", "HEAD"):
+        await middleware(
+            _large_body_scope([], path=path, method=method),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+
+    assert bodies == [b"", b""]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        *sorted(_EXEMPT_EXACT_FOR_TEST),
+        "/.well-known/mcp/",
+        *[f"{prefix}app.js" for prefix in _EXEMPT_PREFIXES_FOR_TEST],
+    ],
+)
+async def test_large_body_admission_exempt_path_large_declaration_takes_permit(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """免鉴权路径不设准入豁免：大申报照常进闸取许可，谎报大请求体钉不死许可。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    await middleware(
+        _large_body_scope(_LARGE_CL_HEADERS, path=path),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1
+    assert bodies == [b""]
+
+
+async def test_large_body_admission_non_exempt_path_large_declaration_still_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非豁免路径（/mcp 与 /web/api）大申报照常进闸取许可。"""
+    keys: list[str] = []
+    real_factory = loop_bound_semaphore
+
+    def _recording(limit: int, *, key: str) -> Any:
+        keys.append(key)
+        return real_factory(limit, key=key)
+
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", _recording)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"payload", "more_body": False}
+
+    for path in ("/mcp", "/web/api/generate/text-to-image"):
+        await middleware(
+            _large_body_scope(_LARGE_CL_HEADERS, path=path),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+
+    assert keys == ["large_body_admission", "large_body_admission"]
+    assert bodies == [b"payload", b"payload"]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [[], [(b"content-length", b"abc")], [(b"transfer-encoding", b"chunked")]],
+    ids=["missing", "invalid", "chunked"],
+)
+async def test_large_body_admission_undeclared_small_body_skips_permit(
+    monkeypatch: pytest.MonkeyPatch, headers: list[tuple[bytes, bytes]]
+) -> None:
+    """申报缺失或非法的小请求体经惰性闸直通：未越阈不取许可，无申报不得绕过计数。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"chunked-body", "more_body": False}
+
+    await middleware(_large_body_scope(headers), cast(Receive, receive), cast(Send, _silence_send))
+
+    assert spy.acquire_calls == 0
+    assert bodies == [b"chunked-body"]
+
+
+async def test_large_body_admission_small_chunked_streams_frames_without_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """小 chunked 请求逐帧直通下游：tee 只计数不缓冲，零许可占用。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    forwarded_frames: list[Message] = []
+    middleware = _admission_stack(
+        _frame_recording_downstream(forwarded_frames), 1, 5, _ADMISSION_THRESHOLD
+    )
+    frames: list[Message] = [
+        {"type": "http.request", "body": b"a" * 256, "more_body": True},
+        {"type": "http.request", "body": b"b" * 256, "more_body": True},
+        {"type": "http.request", "body": b"c" * 256, "more_body": True},
+        {"type": "http.request", "body": b"d" * 256, "more_body": False},
+    ]
+
+    async def receive() -> Message:
+        return frames.pop(0)
+
+    await middleware(
+        _large_body_scope([(b"transfer-encoding", b"chunked")]),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert forwarded_frames == [
+        {"type": "http.request", "body": b"a" * 256, "more_body": True},
+        {"type": "http.request", "body": b"b" * 256, "more_body": True},
+        {"type": "http.request", "body": b"c" * 256, "more_body": True},
+        {"type": "http.request", "body": b"d" * 256, "more_body": False},
+    ]
+    assert spy.acquire_calls == 0
+
+
+async def test_large_body_admission_large_chunked_acquires_permit_after_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """chunked 大行累计越过阈值才取许可，许可取后下游仍收到完整分帧流。"""
+    events: list[str] = []
+    spy = _SpySemaphore(asyncio.Semaphore(1), events)
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", lambda limit, *, key: spy)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+    # 首帧 3MB 未越阈直通，第二帧累计 5MB 越过 4MB 阈值触发取许可。
+    chunks = [b"a" * (3 * 1024 * 1024), b"b" * (2 * 1024 * 1024), b"c" * 1024]
+    pending_frames: list[Message] = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+    receive_calls = {"count": 0}
+
+    async def receive() -> Message:
+        receive_calls["count"] += 1
+        events.append(f"frame:{receive_calls['count']}")
+        return pending_frames.pop(0)
+
+    await middleware(
+        _large_body_scope([(b"transfer-encoding", b"chunked")]),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert events == ["frame:1", "frame:2", "acquire", "frame:3", "release"]
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1
+    assert bodies == [b"".join(chunks)]
+
+
+@dataclass
+class _SaturatedAdmission:
+    """饱和装配的主体侧句柄：待测中间件与共享的许可替身、下游记录器与响应记录。"""
+
+    spy: _SpySemaphore
+    bodies: list[bytes]
+    reached: list[bool]
+    middleware: _LimitRequestBodyMiddleware
+    sent: list[Message]
+
+    async def send(self, message: Message) -> None:
+        self.sent.append(message)
+
+
+@asynccontextmanager
+async def _permits_saturated_by_three_holders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[_SaturatedAdmission]:
+    """三个申报大请求驻留读体占满许可的饱和装配，退出时放行并回收持有者。"""
+    spy = _install_spy_gate(monkeypatch, 3)
+    bodies: list[bytes] = []
+    reached: list[bool] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del send
+        reached.append(True)
+        bodies.append(await Request(scope, receive).body())
+
+    fixture = _SaturatedAdmission(
+        spy, bodies, reached, _admission_stack(downstream, 3, 0.05, _ADMISSION_THRESHOLD), []
+    )
+    # 持闸实例取长读体超时：三个申报大上传驻留读体窗口占满许可，不自行超时。
+    holding = _admission_stack(downstream, 3, 5, _ADMISSION_THRESHOLD)
+    finish_read = asyncio.Event()
+    holders_entered = asyncio.Event()
+    entered = {"count": 0}
+
+    async def _holder_receive() -> Message:
+        entered["count"] += 1
+        if entered["count"] == 3:
+            holders_entered.set()
+        # 驻留读体窗口直至 finish_read，模拟慢速大上传。
+        await finish_read.wait()
+        return {"type": "http.request", "body": b"holder", "more_body": False}
+
+    holders = [
+        asyncio.ensure_future(
+            holding(
+                _large_body_scope(_LARGE_CL_HEADERS),
+                cast(Receive, _holder_receive),
+                cast(Send, _silence_send),
+            )
+        )
+        for _ in range(3)
+    ]
+    try:
+        assert await asyncio.wait_for(holders_entered.wait(), timeout=5), "三个申报大请求未占满许可"
+        yield fixture
+    finally:
+        finish_read.set()
+        await asyncio.gather(*holders)
+
+
+async def test_large_body_admission_chunked_large_times_out_waiting_for_exhausted_permits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """许可被申报大请求占满时 chunked 大行越阈后等待，超时回 408 断连且许可不泄漏。"""
+    async with _permits_saturated_by_three_holders(monkeypatch) as saturated:
+
+        async def _chunked_receive() -> Message:
+            return {"type": "http.request", "body": b"x" * (5 * 1024 * 1024), "more_body": True}
+
+        # 越阈帧在许可等待中被扣住，读体窗口超时后以 408 与断连收尾。
+        await asyncio.wait_for(
+            saturated.middleware(
+                _large_body_scope([(b"transfer-encoding", b"chunked")]),
+                cast(Receive, _chunked_receive),
+                cast(Send, saturated.send),
+            ),
+            timeout=5,
+        )
+
+        # 流式准入下四个下游都已启动，但全部挂在读体窗口，无一完成。
+        assert saturated.reached == [True, True, True, True]
+        assert saturated.bodies == []
+        assert saturated.sent[0]["type"] == "http.response.start"
+        assert saturated.sent[0]["status"] == 408
+        payload = json.loads(saturated.sent[1]["body"])
+        assert payload["error"] == "large_body_admission_timeout"
+        assert "SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY" in payload["error_description"]
+        assert saturated.spy.acquire_calls == 4
+        assert saturated.spy.release_calls == 0
+
+    assert saturated.spy.release_calls == 3
+
+    # 许可不泄漏：后续申报大请求立即可读体进入下游。
+    async def _follow_receive() -> Message:
+        return {"type": "http.request", "body": b"follow", "more_body": False}
+
+    await asyncio.wait_for(
+        saturated.middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _follow_receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+
+    assert saturated.reached == [True, True, True, True, True]
+    assert saturated.bodies == [b"holder", b"holder", b"holder", b"follow"]
+    assert saturated.spy.acquire_calls == 5
+
+
+async def test_large_body_admission_declared_large_times_out_waiting_for_exhausted_permits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """许可被占满时申报大请求的排队等待同样限时，超时回 408 而非无限期挂起。"""
+    async with _permits_saturated_by_three_holders(monkeypatch) as saturated:
+
+        async def _queued_receive() -> Message:
+            return {"type": "http.request", "body": b"queued", "more_body": False}
+
+        await asyncio.wait_for(
+            saturated.middleware(
+                _large_body_scope(_LARGE_CL_HEADERS),
+                cast(Receive, _queued_receive),
+                cast(Send, saturated.send),
+            ),
+            timeout=5,
+        )
+
+        # 三个持闸实例的下游已启动并挂在读体；排队请求卡在许可等待，未进入下游；许可不泄漏。
+        assert saturated.reached == [True, True, True]
+        assert saturated.sent[0]["type"] == "http.response.start"
+        assert saturated.sent[0]["status"] == 408
+        queued_payload = json.loads(saturated.sent[1]["body"])
+        assert queued_payload["error"] == "large_body_admission_timeout"
+        assert "SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY" in queued_payload["error_description"]
+        assert saturated.spy.acquire_calls == 4
+        assert saturated.spy.release_calls == 0
+
+    assert saturated.spy.release_calls == 3
+
+
+async def test_large_body_admission_app_construction_failure_releases_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """下游 app 同步抛异常时许可经 finally 归还，看门狗定时器同步拆除。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+
+    def broken_app(scope: Any, receive: Any, send: Any) -> Any:
+        del scope, receive, send
+        # 模拟 SDK 升级后签名失配：调用即同步抛 TypeError。
+        raise TypeError("app signature mismatch")
+
+    middleware = _admission_stack(broken_app, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    with pytest.raises(TypeError, match="app signature mismatch"):
+        await middleware(
+            _large_body_scope(_LARGE_CL_HEADERS), cast(Receive, None), cast(Send, _silence_send)
+        )
+
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1
+
+    # 许可能用：后续申报大请求照常读体完成。
+    bodies: list[bytes] = []
+
+    async def _follow_receive() -> Message:
+        return {"type": "http.request", "body": b"follow", "more_body": False}
+
+    await asyncio.wait_for(
+        _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _follow_receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+    assert bodies == [b"follow"]
+    assert spy.acquire_calls == 2
+
+
+async def test_large_body_admission_suspended_consumer_releases_permit_via_watchdog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """持闸期间下游读体后挂起不退栈：看门狗强制收尾归还许可，不钉死后续大请求。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    consumer_suspended = asyncio.Event()
+    release_consumer = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        message = await receive()
+        bodies.append(b"partial:" + message.get("body", b"")[:4])
+        consumer_suspended.set()
+        # 读体后挂起不退栈：读取侧不再被调用，唯有看门狗能收尾。
+        await release_consumer.wait()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def _single_large_frame_receive() -> Message:
+        return {"type": "http.request", "body": b"x" * (5 * 1024 * 1024), "more_body": True}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    suspended = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")]),
+            cast(Receive, _single_large_frame_receive),
+            cast(Send, send),
+        )
+    )
+    assert await asyncio.wait_for(consumer_suspended.wait(), timeout=5), "下游未进入挂起"
+
+    # 看门狗在累计窗口耗尽时强制收尾并归还许可。
+    await asyncio.wait_for(suspended, timeout=5)
+    for _ in range(200):
+        if sent:
+            break
+        await asyncio.sleep(0.01)
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    assert spy.release_calls == 1
+
+    # 许可不钉死：后续申报大请求立即可用。
+    async def _fast_receive() -> Message:
+        return {"type": "http.request", "body": b"follow", "more_body": False}
+
+    follow = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+    await asyncio.wait_for(
+        follow(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _fast_receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+    assert b"follow" in bodies
+
+
+async def test_large_body_admission_limit_verdict_releases_permit_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外层流中 413 裁决即刻归还准入许可：无视 413 的滴流客户端不占闸等读体窗口看门狗。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    sent: list[Message] = []
+    downstream_finished = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        try:
+            while True:
+                message = await receive()
+                if message.get("type") != "http.request" or not message.get("more_body", False):
+                    break
+        finally:
+            downstream_finished.set()
+
+    # 阈值 4MB、上限 5MB：首帧 4.5MB 越阈持闸，第二帧累计 5.5MB 越限触发外层流中 413 裁决。
+    channel = _BodyReadPolicyChannel()
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD, channel)
+    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024, channel)
+    pending: list[Message] = [
+        {"type": "http.request", "body": b"a" * (4 * 1024 * 1024 + 512 * 1024), "more_body": True},
+        {"type": "http.request", "body": b"b" * (1024 * 1024), "more_body": True},
+    ]
+
+    async def receive() -> Message:
+        if pending:
+            return pending.pop(0)
+        # 无视已收 413 的滴流客户端：持续发 1 字节帧且永不发终帧。
+        await asyncio.sleep(0.01)
+        return {"type": "http.request", "body": b"x", "more_body": True}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")]),
+            cast(Receive, receive),
+            cast(Send, send),
+        ),
+        timeout=5,
+    )
+
+    # 请求即刻收尾：413 是唯一响应（不叠发 408），许可随断连退栈即刻归还。
+    assert downstream_finished.is_set(), "裁决后下游未随断连退栈"
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    body_msg = next(m for m in sent if m.get("type") == "http.response.body")
+    assert json.loads(body_msg["body"])["error"] == "request_too_large"
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1, "413 裁决后许可须即刻归还，不得等读体窗口看门狗"
+
+    # 许可已归还：后续申报大请求立即可读体，合法大上传不被滴流客户端饿死。
+    follow_bodies: list[bytes] = []
+
+    async def _follow_receive() -> Message:
+        return {"type": "http.request", "body": b"follow", "more_body": False}
+
+    await asyncio.wait_for(
+        _admission_stack(_admission_downstream(follow_bodies), 1, 5, _ADMISSION_THRESHOLD)(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _follow_receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+    assert follow_bodies == [b"follow"]
+
+
+async def test_large_body_admission_limit_verdict_silent_client_releases_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外层 413 发出后客户端即静默停发、下游不随断连退栈：裁决送达准入层取消下游，
+    许可不等待读体窗口看门狗即归还。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    sent: list[Message] = []
+    downstream_cancelled = asyncio.Event()
+    silent = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        try:
+            while True:
+                # 断连不敏感的下游：只认终帧，对合成断连帧持续轮询等待。
+                message = await receive()
+                if message.get("type") == "http.request" and not message.get("more_body", False):
+                    break
+        except asyncio.CancelledError:
+            downstream_cancelled.set()
+            raise
+
+    # 阈值 4MB、上限 5MB、读窗 30 秒：申报 5MB 越阈进入即持闸，实际累计 5.5MB
+    # 越限触发外层流中 413 裁决。
+    channel = _BodyReadPolicyChannel()
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD, channel)
+    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024, channel)
+    pending: list[Message] = [
+        {"type": "http.request", "body": b"a" * (4 * 1024 * 1024 + 512 * 1024), "more_body": True},
+        {"type": "http.request", "body": b"b" * (1024 * 1024), "more_body": True},
+    ]
+
+    async def receive() -> Message:
+        if pending:
+            return pending.pop(0)
+        # 收到 413 即静默停发：receive 不再返回任何帧。
+        await silent.wait()
+        raise AssertionError("静默客户端不应再返回帧")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    # 不等 30 秒读窗看门狗：裁决取消下游后请求须即刻收尾并归还许可。
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope([(b"content-length", str(5 * 1024 * 1024).encode("ascii"))]),
+            cast(Receive, receive),
+            cast(Send, send),
+        ),
+        timeout=2,
+    )
+
+    # 413 已发出且为唯一响应（不叠发 408），下游经裁决取消退栈，许可无孤儿持有。
+    assert downstream_cancelled.is_set(), "裁决须取消下游子任务，不等下游自行退栈"
+    starts = [m for m in sent if m.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1, "静默客户端不得把许可钉死到读体窗口耗尽"
+
+
+async def test_large_body_admission_abandoned_synthetic_frame_yields_to_loop() -> None:
+    """abandoned 分支的合成断连帧返回前让出事件循环：下游断连轮询不给让出点即忙转冻结并发任务。"""
+    ticks = {"before": -1, "after": -1}
+    tick_count = 0
+
+    async def _ticker() -> None:
+        nonlocal tick_count
+        while True:
+            tick_count += 1
+            await asyncio.sleep(0)
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        # 外层 413 裁决置 abandoned 后轮询 receive 模拟断连轮询下游，
+        # 裁决送达即取消下游：轮询在合成帧的让出点被取消收尾。
+        ticks["before"] = tick_count
+        try:
+            for _ in range(20):
+                await receive()
+        except asyncio.CancelledError:
+            ticks["after"] = tick_count
+            raise
+
+    channel = _BodyReadPolicyChannel()
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD, channel)
+    middleware = _LimitRequestBodyMiddleware(admission, 2048, channel)
+    pending: list[Message] = [
+        {"type": "http.request", "body": b"a" * 4096, "more_body": True},
+    ]
+
+    async def receive() -> Message:
+        if pending:
+            return pending.pop(0)
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    ticker = asyncio.ensure_future(_ticker())
+    try:
+        await asyncio.wait_for(
+            middleware(
+                _large_body_scope([(b"transfer-encoding", b"chunked")]),
+                cast(Receive, receive),
+                cast(Send, send),
+            ),
+            timeout=5,
+        )
+    finally:
+        ticker.cancel()
+        try:
+            await ticker
+        except asyncio.CancelledError:
+            pass
+
+    # 轮询期间其他任务持续被调度：合成帧路径存在让出点。
+    assert ticks["before"] >= 0
+    assert ticks["after"] > ticks["before"]
+    starts = [message for message in sent if message.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+
+
+async def test_large_body_admission_watchdog_waits_for_408_send_before_returning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写背压挂起的 408 发送未落定前中间件不返回，响应不被服务器提前终结。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    consumer_suspended = asyncio.Event()
+    release_consumer = asyncio.Event()
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        message = await receive()
+        bodies.append(message.get("body", b"")[:4])
+        consumer_suspended.set()
+        # 读体后挂起不退栈，唯有看门狗能收尾。
+        await release_consumer.wait()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def _single_large_frame_receive() -> Message:
+        return {"type": "http.request", "body": b"x" * (5 * 1024 * 1024), "more_body": True}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+        if not send_started.is_set():
+            send_started.set()
+            # 模拟服务器写背压：首个响应消息挂起，直至放行。
+            await release_send.wait()
+
+    suspended = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")]),
+            cast(Receive, _single_large_frame_receive),
+            cast(Send, send),
+        )
+    )
+    assert await asyncio.wait_for(consumer_suspended.wait(), timeout=5), "下游未进入挂起"
+
+    # 408 发送已开始且挂起：中间件等待发送落定，未返回。
+    assert await asyncio.wait_for(send_started.wait(), timeout=5), "看门狗未发出 408"
+    assert not suspended.done(), "408 未落定前中间件不得返回"
+
+    release_send.set()
+    release_consumer.set()
+    await asyncio.wait_for(suspended, timeout=5)
+    # 许可已随 finally 归还，后续大请求立即可用。
+    assert spy.release_calls == 1
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+
+
+async def test_large_body_admission_exception_path_settles_408_before_propagating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """看门狗收尾后下游以普通异常完成时，408 仍在返回前落定，不与服务器 500 竞发。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # 看门狗取消被转写为普通异常：await 下游子任务逃出两个 except 子句。
+            raise RuntimeError("下游以普通异常收尾")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+        if not send_started.is_set():
+            send_started.set()
+            # 模拟服务器写背压：408 首帧挂起，直至放行。
+            await release_send.wait()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def _never_receive() -> Message:
+        await asyncio.Event().wait()
+        raise AssertionError("下游不读体，receive 不应被调用")
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _never_receive),
+            cast(Send, send),
+        )
+    )
+    assert await asyncio.wait_for(send_started.wait(), timeout=5), "看门狗未发出 408"
+    await asyncio.sleep(0.05)
+    # 408 未落定前中间件不得返回，普通异常也不得先逃逸。
+    assert not request.done()
+
+    release_send.set()
+    with pytest.raises(RuntimeError, match="下游以普通异常收尾"):
+        await request
+    starts = [message for message in sent if message.get("type") == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 408
+    assert spy.release_calls == 1
+
+
+async def test_large_body_admission_abandon_releases_permit_while_408_send_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """读体窗口耗尽的收尾路径 408 经脱离任务发送：阻塞 send 不在持许可时内联钉死。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    send_started = asyncio.Event()
+    release_send = asyncio.Event()
+    downstream_finished = asyncio.Event()
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        try:
+            while True:
+                message = await receive()
+                if message.get("type") != "http.request" or not message.get("more_body", False):
+                    break
+        finally:
+            downstream_finished.set()
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+        if not send_started.is_set():
+            send_started.set()
+            # 模拟服务器写背压：408 首帧挂起，直至放行。
+            await release_send.wait()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+    receive_calls = {"count": 0}
+
+    async def receive() -> Message:
+        receive_calls["count"] += 1
+        # 首帧越阈即持闸；第二帧驻留至读体窗口耗尽触发收尾。
+        await asyncio.sleep(1.0 if receive_calls["count"] > 1 else 0.01)
+        return {"type": "http.request", "body": b"x" * (5 * 1024 * 1024), "more_body": True}
+
+    suspended = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")]),
+            cast(Receive, receive),
+            cast(Send, send),
+        )
+    )
+    assert await asyncio.wait_for(send_started.wait(), timeout=5), "408 未开始发送"
+    # 408 发送挂起期间下游已被看门狗取消收尾、许可已归还，但中间件按 ASGI 语义等发送落定。
+    assert await asyncio.wait_for(downstream_finished.wait(), timeout=5), "下游未随断连收尾"
+    for _ in range(200):
+        if spy.release_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert spy.release_calls == 1, "阻塞的 408 发送不得钉死许可"
+    assert not suspended.done(), "408 未落定前中间件不得返回"
+
+    follow_bodies: list[bytes] = []
+
+    async def _follow_receive() -> Message:
+        return {"type": "http.request", "body": b"follow", "more_body": False}
+
+    await asyncio.wait_for(
+        _admission_stack(_admission_downstream(follow_bodies), 1, 5, _ADMISSION_THRESHOLD)(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _follow_receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+    assert follow_bodies == [b"follow"]
+
+    release_send.set()
+    await asyncio.wait_for(suspended, timeout=5)
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+
+
+async def test_large_body_admission_external_cancel_after_abandon_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """看门狗收尾后到达的外部取消照样传播，不因 abandoned 置位被吞成正常返回。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    watchdog_delivered = asyncio.Event()
+    release_downstream = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # 吞下看门狗取消模拟收尾缓慢的下游，驻留等待外部放行。
+            watchdog_delivered.set()
+        await release_downstream.wait()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"payload", "more_body": False}
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+    )
+    assert await asyncio.wait_for(watchdog_delivered.wait(), timeout=5), "看门狗未取消下游"
+
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert request.cancelled(), "外部取消必须传播，不得被吞成正常完成"
+    assert spy.release_calls == 1
+
+
+async def test_large_body_admission_external_cancel_settles_downstream_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外部取消重抛前先取消并等待下游任务收尾：不留孤儿继续读写，取消照样传播。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    downstream_started = asyncio.Event()
+    downstream_finished = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        downstream_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            downstream_finished.set()
+
+    middleware = _admission_stack(downstream, 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"payload", "more_body": False}
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+    )
+    assert await asyncio.wait_for(downstream_started.wait(), timeout=5), "下游未启动"
+
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert request.cancelled(), "外部取消必须传播"
+    # 重抛前下游任务已被取消并等待终结，不留孤儿，异常也经吞没取回。
+    assert downstream_finished.is_set(), "取消路径未等待下游任务收尾"
+    assert spy.release_calls == 1
+
+
+async def test_large_body_admission_external_cancel_terminal_frame_never_double_releases_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外部取消后下游终帧不得二次归还许可：取消收尾与终帧分支合计恰归还一次。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    first_frame_read = asyncio.Event()
+    cancel_caught = asyncio.Event()
+    release_downstream = asyncio.Event()
+    terminal_read = asyncio.Event()
+    received: list[bytes] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        try:
+            await receive()
+            first_frame_read.set()
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # 吞下取消驻留，模拟收尾缓慢的下游，放行后读完终帧再随取消收尾。
+            cancel_caught.set()
+            await release_downstream.wait()
+            received.append((await receive()).get("body", b""))
+            terminal_read.set()
+            raise
+
+    middleware = _admission_stack(downstream, 1, 5, _ADMISSION_THRESHOLD)
+    frames: list[Message] = [
+        {"type": "http.request", "body": b"first", "more_body": True},
+        {"type": "http.request", "body": b"last", "more_body": False},
+    ]
+
+    async def receive() -> Message:
+        return frames.pop(0)
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+    )
+    assert await asyncio.wait_for(first_frame_read.wait(), timeout=5), "下游未读到首帧"
+
+    request.cancel()
+    assert await asyncio.wait_for(cancel_caught.wait(), timeout=5), "下游未收到取消"
+    release_downstream.set()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert request.cancelled(), "外部取消必须传播"
+    assert terminal_read.is_set(), "下游须真实读到终帧以暴露二次释放窗口"
+    assert received == [b"last"]
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1, "取消收尾与终帧分支合计不得二次释放同一许可"
+
+    release_downstream.set()
+    await asyncio.sleep(0)
+
+
+async def test_large_body_admission_repeated_host_cancel_releases_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """落定等待只吸收窗口内首个取消：重复取消立即放行监督者并经 finally 归还许可，
+    吞取消驻留的下游不钉死监督者，脱离子任务短暂孤儿收尾。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    downstream_started = asyncio.Event()
+    downstream_cancelled = asyncio.Event()
+    release_downstream = asyncio.Event()
+    downstream_finished = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, receive, send
+        downstream_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # 吞下转发的取消驻留收尾，暴露落定等待期间重复宿主取消的窗口。
+            downstream_cancelled.set()
+            await release_downstream.wait()
+            raise
+        finally:
+            downstream_finished.set()
+
+    middleware = _admission_stack(downstream, 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"payload", "more_body": False}
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+    )
+    assert await asyncio.wait_for(downstream_started.wait(), timeout=5), "下游未启动"
+
+    request.cancel()
+    assert await asyncio.wait_for(downstream_cancelled.wait(), timeout=5), "取消未转发到下游"
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not request.done(), "首个取消应被落定等待吸收，子任务收尾前不放行"
+
+    # 窗口内第二个取消仍被吸收：落定等待维持至子任务落定或预算耗尽。
+    request.cancel()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not request.done(), "落定等待须吸收窗口内首个重复取消"
+
+    # 窗口内第三个取消耗尽有界档单次吸收预算：监督者立即放行并经 finally 归还许可，
+    # 吞取消无界驻留的下游由此不再钉死监督者与准入许可，脱离子任务自行孤儿收尾。
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert request.cancelled(), "重复取消须打断落定等待放行，任务保持可取消"
+    assert spy.release_calls == 1, "放行须伴随许可归还"
+    assert not downstream_finished.is_set(), "前置：子任务仍驻留收尾，监督者已先行退出"
+
+    release_downstream.set()
+    assert await asyncio.wait_for(downstream_finished.wait(), timeout=5), "孤儿子任务须仍能自行收尾"
+
+
+async def test_large_body_admission_slow_chunked_stream_times_out_on_cumulative_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """匀速慢传无法逐帧续命：持闸读体按累计读体窗口超时，408 断连收尾。"""
+    _install_spy_gate(monkeypatch, 3)
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del send
+        await Request(scope, receive).body()
+
+    middleware = _admission_stack(downstream, 3, 0.05, _ADMISSION_THRESHOLD)
+    frames_sent = {"count": 0}
+
+    async def receive() -> Message:
+        frames_sent["count"] += 1
+        # 帧间隔远小于单帧窗口，旧口径逐帧刷新永不超时，累计口径第 3 帧越窗。
+        await asyncio.sleep(0.02)
+        return {
+            "type": "http.request",
+            "body": b"x" * (5 * 1024 * 1024),
+            "more_body": True,
+        }
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")]),
+            cast(Receive, receive),
+            cast(Send, send),
+        ),
+        timeout=5,
+    )
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    assert json.loads(sent[1]["body"])["error"] == "body_read_timeout"
+    assert frames_sent["count"] < 10
+
+
+async def test_large_body_admission_subthreshold_undeclared_stall_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """亚阈值未申报慢速挂起同受读体窗口约束：超窗回 408 断连，不取许可不钉连接。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del send
+        await Request(scope, receive).body()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        # 未申报且永不发终帧：总量不及阈值，旧口径无闸无看门狗即无限挂起。
+        await asyncio.Event().wait()
+        raise AssertionError("挂起的上传不再返回任何帧")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")]),
+            cast(Receive, receive),
+            cast(Send, send),
+        ),
+        timeout=5,
+    )
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    assert json.loads(sent[1]["body"])["error"] == "body_read_timeout"
+    assert spy.acquire_calls == 0
+
+
+async def test_large_body_admission_consumer_stall_without_gate_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未取闸读体同受看门狗监护：下游读一帧后停滞不再读，窗口耗尽强制收尾回 408。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    consumer_suspended = asyncio.Event()
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        message = await receive()
+        bodies.append(message.get("body", b""))
+        consumer_suspended.set()
+        # 读一帧后停滞不再读：无闸路径若无看门狗监护即永久挂起。
+        await asyncio.Event().wait()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"part", "more_body": True}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")]),
+            cast(Receive, receive),
+            cast(Send, send),
+        )
+    )
+    assert await asyncio.wait_for(consumer_suspended.wait(), timeout=5), "下游未进入停滞"
+
+    await asyncio.wait_for(request, timeout=5)
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    assert json.loads(sent[1]["body"])["error"] == "body_read_timeout"
+    assert spy.acquire_calls == 0
+
+
+async def test_large_body_admission_te_get_never_ending_survives_window_after_response_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """携 Transfer-Encoding 永不终结的 GET 响应转发开始后拆看门狗：会话越窗存活、许可即归还。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    read_timeout = 0.05
+    response_started = asyncio.Event()
+    downstream_cancelled = asyncio.Event()
+    disconnect_released = asyncio.Event()
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope
+        # 先读一帧越阈持闸再开始转发响应，SSE 形态随后仅轮询断连。
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"data", "more_body": True})
+        response_started.set()
+        try:
+            while (await receive()).get("type") != "http.disconnect":
+                pass
+        except asyncio.CancelledError:
+            downstream_cancelled.set()
+            raise
+
+    # 阈值 16 使首帧 32 字节即越阈持闸，免构造兆级字节串。
+    middleware = _admission_stack(downstream, 1, read_timeout, 16)
+    receive_calls = {"count": 0}
+
+    async def receive() -> Message:
+        receive_calls["count"] += 1
+        if receive_calls["count"] == 1:
+            return {"type": "http.request", "body": b"x" * 32, "more_body": True}
+        # 永不发终结零块：断连前读体侧恒停滞。
+        await disconnect_released.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")], method="GET"),
+            cast(Receive, receive),
+            cast(Send, send),
+        )
+    )
+    assert await asyncio.wait_for(response_started.wait(), timeout=5), "响应未开始转发"
+
+    # 读体窗口耗尽后会话仍存活：看门狗已随首个响应帧拆除，408 不截断已开始的响应流。
+    await asyncio.sleep(read_timeout * 4)
+    assert not request.done()
+    assert not downstream_cancelled.is_set()
+    assert not any(
+        message.get("type") == "http.response.start" and message.get("status") == 408
+        for message in sent
+    )
+    # 响应已开始而 body 永不终结：许可在响应转发开始即归还，不随长会话钉死。
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1
+
+    disconnect_released.set()
+    await asyncio.wait_for(request, timeout=5)
+    assert not request.cancelled()
+    assert spy.release_calls == 1, "响应期归还后收尾不得二次归还"
+
+
+async def test_large_body_admission_over_threshold_frame_after_response_start_skips_reacquire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """响应转发开始后到达的越阈帧不再补取准入许可：监护已终止，补取会把已归还的许可重新钉死。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    frames: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope
+        # 首帧越阈持闸后开始转发响应，随后再读一帧：响应期到达的越阈帧不得重新取闸。
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"data", "more_body": True})
+        frames.append(await receive())
+
+    # 阈值 16 使 32 字节帧即越阈，免构造兆级字节串。
+    middleware = _admission_stack(downstream, 1, 5, 16)
+    receive_calls = {"count": 0}
+
+    async def receive() -> Message:
+        receive_calls["count"] += 1
+        if receive_calls["count"] <= 2:
+            return {"type": "http.request", "body": b"x" * 32, "more_body": True}
+        return {"type": "http.disconnect"}
+
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope([(b"transfer-encoding", b"chunked")], method="GET"),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+
+    assert len(frames) == 1, "响应期越阈帧未被读到"
+    assert frames[0].get("type") == "http.request"
+    assert spy.acquire_calls == 1, "响应转发开始后不得重新补取准入许可"
+    assert spy.release_calls == 1, "响应期归还后收尾不得二次归还"
+
+
+async def test_large_body_admission_terminal_frame_crossing_threshold_skips_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """累计越过阈值的终帧不取许可：请求体随帧收完，占许可无防护意义。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+    # 首帧 3MB 未越阈，终帧累计 5MB 越阈但 more_body=False，免许可直通。
+    chunks = [b"a" * (3 * 1024 * 1024), b"b" * (2 * 1024 * 1024)]
+    pending_frames: list[Message] = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+
+    async def receive() -> Message:
+        return pending_frames.pop(0)
+
+    await middleware(
+        _large_body_scope([(b"transfer-encoding", b"chunked")]),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert spy.acquire_calls == 0
+    assert bodies == [b"".join(chunks)]
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [0, 1, _ADMISSION_THRESHOLD, _ADMISSION_THRESHOLD + 1],
+    ids=["zero", "one", "at-threshold", "above-threshold"],
+)
+@pytest.mark.parametrize("method", ["GET", "POST", "PUT"])
+def test_large_body_admission_declared_supervision_bypass_only_for_zero(
+    method: str, declared: int
+) -> None:
+    """申报请求的免监督判定只看有无申报体：零申报直通，申报体不论大小与方法一律进监督。"""
+    scope = _large_body_scope([(b"content-length", str(declared).encode("ascii"))], method=method)
+    middleware = _LargeBodyAdmissionMiddleware(
+        _admission_downstream([]), 1, 5, _ADMISSION_THRESHOLD, _BodyReadPolicyChannel()
+    )
+    bypasses = middleware._bypasses_supervision(_BodyReadPolicy(scope), scope)
+
+    assert bypasses is (declared == 0)
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [b"-1", b"+5", b"1_0", b" 5"],
+    ids=["negative", "plus-signed", "underscore", "leading-space"],
+)
+def test_large_body_admission_malformed_declaration_takes_undeclared_path(
+    declared: bytes,
+) -> None:
+    """畸形申报按无申报解析：POST 不因负值等 int() 可解析形态误判零申报而免监督直通。"""
+    scope = _large_body_scope([(b"content-length", declared)], method="POST")
+    middleware = _LargeBodyAdmissionMiddleware(
+        _admission_downstream([]), 1, 5, _ADMISSION_THRESHOLD, _BodyReadPolicyChannel()
+    )
+
+    bypasses = middleware._bypasses_supervision(_BodyReadPolicy(scope), scope)
+
+    assert bypasses is False
+
+
+async def test_large_body_admission_small_declaration_stall_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """小申报慢速挂起同受读体窗口约束：免并发许可不免窗口，撒谎申报钉不死连接。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del send
+        await Request(scope, receive).body()
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        # 申报 1 字节却永不发终帧：每分钟滴一个字节的慢速上传形态。
+        await asyncio.Event().wait()
+        raise AssertionError("挂起的小申报上传不再返回任何帧")
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope([(b"content-length", b"1")]),
+            cast(Receive, receive),
+            cast(Send, send),
+        ),
+        timeout=5,
+    )
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    assert json.loads(sent[1]["body"])["error"] == "body_read_timeout"
+    assert spy.acquire_calls == 0
+
+
+async def test_large_body_admission_small_declaration_lying_overflow_takes_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """小申报谎报、实际累计越阈的请求体照常补取许可：免许可不得被撒谎申报套走。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+    # 申报 1024 字节，实际分帧累计 5MB 越阈，越阈帧未到终帧即补取许可。
+    chunks = [b"a" * (3 * 1024 * 1024), b"b" * (2 * 1024 * 1024), b"c" * 1024]
+    pending_frames: list[Message] = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+
+    async def receive() -> Message:
+        return pending_frames.pop(0)
+
+    await middleware(
+        _large_body_scope([(b"content-length", b"1024")]),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1
+    assert bodies == [b"".join(chunks)]
+
+
+async def test_large_body_admission_zero_declaration_bypass_outlives_read_window() -> None:
+    """零申报免监督直通：无体可读的请求不受读体窗口打扰，建流长连接不被 408 打断。"""
+    release_receive = asyncio.Event()
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        # SSE 建流形态：驻留等一帧断连，远超读体窗口。
+        assert (await receive())["type"] == "http.disconnect"
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        await release_receive.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([(b"content-length", b"0")], path="/mcp", method="GET"),
+            cast(Receive, receive),
+            cast(Send, send),
+        )
+    )
+    await asyncio.sleep(0.2)
+    # 窗口早已耗尽而零申报建流不收 408、不被断连回放打断。
+    assert not request.done()
+    assert sent == []
+
+    release_receive.set()
+    await asyncio.wait_for(request, timeout=5)
+
+
+@pytest.mark.parametrize("method", sorted(_BODYLESS_METHODS))
+async def test_large_body_admission_bodyless_method_without_declaration_skips_permit(
+    monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """无体方法缺失申报属正常形态（SSE 建流、静态页 GET、会话删除），免监督直通、不取准入许可。"""
+
+    def _forbidden(limit: int, *, key: str) -> Any:
+        raise AssertionError(f"无体方法无申报不应取准入许可: {key}")
+
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", _forbidden)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    for path in ("/mcp", "/web", "/web/static/app.js", "/web/api/gallery"):
+        await middleware(
+            _large_body_scope([], path=path, method=method),
+            cast(Receive, receive),
+            cast(Send, _silence_send),
+        )
+
+    assert bodies == [b"", b"", b"", b""]
+
+
+async def test_large_body_admission_get_not_queued_when_permits_exhausted() -> None:
+    """许可被慢速大上传占满时，无申报 GET 即时免监督直通，SSE 建流与静态页不被冻结。"""
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+    read_window_held = asyncio.Event()
+    finish_read = asyncio.Event()
+
+    async def _slow_upload_receive() -> Message:
+        # 驻留读体窗口，模拟占满唯一许可的慢速大上传。
+        read_window_held.set()
+        await finish_read.wait()
+        return {"type": "http.request", "body": b"upload", "more_body": False}
+
+    upload = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _slow_upload_receive),
+            cast(Send, _silence_send),
+        )
+    )
+    assert await asyncio.wait_for(read_window_held.wait(), timeout=5), "大上传未驻留读体窗口"
+
+    async def _get_receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    get_request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([], path="/mcp", method="GET"),
+            cast(Receive, _get_receive),
+            cast(Send, _silence_send),
+        )
+    )
+    await asyncio.sleep(0.1)
+    # 许可占满不阻塞无申报 GET：直通即完成，无需等待大上传归还许可。
+    assert get_request.done(), "许可占满时无申报 GET 不应排队"
+    await get_request
+    assert bodies == [b""]
+
+    finish_read.set()
+    await upload
+    assert bodies == [b"", b"upload"]
+
+
+async def test_large_body_admission_bodyless_large_declaration_still_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无体方法申报大 Content-Length 仍按申报口径进入即取许可。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"declared", "more_body": False}
+
+    await middleware(
+        _large_body_scope(_LARGE_CL_HEADERS, method="GET"),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert spy.acquire_calls == 1
+    assert bodies == [b"declared"]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [[(b"content-length", b"abc")], [(b"transfer-encoding", b"chunked")]],
+    ids=["invalid-cl", "chunked"],
+)
+async def test_large_body_admission_bodyless_undeclared_small_body_skips_permit(
+    monkeypatch: pytest.MonkeyPatch, headers: list[tuple[bytes, bytes]]
+) -> None:
+    """无体方法的无有效申报小请求体不取许可：非法申报直通，申报 transfer-encoding 走惰性闸。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"declared", "more_body": False}
+
+    await middleware(
+        _large_body_scope(headers, method="GET"),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert spy.acquire_calls == 0
+    assert bodies == [b"declared"]
+
+
+async def test_large_body_admission_bodyless_bypass_outlives_read_window() -> None:
+    """无体方法免监督直通：读体窗口耗尽后驻留的建流请求不受 408 打扰。"""
+    release_receive = asyncio.Event()
+    sent: list[Message] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del scope, send
+        # SSE 建流形态：驻留等一帧断连，远超读体窗口。
+        assert (await receive())["type"] == "http.disconnect"
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def receive() -> Message:
+        await release_receive.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    request = asyncio.ensure_future(
+        middleware(
+            _large_body_scope([], path="/mcp", method="GET"),
+            cast(Receive, receive),
+            cast(Send, send),
+        )
+    )
+    await asyncio.sleep(0.2)
+    # 窗口早已耗尽而 GET 建流不收 408、不被断连回放打断。
+    assert not request.done()
+    assert sent == []
+
+    release_receive.set()
+    await asyncio.wait_for(request, timeout=5)
+
+
+async def test_large_body_admission_streams_read_body_to_downstream() -> None:
+    """分帧请求体经流式准入原样转发，下游 Request.body() 拼得完整请求体。"""
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 3, 5, _ADMISSION_THRESHOLD)
+    frames: list[Message] = [
+        {"type": "http.request", "body": b'{"prompt": "', "more_body": True},
+        {"type": "http.request", "body": "一只猫".encode("utf-8"), "more_body": False},
+    ]
+
+    async def receive() -> Message:
+        return frames.pop(0)
+
+    await middleware(
+        _large_body_scope(_LARGE_CL_HEADERS), cast(Receive, receive), cast(Send, _silence_send)
+    )
+
+    assert bodies == ['{"prompt": "一只猫'.encode("utf-8")]
+
+
+async def test_large_body_admission_queues_concurrent_large_reads() -> None:
+    """并发大请求体在许可预算内排队：首个读体未完成时第二个不开始读体。"""
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, _ADMISSION_THRESHOLD)
+    read_window_held = asyncio.Event()
+    finish_read = asyncio.Event()
+    first_receive_calls = {"calls": 0}
+    second_receive_calls = {"calls": 0}
+
+    async def _first_receive() -> Message:
+        first_receive_calls["calls"] += 1
+        if first_receive_calls["calls"] == 1:
+            return {"type": "http.request", "body": b'{"prompt": "', "more_body": True}
+        # 第二帧起驻留读体窗口，模拟慢速上传的大载荷。
+        read_window_held.set()
+        await finish_read.wait()
+        return {"type": "http.request", "body": '一只猫"}'.encode("utf-8"), "more_body": False}
+
+    async def _second_receive() -> Message:
+        second_receive_calls["calls"] += 1
+        return {"type": "http.request", "body": b"second", "more_body": False}
+
+    first = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _first_receive),
+            cast(Send, _silence_send),
+        )
+    )
+    assert await asyncio.wait_for(read_window_held.wait(), timeout=5), "首个请求未驻留读体窗口"
+    second = asyncio.ensure_future(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _second_receive),
+            cast(Send, _silence_send),
+        )
+    )
+    await asyncio.sleep(0.1)
+    # 许可预算只容一个大载荷：第二个请求在读取前排队，receive 不被调用。
+    assert second_receive_calls["calls"] == 0
+    assert not bodies
+
+    finish_read.set()
+    await asyncio.gather(first, second)
+
+    assert second_receive_calls["calls"] >= 1
+    assert set(bodies) == {'{"prompt": "一只猫"}'.encode("utf-8"), b"second"}
+
+
+async def test_large_body_admission_read_timeout_returns_408_and_releases_permit() -> None:
+    """读体超时回 408 并归还许可：挂起的慢速读体不再永久钉死许可。"""
+    bodies: list[bytes] = []
+    downstream_reached: list[bool] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        downstream_reached.append(True)
+        bodies.append(await Request(scope, receive).body())
+
+    middleware = _admission_stack(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+
+    async def _hanging_receive() -> Message:
+        # 模拟上传停滞：receive 不返回任何帧，读体窗口直至超时。
+        await asyncio.Event().wait()
+        return {"type": "http.disconnect"}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await middleware(
+        _large_body_scope(_LARGE_CL_HEADERS), cast(Receive, _hanging_receive), cast(Send, send)
+    )
+
+    # 流式准入下下游已进入读体挂起，但请求体未完成。
+    assert downstream_reached == [True]
+    assert bodies == []
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    payload = json.loads(sent[1]["body"])
+    assert payload["error"] == "body_read_timeout"
+    assert "SEEDREAM_BODY_READ_TIMEOUT" in payload["error_description"]
+
+    # 许可已归还：后续大请求立即可读体进入下游，不被残留持有者阻塞。
+    async def _fast_receive() -> Message:
+        return {"type": "http.request", "body": b"follow", "more_body": False}
+
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _fast_receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+
+    assert bodies == [b"follow"]
+
+
+async def test_large_body_admission_client_disconnect_abandons_request() -> None:
+    """读体中客户端断开即放弃该请求：下游随断连退栈且不发响应，许可随 finally 释放。"""
+    bodies: list[bytes] = []
+    downstream_reached: list[bool] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        downstream_reached.append(True)
+        bodies.append(await Request(scope, receive).body())
+
+    middleware = _admission_stack(downstream, 1, 5, _ADMISSION_THRESHOLD)
+
+    async def _disconnecting_receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="INFO"):
+        await middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _disconnecting_receive),
+            cast(Send, send),
+        )
+
+    # 流式准入下下游已启动，随即因断连消息退栈；观测性由 INFO 级日志携持闸阶段承担。
+    assert downstream_reached == [True]
+    assert bodies == []
+    assert sent == []
+    assert any("客户端断开" in record and "持闸" in record for record in records)
+
+    async def _fast_receive() -> Message:
+        return {"type": "http.request", "body": b"follow", "more_body": False}
+
+    await asyncio.wait_for(
+        middleware(
+            _large_body_scope(_LARGE_CL_HEADERS),
+            cast(Receive, _fast_receive),
+            cast(Send, _silence_send),
+        ),
+        timeout=5,
+    )
+
+    assert bodies == [b"follow"]
+
+
+async def test_large_body_admission_passes_non_http_scope() -> None:
+    """lifespan 等非 http 流量直接透传，不经准入闸。"""
+    reached: list[object] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        reached.append(scope.get("type"))
+
+    middleware = _LargeBodyAdmissionMiddleware(
+        downstream, 1, 5, _ADMISSION_THRESHOLD, _BodyReadPolicyChannel()
+    )
+    await middleware({"type": "lifespan"}, cast(Receive, None), cast(Send, None))
+
+    assert reached == ["lifespan"]
+
+
+def test_attach_admission_params_come_from_active_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """准入中间件的许可数与读体超时取自活动配置对应字段，阈值按默认上限派生 4MB。"""
+    config = SeedreamConfig(
+        api_key="test_key", large_body_admission_concurrency=7, body_read_timeout=9
+    )
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
+
+    admission = next(ref for ref in app.user_middleware if ref.cls is _LargeBodyAdmissionMiddleware)
+    assert admission.kwargs["admission_concurrency"] == 7
+    assert admission.kwargs["read_timeout"] == 9
+    assert admission.kwargs["admission_threshold"] == 4 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("max_body_size", "expected_threshold"),
+    [
+        (2 * 1024 * 1024, 2 * 1024 * 1024),
+        (4 * 1024 * 1024, 4 * 1024 * 1024),
+        (64 * 1024 * 1024, 4 * 1024 * 1024),
+    ],
+    ids=["below-ceiling", "at-ceiling", "above-ceiling"],
+)
+def test_large_body_admission_threshold_takes_min_of_ceiling_and_max_body_size(
+    max_body_size: int, expected_threshold: int
+) -> None:
+    """生效阈值取 4MB 档与请求体上限的较小者：上限较小时准入旋钮仍生效。"""
+    assert transport_module._large_body_admission_threshold(max_body_size) == expected_threshold
+
+
+def test_attach_derives_admission_threshold_from_max_body_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """请求体上限低于 4MB 档时装配出的准入阈值同步降低，旋钮不因上限变小失效。"""
+    config = SeedreamConfig(api_key="test_key", http_max_body_size=2 * 1024 * 1024)
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
+
+    admission = next(ref for ref in app.user_middleware if ref.cls is _LargeBodyAdmissionMiddleware)
+    assert admission.kwargs["admission_threshold"] == 2 * 1024 * 1024
+
+
+def test_attach_pairs_body_read_layers_through_shared_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """读体两层经同一配对通道实例构造配对：策略交接单点承载，不经装配序探测。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    app = _FakeStarletteApp()
+
+    _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
+
+    limit = next(ref for ref in app.user_middleware if ref.cls is _LimitRequestBodyMiddleware)
+    admission = next(ref for ref in app.user_middleware if ref.cls is _LargeBodyAdmissionMiddleware)
+    assert limit.kwargs["channel"] is admission.kwargs["channel"]
+
+
+async def test_large_body_admission_small_threshold_still_gates_chunked_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """阈值随上限降至 2MB 后，chunked 大行累计越过 2MB 照常补取许可。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    middleware = _admission_stack(_admission_downstream(bodies), 1, 5, 2 * 1024 * 1024)
+    chunks = [b"a" * (1024 * 1024), b"b" * (1536 * 1024), b"c" * 1024]
+    pending_frames: list[Message] = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+
+    async def receive() -> Message:
+        return pending_frames.pop(0)
+
+    await middleware(
+        _large_body_scope([(b"transfer-encoding", b"chunked")]),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1
+    assert bodies == [b"".join(chunks)]
+
+
+async def test_body_read_policy_counted_once_across_limit_and_admission_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """外层读体计数经配对通道共享给内层准入：两层叠加字节只计一次，阈值判定同源。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    bodies: list[bytes] = []
+    scopes: list[Any] = []
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        del send
+        scopes.append(scope)
+        bodies.append(await Request(scope, receive).body())
+
+    channel = _BodyReadPolicyChannel()
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 5, _ADMISSION_THRESHOLD, channel)
+    stacked = _LimitRequestBodyMiddleware(admission, 64 * 1024 * 1024, channel)
+    chunks = [b"a" * (3 * 1024 * 1024), b"b" * (2 * 1024 * 1024), b"c" * 1024]
+    pending_frames: list[Message] = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+
+    async def receive() -> Message:
+        return pending_frames.pop(0)
+
+    await stacked(
+        _large_body_scope([(b"transfer-encoding", b"chunked")]),
+        cast(Receive, receive),
+        cast(Send, _silence_send),
+    )
+
+    assert spy.acquire_calls == 1
+    assert spy.release_calls == 1
+    assert bodies == [b"".join(chunks)]
+    policy = channel.resolve(scopes[0])
+    assert policy.total_received == sum(len(chunk) for chunk in chunks)
+
+
+# ==================== 请求体超限 413 直发守护 ====================
+
+
+async def test_request_body_limit_early_reject_swallows_send_failure() -> None:
+    """Content-Length 早拒直发 413 的 send 失败被吞掉，与流中判定点同口径静默。"""
+
+    async def send(message: Message) -> None:
+        # 模拟已断开的死连接：任何响应写入都失败。
+        del message
+        raise RuntimeError("client disconnected")
+
+    async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("超限请求不应进入下游应用")
+
+    middleware = transport_module._LimitRequestBodyMiddleware(
+        downstream, 1024, _BodyReadPolicyChannel()
+    )
+    scope = {"type": "http", "headers": [(b"content-length", b"2048")]}
+    records: list[str] = []
+    with capture_loguru_messages(records, level="DEBUG"):
+        await middleware(scope, cast(Receive, None), send)
+
+    assert any("短路响应直发失败" in record for record in records)
+
+
+async def test_send_rejection_swallows_dead_connection_send_failure() -> None:
+    """拒绝发送共用入口内建尽力语义：死连接上的发送失败降为 debug 静默不冒泡。"""
+
+    async def send(message: Message) -> None:
+        del message
+        raise RuntimeError("client disconnected")
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="DEBUG"):
+        await transport_module._send_rejection(send, 403, "invalid_host", "Host not allowed")
+
+    assert any("短路响应直发失败" in record for record in records)

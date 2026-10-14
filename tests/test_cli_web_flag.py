@@ -1,18 +1,21 @@
 """Web 操作台开关的 CLI 旗标与配置优先级测试。
 
 --web/--no-web 互斥组经 argparse 解析，配置优先级为 CLI 覆盖 > env 文件 > 默认关闭，
-与 watermark 旗标同构；未传旗标时 args.web 为 None 表示不覆盖任何来源。
+与 watermark 旗标同构；未传旗标时 args.web 为 None 表示不覆盖任何来源；
+web 开启而传输非 streamable-http 时 cli_main 启动告警的触发与抑制亦在此守护。
 """
 
 from __future__ import annotations
 
-from argparse import Namespace
 from pathlib import Path
 
 import pytest
 
 import seedream_mcp.cli as cli
-from seedream_mcp.config import build_config_from_sources
+from seedream_mcp import bootstrap as bootstrap_module
+from seedream_mcp.config import SeedreamConfig, build_config_from_sources
+
+from _cli_fakes import make_run_args, stub_cli_main
 
 
 def _write_env_file(path: Path, content: str) -> None:
@@ -70,20 +73,6 @@ def test_web_enabled_via_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert config.web_enabled is True
 
 
-def _make_cli_args(web: bool | None, config_file: str | None) -> Namespace:
-    """构造 build_config_from_args 读取的全部 CLI 字段，未测字段取 None。"""
-    return Namespace(
-        api_key=None,
-        base_url=None,
-        model=None,
-        default_size=None,
-        watermark=None,
-        web=web,
-        log_level=None,
-        config_file=config_file,
-    )
-
-
 def test_cli_no_web_overrides_env_file_true(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -92,7 +81,11 @@ def test_cli_no_web_overrides_env_file_true(
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_WEB_ENABLED=true\n")
 
-    config = cli.build_config_from_args(_make_cli_args(web=False, config_file=str(env_file)))
+    args = make_run_args("stdio")
+    args.web = False
+    args.config_file = str(env_file)
+
+    config = cli.build_config_from_args(args)
 
     assert config.web_enabled is False
 
@@ -103,6 +96,39 @@ def test_cli_web_overrides_env_file_false(tmp_path: Path, monkeypatch: pytest.Mo
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_WEB_ENABLED=false\n")
 
-    config = cli.build_config_from_args(_make_cli_args(web=True, config_file=str(env_file)))
+    args = make_run_args("stdio")
+    args.web = True
+    args.config_file = str(env_file)
+
+    config = cli.build_config_from_args(args)
 
     assert config.web_enabled is True
+
+
+def test_cli_main_warns_when_web_enabled_with_stdio_transport(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """web 开启而传输为 stdio 时启动告警经 stderr 兜底可见。"""
+    args = make_run_args("stdio")
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key", web_enabled=True))
+
+    assert bootstrap_module.cli_main() == 0
+    assert "Web 操作台仅在 streamable-http 传输下生效" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("transport", "web_enabled"),
+    [("stdio", False), ("streamable-http", True)],
+)
+def test_cli_main_suppresses_web_warning_without_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    transport: str,
+    web_enabled: bool,
+) -> None:
+    """web 关闭或传输为 streamable-http 时不输出 stdio 忽略告警。"""
+    args = make_run_args(transport)
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key", web_enabled=web_enabled))
+
+    assert bootstrap_module.cli_main() == 0
+    assert "Web 操作台" not in capsys.readouterr().err

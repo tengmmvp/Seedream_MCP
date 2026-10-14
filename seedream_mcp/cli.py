@@ -10,6 +10,7 @@ import argparse
 from typing import Literal, cast
 
 from ._config_sources import _http_auth_token_invalid_reason
+from ._host_syntax import bind_host_invalid_reason
 from .config import (
     DEFAULT_HTTP_HOST,
     DEFAULT_HTTP_PORT,
@@ -210,7 +211,9 @@ def validate_transport_args(args: argparse.Namespace) -> str | None:
     """校验传输相关 CLI 参数组合，返回错误消息；参数合法时返回 None。
 
     仅 streamable-http 需要校验：TLS 证书与私钥必须成对提供或同时省略；
-    --auth-token 显式提供时校验最短长度与可打印 ASCII 字符集，失败原因取自配置侧共用闸口。
+    --auth-token 显式提供时校验最短长度与可打印 ASCII 字符集，失败原因取自配置侧共用闸口；
+    --host 同样校验非空与可打印 ASCII 字符集，与装配期守卫共用判定谓词
+    与理由子句，参数校验期早拒。
     """
     if args.transport != "streamable-http":
         return None
@@ -233,6 +236,9 @@ def validate_transport_args(args: argparse.Namespace) -> str | None:
                 "含控制字符、空白或非 ASCII 字符的令牌与客户端编码口径不一致，"
                 "表现为永久 401 而非显式报错。"
             )
+    host_invalid_reason = bind_host_invalid_reason(args.host)
+    if host_invalid_reason is not None:
+        return f"配置错误：--host {host_invalid_reason}。"
     return None
 
 

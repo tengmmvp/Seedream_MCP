@@ -1,5 +1,6 @@
 """配置构建器测试：多层优先级、别名解析、env 文件合并与不污染 os.environ。"""
 
+import inspect
 import os
 from pathlib import Path
 from typing import Any
@@ -848,6 +849,10 @@ def test_build_config_missing_picker_registration_fails_loudly(
         ({"auto_save_max_file_size": -1}, "auto_save_max_file_size"),
         ({"auto_save_download_timeout": 0}, "auto_save_download_timeout"),
         ({"auto_save_download_timeout": -5}, "auto_save_download_timeout"),
+        ({"body_read_timeout": 0}, "body_read_timeout"),
+        ({"body_read_timeout": -5}, "body_read_timeout"),
+        ({"large_body_admission_concurrency": 0}, "large_body_admission_concurrency"),
+        ({"large_body_admission_concurrency": -1}, "large_body_admission_concurrency"),
         ({"auto_save_max_concurrent": 0}, "auto_save_max_concurrent"),
         ({"auto_save_cleanup_days": -1}, "auto_save_cleanup_days"),
         ({"stream_buffer_max_size": 0}, "stream_buffer_max_size"),
@@ -1009,6 +1014,19 @@ def test_seedream_config_rejects_whitespace_only_netloc() -> None:
         SeedreamConfig(api_key="k", base_url="https:// ")
 
 
+@pytest.mark.parametrize("invalid_base_url", ["https://:8443/api/v3", "http://:8000"])
+def test_seedream_config_rejects_base_url_with_empty_hostname(
+    invalid_base_url: str,
+) -> None:
+    """空主机名带端口的形态 netloc 非空，按 hostname 判定仍在构造期拒绝。
+
+    此类 URL 放行后请求会发往 getaddrinfo('') 解析出的本机地址，
+    携带 API 密钥的连接以网络错误档失败并空转重试。
+    """
+    with pytest.raises(SeedreamConfigError, match="主机名"):
+        SeedreamConfig(api_key="k", base_url=invalid_base_url, allow_http_base_url=True)
+
+
 @pytest.mark.parametrize(
     "valid_base_url",
     [
@@ -1054,6 +1072,75 @@ def test_build_config_rejects_base_url_without_netloc(
 
     with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
         build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== base_url 主机名字符集校验 ====================
+
+
+@pytest.mark.parametrize(
+    "invalid_base_url",
+    [
+        "https://ark .example.com/api/v3",
+        "https:// ark.example.com/",
+        "https://ark.example.com /",
+        "https://ark\x0b.example.com/",
+        "https://ark%zz.com/",
+        "https://ark%2G.example.com/",
+        "https://ark%.com/",
+        "https://ark%2.com/",
+        "https://ark|.example.com",
+        "https://ark`.example.com",
+        "https://例子.com/",
+    ],
+)
+def test_seedream_config_rejects_base_url_with_invalid_hostname_charset(
+    invalid_base_url: str,
+) -> None:
+    """主机名含空格、控制字符、非 ASCII、乱码百分号等非法字符的 base_url 在构造期拒绝。
+
+    此类主机名 urlparse 与 httpx 均不保证在构建期报错，
+    放行后每次 API 调用才以 DNS 解析失败落入网络错误档重试，
+    错误归约档错误地变为 network_error 而非 config_error。
+    """
+    with pytest.raises(SeedreamConfigError, match="非法字符") as excinfo:
+        SeedreamConfig(api_key="k", base_url=invalid_base_url, allow_http_base_url=True)
+
+    assert "环境变量 ARK_BASE_URL" in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    "valid_base_url",
+    [
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "http://10.0.0.1:8000/api/v3",
+        "https://[::1]:8443/api/v3",
+        "https://[fe80::1%25eth0]/api/v3",
+        "https://ark%25.volces.com/api/v3",
+    ],
+)
+def test_seedream_config_accepts_base_url_with_valid_hostname_charset(
+    valid_base_url: str,
+) -> None:
+    """常规域名、IPv4、IPv6 字面量（含 zone-id）与合法 pct-encoded 主机名不被字符集校验误拒。"""
+    config = SeedreamConfig(api_key="k", base_url=valid_base_url, allow_http_base_url=True)
+
+    assert config.base_url == valid_base_url
+
+
+def test_build_config_rejects_base_url_with_invalid_hostname_charset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_config_from_sources 构建路径同样拒绝主机名含空格的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, "ARK_API_KEY=file_key\nARK_BASE_URL=https://ark .example.com/api/v3\n"
+    )
+
+    with pytest.raises(SeedreamConfigError, match="非法字符") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "环境变量 ARK_BASE_URL" in excinfo.value.message
 
 
 # ==================== base_url userinfo 拒绝 ====================
@@ -1103,6 +1190,8 @@ def test_build_config_rejects_base_url_with_userinfo(
         ({"auto_save_download_timeout": 0}, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"),
         ({"prepare_cache_max": 0}, "SEEDREAM_PREPARE_CACHE_MAX"),
         ({"http_max_body_size": 1024}, "SEEDREAM_HTTP_MAX_BODY_SIZE"),
+        ({"body_read_timeout": 0}, "SEEDREAM_BODY_READ_TIMEOUT"),
+        ({"large_body_admission_concurrency": 0}, "SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY"),
         ({"base_url": "ftp://bad.example.com"}, "ARK_BASE_URL"),
         ({"base_url": "https://"}, "ARK_BASE_URL"),
         ({"base_url": "https:foo"}, "ARK_BASE_URL"),
@@ -1225,6 +1314,96 @@ def test_build_config_rejects_non_positive_response_body_limit(
     )
 
     with pytest.raises(SeedreamConfigError, match="response_body_limit"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== SEEDREAM_BODY_READ_TIMEOUT 大请求体读体窗口超时 ====================
+
+
+def test_build_config_loads_body_read_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_BODY_READ_TIMEOUT 显式设置时作为秒数直接生效。"""
+    monkeypatch.delenv("SEEDREAM_BODY_READ_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_BODY_READ_TIMEOUT=600\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.body_read_timeout == 600
+
+
+def test_build_config_body_read_timeout_defaults_to_300(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 body_read_timeout 取默认 300 秒。"""
+    monkeypatch.delenv("SEEDREAM_BODY_READ_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.body_read_timeout == 300
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1", "abc"])
+def test_build_config_rejects_invalid_body_read_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """非正数经下界校验拒绝，不可解析值经取值层拒绝，消息均定位到该变量。"""
+    monkeypatch.delenv("SEEDREAM_BODY_READ_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_BODY_READ_TIMEOUT={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_BODY_READ_TIMEOUT"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY 大请求体并发准入许可数 ====================
+
+
+def test_build_config_loads_large_body_admission_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY 显式设置时作为许可数直接生效。"""
+    monkeypatch.delenv("SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY=8\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.large_body_admission_concurrency == 8
+
+
+def test_build_config_large_body_admission_concurrency_defaults_to_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 large_body_admission_concurrency 取默认 3。"""
+    monkeypatch.delenv("SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.large_body_admission_concurrency == 3
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1", "abc"])
+def test_build_config_rejects_invalid_large_body_admission_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """小于 1 经下界校验拒绝，不可解析值经取值层拒绝，消息均定位到该变量。"""
+    monkeypatch.delenv("SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY"):
         build_config_from_sources(env_file=str(env_file))
 
 
@@ -1433,6 +1612,67 @@ def test_build_config_rejects_duplicate_request_state_keys(
 
     with pytest.raises(SeedreamConfigError, match="重复"):
         build_config_from_sources(env_file=str(env_file))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "ab" * 32,
+        ("ab" * 32) + "," + ("cd" * 32),
+        " " + ("ab" * 32) + " , , " + ("cd" * 32) + " ",
+        "",
+        "   ",
+        ",",
+        "zz" * 32,
+        "abcd",
+        ("ab" * 32) + ",abcd",
+        ("cd" * 32) + "," + ("cd" * 32),
+    ],
+    ids=[
+        "single",
+        "rotation",
+        "strip-blank-entries",
+        "empty",
+        "whitespace",
+        "comma-only",
+        "non-hex",
+        "short",
+        "short-after-valid",
+        "duplicate",
+    ],
+)
+def test_request_state_key_entry_parsing_agrees_between_import_probe_and_build(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """导入期先行取值与配置构建对同一环境变量的条目文法解析结果一致。
+
+    文法若在一侧单独调整（分隔符或空白容忍口径），
+    嵌入式宿主会带着与构建不一致的导入期密钥环运行，本用例在两路径分歧时转红。
+    """
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", raw)
+
+    probed = config_module.active_request_state_keys()
+
+    try:
+        built = build_config_from_sources(overrides={"api_key": "k"}).request_state_secret_keys
+    except SeedreamConfigError:
+        assert probed is None
+        return
+    assert probed == built
+
+
+def test_request_state_key_decode_shared_by_probe_and_picker() -> None:
+    """导入期取值与字段 picker 共用同一拆分与解码单点；绕开解码单点或探测侧手写拆分时在此转红。"""
+    probe_source = inspect.getsource(config_module.active_request_state_keys)
+    assert "_pick_request_state_key_bytes" not in probe_source
+    assert "_split_optional_str_tuple" in probe_source
+    assert "split(" not in probe_source
+    assert "_decode_request_state_key_entries" in probe_source
+
+    picker_source = inspect.getsource(config_sources._pick_request_state_key_bytes)
+    assert "_decode_request_state_key_entries" in picker_source
 
 
 def test_request_state_key_error_message_matches_violation_reason() -> None:

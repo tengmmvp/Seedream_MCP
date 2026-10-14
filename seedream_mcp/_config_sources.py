@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 from dataclasses import MISSING, field, fields
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from dotenv import dotenv_values
 
 from .utils.core.errors import SeedreamConfigError, has_message_value
 from .utils.core.logs import EarlyMessageBuffer
+from .utils.core.sanitizers import is_printable_ascii
 from .utils.core.validators import INT_TEXT_PATTERN, parse_bool
 from .utils.model.model_capabilities import MODEL_ALIASES
 
@@ -97,65 +98,12 @@ def _ensure_field_utf8_encodable(value: str, field_name: str) -> None:
         ) from exc
 
 
-def _is_printable_ascii(value: str) -> bool:
-    """判定是否全为 0x21-0x7E 的可打印 ASCII，空白与控制字符判否。"""
-    return all(0x21 <= ord(ch) <= 0x7E for ch in value)
-
-
 def _http_auth_token_invalid_reason(token: str, min_length: int) -> str | None:
     """返回鉴权令牌的失败类别（"length" 或 "charset"），合法返回 None；CLI 与配置侧共用。"""
     if len(token) < min_length:
         return "length"
-    if not _is_printable_ascii(token):
+    if not is_printable_ascii(token):
         return "charset"
-    return None
-
-
-def _bracket_ipv6_literal(entry: str) -> str | None:
-    """方括号 host 条目返回内部 IPv6 字面量，非方括号或未闭合形态返回 None。
-
-    与 _decompose_allowed_host_entry 的方括号语法同居本模块，形态演化同点维护。
-    """
-    if not entry.startswith("["):
-        return None
-    end = entry.find("]")
-    return entry[1:end] if end > 1 else None
-
-
-def _decompose_allowed_host_entry(entry: str) -> tuple[str, str] | None:
-    """拆分 Host 允许列表条目为 host 与端口后缀，无法识别的形态返回 None。
-
-    端口后缀为空串、":<1-65535 的 ASCII 数字>" 或 ":*"；host 为方括号 IPv6 字面量
-    或不含逗号、冒号与通配符、首尾无点号且无连续点号的非空主机名。
-    """
-    if entry.startswith("["):
-        # 畸形方括号形态直接拒绝。
-        literal = _bracket_ipv6_literal(entry)
-        if literal is None:
-            return None
-        host, suffix = f"[{literal}]", entry[len(literal) + 2 :]
-    else:
-        idx = entry.rfind(":")
-        host, suffix = (entry, "") if idx == -1 else (entry[:idx], entry[idx:])
-        # 逗号与连续点不出现在真实 Host 头中，序列形态误拼的条目在此拒绝。
-        if (
-            not host
-            or host.startswith(".")
-            or host.endswith(".")
-            or ".." in host
-            or any(ch in host for ch in (":", "*", "[", "]", ","))
-        ):
-            return None
-    if suffix in ("", ":*"):
-        return host, suffix
-    if suffix.startswith(":"):
-        port_text = suffix[1:]
-        # SDK 的 Host 校验为精确串比较，前导零端口虽数值合法但与客户端规范化
-        # 形态不匹配，按无效条目拒绝。
-        if port_text.isascii() and port_text.isdigit() and not port_text.startswith("0"):
-            port = int(port_text)
-            if 1 <= port <= 65535:
-                return host, suffix
     return None
 
 
@@ -318,15 +266,12 @@ def _pick_optional_str(
     return str(raw).strip() or None
 
 
-def _pick_optional_str_tuple(
-    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
-) -> tuple[str, ...] | None:
-    """按优先级取值后按逗号拆分为去空白条目元组，空值归 None 表示未配置。
+def _split_optional_str_tuple(raw: object) -> tuple[str, ...] | None:
+    """按逗号拆分为去空白条目元组，空值归 None 表示未配置。
 
-    逐项 strip 并丢弃空条目，全部条目为空时同样归 None。序列形态的 override
-    按元素取值，不经 str() 把整个容器拼成畸形条目。
+    逐项 strip 并丢弃空条目，全部条目为空时同样归 None。序列形态按元素取值，
+    不经 str() 把整个容器拼成畸形条目。
     """
-    raw = _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
     if raw is None:
         return None
     if isinstance(raw, (list, tuple)):
@@ -340,19 +285,26 @@ def _pick_optional_str_tuple(
     return tuple(valid_entries) or None
 
 
-def _pick_request_state_key_bytes(
+def _pick_optional_str_tuple(
     overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
-) -> tuple[bytes, ...] | None:
-    """按优先级取值后按逗号拆分并逐条 hex 解码为密钥字节，空值归 None。
+) -> tuple[str, ...] | None:
+    """按优先级取值后经 _split_optional_str_tuple 拆分为去空白条目元组。"""
+    return _split_optional_str_tuple(
+        _pick_config_value(overrides, field_name, env_key, env_values, ENV_DEFAULTS[env_key])
+    )
 
-    条目归一复用 _pick_optional_str_tuple，序号按有效条目计数；解码失败的
-    错误消息给出格式要求与生成命令提示，不回显密钥内容；解码后单键字节数
-    下限与重复键由 validate 校验。
+
+def _decode_request_state_key_entries(
+    entries: Sequence[str] | None,
+) -> tuple[bytes, ...] | None:
+    """将密钥环条目逐条 hex 解码为字节元组，空输入归 None，供字段 picker 与导入期先行取值共用。
+
+    解码失败的错误消息给出格式要求与生成命令提示，不回显密钥内容；序号按
+    有效条目计数；解码后单键字节数下限与重复键由 validate 校验。
 
     Raises:
         SeedreamConfigError: 任一条目无法以十六进制解码。
     """
-    entries = _pick_optional_str_tuple(overrides, field_name, env_key, env_values)
     if entries is None:
         return None
     material: list[bytes] = []
@@ -364,9 +316,18 @@ def _pick_request_state_key_bytes(
                 f"request_state_secret_keys 第 {effective_index} 个条目不是合法的十六进制密钥，"
                 f"每键须为解码后不少于 {_REQUEST_STATE_KEY_MIN_BYTES} 字节的十六进制串；"
                 f"生成命令: {_REQUEST_STATE_KEYGEN_COMMAND}"
-                f"{_env_var_suffix(field_name)}"
+                f"{_env_var_suffix('request_state_secret_keys')}"
             ) from exc
     return tuple(material) or None
+
+
+def _pick_request_state_key_bytes(
+    overrides: Mapping[str, object], field_name: str, env_key: str, env_values: Mapping[str, str]
+) -> tuple[bytes, ...] | None:
+    """按优先级取值并拆分为条目后，解码委托 _decode_request_state_key_entries。"""
+    return _decode_request_state_key_entries(
+        _pick_optional_str_tuple(overrides, field_name, env_key, env_values)
+    )
 
 
 def _parse_int_with_env_hint(value: object, field_name: str) -> int:
@@ -456,6 +417,8 @@ _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {
     "workspace_root": (_pick_optional_str, None),
     "http_auth_token": (_pick_optional_str, None),
     "http_max_body_size": (_pick_int, None),
+    "body_read_timeout": (_pick_int, None),
+    "large_body_admission_concurrency": (_pick_int, None),
     "web_enabled": (_pick_bool, "web"),
     "http_allowed_hosts": (_pick_optional_str_tuple, None),
     "http_allowed_origins": (_pick_optional_str_tuple, None),

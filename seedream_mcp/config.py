@@ -20,25 +20,25 @@ from ._config_sources import (
     # as 同名形态为显式再导出，resources 的复位协议经 config 模块属性访问。
     _BUILD_WARNINGS as _BUILD_WARNINGS,
     _FIELD_ENV_MAP,
-    _bracket_ipv6_literal,
     _FIELD_PICKERS,
     _KNOWN_OVERRIDE_KEYS,
     _REQUEST_STATE_KEYGEN_COMMAND,
     _REQUEST_STATE_KEY_MIN_BYTES,
-    _decompose_allowed_host_entry,
+    _decode_request_state_key_entries,
     _ensure_field_utf8_encodable,
     _env_field,
     _env_var_suffix,
     _http_auth_token_invalid_reason,
-    _is_printable_ascii,
     _pick_config_value,
     _read_env_values,
+    _split_optional_str_tuple,
     env_family_prefixes,
     init_env_registry,
     normalize_model_selector,
 )
+from ._host_syntax import _bracket_ipv6_literal, _decompose_allowed_host_entry
 from .utils.core.errors import SeedreamConfigError, SeedreamValidationError
-from .utils.core.sanitizers import is_sensitive_key
+from .utils.core.sanitizers import is_printable_ascii, is_sensitive_key
 from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
 from .utils.core.executors import register_cpu_offload_depth_provider
 from .utils.core.logs import (
@@ -125,6 +125,30 @@ def _validate_ipv6_host_literal(literal: str, entry: str, label: str, env_key: s
         )
 
 
+# RFC 3986 reg-name 的非字母数字字符：unreserved 符号与 sub-delims；冒号容纳
+# 方括号 IPv6 字面量，百分号按 pct-encoded 三元组在 _is_valid_url_hostname 判定。
+_REG_NAME_SYMBOLS = frozenset("-._~!$&'()*+,;=")
+_PCT_ENCODED_HEXDIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_valid_url_hostname(hostname: str) -> bool:
+    """主机名仅含 RFC 3986 reg-name 字符（冒号容纳 IPv6 字面量）且百分号为合法 pct-encoded 三元组时为 True。"""
+    index = 0
+    while index < len(hostname):
+        char = hostname[index]
+        if char == "%":
+            # RFC 3986 的百分号仅以 pct-encoded 三元组出现，裸 % 或尾缀非两位十六进制为乱码。
+            encoded = hostname[index + 1 : index + 3]
+            if len(encoded) < 2 or any(c not in _PCT_ENCODED_HEXDIGITS for c in encoded):
+                return False
+            index += 3
+            continue
+        if not (char.isascii() and (char.isalnum() or char in _REG_NAME_SYMBOLS or char == ":")):
+            return False
+        index += 1
+    return True
+
+
 @dataclass(frozen=True)
 class SeedreamConfig:
     """Seedream MCP 工具配置。
@@ -176,6 +200,11 @@ class SeedreamConfig:
         http_auth_token: streamable-http 传输的 Bearer 鉴权令牌；配置时长度不得
             少于 HTTP_AUTH_TOKEN_MIN_LENGTH 字符且须为可打印 ASCII。
         http_max_body_size: streamable-http 请求体大小上限字节数，默认 64MB。
+        body_read_timeout: 读体窗口的超时秒数，未申报（chunked 等）与大请求体统一限时，
+            超窗回 408 断连并归还并发准入许可，防慢速上传钉死许可与连接。
+        large_body_admission_concurrency: 大请求体并发准入的许可数，约束同时在读取
+            的大请求体个数，申报超阈值与未申报累计越阈的请求均占许可，
+            与生成 API 并发解耦。
         web_enabled: 是否在 streamable-http 传输上开启 Web 操作台，默认关闭；开启后
             同一进程提供 /web 网页与 /web/api 接口，stdio 传输不受影响。
         http_allowed_hosts: 非回环绑定的 Host 头允许列表，条目支持 host、host:port
@@ -239,6 +268,10 @@ class SeedreamConfig:
     workspace_root: str | None = _env_field(None, "SEEDREAM_WORKSPACE_ROOT")
     http_auth_token: str | None = _env_field(None, "SEEDREAM_HTTP_AUTH_TOKEN")
     http_max_body_size: int = _env_field(64 * 1024 * 1024, "SEEDREAM_HTTP_MAX_BODY_SIZE")
+    body_read_timeout: int = _env_field(300, "SEEDREAM_BODY_READ_TIMEOUT")
+    large_body_admission_concurrency: int = _env_field(
+        3, "SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY"
+    )
     web_enabled: bool = _env_field(False, "SEEDREAM_WEB_ENABLED")
     http_allowed_hosts: tuple[str, ...] | None = _env_field(None, "SEEDREAM_HTTP_ALLOWED_HOSTS")
     http_allowed_origins: tuple[str, ...] | None = _env_field(None, "SEEDREAM_HTTP_ALLOWED_ORIGINS")
@@ -285,7 +318,7 @@ class SeedreamConfig:
         _ensure_field_utf8_encodable(self.api_key, "api_key")
         # 密钥含控制字符、空白或非 ASCII 字符必为无效输入，留到请求期只以头值
         # 非法或编码失败等晦涩错误暴露。
-        if not _is_printable_ascii(self.api_key):
+        if not is_printable_ascii(self.api_key):
             raise SeedreamConfigError(f"API密钥须为可打印ASCII字符{_env_var_suffix('api_key')}")
         if self.api_key == "your_api_key_here":
             raise SeedreamConfigError(
@@ -305,9 +338,17 @@ class SeedreamConfig:
         base_url_scheme = parsed_base_url.scheme.lower()
         if not self.base_url or base_url_scheme not in ("http", "https"):
             raise SeedreamConfigError(invalid_url_message)
-        # netloc 缺失的畸形 URL 在构造期拒绝，避免运行期才以网络错误档失败。
-        if not parsed_base_url.netloc.strip():
+        # 主机名缺失在构造期拒绝，含 https://:8443 一类 netloc 非空形态，避免
+        # 运行期才以网络错误档失败；空端口形态主机名非空，不受影响。
+        base_url_hostname = parsed_base_url.hostname or ""
+        if not base_url_hostname.strip():
             raise SeedreamConfigError(f"base_url缺少主机名{_env_var_suffix('base_url')}")
+        # 字符集非法的主机名（空格、控制字符、非 ASCII、乱码百分号等）同样延到
+        # 运行期才失败，与缺失同口径在构造期拒绝。
+        if not _is_valid_url_hostname(base_url_hostname):
+            raise SeedreamConfigError(
+                f"base_url主机名含非法字符: {base_url_hostname}{_env_var_suffix('base_url')}"
+            )
         # 非数字或越界端口在 .port 求值即抛 ValueError，归拢到配置构建期拒绝。
         try:
             base_url_port = parsed_base_url.port
@@ -516,7 +557,7 @@ class SeedreamConfig:
             self._validate_dir_field(self.workspace_root, "workspace_root")
 
     def _validate_http_fields(self) -> None:
-        """校验 streamable-http 鉴权令牌长度与字符集、请求体下限与 Host 允许列表。"""
+        """校验 streamable-http 鉴权令牌长度与字符集、请求体下限、读体窗口超时、大请求体并发准入与 Host/Origin 允许列表。"""
         # 与 api_key 同口径回写 strip，直构路径的空白尾符不致误判为非法字符集。
         object.__setattr__(self, "http_auth_token", (self.http_auth_token or "").strip() or None)
         invalid_reason = (
@@ -537,6 +578,15 @@ class SeedreamConfig:
             raise SeedreamConfigError(
                 f"http_max_body_size 不能低于 1MB（{_HTTP_MAX_BODY_SIZE_FLOOR} 字节）"
                 f"{_env_var_suffix('http_max_body_size')}"
+            )
+        if self.body_read_timeout <= 0:
+            raise SeedreamConfigError(
+                f"body_read_timeout必须大于0{_env_var_suffix('body_read_timeout')}"
+            )
+        if self.large_body_admission_concurrency < 1:
+            raise SeedreamConfigError(
+                "large_body_admission_concurrency必须不小于1"
+                f"{_env_var_suffix('large_body_admission_concurrency')}"
             )
         self._validate_http_allowed_hosts()
         self._validate_http_allowed_origins()
@@ -948,10 +998,10 @@ def active_request_state_keys() -> tuple[bytes, ...] | None:
     """向 resources 提供 requestState 密钥环的活动取值。
 
     活动配置已就绪时返回其密钥环；导入期配置未构建，仅按系统环境变量先行
-    取密钥环，.env 中的值由启动路径构建后经 rebind 校正；不构建完整配置，
-    构建告警缓冲不为其写入，drain 输出与启动期声明的配置来源一致。先行取值
-    解码失败或未过强度与重复校验时按未配置处理，真正的配置错误由启动路径
-    报告。
+    取密钥环，条目拆分与解码均复用配置构建的单点。.env 中的值由启动路径
+    构建后经 rebind 校正；不构建完整配置，构建告警缓冲不为其写入，drain
+    输出与启动期声明的配置来源一致。先行取值解码失败或未过强度与重复
+    校验时按未配置处理，真正的配置错误由启动路径报告。
 
     Returns:
         解码后的密钥字节元组，未配置时为 None。
@@ -959,18 +1009,16 @@ def active_request_state_keys() -> tuple[bytes, ...] | None:
     config = _active_config if _active_config is not None else _global_config
     if config is not None:
         return config.request_state_secret_keys
-    raw = os.getenv("SEEDREAM_REQUEST_STATE_KEYS")
-    if not raw or not raw.strip():
-        return None
-    entries = tuple(entry.strip() for entry in raw.split(",") if entry.strip())
     try:
-        keys = tuple(bytes.fromhex(entry) for entry in entries)
-    except ValueError:
+        keys = _decode_request_state_key_entries(
+            _split_optional_str_tuple(os.getenv("SEEDREAM_REQUEST_STATE_KEYS"))
+        )
+    except SeedreamConfigError:
         return None
     # 环判定与配置构建共用同一谓词，不合法值按未配置处理，避免喂给 SDK 在导入期崩溃。
-    if _first_invalid_request_state_key_message(keys) is not None:
+    if keys is not None and _first_invalid_request_state_key_message(keys) is not None:
         return None
-    return keys or None
+    return keys
 
 
 def _make_env_location_provider(attr: str, env_name: str) -> Callable[[], str | None]:

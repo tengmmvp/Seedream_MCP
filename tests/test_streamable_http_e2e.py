@@ -139,6 +139,29 @@ async def test_e2e_oversized_body_returns_413(reset_http_app_state: None) -> Non
     assert response.json()["error_description"] == "Request body exceeds limit"
 
 
+async def test_e2e_large_mcp_body_traverses_admission(reset_http_app_state: None) -> None:
+    """超过准入阈值的大请求体经传输层流式准入到达 MCP 应用。
+
+    5MB 非法 JSON 走全栈（准入中间件取许可限时读体，tee 原样转发），
+    MCP 应用以 -32700 解析错误应答，证明流式准入对 /mcp 载体透明。
+    """
+    app = build_transport_app("s3cret", stateless=True, json_response=True)
+    async with _LifespanManager(app):
+        async with web_asgi_client(app) as client:
+            response = await client.post(
+                _MCP_PATH,
+                content=b"x" * (5 * 1024 * 1024),
+                headers={
+                    "authorization": "Bearer s3cret",
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+            )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32700
+
+
 async def test_e2e_health_check_returns_200_without_token(reset_http_app_state: None) -> None:
     """GET /health 由最外层健康检查中间件短路返回 200，无需 Bearer 令牌。"""
     app = build_transport_app("s3cret")

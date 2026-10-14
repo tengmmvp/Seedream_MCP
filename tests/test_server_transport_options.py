@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import re
 from argparse import Namespace
 from typing import Any, cast
 
@@ -16,8 +17,11 @@ import seedream_mcp.bootstrap as bootstrap_module
 import seedream_mcp.cli as cli
 import seedream_mcp.server as server
 import seedream_mcp.transport as transport_module
+from seedream_mcp._host_syntax import bind_host_invalid_reason
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.model.model_capabilities import MODEL_ALIASES
+
+from _cli_fakes import make_run_args, stub_cli_main
 
 
 def test_build_arg_parser_rejects_deprecated_sse_transport() -> None:
@@ -97,46 +101,14 @@ def test_tls12_ssl_context_factory_enforces_minimum_version() -> None:
     assert result.minimum_version == ssl.TLSVersion.TLSv1_2
 
 
-def _make_cli_args(transport: str) -> Namespace:
-    return Namespace(
-        api_key=None,
-        config_file=None,
-        model=None,
-        default_size=None,
-        watermark=None,
-        web=False,
-        log_level=None,
-        base_url=None,
-        transport=transport,
-        host="127.0.0.1",
-        port=8000,
-        stateless=False,
-        auth_token=None,
-        ssl_certfile=None,
-        ssl_keyfile=None,
-        insecure_allow_non_tls=False,
-    )
-
-
-def _stub_cli(monkeypatch: pytest.MonkeyPatch, args: Namespace, config: SeedreamConfig) -> None:
-    class _FakeParser:
-        def parse_args(self) -> Namespace:
-            return args
-
-    monkeypatch.setattr(bootstrap_module, "build_arg_parser", lambda: _FakeParser())
-    monkeypatch.setattr(bootstrap_module, "build_config_from_args", lambda _args: config)
-    monkeypatch.setattr(bootstrap_module, "setup_logging", lambda *a, **k: None)
-    monkeypatch.setattr(bootstrap_module, "warn_remote_exposure", lambda *a, **k: None)
-
-
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
 def test_cli_main_dispatches_to_correct_runner(
     monkeypatch: pytest.MonkeyPatch, transport: str
 ) -> None:
     """cli_main 按传输类型分发到对应 runner 并返回 0。"""
-    args = _make_cli_args(transport)
+    args = make_run_args(transport)
     config = SeedreamConfig(api_key="test_key")
-    _stub_cli(monkeypatch, args, config)
+    stub_cli_main(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
     def _fake_run(*, transport: str) -> None:
@@ -176,10 +148,10 @@ def test_cli_main_forwards_web_enabled_to_http_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """config.web_enabled 经 cli_main 转发到 http runner 的 web_enabled 参数。"""
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.web = True
     config = SeedreamConfig(api_key="test_key", web_enabled=True)
-    _stub_cli(monkeypatch, args, config)
+    stub_cli_main(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
@@ -204,11 +176,10 @@ def test_cli_main_refuses_non_loopback_http_without_auth_token(
 ) -> None:
     """非回环绑定且未提供鉴权令牌时 fail-closed 拒绝启动。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.host = "0.0.0.0"
     args.auth_token = None
-    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key"))
 
     assert server.cli_main() == 1
 
@@ -218,13 +189,12 @@ def test_cli_main_refuses_non_loopback_http_without_tls(
 ) -> None:
     """非回环绑定携带令牌但无 TLS 且未显式豁免时 fail-closed 拒绝启动，防止令牌明文传输。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.host = "0.0.0.0"
     args.auth_token = "cli-secret-0123456789"
     args.ssl_certfile = None
     args.insecure_allow_non_tls = False
-    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key"))
 
     assert server.cli_main() == 1
 
@@ -234,10 +204,9 @@ def test_cli_main_refuses_non_ascii_cli_auth_token(
 ) -> None:
     """--auth-token 含非 ASCII 字符时构建期拒绝启动，不待部署后表现为永久 401。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.auth_token = "cli-令牌-0123456789"
-    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key"))
 
     assert server.cli_main() == 1
 
@@ -247,12 +216,12 @@ def test_cli_main_allows_non_loopback_http_with_tls(
 ) -> None:
     """非回环绑定携带令牌与 TLS 证书时正常分发并透传 SSL 选项。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.host = "0.0.0.0"
     args.auth_token = "cli-secret-0123456789"
     args.ssl_certfile = "/fake/cert.pem"
     args.ssl_keyfile = "/fake/key.pem"
-    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key"))
     captured: dict[str, dict[str, object]] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
@@ -282,12 +251,11 @@ def test_cli_main_allows_non_loopback_http_with_explicit_non_tls_opt_in(
 ) -> None:
     """非回环绑定携带令牌并显式 --insecure-allow-non-tls 时允许，适用于反代终结 TLS 场景。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.host = "0.0.0.0"
     args.auth_token = "cli-secret-0123456789"
     args.insecure_allow_non_tls = True
-    _stub_cli(monkeypatch, args, SeedreamConfig(api_key="test_key"))
-    monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key"))
 
     assert server.cli_main() == 0
 
@@ -300,7 +268,7 @@ def test_validate_transport_args_rejects_unpaired_tls_cert_and_key(
     certfile: str | None, keyfile: str | None
 ) -> None:
     """ssl_certfile 与 ssl_keyfile 必须同时提供或同时省略，仅提供其一无法建立 TLS。"""
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.ssl_certfile = certfile
     args.ssl_keyfile = keyfile
 
@@ -312,18 +280,18 @@ def test_validate_transport_args_rejects_unpaired_tls_cert_and_key(
 
 def test_validate_transport_args_accepts_paired_tls_options() -> None:
     """证书与私钥成对提供或同时省略时校验通过，返回 None。"""
-    paired = _make_cli_args("streamable-http")
+    paired = make_run_args("streamable-http")
     paired.ssl_certfile = "c.pem"
     paired.ssl_keyfile = "k.pem"
     assert cli.validate_transport_args(paired) is None
 
-    both_absent = _make_cli_args("streamable-http")
+    both_absent = make_run_args("streamable-http")
     assert cli.validate_transport_args(both_absent) is None
 
 
 def test_validate_transport_args_skips_stdio_transport() -> None:
     """stdio 传输不涉及 TLS 参数，参数不成对也不构成错误。"""
-    args = _make_cli_args("stdio")
+    args = make_run_args("stdio")
     args.ssl_certfile = "c.pem"
     args.ssl_keyfile = None
     assert cli.validate_transport_args(args) is None
@@ -331,7 +299,7 @@ def test_validate_transport_args_skips_stdio_transport() -> None:
 
 def test_validate_transport_args_rejects_short_cli_auth_token() -> None:
     """--auth-token 显式提供且短于 16 字符时拒绝，CLI 路径与配置侧同口径。"""
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.auth_token = "short-token"
 
     message = cli.validate_transport_args(args)
@@ -342,7 +310,7 @@ def test_validate_transport_args_rejects_short_cli_auth_token() -> None:
 
 def test_validate_transport_args_rejects_non_ascii_cli_auth_token() -> None:
     """--auth-token 含中文等非 ASCII 字符时拒绝，CLI 路径与配置侧同口径。"""
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.auth_token = "cli-令牌-0123456789"
 
     message = cli.validate_transport_args(args)
@@ -353,13 +321,67 @@ def test_validate_transport_args_rejects_non_ascii_cli_auth_token() -> None:
 
 def test_validate_transport_args_accepts_long_or_blank_cli_auth_token() -> None:
     """达到最短长度的令牌放行；纯空白视为未提供穿透配置侧校验。"""
-    long_enough = _make_cli_args("streamable-http")
+    long_enough = make_run_args("streamable-http")
     long_enough.auth_token = "cli-token-0123456789"
     assert cli.validate_transport_args(long_enough) is None
 
-    blank = _make_cli_args("streamable-http")
+    blank = make_run_args("streamable-http")
     blank.auth_token = "   "
     assert cli.validate_transport_args(blank) is None
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    ["服务器.本地", "127.0.0.1 ", "127.0.0.1\x01"],
+    ids=["non-ascii", "space", "control"],
+)
+def test_validate_transport_args_rejects_non_printable_ascii_cli_host(bad_host: str) -> None:
+    """--host 含非 ASCII、空白或控制字符时拒绝，理由子句取自绑定地址共用谓词，与装配期同文案。"""
+    args = make_run_args("streamable-http")
+    args.host = bad_host
+
+    message = cli.validate_transport_args(args)
+
+    reason = bind_host_invalid_reason(bad_host)
+    assert reason is not None
+    assert message == f"配置错误：--host {reason}。"
+    assert "--host 须为可打印ASCII字符" in message
+
+
+def test_validate_transport_args_rejects_empty_cli_host() -> None:
+    """--host= 空串在参数校验期被拒，理由子句取自绑定地址共用谓词，与装配期同文案。"""
+    args = make_run_args("streamable-http")
+    args.host = ""
+
+    message = cli.validate_transport_args(args)
+
+    reason = bind_host_invalid_reason("")
+    assert reason is not None
+    assert message == f"配置错误：--host {reason}。"
+    assert "--host 不能为空" in message
+
+
+@pytest.mark.parametrize("good_host", ["127.0.0.1", "0.0.0.0", "[::1]", "::", "localhost"], ids=str)
+def test_validate_transport_args_accepts_valid_hosts(good_host: str) -> None:
+    """回环、通配、方括号 IPv6 与主机名绑定地址共用谓词判定通过，CLI 校验同放行。"""
+    assert bind_host_invalid_reason(good_host) is None
+
+    args = make_run_args("streamable-http")
+    args.host = good_host
+
+    assert cli.validate_transport_args(args) is None
+
+
+def test_cli_main_refuses_non_ascii_cli_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--host 含非 ASCII 字符时启动期报配置错误退出，不待运行期以全站 500/421 暴露。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
+    args = make_run_args("streamable-http")
+    args.host = "服务器.本地"
+    stub_cli_main(monkeypatch, args, SeedreamConfig(api_key="test_key"))
+
+    assert server.cli_main() == 1
 
 
 def test_cli_main_config_error_returns_exit_code_one(
@@ -368,7 +390,7 @@ def test_cli_main_config_error_returns_exit_code_one(
     """配置构建抛 SeedreamConfigError 时 cli_main 返回退出码 1。"""
     from seedream_mcp.utils.core.errors import SeedreamConfigError
 
-    args = _make_cli_args("stdio")
+    args = make_run_args("stdio")
 
     class _FakeParser:
         def parse_args(self) -> Namespace:
@@ -386,9 +408,9 @@ def test_cli_main_config_error_returns_exit_code_one(
 
 def test_cli_main_keyboard_interrupt_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """运行期间 KeyboardInterrupt 时 cli_main 捕获并返回退出码 0。"""
-    args = _make_cli_args("stdio")
+    args = make_run_args("stdio")
     config = SeedreamConfig(api_key="test_key")
-    _stub_cli(monkeypatch, args, config)
+    stub_cli_main(monkeypatch, args, config)
 
     def _raise_interrupt(*, transport: str) -> None:
         raise KeyboardInterrupt
@@ -402,9 +424,9 @@ def test_cli_main_runtime_exception_returns_exit_code_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """运行期间抛一般 Exception 时 cli_main 捕获并返回退出码 1。"""
-    args = _make_cli_args("stdio")
+    args = make_run_args("stdio")
     config = SeedreamConfig(api_key="test_key")
-    _stub_cli(monkeypatch, args, config)
+    stub_cli_main(monkeypatch, args, config)
 
     def _raise_runtime(*, transport: str) -> None:
         raise RuntimeError("boom")
@@ -603,12 +625,12 @@ def test_cli_main_non_loopback_auth_token_from_active_config(
     CLI 参数。
     """
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.host = "0.0.0.0"
     args.auth_token = None
     args.insecure_allow_non_tls = True
     config = SeedreamConfig(api_key="test_key", http_auth_token="env-token-0123456789")
-    _stub_cli(monkeypatch, args, config)
+    stub_cli_main(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
@@ -633,12 +655,12 @@ def test_cli_main_cli_auth_token_overrides_config_token(
 ) -> None:
     """CLI 与配置同时提供令牌时 CLI 优先，与配置构建的覆盖优先级一致。"""
     monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
-    args = _make_cli_args("streamable-http")
+    args = make_run_args("streamable-http")
     args.host = "0.0.0.0"
     args.auth_token = "cli-token-0123456789"
     args.insecure_allow_non_tls = True
     config = SeedreamConfig(api_key="test_key", http_auth_token="env-token-0123456789")
-    _stub_cli(monkeypatch, args, config)
+    stub_cli_main(monkeypatch, args, config)
     captured: dict[str, object] = {}
 
     def _fake_http_run(  # type: ignore[no-untyped-def]
@@ -760,6 +782,25 @@ def test_transport_security_loopback_ignores_allowed_hosts(
     ]
 
 
+@pytest.mark.parametrize(
+    "bad_host",
+    ["", "服务器.本地", "127.0.0.1 ", "127.0.0.1\x01"],
+    ids=["empty", "non-ascii", "space", "control"],
+)
+def test_build_streamable_app_rejects_non_printable_ascii_host(
+    monkeypatch: pytest.MonkeyPatch, bad_host: str
+) -> None:
+    """app 装配公共入口对空串与非可打印 ASCII 绑定地址抛 SeedreamConfigError，错误文案取自共用谓词。"""
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    _inject_transport_config(monkeypatch, SeedreamConfig(api_key="test_key"))
+    reason = bind_host_invalid_reason(bad_host)
+    assert reason is not None
+
+    with pytest.raises(SeedreamConfigError, match=re.escape(f"绑定地址{reason}")):
+        transport_module._build_streamable_app(bad_host, True, "", False)
+
+
 # ==================== 残余任务回收 ====================
 
 
@@ -841,3 +882,16 @@ async def test_well_known_mcp_exempt_from_bearer_token(
     assert discovery.status_code == 303
     assert discovery.headers["location"] == "/mcp"
     assert mcp_endpoint.status_code == 401
+
+
+def test_register_well_known_mcp_route_is_idempotent() -> None:
+    """连续两次注册后端点发现路由条目恰好一条，重复构建 streamable app 不叠加路由。"""
+    transport_module._register_well_known_mcp_route()
+    transport_module._register_well_known_mcp_route()
+
+    paths = [
+        getattr(route, "path", None)
+        for route in getattr(server.mcp, "_custom_starlette_routes", ())
+    ]
+
+    assert paths.count(transport_module.WELL_KNOWN_MCP_PATH) == 1

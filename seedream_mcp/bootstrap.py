@@ -92,6 +92,14 @@ def cli_main() -> int:
             # 退出路径的 stderr 兜底：SEEDREAM_LOG_LEVEL 高于 ERROR 时日志通道被过滤，仍保证可见。
             print(error, file=sys.stderr)
             return 1
+        if config.web_enabled and transport != "streamable-http":
+            warning = (
+                f"配置警告：Web 操作台仅在 streamable-http 传输下生效，当前 {transport} 传输"
+                "已忽略 --web/SEEDREAM_WEB_ENABLED，如需浏览器访问请以 "
+                "--transport streamable-http 启动。"
+            )
+            logger.warning(warning)
+            print(warning, file=sys.stderr)
         if transport == "streamable-http":
             warn_remote_exposure(args.host, auth_enabled=bool(auth_token))
             run_streamable_http(
