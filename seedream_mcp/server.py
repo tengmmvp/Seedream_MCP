@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -66,6 +67,7 @@ from .tools import (
     run_text_to_image,
 )
 from .tools.core.common import get_lifespan_resource
+from .tools.core.model_info import build_model_info_description
 from .tools.core.schemas import (
     AUTO_SAVE_DESCRIPTION,
     BACKGROUND_DESCRIPTION,
@@ -137,6 +139,7 @@ from .utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
+from .utils.io.io_file import open_packaged_read
 from .utils.io.io_path import get_workspace_roots
 from .utils.io.io_roots import (
     modern_revision_negotiated,
@@ -678,17 +681,19 @@ async def browse_images(
     title="Seedream 模型信息",
     annotations=READ_ONLY_TOOL_ANNOTATIONS,
     icons=_tool_icons("get_model_info"),
+    description=build_model_info_description(),
 )
 async def get_model_info(
     ctx: Context[Any, Any] | None = None,
 ) -> Annotated[CallToolResult, GetModelInfoStructuredOutput]:
     """查询当前配置模型的能力快照。
 
-    返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、图层拆分、透明背景、尺寸档位与像素区间，
-    以及 output_format、stream、web_search、组图生成的支持情况。
+    返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、尺寸档位与像素区间，
+    以及图层拆分、透明背景、输出格式、流式输出、联网搜索与组图生成的支持情况。
     生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。
     模型由服务器配置决定，更换模型请告知用户调整服务器配置。
     """
+    # 工具描述唯一来源是注册处的 description= 派生文本，显式传入时 SDK 不读 docstring。
     return await run_get_model_info(_config_from_context(ctx))
 
 
@@ -702,10 +707,10 @@ def _tighten_flat_tool_schemas() -> None:
     工具注册表集中修补 inputSchema 顶层声明与参数模型两处，使客户端本地校验与
     服务端运行时都拒绝未知键，新注册工具自动覆盖，无需维护名单。于 import 期
     执行，先于任何 tools/list 与 tools/call 生效。依赖 SDK 私有路径
-    ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，先探测属性存在性，
-    缺失时记录错误并跳过收紧，不抛异常不阻断启动；失效由
-    test_flat_input_schema_forbids_additional_properties 兜底报警。SDK 升级 2.x
-    minor 版本时需复核这两个私有路径仍存在，行为由守护测试锁定。
+    ``mcp._tool_manager`` 与 ``tool.fn_metadata.arg_model``，先只读探测全部工具，
+    任一缺失即记录错误并整体不落地，不抛异常不阻断启动；
+    失效由 test_flat_input_schema_forbids_additional_properties 兜底报警。
+    SDK 升级 2.x minor 版本时需复核这两个私有路径仍存在，行为由守护测试锁定。
     """
     tool_manager = getattr(mcp, "_tool_manager", None)
     list_tools = getattr(tool_manager, "list_tools", None)
@@ -715,13 +720,16 @@ def _tighten_flat_tool_schemas() -> None:
             "additionalProperties 契约守护测试将失败，请适配新版 MCP SDK。"
         )
         return
-    for tool in list_tools():
-        if getattr(getattr(tool, "fn_metadata", None), "arg_model", None) is None:
-            logger.error(
-                "SDK 私有路径 tool.fn_metadata.arg_model 已变更，inputSchema 收紧被跳过，"
-                "additionalProperties 契约守护测试将失败，请适配新版 MCP SDK。"
-            )
-            return
+    tools = list_tools()
+    if any(
+        getattr(getattr(tool, "fn_metadata", None), "arg_model", None) is None for tool in tools
+    ):
+        logger.error(
+            "SDK 私有路径 tool.fn_metadata.arg_model 已变更，inputSchema 收紧被跳过，"
+            "additionalProperties 契约守护测试将失败，请适配新版 MCP SDK。"
+        )
+        return
+    for tool in tools:
         tool.parameters["additionalProperties"] = False
         arg_model = tool.fn_metadata.arg_model
         tool.fn_metadata.arg_model = type(
@@ -884,9 +892,27 @@ _SKILL_DESCRIPTION = (
 _skill_manifest_payload: str | None = None
 
 
+def _read_packaged_text(path: Path) -> str | None:
+    """按打包树打开纪律读取静态文本文件，打开与解码失败统一收敛为 None。"""
+    try:
+        opened = open_packaged_read(path)
+        if opened is None:
+            # FIFO 等非常规文件按不存在口径拒绝，其阻塞读会钉死工作线程。
+            return None
+        handle, _stat_result = opened
+        with TextIOWrapper(handle, encoding="utf-8") as text:
+            return text.read()
+    # UnicodeDecodeError 非 OSError 子类，损坏的非 UTF-8 打包文件同样按不可读取收敛。
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _read_skill_manifest() -> str:
-    """读取 SKILL.md 主文件，含 read_text 同步文件系统调用。"""
-    return _SKILL_MANIFEST_PATH.read_text(encoding="utf-8")
+    """读取 SKILL.md 主文件，含打包树打开等同步文件系统调用。"""
+    payload = _read_packaged_text(_SKILL_MANIFEST_PATH)
+    if payload is None:
+        raise ResourceNotFoundError("skill 主文件不存在或不可读取")
+    return payload
 
 
 @mcp.resource(
@@ -905,14 +931,15 @@ async def skill_manifest_resource() -> str:
 
 
 def _read_skill_reference(path: str) -> str:
-    """定位并读取 skill 参考文档，含 safe_join 与 is_file 等同步文件系统调用。"""
+    """定位并读取 skill 参考文档，含 safe_join 等同步文件系统调用。"""
     try:
         target = safe_join(_SKILL_REFERENCES_DIR, path)
     except PathEscapeError:
         raise ResourceNotFoundError(f"skill 参考文件路径越界: {path}")
-    if not target.is_file():
-        raise ResourceNotFoundError(f"skill 参考文件不存在: {path}")
-    return target.read_text(encoding="utf-8")
+    payload = _read_packaged_text(target)
+    if payload is None:
+        raise ResourceNotFoundError(f"skill 参考文件不存在或不可读取: {path}")
+    return payload
 
 
 @mcp.resource(

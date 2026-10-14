@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 import seedream_mcp.server as server
 
@@ -28,11 +29,17 @@ class _FakeTool:
 class _FakeToolManager:
     """返回工具替身清单的工具管理器。"""
 
-    def __init__(self, tool: _FakeTool | None) -> None:
-        self._tool = tool
+    def __init__(self, tools: list[_FakeTool]) -> None:
+        self._tools = tools
 
     def list_tools(self) -> list[_FakeTool]:
-        return [self._tool] if self._tool is not None else []
+        return list(self._tools)
+
+
+class _SampleArgModel(BaseModel):
+    """健康 arg_model 替身，支持收紧处的子类化与 model_config 合并。"""
+
+    value: int = 0
 
 
 def _install_fake_mcp(
@@ -81,7 +88,7 @@ def test_tighten_skips_when_tool_fn_metadata_missing(
     """工具缺少 fn_metadata 属性时记录一条错误并跳过，不改写任何工具。"""
     capture = RecordingLogger()
     tool = _FakeTool()
-    _install_fake_mcp(monkeypatch, capture, _FakeToolManager(tool))
+    _install_fake_mcp(monkeypatch, capture, _FakeToolManager([tool]))
 
     server._tighten_flat_tool_schemas()
 
@@ -97,10 +104,28 @@ def test_tighten_skips_when_fn_metadata_arg_model_none(
     """fn_metadata 存在但 arg_model 为 None 时同样判定私有面失效并跳过。"""
     capture = RecordingLogger()
     tool = _FakeTool(fn_metadata=SimpleNamespace(arg_model=None))
-    _install_fake_mcp(monkeypatch, capture, _FakeToolManager(tool))
+    _install_fake_mcp(monkeypatch, capture, _FakeToolManager([tool]))
 
     server._tighten_flat_tool_schemas()
 
     assert len(capture.errors) == 1
     assert "fn_metadata.arg_model" in capture.errors[0]
     assert tool.parameters == {}
+
+
+def test_tighten_aborts_whole_registry_when_later_tool_lacks_arg_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后位工具缺 arg_model 时整体不落地，先遍历到的健康工具保持未收紧。"""
+    capture = RecordingLogger()
+    healthy = _FakeTool(fn_metadata=SimpleNamespace(arg_model=_SampleArgModel))
+    broken = _FakeTool(fn_metadata=SimpleNamespace(arg_model=None))
+    _install_fake_mcp(monkeypatch, capture, _FakeToolManager([healthy, broken]))
+
+    server._tighten_flat_tool_schemas()
+
+    assert len(capture.errors) == 1
+    assert "fn_metadata.arg_model" in capture.errors[0]
+    assert healthy.parameters == {}
+    assert healthy.fn_metadata.arg_model is _SampleArgModel
+    assert broken.parameters == {}

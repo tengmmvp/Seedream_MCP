@@ -8,14 +8,21 @@ text/markdown；经 in-process Client 的线上读取管线验证内容与磁盘
 
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat
 import threading
+from pathlib import Path
+from typing import Any
 
 import pytest
 from mcp import MCPError
 from mcp.client import Client
+from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 from mcp.types import ReadResourceResult, TextResourceContents
 
+from _os_fakes import _make_file_link
 import seedream_mcp.server as server
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
@@ -244,6 +251,173 @@ async def test_skill_reference_missing_file_raises_invalid_params(
     assert excinfo.value.code == -32602
     assert excinfo.value.data is not None
     assert excinfo.value.data.get("uri") == uri
+
+
+async def test_skill_reference_non_utf8_raises_invalid_params(
+    reset_lifespan_singletons: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 UTF-8 的参考文件经线上读取收敛 -32602，而非 -32603 内部错误。"""
+    references_dir = tmp_path / "references"
+    references_dir.mkdir()
+    (references_dir / "workflows.md").write_bytes(b"\xff\xfe\x81# \x9c")
+    monkeypatch.setattr(server, "_SKILL_REFERENCES_DIR", references_dir)
+    uri = "skill://seedream-image-generation/references/workflows.md"
+    async with Client(server.mcp) as client:
+        with pytest.raises(MCPError) as excinfo:
+            await client.read_resource(uri)
+    assert excinfo.value.code == -32602
+    assert excinfo.value.data is not None
+    assert excinfo.value.data.get("uri") == uri
+
+
+async def test_skill_manifest_non_utf8_raises_invalid_params(
+    reset_lifespan_singletons: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 UTF-8 的 SKILL.md 经线上读取收敛 -32602，而非 -32603 内部错误。"""
+    manifest = tmp_path / "SKILL.md"
+    manifest.write_bytes(b"\xff\xfe\x81# \x9c")
+    monkeypatch.setattr(server, "_SKILL_MANIFEST_PATH", manifest)
+    monkeypatch.setattr(server, "_skill_manifest_payload", None)
+    uri = "skill://seedream-image-generation/SKILL.md"
+    async with Client(server.mcp) as client:
+        with pytest.raises(MCPError) as excinfo:
+            await client.read_resource(uri)
+    assert excinfo.value.code == -32602
+    assert excinfo.value.data is not None
+    assert excinfo.value.data.get("uri") == uri
+
+
+@pytest.mark.parametrize(
+    "open_error",
+    [FileNotFoundError, NotADirectoryError, PermissionError, IsADirectoryError],
+)
+def test_skill_reference_open_errors_translate_to_resource_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    open_error: type[OSError],
+) -> None:
+    """打开阶段的失败统一转译 ResourceNotFoundError，不依赖前置 is_file 探测。"""
+
+    def _raise_open(*args: Any, **kwargs: Any) -> int:
+        del args, kwargs
+        raise open_error("open failed")
+
+    monkeypatch.setattr(os, "open", _raise_open)
+    with pytest.raises(ResourceNotFoundError):
+        server._read_skill_reference("workflows.md")
+
+
+def test_skill_reference_exotic_oserror_translates_to_resource_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """四个子类之外的 ELOOP 等 OSError 同样转译 ResourceNotFoundError，恢复旧 is_file 语义。"""
+
+    def _eloop_open(*args: Any, **kwargs: Any) -> int:
+        del args, kwargs
+        raise OSError(errno.ELOOP, "too many levels of symbolic links")
+
+    monkeypatch.setattr(os, "open", _eloop_open)
+    with pytest.raises(ResourceNotFoundError):
+        server._read_skill_reference("workflows.md")
+
+
+def test_skill_reference_non_utf8_translates_to_resource_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 UTF-8 的参考文件按不可读取口径转译 ResourceNotFoundError，解码错误不外泄。"""
+    references_dir = tmp_path / "references"
+    references_dir.mkdir()
+    (references_dir / "workflows.md").write_bytes(b"\xff\xfe\x81# \x9c")
+    monkeypatch.setattr(server, "_SKILL_REFERENCES_DIR", references_dir)
+    with pytest.raises(ResourceNotFoundError, match="不存在或不可读取"):
+        server._read_skill_reference("workflows.md")
+
+
+def test_skill_manifest_non_utf8_translates_to_resource_not_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 UTF-8 的 SKILL.md 按不可读取口径转译 ResourceNotFoundError，解码错误不外泄。"""
+    manifest = tmp_path / "SKILL.md"
+    manifest.write_bytes(b"\xff\xfe\x81# \x9c")
+    monkeypatch.setattr(server, "_SKILL_MANIFEST_PATH", manifest)
+    monkeypatch.setattr(server, "_skill_manifest_payload", None)
+    with pytest.raises(ResourceNotFoundError, match="不存在或不可读取"):
+        server._read_skill_manifest()
+
+
+def _patch_fstat_as_fifo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 fstat 结果改写为 FIFO 形态，模拟打包文件被特殊文件替换。"""
+    real_fstat = os.fstat
+
+    def _fifo_fstat(fd: int, *args: Any, **kwargs: Any) -> os.stat_result:
+        st = real_fstat(fd, *args, **kwargs)
+        return os.stat_result(
+            (
+                stat.S_IFIFO | 0o644,
+                st.st_ino,
+                st.st_dev,
+                st.st_nlink,
+                st.st_uid,
+                st.st_gid,
+                st.st_size,
+                st.st_atime,
+                st.st_mtime,
+                st.st_ctime,
+            )
+        )
+
+    monkeypatch.setattr(os, "fstat", _fifo_fstat)
+
+
+def test_skill_reference_non_regular_file_rejected_as_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """references 内 FIFO 等非常规文件在打开单点按不存在口径拒绝，读取不进入阻塞。"""
+    _patch_fstat_as_fifo(monkeypatch)
+    with pytest.raises(ResourceNotFoundError):
+        server._read_skill_reference("workflows.md")
+
+
+def test_skill_manifest_non_regular_file_rejected_as_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SKILL.md 被 FIFO 等非常规文件替换时同样在打开单点拒绝，读取不进入阻塞。"""
+    _patch_fstat_as_fifo(monkeypatch)
+    with pytest.raises(ResourceNotFoundError):
+        server._read_skill_manifest()
+
+
+def test_skill_reference_symlinked_layout_resolves_and_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pip/nix 布局的符号链接参考文件解析到真实目标后可读，不按不存在拒绝。"""
+    references_dir = tmp_path / "references"
+    references_dir.mkdir()
+    real_doc = tmp_path / "store-workflows.md"
+    real_doc.write_text("# 工作流参考", encoding="utf-8")
+    link = references_dir / "workflows.md"
+    _make_file_link(real_doc, link)
+    monkeypatch.setattr(server, "_SKILL_REFERENCES_DIR", references_dir)
+    assert server._read_skill_reference("workflows.md") == "# 工作流参考"
+
+
+def test_skill_manifest_symlinked_layout_resolves_and_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pip/nix 布局的符号链接 SKILL.md 解析到真实目标后可读，不按不存在拒绝。"""
+    real_doc = tmp_path / "store-SKILL.md"
+    real_doc.write_text("# 技能主文件", encoding="utf-8")
+    manifest = tmp_path / "SKILL.md"
+    _make_file_link(real_doc, manifest)
+    monkeypatch.setattr(server, "_SKILL_MANIFEST_PATH", manifest)
+    assert server._read_skill_manifest() == "# 技能主文件"
 
 
 async def test_skill_reference_rejects_path_traversal(

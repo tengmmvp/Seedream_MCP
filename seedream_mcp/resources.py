@@ -292,6 +292,7 @@ def _reset_lifespan_state() -> None:
     _shared_init_lock = asyncio.Lock()
     shutdown_cpu_offload_executor()
     from .utils.images.image_thumbnail import reset_thumb_sweep_gate
+    from .utils.io.io_file import reset_packaged_resolve_cache
     from .utils.io.io_path import clear_resolved_env_root_cache
     from .utils.io.io_save import reset_cleanup_state
     from .utils.io.io_scan import reset_directory_scan_cache
@@ -301,6 +302,7 @@ def _reset_lifespan_state() -> None:
     reset_cleanup_state()
     reset_directory_scan_cache()
     reset_file_manager_cache()
+    reset_packaged_resolve_cache()
     reset_thumb_sweep_gate()
 
 

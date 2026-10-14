@@ -17,11 +17,7 @@ import httpx
 
 from .config import SeedreamConfig
 from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
-from .utils.core.executors import (
-    CpuOffloadPoolClosedError,
-    run_in_cpu_pool,
-    should_offload_size,
-)
+from .utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
 from .utils.core.loop_bound import loop_bound_semaphore
 from .utils.core.errors import (
     SeedreamAPIError,
@@ -38,6 +34,7 @@ from .utils.core.errors import (
 from .utils.core.sanitizers import (
     UPSTREAM_MESSAGE_FRAGMENT_LIMIT,
     _truncate_value_for_output,
+    fit_utf8_bytes,
     sanitize_error_text,
 )
 from .utils.images.image_ref import classify_image_reference
@@ -456,7 +453,7 @@ class _ClientHTTPMixin:
 
         def _decode_as_message() -> dict[str, Any]:
             truncated = len(raw_body) > _ERROR_JSON_PARSE_LIMIT
-            text = raw_body[:_ERROR_JSON_PARSE_LIMIT].decode("utf-8", errors="ignore")
+            text = fit_utf8_bytes(raw_body, _ERROR_JSON_PARSE_LIMIT)
             if truncated:
                 text += f"...(截断，原文 {len(raw_body)} 字节)"
             if not text:
@@ -508,11 +505,7 @@ class _ClientHTTPMixin:
         """
         raw_body = await self._read_response_body_capped(response, deadline=deadline)
         try:
-            # 阈值之下的解析微秒级完成，线程往返成本高于收益，同步执行。
-            if should_offload_size(len(raw_body)):
-                payload = await run_in_cpu_pool(json.loads, raw_body)
-            else:
-                payload = json.loads(raw_body)
+            payload = await load_json_bytes(raw_body)
         except CpuOffloadPoolClosedError:
             # 池关闭属服务退出窗口而非响应体缺陷，原样上抛交由调用链按服务关闭处置。
             raise
