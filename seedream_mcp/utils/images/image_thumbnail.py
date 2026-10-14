@@ -24,7 +24,7 @@ from mcp.types import ImageContent
 from ..core.executors import CPU_OFFLOAD_DECODE_SLOTS, run_in_cpu_pool
 from ..core.formats import MAX_IMAGE_PIXELS
 from ..core.logs import get_logger
-from ..core.loop_bound import loop_bound_semaphore
+from ..core.loop_bound import LoopKeyedInflight, loop_bound_semaphore
 from ..core.throttles import ThrottleRegistry
 from ..io.io_file import atomic_replace_from_fd_sync, open_no_follow_read
 
@@ -256,11 +256,16 @@ def reset_thumb_sweep_gate() -> None:
     _thumb_sweep_after.clear()
 
 
+# 缩略图在途去重的循环键控单飞注册表。
+_thumb_inflight: LoopKeyedInflight[Path, bytes | None] = LoopKeyedInflight()
+
+
 async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes | None:
-    """带落盘缓存的缩略图获取：命中直接读文件，未命中限流解码后写缓存。
+    """带落盘缓存与在途去重的缩略图获取：命中直接读文件，未命中共享单次解码。
 
     缓存键取进入解码前的一次源图 stat，解码期间源图被替换时旧键写入的缩略图
-    随旧图失效，新图的键未命中重新生成。
+    随旧图失效，新图的键未命中重新生成；同循环内并发同键共享同一解码 task
+    （跨循环各自解码），取消语义与孤儿异常兜底由 InflightEntry 承担。
 
     Args:
         image_path: 已保存图片的文件路径。
@@ -284,6 +289,21 @@ async def cached_thumbnail_bytes(image_path: Path, images_root: Path) -> bytes |
     cached, thumb = await asyncio.to_thread(_stat_and_read)
     if cached:
         return cached
+
+    return await _thumb_inflight.consume_shared(
+        thumb,
+        lambda: asyncio.ensure_future(_decode_and_cache_thumbnail(image_path, thumb, thumbs_root)),
+    )
+
+
+async def _decode_and_cache_thumbnail(
+    image_path: Path, thumb: Path, thumbs_root: Path
+) -> bytes | None:
+    """执行单次限流解码，成功时写入缓存，供 cached_thumbnail_bytes 在途去重。
+
+    在途登记由创建方经完成回调按条目身份清理；创建者被取消时 task 继续运行，
+    保护共享同一 task 的其他等待者不被连带取消。
+    """
     generated = await build_thumbnail_bytes_limited(image_path)
     if generated is not None:
         await asyncio.to_thread(_store_thumbnail, thumb, thumbs_root, generated)

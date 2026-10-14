@@ -22,6 +22,7 @@ from seedream_mcp.utils.core.errors import (
     resolve_error_profile,
 )
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
+from seedream_mcp.utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
 from seedream_mcp.utils.images import image_input as image_input_module
 from seedream_mcp.utils.images import image_validation as image_validation_module
 from seedream_mcp.utils.images.image_input import prepare_image_input
@@ -461,19 +462,139 @@ async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
     assert exc_info.value.value == "oversized.png"
 
 
-async def test_prepare_image_input_mime_follows_byte_signature(
+async def test_prepare_image_input_same_bytes_same_verdict_as_data_uri(
     workspace_root: Path, tmp_path: Path
 ) -> None:
-    """data URI 的 MIME 以字节签名为准：PNG 内容存为 .jpg 时标注 image/png。
+    """同字节两路径同判定：跨族错标在 Data URI 与本地文件路径一同硬拒。
 
-    扩展名可伪造，签名不可识别时才回退扩展名映射。
+    此前本地分支经字节签名重推 MIME 把错标修复后放行，与 Data URI 的硬拒漂移，
+    例行「加格式」漏配魔数前缀时错标载荷照常出站；判定只挂 prepare 侧时
+    validate 诊断为有效又被 prepare 拒绝，两个公共入口结论相反，
+    收口读取单点后两侧对齐。
     """
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
+    png_payload = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    with pytest.raises(SeedreamValidationError, match="声明格式与实际内容不一致"):
+        validate_image_input(f"data:image/jpg;base64,{png_payload}")
+
     mismatched = tmp_path / "actually-png.jpg"
-    Image.new("RGB", (32, 32), color="white").save(mismatched, format="PNG")
+    mismatched.write_bytes(buffer.getvalue())
+    with pytest.raises(SeedreamValidationError, match="文件扩展名与实际内容不一致") as exc_info:
+        await prepare_image_input(str(mismatched))
 
-    result = await prepare_image_input(str(mismatched))
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == str(mismatched)
 
-    assert result.startswith("data:image/png;base64,")
+    # validate_image_input 与 validate_image_path 均与 prepare 同判定，诊断结论不被后续 prepare 推翻。
+    with pytest.raises(SeedreamValidationError, match="文件扩展名与实际内容不一致"):
+        validate_image_input(str(mismatched))
+    assert "文件扩展名与实际内容不一致" in (validate_image_path(str(mismatched)) or "")
+
+
+async def test_prepare_image_input_matching_extension_labels_declared_mime(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """匹配扩展名的出站标签取扩展名映射，与 Data URI 按声明归一的口径一致。"""
+    matched = tmp_path / "photo.jpg"
+    Image.new("RGB", (32, 32), color="white").save(matched, format="JPEG")
+
+    result = await prepare_image_input(str(matched))
+
+    assert result.startswith("data:image/jpeg;base64,")
+
+
+async def test_prepare_image_input_heif_label_follows_extension(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """heic/heif 同族互认，出站子类型随扩展名：编码 brand 与扩展名不同族内子型时以扩展名为准。"""
+    import pillow_heif
+
+    buffer = io.BytesIO()
+    pillow_heif.from_pillow(Image.new("RGB", (32, 32), color="white")).save(buffer, format="HEIF")
+    heif_named = tmp_path / "photo.heif"
+    heif_named.write_bytes(buffer.getvalue())
+
+    result = await prepare_image_input(str(heif_named))
+
+    assert result.startswith("data:image/heif;base64,")
+
+
+async def test_prepare_image_input_rejects_weak_magic_disguised_local_file(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """PPM 内容借白名单扩展名伪装时在读取链解码校验被拒，不以白名单 MIME 送上游。"""
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color="white").save(buffer, format="PPM")
+    disguised = tmp_path / "disguised.png"
+    disguised.write_bytes(buffer.getvalue())
+
+    with pytest.raises(SeedreamValidationError, match="不支持的图像格式"):
+        await prepare_image_input(str(disguised))
+
+
+# ---- validate_image_input 用户可见错误分支表驱动守护 ----
+
+_ERROR_BRANCH_CASES: list[tuple[str, str, str | None]] = [
+    ("data_uri_empty_payload", "Data URI 格式无效", None),
+    ("data_uri_avif_subtype", "不支持的Data URI图片格式: avif", None),
+    ("data_uri_svg_subtype", "不支持的Data URI图片格式: svg+xml", None),
+    ("local_directory", "路径不是文件", None),
+    (
+        "local_txt_extension",
+        "不支持的图像格式: .txt",
+        "/".join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED),
+    ),
+    ("local_stat_oserror", "无法访问文件", "[Errno 13]"),
+]
+
+
+def _build_error_branch_input(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """按用例名构造触发对应用户可见错误分支的输入。"""
+    if case == "data_uri_empty_payload":
+        return "data:image/png;base64,"
+    if case == "data_uri_avif_subtype":
+        return "data:image/avif;base64,AAAA"
+    if case == "data_uri_svg_subtype":
+        return "data:image/svg+xml;base64,AAAA"
+    if case == "local_directory":
+        return str(tmp_path)
+    if case == "local_txt_extension":
+        plain = tmp_path / "note.txt"
+        plain.write_text("plain text", encoding="utf-8")
+        return str(plain)
+    # stat 抛非 FileNotFoundError 的 OSError。
+    locked = tmp_path / "locked.png"
+    locked.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _deny_stat(self: Path) -> os.stat_result:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "stat", _deny_stat)
+    return str(locked)
+
+
+@pytest.mark.parametrize(("case", "fragment", "extra"), _ERROR_BRANCH_CASES)
+def test_validate_image_input_user_visible_error_branches(
+    case: str,
+    fragment: str,
+    extra: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """空载荷、非白名单子类型、目录、不支持扩展名与 stat 失败的文案契约。"""
+    image = _build_error_branch_input(case, tmp_path, monkeypatch)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_image_input(image)
+
+    message = exc_info.value.message
+    assert fragment in message
+    if extra is not None:
+        assert extra in message
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == image
 
 
 # ---- 预处理池分派守护 ----

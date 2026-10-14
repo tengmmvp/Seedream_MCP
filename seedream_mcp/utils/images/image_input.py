@@ -20,7 +20,7 @@ from ..core.executors import (
     run_in_cpu_pool,
     should_offload_size,
 )
-from ..core.formats import MIME_BY_EXTENSION, encode_data_uri, infer_extension_from_bytes
+from ..core.formats import encode_data_uri
 from ..core.logs import get_logger
 from ..io.io_path import (
     get_read_context,
@@ -179,19 +179,14 @@ def _prepare_local_image(normalized: str, original: str) -> str:
 
     validated_path, _ = found
 
-    # 读取、限额复核与维度校验经共享辅助，与校验链同一安全语义。内存峰值：读取
-    # 字节、b64 编码与 data URI 拼接约为单图的 5.5×，并发 5 × 30MB 上限下瞬态约
-    # 800MB；PIL 解码成本落在工作线程而非事件循环。
-    image_bytes = read_and_decode_local_image(
+    # 读取、限额复核、格式维度与出站标签校验经共享辅助，与校验链同一判定口径。
+    # 内存峰值：读取字节、b64 编码与 data URI 拼接约为单图的 5.5×，
+    # 并发 5 × 30MB 上限下瞬态约 800MB；PIL 解码成本落在工作线程而非事件循环。
+    image_bytes, media_type = read_and_decode_local_image(
         validated_path,
         field_value=normalized,
         format_read_error=lambda exc: _format_local_read_error(exc, normalized),
     )
-    # MIME 以字节签名为准、扩展名回退：扩展名可伪造，与 auto_save 保存路径同口径。
-    # 两来源的扩展名均为映射键，直取使键缺失以 KeyError 显式暴露而非静默回落。
-    inferred_extension = infer_extension_from_bytes(image_bytes, default="")
-    suffix = inferred_extension or validated_path.suffix.lower()
-    mime_type = MIME_BY_EXTENSION[suffix]
 
     logger.info("成功处理图片文件: {} ({} 字节)", validated_path, len(image_bytes))
-    return encode_data_uri(mime_type, image_bytes)
+    return encode_data_uri(media_type, image_bytes)

@@ -54,8 +54,8 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
 ) -> None:
     """创建者 await task 被取消时仅退出自身，底层 inflight task 与其他等待者不受影响。
 
-    _prepare_inflight 由 task 完成时的 finally 清理，保护共享同一 task 的等待者
-    不被连带取消。
+    _prepare_inflight 登记由注册表完成回调清理，
+    共享同一 task 的等待者不被连带取消。
     """
     client = _make_client()
     # 显式传入 roots_key，使 cache_key 不依赖工作区根目录上下文
@@ -112,7 +112,7 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     """等待者被取消时仅退出自身；共享的 inflight task 继续运行至完成。
 
     等待者 await asyncio.shield(inflight)，取消仅作用于其自身的外层 await，
-    底层 task 由完成时的 finally 清理在途登记。
+    在途登记由注册表完成回调清理。
     """
     client = _make_client()
     roots_key = ("test-roots",)
@@ -161,7 +161,7 @@ async def test_prepare_image_input_error_propagates_to_all_sharers(
 ) -> None:
     """底层抛错时所有共享同一 inflight 的等待者收到该异常，且不写入缓存。
 
-    异常在缓存写入前抛出，_prepare_inflight 由 task 完成时的 finally 清空。
+    异常在缓存写入前抛出，_prepare_inflight 登记由注册表完成回调清理。
     """
     client = _make_client()
     roots_key = ("test-roots",)
@@ -267,7 +267,9 @@ async def test_prepare_creator_cancel_arms_unretrieved_logging_once(
         client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
     await inner_started.wait()
-    inflight = next(iter(client._image_preparer._prepare_inflight.values())).task
+    inflight_entry = client._image_preparer._prepare_inflight.peek((image_url, (), (0.0, 0)))
+    assert inflight_entry is not None
+    inflight = inflight_entry.task
     creator.cancel()
 
     done, pending = await asyncio.wait({creator, inflight})
@@ -303,10 +305,9 @@ async def test_prepare_rechecks_cache_after_semaphore_wait(
 
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
-    # 预置实例级信号量为单槽并由本测试持槽，构造后到者在 acquire 上排队的窗口
+    # 预置单槽信号量并由本测试持槽，构造后到者在 acquire 上排队的窗口。
     semaphore = asyncio.Semaphore(1)
-    preparer._prepare_semaphore = semaphore
-    preparer._prepare_semaphore_loop = asyncio.get_running_loop()
+    monkeypatch.setattr(image_prepare, "loop_bound_semaphore", lambda limit, *, key: semaphore)
     await semaphore.acquire()
 
     image_data_uri = "data:image/png;base64,aGVsbG8="
@@ -335,8 +336,6 @@ async def test_prepare_rechecks_inflight_after_semaphore_wait(
     获槽者若不复查在途注册表，会重复执行全量读盘与编码；命中在途须先归还
     槽位，并发满载的准入不被后到等待者虚占。
     """
-    from seedream_mcp.utils.core.inflight import InflightEntry
-
     client = _make_client()
     preparer = client._image_preparer
 
@@ -352,10 +351,9 @@ async def test_prepare_rechecks_inflight_after_semaphore_wait(
 
     monkeypatch.setattr(image_prepare, "prepare_image_input", gated_prepare)
 
-    # 预置实例级信号量为单槽并由本测试持槽，构造后到者在 acquire 上排队的窗口。
+    # 预置单槽信号量并由本测试持槽，构造后到者在 acquire 上排队的窗口。
     semaphore = asyncio.Semaphore(1)
-    preparer._prepare_semaphore = semaphore
-    preparer._prepare_semaphore_loop = asyncio.get_running_loop()
+    monkeypatch.setattr(image_prepare, "loop_bound_semaphore", lambda limit, *, key: semaphore)
     await semaphore.acquire()
 
     image_data_uri = "data:image/png;base64,aGVsbG8="
@@ -366,7 +364,7 @@ async def test_prepare_rechecks_inflight_after_semaphore_wait(
     # 等待窗口内他人登记同键在途条目，缓存保持未写。
     cache_key = (image_data_uri, (), (0.0, 0))
     inflight_task = asyncio.ensure_future(preparer._prepare_and_cache(image_data_uri, cache_key))
-    preparer._prepare_inflight[cache_key] = InflightEntry(inflight_task)
+    preparer._prepare_inflight.register_if_absent(cache_key, lambda: inflight_task)
     await asyncio.sleep(0)
 
     semaphore.release()
@@ -454,7 +452,9 @@ async def test_all_consumers_abandon_failure_logs_fallback_exactly_once(
         client._image_preparer.prepare_image_input(image_url, scope_key=roots_key)
     )
     await inner_started.wait()
-    shared_task = next(iter(client._image_preparer._prepare_inflight.values())).task
+    inflight_entry = client._image_preparer._prepare_inflight.peek((image_url, (), (0.0, 0)))
+    assert inflight_entry is not None
+    shared_task = inflight_entry.task
     creator.cancel()
 
     done, pending = await asyncio.wait({creator, shared_task})

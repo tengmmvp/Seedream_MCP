@@ -7,8 +7,10 @@ SEEDREAM_PREVIEW_ENABLED 解析。集成用例经 run_text_to_image 触发，moc
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import sys
+import threading
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
@@ -505,6 +507,281 @@ async def test_cached_thumbnail_survives_unwritable_cache_dir(tmp_path: Path) ->
     second = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
 
     assert first is not None and second == first
+
+
+async def test_cached_thumbnail_concurrent_miss_decodes_once_and_shares_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发同图冷未命中经在途去重共享单次解码，共享 task 解码成功后写缓存。"""
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (1200, 800))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    decode_calls = {"count": 0}
+    started = threading.Event()
+    release = threading.Event()
+    original_build = thumbnail_module.build_thumbnail_bytes
+
+    def _gated_build(path: Path) -> bytes | None:
+        decode_calls["count"] += 1
+        started.set()
+        release.wait(timeout=5)
+        return original_build(path)
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _gated_build)
+
+    first = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+    # 阻塞等待下沉工作线程，避免卡住事件循环使解码 task 无法推进。
+    assert await asyncio.to_thread(started.wait, 5)
+    registry = thumbnail_module._thumb_inflight.by_loop[asyncio.get_running_loop()]
+    assert len(registry) == 1
+    holder = next(iter(registry.values()))()
+    assert holder is not None
+    second = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+    # 推进事件循环直至第二个调用完成缓存查找并以等待者身份挂上共享 task。
+    for _ in range(500):
+        if holder.consumers >= 2:
+            break
+        await asyncio.sleep(0.01)
+    release.set()
+
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert decode_calls["count"] == 1
+    assert first_result is not None and second_result == first_result
+    assert len(registry) == 0
+    assert thumbnail_module.thumbnail_cache_root(images_root).is_dir()
+
+
+async def test_concurrent_loops_keep_isolated_inflight_registries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """两线程两循环并发同键各自登记解码，互不等待也不误弹对方循环的条目。
+
+    共享解码 task 绑定创建循环，跨循环等待会 RuntimeError；
+    扁平注册表的循环更替守卫在跨线程交错下会清空对方循环的在途条目
+    或拿到对方条目去 await。
+    事件循环键控后每循环独立单飞，跨循环重复解码是文档化权衡。
+    """
+    import queue
+
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (800, 600))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    # 同名占位文件使缓存目录创建失败，落盘缓存降级，两个循环的调用都走注册表路径。
+    (tmp_path / ".seedream" / "thumbs").write_text("occupied", encoding="utf-8")
+
+    decode_calls = {"count": 0}
+    release: queue.Queue[None] = queue.Queue()
+    original_build = thumbnail_module.build_thumbnail_bytes
+
+    def _gated_build(path: Path) -> bytes | None:
+        decode_calls["count"] += 1
+        release.get(timeout=10)
+        return original_build(path)
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes", _gated_build)
+
+    first = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+    # 轮询推进事件循环，首个解码进入工作线程阻塞后本循环注册表恰有一条在途条目。
+    for _ in range(1000):
+        if decode_calls["count"] == 1:
+            break
+        await asyncio.sleep(0.01)
+    assert decode_calls["count"] == 1
+    stat = image.stat()
+    thumb = thumbnail_module.thumbnail_cache_root(images_root) / thumbnail_module._thumb_key(
+        image, stat.st_mtime_ns, stat.st_size
+    )
+    loop_a_registry = thumbnail_module._thumb_inflight.by_loop[asyncio.get_running_loop()]
+    holder_a = loop_a_registry[thumb]()
+    assert holder_a is not None
+
+    outcome: dict[str, Any] = {}
+
+    def _call_in_second_loop() -> None:
+        async def _run() -> None:
+            outcome["loop"] = asyncio.get_running_loop()
+            outcome["result"] = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
+
+        asyncio.run(_run())
+
+    second_thread = threading.Thread(target=_call_in_second_loop)
+    second_thread.start()
+    # 循环 B 以 miss 进入自己的注册表并启动自己的解码 task。
+    for _ in range(1000):
+        if decode_calls["count"] == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert decode_calls["count"] == 2
+    loop_b_registry = thumbnail_module._thumb_inflight.by_loop[outcome["loop"]]
+    holder_b = loop_b_registry[thumb]()
+    assert holder_b is not None
+    # 同键在途条目按循环并存，循环 B 的登记不清空循环 A 的条目。
+    assert holder_b is not holder_a
+    assert loop_a_registry[thumb]() is holder_a
+
+    try:
+        # 放行首个解码：循环 A 的条目弹出只作用本循环注册表，不动循环 B 的条目。
+        release.put(None)
+        assert await first is not None
+        assert thumb not in loop_a_registry
+        assert loop_b_registry[thumb]() is holder_b
+    finally:
+        # 断言失败也放行并回收循环 B 线程，不遗留阻塞在门上的解码线程。
+        release.put(None)
+        second_thread.join(timeout=10)
+
+    assert not second_thread.is_alive()
+    assert outcome["result"] is not None
+    assert decode_calls["count"] == 2
+    assert thumb not in loop_b_registry
+
+
+async def test_retired_loop_with_pending_decode_is_collectable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """退役循环在解码 task 未决时关闭，循环对象与在途条目经 gc 一并回收。
+
+    登记值链不得强引用循环弱键：值链经在途条目持 task、task 持其循环时
+    弱键被强值钉死，多循环宿主每废弃一个循环就泄漏一个循环加 task。回收后第二循环
+    （本测试循环）照常解码，登记机制不受退役循环残留影响。
+    """
+    import gc
+    import threading
+    import weakref
+
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (300, 200))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    real_limited = thumbnail_module.build_thumbnail_bytes_limited
+
+    async def _eternal_limited(path: Path) -> bytes | None:
+        del path
+        # future 仅被 task 自身持有，等价于关闭循环上永远无法 resolve 的解码。
+        await asyncio.get_running_loop().create_future()
+        return None
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _eternal_limited)
+
+    outcome: dict[str, Any] = {}
+
+    def _retire_first_loop() -> None:
+        async def _create_and_abandon() -> None:
+            creator = asyncio.ensure_future(
+                thumbnail_module.cached_thumbnail_bytes(image, images_root)
+            )
+            # 轮询推进循环直至解码 task 登记进本循环注册表。
+            registry: Any = None
+            for _ in range(1000):
+                registry = thumbnail_module._thumb_inflight.by_loop.get(asyncio.get_running_loop())
+                if registry:
+                    break
+                await asyncio.sleep(0.01)
+            outcome["registry"] = registry
+            outcome["loop_ref"] = weakref.ref(asyncio.get_running_loop())
+            # 创建者放弃等待，共享 task 按取消语义留在本循环继续在途。
+            creator.cancel()
+            try:
+                await creator
+            except asyncio.CancelledError:
+                outcome["abandoned"] = True
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_create_and_abandon())
+        finally:
+            # 循环关闭后未决 task 永不完成，add_done_callback 不再触发。
+            loop.close()
+
+    worker = threading.Thread(target=_retire_first_loop)
+    worker.start()
+    worker.join(timeout=30)
+    assert not worker.is_alive()
+    assert outcome.get("abandoned") is True
+
+    retired_registry = outcome["registry"]
+    assert isinstance(retired_registry, dict)
+    # 泄漏前置：task 未决时在途条目存在。
+    assert len(retired_registry) == 1
+    assert any(
+        item is retired_registry for item in thumbnail_module._thumb_inflight.by_loop.values()
+    )
+    loop_ref = outcome["loop_ref"]
+    assert loop_ref is not None
+
+    gc.collect()
+
+    assert loop_ref() is None
+    assert not any(
+        item is retired_registry for item in thumbnail_module._thumb_inflight.by_loop.values()
+    )
+
+    # 第二循环照常解码，登记去重不受退役循环残留影响。
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", real_limited)
+    assert await thumbnail_module.cached_thumbnail_bytes(image, images_root) is not None
+    assert not thumbnail_module._thumb_inflight.by_loop[asyncio.get_running_loop()]
+
+
+async def test_late_waiter_shares_orphan_decode_after_creator_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """创建者取消后孤儿解码 task 继续在途，后到等待者仍共享同一次解码。
+
+    取消与后到调用之间测试不持在途条目强引用：注册表仅弱持在途条目，条目失去 task 侧保活
+    即被回收、后到者重建解码（decode_calls 计数翻倍），以此锁定共享语义不回退。
+    """
+    from seedream_mcp.utils.images import image_thumbnail as thumbnail_module
+
+    image = _write_png(tmp_path / "src.png", (300, 200))
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    decode_calls = {"count": 0}
+    gate: dict[str, asyncio.Future[bytes | None]] = {}
+
+    async def _gated_limited(path: Path) -> bytes | None:
+        del path
+        decode_calls["count"] += 1
+        future: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+        gate["future"] = future
+        return await future
+
+    monkeypatch.setattr(thumbnail_module, "build_thumbnail_bytes_limited", _gated_limited)
+
+    creator = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+    # 轮询推进循环直至解码 task 登记进本循环注册表。
+    registry: Any = None
+    for _ in range(1000):
+        registry = thumbnail_module._thumb_inflight.by_loop.get(asyncio.get_running_loop())
+        if registry:
+            break
+        await asyncio.sleep(0.01)
+    assert isinstance(registry, dict)
+
+    creator.cancel()
+    try:
+        await creator
+    except asyncio.CancelledError:
+        pass
+
+    # 后到等待者经注册表取同一在途条目，此间不持在途条目强引用。
+    late = asyncio.ensure_future(thumbnail_module.cached_thumbnail_bytes(image, images_root))
+    # 轮询直至有等待者挂上在途条目，创建者已退出，消费者只可能来自后到调用。
+    for _ in range(1000):
+        current = next(iter(registry.values()), None)
+        holder = current() if current is not None else None
+        if holder is not None and holder.consumers >= 1:
+            break
+        await asyncio.sleep(0.01)
+    gate["future"].set_result(b"shared-thumbnail")
+    assert await late == b"shared-thumbnail"
+    assert decode_calls["count"] == 1
+    assert not registry
 
 
 def test_thumbnail_sweep_evicts_oldest_beyond_cap(

@@ -1,8 +1,8 @@
 """图像输入校验：URL、本地文件路径与 Data URI 的格式与维度校验。
 
-涉及 I/O 的图像校验归本模块：本地文件经 no-follow 打开并复核常规文件形态后读取
-字节，交 PIL 解码校验维度，Data URI 经 base64 解码后同样校验；纯参数校验（尺寸、水印、prompt 等）与
-宽高比常量归 validators，本模块从其导入共用。validate_image_path 组合工作区边界
+涉及 I/O 的图像校验归本模块：本地文件经 no-follow 打开并复核常规文件形态后
+读取字节，交 PIL 解码校验格式与维度，Data URI 经 base64 解码后同样校验；
+纯参数校验（尺寸、水印、prompt 等）与宽高比常量归 validators，本模块从其导入共用。validate_image_path 组合工作区边界
 判定与统一规则校验。首次使用时进程级覆写 PIL.Image.MAX_IMAGE_PIXELS 为 36M，
 嵌入本包的宿主进程须感知该副作用。
 """
@@ -21,11 +21,13 @@ from urllib.parse import urlparse
 
 from ..core.errors import SeedreamValidationError
 from ..core.formats import (
+    EXTENSIONS_BY_PIL_FORMAT,
     MAX_IMAGE_PIXELS,
     MIME_BY_EXTENSION,
     SUPPORTED_IMAGE_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
     ensure_image_decoders_ready,
+    estimate_base64_decoded_size,
     format_file_too_large,
     parse_data_uri,
 )
@@ -62,43 +64,91 @@ MIN_IMAGE_EDGE = 15
 LocalImageCandidate = tuple[Path, os.stat_result]
 
 
-def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> None:
-    """解码图像字节并校验像素维度与数据完整性，供本地文件与预处理两条路径复用。
+def _unsupported_format_error(offender: str, value_label: str) -> SeedreamValidationError:
+    """组装格式不支持的统一拒绝错误，白名单子句单点拼接防两条拒绝路径文案漂移。"""
+    return SeedreamValidationError(
+        f"不支持的图像格式: {offender}，"
+        f"支持的格式: {'/'.join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)}",
+        field="image",
+        value=value_label,
+    )
 
-    image_bytes 为已读取的完整图像字节，value_label 用于错误信息。维度超限由
-    _validate_image_dimensions 抛 SeedreamValidationError；img.verify 校验像素数据
-    完整性，头合法但数据截断的文件在本地即被拒；解码与校验异常抛 PIL 原生类型，
-    由调用方按所属模块的异常基类包装。
+
+def _validate_pil_format(pil_format: str | None, value_label: str) -> str:
+    """校验 PIL 识别的实际格式在受支持映射内，返回原样格式名供声明比对。
+
+    弱魔数格式（PPM/XBM 等）可被 PIL 完整解码，但借白名单扩展名取得的
+    白名单 MIME 标签与实际内容不符，送上游只会得到模糊报错或按内容嗅探处理，
+    须在本地拒绝。
+
+    Raises:
+        SeedreamValidationError: 实际格式不在受支持映射内。
+    """
+    if pil_format is None or pil_format not in EXTENSIONS_BY_PIL_FORMAT:
+        raise _unsupported_format_error((pil_format or "未知").lower(), value_label)
+    return pil_format
+
+
+def outbound_media_type(extension: str, actual_format: str) -> str | None:
+    """出站 MIME 标签一致性的单一判定点：扩展名与 PIL 实际格式同族返回对应 MIME，跨族返回 None。
+
+    Data URI 的声明子类型与本地文件的扩展名同为出站标签，经本函数
+    对实际格式做同族比对，使同一字节经两条路径得到同一判定；
+    映射直取使键缺失以 KeyError 显式暴露而非静默回落。
+    """
+    if extension not in EXTENSIONS_BY_PIL_FORMAT[actual_format]:
+        return None
+    return MIME_BY_EXTENSION[extension]
+
+
+def decode_and_validate_dimensions(image_bytes: bytes, value_label: str) -> str:
+    """解码图像字节并校验格式、像素维度与数据完整性，供本地文件与 Data URI 两条路径复用。
+
+    image_bytes 为已读取的完整图像字节，value_label 用于错误信息。
+    实际格式不在受支持映射内或维度超限抛 SeedreamValidationError；
+    img.verify 校验像素数据完整性，头合法但数据截断的文件在本地即被拒；
+    解码与校验异常抛 PIL 原生类型，由调用方按所属模块的异常基类包装。
+    返回的实际格式名供调用方做出站标签比对。
 
     Args:
         image_bytes: 已读取的完整图像字节。
         value_label: 出现在错误信息中的输入标识。
 
+    Returns:
+        PIL 识别的实际格式名，如 ``PNG``。
+
     Raises:
-        SeedreamValidationError: 宽高下限、宽高比或总像素任一约束不满足。
+        SeedreamValidationError: 实际格式不受支持，或宽高下限、宽高比、总像素任一
+            约束不满足。
     """
     from PIL import Image
 
     ensure_image_decoders_ready()
     with Image.open(io.BytesIO(image_bytes)) as img:
+        pil_format = _validate_pil_format(img.format, value_label)
         _validate_image_dimensions(img.size[0], img.size[1], value_label)
         # verify 不解码像素，仅校验数据完整性；本路径不复用解码结果，verify 后
         # 图像不可用的限制无影响。
         img.verify()
+        return pil_format
 
 
-def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> None:
-    """解码校验维度并把 PIL 原生异常统一包装为固定文案的校验错误。
+def decode_and_validate_image_bytes(image_bytes: bytes, field_value: str) -> str:
+    """解码校验格式与维度并把 PIL 原生异常统一包装为固定文案的校验错误。
 
-    本地文件与 Data URI 两条路径共用的异常包装单一来源。
+    本地文件与 Data URI 两条路径共用的异常包装单一来源，透传解码得到的实际
+    格式名。
+
+    Returns:
+        PIL 识别的实际格式名，如 ``PNG``。
 
     Raises:
-        SeedreamValidationError: 维度约束不满足或解码失败。
+        SeedreamValidationError: 实际格式不受支持、维度约束不满足或解码失败。
     """
     from PIL import Image
 
     try:
-        decode_and_validate_dimensions(image_bytes, field_value)
+        return decode_and_validate_dimensions(image_bytes, field_value)
     except SeedreamValidationError:
         raise
     except (ValueError, OSError, SyntaxError, Image.DecompressionBombError) as exc:
@@ -124,13 +174,15 @@ def read_and_decode_local_image(
     *,
     field_value: str,
     format_read_error: Callable[[OSError], str],
-) -> bytes:
-    """no-follow 读取本地图像字节并做形态复核、限额复核与维度校验，供校验与读取两条路径复用。
+) -> tuple[bytes, str]:
+    """no-follow 读取本地图像字节并做形态复核、限额复核、格式维度校验与出站标签一致性判定，供校验与读取两条路径复用。
 
     非常规文件由 io_file.open_no_follow_read 在打开单点拒绝。读取失败的文案由
-    调用方经 format_read_error 生成；超限、维度与解码失败用两条路径一致的固定
-    文案，UnidentifiedImageError 用固定文案避免对象地址进入用户消息。返回读取
-    的字节供调用方编码复用。
+    调用方经 format_read_error 生成；超限、格式、维度与解码失败用
+    两条路径一致的固定文案，UnidentifiedImageError 用固定文案避免对象地址进入用户消息。
+    扩展名与实际格式跨族在此单点拒绝，validate 与 prepare 两个公共入口对
+    同一文件同判定。返回读取的字节与出站 MIME 标签，标签取扩展名映射：
+    HEIF 家族 ftyp brand 枚举非穷尽，魔数不可判的合法内容依赖扩展名定标签。
 
     Args:
         path: 已通过候选定位的本地文件路径。
@@ -138,11 +190,11 @@ def read_and_decode_local_image(
         format_read_error: 读取阶段 OSError 的文案生成函数。
 
     Returns:
-        读取并通过限额复核的完整图像字节。
+        读取并通过限额复核的完整图像字节与经一致性判定的出站 MIME 标签。
 
     Raises:
-        SeedreamValidationError: 读取失败、非常规文件、超出大小上限或维度与解码
-            校验失败。
+        SeedreamValidationError: 读取失败、非常规文件、超出大小上限、扩展名与
+            实际内容跨族不一致或格式、维度与解码校验失败。
     """
     try:
         with open_no_follow_read(path) as f:
@@ -158,8 +210,16 @@ def read_and_decode_local_image(
             field="image",
             value=field_value,
         )
-    decode_and_validate_image_bytes(image_bytes, field_value)
-    return image_bytes
+    actual_format = decode_and_validate_image_bytes(image_bytes, field_value)
+    extension = path.suffix.lower()
+    media_type = outbound_media_type(extension, actual_format)
+    if media_type is None:
+        raise SeedreamValidationError(
+            f"文件扩展名与实际内容不一致: {extension}，实际 {actual_format.lower()}",
+            field="image",
+            value=field_value,
+        )
+    return image_bytes, media_type
 
 
 def _get_validation_base_dir() -> Path:
@@ -375,11 +435,11 @@ def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
 
 
 def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
-    """验证本地文件路径的存在性、文件类型、扩展名与大小，默认还校验图像维度。
+    """验证本地文件路径的存在性、文件类型、扩展名与大小，默认还校验图像内容格式、扩展名一致性与维度。
 
     工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基目录取自环境配置，
-    与 MCP Roots 来源不同，函数内不做边界断言以免误拒 Roots 授权的合法路径。维度
-    读取经 no-follow 打开最终分量并复核常规文件形态；path 已由 _resolve_local_image_path
+    与 MCP Roots 来源不同，函数内不做边界断言以免误拒 Roots 授权的合法路径。格式与
+    维度校验的读取经 no-follow 打开最终分量并复核常规文件形态；path 已由 _resolve_local_image_path
     resolve 跟随符号链接，O_NOFOLLOW 仅防 resolve 与 open 之间的 TOCTOU 窗口，
     主要越界防御由调用方的边界 resolve 与比较提供。
 
@@ -391,7 +451,8 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
         文件的绝对路径。
 
     Raises:
-        SeedreamValidationError: 文件不存在、格式不支持或尺寸超限时抛出。
+        SeedreamValidationError: 文件不存在、格式不支持、扩展名与实际内容不一致
+            或尺寸超限时抛出。
     """
     try:
         path = _resolve_local_image_path(file_path)
@@ -409,12 +470,7 @@ def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
             raise SeedreamValidationError(f"路径不是文件: {path}", field="image", value=file_path)
 
         if path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
-            raise SeedreamValidationError(
-                f"不支持的图像格式: {path.suffix}，"
-                f"支持的格式: {'/'.join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED)}",
-                field="image",
-                value=file_path,
-            )
+            raise _unsupported_format_error(path.suffix, file_path)
 
         file_size = stat_result.st_size
         if file_size > MAX_IMAGE_FILE_SIZE:
@@ -448,7 +504,7 @@ _DATA_URI_ALLOWED_FORMATS: frozenset[str] = frozenset(
 
 
 def _validate_data_uri(data_uri: str) -> str:
-    """验证 Data URI 的格式、可解码性、大小与像素维度。
+    """验证 Data URI 的格式、可解码性、大小、像素维度与声明格式真实性。
 
     校验通过后把 media type 归一化为小写标准 MIME（``image/jpg`` 一并归一为
     ``image/jpeg``）重建 Data URI 返回，使送往上游的载荷恒为官方要求的标准形态，
@@ -477,8 +533,8 @@ def _validate_data_uri(data_uri: str) -> str:
         canonical_fmt = MIME_BY_EXTENSION[f".{fmt}"].split("/", 1)[1]
 
         # 先按 base64 文本长度估算解码后大小，避免对巨型文本先解码触发内存放大；
-        # 尾部 = 填充不计入数据，估算恰等于上限时不误拒。
-        estimated_bytes = len(b64) // 4 * 3 - b64.count("=")
+        # 估算经 formats 单一估算器收口。
+        estimated_bytes = estimate_base64_decoded_size(b64, MAX_IMAGE_FILE_SIZE)
         if estimated_bytes > MAX_IMAGE_FILE_SIZE:
             raise SeedreamValidationError(
                 format_file_too_large(estimated_bytes, MAX_IMAGE_FILE_SIZE, label="数据"),
@@ -501,9 +557,17 @@ def _validate_data_uri(data_uri: str) -> str:
                 value=data_uri,
             )
 
-        decode_and_validate_image_bytes(raw, data_uri)
+        actual_format = decode_and_validate_image_bytes(raw, data_uri)
+        media_type = outbound_media_type(f".{canonical_fmt}", actual_format)
+        if media_type is None:
+            raise SeedreamValidationError(
+                f"Data URI 声明格式与实际内容不一致: 声明 {canonical_fmt}，"
+                f"实际 {actual_format.lower()}",
+                field="image",
+                value=data_uri,
+            )
 
-        return f"data:image/{canonical_fmt};base64,{b64}"
+        return f"data:{media_type};base64,{b64}"
 
     except (OSError, ValueError, SyntaxError) as e:
         raise SeedreamValidationError(

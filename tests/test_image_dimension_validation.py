@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import struct
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,10 @@ from PIL import Image, UnidentifiedImageError
 
 from seedream_mcp.utils.core import formats
 from seedream_mcp.utils.core.errors import SeedreamValidationError
-from seedream_mcp.utils.core.formats import MAX_IMAGE_PIXELS
+from seedream_mcp.utils.core.formats import (
+    MAX_IMAGE_PIXELS,
+    SUPPORTED_IMAGE_EXTENSIONS_ORDERED,
+)
 from seedream_mcp.utils.images.image_validation import (
     MIN_IMAGE_EDGE,
     _validate_image_dimensions,
@@ -32,6 +36,18 @@ def _png_bytes(width: int, height: int) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", (width, height), color="white").save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def _format_bytes(width: int, height: int, fmt: str, mode: str = "RGB") -> bytes:
+    """生成指定 PIL 格式的内存图像字节，XBM 等格式须指定可编码模式。"""
+    buffer = io.BytesIO()
+    Image.new(mode, (width, height), color=1 if mode == "1" else "white").save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+def _data_uri_of(fmt: str, payload: bytes) -> str:
+    """构造指定声明格式与负载字节的 data URI。"""
+    return f"data:image/{fmt};base64," + base64.b64encode(payload).decode()
 
 
 def _write_image(tmp_path: Path, name: str, width: int, height: int) -> Path:
@@ -170,6 +186,39 @@ def test_decode_rejects_truncated_png_bytes() -> None:
         decode_and_validate_dimensions(truncated, "truncated.png")
 
 
+@pytest.mark.parametrize(("fmt", "mode"), [("PPM", "RGB"), ("XBM", "1")])
+def test_decode_rejects_weak_magic_format_despite_whitelisted_extension(
+    fmt: str, mode: str
+) -> None:
+    """PPM/XBM 等弱魔数格式可被 PIL 解码，但不在受支持映射内即拒绝。
+
+    此前这类内容借白名单扩展名回退取得白名单 MIME 标签送上游，本地格式承诺失效。
+    """
+    with pytest.raises(SeedreamValidationError, match="不支持的图像格式") as exc_info:
+        decode_and_validate_dimensions(_format_bytes(32, 32, fmt, mode), "disguised.png")
+
+    message = exc_info.value.message
+    assert fmt.lower() in message
+    assert "/".join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED) in message
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == "disguised.png"
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "GIF", "BMP", "WEBP", "TIFF"])
+def test_decode_accepts_all_supported_pil_formats(fmt: str) -> None:
+    """HEIF 之外的六个家族主格式通过解码校验并回告实际格式名。"""
+    assert decode_and_validate_dimensions(_format_bytes(32, 32, fmt), "img") == fmt
+
+
+def test_decode_accepts_heif_family_under_single_format_name() -> None:
+    """heic/heif 家族共用 PIL 格式名 HEIF，解码校验按家族放行并回告该名。"""
+    import pillow_heif
+
+    buffer = io.BytesIO()
+    pillow_heif.from_pillow(Image.new("RGB", (32, 32), color="white")).save(buffer, format="HEIF")
+    assert decode_and_validate_dimensions(buffer.getvalue(), "img.heic") == "HEIF"
+
+
 def test_validate_image_input_wraps_truncated_local_file(tmp_path: Path) -> None:
     """截断 PNG 经完整校验链包装为维度解析失败的校验错误。"""
     path = tmp_path / "truncated.png"
@@ -199,6 +248,16 @@ def test_validate_image_input_wraps_non_image_local_file_as_unidentified(
     with pytest.raises(SeedreamValidationError, match="无法识别的图像内容") as exc_info:
         validate_image_input(str(path), skip_dimensions=False)
     assert "_io.BytesIO" not in exc_info.value.message
+
+
+def test_validate_image_input_rejects_weak_magic_disguised_local_file(
+    tmp_path: Path,
+) -> None:
+    """白名单扩展名承载 PPM 内容时完整校验链拒绝，不再以白名单 MIME 编码送上游。"""
+    path = tmp_path / "disguised.png"
+    path.write_bytes(_format_bytes(32, 32, "PPM"))
+    with pytest.raises(SeedreamValidationError, match="不支持的图像格式"):
+        validate_image_input(str(path))
 
 
 def test_validate_image_input_wraps_decompression_bomb_for_local_file(
@@ -234,6 +293,18 @@ def test_skip_dimensions_bypasses_local_decode_failure(tmp_path: Path) -> None:
     assert Path(result).resolve() == path.resolve()
 
 
+def test_skip_dimensions_bypasses_extension_consistency(tmp_path: Path) -> None:
+    """skip_dimensions 为 True 时不读取解码，扩展名与内容错标的文件仍通过。
+
+    一致性判定随解码收口读取单点，浅诊断分支不因错标文件改变结论。
+    """
+    path = _write_image(tmp_path, "actually-png.jpg", 32, 32)
+    with pytest.raises(SeedreamValidationError, match="文件扩展名与实际内容不一致"):
+        validate_image_input(str(path), skip_dimensions=False)
+    result = validate_image_input(str(path), skip_dimensions=True)
+    assert Path(result).resolve() == path.resolve()
+
+
 def test_skip_dimensions_does_not_affect_data_uri_validation() -> None:
     """skip_dimensions 仅作用于本地文件路径，Data URI 恒做维度校验。"""
     data_uri = _png_data_uri(10, 10)
@@ -259,9 +330,10 @@ def test_validate_image_input_normalizes_data_uri_media_type() -> None:
     upper_uri = data_uri.replace("data:image/png", "data:image/PNG")
     assert validate_image_input(upper_uri) == data_uri
 
-    payload = data_uri.split(",", 1)[1]
-    jpg_uri = f"data:image/jpg;base64,{payload}"
-    assert validate_image_input(jpg_uri) == f"data:image/jpeg;base64,{payload}"
+    # jpg 别名归一须配 JPEG 实际内容：声明与内容不符已被声明比对拒绝。
+    jpeg_payload = base64.b64encode(_format_bytes(32, 32, "JPEG")).decode()
+    jpg_uri = f"data:image/jpg;base64,{jpeg_payload}"
+    assert validate_image_input(jpg_uri) == f"data:image/jpeg;base64,{jpeg_payload}"
 
 
 def test_validate_image_input_wraps_non_image_data_uri_as_unidentified() -> None:
@@ -270,6 +342,45 @@ def test_validate_image_input_wraps_non_image_data_uri_as_unidentified() -> None
     with pytest.raises(SeedreamValidationError, match="无法识别的图像内容") as exc_info:
         validate_image_input(f"data:image/png;base64,{payload}")
     assert "_io.BytesIO" not in exc_info.value.message
+
+
+def test_validate_image_input_rejects_data_uri_declared_format_mismatch() -> None:
+    """声明格式与实际内容不符的 Data URI 在本地拒绝，不依赖上游嗅探或模糊报错。"""
+    with pytest.raises(SeedreamValidationError, match="声明格式与实际内容不一致") as exc_info:
+        validate_image_input(_data_uri_of("png", _format_bytes(32, 32, "JPEG")))
+
+    message = exc_info.value.message
+    assert "声明 png" in message
+    assert "实际 jpeg" in message
+    assert exc_info.value.field == "image"
+
+
+def test_validate_image_input_rejects_data_uri_with_weak_magic_payload() -> None:
+    """弱魔数负载的 Data URI 在解码校验被拒，报实际格式而非声明格式。"""
+    with pytest.raises(SeedreamValidationError, match="不支持的图像格式: ppm"):
+        validate_image_input(_data_uri_of("png", _format_bytes(32, 32, "PPM")))
+
+
+def test_validate_image_input_rejects_headerless_dib_named_bmp(tmp_path: Path) -> None:
+    """无文件头 DIB 命名 .bmp 按实际格式拒绝：出站原样透传字节，失真标签不上送。"""
+    header = struct.pack("<IIIHHIIIIII", 40, 16, 16, 1, 24, 0, 16 * 16 * 3, 0, 0, 0, 0)
+    dib_file = tmp_path / "photo.bmp"
+    dib_file.write_bytes(header + bytes(16 * 16 * 3))
+
+    with pytest.raises(SeedreamValidationError, match="不支持的图像格式: dib") as exc_info:
+        validate_image_input(str(dib_file))
+
+    assert exc_info.value.field == "image"
+
+
+def test_validate_image_input_accepts_heif_family_declared_subtype() -> None:
+    """heic/heif 共用 PIL 格式名，家族内声明任一子类型均放行并按声明归一返回。"""
+    import pillow_heif
+
+    buffer = io.BytesIO()
+    pillow_heif.from_pillow(Image.new("RGB", (32, 32), color="white")).save(buffer, format="HEIF")
+    heif_uri = _data_uri_of("heif", buffer.getvalue())
+    assert validate_image_input(heif_uri) == heif_uri
 
 
 # ==================== validate_image_path 的非本地引用短路 ====================

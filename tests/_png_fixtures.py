@@ -1,4 +1,4 @@
-"""PNG 头伪造共享助手：以真实 1x1 图改写 IHDR 声明任意宽高，供像素上限类用例复用。"""
+"""PNG 测试字节共享助手：最小 PNG 字节供 base64 解码类用例，IHDR 宽高伪造供像素上限类用例。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,16 @@ import zlib
 from io import BytesIO
 
 from PIL import Image
+
+
+def minimal_png_bytes() -> bytes:
+    """构造最小 PNG 字节，魔法字节可被 is_known_image_bytes 识别。"""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+        b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N"
+        b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
 
 
 def forged_png_bytes(width: int, height: int) -> bytes:
