@@ -5,10 +5,10 @@ schema，runtime 输出也须经模型构造后 model_dump，使声明与实际�
 build_error_dict 与 build_error_structured 收敛各错误分支的错误结构；
 build_structured_json_text 将 structuredContent 序列化为紧凑 JSON 的 TextContent，
 字符串值继承摘要通道净化、二进制载荷替换为长度占位；
-dump_compact_strict_json 是紧凑严格 JSON 的单一序列化原语，Web 控制台的结构化
-JSON 同源委托；
+dump_compact_strict_json 是紧凑严格 JSON 的单一序列化原语，dump_strict_json_bytes
+为其 UTF-8 字节形态，Web 控制台的结构化 JSON 同源委托；
 build_structured_tool_result 把镜像块回传进 content 数组，是「摘要+镜像（+尾部块）」
-结果组装的单一构造点。
+结果组装的单一构造点，镜像装配可经 output_channels_scope 按调用方关闭。
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from typing import Any
 from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from ._channels import MIRROR_CHANNEL, output_channel_enabled
 from ._sanitize import _unique_flat_key
 from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
 from ...utils.core.logs import get_logger
@@ -145,6 +146,7 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
         offset: 当前页起始偏移。
         has_more: 是否仍有未返回的匹配图片。
         next_offset: 下一页起始偏移，无更多图片时为 None。
+        skipped_count: 扫描窗口内因暂时无法访问被跳过的条目数，无跳过时为 None。
         images: 当前页图片条目，含 index 与 path，可选 size_mb 与 modified。
         recursive: 是否递归查找子目录。
         max_depth: 递归查找的最大深度。
@@ -161,6 +163,7 @@ class BrowseImagesStructuredOutput(_BaseStructuredOutput):
     offset: int | None = None
     has_more: bool | None = None
     next_offset: int | None = None
+    skipped_count: int | None = None
     images: list[dict[str, Any]] | None = None
     recursive: bool | None = None
     max_depth: int | None = None
@@ -271,6 +274,11 @@ def dump_compact_strict_json(value: Any) -> str:
     模型可见镜像与 Web 控制台结构化 JSON 共用本函数，序列化形态单源不漂移。
     """
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+def dump_strict_json_bytes(value: Any) -> bytes:
+    """紧凑严格 JSON 的 UTF-8 字节形态，供下沉路径把序列化与编码一并带离事件循环。"""
+    return dump_compact_strict_json(value).encode("utf-8")
 
 
 def build_structured_json_text(structured: dict[str, Any]) -> TextContent:
@@ -389,7 +397,9 @@ async def build_structured_tool_result(
     与结构化载荷共享严格 JSON 出口，未配对代理在装配点统一剥离，含代理的文件名等
     保留原文内容不再使整个响应翻为序列化失败。载荷尺寸估算达到卸载阈值时镜像构建
     的树遍历、净化与序列化下沉专用 CPU 线程池执行，小载荷内联构建免线程往返；两条
-    路径失败时同样降级为无镜像结果并记录告警，is_error 取值保持不变。
+    路径失败时同样降级为无镜像结果并记录告警，is_error 取值保持不变。镜像通道经
+    output_channels_scope 关闭的调用方跳过镜像块免付构建成本，摘要与
+    structuredContent 不受影响。
 
     Args:
         message: 用户可见的摘要文本，作为首个文本块。
@@ -403,17 +413,18 @@ async def build_structured_tool_result(
     sanitized_message = strip_unpaired_surrogates(message)
     sanitized_structured = _strip_result_payload_surrogates(structured)
     blocks: list[ContentBlock] = [TextContent(type="text", text=sanitized_message)]
-    try:
-        if should_offload_to_cpu_pool(
-            sanitized_structured, value_leaf_cost=binary_placeholder_value_leaf_length
-        ):
-            mirror = await run_in_cpu_pool(build_structured_json_text, sanitized_structured)
+    if output_channel_enabled(MIRROR_CHANNEL):
+        try:
+            if should_offload_to_cpu_pool(
+                sanitized_structured, value_leaf_cost=binary_placeholder_value_leaf_length
+            ):
+                mirror = await run_in_cpu_pool(build_structured_json_text, sanitized_structured)
+            else:
+                mirror = build_structured_json_text(sanitized_structured)
+        except Exception:
+            logger.opt(exception=True).warning("结构化镜像构建失败，降级为无镜像结果")
         else:
-            mirror = build_structured_json_text(sanitized_structured)
-    except Exception:
-        logger.opt(exception=True).warning("结构化镜像构建失败，降级为无镜像结果")
-    else:
-        blocks.append(mirror)
+            blocks.append(mirror)
     return CallToolResult(
         content=[*blocks, *trailing],
         structured_content=sanitized_structured,

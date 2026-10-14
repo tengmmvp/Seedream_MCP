@@ -1,8 +1,8 @@
 """Seedream MCP 工具输入模型。
 
-作为参数校验与 MCP inputSchema 的单一来源，MCPServer 依据本模块的 pydantic 模型生成
-各工具入参 schema。通用字段抽到 ``_*Input`` 基类，按需多重继承组合为各工具的最终
-输入模型。
+本模块是工具参数校验的单一来源；inputSchema 由 server.py 的平铺签名生成，平铺签名
+镜像本模块的字段定义，等价性由 test_tool_parameter_order 锁定。
+通用字段抽到 ``_*Input`` 基类，按需多重继承组合为各工具的最终输入模型。
 """
 
 from __future__ import annotations
@@ -277,15 +277,19 @@ class _PromptAndOptimizeInput(BaseModel):
 MAX_IMAGE_INPUT_CHARS = MAX_IMAGE_FILE_SIZE * 2
 
 
-def _reject_blank_or_oversized_image_items(items: list[str]) -> None:
-    """逐项拒绝空白与超防御界的图片字符串，三个带图工具的输入模型共用。"""
+def _reject_blank_or_oversized_image_items(items: list[str]) -> list[str]:
+    """逐项 strip 归一后拒绝空白与超防御界条目并返回归一列表，三个带图工具的输入模型共用。"""
+    normalized: list[str] = []
     for item in items:
-        if not item.strip():
+        stripped = item.strip()
+        if not stripped:
             raise ValueError("image 不能为空字符串")
-        if len(item) > MAX_IMAGE_INPUT_CHARS:
+        if len(stripped) > MAX_IMAGE_INPUT_CHARS:
             raise ValueError(
-                f"image 输入长度 {len(item)} 超过防御上限 {MAX_IMAGE_INPUT_CHARS} 字符"
+                f"image 输入长度 {len(stripped)} 超过防御上限 {MAX_IMAGE_INPUT_CHARS} 字符"
             )
+        normalized.append(stripped)
+    return normalized
 
 
 class _SingleImageInput(BaseModel):
@@ -299,10 +303,9 @@ class _SingleImageInput(BaseModel):
     @field_validator("image")
     @classmethod
     def reject_blank_or_oversized_image(cls, value: str) -> str:
-        """拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
+        """strip 归一并拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
         client 归一化层后退化为 isError 工具结果。"""
-        _reject_blank_or_oversized_image_items([value])
-        return value
+        return _reject_blank_or_oversized_image_items([value])[0]
 
 
 class _MultiImageInput(BaseModel):
@@ -318,10 +321,9 @@ class _MultiImageInput(BaseModel):
     @field_validator("image")
     @classmethod
     def reject_blank_or_oversized_items(cls, value: list[str]) -> list[str]:
-        """逐项拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
+        """逐项 strip 归一并拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
         client 归一化层后退化为 isError 工具结果。"""
-        _reject_blank_or_oversized_image_items(value)
-        return value
+        return _reject_blank_or_oversized_image_items(value)
 
 
 class _SequentialImageInput(BaseModel):
@@ -338,16 +340,13 @@ class _SequentialImageInput(BaseModel):
 
     @field_validator("image")
     @classmethod
-    def reject_blank_or_oversized_items(
-        cls, value: str | list[str] | None
-    ) -> str | list[str] | None:
-        """逐项拒绝空白与超防御界的字符串，使其在 schema 层即报错，而非放行到
-        client 归一化层后退化为 isError 工具结果。"""
+    def reject_blank_or_oversized_items(cls, value: str | list[str] | None) -> list[str] | None:
+        """逐项 strip 归一为列表并拒绝空白与超防御界的字符串，使其在 schema 层即报错，
+        而非放行到 client 归一化层后退化为 isError 工具结果。"""
         if value is None:
             return None
         items = [value] if isinstance(value, str) else value
-        _reject_blank_or_oversized_image_items(items)
-        return value
+        return _reject_blank_or_oversized_image_items(items)
 
 
 class _LayerDecompositionInput(BaseModel):
@@ -589,7 +588,7 @@ class SequentialGenerationInput(
     @field_validator("image", mode="before")
     @classmethod
     def validate_reference_images(cls, value: str | list[str] | None) -> list[str] | None:
-        """归一单字符串为列表并校验数量与格式，None 时跳过校验。"""
+        """归一单字符串为列表并校验数量，空白与超防御界条目由基类共享校验器统一拒绝。"""
         if value is None:
             return None
         if isinstance(value, str):
@@ -601,13 +600,7 @@ class SequentialGenerationInput(
             raise ValueError("image 必须是字符串或字符串列表")
         if len(images) < 1 or len(images) > SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES:
             raise ValueError(f"参考图片数量需在 1-{SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES} 之间")
-
-        normalized: list[str] = []
-        for item in images:
-            if not isinstance(item, str) or not item.strip():
-                raise ValueError("image 列表中的每一项都必须是非空字符串")
-            normalized.append(item.strip())
-        return normalized
+        return images
 
     @model_validator(mode="after")
     def validate_total_image_limit(self) -> "SequentialGenerationInput":

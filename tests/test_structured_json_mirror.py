@@ -4,11 +4,13 @@
 与 structuredContent 经 json.loads 等值仅对净化无变化的干净内容成立，掩码、截断
 与 b64_json 长度占位只作用于镜像视图、原树不受影响；非有限浮点降级为无镜像结果；
 镜像构建按载荷尺寸估算分流专用 CPU 池或内联构建；未配对代理在装配点迭代剥离，
-极端深树不消耗递归配额，干净子树保持原引用。
+极端深树不消耗递归配额，干净子树保持原引用；JSON 字节解析分派 load_json_bytes
+的阈值两侧与池关闭分支由本文件锁定。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from collections.abc import Callable
@@ -26,16 +28,24 @@ from seedream_mcp.tools.core.outputs import (
     _strip_result_payload_surrogates,
     build_structured_json_text,
     build_structured_tool_result,
+    dump_compact_strict_json,
+    dump_strict_json_bytes,
     format_base64_placeholder,
 )
+from seedream_mcp.tools.core.common import output_channels_scope
 from seedream_mcp.tools.core.schemas import BrowseImagesInput, ResponseFormat, TextToImageInput
-from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
+from seedream_mcp.utils.core.executors import (
+    CPU_OFFLOAD_SIZE_THRESHOLD,
+    CpuOffloadPoolClosedError,
+    load_json_bytes,
+    shutdown_cpu_offload_executor,
+)
 from seedream_mcp.utils.core.sanitizers import estimate_output_length, utf8_value_leaf_length
 from seedream_mcp.tools.impl.browse_images import handle_browse_images
-from seedream_mcp.tools.runners import run_text_to_image
+from seedream_mcp.tools.runners import run_browse_images, run_text_to_image
 from seedream_mcp.utils.io import io_save
 
-from _cpu_offload_spy import CpuOffloadSpy
+from _cpu_offload_spy import CpuOffloadSpy, saturate_cpu_offload_pool
 from _generation_fixtures import _patch_client_success, _patch_save_real_file
 from _log_fakes import capture_loguru_messages
 
@@ -344,6 +354,111 @@ def test_structured_json_text_strict_serialization_rejects_non_finite_floats() -
     structured["usage"] = {"total": float("inf")}
     with pytest.raises(ValueError):
         build_structured_json_text(structured)
+
+
+def test_dump_strict_json_bytes_matches_compact_text_encoding() -> None:
+    """字节原语与紧凑严格 JSON 文本逐字节一致，非 ASCII 原文输出不被转义。"""
+    structured: dict[str, Any] = {"tool": "text_to_image", "prompt": "一只猫"}
+
+    payload = dump_strict_json_bytes(structured)
+
+    assert payload == dump_compact_strict_json(structured).encode("utf-8")
+    assert payload.decode("utf-8") == '{"tool":"text_to_image","prompt":"一只猫"}'
+
+
+async def test_load_json_bytes_runs_in_cpu_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """超阈值 JSON 字节经专用线程池解析，不与默认执行器短任务同池排队。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    raw = b'{"pad": "' + b"x" * CPU_OFFLOAD_SIZE_THRESHOLD + b'"}'
+
+    assert await load_json_bytes(raw) == {"pad": "x" * CPU_OFFLOAD_SIZE_THRESHOLD}
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_load_json_bytes_small_runs_outside_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低于阈值的 JSON 字节在事件循环线程同步解析，不付线程往返开销。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    assert await load_json_bytes(b'{"prompt": "a cat"}') == {"prompt": "a cat"}
+    spy.assert_ran_outside_cpu_pool()
+
+
+async def test_load_json_bytes_pool_closed_raises_pool_closed_error() -> None:
+    """饱和池上排队的超阈值解析被关池取消时，以池关闭异常原样上抛供按类型兜底。"""
+    raw = b'{"pad": "' + b"x" * CPU_OFFLOAD_SIZE_THRESHOLD + b'"}'
+
+    async with saturate_cpu_offload_pool() as saturated:
+        parse = asyncio.ensure_future(load_json_bytes(raw))
+        await saturated.wait_queued()
+        shutdown_cpu_offload_executor()
+        with pytest.raises(CpuOffloadPoolClosedError):
+            await parse
+
+    await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
+
+
+async def test_runner_web_form_skips_mirror_keep_structured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """预览与镜像通道关闭的 Web 形态调用跳过镜像，structuredContent 与工具路径逐项一致。
+
+    MCP 工具路径默认仍含镜像块，由同文件既有用例锁定。
+    """
+    _patch_client_success(monkeypatch)
+    config = SeedreamConfig(api_key="test_key", auto_save_enabled=False)
+
+    tool_result = await run_text_to_image(TextToImageInput(prompt="a cat"), config)
+    with output_channels_scope(preview=False, mirror=False):
+        web_result = await run_text_to_image(TextToImageInput(prompt="a cat"), config)
+
+    assert len(_text_blocks(tool_result)) == 2
+    web_blocks = _text_blocks(web_result)
+    assert len(web_blocks) == 1
+    assert "文生图任务完成" in web_blocks[0].text
+    assert web_result.structured_content == tool_result.structured_content
+    assert web_result.is_error is False
+
+
+async def test_mirror_disabled_keeps_preview_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """镜像通道关闭只关镜像：预览装配不受影响，缩略图仍进 content。"""
+    _patch_client_success(monkeypatch)
+    _patch_save_real_file(monkeypatch, tmp_path)
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
+    # 预览的缓存根经环境链取活动配置，设为活动配置防止缓存落到仓库目录。
+    set_active_config(config)
+
+    with output_channels_scope(mirror=False):
+        result = await run_text_to_image(TextToImageInput(prompt="a cat"), config)
+
+    assert result.is_error is False
+    assert len(_text_blocks(result)) == 1
+    assert any(isinstance(content, ImageContent) for content in result.content)
+
+
+async def test_browse_runner_mirror_flag_controls_mirror_block(workspace_root: Path) -> None:
+    """浏览 runner 默认装配镜像块，镜像通道关闭时只剩清单文本。"""
+    images_root = workspace_root / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    (images_root / "demo.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    default_result = await run_browse_images(BrowseImagesInput(directory=".", recursive=False))
+    with output_channels_scope(mirror=False):
+        web_result = await run_browse_images(BrowseImagesInput(directory=".", recursive=False))
+
+    assert len(_text_blocks(default_result)) == 2
+    web_blocks = _text_blocks(web_result)
+    assert len(web_blocks) == 1
+    assert "demo.png" in web_blocks[0].text
+    assert web_result.structured_content == default_result.structured_content
 
 
 @pytest.mark.parametrize("is_error", [False, True])

@@ -1,6 +1,6 @@
-"""生成流水线预览开关测试：include_previews 关闭态跳过缩略图预览装配。
+"""生成流水线预览开关测试：预览通道关闭态跳过缩略图预览装配。
 
-Web 端点只消费 structuredContent，经 runner 的 include_previews=False 沿异步
+Web 端点只消费 structuredContent，经 output_channels_scope 在作用域边界沿异步
 上下文关闭预览装配；mock client 与自动保存驱动真实流水线，以 build_preview_contents
 计数 spy 与 content 形态双重锁定关闭态，并守护作用域退出后的开关复位。
 """
@@ -16,7 +16,8 @@ from mcp.types import ImageContent, TextContent
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core import common as common_module
 from seedream_mcp.tools.core import outputs as outputs_module
-from seedream_mcp.tools.core.common import execute_generation_handler, preview_inclusion_scope
+from seedream_mcp.tools.core._channels import output_channel_enabled
+from seedream_mcp.tools.core.common import execute_generation_handler, output_channels_scope
 from seedream_mcp.tools.core.outputs import build_structured_tool_result
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl._metadata import TEXT_TO_IMAGE
@@ -39,18 +40,17 @@ def _patch_preview_spy(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return calls
 
 
-async def test_runner_include_previews_false_skips_preview_assembly(
+async def test_runner_preview_channel_disabled_skips_preview_assembly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """include_previews=False 时不调用缩略图构建，content 不含 ImageContent。"""
+    """预览通道关闭时不调用缩略图构建，content 不含 ImageContent。"""
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
     config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
 
-    result = await run_text_to_image(
-        TextToImageInput(prompt="a cat"), config, include_previews=False
-    )
+    with output_channels_scope(preview=False):
+        result = await run_text_to_image(TextToImageInput(prompt="a cat"), config)
 
     assert result.is_error is False
     assert calls == []
@@ -103,7 +103,8 @@ async def test_preview_scope_resets_after_runner_call(
     calls = _patch_preview_spy(monkeypatch)
     config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=True)
 
-    await run_text_to_image(TextToImageInput(prompt="a cat"), config, include_previews=False)
+    with output_channels_scope(preview=False):
+        await run_text_to_image(TextToImageInput(prompt="a cat"), config)
     await run_text_to_image(TextToImageInput(prompt="a cat"), config)
 
     assert calls == [1]
@@ -137,7 +138,7 @@ async def test_preview_assembly_failure_degrades_to_text_result(
 async def test_execute_handler_skips_preview_when_scope_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """preview_inclusion_scope 关闭态下 execute_generation_handler 跳过预览装配。"""
+    """预览通道作用域关闭态下 execute_generation_handler 跳过预览装配。"""
     _patch_client_success(monkeypatch)
     _patch_save_real_file(monkeypatch, tmp_path)
     calls = _patch_preview_spy(monkeypatch)
@@ -152,7 +153,7 @@ async def test_execute_handler_skips_preview_when_scope_disabled(
             "status": "completed",
         }
 
-    with preview_inclusion_scope(False):
+    with output_channels_scope(preview=False):
         result = await execute_generation_handler(
             params=TextToImageInput(prompt="a cat"),
             config=config,
@@ -164,6 +165,36 @@ async def test_execute_handler_skips_preview_when_scope_disabled(
 
     assert result.is_error is False
     assert calls == []
+
+
+async def test_config_disabled_preview_wins_over_explicit_scope_enable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """config 预览默认在 handler 入口一次解析：外层显式开启不越过配置关闭。"""
+    _patch_client_success(monkeypatch)
+    _patch_save_real_file(monkeypatch, tmp_path)
+    calls = _patch_preview_spy(monkeypatch)
+    config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path), preview_enabled=False)
+
+    with output_channels_scope(preview=True):
+        result = await run_text_to_image(TextToImageInput(prompt="a cat"), config)
+
+    assert result.is_error is False
+    assert calls == []
+    assert not any(isinstance(content, ImageContent) for content in result.content)
+
+
+def test_output_channels_scope_rejects_unknown_channel_name() -> None:
+    """未知通道名立即抛错：拼错通道名不做静默 no-op。"""
+    with pytest.raises(ValueError, match="未知输出通道"):
+        with output_channels_scope(previews=False):
+            pass
+
+
+def test_output_channel_enabled_rejects_unknown_channel_name() -> None:
+    """读取侧对未知通道名同样抛错，不静默返回 False 使通道永久停用。"""
+    with pytest.raises(ValueError, match="未知输出通道"):
+        output_channel_enabled("no_such_channel")
 
 
 @pytest.mark.parametrize("is_error", [False, True])

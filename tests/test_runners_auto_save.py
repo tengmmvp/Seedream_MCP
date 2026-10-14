@@ -29,7 +29,7 @@ from seedream_mcp.tools.runners import (
 )
 from seedream_mcp.utils.io import io_save
 
-from _generation_fixtures import _patch_client_success
+from _generation_fixtures import _patch_client_method_spy, _patch_client_success
 
 GENERATED_URL = "https://example.com/generated.png"
 
@@ -41,19 +41,6 @@ def _client_result() -> dict[str, Any]:
         "usage": {"generated_images": 1},
         "status": "completed",
     }
-
-
-def _patch_client_method(monkeypatch: pytest.MonkeyPatch, method_name: str) -> list[dict[str, Any]]:
-    """按方法名安装记录调用参数并返回单图成功结果的替身，供分发计数与数据传递断言共用。"""
-    calls: list[dict[str, Any]] = []
-
-    async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
-        del self
-        calls.append(kwargs)
-        return _client_result()
-
-    monkeypatch.setattr(SeedreamClient, method_name, fake_method)
-    return calls
 
 
 def _patch_save_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -262,15 +249,7 @@ async def test_run_text_to_image_rejects_invalid_save_path_before_api_call(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """非法形态 save_path 在校验阶段失败：client 生成方法不被调用，请求不计费执行。"""
-    client_cls = SeedreamClient
-    calls: list[dict[str, Any]] = []
-
-    async def fake_text_to_image(self: Any, **kwargs: Any) -> dict[str, Any]:
-        del self
-        calls.append(kwargs)
-        return _client_result()
-
-    monkeypatch.setattr(client_cls, "text_to_image", fake_text_to_image)
+    calls = _patch_client_method_spy(monkeypatch, "text_to_image", result_factory=_client_result)
 
     base = tmp_path / "images_root"
     base.mkdir()
@@ -295,7 +274,7 @@ async def test_run_image_to_image_dispatches_via_composition_root(
 
     最终调用 client.image_to_image，错分发时被 patch 方法零调用即时显式失败。
     """
-    calls = _patch_client_method(monkeypatch, "image_to_image")
+    calls = _patch_client_method_spy(monkeypatch, "image_to_image", result_factory=_client_result)
     _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
@@ -318,7 +297,9 @@ async def test_run_multi_image_fusion_dispatches_via_composition_root(
 
     最终调用 client.multi_image_fusion，错分发时被 patch 方法零调用即时显式失败。
     """
-    calls = _patch_client_method(monkeypatch, "multi_image_fusion")
+    calls = _patch_client_method_spy(
+        monkeypatch, "multi_image_fusion", result_factory=_client_result
+    )
     _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))
@@ -344,7 +325,9 @@ async def test_run_sequential_generation_dispatches_via_composition_root(
 
     最终调用 client.sequential_generation，错分发时被 patch 方法零调用即时显式失败。
     """
-    calls = _patch_client_method(monkeypatch, "sequential_generation")
+    calls = _patch_client_method_spy(
+        monkeypatch, "sequential_generation", result_factory=_client_result
+    )
     _patch_save_success(monkeypatch)
 
     config = SeedreamConfig(api_key="test_key", data_root=str(tmp_path))

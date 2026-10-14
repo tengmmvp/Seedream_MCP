@@ -1,6 +1,6 @@
 """生成类工具通用处理门面。
 
-内部按职责拆分到 _pipeline/context/results/auto_save/_sanitize/parallel/outputs/schemas
+内部按职责拆分到 _pipeline/context/results/auto_save/_sanitize/parallel/outputs/schemas/_channels
 子模块，本模块聚合公共符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
 ``execute_generation_handler`` 是四类生成工具的统一处理流水线，各阶段职责与异常降级
 契约见该函数 docstring。
@@ -9,9 +9,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager
-from contextvars import ContextVar
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,8 +40,12 @@ from ._pipeline import (
     safe_report_progress,
 )
 from .auto_save import auto_save_from_base64, auto_save_from_urls
+from ._channels import PREVIEW_CHANNEL, output_channel_enabled, output_channels_scope
 from .context import GenerationExecutionContext, build_generation_context
-from .outputs import build_error_structured, build_structured_tool_result
+from .outputs import (
+    build_error_structured,
+    build_structured_tool_result,
+)
 from ._sanitize import _sanitize_image_errors, _sanitize_usage
 from .parallel import (
     _run_generation_requests,
@@ -81,28 +83,10 @@ __all__ = [
     "format_generation_response",
     "get_lifespan_resource",
     "log_tiered_failure",
-    "preview_inclusion_scope",
+    "output_channels_scope",
     "safe_report_progress",
     "update_result_with_auto_save",
 ]
-
-
-# 预览装配的执行期开关。runner 层经 preview_inclusion_scope 关闭后沿异步上下文
-# 传播到 execute_generation_handler，impl 处理器无需在签名上透传该开关。
-_preview_enabled: ContextVar[bool] = ContextVar("seedream_preview_enabled", default=True)
-
-
-@contextmanager
-def preview_inclusion_scope(include_previews: bool) -> Iterator[None]:
-    """在作用域内设置预览装配开关，退出时恢复先前的取值。
-
-    仅 Web 端点等不消费 ImageContent 的调用方传 False，MCP 工具路径保持默认 True。
-    """
-    token = _preview_enabled.set(include_previews)
-    try:
-        yield
-    finally:
-        _preview_enabled.reset(token)
 
 
 @dataclass(frozen=True)
@@ -284,17 +268,16 @@ def _format_generation_outputs(
 
 async def _build_generation_preview(
     *,
-    config: SeedreamConfig,
     is_generation_failed: bool,
     auto_save_results: list[AutoSaveResult],
     module_logger: Logger,
     response_text: str,
 ) -> tuple[str, list[ImageContent]]:
     """预览装配阶段：为成功保存的图片生成缩略图内容并补充超上限说明。"""
-    # 预览从已保存的本地文件生成，未开启、生成失败或无成功保存时退化为纯文本；
+    # 预览从已保存的本地文件生成，生成失败或无成功保存时退化为纯文本；
     # 超上限仅取前 PREVIEW_MAX_IMAGES 张，完整清单仍在 structuredContent.data。
     preview_contents: list[ImageContent] = []
-    if config.preview_enabled and not is_generation_failed and auto_save_results:
+    if not is_generation_failed and auto_save_results:
         saved_paths = [
             Path(save_result.local_path)
             for save_result in auto_save_results
@@ -339,7 +322,8 @@ async def execute_generation_handler(
     分发单次或并行的生成请求，按 response_format 自动保存，净化图片数据并
     格式化文本与 structuredContent，预览开启且存在成功保存图片时追加缩略图
     ImageContent。任意阶段抛出的异常均降级为 ``is_error=True`` 的结果，不向
-    调用方抛出。
+    调用方抛出。config 驱动的预览通道默认在入口一次解析进输出通道作用域，
+    调用方经 ``output_channels_scope`` 的显式关闭优先于配置默认。
 
     Args:
         params: 经 pydantic 校验的工具输入模型。
@@ -353,91 +337,95 @@ async def execute_generation_handler(
         工具结果，content 含文本摘要、structuredContent 的 JSON 回传块与可选缩略图，
         失败时 isError 为 True。
     """
-    try:
-        context = await _prepare_generation_context(
-            params=params,
-            config=config,
-            metadata=metadata,
-            ctx=ctx,
-            module_logger=module_logger,
-        )
-
-        result = await _dispatch_generation_requests(
-            config=config,
-            context=context,
-            ctx=ctx,
-            request_executor=request_executor,
-            module_logger=module_logger,
-        )
-
-        is_generation_failed = response_reports_failure(result)
-        # 图片列表提取一次供自动保存与格式化阶段复用，避免重复提取。
-        images = extract_images(result)
-        result, images, auto_save_results, saveable_indices, auto_save_error = (
-            await _auto_save_generation_images(
-                result=result,
-                images=images,
-                is_generation_failed=is_generation_failed,
-                context=context,
+    with output_channels_scope(
+        preview=config.preview_enabled and output_channel_enabled(PREVIEW_CHANNEL)
+    ):
+        try:
+            context = await _prepare_generation_context(
+                params=params,
                 config=config,
-                tool_name=metadata.tool_name,
+                metadata=metadata,
                 ctx=ctx,
                 module_logger=module_logger,
             )
-        )
 
-        # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
-        # 净化幂等，下游意外重复净化恒等无害。大批量净化下沉工作线程。
-        sanitized_images = await asyncio.to_thread(_sanitize_image_errors, images)
-
-        response_text, structured_result = _format_generation_outputs(
-            metadata=metadata,
-            result=result,
-            context=context,
-            auto_save_results=auto_save_results,
-            auto_save_error=auto_save_error,
-            sanitized_images=sanitized_images,
-            saveable_indices=saveable_indices,
-        )
-    except Exception as exc:
-        log_tiered_failure(module_logger, exc, "{}处理失败", metadata.failure_prefix)
-        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
-        user_facing_error = format_error_for_user(exc)
-        profile = resolve_error_profile(exc)
-        # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。
-        if profile.user_hint:
-            error_message = f"{metadata.failure_prefix}失败：{user_facing_error}"
-        else:
-            error_message = (
-                f"{metadata.failure_prefix}失败：{user_facing_error}\n"
-                f"{_failure_guidance_for_code(profile.error_code)}"
-            )
-        error_structured = build_error_structured(
-            metadata.tool_name,
-            profile.error_code,
-            user_facing_error,
-        )
-        return await build_structured_tool_result(error_message, error_structured, is_error=True)
-
-    # 预览为尽力补充：意外失败降级为纯文本，不把已成功的结果翻转为失败。
-    preview_contents: list[ImageContent] = []
-    if _preview_enabled.get():
-        try:
-            response_text, preview_contents = await _build_generation_preview(
+            result = await _dispatch_generation_requests(
                 config=config,
-                is_generation_failed=is_generation_failed,
-                auto_save_results=auto_save_results,
+                context=context,
+                ctx=ctx,
+                request_executor=request_executor,
                 module_logger=module_logger,
-                response_text=response_text,
             )
-        except Exception:
-            module_logger.opt(exception=True).warning("预览装配失败，降级为纯文本结果")
 
-    final_result = await build_structured_tool_result(
-        response_text,
-        structured_result,
-        is_error=is_generation_failed,
-        trailing=preview_contents,
-    )
-    await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
-    return final_result
+            is_generation_failed = response_reports_failure(result)
+            # 图片列表提取一次供自动保存与格式化阶段复用，避免重复提取。
+            images = extract_images(result)
+            result, images, auto_save_results, saveable_indices, auto_save_error = (
+                await _auto_save_generation_images(
+                    result=result,
+                    images=images,
+                    is_generation_failed=is_generation_failed,
+                    context=context,
+                    config=config,
+                    tool_name=metadata.tool_name,
+                    ctx=ctx,
+                    module_logger=module_logger,
+                )
+            )
+
+            # 单一显式净化步骤：净化一次返回新列表，文本与结构化两出口共用同一结果；
+            # 净化幂等，下游意外重复净化恒等无害。大批量净化下沉工作线程。
+            sanitized_images = await asyncio.to_thread(_sanitize_image_errors, images)
+
+            response_text, structured_result = _format_generation_outputs(
+                metadata=metadata,
+                result=result,
+                context=context,
+                auto_save_results=auto_save_results,
+                auto_save_error=auto_save_error,
+                sanitized_images=sanitized_images,
+                saveable_indices=saveable_indices,
+            )
+        except Exception as exc:
+            log_tiered_failure(module_logger, exc, "{}处理失败", metadata.failure_prefix)
+            await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理失败")
+            user_facing_error = format_error_for_user(exc)
+            profile = resolve_error_profile(exc)
+            # 档案已带 user_hint 时文案已含建议，不再叠加查表建议，避免同一句出现两遍。
+            if profile.user_hint:
+                error_message = f"{metadata.failure_prefix}失败：{user_facing_error}"
+            else:
+                error_message = (
+                    f"{metadata.failure_prefix}失败：{user_facing_error}\n"
+                    f"{_failure_guidance_for_code(profile.error_code)}"
+                )
+            error_structured = build_error_structured(
+                metadata.tool_name,
+                profile.error_code,
+                user_facing_error,
+            )
+            return await build_structured_tool_result(
+                error_message, error_structured, is_error=True
+            )
+
+        # 预览为尽力补充：意外失败降级为纯文本，不把已成功的结果翻转为失败。
+        preview_contents: list[ImageContent] = []
+        if output_channel_enabled(PREVIEW_CHANNEL):
+            try:
+                response_text, preview_contents = await _build_generation_preview(
+                    is_generation_failed=is_generation_failed,
+                    auto_save_results=auto_save_results,
+                    module_logger=module_logger,
+                    response_text=response_text,
+                )
+            except Exception:
+                module_logger.opt(exception=True).warning("预览装配失败，降级为纯文本结果")
+
+        final_result = await build_structured_tool_result(
+            response_text,
+            structured_result,
+            is_error=is_generation_failed,
+            trailing=preview_contents,
+        )
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="请求处理完成")
+        return final_result

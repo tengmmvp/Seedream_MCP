@@ -2,12 +2,13 @@
 
 make_generation_context 提供生成上下文的默认构造，差异字段经 **overrides 覆盖，
 字段增删时只改本工厂；_patch_client_success 与 _patch_save_real_file 复用文生图
-成功与单图真实落盘的 mock 装配；_patch_client_method_spy 复用按方法名安装的
-调用参数记录替身。
+成功与单图真实落盘的 mock 装配；_patch_client_method_spy 复用
+按方法名安装的调用参数记录替身，返回形态经 result_factory 覆盖。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -51,15 +52,26 @@ def make_generation_context(**overrides: Any) -> GenerationExecutionContext:
 
 
 def _patch_client_method_spy(
-    monkeypatch: pytest.MonkeyPatch, method_name: str
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    result_factory: Callable[[], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """monkeypatch 指定 SeedreamClient 方法为记录调用参数并返回成功的替身。"""
+    """monkeypatch 指定 SeedreamClient 方法为记录调用参数并返回成功的替身。
+
+    Args:
+        result_factory: 每次调用返回结果字典的工厂，缺省返回空数据成功形态。
+
+    Returns:
+        调用参数记录列表，每次调用追加一项。
+    """
     calls: list[dict[str, Any]] = []
 
     async def fake_method(self: Any, **kwargs: Any) -> dict[str, Any]:
         del self
         calls.append(kwargs)
-        return {"success": True, "data": [], "usage": {}, "status": "ok"}
+        if result_factory is None:
+            return {"success": True, "data": [], "usage": {}, "status": "ok"}
+        return result_factory()
 
     monkeypatch.setattr(SeedreamClient, method_name, fake_method)
     return calls

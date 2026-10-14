@@ -11,12 +11,12 @@ from mcp.types import CallToolResult, TextContent
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.resources import mcp
 from seedream_mcp.tools.core.model_info import (
-    _CAPABILITY_LABELS,
+    _NUMERIC_FIELD_LABELS,
     build_model_info_payload,
     build_model_info_text,
 )
-from seedream_mcp.utils.core.validators import VALID_OPTIMIZE_MODES
-from seedream_mcp.utils.model.model_capabilities import ModelCapabilities
+from seedream_mcp.utils.core.validators import VALID_OPTIMIZE_MODES, capability_gate_error
+from seedream_mcp.utils.model.model_capabilities import CAPABILITY_LABELS, ModelCapabilities
 
 # 能力表字段到快照键的映射全集，映射完整性断言的数据源。
 _CAPS_FIELD_TO_PAYLOAD_KEY = {
@@ -87,10 +87,20 @@ def test_capability_table_field_order_matches_snapshot_mapping() -> None:
 
 
 def test_capability_labels_cover_switch_keys() -> None:
-    """文本标签表覆盖全部布尔开关键，新增开关漏配标签即文本通道静默丢失。"""
+    """标签表自含的载荷键与快照布尔键集一致，新增开关漏配标签即文本通道静默丢失。"""
     payload = build_model_info_payload(SeedreamConfig(api_key="k"))
     switch_keys = {key for key, value in payload["capabilities"].items() if isinstance(value, bool)}
-    assert {key for _, key in _CAPABILITY_LABELS} == switch_keys
+    assert {entry.payload_key for entry in CAPABILITY_LABELS} == switch_keys
+
+
+def test_numeric_field_labels_cover_payload_numeric_fields() -> None:
+    """取值段标签表覆盖全部非布尔能力字段，新增取值字段漏配标签即工具描述列举缺项。"""
+    payload = build_model_info_payload(SeedreamConfig(api_key="k"))
+    numeric_keys = {
+        key for key, value in payload["capabilities"].items() if not isinstance(value, bool)
+    }
+    labeled = {field for _, fields in _NUMERIC_FIELD_LABELS for field in fields}
+    assert labeled == numeric_keys
 
 
 def test_optimize_prompt_modes_match_validator_vocabulary() -> None:
@@ -223,3 +233,57 @@ async def test_tool_call_returns_structured_error_on_unexpected_failure(
     assert structured["status"] == "failed"
     assert structured["error"]["type"] == "model_info_failed"
     assert "payload assembly exploded" in structured["error"]["message"]
+
+
+# ==================== 工具描述派生守护 ====================
+
+
+# get_model_info 注册描述的逐字定稿。
+_MODEL_INFO_DESCRIPTION_LOCKED = (
+    "查询当前配置模型的能力快照。\n"
+    "\n"
+    "返回当前模型 ID、别名与能力字段：提示词优化档位、参考图上限、尺寸档位与像素区间，\n"
+    "以及图层拆分（layer_decomposition）、透明背景（background）、"
+    "输出格式（output_format）、流式输出（stream）、联网搜索（tools）、"
+    "组图生成（sequential_generation）的支持情况。\n"
+    "生成工具的模型相关参数是否可用以本工具结果为准；不支持时生成工具会报错并附支持该能力的模型清单。\n"
+    "模型由服务器配置决定，更换模型请告知用户调整服务器配置。"
+)
+
+
+async def test_get_model_info_description_matches_locked_text() -> None:
+    """注册描述与定稿逐字一致，改标签或改骨架未同步审视定稿时本用例失败。"""
+    tools = await mcp.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+    assert by_name["get_model_info"].description == _MODEL_INFO_DESCRIPTION_LOCKED
+
+
+async def test_get_model_info_description_enumerations_match_label_tables() -> None:
+    """注册描述的两段列举与标签序一致，手写描述绕开派生即失同步。"""
+    tools = await mcp.list_tools()
+    description = next(tool.description or "" for tool in tools if tool.name == "get_model_info")
+    numeric_fields = "、".join(label for label, _ in _NUMERIC_FIELD_LABELS)
+    capabilities = "、".join(entry.label for entry in CAPABILITY_LABELS)
+    assert f"能力字段：{numeric_fields}，\n" in description
+    assert f"以及{capabilities}的支持情况。" in description
+
+
+def test_label_tables_cover_payload_capability_fields() -> None:
+    """两张标签表的字段并集恰等于 payload 能力字段集，新增字段漏配标签即失败。"""
+    payload = build_model_info_payload(SeedreamConfig(api_key="k"))
+    labeled = {field for _, fields in _NUMERIC_FIELD_LABELS for field in fields}
+    labeled |= {entry.payload_key for entry in CAPABILITY_LABELS}
+    assert labeled == set(payload["capabilities"])
+
+
+def test_capability_labels_shared_by_gate_errors_and_snapshot_text() -> None:
+    """能力标签两处取值同源：门控报错与快照文本渲染同一标签表的标签。"""
+    model_id = "doubao-seedream-4-5-251128"
+    payload = build_model_info_payload(SeedreamConfig(api_key="k", model_id=model_id))
+    text = build_model_info_text(payload)
+    for entry in CAPABILITY_LABELS:
+        assert entry.label in text
+        error = capability_gate_error(
+            field=entry.param, model_id=model_id, capability=entry.capability
+        )
+        assert f"不支持{entry.label}" in error.message
