@@ -470,8 +470,11 @@ class _BodyReadPolicyChannel:
         scope[self._scope_key] = policy
 
     def resolve(self, scope: Scope) -> _BodyReadPolicy:
-        """内层准入中间件取回单请求策略。"""
-        return cast(_BodyReadPolicy, scope[self._scope_key])
+        """内层准入中间件取回单请求策略，键缺失即装配失配，抛 RuntimeError 快失败。"""
+        try:
+            return cast(_BodyReadPolicy, scope[self._scope_key])
+        except KeyError:
+            raise RuntimeError("读体策略键缺失：读体限流层与准入层必须经装配函数成对挂载") from None
 
 
 class _LimitRequestBodyMiddleware:
@@ -530,8 +533,9 @@ class _LimitRequestBodyMiddleware:
                         # 判定点即直发 413：客户端可能停发终帧，等下游收尾再发会把
                         # 连接钉死在永远挂起的 app 上。
                         await _reject_body_too_large(send)
-                        # 413 发出后才送达裁决：随后取消下游不截断本次发送，
-                        # 收到 413 即静默的客户端也不把许可钉死到读体窗口耗尽。
+                        # 413 发出后才送达裁决，看门狗对已裁决形态亦不强收：取消不
+                        # 落在直发窗口内，本次发送不被截断；收到 413 即静默的客户端
+                        # 也不把许可钉死到读体窗口耗尽。
                         policy.deliver_verdict()
                 return {
                     "type": "http.request",
@@ -679,6 +683,10 @@ class _BodyReadAdmission:
     def _expire(self) -> None:
         # 窗口到期的强制收尾：终帧后不再约束，读取侧停滞时取消下游子任务防许可钉死。
         if self.body_complete or self.abandoned:
+            return
+        if self._policy.too_large:
+            # 外层已裁决超限：413 直发即终局动作，此间取消下游会截断响应体，
+            # 写背压挂起由 uvicorn 与客户端连接自身收敛，取消留待裁决送达。
             return
         rejection = (
             _LARGE_BODY_ADMISSION_TIMEOUT_408
