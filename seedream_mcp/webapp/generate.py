@@ -6,10 +6,11 @@ structured_content 字典；生成链路不伪造会话 Roots，文件边界由 
 与 auto_save.results 条目的 local_path 改写为图片目录相对形态并附 web_path
 供前端拼接图片端点，越出图片目录的删除该键（Web 文件端点仅服务图片目录内文件）；
 markdown_ref 前端不消费，整体删除；错误文本原样透传。共享 client 经 context
-替身借用，鉴权由外层 Bearer 中间件承担；端点仅消费 structuredContent，预览
-装配关闭，请求体解析与响应体序列化达阈值时下沉工作线程执行。与 MCP 工具不同，图片
-目录不可用时端点预检即回 400 images_root_unavailable：Web 展示闭环依赖
-web_path，不存在工具侧 auto_save 降级后的纯 URL 成功形态。
+替身借用，鉴权由外层 Bearer 中间件承担；端点仅消费 structuredContent，
+预览与镜像通道经 output_channels_scope 在作用域边界关闭。
+解析与响应体序列化达阈值时下沉工作线程执行。
+与 MCP 工具不同，图片目录不可用时端点预检即回 400 images_root_unavailable：
+Web 展示闭环依赖 web_path，不存在工具侧 auto_save 降级后的纯 URL 成功形态。
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ..config import SeedreamConfig, get_active_config
+from ..tools.core.common import output_channels_scope
 from ..tools.core.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
@@ -58,7 +60,6 @@ class _GenerationRunner(Protocol[_RunnerInputT]):
         config: SeedreamConfig,
         ctx: Context | None = None,
         workspace_roots: ListRootsResult | None = None,
-        include_previews: bool = True,
     ) -> CallToolResult: ...
 
 
@@ -99,9 +100,10 @@ async def _run_web_generation(
 
     请求体经 pydantic 输入模型校验，响应体为工具的结构化结果字典；失败结果
     按 error.type 映射状态码，响应体保持完整结构化结果供前端展示错误详情。
-    请求体解析与响应体序列化达到下沉尺寸阈值时卸载专用 CPU 池，低于阈值
-    同步执行。
+    大请求体并发准入与读体窗口限时由传输层准入中间件承担，许可终帧即释放；
+    解析与响应体序列化达到下沉尺寸阈值时卸载专用 CPU 池，低于阈值同步执行。
     """
+    config = get_active_config()
     body, parse_error = await _responses.parse_json_object_body(request)
     if parse_error is not None:
         return parse_error
@@ -112,7 +114,6 @@ async def _run_web_generation(
     except ValidationError as exc:
         return _responses.validation_error_json(exc)
 
-    config = get_active_config()
     ctx = cast("Context | None", build_web_request_context())
     # 不伪造会话 Roots 传入 runner：Web 请求无客户端声明可用，UNC 工作区根也
     # 在 file URI 转换层丢失。边界交由 runner 内的环境变量回退链处理，与客户
@@ -122,7 +123,8 @@ async def _run_web_generation(
         return images_root
     # runner 契约保证不抛，异常已归约为 is_error 结果，兜底仅防流水线全捕回归
     try:
-        result = await runner(params, config, ctx, include_previews=False)
+        with output_channels_scope(preview=False, mirror=False):
+            result = await runner(params, config, ctx)
     except (SeedreamValidationError, SeedreamConfigError) as exc:
         if isinstance(exc, SeedreamConfigError):
             return _responses.error_json("config_error", exc.message, 503)

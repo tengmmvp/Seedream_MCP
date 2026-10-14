@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -24,6 +25,9 @@ from _web_fixtures import (
 
 # 文件端点参数化清单：路径校验矩阵对缩略图与原图对称覆盖。
 _FILE_ENDPOINTS = ("thumbnail", "image")
+
+# 盘符形态（绝对与相对）仅在 win32 成为路径语法的越界拒绝项。
+_WIN32_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="盘符形态为 win32 专属拒绝项")
 
 
 @pytest.fixture
@@ -172,7 +176,7 @@ async def test_file_endpoints_missing_file_returns_404(web_app_with_image: Any) 
     [
         "../secret.txt",
         "2026-08-20/../../../etc/passwd.png",
-        "C:/Windows/system32/a.png",
+        pytest.param("C:/Windows/system32/a.png", marks=_WIN32_ONLY),
         "/etc/passwd.png",
         "\\\\server\\share\\a.png",
     ],
@@ -190,11 +194,12 @@ async def test_file_endpoints_reject_traversal(
     assert response.json()["error"] == "invalid_path"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="冒号分量拒绝是 win32 的 ADS 防护")
 @pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
 async def test_file_endpoints_reject_colon_ads_paths(
     web_app_with_image: Any, endpoint: str
 ) -> None:
-    """路径任意位置含冒号一律 400，覆盖 Windows 盘符与 ADS 数据流形态。"""
+    """win32 下分量含冒号一律 400。"""
     from urllib.parse import quote
 
     for path in ("sub\\file.png:.jpg", "file.png:$DATA", "2026-08-20/a:p/b.png"):
@@ -203,6 +208,53 @@ async def test_file_endpoints_reject_colon_ads_paths(
 
         assert response.status_code == 400
         assert response.json()["error"] == "invalid_path"
+
+
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/passwd.png",
+        "\\\\server\\share\\a.png",
+        pytest.param("C:/Windows/system32/a.png", marks=_WIN32_ONLY),
+        pytest.param("C:evil.png", marks=_WIN32_ONLY),
+        pytest.param("C:", marks=_WIN32_ONLY),
+        pytest.param("C:a.png", marks=_WIN32_ONLY),
+    ],
+)
+async def test_file_endpoints_gate_rejects_absolute_and_drive_relative(
+    web_app_with_image: Any, endpoint: str, path: str
+) -> None:
+    """绝对与盘符相对形态在早闸以同一文案 400，不依赖深层 normalize_path 的兜底拒绝。"""
+    from urllib.parse import quote
+
+    encoded = quote(path, safe="")
+    response = await web_get(web_app_with_image, f"/web/api/{endpoint}?path={encoded}")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "invalid_path"
+    assert body["error_description"] == "仅接受相对图片目录的路径"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="冒号在 POSIX 是合法文件名字符")
+@pytest.mark.parametrize("endpoint", _FILE_ENDPOINTS)
+async def test_file_endpoints_serve_posix_colon_filenames(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+    endpoint: str,
+) -> None:
+    """POSIX 冒号文件名通过越界判定后正常服务，与图库列表下发的 web_path 口径对齐。"""
+    images_root = write_workspace_config(tmp_path)
+    day_dir = images_root / "2026-08-20" / "text_to_image"
+    day_dir.mkdir(parents=True)
+    (day_dir / "photo:1.png").write_bytes(make_png_bytes())
+    app = build_web_app()
+
+    response = await web_get(app, f"/web/api/{endpoint}?path=2026-08-20/text_to_image/photo:1.png")
+
+    assert response.status_code == 200
 
 
 async def test_thumbnail_goes_through_cache_wrapper(

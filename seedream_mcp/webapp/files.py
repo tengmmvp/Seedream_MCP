@@ -1,11 +1,12 @@
 """Web 操作台文件端点：缩略图与原图，均以图片目录为边界做越界防护。
 
-路径安全为四重校验：空/绝对/含冒号（盘符与 ADS）/上跳段拒绝、扩展名白名单、
-normalize_path 与 is_within_resolved 的边界比较、is_file 存在性；违规 400、
-未命中 404。图片目录解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
-下沉至工作线程；缩略图经落盘缓存免除重复解码，未命中解码受进程级信号量限流；
-原图以预开 no-follow 句柄为读源，经 _responses 的共享 _NoFollowFileResponse
-应答，与 meta 静态页直出同源。
+路径安全为四重校验：空/绝对/盘符相对/win32 冒号分量（NTFS 备用数据流
+形态，POSIX 冒号为合法文件名字符）/上跳段拒绝、扩展名白名单、normalize_path
+与 is_within_resolved 的边界比较、is_file 存在性；违规 400、未命中 404。
+图片目录解析与路径校验为同步文件系统操作，整体经 asyncio.to_thread
+下沉至工作线程；缩略图经落盘缓存免除重复解码，
+未命中解码受进程级信号量限流；原图以预开 no-follow 句柄为读源，
+经 _responses 的共享 _NoFollowFileResponse 应答，与 meta 静态页直出同源。
 """
 
 from __future__ import annotations
@@ -21,7 +22,13 @@ from ..utils.core.executors import CpuOffloadPoolClosedError
 from ..utils.core.formats import MIME_BY_EXTENSION, SUPPORTED_IMAGE_EXTENSIONS
 from ..utils.images.image_thumbnail import cached_thumbnail_bytes
 from ..utils.io.io_file import SymlinkRejectedError, open_regular_read
-from ..utils.io.io_path import is_within_resolved, normalize_path, resolve_images_root
+from ..utils.io.io_path import (
+    has_windows_colon_component,
+    is_drive_relative,
+    is_within_resolved,
+    normalize_path,
+    resolve_images_root,
+)
 from . import _responses
 from ._responses import _NoFollowFileResponse
 
@@ -37,19 +44,27 @@ def resolve_web_relative_path(rel: str, images_root: Path) -> Path:
         resolve 后落在图片目录内的常规文件路径。
 
     Raises:
-        ValueError: 路径为空、绝对形态、任意位置含冒号（Windows 盘符与 ADS
-            数据流一并覆盖）、含 ``..`` 段或扩展名不在白名单。
+        ValueError: 路径为空、绝对或盘符相对形态、win32 下分量含冒号（NTFS
+            备用数据流形态，POSIX 冒号为合法文件名字符）、含 ``..`` 段
+            或扩展名不在白名单。
         FileNotFoundError: 越界或目标不是存在的常规文件。
     """
     rel = (rel or "").strip()
     if not rel:
         raise ValueError("路径不能为空")
-    if Path(rel).is_absolute() or rel.startswith(("\\", "/")) or ":" in rel:
+    rel_path = Path(rel)
+    if (
+        rel_path.is_absolute()
+        or rel.startswith(("\\", "/"))
+        # 盘符相对形态（C:foo）is_absolute 为 False，与绝对形态同口径早闸拒绝。
+        or is_drive_relative(rel_path)
+        or has_windows_colon_component(rel)
+    ):
         raise ValueError("仅接受相对图片目录的路径")
     for segment in rel.replace("\\", "/").split("/"):
         if segment == "..":
             raise ValueError("路径不允许包含上跳段")
-    suffix = Path(rel).suffix.lower()
+    suffix = rel_path.suffix.lower()
     if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
         raise ValueError("不支持的图片扩展名")
 
@@ -73,6 +88,7 @@ async def _resolve_request_path(request: Request) -> tuple[Path, Path] | Respons
     rel = request.query_params.get("path", "")
 
     def _resolve() -> tuple[Path, Path]:
+        # 解析异常经 to_thread 原生传播，沿用本函数外层的共享错误映射。
         images_root = resolve_images_root()
         return resolve_web_relative_path(rel, images_root), images_root
 

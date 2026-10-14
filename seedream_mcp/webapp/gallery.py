@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from ..tools.core.common import output_channels_scope
 from ..tools.core.schemas import BrowseImagesInput
 from ..tools.runners import run_browse_images
 from ..utils.core.logs import get_logger
@@ -85,7 +86,9 @@ async def web_browse(request: Request) -> Response:
     # browse 契约保证不抛，异常已归约为 is_error 结果，兜底仅防处理器全捕回归；
     # 条目过滤以图片目录为界在扫描源头剔除，与 Web 文件端点服务范围一致。
     try:
-        result = await run_browse_images(params, ctx=None, bounds_scope=[images_root])
+        # 端点仅消费 structuredContent，镜像通道在作用域边界关闭，免付镜像构建成本。
+        with output_channels_scope(mirror=False):
+            result = await run_browse_images(params, ctx=None, bounds_scope=[images_root])
     except Exception:
         logger.exception("Web 图库浏览请求执行异常")
         return _responses.error_json("internal_error", "服务器内部错误，详情见日志", 500)

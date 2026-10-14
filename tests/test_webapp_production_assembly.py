@@ -308,8 +308,8 @@ async def test_respond_structured_json_payload_shapes_offload_gating(
 ) -> None:
     """载荷形态经统一门控分流：长度估算达卸载阈值或不可估的下沉专用 CPU 池，
     未达阈值的内联序列化；典型图库页的叶子总量未及 64KB 阈值，走内联。"""
-    spy = CpuOffloadSpy(_responses.dump_strict_json)
-    monkeypatch.setattr(_responses, "dump_strict_json", spy)
+    spy = CpuOffloadSpy(_responses.dump_strict_json_bytes)
+    monkeypatch.setattr(_responses, "dump_strict_json_bytes", spy)
 
     structured = payload_factory()
     response = await _responses.respond_structured_json(structured, 200)
@@ -347,8 +347,8 @@ async def test_respond_structured_json_binary_leaf_runs_in_cpu_pool_outputs_full
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """b64_json 大串按全文进入响应体，序列化下沉专用 CPU 池执行。"""
-    dump_spy = CpuOffloadSpy(_responses.dump_strict_json)
-    monkeypatch.setattr(_responses, "dump_strict_json", dump_spy)
+    dump_spy = CpuOffloadSpy(_responses.dump_strict_json_bytes)
+    monkeypatch.setattr(_responses, "dump_strict_json_bytes", dump_spy)
     b64_payload = "Q" * 300_000
     structured: dict[str, object] = {
         "tool": "text_to_image",

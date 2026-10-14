@@ -20,17 +20,27 @@ from mcp.types import CallToolResult
 from starlette.requests import Request
 
 import seedream_mcp.resources as resources_module
+import seedream_mcp.transport as transport_module
 import seedream_mcp.utils.core.errors as errors_module
 from _cpu_offload_spy import CpuOffloadSpy
+from _generation_fixtures import _patch_client_method_spy
 from _web_fixtures import (
     build_web_app,
     make_images_root_unresolvable,
     web_asgi_client,
     write_workspace_config,
 )
-from seedream_mcp.config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
+from seedream_mcp.config import (
+    LIFESPAN_KEY_CLIENT,
+    LIFESPAN_KEY_DOWNLOAD_MANAGER,
+    SeedreamConfig,
+    set_active_config,
+)
+from seedream_mcp.tools.core import outputs as outputs_module
+from seedream_mcp.tools.core._channels import output_channel_enabled
 from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
+from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
 from seedream_mcp.webapp import _responses
 from seedream_mcp.webapp import generate as generate_module
 from seedream_mcp.webapp.context import build_web_request_context
@@ -50,8 +60,8 @@ def _make_fake_runner(
 ) -> Callable[..., Awaitable[CallToolResult]]:
     """构造生成 runner 替身：返回固定结果或抛指定异常，可选记录调用实参。
 
-    captured 每次调用追加 ctx/workspace_roots/include_previews 三键字典；
-    yield_once 在返回前让出事件循环一次，模拟并发共享的挂起点。
+    captured 每次调用追加 ctx/workspace_roots 两键字典；yield_once 在返回前
+    让出事件循环一次，模拟并发共享的挂起点。
     """
 
     async def _runner(
@@ -59,17 +69,10 @@ def _make_fake_runner(
         config: Any,
         ctx: Any = None,
         workspace_roots: Any = None,
-        include_previews: bool = True,
     ) -> CallToolResult:
         del params, config
         if captured is not None:
-            captured.append(
-                {
-                    "ctx": ctx,
-                    "workspace_roots": workspace_roots,
-                    "include_previews": include_previews,
-                }
-            )
+            captured.append({"ctx": ctx, "workspace_roots": workspace_roots})
         if yield_once:
             await asyncio.sleep(0)
         if error is not None:
@@ -100,6 +103,25 @@ async def _post_raw(app: Any, path: str, content: bytes) -> httpx.Response:
         return await client.post(
             path, content=content, headers={"content-type": "application/json"}
         )
+
+
+def _install_second_entry_gated_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[int], asyncio.Event]:
+    """替换解析入口为计数门：第二个请求进入后放行全部，返回进入序列与双入事件。"""
+    entries: list[int] = []
+    both_entered = asyncio.Event()
+    original_parse = _responses.parse_json_object_body
+
+    async def _gated_parse(request: Request) -> tuple[dict[str, Any], Any]:
+        entries.append(len(entries) + 1)
+        if len(entries) == 2:
+            both_entered.set()
+        await both_entered.wait()
+        return await original_parse(request)
+
+    monkeypatch.setattr(_responses, "parse_json_object_body", _gated_parse)
+    return entries, both_entered
 
 
 async def test_generate_returns_structured_payload_with_web_path(
@@ -558,6 +580,245 @@ def test_generation_error_status_covers_profile_error_codes() -> None:
     } - {"generation_failed"}
 
 
+async def test_respond_structured_json_body_is_utf8_bytes_direct() -> None:
+    """结构化 JSON 响应体为 UTF-8 字节直传，非 ASCII 原文输出不经二次编码。"""
+    structured = {"tool": "text_to_image", "success": True, "prompt": "一只猫"}
+
+    response = await _responses.respond_structured_json(structured, 200)
+
+    assert isinstance(response.body, bytes)
+    assert response.body == '{"tool":"text_to_image","success":true,"prompt":"一只猫"}'.encode(
+        "utf-8"
+    )
+    assert response.media_type == "application/json"
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_respond_structured_json_large_payload_encodes_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """大载荷的 JSON 序列化与 UTF-8 编码在专用 CPU 池整体完成，事件循环不承担编码。"""
+    spy = CpuOffloadSpy(_responses.dump_strict_json_bytes)
+    monkeypatch.setattr(_responses, "dump_strict_json_bytes", spy)
+    structured: dict[str, object] = {"payload": "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)}
+
+    response = await _responses.respond_structured_json(structured, 200)
+
+    spy.assert_ran_in_cpu_pool()
+    assert json.loads(bytes(response.body)) == structured
+
+
+async def test_generate_web_entry_runs_real_runner_without_mirror_assembly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """Web 入口驱动真实 runner 流水线且镜像装配关闭：镜像构建函数不被触达。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path), auto_save_enabled=False)
+    )
+
+    _patch_client_method_spy(
+        monkeypatch,
+        "text_to_image",
+        result_factory=lambda: {
+            "success": True,
+            "data": [{"url": "https://x/a.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        },
+    )
+    spy = CpuOffloadSpy(outputs_module.build_structured_json_text)
+    monkeypatch.setattr(outputs_module, "build_structured_json_text", spy)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"][0]["url"] == "https://x/a.png"
+    assert spy.calls == []
+
+
+async def test_generate_large_body_reads_while_generation_in_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """生成期不占准入闸：首个大请求的 runner 未返回时，第二个大请求仍读体进入解析。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            generate_concurrency=1,
+        )
+    )
+    generation_done = asyncio.Event()
+    runner_entered = asyncio.Event()
+
+    async def _runner(
+        params: Any,
+        config: Any,
+        ctx: Any = None,
+        workspace_roots: Any = None,
+    ) -> CallToolResult:
+        del params, config, ctx, workspace_roots
+        runner_entered.set()
+        await generation_done.wait()
+        return _generation_result({"tool": "image_to_image", "success": True, "data": []})
+
+    monkeypatch.setattr(generate_module, "run_image_to_image", _runner)
+    parse_entries: list[int] = []
+    second_parsed = asyncio.Event()
+    original_parse = _responses.parse_json_object_body
+
+    async def _counting_parse(request: Request) -> tuple[dict[str, Any], Any]:
+        parsed = await original_parse(request)
+        parse_entries.append(len(parse_entries) + 1)
+        if len(parse_entries) == 2:
+            second_parsed.set()
+        return parsed
+
+    monkeypatch.setattr(_responses, "parse_json_object_body", _counting_parse)
+    app = build_web_app()
+    # prompt 上限远低于准入阈值，大载荷经 image 字段的长串构造。
+    body = {"prompt": "改图", "image": "data:image/png;base64," + "A" * (5 * 1024 * 1024)}
+
+    async with web_asgi_client(app) as client:
+        first = asyncio.ensure_future(client.post("/web/api/generate/image-to-image", json=body))
+        assert await asyncio.wait_for(runner_entered.wait(), timeout=5), "首个请求未进入生成"
+        second = asyncio.ensure_future(client.post("/web/api/generate/image-to-image", json=body))
+        assert await asyncio.wait_for(
+            second_parsed.wait(), timeout=5
+        ), "生成进行中第二个大请求未能读体进入解析"
+        generation_done.set()
+        first_response, second_response = await asyncio.gather(first, second)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert len(parse_entries) == 2
+
+
+async def test_generate_body_gate_released_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """闸在读体后即释放：首个大请求停驻解析期不占许可，第二个大请求并发读体进解析。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            generate_concurrency=1,
+        )
+    )
+    entries, both_parsed = _install_second_entry_gated_parse(monkeypatch)
+    _install_runner(
+        monkeypatch, "run_text_to_image", {"tool": "text_to_image", "success": True, "data": []}
+    )
+    app = build_web_app()
+    body = {"prompt": "一只猫", "pad": "x" * (5 * 1024 * 1024)}
+
+    async with web_asgi_client(app) as client:
+        posts = [
+            asyncio.ensure_future(client.post("/web/api/generate/text-to-image", json=body))
+            for _ in range(2)
+        ]
+        assert await asyncio.wait_for(both_parsed.wait(), timeout=5), "两个大请求未并发进入解析"
+        responses = await asyncio.gather(*posts)
+
+    assert [response.status_code for response in responses] == [400, 400]
+    assert len(entries) == 2
+
+
+async def test_generate_small_bodies_admit_concurrently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """小请求体不进准入闸：并发请求同时进入解析，单用户典型负载不被准入阻塞。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            generate_concurrency=1,
+        )
+    )
+    entries, both_entered = _install_second_entry_gated_parse(monkeypatch)
+    _install_runner(
+        monkeypatch, "run_text_to_image", {"tool": "text_to_image", "success": True, "data": []}
+    )
+    app = build_web_app()
+
+    async with web_asgi_client(app) as client:
+        posts = [
+            asyncio.ensure_future(
+                client.post("/web/api/generate/text-to-image", json={"prompt": "一只猫"})
+            )
+            for _ in range(2)
+        ]
+        assert await asyncio.wait_for(both_entered.wait(), timeout=5), "两个小请求未同时进入解析"
+        responses = await asyncio.gather(*posts)
+
+    assert [response.status_code for response in responses] == [200, 200]
+
+
+async def test_generate_large_body_goes_through_transport_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """大请求体经传输层准入读体后进入端点，许可限值取自活动配置。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            large_body_admission_concurrency=1,
+        )
+    )
+    admissions: list[tuple[str, int]] = []
+    real_factory = loop_bound_semaphore
+
+    def _recording(limit: int, *, key: str) -> Any:
+        admissions.append((key, limit))
+        return real_factory(limit, key=key)
+
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", _recording)
+    _install_runner(
+        monkeypatch, "run_text_to_image", {"tool": "text_to_image", "success": True, "data": []}
+    )
+    app = build_web_app()
+    # prompt 上限远低于准入阈值，大载荷经 pad 字段的长串构造。pad 触发端点校验 400，
+    # 响应本身证明请求已越过准入闸到达端点。
+    body = {"prompt": "一只猫", "pad": "x" * (5 * 1024 * 1024)}
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", body)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+    assert admissions == [("large_body_admission", 1)]
+
+
 async def test_generate_runner_validation_error_returns_400(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -674,29 +935,40 @@ async def test_generate_non_dict_structured_content_returns_empty_payload(
     assert response.json() == {}
 
 
-async def test_generate_runner_called_without_previews(
+async def test_generate_runner_called_inside_disabled_output_channels(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     clean_web_routes: None,
     reset_http_app_state: None,
 ) -> None:
-    """端点以 include_previews=False 调 runner：Web 路径只消费结构化结果，跳过预览装配。"""
-    captured: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        generate_module,
-        "run_text_to_image",
-        _make_fake_runner(
-            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
-            captured=captured,
-        ),
-    )
+    """端点在 output_channels_scope(preview=False, mirror=False) 边界内调 runner：
+    Web 路径只消费结构化结果，预览与镜像装配均关闭。作用域随端点调用退出复位。"""
+    captured: list[dict[str, bool]] = []
+
+    async def _runner(
+        params: Any,
+        config: Any,
+        ctx: Any = None,
+        workspace_roots: Any = None,
+    ) -> CallToolResult:
+        del params, config, ctx, workspace_roots
+        captured.append(
+            {
+                "preview": output_channel_enabled("preview"),
+                "mirror": output_channel_enabled("mirror"),
+            }
+        )
+        return _generation_result({"tool": "text_to_image", "success": True, "data": []})
+
+    monkeypatch.setattr(generate_module, "run_text_to_image", _runner)
     write_workspace_config(tmp_path)
     app = build_web_app()
 
     response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
 
     assert response.status_code == 200
-    assert [call["include_previews"] for call in captured] == [False]
+    assert captured == [{"preview": False, "mirror": False}]
+    assert output_channel_enabled("preview") and output_channel_enabled("mirror")
 
 
 async def test_generate_runner_receives_no_forged_workspace_roots(

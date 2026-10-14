@@ -489,19 +489,17 @@ async def test_static_page_existence_degrades_immediately_when_deleted(
     assert "页面缺失" in bytes(degraded.body).decode("utf-8")
 
 
-async def test_static_page_symlink_degrades_to_plain_text_and_warns(
+async def test_static_page_symlinked_layout_serves_page(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """页面以符号链接形态安装时降级纯文本且告警携带符号链接原因。
+    """pip/nix 逐文件符号链接布局的入口页解析到真实目标后正常直出，不降级。
 
-    Windows 无 O_NOFOLLOW，拒绝经 io_file 的 lstat/S_ISLNK 兜底路径产生；
-    POSIX 等价路径为内核 O_NOFOLLOW 原子拒绝，同为 SymlinkRejectedError 分类。
-    无法创建符号链接的环境跳过，由 monkeypatch 形态用例保底覆盖。
+    与 skill 参考文档读取共用包资源打开序列，解析行为由 io_file 侧 open_packaged_read
+    用例覆盖；无法创建符号链接的环境跳过。
     """
     from starlette.requests import Request
 
-    from _log_fakes import capture_loguru_messages
     from seedream_mcp.webapp import meta as meta_module
 
     static_dir = prepare_static_dir(monkeypatch, tmp_path)
@@ -515,18 +513,11 @@ async def test_static_page_symlink_degrades_to_plain_text_and_warns(
         pytest.skip("当前进程无法创建符号链接，Windows 需开发者模式或管理员权限")
 
     scope = _page_scope("/web")
-    warnings: list[str] = []
-    with capture_loguru_messages(warnings):
-        response = await meta_module.web_index(Request(scope))
+    response = await meta_module.web_index(Request(scope))
+    headers, body = await _drive_page_response(response, scope)
 
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/plain")
-    # 符号链接页面存在，降级文案归打开失败档，不误称缺失。
-    assert "无法读取" in bytes(response.body).decode("utf-8")
-    assert "页面缺失" not in bytes(response.body).decode("utf-8")
-    matched = [entry for entry in warnings if "静态页" in entry and "符号链接拒绝" in entry]
-    assert len(matched) == 1
-    assert "index.html" in matched[0]
+    assert headers["content-type"].startswith("text/html")
+    assert b"elsewhere" in body
 
 
 async def test_static_page_symlink_rejection_degrades_and_warns(

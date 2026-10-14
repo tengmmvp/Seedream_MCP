@@ -25,7 +25,7 @@ from ..utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
-from ..utils.io.io_file import SymlinkRejectedError, open_regular_read
+from ..utils.io.io_file import SymlinkRejectedError, open_packaged_read
 from ..utils.model.model_capabilities import (
     MODEL_FAMILY_UNKNOWN,
     get_model_capabilities,
@@ -125,7 +125,7 @@ def _open_static_page(page: Path) -> tuple[IO[bytes], os.stat_result] | _StaticP
     失败与非常规形态按类型化失败交调用方降级。
     """
     try:
-        opened = open_regular_read(page)
+        opened = open_packaged_read(page)
     except PermissionError:
         raise
     except OSError as exc:

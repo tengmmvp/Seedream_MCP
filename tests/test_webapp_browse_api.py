@@ -77,6 +77,30 @@ async def test_browse_rejects_invalid_body(
     assert response.json()["error"] == "invalid_request"
 
 
+async def test_browse_web_entry_does_not_assemble_mirror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """图库 Web 入口驱动真实 browse 流水线且镜像装配关闭：镜像构建函数不被触达。"""
+    from _cpu_offload_spy import CpuOffloadSpy
+    from seedream_mcp.tools.core import outputs as outputs_module
+
+    images_root = write_workspace_config(tmp_path)
+    day_dir = images_root / "2026-08-20"
+    day_dir.mkdir()
+    (day_dir / "a.png").write_bytes(make_png_bytes())
+    spy = CpuOffloadSpy(outputs_module.build_structured_json_text)
+    monkeypatch.setattr(outputs_module, "build_structured_json_text", spy)
+    app = build_web_app()
+
+    response = await _post_browse(app, {"show_details": True})
+
+    assert response.status_code == 200
+    assert spy.calls == []
+
+
 async def test_browse_internal_error_returns_500_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

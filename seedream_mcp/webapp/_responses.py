@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,12 +18,13 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, MalformedRangeHeader, Response
 from starlette.types import Message, Receive, Scope, Send
 
-from ..tools.core.outputs import dump_compact_strict_json
+# as 同名形态为显式再导出，供 webapp 测试经本模块替换序列化原语。
+from ..tools.core.outputs import dump_strict_json_bytes as dump_strict_json_bytes
 from ..utils.core.errors import SeedreamConfigError, validation_error_user_message
 from ..utils.core.executors import (
     CpuOffloadPoolClosedError,
+    load_json_bytes,
     run_in_cpu_pool,
-    should_offload_size,
     should_offload_to_cpu_pool,
 )
 from ..utils.core.logs import get_logger
@@ -89,11 +89,7 @@ async def parse_json_object_body(request: Request) -> tuple[dict[str, Any], JSON
     """
     raw_body = await request.body()
     try:
-        # 阈值之下的解析微秒级完成，线程往返成本高于收益，同步执行。
-        if should_offload_size(len(raw_body)):
-            body = await run_in_cpu_pool(json.loads, raw_body)
-        else:
-            body = json.loads(raw_body)
+        body = await load_json_bytes(raw_body)
     except CpuOffloadPoolClosedError:
         return {}, cpu_pool_closed_json()
     # 深嵌套触发 RecursionError，超长整数字面量抛非 JSONDecodeError 的 ValueError，同归 400。
@@ -150,21 +146,13 @@ def browse_status(structured: dict[str, object]) -> int:
     return 400 if structured_error_type(structured) == "validation_error" else 500
 
 
-def dump_strict_json(structured: dict[str, object]) -> str:
-    """以严格 JSON 序列化结构化结果，序列化形态与工具镜像共用同一原语。
-
-    非有限浮点已在流水线用量净化处归零，严格拒绝仅作漏网哨兵。
-    """
-    return dump_compact_strict_json(structured)
-
-
 async def respond_structured_json(structured: dict[str, object], status: int) -> Response:
-    """以严格 JSON 构造结构化结果响应，载荷达阈值时序列化下沉专用 CPU 池。"""
+    """以严格 JSON 构造结构化结果响应，载荷达阈值时序列化与编码下沉专用 CPU 池。"""
     try:
         if should_offload_to_cpu_pool(structured, value_leaf_cost=utf8_value_leaf_length):
-            payload = await run_in_cpu_pool(dump_strict_json, structured)
+            payload = await run_in_cpu_pool(dump_strict_json_bytes, structured)
         else:
-            payload = dump_strict_json(structured)
+            payload = dump_strict_json_bytes(structured)
     except CpuOffloadPoolClosedError:
         return cpu_pool_closed_json()
     return Response(
