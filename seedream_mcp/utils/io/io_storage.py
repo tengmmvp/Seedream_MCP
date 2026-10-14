@@ -25,6 +25,7 @@ from ..core.formats import (
     SUPPORTED_IMAGE_EXTENSIONS,
 )
 from ..core.logs import get_logger
+from ..core.sanitizers import fit_utf8_budget, strip_unpaired_surrogates
 from ..core.throttles import store_bounded_entry
 from .io_file import (
     atomic_replace_from_fd_sync,
@@ -47,16 +48,18 @@ def current_save_time() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-# 文件名长度上限，避免超出常见文件系统目录项长度限制。
+# 文件名长度上限（UTF-8 字节）：ext4/APFS 等文件系统的目录项限额按字节计量，
+# 多字节文件名按字符计数会超限导致落盘失败。
 _MAX_FILENAME_LENGTH = 200
 
-# 文件名扩展名长度上限：超过该值的扩展名不可能是合法图片后缀，按纯词干截断，
-# 防止超长扩展名使文件名长度截断失效。
+# 文件名扩展名长度上限（UTF-8 字节）：超过该值的扩展名不可能是合法图片后缀，
+# 按纯词干截断，防止超长扩展名使文件名长度截断失效。
 _MAX_EXTENSION_LENGTH = 16
 
-# 唯一文件名词干基础的长度预算：Windows 默认 MAX_PATH 260，custom_name 合法输入
-# 上限 255 字符，不加预算地拼接完整路径必然超限导致自动保存失败，按预算截断后
-# 合法输入可正常落盘。
+# 唯一文件名词干基础的长度预算（UTF-8 字节）：Windows 默认 MAX_PATH 260 按字符、
+# ext4/APFS 的目录项 255 字节限额按字节计量，字节口径对二者均从严；
+# custom_name 合法输入上限 255 个多字节字符，按预算截断后拼接完整文件名
+# 不超 255 字节，合法输入可正常落盘。
 _MAX_UNIQUE_BASE_LENGTH = 120
 
 # 遗留临时文件清扫的 mtime 宽限秒数：仅删除早于该时限的 .part 条目，在途下载与
@@ -159,23 +162,30 @@ class FileManager:
     def sanitize_filename(self, filename: str) -> str:
         """清理文件名，移除文件系统不安全字符并规避 Windows 保留设备名。
 
+        未配对代理无法编码为 UTF-8，入口剥离防字节预算截断抛编码错误。
+
         Args:
             filename: 原始文件名。
 
         Returns:
             清理后仅含安全字符的文件名。
         """
+        filename = strip_unpaired_surrogates(filename)
         filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
         filename = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", filename)
 
-        # 超长文件名截断词干并保留扩展名；超长扩展名不可能是合法后缀，按纯词干
-        # 整体截断，防止 name[:0] + ext 使截断失效。
-        if len(filename) > _MAX_FILENAME_LENGTH:
+        # ASCII 名字符数即 UTF-8 字节数，未超预算时下方截断是恒等变换，
+        # 批量保存热路径跳过拆分与整名编码的分配开销。
+        if not (filename.isascii() and len(filename) <= _MAX_FILENAME_LENGTH):
+            # 超长文件名截断词干并保留扩展名；超长扩展名不可能是合法后缀，
+            # 按纯词干整体截断，防止 name[:0] + ext 使截断失效。预算与扩展名长度门
+            # 均按 UTF-8 字节计量，与文件系统目录项的字节限额同口径。
             name, ext = os.path.splitext(filename)
-            if len(ext) > _MAX_EXTENSION_LENGTH:
-                filename = filename[:_MAX_FILENAME_LENGTH]
+            ext_bytes = len(ext.encode("utf-8"))
+            if ext_bytes > _MAX_EXTENSION_LENGTH:
+                filename = fit_utf8_budget(filename, _MAX_FILENAME_LENGTH)
             else:
-                filename = name[: _MAX_FILENAME_LENGTH - len(ext)] + ext
+                filename = fit_utf8_budget(name, _MAX_FILENAME_LENGTH - ext_bytes) + ext
 
         # Windows 保留设备名处理：CON.txt、NUL 等会被解释为设备而非文件，命中时在
         # 首个点前追加下划线；词干归一判定经 is_windows_reserved_name 与
@@ -227,8 +237,9 @@ class FileManager:
         """生成包含时间戳与唯一性后缀的文件名。
 
         Args:
-            base_name: 基础名称，清理后的词干超过 _MAX_UNIQUE_BASE_LENGTH 时截断
-                至该长度，为时间戳、哈希/随机后缀与目录前缀预留长度预算。
+            base_name: 基础名称，清理后的词干按 UTF-8 字节超过
+                _MAX_UNIQUE_BASE_LENGTH 时截断至该字节数，为时间戳、哈希/随机后缀
+                与目录前缀预留长度预算。
             extension: 文件扩展名，包含点号。
             content_hash: 内容哈希值，提供则取其前 8 位嵌入文件名。
             timestamp: 时间戳，默认取当前时间。
@@ -240,8 +251,10 @@ class FileManager:
             timestamp = datetime.now()
 
         clean_base = self.sanitize_filename(base_name)
-        if len(clean_base) > _MAX_UNIQUE_BASE_LENGTH:
-            clean_base = clean_base[:_MAX_UNIQUE_BASE_LENGTH]
+        # ASCII 词干字符数即 UTF-8 字节数，未超预算时截断是恒等变换，保存热路径
+        # 跳过整词干编码的分配开销。
+        if not (clean_base.isascii() and len(clean_base) <= _MAX_UNIQUE_BASE_LENGTH):
+            clean_base = fit_utf8_budget(clean_base, _MAX_UNIQUE_BASE_LENGTH)
 
         # [:-3] 截掉微秒末三位，得到毫秒精度时间戳。
         time_str = timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -413,7 +426,8 @@ class FileManager:
                 short_hash = self.get_content_hash(data)[:8]
                 final_path = final_path.with_name(f"{base}_{short_hash}{ext}")
 
-            # 原子落盘由 io_file 的同步骨架提供，与 io_download 的异步骨架同一协议。
+            # 原子落盘由 io_file 的同步骨架提供，与 io_download 续传终局
+            # finalize_atomic_replace 共用随机临时文件加 os.replace 的同一协议。
             def _writer(fd: int) -> None:
                 with os.fdopen(fd, "wb", closefd=False) as f:
                     f.write(data)
@@ -646,7 +660,14 @@ class FileManager:
                     continue
                 for entry in entries:
                     entry_path = Path(entry.path)
-                    if entry.is_dir(follow_symlinks=False):
+                    # is_dir 在 POSIX 上可触发独立 lstat，瞬时失败与下方 stat 防护
+                    # 同口径按条目跳过，不放大为整轮清理中止。
+                    try:
+                        is_directory = entry.is_dir(follow_symlinks=False)
+                    except OSError as e:
+                        logger.warning("获取目录信息失败: {} -> {}", entry_path, e)
+                        continue
+                    if is_directory:
                         # 单次 no-follow stat 同时判定符号链接与 reparse 属性；条目
                         # 消失属正常轮替，跳过不下降。
                         try:

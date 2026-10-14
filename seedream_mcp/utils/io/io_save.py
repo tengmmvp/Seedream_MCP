@@ -14,13 +14,16 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from ..core.errors import SeedreamMCPError, has_message_value
+from ..core.executors import CpuOffloadPoolClosedError, run_in_cpu_pool, should_offload_size
 from ..core.sanitizers import sanitize_data_text, sanitize_error_text
 from ..core.formats import (
+    BASE64_WHITESPACE_PATTERN,
     DEFAULT_IMAGE_EXTENSION,
     DEFAULT_MAX_FILE_SIZE,
     EXTENSION_BY_MIME,
     MAX_IMAGE_PIXELS,
     ensure_image_decoders_ready,
+    estimate_base64_decoded_size,
     format_file_too_large,
     infer_extension_from_bytes,
     is_known_image_bytes,
@@ -95,9 +98,6 @@ class AutoSaveError(SeedreamMCPError):
 # Markdown 替代文本的长度上限：alt 只承担图片引用内的可访问性描述，超长文本放大
 # 输出体积且破坏可读性；完整提示词已在 structuredContent 顶层 prompt 字段存在。
 _MARKDOWN_ALT_MAX_LENGTH = 200
-
-# 估算复核与解码重试的空白剥离共用同一模式源，str 模式 \s 含 NBSP 等异形空白。
-_BASE64_WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
 def _build_markdown_alt(alt_text: str | None) -> str:
@@ -510,42 +510,26 @@ class AutoSaveManager:
     ) -> tuple[bytes, str, str]:
         """同步解码 base64 并推断扩展名与内容哈希。
 
-        strip/b64decode/sha256 均为 CPU 密集或全量遍历操作，集中于此供
-        save_base64_image 经 asyncio.to_thread 调用。
+        b64decode/sha256 均为 CPU 密集或全量遍历操作，同步实现供调用方按载荷尺寸选择执行池。
         """
         # None 判定仅作类型收窄，缺失口径单源于 has_message_value。
         if payload is None or not has_message_value(payload):
             raise AutoSaveError("空的Base64数据")
 
-        # 朴素上界估算先行，空白只会缩小估算，入限载荷零额外扫描直达解码。
-        decode_input = payload
-        already_stripped = False
-        estimated_size = (len(payload) * 3) // 4
+        # 解码尺寸预检经 formats 单一估算器收口。
+        estimated_size = estimate_base64_decoded_size(payload, self.max_file_size)
         if estimated_size > self.max_file_size:
-            # 超限时先零分配求和空白长度复核，折行与 NBSP 等异形空白不因开销被误拒。
-            stripped_len = len(payload) - sum(
-                match.end() - match.start()
-                for match in _BASE64_WHITESPACE_PATTERN.finditer(payload)
+            raise AutoSaveError(
+                format_file_too_large(estimated_size, self.max_file_size, label="Base64数据")
             )
-            estimated_size = (stripped_len * 3) // 4
-            if estimated_size > self.max_file_size:
-                raise AutoSaveError(
-                    format_file_too_large(estimated_size, self.max_file_size, label="Base64数据")
-                )
-            # 剥离后入限才物化剥离串，供解码复用免二次全量扫描。
-            decode_input = _BASE64_WHITESPACE_PATTERN.sub("", payload)
-            already_stripped = True
 
         # 直传 validate=True 校验避免对大串做全量复制；含空白致校验失败时才剥离重试。
         try:
             try:
-                content_bytes = base64.b64decode(decode_input, validate=True)
+                content_bytes = base64.b64decode(payload, validate=True)
             except Exception:
-                # 剥离后仍失败即载荷本身损坏，不再对原文重复剥离。
-                if already_stripped:
-                    raise
                 content_bytes = base64.b64decode(
-                    _BASE64_WHITESPACE_PATTERN.sub("", payload), validate=True
+                    BASE64_WHITESPACE_PATTERN.sub("", payload), validate=True
                 )
         except Exception as e:
             raise AutoSaveError(f"Base64解码失败: {e}") from e
@@ -565,6 +549,18 @@ class AutoSaveManager:
         )
         content_hash = self.file_manager.get_content_hash(content_bytes)
         return content_bytes, extension, content_hash
+
+    def _decode_base64_payload(self, b64_data: str) -> tuple[bytes, str, str, str | None]:
+        """同步解析 data URI 并解码 base64，返回解码字节、扩展名、内容哈希与 MIME。
+
+        data URI 的 partition 拷贝、b64decode 与 sha256 均为随载荷放大的 CPU 段，
+        集中于此供调用方按尺寸选择执行池；payload 为解析产生的整份拷贝，
+        随本函数返回即释放，直传解码路径峰值内存约为 b64 文本的 2.75 倍，
+        空白剥离重试再增一份剥离拷贝。
+        """
+        mime, payload, _ = parse_data_uri(b64_data)
+        content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
+        return content_bytes, extension, content_hash, mime
 
     async def save_base64_image(
         self,
@@ -591,15 +587,9 @@ class AutoSaveManager:
         async def _perform_save() -> AutoSaveResult:
             logger.info("开始自动保存 Base64 图片")
 
-            # data URI 解析含对大 base64 串的 partition 全量拷贝，与解码、路径生成、写入一样
-            # 属于同步 CPU/IO 操作，合并到单次工作线程执行，避免在事件循环中阻塞。
-            def _prepare_and_save() -> tuple[dict[str, Any], str | None]:
-                mime, payload, _ = parse_data_uri(b64_data)
-                content_bytes, extension, content_hash = self._prepare_base64_payload(payload, mime)
-                # payload 为 parse_data_uri 对大 base64 串的整份拷贝，解码完成即释放；
-                # 峰值在解码瞬间，原文、拷贝与解码字节并存约为 b64 文本的 2.75 倍，
-                # 5 并发 × 50MB 上限下瞬态约 917MB。
-                del payload
+            def _write_to_disk(
+                content_bytes: bytes, extension: str, content_hash: str
+            ) -> dict[str, Any]:
                 save_path = self.file_manager.create_save_path_from_extension(
                     prompt=prompt or "",
                     extension=extension,
@@ -609,12 +599,34 @@ class AutoSaveManager:
                     date_folder=self.date_folder,
                 )
                 # 写前重建父目录，防后台空目录回收竞态使无 URL 可回退的解码数据丢失。
-                write_result = self.file_manager.save_bytes(
-                    save_path, content_bytes, fsync=self.fsync
-                )
-                return write_result, mime
+                return self.file_manager.save_bytes(save_path, content_bytes, fsync=self.fsync)
 
-            write_result, mime = await asyncio.to_thread(_prepare_and_save)
+            # data URI 解析、b64decode 与 sha256 属随载荷放大的 CPU 段：达卸载阈值时
+            # 下沉专用池，与默认执行器里延迟敏感的短任务隔离，写盘另走默认线程；
+            # 未达阈值时解码与写盘合为同线程单次往返，不多付一次执行器跳转。
+            if should_offload_size(len(b64_data)):
+                try:
+                    content_bytes, extension, content_hash, mime = await run_in_cpu_pool(
+                        self._decode_base64_payload, b64_data
+                    )
+                except CpuOffloadPoolClosedError as exc:
+                    # 池关闭只发生在退出清理窗口，归服务关闭而非保存缺陷。
+                    raise AutoSaveError("服务正在关闭，Base64 图片保存已中止") from exc
+                write_result = await asyncio.to_thread(
+                    _write_to_disk, content_bytes, extension, content_hash
+                )
+            else:
+
+                def _decode_and_write() -> tuple[dict[str, Any], str | None]:
+                    content_bytes, extension, content_hash, mime = self._decode_base64_payload(
+                        b64_data
+                    )
+                    return (
+                        _write_to_disk(content_bytes, extension, content_hash),
+                        mime,
+                    )
+
+                write_result, mime = await asyncio.to_thread(_decode_and_write)
 
             final_path = Path(write_result["file_path"])
 

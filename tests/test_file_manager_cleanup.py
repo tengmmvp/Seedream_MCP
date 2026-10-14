@@ -526,3 +526,94 @@ def test_collect_all_files_warns_when_entries_exceed_threshold(
 
     assert len(all_files) == 3
     assert any("超过阈值 2" in message for message in warnings)
+
+
+class _DirEntryStub:
+    """包装真实 DirEntry，指定条目的 is_dir 注入瞬时 OSError。"""
+
+    def __init__(self, inner: "os.DirEntry[str]", poison_is_dir: bool) -> None:
+        self._inner = inner
+        self._poison_is_dir = poison_is_dir
+
+    @property
+    def path(self) -> str:
+        return self._inner.path
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    def is_dir(self, follow_symlinks: bool = True) -> bool:
+        if self._poison_is_dir:
+            raise OSError("transient stat failure")
+        return self._inner.is_dir(follow_symlinks=follow_symlinks)
+
+    def stat(self, follow_symlinks: bool = True) -> os.stat_result:
+        return self._inner.stat(follow_symlinks=follow_symlinks)
+
+
+class _EntryListContext:
+    """把条目列表包装为 os.scandir 返回的上下文管理器形态。"""
+
+    def __init__(self, entries: list[_DirEntryStub]) -> None:
+        self._entries = entries
+
+    def __enter__(self) -> list[_DirEntryStub]:
+        return self._entries
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+
+def test_collect_all_files_is_dir_oserror_skips_entry_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """目录条目的 is_dir 探测瞬时 OSError 仅跳过该条目，整轮清理照常推进。
+
+    旧行为未捕获 is_dir 的 OSError，单条目瞬时 stat 失败放大为整轮清理中止，
+    已收集文件全部不参与本轮按天/配额清理。
+    """
+    from _log_fakes import capture_loguru_messages
+
+    real_scandir = os.scandir
+    poisoned_name = "flaky_dir"
+
+    def scandir_with_poisoned_is_dir(target: "str | os.PathLike[str]") -> _EntryListContext:
+        with real_scandir(target) as iterator:
+            entries = [
+                _DirEntryStub(
+                    entry,
+                    poison_is_dir=entry.name == poisoned_name and Path(target) == tmp_path,
+                )
+                for entry in iterator
+            ]
+        return _EntryListContext(entries)
+
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "inner.png").write_bytes(b"inner")
+    expired = tmp_path / "old.png"
+    expired.write_bytes(b"old")
+    old_time = (datetime.now() - timedelta(days=41)).timestamp()
+    os.utime(expired, (old_time, old_time))
+    flaky = tmp_path / poisoned_name
+    flaky.mkdir()
+    flaky_file = flaky / "keep.png"
+    flaky_file.write_bytes(b"keep")
+
+    monkeypatch.setattr(os, "scandir", scandir_with_poisoned_is_dir)
+    manager = FileManager(base_dir=tmp_path)
+    errors: list[str] = []
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        all_files, _part_files, directories = manager._collect_all_files(errors)
+
+    assert sorted(entry[0].name for entry in all_files) == ["inner.png", "old.png"]
+    assert all(directory.name != poisoned_name for directory in directories)
+    assert errors == []
+    assert any("获取目录信息失败" in message and poisoned_name in message for message in warnings)
+    # 整轮清理推进不受单条目失败影响：过期文件照常删除，失败目录原样保留。
+    result = manager.run_cleanup_policies(days=40, max_total_bytes=None)
+    assert result["errors"] == []
+    assert not expired.exists()
+    assert flaky_file.exists()

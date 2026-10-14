@@ -1,8 +1,9 @@
 """AutoSaveManager Base64 解码守卫与批量保存异常处理的单元测试。
 
-覆盖 _prepare_base64_payload 的空数据/估算超限/解码失败/非图片格式/解码后超限守卫、
-_run_batch_save 的 CancelledError 重抛与 Exception 降级 fallback 分支，以及
-AutoSaveResult.to_dict 的数据字段净化与 markdown alt 兜底。
+覆盖 _prepare_base64_payload 的空数据/估算超限/padding 边界窗口/解码失败/
+非图片格式/解码后超限守卫、解码 CPU 段的执行池选择、_run_batch_save 的 CancelledError
+重抛与 Exception 降级 fallback 分支，以及 AutoSaveResult.to_dict 的数据字段净化
+与 markdown alt 兜底。
 """
 
 import asyncio
@@ -14,7 +15,8 @@ from typing import Any
 
 import pytest
 
-from seedream_mcp.utils.io import io_save
+from seedream_mcp.utils.core import formats
+from seedream_mcp.utils.core.executors import should_offload_size
 from seedream_mcp.utils.io.io_save import (
     AutoSaveError,
     AutoSaveManager,
@@ -22,7 +24,8 @@ from seedream_mcp.utils.io.io_save import (
     _build_markdown_alt,
 )
 
-from _png_fixtures import forged_png_bytes
+from _cpu_offload_spy import CpuOffloadSpy
+from _png_fixtures import forged_png_bytes, minimal_png_bytes
 
 
 @pytest.fixture
@@ -34,16 +37,6 @@ def manager(tmp_path: Path) -> AutoSaveManager:
     不触发会话分配，因此 sync fixture 无需 close 即可安全释放。
     """
     return AutoSaveManager(base_dir=tmp_path, cleanup_days=0)
-
-
-def _minimal_png_bytes() -> bytes:
-    """构造合法的最小 PNG 字节，magic 头可被 is_known_image_bytes 识别。"""
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
-        b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N"
-        b"\x00\x00\x00\x00IEND\xaeB`\x82"
-    )
 
 
 # ==================== _prepare_base64_payload 守卫 ====================
@@ -86,7 +79,7 @@ def _mime_folded(payload: str, line_length: int = 76) -> str:
 
 
 class _CountingWhitespacePattern:
-    """替换模块级空白模式并计数触达，供零扫描与零物化的触达断言。"""
+    """替换模块级空白模式并计数 finditer/sub 触达，供零扫描与零物化的触达断言。"""
 
     def __init__(self, real: re.Pattern[str]) -> None:
         self._real = real
@@ -102,6 +95,9 @@ class _CountingWhitespacePattern:
         self.sub_calls += 1
         return self._real.sub(repl, payload)
 
+    def match(self, pattern: str) -> re.Match[str] | None:
+        return self._real.match(pattern)
+
 
 async def test_prepare_base64_payload_estimate_ignores_folded_whitespace(
     tmp_path: Path,
@@ -111,7 +107,7 @@ async def test_prepare_base64_payload_estimate_ignores_folded_whitespace(
     max_file_size 取无空白形态的估算值，任何把 CRLF 计入估算的实现都会
     误拒本输入。
     """
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     clean_payload = base64.b64encode(png_bytes).decode()
     limit = (len(clean_payload) * 3) // 4
     mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=limit, cleanup_days=0)
@@ -143,8 +139,8 @@ async def test_prepare_base64_payload_oversized_after_strip_skips_materializatio
     """剥离后仍超限的载荷在零分配复核处即拒绝，不调用 pattern.sub 物化剥离串。"""
     mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=100, cleanup_days=0)
     try:
-        spy = _CountingWhitespacePattern(io_save._BASE64_WHITESPACE_PATTERN)
-        monkeypatch.setattr(io_save, "_BASE64_WHITESPACE_PATTERN", spy)
+        spy = _CountingWhitespacePattern(formats.BASE64_WHITESPACE_PATTERN)
+        monkeypatch.setattr(formats, "BASE64_WHITESPACE_PATTERN", spy)
         with pytest.raises(AutoSaveError, match="Base64数据过大"):
             mgr._prepare_base64_payload(_mime_folded("A" * 200), None)
         assert spy.touches == 1
@@ -161,7 +157,7 @@ async def test_prepare_base64_payload_estimate_counts_nbsp_at_boundary(
     max_file_size 取无空白形态的估算值，任何把 NBSP 计入估算的实现都会在解码前
     误拒。
     """
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     clean_payload = base64.b64encode(png_bytes).decode()
     dirty_payload = clean_payload[:5] + "\xa0" * 8 + clean_payload[5:]
     limit = (len(clean_payload) * 3) // 4
@@ -186,15 +182,61 @@ async def test_prepare_base64_payload_estimate_rejects_nbsp_oversized(
         await mgr.close()
 
 
+def _boundary_window_payload(decoded_size: int) -> str:
+    """构造解码后恰为 decoded_size 字节的 PNG base64 载荷，零字节填充补齐尺寸。"""
+    png_bytes = minimal_png_bytes()
+    return base64.b64encode(png_bytes + b"\x00" * (decoded_size - len(png_bytes))).decode()
+
+
+@pytest.mark.parametrize("decoded_size", [52_428_799, 52_428_800])
+def test_prepare_base64_payload_accepts_window_exactly_at_default_limit(
+    manager: AutoSaveManager,
+    decoded_size: int,
+) -> None:
+    """解码后恰为默认 50MB 上限或差一字节的载荷不被预检误拒。
+
+    padding 计入估算上界时这两档取值的估算值均为上限加一，合法载荷在解码前
+    被拒，与解码后「严格大于才拒绝」及 URL 下载路径的口径不对称。
+    """
+    content_bytes, _, _ = manager._prepare_base64_payload(
+        _boundary_window_payload(decoded_size), None
+    )
+
+    assert len(content_bytes) == decoded_size
+
+
+def test_prepare_base64_payload_rejects_one_byte_over_default_limit(
+    manager: AutoSaveManager,
+) -> None:
+    """解码后超出默认上限一字节的载荷仍在解码前拒绝，严格侧口径不放松。"""
+    with pytest.raises(AutoSaveError, match="Base64数据过大"):
+        manager._prepare_base64_payload(_boundary_window_payload(52_428_801), None)
+
+
+async def test_prepare_base64_payload_folded_boundary_ignores_padding(
+    tmp_path: Path,
+) -> None:
+    """折行形态的边界载荷在剥离分支同样先剔 padding 再估算，恰在上限不被误拒。"""
+    png_bytes = minimal_png_bytes() + b"\x00" * ((1 - len(minimal_png_bytes())) % 3)
+    clean_payload = base64.b64encode(png_bytes).decode()
+    assert clean_payload.endswith("==")
+    mgr = AutoSaveManager(base_dir=tmp_path, max_file_size=len(png_bytes), cleanup_days=0)
+    try:
+        content_bytes, _, _ = mgr._prepare_base64_payload(_mime_folded(clean_payload), None)
+        assert content_bytes == png_bytes
+    finally:
+        await mgr.close()
+
+
 def test_prepare_base64_payload_in_limit_skips_whitespace_scan(
     manager: AutoSaveManager,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """朴素估算入限的干净载荷不做空白扫描，行为与结果和直连解码一致。"""
-    spy = _CountingWhitespacePattern(io_save._BASE64_WHITESPACE_PATTERN)
-    monkeypatch.setattr(io_save, "_BASE64_WHITESPACE_PATTERN", spy)
+    spy = _CountingWhitespacePattern(formats.BASE64_WHITESPACE_PATTERN)
+    monkeypatch.setattr(formats, "BASE64_WHITESPACE_PATTERN", spy)
 
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
     content_bytes, _, _ = manager._prepare_base64_payload(payload, None)
 
@@ -240,7 +282,7 @@ async def test_prepare_base64_payload_decoded_exceeds_limit(
 
 def test_prepare_base64_payload_valid_png(manager: AutoSaveManager) -> None:
     """合法 PNG base64 解码后返回字节、扩展名与 sha256 哈希。"""
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
     content_bytes, extension, content_hash = manager._prepare_base64_payload(payload, None)
     assert content_bytes == png_bytes
@@ -250,7 +292,7 @@ def test_prepare_base64_payload_valid_png(manager: AutoSaveManager) -> None:
 
 def test_prepare_base64_payload_with_mime(manager: AutoSaveManager) -> None:
     """提供与字节签名一致的 mime 时扩展名为该格式的映射值。"""
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
     _, extension, _ = manager._prepare_base64_payload(payload, "image/png")
     assert extension == ".png"
@@ -258,7 +300,7 @@ def test_prepare_base64_payload_with_mime(manager: AutoSaveManager) -> None:
 
 def test_prepare_base64_payload_strips_whitespace(manager: AutoSaveManager) -> None:
     """payload 含换行、空格与制表空白时被 strip 后正常解码。"""
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     clean_payload = base64.b64encode(png_bytes).decode()
     dirty_payload = clean_payload[:5] + " \n\t " + clean_payload[5:]
     content_bytes, _, _ = manager._prepare_base64_payload(dirty_payload, None)
@@ -283,6 +325,80 @@ async def test_save_base64_image_sniffed_extension_overrides_conflicting_mime(
     assert result.local_path is not None
     assert Path(result.local_path).suffix == ".jpeg"
     assert Path(result.local_path).read_bytes() == jpeg_bytes
+
+
+async def test_save_base64_image_small_payload_decodes_in_default_pool(
+    manager: AutoSaveManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低于卸载阈值的载荷：解码 CPU 段走默认工作线程，不占用专用池。"""
+    spy = CpuOffloadSpy(manager._decode_base64_payload)
+    monkeypatch.setattr(manager, "_decode_base64_payload", spy)
+    png_bytes = minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+
+    result = await manager.save_base64_image(payload, custom_name="small", tool_name="t2i")
+
+    assert result.success is True
+    spy.assert_ran_outside_cpu_pool()
+
+
+async def test_save_base64_image_large_payload_offloads_decode_to_cpu_pool(
+    manager: AutoSaveManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """达到卸载阈值的载荷：解码与哈希下沉专用池，磁盘写留在默认线程。"""
+    spy = CpuOffloadSpy(manager._decode_base64_payload)
+    monkeypatch.setattr(manager, "_decode_base64_payload", spy)
+    large_png = minimal_png_bytes() + b"\x00" * 60_000
+    payload = base64.b64encode(large_png).decode()
+    assert should_offload_size(len(payload))
+
+    result = await manager.save_base64_image(payload, custom_name="large", tool_name="t2i")
+
+    assert result.success is True
+    spy.assert_ran_in_cpu_pool()
+    local_path = result.local_path
+    assert local_path is not None
+    assert Path(local_path).read_bytes() == large_png
+
+
+async def test_save_base64_image_small_payload_decode_and_write_share_one_thread_hop(
+    manager: AutoSaveManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低于卸载阈值的载荷：解码与写盘在同一线程往返内完成，不多付一次执行器跳转。"""
+    decode_spy = CpuOffloadSpy(manager._decode_base64_payload)
+    monkeypatch.setattr(manager, "_decode_base64_payload", decode_spy)
+    write_spy = CpuOffloadSpy(manager.file_manager.save_bytes)
+    monkeypatch.setattr(manager.file_manager, "save_bytes", write_spy)
+    png_bytes = minimal_png_bytes()
+    payload = base64.b64encode(png_bytes).decode()
+
+    result = await manager.save_base64_image(payload, custom_name="onehop", tool_name="t2i")
+
+    assert result.success is True
+    assert decode_spy.thread_names == write_spy.thread_names
+
+
+async def test_save_base64_image_large_payload_write_stays_off_decode_thread(
+    manager: AutoSaveManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """达到卸载阈值的载荷：解码下沉专用池、写盘留在默认线程，两段线程隔离保持。"""
+    decode_spy = CpuOffloadSpy(manager._decode_base64_payload)
+    monkeypatch.setattr(manager, "_decode_base64_payload", decode_spy)
+    write_spy = CpuOffloadSpy(manager.file_manager.save_bytes)
+    monkeypatch.setattr(manager.file_manager, "save_bytes", write_spy)
+    large_png = minimal_png_bytes() + b"\x00" * 60_000
+    payload = base64.b64encode(large_png).decode()
+    assert should_offload_size(len(payload))
+
+    result = await manager.save_base64_image(payload, custom_name="split", tool_name="t2i")
+
+    assert result.success is True
+    decode_spy.assert_ran_in_cpu_pool()
+    write_spy.assert_ran_outside_cpu_pool()
 
 
 async def test_save_base64_image_rejects_oversized_pixel_header(
@@ -316,7 +432,7 @@ async def test_save_base64_image_survives_parent_dir_recycled_between_steps(
     b64 数据无 URL 可回退，目录丢失即数据丢失；以建目录后即时删除模拟后台
     清理与保存的竞态。
     """
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
     real_create = manager.file_manager.create_save_path_from_extension
 
@@ -445,7 +561,7 @@ async def test_save_multiple_base64_images_end_to_end(
     manager: AutoSaveManager, tmp_path: Path
 ) -> None:
     """合法与非法 payload 混合时，合法项落盘成功、非法项降级为失败结果。"""
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
     image_data = [
         {"b64_json": payload, "prompt": "cat"},
@@ -530,7 +646,7 @@ async def test_save_base64_image_prompt_not_embedded_in_markdown_ref(
     提示词已在 structuredContent 顶层 prompt 字段存在，alt 兜底使用固定文案，输出
     有界且不引入注入面。custom_name 固定文件名派生，隔离断言到 alt 通道。
     """
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
     malicious_prompt = "api_key: sk-secret\r\nFAKE: injected " + "x" * 5000
 
@@ -557,7 +673,7 @@ async def test_save_base64_image_escapes_markdown_breaking_alt(
 
     右方括号与反斜杠经转义防 alt 内容截断 ``![...](...)`` 结构；空 alt 回退固定文案。
     """
-    png_bytes = _minimal_png_bytes()
+    png_bytes = minimal_png_bytes()
     payload = base64.b64encode(png_bytes).decode()
 
     result = await manager.save_base64_image(payload, alt_text="a]b\\c\r\nd", tool_name="t2i")
