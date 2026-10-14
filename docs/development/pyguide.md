@@ -6,6 +6,13 @@ See README.md for details.
 
 # Google Python Style Guide
 
+## 本项目适配声明
+
+本页为上游 Google Python Style Guide 的快照，与本项目工具链冲突的条目按以下口径执行：
+
+- 行宽以 black 配置为准（100 列），不采用本指南的 80 列上限。
+- 静态检查以 flake8 + mypy 替代本指南的 pylint 条款。
+
 <!-- markdown="1" is required for GitHub Pages to render the TOC properly. -->
 
 <details markdown="1">

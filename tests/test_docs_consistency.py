@@ -6,10 +6,11 @@ README.md、README.en.md、README.zh-TW.md 是同一份文档的三种语言版�
 
 配对策略：围栏代码块按出现顺序配对，先断言数量相等，再逐块比较第 N 块；基准
 版本为 README.md，其余两份与基准对齐。断言只比较语言无关要素，如 JSON 块全文、
-bash 块内的 KEY=value 赋值与 CLI 旗标 token、工具参数 bullet 列表
-的参数名序列、标题层级、链接 URL、表格列数与能力差异表的数字 token 序列，不比
-较自然语言正文。定位能力差异表时以含 "1K / 1.5K / 2K" 单元格的表格为锚点，不
-依赖各语言的章节标题文字。围栏解析、正文行提取、能力差异表定位与参数 bullet、
+bash 块内的 KEY=value 赋值与 CLI 旗标 token、工具参数 bullet 列表的参数名序列
+与数字值集合、标题层级、链接 URL、表格列数、能力差异表的数字 token 序列
+与价格表的小数 token 序列，不比较自然语言正文。定位能力差异表时以含
+"1K / 1.5K / 2K" 单元格的表格为锚点，价格表以 💰 章节标题锚定，均不依赖
+各语言的章节标题文字。围栏解析、正文行提取、能力差异表定位与参数 bullet、
 数字 token 两种提取形态的共享实现位于 _readme_helpers。
 """
 
@@ -27,6 +28,7 @@ from _readme_helpers import (
     _capability_table,
     _lang_blocks,
     _prose_lines,
+    _read_readme,
     _row_cells,
     readme_html_tables,
 )
@@ -83,14 +85,15 @@ def _block_number_tokens(block: CodeBlock) -> list[str]:
     return tokens
 
 
-def _param_bullet_groups(name: str) -> list[tuple[int, list[str]]]:
-    """把正文工具参数 bullet 行按连续行分组，每组的组首行号与参数名序列。
+def _param_bullet_groups(name: str) -> list[tuple[int, list[tuple[str, frozenset[str]]]]]:
+    """把正文工具参数 bullet 行按连续行分组，携带组首行号与 (参数名, 数字值集合) 序列。
 
     bullet 仅出现于正文而非围栏代码块内；分组按连续 bullet 行切分，各工具的
-    参数列表彼此隔离，新增、删除或调序参数而未三语同步时序列先行失配。
+    参数列表彼此隔离。bullet 内的数字取值按唯一值集合提取：任一语言改动、
+    增删数值即失配，同一数值的重复提及次数随行文语言而异，不参与比较。
     """
-    groups: list[tuple[int, list[str]]] = []
-    current: list[str] = []
+    groups: list[tuple[int, list[tuple[str, frozenset[str]]]]] = []
+    current: list[tuple[str, frozenset[str]]] = []
     start_line = 0
     for lineno, raw in _prose_lines(name):
         match = _PARAM_BULLET_PATTERN.match(raw)
@@ -101,7 +104,7 @@ def _param_bullet_groups(name: str) -> list[tuple[int, list[str]]]:
             continue
         if not current:
             start_line = lineno
-        current.append(match.group(1))
+        current.append((match.group(1), frozenset(_NUMBER_TOKEN_PATTERN.findall(raw))))
     if current:
         groups.append((start_line, current))
     return groups
@@ -280,11 +283,12 @@ def test_bash_blocks_share_number_tokens_across_languages() -> None:
 
 
 def test_tool_param_bullet_groups_match() -> None:
-    """各工具参数 bullet 列表的参数名序列三语一致。
+    """各工具参数 bullet 列表的参数名序列与数字值集合三语一致。
 
-    五个工具的参数清单以行首反引号参数名的 bullet 列表表达，参数名与列表分组
-    均为语言无关要素；某语言单独增删参数 bullet 或拆并列表时，分组序列先行失配，
-    失败消息定位两份文件的差异分组行号。
+    五个工具的参数清单以行首反引号参数名的 bullet 列表表达，参数名、列表分组
+    与 bullet 内出现的数字取值均为语言无关要素；某语言单独增删参数 bullet、
+    拆并列表或改动取值范围/默认值数值时先行失配，失败消息定位两份文件的
+    差异分组行号或差异参数名。
     """
     base_groups = _param_bullet_groups(BASE_README)
     assert base_groups, "未提取到任何工具参数 bullet 列表，bullet 解析失效或文档被清空"
@@ -295,15 +299,25 @@ def test_tool_param_bullet_groups_match() -> None:
             f"{name} 的参数 bullet 列表为 {len(other_groups)} 组，{BASE_README} 为 "
             f"{len(base_groups)} 组，存在单语增删的参数列表或分组漂移"
         )
-        for ordinal, ((base_line, base_names), (other_line, other_names)) in enumerate(
+        for ordinal, ((base_line, base_bullets), (other_line, other_bullets)) in enumerate(
             zip(base_groups, other_groups), start=1
         ):
+            base_names = [param for param, _ in base_bullets]
+            other_names = [param for param, _ in other_bullets]
             assert other_names == base_names, (
                 f"{name} 第 {other_line} 行起的第 {ordinal} 组参数 bullet 序列与 "
                 f"{BASE_README} 第 {base_line} 行起的同序组漂移:\n"
                 f"  {BASE_README}: {base_names}\n"
                 f"  {name}: {other_names}"
             )
+            for (base_param, base_values), (other_param, other_values) in zip(
+                base_bullets, other_bullets
+            ):
+                assert other_values == base_values, (
+                    f"参数 `{base_param}` bullet 的数字值集合三语漂移:\n"
+                    f"  仅 {BASE_README} 有: {sorted(base_values - other_values)}\n"
+                    f"  仅 {name} 有: {sorted(other_values - base_values)}"
+                )
 
 
 def test_heading_depth_sequence_matches() -> None:
@@ -448,4 +462,66 @@ def test_capability_table_bool_cells_match() -> None:
             assert _row_bool_tokens(other_raw) == _row_bool_tokens(base_raw), (
                 f"{name} 第 {other_lineno} 行「{other_raw.strip()}」的布尔符号序列与 "
                 f"{BASE_README} 第 {base_lineno} 行「{base_raw.strip()}」漂移"
+            )
+
+
+# 价格表章节标题的 💰 图标三语共用，作为不依赖标题文字的定位锚点。
+_PRICE_HEADING_PATTERN = re.compile(r"^## [^#]*💰")
+
+# 单价与 1.5K 档位均以小数形态书写；序数与张数等整数表述随语言行文不同
+# （如英文 1st/2nd 对中文「首张/第 2 张」），不纳入价格取值指纹。
+_DECIMAL_TOKEN_PATTERN = re.compile(r"\d+\.\d+")
+
+
+def _price_table(name: str) -> list[tuple[int, str]]:
+    """定位模型价格章节内的唯一表格，章节以 💰 标题图标锚定。"""
+    lines = _read_readme(name).splitlines()
+    headings = [
+        lineno for lineno, raw in enumerate(lines, start=1) if _PRICE_HEADING_PATTERN.match(raw)
+    ]
+    assert len(headings) == 1, f"{name} 应恰有一个 💰 价格章节标题，实际命中 {len(headings)} 个"
+    start = headings[0]
+    later_h2 = [
+        lineno
+        for lineno, raw in enumerate(lines, start=1)
+        if lineno > start and raw.startswith("## ")
+    ]
+    end = later_h2[0] if later_h2 else len(lines) + 1
+    candidates = [rows for rows in readme_html_tables(name) if start <= rows[0][0] < end]
+    assert len(candidates) == 1, f"{name} 价格章节应恰含一个表格，实际命中 {len(candidates)} 个"
+    return candidates[0]
+
+
+def _row_decimal_tokens(raw: str) -> list[list[str]]:
+    """按单元格顺序提取行内小数 token 并排序，构成语言无关的价格取值指纹。
+
+    同一单元格内数值的行文次序随语言而异（如中文档位在前、英文单价在前），
+    按单元格排序成多重集比较，数值本身与其出现次数均在比对范围内。
+    """
+    return [sorted(_DECIMAL_TOKEN_PATTERN.findall(cell)) for cell in _row_cells(raw)]
+
+
+def test_price_table_decimal_tokens_match() -> None:
+    """价格表逐行小数 token 三语一致，任一语言单独调价即失败。
+
+    价格是该文档中变更最频繁的数值面，列数守护只锁定表格结构，单元格取值
+    不在其比对范围；小数 token 为语言无关要素，按单元格多重集比较即可
+    覆盖单价与像素档位划界值，失败消息定位两份文件的差异行号。
+    """
+    base_rows = _price_table(BASE_README)
+    base_tokens = [_row_decimal_tokens(raw) for _, raw in base_rows]
+    assert any(base_tokens), "价格表未提取到任何小数 token，定位或解析失效"
+
+    for name in OTHER_READMES:
+        other_rows = _price_table(name)
+        assert len(other_rows) == len(base_rows), (
+            f"{name} 价格表为 {len(other_rows)} 行，{BASE_README} 为 "
+            f"{len(base_rows)} 行，存在单语增删的表格行"
+        )
+        for (base_lineno, base_raw), (other_lineno, other_raw) in zip(base_rows, other_rows):
+            assert _row_decimal_tokens(other_raw) == _row_decimal_tokens(base_raw), (
+                f"{name} 第 {other_lineno} 行「{other_raw.strip()}」的小数 token 序列与 "
+                f"{BASE_README} 第 {base_lineno} 行「{base_raw.strip()}」漂移:\n"
+                f"  {BASE_README}: {_row_decimal_tokens(base_raw)}\n"
+                f"  {name}: {_row_decimal_tokens(other_raw)}"
             )

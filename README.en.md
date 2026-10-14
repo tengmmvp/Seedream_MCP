@@ -260,6 +260,8 @@ ARK_API_KEY=your_api_key_here uvx seedream-image-mcp --transport streamable-http
 
 Access control: the page itself opens without a token; its API calls require one only when the deployment is configured with a token — the token you enter lives only in the current tab's session, expires when the tab closes, and never appears in URLs. For local-only use without a token, nothing is ever asked, and the API accepts requests only from this page and local programs.
 
+When you upload larger images (e.g. reference images), the server limits how many large uploads it reads at once and times each upload — this works out of the box and needs no configuration. Only if a slow network keeps producing 408 errors should you raise `SEEDREAM_BODY_READ_TIMEOUT` (default 300 seconds) in the environment variables.
+
 ## 🛠️ Available Tools
 
 <details>
