@@ -1,7 +1,7 @@
-"""settle 收敛原语守护测试：取消只打断 await 层，脱离的 op 照常执行完，
+"""settle 落定原语守护测试：取消只打断 await 层，脱离的 op 照常执行完，
 等待其落定后放行取消，失败异常被取回，取消后落地的结果交善后回调；
 收尾路径的原始异常不被等待期取消顶替，重复取消的吸收有界、放行不跳过善后，
-在途逃逸的善后经落定回调延迟执行恰一次；无条件档吸收任意次重复取消，
+在途逃逸的善后经落定回调延迟执行恰一次、失败异常经取回回调兜底；无条件档吸收任意次重复取消，
 善后就地执行恰一次。"""
 
 import asyncio
@@ -186,6 +186,46 @@ async def test_await_settled_op_repeated_cancel_in_flight_defers_dispose(
     assert opened
     assert closed == [opened[0][0]]
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_await_settled_op_repeated_cancel_escape_retrieves_late_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """无善后回调的调用点三连取消后在途逃逸：op 随后以异常落定经取回回调消费，无未取回告警。"""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _late_failure() -> None:
+        entered.set()
+        assert release.wait(5.0), "放行事件未触发"
+        raise OSError("escape boom")
+
+    op_task = asyncio.ensure_future(asyncio.to_thread(_late_failure))
+
+    async def _call(op: asyncio.Future[None]) -> None:
+        await await_settled_op(op)
+
+    task = asyncio.ensure_future(_call(op_task))
+    assert await asyncio.to_thread(entered.wait, 5.0), "op 线程未进入执行"
+    task.cancel()  # 取消一：打断外层 shield 进入落定等待。
+    await asyncio.sleep(0.05)
+    task.cancel()  # 取消二：落定等待吸收首个取消继续等待。
+    await asyncio.sleep(0.05)
+    task.cancel()  # 取消三：op 仍在途即打断落定等待放行。
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled(), "放行不等 op 落定，任务保持可取消"
+    assert not op_task.done(), "前置：取消三打断等待时 op 仍在途"
+
+    release.set()  # op 此刻才以异常落定，异常只能经取回回调消费。
+    while not op_task.done():
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # 取回回调经 call_soon 排队，让出一拍执行。
+
+    # 异常是否真被取回以 GC 期告警判定，事先调用 exception() 会掩盖缺口。
+    del task, op_task
+    gc.collect()
+    assert "exception was never retrieved" not in caplog.text
 
 
 async def test_await_settled_op_cancel_does_not_displace_in_flight_error() -> None:

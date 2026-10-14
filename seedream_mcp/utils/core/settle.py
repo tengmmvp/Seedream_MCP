@@ -15,6 +15,12 @@ from typing import Any, TypeVar
 _T = TypeVar("_T")
 
 
+def _retrieve_late_failure(future: asyncio.Future[Any]) -> None:
+    """取回脱离等待层的 future 的最终异常，防 GC 期未取回告警；成功结果取回为 None 无操作。"""
+    if not future.cancelled():
+        future.exception()
+
+
 async def settle_detached_op(
     future: asyncio.Future[Any], *, absorb_all_cancels: bool = False
 ) -> None:
@@ -22,7 +28,8 @@ async def settle_detached_op(
 
     取消只打断 await 层，已提交的脱离 op 照常执行完；提前返回会使后续
     清理与脱离的 op 竞争，失败异常也在此取回避免未取回告警——入口已落定
-    或等待期间落定的失败 op 同样经 await 取回。absorb_all_cancels 为真时
+    或等待期间落定的失败 op 同样经 await 取回，有界档放行时未落定的
+    future 由取回回调兜底。absorb_all_cancels 为真时
     吸收等待期间到达的任意次取消，否则仅吸收首个取消以维持落定等待、重复
     取消中断等待放行，脱离 op 无界挂起时任务不因此不可取消。
     """
@@ -37,6 +44,9 @@ async def settle_detached_op(
             if not absorb_all_cancels:
                 if absorbed:
                     # 重复取消中断等待：落定等待不得吸收任意多次取消使任务不可取消。
+                    if not future.done():
+                        # 放行后异常不再经等待层取回，挂取回回调兜底免告警。
+                        future.add_done_callback(_retrieve_late_failure)
                     raise
                 absorbed = True
             continue
