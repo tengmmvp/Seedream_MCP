@@ -34,6 +34,7 @@ from ._host_syntax import (
 )
 from .config import get_active_config
 from .utils.core.errors import SeedreamConfigError
+from .utils.core.http_int import strict_http_int
 from .utils.core.logs import get_logger
 from .utils.core.loop_bound import loop_bound_semaphore
 from .utils.core.settle import await_settled_op, settle_detached_op
@@ -240,15 +241,11 @@ def _header_value(scope: Scope, name: bytes) -> bytes | None:
 
 
 def _content_length_or_none(value: bytes | None) -> int | None:
-    """解析 Content-Length 头值为 int，仅收 int() 可转换的纯十进制数字，带符号等
-    int() 可解析形态同归 None 以免误判小申报绕过准入闸，None 策略由调用层定义。"""
-    if value is None or not value.isdigit():
+    """解析 Content-Length 头值为 int，畸形形态经 strict_http_int 归 None 以免误判
+    小申报绕过准入闸，None 入参策略由调用层定义。"""
+    if value is None:
         return None
-    try:
-        return int(value)
-    except ValueError:
-        # 超长数字串超出 int 字串转换上限按畸形归 None，与 io_download._int_or_none 同口径、各自维护。
-        return None
+    return strict_http_int(value)
 
 
 def _strip_host_port(host: bytes) -> bytes:
@@ -465,11 +462,6 @@ class _BodyReadPolicy:
 _BODY_READ_POLICY_SCOPE_KEY: Final[str] = "seedream_body_read_policy"
 
 
-def _publish_body_read_policy(scope: Scope, policy: _BodyReadPolicy) -> None:
-    """外层上限中间件交出单请求策略。"""
-    scope[_BODY_READ_POLICY_SCOPE_KEY] = policy
-
-
 def _resolve_body_read_policy(scope: Scope) -> _BodyReadPolicy:
     """内层准入中间件取回单请求策略，键缺失即装配失配，抛 RuntimeError 快失败。"""
     try:
@@ -516,7 +508,7 @@ class _LimitRequestBodyMiddleware:
         if policy.declared is not None and policy.declared > self._max_body_size:
             await _reject_body_too_large(send)
             return
-        _publish_body_read_policy(scope, policy)
+        scope[_BODY_READ_POLICY_SCOPE_KEY] = policy
 
         async def receive_wrapper() -> Message:
             # 始终先等待真实 receive 再按需丢弃 body：同步合成帧会让下游断连
@@ -726,26 +718,23 @@ class _BodyReadAdmission:
             return {"type": "http.disconnect"}
         more_body = bool(message.get("more_body", False))
         if not more_body:
-            # 终帧即读体完成：拆除看门狗，窗口不再约束响应期与断连轮询。
+            # 终帧即读体完成：拆看门狗并归还许可，窗口不约束响应期、长响应不占闸。
             self.body_complete = True
             self._stop_watchdog()
+            self._release_gate()
+            return message
         if (
             self.gate is None
-            and more_body
             and not self._is_forwarded()
             and self._policy.total_received > self._middleware.admission_threshold
         ):
-            # 终帧收完即请求体尽，占许可无防护意义；判定按实际累计字节，小申报
-            # 谎报越阈与未申报同经此补取；越阈后的许可等待超时按断连收尾；
-            # 响应转发开始后监护使命已完成，不再补取。
+            # 判定按实际累计字节，小申报谎报越阈与未申报同经此补取；越阈后的
+            # 许可等待超时按断连收尾；响应转发开始后监护使命已完成，不再补取。
             pending = await self._acquire_gate()
             if pending is None:
                 # 放弃收尾回放断连使下游退栈，408 已按放弃原因发出。
                 return {"type": "http.disconnect"}
             self.gate = pending
-        if not more_body:
-            # 终帧转发即读体完成，归还许可使长响应不占闸。
-            self._release_gate()
         return message
 
     async def _finalize(self) -> None:
