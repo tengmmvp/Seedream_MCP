@@ -45,7 +45,7 @@ on:
         type: string
         default: ""
       package-checks:
-        description: 导入冒烟、wheel 构建与资产断言
+        description: 导入冒烟、wheel/sdist 构建与安装资产断言
         required: false
         type: boolean
         default: false
@@ -105,11 +105,11 @@ jobs:
 
       - name: 🎨 Check formatting
         if: ${{ inputs.static-checks }}
-        run: uv run --no-sync black --check seedream_mcp tests scripts
+        run: uv run --no-sync black --check src/seedream_mcp tests scripts
 
       - name: 🔬 Run flake8
         if: ${{ inputs.static-checks }}
-        run: uv run --no-sync flake8 seedream_mcp tests scripts
+        run: uv run --no-sync flake8 src/seedream_mcp tests scripts
 
       - name: 🔎 Run mypy
         if: ${{ inputs.static-checks }}
@@ -135,7 +135,7 @@ jobs:
         shell: bash
         # node --check 对 .js 是否按 ESM 解析随 Node 版本而定，经 stdin 配 --input-type=module 固定校验
         run: |
-          for f in seedream_mcp/webapp/static/js/*.js; do
+          for f in src/seedream_mcp/webapp/static/js/*.js; do
             echo "check $f"
             node --input-type=module --check < "$f"
           done
@@ -171,7 +171,8 @@ jobs:
 
       - name: 🧱 Check package build
         if: ${{ inputs.package-checks }}
-        run: uv build --wheel
+        # 同产 wheel 与 sdist，安装冒烟两类制品都验证
+        run: uv build
 
       - name: 🧩 Assert wheel assets
         if: ${{ inputs.package-checks }}
@@ -184,6 +185,7 @@ jobs:
           with zipfile.ZipFile(wheels[-1]) as zf:
               names = set(zf.namelist())
           required = [
+              'seedream_mcp/py.typed',
               'seedream_mcp/webapp/static/index.html',
               'seedream_mcp/webapp/static/404.html',
               'seedream_mcp/webapp/static/css/style.css',
@@ -202,3 +204,15 @@ jobs:
               sys.exit(f'wheel 缺少资产: {missing}')
           print('✅ wheel 资产断言通过')
           "
+
+      - name: 🛠️ Smoke test installed artifacts
+        if: ${{ inputs.package-checks }}
+        # wheel 与 sdist 分别装入隔离目录，验证安装态可导入且携带 py.typed
+        run: |
+          T=$(mktemp -d)
+          uv pip install --target $T/wheel --no-deps dist/*.whl
+          uv pip install --target $T/sdist --no-deps dist/*.tar.gz
+          PYTHONPATH=$T/wheel python -c "import seedream_mcp, pathlib; assert pathlib.Path(seedream_mcp.__file__).is_relative_to('$T/wheel')"
+          test -f $T/wheel/seedream_mcp/py.typed
+          PYTHONPATH=$T/sdist python -c "import seedream_mcp, pathlib; assert pathlib.Path(seedream_mcp.__file__).is_relative_to('$T/sdist')"
+          test -f $T/sdist/seedream_mcp/py.typed

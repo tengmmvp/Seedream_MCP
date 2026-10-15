@@ -36,8 +36,10 @@ _README_CONFIG_HEADINGS = {
 
 
 def _repo_root() -> Path:
-    """返回仓库根目录，即 config 包所在目录的上一级。"""
-    return Path(config_sources.__file__).resolve().parent.parent
+    """返回仓库根目录，经 config 再导出的 PROJECT_ROOT 单源取值。"""
+    from seedream_mcp.config import PROJECT_ROOT
+
+    return PROJECT_ROOT
 
 
 def _example_path() -> Path:

@@ -19,4 +19,4 @@ def test_pyproject_uses_dynamic_version_from_source_file() -> None:
     content = pyproject.read_text(encoding="utf-8")
 
     assert 'dynamic = ["version"]' in content
-    assert 'path = "seedream_mcp/version.py"' in content
+    assert 'path = "src/seedream_mcp/version.py"' in content

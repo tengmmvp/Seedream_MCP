@@ -93,3 +93,19 @@ def test_dunder_main_help_smoke() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "usage" in completed.stdout
+
+
+def test_server_module_help_smoke() -> None:
+    """python -m seedream_mcp.server --help 退出码 0，server 模块入口与根 __main__ 同构。"""
+    completed = subprocess.run(
+        [sys.executable, "-m", "seedream_mcp.server", "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "usage" in completed.stdout

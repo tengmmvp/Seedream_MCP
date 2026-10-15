@@ -36,6 +36,9 @@ from ._config_sources import (
     init_env_registry,
     normalize_model_selector,
 )
+
+# as 同名形态为显式再导出，测试侧经 config 单源取仓库根。
+from ._config_sources import PROJECT_ROOT as PROJECT_ROOT  # noqa: F401
 from ._host_syntax import _bracket_ipv6_literal, _decompose_allowed_host_entry
 from .utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from .utils.core.sanitizers import is_printable_ascii, is_sensitive_key

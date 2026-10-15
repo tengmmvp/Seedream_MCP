@@ -38,7 +38,7 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
 
 ## 发版流程
 
-1. **更新版本号**：仅修改 [seedream_mcp/version.py](seedream_mcp/version.py) 中的 `__version__`。
+1. **更新版本号**：仅修改 [src/seedream_mcp/version.py](src/seedream_mcp/version.py) 中的 `__version__`。
 
    ```python
    __version__ = "1.2.7"
@@ -49,7 +49,7 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
 2. **提交并打 tag**（在 main 分支上进行）：
 
    ```bash
-   git add seedream_mcp/version.py docker-compose.yml
+   git add src/seedream_mcp/version.py docker-compose.yml
    git commit -m "chore(release): bump version to v1.2.7"
    git tag v1.2.7
    git push origin main      # 推送提交（用户手动）

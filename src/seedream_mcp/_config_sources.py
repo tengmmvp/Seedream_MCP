@@ -21,7 +21,8 @@ from .utils.model.model_capabilities import MODEL_ALIASES
 _BUILD_WARNINGS = EarlyMessageBuffer()
 
 # 项目根 .env 层仅源码检出部署存在，pip 安装部署该层空转，CWD .env 层仍生效。
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# src 布局下仓库根在 src/seedream_mcp 之上两级。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 # requestState 密钥环单钥的字节数下限，与 SDK RequestStateSecurity 的密钥强度要求一致。

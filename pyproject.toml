@@ -70,11 +70,11 @@ Repository = "https://github.com/tengmmvp/Seedream_MCP.git"
 seedream-image-mcp = "seedream_mcp.server:cli_main"
 
 [tool.hatch.version]
-path = "seedream_mcp/version.py"
+path = "src/seedream_mcp/version.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/seedream_mcp",
+    "/src/seedream_mcp",
     "/tests",
     "/pyproject.toml",
     "/README.md",
@@ -87,13 +87,13 @@ include = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["seedream_mcp"]
+packages = ["src/seedream_mcp"]
 
 [tool.coverage.run]
 # 分支口径统计，未走的分支也计入分母。
 branch = true
 # python -m 入口垫片仅转调 cli_main，不计入覆盖统计。
-omit = ["seedream_mcp/__main__.py"]
+omit = ["src/seedream_mcp/__main__.py"]
 
 [tool.coverage.report]
 # 覆盖率总量门禁，取行业主流基线，不随实测值精确校准。
@@ -124,7 +124,7 @@ extend-exclude = '''
 [tool.mypy]
 python_version = "3.12"
 # 默认检查范围：包源码、全部测试与维护脚本。
-files = ["seedream_mcp", "tests", "scripts"]
+files = ["src/seedream_mcp", "tests", "scripts"]
 strict = true
 
 [[tool.mypy.overrides]]

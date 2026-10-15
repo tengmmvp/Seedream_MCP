@@ -23,7 +23,7 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 RUN uv sync --locked --no-dev --no-install-project
 
 # 复制源码后以非 editable 方式安装项目本体
-COPY seedream_mcp/ ./seedream_mcp/
+COPY src/seedream_mcp/ ./seedream_mcp/
 RUN uv sync --locked --no-dev --no-editable
 
 # 使用项目虚拟环境作为运行时 Python

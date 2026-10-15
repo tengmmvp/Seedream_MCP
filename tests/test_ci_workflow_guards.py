@@ -176,8 +176,8 @@ def test_js_syntax_check_covers_all_modules() -> None:
     """JS 语法校验步骤存在且 glob 覆盖 webapp 静态目录全部模块。"""
     reusable = _workflow_text("reusable-checks.yml")
     assert "node --input-type=module --check" in reusable
-    assert "seedream_mcp/webapp/static/js/*.js" in reusable
-    js_dir = _REPO_ROOT / "seedream_mcp" / "webapp" / "static" / "js"
+    assert "src/seedream_mcp/webapp/static/js/*.js" in reusable
+    js_dir = _REPO_ROOT / "src" / "seedream_mcp" / "webapp" / "static" / "js"
     assert list(js_dir.glob("*.js")), "webapp 静态目录必须存在 JS 模块"
 
 
@@ -251,7 +251,7 @@ def test_sdk_lower_bound_workflow_filters_document_only_changes() -> None:
     assert len(entries) == 2, "pull_request 与 push 事件各自维护 paths 过滤"
     assert entries[0] == entries[1], "两侧过滤清单必须同步维护"
     for required_path in (
-        "seedream_mcp/**",
+        "src/seedream_mcp/**",
         "tests/**",
         "pyproject.toml",
         "uv.lock",
