@@ -14,7 +14,7 @@ import socket
 import threading
 import time
 import zlib
-from collections.abc import Callable, Iterator
+from collections.abc import Buffer, Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -130,6 +130,24 @@ async def test_download_linear_backoff_sequence_locked(
         await manager.download_image("https://example.com/img.png", save_path)
 
     assert sleeps == [1.0, 2.0, 3.0]
+
+
+async def test_download_manager_negative_max_retries_raises_download_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """max_retries<0 时重试循环零次执行：抛 DownloadError 而非 attempt 未绑定的 NameError。"""
+    manager = DownloadManager(max_retries=-1)
+    session = _FakeSession([_png_success_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="下载失败") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 循环零次执行即失败收场，无网络请求发出。
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert session._idx == 0
+    assert not save_path.exists()
 
 
 async def test_download_404_is_terminal_single_attempt(
@@ -997,14 +1015,14 @@ async def test_download_resume_etag_mismatch_restarts_full(
     assert renewed.content._chunk_idx == 1
 
 
-def _etagless_resume_response(offset: int) -> _FakeResponse:
-    """构造未携带 ETag 的续传 206：无法核验表示身份，区间核验维持既有口径。"""
+def _etagless_resume_response(offset: int, total: str | int) -> _FakeResponse:
+    """构造未携带 ETag 的续传 206：Content-Range 总长取传入值，无法核验表示身份。"""
     remaining = _RESUME_BODY[offset:]
     return _FakeResponse(
         status=206,
         headers={
             "content-type": "image/png",
-            "content-range": f"bytes {offset}-{len(_RESUME_BODY) - 1}/{len(_RESUME_BODY)}",
+            "content-range": f"bytes {offset}-{len(_RESUME_BODY) - 1}/{total}",
             "content-length": str(len(remaining)),
         },
         content_chunks=[remaining],
@@ -1016,7 +1034,57 @@ async def test_download_resume_etagless_206_keeps_resuming(
 ) -> None:
     """206 未携带 ETag 时无法核验表示身份：区间核验通过即照常续传落盘。"""
     manager = DownloadManager()
-    session = _FakeSession([_interrupted_first_attempt(), _etagless_resume_response(_RESUME_SPLIT)])
+    session = _FakeSession(
+        [_interrupted_first_attempt(), _etagless_resume_response(_RESUME_SPLIT, len(_RESUME_BODY))]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 2
+    assert save_path.read_bytes() == _RESUME_BODY
+
+
+async def test_download_resume_declared_total_mismatch_restarts_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """206 声明总长与已知总长不符即表示已变化：作废前缀退回全量，不拼新尾部。"""
+    manager = DownloadManager()
+    renewed = _etagless_resume_response(_RESUME_SPLIT, len(_RESUME_BODY) + 50)
+    session = _FakeSession(
+        [_interrupted_first_attempt(), renewed, _full_retry_response(_RESUME_ETAG)]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 3
+    assert save_path.read_bytes() == _RESUME_BODY
+    # 总长不符作废前缀后，第三趟不再携带注定失败的同一 Range。
+    assert "Range" not in session.captured_headers[2]
+    # 作废前缀前先排空响应体，连接得以回池。
+    assert renewed.content._chunk_idx == 1
+
+
+@pytest.mark.parametrize(
+    "total",
+    [
+        pytest.param(len(_RESUME_BODY), id="match"),
+        pytest.param("*", id="missing"),
+    ],
+)
+async def test_download_resume_declared_total_match_or_missing_keeps_resuming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None, total: str | int
+) -> None:
+    """206 声明总长与已知总长一致或缺失：维持现状照常续传落盘。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [_interrupted_first_attempt(), _etagless_resume_response(_RESUME_SPLIT, total)]
+    )
     _patch_download_network(monkeypatch, manager, session)
 
     save_path = tmp_path / "out.png"
@@ -1537,19 +1605,19 @@ async def test_download_forced_zlib_small_read_chunks_residue_is_terminal(
 def test_rewrite_part_file_zero_write_progress_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """os.write 零进展返回 0 时抛 OSError 而非空转烧线程。"""
+    """os.write 零进展返回 0 时按自截断起失败上抛可重试错误，而非空转烧线程。"""
     part = tmp_path / "out.png.part"
     part.write_bytes(b"stale")
     monkeypatch.setattr(os, "write", lambda fd, buffer: 0)
 
-    with pytest.raises(OSError, match="写入零字节"):
+    with pytest.raises(RetryableDownloadError, match="临时文件已毁"):
         io_download_module._rewrite_part_file(part, b"rewritten")
 
 
 def test_rewrite_part_file_close_failure_does_not_mask_write_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """写失败路径上 fd 关闭的 OSError 经静默关闭吸收，原始写入异常上浮。"""
+    """写失败路径上 fd 关闭的 OSError 经静默关闭吸收，写失败经可重试错误链保留。"""
     part = tmp_path / "out.png.part"
     part.write_bytes(b"stale")
 
@@ -1564,8 +1632,26 @@ def test_rewrite_part_file_close_failure_does_not_mask_write_error(
     monkeypatch.setattr(os, "write", _raising_write)
     monkeypatch.setattr(os, "close", _raising_close)
 
-    with pytest.raises(OSError, match="写入失败"):
+    with pytest.raises(RetryableDownloadError, match="临时文件已毁") as excinfo:
         io_download_module._rewrite_part_file(part, b"rewritten")
+
+    # 关闭失败不顶替原始写入异常，写失败仍可经异常因果链观测。
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert str(excinfo.value.__cause__) == "写入失败"
+
+
+def test_transient_file_lock_error_subclass_and_unified_message() -> None:
+    """瞬时持锁经单点辅助归一为可重试子类，统一文案可被断言。"""
+    assert issubclass(io_download_module.TransientFileLockError, RetryableDownloadError)
+
+    with pytest.raises(
+        io_download_module.TransientFileLockError, match="落盘写入瞬时持锁，重试"
+    ) as excinfo:
+        io_download_module._raise_transient_file_lock(
+            "落盘写入", PermissionError(errno.EACCES, "simulated sharing violation")
+        )
+
+    assert isinstance(excinfo.value.__cause__, PermissionError)
 
 
 async def test_download_decode_rewrite_locked_once_preserves_part_and_retries(
@@ -1604,6 +1690,90 @@ async def test_download_decode_rewrite_locked_once_preserves_part_and_retries(
     assert not list(tmp_path.glob("*.part"))
 
 
+async def test_download_decode_rewrite_write_failure_redownloads_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """解码回退写回在截断后写失败：作废完成态退回全量重下自愈，而非重解已毁文件。
+
+    旧路径完成态保留会使重试直达终局，对已毁 .part 重解压得终态签名拒绝。
+    """
+    real_truncate = os.ftruncate
+    real_write = os.write
+    gate = {"rewrite": False, "fired": False}
+
+    def _gated_truncate(fd: int, length: int) -> None:
+        # 写回恒截断到 0，撕裂尾修正截断到已确认偏移；重试趟偏移归零后两处截断同形，
+        # 误触发由 fired 单次置位吸收。
+        if length == 0:
+            gate["rewrite"] = True
+        return real_truncate(fd, length)
+
+    def _gated_write(fd: int, buffer: Buffer) -> int:
+        if gate["rewrite"] and not gate["fired"]:
+            gate["fired"] = True
+            raise OSError("simulated write failure")
+        return real_write(fd, buffer)
+
+    monkeypatch.setattr(os, "ftruncate", _gated_truncate)
+    monkeypatch.setattr(os, "write", _gated_write)
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _compressed_success_response(gzip.compress(_DECODE_BODY)),
+            _compressed_success_response(gzip.compress(_DECODE_BODY)),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 2
+    assert result["file_size"] == len(_DECODE_BODY)
+    assert save_path.read_bytes() == _DECODE_BODY
+    # 写回失败作废完成态：重试退回全量重下发起新请求，而非对已毁 .part 重解码。
+    assert gate["fired"] is True
+    assert session._idx == 2
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_decode_rewrite_persistent_fs_error_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """解码回退写段 ENOSPC：原样上抛走「文件系统永久错误」终态，不烧重试预算。"""
+    real_truncate = os.ftruncate
+    real_write = os.write
+    gate = {"rewrite": False}
+
+    def _gated_truncate(fd: int, length: int) -> None:
+        # 写回恒截断到 0：门控只挂在解码回退的写段上。
+        if length == 0:
+            gate["rewrite"] = True
+        return real_truncate(fd, length)
+
+    def _gated_write(fd: int, buffer: Buffer) -> int:
+        if gate["rewrite"]:
+            raise OSError(errno.ENOSPC, "simulated no space left")
+        return real_write(fd, buffer)
+
+    monkeypatch.setattr(os, "ftruncate", _gated_truncate)
+    monkeypatch.setattr(os, "write", _gated_write)
+    manager = DownloadManager()
+    session = _FakeSession([_compressed_success_response(gzip.compress(_DECODE_BODY))])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="文件系统永久错误") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 永久 errno 原样上抛走终态分类：单次尝试即失败，不进入退避重试。
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert session._idx == 1
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
 async def test_download_data_write_locked_once_retries_and_lands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -1632,6 +1802,72 @@ async def test_download_data_write_locked_once_retries_and_lands(
     assert write_opens["count"] == 2
     assert session._idx == 2
     assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_torn_tail_truncate_locked_once_retries_and_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """撕裂尾截断遭瞬时持锁（PermissionError）：保留续传状态重试，补齐后完整落盘。"""
+    real_ftruncate = os.ftruncate
+    truncate_calls = {"count": 0}
+
+    def _locked_once_ftruncate(fd: int, length: int) -> None:
+        truncate_calls["count"] += 1
+        if truncate_calls["count"] == 1:
+            raise PermissionError(errno.EACCES, "simulated sharing violation")
+        return real_ftruncate(fd, length)
+
+    monkeypatch.setattr(os, "ftruncate", _locked_once_ftruncate)
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _interrupted_first_attempt(),
+            _resumed_response(_RESUME_SPLIT),
+            _resumed_response(_RESUME_SPLIT),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 3
+    assert save_path.read_bytes() == _RESUME_BODY
+    # 持锁趟文件未动、状态保留：第三趟仍自偏移 100 续传而非全量重下。
+    assert session.captured_headers[1]["Range"] == f"bytes={_RESUME_SPLIT}-"
+    assert session.captured_headers[2]["Range"] == f"bytes={_RESUME_SPLIT}-"
+    assert truncate_calls["count"] == 2
+
+
+async def test_download_decode_read_locked_once_retries_and_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """解码回退读取遭瞬时持锁（PermissionError）：保留压缩 .part，重试重解码后落盘。"""
+    real_open_read = io_file.open_no_follow_read
+    read_calls = {"count": 0}
+
+    def _locked_once_open_read(path: Path) -> Any:
+        read_calls["count"] += 1
+        if read_calls["count"] == 1:
+            raise PermissionError(errno.EACCES, "simulated sharing violation")
+        return real_open_read(path)
+
+    monkeypatch.setattr(io_download_module, "open_no_follow_read", _locked_once_open_read)
+    manager = DownloadManager()
+    session = _FakeSession([_compressed_success_response(gzip.compress(_DECODE_BODY))])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 2
+    assert result["file_size"] == len(_DECODE_BODY)
+    assert save_path.read_bytes() == _DECODE_BODY
+    # 持锁不毁数据：完成态保留不发网络请求，第二趟重走解码与终局。
+    assert read_calls["count"] == 2
+    assert session._idx == 1
 
 
 # ==================== 206 声明口径回归：越界交付、虚高总长与畸形 Content-Range ====================
@@ -1748,7 +1984,8 @@ async def test_download_resume_inflated_range_total_rejected_early(
         content_chunks=[_RESUME_BODY[_RESUME_SPLIT : _RESUME_SPLIT + 10]],
     )
     manager = DownloadManager(max_file_size=1000)
-    session = _FakeSession([_interrupted_first_attempt(), inflated])
+    # 首趟无声明总长：总长交叉核对无从比对，虚高总长由上限早拒路径拦下。
+    session = _FakeSession([_interrupted_unknown_total_attempt(), inflated])
     _patch_download_network(monkeypatch, manager, session)
 
     save_path = tmp_path / "out.png"
@@ -1758,6 +1995,39 @@ async def test_download_resume_inflated_range_total_rejected_early(
     # 早拒属终态错误，不空烧重试预算。
     assert not isinstance(excinfo.value, RetryableDownloadError)
     assert session._idx == 2
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_resume_inflated_total_mismatch_beats_size_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """已知总长叠加虚高总长（超上限）：先判总长不符作废重下，重下后被上限早拒终态。
+
+    总长核验先于上限早拒是有意的裁定顺序：表示已变化的证据优先于尺寸拒绝。
+    """
+    manager = DownloadManager(max_file_size=1000)
+    oversized_full = _FakeResponse(
+        status=200,
+        headers={"content-type": "image/png", "content-length": "2000"},
+    )
+    session = _FakeSession(
+        [
+            _interrupted_first_attempt(),
+            _etagless_resume_response(_RESUME_SPLIT, 999999999),
+            oversized_full,
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="文件过大") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 虚高总长先触发总长不符作废重下，全量重下的超限 Content-Length 再被上限早拒。
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert session.captured_headers[2].get("Range") is None
+    assert session._idx == 3
     assert not save_path.exists()
     assert not list(tmp_path.glob("*.part"))
 
@@ -2222,6 +2492,87 @@ async def test_download_resume_416_declared_total_above_offset_is_terminal(
     assert not list(tmp_path.glob("*.part"))
 
 
+# 源站换图后的新表示测试体：与 _RESUME_BODY 同长而字节不同，锚定作废重下落盘的是新字节。
+_RENEWED_BODY = b"\x89PNG\r\n\x1a\n" + b"\x01" * 192
+
+
+def _renewed_full_response() -> _FakeResponse:
+    """构造源站换图后的全量 200：携带新表示字节与新 ETag。"""
+    return _FakeResponse(
+        status=200,
+        headers={
+            "content-type": "image/png",
+            "etag": '"resume-renewed"',
+            "content-length": str(len(_RENEWED_BODY)),
+        },
+        content_chunks=[_RENEWED_BODY],
+    )
+
+
+@pytest.mark.parametrize(
+    "build_unsatisfiable",
+    [
+        pytest.param(
+            lambda: _unsatisfiable_416_response(_RESUME_SPLIT, _RESUME_ETAG),
+            id="declared-total",
+        ),
+        pytest.param(
+            lambda: _unsatisfiable_unknown_total_416_response(_RESUME_ETAG),
+            id="unknown-total",
+        ),
+    ],
+)
+async def test_download_resume_416_total_mismatch_restarts_full(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    no_sleep: None,
+    build_unsatisfiable: Callable[[], _FakeResponse],
+) -> None:
+    """已知总长下 416 完成态声明与已知总长不符：作废前缀退回全量，存新表示字节。
+
+    ``bytes */100`` 恰等偏移或 ``*/*`` 无声明而总长大于偏移，均与已知总长 200
+    矛盾，旧前缀不得判完成落盘；ETag 与源校验器一致，总长核验独立触发。
+    """
+    manager = DownloadManager()
+    unsatisfiable = build_unsatisfiable()
+    session = _FakeSession([_interrupted_first_attempt(), unsatisfiable, _renewed_full_response()])
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 3
+    assert save_path.read_bytes() == _RENEWED_BODY
+    # 总长矛盾作废前缀后，第三趟退回全量、不再携带注定失败的同一 Range。
+    assert session.captured_headers[1]["Range"] == f"bytes={_RESUME_SPLIT}-"
+    assert "Range" not in session.captured_headers[2]
+    # 作废前缀前先排空响应体，连接得以回池。
+    assert unsatisfiable.content._chunk_idx == 1
+
+
+async def test_download_resume_416_consistent_declared_total_keeps_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """416 声明总长与已知总长一致：维持既有「区间应可满足」终态，不被总长核验作废。"""
+    manager = DownloadManager()
+    unsatisfiable = _unsatisfiable_416_response(len(_RESUME_BODY), _RESUME_ETAG)
+    session = _FakeSession(
+        [_interrupted_first_attempt(), unsatisfiable, _full_retry_response(_RESUME_ETAG)]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="区间应可满足") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    # 总长一致时核验不触发：既有的对端违约终态裁决保持不变。
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    assert session._idx == 2
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
 async def test_download_final_failure_cleans_part_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
@@ -2441,10 +2792,10 @@ async def test_download_finalize_persistent_permission_lock_exhausts_retries(
     _patch_download_network(monkeypatch, manager, session)
 
     save_path = tmp_path / "out.png"
-    with pytest.raises(RetryableDownloadError, match="终局落盘瞬时持锁"):
+    with pytest.raises(io_download_module.TransientFileLockError, match="终局落盘瞬时持锁，重试"):
         await manager.download_image("https://example.com/img.png", save_path)
 
-    # 完成态重试不发请求，重试预算全部耗在重走终局上。
+    # 子类经重试循环按可重试处理：完成态重试不发请求，重试预算全部耗在重走终局上。
     assert replace_calls["count"] == manager.max_retries + 1
     assert session._idx == 1
     assert not save_path.exists()

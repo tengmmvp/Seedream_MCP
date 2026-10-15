@@ -146,20 +146,38 @@ def _inflate_part_file_capped(path: Path, wbits: int, max_output: int) -> bytear
     return out
 
 
+# 只读文件系统、磁盘满与配额超限类永久文件系统 errno：解码回退写回与重试循环
+# 共用的终态判定集。
+_PERMANENT_FS_ERRNOS = frozenset({errno.EROFS, errno.ENOSPC, errno.EDQUOT})
+
+
 def _rewrite_part_file(path: Path, data: bytes | bytearray) -> None:
-    """以 no-follow 写打开续传临时文件并把 data 全量重写，供解码回退接管内容。"""
+    """以 no-follow 写打开续传临时文件并把 data 全量重写，供解码回退接管内容。
+
+    截断失败文件未动、截断后写段的永久文件系统 errno 均原样上抛（瞬时保留
+    状态重试、永久终态）；写段其余失败自截断起文件已毁，包装为可重试错误由
+    调用方作废续传状态退回全量重下；打开段 PermissionError 文件未动，原样
+    上抛由调用方保留状态。
+    """
     fd = open_no_follow_write_fd(path)
     try:
+        # 截断失败文件未动：原样上抛，持锁由调用方转可重试，其余走重试循环 errno 分类。
         os.ftruncate(fd, 0)
         # memoryview 切片免复制，避免大缓冲部分写入时逐次整段拷贝。
         view = memoryview(data)
         written = 0
-        while written < len(view):
-            count = os.write(fd, view[written:])
-            if count == 0:
-                # 零进展写入若重试即空转：按 OSError 上抛，对齐 _flush_received 守护。
-                raise OSError("写入零字节")
-            written += count
+        try:
+            while written < len(view):
+                count = os.write(fd, view[written:])
+                if count == 0:
+                    # 零进展写入若重试即空转：与其余写段失败同包装为可重试错误。
+                    raise OSError("写入零字节")
+                written += count
+        except Exception as exc:
+            if isinstance(exc, OSError) and exc.errno in _PERMANENT_FS_ERRNOS:
+                # 永久文件系统错误重试不可恢复：原样上抛走终态分类，不烧重试预算。
+                raise
+            raise RetryableDownloadError("解码回退写回失败，临时文件已毁") from exc
     finally:
         _close_fd_quietly(fd)
 
@@ -347,6 +365,20 @@ class RetryableDownloadError(DownloadError):
     """
 
     pass
+
+
+class TransientFileLockError(RetryableDownloadError):
+    """已存在 .part 的读取、写入、撕裂尾截断、重开与终局替换遭杀毒软件等瞬时持锁的可重试错误。
+
+    此类持锁一律可重试，新文件创建的权限拒绝维持终态。
+    """
+
+    pass
+
+
+def _raise_transient_file_lock(operation: str, exc: PermissionError) -> NoReturn:
+    """把瞬时持锁 PermissionError 单点转为可重试 TransientFileLockError。"""
+    raise TransientFileLockError(f"{operation}瞬时持锁，重试") from exc
 
 
 class _PublicIpPinningResolver(AbstractResolver):
@@ -596,28 +628,41 @@ async def _classify_range_response(
 
     出站请求携带 Range 才把 206/416 解读为续传应答（出站 Range 单源，调用方
     同名头已在入口剥离）：206 校验区间起点与已确认偏移一致且声明总长不倒退，
-    并核验响应 ETag 与源校验器一致（携带而不符即表示已变化；未携带时无法核验
-    维持现状），不符时作废已存前缀退回全量重下；416 解析 RFC 9110 §15.5.17
-    约定的 ``bytes */总长`` 声明，总长不小于已确认偏移时排空响应体，总长随
-    描述符下传由调用方写回续传状态，恰等于偏移判完成态，总长未知的
-    ``bytes */*`` 不可满足声明对开放式区间同样判完成，两完成态先经与 206
-    同口径的 ETag 核验，不符同样作废退回全量重下，大于偏移属对端违约按
-    终态失败，缺失声明或总长倒退作废已存前缀退回全量重下；未携带 Range 或
-    非 206/416 时返回非续传分类，由调用方按非 200 终态处理，未校验的 206
-    不进入落盘侧。
+    声明总长与上趟已知总长不符或响应 ETag 与源校验器不符（携带而不符即表示
+    已变化；未携带时无法核验维持现状）时作废已存前缀退回全量重下；416 解析
+    RFC 9110 §15.5.17
+    约定的 ``bytes */总长`` 声明，声明总长与已知总长不符时作废已存前缀退回
+    全量重下，总长不小于已确认偏移时排空响应体，总长随描述符下传由调用方
+    写回续传状态，恰等于偏移判完成态，总长未知的 ``bytes */*`` 不可满足声明
+    对开放式区间同样判完成，已知总长大于偏移时与不可满足声明矛盾同样作废
+    退回全量重下，两完成态先经与 206 同口径的 ETag 核验，不符同样作废退回
+    全量重下，大于偏移属对端违约按终态失败，缺失声明或总长倒退作废已存前缀
+    退回全量重下；未携带 Range 或非 206/416 时返回非续传分类，由调用方按
+    非 200 终态处理，未校验的 206 不进入落盘侧。
 
     Raises:
         DownloadError: 416 声明总长大于已确认偏移，区间按声明本可满足，重试
             请求逐字节相同，首现即终态失败。
         RetryableDownloadError: 206 缺失或畸形 Content-Range、区间与已确认偏移不符、
-            声明总长倒退、响应 ETag 与源校验器不符（206 与 416 完成态同口径），
-            或 416 声明缺失、畸形与倒退；均作废已存前缀退回全量。
+            声明总长倒退或与已知总长不符、响应 ETag 与源校验器不符（206 与 416
+            完成态同口径），或 416 声明缺失、畸形、倒退及与已知总长不符（含
+            ``*/*`` 声明与已知总长矛盾）；均作废已存前缀退回全量。
     """
     if not range_requested or response.status not in (206, 416):
         return _RangeClassification()
     if response.status == 416:
         declared = _parse_content_range(response.headers.get("content-range"))
         declared_total = declared.total
+        # 声明总长与已知总长不符即表示已变化：旧前缀不得判完成落盘，同 206 口径。
+        if (
+            declared_total is not None
+            and resume.expected_total is not None
+            and declared_total != resume.expected_total
+        ):
+            await resume.invalidate_prefix_and_raise_retryable(
+                response,
+                f"416 声明总长与已知总长不符: {declared_total}/{resume.expected_total}",
+            )
         if declared_total is not None and declared_total >= resume.offset:
             # 声明总长不小于已确认偏移：排空响应体，总长随描述符下传，完成与违约终态共用。
             await _drain_response_quietly(response)
@@ -634,6 +679,13 @@ async def _classify_range_response(
         if declared.unsatisfied:
             # ``bytes */*`` 对开放式区间即起点已达表示总长：已确认字节即完整
             # 数据，补记偏移为总长同样判完成；完成态同 206 口径核验表示身份。
+            if resume.expected_total is not None and resume.expected_total > resume.offset:
+                # 不可满足声明意味着新表示总长已缩至偏移以内，与已知总长矛盾
+                # 即表示已变化：作废前缀退回全量重下。
+                await resume.invalidate_prefix_and_raise_retryable(
+                    response,
+                    f"416 不可满足声明与已知总长矛盾: " f"{resume.expected_total}/{resume.offset}",
+                )
             await _drain_response_quietly(response)
             await _ensure_etag_matches_resume(response, resume)
             return _RangeClassification(completed=True, range_total=resume.offset)
@@ -655,6 +707,17 @@ async def _classify_range_response(
         await resume.invalidate_prefix_and_raise_retryable(
             response,
             f"续传响应区间与已存偏移不符: {response.headers.get('content-range')!r}",
+        )
+    # 声明总长与上趟已知总长不符即表示已变化：旧前缀不得拼入新表示，与 ETag
+    # 核验同口径；总长缺失或无已知总长时无法比对维持现状。
+    if (
+        content_range.total is not None
+        and resume.expected_total is not None
+        and content_range.total != resume.expected_total
+    ):
+        await resume.invalidate_prefix_and_raise_retryable(
+            response,
+            f"续传响应声明总长与已知总长不符: {content_range.total}/{resume.expected_total}",
         )
     # 响应 ETag 与源校验器不符即表示已变化：无视 If-Range 的源站回新表示字节时，
     # 新尾部不得拼接到旧前缀。
@@ -1052,7 +1115,8 @@ class DownloadManager:
         Raises:
             DownloadError: Content-Length 与 Content-Range 总长预检、流式累计上限、
                 字节签名校验失败，或交付越过声明总长。
-            RetryableDownloadError: 响应体流收尾正常但未达声明总长或声明分片，或落盘写入遭瞬时持锁。
+            RetryableDownloadError: 响应体流收尾正常但未达声明总长或声明分片，或撕裂尾截断
+                与落盘写入遭瞬时持锁。
         """
         continuing = classification.continuing
         base_offset = resume.offset if continuing else 0
@@ -1128,7 +1192,13 @@ class DownloadManager:
             def _truncate_torn_tail() -> None:
                 os.ftruncate(fd, resume.offset)
 
-            await await_settled_op(asyncio.to_thread(_truncate_torn_tail), absorb_all_cancels=True)
+            try:
+                await await_settled_op(
+                    asyncio.to_thread(_truncate_torn_tail), absorb_all_cancels=True
+                )
+            except PermissionError as exc:
+                # 撕裂尾截断遭杀软瞬时持锁：文件未动、状态保留，归可重试。
+                _raise_transient_file_lock("撕裂尾截断", exc)
 
         # 批量累积写入：每次落盘提交一次执行器任务，逐 256KB chunk 跳转在批量
         # 下载时占用执行器线程槽，累积至 _WRITE_BATCH_BYTES 再提交。
@@ -1144,8 +1214,8 @@ class DownloadManager:
                         )
                     )
                 except PermissionError as exc:
-                    # 与终局重开同口径：杀软瞬时持锁归可重试，已确认偏移保留续传。
-                    raise RetryableDownloadError("落盘写入瞬时持锁，重试") from exc
+                    # 杀软瞬时持锁归可重试，已确认偏移保留续传。
+                    _raise_transient_file_lock("落盘写入", exc)
                 if written == 0:
                     # 零进展写入若重试即空转：按可重试错误上抛，文件与 offset 保持同步。
                     raise OSError("写入零字节")
@@ -1251,7 +1321,9 @@ class DownloadManager:
         Raises:
             DownloadError: 字节签名校验失败（含解码回退不受理）或续传临时文件缺失。
             RetryableDownloadError: 重开的临时文件已不存在（作废状态退回全量重下），
-                或重开、解码回退写回与终局替换遭瞬时持锁（保留状态，下一趟重试）。
+                重开、终局替换、解码回退读取与写回打开、截断段遭瞬时持锁（保留
+                状态，下一趟重试），或解码回退写回自截断起失败（作废状态退回
+                全量重下）。
         """
         path = resume.path
         if path is None:
@@ -1259,7 +1331,7 @@ class DownloadManager:
         # 字节层校验：小于嗅探窗口的响应体在流结束时兜底判定；压缩容器头由
         # 解码回退在全部原始字节确认后解压复核。
         if not is_known_image_bytes(resume.head_bytes):
-            if await self._decode_compressed_resume(resume) is None:
+            if not await self._decode_compressed_resume(resume):
                 raise DownloadError(_SIGNATURE_REJECTION_MESSAGE)
         head_bytes = resume.head_bytes
         final_save_path = save_path
@@ -1283,13 +1355,12 @@ class DownloadManager:
                 raise RetryableDownloadError("续传临时文件已不存在，退回全量重下") from exc
             except PermissionError as exc:
                 # .part 仍在但被杀毒等瞬时持锁：保留完成态与数据，下一趟直接重试重开。
-                raise RetryableDownloadError("续传临时文件瞬时持锁，重试重开") from exc
+                _raise_transient_file_lock("续传临时文件重开", exc)
         try:
             await finalize_atomic_replace(fd, path, final_save_path, fsync=fsync)
         except PermissionError as exc:
-            # fsync/replace 遭杀软等瞬时持锁与 .part 重开持锁同类：保留完成态与
-            # 数据，退避后重试重走终局。
-            raise RetryableDownloadError("终局落盘瞬时持锁，重试重走终局") from exc
+            # fsync/replace 遭杀软等瞬时持锁：保留完成态与数据，退避后重试重走终局。
+            _raise_transient_file_lock("终局落盘", exc)
         finally:
             resume.fd = None
         # 替换已成，临时路径随之消亡；失败路径保留供重试重走终局。
@@ -1311,23 +1382,24 @@ class DownloadManager:
             "attempts": attempt + 1,
         }
 
-    async def _decode_compressed_resume(self, resume: _ResumeState) -> bytearray | None:
-        """终验解码回退：解压临时文件中的压缩体并接管续传状态，不受理返回 None。
+    async def _decode_compressed_resume(self, resume: _ResumeState) -> bool:
+        """终验解码回退：解压临时文件中的压缩体并接管续传状态，不受理返回 False。
 
         无视 identity 强返 gzip 或 zlib 包装 deflate 的源站在此获得挽救：原始
         字节已全部确认，解压经 CPU 池分块流式执行并以 max_file_size 封顶输出防
-        解压炸弹；解码异常、超限或解码字节仍非受支持图片返回 None，由调用方维持
+        解压炸弹；解码异常、超限或解码字节仍非受支持图片返回 False，由调用方维持
         签名拒绝终态。成功时临时文件重写为解码字节，head_bytes/offset/
         expected_total/content_type 同步改写，扩展名与 MIME 以解码字节重新嗅探，
         后续终局按普通完成态落盘。
 
         Raises:
-            RetryableDownloadError: 解码回退写回临时文件遭瞬时持锁，保留原始状态，
-                下一趟重试重走解码与终局。
+            RetryableDownloadError: 解码读取与写回打开、截断段遭瞬时持锁（文件
+                未动，保留原始状态，下一趟重走解码与终局），或写回自截断起失败
+                （临时文件已毁，作废续传状态退回全量重下自愈）。
         """
         path = resume.path
         if path is None or not _is_compression_container_head(resume.head_bytes):
-            return None
+            return False
         if _is_gzip_head(resume.head_bytes):
             wbits = 16 + zlib.MAX_WBITS
         else:
@@ -1337,23 +1409,31 @@ class DownloadManager:
                 _inflate_part_file_capped, path, wbits, self.max_file_size
             )
         except (ValueError, zlib.error):
-            return None
+            return False
+        except PermissionError as exc:
+            # 读取遭杀软瞬时持锁：文件未动、状态保留，归可重试。
+            _raise_transient_file_lock("解码回退读取", exc)
         # 签名与扩展名嗅探仅依赖首部窗口：取头部切片免整段 bytes 复制。
         head = bytes(decoded[:SNIFF_HEAD_BYTES_FLOOR])
         if not is_known_image_bytes(head):
-            return None
+            return False
         try:
             await await_settled_op(
                 asyncio.to_thread(_rewrite_part_file, path, decoded), absorb_all_cancels=True
             )
         except PermissionError as exc:
-            # 与终局重开持锁同口径：瞬时持锁保留原始状态，重试重走解码与终局。
-            raise RetryableDownloadError("解码回退写回瞬时持锁，重试") from exc
+            # 打开或截断段持锁文件未动：保留原始状态，下一趟重走解码与终局。
+            _raise_transient_file_lock("解码回退写回", exc)
+        except RetryableDownloadError:
+            # 自截断起文件已毁：作废完成态，重试退回全量重下自愈。
+            resume.restart()
+            resume.expected_total = None
+            raise
         resume.head_bytes = head
         resume.offset = len(decoded)
         resume.expected_total = len(decoded)
         resume.content_type = MIME_BY_EXTENSION[infer_extension_from_bytes(head)]
-        return decoded
+        return True
 
     async def _attempt_download(
         self,
@@ -1471,9 +1551,9 @@ class DownloadManager:
             DownloadError: 终态失败原样上抛，或重试耗尽后以最后一次可重试错误收尾。
         """
         last_error: DownloadError | None = None
-        attempts_made = 0
+        # max_retries<0 时循环零次执行，预绑定防末行失败日志读 attempt 未定义。
+        attempt = -1
         for attempt in range(self.max_retries + 1):
-            attempts_made = attempt + 1
             try:
                 # 防御性兜底：父目录可能在退避等待或并发清理期间被删除，每趟尝试前
                 # 确保存在；在 try 内使其 OSError 按下方分支归一（权限/只读盘终态，
@@ -1543,13 +1623,14 @@ class DownloadManager:
                 )
 
             except PermissionError as e:
-                # 保存目录不可写等权限拒绝属永久性错误，重试仅徒增延迟，直接终态
-                # 抛出；终局瞬时持锁已在 _finalize_completed_resume 归为可重试。
+                # 保存目录不可写等新文件创建权限拒绝属永久性错误，重试仅徒增延迟，
+                # 直接终态抛出；已存在 .part 的读取、写入、撕裂尾截断、重开与
+                # 终局替换持锁已单点转为可重试。
                 raise DownloadError(f"权限拒绝，不可重试: {e}") from e
 
             except OSError as e:
                 # 只读文件系统、磁盘满与配额超限等永久性错误不重试；其余瞬时 OSError 保持重试。
-                if e.errno in {errno.EROFS, errno.ENOSPC, errno.EDQUOT}:
+                if e.errno in _PERMANENT_FS_ERRNOS:
                     raise DownloadError(f"文件系统永久错误，不可重试: {e}") from e
                 last_error = DownloadError(f"文件系统错误: {e}")
                 logger.opt(exception=True).warning("文件系统错误 (尝试 {}): {}", attempt + 1, e)
@@ -1579,7 +1660,7 @@ class DownloadManager:
                     break
                 await asyncio.sleep(self.retry_delay * (attempt + 1) + random.uniform(0, 1))
 
-        logger.error("图片下载失败，已尝试 {} 次: {}", attempts_made, sanitize_url(url))
+        logger.error("图片下载失败，已尝试 {} 次: {}", attempt + 1, sanitize_url(url))
         raise last_error or DownloadError("下载失败")
 
     async def download_image(
