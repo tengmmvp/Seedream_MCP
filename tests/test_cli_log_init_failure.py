@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-import seedream_mcp.resources as resources_module
-from seedream_mcp import bootstrap as bootstrap_module
+import seedream_mcp.server.runtime as runtime_module
+from seedream_mcp.server import bootstrap as bootstrap_module
 from seedream_mcp import config as config_module
 
 from _log_fakes import preserved_loguru_globals
@@ -54,8 +54,8 @@ def test_cli_main_rebind_failure_log_reaches_file_channel(
     # 活动配置是模块级状态，先记录原值再交由 monkeypatch 在用例结束后恢复
     monkeypatch.setattr(config_module, "_active_config", config_module._active_config)
     # boundary 探测恒空使真实 rebind 走 ERROR 分支
-    monkeypatch.setattr(resources_module, "locate_request_state_boundary", lambda: None)
-    monkeypatch.setattr(resources_module.mcp, "run", lambda transport: None)
+    monkeypatch.setattr(runtime_module, "locate_request_state_boundary", lambda: None)
+    monkeypatch.setattr(runtime_module.mcp, "run", lambda transport: None)
 
     # cli_main 内的 setup_logging 重建进程级 sink 与 root handlers，退出时恢复
     with preserved_loguru_globals():
@@ -83,8 +83,8 @@ def test_cli_main_swallows_second_keyboard_interrupt_during_cleanup(
     def _interrupting_shutdown() -> None:
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(resources_module.mcp, "run", _interrupting_run)
-    monkeypatch.setattr(resources_module, "shutdown_cpu_offload_executor", _interrupting_shutdown)
+    monkeypatch.setattr(runtime_module.mcp, "run", _interrupting_run)
+    monkeypatch.setattr(runtime_module, "shutdown_cpu_offload_executor", _interrupting_shutdown)
 
     with preserved_loguru_globals():
         exit_code = bootstrap_module.cli_main()

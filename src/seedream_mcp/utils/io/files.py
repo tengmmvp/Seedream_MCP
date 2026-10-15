@@ -245,7 +245,7 @@ _packaged_resolve_cache = ResolveResultCache[Path](_PACKAGED_RESOLVE_CACHE_MAX)
 def reset_packaged_resolve_cache() -> None:
     """清空打包资源解析目标的进程级缓存，供测试隔离与进程复位使用。
 
-    resources._reset_lifespan_state 的复位协议经本函数登记此缓存；模块内其余
+    runtime._reset_lifespan_state 的复位协议经本函数登记此缓存；模块内其余
     名称均为不可变常量或纯函数，无其他需要复位的可变状态。
     """
     _packaged_resolve_cache.clear()

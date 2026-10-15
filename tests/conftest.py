@@ -69,7 +69,7 @@ async def _lifespan_state_guard(
         clear_session_manager: 是否清空 streamable-http 会话管理器引用，供每次
             streamable_http_app 调用重建它的用例做跨测试隔离。
     """
-    import seedream_mcp.resources as resources
+    import seedream_mcp.server.runtime as runtime
     import seedream_mcp.server as server
     from seedream_mcp import config as config_module
 
@@ -91,7 +91,7 @@ async def _lifespan_state_guard(
 
     if clear_session_manager:
         _clear_session_manager()
-    resources._reset_lifespan_state()
+    runtime._reset_lifespan_state()
     if inject_config:
         monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="test_key"))
 
@@ -105,14 +105,14 @@ async def _lifespan_state_guard(
     finally:
         if clear_session_manager:
             _clear_session_manager()
-        active = resources._active_resource
+        active = runtime._active_resource
         if active is not None:
             await _close_quietly(active.client)
             await _close_quietly(active.download_manager)
-        for retired in list(resources._retired_resources):
+        for retired in list(runtime._retired_resources):
             await _close_quietly(retired.client)
             await _close_quietly(retired.download_manager)
-        resources._reset_lifespan_state()
+        runtime._reset_lifespan_state()
 
 
 @pytest.fixture
@@ -145,7 +145,7 @@ def clean_web_routes() -> Iterator[None]:
     当前实例按快照时的登记形态写回。私有路径缺失时告警并跳过，告警经
     _warn_sdk_private_path_missing 单点。
     """
-    from seedream_mcp.resources import mcp
+    from seedream_mcp.server.runtime import mcp
     from seedream_mcp.webapp import routes as web_routes_module
 
     custom_routes = getattr(mcp, "_custom_starlette_routes", None)
@@ -184,9 +184,9 @@ def _isolate_host_env_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     显式测试 .env 或环境变量语义的用例自行传 env_file、覆盖 DEFAULT_ENV_FILE
     或 monkeypatch.setenv，后打补丁生效于本隔离之上。
     """
-    from seedream_mcp import _config_sources
+    from seedream_mcp.config import sources
 
-    monkeypatch.setattr(_config_sources, "DEFAULT_ENV_FILE", tmp_path / "absent.env")
+    monkeypatch.setattr(sources, "DEFAULT_ENV_FILE", tmp_path / "absent.env")
     monkeypatch.chdir(tmp_path)
     _scrub_host_prefixed_env(monkeypatch)
 
@@ -194,7 +194,7 @@ def _isolate_host_env_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 @pytest.fixture(autouse=True)
 def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """每测试重置全局配置与可变模块状态，防止跨测试污染。"""
-    from seedream_mcp.resources import _reset_lifespan_state, locate_request_state_boundary
+    from seedream_mcp.server.runtime import _reset_lifespan_state, locate_request_state_boundary
     from seedream_mcp.utils.core import formats as formats_module
 
     # PIL 已导入时快照解压炸弹阈值，收尾恢复：解码器初始化经 Image.MAX_IMAGE_PIXELS

@@ -11,8 +11,8 @@ from argparse import Namespace
 
 import pytest
 
-import seedream_mcp.bootstrap as bootstrap_module
-import seedream_mcp.resources as resources_module
+import seedream_mcp.server.bootstrap as bootstrap_module
+import seedream_mcp.server.runtime as runtime_module
 from seedream_mcp.config import SeedreamConfig
 
 
@@ -53,4 +53,4 @@ def stub_cli_main(monkeypatch: pytest.MonkeyPatch, args: Namespace, config: Seed
     monkeypatch.setattr(bootstrap_module, "setup_logging", lambda *a, **k: None)
     monkeypatch.setattr(bootstrap_module, "warn_remote_exposure", lambda *a, **k: None)
     monkeypatch.setattr(bootstrap_module, "run_streamable_http", lambda *a, **k: None)
-    monkeypatch.setattr(resources_module.mcp, "run", lambda transport=None: None)
+    monkeypatch.setattr(runtime_module.mcp, "run", lambda transport=None: None)

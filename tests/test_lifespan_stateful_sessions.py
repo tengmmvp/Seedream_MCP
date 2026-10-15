@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 from seedream_mcp import config as config_module
-import seedream_mcp.resources as resources
+import seedream_mcp.server.runtime as runtime
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 
@@ -34,7 +34,7 @@ async def test_second_session_exit_keeps_shared_resource_for_first(
             assert second_state["client"] is shared_client
             assert second_state["download_manager"] is shared_download_manager
 
-        active = resources._active_resource
+        active = runtime._active_resource
         assert active is not None
         assert active.refcount == 1
         # close 会把 client._client 与 download_manager._session 置 None，
@@ -43,7 +43,7 @@ async def test_second_session_exit_keeps_shared_resource_for_first(
         assert shared_download_manager._session is not None
 
     # 最后一个会话退出后引用归零，teardown 清理生效
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
     assert shared_client._client is None
     assert shared_download_manager._session is None
 
@@ -66,17 +66,17 @@ async def test_exit_skips_cleanup_while_retired_resource_in_flight(
             new_client = second_state["client"]
         assert new_client is not old_client
 
-        active = resources._active_resource
+        active = runtime._active_resource
         assert active is not None
         assert active.client is new_client
         # 退役资源仍被会话 1 持有，清理被门控搁置
-        assert resources._retired_resources
+        assert runtime._retired_resources
         assert old_client._client is not None
         assert new_client._client is not None
 
     # 会话 1 退出后退役与活动资源全部清理
-    assert resources._active_resource is None
-    assert resources._retired_resources == []
+    assert runtime._active_resource is None
+    assert runtime._retired_resources == []
     assert old_client._client is None
     assert new_client._client is None
 
@@ -90,7 +90,7 @@ async def test_new_session_rebuilds_after_all_sessions_exit(
 
     async with server.app_lifespan(server.mcp) as first_state:
         first_client = first_state["client"]
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
     async with server.app_lifespan(server.mcp) as second_state:
         assert second_state["client"] is not first_client
@@ -136,7 +136,7 @@ async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
     await teardown
 
     # 清理放弃后资源仍挂活动槽位且未被关闭，会话 2 继续持有可用连接池
-    active = resources._active_resource
+    active = runtime._active_resource
     assert active is not None
     assert active.client is shared_client
     assert active.refcount == 1
@@ -145,7 +145,7 @@ async def test_session_entering_during_cleanup_drain_keeps_resource_alive(
 
     # 会话 2 退出时引用归零，清理正常完成
     await second_lifespan.__aexit__(None, None, None)
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
     assert shared_client._client is None
     assert shared_download_manager._session is None
 
@@ -186,7 +186,7 @@ async def test_new_config_session_during_drain_closes_zero_refcount_resource_imm
 
     assert new_client is not old_client
     # 旧资源引用已归零，退役路径立即关闭，不滞留退役追踪
-    assert resources._retired_resources == []
+    assert runtime._retired_resources == []
     assert old_client._client is None
     assert old_download_manager._session is None
 
@@ -194,11 +194,11 @@ async def test_new_config_session_during_drain_closes_zero_refcount_resource_imm
     await teardown
 
     # teardown 的清理在 drain 后复检引用，第二会话在途使新资源保持可用
-    active = resources._active_resource
+    active = runtime._active_resource
     assert active is not None
     assert active.client is new_client
     assert new_client._client is not None
 
     await second_lifespan.__aexit__(None, None, None)
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
     assert new_client._client is None

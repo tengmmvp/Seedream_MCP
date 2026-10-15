@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-import seedream_mcp.cli as cli
-from seedream_mcp.transport import is_loopback_bind_host
+import seedream_mcp.server.cli as cli
+from seedream_mcp.server.transport import is_loopback_bind_host
 
 from _cli_fakes import make_run_args
 

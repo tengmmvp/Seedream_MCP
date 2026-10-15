@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
-from .config import SeedreamConfig
+from ..config import SeedreamConfig
 from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
-from .utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
-from .utils.core.http_int import strict_http_int
-from .utils.core.loop_bound import loop_bound_semaphore
-from .utils.core.errors import (
+from ..utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
+from ..utils.core.http_int import strict_http_int
+from ..utils.core.loop_bound import loop_bound_semaphore
+from ..utils.core.errors import (
     SeedreamAPIError,
     SeedreamConfigError,
     SeedreamMCPError,
@@ -32,19 +32,19 @@ from .utils.core.errors import (
     parse_retry_after,
     response_reports_failure,
 )
-from .utils.core.sanitizers import (
+from ..utils.core.sanitizers import (
     UPSTREAM_MESSAGE_FRAGMENT_LIMIT,
     _truncate_value_for_output,
     fit_utf8_bytes,
     sanitize_error_text,
 )
-from .utils.images.ref import classify_image_reference
-from .utils.io.sse import (
+from ..utils.images.ref import classify_image_reference
+from ..utils.io.sse import (
     is_sse_response,
     items_limit_for,
     parse_sse_response,
 )
-from .utils.io.stream import (
+from ..utils.io.stream import (
     RESPONSE_BODY_LIMIT_HINT,
     STREAM_DEADLINE_HIT,
     STREAM_ENDED,

@@ -14,7 +14,7 @@ import pytest
 from starlette.types import Message, Receive, Send
 
 from _log_fakes import capture_loguru_messages
-import seedream_mcp.transport as transport
+import seedream_mcp.server.transport as transport
 from seedream_mcp.config import build_config_from_sources
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 

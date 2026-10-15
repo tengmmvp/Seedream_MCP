@@ -95,7 +95,7 @@ class _GuardedStaticFiles(StaticFiles):
 
 def register_web_routes() -> None:
     """向调用方 MCPServer 注册全部 Web 路由，按实例身份守卫并复查路径交集保持幂等。"""
-    from ..resources import mcp
+    from ..server.runtime import mcp
     from . import files, gallery, generate, meta
 
     # 路径交集复查依赖 SDK 私有路由表，getattr 探测缺失时告警并回退纯身份守卫；

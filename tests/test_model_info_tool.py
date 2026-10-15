@@ -9,7 +9,7 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.resources import mcp
+from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.core.model_info import (
     _NUMERIC_FIELD_LABELS,
     build_model_info_payload,

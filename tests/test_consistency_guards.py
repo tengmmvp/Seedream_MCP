@@ -55,8 +55,8 @@ _GENERATION_TOOL_METADATA = (
 # 环境键读取豁免只收真实旁路：动态键站点解不出静态文本，收录模块相对路径加调用原文。
 _ENV_KEY_READ_EXEMPTIONS = frozenset(
     {
-        "config.py:os.getenv(env_name)",
-        "_config_sources.py:os.getenv(env_key)",
+        "config/__init__.py:os.getenv(env_name)",
+        "config/sources.py:os.getenv(env_key)",
         "utils/io/path.py:os.getenv(env_var)",
     }
 )
@@ -178,7 +178,7 @@ async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
     任一侧改名会使 structuredContent.tool 与注册名静默错位，两侧字面量分布在不同
     模块，靠本断言锁定一致。
     """
-    from seedream_mcp.resources import mcp
+    from seedream_mcp.server.runtime import mcp
 
     tools = await mcp.list_tools()
     registered = {tool.name for tool in tools}
@@ -364,7 +364,7 @@ def test_suggest_similar_paths_finds_close_names(tmp_path: Path) -> None:
 
 def test_cli_port_type_rejects_invalid_port() -> None:
     """CLI 端口解析拒绝非数字与超范围端口，接受合法端口。"""
-    from seedream_mcp.cli import _port_type
+    from seedream_mcp.server.cli import _port_type
 
     assert _port_type("8000") == 8000
     with pytest.raises(argparse.ArgumentTypeError):

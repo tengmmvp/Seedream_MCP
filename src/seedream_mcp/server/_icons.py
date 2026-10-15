@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 
-from .utils.core.formats import encode_data_uri
+from ..utils.core.formats import encode_data_uri
 
 _TOOL_SVGS: dict[str, str] = {
     # 图标 image-plus：从无到有生成图片

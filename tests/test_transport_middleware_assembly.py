@@ -20,10 +20,10 @@ from starlette.requests import Request
 from starlette.types import Message, Receive, Send
 
 from _log_fakes import capture_loguru_messages
-import seedream_mcp.transport as transport_module
-from seedream_mcp._host_syntax import bind_host_invalid_reason
+import seedream_mcp.server.transport as transport_module
+from seedream_mcp.config.host_syntax import bind_host_invalid_reason
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.transport import (
+from seedream_mcp.server.transport import (
     ALWAYS_EXEMPT_EXACT_PATHS,
     _AppHostGuardMiddleware,
     _BearerTokenAuthMiddleware,
@@ -415,7 +415,7 @@ def test_repeated_attach_on_same_app_does_not_stack(active_config: None) -> None
 
 def test_attach_passes_web_exempt_paths_when_web_enabled(active_config: None) -> None:
     """web_enabled 且配置令牌时 Bearer 装配携带 Web 静态页面豁免表并入恒豁免常量。"""
-    from seedream_mcp.transport import ALWAYS_EXEMPT_EXACT_PATHS
+    from seedream_mcp.server.transport import ALWAYS_EXEMPT_EXACT_PATHS
     from seedream_mcp.webapp.constants import (
         WEB_EXEMPT_EXACT_PATHS,
         WEB_EXEMPT_PATH_PREFIXES,
@@ -433,7 +433,7 @@ def test_attach_passes_web_exempt_paths_when_web_enabled(active_config: None) ->
 
 def test_attach_web_disabled_exempts_only_always_exempt_paths(active_config: None) -> None:
     """web 关闭时 Bearer 豁免表恰为恒豁免常量，Web 页面路径不进入豁免参数。"""
-    from seedream_mcp.transport import ALWAYS_EXEMPT_EXACT_PATHS
+    from seedream_mcp.server.transport import ALWAYS_EXEMPT_EXACT_PATHS
 
     app = _FakeStarletteApp()
 

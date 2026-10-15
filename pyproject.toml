@@ -93,7 +93,7 @@ packages = ["src/seedream_mcp"]
 # 分支口径统计，未走的分支也计入分母。
 branch = true
 # python -m 入口垫片仅转调 cli_main，不计入覆盖统计。
-omit = ["src/seedream_mcp/__main__.py"]
+omit = ["src/seedream_mcp/__main__.py", "src/seedream_mcp/server/__main__.py"]
 
 [tool.coverage.report]
 # 覆盖率总量门禁，取行业主流基线，不随实测值精确校准。

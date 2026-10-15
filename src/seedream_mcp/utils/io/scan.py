@@ -168,7 +168,7 @@ class _DirectoryScanCacheEntry:
 def reset_directory_scan_cache() -> None:
     """清空目录扫描与 resolve 复用（含失败负缓存）的进程级缓存，供测试隔离与进程复位使用。
 
-    resources._reset_lifespan_state 的复位协议经本函数登记此三处缓存；模块内
+    runtime._reset_lifespan_state 的复位协议经本函数登记此三处缓存；模块内
     其余名称均为不可变常量或纯函数，无其他需要复位的可变状态。
     """
     _DIRECTORY_SCAN_CACHE.clear()

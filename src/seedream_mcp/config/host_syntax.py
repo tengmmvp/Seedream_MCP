@@ -7,7 +7,7 @@ cli 的参数期早拒共用同一语法与判定，形态演化在此单点维�
 
 from __future__ import annotations
 
-from .utils.core.sanitizers import is_printable_ascii
+from ..utils.core.sanitizers import is_printable_ascii
 
 
 def _bracket_ipv6_literal(entry: str) -> str | None:

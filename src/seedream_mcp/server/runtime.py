@@ -20,7 +20,7 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
 from pydantic import ValidationError
 
-from .config import (
+from ..config import (
     LIFESPAN_KEY_CLIENT,
     LIFESPAN_KEY_CONFIG,
     LIFESPAN_KEY_DOWNLOAD_MANAGER,
@@ -29,17 +29,17 @@ from .config import (
     get_active_config,
     set_active_config,
 )
-from .utils.core.errors import validation_error_user_message
-from .utils.core.executors import shutdown_cpu_offload_executor
-from .utils.core.logs import get_logger
-from .version import __version__
+from ..utils.core.errors import validation_error_user_message
+from ..utils.core.executors import shutdown_cpu_offload_executor
+from ..utils.core.logs import get_logger
+from ..version import __version__
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
     from mcp.types import CallToolResult, GetPromptResult, InputRequiredResult
 
-    from .client import SeedreamClient
-    from .utils.io.download import DownloadManager
+    from ..client import SeedreamClient
+    from ..utils.io.download import DownloadManager
 
 # ==================== 服务器元数据常量 ====================
 
@@ -103,8 +103,8 @@ async def _safe_close(obj: Any) -> None:
 
 async def _build_active_resource(config: SeedreamConfig) -> _SharedResource:
     """创建并初始化新的共享资源句柄，部分初始化失败时关闭已创建部分避免泄漏。"""
-    from .client import SeedreamClient
-    from .utils.io.download import DownloadManager
+    from ..client import SeedreamClient
+    from ..utils.io.download import DownloadManager
 
     new_client = SeedreamClient(config)
     # 下载并发上限经构造参数下沉，连接器重建的分支自动保持上限。
@@ -215,7 +215,7 @@ async def _cleanup_shared_resources(*, idle_only: bool = False) -> None:
     退出不等队列。
     """
     global _active_resource
-    from .utils.io.save import drain_background_cleanup_tasks
+    from ..utils.io.save import drain_background_cleanup_tasks
 
     await drain_background_cleanup_tasks()
     if idle_only and _has_inflight_references():
@@ -285,18 +285,18 @@ def _reset_lifespan_state() -> None:
     _active_resource = None
     _retired_resources.clear()
     set_active_config(None)
-    from . import config as config_module
+    from .. import config as config_module
 
     config_module._global_config = None
     config_module._BUILD_WARNINGS.clear()
     _shared_init_lock = asyncio.Lock()
     shutdown_cpu_offload_executor()
-    from .utils.images.thumbnail import reset_thumb_sweep_gate
-    from .utils.io.files import reset_packaged_resolve_cache
-    from .utils.io.path import clear_resolved_env_root_cache
-    from .utils.io.save import reset_cleanup_state
-    from .utils.io.scan import reset_directory_scan_cache
-    from .utils.io.storage import reset_file_manager_cache
+    from ..utils.images.thumbnail import reset_thumb_sweep_gate
+    from ..utils.io.files import reset_packaged_resolve_cache
+    from ..utils.io.path import clear_resolved_env_root_cache
+    from ..utils.io.save import reset_cleanup_state
+    from ..utils.io.scan import reset_directory_scan_cache
+    from ..utils.io.storage import reset_file_manager_cache
 
     clear_resolved_env_root_cache()
     reset_cleanup_state()

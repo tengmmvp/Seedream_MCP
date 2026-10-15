@@ -13,7 +13,7 @@ import re
 
 import pytest
 
-import seedream_mcp._config_sources as config_sources
+import seedream_mcp.config.sources as config_sources
 
 # .env.example 注释行的「默认：」标注形态，冒号兼容全角。
 _EXAMPLE_DEFAULT_PATTERN = re.compile(r"^#\s*默认[:：]\s*(.+)$")

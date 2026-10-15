@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import seedream_mcp.cli as cli
-from seedream_mcp import bootstrap as bootstrap_module
+import seedream_mcp.server.cli as cli
+from seedream_mcp.server import bootstrap as bootstrap_module
 from seedream_mcp.config import SeedreamConfig, build_config_from_sources
 
 from _cli_fakes import make_run_args, stub_cli_main

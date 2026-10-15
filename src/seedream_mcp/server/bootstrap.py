@@ -11,8 +11,8 @@ from .cli import (
     validate_http_security,
     validate_transport_args,
 )
-from .config import drain_pending_build_warnings, set_active_config
-from .resources import (
+from ..config import drain_pending_build_warnings, set_active_config
+from .runtime import (
     SERVER_NAME,
     SERVER_VERSION,
     mcp,
@@ -24,9 +24,9 @@ from .transport import (
     run_streamable_http,
     warn_remote_exposure,
 )
-from .utils.core.errors import SeedreamConfigError, format_error_for_user
-from .utils.core.logs import get_logger, setup_logging
-from .utils.io.path import drain_pending_start_messages, resolve_log_file_path
+from ..utils.core.errors import SeedreamConfigError, format_error_for_user
+from ..utils.core.logs import get_logger, setup_logging
+from ..utils.io.path import drain_pending_start_messages, resolve_log_file_path
 
 logger = get_logger()
 

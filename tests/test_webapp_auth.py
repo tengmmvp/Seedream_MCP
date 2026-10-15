@@ -17,7 +17,7 @@ from _web_fixtures import (
     web_asgi_client,
     write_workspace_config,
 )
-from seedream_mcp.transport import _BearerTokenAuthMiddleware
+from seedream_mcp.server.transport import _BearerTokenAuthMiddleware
 
 
 def test_bearer_path_exempt_matches_static_group_only() -> None:
@@ -68,7 +68,7 @@ def test_bearer_path_exempt_ignores_trailing_slash() -> None:
 
 def test_bearer_exempts_well_known_discovery_via_production_table() -> None:
     """端点发现路径经 transport 常量并入豁免口径，web 开启的令牌部署下发现重定向免鉴权。"""
-    from seedream_mcp.transport import ALWAYS_EXEMPT_EXACT_PATHS
+    from seedream_mcp.server.transport import ALWAYS_EXEMPT_EXACT_PATHS
     from seedream_mcp.webapp.constants import (
         WEB_EXEMPT_EXACT_PATHS,
         WEB_EXEMPT_PATH_PREFIXES,

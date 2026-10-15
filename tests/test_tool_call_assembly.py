@@ -17,7 +17,7 @@ from mcp.types import CallToolResult, TextContent
 
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.resources import mcp
+from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.core.schemas import (
     BackgroundMode,
     BrowseImagesInput,

@@ -15,19 +15,19 @@ from typing import Any
 
 import httpx
 
-from ._client_http import _ClientHTTPMixin
-from .config import SeedreamConfig, get_active_config
+from ._http import _ClientHTTPMixin
+from ..config import SeedreamConfig, get_active_config
 from .request_plan import _ACTIVE_REQUEST_PLAN, _build_request_data
-from .utils.core.errors import SeedreamValidationError
-from .utils.core.logs import get_logger
-from .utils.model.capabilities import (
+from ..utils.core.errors import SeedreamValidationError
+from ..utils.core.logs import get_logger
+from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     get_max_reference_images,
     layer_decomposition_presets_text,
     limited_reference_families_annotation,
     supported_family_display_names,
 )
-from .utils.core.validators import (
+from ..utils.core.validators import (
     ValidatedCommonParams,
     ensure_utf8_encodable,
     resolve_effective_generation_defaults,
@@ -39,7 +39,7 @@ from .utils.core.validators import (
     validate_sequential_generation_support,
     validate_sequential_image_limit,
 )
-from .utils.images.prepare import ImagePreparer
+from ..utils.images.prepare import ImagePreparer
 
 # 生成方法 docstring 的家族清单、图层档位与参考图上限自能力表派生；
 # docstring 为字符串字面量（f-string 不能成为 __doc__），派生值经下方回填替换进入。

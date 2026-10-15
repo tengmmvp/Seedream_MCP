@@ -19,8 +19,8 @@ import pytest
 from mcp.types import CallToolResult
 from starlette.requests import Request
 
-import seedream_mcp.resources as resources_module
-import seedream_mcp.transport as transport_module
+import seedream_mcp.server.runtime as runtime_module
+import seedream_mcp.server.transport as transport_module
 import seedream_mcp.utils.core.errors as errors_module
 from _cpu_offload_spy import CpuOffloadSpy
 from _generation_fixtures import _patch_client_method_spy
@@ -1082,7 +1082,7 @@ def test_build_web_request_context_returns_stub_when_resource_active(
     client = _FakeClient()
     download_manager = _FakeDownloadManager()
     monkeypatch.setattr(
-        resources_module,
+        runtime_module,
         "_active_resource",
         type("_R", (), {"client": client, "download_manager": download_manager})(),
     )
@@ -1098,7 +1098,7 @@ def test_build_web_request_context_returns_none_when_resource_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """共享资源不在堂时返回 None，调用方回退每请求新建 client 路径。"""
-    monkeypatch.setattr(resources_module, "_active_resource", None)
+    monkeypatch.setattr(runtime_module, "_active_resource", None)
 
     assert build_web_request_context() is None
 
@@ -1196,7 +1196,7 @@ async def test_generate_endpoint_receives_shared_client_context(
         ),
     )
     stub = _make_stub_resource()
-    monkeypatch.setattr(resources_module, "_active_resource", stub)
+    monkeypatch.setattr(runtime_module, "_active_resource", stub)
     write_workspace_config(tmp_path)
     app = build_web_app()
 
@@ -1229,7 +1229,7 @@ async def test_generate_concurrent_requests_share_active_resource_client(
         ),
     )
     stub = _make_stub_resource()
-    monkeypatch.setattr(resources_module, "_active_resource", stub)
+    monkeypatch.setattr(runtime_module, "_active_resource", stub)
     write_workspace_config(tmp_path)
     app = build_web_app()
 

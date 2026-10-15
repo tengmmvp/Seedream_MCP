@@ -19,7 +19,7 @@ from pydantic.fields import FieldInfo
 
 from _no_param_tools import NO_PARAM_TOOLS
 
-from seedream_mcp.resources import mcp
+from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
     ImageToImageInput,

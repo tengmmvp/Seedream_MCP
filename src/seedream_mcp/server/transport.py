@@ -5,7 +5,7 @@ Web 操作台同源 Origin 与跨站 Sec-Fetch 校验及内层异常边界八个
 /.well-known/mcp 端点发现 303 重定向路由，以及 streamable-http 监听与 TLS 配置。
 中间件经 Starlette add_middleware 装配到 MCPServer 的 streamable_http_app 外层，
 按装配逆序执行。
-MCPServer 实例 mcp 与共享资源清理函数在调用时从 resources 模块延迟导入，传输层
+MCPServer 实例 mcp 与共享资源清理函数在调用时从 runtime 模块延迟导入，传输层
 不依赖 server 模块。
 """
 
@@ -27,17 +27,17 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.responses import RedirectResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from ._host_syntax import (
+from ..config.host_syntax import (
     _bracket_ipv6_literal,
     _decompose_allowed_host_entry,
     bind_host_invalid_reason,
 )
-from .config import get_active_config
-from .utils.core.errors import SeedreamConfigError
-from .utils.core.http_int import strict_http_int
-from .utils.core.logs import get_logger
-from .utils.core.loop_bound import loop_bound_semaphore
-from .utils.core.settle import await_settled_op, settle_detached_op
+from ..config import get_active_config
+from ..utils.core.errors import SeedreamConfigError
+from ..utils.core.http_int import strict_http_int
+from ..utils.core.logs import get_logger
+from ..utils.core.loop_bound import loop_bound_semaphore
+from ..utils.core.settle import await_settled_op, settle_detached_op
 
 logger = get_logger()
 
@@ -1177,7 +1177,7 @@ def _attach_streamable_http_middleware(
     if auth_token:
         exempt_exact = ALWAYS_EXEMPT_EXACT_PATHS
         if web_enabled:
-            from .webapp.constants import WEB_EXEMPT_EXACT_PATHS, WEB_EXEMPT_PATH_PREFIXES
+            from ..webapp.constants import WEB_EXEMPT_EXACT_PATHS, WEB_EXEMPT_PATH_PREFIXES
 
             exempt_exact |= WEB_EXEMPT_EXACT_PATHS
             exempt_prefixes = WEB_EXEMPT_PATH_PREFIXES
@@ -1200,7 +1200,7 @@ def _attach_streamable_http_middleware(
         )
         logger.info("streamable-http 已启用 Bearer 令牌鉴权")
     elif web_enabled:
-        from .webapp.constants import WEB_API_PREFIX
+        from ..webapp.constants import WEB_API_PREFIX
 
         app.add_middleware(
             _WebOriginGuardMiddleware,
@@ -1357,7 +1357,7 @@ async def _well_known_mcp_redirect(request: Request) -> Response:
 
 def _register_well_known_mcp_route() -> None:
     """注册 RFC 8615 端点发现重定向路由，幂等且须先于 streamable_http_app 调用。"""
-    from .resources import mcp
+    from .runtime import mcp
 
     # 幂等复查依赖 SDK 私有路由表，探测缺失时与 webapp 侧同口径告警后照常注册。
     custom_routes = getattr(mcp, "_custom_starlette_routes", None)
@@ -1386,7 +1386,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     该上限同时供 SDK 内层与本项目中间件两层消费。run_streamable_http 与生产装配
     测试共用本函数构建同源栈。
     """
-    from .resources import mcp
+    from .runtime import mcp
 
     config = get_active_config()
     transport_security = _transport_security_for_host(host)
@@ -1394,7 +1394,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
     allowed_origins = config.http_allowed_origins
     _register_well_known_mcp_route()
     if web_enabled:
-        from .webapp import register_web_routes
+        from ..webapp import register_web_routes
 
         register_web_routes()
     app = mcp.streamable_http_app(
@@ -1422,7 +1422,7 @@ def _build_streamable_app(host: str, stateless: bool, auth_token: str, web_enabl
                 host,
             )
     if web_enabled:
-        from .webapp import mount_web_static
+        from ..webapp import mount_web_static
 
         mount_web_static(app)
     _attach_streamable_http_middleware(
@@ -1455,7 +1455,7 @@ def run_streamable_http(
     """
     import uvicorn
 
-    from .resources import _cleanup_shared_resources
+    from .runtime import _cleanup_shared_resources
 
     app = _build_streamable_app(host, stateless, auth_token, web_enabled)
     ssl_kwargs: dict[str, Any] = {}

@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
-from ._config_sources import (
-    # as 同名形态为显式再导出，resources 的复位协议经 config 模块属性访问。
+from .sources import (
+    # as 同名形态为显式再导出，runtime 的复位协议经 config 模块属性访问。
     _BUILD_WARNINGS as _BUILD_WARNINGS,
     _FIELD_ENV_MAP,
     _FIELD_PICKERS,
@@ -38,26 +38,26 @@ from ._config_sources import (
 )
 
 # as 同名形态为显式再导出，测试侧经 config 单源取仓库根。
-from ._config_sources import PROJECT_ROOT as PROJECT_ROOT  # noqa: F401
-from ._host_syntax import _bracket_ipv6_literal, _decompose_allowed_host_entry
-from .utils.core.errors import SeedreamConfigError, SeedreamValidationError
-from .utils.core.sanitizers import is_printable_ascii, is_sensitive_key
-from .utils.core.formats import DEFAULT_MAX_FILE_SIZE
-from .utils.core.executors import register_cpu_offload_depth_provider
-from .utils.core.logs import (
+from .sources import PROJECT_ROOT as PROJECT_ROOT  # noqa: F401
+from .host_syntax import _bracket_ipv6_literal, _decompose_allowed_host_entry
+from ..utils.core.errors import SeedreamConfigError, SeedreamValidationError
+from ..utils.core.sanitizers import is_printable_ascii, is_sensitive_key
+from ..utils.core.formats import DEFAULT_MAX_FILE_SIZE
+from ..utils.core.executors import register_cpu_offload_depth_provider
+from ..utils.core.logs import (
     DEFAULT_LOG_RETENTION_DAYS,
     DEFAULT_LOG_ROTATION_SIZE_MB,
     LEGAL_LOG_LEVELS,
     get_logger,
 )
-from .utils.core.validators import validate_size_for_model
-from .utils.io.path import (
+from ..utils.core.validators import validate_size_for_model
+from ..utils.io.path import (
     clear_resolved_env_root_cache,
     register_data_root_provider,
     register_env_workspace_root_provider,
     reject_unc_declaration,
 )
-from .utils.model.capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
+from ..utils.model.capabilities import MODEL_ALIASES, DEPRECATED_MODEL_TOKENS
 
 
 def drain_pending_build_warnings() -> None:
@@ -998,7 +998,7 @@ def _first_invalid_request_state_key_message(
 
 
 def active_request_state_keys() -> tuple[bytes, ...] | None:
-    """向 resources 提供 requestState 密钥环的活动取值。
+    """向 runtime 提供 requestState 密钥环的活动取值。
 
     活动配置已就绪时返回其密钥环；导入期配置未构建，仅按系统环境变量先行
     取密钥环，条目拆分与解码均复用配置构建的单点。.env 中的值由启动路径

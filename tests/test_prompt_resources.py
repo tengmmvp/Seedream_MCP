@@ -17,7 +17,7 @@ from mcp.types import GetPromptResult, INVALID_PARAMS, TextContent
 from pydantic import BaseModel, Field, ValidationError
 
 import seedream_mcp.server as server
-from seedream_mcp.resources import _locate_validation_error, _targets_argument
+from seedream_mcp.server.runtime import _locate_validation_error, _targets_argument
 from seedream_mcp.tools.core.schemas import PROMPT_MAX_LENGTH
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供

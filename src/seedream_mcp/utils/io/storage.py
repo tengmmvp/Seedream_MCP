@@ -801,6 +801,6 @@ def get_file_manager(base_dir: Path | None = None) -> "FileManager":
 
 
 def reset_file_manager_cache() -> None:
-    """清空 FileManager 进程级缓存，经 resources 复位协议登记，供测试隔离调用。"""
+    """清空 FileManager 进程级缓存，经 runtime 复位协议登记，供测试隔离调用。"""
     with _file_manager_cache_lock:
         _file_manager_cache.clear()

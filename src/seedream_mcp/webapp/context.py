@@ -42,12 +42,12 @@ def build_web_request_context() -> _WebRequestContextStub | None:
     """共享资源单例在场时返回借用其 client 与下载管理器的上下文替身。
 
     返回 None 表示资源不在场，即 uvicorn serve 之外的调用窗口，调用方以
-    ctx=None 走流水线回退路径，按请求新建 client。共享句柄经 resources 的
+    ctx=None 走流水线回退路径，按请求新建 client。共享句柄经 runtime 的
     borrow_shared_handles 公共入口获取，调用时解析，跟随单例的重建与退役。
     """
-    from .. import resources
+    from ..server import runtime
 
-    resource = resources.borrow_shared_handles()
+    resource = runtime.borrow_shared_handles()
     if resource is None:
         return None
     return _WebRequestContextStub(

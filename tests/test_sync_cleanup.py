@@ -1,4 +1,4 @@
-"""resources.sync_cleanup 进程级清理测试。
+"""runtime.sync_cleanup 进程级清理测试。
 
 sync_cleanup 是 cli_main finally 的同步清理入口：提取并清空活动与退役资源后
 asyncio.run 关闭，并一并关闭 CPU 卸载线程池。覆盖正常清理、RuntimeError 与
@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-import seedream_mcp.resources as resources
+import seedream_mcp.server.runtime as runtime
 
 
 class _Closeable:
@@ -35,14 +35,14 @@ def test_sync_cleanup_closes_shared_resources(monkeypatch: pytest.MonkeyPatch) -
     """正常路径下 asyncio.run 关闭 client 与 download_manager，引用不残留。"""
     client = _Closeable()
     download_manager = _Closeable()
-    monkeypatch.setattr(resources, "_active_resource", _FakeResource(client, download_manager))
+    monkeypatch.setattr(runtime, "_active_resource", _FakeResource(client, download_manager))
 
-    resources.sync_cleanup()
+    runtime.sync_cleanup()
 
     assert client.closed is True
     assert download_manager.closed is True
     # 引用在 asyncio.run 前已清空，无论清理成败都不泄漏。
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
 
 def test_sync_cleanup_swallows_runtime_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,7 +51,7 @@ def test_sync_cleanup_swallows_runtime_error(monkeypatch: pytest.MonkeyPatch) ->
     进程退出清理可能在主线程运行循环内到达，属预期场景，余量交 GC/OS。
     """
     client = _Closeable()
-    monkeypatch.setattr(resources, "_active_resource", _FakeResource(client, None))
+    monkeypatch.setattr(runtime, "_active_resource", _FakeResource(client, None))
 
     def _raising_run(coro: object) -> None:
         # 关闭未 await 的协程，避免 RuntimeWarning。
@@ -61,10 +61,10 @@ def test_sync_cleanup_swallows_runtime_error(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(asyncio, "run", _raising_run)
 
     # 不应抛出。
-    resources.sync_cleanup()
+    runtime.sync_cleanup()
 
     # 引用在 asyncio.run 前已清空。
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
     # asyncio.run 未真正执行，close 未被调用。
     assert client.closed is False
 
@@ -72,7 +72,7 @@ def test_sync_cleanup_swallows_runtime_error(monkeypatch: pytest.MonkeyPatch) ->
 def test_sync_cleanup_swallows_unexpected_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     """asyncio.run 抛非 RuntimeError 的意外异常时被记录并吞掉，清理路径不中断。"""
     client = _Closeable()
-    monkeypatch.setattr(resources, "_active_resource", _FakeResource(client, None))
+    monkeypatch.setattr(runtime, "_active_resource", _FakeResource(client, None))
 
     def _raising_run(coro: object) -> None:
         coro.close()  # type: ignore[attr-defined]
@@ -81,18 +81,18 @@ def test_sync_cleanup_swallows_unexpected_exception(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(asyncio, "run", _raising_run)
 
     # 不应抛出。
-    resources.sync_cleanup()
+    runtime.sync_cleanup()
 
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
 
 def test_sync_cleanup_noop_when_no_shared_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     """无活动资源时清理为 no-op，不抛出、asyncio.run 正常执行空关闭。"""
-    monkeypatch.setattr(resources, "_active_resource", None)
+    monkeypatch.setattr(runtime, "_active_resource", None)
 
-    resources.sync_cleanup()
+    runtime.sync_cleanup()
 
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
 
 def test_sync_cleanup_closes_retired_resources(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,9 +102,9 @@ def test_sync_cleanup_closes_retired_resources(monkeypatch: pytest.MonkeyPatch) 
     """
     retired_client_a, retired_manager_a = _Closeable(), _Closeable()
     retired_client_b, retired_manager_b = _Closeable(), _Closeable()
-    monkeypatch.setattr(resources, "_active_resource", None)
+    monkeypatch.setattr(runtime, "_active_resource", None)
     monkeypatch.setattr(
-        resources,
+        runtime,
         "_retired_resources",
         [
             _FakeResource(retired_client_a, retired_manager_a),
@@ -112,11 +112,11 @@ def test_sync_cleanup_closes_retired_resources(monkeypatch: pytest.MonkeyPatch) 
         ],
     )
 
-    resources.sync_cleanup()
+    runtime.sync_cleanup()
 
     assert retired_client_a.closed and retired_manager_a.closed
     assert retired_client_b.closed and retired_manager_b.closed
-    assert resources._retired_resources == []
+    assert runtime._retired_resources == []
 
 
 def test_sync_cleanup_closes_pool_when_close_body_interrupted(
@@ -125,7 +125,7 @@ def test_sync_cleanup_closes_pool_when_close_body_interrupted(
     """asyncio.run 关闭体内被二次 Ctrl+C 打断时，CPU 卸载池关闭仍不被跳过。"""
     from seedream_mcp.utils.core.executors import cpu_offload_executor
 
-    monkeypatch.setattr(resources, "_active_resource", None)
+    monkeypatch.setattr(runtime, "_active_resource", None)
 
     def _interrupting_run(coro: object) -> None:
         # 关闭未 await 的协程，避免 RuntimeWarning。
@@ -135,7 +135,7 @@ def test_sync_cleanup_closes_pool_when_close_body_interrupted(
     monkeypatch.setattr(asyncio, "run", _interrupting_run)
 
     executor_before = cpu_offload_executor()
-    resources.sync_cleanup()
+    runtime.sync_cleanup()
 
     # 未 patch 的真实 shutdown 已执行：池被关闭后按需重建为新实例；关闭重建池，
     # 不向同进程后续用例泄漏打开的执行器。
@@ -155,7 +155,7 @@ async def test_sync_cleanup_cancels_queued_cpu_offload_pool_work(
         run_in_cpu_pool,
     )
 
-    monkeypatch.setattr(resources, "_active_resource", None)
+    monkeypatch.setattr(runtime, "_active_resource", None)
 
     def _closing_run(coro: object) -> None:
         # 关闭未 await 的协程，避免 RuntimeWarning。
@@ -167,7 +167,7 @@ async def test_sync_cleanup_cancels_queued_cpu_offload_pool_work(
         await saturated.wait_queued()
         monkeypatch.setattr(asyncio, "run", _closing_run)
 
-        resources.sync_cleanup()
+        runtime.sync_cleanup()
 
         with pytest.raises(CpuOffloadPoolClosedError):
             await queued

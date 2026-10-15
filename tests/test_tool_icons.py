@@ -9,8 +9,8 @@ import xml.etree.ElementTree as ET
 import pytest
 
 import seedream_mcp.server  # noqa: F401  工具注册发生在 server 导入期
-from seedream_mcp._icons import TOOL_PNG_SIZE, tool_icon_png_src
-from seedream_mcp.resources import mcp
+from seedream_mcp.server._icons import TOOL_PNG_SIZE, tool_icon_png_src
+from seedream_mcp.server.runtime import mcp
 from seedream_mcp.utils.core.formats import infer_extension_from_bytes, parse_data_uri
 
 _EXPECTED_ICON_TOOLS = frozenset(
@@ -52,7 +52,7 @@ async def test_every_tool_has_png_and_svg_data_uri_icons() -> None:
 
 def test_icon_dicts_share_tool_key_set() -> None:
     """矢量与光栅两表键集一致，新增工具漏更任一格式即失败。"""
-    from seedream_mcp._icons import _TOOL_PNG_B64, _TOOL_SVGS
+    from seedream_mcp.server._icons import _TOOL_PNG_B64, _TOOL_SVGS
 
     assert set(_TOOL_SVGS) == set(_TOOL_PNG_B64) == set(_EXPECTED_ICON_TOOLS)
 

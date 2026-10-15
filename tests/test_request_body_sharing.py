@@ -15,7 +15,7 @@ import pytest
 from _cpu_offload_spy import CpuOffloadSpy
 
 from seedream_mcp.client import SeedreamClient
-from seedream_mcp.request_plan import SharedRequestPlan, shared_request_plan_scope
+from seedream_mcp.client.request_plan import SharedRequestPlan, shared_request_plan_scope
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import TextToImageInput
 from seedream_mcp.tools.impl.text_to_image import handle_text_to_image

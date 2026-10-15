@@ -19,11 +19,11 @@ from typing import Any
 import httpx
 import pytest
 
-import seedream_mcp.resources as resources
-import seedream_mcp.transport as transport_module
+import seedream_mcp.server.runtime as runtime
+import seedream_mcp.server.transport as transport_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.transport import _transport_security_for_host
+from seedream_mcp.server.transport import _transport_security_for_host
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 
 from _asgi_fakes import _LifespanManager, _assemble_streamable_http_app, build_transport_app
@@ -513,7 +513,7 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
         ) as client:
             server_info = client.server_info
             assert server_info is not None
-            assert server_info.version == resources.SERVER_VERSION
+            assert server_info.version == runtime.SERVER_VERSION
             tools = await client.list_tools()
             assert len(tools.tools) == 6
 

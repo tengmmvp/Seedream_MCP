@@ -17,7 +17,7 @@ from mcp.types import ReadResourceResult, TextResourceContents
 
 import seedream_mcp.utils.io.path as io_path_module
 
-import seedream_mcp.resources as resources
+import seedream_mcp.server.runtime as runtime
 import seedream_mcp.server as server
 
 from _roots_session_fakes import RootsListCallback
@@ -47,7 +47,7 @@ async def test_initialize_reports_project_version(
         assert server_info is not None
         assert server_info.name == server.SERVER_NAME
         assert server_info.version != ""
-        assert server_info.version == resources.SERVER_VERSION
+        assert server_info.version == runtime.SERVER_VERSION
 
 
 async def test_workspace_roots_resource_reads_over_wire_without_roots_callback(

@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-import seedream_mcp._config_sources as config_sources
+import seedream_mcp.config.sources as config_sources
 
 from _docker_uid import chown_owner_pair, useradd_line
 

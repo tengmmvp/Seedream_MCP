@@ -9,9 +9,9 @@ from __future__ import annotations
 import argparse
 from typing import Literal, cast
 
-from ._config_sources import _http_auth_token_invalid_reason
-from ._host_syntax import bind_host_invalid_reason
-from .config import (
+from ..config.sources import _http_auth_token_invalid_reason
+from ..config.host_syntax import bind_host_invalid_reason
+from ..config import (
     DEFAULT_HTTP_HOST,
     DEFAULT_HTTP_PORT,
     HTTP_AUTH_TOKEN_MIN_LENGTH,
@@ -19,9 +19,9 @@ from .config import (
     build_config_from_sources,
 )
 from .transport import is_loopback_bind_host
-from .utils.core.logs import LEGAL_LOG_LEVELS
-from .utils.model.capabilities import MODEL_ALIASES
-from .version import __version__
+from ..utils.core.logs import LEGAL_LOG_LEVELS
+from ..utils.model.capabilities import MODEL_ALIASES
+from ..version import __version__
 
 
 def build_config_from_args(args: argparse.Namespace) -> SeedreamConfig:

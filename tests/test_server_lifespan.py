@@ -12,7 +12,7 @@ from mcp.client import Client
 from mcp.server.mcpserver import Context
 
 from seedream_mcp import config as config_module
-import seedream_mcp.resources as resources
+import seedream_mcp.server.runtime as runtime
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import ResponseFormat, TextToImageInput
@@ -50,7 +50,7 @@ async def test_app_lifespan_stdio_cleans_up_on_teardown(
         assert state["client"] is not None
 
     # teardown 后活动资源已清理，执行 close 并置 None
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
 
 async def test_app_lifespan_cleans_up_on_exception_teardown(
@@ -68,7 +68,7 @@ async def test_app_lifespan_cleans_up_on_exception_teardown(
         async with server.app_lifespan(server.mcp):
             raise RuntimeError("boom")
 
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
 
 async def test_borrow_shared_handles_tracks_active_resource(
@@ -84,12 +84,12 @@ async def test_borrow_shared_handles_tracks_active_resource(
     monkeypatch.setattr(config_module, "_active_config", config)
 
     async with server.app_lifespan(server.mcp) as state:
-        borrowed = resources.borrow_shared_handles()
+        borrowed = runtime.borrow_shared_handles()
         assert borrowed is not None
         assert borrowed.client is state["client"]
         assert borrowed.download_manager is state["download_manager"]
 
-    assert resources.borrow_shared_handles() is None
+    assert runtime.borrow_shared_handles() is None
 
 
 def test_get_lifespan_resource_swallows_value_error_from_request_context() -> None:
@@ -153,7 +153,7 @@ async def test_cleanup_shared_resources_drains_background_cleanup_first(
     assert events[0] == "drain", "drain 须先于全部共享资源 close 执行"
     assert "drain" not in events[1:]
     assert set(events[1:]) == {"close:client", "close:download_manager"}
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
 
 async def test_cleanup_shared_resources_unconditional_closes_inflight(
@@ -181,15 +181,15 @@ async def test_cleanup_shared_resources_unconditional_closes_inflight(
 
     active = _FakeResource(refcount=2)
     retired = _FakeResource(refcount=1)
-    monkeypatch.setattr(resources, "_active_resource", active)
-    monkeypatch.setattr(resources, "_retired_resources", [retired])
+    monkeypatch.setattr(runtime, "_active_resource", active)
+    monkeypatch.setattr(runtime, "_retired_resources", [retired])
 
-    await resources._cleanup_shared_resources(idle_only=False)
+    await runtime._cleanup_shared_resources(idle_only=False)
 
     assert active.client.closed and active.download_manager.closed
     assert retired.client.closed and retired.download_manager.closed
-    assert resources._active_resource is None
-    assert resources._retired_resources == []
+    assert runtime._active_resource is None
+    assert runtime._retired_resources == []
 
 
 async def test_app_lifespan_teardown_keeps_cpu_offload_executor(
@@ -221,13 +221,13 @@ async def test_cleanup_shared_resources_unconditional_cancels_queued_pool_work(
         run_in_cpu_pool,
     )
 
-    monkeypatch.setattr(resources, "_active_resource", None)
+    monkeypatch.setattr(runtime, "_active_resource", None)
 
     async with saturate_cpu_offload_pool() as saturated:
         queued = asyncio.ensure_future(run_in_cpu_pool(lambda: "queued"))
         await saturated.wait_queued()
 
-        await resources._cleanup_shared_resources(idle_only=False)
+        await runtime._cleanup_shared_resources(idle_only=False)
 
         with pytest.raises(CpuOffloadPoolClosedError):
             await queued
@@ -248,12 +248,12 @@ async def test_cleanup_shared_resources_idle_abort_keeps_resource_and_pool(
         refcount = 1
 
     inflight: Any = _InflightResource()
-    monkeypatch.setattr(resources, "_active_resource", inflight)
+    monkeypatch.setattr(runtime, "_active_resource", inflight)
     executor = cpu_offload_executor()
 
-    await resources._cleanup_shared_resources(idle_only=True)
+    await runtime._cleanup_shared_resources(idle_only=True)
 
-    assert resources._active_resource is inflight
+    assert runtime._active_resource is inflight
     assert cpu_offload_executor() is executor
 
 
@@ -279,10 +279,10 @@ async def test_build_active_resource_closes_client_when_manager_fails(
 
     config = SeedreamConfig(api_key="test_key")
     with pytest.raises(RuntimeError, match="manager init failed"):
-        await resources._build_active_resource(config)
+        await runtime._build_active_resource(config)
 
     assert close_calls == ["client"]
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
 
 
 def test_config_from_context_prefers_lifespan_config() -> None:
@@ -382,14 +382,14 @@ async def test_app_lifespan_rebuild_survives_concurrent_teardown_in_retire_windo
     monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="key_b"))
     retire_entered = asyncio.Event()
     retire_release = asyncio.Event()
-    real_retire = resources._retire_resource
+    real_retire = runtime._retire_resource
 
     async def gated_retire(resource: Any) -> None:
         retire_entered.set()
         await retire_release.wait()
         await real_retire(resource)
 
-    monkeypatch.setattr(resources, "_retire_resource", gated_retire)
+    monkeypatch.setattr(runtime, "_retire_resource", gated_retire)
 
     second_lifespan = server.app_lifespan(server.mcp)
     entering = asyncio.ensure_future(second_lifespan.__aenter__())
@@ -401,14 +401,14 @@ async def test_app_lifespan_rebuild_survives_concurrent_teardown_in_retire_windo
     retire_release.set()
     state = await entering
 
-    active = resources._active_resource
+    active = runtime._active_resource
     assert active is not None
     assert state["client"] is active.client
     assert state["client"]._client is not None
     assert active.refcount == 1
 
     await second_lifespan.__aexit__(None, None, None)
-    assert resources._active_resource is None
+    assert runtime._active_resource is None
     assert state["client"]._client is None
 
 
@@ -459,7 +459,7 @@ def test_reset_lifespan_state_clears_global_config() -> None:
     from seedream_mcp import config as current_config_module
 
     current_config_module._global_config = SeedreamConfig(api_key="stale_key")
-    resources._reset_lifespan_state()
+    runtime._reset_lifespan_state()
     assert current_config_module._global_config is None
 
 
@@ -658,7 +658,7 @@ def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
 
     assert not hasattr(results_module, "_last_sanitized_images")
     assert not hasattr(results_module, "reset_last_sanitized_images")
-    resources._reset_lifespan_state()
+    runtime._reset_lifespan_state()
 
 
 # ==================== 平铺 inputSchema 收紧版本守护 ====================
@@ -694,12 +694,12 @@ def test_rebind_request_state_security_syncs_declared_audience() -> None:
 
     boundary = next(
         middleware
-        for middleware in resources.mcp.middleware
+        for middleware in runtime.mcp.middleware
         if isinstance(middleware, RequestStateBoundary)
     )
     policy = RequestStateSecurity(keys=(b"\x01" * 32,), audience="seedream-rebind")
 
-    assert resources.rebind_request_state_security(policy) is True
+    assert runtime.rebind_request_state_security(policy) is True
 
     assert boundary._security is policy
     assert boundary._audience == "seedream-rebind"
@@ -711,7 +711,7 @@ def test_rebind_request_state_security_syncs_declared_audience() -> None:
 async def test_initialize_reports_server_title_and_description(
     reset_lifespan_singletons: None,
 ) -> None:
-    """initialize 握手的 serverInfo 携带 resources 常量声明的 title 与 description。
+    """initialize 握手的 serverInfo 携带 runtime 常量声明的 title 与 description。
 
     重构移除 MCPServer(title=, description=) 传参时 initialize 结果静默丢失元数据，
     客户端展示名与简介随之退化。
@@ -719,5 +719,5 @@ async def test_initialize_reports_server_title_and_description(
     async with Client(server.mcp, mode="legacy") as client:
         server_info = client.server_info
         assert server_info is not None
-        assert server_info.title == resources.SERVER_TITLE
-        assert server_info.description == resources.SERVER_DESCRIPTION
+        assert server_info.title == runtime.SERVER_TITLE
+        assert server_info.description == runtime.SERVER_DESCRIPTION

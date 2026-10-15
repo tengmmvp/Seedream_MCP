@@ -13,11 +13,11 @@ import httpx
 import pytest
 from starlette.types import Receive, Send
 
-import seedream_mcp.bootstrap as bootstrap_module
-import seedream_mcp.cli as cli
+import seedream_mcp.server.bootstrap as bootstrap_module
+import seedream_mcp.server.cli as cli
 import seedream_mcp.server as server
-import seedream_mcp.transport as transport_module
-from seedream_mcp._host_syntax import bind_host_invalid_reason
+import seedream_mcp.server.transport as transport_module
+from seedream_mcp.config.host_syntax import bind_host_invalid_reason
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.model.capabilities import MODEL_ALIASES
 
@@ -85,7 +85,7 @@ def test_tls12_ssl_context_factory_enforces_minimum_version() -> None:
     """TLS 上下文工厂复用 uvicorn 默认构造并强制最低 TLS 1.2，拒绝旧版本协商。"""
     import ssl
 
-    from seedream_mcp.transport import _tls12_ssl_context_factory
+    from seedream_mcp.server.transport import _tls12_ssl_context_factory
 
     base = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     captured: dict[str, object] = {}

@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from _log_fakes import RecordingLogger, capture_loguru_messages
 from _os_fakes import _install_counting_realpath, _install_failing_resolve_for
 from _progress_fakes import RecordingProgressContext
-from seedream_mcp.resources import mcp
+from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools import BrowseImagesInput
 from seedream_mcp.tools.core import browse as browse_core_module
 from seedream_mcp.tools.impl import browse_images as browse_images_module

@@ -55,7 +55,7 @@ _cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
 def reset_cleanup_state() -> None:
-    """重置清理节流的模块级状态，供 resources 复位协议与测试隔离调用。
+    """重置清理节流的模块级状态，供 runtime 复位协议与测试隔离调用。
 
     asyncio.Lock 首次 acquire 后绑定当时的事件循环，pytest-asyncio 每用例新建
     循环，跨循环复用旧锁会在 acquire 时报错，故重建 _cleanup_lock 并清空状态。

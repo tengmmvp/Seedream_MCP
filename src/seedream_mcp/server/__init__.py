@@ -2,8 +2,8 @@
 
 注册文生图、图生图、多图融合、组图生成、图片浏览、模型信息查询六种 MCP 工具，
 风格预设 Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源。MCPServer
-实例与共享资源生命周期由 resources 模块持有，本模块导入 mcp 完成注册并再导出
-resources 的公共符号；启动编排经 bootstrap 再导出 cli_main 维持 entry point
+实例与共享资源生命周期由 runtime 模块持有，本模块导入 mcp 完成注册并再导出
+runtime 的公共符号；启动编排经 bootstrap 再导出 cli_main 维持 entry point
 与 python -m 入口。
 
 outputSchema 声明契约：六个工具函数的返回类型注解为
@@ -48,12 +48,12 @@ from mcp.types import (
 from pydantic import BaseModel, Field, ValidationError
 
 from ._icons import TOOL_PNG_SIZE, tool_icon_png_src, tool_icon_src
-from .config import (
+from ..config import (
     LIFESPAN_KEY_CONFIG,
     SeedreamConfig,
     get_active_config,
 )
-from .tools import (
+from ..tools import (
     BrowseImagesInput,
     ImageToImageInput,
     MultiImageFusionInput,
@@ -66,9 +66,9 @@ from .tools import (
     run_sequential_generation,
     run_text_to_image,
 )
-from .tools.core.common import get_lifespan_resource
-from .tools.core.model_info import build_model_info_description
-from .tools.core.schemas import (
+from ..tools.core.common import get_lifespan_resource
+from ..tools.core.model_info import build_model_info_description
+from ..tools.core.schemas import (
     AUTO_SAVE_DESCRIPTION,
     BACKGROUND_DESCRIPTION,
     BackgroundMode,
@@ -125,7 +125,7 @@ from .tools.core.schemas import (
     TOOLS_MAX_ITEMS,
     WATERMARK_DESCRIPTION,
 )
-from .tools.core.outputs import (
+from ..tools.core.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
     GetModelInfoStructuredOutput,
@@ -133,15 +133,15 @@ from .tools.core.outputs import (
     build_error_structured,
     build_structured_tool_result,
 )
-from .utils.core.errors import SeedreamConfigError
-from .utils.core.logs import get_logger
-from .utils.core.validators import (
+from ..utils.core.errors import SeedreamConfigError
+from ..utils.core.logs import get_logger
+from ..utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
 )
-from .utils.io.files import open_packaged_read
-from .utils.io.path import get_workspace_roots
-from .utils.io.roots import (
+from ..utils.io.files import open_packaged_read
+from ..utils.io.path import get_workspace_roots
+from ..utils.io.roots import (
     modern_revision_negotiated,
     read_session_roots_or_raise,
     read_session_roots_result,
@@ -152,15 +152,15 @@ from .utils.io.roots import (
     session_or_none,
     workspace_roots_scope_from_result,
 )
-from .utils.model.capabilities import (
+from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     model_payloads,
 )
 
-# resources 符号重导出：mcp 与 SERVER_NAME/SERVER_VERSION 为本模块直接使用，
+# runtime 符号重导出：mcp 与 SERVER_NAME/SERVER_VERSION 为本模块直接使用，
 # app_lifespan 随 mcp 一并再导出供调用方经 server 入口访问；as 同名形态为
 # PEP 484 显式再导出。
-from .resources import (  # noqa: F401
+from .runtime import (  # noqa: F401
     SERVER_NAME as SERVER_NAME,
     SERVER_VERSION as SERVER_VERSION,
     app_lifespan as app_lifespan,
@@ -168,7 +168,7 @@ from .resources import (  # noqa: F401
 )
 
 # 启动编排拆至 bootstrap，再导出 cli_main 维持 entry point 与 python -m 入口。
-from .bootstrap import cli_main as cli_main
+from .bootstrap import cli_main as cli_main  # noqa: F401
 
 # ==================== 工具注解常量 ====================
 
@@ -872,7 +872,7 @@ async def models_info_resource() -> str:
 # ~/.claude/skills/ 手动安装，或经 skill:// 资源供客户端自动发现。渐进式披露三层：
 # SKILL.md 条目常驻 resources/list，正文在读取时加载，references 模板资源按需读取。
 _SKILL_NAME = "seedream-image-generation"
-_SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+_SKILLS_DIR = Path(__file__).resolve().parents[1] / "skills"
 _SKILL_MANIFEST_PATH = _SKILLS_DIR / _SKILL_NAME / "SKILL.md"
 _SKILL_REFERENCES_DIR = _SKILLS_DIR / _SKILL_NAME / "references"
 
@@ -1018,9 +1018,3 @@ def style_oil_painting_prompt(
 ) -> str:
     """生成油画风格图片的提示词模板，可作为文生图 prompt 使用。"""
     return _build_style_prompt(subject, "油画风格，厚重笔触，丰富层次，经典光影，艺术质感")
-
-
-# ==================== 模块执行入口 ====================
-
-if __name__ == "__main__":
-    raise SystemExit(cli_main())

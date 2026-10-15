@@ -20,7 +20,7 @@ import pytest
 from _cpu_offload_spy import CpuOffloadSpy
 from _subprocess_helpers import _run_in_subprocess
 from _web_fixtures import web_asgi_client, write_workspace_config
-from seedream_mcp.transport import _build_streamable_app
+from seedream_mcp.server.transport import _build_streamable_app
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.sanitizers import _CONTAINER_REPR_DEPTH_LIMIT
 from seedream_mcp.webapp import _responses

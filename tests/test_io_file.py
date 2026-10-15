@@ -537,7 +537,7 @@ def test_open_packaged_read_resolve_cache_cleared_by_lifespan_reset(
     """
     import errno
 
-    from seedream_mcp import resources
+    from seedream_mcp.server import runtime
 
     link = tmp_path / "packaged_reset_link.bin"
     target = tmp_path / "packaged_reset_target.bin"
@@ -565,7 +565,7 @@ def test_open_packaged_read_resolve_cache_cleared_by_lifespan_reset(
     assert io_file._packaged_resolve_cache
     assert resolves == [str(link)]
 
-    resources._reset_lifespan_state()
+    runtime._reset_lifespan_state()
 
     assert not io_file._packaged_resolve_cache
     second = open_packaged_read(link)

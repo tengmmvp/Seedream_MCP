@@ -58,7 +58,7 @@ def test_register_web_routes_registers_expected_paths(clean_web_routes: None) ->
     项目内 custom_route 注册仅来自 Web 域，注册表内容恰为全部 Web 端点路径；
     兜底 catch-all 由 mount_web_static 直接追加到 app 路由表，不进入本断言集合。
     """
-    from seedream_mcp.resources import mcp
+    from seedream_mcp.server.runtime import mcp
     from seedream_mcp.webapp import register_web_routes
 
     register_web_routes()
@@ -69,7 +69,7 @@ def test_register_web_routes_registers_expected_paths(clean_web_routes: None) ->
 
 def test_register_web_routes_is_idempotent(clean_web_routes: None) -> None:
     """重复调用注册不产生重复路由。"""
-    from seedream_mcp.resources import mcp
+    from seedream_mcp.server.runtime import mcp
     from seedream_mcp.webapp import register_web_routes
 
     register_web_routes()
@@ -83,12 +83,12 @@ def test_register_web_routes_reregisters_for_recreated_server(
     clean_web_routes: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """宿主重造 MCPServer 实例后守卫按实例身份区分，新实例的注册不被误跳过。"""
-    import seedream_mcp.resources as resources_module
+    import seedream_mcp.server.runtime as runtime_module
     from seedream_mcp.webapp import register_web_routes
 
     register_web_routes()
     fresh = _FakeServer()
-    monkeypatch.setattr(resources_module, "mcp", fresh)
+    monkeypatch.setattr(runtime_module, "mcp", fresh)
 
     register_web_routes()
 
@@ -100,11 +100,11 @@ def test_register_web_routes_guard_hit_rechecks_route_table(
     clean_web_routes: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """守卫命中仍复查路径交集：路由表被外部清空后重复调用补注册缺失项。"""
-    import seedream_mcp.resources as resources_module
+    import seedream_mcp.server.runtime as runtime_module
     from seedream_mcp.webapp import register_web_routes
 
     fresh = _FakeServer()
-    monkeypatch.setattr(resources_module, "mcp", fresh)
+    monkeypatch.setattr(runtime_module, "mcp", fresh)
     register_web_routes()
     fresh._custom_starlette_routes.clear()
 
@@ -118,11 +118,11 @@ def test_register_web_routes_guard_falls_back_to_identity_without_route_table(
     clean_web_routes: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """私有路由表缺失时守卫退回纯身份判定：二次调用不再注册任何路由。"""
-    import seedream_mcp.resources as resources_module
+    import seedream_mcp.server.runtime as runtime_module
     from seedream_mcp.webapp import register_web_routes
 
     fresh = _RouteCountingServer()
-    monkeypatch.setattr(resources_module, "mcp", fresh)
+    monkeypatch.setattr(runtime_module, "mcp", fresh)
 
     register_web_routes()
     first_count = len(fresh.custom_route_calls)

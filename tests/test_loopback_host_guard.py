@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 from starlette.types import Message
 
-import seedream_mcp.transport as transport_module
-from seedream_mcp.transport import _LoopbackHostGuardMiddleware
+import seedream_mcp.server.transport as transport_module
+from seedream_mcp.server.transport import _LoopbackHostGuardMiddleware
 
 
 async def _noop_receive() -> dict[str, Any]:

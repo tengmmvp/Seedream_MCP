@@ -13,7 +13,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer, RequestStateSecurity
 from mcp.server.request_state import RequestStateBoundary
 
-import seedream_mcp.resources as resources_module
+import seedream_mcp.server.runtime as runtime_module
 from seedream_mcp import config as config_module
 
 
@@ -149,9 +149,9 @@ def test_build_request_state_security_returns_none_without_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """未配置密钥时不构造策略，MCPServer 保持 SDK 默认临时密钥。"""
-    monkeypatch.setattr(resources_module, "active_request_state_keys", lambda: None)
+    monkeypatch.setattr(runtime_module, "active_request_state_keys", lambda: None)
 
-    assert resources_module._build_request_state_security() is None
+    assert runtime_module._build_request_state_security() is None
 
 
 def test_build_request_state_security_builds_policy_from_key_ring(
@@ -159,9 +159,9 @@ def test_build_request_state_security_builds_policy_from_key_ring(
 ) -> None:
     """配置密钥环后构造 RequestStateSecurity，密钥经 config 校验满足强度下限。"""
     keys = (b"\x02" * 32, b"\x03" * 32)
-    monkeypatch.setattr(resources_module, "active_request_state_keys", lambda: keys)
+    monkeypatch.setattr(runtime_module, "active_request_state_keys", lambda: keys)
 
-    security = resources_module._build_request_state_security()
+    security = runtime_module._build_request_state_security()
 
     assert isinstance(security, RequestStateSecurity)
 
@@ -171,16 +171,16 @@ def test_create_mcp_server_constructs_in_both_key_forms(
     monkeypatch: pytest.MonkeyPatch, keys: tuple[bytes, ...] | None
 ) -> None:
     """密钥环两种形态下 MCPServer 构造成功，None 形态保持 SDK 默认。"""
-    monkeypatch.setattr(resources_module, "active_request_state_keys", lambda: keys)
+    monkeypatch.setattr(runtime_module, "active_request_state_keys", lambda: keys)
 
-    server = resources_module._create_mcp_server()
+    server = runtime_module._create_mcp_server()
 
-    assert server.name == resources_module.SERVER_NAME
+    assert server.name == runtime_module.SERVER_NAME
 
 
 def test_static_list_cache_hints_cover_only_static_faces() -> None:
     """缓存提示仅覆盖五个静态面并声明 public 作用域，resources/read 不在内。"""
-    hints = resources_module._STATIC_LIST_CACHE_HINTS
+    hints = runtime_module._STATIC_LIST_CACHE_HINTS
 
     assert set(hints) == {
         "tools/list",
@@ -189,13 +189,13 @@ def test_static_list_cache_hints_cover_only_static_faces() -> None:
         "resources/templates/list",
         "server/discover",
     }
-    assert all(hint.ttl_ms == resources_module._STATIC_LIST_CACHE_TTL_MS for hint in hints.values())
+    assert all(hint.ttl_ms == runtime_module._STATIC_LIST_CACHE_TTL_MS for hint in hints.values())
     assert all(hint.scope == "public" for hint in hints.values())
 
 
 def _singleton_boundary() -> RequestStateBoundary:
     """返回单例 middleware 中的 requestState boundary，供重绑用例定位。"""
-    boundary = resources_module.locate_request_state_boundary()
+    boundary = runtime_module.locate_request_state_boundary()
     assert boundary is not None
     return boundary
 
@@ -208,7 +208,7 @@ def test_rebind_request_state_security_updates_boundary(
     boundary = _singleton_boundary()
     before = boundary._security
 
-    assert resources_module.rebind_request_state_security(keys) is True
+    assert runtime_module.rebind_request_state_security(keys) is True
 
     after = boundary._security
     assert after is not before
@@ -224,9 +224,9 @@ def test_rebind_request_state_security_keeps_default_audience_fallback() -> None
     """
     boundary = _singleton_boundary()
 
-    assert resources_module.rebind_request_state_security((b"\x03" * 32,)) is True
+    assert runtime_module.rebind_request_state_security((b"\x03" * 32,)) is True
 
-    assert boundary._audience == resources_module.SERVER_NAME
+    assert boundary._audience == runtime_module.SERVER_NAME
 
 
 def test_rebind_request_state_security_skips_when_boundary_missing(
@@ -236,15 +236,15 @@ def test_rebind_request_state_security_skips_when_boundary_missing(
 
     配置了密钥环的场景额外向 stderr 输出多副本解封退化告警，未配置时不输出。
     """
-    monkeypatch.setattr(resources_module.mcp._lowlevel_server, "middleware", [], raising=False)
+    monkeypatch.setattr(runtime_module.mcp._lowlevel_server, "middleware", [], raising=False)
 
-    assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
+    assert runtime_module.rebind_request_state_security((b"\x01" * 32,)) is False
 
     stderr = capsys.readouterr().err
     assert "多副本部署的 requestState 解封将失败" in stderr
     assert "进程临时密钥" in stderr
 
-    assert resources_module.rebind_request_state_security(None) is False
+    assert runtime_module.rebind_request_state_security(None) is False
     assert capsys.readouterr().err == ""
 
 
@@ -255,7 +255,7 @@ def test_rebind_request_state_security_survives_missing_public_attribute(
     # middleware 定义于 SDK 基类，删基类属性使子类单例的继承链上缺席。
     monkeypatch.delattr(MCPServer, "middleware")
 
-    assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
+    assert runtime_module.rebind_request_state_security((b"\x01" * 32,)) is False
 
     assert "退化为进程临时密钥" in capsys.readouterr().err
 
@@ -268,16 +268,16 @@ def test_rebind_failure_silent_when_import_time_ring_matches_source(
     系统环境变量来源的密钥环在导入期已进入单例，重绑失败不改变解封能力，
     告警会误导部署者以为已退化。
     """
-    monkeypatch.setattr(resources_module, "_IMPORT_TIME_REQUEST_STATE_KEYS", (b"\x01" * 32,))
-    monkeypatch.setattr(resources_module.mcp._lowlevel_server, "middleware", [], raising=False)
+    monkeypatch.setattr(runtime_module, "_IMPORT_TIME_REQUEST_STATE_KEYS", (b"\x01" * 32,))
+    monkeypatch.setattr(runtime_module.mcp._lowlevel_server, "middleware", [], raising=False)
 
-    assert resources_module.rebind_request_state_security((b"\x01" * 32,)) is False
+    assert runtime_module.rebind_request_state_security((b"\x01" * 32,)) is False
 
     assert capsys.readouterr().err == ""
 
 
 def test_conftest_session_manager_private_path_still_exists() -> None:
     """conftest 会话隔离探测的私有路径存在，SDK 升级改名时先转红而非静默 no-op。"""
-    lowlevel_server = getattr(resources_module.mcp, "_lowlevel_server", None)
+    lowlevel_server = getattr(runtime_module.mcp, "_lowlevel_server", None)
     assert lowlevel_server is not None
     assert hasattr(lowlevel_server, "_session_manager")

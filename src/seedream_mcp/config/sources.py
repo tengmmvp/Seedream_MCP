@@ -9,11 +9,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 from dotenv import dotenv_values
 
-from .utils.core.errors import SeedreamConfigError, has_message_value
-from .utils.core.logs import EarlyMessageBuffer
-from .utils.core.sanitizers import is_printable_ascii
-from .utils.core.validators import INT_TEXT_PATTERN, parse_bool
-from .utils.model.capabilities import MODEL_ALIASES
+from ..utils.core.errors import SeedreamConfigError, has_message_value
+from ..utils.core.logs import EarlyMessageBuffer
+from ..utils.core.sanitizers import is_printable_ascii
+from ..utils.core.validators import INT_TEXT_PATTERN, parse_bool
+from ..utils.model.capabilities import MODEL_ALIASES
 
 # 构建期告警先收集、经 config.drain_pending_build_warnings 后置输出：配置构建早于
 # setup_logging，即时输出会随日志系统重建被移出文件通道。元素为 (级别, 消息)，
@@ -21,8 +21,8 @@ from .utils.model.capabilities import MODEL_ALIASES
 _BUILD_WARNINGS = EarlyMessageBuffer()
 
 # 项目根 .env 层仅源码检出部署存在，pip 安装部署该层空转，CWD .env 层仍生效。
-# src 布局下仓库根在 src/seedream_mcp 之上两级。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# src 布局下仓库根在 config 包之上三级。
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 # requestState 密钥环单钥的字节数下限，与 SDK RequestStateSecurity 的密钥强度要求一致。

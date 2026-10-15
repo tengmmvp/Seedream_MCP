@@ -29,7 +29,7 @@ from _readme_helpers import (
     _read_readme,
     _row_cells,
 )
-from seedream_mcp.cli import build_arg_parser
+from seedream_mcp.server.cli import build_arg_parser
 from seedream_mcp.server import mcp
 from seedream_mcp.tools.core.schemas import (
     BrowseImagesInput,
@@ -100,8 +100,8 @@ _CAPABILITY_EXEMPT_ROWS = {
 
 
 def _server_source() -> str:
-    """读取 server.py 源文本，注册名单以源码装饰器为单一依据不做导入。"""
-    server_path = Path(seedream_mcp.__file__).resolve().parent / "server.py"
+    """读取 server/__init__.py 源文本，注册名单以源码装饰器为单一依据不做导入。"""
+    server_path = Path(seedream_mcp.__file__).resolve().parent / "server" / "__init__.py"
     return server_path.read_text(encoding="utf-8")
 
 

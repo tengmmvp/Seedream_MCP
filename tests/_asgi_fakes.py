@@ -15,7 +15,7 @@ from typing import Any, MutableMapping
 import seedream_mcp.server as server
 from mcp.types import CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.transport import (
+from seedream_mcp.server.transport import (
     MCP_ENDPOINT_PATH,
     _attach_streamable_http_middleware,
     _register_well_known_mcp_route,

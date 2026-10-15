@@ -15,7 +15,7 @@ import httpx
 import pytest
 from PIL import Image
 
-from seedream_mcp._client_http import (
+from seedream_mcp.client._http import (
     _ERROR_JSON_PARSE_LIMIT,
     _first_error_detail,
     _has_valid_image_items,
@@ -2028,7 +2028,7 @@ def test_has_valid_image_items_consumes_payload_predicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """有效图片判定的载荷判据消费 io_stream 单源谓词，不在 _client_http 内重造。"""
-    import seedream_mcp._client_http as client_http_module
+    import seedream_mcp.client._http as client_http_module
 
     monkeypatch.setattr(client_http_module, "item_has_image_payload", lambda item: False)
 

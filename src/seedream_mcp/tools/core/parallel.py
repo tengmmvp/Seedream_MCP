@@ -14,7 +14,7 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ...client import SeedreamClient
-from ...request_plan import shared_request_plan_scope
+from ...client.request_plan import shared_request_plan_scope
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
 from ...utils.io.download import DownloadManager
 from ._pipeline import (
