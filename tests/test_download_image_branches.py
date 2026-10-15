@@ -30,7 +30,6 @@ from seedream_mcp.utils.io.io_download import (
     DownloadManager,
     RetryableDownloadError,
     _ResumeState,
-    _int_or_none,
     _parse_content_range,
     _resume_validator,
 )
@@ -47,6 +46,7 @@ from _download_fakes import (
     _png_success_response,
     _single_trip_to_temp,
 )
+from _http_int_cases import _MALFORMED_STR_FORMS
 from _os_fakes import _install_close_counter, _install_replace_fail_once
 
 # ==================== download_image 重试分类 ====================
@@ -571,50 +571,19 @@ async def test_download_response_rejects_negative_content_length(tmp_path: Path)
     assert not list(tmp_path.glob("*.part"))
 
 
-# HTTP 整数头的非法形态：裸 int() 可解析但按 RFC 9110 语法非法、Unicode 数字
-# 绕过 isdigit，或空串一类平凡畸形；Content-Range 与 Content-Length 共用同一拒绝口径。
-_MALFORMED_HTTP_INTEGERS = [
-    pytest.param("+5", id="plus-sign"),
-    pytest.param(" 5", id="leading-space"),
-    pytest.param("1_0", id="underscore"),
-    pytest.param("", id="empty"),
-    pytest.param("１２３", id="fullwidth"),
-    pytest.param("١٢٣", id="arabic-indic"),
-]
-
-
-def test_int_or_none_accepts_pure_ascii_digits() -> None:
-    """纯 ASCII 十进制数字正常解析，前导零形态同样受理。"""
-    assert _int_or_none("0") == 0
-    assert _int_or_none("007") == 7
-    assert _int_or_none("123456789") == 123456789
-
-
-@pytest.mark.parametrize("value", _MALFORMED_HTTP_INTEGERS)
-def test_int_or_none_rejects_non_ascii_digit_forms(value: str) -> None:
-    """非纯 ASCII 十进制数字形态一律归 None，不经裸 int() 宽松解析。"""
-    assert _int_or_none(value) is None
-
-
-def test_int_or_none_normalizes_overlong_digit_run() -> None:
-    """超长数字串超出 int 字串转换上限，按畸形归一 None 不抛 ValueError。"""
-    assert _int_or_none("9" * 4301) is None
-
-
-@pytest.mark.parametrize("value", _MALFORMED_HTTP_INTEGERS)
+@pytest.mark.parametrize("value", _MALFORMED_STR_FORMS)
 def test_parse_content_range_rejects_loose_integer_forms(value: str) -> None:
     """畸形分量归 None 走既有畸形分支，不得解析出错误锚定的偏移或总长。"""
-    total_malformed = _parse_content_range(f"bytes 0-199/{value}")
-    end_malformed = _parse_content_range(f"bytes 0-{value}/1000")
-
-    assert total_malformed.total is None
-    assert end_malformed.end is None
+    # 总长居串尾：尾随空白被顶层 strip 吞并，不作为畸形到达严格解析。
+    if not value[-1:].isspace():
+        assert _parse_content_range(f"bytes 0-199/{value}").total is None
+    assert _parse_content_range(f"bytes 0-{value}/1000").end is None
     # 起点分量的前置空白已被单元分隔的 split 规范化吞并，其余形态原样到达严格解析。
     if not value[:1].isspace():
         assert _parse_content_range(f"bytes {value}-199/1000").start is None
 
 
-@pytest.mark.parametrize("value", _MALFORMED_HTTP_INTEGERS)
+@pytest.mark.parametrize("value", _MALFORMED_STR_FORMS)
 async def test_download_rejects_malformed_content_length(tmp_path: Path, value: str) -> None:
     """携带畸形 content-length 的响应按终态拒绝，不进入文件写入阶段。"""
     manager = DownloadManager()
@@ -1366,6 +1335,33 @@ async def test_download_caller_range_206_with_partial_state_not_restarted(
     assert not list(tmp_path.glob("*.part"))
 
 
+async def test_download_cross_origin_redirect_after_range_206_is_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """跨源跳剥离续传头后出站无 Range：他源 206 不入续传语义，落非 200 终态而非拼接异源字节。"""
+    manager = DownloadManager()
+    session = _FakeSession(
+        [
+            _interrupted_first_attempt(),
+            _FakeResponse(302, {"location": "https://cdn.example.net/img.png"}),
+            _resumed_response(_RESUME_SPLIT),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    with pytest.raises(DownloadError, match="HTTP错误") as excinfo:
+        await manager.download_image("https://example.com/img.png", save_path)
+
+    assert not isinstance(excinfo.value, RetryableDownloadError)
+    # 重试趟携 Range 续传，跨源跳重建的安全头不再含 Range。
+    assert "Range" in session.captured_headers[1]
+    assert "Range" not in session.captured_headers[2]
+    assert session._idx == 3
+    assert not save_path.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
 # ==================== 出站请求头钉死 Accept-Encoding: identity ====================
 
 
@@ -1837,7 +1833,8 @@ async def test_download_torn_tail_truncate_locked_once_retries_and_lands(
     # 持锁趟文件未动、状态保留：第三趟仍自偏移 100 续传而非全量重下。
     assert session.captured_headers[1]["Range"] == f"bytes={_RESUME_SPLIT}-"
     assert session.captured_headers[2]["Range"] == f"bytes={_RESUME_SPLIT}-"
-    assert truncate_calls["count"] == 2
+    # 持锁趟一次、第三趟流写前截断与终局截齐各一次。
+    assert truncate_calls["count"] == 3
 
 
 async def test_download_decode_read_locked_once_retries_and_lands(
@@ -2351,6 +2348,117 @@ async def test_download_resume_416_unknown_total_declares_completion(
     assert not list(tmp_path.glob("*.part"))
 
 
+async def test_download_416_completion_truncates_torn_tail_before_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """撕裂尾遇 416 完成态捷径：终局落盘前截齐，成品恰为已确认偏移。
+
+    部分写后持锁失败可致磁盘超前已确认偏移而偏移不推进；完成态捷径不经
+    流写前截断，截齐收在终局单点。
+    """
+    torn_bytes = 30
+    write_calls = {"count": 0}
+    real_write_all = io_download_module._write_all
+
+    def _torn_once_write_all(fd: int, data: bytearray) -> None:
+        write_calls["count"] += 1
+        if write_calls["count"] == 2:
+            # 第二趟收尾批量写中途持锁：前 torn_bytes 字节已落盘而偏移不推进。
+            os.write(fd, data[:torn_bytes])
+            raise PermissionError(errno.EACCES, "simulated sharing violation")
+        real_write_all(fd, data)
+
+    monkeypatch.setattr(io_download_module, "_write_all", _torn_once_write_all)
+    manager = DownloadManager()
+    remaining = len(_RESUME_BODY) - _RESUME_SPLIT
+    session = _FakeSession(
+        [
+            _interrupted_unknown_total_attempt(),
+            _unknown_total_resume_response(_RESUME_SPLIT, remaining),
+            _unsatisfiable_416_response(_RESUME_SPLIT),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    result = await manager.download_image("https://example.com/img.png", save_path)
+
+    assert result["success"] is True
+    assert result["attempts"] == 3
+    assert result["file_size"] == _RESUME_SPLIT
+    # 撕裂尾在终局截齐：成品内容与磁盘大小均恰为已确认偏移，不超前撕裂字节。
+    assert save_path.read_bytes() == _RESUME_BODY[:_RESUME_SPLIT]
+    assert save_path.stat().st_size == _RESUME_SPLIT
+    assert session.captured_headers[2]["Range"] == f"bytes={_RESUME_SPLIT}-"
+    assert write_calls["count"] == 2
+    assert not list(tmp_path.glob("*.part"))
+
+
+async def test_download_finalize_truncate_cancel_disposes_reopened_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
+) -> None:
+    """重开后的终局截齐在途取消：fd 归 resume.fd 善后，.part 清理不留残件。
+
+    终局截齐持锁失败先关 fd 置空 resume.fd，下一趟重开 fd 后取消恰落在
+    截齐在途窗口，重开即持有化使 dispose 兜底关闭，句柄不随取消泄漏。
+    """
+    real_ftruncate = os.ftruncate
+    truncate_calls = {"count": 0}
+    reopened_fd: list[int] = []
+    closed_fds: set[int] = set()
+    real_close = os.close
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _recording_close(fd: int) -> None:
+        closed_fds.add(fd)
+        real_close(fd)
+
+    def _staged_ftruncate(fd: int, length: int) -> None:
+        truncate_calls["count"] += 1
+        if truncate_calls["count"] == 2:
+            # 终局截齐持锁：关 fd 置空 resume.fd，逼下一趟重开临时文件。
+            raise PermissionError(errno.EACCES, "simulated sharing violation")
+        if truncate_calls["count"] == 3:
+            reopened_fd.append(fd)
+            entered.set()
+            release.wait(timeout=5)
+        real_ftruncate(fd, length)
+
+    monkeypatch.setattr(os, "ftruncate", _staged_ftruncate)
+    monkeypatch.setattr(os, "close", _recording_close)
+    manager = DownloadManager()
+    remaining = len(_RESUME_BODY) - _RESUME_SPLIT
+    session = _FakeSession(
+        [
+            _interrupted_unknown_total_attempt(),
+            _unknown_total_resume_response(_RESUME_SPLIT, remaining),
+            _unsatisfiable_416_response(_RESUME_SPLIT),
+        ]
+    )
+    _patch_download_network(monkeypatch, manager, session)
+
+    save_path = tmp_path / "out.png"
+    task = asyncio.create_task(manager.download_image("https://example.com/img.png", save_path))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    # 让取消先注入截齐等待（落定等待吸收取消），再放行线程 op 落定，
+    # 取消才落在截齐在途窗口而非下游落盘。
+    for _ in range(10):
+        if task.done():
+            break
+        await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert truncate_calls["count"] == 3
+    # 重开即持有化：取消善后经 resume.fd 引用关闭重开 fd，句柄不随取消泄漏。
+    assert reopened_fd[0] in closed_fds
+    assert not list(tmp_path.glob("*.part"))
+    assert not save_path.exists()
+
+
 @pytest.mark.parametrize(
     "build_unsatisfiable",
     [
@@ -2808,7 +2916,7 @@ async def test_download_finalize_persistent_permission_lock_exhausts_retries(
 async def test_download_flush_partial_write_resubmits_remainder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """os.write 部分写入：按实际写入量切片缓冲后重提交，落盘内容与结果字节数一致。"""
+    """os.write 部分写入：写全循环按已写量续写剩余字节，落盘内容与结果字节数一致。"""
     body = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4
     response = _FakeResponse(
         status=200,
@@ -2862,7 +2970,7 @@ def _install_recording_truncate_align(monkeypatch: pytest.MonkeyPatch, calls: li
 async def test_download_fresh_temp_file_skips_noop_truncate_seek(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """首趟新建空临时文件：截断为空操作，不派发执行器往返。"""
+    """首趟新建空临时文件：流写前截断为空操作跳过，不派发执行器往返。"""
     calls: list[str] = []
     _install_recording_truncate_align(monkeypatch, calls)
     manager = DownloadManager()
@@ -2874,13 +2982,14 @@ async def test_download_fresh_temp_file_skips_noop_truncate_seek(
 
     assert result["success"] is True
     assert save_path.read_bytes() == _PNG_BYTES
-    assert "ftruncate" not in calls
+    # 新建空文件跳过流写前空操作截断：唯一 ftruncate 为终局截齐。
+    assert calls.count("ftruncate") == 1
 
 
-async def test_download_resume_trip_truncates_once_and_reuses_temp_file(
+async def test_download_resume_trip_truncates_and_reuses_temp_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_sleep: None
 ) -> None:
-    """重试趟 fd 已持有：截断撕裂尾部恰一次，临时文件全程仅创建一次。"""
+    """重试趟 fd 已持有：流写前截断与终局截齐各恰一次，临时文件全程仅创建一次。"""
     calls: list[str] = []
     _install_recording_truncate_align(monkeypatch, calls)
     real_ensure_file = _ResumeState.ensure_file
@@ -2900,8 +3009,9 @@ async def test_download_resume_trip_truncates_once_and_reuses_temp_file(
 
     assert result["success"] is True
     assert save_path.read_bytes() == _RESUME_BODY
-    # 首趟新建空文件跳过空操作，仅续传趟截断一次；两批写入各定位一次，截断回调不再定位。
-    assert calls.count("ftruncate") == 1
+    # 首趟新建空文件跳过空操作，续传趟流写前截断与终局截齐各一次；两批写入各定位
+    # 一次，截断回调不再定位。
+    assert calls.count("ftruncate") == 2
     assert calls.count("lseek") == 2
     # 续传趟在事件循环内直接取已持有 fd，不再派发 ensure_file 线程往返。
     assert ensure_calls["count"] == 1

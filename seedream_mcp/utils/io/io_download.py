@@ -46,6 +46,7 @@ from ..core.formats import (
     infer_extension_from_bytes,
     is_known_image_bytes,
 )
+from ..core.http_int import strict_http_int
 from ..core.logs import get_logger
 from ..core.loop_bound import LoopKeyedInflight
 from ..core.settle import await_settled_op
@@ -151,6 +152,18 @@ def _inflate_part_file_capped(path: Path, wbits: int, max_output: int) -> bytear
 _PERMANENT_FS_ERRNOS = frozenset({errno.EROFS, errno.ENOSPC, errno.EDQUOT})
 
 
+def _write_all(fd: int, data: bytes | bytearray) -> None:
+    """把 data 全量写入 fd：os.write 契约允许部分写入，memoryview 切片免复制续写至写尽。"""
+    view = memoryview(data)
+    written = 0
+    while written < len(view):
+        count = os.write(fd, view[written:])
+        if count == 0:
+            # 零进展写入若重试即空转：上抛 OSError，失败分级归调用方站点。
+            raise OSError("写入零字节")
+        written += count
+
+
 def _rewrite_part_file(path: Path, data: bytes | bytearray) -> None:
     """以 no-follow 写打开续传临时文件并把 data 全量重写，供解码回退接管内容。
 
@@ -163,16 +176,8 @@ def _rewrite_part_file(path: Path, data: bytes | bytearray) -> None:
     try:
         # 截断失败文件未动：原样上抛，持锁由调用方转可重试，其余走重试循环 errno 分类。
         os.ftruncate(fd, 0)
-        # memoryview 切片免复制，避免大缓冲部分写入时逐次整段拷贝。
-        view = memoryview(data)
-        written = 0
         try:
-            while written < len(view):
-                count = os.write(fd, view[written:])
-                if count == 0:
-                    # 零进展写入若重试即空转：与其余写段失败同包装为可重试错误。
-                    raise OSError("写入零字节")
-                written += count
+            _write_all(fd, data)
         except Exception as exc:
             if isinstance(exc, OSError) and exc.errno in _PERMANENT_FS_ERRNOS:
                 # 永久文件系统错误重试不可恢复：原样上抛走终态分类，不烧重试预算。
@@ -182,17 +187,16 @@ def _rewrite_part_file(path: Path, data: bytes | bytearray) -> None:
         _close_fd_quietly(fd)
 
 
-def _append_part_bytes(path: Path, offset: int, data: bytearray) -> int:
-    """以 no-follow 纪律打开续传临时文件，按偏移写入 data 并返回写入字节数。
+def _append_part_bytes(path: Path, offset: int, data: bytearray) -> None:
+    """以 no-follow 纪律打开续传临时文件，按偏移把 data 全量写入。
 
     fd 的开关收在函数内部，落定等待可取有界档：重复取消放行后线程仍自闭 fd，
-    不与调用方关闭的续传 fd 竞争同号；os.write 的计数契约使部分写入可观测，
-    由调用方切片重提交。
+    不与调用方关闭的续传 fd 竞争同号。
     """
     fd = open_no_follow_write_fd(path)
     try:
         os.lseek(fd, offset, os.SEEK_SET)
-        return os.write(fd, data)
+        _write_all(fd, data)
     finally:
         _close_fd_quietly(fd)
 
@@ -444,22 +448,6 @@ def _resume_validator(response: "aiohttp.ClientResponse") -> str | None:
     return None
 
 
-def _int_or_none(text: str) -> int | None:
-    """HTTP 整数头的严格解析：仅受理 ASCII 十进制数字，其余形态归一为 None。
-
-    裸 int() 会接受 '+5'、' 5'、'1_0' 与 Unicode 数字等非法形态；isascii 前置
-    防全角与阿拉伯-印度数字经 isdigit 绕过。Content-Range 三分量与 Content-Length
-    共用同一接受口径。
-    """
-    if text.isascii() and text.isdigit():
-        try:
-            return int(text)
-        except ValueError:
-            # 超长数字串超出 int 字串转换上限，按畸形归一 None。
-            return None
-    return None
-
-
 class _ContentRange(NamedTuple):
     """Content-Range 单点解析结果载体：三分量各位置可缺，unsatisfied 表未满足形态。
 
@@ -490,19 +478,14 @@ def _parse_content_range(content_range: str | None) -> _ContentRange:
     range_text, _, total_text = parts[1].partition("/")
     start_text, _, end_text = range_text.partition("-")
     return _ContentRange(
-        _int_or_none(start_text),
-        _int_or_none(end_text),
-        _int_or_none(total_text),
+        strict_http_int(start_text),
+        strict_http_int(end_text),
+        strict_http_int(total_text),
     )
 
 
 # 出站 Range/If-Range 恒由续传状态派生，调用方同名头在入口剥离。
 _RESERVED_RANGE_HEADERS = frozenset({"range", "if-range"})
-
-
-def _headers_request_range(headers: dict[str, str]) -> bool:
-    """判断请求头是否携带 Range：206/416 仅在出站请求带 Range 时并入续传语义。"""
-    return any(key.lower() == "range" for key in headers)
 
 
 class _ResumeState:
@@ -1130,7 +1113,7 @@ class DownloadManager:
         content_length = response.headers.get("content-length")
         cl_value: int | None = None
         if content_length is not None:
-            cl_value = _int_or_none(content_length)
+            cl_value = strict_http_int(content_length)
             if cl_value is None:
                 # 携带而非缺失的畸形整数按终态拒绝，宽松形态不得错误锚定总量。
                 raise DownloadError(f"非法 content-length: {content_length!r}")
@@ -1205,23 +1188,18 @@ class DownloadManager:
         write_buffer = bytearray()
 
         async def _flush_received() -> None:
-            while write_buffer:
-                try:
-                    # 有界档：写入线程自持 fd 开关，重复取消放行不与 fd 关闭竞争。
-                    written = await await_settled_op(
-                        asyncio.to_thread(
-                            _append_part_bytes, part_path, resume.offset, write_buffer
-                        )
-                    )
-                except PermissionError as exc:
-                    # 杀软瞬时持锁归可重试，已确认偏移保留续传。
-                    _raise_transient_file_lock("落盘写入", exc)
-                if written == 0:
-                    # 零进展写入若重试即空转：按可重试错误上抛，文件与 offset 保持同步。
-                    raise OSError("写入零字节")
-                # 部分写入按实际写入量切片，未写部分留待重提交。
-                resume.offset += written
-                del write_buffer[:written]
+            if not write_buffer:
+                return
+            try:
+                # 有界档：写入线程自持 fd 开关，重复取消放行不与 fd 关闭竞争。
+                await await_settled_op(
+                    asyncio.to_thread(_append_part_bytes, part_path, resume.offset, write_buffer)
+                )
+            except PermissionError as exc:
+                # 杀软瞬时持锁归可重试，已确认偏移保留续传。
+                _raise_transient_file_lock("落盘写入", exc)
+            resume.offset += len(write_buffer)
+            write_buffer.clear()
 
         async def _flush_best_effort() -> None:
             # 失败路径尽力落盘已缓冲字节：二次失败不掩盖原始异常。
@@ -1312,18 +1290,19 @@ class DownloadManager:
         """完成态落盘终局：签名复核、路径修正与原子替换，返回结果字典。
 
         首趟流正常收尾与完成态重试共用本终局。字节头非受支持图片时先经
-        _decode_compressed_resume 解码回退复核，解不出维持签名拒绝终态。上一趟
-        终局可能在替换前已关闭 fd，此处经 no-follow 纪律在工作线程重开临时文件
-        补做 fsync 与替换；重开发现临时文件已不存在时作废已确认字节，退回全量
-        重下自愈；重开与终局替换的瞬时持锁均保留完成态与数据，下一趟重试重走
-        终局。
+        _decode_compressed_resume 解码回退复核，解不出维持签名拒绝终态。替换前把
+        临时文件截齐至已确认偏移：完成态捷径不经流写前的撕裂尾修复，部分写残留
+        在此单点截除，正常完成为幂等空操作。上一趟终局可能在替换前已关闭 fd，
+        此处经 no-follow 纪律在工作线程重开临时文件补做 fsync 与替换；重开发现
+        临时文件已不存在时作废已确认字节，退回全量重下自愈；重开、终局截齐与
+        终局替换的瞬时持锁均保留完成态与数据，下一趟重试重走终局。
 
         Raises:
             DownloadError: 字节签名校验失败（含解码回退不受理）或续传临时文件缺失。
             RetryableDownloadError: 重开的临时文件已不存在（作废状态退回全量重下），
-                重开、终局替换、解码回退读取与写回打开、截断段遭瞬时持锁（保留
-                状态，下一趟重试），或解码回退写回自截断起失败（作废状态退回
-                全量重下）。
+                重开、终局截齐、终局替换、解码回退读取与写回打开、截断段遭瞬时
+                持锁（保留状态，下一趟重试），或解码回退写回自截断起失败（作废
+                状态退回全量重下）。
         """
         path = resume.path
         if path is None:
@@ -1356,6 +1335,24 @@ class DownloadManager:
             except PermissionError as exc:
                 # .part 仍在但被杀毒等瞬时持锁：保留完成态与数据，下一趟直接重试重开。
                 _raise_transient_file_lock("续传临时文件重开", exc)
+            # 重开即持有化：截齐在途取消经 resume.fd 引用善后，防本地 fd 泄漏。
+            resume.fd = fd
+        try:
+            # 撕裂尾终局截齐：部分写后可重试失败可致磁盘超前已确认偏移，完成态
+            # 捷径不经流写前截断；disk==offset 时为幂等空操作。
+            await await_settled_op(
+                asyncio.to_thread(os.ftruncate, fd, resume.offset), absorb_all_cancels=True
+            )
+        except PermissionError as exc:
+            # 截齐遭杀软瞬时持锁：关 fd 防泄漏，保留完成态与数据，下一趟重走终局。
+            _close_fd_quietly(fd)
+            resume.fd = None
+            _raise_transient_file_lock("终局截齐", exc)
+        except OSError:
+            # 其余 OSError 关 fd 后原样上抛，交重试循环按 errno 归类。
+            _close_fd_quietly(fd)
+            resume.fd = None
+            raise
         try:
             await finalize_atomic_replace(fd, path, final_save_path, fsync=fsync)
         except PermissionError as exc:
@@ -1464,6 +1461,8 @@ class DownloadManager:
         redirect_count = 0
         while True:
             await self._validate_url_for_request(current_url)
+            # 出站是否携带 Range 逐跳从将发送头判定：跨源剥离续传头后自动失效。
+            range_requested = any(key.lower() == "range" for key in current_headers)
             async with session.get(
                 current_url,
                 headers=current_headers,
@@ -1483,7 +1482,7 @@ class DownloadManager:
                     # 跳向不同源时从调用方原始头重建安全头集合；同源跳转保持当前头不变，
                     # 一旦剥离后续跳回原源也不恢复定制头。
                     if _url_origin(next_url) != _url_origin(current_url):
-                        if _headers_request_range(current_headers):
+                        if range_requested:
                             # 跨源剥离续传头后出站无 Range：作废已存前缀按非续传续行，
                             # 他源 206 恰合偏移也不得与异源已存字节拼接。
                             resume.restart()
@@ -1493,9 +1492,7 @@ class DownloadManager:
                     current_url = next_url
                     continue
 
-                classification = await _classify_range_response(
-                    response, resume, _headers_request_range(current_headers)
-                )
+                classification = await _classify_range_response(response, resume, range_requested)
                 if classification.completed:
                     # 416 声明总长恰达已确认偏移：声明总长自描述符写回续传状态，
                     # 保住终局可重试失败后的完成态捷径；完整数据已确认，
@@ -1574,8 +1571,7 @@ class DownloadManager:
                 )
 
                 session = await self._ensure_session()
-                resume_headers = resume.request_headers()
-                attempt_headers = {**base_headers, **resume_headers}
+                attempt_headers = {**base_headers, **resume.request_headers()}
                 return await self._attempt_download(
                     session,
                     url,
