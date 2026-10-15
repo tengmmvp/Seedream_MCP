@@ -7,7 +7,30 @@ cli 的参数期早拒共用同一语法与判定，形态演化在此单点维�
 
 from __future__ import annotations
 
+import ipaddress
+
 from ..utils.core.sanitizers import is_printable_ascii
+
+
+def _ipv6_host_literal_forms(literal: str) -> tuple[tuple[str, ...], str] | None:
+    """合法 IPv6 字面量返回可匹配真实 Host/Origin 头的形态元组与建议写法，非法返回 None。
+
+    真实头只携带压缩规范形，IPv4 映射地址的客户端另发 dotted 形；compressed 对
+    映射地址的输出随 Python 版本在 dotted 与 hex 展开形间翻转，两形均并入。
+    """
+    try:
+        address = ipaddress.IPv6Address(literal)
+    except ValueError:
+        return None
+    ipv4_mapped = address.ipv4_mapped
+    accepted = [address.compressed]
+    suggested = address.compressed
+    if ipv4_mapped is not None:
+        accepted.append(f"::ffff:{ipv4_mapped}")
+        mapped_int = int(ipv4_mapped)
+        accepted.append(f"::ffff:{mapped_int >> 16:x}:{mapped_int & 0xFFFF:x}")
+        suggested = f"::ffff:{ipv4_mapped}"
+    return tuple(accepted), suggested
 
 
 def _bracket_ipv6_literal(entry: str) -> str | None:
@@ -67,3 +90,27 @@ def bind_host_invalid_reason(host: str) -> str | None:
             " 白名单编码失败或恒不匹配，表现为全站 500 或 421 而非启动期报错"
         )
     return None
+
+
+# RFC 3986 reg-name 的非字母数字字符：unreserved 符号与 sub-delims；冒号容纳
+# 方括号 IPv6 字面量，百分号按 pct-encoded 三元组在 _is_valid_url_hostname 判定。
+_REG_NAME_SYMBOLS = frozenset("-._~!$&'()*+,;=")
+_PCT_ENCODED_HEXDIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_valid_url_hostname(hostname: str) -> bool:
+    """主机名仅含 RFC 3986 reg-name 字符（冒号容纳 IPv6 字面量）且百分号为合法 pct-encoded 三元组时为 True。"""
+    index = 0
+    while index < len(hostname):
+        char = hostname[index]
+        if char == "%":
+            # RFC 3986 的百分号仅以 pct-encoded 三元组出现，裸 % 或尾缀非两位十六进制为乱码。
+            encoded = hostname[index + 1 : index + 3]
+            if len(encoded) < 2 or any(c not in _PCT_ENCODED_HEXDIGITS for c in encoded):
+                return False
+            index += 3
+            continue
+        if not (char.isascii() and (char.isalnum() or char in _REG_NAME_SYMBOLS or char == ":")):
+            return False
+        index += 1
+    return True

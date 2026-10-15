@@ -2,7 +2,7 @@
 
 import pytest
 
-from seedream_mcp import config as config_module
+from seedream_mcp.config import _builder as config_module
 from seedream_mcp.config import SeedreamConfig, get_active_config
 
 

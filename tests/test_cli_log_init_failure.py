@@ -16,7 +16,7 @@ import pytest
 
 import seedream_mcp.server.runtime as runtime_module
 from seedream_mcp.server import bootstrap as bootstrap_module
-from seedream_mcp import config as config_module
+from seedream_mcp.config import _builder as config_module
 
 from _log_fakes import preserved_loguru_globals
 

@@ -14,7 +14,7 @@ import httpx
 import pytest
 from mcp.types import TextContent
 
-import seedream_mcp.client as client_module
+import seedream_mcp.client._api as client_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.context import GenerationExecutionContext

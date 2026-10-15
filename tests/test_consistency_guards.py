@@ -55,7 +55,7 @@ _GENERATION_TOOL_METADATA = (
 # 环境键读取豁免只收真实旁路：动态键站点解不出静态文本，收录模块相对路径加调用原文。
 _ENV_KEY_READ_EXEMPTIONS = frozenset(
     {
-        "config/__init__.py:os.getenv(env_name)",
+        "config/_builder.py:os.getenv(env_name)",
         "config/sources.py:os.getenv(env_key)",
         "utils/io/path.py:os.getenv(env_var)",
     }

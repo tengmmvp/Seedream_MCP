@@ -25,7 +25,7 @@ from seedream_mcp.utils.core.errors import (
     resolve_error_profile,
 )
 
-import seedream_mcp.client as client_module
+import seedream_mcp.client._api as client_module
 
 
 def _build_config() -> SeedreamConfig:

@@ -15,7 +15,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
-import seedream_mcp.server as server
+import seedream_mcp.server._registration as server
 from seedream_mcp.config import SeedreamConfig, set_active_config
 from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools.core.schemas import (

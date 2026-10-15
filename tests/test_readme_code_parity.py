@@ -3,7 +3,7 @@
 三语 README 之间的互等由 test_docs_consistency 锁定，本文件补上「文档对代码」
 这一侧：工具参数 bullet 清单与 tools.core.schemas 输入模型的字段集全等，模型
 能力差异表的档位/倍数/布尔/参考图上限与 MODEL_CAPABILITIES 派生值一致，风格
-预设表与 server.py 的 @mcp.prompt 注册名单一致，启动参数旗标与 cli.py 解析器、
+预设表与 server/_registration.py 的 @mcp.prompt 注册名单一致，启动参数旗标与 cli.py 解析器、
 可用资源 URI 与服务器注册集合、日期目录示例路径与 io_storage 布局亦逐项对账。
 以 README.md（简中版）为基准，代码新增参数或改能力而文档未同步时在此变红，
 不再依赖三语互对的假绿。
@@ -41,7 +41,7 @@ from seedream_mcp.tools.core.schemas import (
 from seedream_mcp.utils.io.storage import FileManager
 from seedream_mcp.utils.model.capabilities import MODEL_CAPABILITIES
 
-# 工具名到输入模型的映射，镜像 server.py 平铺签名组装各工具时使用的输入模型。
+# 工具名到输入模型的映射，镜像 server/_registration.py 平铺签名组装各工具时使用的输入模型。
 _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
     "text_to_image": TextToImageInput,
     "image_to_image": ImageToImageInput,
@@ -55,7 +55,7 @@ _TOOL_INPUT_MODELS: dict[str, type[BaseModel]] = {
 # 工具小节标题形态：<summary><b>1. <code>tool_name</code></b> — …</summary>
 _TOOL_SUMMARY_PATTERN = re.compile(r"<b>\d+\.\s*<code>([a-z_]+)</code></b>")
 
-# server.py 注册装饰器形态，工具与风格预设的注册名单都取源码装饰器为单一依据。
+# server/_registration.py 注册装饰器形态，工具与风格预设的注册名单都取源码装饰器为单一依据。
 _TOOL_DECORATOR_PATTERN = re.compile(r'@mcp\.tool\(\s*name="([a-z_]+)"')
 _PROMPT_DECORATOR_PATTERN = re.compile(r'@mcp\.prompt\(\s*name="([^"]+)"')
 
@@ -100,8 +100,8 @@ _CAPABILITY_EXEMPT_ROWS = {
 
 
 def _server_source() -> str:
-    """读取 server/__init__.py 源文本，注册名单以源码装饰器为单一依据不做导入。"""
-    server_path = Path(seedream_mcp.__file__).resolve().parent / "server" / "__init__.py"
+    """读取 server/_registration.py 源文本，注册名单以源码装饰器为单一依据不做导入。"""
+    server_path = Path(seedream_mcp.__file__).resolve().parent / "server" / "_registration.py"
     return server_path.read_text(encoding="utf-8")
 
 
@@ -227,10 +227,10 @@ def test_tool_param_bullets_exactly_match_input_model_fields() -> None:
 
 
 def test_readme_tool_sections_match_registered_tools() -> None:
-    """README 工具小节集合与 server.py 的 @mcp.tool 注册名单一致。"""
+    """README 工具小节集合与 server/_registration.py 的 @mcp.tool 注册名单一致。"""
     registered = set(_TOOL_DECORATOR_PATTERN.findall(_server_source()))
     assert set(_tool_param_bullets(BASE_README)) == registered, (
-        f"README 工具小节与 server.py 注册工具漂移:\n"
+        f"README 工具小节与 server/_registration.py 注册工具漂移:\n"
         f"  仅文档有: {sorted(set(_tool_param_bullets(BASE_README)) - registered)}\n"
         f"  仅注册有: {sorted(registered - set(_tool_param_bullets(BASE_README)))}"
     )
@@ -312,11 +312,11 @@ def test_capability_table_rows_are_triaged() -> None:
 
 
 def test_style_preset_table_matches_registered_prompts() -> None:
-    """风格预设表首列 Prompt 名称与 server.py 的 @mcp.prompt 注册名单一致。"""
+    """风格预设表首列 Prompt 名称与 server/_registration.py 的 @mcp.prompt 注册名单一致。"""
     registered = set(_PROMPT_DECORATOR_PATTERN.findall(_server_source()))
     documented = _style_prompt_names(BASE_README)
     assert documented == registered, (
-        f"风格预设表与 server.py 注册 Prompt 漂移:\n"
+        f"风格预设表与 server/_registration.py 注册 Prompt 漂移:\n"
         f"  仅文档有: {sorted(documented - registered)}\n"
         f"  仅注册有: {sorted(registered - documented)}"
     )

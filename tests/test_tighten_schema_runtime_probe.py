@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-import seedream_mcp.server as server
+import seedream_mcp.server._registration as server
 
 from _log_fakes import RecordingLogger
 

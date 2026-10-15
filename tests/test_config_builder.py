@@ -11,18 +11,18 @@ from _log_fakes import capture_loguru_messages
 from conftest import _scrub_host_prefixed_env
 from seedream_mcp.config.sources import _FIELD_ENV_MAP, _FIELD_PICKERS
 from seedream_mcp.config import (
-    _BUILD_WARNINGS,
     SeedreamConfig,
-    _active_pool_concurrency,
-    _first_invalid_request_state_key_message,
     build_config_from_sources,
     drain_pending_build_warnings,
 )
+from seedream_mcp.config._builder import _active_pool_concurrency
+from seedream_mcp.config._model import _first_invalid_request_state_key_message
+from seedream_mcp.config.sources import _BUILD_WARNINGS
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 
 # monkeypatch 与 conftest 的 autouse 隔离改写模块全局，须以模块对象为 target。
 import seedream_mcp.config.sources as config_sources
-import seedream_mcp.config as config_module
+import seedream_mcp.config._builder as config_module
 
 
 def _write_env_file(path: Path, content: str) -> None:

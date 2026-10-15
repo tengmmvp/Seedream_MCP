@@ -3,7 +3,7 @@
 impl 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装，经直接子模块路径
 导入消费，不在包门面重导出；runners 的 ``run_*`` 适配器作为 composition root
 注入工作区边界后委托 handler；core.schemas 的输入模型是参数校验的单一来源，
-inputSchema 由 server.py 的平铺签名镜像生成。依赖方向为 core <- impl <- runners。
+inputSchema 由 server/_registration.py 的平铺签名镜像生成。依赖方向为 core <- impl <- runners。
 """
 
 from __future__ import annotations

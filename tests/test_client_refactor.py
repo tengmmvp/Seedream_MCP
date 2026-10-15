@@ -1467,7 +1467,7 @@ async def test_empty_api_key_maps_to_config_error_profile() -> None:
 
 def _install_validate_common_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """在 client 模块命名空间替换 validate_common_generation_params 为计数替身，返回记录调用次数的字典。"""
-    import seedream_mcp.client as client_module
+    import seedream_mcp.client._api as client_module
     from seedream_mcp.utils.core.validators import validate_common_generation_params
 
     calls = {"validate": 0}

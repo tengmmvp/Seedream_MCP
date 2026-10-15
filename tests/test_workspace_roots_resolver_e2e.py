@@ -16,7 +16,7 @@ from mcp.types import CallToolResult, ListRootsResult, TextContent
 
 import seedream_mcp.server as server
 import seedream_mcp.utils.io.roots as io_roots_module
-from seedream_mcp import config as config_module
+from seedream_mcp.config import _builder as config_module
 from seedream_mcp.config import SeedreamConfig
 
 from _roots_session_fakes import RootsListCallback

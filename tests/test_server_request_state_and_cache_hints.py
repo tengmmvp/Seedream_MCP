@@ -14,7 +14,8 @@ from mcp.server.mcpserver import MCPServer, RequestStateSecurity
 from mcp.server.request_state import RequestStateBoundary
 
 import seedream_mcp.server.runtime as runtime_module
-from seedream_mcp import config as config_module
+from seedream_mcp.config import _builder as config_module
+from seedream_mcp.config import sources as config_sources
 
 
 def test_active_request_state_keys_reads_active_config(
@@ -61,10 +62,10 @@ def test_active_request_state_keys_import_time_reads_env_only(
 
     key_hex = "ab" * 32
     monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", key_hex)
-    before_warnings = config_module._BUILD_WARNINGS.snapshot()
+    before_warnings = config_sources._BUILD_WARNINGS.snapshot()
     assert config_module.active_request_state_keys() == (bytes.fromhex(key_hex),)
     # 导入期取值不写构建告警缓冲，drain 输出与启动期声明的配置来源一致。
-    assert config_module._BUILD_WARNINGS.snapshot() == before_warnings
+    assert config_sources._BUILD_WARNINGS.snapshot() == before_warnings
 
 
 def test_active_request_state_keys_import_time_bad_hex_falls_back_to_none(

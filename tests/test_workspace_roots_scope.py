@@ -150,7 +150,7 @@ def test_resolve_env_workspace_root_reads_global_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """活动配置就绪时，resolve_env_workspace_root 读 config.workspace_root。"""
-    from seedream_mcp import config as config_module
+    from seedream_mcp.config import _builder as config_module
     from seedream_mcp.utils.io.path import resolve_env_workspace_root
 
     monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from seedream_mcp.config import sources as config_sources
-from seedream_mcp import config as config_module
+from seedream_mcp.config import _builder as config_module
 from seedream_mcp.config.sources import _read_env_values
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.utils.core.errors import SeedreamConfigError

@@ -354,7 +354,7 @@ def test_pool_depth_follows_generate_and_prepare_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """池深经注册提供者随两类活动并发推导并封顶，低并发由下限兜底，已建池不重建。"""
-    from seedream_mcp import config as config_module
+    from seedream_mcp.config import _builder as config_module
     from seedream_mcp.config import SeedreamConfig
 
     def _rebuild_depth(generate_concurrency: int, image_prepare_concurrency: int = 5) -> int:
@@ -386,7 +386,7 @@ def test_pool_depth_follows_generate_and_prepare_concurrency(
 
 def test_pool_depth_unregistered_provider_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """提供者未注册时不读活动配置，按默认并发回退推导，池照常可用。"""
-    from seedream_mcp import config as config_module
+    from seedream_mcp.config import _builder as config_module
     from seedream_mcp.config import SeedreamConfig
     from seedream_mcp.utils.core import executors as executors_module
 
@@ -404,7 +404,7 @@ def test_pool_depth_unregistered_provider_falls_back(monkeypatch: pytest.MonkeyP
 
 def test_pool_depth_falls_back_when_config_build_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """活动配置不可构建时按默认并发回退推导，池可用性不随配置错误退化。"""
-    from seedream_mcp import config as config_module
+    from seedream_mcp.config import _builder as config_module
     from seedream_mcp.config import SeedreamConfig
     from seedream_mcp.utils.core.errors import SeedreamConfigError
 

@@ -11,9 +11,10 @@ import pytest
 from mcp.client import Client
 from mcp.server.mcpserver import Context
 
-from seedream_mcp import config as config_module
+from seedream_mcp.config import _builder as config_module
 import seedream_mcp.server.runtime as runtime
 import seedream_mcp.server as server
+import seedream_mcp.server._registration as registration_module
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.tools.core.schemas import ResponseFormat, TextToImageInput
 
@@ -295,7 +296,7 @@ def test_config_from_context_prefers_lifespan_config() -> None:
     class _FakeCtx:
         request_context = _FakeRequestContext()
 
-    result = server._config_from_context(_FakeCtx())  # type: ignore[arg-type]
+    result = registration_module._config_from_context(_FakeCtx())  # type: ignore[arg-type]
     assert result is config
 
 
@@ -304,7 +305,7 @@ def test_config_from_context_falls_back_when_state_not_dict(
 ) -> None:
     """lifespan 状态非 dict 时回退活动配置。"""
     fallback = SeedreamConfig(api_key="fallback_key")
-    monkeypatch.setattr(server, "get_active_config", lambda: fallback)
+    monkeypatch.setattr(registration_module, "get_active_config", lambda: fallback)
 
     class _FakeRequestContext:
         lifespan_context = "not a dict"
@@ -312,7 +313,7 @@ def test_config_from_context_falls_back_when_state_not_dict(
     class _FakeCtx:
         request_context = _FakeRequestContext()
 
-    result = server._config_from_context(_FakeCtx())  # type: ignore[arg-type]
+    result = registration_module._config_from_context(_FakeCtx())  # type: ignore[arg-type]
     assert result is fallback
 
 
@@ -456,7 +457,7 @@ def test_reset_lifespan_state_clears_global_config() -> None:
     set_active_config(None) 只清活动配置，全局懒加载缓存须经复位清单清理。复位与
     断言经函数内 import 取 sys.modules 当前模块对象，与延迟消费方同目标。
     """
-    from seedream_mcp import config as current_config_module
+    from seedream_mcp.config import _builder as current_config_module
 
     current_config_module._global_config = SeedreamConfig(api_key="stale_key")
     runtime._reset_lifespan_state()

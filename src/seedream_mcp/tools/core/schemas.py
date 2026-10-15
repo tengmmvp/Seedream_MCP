@@ -1,6 +1,6 @@
 """Seedream MCP 工具输入模型。
 
-本模块是工具参数校验的单一来源；inputSchema 由 server.py 的平铺签名生成，平铺签名
+本模块是工具参数校验的单一来源；inputSchema 由 server/_registration.py 的平铺签名生成，平铺签名
 镜像本模块的字段定义，等价性由 test_tool_parameter_order 锁定。
 通用字段抽到 ``_*Input`` 基类，按需多重继承组合为各工具的最终输入模型。
 """
@@ -32,7 +32,7 @@ from ...utils.core.validators import (
 )
 
 # ==================== 平铺签名共享常量 ====================
-# 以下约束与描述常量是双源镜像的单一来源，本模块的字段定义与 server.py 平铺签名
+# 以下约束与描述常量是双源镜像的单一来源，本模块的字段定义与 server/_registration.py 平铺签名
 # 同处引用，两侧等价性由 test_tool_parameter_order 锁定。
 
 # prompt 长度界限为四个生成工具共享的产品决策，上限仅拦截异常超长输入。
@@ -258,7 +258,7 @@ class GenerationTool(BaseModel):
 class _PromptAndOptimizeInput(BaseModel):
     """提示词与提示词优化参数。"""
 
-    # prompt 在基类声明以锚定字段顺序：模型字段顺序是 server.py 平铺签名的镜像来源，
+    # prompt 在基类声明以锚定字段顺序：模型字段顺序是 server/_registration.py 平铺签名的镜像来源，
     # prompt 须居首；图文生图子类覆盖为 str | None 以支持图层拆分场景缺省。
     prompt: str = Field(
         ...,
@@ -382,7 +382,7 @@ class _SequentialMaxImagesInput(BaseModel):
     """组图最大生成数量参数。"""
 
     # default 仅为声明占位，未显式传入时由 validate_total_image_limit 按参考图数量
-    # 推导为 15 减参考图数；server.py 平铺签名声明 default: null，经
+    # 推导为 15 减参考图数；server/_registration.py 平铺签名声明 default: null，经
     # _filter_unset_params 剔 None 与 validator 覆盖缺省值，两处字面不一、行为
     # 等价，互为镜像。
     max_images: int = Field(
@@ -624,7 +624,7 @@ class SequentialGenerationInput(
 class BrowseImagesInput(BaseModel):
     """本地图片浏览：浏览工作目录中的图片文件，便于选择参考图或查看已生成内容。
 
-    默认值以 ClassVar 声明为单一来源，server.py 平铺签名与本类字段同处引用。
+    默认值以 ClassVar 声明为单一来源，server/_registration.py 平铺签名与本类字段同处引用。
     """
 
     DEFAULT_RECURSIVE: ClassVar[bool] = True

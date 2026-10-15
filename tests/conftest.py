@@ -71,12 +71,12 @@ async def _lifespan_state_guard(
     """
     import seedream_mcp.server.runtime as runtime
     import seedream_mcp.server as server
-    from seedream_mcp import config as config_module
+    from seedream_mcp.config import _builder as config_module
 
     def _clear_session_manager() -> None:
         """清空 SDK 会话管理器引用，私有路径缺失时告警并跳过，不阻断测试。
 
-        探测形态与 server.py 的 _tighten_flat_tool_schemas 对齐：SDK 升级改动
+        探测形态与 server/_registration.py 的 _tighten_flat_tool_schemas 对齐：SDK 升级改动
         mcp._lowlevel_server._session_manager 路径时先在此暴露，而非 AttributeError
         打翻全部依赖该 fixture 的用例。
         """

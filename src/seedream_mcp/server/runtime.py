@@ -285,10 +285,11 @@ def _reset_lifespan_state() -> None:
     _active_resource = None
     _retired_resources.clear()
     set_active_config(None)
-    from .. import config as config_module
+    from ..config import _builder as config_builder
+    from ..config.sources import _BUILD_WARNINGS
 
-    config_module._global_config = None
-    config_module._BUILD_WARNINGS.clear()
+    config_builder._global_config = None
+    _BUILD_WARNINGS.clear()
     _shared_init_lock = asyncio.Lock()
     shutdown_cpu_offload_executor()
     from ..utils.images.thumbnail import reset_thumb_sweep_gate

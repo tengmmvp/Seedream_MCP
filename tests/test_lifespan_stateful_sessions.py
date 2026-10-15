@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from seedream_mcp import config as config_module
+from seedream_mcp.config import _builder as config_module
 import seedream_mcp.server.runtime as runtime
 import seedream_mcp.server as server
 from seedream_mcp.config import SeedreamConfig
