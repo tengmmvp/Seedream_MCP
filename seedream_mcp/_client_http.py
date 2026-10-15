@@ -18,6 +18,7 @@ import httpx
 from .config import SeedreamConfig
 from .request_plan import _ACTIVE_REQUEST_PLAN, serialize_request_body
 from .utils.core.executors import CpuOffloadPoolClosedError, load_json_bytes
+from .utils.core.http_int import strict_http_int
 from .utils.core.loop_bound import loop_bound_semaphore
 from .utils.core.errors import (
     SeedreamAPIError,
@@ -400,11 +401,9 @@ class _ClientHTTPMixin:
         )
         content_length = response.headers.get("content-length")
         if content_length:
-            try:
-                declared_bytes = int(content_length)
-            except ValueError:
-                declared_bytes = -1
-            if declared_bytes > max_bytes:
+            # 畸形声明按未申报跳过预检，由下方流式累计上限兜底。
+            declared_bytes = strict_http_int(content_length)
+            if declared_bytes is not None and declared_bytes > max_bytes:
                 raise SeedreamAPIError(
                     f"响应体过大: Content-Length 声明 {declared_bytes} 字节，"
                     f"超过上限 {max_bytes} 字节{adjust_hint}",

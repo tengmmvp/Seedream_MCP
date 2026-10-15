@@ -641,6 +641,36 @@ async def test_malformed_content_length_degrades_to_streamed_read(no_sleep: None
     assert result["success"] is True
 
 
+# 前四形态曾获裸 int() 宽松解析、预检值 1048576 超上限 20480 致旧口径误报超限；
+# 超长数字串两种口径一致跳过，此处锁定归 None 不抛 ValueError。
+_LENIENT_INT_DECLARED_FORMS = [
+    pytest.param(" 1048576", id="leading-space"),
+    pytest.param("1048576 ", id="trailing-space"),
+    pytest.param("+1048576", id="plus-sign"),
+    pytest.param("1_048576", id="underscore"),
+    pytest.param("9" * 5000, id="overlong-digit-run"),
+]
+
+
+@pytest.mark.parametrize("declared", _LENIENT_INT_DECLARED_FORMS)
+async def test_lenient_int_content_length_forms_skip_precheck(
+    declared: str, no_sleep: None
+) -> None:
+    """畸形 Content-Length 声明按未申报跳过预检，流式累计兜底读取，不误报超限。"""
+    config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
+    body = json.dumps({"data": [], "usage": {}, "status": "completed"}).encode()
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, headers={"content-length": declared}, content=body)
+
+    async with SeedreamClient(config) as client:
+        await _install_mock_transport(client, _handler)
+        result = await client._call_api("text_to_image", {"prompt": "p"})
+
+    assert result["success"] is True
+
+
 async def test_error_body_read_timeout_reduced_with_status_and_retry_after() -> None:
     """错误状态码下读体超时归约为携带状态码与 Retry-After 的 API 错误。
 
