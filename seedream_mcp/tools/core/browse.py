@@ -293,8 +293,7 @@ def _scan_and_filter_directory(
     本函数不叠加补扫循环，增长与停滞语义单层收拢。越界剔除数由扫描层经
     excluded_count 回传（扩窗轮次间不重复计数，命中回放按考查前缀计），
     本函数按计数落单条聚合告警，防大目录翻页时越界项逐条刷屏；
-    扫描中途异常时结果不可得，以谓词剔除调用数兜底落日志，
-    扩窗各轮窗口重叠的重复计数不去重。
+    扫描中途异常时结果不可得，改落无计数告警。
     读范围为空（替代界整界剔除）时条目必然全剔，免注定停滞的扫描直接
     返回空停滞窗。
 
@@ -312,18 +311,12 @@ def _scan_and_filter_directory(
         ScanResult；images 仅含界内条目，未扫尽且未截断时不少于 remaining 条，
         停滞短窗除外；成因与终点信号原样透传，供分页判定。
     """
-    dropped_calls = 0
-
     if not read_scope:
         return ScanResult(images=[], complete=False, incomplete_cause=ScanIncompleteCause.STALLED)
 
     def _within_read_scope(pair: tuple[Path, Path]) -> bool:
         # resolve 结果来自扫描缓存；权限目录已 resolve，直接比较。
-        nonlocal dropped_calls
-        if any(is_within_resolved(pair[1], scope) for scope in read_scope):
-            return True
-        dropped_calls += 1
-        return False
+        return any(is_within_resolved(pair[1], scope) for scope in read_scope)
 
     scan_result: ScanResult | None = None
     try:
@@ -340,9 +333,10 @@ def _scan_and_filter_directory(
             scope_signature=read_scope_signature(read_scope),
         )
     finally:
-        dropped = dropped_calls if scan_result is None else scan_result.excluded_count
-        if dropped:
-            logger.warning("检测到越界图片路径 {} 条，已忽略", dropped)
+        if scan_result is None:
+            logger.warning("扫描中途异常，越界图片剔除计数不可得")
+        elif scan_result.excluded_count:
+            logger.warning("检测到越界图片路径 {} 条，已忽略", scan_result.excluded_count)
     return scan_result
 
 

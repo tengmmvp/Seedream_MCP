@@ -1654,7 +1654,7 @@ async def test_browse_images_out_of_scope_warning_survives_scan_exception(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """补扫轮抛异常时已累计的越界计数仍落日志，保住翻不出图的排障线索。"""
+    """补扫轮抛异常时越界告警仍落日志：计数不可得，改落无计数表述。"""
 
     outside_names = [f"out_{i}" for i in range(6)]
     workspace_names = [f"img_{i}" for i in range(3)]
@@ -1681,9 +1681,11 @@ async def test_browse_images_out_of_scope_warning_survives_scan_exception(
         )
 
     assert result.is_error is True
-    out_of_scope_warnings = [w for w in warnings if "越界图片路径" in w]
+    out_of_scope_warnings = [w for w in warnings if "越界" in w]
     assert len(out_of_scope_warnings) == 1
-    assert "越界图片路径 3 条" in out_of_scope_warnings[0]
+    assert "越界图片剔除计数不可得" in out_of_scope_warnings[0]
+    # 异常路径不回退到带计数表述，防止与 excluded_count 口径分叉。
+    assert [w for w in warnings if "越界图片路径" in w] == []
 
 
 def test_scan_and_filter_directory_passes_include_and_quota(
