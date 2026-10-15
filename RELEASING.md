@@ -1,97 +1,52 @@
-# 发布指南 (Releasing)
+# 发布指南（Releasing）
 
-本文档说明如何将 `seedream-image-mcp` 发布到 [PyPI](https://pypi.org/project/seedream-image-mcp/) 与 GitHub Container Registry，以及维护者需要完成的一次性配置。
-
-发布由 [.github/workflows/release.yml](.github/workflows/release.yml) 自动完成，触发条件是推送 `v*` 开头的 tag。
-
-## 一次性配置（首次发布前）
-
-### 1. 确认 PyPI 包名可用
-
-访问 <https://pypi.org/project/seedream-image-mcp/>：
-
-- 返回 404 → 包名可用，继续。
-- 已存在且属于你 → 继续。
-- 已存在且属于他人 → 改包名（同步修改 `pyproject.toml` 的 `[project].name`、README 与 CI 中的引用）。
-
-### 2. 配置 Trusted Publisher（OIDC）
-
-本项目使用 PyPI **Trusted Publishing**，通过 GitHub OIDC 短期令牌发布，**无需长期 API token**。
-
-在 PyPI 后台（`Account settings → Publishing → Add a new publisher → GitHub`）填写：
-
-| 字段              | 值                   |
-| ----------------- | -------------------- |
-| PyPI Project name | `seedream-image-mcp` |
-| Owner             | `tengmmvp`           |
-| Repository name   | `Seedream_MCP`       |
-| Workflow filename | `release.yml`        |
-| Environment name  | _(留空)_             |
-
-> 由于项目首次发布时尚不存在，使用 **"pending publisher"**（针对尚不存在的项目）。PyPI 会在首次成功发布时自动创建项目，之后该 publisher 自动转正。
->
-> `release.yml` 的 `pypi-release` job 未设置 `environment:`，因此此处 Environment 留空；若将来改用 environment，需在 PyPI 后台与 workflow 中同步配置。
-
-### 3. （可选）GitHub Container Registry
-
-Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配置**。
+本文档说明如何将 `seedream-image-mcp` 发布到 [PyPI](https://pypi.org/project/seedream-image-mcp/) 与 GitHub Container Registry（ghcr.io）。发布由 [release.yml](.github/workflows/release.yml) 自动完成，推送 `v*` 开头的 tag 触发。
 
 ## 发版流程
 
-1. **更新版本号**：仅修改 [src/seedream_mcp/version.py](src/seedream_mcp/version.py) 中的 `__version__`。
+1. **更新版本号**：仅修改 [src/seedream_mcp/version.py](src/seedream_mcp/version.py) 中的 `__version__`——版本号的单一来源。
 
    ```python
-   __version__ = "1.2.7"
+   __version__ = "4.3.0"
    ```
 
-   升级 **minor 或 major** 时，还须同步更新 [docker-compose.yml](docker-compose.yml) 的镜像标签为新 `major.minor`。
+   升级 **minor 或 major** 时，还须同步更新 [docker-compose.yml](docker-compose.yml) 的镜像标签为新 `major.minor`；补丁版无需改动，该标签自动跟进。
 
-2. **提交并打 tag**（在 main 分支上进行）：
+2. **提交并打 tag**：在 main 分支上执行以下命令：
 
    ```bash
    git add src/seedream_mcp/version.py docker-compose.yml
-   git commit -m "chore(release): bump version to v1.2.7"
-   git tag v1.2.7
-   git push origin main      # 推送提交（用户手动）
-   git push origin v1.2.7    # 推送 tag，触发 CI
+   git commit -m "chore(release): bump version to v4.3.0"
+   git tag v4.3.0
+   git push origin main
+   git push origin v4.3.0    # 推送 tag，触发发布流水线
    ```
 
-3. **CI 自动执行**（`.github/workflows/release.yml`，tag `v*` 触发）：
-   - `static-and-package`：3.12 单格跑 black + flake8 + mypy（另以 `--python-version` 补验 3.13 与 3.14）与构建验证
-   - `test`：3.12–3.14 全版本矩阵跑 pytest
-   - `pypi-release`：`uv build` 产出 sdist/wheel，通过 trusted publishing 发布到 PyPI
-   - `build-and-release`：依赖 PyPI 成功后创建 GitHub Release（安装说明引用 PyPI，故须等其完成）
-   - `docker-release`：构建多架构镜像推送 ghcr.io（与 PyPI 并行，从源码构建，不依赖 PyPI）
+3. **CI 自动执行**：流水线先过质量门禁，通过后自动完成发布——sdist/wheel 上传 PyPI，GitHub Release 随之创建，Docker 镜像推送 ghcr.io。作业构成以 `release.yml` 为准，手动触发仅运行检查，不执行发布。
 
-4. **验证**（约 2–5 分钟后）：
+4. **验证**：流水线完成后确认以下各项：
    - PyPI：<https://pypi.org/project/seedream-image-mcp/#history>
    - GitHub Release：<https://github.com/tengmmvp/Seedream_MCP/releases>
    - 命令行：`uvx seedream-image-mcp --help`
 
+## 发布机制
+
+- **PyPI**：经 Trusted Publishing（GitHub OIDC 短期令牌）发布，publisher 已绑定本仓库（owner `tengmmvp` / `Seedream_MCP` / `release.yml`），无需 API token。
+- **GHCR**：Docker 镜像推送使用内置 `GITHUB_TOKEN`，无需额外配置。
+
 ## 版本规则
 
 - 遵循 [SemVer](https://semver.org/)：`MAJOR.MINOR.PATCH`
-- 预发布：tag 仅限 `-rc` / `-alpha` / `-beta` 形态（如 `v1.3.0-rc.1`、`v1.3.0-beta1`）时 CI 自动标记为 prerelease；其余 tag 均为正式版，`uvx seedream-image-mcp` 默认仍拉取稳定版
-- **版本号一经发布不可覆盖**：PyPI 不允许重新上传同一版本。发版有误只能发更高版本号修正
-
-## 结构重构发版声明（v4.3）
-
-v4.3 周期合入纯结构重构（src 布局、六域包归位、utils 去前缀、tools 四层重组、tests 六域镜像），该版本 release note 须声明：
-
-- 纯结构重构，运行时行为零变化；冻结面（repo-layout.md S2：根与 client/config/server/tools 门面 `__all__`、`version.__version__`）零变化
-- 内部路径变更清单：包根模块迁入三域包（`client.py`→`client/_api`、`config.py`→`config/_model`＋`_builder`、`server.py`→`server/_registration`、`resources.py`→`server/runtime`、`_client_http`→`client/_http`、`_config_sources`→`config/sources`、`_host_syntax`→`config/host_syntax`、`request_plan`→`client/request_plan`、`_icons`/`bootstrap`/`cli`/`transport`→`server/` 同名）；utils 16 模块去前缀（`io_file`→`files` 等，见 repo-layout）；`tools/core`＋`tools/impl`→`tools/{schemas,outputs,pipeline,handlers}`；源码迁入 `src/`；`docs/mcp-python-sdk`→`docs/vendor/mcp-python-sdk`
-- 除冻结面外一切模块路径为内部实现（S2），依赖内部路径的下游须随本版本更新
+- 预发布：tag 含 `-rc` / `-alpha` / `-beta`（如 `v4.3.0-rc.1`）时 CI 自动标记为 prerelease，Docker 镜像不获得 `latest` 标签；其余 tag 均为正式版
+- **版本号一经发布不可覆盖**：PyPI 不允许重新上传同一版本，发版有误只能发更高版本号修正
 
 ## 故障排查
 
-| 现象                                        | 原因与处理                                                                                                                 |
-| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `pypi-release` 报 OIDC / `403`              | trusted publisher 配置与 workflow 不一致（repo / owner / workflow filename / environment）。核对 PyPI 后台与 `release.yml` |
-| `pypi-release` 报 `400 File already exists` | 该版本已在 PyPI 存在。bump 版本号重发，勿覆盖                                                                              |
-| 发布成功但 `uvx` 仍拉到旧版                 | PyPI CDN 缓存，等待几分钟                                                                                                  |
-| tag 误推、CI 未成功                         | 删除 tag 后修正重打：`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`（已发到 PyPI 的无法撤销）                    |
+| 现象                                        | 原因与处理                                                                                                   |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `pypi-release` 报 OIDC / `403`              | trusted publisher 配置与 workflow 不一致（repo / owner / workflow filename）。核对 PyPI 后台与 `release.yml` |
+| `pypi-release` 报 `400 File already exists` | 该版本已在 PyPI 存在，bump 版本号重发                                                                        |
+| 发布成功但 `uvx` 仍拉到旧版                 | PyPI CDN 缓存，等待几分钟                                                                                    |
+| tag 误推、CI 未成功                         | 删除 tag 后修正重打：`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`                                |
 
-## 回退
-
-- **tag 未触发 CI / CI 未成功**：删除 tag，修正后重打。
-- **已发布到 PyPI**：无法删除或覆盖，只能发布更高版本号。可在 PyPI 后台对错误版本执行 **yank**（隐藏但不删除）。
+错误版本无法删除或覆盖；可在 PyPI 后台执行 **yank**，该操作仅从索引隐藏版本，不删除文件。
