@@ -1,0 +1,48 @@
+# git-cliff 配置：release.yml 的 build-and-release 据此生成版本段落，
+# 填入 GitHub Release 更新内容节并前插 CHANGELOG.md；提交类型分组见 [git]。
+
+[changelog]
+header = """
+# Changelog
+
+基于 Conventional Commits 由 git-cliff 自动生成，随每次发版前插版本段落。
+
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [未发布]
+{% endif %}\
+{% for group in ["新增与改进", "修复", "性能", "内部重构", "文档", "测试", "构建与 CI", "构建与流程", "其他变更"] %}\
+{% set group_commits = commits | filter(attribute="group", value=group) %}\
+{% if group_commits | length > 0 %}\
+### {{ group }}
+
+{% for commit in group_commits %}\
+- {{ commit.message | split(pat="\n") | first | trim }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/tengmmvp/Seedream_MCP/commit/{{ commit.id }}))
+{% endfor %}
+{% endif %}\
+{% endfor %}\
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+tag_pattern = "v[0-9].*"
+sort_commits = "oldest"
+# bot 的 changelog 回写提交与 merge 提交不构成变更条目，整条跳过。
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^Merge", skip = true },
+  { message = "^feat", group = "新增与改进" },
+  { message = "^fix", group = "修复" },
+  { message = "^perf", group = "性能" },
+  { message = "^refactor", group = "内部重构" },
+  { message = "^docs", group = "文档" },
+  { message = "^test", group = "测试" },
+  { message = "^ci", group = "构建与 CI" },
+  { message = "^chore", group = "构建与流程" },
+  { message = ".*", group = "其他变更" },
+]

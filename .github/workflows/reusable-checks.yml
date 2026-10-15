@@ -96,7 +96,7 @@ jobs:
         # 跳过锁版本 mcp，由 pin 步骤安装目标版本，避免装两次
         run: uv sync --locked --no-install-package mcp
 
-      - name: 🧱 Pin mcp to ${{ inputs.mcp-pin-version }}
+      - name: 📌 Pin mcp to ${{ inputs.mcp-pin-version }}
         if: ${{ inputs.mcp-pin-version != '' }}
         # uv run 一律带 --no-sync，默认重同步会把降级 mcp 升回锁版本
         run: |
@@ -115,7 +115,7 @@ jobs:
         if: ${{ inputs.static-checks }}
         run: uv run --no-sync mypy
 
-      - name: 🔬 Run mypy for extra Python versions
+      - name: 🔎 Run mypy for extra Python versions
         if: ${{ inputs.static-checks && inputs.extra-mypy-python-versions != '[]' }}
         # 命令行 --python-version 覆盖 pyproject 的 python_version，在同一格内模拟目标解释器的类型视角
         shell: bash
@@ -205,7 +205,7 @@ jobs:
           print('✅ wheel 资产断言通过')
           "
 
-      - name: 🛠️ Smoke test installed artifacts
+      - name: 🧫 Smoke test installed artifacts
         if: ${{ inputs.package-checks }}
         # wheel 与 sdist 分别装入隔离目录，验证安装态可导入且携带 py.typed
         run: |

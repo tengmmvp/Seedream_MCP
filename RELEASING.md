@@ -33,6 +33,7 @@
 
 - **PyPI**：经 Trusted Publishing（GitHub OIDC 短期令牌）发布，publisher 已绑定本仓库（owner `tengmmvp` / `Seedream_MCP` / `release.yml`），无需 API token。
 - **GHCR**：Docker 镜像推送使用内置 `GITHUB_TOKEN`，无需额外配置。
+- **CHANGELOG**：[CHANGELOG.md](CHANGELOG.md) 与 Release 更新内容由 git-cliff 从 Conventional Commits 自动派生，随发版由 CI 前插版本段落并提交回 main，无需人工维护。
 
 ## 版本规则
 
