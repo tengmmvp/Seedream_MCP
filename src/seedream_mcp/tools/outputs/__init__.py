@@ -1,7 +1,7 @@
 """Seedream MCP 工具结构化输出模型。
 
 作为 outputSchema 的单一来源：MCPServer 依据本模块模型生成各工具的 structuredContent
-schema，runtime 输出也须经模型构造后 model_dump，使声明与实际输出绑定、不漂移。
+schema，运行时输出也须经模型构造后 model_dump，使声明与实际输出绑定、不漂移。
 build_error_dict 与 build_error_structured 收敛各错误分支的错误结构；
 build_structured_json_text 将 structuredContent 序列化为紧凑 JSON 的 TextContent，
 字符串值继承摘要通道净化、二进制载荷替换为长度占位；

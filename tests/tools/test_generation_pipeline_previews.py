@@ -28,7 +28,7 @@ from _lib.generation_fixtures import _patch_client_success, _patch_save_real_fil
 
 
 def _patch_preview_spy(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """以计数 spy 顶替 common 门面内的 build_preview_contents，记录每次调用的张数。"""
+    """以计数 spy 顶替 _execute 模块命名空间内的 build_preview_contents，记录每次调用的张数。"""
     calls: list[int] = []
 
     async def _counting_spy(paths: Any, images_root: Any = None) -> list[ImageContent]:

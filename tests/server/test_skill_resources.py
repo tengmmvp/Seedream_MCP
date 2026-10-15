@@ -27,7 +27,7 @@ import seedream_mcp.server as server
 import seedream_mcp.server._registration as registration_module
 import seedream_mcp.server.skills as skills_module
 
-# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
+# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供。
 
 _SKILL_DIR = skills_module._SKILLS_DIR / skills_module._SKILL_NAME
 _SKILL_MANIFEST_PATH = skills_module._SKILL_MANIFEST_PATH

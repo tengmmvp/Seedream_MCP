@@ -1,4 +1,4 @@
-"""HTTP 整数头的严格解析：transport、download 与 _client_http 共用单源。"""
+"""HTTP 整数头的严格解析：transport、download 与 client 的 _http 共用单源。"""
 
 from __future__ import annotations
 

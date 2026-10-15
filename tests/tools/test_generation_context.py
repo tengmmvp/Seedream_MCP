@@ -59,7 +59,7 @@ def test_schema_validator_resolves_default_parallelism() -> None:
 
 
 def test_build_generation_context_rejects_sequential_for_pro_model() -> None:
-    """5.0 Pro 组图先报能力根因，不落入围率数量的误导性上限错误。"""
+    """5.0 Pro 组图先报能力根因，不落入图片数量上限的误导性错误。"""
     config = _build_pro_config()
 
     with pytest.raises(SeedreamValidationError, match="不支持组图生成"):
@@ -679,7 +679,7 @@ def test_format_failure_section_extracts_message_from_dict_error() -> None:
     )
     failure_line = text.splitlines()[0]
     assert "并行请求全部失败。请求1: 认证失败" in failure_line
-    # 失败首行不应出现字典 repr 的花括号
+    # 失败首行不应出现字典 repr 的花括号。
     assert "{" not in failure_line
     assert "}" not in failure_line
 

@@ -8,9 +8,9 @@
 - ``tools/pipeline/_progress.py`` 的 safe_report_progress：调用 ``ctx.report_progress``，
   失败静默，故替身提供 no-op 实现即可。
 
-Web 请求没有 MCP 会话上下文，共享资源单例在堂时本模块构造等价替身，使生成
+Web 请求没有 MCP 会话上下文，共享资源单例在场时本模块构造等价替身，使生成
 请求复用同一 HTTP 连接池与下载并发上限。替身仅做借用，不改变引用计数：uvicorn
-serve 期间 lifespan 在堂保证单例存活，serve 之外的窗口返回 None 由流水线回退
+serve 期间 lifespan 在场保证单例存活，serve 之外的窗口返回 None 由流水线回退
 每请求新建 client。SDK 升级若调整上述探测路径，本替身随之失效并自动回退，不
 产生错误行为，仅损失连接池复用。
 """

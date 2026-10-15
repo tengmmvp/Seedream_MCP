@@ -107,7 +107,7 @@ async def test_flat_arguments_assemble_into_input_model(
 async def test_image_to_image_full_flat_arguments_assemble_into_input_model(
     spy_run_handlers: dict[str, Any],
 ) -> None:
-    """图生图全字段平铺参数装配为输入模型，全部显式传入字段登记进 fields_set。"""
+    """图文生图全字段平铺参数装配为输入模型，全部显式传入字段登记进 fields_set。"""
     result = await mcp.call_tool(
         "image_to_image",
         {

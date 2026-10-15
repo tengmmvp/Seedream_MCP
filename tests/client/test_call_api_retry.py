@@ -339,7 +339,6 @@ async def test_call_api_429_retry_after_jitter_floors_at_nominal(
 
     assert send_calls() == 2
     assert result["success"] is True
-    # 负向抖动等待不低于名义 Retry-After，正向抖动可达 1.2 倍
     assert sleep_durations == [slept]
 
 
@@ -362,7 +361,6 @@ async def test_call_api_no_status_code_not_retried(
         return httpx.Response(200, content=b"not-json", headers={"content-type": "text/plain"})
 
     async with SeedreamClient(config) as client:
-        # 用 MockTransport 替换内部 httpx 客户端，驱动真实 _send_standard_request
         await _install_mock_transport(client, _handler)
 
         with pytest.raises(SeedreamAPIError, match="JSON 解析失败") as exc_info:

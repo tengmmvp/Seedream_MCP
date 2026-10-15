@@ -1,7 +1,7 @@
 """validate_image_input 回归测试，重点守护校验异常不得被二次包装。
 
 该回归源于 _validate_url 缺少 ``except SeedreamValidationError: raise`` 前置分支，
-导致自身抛出的"无效的URL格式"被 ``except Exception`` 包装为"URL验证失败: 无效的URL格式"。
+导致自身抛出的「无效的URL格式」被 ``except Exception`` 包装为「URL验证失败: 无效的URL格式」。
 另覆盖 urlparse 的 ValueError 逃逸回归：不闭合 IPv6 括号使 urlparse 抛
 ValueError，download 侧须归一为 DownloadError 而非让原生异常上抛。
 """

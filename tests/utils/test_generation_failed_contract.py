@@ -1,7 +1,8 @@
 """生成结果失败判定契约测试。
 
-``response_reports_failure`` 被 common.py 与 results.py 共用，驱动 isError、自动保存
-与响应格式化分支。HTTP 层 success 与显式 status=="failed" 任一命中即视为失败，
+``response_reports_failure`` 被 client/_http.py 与 tools/pipeline/_execute.py、
+results.py 共用，驱动结局日志、isError、自动保存与响应格式化分支。HTTP 层 success
+与显式 status=="failed" 任一命中即视为失败，
 确保上游即便以 success=True 携带 status=failed 时下游仍按失败处理。
 """
 

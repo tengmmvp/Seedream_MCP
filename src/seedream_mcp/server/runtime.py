@@ -1,9 +1,10 @@
 """Seedream MCP 共享资源模块。
 
 持有 MCPServer 实例 mcp 与其生命周期所需的共享资源管理：服务器元数据常量、
-app_lifespan 引用计数单例、活动与退役资源状态、同步与异步清理入口。server 模块
-导入 mcp 完成工具、资源与 prompt 注册并重导出本模块符号；transport 模块直接从
-本模块导入 mcp 与清理函数，避免经 server 形成反向依赖。
+app_lifespan 引用计数单例、活动与退役资源状态、同步与异步清理入口。
+_registration 导入 mcp 完成工具、资源与 prompt 注册，包门面 __init__ 再导出
+本模块符号；transport 模块直接从本模块导入 mcp 与清理函数，避免经包门面
+形成反向依赖。
 """
 
 from __future__ import annotations
@@ -273,7 +274,7 @@ def sync_cleanup() -> None:
 
 
 def _reset_lifespan_state() -> None:
-    """重置 lifespan 单例、全局配置、初始化锁与关联模块状态，仅供测试隔离调用。
+    """复位 lifespan 单例、全局配置、初始化锁与关联模块状态，仅供测试隔离调用。
 
     重建 _shared_init_lock 避免跨事件循环复用旧锁；_global_config 一并复位避免
     跨用例残留，赋值经函数内延迟 import 取当前 config 模块对象，测试重载模块后
@@ -428,7 +429,7 @@ def _create_mcp_server() -> MCPServer:
 _IMPORT_TIME_REQUEST_STATE_KEYS = active_request_state_keys()
 
 
-# 模块级单例：server 经此注册工具/prompt/resource，transport 与 lifespan 复用同一实例。
+# 模块级单例：_registration 经此注册工具/prompt/resource，transport 与 lifespan 复用同一实例。
 # version 必须显式传入：SDK 2.0 起未传 version 的服务器在 initialize 结果的 serverInfo
 # 中报告空串而非 SDK 包版本。request_state_security 为 None 时 SDK 回退进程临时密钥；
 # 多副本 HTTP 部署经 SEEDREAM_REQUEST_STATE_KEYS 共享密钥环，重试落到其他实例仍可

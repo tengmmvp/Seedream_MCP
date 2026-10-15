@@ -1,6 +1,6 @@
 """Seedream MCP 服务器注册主体。
 
-注册文生图、图生图、多图融合、组图生成、图片浏览、模型信息查询六种 MCP 工具，
+注册文生图、图文生图、多图融合、组图输出、图片浏览、模型信息查询六种 MCP 工具，
 风格预设 Prompt 与工作区、服务器信息、模型信息、Agent Skills 资源；MCPServer
 实例与共享资源生命周期由 runtime 模块持有，skill 常量与读取函数位于 skills
 模块，门面再导出见包 __init__。
@@ -233,7 +233,6 @@ _CUSTOM_NAME_FIELD: str | None = Field(
 )
 
 
-# 工具体 locals() 推导参数字典的排除集：签名中不属于输入模型的参数名。
 _PIPELINE_EXCLUDED_LOCALS = frozenset({"workspace_roots", "ctx"})
 
 

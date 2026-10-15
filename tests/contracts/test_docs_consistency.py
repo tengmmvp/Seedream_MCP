@@ -11,7 +11,7 @@ bash 块内的 KEY=value 赋值与 CLI 旗标 token、工具参数 bullet 列表
 与价格表的小数 token 序列，不比较自然语言正文。定位能力差异表时以含
 "1K / 1.5K / 2K" 单元格的表格为锚点，价格表以 💰 章节标题锚定，均不依赖
 各语言的章节标题文字。围栏解析、正文行提取、能力差异表定位与参数 bullet、
-数字 token 两种提取形态的共享实现位于 _readme_helpers。
+数字 token 两种提取形态的共享实现位于 _lib.readme_helpers。
 """
 
 from __future__ import annotations

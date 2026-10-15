@@ -159,7 +159,7 @@ def parse_int(value: object) -> int:
     try:
         return int(normalized)
     except ValueError as exc:
-        # 超长数字串超出解释器转换上限时同样归一为配置错误
+        # 超长数字串超出解释器转换上限时同样归一为配置错误。
         raise SeedreamConfigError(f"无法解析整数值: {value}") from exc
 
 
@@ -382,7 +382,7 @@ def _pick_bool(
 _ConfigValuePicker = Callable[[Mapping[str, object], str, str, Mapping[str, str]], object]
 
 # 配置字段的声明式取值表：字段到取值辅助与 override 键名覆盖的映射，覆盖为 None 时
-# override 键名即字段名；model_id 与 default_watermark 的 override 键名是 CLI 简称的
+# override 键名即字段名；model_id、default_watermark 与 web_enabled 的 override 键名是 CLI 简称的
 # 有意命名间接映射，别名展开统一由 validate 完成，构建侧不重复规范化。构建循环遍历
 # _FIELD_ENV_MAP 并索引本表，新增 env metadata 字段漏登记时以 KeyError 在构建期暴露。
 _FIELD_PICKERS: dict[str, tuple[_ConfigValuePicker, str | None]] = {

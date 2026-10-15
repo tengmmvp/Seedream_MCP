@@ -506,7 +506,7 @@ async def test_try_get_shared_client_returns_lifespan_instance() -> None:
 
 
 def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
-    """ctx 为 None、lifespan 非 dict、值类型不匹配时均返回 None。"""
+    """ctx 为 None、lifespan 非 dict、值类型不匹配与字典缺键时均返回 None。"""
     from seedream_mcp.tools.pipeline.parallel import (
         _try_get_shared_client,
         _try_get_shared_download_manager,
@@ -571,7 +571,6 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
             request_executor=fake_executor,
             ctx=ctx,
         )
-        # executor 收到的 client 即 lifespan 注入的共享实例
         assert captured_client is shared_client
         assert not result.is_error
     finally:
@@ -642,7 +641,6 @@ async def test_execute_generation_handler_passes_shared_download_manager(
             request_executor=fake_executor,
             ctx=ctx,
         )
-        # auto_save 收到的 download_manager 即 lifespan 注入的共享实例
         assert captured_dm is shared_dm
     finally:
         await shared_client.close()

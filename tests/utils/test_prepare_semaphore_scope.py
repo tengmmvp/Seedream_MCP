@@ -50,7 +50,6 @@ async def test_concurrent_parallel_calls_share_instance_semaphore(
             current -= 1
         return f"prepared:{image}"
 
-    # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # 每批图片数超过上限：退化实现下两批各自的信号量上限会叠加突破全局上限

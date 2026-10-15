@@ -368,7 +368,7 @@ async def test_success_json_data_items_over_cap_rejected(no_sleep: None) -> None
     """成功 JSON 体的 data 条目数超过按总量限额推导的上限时拒绝该响应。
 
     大量小条目在字节未超限时仍可放大解析产物内存，与 SSE 条目硬上限经
-    items_limit_for 同式推导；20480 派生 45 取绝对下限 64，65 项即触顶。无状态码
+    items_limit_for 同口径推导；20480 派生 45 取绝对下限 64，65 项即触顶。无状态码
     即不可重试，避免对非幂等生成 API 重复请求。
     """
     config = SeedreamConfig(api_key="k", max_retries=3, auto_save_max_file_size=1024)
@@ -415,7 +415,7 @@ async def test_success_json_data_items_at_cap_accepted(no_sleep: None) -> None:
 
 
 async def test_parsed_data_items_limit_uses_shared_items_limit_derivation() -> None:
-    """成功 JSON 条目上限经 io_sse.items_limit_for 单源推导，与 SSE 条目上限同式。
+    """成功 JSON 条目上限经 sse 的 items_limit_for 单源推导，与 SSE 条目上限同口径。
 
     显式 response_body_limit 直供推导输入。
     """
@@ -474,7 +474,6 @@ async def test_sse_slow_drip_over_total_budget_times_out_and_retries(no_sleep: N
         with pytest.raises(SeedreamTimeoutError, match="API 调用超时"):
             await client._call_api("text_to_image", {"prompt": "p", "stream": True})
 
-    # 首次超时被重试而非立即上抛，重试耗尽后归一为超时异常
     assert attempts == config.max_retries + 1
 
 

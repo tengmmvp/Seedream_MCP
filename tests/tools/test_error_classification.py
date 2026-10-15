@@ -369,7 +369,7 @@ def test_handle_api_error_5xx_user_hint_mentions_retry_later() -> None:
 def test_failure_guidance_hint_profiles_fall_back_to_generic() -> None:
     """自带 user_hint 的档案不走查表：查表回退通用建议，用户文案由 hint 承担。
 
-    common 层对带 hint 档案跳过查表直接用 hint（全链路行为由
+    _execute 层对带 hint 档案跳过查表直接用 hint（全链路行为由
     test_handler_failure_text_*_uses_profile_hint_only 锁定），查表对这些码
     不再提供文案。
     """
@@ -428,7 +428,7 @@ def test_failure_guidance_api_error_without_status_falls_back_to_generic() -> No
 def test_failure_guidance_table_covers_hintless_profile_error_codes() -> None:
     """无 user_hint 的档案错误码均登记在查表或显式默认集，带 hint 的不走表。
 
-    带 hint 档案由 common 层直接采用 hint，表中登记即双源漂移；新增无 hint
+    带 hint 档案由 _execute 层直接采用 hint，表中登记即双源漂移；新增无 hint
     档案未登记或登记集残留均在此失败。
     """
     profiles = list(errors_module._HTTP_STATUS_PROFILES.values())

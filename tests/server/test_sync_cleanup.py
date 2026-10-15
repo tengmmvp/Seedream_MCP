@@ -14,7 +14,7 @@ import seedream_mcp.server.runtime as runtime
 
 
 class _Closeable:
-    """可关闭资源桩：记录 close 是否被调用，模拟 SeedreamClient/DownloadManager。"""
+    """可关闭资源替身：记录 close 是否被调用，模拟 SeedreamClient/DownloadManager。"""
 
     def __init__(self) -> None:
         self.closed = False
@@ -24,7 +24,7 @@ class _Closeable:
 
 
 class _FakeResource:
-    """活动资源桩：仅提供 sync_cleanup 关闭路径所需的 client 与 download_manager。"""
+    """仅提供 sync_cleanup 关闭路径所需 client 与 download_manager 的资源替身。"""
 
     def __init__(self, client: object, download_manager: object) -> None:
         self.client = client

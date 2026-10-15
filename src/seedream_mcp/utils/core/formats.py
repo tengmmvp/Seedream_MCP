@@ -12,7 +12,7 @@ import re
 from types import MappingProxyType
 from typing import Any, Mapping
 
-# 自动保存单文件大小上限默认值，config 与 download 共享此单一来源。
+# 自动保存单文件大小上限默认值，config、download 与 save 共享此单一来源。
 DEFAULT_MAX_FILE_SIZE = 50 * 1024 * 1024
 
 # 无法推断扩展名时的默认图片扩展名，URL 提取、字节嗅探与 MIME 反推共用此单一来源。

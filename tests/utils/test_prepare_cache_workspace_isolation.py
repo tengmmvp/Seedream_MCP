@@ -32,7 +32,6 @@ async def test_prepare_image_input_cache_isolated_by_workspace_roots(
         call_count += 1
         return f"prepared:{image}"
 
-    # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare_image_input)
 
     # 两次调用返回不同 roots，模拟不同请求上下文 / 租户
@@ -131,7 +130,7 @@ def test_data_uri_digest_tolerates_unpaired_surrogate() -> None:
 async def test_prepare_large_data_uri_with_surrogate_raises_validation_error() -> None:
     """超大含代理字符 data URI 报参数级校验错误，不抛 UnicodeEncodeError 中断整批。
 
-    摘要键容错后非法输入在 base64 解码处失败，文案与 image_validation 口径一致。
+    摘要键容错后非法输入在 base64 解码处失败，文案与 validation 口径一致。
     """
     hostile = "data:image/png;base64," + "\ud800" + "a" * (1024 * 1024 + 32)
     preparer = ImagePreparer(

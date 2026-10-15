@@ -242,7 +242,6 @@ def test_build_config_does_not_inject_dotenv_to_os_environ(
 
     assert config.api_key == "cwd_key"
     assert config.workspace_root == str(workspace_root)
-    # .env 的值不应泄漏到 os.environ
     assert os.getenv("SEEDREAM_WORKSPACE_ROOT") is None
 
 
@@ -367,7 +366,7 @@ def test_build_config_blank_http_allowed_hosts_is_none(
 def test_build_config_http_allowed_hosts_defaults_to_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """未设置时 http_allowed_hosts 为 None，非回环绑定整体关闭 SDK Host 校验。"""
+    """未设置时 http_allowed_hosts 为 None，具体地址绑定按绑定地址启用 Host 校验，通配绑定保持关闭。"""
     monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
     env_file = tmp_path / "config.env"
     _write_env_file(env_file, "ARK_API_KEY=file_key\n")

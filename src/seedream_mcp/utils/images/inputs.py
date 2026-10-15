@@ -1,8 +1,9 @@
 """图像输入预处理：将多种来源的图像统一归一化为 API 可接受的格式。
 
-支持 URL、Data URI 与本地文件路径三种来源。URL 与 Data URI 经校验后原样返回；
-本地文件路径在工作区边界校验通过后，经 O_NOFOLLOW 读取并编码为 Base64 Data URI。
-预处理逻辑独立于 SeedreamClient，可独立测试与复用。
+支持 URL、Data URI 与本地文件路径三种来源。URL 经校验后原样返回，Data URI
+以归一化的 media type 重建返回；本地文件路径在读权限边界校验通过后，经
+O_NOFOLLOW 读取并编码为 Base64 Data URI。预处理逻辑独立于 SeedreamClient，
+可独立测试与复用。
 """
 
 from __future__ import annotations

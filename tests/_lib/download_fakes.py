@@ -1,4 +1,4 @@
-"""io_download 下载测试共享的伪网络对象与辅助函数。
+"""下载域（utils/io/download）测试共享的伪网络对象与辅助函数。
 
 供 test_download_manager_security、test_download_manager_ssrf、
 test_download_image_branches 与 test_auto_save_and_download 复用，避免多处重复
@@ -22,7 +22,7 @@ from seedream_mcp.utils.io.download import (
     _ResumeState,
 )
 
-# 合法 PNG 魔法字节，供成功路径与签名校验对照
+# 合法 PNG 魔法字节，供成功路径与签名校验对照。
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
 
 
@@ -158,7 +158,7 @@ class _FakeSession:
     def get(self, url: str, **kwargs: object):  # type: ignore[no-untyped-def]
         del url
         # SSRF 防护：download_image 须显式传 allow_redirects=False 以逐跳手动校验，
-        # 断言该参数防止退化为自动跟随重定向绕过安全校验
+        # 断言该参数防止退化为自动跟随重定向绕过安全校验。
         assert kwargs.get("allow_redirects") is False, "allow_redirects 必须为 False"
         headers = cast("dict[str, str]", kwargs.get("headers") or {})
         self.captured_headers.append(dict(headers))
@@ -258,7 +258,7 @@ def _patch_download_network(
     覆盖成功路径中对端 IP 复核的串联。
 
     Args:
-        monkeypatch: pytest 打桩器。
+        monkeypatch: pytest 补丁入口。
         manager: 被注入伪网络的下载管理器。
         session: 替换真实网络会话的伪会话。
     """

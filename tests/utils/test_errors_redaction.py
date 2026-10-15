@@ -370,7 +370,7 @@ def test_format_error_for_user_strips_crlf_in_message() -> None:
 def test_sanitize_error_text_strips_crlf_injection() -> None:
     """CR/LF 控制字符被替换为空格，防止上游错误体在日志中伪造行注入误导记录。
 
-    与 io_url.sanitize_url 的控制字符剥离对齐。
+    与 url 模块 sanitize_url 的控制字符剥离对齐。
     """
     injected = "正常错误\r\nERROR fake-line\napikey=leaked"
     redacted = sanitize_error_text(injected)

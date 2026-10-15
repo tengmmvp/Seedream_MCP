@@ -495,8 +495,8 @@ async def test_static_page_symlinked_layout_serves_page(
 ) -> None:
     """pip/nix 逐文件符号链接布局的入口页解析到真实目标后正常直出，不降级。
 
-    与 skill 参考文档读取共用包资源打开序列，解析行为由 io_file 侧 open_packaged_read
-    用例覆盖；无法创建符号链接的环境跳过。
+    与 skill 参考文档读取共用包资源打开序列，解析行为由 test_io_file 的
+    open_packaged_read 用例覆盖；无法创建符号链接的环境跳过。
     """
     from starlette.requests import Request
 

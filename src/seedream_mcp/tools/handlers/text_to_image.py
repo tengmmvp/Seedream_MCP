@@ -1,4 +1,4 @@
-"""文生图工具的 handler 处理器。
+"""文生图工具处理器。
 
 薄适配器：将 prompt 与优化选项封装为 ``_execute`` 回调，委托
 ``execute_generation_handler`` 统一编排；字段规则与校验由 ``TextToImageInput``

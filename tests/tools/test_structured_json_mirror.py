@@ -335,7 +335,6 @@ def test_mirror_view_preserves_key_order_and_does_not_mutate_source() -> None:
     assert list(mirror) == ["z_field", "data"]
     assert list(mirror["data"][0]) == ["url", "b64_json"]
     assert mirror["data"][2] == structured["data"][2]
-    # 原树不被修改。
     assert structured["data"][0]["b64_json"] == "SMALLB64"
     assert structured["data"][1]["note"] == "api_key=secret"
 

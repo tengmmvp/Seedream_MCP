@@ -86,7 +86,7 @@ def _make_fake_runner(
 def _install_runner(
     monkeypatch: pytest.MonkeyPatch, name: str, payload: dict[str, Any], is_error: bool = False
 ) -> None:
-    """把 api 命名空间内的 runner 符号替换为返回固定结果的替身。"""
+    """把 generate 模块内的 runner 符号替换为返回固定结果的替身。"""
     monkeypatch.setattr(
         generate_module, name, _make_fake_runner(result=_generation_result(payload, is_error))
     )
@@ -1171,7 +1171,7 @@ def test_converge_path_entry_deletes_key_when_resolve_fails(tmp_path: Path) -> N
 
 
 def _make_stub_resource() -> SimpleNamespace:
-    """构造共享资源替身，close 为异步桩以兼容 lifespan 复位 fixture 的收尾关闭。"""
+    """构造共享资源替身，close 为异步 no-op 以兼容 lifespan 复位 fixture 的收尾关闭。"""
     client = MagicMock()
     client.close = AsyncMock()
     download_manager = MagicMock()

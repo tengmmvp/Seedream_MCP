@@ -60,7 +60,7 @@ async def _lifespan_state_guard(
 ) -> AsyncIterator[None]:
     """lifespan 复位类 fixture 的共享协议。
 
-    进入时重置模块级单例，按选项注入默认测试配置与清空 SDK 会话管理器引用；
+    进入时复位模块级单例，按选项注入默认测试配置与清空 SDK 会话管理器引用；
     退出时关闭活动与退役共享资源后再次复位，连接池不跨用例泄漏。
 
     Args:
@@ -117,7 +117,7 @@ async def _lifespan_state_guard(
 
 @pytest.fixture
 async def reset_lifespan_singletons(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
-    """重置 lifespan 单例并注入默认测试配置，退出时关闭残留资源并复位。
+    """复位 lifespan 单例并注入默认测试配置，退出时关闭残留资源并再次复位。
 
     需要差异化配置的用例自行覆盖 config._active_config。
     """
@@ -219,7 +219,7 @@ def _reset_global_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     # 解码器就绪标志为模块全局，重置以隔离初始化时序相关用例
     monkeypatch.setattr(formats_module, "_decoders_ready", False)
     # lifespan 共享单例、活动配置、全局配置懒加载缓存、asyncio.Lock、自动保存清理
-    # 状态、目录扫描缓存、io_path resolve 缓存与构建告警缓冲等模块级可变状态统一
+    # 状态、目录扫描缓存、path 的 resolve 缓存与构建告警缓冲等模块级可变状态统一
     # 经复位协议重建到干净态；复位清单见 _reset_lifespan_state
     _reset_lifespan_state()
     yield

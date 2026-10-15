@@ -1,7 +1,8 @@
 """按级别记录格式化消息的 loguru logger 测试替身与真实日志的捕获器。
 
 RecordingLogger 供 test_browse_tool_result、test_client_refactor、
-test_logging_setup、test_parallel_generation_tools、test_workspace_roots_scope、
+test_download_manager_security、test_logging_setup、
+test_parallel_generation_tools、test_workspace_roots_scope、
 test_validation_prompt、test_tighten_schema_runtime_probe 与
 test_prepare_cache_single_flight 复用，替代各文件自持的近实现替身。
 opt(lazy=True) 的 callable 实参在记录时求值，若不求值，lambda 对象本身进入
@@ -91,7 +92,7 @@ def capture_loguru_messages(records: list[str], level: str = "WARNING") -> Itera
         try:
             get_logger().remove(handler_id)
         except ValueError:
-            # sink 已被块内 blanket remove 拆除时无物可移
+            # sink 已被块内无参 remove 整体拆除时无物可移。
             pass
 
 

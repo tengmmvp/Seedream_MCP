@@ -481,9 +481,9 @@ async def _drive_reference_prepare_with_limited_concurrency(
 ) -> tuple[int, dict[str, Any], int]:
     """以受限并发的替身驱动参考图预处理，返回峰值并发、捕获请求与并发上限。
 
-    对实现体打桩而非替换公共 prepare_image_input 方法：并发信号量位于公共入口内部，
-    替换方法会使批量路径绕过信号量，断言的上限不再是真实约束；经实现体打桩信号量
-    守卫仍在路径内，真实入口的 to_thread 签名跳转也不进入计时路径。
+    以替身替换实现体而非公共 prepare_image_input 方法：并发信号量位于公共入口内部，
+    替换公共方法会使批量路径绕过信号量，断言的上限不再是真实约束；经实现体替身
+    信号量守卫仍在路径内，真实入口的 to_thread 签名跳转也不进入计时路径。
     """
     client = SeedreamClient(_build_config())
     client._image_preparer._prepare_concurrency = 2
@@ -926,7 +926,7 @@ async def test_multi_image_fusion_oversized_data_uri_fails_before_api_call(
     """超限 Data URI 在预处理阶段拒绝，不触达 API。
 
     大小上限经 monkeypatch 缩到 KB 级触发同一条超限分支；上限读取的是
-    image_validation 命名空间内的 MAX_IMAGE_FILE_SIZE，patch 目标据此确定。
+    validation 命名空间内的 MAX_IMAGE_FILE_SIZE，patch 目标据此确定。
     """
     client = SeedreamClient(_build_config())
     api_called = False
@@ -1466,7 +1466,7 @@ async def test_empty_api_key_maps_to_config_error_profile() -> None:
 
 
 def _install_validate_common_spy(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
-    """在 client 模块命名空间替换 validate_common_generation_params 为计数替身，返回记录调用次数的字典。"""
+    """在 client._api 模块命名空间替换 validate_common_generation_params 为计数替身，返回记录调用次数的字典。"""
     import seedream_mcp.client._api as client_module
     from seedream_mcp.utils.core.validators import validate_common_generation_params
 
@@ -2020,14 +2020,14 @@ def test_first_error_detail_bounds_container_render_without_full_str() -> None:
     ids=["url", "b64-json", "null-values", "empty-strings", "error-only", "scalar", "none"],
 )
 def test_item_has_image_payload_judges_non_empty_payload(item: Any, expected: bool) -> None:
-    """载荷存在判定单源于 io_stream，url 或 b64_json 任一非空即计，空取值与非 dict 形态计无载荷。"""
+    """载荷存在判定单源于 stream，url 或 b64_json 任一非空即计，空取值与非 dict 形态计无载荷。"""
     assert item_has_image_payload(item) is expected
 
 
 def test_has_valid_image_items_consumes_payload_predicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """有效图片判定的载荷判据消费 io_stream 单源谓词，不在 _client_http 内重造。"""
+    """有效图片判定的载荷判据消费 stream 单源谓词，不在 client._http 内重造。"""
     import seedream_mcp.client._http as client_http_module
 
     monkeypatch.setattr(client_http_module, "item_has_image_payload", lambda item: False)

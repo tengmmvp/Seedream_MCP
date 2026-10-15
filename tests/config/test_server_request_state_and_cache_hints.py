@@ -1,6 +1,6 @@
 """MCPServer 构造的 requestState 密钥环与静态列表缓存提示测试。
 
-resources 在模块 import 期构造进程级 MCPServer 单例，requestState 密钥环经
+server/runtime 在模块 import 期构造进程级 MCPServer 单例，requestState 密钥环经
 config 的活动配置访问器取值，配置不可用时回退 None 保持 SDK 默认临时密钥，
 import 链不因缺配置中断；静态列表缓存提示仅覆盖进程内不变的面。
 """

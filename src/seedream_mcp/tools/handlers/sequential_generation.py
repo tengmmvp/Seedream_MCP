@@ -1,4 +1,4 @@
-"""组图输出工具的 handler 处理器。
+"""组图输出工具处理器。
 
 薄适配器：取出参考图与 max_images 字段，与 prompt 等封装为 ``_execute`` 回调，委托
 ``execute_generation_handler`` 统一编排；字段规则与校验由
@@ -36,8 +36,7 @@ async def handle_sequential_generation(
     max_images 未显式提供时由 schema 按参考图数量自动推导。
 
     Returns:
-        含文本摘要与 structuredContent 的工具结果；失败不抛异常，以 ``is_error=True``
-        返回。
+        含文本摘要与 structuredContent 的工具结果；失败不抛异常，isError 为 True。
     """
     image = params.image
 

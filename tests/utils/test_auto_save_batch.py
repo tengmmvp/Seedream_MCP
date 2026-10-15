@@ -200,7 +200,7 @@ def test_pixel_limit_rejection_treats_value_error_header_as_unidentified(
 ) -> None:
     """畸形头在 PIL 插件抛 ValueError 时按无法识别处置返回 None，不引入新失败面。
 
-    捕获集与 image_validation 的解码包装同口径：ValueError 逃出会使保存降级链路
+    捕获集与 validation 的解码包装同口径：ValueError 逃出会使保存降级链路
     收到未知错误而非既有的「交由保存链路处置」。
     """
     from PIL import Image as PilImage
@@ -222,7 +222,7 @@ def test_pixel_limit_rejection_cold_path_initializes_decoders(
 ) -> None:
     """冷路径调用时设置解压炸弹阈值并注册 HEIF 解码器，再次调用不重复初始化。
 
-    初始化由 formats 的共享入口持有，io_save 与 image_validation 同口径消费；
+    初始化由 formats 的共享入口持有，save 与 validation 同口径消费；
     以注册计数 spy 断言调用与幂等，不构造真实 HEIF 载荷。
     """
     import io

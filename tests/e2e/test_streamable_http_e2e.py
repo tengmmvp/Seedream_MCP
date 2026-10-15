@@ -497,7 +497,7 @@ async def test_run_streamable_http_sse_smoke_and_graceful_shutdown(
         thread, listening = await _start_smoke_server_and_wait(port, thread_errors)
         if listening:
             break
-        # 监听未就绪：收尾本线程后丢弃失败痕迹，换端口重试一次
+        # 监听未就绪：收尾本线程后丢弃失败痕迹，换端口重试一次。
         for created in created_servers:
             created.should_exit = True
         thread.join(timeout=30.0)

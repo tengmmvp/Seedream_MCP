@@ -1,8 +1,8 @@
 """Seedream 模型家族解析与能力声明。
 
 集中管理各模型家族的识别与能力差异，含 output_format、tools、stream、组图、参考图
-上限等维度，供 validation、config、client、schemas 共享，避免分散的子串判定与能力
-表重复。MODEL_CAPABILITIES 等数据表是数据驱动校验的唯一数据源，新增模型只需扩展
+上限等维度，供 validators、config、client、schemas 等共享，避免分散的子串判定与
+能力表重复。MODEL_CAPABILITIES 等数据表是数据驱动校验的唯一数据源，新增模型只需扩展
 数据表而无需修改调用方代码。
 """
 
@@ -236,8 +236,8 @@ class CapabilityLabel(NamedTuple):
         return f"{self.zh}（{self.param}）"
 
 
-# 能力开关的中文标签表，validators 的能力门控报错与 model_info 的能力快照标签序
-# 共用；序与 get_model_info 快照的 capabilities 字段序一致。
+# 能力开关的中文标签表，validators 的能力门控报错与 get_model_info 的能力快照
+# 标签序共用；序与快照的 capabilities 字段序一致。
 CAPABILITY_LABELS: tuple[CapabilityLabel, ...] = (
     CapabilityLabel(
         "图层拆分", "layer_decomposition", "supports_layer_decomposition", "layer_decomposition"

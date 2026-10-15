@@ -30,7 +30,7 @@ def test_validate_prompt_chinese_limit_warns_but_returns(
 ) -> None:
     """中文计数超阈值仅警告不阻断，文案携带实际计数。"""
     text = "你" * 301
-    # 文档为「建议」而非硬限制：超限仅记录警告，不阻断调用。
+    # 文档将该阈值定为「建议」而非硬限制。
     assert validate_prompt(text) == text
     assert len(warning_logger.warnings) == 1
     assert "301" in warning_logger.warnings[0]

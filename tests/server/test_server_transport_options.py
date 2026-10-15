@@ -583,7 +583,7 @@ async def test_bearer_auth_middleware_decides_on_first_authorization_header() ->
 
 
 async def test_bearer_auth_middleware_passes_lifespan_scope() -> None:
-    """lifespan 类型 ASGI 消息直接透传，不校验鉴权。"""
+    """lifespan scope 直接透传，不校验鉴权。"""
     received: dict[str, object] = {}
 
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]

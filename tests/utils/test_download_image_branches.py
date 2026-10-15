@@ -1794,7 +1794,7 @@ async def test_download_data_write_locked_once_retries_and_lands(
     assert result["success"] is True
     assert result["attempts"] == 2
     assert save_path.read_bytes() == _RESUME_BODY
-    # 删除该持锁分类会使 PermissionError 落"权限拒绝，不可重试"终态，attempts 断言即红。
+    # 删除该持锁分类会使 PermissionError 落「权限拒绝，不可重试」终态，attempts 断言即红。
     assert write_opens["count"] == 2
     assert session._idx == 2
     assert not list(tmp_path.glob("*.part"))

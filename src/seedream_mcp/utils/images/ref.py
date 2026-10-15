@@ -29,7 +29,7 @@ def classify_image_reference(image: str) -> Literal["url", "data_uri", "local"]:
     形态判 data_uri，非图像 MIME 与无逗号截断 URI 均交 Data URI 校验给出精确
     报错，形如 data:logo.png、data:photo,v2.png 的本地文件名不误入。逗号与头部
     扫描仅在 data: 前缀命中时执行且封顶 128 字符，超长无逗号串不做全量扫描；
-    scheme 判定取前 16 字符小写窗口，最长前缀 ``https://`` 为 8 字符足够覆盖。
+    scheme 判定取前 16 字符小写窗口，最长匹配前缀 ``https:`` 为 6 字符足够覆盖。
 
     Args:
         image: 图像输入字符串，调用方应先 strip 首尾空白。

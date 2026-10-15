@@ -55,7 +55,7 @@ class NonRegularFileError(OSError):
 def _cleanup_temp_file(temp_path: Path) -> None:
     """清理临时文件，忽略不存在，清理失败记录警告以暴露残留。
 
-    清理失败多为 Windows 杀毒、索引器短暂持锁等瞬时原因，记录 warning 便于运维
+    清理失败多为 Windows 杀软、索引器短暂持锁等瞬时原因，记录 warning 便于运维
     发现残留而非静默吞掉。
     """
     try:

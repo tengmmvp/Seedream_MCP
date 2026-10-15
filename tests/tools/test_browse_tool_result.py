@@ -366,7 +366,7 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
     for i in range(5):
         (images_root / f"img_{i:02d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    # 首页 scan_limit = 0+5+1 = 6 > 5，扫到目录末尾缓存完整的 (原始, resolved) 对列表
+    # 首页 scan_limit = 0+5+1 = 6 > 5，扫到目录末尾缓存完整的 (原始, resolved) 对列表。
     page1 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=5, offset=0)
     )
@@ -374,7 +374,7 @@ async def test_browse_images_deep_page_reuses_resolved_paths(
 
     realpath_calls = _install_counting_realpath(monkeypatch)
 
-    # 深页 offset=4：scan_limit=4+1+1=6，命中完整缓存，不重扫也不逐文件 resolve
+    # 深页 offset=4：scan_limit=4+1+1=6，命中完整缓存，不重扫也不逐文件 resolve。
     page2 = await handle_browse_images(
         BrowseImagesInput(directory=".", recursive=False, limit=1, offset=4)
     )
@@ -788,7 +788,7 @@ async def test_browse_images_truncated_partial_page_marks_incompleteness(
     late.mkdir()
     for i in range(20):
         (late / f"note_{i:02d}.txt").write_bytes(b"x")
-    # 预算使子目录 a 完整产出 1 图、子目录 b 触发截断，页内条目为部分结果
+    # 预算使子目录 a 完整产出 1 图、子目录 b 触发截断，页内条目为部分结果。
     monkeypatch.setattr(path_module, "_SCAN_ENTRY_BUDGET", 15)
 
     result = await handle_browse_images(BrowseImagesInput(directory=".", recursive=True))
@@ -986,7 +986,7 @@ async def test_browse_images_invalid_directory_error_sanitized_and_truncated(
     错误消息收敛到输出上限内且 api_key 裸值被脱敏。
     """
     directory = "//server/share/api_key=secret" + "a" * 900
-    assert len(directory) <= 1024  # schema 侧 max_length 内，进入 handler 触发拒绝
+    assert len(directory) <= 1024  # schema 侧 max_length 内，进入 handler 触发拒绝。
 
     result = await handle_browse_images(BrowseImagesInput(directory=directory))
 
@@ -1748,7 +1748,7 @@ async def test_browse_images_out_of_bounds_symlink_keeps_pagination_reachable(
     复核被剔除且不占配额。Windows 符号链接创建权限不足时按既有先例 skip，
     剔除占额语义由注入扫描器的用例稳定覆盖。
     """
-    # 越界目标置于共享 basetemp 之外的独占临时目录
+    # 越界目标置于共享 basetemp 之外的独占临时目录。
     outside_dir = Path(tempfile.mkdtemp(prefix="seedream-browse-outside-"))
     target = outside_dir / "target.png"
     target.write_bytes(b"\x89PNG\r\n\x1a\n")

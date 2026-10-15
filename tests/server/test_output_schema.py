@@ -30,7 +30,7 @@ async def test_generation_tools_output_schema_covers_core_fields() -> None:
     generation_tools = {
         tool.name: tool for tool in tools if tool.name not in {"browse_images"} | NO_PARAM_TOOLS
     }
-    # 全部工具失注册时 next 立即失败，不给空洞通过的机会。
+    # 生成类工具空集时断言立即失败，不给空洞通过的机会。
     first = next(iter(generation_tools.values()), None)
     assert first is not None, "未找到生成类工具"
 

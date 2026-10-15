@@ -1,9 +1,9 @@
-"""core 流水线守卫测试：聚合状态摊平、结构化输出净化与 SSE 错误重试契约。
+"""生成流水线守卫测试：聚合状态摊平、结构化输出净化、SSE 错误终态与批次前置校验。
 
 覆盖四类契约：并行批次内任一请求自身为 partial 时批次 status 至多为 partial；
 失败分支非 dict 形态 error 的兜底 message 与 usage 共享引用、未知嵌套键同样过
-净化管线；MCP Roots 为空列表时自动保存目录解析归入校验档而非未知错误；
-SSE 请求级错误事件按 4xx 终态处理，_call_api 不对其重试。
+净化管线；SSE 请求级错误事件按 4xx 终态处理，_call_api 不对其重试；公共参数
+前置校验失败时批次零请求分发，错误档位与文案和单请求路径一致。
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def test_aggregate_partial_request_status_flattens_batch_to_partial() -> None:
 
     assert aggregated["success"] is True
     assert aggregated["status"] == "partial"
-    # 两请求均成功，失败计数为 0，partial 仅来自请求自身的部分失败
+    # 两请求均成功，失败计数为 0，partial 仅来自请求自身的部分失败。
     assert aggregated["batch"]["failed_requests"] == 0
 
 
@@ -344,7 +344,7 @@ async def test_parallel_batch_prevalidate_failure_zero_dispatch_and_message_pari
     assert single_result.is_error is True
     assert batch_result.structured_content is not None
     assert batch_result.structured_content["error"]["type"] == "validation_error"
-    # 失败走外层统一降级分支，未进入逐请求错误聚合
+    # 失败走外层统一降级分支，未进入逐请求错误聚合。
     assert batch_result.structured_content["batch"] is None
 
     batch_text = next(

@@ -45,7 +45,7 @@ def _classify_generation_error_type(exc: Exception) -> str:
     return resolve_error_profile(exc).error_code
 
 
-# 带 user_hint 的档案由 common 层直接采用 hint，查表仅覆盖无 hint 的档案；
+# 带 user_hint 的档案由 execute_generation_handler 错误分支直接采用 hint，查表仅覆盖无 hint 的档案；
 # 兜底码 generation_failed 与成因多样的 api_error 无定向指引，均走默认建议。
 _FAILURE_GUIDANCE_DEFAULT_CODES = frozenset({"generation_failed", "api_error"})
 

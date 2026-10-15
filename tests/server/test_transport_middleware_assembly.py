@@ -2428,8 +2428,9 @@ async def test_large_body_admission_external_cancel_terminal_frame_never_double_
 async def test_large_body_admission_repeated_host_cancel_releases_supervisor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """落定等待只吸收窗口内首个取消：重复取消立即放行监督者并经 finally 归还许可，
-    吞取消驻留的下游不钉死监督者，脱离子任务短暂孤儿收尾。"""
+    """落定等待取有界档：进入等待的取消与窗口内首个重复取消均被吸收，后续重复取消
+    立即放行监督者并经 finally 归还许可，吞取消驻留的下游不钉死监督者，脱离子任务
+    短暂孤儿收尾。"""
     spy = _install_spy_gate(monkeypatch, 1)
     downstream_started = asyncio.Event()
     downstream_cancelled = asyncio.Event()

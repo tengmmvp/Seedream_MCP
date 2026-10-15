@@ -2,8 +2,9 @@
 
 涉及 I/O 的图像校验归本模块：本地文件经 no-follow 打开并复核常规文件形态后
 读取字节，交 PIL 解码校验格式与维度，Data URI 经 base64 解码后同样校验；
-纯参数校验（尺寸、水印、prompt 等）与宽高比常量归 validators，本模块从其导入共用。validate_image_path 组合工作区边界
-判定与统一规则校验。首次使用时进程级覆写 PIL.Image.MAX_IMAGE_PIXELS 为 36M，
+纯参数校验（尺寸、水印、prompt 等）与宽高比常量归 validators，本模块从其导入共用。
+validate_image_path 组合读权限边界判定与统一规则校验。首次使用时进程级覆写
+PIL.Image.MAX_IMAGE_PIXELS 为 36M，
 嵌入本包的宿主进程须感知该副作用。
 """
 
@@ -437,9 +438,9 @@ def _validate_image_dimensions(width: int, height: int, value: Any) -> None:
 def _validate_file_path(file_path: str, skip_dimensions: bool = False) -> str:
     """验证本地文件路径的存在性、文件类型、扩展名与大小，默认还校验图像内容格式、扩展名一致性与维度。
 
-    工作区边界由调用方以授权 Roots 集合保证：本函数解析用的基目录取自环境配置，
-    与 MCP Roots 来源不同，函数内不做边界断言以免误拒 Roots 授权的合法路径。格式与
-    维度校验的读取经 no-follow 打开最终分量并复核常规文件形态；path 已由 _resolve_local_image_path
+    越界判定由调用方按读权限集合完成：本函数解析相对路径的基目录仅为图片目录，
+    函数内不做边界断言以免误拒读权限内授权的合法路径。格式与维度校验的读取经
+    no-follow 打开最终分量并复核常规文件形态；path 已由 _resolve_local_image_path
     resolve 跟随符号链接，O_NOFOLLOW 仅防 resolve 与 open 之间的 TOCTOU 窗口，
     主要越界防御由调用方的边界 resolve 与比较提供。
 
@@ -511,7 +512,7 @@ def _validate_data_uri(data_uri: str) -> str:
     用户侧大小写误写不再依赖上游报错。
     """
     try:
-        # 经 formats.parse_data_uri 统一拆分，与 auto_save 共用单一解析。
+        # 经 formats.parse_data_uri 统一拆分，与 save 共用单一解析。
         media_type, b64, is_base64 = parse_data_uri(data_uri)
         if media_type is None or not b64:
             raise SeedreamValidationError("Data URI 格式无效", field="image", value=data_uri)
@@ -578,8 +579,8 @@ def _validate_data_uri(data_uri: str) -> str:
 def validate_image_input(image: str, skip_dimensions: bool = False) -> str:
     """验证图像输入的有效性，支持 HTTP/HTTPS URL、本地文件路径与 Data URI 三种格式。
 
-    本函数对本地文件路径不做工作区越界校验，调用方须先经 validate_image_path 完成
-    基于 MCP Roots 的越界判定，避免直接传入本地路径绕过工作区边界。
+    本函数对本地文件路径不做读权限越界校验，界内判定由调用方先行完成（读取链经
+    候选定位、诊断链经 validate_image_path），避免本地路径绕过读取边界。
 
     Args:
         image: 图像 URL、文件路径或 Data URI。

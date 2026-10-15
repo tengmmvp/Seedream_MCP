@@ -133,8 +133,6 @@ def aggregate_parallel_generation_results(
             request_exc = request_errors.get(request_index)
             error_message = _extract_parallel_request_error(result, request_exc)
             error_items.append({"request_index": request_index, "message": error_message})
-            # 软失败请求的用量照常合并：失败请求上游也可能计量，计费核对不因批次
-            # 聚合漏计。
             usage = result.get("usage") if result else None
             if isinstance(usage, dict):
                 for key, value in usage.items():
@@ -606,8 +604,7 @@ def _build_generation_structured_result(
     Returns:
         structuredContent 字典，成功路径排除 error 键。
     """
-    # b64_json 为用户显式请求的图像载荷，有意不做截断。流水线传入的 images 已
-    # 净化且净化幂等，直接消费；独立调用未传时在此完成首次净化。
+    # b64_json 为用户显式请求的图像载荷，有意不做截断。
     sanitized_images = (
         images if images is not None else _sanitize_image_errors(extract_images(result))
     )

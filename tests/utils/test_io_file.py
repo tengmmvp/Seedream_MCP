@@ -1,4 +1,4 @@
-"""io_file 守护测试：open_no_follow_read 与 open_no_follow_write_fd 的防换链打开、
+"""files 守护测试：open_no_follow_read 与 open_no_follow_write_fd 的防换链打开、
 open_regular_read 的常规文件打开序列与 open_packaged_read 的符号链接布局解析、
 finalize_atomic_replace 落盘终局、atomic_replace_from_fd_sync 同步原子落盘。
 

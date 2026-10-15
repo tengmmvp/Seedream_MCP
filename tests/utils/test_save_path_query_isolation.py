@@ -1,6 +1,6 @@
 """保存路径扩展名推断的 query 与 fragment 隔离测试。
 
-io_url.get_file_extension_from_url 仅从 URL 路径段提取扩展名，签名 query 与
+url.get_file_extension_from_url 仅从 URL 路径段提取扩展名，签名 query 与
 fragment 不参与推断，典型形态为 ?X-Tos-Signature=... 签名串。本文件经
 FileManager.create_save_path 端到端锁定该行为，防止退化为对整串 URL 取后缀。
 """

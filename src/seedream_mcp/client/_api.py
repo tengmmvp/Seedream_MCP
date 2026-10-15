@@ -2,8 +2,8 @@
 
 定义 :class:`SeedreamClient`，封装火山引擎 Seedream 系列图像生成 API 的调用。
 该类同时作为公共库 API 与 MCP 工具后端，提供文生图、图文生图、多图融合、
-组图生成四种入口，入口处重新校验参数，调用方无需预校验。HTTP 传输与响应
-归一化机械位于 ``_client_http``，批内共享请求计划位于 ``request_plan``。
+组图输出四种入口，入口处重新校验参数，调用方无需预校验。HTTP 传输与响应
+归一化机械位于 ``_http``，批内共享请求计划位于 ``request_plan``。
 """
 
 import asyncio

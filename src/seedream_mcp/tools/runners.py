@@ -1,11 +1,11 @@
-"""MCP 工具适配器层，作为 composition root 组装 pipeline 流水线与 handlers 处理器。
+"""MCP 工具适配器层，作为 composition root 组装 pipeline 与 handlers。
 
 除 ``run_get_model_info`` 直接透传配置外，其余 ``run_*`` 函数经
 ``workspace_roots_scope_from_result`` 应用 MCP Roots 工作区边界，roots 结果由
 server 层按协商版本取回注入；再将 pydantic 校验后的入参模型委托给对应
 ``handle_*``。依赖方向为 pipeline <- handlers <- runners，避免 pipeline 反向依赖 handlers。
 输出通道（缩略图预览与 JSON 镜像）由调用方经 ``output_channels_scope``
-作用域开关，runner 与 handler 处理器签名不感知通道开关。
+作用域开关，runner 与 handler 签名不感知通道开关。
 """
 
 from __future__ import annotations

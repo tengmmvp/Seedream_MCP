@@ -52,7 +52,7 @@ def test_sequential_generation_reference_images_max_14_ok() -> None:
 def test_sequential_generation_derived_max_images_not_in_fields_set() -> None:
     """派生的 max_images 不进入 model_fields_set，与显式传入保持可区分。
 
-    普通赋值会把派生值登记进 fields_set，误导以 fields_set 判断"是否显式传入"的
+    普通赋值会把派生值登记进 fields_set，误导以 fields_set 判断「是否显式传入」的
     下游逻辑如 exclude_unset 序列化与审计，并多触发一轮 after-validator。
     """
     images = [f"https://example.com/{i}.png" for i in range(3)]

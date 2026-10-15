@@ -2,7 +2,7 @@
 
 需要伪造 API 响应分块流或注入 MockTransport 的测试经此复用 _FakeLog/
 _FakeSSEResponse 与注入逻辑，避免逐行重复定义造成语义漂移。伪 SSE 响应按
-aiohttp/httpx 公开接口的最小子集模拟分块字节流；_parse_sse 以标准参数组合
+httpx 公开接口的最小子集模拟分块字节流；_parse_sse 以标准参数组合
 解析伪响应，调用方仅声明偏离默认值的参数；_make_client 复用最小测试配置的
 客户端构造。
 """

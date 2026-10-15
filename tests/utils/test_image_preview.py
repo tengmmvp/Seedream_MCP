@@ -1,6 +1,6 @@
 """生成工具结果的缩略图预览测试。
 
-覆盖 image_thumbnail 的缩略图生成、流水线按配置与保存结果装配 ImageContent、
+覆盖 thumbnail 的缩略图生成、流水线按配置与保存结果装配 ImageContent、
 SEEDREAM_PREVIEW_ENABLED 解析。集成用例经 run_text_to_image 触发，mock client
 与自动保存，自动保存返回真实落盘的 PNG 驱动真实缩略图编码。
 """
@@ -500,7 +500,7 @@ async def test_cached_thumbnail_survives_unwritable_cache_dir(tmp_path: Path) ->
     image = _write_png(tmp_path / "src.png", (800, 600))
     images_root = tmp_path / ".seedream" / "images"
     images_root.mkdir(parents=True)
-    # 同名占位文件使缓存目录创建失败，走真实降级路径
+    # 同名占位文件使缓存目录创建失败，走真实降级路径。
     (tmp_path / ".seedream" / "thumbs").write_text("occupied", encoding="utf-8")
 
     first = await thumbnail_module.cached_thumbnail_bytes(image, images_root)
@@ -807,7 +807,7 @@ def test_thumbnail_sweep_evicts_oldest_beyond_cap(
 
     thumbnail_module._maybe_sweep_thumbnails(thumbs_root)
 
-    # 总量 1200 超上界 1000，驱逐目标 500：删最旧 600 后 600 仍超，再删 300 后停止
+    # 总量 1200 超上界 1000，驱逐目标 500：删最旧 600 后 600 仍超，再删 300 后停止。
     assert not oldest.exists()
     assert not middle.exists()
     assert newest.exists()

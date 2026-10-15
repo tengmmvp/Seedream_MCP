@@ -1,4 +1,4 @@
-"""守护测试：_prepare_image_input 本地文件缓存键含 (mtime, size) 签名。
+"""守护测试：ImagePreparer 本地文件缓存键含 (mtime, size) 签名。
 
 本地文件替换后签名变化使缓存失效；以 size 维度变化触发，规避 Windows mtime 精度问题。
 """

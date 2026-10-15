@@ -121,7 +121,7 @@ async def _run_web_generation(
     images_root = await _responses.resolve_web_images_root()
     if isinstance(images_root, JSONResponse):
         return images_root
-    # runner 契约保证不抛，异常已归约为 is_error 结果，兜底仅防流水线全捕回归
+    # runner 契约保证不抛，异常已归约为 is_error 结果，兜底仅防流水线全捕回归。
     try:
         with output_channels_scope(preview=False, mirror=False):
             result = await runner(params, config, ctx)
@@ -149,7 +149,7 @@ async def web_generate_text_to_image(request: Request) -> Response:
 
 
 async def web_generate_image_to_image(request: Request) -> Response:
-    """图生图端点。"""
+    """图文生图端点。"""
     return await _run_web_generation(request, ImageToImageInput, run_image_to_image)
 
 

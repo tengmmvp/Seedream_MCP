@@ -288,7 +288,7 @@ _COMPOSE_SEEDREAM_MOUNT = "- ./.seedream:/app/.seedream"
 
 def test_dockerfile_pins_seedream_uid() -> None:
     """Dockerfile 以 useradd --uid 显式固定容器用户并建同名组，挂载属主契约的 uid 落值于此。"""
-    # 声明行缺失或形态不齐在 _docker_uid 内断言失败，此处锁定建组旗标存在。
+    # 声明行缺失或形态不齐在 _lib.docker_uid 内断言失败，此处锁定建组旗标存在。
     assert "--user-group" in useradd_line()
 
 

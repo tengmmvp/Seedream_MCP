@@ -78,7 +78,7 @@ def _scan(
 
 
 def _advance_past_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
-    """把 io_scan 的 time.monotonic 推进到 TTL 之外，模拟缓存过期。"""
+    """把 scan 模块的 time.monotonic 推进到 TTL 之外，模拟缓存过期。"""
     ttl = scan_module._DIRECTORY_SCAN_CACHE_TTL_SECONDS
     base = time.monotonic()
     monkeypatch.setattr(time, "monotonic", lambda: base + ttl + 1)
@@ -1679,7 +1679,7 @@ def test_cached_find_hit_extension_base_derives_raw_scan_count(
 def test_find_images_does_not_descend_into_reparse_point(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """NTFS junction 等 reparse point 目录不下降，与 io_storage 清理路径防护对齐。
+    """NTFS junction 等 reparse point 目录不下降，与 io/storage 清理路径防护对齐。
 
     junction 的 is_symlink 返回 False，is_dir(follow_symlinks=False) 对其仍返回 True
     而下降进入目标执行 OS 级 listdir，涉及 SMB 出站认证暴露；目录分支复用遍历条目
@@ -1713,7 +1713,7 @@ def test_find_images_does_not_descend_into_reparse_point(
 def test_find_images_excludes_reparse_point_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """reparse point 文件不列入结果，与目录分支及 io_storage 清理遍历防护口径对称。
+    """reparse point 文件不列入结果，与目录分支及 io/storage 清理遍历防护口径对称。
 
     OneDrive 占位 .png 等 reparse 文件不是 symlink，is_file(follow_symlinks=False)
     对其仍返回 True，仅靠后缀过滤会列为参考图而读取时跟随 reparse 目标。文件与

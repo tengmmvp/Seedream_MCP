@@ -22,7 +22,7 @@ import seedream_mcp.server as server
 
 from _lib.roots_session_fakes import RootsListCallback
 
-# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
+# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供。
 
 
 def _single_text_payload(result: ReadResourceResult) -> dict[str, Any]:

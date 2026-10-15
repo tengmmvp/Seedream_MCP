@@ -3,8 +3,8 @@
 锁定四组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
 能力表参考图上限与组图总数上限、MCP 注册工具名与 handlers ToolMetadata 工具名、
 路径相似建议与 CLI 端口解析的边界行为；另含 loguru exc_info 关键字、security
-标记级别与环境变量键清洗前缀的全源码静态守护。新增取值或改名时两侧须同步，
-本文件在各处失败即暴露漂移。
+标记级别与环境变量键清洗前缀的全源码静态守护，以及 repo-layout.md 仓库与 tests
+结构契约的静态守护。新增取值或改名时两侧须同步，本文件在各处失败即暴露漂移。
 """
 
 from __future__ import annotations

@@ -62,7 +62,7 @@ from .url import sanitize_url
 
 logger = get_logger()
 
-# 流式下载块大小：较大块减少多 MB 图片的 await write 循环次数。
+# 流式下载块大小：较大块减少多 MB 图片的逐块循环开销。
 _DOWNLOAD_CHUNK_SIZE = 256 * 1024
 
 # 落盘批量写阈值：累积至该字节数才提交一次写入线程任务，减少执行器跳转次数。
@@ -129,7 +129,6 @@ def _inflate_part_file_capped(path: Path, wbits: int, max_output: int) -> bytear
         while not decomp.eof:
             chunk = handle.read(_DOWNLOAD_CHUNK_SIZE)
             if not chunk:
-                # 输入已尽而流未收束：压缩流被截断。
                 raise ValueError("压缩流未完整收束")
             pending: bytes = chunk
             while pending:
@@ -372,7 +371,7 @@ class RetryableDownloadError(DownloadError):
 
 
 class TransientFileLockError(RetryableDownloadError):
-    """已存在 .part 的读取、写入、撕裂尾截断、重开与终局替换遭杀毒软件等瞬时持锁的可重试错误。
+    """已存在 .part 的读取、写入、撕裂尾截断、重开与终局替换遭杀软等瞬时持锁的可重试错误。
 
     此类持锁一律可重试，新文件创建的权限拒绝维持终态。
     """
@@ -1333,7 +1332,7 @@ class DownloadManager:
                 resume.restart()
                 raise RetryableDownloadError("续传临时文件已不存在，退回全量重下") from exc
             except PermissionError as exc:
-                # .part 仍在但被杀毒等瞬时持锁：保留完成态与数据，下一趟直接重试重开。
+                # .part 仍在但被杀软等瞬时持锁：保留完成态与数据，下一趟直接重试重开。
                 _raise_transient_file_lock("续传临时文件重开", exc)
             # 重开即持有化：截齐在途取消经 resume.fd 引用善后，防本地 fd 泄漏。
             resume.fd = fd
@@ -1632,8 +1631,8 @@ class DownloadManager:
                 logger.opt(exception=True).warning("文件系统错误 (尝试 {}): {}", attempt + 1, e)
 
             except Exception as e:
-                # 编程 bug 等非可重试意外错误直接抛出不浪费退避等待；调用方 auto_save
-                # 仍有兜底 except Exception 负责降级返回原始 URL。
+                # 编程 bug 等非可重试意外错误直接抛出不浪费退避等待；调用方 save.py 的
+                # _run_save_with_degradation 兜底 except Exception，降级返回原始 URL。
                 logger.opt(exception=True).warning(
                     "下载非预期错误，不再重试 (尝试 {}): {}",
                     attempt + 1,

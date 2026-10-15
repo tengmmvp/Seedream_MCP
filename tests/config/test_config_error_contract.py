@@ -115,7 +115,7 @@ def test_workspace_root_provider_falls_back_to_env_on_os_error(
 ) -> None:
     """活动配置懒构建抛 OSError 时提供者回退环境变量，不让异常沿 provider 上抛。
 
-    provider 被 io_path 的每次边界解析调用，异常上抛会把文件访问整体变为崩溃；
+    provider 被 path 模块的每次边界解析调用，异常上抛会把文件访问整体变为崩溃；
     与配置错误同口径回退 SEEDREAM_WORKSPACE_ROOT。
     """
     monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))

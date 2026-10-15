@@ -339,7 +339,7 @@ class SeedreamConfig:
             ) from exc
 
     def _validate_client_timeouts(self) -> None:
-        """校验通用超时、API 超时与 API 重试次数下界及 float 可转换性。"""
+        """校验通用超时、API 超时、生成并发与 API 重试次数下界及超时字段的 float 可转换性。"""
         for field_name in ("timeout", "api_timeout"):
             value = getattr(self, field_name)
             if value <= 0:

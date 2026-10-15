@@ -5,8 +5,7 @@ Web 操作台同源 Origin 与跨站 Sec-Fetch 校验及内层异常边界八个
 /.well-known/mcp 端点发现 303 重定向路由，以及 streamable-http 监听与 TLS 配置。
 中间件经 Starlette add_middleware 装配到 MCPServer 的 streamable_http_app 外层，
 按装配逆序执行。
-MCPServer 实例 mcp 与共享资源清理函数在调用时从 runtime 模块延迟导入，传输层
-不依赖 server 模块。
+MCPServer 实例 mcp 与共享资源清理函数在调用时从 runtime 模块延迟导入。
 """
 
 from __future__ import annotations
@@ -93,7 +92,7 @@ def is_loopback_bind_host(host: str) -> bool:
 
 
 def _ensure_printable_ascii_bind_host(host: str) -> None:
-    """绑定地址守卫：空串与非可打印 ASCII 装配期拒绝，判定与文案取自 _host_syntax 的共用谓词。"""
+    """绑定地址守卫：空串与非可打印 ASCII 装配期拒绝，判定与文案取自 host_syntax 的共用谓词。"""
     invalid_reason = bind_host_invalid_reason(host)
     if invalid_reason is not None:
         raise SeedreamConfigError(f"streamable-http 绑定地址{invalid_reason}。")
@@ -1044,8 +1043,8 @@ class _WebOriginGuardMiddleware:
     def _origin_permitted(self, scope: Scope, origin: bytes) -> bool:
         """判定 Origin 同源或命中配置放行列表。
 
-        与 CORS 层及 SDK 内层同为大小写敏感精确比较，三层共用一条规则；配置
-        条目经构建期校验恒为小写，浏览器 Origin 亦恒为小写。
+        同源比对忽略大小写；放行列表匹配与 CORS 层及 SDK 内层同为大小写敏感
+        精确比较，配置条目经构建期校验恒为小写，浏览器 Origin 亦恒为小写。
         """
         if self._same_origin(scope, origin):
             return True

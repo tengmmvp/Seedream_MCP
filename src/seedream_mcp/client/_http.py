@@ -506,7 +506,6 @@ class _ClientHTTPMixin:
         try:
             payload = await load_json_bytes(raw_body)
         except CpuOffloadPoolClosedError:
-            # 池关闭属服务退出窗口而非响应体缺陷，原样上抛交由调用链按服务关闭处置。
             raise
         except Exception as exc:
             raise SeedreamAPIError(f"JSON 解析失败: {str(exc)}") from exc
@@ -644,7 +643,6 @@ class _ClientHTTPMixin:
             try:
                 return await self._call_api_admitted(endpoint, request_data)
             except CpuOffloadPoolClosedError as exc:
-                # 池关闭只发生在退出清理窗口，属服务正在关闭而非请求或上游失败，不重试。
                 self.logger.warning("{} API 调用因服务正在关闭中止: {}", endpoint, exc)
                 raise SeedreamMCPError(f"服务正在关闭，{endpoint} API 调用已中止") from exc
 

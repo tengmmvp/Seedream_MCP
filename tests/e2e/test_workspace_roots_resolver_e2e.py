@@ -23,7 +23,7 @@ from _lib.roots_session_fakes import RootsListCallback
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n"
 
-# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
+# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供。
 
 
 async def _browse(client: Client, directory: str) -> CallToolResult:

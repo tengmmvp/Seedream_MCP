@@ -159,7 +159,7 @@ def prepare_static_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def make_png_bytes(width: int = 8, height: int = 8) -> bytes:
-    """生成一张 PIL 可解码的 PNG 字节，供文件与缩略图端点测试使用。"""
+    """生成一张 PIL 可解码的 PNG 字节，供图库、文件与缩略图端点测试使用。"""
     from PIL import Image
 
     buffer = io.BytesIO()

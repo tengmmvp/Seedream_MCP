@@ -1,4 +1,4 @@
-"""守护测试：_prepare_image_input 对同一 cache_key 的并发 miss 复用在途任务。
+"""守护测试：ImagePreparer 对同一 cache_key 的并发 miss 复用在途任务。
 
 并发 miss 须共享 _prepare_inflight 中的同一 asyncio.Task，使底层
 prepare_image_input 仅被调用一次。
@@ -32,7 +32,6 @@ async def test_prepare_image_input_concurrent_miss_shares_single_inflight_task(
         await asyncio.sleep(0.05)
         return f"prepared:{image}"
 
-    # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # URL 输入的缓存签名恒为 (0.0, 0)，两次 cache_key 完全一致
@@ -72,7 +71,6 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
         await asyncio.sleep(0.1)
         return f"prepared:{image}"
 
-    # 对象式 monkeypatch：直接作用于模块对象，规避 utils __getattr__ 延迟加载
     monkeypatch.setattr(image_prepare, "prepare_image_input", fake_prepare)
 
     # URL 输入的缓存签名恒为 (0.0, 0)，两次 cache_key 完全一致
@@ -88,16 +86,13 @@ async def test_prepare_image_input_creator_cancel_does_not_cancel_other_waiters(
     await inner_started.wait()
     assert len(client._image_preparer._prepare_inflight) == 1
 
-    # 取消创建者，底层 inflight task 不受连带取消。
     creator.cancel()
 
-    # 等待两个 task 终结。
     done, pending = await asyncio.wait({creator, waiter})
     assert pending == set()
     assert creator.cancelled()
     assert waiter in done
 
-    # 等待者仍从共享 inflight task 拿到结果，不被连带取消
     assert not waiter.cancelled(), "等待者不应被创建者取消连带取消"
     assert waiter.result() == "prepared:https://example.com/ref.png"
     assert call_count == 1
@@ -141,7 +136,6 @@ async def test_prepare_image_input_waiter_cancel_keeps_inflight_running(
     await inner_started.wait()
     assert len(client._image_preparer._prepare_inflight) == 1
 
-    # 取消等待者：shield 隔离使底层 inflight task 不受连带取消
     waiter.cancel()
 
     done, pending = await asyncio.wait({creator, waiter})

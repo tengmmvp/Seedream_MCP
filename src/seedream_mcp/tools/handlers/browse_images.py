@@ -542,8 +542,6 @@ def _paginate_browse_images(
     elif scan_result is None or scan_result.incomplete_cause is None:
         total_count = len(image_pairs)
     else:
-        # 存在不完整成因时总数一律未知；窗口未扫尽（SKIPPED 且扫尽除外）不以
-        # has_more=False 声称无更多。
         total_count = None
         if not (
             scan_result.incomplete_cause is ScanIncompleteCause.SKIPPED and scan_result.complete

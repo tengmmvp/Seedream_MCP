@@ -1,6 +1,6 @@
-"""工具图标
-Lucide 线条图标（https://lucide.dev，ISC License）内嵌为 data URI；
-每工具提供 SVG 与 72×72 PNG 双格式。
+"""工具图标：每工具内嵌 SVG 与 72×72 PNG 双格式 data URI。
+
+图标取自 Lucide（https://lucide.dev，ISC License）。
 """
 
 from __future__ import annotations

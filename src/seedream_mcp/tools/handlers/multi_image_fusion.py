@@ -1,4 +1,4 @@
-"""多图融合工具的 handler 处理器。
+"""多图融合工具处理器。
 
 薄适配器：取出多图列表字段，与 prompt 等封装为 ``_execute`` 回调，委托
 ``execute_generation_handler`` 统一编排；字段规则与校验由 ``MultiImageFusionInput``
