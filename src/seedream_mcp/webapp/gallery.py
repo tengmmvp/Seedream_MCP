@@ -16,8 +16,8 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from ..tools.core.common import output_channels_scope
-from ..tools.core.schemas import BrowseImagesInput
+from ..tools.outputs.channels import output_channels_scope
+from ..tools.schemas import BrowseImagesInput
 from ..tools.runners import run_browse_images
 from ..utils.core.logs import get_logger
 from ..utils.io.path import (

@@ -12,7 +12,7 @@ import pytest
 
 from _os_fakes import _install_counting_realpath, _make_cycle_link, _make_dangling_link
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.tools.core._pipeline import _resolve_base_dir, prevalidate_save_path
+from seedream_mcp.tools.pipeline._paths import _resolve_base_dir, prevalidate_save_path
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.io.path import (
     _DATA_ROOT_RESOLVE_CACHE,
@@ -198,7 +198,7 @@ def test_resolve_base_dir_absolute_save_path_skips_unresolvable_images_root(
 ) -> None:
     """绝对 save_path 不依赖基准，数据根目录声明不可解析时不被计费前预检拒绝。"""
     import seedream_mcp.utils.io.path as io_path_module
-    from seedream_mcp.tools.core._pipeline import prevalidate_save_path, _resolve_base_dir
+    from seedream_mcp.tools.pipeline._paths import prevalidate_save_path, _resolve_base_dir
 
     monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(tmp_path / "pics"))
 

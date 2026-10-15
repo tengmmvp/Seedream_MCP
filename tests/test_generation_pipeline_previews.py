@@ -14,13 +14,13 @@ import pytest
 from mcp.types import ImageContent, TextContent
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core import common as common_module
-from seedream_mcp.tools.core import outputs as outputs_module
-from seedream_mcp.tools.core._channels import output_channel_enabled
-from seedream_mcp.tools.core.common import execute_generation_handler, output_channels_scope
-from seedream_mcp.tools.core.outputs import build_structured_tool_result
-from seedream_mcp.tools.core.schemas import TextToImageInput
-from seedream_mcp.tools.impl._metadata import TEXT_TO_IMAGE
+from seedream_mcp.tools.pipeline import _execute as common_module
+import seedream_mcp.tools.outputs as outputs_module
+from seedream_mcp.tools.outputs.channels import output_channel_enabled
+from seedream_mcp.tools.pipeline import execute_generation_handler, output_channels_scope
+from seedream_mcp.tools.outputs import build_structured_tool_result
+from seedream_mcp.tools.schemas import TextToImageInput
+from seedream_mcp.tools.handlers._metadata import TEXT_TO_IMAGE
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.core.logs import get_logger
 

@@ -26,8 +26,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ..config import SeedreamConfig, get_active_config
-from ..tools.core.common import output_channels_scope
-from ..tools.core.schemas import (
+from ..tools.outputs.channels import output_channels_scope
+from ..tools.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
     SequentialGenerationInput,

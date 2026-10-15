@@ -8,8 +8,8 @@ import pytest
 
 from _generation_fixtures import _patch_client_method_spy
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core.schemas import BackgroundMode, ImageToImageInput
-from seedream_mcp.tools.impl.image_to_image import handle_image_to_image
+from seedream_mcp.tools.schemas import BackgroundMode, ImageToImageInput
+from seedream_mcp.tools.handlers.image_to_image import handle_image_to_image
 
 
 async def test_handle_image_to_image_passes_layer_fields_to_client(

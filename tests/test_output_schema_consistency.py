@@ -12,15 +12,18 @@ from typing import Any
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core.common import extract_images
-from seedream_mcp.tools.core.context import GenerationExecutionContext, build_generation_context
-from seedream_mcp.tools.core.outputs import (
+from seedream_mcp.tools.pipeline import extract_images
+from seedream_mcp.tools.pipeline.context import GenerationExecutionContext, build_generation_context
+from seedream_mcp.tools.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
 )
-from seedream_mcp.tools.core.browse import _BrowseRequestState, _build_browse_structured_result
-from seedream_mcp.tools.core.results import _build_generation_structured_result
-from seedream_mcp.tools.core.schemas import (
+from seedream_mcp.tools.handlers.browse_images import (
+    _BrowseRequestState,
+    _build_browse_structured_result,
+)
+from seedream_mcp.tools.pipeline.results import _build_generation_structured_result
+from seedream_mcp.tools.schemas import (
     BackgroundMode,
     BrowseImagesInput,
     GenerationTool,

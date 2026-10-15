@@ -114,9 +114,10 @@
 | server.transport → server.runtime                                 | 包内延迟                                                        |
 | server.runtime → client                                           | 借共享客户端                                                    |
 | server.runtime → config                                           | 复位协议                                                        |
+| server.runtime → config.sources                                   | 复位协议（构建告警缓冲清理）                                    |
 | server.runtime → utils.io.{save,files,path,scan,storage,download} | 复位协议（六模块）                                              |
 | server.runtime → utils.images.thumbnail                           | 复位协议                                                        |
-| webapp.routes → server.runtime；webapp.context → server.runtime   | 共生环（server 侧借柄）                                         |
+| webapp.routes → server.runtime；webapp.context → server           | 共生环（server 侧借柄）                                         |
 | webapp.routes → webapp.{files,gallery,generate,meta}              | 域内懒装配                                                      |
 | utils.images.thumbnail → utils.core.formats                       | PIL 惰性链                                                      |
 | utils.io.files → utils.core.logs                                  | 既有延迟                                                        |

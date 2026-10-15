@@ -26,7 +26,7 @@ from ...utils.core.validators import (
     validate_stream,
 )
 from ...utils.model.capabilities import get_max_reference_images
-from .schemas import GenerationInputParams
+from ..schemas import GenerationInputParams
 
 
 @dataclass(frozen=True)

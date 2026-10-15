@@ -19,7 +19,7 @@ from starlette.responses import FileResponse, JSONResponse, MalformedRangeHeader
 from starlette.types import Message, Receive, Scope, Send
 
 # as 同名形态为显式再导出，供 webapp 测试经本模块替换序列化原语。
-from ..tools.core.outputs import dump_strict_json_bytes as dump_strict_json_bytes
+from ..tools.outputs import dump_strict_json_bytes as dump_strict_json_bytes
 from ..utils.core.errors import SeedreamConfigError, validation_error_user_message
 from ..utils.core.executors import (
     CpuOffloadPoolClosedError,

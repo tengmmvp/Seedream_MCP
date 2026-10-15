@@ -1,9 +1,9 @@
-"""图片浏览工具的核心执行流水线。
+"""图片浏览工具处理器。
 
-读权限求值（工作区 ∪ 图片目录）、请求目录解析、
-经 include 谓词下沉扫描层的越界过滤与配额填充、分页与 structuredContent 装配；
-不经 ``execute_generation_handler`` 生成流水线，由 impl 处理器薄壳委托调用，
-未预期异常不在本模块捕获，统一由外层兜底降级。
+读权限求值（工作区 ∪ 图片目录）、请求目录解析、经 include 谓词下沉扫描层的越界
+过滤与配额填充、分页与 structuredContent 装配，外加薄壳入口 ``handle_browse_images``
+的异常兜底降级；不经 ``execute_generation_handler`` 生成流水线，字段规则与校验由
+``BrowseImagesInput`` 单一定义。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult
 
+from ...utils.core.errors import format_error_for_user
 from ...utils.core.sanitizers import (
     CONTROL_CHARS_PATTERN,
     sanitize_data_text,
@@ -38,17 +39,18 @@ from ...utils.io.scan import (
     find_images_in_directory,
     read_scope_signature,
 )
-from ._pipeline import (
+from ..pipeline._failures import log_tiered_failure
+from ..pipeline._progress import (
     PROGRESS_COMPLETE,
     PROGRESS_SCAN_START,
     safe_report_progress,
 )
-from .outputs import (
+from ..outputs import (
     BrowseImagesStructuredOutput,
     build_error_dict,
     build_structured_tool_result,
 )
-from .schemas import BrowseImagesInput
+from ..schemas import BrowseImagesInput
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
@@ -669,7 +671,7 @@ async def execute_browse_request(
     """执行图片浏览主逻辑：求值读权限、解析目录、扫描分页并装配工具结果。
 
     目录解析以图片目录为基准，判定面向读权限（工作区 ∪ 图片目录）；扫描结果经扫描
-    缓存加速翻页，切片多取一张以判定 has_more。未预期异常向上抛出，由 impl 外层
+    缓存加速翻页，切片多取一张以判定 has_more。未预期异常向上抛出，由薄壳入口外层
     ``handle_browse_images`` 兜底降级。
 
     Args:
@@ -766,3 +768,37 @@ async def execute_browse_request(
         total_count=total_count,
         scan_result=scan_result,
     )
+
+
+async def handle_browse_images(
+    params: BrowseImagesInput,
+    ctx: Context[Any, Any] | None = None,
+    *,
+    bounds_scope: list[Path] | None = None,
+) -> CallToolResult:
+    """处理图片浏览请求，扫描读权限（工作区 ∪ 图片目录）内指定目录的图片并分页返回。
+
+    无会话 Roots 声明时工作根目录经声明链回退；未预期异常降级为结构化错误返回，
+    不向调用方抛出。
+
+    Args:
+        params: 经 pydantic 校验的工具输入模型。
+        ctx: MCP 上下文，用于进度上报，可为 None。
+        bounds_scope: 条目过滤的替代界，与读权限求交后生效，None 时按读权限过滤；
+            透传给 execute_browse_request。
+
+    Returns:
+        浏览工具结果，失败时 isError 为 True。
+    """
+    # 已解析目录列表在外层创建、core 流水线填充：异常兜底分支经同一引用回显已解析目录。
+    resolved_directories: list[Path] = []
+    try:
+        return await execute_browse_request(
+            params, ctx, resolved_directories=resolved_directories, bounds_scope=bounds_scope
+        )
+    except Exception as exc:
+        log_tiered_failure(logger, exc, "浏览图片处理失败")
+        await safe_report_progress(ctx, progress=PROGRESS_COMPLETE, message="浏览图片处理失败")
+        return await build_browse_fallback_result(
+            params, resolved_directories, format_error_for_user(exc)
+        )

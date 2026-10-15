@@ -14,7 +14,7 @@ from mcp.types import TextContent
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.tools.core.schemas import (
+from seedream_mcp.tools.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
     ResponseFormat,
@@ -352,7 +352,7 @@ async def test_auto_save_cleanup_boundary_stays_at_deployment_images_root(
     扩展到该处会误删非本服务文件；save_path 仅决定本次写入位置。
     """
     from seedream_mcp.config import set_active_config
-    from seedream_mcp.tools.core import auto_save as auto_save_module
+    from seedream_mcp.tools.pipeline import auto_save as auto_save_module
 
     workspace = tmp_path / "ws"
     workspace.mkdir()

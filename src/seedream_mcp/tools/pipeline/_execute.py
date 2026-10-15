@@ -1,9 +1,7 @@
-"""生成类工具通用处理门面。
+"""生成编排主体：ToolMetadata 元数据与 execute_generation_handler 流水线。
 
-内部按职责拆分到 _pipeline/context/results/auto_save/_sanitize/parallel/outputs/schemas/_channels
-子模块，本模块聚合公共符号供 tools/impl 与测试导入。``ToolMetadata`` 收纳各工具的静态元数据，
-``execute_generation_handler`` 是四类生成工具的统一处理流水线，各阶段职责与异常降级
-契约见该函数 docstring。
+阶段函数拆分为准备、分发、自动保存、格式化与预览装配五段，各阶段职责与异常
+降级契约见 ``execute_generation_handler`` docstring。
 """
 
 from __future__ import annotations
@@ -18,75 +16,49 @@ from mcp.types import CallToolResult, ImageContent
 
 from ...client import SeedreamClient
 from ...config import SeedreamConfig
-from ...utils.images.thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
-from ...utils.io.path import resolve_images_root
-from ...utils.io.save import AutoSaveResult
 from ...utils.core.errors import (
     SeedreamConfigError,
     format_error_for_user,
     resolve_error_profile,
     response_reports_failure,
 )
-from ._pipeline import (
+from ...utils.images.thumbnail import PREVIEW_MAX_IMAGES, build_preview_contents
+from ...utils.io.path import resolve_images_root
+from ...utils.io.save import AutoSaveResult
+from ..outputs import build_error_structured, build_structured_tool_result
+from ..outputs.channels import PREVIEW_CHANNEL, output_channel_enabled, output_channels_scope
+from ..outputs.sanitize import _sanitize_image_errors, _sanitize_usage
+from ..schemas import GenerationInputParams
+from ._failures import _failure_guidance_for_code, log_tiered_failure
+from ._paths import prevalidate_save_path
+from ._progress import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,
     PROGRESS_RECEIVED,
     PROGRESS_VALIDATED,
-    _failure_guidance_for_code,
     _yield_for_cancellation,
-    log_tiered_failure,
-    prevalidate_save_path,
     safe_report_progress,
 )
 from .auto_save import auto_save_from_base64, auto_save_from_urls
-from ._channels import PREVIEW_CHANNEL, output_channel_enabled, output_channels_scope
 from .context import GenerationExecutionContext, build_generation_context
-from .outputs import (
-    build_error_structured,
-    build_structured_tool_result,
-)
-from ._sanitize import _sanitize_image_errors, _sanitize_usage
 from .parallel import (
     _run_generation_requests,
     _try_get_shared_client,
     _try_get_shared_download_manager,
-    get_lifespan_resource,
 )
 from .results import (
     _build_generation_structured_result,
     _failure_message_for_result,
-    aggregate_parallel_generation_results,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
 )
-from .schemas import GenerationInputParams
 
 if TYPE_CHECKING:
     from loguru import Logger
 
     from mcp.server.mcpserver import Context
-
-
-# 门面对外导出的公共符号，私有辅助经各自定义模块显式导入。
-__all__ = [
-    "GenerationExecutionContext",
-    "PROGRESS_COMPLETE",
-    "ToolMetadata",
-    "aggregate_parallel_generation_results",
-    "auto_save_from_base64",
-    "auto_save_from_urls",
-    "build_generation_context",
-    "execute_generation_handler",
-    "extract_images",
-    "format_generation_response",
-    "get_lifespan_resource",
-    "log_tiered_failure",
-    "output_channels_scope",
-    "safe_report_progress",
-    "update_result_with_auto_save",
-]
 
 
 @dataclass(frozen=True)
@@ -330,7 +302,7 @@ async def execute_generation_handler(
         config: 当前生效配置。
         metadata: 工具静态元数据，携带工具名、文案前缀与开始日志模板及参数构造回调。
         module_logger: 调用方模块的 loguru logger。
-        request_executor: 执行单次生成请求，由各 impl 提供 client 调用差异。
+        request_executor: 执行单次生成请求，由各 handler 提供 client 调用差异。
         ctx: MCP 上下文，用于进度上报，可为 None。
 
     Returns:

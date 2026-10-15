@@ -1,37 +1,66 @@
 """生成结果处理：图片提取、并行结果聚合、自动保存合并、响应格式化与结构化输出。
 
 各函数为纯数据处理，不触发 I/O，将多种响应形态归一化为统一的图片列表，再装配为
-面向模型的文本与 structuredContent；输出净化子系统位于 _sanitize 模块。
+面向模型的文本与 structuredContent；输出净化子系统位于 outputs/sanitize 模块。
 """
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from ...utils.core.errors import has_message_value, response_reports_failure
+from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
     normalize_message_text,
     sanitize_error_text,
 )
 from ...utils.io.save import AutoSaveResult
-from ._sanitize import (
+from ..outputs.sanitize import (
     _REQUEST_FAILED_TYPE,
     _sanitize_image_errors,
     _sanitize_usage,
     message_limit_for,
     sanitize_error_dict,
 )
-from ._pipeline import (
-    _add_usage_value,
+from ._failures import (
     _classify_generation_error_type,
     _extract_parallel_request_error,
     _normalize_error_message,
 )
 from .context import GenerationExecutionContext
-from .outputs import GenerationStructuredOutput, build_error_dict, format_base64_placeholder
+from ..outputs import GenerationStructuredOutput, build_error_dict, format_base64_placeholder
 
 # 嵌套 data 下钻深度上限，仅兜底受损上游注入的环状或超深结构，超限归一为空。
 _MAX_NESTED_DATA_DEPTH = 10_000
+
+
+logger = get_logger()
+
+
+def _add_usage_value(usage: dict[str, Any], key: str, value: Any) -> None:
+    """累加用量统计值。
+
+    标量数值直接累加，嵌套 dict 递归合并子键；布尔与非数值标量跳过，避免污染汇总。
+    同键既有值与新值形态冲突（标量对字典）时后到值覆盖既有值。
+    """
+    if isinstance(value, dict):
+        current = usage.get(key)
+        if isinstance(current, dict):
+            for sub_key, sub_value in value.items():
+                _add_usage_value(current, sub_key, sub_value)
+        else:
+            if current is not None:
+                logger.debug("用量键 {} 的既有标量被字典值覆盖", key)
+            usage[key] = copy.deepcopy(value)
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+    current = usage.get(key, 0)
+    if isinstance(current, bool) or not isinstance(current, (int, float)):
+        logger.debug("用量键 {} 的既有值被标量值重置后累加", key)
+        current = 0
+    usage[key] = current + value
 
 
 def extract_images(result: dict[str, Any]) -> list[dict[str, Any]]:

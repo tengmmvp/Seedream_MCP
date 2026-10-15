@@ -13,17 +13,17 @@ import pytest
 from mcp.types import TextContent
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._pipeline import (
+from seedream_mcp.tools.pipeline._failures import (
     _FAILURE_GUIDANCE_BY_ERROR_CODE,
     _FAILURE_GUIDANCE_DEFAULT_CODES,
     _classify_generation_error_type,
     _failure_guidance_for_code,
 )
-from seedream_mcp.tools.core.common import (
+from seedream_mcp.tools.pipeline import (
     ToolMetadata,
     execute_generation_handler,
 )
-from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.tools.schemas import TextToImageInput
 from seedream_mcp.utils.core import errors as errors_module
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,

@@ -17,7 +17,7 @@ import seedream_mcp.utils.io.roots as io_roots_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server import workspace_roots_resource
-from seedream_mcp.tools.core.schemas import BrowseImagesInput
+from seedream_mcp.tools.schemas import BrowseImagesInput
 from seedream_mcp.tools.runners import run_browse_images
 from seedream_mcp.utils.io.path import get_workspace_root
 from seedream_mcp.utils.io.roots import (

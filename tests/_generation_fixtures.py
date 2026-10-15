@@ -16,7 +16,7 @@ import pytest
 from PIL import Image
 
 from seedream_mcp.client import SeedreamClient
-from seedream_mcp.tools.core.context import GenerationExecutionContext
+from seedream_mcp.tools.pipeline.context import GenerationExecutionContext
 from seedream_mcp.utils.io import save as io_save
 
 

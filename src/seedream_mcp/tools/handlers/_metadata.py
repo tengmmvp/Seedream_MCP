@@ -1,18 +1,18 @@
-"""生成类工具 impl 共享的工具元数据常量与开始日志参数构造。
+"""生成类工具 handlers 共享的工具元数据常量与开始日志参数构造。
 
 四个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，收敛为
 不可变的 ``ToolMetadata`` 常量；数据类定义于 core 门面，依赖方向保持 core <-
-impl。组图输出的开始日志须携带运行时 max_images，经独立回调从执行上下文读取。
+handler。组图输出的开始日志须携带运行时 max_images，经独立回调从执行上下文读取。
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..core.common import ToolMetadata
+from ..pipeline import ToolMetadata
 
 if TYPE_CHECKING:
-    from ..core.context import GenerationExecutionContext
+    from ..pipeline.context import GenerationExecutionContext
 
 
 def _default_start_log_values(

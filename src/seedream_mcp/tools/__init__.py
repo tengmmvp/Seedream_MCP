@@ -1,9 +1,9 @@
 """Seedream MCP 工具包入口，聚合再导出 runners 适配器与输入模型。
 
-impl 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装，经直接子模块路径
+handlers 的 ``handle_*`` 处理器封装各工具的客户端调用与结果组装，经直接子模块路径
 导入消费，不在包门面重导出；runners 的 ``run_*`` 适配器作为 composition root
-注入工作区边界后委托 handler；core.schemas 的输入模型是参数校验的单一来源，
-inputSchema 由 server/_registration.py 的平铺签名镜像生成。依赖方向为 core <- impl <- runners。
+注入工作区边界后委托 handler；schemas 的输入模型是参数校验的单一来源，
+inputSchema 由 server/_registration.py 的平铺签名镜像生成。依赖方向为 pipeline <- handlers <- runners。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     # as 同名形态为 PEP 484 显式再导出，供 mypy 识别 __getattr__ 延迟加载的导出面。
-    from .core.schemas import (  # noqa: F401
+    from .schemas import (  # noqa: F401
         BrowseImagesInput as BrowseImagesInput,
         ImageToImageInput as ImageToImageInput,
         MultiImageFusionInput as MultiImageFusionInput,
@@ -37,11 +37,11 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "run_multi_image_fusion": (".runners", "run_multi_image_fusion"),
     "run_sequential_generation": (".runners", "run_sequential_generation"),
     "run_text_to_image": (".runners", "run_text_to_image"),
-    "BrowseImagesInput": (".core.schemas", "BrowseImagesInput"),
-    "ImageToImageInput": (".core.schemas", "ImageToImageInput"),
-    "MultiImageFusionInput": (".core.schemas", "MultiImageFusionInput"),
-    "SequentialGenerationInput": (".core.schemas", "SequentialGenerationInput"),
-    "TextToImageInput": (".core.schemas", "TextToImageInput"),
+    "BrowseImagesInput": (".schemas", "BrowseImagesInput"),
+    "ImageToImageInput": (".schemas", "ImageToImageInput"),
+    "MultiImageFusionInput": (".schemas", "MultiImageFusionInput"),
+    "SequentialGenerationInput": (".schemas", "SequentialGenerationInput"),
+    "TextToImageInput": (".schemas", "TextToImageInput"),
 }
 
 __all__ = list(_LAZY_EXPORTS)

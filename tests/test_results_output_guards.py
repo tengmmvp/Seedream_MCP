@@ -12,21 +12,21 @@ from typing import Any
 import pytest
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core import common as common_module
-from seedream_mcp.tools.core import results as results_module
-from seedream_mcp.tools.core._pipeline import (
+from seedream_mcp.tools.pipeline import _execute as common_module
+from seedream_mcp.tools.pipeline import results as results_module
+from seedream_mcp.tools.pipeline._failures import (
     _extract_parallel_request_error,
     _normalize_error_message,
 )
-from seedream_mcp.tools.core.auto_save import auto_save_from_urls
-from seedream_mcp.tools.core.results import (
+from seedream_mcp.tools.pipeline.auto_save import auto_save_from_urls
+from seedream_mcp.tools.pipeline.results import (
     _build_generation_structured_result,
     extract_images,
     format_generation_response,
     update_result_with_auto_save,
 )
-from seedream_mcp.tools.core._sanitize import _sanitize_image_errors, sanitize_error_dict
-from seedream_mcp.tools.core.outputs import _stringify_keys
+from seedream_mcp.tools.outputs.sanitize import _sanitize_image_errors, sanitize_error_dict
+from seedream_mcp.tools.outputs import _stringify_keys
 from seedream_mcp.utils.core.errors import SeedreamAPIError, response_reports_failure
 from seedream_mcp.utils.core.sanitizers import _truncate_value_for_output
 from seedream_mcp.utils.io.save import AutoSaveResult

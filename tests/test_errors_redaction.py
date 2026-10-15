@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from seedream_mcp.tools.core._sanitize import _sanitize_image_errors
-from seedream_mcp.tools.core.outputs import build_structured_tool_result
+from seedream_mcp.tools.outputs.sanitize import _sanitize_image_errors
+from seedream_mcp.tools.outputs import build_structured_tool_result
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamValidationError,

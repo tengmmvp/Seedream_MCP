@@ -10,7 +10,7 @@ from mcp.types import CallToolResult, TextContent
 
 from seedream_mcp.config import SeedreamConfig
 from seedream_mcp.server.runtime import mcp
-from seedream_mcp.tools.core.model_info import (
+from seedream_mcp.tools.handlers.get_model_info import (
     _NUMERIC_FIELD_LABELS,
     build_model_info_payload,
     build_model_info_text,
@@ -215,7 +215,7 @@ async def test_tool_call_returns_structured_error_on_unexpected_failure(
     reset_lifespan_singletons: None,
 ) -> None:
     """载荷组装未预期异常时降级为结构化错误结果，不向调用方抛出。"""
-    import seedream_mcp.tools.impl.get_model_info as impl_module
+    import seedream_mcp.tools.handlers.get_model_info as impl_module
 
     def _boom(config: Any) -> dict[str, Any]:
         del config

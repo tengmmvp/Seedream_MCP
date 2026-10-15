@@ -17,11 +17,11 @@ from ...client import SeedreamClient
 from ...client.request_plan import shared_request_plan_scope
 from ...config import LIFESPAN_KEY_CLIENT, LIFESPAN_KEY_DOWNLOAD_MANAGER
 from ...utils.io.download import DownloadManager
-from ._pipeline import (
+from ._failures import log_tiered_failure
+from ._progress import (
     PROGRESS_GENERATION_DONE,
     PROGRESS_GENERATION_START,
     _yield_for_cancellation,
-    log_tiered_failure,
     safe_report_progress,
 )
 from .context import GenerationExecutionContext
@@ -182,7 +182,7 @@ async def _run_generation_requests(
     缓存复用。
 
     Args:
-        request_executor: 执行单次生成请求的回调，由各 impl 提供 client 调用差异。
+        request_executor: 执行单次生成请求的回调，由各 handler 提供 client 调用差异。
         ctx: MCP 上下文，用于进度上报，可为 None。
     """
     with shared_request_plan_scope():

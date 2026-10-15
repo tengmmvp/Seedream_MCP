@@ -1,4 +1,4 @@
-"""文生图工具的 impl 处理器。
+"""文生图工具的 handler 处理器。
 
 薄适配器：将 prompt 与优化选项封装为 ``_execute`` 回调，委托
 ``execute_generation_handler`` 统一编排；字段规则与校验由 ``TextToImageInput``
@@ -13,15 +13,15 @@ from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
-from ..core.common import execute_generation_handler
-from ..core.schemas import TextToImageInput
+from ..pipeline import execute_generation_handler
+from ..schemas import TextToImageInput
 from ._metadata import TEXT_TO_IMAGE
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
-    from ..core.common import GenerationExecutionContext
+    from ..pipeline import GenerationExecutionContext
 
 logger = get_logger()
 

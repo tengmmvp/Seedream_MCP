@@ -1,7 +1,7 @@
-"""图文生图工具的 impl 处理器。
+"""多图融合工具的 handler 处理器。
 
-薄适配器：取出单张参考图字段，与 prompt 等封装为 ``_execute`` 回调，委托
-``execute_generation_handler`` 统一编排；字段规则与校验由 ``ImageToImageInput``
+薄适配器：取出多图列表字段，与 prompt 等封装为 ``_execute`` 回调，委托
+``execute_generation_handler`` 统一编排；字段规则与校验由 ``MultiImageFusionInput``
 单一定义。
 """
 
@@ -13,25 +13,25 @@ from mcp.types import CallToolResult
 
 from ...config import SeedreamConfig
 from ...utils.core.logs import get_logger
-from ..core.common import execute_generation_handler
-from ..core.schemas import ImageToImageInput
-from ._metadata import IMAGE_TO_IMAGE
+from ..pipeline import execute_generation_handler
+from ..schemas import MultiImageFusionInput
+from ._metadata import MULTI_IMAGE_FUSION
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import Context
 
     from ...client import SeedreamClient
-    from ..core.common import GenerationExecutionContext
+    from ..pipeline import GenerationExecutionContext
 
 logger = get_logger()
 
 
-async def handle_image_to_image(
-    params: ImageToImageInput,
+async def handle_multi_image_fusion(
+    params: MultiImageFusionInput,
     config: SeedreamConfig,
     ctx: Context[Any, Any] | None = None,
 ) -> CallToolResult:
-    """处理图文生图请求，基于参考图与文本指令生成新图像。
+    """处理多图融合请求，依据文本描述融合多张参考图特征生成新图像。
 
     Returns:
         含文本摘要与 structuredContent 的工具结果；失败不抛异常，以 ``is_error=True``
@@ -42,12 +42,10 @@ async def handle_image_to_image(
     async def _execute(
         client: "SeedreamClient", context: GenerationExecutionContext
     ) -> dict[str, Any]:
-        return await client.image_to_image(
+        return await client.multi_image_fusion(
             prompt=context.prompt,
             optimize_prompt_options=context.optimize_prompt_options,
             image=image,
-            layer_decomposition=context.layer_decomposition,
-            background=context.background,
             size=context.size,
             watermark=context.watermark,
             response_format=context.response_format,
@@ -59,7 +57,7 @@ async def handle_image_to_image(
     return await execute_generation_handler(
         params=params,
         config=config,
-        metadata=IMAGE_TO_IMAGE,
+        metadata=MULTI_IMAGE_FUSION,
         module_logger=logger,
         request_executor=_execute,
         ctx=ctx,

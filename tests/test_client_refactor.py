@@ -1485,8 +1485,8 @@ async def test_parallel_batch_validates_common_params_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """4 请求批次公共参数全量校验只发生一次，批内各请求经共享计划命中缓存。"""
-    from seedream_mcp.tools.core.schemas import TextToImageInput
-    from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
+    from seedream_mcp.tools.schemas import TextToImageInput
+    from seedream_mcp.tools.handlers.text_to_image import handle_text_to_image
 
     calls = _install_validate_common_spy(monkeypatch)
 

@@ -1,7 +1,7 @@
 """跨层一致性守护测试。
 
 锁定四组易漂移的双源声明与零覆盖小面：schemas 枚举取值与 validators 白名单、
-能力表参考图上限与组图总数上限、MCP 注册工具名与 impl ToolMetadata 工具名、
+能力表参考图上限与组图总数上限、MCP 注册工具名与 handlers ToolMetadata 工具名、
 路径相似建议与 CLI 端口解析的边界行为；另含 loguru exc_info 关键字、security
 标记级别与环境变量键清洗前缀的全源码静态守护。新增取值或改名时两侧须同步，
 本文件在各处失败即暴露漂移。
@@ -20,14 +20,14 @@ import seedream_mcp
 from _generation_fixtures import make_generation_context
 from _no_param_tools import NO_PARAM_TOOLS
 from conftest import HOST_ENV_SCRUB_PREFIXES
-from seedream_mcp.tools.core.schemas import (
+from seedream_mcp.tools.schemas import (
     BackgroundMode,
     GenerationToolType,
     OptimizePromptOptions,
     OutputFormat,
     ResponseFormat,
 )
-from seedream_mcp.tools.impl._metadata import (
+from seedream_mcp.tools.handlers._metadata import (
     IMAGE_TO_IMAGE,
     MULTI_IMAGE_FUSION,
     SEQUENTIAL_GENERATION,
@@ -173,7 +173,7 @@ def test_family_reference_caps_fit_sequential_total_images() -> None:
 
 
 async def test_mcp_registered_tool_names_match_impl_metadata() -> None:
-    """server 注册的 MCP 工具名与 impl ToolMetadata、browse_images 字面量及无参工具名单的并集一致。
+    """server 注册的 MCP 工具名与 handlers ToolMetadata、browse_images 字面量及无参工具名单的并集一致。
 
     任一侧改名会使 structuredContent.tool 与注册名静默错位，两侧字面量分布在不同
     模块，靠本断言锁定一致。
@@ -306,7 +306,7 @@ def test_env_key_site_extraction_ignores_unrelated_reads() -> None:
 
 
 def test_style_prompt_prefix_names_registered_tools() -> None:
-    """风格预设文案点名的工具存在于 impl 元数据，工具改名时文案须同步。"""
+    """风格预设文案点名的工具存在于 handlers 元数据，工具改名时文案须同步。"""
     from seedream_mcp.server import _STYLE_PROMPT_PREFIX
 
     declared = {metadata.tool_name for metadata in _GENERATION_TOOL_METADATA}
@@ -318,8 +318,8 @@ def test_style_prompt_prefix_names_registered_tools() -> None:
 
 def test_context_probe_keys_match_schema_fields() -> None:
     """context 的工具特有字段探测键须为某输入模型的真字段，改名漂移即失败。"""
-    from seedream_mcp.tools.core import context as context_module
-    from seedream_mcp.tools.core.schemas import (
+    from seedream_mcp.tools.pipeline import context as context_module
+    from seedream_mcp.tools.schemas import (
         ImageToImageInput,
         MultiImageFusionInput,
         SequentialGenerationInput,
@@ -371,3 +371,423 @@ def test_cli_port_type_rejects_invalid_port() -> None:
         _port_type("not-a-port")
     with pytest.raises(argparse.ArgumentTypeError):
         _port_type("70000")
+
+
+# ==================== 仓库结构守护（repo-layout.md D4） ====================
+
+_SRC_ROOT = Path(seedream_mcp.__file__).resolve().parent
+
+# S1 包根准入的封闭集合：身份文件＋六域包＋skills 数据目录。
+_ALLOWED_ROOT_FILES = frozenset({"__init__.py", "__main__.py", "version.py", "py.typed"})
+_ALLOWED_ROOT_DIRS = frozenset({"client", "config", "server", "tools", "utils", "webapp", "skills"})
+
+# D1 跨包边白名单：源组 -> 允许目标组集合（version 为全局豁免不入表）。
+_ALLOWED_MODULE_DEPS: dict[str, frozenset[str]] = {
+    "utils.model": frozenset(),
+    "utils.core": frozenset({"utils.model"}),
+    "utils.io": frozenset({"utils.core"}),
+    "utils.images": frozenset({"utils.core", "utils.io"}),
+    "config": frozenset({"utils"}),
+    "client": frozenset({"config", "utils"}),
+    "tools.schemas": frozenset({"utils"}),
+    "tools.outputs": frozenset({"utils"}),
+    "tools.pipeline": frozenset({"client", "config", "tools.schemas", "tools.outputs", "utils"}),
+    "tools.handlers": frozenset(
+        {"tools.pipeline", "tools.schemas", "tools.outputs", "config", "utils"}
+    ),
+    "tools.runners": frozenset({"tools.handlers", "tools.schemas", "config", "utils.io"}),
+    "server": frozenset({"tools", "config", "utils"}),
+    "webapp": frozenset({"tools", "config", "utils"}),
+    "seedream_mcp": frozenset({"client", "config", "server"}),
+    "tools": frozenset({"tools.schemas", "tools.runners"}),
+}
+
+# 仅 TYPE_CHECKING 形态放行的边（模块级运行时导入仍禁止）。
+_ALLOWED_TYPE_CHECKING_ONLY = frozenset({("server", "client"), ("tools.handlers", "client")})
+
+# D3 函数级导入白名单（精确目标模块），新增须先在 repo-layout.md 登记再使用。
+_ALLOWED_FUNCTION_IMPORTS = frozenset(
+    {
+        ("seedream_mcp.config._model", "seedream_mcp.config._builder"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.client"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.config"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.config.sources"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.utils.images.thumbnail"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.utils.io.download"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.utils.io.files"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.utils.io.path"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.utils.io.save"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.utils.io.scan"),
+        ("seedream_mcp.server.runtime", "seedream_mcp.utils.io.storage"),
+        ("seedream_mcp.server.transport", "seedream_mcp.server.runtime"),
+        ("seedream_mcp.server.transport", "seedream_mcp.webapp"),
+        ("seedream_mcp.server.transport", "seedream_mcp.webapp.constants"),
+        ("seedream_mcp.utils.images.thumbnail", "seedream_mcp.utils.core.formats"),
+        ("seedream_mcp.utils.io.files", "seedream_mcp.utils.core.logs"),
+        ("seedream_mcp.webapp.context", "seedream_mcp.server"),
+        ("seedream_mcp.webapp.routes", "seedream_mcp.server.runtime"),
+        ("seedream_mcp.webapp.routes", "seedream_mcp.webapp.files"),
+        ("seedream_mcp.webapp.routes", "seedream_mcp.webapp.gallery"),
+        ("seedream_mcp.webapp.routes", "seedream_mcp.webapp.generate"),
+        ("seedream_mcp.webapp.routes", "seedream_mcp.webapp.meta"),
+    }
+)
+
+# S3 执行面三件套封闭集与装配支撑面白名单。
+_TOOLS_EXEC_FACE = frozenset(
+    {"tools.runners", "tools.schemas", "tools.outputs", "tools.outputs.channels"}
+)
+_SERVER_TOOLS_EXTRA = frozenset({"tools.pipeline", "tools.handlers.get_model_info"})
+
+# S2 冻结面五门面 __all__ 快照，与实现逐字一致。
+_FACADE_ALL_SNAPSHOTS = {
+    "seedream_mcp": [
+        "__version__",
+        "SeedreamClient",
+        "SeedreamConfig",
+        "get_active_config",
+        "get_global_config",
+        "set_active_config",
+        "mcp",
+        "cli_main",
+    ],
+    "seedream_mcp.tools": [
+        "run_browse_images",
+        "run_get_model_info",
+        "run_image_to_image",
+        "run_multi_image_fusion",
+        "run_sequential_generation",
+        "run_text_to_image",
+        "BrowseImagesInput",
+        "ImageToImageInput",
+        "MultiImageFusionInput",
+        "SequentialGenerationInput",
+        "TextToImageInput",
+    ],
+    "seedream_mcp.client": ["SeedreamClient"],
+    "seedream_mcp.config": [
+        "DEFAULT_HTTP_HOST",
+        "DEFAULT_HTTP_PORT",
+        "ENV_FAMILY_PREFIXES",
+        "HTTP_AUTH_TOKEN_MIN_LENGTH",
+        "LIFESPAN_KEY_CLIENT",
+        "LIFESPAN_KEY_CONFIG",
+        "LIFESPAN_KEY_DOWNLOAD_MANAGER",
+        "PROJECT_ROOT",
+        "SeedreamConfig",
+        "active_request_state_keys",
+        "build_config_from_sources",
+        "drain_pending_build_warnings",
+        "get_active_config",
+        "get_global_config",
+        "set_active_config",
+    ],
+    "seedream_mcp.server": [
+        "SERVER_NAME",
+        "SERVER_VERSION",
+        "app_lifespan",
+        "cli_main",
+        "mcp",
+        "models_info_resource",
+        "server_info_resource",
+        "workspace_roots_resource",
+    ],
+}
+
+
+def _dep_group(module: str) -> str:
+    """模块路径归并为 D1 判定组；入口垫片 __main__ 归并父包。"""
+    if module == "seedream_mcp":
+        return "seedream_mcp"
+    rest = module[len("seedream_mcp.") :]
+    if rest.endswith(".__main__") or rest == "__main__":
+        rest = rest.rpartition(".__main__")[0] if "." in rest else ""
+        if not rest:
+            return "seedream_mcp"
+    head, _, tail = rest.partition(".")
+    if head in ("tools", "utils"):
+        sub = tail.partition(".")[0]
+        return f"{head}.{sub}" if sub else head
+    return head
+
+
+def _dep_allows(src_group: str, dst_group: str) -> bool:
+    """D1 判定：细粒度直配，整包条目（utils/tools）展开覆盖全部子组。"""
+    allowed = _ALLOWED_MODULE_DEPS.get(src_group, frozenset())
+    if dst_group in allowed:
+        return True
+    if "utils" in allowed and dst_group.startswith("utils"):
+        return True
+    if "tools" in allowed and dst_group.startswith("tools"):
+        return True
+    return False
+
+
+def _submodule_exists(prefix: str, name: str) -> bool:
+    """判定 prefix.name 是否为源码树内真实子模块（from X import 名的歧义消解）。"""
+    parts = prefix.split(".") + [name]
+    candidate = _SRC_ROOT.joinpath(*parts[len("seedream_mcp".split(".")) :])
+    return (candidate.with_suffix(".py")).exists() or (candidate / "__init__.py").exists()
+
+
+def _resolve_relative(current: str, level: int, target: str | None, is_package: bool) -> str:
+    parts = current.split(".")
+    if not is_package:
+        parts = parts[:-1]
+    for _ in range(level - 1):
+        parts = parts[:-1]
+    prefix = ".".join(parts)
+    return f"{prefix}.{target}" if target else prefix
+
+
+def _scan_module_edges() -> dict[str, dict[str, set[str]]]:
+    """AST 扫描源码树，按模块产出三类导入边（runtime/type_checking/function）。"""
+    edges: dict[str, dict[str, set[str]]] = {}
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
+        if "webapp" in path.parts and "static" in path.parts:
+            continue
+        rel = path.relative_to(_SRC_ROOT.parent).with_suffix("")
+        parts = list(rel.parts)
+        is_package = parts[-1] == "__init__"
+        if is_package:
+            parts = parts[:-1]
+        name = ".".join(parts)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        buckets: dict[str, set[str]] = {"runtime": set(), "type_checking": set(), "function": set()}
+
+        def record(node: ast.Import | ast.ImportFrom, kind: str) -> None:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    buckets[kind].add(alias.name)
+                return
+            if node.level:
+                prefix = _resolve_relative(name, node.level, None, is_package)
+                if node.module:
+                    target = f"{prefix}.{node.module}"
+                    buckets[kind].add(target)
+                elif _submodule_exists(prefix, node.names[0].name):
+                    # from X import 名 的名恰为子模块时按子模块边，否则按包（符号）边。
+                    for alias in node.names:
+                        buckets[kind].add(f"{prefix}.{alias.name}")
+                else:
+                    buckets[kind].add(prefix)
+                return
+            target = node.module or name
+            buckets[kind].add(target)
+
+        def walk(nodes: list[ast.stmt], in_function: bool, in_tc: bool) -> None:
+            for node in nodes:
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    if in_function:
+                        record(node, "function")
+                    else:
+                        record(node, "type_checking" if in_tc else "runtime")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for stmt in ast.walk(node):
+                        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                            record(stmt, "function")
+                elif isinstance(node, ast.If) and not in_function:
+                    is_tc = isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING"
+                    walk(node.body, False, is_tc or in_tc)
+                    walk(node.orelse, False, in_tc)
+                elif isinstance(node, ast.Try):
+                    walk(node.body, in_function, in_tc)
+                    for handler in node.handlers:
+                        walk(handler.body, in_function, in_tc)
+                    walk(node.orelse, in_function, in_tc)
+                    walk(node.finalbody, in_function, in_tc)
+                else:
+                    for field in ("body", "orelse", "finalbody"):
+                        if hasattr(node, field) and isinstance(getattr(node, field), list):
+                            walk(getattr(node, field), in_function, in_tc)
+
+        walk(tree.body, False, False)
+        edges[name] = buckets
+    return edges
+
+
+def _lazy_export_edges() -> set[tuple[str, str]]:
+    """两个门面的 _LAZY_EXPORTS 字符串表解析入依赖图（D4-2）。"""
+    result: set[tuple[str, str]] = set()
+    for facade, rel_path in (
+        ("seedream_mcp", "__init__.py"),
+        ("seedream_mcp.tools", "tools/__init__.py"),
+    ):
+        path = _SRC_ROOT / rel_path
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "_LAZY_EXPORTS" for t in node.targets
+            ):
+                table = ast.literal_eval(node.value)
+                for _, (rel, _) in table.items():
+                    result.add((facade, f"{facade}{rel}"))
+    return result
+
+
+def test_package_root_admission() -> None:
+    """包根仅允许身份文件、六域包与 skills 数据目录驻留（S1）。"""
+    for entry in sorted(_SRC_ROOT.iterdir()):
+        if entry.name == "__pycache__":
+            continue
+        if entry.is_file():
+            assert entry.name in _ALLOWED_ROOT_FILES, f"包根禁驻文件: {entry.name}"
+        else:
+            assert entry.name in _ALLOWED_ROOT_DIRS, f"包根禁驻目录: {entry.name}"
+
+
+def test_module_dependency_edges_follow_d1() -> None:
+    """模块级与 TYPE_CHECKING 跨包导入按 D1 白名单判定，version 全局豁免。"""
+    violations: list[str] = []
+    for src, buckets in _scan_module_edges().items():
+        src_group = _dep_group(src)
+        for dst in buckets["runtime"] | buckets["type_checking"]:
+            if not dst.startswith("seedream_mcp") or dst == "seedream_mcp.version":
+                continue
+            dst_group = _dep_group(dst)
+            if dst_group == src_group:
+                continue
+            pair = (src_group, dst_group)
+            if dst in buckets["type_checking"] and dst not in buckets["runtime"]:
+                if pair in _ALLOWED_TYPE_CHECKING_ONLY:
+                    continue
+            if not _dep_allows(src_group, dst_group):
+                violations.append(f"{src} -> {dst}（{src_group} -> {dst_group}）")
+    assert not violations, "D1 跨包边违规:\n" + "\n".join(sorted(violations))
+
+
+def test_lazy_export_edges_follow_d1() -> None:
+    """门面 _LAZY_EXPORTS 表解析出的边同样受 D1 约束。"""
+    violations = []
+    for src, dst in _lazy_export_edges():
+        src_group = _dep_group(src)
+        dst_group = _dep_group(dst)
+        if dst_group == src_group:
+            continue
+        if not _dep_allows(src_group, dst_group):
+            violations.append(f"{src} -> {dst}")
+    assert not violations, f"门面延迟导出边违规: {sorted(violations)}"
+
+
+def test_module_import_graph_acyclic() -> None:
+    """模块级导入图（runtime＋TYPE_CHECKING＋门面延迟导出）无环（D2）。"""
+    graph: dict[str, set[str]] = {}
+    for src, buckets in _scan_module_edges().items():
+        graph.setdefault(src, set()).update(
+            d for d in buckets["runtime"] | buckets["type_checking"] if d.startswith("seedream_mcp")
+        )
+    for src, dst in _lazy_export_edges():
+        graph.setdefault(src, set()).add(dst)
+
+    state: dict[str, int] = {}
+    stack: list[str] = []
+
+    def visit(node: str) -> None:
+        if state.get(node) == 1:
+            cycle = stack[stack.index(node) :] + [node]
+            raise AssertionError(f"模块级导入环: {' -> '.join(cycle)}")
+        if state.get(node) == 2:
+            return
+        state[node] = 1
+        stack.append(node)
+        for nxt in sorted(graph.get(node, ())):
+            visit(nxt)
+        stack.pop()
+        state[node] = 2
+
+    for node in sorted(graph):
+        visit(node)
+
+
+def test_function_level_imports_within_whitelist() -> None:
+    """函数级导入仅允许 D3 白名单登记的二元组（标准库与第三方不入判定）。"""
+    actual: set[tuple[str, str]] = set()
+    for src, buckets in _scan_module_edges().items():
+        for dst in buckets["function"]:
+            if dst.startswith("seedream_mcp"):
+                actual.add((src, dst))
+    unregistered = actual - _ALLOWED_FUNCTION_IMPORTS
+    stale = _ALLOWED_FUNCTION_IMPORTS - actual
+    assert not unregistered, f"未登记的函数级导入: {sorted(unregistered)}"
+    assert not stale, f"白名单 stale 条目: {sorted(stale)}"
+
+
+def test_import_module_confined_to_facades() -> None:
+    """import_module 调用仅允许出现在根与 tools 两个门面（D4-2）。"""
+    facades = {"__init__.py", "tools/__init__.py"}
+    offenders = set()
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
+        if "webapp" in path.parts and "static" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "import_module"
+            ):
+                offenders.add(path.relative_to(_SRC_ROOT).as_posix())
+    assert offenders <= facades, f"import_module 仅限门面使用: {sorted(offenders - facades)}"
+
+
+def _tools_face(domain: str) -> set[str]:
+    """收集域内全部模块对 tools 的导入目标，门面导入经 _LAZY_EXPORTS 展开。"""
+    import seedream_mcp.tools as tools_facade
+
+    face: set[str] = set()
+    for src, buckets in _scan_module_edges().items():
+        if not src.startswith(f"seedream_mcp.{domain}"):
+            continue
+        for dst in buckets["runtime"] | buckets["type_checking"] | buckets["function"]:
+            if dst == "seedream_mcp.tools":
+                for alias in tools_facade._LAZY_EXPORTS:
+                    face.add("tools" + tools_facade._LAZY_EXPORTS[alias][0])
+            elif dst.startswith("seedream_mcp.tools"):
+                face.add("tools." + dst[len("seedream_mcp.tools.") :])
+    return face
+
+
+def test_webapp_tools_import_face_follows_s3() -> None:
+    """webapp 对 tools 的导入集 ⊆ 执行面三件套封闭集（S3）。"""
+    offenders = _tools_face("webapp") - _TOOLS_EXEC_FACE
+    assert not offenders, f"webapp 越出执行面三件套: {sorted(offenders)}"
+
+
+def test_server_tools_import_face_follows_s3() -> None:
+    """server 对 tools 的导入集 ⊆ 执行面三件套 ∪ 装配支撑面白名单（S3）。"""
+    offenders = _tools_face("server") - _TOOLS_EXEC_FACE - _SERVER_TOOLS_EXTRA
+    assert not offenders, f"server 越出装配支撑面: {sorted(offenders)}"
+
+
+def test_frozen_facade_paths_importable() -> None:
+    """S2 冻结面五路径可导入（模块转包后路径保持）。"""
+    import importlib
+
+    for path in (
+        "seedream_mcp",
+        "seedream_mcp.client",
+        "seedream_mcp.config",
+        "seedream_mcp.server",
+        "seedream_mcp.tools",
+    ):
+        assert importlib.import_module(path) is not None, path
+
+
+def test_facade_all_matches_frozen_snapshots() -> None:
+    """五门面 __all__ 与冻结面快照逐字一致（D4-4）。"""
+    import seedream_mcp.client
+    import seedream_mcp.config
+    import seedream_mcp.server
+    import seedream_mcp.tools
+
+    modules = {
+        "seedream_mcp": seedream_mcp,
+        "seedream_mcp.tools": seedream_mcp.tools,
+        "seedream_mcp.client": seedream_mcp.client,
+        "seedream_mcp.config": seedream_mcp.config,
+        "seedream_mcp.server": seedream_mcp.server,
+    }
+    for name, module in modules.items():
+        assert (
+            module.__all__ == _FACADE_ALL_SNAPSHOTS[name]
+        ), f"{name}.__all__ 与快照漂移:\n  实际: {module.__all__}\n  快照: {_FACADE_ALL_SNAPSHOTS[name]}"

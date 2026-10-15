@@ -9,15 +9,15 @@ import pytest
 from pydantic import ValidationError
 
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._pipeline import prevalidate_save_path
-from seedream_mcp.tools.core.common import (
+from seedream_mcp.tools.pipeline._paths import prevalidate_save_path
+from seedream_mcp.tools.pipeline import (
     GenerationExecutionContext,
     aggregate_parallel_generation_results,
     build_generation_context,
     format_generation_response,
     update_result_with_auto_save,
 )
-from seedream_mcp.tools.core.schemas import (
+from seedream_mcp.tools.schemas import (
     BackgroundMode,
     GenerationTool,
     ImageToImageInput,
@@ -205,7 +205,7 @@ def test_build_generation_context_rejects_reference_images_over_pro_limit() -> N
     schema 上限只能表达全家族默认 14；留给 client 层则进度已上报「参数校验完成」
     后才报错。
     """
-    from seedream_mcp.tools.core.schemas import MultiImageFusionInput
+    from seedream_mcp.tools.schemas import MultiImageFusionInput
 
     config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0-pro")
     params = MultiImageFusionInput(
@@ -219,7 +219,7 @@ def test_build_generation_context_rejects_reference_images_over_pro_limit() -> N
 
 def test_build_generation_context_allows_default_model_reference_limit() -> None:
     """非 Pro 家族的默认上限 14 在 context 层放行，不误伤合法输入。"""
-    from seedream_mcp.tools.core.schemas import MultiImageFusionInput
+    from seedream_mcp.tools.schemas import MultiImageFusionInput
 
     config = SeedreamConfig(api_key="test_key", model_id="doubao-seedream-5-0")
     params = MultiImageFusionInput(
@@ -573,7 +573,7 @@ def test_structured_outlet_carries_upstream_code_for_parallel_all_failed() -> No
 
     聚合 error 的 code 为上游自由文本，携带 CRLF 与凭据片段时不借该通道注入。
     """
-    from seedream_mcp.tools.core.results import _build_generation_structured_result
+    from seedream_mcp.tools.pipeline.results import _build_generation_structured_result
 
     aggregated = aggregate_parallel_generation_results(
         request_results=[
@@ -823,7 +823,7 @@ async def test_execute_generation_handler_maps_unresolvable_images_root_to_confi
     """数据根目录声明不可解析属部署配置缺陷，MCP 通道归约 config_error 而非参数错误。"""
     from unittest.mock import MagicMock
 
-    from seedream_mcp.tools.core.common import ToolMetadata, execute_generation_handler
+    from seedream_mcp.tools.pipeline import ToolMetadata, execute_generation_handler
     from seedream_mcp.utils.io import path as io_path
 
     def _runtime_error(configured_dir: str) -> Path:

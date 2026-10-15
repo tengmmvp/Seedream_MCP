@@ -1,14 +1,17 @@
-"""模型信息工具的核心载荷组装。
+"""模型信息工具处理器。
 
 从配置的 model_id 派生当前模型的能力快照：家族、别名与能力字段，结构化载荷、
-文本摘要与工具描述同源派生。
+文本摘要与工具描述同源派生；薄壳入口 ``handle_get_model_info`` 包装为结构化工具
+结果，未预期异常降级为错误结果。
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ...config import SeedreamConfig
+from ...utils.core.errors import format_error_for_user
+from ...utils.core.logs import get_logger
 from ...utils.model.capabilities import (
     CAPABILITY_LABELS,
     MODEL_ALIASES,
@@ -16,6 +19,17 @@ from ...utils.model.capabilities import (
     get_model_capabilities,
     preset_numeric_sort_key,
 )
+from ..outputs import (
+    GetModelInfoStructuredOutput,
+    build_error_dict,
+    build_structured_tool_result,
+)
+from ..pipeline import log_tiered_failure
+
+if TYPE_CHECKING:
+    from mcp.types import CallToolResult
+
+logger = get_logger()
 
 # 取值型能力字段的中文标签序，每条标签映射其覆盖的 payload 字段元组，
 # 工具描述的取值段列举由此派生。
@@ -98,3 +112,28 @@ def build_model_info_text(payload: dict[str, Any]) -> str:
     lines.append(f"支持：{'、'.join(supported) if supported else '无'}")
     lines.append(f"不支持：{'、'.join(unsupported) if unsupported else '无'}")
     return "\n".join(lines)
+
+
+async def handle_get_model_info(config: SeedreamConfig) -> CallToolResult:
+    """处理模型信息查询，返回当前配置模型的能力快照。
+
+    未预期异常降级为结构化错误返回，不向调用方抛出。
+    """
+    try:
+        payload = build_model_info_payload(config)
+        structured = GetModelInfoStructuredOutput(
+            tool="get_model_info", success=True, status="completed", **payload
+        ).model_dump(exclude={"error"})
+        return await build_structured_tool_result(
+            build_model_info_text(payload), structured, is_error=False
+        )
+    except Exception as exc:
+        log_tiered_failure(logger, exc, "模型信息查询失败")
+        message = format_error_for_user(exc)
+        structured = GetModelInfoStructuredOutput(
+            tool="get_model_info",
+            success=False,
+            status="failed",
+            error=build_error_dict("model_info_failed", message),
+        ).model_dump()
+        return await build_structured_tool_result(message, structured, is_error=True)

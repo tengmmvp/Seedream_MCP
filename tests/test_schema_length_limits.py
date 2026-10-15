@@ -14,8 +14,8 @@ from typing import cast
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from seedream_mcp.tools.core import schemas as schemas_module
-from seedream_mcp.tools.core.schemas import (
+from seedream_mcp.tools import schemas as schemas_module
+from seedream_mcp.tools.schemas import (
     BackgroundMode,
     BrowseImagesInput,
     GenerationTool,

@@ -8,8 +8,8 @@ import pytest
 
 from _generation_fixtures import _patch_client_method_spy
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core.schemas import SequentialGenerationInput
-from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
+from seedream_mcp.tools.schemas import SequentialGenerationInput
+from seedream_mcp.tools.handlers.sequential_generation import handle_sequential_generation
 
 
 async def test_handle_sequential_generation_passes_derived_max_images_when_omitted(

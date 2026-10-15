@@ -6,7 +6,7 @@ import pytest
 
 import seedream_mcp.utils.core.validators as validation_module
 from seedream_mcp.utils.core.validators import validate_prompt
-from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.tools.schemas import TextToImageInput
 
 from _log_fakes import RecordingLogger
 

@@ -16,7 +16,7 @@ import seedream_mcp.server.runtime as runtime
 import seedream_mcp.server as server
 import seedream_mcp.server._registration as registration_module
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core.schemas import ResponseFormat, TextToImageInput
+from seedream_mcp.tools.schemas import ResponseFormat, TextToImageInput
 
 # lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
 
@@ -106,7 +106,7 @@ def test_get_lifespan_resource_swallows_value_error_from_request_context() -> No
             raise ValueError("Context is not available outside of a request")
 
     from seedream_mcp.config import LIFESPAN_KEY_CLIENT
-    from seedream_mcp.tools.core.common import get_lifespan_resource
+    from seedream_mcp.tools.pipeline import get_lifespan_resource
 
     assert (
         get_lifespan_resource(
@@ -484,7 +484,7 @@ class _FakeLifespanCtx:
 async def test_try_get_shared_client_returns_lifespan_instance() -> None:
     """_try_get_shared_client / _try_get_shared_download_manager 返回注入的实例。"""
     from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.tools.core.parallel import (
+    from seedream_mcp.tools.pipeline.parallel import (
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )
@@ -507,7 +507,7 @@ async def test_try_get_shared_client_returns_lifespan_instance() -> None:
 
 def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
     """ctx 为 None、lifespan 非 dict、值类型不匹配时均返回 None。"""
-    from seedream_mcp.tools.core.parallel import (
+    from seedream_mcp.tools.pipeline.parallel import (
         _try_get_shared_client,
         _try_get_shared_download_manager,
     )
@@ -541,7 +541,7 @@ async def test_execute_generation_handler_reuses_lifespan_shared_client(
     from unittest.mock import MagicMock
 
     from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.tools.core.common import ToolMetadata, execute_generation_handler
+    from seedream_mcp.tools.pipeline import ToolMetadata, execute_generation_handler
 
     config = SeedreamConfig(api_key="test_key")
     monkeypatch.setattr(config_module, "_active_config", config)
@@ -585,8 +585,8 @@ async def test_execute_generation_handler_passes_shared_download_manager(
     from unittest.mock import MagicMock
 
     from seedream_mcp.client import SeedreamClient
-    from seedream_mcp.tools.core import common as common_module
-    from seedream_mcp.tools.core.common import ToolMetadata
+    from seedream_mcp.tools.pipeline import _execute as common_module
+    from seedream_mcp.tools.pipeline import ToolMetadata
     from seedream_mcp.utils.io.download import DownloadManager
 
     config = SeedreamConfig(api_key="test_key")
@@ -655,7 +655,7 @@ def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
     results 侧若重新引入模块级可变状态，须在 _reset_lifespan_state 与本守护
     同步登记。
     """
-    from seedream_mcp.tools.core import results as results_module
+    from seedream_mcp.tools.pipeline import results as results_module
 
     assert not hasattr(results_module, "_last_sanitized_images")
     assert not hasattr(results_module, "reset_last_sanitized_images")

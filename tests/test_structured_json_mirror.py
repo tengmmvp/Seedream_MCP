@@ -22,8 +22,8 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.tools.core import outputs as outputs_module
-from seedream_mcp.tools.core.outputs import (
+import seedream_mcp.tools.outputs as outputs_module
+from seedream_mcp.tools.outputs import (
     _mirror_node,
     _strip_result_payload_surrogates,
     build_structured_json_text,
@@ -32,8 +32,8 @@ from seedream_mcp.tools.core.outputs import (
     dump_strict_json_bytes,
     format_base64_placeholder,
 )
-from seedream_mcp.tools.core.common import output_channels_scope
-from seedream_mcp.tools.core.schemas import BrowseImagesInput, ResponseFormat, TextToImageInput
+from seedream_mcp.tools.pipeline import output_channels_scope
+from seedream_mcp.tools.schemas import BrowseImagesInput, ResponseFormat, TextToImageInput
 from seedream_mcp.utils.core.executors import (
     CPU_OFFLOAD_SIZE_THRESHOLD,
     CpuOffloadPoolClosedError,
@@ -41,7 +41,7 @@ from seedream_mcp.utils.core.executors import (
     shutdown_cpu_offload_executor,
 )
 from seedream_mcp.utils.core.sanitizers import estimate_output_length, utf8_value_leaf_length
-from seedream_mcp.tools.impl.browse_images import handle_browse_images
+from seedream_mcp.tools.handlers.browse_images import handle_browse_images
 from seedream_mcp.tools.runners import run_browse_images, run_text_to_image
 from seedream_mcp.utils.io import save as io_save
 

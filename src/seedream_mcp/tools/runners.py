@@ -1,11 +1,11 @@
-"""MCP 工具适配器层，作为 composition root 组装 core 流水线与 impl 处理器。
+"""MCP 工具适配器层，作为 composition root 组装 pipeline 流水线与 handlers 处理器。
 
 除 ``run_get_model_info`` 直接透传配置外，其余 ``run_*`` 函数经
 ``workspace_roots_scope_from_result`` 应用 MCP Roots 工作区边界，roots 结果由
 server 层按协商版本取回注入；再将 pydantic 校验后的入参模型委托给对应
-``handle_*``。依赖方向为 core <- impl <- runners，避免 core 反向依赖 impl。
+``handle_*``。依赖方向为 pipeline <- handlers <- runners，避免 pipeline 反向依赖 handlers。
 输出通道（缩略图预览与 JSON 镜像）由调用方经 ``output_channels_scope``
-作用域开关，runner 与 impl 处理器签名不感知通道开关。
+作用域开关，runner 与 handler 处理器签名不感知通道开关。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from mcp.types import CallToolResult, ListRootsResult
 
 from ..config import SeedreamConfig
 from ..utils.io.roots import workspace_roots_scope_from_result
-from .core.schemas import (
+from .schemas import (
     BrowseImagesInput,
     GenerationInputParams,
     ImageToImageInput,
@@ -27,12 +27,12 @@ from .core.schemas import (
     SequentialGenerationInput,
     TextToImageInput,
 )
-from .impl.browse_images import handle_browse_images
-from .impl.image_to_image import handle_image_to_image
-from .impl.get_model_info import handle_get_model_info
-from .impl.multi_image_fusion import handle_multi_image_fusion
-from .impl.sequential_generation import handle_sequential_generation
-from .impl.text_to_image import handle_text_to_image
+from .handlers.browse_images import handle_browse_images
+from .handlers.image_to_image import handle_image_to_image
+from .handlers.get_model_info import handle_get_model_info
+from .handlers.multi_image_fusion import handle_multi_image_fusion
+from .handlers.sequential_generation import handle_sequential_generation
+from .handlers.text_to_image import handle_text_to_image
 
 # 泛型绑定具体输入模型，避免 Callable 逆变要求 handler 接受任意协议实现。
 _GenerationInputT = TypeVar("_GenerationInputT", bound=GenerationInputParams)

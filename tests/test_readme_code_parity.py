@@ -1,7 +1,7 @@
 """README 与代码的参数/能力/风格预设对账守护测试。
 
 三语 README 之间的互等由 test_docs_consistency 锁定，本文件补上「文档对代码」
-这一侧：工具参数 bullet 清单与 tools.core.schemas 输入模型的字段集全等，模型
+这一侧：工具参数 bullet 清单与 tools.schemas 输入模型的字段集全等，模型
 能力差异表的档位/倍数/布尔/参考图上限与 MODEL_CAPABILITIES 派生值一致，风格
 预设表与 server/_registration.py 的 @mcp.prompt 注册名单一致，启动参数旗标与 cli.py 解析器、
 可用资源 URI 与服务器注册集合、日期目录示例路径与 io_storage 布局亦逐项对账。
@@ -31,7 +31,7 @@ from _readme_helpers import (
 )
 from seedream_mcp.server.cli import build_arg_parser
 from seedream_mcp.server import mcp
-from seedream_mcp.tools.core.schemas import (
+from seedream_mcp.tools.schemas import (
     BrowseImagesInput,
     ImageToImageInput,
     MultiImageFusionInput,

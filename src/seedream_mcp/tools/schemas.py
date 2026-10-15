@@ -12,13 +12,13 @@ from typing import Annotated, Callable, ClassVar, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ...utils.core.errors import SeedreamValidationError
-from ...utils.images.validation import MAX_IMAGE_FILE_SIZE
-from ...utils.model.capabilities import (
+from ..utils.core.errors import SeedreamValidationError
+from ..utils.images.validation import MAX_IMAGE_FILE_SIZE
+from ..utils.model.capabilities import (
     SEEDREAM_DEFAULT_MAX_REFERENCE_IMAGES,
     layer_decomposition_presets_text,
 )
-from ...utils.core.validators import (
+from ..utils.core.validators import (
     MAX_PARALLEL_REQUEST_COUNT,
     MAX_SEQUENTIAL_TOTAL_IMAGES,
     VALID_BACKGROUND_MODES,

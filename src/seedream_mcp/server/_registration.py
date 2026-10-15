@@ -12,7 +12,7 @@ outputSchema 并校验 structuredContent，运行时返回的 CallToolResult 原
 
 inputSchema 平铺契约：五个带参工具以逐字段平铺参数声明而非单一 params 嵌套模型，
 FuncMetadata 不支持单参数 BaseModel 自动展开，嵌套声明会把 inputSchema 收敛为
-一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.core.schemas
+一个对象字段。平铺字段的名称、类型、默认值、约束与描述镜像 tools.schemas
 的输入模型，描述与约束字面量经该模块的共享常量引用，四个生成工具语义相同参数的
 Field 默认值共用模块级 FieldInfo 常量；非空语义经签名层
 ``_NON_BLANK_PATTERN`` 等价镜像，纯空白输入在协议层即被拒绝。工具体以 locals()
@@ -69,9 +69,9 @@ from ..tools import (
     run_sequential_generation,
     run_text_to_image,
 )
-from ..tools.core.common import get_lifespan_resource
-from ..tools.core.model_info import build_model_info_description
-from ..tools.core.schemas import (
+from ..tools.pipeline import get_lifespan_resource
+from ..tools.handlers.get_model_info import build_model_info_description
+from ..tools.schemas import (
     AUTO_SAVE_DESCRIPTION,
     BACKGROUND_DESCRIPTION,
     BackgroundMode,
@@ -128,7 +128,7 @@ from ..tools.core.schemas import (
     TOOLS_MAX_ITEMS,
     WATERMARK_DESCRIPTION,
 )
-from ..tools.core.outputs import (
+from ..tools.outputs import (
     BrowseImagesStructuredOutput,
     GenerationStructuredOutput,
     GetModelInfoStructuredOutput,

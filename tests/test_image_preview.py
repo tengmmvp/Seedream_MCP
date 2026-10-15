@@ -22,7 +22,7 @@ from mcp.types import ImageContent, TextContent
 
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig, set_active_config
-from seedream_mcp.tools.core.schemas import TextToImageInput
+from seedream_mcp.tools.schemas import TextToImageInput
 from seedream_mcp.tools.runners import run_text_to_image
 from seedream_mcp.utils.images.thumbnail import (
     PREVIEW_MAX_IMAGES,

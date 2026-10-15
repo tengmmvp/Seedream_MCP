@@ -20,8 +20,8 @@ from typing import Any
 from mcp.types import CallToolResult, ContentBlock, TextContent
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from ._channels import MIRROR_CHANNEL, output_channel_enabled
-from ._sanitize import _unique_flat_key
+from .channels import MIRROR_CHANNEL, output_channel_enabled
+from .sanitize import _unique_flat_key
 from ...utils.core.executors import run_in_cpu_pool, should_offload_to_cpu_pool
 from ...utils.core.logs import get_logger
 from ...utils.core.sanitizers import (
@@ -430,3 +430,18 @@ async def build_structured_tool_result(
         structured_content=sanitized_structured,
         is_error=is_error,
     )
+
+
+__all__ = [
+    "BrowseImagesStructuredOutput",
+    "GenerationStructuredOutput",
+    "GetModelInfoStructuredOutput",
+    "binary_placeholder_value_leaf_length",
+    "build_error_dict",
+    "build_error_structured",
+    "build_structured_json_text",
+    "build_structured_tool_result",
+    "dump_compact_strict_json",
+    "dump_strict_json_bytes",
+    "format_base64_placeholder",
+]

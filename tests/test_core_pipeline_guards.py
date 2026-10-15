@@ -17,14 +17,14 @@ from mcp.types import TextContent
 import seedream_mcp.client._api as client_module
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core.context import GenerationExecutionContext
-from seedream_mcp.tools.core.results import (
+from seedream_mcp.tools.pipeline.context import GenerationExecutionContext
+from seedream_mcp.tools.pipeline.results import (
     _build_generation_structured_result,
     aggregate_parallel_generation_results,
 )
-from seedream_mcp.tools.core._sanitize import _sanitize_image_errors, _sanitize_usage
-from seedream_mcp.tools.core.schemas import TextToImageInput
-from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
+from seedream_mcp.tools.outputs.sanitize import _sanitize_image_errors, _sanitize_usage
+from seedream_mcp.tools.schemas import TextToImageInput
+from seedream_mcp.tools.handlers.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import (
     SeedreamAPIError,
     SeedreamValidationError,

@@ -85,7 +85,7 @@ async def test_browse_web_entry_does_not_assemble_mirror(
 ) -> None:
     """图库 Web 入口驱动真实 browse 流水线且镜像装配关闭：镜像构建函数不被触达。"""
     from _cpu_offload_spy import CpuOffloadSpy
-    from seedream_mcp.tools.core import outputs as outputs_module
+    import seedream_mcp.tools.outputs as outputs_module
 
     images_root = write_workspace_config(tmp_path)
     day_dir = images_root / "2026-08-20"
@@ -294,7 +294,7 @@ async def test_web_browse_filters_outside_entries_at_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """越界条目经 bounds_scope 在扫描源头剔除，响应不出现界外路径与计数虚高。"""
-    import seedream_mcp.tools.core.browse as browse_module
+    import seedream_mcp.tools.handlers.browse_images as browse_module
     from seedream_mcp.utils.io.scan import find_images_in_directory
 
     images_root = write_workspace_config(tmp_path)

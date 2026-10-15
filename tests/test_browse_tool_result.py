@@ -27,9 +27,9 @@ from _os_fakes import _install_counting_realpath, _install_failing_resolve_for
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.server.runtime import mcp
 from seedream_mcp.tools import BrowseImagesInput
-from seedream_mcp.tools.core import browse as browse_core_module
-from seedream_mcp.tools.impl import browse_images as browse_images_module
-from seedream_mcp.tools.impl.browse_images import handle_browse_images
+from seedream_mcp.tools.handlers import browse_images as browse_core_module
+from seedream_mcp.tools.handlers import browse_images as browse_images_module
+from seedream_mcp.tools.handlers.browse_images import handle_browse_images
 from seedream_mcp.utils.core.errors import SeedreamConfigError
 from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR
 from seedream_mcp.utils.io.scan import ScanIncompleteCause, ScanResult
@@ -605,7 +605,7 @@ async def test_browse_images_fallback_preserves_resolved_directories(
     workspace_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """impl 在目录解析完成后抛未预期异常时，兜底 structuredContent 回显已解析目录。"""
+    """handler 在目录解析完成后抛未预期异常时，兜底 structuredContent 回显已解析目录。"""
 
     def _exploding_display_entries(**kwargs: object) -> NoReturn:
         raise RuntimeError("boom")

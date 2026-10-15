@@ -2,7 +2,7 @@
 
 import pytest
 
-from seedream_mcp.tools.core.schemas import SequentialGenerationInput
+from seedream_mcp.tools.schemas import SequentialGenerationInput
 from seedream_mcp.utils.core.errors import SeedreamValidationError
 from seedream_mcp.utils.core.validators import validate_sequential_image_limit
 

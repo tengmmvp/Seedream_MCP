@@ -13,7 +13,7 @@ from _generation_fixtures import _patch_client_success
 from _progress_fakes import RecordingProgressContext
 from seedream_mcp.client import SeedreamClient
 from seedream_mcp.config import SeedreamConfig
-from seedream_mcp.tools.core._pipeline import (
+from seedream_mcp.tools.pipeline._progress import (
     PROGRESS_AUTOSAVE_DONE,
     PROGRESS_AUTOSAVE_START,
     PROGRESS_COMPLETE,
@@ -22,19 +22,19 @@ from seedream_mcp.tools.core._pipeline import (
     PROGRESS_RECEIVED,
     PROGRESS_SCAN_START,
     PROGRESS_VALIDATED,
-    _add_usage_value,
 )
-from seedream_mcp.tools.core.results import aggregate_parallel_generation_results
-from seedream_mcp.tools.core.schemas import (
+from seedream_mcp.tools.pipeline.results import _add_usage_value
+from seedream_mcp.tools.pipeline.results import aggregate_parallel_generation_results
+from seedream_mcp.tools.schemas import (
     ImageToImageInput,
     MultiImageFusionInput,
     SequentialGenerationInput,
     TextToImageInput,
 )
-from seedream_mcp.tools.impl.image_to_image import handle_image_to_image
-from seedream_mcp.tools.impl.multi_image_fusion import handle_multi_image_fusion
-from seedream_mcp.tools.impl.sequential_generation import handle_sequential_generation
-from seedream_mcp.tools.impl.text_to_image import handle_text_to_image
+from seedream_mcp.tools.handlers.image_to_image import handle_image_to_image
+from seedream_mcp.tools.handlers.multi_image_fusion import handle_multi_image_fusion
+from seedream_mcp.tools.handlers.sequential_generation import handle_sequential_generation
+from seedream_mcp.tools.handlers.text_to_image import handle_text_to_image
 from seedream_mcp.utils.core.errors import SeedreamAPIError, SeedreamValidationError
 from seedream_mcp.utils.io import save as io_save
 
@@ -544,8 +544,8 @@ async def test_parallel_batch_survives_stalled_progress_client(
     单元级直调并行执行器：handler 尾部的 PROGRESS_COMPLETE 上报在关键路径上
     属既有行为，不在本用例的守护范围。
     """
-    import seedream_mcp.tools.core.parallel as parallel_module
-    from seedream_mcp.tools.core.common import build_generation_context
+    import seedream_mcp.tools.pipeline.parallel as parallel_module
+    from seedream_mcp.tools.pipeline import build_generation_context
 
     monkeypatch.setattr(parallel_module, "_PROGRESS_DRAIN_TIMEOUT_SECONDS", 0.05)
 
@@ -581,8 +581,8 @@ async def test_parallel_batch_survives_stalled_progress_client(
 
 async def test_parallel_batch_aggregates_unexpected_exception() -> None:
     """批次内单请求抛非 SeedreamMCPError 时带堆栈记录并聚合为失败，不外泄。"""
-    import seedream_mcp.tools.core.parallel as parallel_module
-    from seedream_mcp.tools.core.common import build_generation_context
+    import seedream_mcp.tools.pipeline.parallel as parallel_module
+    from seedream_mcp.tools.pipeline import build_generation_context
     from _log_fakes import RecordingLogger
 
     async def _executor(client: Any, context: Any) -> dict[str, Any]:

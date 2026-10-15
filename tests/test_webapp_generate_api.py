@@ -36,8 +36,8 @@ from seedream_mcp.config import (
     SeedreamConfig,
     set_active_config,
 )
-from seedream_mcp.tools.core import outputs as outputs_module
-from seedream_mcp.tools.core._channels import output_channel_enabled
+import seedream_mcp.tools.outputs as outputs_module
+from seedream_mcp.tools.outputs.channels import output_channel_enabled
 from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
 from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
 from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
