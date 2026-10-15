@@ -28,8 +28,8 @@ from seedream_mcp.transport import (
     _AppHostGuardMiddleware,
     _BearerTokenAuthMiddleware,
     _BODYLESS_METHODS,
+    _BodyReadAdmission,
     _BodyReadPolicy,
-    _BodyReadPolicyChannel,
     _ErrorBoundaryMiddleware,
     _HealthCheckMiddleware,
     _LargeBodyAdmissionMiddleware,
@@ -39,11 +39,13 @@ from seedream_mcp.transport import (
     _attach_streamable_http_middleware,
     _bind_address_allowlist,
     _is_dns_rebinding_protected_host,
+    _resolve_body_read_policy,
     _transport_security_for_host,
     _web_app_host_allowlist,
     is_loopback_bind_host,
     warn_remote_exposure,
 )
+from seedream_mcp.utils.core.logs import _sink_filter, get_logger
 from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
 from seedream_mcp.webapp.constants import (
     WEB_EXEMPT_EXACT_PATHS,
@@ -205,6 +207,54 @@ def test_transport_security_merges_origins_into_loopback_allowlist(
         loopback in security.allowed_origins
         for loopback in transport_module._LOOPBACK_ALLOWED_ORIGINS
     )
+
+
+def test_transport_security_loopback_warns_hosts_config_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回环绑定下已配置的 SEEDREAM_HTTP_ALLOWED_HOSTS 不参与放行，security 告警指明该配置不生效。"""
+    config = SeedreamConfig(api_key="test_key", http_allowed_hosts=("mcp.example.com",))
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    records: list[str] = []
+
+    with capture_loguru_messages(records):
+        security = _transport_security_for_host("127.0.0.1")
+
+    assert "mcp.example.com" not in security.allowed_hosts
+    output = "".join(records)
+    assert "SEEDREAM_HTTP_ALLOWED_HOSTS" in output
+    assert "不生效" in output
+    # 告警与通配绑定告警同型携带 security 标记：复刻生产 sink 的 ERROR 级地板仍可见。
+    error_floor_records: list[str] = []
+    handler_id = get_logger().add(
+        lambda message: error_floor_records.append(str(message)),
+        level="WARNING",
+        filter=_sink_filter("ERROR"),
+    )
+    try:
+        _transport_security_for_host("127.0.0.1")
+    finally:
+        get_logger().remove(handler_id)
+    assert "SEEDREAM_HTTP_ALLOWED_HOSTS" in "".join(error_floor_records)
+
+
+@pytest.mark.parametrize(
+    ("host", "http_allowed_hosts"),
+    [("127.0.0.1", ()), ("10.0.0.5", ("mcp.example.com",))],
+    ids=["loopback-without-hosts", "non-loopback-with-hosts"],
+)
+def test_transport_security_hosts_ignored_warning_stays_silent_otherwise(
+    monkeypatch: pytest.MonkeyPatch, host: str, http_allowed_hosts: tuple[str, ...]
+) -> None:
+    """未命中组合时不输出告警：回环未配置 hosts 与非回环按列表放行均静默。"""
+    config = SeedreamConfig(api_key="test_key", http_allowed_hosts=http_allowed_hosts)
+    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
+    records: list[str] = []
+
+    with capture_loguru_messages(records):
+        _transport_security_for_host(host)
+
+    assert not any("SEEDREAM_HTTP_ALLOWED_HOSTS" in record for record in records)
 
 
 def test_transport_security_loopback_allowlist_covers_default_port_forms(
@@ -1212,12 +1262,9 @@ def _install_spy_gate(monkeypatch: pytest.MonkeyPatch, limit: int) -> _SpySemaph
 def _admission_stack(
     downstream: Any, concurrency: int, read_timeout: float, threshold: int
 ) -> _LimitRequestBodyMiddleware:
-    """按生产装配序叠加外层读体计数与内层准入，两层经同一配对通道构造配对。"""
-    channel = _BodyReadPolicyChannel()
-    admission = _LargeBodyAdmissionMiddleware(
-        downstream, concurrency, read_timeout, threshold, channel
-    )
-    return _LimitRequestBodyMiddleware(admission, 64 * 1024 * 1024, channel)
+    """按生产装配序叠加外层读体计数与内层准入，两层经 scope 键交接策略。"""
+    admission = _LargeBodyAdmissionMiddleware(downstream, concurrency, read_timeout, threshold)
+    return _LimitRequestBodyMiddleware(admission, 64 * 1024 * 1024)
 
 
 def _frame_recording_downstream(frames: list[Message]) -> Any:
@@ -1657,6 +1704,40 @@ async def test_large_body_admission_declared_large_times_out_waiting_for_exhaust
     assert saturated.spy.release_calls == 3
 
 
+async def test_large_body_admission_window_exhausted_before_permit_wait_uses_read_timeout_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """窗口耗尽后才尝试取许可的放弃按读体窗口口径发 408：许可纵然空闲也不误报准入饥饿。"""
+    spy = _install_spy_gate(monkeypatch, 1)
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def downstream(scope: Any, receive: Any, send: Any) -> None:
+        raise AssertionError("放弃路径不应驱动下游")
+
+    middleware = _LargeBodyAdmissionMiddleware(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+    scope = _large_body_scope(_LARGE_CL_HEADERS)
+    session = _BodyReadAdmission(
+        middleware, scope, cast(Receive, None), cast(Send, send), _BodyReadPolicy(scope)
+    )
+    # 读体窗口在进入许可等待前已耗尽，许可完全空闲。
+    session._read_deadline = session._loop.time() - 0.01
+
+    assert await session._acquire_gate() is None
+    assert session.abandoned is True
+    assert spy.acquire_calls == 0, "窗口已耗尽时不得触碰许可信号量"
+    assert session.timeout_send is not None
+    await session.timeout_send
+
+    assert sent[0]["type"] == "http.response.start"
+    assert sent[0]["status"] == 408
+    payload = json.loads(sent[1]["body"])
+    assert payload["error"] == "body_read_timeout"
+    assert "SEEDREAM_BODY_READ_TIMEOUT" in payload["error_description"]
+
+
 async def test_large_body_admission_app_construction_failure_releases_permit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1777,9 +1858,8 @@ async def test_large_body_admission_limit_verdict_releases_permit_immediately(
             downstream_finished.set()
 
     # 阈值 4MB、上限 5MB：首帧 4.5MB 越阈持闸，第二帧累计 5.5MB 越限触发外层流中 413 裁决。
-    channel = _BodyReadPolicyChannel()
-    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD, channel)
-    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024, channel)
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD)
+    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024)
     pending: list[Message] = [
         {"type": "http.request", "body": b"a" * (4 * 1024 * 1024 + 512 * 1024), "more_body": True},
         {"type": "http.request", "body": b"b" * (1024 * 1024), "more_body": True},
@@ -1855,9 +1935,8 @@ async def test_large_body_admission_limit_verdict_silent_client_releases_permit(
 
     # 阈值 4MB、上限 5MB、读窗 30 秒：申报 5MB 越阈进入即持闸，实际累计 5.5MB
     # 越限触发外层流中 413 裁决。
-    channel = _BodyReadPolicyChannel()
-    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD, channel)
-    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024, channel)
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD)
+    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024)
     pending: list[Message] = [
         {"type": "http.request", "body": b"a" * (4 * 1024 * 1024 + 512 * 1024), "more_body": True},
         {"type": "http.request", "body": b"b" * (1024 * 1024), "more_body": True},
@@ -1918,9 +1997,8 @@ async def test_large_body_admission_watchdog_expiry_does_not_truncate_verdict_di
 
     # 阈值 4MB、上限 5MB、读窗 0.05 秒：首帧 4.5MB 越阈持闸，第二帧累计 5.5MB
     # 越限触发外层流中 413 裁决，直发在响应体帧上挂起至放行。
-    channel = _BodyReadPolicyChannel()
-    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 0.05, _ADMISSION_THRESHOLD, channel)
-    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024, channel)
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 0.05, _ADMISSION_THRESHOLD)
+    middleware = _LimitRequestBodyMiddleware(admission, 5 * 1024 * 1024)
     pending: list[Message] = [
         {"type": "http.request", "body": b"a" * (4 * 1024 * 1024 + 512 * 1024), "more_body": True},
         {"type": "http.request", "body": b"b" * (1024 * 1024), "more_body": True},
@@ -1991,9 +2069,8 @@ async def test_large_body_admission_abandoned_synthetic_frame_yields_to_loop() -
             ticks["after"] = tick_count
             raise
 
-    channel = _BodyReadPolicyChannel()
-    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD, channel)
-    middleware = _LimitRequestBodyMiddleware(admission, 2048, channel)
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 30, _ADMISSION_THRESHOLD)
+    middleware = _LimitRequestBodyMiddleware(admission, 2048)
     pending: list[Message] = [
         {"type": "http.request", "body": b"a" * 4096, "more_body": True},
     ]
@@ -2677,7 +2754,7 @@ def test_large_body_admission_declared_supervision_bypass_only_for_zero(
     """申报请求的免监督判定只看有无申报体：零申报直通，申报体不论大小与方法一律进监督。"""
     scope = _large_body_scope([(b"content-length", str(declared).encode("ascii"))], method=method)
     middleware = _LargeBodyAdmissionMiddleware(
-        _admission_downstream([]), 1, 5, _ADMISSION_THRESHOLD, _BodyReadPolicyChannel()
+        _admission_downstream([]), 1, 5, _ADMISSION_THRESHOLD
     )
     bypasses = middleware._bypasses_supervision(_BodyReadPolicy(scope), scope)
 
@@ -2695,7 +2772,7 @@ def test_large_body_admission_malformed_declaration_takes_undeclared_path(
     """畸形申报按无申报解析：POST 不因负值等 int() 可解析形态误判零申报而免监督直通。"""
     scope = _large_body_scope([(b"content-length", declared)], method="POST")
     middleware = _LargeBodyAdmissionMiddleware(
-        _admission_downstream([]), 1, 5, _ADMISSION_THRESHOLD, _BodyReadPolicyChannel()
+        _admission_downstream([]), 1, 5, _ADMISSION_THRESHOLD
     )
 
     bypasses = middleware._bypasses_supervision(_BodyReadPolicy(scope), scope)
@@ -3126,9 +3203,7 @@ async def test_large_body_admission_passes_non_http_scope() -> None:
     async def downstream(scope: Any, receive: Any, send: Any) -> None:
         reached.append(scope.get("type"))
 
-    middleware = _LargeBodyAdmissionMiddleware(
-        downstream, 1, 5, _ADMISSION_THRESHOLD, _BodyReadPolicyChannel()
-    )
+    middleware = _LargeBodyAdmissionMiddleware(downstream, 1, 5, _ADMISSION_THRESHOLD)
     await middleware({"type": "lifespan"}, cast(Receive, None), cast(Send, None))
 
     assert reached == ["lifespan"]
@@ -3182,27 +3257,10 @@ def test_attach_derives_admission_threshold_from_max_body_size(
     assert admission.kwargs["admission_threshold"] == 2 * 1024 * 1024
 
 
-def test_attach_pairs_body_read_layers_through_shared_channel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """读体两层经同一配对通道实例构造配对：策略交接单点承载，不经装配序探测。"""
-    config = SeedreamConfig(api_key="test_key")
-    monkeypatch.setattr(transport_module, "get_active_config", lambda: config)
-    app = _FakeStarletteApp()
-
-    _attach_streamable_http_middleware(app, "127.0.0.1", "secret")
-
-    limit = next(ref for ref in app.user_middleware if ref.cls is _LimitRequestBodyMiddleware)
-    admission = next(ref for ref in app.user_middleware if ref.cls is _LargeBodyAdmissionMiddleware)
-    assert limit.kwargs["channel"] is admission.kwargs["channel"]
-
-
-def test_body_read_policy_channel_missing_limit_layer_fails_fast() -> None:
-    """仅挂准入层（无配对上限层先行发布策略）时 resolve 抛 RuntimeError 而非 KeyError 冒泡 500。"""
-    channel = _BodyReadPolicyChannel()
-
+def test_body_read_policy_missing_limit_layer_fails_fast() -> None:
+    """仅挂准入层（无配对上限层先行发布策略）时取回抛 RuntimeError 而非 KeyError 冒泡 500。"""
     with pytest.raises(RuntimeError, match="成对挂载"):
-        channel.resolve(_large_body_scope([]))
+        _resolve_body_read_policy(_large_body_scope([]))
 
 
 async def test_large_body_admission_small_threshold_still_gates_chunked_stream(
@@ -3235,7 +3293,7 @@ async def test_large_body_admission_small_threshold_still_gates_chunked_stream(
 async def test_body_read_policy_counted_once_across_limit_and_admission_layers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """外层读体计数经配对通道共享给内层准入：两层叠加字节只计一次，阈值判定同源。"""
+    """外层读体计数经 scope 键共享给内层准入：两层叠加字节只计一次，阈值判定同源。"""
     spy = _install_spy_gate(monkeypatch, 1)
     bodies: list[bytes] = []
     scopes: list[Any] = []
@@ -3245,9 +3303,8 @@ async def test_body_read_policy_counted_once_across_limit_and_admission_layers(
         scopes.append(scope)
         bodies.append(await Request(scope, receive).body())
 
-    channel = _BodyReadPolicyChannel()
-    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 5, _ADMISSION_THRESHOLD, channel)
-    stacked = _LimitRequestBodyMiddleware(admission, 64 * 1024 * 1024, channel)
+    admission = _LargeBodyAdmissionMiddleware(downstream, 1, 5, _ADMISSION_THRESHOLD)
+    stacked = _LimitRequestBodyMiddleware(admission, 64 * 1024 * 1024)
     chunks = [b"a" * (3 * 1024 * 1024), b"b" * (2 * 1024 * 1024), b"c" * 1024]
     pending_frames: list[Message] = [
         {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
@@ -3266,7 +3323,7 @@ async def test_body_read_policy_counted_once_across_limit_and_admission_layers(
     assert spy.acquire_calls == 1
     assert spy.release_calls == 1
     assert bodies == [b"".join(chunks)]
-    policy = channel.resolve(scopes[0])
+    policy = _resolve_body_read_policy(scopes[0])
     assert policy.total_received == sum(len(chunk) for chunk in chunks)
 
 
@@ -3284,9 +3341,7 @@ async def test_request_body_limit_early_reject_swallows_send_failure() -> None:
     async def downstream(scope, receive, send):  # type: ignore[no-untyped-def]
         raise AssertionError("超限请求不应进入下游应用")
 
-    middleware = transport_module._LimitRequestBodyMiddleware(
-        downstream, 1024, _BodyReadPolicyChannel()
-    )
+    middleware = transport_module._LimitRequestBodyMiddleware(downstream, 1024)
     scope = {"type": "http", "headers": [(b"content-length", b"2048")]}
     records: list[str] = []
     with capture_loguru_messages(records, level="DEBUG"):

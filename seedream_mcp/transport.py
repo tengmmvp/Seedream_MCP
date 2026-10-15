@@ -18,7 +18,7 @@ import ipaddress
 import json
 import ssl
 from collections.abc import Awaitable, Callable, Sequence
-from typing import Any, cast
+from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
 from mcp.server.transport_security import TransportSecuritySettings
@@ -240,11 +240,15 @@ def _header_value(scope: Scope, name: bytes) -> bytes | None:
 
 
 def _content_length_or_none(value: bytes | None) -> int | None:
-    """解析 Content-Length 头值为 int，仅收纯十进制数字，带符号等 int() 可解析形态
-    同归 None 以免误判小申报绕过准入闸，None 策略由调用层定义。"""
+    """解析 Content-Length 头值为 int，仅收 int() 可转换的纯十进制数字，带符号等
+    int() 可解析形态同归 None 以免误判小申报绕过准入闸，None 策略由调用层定义。"""
     if value is None or not value.isdigit():
         return None
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        # 超长数字串超出 int 字串转换上限按畸形归 None，与 io_download._int_or_none 同口径、各自维护。
+        return None
 
 
 def _strip_host_port(host: bytes) -> bytes:
@@ -423,7 +427,7 @@ def _wrap_send_with_verdict_guard(
 class _BodyReadPolicy:
     """单请求的读体策略对象：申报头单点解析、接收字节单点累计、超限裁决单点共享。
 
-    由外层请求体上限中间件创建并经构造配对的通道交给内层准入层，两层复用同一申报值
+    由外层请求体上限中间件创建并经 scope 键交给内层准入层，两层复用同一申报值
     与同一计数，不重复解析头、不重复累计字节；流中超限裁决同样经此共享，
     内层准入见裁决即收尾归还许可，413 发出后另经裁决监听主动送达，
     不依赖下游拉帧观察。
@@ -457,24 +461,21 @@ class _BodyReadPolicy:
             self.total_received += len(message.get("body", b""))
 
 
-class _BodyReadPolicyChannel:
-    """读体两层的装配期配对点：装配函数创建单一实例经构造同时交给两层，单请求策略经
-    scope 键交接，键为实例私有细节。
-    """
+# 读体策略的 scope 交接键：外层上限层发布、内层准入层取回，配对保证由取回守卫承担。
+_BODY_READ_POLICY_SCOPE_KEY: Final[str] = "seedream_body_read_policy"
 
-    def __init__(self) -> None:
-        self._scope_key = "seedream_body_read_policy"
 
-    def publish(self, scope: Scope, policy: _BodyReadPolicy) -> None:
-        """外层上限中间件交出单请求策略。"""
-        scope[self._scope_key] = policy
+def _publish_body_read_policy(scope: Scope, policy: _BodyReadPolicy) -> None:
+    """外层上限中间件交出单请求策略。"""
+    scope[_BODY_READ_POLICY_SCOPE_KEY] = policy
 
-    def resolve(self, scope: Scope) -> _BodyReadPolicy:
-        """内层准入中间件取回单请求策略，键缺失即装配失配，抛 RuntimeError 快失败。"""
-        try:
-            return cast(_BodyReadPolicy, scope[self._scope_key])
-        except KeyError:
-            raise RuntimeError("读体策略键缺失：读体限流层与准入层必须经装配函数成对挂载") from None
+
+def _resolve_body_read_policy(scope: Scope) -> _BodyReadPolicy:
+    """内层准入中间件取回单请求策略，键缺失即装配失配，抛 RuntimeError 快失败。"""
+    try:
+        return cast(_BodyReadPolicy, scope[_BODY_READ_POLICY_SCOPE_KEY])
+    except KeyError:
+        raise RuntimeError("读体策略键缺失：读体限流层与准入层必须经装配函数成对挂载") from None
 
 
 class _LimitRequestBodyMiddleware:
@@ -489,14 +490,13 @@ class _LimitRequestBodyMiddleware:
     永远发不出并把任务与连接钉住。超限后的 http.request 帧仅丢弃 body、
     保留真实帧的 more_body，其余帧原样透传，下游断连轮询在真实 receive 上自然
     挂起，客户端收到 413 断开或发完终帧后请求收尾。申报解析与字节累计
-    收在本层创建的 _BodyReadPolicy，经配对通道与内层准入层共享（机制见该类 docstring）。
+    收在本层创建的 _BodyReadPolicy，经 scope 键与内层准入层共享（机制见该类 docstring）。
     仅作用于 http 请求，其余流量原样透传。
     """
 
-    def __init__(self, app: ASGIApp, max_body_size: int, channel: _BodyReadPolicyChannel) -> None:
+    def __init__(self, app: ASGIApp, max_body_size: int) -> None:
         self.app = app
         self._max_body_size = max_body_size
-        self._channel = channel
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
@@ -516,7 +516,7 @@ class _LimitRequestBodyMiddleware:
         if policy.declared is not None and policy.declared > self._max_body_size:
             await _reject_body_too_large(send)
             return
-        self._channel.publish(scope, policy)
+        _publish_body_read_policy(scope, policy)
 
         async def receive_wrapper() -> Message:
             # 始终先等待真实 receive 再按需丢弃 body：同步合成帧会让下游断连
@@ -627,31 +627,43 @@ class _BodyReadAdmission:
             self.watchdog.cancel()
             self.watchdog = None
 
-    def _finish_read_supervision(self) -> None:
-        """响应转发开始即读体监护使命完成：拆看门狗并归还许可，长响应不占闸。"""
-        self._stop_watchdog()
+    def _release_gate(self) -> None:
+        """归还准入许可并即弃引用，防同一许可经多条收尾路径二次归还。"""
         if self.gate is not None:
             self.gate.release()
             self.gate = None
+
+    def _finish_read_supervision(self) -> None:
+        """响应转发开始即读体监护使命完成：拆看门狗并归还许可，长响应不占闸。"""
+        self._stop_watchdog()
+        self._release_gate()
 
     async def _send_timeout_response(self, code: str, description: str) -> None:
         # 双响应防护与 408 发送单点：下游已转发时跳过，未转发则尽力发送。
         if not self._is_forwarded():
             await _send_rejection(self._send, 408, code, description)
 
+    def _timeout_rejection(self) -> tuple[str, str]:
+        """408 分码单点：等待准入许可中为准入饥饿口径，否则为读体窗口口径。"""
+        if self._waiting_for_permit:
+            return _LARGE_BODY_ADMISSION_TIMEOUT_408
+        return _BODY_READ_TIMEOUT_408
+
     async def _acquire_gate(self) -> asyncio.Semaphore | None:
-        # 按累计窗口剩余时限取准入许可，超时返回 None，窗口基准单一。
+        # 按累计窗口剩余时限取准入许可，失败路径即按放弃原因发 408，窗口基准单一。
         pending = loop_bound_semaphore(
             self._middleware.admission_concurrency, key="large_body_admission"
         )
         remaining = self._read_deadline - self._loop.time()
         if remaining <= 0:
+            self._begin_timeout_response(*self._timeout_rejection())
             return None
-        # 许可等待中窗口到期属准入饥饿而非慢速读体，_expire 据此选择 408 口径。
+        # 许可等待中窗口到期属准入饥饿而非慢速读体。
         self._waiting_for_permit = True
         try:
             await asyncio.wait_for(pending.acquire(), timeout=remaining)
         except asyncio.TimeoutError:
+            self._begin_timeout_response(*self._timeout_rejection())
             return None
         finally:
             self._waiting_for_permit = False
@@ -688,22 +700,12 @@ class _BodyReadAdmission:
             # 外层已裁决超限：413 直发即终局动作，此间取消下游会截断响应体，
             # 写背压挂起由 uvicorn 与客户端连接自身收敛，取消留待裁决送达。
             return
-        rejection = (
-            _LARGE_BODY_ADMISSION_TIMEOUT_408
-            if self._waiting_for_permit
-            else _BODY_READ_TIMEOUT_408
-        )
-        self._begin_timeout_response(*rejection)
+        self._begin_timeout_response(*self._timeout_rejection())
         # 看门狗装设与子任务赋值之间无 await，回调运行时子任务必已赋值。
         task = self.driven_task
         assert task is not None
         if not task.done():
             task.cancel()
-
-    async def _abandon(self) -> Message:
-        # 许可等待超窗的收尾：共用序列发 408，向下游回放断连使其退栈。
-        self._begin_timeout_response(*_LARGE_BODY_ADMISSION_TIMEOUT_408)
-        return {"type": "http.disconnect"}
 
     async def _receive_wrapper(self) -> Message:
         """tee 边转发边复用外层读体计数：实际越阈补取许可，终帧归还许可，外层超限裁决即放弃。"""
@@ -738,21 +740,18 @@ class _BodyReadAdmission:
             # 响应转发开始后监护使命已完成，不再补取。
             pending = await self._acquire_gate()
             if pending is None:
-                return await self._abandon()
+                # 放弃收尾回放断连使下游退栈，408 已按放弃原因发出。
+                return {"type": "http.disconnect"}
             self.gate = pending
-        if self.gate is not None and not more_body:
+        if not more_body:
             # 终帧转发即读体完成，归还许可使长响应不占闸。
-            self.gate.release()
-            self.gate = None
+            self._release_gate()
         return message
 
     async def _finalize(self) -> None:
         """收尾单点：拆看门狗、归还许可并等待 408 脱离发送落定，正常与异常路径共用。"""
         self._stop_watchdog()
-        if self.gate is not None:
-            # 归还即弃引用，防下游终帧分支对同一许可二次归还。
-            self.gate.release()
-            self.gate = None
+        self._release_gate()
         if self.timeout_send is not None:
             # 408 在本中间件返回前等待落定：ASGI 语义下 app 返回即终结响应，
             # 脱离发送在服务器写背压时会被截断；取消打断时等待落定后放行取消，
@@ -770,7 +769,6 @@ class _BodyReadAdmission:
             acquired = await self._acquire_gate()
             if acquired is None:
                 # 未取得的许可不释放，gate 保持 None 防 finally 过量归还。
-                self._begin_timeout_response(*_LARGE_BODY_ADMISSION_TIMEOUT_408)
                 await self._finalize()
                 return
             self.gate = acquired
@@ -818,7 +816,7 @@ class _LargeBodyAdmissionMiddleware:
 
     进入监督的请求由 _BodyReadAdmission 承载单请求状态机：申报与未申报两类大请求体
     走同一条流式准入路径，receive 包装为 tee 边转发下游边复用外层读体策略的累计字节
-    （计数单点在外层，经构造注入的配对通道交接），许可只覆盖读体窗口，
+    （计数单点在外层，经 scope 键交接），许可只覆盖读体窗口，
     终帧转发即释放，解析与响应不占闸，长生成不阻塞后续大请求读体；申报 Content-Length
     超过阈值的请求进入即取许可，未申报与小申报免许可直至实际累计越过阈值且未到终帧才补取，
     许可等待按剩余窗口限时。除免监督直通形态外全部读体一律受自接管起算的累计读体窗口
@@ -843,20 +841,18 @@ class _LargeBodyAdmissionMiddleware:
         admission_concurrency: int,
         read_timeout: float,
         admission_threshold: int,
-        channel: _BodyReadPolicyChannel,
     ) -> None:
         self.app = app
         self.admission_concurrency = admission_concurrency
         self.read_timeout = read_timeout
         self.admission_threshold = admission_threshold
-        self._channel = channel
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
 
-        policy = self._channel.resolve(scope)
+        policy = _resolve_body_read_policy(scope)
         if self._bypasses_supervision(policy, scope):
             await self.app(scope, receive, send)
             return
@@ -1162,8 +1158,8 @@ def _attach_streamable_http_middleware(
     /web/api 前缀），大请求体准入居鉴权层之内，未鉴权请求不占准入许可；超长请求
     与双申报走私形态在鉴权前被 413/400 早拒且错误体经 CORS 层可被跨源客户端读取，
     健康探针同样经 CORS 层携带放行头，探针免令牌，rebinding 请求先于健康检查被拒。
-    读体两层（准入先装、上限收尾）在本函数内经同一配对通道实例构造配对，单请求
-    策略的交接由通道单点承载，不经请求期探测。
+    读体两层（准入先装、上限收尾）在本函数内成对装配，单请求策略经模块级 scope 键
+    交接，配对缺失由取回守卫快失败。
     """
     _ensure_printable_ascii_bind_host(host)
     if _middleware_attached(app):
@@ -1198,14 +1194,12 @@ def _attach_streamable_http_middleware(
             exempt_prefixes = WEB_EXEMPT_PATH_PREFIXES
             logger.info("Web 操作台已开启：静态页面免鉴权，/web/api 接口要求 Bearer 令牌")
 
-    # 读体两层的配对通道：同一实例经构造交给两层，策略交接的配对由此闭合。
-    policy_channel = _BodyReadPolicyChannel()
+    # 准入层先装居读体两层之内，与收尾装配的上限层经 scope 键交接读体计数。
     app.add_middleware(
         _LargeBodyAdmissionMiddleware,
         admission_concurrency=large_body_admission_concurrency,
         read_timeout=body_read_timeout,
         admission_threshold=_large_body_admission_threshold(max_body_size),
-        channel=policy_channel,
     )
     # 鉴权层装入读体两层之间，准入闸由此位于鉴权层之内。
     if auth_token:
@@ -1227,10 +1221,8 @@ def _attach_streamable_http_middleware(
         logger.info("Web 操作台未配置令牌，已启用 /web/api 同源 Origin 与跨站 Sec-Fetch 校验")
     if allowed_origins:
         app.add_middleware(_ErrorBoundaryMiddleware)
-    # 上限层收尾装配成为更外层，包住准入层并经同一配对通道交出读体计数。
-    app.add_middleware(
-        _LimitRequestBodyMiddleware, max_body_size=max_body_size, channel=policy_channel
-    )
+    # 上限层收尾装配成为更外层，包住准入层并经 scope 键交出读体计数。
+    app.add_middleware(_LimitRequestBodyMiddleware, max_body_size=max_body_size)
     app.add_middleware(_HealthCheckMiddleware)
     if allowed_origins:
         # CORS 层位于健康检查、请求体上限与鉴权层之外，预检直达应答，三类错误
@@ -1279,7 +1271,8 @@ def resolve_http_auth_token(args: argparse.Namespace) -> str:
 def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     """按实际绑定地址派生 SDK 内层 DNS rebinding 防护配置。
 
-    回环与 localhost 绑定启用防护并按回环白名单放行；非回环的具体地址绑定默认
+    回环与 localhost 绑定启用防护并按回环白名单放行，已配置的 SEEDREAM_HTTP_ALLOWED_HOSTS
+    在此分支不生效并输出告警；非回环的具体地址绑定默认
     按绑定地址启用 Host/Origin 白名单（Origin 校验为规范 MUST），活动配置了
     SEEDREAM_HTTP_ALLOWED_HOSTS 时改为按该列表放行，条目支持 host、host:port 与
     尾部 :* 端口通配。配置 SEEDREAM_HTTP_ALLOWED_ORIGINS 时统一并入各分支的
@@ -1294,6 +1287,12 @@ def _transport_security_for_host(host: str) -> TransportSecuritySettings:
     base_origins: list[str]
     if _is_dns_rebinding_protected_host(host):
         base_hosts, base_origins = _loopback_bind_allowlists(host)
+        if config.http_allowed_hosts:
+            logger.bind(security=True).warning(
+                "streamable-http 回环绑定 {} 下 SEEDREAM_HTTP_ALLOWED_HOSTS 不生效，"
+                "Host 校验按回环白名单放行",
+                host,
+            )
     elif config.http_allowed_hosts:
         base_hosts = list(config.http_allowed_hosts)
         base_origins = []
