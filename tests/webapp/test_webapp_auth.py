@@ -1,0 +1,171 @@
+"""Web 操作台鉴权测试：静态页面与端点发现的豁免边界及 Bearer 上跳段守卫。
+
+配置令牌时静态页面组与端点发现路径免鉴权、全部 /web/api 强制令牌；无令牌
+部署全程开放。豁免判定的单元用例直接驱动中间件 _path_exempt，覆盖含 ``..`` 的
+路径拒绝豁免。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from _lib.web_fixtures import (
+    build_web_app,
+    prepare_static_dir,
+    web_asgi_client,
+    write_workspace_config,
+)
+from seedream_mcp.server.transport import _BearerTokenAuthMiddleware
+
+
+def test_bearer_path_exempt_matches_static_group_only() -> None:
+    """豁免表仅命中 index、根路径重定向与静态前缀，API 与其余路径一律不豁免。"""
+    middleware = _BearerTokenAuthMiddleware(
+        app=None,  # type: ignore[arg-type]
+        expected_token="secret",
+        exempt_exact=frozenset({"/web", "/"}),
+        exempt_prefixes=("/web/static/",),
+    )
+
+    assert middleware._path_exempt({"path": "/web"}) is True
+    assert middleware._path_exempt({"path": "/"}) is True
+    assert middleware._path_exempt({"path": "/web/static/app.js"}) is True
+    assert middleware._path_exempt({"path": "/web/api/config-info"}) is False
+    assert middleware._path_exempt({"path": "/mcp"}) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/web/static/../web/api/config-info", "/web/../mcp", "/web%2f..%2fapi"],
+)
+def test_bearer_path_exempt_rejects_traversal(path: str) -> None:
+    """路径含上跳段时一律不豁免，防止借豁免前缀穿越到受保护路径。"""
+    middleware = _BearerTokenAuthMiddleware(
+        app=None,  # type: ignore[arg-type]
+        expected_token="secret",
+        exempt_exact=frozenset({"/web", "/"}),
+        exempt_prefixes=("/web/static/",),
+    )
+
+    assert middleware._path_exempt({"path": path}) is False
+
+
+def test_bearer_path_exempt_ignores_trailing_slash() -> None:
+    """豁免 exact 匹配忽略尾斜杠差异，表项与请求路径归一后比对。"""
+    middleware = _BearerTokenAuthMiddleware(
+        app=None,  # type: ignore[arg-type]
+        expected_token="secret",
+        exempt_exact=frozenset({"/web/", "/"}),
+        exempt_prefixes=("/web/static/",),
+    )
+
+    assert middleware._path_exempt({"path": "/web/"}) is True
+    assert middleware._path_exempt({"path": "/web"}) is True
+    assert middleware._path_exempt({"path": "/web/api/"}) is False
+
+
+def test_bearer_exempts_well_known_discovery_via_production_table() -> None:
+    """端点发现路径经 transport 常量并入豁免口径，web 开启的令牌部署下发现重定向免鉴权。"""
+    from seedream_mcp.server.transport import ALWAYS_EXEMPT_EXACT_PATHS
+    from seedream_mcp.webapp.constants import (
+        WEB_EXEMPT_EXACT_PATHS,
+        WEB_EXEMPT_PATH_PREFIXES,
+    )
+
+    middleware = _BearerTokenAuthMiddleware(
+        app=None,  # type: ignore[arg-type]
+        expected_token="secret",
+        exempt_exact=WEB_EXEMPT_EXACT_PATHS | ALWAYS_EXEMPT_EXACT_PATHS,
+        exempt_prefixes=WEB_EXEMPT_PATH_PREFIXES,
+    )
+
+    assert middleware._path_exempt({"path": "/.well-known/mcp"}) is True
+    assert middleware._path_exempt({"path": "/.well-known/mcp/"}) is True
+
+
+async def test_static_pages_exempt_and_api_requires_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """令牌部署下静态页 200、API 无令牌 401、携带令牌 200。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app(auth_token="secret")
+
+    async with web_asgi_client(app) as client:
+        index_response = await client.get("/web")
+        static_response = await client.get("/web/static/app.js")
+        unauthorized = await client.get("/web/api/config-info")
+        authorized = await client.get(
+            "/web/api/config-info", headers={"Authorization": "Bearer secret"}
+        )
+
+    assert index_response.status_code == 200
+    assert index_response.headers["content-type"].startswith("text/html")
+    assert static_response.status_code == 200
+    assert unauthorized.status_code == 401
+    assert unauthorized.headers["www-authenticate"] == "Bearer"
+    assert unauthorized.json()["error"] == "missing_token"
+    assert authorized.status_code == 200
+
+
+async def test_api_open_when_no_token_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """无令牌部署不装配 Bearer 中间件，Web 页面与 API 全程开放。"""
+    prepare_static_dir(monkeypatch, tmp_path)
+    write_workspace_config(tmp_path)
+    app = build_web_app(auth_token="")
+
+    async with web_asgi_client(app) as client:
+        index_response = await client.get("/web")
+        api_response = await client.get("/web/api/config-info")
+
+    assert index_response.status_code == 200
+    assert api_response.status_code == 200
+
+
+async def test_configured_origin_allows_cross_origin_web_api_without_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """无令牌部署下配置放行列表内的跨源 /web/api 请求放行，列表外仍 403。
+
+    配置的 origins 为显式信任声明，与 CORS 层放行口径一致，预检应答可达的来源
+    真实请求同样可达。
+    """
+    from seedream_mcp.config import SeedreamConfig, set_active_config
+
+    prepare_static_dir(monkeypatch, tmp_path)
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_allowed_origins=("https://app.example.com",),
+        )
+    )
+    app = build_web_app(auth_token="")
+
+    async with web_asgi_client(app) as client:
+        allowed = await client.get(
+            "/web/api/config-info",
+            headers={"host": "127.0.0.1", "origin": "https://app.example.com"},
+        )
+        denied = await client.get(
+            "/web/api/config-info",
+            headers={"host": "127.0.0.1", "origin": "https://evil.example"},
+        )
+
+    assert allowed.status_code == 200
+    assert denied.status_code == 403

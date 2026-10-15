@@ -1,0 +1,1293 @@
+"""Web 操作台生成 API 测试：四端点复用 runners、错误映射与 web_path 增强。
+
+runner 经对象式 monkeypatch 替换，覆盖成功、校验失败与错误类型映射到 HTTP
+状态码的分支；web_path 增强的防劣化分支独立单测；共享资源 shim 的构造行为
+与端点级传递（含并发共享）分别独立覆盖。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx
+import pytest
+from mcp.types import CallToolResult
+from starlette.requests import Request
+
+import seedream_mcp.server.runtime as runtime_module
+import seedream_mcp.server.transport as transport_module
+import seedream_mcp.utils.core.errors as errors_module
+from _lib.cpu_offload_spy import CpuOffloadSpy
+from _lib.generation_fixtures import _patch_client_method_spy
+from _lib.web_fixtures import (
+    build_web_app,
+    make_images_root_unresolvable,
+    web_asgi_client,
+    write_workspace_config,
+)
+from seedream_mcp.config import (
+    LIFESPAN_KEY_CLIENT,
+    LIFESPAN_KEY_DOWNLOAD_MANAGER,
+    SeedreamConfig,
+    set_active_config,
+)
+import seedream_mcp.tools.outputs as outputs_module
+from seedream_mcp.tools.outputs.channels import output_channel_enabled
+from seedream_mcp.utils.core.errors import SeedreamConfigError, SeedreamValidationError
+from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
+from seedream_mcp.utils.core.loop_bound import loop_bound_semaphore
+from seedream_mcp.webapp import _responses
+from seedream_mcp.webapp import generate as generate_module
+from seedream_mcp.webapp.context import build_web_request_context
+
+
+def _generation_result(payload: dict[str, Any], is_error: bool = False) -> CallToolResult:
+    """构造生成 runner 的替身返回值。"""
+    return CallToolResult(content=[], structured_content=payload, is_error=is_error)
+
+
+def _make_fake_runner(
+    *,
+    result: CallToolResult | None = None,
+    error: Exception | None = None,
+    captured: list[dict[str, Any]] | None = None,
+    yield_once: bool = False,
+) -> Callable[..., Awaitable[CallToolResult]]:
+    """构造生成 runner 替身：返回固定结果或抛指定异常，可选记录调用实参。
+
+    captured 每次调用追加 ctx/workspace_roots 两键字典；yield_once 在返回前
+    让出事件循环一次，模拟并发共享的挂起点。
+    """
+
+    async def _runner(
+        params: Any,
+        config: Any,
+        ctx: Any = None,
+        workspace_roots: Any = None,
+    ) -> CallToolResult:
+        del params, config
+        if captured is not None:
+            captured.append({"ctx": ctx, "workspace_roots": workspace_roots})
+        if yield_once:
+            await asyncio.sleep(0)
+        if error is not None:
+            raise error
+        assert result is not None
+        return result
+
+    return _runner
+
+
+def _install_runner(
+    monkeypatch: pytest.MonkeyPatch, name: str, payload: dict[str, Any], is_error: bool = False
+) -> None:
+    """把 api 命名空间内的 runner 符号替换为返回固定结果的替身。"""
+    monkeypatch.setattr(
+        generate_module, name, _make_fake_runner(result=_generation_result(payload, is_error))
+    )
+
+
+async def _post_json(app: Any, path: str, body: dict[str, Any]) -> httpx.Response:
+    async with web_asgi_client(app) as client:
+        return await client.post(path, json=body)
+
+
+async def _post_raw(app: Any, path: str, content: bytes) -> httpx.Response:
+    """以 application/json 原始请求体 POST 一次，供畸形 JSON 解析分支使用。"""
+    async with web_asgi_client(app) as client:
+        return await client.post(
+            path, content=content, headers={"content-type": "application/json"}
+        )
+
+
+def _install_second_entry_gated_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[int], asyncio.Event]:
+    """替换解析入口为计数门：第二个请求进入后放行全部，返回进入序列与双入事件。"""
+    entries: list[int] = []
+    both_entered = asyncio.Event()
+    original_parse = _responses.parse_json_object_body
+
+    async def _gated_parse(request: Request) -> tuple[dict[str, Any], Any]:
+        entries.append(len(entries) + 1)
+        if len(entries) == 2:
+            both_entered.set()
+        await both_entered.wait()
+        return await original_parse(request)
+
+    monkeypatch.setattr(_responses, "parse_json_object_body", _gated_parse)
+    return entries, both_entered
+
+
+async def test_generate_returns_structured_payload_with_web_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """成功结果的 data 条目附 web_path 且 local_path 改写为同一相对形态。"""
+    images_root = write_workspace_config(tmp_path)
+    local_path = images_root / "2026-08-20" / "text_to_image" / "a.png"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"png")
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [{"url": "https://x/a.png", "local_path": str(local_path)}],
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    entry = response.json()["data"][0]
+    assert entry["web_path"] == "2026-08-20/text_to_image/a.png"
+    assert entry["local_path"] == "2026-08-20/text_to_image/a.png"
+
+
+async def test_generate_skips_web_path_outside_images_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """图片目录之外的条目删除 local_path 键且不附 web_path，绝对路径不出端点。"""
+    write_workspace_config(tmp_path)
+    outside = tmp_path / "elsewhere.png"
+    outside.write_bytes(b"png")
+    _install_runner(
+        monkeypatch,
+        "run_image_to_image",
+        {"tool": "image_to_image", "success": True, "data": [{"local_path": str(outside)}]},
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app, "/web/api/generate/image-to-image", {"prompt": "改图", "image": "https://x/a.png"}
+    )
+
+    assert response.status_code == 200
+    entry = response.json()["data"][0]
+    assert "web_path" not in entry
+    assert "local_path" not in entry
+
+
+async def test_generate_save_path_outside_drops_local_path_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """save_path 越出图片目录时，data 与 auto_save.results 条目的 local_path 与
+    markdown_ref 键删除，Web 文件端点无法服务图片目录外文件。"""
+    write_workspace_config(tmp_path)
+    destination = tmp_path / "tmp-export" / "batch"
+    destination.mkdir(parents=True)
+    saved = destination / "x.png"
+    saved.write_bytes(b"png")
+    absolute = str(saved)
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [
+                {
+                    "url": "https://x/x.png",
+                    "local_path": absolute,
+                    "markdown_ref": f"![x]({absolute})",
+                }
+            ],
+            "auto_save": {
+                "enabled": True,
+                "results": [
+                    {
+                        "success": True,
+                        "original_url": "https://x/x.png",
+                        "local_path": absolute,
+                        "markdown_ref": f"![x]({absolute})",
+                    }
+                ],
+            },
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app, "/web/api/generate/text-to-image", {"prompt": "一只猫", "save_path": str(destination)}
+    )
+
+    assert response.status_code == 200
+    assert absolute not in response.text
+    assert str(tmp_path) not in response.text
+    assert saved.as_posix() not in response.text
+    assert tmp_path.as_posix() not in response.text
+    # JSON 编码把反斜杠双写，泄漏须按转义后形态检查。
+    assert absolute.replace("\\", "\\\\") not in response.text
+    assert str(tmp_path).replace("\\", "\\\\") not in response.text
+    payload = response.json()
+    assert "local_path" not in payload["data"][0]
+    assert "markdown_ref" not in payload["data"][0]
+    result_entry = payload["auto_save"]["results"][0]
+    assert "local_path" not in result_entry
+    assert "markdown_ref" not in result_entry
+
+
+async def test_generate_rewrites_auto_save_results_local_path_inside_images_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """图片目录内的 auto_save.results 条目同样附 web_path 相对形态，与 data 条目同口径。"""
+    images_root = write_workspace_config(tmp_path)
+    local_path = images_root / "2026-08-20" / "text_to_image" / "a.png"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"png")
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [],
+            "auto_save": {
+                "enabled": True,
+                "results": [{"success": True, "local_path": str(local_path)}],
+            },
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    result_entry = response.json()["auto_save"]["results"][0]
+    assert result_entry["web_path"] == "2026-08-20/text_to_image/a.png"
+    assert result_entry["local_path"] == "2026-08-20/text_to_image/a.png"
+
+
+async def test_generate_multi_image_fusion_returns_structured_payload_with_web_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """融合端点复用 run_multi_image_fusion，图片目录内条目附 web_path。"""
+    images_root = write_workspace_config(tmp_path)
+    local_path = images_root / "2026-08-20" / "multi_image_fusion" / "a.png"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"png")
+    _install_runner(
+        monkeypatch,
+        "run_multi_image_fusion",
+        {
+            "tool": "multi_image_fusion",
+            "success": True,
+            "data": [{"url": "https://x/a.png", "local_path": str(local_path)}],
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app,
+        "/web/api/generate/multi-image-fusion",
+        {"prompt": "融合穿搭", "image": ["https://x/a.png", "https://x/b.png"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["web_path"] == "2026-08-20/multi_image_fusion/a.png"
+
+
+async def test_generate_multi_image_fusion_missing_images_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """融合请求缺 image 列表经 MultiImageFusionInput 校验拒绝，映射 400。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/multi-image-fusion", {"prompt": "融合穿搭"})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+
+
+async def test_generate_sequential_generation_returns_structured_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """组图端点复用 run_sequential_generation，结构化结果原样返回。"""
+    write_workspace_config(tmp_path)
+    _install_runner(
+        monkeypatch,
+        "run_sequential_generation",
+        {
+            "tool": "sequential_generation",
+            "success": True,
+            "data": [{"url": "https://x/1.png"}, {"url": "https://x/2.png"}],
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app, "/web/api/generate/sequential-generation", {"prompt": "四格漫画", "max_images": 4}
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tool"] == "sequential_generation"
+    assert [item["url"] for item in payload["data"]] == ["https://x/1.png", "https://x/2.png"]
+
+
+async def test_generate_sequential_generation_empty_prompt_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """组图空提示词经 SequentialGenerationInput 校验拒绝，映射 400。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/sequential-generation", {"prompt": ""})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+
+
+async def test_generate_invalid_params_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """空提示词经 pydantic 校验拒绝，映射 400。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": ""})
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+
+
+async def test_generate_invalid_json_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """非法 JSON 请求体映射 400。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_raw(app, "/web/api/generate/text-to-image", b"not-json")
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+
+
+async def test_generate_deeply_nested_json_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """深嵌套 JSON 触发的 RecursionError 与解析失败同归 400 invalid_json。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_raw(app, "/web/api/generate/text-to-image", b"[" * 5000)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+
+
+async def test_generate_oversized_integer_json_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """超长整数字面量抛非 JSONDecodeError 的裸 ValueError，同样归 400 invalid_json。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    body = ('{"a": ' + "1" * 5000 + "}").encode("utf-8")
+    response = await _post_raw(app, "/web/api/generate/text-to-image", body)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+
+
+async def test_generate_non_object_json_body_returns_400(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """JSON 数组等非对象请求体映射 400 invalid_request。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_raw(app, "/web/api/generate/text-to-image", b"[1, 2]")
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"] == "invalid_request"
+    assert payload["error_description"] == "请求体须为 JSON 对象"
+
+
+async def test_parse_json_object_body_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超阈值请求体的 JSON 解析经专用 CPU 池执行，不与默认执行器短任务同池排队。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    large_body = (
+        '{"prompt": "a cat", "pad": "' + "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1) + '"}'
+    ).encode("utf-8")
+
+    async def _receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": large_body, "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive=_receive)
+    body, error = await _responses.parse_json_object_body(request)
+
+    assert error is None
+    assert body["prompt"] == "a cat"
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_parse_json_object_body_small_runs_outside_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """低于下沉阈值的请求体在事件循环线程同步解析，不付线程往返开销。"""
+    spy = CpuOffloadSpy(json.loads)
+
+    monkeypatch.setattr(json, "loads", spy)
+
+    async def _receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b'{"prompt": "a cat"}', "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive=_receive)
+    body, error = await _responses.parse_json_object_body(request)
+
+    assert error is None
+    assert body == {"prompt": "a cat"}
+    spy.assert_ran_outside_cpu_pool()
+
+
+async def test_parse_json_object_body_pool_closed_returns_service_unavailable() -> None:
+    """CPU 卸载池关闭取消大请求体的排队解析时回 500，不误诊为 invalid_json。"""
+    from _lib.cpu_offload_spy import saturate_cpu_offload_pool
+    from seedream_mcp.utils.core.executors import shutdown_cpu_offload_executor
+
+    large_body = (
+        '{"prompt": "a cat", "pad": "' + "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1) + '"}'
+    ).encode("utf-8")
+
+    async def _receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": large_body, "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "headers": []}, receive=_receive)
+
+    async with saturate_cpu_offload_pool() as saturated:
+        parse = asyncio.ensure_future(_responses.parse_json_object_body(request))
+        await saturated.wait_queued()
+        shutdown_cpu_offload_executor()
+        body, error = await parse
+
+    await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5)
+
+    assert body == {}
+    assert error is not None
+    assert error.status_code == 500
+    assert json.loads(bytes(error.body))["error"] == "service_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [
+        ("validation_error", 400),
+        ("payload_too_large", 400),
+        ("rate_limited", 429),
+        ("payment_required", 402),
+        ("auth_error", 503),
+        ("config_error", 503),
+        ("network_error", 502),
+        ("api_error", 502),
+        ("timeout_error", 504),
+        ("generation_failed", 502),
+    ],
+)
+async def test_generate_maps_error_type_to_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+    error_type: str,
+    expected_status: int,
+) -> None:
+    """失败结果按 error.type 映射状态码，响应体保留完整结构化结果。"""
+    write_workspace_config(tmp_path)
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": False,
+            "data": [],
+            "error": {"type": error_type, "message": "x"},
+        },
+        is_error=True,
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == expected_status
+    assert response.json()["error"]["type"] == error_type
+
+
+def test_generation_error_status_covers_profile_error_codes() -> None:
+    """状态码映射表覆盖除显式走默认外的全部档案错误码。
+
+    新增档案错误码未登记映射时在此失败，防其静默回落 502；generation_failed
+    有意走默认回退，为唯一豁免。
+    """
+    profiles = list(errors_module._HTTP_STATUS_PROFILES.values())
+    profiles += [profile for _, profile in errors_module._EXCEPTION_PROFILES]
+    profiles += [
+        errors_module._HTTP_5XX_PROFILE,
+        errors_module._HTTP_DEFAULT_PROFILE,
+        errors_module._GENERIC_MCP_PROFILE,
+        errors_module._UNKNOWN_PROFILE,
+    ]
+
+    assert set(_responses.GENERATION_ERROR_STATUS) == {
+        profile.error_code for profile in profiles
+    } - {"generation_failed"}
+
+
+async def test_respond_structured_json_body_is_utf8_bytes_direct() -> None:
+    """结构化 JSON 响应体为 UTF-8 字节直传，非 ASCII 原文输出不经二次编码。"""
+    structured = {"tool": "text_to_image", "success": True, "prompt": "一只猫"}
+
+    response = await _responses.respond_structured_json(structured, 200)
+
+    assert isinstance(response.body, bytes)
+    assert response.body == '{"tool":"text_to_image","success":true,"prompt":"一只猫"}'.encode(
+        "utf-8"
+    )
+    assert response.media_type == "application/json"
+    assert response.headers["cache-control"] == "no-store"
+
+
+async def test_respond_structured_json_large_payload_encodes_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """大载荷的 JSON 序列化与 UTF-8 编码在专用 CPU 池整体完成，事件循环不承担编码。"""
+    spy = CpuOffloadSpy(_responses.dump_strict_json_bytes)
+    monkeypatch.setattr(_responses, "dump_strict_json_bytes", spy)
+    structured: dict[str, object] = {"payload": "x" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)}
+
+    response = await _responses.respond_structured_json(structured, 200)
+
+    spy.assert_ran_in_cpu_pool()
+    assert json.loads(bytes(response.body)) == structured
+
+
+async def test_generate_web_entry_runs_real_runner_without_mirror_assembly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """Web 入口驱动真实 runner 流水线且镜像装配关闭：镜像构建函数不被触达。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(api_key="test_key", workspace_root=str(tmp_path), auto_save_enabled=False)
+    )
+
+    _patch_client_method_spy(
+        monkeypatch,
+        "text_to_image",
+        result_factory=lambda: {
+            "success": True,
+            "data": [{"url": "https://x/a.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        },
+    )
+    spy = CpuOffloadSpy(outputs_module.build_structured_json_text)
+    monkeypatch.setattr(outputs_module, "build_structured_json_text", spy)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"][0]["url"] == "https://x/a.png"
+    assert spy.calls == []
+
+
+async def test_generate_large_body_reads_while_generation_in_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """生成期不占准入闸：首个大请求的 runner 未返回时，第二个大请求仍读体进入解析。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            generate_concurrency=1,
+        )
+    )
+    generation_done = asyncio.Event()
+    runner_entered = asyncio.Event()
+
+    async def _runner(
+        params: Any,
+        config: Any,
+        ctx: Any = None,
+        workspace_roots: Any = None,
+    ) -> CallToolResult:
+        del params, config, ctx, workspace_roots
+        runner_entered.set()
+        await generation_done.wait()
+        return _generation_result({"tool": "image_to_image", "success": True, "data": []})
+
+    monkeypatch.setattr(generate_module, "run_image_to_image", _runner)
+    parse_entries: list[int] = []
+    second_parsed = asyncio.Event()
+    original_parse = _responses.parse_json_object_body
+
+    async def _counting_parse(request: Request) -> tuple[dict[str, Any], Any]:
+        parsed = await original_parse(request)
+        parse_entries.append(len(parse_entries) + 1)
+        if len(parse_entries) == 2:
+            second_parsed.set()
+        return parsed
+
+    monkeypatch.setattr(_responses, "parse_json_object_body", _counting_parse)
+    app = build_web_app()
+    # prompt 上限远低于准入阈值，大载荷经 image 字段的长串构造。
+    body = {"prompt": "改图", "image": "data:image/png;base64," + "A" * (5 * 1024 * 1024)}
+
+    async with web_asgi_client(app) as client:
+        first = asyncio.ensure_future(client.post("/web/api/generate/image-to-image", json=body))
+        assert await asyncio.wait_for(runner_entered.wait(), timeout=5), "首个请求未进入生成"
+        second = asyncio.ensure_future(client.post("/web/api/generate/image-to-image", json=body))
+        assert await asyncio.wait_for(
+            second_parsed.wait(), timeout=5
+        ), "生成进行中第二个大请求未能读体进入解析"
+        generation_done.set()
+        first_response, second_response = await asyncio.gather(first, second)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert len(parse_entries) == 2
+
+
+async def test_generate_body_gate_released_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """闸在读体后即释放：首个大请求停驻解析期不占许可，第二个大请求并发读体进解析。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            generate_concurrency=1,
+        )
+    )
+    entries, both_parsed = _install_second_entry_gated_parse(monkeypatch)
+    _install_runner(
+        monkeypatch, "run_text_to_image", {"tool": "text_to_image", "success": True, "data": []}
+    )
+    app = build_web_app()
+    body = {"prompt": "一只猫", "pad": "x" * (5 * 1024 * 1024)}
+
+    async with web_asgi_client(app) as client:
+        posts = [
+            asyncio.ensure_future(client.post("/web/api/generate/text-to-image", json=body))
+            for _ in range(2)
+        ]
+        assert await asyncio.wait_for(both_parsed.wait(), timeout=5), "两个大请求未并发进入解析"
+        responses = await asyncio.gather(*posts)
+
+    assert [response.status_code for response in responses] == [400, 400]
+    assert len(entries) == 2
+
+
+async def test_generate_small_bodies_admit_concurrently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """小请求体不进准入闸：并发请求同时进入解析，单用户典型负载不被准入阻塞。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            generate_concurrency=1,
+        )
+    )
+    entries, both_entered = _install_second_entry_gated_parse(monkeypatch)
+    _install_runner(
+        monkeypatch, "run_text_to_image", {"tool": "text_to_image", "success": True, "data": []}
+    )
+    app = build_web_app()
+
+    async with web_asgi_client(app) as client:
+        posts = [
+            asyncio.ensure_future(
+                client.post("/web/api/generate/text-to-image", json={"prompt": "一只猫"})
+            )
+            for _ in range(2)
+        ]
+        assert await asyncio.wait_for(both_entered.wait(), timeout=5), "两个小请求未同时进入解析"
+        responses = await asyncio.gather(*posts)
+
+    assert [response.status_code for response in responses] == [200, 200]
+
+
+async def test_generate_large_body_goes_through_transport_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """大请求体经传输层准入读体后进入端点，许可限值取自活动配置。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    set_active_config(
+        SeedreamConfig(
+            api_key="test_key",
+            workspace_root=str(tmp_path),
+            http_max_body_size=8 * 1024 * 1024,
+            large_body_admission_concurrency=1,
+        )
+    )
+    admissions: list[tuple[str, int]] = []
+    real_factory = loop_bound_semaphore
+
+    def _recording(limit: int, *, key: str) -> Any:
+        admissions.append((key, limit))
+        return real_factory(limit, key=key)
+
+    monkeypatch.setattr(transport_module, "loop_bound_semaphore", _recording)
+    _install_runner(
+        monkeypatch, "run_text_to_image", {"tool": "text_to_image", "success": True, "data": []}
+    )
+    app = build_web_app()
+    # prompt 上限远低于准入阈值，大载荷经 pad 字段的长串构造。pad 触发端点校验 400，
+    # 响应本身证明请求已越过准入闸到达端点。
+    body = {"prompt": "一只猫", "pad": "x" * (5 * 1024 * 1024)}
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", body)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+    assert admissions == [("large_body_admission", 1)]
+
+
+async def test_generate_runner_validation_error_returns_400(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """runner 抛 SeedreamValidationError 映射 400 validation_error，携带原因。"""
+
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(error=SeedreamValidationError("参考图数量超出上限", field="image")),
+    )
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"] == "validation_error"
+    assert "参考图数量超出上限" in payload["error_description"]
+
+
+async def test_generate_runner_validation_error_echoes_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """runner 校验错误消息原样返回，携带图片目录路径。"""
+    images_root = write_workspace_config(tmp_path)
+
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            error=SeedreamValidationError(f"保存路径须位于 {images_root} 之内", field="save_path")
+        ),
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 400
+    description = response.json()["error_description"]
+    assert str(images_root) in description
+
+
+async def test_generate_runner_config_error_returns_503(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """runner 抛 SeedreamConfigError 映射 503 config_error，携带原因。"""
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(error=SeedreamConfigError("数据根目录无法解析")),
+    )
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["error"] == "config_error"
+    assert "数据根目录无法解析" in payload["error_description"]
+
+
+async def test_generate_runner_unexpected_error_returns_500(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """runner 抛未归类异常兜底 500 internal_error，不向响应泄露异常细节。"""
+
+    monkeypatch.setattr(
+        generate_module, "run_text_to_image", _make_fake_runner(error=RuntimeError("boom"))
+    )
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert payload["error"] == "internal_error"
+    assert "boom" not in payload["error_description"]
+
+
+async def test_generate_non_dict_structured_content_returns_empty_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """structured_content 非 dict 时回退空对象响应为 200，不抛异常。"""
+
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(result=CallToolResult(content=[], structured_content="bad")),
+    )
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    assert response.json() == {}
+
+
+async def test_generate_runner_called_inside_disabled_output_channels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """端点在 output_channels_scope(preview=False, mirror=False) 边界内调 runner：
+    Web 路径只消费结构化结果，预览与镜像装配均关闭。作用域随端点调用退出复位。"""
+    captured: list[dict[str, bool]] = []
+
+    async def _runner(
+        params: Any,
+        config: Any,
+        ctx: Any = None,
+        workspace_roots: Any = None,
+    ) -> CallToolResult:
+        del params, config, ctx, workspace_roots
+        captured.append(
+            {
+                "preview": output_channel_enabled("preview"),
+                "mirror": output_channel_enabled("mirror"),
+            }
+        )
+        return _generation_result({"tool": "text_to_image", "success": True, "data": []})
+
+    monkeypatch.setattr(generate_module, "run_text_to_image", _runner)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    assert captured == [{"preview": False, "mirror": False}]
+    assert output_channel_enabled("preview") and output_channel_enabled("mirror")
+
+
+async def test_generate_runner_receives_no_forged_workspace_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """端点不向 runner 伪造会话 Roots，文件边界走环境变量回退链。
+
+    伪造 Roots 有两重回归：UNC 工作区根经 file URI 转换层丢失使回退边界失效、
+    本地路径错误回显分支解锁泄露服务器路径；图片目录作边界还会造成保存目录
+    双重嵌套。
+    """
+    write_workspace_config(tmp_path)
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
+            captured=captured,
+        ),
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    assert [call["workspace_roots"] for call in captured] == [None]
+
+
+async def test_generate_rejects_when_images_root_unresolvable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """图片目录不可解析时与图库端点同口径返回 400 配置指引，不以宽边界降级执行。"""
+    make_images_root_unresolvable(monkeypatch, tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"] == "images_root_unavailable"
+    assert "SEEDREAM_DATA_ROOT" in body["error_description"]
+
+
+async def test_generate_error_channels_carry_messages_verbatim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """auto_save.results[].error、data[].error 嵌套 message 与顶层 error.message 原样透传。"""
+    images_root = write_workspace_config(tmp_path)
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": False,
+            "data": [
+                {"url": "https://x/a.png", "error": {"message": f"下载失败于 {images_root}\\a.png"}}
+            ],
+            "error": {"type": "generation_failed", "message": f"保存到 {images_root} 失败"},
+            "auto_save": {
+                "results": [{"success": False, "error": f"写入 {images_root}\\b.png 被拒绝"}]
+            },
+        },
+        is_error=True,
+    )
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["error"]["message"] == f"保存到 {images_root} 失败"
+    assert payload["data"][0]["error"]["message"] == f"下载失败于 {images_root}\\a.png"
+    assert payload["auto_save"]["results"][0]["error"] == f"写入 {images_root}\\b.png 被拒绝"
+
+
+async def test_generate_endpoint_requires_token(
+    tmp_path: Path,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """令牌部署下生成端点未携带令牌时被 Bearer 中间件拒绝。"""
+    write_workspace_config(tmp_path)
+    app = build_web_app(auth_token="secret")
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 401
+
+
+def test_build_web_request_context_returns_stub_when_resource_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """共享资源在堂时 shim 的 lifespan 字典携带共享 client 与下载管理器。"""
+
+    class _FakeClient:
+        pass
+
+    class _FakeDownloadManager:
+        pass
+
+    client = _FakeClient()
+    download_manager = _FakeDownloadManager()
+    monkeypatch.setattr(
+        runtime_module,
+        "_active_resource",
+        type("_R", (), {"client": client, "download_manager": download_manager})(),
+    )
+
+    stub = build_web_request_context()
+
+    assert stub is not None
+    assert stub.request_context.lifespan_context["client"] is client
+    assert stub.request_context.lifespan_context["download_manager"] is download_manager
+
+
+def test_build_web_request_context_returns_none_when_resource_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """共享资源不在堂时返回 None，调用方回退每请求新建 client 路径。"""
+    monkeypatch.setattr(runtime_module, "_active_resource", None)
+
+    assert build_web_request_context() is None
+
+
+def test_augment_generation_payload_ignores_scalar_data(tmp_path: Path) -> None:
+    """标量形态 data 无条目，整体跳过，原字典不被改写。"""
+    structured = {"data": "not-a-list", "success": True}
+
+    generate_module.augment_generation_payload(structured, tmp_path)
+
+    assert structured == {"data": "not-a-list", "success": True}
+
+
+def test_augment_generation_payload_converges_dict_form_data(tmp_path: Path) -> None:
+    """dict 形态 data 计单条目，同样附 web_path 收敛。"""
+    local_path = tmp_path / "2026-08-20" / "text_to_image" / "a.png"
+    local_path.parent.mkdir(parents=True)
+    local_path.write_bytes(b"png")
+    structured: dict[str, object] = {
+        "data": {"url": "https://x/a.png", "local_path": str(local_path)}
+    }
+
+    generate_module.augment_generation_payload(structured, tmp_path)
+
+    entry = structured["data"]
+    assert isinstance(entry, dict)
+    assert entry["web_path"] == "2026-08-20/text_to_image/a.png"
+    assert entry["local_path"] == "2026-08-20/text_to_image/a.png"
+
+
+def test_augment_generation_payload_skips_non_dict_items(tmp_path: Path) -> None:
+    """data 条目非 dict 时跳过该条目，列表与其他键保持原样。"""
+    structured = {"data": [42, "x", None], "count": 3}
+
+    generate_module.augment_generation_payload(structured, tmp_path)
+
+    assert structured == {"data": [42, "x", None], "count": 3}
+
+
+def test_augment_generation_payload_skips_non_string_local_path(tmp_path: Path) -> None:
+    """local_path 非字符串时跳过该条目，不附 web_path 且既有键不变。"""
+    structured: dict[str, object] = {
+        "data": [{"local_path": 123, "keep": "v"}, {"local_path": None, "keep": 2}]
+    }
+
+    generate_module.augment_generation_payload(structured, tmp_path)
+
+    assert structured["data"] == [{"local_path": 123, "keep": "v"}, {"local_path": None, "keep": 2}]
+
+
+def test_generation_status_falls_back_to_502_without_str_error_type() -> None:
+    """error.type 缺失或非字符串时状态码回落 502，命中形态时按映射表取值。"""
+    assert _responses.structured_error_type({"success": False}) is None
+    assert _responses.structured_error_type({"error": {"type": 42}}) is None
+    assert _responses.structured_error_type({"error": {"type": "timeout_error"}}) == "timeout_error"
+
+    assert _responses.generation_status({"success": False}) == 502
+    assert _responses.generation_status({"error": {"type": "timeout_error"}}) == 504
+
+
+def test_converge_path_entry_deletes_key_when_resolve_fails(tmp_path: Path) -> None:
+    """resolve 阶段抛 OSError/ValueError 的路径删除条目键，不附 web_path。"""
+    images_root = tmp_path / ".seedream" / "images"
+    images_root.mkdir(parents=True)
+    item: dict[str, object] = {"local_path": "bad\x00name.png", "keep": 1}
+
+    _responses.converge_path_entry(item, "local_path", images_root, resolve=True)
+
+    assert item == {"keep": 1}
+
+
+def _make_stub_resource() -> SimpleNamespace:
+    """构造共享资源替身，close 为异步桩以兼容 lifespan 复位 fixture 的收尾关闭。"""
+    client = MagicMock()
+    client.close = AsyncMock()
+    download_manager = MagicMock()
+    download_manager.close = AsyncMock()
+    return SimpleNamespace(client=client, download_manager=download_manager)
+
+
+async def test_generate_endpoint_receives_shared_client_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """端点把 shim 上下文传入 runner，lifespan 字典携带共享资源同一实例。"""
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
+            captured=captured,
+        ),
+    )
+    stub = _make_stub_resource()
+    monkeypatch.setattr(runtime_module, "_active_resource", stub)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    response = await _post_json(app, "/web/api/generate/text-to-image", {"prompt": "一只猫"})
+
+    assert response.status_code == 200
+    assert len(captured) == 1
+    ctx = captured[0]["ctx"]
+    assert ctx is not None
+    lifespan = ctx.request_context.lifespan_context
+    assert lifespan[LIFESPAN_KEY_CLIENT] is stub.client
+    assert lifespan[LIFESPAN_KEY_DOWNLOAD_MANAGER] is stub.download_manager
+
+
+async def test_generate_concurrent_requests_share_active_resource_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """并发请求各自收到 shim 上下文且共享同一 client，全部成功无异常。"""
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        generate_module,
+        "run_text_to_image",
+        _make_fake_runner(
+            result=_generation_result({"tool": "text_to_image", "success": True, "data": []}),
+            captured=captured,
+            yield_once=True,
+        ),
+    )
+    stub = _make_stub_resource()
+    monkeypatch.setattr(runtime_module, "_active_resource", stub)
+    write_workspace_config(tmp_path)
+    app = build_web_app()
+
+    async with web_asgi_client(app) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post("/web/api/generate/text-to-image", json={"prompt": f"一只猫{i}"})
+                for i in range(3)
+            )
+        )
+
+    assert all(response.status_code == 200 for response in responses)
+    assert len(captured) == 3
+    assert all(call["ctx"] is not None for call in captured)
+    assert all(
+        call["ctx"].request_context.lifespan_context[LIFESPAN_KEY_CLIENT] is stub.client
+        for call in captured
+    )
+
+
+async def test_generate_save_path_destination_in_error_channel_verbatim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clean_web_routes: None,
+    reset_http_app_state: None,
+) -> None:
+    """save_path 目的地出现在 auto_save.results[].error 文案中时原样透传。"""
+    write_workspace_config(tmp_path)
+    destination = tmp_path / "denied-export"
+    destination.mkdir()
+    absolute_file = str(destination / "x.png")
+    _install_runner(
+        monkeypatch,
+        "run_text_to_image",
+        {
+            "tool": "text_to_image",
+            "success": True,
+            "data": [{"url": "https://x/x.png"}],
+            "auto_save": {
+                "enabled": True,
+                "results": [
+                    {
+                        "success": False,
+                        "original_url": "https://x/x.png",
+                        "error": f"文件系统错误: [WinError 5] 拒绝访问: '{absolute_file}'",
+                    }
+                ],
+            },
+        },
+    )
+    app = build_web_app()
+
+    response = await _post_json(
+        app,
+        "/web/api/generate/text-to-image",
+        {"prompt": "一只猫", "save_path": str(destination)},
+    )
+
+    assert response.status_code == 200
+    error_text = response.json()["auto_save"]["results"][0]["error"]
+    assert absolute_file in error_text

@@ -1,0 +1,677 @@
+"""image_input 预处理测试：URL 与 Data URI 主干、本地文件读取与读权限校验。
+
+相对路径以图片目录为基准，绝对路径判定面向读权限（工作区 ∪ 图片目录）；读取失败与
+诊断消息统一回显解析后的绝对路径。
+"""
+
+import base64
+import io
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import IO
+
+import pytest
+from PIL import Image
+
+from _lib.cpu_offload_spy import CpuOffloadSpy
+from seedream_mcp.utils.core.errors import (
+    SeedreamValidationError,
+    resolve_error_profile,
+)
+from seedream_mcp.utils.core.executors import CPU_OFFLOAD_SIZE_THRESHOLD
+from seedream_mcp.utils.core.formats import SUPPORTED_IMAGE_EXTENSIONS_ORDERED
+from seedream_mcp.utils.images import inputs as image_input_module
+from seedream_mcp.utils.images import validation as image_validation_module
+from seedream_mcp.utils.images.inputs import prepare_image_input
+from seedream_mcp.utils.images.validation import validate_image_input, validate_image_path
+from seedream_mcp.utils.io.path import _WORKSPACE_ROOTS_VAR
+
+
+def _images_root(ws: Path) -> Path:
+    """返回 ws 派生的图片目录并确保存在，相对路径测试文件统一放图片目录内。"""
+    root = ws / ".seedream" / "images"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+async def test_prepare_image_input_rejects_symlink_escape(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """指向读权限外的符号链接须被越界校验拒绝，防止经符号链接逃逸。
+
+    目标位于权限内时 resolve 后为常规文件、O_NOFOLLOW 打开不抛错，测试将沦为
+    空芯。以会话 Roots 声明工作区，目标置于其外。
+    """
+    # 越界目标置于共享 basetemp 之外的独占临时目录；resolve 跟随符号链接后越界被拒。
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-escape-outside-"))
+    target = outside_dir / "target.png"
+    Image.new("RGB", (32, 32), color="white").save(target)
+    link = tmp_path / "link.png"
+    try:
+        os.symlink(target, link)
+    except OSError:
+        shutil.rmtree(outside_dir, ignore_errors=True)
+        pytest.skip("当前环境不支持创建符号链接")
+
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
+    try:
+        with pytest.raises(SeedreamValidationError, match="路径不在读取范围内"):
+            await prepare_image_input(str(link))
+    finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+async def test_prepare_image_input_out_of_bounds_error_carries_config_guidance(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """绝对路径落在读权限之外时抛校验错误，消息携带配置项指引供纠错。"""
+    del tmp_path
+    # 越界目标置于独占临时目录：既在会话 Roots 工作区外，也不落入共享 basetemp。
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-oob-outside-"))
+    outside = outside_dir / "outside_workspace_image.png"
+    Image.new("RGB", (32, 32), color="white").save(outside)
+
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
+    try:
+        with pytest.raises(SeedreamValidationError, match="路径不在读取范围内") as exc_info:
+            await prepare_image_input(str(outside))
+        assert "SEEDREAM_WORKSPACE_ROOT" in exc_info.value.message
+        assert "驱动器相对" not in exc_info.value.message
+        assert "空字节" not in exc_info.value.message
+        assert exc_info.value.field == "image"
+    finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+async def test_prepare_image_input_out_of_bounds_masks_fallback_boundary(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """无会话 Roots 的回退工作区下，越界消息不回显服务器环境路径。"""
+    # 越界目标置于独占临时目录，在回退工作区（tmp_path）之外。
+    outside_dir = Path(tempfile.mkdtemp(prefix="seedream-oob-outside-"))
+    outside = outside_dir / "outside_workspace_masked.png"
+    Image.new("RGB", (32, 32), color="white").save(outside)
+
+    try:
+        with pytest.raises(SeedreamValidationError, match="路径不在读取范围内") as exc_info:
+            await prepare_image_input(str(outside))
+        assert str(tmp_path.resolve()) not in exc_info.value.message
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
+
+
+async def test_prepare_image_input_missing_in_bounds_keeps_diagnostics(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """读权限内不存在的路径仍走诊断分支：报文件不存在而非越界。"""
+    del tmp_path
+    _images_root(workspace_root)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("missing.png")
+    assert "路径不在读取范围内" not in exc_info.value.message
+    assert "文件不存在" in exc_info.value.message
+    assert exc_info.value.field == "image"
+
+
+async def test_prepare_image_input_in_bounds_diagnostics_echo_real_paths(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """界内定位失败的诊断消息携带解析后的真实绝对路径。"""
+    del tmp_path
+    images_root = _images_root(workspace_root)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("missing_sib.png")
+    assert "路径不在读取范围内" not in exc_info.value.message
+    assert str((images_root / "missing_sib.png").resolve()) in exc_info.value.message
+    assert exc_info.value.field == "image"
+
+
+async def test_prepare_image_input_rejects_relative_escape_outside_images_root(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """相对路径经 ``..`` 解析到图片目录之外时拒绝，即便目标仍在工作区内。
+
+    相对路径仅限图片目录内，工作区内的其他位置须使用绝对路径访问。
+    """
+    del tmp_path
+    _images_root(workspace_root)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("../missing.png")
+
+    message = exc_info.value.message
+    assert "相对路径仅限图片保存目录内" in message
+    assert "绝对路径" in message
+    assert exc_info.value.field == "image"
+
+
+async def test_prepare_image_input_single_slash_url_typo_reports_url_error() -> None:
+    """单斜杠 URL 手误归入 url 分类，报 URL 格式错误而非误导的本地路径错误。
+
+    此前该形态落入本地分支，win32 下被误报为 NTFS 备用数据流形态。
+    """
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("https:/example.com/a.png")
+
+    message = exc_info.value.message
+    assert "无效的URL格式" in message
+    assert "备用数据流" not in message
+    assert "文件不存在" not in message
+
+
+async def test_prepare_image_input_non_image_data_uri_reports_data_uri_error() -> None:
+    """非图像 MIME 的 data URI 归入 data_uri 分类，报 Data URI 格式错误而非本地路径错误。
+
+    此前该形态落入本地分支，win32 下被误报为 NTFS 备用数据流形态。
+    """
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("data:text/plain;base64,aGVsbG8=")
+
+    message = exc_info.value.message
+    assert "Data URI" in message
+    assert "备用数据流" not in message
+    assert "文件不存在" not in message
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="驱动器相对形态仅 win32 被拒绝")
+async def test_prepare_image_input_drive_relative_form_surfaces_rejection_reason(
+    workspace_root: Path,
+) -> None:
+    """驱动器相对形态透出 normalize_path 的拒绝原因，不误报为可授权的越界。
+
+    盘符取与工作区所在盘相异的字母：异盘拼接丢弃图片目录锚定而不产生候选，
+    旧口径在该形态上误报越界；授权工作区无法修复形态非法的输入。
+    """
+    _images_root(workspace_root)
+    foreign_drive = "D" if workspace_root.drive[:1].upper() != "D" else "C"
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input(f"{foreign_drive}:photo.png")
+
+    message = exc_info.value.message
+    assert "驱动器相对" in message
+    assert "不在读取范围内" not in message
+
+
+async def test_prepare_image_input_null_byte_form_surfaces_rejection_reason(
+    workspace_root: Path,
+) -> None:
+    """含空字节的形态透出精确拒绝原因，不落入越界授权指引。"""
+    _images_root(workspace_root)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("bad\x00name.png")
+
+    message = exc_info.value.message
+    assert "空字节" in message
+    assert "不在读取范围内" not in message
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="锚定重置与冒号分量守卫仅 win32 生效")
+@pytest.mark.parametrize(
+    ("form", "reason"),
+    [
+        ("/escape.png", "有根无盘符"),
+        ("C:relative.png", "驱动器相对"),
+        ("photo.png:ads", "备用数据流"),
+    ],
+)
+def test_validate_image_input_rejects_forms_that_reset_anchor(form: str, reason: str) -> None:
+    """win32 锚定重置与备用数据流形态在路径解析入口拒绝，不静默逃逸基目录或读取备用数据流。"""
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_image_input(form)
+
+    message = exc_info.value.message
+    assert reason in message
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == form
+
+
+async def test_prepare_image_input_reads_local_file(workspace_root: Path, tmp_path: Path) -> None:
+    """本地图片读取并编码为 data URI，维度校验在内存单次读取完成。"""
+    image_path = tmp_path / "local.png"
+    Image.new("RGB", (64, 64), color="black").save(image_path)
+
+    result = await prepare_image_input(str(image_path))
+    assert result.startswith("data:image/")
+
+
+async def test_prepare_image_input_read_failure_echoes_resolved_path(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地文件打开失败的错误消息回显解析后的绝对路径，与诊断分支口径一致。
+
+    OSError 的 filename 携带解析后的绝对路径，错误信息直接回显该路径与系统错误
+    语义，调用方输入以 value 字段保留。
+    """
+    del tmp_path
+    locked = _images_root(workspace_root) / "locked.png"
+    Image.new("RGB", (32, 32), color="white").save(locked)
+
+    def _deny_open(path: Path) -> IO[bytes]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(image_validation_module, "open_no_follow_read", _deny_open)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("locked.png")
+
+    message = exc_info.value.message
+    assert str(locked.resolve()) in message
+    assert "Permission denied" in message
+    assert "locked.png" in message
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == "locked.png"
+
+
+async def test_prepare_image_input_read_failure_profiles_as_validation_error(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地文件读取失败归入 validation_error 档，不给凭据与网络排查建议。
+
+    PermissionError 一类读取失败是本地输入问题；此前归入 api_error 档会给用户
+    「请确认 API Key 和网络可用后重试」的误导建议。
+    """
+    del tmp_path
+    locked = _images_root(workspace_root) / "locked2.png"
+    Image.new("RGB", (32, 32), color="white").save(locked)
+
+    def _deny_open(path: Path) -> IO[bytes]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(image_validation_module, "open_no_follow_read", _deny_open)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("locked2.png")
+
+    profile = resolve_error_profile(exc_info.value)
+    assert profile.error_code == "validation_error"
+    assert "API Key" not in profile.user_hint
+
+
+async def test_prepare_image_input_read_failure_echoes_session_roots_boundary(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """会话 Roots 边界下打开失败同样回显解析后路径，回显口径统一。"""
+    del tmp_path
+    locked = _images_root(workspace_root) / "locked.png"
+    Image.new("RGB", (32, 32), color="white").save(locked)
+
+    def _deny_open(path: Path) -> IO[bytes]:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(image_validation_module, "open_no_follow_read", _deny_open)
+
+    token = _WORKSPACE_ROOTS_VAR.set((workspace_root.resolve(),))
+    try:
+        with pytest.raises(SeedreamValidationError) as exc_info:
+            await prepare_image_input("locked.png")
+        assert str(locked.resolve()) in exc_info.value.message
+        assert "Permission denied" in exc_info.value.message
+    finally:
+        _WORKSPACE_ROOTS_VAR.reset(token)
+
+
+async def test_prepare_image_input_in_bounds_failure_profiles_as_validation_error(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """界内定位失败归入 validation_error 档，不给凭据与网络排查建议。
+
+    文件不存在、格式不支持属调用方输入问题；此前归入 api_error 档会给用户
+    「请确认 API Key 和网络可用后重试」的误导建议。
+    """
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input("missing.png")
+
+    profile = resolve_error_profile(exc_info.value)
+    assert profile.error_code == "validation_error"
+    assert "API Key" not in profile.user_hint
+
+
+# ---- URL 与 Data URI 主干路径 ----
+
+
+async def test_prepare_image_input_returns_https_url_unchanged() -> None:
+    """HTTP/HTTPS URL 经主机校验后原样返回，不触网也不改写。"""
+    url = "https://example.com/path/img.png"
+    assert await prepare_image_input(url) == url
+
+
+async def test_prepare_image_input_returns_http_url_unchanged() -> None:
+    """http 协议同样原样返回。"""
+    url = "http://example.com/img.png"
+    assert await prepare_image_input(url) == url
+
+
+async def test_prepare_image_input_validates_and_returns_data_uri() -> None:
+    """合法 Data URI 经格式与维度校验后原样返回。"""
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
+    data_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    assert await prepare_image_input(data_uri) == data_uri
+
+
+async def test_prepare_image_input_rejects_url_without_netloc() -> None:
+    """以 http:// 开头但缺少主机名的 URL 须在入参校验即拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="无效的URL格式"):
+        await prepare_image_input("http://")
+
+
+async def test_prepare_image_input_rejects_url_userinfo_credentials() -> None:
+    """携带 userinfo 凭据的参考图 URL 须在主管道即拒绝，凭据不得随请求体送往上游 API。
+
+    守护 URL 分支接入统一校验，防止拒绝仅 data_uri/本地分支可达。
+    """
+    with pytest.raises(SeedreamValidationError, match="用户名密码"):
+        await prepare_image_input("https://AKID:SECRET@mirror.example.com/ref.png")
+
+
+async def test_prepare_image_input_rejects_url_userinfo_username_only() -> None:
+    """仅用户名、无密码的 userinfo 形态同样拒绝。"""
+    with pytest.raises(SeedreamValidationError, match="用户名密码"):
+        await prepare_image_input("https://user@mirror.example.com/ref.png")
+
+
+async def test_prepare_image_input_rejects_invalid_data_uri() -> None:
+    """非法 base64 负载的 Data URI 须被校验透传拒绝，校验错误原样上抛不被吞掉。"""
+    with pytest.raises(SeedreamValidationError, match="Base64 解码失败|Data URI"):
+        await prepare_image_input("data:image/png;base64,@@not_base64@@")
+
+
+async def test_prepare_image_input_accepts_uppercase_data_scheme() -> None:
+    """scheme 大小写不敏感：大写 DATA: 前缀的合法 Data URI 正常校验通过。
+
+    此前大写前缀在 parse_data_uri 拆分失败而报笼统的「格式无效」；返回值归一化
+    为小写标准形态。
+    """
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
+    data_uri = "DATA:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    normalized = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    assert await prepare_image_input(data_uri) == normalized
+
+
+async def test_prepare_image_input_corrupt_content_raises_validation_error(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """扩展名合法但内容损坏属参数校验语义，抛 SeedreamValidationError 而非 API 错误。
+
+    用户可见消息为固定文案，PIL 异常原文中的 BytesIO 对象地址不进入消息。
+    """
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"definitely-not-an-image-0123456789")
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input(str(corrupt))
+
+    assert "无法识别的图像内容" in exc_info.value.message
+    assert "_io.BytesIO" not in exc_info.value.message
+
+
+async def test_prepare_image_input_corrupt_data_uri_message_masks_bytesio_address() -> None:
+    """Data URI 负载损坏时用户可见消息为固定文案，不含 BytesIO 对象地址。"""
+    payload = base64.b64encode(b"definitely-not-an-image-0123456789").decode("ascii")
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        await prepare_image_input(f"data:image/png;base64,{payload}")
+
+    assert "无法识别的图像内容" in exc_info.value.message
+    assert "_io.BytesIO" not in exc_info.value.message
+
+
+async def test_prepare_image_input_rejects_file_replaced_with_oversized_content(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """定位 stat 与读取之间文件被替换为超大内容时，读取量复核以文件过大拒绝。
+
+    读取阶段限制读取量为上限加一并复核，防 TOCTOU 窗口内的巨型文件撑爆内存；
+    假句柄仿真实打开的返回契约，fileno 指向真实落盘的常规文件。
+    """
+    oversized = _images_root(workspace_root) / "oversized.png"
+    Image.new("RGB", (16, 16), color="white").save(oversized)
+    real_fd = os.open(str(oversized), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+
+    class _OversizedFile:
+        def read(self, limit: int) -> bytes:
+            return b"\x00" * limit
+
+        def fileno(self) -> int:
+            return real_fd
+
+        def __enter__(self) -> "_OversizedFile":
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            os.close(real_fd)
+
+    monkeypatch.setattr(
+        image_validation_module, "open_no_follow_read", lambda _path: _OversizedFile()
+    )
+
+    with pytest.raises(SeedreamValidationError, match="文件过大") as exc_info:
+        await prepare_image_input("oversized.png")
+
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == "oversized.png"
+
+
+async def test_prepare_image_input_same_bytes_same_verdict_as_data_uri(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """同字节两路径同判定：跨族错标在 Data URI 与本地文件路径一同硬拒。
+
+    此前本地分支经字节签名重推 MIME 把错标修复后放行，与 Data URI 的硬拒漂移，
+    例行「加格式」漏配魔数前缀时错标载荷照常出站；判定只挂 prepare 侧时
+    validate 诊断为有效又被 prepare 拒绝，两个公共入口结论相反，
+    收口读取单点后两侧对齐。
+    """
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color="white").save(buffer, format="PNG")
+    png_payload = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    with pytest.raises(SeedreamValidationError, match="声明格式与实际内容不一致"):
+        validate_image_input(f"data:image/jpg;base64,{png_payload}")
+
+    mismatched = tmp_path / "actually-png.jpg"
+    mismatched.write_bytes(buffer.getvalue())
+    with pytest.raises(SeedreamValidationError, match="文件扩展名与实际内容不一致") as exc_info:
+        await prepare_image_input(str(mismatched))
+
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == str(mismatched)
+
+    # validate_image_input 与 validate_image_path 均与 prepare 同判定，诊断结论不被后续 prepare 推翻。
+    with pytest.raises(SeedreamValidationError, match="文件扩展名与实际内容不一致"):
+        validate_image_input(str(mismatched))
+    assert "文件扩展名与实际内容不一致" in (validate_image_path(str(mismatched)) or "")
+
+
+async def test_prepare_image_input_matching_extension_labels_declared_mime(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """匹配扩展名的出站标签取扩展名映射，与 Data URI 按声明归一的口径一致。"""
+    matched = tmp_path / "photo.jpg"
+    Image.new("RGB", (32, 32), color="white").save(matched, format="JPEG")
+
+    result = await prepare_image_input(str(matched))
+
+    assert result.startswith("data:image/jpeg;base64,")
+
+
+async def test_prepare_image_input_heif_label_follows_extension(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """heic/heif 同族互认，出站子类型随扩展名：编码 brand 与扩展名不同族内子型时以扩展名为准。"""
+    import pillow_heif
+
+    buffer = io.BytesIO()
+    pillow_heif.from_pillow(Image.new("RGB", (32, 32), color="white")).save(buffer, format="HEIF")
+    heif_named = tmp_path / "photo.heif"
+    heif_named.write_bytes(buffer.getvalue())
+
+    result = await prepare_image_input(str(heif_named))
+
+    assert result.startswith("data:image/heif;base64,")
+
+
+async def test_prepare_image_input_rejects_weak_magic_disguised_local_file(
+    workspace_root: Path, tmp_path: Path
+) -> None:
+    """PPM 内容借白名单扩展名伪装时在读取链解码校验被拒，不以白名单 MIME 送上游。"""
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), color="white").save(buffer, format="PPM")
+    disguised = tmp_path / "disguised.png"
+    disguised.write_bytes(buffer.getvalue())
+
+    with pytest.raises(SeedreamValidationError, match="不支持的图像格式"):
+        await prepare_image_input(str(disguised))
+
+
+# ---- validate_image_input 用户可见错误分支表驱动守护 ----
+
+_ERROR_BRANCH_CASES: list[tuple[str, str, str | None]] = [
+    ("data_uri_empty_payload", "Data URI 格式无效", None),
+    ("data_uri_avif_subtype", "不支持的Data URI图片格式: avif", None),
+    ("data_uri_svg_subtype", "不支持的Data URI图片格式: svg+xml", None),
+    ("local_directory", "路径不是文件", None),
+    (
+        "local_txt_extension",
+        "不支持的图像格式: .txt",
+        "/".join(SUPPORTED_IMAGE_EXTENSIONS_ORDERED),
+    ),
+    ("local_stat_oserror", "无法访问文件", "[Errno 13]"),
+]
+
+
+def _build_error_branch_input(case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """按用例名构造触发对应用户可见错误分支的输入。"""
+    if case == "data_uri_empty_payload":
+        return "data:image/png;base64,"
+    if case == "data_uri_avif_subtype":
+        return "data:image/avif;base64,AAAA"
+    if case == "data_uri_svg_subtype":
+        return "data:image/svg+xml;base64,AAAA"
+    if case == "local_directory":
+        return str(tmp_path)
+    if case == "local_txt_extension":
+        plain = tmp_path / "note.txt"
+        plain.write_text("plain text", encoding="utf-8")
+        return str(plain)
+    # stat 抛非 FileNotFoundError 的 OSError。
+    locked = tmp_path / "locked.png"
+    locked.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def _deny_stat(self: Path) -> os.stat_result:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "stat", _deny_stat)
+    return str(locked)
+
+
+@pytest.mark.parametrize(("case", "fragment", "extra"), _ERROR_BRANCH_CASES)
+def test_validate_image_input_user_visible_error_branches(
+    case: str,
+    fragment: str,
+    extra: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """空载荷、非白名单子类型、目录、不支持扩展名与 stat 失败的文案契约。"""
+    image = _build_error_branch_input(case, tmp_path, monkeypatch)
+
+    with pytest.raises(SeedreamValidationError) as exc_info:
+        validate_image_input(image)
+
+    message = exc_info.value.message
+    assert fragment in message
+    if extra is not None:
+        assert extra in message
+    assert exc_info.value.field == "image"
+    assert exc_info.value.value == image
+
+
+# ---- 预处理池分派守护 ----
+
+
+async def test_prepare_image_input_local_read_runs_in_cpu_pool(
+    workspace_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地读取编码在专用 CPU 池执行，不与默认执行器的延迟敏感短任务同池。"""
+    image_path = tmp_path / "local.png"
+    Image.new("RGB", (64, 64), color="black").save(image_path)
+
+    spy = CpuOffloadSpy(image_input_module._prepare_local_image)
+    monkeypatch.setattr(image_input_module, "_prepare_local_image", spy)
+
+    result = await prepare_image_input(str(image_path))
+
+    assert result.startswith("data:image/")
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_prepare_image_input_large_data_uri_runs_in_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """超过下沉阈值的 Data URI 校验在专用 CPU 池执行，长时解码不占默认池槽位。"""
+    spy = CpuOffloadSpy(lambda image: image)
+    monkeypatch.setattr(image_input_module, "validate_image_input", spy)
+
+    data_uri = "data:image/png;base64," + "A" * (CPU_OFFLOAD_SIZE_THRESHOLD + 1)
+
+    assert await prepare_image_input(data_uri) == data_uri
+    spy.assert_ran_in_cpu_pool()
+
+
+async def test_prepare_image_input_small_payloads_stay_outside_cpu_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """URL 与阈值之下的 Data URI 校验走默认工作线程，不占专用池槽位。"""
+    spy = CpuOffloadSpy(lambda image: image)
+    monkeypatch.setattr(image_input_module, "validate_image_input", spy)
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color="white").save(buffer, format="PNG")
+    small_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+    await prepare_image_input("https://example.com/a.png")
+    await prepare_image_input(small_uri)
+
+    spy.assert_ran_outside_cpu_pool()
+    assert len(spy.calls) == 2
+
+
+def test_validate_image_input_keeps_home_prefix_literal(workspace_root: Path) -> None:
+    """~ 前缀不做用户目录展开，按字面相对路径参与解析，与候选定位口径一致。
+
+    展开会使实际读取目标脱离调用方已按字面值完成的工作区边界判定。
+    """
+    from seedream_mcp.utils.images.validation import _resolve_local_image_path
+
+    resolved = _resolve_local_image_path("~/x.png")
+
+    assert "~" in str(resolved)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "  https://example.com/x.png",
+        "http://example.com/x.png\t",
+        "\ndata:image/png;base64,iVBORw0KGgo=",
+        "data:image/png;base64,iVBORw0KGgo= ",
+    ],
+)
+def test_validate_image_path_strips_surrounding_whitespace(reference: str) -> None:
+    """带首尾空白的 URL 与 Data URI 先 strip 再分类，不再误入本地路径分支。
+
+    与 validate_image_input 的入参口径对齐；此前前导空白使分类落入 local 分支，
+    非本地引用被拼接为畸形文件名误报路径错误。
+    """
+    assert validate_image_path(reference) is None

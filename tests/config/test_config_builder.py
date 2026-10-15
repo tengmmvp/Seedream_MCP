@@ -1,0 +1,1820 @@
+"""配置构建器测试：多层优先级、别名解析、env 文件合并与不污染 os.environ。"""
+
+import inspect
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from _lib.log_fakes import capture_loguru_messages
+from conftest import _scrub_host_prefixed_env
+from seedream_mcp.config.sources import _FIELD_ENV_MAP, _FIELD_PICKERS
+from seedream_mcp.config import (
+    SeedreamConfig,
+    build_config_from_sources,
+    drain_pending_build_warnings,
+)
+from seedream_mcp.config._builder import _active_pool_concurrency
+from seedream_mcp.config._model import _first_invalid_request_state_key_message
+from seedream_mcp.config.sources import _BUILD_WARNINGS
+from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+# monkeypatch 与 conftest 的 autouse 隔离改写模块全局，须以模块对象为 target。
+import seedream_mcp.config.sources as config_sources
+import seedream_mcp.config._builder as config_module
+
+
+def _write_env_file(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+
+
+def test_suite_isolates_default_env_sources() -> None:
+    """conftest 隔离 .env 与进程环境两来源，默认构建读不到宿主配置，串扰类缺口在此转红。"""
+    assert not Path(config_sources.DEFAULT_ENV_FILE).is_file()
+    assert not Path(".env").is_file()
+
+    config = build_config_from_sources(overrides={"api_key": "test_key"})
+
+    assert config.data_root is None
+
+
+def test_suite_isolates_prefixed_host_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """前缀键清洗只动 SEEDREAM_/ARK_ 键，清洗后默认构建读不到宿主数据根。"""
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", "C:\\host_root")
+    monkeypatch.setenv("ARK_API_KEY", "host_key")
+    monkeypatch.setenv("UNRELATED_HOST_VAR", "keep_me")
+
+    _scrub_host_prefixed_env(monkeypatch)
+
+    assert os.getenv("SEEDREAM_DATA_ROOT") is None
+    assert os.getenv("ARK_API_KEY") is None
+    assert os.getenv("UNRELATED_HOST_VAR") == "keep_me"
+
+    config = build_config_from_sources(overrides={"api_key": "test_key"})
+
+    assert config.data_root is None
+
+
+def test_build_config_priority_prefers_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """运行时覆盖优先于系统环境变量与 env 文件。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "\n".join(
+            [
+                "ARK_API_KEY=file_key",
+                "SEEDREAM_MODEL_ID=doubao-seedream-4.5",
+            ]
+        ),
+    )
+    monkeypatch.setenv("ARK_API_KEY", "env_key")
+
+    config = build_config_from_sources(
+        overrides={"api_key": "override_key", "model": "doubao-seedream-4.0"},
+        env_file=str(env_file),
+    )
+
+    assert config.api_key == "override_key"
+    assert config.model_id == "doubao-seedream-4-0-250828"
+
+
+def test_build_config_priority_prefers_system_env_over_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """系统环境变量优先于 env 文件。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.setenv("ARK_API_KEY", "env_key")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.api_key == "env_key"
+
+
+def test_build_config_reads_seedream_log_level_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """日志级别经 SEEDREAM_LOG_LEVEL 读取，裸 LOG_LEVEL 不参与构建。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.setenv("SEEDREAM_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.log_level == "DEBUG"
+
+    monkeypatch.delenv("SEEDREAM_LOG_LEVEL")
+    fallback = build_config_from_sources(env_file=str(env_file))
+
+    assert fallback.log_level == "INFO"
+
+
+def test_build_config_resolves_seedream_50_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env 文件中的 5.0 别名解析为完整模型 ID。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-5.0\n")
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.model_id == "doubao-seedream-5-0-260128"
+
+
+def test_build_config_uses_seedream_50_as_default_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未指定模型时默认取 5.0 并解析为完整模型 ID。"""
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.model_id == "doubao-seedream-5-0-260128"
+
+
+def test_build_config_raises_when_explicit_env_file_missing(tmp_path: Path) -> None:
+    """显式指定的 env 文件缺失时抛 SeedreamConfigError。"""
+    missing_env = tmp_path / "missing.env"
+
+    with pytest.raises(SeedreamConfigError, match="配置文件不存在"):
+        build_config_from_sources(env_file=str(missing_env))
+
+
+def test_build_config_reads_cwd_env_when_env_file_not_provided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未显式指定 env 文件时读取工作目录下的 .env，并提示该隐式加载。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+
+    _write_env_file(
+        tmp_path / ".env", "ARK_API_KEY=cwd_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n"
+    )
+
+    records: list[str] = []
+    with capture_loguru_messages(records, level="WARNING"):
+        config = build_config_from_sources()
+        drain_pending_build_warnings()
+
+    assert any("已加载当前工作目录 .env" in record for record in records)
+
+    assert config.api_key == "cwd_key"
+    assert config.model_id == "doubao-seedream-4-0-250828"
+
+
+def test_build_config_falls_back_to_default_env_when_cwd_env_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """工作目录无 .env 时回退默认 env 文件。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+
+    config = build_config_from_sources()
+
+    assert config.api_key == "default_key"
+
+
+def test_build_config_merges_default_and_cwd_env_when_cwd_missing_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cwd .env 缺键时由默认 env 文件补齐，合并后生效。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+
+    default_env = tmp_path / "default.env"
+    _write_env_file(default_env, "ARK_API_KEY=default_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.5\n")
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", default_env)
+
+    _write_env_file(runtime_dir / ".env", "SEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
+
+    config = build_config_from_sources()
+
+    assert config.api_key == "default_key"
+    assert config.model_id == "doubao-seedream-4-0-250828"
+
+
+def test_build_config_does_not_inject_dotenv_to_os_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """.env 值进入配置对象但不注入 os.environ，避免全局状态污染。"""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    workspace_root = runtime_dir / "workspace"
+    workspace_root.mkdir()
+
+    monkeypatch.chdir(runtime_dir)
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+
+    _write_env_file(
+        runtime_dir / ".env",
+        "\n".join(
+            [
+                "ARK_API_KEY=cwd_key",
+                f"SEEDREAM_WORKSPACE_ROOT={workspace_root}",
+            ]
+        ),
+    )
+
+    config = build_config_from_sources()
+
+    assert config.api_key == "cwd_key"
+    assert config.workspace_root == str(workspace_root)
+    # .env 的值不应泄漏到 os.environ
+    assert os.getenv("SEEDREAM_WORKSPACE_ROOT") is None
+
+
+def test_build_config_explicit_env_file_is_not_polluted_by_previous_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式 env 文件的构建结果不受此前其他 env 文件影响。"""
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+
+    env_file_a = tmp_path / "a.env"
+    env_file_b = tmp_path / "b.env"
+    _write_env_file(env_file_a, "ARK_API_KEY=key_a\nSEEDREAM_MODEL_ID=doubao-seedream-4.5\n")
+    _write_env_file(env_file_b, "ARK_API_KEY=key_b\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
+
+    config_a = build_config_from_sources(env_file=str(env_file_a))
+    config_b = build_config_from_sources(env_file=str(env_file_b))
+
+    assert config_a.api_key == "key_a"
+    assert config_b.api_key == "key_b"
+    assert config_b.model_id == "doubao-seedream-4-0-250828"
+
+
+def test_build_config_does_not_write_back_to_os_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """构建读取系统 env 但不回写，.env 值不污染 os.environ。"""
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.0\n")
+    monkeypatch.setenv("ARK_API_KEY", "runtime_key")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.api_key == "runtime_key"
+    # 系统未设置 SEEDREAM_MODEL_ID，.env 的该值不应写入 os.environ
+    assert os.getenv("SEEDREAM_MODEL_ID") is None
+    assert config.model_id == "doubao-seedream-4-0-250828"
+
+
+@pytest.mark.parametrize("with_bom", [False, True], ids=["without-bom", "with-bom"])
+def test_build_config_env_file_bom_does_not_pollute_first_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_bom: bool
+) -> None:
+    """带 BOM 的 .env 首键正常解析，无 BOM 文件行为不变。"""
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    env_file = tmp_path / "config.env"
+    data = b"ARK_API_KEY=file_key\n"
+    if with_bom:
+        data = b"\xef\xbb\xbf" + data
+    env_file.write_bytes(data)
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.api_key == "file_key"
+
+
+def test_build_config_loads_http_auth_token_from_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_HTTP_AUTH_TOKEN 经 .env 配置链加载。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(config_sources, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+    _write_env_file(
+        tmp_path / ".env", "ARK_API_KEY=k\nSEEDREAM_HTTP_AUTH_TOKEN=token1234567890abcd\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    config = build_config_from_sources()
+    assert config.http_auth_token == "token1234567890abcd"
+
+
+# ==================== SEEDREAM_HTTP_ALLOWED_HOSTS Host 允许列表 ====================
+
+
+def test_build_config_loads_http_allowed_hosts_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_HTTP_ALLOWED_HOSTS 按逗号拆分为条目元组，host:port 与 :* 通配原样保留。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n" "SEEDREAM_HTTP_ALLOWED_HOSTS=mcp.example.com,mcp.example.com:*\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == ("mcp.example.com", "mcp.example.com:*")
+
+
+def test_build_config_http_allowed_hosts_strips_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """条目前后空白被去除，空条目被丢弃。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_HOSTS= mcp.example.com , , api.example.com:8443 \n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == ("mcp.example.com", "api.example.com:8443")
+
+
+@pytest.mark.parametrize("raw_value", ["", "   ", ","])
+def test_build_config_blank_http_allowed_hosts_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    """空串、纯空白与全空条目均归 None，等价于未配置。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts is None
+
+
+def test_build_config_http_allowed_hosts_defaults_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 http_allowed_hosts 为 None，非回环绑定整体关闭 SDK Host 校验。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts is None
+
+
+def test_build_config_accepts_all_valid_http_allowed_hosts_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """host、host:port、host:* 与方括号 IPv6 形态均通过构建期条目校验。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_HOSTS="
+        "api.example.com,api.example.com:8443,api.example.com:*,[2001:db8::1]:*\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == (
+        "api.example.com",
+        "api.example.com:8443",
+        "api.example.com:*",
+        "[2001:db8::1]:*",
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_value,match",
+    [
+        ("https://api.example.com", "scheme 或斜杠"),
+        ("api.example.com/path", "scheme 或斜杠"),
+        ("*:8080", "host、host:port、host:\\*"),
+        ("*.example.com", "host、host:port、host:\\*"),
+        ("*", "host、host:port、host:\\*"),
+        ("api.example.com:https", "host、host:port、host:\\*"),
+        ("api.example.com:", "host、host:port、host:\\*"),
+        ("[2001:db8::1", "host、host:port、host:\\*"),
+        ("api.example.com:0", "host、host:port、host:\\*"),
+        ("api.example.com:99999", "host、host:port、host:\\*"),
+        ("api.example.com:８０", "ASCII"),
+        ("api.example.com.", "host、host:port、host:\\*"),
+        (".api.example.com", "host、host:port、host:\\*"),
+        ("api..example.com", "host、host:port、host:\\*"),
+        ("MCP.example.com", "须全小写"),
+        ("api.example.COM:8443", "须全小写"),
+        ("[2001:DB8::1]:8080", "须全小写"),
+        ("[not-an-ip]:80", "IPv6"),
+        ("[no-ip]", "IPv6"),
+        ("[fe80::1%eth0]:8000", "zone-id"),
+        ("[2001:0db8::1]", "压缩规范形"),
+        ("[::ffff:0:0:192.0.2.1]", "压缩规范形"),
+        ("[0:0:0:0:0:ffff:192.0.2.1]", "压缩规范形"),
+        ("[64:ff9b::192.0.2.1]", "压缩规范形"),
+    ],
+)
+def test_build_config_rejects_malformed_http_allowed_hosts_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str, match: str
+) -> None:
+    """含 scheme/斜杠、大写、非尾部通配、端口非数字或超范围、空标签或首尾点号、畸形方括号或 IPv6 带 zone-id 与非压缩规范形的条目构建期拒绝。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")
+
+    with pytest.raises(SeedreamConfigError, match=match) as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert raw_value in excinfo.value.message
+    assert "环境变量 SEEDREAM_HTTP_ALLOWED_HOSTS" in excinfo.value.message
+
+
+def test_build_config_accepts_ipv6_allowed_host_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合法 IPv6 方括号条目的裸 host、精确端口与端口通配形态均放行。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_HOSTS=[::1]:8000,[2001:db8::1],[2001:db8::1]:*\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == ("[::1]:8000", "[2001:db8::1]", "[2001:db8::1]:*")
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    ["[::ffff:192.0.2.1]:8443", "[::ffff:c000:201]"],
+)
+def test_build_config_accepts_ipv4_mapped_ipv6_allowed_host_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    """IPv4 映射地址的 dotted 形与压缩形条目均放行，客户端对该类地址发送 dotted 形 Host。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS={raw_value}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_hosts == (raw_value,)
+
+
+def test_build_config_http_allowed_hosts_wildcard_without_bare_host_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """仅列端口通配未列裸 host 时构建成功并告警，配套裸 host 后不再告警。
+
+    SDK 的 host:* 通配仅匹配带端口的 Host 头，无端口 Host 会被 421 拒绝，
+    构建期告警提示补配裸 host；告警不构成拒绝。
+    """
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_HOSTS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=api.example.com:*\n"
+    )
+
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        config = build_config_from_sources(env_file=str(env_file))
+        # 构建期告警收集后置输出，drain 在日志系统就绪后放行
+        drain_pending_build_warnings()
+
+    assert config.http_allowed_hosts == ("api.example.com:*",)
+    assert any("api.example.com" in record for record in records)
+
+    paired_env_file = tmp_path / "paired.env"
+    _write_env_file(
+        paired_env_file,
+        "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_HOSTS=api.example.com,api.example.com:*\n",
+    )
+    quiet_records: list[str] = []
+    with capture_loguru_messages(quiet_records):
+        paired_config = build_config_from_sources(env_file=str(paired_env_file))
+        drain_pending_build_warnings()
+
+    assert paired_config.http_allowed_hosts == ("api.example.com", "api.example.com:*")
+    assert not any("http_allowed_hosts" in record for record in quiet_records)
+
+
+# ==================== SEEDREAM_HTTP_ALLOWED_ORIGINS Origin 允许列表 ====================
+
+
+def test_build_config_loads_http_allowed_origins_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_HTTP_ALLOWED_ORIGINS 按逗号拆分为条目元组，精确 origin 原样保留。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_ORIGINS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_ORIGINS=https://app.example.com,http://localhost:5173\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_origins == ("https://app.example.com", "http://localhost:5173")
+
+
+def test_build_config_blank_http_allowed_origins_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空串与全空条目归 None，等价于未配置。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_ORIGINS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_ORIGINS= , \n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_origins is None
+
+
+@pytest.mark.parametrize(
+    "raw_value, match",
+    [
+        ("app.example.com", "http://"),
+        ("ftp://app.example.com", "http://"),
+        ("https://app.example.com/path", "路径"),
+        ("https://app.example.com:*", "通配"),
+        ("https://", "主机为空"),
+        ("https://*.example.com", "通配"),
+        ("https://app.example.com:abc", "端口须为数字"),
+        ("https://app.example.com?q=1", "query"),
+        ("https://app.example.com#frag", "query"),
+        ("https://user@app.example.com", "userinfo"),
+        ("https://app.example.com.", "尾点"),
+        ("https://APP.example.com", "小写"),
+        ("https://app.example.com:", "端口为空"),
+        ("https://app.example.com:0", "不得为 0"),
+        ("https://app.example.com\\evil", "反斜杠"),
+        ("https://app.example.com:443", "默认端口"),
+        ("http://app.example.com:80", "默认端口"),
+        ("http://app.example.com:080", "前导零"),
+        ("https://[::1", "形态无效"),
+        ("https://@app.example.com", "userinfo"),
+        ("https://应用.公司.cn", "ASCII"),
+        ("http://.example.com", "前导点"),
+        ("http://example..com", "前导点"),
+        ("http://ex%61mple.com", "百分号"),
+        ("https://[::1%25eth0]", "百分号"),
+        ("https://[0:0:0:0:0:0:0:1]", "压缩规范形"),
+    ],
+)
+def test_build_config_rejects_malformed_http_allowed_origins_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str, match: str
+) -> None:
+    """缺 scheme、含路径、空标签、百分号编码或非压缩 IPv6 主机等死配置条目构建期拒绝。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_ORIGINS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_HTTP_ALLOWED_ORIGINS={raw_value}\n")
+
+    with pytest.raises(SeedreamConfigError, match=match) as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert raw_value in excinfo.value.message
+    assert "环境变量 SEEDREAM_HTTP_ALLOWED_ORIGINS" in excinfo.value.message
+
+
+def test_build_config_accepts_ipv6_and_ipv4_mapped_origin_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """压缩规范形 IPv6 与 IPv4 映射 dotted 形的 origin 条目原样保留。"""
+    monkeypatch.delenv("SEEDREAM_HTTP_ALLOWED_ORIGINS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "SEEDREAM_HTTP_ALLOWED_ORIGINS="
+        "https://[::1],https://[2001:db8::1]:8443,https://[::ffff:192.0.2.1]\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.http_allowed_origins == (
+        "https://[::1]",
+        "https://[2001:db8::1]:8443",
+        "https://[::ffff:192.0.2.1]",
+    )
+
+
+def test_direct_construction_build_warnings_stay_on_instance() -> None:
+    """直接构造产生的构建期告警留在实例，不混入全局 drain 队列。"""
+    before = _BUILD_WARNINGS.snapshot()
+    config = SeedreamConfig(
+        api_key="k", base_url="http://10.0.0.1/api/v3", allow_http_base_url=True
+    )
+
+    assert config._build_warnings, "http 明文豁免应产生实例告警"
+    assert _BUILD_WARNINGS.snapshot() == before
+
+
+def test_to_dict_masks_sensitive_fields() -> None:
+    """to_dict 对 api_key 与 http_auth_token 脱敏。"""
+    config = SeedreamConfig(api_key="k", http_auth_token="secret-token-123456")
+    dumped = config.to_dict()
+    assert dumped["api_key"] == "***"
+    assert dumped["http_auth_token"] == "***"
+
+
+def test_workspace_root_non_directory_rejected(tmp_path: Path) -> None:
+    """workspace_root 指向文件时拒绝。"""
+    file_path = tmp_path / "notdir"
+    file_path.write_text("x", encoding="utf-8")
+    with pytest.raises(SeedreamConfigError, match="workspace_root"):
+        SeedreamConfig(api_key="k", workspace_root=str(file_path))
+
+
+@pytest.mark.parametrize("unc_dir", ["//nas/pics", "\\\\nas\\pics"])
+def test_data_root_unc_rejected_at_build(unc_dir: str) -> None:
+    """数据根目录声明 UNC 路径在构建期拒绝，启动即报配置错误而非运行期逐次降级。"""
+    with pytest.raises(SeedreamConfigError, match="UNC") as excinfo:
+        SeedreamConfig(api_key="k", data_root=unc_dir)
+
+    assert "SEEDREAM_DATA_ROOT" in excinfo.value.message
+
+
+@pytest.mark.parametrize("unc_dir", ["//nas/pics", "\\\\nas\\pics"])
+def test_workspace_root_unc_rejected_at_build(unc_dir: str) -> None:
+    """工作区根目录声明 UNC 路径在构建期拒绝，与 data_root 同口径。"""
+    with pytest.raises(SeedreamConfigError, match="UNC") as excinfo:
+        SeedreamConfig(api_key="k", workspace_root=unc_dir)
+
+    assert "SEEDREAM_WORKSPACE_ROOT" in excinfo.value.message
+
+
+def test_client_timeout_overflow_rejected_as_config_error() -> None:
+    """超大超时整数在构建期按配置错误拒绝，不延迟到客户端初始化才失败。"""
+    with pytest.raises(SeedreamConfigError, match="api_timeout"):
+        SeedreamConfig(api_key="k", api_timeout=10**5000)
+
+
+def test_generate_concurrency_lower_bound_enforced() -> None:
+    """生成并发准入下限为 1。"""
+    with pytest.raises(SeedreamConfigError, match="generate_concurrency"):
+        SeedreamConfig(api_key="k", generate_concurrency=0)
+
+
+def test_http_auth_token_min_length_enforced() -> None:
+    """鉴权令牌配置时长度不足 16 字符在构建期拒绝，低熵令牌不进生产部署。"""
+    with pytest.raises(SeedreamConfigError, match="http_auth_token"):
+        SeedreamConfig(api_key="k", http_auth_token="short")
+    # 未配置不受限，16 字符恰好放行。
+    assert SeedreamConfig(api_key="k", http_auth_token=None).http_auth_token is None
+    assert SeedreamConfig(api_key="k", http_auth_token="a" * 16).http_auth_token == "a" * 16
+
+
+@pytest.mark.parametrize(
+    "invalid_token",
+    ["令牌token-12345678", "token 1234567890", "token1234567890\x7f"],
+)
+def test_http_auth_token_requires_printable_ascii(invalid_token: str) -> None:
+    """含非 ASCII、空白或控制字符的令牌构造期拒绝，避免部署后永久 401。"""
+    with pytest.raises(SeedreamConfigError, match="可打印ASCII"):
+        SeedreamConfig(api_key="k", http_auth_token=invalid_token)
+
+
+def test_http_auth_token_direct_construction_strips_trailing_whitespace() -> None:
+    """直构路径的空白尾符经 strip 回写后接受，与 env 构建路径同口径。"""
+    config = SeedreamConfig(api_key="k", http_auth_token="a" * 16 + "\n")
+    assert config.http_auth_token == "a" * 16
+    assert SeedreamConfig(api_key="k", http_auth_token="   ").http_auth_token is None
+
+
+def test_generate_concurrency_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SEEDREAM_GENERATE_CONCURRENCY 环境变量取值生效。"""
+    monkeypatch.setenv("ARK_API_KEY", "k")
+    monkeypatch.setenv("SEEDREAM_GENERATE_CONCURRENCY", "5")
+    config = SeedreamConfig.from_env()
+    assert config.generate_concurrency == 5
+
+
+def test_http_allowed_hosts_sequence_override_splits_entries() -> None:
+    """序列形态的 override 按元素取值，不经 str() 拼成畸形条目。"""
+    config = build_config_from_sources(
+        overrides={
+            "api_key": "test_key",
+            "http_allowed_hosts": ("api.example.com", "b.example.com"),
+        }
+    )
+    assert config.http_allowed_hosts == ("api.example.com", "b.example.com")
+
+
+def test_http_allowed_hosts_sequence_override_rejects_comma_joined_entry() -> None:
+    """序列元素内嵌逗号在构建期拒绝，不产出永不匹配真实 Host 头的条目。"""
+    with pytest.raises(SeedreamConfigError, match="形态"):
+        build_config_from_sources(
+            overrides={
+                "api_key": "test_key",
+                "http_allowed_hosts": ["api.example.com,b.example.com"],
+            }
+        )
+
+
+def test_build_config_none_overrides_fall_through_to_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """overrides 中值为 None 时不视为覆盖，穿透到 env/file/default。"""
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    monkeypatch.delenv("SEEDREAM_DEFAULT_WATERMARK", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(
+        overrides={"watermark": None, "model": None},
+        env_file=str(env_file),
+    )
+
+    assert config.api_key == "file_key"
+    # None override 不阻断后续链路：watermark/model 均回落到默认值
+    assert config.default_watermark is False
+    assert config.model_id == "doubao-seedream-5-0-260128"
+
+
+def test_build_config_loads_image_prepare_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_IMAGE_PREPARE_CONCURRENCY 经 .env 加载到 image_prepare_concurrency 字段。"""
+    monkeypatch.delenv("SEEDREAM_IMAGE_PREPARE_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_IMAGE_PREPARE_CONCURRENCY=7\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.image_prepare_concurrency == 7
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1"])
+def test_build_config_rejects_non_positive_image_prepare_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """image_prepare_concurrency 必须 > 0，否则抛 SeedreamConfigError。"""
+    monkeypatch.delenv("SEEDREAM_IMAGE_PREPARE_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_IMAGE_PREPARE_CONCURRENCY={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="image_prepare_concurrency"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+def test_build_config_loads_prepare_cache_max(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_PREPARE_CACHE_MAX 经 .env 加载到 prepare_cache_max 字段。"""
+    monkeypatch.delenv("SEEDREAM_PREPARE_CACHE_MAX", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_PREPARE_CACHE_MAX=16\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.prepare_cache_max == 16
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1"])
+def test_build_config_rejects_prepare_cache_max_below_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """prepare_cache_max 必须 >= 1，否则抛 SeedreamConfigError。"""
+    monkeypatch.delenv("SEEDREAM_PREPARE_CACHE_MAX", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_PREPARE_CACHE_MAX={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="prepare_cache_max"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+def test_field_env_map_covers_all_optional_config_fields() -> None:
+    """_FIELD_ENV_MAP 须覆盖除 api_key 外的全部可配置字段。
+
+    新增配置字段若遗漏登记，会在首次构建配置取默认值时抛 KeyError。本测试守护该同步点。
+    init=False 的内部字段不进构造签名，不属于可配置字段。
+    """
+    from dataclasses import fields as dataclass_fields
+
+    optional_field_names = {
+        f.name for f in dataclass_fields(SeedreamConfig) if f.init and f.name != "api_key"
+    }
+    assert set(_FIELD_ENV_MAP) == optional_field_names
+
+
+def test_build_config_missing_picker_registration_fails_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env metadata 字段漏登记 _FIELD_PICKERS 取值表时，构建期以 KeyError 暴露。
+
+    取值表驱动构建依赖该 fail-loud 语义，防止新增字段被静默跳过而取默认值。
+    """
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+    monkeypatch.delitem(_FIELD_PICKERS, "timeout")
+
+    with pytest.raises(KeyError):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== __post_init__ 字段边界校验 ====================
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"prepare_cache_max_bytes": 0}, "prepare_cache_max_bytes"),
+        ({"auto_save_max_file_size": 0}, "auto_save_max_file_size"),
+        ({"auto_save_max_file_size": -1}, "auto_save_max_file_size"),
+        ({"auto_save_download_timeout": 0}, "auto_save_download_timeout"),
+        ({"auto_save_download_timeout": -5}, "auto_save_download_timeout"),
+        ({"body_read_timeout": 0}, "body_read_timeout"),
+        ({"body_read_timeout": -5}, "body_read_timeout"),
+        ({"large_body_admission_concurrency": 0}, "large_body_admission_concurrency"),
+        ({"large_body_admission_concurrency": -1}, "large_body_admission_concurrency"),
+        ({"auto_save_max_concurrent": 0}, "auto_save_max_concurrent"),
+        ({"auto_save_cleanup_days": -1}, "auto_save_cleanup_days"),
+        ({"stream_buffer_max_size": 0}, "stream_buffer_max_size"),
+    ],
+)
+def test_seedream_config_rejects_invalid_positive_or_non_negative_field(
+    kwargs: dict[str, Any], match: str
+) -> None:
+    """各数值字段越界时 __post_init__ 经 validate 抛 SeedreamConfigError。"""
+    with pytest.raises(SeedreamConfigError, match=match):
+        SeedreamConfig(api_key="k", **kwargs)
+
+
+def test_seedream_config_rejects_non_string_default_size() -> None:
+    """非字符串 default_size 报「必须为字符串」类型错误。"""
+    with pytest.raises(SeedreamConfigError, match="default_size必须为字符串"):
+        SeedreamConfig(api_key="k", default_size=2048)  # type: ignore[arg-type]
+
+
+def test_seedream_config_rejects_sse_event_size_below_derived_floor() -> None:
+    """sse_event_max_size 低于单图 base64 最坏展开推导值时拒绝，防止合法图片事件被截断。"""
+    # 12MB 高于默认缓冲区 10MB 但远低于 50MB 单图的最坏展开约 66.7MB
+    with pytest.raises(
+        SeedreamConfigError, match="sse_event_max_size不能低于单图 base64 最坏展开推导值"
+    ):
+        SeedreamConfig(api_key="k", sse_event_max_size=12 * 1024 * 1024)
+
+
+def test_seedream_config_accepts_sse_event_size_above_derived_floor() -> None:
+    """sse_event_max_size 不低于推导值时接受，显式配置仅用于调大阈值。"""
+    config = SeedreamConfig(api_key="k", sse_event_max_size=128 * 1024 * 1024)
+    assert config.sse_event_max_size == 128 * 1024 * 1024
+
+
+def test_seedream_config_accepts_zero_cleanup_days() -> None:
+    """cleanup_days 下界含 0，表示不清理，不得被当成负数拒绝。"""
+    config = SeedreamConfig(api_key="k", auto_save_cleanup_days=0)
+    assert config.auto_save_cleanup_days == 0
+
+
+def test_seedream_config_accepts_zero_max_retries() -> None:
+    """max_retries 下界含 0，表示不重试，计费非幂等接口可关闭重试。"""
+    config = SeedreamConfig(api_key="k", max_retries=0)
+    assert config.max_retries == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"api_key": "your_api_key_here"}, "占位符"),
+        ({"base_url": "ftp://bad.example.com"}, "base_url"),
+        ({"base_url": ""}, "base_url"),
+        ({"model_id": ""}, "model_id"),
+        ({"model_id": "   "}, "model_id"),
+        ({"timeout": 0}, "timeout"),
+        ({"timeout": -1}, "timeout"),
+        ({"api_timeout": 0}, "api_timeout"),
+        ({"api_timeout": -10}, "api_timeout"),
+        ({"max_retries": -1}, "max_retries"),
+        ({"log_level": "VERBOSE"}, "log_level"),
+        ({"auto_save_max_retries": -1}, "auto_save_max_retries"),
+    ],
+)
+def test_seedream_config_rejects_invalid_validate_branches(
+    kwargs: dict[str, Any], match: str
+) -> None:
+    """validate() 各拒绝分支经构造期校验拒绝非法配置。
+
+    覆盖占位符密钥、非法协议 base_url、空 model_id、非正 timeout/api_timeout、
+    max_retries<1、非法 log_level、负 auto_save_max_retries。
+    """
+    # api_key 未在 kwargs 中时补充合法值，占位符用例已在 kwargs 中时不覆盖
+    full_kwargs = {"api_key": "k", **kwargs} if "api_key" not in kwargs else kwargs
+    with pytest.raises(SeedreamConfigError, match=match):
+        SeedreamConfig(**full_kwargs)
+
+
+# ==================== http:// base_url 默认拒绝与显式豁免 ====================
+
+
+def test_seedream_config_rejects_http_base_url_by_default() -> None:
+    """http:// 的 base_url 未豁免时默认拒绝构建，防止 API 密钥明文传输。"""
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_ALLOW_HTTP_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="http://internal.example.com/api/v3")
+
+
+def test_seedream_config_allows_http_base_url_with_explicit_exemption() -> None:
+    """显式设置 allow_http_base_url 后接受 http:// base_url。"""
+    config = SeedreamConfig(
+        api_key="k",
+        base_url="http://internal.example.com/api/v3",
+        allow_http_base_url=True,
+    )
+
+    assert config.base_url == "http://internal.example.com/api/v3"
+    assert config.allow_http_base_url is True
+
+
+def test_build_config_loads_allow_http_base_url_from_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_ALLOW_HTTP_BASE_URL 经 .env 豁免 http:// 的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    monkeypatch.delenv("SEEDREAM_ALLOW_HTTP_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        "ARK_API_KEY=file_key\n"
+        "ARK_BASE_URL=http://internal.example.com/api/v3\n"
+        "SEEDREAM_ALLOW_HTTP_BASE_URL=true\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.allow_http_base_url is True
+    assert config.base_url == "http://internal.example.com/api/v3"
+
+
+# ==================== base_url scheme 大小写不敏感 ====================
+
+
+def test_seedream_config_accepts_uppercase_https_scheme() -> None:
+    """RFC 3986 scheme 大小写不敏感：HTTPS:// 大写形态应被接受。"""
+    config = SeedreamConfig(api_key="k", base_url="HTTPS://ark.example.com/api/v3")
+
+    assert config.base_url == "HTTPS://ark.example.com/api/v3"
+
+
+def test_seedream_config_uppercase_http_scheme_requires_exemption() -> None:
+    """HTTP:// 大写形态按明文端点处理：未豁免时拒绝，豁免后接受。"""
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_ALLOW_HTTP_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="HTTP://internal.example.com/api/v3")
+
+    config = SeedreamConfig(
+        api_key="k",
+        base_url="HTTP://internal.example.com/api/v3",
+        allow_http_base_url=True,
+    )
+    assert config.base_url == "HTTP://internal.example.com/api/v3"
+
+
+# ==================== base_url netloc 主机名校验 ====================
+
+
+@pytest.mark.parametrize("invalid_base_url", ["https://", "https:foo", "https:///path", "http://"])
+def test_seedream_config_rejects_base_url_without_netloc(invalid_base_url: str) -> None:
+    """scheme 合法但 netloc 缺失的 base_url 在构造期拒绝。
+
+    此类畸形 URL 若放行到运行时，会在 httpx 拼请求时抛 UnsupportedProtocol 落入
+    网络错误重试，错误归约档错误地变为 network_error 而非 config_error。
+    """
+    with pytest.raises(SeedreamConfigError, match="主机名"):
+        SeedreamConfig(api_key="k", base_url=invalid_base_url, allow_http_base_url=True)
+
+
+def test_seedream_config_rejects_whitespace_only_netloc() -> None:
+    """netloc 仅含空白的 base_url 同样视为缺主机名，strip 后判定。"""
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="https:// ")
+
+
+@pytest.mark.parametrize("invalid_base_url", ["https://:8443/api/v3", "http://:8000"])
+def test_seedream_config_rejects_base_url_with_empty_hostname(
+    invalid_base_url: str,
+) -> None:
+    """空主机名带端口的形态 netloc 非空，按 hostname 判定仍在构造期拒绝。
+
+    此类 URL 放行后请求会发往 getaddrinfo('') 解析出的本机地址，
+    携带 API 密钥的连接以网络错误档失败并空转重试。
+    """
+    with pytest.raises(SeedreamConfigError, match="主机名"):
+        SeedreamConfig(api_key="k", base_url=invalid_base_url, allow_http_base_url=True)
+
+
+@pytest.mark.parametrize(
+    "valid_base_url",
+    [
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "https://ark.example.com:8443/api/v3",
+        "HTTPS://ark.example.com/api/v3",
+        "http://internal.example.com",
+        "https://ark.example.com:0443/api/v3",
+        "https://ark.example.com:/api/v3",
+    ],
+)
+def test_seedream_config_accepts_base_url_with_netloc(valid_base_url: str) -> None:
+    """带主机名的合法 URL 不被 netloc 与端口校验误伤，含 httpx 可归一的前导零与空端口。"""
+    config = SeedreamConfig(api_key="k", base_url=valid_base_url, allow_http_base_url=True)
+
+    assert config.base_url == valid_base_url
+
+
+@pytest.mark.parametrize(
+    "invalid_base_url",
+    [
+        "https://ark.example.com:abc/api/v3",
+        "https://ark.example.com:99999/api/v3",
+        "https://ark.example.com:0/api/v3",
+    ],
+)
+def test_seedream_config_rejects_base_url_with_malformed_port(invalid_base_url: str) -> None:
+    """畸形与 0 端口在构造期拒绝，不延迟到 httpx 客户端构造或连接期才失败。"""
+
+    with pytest.raises(SeedreamConfigError, match="base_url端口") as excinfo:
+        SeedreamConfig(api_key="k", base_url=invalid_base_url)
+
+    assert "环境变量 ARK_BASE_URL" in excinfo.value.message
+
+
+def test_build_config_rejects_base_url_without_netloc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_config_from_sources 构建路径同样经 validate 拒绝缺主机名的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nARK_BASE_URL=https://\n")
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== base_url 主机名字符集校验 ====================
+
+
+@pytest.mark.parametrize(
+    "invalid_base_url",
+    [
+        "https://ark .example.com/api/v3",
+        "https:// ark.example.com/",
+        "https://ark.example.com /",
+        "https://ark\x0b.example.com/",
+        "https://ark%zz.com/",
+        "https://ark%2G.example.com/",
+        "https://ark%.com/",
+        "https://ark%2.com/",
+        "https://ark|.example.com",
+        "https://ark`.example.com",
+        "https://例子.com/",
+    ],
+)
+def test_seedream_config_rejects_base_url_with_invalid_hostname_charset(
+    invalid_base_url: str,
+) -> None:
+    """主机名含空格、控制字符、非 ASCII、乱码百分号等非法字符的 base_url 在构造期拒绝。
+
+    此类主机名 urlparse 与 httpx 均不保证在构建期报错，
+    放行后每次 API 调用才以 DNS 解析失败落入网络错误档重试，
+    错误归约档错误地变为 network_error 而非 config_error。
+    """
+    with pytest.raises(SeedreamConfigError, match="非法字符") as excinfo:
+        SeedreamConfig(api_key="k", base_url=invalid_base_url, allow_http_base_url=True)
+
+    assert "环境变量 ARK_BASE_URL" in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    "valid_base_url",
+    [
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "http://10.0.0.1:8000/api/v3",
+        "https://[::1]:8443/api/v3",
+        "https://[fe80::1%25eth0]/api/v3",
+        "https://ark%25.volces.com/api/v3",
+    ],
+)
+def test_seedream_config_accepts_base_url_with_valid_hostname_charset(
+    valid_base_url: str,
+) -> None:
+    """常规域名、IPv4、IPv6 字面量（含 zone-id）与合法 pct-encoded 主机名不被字符集校验误拒。"""
+    config = SeedreamConfig(api_key="k", base_url=valid_base_url, allow_http_base_url=True)
+
+    assert config.base_url == valid_base_url
+
+
+def test_build_config_rejects_base_url_with_invalid_hostname_charset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_config_from_sources 构建路径同样拒绝主机名含空格的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, "ARK_API_KEY=file_key\nARK_BASE_URL=https://ark .example.com/api/v3\n"
+    )
+
+    with pytest.raises(SeedreamConfigError, match="非法字符") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "环境变量 ARK_BASE_URL" in excinfo.value.message
+
+
+# ==================== base_url userinfo 拒绝 ====================
+
+
+@pytest.mark.parametrize(
+    "invalid_base_url",
+    [
+        "https://user:pass@ark.example.com/api/v3",
+        "https://user@ark.example.com/api/v3",
+        "https://:pass@ark.example.com/api/v3",
+        "https://@ark.example.com/api/v3",
+    ],
+)
+def test_seedream_config_rejects_base_url_with_userinfo(invalid_base_url: str) -> None:
+    """携带 userinfo 的 base_url 在构造期拒绝，httpx 会以 Basic 认证覆盖 Bearer 密钥头。"""
+    with pytest.raises(SeedreamConfigError, match="userinfo") as excinfo:
+        SeedreamConfig(api_key="k", base_url=invalid_base_url)
+
+    assert "环境变量 ARK_BASE_URL" in excinfo.value.message
+
+
+def test_build_config_rejects_base_url_with_userinfo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_config_from_sources 构建路径同样经 validate 拒绝携带 userinfo 的 ARK_BASE_URL。"""
+    monkeypatch.delenv("ARK_BASE_URL", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, "ARK_API_KEY=file_key\nARK_BASE_URL=https://user:pass@ark.example.com/api/v3\n"
+    )
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== 校验错误消息附带环境变量名 ====================
+
+
+@pytest.mark.parametrize(
+    "kwargs,env_name",
+    [
+        ({"timeout": 0}, "SEEDREAM_TIMEOUT"),
+        ({"api_timeout": -1}, "SEEDREAM_API_TIMEOUT"),
+        ({"max_retries": -1}, "SEEDREAM_MAX_RETRIES"),
+        ({"log_level": "VERBOSE"}, "SEEDREAM_LOG_LEVEL"),
+        ({"auto_save_download_timeout": 0}, "SEEDREAM_AUTO_SAVE_DOWNLOAD_TIMEOUT"),
+        ({"prepare_cache_max": 0}, "SEEDREAM_PREPARE_CACHE_MAX"),
+        ({"http_max_body_size": 1024}, "SEEDREAM_HTTP_MAX_BODY_SIZE"),
+        ({"body_read_timeout": 0}, "SEEDREAM_BODY_READ_TIMEOUT"),
+        ({"large_body_admission_concurrency": 0}, "SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY"),
+        ({"base_url": "ftp://bad.example.com"}, "ARK_BASE_URL"),
+        ({"base_url": "https://"}, "ARK_BASE_URL"),
+        ({"base_url": "https:foo"}, "ARK_BASE_URL"),
+        ({"base_url": "https:///path"}, "ARK_BASE_URL"),
+        ({"model_id": "doubao-seededit-3-0-250828"}, "SEEDREAM_MODEL_ID"),
+    ],
+)
+def test_seedream_config_validation_errors_mention_env_var(
+    kwargs: dict[str, Any], env_name: str
+) -> None:
+    """校验失败消息附带对应环境变量名，用户可直接定位配置来源。"""
+    with pytest.raises(SeedreamConfigError, match=f"环境变量 {env_name}"):
+        SeedreamConfig(api_key="k", **kwargs)
+
+
+def test_seedream_config_empty_api_key_error_mentions_env_var() -> None:
+    """api_key 为空的校验消息附带 ARK_API_KEY，虽该字段无 env metadata。"""
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_API_KEY"):
+        SeedreamConfig(api_key=" ")
+
+
+def test_seedream_config_strips_api_key_whitespace() -> None:
+    """带首尾空白的 api_key 在构造期规范化，不产出畸形 Bearer 头。"""
+    config = SeedreamConfig(api_key=" key ")
+    assert config.api_key == "key"
+
+
+@pytest.mark.parametrize(
+    "invalid_api_key",
+    ["k\nx", "k\rx", "k\tx", "k\x7f", "中文Key", "k ey"],
+)
+def test_seedream_config_rejects_non_printable_ascii_in_api_key(invalid_api_key: str) -> None:
+    """含控制字符、空白或非 ASCII 的 api_key 在构造期拒绝，不延迟到请求期以晦涩错误失败。"""
+    with pytest.raises(SeedreamConfigError, match="可打印ASCII") as excinfo:
+        SeedreamConfig(api_key=invalid_api_key)
+
+    assert "环境变量 ARK_API_KEY" in excinfo.value.message
+
+
+def test_seedream_config_strips_trailing_newline_in_api_key() -> None:
+    """尾随换行按既有 strip 规范化，仅内嵌非法字符才拒绝。"""
+    config = SeedreamConfig(api_key="k\n")
+    assert config.api_key == "k"
+
+
+@pytest.mark.parametrize("valid_api_key", ["k", "ASCII-key_42-x"])
+def test_seedream_config_accepts_printable_ascii_api_keys(valid_api_key: str) -> None:
+    """可打印 ASCII 的正常键照常通过。"""
+    assert SeedreamConfig(api_key=valid_api_key).api_key == valid_api_key
+
+
+def test_seedream_config_none_api_key_raises_config_error() -> None:
+    """api_key 为 None 时抛配置错误并附环境变量指引，不裸 AttributeError。"""
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_API_KEY"):
+        SeedreamConfig(api_key=None)  # type: ignore[arg-type]
+
+
+def test_seedream_config_malformed_base_url_raises_config_error() -> None:
+    """括号畸形 IPv6 等 base_url 形态归约为配置错误并附环境变量提示。"""
+    with pytest.raises(SeedreamConfigError, match="环境变量 ARK_BASE_URL"):
+        SeedreamConfig(api_key="k", base_url="http://[::1")
+
+
+def test_build_config_unparsable_int_error_mentions_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整数字段值解析失败的消息附带环境变量名，用户可直接定位写坏的变量。"""
+    monkeypatch.delenv("SEEDREAM_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_TIMEOUT=abc\n")
+
+    with pytest.raises(SeedreamConfigError, match="环境变量 SEEDREAM_TIMEOUT") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "无法解析整数值" in excinfo.value.message
+
+
+# ==================== response_body_limit 响应体读取上限 ====================
+
+
+def test_build_config_loads_response_body_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_RESPONSE_BODY_LIMIT 显式设置时作为字节值直接生效。"""
+    monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_RESPONSE_BODY_LIMIT=1048576\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.response_body_limit == 1048576
+
+
+def test_build_config_response_body_limit_defaults_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 response_body_limit 为 None。
+
+    由 client 按 auto_save_max_file_size × 20 推导。
+    """
+    monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.response_body_limit is None
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1"])
+def test_build_config_rejects_non_positive_response_body_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """response_body_limit 必须 > 0，否则抛 SeedreamConfigError。"""
+    monkeypatch.delenv("SEEDREAM_RESPONSE_BODY_LIMIT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_RESPONSE_BODY_LIMIT={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="response_body_limit"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== SEEDREAM_BODY_READ_TIMEOUT 大请求体读体窗口超时 ====================
+
+
+def test_build_config_loads_body_read_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_BODY_READ_TIMEOUT 显式设置时作为秒数直接生效。"""
+    monkeypatch.delenv("SEEDREAM_BODY_READ_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_BODY_READ_TIMEOUT=600\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.body_read_timeout == 600
+
+
+def test_build_config_body_read_timeout_defaults_to_300(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 body_read_timeout 取默认 300 秒。"""
+    monkeypatch.delenv("SEEDREAM_BODY_READ_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.body_read_timeout == 300
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1", "abc"])
+def test_build_config_rejects_invalid_body_read_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """非正数经下界校验拒绝，不可解析值经取值层拒绝，消息均定位到该变量。"""
+    monkeypatch.delenv("SEEDREAM_BODY_READ_TIMEOUT", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_BODY_READ_TIMEOUT={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_BODY_READ_TIMEOUT"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY 大请求体并发准入许可数 ====================
+
+
+def test_build_config_loads_large_body_admission_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY 显式设置时作为许可数直接生效。"""
+    monkeypatch.delenv("SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY=8\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.large_body_admission_concurrency == 8
+
+
+def test_build_config_large_body_admission_concurrency_defaults_to_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 large_body_admission_concurrency 取默认 3。"""
+    monkeypatch.delenv("SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.large_body_admission_concurrency == 3
+
+
+@pytest.mark.parametrize("invalid_value", ["0", "-1", "abc"])
+def test_build_config_rejects_invalid_large_body_admission_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """小于 1 经下界校验拒绝，不可解析值经取值层拒绝，消息均定位到该变量。"""
+    monkeypatch.delenv("SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_LARGE_BODY_ADMISSION_CONCURRENCY"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+# ==================== auto_save_fsync 落盘刷盘开关 ====================
+
+
+def test_build_config_loads_auto_save_fsync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_AUTO_SAVE_FSYNC=true 经 .env 加载为 True。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_FSYNC", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_AUTO_SAVE_FSYNC=true\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_fsync is True
+
+
+def test_build_config_auto_save_fsync_defaults_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 auto_save_fsync 默认 False，落盘不做同步刷盘。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_FSYNC", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_fsync is False
+
+
+# ==================== auto_save_max_total_bytes 0 哨兵表示不限制 ====================
+
+
+def test_build_config_zero_max_total_bytes_means_unlimited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=0 归一为 None，显式关闭总量上限。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES=0\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_max_total_bytes is None
+
+
+def test_build_config_max_total_bytes_defaults_to_10gb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时 auto_save_max_total_bytes 取默认 10GB 上限。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.auto_save_max_total_bytes == 10 * 1024 * 1024 * 1024
+
+
+@pytest.mark.parametrize("invalid_value", ["-1", "-10737418240"])
+def test_build_config_rejects_negative_max_total_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_value: str
+) -> None:
+    """负数不被 0 哨兵路径吸收，经 validate 下界校验拒绝。"""
+    monkeypatch.delenv("SEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_AUTO_SAVE_MAX_TOTAL_BYTES={invalid_value}\n",
+    )
+
+    with pytest.raises(SeedreamConfigError, match="auto_save_max_total_bytes"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+def test_seedream_config_normalizes_programmatic_zero_max_total_bytes() -> None:
+    """程序构造直接传 0 与 env 哨兵同口径归一为 None，显式关闭总量上限。"""
+    config = SeedreamConfig(api_key="k", auto_save_max_total_bytes=0)
+
+    assert config.auto_save_max_total_bytes is None
+
+
+# ==================== SEEDREAM_REQUEST_STATE_KEYS requestState 密钥环 ====================
+
+
+def test_build_config_loads_single_request_state_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """单键十六进制串解码为 32 字节密钥并以字节元组持有。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    key_hex = "ab" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={key_hex}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys == (bytes.fromhex(key_hex),)
+
+
+def test_build_config_loads_rotation_request_state_key_ring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """多键逗号分隔按序解码，首键密封全键解封的轮换顺序原样保留。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    first_hex, second_hex = "ab" * 32, "cd" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={first_hex},{second_hex}\n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys == (bytes.fromhex(first_hex), bytes.fromhex(second_hex))
+
+
+def test_build_config_request_state_keys_strip_blank_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """条目前后空白被去除，空条目被丢弃。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    first_hex, second_hex = "ab" * 32, "cd" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file,
+        f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS= {first_hex} , , {second_hex} \n",
+    )
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys == (bytes.fromhex(first_hex), bytes.fromhex(second_hex))
+
+
+@pytest.mark.parametrize("raw_value", ["", "   ", ","])
+def test_build_config_blank_request_state_keys_is_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    """空串、纯空白与全空条目均归 None，等价于未启用密钥环。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={raw_value}\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys is None
+
+
+def test_build_config_request_state_keys_default_to_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未设置时不启用密钥环，保持 SDK 默认进程临时密钥。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\n")
+
+    config = build_config_from_sources(env_file=str(env_file))
+
+    assert config.request_state_secret_keys is None
+
+
+@pytest.mark.parametrize("bad_hex", ["zz" * 32, "0x" + "ab" * 32, "abc"])
+def test_build_config_rejects_non_hex_request_state_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_hex: str
+) -> None:
+    """非十六进制条目构建期拒绝，消息含格式要求与生成命令且不回显密钥内容。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={bad_hex}\n")
+
+    with pytest.raises(SeedreamConfigError, match="十六进制") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "secrets.token_hex(32)" in excinfo.value.message
+    assert bad_hex not in excinfo.value.message
+    assert "环境变量 SEEDREAM_REQUEST_STATE_KEYS" in excinfo.value.message
+
+
+@pytest.mark.parametrize("short_hex", ["ab" * 31, "ab" * 16])
+def test_build_config_rejects_short_request_state_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_hex: str
+) -> None:
+    """解码后不足 32 字节的密钥构建期拒绝，消息含生成命令提示。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={short_hex}\n")
+
+    with pytest.raises(SeedreamConfigError, match="32 字节") as excinfo:
+        build_config_from_sources(env_file=str(env_file))
+
+    assert "secrets.token_hex(32)" in excinfo.value.message
+    assert "第 1 个密钥" in excinfo.value.message
+
+
+def test_build_config_rejects_duplicate_request_state_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重复密钥在轮换环内只允许登记一次，重复登记构建期拒绝。"""
+    monkeypatch.delenv("SEEDREAM_REQUEST_STATE_KEYS", raising=False)
+    key_hex = "ab" * 32
+    env_file = tmp_path / "config.env"
+    _write_env_file(
+        env_file, f"ARK_API_KEY=file_key\nSEEDREAM_REQUEST_STATE_KEYS={key_hex},{key_hex}\n"
+    )
+
+    with pytest.raises(SeedreamConfigError, match="重复"):
+        build_config_from_sources(env_file=str(env_file))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "ab" * 32,
+        ("ab" * 32) + "," + ("cd" * 32),
+        " " + ("ab" * 32) + " , , " + ("cd" * 32) + " ",
+        "",
+        "   ",
+        ",",
+        "zz" * 32,
+        "abcd",
+        ("ab" * 32) + ",abcd",
+        ("cd" * 32) + "," + ("cd" * 32),
+    ],
+    ids=[
+        "single",
+        "rotation",
+        "strip-blank-entries",
+        "empty",
+        "whitespace",
+        "comma-only",
+        "non-hex",
+        "short",
+        "short-after-valid",
+        "duplicate",
+    ],
+)
+def test_request_state_key_entry_parsing_agrees_between_import_probe_and_build(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """导入期先行取值与配置构建对同一环境变量的条目文法解析结果一致。
+
+    文法若在一侧单独调整（分隔符或空白容忍口径），
+    嵌入式宿主会带着与构建不一致的导入期密钥环运行，本用例在两路径分歧时转红。
+    """
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+    monkeypatch.setenv("SEEDREAM_REQUEST_STATE_KEYS", raw)
+
+    probed = config_module.active_request_state_keys()
+
+    try:
+        built = build_config_from_sources(overrides={"api_key": "k"}).request_state_secret_keys
+    except SeedreamConfigError:
+        assert probed is None
+        return
+    assert probed == built
+
+
+def test_request_state_key_decode_shared_by_probe_and_picker() -> None:
+    """导入期取值与字段 picker 共用同一拆分与解码单点；绕开解码单点或探测侧手写拆分时在此转红。"""
+    probe_source = inspect.getsource(config_module.active_request_state_keys)
+    assert "_pick_request_state_key_bytes" not in probe_source
+    assert "_split_optional_str_tuple" in probe_source
+    assert "split(" not in probe_source
+    assert "_decode_request_state_key_entries" in probe_source
+
+    picker_source = inspect.getsource(config_sources._pick_request_state_key_bytes)
+    assert "_decode_request_state_key_entries" in picker_source
+
+
+def test_request_state_key_error_message_matches_violation_reason() -> None:
+    """短密钥与重复密钥各渲染对应消息，不串入对方规则的说法。"""
+    with pytest.raises(SeedreamConfigError) as short_excinfo:
+        SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 32, b"\x02" * 31))
+
+    assert "32 字节" in short_excinfo.value.message
+    assert "第 2 个密钥" in short_excinfo.value.message
+    assert "重复" not in short_excinfo.value.message
+
+    with pytest.raises(SeedreamConfigError) as duplicate_excinfo:
+        SeedreamConfig(
+            api_key="k",
+            request_state_secret_keys=(b"\x01" * 32, b"\x02" * 32, b"\x01" * 32),
+        )
+
+    assert "重复" in duplicate_excinfo.value.message
+    assert "第 3 个密钥" in duplicate_excinfo.value.message
+    assert "字节" not in duplicate_excinfo.value.message
+
+
+def test_request_state_short_and_duplicate_key_renders_short_reason() -> None:
+    """短键与其后等值重复键并存时按首个违规的短键渲染，序号与字节数取自该键自身。"""
+    with pytest.raises(SeedreamConfigError) as excinfo:
+        SeedreamConfig(
+            api_key="k",
+            request_state_secret_keys=(b"\x01" * 32, b"\x02" * 31, b"\x02" * 31),
+        )
+
+    assert "第 2 个密钥" in excinfo.value.message
+    assert "仅 31 字节" in excinfo.value.message
+    assert "重复" not in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    ("ring", "expected_fragment"),
+    [
+        ((b"\x01" * 31,), "第 1 个密钥解码后仅 31 字节"),
+        ((b"\x01" * 32, b"\x02" * 31), "第 2 个密钥解码后仅 31 字节"),
+        ((b"\x01" * 32, b"\x01" * 32), "第 2 个密钥与在先密钥重复"),
+        ((b"\x01" * 32, b"\x02" * 32), None),
+    ],
+    ids=["short-first", "short-after-valid", "duplicate", "valid-ring"],
+)
+def test_first_invalid_request_state_key_message_reports_first_violation(
+    ring: tuple[bytes, ...],
+    expected_fragment: str | None,
+) -> None:
+    """首个违规键的报错消息就地拼好返回，合法密钥环返回 None。"""
+    message = _first_invalid_request_state_key_message(ring)
+    if expected_fragment is None:
+        assert message is None
+    else:
+        assert message is not None and expected_fragment in message
+
+
+def test_seedream_config_accepts_programmatic_request_state_key_ring() -> None:
+    """程序构造直接传解码后的字节密钥，经 validate 下界校验后原样持有。"""
+    config = SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 32,))
+
+    assert config.request_state_secret_keys == (b"\x01" * 32,)
+
+
+def test_seedream_config_rejects_programmatic_short_request_state_key() -> None:
+    """程序构造的短密钥不经 env 解码路径，仍由 validate 下界校验拒绝。"""
+    with pytest.raises(SeedreamConfigError, match="32 字节"):
+        SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 31,))
+
+
+def test_to_dict_masks_request_state_secret_keys() -> None:
+    """to_dict 对 request_state_secret_keys 脱敏，密钥字节不进入导出字典。"""
+    config = SeedreamConfig(api_key="k", request_state_secret_keys=(b"\x01" * 32,))
+    dumped = config.to_dict()
+
+    assert dumped["request_state_secret_keys"] == "***"
+
+
+def test_build_config_concurrent_builds_succeed_and_agree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发多次构建经 _config_build_lock 串行化，全部成功且结果一致。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv("SEEDREAM_MODEL_ID", raising=False)
+    env_file = tmp_path / "config.env"
+    _write_env_file(env_file, "ARK_API_KEY=file_key\nSEEDREAM_MODEL_ID=doubao-seedream-4.5\n")
+
+    def build() -> SeedreamConfig:
+        return build_config_from_sources(env_file=str(env_file))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        configs = list(executor.map(lambda _: build(), range(16)))
+
+    first = configs[0]
+    assert first.api_key == "file_key"
+    assert first.model_id == "doubao-seedream-4-5-251128"
+    assert all(config == first for config in configs)
+
+
+def test_failed_build_rolls_back_pending_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """构建失败期间收集的告警随回滚清空，不外泄给下一次成功构建的 drain。"""
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        with pytest.raises(SeedreamConfigError, match="log_level"):
+            build_config_from_sources(
+                overrides={
+                    "api_key": "k",
+                    "definitely_unknown_key": 1,
+                    "log_level": "VERBOSE",
+                }
+            )
+        build_config_from_sources(overrides={"api_key": "k"})
+        drain_pending_build_warnings()
+
+    assert not any("definitely_unknown_key" in message for message in records)
+
+
+def test_pool_depth_provider_supplies_generate_and_prepare_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """池深提供者同时供给活动配置的生成并发与图像预处理并发。"""
+    config = SeedreamConfig(api_key="k", generate_concurrency=7, image_prepare_concurrency=4)
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    assert _active_pool_concurrency() == (7, 4)
+
+
+def test_pool_depth_provider_returns_none_when_config_build_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活动配置不可构建时提供者返回 None，池深回退交由 executors 侧兜底。"""
+    monkeypatch.setattr(config_module, "_active_config", None)
+    monkeypatch.setattr(config_module, "_global_config", None)
+
+    def _raising_from_env() -> SeedreamConfig:
+        raise SeedreamConfigError("未找到ARK_API_KEY环境变量")
+
+    monkeypatch.setattr(SeedreamConfig, "from_env", _raising_from_env)
+
+    assert _active_pool_concurrency() is None

@@ -1,0 +1,127 @@
+"""seedream://workspace/roots 模板资源端到端守护测试。
+
+经 SDK in-process Client 驱动真实读取管线，测试不直调 handler；项目曾因参数化
+Context 注解使模板资源创建失败，本套件锁定管线与回退语义。另守护 initialize
+报告的 serverInfo.version 为项目版本号。
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+from mcp.client import Client
+from mcp.types import ReadResourceResult, TextResourceContents
+
+import seedream_mcp.utils.io.path as io_path_module
+
+import seedream_mcp.server.runtime as runtime
+import seedream_mcp.server as server
+
+from _lib.roots_session_fakes import RootsListCallback
+
+# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
+
+
+def _single_text_payload(result: ReadResourceResult) -> dict[str, Any]:
+    """断言读取结果为单一 JSON 文本内容并返回解析后的字典。"""
+    assert len(result.contents) == 1
+    content = result.contents[0]
+    assert content.mime_type == "application/json"
+    assert isinstance(content, TextResourceContents)
+    assert isinstance(content.text, str)
+    return cast("dict[str, Any]", json.loads(content.text))
+
+
+async def test_initialize_reports_project_version(
+    reset_lifespan_singletons: None,
+) -> None:
+    """initialize 握手的 serverInfo.version 非空且等于项目 __version__。
+
+    SDK 2.0 起未传 version 的服务器会报告空串，客户端版本判断失去依据。
+    """
+    async with Client(server.mcp, mode="legacy") as client:
+        server_info = client.server_info
+        assert server_info is not None
+        assert server_info.name == server.SERVER_NAME
+        assert server_info.version != ""
+        assert server_info.version == runtime.SERVER_VERSION
+
+
+async def test_workspace_roots_resource_reads_over_wire_without_roots_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """默认协商路径读取模板资源返回 JSON，客户端未声明 roots 时回显环境回退根。"""
+    env_root = tmp_path / "env"
+    env_root.mkdir()
+    # 声明读取入口为 config 注册的提供者而非裸环境变量，以提供者注入固定回退根。
+    monkeypatch.setitem(
+        io_path_module._env_value_providers, "SEEDREAM_WORKSPACE_ROOT", lambda: str(env_root)
+    )
+
+    async with Client(server.mcp) as client:
+        expected_display = str(env_root.resolve()).replace("\\", "/")
+        plain = await client.read_resource("seedream://workspace/roots")
+        assert _single_text_payload(plain) == {"roots": [expected_display]}
+
+        verbose = await client.read_resource("seedream://workspace/roots?verbose=true")
+        assert _single_text_payload(verbose) == {
+            "roots": [expected_display],
+            "resolved": [str(env_root.resolve())],
+        }
+
+
+async def test_workspace_roots_resource_reports_client_roots(
+    tmp_path: Path,
+    reset_lifespan_singletons: None,
+) -> None:
+    """legacy 协商加 roots callback 时，模板资源经会话 Roots 往返输出授权根目录。
+
+    roots 为反斜杠归一后的展示形态，verbose 附 resolve 后的物理路径；同时守护
+    Context 注入实例的 session 可用性。
+    """
+    declared_root = tmp_path / "workspace"
+    declared_root.mkdir()
+    callback = RootsListCallback([declared_root])
+
+    async with Client(server.mcp, mode="legacy", list_roots_callback=callback) as client:
+        plain = await client.read_resource("seedream://workspace/roots")
+        expected_display = str(declared_root.resolve()).replace("\\", "/")
+        assert _single_text_payload(plain) == {"roots": [expected_display]}
+
+        verbose = await client.read_resource("seedream://workspace/roots?verbose=true")
+        assert _single_text_payload(verbose) == {
+            "roots": [expected_display],
+            "resolved": [str(declared_root.resolve())],
+        }
+
+
+async def test_workspace_roots_resource_modern_round_trip_reports_client_roots(
+    tmp_path: Path,
+    reset_lifespan_singletons: None,
+) -> None:
+    """默认协商 2026-07-28 加 roots callback 时，资源经多轮请求取回授权根目录。
+
+    2026 会话无反向通道，资源返回 InputRequiredResult 由客户端应答后重试，输出
+    与 legacy 等价。
+    """
+    declared_root = tmp_path / "workspace"
+    declared_root.mkdir()
+    callback = RootsListCallback([declared_root])
+
+    async with Client(server.mcp, list_roots_callback=callback) as client:
+        plain = await client.read_resource("seedream://workspace/roots")
+        expected_display = str(declared_root.resolve()).replace("\\", "/")
+        assert _single_text_payload(plain) == {"roots": [expected_display]}
+
+        verbose = await client.read_resource("seedream://workspace/roots?verbose=true")
+        assert _single_text_payload(verbose) == {
+            "roots": [expected_display],
+            "resolved": [str(declared_root.resolve())],
+        }
+
+    assert callback.calls == 2

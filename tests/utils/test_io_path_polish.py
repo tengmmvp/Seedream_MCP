@@ -1,0 +1,640 @@
+"""io_path 行为修复回归测试，覆盖相似路径建议、工作区根解析与提供者注册、
+目录图片查找。
+"""
+
+from __future__ import annotations
+
+import errno
+import os
+import tempfile
+import time
+from pathlib import Path
+
+import pytest
+
+import seedream_mcp.utils.io.path as io_path_module
+import seedream_mcp.utils.io.scan as io_scan_module
+from _lib.log_fakes import capture_loguru_messages
+from _lib.os_fakes import _install_counting_realpath, _make_cycle_link, _make_dangling_link
+from seedream_mcp.config import SeedreamConfig, set_active_config
+
+
+def test_suggest_similar_paths_empty_target_name_returns_no_suggestions(
+    tmp_path: Path,
+) -> None:
+    """目标名为空串时不产生建议，避免空串子串匹配把任意图片误当相近项。
+
+    ``/``、``.`` 等输入的 Path.name 为空串，旧实现的 ``"" in name`` 恒真。
+    """
+    for name in ("a.png", "b.png", "c.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    for bare_target in ("", ".", "..", "/"):
+        assert io_scan_module.suggest_similar_paths(bare_target, search_dirs=[str(tmp_path)]) == []
+
+    # 对照：非空目标名仍按子串匹配给出建议
+    assert io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)]) == [
+        str(tmp_path / "a.png")
+    ]
+
+
+def test_resolve_env_workspace_root_caches_resolved_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一配置根重复解析命中缓存，不再触达文件系统；配置值变更产生新键重新解析。"""
+    first_root = tmp_path / "first"
+    first_root.mkdir()
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    configured = {"value": str(first_root)}
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(
+        io_path_module, "_configured_env_value", lambda env_var: configured["value"]
+    )
+
+    resolve_calls = _install_counting_realpath(monkeypatch)
+    tracked = {str(first_root), str(second_root)}
+
+    first = io_path_module.resolve_env_workspace_root()
+    cached_again = io_path_module.resolve_env_workspace_root()
+    assert first == cached_again == first_root
+    # 同配置两次解析仅触发一次该路径的解析，cwd 兜底分支未走
+    assert [p for p in resolve_calls if p in tracked] == [str(first_root)]
+
+    configured["value"] = str(second_root)
+    changed = io_path_module.resolve_env_workspace_root()
+    assert changed == second_root
+    assert [p for p in resolve_calls if p in tracked] == [str(first_root), str(second_root)]
+
+
+def test_resolve_env_workspace_root_relative_config_recomputes_after_cwd_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """相对路径形态的配置根不进缓存，进程 CWD 变更后按新 CWD 重新解析。
+
+    相对路径的 resolve 结果随 CWD 变化，缓存会命中陈旧值；绝对路径形态仍走缓存，
+    由 test_resolve_env_workspace_root_caches_resolved_result 锁定。
+    """
+    first_cwd = tmp_path / "first"
+    second_cwd = tmp_path / "second"
+    first_cwd.mkdir()
+    second_cwd.mkdir()
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_configured_env_value", lambda env_var: "images")
+
+    monkeypatch.chdir(first_cwd)
+    assert io_path_module.resolve_env_workspace_root() == (first_cwd / "images").resolve()
+
+    monkeypatch.chdir(second_cwd)
+    assert io_path_module.resolve_env_workspace_root() == (second_cwd / "images").resolve()
+    assert "images" not in io_path_module._RESOLVED_ENV_ROOT_CACHE
+
+
+def test_resolve_env_workspace_root_tilde_form_uses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """~ 形态的配置根进入 resolve 缓存，重复访问不再触达文件系统。
+
+    ~ 展开结果只依赖用户主目录而与 CWD 无关，按展开后绝对性判定可缓存；旧实现
+    以展开前的 is_absolute 排除该形态。
+    """
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_configured_env_value", lambda env_var: "~")
+
+    # 期望值在 realpath 被 monkeypatch 计数前捕获，避免断言自身的 resolve 混入计数
+    expected = Path("~").expanduser().resolve()
+    expanded_home = str(Path("~").expanduser())
+    resolve_calls = _install_counting_realpath(monkeypatch)
+
+    first = io_path_module.resolve_env_workspace_root()
+    cached_again = io_path_module.resolve_env_workspace_root()
+
+    assert first == cached_again == expected
+    assert resolve_calls.count(expanded_home) == 1, "~ 形态配置根的解析应只执行一次"
+    assert "~" in io_path_module._RESOLVED_ENV_ROOT_CACHE
+
+
+def test_workspace_root_provider_registration_drives_configured_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """注册的提供者是声明值的读取入口；提供者未注册时回退同名环境变量。"""
+    target = tmp_path / "provided"
+    target.mkdir()
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setitem(
+        io_path_module._env_value_providers, "SEEDREAM_WORKSPACE_ROOT", lambda: str(target)
+    )
+
+    assert io_path_module._configured_env_value("SEEDREAM_WORKSPACE_ROOT") == str(target)
+    assert io_path_module.resolve_env_workspace_root() == target.resolve()
+
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.setenv("SEEDREAM_WORKSPACE_ROOT", str(tmp_path))
+    assert io_path_module._configured_env_value("SEEDREAM_WORKSPACE_ROOT") == str(tmp_path)
+
+
+def test_register_env_workspace_root_provider_replaces_previous() -> None:
+    """register_env_workspace_root_provider 为覆盖式替换，后注册者生效。"""
+    original = dict(io_path_module._env_value_providers)
+    try:
+        io_path_module.register_env_workspace_root_provider(lambda: "/registered/root")
+        assert io_path_module._configured_env_value("SEEDREAM_WORKSPACE_ROOT") == "/registered/root"
+
+        io_path_module.register_env_workspace_root_provider(lambda: "/other/root")
+        assert io_path_module._configured_env_value("SEEDREAM_WORKSPACE_ROOT") == "/other/root"
+    finally:
+        io_path_module._env_value_providers.clear()
+        io_path_module._env_value_providers.update(original)
+
+
+def test_fallback_all_unavailable_raises_config_error_with_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """工作目录与主目录均不可用属部署环境缺陷，报携带配置指引的配置错误而非 RuntimeError 逃出。"""
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+
+    def _no_cwd() -> Path:
+        raise FileNotFoundError("cwd deleted")
+
+    def _no_home() -> Path:
+        raise RuntimeError("Could not resolve home directory")
+
+    monkeypatch.setattr(Path, "cwd", _no_cwd)
+    monkeypatch.setattr(Path, "home", _no_home)
+
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_WORKSPACE_ROOT"):
+        io_path_module.resolve_env_workspace_root()
+
+
+def test_fallback_prefers_writable_cwd_without_touching_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回退根取可写的进程启动目录，主目录不参与求值，探测不留目录副作用。"""
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+    monkeypatch.chdir(tmp_path)
+
+    def _fail_home() -> Path:
+        raise AssertionError("工作目录可写时保底不应触达主目录")
+
+    monkeypatch.setattr(Path, "home", _fail_home)
+    assert io_path_module.resolve_env_workspace_root() == tmp_path.resolve()
+
+    # 临时探测文件用后即删，目录零残留
+    assert list(tmp_path.iterdir()) == []
+    # 回退提示进启动缓冲队列而非即时输出，drain 后经日志通道落地
+    pending = [message for _, message in io_path_module._START_MESSAGES.snapshot()]
+    assert any("工作根目录回退为进程启动目录" in message for message in pending)
+    records: list[str] = []
+    with capture_loguru_messages(records, level="INFO"):
+        io_path_module.drain_pending_start_messages()
+    assert any("工作根目录回退为进程启动目录" in record for record in records)
+
+
+def test_usable_cwd_root_rejects_unc_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UNC 形态的进程启动目录不作为回退根，不触发探测与路径解析。"""
+
+    def _unc_cwd() -> Path:
+        return Path("//server/share")
+
+    def _explode_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        raise AssertionError("UNC 形态的启动目录不得进入写探测")
+
+    monkeypatch.setattr(Path, "cwd", _unc_cwd)
+    monkeypatch.setattr(tempfile, "mkstemp", _explode_mkstemp)
+
+    assert io_path_module._usable_cwd_root() is None
+
+
+def test_usable_cwd_root_returns_none_when_resolve_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写探测通过但 resolve 失败时启动目录不可用作回退根，返回 None。"""
+
+    def _tmp_cwd() -> Path:
+        return tmp_path
+
+    def _fail_resolve(self: Path) -> Path:
+        del self
+        raise OSError("resolve failed")
+
+    monkeypatch.setattr(Path, "cwd", _tmp_cwd)
+    monkeypatch.setattr(Path, "resolve", _fail_resolve)
+
+    assert io_path_module._usable_cwd_root() is None
+    # 临时探测文件用后即删，目录零残留
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_usable_cwd_root_unlink_failure_warns_but_stays_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """探测文件清理失败记录 warning 暴露残留，不影响启动目录的可写判定。"""
+    import os
+
+    def _fail_unlink(path: object) -> None:
+        raise OSError("unlink denied")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(os, "unlink", _fail_unlink)
+
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        assert io_path_module._usable_cwd_root() == tmp_path.resolve()
+
+    assert any("清理探测文件失败" in message for message in warnings)
+    # unlink 失败后探测文件残留于目录，以残留暴露清理失败
+    leftover = list(tmp_path.iterdir())
+    assert len(leftover) == 1
+    assert leftover[0].name.startswith(".seedream-probe-")
+
+
+def test_fallback_caches_home_when_cwd_not_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """工作目录写探测失败回退主目录，回退结果进程级缓存，重复求值不再触达 Path.home。"""
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+    monkeypatch.chdir(tmp_path)
+
+    def _denied(*args: object, **kwargs: object) -> tuple[int, str]:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(tempfile, "mkstemp", _denied)
+    home = tmp_path / "home"
+    home.mkdir()
+    calls = {"count": 0}
+
+    def _fake_home() -> Path:
+        calls["count"] += 1
+        return home
+
+    monkeypatch.setattr(Path, "home", _fake_home)
+
+    first = io_path_module.resolve_env_workspace_root()
+    second = io_path_module.resolve_env_workspace_root()
+
+    assert first == second == home.resolve()
+    assert calls["count"] == 1
+
+
+def test_suggest_similar_paths_reuses_scan_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重复的校验失败命中 io_scan 扫描缓存，同目录不重复全量扫描。
+
+    suggest_similar_paths 显式注入 io_scan.find_images_in_directory 为扫描器，
+    计数补丁挂在 io_scan 命名空间即可覆盖注入点。
+    """
+    (tmp_path / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    calls = {"count": 0}
+    original_scan = io_scan_module.find_images_in_directory
+
+    def _counting_scan(*args: object, **kwargs: object) -> list[Path]:
+        calls["count"] += 1
+        return original_scan(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(io_scan_module, "find_images_in_directory", _counting_scan)
+
+    first = io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])
+    second = io_scan_module.suggest_similar_paths("a", search_dirs=[str(tmp_path)])
+
+    assert first == second == [str((tmp_path / "a.png").resolve())]
+    assert calls["count"] == 1
+
+
+def test_find_images_rejects_unc_directory_before_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNC 形式的目录入参在 resolve 前被拒：记录告警、返回空列表且不触发路径解析。
+
+    Windows 的 resolve 会触发 SMB 认证。前置拦截经告警文案锁定：find_images_in_directory
+    的兜底 except 会吞掉 resolve 异常并同样返回空列表，仅断言空返回无法区分两条路径。
+    """
+
+    def _explode_resolve(self: Path, strict: bool = False) -> Path:
+        raise AssertionError("UNC 形式的目录入参不得进入 resolve")
+
+    monkeypatch.setattr(Path, "resolve", _explode_resolve)
+
+    warnings: list[str] = []
+    with capture_loguru_messages(warnings):
+        assert io_scan_module.find_images_in_directory("//server/share", recursive=False) == []
+        assert io_scan_module.find_images_in_directory("\\\\server\\share", recursive=True) == []
+
+    assert any("拒绝 UNC 形式的目录扫描入参" in message for message in warnings)
+
+
+def test_read_context_degrades_to_images_root_when_home_unresolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回退链整体不可用且显式数据根目录可用时，读权限退化为仅图片目录不整体失败。
+
+    数据根目录声明在场时回退链不参与图片目录求值，工作区链的失败不应拖垮
+    读取与浏览。
+    """
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    images_root = tmp_path / "pics"
+    images_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(images_root))
+    monkeypatch.delenv("SEEDREAM_WORKSPACE_ROOT", raising=False)
+    monkeypatch.setattr(io_path_module, "_env_value_providers", {})
+    monkeypatch.setattr(io_path_module, "_fallback_root", None)
+
+    def _no_cwd() -> Path:
+        raise FileNotFoundError("cwd deleted")
+
+    def _no_home() -> Path:
+        raise RuntimeError("Could not resolve home directory")
+
+    monkeypatch.setattr(Path, "cwd", _no_cwd)
+    monkeypatch.setattr(Path, "home", _no_home)
+
+    # 工作区链单点仍如实报配置指引
+    with pytest.raises(SeedreamConfigError, match="SEEDREAM_WORKSPACE_ROOT"):
+        io_path_module.get_workspace_roots()
+    # 读权限退化为仅图片目录，图片目录派生自显式声明的 .seedream/images
+    assert io_path_module.get_read_scope() == [(images_root / ".seedream" / "images").resolve()]
+
+
+def test_read_context_degrades_observably_when_declared_workspace_root_unresolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已声明工作区根目录解析失败时读权限可观测退化为仅图片目录，不静默漂移到回退链。"""
+    images_root = tmp_path / "pics"
+    images_root.mkdir()
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", str(images_root))
+    real_configured_value = io_path_module._configured_env_value
+
+    def _declared_broken_workspace(env_var: str) -> str | None:
+        if env_var == "SEEDREAM_WORKSPACE_ROOT":
+            return "/declared/broken/root"
+        return real_configured_value(env_var)
+
+    monkeypatch.setattr(io_path_module, "_configured_env_value", _declared_broken_workspace)
+    real_realpath = os.path.realpath
+
+    def _fail_only_declared(src: "str | os.PathLike[str]", *, strict: bool = False) -> str:
+        if strict and "declared/broken/root" in os.fspath(src).replace("\\", "/"):
+            # ELOOP 使 resolve_rejecting_cycle 如实上抛而非回退非严格 resolve。
+            raise OSError(errno.ELOOP, "resolve failed")
+        return real_realpath(src, strict=strict)
+
+    monkeypatch.setattr(os.path, "realpath", _fail_only_declared)
+
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        workspace_roots, resolved_images, scope = io_path_module.get_read_context()
+
+    assert workspace_roots == []
+    assert scope == [resolved_images]
+    assert resolved_images == (images_root / ".seedream" / "images").resolve()
+    assert any("读权限退化为仅图片目录" in record for record in records)
+
+
+def test_resolve_images_root_wraps_runtime_error_with_configured_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式数据根目录的 expanduser RuntimeError 也归一为配置错误，消息不嵌展开路径。
+
+    用户消息只回显其自行配置的原始值，异常原文留在日志。
+    """
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    monkeypatch.setenv("SEEDREAM_DATA_ROOT", "~/pics")
+
+    def _runtime_error(configured_dir: str) -> Path:
+        raise RuntimeError(r"Could not resolve home directory for ~/pics -> C:\Users\srv\pics")
+
+    monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _runtime_error)
+
+    with pytest.raises(SeedreamConfigError) as exc_info:
+        io_path_module.resolve_images_root()
+
+    message = exc_info.value.message
+    assert message == "数据根目录配置无法解析: ~/pics"
+    assert "C:" not in message and "Users" not in message
+
+
+@pytest.mark.parametrize(
+    ("entry", "label", "configured", "cause_type"),
+    [
+        ("workspace_root", "工作区根目录", "/declared/root", OSError),
+        ("images_root", "数据根目录", "~/pics", RuntimeError),
+        ("log_file_path", "数据根目录", "~/pics", RuntimeError),
+    ],
+)
+def test_declaration_resolve_failure_shape_shared_by_entry_points(
+    entry: str,
+    label: str,
+    configured: str,
+    cause_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """三条求值链的声明解析失败共用同一形态：错误只回显配置原值，异常原文仅进日志并保留异常链。"""
+    from seedream_mcp.utils.core.errors import SeedreamConfigError
+
+    if entry == "workspace_root":
+
+        def _workspace_only(env_var: str) -> str | None:
+            return configured if env_var == "SEEDREAM_WORKSPACE_ROOT" else None
+
+        monkeypatch.setattr(io_path_module, "_configured_env_value", _workspace_only)
+        real_realpath = os.path.realpath
+
+        def _strict_only_eloop(src: "str | os.PathLike[str]", *, strict: bool = False) -> str:
+            if strict:
+                # ELOOP 使 resolve_rejecting_cycle 如实上抛而非回退非严格 resolve。
+                raise OSError(errno.ELOOP, "resolve failed")
+            return real_realpath(src, strict=strict)
+
+        monkeypatch.setattr(os.path, "realpath", _strict_only_eloop)
+        trigger = io_path_module.resolve_env_workspace_root
+    else:
+        monkeypatch.setenv("SEEDREAM_DATA_ROOT", configured)
+
+        def _runtime_error(configured_dir: str) -> Path:
+            del configured_dir
+            raise RuntimeError(r"Could not resolve home directory for ~/pics -> C:\Users\srv\pics")
+
+        monkeypatch.setattr(io_path_module, "resolve_cached_data_root", _runtime_error)
+        trigger = (
+            io_path_module.resolve_images_root
+            if entry == "images_root"
+            else io_path_module.resolve_log_file_path
+        )
+
+    records: list[str] = []
+    with capture_loguru_messages(records):
+        with pytest.raises(SeedreamConfigError) as exc_info:
+            trigger()
+
+    assert exc_info.value.message == f"{label}配置无法解析: {configured}"
+    assert isinstance(exc_info.value.__cause__, cause_type)
+    assert any(f"{label}配置无法解析 '{configured}': " in record for record in records)
+
+
+def test_clear_resolved_env_root_cache_resets_fallback_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回退根缓存随配置路径缓存一并复位。
+
+    隔离用例经 monkeypatch 改写保底解析后，复位协议使后续用例重新解析，
+    不再读到先前用例缓存的陈旧回退根。
+    """
+    monkeypatch.setattr(io_path_module, "_fallback_root", Path("D:/stale"))
+
+    io_path_module.clear_resolved_env_root_cache()
+
+    assert io_path_module._fallback_root is None
+
+
+@pytest.mark.parametrize("unc_dir", [r"\\nas\pics", "//nas/pics"])
+def test_suggest_similar_paths_skips_unc_search_dirs(unc_dir: str) -> None:
+    """UNC 形态的搜索目录在 resolve 前跳过，不触发 SMB 连接，返回空建议。"""
+    assert io_scan_module.suggest_similar_paths("portrait", search_dirs=[unc_dir]) == []
+
+
+def test_resolve_result_cache_protocol_respects_capacity() -> None:
+    """映射协议的写入走加锁路径并受容量上限约束，超容逐出最旧条目。"""
+    cache = io_path_module.ResolveResultCache[Path](2)
+
+    cache["a"] = Path("/a")
+    cache["b"] = Path("/b")
+    cache["c"] = Path("/c")
+
+    assert len(cache) == 2
+    assert "a" not in cache
+    assert cache["b"] == Path("/b")
+    assert cache["c"] == Path("/c")
+
+
+def test_resolve_result_cache_ttl_counts_from_store_time() -> None:
+    """TTL 自写入时刻起算：慢速 resolver 的执行时长不预扣缓存寿命。
+
+    resolver 耗时超过 TTL 本身：以执行前时间戳为 captured_at 的实现会在写入时
+    即过期，下次访问重新解析；写入时刻起算的实现仍命中缓存。
+    """
+    cache = io_path_module.ResolveResultCache[Path](4, ttl_seconds=0.05)
+    calls: list[int] = []
+
+    def slow_resolver() -> Path:
+        calls.append(1)
+        time.sleep(0.15)
+        return Path("/resolved")
+
+    assert cache.get_or_resolve("key", slow_resolver) == Path("/resolved")
+    assert cache.get_or_resolve("key", slow_resolver) == Path("/resolved")
+    assert len(calls) == 1
+
+
+def test_resolve_result_cache_fresh_keys_filters_expired() -> None:
+    """fresh_keys 仅返回未过 TTL 的键，过期条目留存至容量逐出。"""
+    cache = io_path_module.ResolveResultCache[Path](4, ttl_seconds=0.05)
+    cache["stale"] = Path("/stale")
+    time.sleep(0.1)
+    cache["fresh"] = Path("/fresh")
+
+    assert cache.fresh_keys() == {"fresh"}
+    assert len(cache) == 2
+
+
+def test_resolve_result_cache_update_writes_batch_under_bound() -> None:
+    """update 批量写入受容量上限约束，无 TTL 缓存的 fresh_keys 返回全部键。"""
+    cache = io_path_module.ResolveResultCache[Path](3)
+    cache.update((f"key-{index}", Path(f"/{index}")) for index in range(4))
+
+    assert len(cache) == 3
+    assert cache["key-3"] == Path("/3")
+    assert cache.fresh_keys() == {"key-1", "key-2", "key-3"}
+
+
+def _use_active_config(config: SeedreamConfig) -> None:
+    """把 config 设为活动配置，conftest 的配置重置基线负责还原。"""
+    set_active_config(config)
+
+
+def test_resolve_log_file_path_follows_data_root_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """日志文件路径取数据根目录声明，声明优先于工作根目录声明。"""
+    del monkeypatch
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _use_active_config(
+        SeedreamConfig(api_key="test_key", data_root=str(data_root), workspace_root=str(workspace))
+    )
+
+    result = io_path_module.resolve_log_file_path()
+
+    assert result == data_root.resolve() / ".seedream" / "logs" / "seedream_mcp.log"
+
+
+def test_resolve_log_file_path_falls_back_to_workspace_then_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """数据根目录声明缺席时取工作根目录声明，两者皆缺时经回退链落进程启动目录。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _use_active_config(SeedreamConfig(api_key="test_key", workspace_root=str(workspace)))
+    assert io_path_module.resolve_log_file_path() == (
+        workspace.resolve() / ".seedream" / "logs" / "seedream_mcp.log"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    _use_active_config(SeedreamConfig(api_key="test_key"))
+    assert io_path_module.resolve_log_file_path() == (
+        tmp_path.resolve() / ".seedream" / "logs" / "seedream_mcp.log"
+    )
+
+
+def test_resolve_rejecting_cycle_passes_normal_paths(tmp_path: Path) -> None:
+    """已存在目录与不存在路径经环复核助手正常返回，环复核不误伤常规求值。"""
+    existing = tmp_path / "d"
+    existing.mkdir()
+    assert io_path_module.resolve_rejecting_cycle(existing) == existing.resolve()
+
+    missing = tmp_path / "not-there"
+    assert io_path_module.resolve_rejecting_cycle(missing) == missing.resolve()
+
+
+def test_resolve_rejecting_cycle_rejects_link_cycle(tmp_path: Path) -> None:
+    """链接环经助手抛 OSError，交调用方归档拒绝。"""
+    cycle = _make_cycle_link(tmp_path)
+
+    with pytest.raises(OSError):
+        io_path_module.resolve_rejecting_cycle(cycle)
+
+
+def test_resolve_rejecting_cycle_tolerates_dangling_link(tmp_path: Path) -> None:
+    """悬空链接解析到目标路径交 mkdir 自建，不因目标尚未创建而拒绝。"""
+    link, missing = _make_dangling_link(tmp_path)
+
+    assert io_path_module.resolve_rejecting_cycle(link) == missing.resolve()
+
+
+@pytest.mark.parametrize("fallback_errno", [errno.ENOTDIR, errno.EACCES])
+def test_resolve_rejecting_cycle_falls_back_on_non_cycle_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback_errno: int
+) -> None:
+    """环以外的 strict realpath 失败回退非严格 resolve，保持旧容忍语义。"""
+    path = tmp_path / "missing"
+    real_realpath = os.path.realpath
+
+    def _strict_only_failure(src: "str | os.PathLike[str]", *, strict: bool = False) -> str:
+        if strict:
+            raise OSError(fallback_errno, "simulated strict failure")
+        return real_realpath(src, strict=strict)
+
+    monkeypatch.setattr(os.path, "realpath", _strict_only_failure)
+
+    assert io_path_module.resolve_rejecting_cycle(path) == path.resolve()

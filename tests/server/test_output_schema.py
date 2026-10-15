@@ -1,0 +1,66 @@
+"""工具 outputSchema 结构化输出声明测试，对齐 MCP 2025-06-18 规范。
+
+outputSchema 由工具返回类型注解自动生成；运行时仍返回手动构造的 CallToolResult，
+保留人类可读 content 与 structuredContent。
+"""
+
+from __future__ import annotations
+
+from _lib.no_param_tools import NO_PARAM_TOOLS
+
+from seedream_mcp.server import mcp
+
+
+async def test_all_tools_declare_output_schema() -> None:
+    """全部工具声明 object 形态 outputSchema，含 tool 与 success 字段。"""
+    tools = await mcp.list_tools()
+    assert tools, "未注册任何工具"
+
+    for tool in tools:
+        assert tool.output_schema is not None, f"{tool.name} 缺少 outputSchema"
+        assert tool.output_schema.get("type") == "object"
+        properties = tool.output_schema.get("properties", {})
+        assert "tool" in properties, f"{tool.name} outputSchema 缺少 tool"
+        assert "success" in properties, f"{tool.name} outputSchema 缺少 success"
+
+
+async def test_generation_tools_output_schema_covers_core_fields() -> None:
+    """生成类工具 outputSchema 覆盖数据与统计核心字段。"""
+    tools = await mcp.list_tools()
+    generation_tools = {
+        tool.name: tool for tool in tools if tool.name not in {"browse_images"} | NO_PARAM_TOOLS
+    }
+    # 全部工具失注册时 next 立即失败，不给空洞通过的机会。
+    first = next(iter(generation_tools.values()), None)
+    assert first is not None, "未找到生成类工具"
+
+    for name, tool in generation_tools.items():
+        schema = tool.output_schema
+        assert schema is not None
+        properties = schema["properties"]
+        for field in ("data", "usage", "batch", "auto_save", "prompt", "size"):
+            assert field in properties, f"{name} outputSchema 缺少 {field}"
+
+
+async def test_get_model_info_output_schema_covers_core_fields() -> None:
+    """模型信息工具 outputSchema 覆盖模型与能力字段。"""
+    tools = await mcp.list_tools()
+    info = next(tool for tool in tools if tool.name == "get_model_info")
+    schema = info.output_schema
+    assert schema is not None
+
+    properties = schema["properties"]
+    for field in ("model_id", "family", "display_name", "aliases", "capabilities"):
+        assert field in properties, f"get_model_info outputSchema 缺少 {field}"
+
+
+async def test_browse_tool_output_schema_covers_core_fields() -> None:
+    """浏览工具 outputSchema 覆盖图片列表与目录核心字段。"""
+    tools = await mcp.list_tools()
+    browse = next(tool for tool in tools if tool.name == "browse_images")
+    schema = browse.output_schema
+    assert schema is not None
+
+    properties = schema["properties"]
+    for field in ("images", "count", "directory", "workspace_roots"):
+        assert field in properties, f"browse outputSchema 缺少 {field}"

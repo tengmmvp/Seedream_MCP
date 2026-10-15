@@ -1,0 +1,724 @@
+"""app_lifespan 注入测试：验证 yield 含 config 与可用 client 的字典。
+
+SeedreamClient 与 DownloadManager 为模块级单例，修复 stateless_http 模式下每请求
+重入 lifespan 导致的连接池退化；同时守护单例的跨重入复用语义。
+"""
+
+import asyncio
+from typing import Any, cast
+
+import pytest
+from mcp.client import Client
+from mcp.server.mcpserver import Context
+
+from seedream_mcp.config import _builder as config_module
+import seedream_mcp.server.runtime as runtime
+import seedream_mcp.server as server
+import seedream_mcp.server._registration as registration_module
+from seedream_mcp.config import SeedreamConfig
+from seedream_mcp.tools.schemas import ResponseFormat, TextToImageInput
+
+# lifespan 复位 fixture reset_lifespan_singletons 由 tests/conftest.py 共享提供
+
+
+async def test_app_lifespan_yields_config_and_client(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """lifespan yield 的状态字典含活动配置与已就绪的 client 与 download_manager。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    async with server.app_lifespan(server.mcp) as state:
+        assert isinstance(state, dict)
+        assert state["config"] is config
+        client = state["client"]
+        assert client is not None
+        # client 在 lifespan 期内应已持有可用的 httpx 客户端
+        assert client._client is not None
+        assert state["download_manager"] is not None
+
+
+async def test_app_lifespan_stdio_cleans_up_on_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """stdio 模式 lifespan 退出时在同事件循环清理单例，实现进程级优雅关闭。"""
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    async with server.app_lifespan(server.mcp) as state:
+        assert state["client"] is not None
+
+    # teardown 后活动资源已清理，执行 close 并置 None
+    assert runtime._active_resource is None
+
+
+async def test_app_lifespan_cleans_up_on_exception_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """yield 体抛异常的 teardown 同样执行共享资源清理，防止异常退出泄漏连接池。
+
+    清理语句位于 finally 内，写在 finally 之后的语句会因异常继续传播被跳过。
+    """
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with server.app_lifespan(server.mcp):
+            raise RuntimeError("boom")
+
+    assert runtime._active_resource is None
+
+
+async def test_borrow_shared_handles_tracks_active_resource(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """borrow_shared_handles 在 lifespan 期返回活动资源，teardown 后返回 None。
+
+    公共借用入口供 webapp 上下文替身使用，返回对象即 lifespan 注入的同一
+    client 与 download_manager 的持有者。
+    """
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    async with server.app_lifespan(server.mcp) as state:
+        borrowed = runtime.borrow_shared_handles()
+        assert borrowed is not None
+        assert borrowed.client is state["client"]
+        assert borrowed.download_manager is state["download_manager"]
+
+    assert runtime.borrow_shared_handles() is None
+
+
+def test_get_lifespan_resource_swallows_value_error_from_request_context() -> None:
+    """ctx.request_context 抛 ValueError 时守卫返回 None 而非异常逃逸。
+
+    mcp 的 request_context 无请求上下文时抛 ValueError 而非 AttributeError，
+    仅捕后者会令异常从本应回退 None 的守卫路径逃逸。
+    """
+
+    class _ValueErrorCtx:
+        @property
+        def request_context(self) -> object:
+            raise ValueError("Context is not available outside of a request")
+
+    from seedream_mcp.config import LIFESPAN_KEY_CLIENT
+    from seedream_mcp.tools.pipeline import get_lifespan_resource
+
+    assert (
+        get_lifespan_resource(
+            cast(Context[Any, Any], _ValueErrorCtx()), LIFESPAN_KEY_CLIENT, object
+        )
+        is None
+    )
+
+
+async def test_cleanup_shared_resources_drains_background_cleanup_first(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """进程级清理先等待在途后台清理任务收尾，再关闭共享资源。"""
+    from seedream_mcp.utils.io import save as auto_save_module
+
+    events: list[str] = []
+    real_drain = auto_save_module.drain_background_cleanup_tasks
+
+    async def recording_drain() -> None:
+        events.append("drain")
+        await real_drain()
+
+    monkeypatch.setattr(auto_save_module, "drain_background_cleanup_tasks", recording_drain)
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    async with server.app_lifespan(server.mcp) as state:
+        client = state["client"]
+        download_manager = state["download_manager"]
+        real_client_close = client.close
+        real_manager_close = download_manager.close
+
+        async def recording_client_close() -> None:
+            events.append("close:client")
+            await real_client_close()
+
+        async def recording_manager_close() -> None:
+            events.append("close:download_manager")
+            await real_manager_close()
+
+        monkeypatch.setattr(client, "close", recording_client_close)
+        monkeypatch.setattr(download_manager, "close", recording_manager_close)
+
+    assert events[0] == "drain", "drain 须先于全部共享资源 close 执行"
+    assert "drain" not in events[1:]
+    assert set(events[1:]) == {"close:client", "close:download_manager"}
+    assert runtime._active_resource is None
+
+
+async def test_cleanup_shared_resources_unconditional_closes_inflight(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """idle_only=False 的进程退出兜底无视在途引用，无条件关闭全部资源。
+
+    streamable-http 退出清理走本分支，覆盖关闭时仍有在途会话的场景；误按引用
+    计数门控会阻止连接池关闭。
+    """
+
+    class _Closeable:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _FakeResource:
+        def __init__(self, refcount: int) -> None:
+            self.client = _Closeable()
+            self.download_manager = _Closeable()
+            self.refcount = refcount
+
+    active = _FakeResource(refcount=2)
+    retired = _FakeResource(refcount=1)
+    monkeypatch.setattr(runtime, "_active_resource", active)
+    monkeypatch.setattr(runtime, "_retired_resources", [retired])
+
+    await runtime._cleanup_shared_resources(idle_only=False)
+
+    assert active.client.closed and active.download_manager.closed
+    assert retired.client.closed and retired.download_manager.closed
+    assert runtime._active_resource is None
+    assert runtime._retired_resources == []
+
+
+async def test_app_lifespan_teardown_keeps_cpu_offload_executor(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """lifespan 退出的 idle 清理不关闭进程级 CPU 卸载池，池上提交照常执行。"""
+    from seedream_mcp.utils.core.executors import cpu_offload_executor, run_in_cpu_pool
+
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    executor = cpu_offload_executor()
+
+    async with server.app_lifespan(server.mcp):
+        pass
+
+    assert cpu_offload_executor() is executor
+    assert await run_in_cpu_pool(lambda: "ok") == "ok"
+
+
+async def test_cleanup_shared_resources_unconditional_cancels_queued_pool_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """进程退出兜底清理关闭 CPU 卸载池，池上排队任务取消为专用异常。"""
+    from _lib.cpu_offload_spy import saturate_cpu_offload_pool
+    from seedream_mcp.utils.core.executors import (
+        CpuOffloadPoolClosedError,
+        cpu_offload_executor,
+        run_in_cpu_pool,
+    )
+
+    monkeypatch.setattr(runtime, "_active_resource", None)
+
+    async with saturate_cpu_offload_pool() as saturated:
+        queued = asyncio.ensure_future(run_in_cpu_pool(lambda: "queued"))
+        await saturated.wait_queued()
+
+        await runtime._cleanup_shared_resources(idle_only=False)
+
+        with pytest.raises(CpuOffloadPoolClosedError):
+            await queued
+
+    assert cpu_offload_executor() is not saturated.executor
+    assert await asyncio.wait_for(asyncio.gather(*saturated.tasks), timeout=5) == [None] * len(
+        saturated.tasks
+    )
+
+
+async def test_cleanup_shared_resources_idle_abort_keeps_resource_and_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """idle 清理在 drain 等待后见在途引用即放弃，活动资源与 CPU 卸载池均不动。"""
+    from seedream_mcp.utils.core.executors import cpu_offload_executor
+
+    class _InflightResource:
+        refcount = 1
+
+    inflight: Any = _InflightResource()
+    monkeypatch.setattr(runtime, "_active_resource", inflight)
+    executor = cpu_offload_executor()
+
+    await runtime._cleanup_shared_resources(idle_only=True)
+
+    assert runtime._active_resource is inflight
+    assert cpu_offload_executor() is executor
+
+
+async def test_build_active_resource_closes_client_when_manager_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """download_manager 初始化失败时补偿关闭已创建的 client，不泄漏半初始化资源。"""
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.utils.io import download as io_download
+
+    close_calls: list[str] = []
+
+    async def _failing_manager_aenter(self: object) -> object:
+        raise RuntimeError("manager init failed")
+
+    async def _record_client_close(self: SeedreamClient) -> None:
+        close_calls.append("client")
+        if self._client is not None:
+            await self._client.aclose()
+
+    monkeypatch.setattr(io_download.DownloadManager, "__aenter__", _failing_manager_aenter)
+    monkeypatch.setattr(SeedreamClient, "close", _record_client_close)
+
+    config = SeedreamConfig(api_key="test_key")
+    with pytest.raises(RuntimeError, match="manager init failed"):
+        await runtime._build_active_resource(config)
+
+    assert close_calls == ["client"]
+    assert runtime._active_resource is None
+
+
+def test_config_from_context_prefers_lifespan_config() -> None:
+    """_config_from_context 优先取 lifespan 注入的 config，回退活动配置。"""
+    config = SeedreamConfig(api_key="lifespan_key")
+
+    class _FakeRequestContext:
+        lifespan_context = {"config": config}
+
+    class _FakeCtx:
+        request_context = _FakeRequestContext()
+
+    result = registration_module._config_from_context(_FakeCtx())  # type: ignore[arg-type]
+    assert result is config
+
+
+def test_config_from_context_falls_back_when_state_not_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lifespan 状态非 dict 时回退活动配置。"""
+    fallback = SeedreamConfig(api_key="fallback_key")
+    monkeypatch.setattr(registration_module, "get_active_config", lambda: fallback)
+
+    class _FakeRequestContext:
+        lifespan_context = "not a dict"
+
+    class _FakeCtx:
+        request_context = _FakeRequestContext()
+
+    result = registration_module._config_from_context(_FakeCtx())  # type: ignore[arg-type]
+    assert result is fallback
+
+
+async def test_app_lifespan_concurrent_reentry_creates_one_client(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """并发进入 lifespan 应复用同一单例，验证 _shared_init_lock 防竞态。
+
+    两个进入协程以屏障会合保证真正并发在途；锁内二次判定失效时第二个进入会
+    构造新 client。
+    """
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    both_entered = asyncio.Event()
+    entered_count = 0
+    count_guard = asyncio.Lock()
+
+    async def enter() -> Any:
+        nonlocal entered_count
+        async with server.app_lifespan(server.mcp) as state:
+            async with count_guard:
+                entered_count += 1
+                if entered_count == 2:
+                    both_entered.set()
+            await both_entered.wait()
+            return state["client"]
+
+    client_a, client_b = await asyncio.gather(enter(), enter())
+    assert client_a is client_b
+
+
+async def test_app_lifespan_rebuilds_on_config_change(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """config 身份变化后下次进入 lifespan 重建单例，使热重载生效。"""
+    config_a = SeedreamConfig(api_key="key_a")
+    monkeypatch.setattr(config_module, "_active_config", config_a)
+    async with server.app_lifespan(server.mcp) as state:
+        client_a = state["client"]
+
+    config_b = SeedreamConfig(api_key="key_b")
+    monkeypatch.setattr(config_module, "_active_config", config_b)
+    async with server.app_lifespan(server.mcp) as state:
+        client_b = state["client"]
+
+    assert client_b is not client_a
+    assert client_b.config is config_b
+
+
+async def test_app_lifespan_rebuild_survives_concurrent_teardown_in_retire_window(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """重建在退役旧资源的 await 窗口期间，并发 teardown 的 idle 清理不得回收新资源。
+
+    旧资源先退役再发布：会话 2 的重建挂在 _retire_resource 处时新资源尚未发布，
+    会话 1 的 teardown 只作用于旧资源；新资源发布点到进场登记之间无挂起点，
+    teardown 的 idle 清理观察不到零引用的新发布资源。
+    """
+    monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="key_a"))
+    first_lifespan = server.app_lifespan(server.mcp)
+    await first_lifespan.__aenter__()
+
+    monkeypatch.setattr(config_module, "_active_config", SeedreamConfig(api_key="key_b"))
+    retire_entered = asyncio.Event()
+    retire_release = asyncio.Event()
+    real_retire = runtime._retire_resource
+
+    async def gated_retire(resource: Any) -> None:
+        retire_entered.set()
+        await retire_release.wait()
+        await real_retire(resource)
+
+    monkeypatch.setattr(runtime, "_retire_resource", gated_retire)
+
+    second_lifespan = server.app_lifespan(server.mcp)
+    entering = asyncio.ensure_future(second_lifespan.__aenter__())
+    await retire_entered.wait()
+
+    # 窗口内并发 teardown 释放并清理旧资源，尚未发布的新资源不受影响。
+    await first_lifespan.__aexit__(None, None, None)
+
+    retire_release.set()
+    state = await entering
+
+    active = runtime._active_resource
+    assert active is not None
+    assert state["client"] is active.client
+    assert state["client"]._client is not None
+    assert active.refcount == 1
+
+    await second_lifespan.__aexit__(None, None, None)
+    assert runtime._active_resource is None
+    assert state["client"]._client is None
+
+
+async def test_app_lifespan_applies_download_concurrency_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_lifespan_singletons: None,
+) -> None:
+    """共享 DownloadManager 经构造参数施加进程级下载并发上限到会话连接器。
+
+    批量保存局部构造的信号量只约束单次调用，跨请求叠加的并发须由共享会话的
+    连接器统一限制。
+    """
+    config = SeedreamConfig(api_key="test_key", auto_save_max_concurrent=3)
+    monkeypatch.setattr(config_module, "_active_config", config)
+
+    async with server.app_lifespan(server.mcp) as state:
+        download_manager = state["download_manager"]
+        session = download_manager._session
+        assert session is not None
+        assert session.connector.limit == 3
+
+
+async def test_download_manager_connection_limit_survives_session_rebuild() -> None:
+    """close 后重建的会话连接器保持构造期注入的并发上限。
+
+    并发上限经构造参数传入，_ensure_session 每次构造连接器均施加；依赖会话
+    建立后二次注入会在重建时静默失去上限。
+    """
+    from aiohttp import BaseConnector
+    from seedream_mcp.utils.io.download import DownloadManager
+
+    manager = DownloadManager(connection_limit=2)
+    session = await manager._ensure_session()
+    assert cast(BaseConnector, session.connector).limit == 2
+    await manager.close()
+    rebuilt = await manager._ensure_session()
+    assert rebuilt is not session
+    assert cast(BaseConnector, rebuilt.connector).limit == 2
+    await manager.close()
+
+
+def test_reset_lifespan_state_clears_global_config() -> None:
+    """复位协议覆盖 config._global_config，懒加载配置不跨用例残留。
+
+    set_active_config(None) 只清活动配置，全局懒加载缓存须经复位清单清理。复位与
+    断言经函数内 import 取 sys.modules 当前模块对象，与延迟消费方同目标。
+    """
+    from seedream_mcp.config import _builder as current_config_module
+
+    current_config_module._global_config = SeedreamConfig(api_key="stale_key")
+    runtime._reset_lifespan_state()
+    assert current_config_module._global_config is None
+
+
+# ==================== Lifespan 共享资源复用测试 ====================
+
+
+class _FakeLifespanCtx:
+    """模拟 MCP Context：提供 lifespan_context 访问路径与进度上报空实现。"""
+
+    def __init__(self, lifespan_context: Any) -> None:
+        class _FakeRequestContext:
+            lifespan_context: Any
+
+        self.request_context = _FakeRequestContext()
+        self.request_context.lifespan_context = lifespan_context
+
+    async def report_progress(self, **kwargs: Any) -> None:
+        pass
+
+
+async def test_try_get_shared_client_returns_lifespan_instance() -> None:
+    """_try_get_shared_client / _try_get_shared_download_manager 返回注入的实例。"""
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.tools.pipeline.parallel import (
+        _try_get_shared_client,
+        _try_get_shared_download_manager,
+    )
+    from seedream_mcp.utils.io.download import DownloadManager
+
+    config = SeedreamConfig(api_key="test_key")
+    shared_client = SeedreamClient(config)
+    shared_dm = DownloadManager()
+    try:
+        ctx = cast(
+            Context[Any, Any],
+            _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm}),
+        )
+        assert _try_get_shared_client(ctx) is shared_client
+        assert _try_get_shared_download_manager(ctx) is shared_dm
+    finally:
+        await shared_client.close()
+        await shared_dm.close()
+
+
+def test_try_get_shared_client_returns_none_for_invalid_context() -> None:
+    """ctx 为 None、lifespan 非 dict、值类型不匹配时均返回 None。"""
+    from seedream_mcp.tools.pipeline.parallel import (
+        _try_get_shared_client,
+        _try_get_shared_download_manager,
+    )
+
+    # ctx=None 恒返回 None，调用方据此回退新建
+    assert _try_get_shared_client(None) is None
+    assert _try_get_shared_download_manager(None) is None
+
+    # lifespan 非 dict
+    assert _try_get_shared_client(cast(Context[Any, Any], _FakeLifespanCtx("not a dict"))) is None
+    assert (
+        _try_get_shared_download_manager(cast(Context[Any, Any], _FakeLifespanCtx("not a dict")))
+        is None
+    )
+
+    # 值类型不匹配，非 SeedreamClient / DownloadManager
+    bad_ctx = cast(Context[Any, Any], _FakeLifespanCtx({"client": "fake", "download_manager": 123}))
+    assert _try_get_shared_client(bad_ctx) is None
+    assert _try_get_shared_download_manager(bad_ctx) is None
+
+    # dict 中缺 key
+    empty_ctx = cast(Context[Any, Any], _FakeLifespanCtx({}))
+    assert _try_get_shared_client(empty_ctx) is None
+    assert _try_get_shared_download_manager(empty_ctx) is None
+
+
+async def test_execute_generation_handler_reuses_lifespan_shared_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_generation_handler 优先复用 lifespan 注入的共享 client 而非新建。"""
+    from unittest.mock import MagicMock
+
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.tools.pipeline import ToolMetadata, execute_generation_handler
+
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    shared_client = SeedreamClient(config)
+
+    captured_client: Any = None
+
+    async def fake_executor(client: Any, context: Any) -> dict[str, Any]:
+        nonlocal captured_client
+        captured_client = client
+        return {"success": True, "data": [], "usage": {}, "status": "completed"}
+
+    metadata = ToolMetadata(
+        tool_name="text_to_image",
+        completion_title="文生图完成",
+        failure_prefix="文生图",
+        start_log_message="",
+        start_log_values_builder=lambda c: (),
+    )
+    ctx = cast(Context[Any, Any], _FakeLifespanCtx({"client": shared_client}))
+    try:
+        result = await execute_generation_handler(
+            params=TextToImageInput(prompt="test", auto_save=False),
+            config=config,
+            module_logger=MagicMock(),
+            metadata=metadata,
+            request_executor=fake_executor,
+            ctx=ctx,
+        )
+        # executor 收到的 client 即 lifespan 注入的共享实例
+        assert captured_client is shared_client
+        assert not result.is_error
+    finally:
+        await shared_client.close()
+
+
+async def test_execute_generation_handler_passes_shared_download_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """handler 将 lifespan 注入的 download_manager 透传给 auto_save_from_urls。"""
+    from unittest.mock import MagicMock
+
+    from seedream_mcp.client import SeedreamClient
+    from seedream_mcp.tools.pipeline import _execute as common_module
+    from seedream_mcp.tools.pipeline import ToolMetadata
+    from seedream_mcp.utils.io.download import DownloadManager
+
+    config = SeedreamConfig(api_key="test_key")
+    monkeypatch.setattr(config_module, "_active_config", config)
+    shared_client = SeedreamClient(config)
+    shared_dm = DownloadManager()
+
+    captured_dm: Any = None
+
+    async def fake_executor(client: Any, context: Any) -> dict[str, Any]:
+        return {
+            "success": True,
+            "data": [{"url": "http://x/1.png"}],
+            "usage": {"generated_images": 1},
+            "status": "completed",
+        }
+
+    async def fake_auto_save_from_urls(
+        result: Any,
+        prompt: Any,
+        config: Any,
+        save_path: Any,
+        custom_name: Any,
+        tool_name: Any,
+        download_manager: Any = None,
+        images: Any = None,
+    ) -> tuple[list[Any], list[Any]]:
+        nonlocal captured_dm
+        captured_dm = download_manager
+        return [], []
+
+    monkeypatch.setattr(common_module, "auto_save_from_urls", fake_auto_save_from_urls)
+
+    metadata = ToolMetadata(
+        tool_name="text_to_image",
+        completion_title="文生图完成",
+        failure_prefix="文生图",
+        start_log_message="",
+        start_log_values_builder=lambda c: (),
+    )
+    ctx = cast(
+        Context[Any, Any],
+        _FakeLifespanCtx({"client": shared_client, "download_manager": shared_dm}),
+    )
+    try:
+        await common_module.execute_generation_handler(
+            params=TextToImageInput(
+                prompt="test", auto_save=True, response_format=cast(ResponseFormat, "url")
+            ),
+            config=config,
+            module_logger=MagicMock(),
+            metadata=metadata,
+            request_executor=fake_executor,
+            ctx=ctx,
+        )
+        # auto_save 收到的 download_manager 即 lifespan 注入的共享实例
+        assert captured_dm is shared_dm
+    finally:
+        await shared_client.close()
+        await shared_dm.close()
+
+
+def test_reset_lifespan_state_no_longer_touches_results_module() -> None:
+    """复位协议不再清理 results 的净化哨兵：模块级哨兵已随显式传参重构移除。
+
+    results 侧若重新引入模块级可变状态，须在 _reset_lifespan_state 与本守护
+    同步登记。
+    """
+    from seedream_mcp.tools.pipeline import results as results_module
+
+    assert not hasattr(results_module, "_last_sanitized_images")
+    assert not hasattr(results_module, "reset_last_sanitized_images")
+    runtime._reset_lifespan_state()
+
+
+# ==================== 平铺 inputSchema 收紧版本守护 ====================
+
+
+def test_tighten_flat_tool_schemas_private_surface_guard() -> None:
+    """全部注册工具经 SDK 私有面命中并完成收紧，SDK 升级改动私有 API 时本测试转红。
+
+    依赖 mcp._tool_manager.list_tools 与 Tool.fn_metadata.arg_model 两个私有入口，
+    任一探测失败使收紧提前中止，全量断言 additionalProperties 兜底报警；新注册
+    工具自动进入断言范围。
+    """
+    tools = server.mcp._tool_manager.list_tools()
+    assert len(tools) >= 6
+
+    for tool in tools:
+        assert tool.parameters.get("additionalProperties") is False, tool.name
+        arg_model = tool.fn_metadata.arg_model
+        assert arg_model.model_config.get("extra") == "forbid", tool.name
+
+
+# ==================== requestState 密钥环重绑 ====================
+
+
+def test_rebind_request_state_security_syncs_declared_audience() -> None:
+    """策略显式声明 audience 时重绑同步 boundary._audience，条件分支活体受测。
+
+    _audience 构造期自旧策略预计算，不随 _security 替换自动更新，缺同步会使
+    新旧策略的封签 audience 口径不一致。
+    """
+    from mcp.server.mcpserver import RequestStateSecurity
+    from mcp.server.request_state import RequestStateBoundary
+
+    boundary = next(
+        middleware
+        for middleware in runtime.mcp.middleware
+        if isinstance(middleware, RequestStateBoundary)
+    )
+    policy = RequestStateSecurity(keys=(b"\x01" * 32,), audience="seedream-rebind")
+
+    assert runtime.rebind_request_state_security(policy) is True
+
+    assert boundary._security is policy
+    assert boundary._audience == "seedream-rebind"
+
+
+# ==================== initialize serverInfo 元数据 ====================
+
+
+async def test_initialize_reports_server_title_and_description(
+    reset_lifespan_singletons: None,
+) -> None:
+    """initialize 握手的 serverInfo 携带 runtime 常量声明的 title 与 description。
+
+    重构移除 MCPServer(title=, description=) 传参时 initialize 结果静默丢失元数据，
+    客户端展示名与简介随之退化。
+    """
+    async with Client(server.mcp, mode="legacy") as client:
+        server_info = client.server_info
+        assert server_info is not None
+        assert server_info.title == runtime.SERVER_TITLE
+        assert server_info.description == runtime.SERVER_DESCRIPTION
