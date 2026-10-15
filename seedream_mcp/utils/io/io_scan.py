@@ -212,11 +212,11 @@ def _resolve_scan_pairs(images: list[Path]) -> list[tuple[Path, Path]]:
     热路径不付逐条目锁往返。
     """
     pairs: list[tuple[Path, Path]] = []
-    cache_keys = [str(image_path) for image_path in images]
     # 与首笔失败登记的竞态仅多付一次 resolve 重试。
     recent_failures = _SCAN_RESOLVE_FAILURE_CACHE.fresh_keys()
     new_failures: list[str] = []
-    for image_path, cache_key in zip(images, cache_keys, strict=True):
+    for image_path in images:
+        cache_key = str(image_path)
         if cache_key in recent_failures:
             continue
         try:
