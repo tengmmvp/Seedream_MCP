@@ -714,7 +714,7 @@ class BrowseImagesInput(BaseModel):
 class GenerationInputParams(Protocol):
     """四个生成工具输入模型共享字段的协议类型。
 
-    供 core 流水线以类型化属性访问读取共享字段；各工具的具体输入模型经结构化子类型
+    供生成流水线以类型化属性访问读取共享字段；各工具的具体输入模型经结构化子类型
     自动满足本协议，无需显式继承。
     """
 

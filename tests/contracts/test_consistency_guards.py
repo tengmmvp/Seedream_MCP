@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import re
 from pathlib import Path
 
@@ -540,8 +541,12 @@ def _resolve_relative(current: str, level: int, target: str | None, is_package: 
     return f"{prefix}.{target}" if target else prefix
 
 
+@functools.cache
 def _scan_module_edges() -> dict[str, dict[str, set[str]]]:
-    """AST 扫描源码树，按模块产出三类导入边（runtime/type_checking/function）。"""
+    """AST 扫描源码树，按模块产出三类导入边（runtime/type_checking/function）。
+
+    会话内源码树静态，多处断言共用一份扫描结果。
+    """
     edges: dict[str, dict[str, set[str]]] = {}
     for path in sorted(_SRC_ROOT.rglob("*.py")):
         if "webapp" in path.parts and "static" in path.parts:
@@ -607,7 +612,10 @@ def _scan_module_edges() -> dict[str, dict[str, set[str]]]:
 
 
 def _lazy_export_edges() -> set[tuple[str, str]]:
-    """两个门面的 _LAZY_EXPORTS 字符串表解析入依赖图（D4-2）。"""
+    """两个门面的 _LAZY_EXPORTS 字符串表解析入依赖图（D4-2）。
+
+    门面对该表可能采用裸赋值或带注解赋值（ast.Assign / ast.AnnAssign）两种形态。
+    """
     result: set[tuple[str, str]] = set()
     for facade, rel_path in (
         ("seedream_mcp", "__init__.py"),
@@ -616,10 +624,22 @@ def _lazy_export_edges() -> set[tuple[str, str]]:
         path = _SRC_ROOT / rel_path
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in tree.body:
-            if isinstance(node, ast.Assign) and any(
+            if isinstance(node, ast.AnnAssign):
+                if not (
+                    isinstance(node.target, ast.Name)
+                    and node.target.id == "_LAZY_EXPORTS"
+                    and node.value is not None
+                ):
+                    continue
+                values = [node.value]
+            elif isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == "_LAZY_EXPORTS" for t in node.targets
             ):
-                table = ast.literal_eval(node.value)
+                values = [node.value]
+            else:
+                continue
+            for value in values:
+                table = ast.literal_eval(value)
                 for _, (rel, _) in table.items():
                     result.add((facade, f"{facade}{rel}"))
     return result
@@ -721,11 +741,13 @@ def test_import_module_confined_to_facades() -> None:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "import_module"
-            ):
+            if not isinstance(node, ast.Call):
+                continue
+            is_bare = isinstance(node.func, ast.Name) and node.func.id == "import_module"
+            is_qualified = (
+                isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
+            )
+            if is_bare or is_qualified:
                 offenders.add(path.relative_to(_SRC_ROOT).as_posix())
     assert offenders <= facades, f"import_module 仅限门面使用: {sorted(offenders - facades)}"
 

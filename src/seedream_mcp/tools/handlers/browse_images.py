@@ -790,7 +790,7 @@ async def handle_browse_images(
     Returns:
         浏览工具结果，失败时 isError 为 True。
     """
-    # 已解析目录列表在外层创建、core 流水线填充：异常兜底分支经同一引用回显已解析目录。
+    # 已解析目录列表在外层创建、浏览编排填充：异常兜底分支经同一引用回显已解析目录。
     resolved_directories: list[Path] = []
     try:
         return await execute_browse_request(

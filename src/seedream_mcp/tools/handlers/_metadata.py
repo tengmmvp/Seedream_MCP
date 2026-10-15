@@ -1,7 +1,7 @@
 """生成类工具 handlers 共享的工具元数据常量与开始日志参数构造。
 
 四个生成 handler 传给 ``execute_generation_handler`` 的元数据高度同构，收敛为
-不可变的 ``ToolMetadata`` 常量；数据类定义于 core 门面，依赖方向保持 core <-
+不可变的 ``ToolMetadata`` 常量；数据类定义于 pipeline 门面，依赖方向保持 core <-
 handler。组图输出的开始日志须携带运行时 max_images，经独立回调从执行上下文读取。
 """
 
