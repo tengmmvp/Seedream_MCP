@@ -318,7 +318,6 @@ def _scan_and_filter_directory(
         # resolve 结果来自扫描缓存；权限目录已 resolve，直接比较。
         return any(is_within_resolved(pair[1], scope) for scope in read_scope)
 
-    scan_result: ScanResult | None = None
     try:
         # 底层扫描经本模块作用域的 find_images_in_directory 注入，外部替换本模块同名属性即可生效。
         scan_result = cached_find_images_in_directory(
@@ -332,11 +331,11 @@ def _scan_and_filter_directory(
             include=_within_read_scope,
             scope_signature=read_scope_signature(read_scope),
         )
-    finally:
-        if scan_result is None:
-            logger.warning("扫描中途异常，越界图片剔除计数不可得")
-        elif scan_result.excluded_count:
-            logger.warning("检测到越界图片路径 {} 条，已忽略", scan_result.excluded_count)
+    except BaseException:
+        logger.warning("扫描中途异常，越界图片剔除计数不可得")
+        raise
+    if scan_result.excluded_count:
+        logger.warning("检测到越界图片路径 {} 条，已忽略", scan_result.excluded_count)
     return scan_result
 
 
