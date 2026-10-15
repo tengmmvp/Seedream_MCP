@@ -1,4 +1,4 @@
-"""runners 到 tools/core/auto_save 的端到端测试。
+"""runners 到 tools/pipeline/auto_save 的端到端测试。
 
 mock SeedreamClient 返回含 url 的结果，经 run_text_to_image 走完整生成流水线，
 产出含 auto_save 字段的 CallToolResult；另测自动保存抛错时降级为保留原始 url。

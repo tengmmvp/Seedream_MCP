@@ -74,6 +74,14 @@ Docker 镜像发布到 `ghcr.io` 使用内置 `GITHUB_TOKEN`，**无需额外配
 - 预发布：tag 仅限 `-rc` / `-alpha` / `-beta` 形态（如 `v1.3.0-rc.1`、`v1.3.0-beta1`）时 CI 自动标记为 prerelease；其余 tag 均为正式版，`uvx seedream-image-mcp` 默认仍拉取稳定版
 - **版本号一经发布不可覆盖**：PyPI 不允许重新上传同一版本。发版有误只能发更高版本号修正
 
+## 结构重构发版声明（v4.3）
+
+v4.3 周期合入纯结构重构（src 布局、六域包归位、utils 去前缀、tools 四层重组、tests 六域镜像），该版本 release note 须声明：
+
+- 纯结构重构，运行时行为零变化；冻结面（repo-layout.md S2：根与 client/config/server/tools 门面 `__all__`、`version.__version__`）零变化
+- 内部路径变更清单：包根模块迁入三域包（`client.py`→`client/_api`、`config.py`→`config/_model`＋`_builder`、`server.py`→`server/_registration`、`resources.py`→`server/runtime`、`_client_http`→`client/_http`、`_config_sources`→`config/sources`、`_host_syntax`→`config/host_syntax`、`request_plan`→`client/request_plan`、`_icons`/`bootstrap`/`cli`/`transport`→`server/` 同名）；utils 16 模块去前缀（`io_file`→`files` 等，见 repo-layout）；`tools/core`＋`tools/impl`→`tools/{schemas,outputs,pipeline,handlers}`；源码迁入 `src/`；`docs/mcp-python-sdk`→`docs/vendor/mcp-python-sdk`
+- 除冻结面外一切模块路径为内部实现（S2），依赖内部路径的下游须随本版本更新
+
 ## 故障排查
 
 | 现象                                        | 原因与处理                                                                                                                 |
